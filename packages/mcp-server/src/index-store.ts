@@ -20,6 +20,13 @@ import type {
 } from "./types.ts";
 import { redact } from "./redact.ts";
 
+/**
+ * Statuses that mean a graph is finished, so it is no longer "open" in a brief.
+ * These are exactly Notion's `complete` status group on the Agent Task Graph —
+ * a shorter list leaves Closed and Resolved graphs showing up as live work.
+ */
+const TERMINAL_STATUSES = ["Merged", "Resolved", "Done", "Won't Fix", "Closed", "Failed", "Canceled"];
+
 export class IndexStore {
 	private readonly sql: SQL;
 
@@ -153,7 +160,7 @@ export class IndexStore {
 		const rows = (await this.sql`
 			select * from graph_index
 			where repo = ${repo}
-			  and (status is null or status not in ('Done', 'Merged', 'Failed'))
+			  and (status is null or status not in ${this.sql(TERMINAL_STATUSES)})
 			  and (${excludeGraphId ?? null}::text is null or graph_id <> ${excludeGraphId ?? null})
 			order by updated desc
 			limit 10`) as GraphIndexRow[];
