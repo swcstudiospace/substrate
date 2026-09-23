@@ -140,9 +140,11 @@ export async function composeBrief(request: BriefRequest, sources: BriefSources)
 				.slice(0, 4)
 				.map((other) => {
 					const started = other.nodes.filter((n) => n.claimed_by).length;
-					const parts = [other.surface, other.status, started > 0 ? `${started} nodes started` : null].filter(
-						Boolean,
-					);
+					const parts = [
+						other.surface,
+						other.status,
+						started > 0 ? `${started} node${started === 1 ? "" : "s"} started` : null,
+					].filter(Boolean);
 					return `${other.graph_id} (${parts.join(", ")})`;
 				})
 				.join(" · ");

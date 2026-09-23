@@ -83,6 +83,17 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig) 
 				return;
 			}
 
+			if (req.method === "POST" && url.pathname === "/verify") {
+				const raw = await readBody(req);
+				const body = JSON.parse(raw) as { graph_id?: unknown };
+				if (typeof body.graph_id !== "string") {
+					sendJson(res, 400, { error: "graph_id is required" });
+					return;
+				}
+				sendJson(res, 200, await substrate.verifyGraph(body.graph_id));
+				return;
+			}
+
 			if (url.pathname === "/mcp") {
 				await handleMcp(req, res, substrate, surface);
 				return;

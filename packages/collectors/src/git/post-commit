@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Agent Substrate — git post-commit collector.
+#
+# Emits a `commit` event for every commit in this repo, attributed to the
+# surface that made it. Installed by `bun packages/collectors/src/install-git-hook.ts`.
+#
+# post-commit runs after the commit is already written, so nothing here can
+# abort it — but this still exits 0 unconditionally and backgrounds the call so
+# a slow or dead substrate never delays the user's shell.
+
+set -u
+
+SUBSTRATE_CLI="${SUBSTRATE_CLI:-/root/src/repos/agent-substrate/packages/cli/src/index.ts}"
+[ -r "$SUBSTRATE_CLI" ] || exit 0
+command -v bun >/dev/null 2>&1 || exit 0
+
+sha="$(git rev-parse --short HEAD 2>/dev/null)" || exit 0
+subject="$(git log -1 --pretty=%s 2>/dev/null)"
+files="$(git diff-tree --no-commit-id --name-only -r HEAD 2>/dev/null | head -20 | jq -R . | jq -s -c . 2>/dev/null || echo '[]')"
+
+# SUBSTRATE_SURFACE lets a wrapper attribute the commit; a bare terminal commit
+# is the human's, not an agent's.
+surface="${SUBSTRATE_SURFACE:-cursor}"
+actor="${SUBSTRATE_ACTOR:-human}"
+
+(
+  bun "$SUBSTRATE_CLI" emit \
+    --kind commit \
+    --summary "commit ${sha} ${subject}" \
+    --surface "$surface" \
+    --actor "$actor" \
+    --payload "{\"sha\":\"${sha}\",\"files\":${files}}" \
+    >/dev/null 2>&1
+) &
+
+exit 0

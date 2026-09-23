@@ -7,10 +7,49 @@
  */
 import { composeBrief, type BriefRequest } from "./brief.ts";
 import type { SubstrateConfig } from "./config.ts";
-import { normalizeEvent } from "./event.ts";
-import { GreptimeClient } from "./greptime.ts";
+import { normalizeEvent, verifyChain } from "./event.ts";
+import { GreptimeClient, quote } from "./greptime.ts";
 import { IndexStore } from "./index-store.ts";
-import type { EventInput, MemoryEntry, MemoryEntryInput, NodeState, Surface, SubstrateEvent } from "./types.ts";
+import type {
+	Actor,
+	EventInput,
+	EventKind,
+	MemoryEntry,
+	MemoryEntryInput,
+	NodeState,
+	Surface,
+	SubstrateEvent,
+} from "./types.ts";
+
+/** Greptime gives back loosely typed rows; rebuild the exact shape that was hashed. */
+function rowToEvent(row: Record<string, unknown>): SubstrateEvent {
+	const text = (value: unknown): string | null => (value === null || value === undefined ? null : String(value));
+	let payload: Record<string, unknown> = {};
+	try {
+		payload = row.payload ? (JSON.parse(String(row.payload)) as Record<string, unknown>) : {};
+	} catch {
+		payload = {};
+	}
+	return {
+		id: String(row.id),
+		// The chain hashed an ISO string; Greptime returns epoch millis.
+		ts: new Date(Number(row.ts)).toISOString(),
+		surface: String(row.surface) as Surface,
+		session_id: text(row.session_id),
+		graph_id: text(row.graph_id),
+		node_id: text(row.node_id),
+		linear_identifier: text(row.linear_identifier),
+		step: row.step === null || row.step === undefined ? null : Number(row.step),
+		repo: text(row.repo),
+		branch: text(row.branch),
+		actor: String(row.actor) as Actor,
+		kind: String(row.kind) as EventKind,
+		summary: String(row.summary),
+		payload,
+		hash: String(row.hash),
+		prev: text(row.prev),
+	};
+}
 
 export class Substrate {
 	readonly index: IndexStore | null;
@@ -117,6 +156,39 @@ export class Substrate {
 		if (!this.index) throw new Error("graph_complete requires SUBSTRATE_PG_URL");
 		await this.index.setNodeState(graphId, nodeId, state);
 		await this.index.releaseNode(graphId, nodeId);
+	}
+
+	/**
+	 * Recompute the hash chain for one graph.
+	 *
+	 * Events are grouped by session before verification: `prev` chains within a
+	 * session, so interleaving two sessions' events into one sequence would
+	 * report a break that is not there.
+	 */
+	async verifyGraph(
+		graphId: string,
+	): Promise<{ ok: boolean; events: number; brokenAt?: string; reason?: string }> {
+		if (!this.greptime) return { ok: false, events: 0, reason: "greptime not configured" };
+		const rows = await this.greptime.sql(
+			`SELECT "ts", "id", "surface", "session_id", "graph_id", "node_id", "linear_identifier", "step",
+			        "repo", "branch", "actor", "kind", "summary", "payload", "hash", "prev"
+			 FROM "agent_events" WHERE "graph_id" = ${quote(graphId)} ORDER BY "ts"`,
+		);
+
+		const bySession = new Map<string, SubstrateEvent[]>();
+		for (const row of rows) {
+			const event = rowToEvent(row);
+			const key = event.session_id ?? "";
+			const bucket = bySession.get(key);
+			if (bucket) bucket.push(event);
+			else bySession.set(key, [event]);
+		}
+
+		for (const events of bySession.values()) {
+			const result = verifyChain(events);
+			if (!result.ok) return { ok: false, events: rows.length, brokenAt: result.brokenAt, reason: result.reason };
+		}
+		return { ok: true, events: rows.length };
 	}
 
 	async health(): Promise<{ index: boolean; greptime: boolean }> {
