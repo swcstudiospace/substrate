@@ -76,3 +76,31 @@ the Cursor projector and git collector.
   through the same path — the eng-board `on_tool` hook is not the only option.
 - `orca-ide` also listens on `0.0.0.0:6768`. Not the hook port; not touched.
 - herdr remains uninstalled, and on this evidence should stay that way.
+
+
+## Native floor — status
+
+**Done: Grok Build collector.** `packages/collectors/src/grok.ts`, running as
+`substrate-collector-grok.service`. Verified end-to-end into production
+Greptime. See the commit for the filtering rationale.
+
+**Next: Hermes.** Probed, not yet built. Entry points confirmed:
+
+    /root/.hermes/plugins/hermes_eng_board/__init__.py
+        on_start (L32) · on_tool (L35) · on_end (L38)   → retarget to events.emit
+    /root/.hermes/plugins/prompt-uplift/__init__.py
+        on_pre_llm_call (L222)                          → inject the brief here
+
+    /root/src/repos/hermes-plugin/.planning/PROJECT.md  → the redesign this
+        phase adopts as-is (Python calls the TypeScript engine; Kanban retired
+        as a tracker)
+
+Related repos on disk: `hermes-agent`, `hermes-engineering-board`,
+`hermes-linear-connector`, `hermes-plugin`.
+
+Note both plugin files are mode 0600 and live in a running Hermes install —
+edits there affect live sessions, so they want the same care as the Orca seam.
+
+**Then:** Omp discovery step, Muse `.substrate/BRIEF.md` fallback, Grok Build
+uplift hook, connector v0.4. **Then** the Orca tee (user chose: native floor
+first, tee second).

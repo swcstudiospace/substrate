@@ -2,8 +2,8 @@
 gsd_state_version: "1.0"
 milestone: v1.0
 milestone_name: "Agent Substrate — four planes (runtime, memory, skills, ledger) keyed by Graph ID"
-current_phase: 0
-current_phase_name: "Brief"
+current_phase: 1
+current_phase_name: "Lane B"
 status: executing
 last_updated: 2026-09-23
 progress:
@@ -11,12 +11,21 @@ progress:
   completed_phases: 0
   total_plans: 0
   completed_plans: 0
-  percent: 25
+  percent: 32
 ---
 
 # State
 
 ## Current
+
+**Phase 1 (Lane B) in progress.** Orca-vs-herdr resolved in favour of Orca
+(herdr not needed — see phases/01-lane-b/CONTEXT.md). Grok Build collector
+built, tested and running under systemd. Hermes probed but not started.
+
+Paused at 65% context, deliberately, rather than starting the Hermes plugin
+edits mid-window — those touch a running install.
+
+## Phase 0 (complete)
 
 Phase 0 (Brief) is **complete and live on production infrastructure**.
 `substrate-mcp` runs under systemd against GreptimeDB v1.1.4 and TimescaleDB,
