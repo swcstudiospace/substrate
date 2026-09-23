@@ -3,17 +3,20 @@ Description=Agent Substrate MCP server (brief, memory, events, graph)
 Documentation=https://github.com/swcstudiospace/agent-substrate
 After=network-online.target
 Wants=network-online.target
+# The stores are external (Railway); a network blip must not trip the start
+# limit and leave the unit dead. This key only takes effect in [Unit] —
+# systemd ignores it under [Service].
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 # Credentials only; nothing secret lives in the repo.
 EnvironmentFile=/etc/substrate/substrate.env
 WorkingDirectory=/root/src/repos/agent-substrate
-ExecStart=/usr/local/bin/bun packages/mcp-server/src/index.ts
+# Machine-specific: `command -v bun`. Adjust when deploying elsewhere.
+ExecStart=/root/.local/share/reflex/bun/bin/bun packages/mcp-server/src/index.ts
 Restart=always
 RestartSec=3
-# The stores are external (Railway); a network blip must not mark the unit failed.
-StartLimitIntervalSec=0
 
 StandardOutput=journal
 StandardError=journal

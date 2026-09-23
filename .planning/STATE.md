@@ -4,22 +4,23 @@ milestone: v1.0
 milestone_name: "Agent Substrate — four planes (runtime, memory, skills, ledger) keyed by Graph ID"
 current_phase: 0
 current_phase_name: "Brief"
-status: awaiting-credentials
+status: executing
 last_updated: 2026-09-23
 progress:
   total_phases: 7
   completed_phases: 0
   total_plans: 0
   completed_plans: 0
-  percent: 12
+  percent: 20
 ---
 
 # State
 
 ## Current
 
-Phase 0 (Brief) is **built and proven against a local stack**; it is not yet
-pointed at the real stores.
+Phase 0 (Brief) is **live on the real event store**. `substrate-mcp` runs under
+systemd against GreptimeDB on Railway (v1.1.4); the index still runs against a
+local container pending a reachable Postgres URL.
 
 Done:
 - `substrate-mcp` on `127.0.0.1:7410` — MCP at `/mcp` plus `POST /brief`,
@@ -41,9 +42,13 @@ Done:
 edit, a Hermes test run, another agent's open graph and a warning — 14 ms,
 inside the 1.5 s budget.
 
-Not done: real Greptime/Postgres credentials; `graph_register` call inside the
-`ultrathink-kickoff` skill; nothing installed to the live system yet (systemd
-unit, git hook and Cursor hooks are all written but only dry-run).
+Verified in production: 3 chained events written to Railway Greptime, read back
+in a brief, and `substrate verify` confirmed the hash chain intact. The service
+survives SIGKILL and is restarted by systemd.
+
+Not done: a reachable Postgres URL for the index; `graph_register` call inside
+the `ultrathink-kickoff` skill; git post-commit hook and Cursor hooks are
+written but still only dry-run.
 
 ## Accumulated context
 
@@ -81,11 +86,17 @@ unit, git hook and Cursor hooks are all written but only dry-run).
 
 ## Blockers
 
-- **Greptime and Postgres credentials not yet supplied.** `GREPTIME_URL` /
-  `GREPTIME_USER` / `GREPTIME_PASSWORD` / `GREPTIME_DB` and `SUBSTRATE_PG_URL`
-  are needed to point Phase 0 at the real stores. Development runs against
-  throwaway local containers (`substrate-dev-pg` on 55432, `substrate-dev-greptime`
-  on 44000); repointing is an env change, no code change.
+- **Postgres index has no reachable URL.** The supplied TimescaleDB
+  `DATABASE_URL` uses `timescaledb.railway.internal`, which is Railway's private
+  network hostname and returns NXDOMAIN from this VPS. What is needed is the
+  public TCP proxy — Railway exposes it on the service as `DATABASE_PUBLIC_URL`
+  (`…proxy.rlwy.net:PORT`). Until then `SUBSTRATE_PG_URL` points at the local
+  `substrate-dev-pg` container, so graphs, claims and memory are local-only while
+  events are already production.
+
+- **Credentials were pasted in plaintext into a chat transcript.** They now live
+  at `/etc/substrate/substrate.env` (0600, root). Rotating the Greptime password
+  and the Timescale password is worth doing once wiring is settled.
 
 ## Pending todos
 
@@ -98,10 +109,13 @@ unit, git hook and Cursor hooks are all written but only dry-run).
   query API, Muse's plugin API, Omp's skills directory, which Cursor hooks fire for the CLI,
   rivet-agentos `openSession` option names and the Codex adapter package name.
 
-## Local dev stack
+## Deployment
 
-Two throwaway containers, safe to delete:
+`substrate-mcp` runs under systemd — `systemctl status substrate-mcp`,
+`journalctl -u substrate-mcp -f`. Credentials at `/etc/substrate/substrate.env`.
 
-    docker rm -f substrate-dev-pg substrate-dev-greptime
+`substrate-dev-greptime` (44000) is now redundant and can be removed;
+`substrate-dev-pg` (55432) is still the live index until a public Postgres URL
+arrives.
 
-`substrate-mcp` runs from /tmp/substrate-mcp.pid during development.
+    docker rm -f substrate-dev-greptime
