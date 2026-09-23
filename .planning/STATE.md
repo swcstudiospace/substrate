@@ -98,14 +98,25 @@ written but still only dry-run.
 
 ## Blockers
 
-- **Credentials were pasted in plaintext into a chat transcript.** They now live
-  at `/etc/substrate/substrate.env` (0600, root). Rotating the Greptime password
-  and the Timescale password is worth doing once wiring is settled.
+_(No open blockers. Credential rotation was considered and declined by the
+owner — recorded here so it is not re-raised.)_
 
 ## Pending todos
 
-- Confirm the GitHub remote name/owner before first push (`swcstudiospace/agent-substrate`,
-  private, assumed).
+- Review and merge claude-ultrathink PR #1 (`substrate/brief` → `master`).
+
+## Published
+
+- `swcstudiospace/agent-substrate` (private) — `main` pushed.
+- `swcstudiospace/claude-ultrathink` PR #1 — the `fetchBrief` integration,
+  branched cleanly from `master`, 5 files, 256 tests green.
+
+**Lesson recorded:** `git add <file>` on a file another session had already
+modified swept four of their hunks into my commit (a 3→15 Sub-Issue assertion
+and a `<thinking>`→`<rationale>` fixture change). It only surfaced because the
+clean branch failed against `master`. In a shared checkout, stage hunks or
+verify the diff against the target branch before pushing — not just the file
+list.
 
 ## Deferred
 
