@@ -11,16 +11,17 @@ progress:
   completed_phases: 0
   total_plans: 0
   completed_plans: 0
-  percent: 20
+  percent: 25
 ---
 
 # State
 
 ## Current
 
-Phase 0 (Brief) is **live on the real event store**. `substrate-mcp` runs under
-systemd against GreptimeDB on Railway (v1.1.4); the index still runs against a
-local container pending a reachable Postgres URL.
+Phase 0 (Brief) is **complete and live on production infrastructure**.
+`substrate-mcp` runs under systemd against GreptimeDB v1.1.4 and TimescaleDB,
+both on Railway. The local dev containers have been deleted and the service
+remains healthy, which is the proof it no longer depends on them.
 
 Done:
 - `substrate-mcp` on `127.0.0.1:7410` — MCP at `/mcp` plus `POST /brief`,
@@ -42,8 +43,10 @@ Done:
 edit, a Hermes test run, another agent's open graph and a warning — 14 ms,
 inside the 1.5 s budget.
 
-Verified in production: 3 chained events written to Railway Greptime, read back
-in a brief, and `substrate verify` confirmed the hash chain intact. The service
+Verified in production: chained events written to Railway Greptime and read
+back, `substrate verify` confirming the hash chain intact, the index backfilled
+from 6 real Agent Task Graph graphs, and three surfaces (hermes, omp,
+grok-build) holding claims that a fourth (muse) sees in its brief. The service
 survives SIGKILL and is restarted by systemd.
 
 Not done: a reachable Postgres URL for the index; `graph_register` call inside
@@ -86,14 +89,6 @@ written but still only dry-run.
 
 ## Blockers
 
-- **Postgres index has no reachable URL.** The supplied TimescaleDB
-  `DATABASE_URL` uses `timescaledb.railway.internal`, which is Railway's private
-  network hostname and returns NXDOMAIN from this VPS. What is needed is the
-  public TCP proxy — Railway exposes it on the service as `DATABASE_PUBLIC_URL`
-  (`…proxy.rlwy.net:PORT`). Until then `SUBSTRATE_PG_URL` points at the local
-  `substrate-dev-pg` container, so graphs, claims and memory are local-only while
-  events are already production.
-
 - **Credentials were pasted in plaintext into a chat transcript.** They now live
   at `/etc/substrate/substrate.env` (0600, root). Rotating the Greptime password
   and the Timescale password is worth doing once wiring is settled.
@@ -112,10 +107,11 @@ written but still only dry-run.
 ## Deployment
 
 `substrate-mcp` runs under systemd — `systemctl status substrate-mcp`,
-`journalctl -u substrate-mcp -f`. Credentials at `/etc/substrate/substrate.env`.
+`journalctl -u substrate-mcp -f`. Credentials at `/etc/substrate/substrate.env`
+(0600, root). Both stores are on Railway; no local containers remain.
 
-`substrate-dev-greptime` (44000) is now redundant and can be removed;
-`substrate-dev-pg` (55432) is still the live index until a public Postgres URL
-arrives.
-
-    docker rm -f substrate-dev-greptime
+Railway networking, learned the hard way: `.railway.internal` and
+`DATABASE_PRIVATE_URL` resolve only from inside Railway. A consumer outside it
+needs the TCP proxy (`…proxy.rlwy.net:PORT`), which must be enabled per service
+under Settings → Networking. HTTP services get a public domain automatically,
+which is why Greptime worked immediately and Postgres did not.

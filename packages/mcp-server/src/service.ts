@@ -55,9 +55,15 @@ export class Substrate {
 	readonly index: IndexStore | null;
 	readonly greptime: GreptimeClient | null;
 
-	constructor(readonly config: SubstrateConfig) {
-		this.index = config.postgresUrl ? new IndexStore(config.postgresUrl) : null;
-		this.greptime = config.greptime ? new GreptimeClient(config.greptime) : null;
+	/** `stores` is a test seam; production always builds them from config. */
+	constructor(
+		readonly config: SubstrateConfig,
+		stores?: { index?: IndexStore | null; greptime?: GreptimeClient | null },
+	) {
+		this.index =
+			stores?.index !== undefined ? stores.index : config.postgresUrl ? new IndexStore(config.postgresUrl) : null;
+		this.greptime =
+			stores?.greptime !== undefined ? stores.greptime : config.greptime ? new GreptimeClient(config.greptime) : null;
 	}
 
 	/** Idempotent. Missing stores are reported, not fatal — the server still serves what it can. */
@@ -134,14 +140,22 @@ export class Substrate {
 		if (!this.index) throw new Error("graph_claim requires SUBSTRATE_PG_URL");
 		const result = await this.index.claimNode(graphId, nodeId, surface, sessionId);
 		if (result.claimed) {
+			// The repo comes from the graph, not the caller: a claim event without one
+			// is invisible to every repo-scoped brief, which is exactly where a claim
+			// most needs to be seen.
+			const graph = await this.index.getGraph(graphId).catch(() => null);
 			await this.emit({
 				surface,
 				kind: "claim",
-				summary: `claimed ${nodeId}${result.node.linear_identifier ? ` (${result.node.linear_identifier})` : ""}`,
+				// The brief already renders the node id alongside every action, so
+				// naming it here too reads as "claimed n4 (SPE-123) (n4)".
+				summary: result.node.linear_identifier ? `claimed ${result.node.linear_identifier}` : "claimed node",
 				graph_id: graphId,
 				node_id: nodeId,
 				linear_identifier: result.node.linear_identifier ?? undefined,
 				session_id: sessionId,
+				repo: graph?.repo ?? undefined,
+				branch: graph?.branch ?? undefined,
 			}).catch(() => undefined);
 		}
 		return result;

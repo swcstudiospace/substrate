@@ -124,7 +124,7 @@ export async function composeBrief(request: BriefRequest, sources: BriefSources)
 			)
 			.catch(swallow("recent actions", [] as Array<Record<string, unknown>>));
 		if (rows.length > 0) {
-			lines.push("", `Last ${rows.length} agent actions in this repo`);
+			lines.push("", `Last ${rows.length} agent action${rows.length === 1 ? "" : "s"} in this repo`);
 			for (const row of rows) {
 				const where = row.node_id ? ` (${row.node_id}${row.step ? ` step ${row.step}` : ""})` : "";
 				lines.push(`- ${clock(row.ts)} ${String(row.surface).padEnd(12)} ${String(row.summary)}${where}`);
