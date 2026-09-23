@@ -11,8 +11,7 @@
     "strict": true,
     "skipLibCheck": true,
     "noUncheckedIndexedAccess": true,
-    "noFallthroughCasesInSwitch": true,
-    "types": ["bun-types"]
+    "noFallthroughCasesInSwitch": true
   },
   "include": ["packages/**/*.ts"],
   "exclude": ["node_modules", "**/dist"]
