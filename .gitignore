@@ -1,0 +1,31 @@
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+
+# Secrets — the substrate env lives at /etc/substrate/substrate.env, never here
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local state
+.substrate/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ruff_cache/
+.pytest_cache/
+
+# Editors / OS
+.DS_Store
+.idea/
+*.swp
