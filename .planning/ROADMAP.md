@@ -8,10 +8,16 @@ in a proof that is **run for real**, not asserted.
 
 ## Phases
 
+> **Note on numbering.** GSD's roadmap parser does not recognise phase number
+> `0` — `roadmap.analyze` reports 6 phases and starts at 1, so Phase 0 is
+> invisible to GSD progress and milestone audits. The numbering is kept as
+> 0-6 to match the Notion build plan, which is the source of truth and which
+> is cross-referenced throughout. Phase 0 is complete and live; track it here.
+
 **Phase Numbering:** integer phases are planned milestone work; decimal phases (2.1) are
 urgent insertions.
 
-- [ ] **Phase 0: Brief** — cross-agent briefing on the two surfaces used most, keyed by Graph ID
+- [x] **Phase 0: Brief** — cross-agent briefing on the two surfaces used most, keyed by Graph ID
 - [ ] **Phase 1: Lane B** — Hermes, Omp, Muse Code, Grok Build and Grok Bot inside the substrate
 - [ ] **Phase 2: Claims and dispatch** — Linear drives who works on what
 - [ ] **Phase 3: Lane A** — sandboxed, durable sessions per Graph ID via rivet-agentos
