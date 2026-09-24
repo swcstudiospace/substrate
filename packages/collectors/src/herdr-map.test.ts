@@ -33,10 +33,13 @@ describe("mapHerdrEvent — per event type", () => {
 	});
 
 	test("Test 4: pane.output_matched maps to note with matched text redacted before it becomes the summary", () => {
+		// `matched_line` is the real wire field name (herdr api schema, 0.9.1's
+		// SubscriptionEventData.PaneOutputMatchedEvent), confirmed live against
+		// the running socket.
 		const event: HerdrEvent = {
 			type: "pane.output_matched",
 			pane_id: "w1:p1",
-			output_matched: "auth token tskey-abc123def456",
+			matched_line: "auth token tskey-abc123def456",
 		};
 		const out = mapHerdrEvent(event, pane);
 		expect(out?.kind).toBe("note");

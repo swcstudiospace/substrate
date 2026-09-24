@@ -15,7 +15,13 @@ export interface HerdrEvent {
 	pane_id?: string;
 	/** New status carried by `pane.agent_status_changed`. */
 	agent_status?: string;
-	/** Terminal text a `pane.output_matched` event matched against. */
+	/**
+	 * Terminal text a `pane.output_matched` event matched against. `matched_line`
+	 * is the live wire field name (`SubscriptionEventData.PaneOutputMatchedEvent`
+	 * per `herdr api schema` on 0.9.1); `output_matched`/`matched_text` are
+	 * accepted aliases in case the collector's own flattening uses either.
+	 */
+	matched_line?: string;
 	output_matched?: string;
 	matched_text?: string;
 	[key: string]: unknown;
@@ -81,7 +87,7 @@ export function mapHerdrEvent(event: HerdrEvent, pane: HerdrPane | undefined): E
 			};
 
 		case "pane.output_matched": {
-			const matched = event.output_matched ?? event.matched_text;
+			const matched = event.matched_line ?? event.output_matched ?? event.matched_text;
 			const redacted = typeof matched === "string" ? redact(matched) : undefined;
 			return {
 				...base,
