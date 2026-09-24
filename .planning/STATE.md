@@ -1,42 +1,54 @@
 ---
 gsd_state_version: "1.0"
 milestone: v1.0
-current_plan: 8
+current_plan: 9
 status: executing
-stopped_at: Completed 01-03-PLAN.md (owner-approved checkpoint)
-last_updated: "2026-09-24T16:31:58.421Z"
-state_head: 023874e4a90108d94e358c735fcadd25a7435e70
+stopped_at: Completed 01-09-PLAN.md with recorded proof gaps
+last_updated: "2026-09-24T17:22:00Z"
+state_head: 2933f1c74e890ea5e36e05766a63cb765729169f
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 9
-  completed_plans: 7
+  completed_plans: 9
   percent: 0
 milestone_name: Agent Substrate — four planes (runtime, memory, skills, ledger) keyed by Graph ID
-current_phase: 1
 current_phase_name: Lane B
+current_phase: 1
 ---
 
 # State
 
 ## Current
 
-Current Plan: 8
+Current Plan: 9
 Total Plans in Phase: 9
 
-**Phase 1 (Lane B) in progress.** Orca-vs-herdr resolved in favour of
-**herdr as the persistent runtime, with Orca alongside** as the IDE surface
-and as a collector — its push path (agent hooks) is complete, so no query API
-is needed from it. See phases/01-lane-b/CONTEXT.md, which is authoritative.
-An earlier revision of this paragraph said "Orca, herdr not needed"; that
-answered "can Orca supply events?" rather than "what is the Lane B runtime?".
-Grok Build collector built, tested and running under systemd. Hermes probed
-but not started.
+**Phase 1 (Lane B) plans 01-01 through 01-09 have been executed.** The
+cross-surface proof was run on live installs and written to
+`phases/01-lane-b/01-PROOF.md`. It is not a pass. Graph ID
+`ut-mufsocbe-c7ced745` in `swcstudiospace/agent-substrate` received a
+`handoff` event, and Hermes did not claim node n2. Omp discovery, the Muse
+brief file, and the Grok Build session file did not name both the handoff
+and the claim. Do not start Phase 2 on the strength of this record.
 
-**Wave 1 is DONE. Waves 2-4 (plans 01-02 … 01-09) are not started.** 9 plans in 4
-waves (`3ab6c87`), plan-checker blockers closed (`8204988`). **Still no Lane B
-code written and no live install touched** — plan 01-01 creates recovery
-artifacts only.
+Lane B proceeded under **D-01**: an additive brief and events only. The
+TypeScript-engine work and the Kanban retirement belong to the "Ultrathink
+on Hermes" v1.0 milestone in the `claude-ultrathink-grok` worktree.
+`hermes-plugin/.planning/PROJECT.md` is a shipped v0.3.0 milestone; it does
+not specify that redesign. ROADMAP Success Criteria 1 and 2 for Phase 1,
+**as literally worded**, were not achievable in Lane B and were not attempted.
+Lane B is assessed against its actual goal — every surface reads the brief
+and emits events — as recorded in `01-VALIDATION.md`.
+
+herdr 0.9.1 requires a **string** request id. `pane_id` is a **required**
+field on a `pane.agent_status_changed` subscription, which makes a wildcard
+agent-status subscription impossible and per-pane subscription mandatory.
+
+Orca-vs-herdr remains resolved in favour of **herdr as the persistent
+runtime, with Orca alongside** as the IDE surface and as a collector. See
+phases/01-lane-b/CONTEXT.md. Grok Build file delivery is installed; a live
+Grok Build model did not quote the brief.
 
 **Plan 01-01 (rollback safety baseline) executed 2026-09-24, all 3 tasks, 11 min.**
 See `phases/01-lane-b/01-01-SUMMARY.md`. What now exists that did not before:
@@ -54,23 +66,12 @@ See `phases/01-lane-b/01-01-SUMMARY.md`. What now exists that did not before:
 - `phases/01-lane-b/01-BASELINE.md` — seven measured suites and the node ids of
   all 8 pre-existing failures.
 
-**Waves 1-2 are DONE.** Plan 01-01 (safety baseline) and plan 01-02 (the Hermes
-tracer) are complete; the tracer's blocking checkpoint was approved by the owner
-after live verification. Hermes now reads the brief and emits events on the
-running install, additively — `__init__.py` is byte-identical to the Wave 1
-snapshot, so the hook file itself was never edited.
+**Plans 01-01 through 01-09 are executed.** Waves 1-4 ran. The Hermes tracer
+checkpoint and the eng-board checkpoint were approved earlier. 01-09 recorded
+the cross-surface proof and did not clear its gaps. Resume is `/gsd-verify-work`
+for those gaps, not another execution of 01-09 and not Phase 2.
 
-**Next: Wave 3** — plans 01-03 … 01-08 (eng-board, herdr collector, connector
-v0.4, Muse, Omp, Grok Build). They have zero `files_modified` overlap and can run
-in parallel. Plan 01-03 carries the phase's second blocking-human checkpoint
-(live eng-board plugin). Then Wave 4 (01-09) for the cross-surface proof.
-
-**Resume with:** `/clear`, then `/gsd-execute-phase 1` (picks up at wave 2).
-
-Expect two blocking-human checkpoints that do not auto-approve: end of wave 2
-(live hermes-plugin) and wave 3 plan 01-03 (live eng-board).
-
-**Before any wave-2 edit, read `/var/lib/substrate/phase1-baseline/RESTORE.md`.**
+**Before editing a snapshotted live file, read `/var/lib/substrate/phase1-baseline/RESTORE.md`.**
 It is the only undo, and choosing the wrong route on the two flagged files
 discards another session's work.
 
@@ -183,12 +184,23 @@ Previously "not done", now resolved:
 - `/root/agent-skills` is not a git checkout: 14 real dirs + 26 symlinks.
 - Ports 7410 and 6420 are free; `auctioning-greptime-1` on :4000 belongs to another project.
 
+**Lane B documentation corrections (do not rediscover)**
+
+- D-01: Hermes work in this phase is an additive brief and events only. The TypeScript-engine work and the Kanban retirement belong to the "Ultrathink on Hermes" v1.0 milestone in the `claude-ultrathink-grok` worktree. ROADMAP criteria 1 and 2 as literally worded were not attempted.
+- herdr 0.9.1 requires a **string** request id. A numeric `id` is rejected.
+- `pane_id` is a **required** field on a `pane.agent_status_changed` subscription, which makes a wildcard agent-status subscription impossible and per-pane subscription mandatory.
+
 ## Blockers
 
-_(No open blockers. Credential rotation was considered and declined by the
-owner — recorded here so it is not re-raised.)_
+_(Credential rotation was considered and declined by the owner — recorded
+here so it is not re-raised.)_
 
-- 01-08 (Grok Build) blocked: precondition unmet (fetchBrief/brief.ts missing on claude-ultrathink-grok HEAD a12eee1, branch rebased past 01-BASELINE.md's recorded ancestor 3766efd). Re-measure 01-BASELINE.md row 6 before retrying; code recoverable from branches substrate/brief, feat/substrate-brief, substrate/graph-register or squash-merge f10e8de on origin/master.
+- 01-08 precondition was later met on this host; that plan completed. The old blocker text is kept so it is not re-opened as if unread: precondition unmet (fetchBrief/brief.ts missing on claude-ultrathink-grok HEAD a12eee1, branch rebased past 01-BASELINE.md's recorded ancestor 3766efd). Re-measure 01-BASELINE.md row 6 before retrying; code recoverable from branches substrate/brief, feat/substrate-brief, substrate/graph-register or squash-merge f10e8de on origin/master.
+- Hermes did not claim node n2 of graph_id `ut-mufsocbe-c7ced745`. Index claim is absent. The dispatched `hermes chat` slept after a model-normalization line; the status file read `completed` with no claim. Process killed so the implement wrapper would not edit the tree.
+- The handoff event landed (`kind=handoff`, `graph_id=ut-mufsocbe-c7ced745`, `session_id=20260924T171800Z-3fb834d5`) but `repo` and `node_id` are null, so the repo-scoped brief does not list it.
+- Omp discovery does not name both the handoff and the claim. `pi -e` failed to load the extension (`path` argument undefined). No live Omp model session ran.
+- Muse `.substrate/BRIEF.md` in the proof repo is stale (`No substrate history for this repo yet`) because that repo is not in `SUBSTRATE_MUSE_REPOS`. No Muse session quoted the handoff or the claim.
+- No Grok Build model quoted the brief. The shim-written session file names the open graph and does not name the handoff or the claim.
 
 ## Pending todos
 
@@ -242,11 +254,12 @@ which is why Greptime worked immediately and Postgres did not.
 | Phase 01-lane-b P07 | 23min | 3 tasks | 5 files |
 | Phase 01-lane-b P05 | 29min | 3 tasks | 5 files |
 | Phase 01 P01-03 | 14min | 3 tasks | 4 files |
+| Phase 01-lane-b P09 | 14min | 3 tasks | 2 files |
 
 ## Session
 
-**Last session:** 2026-09-24T16:31:20.387Z
-**Stopped at:** Completed 01-03-PLAN.md (owner-approved checkpoint)
+**Last session:** 2026-09-24T17:22:00Z
+**Stopped at:** Completed 01-09-PLAN.md with recorded proof gaps
 **Resume file:** None
 
 ## Decisions
@@ -270,3 +283,4 @@ which is why Greptime worked immediately and Postgres did not.
 - [Phase 1]: Phase 1: 01-03: eng-board substrate forwarding additive over work_unit_store/connector (Rule 3 fix: SUBSTRATE_DISABLED=1 on 3 pre-existing hook tests to stop them hitting live 127.0.0.1:7410); owner-approved live checkpoint (eng-board work item, 3 event kinds, connector unchanged)
 - [Phase 1]: Phase 1: 01-08 (Grok Build) DEFERRED by owner decision — precondition unmet: src/substrate/brief.ts exporting fetchBrief does not exist on claude-ultrathink-grok's current branch milestone/v1.0-cross-runtime (HEAD a12eee1); another session rebased that branch so 01-BASELINE.md's baseline commit 3766efd is no longer an ancestor of HEAD. Suite now 246 pass/0 fail/21 files vs recorded 256 pass/1 fail/22 files — the recorded failing node id vanished. Code not lost: exists on branches substrate/brief, feat/substrate-brief, substrate/graph-register, and squash-merged to origin/master as f10e8de. 01-BASELINE.md row 6 is stale and must be re-measured before 01-08 is retried.
 - [Phase 1]: Phase 1: omp-ultrathink has NO row in 01-BASELINE.md (table covers 7 repos, omp not among them). Measured after plan 01-07: 62 pass/0 fail, tsc at pre-existing 52 errors. The no-new-failures half of the two-sided gate holds; the no-vanished-failures half is unverifiable for this repo because none were ever recorded.
+- [Phase 1]: 01-09 recorded the cross-surface proof rather than asserting it. graph_id ut-mufsocbe-c7ced745 handoff event landed with null repo and node_id. Hermes did not claim n2. Omp, Muse, and Grok Build model quotation gaps are in Blockers verbatim. ROADMAP criteria 1 and 2 as worded were not attempted (D-01; Ultrathink on Hermes owns the TypeScript engine and Kanban retirement). herdr 0.9.1 string request id and required pane_id on pane.agent_status_changed are carried forward.
