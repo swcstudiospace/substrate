@@ -214,3 +214,39 @@ This settles Finding 5's ambiguity: the red baselines the researcher observed
 are confined to uncommitted work in those two worktrees and are **not**
 regressions from the Phase 0 merge. Do not attribute them to Lane B, and do not
 try to "fix" them inside this phase.
+
+### D2 addendum — herdr verified live on this host (2026-09-24)
+
+The owner installed herdr; D2's install question is closed. Version **0.9.1** at
+`/root/.local/bin/herdr`, server running (`herdr server`), socket present at
+`/root/.config/herdr/herdr.sock` as documented.
+
+The socket seam was then probed directly, and **the official docs are wrong in
+two ways that will cost an executor a debugging cycle each.** Corrected contract,
+verified against 0.9.1 on this machine:
+
+1. **`id` must be a STRING, not a number.** Sending `{"id": 1, ...}` returns
+   `invalid request: invalid type: integer 1, expected a string`. herdr's own CLI
+   uses `"id":"cli:api:snapshot"`. The docs just say "an `id`".
+2. **`pane_id` is REQUIRED on a `pane.agent_status_changed` subscription**, not an
+   optional filter as the docs describe it ("a `type` plus optional filters").
+   Omitting it returns `invalid request: missing field 'pane_id'`.
+3. **Therefore a wildcard "subscribe to all agent status" call is impossible.**
+   The collector MUST enumerate panes from `session.snapshot` first and subscribe
+   per pane. This also sharpens the known upstream issue research flagged (one
+   unknown pane failing an entire subscription): with per-pane subscriptions
+   mandatory, pane churn is the main failure mode, so the collector needs to
+   re-subscribe as panes appear and tolerate individual pane failures.
+
+Verified working call, copy this shape:
+
+```json
+{"id":"substrate:probe:2","method":"events.subscribe",
+ "params":{"subscriptions":[{"type":"pane.agent_status_changed","pane_id":"w1:p1"}]}}
+```
+→ `{"id":"substrate:probe:2","result":{"type":"subscription_started"}}`
+
+`herdr api snapshot` works and returns real data: `panes[]` with `pane_id`,
+`agent_status`, `cwd`, `foreground_cwd`, `terminal_title`, `revision`, plus
+`layouts`, `focused_*` ids and an `agents[]` array (empty until an agent is
+detected). `cwd` per pane is what lets the collector attribute an event to a repo.
