@@ -1,6 +1,18 @@
 # Phase 1 — Lane B: Context
 
-## The Orca-vs-herdr question is answered: Orca, and herdr is not needed
+> **CORRECTED 2026-09-24 by the owner.** An earlier version of this document
+> concluded "Orca, and herdr is not needed". That was wrong, and wrong in a
+> specific way: it answered *"can Orca supply events?"* (yes) and treated that
+> as answering *"what is the Lane B runtime?"* (a different question). Orca is
+> an **IDE** — it runs as `orca-ide` — and is not the best persistent runtime.
+> **herdr is the persistent runtime. Both are used:** herdr runs and holds the
+> agents, Orca stays as the IDE surface and as a collector, because its push
+> path genuinely does carry tool events.
+>
+> Everything below about Orca's hook contract remains accurate and useful. Only
+> the runtime conclusion was wrong.
+
+## What the Orca probe established (still valid, wrongly extrapolated)
 
 Notion §4.2 framed this as "ask `orca agent-context --json` whether the runtime
 exposes a session or event query the collector can subscribe to. If it does,
@@ -75,7 +87,11 @@ the Cursor projector and git collector.
 - Orca hooks are installed for hermes, so Hermes session lifecycle is available
   through the same path — the eng-board `on_tool` hook is not the only option.
 - `orca-ide` also listens on `0.0.0.0:6768`. Not the hook port; not touched.
-- herdr remains uninstalled, and on this evidence should stay that way.
+- herdr is **not installed** and must be, as the Lane B persistent runtime.
+  Notion §4.2's `events.subscribe` on `pane.agent_status_changed` plus
+  `pane.read` is the collector seam for it.
+- Orca keeps two roles: the IDE, and a collector via the `endpoint.env` tee
+  (deferred by the owner until the native floor lands).
 
 
 ## Native floor — status
