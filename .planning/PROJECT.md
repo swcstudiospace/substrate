@@ -84,3 +84,6 @@ brief does not call either API on every prompt.
   Railway or Greptime credentials in `agent_events`.
 - **No KVM on this host** — cua runs the Docker path; the QEMU path is out.
 - Secrets live in `/etc/substrate/substrate.env` (0600, root), never in the repo.
+
+---
+*Last updated: 2026-09-24 after Phase 1 (Lane B). Lane B delivered additive brief reads and event emits on Hermes, Omp, Muse, Grok Build and Grok Bot under D-01; handoff events carry Graph ID, repo and node_id. The Hermes TypeScript-engine bridge and Kanban retirement remain with the "Ultrathink on Hermes" milestone.*

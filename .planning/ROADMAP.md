@@ -18,7 +18,7 @@ in a proof that is **run for real**, not asserted.
 urgent insertions.
 
 - [x] **Phase 0: Brief** — cross-agent briefing on the two surfaces used most, keyed by Graph ID
-- [ ] **Phase 1: Lane B** — Hermes, Omp, Muse Code, Grok Build and Grok Bot inside the substrate
+- [x] **Phase 1: Lane B** — Hermes, Omp, Muse Code, Grok Build and Grok Bot inside the substrate (completed 2026-09-24)
 - [ ] **Phase 2: Claims and dispatch** — Linear drives who works on what
 - [ ] **Phase 3: Lane A** — sandboxed, durable sessions per Graph ID via rivet-agentos
 - [ ] **Phase 4: Skills** — one library, three miners proposing, Hermes primary
@@ -79,9 +79,11 @@ brief naming that edit and the open graphs in that repo.
      `graph_get`; `handoff_to_hermes` records a `handoff` event with its Graph ID.
 **Proof**: Hermes finishes node n2 from a Grok Bot handoff; Omp's next prompt in that repo
 lists both the handoff and the claim.
-**Plans**: 7/9 plans executed
+**Plans**: 10/10 plans executed
 
 Plans:
+
+- [x] 01-10-PLAN.md
 
 - [x] 01-01-PLAN.md — Wave 0 rollback safety baseline: git baselines, live-file snapshots, measured test baselines (D-04)
 - [x] 01-02-PLAN.md — Phase tracer: Hermes reads the brief and emits one event, additively and fail-open (D-01)
@@ -90,8 +92,8 @@ Plans:
 - [x] 01-05-PLAN.md — grok-hermes-connector v0.4: four substrate tools and a Graph ID on `handoff_to_hermes`
 - [x] 01-06-PLAN.md — Muse: `.substrate/BRIEF.md` writer, AGENTS.md pointer, PostToolUse event hook
 - [x] 01-07-PLAN.md — Omp: substrate-mcp registered as a second MCP endpoint, `memory_brief` in discovery
-- [ ] 01-08-PLAN.md — Grok Build: brief fetched on UserPromptSubmit, delivered by session file plus rules entry
-- [ ] 01-09-PLAN.md — Cross-surface proof, full regression sweep, and the STATE.md correction
+- [x] 01-08-PLAN.md — Grok Build: brief fetched on UserPromptSubmit, delivered by session file plus rules entry
+- [x] 01-09-PLAN.md — Cross-surface proof, full regression sweep, and the STATE.md correction
 
 ### Phase 2: Claims and dispatch
 

@@ -1,36 +1,39 @@
 ---
 gsd_state_version: "1.0"
 milestone: v1.0
-current_plan: 9
+current_plan: Not started
 status: executing
-stopped_at: Completed 01-09-PLAN.md with recorded proof gaps
-last_updated: "2026-09-24T17:22:00Z"
-state_head: 2933f1c74e890ea5e36e05766a63cb765729169f
+stopped_at: Phase 1 complete, ready to plan Phase 2
+last_updated: "2026-09-24T18:44:21.071Z"
+state_head: 45cb7e70e3cbbb6e7eae6056ae3a502bc61b1c0d
 progress:
   total_phases: 6
-  completed_phases: 0
-  total_plans: 9
-  completed_plans: 9
-  percent: 0
+  completed_phases: 1
+  total_plans: 10
+  completed_plans: 10
+  percent: 17
 milestone_name: Agent Substrate — four planes (runtime, memory, skills, ledger) keyed by Graph ID
-current_phase_name: Lane B
-current_phase: 1
+current_phase: 2
+current_phase_name: Claims and dispatch
 ---
 
 # State
 
 ## Current
 
-Current Plan: 9
-Total Plans in Phase: 9
+Current Plan: Not started
+Total Plans in Phase: 0 (Phase 2 not yet discussed or planned)
 
-**Phase 1 (Lane B) plans 01-01 through 01-09 have been executed.** The
-cross-surface proof was run on live installs and written to
-`phases/01-lane-b/01-PROOF.md`. It is not a pass. Graph ID
-`ut-mufsocbe-c7ced745` in `swcstudiospace/agent-substrate` received a
-`handoff` event, and Hermes did not claim node n2. Omp discovery, the Muse
-brief file, and the Grok Build session file did not name both the handoff
-and the claim. Do not start Phase 2 on the strength of this record.
+**Phase 1 (Lane B) is complete** — 10/10 plans, verification `passed`
+(`phases/01-lane-b/01-VERIFICATION.md`, commit `45cb7e7`). The 01-09 proof
+recorded gaps; gap-closure plan 01-10 closed them: handoff events now carry
+`repo` and `node_id` (mcp `63fd450`), a real Hermes session
+(`20260924_182534_fe7fa2`) claimed n2 of `ut-mufsocbe-c7ced745` without
+editing the tree, and the Omp brief for that graph names both the handoff and
+the claim (`phases/01-lane-b/01-10-PROOF.md`). The owner accepted the
+remaining live-model-session checks on 2026-09-24 (see Blockers → Accepted).
+
+**Next: Phase 2 (Claims and dispatch)** — discuss, plan, execute.
 
 Lane B proceeded under **D-01**: an additive brief and events only. The
 TypeScript-engine work and the Kanban retirement belong to the "Ultrathink
@@ -196,11 +199,14 @@ _(Credential rotation was considered and declined by the owner — recorded
 here so it is not re-raised.)_
 
 - 01-08 precondition was later met on this host; that plan completed. The old blocker text is kept so it is not re-opened as if unread: precondition unmet (fetchBrief/brief.ts missing on claude-ultrathink-grok HEAD a12eee1, branch rebased past 01-BASELINE.md's recorded ancestor 3766efd). Re-measure 01-BASELINE.md row 6 before retrying; code recoverable from branches substrate/brief, feat/substrate-brief, substrate/graph-register or squash-merge f10e8de on origin/master.
-- Hermes did not claim node n2 of graph_id `ut-mufsocbe-c7ced745`. Index claim is absent. The dispatched `hermes chat` slept after a model-normalization line; the status file read `completed` with no claim. Process killed so the implement wrapper would not edit the tree.
-- The handoff event landed (`kind=handoff`, `graph_id=ut-mufsocbe-c7ced745`, `session_id=20260924T171800Z-3fb834d5`) but `repo` and `node_id` are null, so the repo-scoped brief does not list it.
-- Omp discovery does not name both the handoff and the claim. `pi -e` failed to load the extension (`path` argument undefined). No live Omp model session ran.
-- Muse `.substrate/BRIEF.md` in the proof repo is stale (`No substrate history for this repo yet`) because that repo is not in `SUBSTRATE_MUSE_REPOS`. No Muse session quoted the handoff or the claim.
-- No Grok Build model quoted the brief. The shim-written session file names the open graph and does not name the handoff or the claim.
+- [Phase 1] Proof gaps from 01-09 (null handoff attribution, no Hermes claim, Omp brief missing both facts, stale proof-repo Muse brief) were closed by 01-10. See `phases/01-lane-b/01-10-PROOF.md`.
+
+**Accepted by owner, not agent-verified (Phase 1, 2026-09-24):**
+
+- Hermes *claimed* n2; it did not mark it completed. Accepted as the finish.
+- No live Omp, Grok Bot, Grok Build or Muse model session quoted a brief. The brief text those surfaces receive was observed; model quotation was not.
+- The Muse `.substrate/BRIEF.md` is keyed by checkout path, so it does not list slug-keyed events (the handoff and the claim).
+- The 01-10 production dispatch wrapper was killed ~100 ms after spawn; whether its Telegram ACK was sent was not observed.
 
 ## Pending todos
 
@@ -259,7 +265,7 @@ which is why Greptime worked immediately and Postgres did not.
 ## Session
 
 **Last session:** 2026-09-24T17:22:00Z
-**Stopped at:** Completed 01-09-PLAN.md with recorded proof gaps
+**Stopped at:** Phase 1 complete, ready to plan Phase 2
 **Resume file:** None
 
 ## Decisions
