@@ -18,7 +18,7 @@ affects: ["01-02", "01-03", "01-04", "01-05", "01-06", "01-07", "01-08", "01-09"
 actuals:
   tokens: 5717
   tasks: 3
-  commits: 2
+  commits: 3
   plan_head_before: ac16d2e4b847f4f2ae34174e970dcf364e5ef118
 
 tech-stack:
@@ -296,6 +296,13 @@ already require.
   next executor does not lose a cycle to it.
 - **`mcp/src/grok_hermes_connector/pyproject.toml` does not exist.** Used the
   plan's stated fallback, `mcp/pyproject.toml`. Noted in `RESTORE.md` § 6.
+- **D-03 is slightly wrong about `claude-ultrathink-grok`, and it matters.** D-03
+  says both red baselines are "confined to uncommitted work in those two
+  checkouts". `claude-ultrathink` has 24 dirty files, so that holds. But
+  `claude-ultrathink-grok` has **zero** dirty files — its failing assertion is
+  *committed* on `milestone/v1.0-cross-runtime` (HEAD `3766efd`). Its failure is
+  therefore stable and cannot vanish the way `claude-ultrathink`'s five can.
+  Recorded in `01-BASELINE.md` § 6 as a measured correction.
 
 ## User Setup Required
 

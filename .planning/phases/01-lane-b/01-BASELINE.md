@@ -170,9 +170,21 @@ Measured: 256 passed, 1 failed. Exit code 1. Branch `milestone/v1.0-cross-runtim
    - Assertion: `expect(plan?.subIssues).toHaveLength(15)`
    - Message: `error: expect(received).toHaveLength(expected)` — `Expected length: 15`, `Received length: 3`
 
-This matches D-03 exactly: an assertion-count mismatch in `src/claude/hook.test.ts`
-from a concurrent session's in-flight work (the 3→15 Sub-Issue assertion change
-named in `STATE.md` § "Lesson recorded").
+The failure is the assertion-count mismatch in `src/claude/hook.test.ts` that
+D-03 describes — the 3→15 Sub-Issue assertion change named in `STATE.md`
+§ "Lesson recorded".
+
+**Correction to D-03, measured.** D-03 states both red baselines are "confined to
+uncommitted work in those two checkouts". That holds for `claude-ultrathink`
+(24 dirty files) but **not** for `claude-ultrathink-grok`: `git status --short`
+returns **zero** dirty files there. Its HEAD is `3766efd`
+(`docs: synthesize v1.0 cross-runtime research`) on `milestone/v1.0-cross-runtime`,
+so the failing assertion is **committed** on that branch.
+
+Consequence for later gates: this failure is *stable*. It cannot vanish because
+another session committed or reset, the way `claude-ultrathink`'s five can. If
+`claude-ultrathink-grok` ever reports 257 pass / 0 fail, something changed the
+branch — investigate rather than celebrate.
 
 ### 7. `claude-ultrathink` — ⚠ RED (D-03)
 
