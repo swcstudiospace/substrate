@@ -119,6 +119,11 @@ divergence rather than changing working code.
   backup was written to `hooks.json.substrate-backup`, and a re-run reports
   `already current`, confirming idempotence.
 
+*Proven live, not just installed:* committing `716b8ba` to this repo raised
+`agent_events` from 13 to 14, and the new row is
+`commit | commit 716b8ba docs(phase-0): close the three verification gaps |
+cursor` — the hook fired on a real commit and the sha matches.
+
 **Criterion 5 — landed, not yet live.** The `graph_register` call was added to
 `ultrathink-kickoff` as a new step 5 (between creating the rows and resolving
 HITL), idempotent by `graph_id` and explicitly fail-open. Committed as
