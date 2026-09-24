@@ -27,8 +27,34 @@ answered "can Orca supply events?" rather than "what is the Lane B runtime?".
 Grok Build collector built, tested and running under systemd. Hermes probed
 but not started.
 
-Paused at 65% context, deliberately, rather than starting the Hermes plugin
-edits mid-window — those touch a running install.
+**Phase 1 is PLANNED and gated, not started.** 9 plans in 4 waves (`3ab6c87`),
+plan-checker blockers closed (`8204988`). No Lane B code has been written yet and
+no live install has been touched.
+
+Paused a second time at the same 65-70% context mark, deliberately, rather than
+starting the Hermes plugin edits mid-window — those touch a running install, and
+`/root/.hermes/plugins` is a symlink into `/root/src/repos/`, so the edit lands on
+the live plugin with no staging separation.
+
+**Resume with:** `/clear`, then `/gsd-execute-phase 1`
+
+Expect two blocking-human checkpoints that do not auto-approve: end of wave 2
+(live hermes-plugin) and wave 3 plan 01-03 (live eng-board).
+
+Wave 1 (plan 01-01) MUST run first and is structurally unskippable — every other
+plan declares `depends_on: ["01-01", ...]`. It establishes the only rollback that
+exists: `git init` + path-scoped initial commits in the four repos that currently
+have no history, byte-verified snapshots of every live file, a written
+`RESTORE.md`, and `01-BASELINE.md` with measured test counts and the node id of
+every pre-existing failure.
+
+Open items carried into execution:
+- ROADMAP.md criteria 1-3 were annotated in place with the D-01/D-02 re-scoping
+  (kept the original wording quoted). The owner had declined re-scoping when
+  offered; revert that hunk of `3ab6c87` if the roadmap should stay pristine.
+- The planner added an Omp `events_emit` that the success criteria do not name,
+  to satisfy the phase GOAL's "read AND emit". Sensible, but it is scope the
+  planner chose rather than scope the owner approved.
 
 ## Phase 0 (complete)
 
