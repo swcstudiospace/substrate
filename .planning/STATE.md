@@ -50,6 +50,17 @@ See `phases/01-lane-b/01-01-SUMMARY.md`. What now exists that did not before:
 - `phases/01-lane-b/01-BASELINE.md` — seven measured suites and the node ids of
   all 8 pre-existing failures.
 
+**Waves 1-2 are DONE.** Plan 01-01 (safety baseline) and plan 01-02 (the Hermes
+tracer) are complete; the tracer's blocking checkpoint was approved by the owner
+after live verification. Hermes now reads the brief and emits events on the
+running install, additively — `__init__.py` is byte-identical to the Wave 1
+snapshot, so the hook file itself was never edited.
+
+**Next: Wave 3** — plans 01-03 … 01-08 (eng-board, herdr collector, connector
+v0.4, Muse, Omp, Grok Build). They have zero `files_modified` overlap and can run
+in parallel. Plan 01-03 carries the phase's second blocking-human checkpoint
+(live eng-board plugin). Then Wave 4 (01-09) for the cross-surface proof.
+
 **Resume with:** `/clear`, then `/gsd-execute-phase 1` (picks up at wave 2).
 
 Expect two blocking-human checkpoints that do not auto-approve: end of wave 2
