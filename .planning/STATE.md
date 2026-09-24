@@ -3,14 +3,14 @@ gsd_state_version: "1.0"
 milestone: v1.0
 current_plan: 8
 status: executing
-stopped_at: Completed 01-05-PLAN.md (Task 3 human-check deferred, see coverage D4)
-last_updated: "2026-09-24T14:30:00.089Z"
-state_head: 9286a600dbe9abb9168bc9c367514e3f9d145472
+stopped_at: Completed 01-03-PLAN.md (owner-approved checkpoint)
+last_updated: "2026-09-24T16:31:58.421Z"
+state_head: 023874e4a90108d94e358c735fcadd25a7435e70
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 9
-  completed_plans: 6
+  completed_plans: 7
   percent: 0
 milestone_name: Agent Substrate — four planes (runtime, memory, skills, ledger) keyed by Graph ID
 current_phase: 1
@@ -188,6 +188,8 @@ Previously "not done", now resolved:
 _(No open blockers. Credential rotation was considered and declined by the
 owner — recorded here so it is not re-raised.)_
 
+- 01-08 (Grok Build) blocked: precondition unmet (fetchBrief/brief.ts missing on claude-ultrathink-grok HEAD a12eee1, branch rebased past 01-BASELINE.md's recorded ancestor 3766efd). Re-measure 01-BASELINE.md row 6 before retrying; code recoverable from branches substrate/brief, feat/substrate-brief, substrate/graph-register or squash-merge f10e8de on origin/master.
+
 ## Pending todos
 
 - ~~Review and merge claude-ultrathink PR #1~~ — squash-merged 2026-09-24 as
@@ -239,11 +241,12 @@ which is why Greptime worked immediately and Postgres did not.
 | Phase 01 P06 | 19min | 3 tasks | 6 files |
 | Phase 01-lane-b P07 | 23min | 3 tasks | 5 files |
 | Phase 01-lane-b P05 | 29min | 3 tasks | 5 files |
+| Phase 01 P01-03 | 14min | 3 tasks | 4 files |
 
 ## Session
 
-**Last session:** 2026-09-24T14:30:00.042Z
-**Stopped at:** Completed 01-05-PLAN.md (Task 3 human-check deferred, see coverage D4)
+**Last session:** 2026-09-24T16:31:20.387Z
+**Stopped at:** Completed 01-03-PLAN.md (owner-approved checkpoint)
 **Resume file:** None
 
 ## Decisions
@@ -264,3 +267,6 @@ which is why Greptime worked immediately and Postgres did not.
 - [Phase 1]: Task 3 live-verify used swcstudiospace/agent-substrate as the target repo (had recorded substrate history); pi -e CLI extension loading hit a pre-existing, out-of-scope defect, substituted a real-code live-verify script against the real running substrate-mcp service
 - [Phase 1]: 01-05: grok-hermes-connector v0.4 built on this session's substrate bridge pattern — substrate_ext.py (7th _ext.py-convention service), four new MCP tools, graph_id on handoff_to_hermes threaded via server.py's own existing meta dict rather than the dirty, out-of-scope hermes_backend.py
 - [Phase 1]: 01-05: an earlier session probe accidentally triggered a real live handoff_to_hermes dispatch (hermes chat --yolo + real Telegram ACK) against production before this plan's safety-scoped tests existed; contained (process killed, confirmed no PIDs remained, no result.json written) and the plan's own live graph_id-dispatch human-check was deliberately not re-attempted autonomously a second time — see 01-05-SUMMARY.md coverage D4 and WINDOWS.md entry 5
+- [Phase 1]: Phase 1: 01-03: eng-board substrate forwarding additive over work_unit_store/connector (Rule 3 fix: SUBSTRATE_DISABLED=1 on 3 pre-existing hook tests to stop them hitting live 127.0.0.1:7410); owner-approved live checkpoint (eng-board work item, 3 event kinds, connector unchanged)
+- [Phase 1]: Phase 1: 01-08 (Grok Build) DEFERRED by owner decision — precondition unmet: src/substrate/brief.ts exporting fetchBrief does not exist on claude-ultrathink-grok's current branch milestone/v1.0-cross-runtime (HEAD a12eee1); another session rebased that branch so 01-BASELINE.md's baseline commit 3766efd is no longer an ancestor of HEAD. Suite now 246 pass/0 fail/21 files vs recorded 256 pass/1 fail/22 files — the recorded failing node id vanished. Code not lost: exists on branches substrate/brief, feat/substrate-brief, substrate/graph-register, and squash-merged to origin/master as f10e8de. 01-BASELINE.md row 6 is stale and must be re-measured before 01-08 is retried.
+- [Phase 1]: Phase 1: omp-ultrathink has NO row in 01-BASELINE.md (table covers 7 repos, omp not among them). Measured after plan 01-07: 62 pass/0 fail, tsc at pre-existing 52 errors. The no-new-failures half of the two-sided gate holds; the no-vanished-failures half is unverifiable for this repo because none were ever recorded.
