@@ -79,7 +79,7 @@ brief naming that edit and the open graphs in that repo.
      `graph_get`; `handoff_to_hermes` records a `handoff` event with its Graph ID.
 **Proof**: Hermes finishes node n2 from a Grok Bot handoff; Omp's next prompt in that repo
 lists both the handoff and the claim.
-**Plans**: 4/9 plans executed
+**Plans**: 5/9 plans executed
 
 Plans:
 
@@ -89,7 +89,7 @@ Plans:
 - [x] 01-04-PLAN.md — herdr socket collector: per-pane subscriptions, race-free bootstrap, systemd unit (D-02)
 - [ ] 01-05-PLAN.md — grok-hermes-connector v0.4: four substrate tools and a Graph ID on `handoff_to_hermes`
 - [x] 01-06-PLAN.md — Muse: `.substrate/BRIEF.md` writer, AGENTS.md pointer, PostToolUse event hook
-- [ ] 01-07-PLAN.md — Omp: substrate-mcp registered as a second MCP endpoint, `memory_brief` in discovery
+- [x] 01-07-PLAN.md — Omp: substrate-mcp registered as a second MCP endpoint, `memory_brief` in discovery
 - [ ] 01-08-PLAN.md — Grok Build: brief fetched on UserPromptSubmit, delivered by session file plus rules entry
 - [ ] 01-09-PLAN.md — Cross-surface proof, full regression sweep, and the STATE.md correction
 
