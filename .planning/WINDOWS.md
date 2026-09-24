@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 3
+open_count: 4
 waived_count: 0
 fixed_count: 0
-total_count: 3
-last_updated: 2026-09-24T12:09:46.208Z
+total_count: 4
+last_updated: 2026-09-24T12:49:50.971Z
 ---
 
 # Broken Windows Ledger
@@ -18,6 +18,7 @@ last_updated: 2026-09-24T12:09:46.208Z
 | 1 | 01 | unrun-verify | packages/collectors/src/herdr.ts |  | herdr-server-restart reconnect behavior not exercised live: herdr's server runs as a bare process (not a systemd unit), shared with live human terminal sessions on this VPS, so it was not restarted to force a reconnect test. Collector's own restart was verified clean instead. | open |  | 2026-09-24T11:06:19.041Z |  |
 | 2 | 01 | unrun-verify | packages/collectors/src/herdr-map.ts |  | Plan's <human-check> (drive a real herdr pane, confirm an agent-status event reaches the substrate within a minute) not exercised: no agent was present in the one live pane (session.snapshot returned agents: []). Verified instead with a manually-issued, wire-real POST /events carrying the pane's real repo/pane_id. | open |  | 2026-09-24T11:06:19.220Z |  |
 | 3 | 01 | deviation | .planning/phases/01-lane-b/01-06-PLAN.md | 220 | Task 2's literal automated verify (grep -c 'substrate' == 1 on muse plugins list --json) fails even for a correctly non-duplicated install, because the binary's pretty-printed JSON has multiple substring-matching lines per entry; verified instead via jq structural count. See 01-06-SUMMARY.md deviation 3. | open |  | 2026-09-24T12:09:46.208Z |  |
+| 4 | 01 | unrun-verify | omp-ultrathink/swe.ts |  | Task 3 human-check could not run the literal pi -e CLI session (pre-existing extension-loader defect: path argument must be of type string, received undefined); substituted a direct real-code live-verify script against the real running substrate-mcp service instead. See 01-07-SUMMARY.md coverage D4. | open |  | 2026-09-24T12:49:50.971Z |  |
 
 ````json
 [
@@ -57,6 +58,19 @@ last_updated: 2026-09-24T12:09:46.208Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-09-24T12:09:46.208Z",
+    "resolved_at": null,
+    "milestone": "v1.0"
+  },
+  {
+    "id": 4,
+    "kind": "unrun-verify",
+    "phase": "01",
+    "file": "omp-ultrathink/swe.ts",
+    "line": null,
+    "description": "Task 3 human-check could not run the literal pi -e CLI session (pre-existing extension-loader defect: path argument must be of type string, received undefined); substituted a direct real-code live-verify script against the real running substrate-mcp service instead. See 01-07-SUMMARY.md coverage D4.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-24T12:49:50.971Z",
     "resolved_at": null,
     "milestone": "v1.0"
   }
