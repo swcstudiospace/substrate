@@ -53,19 +53,39 @@ brief naming that edit and the open graphs in that repo.
 **Goal**: Hermes, Omp, Muse Code, Grok Build and Grok Bot all read the brief and emit events.
 **Depends on**: Phase 0
 **Success Criteria**:
-  1. Hermes redesign per its own `.planning/PROJECT.md`: the Python `pre_llm_call` hook calls
-     the TypeScript engine, which returns the brief with the uplift XML and graph.
-  2. Hermes Kanban is retired as a tracker; `hermes-linear-connector` keeps its Linear→Hermes
-     dispatch, comment mirroring and DoD gate; eng-board auto-ingest points at `events.emit`.
-  3. Orca-vs-herdr decided by probing `orca agent-context --json` and the
-     `ORCA_AGENT_HOOK_ENDPOINT` contract — herdr only if Orca's event API is closed.
+  1. **Re-scoped by decision D-01 (CONTEXT.md D1).** Hermes reads the brief and emits events
+     through an **additive** `/brief` call and `events_emit` injected into the existing
+     `on_pre_llm_call` path without restructuring it. The original wording — "Hermes redesign
+     per its own `.planning/PROJECT.md`: the Python `pre_llm_call` hook calls the TypeScript
+     engine" — cites a shipped v0.3.0 milestone that does not contain that redesign; the real
+     TypeScript-engine bridge belongs to the "Ultrathink on Hermes" v1.0 milestone. Lane B does
+     not build it and must not claim it.
+  2. **Re-scoped by D-01.** Hermes Kanban retirement is **deferred** to that same milestone;
+     Lane B asserts only that `hermes_kanban_create` behaviour is *unchanged*.
+     `hermes-linear-connector` keeps its Linear→Hermes dispatch, comment mirroring and DoD gate,
+     untouched; eng-board auto-ingest additionally points at `events_emit`.
+  3. **Settled by D-02.** herdr is the Lane B persistent runtime, already installed and verified
+     live (0.9.1); Orca stays alongside as the IDE surface and a collector. This phase stands up
+     the herdr `events.subscribe` collector against the corrected 0.9.1 wire contract.
   4. `omp-ultrathink` adds `memory.brief` to its discovery tools; Grok Build's `ultrathink`
-     `UserPromptSubmit` hook fetches `/brief`; Muse falls back to `.substrate/BRIEF.md`.
+     `UserPromptSubmit` hook fetches `/brief` and delivers it via a session file plus a rules
+     entry, since Grok Build discards hook stdout; Muse falls back to `.substrate/BRIEF.md`.
   5. `grok-hermes-connector` v0.4 forwards `memory_brief`, `memory_write`, `events_emit`,
      `graph_get`; `handoff_to_hermes` records a `handoff` event with its Graph ID.
 **Proof**: Hermes finishes node n2 from a Grok Bot handoff; Omp's next prompt in that repo
 lists both the handoff and the claim.
-**Plans**: TBD
+**Plans**: 9 plans
+
+Plans:
+- [ ] 01-01-PLAN.md — Wave 0 rollback safety baseline: git baselines, live-file snapshots, measured test baselines (D-04)
+- [ ] 01-02-PLAN.md — Phase tracer: Hermes reads the brief and emits one event, additively and fail-open (D-01)
+- [ ] 01-03-PLAN.md — eng-board auto-ingest forwards session start, tool calls and finalize to `events_emit`
+- [ ] 01-04-PLAN.md — herdr socket collector: per-pane subscriptions, race-free bootstrap, systemd unit (D-02)
+- [ ] 01-05-PLAN.md — grok-hermes-connector v0.4: four substrate tools and a Graph ID on `handoff_to_hermes`
+- [ ] 01-06-PLAN.md — Muse: `.substrate/BRIEF.md` writer, AGENTS.md pointer, PostToolUse event hook
+- [ ] 01-07-PLAN.md — Omp: substrate-mcp registered as a second MCP endpoint, `memory_brief` in discovery
+- [ ] 01-08-PLAN.md — Grok Build: brief fetched on UserPromptSubmit, delivered by session file plus rules entry
+- [ ] 01-09-PLAN.md — Cross-surface proof, full regression sweep, and the STATE.md correction
 
 ### Phase 2: Claims and dispatch
 **Goal**: Labelling a Linear issue for an agent starts that agent on that node.
