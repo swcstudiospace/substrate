@@ -1,17 +1,19 @@
 ---
 gsd_state_version: "1.0"
 milestone: v1.0
-milestone_name: "Agent Substrate — four planes (runtime, memory, skills, ledger) keyed by Graph ID"
-current_phase: 1
-current_phase_name: "Lane B"
 status: executing
-last_updated: 2026-09-23
+stopped_at: Completed 01-01-PLAN.md (Wave 1 rollback baseline). Plans 01-02..01-09 not started.
+last_updated: "2026-09-24T04:10:43.008Z"
+state_head: 7d96379b2877243fb5ab77a5f86dc218a2e1fbbf
 progress:
-  total_phases: 7
+  total_phases: 6
   completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
-  percent: 32
+  total_plans: 9
+  completed_plans: 1
+  percent: 0
+milestone_name: Agent Substrate — four planes (runtime, memory, skills, ledger) keyed by Graph ID
+current_phase: 1
+current_phase_name: Lane B
 ---
 
 # State
@@ -27,28 +29,49 @@ answered "can Orca supply events?" rather than "what is the Lane B runtime?".
 Grok Build collector built, tested and running under systemd. Hermes probed
 but not started.
 
-**Phase 1 is PLANNED and gated, not started.** 9 plans in 4 waves (`3ab6c87`),
-plan-checker blockers closed (`8204988`). No Lane B code has been written yet and
-no live install has been touched.
+**Wave 1 is DONE. Waves 2-4 (plans 01-02 … 01-09) are not started.** 9 plans in 4
+waves (`3ab6c87`), plan-checker blockers closed (`8204988`). **Still no Lane B
+code written and no live install touched** — plan 01-01 creates recovery
+artifacts only.
 
-Paused a second time at the same 65-70% context mark, deliberately, rather than
-starting the Hermes plugin edits mid-window — those touch a running install, and
-`/root/.hermes/plugins` is a symlink into `/root/src/repos/`, so the edit lands on
-the live plugin with no staging separation.
+**Plan 01-01 (rollback safety baseline) executed 2026-09-24, all 3 tasks, 11 min.**
+See `phases/01-lane-b/01-01-SUMMARY.md`. What now exists that did not before:
 
-**Resume with:** `/clear`, then `/gsd-execute-phase 1`
+- Initial commits in the four repos that had no restorable history —
+  `hermes-plugin` `65caa2d`, `omp-ultrathink` `3c8c2ec`,
+  `hermes-engineering-board` `b60d581`, `hermes-linear-connector` `dc2d74d`.
+  `redactor.py` tracked in `mcp` as single-path commit `2a89f98`.
+- Byte-verified snapshot of all 10 live files at
+  `/var/lib/substrate/phase1-baseline/20260924T040418Z/` (`latest` symlink),
+  with `MANIFEST.sha256`.
+- `/var/lib/substrate/phase1-baseline/RESTORE.md` — two restore routes per file,
+  with ⚠ flags on the two where `git checkout --` would destroy another
+  session's uncommitted work (`mcp/…/server.py`, `claude-ultrathink-grok/hooks/uplift.ts`).
+- `phases/01-lane-b/01-BASELINE.md` — seven measured suites and the node ids of
+  all 8 pre-existing failures.
+
+**Resume with:** `/clear`, then `/gsd-execute-phase 1` (picks up at wave 2).
 
 Expect two blocking-human checkpoints that do not auto-approve: end of wave 2
 (live hermes-plugin) and wave 3 plan 01-03 (live eng-board).
 
-Wave 1 (plan 01-01) MUST run first and is structurally unskippable — every other
-plan declares `depends_on: ["01-01", ...]`. It establishes the only rollback that
-exists: `git init` + path-scoped initial commits in the four repos that currently
-have no history, byte-verified snapshots of every live file, a written
-`RESTORE.md`, and `01-BASELINE.md` with measured test counts and the node id of
-every pre-existing failure.
+**Before any wave-2 edit, read `/var/lib/substrate/phase1-baseline/RESTORE.md`.**
+It is the only undo, and choosing the wrong route on the two flagged files
+discards another session's work.
 
 Open items carried into execution:
+
+- **`mcp` is RED at 99 passed / 2 failed and `01-VALIDATION.md` does not list it
+  at all.** Measured, not remembered. Pre-existing, from another session's
+  in-progress v0.4 work. D-03's no-repair rule applies. **Gate against
+  `01-BASELINE.md`, not `01-VALIDATION.md`** — the latter's five counts were all
+  correct, but it omits `mcp` and `agent-substrate` entirely.
+- **Lane B test gates are two-sided.** A pre-existing failure that *disappears*
+  fails the gate exactly as a new one does — a vanished failure means a task
+  touched a checkout Lane B does not own.
+- `omp-ultrathink`'s baseline is path-scoped to `config.ts`, `index.ts`, `swe.ts`
+  plus manifests; ~40 other `.ts` files stay untracked. Extend the baseline before
+  editing any of them.
 - ROADMAP.md criteria 1-3 were annotated in place with the D-01/D-02 re-scoping
   (kept the original wording quoted). The owner had declined re-scoping when
   offered; revert that hunk of `3ab6c87` if the roadmap should stay pristine.
@@ -64,6 +87,7 @@ both on Railway. The local dev containers have been deleted and the service
 remains healthy, which is the proof it no longer depends on them.
 
 Done:
+
 - `substrate-mcp` on `127.0.0.1:7410` — MCP at `/mcp` plus `POST /brief`,
   `/events`, `/verify` and `GET /healthz`. Tools: `memory_brief`,
   `memory_write`, `memory_search`, `events_emit`, `graph_get`,
@@ -95,6 +119,7 @@ survives SIGKILL and is restarted by systemd.
 2 fail; all three gaps were then closed.
 
 Previously "not done", now resolved:
+
 - ~~a reachable Postgres URL for the index~~ — reachable; the index answers
   (`graph_index` 6, `graph_nodes` 15, `memory_entries` 1).
 - ~~`graph_register` inside `ultrathink-kickoff`~~ — added as step 5,
@@ -189,3 +214,22 @@ Railway networking, learned the hard way: `.railway.internal` and
 needs the TCP proxy (`…proxy.rlwy.net:PORT`), which must be enabled per service
 under Settings → Networking. HTTP services get a public domain automatically,
 which is why Greptime worked immediately and Postgres did not.
+
+## Performance Metrics
+
+| Plan | Duration | Tasks | Files |
+|------|----------|-------|-------|
+| Phase 01 P01 | 11min | 3 tasks | 7 files |
+
+## Session
+
+**Last session:** 2026-09-24T04:10:34.655Z
+**Stopped at:** Completed 01-01-PLAN.md (Wave 1 rollback baseline). Plans 01-02..01-09 not started.
+**Resume file:** None
+
+## Decisions
+
+- [Phase 1]: Phase 1 rollback baseline: 4 repos given an initial commit (hermes-plugin, omp-ultrathink, hermes-engineering-board, hermes-linear-connector); redactor.py tracked in mcp. Undo for the two git-init'd repos is rm -rf their new .git.
+- [Phase 1]: hermes-engineering-board and hermes-linear-connector had STALE indexes (staged blobs older than the worktree). Refreshed from disk by explicit path before committing — a baseline built from a stale index restores the wrong bytes.
+- [Phase 1]: mcp measured RED at 99 passed / 2 failed and is absent from 01-VALIDATION.md's baseline table. D-03's no-repair rule applied to it by the same reasoning; gate against 01-BASELINE.md, not 01-VALIDATION.md.
+- [Phase 1]: Lane B test gates are two-sided: a pre-existing failure that disappears fails the gate exactly as a new one does. 8 failing node ids recorded in 01-BASELINE.md.

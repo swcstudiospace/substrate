@@ -28,10 +28,12 @@ urgent insertions.
 ## Phase Details
 
 ### Phase 0: Brief
+
 **Goal**: A Claude Code prompt on the VPS is preceded by a brief that names what other agents
 and surfaces did in that repo, sourced from a real event store and a real index.
 **Depends on**: Nothing (first phase)
 **Success Criteria** (what must be TRUE):
+
   1. `substrate-mcp` listens on `127.0.0.1:7410` under systemd and serves `memory.brief`,
      `memory.write`, `memory.search`, `events.emit`, `graph.get`, `graph.register` over MCP,
      plus `POST /brief` and `POST /events` as plain HTTP for hooks.
@@ -45,14 +47,17 @@ and surfaces did in that repo, sourced from a real event store and a real index.
   6. Cursor `hooks.json` has substrate commands **appended** to the GSD-managed arrays, not
      replacing them; a git post-commit hook emits `commit` events.
   7. Stopping `substrate-mcp` leaves every agent working, just unbriefed.
+
 **Proof**: Edit a file in Cursor, then start Claude Code on the VPS — the uplift echo shows a
 brief naming that edit and the open graphs in that repo.
 **Plans**: TBD
 
 ### Phase 1: Lane B
+
 **Goal**: Hermes, Omp, Muse Code, Grok Build and Grok Bot all read the brief and emit events.
 **Depends on**: Phase 0
 **Success Criteria**:
+
   1. **Re-scoped by decision D-01 (CONTEXT.md D1).** Hermes reads the brief and emits events
      through an **additive** `/brief` call and `events_emit` injected into the existing
      `on_pre_llm_call` path without restructuring it. The original wording — "Hermes redesign
@@ -74,10 +79,11 @@ brief naming that edit and the open graphs in that repo.
      `graph_get`; `handoff_to_hermes` records a `handoff` event with its Graph ID.
 **Proof**: Hermes finishes node n2 from a Grok Bot handoff; Omp's next prompt in that repo
 lists both the handoff and the claim.
-**Plans**: 9 plans
+**Plans**: 1/9 plans executed
 
 Plans:
-- [ ] 01-01-PLAN.md — Wave 0 rollback safety baseline: git baselines, live-file snapshots, measured test baselines (D-04)
+
+- [x] 01-01-PLAN.md — Wave 0 rollback safety baseline: git baselines, live-file snapshots, measured test baselines (D-04)
 - [ ] 01-02-PLAN.md — Phase tracer: Hermes reads the brief and emits one event, additively and fail-open (D-01)
 - [ ] 01-03-PLAN.md — eng-board auto-ingest forwards session start, tool calls and finalize to `events_emit`
 - [ ] 01-04-PLAN.md — herdr socket collector: per-pane subscriptions, race-free bootstrap, systemd unit (D-02)
@@ -88,9 +94,11 @@ Plans:
 - [ ] 01-09-PLAN.md — Cross-surface proof, full regression sweep, and the STATE.md correction
 
 ### Phase 2: Claims and dispatch
+
 **Goal**: Labelling a Linear issue for an agent starts that agent on that node.
 **Depends on**: Phase 1
 **Success Criteria**:
+
   1. `graph.claim` moves the Linear issue to `started`, adds `agent:<surface>`, posts a
      one-line comment with the session id, sets `Agent` on the Notion Issue row, and writes
      `claimed_by` in the index. A second agent asking for the same node gets the existing claim.
@@ -104,23 +112,28 @@ Notion Issue row shows Agent hermes, and Claude Code's brief shows it within a m
 **Plans**: TBD
 
 ### Phase 3: Lane A
+
 **Goal**: Sandboxed, durable Claude Code sessions, one VM per Graph ID.
 **Depends on**: Phase 2
 **Success Criteria**:
+
   1. Free disk verified before pulling images (host is at 90%).
   2. rivet-agentos host runs; `openTask` writes shared skills, `SUBSTRATE_BRIEF.md` and the
      substrate/notion/linear MCP config into `/home/agentos`.
   3. The dispatcher routes `dispatch:claude-code` to a VM; `permissionPolicy: "ask"` surfaces
      approvals to Telegram through the existing stop-notify path.
   4. `claude-ultrathink` runs inside the VM, so kickoff and sync still write Notion and Linear.
+
 **Proof**: A labelled issue opens a VM, the session survives a host restart, the PR lands and
 `ultrathink-sync` closes the loop.
 **Plans**: TBD
 
 ### Phase 4: Skills
+
 **Goal**: One git-backed library every agent reads; the three existing miners propose into it.
 **Depends on**: Phase 1
 **Success Criteria**:
+
   1. `/root/agent-skills` is a git checkout of `swcstudiospace/agent-skills` with the **real
      content vendored** — all 26 symlinks dereferenced, no dangling links for any agent.
   2. The docs-scraper pipeline publishes into the repo instead of its own exports dir.
@@ -135,9 +148,11 @@ Build without either being touched.
 **Plans**: TBD
 
 ### Phase 5: Docs and desktop
+
 **Goal**: Product docs and GUI tasks reachable from any agent.
 **Depends on**: Phase 0
 **Success Criteria**:
+
   1. `docs.search` proxies the existing RAGFlow MCP endpoint (`ragflow_retrieval`).
   2. `docs.ingest` runs the redactor before ingesting.
   3. `desktop.run` drives cua on the Docker path or the existing `recruitment-desktop` webtop.
@@ -146,12 +161,15 @@ Build without either being touched.
 **Plans**: TBD
 
 ### Phase 6: Ledger
+
 **Goal**: Tamper-evident history.
 **Depends on**: Phase 1
 **Success Criteria**:
+
   1. Every collector computes `hash` over the canonical event JSON and carries `prev`.
   2. An hourly systemd timer Merkle-roots the hour's events into a Solana **devnet** memo and
      records root, signature and event count in an `anchors` table.
   3. `substrate verify <graph_id>` recomputes the chain and checks roots against signatures.
+
 **Proof**: Alter one event row — `verify` flags the graph.
 **Plans**: TBD
