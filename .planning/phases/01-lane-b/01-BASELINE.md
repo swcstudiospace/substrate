@@ -17,7 +17,7 @@ is precisely why later gates must compare against **this** file.
 | 3 | `hermes-linear-connector` | `cd /root/src/repos/hermes-linear-connector && .venv/bin/python -m pytest -q` | **49 passed, 0 failed** (2 skipped) |
 | 4 | `mcp` | `cd /root/src/repos/mcp && .venv/bin/python -m pytest -q` | **99 passed, 2 failed** ⚠ |
 | 5 | `agent-substrate` | `cd /root/src/repos/agent-substrate && /root/.local/share/reflex/bun/bin/bun test` | **62 passed, 0 failed** |
-| 6 | `claude-ultrathink-grok` | `cd /root/src/repos/claude-ultrathink-grok && /root/.local/share/reflex/bun/bin/bun test` | **256 passed, 1 failed** ⚠ |
+| 6 | `claude-ultrathink-grok` | `cd /root/src/repos/claude-ultrathink-grok && /root/.local/share/reflex/bun/bin/bun test` | **246 passed, 0 failed** (re-measured 2026-09-24 by 01-08 at `0066755`, before behavior edits; no failing node ids) |
 | 7 | `claude-ultrathink` | `cd /root/src/repos/claude-ultrathink && /root/.local/share/reflex/bun/bin/bun test` | **279 passed, 5 failed** ⚠ |
 
 Row 7 is not in the plan's command list. It was added because **D-03** names
@@ -146,45 +146,35 @@ They are expected fallback-path output from tests that exercise the
 degrade-gracefully branch; they are not failures and the suite is green with them
 present.
 
-### 6. `claude-ultrathink-grok` — ⚠ RED (D-03)
+### 6. `claude-ultrathink-grok` — re-measured by 01-08 before behavior edits
 
 ```
 cd /root/src/repos/claude-ultrathink-grok && /root/.local/share/reflex/bun/bin/bun test
 ```
 
-Verbatim summary lines:
+Verbatim summary lines (2026-09-24, HEAD `0066755` on `milestone/v1.0-cross-runtime`, clean tree):
 
 ```
- 256 pass
- 1 fail
- 686 expect() calls
-Ran 257 tests across 22 files. [169.00ms]
+ 246 pass
+ 0 fail
+ 673 expect() calls
+Ran 246 tests across 21 files. [203.00ms]
 ```
 
-Measured: 256 passed, 1 failed. Exit code 1. Branch `milestone/v1.0-cross-runtime`.
+Measured: 246 passed, 0 failed. Exit code 0. **Green.**
 
-**Failing test identity:**
+**Failing test identities:** none.
 
-1. `src/claude/hook.test.ts > runPromptSubmit > uplift + think + track: additionalContext carries the kickoff instruction, record carries the plan`
-   - Location: `/root/src/repos/claude-ultrathink-grok/src/claude/hook.test.ts:112:28`
-   - Assertion: `expect(plan?.subIssues).toHaveLength(15)`
-   - Message: `error: expect(received).toHaveLength(expected)` — `Expected length: 15`, `Received length: 3`
+The earlier row (256 pass / 1 fail / 22 files at `3766efd`, node id
+`src/claude/hook.test.ts > runPromptSubmit > uplift + think + track: additionalContext carries the kickoff instruction, record carries the plan`)
+is stale. A later session had already seen 246 pass / 0 fail / 21 files at `a12eee1`;
+this re-measure at `0066755` confirms that count before any 01-08 behavior edit.
+That vanished failure belongs to branch movement that happened before this plan,
+not to a Lane B repair. From this row forward, D-03 is two-sided against **0 failed
+and an empty failing-node-id set**. 01-08 adds tests, so the passed count is a floor;
+a new failure, or a failure that appears and then vanishes relative to this row, fails
+the gate.
 
-The failure is the assertion-count mismatch in `src/claude/hook.test.ts` that
-D-03 describes — the 3→15 Sub-Issue assertion change named in `STATE.md`
-§ "Lesson recorded".
-
-**Correction to D-03, measured.** D-03 states both red baselines are "confined to
-uncommitted work in those two checkouts". That holds for `claude-ultrathink`
-(24 dirty files) but **not** for `claude-ultrathink-grok`: `git status --short`
-returns **zero** dirty files there. Its HEAD is `3766efd`
-(`docs: synthesize v1.0 cross-runtime research`) on `milestone/v1.0-cross-runtime`,
-so the failing assertion is **committed** on that branch.
-
-Consequence for later gates: this failure is *stable*. It cannot vanish because
-another session committed or reset, the way `claude-ultrathink`'s five can. If
-`claude-ultrathink-grok` ever reports 257 pass / 0 fail, something changed the
-branch — investigate rather than celebrate.
 
 ### 7. `claude-ultrathink` — ⚠ RED (D-03)
 
@@ -286,7 +276,7 @@ For each repo, a later plan's `<verify>` passes only when **both** hold:
 | `hermes-linear-connector` | 49 passed / 0 failed (2 skipped) |
 | `mcp` | 99 passed / 2 failed — the two node ids in § 4 |
 | `agent-substrate` | 62 passed / 0 failed (this count *will* rise as Lane B adds tests; the floor is 0 failed) |
-| `claude-ultrathink-grok` | 256 passed / 1 failed — the node id in § 6 |
+| `claude-ultrathink-grok` | 246 passed / 0 failed at `0066755` — no failing node ids (§ 6). Failed count and node-id set are equalities. Passed count is a floor once 01-08 adds tests. |
 | `claude-ultrathink` | 279 passed / 5 failed — the five node ids in § 7 |
 
 `agent-substrate` is the one repo Lane B legitimately adds tests to, so its
