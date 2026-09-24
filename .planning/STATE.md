@@ -18,9 +18,14 @@ progress:
 
 ## Current
 
-**Phase 1 (Lane B) in progress.** Orca-vs-herdr resolved in favour of Orca
-(herdr not needed — see phases/01-lane-b/CONTEXT.md). Grok Build collector
-built, tested and running under systemd. Hermes probed but not started.
+**Phase 1 (Lane B) in progress.** Orca-vs-herdr resolved in favour of
+**herdr as the persistent runtime, with Orca alongside** as the IDE surface
+and as a collector — its push path (agent hooks) is complete, so no query API
+is needed from it. See phases/01-lane-b/CONTEXT.md, which is authoritative.
+An earlier revision of this paragraph said "Orca, herdr not needed"; that
+answered "can Orca supply events?" rather than "what is the Lane B runtime?".
+Grok Build collector built, tested and running under systemd. Hermes probed
+but not started.
 
 Paused at 65% context, deliberately, rather than starting the Hermes plugin
 edits mid-window — those touch a running install.
