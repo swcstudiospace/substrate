@@ -1,16 +1,16 @@
 ---
 gsd_state_version: "1.0"
 milestone: v1.0
-current_plan: 5
+current_plan: 6
 status: executing
-stopped_at: Completed 01-04-PLAN.md (herdr runtime collector). Plans 01-03, 01-05..01-09 not started.
-last_updated: "2026-09-24T11:08:20.596Z"
-state_head: 69329a7554493fdc959c7b5ec96fabed982a5758
+stopped_at: Completed 01-06-PLAN.md
+last_updated: "2026-09-24T12:09:24.827Z"
+state_head: 531c1dea8030a4c7e7857b0eb842971b615d4051
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 9
-  completed_plans: 3
+  completed_plans: 4
   percent: 0
 milestone_name: Agent Substrate — four planes (runtime, memory, skills, ledger) keyed by Graph ID
 current_phase: 1
@@ -21,7 +21,7 @@ current_phase_name: Lane B
 
 ## Current
 
-Current Plan: 5
+Current Plan: 6
 Total Plans in Phase: 9
 
 **Phase 1 (Lane B) in progress.** Orca-vs-herdr resolved in favour of
@@ -236,11 +236,12 @@ which is why Greptime worked immediately and Postgres did not.
 |------|----------|-------|-------|
 | Phase 01 P01 | 11min | 3 tasks | 7 files |
 | Phase 01 P04 | 35min | 3 tasks | 5 files |
+| Phase 01 P06 | 19min | 3 tasks | 6 files |
 
 ## Session
 
-**Last session:** 2026-09-24T11:08:20.557Z
-**Stopped at:** Completed 01-04-PLAN.md (herdr runtime collector). Plans 01-03, 01-05..01-09 not started.
+**Last session:** 2026-09-24T12:09:24.789Z
+**Stopped at:** Completed 01-06-PLAN.md
 **Resume file:** None
 
 ## Decisions
@@ -252,3 +253,7 @@ which is why Greptime worked immediately and Postgres did not.
 - [Phase 1]: Extended mcp-server SURFACES/EVENT_KINDS unions to admit the herdr surface and its 3 event kinds (Rule 2/3 auto-fix).
 - [Phase 1]: herdr's pane.output_matched terminal text is carried on field matched_line, not output_matched/matched_text as the plan prose implied - confirmed via live socket probe (Rule 1 fix).
 - [Phase 1]: herdr.ts opens one persistent socket connection per pane: herdr 0.9.1 resets a connection on a second events.subscribe call, and one bad pane_id in a batched subscribe kills the whole connection without acking any other entry.
+- [Phase 1]: 01-06: SUBSTRATE_MUSE_REPOS set to Lane B's four repos (hermes-plugin, omp-ultrathink, hermes-engineering-board, hermes-linear-connector), not agent-substrate itself
+- [Phase 1]: 01-06: Muse native plugin manifest/hook schema derived from the binary's own bundled create-plugin skill docs, not guessed
+- [Phase 1]: 01-06: muse plugins update refreshes from the plugin's originally recorded install source path, not any newly given path — idempotence testing must fully remove+reinstall to avoid a stale source
+- [Phase 1]: 01-06: Assumption A2 (SessionStart hook output reaching model context) confirmed YES via hook test's decision.additional_contexts
