@@ -12,6 +12,7 @@ export const SURFACES = [
 	"opencode",
 	"pi",
 	"rivet-agentos",
+	"herdr",
 ] as const;
 export type Surface = (typeof SURFACES)[number];
 
@@ -28,6 +29,9 @@ export const EVENT_KINDS = [
 	"session.end",
 	"note",
 	"warning",
+	"agent.detected",
+	"agent.status",
+	"agent.exited",
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 
