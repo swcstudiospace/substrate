@@ -65,12 +65,25 @@ blocked: 0
 
 ## Gaps
 
-1. `graph_register` is not called from `ultrathink-kickoff` (test 5) — the index
-   does not self-populate when a new Task is tracked.
-2. Collectors are written but not installed (test 6) — no git post-commit hook,
-   no substrate commands appended to the Cursor hook arrays.
-3. claude-ultrathink PR #1 is unmerged (test 4) — the brief only reaches
-   sessions running `feat/substrate-brief`, not `master`.
+All three closed the same day, on the owner's instruction. Test results above
+record the state **at the time of the run**; this records what changed after.
 
-None is blocking for Phase 1, which consumes `/brief` and `/events` over HTTP —
-both live and proven here.
+1. ~~`graph_register` not called from `ultrathink-kickoff` (test 5)~~ —
+   **landed, not yet live.** Added as step 5, idempotent and fail-open,
+   committed as `c2c12a8` on branch `substrate/graph-register`. Two caveats:
+   it is not yet merged to `master`, and the running plugin loads from a cache
+   copy (`plugins/cache/ultrathink/ultrathink/0.1.1/…`) that still has no
+   `graph_register`, so a live kickoff will not register until that cache is
+   rebuilt.
+2. ~~Collectors written but not installed (test 6)~~ — **closed and verified.**
+   `.git/hooks/post-commit` installed (`--check` → `✓ present`); 3
+   `substrate-managed` entries appended to `/root/.cursor/hooks.json` with all
+   6 `gsd-managed` entries untouched, backup written, re-run idempotent.
+3. ~~claude-ultrathink PR #1 unmerged (test 4)~~ — **closed.** Squash-merged as
+   `f10e8de`; `fetchBrief` is on `origin/master` with the call site at
+   `hook.ts:110` and the await at `:130`, before `runThink`. The
+   `<SUBSTRATE_BRIEF>` wording divergence is recorded as an accepted deviation
+   — the code uses a markdown header with untrusted-content framing instead.
+
+None was blocking for Phase 1, which consumes `/brief` and `/events` over HTTP
+— both live and proven here.

@@ -63,9 +63,25 @@ from 6 real Agent Task Graph graphs, and three surfaces (hermes, omp,
 grok-build) holding claims that a fourth (muse) sees in its brief. The service
 survives SIGKILL and is restarted by systemd.
 
-Not done: a reachable Postgres URL for the index; `graph_register` call inside
-the `ultrathink-kickoff` skill; git post-commit hook and Cursor hooks are
-written but still only dry-run.
+**Verified end to end on 2026-09-24** via `/gsd-autonomous` in verify-only mode
+— all 8 UAT items run against the live service, no rebuild. See
+`phases/00-brief/0-VERIFICATION.md`. Initial result was 5 pass / 1 partial /
+2 fail; all three gaps were then closed.
+
+Previously "not done", now resolved:
+- ~~a reachable Postgres URL for the index~~ — reachable; the index answers
+  (`graph_index` 6, `graph_nodes` 15, `memory_entries` 1).
+- ~~`graph_register` inside `ultrathink-kickoff`~~ — added as step 5,
+  idempotent and fail-open, committed as `c2c12a8` on branch
+  `substrate/graph-register`. **Not yet merged, and not yet live:** the running
+  plugin loads a cache copy at
+  `~/.claude/plugins/cache/ultrathink/ultrathink/0.1.1/` that still has no
+  `graph_register`. A live kickoff will not register until that cache is
+  rebuilt.
+- ~~git post-commit hook and Cursor hooks only dry-run~~ — both installed.
+  `.git/hooks/post-commit` present; 3 `substrate-managed` entries appended to
+  `/root/.cursor/hooks.json` with all 6 `gsd-managed` entries untouched
+  (backup at `hooks.json.substrate-backup`, re-run is idempotent).
 
 ## Accumulated context
 
@@ -108,7 +124,14 @@ owner — recorded here so it is not re-raised.)_
 
 ## Pending todos
 
-- Review and merge claude-ultrathink PR #1 (`substrate/brief` → `master`).
+- ~~Review and merge claude-ultrathink PR #1~~ — squash-merged 2026-09-24 as
+  `f10e8de`. `fetchBrief` is on `origin/master`.
+- Merge claude-ultrathink `substrate/graph-register` (`c2c12a8`) — the
+  `graph_register` step for `ultrathink-kickoff`. Held on a separate branch
+  because `feat/substrate-brief`'s working tree has 15 files modified by
+  another session, including its own uncommitted edit to the same `SKILL.md`.
+- Rebuild the ultrathink plugin cache after that merge, otherwise the running
+  install keeps loading the 0.1.1 snapshot without `graph_register`.
 
 ## Published
 
