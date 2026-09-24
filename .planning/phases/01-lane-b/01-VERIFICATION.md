@@ -1,8 +1,8 @@
 ---
 phase: 01-lane-b
-verified: 2026-09-24T17:37:42Z
-status: gaps_found
-score: 6/10 must-haves verified
+verified: 2026-09-24T18:33:06Z
+status: human_needed
+score: 8/10 must-haves verified (2 need human verification, 0 failed)
 overrides_applied: 0
 behavior_unverified: 0
 covered_files:
@@ -25,6 +25,9 @@ covered_files:
   - .planning/phases/01-lane-b/01-08-SUMMARY.md
   - .planning/phases/01-lane-b/01-09-PLAN.md
   - .planning/phases/01-lane-b/01-09-SUMMARY.md
+  - .planning/phases/01-lane-b/01-10-PLAN.md
+  - .planning/phases/01-lane-b/01-10-PROOF.md
+  - .planning/phases/01-lane-b/01-10-SUMMARY.md
   - .planning/phases/01-lane-b/01-BASELINE.md
   - .planning/phases/01-lane-b/01-PROOF.md
   - .planning/phases/01-lane-b/CONTEXT.md
@@ -34,76 +37,44 @@ covered_files:
   - packages/mcp-server/src/brief.ts
   - packages/mcp-server/src/types.ts
   - packages/projector/src/muse.ts
-covered_digest: "v1:sha256:6e3423099f4c194fa05258870cf41b3329818d1fe237b3b610463009e3e4f52f"
-gaps:
-  - truth: "Hermes, Omp, Muse Code, Grok Build and Grok Bot all read the brief and emit events"
-    status: failed
-    reason: "Integrations exist and some events have landed, but the five surfaces did not read one another's work. No model quoted a brief. The proof-repo Muse file is stale. The handoff is invisible to a repo-scoped brief."
-    artifacts:
-      - path: "/root/src/repos/agent-substrate/.substrate/BRIEF.md"
-        issue: "Still the 11:48 stub: no substrate history for this repo yet"
-      - path: "/root/.grok/plugin-data/ultrathink/substrate-brief.md"
-        issue: "Hook wrote a file; it names the open graph and does not name the handoff or a claim. No model quoted it."
-      - path: "/root/src/repos/mcp/src/grok_hermes_connector/server.py"
-        issue: "handoff emit sets graph_id and omits repo and node_id"
-    missing:
-      - "A live read of a current brief on all five surfaces"
-      - "A repo-attributed handoff the other surfaces can see"
-  - truth: "Hermes finishes node n2 from a Grok Bot handoff; Omp's next prompt in that repo lists both the handoff and the claim"
-    status: failed
-    reason: "Re-checked live at 17:37Z. graph_get still shows n1 and n2 unstarted with claimed_by null. POST /brief for omp does not name the handoff or a claim. POST /verify returns events:1."
-    artifacts:
-      - path: "/root/src/repos/mcp/src/grok_hermes_connector/server.py"
-        issue: "emit(kind=handoff) passes graph_id and session_id only"
-      - path: "/root/src/repos/agent-substrate/packages/mcp-server/src/brief.ts"
-        issue: "Recent actions query requires repo, so a null-repo handoff cannot appear"
-    missing:
-      - "A claim on node n2 of ut-mufsocbe-c7ced745"
-      - "Brief text that names both the handoff and the claim"
-  - truth: "A handoff event is visible to a repo-scoped brief"
-    status: failed
-    reason: "Greptime row for ut-mufsocbe-c7ced745 is kind=handoff, graph_id set, repo null, node_id null, session_id 20260924T171800Z-3fb834d5."
-    artifacts:
-      - path: "/root/src/repos/mcp/src/grok_hermes_connector/server.py"
-        issue: "Lines 609-615 omit repo and node_id"
-    missing:
-      - "repo and node_id on the handoff emit"
-  - truth: "Muse .substrate/BRIEF.md in the proof repo is a current brief"
-    status: failed
-    reason: "SUBSTRATE_MUSE_REPOS is the four other Lane B repos. swcstudiospace/agent-substrate is not in that list, so the collector never refreshes this file."
-    artifacts:
-      - path: "/root/src/repos/agent-substrate/.substrate/BRIEF.md"
-        issue: "135 bytes, mtime 2026-09-24 11:48:50, text says no substrate history yet"
-      - path: "/root/src/repos/agent-substrate/packages/collectors/src/muse.ts"
-        issue: "Writer is real, but the unit's repo list excludes the proof repo"
-    missing:
-      - "Proof repo on the muse collector list, or another writer for this checkout"
+covered_digest: "v1:sha256:a63ae9f3be274b8b6624b911f602583d53a666f0403d40756985f4ce93e34772"
+re_verification:
+  previous_status: gaps_found
+  previous_score: 6/10
+  gaps_closed:
+    - "A handoff event is visible to a repo-scoped brief"
+    - "Muse .substrate/BRIEF.md in the proof repo is a current brief"
+    - "Hermes claims node n2 from a Grok Bot handoff; POST /brief as omp names both the handoff and the claim (code and live data)"
+    - "Integrations exist, events land, and the brief the surfaces read now carries the handoff (code and live data)"
+  gaps_remaining: []
+  regressions: []
+gaps: []
 human_verification:
-  - test: "Start a Grok Build session in swcstudiospace/agent-substrate and ask what other agents did"
-    expected: "The model quotes the session brief file, including a handoff and a claim once those exist"
-    why_human: "Grok Build discards hook stdout. The shim wrote the file; no model quotation was observed."
-  - test: "Start a Muse session in the proof repo, ask it to quote .substrate/BRIEF.md, and run one tool"
-    expected: "The model quotes a current brief, and a muse tool.call event lands"
-    why_human: "No Muse model session was started. The proof-repo file is also stale."
+  - test: "Decide whether a claim-only Hermes session satisfies 'Hermes finishes node n2', or have Hermes mark n2 completed"
+    expected: "Either a human accepts claimed_by=hermes / claim_session=20260924_182534_fe7fa2 as the finish, or graph_get shows n2 state=completed by hermes"
+    why_human: "A real Hermes model session (claude-fable-5-1, 2 API calls, 1 terminal tool call) claimed n2 at 18:26:16Z without editing the tree. graph_get still shows n2 state=unstarted. 'Finish' versus 'claim' is a scope judgment."
   - test: "Start Omp in the proof repo and send an implementation-shaped prompt"
-    expected: "Discovery names both the handoff and the claim"
-    why_human: "pi -e failed to load the extension (path argument undefined). No live Omp model session ran."
-  - test: "From a Grok Bot session, call memory_brief, then hand off with a Graph ID"
-    expected: "The model states work another surface did, and the handoff event carries that Graph ID plus repo and node_id"
-    why_human: "The proof called the connector API. A Grok Bot model session was not run."
-  - test: "Let Hermes finish node n2 from a claim-only handoff, without the implement wrapper editing the tree"
-    expected: "graph_get shows n2 claimed or finished by hermes, and a claim event carries the graph id"
-    why_human: "The dispatched hermes chat slept after a model-normalization line and was killed so it would not edit the tree. A live finish was not observed."
+    expected: "Discovery calls memory_brief and the model's context names both '18:24 grok-bot Handoff to Hermes ... (n2)' and '18:26 hermes claimed node (n2)'"
+    why_human: "The /brief text Omp would inject was observed live and names both facts. No Omp model session ran; the earlier pi -e launch failed to load the extension."
+  - test: "From a Grok Bot model session, call memory_brief, then handoff_to_hermes with graph_id, repo and node_id"
+    expected: "The model states work another surface did, and the new handoff row carries graph_id, repo and node_id"
+    why_human: "The 01-10 handoff was made through the connector's authenticated MCP API, not by a Grok Bot model."
+  - test: "Start a Grok Build session in swcstudiospace/agent-substrate and ask what other agents did"
+    expected: "The model quotes the session brief file, including the handoff and the hermes claim"
+    why_human: "Grok Build discards hook stdout. The session file /root/.grok/plugin-data/ultrathink/substrate-brief.md was last written 17:21Z, before the handoff and claim existed. No Grok Build session ran."
+  - test: "Start Muse in the proof repo, ask it to quote .substrate/BRIEF.md, and run one tool"
+    expected: "The model quotes the current collector-written brief, and a muse tool.call event lands"
+    why_human: "The file is current (collector rewrote it at 18:32:07Z) but no Muse model session ran. Note: the file is keyed by checkout path, so it does not list the slug-keyed handoff and claim; a human should decide whether that is acceptable for the Muse surface."
 ---
 
 # Phase 1: Lane B Verification Report
 
 **Phase Goal:** Hermes, Omp, Muse Code, Grok Build and Grok Bot all read the brief and emit events.
-**Verified:** 2026-09-24T17:37:42Z
-**Status:** gaps_found
-**Re-verification:** No — initial verification
+**Verified:** 2026-09-24T18:33:06Z
+**Status:** human_needed
+**Re-verification:** Yes — after gap closure (01-10)
 
-The ROADMAP proof was re-checked against the live substrate. It did not pass. This phase is not passed. D-01's deferred TypeScript-engine bridge and Kanban retirement are not gaps. The mcp baseline of 2 failed tests with unchanged node ids was not re-run and is not a new Lane B failure.
+All four code-and-live gaps from the 17:37Z report are closed on live observation. No regressions. What remains is model-session evidence: no Grok Bot, Omp, Muse or Grok Build model session ran, and Hermes claimed n2 rather than completing it. Those items are human verification, not gaps. D-01's TypeScript-engine bridge and Kanban retirement are out of scope and not counted.
 
 ## Goal Achievement
 
@@ -111,74 +82,67 @@ The ROADMAP proof was re-checked against the live substrate. It did not pass. Th
 
 | # | Truth | Status | Evidence |
 | --- | --- | --- | --- |
-| 1 | Hermes, Omp, Muse Code, Grok Build and Grok Bot all read the brief and emit events | ✗ FAILED | Store has events from each surface, but no model read was observed, the proof-repo Muse file is stale, and the handoff is invisible to a repo-scoped brief. See gaps. |
-| 2 | Hermes reads the brief and emits events through an additive `/brief` call and `events_emit` on `on_pre_llm_call`, without a TypeScript engine bridge (D-01) | ✓ VERIFIED | `prompt_uplift/hook.py` calls `fetch_brief` and `emit_event` and injects `<SUBSTRATE_BRIEF>`. `__init__.py` still passes `create_task=hermes_kanban_create`. No TypeScript engine call in that path. Store has hermes `prompt` (4) and `claim` (1), not on the proof graph. |
-| 3 | `hermes_kanban_create` is unchanged; hermes-linear-connector dispatch, mirroring and DoD stay untouched; eng-board also calls `events_emit` | ✓ VERIFIED | Kanban callable still wired. Connector tree has no `events_emit` (only the muse `AGENTS.md` pointer). `hooks_session.py` still writes `work_unit_store` and calls `emit_event`. |
-| 4 | herdr `events.subscribe` collector is up against the corrected 0.9.1 contract | ✓ VERIFIED | `herdr.ts` subscribes per pane with string ids and required `pane_id`. `substrate-collector-herdr` is active. Store has 99 `herdr` `agent.status` events. This verifier did not drive a pane. |
-| 5 | Omp discovery calls `memory_brief`; Grok Build delivers `/brief` by session file plus a rules entry; Muse falls back to `.substrate/BRIEF.md` | ✓ VERIFIED | `swe.ts` calls `memory_brief` and `events_emit`. Installed rule `/root/.grok/rules/substrate-brief.md` matches the repo copy. `uplift.ts` calls `deliverSubstrateBrief` then `fetchBrief`. Muse writer and PostToolUse projector exist and are live for four repos. Proof-repo currency is truth 9, not this mechanism check. |
-| 6 | grok-hermes-connector v0.4 forwards `memory_brief`, `memory_write`, `events_emit`, `graph_get`; `handoff_to_hermes` records a handoff event with its Graph ID | ✓ VERIFIED | Four tools are registered in `server.py`. Live Greptime row has `graph_id=ut-mufsocbe-c7ced745` and `kind=handoff`. Null `repo` and `node_id` is truth 8. |
-| 7 | Hermes finishes node n2 from a Grok Bot handoff; Omp's next prompt lists both the handoff and the claim | ✗ FAILED | `graph_get` at 17:37Z: n1 and n2 `unstarted`, `claimed_by` null, `updated` still `2026-09-24T17:17:18.092Z`. `POST /brief` does not name the handoff or a claim. `POST /verify` returns `{"ok":true,"events":1}`. |
-| 8 | A handoff event is visible to a repo-scoped brief | ✗ FAILED | `server.py` emit omits `repo` and `node_id`. `brief.ts` recent-action SQL filters on repo. Observed row: `repo=null`, `node_id=null`. |
-| 9 | Muse `.substrate/BRIEF.md` in the proof repo is a current brief | ✗ FAILED | File is the 11:48 stub. `SUBSTRATE_MUSE_REPOS` is hermes-plugin, omp-ultrathink, hermes-engineering-board, hermes-linear-connector. |
-| 10 | Every substrate service and collector Lane B stood up is active under systemd | ✓ VERIFIED | `systemctl is-active` returned active for substrate-mcp, substrate-collector-grok, substrate-collector-herdr, substrate-collector-muse, grok-hermes-connector, hermes-linear-api, hermes-linear-poller. `GET /healthz` returned `{"index":true,"greptime":true}`. |
+| 1 | Hermes, Omp, Muse Code, Grok Build and Grok Bot all read the brief and emit events | ? HUMAN NEEDED | Every surface has events in the store (grok-bot handoff 2, grok-build 6, herdr 133, hermes 6, muse 383, omp 2). The repo-scoped brief now carries the handoff and the claim. The Muse file is current. No model quotation of a brief by Omp, Muse, Grok Build or Grok Bot was observed. |
+| 2 | Hermes reads the brief and emits events additively on `on_pre_llm_call`, no TS engine bridge (D-01) | ✓ VERIFIED (regression) | `hook.py` still references `fetch_brief`/`emit_event`/`SUBSTRATE_BRIEF`. |
+| 3 | `hermes_kanban_create` unchanged; connector dispatch untouched; eng-board calls `events_emit` | ✓ VERIFIED (regression) | `__init__.py:244` still passes `create_task=hermes_kanban_create`. `hooks_session.py` still has `emit_event` and `work_unit_store`. |
+| 4 | herdr `events.subscribe` collector on the 0.9.1 contract | ✓ VERIFIED (regression) | `herdr.ts` unchanged in shape; `substrate-collector-herdr` active; herdr rows now 114 `agent.status` + 19 `note`. |
+| 5 | Omp `memory_brief`; Grok Build file + rule; Muse `.substrate/BRIEF.md` fallback | ✓ VERIFIED (regression) | `swe.ts` calls `memory_brief`/`events_emit`. Installed rule is byte-identical to the repo copy (`cmp` exit 0). `uplift.ts` calls `deliverSubstrateBrief`/`fetchBrief`. |
+| 6 | Connector v0.4 forwards four tools; `handoff_to_hermes` records a handoff with its Graph ID | ✓ VERIFIED (regression) | `server.py` registers `memory_brief`, `memory_write`, `events_emit`, `graph_get`. New handoff row has `graph_id=ut-mufsocbe-c7ced745`. |
+| 7 | Hermes finishes node n2 from a Grok Bot handoff; Omp's next prompt lists both the handoff and the claim | ? HUMAN NEEDED | Live: `graph_get` n2 `claimed_by=hermes`, `claimed_at=2026-09-24T18:26:16.407Z`, `claim_session=20260924_182534_fe7fa2`, `state=unstarted`. `POST /brief` as omp names `18:26 hermes claimed node (n2)` and `18:24 grok-bot Handoff to Hermes ... (n2)`. Open: claim versus finish, and no Omp or Grok Bot model session. |
+| 8 | A handoff event is visible to a repo-scoped brief | ✓ VERIFIED | mcp `63fd450` adds `repo`/`node_id` to `handoff_to_hermes` and forwards both on `substrate_ext.emit` (working tree `server.py:620-621`). Connector restarted 18:21:33Z, after the 18:21:28Z commit. Row `evt_1ddb0a2c572849ce86b2616b77bc0589`: `repo=swcstudiospace/agent-substrate`, `node_id=n2`. The two handoff tests pass (`2 passed in 1.41s`). The row appears in the omp brief. |
+| 9 | Muse `.substrate/BRIEF.md` in the proof repo is a current brief | ✓ VERIFIED | `SUBSTRATE_MUSE_REPOS` is a single line with five roots including `/root/src/repos/agent-substrate` (read with `sudo grep`, values not printed beyond paths; file still `600 root root`). Collector journal: `delivered briefs to 5 repo(s)`. File mtime `18:32:07Z`, 406 bytes, lists muse deliveries at 18:21 and 18:27. |
+| 10 | Every Lane B service and collector is active under systemd | ✓ VERIFIED (regression) | All seven units `active` at 18:31Z. `GET /healthz` → `{"index":true,"greptime":true}` HTTP 200. |
 
-**Score:** 6/10 truths verified
-
-Not scored as failures: the TypeScript-engine bridge and Kanban retirement. D-01 put those on Ultrathink on Hermes. Lane B did not build them, and this report does not require them. The mcp suite's two pre-existing failures were not re-run; they are not a new Lane B gap.
+**Score:** 8/10 truths verified. 2 need human verification. 0 failed.
 
 ### Required Artifacts
 
 | Artifact | Expected | Status | Details |
 | --- | --- | --- | --- |
-| `/root/src/repos/hermes-plugin/prompt_uplift/hook.py` | Additive brief inject and emit | ✓ EXISTS + SUBSTANTIVE + WIRED | `run_substrate_brief` calls `fetch_brief` and `emit_event`; uplift appends `<SUBSTRATE_BRIEF>` |
-| `/root/src/repos/hermes-plugin/__init__.py` | Kanban create unchanged | ✓ EXISTS + WIRED | `create_task=hermes_kanban_create` still passed when issues are enabled |
-| `/root/src/repos/hermes-engineering-board/src/hermes_eng_board/hooks_session.py` | Additive `events_emit`, local store kept | ✓ EXISTS + WIRED | `emit_event` in try/except; `work_unit_store` still written |
-| `/root/src/repos/agent-substrate/packages/collectors/src/herdr.ts` | Per-pane 0.9.1 subscribe | ✓ EXISTS + SUBSTANTIVE + WIRED | One socket per pane; `pane_id` on each subscription; unit active |
-| `/root/src/repos/omp-ultrathink/swe.ts` | `memory_brief` in discovery and an emit | ✓ EXISTS + WIRED | Calls `memory_brief` and `events_emit` (`kind: "prompt"`). Live `pi -e` did not load the extension. |
-| `/root/src/repos/claude-ultrathink-grok/hooks/uplift.ts` | `fetchBrief` on UserPromptSubmit, not via stdout | ✓ EXISTS + WIRED | `deliverSubstrateBrief` uses `fetchBrief`. Installed shim exists. |
-| `/root/.grok/rules/substrate-brief.md` | Rules entry telling the session to read the file | ✓ EXISTS | Installed. Points at the session brief file. |
-| `/root/src/repos/agent-substrate/packages/collectors/src/muse.ts` | `.substrate/BRIEF.md` writer | ✓ EXISTS + WIRED | Writes and emits `brief.delivered` for repos in `SUBSTRATE_MUSE_REPOS`. Proof repo excluded. |
-| `/root/src/repos/mcp/src/grok_hermes_connector/server.py` | Four tools and a Graph-ID handoff event | ✓ EXISTS + PARTIAL | Tools registered. Handoff emit sets `graph_id` and drops `repo` and `node_id`. |
-| `/root/src/repos/agent-substrate/.substrate/BRIEF.md` | Current Muse brief for the proof repo | ✗ STALE | 135 bytes: "No substrate history for this repo yet." |
-
-**Artifacts:** 9/10 verified. The Muse file for the proof repo is not current.
+| `/root/src/repos/mcp/src/grok_hermes_connector/server.py` | Handoff emit with graph_id, repo, node_id | ✓ EXISTS + SUBSTANTIVE + WIRED | `63fd450` is an ancestor of mcp HEAD; working tree still forwards both args; the running process started after the commit. |
+| `/root/src/repos/mcp/tests/test_handoff_pack.py` | Pass-through test | ✓ EXISTS + PASSING | `test_handoff_to_hermes_emits_repo_and_node_id` and the graph_id test: `2 passed`. |
+| `/etc/substrate/substrate.env` | Proof repo on the Muse list | ✓ EXISTS + WIRED | One `SUBSTRATE_MUSE_REPOS=` line, five `/root/src/repos/` roots, proof repo present. |
+| `/root/src/repos/agent-substrate/.substrate/BRIEF.md` | Current collector-written brief | ✓ CURRENT | Rewritten 18:32:07Z by the collector; no longer the 11:48 stub. Gitignored by `.gitignore:14`. |
+| `.planning/phases/01-lane-b/01-10-PROOF.md` | Observed proof | ✓ EXISTS | Every live fact it records was re-observed here (rows, graph_get, brief text, session export). |
+| Phase 1 artifacts from the initial report | Unchanged | ✓ No regression | `brief.ts` and `muse.ts` last touched by earlier plans; not modified by 01-10. |
 
 ### Key Link Verification
 
 | From | To | Via | Status | Details |
 | --- | --- | --- | --- | --- |
-| `hook.py` `on_pre_llm_call` | `POST /brief` and `POST /events` | `run_substrate_brief` | ✓ WIRED | `fetch_brief` then `emit_event`; fail-open on exception |
-| eng-board session hooks | substrate `events_emit` | `SubstrateClient.emit_event` | ✓ WIRED | Call site after the local store write |
-| `herdr.ts` | herdr socket | `events.subscribe` per pane | ✓ WIRED | pane.agent_detected, pane.agent_status_changed, pane.exited, pane.output_matched |
-| `swe.ts` discovery | `memory_brief` / `events_emit` | substrate MCP client | ✓ WIRED in code | Live Omp process did not start |
-| `uplift.ts` | session brief file | `fetchBrief` + rules file | ✓ WIRED | File on disk at 17:21; rule installed. Model did not quote it. |
-| muse collector | `.substrate/BRIEF.md` | `SUBSTRATE_MUSE_REPOS` | ⚠️ PARTIAL | Four configured repos refreshed at 17:28. Proof repo not in the list. |
-| `handoff_to_hermes` | Greptime `agent_events` | `substrate_ext.emit` | ⚠️ PARTIAL | Event landed with `graph_id`. `repo` and `node_id` not passed. |
-| repo-scoped brief | handoff row | `brief.ts` SQL filter on repo | ✗ NOT WIRED for this event | Null `repo` cannot match `swcstudiospace/agent-substrate` |
-
-**Wiring:** 5/8 connections fully verified. The handoff-to-brief link is the one that blocks the proof.
+| `handoff_to_hermes` | Greptime `agent_events` | `substrate_ext.emit(repo, node_id, graph_id)` | ✓ WIRED | Row carries all three. |
+| repo-scoped brief | handoff row | `brief.ts` repo filter | ✓ WIRED | Handoff line appears in `POST /brief` for `swcstudiospace/agent-substrate`. |
+| Hermes session | `graph_claim` | terminal `curl` to `:7410/mcp` | ✓ WIRED | Session export shows one `terminal` call with `graph_claim` for n2, surface hermes, own session id; tool output `claimed: true`. |
+| claim | omp brief | `claim` event with repo and graph_id | ✓ WIRED | Row `evt_f3cc3d13277e489cab0632a00b78f723`; brief line `hermes claimed node (n2)` and `n2 started by hermes`. |
+| muse collector | proof-repo `BRIEF.md` | `SUBSTRATE_MUSE_REPOS` | ✓ WIRED | Five repos delivered; file refreshed on the 5-minute cycle. |
+| earlier key links (hook.py, eng-board, herdr, swe.ts, uplift.ts) | - | - | ✓ No regression | Quick greps as in truths 2-5. |
 
 ### Data-Flow Trace (Level 4)
 
 | Artifact | Data Variable | Source | Produces Real Data | Status |
 | --- | --- | --- | --- | --- |
-| Omp / Grok brief text | recent actions | Greptime `agent_events` filtered by `repo` | Yes for repo-tagged rows; no for this handoff | ✗ HOLLOW for the proof event |
-| Grok session file | brief body | `POST /brief` via installed shim | Yes — file names open graph `ut-mufsocbe-c7ced745` and does not name the handoff | ✓ REAL, incomplete for the proof |
-| Proof-repo `BRIEF.md` | brief body | muse collector | No — collector never selected this repo; file is the first-session stub | ✗ STALE |
-| herdr events | pane cwd to repo | `session.snapshot` pane record | Yes — 99 `agent.status` rows in the store | ✓ REAL |
+| Omp brief text | recent actions | Greptime rows filtered by repo slug | Yes: handoff and claim rows for the proof graph | ✓ REAL |
+| `graph_get` n2 | claim fields | substrate index after `graph_claim` | Yes: `claimed_by=hermes`, session `20260924_182534_fe7fa2` | ✓ REAL |
+| Proof-repo `BRIEF.md` | brief body | muse collector, keyed by checkout path | Yes: current path-keyed history | ✓ REAL; does not include slug-keyed events (see human item 5) |
+| Grok session file | brief body | installed shim | Written 17:21Z, before the proof events | ⚠️ Not refreshed since; refreshed only on a Grok Build prompt |
 
 ### Behavioral Spot-Checks
 
 | Behavior | Command | Result | Status |
 | --- | --- | --- | --- |
-| substrate health | `GET http://127.0.0.1:7410/healthz` | `{"index":true,"greptime":true}` HTTP 200 | observed |
-| proof graph claim | MCP `tools/call` `graph_get` `ut-mufsocbe-c7ced745` | n1 and n2 `unstarted`, `claimed_by` null, updated `2026-09-24T17:17:18.092Z` | failed |
-| proof event count | `POST /verify` with that graph_id | `{"ok":true,"events":1}` | observed, not a finish |
-| Omp brief text | `POST /brief` repo `swcstudiospace/agent-substrate`, surface `omp` | Nodes unstarted. Recent actions are cursor and grok-build commits. No handoff. No claim. | failed |
-| handoff row | Greptime SQL on `graph_id` | one row: `surface=grok-bot`, `kind=handoff`, `repo=null`, `node_id=null`, `session_id=20260924T171800Z-3fb834d5` | failed attribution |
-| systemd | `systemctl is-active` on the seven units | all `active` | observed |
+| health | `GET :7410/healthz` | `{"index":true,"greptime":true}` 200 | pass |
+| omp brief | `POST :7410/brief` `{"repo":"swcstudiospace/agent-substrate","graph_id":"ut-mufsocbe-c7ced745","surface":"omp"}` | 200. `Nodes: n1 unstarted · n2 started by hermes 5 min ago`; lines `18:26 hermes claimed node (n2)` and `18:24 grok-bot Handoff to Hermes: Lane B 01-10 proof claim n2 ut-mufsocbe-c7ced745 (n2)` | pass |
+| verify | `POST :7410/verify` graph_id | `{"ok":true,"events":3}` | pass |
+| graph_get | MCP `tools/call` `graph_get` on `:7410/mcp` | n1 unstarted/unclaimed; n2 unstarted, `claimed_by=hermes`, `claimed_at=2026-09-24T18:26:16.407Z`, `claim_session=20260924_182534_fe7fa2` | pass (claim, not completion) |
+| handoff row | Greptime SQL on graph_id | old 01-09 row still `repo=null`; new row `surface=grok-bot kind=handoff repo=swcstudiospace/agent-substrate node_id=n2 session_id=20260924T182453Z-bb506df2` | pass |
+| Hermes attribution | `hermes sessions export --format jsonl --session-id 20260924_182534_fe7fa2 -` | source `oneshot`, model `claude-fable-5-1`, cwd proof repo, `api_call_count=2`, `output_tokens=249`, `tool_call_count=1` (terminal curl `graph_claim` n2), final reply `session_id=20260924_182534_fe7fa2 claimed=true claimed_by=hermes`; started 18:25:38Z, ended 18:27:13Z | pass |
+| mcp commit | `git show 63fd450` | +`repo`/`node_id` params; `node_id=node_id, repo=repo` on the handoff emit; ancestor of HEAD | pass |
+| handoff tests | `pytest -q` on the two handoff tests | `2 passed in 1.41s` | pass |
+| Muse list | `sudo grep` on `/etc/substrate/substrate.env` | 1 line, 5 roots, proof repo listed; 600 root root | pass |
+| Muse file | `stat` + read `.substrate/BRIEF.md` | mtime 18:32:07Z, 406 bytes, collector text | pass |
+| systemd | `systemctl is-active` on seven units | all active | pass |
 
-Regression suites were not re-run in this pass. `01-PROOF.md` already recorded the mcp 2 failed / same node ids result. That is not treated as a new gap.
+Tree safety for the Hermes run is taken from 01-10-PROOF.md (ReadOnlyPaths sandbox, unchanged porcelain and content hashes). This verifier observed the agent-substrate porcelain now matches the pre-proof snapshot listed there.
 
 ### Probe Execution
 
@@ -186,135 +150,74 @@ No probe scripts are declared for this phase.
 
 ### Requirements Coverage
 
-No `.planning/REQUIREMENTS.md` in this repo. Coverage is against ROADMAP Phase 1 success criteria.
+No `.planning/REQUIREMENTS.md`. Coverage is against ROADMAP Phase 1.
 
 | Requirement | Status | Blocking Issue |
 | --- | --- | --- |
-| SC1 additive Hermes brief and events; no TS engine | ✓ SATISFIED | D-01 honored. Not the n2 finish. |
+| SC1 additive Hermes brief and events; no TS engine | ✓ SATISFIED | - |
 | SC2 Kanban unchanged; connector dispatch untouched; eng-board `events_emit` | ✓ SATISFIED | - |
-| SC3 herdr collector on the 0.9.1 contract | ✓ SATISFIED | Pane drive not repeated here; store already has herdr events. |
-| SC4 Omp `memory_brief`, Grok file+rule, Muse `BRIEF.md` writer | ✓ SATISFIED as mechanisms | Proof repo is outside the Muse repo list. |
-| SC5 four connector tools; handoff event carries Graph ID | ✓ SATISFIED for Graph ID | `repo` and `node_id` null. |
-| ROADMAP proof | ✗ BLOCKED | Hermes did not finish n2. Omp brief does not list handoff and claim. |
-| Phase goal: all five read and emit | ✗ BLOCKED | Same proof, plus no model quotation and a stale Muse file. |
-
-**Coverage:** 5/7 roadmap-and-goal checks satisfied. The proof and the goal are not.
+| SC3 herdr collector on 0.9.1 | ✓ SATISFIED | - |
+| SC4 Omp `memory_brief`, Grok file+rule, Muse `BRIEF.md` | ✓ SATISFIED | Proof repo now on the Muse list. |
+| SC5 four connector tools; handoff carries Graph ID | ✓ SATISFIED | Handoff also carries repo and node_id. |
+| ROADMAP proof | ? HUMAN NEEDED | Claim observed, not completion; Omp brief text observed, no Omp model prompt. |
+| Phase goal: all five read and emit | ? HUMAN NEEDED | Events from all five; brief text current; no model quotations. |
 
 ### Decision Coverage
 
-`gsd-tools query check.decision-coverage-verify` returned skipped: no trackable `<decisions>` block in `CONTEXT.md`. Non-blocking.
-
-The prose decisions were still checked. D-01 (additive Hermes only) holds: no TypeScript engine, Kanban create still wired. D-02 (herdr collector, corrected wire contract) holds in `herdr.ts` and the active unit. D-03 (do not repair unrelated red baselines) was not violated by this verification; those suites were not re-run.
-
-### Test Quality Audit
-
-Requirement-linked tests were read, not re-executed, in this pass.
-
-| Test File | Linked Req | Active | Skipped | Circular | Assertion Level | Verdict |
-| --- | --- | --- | --- | --- | --- | --- |
-| `hermes-plugin/tests/test_hook.py` | SC1, SC2 | yes — injection, fail-open, kanban identity | none seen | no | behavioral on a stubbed `fetch_brief` | present; not re-run |
-| `omp-ultrathink/swe.test.ts` | SC4 | yes — `memory_brief` text lands in tool results | none seen | no | value against a stub client | present; not re-run |
-| `claude-ultrathink-grok/hooks/uplift.test.ts` | SC4 | yes — writes session file, empty on fetch failure | none seen | no | value against a stubbed fetch | present; not re-run |
-| `packages/collectors/src/muse.test.ts` | SC4 | yes — writes `BRIEF.md`, emits `brief.delivered` | none seen | no | value | present; not re-run |
-| `packages/collectors/src/herdr-map.test.ts` | SC3 | yes — maps pane events | none seen | no | value | present; not re-run |
-
-**Disabled tests on requirements:** 0
-**Circular patterns detected:** 0
-**Insufficient assertions:** 0 in the files read. They do not prove the live proof graph.
+D-01 holds: no TypeScript-engine bridge, Kanban create still wired. D-02 holds: herdr collector active. D-03 holds: 01-10 did not touch the two mcp baseline failures (per 01-10-SUMMARY; not re-run here).
 
 ### Anti-Patterns Found
 
 | File | Line | Pattern | Severity | Impact |
 | --- | --- | --- | --- | --- |
-| `/root/src/repos/mcp/src/grok_hermes_connector/server.py` | 609-615 | handoff `emit` omits `repo` and `node_id` | Blocker | Repo-scoped brief cannot list the handoff, so the ROADMAP proof cannot pass |
-| `/root/src/repos/agent-substrate/.substrate/BRIEF.md` | 1-2 | stale first-session stub | Blocker | Muse in the proof repo does not read current history |
-| phase-touched collectors and Hermes substrate module | - | `TBD` / `FIXME` / `XXX` | none | debt-marker scan of those files found none |
+| `/tmp/hermes-handoffs/jobs/grok-hermes-20260924T182453Z-bb506df2.status` | - | status stays `running` because the wrapper was SIGKILLed | Info | Proof artifact only; the live handoff path still launches the implement wrapper by design. |
 
-**Anti-patterns:** 2 blockers.
+The two blockers from the initial report are resolved.
 
 ## Human Verification Required
 
-These sessions were not run. They do not override `gaps_found`. Fix the attribution and Muse coverage first, or the sessions will quote a brief that still omits the handoff.
+### 1. Hermes finish of n2
 
-### 1. Grok Build model quotation
+**Test:** Decide whether the claim-only session counts as "finishes", or have Hermes mark n2 completed.
+**Expected:** Acceptance of `claimed_by=hermes` / `claim_session=20260924_182534_fe7fa2`, or `graph_get` n2 `state=completed`.
+**Why human:** A real Hermes model session claimed n2 without editing the tree. The node is claimed, not completed.
 
-**Test:** Start a Grok Build session in `swcstudiospace/agent-substrate` and ask what other agents did.
-**Expected:** The model quotes the session brief, including the handoff and the claim once those exist.
-**Why human:** Grok Build discards hook stdout. The installed shim wrote `/root/.grok/plugin-data/ultrathink/substrate-brief.md`. No model quotation was observed.
-
-### 2. Muse model quotation
-
-**Test:** Start Muse in the proof repo, ask it to quote `.substrate/BRIEF.md`, and run one tool.
-**Expected:** The model quotes a current brief, and a `muse` `tool.call` event lands.
-**Why human:** No Muse model session was started. The file it would read is stale.
-
-### 3. Omp live discovery
+### 2. Omp live discovery
 
 **Test:** Start Omp in the proof repo and send an implementation-shaped prompt.
-**Expected:** Discovery names both the handoff and the claim.
-**Why human:** `pi -e /root/src/repos/omp-ultrathink/index.ts` failed: the path argument was undefined. No live Omp model session ran.
+**Expected:** Discovery names both the grok-bot handoff and the hermes claim of n2.
+**Why human:** The brief text was observed live; no Omp model session ran.
 
-### 4. Grok Bot session
+### 3. Grok Bot session
 
-**Test:** From a Grok Bot session, call `memory_brief`, then hand off with a Graph ID.
-**Expected:** The model states work another surface did, and the handoff event carries that Graph ID plus `repo` and `node_id`.
-**Why human:** The proof called the connector HTTP API. A Grok Bot model session was not run.
+**Test:** From a Grok Bot model session, call `memory_brief`, then `handoff_to_hermes` with `graph_id`, `repo` and `node_id`.
+**Expected:** The model states work another surface did; the handoff row carries all three fields.
+**Why human:** The 01-10 handoff came from the connector API, not a Grok Bot model.
 
-### 5. Hermes finishes n2
+### 4. Grok Build model quotation
 
-**Test:** Dispatch a claim-only handoff and let Hermes finish node n2, without the implement wrapper editing the tree.
-**Expected:** `graph_get` shows n2 claimed or finished by hermes.
-**Why human:** The earlier `hermes chat` slept after a model-normalization line. It was killed so the implement wrapper would not edit the tree. This verifier did not start another Hermes session.
+**Test:** Start Grok Build in the proof repo and ask what other agents did.
+**Expected:** The model quotes the session brief, including the handoff and the claim.
+**Why human:** Hook stdout is discarded; the session file predates the proof events; no session ran.
+
+### 5. Muse model quotation
+
+**Test:** Start Muse in the proof repo, ask it to quote `.substrate/BRIEF.md`, and run one tool.
+**Expected:** The model quotes the current collector-written brief and a muse `tool.call` lands.
+**Why human:** No Muse model session ran. The file is keyed by checkout path and does not list the slug-keyed handoff and claim; whether that is acceptable for this surface is a judgment call.
 
 ## Gaps Summary
 
-### Critical Gaps (Block Progress)
+No code or live-data gaps remain. The previous four gaps are closed:
 
-1. **ROADMAP proof did not happen**
-   - Missing: Hermes claim or finish of node n2 on `ut-mufsocbe-c7ced745`; an Omp brief that names both the handoff and the claim.
-   - Impact: Phase 1's proof is the gate for later phases. It failed on 01-09 and was still failed when re-checked.
-   - Fix: Make the handoff visible to the repo brief, then run a claim-only Hermes finish and confirm the next Omp brief names both facts.
+1. **Handoff attribution** — closed by mcp `63fd450`; live row has repo and node_id.
+2. **ROADMAP proof data** — a real Hermes session claimed n2; the omp brief names the handoff and the claim.
+3. **Muse proof-repo brief** — proof repo on the list; file current.
+4. **Five-surface read (code and data)** — the brief the surfaces read now contains the cross-surface facts; model-read evidence moved to human verification.
 
-2. **Handoff event has null repo and null node_id**
-   - Missing: `repo` and `node_id` on `substrate_ext.emit` in `handoff_to_hermes`.
-   - Impact: `brief.ts` drops the row, so no surface's repo brief can list the handoff.
-   - Fix: Pass the graph's repo and the target node id on that emit.
-
-3. **Five surfaces did not all read a current brief**
-   - Missing: model quotations; a current Muse file in the proof repo; a brief that contains the handoff.
-   - Impact: The phase goal is not achieved. Code that can fetch a brief is not the same as the five surfaces reading one another's work.
-   - Fix: After the emit fix, put the proof repo on the Muse writer and run the five human sessions.
-
-4. **Muse brief for the proof repo is stale**
-   - Missing: the proof repo in `SUBSTRATE_MUSE_REPOS`.
-   - Impact: A Muse session here still reads "You are the first muse session here."
-   - Fix: Add the repo to the collector list and confirm the file refreshes.
-
-### Non-Critical Gaps (Can Defer)
-
-None. The TypeScript-engine bridge and Kanban retirement are out of scope under D-01, not deferred leftovers of this phase. Do not open them as gap-closure work.
-
-## Recommended Fix Plans
-
-### 01-10-PLAN.md: Make the handoff visible and re-run the proof
-
-**Objective:** A Grok Bot handoff for a known graph shows up in that repo's brief, Hermes claims n2, and Omp's next brief names both.
-
-**Tasks:**
-1. Pass `repo` and `node_id` on the `handoff` emit in `handoff_to_hermes`. Add the proof repo to the Muse collector list and refresh `.substrate/BRIEF.md`.
-2. Re-run the ROADMAP proof with a claim-only Hermes dispatch that cannot edit the tree. Record `graph_get`, the Greptime row, and `POST /brief`.
-3. Do not start Phase 2, and do not build the TypeScript engine or retire Kanban.
-
-**Estimated scope:** Small
-
-## Verification Metadata
-
-**Verification approach:** Goal-backward. ROADMAP success criteria plus the proof, checked in code and on the live substrate. Summaries were not treated as evidence.
-**Must-haves source:** ROADMAP.md Phase 1 success criteria, the phase goal, the ROADMAP proof, and the 01-09 proof truth. Plan truths that only restate those were not double-counted. D-01 non-goals were checked and not failed.
-**Automated checks:** live `healthz`, `graph_get`, `POST /brief`, `POST /verify`, Greptime row, systemd, installed rule and brief files. Suites not re-run.
-**Human checks required:** 5
-**Decision coverage:** skipped (no decisions block). Non-blocking.
+Not gaps: the TypeScript-engine bridge and Kanban retirement (D-01), and the two pre-existing mcp baseline failures.
 
 ---
-*Verified: 2026-09-24T17:37:42Z*
-*Verifier: gsd-verifier*
+
+_Verified: 2026-09-24T18:33:06Z_
+_Verifier: gsd-verifier (re-verification)_
