@@ -32,6 +32,7 @@ export const EVENT_KINDS = [
 	"agent.detected",
 	"agent.status",
 	"agent.exited",
+	"brief.delivered",
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 
