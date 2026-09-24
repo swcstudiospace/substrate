@@ -752,3 +752,44 @@ the phase's own goal of Hermes/Grok Bot doing the same via the substrate.
 
 **Research date:** 2026-09-24
 **Valid until:** 7 days — this phase touches multiple live, actively-being-edited repos (at least two concurrent sessions were found mid-flight); re-verify Findings 1 and 5 immediately before planning if more than a day or two elapses.
+
+---
+
+## Addendum — Open Questions resolved (2026-09-24, autonomous run)
+
+All three Open Questions above were put to the owner and are now settled. The
+binding text is in `CONTEXT.md` § "Decisions locked during autonomous planning";
+this addendum exists so the two documents do not disagree.
+
+**OQ1 — coordination with the parallel Hermes milestone → RESOLVED (D1).**
+Option 3. Lane B scopes its Hermes work to an additive `/brief` call and
+`events_emit`, without restructuring `on_pre_llm_call`. The TS-engine bridge and
+Kanban retirement stay with the "Ultrathink on Hermes" v1.0 milestone. Finding
+1's discrepancy was independently re-verified this session before the decision
+was taken: both `PROJECT.md` files were re-read, and `git worktree list`
+confirmed `claude-ultrathink-grok` is a worktree of `claude-ultrathink` on
+`milestone/v1.0-cross-runtime`.
+
+**OQ2 — herdr's install command → RESOLVED (D2).** `herdrdev/herdr`,
+Apache-2.0, single ~10 MB Rust binary, zero runtime dependencies. Official
+install is `curl -fsSL https://herdr.dev/install.sh | sh`; `mise use -g herdr`
+and a from-source `cargo build --release` are the alternatives (`brew` is
+macOS-only). The socket API was retrieved from the official docs and is recorded
+in full in D2 — ND-JSON over a Unix socket at `~/.config/herdr/herdr.sock`,
+`events.subscribe` with `{type, ...filters}`, `session.snapshot` for bootstrap,
+and the documented race-free ordering (subscribe → ack → buffer → snapshot →
+apply buffered). Two upstream caveats carried forward: one unknown pane can fail
+an entire subscription, and herdr does **not** survive a machine restart with
+its original processes intact — so it is not by itself the durability story.
+
+**OQ3 — Muse `SessionStart` reach → still open, but no longer blocking.**
+Finding 7's conclusion stands: Muse exposes no prompt-submission hook, so the
+static `.substrate/BRIEF.md` fallback is the only channel. Whether a
+`SessionStart` hook can inject it into model context remains Assumption A2 and
+should be settled by `muse plugins hook test` inside the phase, before any
+design depends on it.
+
+**Finding 5 red baselines → RESOLVED (D3).** `origin/master` at `f10e8de` was
+tested this session in a throwaway detached worktree: **256 pass, 0 fail**. The
+red baselines are confined to uncommitted work in the two active worktrees and
+are not regressions from the Phase 0 merge. Do not attribute them to Lane B.

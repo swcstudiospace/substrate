@@ -107,9 +107,14 @@ Greptime. See the commit for the filtering rationale.
     /root/.hermes/plugins/prompt-uplift/__init__.py
         on_pre_llm_call (L222)                          → inject the brief here
 
-    /root/src/repos/hermes-plugin/.planning/PROJECT.md  → the redesign this
-        phase adopts as-is (Python calls the TypeScript engine; Kanban retired
-        as a tracker)
+    /root/src/repos/hermes-plugin/.planning/PROJECT.md  → ⚠ NOT the redesign.
+        Corrected 2026-09-24 (see Decisions locked below). That document is a
+        shipped v0.3.0 milestone, "Prompt Uplift — Grok 4.7 xhigh reasoning
+        engine + GSD handoff", and its Out of Scope says verbatim: "Kanban
+        behaviour in hermes-plugin (unchanged; GSD writes are additive)." The
+        TypeScript-engine bridge and Kanban retirement belong to a different,
+        currently unplanned milestone — "Ultrathink on Hermes" v1.0 in the
+        `claude-ultrathink-grok` worktree. Lane B does NOT adopt it.
 
 Related repos on disk: `hermes-agent`, `hermes-engineering-board`,
 `hermes-linear-connector`, `hermes-plugin`.
@@ -120,3 +125,92 @@ edits there affect live sessions, so they want the same care as the Orca seam.
 **Then:** Omp discovery step, Muse `.substrate/BRIEF.md` fallback, Grok Build
 uplift hook, connector v0.4. **Then** the Orca tee (user chose: native floor
 first, tee second).
+
+## Decisions locked during autonomous planning (2026-09-24)
+
+Three questions were put to the owner after research and answered. These are
+binding on the plan; do not re-open or infer around them.
+
+### D1 — Hermes scope: additive brief + events only
+
+Lane B's Hermes work is **an additive `/brief` call and `events_emit`, without
+restructuring `on_pre_llm_call`**. The TypeScript-engine bridge and the true
+Kanban retirement are explicitly **deferred** to the "Ultrathink on Hermes"
+v1.0 milestone, which already owns them.
+
+*Why:* research established that Phase 1's criteria 1-2 cite
+`hermes-plugin/.planning/PROJECT.md` as "the redesign", but that document is a
+shipped Grok-routing milestone that puts Kanban changes out of scope. The real
+redesign lives in a sibling git worktree of `claude-ultrathink`
+(`milestone/v1.0-cross-runtime`) as an unplanned milestone with 0 phases. Both
+target the same hook. Building the bridge twice guarantees a collision over
+`on_pre_llm_call` registration or an orphaned implementation.
+
+**Consequences the plan must honour:**
+- Criteria 1 and 2 as written in ROADMAP.md are **not** achievable in Lane B
+  and must not be claimed. Phase verification should assess Lane B against its
+  actual goal — every surface reads the brief and emits events — not against
+  the TS-bridge premise.
+- Hermes edits stay additive and reversible. Both plugin files are mode 0600
+  inside a **running** Hermes install; treat every edit there as hot.
+- Do not modify `hermes_kanban_create` or the GSD working-directory write.
+
+### D2 — herdr install is in scope for Phase 1
+
+Resolved this session (research Open Question 2). herdr is `herdrdev/herdr`,
+Apache-2.0, a single ~10 MB Rust binary with zero runtime dependencies.
+
+Install options, in order of preference for this host:
+1. `curl -fsSL https://herdr.dev/install.sh | sh` — official, but **review the
+   script before piping it to a shell**; this is a production VPS.
+2. Build from source: `git clone https://github.com/herdrdev/herdr && cargo
+   build --release` — no pipe-to-shell, at the cost of a Rust toolchain.
+3. `mise use -g herdr` if mise is already present.
+
+`brew` is macOS-only and not applicable here.
+
+**Socket API (the Lane B collector seam), confirmed from the official docs:**
+- Newline-delimited JSON over a Unix domain socket. One JSON object per line
+  with `id`, `method`, `params`; replies reuse `id` under `result` or `error`.
+- Default socket `~/.config/herdr/herdr.sock`; named sessions at
+  `~/.config/herdr/sessions/<name>/herdr.sock`. Resolution order: CLI
+  `--session` → `HERDR_SOCKET_PATH` → `HERDR_SESSION` → default.
+- `events.subscribe` takes a `subscriptions` array of `{type, ...filters}`,
+  e.g. `{"type":"pane.agent_status_changed","pane_id":"w1:p1"}`. First reply is
+  an ack; subsequent lines are pushed events. **Lifecycle streams start at
+  accept time and do not replay retained events.**
+- `session.snapshot` is a one-shot bootstrap (CLI: `herdr api snapshot`), not a
+  live stream.
+- **Race-free bootstrap, per the docs:** open `events.subscribe` on a separate
+  connection, wait for the ack, buffer events while calling `session.snapshot`,
+  install the snapshot, then apply the buffered events in order. Re-snapshot
+  after any reconnect.
+- Relevant pane events for the collector: `pane.agent_detected`,
+  `pane.agent_status_changed`, `pane.output_matched`, `pane.exited`.
+
+**Known upstream issues to design around** (from the project's own tracker, via
+research): one unknown pane can fail an *entire* subscription, and integrators
+advise treating pushed events as invalidation triggers and re-fetching
+`session.snapshot` rather than trusting event payloads directly.
+
+**Caveat that limits the "persistent runtime" claim:** after a machine restart
+herdr restores the saved layout and can resume supported agent sessions, but
+the original processes do **not** survive. Durability across reboot is Phase 3
+(Lane A) territory, not something herdr alone provides.
+
+**Gate:** installing herdr on this production VPS is an owner-approved action
+in principle (D2), but the *method* still warrants a `checkpoint:human-verify`
+before the install task runs — the owner has not yet chosen between the three
+options above.
+
+### D3 — claude-ultrathink `master` verified green
+
+Checked this session in a throwaway detached worktree at `origin/master`
+(`f10e8de`, the Phase 0 PR #1 squash-merge): **256 pass, 0 fail**. The worktree
+was removed afterwards; neither in-flight checkout was touched.
+
+This settles Finding 5's ambiguity: the red baselines the researcher observed
+(`claude-ultrathink` 279 pass/5 fail, `claude-ultrathink-grok` 256 pass/1 fail)
+are confined to uncommitted work in those two worktrees and are **not**
+regressions from the Phase 0 merge. Do not attribute them to Lane B, and do not
+try to "fix" them inside this phase.
