@@ -1,15 +1,16 @@
 ---
 gsd_state_version: "1.0"
 milestone: v1.0
+current_plan: 5
 status: executing
-stopped_at: Completed 01-01-PLAN.md (Wave 1 rollback baseline). Plans 01-02..01-09 not started.
-last_updated: "2026-09-24T04:10:43.008Z"
-state_head: 7d96379b2877243fb5ab77a5f86dc218a2e1fbbf
+stopped_at: Completed 01-04-PLAN.md (herdr runtime collector). Plans 01-03, 01-05..01-09 not started.
+last_updated: "2026-09-24T11:08:20.596Z"
+state_head: 69329a7554493fdc959c7b5ec96fabed982a5758
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 9
-  completed_plans: 1
+  completed_plans: 3
   percent: 0
 milestone_name: Agent Substrate — four planes (runtime, memory, skills, ledger) keyed by Graph ID
 current_phase: 1
@@ -19,6 +20,9 @@ current_phase_name: Lane B
 # State
 
 ## Current
+
+Current Plan: 5
+Total Plans in Phase: 9
 
 **Phase 1 (Lane B) in progress.** Orca-vs-herdr resolved in favour of
 **herdr as the persistent runtime, with Orca alongside** as the IDE surface
@@ -231,11 +235,12 @@ which is why Greptime worked immediately and Postgres did not.
 | Plan | Duration | Tasks | Files |
 |------|----------|-------|-------|
 | Phase 01 P01 | 11min | 3 tasks | 7 files |
+| Phase 01 P04 | 35min | 3 tasks | 5 files |
 
 ## Session
 
-**Last session:** 2026-09-24T04:10:34.655Z
-**Stopped at:** Completed 01-01-PLAN.md (Wave 1 rollback baseline). Plans 01-02..01-09 not started.
+**Last session:** 2026-09-24T11:08:20.557Z
+**Stopped at:** Completed 01-04-PLAN.md (herdr runtime collector). Plans 01-03, 01-05..01-09 not started.
 **Resume file:** None
 
 ## Decisions
@@ -244,3 +249,6 @@ which is why Greptime worked immediately and Postgres did not.
 - [Phase 1]: hermes-engineering-board and hermes-linear-connector had STALE indexes (staged blobs older than the worktree). Refreshed from disk by explicit path before committing — a baseline built from a stale index restores the wrong bytes.
 - [Phase 1]: mcp measured RED at 99 passed / 2 failed and is absent from 01-VALIDATION.md's baseline table. D-03's no-repair rule applied to it by the same reasoning; gate against 01-BASELINE.md, not 01-VALIDATION.md.
 - [Phase 1]: Lane B test gates are two-sided: a pre-existing failure that disappears fails the gate exactly as a new one does. 8 failing node ids recorded in 01-BASELINE.md.
+- [Phase 1]: Extended mcp-server SURFACES/EVENT_KINDS unions to admit the herdr surface and its 3 event kinds (Rule 2/3 auto-fix).
+- [Phase 1]: herdr's pane.output_matched terminal text is carried on field matched_line, not output_matched/matched_text as the plan prose implied - confirmed via live socket probe (Rule 1 fix).
+- [Phase 1]: herdr.ts opens one persistent socket connection per pane: herdr 0.9.1 resets a connection on a second events.subscribe call, and one bad pane_id in a batched subscribe kills the whole connection without acking any other entry.

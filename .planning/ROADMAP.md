@@ -79,14 +79,14 @@ brief naming that edit and the open graphs in that repo.
      `graph_get`; `handoff_to_hermes` records a `handoff` event with its Graph ID.
 **Proof**: Hermes finishes node n2 from a Grok Bot handoff; Omp's next prompt in that repo
 lists both the handoff and the claim.
-**Plans**: 1/9 plans executed
+**Plans**: 3/9 plans executed
 
 Plans:
 
 - [x] 01-01-PLAN.md — Wave 0 rollback safety baseline: git baselines, live-file snapshots, measured test baselines (D-04)
-- [ ] 01-02-PLAN.md — Phase tracer: Hermes reads the brief and emits one event, additively and fail-open (D-01)
+- [x] 01-02-PLAN.md — Phase tracer: Hermes reads the brief and emits one event, additively and fail-open (D-01)
 - [ ] 01-03-PLAN.md — eng-board auto-ingest forwards session start, tool calls and finalize to `events_emit`
-- [ ] 01-04-PLAN.md — herdr socket collector: per-pane subscriptions, race-free bootstrap, systemd unit (D-02)
+- [x] 01-04-PLAN.md — herdr socket collector: per-pane subscriptions, race-free bootstrap, systemd unit (D-02)
 - [ ] 01-05-PLAN.md — grok-hermes-connector v0.4: four substrate tools and a Graph ID on `handoff_to_hermes`
 - [ ] 01-06-PLAN.md — Muse: `.substrate/BRIEF.md` writer, AGENTS.md pointer, PostToolUse event hook
 - [ ] 01-07-PLAN.md — Omp: substrate-mcp registered as a second MCP endpoint, `memory_brief` in discovery
