@@ -1,0 +1,35 @@
+[Unit]
+Description=Agent Substrate — Muse Code brief writer
+Documentation=https://github.com/swcstudiospace/agent-substrate
+After=substrate-mcp.service
+Wants=substrate-mcp.service
+# substrate-mcp may be briefly unreachable; that is not a reason to give up.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/substrate/substrate.env
+WorkingDirectory=/root/src/repos/agent-substrate
+# Machine-specific: `command -v bun`.
+ExecStart=/root/.local/share/reflex/bun/bin/bun packages/collectors/src/muse.ts --watch
+Restart=always
+RestartSec=5
+
+# Byte offsets per session log, so a restart never replays or skips.
+StateDirectory=substrate
+Environment=SUBSTRATE_COLLECTOR_STATE=/var/lib/substrate/muse-offsets.json
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=substrate-collector-muse
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
