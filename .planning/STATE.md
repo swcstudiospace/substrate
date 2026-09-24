@@ -1,16 +1,16 @@
 ---
 gsd_state_version: "1.0"
 milestone: v1.0
-current_plan: 7
+current_plan: 8
 status: executing
-stopped_at: Completed 01-07-PLAN.md
-last_updated: "2026-09-24T12:50:16.423Z"
-state_head: a40b13a2fee7c4e1ee9c26e4a7cb59a028bbe16c
+stopped_at: Completed 01-05-PLAN.md (Task 3 human-check deferred, see coverage D4)
+last_updated: "2026-09-24T14:30:00.089Z"
+state_head: 9286a600dbe9abb9168bc9c367514e3f9d145472
 progress:
   total_phases: 6
   completed_phases: 0
   total_plans: 9
-  completed_plans: 5
+  completed_plans: 6
   percent: 0
 milestone_name: Agent Substrate — four planes (runtime, memory, skills, ledger) keyed by Graph ID
 current_phase: 1
@@ -21,7 +21,7 @@ current_phase_name: Lane B
 
 ## Current
 
-Current Plan: 7
+Current Plan: 8
 Total Plans in Phase: 9
 
 **Phase 1 (Lane B) in progress.** Orca-vs-herdr resolved in favour of
@@ -238,11 +238,12 @@ which is why Greptime worked immediately and Postgres did not.
 | Phase 01 P04 | 35min | 3 tasks | 5 files |
 | Phase 01 P06 | 19min | 3 tasks | 6 files |
 | Phase 01-lane-b P07 | 23min | 3 tasks | 5 files |
+| Phase 01-lane-b P05 | 29min | 3 tasks | 5 files |
 
 ## Session
 
-**Last session:** 2026-09-24T12:50:16.391Z
-**Stopped at:** Completed 01-07-PLAN.md
+**Last session:** 2026-09-24T14:30:00.042Z
+**Stopped at:** Completed 01-05-PLAN.md (Task 3 human-check deferred, see coverage D4)
 **Resume file:** None
 
 ## Decisions
@@ -261,3 +262,5 @@ which is why Greptime worked immediately and Postgres did not.
 - [Phase 1]: events_emit kind:"uplift" corrected to kind:"prompt" (closed EVENT_KINDS enum), following 01-02 precedent; uplift specifics carried in payload
 - [Phase 1]: runAutonomousDiscovery substrateMcp parameter placed trailing-optional to protect an untracked, not-owned caller (mcp-bind-timeout.test.ts) from a typecheck break
 - [Phase 1]: Task 3 live-verify used swcstudiospace/agent-substrate as the target repo (had recorded substrate history); pi -e CLI extension loading hit a pre-existing, out-of-scope defect, substituted a real-code live-verify script against the real running substrate-mcp service
+- [Phase 1]: 01-05: grok-hermes-connector v0.4 built on this session's substrate bridge pattern — substrate_ext.py (7th _ext.py-convention service), four new MCP tools, graph_id on handoff_to_hermes threaded via server.py's own existing meta dict rather than the dirty, out-of-scope hermes_backend.py
+- [Phase 1]: 01-05: an earlier session probe accidentally triggered a real live handoff_to_hermes dispatch (hermes chat --yolo + real Telegram ACK) against production before this plan's safety-scoped tests existed; contained (process killed, confirmed no PIDs remained, no result.json written) and the plan's own live graph_id-dispatch human-check was deliberately not re-attempted autonomously a second time — see 01-05-SUMMARY.md coverage D4 and WINDOWS.md entry 5
