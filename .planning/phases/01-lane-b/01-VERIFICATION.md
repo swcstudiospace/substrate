@@ -1,8 +1,9 @@
 ---
 phase: 01-lane-b
 verified: 2026-09-24T18:33:06Z
-status: human_needed
-score: 8/10 must-haves verified (2 need human verification, 0 failed)
+status: passed
+score: 10/10 must-haves verified (2 accepted by owner human validation 2026-09-24)
+human_validation: "Owner selected 'All good — continue' on 2026-09-24. Accepted: Hermes claim of n2 by session 20260924_182534_fe7fa2 counts as the finish; live Omp, Grok Bot, Grok Build and Muse model sessions not run."
 overrides_applied: 0
 behavior_unverified: 0
 covered_files:
