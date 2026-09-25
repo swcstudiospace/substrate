@@ -1,0 +1,52 @@
+[Unit]
+Description=Agent Substrate — host (agentOS VMs for dispatch:claude-code)
+Documentation=https://github.com/swcstudiospace/agent-substrate
+After=substrate-mcp.service network-online.target docker.service
+Wants=substrate-mcp.service
+# substrate-mcp, Docker or the shunt may be briefly unavailable at boot; that is not a reason to
+# give up. This key only takes effect in [Unit] — systemd ignores it under [Service].
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# Credentials for the host only (D-08): nothing from this file is copied into a VM except, on
+# route a:anthropic_key, SUBSTRATE_VM_ANTHROPIC_API_KEY as the session's model auth.
+EnvironmentFile=/etc/substrate/substrate.env
+Environment=HOME=/root
+# rivet: local engine, loopback only, storage under /var/lib/substrate/agentos (D-05).
+Environment=RIVET_RUN_ENGINE=1
+Environment=RIVET_RUN_ENGINE_HOST=127.0.0.1
+Environment=RIVETKIT_STORAGE_PATH=/var/lib/substrate/agentos
+# Route and sandbox facts from .planning/phases/03-lane-a/03-01-SPIKE.md (route_choice, a_model_name,
+# sandbox_net, hostfn_sandbox_collection, tests_route). A re-spike changes these lines, not the code.
+Environment=SUBSTRATE_HOST_ROUTE=a:loopback,b:prompt_hostfn,c:hostfn_commit,s:hostfn
+Environment=SUBSTRATE_HOST_MODEL=grok-4.6
+Environment=SUBSTRATE_SANDBOX_NET=published_loopback
+Environment=SUBSTRATE_SANDBOX_HOSTFN=sandbox
+Environment=SUBSTRATE_TESTS_ROUTE=sandbox
+WorkingDirectory=/root/src/repos/agent-substrate/packages/host
+# Machine-specific: `command -v node` (Node 24 runs the .ts sources by type stripping). Adjust when deploying elsewhere.
+ExecStart=/usr/bin/node src/main.ts
+Restart=always
+RestartSec=5
+# Stopping the unit disposes every VM (sandbox containers included); 15 s before SIGKILL.
+TimeoutStopSec=15
+
+# VM storage, task records and (via substrate-dispatcher) the worktrees live under /var/lib/substrate.
+StateDirectory=substrate
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=substrate-host
+
+# It listens on loopback, talks to substrate-mcp, the shunt and the Docker socket (AF_UNIX). Nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
