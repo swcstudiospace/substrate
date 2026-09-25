@@ -68,7 +68,9 @@ export class Mirror {
 		const agentLabelId = await linear.ensureLabel(issue.team.id, `agent:${ctx.surface}`);
 		const removedLabelIds = issue.labels.filter((l) => l.name.startsWith("dispatch:")).map((l) => l.id);
 		await linear.updateIssue(issue.id, { stateId, addedLabelIds: [agentLabelId], removedLabelIds });
-		if (issue.comments.some((body) => body.includes(`session ${ctx.sessionId}`))) return;
+		// `session sess-1 ` with the space, so an earlier sess-10 comment does not count as sess-1's.
+		const marker = `session ${ctx.sessionId}`;
+		if (issue.comments.some((body) => body.includes(`${marker} `) || body.endsWith(marker))) return;
 		await linear.createComment(
 			issue.id,
 			`Claimed by ${ctx.surface} — session ${ctx.sessionId} (graph ${ctx.graphId}, node ${ctx.nodeId})`,

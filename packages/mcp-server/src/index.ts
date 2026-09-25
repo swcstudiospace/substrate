@@ -27,6 +27,7 @@ server.listen(config.port, config.host, () => {
 		`[substrate] listening on http://${config.host}:${config.port} ` +
 			`(${stores || "no stores"}, ${config.allowAnonymous ? "anonymous" : `${config.tokens.size} tokens`})\n`,
 	);
+	process.stdout.write(`[substrate] mirror: ${substrate.mirror.describe()}\n`);
 });
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {

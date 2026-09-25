@@ -147,6 +147,9 @@ export class Substrate {
 		if (!this.index) throw new Error("graph_claim requires SUBSTRATE_PG_URL");
 		const result = await this.index.claimNode(graphId, nodeId, surface, sessionId);
 		if (result.claimed) {
+			// The index caches the Linear state the mirror is about to ask for. A
+			// failure here never un-claims.
+			await this.index.setNodeState(graphId, nodeId, "started").catch(() => undefined);
 			// The repo comes from the graph, not the caller: a claim event without one
 			// is invisible to every repo-scoped brief, which is exactly where a claim
 			// most needs to be seen.
