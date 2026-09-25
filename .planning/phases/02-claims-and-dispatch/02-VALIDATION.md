@@ -25,16 +25,16 @@ Phase 2 touches one TypeScript package, adds one Python package, and may touch
 | Property | Value |
 |----------|-------|
 | **Framework (TS)** | `bun test` (repo root) + `bunx tsc --noEmit`, colocated `packages/mcp-server/src/*.test.ts` |
-| **Framework (Python, new)** | pytest via uv, `packages/dispatcher/` (new `pyproject.toml`, `src/` layout, `pythonpath=["src"]`) |
+| **Framework (Python, new)** | system python3 3.12 pytest (httpx 0.28.1 + pytest 9.1.1 already installed — no uv/pip install, per 02-04), `packages/dispatcher/` (`pyproject.toml`, `src/` layout, `pythonpath=["src"]`) |
 | **Config file** | `package.json` / `tsconfig.json` (existing); `packages/dispatcher/pyproject.toml` — none yet, Wave 0 creates it |
 | **Quick run command** | the targeted test file for the task (table below) |
-| **Full suite command** | `cd /root/src/repos/agent-substrate && SUBSTRATE_DISABLED=1 /root/.local/share/reflex/bun/bin/bun test && uv run --project packages/dispatcher pytest -q` (+ connector pytest if touched) |
+| **Full suite command** | `cd /root/src/repos/agent-substrate && SUBSTRATE_DISABLED=1 /root/.local/share/reflex/bun/bin/bun test && (cd packages/dispatcher && python3 -m pytest -q)` (+ connector pytest if touched) |
 | **Estimated runtime** | < 30 s per suite |
 
 | Repo / package | Quick run command | Baseline (measured 2026-09-24, 02-RESEARCH.md Q9) |
 |---|---|---|
 | agent-substrate (TS) | `cd /root/src/repos/agent-substrate && SUBSTRATE_DISABLED=1 /root/.local/share/reflex/bun/bin/bun test` | **76 pass / 0 fail**, 8 files |
-| agent-substrate dispatcher (Python) | `cd /root/src/repos/agent-substrate && uv run --project packages/dispatcher pytest -q` | does not exist yet — Wave 0 |
+| agent-substrate dispatcher (Python) | `cd /root/src/repos/agent-substrate/packages/dispatcher && python3 -m pytest -q` | does not exist yet — Wave 0 |
 | hermes-linear-connector (only if touched by D-06) | `cd /root/src/repos/hermes-linear-connector && .venv/bin/python -m pytest -q` | **49 passed / 2 skipped / 0 failed** (branch `master`) |
 
 Both measured baselines are green, so the gates are "stay green + new tests pass".
@@ -71,13 +71,13 @@ the failing node ids and gate two-sided against them — do not repair them.
 | `graph_complete` writes only Notion Status / Linear State / Completed — never PR URL, PR #, PR State, Repo, Branch | D-07 | — | N/A | unit | `bun test packages/mcp-server/src/mirror.test.ts` | ❌ W0 | ⬜ pending |
 | `EVENT_KINDS` accepts `release` and `complete`; existing hash vectors unchanged | D-08 | — | hash chain intact | unit | `bun test packages/mcp-server/src/event.test.ts` | ✅ extend | ⬜ pending |
 | Reverse lookup Linear issue → (graph_id, node_id, repo) | SC-3 | T-2-07 | only registered nodes dispatchable | unit | `bun test packages/mcp-server/src/service.test.ts` | ✅ extend | ⬜ pending |
-| Dispatcher poll filter: unstarted + `dispatch:*`, every 30 s | SC-3, D-10 | — | N/A | unit (fake Linear) | `uv run --project packages/dispatcher pytest -q` | ❌ W0 | ⬜ pending |
-| Non-hermes `dispatch:<surface>` → exactly one comment across repeated polls, nothing launched | D-11 | — | N/A | unit | `uv run --project packages/dispatcher pytest -q` | ❌ W0 | ⬜ pending |
-| Worktree at `/var/lib/substrate/worktrees/<graph_id>` on `substrate/<graph_id>`, reused; refused under 5 GB free; graph_id validated `^[A-Za-z0-9._-]+$` | D-12 | T-2-02 | no path traversal / ref injection | unit (tmp git repo, fake disk_usage) | `uv run --project packages/dispatcher pytest -q` | ❌ W0 | ⬜ pending |
-| Launch is `hermes chat --query-file` with a fixed-template prompt (claim first, graph_id/node_id/identifier only, no issue body), cwd = worktree; never `dispatch_handoff_to_hermes.sh` | D-13 | T-2-01 | no untrusted issue text in the prompt | unit | `uv run --project packages/dispatcher pytest -q` | ❌ W0 | ⬜ pending |
-| At most 2 concurrent sessions, one per issue; no claim in 10 min → comment + remove `dispatch:` label, no retry | D-14 | T-2-04 | bounded sessions | unit (fake clock) | `uv run --project packages/dispatcher pytest -q` | ❌ W0 | ⬜ pending |
-| `SUBSTRATE_DISPATCH_DISABLED=1` → poll loop launches nothing; unit stop ends sessions | D-15 | T-2-04 | kill switch | unit + systemd smoke | `uv run --project packages/dispatcher pytest -q` + `systemctl is-active substrate-dispatcher` | ❌ W0 | ⬜ pending |
-| MCP streamable-HTTP SSE response parsing (`data:` line → `content[0].text`) | SC-3 | — | N/A | unit | `uv run --project packages/dispatcher pytest -q` | ❌ W0 | ⬜ pending |
+| Dispatcher poll filter: unstarted + `dispatch:*`, every 30 s | SC-3, D-10 | — | N/A | unit (fake Linear) | `cd packages/dispatcher && python3 -m pytest -q` | ❌ W0 | ⬜ pending |
+| Non-hermes `dispatch:<surface>` → exactly one comment across repeated polls, nothing launched | D-11 | — | N/A | unit | `cd packages/dispatcher && python3 -m pytest -q` | ❌ W0 | ⬜ pending |
+| Worktree at `/var/lib/substrate/worktrees/<graph_id>` on `substrate/<graph_id>`, reused; refused under 5 GB free; graph_id validated `^[A-Za-z0-9._-]+$` | D-12 | T-2-02 | no path traversal / ref injection | unit (tmp git repo, fake disk_usage) | `cd packages/dispatcher && python3 -m pytest -q` | ❌ W0 | ⬜ pending |
+| Launch is `hermes chat --query-file` with a fixed-template prompt (claim first, graph_id/node_id/identifier only, no issue body), cwd = worktree; never `dispatch_handoff_to_hermes.sh` | D-13 | T-2-01 | no untrusted issue text in the prompt | unit | `cd packages/dispatcher && python3 -m pytest -q` | ❌ W0 | ⬜ pending |
+| At most 2 concurrent sessions, one per issue; no claim in 10 min → comment + remove `dispatch:` label, no retry | D-14 | T-2-04 | bounded sessions | unit (fake clock) | `cd packages/dispatcher && python3 -m pytest -q` | ❌ W0 | ⬜ pending |
+| `SUBSTRATE_DISPATCH_DISABLED=1` → poll loop launches nothing; unit stop ends sessions | D-15 | T-2-04 | kill switch | unit + systemd smoke | `cd packages/dispatcher && python3 -m pytest -q` + `systemctl is-active substrate-dispatcher` | ❌ W0 | ⬜ pending |
+| MCP streamable-HTTP SSE response parsing (`data:` line → `content[0].text`) | SC-3 | — | N/A | unit | `cd packages/dispatcher && python3 -m pytest -q` | ❌ W0 | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -99,7 +99,7 @@ the failing node ids and gate two-sided against them — do not repair them.
 | Behavior | Criterion | Why Manual | Test Instructions |
 |---|---|---|---|
 | Phase proof: label a NEW throwaway issue `dispatch:hermes` on a NEW graph for `swcstudiospace/agent-substrate` → Hermes session starts in the per-graph worktree, claims the node, Linear shows In Progress + `agent:hermes` + session comment, Notion Issue row shows Agent hermes, Claude Code's brief shows the claim within 60 s | Proof, D-16 | spans live Linear, live Notion, a live Hermes model session, and a Claude Code prompt | Record timestamps for label, launch, claim, Linear state, Notion row, brief line in `02-PROOF.md`. If the Hermes model session cannot be run, record it as a human check — never assert it ran. |
-| Notion token creation and DB share | Wave 0 | requires a Notion workspace admin | Create the integration, share the Agent Task Graph data source, add `NOTION_API_KEY` to substrate.env, restart `substrate-mcp`. |
+| Notion token creation and DB share | Wave 0 | requires a Notion workspace admin | Create the integration, share the Agent Task Graph data source, append `NOTION_API_KEY` to substrate.env (append-only, never an editor buffer). Do not restart `substrate-mcp` here — plan 02-06 restarts it after its code lands. |
 | Claude Code brief shows the claim | Proof | needs an interactive Claude Code prompt | Start Claude Code in `agent-substrate`; check the uplift echo lists the `claim` event (surface hermes) — the per-surface "started by" line appears only when the session is scoped to that graph (02-RESEARCH.md finding 5). |
 
 ---
