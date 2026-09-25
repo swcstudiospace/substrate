@@ -8,6 +8,8 @@ import pytest
 
 from substrate_dispatcher.dispatch import (
     COMMENT_PREFIX,
+    DISPATCHABLE_SURFACES,
+    MARKERS,
     Decision,
     InvalidIds,
     decide,
@@ -15,6 +17,7 @@ from substrate_dispatcher.dispatch import (
     make_launch_fn,
     tick,
 )
+from substrate_dispatcher.host import HostRefused
 from substrate_dispatcher.launcher import Launched
 from substrate_dispatcher.linear import Candidate
 from substrate_dispatcher.sessions import Session, SessionRegistry
@@ -209,6 +212,91 @@ def test_last_line_wins(env_file, lines, disabled):
     assert dispatch_disabled(env_file, {}) is disabled
 
 
+def test_make_launch_fn_routes_claude_code_to_open_task_after_the_worktree():
+    order: list[tuple] = []
+    repo_path, wt = Path("/root/src/repos/agent-substrate"), Path(f"/var/lib/substrate/worktrees/{GID}")
+
+    def checkout(slug):
+        order.append(("checkout", slug))
+        return repo_path
+
+    def ensure(repo, graph_id, branch):
+        order.append(("ensure", repo, graph_id, branch))
+        return wt
+
+    def launch(**_k):  # pragma: no cover - must not be reached
+        raise AssertionError("hermes launch for a claude-code candidate")
+
+    def open_task(**kwargs):
+        order.append(("open_task", kwargs))
+        return Launched(pid=0, proc=FakeProc(0), prompt_path=Path("/t.json"), log_path=Path("/t.json"), started_at=0.0)
+
+    lines: list[str] = []
+    fn = make_launch_fn(log=lines.append, checkout=checkout, ensure=ensure, launch=launch, open_task=open_task)
+    result = fn(cand(identifier="SWC-9", surface="claude-code"), FOUND)
+    assert result.pid == 0
+    assert order == [
+        ("checkout", "swcstudiospace/agent-substrate"),
+        ("ensure", repo_path, GID, "main"),
+        ("open_task", dict(identifier="SWC-9", graph_id=GID, node_id="n1",
+                           repo="swcstudiospace/agent-substrate", worktree=wt)),
+    ]
+    assert lines == [f"launched claude-code for SWC-9 graph {GID} node n1 task {GID}/n1 worktree {wt}"]
+
+
+def test_make_launch_fn_hermes_candidate_never_calls_open_task():
+    def open_task(**_k):  # pragma: no cover - must not be reached
+        raise AssertionError("open_task for a hermes candidate")
+
+    called: list[str] = []
+    fn = make_launch_fn(
+        log=lambda _l: None, checkout=lambda _s: Path("/r"), ensure=lambda *_a: Path("/w"),
+        launch=lambda **_k: called.append("launch") or launched(5), open_task=open_task,
+    )
+    assert fn(cand(surface="hermes"), FOUND).pid == 5 and called == ["launch"]
+
+
+def test_make_launch_fn_without_a_host_client_refuses_claude_code_as_unreachable():
+    fn = make_launch_fn(log=lambda _l: None, checkout=lambda _s: Path("/r"), ensure=lambda *_a: Path("/w"))
+    with pytest.raises(HostRefused) as err:
+        fn(cand(surface="claude-code"), FOUND)
+    assert err.value.marker == "host-unreachable"
+
+
+def test_claude_code_is_dispatchable_and_launches_with_capacity(env_file):
+    assert DISPATCHABLE_SURFACES == frozenset({"hermes", "claude-code"})
+    linear, mcp = FakeLinear([cand(surface="claude-code")]), FakeMcp()
+    decisions, _, registry, launch_fn = run_tick(linear, mcp, env_file=env_file)
+    assert [d.action for d in decisions] == ["launch"]
+    assert launch_fn.calls[0][0].surface == "claude-code"
+    got = registry.get("i-1")
+    assert got is not None and got.surface == "claude-code" and got.dispatch_label_id == "l-claude-code"
+    assert linear.named("comment") == []
+
+
+def test_host_refused_becomes_one_once_only_comment_without_a_session_or_give_up(env_file):
+    linear, mcp = FakeLinear([cand(surface="claude-code")]), FakeMcp()
+    refusing = RecordingLaunch(raises=HostRefused("HTTP 409: node n1 already claimed by hermes", "host-refused"))
+    _, lines, registry, _ = run_tick(linear, mcp, env_file=env_file, launch_fn=refusing)
+    decisions, _, _, _ = run_tick(linear, mcp, env_file=env_file, registry=registry, launch_fn=refusing)
+    posted = linear.named("comment")
+    assert len(posted) == 1 and posted[0][2] == f"{COMMENT_PREFIX} [host-refused] {MARKERS['host-refused']}"
+    assert "already claimed" not in posted[0][2]  # the host's text stays in the journal
+    assert registry.active_issue_ids() == set() and registry.given_up == set()
+    assert len(refusing.calls) == 2 and decisions[0].action == "launch"
+    assert any("[host-refused]" in line and "already claimed" in line for line in lines)
+
+
+def test_host_unreachable_marker_is_retried_next_tick(env_file):
+    linear, mcp = FakeLinear([cand(surface="claude-code")]), FakeMcp()
+    down = RecordingLaunch(raises=HostRefused("POST /tasks failed: ConnectError", "host-unreachable"))
+    _, _, registry, _ = run_tick(linear, mcp, env_file=env_file, launch_fn=down)
+    run_tick(linear, mcp, env_file=env_file, registry=registry, launch_fn=down)
+    posted = linear.named("comment")
+    assert len(posted) == 1 and "[host-unreachable]" in posted[0][2] and "retry" in posted[0][2]
+    assert len(down.calls) == 2 and registry.given_up == set()
+
+
 def test_make_launch_fn_composes_checkout_ensure_launch_in_order():
     order: list[tuple] = []
     repo_path, wt = Path("/root/src/repos/agent-substrate"), Path(f"/var/lib/substrate/worktrees/{GID}")
@@ -387,6 +475,7 @@ def test_non_hermes_surface_comments_once_and_leaves_label(env_file):
     posted = linear.named("comment")
     assert len(posted) == 1
     assert posted[0][2].startswith(COMMENT_PREFIX) and "[not-dispatchable]" in posted[0][2]
+    assert "dispatch:hermes" in posted[0][2] and "dispatch:claude-code" in posted[0][2]
     assert mcp.calls == [] and launch_fn.calls == [] and linear.named("remove_label") == []
 
     decisions, _, _, _ = run_tick(linear, mcp, env_file=env_file)

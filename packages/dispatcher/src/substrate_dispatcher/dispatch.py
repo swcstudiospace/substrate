@@ -1,8 +1,9 @@
-"""One dispatcher tick: poll Linear, resolve each candidate's node, decide, launch Hermes.
+"""One dispatcher tick: poll Linear, resolve each candidate's node, decide, launch.
 
 D-10: a tick polls Linear for unstarted issues carrying a ``dispatch:*`` label and resolves each
 dispatchable candidate through substrate-mcp ``graph_find`` before any launch decision.
-D-11: only ``dispatch:hermes`` can launch.
+D-11 / D-06: ``dispatch:hermes`` launches a Hermes chat; ``dispatch:claude-code`` opens a VM task
+on substrate-host (host.HostClient) and is watched through the same registry contract.
 D-14: at most 2 dispatched sessions, one per issue; an issue the registry gave up on is never
 relaunched (sessions.SessionRegistry).
 D-15: ``SUBSTRATE_DISPATCH_DISABLED=1`` in the live env file stops every tick before any call.
@@ -15,17 +16,18 @@ from pathlib import Path
 from typing import Any, Callable, Literal, Mapping
 
 from . import launcher, sessions, worktree
+from .host import HostRefused
 from .launcher import Launched
 from .linear import Candidate
 from .worktree import WorktreeRefused
 
-DISPATCHABLE_SURFACES = frozenset({"hermes"})
+DISPATCHABLE_SURFACES = frozenset({"hermes", "claude-code"})
 COMMENT_PREFIX = "substrate-dispatcher:"
 DISABLE_KEY = "SUBSTRATE_DISPATCH_DISABLED"
 # Once-only comment texts by marker; every body starts with COMMENT_PREFIX and carries the stable
 # tag "[<marker>]", which tick looks for in the issue's last 50 comments before posting.
 MARKERS: dict[str, str] = {
-    "not-dispatchable": "surface not dispatchable yet — this dispatcher only starts dispatch:hermes",
+    "not-dispatchable": "surface not dispatchable yet — this dispatcher starts dispatch:hermes and dispatch:claude-code only",
     "no-node": "no registered substrate graph node for this issue; register it with graph_register first",
     "already-claimed": "node already claimed by {holder}; not dispatching",
     "invalid-graph-id": "the graph id is not a safe worktree name; not dispatching",
@@ -34,6 +36,8 @@ MARKERS: dict[str, str] = {
     "low-disk": "under 5 GB free on /; no worktree created, not dispatching",
     "path-conflict": "the worktree path is taken by something git does not track as this graph's worktree; not dispatching",
     "git-failed": "git could not prepare the worktree; not dispatching",
+    "host-refused": "substrate-host refused the task; not dispatching",
+    "host-unreachable": "substrate-host is not reachable; will retry on a later tick",
     "exited-unclaimed": "hermes session exited (code {code}) without claiming the node — removed the dispatch label; not retrying",
     "claim-timeout": "no claim within 15 minutes — removed the dispatch label; not retrying",
 }
@@ -177,6 +181,10 @@ def tick(
                     log(f"{candidate.identifier}: worktree refused {tag(refused.marker)}: {refused.reason}")
                     _comment_once(linear, candidate, refused.marker)
                     continue
+                except HostRefused as refused:
+                    log(f"{candidate.identifier}: host refused {tag(refused.marker)}: {refused.reason}")
+                    _comment_once(linear, candidate, refused.marker)
+                    continue
                 registry.add(
                     sessions.Session(
                         issue_id=candidate.issue_id,
@@ -232,8 +240,10 @@ def make_launch_fn(
     checkout: Callable[..., Path] = worktree.repo_checkout,
     ensure: Callable[..., Path] = worktree.ensure_worktree,
     launch: Callable[..., Launched] = launcher.launch,
+    open_task: Callable[..., Launched] | None = None,
 ) -> LaunchFn:
-    """Compose D-12 (per-Graph-ID worktree) and D-13 (direct hermes chat) for one candidate.
+    """Compose D-12 (per-Graph-ID worktree) with D-13 (direct hermes chat) or D-06 (a VM task on
+    substrate-host, ``open_task`` = HostClient.launch) for one candidate, by its surface.
 
     The prompt's ids are validated first, so an id render_prompt would refuse never leaves a
     worktree behind.
@@ -243,13 +253,23 @@ def make_launch_fn(
         validate_ids(candidate, found)
         repo_path = checkout(found["repo"])
         path = ensure(repo_path, found["graph_id"], found["branch"])
-        launched = launch(
+        ids = dict(
             identifier=candidate.identifier,
             graph_id=found["graph_id"],
             node_id=found["node_id"],
             repo=found["repo"],
             worktree=path,
         )
+        if candidate.surface == "claude-code":
+            if open_task is None:
+                raise HostRefused("no substrate-host client configured", "host-unreachable")
+            launched = open_task(**ids)
+            log(
+                f"launched claude-code for {candidate.identifier} graph {found['graph_id']} "
+                f"node {found['node_id']} task {found['graph_id']}/{found['node_id']} worktree {path}"
+            )
+            return launched
+        launched = launch(**ids)
         log(
             f"launched hermes for {candidate.identifier} graph {found['graph_id']} "
             f"node {found['node_id']} pid {launched.pid} worktree {path} log {launched.log_path}"
