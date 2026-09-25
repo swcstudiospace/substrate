@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import inspect
+import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -95,10 +98,54 @@ def test_render_prompt_carries_ids_and_claim_first():
 
 def test_render_prompt_step4_completes_as_hermes_with_the_claim_session():
     prompt = render_prompt(**IDS)
-    step4 = prompt[prompt.rindex("graph_complete"):]
+    step4 = prompt[prompt.index("(4)"):prompt.index("(5)")]
+    assert "graph_complete" in step4
     assert SURFACE in step4
     assert "session id" in step4
-    assert "same session id" in prompt[prompt.index("(4)"):]
+    assert "same session id" in step4
+
+
+def _tool_arguments(prompt: str, name: str) -> dict:
+    """The JSON arguments of the prompt's tools/call for `name`, parsed from the curl line."""
+    match = re.search(r'"name":"%s","arguments":(\{.*?\})\}\}' % re.escape(name), prompt)
+    assert match, f"no tools/call for {name}"
+    return json.loads(match.group(1))
+
+
+def test_render_prompt_step3_fetches_the_issue_with_issue_get_for_its_own_ids():
+    # Regression: WR-05 — the prompt used to point at a Linear tool Hermes does not have.
+    prompt = render_prompt(**IDS)
+    assert _tool_arguments(prompt, "issue_get") == {"graph_id": IDS["graph_id"], "node_id": IDS["node_id"]}
+
+
+def test_render_prompt_orders_claim_then_issue_get_then_complete():
+    prompt = render_prompt(**IDS)
+    assert prompt.index("graph_claim") < prompt.index('"name":"issue_get"') < prompt.index("graph_complete")
+
+
+def test_render_prompt_step5_releases_as_hermes_with_the_claim_session_and_stops():
+    prompt = render_prompt(**IDS)
+    assert prompt.index("(4)") < prompt.index("(5)")
+    step5 = prompt[prompt.index("(5)"):]
+    args = _tool_arguments(step5, "graph_release")
+    assert args["graph_id"] == IDS["graph_id"]
+    assert args["node_id"] == IDS["node_id"]
+    assert args["surface"] == "hermes"
+    assert "session_id" in args
+    assert "same session id you passed to graph_claim" in step5
+    assert "stop" in step5
+
+
+def test_render_prompt_step3_frames_issue_text_as_a_task_description_without_an_own_linear_tool():
+    prompt = render_prompt(**IDS)
+    step3 = prompt[prompt.index("(3)"):prompt.index("(4)")]
+    assert "Linear tool" not in prompt
+    assert "UNTRUSTED" in step3
+    assert "task description only" in step3
+
+
+def test_render_prompt_takes_ids_only_and_no_issue_text():
+    assert set(inspect.signature(render_prompt).parameters) == {"identifier", "graph_id", "node_id", "repo", "worktree"}
 
 
 @pytest.mark.parametrize(
