@@ -128,8 +128,9 @@ throwaway_worktrees_removed=2
 
 The two throwaway graphs (`ut-muh2ea68-eb8dcf1c`, `ut-muh2o0rz-5fdd249a`) stay in the substrate
 index (no Linear or Notion reference, no claim) and their VM actors stay in
-/var/lib/substrate/agentos; the second graph's sandbox container stays up until its VM sleeps
-(`vm disposed … reason=sleep`) or the next unit restart's D-04 orphan sweep removes it by label.
+/var/lib/substrate/agentos. The second graph's sandbox container was disposed when its VM slept
+(journal 14:45:53Z `vm disposed ut-muh2o0rz-5fdd249a reason=sleep sandboxes=1`); 0 labelled
+containers remained.
 
 ## Gaps
 
