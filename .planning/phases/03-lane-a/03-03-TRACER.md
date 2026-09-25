@@ -154,3 +154,44 @@ vm_loopback_7410=200
   a claim); `issue-get` and the hostCallTarget refusal were.
 - The three task records of runs 1–3 stay in /var/lib/substrate/agentos/tasks (released, exit 1);
   the two failed-run VM actors stay in rivet storage (no delete path in scope).
+
+## Task 2 — openTask contract, live (after `sudo systemctl restart substrate-host`, healthz 200 at 14:21:09Z)
+
+```
+python3 /tmp/03-03-contract.py    # throwaway: graph_register, ensure_worktree, POST /tasks ×2, POST /tasks worktree=/tmp/x,
+                                  # GET /tasks, graph_get, POST terminate, GET until exit_code, POST kill, graph_get
+```
+
+contract_graph_id=ut-muh1trcj-90066f6e
+t_contract_open=2026-09-25T14:21:14Z
+idempotent_first_status=202
+idempotent_second_status=200
+idempotent_prompt_count=1
+bad_worktree_status=400
+bad_worktree_error="worktree must be /var/lib/substrate/worktrees/ut-muh1trcj-90066f6e"
+list_has_gid=true
+contract_claim_session=n1
+contract_exit_after_terminate=1
+contract_released_after_kill=true
+contract_claimed_by_after_kill=null
+t_contract_done=2026-09-25T14:21:33Z
+
+Unit tests for the same contract: `SUBSTRATE_DISABLED=1 bun test packages/host/src/tasks.test.ts
+packages/host/src/api.test.ts` → ` 36 pass`, ` 0 fail` (neither file imports @rivet-dev).
+
+## Cleanup
+
+```
+git -C /root/src/repos/agent-substrate worktree remove --force /var/lib/substrate/worktrees/<gid>
+git -C /root/src/repos/agent-substrate branch -D substrate/<gid>       # for graph_id and contract_graph_id only
+git -C /root/src/repos/agent-substrate worktree list                   # → main + ut-mugbqivi-752f2dad + ut-mughkkc0-73909228 (Phase 2's)
+```
+
+throwaway_worktrees_removed=2
+
+## Retained
+
+The four throwaway graphs (runs 1–3 and the contract graph) stay in the substrate index and their
+VM actors stay in /var/lib/substrate/agentos: there is no delete path in scope and COVERAGE.md opts
+out of sessions.delete. They hold no Linear or Notion reference and no claim (claimed_by null after
+each kill). Their task records in /var/lib/substrate/agentos/tasks read released=true, exit_code=1.
