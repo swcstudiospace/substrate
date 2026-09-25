@@ -86,4 +86,4 @@ brief does not call either API on every prompt.
 - Secrets live in `/etc/substrate/substrate.env` (0600, root), never in the repo.
 
 ---
-*Last updated: 2026-09-24 after Phase 1 (Lane B). Lane B delivered additive brief reads and event emits on Hermes, Omp, Muse, Grok Build and Grok Bot under D-01; handoff events carry Graph ID, repo and node_id. The Hermes TypeScript-engine bridge and Kanban retirement remain with the "Ultrathink on Hermes" milestone.*
+*Last updated: 2026-09-25 after Phase 2 (Claims and dispatch). `graph_claim`/`graph_release`/`graph_complete` now mirror Linear (state, `agent:<surface>`, session comment) and the Notion Issue row (Agent, Status, Linear State, Completed); Done goes only through hermes-linear-connector's DoD gate (`POST /v1/complete-issue`). `substrate-dispatcher` turns a `dispatch:hermes` label into a Hermes session in a per-Graph-ID worktree (currently switched off; model `claude-opus-5.5`). Notion access uses the owner's PAT (accepted deviation). Phase 1 (Lane B): additive brief reads and event emits on Hermes, Omp, Muse, Grok Build and Grok Bot under D-01.*

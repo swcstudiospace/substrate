@@ -3,18 +3,18 @@ gsd_state_version: "1.0"
 milestone: v1.0
 current_plan: Not started
 status: executing
-stopped_at: Phase 2 planned (9 plans, 5 waves), ready to execute
-last_updated: "2026-09-25T01:09:06.829Z"
-state_head: 5eb63342a13cdf22df48f439b71d993474227031
+stopped_at: Phase 2 complete, ready to plan Phase 3
+last_updated: "2026-09-25T07:27:57.653Z"
+state_head: 55b45218d9b22cace76f16ed2169813efa8d5a7c
 progress:
   total_phases: 6
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 19
-  completed_plans: 10
-  percent: 0
+  completed_plans: 19
+  percent: 33
 milestone_name: Agent Substrate — four planes (runtime, memory, skills, ledger) keyed by Graph ID
-current_phase_name: Claims and dispatch
-current_phase: 2
+current_phase: 3
+current_phase_name: Lane A
 ---
 
 # State
@@ -22,7 +22,7 @@ current_phase: 2
 ## Current
 
 Current Plan: Not started
-Total Plans in Phase: 9
+Total Plans in Phase: 0 (Phase 3 not yet discussed or planned)
 
 **Phase 1 (Lane B) is complete** — 10/10 plans, verification `passed`
 (`phases/01-lane-b/01-VERIFICATION.md`, commit `45cb7e7`). The 01-09 proof
@@ -33,7 +33,11 @@ editing the tree, and the Omp brief for that graph names both the handoff and
 the claim (`phases/01-lane-b/01-10-PROOF.md`). The owner accepted the
 remaining live-model-session checks on 2026-09-24 (see Blockers → Accepted).
 
-**Next: Phase 2 (Claims and dispatch)** — planned 2026-09-25: 9 plans in 5 waves (`phases/02-claims-and-dispatch/`), plan-checker passed with info only. Ready for `/gsd:execute-phase 2`. Wave 3 plan 02-02 is a human-action checkpoint (Notion token); 02-08 ends with an owner human-verify.
+**Phase 2 (Claims and dispatch) is complete** — 9/9 plans, verification `passed` 65/65 with 5 owner overrides (`phases/02-claims-and-dispatch/02-VERIFICATION.md`). Proof run 5 on SWC-467: `dispatch:hermes` → dispatched Hermes (`claude-opus-5.5`) claimed n1 → Linear In Progress + `agent:hermes`, Notion Agent hermes, brief → DoD-gated Done. Accepted shortfalls: label→brief 65 s (30 s Hermes `pre_llm_call` hook stall dominates), completion by the operator because the dispatched model cannot read the issue text. Code review fix pass applied (02-REVIEW.md: WR-01..04, IN-02, IN-03). **Dispatch is OFF** (`SUBSTRATE_DISPATCH_DISABLED=1`); dispatched model is `SUBSTRATE_DISPATCH_MODEL=claude-opus-5.5`.
+
+**Open owner decisions from Phase 2 review:** WR-05 (give dispatched Hermes a read-only issue-text tool and a release-if-stuck step) and IN-01 (dispatcher and Hermes run as root and can read `/etc/substrate/substrate.env`).
+
+**Next: Phase 3 (Lane A)** — discuss, plan, execute. Disk on `/` is at 93% (30 GB free); Phase 3's first criterion gates on it. Linear SWC team is at the free-plan cap (250/250).
 
 Lane B proceeded under **D-01**: an additive brief and events only. The
 TypeScript-engine work and the Kanban retirement belong to the "Ultrathink
@@ -265,7 +269,7 @@ which is why Greptime worked immediately and Postgres did not.
 ## Session
 
 **Last session:** 2026-09-24T17:22:00Z
-**Stopped at:** Phase 1 complete, ready to plan Phase 2
+**Stopped at:** Phase 2 complete, ready to plan Phase 3
 **Resume file:** None
 
 ## Decisions

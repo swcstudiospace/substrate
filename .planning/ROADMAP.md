@@ -19,7 +19,7 @@ urgent insertions.
 
 - [x] **Phase 0: Brief** — cross-agent briefing on the two surfaces used most, keyed by Graph ID
 - [x] **Phase 1: Lane B** — Hermes, Omp, Muse Code, Grok Build and Grok Bot inside the substrate (completed 2026-09-24)
-- [ ] **Phase 2: Claims and dispatch** — Linear drives who works on what
+- [x] **Phase 2: Claims and dispatch** — Linear drives who works on what (completed 2026-09-25)
 - [ ] **Phase 3: Lane A** — sandboxed, durable sessions per Graph ID via rivet-agentos
 - [ ] **Phase 4: Skills** — one library, three miners proposing, Hermes primary
 - [ ] **Phase 5: Docs and desktop** — product docs and GUI tasks reachable from any agent
