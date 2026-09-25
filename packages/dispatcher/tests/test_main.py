@@ -176,7 +176,7 @@ def hold(path: Path) -> int:
 def test_held_lock_exits_3_without_any_client(lock_path, client_calls, capsys):
     fd = hold(lock_path)
     try:
-        assert cli.main(["--once"]) == 3
+        assert cli.main([]) == 3
     finally:
         os.close(fd)
     assert client_calls == []
@@ -193,9 +193,21 @@ def test_dry_run_takes_no_lock(lock_path, client_calls, monkeypatch, env_file):
     assert client_calls == ["linear", "mcp"]
 
 
-def test_once_takes_the_lock_and_releases_it(lock_path, client_calls, monkeypatch, env_file):
+def test_once_without_dry_run_exits_2_before_lock_or_any_client(lock_path, client_calls, capsys):
+    with pytest.raises(SystemExit) as exited:
+        cli.main(["--once"])
+    assert exited.value.code == 2
+    assert client_calls == []
+    assert not lock_path.exists()
+    assert "--once requires --dry-run" in capsys.readouterr().err
+
+
+def test_real_mode_takes_the_lock_and_releases_it(lock_path, client_calls, monkeypatch, env_file):
     monkeypatch.setenv("SUBSTRATE_ENV_FILE", str(env_file))
-    assert cli.main(["--once"]) == 0
+    runs: list[dict] = []
+    monkeypatch.setattr(cli, "run_loop", lambda **kwargs: runs.append(kwargs) or 0)
+    assert cli.main([]) == 0
+    assert [(r["iterations"], r["dry_run"]) for r in runs] == [(None, False)]
     assert oct(lock_path.parent.stat().st_mode & 0o777) == "0o700"
     os.close(hold(lock_path))  # released: a new holder gets it
 

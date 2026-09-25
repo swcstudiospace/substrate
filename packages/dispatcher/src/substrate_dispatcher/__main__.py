@@ -1,8 +1,10 @@
 """``python3 -m substrate_dispatcher``: the supervised dispatch loop (D-10, D-14, D-15).
 
-Default mode runs reap → tick every POLL_INTERVAL_SECONDS until SIGTERM/SIGINT. ``--once`` runs
-one reap and one tick. ``--dry-run`` logs decisions and writes nothing. Real (non-dry) modes
-hold an exclusive flock on LOCK_PATH, so only one dispatcher can launch sessions; a second one
+Default mode runs reap → tick every POLL_INTERVAL_SECONDS until SIGTERM/SIGINT. ``--once --dry-run``
+runs one reap and one tick. ``--dry-run`` logs decisions and writes nothing. ``--once`` alone is
+refused: a real launch must stay under the loop's D-14 watch (claim timeout, SIGTERM→SIGKILL,
+registry). The real (non-dry) mode holds an exclusive flock on LOCK_PATH, so only one dispatcher
+can launch sessions; a second one
 exits 3 without polling. Launches go through dispatch.make_launch_fn (D-12 worktree, D-13
 hermes chat). Every line goes to stderr with the ``[substrate-dispatcher]`` prefix (journal).
 """
@@ -106,11 +108,16 @@ def main(argv: list[str] | None = None) -> int:
         prog="substrate_dispatcher",
         description="Supervised dispatch loop: Linear dispatch:<surface> → Hermes session.",
     )
-    parser.add_argument("--once", action="store_true", help="run one reap and one tick, then exit")
+    parser.add_argument(
+        "--once", action="store_true", help="with --dry-run: run one reap and one tick, then exit"
+    )
     parser.add_argument(
         "--dry-run", action="store_true", help="log decisions, write nothing (takes no lock)"
     )
     args = parser.parse_args(argv)
+    if args.once and not args.dry_run:
+        # A real launch outlives one tick; only the loop enforces the D-14 claim timeout and kill.
+        parser.error("--once requires --dry-run; real dispatch runs only as the supervised loop")
     log = make_log()
 
     lock_fd: int | None = None
