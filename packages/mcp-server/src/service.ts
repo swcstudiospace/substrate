@@ -10,6 +10,7 @@ import type { SubstrateConfig } from "./config.ts";
 import { normalizeEvent, verifyChain } from "./event.ts";
 import { GreptimeClient, quote } from "./greptime.ts";
 import { IndexStore } from "./index-store.ts";
+import { createMirror, type Mirror } from "./mirror.ts";
 import type {
 	Actor,
 	EventInput,
@@ -54,16 +55,18 @@ function rowToEvent(row: Record<string, unknown>): SubstrateEvent {
 export class Substrate {
 	readonly index: IndexStore | null;
 	readonly greptime: GreptimeClient | null;
+	readonly mirror: Mirror;
 
 	/** `stores` is a test seam; production always builds them from config. */
 	constructor(
 		readonly config: SubstrateConfig,
-		stores?: { index?: IndexStore | null; greptime?: GreptimeClient | null },
+		stores?: { index?: IndexStore | null; greptime?: GreptimeClient | null; mirror?: Mirror },
 	) {
 		this.index =
 			stores?.index !== undefined ? stores.index : config.postgresUrl ? new IndexStore(config.postgresUrl) : null;
 		this.greptime =
 			stores?.greptime !== undefined ? stores.greptime : config.greptime ? new GreptimeClient(config.greptime) : null;
+		this.mirror = stores?.mirror ?? createMirror(config);
 	}
 
 	/** Idempotent. Missing stores are reported, not fatal — the server still serves what it can. */
@@ -133,8 +136,12 @@ export class Substrate {
 	}
 
 	/**
-	 * Claim a node for a surface. Phase 0 records the claim in the index and the
-	 * event log; Phase 2 adds the Linear and Notion mirroring.
+	 * Claim a node for a surface. The index claim lands first and is the truth;
+	 * only the winner then emits the claim event and mirrors the claim to Linear
+	 * (In Progress, `agent:<surface>`, `dispatch:*` removed, a session comment).
+	 * A mirror failure never rolls the claim back — it becomes one warning event
+	 * per failed target, and a same-surface re-claim re-runs the mirror. A losing
+	 * claimer gets the holder's node back and causes no writes at all.
 	 */
 	async claimNode(graphId: string, nodeId: string, surface: Surface, sessionId: string) {
 		if (!this.index) throw new Error("graph_claim requires SUBSTRATE_PG_URL");
@@ -144,6 +151,9 @@ export class Substrate {
 			// is invisible to every repo-scoped brief, which is exactly where a claim
 			// most needs to be seen.
 			const graph = await this.index.getGraph(graphId).catch(() => null);
+			const repo = graph?.repo ?? null;
+			const branch = graph?.branch ?? null;
+			const linearIdentifier = result.node.linear_identifier ?? undefined;
 			await this.emit({
 				surface,
 				kind: "claim",
@@ -152,11 +162,35 @@ export class Substrate {
 				summary: result.node.linear_identifier ? `claimed ${result.node.linear_identifier}` : "claimed node",
 				graph_id: graphId,
 				node_id: nodeId,
-				linear_identifier: result.node.linear_identifier ?? undefined,
+				linear_identifier: linearIdentifier,
 				session_id: sessionId,
-				repo: graph?.repo ?? undefined,
-				branch: graph?.branch ?? undefined,
+				repo: repo ?? undefined,
+				branch: branch ?? undefined,
 			}).catch(() => undefined);
+
+			const failures = await this.mirror.claim({
+				graphId,
+				nodeId,
+				surface,
+				sessionId,
+				node: result.node,
+				repo,
+				branch,
+			});
+			for (const failure of failures) {
+				await this.emit({
+					surface,
+					kind: "warning",
+					summary: `claim mirror to ${failure.target} failed for ${linearIdentifier ?? nodeId}: ${failure.reason}`,
+					graph_id: graphId,
+					node_id: nodeId,
+					linear_identifier: linearIdentifier,
+					session_id: sessionId,
+					repo: repo ?? undefined,
+					branch: branch ?? undefined,
+					payload: { target: failure.target, action: "claim", reason: failure.reason },
+				}).catch(() => undefined);
+			}
 		}
 		return result;
 	}
