@@ -304,3 +304,164 @@ describe("findNode", () => {
 		expect(calls).toEqual([]);
 	});
 });
+
+/** A node claimed by claude-code/sess-holder, behind an index that records and applies release/state writes. */
+function holderStores(node: Partial<GraphNode> = {}) {
+	const emitted: SubstrateEvent[] = [];
+	const writes: string[] = [];
+	const current: GraphNode = {
+		graph_id: "ut-1",
+		node_id: "n1",
+		linear_issue_id: "issue-uuid",
+		linear_identifier: "SWC-7",
+		notion_page: null,
+		state: "started",
+		claimed_by: "claude-code",
+		claimed_at: "2026-09-25T00:00:00.000Z",
+		claim_session: "sess-holder",
+		...node,
+	};
+	const index = {
+		getGraph: async (graph_id: string) =>
+			graph_id === "ut-1"
+				? { graph_id, repo: "swcstudiospace/agent-substrate", branch: "main", nodes: [{ ...current }] }
+				: null,
+		releaseNode: async () => {
+			writes.push("release");
+			Object.assign(current, { claimed_by: null, claimed_at: null, claim_session: null });
+		},
+		setNodeState: async (_graph_id: string, _node_id: string, state: NodeState) => {
+			writes.push(`state:${state}`);
+			current.state = state;
+		},
+	};
+	const greptime = {
+		lastHash: async () => null,
+		insertEvent: async (event: SubstrateEvent) => {
+			emitted.push(event);
+		},
+	};
+	return { emitted, writes, index, greptime };
+}
+
+/** A Linear stand-in recording every operation with its variables; the team has Todo, In Progress, In Review and Done. */
+function trackerLinear(opts: { status?: number; labels?: Array<{ id: string; name: string }> } = {}) {
+	const requests: Array<{ op: string; variables: Record<string, unknown> }> = [];
+	const fetchImpl = (async (_url: string, init: RequestInit) => {
+		const { query, variables } = JSON.parse(String(init.body)) as { query: string; variables: Record<string, unknown> };
+		const op = /(?:query|mutation)\s+(\w+)/.exec(query)?.[1] ?? "unknown";
+		requests.push({ op, variables });
+		if (opts.status && opts.status !== 200) return new Response("internal error", { status: opts.status });
+		const replies: Record<string, unknown> = {
+			IssueContext: {
+				issue: {
+					id: "issue-uuid",
+					identifier: "SWC-7",
+					team: {
+						id: "team-swc",
+						key: "SWC",
+						states: {
+							nodes: [
+								{ id: "st-todo", name: "Todo", type: "unstarted" },
+								{ id: "st-progress", name: "In Progress", type: "started" },
+								{ id: "st-review", name: "In Review", type: "started" },
+								{ id: "st-done", name: "Done", type: "completed" },
+							],
+						},
+					},
+					labels: {
+						nodes: opts.labels ?? [
+							{ id: "lbl-agent-cc", name: "agent:claude-code" },
+							{ id: "lbl-area", name: "area:mcp" },
+						],
+					},
+					comments: { nodes: [] },
+				},
+			},
+			IssueUpdate: { issueUpdate: { success: true } },
+		};
+		return new Response(JSON.stringify({ data: replies[op] }), { status: 200 });
+	}) as unknown as typeof fetch;
+	const updates = () => requests.filter((r) => r.op === "IssueUpdate").map((r) => r.variables.input);
+	return { requests, updates, mirror: new Mirror({ linear: new LinearClient(KEY, { fetchImpl }) }) };
+}
+
+describe("releaseNode", () => {
+	test("the holder's release sends Linear to Todo, drops agent:<surface>, clears the claim and logs one release event", async () => {
+		const { emitted, writes, index, greptime } = holderStores();
+		const linear = trackerLinear();
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, mirror: linear.mirror });
+
+		const result = await substrate.releaseNode("ut-1", "n1", "claude-code", "sess-holder");
+
+		expect(result.released).toBe(true);
+		expect(result.node).toMatchObject({ claimed_by: null, claim_session: null, state: "unstarted" });
+		expect(linear.updates()).toEqual([{ stateId: "st-todo", removedLabelIds: ["lbl-agent-cc"] }]);
+		expect(writes).toEqual(["release", "state:unstarted"]);
+		expect(emitted).toHaveLength(1);
+		expect(emitted[0]).toMatchObject({
+			kind: "release",
+			graph_id: "ut-1",
+			node_id: "n1",
+			repo: "swcstudiospace/agent-substrate",
+			branch: "main",
+			session_id: "sess-holder",
+			linear_identifier: "SWC-7",
+		});
+	});
+
+	test("an issue without the agent label gets a state change only", async () => {
+		const { index, greptime } = holderStores();
+		const linear = trackerLinear({ labels: [{ id: "lbl-agent-omp", name: "agent:omp" }] });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, mirror: linear.mirror });
+
+		await substrate.releaseNode("ut-1", "n1", "claude-code", "sess-holder");
+
+		expect(linear.updates()).toEqual([{ stateId: "st-todo" }]);
+	});
+
+	for (const [label, surface, session, node] of [
+		["another surface", "omp", "sess-holder", {}],
+		["the same surface in another session", "claude-code", "sess-other", {}],
+		["anyone on an unclaimed node", "claude-code", "sess-holder", { claimed_by: null, claim_session: null }],
+	] as const) {
+		test(`${label} is refused with no Linear request, index write or event`, async () => {
+			const { emitted, writes, index, greptime } = holderStores(node);
+			const linear = trackerLinear();
+			const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, mirror: linear.mirror });
+
+			const result = await substrate.releaseNode("ut-1", "n1", surface, session);
+
+			expect(result.released).toBe(false);
+			expect(result.reason).toBe(
+				node.claimed_by === null
+					? "node is not claimed"
+					: "node is claimed by claude-code session sess-holder; only that session can release it",
+			);
+			expect(linear.requests).toEqual([]);
+			expect(writes).toEqual([]);
+			expect(emitted).toEqual([]);
+		});
+	}
+
+	test("Linear answering 500 still releases, logs the release and one warning naming linear/release (D-02)", async () => {
+		const { emitted, writes, index, greptime } = holderStores();
+		const linear = trackerLinear({ status: 500 });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, mirror: linear.mirror });
+
+		const result = await substrate.releaseNode("ut-1", "n1", "claude-code", "sess-holder");
+
+		expect(result.released).toBe(true);
+		expect(writes).toEqual(["release", "state:unstarted"]);
+		expect(emitted.map((e) => e.kind)).toEqual(["release", "warning"]);
+		expect(emitted[1]?.payload).toMatchObject({ target: "linear", action: "release" });
+		expect(emitted[1]).toMatchObject({ graph_id: "ut-1", node_id: "n1", repo: "swcstudiospace/agent-substrate" });
+	});
+
+	test("an unknown node throws rather than answering for a node that does not exist", async () => {
+		const { index, greptime } = holderStores();
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, mirror: trackerLinear().mirror });
+
+		await expect(substrate.releaseNode("ut-1", "n9", "claude-code", "sess-holder")).rejects.toThrow("unknown node ut-1/n9");
+	});
+});

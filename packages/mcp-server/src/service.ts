@@ -10,7 +10,7 @@ import type { SubstrateConfig } from "./config.ts";
 import { normalizeEvent, verifyChain } from "./event.ts";
 import { GreptimeClient, quote } from "./greptime.ts";
 import { IndexStore } from "./index-store.ts";
-import { createMirror, type Mirror } from "./mirror.ts";
+import { createMirror, type Mirror, type MirrorFailure } from "./mirror.ts";
 import type {
 	Actor,
 	EventInput,
@@ -22,6 +22,14 @@ import type {
 	Surface,
 	SubstrateEvent,
 } from "./types.ts";
+
+/** Why a caller may not move a node, or null when it holds the claim. */
+function ownershipRefusal(node: GraphNode, surface: Surface, sessionId: string, verb: string): string | null {
+	if (node.claimed_by === surface && node.claim_session === sessionId) return null;
+	return node.claimed_by
+		? `node is claimed by ${node.claimed_by} session ${node.claim_session}; only that session can ${verb} it`
+		: "node is not claimed";
+}
 
 /** Greptime gives back loosely typed rows; rebuild the exact shape that was hashed. */
 function rowToEvent(row: Record<string, unknown>): SubstrateEvent {
@@ -219,33 +227,103 @@ export class Substrate {
 				repo,
 				branch,
 			});
-			for (const failure of failures) {
-				await this.emit({
-					surface,
-					kind: "warning",
-					summary: `claim mirror to ${failure.target} failed for ${linearIdentifier ?? nodeId}: ${failure.reason}`,
-					graph_id: graphId,
-					node_id: nodeId,
-					linear_identifier: linearIdentifier,
-					session_id: sessionId,
-					repo: repo ?? undefined,
-					branch: branch ?? undefined,
-					payload: { target: failure.target, action: "claim", reason: failure.reason },
-				}).catch(() => undefined);
-			}
+			await this.warn(failures, "claim", {
+				surface,
+				graph_id: graphId,
+				node_id: nodeId,
+				linear_identifier: linearIdentifier,
+				session_id: sessionId,
+				repo: repo ?? undefined,
+				branch: branch ?? undefined,
+			});
 		}
 		return result;
 	}
 
-	async releaseNode(graphId: string, nodeId: string) {
-		if (!this.index) throw new Error("graph_release requires SUBSTRATE_PG_URL");
-		await this.index.releaseNode(graphId, nodeId);
+	/**
+	 * Give a claimed node back. Only the claiming surface and session may: any
+	 * other caller — or a call on an unclaimed node — gets `released: false`
+	 * with the reason and causes no index, tracker or event write, so one agent
+	 * cannot drop another's work by accident or through an injected
+	 * instruction. The holder's release clears the claim, sets the node
+	 * `unstarted`, logs a `release` event and mirrors it (Linear back to Todo,
+	 * `agent:<surface>` removed); a mirror failure is a warning, never a block.
+	 */
+	async releaseNode(
+		graphId: string,
+		nodeId: string,
+		surface: Surface,
+		sessionId: string,
+	): Promise<{ released: boolean; reason?: string; node: GraphNode }> {
+		const { index, graph, node } = await this.holder(graphId, nodeId);
+		const reason = ownershipRefusal(node, surface, sessionId, "release");
+		if (reason) return { released: false, reason, node };
+
+		await index.releaseNode(graphId, nodeId);
+		await index.setNodeState(graphId, nodeId, "unstarted").catch(() => undefined);
+		const meta = {
+			surface,
+			graph_id: graphId,
+			node_id: nodeId,
+			linear_identifier: node.linear_identifier ?? undefined,
+			session_id: sessionId,
+			repo: graph.repo ?? undefined,
+			branch: graph.branch ?? undefined,
+		};
+		await this.emit({
+			...meta,
+			kind: "release",
+			summary: `released ${node.linear_identifier ?? nodeId}`,
+		}).catch(() => undefined);
+		const failures = await this.mirror.release({
+			graphId,
+			nodeId,
+			surface,
+			sessionId,
+			node,
+			repo: graph.repo,
+			branch: graph.branch,
+		});
+		await this.warn(failures, "release", meta);
+		return { released: true, node: await this.refreshed(graphId, nodeId, node) };
 	}
 
 	async completeNode(graphId: string, nodeId: string, state: NodeState = "completed") {
 		if (!this.index) throw new Error("graph_complete requires SUBSTRATE_PG_URL");
 		await this.index.setNodeState(graphId, nodeId, state);
 		await this.index.releaseNode(graphId, nodeId);
+	}
+
+	/** The graph and node a release or completion acts on; the index is required. */
+	private async holder(graphId: string, nodeId: string) {
+		const index = this.index;
+		if (!index) throw new Error("graph_release and graph_complete require SUBSTRATE_PG_URL");
+		const graph = await index.getGraph(graphId);
+		const node = graph?.nodes.find((n) => n.node_id === nodeId);
+		if (!graph || !node) throw new Error(`unknown node ${graphId}/${nodeId}`);
+		return { index, graph, node };
+	}
+
+	/** The node as the index now has it, or the pre-change copy if the re-read fails. */
+	private async refreshed(graphId: string, nodeId: string, fallback: GraphNode): Promise<GraphNode> {
+		const graph = await this.index?.getGraph(graphId).catch(() => null);
+		return graph?.nodes.find((n) => n.node_id === nodeId) ?? fallback;
+	}
+
+	/** One warning event per failed mirror target (D-02); never throws. */
+	private async warn(
+		failures: MirrorFailure[],
+		action: string,
+		meta: Omit<EventInput, "kind" | "summary" | "payload">,
+	): Promise<void> {
+		for (const failure of failures) {
+			await this.emit({
+				...meta,
+				kind: "warning",
+				summary: `${action} mirror to ${failure.target} failed for ${meta.linear_identifier ?? meta.node_id}: ${failure.reason}`,
+				payload: { target: failure.target, action, reason: failure.reason },
+			}).catch(() => undefined);
+		}
 	}
 
 	/**

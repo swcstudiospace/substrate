@@ -196,13 +196,17 @@ export function createMcpServer(substrate: Substrate, callerSurface: Surface | n
 		"graph_release",
 		{
 			title: "Release a node",
-			description: "Drop this surface's claim on a node without marking it complete.",
-			inputSchema: { graph_id: z.string(), node_id: z.string() },
+			description:
+				"Release this session's claim on a node: the Linear issue goes back to Todo and agent:<surface> is removed. Only the claiming surface and session can release.",
+			inputSchema: {
+				graph_id: z.string(),
+				node_id: z.string(),
+				session_id: z.string(),
+				surface: surfaceSchema.optional(),
+			},
 		},
-		async ({ graph_id, node_id }) => {
-			await substrate.releaseNode(graph_id, node_id);
-			return text(`Released ${graph_id}/${node_id}.`);
-		},
+		async ({ graph_id, node_id, session_id, surface }) =>
+			json(await substrate.releaseNode(graph_id, node_id, surface ?? callerSurface ?? "claude-code", session_id)),
 	);
 
 	server.registerTool(
