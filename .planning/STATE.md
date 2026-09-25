@@ -1,27 +1,27 @@
 ---
 gsd_state_version: "1.0"
 milestone: v1.0
-current_plan: Not started
+current_plan: 8
 status: executing
-stopped_at: Phase 3 planned (10 plans), ready to execute
-last_updated: "2026-09-25T10:44:00.172Z"
-state_head: 628af85d87b06667e3cd470ff3f3ba7d3c5d0acf
+stopped_at: "03-08 Task 2 blocking: owner must create the approval bot and append SUBSTRATE_APPROVAL_* keys (done|skip)"
+last_updated: "2026-09-25T18:09:37.013Z"
+state_head: ed8cc94632384fc55fa66b4e99bb1528aaba1bf0
 progress:
   total_phases: 6
   completed_phases: 2
   total_plans: 29
-  completed_plans: 19
+  completed_plans: 26
   percent: 33
 milestone_name: Agent Substrate — four planes (runtime, memory, skills, ledger) keyed by Graph ID
-current_phase_name: Lane A
 current_phase: 3
+current_phase_name: Lane A
 ---
 
 # State
 
 ## Current
 
-Current Plan: Not started
+Current Plan: 8
 Total Plans in Phase: 10
 
 **Phase 1 (Lane B) is complete** — 10/10 plans, verification `passed`
@@ -37,7 +37,9 @@ remaining live-model-session checks on 2026-09-24 (see Blockers → Accepted).
 
 **Open owner decisions from Phase 2 review:** WR-05 (give dispatched Hermes a read-only issue-text tool and a release-if-stuck step) and IN-01 (dispatcher and Hermes run as root and can read `/etc/substrate/substrate.env`).
 
-**Phase 3 (Lane A) is planned** — 10 plans in 10 sequential waves (`phases/03-lane-a/03-0{1..10}-PLAN.md`), plan-checker passed on iteration 3 (0 blockers, 0 warnings, 3 info), decision coverage 16/16. 03-01 is the D-09 spike: it re-measures baselines (167 pass / 0 fail, tsc exit 0; dispatcher 114 passed), gates on ≥ 10 GiB free, waits for an owner human-verify on the SUS-flagged rivet packages, installs rivet into `packages/host`, and writes `03-01-SPIKE.md` with `route_choice` / `tracker_route` / `tests_route` that every later plan branches on. Research changed three assumptions: the pinned Claude adapter 0.2.7 runs `--bare` (hooks, skills and `.claude.json` MCP likely not loaded, session MCP servers renamed `mcp-N`), the VM's model calls need the loopback route to shunt :3001 (no Anthropic key on the host), and rivet's stock Docker sandbox publishes an unauthenticated command port on 0.0.0.0 (a custom 127.0.0.1 provider replaces it). Linear SWC is at 251 active, so D-14 needs 2 archives. Owner checkpoints: rivet package verification (03-01), the new Telegram approval bot (03-08), "PR lands" meaning (03-09), approval taps (03-10). Dispatch stays OFF except inside 03-10's trap-closed window.
+**Phase 3 (Lane A) is executing** — 7/10 plans executed (03-01 through 03-07). Current plan is 03-08: Task 1 deployed (`ed8cc94`, approvals off, journal `telegram approvals off`), Task 2 blocking on the owner creating the dedicated approval bot and appending the three `SUBSTRATE_APPROVAL_*` keys (resume: done|skip). Post-wave gate at `ed8cc94`: bun test 338 pass / 0 fail, tsc exit 0, dispatcher pytest 149 passed. `hostFunctionPermissions` stays `substrate:*` and `${sandboxCollection}:*`.
+
+**Phase 3 (Lane A) was planned** — 10 plans in 10 sequential waves (`phases/03-lane-a/03-0{1..10}-PLAN.md`), plan-checker passed on iteration 3 (0 blockers, 0 warnings, 3 info), decision coverage 16/16. 03-01 is the D-09 spike: it re-measures baselines (167 pass / 0 fail, tsc exit 0; dispatcher 114 passed), gates on ≥ 10 GiB free, waits for an owner human-verify on the SUS-flagged rivet packages, installs rivet into `packages/host`, and writes `03-01-SPIKE.md` with `route_choice` / `tracker_route` / `tests_route` that every later plan branches on. Research changed three assumptions: the pinned Claude adapter 0.2.7 runs `--bare` (hooks, skills and `.claude.json` MCP likely not loaded, session MCP servers renamed `mcp-N`), the VM's model calls need the loopback route to shunt :3001 (no Anthropic key on the host), and rivet's stock Docker sandbox publishes an unauthenticated command port on 0.0.0.0 (a custom 127.0.0.1 provider replaces it). Linear SWC is at 251 active, so D-14 needs 2 archives. Owner checkpoints: rivet package verification (03-01), the new Telegram approval bot (03-08), "PR lands" meaning (03-09), approval taps (03-10). Dispatch stays OFF except inside 03-10's trap-closed window.
 
 Lane B proceeded under **D-01**: an additive brief and events only. The
 TypeScript-engine work and the Kanban retirement belong to the "Ultrathink
@@ -268,8 +270,8 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Session
 
-**Last session:** 2026-09-25T10:45:00Z
-**Stopped at:** Phase 3 planned (10 plans), ready to execute
+**Last session:** 2026-09-25T18:09:36.925Z
+**Stopped at:** 03-08 Task 2 blocking: owner must create the approval bot and append SUBSTRATE_APPROVAL_* keys (done|skip)
 **Resume file:** None
 
 ## Decisions
