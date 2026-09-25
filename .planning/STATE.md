@@ -1,16 +1,16 @@
 ---
 gsd_state_version: "1.0"
 milestone: v1.0
-current_plan: 9
+current_plan: 10
 status: executing
-stopped_at: "03-08 closed partial (owner skip on approval bot); 03-09 Task 1 decided pr_lands_decision=i; executing 03-09 Task 2"
-last_updated: "2026-09-25T18:09:37.013Z"
-state_head: ed8cc94632384fc55fa66b4e99bb1528aaba1bf0
+stopped_at: "03-09 complete (pr_lands_decision=i; SWC-480, graph ut-muhk8v3p-47ae5f1a, 13 D-14 archives, dispatch:claude-code created unapplied); next 03-10 proof"
+last_updated: "2026-09-25T23:05:00.000Z"
+state_head: 8dcc7d21215bb17f32b4a6e9cbc4e0d57ac5726e
 progress:
   total_phases: 6
   completed_phases: 2
   total_plans: 29
-  completed_plans: 26
+  completed_plans: 28
   percent: 33
 milestone_name: Agent Substrate — four planes (runtime, memory, skills, ledger) keyed by Graph ID
 current_phase: 3
@@ -21,7 +21,7 @@ current_phase_name: Lane A
 
 ## Current
 
-Current Plan: 8
+Current Plan: 10
 Total Plans in Phase: 10
 
 **Phase 1 (Lane B) is complete** — 10/10 plans, verification `passed`
@@ -37,7 +37,7 @@ remaining live-model-session checks on 2026-09-24 (see Blockers → Accepted).
 
 **Open owner decisions from Phase 2 review:** WR-05 (give dispatched Hermes a read-only issue-text tool and a release-if-stuck step) and IN-01 (dispatcher and Hermes run as root and can read `/etc/substrate/substrate.env`).
 
-**Phase 3 (Lane A) is executing** — 7/10 plans executed (03-01 through 03-07). Current plan is 03-08: Task 1 deployed (`ed8cc94`, approvals off, journal `telegram approvals off`), Task 2 blocking on the owner creating the dedicated approval bot and appending the three `SUBSTRATE_APPROVAL_*` keys (resume: done|skip). Post-wave gate at `ed8cc94`: bun test 338 pass / 0 fail, tsc exit 0, dispatcher pytest 149 passed. `hostFunctionPermissions` stays `substrate:*` and `${sandboxCollection}:*`.
+**Phase 3 (Lane A) is executing** — 03-01 through 03-09 executed; 03-08 closed **partial** (owner `skip` on the approval bot: no `SUBSTRATE_APPROVAL_*` keys, approvals off, so 03-10's Approve/Deny round-trip cannot run). 03-09 set up the proof (`phases/03-lane-a/03-PROOF.md` § Setup, commit `8dcc7d2`): owner decision `pr_lands_decision=i` (PR on swcstudiospace/agent-substrate, owner merges later); D-14 archived 13 duplicate issues (262 → 249; 12 `Untitled eng work` issues from another workflow raised the count), then created SWC-480 in Todo — the workspace now sits at 250 active, the Free-plan limit; graph `ut-muhk8v3p-47ae5f1a` with Notion Task row (Status Implementing, kickoff_by=host) and Issue row; `dispatch:claude-code` label `3dee3876-…` created, **not applied**. Next: 03-10 applies the label and runs the proof. Post-wave gate at `ed8cc94`: bun test 338 pass / 0 fail, tsc exit 0, dispatcher pytest 149 passed. `hostFunctionPermissions` stays `substrate:*` and `${sandboxCollection}:*`.
 
 **Phase 3 (Lane A) was planned** — 10 plans in 10 sequential waves (`phases/03-lane-a/03-0{1..10}-PLAN.md`), plan-checker passed on iteration 3 (0 blockers, 0 warnings, 3 info), decision coverage 16/16. 03-01 is the D-09 spike: it re-measures baselines (167 pass / 0 fail, tsc exit 0; dispatcher 114 passed), gates on ≥ 10 GiB free, waits for an owner human-verify on the SUS-flagged rivet packages, installs rivet into `packages/host`, and writes `03-01-SPIKE.md` with `route_choice` / `tracker_route` / `tests_route` that every later plan branches on. Research changed three assumptions: the pinned Claude adapter 0.2.7 runs `--bare` (hooks, skills and `.claude.json` MCP likely not loaded, session MCP servers renamed `mcp-N`), the VM's model calls need the loopback route to shunt :3001 (no Anthropic key on the host), and rivet's stock Docker sandbox publishes an unauthenticated command port on 0.0.0.0 (a custom 127.0.0.1 provider replaces it). Linear SWC is at 251 active, so D-14 needs 2 archives. Owner checkpoints: rivet package verification (03-01), the new Telegram approval bot (03-08), "PR lands" meaning (03-09), approval taps (03-10). Dispatch stays OFF except inside 03-10's trap-closed window.
 
@@ -270,8 +270,8 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Session
 
-**Last session:** 2026-09-25T18:09:36.925Z
-**Stopped at:** 03-08 Task 2 blocking: owner must create the approval bot and append SUBSTRATE_APPROVAL_* keys (done|skip)
+**Last session:** 2026-09-25T23:05:00.000Z
+**Stopped at:** 03-09 complete; next 03-10 (label SWC-480 with dispatch:claude-code, run the Lane A proof; approvals off)
 **Resume file:** None
 
 ## Decisions
