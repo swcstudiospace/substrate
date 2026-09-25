@@ -4,6 +4,8 @@
  *   POST /mcp      MCP over streamable HTTP, for agents
  *   POST /brief    the same briefing as plain text, for hooks
  *   POST /events   append an event, for hooks
+ *   POST /verify   check a graph's event hash chain
+ *   POST /issue    a node's Linear issue text, redacted and untrusted, for hooks and host functions
  *   GET  /healthz  store reachability
  *
  * Hooks get REST because a hook process cannot call an MCP tool — it has no
@@ -91,6 +93,17 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig) 
 					return;
 				}
 				sendJson(res, 200, await substrate.verifyGraph(body.graph_id));
+				return;
+			}
+
+			if (req.method === "POST" && url.pathname === "/issue") {
+				const raw = await readBody(req);
+				const body = JSON.parse(raw) as { graph_id?: unknown; node_id?: unknown };
+				if (typeof body.graph_id !== "string" || typeof body.node_id !== "string") {
+					sendJson(res, 400, { error: "graph_id and node_id are required" });
+					return;
+				}
+				sendJson(res, 200, await substrate.getIssue(body.graph_id, body.node_id));
 				return;
 			}
 
