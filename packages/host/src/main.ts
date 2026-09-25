@@ -18,6 +18,7 @@ import { formatRoute, parseRoute, parseTestsRoute, type Route, type TestsRoute, 
 import { GRAPH_LABEL, type SandboxNetwork } from "./sandbox-options.ts";
 import type { Skill, TrackerLocators } from "./seed.ts";
 import { SubstrateClient } from "./substrate.ts";
+import { HostSync, LinearLink, NotionSync } from "./sync.ts";
 import { TaskService, TaskStore, type VmHandle } from "./tasks.ts";
 import { createEnsureModelRoute, createHostVm } from "./vm.ts";
 
@@ -121,6 +122,11 @@ const skills = loadSkills(skillsDir);
 const trackers = loadTrackers(ultrathinkConfig);
 const store = new TaskStore(join(storageDir, "tasks"));
 const substrate = new SubstrateClient({ baseUrl: mcpBase });
+// D-10 host-side sync: keys stay in this process (the unit's EnvironmentFile), never in the VM (D-08).
+const notionSync = NotionSync.fromEnv(process.env);
+const linearLink = LinearLink.fromEnv(process.env);
+const sync = notionSync || linearLink ? new HostSync({ notion: notionSync, linear: linearLink, log }) : null;
+log(`[substrate-host] sync: notion ${notionSync ? "on" : "off"}, linear ${linearLink ? "on" : "off"} (tracker route ${trackerRoute(route)})`);
 
 let client: Client<typeof registry> | null = null;
 let engineReady = false;
@@ -139,6 +145,7 @@ const service = new TaskService({
 	directKey,
 	skills,
 	trackers,
+	sync: sync ?? undefined,
 	log,
 });
 
@@ -150,6 +157,7 @@ const { registry } = createHostVm({
 	checkoutNodeModules: join(checkout, "node_modules"),
 	store,
 	substrate,
+	sync,
 	tasks: () => service,
 	log,
 });

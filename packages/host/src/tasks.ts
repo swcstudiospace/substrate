@@ -9,7 +9,7 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { type Route, sessionEnv, SUBSTRATE_MCP_URL, type TestsRoute, worktreeFor } from "./options.ts";
+import { type Route, sessionEnv, SUBSTRATE_MCP_URL, type TestsRoute, trackerRoute, worktreeFor } from "./options.ts";
 import { isValidGraphId } from "./sandbox-options.ts";
 import {
 	ADDITIONAL_INSTRUCTIONS,
@@ -22,7 +22,7 @@ import {
 	type TrackerLocators,
 	VM_WORK,
 } from "./seed.ts";
-import { type GraphView, HOST_SURFACE } from "./substrate.ts";
+import { type GraphNodeView, type GraphView, HOST_SURFACE } from "./substrate.ts";
 
 export type PendingApproval = { request_id: string; tool: string; at: string };
 export type SeededFile = { path: string; sha256: string; bytes: number };
@@ -49,17 +49,25 @@ export type TaskRecord = {
 	/** 03-07: set once by the host's own pr-create (T-03-07-04/05); null until a PR is opened. */
 	pr_url: string | null;
 	pr_number: number | null;
+	/** D-10: when the PR fields reached the trackers and who wrote them (T-03-07-06). */
+	synced_at: string | null;
+	sync_by: SyncBy | null;
 };
+
+/** model: the sync host function; model_mcp: in-VM ultrathink-sync verified read-only; host: the turn-settle backstop. */
+export type SyncBy = "model" | "model_mcp" | "host";
 
 /**
  * Records written by earlier plans lack later fields: resume counters read as 0 (T-03-06-01: the
- * key must stay numeric) and PR fields as null.
+ * key must stay numeric), PR and sync fields as null.
  */
 export function withRecordDefaults(record: TaskRecord): TaskRecord {
 	record.resumes = Number.isInteger(record.resumes) ? record.resumes : 0;
 	record.stale_approvals = Number.isInteger(record.stale_approvals) ? record.stale_approvals : 0;
 	record.pr_url = typeof record.pr_url === "string" ? record.pr_url : null;
 	record.pr_number = Number.isInteger(record.pr_number) ? record.pr_number : null;
+	record.synced_at = typeof record.synced_at === "string" ? record.synced_at : null;
+	record.sync_by = record.sync_by === "model" || record.sync_by === "model_mcp" || record.sync_by === "host" ? record.sync_by : null;
 	return record;
 }
 
@@ -251,6 +259,24 @@ export type SubstrateLike = {
 	brief(graphId: string, repo: string): Promise<string>;
 };
 
+/** The slice of sync.ts's HostSync the turn-settle backstop drives. */
+export type HostSyncLike = {
+	syncPr(input: {
+		graphId: string;
+		nodeId: string;
+		prUrl: string;
+		prNumber: number;
+		repo: string;
+		branch: string;
+		node: Pick<GraphNodeView, "linear_issue_id" | "linear_identifier">;
+	}): Promise<{ notion: string; linear: string }>;
+	verifyModelSync(input: {
+		graphId: string;
+		node: Pick<GraphNodeView, "linear_issue_id" | "linear_identifier">;
+		prUrl: string;
+	}): Promise<{ notion: boolean; linear: boolean }>;
+};
+
 export type TaskServiceDeps = {
 	substrate: SubstrateLike;
 	/** vm.getOrCreate([graphId]) — one VM per graph (D-06). */
@@ -264,6 +290,8 @@ export type TaskServiceDeps = {
 	directKey?: string;
 	skills: Skill[];
 	trackers: TrackerLocators;
+	/** D-10 backstop; absent means no tracker sync on this host. */
+	sync?: HostSyncLike;
 	log?: (line: string) => void;
 	now?: () => Date;
 };
@@ -394,6 +422,8 @@ export class TaskService {
 				stale_approvals: 0,
 				pr_url: null,
 				pr_number: null,
+				synced_at: null,
+				sync_by: null,
 			};
 			this.deps.store.save(record);
 
@@ -422,6 +452,7 @@ export class TaskService {
 					r.exit_code = pollCode(r);
 				});
 				this.log(`[substrate-host] turn ended ${key} stop=${result.stopReason}`);
+				return this.backstopSync(record.graph_id, record.node_id);
 			})
 			.catch((cause: unknown) => {
 				if (this.stopping) {
@@ -435,11 +466,56 @@ export class TaskService {
 					r.exit_code = 1;
 				});
 				this.log(`[substrate-host] prompt failed ${key}: ${String(cause)}`);
+				return this.backstopSync(record.graph_id, record.node_id);
 			})
 			.finally(() => {
 				if (this.turns.get(key) === settled) this.turns.delete(key);
 			});
 		this.turns.set(key, settled);
+	}
+
+	/**
+	 * D-10 backstop, on every route, once per task: a settled turn whose record holds a pr_url
+	 * (recorded by the host's own pr-create) that is still unsynced. On tracker_route vm_mcp the
+	 * model's in-VM ultrathink-sync is verified read-only first (both trackers hold the URL →
+	 * sync_by model_mcp, no write); otherwise — and on tracker_route host always — the host writes
+	 * the PR fields itself (sync_by host, the D-10 deviation 03-10 records). synced_at is set after
+	 * one run whatever the trackers answered, so a later settle never repeats it; the outcome is in
+	 * the journal.
+	 */
+	async backstopSync(graphId: string, nodeId: string): Promise<void> {
+		const sync = this.deps.sync;
+		const record = this.deps.store.get(graphId, nodeId);
+		if (!sync || !record || !record.pr_url || record.pr_number === null || record.synced_at !== null) return;
+		const key = `${graphId}/${nodeId}`;
+		const prUrl = record.pr_url;
+		const prNumber = record.pr_number;
+		try {
+			const graph = await this.deps.substrate.graphGet(graphId);
+			const node = graph?.nodes?.find((n) => n.node_id === nodeId);
+			if (!graph || !node) {
+				this.log(`[substrate-host] sync backstop ${key}: graph or node missing from the index`);
+				return;
+			}
+			let by: SyncBy = "host";
+			if (trackerRoute(this.deps.route) === "vm_mcp") {
+				const seen = await sync.verifyModelSync({ graphId, node, prUrl });
+				if (seen.notion && seen.linear) by = "model_mcp";
+			}
+			if (by === "host") {
+				const result = await sync.syncPr({ graphId, nodeId, prUrl, prNumber, repo: graph.repo ?? record.repo, branch: `substrate/${graphId}`, node });
+				this.log(`[substrate-host] sync by host for ${key}`);
+				this.log(`[substrate-host] sync result ${key}: notion ${result.notion}, linear ${result.linear}`);
+			} else {
+				this.log(`[substrate-host] sync by model (mcp) for ${key}`);
+			}
+			this.update(graphId, nodeId, (r) => {
+				r.synced_at = this.now().toISOString();
+				r.sync_by = by;
+			});
+		} catch (cause) {
+			this.log(`[substrate-host] sync backstop ${key} failed: ${String(cause)}`);
+		}
 	}
 
 	/**

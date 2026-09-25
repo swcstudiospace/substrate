@@ -20,6 +20,7 @@ import { sandboxAgentProvider } from "@rivet-dev/agentos-sandbox";
 import { z } from "zod";
 import { redact } from "../../mcp-server/src/redact.ts";
 import { commit, execFileRunner, gitPush, PR_BODY_MAX, PR_TITLE_MAX, prCreate, COMMIT_MESSAGE_MAX } from "./hostfns.ts";
+import { type HostSync, syncTask } from "./sync.ts";
 import {
 	hostFunctionPermissions,
 	loopbackPorts,
@@ -48,6 +49,8 @@ export type HostVmConfig = {
 	checkoutNodeModules: string;
 	store: TaskStoreLike;
 	substrate: SubstrateClient;
+	/** D-10 host-side sync (tracker_route host, the model's `agentos-substrate sync`); null when no tracker key is configured. */
+	sync: HostSync | null;
 	/** Late-bound: the service exists before the registry starts, the client only after. */
 	tasks: () => TaskService;
 	log: (line: string) => void;
@@ -213,6 +216,8 @@ function runTestsCollection(key: readonly unknown[], config: HostVmConfig) {
 
 /** git/gh run on the host under the 120 s runner; the sidecar timeout leaves headroom for the reply. */
 const GIT_HOSTFN_TIMEOUT_MS = 130_000;
+/** A GitHub PR URL is `https://github.com/<owner>/<repo>/pull/<n>`; anything longer is not one. */
+const PR_URL_MAX = 512;
 
 /**
  * `agentos-substrate git-push | pr-create` on every route, `commit` on c:hostfn_commit (03-07,
@@ -271,6 +276,22 @@ function gitCollection(key: readonly unknown[], config: HostVmConfig) {
 			},
 		};
 	}
+	// D-10, tracker_route host: the model applies ultrathink-sync through this function; the URL must be the recorded one.
+	functions["sync"] = {
+		timeout: GIT_HOSTFN_TIMEOUT_MS,
+		inputSchema: z
+			.object({
+				node: z.string().describe("node id of this graph's task"),
+				prUrl: z.string().max(PR_URL_MAX).describe("the pull request URL pr-create returned"),
+			})
+			.describe("Write PR URL, PR #, PR State (Open), Repo and Branch on the Notion Task row and attach the PR link to the Linear issue (never a state change)"),
+		execute: async (input: { node: string; prUrl: string }) => {
+			const t = hostCallTarget(key, ["--node", input.node], lookup);
+			if ("error" in t) return { error: t.error };
+			if (!config.sync) return { error: "tracker sync is not configured on this host" };
+			return syncTask({ graphId: t.graphId, nodeId: t.nodeId, prUrl: input.prUrl, store: config.store, substrate: config.substrate, sync: config.sync });
+		},
+	};
 	return functions;
 }
 

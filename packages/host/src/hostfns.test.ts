@@ -44,6 +44,8 @@ function record(overrides: Partial<TaskRecord> = {}): TaskRecord {
 		stale_approvals: 0,
 		pr_url: null,
 		pr_number: null,
+		synced_at: null,
+		sync_by: null,
 		...overrides,
 	};
 }

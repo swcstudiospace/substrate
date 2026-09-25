@@ -207,6 +207,44 @@ describe("renderPrompt (D-15)", () => {
 			}
 		}
 	});
+
+	test("sync step (D-10): vm_mcp runs ultrathink-sync in the VM through the notion/linear servers with the state file and PR URL, PR fields only, never Done, no agentos-substrate sync", () => {
+		for (const route of allRoutes()) {
+			if (trackerRoute(route) !== "vm_mcp") continue;
+			const prompt = renderPrompt(promptInput({ route }));
+			const step = prompt.slice(prompt.indexOf("(4)"), prompt.indexOf("(5)"));
+			expect(step).toContain("/home/agentos/.claude/skills/ultrathink-sync/SKILL.md");
+			expect(step).toContain("stateFile=/home/agentos/.substrate/ultrathink-state.json");
+			expect(step).toContain("prUrl=<the PR URL>");
+			expect(step).toContain("notion and linear MCP servers");
+			expect(step).toContain("PR URL, PR #, PR State (Open), Repo and Branch");
+			expect(step).toContain("PR link on the Linear issue");
+			expect(step).toContain("no Linear state change");
+			expect(step).toContain("never Done");
+			expect(step).not.toContain("agentos-substrate sync");
+			expect(step.indexOf("pr-create")).toBeLessThan(step.indexOf("ultrathink-sync"));
+		}
+	});
+
+	test("sync step (D-10): tracker_route host applies the same SKILL through agentos-substrate sync --node on b:hooks and b:prompt_hostfn; b:host_after_turn has no sync step", () => {
+		for (const route of allRoutes()) {
+			if (trackerRoute(route) !== "host") continue;
+			const prompt = renderPrompt(promptInput({ route }));
+			const step = prompt.slice(prompt.indexOf("(4)"), prompt.indexOf("(5)"));
+			if (route.b === "host_after_turn") {
+				expect(step).not.toContain("ultrathink-sync");
+				expect(step).not.toContain("agentos-substrate sync");
+				expect(prompt).not.toContain("sync");
+			} else {
+				expect(step).toContain("/home/agentos/.claude/skills/ultrathink-sync/SKILL.md");
+				expect(step).toContain(`agentos-substrate sync --node ${NID} --pr-url`);
+				expect(step).toContain("PR URL, PR #, PR State (Open), Repo and Branch");
+				expect(step).toContain("never Done");
+				expect(step).not.toContain("stateFile=");
+				expect(step).not.toContain("MCP servers");
+			}
+		}
+	});
 });
 
 describe("seedFiles (SC-2, D-08, D-11)", () => {
