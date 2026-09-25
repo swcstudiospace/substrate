@@ -9,10 +9,12 @@
  */
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
+import type { Server } from "node:http";
 import { join } from "node:path";
 import { type Client, createClient } from "@rivet-dev/agentos/client";
 import { createApiServer } from "./api.ts";
-import { formatRoute, parseRoute, parseTestsRoute, type Route, type TestsRoute } from "./options.ts";
+import { startTrackerProxy } from "./mcp-proxy.ts";
+import { formatRoute, parseRoute, parseTestsRoute, type Route, type TestsRoute, trackerRoute } from "./options.ts";
 import { GRAPH_LABEL, type SandboxNetwork } from "./sandbox-options.ts";
 import type { Skill, TrackerLocators } from "./seed.ts";
 import { SubstrateClient } from "./substrate.ts";
@@ -163,6 +165,11 @@ engineReady = true;
 client = createClient<typeof registry>({ endpoint: engineEndpoint });
 log(`[substrate-host] engine ${engineEndpoint.replace(/^https?:\/\//, "")}`);
 
+// D-10: the tracker MCP proxy exists only on the evidence-selected vm_mcp route; elsewhere the seeded
+// notion/linear entries are inert (port neither exempted nor served) and the host does those writes.
+const trackerProxy: Server | null = trackerRoute(route) === "vm_mcp" ? startTrackerProxy({ log }) : null;
+if (!trackerProxy) log("[substrate-host] tracker mcp proxy off (tracker route host)");
+
 const server = createApiServer(service, { engineReady: () => engineReady });
 server.listen(apiPort, "127.0.0.1", () => {
 	log(`[substrate-host] api 127.0.0.1:${apiPort}`);
@@ -178,6 +185,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 		stopping = true;
 		log(`[substrate-host] ${signal}: stopping`);
 		server.close();
+		trackerProxy?.close();
 		registry
 			.shutdown()
 			.catch((cause: unknown) => log(`[substrate-host] shutdown: ${String(cause)}`))
