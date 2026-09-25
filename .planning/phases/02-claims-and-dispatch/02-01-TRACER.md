@@ -22,3 +22,11 @@ Live checks that did run (no Linear write):
 
 - `graph_find {"linear_identifier":"SWC-999999"}` → `{"found": false, "reason": "no registered node for SWC-999999"}`
 - `graph_find {}` → `{"found": false, "reason": "provide linear_issue_id or linear_identifier"}`
+
+## Attempt 2 — 2026-09-25T01:33Z, archive route evaluated, still blocked
+
+The owner allowed archiving old completed and canceled issues, with a cap of 10. Observed usage: 275
+non-archived issues. Linear's Free-plan limit is 250 (from the docs, not exposed by the API), so
+26 archives are needed. Only 3 issues are eligible under the archive rules. No archive was made
+and no issueCreate was retried, because the arithmetic shows it would fail. Full evidence:
+02-LINEAR-ARCHIVED.md.
