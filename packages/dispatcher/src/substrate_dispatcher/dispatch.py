@@ -16,11 +16,23 @@ from typing import Any, Callable, Literal, Mapping
 from . import launcher, worktree
 from .launcher import Launched
 from .linear import Candidate
+from .worktree import WorktreeRefused
 
 DISPATCHABLE_SURFACES = frozenset({"hermes"})
 COMMENT_PREFIX = "substrate-dispatcher:"
 DISABLE_KEY = "SUBSTRATE_DISPATCH_DISABLED"
-MARKERS: dict[str, str] = {}
+# Once-only comment texts by marker; every body starts with COMMENT_PREFIX and carries the stable
+# tag "[<marker>]", which tick looks for in the issue's last 50 comments before posting.
+MARKERS: dict[str, str] = {
+    "not-dispatchable": "surface not dispatchable yet — this dispatcher only starts dispatch:hermes",
+    "no-node": "no registered substrate graph node for this issue; register it with graph_register first",
+    "already-claimed": "node already claimed by {holder}; not dispatching",
+    "invalid-graph-id": "the graph id is not a safe worktree name; not dispatching",
+    "no-checkout": "no verified checkout of the graph's repo on this host; not dispatching",
+    "low-disk": "under 5 GB free on /; no worktree created, not dispatching",
+    "path-conflict": "the worktree path is taken by something git does not track as this graph's worktree; not dispatching",
+    "git-failed": "git could not prepare the worktree; not dispatching",
+}
 
 LaunchFn = Callable[[Candidate, dict], Launched]
 Log = Callable[[str], None]
@@ -76,19 +88,33 @@ def dispatch_disabled(env_file: Path, environ: Mapping[str, str]) -> bool:
     return value.strip().strip("'\"") == "1"
 
 
+def tag(marker: str) -> str:
+    return f"[{marker}]"
+
+
+def comment_body(marker: str, **fields: str) -> str:
+    return f"{COMMENT_PREFIX} {tag(marker)} {MARKERS[marker].format(**fields)}"
+
+
 def decide(
     candidate: Candidate, *, found: dict | None, active_issue_ids: set[str], capacity_left: int
 ) -> Decision:
     if candidate.surface not in DISPATCHABLE_SURFACES:
-        return Decision("skip", candidate, f"surface {candidate.surface} not dispatchable")
+        return Decision(
+            "comment", candidate, f"surface {candidate.surface} not dispatchable",
+            marker="not-dispatchable",
+        )
     if candidate.issue_id in active_issue_ids:
         return Decision("skip", candidate, "session already running for this issue")
     if not found or not found.get("found"):
         reason = (found or {}).get("reason") or "no registered node"
-        return Decision("skip", candidate, f"no node: {reason}", found=found)
+        return Decision("comment", candidate, f"no node: {reason}", marker="no-node", found=found)
     holder = (found.get("node") or {}).get("claimed_by")
     if holder:
-        return Decision("skip", candidate, f"node already claimed by {holder}", found=found)
+        return Decision(
+            "comment", candidate, f"node already claimed by {holder}",
+            marker="already-claimed", found=found,
+        )
     if capacity_left <= 0:
         return Decision("skip", candidate, "at capacity", found=found)
     return Decision(
@@ -125,13 +151,29 @@ def tick(
             )
             decisions.append(decision)
             if dry_run:
+                log(f"{candidate.identifier} {candidate.dispatch_label} → {decision.action}: {decision.reason}")
                 continue
-            if decision.action == "launch":
-                launched = launch_fn(candidate, decision.found or {})
+            if decision.action == "comment" and decision.marker:
+                holder = ((decision.found or {}).get("node") or {}).get("claimed_by") or ""
+                _comment_once(linear, candidate, decision.marker, holder=str(holder))
+            elif decision.action == "launch":
+                try:
+                    launched = launch_fn(candidate, decision.found or {})
+                except WorktreeRefused as refused:
+                    log(f"{candidate.identifier}: worktree refused {tag(refused.marker)}: {refused.reason}")
+                    _comment_once(linear, candidate, refused.marker)
+                    continue
                 registry.add(candidate.issue_id, launched)
         except Exception as exc:  # noqa: BLE001 — one bad candidate never stops the tick
             log(f"{candidate.identifier}: {type(exc).__name__}: {exc}")
     return decisions
+
+
+def _comment_once(linear: Any, candidate: Candidate, marker: str, **fields: str) -> None:
+    """Post the marker's comment unless one of the issue's last 50 comments carries its tag."""
+    if any(tag(marker) in existing for existing in linear.comment_bodies(candidate.issue_id)):
+        return
+    linear.comment(candidate.issue_id, comment_body(marker, **fields))
 
 
 def make_launch_fn(

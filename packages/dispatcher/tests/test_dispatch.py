@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pytest
 
+from substrate_dispatcher.__main__ import main as cli_main
 from substrate_dispatcher.dispatch import (
+    COMMENT_PREFIX,
     Decision,
     SessionRegistry,
     dispatch_disabled,
@@ -236,3 +238,113 @@ def test_dry_run_never_launches(env_file):
     assert launch_fn.calls == []
     assert registry.active_issue_ids() == set()
     assert isinstance(decisions[0], Decision) and decisions[0].action == "launch"
+
+
+# --- Task 2: decision table, once-only comments, dry run, CLI ------------------------------
+
+
+def test_non_hermes_surface_comments_once_and_leaves_label(env_file):
+    linear, mcp = FakeLinear([cand(surface="omp")]), FakeMcp()
+    decisions, _, _, launch_fn = run_tick(linear, mcp, env_file=env_file)
+    assert decisions[0].action == "comment" and decisions[0].marker == "not-dispatchable"
+    posted = linear.named("comment")
+    assert len(posted) == 1
+    assert posted[0][2].startswith(COMMENT_PREFIX) and "[not-dispatchable]" in posted[0][2]
+    assert mcp.calls == [] and launch_fn.calls == [] and linear.named("remove_label") == []
+
+    decisions, _, _, _ = run_tick(linear, mcp, env_file=env_file)
+    assert decisions[0].marker == "not-dispatchable"
+    assert len(linear.named("comment")) == 1
+    assert linear.named("remove_label") == []
+
+
+def test_unregistered_issue_gets_one_no_node_comment(env_file):
+    linear = FakeLinear([cand()])
+    mcp = FakeMcp(default={"found": False, "reason": "no registered node for SWC-1"})
+    decisions, _, _, launch_fn = run_tick(linear, mcp, env_file=env_file)
+    run_tick(linear, mcp, env_file=env_file)
+    assert decisions[0].action == "comment" and decisions[0].marker == "no-node"
+    posted = linear.named("comment")
+    assert len(posted) == 1 and "[no-node]" in posted[0][2]
+    assert launch_fn.calls == []
+
+
+def test_claimed_node_gets_one_already_claimed_comment_naming_holder(env_file):
+    claimed = {**FOUND, "node": {**FOUND["node"], "claimed_by": "claude-code"}}
+    linear, mcp = FakeLinear([cand()]), FakeMcp(default=claimed)
+    decisions, _, _, launch_fn = run_tick(linear, mcp, env_file=env_file)
+    run_tick(linear, mcp, env_file=env_file)
+    assert decisions[0].action == "comment" and decisions[0].marker == "already-claimed"
+    posted = linear.named("comment")
+    assert len(posted) == 1
+    assert "[already-claimed]" in posted[0][2] and "claude-code" in posted[0][2]
+    assert launch_fn.calls == []
+
+
+def test_issue_with_running_session_is_skipped_without_graph_find(env_file):
+    registry = SessionRegistry()
+    registry.add("i-1", launched())
+    linear, mcp = FakeLinear([cand()]), FakeMcp()
+    decisions, _, _, launch_fn = run_tick(linear, mcp, env_file=env_file, registry=registry)
+    assert decisions[0].action == "skip"
+    assert mcp.calls == [] and launch_fn.calls == [] and linear.named("comment") == []
+
+
+def test_at_capacity_skips_and_decides_again_next_tick(env_file):
+    registry = SessionRegistry(max_sessions=2)
+    registry.add("a", launched())
+    registry.add("b", launched())
+    linear, mcp = FakeLinear([cand("i-3", "SWC-3")]), FakeMcp()
+    decisions, _, _, launch_fn = run_tick(linear, mcp, env_file=env_file, registry=registry)
+    assert decisions[0].action == "skip" and "capacity" in decisions[0].reason
+    assert launch_fn.calls == [] and linear.named("comment") == []
+
+    registry = SessionRegistry(max_sessions=2)
+    registry.add("a", launched())
+    decisions, _, _, launch_fn = run_tick(linear, mcp, env_file=env_file, registry=registry)
+    assert decisions[0].action == "launch" and len(launch_fn.calls) == 1
+    assert mcp.calls == ["i-3", "i-3"]
+
+
+def test_worktree_refused_becomes_one_once_only_marker_comment(env_file):
+    linear, mcp = FakeLinear([cand()]), FakeMcp()
+    refusing = RecordingLaunch(raises=WorktreeRefused("only 1.0 GB free on /", "low-disk"))
+    _, lines, registry, _ = run_tick(linear, mcp, env_file=env_file, launch_fn=refusing)
+    run_tick(linear, mcp, env_file=env_file, launch_fn=refusing)
+    posted = linear.named("comment")
+    assert len(posted) == 1 and "[low-disk]" in posted[0][2]
+    assert posted[0][2].startswith(COMMENT_PREFIX)
+    assert registry.active_issue_ids() == set()
+    assert any("[low-disk]" in line for line in lines)
+
+
+def test_dry_run_logs_every_decision_and_writes_nothing(env_file):
+    claimed = {**FOUND, "node": {**FOUND["node"], "claimed_by": "omp"}}
+    linear = FakeLinear([cand("i-1", "SWC-1"), cand("i-2", "SWC-2", "omp"), cand("i-3", "SWC-3")])
+    mcp = FakeMcp({"i-3": claimed})
+    decisions, lines, _, launch_fn = run_tick(linear, mcp, env_file=env_file, dry_run=True)
+    assert [d.action for d in decisions] == ["launch", "comment", "comment"]
+    assert lines[1:] == [
+        f"SWC-1 dispatch:hermes → launch: graph {GID} node n1",
+        "SWC-2 dispatch:omp → comment: surface omp not dispatchable",
+        "SWC-3 dispatch:hermes → comment: node already claimed by omp",
+    ]
+    assert launch_fn.calls == []
+    assert linear.named("comment") == [] and linear.named("remove_label") == []
+
+
+@pytest.mark.parametrize("argv", [["--once"], [], ["--dry-run"]])
+def test_cli_rejects_anything_but_once_dry_run(argv, capsys):
+    with pytest.raises(SystemExit) as err:
+        cli_main(argv)
+    assert err.value.code == 2
+    assert "only --once --dry-run is supported" in capsys.readouterr().err
+
+
+def test_cli_without_linear_key_exits_2_and_prints_no_environment(monkeypatch, capsys):
+    monkeypatch.delenv("LINEAR_API_KEY", raising=False)
+    monkeypatch.setenv("SUBSTRATE_CANARY_SECRET", "canary-7f3a")
+    assert cli_main(["--once", "--dry-run"]) == 2
+    out = capsys.readouterr()
+    assert "LINEAR_API_KEY not set" in out.err
+    assert "canary-7f3a" not in out.out + out.err
