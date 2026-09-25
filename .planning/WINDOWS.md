@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 5
+open_count: 6
 waived_count: 0
 fixed_count: 0
-total_count: 5
-last_updated: 2026-09-24T14:29:47.798Z
+total_count: 6
+last_updated: 2026-09-25T11:45:13.673Z
 ---
 
 # Broken Windows Ledger
@@ -20,6 +20,7 @@ last_updated: 2026-09-24T14:29:47.798Z
 | 3 | 01 | deviation | .planning/phases/01-lane-b/01-06-PLAN.md | 220 | Task 2's literal automated verify (grep -c 'substrate' == 1 on muse plugins list --json) fails even for a correctly non-duplicated install, because the binary's pretty-printed JSON has multiple substring-matching lines per entry; verified instead via jq structural count. See 01-06-SUMMARY.md deviation 3. | open |  | 2026-09-24T12:09:46.208Z |  |
 | 4 | 01 | unrun-verify | omp-ultrathink/swe.ts |  | Task 3 human-check could not run the literal pi -e CLI session (pre-existing extension-loader defect: path argument must be of type string, received undefined); substituted a direct real-code live-verify script against the real running substrate-mcp service instead. See 01-07-SUMMARY.md coverage D4. | open |  | 2026-09-24T12:49:50.971Z |  |
 | 5 | 01 | unrun-verify | src/grok_hermes_connector/server.py |  | Task 3 human-check could not be safely re-triggered: an earlier session probe accidentally caused a real handoff_to_hermes dispatch (live hermes chat --yolo process + real Telegram notification) against production; a second live graph_id-carrying dispatch was deliberately deferred to a human rather than re-attempted autonomously. See 01-05-SUMMARY.md coverage D4. | open |  | 2026-09-24T14:29:47.798Z |  |
+| 6 | 03 | deviation | packages/host/src/sandbox-provider.ts |  | D-12 deviation: sandbox container egress is open. @rivet-dev/agentos 0.2.21 rejects a non-https, non-localhost sandbox baseUrl, so sandbox_net=internal is unusable; the container runs on Docker's default bridge with its token-protected command port published on 127.0.0.1 only and curl https://example.com from inside exits 0. See 03-01-SPIKE.md Gaps; 03-06 re-checks (container_example_com). | open |  | 2026-09-25T11:45:13.673Z |  |
 
 ````json
 [
@@ -85,6 +86,19 @@ last_updated: 2026-09-24T14:29:47.798Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-09-24T14:29:47.798Z",
+    "resolved_at": null,
+    "milestone": "v1.0"
+  },
+  {
+    "id": 6,
+    "kind": "deviation",
+    "phase": "03",
+    "file": "packages/host/src/sandbox-provider.ts",
+    "line": null,
+    "description": "D-12 deviation: sandbox container egress is open. @rivet-dev/agentos 0.2.21 rejects a non-https, non-localhost sandbox baseUrl, so sandbox_net=internal is unusable; the container runs on Docker's default bridge with its token-protected command port published on 127.0.0.1 only and curl https://example.com from inside exits 0. See 03-01-SPIKE.md Gaps; 03-06 re-checks (container_example_com).",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-25T11:45:13.673Z",
     "resolved_at": null,
     "milestone": "v1.0"
   }
