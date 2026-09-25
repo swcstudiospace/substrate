@@ -111,7 +111,7 @@ Plans:
      `agent:<surface>` added when the claim lands.
 **Proof**: Label a real issue `dispatch:hermes` — a Hermes session starts, claims the node, the
 Notion Issue row shows Agent hermes, and Claude Code's brief shows it within a minute.
-**Plans**: 2/9 plans executed
+**Plans**: 6/9 plans executed
 
 Plans:
 **Wave 1**
@@ -121,18 +121,18 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 02-04-PLAN.md — Dispatcher package: Linear/MCP clients, D-12 worktree, D-13 launcher (fixed-template prompt, scrubbed env)
-- [ ] 02-05-PLAN.md — graph_release/graph_complete: ownership check, Linear Todo/In Review, DodGate client, release/complete event kinds (D-05..D-08)
+- [x] 02-04-PLAN.md — Dispatcher package: Linear/MCP clients, D-12 worktree, D-13 launcher (fixed-template prompt, scrubbed env)
+- [x] 02-05-PLAN.md — graph_release/graph_complete: ownership check, Linear Todo/In Review, DodGate client, release/complete event kinds (D-05..D-08)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
 - [ ] 02-02-PLAN.md — Owner adds NOTION_API_KEY (human-action) and the Agent Task Graph schema is read, or notion_skipped is pinned
-- [ ] 02-09-PLAN.md — Live dispatch tracer: label → tick → worktree → Hermes → claim, latency measured; decision table and dry-run CLI
+- [x] 02-09-PLAN.md — Live dispatch tracer: label → tick → worktree → Hermes → claim, latency measured; decision table and dry-run CLI
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
 - [ ] 02-06-PLAN.md — Notion half of the mirror: Agent on claim/release; Status, Linear State, Completed on complete (never PR fields, D-07)
-- [ ] 02-07-PLAN.md — Supervised 30 s loop, D-14 session registry and claim watch, lock, systemd unit started disabled (D-15)
+- [x] 02-07-PLAN.md — Supervised 30 s loop, D-14 session registry and claim watch, lock, systemd unit started disabled (D-15)
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
