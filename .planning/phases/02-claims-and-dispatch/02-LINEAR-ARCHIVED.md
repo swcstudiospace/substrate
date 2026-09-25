@@ -208,3 +208,84 @@ the proof issue SWC-480 was created, **250**.
 ## 2026-09-25 — owner-requested cleanup of completed issues
 
 Archived every issue in a `completed` state type: SWC-467, SWC-465, SWC-113 (3). Undo with `issueUnarchive`.
+
+## 2026-09-25: owner-requested cleanup of irrelevant issues
+
+The owner asked to "close off random Linear issues which aren't relevant to anything". The active count went from 247 to 179.
+
+- 12 × `Untitled eng work` (SWC-468..479). These are hermes-engineering-board session auto-ingest issues with "Last user ask: (none)".
+- SWC-466, the Phase 2 dispatch tracer. Its body says "safe to close". It is still indexed as graph `ut-mugbqivi-752f2dad` n1.
+- 55 issues with no project. Each is a dual-write copy of an AI Dropshipping Agency pipeline issue (same title and run, within ±2 identifiers). The projected twin is kept.
+
+GitHub mirror issues (agent_runtime / ai-agency) were not touched. Undo any row with `issueUnarchive`.
+
+| identifier | id | why | title |
+|---|---|---|---|
+| SWC-69 | 85ad02ab-28ac-4938-aef9-9859c6989a16 | dual-write duplicate (no project) | [E2E] Product pipeline — KOUPA Height Adjustable Flip Standing Desk wi |
+| SWC-70 | b71199c8-6a9b-4ad6-95f6-be5d9f0ae1d9 | dual-write duplicate (no project) | [NO-GO] KOUPA Height Adjustable Flip Standing Desk with Wheels, 24-Inc |
+| SWC-73 | 9e7289b6-ef6d-405a-8826-6457e35efb58 | dual-write duplicate (no project) | [E2E] Product pipeline — Fold-Flat Adjustable Aluminum Laptop Stand |
+| SWC-76 | b0437f71-a18c-4074-9d9f-f1f86397b5bd | dual-write duplicate (no project) | [GO] Clamp-On Rotating Forearm Support |
+| SWC-81 | 1b8960a0-9fbd-488c-a0bf-e7563b934303 | dual-write duplicate (no project) | [Post-locate] Outreach + shipping — 20260812T003502Z |
+| SWC-88 | 9494daf5-a553-463a-9016-b47670dbbd09 | dual-write duplicate (no project) | [Scout] Pet travel accessories — product-ranking gate |
+| SWC-91 | f2d313b1-0f91-4766-b697-28ac2fdc54a5 | dual-write duplicate (no project) | [Product Rank] pet travel accessories |
+| SWC-100 | 8cc51154-bcc7-4601-bd4e-0abe45c22a4a | dual-write duplicate (no project) | [Post-locate] Outreach + shipping — 20260812T081951Z |
+| SWC-112 | fbf6df0a-8b1f-4b47-8b91-249d9f0b717d | dual-write duplicate (no project) | [Post-locate] Outreach + shipping — 20260812T124257Z |
+| SWC-114 | 1f6eff05-0ecd-47b9-b961-140f8123a2ef | dual-write duplicate (no project) | [Scout] Travel tech organizers — product-ranking gate |
+| SWC-118 | e7f33c59-3cf8-4e60-9c99-ea78baedd113 | dual-write duplicate (no project) | [GO] AirTag-Compatible Passport + SIM Travel Wallet |
+| SWC-132 | 66f9d806-30ed-48e0-b764-834c253b5b9b | dual-write duplicate (no project) | [Scout] Desk mobility product-ranking gate |
+| SWC-142 | 09c8981e-74ba-4730-8b03-4a95f74971ef | dual-write duplicate (no project) | [Post-locate] Outreach + shipping — 20260813T002027Z |
+| SWC-144 | 48e78a78-fce0-4c2e-86ef-0da5cb55c7a9 | dual-write duplicate (no project) | [Scout] Kitchen organizers under $40 — product-ranking gate |
+| SWC-149 | 89d9b92b-d4df-4667-b64e-26c64ee80492 | dual-write duplicate (no project) | [Post-locate] Outreach + shipping — 20260813T041919Z |
+| SWC-151 | eced4381-a03c-4c9c-961e-513b32f4aa8f | dual-write duplicate (no project) | [Scout] Pet travel accessories — product-ranking gate |
+| SWC-153 | 12f195f3-a66d-4744-8c87-2b71f5c70024 | dual-write duplicate (no project) | [Scout] Pet travel ranking gate — final top 5 |
+| SWC-155 | cd2cf475-27b1-4d7a-a7ee-9be4bc58862e | dual-write duplicate (no project) | [Product Rank] pet travel accessories |
+| SWC-160 | 5d2509fc-433a-412d-a1fa-4f2b3df29926 | dual-write duplicate (no project) | [Scout] Home gym micro-equipment ranking gate |
+| SWC-163 | 57654c6f-74d4-4aee-8dd4-2385170441ac | dual-write duplicate (no project) | [GO] Portable Cable Resistance Travel Gym Kit |
+| SWC-166 | d1cf8acd-13af-4fda-9aae-b7a0dd682c81 | dual-write duplicate (no project) | [GO] Fabric Hip-Band Glute Activation Kit |
+| SWC-173 | f010e9b1-22fa-4073-a17e-935b3054fa84 | dual-write duplicate (no project) | [Product Rank] travel tech organizers |
+| SWC-175 | 9ef4f604-f5c3-4da2-977e-f46f17c47735 | dual-write duplicate (no project) | [GO] Modular Padded Tech Organizer with Removable Dividers |
+| SWC-177 | 763a80e7-39ab-46ea-91a8-8c92d13b0a72 | dual-write duplicate (no project) | [GO] Creator SD-Card and Adapter Media Vault |
+| SWC-182 | f6800302-0d29-4815-bd9b-844ba5841cf4 | dual-write duplicate (no project) | [Post-locate] Outreach + shipping — 20260813T161706Z |
+| SWC-184 | ba711cc5-49cf-4d35-9ba0-80aaaa84271f | dual-write duplicate (no project) | [Scout] Product-ranking gate: sustainable bathroom gadgets |
+| SWC-186 | 8437f2d2-7db6-46e3-9a3c-7931dd3bf1d0 | dual-write duplicate (no project) | [Product Rank] sustainable bathroom gadgets |
+| SWC-192 | 03c044ca-0ef7-4639-a0e0-884011488e17 | dual-write duplicate (no project) | [Scout] Product-ranking gate: desk mobility / posture tools |
+| SWC-208 | 7a46c245-36b8-4db7-a8de-72208c8ae7cc | dual-write duplicate (no project) | [Post-locate] Outreach + shipping — 20260814T080232Z |
+| SWC-214 | e6f28bfe-0496-40d5-b56a-162a88e5b6ef | dual-write duplicate (no project) | [Post-locate] Outreach + shipping — 20260815T040224Z |
+| SWC-216 | 8bf4b5be-6a5e-4b17-a22a-3f6324df7f8e | dual-write duplicate (no project) | [Post-locate] Outreach + shipping — 20260815T080212Z |
+| SWC-218 | 6bf12efa-38dc-4552-b9f4-31ccfaa10b49 | dual-write duplicate (no project) | [Post-locate] Outreach + shipping — 20260815T200154Z |
+| SWC-221 | 375048c8-5757-4a39-9d13-36352204ebba | dual-write duplicate (no project) | [Product Rank FALLBACK] desk mobility and posture tools for remote wor |
+| SWC-223 | b07a3df7-52b9-42c8-a72a-bc1de3d39b88 | dual-write duplicate (no project) | [GO/FB] Silent under-desk pedal exerciser (no-screen mechanical) |
+| SWC-225 | 2cbe4dd1-54de-4a04-8883-1883f0110940 | dual-write duplicate (no project) | [TEST/FB] Textured topographic anti-fatigue standing mat (compact desk |
+| SWC-232 | 1876c9ad-b7f3-4e5f-9f1c-af98d585b71f | dual-write duplicate (no project) | [NO-GO] Stackable Fridge Water-Bottle & Tumbler Rack (2-Pack) |
+| SWC-235 | 4d764c7f-99ad-4a59-8c8a-5b2e3cbc2a19 | dual-write duplicate (no project) | [NO-GO] Bamboo Bag Organizer Dispenser (Foil/Wrap/Bag Trio) |
+| SWC-240 | 46af6550-6a56-483e-8039-ad300a9dd6b6 | dual-write duplicate (no project) | [Post-locate] Outreach + shipping — 20260816T040454Z |
+| SWC-242 | 821f141e-e89e-49db-a955-feef8716d043 | dual-write duplicate (no project) | [Product Rank FALLBACK] pet travel accessories |
+| SWC-249 | ad6bf083-e36a-45c4-a2f6-51db5434cdc6 | dual-write duplicate (no project) | [Post-locate] Outreach + shipping — 20260816T080535Z |
+| SWC-251 | 191463f0-8aa2-4f91-9347-613aa4963822 | dual-write duplicate (no project) | [Post-locate] Outreach + shipping — 20260816T080605Z |
+| SWC-253 | 86f54bf9-ff30-4bc9-b943-821e77b2dcf7 | dual-write duplicate (no project) | [Product Rank FALLBACK] home gym micro-equipment |
+| SWC-255 | b24457d0-1314-4324-8939-0ba8d46e88a4 | dual-write duplicate (no project) | [GO] Pilates Ring + Mini Loop Band Trio Mobility Bundle |
+| SWC-257 | 74ec2179-caad-446c-9f8e-841c747a4bbc | dual-write duplicate (no project) | [GO] Progressive Fabric Resistance Band Kit + Door Anchor + Workout Ca |
+| SWC-259 | 5079bbbc-6100-4f83-a04a-be3ed05219b1 | dual-write duplicate (no project) | [GO] Collapsible/Fillable Soft Kettlebell (empty ship, user fills sand |
+| SWC-265 | 556290ba-f925-4609-93bf-077079fe0659 | dual-write duplicate (no project) | [Post-locate] Outreach + shipping — 20260816T120413Z |
+| SWC-267 | 452e3cb2-f186-4d7e-bc6e-2df51e5be0e1 | dual-write duplicate (no project) | [Product Rank FALLBACK] travel tech organizers |
+| SWC-273 | b3c340e7-5dbb-4877-9d56-d4dc01fb53f6 | dual-write duplicate (no project) | [GO] Under-seat personal-item organizer insert with tech bay |
+| SWC-306 | ad189320-618f-46fb-a5f5-6c796c1179da | dual-write duplicate (no project) | [Post-locate] Outreach + shipping — 20260817T000528Z |
+| SWC-319 | e7ab3603-afde-415b-b206-e9e2b1e44ee8 | dual-write duplicate (no project) | [TEST] Crash-tested style 3-in-1 dog seatbelt harness (walk harness +  |
+| SWC-323 | 521aa1ca-0a25-4528-9e9e-57c112b3ab85 | dual-write duplicate (no project) | [Locate FALLBACK] Crash-tested style 3-in-1 dog seatbelt harness (walk |
+| SWC-325 | 7455f408-dc7a-498e-9b47-3f95d5682d36 | dual-write duplicate (no project) | [Post-locate] Outreach + shipping — 20260817T080543Z |
+| SWC-327 | 8fd858af-57a9-4785-9879-757f9bc79955 | dual-write duplicate (no project) | [Product Rank FALLBACK] home gym micro-equipment |
+| SWC-330 | f502cd6f-88d8-4f97-b3ab-10e1119c034f | dual-write duplicate (no project) | [TEST] Under-desk mini pedal exerciser (no electronics) |
+| SWC-334 | 2fa89571-596d-42a7-a68c-f04e3600048a | dual-write duplicate (no project) | [Post-locate] Outreach + shipping — 20260817T120524Z |
+| SWC-466 | d5b9c622-c760-4ee4-89d0-3dbaab0a1ab5 | Phase 2 dispatch tracer (done) | [substrate 02-09 dispatch tracer] throwaway — safe to close |
+| SWC-468 | 96016de3-ac5b-48b8-8bae-20201a0f625e | untitled eng-board session ingest | Untitled eng work |
+| SWC-469 | 1a3e2e85-001c-4e4e-bcc5-0be7a81ffd91 | untitled eng-board session ingest | Untitled eng work |
+| SWC-470 | 9dacc7c5-7dd4-4420-8f6d-38f87436b000 | untitled eng-board session ingest | Untitled eng work |
+| SWC-471 | 2bd08777-27e0-4246-80da-14bbd8e145f1 | untitled eng-board session ingest | Untitled eng work |
+| SWC-472 | 383dd688-94ea-484a-8aef-17f0baec0ab3 | untitled eng-board session ingest | Untitled eng work |
+| SWC-473 | 5c623ccd-8ff8-4c68-b665-959cb09cf6ae | untitled eng-board session ingest | Untitled eng work |
+| SWC-474 | fe5e6ede-68ff-481c-bfaf-3887a7f2d713 | untitled eng-board session ingest | Untitled eng work |
+| SWC-475 | e26b730e-ab34-480a-b105-384284220fba | untitled eng-board session ingest | Untitled eng work |
+| SWC-476 | 2fad6ccd-cbe8-4b7a-9b37-cf022fc94a96 | untitled eng-board session ingest | Untitled eng work |
+| SWC-477 | 3e4c4d10-ea44-451c-a359-8c83bd2cc1cd | untitled eng-board session ingest | Untitled eng work |
+| SWC-478 | 2aefe23e-1bad-4594-8294-b939c74e20ae | untitled eng-board session ingest | Untitled eng work |
+| SWC-479 | bb611ef9-e83f-4024-a98e-b394f9cba6c5 | untitled eng-board session ingest | Untitled eng work |
