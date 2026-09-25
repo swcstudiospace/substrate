@@ -247,7 +247,10 @@ export class Substrate {
 	 * other caller — or a call on an unclaimed node — gets `released: false`
 	 * with the reason and causes no index, tracker or event write, so one agent
 	 * cannot drop another's work by accident or through an injected
-	 * instruction. The holder's release clears the claim, sets the node
+	 * instruction. `surface` must be the caller's authenticated surface when
+	 * there is one — the MCP tools refuse a payload naming another — because the
+	 * claim session id is public; only an anonymous caller is taken at its
+	 * payload's word. The holder's release clears the claim, sets the node
 	 * `unstarted`, logs a `release` event and mirrors it (Linear back to Todo,
 	 * `agent:<surface>` removed); a mirror failure is a warning, never a block.
 	 */

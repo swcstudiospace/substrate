@@ -21,6 +21,25 @@ function json(value: unknown) {
 	return text(JSON.stringify(value, null, 2));
 }
 
+/**
+ * Who a release or completion acts as. The claim session id is public (a
+ * Linear comment, the claim event), so the surface is the ownership proof: an
+ * authenticated caller is its token's surface and a payload naming another is
+ * refused. An anonymous caller is attributed by its payload.
+ */
+function ownerSurface(
+	payload: Surface | undefined,
+	callerSurface: Surface | null,
+): { surface: Surface; refusal?: never } | { refusal: string } {
+	if (callerSurface === null) return { surface: payload ?? "claude-code" };
+	if (payload && payload !== callerSurface) {
+		return { refusal: `surface ${payload} does not match the authenticated caller ${callerSurface}` };
+	}
+	return { surface: callerSurface };
+}
+
+const OWNER_SURFACE_HINT = "defaults to the caller's own surface; an authenticated caller cannot name another";
+
 export function createMcpServer(substrate: Substrate, callerSurface: Surface | null): McpServer {
 	const server = new McpServer({ name: "substrate", version: "0.1.0" });
 
@@ -202,11 +221,14 @@ export function createMcpServer(substrate: Substrate, callerSurface: Surface | n
 				graph_id: z.string(),
 				node_id: z.string(),
 				session_id: z.string(),
-				surface: surfaceSchema.optional(),
+				surface: surfaceSchema.optional().describe(OWNER_SURFACE_HINT),
 			},
 		},
-		async ({ graph_id, node_id, session_id, surface }) =>
-			json(await substrate.releaseNode(graph_id, node_id, surface ?? callerSurface ?? "claude-code", session_id)),
+		async ({ graph_id, node_id, session_id, surface }) => {
+			const owner = ownerSurface(surface, callerSurface);
+			if (owner.refusal !== undefined) return json({ released: false, reason: owner.refusal });
+			return json(await substrate.releaseNode(graph_id, node_id, owner.surface, session_id));
+		},
 	);
 
 	server.registerTool(
@@ -219,7 +241,7 @@ export function createMcpServer(substrate: Substrate, callerSurface: Surface | n
 				graph_id: z.string(),
 				node_id: z.string(),
 				session_id: z.string(),
-				surface: surfaceSchema.optional(),
+				surface: surfaceSchema.optional().describe(OWNER_SURFACE_HINT),
 				dod: z
 					.object({
 						summary: z.string(),
@@ -229,10 +251,11 @@ export function createMcpServer(substrate: Substrate, callerSurface: Surface | n
 					.optional(),
 			},
 		},
-		async ({ graph_id, node_id, session_id, surface, dod }) =>
-			json(
-				await substrate.completeNode(graph_id, node_id, surface ?? callerSurface ?? "claude-code", session_id, dod),
-			),
+		async ({ graph_id, node_id, session_id, surface, dod }) => {
+			const owner = ownerSurface(surface, callerSurface);
+			if (owner.refusal !== undefined) return json({ completed: false, reason: owner.refusal });
+			return json(await substrate.completeNode(graph_id, node_id, owner.surface, session_id, dod));
+		},
 	);
 
 	return server;
