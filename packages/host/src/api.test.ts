@@ -23,6 +23,8 @@ function statusFor(graphId: string, nodeId: string, extra: Record<string, unknow
 		opened_at: "2026-09-25T12:00:00.000Z",
 		last_error: null,
 		seeded: [],
+		resumes: 0,
+		stale_approvals: 0,
 		state: "running",
 		latest_sequence: 1,
 		history_events: 1,

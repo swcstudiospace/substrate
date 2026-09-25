@@ -42,7 +42,27 @@ export type TaskRecord = {
 	opened_at: string;
 	last_error: string | null;
 	seeded: SeededFile[];
+	/** D-07: continuation prompts sent after host restarts; the next key is `<gid>:<nid>:resume:<resumes + 1>`. */
+	resumes: number;
+	/** Approval requests that died with an interrupted turn (count only; they can never be answered). */
+	stale_approvals: number;
 };
+
+/** Records written before 03-06 carry no resume fields; they read as 0 (T-03-06-01: the key must stay numeric). */
+export function withResumeDefaults(record: TaskRecord): TaskRecord {
+	record.resumes = Number.isInteger(record.resumes) ? record.resumes : 0;
+	record.stale_approvals = Number.isInteger(record.stale_approvals) ? record.stale_approvals : 0;
+	return record;
+}
+
+/** D-07: the tasks whose turn a host restart cut short — in flight, still claimed, not finished. */
+export function interruptedTasks(records: readonly TaskRecord[]): TaskRecord[] {
+	return records.filter((r) => r.turn_in_flight && !r.released && r.exit_code === null);
+}
+
+/** The continuation prompt (D-07): the model resumes from the worktree and its first prompt's steps. */
+export const RESUME_TEXT =
+	"substrate-host restarted during your last turn. Continue the same task from the files in /home/agentos/work and the numbered steps of your first prompt; do not repeat steps that already succeeded.";
 
 export type OpenRequest = { graph_id: string; node_id: string; identifier: string; repo: string; worktree: string };
 
@@ -137,7 +157,7 @@ export class TaskStore implements TaskStoreLike {
 
 	get(graphId: string, nodeId: string): TaskRecord | null {
 		try {
-			return JSON.parse(readFileSync(this.path(graphId, nodeId), "utf8")) as TaskRecord;
+			return withResumeDefaults(JSON.parse(readFileSync(this.path(graphId, nodeId), "utf8")) as TaskRecord);
 		} catch (cause) {
 			if ((cause as { code?: unknown }).code === "ENOENT") return null;
 			throw cause;
@@ -160,7 +180,7 @@ export class TaskStore implements TaskStoreLike {
 		const records: TaskRecord[] = [];
 		for (const name of readdirSync(this.dir).sort()) {
 			if (!name.endsWith(".json")) continue;
-			records.push(JSON.parse(readFileSync(join(this.dir, name), "utf8")) as TaskRecord);
+			records.push(withResumeDefaults(JSON.parse(readFileSync(join(this.dir, name), "utf8")) as TaskRecord));
 		}
 		return records;
 	}
@@ -258,12 +278,27 @@ export class TaskService {
 	now: () => Date;
 	/** In-flight turns by `<gid>/<nid>`: the promise settles once the record reflects the prompt's outcome. */
 	turns: Map<string, Promise<void>>;
+	/** resumeInterrupted runs once per host process (D-07). */
+	resumedThisBoot: boolean;
+	/** Set by beginShutdown: prompt rejections after this point are the shutdown's, not the turn's. */
+	stopping: boolean;
 
 	constructor(deps: TaskServiceDeps) {
 		this.deps = deps;
 		this.log = deps.log ?? ((line) => process.stdout.write(`${line}\n`));
 		this.now = deps.now ?? (() => new Date());
 		this.turns = new Map();
+		this.resumedThisBoot = false;
+		this.stopping = false;
+	}
+
+	/**
+	 * Called from the SIGTERM handler before the registry shuts down: an in-flight prompt that the
+	 * shutdown rejects (sidecar exit, lost websocket) must keep its record in flight, or the next
+	 * boot would never send its continuation (D-07).
+	 */
+	beginShutdown(): void {
+		this.stopping = true;
 	}
 
 	/** Research Pattern 2: validate → existing? → graph_get → graph_claim → brief → seed → open → prompt (not awaited). */
@@ -347,6 +382,8 @@ export class TaskService {
 				opened_at: this.now().toISOString(),
 				last_error: null,
 				seeded,
+				resumes: 0,
+				stale_approvals: 0,
 			};
 			this.deps.store.save(record);
 
@@ -377,6 +414,11 @@ export class TaskService {
 				this.log(`[substrate-host] turn ended ${key} stop=${result.stopReason}`);
 			})
 			.catch((cause: unknown) => {
+				if (this.stopping) {
+					// D-07: the host is going down; the turn is interrupted, not failed, so the next boot resumes it.
+					this.log(`[substrate-host] prompt interrupted by shutdown ${key}: ${String(cause)}`);
+					return;
+				}
 				this.update(record.graph_id, record.node_id, (r) => {
 					r.turn_in_flight = false;
 					r.last_error = String(cause);
@@ -388,6 +430,52 @@ export class TaskService {
 				if (this.turns.get(key) === settled) this.turns.delete(key);
 			});
 		this.turns.set(key, settled);
+	}
+
+	/**
+	 * D-07, once per process at boot: every task whose turn the previous host process left in
+	 * flight gets exactly one continuation prompt, keyed `<gid>:<nid>:resume:<n>` so a repeated
+	 * boot cannot replay it (T-03-06-01). rivet restores the session itself (resume → load →
+	 * bounded-history fallback); the host only sends the next prompt. Approval requests of the dead
+	 * turn can never be answered, so they leave pending_approvals as a stale count (T-03-06-02).
+	 * The model route is re-established first (on a:hostfn_proxy the restart killed the in-VM relay);
+	 * a task whose route or prompt fails is marked failed on its own and the others still resume.
+	 * Returns the number of continuation prompts sent.
+	 */
+	async resumeInterrupted(): Promise<number> {
+		if (this.resumedThisBoot) return 0;
+		this.resumedThisBoot = true;
+		let sent = 0;
+		for (const interrupted of interruptedTasks(this.deps.store.list())) {
+			const { graph_id: gid, node_id: nid } = interrupted;
+			const key = `${gid}/${nid}`;
+			let handle: VmHandle;
+			try {
+				handle = this.deps.vmFor(gid);
+				await this.deps.ensureModelRoute(handle, gid);
+			} catch (cause) {
+				this.update(gid, nid, (r) => {
+					r.turn_in_flight = false;
+					r.last_error = String(cause);
+					r.exit_code = 1;
+				});
+				this.log(`[substrate-host] resume ${key} failed before the prompt: ${String(cause)}`);
+				continue;
+			}
+			const record = this.update(gid, nid, (r) => {
+				r.resumes += 1;
+				r.prompt_count += 1;
+				r.stale_approvals += r.pending_approvals.length;
+				r.pending_approvals = [];
+				r.turn_in_flight = true;
+			});
+			if (!record) continue;
+			const idempotencyKey = `${gid}:${nid}:resume:${record.resumes}`;
+			this.startPrompt(handle, record, RESUME_TEXT, idempotencyKey);
+			this.log(`[substrate-host] resumed ${key} key ${idempotencyKey}`);
+			sent += 1;
+		}
+		return sent;
 	}
 
 	update(graphId: string, nodeId: string, change: (record: TaskRecord) => void): TaskRecord | null {

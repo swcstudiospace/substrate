@@ -165,6 +165,11 @@ engineReady = true;
 client = createClient<typeof registry>({ endpoint: engineEndpoint });
 log(`[substrate-host] engine ${engineEndpoint.replace(/^https?:\/\//, "")}`);
 
+// D-07: before the API accepts requests, every turn the previous host process left in flight gets
+// its one continuation prompt (rivet restores the session; the prompt is keyed <gid>:<nid>:resume:<n>).
+const resumed = await service.resumeInterrupted();
+log(`[substrate-host] interrupted turns resumed: ${resumed}`);
+
 // D-10: the tracker MCP proxy exists only on the evidence-selected vm_mcp route; elsewhere the seeded
 // notion/linear entries are inert (port neither exempted nor served) and the host does those writes.
 const trackerProxy: Server | null = trackerRoute(route) === "vm_mcp" ? startTrackerProxy({ log }) : null;
@@ -184,6 +189,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 		if (stopping) return;
 		stopping = true;
 		log(`[substrate-host] ${signal}: stopping`);
+		service.beginShutdown();
 		server.close();
 		trackerProxy?.close();
 		registry

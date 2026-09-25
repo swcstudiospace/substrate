@@ -1,13 +1,20 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { parseRoute } from "./options.ts";
 import { WORKTREES_ROOT } from "./sandbox-options.ts";
 import {
 	hostCallTarget,
+	interruptedTasks,
 	MemoryTaskStore,
 	pollCode,
+	RESUME_TEXT,
 	type TaskRecord,
 	TaskService,
 	type TaskServiceDeps,
+	TaskStore,
+	type TaskStoreLike,
 	validateOpenRequest,
 	type VmHandle,
 } from "./tasks.ts";
@@ -28,6 +35,7 @@ function openBody(overrides: Record<string, unknown> = {}) {
 }
 
 type Call = { name: string; args: unknown[] };
+type PromptInput = Parameters<VmHandle["sessions"]["prompt"]>[0];
 
 /** Fakes for every collaborator; `calls` records the order of every side effect. */
 function harness(opts: {
@@ -35,11 +43,19 @@ function harness(opts: {
 	claimed?: boolean;
 	openThrows?: string;
 	modelRouteThrows?: string;
+	/** ensureModelRoute throws only for this graph id (the others succeed). */
+	modelRouteThrowsFor?: string;
+	/** sessions.prompt rejects at once when the idempotency key contains this text. */
+	promptRejectsFor?: string;
 	sessionState?: string;
-	store?: MemoryTaskStore;
+	store?: TaskStoreLike;
 } = {}) {
 	const calls: Call[] = [];
 	const record = (name: string, ...args: unknown[]) => calls.push({ name, args });
+	/** Every sessions.prompt input, typed, in call order. */
+	const prompts: PromptInput[] = [];
+	/** Model-route and prompt steps in order, as `ensureModelRoute:<gid>` / `prompt:<idempotencyKey>`. */
+	const sequence: string[] = [];
 	let pending = Promise.withResolvers<{ stopReason: string }>();
 	let promptInFlight = false;
 	const files = new Map<string, string>();
@@ -61,6 +77,11 @@ function harness(opts: {
 			},
 			prompt: (input) => {
 				record("sessions.prompt", input);
+				prompts.push(input);
+				sequence.push(`prompt:${input.idempotencyKey}`);
+				if (opts.promptRejectsFor && input.idempotencyKey.includes(opts.promptRejectsFor)) {
+					return Promise.reject(new Error(`prompt refused for ${input.idempotencyKey}`));
+				}
 				pending = Promise.withResolvers<{ stopReason: string }>();
 				promptInFlight = true;
 				return pending.promise;
@@ -100,7 +121,9 @@ function harness(opts: {
 		store: opts.store ?? new MemoryTaskStore(),
 		ensureModelRoute: async (_handle, graphId) => {
 			record("ensureModelRoute", graphId);
+			sequence.push(`ensureModelRoute:${graphId}`);
 			if (opts.modelRouteThrows) throw new Error(opts.modelRouteThrows);
+			if (opts.modelRouteThrowsFor === graphId) throw new Error(`relay failed for ${graphId}`);
 		},
 		route: ROUTE,
 		testsRoute: "sandbox",
@@ -124,6 +147,8 @@ function harness(opts: {
 		service,
 		calls,
 		named,
+		prompts,
+		sequence,
 		files,
 		store: deps.store as MemoryTaskStore,
 		settlePrompt: (stopReason: string) => settle({ stopReason }),
@@ -342,6 +367,175 @@ describe("TaskService status, terminate and kill", () => {
 		h.service.resolveApproval(GID, NID, "req-1");
 		status = await h.service.status(GID, NID);
 		expect(status?.pending_approvals).toEqual([]);
+	});
+});
+
+/** A record as 03-03 wrote it after the first prompt started (no resumes/stale_approvals yet). */
+function taskRecord(overrides: Partial<TaskRecord> = {}): TaskRecord {
+	return {
+		graph_id: GID,
+		node_id: NID,
+		identifier: "TRC-1",
+		repo: "swcstudiospace/agent-substrate",
+		session_id: NID,
+		prompt_count: 1,
+		turn_in_flight: true,
+		last_stop_reason: null,
+		exit_code: null,
+		released: false,
+		pending_approvals: [],
+		opened_at: "2026-09-25T12:00:00.000Z",
+		last_error: null,
+		seeded: [],
+		resumes: 0,
+		stale_approvals: 0,
+		...overrides,
+	};
+}
+
+describe("interruptedTasks", () => {
+	test("returns exactly the records whose turn was in flight, not released and not finished", () => {
+		const inFlight = taskRecord({ graph_id: "ut-in-11111111" });
+		const released = taskRecord({ graph_id: "ut-rel-22222222", released: true });
+		const finished = taskRecord({ graph_id: "ut-fin-33333333", turn_in_flight: false, last_stop_reason: "end_turn", exit_code: 0 });
+		const failed = taskRecord({ graph_id: "ut-bad-44444444", exit_code: 1 });
+		const idle = taskRecord({ graph_id: "ut-idle-55555555", turn_in_flight: false });
+		expect(interruptedTasks([released, inFlight, finished, failed, idle]).map((r) => r.graph_id)).toEqual(["ut-in-11111111"]);
+		expect(interruptedTasks([])).toEqual([]);
+	});
+});
+
+describe("TaskService.resumeInterrupted", () => {
+	test("one interrupted record gets one continuation prompt keyed resume:1; approvals of the dead turn become stale", async () => {
+		const store = new MemoryTaskStore();
+		store.save(
+			taskRecord({
+				pending_approvals: [
+					{ request_id: "req-1", tool: "Read", at: "2026-09-25T12:00:01.000Z" },
+					{ request_id: "req-2", tool: "Bash", at: "2026-09-25T12:00:02.000Z" },
+				],
+			}),
+		);
+		const h = harness({ store });
+		expect(await h.service.resumeInterrupted()).toBe(1);
+		expect(h.prompts).toHaveLength(1);
+		const prompt = h.prompts[0];
+		expect(prompt?.sessionId).toBe(NID);
+		expect(prompt?.idempotencyKey).toBe(`${GID}:${NID}:resume:1`);
+		expect(prompt?.content).toEqual([{ type: "text", text: RESUME_TEXT }]);
+		expect(RESUME_TEXT).toContain("/home/agentos/work");
+		const stored = store.get(GID, NID);
+		expect(stored?.prompt_count).toBe(2);
+		expect(stored?.resumes).toBe(1);
+		expect(stored?.turn_in_flight).toBe(true);
+		expect(stored?.pending_approvals).toEqual([]);
+		expect(stored?.stale_approvals).toBe(2);
+		expect(stored?.exit_code).toBeNull();
+		// The continuation settles exactly like the first prompt.
+		await h.settlePrompt("end_turn");
+		expect(store.get(GID, NID)?.exit_code).toBe(0);
+		expect(store.get(GID, NID)?.turn_in_flight).toBe(false);
+	});
+
+	test("a second call in the same process sends nothing; the next boot keys the record resume:2", async () => {
+		const store = new MemoryTaskStore();
+		store.save(taskRecord());
+		const boot1 = harness({ store });
+		await boot1.service.resumeInterrupted();
+		expect(await boot1.service.resumeInterrupted()).toBe(0);
+		expect(boot1.prompts).toHaveLength(1);
+		// The host restarts again while the continuation is still in flight (record: resumes 1, turn in flight).
+		const boot2 = harness({ store });
+		expect(await boot2.service.resumeInterrupted()).toBe(1);
+		expect(boot2.prompts.map((p) => p.idempotencyKey)).toEqual([`${GID}:${NID}:resume:2`]);
+		expect(store.get(GID, NID)?.resumes).toBe(2);
+		expect(store.get(GID, NID)?.prompt_count).toBe(3);
+	});
+
+	test("released, finished and not-in-flight records get no prompt", async () => {
+		const store = new MemoryTaskStore();
+		store.save(taskRecord({ graph_id: "ut-rel-22222222", released: true, pending_approvals: [{ request_id: "r", tool: "Read", at: "t" }] }));
+		store.save(taskRecord({ graph_id: "ut-fin-33333333", turn_in_flight: false, last_stop_reason: "end_turn", exit_code: 0 }));
+		store.save(taskRecord({ graph_id: "ut-idle-55555555", turn_in_flight: false }));
+		const h = harness({ store });
+		expect(await h.service.resumeInterrupted()).toBe(0);
+		expect(h.prompts).toHaveLength(0);
+		expect(h.sequence).toEqual([]);
+		for (const r of store.list()) {
+			expect(r.resumes).toBe(0);
+			expect(r.prompt_count).toBe(1);
+		}
+		expect(store.get("ut-rel-22222222", NID)?.pending_approvals).toHaveLength(1);
+	});
+
+	test("a continuation prompt that rejects fails that task only; the other task still resumes", async () => {
+		const store = new MemoryTaskStore();
+		store.save(taskRecord({ graph_id: "ut-aaa-11111111" }));
+		store.save(taskRecord({ graph_id: "ut-bbb-22222222" }));
+		const h = harness({ store, promptRejectsFor: "ut-aaa-11111111:" });
+		expect(await h.service.resumeInterrupted()).toBe(2);
+		expect(h.prompts.map((p) => p.idempotencyKey)).toEqual(["ut-aaa-11111111:n1:resume:1", "ut-bbb-22222222:n1:resume:1"]);
+		await (h.service.turns.get("ut-aaa-11111111/n1") ?? Promise.resolve()); // the other turn is still pending on the fake
+		const failed = store.get("ut-aaa-11111111", NID);
+		expect(failed?.exit_code).toBe(1);
+		expect(failed?.last_error).toContain("prompt refused");
+		expect(failed?.turn_in_flight).toBe(false);
+		const other = store.get("ut-bbb-22222222", NID);
+		expect(other?.exit_code).toBeNull();
+		expect(other?.last_error).toBeNull();
+		expect(other?.turn_in_flight).toBe(true);
+		expect(other?.resumes).toBe(1);
+	});
+
+	test("ensureModelRoute is awaited once per task before its prompt; a failing route fails that task only", async () => {
+		const store = new MemoryTaskStore();
+		store.save(taskRecord({ graph_id: "ut-aaa-11111111" }));
+		store.save(taskRecord({ graph_id: "ut-bbb-22222222" }));
+		const h = harness({ store, modelRouteThrowsFor: "ut-aaa-11111111" });
+		expect(await h.service.resumeInterrupted()).toBe(1);
+		expect(h.sequence).toEqual(["ensureModelRoute:ut-aaa-11111111", "ensureModelRoute:ut-bbb-22222222", "prompt:ut-bbb-22222222:n1:resume:1"]);
+		const failed = store.get("ut-aaa-11111111", NID);
+		expect(failed?.exit_code).toBe(1);
+		expect(failed?.last_error).toContain("relay failed");
+		expect(failed?.turn_in_flight).toBe(false);
+		expect(failed?.resumes).toBe(0);
+		expect(store.get("ut-bbb-22222222", NID)?.resumes).toBe(1);
+		expect(store.get("ut-bbb-22222222", NID)?.exit_code).toBeNull();
+	});
+
+	test("TaskStore reads a record written before resumes/stale_approvals existed as 0, so the first key is resume:1", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "tasks-03-06-"));
+		try {
+			const { resumes: _resumes, stale_approvals: _stale, ...legacy } = taskRecord();
+			writeFileSync(join(dir, `${GID}--${NID}.json`), JSON.stringify(legacy));
+			const store = new TaskStore(dir);
+			expect(store.get(GID, NID)?.resumes).toBe(0);
+			expect(store.list()[0]?.stale_approvals).toBe(0);
+			const h = harness({ store });
+			await h.service.resumeInterrupted();
+			expect(h.prompts.map((p) => p.idempotencyKey)).toEqual([`${GID}:${NID}:resume:1`]);
+			expect(store.get(GID, NID)?.resumes).toBe(1);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a prompt that rejects after beginShutdown leaves the record in flight, so the next boot resumes it", async () => {
+		const store = new MemoryTaskStore();
+		const h = harness({ store });
+		await h.service.openTask(openBody());
+		h.service.beginShutdown();
+		await h.failPrompt(new Error("SidecarProcessExited: sidecar process exited with disconnect"));
+		const stored = store.get(GID, NID);
+		expect(stored?.turn_in_flight).toBe(true);
+		expect(stored?.exit_code).toBeNull();
+		expect(stored?.last_error).toBeNull();
+		expect(interruptedTasks(store.list())).toHaveLength(1);
+		// Without the shutdown flag the same rejection fails the task (the first-prompt contract from 03-03).
+		const h2 = harness();
+		await h2.service.openTask(openBody());
+		await h2.failPrompt(new Error("boom"));
+		expect(h2.store.get(GID, NID)?.exit_code).toBe(1);
 	});
 });
 
