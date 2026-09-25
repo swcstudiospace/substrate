@@ -46,12 +46,20 @@ export type TaskRecord = {
 	resumes: number;
 	/** Approval requests that died with an interrupted turn (count only; they can never be answered). */
 	stale_approvals: number;
+	/** 03-07: set once by the host's own pr-create (T-03-07-04/05); null until a PR is opened. */
+	pr_url: string | null;
+	pr_number: number | null;
 };
 
-/** Records written before 03-06 carry no resume fields; they read as 0 (T-03-06-01: the key must stay numeric). */
-export function withResumeDefaults(record: TaskRecord): TaskRecord {
+/**
+ * Records written by earlier plans lack later fields: resume counters read as 0 (T-03-06-01: the
+ * key must stay numeric) and PR fields as null.
+ */
+export function withRecordDefaults(record: TaskRecord): TaskRecord {
 	record.resumes = Number.isInteger(record.resumes) ? record.resumes : 0;
 	record.stale_approvals = Number.isInteger(record.stale_approvals) ? record.stale_approvals : 0;
+	record.pr_url = typeof record.pr_url === "string" ? record.pr_url : null;
+	record.pr_number = Number.isInteger(record.pr_number) ? record.pr_number : null;
 	return record;
 }
 
@@ -157,7 +165,7 @@ export class TaskStore implements TaskStoreLike {
 
 	get(graphId: string, nodeId: string): TaskRecord | null {
 		try {
-			return withResumeDefaults(JSON.parse(readFileSync(this.path(graphId, nodeId), "utf8")) as TaskRecord);
+			return withRecordDefaults(JSON.parse(readFileSync(this.path(graphId, nodeId), "utf8")) as TaskRecord);
 		} catch (cause) {
 			if ((cause as { code?: unknown }).code === "ENOENT") return null;
 			throw cause;
@@ -180,7 +188,7 @@ export class TaskStore implements TaskStoreLike {
 		const records: TaskRecord[] = [];
 		for (const name of readdirSync(this.dir).sort()) {
 			if (!name.endsWith(".json")) continue;
-			records.push(withResumeDefaults(JSON.parse(readFileSync(join(this.dir, name), "utf8")) as TaskRecord));
+			records.push(withRecordDefaults(JSON.parse(readFileSync(join(this.dir, name), "utf8")) as TaskRecord));
 		}
 		return records;
 	}
@@ -384,6 +392,8 @@ export class TaskService {
 				seeded,
 				resumes: 0,
 				stale_approvals: 0,
+				pr_url: null,
+				pr_number: null,
 			};
 			this.deps.store.save(record);
 

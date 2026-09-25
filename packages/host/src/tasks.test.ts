@@ -389,6 +389,8 @@ function taskRecord(overrides: Partial<TaskRecord> = {}): TaskRecord {
 		seeded: [],
 		resumes: 0,
 		stale_approvals: 0,
+		pr_url: null,
+		pr_number: null,
 		...overrides,
 	};
 }

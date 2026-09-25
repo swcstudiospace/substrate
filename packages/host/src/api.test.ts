@@ -25,6 +25,8 @@ function statusFor(graphId: string, nodeId: string, extra: Record<string, unknow
 		seeded: [],
 		resumes: 0,
 		stale_approvals: 0,
+		pr_url: null,
+		pr_number: null,
 		state: "running",
 		latest_sequence: 1,
 		history_events: 1,

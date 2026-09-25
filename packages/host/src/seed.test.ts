@@ -181,6 +181,32 @@ describe("renderPrompt (D-15)", () => {
 		expect(step("none")).not.toContain("run-command");
 		expect(step("none")).not.toContain("run-tests");
 	});
+
+	test("step (4) names the c-route's commit, then git-push and pr-create, before graph_complete (03-07)", () => {
+		for (const route of allRoutes()) {
+			const prompt = renderPrompt(promptInput({ route }));
+			const step = prompt.slice(prompt.indexOf("(4)"), prompt.indexOf("(5)"));
+			const push = step.indexOf(`agentos-substrate git-push --node ${NID}`);
+			const pr = step.indexOf(`agentos-substrate pr-create --node ${NID} --title`);
+			expect(push).toBeGreaterThan(-1);
+			expect(pr).toBeGreaterThan(push);
+			expect(step).toContain("--body");
+			expect(step.indexOf("Commit your work")).toBeLessThan(push);
+			expect(prompt.indexOf("graph_complete")).toBeGreaterThan(prompt.indexOf("pr-create"));
+			if (route.c === "hostfn_commit") {
+				expect(step).toContain(`agentos-substrate commit --node ${NID} --message`);
+				expect(step).not.toContain("shim");
+			} else if (route.c === "sandbox_git") {
+				expect(step).toContain("shim");
+				expect(step).toContain("-m only");
+				expect(step).not.toContain("agentos-substrate commit");
+			} else {
+				expect(step).toContain("git in /home/agentos/work");
+				expect(step).not.toContain("shim");
+				expect(step).not.toContain("agentos-substrate commit");
+			}
+		}
+	});
 });
 
 describe("seedFiles (SC-2, D-08, D-11)", () => {

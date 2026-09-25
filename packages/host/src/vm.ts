@@ -19,6 +19,7 @@ import { agentOS, getSandboxDisposeHooks, type HostFunctionCollections, resolveS
 import { sandboxAgentProvider } from "@rivet-dev/agentos-sandbox";
 import { z } from "zod";
 import { redact } from "../../mcp-server/src/redact.ts";
+import { commit, execFileRunner, gitPush, PR_BODY_MAX, PR_TITLE_MAX, prCreate, COMMIT_MESSAGE_MAX } from "./hostfns.ts";
 import {
 	hostFunctionPermissions,
 	loopbackPorts,
@@ -210,6 +211,69 @@ function runTestsCollection(key: readonly unknown[], config: HostVmConfig) {
 	};
 }
 
+/** git/gh run on the host under the 120 s runner; the sidecar timeout leaves headroom for the reply. */
+const GIT_HOSTFN_TIMEOUT_MS = 130_000;
+
+/**
+ * `agentos-substrate git-push | pr-create` on every route, `commit` on c:hostfn_commit (03-07,
+ * D-08): the owner's GitHub credential answers git and gh on the host only; the guest supplies
+ * text within limits, the executors fix worktree, branch, remote, repo and base (T-03-07-01).
+ */
+function gitCollection(key: readonly unknown[], config: HostVmConfig) {
+	const lookup = (gid: string, nid: string) => config.store.get(gid, nid);
+	const context = (node: string) => {
+		const t = hostCallTarget(key, ["--node", node], lookup);
+		if ("error" in t) return t;
+		return { graphId: t.graphId, nodeId: t.nodeId, store: config.store, substrate: config.substrate, run: execFileRunner, log: config.log };
+	};
+	const functions: HostFunctionCollections[string] = {
+		"git-push": {
+			timeout: GIT_HOSTFN_TIMEOUT_MS,
+			inputSchema: z
+				.object({ node: z.string().describe("node id of this graph's task") })
+				.describe("Push this task's branch (substrate/<graph>) to origin from the host; refuses .substrate- files"),
+			execute: async (input: { node: string }) => {
+				const ctx = context(input.node);
+				if ("error" in ctx) return { error: ctx.error };
+				return gitPush(ctx);
+			},
+		},
+		"pr-create": {
+			timeout: GIT_HOSTFN_TIMEOUT_MS,
+			inputSchema: z
+				.object({
+					node: z.string().describe("node id of this graph's task"),
+					title: z.string().max(PR_TITLE_MAX).describe("pull request title"),
+					body: z.string().max(PR_BODY_MAX).describe("pull request body"),
+				})
+				.describe("Open the pull request for this task's branch against the graph's base branch (once; returns the recorded URL after that)"),
+			execute: async (input: { node: string; title: string; body: string }) => {
+				const ctx = context(input.node);
+				if ("error" in ctx) return { error: ctx.error };
+				return prCreate({ ...ctx, title: input.title, body: input.body });
+			},
+		},
+	};
+	if (config.route.c === "hostfn_commit") {
+		// c:hostfn_commit only: `agentos-substrate commit --node <nid> --message …`.
+		functions["commit"] = {
+			timeout: GIT_HOSTFN_TIMEOUT_MS,
+			inputSchema: z
+				.object({
+					node: z.string().describe("node id of this graph's task"),
+					message: z.string().max(COMMIT_MESSAGE_MAX).describe("commit message"),
+				})
+				.describe("git add -A (excluding .substrate-* files) and git commit on the worktree, run by the host"),
+			execute: async (input: { node: string; message: string }) => {
+				const ctx = context(input.node);
+				if ("error" in ctx) return { error: ctx.error };
+				return commit({ ...ctx, message: redact(input.message) });
+			},
+		};
+	}
+	return functions;
+}
+
 /** Node source run inside the VM on a:hostfn_proxy: an HTTP relay on 127.0.0.1:3001 → agentos-substrate model-fetch. */
 const RELAY_SCRIPT = `
 const http = require("node:http");
@@ -277,6 +341,8 @@ export function createHostVm(config: HostVmConfig) {
 			if (config.route.s === "hostfn") hostFunctions.substrate = substrateCollection(c.key, config);
 			if (config.route.a === "hostfn_proxy") hostFunctions.substrate = { ...hostFunctions.substrate, ...modelFetchCollection() };
 			if (config.testsRoute === "oneshot") hostFunctions.substrate = { ...hostFunctions.substrate, ...runTestsCollection(c.key, config) };
+			// git-push, pr-create (and commit) live on `agentos-substrate` whatever the s: channel: no MCP path exists for them.
+			hostFunctions.substrate = { ...hostFunctions.substrate, ...gitCollection(c.key, config) };
 			const expanded = await resolveSandboxOptions({
 				sidecar: { kind: "shared" as const, pool: `vm-${gid}` },
 				mounts: [{ path: "/home/agentos/work", plugin: { id: "host_dir", config: { hostPath: worktree } } }],
