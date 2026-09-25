@@ -29,6 +29,8 @@ function statusFor(graphId: string, nodeId: string, extra: Record<string, unknow
 		pr_number: null,
 		synced_at: null,
 		sync_by: null,
+		approvals_allowed: 0,
+		approvals_denied: 0,
 		state: "running",
 		latest_sequence: 1,
 		history_events: 1,

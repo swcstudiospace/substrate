@@ -235,6 +235,8 @@ function record(overrides: Partial<TaskRecord> = {}): TaskRecord {
 		pr_number: 41,
 		synced_at: null,
 		sync_by: null,
+		approvals_allowed: 0,
+		approvals_denied: 0,
 		...overrides,
 	};
 }

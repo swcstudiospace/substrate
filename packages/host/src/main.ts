@@ -21,6 +21,7 @@ import { SubstrateClient } from "./substrate.ts";
 import { HostSync, LinearLink, NotionSync } from "./sync.ts";
 import { TaskService, TaskStore, type VmHandle } from "./tasks.ts";
 import { createEnsureModelRoute, createHostVm } from "./vm.ts";
+import { createApprovals, TelegramError } from "./telegram.ts";
 
 const log = (line: string) => process.stdout.write(`${line}\n`);
 
@@ -149,6 +150,14 @@ const service = new TaskService({
 	log,
 });
 
+const broker = createApprovals(process.env, {
+	log,
+	respond: (graphId, sessionId, requestId, optionId) => service.respondApproval(graphId, sessionId, requestId, optionId),
+	statePath: join(storageDir, "approvals.json"),
+});
+let approvalsStopped = false;
+let approvalTimer: NodeJS.Timeout | undefined;
+
 const { registry } = createHostVm({
 	route,
 	sandboxNet,
@@ -159,6 +168,7 @@ const { registry } = createHostVm({
 	substrate,
 	sync,
 	tasks: () => service,
+	broker,
 	log,
 });
 
@@ -183,12 +193,52 @@ log(`[substrate-host] interrupted turns resumed: ${resumed}`);
 const trackerProxy: Server | null = trackerRoute(route) === "vm_mcp" ? startTrackerProxy({ log }) : null;
 if (!trackerProxy) log("[substrate-host] tracker mcp proxy off (tracker route host)");
 
+function sleepApprovals(ms: number): Promise<void> {
+	const { promise, resolve } = Promise.withResolvers<void>();
+	approvalTimer = setTimeout(() => {
+		approvalTimer = undefined;
+		resolve();
+	}, ms);
+	return promise;
+}
+
+async function pollApprovals(): Promise<void> {
+	while (!approvalsStopped) {
+		try {
+			await broker.pollOnce();
+		} catch (cause) {
+			if (approvalsStopped) return;
+			if (cause instanceof TelegramError && cause.code === 409) {
+				log("[substrate-host] telegram poll conflict (409)");
+				await sleepApprovals(30_000);
+				continue;
+			}
+			const message = cause instanceof TelegramError ? cause.message : "telegram poll: request failed (Error)";
+			log(`[substrate-host] ${message}`);
+			await sleepApprovals(5_000);
+		}
+	}
+}
+
+if (broker.enabled) {
+	try {
+		const username = await broker.whoami();
+		log(`[substrate-host] telegram approvals on (bot @${username})`);
+		void pollApprovals();
+	} catch (cause) {
+		const message = cause instanceof TelegramError ? cause.message : "telegram getMe: request failed (Error)";
+		log(`[substrate-host] ${message}`);
+		log("[substrate-host] telegram approvals off");
+	}
+} else {
+	log("[substrate-host] telegram approvals off");
+}
+
 const server = createApiServer(service, { engineReady: () => engineReady });
 server.listen(apiPort, "127.0.0.1", () => {
 	log(`[substrate-host] api 127.0.0.1:${apiPort}`);
 	log(`[substrate-host] route ${formatRoute(route)}`);
 	log(`[substrate-host] tests route ${testsRoute}; model ${model}; sandbox ${sandboxNet}; skills ${skills.map((s) => s.name).join(",")}`);
-	log("[substrate-host] telegram approvals off");
 });
 
 let stopping = false;
@@ -196,6 +246,9 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 	process.on(signal, () => {
 		if (stopping) return;
 		stopping = true;
+		approvalsStopped = true;
+		broker.stop();
+		clearTimeout(approvalTimer);
 		log(`[substrate-host] ${signal}: stopping`);
 		service.beginShutdown();
 		server.close();

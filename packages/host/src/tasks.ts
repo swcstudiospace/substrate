@@ -52,6 +52,10 @@ export type TaskRecord = {
 	/** D-10: when the PR fields reached the trackers and who wrote them (T-03-07-06). */
 	synced_at: string | null;
 	sync_by: SyncBy | null;
+	/** D-13: taps that answered allow_once. Old records read as 0. */
+	approvals_allowed: number;
+	/** D-13: taps that answered reject_once. Old records read as 0. */
+	approvals_denied: number;
 };
 
 /** model: the sync host function; model_mcp: in-VM ultrathink-sync verified read-only; host: the turn-settle backstop. */
@@ -68,6 +72,8 @@ export function withRecordDefaults(record: TaskRecord): TaskRecord {
 	record.pr_number = Number.isInteger(record.pr_number) ? record.pr_number : null;
 	record.synced_at = typeof record.synced_at === "string" ? record.synced_at : null;
 	record.sync_by = record.sync_by === "model" || record.sync_by === "model_mcp" || record.sync_by === "host" ? record.sync_by : null;
+	record.approvals_allowed = Number.isInteger(record.approvals_allowed) ? record.approvals_allowed : 0;
+	record.approvals_denied = Number.isInteger(record.approvals_denied) ? record.approvals_denied : 0;
 	return record;
 }
 
@@ -250,6 +256,8 @@ export type VmHandle = {
 		cancelPrompt(input: { sessionId: string }): Promise<unknown>;
 		unload(input: { sessionId: string }): Promise<void>;
 	};
+	/** The only answer path (D-13). vm.ts never calls this; the broker does, through TaskService. */
+	respondPermission(input: { sessionId: string; requestId: string; optionId: string }): Promise<{ status: "accepted" | "not_pending" }>;
 };
 
 export type SubstrateLike = {
@@ -424,6 +432,8 @@ export class TaskService {
 				pr_number: null,
 				synced_at: null,
 				sync_by: null,
+				approvals_allowed: 0,
+				approvals_denied: 0,
 			};
 			this.deps.store.save(record);
 
@@ -587,6 +597,23 @@ export class TaskService {
 		this.update(graphId, sessionId, (r) => {
 			r.pending_approvals = r.pending_approvals.filter((p) => p.request_id !== requestId);
 		});
+	}
+
+	/**
+	 * The only code path that answers a permission request (D-13). Called only after an
+	 * authorised callback. allow_always is refused here as well as at the button layer.
+	 */
+	async respondApproval(graphId: string, sessionId: string, requestId: string, optionId: string): Promise<"answered" | "not_pending"> {
+		if (optionId !== "allow_once" && optionId !== "reject_once") return "not_pending";
+		const handle = this.deps.vmFor(graphId);
+		const result = await handle.respondPermission({ sessionId, requestId, optionId });
+		if (result.status !== "accepted") return "not_pending";
+		this.update(graphId, sessionId, (r) => {
+			r.pending_approvals = r.pending_approvals.filter((p) => p.request_id !== requestId);
+			if (optionId === "allow_once") r.approvals_allowed += 1;
+			else r.approvals_denied += 1;
+		});
+		return "answered";
 	}
 
 	/** Every stored field plus the live session view; later plans' record fields appear unchanged. */

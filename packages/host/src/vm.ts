@@ -35,6 +35,7 @@ import {
 import type { SandboxNetwork } from "./sandbox-options.ts";
 import { substrateDocker } from "./sandbox-provider.ts";
 import { hostCallTarget, type TaskService, type TaskStoreLike, type VmHandle } from "./tasks.ts";
+import type { ApprovalBroker } from "./telegram.ts";
 import type { Dod, SubstrateClient } from "./substrate.ts";
 import { HOST_SURFACE } from "./substrate.ts";
 
@@ -53,6 +54,8 @@ export type HostVmConfig = {
 	sync: HostSync | null;
 	/** Late-bound: the service exists before the registry starts, the client only after. */
 	tasks: () => TaskService;
+	/** Set by main.ts before registry.start(); off when the approval bot keys are absent. */
+	broker: ApprovalBroker;
 	log: (line: string) => void;
 };
 
@@ -398,6 +401,18 @@ export function createHostVm(config: HostVmConfig) {
 			if (event.type === "permission_request") {
 				const title = event.toolCall?.title ?? event.toolCall?.kind ?? "tool";
 				config.tasks().recordApproval(gid, sessionId, event.requestId, redact(String(title)).slice(0, 200));
+				const broker = config.broker;
+				void broker.post({
+					graphId: gid,
+					nodeId: sessionId,
+					sessionId,
+					requestId: event.requestId,
+					tool: String(title),
+					input: event.toolCall?.rawInput ?? null,
+					options: event.options.map((option) => ({ optionId: option.optionId, kind: option.kind, name: option.name })),
+				}).catch((cause: unknown) => {
+					config.log(`[substrate-host] approval post failed: ${cause instanceof Error ? cause.name : "Error"}`);
+				});
 			} else if (event.type === "permission_response") {
 				config.tasks().resolveApproval(gid, sessionId, event.requestId);
 			}

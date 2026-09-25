@@ -34,7 +34,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 function scriptedFetch(handler: (call: FetchCall) => unknown): { fetchImpl: typeof fetch; calls: FetchCall[] } {
 	const calls: FetchCall[] = [];
-	const fetchImpl: typeof fetch = async (input, init) => {
+	const fetchImpl = (async (input, init) => {
 		const url = String(input);
 		const method = url.split("/").pop() ?? "";
 		const params = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
@@ -43,7 +43,7 @@ function scriptedFetch(handler: (call: FetchCall) => unknown): { fetchImpl: type
 		const result = await handler(call);
 		if (result instanceof Response) return result;
 		return jsonResponse({ ok: true, result });
-	};
+	}) as typeof fetch;
 	return { fetchImpl, calls };
 }
 
@@ -155,18 +155,20 @@ describe("telegram approvals", () => {
 		expect(String(sent[0]?.params.chat_id)).toBe(String(CHAT));
 		const keyboard = sent[0]?.params.reply_markup as { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> };
 		expect(keyboard.inline_keyboard[0]?.map((b) => b.text)).toEqual(["Approve", "Deny"]);
-		const decoded = keyboard.inline_keyboard[0]?.map((b) => decodeCallback(b.callback_data));
-		expect(decoded).toEqual([
-			{ key: decoded?.[0]?.key, index: 0 },
-			{ key: decoded?.[0]?.key, index: 2 },
-		]);
-		expect(decoded?.[0]?.key).toMatch(/^[A-Z2-7]{13}$/);
+		const row = keyboard.inline_keyboard[0] ?? [];
+		const approve = decodeCallback(row[0]?.callback_data ?? "");
+		const deny = decodeCallback(row[1]?.callback_data ?? "");
+		expect(approve?.index).toBe(0);
+		expect(deny?.index).toBe(2);
+		expect(approve?.key).toBe(deny?.key);
+		const key = approve?.key ?? "";
+		expect(key).toMatch(/^[A-Z2-7]{13}$/);
 		await broker.pollOnce();
 		const raw = JSON.parse(readFileSync(statePath, "utf8")) as { offset: number; keys: Record<string, { graphId: string; sessionId: string; requestId: string }> };
 		expect(raw.offset).toBe(16);
-		expect(raw.keys[decoded?.[0]?.key ?? ""]?.graphId).toBe("g-1");
-		expect(raw.keys[decoded?.[0]?.key ?? ""]?.sessionId).toBe("n-1");
-		expect(raw.keys[decoded?.[0]?.key ?? ""]?.requestId).toBe("req-1");
+		expect(raw.keys[key]?.graphId).toBe("g-1");
+		expect(raw.keys[key]?.sessionId).toBe("n-1");
+		expect(raw.keys[key]?.requestId).toBe("req-1");
 		expect(statSync(statePath).mode & 0o777).toBe(0o600);
 		const reloaded = createApprovals(ON_ENV, { fetchImpl, log: (line) => logs.push(line), respond: async () => "answered", statePath });
 		await reloaded.pollOnce();

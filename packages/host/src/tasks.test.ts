@@ -96,6 +96,10 @@ function harness(opts: {
 				record("sessions.unload", input);
 			},
 		},
+		respondPermission: async (input) => {
+			record("respondPermission", input);
+			return { status: "accepted" };
+		},
 	};
 	const node = opts.graphNode === undefined ? { claimed_by: null, claim_session: null } : opts.graphNode;
 	const deps: TaskServiceDeps = {
@@ -393,6 +397,8 @@ function taskRecord(overrides: Partial<TaskRecord> = {}): TaskRecord {
 		pr_number: null,
 		synced_at: null,
 		sync_by: null,
+		approvals_allowed: 0,
+		approvals_denied: 0,
 		...overrides,
 	};
 }
