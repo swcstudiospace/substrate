@@ -224,10 +224,18 @@ export class IndexStore {
 		return { claimed: false, node };
 	}
 
-	async releaseNode(graphId: string, nodeId: string): Promise<void> {
-		await this.sql`
+	/**
+	 * Clear a claim only if it is still this surface's and session's: the
+	 * caller's ownership check read an earlier snapshot, and a re-claim may have
+	 * landed since. Returns the rows released — 0 means the claim changed.
+	 */
+	async releaseNode(graphId: string, nodeId: string, surface: Surface, sessionId: string): Promise<number> {
+		const rows = (await this.sql`
 			update graph_nodes set claimed_by = null, claimed_at = null, claim_session = null
-			where graph_id = ${graphId} and node_id = ${nodeId}`;
+			where graph_id = ${graphId} and node_id = ${nodeId}
+			  and claimed_by = ${surface} and claim_session = ${sessionId}
+			returning node_id`) as Array<{ node_id: string }>;
+		return rows.length;
 	}
 
 	async setNodeState(graphId: string, nodeId: string, state: NodeState): Promise<void> {

@@ -253,6 +253,9 @@ export class Substrate {
 	 * payload's word. The holder's release clears the claim, sets the node
 	 * `unstarted`, logs a `release` event and mirrors it (Linear back to Todo,
 	 * `agent:<surface>` removed); a mirror failure is a warning, never a block.
+	 * The clear is compare-and-set on the claim just checked: a re-claim that
+	 * lands in between stands, and the caller gets `released: false` with no
+	 * state, event or Linear write.
 	 */
 	async releaseNode(
 		graphId: string,
@@ -264,7 +267,10 @@ export class Substrate {
 		const reason = ownershipRefusal(node, surface, sessionId, "release");
 		if (reason) return { released: false, reason, node };
 
-		await index.releaseNode(graphId, nodeId);
+		if ((await index.releaseNode(graphId, nodeId, surface, sessionId)) === 0) {
+			// A re-claim landed after the snapshot: it stands, and Linear stays with it.
+			return { released: false, ...(await this.lostClaim(graphId, nodeId, surface, sessionId, node)) };
+		}
 		await index.setNodeState(graphId, nodeId, "unstarted").catch(() => undefined);
 		const meta = {
 			surface,
@@ -346,7 +352,16 @@ export class Substrate {
 
 		if (gate.completed) {
 			await index.setNodeState(graphId, nodeId, "completed").catch(() => undefined);
-			await index.releaseNode(graphId, nodeId);
+			if ((await index.releaseNode(graphId, nodeId, surface, sessionId)) === 0) {
+				// Linear is Done either way; a claim that changed after the snapshot is left alone.
+				const { reason } = await this.lostClaim(graphId, nodeId, surface, sessionId, node);
+				await this.emit({
+					...meta,
+					kind: "warning",
+					summary: `complete release skipped for ${identifier}: ${reason}`,
+					payload: { target: "index", action: "release", reason },
+				}).catch(() => undefined);
+			}
 			await this.warn(await this.mirror.done(ctx), "done", meta);
 		}
 		await this.emit({
@@ -388,6 +403,13 @@ export class Substrate {
 	private async refreshed(graphId: string, nodeId: string, fallback: GraphNode): Promise<GraphNode> {
 		const graph = await this.index?.getGraph(graphId).catch(() => null);
 		return graph?.nodes.find((n) => n.node_id === nodeId) ?? fallback;
+	}
+
+	/** The node and why a compare-and-set release matched no row: the claim it checked has since changed. */
+	private async lostClaim(graphId: string, nodeId: string, surface: Surface, sessionId: string, fallback: GraphNode) {
+		const node = await this.refreshed(graphId, nodeId, fallback);
+		const reason = ownershipRefusal(node, surface, sessionId, "release") ?? "the claim changed before the release";
+		return { reason, node };
 	}
 
 	/** One warning event per failed mirror target (D-02); never throws. */

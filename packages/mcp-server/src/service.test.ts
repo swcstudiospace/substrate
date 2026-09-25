@@ -341,10 +341,15 @@ describe("findNode", () => {
 	});
 });
 
-/** A node claimed by claude-code/sess-holder, behind an index that records and applies release/state writes. */
+/**
+ * A node claimed by claude-code/sess-holder, behind an index that records and applies release/state writes. The
+ * release is compare-and-set on the claim, as the real one is; `reclaimBeforeRelease` lands a claim after the
+ * ownership check has read the node and before the release write.
+ */
 function holderStores(node: Partial<GraphNode> = {}) {
 	const emitted: SubstrateEvent[] = [];
 	const writes: string[] = [];
+	let reclaim: Partial<GraphNode> | null = null;
 	const current: GraphNode = {
 		graph_id: "ut-1",
 		node_id: "n1",
@@ -362,9 +367,12 @@ function holderStores(node: Partial<GraphNode> = {}) {
 			graph_id === "ut-1"
 				? { graph_id, repo: "swcstudiospace/agent-substrate", branch: "main", nodes: [{ ...current }] }
 				: null,
-		releaseNode: async () => {
+		releaseNode: async (_graph_id: string, _node_id: string, surface: string, session: string) => {
 			writes.push("release");
+			if (reclaim) Object.assign(current, reclaim);
+			if (current.claimed_by !== surface || current.claim_session !== session) return 0;
 			Object.assign(current, { claimed_by: null, claimed_at: null, claim_session: null });
+			return 1;
 		},
 		setNodeState: async (_graph_id: string, _node_id: string, state: NodeState) => {
 			writes.push(`state:${state}`);
@@ -377,7 +385,10 @@ function holderStores(node: Partial<GraphNode> = {}) {
 			emitted.push(event);
 		},
 	};
-	return { emitted, writes, index, greptime };
+	const reclaimBeforeRelease = (claim: Partial<GraphNode>) => {
+		reclaim = claim;
+	};
+	return { emitted, writes, index, greptime, reclaimBeforeRelease };
 }
 
 /**
@@ -506,6 +517,22 @@ describe("releaseNode", () => {
 		expect(emitted.map((e) => e.kind)).toEqual(["release", "warning"]);
 		expect(emitted[1]?.payload).toMatchObject({ target: "linear", action: "release" });
 		expect(emitted[1]).toMatchObject({ graph_id: "ut-1", node_id: "n1", repo: "swcstudiospace/agent-substrate" });
+	});
+
+	test("a re-claim landing after the ownership check survives the old session's release: released:false, no Todo, no event", async () => {
+		const { emitted, writes, index, greptime, reclaimBeforeRelease } = holderStores();
+		const linear = trackerLinear();
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never, mirror: linear.mirror });
+		reclaimBeforeRelease({ claimed_by: "claude-code", claim_session: "sess-new" });
+
+		const result = await substrate.releaseNode("ut-1", "n1", "claude-code", "sess-holder");
+
+		expect(result.released).toBe(false);
+		expect(result.reason).toBe("node is claimed by claude-code session sess-new; only that session can release it");
+		expect(result.node).toMatchObject({ claimed_by: "claude-code", claim_session: "sess-new" });
+		expect(writes).toEqual(["release"]);
+		expect(linear.requests).toEqual([]);
+		expect(emitted).toEqual([]);
 	});
 
 	test("an unknown node throws rather than answering for a node that does not exist", async () => {
@@ -695,6 +722,22 @@ describe("completeNode → DoD gate (D-06)", () => {
 		expect(writes).toEqual(["state:completed", "release"]);
 		expect(result.node).toMatchObject({ state: "completed", claimed_by: null });
 		expect(emitted.map((e) => e.kind)).toEqual(["complete"]);
+	});
+
+	test("an approved completion whose release no longer matches the claim warns, and still mirrors Done and logs complete", async () => {
+		const { substrate, writes, emitted, reclaimBeforeRelease } = setup();
+		reclaimBeforeRelease({ claimed_by: "claude-code", claim_session: "sess-new" });
+
+		const result = await substrate.completeNode("ut-1", "n1", "claude-code", "sess-holder", { summary: "s", tests_pass: true });
+
+		expect(result.completed).toBe(true);
+		expect(result.node).toMatchObject({ claimed_by: "claude-code", claim_session: "sess-new" });
+		expect(writes).toEqual(["state:started_review", "state:completed", "release"]);
+		expect(emitted.map((e) => e.kind)).toEqual(["warning", "complete"]);
+		expect(emitted[0]?.summary).toBe(
+			"complete release skipped for SWC-7: node is claimed by claude-code session sess-new; only that session can release it",
+		);
+		expect(emitted[0]?.payload).toMatchObject({ target: "index", action: "release" });
 	});
 
 	test("a node with no Linear issue is refused without asking the gate", async () => {
