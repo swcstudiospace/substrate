@@ -21,6 +21,8 @@ export interface SubstrateConfig {
 	linearApiKey: string | undefined;
 	notionApiKey: string | undefined;
 	notionTaskGraphDataSource: string;
+	/** hermes-linear-connector's API; its DoD gate alone moves an issue to Done (D-06). */
+	hermesLinearUrl: string;
 	/** bearer token → surface. Lets every event be attributed to a caller. */
 	tokens: Map<string, Surface>;
 	/** When true, an unauthenticated caller is accepted and attributed by its payload. */
@@ -58,6 +60,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		linearApiKey: env.LINEAR_API_KEY?.trim() || undefined,
 		notionApiKey: env.NOTION_API_KEY?.trim() || undefined,
 		notionTaskGraphDataSource: env.NOTION_TASK_GRAPH_DS?.trim() || "be3418f0-d2d8-411b-8677-fa8a95ee63be",
+		hermesLinearUrl: (env.HERMES_LINEAR_URL?.trim() || "http://127.0.0.1:8792").replace(/\/+$/, ""),
 		tokens: readTokens(env),
 		// No tokens configured at all means a local dev run; requiring auth then
 		// would just lock the operator out of their own machine.

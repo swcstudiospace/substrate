@@ -213,13 +213,26 @@ export function createMcpServer(substrate: Substrate, callerSurface: Surface | n
 		"graph_complete",
 		{
 			title: "Complete a node",
-			description: "Mark a node completed and drop its claim.",
-			inputSchema: { graph_id: z.string(), node_id: z.string() },
+			description:
+				"Finish a node: the Linear issue moves to In Review and hermes-linear-connector's Definition-of-Done gate decides Done. Returns completed:false with the reason when DoD has not passed; the issue then stays In Review and the claim stays.",
+			inputSchema: {
+				graph_id: z.string(),
+				node_id: z.string(),
+				session_id: z.string(),
+				surface: surfaceSchema.optional(),
+				dod: z
+					.object({
+						summary: z.string(),
+						tests_pass: z.boolean(),
+						review_pass: z.boolean().optional(),
+					})
+					.optional(),
+			},
 		},
-		async ({ graph_id, node_id }) => {
-			await substrate.completeNode(graph_id, node_id);
-			return text(`Completed ${graph_id}/${node_id}.`);
-		},
+		async ({ graph_id, node_id, session_id, surface, dod }) =>
+			json(
+				await substrate.completeNode(graph_id, node_id, surface ?? callerSurface ?? "claude-code", session_id, dod),
+			),
 	);
 
 	return server;

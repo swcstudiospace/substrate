@@ -7,6 +7,7 @@
  */
 import { composeBrief, type BriefRequest } from "./brief.ts";
 import type { SubstrateConfig } from "./config.ts";
+import { DodGate, type DodEvidence, type GateResult } from "./dod-gate.ts";
 import { normalizeEvent, verifyChain } from "./event.ts";
 import { GreptimeClient, quote } from "./greptime.ts";
 import { IndexStore } from "./index-store.ts";
@@ -18,7 +19,6 @@ import type {
 	GraphNode,
 	MemoryEntry,
 	MemoryEntryInput,
-	NodeState,
 	Surface,
 	SubstrateEvent,
 } from "./types.ts";
@@ -65,17 +65,19 @@ export class Substrate {
 	readonly index: IndexStore | null;
 	readonly greptime: GreptimeClient | null;
 	readonly mirror: Mirror;
+	readonly dodGate: DodGate;
 
 	/** `stores` is a test seam; production always builds them from config. */
 	constructor(
 		readonly config: SubstrateConfig,
-		stores?: { index?: IndexStore | null; greptime?: GreptimeClient | null; mirror?: Mirror },
+		stores?: { index?: IndexStore | null; greptime?: GreptimeClient | null; mirror?: Mirror; dodGate?: DodGate },
 	) {
 		this.index =
 			stores?.index !== undefined ? stores.index : config.postgresUrl ? new IndexStore(config.postgresUrl) : null;
 		this.greptime =
 			stores?.greptime !== undefined ? stores.greptime : config.greptime ? new GreptimeClient(config.greptime) : null;
 		this.mirror = stores?.mirror ?? createMirror(config);
+		this.dodGate = stores?.dodGate ?? new DodGate(config.hermesLinearUrl);
 	}
 
 	/** Idempotent. Missing stores are reported, not fatal — the server still serves what it can. */
@@ -288,10 +290,65 @@ export class Substrate {
 		return { released: true, node: await this.refreshed(graphId, nodeId, node) };
 	}
 
-	async completeNode(graphId: string, nodeId: string, state: NodeState = "completed") {
-		if (!this.index) throw new Error("graph_complete requires SUBSTRATE_PG_URL");
-		await this.index.setNodeState(graphId, nodeId, state);
-		await this.index.releaseNode(graphId, nodeId);
+	/**
+	 * Finish a node. Ownership is checked exactly as for release. The holder's
+	 * call moves Linear to In Review and the node to `started_review`, then
+	 * forwards the caller's DoD evidence to hermes-linear-connector's gate,
+	 * which alone decides and alone moves the issue to Done (D-06) — substrate
+	 * never resolves or sends a Done state id. On a refusal, an unreachable
+	 * gate or a node without a Linear issue the result is `completed: false`
+	 * with the reason, the issue stays In Review and the claim stays; on
+	 * approval the node is `completed` and released. Every attempt past the
+	 * ownership check is logged as one `complete` event.
+	 */
+	async completeNode(
+		graphId: string,
+		nodeId: string,
+		surface: Surface,
+		sessionId: string,
+		dod?: DodEvidence,
+	): Promise<{ completed: boolean; reason: string | null; node: GraphNode }> {
+		const { index, graph, node } = await this.holder(graphId, nodeId);
+		const refusal = ownershipRefusal(node, surface, sessionId, "complete");
+		if (refusal) return { completed: false, reason: refusal, node };
+
+		const identifier = node.linear_identifier ?? nodeId;
+		const meta = {
+			surface,
+			graph_id: graphId,
+			node_id: nodeId,
+			linear_identifier: node.linear_identifier ?? undefined,
+			session_id: sessionId,
+			repo: graph.repo ?? undefined,
+			branch: graph.branch ?? undefined,
+		};
+		const ctx = { graphId, nodeId, surface, sessionId, node, repo: graph.repo, branch: graph.branch };
+
+		await this.warn(await this.mirror.review(ctx), "review", meta);
+		await index.setNodeState(graphId, nodeId, "started_review").catch(() => undefined);
+
+		const ref = node.linear_issue_id ?? node.linear_identifier;
+		const gate: GateResult = ref
+			? await this.dodGate.completeIssue({
+					linearIssueId: ref,
+					summary: dod?.summary ?? "",
+					testsPass: dod?.tests_pass ?? false,
+					reviewPass: dod?.review_pass ?? false,
+				})
+			: { completed: false, reason: "node has no Linear issue; Done must pass the hermes-linear-connector DoD gate" };
+
+		if (gate.completed) {
+			await index.setNodeState(graphId, nodeId, "completed").catch(() => undefined);
+			await index.releaseNode(graphId, nodeId);
+			await this.warn(await this.mirror.done(ctx), "done", meta);
+		}
+		await this.emit({
+			...meta,
+			kind: "complete",
+			summary: gate.completed ? `completed ${identifier}` : `complete refused for ${identifier}: ${gate.reason}`,
+			payload: { completed: gate.completed, reason: gate.reason },
+		}).catch(() => undefined);
+		return { completed: gate.completed, reason: gate.reason, node: await this.refreshed(graphId, nodeId, node) };
 	}
 
 	/** The graph and node a release or completion acts on; the index is required. */

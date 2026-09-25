@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { loadConfig } from "./config.ts";
+import { DodGate } from "./dod-gate.ts";
 import { LinearClient } from "./linear.ts";
 import { createMirror, Mirror } from "./mirror.ts";
 import { Substrate } from "./service.ts";
@@ -345,12 +346,15 @@ function holderStores(node: Partial<GraphNode> = {}) {
 }
 
 /** A Linear stand-in recording every operation with its variables; the team has Todo, In Progress, In Review and Done. */
-function trackerLinear(opts: { status?: number; labels?: Array<{ id: string; name: string }> } = {}) {
+function trackerLinear(
+	opts: { status?: number; labels?: Array<{ id: string; name: string }>; timeline?: string[] } = {},
+) {
 	const requests: Array<{ op: string; variables: Record<string, unknown> }> = [];
 	const fetchImpl = (async (_url: string, init: RequestInit) => {
 		const { query, variables } = JSON.parse(String(init.body)) as { query: string; variables: Record<string, unknown> };
 		const op = /(?:query|mutation)\s+(\w+)/.exec(query)?.[1] ?? "unknown";
 		requests.push({ op, variables });
+		opts.timeline?.push(`linear:${op}`);
 		if (opts.status && opts.status !== 200) return new Response("internal error", { status: opts.status });
 		const replies: Record<string, unknown> = {
 			IssueContext: {
@@ -464,4 +468,169 @@ describe("releaseNode", () => {
 
 		await expect(substrate.releaseNode("ut-1", "n9", "claude-code", "sess-holder")).rejects.toThrow("unknown node ut-1/n9");
 	});
+});
+
+/** A DoD gate over a fake fetch: records each request body and answers as told. */
+function recordingGate(
+	answer: { status?: number; body?: unknown; reject?: Error } = {},
+	opts: { timeline?: string[]; timeoutMs?: number; fetchImpl?: typeof fetch } = {},
+) {
+	const calls: Array<{ url: string; body: unknown; signal: unknown }> = [];
+	const fetchImpl =
+		opts.fetchImpl ??
+		((async (url: string, init: RequestInit) => {
+			calls.push({ url, body: JSON.parse(String(init.body)), signal: init.signal });
+			opts.timeline?.push("gate");
+			if (answer.reject) throw answer.reject;
+			const body = answer.body ?? { completed: true, reason: null, linear_issue_id: "issue-uuid" };
+			return new Response(typeof body === "string" ? body : JSON.stringify(body), { status: answer.status ?? 200 });
+		}) as unknown as typeof fetch);
+	return { calls, gate: new DodGate("http://gate.test", { fetchImpl, timeoutMs: opts.timeoutMs }) };
+}
+
+describe("completeNode → DoD gate (D-06)", () => {
+	function setup(
+		answer: Parameters<typeof recordingGate>[0] = {},
+		node: Partial<GraphNode> = {},
+		linearOpts: { status?: number } = {},
+	) {
+		const timeline: string[] = [];
+		const stores = holderStores(node);
+		const linear = trackerLinear({ ...linearOpts, timeline });
+		const gate = recordingGate(answer, { timeline });
+		const substrate = new Substrate(loadConfig({}), {
+			index: stores.index as never,
+			greptime: stores.greptime as never,
+			mirror: linear.mirror,
+			dodGate: gate.gate,
+		});
+		return { ...stores, linear, gate, timeline, substrate };
+	}
+
+	test("the holder with passing evidence: In Review, then the gate, then completed and released, one complete event", async () => {
+		const { substrate, linear, gate, timeline, writes, emitted } = setup();
+
+		const result = await substrate.completeNode("ut-1", "n1", "claude-code", "sess-holder", {
+			summary: "green",
+			tests_pass: true,
+		});
+
+		expect(result.completed).toBe(true);
+		expect(result.reason).toBeNull();
+		expect(result.node).toMatchObject({ state: "completed", claimed_by: null, claim_session: null });
+		expect(timeline).toEqual(["linear:IssueContext", "linear:IssueUpdate", "gate"]);
+		expect(linear.updates()).toEqual([{ stateId: "st-review" }]);
+		expect(gate.calls).toHaveLength(1);
+		expect(gate.calls[0]?.url).toBe("http://gate.test/v1/complete-issue");
+		expect(gate.calls[0]?.body).toEqual({
+			linear_issue_id: "issue-uuid",
+			summary: "green",
+			tests_pass: true,
+			review_pass: false,
+		});
+		expect(gate.calls[0]?.signal).toBeInstanceOf(AbortSignal);
+		expect(writes).toEqual(["state:started_review", "state:completed", "release"]);
+		expect(emitted).toHaveLength(1);
+		expect(emitted[0]).toMatchObject({
+			kind: "complete",
+			graph_id: "ut-1",
+			node_id: "n1",
+			repo: "swcstudiospace/agent-substrate",
+			session_id: "sess-holder",
+			payload: { completed: true, reason: null },
+		});
+	});
+
+	test("a gate refusal returns its reason, leaves the node in review and claimed, and substrate only ever sent In Review", async () => {
+		const reason = "dod not passed: tests_pass true and a non-empty summary are required";
+		const { substrate, linear, writes, emitted } = setup({ body: { completed: false, reason, linear_issue_id: "issue-uuid" } });
+
+		const result = await substrate.completeNode("ut-1", "n1", "claude-code", "sess-holder");
+
+		expect(result).toMatchObject({ completed: false, reason });
+		expect(result.node).toMatchObject({ state: "started_review", claimed_by: "claude-code", claim_session: "sess-holder" });
+		expect(writes).toEqual(["state:started_review"]);
+		expect(linear.updates()).toEqual([{ stateId: "st-review" }]);
+		expect(emitted.map((e) => e.kind)).toEqual(["complete"]);
+		expect(emitted[0]?.payload).toEqual({ completed: false, reason });
+	});
+
+	for (const [label, answer, prefix] of [
+		["an unreachable gate", { reject: new Error("connect ECONNREFUSED 127.0.0.1:8792") }, "dod gate unreachable"],
+		["a gate answering 502", { status: 502, body: { detail: "linear error" } }, "dod gate error 502"],
+		["a gate answering 200 without a completed flag", { body: "<html>proxy</html>" }, "dod gate returned a malformed answer"],
+	] as const) {
+		test(`${label} is a refusal, never a completion or a throw`, async () => {
+			const { substrate, writes, emitted } = setup(answer);
+
+			const result = await substrate.completeNode("ut-1", "n1", "claude-code", "sess-holder", {
+				summary: "green",
+				tests_pass: true,
+			});
+
+			expect(result.completed).toBe(false);
+			expect(result.reason).toStartWith(prefix);
+			expect(writes).toEqual(["state:started_review"]);
+			expect(emitted[0]?.payload).toMatchObject({ completed: false });
+		});
+	}
+
+	test("a gate that never answers times out into an unreachable refusal", async () => {
+		const hanging = ((_url: string, init: RequestInit) =>
+			new Promise<Response>((_resolve, reject) => {
+				init.signal?.addEventListener("abort", () => reject(init.signal?.reason));
+			})) as unknown as typeof fetch;
+		const { gate } = recordingGate({}, { fetchImpl: hanging, timeoutMs: 20 });
+
+		const result = await gate.completeIssue({ linearIssueId: "issue-uuid", summary: "s", testsPass: true, reviewPass: false });
+
+		expect(result.completed).toBe(false);
+		expect(result.reason).toStartWith("dod gate unreachable");
+	});
+
+	test("a node with no Linear issue is refused without asking the gate", async () => {
+		const { substrate, gate, emitted } = setup({}, { linear_issue_id: null, linear_identifier: null });
+
+		const result = await substrate.completeNode("ut-1", "n1", "claude-code", "sess-holder", { summary: "s", tests_pass: true });
+
+		expect(result.completed).toBe(false);
+		expect(result.reason).toContain("no Linear issue");
+		expect(gate.calls).toEqual([]);
+		expect(emitted.filter((e) => e.kind === "complete")).toHaveLength(1);
+	});
+
+	for (const [label, surface, session] of [
+		["another surface", "omp", "sess-holder"],
+		["the same surface in another session", "claude-code", "sess-intruder"],
+	] as const) {
+		test(`${label} is refused with no Linear or gate request, no index write and no event`, async () => {
+			const { substrate, linear, gate, writes, emitted } = setup();
+
+			const result = await substrate.completeNode("ut-1", "n1", surface, session, { summary: "s", tests_pass: true });
+
+			expect(result.completed).toBe(false);
+			expect(result.reason).toBe("node is claimed by claude-code session sess-holder; only that session can complete it");
+			expect(linear.requests).toEqual([]);
+			expect(gate.calls).toEqual([]);
+			expect(writes).toEqual([]);
+			expect(emitted).toEqual([]);
+		});
+	}
+
+	test("Linear failing on In Review warns (linear/review) and still reaches the gate (D-02)", async () => {
+		const { substrate, gate, writes, emitted } = setup({}, {}, { status: 500 });
+
+		const result = await substrate.completeNode("ut-1", "n1", "claude-code", "sess-holder", { summary: "s", tests_pass: true });
+
+		expect(result.completed).toBe(true);
+		expect(gate.calls).toHaveLength(1);
+		expect(writes).toEqual(["state:started_review", "state:completed", "release"]);
+		expect(emitted.map((e) => e.kind)).toEqual(["warning", "complete"]);
+		expect(emitted[0]?.payload).toMatchObject({ target: "linear", action: "review" });
+	});
+});
+
+test("HERMES_LINEAR_URL sets the gate's base URL without trailing slashes, defaulting to the local connector", () => {
+	expect(loadConfig({}).hermesLinearUrl).toBe("http://127.0.0.1:8792");
+	expect(loadConfig({ HERMES_LINEAR_URL: " http://10.0.0.5:9000// " }).hermesLinearUrl).toBe("http://10.0.0.5:9000");
 });
