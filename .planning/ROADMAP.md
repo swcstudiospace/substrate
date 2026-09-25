@@ -111,13 +111,13 @@ Plans:
      `agent:<surface>` added when the claim lands.
 **Proof**: Label a real issue `dispatch:hermes` — a Hermes session starts, claims the node, the
 Notion Issue row shows Agent hermes, and Claude Code's brief shows it within a minute.
-**Plans**: 9 plans
+**Plans**: 2/9 plans executed
 
 Plans:
 **Wave 1**
 
-- [ ] 02-01-PLAN.md — Claim tracer: graph_claim → index → Linear mirror (In Progress, agent:<surface>, dispatch:* removed, session comment), D-02/D-04, graph_find, measured baseline
-- [ ] 02-03-PLAN.md — hermes-linear-connector POST /v1/complete-issue: Done only through the existing DoD gate (D-06)
+- [x] 02-01-PLAN.md — Claim tracer: graph_claim → index → Linear mirror (In Progress, agent:<surface>, dispatch:* removed, session comment), D-02/D-04, graph_find, measured baseline
+- [x] 02-03-PLAN.md — hermes-linear-connector POST /v1/complete-issue: Done only through the existing DoD gate (D-06)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
