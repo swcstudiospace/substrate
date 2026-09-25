@@ -136,6 +136,18 @@ export class LinearClient {
 		return data.issue.state;
 	}
 
+	/** The issue's identifier, title and description (D-15). `ref` may be a UUID or an identifier like SWC-12. */
+	async issueText(ref: string): Promise<{ identifier: string; title: string; description: string | null }> {
+		const data = await this.graphql<{ issue: { identifier: string; title: string; description: string | null } | null }>(
+			`query IssueText($id: String!) {
+				issue(id: $id) { identifier title description }
+			}`,
+			{ id: ref },
+		);
+		if (!data.issue) throw new LinearError(`issue ${ref} not found`);
+		return data.issue;
+	}
+
 	/**
 	 * The id of a label with this exact name usable on the team: the team's own
 	 * label, else a workspace label, else a new team label.

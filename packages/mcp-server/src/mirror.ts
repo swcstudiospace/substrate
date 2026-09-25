@@ -110,6 +110,24 @@ export class Mirror {
 		return this.targets.linear.issueState(ref).catch(() => null);
 	}
 
+	/**
+	 * The node's Linear issue text for issue_get (D-15), or why it is
+	 * unavailable. Never throws; a failure carries the error message only,
+	 * never headers or the request.
+	 */
+	async issueText(
+		node: Pick<GraphNode, "linear_issue_id" | "linear_identifier">,
+	): Promise<{ ok: true; identifier: string; title: string; description: string | null } | { ok: false; reason: string }> {
+		if (!this.targets.linear) return { ok: false, reason: "linear mirror off" };
+		const ref = node.linear_issue_id ?? node.linear_identifier;
+		if (!ref) return { ok: false, reason: "node has no Linear issue reference" };
+		try {
+			return { ok: true, ...(await this.targets.linear.issueText(ref)) };
+		} catch (cause) {
+			return { ok: false, reason: `linear read failed: ${reasonOf(cause)}` };
+		}
+	}
+
 	private async run(
 		ctx: MirrorContext,
 		linearStep: ((linear: LinearClient) => Promise<void>) | null,
