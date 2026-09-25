@@ -11,7 +11,7 @@ import { DodGate, type DodEvidence, type GateResult } from "./dod-gate.ts";
 import { normalizeEvent, verifyChain } from "./event.ts";
 import { GreptimeClient, quote } from "./greptime.ts";
 import { IndexStore } from "./index-store.ts";
-import { createMirror, type Mirror, type MirrorFailure } from "./mirror.ts";
+import { createMirror, type Mirror, type MirrorContext, type MirrorFailure } from "./mirror.ts";
 import type {
 	Actor,
 	EventInput,
@@ -77,7 +77,7 @@ export class Substrate {
 		this.greptime =
 			stores?.greptime !== undefined ? stores.greptime : config.greptime ? new GreptimeClient(config.greptime) : null;
 		this.mirror = stores?.mirror ?? createMirror(config);
-		this.dodGate = stores?.dodGate ?? new DodGate(config.hermesLinearUrl);
+		this.dodGate = stores?.dodGate ?? new DodGate(config.hermesLinearUrl, { timeoutMs: config.dodGateTimeoutMs });
 	}
 
 	/** Idempotent. Missing stores are reported, not fatal — the server still serves what it can. */
@@ -298,7 +298,11 @@ export class Substrate {
 	 * never resolves or sends a Done state id. On a refusal, an unreachable
 	 * gate or a node without a Linear issue the result is `completed: false`
 	 * with the reason, the issue stays In Review and the claim stays; on
-	 * approval the node is `completed` and released. Every attempt past the
+	 * approval the node is `completed` and released. A gate timeout is not a
+	 * refusal: the connector may still have moved the issue, so Linear's state
+	 * decides — Done completes, anything else is `completed: false` naming it.
+	 * An issue already Done (an earlier attempt that timed out) is never sent
+	 * back to In Review nor gated again; it completes. Every attempt past the
 	 * ownership check is logged as one `complete` event.
 	 */
 	async completeNode(
@@ -322,20 +326,20 @@ export class Substrate {
 			repo: graph.repo ?? undefined,
 			branch: graph.branch ?? undefined,
 		};
-		const ctx = { graphId, nodeId, surface, sessionId, node, repo: graph.repo, branch: graph.branch };
+		const ctx: MirrorContext = { graphId, nodeId, surface, sessionId, node, repo: graph.repo, branch: graph.branch };
 
-		await this.warn(await this.mirror.review(ctx), "review", meta);
-		await index.setNodeState(graphId, nodeId, "started_review").catch(() => undefined);
-
-		const ref = node.linear_issue_id ?? node.linear_identifier;
-		const gate: GateResult = ref
-			? await this.dodGate.completeIssue({
-					linearIssueId: ref,
-					summary: dod?.summary ?? "",
-					testsPass: dod?.tests_pass ?? false,
-					reviewPass: dod?.review_pass ?? false,
-				})
-			: { completed: false, reason: "node has no Linear issue; Done must pass the hermes-linear-connector DoD gate" };
+		const before = await this.mirror.linearState(ctx);
+		let gate: GateResult;
+		if (before?.type === "completed") {
+			gate = { completed: true, reason: `issue already ${before.name} in Linear` };
+		} else {
+			await this.warn(await this.mirror.review(ctx), "review", meta);
+			await index.setNodeState(graphId, nodeId, "started_review").catch(() => undefined);
+			const ref = node.linear_issue_id ?? node.linear_identifier;
+			gate = ref
+				? await this.askGate(ctx, ref, dod)
+				: { completed: false, reason: "node has no Linear issue; Done must pass the hermes-linear-connector DoD gate" };
+		}
 
 		if (gate.completed) {
 			await index.setNodeState(graphId, nodeId, "completed").catch(() => undefined);
@@ -349,6 +353,22 @@ export class Substrate {
 			payload: { completed: gate.completed, reason: gate.reason },
 		}).catch(() => undefined);
 		return { completed: gate.completed, reason: gate.reason, node: await this.refreshed(graphId, nodeId, node) };
+	}
+
+	/**
+	 * The gate's answer. A timeout leaves the outcome unknown — the connector's
+	 * handler outlives the client's abort — so the issue's Linear state settles it.
+	 */
+	private async askGate(ctx: MirrorContext, ref: string, dod?: DodEvidence): Promise<GateResult> {
+		const gate = await this.dodGate.completeIssue({
+			linearIssueId: ref,
+			summary: dod?.summary ?? "",
+			testsPass: dod?.tests_pass ?? false,
+			reviewPass: dod?.review_pass ?? false,
+		});
+		if (!gate.timedOut) return gate;
+		const state = await this.mirror.linearState(ctx);
+		return { completed: state?.type === "completed", reason: `dod gate timed out; issue state ${state?.name ?? "unknown"}` };
 	}
 
 	/** The graph and node a release or completion acts on; the index is required. */

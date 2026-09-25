@@ -99,6 +99,17 @@ export class Mirror {
 		}));
 	}
 
+	/**
+	 * The node's issue state as Linear has it now, or null when Linear is off,
+	 * the node has no issue or the read fails. Never throws. Lets completion
+	 * tell an issue the connector already moved to Done from one still open.
+	 */
+	async linearState(ctx: MirrorContext): Promise<{ name: string; type: string } | null> {
+		const ref = ctx.node.linear_issue_id ?? ctx.node.linear_identifier;
+		if (!this.targets.linear || !ref) return null;
+		return this.targets.linear.issueState(ref).catch(() => null);
+	}
+
 	private async run(
 		ctx: MirrorContext,
 		linearStep: ((linear: LinearClient) => Promise<void>) | null,

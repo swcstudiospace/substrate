@@ -380,10 +380,20 @@ function holderStores(node: Partial<GraphNode> = {}) {
 	return { emitted, writes, index, greptime };
 }
 
-/** A Linear stand-in recording every operation with its variables; the team has Todo, In Progress, In Review and Done. */
+/**
+ * A Linear stand-in recording every operation with its variables; the team has Todo, In Progress, In Review and
+ * Done. `states` are the issue's workflow states IssueState answers with, one per read, the last repeating
+ * (In Progress by default).
+ */
 function trackerLinear(
-	opts: { status?: number; labels?: Array<{ id: string; name: string }>; timeline?: string[] } = {},
+	opts: {
+		status?: number;
+		labels?: Array<{ id: string; name: string }>;
+		timeline?: string[];
+		states?: Array<{ name: string; type: string }>;
+	} = {},
 ) {
+	const states = [...(opts.states ?? [{ name: "In Progress", type: "started" }])];
 	const requests: Array<{ op: string; variables: Record<string, unknown> }> = [];
 	const fetchImpl = (async (_url: string, init: RequestInit) => {
 		const { query, variables } = JSON.parse(String(init.body)) as { query: string; variables: Record<string, unknown> };
@@ -417,6 +427,7 @@ function trackerLinear(
 					comments: { nodes: [] },
 				},
 			},
+			IssueState: { issue: { state: states.length > 1 ? states.shift() : states[0] } },
 			IssueUpdate: { issueUpdate: { success: true } },
 		};
 		return new Response(JSON.stringify({ data: replies[op] }), { status: 200 });
@@ -527,12 +538,13 @@ describe("completeNode → DoD gate (D-06)", () => {
 	function setup(
 		answer: Parameters<typeof recordingGate>[0] = {},
 		node: Partial<GraphNode> = {},
-		linearOpts: { status?: number } = {},
+		linearOpts: { status?: number; states?: Array<{ name: string; type: string }> } = {},
+		gateOpts: { fetchImpl?: typeof fetch; timeoutMs?: number } = {},
 	) {
 		const timeline: string[] = [];
 		const stores = holderStores(node);
 		const linear = trackerLinear({ ...linearOpts, timeline });
-		const gate = recordingGate(answer, { timeline });
+		const gate = recordingGate(answer, { timeline, ...gateOpts });
 		const substrate = new Substrate(loadConfig({}), {
 			index: stores.index as never,
 			greptime: stores.greptime as never,
@@ -553,7 +565,7 @@ describe("completeNode → DoD gate (D-06)", () => {
 		expect(result.completed).toBe(true);
 		expect(result.reason).toBeNull();
 		expect(result.node).toMatchObject({ state: "completed", claimed_by: null, claim_session: null });
-		expect(timeline).toEqual(["linear:IssueContext", "linear:IssueUpdate", "gate"]);
+		expect(timeline).toEqual(["linear:IssueState", "linear:IssueContext", "linear:IssueUpdate", "gate"]);
 		expect(linear.updates()).toEqual([{ stateId: "st-review" }]);
 		expect(gate.calls).toHaveLength(1);
 		expect(gate.calls[0]?.url).toBe("http://gate.test/v1/complete-issue");
@@ -610,17 +622,79 @@ describe("completeNode → DoD gate (D-06)", () => {
 		});
 	}
 
-	test("a gate that never answers times out into an unreachable refusal", async () => {
-		const hanging = ((_url: string, init: RequestInit) =>
-			new Promise<Response>((_resolve, reject) => {
-				init.signal?.addEventListener("abort", () => reject(init.signal?.reason));
-			})) as unknown as typeof fetch;
+	/** A gate whose request outlives its timeout, as a slow connector Linear call does. */
+	const hanging = ((_url: string, init: RequestInit) =>
+		new Promise<Response>((_resolve, reject) => {
+			init.signal?.addEventListener("abort", () => reject(init.signal?.reason));
+		})) as unknown as typeof fetch;
+
+	test("a gate that never answers times out into an unknown outcome, not a refusal", async () => {
 		const { gate } = recordingGate({}, { fetchImpl: hanging, timeoutMs: 20 });
 
 		const result = await gate.completeIssue({ linearIssueId: "issue-uuid", summary: "s", testsPass: true, reviewPass: false });
 
+		expect(result).toEqual({ completed: false, reason: "dod gate timed out", timedOut: true });
+	});
+
+	test("the gate waits longer than the connector's 30 s Linear call by default, and the timeout is configurable", () => {
+		expect(loadConfig({}).dodGateTimeoutMs).toBe(35_000);
+		expect(loadConfig({ SUBSTRATE_DOD_GATE_TIMEOUT_MS: "45000" }).dodGateTimeoutMs).toBe(45_000);
+		expect(loadConfig({ SUBSTRATE_DOD_GATE_TIMEOUT_MS: "soon" }).dodGateTimeoutMs).toBe(35_000);
+	});
+
+	test("a gate timeout with the issue already Done in Linear completes: released, Mirror.done, one complete event", async () => {
+		// Live before review; Done once the connector's slow Linear call lands behind the timeout.
+		const { substrate, linear, writes, emitted } = setup(
+			{},
+			{},
+			{ states: [{ name: "In Progress", type: "started" }, { name: "Done", type: "completed" }] },
+			{ fetchImpl: hanging, timeoutMs: 20 },
+		);
+		const done: string[] = [];
+		linear.mirror.done = async () => {
+			done.push("done");
+			return [];
+		};
+
+		const result = await substrate.completeNode("ut-1", "n1", "claude-code", "sess-holder", { summary: "s", tests_pass: true });
+
+		expect(result.completed).toBe(true);
+		expect(result.reason).toBe("dod gate timed out; issue state Done");
+		expect(result.node).toMatchObject({ state: "completed", claimed_by: null, claim_session: null });
+		expect(writes).toEqual(["state:started_review", "state:completed", "release"]);
+		expect(done).toEqual(["done"]);
+		expect(emitted.map((e) => e.kind)).toEqual(["complete"]);
+		expect(emitted[0]?.payload).toMatchObject({ completed: true });
+	});
+
+	test("a gate timeout with the issue not Done is completed:false naming the state; the claim stays", async () => {
+		const { substrate, writes, emitted } = setup(
+			{},
+			{},
+			{ states: [{ name: "In Review", type: "started" }] },
+			{ fetchImpl: hanging, timeoutMs: 20 },
+		);
+
+		const result = await substrate.completeNode("ut-1", "n1", "claude-code", "sess-holder", { summary: "s", tests_pass: true });
+
 		expect(result.completed).toBe(false);
-		expect(result.reason).toStartWith("dod gate unreachable");
+		expect(result.reason).toBe("dod gate timed out; issue state In Review");
+		expect(result.node).toMatchObject({ claimed_by: "claude-code", claim_session: "sess-holder" });
+		expect(writes).toEqual(["state:started_review"]);
+		expect(emitted.map((e) => e.kind)).toEqual(["complete"]);
+	});
+
+	test("a retry on an issue already Done never sends In Review or asks the gate again, and completes", async () => {
+		const { substrate, linear, gate, writes, emitted } = setup({}, {}, { states: [{ name: "Done", type: "completed" }] });
+
+		const result = await substrate.completeNode("ut-1", "n1", "claude-code", "sess-holder", { summary: "s", tests_pass: true });
+
+		expect(result.completed).toBe(true);
+		expect(linear.updates()).toEqual([]);
+		expect(gate.calls).toEqual([]);
+		expect(writes).toEqual(["state:completed", "release"]);
+		expect(result.node).toMatchObject({ state: "completed", claimed_by: null });
+		expect(emitted.map((e) => e.kind)).toEqual(["complete"]);
 	});
 
 	test("a node with no Linear issue is refused without asking the gate", async () => {

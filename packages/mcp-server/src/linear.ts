@@ -124,6 +124,18 @@ export class LinearClient {
 		};
 	}
 
+	/** The issue's current workflow state. `ref` may be a UUID or an identifier like SWC-12. */
+	async issueState(ref: string): Promise<{ name: string; type: string }> {
+		const data = await this.graphql<{ issue: { state: { name: string; type: string } } | null }>(
+			`query IssueState($id: String!) {
+				issue(id: $id) { state { name type } }
+			}`,
+			{ id: ref },
+		);
+		if (!data.issue) throw new LinearError(`issue ${ref} not found`);
+		return data.issue.state;
+	}
+
 	/**
 	 * The id of a label with this exact name usable on the team: the team's own
 	 * label, else a workspace label, else a new team label.

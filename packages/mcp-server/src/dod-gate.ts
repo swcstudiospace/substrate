@@ -7,9 +7,14 @@
  * caller's evidence and reports the answer. It never throws — an unreachable
  * or failing gate is a refusal with a reason, so substrate can never mistake
  * a gate outage for a completion.
+ *
+ * A timeout is different: the connector's handler keeps running after the
+ * client gives up, so the issue may be Done anyway. That answer is marked
+ * `timedOut` for the caller to settle by reading Linear, never as a refusal.
  */
 
-const DEFAULT_TIMEOUT_MS = 5000;
+/** Above the connector's own 30 s Linear call, so a slow Linear still answers inside it. */
+export const DEFAULT_TIMEOUT_MS = 35_000;
 const BODY_LIMIT = 200;
 
 /** What a completing agent claims about its work; the connector judges it. */
@@ -22,6 +27,8 @@ export interface DodEvidence {
 export interface GateResult {
 	completed: boolean;
 	reason: string | null;
+	/** The gate did not answer in time: the outcome is unknown, not a refusal. */
+	timedOut?: true;
 }
 
 export class DodGate {
@@ -56,6 +63,10 @@ export class DodGate {
 				signal: AbortSignal.timeout(this.timeoutMs),
 			});
 		} catch (cause) {
+			const name = (cause as { name?: unknown } | null)?.name;
+			if (name === "TimeoutError" || name === "AbortError") {
+				return { completed: false, reason: "dod gate timed out", timedOut: true };
+			}
 			return {
 				completed: false,
 				reason: `dod gate unreachable: ${cause instanceof Error ? cause.message : String(cause)}`,
