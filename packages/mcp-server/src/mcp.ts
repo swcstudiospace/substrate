@@ -119,6 +119,22 @@ export function createMcpServer(substrate: Substrate, callerSurface: Surface | n
 	);
 
 	server.registerTool(
+		"graph_find",
+		{
+			title: "Find a node by Linear issue",
+			description:
+				"Resolve a Linear issue (id or identifier) to the registered graph node that owns it. Used by substrate-dispatcher.",
+			inputSchema: {
+				linear_issue_id: z.string().optional(),
+				linear_identifier: z.string().optional(),
+			},
+			annotations: { readOnlyHint: true },
+		},
+		async ({ linear_issue_id, linear_identifier }) =>
+			json(await substrate.findNode({ linear_issue_id, linear_identifier })),
+	);
+
+	server.registerTool(
 		"graph_register",
 		{
 			title: "Register a graph",

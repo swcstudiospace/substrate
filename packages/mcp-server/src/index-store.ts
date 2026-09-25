@@ -27,6 +27,9 @@ import { redact } from "./redact.ts";
  */
 const TERMINAL_STATUSES = ["Merged", "Resolved", "Done", "Won't Fix", "Closed", "Failed", "Canceled"];
 
+/** A node joined to its graph's repo, branch and status — what a Linear → node lookup returns. */
+export type LinearNodeMatch = GraphNode & { repo: string | null; branch: string | null; graph_status: string | null };
+
 export class IndexStore {
 	private readonly sql: SQL;
 
@@ -153,6 +156,28 @@ export class IndexStore {
 		const steps = (await this.sql`
 			select * from graph_steps where graph_id = ${graphId} order by node_id, step`) as GraphStep[];
 		return { ...row, nodes, steps };
+	}
+
+	/**
+	 * Nodes that own a Linear issue, by UUID first and then by identifier (backfilled
+	 * nodes carry only the identifier). At most two rows: the caller only needs to
+	 * tell one match from an ambiguous one.
+	 */
+	async findNodesByLinear(ref: { linearIssueId?: string; linearIdentifier?: string }): Promise<LinearNodeMatch[]> {
+		if (ref.linearIssueId) {
+			const rows = (await this.sql`
+				select n.*, g.repo, g.branch, g.status as graph_status
+				from graph_nodes n join graph_index g on g.graph_id = n.graph_id
+				where n.linear_issue_id = ${ref.linearIssueId}
+				limit 2`) as LinearNodeMatch[];
+			if (rows.length > 0) return rows;
+		}
+		if (!ref.linearIdentifier) return [];
+		return (await this.sql`
+			select n.*, g.repo, g.branch, g.status as graph_status
+			from graph_nodes n join graph_index g on g.graph_id = n.graph_id
+			where n.linear_identifier = ${ref.linearIdentifier}
+			limit 2`) as LinearNodeMatch[];
 	}
 
 	/** Graphs in a repo that are not finished — what "who else is working here" means. */

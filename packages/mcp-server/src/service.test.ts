@@ -233,3 +233,74 @@ describe("claimNode → mirror", () => {
 		}
 	});
 });
+
+describe("findNode", () => {
+	/** An index that answers the UUID lookup and the identifier lookup from separate tables, as the SQL does. */
+	function findStub(byId: Record<string, string[]>, byIdentifier: Record<string, string[]>) {
+		const calls: Array<{ linearIssueId?: string; linearIdentifier?: string }> = [];
+		const row = (key: string) => {
+			const [graph_id, node_id] = key.split("/") as [string, string];
+			return { graph_id, node_id, linear_issue_id: null, linear_identifier: null, repo: `repo-of-${graph_id}`, branch: "main", graph_status: "Implementing" };
+		};
+		const index = {
+			findNodesByLinear: async (ref: { linearIssueId?: string; linearIdentifier?: string }) => {
+				calls.push(ref);
+				const hits = ref.linearIssueId ? (byId[ref.linearIssueId] ?? []) : [];
+				if (hits.length > 0) return hits.map(row);
+				return ref.linearIdentifier ? (byIdentifier[ref.linearIdentifier] ?? []).map(row) : [];
+			},
+		};
+		return { calls, substrate: new Substrate(loadConfig({}), { index: index as never, greptime: null }) };
+	}
+
+	test("one node owning the issue id resolves with its graph's repo and branch", async () => {
+		const { substrate } = findStub({ "issue-uuid": ["ut-a/n1"] }, {});
+
+		const result = await substrate.findNode({ linear_issue_id: "issue-uuid" });
+
+		expect(result).toMatchObject({
+			found: true,
+			graph_id: "ut-a",
+			node_id: "n1",
+			repo: "repo-of-ut-a",
+			branch: "main",
+			graph_status: "Implementing",
+		});
+		if (result.found) expect(result.node).not.toHaveProperty("repo");
+	});
+
+	test("falls back to the identifier when no node carries the issue id (backfilled nodes)", async () => {
+		const { substrate } = findStub({}, { "SWC-7": ["ut-b/n2"] });
+
+		const result = await substrate.findNode({ linear_issue_id: "issue-uuid", linear_identifier: "SWC-7" });
+
+		expect(result).toMatchObject({ found: true, graph_id: "ut-b", node_id: "n2" });
+	});
+
+	test("two owning nodes are reported as ambiguous, not guessed", async () => {
+		const { substrate } = findStub({ "issue-uuid": ["ut-a/n1", "ut-c/n3"] }, {});
+
+		const result = await substrate.findNode({ linear_issue_id: "issue-uuid" });
+
+		expect(result.found).toBe(false);
+		if (!result.found) expect(result.reason).toStartWith("ambiguous");
+	});
+
+	test("an issue on no node is reported as unregistered", async () => {
+		const { substrate } = findStub({}, {});
+
+		const result = await substrate.findNode({ linear_identifier: "SWC-404" });
+
+		expect(result.found).toBe(false);
+		if (!result.found) expect(result.reason).toStartWith("no registered node");
+	});
+
+	test("with neither reference it answers without querying the index", async () => {
+		const { calls, substrate } = findStub({}, {});
+
+		const result = await substrate.findNode({});
+
+		expect(result).toEqual({ found: false, reason: "provide linear_issue_id or linear_identifier" });
+		expect(calls).toEqual([]);
+	});
+});

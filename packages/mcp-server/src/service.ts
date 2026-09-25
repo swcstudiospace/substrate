@@ -15,6 +15,7 @@ import type {
 	Actor,
 	EventInput,
 	EventKind,
+	GraphNode,
 	MemoryEntry,
 	MemoryEntryInput,
 	NodeState,
@@ -128,6 +129,44 @@ export class Substrate {
 	async getGraph(graphId: string) {
 		if (!this.index) return null;
 		return this.index.getGraph(graphId);
+	}
+
+	/**
+	 * Resolve a Linear issue to the one registered node that owns it. The
+	 * dispatcher sees issues, not nodes; an ambiguous or unknown issue is
+	 * reported, never guessed.
+	 */
+	async findNode(ref: { linear_issue_id?: string; linear_identifier?: string }): Promise<
+		| {
+				found: true;
+				graph_id: string;
+				node_id: string;
+				repo: string | null;
+				branch: string | null;
+				graph_status: string | null;
+				node: GraphNode;
+		  }
+		| { found: false; reason: string }
+	> {
+		if (!ref.linear_issue_id && !ref.linear_identifier) {
+			return { found: false, reason: "provide linear_issue_id or linear_identifier" };
+		}
+		if (!this.index) return { found: false, reason: "index not configured" };
+		const matches = await this.index.findNodesByLinear({
+			linearIssueId: ref.linear_issue_id,
+			linearIdentifier: ref.linear_identifier,
+		});
+		const wanted = ref.linear_issue_id ?? ref.linear_identifier;
+		if (matches.length > 1) {
+			return {
+				found: false,
+				reason: `ambiguous: ${wanted} is on more than one node (${matches.map((m) => `${m.graph_id}/${m.node_id}`).join(", ")})`,
+			};
+		}
+		const match = matches[0];
+		if (!match) return { found: false, reason: `no registered node for ${wanted}` };
+		const { repo, branch, graph_status, ...node } = match;
+		return { found: true, graph_id: node.graph_id, node_id: node.node_id, repo, branch, graph_status, node };
 	}
 
 	async registerGraph(plan: Parameters<IndexStore["registerGraph"]>[0]) {
