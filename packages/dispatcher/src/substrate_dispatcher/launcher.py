@@ -31,6 +31,9 @@ DEFAULT_RUN_BUDGET = int(os.environ.get("SUBSTRATE_DISPATCH_RUN_BUDGET") or 3600
 # ("mcp-" + "linear"), so no MCP toolset is passed. Hermes' own Linear key belongs to a different
 # workspace; Linear writes for the dispatched issue are done by the substrate claim mirror, not by Hermes.
 DEFAULT_TOOLSETS = os.environ.get("SUBSTRATE_DISPATCH_TOOLSETS") or "terminal,file"
+# Unset → Hermes' own default model. Set when the default is unusable for dispatch (02-08: Anthropic
+# per-model 429 on claude-fable-5-1; the owner chose claude-opus-5.5 on 2026-09-25).
+DEFAULT_MODEL = (os.environ.get("SUBSTRATE_DISPATCH_MODEL") or "").strip()
 DISPATCH_SOURCE = "substrate-dispatcher"
 
 CHILD_ENV_ALLOW = ("HOME", "PATH", "LANG", "LC_ALL", "USER", "LOGNAME", "SHELL")
@@ -107,8 +110,9 @@ def build_argv(
     toolsets: str = DEFAULT_TOOLSETS,
     max_turns: int = DEFAULT_MAX_TURNS,
     run_budget: int = DEFAULT_RUN_BUDGET,
+    model: str = DEFAULT_MODEL,
 ) -> list[str]:
-    return [
+    argv = [
         hermes_bin,
         "chat",
         "--query-file",
@@ -124,6 +128,9 @@ def build_argv(
         "-t",
         toolsets,
     ]
+    if model:
+        argv += ["-m", model]
+    return argv
 
 
 def child_env(environ: Mapping[str, str]) -> dict[str, str]:

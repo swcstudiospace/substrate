@@ -25,7 +25,7 @@ SURFACE = '"surface":"hermes"'
 def test_build_argv_shape_without_yolo_or_handoff_wrapper():
     argv = build_argv(
         "/state/prompts/p.md", hermes_bin="/usr/local/bin/hermes", toolsets="terminal,file",
-        max_turns=60, run_budget=3600,
+        max_turns=60, run_budget=3600, model="",
     )
     assert argv == [
         "/usr/local/bin/hermes", "chat", "--query-file", "/state/prompts/p.md", "-Q",
@@ -35,6 +35,29 @@ def test_build_argv_shape_without_yolo_or_handoff_wrapper():
     assert "--yolo" not in argv
     assert "--worktree" not in argv
     assert not any("dispatch_handoff" in part for part in argv)
+
+
+def test_build_argv_passes_the_dispatch_model_last():
+    argv = build_argv(
+        "/state/prompts/p.md", hermes_bin="/usr/local/bin/hermes", toolsets="terminal,file",
+        max_turns=60, run_budget=3600, model="claude-opus-5.5",
+    )
+    assert argv[-4:] == ["-t", "terminal,file", "-m", "claude-opus-5.5"]
+    assert argv.count("-m") == 1
+
+
+def test_dispatch_model_comes_from_env_and_unset_means_hermes_default():
+    # Imported fresh so the module-level default reads the environment each time.
+    base = {k: v for k, v in os.environ.items() if k != "SUBSTRATE_DISPATCH_MODEL"}
+    base["PYTHONPATH"] = os.pathsep.join(sys.path)
+    code = "from substrate_dispatcher.launcher import build_argv; print(build_argv('/p.md'))"
+    unset = subprocess.run([sys.executable, "-c", code], env=base, capture_output=True, text=True, check=True)
+    assert "'-m'" not in unset.stdout
+    set_ = subprocess.run(
+        [sys.executable, "-c", code], env={**base, "SUBSTRATE_DISPATCH_MODEL": "claude-opus-5.5"},
+        capture_output=True, text=True, check=True,
+    )
+    assert "'-m', 'claude-opus-5.5'" in set_.stdout
 
 
 def test_default_toolsets_are_builtins_without_mcp_linear():
