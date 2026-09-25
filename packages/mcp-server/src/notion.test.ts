@@ -149,9 +149,9 @@ describe("NotionClient.getPage", () => {
 
 		const error = await client.getPage(PAGE).catch((e: unknown) => e);
 
-		expect(error).toBeInstanceOf(NotionError);
-		expect((error as NotionError).status).toBe(404);
-		const message = (error as NotionError).message;
+		if (!(error instanceof NotionError)) throw new Error(`expected a NotionError, got ${String(error)}`);
+		expect(error.status).toBe(404);
+		const message = error.message;
 		expect(message).toContain("404");
 		expect(message).not.toContain(KEY);
 		expect(message).not.toContain("Bearer");
@@ -161,7 +161,8 @@ describe("NotionClient.getPage", () => {
 	test("an error body is cut to 200 characters", async () => {
 		const { client } = fakeNotion({ [PAGE]: { status: 502, text: "x".repeat(500) } });
 
-		const error = (await client.getPage(PAGE).catch((e: unknown) => e)) as NotionError;
+		const error = await client.getPage(PAGE).catch((e: unknown) => e);
+		if (!(error instanceof NotionError)) throw new Error(`expected a NotionError, got ${String(error)}`);
 
 		expect(error.status).toBe(502);
 		expect(error.message.match(/x/g)?.length).toBe(200);

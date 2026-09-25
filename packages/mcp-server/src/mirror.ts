@@ -10,9 +10,17 @@
  * Done is deliberately absent from the Linear side: only hermes-linear-
  * connector's DoD gate moves an issue to Done (D-06), so this module never
  * resolves a Done state id.
+ *
+ * Each transition runs the Linear step first, then one Notion PATCH on the
+ * node's Issue row. Notion's `Linear State` mirrors what substrate just set on
+ * Linear, so it is written only when that Linear step ran and succeeded —
+ * except on done, where the connector has already moved Linear to Done. The
+ * Notion side writes only Agent, Status, Linear State and Completed; the PR
+ * fields belong to ultrathink-sync (D-07).
  */
 import type { SubstrateConfig } from "./config.ts";
 import { type IssueContext, LinearClient, stateIdByName } from "./linear.ts";
+import { buildProperty, NotionClient, notionPageId, type PropertyValue } from "./notion.ts";
 import type { GraphNode, Surface } from "./types.ts";
 
 export interface MirrorContext {
@@ -44,46 +52,112 @@ async function linearIssue(linear: LinearClient, ctx: MirrorContext): Promise<Is
 	return linear.issueContext(ref);
 }
 
+/** The Notion values one transition wants, given whether its Linear step ran and succeeded. */
+type NotionWants = (linearOk: boolean) => Record<string, PropertyValue>;
+
 export class Mirror {
-	constructor(private readonly targets: { linear: LinearClient | null }) {}
+	constructor(private readonly targets: { linear: LinearClient | null; notion?: NotionClient | null }) {}
 
 	/** The startup log line's body, so a missing key shows once at boot rather than as a warning per claim. */
 	describe(): string {
-		return `linear ${this.targets.linear ? "on" : "off"}`;
+		return `linear ${this.targets.linear ? "on" : "off"}, notion ${this.targets.notion ? "on" : "off"}`;
 	}
 
 	/** Run the claim transition on every enabled target. Never throws. */
 	claim(ctx: MirrorContext): Promise<MirrorFailure[]> {
-		return this.run((linear) => this.claimLinear(linear, ctx));
+		return this.run(ctx, (linear) => this.claimLinear(linear, ctx), (linearOk) => ({
+			Agent: ctx.surface,
+			...(linearOk ? { "Linear State": "In Progress" } : {}),
+		}));
 	}
 
-	/** Back to Todo with `agent:<surface>` removed. Never throws. */
+	/** Back to Todo with `agent:<surface>` removed, and Agent cleared on the Notion row (D-05). Never throws. */
 	release(ctx: MirrorContext): Promise<MirrorFailure[]> {
-		return this.run((linear) => this.releaseLinear(linear, ctx));
+		return this.run(ctx, (linear) => this.releaseLinear(linear, ctx), (linearOk) => ({
+			Agent: null,
+			...(linearOk ? { "Linear State": "Todo" } : {}),
+		}));
 	}
 
 	/** To In Review, ahead of the connector's DoD gate. Never throws. */
 	review(ctx: MirrorContext): Promise<MirrorFailure[]> {
-		return this.run((linear) => this.reviewLinear(linear, ctx));
+		return this.run(ctx, (linear) => this.reviewLinear(linear, ctx), (linearOk): Record<string, PropertyValue> =>
+			linearOk ? { "Linear State": "In Review" } : {},
+		);
 	}
 
 	/**
 	 * After the connector's gate has moved the issue to Done. Linear needs no
-	 * call — the connector already made it — so this is where the other
-	 * targets record completion. Never throws.
+	 * call — the connector already made it — so this records completion on the
+	 * Notion row: Status, Linear State and Completed only (D-07). Never throws.
 	 */
-	async done(_ctx: MirrorContext): Promise<MirrorFailure[]> {
-		return [];
+	done(ctx: MirrorContext): Promise<MirrorFailure[]> {
+		return this.run(ctx, null, () => ({
+			Status: "Done",
+			"Linear State": "Done",
+			Completed: new Date().toISOString().slice(0, 10),
+		}));
 	}
 
-	private async run(linearStep: (linear: LinearClient) => Promise<void>): Promise<MirrorFailure[]> {
+	private async run(
+		ctx: MirrorContext,
+		linearStep: ((linear: LinearClient) => Promise<void>) | null,
+		notionWants: NotionWants,
+	): Promise<MirrorFailure[]> {
 		const failures: MirrorFailure[] = [];
-		if (this.targets.linear) {
+		let linearOk = false;
+		if (this.targets.linear && linearStep) {
 			try {
 				await linearStep(this.targets.linear);
+				linearOk = true;
 			} catch (cause) {
 				failures.push({ target: "linear", reason: reasonOf(cause) });
 			}
+		}
+		if (this.targets.notion) {
+			failures.push(...(await this.notionStep(this.targets.notion, ctx, notionWants(linearOk))));
+		}
+		return failures;
+	}
+
+	/**
+	 * One PATCH on the node's Issue row, each value shaped for the type the row
+	 * itself reports. A property the row lacks, or has in a type substrate
+	 * cannot write, is skipped with its own failure; the rest are still sent.
+	 */
+	private async notionStep(
+		notion: NotionClient,
+		ctx: MirrorContext,
+		wants: Record<string, PropertyValue>,
+	): Promise<MirrorFailure[]> {
+		if (Object.keys(wants).length === 0) return [];
+		const pageId = notionPageId(ctx.node.notion_page);
+		if (!pageId) {
+			const reason = ctx.node.notion_page
+				? `notion_page holds no Notion page id: ${ctx.node.notion_page.slice(0, 100)}`
+				: "node has no notion_page";
+			return [{ target: "notion", reason }];
+		}
+
+		const failures: MirrorFailure[] = [];
+		try {
+			const types = await notion.getPage(pageId);
+			const properties: Record<string, unknown> = {};
+			for (const [name, value] of Object.entries(wants)) {
+				const type = types[name];
+				const shaped = type ? buildProperty(type, value) : null;
+				if (shaped) {
+					properties[name] = shaped;
+				} else {
+					const reason = type
+						? `"${name}" on page ${pageId} is a ${type} property, which substrate cannot write`
+						: `page ${pageId} has no "${name}" property`;
+					failures.push({ target: "notion", reason });
+				}
+			}
+			if (Object.keys(properties).length > 0) await notion.updatePage(pageId, properties);
+		} catch (cause) {
+			failures.push({ target: "notion", reason: reasonOf(cause) });
 		}
 		return failures;
 	}
@@ -126,9 +200,12 @@ export class Mirror {
 	}
 }
 
-/** Production wiring: a Linear target only when LINEAR_API_KEY is configured. */
+/** Production wiring: each target only when its API key is configured. */
 export function createMirror(config: SubstrateConfig, fetchImpl?: typeof fetch): Mirror {
 	return new Mirror({
 		linear: config.linearApiKey ? new LinearClient(config.linearApiKey, { fetchImpl }) : null,
+		notion: config.notionApiKey
+			? new NotionClient(config.notionApiKey, { dataSourceId: config.notionTaskGraphDataSource, fetchImpl })
+			: null,
 	});
 }

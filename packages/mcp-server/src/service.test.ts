@@ -3,6 +3,7 @@ import { loadConfig } from "./config.ts";
 import { DodGate } from "./dod-gate.ts";
 import { LinearClient } from "./linear.ts";
 import { createMirror, Mirror } from "./mirror.ts";
+import { NotionClient } from "./notion.ts";
 import { Substrate } from "./service.ts";
 import type { GraphNode, NodeState, SubstrateEvent } from "./types.ts";
 
@@ -172,9 +173,43 @@ describe("claimNode → mirror", () => {
 
 		await substrate.claimNode("ut-1", "n1", "omp", "sess-1");
 
-		expect(mirror.describe()).toBe("linear off");
+		expect(mirror.describe()).toBe("linear off, notion off");
 		expect(linear.ops).toEqual([]);
 		expect(emitted.filter((e) => e.kind === "warning")).toEqual([]);
+	});
+
+	test("a notion_page outside the Agent Task Graph is never PATCHed: the claim stands, one notion warning", async () => {
+		// The Notion key is a workspace-wide PAT and graph_register accepts any
+		// notion_page, so the row's parent is the last line of defence.
+		const page = "11111111-2222-3333-4444-555555555555";
+		const { emitted, index, greptime } = stubStores(
+			{ repo: "r" },
+			{ node: { notion_page: `https://www.notion.so/Private-notes-${page.replaceAll("-", "")}` } },
+		);
+		const methods: string[] = [];
+		const fetchImpl = (async (_url: string, init: RequestInit) => {
+			methods.push(init.method ?? "GET");
+			const parent = { type: "data_source_id", data_source_id: "99999999-8888-7777-6666-555555555555" };
+			return new Response(JSON.stringify({ id: page, parent, properties: { Agent: { type: "rich_text" } } }), {
+				status: 200,
+			});
+		}) as unknown as typeof fetch;
+		const notion = new NotionClient("ntn_service_test_key", { dataSourceId: "be3418f0-d2d8-411b-8677-fa8a95ee63be", fetchImpl });
+		const substrate = new Substrate(loadConfig({}), {
+			index: index as never,
+			greptime: greptime as never,
+			mirror: new Mirror({ linear: null, notion }),
+		});
+
+		const result = await substrate.claimNode("ut-1", "n1", "omp", "sess-1");
+
+		expect(result.claimed).toBe(true);
+		expect(methods).toEqual(["GET"]);
+		const warnings = emitted.filter((e) => e.kind === "warning");
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]?.payload.target).toBe("notion");
+		expect(warnings[0]?.payload.action).toBe("claim");
+		expect(warnings[0]?.summary).toContain("not a row of the Agent Task Graph");
 	});
 
 	test("a same-session re-claim re-applies state and labels but does not comment twice", async () => {

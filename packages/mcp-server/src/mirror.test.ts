@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { loadConfig } from "./config.ts";
 import { LinearClient } from "./linear.ts";
-import { Mirror, type MirrorContext } from "./mirror.ts";
+import { createMirror, Mirror, type MirrorContext } from "./mirror.ts";
+import { NotionClient } from "./notion.ts";
 import type { GraphNode } from "./types.ts";
 
 const KEY = "lin_api_test_key_0123456789";
@@ -208,5 +210,233 @@ describe("Mirror.claim → Linear", () => {
 		expect(failures[0]!.target).toBe("linear");
 		expect(failures[0]!.reason).toContain("In Progress");
 		expect(only(requests, "IssueUpdate")).toHaveLength(0);
+	});
+});
+
+const DS = "be3418f0-d2d8-411b-8677-fa8a95ee63be";
+const PAGE = "3e4bc1a0-c7ae-81ba-afff-d1ebd773123d";
+const PAGE_URL = `https://www.notion.so/n1-Throwaway-${PAGE.replaceAll("-", "")}`;
+const PR_OWNED = ["PR URL", "PR #", "PR State", "Repo", "Branch"];
+
+/** An Agent Task Graph Issue row's types as 02-NOTION-SCHEMA.md observed them, the PR-owned ones included. */
+const ISSUE_ROW_TYPES: Record<string, string> = {
+	Item: "title",
+	Level: "select",
+	"Graph ID": "rich_text",
+	"Issue ID": "rich_text",
+	"Linear URL": "url",
+	Agent: "rich_text",
+	Status: "status",
+	"Linear State": "select",
+	Completed: "date",
+	"PR URL": "url",
+	"PR #": "number",
+	"PR State": "select",
+	Repo: "rich_text",
+	Branch: "rich_text",
+};
+
+interface NotionRequest {
+	method: string;
+	url: string;
+	body: { properties?: Record<string, unknown> } | undefined;
+}
+
+/** A Notion stand-in answering GET with a row of `types` under `dataSource`, and PATCH with 200; it records everything. */
+function fakeNotion(opts: { types?: Record<string, string>; dataSource?: string } = {}) {
+	const requests: NotionRequest[] = [];
+	const fetchImpl = (async (url: string, init: RequestInit) => {
+		requests.push({ method: init.method ?? "GET", url, body: init.body ? JSON.parse(String(init.body)) : undefined });
+		if (init.method === "PATCH") return new Response(JSON.stringify({ object: "page", id: PAGE }), { status: 200 });
+		const properties = Object.fromEntries(
+			Object.entries(opts.types ?? ISSUE_ROW_TYPES).map(([name, type]) => [name, { id: name, type }]),
+		);
+		const parent = { type: "data_source_id", data_source_id: opts.dataSource ?? DS };
+		return new Response(JSON.stringify({ object: "page", id: PAGE, parent, properties }), { status: 200 });
+	}) as unknown as typeof fetch;
+	const patches = () => requests.filter((r) => r.method === "PATCH").map((r) => r.body?.properties);
+	return { requests, patches, fetchImpl, client: new NotionClient("ntn_mirror_test_key", { dataSourceId: DS, fetchImpl }) };
+}
+
+const linearDown = () =>
+	new LinearClient(KEY, { fetchImpl: (async () => new Response("down", { status: 500 })) as unknown as typeof fetch });
+
+function notionCtx(notionPage: string | null = PAGE_URL): MirrorContext {
+	return ctx({ node: node({ notion_page: notionPage }) });
+}
+
+describe("Mirror → Notion Issue row", () => {
+	test("claim with Linear ok: one PATCH of exactly Agent and Linear State In Progress, in the row's types", async () => {
+		const notion = fakeNotion();
+		const failures = await new Mirror({ linear: fakeLinear().client, notion: notion.client }).claim(notionCtx());
+
+		expect(failures).toEqual([]);
+		expect(notion.patches()).toEqual([
+			{ Agent: { rich_text: [{ text: { content: "hermes" } }] }, "Linear State": { select: { name: "In Progress" } } },
+		]);
+		expect(notion.requests.at(-1)!.url).toBe(`https://api.notion.com/v1/pages/${PAGE}`);
+	});
+
+	test("claim with a Linear failure still sets Agent but leaves Linear State alone", async () => {
+		const notion = fakeNotion();
+		const failures = await new Mirror({ linear: linearDown(), notion: notion.client }).claim(notionCtx());
+
+		expect(failures.map((f) => f.target)).toEqual(["linear"]);
+		expect(notion.patches()).toEqual([{ Agent: { rich_text: [{ text: { content: "hermes" } }] } }]);
+	});
+
+	test("claim with Linear off writes Agent only: substrate set nothing on Linear to mirror", async () => {
+		const notion = fakeNotion();
+		const failures = await new Mirror({ linear: null, notion: notion.client }).claim(notionCtx());
+
+		expect(failures).toEqual([]);
+		expect(notion.patches()).toEqual([{ Agent: { rich_text: [{ text: { content: "hermes" } }] } }]);
+	});
+
+	test("the Agent value follows the row's own type (a select Agent gets a select value)", async () => {
+		const notion = fakeNotion({ types: { ...ISSUE_ROW_TYPES, Agent: "select" } });
+		await new Mirror({ linear: null, notion: notion.client }).claim(notionCtx());
+
+		expect(notion.patches()).toEqual([{ Agent: { select: { name: "hermes" } } }]);
+	});
+
+	test("release clears Agent and sets Linear State Todo (D-05)", async () => {
+		const notion = fakeNotion();
+		const failures = await new Mirror({ linear: fakeLinear().client, notion: notion.client }).release(notionCtx());
+
+		expect(failures).toEqual([]);
+		expect(notion.patches()).toEqual([{ Agent: { rich_text: [] }, "Linear State": { select: { name: "Todo" } } }]);
+	});
+
+	test("review writes Linear State In Review and nothing else", async () => {
+		const notion = fakeNotion();
+		const failures = await new Mirror({ linear: fakeLinear().client, notion: notion.client }).review(notionCtx());
+
+		expect(failures).toEqual([]);
+		expect(notion.patches()).toEqual([{ "Linear State": { select: { name: "In Review" } } }]);
+	});
+
+	test("review after a Linear failure makes no Notion request at all", async () => {
+		const notion = fakeNotion();
+		const failures = await new Mirror({ linear: linearDown(), notion: notion.client }).review(notionCtx());
+
+		expect(failures.map((f) => f.target)).toEqual(["linear"]);
+		expect(notion.requests).toEqual([]);
+	});
+
+	test("done writes only Status Done, Linear State Done and Completed = today (UTC)", async () => {
+		const notion = fakeNotion();
+		const before = new Date().toISOString().slice(0, 10);
+		const failures = await new Mirror({ linear: fakeLinear().client, notion: notion.client }).done(notionCtx());
+		const after = new Date().toISOString().slice(0, 10);
+
+		expect(failures).toEqual([]);
+		const [patch] = notion.patches();
+		expect(Object.keys(patch!).sort()).toEqual(["Completed", "Linear State", "Status"]);
+		expect(patch!.Status).toEqual({ status: { name: "Done" } });
+		expect(patch!["Linear State"]).toEqual({ select: { name: "Done" } });
+		const onEitherSide = [before, after].map((day) => JSON.stringify({ date: { start: day } }));
+		expect(onEitherSide).toContain(JSON.stringify(patch!.Completed));
+	});
+
+	test("no request in claim, release, review or done names a PR-owned property (D-07)", async () => {
+		const notion = fakeNotion();
+		const mirror = new Mirror({ linear: fakeLinear().client, notion: notion.client });
+
+		await mirror.claim(notionCtx());
+		await mirror.release(notionCtx());
+		await mirror.review(notionCtx());
+		await mirror.done(notionCtx());
+
+		expect(notion.patches()).toHaveLength(4);
+		for (const request of notion.requests) {
+			const sent = JSON.stringify(request.body ?? {});
+			for (const name of PR_OWNED) expect(sent).not.toContain(`"${name}"`);
+		}
+	});
+
+	test("a row without an Agent property still gets Linear State, and one notion failure names Agent", async () => {
+		const { Agent: _agent, ...withoutAgent } = ISSUE_ROW_TYPES;
+		const notion = fakeNotion({ types: withoutAgent });
+		const failures = await new Mirror({ linear: fakeLinear().client, notion: notion.client }).claim(notionCtx());
+
+		expect(notion.patches()).toEqual([{ "Linear State": { select: { name: "In Progress" } } }]);
+		expect(failures).toHaveLength(1);
+		expect(failures[0]!.target).toBe("notion");
+		expect(failures[0]!.reason).toContain('"Agent"');
+	});
+
+	test("a property of a type substrate cannot write is skipped with a notion failure naming it", async () => {
+		const notion = fakeNotion({ types: { ...ISSUE_ROW_TYPES, Agent: "people" } });
+		const failures = await new Mirror({ linear: fakeLinear().client, notion: notion.client }).claim(notionCtx());
+
+		expect(notion.patches()).toEqual([{ "Linear State": { select: { name: "In Progress" } } }]);
+		expect(failures.map((f) => f.target)).toEqual(["notion"]);
+		expect(failures[0]!.reason).toContain('"Agent"');
+		expect(failures[0]!.reason).toContain("people");
+	});
+
+	test("a node with no notion_page: one notion failure and zero Notion requests", async () => {
+		const notion = fakeNotion();
+		const failures = await new Mirror({ linear: fakeLinear().client, notion: notion.client }).claim(notionCtx(null));
+
+		expect(failures).toEqual([{ target: "notion", reason: "node has no notion_page" }]);
+		expect(notion.requests).toEqual([]);
+	});
+
+	test("a page outside the Agent Task Graph is never PATCHed; the refusal is a notion failure", async () => {
+		const notion = fakeNotion({ dataSource: "99999999-8888-7777-6666-555555555555" });
+		const failures = await new Mirror({ linear: fakeLinear().client, notion: notion.client }).claim(notionCtx());
+
+		expect(notion.requests.map((r) => r.method)).toEqual(["GET"]);
+		expect(failures.map((f) => f.target)).toEqual(["notion"]);
+		expect(failures[0]!.reason).toContain("not a row of the Agent Task Graph");
+	});
+
+	test("a Notion error becomes a notion failure; the Linear step is unaffected", async () => {
+		const linear = fakeLinear();
+		const down = (async () => new Response("bad gateway", { status: 502 })) as unknown as typeof fetch;
+		const notion = new NotionClient("ntn_mirror_test_key", { dataSourceId: DS, fetchImpl: down });
+		const failures = await new Mirror({ linear: linear.client, notion }).claim(notionCtx());
+
+		expect(failures).toHaveLength(1);
+		expect(failures[0]!.target).toBe("notion");
+		expect(failures[0]!.reason).toContain("502");
+		expect(only(linear.requests, "IssueUpdate")).toHaveLength(1);
+	});
+});
+
+describe("createMirror → Notion", () => {
+	test("without NOTION_API_KEY: notion off, zero Notion requests and no notion failure", async () => {
+		const linear = fakeLinear();
+		const urls: string[] = [];
+		const recording = (async (url: string, init: RequestInit) => {
+			urls.push(url);
+			return linear.fetchImpl(url, init);
+		}) as unknown as typeof fetch;
+		const mirror = createMirror(loadConfig({ LINEAR_API_KEY: KEY }), recording);
+
+		const failures = await mirror.claim(notionCtx());
+
+		expect(mirror.describe()).toBe("linear on, notion off");
+		expect(failures).toEqual([]);
+		expect(urls.length).toBeGreaterThan(0);
+		expect(urls.filter((url) => url.includes("notion"))).toEqual([]);
+	});
+
+	test("with NOTION_API_KEY: notion on, checking rows against the configured data source", async () => {
+		const custom = "12345678-90ab-cdef-1234-567890abcdef";
+		const linear = fakeLinear();
+		const notion = fakeNotion({ dataSource: custom });
+		const routed = (async (url: string, init: RequestInit) =>
+			url.startsWith("https://api.notion.com/") ? notion.fetchImpl(url, init) : linear.fetchImpl(url, init)) as unknown as typeof fetch;
+		const env = { LINEAR_API_KEY: KEY, NOTION_API_KEY: "ntn_key", NOTION_TASK_GRAPH_DS: custom };
+		const mirror = createMirror(loadConfig(env), routed);
+
+		const failures = await mirror.claim(notionCtx());
+
+		expect(mirror.describe()).toBe("linear on, notion on");
+		expect(failures).toEqual([]);
+		expect(notion.patches()).toHaveLength(1);
 	});
 });
