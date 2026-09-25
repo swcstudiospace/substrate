@@ -6,8 +6,10 @@ import subprocess
 import sys
 import time
 
+import httpx
 import pytest
 
+from substrate_dispatcher.host import HostClient, RemoteTask
 from substrate_dispatcher.sessions import (
     CLAIM_TIMEOUT_SECONDS,
     HERMES_RATE_LIMIT_BACKOFF_SECONDS,
@@ -343,3 +345,95 @@ def test_failed_label_removal_is_retried_and_the_issue_is_not_relaunched(env_fil
     assert registry.pending_label_removal == {}
     reap(120)
     assert len(linear.named("remove_label")) == 3
+
+
+# --- a VM task through the registry (D-06): RemoteTask over httpx.MockTransport --------------
+
+
+class FakeHostTask:
+    """substrate-host stand-in for one task: ``exit_code`` and ``fail`` are mutated between reaps."""
+
+    def __init__(self):
+        self.exit_code: int | None = None
+        self.fail: Exception | None = None
+        self.posts: list[str] = []
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        if self.fail is not None:
+            raise self.fail
+        if request.method == "POST":
+            self.posts.append(request.url.path.rsplit("/", 1)[1])
+            return httpx.Response(202, json={"accepted": True})
+        return httpx.Response(200, json={"graph_id": GID, "node_id": "n1", "session_id": "n1", "exit_code": self.exit_code})
+
+
+def remote_setup(**node):
+    host = FakeHostTask()
+    client = HostClient(transport=httpx.MockTransport(host.handler))
+    proc = RemoteTask(client, GID, "n1")
+    registry = SessionRegistry()
+    s = session(surface="claude-code", dispatch_label_id="l-claude-code", proc=proc, pid=0)
+    registry.add(s)
+    linear = FakeLinear(comments={"i-1": []})
+    mcp = FakeGraph(**node)
+    lines: list[str] = []
+
+    def reap(now: float) -> None:
+        registry.reap(now, mcp=mcp, linear=linear, log=lines.append)
+
+    return registry, s, linear, mcp, host, reap, lines
+
+
+@pytest.mark.parametrize("code", [0, 1])
+def test_remote_task_claimed_by_the_host_then_ended_is_removed_quietly(code):
+    registry, s, linear, mcp, host, reap, lines = remote_setup(claimed_by="claude-code", claim_session="n1")
+    reap(30)
+    assert s.claimed_at == 30 and s.claim_session == "n1"
+    assert "claim landed for SWC-i-1 (claimed_by, session n1)" in lines
+    assert registry.active_issue_ids() == {"i-1"}
+
+    host.exit_code = code
+    reap(60)
+    assert registry.active_issue_ids() == set() and registry.capacity_left() == 2
+    assert posted(linear) == [] and linear.named("remove_label") == [] and registry.given_up == set()
+    assert linear.calls == []  # the claim was proven by graph_get; Linear never consulted
+    assert any(f"pid 0 exited (code {code}) after its claim (session n1)" in l for l in lines)
+    assert host.posts == []
+
+
+def test_remote_task_host_unreachable_three_reaps_after_the_claim_frees_the_slot_without_linear():
+    registry, s, linear, mcp, host, reap, lines = remote_setup(claimed_by="claude-code", claim_session="n1")
+    reap(30)
+    assert s.claimed_at == 30
+    host.fail = httpx.ConnectError("refused")
+    reap(60)
+    reap(90)
+    assert registry.active_issue_ids() == {"i-1"} and registry.capacity_left() == 1
+    reap(120)
+    assert registry.active_issue_ids() == set() and registry.capacity_left() == 2
+    assert linear.calls == [] and registry.given_up == set()
+    assert any("exited (code 2) after its claim" in l for l in lines)
+
+
+def test_unclaimed_remote_task_hits_the_unchanged_claim_timeout_then_terminate_and_kill():
+    registry, s, linear, mcp, host, reap, _ = remote_setup()
+    assert CLAIM_TIMEOUT_SECONDS == 900
+    reap(CLAIM_TIMEOUT_SECONDS - 1)
+    assert posted(linear) == [] and host.posts == []
+
+    reap(CLAIM_TIMEOUT_SECONDS)
+    bodies = posted(linear)
+    assert len(bodies) == 1 and "[claim-timeout]" in bodies[0]
+    assert linear.named("remove_label") == [("remove_label", "i-1", "l-claude-code")]
+    assert host.posts == ["terminate"] and s.terminated_at == CLAIM_TIMEOUT_SECONDS
+    assert registry.given_up == {"i-1"} and registry.active_issue_ids() == {"i-1"}
+
+    reap(CLAIM_TIMEOUT_SECONDS + TERMINATE_GRACE_SECONDS - 1)
+    assert host.posts == ["terminate"]
+    reap(CLAIM_TIMEOUT_SECONDS + TERMINATE_GRACE_SECONDS)
+    assert host.posts == ["terminate", "kill"]
+    assert registry.active_issue_ids() == {"i-1"}  # slot held until the host reports an exit code
+
+    host.exit_code = 1
+    reap(CLAIM_TIMEOUT_SECONDS + TERMINATE_GRACE_SECONDS + 30)
+    assert registry.active_issue_ids() == set() and len(posted(linear)) == 1

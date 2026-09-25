@@ -5,8 +5,9 @@ runs one reap and one tick. ``--dry-run`` logs decisions and writes nothing. ``-
 refused: a real launch must stay under the loop's D-14 watch (claim timeout, SIGTERM→SIGKILL,
 registry). The real (non-dry) mode holds an exclusive flock on LOCK_PATH, so only one dispatcher
 can launch sessions; a second one
-exits 3 without polling. Launches go through dispatch.make_launch_fn (D-12 worktree, D-13
-hermes chat). Every line goes to stderr with the ``[substrate-dispatcher]`` prefix (journal).
+exits 3 without polling. Launches go through dispatch.make_launch_fn (D-12 worktree, then D-13
+hermes chat for dispatch:hermes or a substrate-host VM task for dispatch:claude-code, D-06). Every
+line goes to stderr with the ``[substrate-dispatcher]`` prefix (journal).
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, TextIO
 
 from .dispatch import LaunchFn, Log, make_launch_fn, tick
+from .host import HostClient
 from .launcher import STATE_DIR
 from .linear import LinearClient
 from .mcp import McpClient
@@ -133,12 +135,13 @@ def main(argv: list[str] | None = None) -> int:
             print(f"substrate_dispatcher: {exc}", file=sys.stderr)
             return 2
         mcp = McpClient.from_env()
+        host = HostClient.from_env()
         try:
             run_loop(
                 linear=linear,
                 mcp=mcp,
                 registry=SessionRegistry(),
-                launch_fn=make_launch_fn(log=log),
+                launch_fn=make_launch_fn(log=log, open_task=host.launch),
                 env_file=Path(os.environ.get("SUBSTRATE_ENV_FILE") or DEFAULT_ENV_FILE),
                 environ=os.environ,
                 iterations=1 if args.once else None,
@@ -146,6 +149,7 @@ def main(argv: list[str] | None = None) -> int:
                 log=log,
             )
         finally:
+            host.close()
             mcp.close()
             linear.close()
     finally:

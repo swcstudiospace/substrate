@@ -96,8 +96,74 @@ is `RemoteTask.poll()` at the moment the host first reported `pending_approvals=
   container labelled `substrate.graph_id=ut-muh32wc1-d14818ff` (`127.0.0.1:32782->3000/tcp`). The
   task is left running for Task 2's D-05 restart.
 
+## Task 2 — D-05 live: dispatcher restart around the running VM task
+
+After the supervised loop was wired to `HostClient.from_env()` (`open_task=host.launch`), the unit
+was restarted with the switch still at `=1`:
+
+```
+systemctl show -p ActiveEnterTimestamp --value substrate-host; curl -s 127.0.0.1:7411/tasks   # before
+sudo systemctl restart substrate-dispatcher; sleep 35
+systemctl is-active substrate-dispatcher; systemctl show -p NRestarts --value substrate-dispatcher
+journalctl -u substrate-dispatcher --since "$(systemctl show -p ActiveEnterTimestamp --value substrate-dispatcher)"
+systemctl show -p ActiveEnterTimestamp --value substrate-host; curl -s 127.0.0.1:7411/tasks   # after
+curl -s -X POST 127.0.0.1:7411/tasks/ut-muh32wc1-d14818ff/n1/kill; graph_get over MCP
+```
+
+Observed: before the restart `GET /tasks` listed the tracer's task as `session_id=n1 state=waiting
+exit_code=null pending_approvals=1 released=false` (dispatcher MainPID 1586416, active since
+06:48:56 UTC). The restart at 15:00:12Z stopped and started the unit within one second (new MainPID
+2681092, `NRestarts=0`, active since 15:00:13 UTC); its journal since then reads
+`[substrate-dispatcher] dispatch disabled (SUBSTRATE_DISPATCH_DISABLED=1)` at 15:00:13Z and
+15:00:43Z, no Traceback. 35 s later `GET /tasks` listed the same task with the same session id and
+state (`session_id=n1 state=waiting exit_code=null pending_approvals=1 released=false`),
+substrate-host was `active` with the same MainPID 2650098 and the same `ActiveEnterTimestamp`, and
+the sandbox container `goofy_wright` (label `substrate.graph_id=ut-muh32wc1-d14818ff`) was
+`Up 4 minutes`. The dispatcher's in-memory registry, of course, no longer holds the RemoteTask
+(Gaps).
+
+host_active_since_before=Fri 2026-09-25 14:44:31 UTC
+host_active_since_after=Fri 2026-09-25 14:44:31 UTC
+dispatcher_restart_task_kept=true
+dispatcher_restarted_at=2026-09-25T15:00:12Z
+
+Kill at 15:00:58Z: `POST /tasks/ut-muh32wc1-d14818ff/n1/kill` → 202 `{"kill":"accepted"}`; host
+journal `turn ended … stop=cancelled` 15:00:58Z, `task killed …` 15:01:01Z; `GET /tasks/<gid>/n1`
+then read `state=unloaded exit_code=1 released=true last_stop_reason=cancelled`; `graph_get` showed
+n1 `claimed_by=null claim_session=null state=unstarted`.
+
+tracer_task_killed=true
+
+## Cleanup
+
+```
+git -C /root/src/repos/agent-substrate worktree remove --force /var/lib/substrate/worktrees/ut-muh32wc1-d14818ff
+git -C /root/src/repos/agent-substrate branch -D substrate/ut-muh32wc1-d14818ff     # "Deleted branch … (was 5fdeb7c)"
+git -C /root/src/repos/agent-substrate worktree list    # → main + Phase 2's ut-mugbqivi-752f2dad and ut-mughkkc0-73909228
+rm -f /tmp/03-05-tracer.py
+```
+
+The worktree directory is gone and the main checkout stayed on `main` throughout.
+
+tracer_worktree_removed=true
+
+## Retained
+
+The throwaway graph `ut-muh32wc1-d14818ff` stays in the substrate index (status Implementing, n1
+unstarted, no Linear or Notion reference, no claim after the kill) and its VM actor stays in
+/var/lib/substrate/agentos (task record `released=true, exit_code=1`); there is no delete path in
+scope. Its sandbox container is disposed by the host's per-actor dispose hook when the VM sleeps
+(03-03), not by this plan.
+
 ## Gaps
 
+- **Re-adoption gap (D-05, accepted as T-03-05-04):** a dispatcher restart forgets RemoteTask
+  supervision of running VM tasks (in-memory registry); substrate-host keeps them and lists them on
+  GET /tasks for a later re-adoption; the claim mirror already removed dispatch:* so the issue is
+  not re-polled. Observed here: after the restart the task was still `waiting` on the host with
+  `session_id=n1` while the new dispatcher process started with an empty registry (capacity 2), so
+  the 900 s claim timeout, terminate and kill no longer applied to it from the dispatcher side —
+  the host's approval gate and its kill route remained the only controls.
 - The label → poll leg for `dispatch:claude-code` (Linear `dispatch_candidates` → `graph_find`
   → `tick`) was not exercised here: the candidate and `found` were synthetic, and no Linear issue
   exists for TRC-2 (SWC free-plan cap). The proof (03-10) exercises it with the D-14 issue; the
@@ -105,6 +171,8 @@ is `RemoteTask.poll()` at the moment the host first reported `pending_approvals=
   refusals comment once).
 - The model's first turn stopped at its first tool call (permission request, no approver): the
   prompt's issue_get / work / complete steps were not run by the model, so `poll()` returning the
-  host's 0 or 1 was observed only in test_host.py, not live.
+  host's 0 or 1 was observed only in test_host.py, not live (the kill's `exit_code=1` was read after
+  the registry had let go of the task).
 - `RemoteTask.terminate()` / `kill()` were not invoked by the registry in this run (no timeout
-  reached); Task 2 kills the task through the same host route directly.
+  reached); the kill went through the same host route directly, and the registry's timeout →
+  terminate → kill sequence over a RemoteTask is pinned by test_sessions.py.

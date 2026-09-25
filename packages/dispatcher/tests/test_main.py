@@ -147,6 +147,19 @@ def lock_path(tmp_path, monkeypatch) -> Path:
     return path
 
 
+class FakeHost:
+    """HostClient stand-in: records close(); ``launch`` is the bound method main hands to make_launch_fn."""
+
+    def __init__(self):
+        self.closed = 0
+
+    def launch(self, **_kwargs):  # pragma: no cover - never launched in these tests
+        raise AssertionError("launch called")
+
+    def close(self) -> None:
+        self.closed += 1
+
+
 @pytest.fixture
 def client_calls(monkeypatch) -> list[str]:
     calls: list[str] = []
@@ -159,11 +172,37 @@ def client_calls(monkeypatch) -> list[str]:
         calls.append("mcp")
         return FakeMcp()
 
+    def host_from_env():
+        calls.append("host")
+        return FakeHost()
+
     monkeypatch.setattr(FakeLinear, "close", lambda self: None, raising=False)
     monkeypatch.setattr(FakeMcp, "close", lambda self: None, raising=False)
     monkeypatch.setattr(cli.LinearClient, "from_env", staticmethod(linear_from_env))
     monkeypatch.setattr(cli.McpClient, "from_env", staticmethod(mcp_from_env))
+    monkeypatch.setattr(cli.HostClient, "from_env", staticmethod(host_from_env))
     return calls
+
+
+def test_main_builds_one_host_client_hands_its_launch_to_make_launch_fn_and_closes_it(
+    lock_path, client_calls, monkeypatch, env_file
+):
+    monkeypatch.setenv("SUBSTRATE_ENV_FILE", str(env_file))
+    hosts: list[FakeHost] = []
+
+    def host_from_env():
+        client_calls.append("host")
+        hosts.append(FakeHost())
+        return hosts[-1]
+
+    monkeypatch.setattr(cli.HostClient, "from_env", staticmethod(host_from_env))
+    captured: dict = {}
+    monkeypatch.setattr(cli, "make_launch_fn", lambda **kw: captured.update(kw) or (lambda *_: None))
+    monkeypatch.setattr(cli, "run_loop", lambda **kwargs: 0)
+    assert cli.main([]) == 0
+    assert client_calls == ["linear", "mcp", "host"]
+    assert captured["open_task"] == hosts[0].launch
+    assert hosts[0].closed == 1
 
 
 def hold(path: Path) -> int:
@@ -190,7 +229,7 @@ def test_dry_run_takes_no_lock(lock_path, client_calls, monkeypatch, env_file):
         assert cli.main(["--once", "--dry-run"]) == 0
     finally:
         os.close(fd)
-    assert client_calls == ["linear", "mcp"]
+    assert client_calls == ["linear", "mcp", "host"]
 
 
 def test_once_without_dry_run_exits_2_before_lock_or_any_client(lock_path, client_calls, capsys):
