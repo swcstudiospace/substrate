@@ -138,3 +138,69 @@ Undo: `issueUnarchive(id)` per the method above, using the ids below.
 One transient Linear read timeout occurred before SWC-271's pre-archive read; the read was retried and the issue then archived normally.
 
 Result: 28 archived, 0 skipped, 0 errors. Active issues in team SWC after the run: **247** (limit 250 per Linear docs). This leaves room for three new issues: the 02-01, 02-09 and 02-08 tracer/proof issues. Keepers (the Todo copies) are untouched.
+
+
+## Phase 3 — archives for the proof issue (D-14, 2026-09-25)
+
+Plan 03-09 needed room for one issue: the Phase 3 proof issue. D-14 allows exactly
+max(0, active − 249) archives from the owner-decision-2 pool above, oldest `updatedAt` first, each
+re-checked immediately before its `issueArchive`, and never more.
+
+Rule: the owner-decision-2 selection rule, unchanged (team SWC; state type backlog or unstarted; title
+starting "[TEST]" or "[Locate"; created 2026-08-11..17; exact title matches at least one other open
+issue; per exact-title group the keeper is the oldest Todo copy, else the oldest, and only non-keepers
+are candidates; no assignee, parent or sub-issues; at most one comment; no `agent:*`/`dispatch:*`
+label; `updatedAt` before 2026-09-11; `graph_find` found:false for both the id and the identifier).
+
+active_before: **262** non-archived issues in the workspace (counted 2026-09-25T22:55:11Z; research
+earlier that day saw 251 — 12 `Untitled eng work` Backlog issues SWC-468..SWC-479 were created
+2026-09-25 06:52–13:52Z by another workflow).
+
+Arithmetic: a create needs ≤ 249 active, so max(0, 262 − 249) = **13** archives. The pool had
+16 eligible issues; the 13 oldest were taken. Before each archive the script re-read every active
+issue, recomputed the pool and re-ran `graph_find`; an issue that no longer qualified would have been
+skipped and the next taken. None was skipped. Every keeper stays open.
+
+| identifier | id | title | state | updatedAt | keeper |
+|---|---|---|---|---|---|
+| SWC-210 | 8fe57e27-36bb-418d-a14e-4041c77c0cfe | [Locate] Roll-Up Over-Sink Dish-Drying Rack | Todo | 2026-08-15T04:02:02.102Z | SWC-202 (Todo, stays open) |
+| SWC-211 | 39e59ba7-2be0-4b29-9321-9654c9306841 | [Locate] Four-Compartment Food-Bag Drawer Dispenser | Todo | 2026-08-15T04:02:14.866Z | SWC-204 (Todo, stays open) |
+| SWC-275 | a6b9d6c0-b34d-47c4-af32-c5b7a7414258 | [Locate] TSA-friendly toiletry + tech wet/dry split Dopp kit | Backlog | 2026-08-16T16:03:35.791Z | SWC-274 (Todo, stays open) |
+| SWC-278 | 5ee0cfee-07ee-42b3-a319-e5f0d1b7aeb9 | [Locate FALLBACK] TSA-friendly toiletry + tech wet/dry split Dopp kit | Backlog | 2026-08-16T16:05:36.354Z | SWC-277 (Todo, stays open) |
+| SWC-287 | 1dd173d7-0549-4e47-a172-403fd9953954 | [Locate] Safety razor starter kit with bamboo handle + stand + blades tin | Backlog | 2026-08-16T20:04:21.950Z | SWC-286 (Todo, stays open) |
+| SWC-289 | f74cd707-6930-4927-aada-c342bb14d373 | [Locate FALLBACK] Reusable bamboo cotton rounds set with mesh wash bag (30–40 pads) | Backlog | 2026-08-16T20:05:00.789Z | SWC-288 (Todo, stays open) |
+| SWC-296 | 06059b79-5078-44eb-aced-7044dd131fa1 | [TEST] Wobble/balance board for sit-stand desks | Backlog | 2026-08-17T00:03:36.590Z | SWC-295 (Todo, stays open) |
+| SWC-298 | 51e273a1-c336-442f-af0d-1b496c55504c | [Locate] Portable under-desk pedal exerciser (tension-adjust, fold-flat) | Backlog | 2026-08-17T00:03:52.656Z | SWC-297 (Todo, stays open) |
+| SWC-300 | 648ba127-4f76-42c7-b520-570893249000 | [Locate] Under-desk silent mini elliptical (magnetic resistance) | Backlog | 2026-08-17T00:03:56.690Z | SWC-299 (Todo, stays open) |
+| SWC-302 | 3be05180-8a38-4f98-9b04-92caa20183db | [Locate FALLBACK] Portable under-desk pedal exerciser (tension-adjust, fold-flat) | Backlog | 2026-08-17T00:04:41.222Z | SWC-301 (Todo, stays open) |
+| SWC-304 | c2e6837e-6a76-45f3-84b7-eb4dec750513 | [Locate FALLBACK] Under-desk silent mini elliptical (magnetic resistance) | Backlog | 2026-08-17T00:05:14.742Z | SWC-303 (Todo, stays open) |
+| SWC-314 | 897e321c-6b1e-4530-a16a-0a8d2b996f60 | [Locate FALLBACK] Expandable Bamboo Drawer Organizer Set (3-pc nested) | Backlog | 2026-08-17T04:05:03.667Z | SWC-312 (Todo, stays open) |
+| SWC-317 | 2dd10cd6-19f3-4530-9c23-9ff65a858659 | [TEST] Inflatable elevated pet travel bed with puncture-resistant top and carry sack | Backlog | 2026-08-17T08:03:59.632Z | SWC-316 (Todo, stays open) |
+
+Still open in the pool (eligible, not archived): SWC-319, SWC-323, SWC-330.
+
+### Archive log (Phase 3)
+
+| identifier | id | result |
+|---|---|---|
+| SWC-210 | 8fe57e27-36bb-418d-a14e-4041c77c0cfe | archived 2026-09-25T22:55:50+00:00 |
+| SWC-211 | 39e59ba7-2be0-4b29-9321-9654c9306841 | archived 2026-09-25T22:55:52+00:00 |
+| SWC-275 | a6b9d6c0-b34d-47c4-af32-c5b7a7414258 | archived 2026-09-25T22:55:54+00:00 |
+| SWC-278 | 5ee0cfee-07ee-42b3-a319-e5f0d1b7aeb9 | archived 2026-09-25T22:55:57+00:00 |
+| SWC-287 | 1dd173d7-0549-4e47-a172-403fd9953954 | archived 2026-09-25T22:55:59+00:00 |
+| SWC-289 | f74cd707-6930-4927-aada-c342bb14d373 | archived 2026-09-25T22:56:01+00:00 |
+| SWC-296 | 06059b79-5078-44eb-aced-7044dd131fa1 | archived 2026-09-25T22:56:03+00:00 |
+| SWC-298 | 51e273a1-c336-442f-af0d-1b496c55504c | archived 2026-09-25T22:56:06+00:00 |
+| SWC-300 | 648ba127-4f76-42c7-b520-570893249000 | archived 2026-09-25T22:56:09+00:00 |
+| SWC-302 | 3be05180-8a38-4f98-9b04-92caa20183db | archived 2026-09-25T22:56:11+00:00 |
+| SWC-304 | c2e6837e-6a76-45f3-84b7-eb4dec750513 | archived 2026-09-25T22:56:13+00:00 |
+| SWC-314 | 897e321c-6b1e-4530-a16a-0a8d2b996f60 | archived 2026-09-25T22:56:16+00:00 |
+| SWC-317 | 2dd10cd6-19f3-4530-9c23-9ff65a858659 | archived 2026-09-25T22:56:19+00:00 |
+
+Unarchive method: `mutation { issueUnarchive(id: "<id>") { success } }` with each id above, sent from a
+python3 script started as `sudo systemd-run --quiet --wait --pipe --collect -p EnvironmentFile=/etc/substrate/substrate.env /usr/bin/python3 - < <script>`
+(the script holds no key and is deleted afterwards). Unarchiving any of them raises the active count
+above the limit again.
+
+Result: 13 archived, 0 skipped, 0 errors. Active issues now **249** (limit 250 per Linear docs); after
+the proof issue SWC-480 was created, **250**.
