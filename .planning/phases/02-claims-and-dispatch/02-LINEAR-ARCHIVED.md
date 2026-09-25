@@ -204,3 +204,7 @@ above the limit again.
 
 Result: 13 archived, 0 skipped, 0 errors. Active issues now **249** (limit 250 per Linear docs); after
 the proof issue SWC-480 was created, **250**.
+
+## 2026-09-25 — owner-requested cleanup of completed issues
+
+Archived every issue in a `completed` state type: SWC-467, SWC-465, SWC-113 (3). Undo with `issueUnarchive`.
