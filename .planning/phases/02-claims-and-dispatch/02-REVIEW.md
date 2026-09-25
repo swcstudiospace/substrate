@@ -45,3 +45,18 @@ Reviewer: gsd-code-reviewer role (read-only). Scope: Phase 2 source diffs only. 
 
 ### IN-03 — index writes after a gate approval are unguarded
 `service.ts:340-344`. A Postgres error after Linear is Done skips `Mirror.done` and the `complete` event; a retry moves Done back to In Review. **Fix:** once `gate.completed`, catch and warn on index writes so `Mirror.done` and the event always run. Confidence 0.5.
+
+## Fix pass (2026-09-25, autonomous code-review fix chain)
+
+| ID | Status | Commit |
+|---|---|---|
+| WR-01 | fixed — gate timeout 35 s (`SUBSTRATE_DOD_GATE_TIMEOUT_MS`); timeout settled by the issue's Linear state; retry on a Done issue skips review and gate | a63fddb |
+| WR-02 | fixed — authenticated callerSurface wins; a different payload surface is refused with no write; anonymous mode unchanged | e74ce9a |
+| WR-03 | fixed — `releaseNode` is compare-and-set on claimed_by + claim_session; 0 rows → `released:false` / warning after approval | 21667e9 |
+| WR-04 | fixed — `--once` requires `--dry-run` (exit 2); the unit runs the loop | 41c5089 |
+| WR-05 | open — owner decision (owner-accepted shortfall in 02-PROOF.md) | — |
+| IN-01 | open — owner decision (privilege model for dispatched Hermes) | — |
+| IN-02 | fixed — ids validated before checkout/worktree; once-only `invalid-ids` comment and give-up | a0c5b11 |
+| IN-03 | fixed — index writes after gate approval warn instead of throwing | 7b8ad5c |
+
+Gate after fixes: agent-substrate 167 pass / 0 fail, tsc exit 0; dispatcher 114 passed. substrate-mcp restarted 07:27:18Z, healthz index+greptime true, mirror linear+notion on.
