@@ -107,6 +107,105 @@ had already cancelled and unloaded the session; the record was then marked relea
 
 restart_kill_released=true
 
+## Task 2 — containment audit (D-08, D-01, D-12, D-04)
+
+`sandbox_net=published_loopback` and `route_choice=a:loopback,…` (03-01-SPIKE.md), so the audit ran
+with `--sandbox-net published_loopback` and no `--sanctioned` name.
+
+```
+python3 /tmp/03-06-open.py open TRC-7; python3 /tmp/03-06-open.py wait-approval <gid>   # second throwaway task, as Task 1
+sudo systemd-run --quiet --wait --pipe --collect -p WorkingDirectory=/root/src/repos/agent-substrate/packages/host \
+  -E HOME=/root /usr/bin/node .probe-03-06.mjs audit <gid>   # in the task's VM: agentos-sandbox run-command git --version
+                                                            # (starts the container), node -e fetch https://example.com,
+                                                            # agentos-sandbox run-command curl -sS -m 10 -o /dev/null https://example.com
+docker ps --filter label=substrate.graph_id --format '{{.ID}} {{.Names}} {{.Labels}} {{.Ports}}'
+sudo systemd-run --quiet --wait --pipe --collect -p EnvironmentFile=/etc/substrate/substrate.env \
+  -p WorkingDirectory=/root/src/repos/agent-substrate/packages/host -E HOME=/root \
+  /usr/bin/node src/audit.ts --sandbox-net published_loopback > /tmp/03-06-audit.out          # while the container ran
+docker inspect <id> --format '…PortBindings/Privileged/AutoRemove/Binds/Labels/NetworkMode/Image…'   # token redacted below
+docker image inspect asterinas/dev:0.18.1-20260901 --format '{{.Id}}'; docker ps -a --filter name=^bold_rosalind$
+curl -s -X POST 127.0.0.1:7411/tasks/<gid>/n1/kill; python3 /tmp/03-06-open.py graph <gid>
+git -C /root/src/repos/agent-substrate worktree remove --force /var/lib/substrate/worktrees/<gid>; git branch -D substrate/<gid>   # both gids
+```
+
+audit_graph_id=ut-muh424n5-667ff591
+audit_open_status=202
+t_audit_first_approval=2026-09-25T15:24:06Z
+
+In-VM probe (throwaway rivet client, `t_probe=2026-09-25T15:24:13Z`), verbatim:
+
+sandbox_git_exit=0
+sandbox_git_out={"ok":true,"result":{"stdout":"git version 2.39.5\n","stderr":"","exitCode":0,"timedOut":false,"durationMs":5}}
+vm_fetch_exit=7
+vm_fetch_out=E EACCES: EACCES: permission denied, tcp://example.com:443: blocked by network.http policy
+vm_example_com=denied
+container_curl_hostfn_exit=0
+container_curl_timed_out=false
+container_curl_exit=0
+container_example_com=reachable
+
+`docker ps` at `t_audit=2026-09-25T15:24:15Z`, while the audit CLI ran:
+`5aa36b601b8d awesome_sutherland substrate.graph_id=ut-muh424n5-667ff591 127.0.0.1:32785->3000/tcp`
+
+sandbox_container_seen=true
+
+Audit CLI output (`/tmp/03-06-audit.out`, exit 0, stderr empty), verbatim — names and counts only:
+
+storage_mode=700
+secret_keys=GREPTIME_PASSWORD,LINEAR_API_KEY,NOTION_API_KEY
+secret_hits_GREPTIME_PASSWORD=0
+secret_hits_LINEAR_API_KEY=0
+secret_hits_NOTION_API_KEY=0
+secret_hits_total=0
+sanctioned_keys=none
+config_keys=GREPTIME_URL,INVOCATION_ID,MEMORY_PRESSURE_WRITE,NOTION_TASK_GRAPH_DS,SUBSTRATE_DISPATCH_MODEL,SUBSTRATE_PG_URL
+config_hits_GREPTIME_URL=0
+config_hits_INVOCATION_ID=0
+config_hits_MEMORY_PRESSURE_WRITE=0
+config_hits_NOTION_TASK_GRAPH_DS=1548
+config_hits_SUBSTRATE_DISPATCH_MODEL=0
+config_hits_SUBSTRATE_PG_URL=0
+config_hits_total=1548
+containers_inspected=1
+container_violations=0
+
+The scanned set is every variable of the transient unit's environment with a value of at least 12
+characters not starting with `/` (substrate.env through EnvironmentFile plus systemd's own
+`INVOCATION_ID`, `MEMORY_PRESSURE_WRITE`); `SUBSTRATE_APPROVAL_*` and `SUBSTRATE_TOKEN_*` are not
+in substrate.env yet (D-13 owner checkpoint pending), so they do not appear. `NOTION_TASK_GRAPH_DS`
+is the Notion data-source id 03-03 seeds into every VM's `/home/agentos/.config/ultrathink/config.json`
+(`notion.dataSourceUrl`); its 1548 matches across every VM's files and history are the seeded
+locator, reported by name and never counted in `secret_hits_total`.
+
+Container `5aa36b601b8d` as inspected (token redacted):
+`{"3000/tcp":[{"HostIp":"127.0.0.1","HostPort":""}]} privileged=false autoremove=true binds=["/var/lib/substrate/worktrees/ut-muh424n5-667ff591:/work","/root/src/repos/agent-substrate/node_modules:/work/node_modules:ro"] label=ut-muh424n5-667ff591 network=bridge image=substrate-sandbox:0.1`
+`Cmd=["server","--token","<redacted>","--host","0.0.0.0","--port","3000","--no-telemetry"]`
+
+D-04 after the audit: `asterinas/dev:0.18.1-20260901` →
+`sha256:5211b0c1afdf8c51dd42528009da562d2308959b1979f5764ea431db4a64d0f6`; `bold_rosalind` listed,
+`Exited (0) 8 days ago`. The boot sweeps of this plan removed only `substrate.graph_id` containers
+(one, `interesting_wescoff`, after the Task 1 SIGKILL).
+
+d04_intact=yes
+
+Kill at `t_kill2=2026-09-25T15:24:41Z`: `{"kill":"accepted"}` → `state=unloaded`, `released=true`,
+`exit_code=1`; `graph_get` → `claimed_by=None`, `claim_session=None`.
+
+audit_kill_released=true
+throwaway_worktrees_removed=2
+
+`git worktree list` after the removal: main (`625f3e8 [main]`) plus Phase 2's
+`ut-mugbqivi-752f2dad` and `ut-mughkkc0-73909228`; no `substrate/ut-muh3nlig-*` or
+`substrate/ut-muh424n5-*` branch remains; the main checkout stayed on `main`.
+
+## Retained
+
+Graphs `ut-muh3nlig-97d72a43` and `ut-muh424n5-667ff591` stay in the substrate index (no Linear or
+Notion reference, no claim: `claimed_by` null on both) and their VM actors stay in
+`/var/lib/substrate/agentos` (rivet keeps VM files and session history; kill unloads, never deletes).
+The task records under `/var/lib/substrate/agentos/tasks/` are kept (`released=true`). Nothing else
+was created: no image, no network, no substrate.env change (the switch's last line is still `=1`).
+
 ## Gaps
 
 - What the model did inside the interrupted turn is not observable from the host: the pre-restart
@@ -126,3 +225,17 @@ restart_kill_released=true
 - The continuation prompt's own settlement was observed only through the kill (`session_storage_error`
   lease failure while the session was being unloaded), not as an `end_turn`, because no approver
   answered the new `Read` request (03-08).
+- RocksDB block compression can hide a byte match, so secret_hits_total=0 is a floor; the D-08
+  control is sessionEnv's exact-key test (03-04).
+- Keys are classified by name segment (secretKey); a credential stored under a name without a
+  secret segment would be counted under config_hits, not secret_hits_total — config_keys lists every
+  such name for review. On this host that list holds two URLs that could embed a credential,
+  `SUBSTRATE_PG_URL` and `GREPTIME_URL` (both 0 hits), and `SUBSTRATE_DISPATCH_MODEL` (0 hits).
+- D-12 deviation: sandbox container egress is open on sandbox_net=published_loopback (Docker's
+  default bridge; D-12 covers the VM only): `curl -sS -m 10 -o /dev/null https://example.com` inside
+  container `5aa36b601b8d` exited 0 (`container_example_com=reachable`) while the same fetch from the
+  VM was denied (`blocked by network.http policy`). Every command reaches the container only as a VM
+  tool call (`agentos-sandbox run-command`) that waits on an owner tap under D-13, and the container
+  holds no credential (no env, no docker socket, the worktree and a read-only node_modules bind, a
+  per-container token on a 127.0.0.1-published port). Same finding as 03-01 (`sandbox_egress=open`);
+  `sandbox_net=internal` is unusable with the 0.2.21 sidecar (non-https, non-localhost baseUrl).
