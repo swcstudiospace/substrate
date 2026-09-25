@@ -1,4 +1,4 @@
-"""D-14 session registry: the cap, the claim watch and the 10-minute claim timeout.
+"""D-14 session registry: the cap, the claim watch and the 15-minute claim timeout.
 
 A dispatched Hermes session either lands its claim or ends without one. A session that ends
 without a claim — its process exits first, or CLAIM_TIMEOUT_SECONDS pass — gets one Linear
@@ -21,7 +21,11 @@ from typing import Any, Callable, Iterable
 
 from . import dispatch
 
-CLAIM_TIMEOUT_SECONDS = 600
+# Must outlast one Hermes 429 rate-limit backoff (HERMES_RATE_LIMIT_BACKOFF_SECONDS) plus startup:
+# in 02-08 a 600 s timeout equal to that backoff turned every first-call 429 into a certain
+# [claim-timeout] before Hermes could retry (D-14 amended 2026-09-25 by the owner).
+HERMES_RATE_LIMIT_BACKOFF_SECONDS = 600
+CLAIM_TIMEOUT_SECONDS = 900
 # Hermes was seen ignoring SIGTERM (02-09 tracer): terminate, then kill once this has passed.
 TERMINATE_GRACE_SECONDS = 10
 LANDED_STATES = frozenset({"started_review", "completed"})

@@ -34,7 +34,7 @@ MARKERS: dict[str, str] = {
     "path-conflict": "the worktree path is taken by something git does not track as this graph's worktree; not dispatching",
     "git-failed": "git could not prepare the worktree; not dispatching",
     "exited-unclaimed": "hermes session exited (code {code}) without claiming the node — removed the dispatch label; not retrying",
-    "claim-timeout": "no claim within 10 minutes — removed the dispatch label; not retrying",
+    "claim-timeout": "no claim within 15 minutes — removed the dispatch label; not retrying",
 }
 
 LaunchFn = Callable[[Candidate, dict], Launched]

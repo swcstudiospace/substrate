@@ -1,4 +1,4 @@
-"""D-14 session watch: landed-claim rule, unclaimed exit, 600 s timeout, SIGTERM → SIGKILL."""
+"""D-14 session watch: landed-claim rule, unclaimed exit, claim timeout, SIGTERM → SIGKILL."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import pytest
 
 from substrate_dispatcher.sessions import (
     CLAIM_TIMEOUT_SECONDS,
+    HERMES_RATE_LIMIT_BACKOFF_SECONDS,
     TERMINATE_GRACE_SECONDS,
     SessionRegistry,
     claim_comment_sessions,
@@ -67,7 +68,13 @@ def assert_untouched(registry, s, linear):
 # --- timeout -----------------------------------------------------------------------------
 
 
-def test_timeout_at_600_comments_removes_label_terminates_and_holds_slot():
+def test_claim_timeout_outlasts_one_hermes_rate_limit_backoff():
+    # A first-call 429 makes Hermes wait this long before retrying; the claim timeout must leave
+    # room for the retry and Hermes' ~35 s startup, or every rate-limited run times out unclaimed.
+    assert CLAIM_TIMEOUT_SECONDS >= HERMES_RATE_LIMIT_BACKOFF_SECONDS + 120
+
+
+def test_timeout_comments_removes_label_terminates_and_holds_slot():
     registry, s, linear, _, reap, _ = setup()
     reap(CLAIM_TIMEOUT_SECONDS - 1)
     assert_untouched(registry, s, linear)
@@ -206,7 +213,7 @@ def test_claim_then_complete_between_reaps():
     assert registry.active_issue_ids() == set()
     assert_untouched(registry, s, linear)
 
-    # Alive variant: the same node through start+600 s never times out.
+    # Alive variant: the same node through start+CLAIM_TIMEOUT_SECONDS never times out.
     registry, s, linear, mcp, reap, _ = setup()
     reap(30)
     mcp.node.update(state="completed", claimed_by=None, claim_session=None)
