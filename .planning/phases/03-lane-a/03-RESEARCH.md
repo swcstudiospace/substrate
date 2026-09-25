@@ -117,6 +117,8 @@ npm install --no-audit --no-fund @rivet-dev/agentos@0.2.21 @rivet-dev/agentos-sa
 ```
 Use `npm` in `packages/host`, not `bun add`. Bun does not run untrusted lifecycle scripts, and `better-sqlite3` (a dependency of agentos-core) needs its `prebuild-install` install script [VERIFIED: `npm view better-sqlite3 scripts.install`]. `packages/host` is a root workspace member (`package.json` `workspaces`), so decide explicitly whether to keep it there. Recommendation: keep it, but give it its own `package-lock.json`, and keep root `bunx tsc` green by excluding `packages/host/node_modules` (already excluded by the `node_modules` pattern). Expected footprint is about 0.7 GB: agentos-core pulls claude-code 114 MB, codex-cli 60 MB, the sidecars 150+148 MB, engine-cli 88 MB and rivetkit-napi 42 MB [VERIFIED: npm `dist.unpackedSize`; ScoutLaneA].
 
+**Workspace install caveat (the planner reproduced this):** the install must run as `npm install --no-audit --no-fund --workspaces=false …` inside `packages/host`. Plain `npm install` in a workspace member writes the repo-root `package-lock.json` and root `node_modules`. 03-01 checks for this: `packages/host/package-lock.json` must exist, and the root must have no `package-lock.json`.
+
 **Version verification:** `npm view` on 2026-09-25 gave these latest versions: `@rivet-dev/agentos` 0.2.21, `@rivet-dev/agentos-sandbox` 0.2.21, `@agentos-software/claude-code` 0.2.7 (with rc 0.2.8-rc.2, which has the same `--bare`/`mcp-N` code), `@agentos-software/git` 0.3.3, `sandbox-agent` 0.4.2 and `rivetkit` 2.3.21. agentos pins rivetkit **2.3.10**. GitHub `main` of rivet-dev/agentos has a rewritten Claude package (`@agentclientprotocol/claude-agent-acp` 0.29.2), but it is **unreleased**. The docs site describes `main`, not 0.2.21, so docs claims about the Claude adapter (for example "skills load automatically") must be checked against 0.2.7 behaviour.
 
 ## Package Legitimacy Audit
@@ -405,21 +407,37 @@ class RemoteTask:
 | A7 | Two getUpdates consumers on one token conflict (HTTP 409) | D-13 | None for the design |
 | A8 | Exact host-function names for the sandbox collection (`sandbox`) | Code Examples | Rule mismatch denies `agentos-sandbox`. The spike lists them |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Can the VM reach host 127.0.0.1:7410/:3001?** Desk answer: yes, via `loopbackExemptPorts` plus network rules (docs: "Reaching a host loopback port still requires an explicit loopback exemption entry"). **OPEN until spike (a).** The fallbacks are in the spike design below.
+1. **Can the VM reach host 127.0.0.1:7410/:3001?** Desk answer: yes, via `loopbackExemptPorts` plus network rules (docs: "Reaching a host loopback port still requires an explicit loopback exemption entry"). The spike design below lists the fallbacks. — RESOLVED (for planning): the live answer is not known yet. Spike (a) in 03-01 answers it, and both outcomes are planned:
+   - `a:loopback` when `a_loopback=yes` and `a_model=yes`.
+   - Otherwise `a:hostfn_proxy`, when `a2_substrate_hostfn=yes` and `a2_model_relay=yes`.
+   - Otherwise `a:anthropic_key`, after an owner checkpoint:decision on (a3).
+   - Otherwise the spike stops with `spike_blocked=no_model_route`.
+
+   Later plans branch on `route_choice=a:<…>` in `03-01-SPIKE.md`.
 2. **Where do model calls originate?** RESOLVED: inside the VM. The Claude Agent SDK runs in the guest and reads `ANTHROPIC_BASE_URL` from the session `env` [CITED: agents/claude.mdx; adapter.js spawns the CLI with `...process.env`]. There is no Anthropic key on the host (substrate.env `ANTHROPIC_API_KEY`=0, `ANTHROPIC_AUTH_TOKEN`=0; `/root/.claude/settings.json` env holds `ANTHROPIC_BASE_URL` and model options only).
 3. **What is shunt, and does it need auth?** RESOLVED: `shunt.service`, "Shunt Claude Code gateway (Anthropic-compatible, SuperGrok OAuth)", root, `/root/.cargo/bin/shunt --config /root/.config/shunt/shunt.toml run`, listening on `127.0.0.1:3001`. Its `[server]` table has `bind` and `default_provider` only. Unauthenticated `GET /` and `GET /v1/models` return 200. Any VM with the route can therefore spend the owner's SuperGrok quota. That is acceptable for loopback-only; record it as a threat.
-4. **Does the adapter load hooks/settings/plugins?** Desk answer: no (bare, project-only settings, no plugins). **OPEN until spike (b).**
-5. **Does git work?** `@agentos-software/git` 0.3.3 ships a 664 KB WASM package but its npm description says "(planned)". Container git (2.x in the image) works if the sandbox works. **OPEN until spike (c).**
+4. **Does the adapter load hooks/settings/plugins?** Desk answer: no (bare mode, project-only settings, no plugins). — RESOLVED (for planning): the live answer is not known yet. Spike (b) records `b_hooks`, `b_skills`, `b_skill_by_path`, `b_claude_json_mcp`, `b_session_mcp_names` and `b_sandbox_bun`, then derives the route:
+   - `b:hooks` when hooks fire and bun runs in the sandbox.
+   - Otherwise `b:prompt_hostfn`, when the model can read the sync SKILL.md by path.
+   - Otherwise `b:host_after_turn`.
+
+   03-06 adds a host sync backstop on every route: a turn that settles with `pr_url` set and `synced_at` null makes the host run sync once. When the host does the sync, it is recorded as the D-10 deviation.
+5. **Does git work?** `@agentos-software/git` 0.3.3 ships a 664 KB WASM package, but its npm description says "(planned)". Container git (2.x in the image) works if the sandbox works. — RESOLVED (for planning): the live answer is not known yet. Spike (c) derives the route:
+   - `c:vm_git` when `c_vm_git=yes`.
+   - Otherwise `c:sandbox_git`.
+   - Otherwise `c:hostfn_commit`.
+
+   Push and PR creation always go through host functions (`c_push_hostfn`), whichever route wins. Caveat the planner found: a dispatcher worktree's `.git` is a file naming an absolute gitdir under the main checkout's `.git/worktrees/`, which lies outside any `host_dir` or bind mount. So spike (c) tests a real `git worktree add` layout, and `c_vm_git=clone_only` (works on a plain clone only) counts as no.
 6. **Which storage variable applies?** RESOLVED: `RIVETKIT_STORAGE_PATH`. rivetkit-engine-process sets the engine's `RIVET__FILE_SYSTEM__PATH` itself to `<RIVETKIT_STORAGE_PATH>/.rivetkit/var/engine/db` (default `$HOME/.rivetkit`) [VERIFIED: docs.rs rivetkit-engine-process 2.3.21 src/lib.rs `storage_root`, `engine_db_path`, `engine_env`]. Set `RIVETKIT_STORAGE_PATH=/var/lib/substrate/agentos` and `RIVET_RUN_ENGINE=1` (`getRivetRunEngine = () => getEnvUniversal("RIVET_RUN_ENGINE") === "1"`, rivetkit dist). `RIVET_RUN_ENGINE_PORT`/`_HOST` exist. Note: the crate read is 2.3.21, and agentos pins 2.3.10. The spike confirms the path by listing the directory.
-7. **Can D-11 be met?** Partially. `sessions.open` MCP names are rewritten to `mcp-N`. D-11 holds only if bare mode reads `/home/agentos/.claude.json`. **OPEN (spike b).** If it does not, record D-11 as unmet by adapter 0.2.7 and use host functions or HTTP for substrate calls.
+7. **Can D-11 be met?** Partially. `sessions.open` rewrites MCP server names to `mcp-N`, so D-11 holds only if bare mode reads `/home/agentos/.claude.json`. — RESOLVED (for planning): the live answer is not known yet. The spike derives `s:mcp` (when `a:loopback` and `b_claude_json_mcp=yes`), otherwise `s:hostfn`. `d11=met` exactly when `s:mcp`. Otherwise D-11 is recorded as unmet for adapter 0.2.7: the seed still writes `/home/agentos/.claude.json` naming `substrate`, and substrate calls go through the `agentos-substrate` host functions.
 8. **Which repo does the proof PR land in, and what does "lands" mean?** Options for the owner, not decided here:
    - (i) **Open the PR** on `swcstudiospace/agent-substrate` from `substrate/<gid>`, and let the owner merge it. Lowest risk; "lands" = PR opened plus Greptile review.
    - (ii) **Merge via aio `github_merge_pull_request`** after `greptile_review` → `allowsMerge`. This is the fullest meaning of "lands", but the repo is private on the free plan, so GitHub branch protection is unavailable (`403 Upgrade to GitHub Pro`). "Protected main" is a workflow rule, and merging a throwaway change to main needs explicit owner consent.
    - (iii) A throwaway PR to a scratch repo in the org: isolates main, but it is not the substrate repo, so `repo_checkout` must know it. It needs a new checkout under `/root/src/repos`.
 
-   Recommendation: (i), with the owner deciding at the proof checkpoint whether to merge.
+   Recommendation: (i). — RESOLVED (for planning): the owner decides at 03-08 Task 1 (checkpoint:decision, options i/ii/iii, recommendation i). The answer is recorded as `pr_lands_decision=i|ii|iii` in `03-PROOF.md`.
 9. **What GitHub credentials exist?** RESOLVED: substrate.env has `GH_TOKEN`=0 and `GITHUB_TOKEN`=0. Host `gh` 2.45.0 is logged in as `SomeRandmGuyy` via `GH_TOKEN` in the shell env, with scopes including `admin:org`, `delete_repo` and `workflow`. **Never copy it into the VM or container.** Push and PR go through the host function on the host. `/usr/bin/git` 2.43.0 and `/usr/bin/gh` exist on the host.
 10. **D-14 counts?** RESOLVED (read-only, 2026-09-25):
     - SWC non-archived: **251** (backlog 67, unstarted 174, started 5, completed 3, canceled 2); the workspace has the SWC team only.
