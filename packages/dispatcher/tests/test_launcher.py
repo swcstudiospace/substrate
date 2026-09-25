@@ -1,0 +1,129 @@
+"""D-13 launcher: argv, scrubbed environment, template-only prompt and the launch side effects."""
+
+from __future__ import annotations
+
+import stat
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from substrate_dispatcher.launcher import build_argv, child_env, launch, render_prompt
+
+IDS = dict(
+    identifier="SWC-465",
+    graph_id="ut-mugb3vwa-c57eb6ac",
+    node_id="n1",
+    repo="swcstudiospace/agent-substrate",
+    worktree="/var/lib/substrate/worktrees/ut-mugb3vwa-c57eb6ac",
+)
+SURFACE = '"surface":"hermes"'
+
+
+def test_build_argv_shape_without_yolo_or_handoff_wrapper():
+    argv = build_argv(
+        "/state/prompts/p.md", hermes_bin="/usr/local/bin/hermes", toolsets="terminal,file,mcp-linear",
+        max_turns=60, run_budget=3600,
+    )
+    assert argv == [
+        "/usr/local/bin/hermes", "chat", "--query-file", "/state/prompts/p.md", "-Q",
+        "--pass-session-id", "--source", "substrate-dispatcher", "--max-turns", "60",
+        "--run-budget", "3600", "-t", "terminal,file,mcp-linear",
+    ]
+    assert "--yolo" not in argv
+    assert "--worktree" not in argv
+    assert not any("dispatch_handoff" in part for part in argv)
+
+
+def test_child_env_keeps_allowlist_and_drops_secrets():
+    env = child_env({
+        "HOME": "/root", "PATH": "/usr/bin", "LINEAR_API_KEY": "k", "SUBSTRATE_PG_URL": "p",
+        "GREPTIME_PASSWORD": "g", "NOTION_API_KEY": "n",
+    })
+    assert env == {"HOME": "/root", "PATH": "/usr/bin", "TERM": "dumb"}
+
+
+def test_child_env_defaults_home():
+    assert child_env({"PATH": "/usr/bin"})["HOME"] == "/root"
+
+
+def test_render_prompt_carries_ids_and_claim_first():
+    prompt = render_prompt(**IDS)
+    for value in IDS.values():
+        assert value in prompt
+    assert "graph_claim" in prompt
+    assert SURFACE in prompt
+    assert prompt.index("graph_claim") < prompt.index("graph_complete")
+
+
+def test_render_prompt_step4_completes_as_hermes_with_the_claim_session():
+    prompt = render_prompt(**IDS)
+    step4 = prompt[prompt.rindex("graph_complete"):]
+    assert SURFACE in step4
+    assert "session id" in step4
+    assert "same session id" in prompt[prompt.index("(4)"):]
+
+
+@pytest.mark.parametrize(
+    "field, bad",
+    [
+        ("identifier", "swc-465"),
+        ("identifier", "SWC-465; rm -rf /"),
+        ("node_id", "n1 extra"),
+        ("node_id", "x" * 33),
+        ("graph_id", "../etc"),
+        ("repo", "a/../b"),
+        ("worktree", "relative/path"),
+    ],
+)
+def test_render_prompt_rejects_unvalidated_values(field, bad):
+    with pytest.raises(ValueError):
+        render_prompt(**{**IDS, field: bad})
+
+
+class FakePopen:
+    def __init__(self) -> None:
+        self.calls: list[tuple[list[str], dict]] = []
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append((argv, kwargs))
+        return type("Proc", (), {"pid": 4242})()
+
+
+def test_launch_writes_private_prompt_and_starts_hermes_in_worktree(tmp_path: Path):
+    popen = FakePopen()
+    worktree = tmp_path / "wt" / IDS["graph_id"]
+    environ = {"HOME": "/root", "PATH": "/usr/bin", "LINEAR_API_KEY": "k"}
+
+    launched = launch(
+        **{**IDS, "worktree": worktree}, popen=popen, state_dir=tmp_path / "state",
+        environ=environ, clock=lambda: 1_790_000_000.0,
+    )
+
+    (argv, kwargs), = popen.calls
+    assert launched.pid == 4242
+    assert launched.prompt_path.parent == tmp_path / "state" / "prompts"
+    assert launched.log_path.parent == tmp_path / "state" / "sessions"
+    assert launched.prompt_path.name == f"{IDS['graph_id']}-n1-20260921T141320Z.md"
+    assert launched.log_path.exists()
+    assert stat.S_IMODE(launched.prompt_path.stat().st_mode) == 0o600
+    assert launched.prompt_path.read_text() == render_prompt(**{**IDS, "worktree": worktree})
+    assert argv[:4] == [argv[0], "chat", "--query-file", str(launched.prompt_path)]
+    assert "--yolo" not in argv
+    assert kwargs["cwd"] == str(worktree)
+    assert kwargs["env"] == {"HOME": "/root", "PATH": "/usr/bin", "TERM": "dumb"}
+    assert kwargs["stdin"] is subprocess.DEVNULL
+    assert kwargs["stderr"] is subprocess.STDOUT
+    assert kwargs["stdout"].name == str(launched.log_path)
+
+
+def test_launch_propagates_spawn_failure_and_closes_log(tmp_path: Path):
+    opened = []
+
+    def popen(argv, **kwargs):
+        opened.append(kwargs["stdout"])
+        raise FileNotFoundError(argv[0])
+
+    with pytest.raises(FileNotFoundError):
+        launch(**IDS, popen=popen, state_dir=tmp_path / "state", environ={})
+    assert opened[0].closed
