@@ -7,7 +7,6 @@ human_validation: "Owner selected 'All good — continue' on 2026-09-24. Accepte
 overrides_applied: 0
 behavior_unverified: 0
 covered_files:
-  - .planning/ROADMAP.md
   - .planning/phases/01-lane-b/01-01-PLAN.md
   - .planning/phases/01-lane-b/01-01-SUMMARY.md
   - .planning/phases/01-lane-b/01-02-PLAN.md
@@ -38,8 +37,8 @@ covered_files:
   - packages/mcp-server/src/brief.ts
   - packages/mcp-server/src/types.ts
   - packages/projector/src/muse.ts
-covered_digest: "v1:sha256:fd6a6c5e09d6ae3b5e7d54239ea9d8835fea695f03cd3e47a70cd637b1f00e65"
-digest_refreshed: "2026-09-25 regression check after Phase 2 changed two covered files: types.ts (02-05 added release/complete EVENT_KINDS, additive) and ROADMAP.md (Phase 1 ticked complete, Phase 2 plan list). bun test collectors+mcp-server 115 pass/0 fail; substrate-mcp and grok/herdr/muse collectors and grok-hermes-connector active; omp brief still shows n2 started by hermes. No Phase 1 truth changed."
+covered_digest: "v1:sha256:a230a6e55c10ba0e1efb1596082e7f1ca3a590538b22aecca99d100d1bfd6b29"
+digest_refreshed: "2026-09-25 regression check after Phase 2 changed two covered files: types.ts (02-05 added release/complete EVENT_KINDS, additive) and ROADMAP.md (Phase 1 ticked complete, Phase 2 plan list). bun test collectors+mcp-server 115 pass/0 fail; substrate-mcp and grok/herdr/muse collectors and grok-hermes-connector active; omp brief still shows n2 started by hermes. No Phase 1 truth changed. Later the same day ROADMAP.md was dropped from covered_files: it is a milestone tracking file every phase transition edits, not Phase 1 evidence, and re-staled this report on each update. No other covered file changed since 141d681."
 re_verification:
   previous_status: gaps_found
   previous_score: 6/10
