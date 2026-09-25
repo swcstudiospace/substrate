@@ -1,9 +1,9 @@
 ---
 gsd_state_version: "1.0"
 milestone: v1.0
-current_plan: 8
+current_plan: 9
 status: executing
-stopped_at: "03-08 Task 2 blocking: owner must create the approval bot and append SUBSTRATE_APPROVAL_* keys (done|skip)"
+stopped_at: "03-08 closed partial (owner skip on approval bot); 03-09 Task 1 decided pr_lands_decision=i; executing 03-09 Task 2"
 last_updated: "2026-09-25T18:09:37.013Z"
 state_head: ed8cc94632384fc55fa66b4e99bb1528aaba1bf0
 progress:
