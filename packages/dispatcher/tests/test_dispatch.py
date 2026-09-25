@@ -9,6 +9,7 @@ import pytest
 from substrate_dispatcher.dispatch import (
     COMMENT_PREFIX,
     Decision,
+    InvalidIds,
     decide,
     dispatch_disabled,
     make_launch_fn,
@@ -251,6 +252,49 @@ def test_make_launch_fn_propagates_worktree_refused():
     with pytest.raises(WorktreeRefused) as err:
         fn(cand(), FOUND)
     assert err.value.marker == "low-disk"
+
+
+@pytest.mark.parametrize(
+    ("identifier", "field", "value"),
+    [
+        ("swc-1", None, None),
+        ("SWC-1", "node_id", "n1; rm -rf /"),
+        ("SWC-1", "graph_id", "../escape"),
+        ("SWC-1", "repo", "owner/name/extra"),
+    ],
+)
+def test_make_launch_fn_refuses_invalid_ids_before_any_checkout_or_worktree(identifier, field, value):
+    touched: list[str] = []
+    fn = make_launch_fn(
+        log=lambda _l: None,
+        checkout=lambda _s: touched.append("checkout") or Path("/r"),
+        ensure=lambda *_a: touched.append("ensure") or Path("/w"),
+        launch=lambda **_k: touched.append("launch") or launched(),
+    )
+    found = {**FOUND, field: value} if field else FOUND
+    with pytest.raises(InvalidIds):
+        fn(cand(identifier=identifier), found)
+    assert touched == []
+
+
+def test_invalid_node_id_comments_once_creates_no_worktree_and_is_not_retried(env_file):
+    ensured: list[str] = []
+    launch_fn = make_launch_fn(
+        log=lambda _l: None,
+        checkout=lambda _s: Path("/r"),
+        ensure=lambda _r, gid, _b: ensured.append(gid) or Path("/w"),
+        launch=lambda **_k: launched(),
+    )
+    linear, mcp = FakeLinear([cand()]), FakeMcp(default={**FOUND, "node_id": "bad node"})
+    _, lines, registry, _ = run_tick(linear, mcp, env_file=env_file, launch_fn=launch_fn)
+    decisions, _, _, _ = run_tick(linear, mcp, env_file=env_file, registry=registry, launch_fn=launch_fn)
+    assert ensured == []
+    posted = linear.named("comment")
+    assert len(posted) == 1 and posted[0][2].startswith(f"{COMMENT_PREFIX} [invalid-ids]")
+    assert registry.given_up == {"i-1"} and registry.active_issue_ids() == set()
+    assert mcp.calls == ["i-1"]  # the second tick never resolved it again
+    assert [d.action for d in decisions] == ["skip"]
+    assert any("[invalid-ids]" in line for line in lines)
 
 
 def test_graph_find_error_is_logged_and_next_candidate_still_processed(env_file):

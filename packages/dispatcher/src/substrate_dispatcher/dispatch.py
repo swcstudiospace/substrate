@@ -29,6 +29,7 @@ MARKERS: dict[str, str] = {
     "no-node": "no registered substrate graph node for this issue; register it with graph_register first",
     "already-claimed": "node already claimed by {holder}; not dispatching",
     "invalid-graph-id": "the graph id is not a safe worktree name; not dispatching",
+    "invalid-ids": "the issue identifier, node id, graph id or repo is not a safe prompt value; not dispatching, not retrying",
     "no-checkout": "no verified checkout of the graph's repo on this host; not dispatching",
     "low-disk": "under 5 GB free on /; no worktree created, not dispatching",
     "path-conflict": "the worktree path is taken by something git does not track as this graph's worktree; not dispatching",
@@ -39,6 +40,10 @@ MARKERS: dict[str, str] = {
 
 LaunchFn = Callable[[Candidate, dict], Launched]
 Log = Callable[[str], None]
+
+
+class InvalidIds(ValueError):
+    """The ids launcher.render_prompt would reject; raised before any checkout or worktree."""
 
 
 @dataclass(frozen=True)
@@ -162,6 +167,12 @@ def tick(
                     continue
                 try:
                     launched = launch_fn(candidate, found)
+                except InvalidIds as invalid:
+                    # Ids never change for a registered node, so a retry could only fail again.
+                    log(f"{candidate.identifier}: {tag('invalid-ids')} {invalid}; giving up on this issue")
+                    _comment_once(linear, candidate, "invalid-ids")
+                    registry.given_up.add(candidate.issue_id)
+                    continue
                 except WorktreeRefused as refused:
                     log(f"{candidate.identifier}: worktree refused {tag(refused.marker)}: {refused.reason}")
                     _comment_once(linear, candidate, refused.marker)
@@ -199,6 +210,22 @@ def _comment_once(linear: Any, candidate: Candidate, marker: str, **fields: str)
     linear.comment(candidate.issue_id, comment_body(marker, **fields))
 
 
+def validate_ids(candidate: Candidate, found: dict) -> None:
+    """Raise InvalidIds for any id launcher.render_prompt would refuse, using its own patterns."""
+    identifier, node_id = candidate.identifier, found.get("node_id")
+    graph_id, repo = found.get("graph_id"), found.get("repo")
+    if not isinstance(identifier, str) or not launcher.IDENTIFIER_RE.fullmatch(identifier):
+        raise InvalidIds(f"invalid Linear identifier {identifier!r}")
+    if not isinstance(node_id, str) or not launcher.NODE_ID_RE.fullmatch(node_id):
+        raise InvalidIds(f"invalid node id {node_id!r}")
+    try:
+        worktree.validate_graph_id(graph_id)
+    except WorktreeRefused as refused:
+        raise InvalidIds(refused.reason) from None
+    if not isinstance(repo, str) or not worktree.REPO_SLUG_RE.fullmatch(repo):
+        raise InvalidIds(f"invalid repo slug {repo!r}")
+
+
 def make_launch_fn(
     *,
     log: Log,
@@ -206,9 +233,14 @@ def make_launch_fn(
     ensure: Callable[..., Path] = worktree.ensure_worktree,
     launch: Callable[..., Launched] = launcher.launch,
 ) -> LaunchFn:
-    """Compose D-12 (per-Graph-ID worktree) and D-13 (direct hermes chat) for one candidate."""
+    """Compose D-12 (per-Graph-ID worktree) and D-13 (direct hermes chat) for one candidate.
+
+    The prompt's ids are validated first, so an id render_prompt would refuse never leaves a
+    worktree behind.
+    """
 
     def launch_fn(candidate: Candidate, found: dict) -> Launched:
+        validate_ids(candidate, found)
         repo_path = checkout(found["repo"])
         path = ensure(repo_path, found["graph_id"], found["branch"])
         launched = launch(
