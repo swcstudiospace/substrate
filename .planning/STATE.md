@@ -3,18 +3,18 @@ gsd_state_version: "1.0"
 milestone: v1.0
 current_plan: Not started
 status: executing
-stopped_at: Phase 2 complete, ready to plan Phase 3
-last_updated: "2026-09-25T07:27:57.653Z"
-state_head: 55b45218d9b22cace76f16ed2169813efa8d5a7c
+stopped_at: Phase 3 planned (10 plans), ready to execute
+last_updated: "2026-09-25T10:44:00.172Z"
+state_head: 628af85d87b06667e3cd470ff3f3ba7d3c5d0acf
 progress:
   total_phases: 6
   completed_phases: 2
-  total_plans: 19
+  total_plans: 29
   completed_plans: 19
   percent: 33
 milestone_name: Agent Substrate — four planes (runtime, memory, skills, ledger) keyed by Graph ID
-current_phase: 3
 current_phase_name: Lane A
+current_phase: 3
 ---
 
 # State
@@ -22,7 +22,7 @@ current_phase_name: Lane A
 ## Current
 
 Current Plan: Not started
-Total Plans in Phase: 0 (Phase 3 not yet discussed or planned)
+Total Plans in Phase: 10
 
 **Phase 1 (Lane B) is complete** — 10/10 plans, verification `passed`
 (`phases/01-lane-b/01-VERIFICATION.md`, commit `45cb7e7`). The 01-09 proof
@@ -37,7 +37,7 @@ remaining live-model-session checks on 2026-09-24 (see Blockers → Accepted).
 
 **Open owner decisions from Phase 2 review:** WR-05 (give dispatched Hermes a read-only issue-text tool and a release-if-stuck step) and IN-01 (dispatcher and Hermes run as root and can read `/etc/substrate/substrate.env`).
 
-**Next: Phase 3 (Lane A)** — discuss, plan, execute. Disk on `/` is at 93% (30 GB free); Phase 3's first criterion gates on it. Linear SWC team is at the free-plan cap (250/250).
+**Phase 3 (Lane A) is planned** — 10 plans in 10 sequential waves (`phases/03-lane-a/03-0{1..10}-PLAN.md`), plan-checker passed on iteration 3 (0 blockers, 0 warnings, 3 info), decision coverage 16/16. 03-01 is the D-09 spike: it re-measures baselines (167 pass / 0 fail, tsc exit 0; dispatcher 114 passed), gates on ≥ 10 GiB free, waits for an owner human-verify on the SUS-flagged rivet packages, installs rivet into `packages/host`, and writes `03-01-SPIKE.md` with `route_choice` / `tracker_route` / `tests_route` that every later plan branches on. Research changed three assumptions: the pinned Claude adapter 0.2.7 runs `--bare` (hooks, skills and `.claude.json` MCP likely not loaded, session MCP servers renamed `mcp-N`), the VM's model calls need the loopback route to shunt :3001 (no Anthropic key on the host), and rivet's stock Docker sandbox publishes an unauthenticated command port on 0.0.0.0 (a custom 127.0.0.1 provider replaces it). Linear SWC is at 251 active, so D-14 needs 2 archives. Owner checkpoints: rivet package verification (03-01), the new Telegram approval bot (03-08), "PR lands" meaning (03-09), approval taps (03-10). Dispatch stays OFF except inside 03-10's trap-closed window.
 
 Lane B proceeded under **D-01**: an additive brief and events only. The
 TypeScript-engine work and the Kanban retirement belong to the "Ultrathink
@@ -268,8 +268,8 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Session
 
-**Last session:** 2026-09-24T17:22:00Z
-**Stopped at:** Phase 2 complete, ready to plan Phase 3
+**Last session:** 2026-09-25T10:45:00Z
+**Stopped at:** Phase 3 planned (10 plans), ready to execute
 **Resume file:** None
 
 ## Decisions

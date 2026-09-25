@@ -153,7 +153,52 @@ Plans:
 
 **Proof**: A labelled issue opens a VM, the session survives a host restart, the PR lands and
 `ultrathink-sync` closes the loop.
-**Plans**: TBD
+**Plans**: 10 plans
+
+Plans:
+**Wave 1**
+
+- [ ] 03-01-PLAN.md — D-09 spike: baselines, D-03/D-04 gates, owner verify of the rivet packages, install into packages/host, 127.0.0.1 sandbox provider and local image, probes (a) loopback/model, (b) adapter loading, (c) git, durability → 03-01-SPIKE.md route_choice / tracker_route / tests_route
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 03-02-PLAN.md — WR-05/D-15: issue_get MCP tool and POST /issue (redacted, untrusted), Hermes prompt issue_get and release-and-stop steps, D-16 root-trust note beside CHILD_ENV_ALLOW
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 03-03-PLAN.md — Host tracer: substrate-host unit (D-05); POST /tasks claims, briefs, seeds and opens the VM session to a first model event
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 03-04-PLAN.md — Seed/prompt/VM policy tests; substrate/notion/linear MCP entries on every route via the loopback tracker proxy (live on vm_mcp, inert on host); tests route; VM-side issue_get
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [ ] 03-05-PLAN.md — Dispatch tracer: dispatcher RemoteTask handle routes dispatch:claude-code to the host; a dispatcher restart keeps the VM task (D-05, D-06)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
+- [ ] 03-06-PLAN.md — D-07 resume on boot and live restart survival; containment audit (D-08 storage scan, D-01 container shape, D-12 egress, D-04)
+
+**Wave 7** *(blocked on Wave 6 completion)*
+
+- [ ] 03-07-PLAN.md — Commit/push/PR host functions per the spike's git route; sync by tracker route with a host backstop (D-10)
+
+**Wave 8** *(blocked on Wave 7 completion)*
+
+- [ ] 03-08-PLAN.md — D-13 Telegram approvals: owner's new bot (human-action), Approve/Deny only, authorised callbacks, respondPermission
+
+**Wave 9** *(blocked on Wave 8 completion)*
+
+- [ ] 03-09-PLAN.md — Proof setup: "PR lands" decision, D-14 archives recorded in 02-LINEAR-ARCHIVED.md, fresh issue, Notion rows, new graph, dispatch label created but not applied
+
+**Wave 10** *(blocked on Wave 9 completion)*
+
+- [ ] 03-10-PLAN.md — Proof run: trap-closed dispatch window, VM via the dispatcher, host restart under a waiting turn, Telegram approvals, PR, sync, completion through the DoD gate, dispatch off
+
+**Cross-cutting constraints:**
+
+- Root suite and tsc are two-sided green against 03-BASELINE.md with more passes than agent-substrate-pass
 
 ### Phase 4: Skills
 
