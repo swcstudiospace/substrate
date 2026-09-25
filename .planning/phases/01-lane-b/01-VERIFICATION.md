@@ -38,7 +38,8 @@ covered_files:
   - packages/mcp-server/src/brief.ts
   - packages/mcp-server/src/types.ts
   - packages/projector/src/muse.ts
-covered_digest: "v1:sha256:a63ae9f3be274b8b6624b911f602583d53a666f0403d40756985f4ce93e34772"
+covered_digest: "v1:sha256:fd6a6c5e09d6ae3b5e7d54239ea9d8835fea695f03cd3e47a70cd637b1f00e65"
+digest_refreshed: "2026-09-25 regression check after Phase 2 changed two covered files: types.ts (02-05 added release/complete EVENT_KINDS, additive) and ROADMAP.md (Phase 1 ticked complete, Phase 2 plan list). bun test collectors+mcp-server 115 pass/0 fail; substrate-mcp and grok/herdr/muse collectors and grok-hermes-connector active; omp brief still shows n2 started by hermes. No Phase 1 truth changed."
 re_verification:
   previous_status: gaps_found
   previous_score: 6/10
