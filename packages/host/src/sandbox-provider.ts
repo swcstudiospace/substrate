@@ -135,7 +135,9 @@ export function substrateDocker(opts: SubstrateDockerOptions): SubstrateSandboxP
 			const container = docker().getContainer(sandboxId);
 			await container.stop({ t: 5 }).catch(() => undefined);
 			await container.remove({ force: true }).catch((error: unknown) => {
-				if (!isNotFound(error)) throw error;
+				// 404: already gone; 409: AutoRemove started removing it when stop() returned.
+				const status = (error as { statusCode?: unknown }).statusCode;
+				if (status !== 404 && status !== 409) throw error;
 			});
 		},
 
