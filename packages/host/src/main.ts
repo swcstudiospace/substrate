@@ -143,6 +143,7 @@ const service = new TaskService({
 const { registry } = createHostVm({
 	route,
 	sandboxNet,
+	testsRoute,
 	sandboxCollection,
 	checkoutNodeModules: join(checkout, "node_modules"),
 	store,

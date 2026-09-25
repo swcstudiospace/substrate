@@ -4,7 +4,9 @@
 // The route grammar is 03-01-SPIKE.md's `route_choice=` line: four `<letter>:<value>` segments
 // in the order a (model/loopback), b (sync), c (git), s (substrate-call channel).
 
-export { WORKTREES_ROOT, worktreeFor } from "./sandbox-options.ts";
+import { SANDBOX_IMAGE, WORKTREES_ROOT, worktreeFor } from "./sandbox-options.ts";
+
+export { WORKTREES_ROOT, worktreeFor };
 
 export type Route = {
 	a: "loopback" | "hostfn_proxy" | "anthropic_key";
@@ -56,19 +58,38 @@ export function parseTestsRoute(value: string): TestsRoute {
 	throw new Error(`invalid tests route ${JSON.stringify(value)}: expected sandbox|oneshot|none`);
 }
 
+/**
+ * D-10 by 03-01's evidence: claude-ultrathink's kickoff and sync run inside the VM only when the
+ * adapter fires its hooks (b:hooks) and the session holds MCP servers (s:mcp) — the rule 03-01
+ * used for its `tracker_route=` line. Every other combination leaves the tracker writes to the host.
+ */
+export type TrackerRoute = "vm_mcp" | "host";
+
+export function trackerRoute(route: Route): TrackerRoute {
+	return route.b === "hooks" && route.s === "mcp" ? "vm_mcp" : "host";
+}
+
 /** D-12 egress allowlist (dns + tcp:443 each). Anthropic itself only on a:anthropic_key. */
 export const D12_HOSTS = ["mcp.notion.com", "mcp.linear.app", "api.greptile.com", "github.com", "api.github.com"] as const;
 
 export const SUBSTRATE_MCP_PORT = 7410;
 export const MODEL_RELAY_PORT = 3001;
+/** The host's tracker MCP proxy (notion, linear) — served and reachable only on tracker_route vm_mcp. */
+export const TRACKER_PROXY_PORT = 7412;
 export const SUBSTRATE_MCP_URL = `http://127.0.0.1:${SUBSTRATE_MCP_PORT}/mcp`;
 /** Where the session's Anthropic client connects on a:loopback (host shunt) and a:hostfn_proxy (in-VM relay). */
 export const MODEL_RELAY_URL = `http://127.0.0.1:${MODEL_RELAY_PORT}`;
 export const ANTHROPIC_DIRECT_URL = "https://api.anthropic.com";
 
-/** Host loopback ports the VM may reach: only on a:loopback (the sidecar's SSRF exemption list). */
+/**
+ * Host loopback ports the VM may reach (the sidecar's SSRF exemption list): only on a:loopback,
+ * plus the tracker proxy when tracker_route is vm_mcp (s:mcp implies a:loopback).
+ */
 export function loopbackPorts(route: Route): number[] {
-	return route.a === "loopback" ? [SUBSTRATE_MCP_PORT, MODEL_RELAY_PORT] : [];
+	if (route.a !== "loopback") return [];
+	const ports = [SUBSTRATE_MCP_PORT, MODEL_RELAY_PORT];
+	if (trackerRoute(route) === "vm_mcp") ports.push(TRACKER_PROXY_PORT);
+	return ports;
 }
 
 export type PatternRule = { mode: "allow" | "deny"; operations: string[]; patterns: string[] };
@@ -80,6 +101,7 @@ export function networkPermissions(route: Route): RulePermissions {
 	if (route.a === "loopback") {
 		patterns.push(`tcp://127.0.0.1:${SUBSTRATE_MCP_PORT}`, `tcp://127.0.0.1:${MODEL_RELAY_PORT}`);
 	}
+	if (trackerRoute(route) === "vm_mcp") patterns.push(`tcp://127.0.0.1:${TRACKER_PROXY_PORT}`);
 	if (route.a === "anthropic_key") {
 		patterns.push("dns://api.anthropic.com", "tcp://api.anthropic.com:443");
 	}
@@ -119,9 +141,7 @@ export function sessionEnv(input: SessionEnvInput): Record<string, string> {
 	let baseUrl = MODEL_RELAY_URL;
 	let apiKey = "shunt";
 	if (route.a === "anthropic_key") {
-		if (!input.directKey) {
-			throw new Error("route a:anthropic_key requires SUBSTRATE_VM_ANTHROPIC_API_KEY in the host environment");
-		}
+		if (!input.directKey) throw new Error("SUBSTRATE_VM_ANTHROPIC_API_KEY required on route a:anthropic_key");
 		baseUrl = ANTHROPIC_DIRECT_URL;
 		apiKey = input.directKey;
 	}
@@ -132,4 +152,38 @@ export function sessionEnv(input: SessionEnvInput): Record<string, string> {
 		SUBSTRATE_GRAPH_ID: graphId,
 		SUBSTRATE_NODE_ID: nodeId,
 	};
+}
+
+export type TestRunInput = {
+	graphId: string;
+	/** Must be worktreeFor(graphId): the only tree a one-shot test container may see. */
+	worktree: string;
+	/** The graph repo checkout's node_modules, bound read-only; null when the checkout has none. */
+	nodeModules: string | null;
+	/** Worktree-relative *.test.ts files, at most 8. */
+	paths: string[];
+};
+
+export const TEST_RUN_LABEL = "substrate.test_run";
+export const TEST_RUN_MAX_PATHS = 8;
+
+/**
+ * tests_route oneshot (T-03-04-06): one network-less container over a read-only worktree, no
+ * docker socket, no privileged flag, fixed image. The argv is exact so vm.ts can hand it to
+ * execFile without a shell.
+ */
+export function testRunArgv(input: TestRunInput): string[] {
+	const { graphId, worktree, nodeModules, paths } = input;
+	if (worktree !== worktreeFor(graphId)) throw new Error(`worktree must be ${worktreeFor(graphId)}`);
+	if (paths.length === 0) throw new Error("at least one test path is required");
+	if (paths.length > TEST_RUN_MAX_PATHS) throw new Error(`at most ${TEST_RUN_MAX_PATHS} test paths per run`);
+	for (const path of paths) {
+		if (path.startsWith("/")) throw new Error(`test path ${JSON.stringify(path)} is absolute`);
+		if (path.split("/").includes("..")) throw new Error(`test path ${JSON.stringify(path)} contains ..`);
+		if (!path.endsWith(".test.ts") || path.split("/").includes("")) throw new Error(`test path ${JSON.stringify(path)} must be a worktree-relative .test.ts file`);
+	}
+	const argv = ["docker", "run", "--rm", "--network", "none", "--label", `${TEST_RUN_LABEL}=${graphId}`, "--tmpfs", "/tmp", "-v", `${worktree}:/work:ro`];
+	if (nodeModules !== null) argv.push("-v", `${nodeModules}:/work/node_modules:ro`);
+	argv.push("-w", "/work", SANDBOX_IMAGE, "bun", "test", ...paths);
+	return argv;
 }

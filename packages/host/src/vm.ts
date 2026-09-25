@@ -12,6 +12,7 @@
 //   3. the expanded options carry their sandbox dispose hooks on a non-enumerable symbol that the
 //      actor layer's spread drops — so they are kept per actor here and run from onVmDisposed.
 
+import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import claude from "@agentos-software/claude-code";
 import { agentOS, getSandboxDisposeHooks, type HostFunctionCollections, resolveSandboxOptions, setup } from "@rivet-dev/agentos";
@@ -25,6 +26,8 @@ import {
 	MODEL_RELAY_URL,
 	networkPermissions,
 	type Route,
+	type TestsRoute,
+	testRunArgv,
 	worktreeFor,
 } from "./options.ts";
 import type { SandboxNetwork } from "./sandbox-options.ts";
@@ -36,6 +39,8 @@ import { HOST_SURFACE } from "./substrate.ts";
 export type HostVmConfig = {
 	route: Route;
 	sandboxNet: SandboxNetwork;
+	/** 03-01's tests_route: on oneshot the substrate collection gains run-tests. */
+	testsRoute: TestsRoute;
 	/** The sandbox host-function collection name 03-01 recorded (hostfn_sandbox_collection). */
 	sandboxCollection: string;
 	/** `<checkout>/node_modules`, bound read-only at /work/node_modules when it exists. */
@@ -153,6 +158,58 @@ function modelFetchCollection() {
 	};
 }
 
+/** run-tests (tests_route oneshot): 600 s wall clock, output tail capped and redacted. */
+const TEST_RUN_TIMEOUT_MS = 600_000;
+const TEST_RUN_TAIL_CHARS = 4_000;
+
+/**
+ * `agentos-substrate run-tests --node <nid> --path <file.test.ts>...` (tests_route oneshot only):
+ * one network-less container over the read-only worktree (testRunArgv), run on the host through
+ * execFile — argv only, no shell. The guest never names the worktree or the image.
+ */
+function runTestsCollection(key: readonly unknown[], config: HostVmConfig) {
+	const lookup = (gid: string, nid: string) => config.store.get(gid, nid);
+	return {
+		runTests: {
+			timeout: TEST_RUN_TIMEOUT_MS,
+			inputSchema: z
+				.object({
+					node: z.string().describe("node id of this graph's task"),
+					path: z.array(z.string()).describe("worktree-relative *.test.ts files (at most 8)"),
+				})
+				.describe("Run bun test on the given files in a one-shot container without network"),
+			execute: async (input: { node: string; path: string[] }) => {
+				const t = hostCallTarget(key, ["--node", input.node], lookup);
+				if ("error" in t) return { error: t.error };
+				let argv: string[];
+				try {
+					argv = testRunArgv({
+						graphId: t.graphId,
+						worktree: worktreeFor(t.graphId),
+						nodeModules: existsSync(config.checkoutNodeModules) ? config.checkoutNodeModules : null,
+						paths: input.path,
+					});
+				} catch (cause) {
+					return { error: cause instanceof Error ? cause.message : String(cause) };
+				}
+				config.log(`[substrate-host] run-tests ${t.graphId}/${t.nodeId} ${input.path.length} file(s)`);
+				return new Promise<{ exit_code: number | null; output_tail: string }>((resolve) => {
+					execFile(
+						argv[0] as string,
+						argv.slice(1),
+						{ timeout: TEST_RUN_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, encoding: "utf8" },
+						(error, stdout, stderr) => {
+							const output = `${stdout}${stderr}`;
+							const exitCode = error ? (typeof error.code === "number" ? error.code : null) : 0;
+							resolve({ exit_code: exitCode, output_tail: redact(output.slice(-TEST_RUN_TAIL_CHARS)) });
+						},
+					);
+				});
+			},
+		},
+	};
+}
+
 /** Node source run inside the VM on a:hostfn_proxy: an HTTP relay on 127.0.0.1:3001 → agentos-substrate model-fetch. */
 const RELAY_SCRIPT = `
 const http = require("node:http");
@@ -210,6 +267,8 @@ export function createHostVm(config: HostVmConfig) {
 			network: networkPermissions(config.route),
 			hostFunction: hostFunctionPermissions(config.sandboxCollection),
 		},
+		// run-tests and model-fetch declare 600 s timeouts; the cap must admit them.
+		limits: { hostFunctions: { maxTimeoutMs: TEST_RUN_TIMEOUT_MS } },
 
 		resolveOptions: async (c) => {
 			const gid = graphIdOf(c.key);
@@ -217,6 +276,7 @@ export function createHostVm(config: HostVmConfig) {
 			const hostFunctions: HostFunctionCollections = {};
 			if (config.route.s === "hostfn") hostFunctions.substrate = substrateCollection(c.key, config);
 			if (config.route.a === "hostfn_proxy") hostFunctions.substrate = { ...hostFunctions.substrate, ...modelFetchCollection() };
+			if (config.testsRoute === "oneshot") hostFunctions.substrate = { ...hostFunctions.substrate, ...runTestsCollection(c.key, config) };
 			const expanded = await resolveSandboxOptions({
 				sidecar: { kind: "shared" as const, pool: `vm-${gid}` },
 				mounts: [{ path: "/home/agentos/work", plugin: { id: "host_dir", config: { hostPath: worktree } } }],

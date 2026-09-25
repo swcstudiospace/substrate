@@ -206,10 +206,16 @@ describe("TaskService.openTask", () => {
 			"/home/agentos/.claude/skills/ultrathink-sync/SKILL.md",
 			"/home/agentos/.claude.json",
 			"/home/agentos/.config/ultrathink/config.json",
+			"/home/agentos/.substrate/ultrathink-state.json",
+			"/home/agentos/.substrate/ultrathink-state.xml",
 		]);
 		expect(body.seeded.every((f) => /^[0-9a-f]{64}$/.test(f.sha256))).toBe(true);
 		expect(JSON.parse(h.files.get("/home/agentos/.claude.json") ?? "")).toEqual({
-			mcpServers: { substrate: { type: "http", url: "http://127.0.0.1:7410/mcp" } },
+			mcpServers: {
+				substrate: { type: "http", url: "http://127.0.0.1:7410/mcp" },
+				notion: { type: "http", url: "http://127.0.0.1:7412/mcp/notion" },
+				linear: { type: "http", url: "http://127.0.0.1:7412/mcp/linear" },
+			},
 		});
 
 		await h.settlePrompt("end_turn");
