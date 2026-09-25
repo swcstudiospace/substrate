@@ -1,0 +1,46 @@
+[Unit]
+Description=Agent Substrate — dispatcher (Linear dispatch:<surface> → Hermes session)
+Documentation=https://github.com/swcstudiospace/agent-substrate
+After=substrate-mcp.service network-online.target
+Wants=substrate-mcp.service
+# Linear or substrate-mcp may be briefly unreachable; that is not a reason to give up.
+# This key only takes effect in [Unit] — systemd ignores it under [Service].
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# Credentials and the D-15 kill switch (SUBSTRATE_DISPATCH_DISABLED=1). The loop re-reads
+# SUBSTRATE_ENV_FILE every tick, so flipping the switch needs no restart.
+EnvironmentFile=/etc/substrate/substrate.env
+Environment=HOME=/root
+Environment=PYTHONPATH=/root/src/repos/agent-substrate/packages/dispatcher/src
+Environment=SUBSTRATE_ENV_FILE=/etc/substrate/substrate.env
+WorkingDirectory=/root/src/repos/agent-substrate
+# System python3: httpx and pytest are already installed; no venv.
+ExecStart=/usr/bin/python3 -m substrate_dispatcher
+Restart=always
+RestartSec=5
+
+# The default KillMode=control-group is intentional: stopping the unit ends every dispatched
+# Hermes session with it (D-15 kill switch). A restart ends them too.
+# Hermes was seen ignoring SIGTERM (02-09 tracer), so the stop escalates to SIGKILL after 15 s
+# instead of systemd's default 90 s.
+TimeoutStopSec=15
+
+# Lock file, prompts and session logs live under /var/lib/substrate/dispatcher.
+StateDirectory=substrate
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=substrate-dispatcher
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
