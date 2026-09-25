@@ -740,6 +740,36 @@ describe("completeNode → DoD gate (D-06)", () => {
 		expect(emitted[0]?.payload).toMatchObject({ target: "index", action: "release" });
 	});
 
+	test("an index outage after gate approval warns per failed write; Mirror.done and the complete event still run", async () => {
+		const { substrate, index, linear, emitted } = setup();
+		const setNodeState = index.setNodeState;
+		index.setNodeState = async (graph_id, node_id, state) => {
+			if (state === "completed") throw new Error("connection terminated");
+			return setNodeState(graph_id, node_id, state);
+		};
+		index.releaseNode = async () => {
+			throw new Error("connection terminated");
+		};
+		const done: string[] = [];
+		linear.mirror.done = async () => {
+			done.push("done");
+			return [];
+		};
+
+		const result = await substrate.completeNode("ut-1", "n1", "claude-code", "sess-holder", { summary: "s", tests_pass: true });
+
+		expect(result.completed).toBe(true);
+		expect(done).toEqual(["done"]);
+		expect(emitted.map((e) => e.kind)).toEqual(["warning", "warning", "complete"]);
+		expect(emitted.map((e) => e.summary)).toEqual([
+			"complete state failed for SWC-7: connection terminated",
+			"complete release failed for SWC-7: connection terminated",
+			"completed SWC-7",
+		]);
+		expect(emitted[0]?.payload).toMatchObject({ target: "index", action: "state" });
+		expect(emitted[1]?.payload).toMatchObject({ target: "index", action: "release" });
+	});
+
 	test("a node with no Linear issue is refused without asking the gate", async () => {
 		const { substrate, gate, emitted } = setup({}, { linear_issue_id: null, linear_identifier: null });
 

@@ -307,7 +307,9 @@ export class Substrate {
 	 * never resolves or sends a Done state id. On a refusal, an unreachable
 	 * gate or a node without a Linear issue the result is `completed: false`
 	 * with the reason, the issue stays In Review and the claim stays; on
-	 * approval the node is `completed` and released. A gate timeout is not a
+	 * approval the node is `completed` and released, and Done is mirrored to
+	 * Notion — an index write that fails or no longer matches the claim is a
+	 * warning there, never a throw, since Linear is already Done. A gate timeout is not a
 	 * refusal: the connector may still have moved the issue, so Linear's state
 	 * decides — Done completes, anything else is `completed: false` naming it.
 	 * An issue already Done (an earlier attempt that timed out) is never sent
@@ -351,16 +353,28 @@ export class Substrate {
 		}
 
 		if (gate.completed) {
-			await index.setNodeState(graphId, nodeId, "completed").catch(() => undefined);
-			if ((await index.releaseNode(graphId, nodeId, surface, sessionId)) === 0) {
-				// Linear is Done either way; a claim that changed after the snapshot is left alone.
-				const { reason } = await this.lostClaim(graphId, nodeId, surface, sessionId, node);
-				await this.emit({
+			// Linear is already Done, so nothing here may stop Mirror.done or the
+			// complete event: a failed or unmatched index write is a warning.
+			const indexWarning = (action: string, outcome: string, cause: unknown) => {
+				const reason = (cause instanceof Error ? cause.message : String(cause)).slice(0, 300);
+				return this.emit({
 					...meta,
 					kind: "warning",
-					summary: `complete release skipped for ${identifier}: ${reason}`,
-					payload: { target: "index", action: "release", reason },
+					summary: `complete ${action} ${outcome} for ${identifier}: ${reason}`,
+					payload: { target: "index", action, reason },
 				}).catch(() => undefined);
+			};
+			await index
+				.setNodeState(graphId, nodeId, "completed")
+				.catch((cause: unknown) => indexWarning("state", "failed", cause));
+			const released = await index.releaseNode(graphId, nodeId, surface, sessionId).catch(async (cause: unknown) => {
+				await indexWarning("release", "failed", cause);
+				return null;
+			});
+			if (released === 0) {
+				// A claim that changed after the snapshot is left alone.
+				const { reason } = await this.lostClaim(graphId, nodeId, surface, sessionId, node);
+				await indexWarning("release", "skipped", reason);
 			}
 			await this.warn(await this.mirror.done(ctx), "done", meta);
 		}
