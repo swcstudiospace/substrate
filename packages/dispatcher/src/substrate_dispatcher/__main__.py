@@ -11,9 +11,10 @@ import os
 import sys
 from pathlib import Path
 
-from .dispatch import SessionRegistry, make_launch_fn, tick
+from .dispatch import make_launch_fn, tick
 from .linear import LinearClient
 from .mcp import McpClient
+from .sessions import SessionRegistry
 
 DEFAULT_ENV_FILE = "/etc/substrate/substrate.env"
 

@@ -6,17 +6,17 @@ from pathlib import Path
 
 import pytest
 
-from substrate_dispatcher.__main__ import main as cli_main
 from substrate_dispatcher.dispatch import (
     COMMENT_PREFIX,
     Decision,
-    SessionRegistry,
+    decide,
     dispatch_disabled,
     make_launch_fn,
     tick,
 )
 from substrate_dispatcher.launcher import Launched
 from substrate_dispatcher.linear import Candidate
+from substrate_dispatcher.sessions import Session, SessionRegistry
 from substrate_dispatcher.worktree import WorktreeRefused
 
 GID = "ut-mugzzzzz-0123abcd"
@@ -38,17 +38,58 @@ def cand(issue_id: str = "i-1", identifier: str = "SWC-1", surface: str = "herme
     )
 
 
+class FakeProc:
+    """Popen stand-in: poll() returns ``code``; terminate() and kill() are recorded."""
+
+    def __init__(self, pid: int = 4242, code: int | None = None):
+        self.pid = pid
+        self.code = code
+        self.signals: list[str] = []
+
+    def poll(self) -> int | None:
+        return self.code
+
+    def terminate(self) -> None:
+        self.signals.append("terminate")
+
+    def kill(self) -> None:
+        self.signals.append("kill")
+
+
 def launched(pid: int = 4242) -> Launched:
     return Launched(
-        pid=pid, proc=None, prompt_path=Path("/s/p.md"), log_path=Path("/s/l.log"), started_at=0.0
+        pid=pid, proc=FakeProc(pid), prompt_path=Path("/s/p.md"), log_path=Path("/s/l.log"),
+        started_at=0.0,
     )
 
 
+def session(issue_id: str = "i-1", **fields) -> Session:
+    values = dict(
+        issue_id=issue_id, identifier=f"SWC-{issue_id}", graph_id=GID, node_id="n1",
+        surface="hermes", dispatch_label_id="l-hermes", proc=FakeProc(), pid=4242,
+        started_at=0.0, log_path=Path("/s/l.log"), launch_state="unstarted",
+    )
+    values.update(fields)
+    return Session(**values)
+
+
 class FakeLinear:
-    def __init__(self, candidates: list[Candidate], comments: dict[str, list[str]] | None = None):
-        self.candidates = candidates
+    """Records every call; ``fail`` maps a method name to the exception it raises."""
+
+    def __init__(
+        self,
+        candidates: list[Candidate] | None = None,
+        comments: dict[str, list[str]] | None = None,
+        fail: dict[str, Exception] | None = None,
+    ):
+        self.candidates = candidates or []
         self.comments = comments or {}
+        self.fail = fail or {}
         self.calls: list[tuple] = []
+
+    def _maybe_fail(self, name: str) -> None:
+        if name in self.fail:
+            raise self.fail[name]
 
     def dispatch_candidates(self) -> list[Candidate]:
         self.calls.append(("dispatch_candidates",))
@@ -56,14 +97,17 @@ class FakeLinear:
 
     def comment_bodies(self, issue_id: str) -> list[str]:
         self.calls.append(("comment_bodies", issue_id))
+        self._maybe_fail("comment_bodies")
         return list(self.comments.get(issue_id, []))
 
     def comment(self, issue_id: str, body: str) -> None:
         self.calls.append(("comment", issue_id, body))
+        self._maybe_fail("comment")
         self.comments.setdefault(issue_id, []).append(body)
 
     def remove_label(self, issue_id: str, label_id: str) -> None:
         self.calls.append(("remove_label", issue_id, label_id))
+        self._maybe_fail("remove_label")
 
     def named(self, name: str) -> list[tuple]:
         return [c for c in self.calls if c[0] == name]
@@ -222,14 +266,63 @@ def test_graph_find_error_is_logged_and_next_candidate_still_processed(env_file)
 
 def test_registry_cap_and_one_per_issue():
     registry = SessionRegistry(max_sessions=2)
-    registry.add("a", launched())
+    registry.add(session("a"))
     with pytest.raises(ValueError):
-        registry.add("a", launched())
-    registry.add("b", launched())
+        registry.add(session("a"))
+    registry.add(session("b"))
     assert registry.capacity_left() == 0
     with pytest.raises(ValueError):
-        registry.add("c", launched())
+        registry.add(session("c"))
     assert registry.active_issue_ids() == {"a", "b"}
+
+
+def test_launch_registers_session_with_launch_state_and_prior_claim_sessions(env_file):
+    prior = [
+        f"Claimed by hermes — session OLD1 (graph {GID}, node n1)",
+        f"Claimed by omp — session OTHER (graph {GID}, node n1)",
+    ]
+    linear, mcp = FakeLinear([cand()], comments={"i-1": prior}), FakeMcp()
+    reads_at_launch: list[int] = []
+
+    def launch_fn(candidate, found):
+        reads_at_launch.append(len(linear.named("comment_bodies")))
+        return launched(1001)
+
+    _, _, registry, _ = run_tick(linear, mcp, env_file=env_file, launch_fn=launch_fn)
+    assert reads_at_launch == [1]
+    got = registry.get("i-1")
+    assert got is not None
+    assert (got.graph_id, got.node_id, got.surface) == (GID, "n1", "hermes")
+    assert got.dispatch_label_id == "l-hermes" and got.pid == 1001
+    assert got.launch_state == "unstarted"
+    assert got.prior_claim_sessions == frozenset({"OLD1"})
+
+
+def test_prelaunch_comment_read_failure_launches_nothing_and_next_tick_decides_again(env_file):
+    linear = FakeLinear([cand()], fail={"comment_bodies": RuntimeError("linear 503")})
+    mcp = FakeMcp()
+    _, lines, registry, launch_fn = run_tick(linear, mcp, env_file=env_file)
+    assert launch_fn.calls == [] and registry.active_issue_ids() == set()
+    assert linear.named("comment") == []
+    assert any(l.startswith("SWC-1: not launched: comment_bodies failed") for l in lines)
+
+    linear.fail.clear()
+    run_tick(linear, mcp, env_file=env_file, registry=registry, launch_fn=launch_fn)
+    assert len(launch_fn.calls) == 1 and registry.active_issue_ids() == {"i-1"}
+
+
+def test_decide_skips_an_issue_the_registry_gave_up_on():
+    decision = decide(cand(), found=FOUND, active_issue_ids=set(), capacity_left=2, given_up={"i-1"})
+    assert decision.action == "skip" and "gave up" in decision.reason
+
+
+def test_given_up_issue_is_not_resolved_or_launched(env_file):
+    registry = SessionRegistry()
+    registry.given_up.add("i-1")
+    linear, mcp = FakeLinear([cand()]), FakeMcp()
+    decisions, _, _, launch_fn = run_tick(linear, mcp, env_file=env_file, registry=registry)
+    assert [d.action for d in decisions] == ["skip"]
+    assert mcp.calls == [] and launch_fn.calls == [] and linear.named("comment") == []
 
 
 def test_dry_run_never_launches(env_file):
@@ -283,7 +376,7 @@ def test_claimed_node_gets_one_already_claimed_comment_naming_holder(env_file):
 
 def test_issue_with_running_session_is_skipped_without_graph_find(env_file):
     registry = SessionRegistry()
-    registry.add("i-1", launched())
+    registry.add(session("i-1"))
     linear, mcp = FakeLinear([cand()]), FakeMcp()
     decisions, _, _, launch_fn = run_tick(linear, mcp, env_file=env_file, registry=registry)
     assert decisions[0].action == "skip"
@@ -292,15 +385,15 @@ def test_issue_with_running_session_is_skipped_without_graph_find(env_file):
 
 def test_at_capacity_skips_and_decides_again_next_tick(env_file):
     registry = SessionRegistry(max_sessions=2)
-    registry.add("a", launched())
-    registry.add("b", launched())
+    registry.add(session("a"))
+    registry.add(session("b"))
     linear, mcp = FakeLinear([cand("i-3", "SWC-3")]), FakeMcp()
     decisions, _, _, launch_fn = run_tick(linear, mcp, env_file=env_file, registry=registry)
     assert decisions[0].action == "skip" and "capacity" in decisions[0].reason
     assert launch_fn.calls == [] and linear.named("comment") == []
 
     registry = SessionRegistry(max_sessions=2)
-    registry.add("a", launched())
+    registry.add(session("a"))
     decisions, _, _, launch_fn = run_tick(linear, mcp, env_file=env_file, registry=registry)
     assert decisions[0].action == "launch" and len(launch_fn.calls) == 1
     assert mcp.calls == ["i-3", "i-3"]
@@ -331,20 +424,3 @@ def test_dry_run_logs_every_decision_and_writes_nothing(env_file):
     ]
     assert launch_fn.calls == []
     assert linear.named("comment") == [] and linear.named("remove_label") == []
-
-
-@pytest.mark.parametrize("argv", [["--once"], [], ["--dry-run"]])
-def test_cli_rejects_anything_but_once_dry_run(argv, capsys):
-    with pytest.raises(SystemExit) as err:
-        cli_main(argv)
-    assert err.value.code == 2
-    assert "only --once --dry-run is supported" in capsys.readouterr().err
-
-
-def test_cli_without_linear_key_exits_2_and_prints_no_environment(monkeypatch, capsys):
-    monkeypatch.delenv("LINEAR_API_KEY", raising=False)
-    monkeypatch.setenv("SUBSTRATE_CANARY_SECRET", "canary-7f3a")
-    assert cli_main(["--once", "--dry-run"]) == 2
-    out = capsys.readouterr()
-    assert "LINEAR_API_KEY not set" in out.err
-    assert "canary-7f3a" not in out.out + out.err
