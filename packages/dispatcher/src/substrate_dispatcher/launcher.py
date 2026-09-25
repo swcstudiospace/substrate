@@ -27,10 +27,10 @@ HERMES_BIN = os.environ.get("SUBSTRATE_HERMES_BIN", "/usr/local/bin/hermes")
 STATE_DIR = Path("/var/lib/substrate/dispatcher")
 DEFAULT_MAX_TURNS = int(os.environ.get("SUBSTRATE_DISPATCH_MAX_TURNS") or 60)
 DEFAULT_RUN_BUDGET = int(os.environ.get("SUBSTRATE_DISPATCH_RUN_BUDGET") or 3600)
-# MCP servers register their tools under toolset "mcp-<server>" in hermes-agent
-# (tools/mcp_tool_registration.py:327), and toolsets.validate_toolset accepts registry
-# toolset names, so "mcp-linear" selects the Linear MCP server via -t.
-DEFAULT_TOOLSETS = os.environ.get("SUBSTRATE_DISPATCH_TOOLSETS") or "terminal,file,mcp-linear"
+# 02-09 live run: Hermes v0.21.4 warned "Unknown toolsets" for the Linear MCP toolset
+# ("mcp-" + "linear"), so no MCP toolset is passed. Hermes' own Linear key belongs to a different
+# workspace; Linear writes for the dispatched issue are done by the substrate claim mirror, not by Hermes.
+DEFAULT_TOOLSETS = os.environ.get("SUBSTRATE_DISPATCH_TOOLSETS") or "terminal,file"
 DISPATCH_SOURCE = "substrate-dispatcher"
 
 CHILD_ENV_ALLOW = ("HOME", "PATH", "LANG", "LC_ALL", "USER", "LOGNAME", "SHELL")

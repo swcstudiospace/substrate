@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -22,17 +24,29 @@ SURFACE = '"surface":"hermes"'
 
 def test_build_argv_shape_without_yolo_or_handoff_wrapper():
     argv = build_argv(
-        "/state/prompts/p.md", hermes_bin="/usr/local/bin/hermes", toolsets="terminal,file,mcp-linear",
+        "/state/prompts/p.md", hermes_bin="/usr/local/bin/hermes", toolsets="terminal,file",
         max_turns=60, run_budget=3600,
     )
     assert argv == [
         "/usr/local/bin/hermes", "chat", "--query-file", "/state/prompts/p.md", "-Q",
         "--pass-session-id", "--source", "substrate-dispatcher", "--max-turns", "60",
-        "--run-budget", "3600", "-t", "terminal,file,mcp-linear",
+        "--run-budget", "3600", "-t", "terminal,file",
     ]
     assert "--yolo" not in argv
     assert "--worktree" not in argv
     assert not any("dispatch_handoff" in part for part in argv)
+
+
+def test_default_toolsets_are_builtins_without_mcp_linear():
+    # 02-09: Hermes v0.21.4 rejects "mcp-linear"; import fresh with the override unset.
+    env = {k: v for k, v in os.environ.items() if k != "SUBSTRATE_DISPATCH_TOOLSETS"}
+    env["PYTHONPATH"] = os.pathsep.join(sys.path)
+    default = subprocess.run(
+        [sys.executable, "-c", "from substrate_dispatcher.launcher import DEFAULT_TOOLSETS as t; print(t)"],
+        env=env, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert default == "terminal,file"
+    assert not any(t.startswith("mcp-") for t in default.split(","))
 
 
 def test_child_env_keeps_allowlist_and_drops_secrets():
