@@ -1619,3 +1619,23 @@ dispatch_switch_final=1
       Its live Linear check found SWC-467 `Done`, carrying `agent:hermes` and not `dispatch:hermes`.
     - Task 1 `<verify>` exits 1 only on its final journal clause: the latest tick line is `dispatch disabled`,
       because of the owner-directed switch-off (item 6). With that clause removed, it exits 0.
+
+## Task 3 — owner verification (checkpoint:human-verify)
+
+The owner's resume signal, relayed by the orchestrator on 2026-09-25: **"approved"**. The owner accepts run 5 as
+the Phase 2 proof.
+
+owner_verified=approved 2026-09-25
+
+The owner accepted these shortfalls:
+- `within_60s=false`: label → brief took 65 s (Gaps 1–2).
+- `completion=operator`: the dispatched model could not read the issue text, so the operator completed n1
+  through the DoD gate with the claim session (Gap 3).
+
+The owner accepted these deviations:
+- Model switch to `claude-opus-5.5` (be5e34d, D-13 amended; Gap 4).
+- SWC-467 and graph `ut-mughkkc0-73909228` reused across runs (D-16 amended; Gap 5).
+- `dispatch_switch_final=1`, so dispatch is left off (Gap 6).
+- Claim timeout raised to 900 s (a6e9604, D-14 amended).
+
+The owner reported no difference, so no Gaps entry was added.
