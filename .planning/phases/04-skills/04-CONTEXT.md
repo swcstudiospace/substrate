@@ -15,7 +15,7 @@ ROADMAP success criteria:
 4. Hermes `/learn`, Omp's skill creator and Grok Build `/autolearn` all call `skills.propose` (MCP name `skills_propose`), which opens a branch and PR rather than publishing live.
 5. Hermes runs hourly as primary miner; `skills.write_approval` and `memory.write_approval` are on.
 
-Proof: a skill mined from a Cursor session is merged and appears in Claude Code and Grok Build without either being touched.
+Proof: a skill mined from a Cursor session is merged and appears in Claude Code and Grok Build without either being touched. *(Superseded for the proof by D-22 below: the proof source is a real Omp session.)*
 
 Depends on Phase 1 only (not Phase 3). Phase 3 is blocked at 03-10 (Telegram approvals off by owner decision, 2026-09-26). Phase 4 must not change Phase 3's pending plans or the substrate-host behaviour those plans rely on, except for the skills source (D-08).
 
@@ -88,6 +88,12 @@ Not in this phase: absorbing each agent's own authored skills into the library; 
 - **D-19:** Add `docs-scraper` to `SURFACES`. — **Reversibility:** reversible.
 - **D-20:** Keep the `~/.agents/skills` links per D-05. Drop them only if the proof shows Cursor listing duplicates. — **Reversibility:** reversible.
 - **D-21:** The proof uses owner checkpoints: review the scan report, merge the tracer PR, run one short Cursor session (cursor-agent stays signed out), and merge the proof PR. — **Reversibility:** reversible.
+- **D-22 (owner, 2026-09-26; proof source is Omp):** The owner's words, verbatim: "We're suppose to be builidng this using Omp not Cursor Agent. If we use Cursor Agent we can't use our Claude Pro Max 20x plan".
+  - The proof source is a real **Omp** session on this VPS: Omp's skill creator (`manage_skill` create, or `learn` when a memory backend is on) → the 04-08 extension blocks the local write and proposes → a PR on `swcstudiospace/agent-skills` that names the Omp session → the owner merges (D-16) → the sync timer projects it → Claude Code and Grok Build list it untouched.
+  - Cursor capture (04-11: the stop hook, `/var/lib/substrate/transcripts/cursor/`, the Hermes miner's transcript input) stays installed but is out of the proof path.
+  - Superseded for the proof: the headless `cursor-agent` sign-in check (D-15's proof clause), the classic Remote-SSH owner Cursor session checkpoint (D-21's Cursor-session item), and the Cursor `/` skill-menu check with its D-20 flag choice. The `~/.agents/skills` links and the D-20 flag files stay as they are.
+  - SC-3's Cursor projection is evidenced at file level from 04-05 (library links present in `~/.agents/skills`, no D-20 flag set), plus the proof skill's own `~/.agents/skills` link after the sync, instead of the Cursor `/` menu.
+  - Recorded in ROADMAP Phase 4 **Proof** (re-scoped in commit 84c2ebc); plan 04-12 is rewritten for this route. — **Reversibility:** reversible.
 
 ### Standing rules carried forward
 - Two-sided test gates against a measured phase baseline (`04-BASELINE.md`); a vanished failure fails the gate like a new one.

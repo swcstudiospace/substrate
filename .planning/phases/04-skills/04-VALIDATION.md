@@ -13,7 +13,7 @@ created: "2026-09-26"
 
 > Per-phase validation contract for feedback sampling during execution.
 > Seeded from `04-RESEARCH.md` § Validation Architecture, reconciled with the locked decisions
-> D-01..D-21 in `04-CONTEXT.md` and with plans 04-01..04-12 (test file names below are the ones the
+> D-01..D-22 in `04-CONTEXT.md` and with plans 04-01..04-12 (test file names below are the ones the
 > plans create). Revised after the independent plan check (`04-PLAN-CHECK.md`, B1-B2, W1-W10): the
 > former 04-03 is split into 04-03 (propose core, route, tool) and 04-04 (sync, projector, merge,
 > arrival), and the later plans are renumbered 04-05..04-12. The criterion and decision coverage matrices are in `COVERAGE.md`.
@@ -64,7 +64,7 @@ re-run the gate after that plan commits; never edit its file.
 - **After every task commit:** the targeted test file(s) for the touched module (each task's `<automated>` starts with them).
 - **After every plan (last code task):** full `bun test` + normalized tsc, two-sided against 04-BASELINE.md; dispatcher pytest in 04-04 Task 1 and 04-07 Task 2; miner pytest in 04-07; skill-autonomy pytest in 04-09.
 - **Live smoke per plan:** the `04-NN-SMOKE.md` / `04-03-TRACER.md` / `04-04-TRACER.md` key=value lines each plan's verify checks.
-- **Before `/gsd:verify-work`:** all suites green against the baselines, every SMOKE/TRACER file complete, and `04-PROOF.md` with `proof_result=pass` and `sc3_cursor_visible=true`.
+- **Before `/gsd:verify-work`:** all suites green against the baselines, every SMOKE/TRACER file complete, and `04-PROOF.md` with `proof_result=pass` and `sc3_cursor_file_level=true` (Omp route, D-22; `sc3_cursor_visible` was the Cursor-menu key of the superseded route).
 - **Max feedback latency:** 30 seconds for unit gates.
 
 ---
@@ -99,11 +99,11 @@ re-run the gate after that plan commits; never edit its file.
 | 04-10-02 | 10 | 4 | SC-2, D-14, D-18, D-19 | T-04-10-01, -02, -05 | doc examples redacted only with the flag; corrected skill proposed from a scratch copy, never through the workspace symlink into /root/agent-skills | live | 04-10-SMOKE.md keys (unchanged, jwt refusal, dry-run redactions, PR files = docs-scraper/SKILL.md, `gh pr diff` adds the text, symlink unchanged, library clean) | ❌ | ⬜ pending |
 | 04-11-01 | 11 | 4 | D-15 | T-04-11-01, -02, -03 | realpath containment; 0600 redacted copy; fail open | unit | `bun test packages/collectors/src/cursor-stop.test.ts` + `cursor.ts --print-desired` check | ❌ | ⬜ pending |
 | 04-11-02 | 11 | 4 | D-15 | T-04-11-03, -05 | no synthetic transcript; gsd entries untouched | live | 04-11-SMOKE.md keys; hooks.json stop entry; transcripts dir empty, 0700 | ❌ | ⬜ pending |
-| 04-12-01 | 12 | 5 | Proof (preflight), SC-5 | T-04-12-03 | untouched baseline recorded; scheduled suppressed ticks read back | live | 04-PROOF.md setup keys (`sched_suppressed_ticks` ≥ 1, `sched_docs_off_schedule=0`, monitor binding); timers/services active | ❌ | ⬜ pending |
-| 04-12-02 | 12 | 5 | Proof, D-15, D-20, D-21 | T-04-12-02 | real session only | checkpoint (human-action) | presence: new *.jsonl newer than the t0 marker, mode 600 | — | ⬜ pending |
-| 04-12-03 | 12 | 5 | Proof, SC-4, SC-5, D-13, D-20 | T-04-12-01, -03 | no hand-made pending/PR | live | 04-PROOF.md mining keys; flag files and `cursor_recheck_needed` match d20_action; `gh pr diff` carries `source: cursor:<id>` | ❌ | ⬜ pending |
-| 04-12-04 | 12 | 5 | Proof, D-16, D-20, D-21, SC-3 (Cursor) | T-04-12-01 | owner merge; Cursor menu re-checked after a flag change | checkpoint (human-action) | presence: `gh pr view --json state` = MERGED | — | ⬜ pending |
-| 04-12-05 | 12 | 5 | Proof, SC-3 (incl. Cursor) | T-04-12-03 | timer-only delivery; config mtimes unchanged | live | 04-PROOF.md arrival keys, `proof_result=pass`, `sc3_cursor_visible=true`, readlink checks | ❌ | ⬜ pending |
+| 04-12-01 | 12 | 5 | Proof provenance, SC-4 (Omp), D-09, D-22 | T-04-12-03, -04 | session id read from Omp's tool_call ctx, never model input; absent/empty/throwing getter → no key, never a throw; queued body carries it too | unit + two-sided gate | `bun test packages/projector/omp/substrate-skills.test.ts` (≥ 17 pass, 0 fail) + root bun/tsc two-sided against 04-BASELINE.md; `getSessionId` in the extension, no `@oh-my-pi`, symlink target | ✅ extend | ⬜ pending |
+| 04-12-02 | 12 | 5 | Proof (Omp-route preflight), SC-5, D-22 | T-04-12-03 | Setup kept as recorded; fresh Omp-route untouched baseline; Omp queue empty; propose key presence only | live | 04-PROOF.md `omp_route_*` / `omp_*` keys (services ×4, extension session forwarding, `omp config get` read-backs, skipOnce false, no managed-skills, library clean, queue 0) + Setup SC-5 keys (`sched_suppressed_ticks` ≥ 1, `sched_docs_off_schedule=0`, no_change doc) + `sc5_monitor_bound_live=true` | ❌ | ⬜ pending |
+| 04-12-03 | 12 | 5 | Proof, SC-4 (Omp), D-11, D-17, D-22 | T-04-12-02, -03, -05 | real Omp session (04-08 headless invocation, fixed prompt dictating no skill content); no hand-made transcript/queue/pending/SKILL.md/PR; output 0600 and deleted | live model session | 04-PROOF.md Omp-session keys (prompt byte-equal, exit 0, ≥ 2 task tool calls, manage_skill blocked, `proof_pr_status=opened`, `proof_skill_new=true`); PR body `session_id:` = header id of Omp's session file, `surface: omp`, files = `<skill>/SKILL.md`, head `skill/omp/<skill>-…` | ❌ | ⬜ pending |
+| 04-12-04 | 12 | 5 | Proof, D-16, D-21 | T-04-12-01 | owner merge is the gate | checkpoint (human-action) | presence: `gh pr view --json state` = MERGED | — | ⬜ pending |
+| 04-12-05 | 12 | 5 | Proof, SC-3 (Claude, Grok; Cursor at file level per D-22) | T-04-12-03, -05 | timer-only delivery within one interval (≤ 360 s); Claude/Grok config mtimes equal the Omp-route baseline | live | 04-PROOF.md arrival keys, `proof_result=pass`, `sc3_cursor_file_level=true`; readlink checks (Claude, Grok, `~/.agents/skills`); no D-20 flag file; agents link count = library skill count | ❌ | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -126,8 +126,8 @@ re-run the gate after that plan commits; never edit its file.
 |---|---|---|---|
 | Raw library content may leave the host | D-18, D-21 | content-policy decision | 04-02 Task 2: owner reads 04-02-SCAN.md and answers approved / redact-high / stop. |
 | Library PR merges (tracer, proof) | D-16, D-21 | the owner is the review gate | 04-04 Task 2 and 04-12 Task 4: owner merges on GitHub; the executor only checks `state = MERGED`. |
-| Real Cursor session producing a transcript | Proof, D-15 | the headless cursor-agent is not signed in and fires no hooks in print mode | 04-12 Task 2: classic Remote-SSH session with transcripts on; presence of a new 0600 transcript copy. |
-| Cursor skill menu lists library skills once (duplicates / none) | D-20, D-05 (Cursor reads ~/.agents/skills), SC-3 (Cursor) | only visible in the Cursor UI | 04-12 Task 2 step 4; the answer selects the D-20 flag in Task 3; on none or duplicates the owner re-checks at 04-12 Task 4 after the flag's sync tick, and 04-12 Task 5 requires `sc3_cursor_visible=true` (checker W8). |
+| Real Omp session producing the proof skill | Proof, D-22 | model behaviour is nondeterministic; the session is run by the executor headless (04-08 invocation), not by the owner | 04-12 Task 3: fixed prompt; the skill content is the model's own; one retry with the first run under `## Failed runs`. No Cursor session is on the proof path (D-22). |
+| Cursor lists library skills (SC-3 Cursor) | SC-3 (Cursor), D-05, D-20, D-22 | the Cursor `/` menu is only visible in the Cursor UI and is out of the proof path by D-22 | Evidenced at file level instead: 04-05 `agents_library_links`, and 04-12 Task 5 `agents_link=true`, `cursor_flags_absent=true`, `sc3_cursor_file_level=true`. The D-20 duplicate check stays with the owner and is not part of the proof. |
 | Live model sessions (Omp print mode, Claude init probe, Hermes miner run) | SC-3, SC-4 | model behaviour is nondeterministic | Observed and recorded; a model that does not call the tool is retried once and the first run kept under `## Failed runs`. |
 
 ---

@@ -254,7 +254,7 @@ Plans:
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
-- [ ] 04-12-PLAN.md — Proof: owner Cursor session (D-20 menu check) → Hermes miner → bridge PR → owner merge → Claude Code and Grok Build list it with neither touched
+- [ ] 04-12-PLAN.md — Proof (re-planned for D-22, owner 2026-09-26): Omp extension forwards the session id → real headless Omp session's `manage_skill` is blocked and proposed as a PR naming that session → owner merge → Claude Code and Grok Build list it within one sync interval with neither touched; SC-3 Cursor checked at file level
 
 **Cross-cutting constraints:**
 
