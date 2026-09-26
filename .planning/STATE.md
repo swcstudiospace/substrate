@@ -3,7 +3,7 @@ gsd_state_version: "1.0"
 milestone: v1.0
 current_plan: 0
 status: executing
-stopped_at: "Phase 4 executing: 04-01, 04-02 done (library repo swcstudiospace/agent-skills live, owner approved scan); next 04-03. Host rebooted 2026-09-26 ~07:02 after load ~890; services came back healthy"
+stopped_at: "HALTED at 04-04 Task 2 (checkpoint:human-action): owner must merge https://github.com/swcstudiospace/agent-skills/pull/1; still OPEN at 2026-09-26T08:45Z. 04-04 Task 1 done (sync timer + Claude/Grok projector live). Resume: merge PR, then resume 04-04 Task 3 (timer-only delivery check)"
 last_updated: "2026-09-26T01:30:00.000Z"
 state_head: 79c79446b55e0ab59dcea33a501f947958150af9
 progress:
