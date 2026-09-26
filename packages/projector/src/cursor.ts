@@ -2,7 +2,7 @@
 /**
  * Project substrate hooks into Cursor's `hooks.json`.
  *
- *   bun packages/projector/src/cursor.ts [--check] [--remove] [--path P]
+ *   bun packages/projector/src/cursor.ts [--check] [--remove] [--path P] [--print-desired]
  *
  * The file is GSD-managed: every existing entry carries `gsd-managed: true` and
  * belongs to another owner. This appends its own entries, tagged
@@ -12,11 +12,19 @@
  * Only the events this Cursor build actually declares are used. The design doc
  * also names `afterFileEdit` and `afterShellExecution`; whether those fire for
  * the CLI is still unverified (Notion §12), so they are not written here.
+ *
+ * `stop` runs a script rather than a CLI subcommand: packages/collectors/src/
+ * cursor-stop.ts reads the stop envelope on stdin (inherited from the hook),
+ * keeps a redacted transcript copy for the skill miner and emits session.end
+ * (D-15). `--print-desired` prints the entries this would write, as JSON, and
+ * touches no file.
  */
 import { existsSync, readFileSync, writeFileSync, copyFileSync } from "node:fs";
 
 const DEFAULT_PATH = "/root/.cursor/hooks.json";
 const CLI = process.env.SUBSTRATE_CLI ?? "/root/src/repos/agent-substrate/packages/cli/src/index.ts";
+const STOP_SCRIPT =
+	process.env.SUBSTRATE_CURSOR_STOP ?? "/root/src/repos/agent-substrate/packages/collectors/src/cursor-stop.ts";
 
 interface HookEntry {
 	type: string;
@@ -39,14 +47,27 @@ function command(args: string): HookEntry {
 	};
 }
 
+/** A hook that runs a script directly, stdin inherited; same `|| true` rule. */
+function script(path: string): HookEntry {
+	return {
+		type: "command",
+		command: `bun ${path} >/dev/null 2>&1 || true`,
+		"substrate-managed": true,
+	};
+}
+
 const DESIRED: Record<string, HookEntry> = {
 	// Writes .substrate/BRIEF.md into the workspace so the session can read it.
 	sessionStart: command("brief --surface cursor --write"),
 	postToolUse: command("emit --kind tool.call --summary 'cursor tool call' --surface cursor --actor human"),
-	stop: command("emit --kind session.end --summary 'cursor session ended' --surface cursor --actor human"),
+	stop: script(STOP_SCRIPT),
 };
 
 const args = process.argv.slice(2);
+if (args.includes("--print-desired")) {
+	process.stdout.write(`${JSON.stringify(DESIRED, null, 2)}\n`);
+	process.exit(0);
+}
 const checkOnly = args.includes("--check");
 const remove = args.includes("--remove");
 const pathIndex = args.indexOf("--path");
