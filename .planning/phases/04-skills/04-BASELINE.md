@@ -140,3 +140,19 @@ docs-scraper exports) points at `/root/.hermes/skills/research/anda-ecosystem`.
   `skill-autonomy-pass`; Phase 4 plans that add tests require the matching count to grow.
 - The miner suite (`cd packages/miner && python3 -m pytest -q`) is new in Phase 4 and has no
   baseline: it must report 0 failed and at least the plan's own test count.
+
+## Git baselines (Task 2: D-12, D-14)
+
+skill-autonomy had no `.git`: `git init -b main`, then every path of
+`git ls-files -z --others --exclude-standard` (42, `.gitignore` and `.grok-plugin/plugin.json`,
+`.grok-plugin/marketplace.json` included, no `__pycache__`/`.pyc`/`.pytest_cache`) staged by explicit
+path and committed; `git status --porcelain --untracked-files=all` empty afterwards; the existing
+4-line `.gitignore` unchanged (sha256 below, recorded before `git init`); the source still equals
+the installed Grok copy (`diff -rq -x .git -x __pycache__ -x .pytest_cache` printed nothing).
+`/root/.openclaw/workspace` had no commits: its first commit holds only `projects/docs-scraper/`
+(82 files), nothing staged afterwards. Undo routes: `RESTORE.d/04-01.md`.
+
+skill-autonomy-gitignore-sha256=a2c5d1b1e8fc2d00576f130634feec851372f52aa103d99d891f4533e011a3ff
+skill-autonomy-git-head=54972bf9f98bcadb4b1fdd30fef25c2235a27022
+skill-autonomy-tracked-files=42
+docs-scraper-baseline-commit=ab5652e9b0941fa510593851ea901383857cdaff
