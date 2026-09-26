@@ -217,7 +217,7 @@ Plans:
      are on.
 **Proof**: A skill mined from a Cursor session is merged and appears in Claude Code and Grok
 Build without either being touched.
-**Plans**: 2/12 plans executed (plan-check passed after 3 iterations: `phases/04-skills/04-CHECK.md`)
+**Plans**: 3/12 plans executed (plan-check passed after 3 iterations: `phases/04-skills/04-CHECK.md`)
 
 Plans:
 **Wave 0**
@@ -230,7 +230,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 04-03-PLAN.md — Tracer, near half: propose core (validate, redact, overlay on main, ledger idempotence, declined/--reopen), propose-auth VM-guest guard, CLI `skills propose --dir`, `skills_propose` tool and `POST /skills/propose`, `skill.propose` kind and docs-scraper surface
+- [x] 04-03-PLAN.md — Tracer, near half: propose core (validate, redact, overlay on main, ledger idempotence, declined/--reopen), propose-auth VM-guest guard, CLI `skills propose --dir`, `skills_propose` tool and `POST /skills/propose`, `skill.propose` kind and docs-scraper surface
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
