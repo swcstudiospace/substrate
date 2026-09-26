@@ -217,16 +217,16 @@ Plans:
      are on.
 **Proof**: A skill mined from a Cursor session is merged and appears in Claude Code and Grok
 Build without either being touched.
-**Plans**: 0/12 plans executed (plan-check passed after 3 iterations: `phases/04-skills/04-CHECK.md`)
+**Plans**: 2/12 plans executed (plan-check passed after 3 iterations: `phases/04-skills/04-CHECK.md`)
 
 Plans:
 **Wave 0**
 
-- [ ] 04-01-PLAN.md — Baselines (bun, tsc, dispatcher, skill-autonomy) and live inventory in 04-BASELINE.md; phase4-baseline rollback area with RESTORE.md; skill-autonomy git baseline tracking every pre-Phase-4 file; docs-scraper path-scoped baseline; rivet nested read-only mount spike → mount_route
+- [x] 04-01-PLAN.md — Baselines (bun, tsc, dispatcher, skill-autonomy) and live inventory in 04-BASELINE.md; phase4-baseline rollback area with RESTORE.md; skill-autonomy git baseline tracking every pre-Phase-4 file; docs-scraper path-scoped baseline; rivet nested read-only mount spike → mount_route
 
 **Wave 1** *(blocked on Wave 0 completion)*
 
-- [ ] 04-02-PLAN.md — Skill-content redactor (D-18) and raw scan report, owner human-verify of the scan; private swcstudiospace/agent-skills created in-plan, vendored push, mirror.git, snapshot and clone-then-rename swap of /root/agent-skills
+- [x] 04-02-PLAN.md — Skill-content redactor (D-18) and raw scan report, owner human-verify of the scan; private swcstudiospace/agent-skills created in-plan, vendored push, mirror.git, snapshot and clone-then-rename swap of /root/agent-skills
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
