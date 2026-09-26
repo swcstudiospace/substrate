@@ -13,6 +13,7 @@ export const SURFACES = [
 	"pi",
 	"rivet-agentos",
 	"herdr",
+	"docs-scraper",
 ] as const;
 export type Surface = (typeof SURFACES)[number];
 
@@ -35,6 +36,7 @@ export const EVENT_KINDS = [
 	"brief.delivered",
 	"release",
 	"complete",
+	"skill.propose",
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 
