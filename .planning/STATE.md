@@ -1,11 +1,11 @@
 ---
 gsd_state_version: "1.0"
 milestone: v1.0
-current_plan: 10
-status: executing
-stopped_at: "03-10 blocked: owner keeps Telegram approvals code but off (2026-09-26); VM sessions stall on permission requests until an approval route is chosen"
-last_updated: "2026-09-25T23:05:00.000Z"
-state_head: 8dcc7d21215bb17f32b4a6e9cbc4e0d57ac5726e
+current_plan: 0
+status: planning
+stopped_at: "Autonomous run 2026-09-26: Phase 3 skipped (03-10 blocked, approvals off); Phase 4 plans in revision after plan-check (2 blockers); Phase 5 context+research in progress; Phase 6 planning"
+last_updated: "2026-09-26T01:30:00.000Z"
+state_head: 79c79446b55e0ab59dcea33a501f947958150af9
 progress:
   total_phases: 6
   completed_phases: 2
@@ -13,8 +13,8 @@ progress:
   completed_plans: 28
   percent: 33
 milestone_name: Agent Substrate — four planes (runtime, memory, skills, ledger) keyed by Graph ID
-current_phase: 3
-current_phase_name: Lane A
+current_phase: 4
+current_phase_name: Skills
 ---
 
 # State
@@ -203,6 +203,8 @@ Previously "not done", now resolved:
 
 - **[Phase 3] 03-10 blocked by an owner decision (2026-09-26).** The owner did not ask for Telegram directly; it came from Notion Build Plan v0.2 §10 ("approvals surfaced to Telegram through the existing stop-notify path"), and the D-13 dedicated bot was the planner's escalation of that. Decision: keep `telegram.ts` and its wiring, leave approvals off. With `permissionPolicy: "ask"` and no approver, the proof session stalls at its first permission request, so 03-10 waits until the owner either sets up the bot or picks another approval route.
 - Linear: 220 issues archived at the owner's request on 2026-09-25/26 (68 junk, then 152 dropshipping run output). 27 are active, and SWC-480 is kept for 03-10. Details and undo ids are in `phases/02-claims-and-dispatch/02-LINEAR-ARCHIVED.md`.
+- **[Autonomous run 2026-09-26] Phase 3 skipped, not complete.** 03-10 stays deferred until an approval route exists; Phases 4–6 proceed because none depends on 03-10. Phase 2's stale verification was re-run and passed 65/65 at `ab12975`.
+- **[Phase 5] Owner inputs pending:** RAGFLOW_URL / RAGFLOW_API_KEY in substrate.env, plus a TEI bge-small embedding sidecar on Railway registered in RAGFlow (no chat model). These are checkpoints inside the Phase 5 plans. See `phases/05-docs-and-desktop/05-DISCOVERY.md`.
 _(Credential rotation was considered and declined by the owner — recorded
 here so it is not re-raised.)_
 
@@ -242,6 +244,7 @@ list.
 
 ## Deferred
 
+- **Recall phase (owner-proposed 2026-09-26; not in the v1.0 ROADMAP):** send distilled, redacted chat-output summaries to Agentmemory (rohitg00/agentmemory on Railway, 0.9.28 or later, local embeddings) behind a substrate `context_search` tool, and retire the broken hindsight and supermemory memories. Evidence and contract are in `phases/05-docs-and-desktop/05-DISCOVERY.md`. Add it to the next milestone rather than to v1.0.
 - Notion §12 unknowns, each probed at the start of the phase that needs it: Orca's session/event
   query API, Muse's plugin API, Omp's skills directory, which Cursor hooks fire for the CLI,
   rivet-agentos `openSession` option names and the Codex adapter package name.
