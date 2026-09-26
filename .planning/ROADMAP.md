@@ -217,7 +217,43 @@ Plans:
      are on.
 **Proof**: A skill mined from a Cursor session is merged and appears in Claude Code and Grok
 Build without either being touched.
-**Plans**: TBD
+**Plans**: 0/12 plans executed (plan-check passed after 3 iterations: `phases/04-skills/04-CHECK.md`)
+
+Plans:
+**Wave 0**
+
+- [ ] 04-01-PLAN.md — Baselines (bun, tsc, dispatcher, skill-autonomy) and live inventory in 04-BASELINE.md; phase4-baseline rollback area with RESTORE.md; skill-autonomy git baseline tracking every pre-Phase-4 file; docs-scraper path-scoped baseline; rivet nested read-only mount spike → mount_route
+
+**Wave 1** *(blocked on Wave 0 completion)*
+
+- [ ] 04-02-PLAN.md — Skill-content redactor (D-18) and raw scan report, owner human-verify of the scan; private swcstudiospace/agent-skills created in-plan, vendored push, mirror.git, snapshot and clone-then-rename swap of /root/agent-skills
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 04-03-PLAN.md — Tracer, near half: propose core (validate, redact, overlay on main, ledger idempotence, declined/--reopen), propose-auth VM-guest guard, CLI `skills propose --dir`, `skills_propose` tool and `POST /skills/propose`, `skill.propose` kind and docs-scraper surface
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 04-04-PLAN.md — Tracer, far half: sync timer and Claude/Grok projection; owner merges the tracer PR and it reaches both agents on the timer alone
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 04-05-PLAN.md — Projection fan-out: Cursor ~/.agents/skills, Muse ~/.config/muse/skills, OpenClaw repoint, Grok identical copies backed up and linked, D-20 flag files
+- [ ] 04-06-PLAN.md — rivet VMs get the library read-only per new VM (D-08), with the onVmStart copy fallback; Phase-3 seed tests untouched; live VM check
+- [ ] 04-07-PLAN.md — Hermes: write_approval ×2 before external_dirs, shadowing links removed, anda moved; packages/miner bridge + queue drain + cron precheck; hourly substrate-skill-miner job; gate-staged write → PR
+- [ ] 04-08-PLAN.md — Omp: standalone tool_call extension (D-17) blocks manage_skill/learn writes and proposes; customDirectories and autolearn.enabled; live Omp session blocked with a PR URL
+- [ ] 04-09-PLAN.md — Grok skill-autonomy: write_skill, /autolearn and Stop-hook live learning propose (pending when down); rule updated; plugin reinstalled; live propose
+- [ ] 04-10-PLAN.md — docs-scraper publishes via `substrate skills propose --dir --surface docs-scraper --allow-doc-examples pem,jwt`; symlinks and README rewrite removed; its skill update proposed from a scratch copy
+- [ ] 04-11-PLAN.md — Cursor stop hook reads the envelope, keeps a redacted transcript copy for the miner and emits session.end with its ref; hooks.json projected
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [ ] 04-12-PLAN.md — Proof: owner Cursor session (D-20 menu check) → Hermes miner → bridge PR → owner merge → Claude Code and Grok Build list it with neither touched
+
+**Cross-cutting constraints:**
+
+- Root suite and tsc are two-sided green against 04-BASELINE.md; every live edit outside the repo is snapshotted under /var/lib/substrate/phase4-baseline/ with a RESTORE.d route first
+- Commit messages carry `Refs SPE-2734` and `Refs SPE-3576`; stage by explicit path only
 
 ### Phase 5: Docs and desktop
 
