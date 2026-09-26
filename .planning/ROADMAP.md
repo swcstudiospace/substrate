@@ -24,6 +24,8 @@ urgent insertions.
 - [ ] **Phase 4: Skills** — one library, three miners proposing, Hermes primary
 - [ ] **Phase 5: Docs and desktop** — product docs and GUI tasks reachable from any agent
 - [ ] **Phase 6: Ledger** — tamper-evident history
+- [ ] **Phase 7: Recall** — agents recall earlier sessions through `context_search`, backed by Agentmemory
+- [ ] **Phase 8: Hot cache** — DragonflyDB caches the brief and search reads, fail-open
 
 ## Phase Details
 
@@ -215,8 +217,12 @@ Plans:
      `skills.propose`, which opens a branch and PR rather than publishing live.
   5. Hermes runs hourly as primary miner; `skills.write_approval` and `memory.write_approval`
      are on.
-**Proof**: A skill mined from a Cursor session is merged and appears in Claude Code and Grok
-Build without either being touched.
+**Proof**: **Re-scoped by owner decision (2026-09-26).** A skill mined from a real **Omp** session
+(Omp's skill creator / `learn`, turned into a library PR by the 04-08 extension) is merged and appears
+in Claude Code and Grok Build without either being touched. Reason: this work is built with Omp on
+the owner's Claude plan, which Cursor Agent sessions cannot use, and under Remote-SSH Cursor's stop
+hook and transcripts stay on the desktop. Original wording kept for the record: "A skill mined from a
+Cursor session is merged and appears in Claude Code and Grok Build without either being touched."
 **Plans**: 11/12 plans executed (plan-check passed after 3 iterations: `phases/04-skills/04-CHECK.md`)
 
 Plans:
@@ -354,3 +360,62 @@ Plans:
 
 - Root suite and tsc are two-sided green against 06-BASELINE.md; every live edit outside the repo is snapshotted under /var/lib/substrate/phase6-baseline/ with a RESTORE.d route first
 - Commit messages carry `Refs SPE-3576`; stage by explicit path only; runs after Phases 4 and 5 (gated in 06-01), so the shared mcp-server and cli files are edited additively
+
+### Phase 7: Recall
+
+**Goal:** Any agent can recall what earlier sessions on any surface learned, through one substrate
+tool keyed by Graph ID: the substrate forwards its own already-redacted summaries to Agentmemory and
+fronts Agentmemory's search as `context_search`.
+**Requirements**: Owner decisions 2026-09-26 — Agentmemory *augments* the substrate memory plane (the
+substrate stays the source of truth) and replaces the broken hindsight (Claude Code) and supermemory
+(Hermes) memories; runs after Phase 6 ("defer to end"). Contract: `phases/05-docs-and-desktop/05-DISCOVERY.md` §2.
+**Depends on:** Phase 6
+**Success Criteria**:
+
+  1. `context_search` (MCP) and `POST /context/search` proxy Agentmemory's smart search using
+     `AGENTMEMORY_URL` and `AGENTMEMORY_SECRET` from `/etc/substrate/substrate.env`; results carry
+     `graph_id`, `repo` and `surface` and are marked untrusted; an Agentmemory outage or a missing key
+     returns an empty result with the reason logged, never an error on the caller's path.
+  2. The substrate forwards already-redacted records — `session.end` summaries, handoffs and memory
+     notes — to Agentmemory with `project=<repo>`, `agentId=<surface>` and the Graph ID; nothing leaves
+     the VPS before `redact()`.
+  3. The deployment is Agentmemory ≥ 0.9.28 with per-agent isolation (upstream #817), checked before
+     the first write.
+  4. hindsight (Claude Code) and supermemory (Hermes) are retired in favour of `context_search`, each
+     with a restore route written first.
+
+**Proof**: A fact recorded in one agent's session is recalled, with its Graph ID, by a different
+agent's `context_search`.
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 7 to break down)
+
+### Phase 8: Hot cache
+
+**Goal:** DragonflyDB fronts the substrate's slow remote reads — the brief, `docs_search` and
+`context_search` — so repeated calls are fast, and a miss or a Dragonfly outage always falls through
+to the source.
+**Requirements**: Owner decision 2026-09-26 — Dragonfly's role is a caching layer (not a session
+store, not pub/sub or a queue); runs after Phase 7 so it can cache `context_search`.
+**Depends on:** Phase 7
+**Success Criteria**:
+
+  1. `DRAGONFLY_URL` comes from `/etc/substrate/substrate.env`; the password never crosses the public
+     Railway TCP proxy in plaintext (Dragonfly TLS or an equivalent protected path).
+  2. `/brief` and `memory_brief` results are cached per surface, repo, branch and Graph ID with a short
+     TTL and invalidated by new events for that repo or graph; the brief stays inside its 1.5 s
+     fail-open budget with Dragonfly unreachable.
+  3. `docs_search` and `context_search` results are cached by normalized query and scope with a TTL;
+     cached values hold only already-redacted text.
+  4. Hit, miss and bypass counts are visible on `GET /healthz` (or a stats endpoint); with Dragonfly
+     unreachable every tool still answers, uncached.
+
+**Proof**: A repeated brief, docs query and recall query are served from Dragonfly (hit counts rise,
+latency drops); with Dragonfly unreachable the same calls return the same answers, uncached.
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 8 to break down)

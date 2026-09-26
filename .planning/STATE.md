@@ -3,11 +3,11 @@ gsd_state_version: "1.0"
 milestone: v1.0
 current_plan: 0
 status: executing
-stopped_at: "BLOCKED 04-12 Task 2: owner ran Cursor Remote-SSH sessions (answer 'done single', then retry 'done'), but Cursor's stop hook never fires on the VPS (0 real cursor session.end ever; postToolUse does fire) and no agent-transcripts exist on the VPS. Stop hook + transcripts appear desktop-side under Remote-SSH [INFERENCE]. 04-11 capture design (cursor-stop.ts on VPS) cannot capture. Awaiting owner decision on capture route."
-last_updated: "2026-09-26T14:50:00.000Z"
+stopped_at: "Owner decisions 2026-09-26 (SPE-3970): 04-12 proof re-scoped from Cursor to an Omp session; Agentmemory → Phase 7 Recall and DragonflyDB → Phase 8 Hot cache (caching layer), both after Phase 6; RAGFlow/Agentmemory/Dragonfly keys being appended to substrate.env. Phases 1-2 re-verified passed (c0d11f8). Next: re-plan 04-12 on the Omp route, execute Phase 5."
+last_updated: "2026-09-26T18:05:00.000Z"
 state_head: 79c79446b55e0ab59dcea33a501f947958150af9
 progress:
-  total_phases: 6
+  total_phases: 8
   completed_phases: 2
   total_plans: 29
   completed_plans: 28
@@ -161,6 +161,12 @@ Previously "not done", now resolved:
 
 ## Accumulated context
 
+### Roadmap Evolution
+
+- Phase 7 added: Recall — Agentmemory behind `context_search` (owner decision 2026-09-26, runs after Phase 6)
+- Phase 8 added: Hot cache — DragonflyDB as a fail-open caching layer (owner decision 2026-09-26, runs after Phase 7)
+- Phase 4 proof re-scoped from a Cursor session to an Omp session (owner decision 2026-09-26)
+
 **Decisions**
 
 - `agent-substrate` is its own git repo. Before `git init` it was an empty dir inside
@@ -174,6 +180,12 @@ Previously "not done", now resolved:
 - Phase 4 vendors the real content of `/root/agent-skills` (dereferencing all 26 symlinks)
   rather than committing links or using submodules.
 - Execution is full-autonomous, including live phase proofs and cross-repo PRs.
+- 2026-09-26 owner decisions (graph `ut-muiofx6k-cf5c0bb7`, SPE-3970): Agentmemory and DragonflyDB
+  work is appended after Phase 6 ("defer to end"); Dragonfly is a caching layer only; Agentmemory
+  *augments* the substrate memory plane (settled by the owner's Recall proposal) and replaces
+  hindsight/supermemory; the Phase 4 proof uses Omp, not Cursor Agent (Cursor Agent cannot use the
+  owner's Claude plan); new credentials go into `/etc/substrate/substrate.env` only, checked by
+  presence, never by value.
 
 **Corrections found while building**
 
@@ -202,9 +214,10 @@ Previously "not done", now resolved:
 ## Blockers
 
 - **[Phase 3] 03-10 blocked by an owner decision (2026-09-26).** The owner did not ask for Telegram directly; it came from Notion Build Plan v0.2 §10 ("approvals surfaced to Telegram through the existing stop-notify path"), and the D-13 dedicated bot was the planner's escalation of that. Decision: keep `telegram.ts` and its wiring, leave approvals off. With `permissionPolicy: "ask"` and no approver, the proof session stalls at its first permission request, so 03-10 waits until the owner either sets up the bot or picks another approval route.
+- **[Phase 4] 04-12 unblocked by owner decision (2026-09-26).** The proof source moves from a Cursor session to a real Omp session: Cursor Agent cannot use the owner's Claude plan, and under Remote-SSH its stop hook and transcripts stay desktop-side. 04-12 is re-planned on the Omp route (Omp's skill creator/`learn` → 04-08 extension → library PR); Cursor capture (04-11) stays installed but leaves the proof path.
 - Linear: 220 issues archived at the owner's request on 2026-09-25/26 (68 junk, then 152 dropshipping run output). 27 are active, and SWC-480 is kept for 03-10. Details and undo ids are in `phases/02-claims-and-dispatch/02-LINEAR-ARCHIVED.md`.
 - **[Autonomous run 2026-09-26] Phase 3 skipped, not complete.** 03-10 stays deferred until an approval route exists; Phases 4–6 proceed because none depends on 03-10. Phase 2's stale verification was re-run and passed 65/65 at `ab12975`.
-- **[Phase 5] Owner inputs pending:** RAGFLOW_URL / RAGFLOW_API_KEY in substrate.env, plus a TEI bge-small embedding sidecar on Railway registered in RAGFlow (no chat model). These are checkpoints inside the Phase 5 plans. See `phases/05-docs-and-desktop/05-DISCOVERY.md`.
+- **[Phase 5] Owner inputs in progress (2026-09-26):** the owner reports RAGFlow is up and is appending RAGFLOW_URL / RAGFLOW_API_KEY (plus AGENTMEMORY_URL, AGENTMEMORY_SECRET, DRAGONFLY_URL for Phases 7-8) to substrate.env; the embedding model registered in RAGFlow is checked at the 05-02 checkpoint (plan: TEI bge-small, no chat model). See `phases/05-docs-and-desktop/05-DISCOVERY.md`.
 _(Credential rotation was considered and declined by the owner — recorded
 here so it is not re-raised.)_
 
@@ -244,7 +257,7 @@ list.
 
 ## Deferred
 
-- **Recall phase (owner-proposed 2026-09-26; not in the v1.0 ROADMAP):** send distilled, redacted chat-output summaries to Agentmemory (rohitg00/agentmemory on Railway, 0.9.28 or later, local embeddings) behind a substrate `context_search` tool, and retire the broken hindsight and supermemory memories. Evidence and contract are in `phases/05-docs-and-desktop/05-DISCOVERY.md`. Add it to the next milestone rather than to v1.0.
+- ~~Recall phase (owner-proposed 2026-09-26)~~ — moved into v1.0 as **Phase 7: Recall** by owner decision 2026-09-26 ("defer to end": after Phase 6); DragonflyDB joins as **Phase 8: Hot cache**. Evidence and contract stay in `phases/05-docs-and-desktop/05-DISCOVERY.md` §2.
 - Notion §12 unknowns, each probed at the start of the phase that needs it: Orca's session/event
   query API, Muse's plugin API, Omp's skills directory, which Cursor hooks fire for the CLI,
   rivet-agentos `openSession` option names and the Codex adapter package name.
