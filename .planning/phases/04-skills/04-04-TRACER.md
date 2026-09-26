@@ -94,6 +94,49 @@ projector_restore_lines=70
 warned_state_keys=10
 library_porcelain_empty=true
 
+## Far end: owner merge to Claude Code and Grok Build on the timer alone (Task 3)
+
+```
+env -i HOME=/root PATH=/usr/bin:/bin gh pr view https://github.com/swcstudiospace/agent-skills/pull/1 --json state,mergedAt,mergeCommit
+git -C /root/agent-skills rev-parse HEAD; git -C /root/agent-skills status --porcelain
+readlink /root/.claude/skills/substrate-skill-miner /root/.grok/skills/substrate-skill-miner
+systemctl show substrate-skills-sync.timer -p LastTriggerUSec --value
+journalctl -u substrate-skills-sync --since "2026-09-26 08:57:08" -o short-iso-precise
+journalctl -u substrate-skills-sync --since "2026-09-26 08:40" | grep -E 'Starting|\[skills-sync\]'
+journalctl --since "2026-09-26 08:57:00" | grep -iE 'sudo.*(skills-sync|skills\.ts)|COMMAND=.*skills'   # no match
+cd /tmp && timeout 60 grok inspect 2>&1 | grep -c 'substrate-skill-miner'
+mkdir -p /tmp/p4-claude-probe && cd /tmp/p4-claude-probe && timeout 180 claude -p ok --output-format stream-json --verbose --max-turns 1 > /tmp/04-04-claude.jsonl 2>/dev/null
+python3 -c '<find type=system subtype=init; test "substrate-skill-miner" in slash_commands / skills>'
+rm -f /tmp/04-04-claude.jsonl; rm -rf /tmp/p4-claude-probe
+```
+
+gh reports PR #1 MERGED at 08:57:08Z with merge commit 34b32e2. Nobody started the service or
+ran the projector after the merge: the service's starts before and after the merge are exactly the
+timer's 5-minute cadence (08:43:18, 08:48:18, 08:53:18, 08:58:18), the timer's LastTriggerUSec is
+the 08:58:18 start, and no sudo command naming the sync or the projector appears in the journal
+since the merge. That 08:58:18 tick, the first after the merge, printed
+`[skills-sync] ff 3ac857273e02a9dfe2d35383a9ccbbc3f16ed7ec..34b32e27870c49d84e166830033b42f011eaf96e`,
+`[projector] claude link-new substrate-skill-miner`, `[projector] grok link-new substrate-skill-miner`
+and `[projector] actions=2 warnings=0` at 08:58:19.687Z, then exited successfully. Both links carry
+the mtime 08:58:19.686Z and point at /root/agent-skills/substrate-skill-miner; the checkout HEAD is
+the merge commit and its porcelain is empty. `grok inspect` lists the skill once (a `user` entry
+under skills). Claude Code's init event (claude_code_version present, 255 slash_commands, 204
+skills) holds `substrate-skill-miner` in both slash_commands and skills; the probe's temp file and
+dir were removed.
+
+t_merged=2026-09-26T08:57:08Z
+merge_sha=34b32e27870c49d84e166830033b42f011eaf96e
+t_timer_trigger=2026-09-26T08:58:18Z
+t_projected=2026-09-26T08:58:19Z
+delta_merge_to_projection_s=71
+manual_sync_after_merge=false
+library_has_tracer=true
+claude_link=true
+grok_link=true
+grok_inspect_lists=true
+claude_init_lists=true
+sync_journal_line=[projector] claude link-new substrate-skill-miner
+
 ## Gaps
 
 - The first run was started by the timer on `enable --now` (boot was more than 2 min earlier), not
@@ -103,3 +146,7 @@ library_porcelain_empty=true
   them arrives in 04-05.
 - The warning events were accepted by the substrate (the projector counts only accepted POSTs);
   they were not read back from the event store.
+- Task 3: `grok inspect` was run twice (once for the count, once to see the matching line); both
+  were read-only. `sync_journal_line` records the Claude line; the Grok line from the same run is
+  `[projector] grok link-new substrate-skill-miner`. The timer's LastTriggerUSec is overwritten on
+  each tick, so t_timer_trigger is the value read at 08:58:30Z and again at 09:01:07Z.
