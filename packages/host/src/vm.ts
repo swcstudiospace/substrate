@@ -12,8 +12,8 @@
 //   3. the expanded options carry their sandbox dispose hooks on a non-enumerable symbol that the
 //      actor layer's spread drops — so they are kept per actor here and run from onVmDisposed.
 
-import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { execFile, execFileSync } from "node:child_process";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
 import claude from "@agentos-software/claude-code";
 import { agentOS, getSandboxDisposeHooks, type HostFunctionCollections, resolveSandboxOptions, setup } from "@rivet-dev/agentos";
 import { sandboxAgentProvider } from "@rivet-dev/agentos-sandbox";
@@ -22,12 +22,17 @@ import { redact } from "../../mcp-server/src/redact.ts";
 import { commit, execFileRunner, gitPush, PR_BODY_MAX, PR_TITLE_MAX, prCreate, COMMIT_MESSAGE_MAX } from "./hostfns.ts";
 import { type HostSync, syncTask } from "./sync.ts";
 import {
+	copyLibraryInto,
 	hostFunctionPermissions,
+	libraryCopyPlan,
+	listLibrary,
 	loopbackPorts,
 	MODEL_RELAY_PORT,
 	MODEL_RELAY_URL,
+	type MountRoute,
 	networkPermissions,
 	type Route,
+	skillMounts,
 	type TestsRoute,
 	testRunArgv,
 	worktreeFor,
@@ -56,6 +61,12 @@ export type HostVmConfig = {
 	tasks: () => TaskService;
 	/** Set by main.ts before registry.start(); off when the approval bot keys are absent. */
 	broker: ApprovalBroker;
+	/** D-08: the git-backed skill library, read afresh at every VM boot. */
+	libraryDir: string;
+	/** 04-01-SPIKE.md mount_route (none = copy). */
+	mountRoute: MountRoute;
+	/** Skill names seed.ts writes (the ultrathink four): never mounted over or copied. */
+	reservedSkills: readonly string[];
 	log: (line: string) => void;
 };
 
@@ -344,6 +355,54 @@ export function createEnsureModelRoute(route: Route, log: (line: string) => void
 	};
 }
 
+function errorName(cause: unknown): string {
+	return cause instanceof Error ? cause.name : "Error";
+}
+
+/** Nested/sibling: read-only host_dir mounts of the current library; any failure → none (fail open). */
+function libraryMounts(gid: string, config: HostVmConfig) {
+	try {
+		const mounts = skillMounts({ route: config.mountRoute, libraryDir: config.libraryDir, names: listLibrary(config.libraryDir), reserved: config.reservedSkills });
+		if (config.mountRoute !== "copy") config.log(`[substrate-host] vm skills ${gid} mounted ${mounts.length} (${config.mountRoute})`);
+		return mounts;
+	} catch (cause) {
+		config.log(`[substrate-host] vm skills ${gid} unavailable: ${errorName(cause)}`);
+		return [];
+	}
+}
+
+const GIT_TIMEOUT_MS = 30_000;
+
+function isRegularFile(path: string): boolean {
+	try {
+		return lstatSync(path).isFile();
+	} catch {
+		return false; // tracked but deleted in the work tree
+	}
+}
+
+/**
+ * Copy route: the git-tracked library files (regular files only, so a tracked symlink cannot pull
+ * a non-library host file into the guest) at the library's HEAD. Any error → one log line and the
+ * VM keeps working without the library.
+ */
+async function copyLibrary(gid: string, filesystem: Parameters<typeof copyLibraryInto>[0], config: HostVmConfig): Promise<void> {
+	try {
+		const git = (args: string[]) => execFileSync("git", ["-C", config.libraryDir, ...args], { encoding: "utf8", timeout: GIT_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024 });
+		const head = git(["rev-parse", "HEAD"]).trim();
+		if (!/^[0-9a-f]{40,64}$/.test(head)) throw new Error("library HEAD unreadable");
+		const files = git(["ls-files", "-z"]).split("\0").filter(Boolean);
+		const plan = libraryCopyPlan({ libraryDir: config.libraryDir, files, reserved: config.reservedSkills }).filter((entry) => isRegularFile(entry.hostPath));
+		const started = Date.now();
+		const result = await copyLibraryInto(filesystem, plan, head, readFileSync);
+		if (result.skipped) config.log(`[substrate-host] vm skills ${gid} current (copy)`);
+		else if (result.failed.length > 0) config.log(`[substrate-host] vm skills ${gid} partial ${result.failed.length} failed (copy)`);
+		else config.log(`[substrate-host] vm skills ${gid} copied ${result.copied} files in ${Date.now() - started} ms (copy)`);
+	} catch (cause) {
+		config.log(`[substrate-host] vm skills ${gid} unavailable: ${errorName(cause)}`);
+	}
+}
+
 export function createHostVm(config: HostVmConfig) {
 	const disposeHooks = new Map<string, Array<() => void | Promise<void>>>();
 	const readOnlyBinds = existsSync(config.checkoutNodeModules) ? [`${config.checkoutNodeModules}:/work/node_modules`] : [];
@@ -369,7 +428,7 @@ export function createHostVm(config: HostVmConfig) {
 			hostFunctions.substrate = { ...hostFunctions.substrate, ...gitCollection(c.key, config) };
 			const expanded = await resolveSandboxOptions({
 				sidecar: { kind: "shared" as const, pool: `vm-${gid}` },
-				mounts: [{ path: "/home/agentos/work", plugin: { id: "host_dir", config: { hostPath: worktree } } }],
+				mounts: [{ path: "/home/agentos/work", plugin: { id: "host_dir", config: { hostPath: worktree } } }, ...libraryMounts(gid, config)],
 				sandbox: {
 					// No `token` option: SandboxAgent.start reads it through substrateDocker.getToken() (sandbox-provider.ts).
 					provider: sandboxAgentProvider(substrateDocker({ graphId: gid, worktree, network: config.sandboxNet, readOnlyBinds })),
@@ -380,6 +439,12 @@ export function createHostVm(config: HostVmConfig) {
 			disposeHooks.set(c.actorId, getSandboxDisposeHooks(expanded));
 			config.log(`[substrate-host] vm resolved ${gid} worktree ${worktree} sandbox ${config.sandboxNet}`);
 			return expanded;
+		},
+
+		// D-08 copy route (mount_route none): trusted host code writes the library into the VM.
+		onVmStart: async (c, vm) => {
+			if (config.mountRoute !== "copy") return;
+			await copyLibrary(graphIdOf(c.key), vm.filesystem, config);
 		},
 
 		onVmDisposed: async (c, reason) => {

@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { type Client, createClient } from "@rivet-dev/agentos/client";
 import { createApiServer } from "./api.ts";
 import { startTrackerProxy } from "./mcp-proxy.ts";
-import { formatRoute, parseRoute, parseTestsRoute, type Route, type TestsRoute, trackerRoute } from "./options.ts";
+import { formatRoute, type MountRoute, parseMountRoute, parseRoute, parseTestsRoute, type Route, type TestsRoute, trackerRoute } from "./options.ts";
 import { GRAPH_LABEL, type SandboxNetwork } from "./sandbox-options.ts";
 import type { Skill, TrackerLocators } from "./seed.ts";
 import { SubstrateClient } from "./substrate.ts";
@@ -60,6 +60,14 @@ const engineEndpoint = env("SUBSTRATE_ENGINE_ENDPOINT") ?? "http://127.0.0.1:642
 const storageDir = env("RIVETKIT_STORAGE_PATH") ?? "/var/lib/substrate/agentos";
 const checkout = env("SUBSTRATE_CHECKOUT") ?? "/root/src/repos/agent-substrate";
 const skillsDir = env("SUBSTRATE_SKILLS_DIR") ?? "/root/.claude/plugins/cache/ultrathink/ultrathink/0.3.0/skills";
+// D-08: the git-backed skill library and 04-01-SPIKE.md's mount_route (nested; none = copy).
+const libraryDir = env("SUBSTRATE_LIBRARY_DIR") ?? "/root/agent-skills";
+let mountRoute: MountRoute;
+try {
+	mountRoute = parseMountRoute(env("SUBSTRATE_SKILL_MOUNTS") ?? "nested");
+} catch (cause) {
+	fail(String(cause));
+}
 const ultrathinkConfig = env("SUBSTRATE_ULTRATHINK_CONFIG") ?? "/root/.config/ultrathink/config.json";
 const directKey = route.a === "anthropic_key" ? env("SUBSTRATE_VM_ANTHROPIC_API_KEY") : undefined;
 
@@ -167,6 +175,9 @@ const { registry } = createHostVm({
 	store,
 	substrate,
 	sync,
+	libraryDir,
+	mountRoute,
+	reservedSkills: skills.map((s) => s.name),
 	tasks: () => service,
 	broker,
 	log,
@@ -238,7 +249,7 @@ const server = createApiServer(service, { engineReady: () => engineReady });
 server.listen(apiPort, "127.0.0.1", () => {
 	log(`[substrate-host] api 127.0.0.1:${apiPort}`);
 	log(`[substrate-host] route ${formatRoute(route)}`);
-	log(`[substrate-host] tests route ${testsRoute}; model ${model}; sandbox ${sandboxNet}; skills ${skills.map((s) => s.name).join(",")}`);
+	log(`[substrate-host] tests route ${testsRoute}; model ${model}; sandbox ${sandboxNet}; skills ${skills.map((s) => s.name).join(",")}; library ${libraryDir} mounts ${mountRoute}`);
 });
 
 let stopping = false;

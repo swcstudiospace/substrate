@@ -15,6 +15,7 @@ import {
 	parseMountRoute,
 	parseRoute,
 	parseTestsRoute,
+	type HostDirMount,
 	type Route,
 	sessionEnv,
 	skillMounts,
@@ -242,7 +243,7 @@ describe("skillMounts (D-08)", () => {
 	});
 
 	test("sibling: exactly one read-only mount of the whole library whatever the names", () => {
-		const expected = [{ path: VM_LIBRARY_DIR, readOnly: true, plugin: { id: "host_dir", config: { hostPath: "/lib", readOnly: true } } }];
+		const expected: HostDirMount[] = [{ path: VM_LIBRARY_DIR, readOnly: true, plugin: { id: "host_dir", config: { hostPath: "/lib", readOnly: true } } }];
 		expect(skillMounts({ route: "sibling", libraryDir: "/lib", names: ["a", "b", "c"], reserved: [] })).toEqual(expected);
 		expect(skillMounts({ route: "sibling", libraryDir: "/lib/", names: [], reserved: [] })).toEqual(expected);
 		expect(VM_LIBRARY_DIR).toBe("/home/agentos/agent-skills");

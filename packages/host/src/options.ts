@@ -4,6 +4,8 @@
 // The route grammar is 03-01-SPIKE.md's `route_choice=` line: four `<letter>:<value>` segments
 // in the order a (model/loopback), b (sync), c (git), s (substrate-call channel).
 
+import { existsSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { SANDBOX_IMAGE, WORKTREES_ROOT, worktreeFor } from "./sandbox-options.ts";
 
 export { WORKTREES_ROOT, worktreeFor };
@@ -186,4 +188,131 @@ export function testRunArgv(input: TestRunInput): string[] {
 	if (nodeModules !== null) argv.push("-v", `${nodeModules}:/work/node_modules:ro`);
 	argv.push("-w", "/work", SANDBOX_IMAGE, "bun", "test", ...paths);
 	return argv;
+}
+
+// ── D-08: the skill library in every rivet-agentos VM ────────────────────────────────────────
+// 04-01-SPIKE.md's mount_route picks the delivery: nested (one read-only host_dir mount per skill
+// under the seeded skills dir), sibling (one read-only mount of the whole library), or copy (the
+// spike's `none`: trusted host code writes the git-tracked library into the VM at boot). Every
+// host path and copy source is `<libraryDir>/<valid skill name>/…`, so no other host state (the
+// 04-03 propose key under /var/lib/substrate included) can reach a guest.
+
+export type MountRoute = "nested" | "sibling" | "copy";
+
+/** Where seed.ts writes the ultrathink skills; nested mounts sit beside them. */
+export const VM_SKILLS_DIR = "/home/agentos/.claude/skills";
+/** The sibling mount point and the copy route's target. */
+export const VM_LIBRARY_DIR = "/home/agentos/agent-skills";
+/** Copy route: the library HEAD the VM holds; empty or absent means no complete copy. */
+export const LIBRARY_HEAD_MARKER = `${VM_LIBRARY_DIR}/.library-head`;
+
+const SKILL_NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+const COPY_BATCH = 200;
+
+/**
+ * readOnly at both levels (04-01-SPIKE.md Gaps): `plugin.config.readOnly` is what host_dir
+ * enforces, the top-level flag is what listMounts reports.
+ */
+export type HostDirMount = {
+	path: string;
+	readOnly: true;
+	plugin: { id: "host_dir"; config: { hostPath: string; readOnly: true } };
+};
+
+function hostDirMount(path: string, hostPath: string): HostDirMount {
+	return { path, readOnly: true, plugin: { id: "host_dir", config: { hostPath, readOnly: true } } };
+}
+
+function trimDir(dir: string): string {
+	return dir.length > 1 ? dir.replace(/\/+$/, "") : dir;
+}
+
+/** Sorted names of the library's real (non-symlink, non-dot) subdirectories that hold SKILL.md; a missing dir lists nothing. */
+export function listLibrary(dir: string): string[] {
+	if (!existsSync(dir)) return [];
+	return readdirSync(dir, { withFileTypes: true })
+		.filter((entry) => entry.isDirectory() && !entry.name.startsWith(".") && existsSync(join(dir, entry.name, "SKILL.md")))
+		.map((entry) => entry.name)
+		.sort();
+}
+
+export function parseMountRoute(raw: string): MountRoute {
+	if (raw === "nested" || raw === "sibling" || raw === "copy") return raw;
+	if (raw === "none") return "copy";
+	throw new Error(`invalid mount route ${JSON.stringify(raw)}: expected nested|sibling|copy (none = copy)`);
+}
+
+export function skillMounts(input: { route: MountRoute; libraryDir: string; names: readonly string[]; reserved: readonly string[] }): HostDirMount[] {
+	const libraryDir = trimDir(input.libraryDir);
+	if (input.route === "copy") return [];
+	if (input.route === "sibling") return [hostDirMount(VM_LIBRARY_DIR, libraryDir)];
+	const reserved = new Set(input.reserved);
+	return [...new Set(input.names)]
+		.filter((name) => SKILL_NAME_RE.test(name) && !reserved.has(name))
+		.sort()
+		.map((name) => hostDirMount(`${VM_SKILLS_DIR}/${name}`, `${libraryDir}/${name}`));
+}
+
+/**
+ * Copy route: `files` are `git -C <libraryDir> ls-files -z` entries. Kept: `<valid name>/<rel>`
+ * with no empty, `.`, `..` or `.git` segment, the name not reserved (seeded by seed.ts).
+ */
+export function libraryCopyPlan(input: { libraryDir: string; files: readonly string[]; reserved: readonly string[] }): { hostPath: string; vmPath: string }[] {
+	const libraryDir = trimDir(input.libraryDir);
+	const reserved = new Set(input.reserved);
+	const kept = new Set<string>();
+	for (const file of input.files) {
+		const segments = file.split("/");
+		const name = segments[0] ?? "";
+		if (segments.length < 2 || !SKILL_NAME_RE.test(name) || reserved.has(name)) continue;
+		if (segments.some((s) => s === "" || s === "." || s === ".." || s === ".git")) continue;
+		kept.add(file);
+	}
+	return [...kept].sort().map((rel) => ({ hostPath: `${libraryDir}/${rel}`, vmPath: `${VM_LIBRARY_DIR}/${rel}` }));
+}
+
+/** The slice of rivet's `vm.filesystem` the copy uses (structural: no rivet import). */
+export type LibraryCopyTarget = {
+	readFile(path: string): Promise<Uint8Array>;
+	writeFile(path: string, content: string | Uint8Array): Promise<void>;
+	writeFiles(entries: { path: string; content: Uint8Array }[]): Promise<{ path: string; success: boolean; error?: string }[]>;
+	mkdir(path: string, options?: { recursive?: boolean }): Promise<void>;
+};
+
+/**
+ * Copy the planned library files into a VM unless it already holds `head`. An existing marker is
+ * emptied before anything else, and `head` is written only when every BatchWriteResult succeeded,
+ * so an interrupted or partial copy is retried on the next boot. Rejections propagate (the caller
+ * logs and fails open).
+ */
+export async function copyLibraryInto(
+	target: LibraryCopyTarget,
+	entries: readonly { hostPath: string; vmPath: string }[],
+	head: string,
+	readHost: (path: string) => Uint8Array,
+): Promise<{ copied: number; skipped: boolean; failed: string[] }> {
+	let marker: string | null = null;
+	try {
+		marker = new TextDecoder().decode(await target.readFile(LIBRARY_HEAD_MARKER)).trim();
+	} catch {
+		marker = null; // absent: no copy yet
+	}
+	if (marker !== null && marker === head) return { copied: 0, skipped: true, failed: [] };
+	if (marker !== null) await target.writeFile(LIBRARY_HEAD_MARKER, "");
+
+	const dirs = new Set<string>([VM_LIBRARY_DIR]);
+	for (const entry of entries) dirs.add(entry.vmPath.slice(0, entry.vmPath.lastIndexOf("/")));
+	for (const dir of [...dirs].sort()) await target.mkdir(dir, { recursive: true });
+
+	let copied = 0;
+	const failed: string[] = [];
+	for (let i = 0; i < entries.length; i += COPY_BATCH) {
+		const batch = entries.slice(i, i + COPY_BATCH).map((entry) => ({ path: entry.vmPath, content: readHost(entry.hostPath) }));
+		for (const result of await target.writeFiles(batch)) {
+			if (result.success) copied += 1;
+			else failed.push(result.path);
+		}
+	}
+	if (failed.length === 0) await target.writeFile(LIBRARY_HEAD_MARKER, head);
+	return { copied, skipped: false, failed };
 }
