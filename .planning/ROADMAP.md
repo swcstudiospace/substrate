@@ -217,7 +217,7 @@ Plans:
      are on.
 **Proof**: A skill mined from a Cursor session is merged and appears in Claude Code and Grok
 Build without either being touched.
-**Plans**: 3/12 plans executed (plan-check passed after 3 iterations: `phases/04-skills/04-CHECK.md`)
+**Plans**: 4/12 plans executed (plan-check passed after 3 iterations: `phases/04-skills/04-CHECK.md`)
 
 Plans:
 **Wave 0**
@@ -234,7 +234,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 04-04-PLAN.md — Tracer, far half: sync timer and Claude/Grok projection; owner merges the tracer PR and it reaches both agents on the timer alone
+- [x] 04-04-PLAN.md — Tracer, far half: sync timer and Claude/Grok projection; owner merges the tracer PR and it reaches both agents on the timer alone
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
