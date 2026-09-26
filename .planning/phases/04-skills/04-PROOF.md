@@ -1,6 +1,7 @@
-# Phase 4 proof — a Cursor-mined skill reaches Claude Code and Grok Build untouched
+# Phase 4 proof — an Omp-mined skill reaches Claude Code and Grok Build untouched
 
 Recorded from observed output only.
+Re-scoped to an Omp session by D-22 (2026-09-26). The Setup section was recorded for the Cursor route (04-12 before the revision) and is kept as recorded; its services, Hermes cron and SC-5 keys are reused.
 
 ## Setup
 
@@ -75,6 +76,77 @@ sched_docs_off_schedule=0
 sched_suppressed_ticks=1
 sched_suppressed_example=/root/.hermes/cron/output/0c172431cf5b/2026-09-26_21-00-43.md
 sched_suppressed_log_line=true
+
+## Omp route
+
+### Baseline
+
+Recorded by plan 04-12 Task 2 (Omp route, D-22) on 2026-09-26 from 22:45Z, after Task 1's GREEN
+commit 741249b made session forwarding live through the extension symlink. Read-only apart from the
+key lists, RESTORE.d/04-12.md and route 1 (the unused Cursor-route marker).
+
+```
+date -u +%FT%TZ                                                          → 2026-09-26T22:45:02Z
+omp --version                                                            → omp/18.3.1
+/usr/bin/time -f %e -o /tmp/04-12-startup.txt omp --version              → 15.09 (file removed)
+systemctl is-active substrate-mcp substrate-host substrate-skills-sync.timer substrate-skills-bridge.timer
+                                                                         → active ×4
+readlink /root/.omp/agent/extensions/substrate-skills.ts                 → /root/src/repos/agent-substrate/packages/projector/omp/substrate-skills.ts
+grep -c getSessionId <that file>                                         → 4
+omp config get skills.customDirectories                                  → ["/root/agent-skills"]
+omp config get autolearn.enabled; … autolearn.autoContinue               → true, false
+omp config get memory.backend                                            → off
+control.json skipOnce (json.dumps)                                       → false
+test -e /root/.omp/agent/managed-skills                                  → absent
+test -s /var/lib/substrate/skills/propose.key                            → present (presence only, never read)
+git -C /root/agent-skills rev-parse HEAD                                 → 34b32e27870c49d84e166830033b42f011eaf96e
+git -C /root/agent-skills status --porcelain | wc -l                     → 0
+stat -c %Y /root/.claude/settings.json /root/.grok/config.toml           → 1790356194, 1790447779
+keys-only lister (interfaces) over both files, umask 077 → /var/lib/substrate/phase4-baseline/04-12/omp-route/
+    claude-settings.keys, grok-config.keys (0600, dir 0700)              → 52, 46 lines
+env -i HOME=/root PATH=/usr/bin:/bin gh pr list --repo swcstudiospace/agent-skills --state open --json url,title → 5 PRs (below)
+ls /root/.omp/agent/substrate-pending/*.json | wc -l                     → 0 (dir present)
+ls /root/.omp/agent/sessions/-tmp/*.jsonl | wc -l                        → 3
+grep -c substrate-skill-miner-monitor.sh /root/.hermes/cron/jobs.json    → 1
+rm -f /var/lib/substrate/transcripts/.p4-proof-t0 (route 1)              → 2026-09-26T22:47:32Z, gone
+```
+
+Grok's config.toml mtime moved since Setup (1790311878 → 1790447779; the unattributed writer noted in
+the plan objective, before this route started). The gating "untouched" window is merge → projection
+(Task 5); this comparison is supporting only.
+
+omp_route_t0=2026-09-26T22:45:02Z
+omp_version=omp/18.3.1
+omp_startup_s=15.09
+omp_services_active=true
+omp_extension_link=/root/src/repos/agent-substrate/packages/projector/omp/substrate-skills.ts
+omp_extension_session_id=true
+omp_custom_directories=["/root/agent-skills"]
+omp_autolearn_enabled=true
+omp_autolearn_autocontinue=false
+omp_memory_backend=off
+omp_ultrathink_skip_pending=false
+omp_managed_skills_absent=true
+omp_route_propose_key_present=true
+omp_route_library_head=34b32e27870c49d84e166830033b42f011eaf96e
+omp_route_library_clean=true
+omp_route_claude_mtime=1790356194
+omp_route_grok_mtime=1790447779
+omp_route_setup_mtimes_match=false
+omp_route_keys_dir=/var/lib/substrate/phase4-baseline/04-12/omp-route
+omp_route_claude_keys=52
+omp_route_grok_keys=46
+omp_route_open_prs=5
+omp_route_queue_files=0
+omp_route_sessions_before=3
+sc5_monitor_bound_live=true
+cursor_route_marker_removed=true
+
+open_pr_omp_route: https://github.com/swcstudiospace/agent-skills/pull/6 skill(vps-cpu-memory-lsp-triage): proposal from omp
+open_pr_omp_route: https://github.com/swcstudiospace/agent-skills/pull/5 skill(substrate-skill-miner): proposal from hermes
+open_pr_omp_route: https://github.com/swcstudiospace/agent-skills/pull/4 skill(grok-skill-propose): proposal from grok-build
+open_pr_omp_route: https://github.com/swcstudiospace/agent-skills/pull/3 skill(omp-skill-propose): proposal from omp
+open_pr_omp_route: https://github.com/swcstudiospace/agent-skills/pull/2 skill(docs-scraper): proposal from docs-scraper
 
 ## Gaps
 
