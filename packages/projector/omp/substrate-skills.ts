@@ -21,7 +21,7 @@
  * per call and sent only as the x-substrate-propose-key header: never logged, never queued, never
  * in a reason.
  *
- * No import from @oh-my-pi/* or the repo's module graph: the types below are structural copies of
+ * No import from the Omp package or the repo's module graph: the types below are structural copies of
  * pi-coding-agent's extensibility/shared-events.ts ToolCallEventResult.
  */
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
