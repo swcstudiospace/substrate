@@ -3,8 +3,8 @@ gsd_state_version: "1.0"
 milestone: v1.0
 current_plan: 0
 status: executing
-stopped_at: "Owner decisions 2026-09-26 (SPE-3970): 04-12 proof re-scoped from Cursor to an Omp session; Agentmemory → Phase 7 Recall and DragonflyDB → Phase 8 Hot cache (caching layer), both after Phase 6; RAGFlow/Agentmemory/Dragonfly keys being appended to substrate.env. Phases 1-2 re-verified passed (c0d11f8). Next: re-plan 04-12 on the Omp route, execute Phase 5."
-last_updated: "2026-09-26T18:05:00.000Z"
+stopped_at: "2026-09-26 run (SPE-3970): Phases 1-2 re-verified passed (c0d11f8). Phase 4: 04-12 re-planned on the Omp route (D-22; 5e97249, checker round 1 fixes 19be667; re-check in progress). Phase 5: 05-01 done (3f1271c), 05-03 desktop tracer done (2554d4b; root suite 530/0/29), 05-02 stopped at its owner checkpoint (TEI + RAGFlow key; RAGFLOW_* absent). Phases 7 (Recall) and 8 (Hot cache) discussed (12c0d24, ea929a8) and being planned. Owner inputs pending: RAGFlow checkpoint, AGENTMEMORY_*/DRAGONFLY_* keys."
+last_updated: "2026-09-26T20:10:00.000Z"
 state_head: 79c79446b55e0ab59dcea33a501f947958150af9
 progress:
   total_phases: 8
