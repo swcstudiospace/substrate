@@ -3,7 +3,7 @@ gsd_state_version: "1.0"
 milestone: v1.0
 current_plan: 10
 status: executing
-stopped_at: "03-09 complete (pr_lands_decision=i; SWC-480, graph ut-muhk8v3p-47ae5f1a, 13 D-14 archives, dispatch:claude-code created unapplied); next 03-10 proof"
+stopped_at: "03-10 blocked: owner keeps Telegram approvals code but off (2026-09-26); VM sessions stall on permission requests until an approval route is chosen"
 last_updated: "2026-09-25T23:05:00.000Z"
 state_head: 8dcc7d21215bb17f32b4a6e9cbc4e0d57ac5726e
 progress:
@@ -201,6 +201,8 @@ Previously "not done", now resolved:
 
 ## Blockers
 
+- **[Phase 3] 03-10 blocked by an owner decision (2026-09-26).** The owner did not ask for Telegram directly; it came from Notion Build Plan v0.2 §10 ("approvals surfaced to Telegram through the existing stop-notify path"), and the D-13 dedicated bot was the planner's escalation of that. Decision: keep `telegram.ts` and its wiring, leave approvals off. With `permissionPolicy: "ask"` and no approver, the proof session stalls at its first permission request, so 03-10 waits until the owner either sets up the bot or picks another approval route.
+- Linear: 220 issues archived at the owner's request on 2026-09-25/26 (68 junk, then 152 dropshipping run output). 27 are active, and SWC-480 is kept for 03-10. Details and undo ids are in `phases/02-claims-and-dispatch/02-LINEAR-ARCHIVED.md`.
 _(Credential rotation was considered and declined by the owner — recorded
 here so it is not re-raised.)_
 
