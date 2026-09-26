@@ -17,6 +17,10 @@
  * key) and still blocks/strips. 400 and 413 are final: block with the reason, queue nothing.
  * The handler never throws.
  *
+ * Provenance: Omp passes every tool_call handler a ctx whose sessionManager.getSessionId() is the
+ * calling session's id; it travels in the propose body (and so in a queued file) as `session_id`,
+ * which the substrate prints in the PR body. No ctx, a blank id or a throwing getter omits the key.
+ *
  * The propose key (/var/lib/substrate/skills/propose.key, env SUBSTRATE_PROPOSE_KEY_FILE) is read
  * per call and sent only as the x-substrate-propose-key header: never logged, never queued, never
  * in a reason.
@@ -41,8 +45,13 @@ export interface ToolCallResult {
 	additionalContext?: string;
 }
 
+/** Structural subset of Omp's ExtensionContext: getSessionId reads a #private field, so call it as a method. */
+export interface OmpContext {
+	sessionManager?: { getSessionId?(): unknown };
+}
+
 export interface OmpPi {
-	on(event: "tool_call", handler: (event: ToolCallEvent) => Promise<ToolCallResult | undefined>): void;
+	on(event: "tool_call", handler: (event: ToolCallEvent, ctx?: OmpContext) => Promise<ToolCallResult | undefined>): void;
 }
 
 export interface OmpSkill {
@@ -58,6 +67,7 @@ export interface ProposeBody {
 	files: Record<string, string>;
 	rationale: string;
 	surface: "omp";
+	session_id?: string;
 }
 
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
@@ -117,6 +127,17 @@ function readKey(keyFile: string): string | null {
 	}
 }
 
+/** The calling Omp session's id, trimmed and capped, or undefined when unknown; never throws. */
+function sessionIdOf(ctx: OmpContext | undefined): string | undefined {
+	try {
+		const id = ctx?.sessionManager?.getSessionId?.();
+		const trimmed = typeof id === "string" ? id.trim().slice(0, 200) : "";
+		return trimmed === "" ? undefined : trimmed;
+	} catch {
+		return undefined;
+	}
+}
+
 /** A final answer for the model, or the pending file the proposal was queued in. */
 type Outcome = { kind: "final"; text: string } | { kind: "queued"; path: string };
 
@@ -143,7 +164,7 @@ function describe(skillName: string, reply: unknown): string {
 	}
 }
 
-export function createHandler(opts: HandlerOptions): (event: ToolCallEvent) => Promise<ToolCallResult | undefined> {
+export function createHandler(opts: HandlerOptions): (event: ToolCallEvent, ctx?: OmpContext) => Promise<ToolCallResult | undefined> {
 	const now = opts.now ?? (() => new Date());
 	const endpoint = `${opts.url.replace(/\/+$/, "")}/skills/propose`;
 
@@ -183,7 +204,7 @@ export function createHandler(opts: HandlerOptions): (event: ToolCallEvent) => P
 		return { kind: "final", text: `The substrate answered HTTP ${res.status} for the skill ${body.name}; nothing was written locally.` };
 	}
 
-	return async (event) => {
+	return async (event, ctx) => {
 		try {
 			const skill = skillFromToolCall(event);
 			if (skill === null) return undefined;
@@ -191,11 +212,13 @@ export function createHandler(opts: HandlerOptions): (event: ToolCallEvent) => P
 				const reason = `invalid skill name ${JSON.stringify(skill.name.slice(0, 80))}: must match ${SKILL_NAME_RE.source}; nothing was proposed or written.`;
 				return { block: true, reason };
 			}
+			const sid = sessionIdOf(ctx);
 			const body: ProposeBody = {
 				name: skill.name,
 				files: { "SKILL.md": renderSkillMd(skill) },
 				rationale: `Omp ${skill.kind} tool (${skill.action}) in an Omp session; routed through the substrate instead of writing ~/.omp/agent/managed-skills.`,
 				surface: "omp",
+				...(sid ? { session_id: sid } : {}),
 			};
 			const outcome = await propose(body);
 			const text =
