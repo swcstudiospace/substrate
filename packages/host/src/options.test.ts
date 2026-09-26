@@ -1,17 +1,28 @@
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
+	copyLibraryInto,
 	D12_HOSTS,
 	formatRoute,
 	hostFunctionPermissions,
+	LIBRARY_HEAD_MARKER,
+	libraryCopyPlan,
+	listLibrary,
 	loopbackPorts,
 	networkPermissions,
+	parseMountRoute,
 	parseRoute,
 	parseTestsRoute,
 	type Route,
 	sessionEnv,
+	skillMounts,
 	TRACKER_PROXY_PORT,
 	testRunArgv,
 	trackerRoute,
+	VM_LIBRARY_DIR,
+	VM_SKILLS_DIR,
 	worktreeFor,
 } from "./options.ts";
 
@@ -210,5 +221,213 @@ describe("testRunArgv (tests_route oneshot)", () => {
 		expect(() => testRunArgv({ ...ok, worktree: "/tmp/x", paths: ["a.test.ts"] })).toThrow(/worktree/);
 		expect(() => testRunArgv({ ...ok, worktree: `${worktree}/../other`, paths: ["a.test.ts"] })).toThrow(/worktree/);
 		expect(testRunArgv({ ...ok, paths: Array.from({ length: 8 }, (_, i) => `t${i}.test.ts`) })).toHaveLength(8 + 16);
+	});
+});
+
+const ULTRATHINK = ["ultrathink-kickoff", "ultrathink-plan", "ultrathink-ship", "ultrathink-sync"] as const;
+
+describe("skillMounts (D-08)", () => {
+	test("nested: one read-only host_dir mount per library skill, sorted by name", () => {
+		expect(skillMounts({ route: "nested", libraryDir: "/lib", names: ["b-skill", "a-skill"], reserved: [] })).toEqual([
+			{ path: `${VM_SKILLS_DIR}/a-skill`, readOnly: true, plugin: { id: "host_dir", config: { hostPath: "/lib/a-skill", readOnly: true } } },
+			{ path: `${VM_SKILLS_DIR}/b-skill`, readOnly: true, plugin: { id: "host_dir", config: { hostPath: "/lib/b-skill", readOnly: true } } },
+		]);
+		expect(VM_SKILLS_DIR).toBe("/home/agentos/.claude/skills");
+	});
+
+	test("reserved (seeded ultrathink) names are never mounted; invalid names are skipped", () => {
+		const names = [...ULTRATHINK, "../x", "X", ".git", "a/b", "", "-lead", "ok-skill"];
+		const mounts = skillMounts({ route: "nested", libraryDir: "/lib", names, reserved: ULTRATHINK });
+		expect(mounts.map((m) => m.path)).toEqual([`${VM_SKILLS_DIR}/ok-skill`]);
+	});
+
+	test("sibling: exactly one read-only mount of the whole library whatever the names", () => {
+		const expected = [{ path: VM_LIBRARY_DIR, readOnly: true, plugin: { id: "host_dir", config: { hostPath: "/lib", readOnly: true } } }];
+		expect(skillMounts({ route: "sibling", libraryDir: "/lib", names: ["a", "b", "c"], reserved: [] })).toEqual(expected);
+		expect(skillMounts({ route: "sibling", libraryDir: "/lib/", names: [], reserved: [] })).toEqual(expected);
+		expect(VM_LIBRARY_DIR).toBe("/home/agentos/agent-skills");
+	});
+
+	test("copy: no mounts; every mount any route builds is read-only and confined to the library dir", () => {
+		const names = ["a-skill", "b-skill", "../../var/lib/substrate", "ultrathink-sync"];
+		expect(skillMounts({ route: "copy", libraryDir: "/lib", names, reserved: ULTRATHINK })).toEqual([]);
+		for (const route of ["nested", "sibling", "copy"] as const) {
+			for (const mount of skillMounts({ route, libraryDir: "/lib", names, reserved: ULTRATHINK })) {
+				expect(mount.readOnly).toBe(true);
+				expect(mount.plugin.config.readOnly).toBe(true);
+				expect(mount.plugin.config.hostPath === "/lib" || /^\/lib\/[a-z0-9][a-z0-9-]*$/.test(mount.plugin.config.hostPath)).toBe(true);
+			}
+		}
+	});
+});
+
+describe("listLibrary (D-08)", () => {
+	test("sorted names of real subdirectories holding SKILL.md; .git, README.md, dirs without SKILL.md and symlinks ignored", () => {
+		const dir = mkdtempSync(join(tmpdir(), "options-04-06-"));
+		try {
+			for (const name of ["b-skill", "a-skill", "no-skill-md", ".git"]) mkdirSync(join(dir, name));
+			writeFileSync(join(dir, "b-skill", "SKILL.md"), "b");
+			writeFileSync(join(dir, "a-skill", "SKILL.md"), "a");
+			writeFileSync(join(dir, ".git", "SKILL.md"), "not a skill");
+			writeFileSync(join(dir, "no-skill-md", "README.md"), "x");
+			writeFileSync(join(dir, "README.md"), "library");
+			symlinkSync(join(dir, "a-skill"), join(dir, "linked-skill"));
+			expect(listLibrary(dir)).toEqual(["a-skill", "b-skill"]);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a missing library dir lists nothing", () => {
+		expect(listLibrary(join(tmpdir(), "options-04-06-missing-library"))).toEqual([]);
+	});
+});
+
+describe("parseMountRoute", () => {
+	test("nested, sibling and copy pass; the spike's none selects copy; anything else throws", () => {
+		expect(parseMountRoute("nested")).toBe("nested");
+		expect(parseMountRoute("sibling")).toBe("sibling");
+		expect(parseMountRoute("copy")).toBe("copy");
+		expect(parseMountRoute("none")).toBe("copy");
+		for (const bad of ["", "Nested", "rw", "nested,sibling"]) expect(() => parseMountRoute(bad)).toThrow(/mount route/);
+	});
+});
+
+describe("libraryCopyPlan (D-08 copy route)", () => {
+	test("only git-tracked <valid name>/<rel> files outside reserved names, sorted, confined to the library", () => {
+		const files = [
+			"b-skill/SKILL.md",
+			"a-skill/SKILL.md",
+			"a-skill/refs/x.md",
+			"README.md",
+			".git/config",
+			"ultrathink-sync/SKILL.md",
+			"X/SKILL.md",
+			"../e/SKILL.md",
+			"a-skill/../../etc/passwd",
+			"a-skill/.git/config",
+			"a-skill/./SKILL.md",
+			"a-skill//SKILL.md",
+			"/abs/SKILL.md",
+		];
+		const plan = libraryCopyPlan({ libraryDir: "/lib", files, reserved: ["ultrathink-sync"] });
+		expect(plan).toEqual([
+			{ hostPath: "/lib/a-skill/SKILL.md", vmPath: `${VM_LIBRARY_DIR}/a-skill/SKILL.md` },
+			{ hostPath: "/lib/a-skill/refs/x.md", vmPath: `${VM_LIBRARY_DIR}/a-skill/refs/x.md` },
+			{ hostPath: "/lib/b-skill/SKILL.md", vmPath: `${VM_LIBRARY_DIR}/b-skill/SKILL.md` },
+		]);
+		for (const entry of plan) {
+			expect(entry.hostPath.startsWith("/lib/")).toBe(true);
+			expect(entry.vmPath.startsWith(`${VM_LIBRARY_DIR}/`)).toBe(true);
+			for (const path of [entry.hostPath, entry.vmPath]) {
+				expect(path.split("/").includes("..")).toBe(false);
+				expect(path.split("/").includes(".git")).toBe(false);
+			}
+		}
+	});
+});
+
+type FakeCall = { op: "readFile" | "writeFile" | "writeFiles" | "mkdir"; path?: string; paths?: string[]; recursive?: boolean };
+
+/** In-memory stand-in for rivet's VM filesystem (structural: no rivet import). */
+function fakeTarget(opts: { marker?: string; failPaths?: string[]; rejectWriteFiles?: boolean; rejectMkdir?: boolean } = {}) {
+	const files = new Map<string, Uint8Array | string>();
+	if (opts.marker !== undefined) files.set(LIBRARY_HEAD_MARKER, opts.marker);
+	const calls: FakeCall[] = [];
+	const target = {
+		readFile: async (path: string) => {
+			calls.push({ op: "readFile", path });
+			const value = files.get(path);
+			if (value === undefined) throw new Error("ENOENT");
+			return typeof value === "string" ? new TextEncoder().encode(value) : value;
+		},
+		writeFile: async (path: string, content: string | Uint8Array) => {
+			calls.push({ op: "writeFile", path });
+			files.set(path, content);
+		},
+		writeFiles: async (entries: { path: string; content: Uint8Array }[]) => {
+			calls.push({ op: "writeFiles", paths: entries.map((e) => e.path) });
+			if (opts.rejectWriteFiles) throw new Error("batch rejected");
+			return entries.map((entry) => {
+				if (opts.failPaths?.includes(entry.path)) return { path: entry.path, success: false, error: "EIO" };
+				files.set(entry.path, entry.content);
+				return { path: entry.path, success: true };
+			});
+		},
+		mkdir: async (path: string, options?: { recursive?: boolean }) => {
+			calls.push({ op: "mkdir", path, recursive: options?.recursive });
+			if (opts.rejectMkdir) throw new Error("mkdir rejected");
+		},
+	};
+	const marker = () => {
+		const value = files.get(LIBRARY_HEAD_MARKER);
+		return value === undefined ? undefined : typeof value === "string" ? value : new TextDecoder().decode(value);
+	};
+	return { target, calls, files, marker };
+}
+
+function entriesOf(n: number) {
+	return Array.from({ length: n }, (_, i) => {
+		const rel = `s${i % 3}/d${i % 2}/f${String(i).padStart(3, "0")}.md`;
+		return { hostPath: `/lib/${rel}`, vmPath: `${VM_LIBRARY_DIR}/${rel}` };
+	});
+}
+const readHost = (path: string) => new TextEncoder().encode(`bytes of ${path}`);
+
+describe("copyLibraryInto (D-08 copy route, checker I17)", () => {
+	test("a VM already holding the current head is skipped with no write", async () => {
+		const fake = fakeTarget({ marker: "abc123" });
+		expect(await copyLibraryInto(fake.target, entriesOf(5), "abc123", readHost)).toEqual({ copied: 0, skipped: true, failed: [] });
+		expect(fake.calls.filter((c) => c.op !== "readFile")).toEqual([]);
+		expect(LIBRARY_HEAD_MARKER).toBe("/home/agentos/agent-skills/.library-head");
+	});
+
+	test("stale marker: cleared first, parent dirs made once each (sorted) before any file write, batches ≤ 200, marker = head last", async () => {
+		const fake = fakeTarget({ marker: "old-head" });
+		const entries = entriesOf(450);
+		expect(await copyLibraryInto(fake.target, entries, "new-head", readHost)).toEqual({ copied: 450, skipped: false, failed: [] });
+		const writes = fake.calls.filter((c) => c.op !== "readFile");
+		expect(writes[0]).toEqual({ op: "writeFile", path: LIBRARY_HEAD_MARKER });
+		const mkdirs = writes.filter((c) => c.op === "mkdir");
+		const dirs = [...new Set([VM_LIBRARY_DIR, ...entries.map((e) => e.vmPath.slice(0, e.vmPath.lastIndexOf("/")))])].sort();
+		expect(mkdirs.map((c) => c.path)).toEqual(dirs);
+		expect(mkdirs.every((c) => c.recursive === true)).toBe(true);
+		const firstBatch = writes.findIndex((c) => c.op === "writeFiles");
+		expect(writes.slice(1, firstBatch).every((c) => c.op === "mkdir")).toBe(true);
+		expect(writes.slice(1, firstBatch)).toHaveLength(dirs.length);
+		const batches = writes.filter((c) => c.op === "writeFiles").map((c) => c.paths ?? []);
+		expect(batches.map((b) => b.length)).toEqual([200, 200, 50]);
+		expect(batches.flat()).toEqual(entries.map((e) => e.vmPath));
+		expect(writes.at(-1)).toEqual({ op: "writeFile", path: LIBRARY_HEAD_MARKER });
+		expect(fake.marker()).toBe("new-head");
+		expect(new TextDecoder().decode(fake.files.get(entries[7]?.vmPath ?? "") as Uint8Array)).toBe(`bytes of ${entries[7]?.hostPath}`);
+	});
+
+	test("first boot (no marker): copies everything and writes the marker", async () => {
+		const fake = fakeTarget();
+		expect(await copyLibraryInto(fake.target, entriesOf(3), "h1", readHost)).toEqual({ copied: 3, skipped: false, failed: [] });
+		expect(fake.marker()).toBe("h1");
+	});
+
+	test("one failed BatchWriteResult: marker stays empty, failed names the path, the next call copies again", async () => {
+		const entries = entriesOf(4);
+		const bad = entries[2]?.vmPath ?? "";
+		const fake = fakeTarget({ marker: "old-head", failPaths: [bad] });
+		const first = await copyLibraryInto(fake.target, entries, "new-head", readHost);
+		expect(first).toEqual({ copied: 3, skipped: false, failed: [bad] });
+		expect(fake.marker()).toBe("");
+		const again = await copyLibraryInto(fake.target, entries, "new-head", readHost);
+		expect(again.skipped).toBe(false);
+		expect(again.failed).toEqual([bad]);
+	});
+
+	test("a writeFiles or mkdir rejection propagates with the marker left empty", async () => {
+		const batch = fakeTarget({ marker: "old-head", rejectWriteFiles: true });
+		await expect(copyLibraryInto(batch.target, entriesOf(3), "new-head", readHost)).rejects.toThrow(/batch rejected/);
+		expect(batch.marker()).toBe("");
+		const mk = fakeTarget({ marker: "old-head", rejectMkdir: true });
+		await expect(copyLibraryInto(mk.target, entriesOf(3), "new-head", readHost)).rejects.toThrow(/mkdir rejected/);
+		expect(mk.marker()).toBe("");
+		expect(mk.calls.some((c) => c.op === "writeFiles")).toBe(false);
 	});
 });
