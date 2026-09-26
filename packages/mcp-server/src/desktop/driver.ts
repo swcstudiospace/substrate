@@ -36,7 +36,13 @@ import {
 export const SHOTS_DIR = "/var/lib/substrate/desktop";
 export const RETAIN_RUNS = 200;
 export const RETAIN_MS = 7 * 86_400_000;
-export const ACTION_TIMEOUT_MS = 10_000;
+/**
+ * One docker exec round trip. Measured on this VPS under ~75% CPU steal: 4-7 s for an xdotool
+ * call and 8-11 s for an xwd, so a 10 s budget cut real calls off.
+ */
+export const ACTION_TIMEOUT_MS = 30_000;
+/** A type action's budget grows with its text: xdotool types ≥12 ms per character (its --delay), ~160 ms under that steal. */
+export const TYPE_MS_PER_CHAR = 200;
 const ERROR_CHARS = 300;
 const TITLE_CHARS = 256;
 const RUN_ID = /^dr-\d{8}T\d{6}Z-[0-9a-f]{6}$/;
@@ -283,7 +289,8 @@ export function createDesktopDriver(deps: {
 				} else {
 					argv = shotArgv();
 				}
-				const outcome = await call(argv, Math.min(ACTION_TIMEOUT_MS, remaining));
+				const budget = action.type === "type" ? ACTION_TIMEOUT_MS + action.text.length * TYPE_MS_PER_CHAR : ACTION_TIMEOUT_MS;
+				const outcome = await call(argv, Math.min(budget, remaining));
 				if (outcome === TIMEOUT) entry.error = "timeout";
 				else if (outcome.code !== 0) entry.error = failure(outcome);
 				else if (action.type === "screenshot") {
@@ -307,7 +314,9 @@ export function createDesktopDriver(deps: {
 						const settle = action.settle_ms ?? DEFAULT_SETTLE_MS[action.type];
 						await sleep(Math.min(settle, Math.max(0, deadline - now())));
 					}
-					const title = await call(titleArgv(), Math.min(ACTION_TIMEOUT_MS, Math.max(1000, deadline - now())));
+					// The title belongs to the action that already ran, so it gets its full budget even
+					// past the deadline; the deadline only stops actions that have not started.
+					const title = await call(titleArgv(), ACTION_TIMEOUT_MS);
 					if (title !== TIMEOUT && title.code === 0) {
 						entry.active_window = title.stdout.toString("utf8").trim().slice(0, TITLE_CHARS);
 					}

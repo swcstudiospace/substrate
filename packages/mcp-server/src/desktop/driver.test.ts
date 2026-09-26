@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { inflateSync } from "node:zlib";
 import { geometryArgv, keyArgv, shotArgv, titleArgv, typeArgv, type DesktopRunInput } from "./actions.ts";
 import {
+	ACTION_TIMEOUT_MS,
 	type BufferRunner,
 	type BufferRunResult,
 	crc32,
@@ -13,6 +14,7 @@ import {
 	decodeXwd,
 	type DesktopActionEvent,
 	encodePng,
+	TYPE_MS_PER_CHAR,
 } from "./driver.ts";
 
 const dirs: string[] = [];
@@ -241,6 +243,32 @@ describe("createDesktopDriver", () => {
 			[1, false, "deadline"],
 		]);
 		expect(calls.some((argv) => argv.at(-1) === "b" || argv.at(-1) === "c")).toBe(false);
+	});
+
+	test("a type action's budget grows with its text; the title read keeps the full budget after the deadline", async () => {
+		let clock = FIXED;
+		const budgets: Array<[string, number]> = [];
+		const run: BufferRunner = async (argv, timeoutMs) => {
+			budgets.push([argv[6]!, timeoutMs]);
+			if (argv.includes("type")) clock = FIXED + 120_000; // typing ends exactly at the run deadline
+			return res(argv.includes("getdisplaygeometry") ? "1280 800\n" : "w\n");
+		};
+		const driver = createDesktopDriver({ run, shotsDir: tmpShots(), now: () => clock, sleep: noSleep, emit: async () => {} });
+
+		const result = await driver.run(
+			{ actions: [{ type: "type", text: "x".repeat(300) }, { type: "key", keys: "Return" }], timeout: 120 },
+			{ surface: "omp" },
+		);
+
+		expect(budgets).toEqual([
+			["getdisplaygeometry", ACTION_TIMEOUT_MS],
+			["type", ACTION_TIMEOUT_MS + 300 * TYPE_MS_PER_CHAR],
+			["getactivewindow", ACTION_TIMEOUT_MS],
+		]);
+		expect(result.log.map((l) => [l.ok, l.active_window, l.error])).toEqual([
+			[true, "w", undefined],
+			[false, null, "deadline"],
+		]);
 	});
 
 	test("a stopped or missing container fails the run as not running", async () => {
