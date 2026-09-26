@@ -1,6 +1,7 @@
 ---
 phase: 02-claims-and-dispatch
-verified: 2026-09-26T00:23:44Z
+verified: 2026-09-26T17:56:33Z
+re_verified_reason: "additive mcp-server edits by later phases changed covered files"
 status: passed
 score: 65/65 must-haves verified (60 verified, 5 passed by owner override)
 covered_files:
@@ -51,8 +52,8 @@ covered_files:
   - packages/mcp-server/src/notion.ts
   - packages/mcp-server/src/service.ts
   - packages/mcp-server/src/types.ts
-covered_digest: "v1:sha256:e90da44cbd3211078af877d49c467549345d98ceca53befafd3b2b16d29e6105"
-covered_files_note: "Same list as the 2026-09-25 report; the digest is recomputed at HEAD fb6ffa0 with `query verification.fingerprint`. Excluded: ROADMAP.md and 02-LINEAR-ARCHIVED.md (tracking logs that later phases append to — Phase 3 D-14 records its archives there); 02-RESEARCH/PATTERNS/VALIDATION/REVIEW and COVERAGE.md (not plan, summary or evidence inputs); Phase 3 files that Phase 2 code now imports (packages/dispatcher/src/substrate_dispatcher/host.py, packages/mcp-server/src/server.ts /issue route, redact.ts), which Phase 3's own verification covers. The four hermes-linear-connector files (sync_engine.py, webhook_app.py and their tests) live in another repository and cannot be fingerprinted root-relative; that repository's HEAD is still 6e532fe, so they are unchanged since the original verification."
+covered_digest: "v1:sha256:e06c81380da8bdd5a47ea3bece92910b47d1c5e15eb11fa53aa18a4929c2e37f"
+covered_files_note: "Same list as the 2026-09-25 report; the digest was recomputed at HEAD fb6ffa0 and again at HEAD c322e9c (stale-fingerprint re-verification) with `query verification.fingerprint`. Excluded: ROADMAP.md and 02-LINEAR-ARCHIVED.md (tracking logs that later phases append to — Phase 3 D-14 records its archives there); 02-RESEARCH/PATTERNS/VALIDATION/REVIEW and COVERAGE.md (not plan, summary or evidence inputs); Phase 3 files that Phase 2 code now imports (packages/dispatcher/src/substrate_dispatcher/host.py, packages/mcp-server/src/server.ts /issue route, redact.ts), which Phase 3's own verification covers. The four hermes-linear-connector files (sync_engine.py, webhook_app.py and their tests) live in another repository and cannot be fingerprinted root-relative; that repository's HEAD is still 6e532fe, so they are unchanged since the original verification."
 re_verification:
   date: "2026-09-26"
   reason: "verification.status reported stale: Phase 3 commits changed covered implementation files after the 2026-09-25 digest (55b4521)."
@@ -99,11 +100,62 @@ gaps: []
 # Phase 2: Claims and dispatch Verification Report
 
 **Phase Goal:** Labelling a Linear issue for an agent starts that agent on that node.
-**Verified:** 2026-09-26T00:23:44Z (re-verification; initial 2026-09-25T07:12:09Z)
+**Verified:** 2026-09-26T17:56:33Z (stale-fingerprint re-verification at c322e9c; previous 2026-09-26T00:23:44Z at fb6ffa0; initial 2026-09-25T07:12:09Z)
 **Status:** passed
 **Re-verification:** Yes — covered files changed after the original verification (the digest went stale), not a gap closure
 
 I checked the live systems myself (read-only) and ran the suites once. Labelling SWC-467 `dispatch:hermes` started a real Hermes session in the per-graph worktree. That session claimed n1 as hermes, and the claim reached the index, Linear, Notion and POST /brief. Completion went through the hermes-linear-connector DoD gate. Five owner-accepted deviations are carried as overrides. There are no other failures and no open human items.
+
+## Re-verification (2026-09-26 — stale fingerprint)
+
+`verification.status` reported `stale` because two Phase 4 (04-03) commits changed three covered `packages/mcp-server` files after the 2026-09-26T00:23:44Z digest. I re-checked the Phase 2 contracts those files carry against HEAD `c322e9c`. All 65 truths still hold. The five owner overrides and the owner-approved live proof are carried forward verbatim; no live Linear, Notion or dispatch run was made.
+
+**Base commit:** `fb6ffa0`, the last commit before 2026-09-26T00:23:44Z and the HEAD the previous re-verification used. Per-file bases (`git log -1 --before=2026-09-26T00:23:44Z -- <file>`): `mcp.ts` 71f06ef, `service.ts` 7926c0b, `types.ts` 3036c23. `git log fb6ffa0..HEAD` over the covered files and the phase directory lists three commits: 73415c0 and 464b151 below, and ab12975 (docs), which touches only `02-VERIFICATION.md`, not a covered file. `git log --since=2026-09-26T00:23:44Z -- packages/dispatcher infra/vps/substrate-dispatcher.service` is empty: the dispatcher package and unit are untouched. `git status --porcelain` shows no uncommitted change in any covered path.
+
+| Covered file | Commit | Diff vs base | Change |
+| --- | --- | --- | --- |
+| `packages/mcp-server/src/mcp.ts` | 73415c0 feat(04-03): skills_propose MCP tool and POST /skills/propose behind the host caller check (2026-09-26T07:19:47Z) | +50 / −1 | Imports `ProposeFailed`/`ProposeRefused`; new `refusal()` helper (`:25-27`); `createMcpServer` gains an optional third parameter `opts: { proposeAllowed?: boolean } = {}` (`:53-57`, the only removed line is the old one-line signature); new `skills_propose` tool (`:140-173`) |
+| `packages/mcp-server/src/service.ts` | 73415c0 (same) | +36 / −1 | Imports from `./skills/propose.ts`; new `readonly skills: SkillProposer` field and optional `stores.skills` test seam (the only removed line is the old one-line `stores` type); new `proposeSkill()` (`:161-173`) emitting a `skill.propose` event |
+| `packages/mcp-server/src/types.ts` | 464b151 feat(04-03): skills propose core and CLI tracer (2026-09-26T07:14:53Z) | +2 / −0 | `SURFACES` gains `"docs-scraper"` (`:16`); `EVENT_KINDS` gains `"skill.propose"` (`:39`) |
+
+No other covered file changed; the fingerprint below is the same 47-file list.
+
+### Contract verdicts at c322e9c
+
+| Phase 2 contract (truths) | Verdict | Evidence |
+| --- | --- | --- |
+| graph_claim / graph_release / graph_complete / graph_find registrations and input schemas (1–3, 14, 33–36) | Still holds | The mcp.ts diff has no hunk inside any of the four registrations. `graph_find` `mcp.ts:201-215` (`linear_issue_id?`, `linear_identifier?`, read-only); `graph_claim` `:258-273` (`graph_id`, `node_id`, `session_id`, `surface?`); `graph_release` `:275-293`; `graph_complete` `:295-320` (same fields plus `dod {summary, tests_pass, review_pass?}?`). One additive widening: the shared `surfaceSchema = z.enum(SURFACES)` now also accepts `docs-scraper` (`types.ts:16`, 464b151); field names, optionality and handler bodies are unchanged |
+| Ownership refusal: `ownerSurface` / `OWNER_SURFACE_HINT` (36) | Still holds | `ownerSurface` `mcp.ts:35-44` and `OWNER_SURFACE_HINT` `:46` are outside every diff hunk. `graph_release` `:289-290` and `graph_complete` `:316-317` still return `json({released\|completed: false, reason})` on refusal; the new `refusal()` helper is used only by `skills_propose` (`:159,162,167,169`), which calls `ownerSurface` without changing it |
+| Linear + Notion mirror on claim/release/complete (1, 3, 10–13, 33, 37–41) | Still holds | service.ts hunks sit at the import block, the constructor and the new `proposeSkill` (before `writeMemory`); none is inside `claimNode`/`releaseNode`/`completeNode`/`askGate`, which only shifted +36 lines. `claimNode` `service.ts:280`, `this.mirror.claim` `:308` inside `if (result.claimed)` `:283`; `releaseNode` `:345`, `this.mirror.release` `:374`; `completeNode` `:404`, `this.mirror.review` `:432`, `this.mirror.done` `:464`. `mirror.ts`, `linear.ts`, `notion.ts` unchanged |
+| Completion only through the DoD gate (3, 21, 34, 35) | Still holds | `completeNode` reaches Done only via `this.askGate(ctx, ref, dod)` `service.ts:436` → `this.dodGate.completeIssue` `:480`; a node without a Linear ref still returns `completed:false` (`:437`). `dod-gate.ts` unchanged; it posts to `${baseUrl}/v1/complete-issue` (`dod-gate.ts:54`) |
+| release / complete event kinds (32) | Still holds | `EVENT_KINDS` still has `"release"` `types.ts:37` and `"complete"` `:38` (was 36-37); `kind: "release"` `service.ts:371`, `kind: "complete"` `:468`. `skill.propose` is appended after them, so no existing kind moved or was removed |
+| MCP server construction (key link "mcp.ts graph_find → index-store") | Still holds | `opts` defaults to `{}`, so a two-argument call behaves as before; the only production caller passes it (`server.ts:239`, not covered). `index-store.ts` unchanged |
+| Dispatcher, D-11 surfaces (4, 26–31, 43–49, 58–65) | Still holds (no change) | No commit since the previous verification. `DISPATCHABLE_SURFACES = frozenset({"hermes", "claude-code"})` (`dispatch.py:24`), so the new `docs-scraper` surface is not dispatchable and gets the once-only comment like any other non-launchable surface |
+
+Line-number map for citations elsewhere in this report (earlier re-verification → c322e9c, same code): `service.ts:273` mirror.claim → `:308`; `:339` mirror.release → `:374`; `:397` mirror.review → `:432`; `:445` gate call → `:436` (askGate) / `:480` (dodGate.completeIssue); `:429` mirror.done → `:464`; `types.ts:36-37` → `:37-38`.
+
+### Gates (measured once at HEAD c322e9c by the orchestrator)
+
+| Gate | Result |
+| --- | --- |
+| `SUBSTRATE_DISABLED=1 bun test` (repo root) | 503 pass / 0 fail / 27 files |
+| `cd packages/dispatcher && python3 -m pytest -q` | 149 passed |
+| normalized `tsc --noEmit` | `tsc-exit=0`, zero `error TS` lines |
+
+### Live read-only checks (2026-09-26 17:55Z)
+
+| What | Command | Observed |
+| --- | --- | --- |
+| Services | `systemctl is-active substrate-mcp substrate-dispatcher` | `active` ×2 |
+| MCP health | `curl -s -m 3 127.0.0.1:7410/healthz` | `{"index":true,"greptime":true}` |
+| Switch key | `sudo cut -d= -f1 /etc/substrate/substrate.env \| grep -c '^SUBSTRATE_DISPATCH_DISABLED$'` | 7 occurrences (the known appended-duplicates oddity, unchanged since 2026-09-25; not fixed). Last line `SUBSTRATE_DISPATCH_DISABLED=1`, so override 5 still describes the live state |
+| Dispatcher | `journalctl -u substrate-dispatcher -n 2` | `dispatch disabled (SUBSTRATE_DISPATCH_DISABLED=1)` at 17:54:34Z and 17:55:04Z (30 s ticks) |
+
+### Fingerprint
+
+`node /root/.agents/gsd-core/bin/gsd-tools.cjs query verification.fingerprint .planning/phases/02-claims-and-dispatch <same 47 files>` → `covered_digest` `v1:sha256:e06c81380da8bdd5a47ea3bece92910b47d1c5e15eb11fa53aa18a4929c2e37f` (previous `v1:sha256:e90da44cbd3211078af877d49c467549345d98ceca53befafd3b2b16d29e6105`). The emitted sorted `covered_files` is identical to the frontmatter list; every file exists.
+
+**Verdict:** no regressions, no new gaps. The three changes are additive (a new tool, a new service method, one new surface and one new event kind).
 
 ## Re-verification 2026-09-26
 
@@ -332,9 +384,9 @@ There are no gaps. Five truths pass by owner override, all recorded in 02-PROOF.
 
 Of the two root causes behind overrides 1 and 2, Phase 3 (03-02, dda3758) fixed the prompt's missing Linear tool with `issue_get`. The Hermes `pre_llm_call` hook timeout is still open; 03-CONTEXT lists it under deferred ideas.
 
-Re-verification 2026-09-26: no regressions and no new gaps. Truth 61 is superseded as planned by Phase 3 D-06; see "Re-verification 2026-09-26" above.
+Re-verification 2026-09-26: no regressions and no new gaps. Truth 61 is superseded as planned by Phase 3 D-06; see "Re-verification 2026-09-26" above. Stale-fingerprint re-verification at c322e9c (04-03 commits 464b151, 73415c0): no regressions and no new gaps; see "Re-verification (2026-09-26 — stale fingerprint)".
 
 ---
 
-_Verified: 2026-09-25T07:12:09Z; re-verified 2026-09-26T00:23:44Z at fb6ffa0_
+_Verified: 2026-09-25T07:12:09Z; re-verified 2026-09-26T00:23:44Z at fb6ffa0; re-verified 2026-09-26T17:56:33Z at c322e9c (stale fingerprint)_
 _Verifier: Claude (gsd-verifier)_

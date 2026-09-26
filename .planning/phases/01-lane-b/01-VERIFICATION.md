@@ -1,6 +1,7 @@
 ---
 phase: 01-lane-b
-verified: 2026-09-24T18:33:06Z
+verified: 2026-09-26T17:54:32Z
+re_verified_reason: "additive mcp-server edits by later phases changed covered files"
 status: passed
 score: 10/10 must-haves verified (2 accepted by owner human validation 2026-09-24)
 human_validation: "Owner selected 'All good — continue' on 2026-09-24. Accepted: Hermes claim of n2 by session 20260924_182534_fe7fa2 counts as the finish; live Omp, Grok Bot, Grok Build and Muse model sessions not run."
@@ -37,7 +38,7 @@ covered_files:
   - packages/mcp-server/src/brief.ts
   - packages/mcp-server/src/types.ts
   - packages/projector/src/muse.ts
-covered_digest: "v1:sha256:a230a6e55c10ba0e1efb1596082e7f1ca3a590538b22aecca99d100d1bfd6b29"
+covered_digest: "v1:sha256:800804f2768982772606fe830230e5eb832ac59e435d0bf5ee577c197adf8676"
 digest_refreshed: "2026-09-25 regression check after Phase 2 changed two covered files: types.ts (02-05 added release/complete EVENT_KINDS, additive) and ROADMAP.md (Phase 1 ticked complete, Phase 2 plan list). bun test collectors+mcp-server 115 pass/0 fail; substrate-mcp and grok/herdr/muse collectors and grok-hermes-connector active; omp brief still shows n2 started by hermes. No Phase 1 truth changed. Later the same day ROADMAP.md was dropped from covered_files: it is a milestone tracking file every phase transition edits, not Phase 1 evidence, and re-staled this report on each update. No other covered file changed since 141d681."
 re_verification:
   previous_status: gaps_found
@@ -217,6 +218,57 @@ No code or live-data gaps remain. The previous four gaps are closed:
 4. **Five-surface read (code and data)** — the brief the surfaces read now contains the cross-surface facts; model-read evidence moved to human verification.
 
 Not gaps: the TypeScript-engine bridge and Kanban retirement (D-01), and the two pre-existing mcp baseline failures.
+
+## Re-verification (2026-09-26 — stale fingerprint)
+
+**Base commit:** `df13c83ac81b0ff412cb82dd5da8c14ade2c2f74` (`git log -1 --before=2026-09-24T18:33:06Z -- packages/mcp-server/src/types.ts`, feat(01-06)). Re-checked at 2026-09-26T17:54:32Z against HEAD of `main`.
+
+**Changed covered files:** only `packages/mcp-server/src/types.ts`. No other covered file has a commit after `2f6db29` (the 2026-09-25 coverage refresh) and none has uncommitted changes.
+
+| Commit | Date (UTC) | Change to `types.ts` |
+| --- | --- | --- |
+| `3036c23` feat(02-05): release/complete event kinds and ownership-checked graph_release | 2026-09-25 01:59:56 | +`"release"`, +`"complete"` in `EVENT_KINDS` (already noted by the 2026-09-25 `digest_refreshed` entry) |
+| `464b151` feat(04-03): skills propose core and CLI tracer (D-09) | 2026-09-26 07:14:53 | +`"docs-scraper"` in `SURFACES`, +`"skill.propose"` in `EVENT_KINDS` (this refresh) |
+
+`git diff df13c83..HEAD -- packages/mcp-server/src/types.ts`: 1 file, 4 insertions, 0 deletions. Nothing was removed or renamed.
+
+**Phase 1 dependencies on `types.ts` at HEAD:**
+
+| Dependency | Where Phase 1 uses it | HEAD location | Verdict |
+| --- | --- | --- | --- |
+| Surfaces `hermes`, `omp`, `muse`, `grok-build`, `grok-bot` (truths 1, 2, 5, 6, 7) | hook/brief callers, `muse.ts:58`, `projector/src/muse.ts:107` | `types.ts:6-10` | still holds |
+| Surface `herdr` (truth 4, added by 01-04) | `herdr-map.ts:58` | `types.ts:15` | still holds |
+| Kinds `handoff`, `claim` (truths 6, 7, 8; key links) | connector handoff emit, Hermes `graph_claim` | `types.ts:29`, `types.ts:23` | still holds |
+| Kinds `prompt`, `tool.call`, `session.start`, `session.end` (truths 1, 2, 5) | Hermes/Omp emits; Muse PostToolUse hook `projector/src/muse.ts:108` | `types.ts:22`, `:24`, `:21`, `:30` | still holds |
+| herdr kinds `agent.detected`, `agent.status`, `agent.exited`, fallback `note` (truth 4, added by 01-04) | `herdr-map.ts:66,75,84,94,103` | `types.ts:33-35`, `:31` | still holds |
+| Kind `brief.delivered` (truth 9, added by 01-06) | `collectors/src/muse.ts:152-153` | `types.ts:36` | still holds |
+| `Surface`/`EventKind` derived types | `EventInput` in `types.ts:46-48` | `types.ts:18`, `:41` | still holds (unions only widened) |
+
+Truths 1-10, Required Artifacts and Key Links are unaffected: the edits only widen closed unions; no Phase 1 member moved. Truths 1 and 7 remain HUMAN NEEDED as accepted by the owner on 2026-09-24 (`human_validation`, unchanged).
+
+**Gates (measured by the orchestrator at HEAD, not re-run here):**
+
+- `SUBSTRATE_DISABLED=1 bun test` → 503 pass / 0 fail / 27 files
+- `cd packages/dispatcher && python3 -m pytest -q` → 149 passed
+- normalized tsc → `tsc-exit=0`, zero `error TS` lines
+
+**Live re-checks (truth 10, seven units from 01-09-PLAN.md:117):**
+
+```
+substrate-mcp active
+substrate-collector-grok active
+substrate-collector-herdr active
+substrate-collector-muse active
+grok-hermes-connector active
+hermes-linear-api active
+hermes-linear-poller active
+$ curl -s -m 3 127.0.0.1:7410/healthz
+{"index":true,"greptime":true} HTTP 200
+```
+
+Truth 10: still holds.
+
+**Fingerprint:** recomputed over the same 30 covered files (membership unchanged) → `v1:sha256:800804f2768982772606fe830230e5eb832ac59e435d0bf5ee577c197adf8676`.
 
 ---
 
