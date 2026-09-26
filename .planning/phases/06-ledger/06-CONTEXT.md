@@ -70,6 +70,12 @@ Not in this phase:
 
   The original rows are captured before any overwrite. — **Reversibility:** reversible (the restore is part of the proof).
 
+### Resolved research open questions (orchestrator, 2026-09-26)
+- **D-13 (OQ1):** Keep `OnCalendar=hourly` literally, with a 5-minute lag inside the job. An hour is therefore anchored at the second tick after it ends and stays pending for up to about 2 h. The proof waits for the timer. A manual `systemctl start` of the same unit is allowed only as a recorded fallback (`anchored_by=manual` plus a Gap). — **Reversibility:** reversible (change the calendar or the lag).
+- **D-14 (OQ2):** An hour with no anchors row is `pending` until 3 h after it closes. After that it is unanchored, which counts as a failure. This is the threshold behind D-11's "recent unanchored hours report pending". — **Reversibility:** reversible (PENDING_MS).
+- **D-15 (OQ3):** Before anchoring an hour that has no row, the job lists the key's recent memos. If a signer-checked v1 memo for that period exists, the job adopts it instead of re-anchoring. A memo whose root differs is recorded as found, logged as ALARM, and the job exits 1. This extends D-07's idempotency. — **Reversibility:** reversible (remove the adopt step).
+- **D-16 (OQ4):** Verify fails closed. If devnet cannot be read, the transaction is not found, or `SOLANA_ANCHOR_PUBKEY` is unset, the hour is `unverified`: `ok:false`, the CLI exits 1, and it prints the distinct line `[substrate] verify could not check devnet for <period>: <reason>`. — **Reversibility:** reversible (downgrade `unverified` to a warning).
+
 ### Standing rules carried forward
 - Two-sided test gates against a measured phase baseline (`06-BASELINE.md`). A failure that vanishes fails the gate just like a new one.
 - Before editing any live file outside this repo (`/etc/substrate/substrate.env`, `/etc/systemd/system/*`, the new key file, the Greptime schema), take a snapshot under `/var/lib/substrate/phase6-baseline/` and add a `RESTORE.md` route. Read `/var/lib/substrate/phase1-baseline/RESTORE.md` before touching any Phase 1 snapshotted file.

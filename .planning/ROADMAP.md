@@ -274,10 +274,51 @@ Plans:
 **Depends on**: Phase 1
 **Success Criteria**:
 
-  1. Every collector computes `hash` over the canonical event JSON and carries `prev`.
+  1. **Re-scoped by D-01 (06-CONTEXT.md, owner-approved 2026-09-26).** Every event is hashed on
+     ingest over the canonical event JSON and carries `prev`. The original wording — "Every collector
+     computes `hash` over the canonical event JSON and carries `prev`" — is kept for the record.
   2. An hourly systemd timer Merkle-roots the hour's events into a Solana **devnet** memo and
      records root, signature and event count in an `anchors` table.
   3. `substrate verify <graph_id>` recomputes the chain and checks roots against signatures.
 
 **Proof**: Alter one event row — `verify` flags the graph.
-**Plans**: TBD
+**Plans**: 0/9 plans executed (plan-check passed: `phases/06-ledger/06-CHECK.md`)
+
+Plans:
+**Wave 0**
+
+- [ ] 06-01-PLAN.md — Phase-order gate (Phases 4 and 5 landed: VERIFICATION status re-read, symbols present); baselines (bun, tsc, dispatcher, live Greptime/Solana, baseline-ok graphs) in 06-BASELINE.md; phase6-baseline rollback area with RESTORE.md and verbatim DDL; pre-cutover row fixture; Greptime scratch-table spike
+
+**Wave 1** *(blocked on Wave 0 completion)*
+
+- [ ] 06-02-PLAN.md — Ledger core: RFC 6962 Merkle (8 reference roots), memo v1 and all memo program IDs, half-open ingest hours, Solana CLI argv/runner, devnet JSON-RPC reader
+- [ ] 06-03-PLAN.md — Dedicated devnet key and guarded substrate.env lines (D-04), airdrop (owner asked only through a funded-key precondition when refused, D-05), send-once 0-lamport devnet memo spike (D-06)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 06-04-PLAN.md — Global ingest chain code: ingested_at in the hash (absent on old rows, fixture-pinned), guarded Greptime migrate, IngestChain with one multi-row INSERT per turn and the client-ts guard, verify pre/post split; lastHash/insertEvent removed everywhere
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 06-05-PLAN.md — Cutover: guarded DDL under the old code (early-cutover branch), substrate-mcp restart, cutover event recorded (D-03), live chain/latency/collision smoke, historical graphs still verify
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 06-06-PLAN.md — Tracer: hour digest over recomputed leaves, anchors store, `ledger anchor` (5 min lag, watermark, adopt-not-re-anchor) anchors the cutover and smoke hours on devnet, proves the CLI output shape on a real send, reads them back; re-run is a no-op
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [ ] 06-08-PLAN.md — substrate-ledger-anchor.{service,timer} (OnCalendar=hourly, Persistent=true), guarded install, first timer tick and dead-RPC failure path
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
+- [ ] 06-07-PLAN.md — `substrate verify` checks every hour's signer-checked devnet memo (pending ≤ 3 h, fail closed as unverified), CLI verify timeout and per-hour lines; live anchored/pending/unverified
+
+**Wave 7** *(blocked on Wave 6 completion)*
+
+- [ ] 06-09-PLAN.md — Proof (D-12): throwaway graph anchored by the timer; tamper (a) stale hash and (b) recomputed hash both flagged by verify; originals restored byte-equal and re-verified
+
+**Cross-cutting constraints:**
+
+- Root suite and tsc are two-sided green against 06-BASELINE.md; every live edit outside the repo is snapshotted under /var/lib/substrate/phase6-baseline/ with a RESTORE.d route first
+- Commit messages carry `Refs SPE-3576`; stage by explicit path only; runs after Phases 4 and 5 (gated in 06-01), so the shared mcp-server and cli files are edited additively
