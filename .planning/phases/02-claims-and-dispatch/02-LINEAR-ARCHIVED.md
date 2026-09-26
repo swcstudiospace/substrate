@@ -289,3 +289,164 @@ GitHub mirror issues (agent_runtime / ai-agency) were not touched. Undo any row 
 | SWC-477 | 3e4c4d10-ea44-451c-a359-8c83bd2cc1cd | untitled eng-board session ingest | Untitled eng work |
 | SWC-478 | 2aefe23e-1bad-4594-8294-b939c74e20ae | untitled eng-board session ingest | Untitled eng work |
 | SWC-479 | bb611ef9-e83f-4024-a98e-b394f9cba6c5 | untitled eng-board session ingest | Untitled eng work |
+
+## 2026-09-26: AI Dropshipping Agency run output archived (owner: "Keep setup + GO, archive the rest")
+
+Archived 152 pipeline issues: Scout, Product Rank, TEST, NO-GO, Locate, Post-locate, E2E and Spend HITL drafts from 11–17 Aug. The active count went from 179 to 27.
+Kept: SWC-60, SWC-61, SWC-62, SWC-64, SWC-65, SWC-74, SWC-75, SWC-107, SWC-116, SWC-117, SWC-124, SWC-136, SWC-162, SWC-165, SWC-174, SWC-176, SWC-178, SWC-194, SWC-209, SWC-222, SWC-254, SWC-256, SWC-258, SWC-272, SWC-293, SWC-294, SWC-480. These are the setup issues SWC-60/61/62, the Parallel 402 ops issue SWC-209, every [GO] and [GO/FB] pick, and the 03-10 proof issue SWC-480.
+Undo with `issueUnarchive`.
+
+| identifier | id | title |
+|---|---|---|
+| SWC-63 | 726fa774-79c9-4e22-8e65-d4eee73868ba | [Product Rank] desk mobility and posture tools for remote workers |
+| SWC-66 | 7c402c5b-def3-4c32-83ba-d1d704f5bb5f | [TEST] Desk Reset Mobility Kit |
+| SWC-67 | ea5e1768-9a49-4f02-9103-28e6d95dbe52 | [E2E] Product pipeline — KOUPA Height Adjustable Flip Standing Desk with Wheels, |
+| SWC-68 | 4f1e6170-6160-4ae2-a4e6-d27adbbe165c | [NO-GO] KOUPA Height Adjustable Flip Standing Desk with Wheels, 24-Inch, 360° Fl |
+| SWC-71 | 87b4b336-f26c-43b1-b231-6f4f9075113c | [Spend HITL] HITL spend $75.00 meta: E2E draft only — KOUPA Height Adjustable Fl |
+| SWC-72 | f2d4cf10-1ccf-4aa7-ace2-cbc2d94e1af4 | [E2E] Product pipeline — Fold-Flat Adjustable Aluminum Laptop Stand |
+| SWC-77 | 7748c762-1290-4dc0-a96a-edb60549a5f7 | [Spend HITL] HITL spend $75.00 meta: E2E draft only — Fold-Flat Adjustable Alumi |
+| SWC-78 | 32293694-4e25-4126-9a32-7fa81e2c3b73 | [Locate] Fold-Flat Adjustable Aluminum Laptop Stand |
+| SWC-80 | 48f14a3f-807a-4e9b-a6fa-04b5fde91cef | [Post-locate] Outreach + shipping — 20260812T003502Z |
+| SWC-82 | e44ad63c-bb21-4c29-aa2d-8c0ffc91eb22 | [Locate] Magnetic Fridge Side Shelf — 2 shelves plus movable hooks |
+| SWC-84 | d00863cb-a803-45d4-aa87-c4fd92765b80 | [Locate] Under-Shelf Basket Pair — clip-on cabinet shelf expansion |
+| SWC-86 | 8d91ec60-8a24-46cd-ae1a-1343fb65586a | [Post-locate] Outreach + shipping — 20260812T042017Z |
+| SWC-87 | 7ab28873-7244-4533-97ff-dc6e812abdba | [Scout] Pet travel accessories — product-ranking gate |
+| SWC-89 | bc9aa085-5907-47cb-8985-dd5541526efd | [Product Rank] pet travel accessories |
+| SWC-90 | fccfb25d-9e19-4ff6-9573-8a0bee7c4c24 | [TEST] 23-cup waterproof pet food travel bag + two collapsible bowls |
+| SWC-93 | 7b0551af-9abe-4594-be0e-5ad9bd321e71 | [TEST] Fold-flat waterproof ripstop travel mat for hotels, RVs, and campsites |
+| SWC-94 | 39d29f87-8234-4e55-a896-544dab52c192 | [TEST] Waterproof 600D dog backseat hammock + bench/cargo liner |
+| SWC-96 | b4bb4acb-6037-41ce-b648-94e3e7350ca4 | [Locate] 23-cup waterproof pet food travel bag + two collapsible bowls |
+| SWC-98 | 3c101757-322a-421f-ae54-3bd208d03266 | [Locate] Fold-flat waterproof ripstop travel mat for hotels, RVs, and campsites |
+| SWC-99 | a3520cb1-59d0-4617-937a-08de1272c52e | [Post-locate] Outreach + shipping — 20260812T081951Z |
+| SWC-101 | 5b6e209c-5856-4b99-a1d4-6433390411ca | [Scout] Home gym micro-equipment ranking gate |
+| SWC-102 | 6c0815de-3d3d-43e9-987d-87cab5a646c3 | [Scout] Home gym micro-equipment ranking gate |
+| SWC-103 | d7a4ecd6-8dca-4bbb-bb80-142a4a13ed0f | [Product Rank] home gym micro-equipment |
+| SWC-104 | 9f6087b4-b6cd-44b7-ab56-5c33f2e236db | [TEST] Pilates Ring + Dual-Surface Slider Core Kit |
+| SWC-105 | de8e6b82-aba5-4d7f-ae2e-735f391a0a0b | [TEST] Weighted Speed-Jump-Rope Conditioning Bundle |
+| SWC-108 | 8aff443e-17c7-4659-91da-ddaf057cf00f | [Locate] Pilates Ring + Dual-Surface Slider Core Kit |
+| SWC-109 | d39dc363-d1f5-4da1-a340-78d3ac21e5ab | [Locate] Weighted Speed-Jump-Rope Conditioning Bundle |
+| SWC-111 | 4070766d-e56b-42eb-88f3-f25f2f76736a | [Post-locate] Outreach + shipping — 20260812T124257Z |
+| SWC-115 | 24c7a187-a1ea-4d6e-8b5c-3673e81ba464 | [Product Rank] travel tech organizers |
+| SWC-119 | fdfbe716-88d8-4025-a822-29d321672856 | [TEST] Creator Media Vault: Passive SD/microSD + Dongle Case |
+| SWC-120 | b598f386-fec1-4e22-842c-68a324653e6f | [Locate] AirTag-Compatible Passport + SIM Travel Wallet |
+| SWC-121 | 73e5039c-2fbd-4f61-9337-9047eb457a54 | [Locate] Creator Mini Tech Sling / Pocket Organizer |
+| SWC-122 | 85a056ec-c118-4c57-a1e3-c743be5a9989 | [Post-locate] Outreach + shipping — 20260812T163443Z |
+| SWC-123 | 4790125d-ba06-467b-8a7b-7045d3e06f24 | [Product Rank] sustainable bathroom gadgets |
+| SWC-125 | 597cf47e-eba6-4fd2-a9e3-494da967a32f | [TEST] Non-electric bidet attachment + fit-guarantee install kit |
+| SWC-127 | 80282224-f244-467f-9412-008a2f91d10a | [Locate] Filtered showerhead + first replacement cartridge |
+| SWC-128 | f057237d-d92b-46d8-b692-c066779fe4b0 | [Locate] Non-electric bidet attachment + fit-guarantee install kit |
+| SWC-130 | 61a7bc1d-c658-4bd2-beb2-a8869dccc868 | [Post-locate] Outreach + shipping — 20260812T202416Z |
+| SWC-131 | 6aa49b13-4deb-4984-bdd1-f00b2b8acbbc | [Scout] Desk mobility product-ranking gate |
+| SWC-133 | ef34a80b-2bea-4e98-a02c-c5fa463e0501 | [Product Rank] desk mobility and posture tools for remote workers |
+| SWC-134 | 63ad8c1b-9d26-4240-bb91-7a3985c7fd4e | [TEST] Folding adjustable aluminum laptop stand (with cable slot) |
+| SWC-135 | 885da2dd-5066-4618-b6b4-bc1608cf069a | [TEST] Remote-worker microbreak mobility kit: stretch strap plus mini resistance |
+| SWC-137 | c581a2f1-5324-46f5-ac15-bc84fe0471ae | [Locate] Folding adjustable aluminum laptop stand (with cable slot) |
+| SWC-139 | dd0ebca8-b896-40fe-b7a3-e555f65815ef | [Locate] Remote-worker microbreak mobility kit: stretch strap plus mini resistan |
+| SWC-141 | 420113f5-c742-47b9-8a41-e29f17dd9dc1 | [Post-locate] Outreach + shipping — 20260813T002027Z |
+| SWC-143 | a952b29f-315b-455f-b795-34baf2f487dc | [Scout] Kitchen organizers under $40 — product-ranking gate |
+| SWC-145 | cc3f73fb-674c-42de-8a62-329aa6330b40 | [Locate] Under-Shelf Hanging Basket Pair for Pantry and Cabinets |
+| SWC-147 | f737aca3-924f-4d82-a4b9-98b48413afd8 | [Locate] 3-in-1 Foil, Plastic-Wrap & Baggy Dispenser Drawer |
+| SWC-148 | a5af4777-d3a3-45b4-aeed-c7faecec2875 | [Post-locate] Outreach + shipping — 20260813T041919Z |
+| SWC-150 | 0fc34f64-a487-4c58-9b05-5eea42a53bc6 | [Scout] Pet travel accessories — product-ranking gate |
+| SWC-152 | 65a38e09-c08e-44c4-bd57-f09f8567e4ad | [Scout] Pet travel ranking gate — final top 5 |
+| SWC-154 | 7b76240a-56a3-4225-83c5-9843b3f88158 | [Product Rank] pet travel accessories |
+| SWC-156 | 7b203e31-7d63-485c-ac75-4811155a1e73 | [TEST] Universal Waterproof Back-Seat Pet Hammock with Door Shields |
+| SWC-157 | c5396942-86de-4bca-8a21-be2345697423 | [Locate] Universal Waterproof Back-Seat Pet Hammock with Door Shields |
+| SWC-158 | 6287b58a-1cd8-4fb7-b0f8-224df1d79958 | [Post-locate] Outreach + shipping — 20260813T081216Z |
+| SWC-159 | 4a6fe366-b50f-4129-86eb-f9bf69af169b | [Scout] Home gym micro-equipment ranking gate |
+| SWC-161 | ce5a524b-df92-4d85-b1d7-6ac57c9e3615 | [Product Rank] home gym micro-equipment |
+| SWC-164 | 003e6a8f-b187-4e5b-ad92-b2222803e09d | [TEST] Pilates Ring + Mini-Ball Starter Kit |
+| SWC-167 | 87d06d6b-523b-414d-b4b4-26c1713b8cc3 | [Locate] Portable Cable Resistance Travel Gym Kit |
+| SWC-169 | 9b9542b1-7a87-46e6-9984-b73c5328a8ed | [Locate] Pilates Ring + Mini-Ball Starter Kit |
+| SWC-170 | 09cdc720-3342-4162-87f3-1d71a74c41cc | [Post-locate] Outreach + shipping — 20260813T121736Z |
+| SWC-171 | de0b6654-90bb-4776-8722-76729515984b | [Scout] Travel tech organizers — product-ranking gate |
+| SWC-172 | 11a60e51-63dc-42c6-ab02-0d153eb40dbb | [Product Rank] travel tech organizers |
+| SWC-179 | 3e61e33f-20f3-4bd2-baff-88e741ee51f1 | [Locate] Modular Padded Tech Organizer with Removable Dividers |
+| SWC-180 | bee2081a-36bd-4dad-95aa-72f325fe500f | [Locate] Creator SD-Card and Adapter Media Vault |
+| SWC-181 | 013306a3-c014-4bc7-8e96-0df2f439e373 | [Post-locate] Outreach + shipping — 20260813T161706Z |
+| SWC-183 | c1be7413-f3a9-4b53-b8d9-e85b18d25b4a | [Scout] Product-ranking gate: sustainable bathroom gadgets |
+| SWC-185 | 4bbfbd6c-fe6d-4077-96e7-0db43463e5e2 | [Product Rank] sustainable bathroom gadgets |
+| SWC-187 | 2bcb9ed7-862d-4eac-8476-d92872c3c262 | [TEST] Non-electric dual-nozzle bidet attachment and installation kit |
+| SWC-189 | 5d85b477-2435-4673-b5f9-57dbf3b1bed0 | [Locate] Non-electric dual-nozzle bidet attachment and installation kit |
+| SWC-190 | a5194215-0a80-435d-a27c-1e97b30d3ec4 | [Post-locate] Outreach + shipping — 20260813T201856Z |
+| SWC-191 | 21f267a7-b980-4801-a462-377a7feefee7 | [Scout] Product-ranking gate: desk mobility / posture tools |
+| SWC-193 | ff44155b-7b54-4d35-91a1-b5b6eb7d8f2d | [Product Rank] desk mobility and posture tools for remote workers |
+| SWC-195 | deef91c2-2d5d-4665-81fe-5d7f9645edb4 | [TEST] Foldable adjustable aluminum laptop stand + carry sleeve |
+| SWC-196 | bf3abfa7-ffc6-4708-9d42-cb8446bf3b4c | [TEST] Desk-reset trigger-point foam roller / compact recovery roller |
+| SWC-198 | e9f89f6f-736b-4a49-b15b-fb5fcae0dcac | [Locate] Adjustable double-height desk foot hammock |
+| SWC-199 | d24bdc6a-0479-4d30-beec-b846e6967a42 | [Locate] Foldable adjustable aluminum laptop stand + carry sleeve |
+| SWC-201 | f5a7779a-3762-4e6c-af3a-acf218637ec2 | [Post-locate] Outreach + shipping — 20260814T002237Z |
+| SWC-202 | 556956eb-f89e-4aea-b9d4-cb659e00e34d | [Locate] Roll-Up Over-Sink Dish-Drying Rack |
+| SWC-204 | a395ad47-68ce-41eb-9cf6-45e024906fe8 | [Locate] Four-Compartment Food-Bag Drawer Dispenser |
+| SWC-206 | 46ef8f5a-07e0-45d0-9ec9-7207e371678e | [Post-locate] Outreach + shipping — 20260814T040702Z |
+| SWC-207 | cc6ca9ce-c795-468b-9e04-2685bc2653b1 | [Post-locate] Outreach + shipping — 20260814T080232Z |
+| SWC-213 | 5b021b2f-cd33-40e3-81ea-31328c595693 | [Post-locate] Outreach + shipping — 20260815T040224Z |
+| SWC-215 | f2ca2f02-642f-4418-811b-137e689f3608 | [Post-locate] Outreach + shipping — 20260815T080212Z |
+| SWC-217 | c4b6e783-59a1-4a62-8578-031afdf40859 | [Post-locate] Outreach + shipping — 20260815T200154Z |
+| SWC-219 | 8297a19b-7039-4e6f-96bb-f7de700e1fb7 | [Product Rank FALLBACK] desk mobility and posture tools for remote workers |
+| SWC-220 | 3b5e5a36-be94-4309-882e-fd4cfca446ff | [TEST/FB] Rocking height-adjustable memory-foam under-desk footrest |
+| SWC-224 | 3773a499-ec87-44c8-a91f-497f9a1240a6 | [TEST/FB] Textured topographic anti-fatigue standing mat (compact desk size) |
+| SWC-226 | e0386623-32bd-4304-b8b5-158ba63537fc | [Locate/FB] Rocking height-adjustable memory-foam under-desk footrest |
+| SWC-227 | f16b038a-7fdc-418d-bf80-369986328b6e | [Locate/FB] Silent under-desk pedal exerciser (no-screen mechanical) |
+| SWC-229 | d5be38c5-d8f0-435f-9432-404bfdf89ee4 | [Post-locate] Outreach + shipping — 20260816T000702Z |
+| SWC-230 | 5f617690-0d2c-4ae8-b90f-5e72693830b3 | [Product Rank FALLBACK] kitchen organizers under $40 |
+| SWC-231 | b7d73c89-76ba-4c61-9c92-832f86cb9449 | [NO-GO] Stackable Fridge Water-Bottle & Tumbler Rack (2-Pack) |
+| SWC-233 | 79732998-3d06-47d7-a012-35fec430cd24 | [NO-GO] 360° Turntable Lazy Susan Duo (Pantry + Fridge) |
+| SWC-234 | 64c60e7c-7fdf-4f20-bc72-c3eecf693012 | [NO-GO] Bamboo Bag Organizer Dispenser (Foil/Wrap/Bag Trio) |
+| SWC-236 | 2d172064-4fcd-422c-a32b-f8bc0fd293bb | [Locate] Stackable Fridge Water-Bottle & Tumbler Rack (2-Pack) |
+| SWC-238 | cecd4aa5-7626-4fba-b9e0-4c3f6131bdb9 | [Locate] 360° Turntable Lazy Susan Duo (Pantry + Fridge) |
+| SWC-239 | 1dc14ea7-032e-43c7-9799-a1b786b5e15d | [Post-locate] Outreach + shipping — 20260816T040454Z |
+| SWC-241 | fddade29-e614-42b8-bad5-e921c2b2e99e | [Product Rank FALLBACK] pet travel accessories |
+| SWC-243 | 6ac56a13-e503-4eb7-9062-884fc6a1f2fa | [TEST] Airline-style soft pet carrier backpack with side expanders |
+| SWC-245 | dd584fc2-5880-48dd-98a0-6b2e56d8d784 | [Locate] Airline-style soft pet carrier backpack with side expanders |
+| SWC-247 | e070032f-c16f-4c3e-beb5-9fa35a3f3d26 | [Locate] Pet travel organizer tote (bowls, bags, docs, meds pouches) |
+| SWC-248 | b36f1698-c532-4a7a-afa2-ca79287356f8 | [Post-locate] Outreach + shipping — 20260816T080535Z |
+| SWC-250 | b508a600-6919-418b-b948-23a4c3ed9555 | [Post-locate] Outreach + shipping — 20260816T080605Z |
+| SWC-252 | 262092e4-c987-4097-b1bc-b28e2707b7f3 | [Product Rank FALLBACK] home gym micro-equipment |
+| SWC-260 | cadbff27-7c02-44ce-ba5c-aceccaddac97 | [Locate] Pilates Ring + Mini Loop Band Trio Mobility Bundle |
+| SWC-262 | 6d994eae-800b-459d-af18-dc431e69afc7 | [Locate] Progressive Fabric Resistance Band Kit + Door Anchor + Workout Cards |
+| SWC-264 | e84dc025-309a-43d5-932f-c950dc47ce8c | [Post-locate] Outreach + shipping — 20260816T120413Z |
+| SWC-266 | eeda5d77-4a13-4831-b061-18b7531e25e7 | [Product Rank FALLBACK] travel tech organizers |
+| SWC-268 | 88c87b0c-4e66-436e-9e0c-c256b53c3f4d | [TEST] TSA-friendly toiletry + tech wet/dry split Dopp kit |
+| SWC-270 | 62680189-cbd5-49c7-87f9-5ed874a25c54 | [TEST] Modular tech pouch with labeled cable inserts |
+| SWC-274 | d3a916a6-3c4b-44bc-aaa1-51ee936f4c18 | [Locate] TSA-friendly toiletry + tech wet/dry split Dopp kit |
+| SWC-276 | 3eae690f-d16f-468a-84ba-56fe26950f96 | [Locate] Modular tech pouch with labeled cable inserts |
+| SWC-277 | 54647533-cc7b-4109-bfcf-a20fa7b56cb2 | [Locate FALLBACK] TSA-friendly toiletry + tech wet/dry split Dopp kit |
+| SWC-279 | b54e68ac-4c49-495b-96cd-30d523659f7c | [Locate FALLBACK] Modular tech pouch with labeled cable inserts |
+| SWC-280 | 55b1eb61-5594-445f-a253-2281bfbfbdec | [Post-locate] Outreach + shipping — 20260816T160621Z |
+| SWC-281 | 41f673ba-fa90-43ca-a5b9-cba370f1d376 | [Product Rank FALLBACK] sustainable bathroom gadgets |
+| SWC-282 | 55d8fb49-5f7f-4628-93e4-197be88689cc | [NO-GO] Reusable bamboo cotton rounds set with mesh wash bag (30–40 pads) |
+| SWC-283 | c814b601-aaed-46e0-87b9-4ed2324bb995 | [NO-GO] Safety razor starter kit with bamboo handle + stand + blades tin |
+| SWC-284 | 0a2d11e2-6703-4cb0-84cd-f565cce23a35 | [NO-GO] Solid shampoo + conditioner bar duo with travel tin |
+| SWC-285 | cff0b41b-037e-4869-91e1-e2852ef1323b | [Locate] Reusable bamboo cotton rounds set with mesh wash bag (30–40 pads) |
+| SWC-286 | bcff9d11-9853-411d-9db9-75980c908751 | [Locate] Safety razor starter kit with bamboo handle + stand + blades tin |
+| SWC-288 | 44cb3406-88d8-4658-a151-6f8a171d5f62 | [Locate FALLBACK] Reusable bamboo cotton rounds set with mesh wash bag (30–40 pa |
+| SWC-290 | 252b8b4f-b474-44cc-8343-9adb09c4d94b | [Locate FALLBACK] Safety razor starter kit with bamboo handle + stand + blades t |
+| SWC-291 | 61933c7d-f55c-4c3f-aeab-d09c0532633d | [Post-locate] Outreach + shipping — 20260816T200544Z |
+| SWC-292 | 4dbca16d-c8c9-4d3c-b759-5988d11014bb | [Product Rank FALLBACK] desk mobility and posture tools for remote workers |
+| SWC-295 | 55840614-dadd-4d11-b889-c6f88d0cd30d | [TEST] Wobble/balance board for sit-stand desks |
+| SWC-297 | c8743c82-f3dd-4516-b9e2-0321ad51d12d | [Locate] Portable under-desk pedal exerciser (tension-adjust, fold-flat) |
+| SWC-299 | a49435f6-d147-4dfc-b51b-61082b82c1d6 | [Locate] Under-desk silent mini elliptical (magnetic resistance) |
+| SWC-301 | 7c8a6a51-6348-44d1-967f-d14b7e7e2ded | [Locate FALLBACK] Portable under-desk pedal exerciser (tension-adjust, fold-flat |
+| SWC-303 | bf786b42-af3e-4976-9c88-81503968fd25 | [Locate FALLBACK] Under-desk silent mini elliptical (magnetic resistance) |
+| SWC-305 | 954fc139-cccc-4e4f-a229-739b30226ca7 | [Post-locate] Outreach + shipping — 20260817T000528Z |
+| SWC-307 | 5d0a8dca-5c31-4e11-8e66-87b6a3aa3a07 | [Product Rank FALLBACK] kitchen organizers under $40 |
+| SWC-308 | 25b15857-a374-495f-a5e6-ca046e317d83 | [NO-GO] Pantry Shelf Divider Set (clip-on, 4-pack) |
+| SWC-309 | 4e740697-24dc-481a-8e90-bed3340989b2 | [NO-GO] Expandable Bamboo Drawer Organizer Set (3-pc nested) |
+| SWC-310 | 9f274912-747a-4f8e-9e9b-fc56ecd59dfc | [NO-GO] Water Bottle & Tumbler Cabinet Organizer (stackable rack) |
+| SWC-311 | 850718a8-f49d-4975-bd09-92eb86a13911 | [Locate FALLBACK] Pantry Shelf Divider Set (clip-on, 4-pack) |
+| SWC-312 | db19260e-615f-4909-98c3-bc5cd42fca79 | [Locate FALLBACK] Expandable Bamboo Drawer Organizer Set (3-pc nested) |
+| SWC-313 | 22819ce5-30d3-442f-9862-1d034a647b16 | [Post-locate] Outreach + shipping — 20260817T040450Z |
+| SWC-315 | 55c26c7b-7dde-4cfc-9fbb-95d1efb5c27c | [Product Rank FALLBACK] pet travel accessories |
+| SWC-316 | d64cf113-4473-403e-a606-b61a0e5e36df | [TEST] Inflatable elevated pet travel bed with puncture-resistant top and carry  |
+| SWC-318 | 4cdcedf3-ad0f-45df-90b8-ec91ab587113 | [TEST] Crash-tested style 3-in-1 dog seatbelt harness (walk harness + car tether |
+| SWC-320 | 3cc7a432-5fba-4a4d-ad0d-58f075a59da6 | [TEST] Waterproof pet car rear-seat hammock cover with seat anchors and side fla |
+| SWC-321 | c2214760-9839-4616-aece-d9653f13699a | [Locate FALLBACK] Inflatable elevated pet travel bed with puncture-resistant top |
+| SWC-322 | eb2e82b1-63e4-41c0-b14d-83f1039f1ae0 | [Locate FALLBACK] Crash-tested style 3-in-1 dog seatbelt harness (walk harness + |
+| SWC-324 | 8603fc1f-f287-483e-b89a-88f62d6d0f68 | [Post-locate] Outreach + shipping — 20260817T080543Z |
+| SWC-326 | 4a1fd915-9e10-4a88-8628-9100bbcfd561 | [Product Rank FALLBACK] home gym micro-equipment |
+| SWC-328 | c1b5d63e-3e82-49d9-ac26-1e611c15e453 | [TEST] Suspension trainer straps (door anchor bodyweight system) |
+| SWC-329 | 95f5a399-e25e-40db-acf2-c7e381f78515 | [TEST] Under-desk mini pedal exerciser (no electronics) |
+| SWC-331 | d2564e81-057d-4022-a033-3bc4fc15dd5c | [Locate FALLBACK] Suspension trainer straps (door anchor bodyweight system) |
+| SWC-332 | 39a7df8e-1987-4c9f-9a81-2d71efa2214e | [Locate FALLBACK] Under-desk mini pedal exerciser (no electronics) |
+| SWC-333 | 89525cd4-4a65-4ba9-b772-68d53410e9be | [Post-locate] Outreach + shipping — 20260817T120524Z |
