@@ -17,7 +17,7 @@ ROADMAP success criteria:
 
 Proof: a skill mined from a Cursor session is merged and appears in Claude Code and Grok Build without either being touched.
 
-Depends on Phase 1 only (not Phase 3). Phase 3 is paused at 03-08 Task 2; Phase 4 must not change Phase 3's pending plans or the substrate-host behaviour those plans rely on beyond the skills source (D-08).
+Depends on Phase 1 only (not Phase 3). Phase 3 is blocked at 03-10 (Telegram approvals off by owner decision, 2026-09-26). Phase 4 must not change Phase 3's pending plans or the substrate-host behaviour those plans rely on, except for the skills source (D-08).
 
 Not in this phase: absorbing each agent's own authored skills into the library; Codex/OpenCode/Pi/Gemini/OpenClaw projection beyond repointing OpenClaw's existing links (D-06); a public ingress/webhook; scheduling the docs-scraper crawl itself.
 
@@ -81,6 +81,13 @@ Not in this phase: absorbing each agent's own authored skills into the library; 
   - For the proof, first try the bundled headless `cursor-agent` CLI on the VPS. If it is not signed in, the owner runs one short Cursor session (checkpoint:human-action). Never seed a synthetic transcript.
   — **Reversibility:** reversible.
 - **D-16:** The owner merges library PRs; that review is the gate. The proof's merge is a checkpoint:human-action. — **Reversibility:** reversible.
+
+### Owner decisions on the research open questions (2026-09-26)
+- **D-17 (deviation from D-11, owner-acknowledged):** Omp interception lives in a **standalone extension owned by agent-substrate**, symlinked into `~/.omp/agent/extensions/`. omp-ultrathink stays disabled and is not edited. Reason: the loader skips disabled plugins, so a handler there would never run (04-RESEARCH Summary 1). — **Reversibility:** reversible.
+- **D-18 (redaction policy):** Vendor the 40 library entries **raw**, after the owner reviews a scan report (one human-verify checkpoint). Every `skills_propose` uses a skill-content redactor (`redactSkillContent`): it keeps `$VAR` and placeholder forms, redacts real values, and rejects high-confidence secrets. The docs-scraper `--dir` path redacts the 5 known documentation-example PEM/JWT spans instead of rejecting them (`--allow-doc-examples pem,jwt`) and lists them in the PR body. The event redactor is unchanged. — **Reversibility:** reversible.
+- **D-19:** Add `docs-scraper` to `SURFACES`. — **Reversibility:** reversible.
+- **D-20:** Keep the `~/.agents/skills` links per D-05. Drop them only if the proof shows Cursor listing duplicates. — **Reversibility:** reversible.
+- **D-21:** The proof uses owner checkpoints: review the scan report, merge the tracer PR, run one short Cursor session (cursor-agent stays signed out), and merge the proof PR. — **Reversibility:** reversible.
 
 ### Standing rules carried forward
 - Two-sided test gates against a measured phase baseline (`04-BASELINE.md`); a vanished failure fails the gate like a new one.
