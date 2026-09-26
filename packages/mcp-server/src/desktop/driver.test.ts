@@ -39,13 +39,18 @@ const H = 3;
 const pixel = (x: number, y: number) => [10 * x + 1, 20 * y + 2, 7 * x + 5 * y + 3] as const;
 const EXPECTED_RGB = Buffer.from(Array.from({ length: W * H }, (_, n) => [...pixel(n % W, Math.floor(n / W))]).flat());
 
-/** A synthetic XWD: big-endian header, window name, ncolors × 12-byte colours, rows padded by 4 bytes. */
+/**
+ * A synthetic XWD: big-endian header, window name, ncolors × 12-byte colours, then rows of 4-byte
+ * (32 bpp) or packed 3-byte (24 bpp, what this Xvfb's `xwd -root` writes) pixels padded by 4 bytes.
+ */
 function xwd(o: { byteOrder: 0 | 1; version?: number; format?: number; bpp?: number; ncolors?: number }): Buffer {
 	const name = Buffer.from("xwdtest\0");
-	const bytesPerLine = W * 4 + 4;
+	const bpp = o.bpp ?? 32;
+	const unit = bpp === 24 ? 3 : 4;
+	const bytesPerLine = W * unit + 4;
 	const header = Buffer.alloc(100);
 	const fields = [
-		100 + name.length, o.version ?? 7, o.format ?? 2, 24, W, H, 0, o.byteOrder, 32, o.byteOrder, 32, o.bpp ?? 32,
+		100 + name.length, o.version ?? 7, o.format ?? 2, 24, W, H, 0, o.byteOrder, 32, o.byteOrder, 32, bpp,
 		bytesPerLine, 4, 0xff0000, 0xff00, 0xff, 8, 256, o.ncolors ?? 0, W, H, 0, 0, 0,
 	];
 	fields.forEach((value, i) => header.writeUInt32BE(value, i * 4));
@@ -53,9 +58,9 @@ function xwd(o: { byteOrder: 0 | 1; version?: number; format?: number; bpp?: num
 	for (let y = 0; y < H; y++) {
 		for (let x = 0; x < W; x++) {
 			const [r, g, b] = pixel(x, y);
-			const value = (r << 16) | (g << 8) | b;
-			if (o.byteOrder === 0) pixels.writeUInt32LE(value, y * bytesPerLine + x * 4);
-			else pixels.writeUInt32BE(value, y * bytesPerLine + x * 4);
+			const at = y * bytesPerLine + x * unit;
+			if (o.byteOrder === 0) pixels.writeUIntLE((r << 16) | (g << 8) | b, at, unit);
+			else pixels.writeUIntBE((r << 16) | (g << 8) | b, at, unit);
 		}
 	}
 	return Buffer.concat([header, name, Buffer.alloc((o.ncolors ?? 0) * 12), pixels]);
@@ -76,17 +81,19 @@ function chunks(png: Buffer): Array<{ type: string; data: Buffer; crc: number }>
 }
 
 describe("decodeXwd", () => {
-	test("decodes a 4×3 ZPixmap/32 bpp/TrueColor XWD in either pixel byte order, skipping the colormap", () => {
-		for (const byteOrder of [0, 1] as const) {
-			expect(decodeXwd(xwd({ byteOrder }))).toEqual({ width: W, height: H, rgb: EXPECTED_RGB });
+	test("decodes a 4×3 ZPixmap TrueColor XWD at 32 and packed 24 bpp in either pixel byte order, skipping the colormap", () => {
+		for (const bpp of [32, 24]) {
+			for (const byteOrder of [0, 1] as const) {
+				expect(decodeXwd(xwd({ byteOrder, bpp }))).toEqual({ width: W, height: H, rgb: EXPECTED_RGB });
+			}
 		}
-		expect(decodeXwd(xwd({ byteOrder: 0, ncolors: 256 })).rgb).toEqual(EXPECTED_RGB);
+		expect(decodeXwd(xwd({ byteOrder: 0, bpp: 24, ncolors: 256 })).rgb).toEqual(EXPECTED_RGB);
 	});
 
-	test("refuses version 6, XYPixmap, 24 bpp and a truncated buffer", () => {
+	test("refuses version 6, XYPixmap, 16 bpp and a truncated buffer", () => {
 		expect(() => decodeXwd(xwd({ byteOrder: 0, version: 6 }))).toThrow();
 		expect(() => decodeXwd(xwd({ byteOrder: 0, format: 1 }))).toThrow();
-		expect(() => decodeXwd(xwd({ byteOrder: 0, bpp: 24 }))).toThrow();
+		expect(() => decodeXwd(xwd({ byteOrder: 0, bpp: 16 }))).toThrow();
 		expect(() => decodeXwd(xwd({ byteOrder: 0 }).subarray(0, 150))).toThrow();
 		expect(() => decodeXwd(Buffer.alloc(40))).toThrow();
 	});

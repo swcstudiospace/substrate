@@ -76,8 +76,9 @@ const DIRECT_COLOR = 5;
 
 /**
  * Decode an X Window Dump: header CARD32s are big-endian, pixels are in the file's byte_order,
- * channels come from the red/green/blue masks. Only version 7, ZPixmap, 32 bpp, TrueColor or
- * DirectColor — what `xwd -root` prints for an Xvfb screen.
+ * channels come from the red/green/blue masks. Only version 7, ZPixmap, TrueColor or DirectColor,
+ * at 32 bpp or packed 24 bpp — the webtop's Xvfb (`-screen 0 1280x800x24`) makes `xwd -root` write
+ * 24 bpp: 3-byte pixels in 5,120-byte scanlines.
  */
 export function decodeXwd(buf: Buffer): { width: number; height: number; rgb: Buffer } {
 	if (buf.length < XWD_HEADER_BYTES) throw new Error("xwd: shorter than its header");
@@ -94,10 +95,11 @@ export function decodeXwd(buf: Buffer): { width: number; height: number; rgb: Bu
 	const ncolors = field(19);
 	if (version !== 7) throw new Error(`xwd: version ${version}, expected 7`);
 	if (format !== ZPIXMAP) throw new Error(`xwd: pixmap format ${format}, expected ZPixmap`);
-	if (bpp !== 32) throw new Error(`xwd: ${bpp} bits per pixel, expected 32`);
+	if (bpp !== 32 && bpp !== 24) throw new Error(`xwd: ${bpp} bits per pixel, expected 32 or 24`);
+	const unit = bpp / 8;
 	if (visualClass !== TRUE_COLOR && visualClass !== DIRECT_COLOR) throw new Error(`xwd: visual class ${visualClass}`);
 	if (byteOrder > 1) throw new Error(`xwd: byte order ${byteOrder}`);
-	if (headerSize < XWD_HEADER_BYTES || width === 0 || height === 0 || bytesPerLine < width * 4) {
+	if (headerSize < XWD_HEADER_BYTES || width === 0 || height === 0 || bytesPerLine < width * unit) {
 		throw new Error("xwd: inconsistent header");
 	}
 	const offset = headerSize + ncolors * XWD_COLOR_BYTES;
@@ -113,8 +115,8 @@ export function decodeXwd(buf: Buffer): { width: number; height: number; rgb: Bu
 	let out = 0;
 	for (let y = 0; y < height; y++) {
 		let at = offset + y * bytesPerLine;
-		for (let x = 0; x < width; x++, at += 4) {
-			const pixel = littleEndian ? buf.readUInt32LE(at) : buf.readUInt32BE(at);
+		for (let x = 0; x < width; x++, at += unit) {
+			const pixel = littleEndian ? buf.readUIntLE(at, unit) : buf.readUIntBE(at, unit);
 			for (const { mask, shift, max } of channels) {
 				const value = (pixel & mask) >>> shift;
 				rgb[out++] = max === 255 ? value : Math.round((value * 255) / max);
