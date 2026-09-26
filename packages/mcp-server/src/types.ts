@@ -37,6 +37,8 @@ export const EVENT_KINDS = [
 	"release",
 	"complete",
 	"skill.propose",
+	"docs.ingest",
+	"desktop.action",
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 

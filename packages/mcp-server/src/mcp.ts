@@ -8,6 +8,8 @@
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { DesktopRunInput } from "./desktop/actions.ts";
+import { redact } from "./redact.ts";
 import type { Substrate } from "./service.ts";
 import { ProposeFailed, ProposeRefused } from "./skills/propose.ts";
 import { EVENT_KINDS, MEMORY_KINDS, NODE_STATES, SURFACES, TRUST_LEVELS, type Surface } from "./types.ts";
@@ -48,7 +50,8 @@ const OWNER_SURFACE_HINT = "defaults to the caller's own surface; an authenticat
 /**
  * `proposeAllowed` comes from server.ts's caller check (skills/propose-auth.ts): an authenticated
  * bearer surface or the host propose key header. It defaults to false, so a session created
- * without it — a rivet VM guest's anonymous session included — cannot reach skills_propose.
+ * without it — a rivet VM guest's anonymous session included — cannot reach skills_propose or
+ * desktop_run (D-19).
  */
 export function createMcpServer(
 	substrate: Substrate,
@@ -168,6 +171,33 @@ export function createMcpServer(
 				}
 				if (cause instanceof ProposeFailed) return refusal(JSON.stringify({ error: cause.message }));
 				throw cause;
+			}
+		},
+	);
+
+	server.registerTool(
+		"desktop_run",
+		{
+			title: "Drive the sandbox desktop",
+			description:
+				"Runs 1-50 actions on substrate-desktop, a sandboxed Xfce desktop container (1280×800; no host mounts, no docker socket): click {x, y, button?, double?}, type {text}, key {keys, e.g. \"ctrl+alt+t Return\"} and screenshot {}. Each action is a fixed xdotool/xwd call; no program or shell is ever named. One run at a time, bounded by `timeout` seconds (default 30, max 120). Returns {run_id, screenshots, log} (log[i].active_window is the focused window's title after the action) followed by each screenshot as a PNG image. Every action is audited as a desktop.action event; typed text is recorded only as its length and sha256. Needs an authenticated surface or the host propose key.",
+			inputSchema: DesktopRunInput.shape,
+			annotations: { destructiveHint: false, openWorldHint: true },
+		},
+		async (input) => {
+			if (!opts.proposeAllowed) {
+				return refusal("desktop_run needs an authenticated surface or the host propose key; nothing was run");
+			}
+			try {
+				const { images, ...result } = await substrate.runDesktop(input, callerSurface ?? "claude-code");
+				return {
+					content: [
+						{ type: "text" as const, text: JSON.stringify(result, null, 2) },
+						...images.map((data) => ({ type: "image" as const, data, mimeType: "image/png" })),
+					],
+				};
+			} catch (cause) {
+				return refusal(redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 400));
 			}
 		},
 	);

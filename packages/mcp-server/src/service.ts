@@ -7,6 +7,8 @@
  */
 import { composeBrief, type BriefRequest } from "./brief.ts";
 import type { SubstrateConfig } from "./config.ts";
+import type { DesktopRunInput } from "./desktop/actions.ts";
+import { bufferRunner, createDesktopDriver, type DesktopDriver, type DesktopRunResult } from "./desktop/driver.ts";
 import { DodGate, type DodEvidence, type GateResult } from "./dod-gate.ts";
 import { normalizeEvent, verifyChain } from "./event.ts";
 import { GreptimeClient, quote } from "./greptime.ts";
@@ -86,6 +88,7 @@ export class Substrate {
 	readonly mirror: Mirror;
 	readonly dodGate: DodGate;
 	readonly skills: SkillProposer;
+	readonly desktop: DesktopDriver | null;
 
 	/** `stores` is a test seam; production always builds them from config. */
 	constructor(
@@ -96,6 +99,7 @@ export class Substrate {
 			mirror?: Mirror;
 			dodGate?: DodGate;
 			skills?: SkillProposer;
+			desktop?: DesktopDriver | null;
 		},
 	) {
 		this.index =
@@ -105,6 +109,8 @@ export class Substrate {
 		this.mirror = stores?.mirror ?? createMirror(config);
 		this.dodGate = stores?.dodGate ?? new DodGate(config.hermesLinearUrl, { timeoutMs: config.dodGateTimeoutMs });
 		this.skills = stores?.skills ?? createSkillProposer({ run: execFileRunner });
+		this.desktop =
+			stores?.desktop !== undefined ? stores.desktop : createDesktopDriver({ run: bufferRunner, emit: (e) => this.emit(e) });
 	}
 
 	/** Idempotent. Missing stores are reported, not fatal — the server still serves what it can. */
@@ -170,6 +176,15 @@ export class Substrate {
 			payload: { name: input.name, status: result.status, pr_url: result.pr_url, content_sha256: result.content_sha256 },
 		}).catch(() => undefined);
 		return result;
+	}
+
+	/**
+	 * desktop_run (D-13): drives the substrate-desktop container. The driver serializes runs and
+	 * emits one desktop.action per action itself, fail-open.
+	 */
+	async runDesktop(input: DesktopRunInput, surface: Surface): Promise<DesktopRunResult> {
+		if (!this.desktop) throw new Error("desktop driver not available");
+		return this.desktop.run(input, { surface });
 	}
 
 	async writeMemory(entry: MemoryEntryInput): Promise<MemoryEntry> {
