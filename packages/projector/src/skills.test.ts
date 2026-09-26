@@ -398,7 +398,7 @@ describe("backup-then-link (D-06)", () => {
 		expect(manifest).toEqual(
 			["grok/same/SKILL.md", "grok/same/scripts/__pycache__/x.pyc", "grok/same/scripts/run.sh"].map(
 				(rel) => `${sha(join(BACKUP, rel))}  ${rel}`,
-			),
+			).sort(),
 		);
 		const restore = readFileSync(join(BACKUP, "RESTORE.md"), "utf8");
 		const line = `rm '${path}' && cp -a '${backup}' '${path}'`;
