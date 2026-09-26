@@ -153,7 +153,7 @@ Plans:
 
 **Proof**: A labelled issue opens a VM, the session survives a host restart, the PR lands and
 `ultrathink-sync` closes the loop.
-**Plans**: 7/10 plans executed
+**Plans**: 9/10 plans executed (03-10 blocked: owner keeps Telegram approvals off, 2026-09-26)
 
 Plans:
 **Wave 1**
@@ -186,15 +186,15 @@ Plans:
 
 **Wave 8** *(blocked on Wave 7 completion)*
 
-- [ ] 03-08-PLAN.md — D-13 Telegram approvals: owner's new bot (human-action), Approve/Deny only, authorised callbacks, respondPermission
+- [x] 03-08-PLAN.md — D-13 Telegram approvals: owner's new bot (human-action), Approve/Deny only, authorised callbacks, respondPermission *(closed partial: owner skipped the bot; approvals off)*
 
 **Wave 9** *(blocked on Wave 8 completion)*
 
-- [ ] 03-09-PLAN.md — Proof setup: "PR lands" decision, D-14 archives recorded in 02-LINEAR-ARCHIVED.md, fresh issue, Notion rows, new graph, dispatch label created but not applied
+- [x] 03-09-PLAN.md — Proof setup: "PR lands" decision, D-14 archives recorded in 02-LINEAR-ARCHIVED.md, fresh issue, Notion rows, new graph, dispatch label created but not applied
 
 **Wave 10** *(blocked on Wave 9 completion)*
 
-- [ ] 03-10-PLAN.md — Proof run: trap-closed dispatch window, VM via the dispatcher, host restart under a waiting turn, Telegram approvals, PR, sync, completion through the DoD gate, dispatch off
+- [ ] 03-10-PLAN.md — Proof run: trap-closed dispatch window, VM via the dispatcher, host restart under a waiting turn, Telegram approvals, PR, sync, completion through the DoD gate, dispatch off *(deferred: needs an approval route)*
 
 **Cross-cutting constraints:**
 

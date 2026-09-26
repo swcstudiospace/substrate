@@ -1,6 +1,6 @@
 ---
 phase: 02-claims-and-dispatch
-verified: 2026-09-25T07:12:09Z
+verified: 2026-09-26T00:23:44Z
 status: passed
 score: 65/65 must-haves verified (60 verified, 5 passed by owner override)
 covered_files:
@@ -51,9 +51,25 @@ covered_files:
   - packages/mcp-server/src/notion.ts
   - packages/mcp-server/src/service.ts
   - packages/mcp-server/src/types.ts
-covered_digest: "v1:sha256:f63511444e78c67751724d74285595f88646f463db4192b88b2b8fc8dc24b994"
-digest_refreshed: "2026-09-25 07:28Z after the code-review fix pass (02-REVIEW.md: WR-01..04, IN-02, IN-03; commits 41c5089..7b8ad5c) changed 9 covered implementation files. Regression: agent-substrate bun test 167 pass/0 fail, tsc exit 0, dispatcher pytest 114 passed; substrate-mcp restarted 07:27:18Z, healthz index+greptime true, mirror linear+notion on; scoped brief for ut-mughkkc0-73909228 still 'Done · n1 SWC-467 done'. Truth 49's probe is now the no-flag run (--once requires --dry-run since WR-04). No truth changed status."
-covered_files_note: "ROADMAP.md is excluded (tracking file later phases edit). The four hermes-linear-connector files (sync_engine.py, webhook_app.py and their tests, git diff dc2d74d..6e532fe) live in another repository, so they cannot be fingerprinted root-relative; they were verified by their tests and the live route."
+covered_digest: "v1:sha256:e90da44cbd3211078af877d49c467549345d98ceca53befafd3b2b16d29e6105"
+covered_files_note: "Same list as the 2026-09-25 report; the digest is recomputed at HEAD fb6ffa0 with `query verification.fingerprint`. Excluded: ROADMAP.md and 02-LINEAR-ARCHIVED.md (tracking logs that later phases append to — Phase 3 D-14 records its archives there); 02-RESEARCH/PATTERNS/VALIDATION/REVIEW and COVERAGE.md (not plan, summary or evidence inputs); Phase 3 files that Phase 2 code now imports (packages/dispatcher/src/substrate_dispatcher/host.py, packages/mcp-server/src/server.ts /issue route, redact.ts), which Phase 3's own verification covers. The four hermes-linear-connector files (sync_engine.py, webhook_app.py and their tests) live in another repository and cannot be fingerprinted root-relative; that repository's HEAD is still 6e532fe, so they are unchanged since the original verification."
+re_verification:
+  date: "2026-09-26"
+  reason: "verification.status reported stale: Phase 3 commits changed covered implementation files after the 2026-09-25 digest (55b4521)."
+  previous_status: passed
+  previous_score: 65/65
+  previous_digest: "v1:sha256:f63511444e78c67751724d74285595f88646f463db4192b88b2b8fc8dc24b994"
+  commits_touching_covered_files:
+    - "7926c0b feat(03-02): issue_get service path — linear.ts, mirror.ts, service.ts (additive only)"
+    - "71f06ef feat(03-02): issue_get MCP tool — mcp.ts (additive only; server.ts is not covered)"
+    - "dda3758 feat(03-02): Hermes prompt uses issue_get and gains a release-and-stop step — launcher.py"
+    - "41e1ed7 feat(03-05): dispatch:claude-code routed to substrate-host — dispatch.py (host.py new, not covered)"
+    - "98cf59d feat(03-05): HostClient wired into the loop — __main__.py"
+  gaps_closed: []
+  gaps_remaining: []
+  regressions: []
+  superseded_as_planned:
+    - "Truth 61 (D-11): dispatch:claude-code now launches (Phase 3 D-06, commit 41e1ed7), which D-11 itself deferred to Phase 3. Every other surface still gets the once-only not-dispatchable comment and keeps its label."
 behavior_unverified: 0
 overrides_applied: 5
 overrides:
@@ -83,13 +99,51 @@ gaps: []
 # Phase 2: Claims and dispatch Verification Report
 
 **Phase Goal:** Labelling a Linear issue for an agent starts that agent on that node.
-**Verified:** 2026-09-25T07:12:09Z
+**Verified:** 2026-09-26T00:23:44Z (re-verification; initial 2026-09-25T07:12:09Z)
 **Status:** passed
-**Re-verification:** No — initial verification
+**Re-verification:** Yes — covered files changed after the original verification (the digest went stale), not a gap closure
 
 I checked the live systems myself (read-only) and ran the suites once. Labelling SWC-467 `dispatch:hermes` started a real Hermes session in the per-graph worktree. That session claimed n1 as hermes, and the claim reached the index, Linear, Notion and POST /brief. Completion went through the hermes-linear-connector DoD gate. Five owner-accepted deviations are carried as overrides. There are no other failures and no open human items.
 
-## Live observations (this verification, 2026-09-25 07:07–07:12Z)
+## Re-verification 2026-09-26
+
+`verification.status` reported `stale` because five Phase 3 commits changed covered implementation files after the 2026-09-25 digest (55b4521, 07:27:49Z). I re-checked every truth against HEAD `fb6ffa0`. All 65 still hold. The five owner overrides and the owner-approved live proof (02-PROOF.md, `owner_verified=approved 2026-09-25`) are carried forward unchanged, and I did not re-run any live Linear or Notion proof.
+
+`git log --oneline 55b4521..HEAD -- <covered files>` lists nine commits. Four of them (8dcc7d2, 3f65046, 9b27d7d, 70e6c11) touch only `02-LINEAR-ARCHIVED.md`, which is not a covered file. The other five touch covered code:
+
+| Commit | Covered files | Change | Phase 2 truths affected | Verdict |
+| --- | --- | --- | --- | --- |
+| 7926c0b feat(03-02) | `linear.ts` +12, `mirror.ts` +18, `service.ts` +50 (all `-0`) | New read-only `LinearClient.issueText`, `Mirror.issueText` and `Substrate.getIssue` (redacted, capped, framed as untrusted). `getIssue` emits no event and writes nothing to the index. `Mirror.issueText` makes one Linear GraphQL read and never calls Notion | 1–3, 10–14, 32–41 (claim/release/complete, mirror, D-06 gate, D-07) | Intact. The diff is additions only: `claimNode`, `releaseNode`, `completeNode`, `askGate` and `Mirror.run` are byte-for-byte unchanged; only their line numbers moved (+50) |
+| 71f06ef feat(03-02) | `mcp.ts` +12 | Registers the `issue_get` tool | 14 (graph_find), MCP tool surface | Intact. Additions only; the graph_claim/release/complete/find registrations are unchanged |
+| dda3758 feat(03-02) | `launcher.py` +25/−1 | Step (3) now fetches the issue with `issue_get` instead of "your Linear tool" (fixes WR-05, the root cause behind override 2); new step (5) releases as hermes with the claim session and stops; D-16 root-trust comment beside `CHILD_ENV_ALLOW` | 29, 30, 31 (D-13 argv/prompt, step 4 completes as hermes, child env allowlist) | Intact. `build_argv` is unchanged; the claim is still step (1); step (4) still completes as hermes with the claim session; `CHILD_ENV_ALLOW` is unchanged. Tests `test_render_prompt_orders_claim_then_issue_get_then_complete`, `test_render_prompt_step4_completes_as_hermes_with_the_claim_session` and `test_child_env_keeps_allowlist_and_drops_secrets` pass |
+| 41e1ed7 feat(03-05) | `dispatch.py` +32/−10 | `DISPATCHABLE_SURFACES = {"hermes","claude-code"}`; `make_launch_fn` sends claude-code to `open_task` (substrate-host) after the same D-12 worktree step and keeps the hermes path; a `HostRefused` becomes a once-only comment | 4, 27, 48, 60–63 (label routing, graph_find before launch, D-12 worktree, D-11, D-14 cap) | Intact, with truth 61 superseded as planned: D-11 says "`dispatch:claude-code` is Phase 3", and Phase 3 D-06 now makes it launch. Other surfaces still get the once-only `not-dispatchable` comment and keep the label (`test_non_hermes_surface_comments_once_and_leaves_label`, surface `omp`). The hermes path still goes checkout → `ensure_worktree` → `launcher.launch` |
+| 98cf59d feat(03-05) | `__main__.py` +7/−2 | Builds one `HostClient` and passes `open_task=host.launch` to `make_launch_fn`; closes it on exit | 45–49 (poll interval, switch, unit, launch path, lock) | Intact. `POLL_INTERVAL_SECONDS = 30`, and the lock and switch code are unchanged; `test_held_lock_exits_3_without_any_client` and the D-15 switch tests pass |
+
+Nothing else changed. The covered planning files, `infra/vps/substrate-dispatcher.service`, `pyproject.toml`, `sessions.py`, `worktree.py`, `linear.py` (dispatcher), `mcp.py`, `config.ts`, `dod-gate.ts`, `index-store.ts`, `index.ts`, `notion.ts` and `types.ts` are identical to 55b4521. The hermes-linear-connector (DoD gate, truths 21–25) is still at `6e532fe`, with no commit since.
+
+### Tests run for this re-verification (HEAD fb6ffa0)
+
+| Command | Verbatim result |
+| --- | --- |
+| `SUBSTRATE_DISABLED=1 /root/.local/share/reflex/bun/bin/bun test packages/mcp-server` | `155 pass` / `0 fail` / `521 expect() calls` / `Ran 155 tests across 9 files. [564.00ms]` |
+| `cd packages/dispatcher && python3 -m pytest -q` | `149 passed in 3.23s` |
+| `bun test packages/mcp-server -t '<22 Phase 2 claim/ownership/gate/mirror/Notion test-name patterns>'` | `35 pass` / `0 fail` / `Ran 35 tests across 9 files. [432.00ms]` |
+| `python3 -m pytest -q -k '<the 24 dispatcher tests this report cites by name>'` | `41 passed, 108 deselected in 0.38s` |
+
+The original run recorded 128/0 (mcp-server) and 108 passed (dispatcher), then 114 after the review fix pass. The increases come from the Phase 3 tests for issue_get, the claude-code route, HostClient and RemoteTask. Every test this report cites by name still exists (checked against the `def test_` names in `packages/dispatcher/tests/*.py`) and passes. I did not re-run `tsc --noEmit` or the connector suite (the connector is unchanged).
+
+### Live read-only checks (2026-09-26 00:22Z)
+
+| What | Command | Observed |
+| --- | --- | --- |
+| Unit file | `diff infra/vps/substrate-dispatcher.service /etc/systemd/system/substrate-dispatcher.service` | identical |
+| Services | `systemctl is-active substrate-mcp substrate-dispatcher substrate-host hermes-linear-api` | `active` ×4 |
+| Switch | `sudo grep -c '^SUBSTRATE_DISPATCH_DISABLED=' …`; last matching line | 7 lines; last `SUBSTRATE_DISPATCH_DISABLED=1` (override 5 still describes the live state) |
+| Dispatcher | `journalctl -u substrate-dispatcher -n 3` | `dispatch disabled (SUBSTRATE_DISPATCH_DISABLED=1)` at 00:21:15, 00:21:45, 00:22:15 (30 s ticks) |
+
+The "Live observations" table below is the original 2026-09-25 record and is kept as it was.
+
+## Live observations (original verification, 2026-09-25 07:07–07:12Z)
 
 | What | How | Observed |
 | --- | --- | --- |
@@ -115,21 +169,21 @@ Roadmap success criteria and proof (the contract), then plan must-haves. Where a
 
 | # | Truth | Status | Evidence |
 | --- | --- | --- | --- |
-| 1 | SC-1: `graph.claim` moves the Linear issue to started, adds `agent:<surface>`, posts a one-line comment with the session id, sets `Agent` on the Notion Issue row and writes `claimed_by` in the index | ✓ VERIFIED | Live: SWC-467 Todo→In Progress with `+agent:hermes`, claim comment carrying session 20260925_065059_f7cea2, Notion Agent `hermes`, claim event. 02-PROOF `graph_get_n1_at_claim` claimed_by hermes. `service.ts:195-243` calls `this.mirror.claim` only when `result.claimed`. mirror.test "moves to In Progress by name…", "posts one comment carrying the session id", "claim with Linear ok: one PATCH of exactly Agent and Linear State In Progress" pass |
+| 1 | SC-1: `graph.claim` moves the Linear issue to started, adds `agent:<surface>`, posts a one-line comment with the session id, sets `Agent` on the Notion Issue row and writes `claimed_by` in the index | ✓ VERIFIED | Live: SWC-467 Todo→In Progress with `+agent:hermes`, claim comment carrying session 20260925_065059_f7cea2, Notion Agent `hermes`, claim event. 02-PROOF `graph_get_n1_at_claim` claimed_by hermes. `service.ts:245-300` (was 195-243; unchanged apart from the line shift) calls `this.mirror.claim` (line 273) only when `result.claimed`. mirror.test "moves to In Progress by name…", "posts one comment carrying the session id", "claim with Linear ok: one PATCH of exactly Agent and Linear State In Progress" pass |
 | 2 | SC-1: a second agent asking for the same node gets the existing claim (D-04: no Linear/Notion writes, no event) | ✓ VERIFIED | Test "a losing claimer causes no Linear request, no event and no state write (D-04)" passes. 02-01-TRACER live loser: `graph_claim` as omp returned `{"claimed":false,"node":{…"claimed_by":"claude-code",…}}` with `loser_linear_unchanged=true` (updatedAt and comment count unchanged) |
-| 3 | SC-2: `graph.release` and `graph.complete` mirror ultrathink-sync's state table; completion passes the hermes-linear-connector DoD gate | ✓ VERIFIED | Release goes to Todo and drops the agent label; complete goes to In Review and then the gate (`service.ts:280,327,332,343`). Tests: "the holder's release sends Linear to Todo…", "the holder with passing evidence: In Review, then the gate…", "a gate refusal returns its reason…". 02-05-SMOKE: `release_state=Todo`, `refused_state=In Review`, `done_state=Done`. Live SWC-467: In Review at 06:53:39.619Z (substrate), then Done at 06:53:41.378Z (connector) |
-| 4 | SC-3: substrate-dispatcher watches `dispatch:<surface>` on unstarted issues and starts a session for that Graph ID in a per-Graph-ID worktree; the label is removed and `agent:<surface>` added when the claim lands | ✓ VERIFIED | Run-5 journal: `tick: 1 candidate` → `launched hermes for SWC-467 graph ut-mughkkc0-73909228 node n1 … worktree /var/lib/substrate/worktrees/ut-mughkkc0-73909228` → `claim landed for SWC-467 (claimed_by, session 20260925_065059_f7cea2)`. The worktree is on `substrate/ut-mughkkc0-73909228`. The label swap is in the live Linear history. Dispatcher pytest 108 passed |
+| 3 | SC-2: `graph.release` and `graph.complete` mirror ultrathink-sync's state table; completion passes the hermes-linear-connector DoD gate | ✓ VERIFIED | Release goes to Todo and drops the agent label; complete goes to In Review and then the gate (`service.ts:339` mirror.release, `:397` mirror.review, `:445` dodGate.completeIssue, `:429` mirror.done; was 280/327/332/343). Tests: "the holder's release sends Linear to Todo…", "the holder with passing evidence: In Review, then the gate…", "a gate refusal…" pass (2026-09-26). 02-05-SMOKE: `release_state=Todo`, `refused_state=In Review`, `done_state=Done`. Live SWC-467: In Review at 06:53:39.619Z (substrate), then Done at 06:53:41.378Z (connector) |
+| 4 | SC-3: substrate-dispatcher watches `dispatch:<surface>` on unstarted issues and starts a session for that Graph ID in a per-Graph-ID worktree; the label is removed and `agent:<surface>` added when the claim lands | ✓ VERIFIED | Run-5 journal: `tick: 1 candidate` → `launched hermes for SWC-467 graph ut-mughkkc0-73909228 node n1 … worktree /var/lib/substrate/worktrees/ut-mughkkc0-73909228` → `claim landed for SWC-467 (claimed_by, session 20260925_065059_f7cea2)`. The worktree is on `substrate/ut-mughkkc0-73909228`. The label swap is in the live Linear history. Dispatcher pytest 149 passed (2026-09-26). Since 41e1ed7, `dispatch:claude-code` also goes through the same worktree step before substrate-host (Phase 3), which widens this criterion without changing the hermes path |
 | 5 | substrate-dispatcher is left watching dispatch:<surface> labels after the proof (02-08 plan: dispatch_switch_final=0) | PASSED (override) | Override: dispatch left off by owner direction (`SUBSTRATE_DISPATCH_DISABLED=1`; live journal `dispatch disabled`) — accepted by owner on 2026-09-25 |
 | 6 | Proof: labelling a real issue `dispatch:hermes` starts a Hermes session that claims the node | ✓ VERIFIED | Live export of 20260925_065059_f7cea2: source substrate-dispatcher, first tool call `graph_claim` with surface hermes. The dispatcher launched it 24.5 s after the label (02-PROOF timeline); its cwd was the worktree (`/proc` in 02-PROOF) |
 | 7 | Proof: the Notion Issue row shows Agent hermes | ✓ VERIFIED | Live GET: `Agent hermes`. The watch saw it at 06:51:43.586Z, 5.4 s after the claim |
 | 8 | Proof: Claude Code's brief shows the hermes claim within a minute of labelling the issue dispatch:hermes | PASSED (override) | The brief showed `n1 SWC-467 started by hermes just now` at 06:51:38.154Z, 65 s after the label. Override: 65 s, not within 60 s — accepted by owner on 2026-09-25 |
-| 9 | The dispatched Hermes session works the node it claimed and completes it itself through graph_complete and the DoD gate | PASSED (override) | The live export has no `graph_complete` call. The model could not read the issue: prompt step (3) says "with your Linear tool" (`launcher.py:64`), but the session runs `-t terminal,file`. The operator completed n1 as hermes with the claim session. Override accepted by owner on 2026-09-25 |
-| 10 | 02-01 D-01: the Linear mirror runs inside substrate-mcp's claimNode via a Mirror built from config.linearApiKey; LINEAR_API_KEY is in substrate.env exactly once | ✓ VERIFIED | `service.ts:223` calls `mirror.claim`; `mirror.ts` has `createMirror(config)`; `sudo grep -c` → 1; the journal shows `mirror: linear on, notion on` |
+| 9 | The dispatched Hermes session works the node it claimed and completes it itself through graph_complete and the DoD gate | PASSED (override) | The live export has no `graph_complete` call. The model could not read the issue: prompt step (3) said "with your Linear tool" (then `launcher.py:64`), but the session runs `-t terminal,file`. The operator completed n1 as hermes with the claim session. Override accepted by owner on 2026-09-25. Since dda3758 (Phase 3, 03-02) step (3) fetches the issue with `issue_get` (`launcher.py:71-74`), which removes this root cause for future runs; the override stands for the Phase 2 proof run |
+| 10 | 02-01 D-01: the Linear mirror runs inside substrate-mcp's claimNode via a Mirror built from config.linearApiKey; LINEAR_API_KEY is in substrate.env exactly once | ✓ VERIFIED | `service.ts:273` calls `mirror.claim`; `mirror.ts` has `createMirror(config)`; `sudo grep -c` → 1; the journal shows `mirror: linear on, notion on` |
 | 11 | 02-01 SC-1 detail: In Progress is resolved by name in the issue's team, `agent:<surface>` is added and every `dispatch:*` label is removed in the same issueUpdate, with one comment line | ✓ VERIFIED | mirror.test "moves to In Progress by name, never the other started state", "removes every dispatch:* label and leaves other labels alone", "a team with no state named In Progress fails the target instead of guessing" pass. Live history row 06:51:40.452Z does the state change, the add and the remove in one row |
 | 12 | 02-01 D-02: the index claim lands first and is never rolled back; a Linear failure emits one warning (target linear); a same-session re-claim does not comment twice | ✓ VERIFIED | Tests "Linear answering 500 still claims, and leaves exactly one warning naming the target (D-02)", "a node with no Linear reference warns without calling Linear", "a same-session re-claim … does not comment twice" pass. 02-06-SMOKE events show the warning target linear |
 | 13 | 02-01 D-03: `agent:<surface>` is reused or created on the team and applied with addedLabelIds; never labelIds or replaceTeamLabels | ✓ VERIFIED | mirror.test "reuses the team's own agent label", "reuses a workspace label (team null)", "creates the agent label … without replaceTeamLabels", "never sends labelIds…" pass |
 | 14 | 02-01 graph_find resolves a Linear issue to exactly one node, or returns found:false (ambiguous/unknown) | ✓ VERIFIED | service tests "one node owning the issue id resolves…", "falls back to the identifier…", "two owning nodes are reported as ambiguous", "an issue on no node is reported as unregistered" pass; 02-01-TRACER live `find_found=true`; the dispatcher resolved SWC-467 live |
-| 15 | 02-01 measured baseline recorded before the first edit; gates two-sided | ✓ VERIFIED | 02-BASELINE.md `agent-substrate-pass=76`, `agent-substrate-fail=0`, `tsc-exit=0`. Now: mcp-server `bun test` 128 pass / 0 fail (this run), repo 154/0 at HEAD (orchestrator), root `tsc --noEmit` exit 0 (this run) |
+| 15 | 02-01 measured baseline recorded before the first edit; gates two-sided | ✓ VERIFIED | 02-BASELINE.md `agent-substrate-pass=76`, `agent-substrate-fail=0`, `tsc-exit=0`. Originally mcp-server `bun test` 128 pass / 0 fail and root `tsc --noEmit` exit 0; on 2026-09-26 `bun test packages/mcp-server` 155 pass / 0 fail (tsc not re-run) |
 | 16 | 02-02 D-01: NOTION_API_KEY is present exactly once in substrate.env (0600 root) and was never printed | ✓ VERIFIED | `sudo grep -c '^NOTION_API_KEY='` → 1; `stat` → `600 root` |
 | 17 | 02-02 02-NOTION-SCHEMA.md carries exactly one gap marker | ✓ VERIFIED | Only `notion_skipped=false` (line 6); 02-06-SMOKE mirrors it |
 | 18 | 02-02 the integration can read the Agent Task Graph data source (HTTP 200) | ✓ VERIFIED | 02-NOTION-SCHEMA `data_source_http=200`, `page_read_http=200`; my live page GET succeeded |
@@ -140,11 +194,11 @@ Roadmap success criteria and proof (the contract), then plan must-haves. Where a
 | 23 | 02-03 an allowed request makes exactly one issue_update to the completed state and returns completed:true | ✓ VERIFIED | `test_complete_issue_with_evidence_moves_issue_to_done_once` PASSED; live, SWC-467 went In Review→Done in one history row |
 | 24 | 02-03 apply_kanban_status behaviour unchanged | ✓ VERIFIED | `test_apply_kanban_done_updates_linear`, `test_apply_kanban_done_refused_without_dod`, `test_mark_dod_then_done` PASSED |
 | 25 | 02-03 connector suite two-sided against 02-03-BASELINE.md | ✓ VERIFIED | Baseline `connector-pass=49 fail=0 skip=2`; this run 60 passed, 2 skipped, 0 failed |
-| 26 | 02-04 D-09: packages/dispatcher is a src-layout Python package with pytest tests on the system python3 | ✓ VERIFIED | `pyproject.toml`; `python3 -m pytest` → 108 passed; the unit runs `/usr/bin/python3 -m substrate_dispatcher` |
+| 26 | 02-04 D-09: packages/dispatcher is a src-layout Python package with pytest tests on the system python3 | ✓ VERIFIED | `pyproject.toml` (unchanged); `python3 -m pytest -q` → 149 passed (2026-09-26); the unit runs `/usr/bin/python3 -m substrate_dispatcher` |
 | 27 | 02-04 D-10: dispatch_candidates asks for unstarted issues carrying a `dispatch:`-prefixed label, one Candidate per label | ✓ VERIFIED | `test_dispatch_candidates_sends_poll_filter_and_splits_dispatch_labels` passes; `linear.py` has `startsWith` |
 | 28 | 02-04 D-12: worktree `/var/lib/substrate/worktrees/<graph_id>` on `substrate/<graph_id>`, reused, refused under 5 GiB, graph_id validated | ✓ VERIFIED | `MIN_FREE_BYTES = 5 * 1024**3`; `test_ensure_worktree_disk_floor[…]` and `test_validate_graph_id_rejects[…]` pass; live worktrees on `substrate/<graph_id>` |
 | 29 | D-13: the launch argv is the hermes binary followed by chat --query-file <prompt>, cwd is the worktree, fixed-template prompt, graph_claim (surface hermes) before any work, never --yolo, never dispatch_handoff_to_hermes.sh | PASSED (override) | The planned shape holds (`test_build_argv_shape_without_yolo_or_handoff_wrapper`, `test_render_prompt_carries_ids_and_claim_first`; live argv has no `--yolo` or wrapper). Run 5 added `-m claude-opus-5.5` (`test_build_argv_passes_the_dispatch_model_last`). Override: model switch — accepted by owner on 2026-09-25 |
-| 30 | 02-04 the prompt's graph_complete step passes `"surface":"hermes"` and the same session id used for graph_claim | ✓ VERIFIED | `test_render_prompt_step4_completes_as_hermes_with_the_claim_session` passes; `launcher.py:68-72`. The live operator completion used those same arguments and passed the ownership check |
+| 30 | 02-04 the prompt's graph_complete step passes `"surface":"hermes"` and the same session id used for graph_claim | ✓ VERIFIED | `test_render_prompt_step4_completes_as_hermes_with_the_claim_session` passes (now slices step (4) up to the new step (5)); `launcher.py:80-82`. The live operator completion used those same arguments and passed the ownership check |
 | 31 | 02-04 the Hermes child environment is an allowlist excluding LINEAR/NOTION keys, SUBSTRATE_PG_URL and GREPTIME_* | ✓ VERIFIED | `CHILD_ENV_ALLOW = ("HOME","PATH","LANG","LC_ALL","USER","LOGNAME","SHELL")`; `test_child_env_keeps_allowlist_and_drops_secrets` passes; the only Linear key the run-5 model found could see only workspace `swcstudio`/team `SPE` (Hermes' own), not substrate's SWC key |
 | 32 | 02-05 D-08: EVENT_KINDS has release and complete; the events carry graph_id, repo, node_id; /verify stays ok | ✓ VERIFIED | `types.ts:36-37`; the live complete event has graph_id and node_id and appears in the repo-scoped brief; `POST /verify` → `{"ok":true,"events":2}` |
 | 33 | 02-05 D-05: release by the holder sets Linear Todo, removes the agent label with removedLabelIds, clears the claim, sets unstarted and emits one release event | ✓ VERIFIED | Tests "the holder's release sends Linear to Todo, drops agent:<surface>, clears the claim and logs one release event" and "an issue without the agent label gets a state change only" pass; 02-05-SMOKE `release_state=Todo` |
@@ -162,7 +216,7 @@ Roadmap success criteria and proof (the contract), then plan must-haves. Where a
 | 45 | 02-07 D-10: the loop polls every 30 s | ✓ VERIFIED | `POLL_INTERVAL_SECONDS = 30  # D-10`; live journal ticks 30 s apart |
 | 46 | 02-07 D-15: appending SUBSTRATE_DISPATCH_DISABLED=1 stops launches on the next tick without a restart; `systemctl stop` ends the loop and its children | ✓ VERIFIED | Live: `=1` appended at 06:54:08Z; `dispatch disabled` at 06:54:30Z under the same MainPID 1586416. `test_disabled_env_file_makes_no_client_call` and `test_env_file_value_wins_over_process_env` pass. The unit keeps the default KillMode=control-group with `TimeoutStopSec=15`. Stopping the unit while a child ran was not exercised; it rests on systemd's control-group semantics (see Info) |
 | 47 | 02-07 D-09: the repo unit is installed, reads the EnvironmentFile, runs `/usr/bin/python3 -m substrate_dispatcher`, and is active | ✓ VERIFIED | `diff` of the repo unit against `/etc/systemd/system/substrate-dispatcher.service` is identical; `active`, `enabled` |
-| 48 | 02-07 D-12/D-13 on the live path: the loop launches only via make_launch_fn (repo_checkout → ensure_worktree → launcher.launch) | ✓ VERIFIED | `__main__.py:134 launch_fn=make_launch_fn(log=log)`; `dispatch.py:202-214`; the run-5 launch line names the per-graph worktree |
+| 48 | 02-07 D-12/D-13 on the live path: the loop launches only via make_launch_fn (repo_checkout → ensure_worktree → launcher.launch) | ✓ VERIFIED | `__main__.py:144 launch_fn=make_launch_fn(log=log, open_task=host.launch)`; `dispatch.py:237` onward: hermes candidates still go checkout → `ensure` → `launch`, and claude-code candidates take the same worktree step before `open_task` (Phase 3 D-06); the run-5 launch line names the per-graph worktree |
 | 49 | 02-07 only one process can hold dispatcher.lock; a second real-mode run exits 3 without polling | ✓ VERIFIED | Live run of `--once` at 07:10Z → `Another substrate-dispatcher holds …dispatcher.lock`, exit 3; `test_held_lock_exits_3_without_any_client` passes (now `main([])`). Since WR-04 (41c5089) `--once` without `--dry-run` exits 2 before the lock, so the real-mode lock probe is the no-flag run |
 | 50 | D-16: the proof ran on a Linear issue created for it in the live team and on a graph minted for it; a repeated run uses a NEW throwaway issue and graph | PASSED (override) | SWC-467 and ut-mughkkc0-73909228 were created for the proof. Every Linear read went through graph_get's `linear_issue_id`. Runs 2-5 reused them. Override: one issue reused across runs — accepted by owner on 2026-09-25 |
 | 51 | 02-08 proof timing: UTC timestamps for label, launch, claim, Linear In Progress, Notion Agent and brief, with delta_label_to_brief_s and within_60s; a miss is recorded, not retried | ✓ VERIFIED | 02-PROOF result lines `t_label … t_brief`, `delta_label_to_brief_s=65`, `within_60s=false`, each exactly once at column 0 |
@@ -175,8 +229,8 @@ Roadmap success criteria and proof (the contract), then plan must-haves. Where a
 | 58 | 02-09 dispatch tracer: one real Hermes session launched through tick → make_launch_fn → … → launch on a throwaway issue and graph, and it claimed n1 as hermes | ✓ VERIFIED | 02-09-TRACER: SWC-466 / ut-mugbqivi-752f2dad, `claim_evidence=claimed_by`, `claim_session=20260925_021057_7310e5` = export id; its worktree still exists on `substrate/ut-mugbqivi-752f2dad` |
 | 59 | 02-09 label-to-claim latency measured before the proof | ✓ VERIFIED | `delta_label_to_claim_s=49`, `delta_launch_to_claim_s=48`, `projected_within_60s=false` |
 | 60 | 02-09 D-10: a tick polls dispatch candidates and resolves each through graph_find before deciding | ✓ VERIFIED | `test_valid_unclaimed_hermes_candidate_launches_once` passes; `dispatch.py` calls `graph_find`; live launches |
-| 61 | 02-09 D-11: only dispatch:hermes can launch; other surfaces get one once-only comment and keep the label | ✓ VERIFIED | `test_non_hermes_surface_comments_once_and_leaves_label` passes |
-| 62 | 02-09 a launch needs exactly one registered, unclaimed node; otherwise one once-only comment | ✓ VERIFIED | Decision-table tests in `test_dispatch.py` pass (108/0 suite) |
+| 61 | 02-09 D-11: only dispatch:hermes can launch; other surfaces get one once-only comment and keep the label | ✓ VERIFIED (superseded as planned) | D-11 reads "Phase 2 dispatches `dispatch:hermes` only … `dispatch:claude-code` is Phase 3". Phase 3 D-06 (41e1ed7) added claude-code to `DISPATCHABLE_SURFACES` (`dispatch.py:24`), as D-11 anticipated. Every other surface still gets one once-only `not-dispatchable` comment and keeps its label: `test_non_hermes_surface_comments_once_and_leaves_label` (surface `omp`) passes; the comment text now names both launchable surfaces |
+| 62 | 02-09 a launch needs exactly one registered, unclaimed node; otherwise one once-only comment | ✓ VERIFIED | Decision-table tests in `test_dispatch.py` pass (149/0 suite, 2026-09-26) |
 | 63 | 02-09 D-14 cap and tracer bound | ✓ VERIFIED | `test_registry_cap_and_one_per_issue`, `test_at_capacity_skips_and_decides_again_next_tick` pass; the tracer supervised a single session |
 | 64 | 02-09 D-15: last-line-wins switch; disabled tick makes no Linear/MCP call | ✓ VERIFIED | `test_disabled_env_file_makes_no_client_call`, `test_env_file_value_wins_over_process_env`, `test_process_env_decides_when_file_lacks_key`, `test_unreadable_env_file_falls_back_to_process_env` pass; live `dispatch disabled` with the last line `=1` |
 | 65 | 02-09 D-12 on the live path: disk recorded ≥ 5 GB, main checkout stayed on main | ✓ VERIFIED | 02-09-TRACER disk record; live `git branch --show-current` → `main` |
@@ -190,11 +244,11 @@ Roadmap success criteria and proof (the contract), then plan must-haves. Where a
 | `packages/mcp-server/src/linear.ts` | LinearClient, `issueUpdate` | ✓ VERIFIED | 201 lines; used by mirror |
 | `packages/mcp-server/src/mirror.ts` | claim/release/review/done, Linear + Notion | ✓ VERIFIED | `addedLabelIds`, `In Review`, `updatePage`; built in `createMirror` |
 | `packages/mcp-server/src/notion.ts` | NotionClient, NOTION_WRITABLE, 2025-09-03 | ✓ VERIFIED | used by mirror when `notionApiKey` is set; journal `notion on` |
-| `packages/mcp-server/src/dod-gate.ts` | POST /v1/complete-issue, never throws | ✓ VERIFIED | called at `service.ts:332` |
+| `packages/mcp-server/src/dod-gate.ts` | POST /v1/complete-issue, never throws | ✓ VERIFIED | called at `service.ts:445` (unchanged file) |
 | `packages/mcp-server/src/service.ts` | claim/release/complete with ownership, mirror, gate, events | ✓ VERIFIED | `this.mirror.claim`, `kind: "release"`, `dodGate.completeIssue` |
 | `packages/mcp-server/src/index-store.ts`, `mcp.ts` | findNodesByLinear, graph_find, graph_release/complete args | ✓ VERIFIED | graph_find in the live `tools/list` |
 | `packages/mcp-server/src/types.ts`, `config.ts` | release/complete kinds; hermesLinearUrl | ✓ VERIFIED | lines 36-37; config test passes |
-| `packages/dispatcher/src/substrate_dispatcher/*.py` | linear, mcp, worktree, launcher, dispatch, sessions, __main__ | ✓ VERIFIED | 108 tests pass; the live service runs this code |
+| `packages/dispatcher/src/substrate_dispatcher/*.py` | linear, mcp, worktree, launcher, dispatch, sessions, __main__ | ✓ VERIFIED | 149 tests pass (2026-09-26); the live service runs this code |
 | `infra/vps/substrate-dispatcher.service` | EnvironmentFile, SUBSTRATE_ENV_FILE | ✓ VERIFIED | identical to the installed unit |
 | hermes-linear-connector `sync_engine.py`, `webhook_app.py` | `complete_issue`, `/v1/complete-issue` | ✓ VERIFIED | 16 targeted tests pass; route live |
 | Phase evidence docs (02-BASELINE, 02-03-BASELINE, 02-01-TRACER, 02-05-SMOKE, 02-NOTION-SCHEMA, 02-06-SMOKE, 02-09-TRACER, 02-PROOF) | the plans' `contains` markers | ✓ VERIFIED | markers present (`agent-substrate-pass=`, `connector-pass=`, `linear_issue_id=`, `done_state=`, `notion_skipped=`, `delta_label_to_claim_s=`, `delta_label_to_brief_s=`) |
@@ -203,7 +257,7 @@ Roadmap success criteria and proof (the contract), then plan must-haves. Where a
 
 | From | To | Via | Status | Details |
 | --- | --- | --- | --- | --- |
-| service.ts claimNode | mirror.ts | `this.mirror.claim` only when claimed | ✓ WIRED | `service.ts:198,223` |
+| service.ts claimNode | mirror.ts | `this.mirror.claim` only when claimed | ✓ WIRED | `service.ts:248,273` |
 | mirror.ts | linear.ts | one `updateIssue` per transition | ✓ WIRED | live single history row for state + labels |
 | mcp.ts graph_find | index-store.ts | `findNodesByLinear` | ✓ WIRED | the dispatcher resolved SWC-467 live |
 | service.ts completeNode | dod-gate.ts → connector | `dodGate.completeIssue` → POST /v1/complete-issue | ✓ WIRED | live In Review → Done by the connector |
@@ -226,14 +280,15 @@ Roadmap success criteria and proof (the contract), then plan must-haves. Where a
 
 | Behavior | Command | Result | Status |
 | --- | --- | --- | --- |
-| mcp-server suite | `cd packages/mcp-server && bun test` | 128 pass, 0 fail | ✓ PASS |
-| Type check | `bunx tsc --noEmit` | exit 0 | ✓ PASS |
-| Claim, ownership and Notion tests | `bun test -t 'losing claimer\|ownership\|another surface\|gate refusal\|…'` | 22 pass, 0 fail | ✓ PASS |
-| Dispatcher suite | `python3 -m pytest -q` (packages/dispatcher) | 108 passed | ✓ PASS |
-| Connector suite | `python3 -m pytest -q` (hermes-linear-connector) | 60 passed, 2 skipped | ✓ PASS |
-| Connector gate tests | `pytest -rA -k 'complete or apply_kanban_done or mark_dod_then_done'` | 16 PASSED | ✓ PASS |
-| Lock exclusivity | `sudo python3 -m substrate_dispatcher --once` | exit 3, lock held | ✓ PASS |
-| DoD route live | `curl -X POST :8792/v1/complete-issue -d '{}'` | 422 | ✓ PASS |
+| mcp-server suite (2026-09-26) | `SUBSTRATE_DISABLED=1 bun test packages/mcp-server` | 155 pass, 0 fail (originally 128/0) | ✓ PASS |
+| Type check | `bunx tsc --noEmit` | exit 0 (2026-09-25; not re-run) | ✓ PASS |
+| Claim, ownership, gate and Notion tests (2026-09-26) | `bun test packages/mcp-server -t '<22 patterns>'` | 35 pass, 0 fail | ✓ PASS |
+| Dispatcher suite (2026-09-26) | `python3 -m pytest -q` (packages/dispatcher) | 149 passed (originally 108) | ✓ PASS |
+| Cited dispatcher tests (2026-09-26) | `python3 -m pytest -q -k '<24 names>'` | 41 passed, 108 deselected | ✓ PASS |
+| Connector suite | `python3 -m pytest -q` (hermes-linear-connector) | 60 passed, 2 skipped (2026-09-25; repo unchanged at 6e532fe) | ✓ PASS |
+| Connector gate tests | `pytest -rA -k 'complete or apply_kanban_done or mark_dod_then_done'` | 16 PASSED (2026-09-25) | ✓ PASS |
+| Lock exclusivity | `sudo python3 -m substrate_dispatcher --once` | exit 3, lock held (2026-09-25) | ✓ PASS |
+| DoD route live | `curl -X POST :8792/v1/complete-issue -d '{}'` | 422 (2026-09-25) | ✓ PASS |
 
 ### Probe Execution
 
@@ -249,7 +304,9 @@ No TBD, FIXME, XXX, TODO, HACK or placeholder markers appear in any changed impl
 
 | File | Line | Pattern | Severity | Impact |
 | --- | --- | --- | --- | --- |
-| `packages/dispatcher/src/substrate_dispatcher/launcher.py` | 64 | Prompt step (3) says "read issue … with your Linear tool", but the session has no Linear tool (`-t terminal,file`), and Hermes' own key is for another workspace | ⚠️ Warning (owner-accepted, truth 9) | A dispatched agent can claim but cannot learn the task, so it cannot do the work unaided |
+| `packages/dispatcher/src/substrate_dispatcher/launcher.py` | 64 (at 55b4521) | Prompt step (3) said "read issue … with your Linear tool", but the session has no Linear tool (`-t terminal,file`), and Hermes' own key is for another workspace | ⚠️ Warning (owner-accepted, truth 9) — resolved by dda3758 (03-02, `issue_get`, now `launcher.py:71-74`) | The Phase 2 proof run could claim but could not learn the task; future dispatched runs can read it through `issue_get` |
+
+Re-verification anti-pattern scan: no TBD, FIXME, XXX, TODO, HACK or placeholder markers in the five changed covered files at HEAD.
 
 ### Info (not gaps)
 
@@ -273,9 +330,11 @@ There are no gaps. Five truths pass by owner override, all recorded in 02-PROOF.
 4. SWC-467 and its graph were reused across the five runs.
 5. Dispatch was left off after the proof.
 
-Two root causes behind overrides 1 and 2 remain for a later phase: the prompt's missing Linear tool, and the Hermes `pre_llm_call` hook timeout.
+Of the two root causes behind overrides 1 and 2, Phase 3 (03-02, dda3758) fixed the prompt's missing Linear tool with `issue_get`. The Hermes `pre_llm_call` hook timeout is still open; 03-CONTEXT lists it under deferred ideas.
+
+Re-verification 2026-09-26: no regressions and no new gaps. Truth 61 is superseded as planned by Phase 3 D-06; see "Re-verification 2026-09-26" above.
 
 ---
 
-_Verified: 2026-09-25T07:12:09Z_
+_Verified: 2026-09-25T07:12:09Z; re-verified 2026-09-26T00:23:44Z at fb6ffa0_
 _Verifier: Claude (gsd-verifier)_
