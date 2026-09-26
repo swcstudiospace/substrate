@@ -217,7 +217,7 @@ Plans:
      are on.
 **Proof**: A skill mined from a Cursor session is merged and appears in Claude Code and Grok
 Build without either being touched.
-**Plans**: 4/12 plans executed (plan-check passed after 3 iterations: `phases/04-skills/04-CHECK.md`)
+**Plans**: 11/12 plans executed (plan-check passed after 3 iterations: `phases/04-skills/04-CHECK.md`)
 
 Plans:
 **Wave 0**
@@ -238,13 +238,13 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 04-05-PLAN.md — Projection fan-out: Cursor ~/.agents/skills, Muse ~/.config/muse/skills, OpenClaw repoint, Grok identical copies backed up and linked, D-20 flag files
-- [ ] 04-06-PLAN.md — rivet VMs get the library read-only per new VM (D-08), with the onVmStart copy fallback; Phase-3 seed tests untouched; live VM check
-- [ ] 04-07-PLAN.md — Hermes: write_approval ×2 before external_dirs, shadowing links removed, anda moved; packages/miner bridge + queue drain + cron precheck; hourly substrate-skill-miner job; gate-staged write → PR
-- [ ] 04-08-PLAN.md — Omp: standalone tool_call extension (D-17) blocks manage_skill/learn writes and proposes; customDirectories and autolearn.enabled; live Omp session blocked with a PR URL
-- [ ] 04-09-PLAN.md — Grok skill-autonomy: write_skill, /autolearn and Stop-hook live learning propose (pending when down); rule updated; plugin reinstalled; live propose
-- [ ] 04-10-PLAN.md — docs-scraper publishes via `substrate skills propose --dir --surface docs-scraper --allow-doc-examples pem,jwt`; symlinks and README rewrite removed; its skill update proposed from a scratch copy
-- [ ] 04-11-PLAN.md — Cursor stop hook reads the envelope, keeps a redacted transcript copy for the miner and emits session.end with its ref; hooks.json projected
+- [x] 04-05-PLAN.md — Projection fan-out: Cursor ~/.agents/skills, Muse ~/.config/muse/skills, OpenClaw repoint, Grok identical copies backed up and linked, D-20 flag files
+- [x] 04-06-PLAN.md — rivet VMs get the library read-only per new VM (D-08), with the onVmStart copy fallback; Phase-3 seed tests untouched; live VM check
+- [x] 04-07-PLAN.md — Hermes: write_approval ×2 before external_dirs, shadowing links removed, anda moved; packages/miner bridge + queue drain + cron precheck; hourly substrate-skill-miner job; gate-staged write → PR
+- [x] 04-08-PLAN.md — Omp: standalone tool_call extension (D-17) blocks manage_skill/learn writes and proposes; customDirectories and autolearn.enabled; live Omp session blocked with a PR URL
+- [x] 04-09-PLAN.md — Grok skill-autonomy: write_skill, /autolearn and Stop-hook live learning propose (pending when down); rule updated; plugin reinstalled; live propose
+- [x] 04-10-PLAN.md — docs-scraper publishes via `substrate skills propose --dir --surface docs-scraper --allow-doc-examples pem,jwt`; symlinks and README rewrite removed; its skill update proposed from a scratch copy
+- [x] 04-11-PLAN.md — Cursor stop hook reads the envelope, keeps a redacted transcript copy for the miner and emits session.end with its ref; hooks.json projected
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
