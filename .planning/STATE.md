@@ -3,8 +3,8 @@ gsd_state_version: "1.0"
 milestone: v1.0
 current_plan: 0
 status: executing
-stopped_at: "CHECKPOINT 04-12 Task 2 (checkpoint:human-action): owner runs one Cursor Remote-SSH agent session on the VPS (transcripts enabled) and reports the `/` menu (done single|duplicates|none). 04-12 Task 1 done (8113f8c, t0 11:06:34Z). Resume: 04-12 Task 3."
-last_updated: "2026-09-26T11:10:00.000Z"
+stopped_at: "BLOCKED 04-12 Task 2: owner ran Cursor Remote-SSH sessions (answer 'done single', then retry 'done'), but Cursor's stop hook never fires on the VPS (0 real cursor session.end ever; postToolUse does fire) and no agent-transcripts exist on the VPS. Stop hook + transcripts appear desktop-side under Remote-SSH [INFERENCE]. 04-11 capture design (cursor-stop.ts on VPS) cannot capture. Awaiting owner decision on capture route."
+last_updated: "2026-09-26T14:50:00.000Z"
 state_head: 79c79446b55e0ab59dcea33a501f947958150af9
 progress:
   total_phases: 6
