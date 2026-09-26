@@ -1,0 +1,12 @@
+[Unit]
+Description=Agent Substrate — skills library sync every 5 minutes
+Documentation=https://github.com/swcstudiospace/agent-substrate
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=substrate-skills-sync.service
+
+[Install]
+WantedBy=timers.target

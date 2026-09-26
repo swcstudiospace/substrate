@@ -1,0 +1,29 @@
+[Unit]
+Description=Agent Substrate — skills library sync (ff-only) and projection
+Documentation=https://github.com/swcstudiospace/agent-substrate
+After=network-online.target substrate-mcp.service
+Wants=network-online.target
+
+[Service]
+# One tick, started by substrate-skills-sync.timer (D-04): refuse a dirty tree, a branch other
+# than main or a diverged history with a warning event; otherwise fetch + merge --ff-only
+# origin/main in /root/agent-skills, then the skills projector (D-05). Nothing else writes the
+# checkout. git reaches the private repo through gh's stored credential (HOME=/root, hosts.yml).
+Type=oneshot
+EnvironmentFile=/etc/substrate/substrate.env
+Environment=HOME=/root
+WorkingDirectory=/root/src/repos/agent-substrate
+# Machine-specific: `command -v bun`. Adjust when deploying elsewhere.
+ExecStart=/root/.local/share/reflex/bun/bin/bun packages/projector/src/skills-sync.ts
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=substrate-skills-sync
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX

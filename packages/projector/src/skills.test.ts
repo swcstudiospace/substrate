@@ -162,7 +162,7 @@ describe("apply writes", () => {
 		const restore = readFileSync(join(BACKUP, "RESTORE.md"), "utf8");
 		expect(restore).toContain(`ln -sfn '${join(EXP, "exp")}' '${join(GROK.dir, "exp")}'`);
 		expect(restore).toContain(`rm '${join(GROK.dir, "fresh")}'`);
-		expect(log).toEqual(["[projector] grok link-new fresh", "[projector] grok repoint exp"]);
+		expect(log).toEqual(["[projector] grok repoint exp", "[projector] grok link-new fresh"]);
 	});
 
 	test("a stale <name>.substrate-tmp left by an interrupted run is replaced, and the target never goes missing", async () => {
