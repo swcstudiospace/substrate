@@ -75,7 +75,7 @@ describe("key grammar", () => {
 describe("argv builders", () => {
 	test("equal the fixed table exactly", () => {
 		const exec = ["docker", "exec", "-e", "DISPLAY=:1", "substrate-desktop"];
-		expect([...EXEC]).toEqual(exec);
+		expect<readonly string[]>(EXEC).toEqual(exec);
 		expect(clickArgv({ type: "click", x: 10, y: 20 })).toEqual([...exec, "xdotool", "mousemove", "--sync", "10", "20", "click", "1"]);
 		expect(clickArgv({ type: "click", x: 10, y: 20, button: 3, double: true })).toEqual(
 			[...exec, "xdotool", "mousemove", "--sync", "10", "20", "click", "--repeat", "2", "3"],
