@@ -1,0 +1,34 @@
+[Unit]
+Description=Agent Substrate — Hermes pending-skill bridge (staged skill_manage → library PR) and queue drain
+Documentation=https://github.com/swcstudiospace/agent-substrate
+After=network-online.target substrate-mcp.service
+Wants=substrate-mcp.service
+
+[Service]
+# One tick, started by substrate-skills-bridge.timer (D-10): group ~/.hermes/pending/skills by
+# skill name, propose library skills and new foreground-created skills through
+# POST 127.0.0.1:7410/skills/propose with the host propose key (read per request from
+# /var/lib/substrate/skills/propose.key), hold everything else for the owner, then drain the Omp
+# and Grok queued-proposal dirs. Never reads ~/.hermes/pending/memory. Log and held state:
+# /var/lib/substrate/miner/bridge-log.jsonl and bridge-held.json.
+Type=oneshot
+EnvironmentFile=/etc/substrate/substrate.env
+Environment=HOME=/root
+Environment=PYTHONPATH=/root/src/repos/agent-substrate/packages/miner/src
+WorkingDirectory=/root/src/repos/agent-substrate
+# System python3: httpx is already installed; no venv.
+ExecStart=/usr/bin/python3 -m substrate_miner bridge --once
+
+StateDirectory=substrate
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=substrate-skills-bridge
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
