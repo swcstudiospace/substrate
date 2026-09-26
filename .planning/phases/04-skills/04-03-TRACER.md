@@ -100,6 +100,51 @@ overlay_diff_added=0
 overlay_diff_changed=1
 overlay_diff_deleted=0
 
+## Route and tool (Task 2)
+
+```
+sudo systemctl restart substrate-mcp                               # /healthz polled until 200
+ss -ltnH '( sport = :7410 )'
+sudo stat -c '%a %U %s' /var/lib/substrate/skills/propose.key      # created with umask 077, never printed
+curl -s -X POST 127.0.0.1:7410/mcp -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+curl -s -X POST 127.0.0.1:7410/mcp … -d '{"jsonrpc":"2.0","id":2,"method":"tools/call",
+  "params":{"name":"skills_propose","arguments":{…}}}'              # no key header: the VM guest's case
+curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+  -d '{"name":"x","files":{"SKILL.md":"x"},"rationale":"x"}' 127.0.0.1:7410/skills/propose
+bun /tmp/04-03-keyed.ts    # throwaway: reads the key file itself, sends it only as the header,
+                           # prints status codes and status/pr_url; deleted after the run
+```
+
+Restarted at 07:18:39Z (`ActiveEnterTimestamp`), `/healthz` 200, `active`; the journal shows
+`listening on http://127.0.0.1:7410 (index + greptime, anonymous)`. The only listener on 7410 is
+`127.0.0.1:7410`. The key file is `600 root`, 64 bytes, one line matching `^[0-9a-f]{64}$`.
+tools/list names `skills_propose`. The anonymous tools/call answered
+`{"content":[{"type":"text","text":"skills_propose needs an authenticated surface or the host propose key; nothing was proposed"}],"isError":true}`;
+the anonymous route answered 401 `{"error":"skills propose needs an authenticated surface or the host propose key"}`.
+Keyed checks: `Bad_Name` 400; a SKILL.md carrying a `ghp_` + 36 `A` shape (built at run time)
+400 with one finding of rule `github`, and the reply text does not contain the shape; a
+1,100,000-character rationale 413; the tracer's SKILL.md (surface claude-code) 200 `existing`
+with PR #1 and the same content hash, through the service's own gh (systemd, `HOME=/root`,
+hosts.yml). The ledger still holds 2 lines for the hash; `propose/` and `locks/` are empty and
+`mirror.lock` is absent. RESTORE.d/04-03.md (key removal route, ledger note, PR note) was
+written before the key was created.
+
+route_restarted_at=2026-09-26T07:18:39Z
+mcp_bind=127.0.0.1
+mcp_tools_list_has_skills_propose=true
+propose_key_mode=600
+propose_key_length=64
+route_anonymous=401
+mcp_anonymous_refused=true
+route_bad_name=400
+route_secret=400
+route_secret_rule=github
+route_too_large=413
+route_repropose_status=existing
+route_repropose_pr_url=https://github.com/swcstudiospace/agent-skills/pull/1
+route_propose_ms=782
+
 ## Gaps
 
 - The PR stays OPEN: merging it is the owner's step in 04-04 (D-16), which carries it through the
@@ -107,5 +152,12 @@ overlay_diff_deleted=0
 - `propose_ms` and `repropose_ms` include bun start-up and the `/events` POST; the propose path
   itself is not timed separately. Host load was low (just after the 07:02 reboot).
 - The dry run and the tracer ran from an interactive root shell, where gh may answer from the
-  shell's environment rather than hosts.yml; the PR read-back above used `env -i HOME=/root`, and
-  the service-path proposals (route and tool) are exercised in Task 2.
+  shell's environment rather than hosts.yml; the PR read-back used `env -i HOME=/root`, and the
+  route's re-propose ran `gh pr view` from the systemd service (hosts.yml). No PR has yet been
+  opened by the service itself (the route answered `existing`); 04-07's bridge is the first.
+- The tracer PR body was written before a cosmetic fix (a blank line after "## Redacted spans");
+  the hash and every other line are the same.
+- `route_propose_ms` covers one keyed HTTP request (ledger lookup + `gh pr view`), no git.
+- With `SUBSTRATE_TOKEN_*` configured, the global bearer check refuses every anonymous request
+  before the propose-key check, so host clients holding only the key would then need a token too;
+  today substrate.env has no token lines (`allowAnonymous`), as the plan's interfaces note.

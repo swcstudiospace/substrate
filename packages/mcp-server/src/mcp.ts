@@ -9,6 +9,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Substrate } from "./service.ts";
+import { ProposeFailed, ProposeRefused } from "./skills/propose.ts";
 import { EVENT_KINDS, MEMORY_KINDS, NODE_STATES, SURFACES, TRUST_LEVELS, type Surface } from "./types.ts";
 
 const surfaceSchema = z.enum(SURFACES);
@@ -19,6 +20,10 @@ function text(value: string) {
 
 function json(value: unknown) {
 	return text(JSON.stringify(value, null, 2));
+}
+
+function refusal(value: string) {
+	return { ...text(value), isError: true };
 }
 
 /**
@@ -40,7 +45,16 @@ function ownerSurface(
 
 const OWNER_SURFACE_HINT = "defaults to the caller's own surface; an authenticated caller cannot name another";
 
-export function createMcpServer(substrate: Substrate, callerSurface: Surface | null): McpServer {
+/**
+ * `proposeAllowed` comes from server.ts's caller check (skills/propose-auth.ts): an authenticated
+ * bearer surface or the host propose key header. It defaults to false, so a session created
+ * without it — a rivet VM guest's anonymous session included — cannot reach skills_propose.
+ */
+export function createMcpServer(
+	substrate: Substrate,
+	callerSurface: Surface | null,
+	opts: { proposeAllowed?: boolean } = {},
+): McpServer {
 	const server = new McpServer({ name: "substrate", version: "0.1.0" });
 
 	server.registerTool(
@@ -120,6 +134,41 @@ export function createMcpServer(substrate: Substrate, callerSurface: Surface | n
 		async (args) => {
 			const event = await substrate.emit({ ...args, surface: args.surface ?? callerSurface ?? "claude-code" });
 			return json({ id: event.id, ts: event.ts, hash: event.hash });
+		},
+	);
+
+	server.registerTool(
+		"skills_propose",
+		{
+			title: "Propose a skill to the shared library",
+			description:
+				"Validates and redacts a skill, then opens a branch and pull request on the private library swcstudiospace/agent-skills. Never publishes live: the owner reviews and merges. `files` (SKILL.md plus small text files, ≤ 1 MB) is overlaid on the skill as it is on main — files not named are kept; `remove` lists paths to delete. Returns status opened, existing, unchanged or declined (the owner closed identical content) with the PR URL. Needs an authenticated surface or the host propose key.",
+			inputSchema: {
+				name: z.string().describe("the skill's directory name: ^[a-z0-9][a-z0-9-]{0,63}$, equal to SKILL.md's frontmatter name"),
+				files: z.record(z.string(), z.string()).describe("relative path → UTF-8 text; must contain SKILL.md"),
+				rationale: z.string().describe("why this skill is worth keeping; goes into the PR body"),
+				remove: z.array(z.string()).optional().describe("relative paths to delete from the library skill; never SKILL.md"),
+				surface: surfaceSchema.optional().describe(OWNER_SURFACE_HINT),
+				session_id: z.string().optional(),
+				graph_id: z.string().optional(),
+			},
+			annotations: { destructiveHint: false, openWorldHint: true },
+		},
+		async ({ surface, ...args }) => {
+			if (!opts.proposeAllowed) {
+				return refusal("skills_propose needs an authenticated surface or the host propose key; nothing was proposed");
+			}
+			const owner = ownerSurface(surface, callerSurface);
+			if (owner.refusal !== undefined) return refusal(owner.refusal);
+			try {
+				return json(await substrate.proposeSkill({ ...args, surface: owner.surface }));
+			} catch (cause) {
+				if (cause instanceof ProposeRefused) {
+					return refusal(JSON.stringify({ error: cause.message, ...(cause.findings ? { findings: cause.findings } : {}) }));
+				}
+				if (cause instanceof ProposeFailed) return refusal(JSON.stringify({ error: cause.message }));
+				throw cause;
+			}
 		},
 	);
 

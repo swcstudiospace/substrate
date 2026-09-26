@@ -13,6 +13,14 @@ import { GreptimeClient, quote } from "./greptime.ts";
 import { IndexStore } from "./index-store.ts";
 import { createMirror, type Mirror, type MirrorContext, type MirrorFailure } from "./mirror.ts";
 import { redact } from "./redact.ts";
+import {
+	createSkillProposer,
+	execFileRunner,
+	type ProposeInput,
+	type ProposeResult,
+	ROUTE_MAX_BYTES,
+	type SkillProposer,
+} from "./skills/propose.ts";
 import type {
 	Actor,
 	EventInput,
@@ -77,11 +85,18 @@ export class Substrate {
 	readonly greptime: GreptimeClient | null;
 	readonly mirror: Mirror;
 	readonly dodGate: DodGate;
+	readonly skills: SkillProposer;
 
 	/** `stores` is a test seam; production always builds them from config. */
 	constructor(
 		readonly config: SubstrateConfig,
-		stores?: { index?: IndexStore | null; greptime?: GreptimeClient | null; mirror?: Mirror; dodGate?: DodGate },
+		stores?: {
+			index?: IndexStore | null;
+			greptime?: GreptimeClient | null;
+			mirror?: Mirror;
+			dodGate?: DodGate;
+			skills?: SkillProposer;
+		},
 	) {
 		this.index =
 			stores?.index !== undefined ? stores.index : config.postgresUrl ? new IndexStore(config.postgresUrl) : null;
@@ -89,6 +104,7 @@ export class Substrate {
 			stores?.greptime !== undefined ? stores.greptime : config.greptime ? new GreptimeClient(config.greptime) : null;
 		this.mirror = stores?.mirror ?? createMirror(config);
 		this.dodGate = stores?.dodGate ?? new DodGate(config.hermesLinearUrl, { timeoutMs: config.dodGateTimeoutMs });
+		this.skills = stores?.skills ?? createSkillProposer({ run: execFileRunner });
 	}
 
 	/** Idempotent. Missing stores are reported, not fatal — the server still serves what it can. */
@@ -135,6 +151,25 @@ export class Substrate {
 		const event = normalizeEvent(input, prev);
 		if (this.greptime) await this.greptime.insertEvent(event);
 		return event;
+	}
+
+	/**
+	 * skills_propose and POST /skills/propose (D-09): the route byte cap, overlay only (W2: only
+	 * the CLI may replace a tree) and no documentation-example allowance (D-18: CLI only). The
+	 * skill.propose event is a side effect and never fails the proposal.
+	 */
+	async proposeSkill(input: ProposeInput): Promise<ProposeResult> {
+		const result = await this.skills.propose(input, { maxBytes: ROUTE_MAX_BYTES, mode: "overlay" });
+		await this.emit({
+			kind: "skill.propose",
+			surface: input.surface,
+			summary: `skill ${input.name} ${result.status}`,
+			...(input.session_id ? { session_id: input.session_id } : {}),
+			...(input.graph_id ? { graph_id: input.graph_id } : {}),
+			actor: "agent",
+			payload: { name: input.name, status: result.status, pr_url: result.pr_url, content_sha256: result.content_sha256 },
+		}).catch(() => undefined);
+		return result;
 	}
 
 	async writeMemory(entry: MemoryEntryInput): Promise<MemoryEntry> {

@@ -174,7 +174,7 @@ describe("POST /skills/propose (D-09, W4)", () => {
 		const before = reachedGit.length;
 		const res = await propose({ ...VALID, name: "Bad_Name" });
 		expect(res.status).toBe(400);
-		expect((await res.json()).error).toContain("invalid skill name");
+		expect(((await res.json()) as { error: string }).error).toContain("invalid skill name");
 		expect(reachedGit).toHaveLength(before);
 	});
 
