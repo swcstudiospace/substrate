@@ -148,6 +148,76 @@ open_pr_omp_route: https://github.com/swcstudiospace/agent-skills/pull/4 skill(g
 open_pr_omp_route: https://github.com/swcstudiospace/agent-skills/pull/3 skill(omp-skill-propose): proposal from omp
 open_pr_omp_route: https://github.com/swcstudiospace/agent-skills/pull/2 skill(docs-scraper): proposal from docs-scraper
 
+### Omp session
+
+Run by plan 04-12 Task 3 with the fixed prompt (byte for byte from the plan) and the 04-08 invocation
+(04-08-SMOKE.md:51), one declared deviation `timeout 900` (plan objective). No flag added, no model,
+Omp config, ultrathink control file or propose key touched.
+
+```
+date -u +%FT%TZ                                                          → 2026-09-26T22:48:32Z
+( umask 077 && cd /tmp && timeout 900 omp -p --mode json "/ultrathink-skip" "<PROMPT>" > /tmp/04-12-omp.json ); echo "exit=$?"
+    stderr: MCP servers "ktui" and "aio" not ready after 30000ms (their tools unavailable; not used by the task)
+                                                                         → exit=0
+date -u +%FT%TZ                                                          → 2026-09-26T22:52:40Z
+python3 over /tmp/04-12-omp.json (non-JSON lines skipped; fixed fields only)
+    type: session id                                                     → 01a0dfe8-61c8-7625-abd2-071abece07e1
+    tool_execution_end, toolName != manage_skill                         → 14 (bash ×9, grep ×2, read ×2, eval ×1)
+    tool_execution_end, toolName == manage_skill                         → 1, isError true, outcome:
+    The substrate was unreachable; the proposal is queued at /root/.omp/agent/substrate-pending/substrate-skills-sync-audit-20260926T225221Z.json and will be opened as a PR automatically. Nothing was written locally.
+bridge-log.jsonl, "queue": "omp" line for that file (polled every 60 s; found on the 3rd poll)
+    {"file": "substrate-skills-sync-audit-20260926T225221Z.json", "name": "substrate-skills-sync-audit", "pr_url": "https://github.com/swcstudiospace/agent-skills/pull/7", "queue": "omp", "status": "existing", "ts": "2026-09-26T22:54:32Z"}
+ls /root/.omp/agent/substrate-pending/                                   → empty (drained)
+systemctl show substrate-mcp -p NRestarts -p ActiveEnterTimestamp        → 0, Sat 2026-09-26 19:31:28 UTC (no restart)
+ls /root/.omp/agent/sessions/-tmp/*_01a0dfe8-61c8-7625-abd2-071abece07e1.jsonl
+    → 2026-09-26T22-49-03-688Z_01a0dfe8-61c8-7625-abd2-071abece07e1.jsonl; line 1 type title; type: session id → 01a0dfe8-61c8-7625-abd2-071abece07e1
+test -e /root/.omp/agent/managed-skills                                  → absent
+control.json skipOnce (json.dumps)                                       → false (consumed)
+rm -f /tmp/04-12-omp.json                                                → gone
+env -i HOME=/root PATH=/usr/bin:/bin gh pr view <proof_pr_url> --json files,body,headRefName,createdAt
+    files → substrate-skills-sync-audit/SKILL.md; createdAt → 2026-09-26T22:52:20Z
+    body lines → "surface: omp", exactly one "session_id: 01a0dfe8-61c8-7625-abd2-071abece07e1"
+    headRefName → skill/omp/substrate-skills-sync-audit-20260926T225202692Z-3c2a
+git -C /root/agent-skills cat-file -e 34b32e2…:substrate-skills-sync-audit/SKILL.md → fails (not in the library at the Omp-route head)
+~/.claude/skills, ~/.grok/skills, ~/.agents/skills, ~/.config/muse/skills /substrate-skills-sync-audit → absent ×4
+cd /tmp && timeout 60 grok inspect 2>&1 | grep -cE '(^|[^A-Za-z0-9_-])substrate-skills-sync-audit([^A-Za-z0-9_-]|$)' → 0
+```
+
+The propose outlived the extension's 25 s client timeout: the server opened PR #7 at 22:52:20Z
+(branch stamped 22:52:02.692Z) after the extension had queued the same body at 22:52:21Z; the bridge's
+re-post at 22:54:32Z was answered `existing` with that PR (the plan's W3 slow-propose case). The PR
+was created after t_omp_start and its body names this session, so `existing` is accepted. The
+session file does not hold the PR URL on this path (the tool result names the queue file); the bridge
+log line ties the queue file to the PR.
+
+omp_prompt=On this VPS, work out how a change merged into the shared skills library (/root/agent-skills, a git checkout of swcstudiospace/agent-skills) reaches the agents: when the substrate-skills-sync timer last ran and what that run logged, which command it runs, and whether the skill links it maintains for Claude Code (/root/.claude/skills) and Grok Build (/root/.grok/skills) have drifted from the library. Stay read-only: do not edit or create files, do not start, stop or restart any service or timer, and run the projector only in its --check mode. Report what you found. Then, if the steps you took form a procedure worth reusing, save it as a new skill with your skill creator (the manage_skill tool, action create), choosing the name, description and steps yourself from what you actually ran, and report the tool result verbatim.
+omp_timeout_s=900
+t_omp_start=2026-09-26T22:48:32Z
+t_omp_end=2026-09-26T22:52:40Z
+omp_run_exit=0
+omp_session_id=01a0dfe8-61c8-7625-abd2-071abece07e1
+omp_session_file=/root/.omp/agent/sessions/-tmp/2026-09-26T22-49-03-688Z_01a0dfe8-61c8-7625-abd2-071abece07e1.jsonl
+omp_task_tool_calls=14
+omp_skill_calls=1
+extra_skill_calls=0
+omp_skill_tool=manage_skill
+omp_tool_blocked=true
+omp_propose_path=queued
+t_bridge=2026-09-26T22:54:32Z
+omp_managed_skill_written=false
+omp_ultrathink_skip_consumed=true
+omp_output_removed=true
+proof_pr_url=https://github.com/swcstudiospace/agent-skills/pull/7
+proof_pr_status=existing
+proof_pr_created_at=2026-09-26T22:52:20Z
+proof_skill=substrate-skills-sync-audit
+proof_pr_files=substrate-skills-sync-audit/SKILL.md
+proof_pr_session_line=true
+proof_pr_surface_line=true
+proof_pr_head=skill/omp/substrate-skills-sync-audit-20260926T225202692Z-3c2a
+proof_skill_new=true
+grok_inspect_count_pre=0
+
 ## Gaps
 
 ## Failed runs
