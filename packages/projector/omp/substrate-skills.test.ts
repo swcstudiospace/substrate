@@ -225,6 +225,58 @@ describe("createHandler", () => {
 		expect(result?.reason).toContain("nothing was written locally");
 		expect(result?.reason).not.toContain(KEY);
 	});
+
+	test("the ctx session id is sent as session_id, rationale unchanged", async () => {
+		const plain = fakeFetch(() => reply(200, { status: "opened", pr_url: PR }));
+		await handlerWith(plain.fetchImpl)(create);
+		const { fetchImpl, calls } = fakeFetch(() => reply(200, { status: "opened", pr_url: PR }));
+		const result = await handlerWith(fetchImpl)(create, { sessionManager: { getSessionId: () => "sess-omp-1" } });
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toContain(PR);
+		const body = JSON.parse(String(calls[0]?.init.body));
+		expect(body).toMatchObject({ ...expectedBody, session_id: "sess-omp-1" });
+		expect(body.rationale).toBe(JSON.parse(String(plain.calls[0]?.init.body)).rationale);
+	});
+
+	test("a queued proposal keeps the session_id in its pending file", async () => {
+		const { fetchImpl } = fakeFetch(() => Promise.reject(new TypeError("connection refused")));
+		const result = await handlerWith(fetchImpl)(create, { sessionManager: { getSessionId: () => "sess-omp-1" } });
+		expect(result?.reason).toContain(`queued at ${pendingPath()}`);
+		expect(JSON.parse(readFileSync(pendingPath(), "utf8"))).toMatchObject({ ...expectedBody, session_id: "sess-omp-1" });
+	});
+
+	test("no ctx, a throwing getter or a blank id sends no session_id key and still proposes", async () => {
+		const throwing = {
+			sessionManager: {
+				getSessionId: (): string => {
+					throw new Error("no session");
+				},
+			},
+		};
+		for (const ctx of [undefined, throwing, { sessionManager: { getSessionId: () => "" } }, { sessionManager: { getSessionId: () => "  " } }]) {
+			const { fetchImpl, calls } = fakeFetch(() => reply(200, { status: "opened", pr_url: PR }));
+			const result = await handlerWith(fetchImpl)(create, ctx);
+			expect(result?.block).toBe(true);
+			expect(result?.reason).toContain(PR);
+			expect(calls).toHaveLength(1);
+			expect(Object.keys(JSON.parse(String(calls[0]?.init.body)))).not.toContain("session_id");
+		}
+	});
+
+	test("the session id is read by calling getSessionId as a method (a #private field survives)", async () => {
+		class FakeSessionManager {
+			#id: string;
+			constructor(id: string) {
+				this.#id = id;
+			}
+			getSessionId(): string {
+				return this.#id;
+			}
+		}
+		const { fetchImpl, calls } = fakeFetch(() => reply(200, { status: "opened", pr_url: PR }));
+		await handlerWith(fetchImpl)(create, { sessionManager: new FakeSessionManager("sess-omp-private") });
+		expect(JSON.parse(String(calls[0]?.init.body)).session_id).toBe("sess-omp-private");
+	});
 });
 
 test("the default export registers exactly one handler, for tool_call", () => {
