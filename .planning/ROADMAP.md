@@ -261,12 +261,44 @@ Plans:
 **Depends on**: Phase 0
 **Success Criteria**:
 
-  1. `docs.search` proxies the existing RAGFlow MCP endpoint (`ragflow_retrieval`).
+  1. **Re-scoped by D-01/D-03 (05-CONTEXT.md, owner-approved 2026-09-26).** `docs.search` proxies
+     the owner's RAGFlow retrieval API (MCP name `docs_search`). Original wording kept for the
+     record: "`docs.search` proxies the existing RAGFlow MCP endpoint (`ragflow_retrieval`)."
   2. `docs.ingest` runs the redactor before ingesting.
-  3. `desktop.run` drives cua on the Docker path or the existing `recruitment-desktop` webtop.
-     No QEMU path — this host has no `/dev/kvm`.
+  3. **Re-scoped by D-16.** `desktop.run` drives a dedicated webtop container on the Docker path
+     (docker exec + xdotool/xwd; MCP name `desktop_run`). No QEMU path — this host has no
+     `/dev/kvm`. Original wording kept for the record: "`desktop.run` drives cua on the Docker path
+     or the existing `recruitment-desktop` webtop."
 **Proof**: An agent answers a docs question with a citation; a GUI smoke test runs in a sandbox.
-**Plans**: TBD
+**Plans**: 0/6 plans executed (plan-check passed: `phases/05-docs-and-desktop/05-CHECK.md`)
+
+Plans:
+**Wave 0**
+
+- [ ] 05-01-PLAN.md — Precondition (Phase 4 landed: library a clean git checkout, 04-VERIFICATION passed or accepted), ≥10 GiB disk gate, baseline re-measured at the post-Phase-4 HEAD (gate-* keys), phase5-baseline RESTORE index + RESTORE.d, library corpus inventory (D-15) → 05-01-INVENTORY.md
+
+**Wave 1** *(blocked on Wave 0 completion)*
+
+- [ ] 05-02-PLAN.md — Owner checkpoint (human-action): TEI bge-small on Railway (private), HuggingFace provider as default embedding, chat model unset, API key, REGISTER_ENABLED=0, RAGFLOW_* appended to substrate.env (presence-only); keyed checks and a redact-first live RAGFlow contract spike → 05-02-SPIKE.md
+- [ ] 05-03-PLAN.md — Desktop tracer: substrate-desktop webtop (--pull never, 127.0.0.1:6081 with basic auth, recruitment-desktop untouched), desktop_run via docker exec + xdotool/xwd behind the VM-guest guard, desktop.action events, GUI smoke over MCP
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 05-04-PLAN.md — Docs tracer: ragflow-/hyphenated sk- redaction rules, RAGFlow HTTP client, redact → strip images → hash page source, idempotent ingest planner, search normaliser, `substrate docs ingest|search`; docs-python ingested and cited
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 05-05-PLAN.md — docs_search (open) and docs_ingest (VM-guest guard) MCP tools, POST /docs/search and /docs/ingest (1 MB cap); full-corpus ingest with a zero-write re-run; redaction fixture comes back [REDACTED]
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 05-06-PLAN.md — Proof: real `claude -p` sessions (session-scoped --mcp-config) cite a docs_search URL with tool.call evidence and drive substrate-desktop through desktop_run; fixture re-check; final two-sided gate → 05-PROOF.md
+
+**Cross-cutting constraints:**
+
+- Root suite and tsc are two-sided green against the post-Phase-4 re-measure in 05-BASELINE.md (gate-* keys) with more passes than gate-pass; dispatcher pytest two-sided in 05-01 and 05-06
+- Every live change (substrate-desktop, substrate-desktop.env, substrate-mcp restarts, the RAGFlow dataset, the redaction fixture, proof files) gets a route in its plan's own /var/lib/substrate/phase5-baseline/RESTORE.d/05-NN.md first; recruitment-desktop is never touched; `--pull never`
+- Commit messages carry `Refs SPE-3576`; stage by explicit path only
 
 ### Phase 6: Ledger
 
