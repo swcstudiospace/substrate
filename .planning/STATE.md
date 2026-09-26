@@ -3,8 +3,8 @@ gsd_state_version: "1.0"
 milestone: v1.0
 current_plan: 0
 status: executing
-stopped_at: "Phase 4 wave 4 (04-05..04-11) complete; 503 bun pass, tsc 0. Executing 04-12 proof (owner Cursor session + proof PR merge checkpoints). Owner-mergeable smoke PRs open: agent-skills #2 #3 #4 #5."
-last_updated: "2026-09-26T09:10:00.000Z"
+stopped_at: "CHECKPOINT 04-12 Task 2 (checkpoint:human-action): owner runs one Cursor Remote-SSH agent session on the VPS (transcripts enabled) and reports the `/` menu (done single|duplicates|none). 04-12 Task 1 done (8113f8c, t0 11:06:34Z). Resume: 04-12 Task 3."
+last_updated: "2026-09-26T11:10:00.000Z"
 state_head: 79c79446b55e0ab59dcea33a501f947958150af9
 progress:
   total_phases: 6
