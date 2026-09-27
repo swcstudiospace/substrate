@@ -8,7 +8,7 @@ last_updated: "2026-09-27T06:00:00.000Z"
 state_head: 79c79446b55e0ab59dcea33a501f947958150af9
 progress:
   total_phases: 8
-  completed_phases: 4
+  completed_phases: 5
   total_plans: 29
   completed_plans: 28
   percent: 33
@@ -168,6 +168,8 @@ Previously "not done", now resolved:
 - Phase 4 proof re-scoped from a Cursor session to an Omp session (owner decision 2026-09-26)
 
 **Decisions**
+
+- 2026-09-27 owner: Phase 6 verification gaps_found 46/48 accepted ("Accept gaps, continue"). phase6-verification=accepted; phase6-accepted-note: Owner skipped Phase 6 devnet anchoring on 2026-09-27 ("Skip Phase 6 anchoring", 06-CONTEXT D-17) and accepted the resulting verification gaps ("Accept gaps, continue"): SC2 and SC3's roots-against-signatures clause are not delivered this milestone; SC1, SC3's chain recomputation and the chain-only tamper Proof are verified (06-VERIFICATION.md). The devnet key /etc/substrate/ledger-devnet.json and 3 SOLANA_* env lines remain unused (RESTORE.d/06-03.md removes them).
 
 - 2026-09-27 owner: Phase 5 verification gaps_found 22/25 accepted ("Accept gaps, continue"). phase5-verification=accepted; phase5-accepted-note: Owner skipped the Phase 5 docs half on 2026-09-27 (05-02 resume-signal "skip") and accepted the resulting verification gaps ("Accept gaps, continue"): SC1, SC2 and the docs clause of the Proof are not delivered this milestone; SC3 and the GUI-smoke clause are verified (05-VERIFICATION.md). Also noted: the global prompt-uplift hook created 36 Linear Backlog issues SPE-4046..4081 during the 05-06 proof; not archived (owner's call).
 
