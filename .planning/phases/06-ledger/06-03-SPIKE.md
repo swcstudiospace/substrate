@@ -67,3 +67,15 @@ id_json_stat_unchanged=true
 
 pow_faucet=build-failed
 airdrop_retry=refused
+
+## Owner decision (Task 2)
+
+After two "funded" answers the key still showed 0 lamports and no devnet transaction, and the owner
+decided at the funding checkpoint (verbatim): "Skip Phase 6 anchoring". No memo spike was sent.
+The balance was re-checked just before this closing entry: 0 lamports. The key file and the three
+SOLANA_ lines stay in place but are unused. RESTORE.d/06-03.md routes (a) and (c) document how to remove them.
+
+owner_funding=owner-skip
+owner_answer=Skip Phase 6 anchoring
+spike_result=skipped-owner
+balance_before_skip=0
