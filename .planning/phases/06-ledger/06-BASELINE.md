@@ -26,7 +26,7 @@ once under the keyed line with `-E P6_SNAPSHOT=<snapshot>`):
 sudo systemd-run --quiet --wait --pipe --collect -p EnvironmentFile=/etc/substrate/substrate.env -p WorkingDirectory=/root/src/repos/agent-substrate -E HOME=/root -E P6_SNAPSHOT=/var/lib/substrate/phase6-baseline/06-01/20260927T063414Z /root/.local/share/reflex/bun/bin/bun /tmp/06-01-probe.ts
 sudo sh -c 'cd $S && find . -type f ! -name MANIFEST.sha256 -print0 | sort -z | xargs -0 sha256sum > MANIFEST.sha256'
 sha256sum packages/mcp-server/src/fixtures/pre-cutover-rows.json
-grep -cE 'gh[pousr]_[A-Za-z0-9]{20,}|github_pat_|sk-ant-|lin_api_|ntn_[A-Za-z0-9]{30,}|\[([0-9]{1,3},){63}[0-9]{1,3}\]' packages/mcp-server/src/fixtures/pre-cutover-rows.json
+grep -cE "<the 06-PATTERNS token-shape regex>" packages/mcp-server/src/fixtures/pre-cutover-rows.json
 sudo grep -c '^SOLANA_' /etc/substrate/substrate.env
 systemctl list-timers --all --no-pager | grep -c ledger
 /root/.local/share/solana/install/active_release/bin/solana --version
