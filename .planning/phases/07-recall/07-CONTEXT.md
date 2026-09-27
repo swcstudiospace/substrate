@@ -34,6 +34,8 @@ Hindsight (Claude Code) and supermemory (Hermes) are retired in its favour.
 - D-10 Hermes: `memory.provider` supermemory → none; Hermes reaches `context_search` through its existing substrate route (planner confirms connector tool vs MCP entry). agentmemory's native plugins are NOT installed (they bypass `redact()`).
 - D-11 Substrate is the only writer holding `AGENTMEMORY_SECRET`; one agentId per surface; server scope `shared`. One-time backfill of the last 14 days of qualifying events, then continuous.
 - D-12 Proof: a headless Omp session (`omp -p --mode json "/ultrathink-skip" …`, 04-08 precedent) records a decision in graph X; a headless `claude -p` session with a session-scoped `--mcp-config` (05-06 precedent) recalls it with graph X via `context_search`.
+- D-13 (owner, 2026-09-27, OQ1): forwarded memory kinds are exactly `decision`, `warning` and `fact`; memory handoff entries are not forwarded.
+- D-14 (owner, 2026-09-27, OQ2): host Claude Code gets the substrate MCP as `deny-mutating` — read tools only (memory_brief, memory_search, graph_get, graph_find, issue_get, docs_search, context_search); every mutating substrate tool is denied in Claude Code permissions.
 
 ### Claude's Discretion
 - Cursor storage (Postgres table vs file under /var/lib/substrate), backfill batching, over-fetch factor.

@@ -372,21 +372,21 @@ substrate stays the source of truth) and replaces the broken hindsight (Claude C
 **Depends on:** Phase 6
 **Success Criteria**:
 
-  1. `context_search` (MCP) and `POST /context/search` proxy Agentmemory's smart search using
+  1. `context_search` (MCP) and `POST /context/search` proxy Agentmemory's search (`POST /agentmemory/search`, per 07-CONTEXT D-05; smart-search ignores `project`) using
      `AGENTMEMORY_URL` and `AGENTMEMORY_SECRET` from `/etc/substrate/substrate.env`; results carry
      `graph_id`, `repo` and `surface` and are marked untrusted; an Agentmemory outage or a missing key
      returns an empty result with the reason logged, never an error on the caller's path.
   2. The substrate forwards already-redacted records — `session.end` summaries, handoffs and memory
      notes — to Agentmemory with `project=<repo>`, `agentId=<surface>` and the Graph ID; nothing leaves
      the VPS before `redact()`.
-  3. The deployment is Agentmemory ≥ 0.9.28 with per-agent isolation (upstream #817), checked before
+  3. The deployment is Agentmemory ≥ 0.9.29 (raised from 0.9.28 by 07-CONTEXT D-08: 0.9.28 drops `agentId` on `/remember`) with per-agent isolation (upstream #817), checked before
      the first write.
   4. hindsight (Claude Code) and supermemory (Hermes) are retired in favour of `context_search`, each
      with a restore route written first.
 
 **Proof**: A fact recorded in one agent's session is recalled, with its Graph ID, by a different
 agent's `context_search`.
-**Plans:** 0 plans
+**Plans:** 8 plans (07-01..07-08, waves 0-6; plan-check passed iteration 3)
 
 Plans:
 
