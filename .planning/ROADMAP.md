@@ -344,19 +344,13 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 06-06-PLAN.md — Tracer: hour digest over recomputed leaves, anchors store, `ledger anchor` (5 min lag, watermark, adopt-not-re-anchor) anchors the cutover and smoke hours on devnet, proves the CLI output shape on a real send, reads them back; re-run is a no-op
+- [ ] 06-07-PLAN.md — Chain-only (D-17): CLI verify timeout and one `hour <period_start> chain <ok|broken>` line per hour; live smoke graph and baseline graphs N/N; no anchor or signature checks
+- [—] 06-06-PLAN.md — *Not executed (owner skip, D-17).* Tracer: hour digest, anchors store, `ledger anchor` on devnet
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
-- [ ] 06-08-PLAN.md — substrate-ledger-anchor.{service,timer} (OnCalendar=hourly, Persistent=true), guarded install, first timer tick and dead-RPC failure path
-
-**Wave 6** *(blocked on Wave 5 completion)*
-
-- [ ] 06-07-PLAN.md — `substrate verify` checks every hour's signer-checked devnet memo (pending ≤ 3 h, fail closed as unverified), CLI verify timeout and per-hour lines; live anchored/pending/unverified
-
-**Wave 7** *(blocked on Wave 6 completion)*
-
-- [ ] 06-09-PLAN.md — Proof (D-12): throwaway graph anchored by the timer; tamper (a) stale hash and (b) recomputed hash both flagged by verify; originals restored byte-equal and re-verified
+- [ ] 06-09-PLAN.md — Proof, chain-only (D-17): throwaway graph; tamper (a) stale hash and (b) recomputed hash both flagged by verify through the global ingest chain (b via prev linkage); originals restored byte-equal and re-verified
+- [—] 06-08-PLAN.md — *Not executed (owner skip, D-17).* substrate-ledger-anchor.{service,timer}
 
 **Cross-cutting constraints:**
 
