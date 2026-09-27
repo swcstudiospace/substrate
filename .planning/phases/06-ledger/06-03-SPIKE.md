@@ -56,3 +56,14 @@ id_json_stat_unchanged=true
   Task 2's funding precondition (balance ≥ 100000000 lamports) is unmet; per D-05 the owner funds
   the pubkey above (user_setup step) before the memo spike runs. The agent did not use
   faucet.solana.com.
+- Owner direction on the funding checkpoint (verbatim): "There's a method for seeding your first
+  amounts needed for free, can you search the web for it". Route tried: the proof-of-work devnet
+  faucet `devnet-pow` (github.com/jarry-xiao/proof-of-work-faucet). It could not be built:
+  devnet-pow 0.1.4 fails with `--locked` (its old wasm-bindgen pin does not build on the current
+  Rust toolchain), and the unlocked build ran over 40 min on this host and was stopped. No binary
+  was installed and no mining transaction was sent; RESTORE.d/06-03.md route (e) has nothing to undo.
+- A second RPC airdrop request (0.5 and 0.2 SOL) at about 09:40Z was also refused.
+- Task 2 stays blocked on the owner funding checkpoint (≥ 100000000 lamports to the pubkey above).
+
+pow_faucet=build-failed
+airdrop_retry=refused
