@@ -276,7 +276,8 @@ Plans:
      `/dev/kvm`. Original wording kept for the record: "`desktop.run` drives cua on the Docker path
      or the existing `recruitment-desktop` webtop."
 **Proof**: An agent answers a docs question with a citation; a GUI smoke test runs in a sandbox.
-**Plans**: 0/6 plans executed (plan-check passed: `phases/05-docs-and-desktop/05-CHECK.md`)
+**Owner skip (2026-09-27, 05-02 resume-signal "skip"):** the docs half (SC1, SC2 and the docs clause of the Proof) does not run this milestone — 05-04 and 05-05 are not executed and RAGFlow stays unused. Phase 5 lands on the desktop half (SC3 and the GUI-smoke clause).
+**Plans**: 05-01 and 05-03 executed; 05-02 closed at its owner checkpoint (skip); 05-04 and 05-05 skipped; 05-06 runs its desktop half only
 
 Plans:
 **Wave 0**
@@ -407,8 +408,9 @@ store, not pub/sub or a queue); runs after Phase 7 so it can cache `context_sear
   2. `/brief` and `memory_brief` results are cached per surface, repo, branch and Graph ID with a short
      TTL and invalidated by new events for that repo or graph; the brief stays inside its 1.5 s
      fail-open budget with Dragonfly unreachable.
-  3. `docs_search` and `context_search` results are cached by normalized query and scope with a TTL;
-     cached values hold only already-redacted text.
+  3. `context_search` results are cached by normalized query and scope with a TTL; cached values hold
+     only already-redacted text. *(Docs clause superseded by 08-CONTEXT D-10: Phase 5's docs half was
+     skipped by the owner, so `docs_search` does not exist.)*
   4. Hit, miss and bypass counts are visible on `GET /healthz` (or a stats endpoint); with Dragonfly
      unreachable every tool still answers, uncached.
 
