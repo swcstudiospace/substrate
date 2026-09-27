@@ -22,7 +22,7 @@ urgent insertions.
 - [x] **Phase 2: Claims and dispatch** — Linear drives who works on what (completed 2026-09-25)
 - [ ] **Phase 3: Lane A** — sandboxed, durable sessions per Graph ID via rivet-agentos
 - [x] **Phase 4: Skills** — one library, three miners proposing, Hermes primary (completed 2026-09-27)
-- [ ] **Phase 5: Docs and desktop** — product docs and GUI tasks reachable from any agent
+- [x] **Phase 5: Docs and desktop** — product docs and GUI tasks reachable from any agent (completed 2026-09-27; desktop half — docs half skipped by owner, gaps accepted)
 - [ ] **Phase 6: Ledger** — tamper-evident history
 - [ ] **Phase 7: Recall** — agents recall earlier sessions through `context_search`, backed by Agentmemory
 - [ ] **Phase 8: Hot cache** — DragonflyDB caches the brief and search reads, fail-open

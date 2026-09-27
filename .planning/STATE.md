@@ -8,7 +8,7 @@ last_updated: "2026-09-27T06:00:00.000Z"
 state_head: 79c79446b55e0ab59dcea33a501f947958150af9
 progress:
   total_phases: 8
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 29
   completed_plans: 28
   percent: 33
@@ -168,6 +168,8 @@ Previously "not done", now resolved:
 - Phase 4 proof re-scoped from a Cursor session to an Omp session (owner decision 2026-09-26)
 
 **Decisions**
+
+- 2026-09-27 owner: Phase 5 verification gaps_found 22/25 accepted ("Accept gaps, continue"). phase5-verification=accepted; phase5-accepted-note: Owner skipped the Phase 5 docs half on 2026-09-27 (05-02 resume-signal "skip") and accepted the resulting verification gaps ("Accept gaps, continue"): SC1, SC2 and the docs clause of the Proof are not delivered this milestone; SC3 and the GUI-smoke clause are verified (05-VERIFICATION.md). Also noted: the global prompt-uplift hook created 36 Linear Backlog issues SPE-4046..4081 during the 05-06 proof; not archived (owner's call).
 
 - `agent-substrate` is its own git repo. Before `git init` it was an empty dir inside
   `/root/src/repos`, so GSD resolved upward to that repo's `.planning/` — an unrelated
