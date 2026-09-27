@@ -321,7 +321,8 @@ Plans:
   3. `substrate verify <graph_id>` recomputes the chain and checks roots against signatures.
 
 **Proof**: Alter one event row — `verify` flags the graph.
-**Plans**: 0/9 plans executed (plan-check passed: `phases/06-ledger/06-CHECK.md`)
+**Owner skip (2026-09-27, 06-CONTEXT D-17):** "Skip Phase 6 anchoring" — the devnet key could not be funded (RPC airdrop refused, PoW faucet would not build, web-faucet funding never reached the address). SC2 (hourly devnet Merkle anchor, `anchors` table) and SC3's roots-against-signatures clause are not delivered; SC1 and the chain-based tamper Proof stay in scope.
+**Plans**: 06-01, 06-02 executed; 06-03 closed at its funding checkpoint (owner skip); 06-06 and 06-08 skipped; 06-04, 06-05, 06-07 (chain-only), 06-09 (chain-only proof) remain
 
 Plans:
 **Wave 0**

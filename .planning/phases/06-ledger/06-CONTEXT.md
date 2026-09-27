@@ -76,6 +76,26 @@ Not in this phase:
 - **D-15 (OQ3):** Before anchoring an hour that has no row, the job lists the key's recent memos. If a signer-checked v1 memo for that period exists, the job adopts it instead of re-anchoring. A memo whose root differs is recorded as found, logged as ALARM, and the job exits 1. This extends D-07's idempotency. — **Reversibility:** reversible (remove the adopt step).
 - **D-16 (OQ4):** Verify fails closed. If devnet cannot be read, the transaction is not found, or `SOLANA_ANCHOR_PUBKEY` is unset, the hour is `unverified`: `ok:false`, the CLI exits 1, and it prints the distinct line `[substrate] verify could not check devnet for <period>: <reason>`. — **Reversibility:** reversible (downgrade `unverified` to a warning).
 
+### Owner scope decision (2026-09-27, SPE-3970)
+- **D-17: Solana anchoring is skipped by the owner.** At 06-03's funding checkpoint the owner answered (verbatim): **"Skip Phase 6 anchoring"**. Reason: the dedicated devnet key (D-04, pubkey `Fku22yAX…Pjivq`) could not be funded. Three RPC airdrops and a later retry were refused by the rate limit, the proof-of-work faucet did not build, and the key still held 0 lamports when the owner answered (06-03-SUMMARY.md). No devnet memo was ever sent. This decision has the following effects:
+  - **Skipped (owner):**
+    - ROADMAP SC2 as a whole: the hourly Merkle root in a devnet memo, and the root/signature/count rows in `anchors`.
+    - The signature clause of SC3 ("checks roots against signatures").
+    - The anchor half of D-12 step 2 ("wait until its hour is anchored") and the anchor catch in step 3 (b).
+    - Plans 06-06 (anchor job + tracer) and 06-08 (hourly timer). They are kept on disk, marked not executed.
+    - The anchor, signer, pending and unverified half of 06-07.
+  - **Moot:** D-05, D-06 and D-07; D-10 on-chain (the 06-02 Merkle and memo code stays in the repo, but nothing calls it); the anchor half of D-11; D-13 to D-16.
+  - **Still in scope:**
+    - SC1 (D-01, D-02, D-03, D-09).
+    - SC3's chain clause: `substrate verify` recomputes the pre-cutover per-session chains and the post-cutover whole-hour global chain (06-04). The CLI prints one chain line per hour and has its own timeout (06-07 as revised).
+    - The chain-only proof (06-09 as revised): tamper (a), stale hash, fails with "hash does not match contents" at the altered row. Tamper (b), recomputed hash, is flagged **by the global chain alone**: the global successor's `prev` still names the original hash, so it fails with "prev does not match the preceding event". That successor is always in the proof hour, because event 3 is ingested after event 2 in the same hour. Restores and re-verification stay as D-12 step 4 describes.
+  - **Residual risk, accepted with the skip:** without an external anchor, a *consistent* rewrite (the altered row plus every later row, with each hash and `prev` recomputed through the head, then a substrate-mcp restart so the in-memory head re-seeds) cannot be detected. 06-04's unit test pins this as passing the chain.
+  - **Left in place, unused:**
+    - The key file and the three `SOLANA_*` lines in substrate.env (removal routes are in RESTORE.d/06-03.md).
+    - The period-keyed `anchors` table that 06-04's `migrate()` re-creates (D-08). It stays empty, 0 rows. Its re-create is harmless and cannot be avoided anyway, because `migrate()` runs on every substrate-mcp boot.
+
+  — **Reversibility:** reversible. Anchoring can be re-planned once a funded devnet key exists, by reviving 06-06, 06-08 and the anchor half of 06-07 (CONTEXT § Deferred). Rows ingested in the meantime would need the deferred genesis-style anchor over their hashes.
+
 ### Standing rules carried forward
 - Two-sided test gates against a measured phase baseline (`06-BASELINE.md`). A failure that vanishes fails the gate just like a new one.
 - Before editing any live file outside this repo (`/etc/substrate/substrate.env`, `/etc/systemd/system/*`, the new key file, the Greptime schema), take a snapshot under `/var/lib/substrate/phase6-baseline/` and add a `RESTORE.md` route. Read `/var/lib/substrate/phase1-baseline/RESTORE.md` before touching any Phase 1 snapshotted file.
