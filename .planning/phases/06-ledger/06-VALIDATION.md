@@ -27,8 +27,11 @@ Phase 6 touches `packages/mcp-server` (event, types, greptime, chain, service, i
 ledger-verify), the empty `packages/ledger` package (merkle, memo, period, solana, rpc, digest,
 store, anchor, cli), `packages/cli` (verify only), `infra/vps` (one service/timer pair) and live
 state (Greptime `agent_events` and `anchors`, `/etc/substrate/substrate.env`, a new devnet key,
-`/etc/systemd/system`, substrate-mcp, Solana devnet). Phase 6 runs **after Phases 4 and 5**; its
-baseline is measured then (06-01), never copied.
+`/etc/systemd/system`, substrate-mcp, Solana devnet). Phase 6 runs **after Phases 4 and 5** (Phase 5
+as its desktop half only: the owner skipped the docs half on 2026-09-27, SPE-3970); 06-01's gate takes
+04/05-VERIFICATION `passed` or an orchestrator acceptance quoted verbatim, and `phase45-symbols`
+needs only "skill.propose" and "docs.ingest" in types.ts and `skills propose` in the CLI (no
+`docs ingest`); its baseline is measured then (06-01), never copied.
 
 | Property | Value |
 |----------|-------|

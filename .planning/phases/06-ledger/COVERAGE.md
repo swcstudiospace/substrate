@@ -1,7 +1,7 @@
 # Coverage — Phase 6 (Ledger)
 
 > Full coverage by default. Opt-outs are explicit, reasoned decisions.
-> Plans: 06-01 (phase-order gate on Phases 4/5, baseline, rollback area, pre-cutover fixture, Greptime scratch spike), 06-02 (ledger core: Merkle, memo, hours, Solana argv, devnet RPC),
+> Plans: 06-01 (phase-order gate on Phases 4/5 — Phase 5 desktop half only, docs half owner-skipped 2026-09-27 (SPE-3970), so no `docs ingest` CLI symbol is required; baseline, rollback area, pre-cutover fixture, Greptime scratch spike), 06-02 (ledger core: Merkle, memo, hours, Solana argv, devnet RPC),
 > 06-03 (devnet key, substrate.env, funding checkpoint, memo spike), 06-04 (ingest chain code: hashing rules, Greptime contract, IngestChain, verify split),
 > 06-05 (cutover: guarded DDL, restart, cutover record, live smoke), 06-06 (anchor job + devnet tracer), 06-07 (verify anchors, CLI),
 > 06-08 (hourly timer), 06-09 (proof).
@@ -31,7 +31,7 @@
 | D-08 anchors in Greptime, re-created keyed by period | 06-01 T2 (spike), 06-04 T2 (guarded migrate), 06-05 T1 (live), 06-06 T1 (store) | DROP only while root is a TAG and count = 0; period_start time index, no PRIMARY KEY |
 | D-09 additive `ingested_at`; hours by ingest time | 06-01 T2 (spike), 06-02 T2 (period.ts), 06-04 T1/T2, 06-05 T1 | information_schema check before ADD COLUMN; `ingested_at_column=FIELD:timestamp(3)` |
 | D-10 RFC 6962 (0x00/0x01, no duplicate-last) over hashes ordered by (ingested_at, id); memo `substrate:v1:<period>:<root>:<count>` | 06-02 T1/T2, 06-06 T1 (hourDigest) | 8 reference roots; anchored memo regex; leaves recomputed |
-| D-11 verify = chain + per-hour anchor check; memo fetched server-side with an RPC timeout; first mismatching hour; recent unanchored = pending; CLI thin POST, exit 0/1 | 06-04 T3 (chain half), 06-07 T1-T3 | `firstBadHour`; `SUBSTRATE_VERIFY_TIMEOUT_MS`; cmdVerify is a single `post("/verify", …)` and Phase 6 adds no ledger/greptime/ledger-verify import to the CLI (diff since the baseline head; Phase 4/5's in-process `skills propose` and `docs ingest\|search` imports are expected) |
+| D-11 verify = chain + per-hour anchor check; memo fetched server-side with an RPC timeout; first mismatching hour; recent unanchored = pending; CLI thin POST, exit 0/1 | 06-04 T3 (chain half), 06-07 T1-T3 | `firstBadHour`; `SUBSTRATE_VERIFY_TIMEOUT_MS`; cmdVerify is a single `post("/verify", …)` and Phase 6 adds no ledger/greptime/ledger-verify import to the CLI (diff since the baseline head; Phase 4's in-process `skills propose` imports are expected — Phase 5's docs half, which would have added `docs ingest\|search`, was skipped by the owner) |
 | D-12 proof: throwaway graph, 3 events, anchored, overwrite middle (a) stale hash, (b) recomputed hash, both flagged, restore, originals captured first | 06-09 T1-T3 | see Proof row |
 | D-13 (OQ1) keep `OnCalendar=hourly` + 5 min lag; manual start only as a recorded fallback | 06-06 T2 (`ANCHOR_LAG_MS`), 06-08 T1 (units), 06-09 T1 (`anchored_by`) | pending window ≤ ~2 h stated in 06-06-TRACER Gaps and 06-PROOF Gaps |
 | D-14 (OQ2) pending within 3 h of the hour's end; older unanchored hours fail | 06-07 T1 (`PENDING_MS`), 06-07 T2 | boundary test at end + 3 h − 1 ms / + 3 h |
@@ -60,7 +60,7 @@
 | 4. Pre-cutover rows still verify; rowToEvent leaves ingested_at absent for NULL; regression pinned on the existing graphs | 06-01 T1 (fixture of every baseline-ok graph), 06-04 T1 (fixture test + inverse), 06-05 T2 / 06-07 T3 / 06-09 T3 (live N/N) |
 | 5. Proof per D-12 with evidence in 06-PROOF.md | 06-09 T1-T3 |
 | 6. checkpoint:human-action only for a refused airdrop | No static checkpoint task anywhere: the owner is reached only through 06-03 T2's precondition (funded key), which fails only when the airdrop was refused; all nine plans are `autonomous: true` |
-| 7. Runs after Phases 4 and 5; shared files edited additively | 06-PATTERNS § Cross-phase file overlap; 06-04 and 06-07 objectives; server.ts and mcp.ts untouched |
+| 7. Runs after Phases 4 and 5; shared files edited additively | 06-01 T1 phase-order gate (04/05-VERIFICATION `passed`, or `accepted` with a verbatim note; `phase45-symbols`: "skill.propose" and "docs.ingest" in types.ts, `skills propose` in the CLI — Phase 5 lands as its desktop half only, the owner skipped the docs half); 06-PATTERNS § Cross-phase file overlap; 06-04 and 06-07 objectives; server.ts and mcp.ts untouched |
 
 ## Standing rules → plan/task
 
