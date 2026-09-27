@@ -4,7 +4,8 @@
  * Ports the patterns from grok-hermes-connector's `redactor.py` so that every
  * surface strips the same things, and adds the credential classes this
  * substrate actually handles: Linear, Notion, GitHub, xAI, Anthropic, OpenAI,
- * Railway, bearer tokens, JWTs and passworded connection URLs.
+ * Railway, bearer tokens, JWTs and passworded connection URLs, and the classes
+ * agentmemory's /remember does not filter (D-04).
  *
  * This runs on the write path. An event that reaches Greptime is already clean;
  * there is no second chance once it is in an append-only log.
@@ -16,6 +17,8 @@ const REDACTED_TSKEY = "[REDACTED_TSKEY]";
 
 /** Ordered: broader structural patterns first, then token shapes. */
 const RULES: ReadonlyArray<readonly [RegExp, string]> = [
+	// ── D-04 structural: a <private> block, first so a PEM inside it goes as one block ─
+	[/<private>[\s\S]*?<\/private>/gi, REDACTED],
 	// ── from redactor.py ──────────────────────────────────────────────────────
 	[/-----BEGIN[ A-Z]*PRIVATE KEY-----[\s\S]*?-----END[ A-Z]*PRIVATE KEY-----/g, REDACTED_PEM],
 	[/tskey-[A-Za-z0-9_-]+/g, REDACTED_TSKEY],
@@ -29,6 +32,8 @@ const RULES: ReadonlyArray<readonly [RegExp, string]> = [
 	// SUBSTRATE_TOKEN_* where the keyword sits mid-name. The keyword must be a
 	// whole underscore-delimited segment, so KEYBOARD_LAYOUT is not a secret.
 	[/\b((?:[A-Z0-9]+_)*(?:API_?KEY|APIKEY|TOKEN|SECRET|KEY)(?:_[A-Z0-9]+)*\s*[:=]\s*)(\S+)/g, `$1${REDACTED}`],
+	// D-04 api-key-lower: api_key / apiKey / api-key assignments, any case; keeps the key.
+	[/\b(api[_-]?key)(\s*[:=]\s*["']?)[A-Za-z0-9_\-/.+]{16,}/gi, `$1$2${REDACTED}`],
 	// Authorization headers, however cased.
 	[/\b(authorization\s*[:=]\s*)(?:bearer\s+)?(\S+)/gi, `$1${REDACTED}`],
 	[/\bBearer\s+[A-Za-z0-9._~+/-]{12,}=*/g, `Bearer ${REDACTED}`],
@@ -43,6 +48,23 @@ const RULES: ReadonlyArray<readonly [RegExp, string]> = [
 	[/\bxai-[A-Za-z0-9]{20,}/g, REDACTED],
 	[/\bsk-ant-[A-Za-z0-9_-]{20,}/g, REDACTED],
 	[/\bsk-(?!ant-)[A-Za-z0-9]{20,}/g, REDACTED],
+	// ── D-04: shapes agentmemory's /remember does not filter ──────────────────
+	// aws: AWS access key id.
+	[/\bAKIA[0-9A-Z]{16}\b/g, REDACTED],
+	// google: Google API key.
+	[/\bAIza[0-9A-Za-z_-]{35}/g, REDACTED],
+	// slack: Slack bot token.
+	[/\bxoxb-[0-9A-Za-z-]{10,}/g, REDACTED],
+	// npm: npm access token.
+	[/\bnpm_[A-Za-z0-9]{36}/g, REDACTED],
+	// gitlab: GitLab personal access token.
+	[/\bglpat-[A-Za-z0-9_-]{20,}/g, REDACTED],
+	// digitalocean: DigitalOcean personal access token.
+	[/\bdop_v1_[a-f0-9]{64}/g, REDACTED],
+	// openai-proj: OpenAI project key (the sk- rule above stops at its second hyphen).
+	[/\bsk-proj-[A-Za-z0-9_-]{20,}/g, REDACTED],
+	// pk / rk: publishable and restricted keys.
+	[/\b(?:pk|rk)-[A-Za-z0-9][A-Za-z0-9_-]{19,}/g, REDACTED],
 	// JWTs.
 	[/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, REDACTED],
 	// Private keypair arrays, e.g. a Solana keypair pasted into a summary.
