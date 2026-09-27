@@ -21,7 +21,7 @@ urgent insertions.
 - [x] **Phase 1: Lane B** — Hermes, Omp, Muse Code, Grok Build and Grok Bot inside the substrate (completed 2026-09-24)
 - [x] **Phase 2: Claims and dispatch** — Linear drives who works on what (completed 2026-09-25)
 - [ ] **Phase 3: Lane A** — sandboxed, durable sessions per Graph ID via rivet-agentos
-- [ ] **Phase 4: Skills** — one library, three miners proposing, Hermes primary
+- [x] **Phase 4: Skills** — one library, three miners proposing, Hermes primary (completed 2026-09-27)
 - [ ] **Phase 5: Docs and desktop** — product docs and GUI tasks reachable from any agent
 - [ ] **Phase 6: Ledger** — tamper-evident history
 - [ ] **Phase 7: Recall** — agents recall earlier sessions through `context_search`, backed by Agentmemory
@@ -223,7 +223,7 @@ in Claude Code and Grok Build without either being touched. Reason: this work is
 the owner's Claude plan, which Cursor Agent sessions cannot use, and under Remote-SSH Cursor's stop
 hook and transcripts stay on the desktop. Original wording kept for the record: "A skill mined from a
 Cursor session is merged and appears in Claude Code and Grok Build without either being touched."
-**Plans**: 11/12 plans executed (plan-check passed after 3 iterations: `phases/04-skills/04-CHECK.md`)
+**Plans**: 12/12 plans executed; verification `passed` 6/6 (`phases/04-skills/04-VERIFICATION.md`)
 
 Plans:
 **Wave 0**
@@ -254,7 +254,7 @@ Plans:
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
-- [ ] 04-12-PLAN.md — Proof (re-planned for D-22, owner 2026-09-26): Omp extension forwards the session id → real headless Omp session's `manage_skill` is blocked and proposed as a PR naming that session → owner merge → Claude Code and Grok Build list it within one sync interval with neither touched; SC-3 Cursor checked at file level
+- [x] 04-12-PLAN.md — Proof (re-planned for D-22, owner 2026-09-26): Omp extension forwards the session id → real headless Omp session's `manage_skill` is blocked and proposed as a PR naming that session → owner merge → Claude Code and Grok Build list it within one sync interval with neither touched; SC-3 Cursor checked at file level
 
 **Cross-cutting constraints:**
 
