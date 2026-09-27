@@ -382,7 +382,8 @@ substrate stays the source of truth) and replaces the broken hindsight (Claude C
 
 **Proof**: A fact recorded in one agent's session is recalled, with its Graph ID, by a different
 agent's `context_search`.
-**Plans:** 8 plans (07-01..07-08, waves 0-6; plan-check passed iteration 3)
+**Owner skip (2026-09-27, 07-02 resume-signal "skip"):** Agentmemory is not integrated this milestone — 07-04..07-08 do not run; SC1–SC4 and the Proof are not delivered. Delivered: 07-01 baseline/inventory and 07-03 (redact() gains the D-04 secret classes on every emit).
+**Plans:** 07-01 and 07-03 executed; 07-02 closed at its owner checkpoint (skip); 07-04..07-08 skipped
 
 Plans:
 
@@ -411,7 +412,8 @@ store, not pub/sub or a queue); runs after Phase 7 so it can cache `context_sear
 
 **Proof**: A repeated brief, docs query and recall query are served from Dragonfly (hit counts rise,
 latency drops); with Dragonfly unreachable the same calls return the same answers, uncached.
-**Plans:** 0 plans
+**Owner skip (2026-09-27):** "Skip Phase 8" — with docs and recall skipped the cache would front only the brief, which is inside its budget; DragonflyDB stays unused this milestone. No plan executes; the 7 plans (08-01..08-07, plan-checked) are kept for a later milestone.
+**Plans:** 0/7 executed (skipped by owner)
 
 Plans:
 
