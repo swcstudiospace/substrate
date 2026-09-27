@@ -80,8 +80,17 @@ export interface SubstrateEvent {
 	payload: Record<string, unknown>;
 	/** sha256 over the canonical JSON of every other field, including `prev`. */
 	hash: string;
-	/** Hash of the previous event in this session; null for the first. */
+	/**
+	 * Hash of the previous event: per session before the Phase 6 cutover, the previous ingested
+	 * event across all surfaces after it. Null for a session's first pre-cutover event and for
+	 * the genesis (the first post-cutover event).
+	 */
 	prev: string | null;
+	/**
+	 * ISO ingest time assigned by substrate-mcp from the Phase 6 cutover on; covered by the hash.
+	 * Absent — never null — on earlier rows, so their hashes are unchanged.
+	 */
+	ingested_at?: string;
 }
 
 export const MEMORY_KINDS = ["decision", "fact", "warning", "handoff", "todo"] as const;

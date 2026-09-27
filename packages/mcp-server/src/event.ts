@@ -7,7 +7,15 @@
  */
 import { randomUUID } from "node:crypto";
 import { redact, redactValue } from "./redact.ts";
-import { EVENT_KINDS, SURFACES, type EventInput, type SubstrateEvent } from "./types.ts";
+import {
+	EVENT_KINDS,
+	SURFACES,
+	type Actor,
+	type EventInput,
+	type EventKind,
+	type SubstrateEvent,
+	type Surface,
+} from "./types.ts";
 
 /**
  * Deterministic JSON: object keys sorted recursively, so two encoders agree.
@@ -53,8 +61,13 @@ const MAX_SUMMARY = 2000;
  *
  * Redaction happens here rather than in each collector's own code path: a
  * collector may forget, but nothing reaches storage without passing through this.
+ *
+ * `ingestedAt` (ISO) is given by the ingest chain from the Phase 6 cutover on: it becomes the
+ * hashed `ingested_at` and the default `ts`. Without it the event has no `ingested_at` key at
+ * all and hashes exactly as before the cutover. The stored object is built field by field, so
+ * an input that also carries `id`, `hash`, `prev` or `ingested_at` cannot set them.
  */
-export function normalizeEvent(input: EventInput, prev: string | null): SubstrateEvent {
+export function normalizeEvent(input: EventInput, prev: string | null, ingestedAt?: string): SubstrateEvent {
 	if (!input || typeof input !== "object") throw new InvalidEventError("event must be an object");
 	if (typeof input.surface !== "string" || !isSurface(input.surface)) {
 		throw new InvalidEventError(`unknown surface: ${String(input.surface)}`);
@@ -66,7 +79,9 @@ export function normalizeEvent(input: EventInput, prev: string | null): Substrat
 		throw new InvalidEventError("summary is required");
 	}
 
-	const ts = input.ts ? new Date(input.ts) : new Date();
+	const ingested = ingestedAt === undefined ? undefined : new Date(ingestedAt);
+	if (ingested && Number.isNaN(ingested.getTime())) throw new Error(`invalid ingestedAt: ${ingestedAt}`);
+	const ts = input.ts ? new Date(input.ts) : (ingested ?? new Date());
 	if (Number.isNaN(ts.getTime())) throw new InvalidEventError(`invalid ts: ${String(input.ts)}`);
 
 	const unhashed: Omit<SubstrateEvent, "hash"> = {
@@ -86,15 +101,57 @@ export function normalizeEvent(input: EventInput, prev: string | null): Substrat
 		payload: redactValue(input.payload ?? {}),
 		prev,
 	};
+	if (ingested) unhashed.ingested_at = ingested.toISOString();
 
 	return { ...unhashed, hash: eventHash(unhashed) };
 }
 
 /**
- * Recompute a chain and report the first event that does not verify.
- * Used by `substrate verify <graph_id>`.
+ * Greptime gives back loosely typed rows; rebuild the exact shape that was hashed.
+ *
+ * `ingested_at` is set only when the column is non-null. A pre-cutover row reads NULL there and
+ * must hash without the key — `"ingested_at": null` would change every historical digest.
  */
-export function verifyChain(events: SubstrateEvent[]): { ok: true } | { ok: false; brokenAt: string; reason: string } {
+export function rowToEvent(row: Record<string, unknown>): SubstrateEvent {
+	const text = (value: unknown): string | null => (value === null || value === undefined ? null : String(value));
+	let payload: Record<string, unknown> = {};
+	try {
+		payload = row.payload ? (JSON.parse(String(row.payload)) as Record<string, unknown>) : {};
+	} catch {
+		payload = {};
+	}
+	const event: SubstrateEvent = {
+		id: String(row.id),
+		// The chain hashed ISO strings; Greptime returns epoch millis.
+		ts: new Date(Number(row.ts)).toISOString(),
+		surface: String(row.surface) as Surface,
+		session_id: text(row.session_id),
+		graph_id: text(row.graph_id),
+		node_id: text(row.node_id),
+		linear_identifier: text(row.linear_identifier),
+		step: row.step === null || row.step === undefined ? null : Number(row.step),
+		repo: text(row.repo),
+		branch: text(row.branch),
+		actor: String(row.actor) as Actor,
+		kind: String(row.kind) as EventKind,
+		summary: String(row.summary),
+		payload,
+		hash: String(row.hash),
+		prev: text(row.prev),
+	};
+	if (row.ingested_at !== null && row.ingested_at !== undefined) {
+		event.ingested_at = new Date(Number(row.ingested_at)).toISOString();
+	}
+	return event;
+}
+
+export type ChainResult = { ok: true } | { ok: false; brokenAt: string; reason: string };
+
+/**
+ * Recompute a per-session chain and report the first event that does not verify. The first
+ * event's `prev` is not checked: before the cutover a session's chain has no fixed start.
+ */
+export function verifyChain(events: SubstrateEvent[]): ChainResult {
 	let expectedPrev: string | null = null;
 	for (const event of events) {
 		const { hash, ...rest } = event;
@@ -105,6 +162,57 @@ export function verifyChain(events: SubstrateEvent[]): { ok: true } | { ok: fals
 		if (expectedPrev !== null && event.prev !== expectedPrev) {
 			return { ok: false, brokenAt: event.id, reason: "prev does not match the preceding event" };
 		}
+		expectedPrev = hash;
+	}
+	return { ok: true };
+}
+
+/**
+ * Pre-cutover rows: `prev` chains within a session, so events are grouped by session (null
+ * sessions together) and each group is checked in the order given. Interleaving two sessions
+ * into one sequence would report a break that is not there.
+ */
+export function verifySessions(events: SubstrateEvent[]): ChainResult {
+	const bySession = new Map<string, SubstrateEvent[]>();
+	for (const event of events) {
+		const key = event.session_id ?? "";
+		const bucket = bySession.get(key);
+		if (bucket) bucket.push(event);
+		else bySession.set(key, [event]);
+	}
+	for (const group of bySession.values()) {
+		const result = verifyChain(group);
+		if (!result.ok) return result;
+	}
+	return { ok: true };
+}
+
+/**
+ * Post-cutover rows: one global chain in ingest order. `events` is a contiguous stretch of it
+ * (a whole ingest hour, ordered by ingested_at, id) and `boundaryPrev` the hash of the event
+ * ingested just before the stretch — null when the stretch starts at the genesis.
+ *
+ * A consistent rewrite (content changed, every hash and prev recomputed in order) passes here;
+ * only an external anchor of the stretch could catch that.
+ */
+export function verifyGlobalChain(events: SubstrateEvent[], boundaryPrev: string | null): ChainResult {
+	const earlier = new Set<string>();
+	let expectedPrev = boundaryPrev;
+	for (const event of events) {
+		const { hash, ...rest } = event;
+		if (eventHash(rest) !== hash) {
+			return { ok: false, brokenAt: event.id, reason: "hash does not match contents" };
+		}
+		if (event.prev !== expectedPrev) {
+			const reason =
+				event.prev === null
+					? "chain reset: null prev after genesis"
+					: earlier.has(event.prev)
+						? "fork: prev names an earlier event (ambiguous insert timeout)"
+						: "prev does not match the preceding event";
+			return { ok: false, brokenAt: event.id, reason };
+		}
+		earlier.add(hash);
 		expectedPrev = hash;
 	}
 	return { ok: true };
