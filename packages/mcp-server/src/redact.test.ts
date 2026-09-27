@@ -232,3 +232,79 @@ describe("event redactor stays liberal", () => {
 		expect(redactSkillContent(line).text).toBe(line);
 	});
 });
+
+// ── D-04: the classes agentmemory's /remember does not filter (07-03) ──────────
+// Deterministic run-time fixtures: the source never holds a literal token shape.
+const UPPER_DIGITS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+const ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+const HEX = "0123456789abcdef";
+const DIGITS = "0123456789";
+const rnd = (alphabet: string, n: number) =>
+	Array.from({ length: n }, (_, i) => alphabet[(i * 7 + 3) % alphabet.length]).join("");
+
+const D04_FIXTURES: Record<string, string> = {
+	aws: "AKIA" + rnd(UPPER_DIGITS, 16),
+	google: "AIza" + rnd(ALNUM, 35),
+	slack: "xoxb-" + rnd(DIGITS, 12) + "-" + rnd(ALNUM, 24),
+	npm: "npm_" + rnd(ALNUM, 36),
+	gitlab: "glpat-" + rnd(ALNUM, 20),
+	digitalocean: "dop_v1_" + rnd(HEX, 64),
+	"openai-proj": "sk-proj-" + rnd(ALNUM, 40),
+	pk: "pk-" + rnd(ALNUM, 24),
+	rk: "rk-" + rnd(ALNUM, 24),
+	"private-tag": "<" + "private>keep this between us</" + "private>",
+	"api-key-lower": "api_key: " + rnd(ALNUM, 24),
+};
+const D04_ALL = Object.values(D04_FIXTURES).join(" and ");
+
+describe("redact D-04 classes", () => {
+	test("D-04 redacts every class agentmemory's /remember does not filter", () => {
+		for (const [name, value] of Object.entries(D04_FIXTURES)) {
+			const out = redact(`shipped ${value} to staging`);
+			expect(out, name).toContain(REDACTED);
+			expect(out, name).not.toContain(value);
+			expect(out.startsWith("shipped "), name).toBe(true);
+			expect(out.endsWith(" to staging"), name).toBe(true);
+		}
+		const all = redact(D04_ALL);
+		for (const [name, value] of Object.entries(D04_FIXTURES)) expect(all, name).not.toContain(value);
+	});
+
+	test("D-04 keeps the assignment key and drops only the value", () => {
+		const secret = rnd(ALNUM, 24);
+		expect(redact(`api_key: ${secret}`)).toBe(`api_key: ${REDACTED}`);
+		expect(redact(`apiKey="${secret}"`)).toBe(`apiKey="${REDACTED}"`);
+		expect(redact(`api-key: '${secret}'`)).toBe(`api-key: '${REDACTED}'`);
+		expect(redact(`API_KEY=${secret}`)).toBe(`API_KEY=${REDACTED}`);
+	});
+
+	test("D-04 leaves near-miss shapes alone", () => {
+		const nearMisses = [
+			`id AKIA${rnd(UPPER_DIGITS, 15)} only`,
+			"api_key: short",
+			"moved the desk-top icons into the work-flow folder",
+			`ref pk-${rnd(ALNUM, 10)} here`,
+			"<" + "private> this block never closes",
+			`pkg npm_${rnd(ALNUM, 20)} there`,
+		];
+		for (const text of nearMisses) expect(redact(text)).toBe(text);
+	});
+
+	test("D-04 redaction is idempotent", () => {
+		const once = redact(D04_ALL);
+		expect(redact(once)).toBe(once);
+		for (const [name, value] of Object.entries(D04_FIXTURES)) {
+			const single = redact(`shipped ${value} to staging`);
+			expect(redact(single), name).toBe(single);
+		}
+	});
+
+	test("D-04 multi-line private block", () => {
+		expect(redact("<" + "private>\nline one\nline two\n</" + "private> after")).toBe(`${REDACTED} after`);
+	});
+
+	test("D-04 redactValue reaches the new rules through its string path", () => {
+		expect(redactValue({ note: `deploy with ${D04_FIXTURES.aws}` })).toEqual({ note: `deploy with ${REDACTED}` });
+		expect(redactValue({ api_key: "short", note: "plain" })).toEqual({ api_key: REDACTED, note: "plain" });
+	});
+});
