@@ -5,7 +5,8 @@
  *   substrate brief [--repo R] [--branch B] [--graph G] [--surface S] [--write]
  *   substrate emit --kind K --summary S [--repo R] [--branch B] [--session I] ...
  *   substrate run <surface> [args...]        launch an agent with the brief on disk
- *   substrate verify <graph_id>              recompute the hash chain for a graph
+ *   substrate verify <graph_id>              recompute the hash chain for a graph, hour by hour
+ *                                            (own timeout: SUBSTRATE_VERIFY_TIMEOUT_MS, default 60000)
  *   substrate skills propose --dir <path> [--name N] [--surface S] [--rationale R] [--session I]
  *       [--graph G] [--allow-doc-examples pem,jwt] [--replace] [--reopen] [--dry-run]
  *                                            propose a skill dir to the shared library (branch + PR)
@@ -36,6 +37,8 @@ import type { Surface } from "../../mcp-server/src/types.ts";
 
 const DEFAULT_URL = "http://127.0.0.1:7410";
 const DEFAULT_TIMEOUT_MS = 1500;
+/** A whole-hour global chain check costs several Greptime round trips per hour: no 1.5 s hook budget. */
+const DEFAULT_VERIFY_TIMEOUT_MS = 60000;
 
 function base(): string {
 	return (process.env.SUBSTRATE_URL?.trim() || DEFAULT_URL).replace(/\/+$/, "");
@@ -49,6 +52,11 @@ function headers(): Record<string, string> {
 function timeout(): number {
 	const raw = Number(process.env.SUBSTRATE_TIMEOUT_MS);
 	return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_TIMEOUT_MS;
+}
+
+function verifyTimeout(): number {
+	const raw = Number(process.env.SUBSTRATE_VERIFY_TIMEOUT_MS);
+	return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_VERIFY_TIMEOUT_MS;
 }
 
 /** Parse `--key value` and `--flag` into a map. Unknown keys are kept, not rejected. */
@@ -88,13 +96,13 @@ function branch(cwd = process.cwd()): string | undefined {
 	return git(["rev-parse", "--abbrev-ref", "HEAD"], cwd) || undefined;
 }
 
-async function post(path: string, body: unknown): Promise<Response | null> {
+async function post(path: string, body: unknown, timeoutMs = timeout()): Promise<Response | null> {
 	try {
 		return await fetch(`${base()}${path}`, {
 			method: "POST",
 			headers: headers(),
 			body: JSON.stringify(body),
-			signal: AbortSignal.timeout(timeout()),
+			signal: AbortSignal.timeout(timeoutMs),
 		});
 	} catch {
 		return null;
@@ -174,18 +182,26 @@ async function cmdVerify(graphId: string | undefined): Promise<number> {
 		process.stderr.write("usage: substrate verify <graph_id>\n");
 		return 2;
 	}
-	const response = await post("/verify", { graph_id: graphId });
+	const response = await post("/verify", { graph_id: graphId }, verifyTimeout());
 	if (!response) {
 		process.stderr.write("[substrate] unreachable\n");
 		return 1;
 	}
-	const body = (await response.json()) as { ok?: boolean; brokenAt?: string; reason?: string; events?: number };
-	if (body.ok) {
-		process.stdout.write(`chain intact for ${graphId} (${body.events ?? 0} events)\n`);
-		return 0;
+	const body = (await response.json()) as {
+		ok?: boolean;
+		brokenAt?: string;
+		reason?: string;
+		events?: number;
+		hours?: { period_start: string; hour_events: number; graph_events: number; chain: string }[];
+	};
+	if (body.ok) process.stdout.write(`chain intact for ${graphId} (${body.events ?? 0} events)\n`);
+	else process.stderr.write(`chain BROKEN for ${graphId} at ${body.brokenAt}: ${body.reason}\n`);
+	for (const hour of body.hours ?? []) {
+		process.stdout.write(
+			`hour ${hour.period_start} chain ${hour.chain} (${hour.graph_events} of ${hour.hour_events} events)\n`,
+		);
 	}
-	process.stderr.write(`chain BROKEN for ${graphId} at ${body.brokenAt}: ${body.reason}\n`);
-	return 1;
+	return body.ok ? 0 : 1;
 }
 
 class DirRefused extends Error {}
@@ -347,7 +363,7 @@ switch (command) {
 			"substrate brief [--repo R] [--branch B] [--graph G] [--surface S] [--write]\n" +
 				"substrate emit --kind K --summary S [--repo R] [--session I] [--graph G] [--payload JSON]\n" +
 				"substrate run <surface> [args...]\n" +
-				"substrate verify <graph_id>\n" +
+				"substrate verify <graph_id>   (SUBSTRATE_VERIFY_TIMEOUT_MS, default 60000)\n" +
 				"substrate skills propose --dir <path> [--name N] [--surface S] [--rationale R] [--session I] [--graph G] [--allow-doc-examples pem,jwt] [--replace] [--reopen] [--dry-run]\n",
 		);
 		process.exit(command ? 2 : 0);
