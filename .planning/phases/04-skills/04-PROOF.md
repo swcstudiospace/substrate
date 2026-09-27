@@ -218,6 +218,99 @@ proof_pr_head=skill/omp/substrate-skills-sync-audit-20260926T225202692Z-3c2a
 proof_skill_new=true
 grok_inspect_count_pre=0
 
+### Arrival
+
+Recorded by plan 04-12 Task 5. Nothing was started, no projector was run and no sudo was used; the
+only calls against Claude Code and Grok Build were the two read-only probes.
+
+Merge (Task 4): at the checkpoint the owner answered "merged" (relayed by the orchestrator) while gh
+still reported PR #7 OPEN (polled 02:50:08Z–03:02:06Z, mergedAt null, origin main 34b32e2); the
+executor stopped and reported. The owner then re-confirmed "merged (done now)", and the orchestrator
+merged the PR under an explicit one-time owner authorization (see ## Gaps, D-16).
+Owner answer (verbatim): "Authorize agent to merge #7"; option text (verbatim): "You authorize a one-time exception to D-16: I run `gh pr merge 7 --squash` and the proof records `owner_merge=delegated` with your answer verbatim."
+
+```
+env -i HOME=/root PATH=/usr/bin:/bin gh pr view 7 -R swcstudiospace/agent-skills --json state,mergedAt,mergeCommit
+    (polled every 30 s from 03:12Z)                                      → 03:27:09Z MERGED, mergedAt 2026-09-27T03:26:59Z, mergeCommit df0db4e18b2837a1907d4fd4ddb86c3b825310f1
+read-only poll every 30 s: library SKILL.md + claude/grok links          → 03:27:15Z … 03:28:45Z waiting, 03:29:16Z projected
+stat -c %Y /root/.claude/settings.json /root/.grok/config.toml (at the observation, before the probes)
+                                                                         → 1790356194, 1790447779 (merge epoch 1790479619)
+journalctl -u substrate-skills-sync --since "2026-09-27 03:26:59" -o short-iso-precise
+    2026-09-27T03:28:56.189653+00:00 systemd[1]: Starting substrate-skills-sync.service …
+    2026-09-27T03:29:05.388915+00:00 [skills-sync] ff 34b32e27870c49d84e166830033b42f011eaf96e..df0db4e18b2837a1907d4fd4ddb86c3b825310f1
+    2026-09-27T03:29:05.393949+00:00 [projector] claude link-new substrate-skills-sync-audit
+    2026-09-27T03:29:05.394928+00:00 [projector] grok link-new substrate-skills-sync-audit
+    2026-09-27T03:29:05.395092+00:00 [projector] agents link-new substrate-skills-sync-audit
+    2026-09-27T03:29:05.395173+00:00 [projector] muse link-new substrate-skills-sync-audit
+    2026-09-27T03:29:05.395173+00:00 [projector] actions=4 warnings=0
+    2026-09-27T03:29:05.587193+00:00 systemd[1]: Finished substrate-skills-sync.service …
+journalctl -u substrate-skills-sync --since "2026-09-27 03:00" | grep Starting
+                                                                         → 03:03:53, 03:08:54, 03:13:54, 03:18:55, 03:23:55, 03:28:56 (5-min cadence)
+journalctl --since "2026-09-27 03:26:59" | grep -iE 'sudo.*(skills-sync|skills\.ts)|COMMAND=.*skills' | wc -l → 0
+readlink + stat -c %Y/%y (no -L) of the four links
+    /root/.claude/skills/substrate-skills-sync-audit   → /root/agent-skills/substrate-skills-sync-audit, 1790479745 (03:29:05.393Z)
+    /root/.grok/skills/substrate-skills-sync-audit     → /root/agent-skills/substrate-skills-sync-audit, 1790479745 (03:29:05.394Z)
+    /root/.agents/skills/substrate-skills-sync-audit   → /root/agent-skills/substrate-skills-sync-audit
+    /root/.config/muse/skills/substrate-skills-sync-audit → /root/agent-skills/substrate-skills-sync-audit
+git -C /root/agent-skills rev-parse HEAD; status --porcelain | wc -l     → df0db4e18b2837a1907d4fd4ddb86c3b825310f1, 0
+cd /tmp && timeout 60 grok inspect 2>&1 | grep -cE '(^|[^A-Za-z0-9_-])substrate-skills-sync-audit([^A-Za-z0-9_-]|$)' → 1
+    (matching line: `└ substrate-skills-sync-audit  user`)
+mkdir -p /tmp/p4-claude-probe && cd /tmp/p4-claude-probe && timeout 180 claude -p ok --output-format stream-json --verbose --max-turns 1 > /tmp/04-12-claude.jsonl 2>/dev/null
+                                                                         → exit 124 (the 180 s stop hit after the init event was written)
+python3: type system, subtype init                                       → claude_code_version present, 243 slash_commands, 205 skills;
+                                                                           substrate-skills-sync-audit in slash_commands and in skills
+rm -f /tmp/04-12-claude.jsonl; rm -rf /tmp/p4-claude-probe               → gone
+test -e /var/lib/substrate/skills/{disable-agents-root,enable-cursor-root} → absent, absent
+find /root/.agents/skills -mindepth 1 -maxdepth 1 -type l -lname '/root/agent-skills/*' | wc -l → 42
+find -L /root/agent-skills -mindepth 2 -maxdepth 2 -name SKILL.md | wc -l → 42
+hermes skills list | grep -c substrate-skills-sync-audit                 → 0 (the default table width truncates the name column);
+COLUMNS=250 hermes skills list | grep -c substrate-skills-sync           → 1 (`substrate-skills-sync-audit … local … enabled`)
+bun /tmp/04-12-load.ts (scratch, removed): loadSkills({ cwd: "/tmp", customDirectories: ["/root/agent-skills"] }),
+    name match with realpath under /root/agent-skills/                   → 1
+```
+
+The timer's first tick after the merge (03:28:56Z, 117 s later, on the 5-minute cadence) fast-forwarded
+the checkout to the merge commit and created all four links at 03:29:05Z. D = 1790479745 − 1790479619 = 126 s.
+Both config files kept the mtimes recorded at the Omp-route baseline, earlier than the merge, so neither
+was written in the merge → observation window and no keys-only diff was needed.
+
+owner_merge_answer=merged
+owner_merge=delegated
+owner_merge_note=Authorize agent to merge #7 (option: You authorize a one-time exception to D-16: I run `gh pr merge 7 --squash` and the proof records `owner_merge=delegated` with your answer verbatim.)
+t_merged=2026-09-27T03:26:59Z
+merge_sha=df0db4e18b2837a1907d4fd4ddb86c3b825310f1
+t_timer_trigger=2026-09-27T03:28:56Z
+t_projected=2026-09-27T03:29:05Z
+delta_merge_to_projection_s=126
+sync_journal_line=2026-09-27T03:29:05.393949+00:00 [projector] claude link-new substrate-skills-sync-audit
+manual_sync_after_merge=false
+claude_link=true
+grok_link=true
+claude_settings_mtime_after=1790356194
+grok_config_mtime_after=1790447779
+claude_grok_touched=false
+claude_grok_same_as_omp_route=true
+grok_inspect_count_after=1
+grok_inspect_lists=true
+claude_init_lists=true
+agents_link=true
+cursor_flags_absent=true
+agents_library_links=42
+library_skill_count=42
+sc3_cursor_file_level=true
+muse_link=true
+hermes_lists=true
+omp_lists=true
+proof_result=pass
+
 ## Gaps
+
+- D-16 / D-21 (merge checkpoint): the owner did not click merge on PR #7. The orchestrator merged it
+  with `gh pr merge 7 --squash` under the owner's explicit one-time authorization, recorded above as
+  owner_merge=delegated with the answer verbatim. Before that, a relayed "merged" answer arrived while
+  gh still reported the PR OPEN (02:50Z–03:02Z). The merge was not done by the executor.
+- Task 3 direct-path tie: the proposal took the queued path (slow propose, `existing` from the bridge
+  re-post), so the Omp session file holds the queue path, not the PR URL. The bridge-log omp line ties
+  the queue file to PR #7, and the PR body's session_id equals the session file's id.
 
 ## Failed runs
