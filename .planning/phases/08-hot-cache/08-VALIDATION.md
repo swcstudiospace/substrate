@@ -11,8 +11,17 @@ created: "2026-09-26"
 
 # Phase 8 — Validation Strategy
 
+> **Revision 2026-09-27 — Phase 5 docs half skipped (D-10, SPE-3970).** The owner answered 05-02's
+> resume-signal "skip": 05-04 and 05-05 never run, so `docs_search`, `docs_ingest`,
+> `substrate docs ingest|search`, `POST /docs/*` and `searchDocs` do not exist this milestone and
+> RAGFlow stays unused; Phase 5 lands as its desktop half only (05-01, 05-03, 05-06 desktop half).
+> Phase 8 therefore caches the brief and `context_search` only (08-CONTEXT D-10; ROADMAP Phase 8 SC3's
+> docs clause superseded).
+> Rows below are amended: no docs latency baseline, 08-05 caches context_search only, the proof
+> probes are brief + recall.
+
 > Per-phase validation contract for feedback sampling during execution.
-> Seeded from `08-CONTEXT.md` (owner-accepted D-01..D-09), `08-RESEARCH-CONTRACTS.md` §6–7 and plans
+> Seeded from `08-CONTEXT.md` (owner-accepted D-01..D-09; D-10 records the Phase 5 docs skip), `08-RESEARCH-CONTRACTS.md` §6–7 and plans
 > 08-01..08-07 (the test file names below are the ones the plans create or extend). The criterion and
 > decision coverage matrices are in `COVERAGE.md`.
 
@@ -24,7 +33,7 @@ Phase 8 touches `packages/mcp-server` (new cache.ts; config, service, server and
 `.env.example`, and live state: the owner's Railway Dragonfly service (variables, start command, TCP
 proxy), `/etc/substrate/substrate.env` (two owner-appended lines), `/etc/substrate/dragonfly-tls/`,
 substrate-mcp restarts, and — during the proof only — tagged iptables/ip6tables OUTPUT rules. Phase 8
-runs **after Phase 7** (and Phase 5's docs half); its baseline is measured then (08-01), never copied.
+runs **after Phase 7** (and Phase 5's desktop half; its docs half was skipped, D-10); its baseline is measured then (08-01), never copied.
 
 | Property | Value |
 |----------|-------|
@@ -42,7 +51,7 @@ runs **after Phase 7** (and Phase 5's docs half); its baseline is measured then 
 | agent-substrate (TS) | `SUBSTRATE_DISABLED=1 /root/.local/share/reflex/bun/bin/bun test` | re-measured after Phase 7 (`agent-substrate-pass=`) |
 | agent-substrate (tsc) | normalized `bunx tsc --noEmit` pipeline (03-BASELINE.md) | re-measured (`agent-substrate-tsc-set:`) |
 | dispatcher (Python) | `cd packages/dispatcher && python3 -m pytest -q` | re-measured (`dispatcher-pass=`) |
-| live latency (uncached) | 5× POST /brief, /docs/search, /context/search | `brief-ms-p50=` (~700 ms at planning), `docs-ms-p50=`, `ctx-ms-p50=` |
+| live latency (uncached) | 5× POST /brief, /context/search (no docs probe, D-10) | `brief-ms-p50=` (~700 ms at planning), `ctx-ms-p50=` |
 
 Two-sided rule (standing): every code task diffs failing ids and the normalized tsc set against
 `08-BASELINE.md`; a failure or type error that **disappears** fails the gate like a new one; the pass
@@ -86,9 +95,9 @@ ICMP RTT VPS → existing Railway TCP proxy 96–99 ms, SELECT 1 on an establish
 | 08-04-01 | 04 | 3 | D-03, D-04, D-05 (read path), D-08, SC2, SC4 — **tracer** | T-08-04-01, -02, -04 | rediss-only client (refusal logs "not a TLS URL", never the URL); CA pinned; offline queue off; race; value-level redactionStable guard | unit + e2e + live one-shot | `bun test cache.test.ts server.test.ts service.test.ts` ("healthz carries cache counters without changing its status"); 08-04-TRACER.md tracer_* keys; gate (manifest check over (08- commits) | ❌ | ⬜ pending |
 | 08-04-02 | 04 | 3 | D-05 (invalidation), D-07 (breaker with observed `breaker_redial`, re-arm, fire-and-forget, write guard) | T-08-04-01..04 | never blocks or fails a caller; never logs the password; already-redacted text is cacheable | unit | `bun test cache.test.ts service.test.ts` ("opens the breaker after 5 consecutive failures", "re-arms connect after a terminal close", "never logs the password", "caches already-redacted text", "an event for the repo invalidates its cached brief"); `this.forwarder?.enqueue(` count ≥ 2; gate | ✅ extend | ⬜ pending |
 | 08-04-03 | 04 | 3 | SC1 (wire), SC2 (REST + MCP brief, invalidation live), SC4 (healthz), D-08 | T-08-04-01, -05 | RESTORE first; guarded restart; tcpdump ready before restart; pcap/journal password checks; per-key expiry_stable attribution (key exists and its absolute expiry = read time + PTTL is unchanged across the repeat, ≥ 1 s gap) | live | 08-04-TRACER.md keys (`rest_repeat_hit`, `mcp_repeat_hit`, `gen_bumped`, `invalidation_new_key_written`, `post_invalidation_hit`); live healthz cache keys; RESTORE.d/08-04.md | ❌ | ⬜ pending |
-| 08-05-01 | 05 | 4 | D-06, SC3; discretion (normalization) | T-08-05-01, -04, -05, -06 | redacted values only; never cache errors or fail-open empties; tool.call on hits | unit | `bun test cache.test.ts service.test.ts server.test.ts mcp.test.ts` ("docs_search is served from the cache on a repeat", "context_search never caches a fail-open empty"); gate | ✅ extend | ⬜ pending |
-| 08-05-02 | 05 | 4 | SC3 live, SC4 (docs/recall counters) | T-08-05-01, -04 | raw values redaction-stable (value-level), 0 token shapes, TTL-bounded; tool.call count filtered to the probe query | live | 08-05-SMOKE.md keys (`docs_repeats_hit`, `ctx_repeats_hit` by expiry_stable); RESTORE.d/08-05.md; live healthz | ❌ | ⬜ pending |
-| 08-06-01 | 06 | 5 | Proof / D-09 (warm half); discretion (latency method) | T-08-06-01, -03, -04, -05 | unblock route + `#!/bin/bash` script before any rule, dry-run as a systemd unit; no ::ffff: addresses | live | 08-PROOF.md setup/warm keys (per-key `*_repeats_hit`, `warm_src_*_equal`); route/script modes, shebang, `bash -n`, TAG and addresses | ❌ | ⬜ pending |
+| 08-05-01 | 05 | 4 | D-06 (context part; docs part superseded by D-10), SC3; discretion (normalization) | T-08-05-01, -04, -05, -06 | redacted values only; never cache errors or fail-open empties; tool.call on hits | unit | `bun test cache.test.ts service.test.ts server.test.ts mcp.test.ts` ("context_search is served from the cache on a repeat", "context_search never caches a fail-open empty"); gate | ✅ extend | ⬜ pending |
+| 08-05-02 | 05 | 4 | SC3 live, SC4 (recall counters) | T-08-05-01, -04 | raw values redaction-stable (value-level), 0 token shapes, TTL-bounded; tool.call count filtered to the probe query | live | 08-05-SMOKE.md keys (`ctx_repeats_hit` by expiry_stable, `ctx_variant_equal`, `ctx_tool_call_events=5`); RESTORE.d/08-05.md; live healthz | ❌ | ⬜ pending |
+| 08-06-01 | 06 | 5 | Proof / D-09 (warm half: brief + recall, D-10); discretion (latency method) | T-08-06-01, -03, -04, -05 | unblock route + `#!/bin/bash` script before any rule, dry-run as a systemd unit; no ::ffff: addresses | live | 08-PROOF.md setup/warm keys (per-key `*_repeats_hit`, `warm_src_*_equal`, `warm_hits_delta_global` ≥ 22); route/script modes, shebang, `bash -n`, TAG and addresses | ❌ | ⬜ pending |
 | 08-06-02 | 06 | 5 | Proof / D-09 (unreachable half), SC2 (1.5 s), SC4 (every tool answers), D-07 live | T-08-06-01, -02, -05 | addresses re-resolved first; TAG-only deletion; dead-man via /bin/bash; drift classified against a direct source read; recovery without restart | live | 08-PROOF.md unreachable/recovery keys (`unreachable_*_equality` identical or substantiated drift); live iptables/ip6tables-save 0 tagged; timer inactive; healthz connected | ❌ | ⬜ pending |
 | 08-07-01 | 07 | 6 | CONTEXT open item (proxy idle timeout); D-02/D-07 evidence setup | T-08-07-02, -05 | RESTORE first; 24 h marker key; watcher unit (5 s, 4 h cap) | live probe | 08-PROOF.md `## Final` idle, persist_key_*, watcher_* keys; unit active | ❌ | ⬜ pending |
 | 08-07-02 | 07 | 6 | CONTEXT open item (domain stability across redeploys) | T-08-07-01 | none secret | owner checkpoint | reply recorded | n/a | ⬜ pending |
@@ -100,7 +109,7 @@ ICMP RTT VPS → existing Railway TCP proxy 96–99 ms, SELECT 1 on an establish
 
 ## Wave 0 Requirements
 
-- [ ] `08-BASELINE.md` — phase-order gate (05/07 VERIFICATION or recorded acceptance), bun/tsc/dispatcher two-sided keys, healthz shape, env presence counts, TLS dir absent, 0 p8-proof rules, bun revision/types, uncached latency samples, disk ≥ 10 GiB (08-01 Task 1).
+- [ ] `08-BASELINE.md` — phase-order gate (05/07 VERIFICATION or recorded acceptance; Phase 5 `accepted` with a D-10 note is expected), bun/tsc/dispatcher two-sided keys, healthz shape, env presence counts, TLS dir absent, 0 p8-proof rules, bun revision/types, uncached latency samples, disk ≥ 10 GiB (08-01 Task 1).
 - [ ] `/var/lib/substrate/phase8-baseline/` (0700) with `RESTORE.md` index and `RESTORE.d/08-01.md` (08-01 Task 1).
 - [ ] Bun RedisClient TLS spike → `08-01-SPIKE.md` with `ca_form_decision`, `close_then_connect`/`breaker_redial` and `idle_client_keeps_process=false` (08-01 Task 2).
 - [ ] `cache.test.ts` is created by 08-04 Task 1 (TDD, before cache.ts); no other scaffold is needed — service/server tests exist and are extended.
