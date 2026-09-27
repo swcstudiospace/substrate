@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { HOUR_MS } from "../../ledger/src/period.ts";
 import { loadConfig } from "./config.ts";
 import { DodGate } from "./dod-gate.ts";
+import { eventHash, normalizeEvent } from "./event.ts";
 import { LinearClient } from "./linear.ts";
 import { createMirror, Mirror } from "./mirror.ts";
 import { NotionClient } from "./notion.ts";
@@ -26,10 +28,11 @@ function stubStores(
 		},
 	};
 	const greptime = {
-		lastHash: async () => null,
-		insertEvent: async (event: SubstrateEvent) => {
-			emitted.push(event);
+		chainHead: async () => null,
+		insertEvents: async (events: readonly SubstrateEvent[]) => {
+			emitted.push(...events);
 		},
+		eventsAtKeys: async () => [],
 	};
 	return { emitted, states, index, greptime };
 }
@@ -381,10 +384,11 @@ function holderStores(node: Partial<GraphNode> = {}) {
 		},
 	};
 	const greptime = {
-		lastHash: async () => null,
-		insertEvent: async (event: SubstrateEvent) => {
-			emitted.push(event);
+		chainHead: async () => null,
+		insertEvents: async (events: readonly SubstrateEvent[]) => {
+			emitted.push(...events);
 		},
+		eventsAtKeys: async () => [],
 	};
 	const reclaimBeforeRelease = (claim: Partial<GraphNode>) => {
 		reclaim = claim;
@@ -953,7 +957,7 @@ describe("proposeSkill (D-09, D-18, W2)", () => {
 		redactions: [{ file: "SKILL.md", line: 2, rule: "assignment" }],
 	};
 
-	function setup(greptimeOverride?: { lastHash: () => Promise<null>; insertEvent: () => Promise<void> }) {
+	function setup(greptimeOverride?: { chainHead: () => Promise<null>; insertEvents: () => Promise<void>; eventsAtKeys: () => Promise<never[]> }) {
 		const { emitted, greptime } = stubStores(null);
 		const proposals: Array<{ input: ProposeInput; opts: Omit<ProposeOptions, "run"> }> = [];
 		const skills: SkillProposer = {
@@ -987,12 +991,216 @@ describe("proposeSkill (D-09, D-18, W2)", () => {
 
 	test("an event write that throws does not change the result", async () => {
 		const { substrate } = setup({
-			lastHash: async () => null,
-			insertEvent: async () => {
+			chainHead: async () => null,
+			insertEvents: async () => {
 				throw new Error("greptime down");
 			},
+			eventsAtKeys: async () => [],
 		});
 
 		expect(await substrate.proposeSkill(INPUT)).toEqual(REPLY);
+	});
+});
+
+/** A stored event as Greptime answers it: epoch-ms timestamps, payload as JSON text, NULL ingested_at. */
+function greptimeRow(event: SubstrateEvent): Record<string, unknown> {
+	return {
+		...event,
+		ts: Date.parse(event.ts),
+		payload: JSON.stringify(event.payload),
+		ingested_at: event.ingested_at === undefined ? null : Date.parse(event.ingested_at),
+	};
+}
+
+/** A greptime stand-in for verifyGraph: the graph query, one ingest hour and its boundary. */
+function verifyStore(opts: { graph: SubstrateEvent[]; hour?: SubstrateEvent[]; boundary?: SubstrateEvent | null }) {
+	const calls: string[] = [];
+	const greptime = {
+		chainHead: async () => null,
+		insertEvents: async () => undefined,
+		eventsAtKeys: async () => [],
+		sql: async (statement: string) => {
+			calls.push(`sql ${statement.includes('"ingested_at"') ? "17" : "16"}`);
+			return opts.graph.map(greptimeRow);
+		},
+		hourEvents: async (startMs: number, endMs: number) => {
+			calls.push(`hour ${new Date(startMs).toISOString()} ${endMs - startMs}`);
+			return (opts.hour ?? []).map(greptimeRow);
+		},
+		lastEventBefore: async (ms: number) => {
+			calls.push(`before ${new Date(ms).toISOString()}`);
+			return opts.boundary ? greptimeRow(opts.boundary) : null;
+		},
+	};
+	return { calls, substrate: new Substrate(loadConfig({}), { index: null, greptime: greptime as never }) };
+}
+
+/** Rebuild an event with some fields changed and its hash recomputed. */
+function rehashed(event: SubstrateEvent, changes: Partial<SubstrateEvent>): SubstrateEvent {
+	const { hash: _hash, ...rest } = { ...event, ...changes };
+	return { ...rest, hash: eventHash(rest) };
+}
+
+describe("global ingest chain (06-04)", () => {
+	const HOUR = Date.parse("2026-09-27T13:00:00.000Z");
+	const at = (ms: number) => new Date(ms).toISOString();
+	const base = { surface: "claude-code" as const, kind: "tool.call" as const, repo: "r" };
+
+	/** A global chain: `specs` in ingest order, one ms apart from `startMs`, chained onto `prev`. */
+	function chain(startMs: number, prev: string | null, specs: Array<{ graph_id: string; session_id: string }>) {
+		const events: SubstrateEvent[] = [];
+		for (const [i, spec] of specs.entries()) {
+			const event = normalizeEvent({ ...base, ...spec, summary: `event ${i}` }, prev, at(startMs + i));
+			events.push(event);
+			prev = event.hash;
+		}
+		return events;
+	}
+
+	test("two sequential emits chain across sessions and carry ingested_at", async () => {
+		const { emitted, greptime } = stubStores(null);
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: greptime as never });
+		const a = await substrate.emit({ ...base, summary: "a", session_id: "A" });
+		const b = await substrate.emit({ ...base, summary: "b", session_id: "B" });
+		expect(a.prev).toBeNull();
+		expect(b.prev).toBe(a.hash);
+		expect(typeof a.ingested_at).toBe("string");
+		expect(Date.parse(b.ingested_at!)).toBeGreaterThan(Date.parse(a.ingested_at!));
+		expect(emitted.map((e) => e.id)).toEqual([a.id, b.id]);
+	});
+
+	test("without greptime, emit normalizes only: no prev, no ingested_at, nothing stored", async () => {
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: null });
+		expect(substrate.chain).toBeNull();
+		const event = await substrate.emit({ ...base, summary: "a", session_id: "A" });
+		expect(event.prev).toBeNull();
+		expect("ingested_at" in event).toBe(false);
+		const { hash, ...rest } = event;
+		expect(eventHash(rest)).toBe(hash);
+	});
+
+	test("seedChain reports seeded, genesis or unknown without throwing", async () => {
+		const seeded = { chainHead: async () => ({ hash: "h", ingestedAtMs: HOUR }), insertEvents: async () => undefined, eventsAtKeys: async () => [] };
+		const genesis = { ...seeded, chainHead: async () => null };
+		const down = {
+			...seeded,
+			chainHead: async () => {
+				throw new Error("greptime unreachable");
+			},
+		};
+		const seed = (greptime: object | null) => new Substrate(loadConfig({}), { index: null, greptime: greptime as never }).seedChain();
+		expect(await seed(seeded)).toBe("seeded");
+		expect(await seed(genesis)).toBe("genesis");
+		expect(await seed(down)).toBe("unknown: greptime unreachable");
+		expect(await seed(null)).toBe("unknown: greptime not configured");
+	});
+
+	test("a pre-cutover graph verifies per session exactly as before, with an empty post side", async () => {
+		const a1 = normalizeEvent({ ...base, graph_id: "G", session_id: "A", summary: "a1" }, null);
+		const b1 = normalizeEvent({ ...base, graph_id: "G", session_id: "B", summary: "b1" }, null);
+		const a2 = normalizeEvent({ ...base, graph_id: "G", session_id: "A", summary: "a2" }, a1.hash);
+		const ok = verifyStore({ graph: [a1, b1, a2] });
+		expect(await ok.substrate.verifyGraph("G")).toEqual({
+			ok: true,
+			events: 3,
+			chain: { pre: { ok: true, events: 3 }, post: { ok: true, events: 0 } },
+			hours: [],
+		});
+		expect(ok.calls).toEqual(["sql 17"]);
+
+		const tampered = { ...a2, summary: "ran rm -rf /" };
+		expect(await verifyStore({ graph: [a1, b1, tampered] }).substrate.verifyGraph("G")).toEqual({
+			ok: false,
+			events: 3,
+			brokenAt: a2.id,
+			reason: "hash does not match contents",
+			chain: {
+				pre: { ok: false, events: 3, brokenAt: a2.id, reason: "hash does not match contents" },
+				post: { ok: true, events: 0 },
+			},
+			hours: [],
+		});
+	});
+
+	test("post-cutover interleaved sessions verify as one global hour", async () => {
+		const [boundary] = chain(HOUR - 60_000, "h-before", [{ graph_id: "X", session_id: "x" }]);
+		const hour = chain(HOUR, boundary!.hash, [
+			{ graph_id: "G", session_id: "A" },
+			{ graph_id: "X", session_id: "x" },
+			{ graph_id: "G", session_id: "B" },
+			{ graph_id: "G", session_id: "A" },
+			{ graph_id: "X", session_id: "y" },
+		]);
+		const graph = hour.filter((e) => e.graph_id === "G");
+		const { calls, substrate } = verifyStore({ graph, hour, boundary });
+		expect(await substrate.verifyGraph("G")).toEqual({
+			ok: true,
+			events: 3,
+			chain: { pre: { ok: true, events: 0 }, post: { ok: true, events: 3 } },
+			hours: [{ period_start: "2026-09-27T13:00:00.000Z", hour_events: 5, graph_events: 3, chain: "ok" }],
+		});
+		expect(calls.sort()).toEqual(
+			["sql 17", `hour 2026-09-27T13:00:00.000Z ${HOUR_MS}`, "before 2026-09-27T13:00:00.000Z"].sort(),
+		);
+	});
+
+	test("a stale hash, a boundary break or a second null prev breaks the hour at that event", async () => {
+		const [boundary] = chain(HOUR - 60_000, "h-before", [{ graph_id: "X", session_id: "x" }]);
+		const hour = chain(HOUR, boundary!.hash, [
+			{ graph_id: "G", session_id: "A" },
+			{ graph_id: "X", session_id: "x" },
+			{ graph_id: "G", session_id: "B" },
+		]);
+		const cases: Array<{ hour: SubstrateEvent[]; boundary: SubstrateEvent | null; brokenAt: string; reason: string }> = [
+			{
+				hour: [hour[0]!, { ...hour[1]!, summary: "rewritten" }, hour[2]!],
+				boundary: boundary!,
+				brokenAt: hour[1]!.id,
+				reason: "hash does not match contents",
+			},
+			{
+				hour,
+				boundary: rehashed(boundary!, { summary: "another boundary" }),
+				brokenAt: hour[0]!.id,
+				reason: "prev does not match the preceding event",
+			},
+			{
+				hour: [hour[0]!, hour[1]!, rehashed(hour[2]!, { prev: null })],
+				boundary: boundary!,
+				brokenAt: hour[2]!.id,
+				reason: "chain reset: null prev after genesis",
+			},
+		];
+		for (const c of cases) {
+			const graph = c.hour.filter((e) => e.graph_id === "G");
+			const reply = await verifyStore({ graph, hour: c.hour, boundary: c.boundary }).substrate.verifyGraph("G");
+			expect(reply).toMatchObject({ ok: false, events: 2, brokenAt: c.brokenAt, reason: c.reason });
+			expect(reply.chain?.post).toEqual({ ok: false, events: 2, brokenAt: c.brokenAt, reason: c.reason });
+			expect(reply.hours).toEqual([
+				{ period_start: "2026-09-27T13:00:00.000Z", hour_events: 3, graph_events: 2, chain: "broken" },
+			]);
+		}
+	});
+
+	test("pre and post results are both reported; the first failure names brokenAt", async () => {
+		const pre1 = normalizeEvent({ ...base, graph_id: "G", session_id: "A", summary: "old" }, null);
+		const hour = chain(HOUR, null, [
+			{ graph_id: "G", session_id: "A" },
+			{ graph_id: "G", session_id: "A" },
+		]);
+		const staleHour = [hour[0]!, { ...hour[1]!, summary: "rewritten" }];
+		const postBroken = await verifyStore({ graph: [pre1, ...staleHour], hour: staleHour, boundary: null }).substrate.verifyGraph("G");
+		expect(postBroken.ok).toBe(false);
+		expect(postBroken.brokenAt).toBe(hour[1]!.id);
+		expect(postBroken.chain).toEqual({
+			pre: { ok: true, events: 1 },
+			post: { ok: false, events: 2, brokenAt: hour[1]!.id, reason: "hash does not match contents" },
+		});
+
+		const preTampered = { ...pre1, summary: "ran rm -rf /" };
+		const preBroken = await verifyStore({ graph: [preTampered, ...staleHour], hour: staleHour, boundary: null }).substrate.verifyGraph("G");
+		expect(preBroken.brokenAt).toBe(pre1.id);
+		expect(preBroken.chain?.pre.ok).toBe(false);
+		expect(preBroken.chain?.post.ok).toBe(false);
 	});
 });

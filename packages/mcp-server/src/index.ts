@@ -17,6 +17,11 @@ for (const problem of migration.errors) {
 	process.stderr.write(`[substrate] degraded — ${problem}\n`);
 }
 
+// After migrate: the head of the global ingest chain. An unknown head is retried by the first emit.
+const head = await substrate.seedChain();
+if (head.startsWith("unknown")) process.stderr.write(`[substrate] degraded — chain head ${head}\n`);
+else process.stdout.write(`[substrate] chain head ${head}\n`);
+
 const server = createHttpServer(substrate, config);
 
 server.listen(config.port, config.host, () => {

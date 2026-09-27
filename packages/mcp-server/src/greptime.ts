@@ -234,39 +234,6 @@ export class GreptimeClient {
 		}));
 	}
 
-	async insertEvent(event: SubstrateEvent): Promise<void> {
-		const values = [
-			quote(event.ts),
-			quote(event.id),
-			quote(event.surface),
-			quote(event.session_id),
-			quote(event.graph_id),
-			quote(event.node_id),
-			quote(event.linear_identifier),
-			event.step === null ? "NULL" : quote(event.step),
-			quote(event.repo),
-			quote(event.branch),
-			quote(event.actor),
-			quote(event.kind),
-			quote(event.summary),
-			quote(JSON.stringify(event.payload)),
-			quote(event.hash),
-			quote(event.prev),
-		].join(", ");
-		await this.sql(
-			`INSERT INTO "agent_events" ("ts", "id", "surface", "session_id", "graph_id", "node_id", "linear_identifier", "step", "repo", "branch", "actor", "kind", "summary", "payload", "hash", "prev") VALUES (${values})`,
-		);
-	}
-
-	/** Latest event hash for a session — the `prev` of the next one. */
-	async lastHash(sessionId: string): Promise<string | null> {
-		const rows = await this.sql(
-			`SELECT "hash" FROM "agent_events" WHERE "session_id" = ${quote(sessionId)} ORDER BY "ts" DESC LIMIT 1`,
-		);
-		const hash = rows[0]?.hash;
-		return typeof hash === "string" ? hash : null;
-	}
-
 	/** Write a whole ingest batch in ONE multi-row INSERT (one round trip). */
 	async insertEvents(events: readonly SubstrateEvent[]): Promise<void> {
 		if (events.length === 0) return;

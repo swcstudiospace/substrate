@@ -5,13 +5,15 @@
  * surfaces cannot drift. Hooks need REST (they cannot call MCP tools); agents
  * get MCP. Same code underneath.
  */
+import { HOUR_MS, hourIso, hourStart } from "../../ledger/src/period.ts";
 import { composeBrief, type BriefRequest } from "./brief.ts";
+import { IngestChain } from "./chain.ts";
 import type { SubstrateConfig } from "./config.ts";
 import type { DesktopRunInput } from "./desktop/actions.ts";
 import { bufferRunner, createDesktopDriver, type DesktopDriver, type DesktopRunResult } from "./desktop/driver.ts";
 import { DodGate, type DodEvidence, type GateResult } from "./dod-gate.ts";
-import { normalizeEvent, verifyChain } from "./event.ts";
-import { GreptimeClient, quote } from "./greptime.ts";
+import { type ChainResult, normalizeEvent, rowToEvent, verifyGlobalChain, verifySessions } from "./event.ts";
+import { EVENT_COLUMNS, GreptimeClient, quote } from "./greptime.ts";
 import { IndexStore } from "./index-store.ts";
 import { createMirror, type Mirror, type MirrorContext, type MirrorFailure } from "./mirror.ts";
 import { redact } from "./redact.ts";
@@ -24,9 +26,7 @@ import {
 	type SkillProposer,
 } from "./skills/propose.ts";
 import type {
-	Actor,
 	EventInput,
-	EventKind,
 	GraphNode,
 	MemoryEntry,
 	MemoryEntryInput,
@@ -52,39 +52,38 @@ function ownershipRefusal(node: GraphNode, surface: Surface, sessionId: string, 
 		: "node is not claimed";
 }
 
-/** Greptime gives back loosely typed rows; rebuild the exact shape that was hashed. */
-function rowToEvent(row: Record<string, unknown>): SubstrateEvent {
-	const text = (value: unknown): string | null => (value === null || value === undefined ? null : String(value));
-	let payload: Record<string, unknown> = {};
-	try {
-		payload = row.payload ? (JSON.parse(String(row.payload)) as Record<string, unknown>) : {};
-	} catch {
-		payload = {};
-	}
-	return {
-		id: String(row.id),
-		// The chain hashed an ISO string; Greptime returns epoch millis.
-		ts: new Date(Number(row.ts)).toISOString(),
-		surface: String(row.surface) as Surface,
-		session_id: text(row.session_id),
-		graph_id: text(row.graph_id),
-		node_id: text(row.node_id),
-		linear_identifier: text(row.linear_identifier),
-		step: row.step === null || row.step === undefined ? null : Number(row.step),
-		repo: text(row.repo),
-		branch: text(row.branch),
-		actor: String(row.actor) as Actor,
-		kind: String(row.kind) as EventKind,
-		summary: String(row.summary),
-		payload,
-		hash: String(row.hash),
-		prev: text(row.prev),
-	};
+/** One side of a graph's verification: the pre-cutover sessions or the post-cutover hours. */
+export interface ChainSide {
+	ok: boolean;
+	events: number;
+	brokenAt?: string;
+	reason?: string;
+}
+
+/** One ingest hour of the global chain that holds events of the graph. */
+export interface HourCheck {
+	period_start: string;
+	/** Every event of the hour, all graphs and surfaces: the chain is checked over the whole hour. */
+	hour_events: number;
+	graph_events: number;
+	chain: "ok" | "broken";
+}
+
+/** POST /verify. `ok`, `events`, `brokenAt` and `reason` keep their pre-Phase-6 meaning. */
+export interface GraphVerification extends ChainSide {
+	chain?: { pre: ChainSide; post: ChainSide };
+	hours?: HourCheck[];
+}
+
+function side(events: number, result: ChainResult): ChainSide {
+	return result.ok ? { ok: true, events } : { ok: false, events, brokenAt: result.brokenAt, reason: result.reason };
 }
 
 export class Substrate {
 	readonly index: IndexStore | null;
 	readonly greptime: GreptimeClient | null;
+	/** The global ingest chain every emit goes through; null without Greptime. */
+	readonly chain: IngestChain | null;
 	readonly mirror: Mirror;
 	readonly dodGate: DodGate;
 	readonly skills: SkillProposer;
@@ -106,6 +105,7 @@ export class Substrate {
 			stores?.index !== undefined ? stores.index : config.postgresUrl ? new IndexStore(config.postgresUrl) : null;
 		this.greptime =
 			stores?.greptime !== undefined ? stores.greptime : config.greptime ? new GreptimeClient(config.greptime) : null;
+		this.chain = this.greptime ? new IngestChain(this.greptime) : null;
 		this.mirror = stores?.mirror ?? createMirror(config);
 		this.dodGate = stores?.dodGate ?? new DodGate(config.hermesLinearUrl, { timeoutMs: config.dodGateTimeoutMs });
 		this.skills = stores?.skills ?? createSkillProposer({ run: execFileRunner });
@@ -146,17 +146,26 @@ export class Substrate {
 	}
 
 	/**
-	 * Append an event. Chains onto the session's previous event when Greptime
-	 * knows of one; a session's first event has `prev: null`.
+	 * Append an event to the global ingest chain: hashed on ingest with `prev` = the event ingested
+	 * just before it across every surface, and a strictly increasing `ingested_at`. IngestChain
+	 * serializes and batches concurrent emits. Without Greptime the event is normalized only —
+	 * no `prev`, no `ingested_at`, nothing stored.
 	 */
 	async emit(input: EventInput): Promise<SubstrateEvent> {
-		let prev: string | null = null;
-		if (this.greptime && input.session_id) {
-			prev = await this.greptime.lastHash(input.session_id).catch(() => null);
+		return this.chain ? this.chain.append(input) : normalizeEvent(input, null);
+	}
+
+	/**
+	 * Seed the chain head at boot. Never throws: "unknown: <reason>" means the head could not be
+	 * read, and the first emit retries the seed.
+	 */
+	async seedChain(): Promise<string> {
+		if (!this.chain) return "unknown: greptime not configured";
+		try {
+			return await this.chain.seed();
+		} catch (cause) {
+			return `unknown: ${cause instanceof Error ? cause.message : String(cause)}`;
 		}
-		const event = normalizeEvent(input, prev);
-		if (this.greptime) await this.greptime.insertEvent(event);
-		return event;
 	}
 
 	/**
@@ -545,34 +554,58 @@ export class Substrate {
 	/**
 	 * Recompute the hash chain for one graph.
 	 *
-	 * Events are grouped by session before verification: `prev` chains within a
-	 * session, so interleaving two sessions' events into one sequence would
-	 * report a break that is not there.
+	 * Pre-cutover rows (no `ingested_at`) chain per session, so they are grouped by session before
+	 * verification. Post-cutover rows chain globally in ingest order, so each ingest hour that holds
+	 * one of the graph's events is checked whole — every event of the hour, from every graph and
+	 * surface, with the first `prev` bound to the event ingested just before the hour. Interleaved
+	 * sessions therefore never read as tampering. `brokenAt`/`reason` name the first failure: the
+	 * pre-cutover side first, then the hours in order.
 	 */
-	async verifyGraph(
-		graphId: string,
-	): Promise<{ ok: boolean; events: number; brokenAt?: string; reason?: string }> {
-		if (!this.greptime) return { ok: false, events: 0, reason: "greptime not configured" };
-		const rows = await this.greptime.sql(
-			`SELECT "ts", "id", "surface", "session_id", "graph_id", "node_id", "linear_identifier", "step",
-			        "repo", "branch", "actor", "kind", "summary", "payload", "hash", "prev"
-			 FROM "agent_events" WHERE "graph_id" = ${quote(graphId)} ORDER BY "ts"`,
+	async verifyGraph(graphId: string): Promise<GraphVerification> {
+		const greptime = this.greptime;
+		if (!greptime) return { ok: false, events: 0, reason: "greptime not configured" };
+		const rows = await greptime.sql(
+			`SELECT ${EVENT_COLUMNS.map((name) => `"${name}"`).join(", ")} FROM "agent_events" WHERE "graph_id" = ${quote(graphId)} ORDER BY "ts"`,
 		);
 
-		const bySession = new Map<string, SubstrateEvent[]>();
+		const pre: SubstrateEvent[] = [];
+		const graphEventsByHour = new Map<number, number>();
 		for (const row of rows) {
 			const event = rowToEvent(row);
-			const key = event.session_id ?? "";
-			const bucket = bySession.get(key);
-			if (bucket) bucket.push(event);
-			else bySession.set(key, [event]);
+			if (event.ingested_at === undefined) {
+				pre.push(event);
+				continue;
+			}
+			const start = hourStart(Date.parse(event.ingested_at));
+			graphEventsByHour.set(start, (graphEventsByHour.get(start) ?? 0) + 1);
 		}
+		const postEvents = rows.length - pre.length;
+		const preResult = verifySessions(pre);
 
-		for (const events of bySession.values()) {
-			const result = verifyChain(events);
-			if (!result.ok) return { ok: false, events: rows.length, brokenAt: result.brokenAt, reason: result.reason };
-		}
-		return { ok: true, events: rows.length };
+		const starts = [...graphEventsByHour.keys()].sort((a, b) => a - b);
+		const checked = await Promise.all(
+			starts.map(async (start) => {
+				const [hourRows, boundary] = await Promise.all([
+					greptime.hourEvents(start, start + HOUR_MS),
+					greptime.lastEventBefore(start),
+				]);
+				const result = verifyGlobalChain(hourRows.map(rowToEvent), boundary ? String(boundary.hash) : null);
+				return { start, hourEvents: hourRows.length, result };
+			}),
+		);
+		const hours: HourCheck[] = checked.map(({ start, hourEvents, result }) => ({
+			period_start: hourIso(start),
+			hour_events: hourEvents,
+			graph_events: graphEventsByHour.get(start) ?? 0,
+			chain: result.ok ? "ok" : "broken",
+		}));
+		const postResult: ChainResult = checked.find(({ result }) => !result.ok)?.result ?? { ok: true };
+
+		const chain = { pre: side(pre.length, preResult), post: side(postEvents, postResult) };
+		const first = preResult.ok ? postResult : preResult;
+		return first.ok
+			? { ok: true, events: rows.length, chain, hours }
+			: { ok: false, events: rows.length, brokenAt: first.brokenAt, reason: first.reason, chain, hours };
 	}
 
 	async health(): Promise<{ index: boolean; greptime: boolean }> {
