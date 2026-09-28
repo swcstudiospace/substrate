@@ -8,7 +8,7 @@ last_updated: "2026-09-27T06:00:00.000Z"
 state_head: 79c79446b55e0ab59dcea33a501f947958150af9
 progress:
   total_phases: 8
-  completed_phases: 6
+  completed_phases: 7
   total_plans: 29
   completed_plans: 28
   percent: 33

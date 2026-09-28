@@ -1,8 +1,8 @@
 ---
 phase: 03-lane-a
-verified: 2026-09-28T01:39:33Z
+verified: 2026-09-28T02:59:38Z
 status: gaps_found
-score: 82/91 must-haves verified (82 verified, 1 present but behaviour-unverified, 8 not verified — 7 under the owner's 2026-09-28 acceptance of Phase 3 without 03-10, override recorded, not applied; 1 live regression with no override)
+score: 83/91 must-haves verified (83 verified, 1 present but behaviour-unverified, 7 not verified — all under the owner's 2026-09-28 acceptance of Phase 3 without 03-10, override recorded, not applied; G5 closed by 03-11)
 covered_files:
   - .planning/phases/02-claims-and-dispatch/02-LINEAR-ARCHIVED.md
   - .planning/phases/03-lane-a/03-01-PLAN.md
@@ -31,6 +31,8 @@ covered_files:
   - .planning/phases/03-lane-a/03-09-PLAN.md
   - .planning/phases/03-lane-a/03-09-SUMMARY.md
   - .planning/phases/03-lane-a/03-10-PLAN.md
+  - .planning/phases/03-lane-a/03-11-PLAN.md
+  - .planning/phases/03-lane-a/03-11-SUMMARY.md
   - .planning/phases/03-lane-a/03-BASELINE.md
   - .planning/phases/03-lane-a/03-CONTEXT.md
   - .planning/phases/03-lane-a/03-PROOF.md
@@ -78,11 +80,24 @@ covered_files:
   - packages/mcp-server/src/server.ts
   - packages/mcp-server/src/service.test.ts
   - packages/mcp-server/src/service.ts
-covered_digest: "v1:sha256:6df6d5eacad96d4d8c9139a5de9b14f62dd555afdb8f17fdade586274b09e9c5"
-covered_files_note: "Computed at HEAD 1806f27 with `query verification.fingerprint`. Covered: every 03-01..03-10 PLAN, every SUMMARY, the observed-evidence files (SPIKE, SMOKE, TRACER, BASELINE, PROOF), 03-CONTEXT (D-01..D-16), 02-LINEAR-ARCHIVED.md (03-09's D-14 record) and every non-.planning file that a `(03-0N)` commit touched (`git log --name-only --grep='(03-0[1-9]'`). Excluded: packages/host/package-lock.json (generated), ROADMAP.md and STATE.md (tracking logs the orchestrator edits), 03-RESEARCH, 03-PATTERNS, 03-VALIDATION, COVERAGE.md and deferred-items.md (not plan, summary or evidence inputs). 03-10-PLAN.md is covered because its must-haves are the undelivered proof folded into gap 3."
+covered_digest: "v1:sha256:bcc621942466000028608e61b1d3ca01a28f22bae91e32ed2db282ccc25e4b19"
+covered_files_note: "Re-computed at HEAD 8c342b0 with `query verification.fingerprint` (the initial run at 1806f27 had 74 files, digest 6df6d5ea…). Covered: every 03-01..03-11 PLAN, every SUMMARY, the observed-evidence files (SPIKE, SMOKE, TRACER, BASELINE, PROOF), 03-CONTEXT (D-01..D-16), 02-LINEAR-ARCHIVED.md (03-09's D-14 record) and every non-.planning file that a `(03-NN)` commit touched (`git log --name-only --grep='(03-0[1-9]'`, plus infra/sandbox/Dockerfile from b3acd04 (03-11), already listed). Excluded: packages/host/package-lock.json (generated), ROADMAP.md and STATE.md (tracking logs the orchestrator edits), 03-RESEARCH, 03-PATTERNS, 03-VALIDATION, COVERAGE.md and deferred-items.md (not plan, summary or evidence inputs). 03-10-PLAN.md is covered because its must-haves are the undelivered proof folded into gap 3."
 behavior_unverified: 1
 overrides_applied: 0
 owner_accept_overrides_recorded: 4 # on gaps 1–4 below; not applied — see "Why the status is gaps_found"
+re_verification:
+  previous_status: gaps_found
+  previous_score: 82/91
+  previous_verified: 2026-09-28T01:39:33Z
+  trigger: "03-11 gap closure for G5 (commits 5a83439, b3acd04, 8c342b0)"
+  gaps_closed:
+    - "G5 / truth 6: the sandbox image the host names (SANDBOX_IMAGE = substrate-sandbox:0.1) exists on the host, so a new task can start its sandbox — rebuilt by 03-11 with label org.swcstudio.substrate.keep=true, and the daily prune now skips it"
+  gaps_remaining:
+    - "G1 SC3 (owner-accept)"
+    - "G2 SC4 (owner-accept)"
+    - "G3 Proof (owner-accept)"
+    - "G4 03-08 approval bot (owner-accept)"
+  regressions: []
 gaps:
   - truth: "SC3: the dispatcher routes dispatch:claude-code to a VM; permissionPolicy \"ask\" surfaces approvals to Telegram through the existing stop-notify path"
     status: partial
@@ -124,7 +139,6 @@ gaps:
         issue: "Pinned by hostfns.test.ts; live only as `--dry-run` push; pr-create never invoked"
     missing:
       - "03-10 in full: label SWC-480 inside a trap-closed dispatch window, VM via the dispatcher, `systemctl restart substrate-host` under a waiting turn with the D-07 observations, Approve and Deny round-trips, the real push and pr-create (PR plus Greptile review, pr_lands_decision=i), sync, completion through the DoD gate (D-06/D-07), dispatch back off"
-      - "Before any revival: rebuild substrate-sandbox:0.1 and protect it from the daily prune (gap 5)"
   - truth: "03-08 (D-13): the owner's dedicated approval bot is configured (three SUBSTRATE_APPROVAL_* keys once each), the host logs `telegram approvals on (bot @<username>)`, and a live Bot API smoke (getMe, sendMessage with an inline keyboard, 60 s long-poll without 409) passes"
     status: partial
     override: "owner-accept 2026-09-28"
@@ -139,19 +153,6 @@ gaps:
     missing:
       - "03-08 Task 2: the owner creates the bot and appends SUBSTRATE_APPROVAL_BOT_TOKEN, _CHAT_ID and _USER_IDS"
       - "03-08 Task 3: guarded restart, `telegram approvals on (bot @…)`, getMe, sendMessage with a keyboard, a 60 s long-poll with no 409"
-  - truth: "Derived from the goal, SC2 and D-02 (live): the sandbox image the host names (SANDBOX_IMAGE = substrate-sandbox:0.1) exists on the host, so a new task can start its sandbox"
-    status: failed
-    reason: "The image is gone. `docker image inspect substrate-sandbox:0.1` returns `No such image`, and so does its base node:24-bookworm-slim. /etc/cron.d/docker-image-prune (root, dated 2026-06-23, predating Phase 3) runs `docker image prune -af --filter \"until=24h\"` daily at 02:29, which removes every image older than 24 h that no container is using. The sandbox image is in use only while a VM runs. VMs still started on 2026-09-26 (04-06 live VM check after the 09:08:49Z restart), so the image was most likely removed at the 2026-09-27 02:29 run [INFERENCE: the removal itself is not in any log I can read]. sandbox-provider.ts creates containers from SANDBOX_IMAGE with no pull or build fallback. Any new session, including a revived 03-10, would fail at sandbox creation until the image is rebuilt. This is not covered by the owner's acceptance, which covers the unrun 03-10 and approvals, not a regression in delivered 03-01..03-09 behaviour."
-    artifacts:
-      - path: "docker image substrate-sandbox:0.1"
-        issue: "absent (built by 03-01 on 2026-09-25, sha256:2063de59…)"
-      - path: "/etc/cron.d/docker-image-prune"
-        issue: "daily `docker image prune -af --filter until=24h` removes the idle sandbox image"
-      - path: "packages/host/src/sandbox-options.ts:8, sandbox-provider.ts:94"
-        issue: "SANDBOX_IMAGE is a local tag with no pull or build step"
-    missing:
-      - "Rebuild the image under D-03's disk gate (03-01-SPIKE § Image command: `docker buildx build --load --build-context ultrathink=/root/.claude/plugins/cache/ultrathink/ultrathink/0.3.0 -t substrate-sandbox:0.1 infra/sandbox`)"
-      - "Stop the prune removing it (for example a `--filter label!=…` on the cron line with a label added in infra/sandbox/Dockerfile, or a host-side presence check at boot that fails loudly)"
 behavior_unverified_items:
   - truth: "03-03: ensureModelRoute is awaited before sessions.open and before every prompt; it starts the model relay on a:hostfn_proxy and is a no-op otherwise"
     test: "Deploy with SUBSTRATE_HOST_ROUTE on a:hostfn_proxy (or add a test around createEnsureModelRoute with a fake relay), open a task, and restart the host with a task in flight"
@@ -162,9 +163,9 @@ behavior_unverified_items:
 # Phase 3: Lane A Verification Report
 
 **Phase Goal:** Sandboxed, durable Claude Code sessions, one VM per Graph ID.
-**Verified:** 2026-09-28T01:39:33Z (HEAD 1806f27)
+**Verified:** 2026-09-28T02:59:38Z (HEAD 8c342b0); initial run 2026-09-28T01:39:33Z (HEAD 1806f27)
 **Status:** gaps_found
-**Re-verification:** No — initial verification (no earlier 03-VERIFICATION.md)
+**Re-verification:** Yes — after 03-11 closed G5 (previous: gaps_found 82/91). G5 closed; gaps 1–4 unchanged (owner-accept); no regressions.
 
 The goal is delivered in code and was observed working in pieces on throwaway graphs, but the phase
 proof never ran. 03-01 to 03-09 built substrate-host (its own unit, rivet engine and API on
@@ -180,9 +181,12 @@ have shown is therefore a gap. Each carries `override: owner-accept 2026-09-28`,
 passed. Those items are: the label → tick leg and Telegram approvals (SC3), in-VM kickoff and sync
 writing the trackers (SC4), the end-to-end Proof, and 03-08's bot.
 
-There is one more gap the owner has not accepted. **The sandbox image `substrate-sandbox:0.1` is no
-longer on the host.** A daily root cron prunes idle images, so no new Lane A task can start a
-sandbox until the image is rebuilt (gap 5, Note N1).
+The initial run found one more gap that the owner had not accepted: a daily root cron had pruned the
+sandbox image `substrate-sandbox:0.1` (G5). **03-11 closed it.** The image is rebuilt from 03-01's
+route and base digest with the label `org.swcstudio.substrate.keep=true`. The cron line now carries
+`--filter "label!=org.swcstudio.substrate.keep=true"`, and a sandbox started through the host's
+own provider answered `/v1/health` 200 with its token and 401 without (truth 6, § Re-verification).
+The four remaining gaps are all owner-accepted.
 
 ## Why the status is gaps_found
 
@@ -202,8 +206,9 @@ gaps_found):
 3. **No later phase takes the work (Step 9b).** Phases 4–8 do not mention the Lane A proof,
    approvals, or `dispatch:claude-code` routing. 04-06 only adds read-only skill mounts to new VMs.
    Nothing moves to a deferred list.
-4. **Gap 5 has no owner answer at all.** It is a live regression found during this verification,
-   after the owner's acceptance.
+4. **The only gap without an owner answer is closed.** G5 was a live regression; 03-11 fixed it and
+   this re-verification confirmed the fix live (truth 6). The remaining gaps all carry the owner's
+   answer, but under rules 1–3 that answer does not turn them into passes.
 
 The owner-accept annotations stay on the gap entries and are not in a top-level `overrides:` list.
 Step 3b would otherwise fuzzy-match such a list on re-verification and turn the gaps into `PASSED
@@ -226,11 +231,11 @@ Status key: ✓ VERIFIED · ✗ NOT VERIFIED (owner-accept 2026-09-28, override 
 | # | Truth | Status | Evidence |
 | --- | --- | --- | --- |
 | 1 | SC1: free disk verified before pulling images (= 03-01 D-03: ≥ 10 GiB before install and before the image build, after-values recorded) | ✓ VERIFIED | 03-01-SPIKE: disk_before=31843188736 (:13), disk_after_install=29634609152 (:36), disk_before_image=29633863680 (:50), disk_after_image=28647456768 (:51), disk_after_cleanup=28535652352 (:286). Every before-value is ≥ 10737418240. Live today: 192440250368 free. |
-| 2 | SC2: rivet-agentos host runs; `openTask` writes shared skills, `SUBSTRATE_BRIEF.md` and the substrate/notion/linear MCP config into `/home/agentos` | ✓ VERIFIED (see N1 for today's sandbox image) | Live: `systemctl is-active substrate-host` = active (enabled, up since 2026-09-26 15:09:58 UTC); GET :7411/healthz → `{"engine":true,"api":true}` 200; ss shows 127.0.0.1:7411 and rivet-engine on 127.0.0.1:6420/6421/6430 only. seed.ts:254-290 seedFiles. 03-03-TRACER: seeded_brief=yes, seeded_claude_json=yes, seeded_skills=ultrathink-kickoff,…-plan,…-ship,…-sync, sha256 read-back. 03-04-SMOKE: seeded_mcp_servers=linear,notion,substrate on two VMs, seeded_mcp_headers=none. |
+| 2 | SC2: rivet-agentos host runs; `openTask` writes shared skills, `SUBSTRATE_BRIEF.md` and the substrate/notion/linear MCP config into `/home/agentos` | ✓ VERIFIED (the sandbox image is present again, truth 6) | Live: `systemctl is-active substrate-host` = active (enabled, up since 2026-09-26 15:09:58 UTC); GET :7411/healthz → `{"engine":true,"api":true}` 200; ss shows 127.0.0.1:7411 and rivet-engine on 127.0.0.1:6420/6421/6430 only. seed.ts:254-290 seedFiles. 03-03-TRACER: seeded_brief=yes, seeded_claude_json=yes, seeded_skills=ultrathink-kickoff,…-plan,…-ship,…-sync, sha256 read-back. 03-04-SMOKE: seeded_mcp_servers=linear,notion,substrate on two VMs, seeded_mcp_headers=none. |
 | 3 | SC3: dispatcher routes `dispatch:claude-code` to a VM; `permissionPolicy: "ask"` surfaces approvals to Telegram | ✗ NOT VERIFIED (partial) — owner-accept 2026-09-28 | Routing: dispatch.py:24, :252-271, host.py:152-175. 03-05-TRACER launch_line=`launched claude-code for TRC-2 graph ut-muh32wc1-d14818ff node n1 task …/n1 worktree …`, claim_evidence=claimed_by (synthetic candidate; the label → tick leg was 03-10's). Approvals: tasks.ts:410 `ask`; the journal says `telegram approvals off`; 0 SUBSTRATE_APPROVAL_* keys. Gap 1. |
 | 4 | SC4: `claude-ultrathink` runs inside the VM, so kickoff and sync still write Notion and Linear | ✗ NOT VERIFIED (partial) — owner-accept 2026-09-28 | 03-01-SPIKE b_hooks=none, b_skill_by_path=yes → b:prompt_hostfn, tracker_route=host, d11=unmet (D-10 deviation). Skills are seeded into the VM (truth 2). Kickoff was host-written (03-PROOF kickoff_by=host). Sync code is host-side and was never fired live. Gap 2. |
 | 5 | Proof: a labelled issue opens a VM, the session survives a host restart, the PR lands, `ultrathink-sync` closes the loop | ✗ NOT VERIFIED — owner-accept 2026-09-28 | 03-10 never ran: no commit, 03-PROOF.md has only § Setup, 0 host tasks for ut-muhk8v3p-47ae5f1a, no pr_url on any task. Restart survival was observed separately on a throwaway graph (truth 57). Gap 3. |
-| 6 | Derived (goal + SC2 + D-02, live): `substrate-sandbox:0.1` exists, so a new task can start its sandbox | ✗ FAILED (no override) | `docker image inspect substrate-sandbox:0.1` → No such image. /etc/cron.d/docker-image-prune: `29 2 * * * root docker image prune -af --filter "until=24h"`. sandbox-provider.ts:94 uses SANDBOX_IMAGE with no pull or build. Gap 5, N1. |
+| 6 | Derived (goal + SC2 + D-02, live): `substrate-sandbox:0.1` exists, so a new task can start its sandbox, and the daily prune leaves it alone | ✓ VERIFIED (re-verified; G5 closed by 03-11) | Live: `docker image inspect substrate-sandbox:0.1` → sha256:3c72e6c3…, created 2026-09-28T02:34:03Z, 181084860 B, ENTRYPOINT `["sandbox-agent"]`, WORKDIR /work, labels `{"org.swcstudio.substrate.keep":"true"}`. The label is baked in by the Dockerfile (b3acd04: one `LABEL` and one comment line). /etc/cron.d/docker-image-prune is one line, 644 root, sha256 d68e95ea…: `… prune -af --filter "until=24h" --filter "label!=org.swcstudio.substrate.keep=true"`. On this daemon (29.6.2), `docker image ls --filter 'label!=org.swcstudio.substrate.keep=true'` lists every other image but not the sandbox, and `label=…keep=true` lists only `substrate-sandbox:0.1`. 03-11-SUMMARY records the base digest 0e0ff40c… (= 03-01) and in-image versions node v24.21.0, bun 1.4.0, git 2.39.5, gh 2.101.0 and sandbox-agent 0.4.2 (= 03-01). The provider proof through substrateDocker gave health_with_token=200, health_without_token=401, destroyed=yes, containers_after=0. |
 
 **03-01 — D-09 spike, install, sandbox provider and image**
 
@@ -242,7 +247,7 @@ Status key: ✓ VERIFIED · ✗ NOT VERIFIED (owner-accept 2026-09-28, override 
 | 10 | tracker_route=vm_mcp exactly on b:hooks + s:mcp, else host | ✓ VERIFIED | SPIKE:261 tracker_route=host; options.ts:70-72 encodes the same rule; test "vm_mcp exactly for b:hooks + s:mcp … 36 combinations". |
 | 11 | tests_route=sandbox when sandbox_tests=yes | ✓ VERIFIED | SPIKE:230 sandbox_tests=yes (12 pass in the container), :262 tests_route=sandbox; the unit has `SUBSTRATE_TESTS_ROUTE=sandbox`. |
 | 12 | D-04: asterinas/dev and bold_rosalind intact before and after; no prune/rm on unlabelled data | ✓ VERIFIED (for Phase 3's actions; see N2) | SPIKE:14-15 and :280-285 d04_intact=yes; 03-06-SMOKE d04_intact=yes. The host's boot sweep filters by the `substrate.graph_id` label only (main.ts:113-128), and the journal shows only two removals ever, both labelled sandboxes. Both objects are gone today, and nothing in Phase 3 removed them (N2). |
-| 13 | D-02: `substrate-sandbox:0.1` built locally from infra/sandbox/Dockerfile; only node:24-bookworm-slim pulled | ✓ VERIFIED (as built; absent today, truth 6) | Dockerfile FROM node:24-bookworm-slim, bun 1.4.0 sha-pinned, sandbox-agent@0.4.2, COPY --from=ultrathink. SPIKE:41-51: buildx exit 0, only the base was pulled, image sha256:2063de59…, 181055374 B. |
+| 13 | D-02: `substrate-sandbox:0.1` built locally from infra/sandbox/Dockerfile; only node:24-bookworm-slim pulled | ✓ VERIFIED (built by 03-01; rebuilt by 03-11 from the same base digest, truth 6) | Dockerfile FROM node:24-bookworm-slim, bun 1.4.0 sha-pinned, sandbox-agent@0.4.2, COPY --from=ultrathink. SPIKE:41-51: buildx exit 0, only the base was pulled, image sha256:2063de59…, 181055374 B. |
 | 14 | D-01: sandboxes only via substrateDocker (127.0.0.1 publish, per-container token, label, own worktree, no privileged or docker.sock); stock docker() never used | ✓ VERIFIED | sandbox-options.ts:82-103 (HostIp 127.0.0.1, --token, label, Binds worktree:/work, Privileged false; docker.sock refused :60-62); sandbox-provider.ts:113-126 creates only through buildContainerSpec, and sandbox-agent is imported as a type only (:12). SPIKE:190-194: unauthenticated /v1/health → 401. |
 | 15 | Owner approved the SUS-flagged rivet packages before install; `--workspaces=false`; host lock only | ✓ VERIFIED | The owner reply "approved" is recorded verbatim in 03-01-SUMMARY.md:113 with the approved versions. packages/host/package-lock.json exists and there is no root lock. Pins in package.json: agentos 0.2.21, agentos-sandbox 0.2.21, sandbox-agent 0.4.2. |
 | 16 | 03-BASELINE holds the pre-phase keys; root suite and tsc two-sided green after install | ✓ VERIFIED | 03-BASELINE:44-50 head=2df112c, pass=167, fail=0, `tsc-set: tsc-exit=0`, dispatcher 114/0. The latest gates are root 640/0 (07-03), tsc 0 and pytest 149, all ≥ baseline with no failing ids. |
@@ -367,10 +372,11 @@ Status key: ✓ VERIFIED · ✗ NOT VERIFIED (owner-accept 2026-09-28, override 
 | --- | --- | --- | --- |
 | 91 | Root suite and tsc two-sided green against 03-BASELINE with more passes than agent-substrate-pass | ✓ VERIFIED | Latest root suite 640 pass / 0 fail (07-03) > 167; tsc `tsc-exit=0` = baseline set; dispatcher pytest 149 > 114. There are no failing ids on either side. I did not re-run the full suites. |
 
-**Score:** 82/91 truths verified (1 present, behaviour-unverified; 0 overrides applied; 7 items
-not verified under owner-accept gaps 1–4; 1 failure without an override, gap 5)
+**Score:** 83/91 truths verified (1 present, behaviour-unverified; 0 overrides applied; 7 items
+not verified under owner-accept gaps 1–4; G5 closed)
 
-Not verified: 3, 4, 5, 65, 80, 81 and 82 (owner-accept 2026-09-28) and 6 (no override).
+Not verified: 3, 4, 5, 65, 80, 81 and 82 (owner-accept 2026-09-28). Truth 6 was FAILED in the
+initial run and is VERIFIED after 03-11.
 Behaviour-unverified: 32.
 
 ### Required Artifacts
@@ -387,7 +393,9 @@ Behaviour-unverified: 32.
 | `packages/dispatcher/src/substrate_dispatcher/{host,dispatch,__main__}.py` | HostClient, RemoteTask, claude-code route | ✓ VERIFIED | 93 dispatcher tests re-run across four files |
 | `packages/mcp-server/src/{service,mcp,server,mirror,linear}.ts`, `launcher.py` | issue_get, POST /issue, Hermes prompt, D-16 note | ✓ VERIFIED | 93 + 22 tests re-run |
 | `infra/sandbox/Dockerfile` | D-02 image recipe | ✓ VERIFIED | Present and correct |
-| docker image `substrate-sandbox:0.1` | The runtime sandbox image | ✗ MISSING (gap 5) | Pruned by /etc/cron.d/docker-image-prune |
+| docker image `substrate-sandbox:0.1` | The runtime sandbox image | ✓ VERIFIED (re-verified) | sha256:3c72e6c3…, keep label; exempt from /etc/cron.d/docker-image-prune |
+| `/etc/cron.d/docker-image-prune` | Daily prune that skips keep-labelled images | ✓ VERIFIED | Carries the `label!=` filter; the 0600 pre-edit snapshot and RESTORE.d/03-11.md are in /var/lib/substrate/phase3-baseline (700 root) |
+| `03-11-PLAN.md`, `03-11-SUMMARY.md` | G5 gap closure and its observed evidence | ✓ VERIFIED | Commits 5a83439, b3acd04, 8c342b0 |
 | `03-BASELINE.md`, `03-01-SPIKE.md`, `03-02-SMOKE.md`, `03-03-TRACER.md`, `03-04-SMOKE.md`, `03-05-TRACER.md`, `03-06-SMOKE.md`, `03-07-SMOKE.md` | Observed evidence | ✓ VERIFIED | Every required key present; each has one `## Gaps` |
 | `03-08-SMOKE.md` | Live Bot API smoke | ✗ MISSING (owner-accept, gap 4) | Task 3 not run |
 | `03-PROOF.md` | Setup plus the observed proof (`restart_survived=`) | ⚠️ PARTIAL (owner-accept, gap 3) | § Setup complete; proof body absent |
@@ -413,7 +421,8 @@ Behaviour-unverified: 32.
 | Linear label on the proof issue | dispatcher tick → POST /tasks | 30 s poll → graph_find → make_launch_fn | ✗ NOT_WIRED live (owner-accept, gap 1) | 03-10 not run; label never applied |
 | VM permission_request | owner's Telegram tap → respondPermission | ApprovalBroker | ✗ NOT_WIRED live (owner-accept, gaps 1 and 4) | No bot |
 | host pr-create result | Notion Task PR fields and Linear PR link | sync | ✗ NOT_WIRED live (owner-accept, gaps 2 and 3) | Never run |
-| SANDBOX_IMAGE | docker image store | createContainer | ✗ NOT_WIRED live (gap 5) | Image absent |
+| SANDBOX_IMAGE | docker image store | createContainer | ✓ WIRED (re-verified) | Image present; 03-11 provider proof create → health 200/401 → destroy |
+| infra/sandbox/Dockerfile `LABEL org.swcstudio.substrate.keep` | cron prune | `--filter "label!=org.swcstudio.substrate.keep=true"` | ✓ WIRED | The daemon's `label!=` filter excludes the image (live `docker image ls` check) |
 
 ### Data-Flow Trace (Level 4)
 
@@ -436,7 +445,10 @@ Behaviour-unverified: 32.
 | Dispatch off | last `SUBSTRATE_DISPATCH_DISABLED=` line; dispatcher journal | `1`; `dispatch disabled (SUBSTRATE_DISPATCH_DISABLED=1)` | ✓ PASS |
 | Approvals off | `sudo grep -c '^SUBSTRATE_APPROVAL_' /etc/substrate/substrate.env` | 0 | ✓ PASS (confirms gaps 1 and 4) |
 | Proof not run | `GET :7411/tasks` | 12 tasks, all `unloaded`; 0 for ut-muhk8v3p-47ae5f1a; no pr_url | ✓ PASS (confirms gap 3) |
-| Sandbox image | `docker image inspect substrate-sandbox:0.1`; `cat /etc/cron.d/docker-image-prune` | No such image; daily `docker image prune -af --filter "until=24h"` | ✗ FAIL (gap 5) |
+| Sandbox image (re-verification) | `docker image inspect substrate-sandbox:0.1 --format …`; `cat`, `sha256sum` and `stat` on /etc/cron.d/docker-image-prune | sha256:3c72e6c3…, keep=true, ENTRYPOINT sandbox-agent, WORKDIR /work; cron has the `label!=` filter, 644 root, 129 B, sha256 d68e95ea… (= 03-11-SUMMARY) | ✓ PASS (G5 closed) |
+| Prune filter semantics (read-only) | `docker image ls --filter 'label!=org.swcstudio.substrate.keep=true'` / `--filter 'label=…'` | every other image / only `substrate-sandbox:0.1` | ✓ PASS |
+| 03-11 rollback area | `sudo ls -la /var/lib/substrate/phase3-baseline{,/RESTORE.d}`; `sha256sum` of the snapshot | dirs 700 root; RESTORE.md and RESTORE.d/03-11.md 600 root; snapshot 5fa79cdb… (= 03-11-SUMMARY's pre-edit hash) | ✓ PASS |
+| 03-11 left nothing running | `docker ps -a --filter label=substrate.graph_id`; `ls /var/lib/substrate/worktrees`; substrate-host ActiveEnterTimestamp | 0; only the two pre-existing worktrees; still `Sat 2026-09-26 15:09:58 UTC`, healthz 200 | ✓ PASS |
 | No leftover sandboxes | `docker ps --filter label=substrate.graph_id` | none | ✓ PASS |
 | Host unit tests (workers) | `SUBSTRATE_DISABLED=1 bun test` on sandbox-options, tasks, api / seed / options / mcp-proxy / audit / hostfns / sync / telegram | 63/0, 18/0, 27/0, 14/0, 11/0, 17/0, 10/0, 10/0 | ✓ PASS |
 | mcp-server tests (worker) | `bun test service.test.ts mcp.test.ts server.test.ts` | 93/0 | ✓ PASS |
@@ -460,7 +472,7 @@ ROADMAP success criteria plus the owner decisions in 03-CONTEXT.
 | Decision | Status | Where |
 | --- | --- | --- |
 | D-01 VM plus Docker sandbox provider | ✓ | truths 14, 60 |
-| D-02 local sandbox image | ✓ built / ✗ absent today | truths 13, 6 (gap 5) |
+| D-02 local sandbox image | ✓ built (03-01), rebuilt and prune-exempt (03-11) | truths 13, 6 |
 | D-03 disk gate | ✓ | truth 1 |
 | D-04 other projects' Docker data untouched | ✓ by Phase 3 (N2) | truths 12, 63 |
 | D-05 separate host unit | ✓ | truths 25, 52 |
@@ -493,24 +505,27 @@ There are no orphaned requirements.
 
 ### Human Verification Required
 
-None as a separate gate. The seven owner-accept items are gaps with the owner's recorded answer. Gap
-5 is a gap for the orchestrator. The one behaviour-unverified truth (32) is listed in
-`behavior_unverified_items` and does not change the status, which is already `gaps_found`.
+None as a separate gate. The seven owner-accept items are gaps with the owner's recorded answer. G5
+is closed. The one behaviour-unverified truth (32) is listed in `behavior_unverified_items` and does
+not change the status, which is already `gaps_found`. It would be worth an optional
+`docker image inspect substrate-sandbox:0.1` after 2026-09-30 02:29Z, the first prune run where the
+keep filter matters (N1).
 
 ### Notes
 
-- **N1 — The sandbox image is gone (⚠️ Warning, gap 5).** `substrate-sandbox:0.1` (and its base
-  node:24-bookworm-slim) are absent. The root cron `/etc/cron.d/docker-image-prune`, dated
-  2026-06-23 and so older than Phase 3, runs `docker image prune -af --filter "until=24h"` daily at
-  02:29. That removes any image older than 24 h that no container uses, and the sandbox image is
-  idle whenever no VM runs. VMs still started on 2026-09-26 (04-06's live check), so the image most
-  likely went at the 2026-09-27 02:29 run [INFERENCE]. SC2 is verified on its 2026-09-25 evidence.
-  Today, though, a new task cannot create its sandbox (sandbox-provider.ts has no pull or build).
-  Rebuilding under D-03's gate and exempting the image from the prune closes this. It must be done
-  before any 03-10 revival.
+- **N1 — Sandbox image: G5 closed by 03-11 (ℹ️ Info).** The initial run found `substrate-sandbox:0.1`
+  pruned by the pre-existing root cron `docker image prune -af --filter "until=24h"`. 03-11 rebuilt it
+  by 03-01's route under D-03's gate (192375791616 B free before), from the same base digest, with a
+  baked-in keep label. It also added the `label!=` filter to the cron line after snapshotting it. The
+  exemption has not yet been seen surviving a real prune run. The image is younger than 24 h until
+  2026-09-29 02:34Z, so the first run where the filter matters is 2026-09-30 02:29Z. Its semantics
+  are confirmed on this daemon by the read-only `docker image ls` check and by Docker's documented
+  AND of different filter keys. A `docker image inspect substrate-sandbox:0.1` after 2026-09-30 02:29Z
+  would confirm it directly. The base node:24-bookworm-slim is not kept, and deliberately so: a
+  rebuild re-pulls it with `--pull` (03-11 key-decisions).
 - **N2 — D-04's protected objects are gone, and not by Phase 3 (ℹ️ Info).** asterinas/dev and
   bold_rosalind were intact through 03-06 (d04_intact=yes twice). Today the image is absent (the
-  same cron prunes unused images) and so is the container (`docker image prune` does not remove
+  same cron prunes unlabelled unused images) and so is the container (`docker image prune` does not remove
   containers, so something else did). substrate-host's journal shows only two sweep removals ever,
   both labelled sandboxes. D-04 bound Phase 3's own actions, and those held.
 - **N3 — The D-12 container-egress deviation (ℹ️ Info).** On `sandbox_net=published_loopback` the
@@ -543,21 +558,19 @@ claude-ultrathink's hooks and skills do not load natively under the rivet adapte
 kickoff and sync run through the host (tracker_route=host, D-10), not "inside the VM" as the
 criterion reads.
 
-Gap 5 has a different root cause and no owner answer. A pre-existing daily image prune removed the
-locally built sandbox image, so Lane A cannot start a new sandbox today.
+Gap 5 had a different root cause: a pre-existing daily image prune removed the locally built sandbox
+image. 03-11 closed it (rebuild, keep label and prune exemption), and this re-verification confirmed
+the fix live. Lane A can start a new sandbox again.
 
 The orchestrator or owner can proceed in one of two ways:
 
 - **Record Phase 3 as accepted.** Cite the owner's verbatim "Accept Phase 3 without 03-10" and this
   report, the same route Phases 5–7 took (`phase3-verification=accepted` with a verbatim note).
-  Decide gap 5 separately: rebuild `substrate-sandbox:0.1` under D-03's gate and exempt it from
-  `/etc/cron.d/docker-image-prune`, or record that Lane A is dormant until it is rebuilt.
-- **Close the gaps later.** Pick an approval route (03-08 Tasks 2–3 or another), rebuild and protect
-  the image, then run 03-10 as planned on SWC-480 and graph ut-muhk8v3p-47ae5f1a.
+- **Close the gaps later.** Pick an approval route (03-08 Tasks 2–3 or another), then run 03-10 as planned on SWC-480 and graph ut-muhk8v3p-47ae5f1a.
 
 No code change inside Phase 3 closes gaps 1–4 without the owner's approval route.
 
 ---
 
-_Verified: 2026-09-28T01:39:33Z_
+_Verified: 2026-09-28T02:59:38Z (re-verification after 03-11; initial 2026-09-28T01:39:33Z)_
 _Verifier: Claude (gsd-verifier)_
