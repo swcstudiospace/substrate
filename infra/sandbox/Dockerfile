@@ -9,7 +9,9 @@
 # Containers are started only by packages/host/src/sandbox-provider.ts (substrateDocker), which
 # supplies Cmd ["server","--token",<token>,"--host","0.0.0.0","--port","3000","--no-telemetry"]
 # after this ENTRYPOINT.
+# The keep label exempts this (usually idle) image from /etc/cron.d/docker-image-prune's --filter "label!=org.swcstudio.substrate.keep=true".
 FROM node:24-bookworm-slim
+LABEL org.swcstudio.substrate.keep="true"
 
 ARG BUN_VERSION=1.4.0
 ARG BUN_SHA256=2d03fb5fb83ac8b567aca0a281b2ce1a1a19d488f56c2968d88c3f25e92fe452
