@@ -24,8 +24,8 @@ urgent insertions.
 - [x] **Phase 4: Skills** — one library, three miners proposing, Hermes primary (completed 2026-09-27)
 - [x] **Phase 5: Docs and desktop** — product docs and GUI tasks reachable from any agent (completed 2026-09-27; desktop half — docs half skipped by owner, gaps accepted)
 - [x] **Phase 6: Ledger** — tamper-evident history (completed 2026-09-27; chain-only — devnet anchoring skipped by owner, gaps accepted)
-- [ ] **Phase 7: Recall** — agents recall earlier sessions through `context_search`, backed by Agentmemory
-- [ ] **Phase 8: Hot cache** — DragonflyDB caches the brief and search reads, fail-open
+- [x] **Phase 7: Recall** — agents recall earlier sessions through `context_search`, backed by Agentmemory (closed 2026-09-28; recall skipped by owner — redact() hardening delivered, gaps accepted)
+- [ ] **Phase 8: Hot cache** — DragonflyDB caches the brief and search reads, fail-open (skipped by owner 2026-09-28; plans kept for a later milestone)
 
 ## Phase Details
 

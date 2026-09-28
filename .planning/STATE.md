@@ -8,7 +8,7 @@ last_updated: "2026-09-27T06:00:00.000Z"
 state_head: 79c79446b55e0ab59dcea33a501f947958150af9
 progress:
   total_phases: 8
-  completed_phases: 5
+  completed_phases: 6
   total_plans: 29
   completed_plans: 28
   percent: 33
@@ -168,6 +168,10 @@ Previously "not done", now resolved:
 - Phase 4 proof re-scoped from a Cursor session to an Omp session (owner decision 2026-09-26)
 
 **Decisions**
+
+- 2026-09-28 owner: Phase 7 verification gaps_found 14/19 accepted ("Accept gaps, continue"); Agentmemory recall skipped at 07-02 ("skip"); delivered 07-01 and 07-03 (D-04 redaction, live after substrate-mcp restart 2026-09-27T22:10:15Z, chain head seeded).
+- 2026-09-28 owner: Phase 8 Hot cache skipped ("Skip Phase 8"); DragonflyDB unused this milestone; plans 08-01..08-07 kept (plan-checked) for a later milestone.
+- 2026-09-28 owner: "Accept Phase 3 without 03-10" — Phase 3 is verified on 03-01..03-09; the 03-10 proof and Telegram approvals are owner-accepted gaps.
 
 - 2026-09-27 owner: Phase 6 verification gaps_found 46/48 accepted ("Accept gaps, continue"). phase6-verification=accepted; phase6-accepted-note: Owner skipped Phase 6 devnet anchoring on 2026-09-27 ("Skip Phase 6 anchoring", 06-CONTEXT D-17) and accepted the resulting verification gaps ("Accept gaps, continue"): SC2 and SC3's roots-against-signatures clause are not delivered this milestone; SC1, SC3's chain recomputation and the chain-only tamper Proof are verified (06-VERIFICATION.md). The devnet key /etc/substrate/ledger-devnet.json and 3 SOLANA_* env lines remain unused (RESTORE.d/06-03.md removes them).
 
