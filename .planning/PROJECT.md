@@ -74,11 +74,23 @@ brief does not call either API on every prompt.
 
 ## Data
 
-- **Postgres (index)** — `graph_index`, `graph_nodes`, `graph_steps`, memory entries. External.
-- **GreptimeDB (events)** — append-only `agent_events` with a `hash`/`prev` chain. External,
-  on a separate Railway account.
-- **RAGFlow (docs)** — behind `docs.search`. External. Phase 5.
+Revised 2026-09-30 — policy in `docs/data-planes.md`, network in `docs/railway-tailscale.md`.
+
+- **Railway project "Ultrathink"** — **TimescaleDB (index and coordination)**: `graph_index`,
+  `graph_nodes`, `graph_steps`, memory index, and the Programming Desk tables (`desk_intake`
+  queue, `desk_claims`, `desk_idempotency`, `desk_receipts`, `seat_roster`, `tool_pack_state`,
+  hypertables). **GreptimeDB (events)**: append-only `agent_events` with a `hash`/`prev` chain.
+  **DragonflyDB (cache only)**: brief, search and recall caches, rate counters; falls through on
+  outage (owner decision 2026-09-26 stands).
+- **Railway project "Agent Substrate"** — **Hindsight (memory)**: banks `sub-<surface>` and
+  `pd-<seat>`; replaces Agentmemory (Phase 7) and the local Claude Code `hindsight` stdio server.
+  **RAGFlow (docs)**: behind `docs_search`; datasets per repo (Phase 5 docs half re-opened).
+- All five are reached from the VPS over a Tailscale Forwarder deployed inside each project; no
+  public TCP proxy or public database domain after cutover.
 - **Langfuse** keeps LLM traces; Greptime holds the substrate's own log. No duplication.
+- The Programming Desk consumes these planes through its own gateway on the VPS
+  (`desk.swcstudio.space`, loopback `:8791`), which calls `substrate-mcp` over loopback with
+  `SUBSTRATE_TOKEN_DESK_GATEWAY`; Grok Bots never hold plane credentials.
 
 ## Departures from the Notion brief (§11), carried forward
 
