@@ -223,8 +223,28 @@ export interface MemoryStore {
 	 * entry has committed.
 	 */
 	approvedReview(entryHash: string): Promise<{ id: string; entry_id: string } | null>;
-	/** Mark parked proposals for this content reviewed, once a reviewer lands one. */
-	releaseReviews(entryHash: string, entryId: string, decidedBy: string): Promise<number>;
+	/**
+	 * Write down that a reviewer's decision for this content is in force: resolve every
+	 * proposal parked for it, and — where none was parked — record the approval anyway.
+	 *
+	 * The second half is what makes a *direct* install discoverable. A reviewer may send
+	 * a global write with a token and no proposal having ever existed, which installs the
+	 * entry and resolves nothing; with no approved row to find, the same content sent
+	 * later without a token went back into the queue as though a reviewer had never seen
+	 * it — and approving that proposal is the second entry for a decision already in
+	 * force. What `approvedReview` is asked about is the decision, so the decision is
+	 * what gets written down, queue entry or no queue entry.
+	 *
+	 * Atomic, because the two halves race each other: a proposal parked between the
+	 * resolve and the record would be left pending for content already installed.
+	 *
+	 * `row` is only read where a row has to be created, and `row.id` is the id it takes.
+	 */
+	recordApproval(
+		row: NewMemoryEntry & { reason: string },
+		entryId: string,
+		decidedBy: string,
+	): Promise<{ released: number; review_id: string }>;
 }
 
 export interface GovernanceDeps {
@@ -259,6 +279,11 @@ function refuse(
 ): Decision {
 	return { outcome, reason, remedy, verified_persisted: false, idempotency_key: "", ...extra };
 }
+
+/** Why a global write is parked, as the reviewer's queue reads it. */
+const REVIEW_REQUIRED = "global scope requires review";
+/** Why an approval exists with no proposal behind it: a reviewer installed it outright. */
+const APPROVAL_INSTALLED = "installed with a reviewer's token";
 
 /** Derive a key from the content, so an interrupted retry dedupes without one. */
 function derivedKey(entryHash: string, sourceEvent: string | null, reviewed: boolean): string {
@@ -495,8 +520,17 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 		// A recovered global write is installed, so its proposal is no longer pending —
 		// the acknowledgement died, not the review. Leaving it in the queue would have a
 		// reviewer weighing a decision that is already in force.
+		// Leaving the approval *unrecorded* would be the other half of the same mistake:
+		// the next tokenless submission of this content would find nothing approved and be
+		// parked as though no reviewer had ever seen it.
 		if (reviewed && scope.class === "global") {
-			await store.releaseReviews(entryHash, orphan.id, writer).catch(() => undefined);
+			await store
+				.recordApproval(
+					{ ...baseRow, id: newId("memr"), idempotency_key: key, reason: APPROVAL_INSTALLED },
+					orphan.id,
+					writer,
+				)
+				.catch(() => undefined);
 		}
 		await store.finishWrite(key, holder, "accepted", orphan.id).catch(() => undefined);
 		return {
@@ -563,53 +597,63 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 			// the entry: it is this content, it is in the index, and nothing was written
 			// again.
 			//
-			// Only where the installed row is still standing. A superseded one is no longer
-			// what any agent reads, so re-proposing the content is a real proposal and goes
-			// through review like any other. The hash is re-checked because `entry_hash` is
-			// what ties a proposal to its entry, and a mismatch means the pointer is wrong
-			// rather than that this content is in force.
-			const approved = await store.approvedReview(entryHash);
-			const installed = approved ? await store.readEntry(approved.entry_id) : null;
-			if (approved && installed && installed.entry_hash === entryHash && !installed.superseded_by) {
-				await store.finishWrite(key, holder, "accepted", installed.id);
-				return {
-					outcome: "accepted",
-					reason: "review.already-approved",
-					remedy:
-						"A reviewer already approved this exact content and it is the entry in force, so it was not " +
-						"parked for review again and nothing was written. Send a changed text — or supersede the entry " +
-						"deliberately — if this was meant to be a new proposal.",
-					// Read out of the index and hash-checked, like every other verification here.
-					verified_persisted: true,
-					idempotency_key: key,
-					entry: installed,
-					deduplicated: true,
-					strategy: "require-review",
-					review_id: approved.id,
-					grant: grant.name,
-					...(trust.downgradedFrom ? { trust_downgraded_from: trust.downgradedFrom } : {}),
-				};
-			}
+			// Only where the installed row answers *this* request, which is two conditions
+			// and not one. It has to still be standing — a superseded row is no longer what
+			// any agent reads, so re-proposing the content is a real proposal — and it has to
+			// already record the retention and the confidence being asked for. See
+			// `requestDiff`: `entry_hash` is content only, so a changed `ttl` or `trust`
+			// arrives here hashing identically while asking for something the entry in force
+			// does not say.
+			const want = { ttl, trust: request.trust, actor: request.actor };
+			const standing = await standingApproval(store, entryHash);
+			const changed = standing ? requestDiff(standing.entry, want) : null;
+			if (standing && !changed) return await alreadyApproved(store, { key, holder }, standing, grant.name, trust);
 
 			const reviewId = await store.enqueueReview({
 				...baseRow,
 				id: newId("memr"),
 				idempotency_key: key,
-				reason: "global scope requires review",
+				reason: changed ? `${REVIEW_REQUIRED} — ${changed}` : REVIEW_REQUIRED,
 			});
+
+			// Look again, now that the proposal is parked.
+			//
+			// The lookup above and this insert are two statements, and a reviewer installing
+			// this content in between is not a rare shape: it is what happens whenever an
+			// agent re-proposes at the moment its proposal is being approved. Without this
+			// second look the gate parks a proposal for a decision that went into force
+			// while it was deciding — the stale queue entry `approvedReview` exists to
+			// prevent, one step later. Nothing to undo if it did: the pending row is for this
+			// exact content, so the reviewer's own decision resolves it.
+			//
+			// Skipped where the content is already known approved-but-different, because
+			// then the parked proposal is a genuinely new ask and is meant to stay.
+			const raced = changed ? null : await standingApproval(store, entryHash);
+			if (raced && !requestDiff(raced.entry, want)) {
+				await store
+					.recordApproval({ ...baseRow, id: newId("memr"), idempotency_key: key, reason: APPROVAL_INSTALLED }, raced.entry.id, writer)
+					.catch(() => undefined);
+				return await alreadyApproved(store, { key, holder }, raced, grant.name, trust);
+			}
+
 			await store.finishWrite(key, holder, "conflict", null);
 			return {
 				outcome: "conflict",
 				reason: "review.required",
 				remedy:
 					`A ${kind} at global scope is read by every agent in every repo, so it is a proposal until a ` +
-					`reviewer releases it. It is parked as ${reviewId}. Re-submit the same write with a review_token ` +
-					"to install it, or scope it to this repo or graph instead.",
+					`reviewer releases it. It is parked as ${reviewId}. ` +
+					(changed
+						? `This content is already in force as ${standing?.entry.id}, but with a different ${changed} — so ` +
+							"this is a new proposal, not a duplicate of it. Re-submit with a review_token to install it. "
+						: "Re-submit the same write with a review_token to install it, or scope it to this repo or graph " +
+							"instead."),
 				verified_persisted: false,
 				idempotency_key: key,
 				strategy: "require-review",
 				review_id: reviewId,
 				grant: grant.name,
+				...(changed && standing ? { conflict_with: standing.entry.id } : {}),
 				...(trust.downgradedFrom ? { trust_downgraded_from: trust.downgradedFrom } : {}),
 			};
 		}
@@ -736,7 +780,14 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 		const stored = await store.readEntry(inserted.id);
 		const verified = stored !== null && stored.entry_hash === entryHash;
 
-		if (verified && plan.requiresReview) await store.releaseReviews(entryHash, inserted.id, writer);
+		// The decision is written down whether or not anything was parked for it. A
+		// reviewer may install a global entry outright, with a token and no proposal ever
+		// having existed; recording only the *release* of pending rows leaves that install
+		// invisible to `approvedReview`, and the same content sent later without a token is
+		// then parked as though no reviewer had ever seen it.
+		if (verified && plan.requiresReview) {
+			await store.recordApproval({ ...row, id: newId("memr"), reason: APPROVAL_INSTALLED }, inserted.id, writer);
+		}
 
 		return {
 			outcome: "accepted",
@@ -762,6 +813,97 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 		if (!mayHaveWritten) await store.releaseWrite(key, holder).catch(() => undefined);
 		throw cause;
 	}
+}
+
+/**
+ * The entry a reviewer's approval of this exact content put in force, or null.
+ *
+ * Three things have to hold before an approval means "this content is what agents
+ * read": the row it points at has to exist, it has to hold this content — `entry_hash`
+ * is the tie between a proposal and its entry, and a mismatch means the pointer is
+ * wrong rather than that this content is in force — and it has to be standing.
+ */
+async function standingApproval(
+	store: MemoryStore,
+	entryHash: string,
+): Promise<{ review: string; entry: MemoryEntry } | null> {
+	const approved = await store.approvedReview(entryHash);
+	if (!approved) return null;
+	const installed = await store.readEntry(approved.entry_id);
+	if (!installed || installed.entry_hash !== entryHash || installed.superseded_by) return null;
+	return { review: approved.id, entry: installed };
+}
+
+/**
+ * What this request asks to have recorded that the entry in force does not record.
+ *
+ * `entry_hash` covers the *content* — scope, kind, subject, text, writer — and
+ * deliberately not the retention or the confidence, because a reviewed re-submission
+ * has to hash the same as the proposal it is approving while asking for different
+ * trust. So a hash match is not yet an answer to this request: the same words asking
+ * for `ttl: "session"` against a permanent entry, or for `human-confirmed` against an
+ * agent-claimed one, are a different ask about the same claim. Answering those with the
+ * standing entry and `verified_persisted: true` reports retention and confidence that
+ * were never recorded — the same falsehood `requestHash` refuses on a re-used key, one
+ * table over.
+ *
+ * Only what the caller actually asked for counts. A request naming no `trust` and no
+ * `actor` is asking for the default, not asking for the entry in force to be *downgraded*
+ * to it; counting that as a difference would put decisions a reviewer installed straight
+ * back into their queue, which is the bug this whole branch exists to prevent. `ttl`
+ * always counts: it has a default, and that default is a retention ask like any other.
+ */
+function requestDiff(
+	entry: MemoryEntry,
+	want: { ttl: MemoryTtl; trust: Trust | undefined; actor: Actor | undefined },
+): string | null {
+	if (entry.ttl !== want.ttl) return `ttl (asked for ${want.ttl}, in force is ${entry.ttl})`;
+	if (want.trust !== undefined && entry.trust !== want.trust) {
+		return `trust (asked for ${want.trust}, in force is ${entry.trust})`;
+	}
+	if (want.actor !== undefined && entry.actor !== want.actor) {
+		return `actor (asked for ${want.actor}, in force is ${entry.actor})`;
+	}
+	return null;
+}
+
+/**
+ * Answer a re-proposal with the entry a reviewer already installed.
+ *
+ * The claim is **released**, not finished. Recording `accepted` against it spends the
+ * key on a row this attempt did not write, and for the derived key a keyless
+ * re-proposal arrives under that is the next bug: once the approved entry is
+ * superseded, the same content inside the 24-hour window replays the superseded row as
+ * this write's own `verified_persisted` entry instead of reaching review. Nothing was
+ * written here, so the key is protecting nothing — and letting go of it is what makes
+ * the next ask get decided against the index as it is *then*, which is the only way a
+ * superseded approval stops answering for a decision that is no longer in force.
+ */
+async function alreadyApproved(
+	store: MemoryStore,
+	claim: { key: string; holder: string },
+	standing: { review: string; entry: MemoryEntry },
+	grant: string,
+	trust: { downgradedFrom?: Trust },
+): Promise<Decision> {
+	await store.releaseWrite(claim.key, claim.holder);
+	return {
+		outcome: "accepted",
+		reason: "review.already-approved",
+		remedy:
+			"A reviewer already approved this exact content, with the retention and trust you asked for, and it is " +
+			"the entry in force — so it was not parked for review again and nothing was written. Send a changed text " +
+			"— or supersede the entry deliberately — if this was meant to be a new proposal.",
+		// Read out of the index and hash-checked, like every other verification here.
+		verified_persisted: true,
+		idempotency_key: claim.key,
+		entry: standing.entry,
+		deduplicated: true,
+		strategy: "require-review",
+		review_id: standing.review,
+		grant,
+		...(trust.downgradedFrom ? { trust_downgraded_from: trust.downgradedFrom } : {}),
+	};
 }
 
 /**

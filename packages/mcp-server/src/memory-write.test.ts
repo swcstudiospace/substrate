@@ -28,7 +28,9 @@ class FakeStore implements MemoryStore {
 	readonly writes = new Map<string, WriteRecord & { holder: string; claimed: number }>();
 	private holders = 0;
 	readonly quarantined: Array<NewMemoryEntry & { reason: QuarantineReason; detail: string }> = [];
-	readonly reviews: Array<NewMemoryEntry & { reason: string; state: string; entry_id: string | null }> = [];
+	readonly reviews: Array<
+		NewMemoryEntry & { reason: string; state: string; entry_id: string | null; decided_by?: string }
+	> = [];
 
 	/** Makes the read-back miss, which is the only way to reach `verified_persisted: false`. */
 	hideFromReadBack = false;
@@ -56,6 +58,14 @@ class FakeStore implements MemoryStore {
 	 * position deliberately.
 	 */
 	onInsert: (() => Promise<void>) | null = null;
+	/**
+	 * Runs at the top of `enqueueReview`, before the proposal is parked.
+	 *
+	 * The gate asks `approvedReview` and then parks, and those are two statements: a
+	 * reviewer can install the content in between, which leaves a queue entry for a
+	 * decision already in force. This hook is how a test puts that install exactly there.
+	 */
+	onEnqueueReview: (() => Promise<void>) | null = null;
 	/**
 	 * Restores the hand-over rule from before a claim with no `request_hash` was treated
 	 * as unidentified: it matched whoever asked, and its reservation went with it.
@@ -249,6 +259,7 @@ class FakeStore implements MemoryStore {
 	}
 
 	async enqueueReview(row: NewMemoryEntry & { reason: string }): Promise<string> {
+		if (this.onEnqueueReview) await this.onEnqueueReview();
 		const existing = this.reviews.find((held) => held.entry_hash === row.entry_hash && held.state === "pending");
 		if (existing) return existing.id;
 		this.reviews.push({ ...row, state: "pending", entry_id: null });
@@ -263,15 +274,24 @@ class FakeStore implements MemoryStore {
 		return approved ? { id: approved.id, entry_id: approved.entry_id! } : null;
 	}
 
-	async releaseReviews(entryHash: string, entryId: string): Promise<number> {
-		let released = 0;
+	async recordApproval(
+		row: NewMemoryEntry & { reason: string },
+		entryId: string,
+		decidedBy: string,
+	): Promise<{ released: number; review_id: string }> {
+		const released: string[] = [];
 		for (const review of this.reviews) {
-			if (review.entry_hash !== entryHash || review.state !== "pending") continue;
+			if (review.entry_hash !== row.entry_hash || review.state !== "pending") continue;
 			review.state = "approved";
 			review.entry_id = entryId;
-			released++;
+			review.decided_by = decidedBy;
+			released.push(review.id);
 		}
-		return released;
+		if (released.length > 0) return { released: released.length, review_id: released[0]! };
+		// Nothing was parked, so the approval is recorded as its own row — the half that
+		// makes a reviewer's direct install findable by `approvedReview`.
+		this.reviews.push({ ...row, state: "approved", entry_id: entryId, decided_by: decidedBy });
+		return { released: 0, review_id: row.id };
 	}
 }
 
@@ -459,6 +479,150 @@ describe("conflict — require-review for global", () => {
 		// Both proposals are resolved, and the second approval is recorded beside the
 		// first rather than colliding with it.
 		expect(store.reviews.every((review) => review.state === "approved")).toBe(true);
+	});
+
+	test("a changed ttl does not ride the old approval", async () => {
+		// `entry_hash` is the content — scope, kind, subject, text, writer — and not the
+		// retention, because a reviewed re-submission has to hash the same as the proposal
+		// it approves. So a write asking for different retention arrives here hashing
+		// identically to one a reviewer installed, and answering it with that entry reports
+		// a `ttl` nobody ever recorded, under `verified_persisted: true`.
+		const request = { scope: "global", kind: "fact" as const, text: "the poller runs on the host" };
+		await write(request);
+		const approved = await write({ ...request, review_token: REVIEW_TOKEN });
+		expect(approved.entry?.ttl).toBe("permanent");
+
+		const shorter = await write({ ...request, ttl: "30d" });
+
+		expect(shorter.outcome).toBe("conflict");
+		expect(shorter.reason).toBe("review.required");
+		expect(shorter.remedy).toContain("ttl");
+		expect(shorter.conflict_with).toBe(approved.entry?.id);
+		// A real proposal, for the retention actually asked for — and the entry in force is
+		// untouched, because nothing here was a write.
+		expect(store.reviews.filter((review) => review.state === "pending").map((review) => review.ttl)).toEqual(["30d"]);
+		expect(store.standing().map((entry) => entry.ttl)).toEqual(["permanent"]);
+	});
+
+	test("a changed trust does not ride the old approval either", async () => {
+		const request = { scope: "global", kind: "fact" as const, text: "the projector is idempotent" };
+		await write(request);
+		const approved = await write({ ...request, review_token: REVIEW_TOKEN });
+		expect(approved.entry?.trust).toBe("agent-claimed");
+
+		// An escalation is a decision for a reviewer, and the entry in force does not carry
+		// it. Reporting `accepted` here is how an agent comes to believe a human confirmed
+		// something nobody confirmed.
+		const escalated = await write({ ...request, trust: "human-confirmed" });
+
+		expect(escalated.outcome).toBe("conflict");
+		expect(escalated.reason).toBe("review.required");
+		expect(escalated.remedy).toContain("trust");
+		expect(escalated.trust_downgraded_from).toBe("human-confirmed");
+		expect(store.standing().map((entry) => entry.trust)).toEqual(["agent-claimed"]);
+	});
+
+	test("a re-proposal asking for nothing still gets the entry in force", async () => {
+		// The other side of the same rule, and the one that keeps it from being a
+		// regression: naming no trust and no actor is asking for the default, not asking
+		// for the entry in force to be *downgraded* to it. Treating that as a difference
+		// would put every decision a reviewer installed with `human-confirmed` back into
+		// their queue on the next re-proposal.
+		const request = { scope: "global", kind: "fact" as const, text: "eight agents share one host" };
+		await write(request);
+		const approved = await write({
+			...request,
+			trust: "human-confirmed",
+			actor: "human",
+			review_token: REVIEW_TOKEN,
+		});
+		expect(approved.entry?.trust).toBe("human-confirmed");
+
+		const again = await write(request);
+
+		expect(again.reason).toBe("review.already-approved");
+		expect(again.entry?.id).toBe(approved.entry?.id);
+		expect(store.reviews.filter((review) => review.state === "pending")).toEqual([]);
+	});
+
+	test("an entry installed straight from a token is findable as approved", async () => {
+		// No proposal ever existed: the reviewer sent the write with a token, so there was
+		// nothing pending to release. Recording only the *release* left nothing for
+		// `approvedReview` to find, and the same content sent later without a token went
+		// back into the queue as though no reviewer had ever seen it — where approving it is
+		// a second entry for a decision already in force.
+		const request = { scope: "global", kind: "fact" as const, text: "the host reboots on Sundays" };
+		const installed = await write({ ...request, review_token: REVIEW_TOKEN });
+		expect(installed.outcome).toBe("accepted");
+		expect(store.reviews.filter((review) => review.state === "pending")).toEqual([]);
+
+		const again = await write(request);
+
+		expect(again.outcome).toBe("accepted");
+		expect(again.reason).toBe("review.already-approved");
+		expect(again.entry?.id).toBe(installed.entry?.id);
+		expect(store.entries()).toHaveLength(1);
+		expect(store.reviews.filter((review) => review.state === "pending")).toEqual([]);
+	});
+
+	test("a superseded approval does not replay as this write's own entry", async () => {
+		const request = {
+			scope: "global",
+			kind: "decision" as const,
+			subject: "ledger",
+			text: "Greptime is the events ledger",
+		};
+		await write(request);
+		const approved = await write({ ...request, review_token: REVIEW_TOKEN });
+		// The keyless re-proposal, answered with the entry in force. The fix is what it does
+		// *not* do: spend the content-derived key on a row it did not write.
+		expect((await write(request)).reason).toBe("review.already-approved");
+
+		// A reviewer replaces the decision.
+		const replaced = await write({
+			...request,
+			text: "Postgres is the events ledger",
+			expected_version: 1,
+			review_token: REVIEW_TOKEN,
+		});
+		expect(replaced.outcome).toBe("accepted");
+		expect(store.rows.get(approved.entry!.id)?.entry.superseded_by).toBe(replaced.entry?.id);
+
+		// The original content again, keyless, inside the 24-hour derived-key window. It
+		// used to replay the superseded row as this write's own `verified_persisted` entry,
+		// because the already-approved answer above had recorded that row against the key.
+		const stale = await write(request);
+
+		expect(stale.outcome).toBe("conflict");
+		expect(stale.reason).toBe("review.required");
+		expect(stale.verified_persisted).toBe(false);
+		expect(stale.entry).toBeUndefined();
+		// Superseded content is a real proposal again, so it is in front of a reviewer.
+		expect(store.reviews.filter((review) => review.state === "pending")).toHaveLength(1);
+	});
+
+	test("a reviewer installing mid-park does not leave a stale proposal", async () => {
+		// The window between the approval lookup and the parking insert. A reviewer landing
+		// the content in there used to be answered `review.required` with a queue entry for
+		// a decision that was already in force — `approvedReview`'s own bug, one statement
+		// later.
+		const request = { scope: "global", kind: "fact" as const, text: "the lease heartbeat is 20s" };
+		const landed: MemoryWriteResult[] = [];
+		store.onEnqueueReview = async () => {
+			store.onEnqueueReview = null;
+			landed.push(await write({ ...request, review_token: REVIEW_TOKEN }));
+		};
+
+		const parked = await write(request);
+
+		expect(landed[0]?.outcome).toBe("accepted");
+		expect(parked.outcome).toBe("accepted");
+		expect(parked.reason).toBe("review.already-approved");
+		expect(parked.entry?.id).toBe(landed[0]?.entry?.id);
+		// One entry, and the proposal this write parked in the window is resolved by the
+		// reviewer's own decision rather than left for them to look at twice.
+		expect(store.entries()).toHaveLength(1);
+		expect(store.reviews.filter((review) => review.state === "pending")).toEqual([]);
 	});
 
 	test("the parked conflict does not pin the outcome forever", async () => {

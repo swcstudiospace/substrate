@@ -189,7 +189,7 @@ describeLive("memory governance against a live index", () => {
 			quarantineEntry: (row) => b.quarantineEntry(row),
 			enqueueReview: (row) => b.enqueueReview(row),
 			approvedReview: (hash) => b.approvedReview(hash),
-			releaseReviews: (hash, entryId, by) => b.releaseReviews(hash, entryId, by),
+			recordApproval: (row, entryId, by) => b.recordApproval(row, entryId, by),
 		};
 
 		const loser = await write(racing, {
@@ -235,12 +235,18 @@ describeLive("memory governance against a live index", () => {
 		};
 
 		expect(await a.enqueueReview(proposal)).toBe(`memr_${MARKER}_1`);
-		expect(await a.releaseReviews(hash, `mem_${MARKER}_r1`, "hermes")).toBe(1);
+		expect(await a.recordApproval(proposal, `mem_${MARKER}_r1`, "hermes")).toEqual({
+			released: 1,
+			review_id: `memr_${MARKER}_1`,
+		});
 
 		// Parked again — allowed, because the pending slot is free once the first was
 		// decided — and approved again.
 		expect(await a.enqueueReview({ ...proposal, id: `memr_${MARKER}_2` })).toBe(`memr_${MARKER}_2`);
-		expect(await a.releaseReviews(hash, `mem_${MARKER}_r2`, "hermes")).toBe(1);
+		expect(await a.recordApproval({ ...proposal, id: `memr_${MARKER}_2` }, `mem_${MARKER}_r2`, "hermes")).toEqual({
+			released: 1,
+			review_id: `memr_${MARKER}_2`,
+		});
 
 		const rows = (await raw`
 			select state, count(*)::int as n from memory_reviews where entry_hash = ${hash}

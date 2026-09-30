@@ -1070,20 +1070,60 @@ export class IndexStore implements MemoryStore {
 	}
 
 	/**
-	 * Close the loop: a reviewed write that landed resolves the proposal it came from.
+	 * Close the loop: a reviewed write that landed resolves the proposal it came from —
+	 * and where it came from no proposal, it still records that a reviewer installed it.
 	 *
-	 * Safe to run when this content was approved once before — the uniqueness on
+	 * Resolving pending rows alone was half an answer. A reviewer can send a global write
+	 * with a token and nothing parked for it, which installs the entry and releases
+	 * nothing at all; with no `approved` row left behind, the same content sent later
+	 * without a token found no approval and went back into the queue as though a reviewer
+	 * had never seen it. Approving *that* proposal is a second entry for a decision
+	 * already in force. So the decision is written down either way, as an `approved` row
+	 * from the start: it is not a proposal anybody has to look at, it is the record that
+	 * this content is installed.
+	 *
+	 * One statement, and that is the point. As an update followed by a conditional
+	 * insert, a proposal parked in between would be left pending for content already
+	 * installed — the very stale queue entry the insert exists to prevent. Inside a
+	 * single statement both halves see one snapshot: either the update finds the pending
+	 * row and resolves it, or there was none to find and the record is created.
+	 *
+	 * Safe to run when this content was approved once before: the uniqueness on
 	 * `memory_reviews` covers the pending rows only, so a second approval lands beside
-	 * the first instead of raising a duplicate key on a write that has already
-	 * committed.
+	 * the first instead of raising a duplicate key on a write that has already committed.
 	 */
-	async releaseReviews(entryHash: string, entryId: string, decidedBy: string): Promise<number> {
+	async recordApproval(
+		row: NewMemoryEntry & { reason: string },
+		entryId: string,
+		decidedBy: string,
+	): Promise<{ released: number; review_id: string }> {
 		const rows = (await this.sql`
-			update memory_reviews
-			set state = 'approved', entry_id = ${entryId}, decided = now(), decided_by = ${decidedBy}
-			where entry_hash = ${entryHash} and state = 'pending'
-			returning id`) as Array<Record<string, unknown>>;
-		return rows.length;
+			with released as (
+				update memory_reviews
+				set state = 'approved', entry_id = ${entryId}, decided = now(), decided_by = ${decidedBy}
+				where entry_hash = ${row.entry_hash} and state = 'pending'
+				returning id
+			), recorded as (
+				insert into memory_reviews (
+					id, scope, kind, body, subject, writer, source_event, session_id, graph_id, repo, ttl,
+					entry_hash, reason, state, entry_id, decided, decided_by)
+				select
+					${row.id}, ${row.scope}, ${row.kind}, ${redact(row.text)}, ${row.subject}, ${row.writer},
+					${row.source_event}, ${row.session_id}, ${row.graph_id}, ${row.repo}, ${row.ttl},
+					${row.entry_hash}, ${row.reason}, 'approved', ${entryId}, now(), ${decidedBy}
+				-- What makes the two halves exclusive, and what forces the update above to run
+				-- first: nothing is recorded where a proposal was there to resolve.
+				where not exists (select 1 from released)
+				-- A retry under the same reserved id records the approval once.
+				on conflict (id) do nothing
+				returning id
+			)
+			select id, true as released from released
+			union all
+			select id, false as released from recorded`) as Array<Record<string, unknown>>;
+		const released = rows.filter((found) => found.released === true);
+		const first = released[0] ?? rows[0];
+		return { released: released.length, review_id: first ? String(first.id) : row.id };
 	}
 
 	/**
