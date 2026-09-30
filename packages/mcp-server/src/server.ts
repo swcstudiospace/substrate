@@ -46,21 +46,24 @@ export function healthStatus(
 /**
  * Who a memory write is attributed to, and therefore whose grants it gets.
  *
- * The token wins whenever there is one. A body-supplied writer is honoured only on a
- * deployment that configured no tokens at all — a local run, where every caller is
- * anonymous and forcing `unknown` would leave memory unwritable rather than
- * protected.
+ * Only a token names a writer. `bodyWriter` is taken as a parameter so that
+ * discarding it is a thing a test can assert rather than a line somebody has to
+ * notice is missing.
  *
- * Today `surface` is always set when tokens exist, because the server 401s an
- * unauthenticated request. This is written as an explicit condition anyway: it is the
- * difference between "a caller cannot impersonate a surface" and "a caller cannot
- * impersonate a surface as long as the auth check above stays exactly as it is", and
- * only one of those survives somebody editing the route.
+ * It used to be honoured on a deployment that configured no tokens, on the reasoning
+ * that a local run has no token to beat. But "no tokens configured" is exactly the
+ * state in which the 401 above is not applied, so that condition read: any anonymous
+ * caller may name itself `hermes` and collect hermes's graph, repo and `agent:hermes`
+ * grants. Default-deny that a request parameter defeats is not default-deny, and the
+ * convenience is not worth the hole — `unknown` holds no grants, matches no wildcard,
+ * and the denial's remedy says how to fix it.
+ *
+ * A local run that genuinely wants ungoverned memory says so out loud, with a grant
+ * naming `unknown` in `SUBSTRATE_MEMORY_GRANTS` or a token in `SUBSTRATE_TOKENS`.
+ * Both are one line, and both leave a record of the decision.
  */
-export function memoryWriter(surface: Surface | null, bodyWriter: unknown, allowAnonymous: boolean): string {
-	if (surface) return surface;
-	if (allowAnonymous && typeof bodyWriter === "string" && bodyWriter.trim()) return bodyWriter.trim();
-	return "unknown";
+export function memoryWriter(surface: Surface | null, bodyWriter: unknown): string {
+	return surface ?? "unknown";
 }
 
 /**
@@ -177,7 +180,7 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig) 
 				const body = JSON.parse(raw) as Record<string, unknown>;
 				const result = await substrate.writeMemory({
 					...(body as object),
-					writer: memoryWriter(surface, body.writer, config.allowAnonymous),
+					writer: memoryWriter(surface, body.writer),
 				} as Parameters<Substrate["writeMemory"]>[0]);
 				sendJson(res, memoryWriteStatus(result), result);
 				return;

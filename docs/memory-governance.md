@@ -67,11 +67,36 @@ implicit allow.
 - `agent:` is self-only. An agent does not write into another agent's scope; that
   is what a `handoff` at graph scope is for.
 - `"*"` means every *known* surface and never an unrecognised writer. An
-  unauthenticated MCP caller arrives as `unknown` and writes nothing at all. This
+  unauthenticated caller arrives as `unknown` and writes nothing at all. This
   is the teeth: default-deny that a wildcard quietly defeats is not default-deny.
 
 Passing RBAC at `global` is permission to **propose** a global memory, not to
 install one — see review, below.
+
+### Only a token names a writer
+
+The writer a memory write is attributed to comes from the bearer token and from
+nowhere else. `POST /memory` ignores `writer` in the body and `memory_write` ignores
+its `surface` argument; both report the surface actually used in the reply's
+`writer`, so a caller never has to guess whether its argument was taken.
+
+This matters most where it is least obvious. A deployment with no tokens configured
+accepts anonymous callers — that is what keeps a local run usable — and it is
+therefore the one deployment where nothing else stops a caller naming itself
+`hermes` and collecting hermes's graph, repo and `agent:hermes` grants. RBAC is
+decided on the writer's name, so a caller-supplied name is a caller-supplied
+permission.
+
+A local run that wants memory writable without tokens says so explicitly, with
+either a token in `SUBSTRATE_TOKENS` or a grant naming `unknown` in
+`SUBSTRATE_MEMORY_GRANTS`:
+
+```json
+[{ "name": "local-dev", "surfaces": ["unknown"], "scopes": ["graph", "repo"], "kinds": ["fact", "warning", "todo"] }]
+```
+
+Both are one line and both leave a record of the decision, which is the difference
+between a considered exception and a hole.
 
 Operators widen the policy with `SUBSTRATE_MEMORY_GRANTS`, a JSON array appended to
 the defaults. There is deliberately no variable that narrows them: a policy you can
