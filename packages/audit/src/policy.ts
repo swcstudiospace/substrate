@@ -18,7 +18,10 @@ export const FAIL_CLOSED_TOOLS: ReadonlySet<string> = new Set([
 	"graph_release",
 	"graph_complete",
 	"graph_register",
+	"graph_heartbeat",
 	"memory_write",
+	"coord_handoff",
+	"coord_reap_leases",
 ]);
 
 /**
@@ -27,15 +30,36 @@ export const FAIL_CLOSED_TOOLS: ReadonlySet<string> = new Set([
  * All reads, plus `events_emit`. These sit inside a prompt's hook budget: the
  * substrate is not allowed to fail an agent's turn, and an unwritable audit file is
  * not a reason to start. The call still produces a record — it is just not a gate.
+ *
+ * **Every read tool this substrate serves has to be named here.** An unlisted name is
+ * fail-closed by default, which is right for a write and wrong for a read: it meant an
+ * unwritable audit file refused `events_query`, `events_verify`, `memory_pending`,
+ * `coord_handoff_list` and `coord_drift_scan` while both their backing stores were
+ * healthy — the audit sink failing took out reads it was never meant to gate, which is
+ * the opposite of the stated policy. The two sets below are exhaustive over the tools in
+ * `mcp.ts` and the REST routes in `server.ts`, so the default-deny catches only a name
+ * this substrate does not serve; `policy.test.ts` pins that, and a tool added without a
+ * decision about its audit mode still fails closed the first time it is called.
  */
 export const FAIL_OPEN_TOOLS: ReadonlySet<string> = new Set([
+	// MCP reads.
 	"memory_brief",
 	"memory_search",
-	"events_emit",
+	"memory_pending",
+	"events_query",
+	"events_verify",
 	"graph_get",
+	"coord_handoff_verify",
+	"coord_handoff_list",
+	"coord_drift_scan",
+	// The one write that is fail-open on purpose: an event costs a line in the trail,
+	// and refusing the turn over it would make a substrate outage an outage of the host.
+	"events_emit",
+	// REST routes, named as `server.ts` audits them.
 	"brief",
 	"events",
 	"verify",
+	"drift",
 	"healthz",
 	"metrics",
 	"slo",

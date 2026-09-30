@@ -24,6 +24,52 @@ describe("auditMode", () => {
 		expect(auditMode("")).toBe("fail-closed");
 	});
 
+	test("every read tool this substrate serves is fail-open", () => {
+		// The ones that were missing. An unlisted name is fail-closed by default, which is
+		// right for a write and wrong for a read: an unwritable audit file refused these
+		// while both their backing stores were healthy, so the audit sink failing took out
+		// reads it was never meant to gate.
+		for (const tool of [
+			"events_query",
+			"events_verify",
+			"memory_pending",
+			"coord_handoff_list",
+			"coord_handoff_verify",
+			"coord_drift_scan",
+		]) {
+			expect(auditMode(tool)).toBe("fail-open");
+		}
+	});
+
+	test("every REST route server.ts audits has a mode", () => {
+		// `auditedRest` refuses a route whose record the chain will not take, so a route
+		// audited under a name in neither list would be fail-closed by accident — a
+		// Prometheus-adjacent read answering 503 because a disk filled.
+		for (const [route, tool] of [
+			["/brief", "brief"],
+			["/events", "events"],
+			["/events/query", "events_query"],
+			["/verify", "verify"],
+			["/drift", "drift"],
+			["/evidence", "evidence"],
+		]) {
+			expect(FAIL_OPEN_TOOLS.has(tool as string)).toBe(true);
+			expect(route).toBeDefined();
+		}
+		// The two action routes are audited under their MCP tools' own names, and inherit
+		// those tools' fail-closed mode rather than being listed twice.
+		expect(auditMode("memory_write")).toBe("fail-closed");
+		expect(auditMode("coord_handoff")).toBe("fail-closed");
+	});
+
+	test("the write tools are all fail-closed, explicitly rather than by default", () => {
+		// Default-deny catches a tool nobody decided about; it should not be what is
+		// carrying the decision for a tool somebody did.
+		for (const tool of ["graph_heartbeat", "coord_handoff", "coord_reap_leases"]) {
+			expect(FAIL_CLOSED_TOOLS.has(tool)).toBe(true);
+		}
+	});
+
 	test("the two lists do not overlap", () => {
 		for (const tool of FAIL_CLOSED_TOOLS) expect(FAIL_OPEN_TOOLS.has(tool)).toBe(false);
 	});
