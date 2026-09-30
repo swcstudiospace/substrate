@@ -77,8 +77,22 @@ to a single `unrecognized` bucket, drawn from the list of tools the substrate
 actually serves — the audit chain still records the name exactly as sent, because
 that is a log, where the real value is the point. And `HARD_MAX_SERIES` is a ceiling
 past which *every* attribute collapses, so the bound no longer depends on each call
-site getting it right. Attribute values are capped at `MAX_ATTRIBUTE_LENGTH` too,
-since a series key is held for the life of the process. The cost is visible in exactly one place, and is
+site getting it right. Attribute values are capped too, since a series key is held for
+the life of the process.
+
+The cap is **per attribute**, and the attributes a value is *read back by* get a longer
+one. `graph_id`, `session_id` and `node_id` are capped at `MAX_IDENTIFIER_ATTRIBUTE_LENGTH`
+(512, the same `MAX_FIELD` the event path and the audit record use), because
+`substrate evidence` finds a graph's token and cost totals by searching with the full id.
+At the general 120-character cap the two ends disagreed: an id longer than that recorded
+truncated and its usage could never be found again — and worse, an id of exactly 120
+characters received the totals of every longer id sharing its prefix, so one graph's spend
+was reported as another's. Anything that still exceeds its cap is shortened by
+`boundValue`, which appends a digest of the whole value to the prefix rather than
+truncating: bounded, and unique to its input, so two values can no longer collide into one
+series.
+
+The cardinality cost is visible in exactly one place, and is
 reported there rather than papered over: a graph whose series collapsed has no
 separable token or cost total, so `substrate evidence` says so instead of printing
 another graph's numbers.
@@ -202,6 +216,14 @@ chosen to be alarming rather than measured, and `SUBSTRATE_SLO_LEASE_STEAL` /
   `claimed_by` is null or already this surface. The counter exists so the rate is
   observable the moment Phase 2 adds lease expiry, and so the objective is written
   down before there is pressure to weaken it.
+
+  The rate is observable because the *index's action* reaches the observer, not only the
+  substrate's verdict. A takeover of another surface's expired lease is
+  `decision: "granted"` with `action: "stolen"`, and `stolen` is the only outcome that
+  increments `substrate.lease.steals` — so reading the verdict alone mapped every takeover
+  to `granted` and the numerator could not leave zero however many leases were taken. An
+  objective whose numerator cannot move is not one. Where the two disagree the verdict
+  wins: a steal whose event never reached the ledger is `revoked`, and it did not happen.
 - **Quarantine** — a node the substrate withdrew from dispatch rather than handing
   out. One reason is emitted today, `unrecorded-claim` (below). Phase 2 adds
   dispatch-failure quarantine.
@@ -228,6 +250,18 @@ taken, and the only way they learn it is the brief, whose recent actions come fr
 the ledger. A claim the ledger never took is a lock the substrate cannot tell
 anyone about — handing it out would be worse than refusing it, because the second
 agent would see an idle node and start the same work.
+
+**The withdrawal is recorded on the audit chain**, as its own `denied` record for
+`graph_claim` with `transport: "internal"`. The gate in front of the dispatcher has
+already recorded the call as `allowed` — which is true of the call: it was permitted to
+run. What happens next is that the claim's event does not reach the ledger and the hold is
+withdrawn, and nothing wrote that: the trail and the per-graph evidence bundle showed the
+claim allowed and said nothing about the withdrawal, which is the opposite of the decision
+the substrate made, in the document an incident is reconstructed from, during the one
+outage this behaviour exists for. Appended rather than amended, because the chain is
+append-only and **both** records are true; fail-open, because the withdrawal has already
+happened and refusing to write it cannot undo it. `chaos.test.ts` asserts every allowed
+claim has its withdrawal beside it, and that a claim granted on a healthy ledger has none.
 
 `SUBSTRATE_CLAIM_REQUIRE_LEDGER` forces either way. The default is off when no
 ledger is configured at all, so a local run does not have every claim withdrawn.
@@ -271,7 +305,10 @@ like, whereas `revoked` can only come from the withdrawal path running.
 
 `CHAOS_REHEARSAL=1` downgrades those checks to notes, for testing the script itself
 against a healthy deployment; the report says so, so a rehearsal cannot be mistaken
-for a proof. `CHAOS_WINDOW_MS` and `CHAOS_TICK_MS` shorten the window.
+for a proof. **Every check that only holds during the outage is one of them**, "no claim
+was granted" included: a healthy deployment grants claims, and that is the behaviour, so
+a rehearsal that failed on it was failing on the deployment being healthy — which is the
+one thing a rehearsal assumes. `CHAOS_WINDOW_MS` and `CHAOS_TICK_MS` shorten the window.
 
 It appends `note` events under a `ut-chaos-…` graph. The ledger is append-only so
 they stay; they carry no repo, so no brief shows them.

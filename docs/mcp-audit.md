@@ -55,7 +55,64 @@ It has no compaction and no rotation. Plan for `logrotate` with `copytruncate`
 **off** — truncating the file mid-chain is indistinguishable from tampering to
 `verify`. Rotate by moving the file and restarting the service, which starts a
 fresh chain whose first record has `prev: null`; keep the rotated files, since the
-chain they hold is only verifiable as a whole.
+chain they hold is only verifiable as a whole. Remove `<path>.checkpoint` along with
+the file when you do, or the new chain is reported as **missing history** — which is
+the point of it.
+
+### The checkpoint, and telling a fresh install from a deleted file
+
+Beside the file sits `<path>.checkpoint`: the last `seq` and `hash` this process
+committed, rewritten after every append through a temporary file and a rename, so a
+crash leaves either the old one or the new one and never half of each.
+
+It exists because "the file holds no records" had two possible causes and the writer
+could not tell them apart. A fresh installation legitimately starts at `seq: 1`. A
+deployment whose audit file was deleted or truncated also has no records — and started
+at `seq: 1` too, whereupon the new chain verified as intact and an evidence bundle
+attested to it without a word about the decisions that had disappeared. That is the one
+failure an audit cannot be allowed to have: the reader of an evidence document has
+nothing else to go on.
+
+With the checkpoint, the states are distinct:
+
+| | |
+| --- | --- |
+| no checkpoint, no file | a fresh install. `seq` starts at 1. |
+| checkpoint at `seq: N`, file accounts for `N` or more | sound. The chain continues from the file. |
+| checkpoint at `seq: N`, file accounts for fewer | **missing history.** |
+
+In the last state the chain resumes from the checkpoint rather than from 1 — so nothing
+reuses a sequence number, and the file's own first record is no longer `seq: 1`, which
+means the head check reports the gap on the file's own terms as well. `verify` says so
+outright for as long as the process lives, `/evidence` carries a note, and the service
+warns at boot. **Appending still works**: refusing every fail-closed tool forever after a
+disk mishap would be an outage in the name of an audit.
+
+An unreadable or malformed checkpoint is treated as absent. A false alarm about tampering
+is its own kind of damage, and a torn checkpoint is not evidence of loss.
+
+### Recovery reads the tail, and grows the window when it has to
+
+At boot only the file's tail is read, because an audit log has no compaction. A fixed
+64 KiB window assumed the last record fit in it, and `params.name` in a JSON-RPC envelope
+is a caller-supplied string — so the size was the caller's to choose. A record past the
+window filled it with nothing but its own fragments, recovery found no complete record,
+and the writer restarted at `seq: 1` on top of a file that already held a chain: every
+later fail-closed call then appended to something no verifier could reconstruct.
+
+Two things close that, and both are needed:
+
+- **records are size-bounded.** Every stored field is capped (`MAX_RECORD_BYTES`), and
+  the recovery window is never smaller than that bound — so "the last record did not fit"
+  is a state this writer cannot produce.
+- **the scan doubles its way back** to `maxScanBytes` before giving up, so a long record
+  written by some other version of this code is found rather than skipped past.
+
+If there are bytes and still no readable record, and no checkpoint to fall back on, the
+chain **refuses to append at all**: `durable: false` with a reason at boot, every
+fail-closed tool refused, and every fail-open call recorded as lost. That is the
+fail-closed answer to a position that is not known, rather than a `seq: 1` written on top
+of somebody's chain.
 
 ## The record
 
@@ -155,12 +212,36 @@ The chain tip advances **only on a successful write**, for the same reason.
 
 | | Tools | Why |
 | --- | --- | --- |
-| **fail-open** | `memory_brief`, `memory_search`, `graph_get`, `events_emit`, and the `/brief`, `/events`, `/verify`, `/evidence` routes | These sit inside a prompt's hook budget. The substrate is not allowed to fail an agent's turn, and an unwritable audit file is not a reason to start. The call still produces a record; it is just not a gate. |
-| **fail-closed** | `graph_claim`, `graph_release`, `graph_complete`, `graph_register`, `memory_write` | Everything that grants or transfers exclusive ownership of a node, or writes shared state another agent will act on. A claim nobody recorded is how two agents end up holding one node, and the whole point of `graph_claim` is that they cannot. |
+| **fail-open** | every read — `memory_brief`, `memory_search`, `memory_pending`, `events_query`, `events_verify`, `graph_get`, `coord_handoff_verify`, `coord_handoff_list`, `coord_drift_scan` — plus `events_emit`, and the `/brief`, `/events`, `/events/query`, `/verify`, `/drift`, `/evidence` routes | These sit inside a prompt's hook budget. The substrate is not allowed to fail an agent's turn, and an unwritable audit file is not a reason to start. The call still produces a record; it is just not a gate. |
+| **fail-closed** | `graph_claim`, `graph_release`, `graph_complete`, `graph_register`, `graph_heartbeat`, `memory_write`, `coord_handoff`, `coord_reap_leases` | Everything that grants or transfers exclusive ownership of a node, or writes shared state another agent will act on. A claim nobody recorded is how two agents end up holding one node, and the whole point of `graph_claim` is that they cannot. |
 
 **An unknown tool is fail-closed.** Deny by default, like `assertAppendOnly` in the
 ledger client: a tool added without a decision about its audit mode is caught the
 first time it is called rather than becoming a permanent hole.
+
+**Both lists are exhaustive over the tools this substrate serves**, and `policy.test.ts`
+pins that. Default-deny is there to catch a tool nobody has decided about; it is not
+meant to be what carries the decision for one somebody has. Leaving the read tools out
+of the fail-open list meant an unwritable audit file refused `events_query`,
+`events_verify`, `memory_pending`, `coord_handoff_list` and `coord_drift_scan` while
+both their backing stores were healthy — the audit sink failing took out reads it exists
+not to gate.
+
+## REST is audited under the same names, and honours the same modes
+
+Every route that reaches the service goes through one wrapper, `auditedRest`, under the
+MCP tool's own name where there is one: `POST /memory` is audited as `memory_write` and
+`POST /handoff` as `coord_handoff`, so one action does not appear in the trail twice
+under two names. Only `/healthz`, `/metrics` and `/slo` are exempt; no agent action is
+behind them and a trail dominated by a Prometheus scrape is one nobody reads.
+
+**A REST route inherits its tool's mode, denial included.** Auditing MCP `memory_write`
+as fail-closed while `POST /memory` wrote shared memory unaudited left the policy with an
+unlocked door beside it — and a hook, which cannot call an MCP tool, walks through that
+door by design. A fail-closed route the chain will not record is answered **503** with
+the reason: an audit sink that cannot take the record is an outage of this substrate,
+not a permission decision about the caller, and a hook reading only the status code must
+not learn "you may not" from it.
 
 ## The gate sits in front of the dispatcher
 
@@ -246,6 +327,23 @@ Unlike `brief` and `emit`, the command **exits non-zero** — on an unreachable
 substrate, a chain that does not verify, or a breached objective. It does not sit
 in a hook, and a document nobody can tell from a missing one is not evidence.
 
+"Does not verify" covers a chain that **could not** be verified, not only one that came
+back broken. Each chain carries a `state`, because `ok` alone could not tell the two
+apart:
+
+| `state` | | exit |
+| --- | --- | --- |
+| `verified` | the chain was recomputed and holds | 0 |
+| `broken` | it does not verify | non-zero |
+| `unverifiable` | it exists and the store would not answer | non-zero |
+| `not-configured` | this deployment has no such chain | 0 |
+
+Checking `ok === false` alone meant a Greptime outage produced a bundle whose app chain
+was `unknown` and an exit status of 0, as long as no objective happened to be breached —
+so a caller that trusted the status shipped an unverified document as a verified one. The
+document is still written in that case, because an operator investigating the outage needs
+it, and it says **unverified** on its face.
+
 ### It is a stub, and says so
 
 The bundle carries `"stub": true` and a `pending` list naming what it cannot yet
@@ -264,3 +362,39 @@ document that overstates itself is worse than one that is honestly partial.
 Only audit records naming the graph are included. A record with no `graph_id`
 belongs to no graph, and folding those in would make every bundle a copy of the
 whole trail; when a bundle has none, it says which.
+
+### One pass over the audit file
+
+Verifying the chain and then selecting the graph's records used to be two whole reads and
+two whole parses of a file with no compaction, with the request's own record appended
+between them — so an ordinary authenticated `/evidence` call cost twice the trail, and a
+few in a row could take down a process every prompt on this host waits for.
+
+`verifiedView` does both in one streaming pass: the file is read a line at a time rather
+than as one string, the chain is checked incrementally by the same rules
+`verifyAuditChain` applies in memory (one `ChainWalker`, so the two cannot drift), and
+what is held is *this graph's* records rather than all of them, bounded at
+`MAX_EVIDENCE_RECORDS` with a note when a graph has more. The cost is therefore
+proportional to the graph being asked about, whatever the file grew to around it, and the
+chain verdict still covers every record in it.
+
+## What a record keeps of its caller, and what it does not
+
+Arguments are never stored — only their names and a digest. On top of that, **every
+stored field is redacted and capped**, not just `reason`:
+
+`surface`, `tool`, `graph_id`, `node_id`, `session_id`, `actor` and the argument names all
+arrive from the request envelope, and the gate runs *before* any tool validates them. A
+credential in `graph_id` on a call that was then refused and never ran reached the file
+verbatim — in the one file that exists to be read during an incident, while the app-event
+write path would have stripped the same string. The trail must not be the more attractive
+copy of the two.
+
+The caps (`MAX_IDENTIFIER` 512, matching `MAX_FIELD` on the event path; `MAX_TOOL_NAME`;
+`MAX_ARG_KEYS` × `MAX_ARG_KEY`; `MAX_REASON`) do a second job: they are what makes a
+record's size the writer's to decide rather than a caller's, which is what recovery and a
+bounded file both rest on.
+
+The **digest is untouched** by any of it. Its whole job is proving that a request an
+investigator holds is the one that was allowed, byte for byte; digesting a redacted copy
+would break that for every request with a credential-shaped string anywhere in it.

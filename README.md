@@ -114,9 +114,12 @@ separate claim read back from the index: **anything other agents act on requires
 Two more planes, both reached only through `substrate-mcp` and neither of them in Greptime:
 
 - **OTLP metrics and traces** — latency, errors and tokens/cost per `surface` and `graph_id`,
-  pushed as OTLP/HTTP JSON. Four SLOs are stated over them: brief p95 < 800 ms, emit success
+  pushed as OTLP/HTTP JSON. Four SLOs are stated over them: brief p95 ≤ 800 ms, emit success
   ≥ 99.5 %, and ceilings on the lease-steal and quarantine rates. `GET /metrics` and
-  `GET /slo` serve them with no collector configured.
+  `GET /slo` serve them with no collector configured. SPE-4793 words the first one
+  `< 800 ms`; 800 ms is an inclusive bucket edge, so `≤` is what the histogram can actually
+  decide and what `/slo` reports — [`docs/observability.md`](docs/observability.md) has the
+  reasoning.
 - **A hash-chained MCP audit** of what agents asked for and whether it was allowed, in its own
   local append-only file. Separate from `agent_events` on purpose: an audit has to survive an
   outage of the store it audits, and `agent_events` is writable by the agents being audited.
