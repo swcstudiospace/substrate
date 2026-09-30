@@ -19,6 +19,8 @@ import {
 	type Actor,
 	type EventInput,
 	type EventKind,
+	type GovernanceQueue,
+	type GovernanceQueueRow,
 	type MemoryEntry,
 	type MemoryWriteRequest,
 	type MemoryWriteResult,
@@ -377,6 +379,9 @@ export class Substrate {
 	 * mid-turn can act on and `denied: store.unavailable` is.
 	 */
 	async writeMemory(request: MemoryWriteRequest): Promise<MemoryWriteResult> {
+		// Reported on every reply, including the ones the gate never sees, so a caller
+		// always learns which surface its write was attributed to.
+		const writer = typeof request.writer === "string" ? request.writer.trim() : "";
 		if (!this.index) {
 			return {
 				outcome: "denied",
@@ -386,6 +391,7 @@ export class Substrate {
 					"and nothing would read it back. Nothing was stored.",
 				verified_persisted: false,
 				idempotency_key: "",
+				writer,
 			};
 		}
 
@@ -395,6 +401,13 @@ export class Substrate {
 				store: this.index,
 				isReviewToken: (token) => isReviewToken(this.config, token),
 				grants: this.config.memoryGrants,
+				// The one place memory consults the ledger, and it is a read of one column:
+				// `verified-by-test` rests on a source event, so the gate establishes that the
+				// event exists before honouring the trust. No ledger, unreachable ledger or
+				// unknown id all come back false, and the trust is downgraded rather than
+				// taken on the caller's word.
+				verifySourceEvent: async (eventId) =>
+					this.greptime ? await this.greptime.hasEvent(eventId).catch(() => false) : false,
 			});
 		} catch (cause) {
 			// Redacted for the reason `emit` redacts: a connection error quotes its URL,
@@ -406,6 +419,7 @@ export class Substrate {
 				remedy: `The index refused the write (${error}). Nothing was stored; retry once it is reachable.`,
 				verified_persisted: false,
 				idempotency_key: "",
+				writer,
 			};
 		}
 
@@ -426,10 +440,14 @@ export class Substrate {
 	 */
 	private async auditMemoryWrite(request: MemoryWriteRequest, result: MemoryWriteResult): Promise<void> {
 		if (result.outcome === "accepted" && result.verified_persisted) return;
-		const line = `memory.write ${result.outcome}: ${result.reason} (${request.kind} at ${request.scope})`;
-		process.stderr.write(`[substrate] ${line} by ${String(request.writer)}\n`);
-
+		// Redacted, and redacted *here* rather than relying on the event path: `scope`,
+		// `kind` and `writer` are all caller-controlled, a refused write is exactly where
+		// a malformed one arrives, and a credential in the journal is a credential
+		// leaked whether or not the event that would have carried it was ever emitted.
+		const line = redact(`memory.write ${result.outcome}: ${result.reason} (${request.kind} at ${request.scope})`);
 		const writer = String(request.writer);
+		process.stderr.write(`[substrate] ${line} by ${redact(writer)}\n`);
+
 		// `emit` rejects an unknown surface, and an unattributed caller is precisely the
 		// one that default-deny refuses most often. The stderr line above is its trail.
 		if (!(SURFACES as readonly string[]).includes(writer)) return;
@@ -457,10 +475,29 @@ export class Substrate {
 		return this.index.searchMemory(query, scope, limit, includeSuperseded);
 	}
 
-	/** What a reviewer has to look at: proposals awaiting review, and quarantined writes. */
-	async governanceQueue(limit?: number) {
-		if (!this.index) return { reviews: [], quarantined: [] };
-		return this.index.governanceQueue(limit);
+	/**
+	 * What a reviewer has to look at: proposals awaiting review, and quarantined writes.
+	 *
+	 * Bodies and subjects need a reviewer's token. Redaction strips credentials, not the
+	 * email address or phone number that caused a PII quarantine — so a queue that
+	 * showed every body to every agent holding any surface token would publish exactly
+	 * what quarantining it was meant to contain, and would do it to *more* readers than
+	 * accepting the write would have.
+	 *
+	 * Without a token a caller still learns that something is parked, where, by whom and
+	 * why. That is the part worth knowing and none of it is the payload.
+	 */
+	async governanceQueue(options: { limit?: number; review_token?: string } = {}): Promise<GovernanceQueue> {
+		const authorized = isReviewToken(this.config, options.review_token);
+		if (!this.index) return { authorized, reviews: [], quarantined: [] };
+		const queue = await this.index.governanceQueue(options.limit);
+		const visible = (row: GovernanceQueueRow): GovernanceQueueRow =>
+			authorized ? row : { ...row, text: undefined, subject: undefined };
+		return {
+			authorized,
+			reviews: queue.reviews.map(visible),
+			quarantined: queue.quarantined.map(visible),
+		};
 	}
 
 	async getGraph(graphId: string) {

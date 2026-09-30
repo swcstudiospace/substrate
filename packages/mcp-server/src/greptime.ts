@@ -564,6 +564,20 @@ export class GreptimeClient {
 		);
 	}
 
+	/**
+	 * Whether an event id names a real event.
+	 *
+	 * Exists so the memory governance gate can check a `source_event` before honouring
+	 * the `verified-by-test` trust that rests on it. Reads one column and returns a
+	 * boolean rather than the row: the caller is establishing that provenance exists,
+	 * not reading it, and a lookup that handed back the event would invite callers to
+	 * start using this as a general event fetch.
+	 */
+	async hasEvent(eventId: string): Promise<boolean> {
+		const rows = await this.sql(`SELECT "id" FROM "agent_events" WHERE "id" = ${this.q(eventId)} LIMIT 1`);
+		return rows.length > 0;
+	}
+
 	async ping(): Promise<boolean> {
 		try {
 			await this.sql("SELECT 1");

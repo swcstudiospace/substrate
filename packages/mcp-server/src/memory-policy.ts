@@ -298,19 +298,23 @@ export function needsReverification(deadline: string | Date | null | undefined, 
  * An agent may not vouch for itself. `human-confirmed` says a person checked
  * this, so it takes a reviewer's token — otherwise the highest-trust level in the
  * system would be a string any caller could type. `verified-by-test` is a claim
- * an agent *can* honestly make, but only with a `source_event` pointing at the
- * run that proved it: provenance is the difference between a verified claim and
- * an asserted one.
+ * an agent *can* honestly make, but only against a `source_event` that has been
+ * **looked up in the ledger**: provenance is the difference between a verified
+ * claim and an asserted one, and an event id nobody checked is just a string.
+ *
+ * `sourceEventVerified` is that lookup's answer, taken rather than performed —
+ * this stays a pure function of the request, and the caller (`governMemoryWrite`)
+ * decides when the ledger is worth consulting.
  */
 export function resolveTrust(request: {
 	requested?: Trust;
 	reviewed: boolean;
-	sourceEvent?: string | null;
+	sourceEventVerified: boolean;
 }): { trust: Trust; downgradedFrom?: Trust } {
 	const requested = request.requested ?? "agent-claimed";
 	if (request.reviewed) return { trust: requested };
 	if (requested === "agent-claimed") return { trust: "agent-claimed" };
-	if (requested === "verified-by-test" && request.sourceEvent) return { trust: "verified-by-test" };
+	if (requested === "verified-by-test" && request.sourceEventVerified) return { trust: "verified-by-test" };
 	return { trust: "agent-claimed", downgradedFrom: requested };
 }
 

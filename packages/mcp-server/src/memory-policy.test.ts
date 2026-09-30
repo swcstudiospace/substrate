@@ -259,25 +259,29 @@ describe("trust decay", () => {
 
 describe("an agent cannot vouch for itself", () => {
 	test("human-confirmed takes a reviewer's token", () => {
-		expect(resolveTrust({ requested: "human-confirmed", reviewed: false })).toEqual({
+		expect(resolveTrust({ requested: "human-confirmed", reviewed: false, sourceEventVerified: false })).toEqual({
 			trust: "agent-claimed",
 			downgradedFrom: "human-confirmed",
 		});
-		expect(resolveTrust({ requested: "human-confirmed", reviewed: true })).toEqual({ trust: "human-confirmed" });
+		expect(resolveTrust({ requested: "human-confirmed", reviewed: true, sourceEventVerified: false })).toEqual({
+			trust: "human-confirmed",
+		});
 	});
 
-	test("verified-by-test takes provenance: the event that proved it", () => {
-		expect(resolveTrust({ requested: "verified-by-test", reviewed: false })).toEqual({
+	test("verified-by-test takes provenance that was actually looked up", () => {
+		// An unchecked event id is just a string. Granting the longer shelf life on the
+		// strength of one would make `verified-by-test` a label rather than a claim.
+		expect(resolveTrust({ requested: "verified-by-test", reviewed: false, sourceEventVerified: false })).toEqual({
 			trust: "agent-claimed",
 			downgradedFrom: "verified-by-test",
 		});
-		expect(resolveTrust({ requested: "verified-by-test", reviewed: false, sourceEvent: "evt_1" })).toEqual({
+		expect(resolveTrust({ requested: "verified-by-test", reviewed: false, sourceEventVerified: true })).toEqual({
 			trust: "verified-by-test",
 		});
 	});
 
 	test("agent-claimed is what an unadorned write gets", () => {
-		expect(resolveTrust({ reviewed: false })).toEqual({ trust: "agent-claimed" });
+		expect(resolveTrust({ reviewed: false, sourceEventVerified: false })).toEqual({ trust: "agent-claimed" });
 	});
 
 	test("an actor: human claim is provenance too", () => {

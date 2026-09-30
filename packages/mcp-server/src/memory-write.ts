@@ -101,7 +101,24 @@ export interface WriteRecord {
 	entry_hash: string;
 }
 
-export type ClaimResult = { claimed: true } | { claimed: false; existing: WriteRecord };
+export type ClaimResult =
+	| {
+			claimed: true;
+			/**
+			 * A fencing token. Every later statement about this claim carries it, so an
+			 * attempt whose claim was taken over after timing out cannot come back and
+			 * finish — or delete — the claim that replaced it. Identifying a claim by key
+			 * alone is what lets a timed-out writer clobber its successor's record.
+			 */
+			holder: string;
+			/**
+			 * The entry id reserved by the abandoned attempt this claim took over, or null
+			 * for a fresh claim. An attempt can insert its row and die before recording
+			 * that it did, so the successor has to look before writing again.
+			 */
+			tookOverFrom: string | null;
+	  }
+	| { claimed: false; existing: WriteRecord };
 
 /**
  * The narrow store the gate needs.
@@ -111,9 +128,21 @@ export type ClaimResult = { claimed: true } | { claimed: false; existing: WriteR
  * finished-but-refused, an abandoned in-flight claim, or an expired derived key.
  */
 export interface MemoryStore {
-	claimWrite(input: { key: string; explicit: boolean; entryHash: string }): Promise<ClaimResult>;
-	finishWrite(key: string, outcome: MemoryWriteOutcome, entryId: string | null): Promise<void>;
-	releaseWrite(key: string): Promise<void>;
+	/**
+	 * `entryId` is the row this attempt *will* insert, reserved on the claim before it
+	 * exists. That is what makes a crash between the insert and the acknowledgement
+	 * recoverable: the successor knows which row to look for.
+	 */
+	claimWrite(input: {
+		key: string;
+		explicit: boolean;
+		entryHash: string;
+		entryId: string;
+	}): Promise<ClaimResult>;
+	/** Records an outcome only while `holder` still owns the claim. */
+	finishWrite(key: string, holder: string, outcome: MemoryWriteOutcome, entryId: string | null): Promise<void>;
+	/** Drops an in-flight claim only while `holder` still owns it. */
+	releaseWrite(key: string, holder: string): Promise<void>;
 	/** The current, un-superseded entry for a conflict identity. */
 	standingEntry(conflictKey: string): Promise<MemoryEntry | null>;
 	/**
@@ -145,6 +174,16 @@ export interface GovernanceDeps {
 	isReviewToken: (token: string | undefined) => boolean;
 	/** Operator grants are appended to the defaults; they widen, never narrow. */
 	grants?: readonly MemoryGrant[];
+	/**
+	 * Whether an event id names a real event in the ledger.
+	 *
+	 * `verified-by-test` rests on a `source_event`, and a claim backed by a string
+	 * nobody checked is an asserted claim wearing a verified label — with the longer
+	 * shelf life to match. Absent, throwing or false all mean the same thing here:
+	 * unconfirmed, so the trust is downgraded. Fail-closed, like everything else on
+	 * this path.
+	 */
+	verifySourceEvent?: (eventId: string) => Promise<boolean>;
 	now?: () => Date;
 	newId?: (prefix: string) => string;
 }
@@ -157,8 +196,8 @@ function refuse(
 	outcome: Exclude<MemoryWriteOutcome, "accepted">,
 	reason: string,
 	remedy: string,
-	extra: Partial<MemoryWriteResult> = {},
-): MemoryWriteResult {
+	extra: Partial<Decision> = {},
+): Decision {
 	return { outcome, reason, remedy, verified_persisted: false, idempotency_key: "", ...extra };
 }
 
@@ -187,6 +226,20 @@ export async function governMemoryWrite(
 	request: MemoryWriteRequest,
 	deps: GovernanceDeps,
 ): Promise<MemoryWriteResult> {
+	const result = await decide(request, deps);
+	// Every reply says who the write was attributed to, on every outcome.
+	//
+	// The caller does not get to assume it: a bearer token overrides a caller-named
+	// surface, so the writer a caller asked to be and the writer it got can differ —
+	// and a parameter that is silently ignored is a footgun. RBAC was decided on this
+	// name, so this name is what the caller has to be told.
+	return { ...result, writer: typeof request.writer === "string" ? request.writer.trim() : "" };
+}
+
+/** Everything but the attribution, which `governMemoryWrite` stamps on every reply. */
+type Decision = Omit<MemoryWriteResult, "writer">;
+
+async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promise<Decision> {
 	const { store } = deps;
 	const now = deps.now?.() ?? new Date();
 	const newId = deps.newId ?? defaultId;
@@ -298,13 +351,51 @@ export async function governMemoryWrite(
 	// ── 4. exactly-once ────────────────────────────────────────────────────────
 	const explicitKey = normalizeKey(request.idempotency_key);
 	const key = explicitKey ?? derivedKey(entryHash, sourceEvent, reviewed);
-	const claim = await store.claimWrite({ key, explicit: explicitKey !== null, entryHash });
+	// Minted before the claim, so the claim can reserve it. An attempt that inserts its
+	// row and then dies is otherwise indistinguishable from one that never got that far,
+	// and its successor has to guess — which means either duplicating the row or losing
+	// it. Reserving the id removes the guess.
+	const entryId = newId("mem");
+	const claim = await store.claimWrite({ key, explicit: explicitKey !== null, entryHash, entryId });
 	if (!claim.claimed) return await replay(store, key, claim.existing, grant.name);
+	const { holder } = claim;
+
+	// Taking over an abandoned claim is not the same as finding nothing done. Look for
+	// the row that attempt reserved before writing another one.
+	if (claim.tookOverFrom) {
+		const orphan = await store.readEntry(claim.tookOverFrom).catch(() => null);
+		if (orphan) {
+			await store.finishWrite(key, holder, "accepted", orphan.id).catch(() => undefined);
+			return {
+				outcome: "accepted",
+				reason: "recovered.orphan",
+				remedy:
+					"A previous attempt under this key had already written this entry but died before acknowledging " +
+					"it. That entry is returned; nothing was written again.",
+				verified_persisted: orphan.entry_hash === entryHash,
+				idempotency_key: key,
+				entry: orphan,
+				deduplicated: true,
+				grant: grant.name,
+			};
+		}
+	}
 
 	// ── 5. conflict, insert, read-back ─────────────────────────────────────────
+	// True once the entry has committed. From that point the claim is never released:
+	// releasing it would let a retry insert the row a second time, which for an
+	// appending kind means two visible entries for one write.
+	let committed = false;
 	try {
 		const plan = conflictPlan(scope, kind, subject !== null);
-		const trust = resolveTrust({ requested: request.trust, reviewed, sourceEvent });
+		// Only a `verified-by-test` claim standing on a source event needs the ledger
+		// consulted, and only when no reviewer vouched for it — so an ordinary write pays
+		// nothing for this.
+		const sourceEventVerified =
+			request.trust === "verified-by-test" && !reviewed && sourceEvent
+				? await (deps.verifySourceEvent?.(sourceEvent) ?? Promise.resolve(false)).catch(() => false)
+				: false;
+		const trust = resolveTrust({ requested: request.trust, reviewed, sourceEventVerified });
 		const actor = resolveActor(request.actor, reviewed);
 
 		if (plan.requiresReview && !reviewed) {
@@ -314,7 +405,7 @@ export async function governMemoryWrite(
 				idempotency_key: key,
 				reason: "global scope requires review",
 			});
-			await store.finishWrite(key, "conflict", null);
+			await store.finishWrite(key, holder, "conflict", null);
 			return {
 				outcome: "conflict",
 				reason: "review.required",
@@ -331,13 +422,17 @@ export async function governMemoryWrite(
 			};
 		}
 
-		const identity = conflictKey(scope, kind, subject);
-		const standing = identity && plan.resolve !== "append" ? await store.standingEntry(identity) : null;
+		// Only a strategy that *resolves* on the identity may record one. `conflict_key`
+		// is backed by a unique index over the entries in force, so stamping it on an
+		// appending kind would turn the second warning about one subject into a store
+		// error instead of a second warning.
+		const identity = plan.resolve === "append" ? null : conflictKey(scope, kind, subject);
+		const standing = identity ? await store.standingEntry(identity) : null;
 
 		if (plan.resolve === "versioned") {
 			const stale = versionMismatch(standing, request.expected_version);
 			if (stale) {
-				await store.finishWrite(key, "conflict", null);
+				await store.finishWrite(key, holder, "conflict", null);
 				return {
 					outcome: "conflict",
 					reason: stale.reason,
@@ -353,7 +448,7 @@ export async function governMemoryWrite(
 
 		const row: NewMemoryEntry = {
 			...baseRow,
-			id: newId("mem"),
+			id: entryId,
 			idempotency_key: key,
 			conflict_key: identity,
 			version: standing ? standing.version + 1 : 1,
@@ -365,7 +460,7 @@ export async function governMemoryWrite(
 
 		const written = await store.insertEntry(row);
 		if (!written.ok) {
-			await store.finishWrite(key, "conflict", null);
+			await store.finishWrite(key, holder, "conflict", null);
 			return {
 				outcome: "conflict",
 				reason: "version.raced",
@@ -380,15 +475,20 @@ export async function governMemoryWrite(
 			};
 		}
 
+		const inserted = written.entry;
+		committed = true;
+		// Record the commit *before* the read-back, not after. Everything below can throw,
+		// and if the acknowledgement were last then a crash in between would leave a row
+		// in the index that no claim points at — so the retry would write a second one.
+		// Recorded first, the retry replays and re-verifies instead.
+		await store.finishWrite(key, holder, "accepted", inserted.id);
+
 		// Read it back before believing it. `verified_persisted` is a claim about what
 		// is in the index, and an insert that returned is not the same statement.
-		const inserted = written.entry;
 		const stored = await store.readEntry(inserted.id);
 		const verified = stored !== null && stored.entry_hash === entryHash;
 
 		if (verified && plan.requiresReview) await store.releaseReviews(entryHash, inserted.id, writer);
-
-		await store.finishWrite(key, "accepted", inserted.id);
 
 		return {
 			outcome: "accepted",
@@ -406,9 +506,12 @@ export async function governMemoryWrite(
 			...(trust.downgradedFrom ? { trust_downgraded_from: trust.downgradedFrom } : {}),
 		};
 	} catch (cause) {
-		// Let go of the key, or an outage would burn it and the retry would replay a
-		// write that never happened.
-		await store.releaseWrite(key).catch(() => undefined);
+		// Let go of the key only while nothing has committed: an outage before the insert
+		// would otherwise burn it, and the retry would replay a write that never happened.
+		// Once the entry exists the claim stays — held if even the acknowledgement failed —
+		// because the alternative is a duplicate, and an abandoned claim is recoverable
+		// while a duplicate entry is not.
+		if (!committed) await store.releaseWrite(key, holder).catch(() => undefined);
 		throw cause;
 	}
 }
@@ -437,7 +540,7 @@ async function replay(
 	key: string,
 	existing: WriteRecord,
 	grant: string,
-): Promise<MemoryWriteResult> {
+): Promise<Decision> {
 	if (existing.outcome === "in-flight") {
 		return refuse(
 			"conflict",

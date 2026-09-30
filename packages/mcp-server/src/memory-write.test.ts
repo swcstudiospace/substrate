@@ -25,7 +25,8 @@ const START = Date.parse("2026-09-30T00:00:00.000Z");
 class FakeStore implements MemoryStore {
 	clock = START;
 	readonly rows = new Map<string, { entry: MemoryEntry; conflict_key: string | null }>();
-	readonly writes = new Map<string, WriteRecord & { claimed: number }>();
+	readonly writes = new Map<string, WriteRecord & { holder: string; claimed: number }>();
+	private holders = 0;
 	readonly quarantined: Array<NewMemoryEntry & { reason: QuarantineReason; detail: string }> = [];
 	readonly reviews: Array<NewMemoryEntry & { reason: string; state: string; entry_id: string | null }> = [];
 
@@ -33,6 +34,8 @@ class FakeStore implements MemoryStore {
 	hideFromReadBack = false;
 	/** Makes the insert throw, standing in for an index that went away mid-write. */
 	failInsert: string | null = null;
+	/** Makes the acknowledgement throw, standing in for a crash right after the commit. */
+	failFinish: string | null = null;
 
 	entries(): MemoryEntry[] {
 		return [...this.rows.values()].map((row) => row.entry);
@@ -42,36 +45,53 @@ class FakeStore implements MemoryStore {
 		return this.entries().filter((entry) => !entry.superseded_by);
 	}
 
-	async claimWrite(input: { key: string; explicit: boolean; entryHash: string }): Promise<ClaimResult> {
+	async claimWrite(input: {
+		key: string;
+		explicit: boolean;
+		entryHash: string;
+		entryId: string;
+	}): Promise<ClaimResult> {
 		const existing = this.writes.get(input.key);
 		const age = existing ? this.clock - existing.claimed : 0;
+		const inFlight = existing?.outcome === "in-flight";
 		const free =
 			!existing ||
 			// A refused attempt wrote nothing, so re-asking is allowed a fresh answer.
-			(existing.outcome !== "accepted" && existing.outcome !== "in-flight") ||
-			(existing.outcome === "in-flight" && age >= IN_FLIGHT_TIMEOUT_MS) ||
+			(existing.outcome !== "accepted" && !inFlight) ||
+			(inFlight && age >= IN_FLIGHT_TIMEOUT_MS) ||
 			(existing.outcome === "accepted" && !existing.explicit && age >= DERIVED_KEY_WINDOW_MS);
-		if (free) {
-			this.writes.set(input.key, {
-				idempotency_key: input.key,
-				explicit: input.explicit,
-				outcome: "in-flight",
-				entry_id: null,
-				entry_hash: input.entryHash,
-				claimed: this.clock,
-			});
-			return { claimed: true };
-		}
-		return { claimed: false, existing: { ...existing } };
+		if (!free) return { claimed: false, existing: { ...existing! } };
+
+		const holder = `hold_${++this.holders}`;
+		this.writes.set(input.key, {
+			idempotency_key: input.key,
+			explicit: input.explicit,
+			outcome: "in-flight",
+			// Reserved: the row this attempt will insert, recorded before it exists.
+			entry_id: input.entryId,
+			entry_hash: input.entryHash,
+			holder,
+			claimed: this.clock,
+		});
+		return { claimed: true, holder, tookOverFrom: inFlight ? (existing?.entry_id ?? null) : null };
 	}
 
-	async finishWrite(key: string, outcome: MemoryWriteResult["outcome"], entryId: string | null): Promise<void> {
+	async finishWrite(
+		key: string,
+		holder: string,
+		outcome: MemoryWriteResult["outcome"],
+		entryId: string | null,
+	): Promise<void> {
+		if (this.failFinish) throw new Error(this.failFinish);
 		const record = this.writes.get(key);
-		if (record) this.writes.set(key, { ...record, outcome, entry_id: entryId, claimed: this.clock });
+		// Fenced: a claim that was taken over is no longer this holder's to finish.
+		if (record?.holder !== holder) return;
+		this.writes.set(key, { ...record, outcome, entry_id: entryId, claimed: this.clock });
 	}
 
-	async releaseWrite(key: string): Promise<void> {
-		if (this.writes.get(key)?.outcome === "in-flight") this.writes.delete(key);
+	async releaseWrite(key: string, holder: string): Promise<void> {
+		const record = this.writes.get(key);
+		if (record?.holder === holder && record.outcome === "in-flight") this.writes.delete(key);
 	}
 
 	async standingEntry(conflictKey: string): Promise<MemoryEntry | null> {
@@ -83,6 +103,15 @@ class FakeStore implements MemoryStore {
 
 	async insertEntry(row: NewMemoryEntry): Promise<{ ok: true; entry: MemoryEntry } | { ok: false; reason: "standing-moved" }> {
 		if (this.failInsert) throw new Error(this.failInsert);
+		// `memory_standing_idx` is a unique partial index in the real store, so the fake
+		// enforces it too. Otherwise a row that should never have carried a conflict key
+		// passes here and fails only against Postgres.
+		if (row.conflict_key) {
+			const clash = [...this.rows.values()].find(
+				(held) => held.conflict_key === row.conflict_key && !held.entry.superseded_by && held.entry.id !== row.supersedes,
+			);
+			if (clash) throw new Error(`duplicate key value violates unique constraint "memory_standing_idx"`);
+		}
 		if (row.supersedes) {
 			const predecessor = this.rows.get(row.supersedes);
 			if (!predecessor || predecessor.entry.superseded_by) return { ok: false, reason: "standing-moved" };
@@ -147,10 +176,16 @@ class FakeStore implements MemoryStore {
 
 let store: FakeStore;
 let ids: number;
+/** Event ids the stand-in ledger will confirm. Empty, unless a test says otherwise. */
+let knownEvents: Set<string>;
+/** Set to make the ledger lookup throw, which must read as "unconfirmed". */
+let ledgerFails: string | null;
 
 beforeEach(() => {
 	store = new FakeStore();
 	ids = 0;
+	knownEvents = new Set();
+	ledgerFails = null;
 });
 
 /** Deterministic ids, so a test can assert on them. */
@@ -162,6 +197,10 @@ function write(request: Partial<MemoryWriteRequest> = {}): Promise<MemoryWriteRe
 			isReviewToken: (token) => token === REVIEW_TOKEN,
 			now: () => new Date(store.clock),
 			newId: (prefix) => `${prefix}_${++ids}`,
+			verifySourceEvent: async (eventId) => {
+				if (ledgerFails) throw new Error(ledgerFails);
+				return knownEvents.has(eventId);
+			},
 		},
 	);
 }
@@ -391,6 +430,116 @@ describe("accepted — last-write-wins todos", () => {
 	});
 });
 
+describe("accepted — appending kinds carry no conflict identity", () => {
+	test("two warnings about one subject are two warnings", async () => {
+		// The break this fixes: an appending kind was still stamped with a conflict key,
+		// and `memory_standing_idx` is unique over the entries in force — so the second
+		// warning about one subject became a store error instead of a second warning.
+		const first = await write({ scope: "repo:a/b", kind: "warning", subject: "poller", text: "the poller 401s" });
+		const second = await write({
+			scope: "repo:a/b",
+			kind: "warning",
+			subject: "poller",
+			text: "the poller 401s again after the rotate",
+		});
+
+		expect(first.outcome).toBe("accepted");
+		expect(second.outcome).toBe("accepted");
+		expect(second.strategy).toBe("append");
+		expect(store.standing()).toHaveLength(2);
+	});
+
+	test("nor do facts or handoffs", async () => {
+		for (const kind of ["fact", "handoff"] as const) {
+			await write({ scope: "graph:ut-1", kind, subject: "n2", text: `first ${kind}` });
+			expect((await write({ scope: "graph:ut-1", kind, subject: "n2", text: `second ${kind}` })).outcome).toBe(
+				"accepted",
+			);
+		}
+		expect(store.standing()).toHaveLength(4);
+	});
+
+	test("the row itself records no identity, which is what the index cares about", async () => {
+		await write({ scope: "repo:a/b", kind: "warning", subject: "poller", text: "the poller 401s" });
+		const held = [...store.rows.values()][0];
+		expect(held?.conflict_key).toBeNull();
+	});
+});
+
+describe("claim ownership", () => {
+	test("a timed-out writer cannot finish the claim that replaced it", async () => {
+		// Identifying a claim by key alone lets a slow attempt come back and record its
+		// outcome over its successor's, so the idempotency record ends up pointing at the
+		// wrong entry — or at nothing.
+		const first = await store.claimWrite({ key: "k1", explicit: true, entryHash: "h1", entryId: "mem_a" });
+		if (!first.claimed) throw new Error("the first claim should have been granted");
+
+		store.clock += IN_FLIGHT_TIMEOUT_MS;
+		const second = await store.claimWrite({ key: "k1", explicit: true, entryHash: "h2", entryId: "mem_b" });
+		if (!second.claimed) throw new Error("a stale claim should be takeable");
+
+		// The original, still running, now tries to finish and then to release.
+		await store.finishWrite("k1", first.holder, "accepted", "mem_a");
+		await store.releaseWrite("k1", first.holder);
+
+		const record = store.writes.get("k1");
+		expect(record?.holder).toBe(second.holder);
+		expect(record?.outcome).toBe("in-flight");
+		expect(record?.entry_id).toBe("mem_b");
+	});
+
+	test("a claim reserves the row it will write, so an unacknowledged commit is findable", async () => {
+		const claim = await store.claimWrite({ key: "k1", explicit: true, entryHash: "h1", entryId: "mem_a" });
+		expect(claim.claimed).toBe(true);
+		expect(store.writes.get("k1")?.entry_id).toBe("mem_a");
+	});
+
+	test("a committed write that was never acknowledged is recovered, not written twice", async () => {
+		// The gap: the insert commits, then the acknowledgement throws. Releasing the key
+		// would let the retry insert a second visible entry; this keeps the claim and has
+		// the successor look for the row the dead attempt reserved.
+		store.failFinish = "postgres: connection reset";
+		await expect(write({ idempotency_key: "k1" })).rejects.toThrow("connection reset");
+		expect(store.entries()).toHaveLength(1);
+		// The claim is deliberately *not* released — an abandoned claim is recoverable,
+		// a duplicate entry is not.
+		expect(store.writes.get("k1")?.outcome).toBe("in-flight");
+
+		store.failFinish = null;
+		store.clock += IN_FLIGHT_TIMEOUT_MS;
+		const retry = await write({ idempotency_key: "k1" });
+
+		expect(retry.outcome).toBe("accepted");
+		expect(retry.reason).toBe("recovered.orphan");
+		expect(retry.deduplicated).toBe(true);
+		expect(retry.verified_persisted).toBe(true);
+		expect(store.entries()).toHaveLength(1);
+	});
+
+	test("taking over a claim whose row never landed just writes it", async () => {
+		await store.claimWrite({ key: "k1", explicit: true, entryHash: "h1", entryId: "mem_never" });
+		store.clock += IN_FLIGHT_TIMEOUT_MS;
+
+		const result = await write({ idempotency_key: "k1" });
+
+		expect(result.outcome).toBe("accepted");
+		expect(result.reason).toBe("accepted");
+		expect(store.entries()).toHaveLength(1);
+	});
+
+	test("an aged-out derived key is a new write, not an orphan to recover", async () => {
+		// The row from the earlier write is still in force; the point of the expiry is
+		// that the same fact may be stated again, so the old entry must not be replayed.
+		const first = await write();
+		store.clock += DERIVED_KEY_WINDOW_MS + 1;
+		const later = await write();
+
+		expect(later.deduplicated).toBeUndefined();
+		expect(later.entry?.id).not.toBe(first.entry?.id);
+		expect(store.entries()).toHaveLength(2);
+	});
+});
+
 describe("exactly-once", () => {
 	test("the same explicit key never writes twice", async () => {
 		const first = await write({ idempotency_key: "k1" });
@@ -428,7 +577,7 @@ describe("exactly-once", () => {
 	});
 
 	test("a concurrent write holding the key is told to retry, not allowed through", async () => {
-		await store.claimWrite({ key: "k1", explicit: true, entryHash: "whatever" });
+		await store.claimWrite({ key: "k1", explicit: true, entryHash: "whatever", entryId: "mem_someone-else" });
 		const result = await write({ idempotency_key: "k1" });
 		expect(result.outcome).toBe("conflict");
 		expect(result.reason).toBe("write.in-flight");
@@ -436,7 +585,7 @@ describe("exactly-once", () => {
 	});
 
 	test("an abandoned claim is taken over once it is stale", async () => {
-		await store.claimWrite({ key: "k1", explicit: true, entryHash: "whatever" });
+		await store.claimWrite({ key: "k1", explicit: true, entryHash: "whatever", entryId: "mem_someone-else" });
 		store.clock += IN_FLIGHT_TIMEOUT_MS;
 		expect((await write({ idempotency_key: "k1" })).outcome).toBe("accepted");
 	});
@@ -533,11 +682,56 @@ describe("provenance", () => {
 		expect(result.trust_downgraded_from).toBe("human-confirmed");
 	});
 
-	test("verified-by-test needs the event that proved it", async () => {
+	test("verified-by-test needs an event the ledger confirms, not just a string", async () => {
+		// The hole this closes: any nonempty `source_event` used to buy the verified label
+		// and its longer shelf life. An id nobody looked up is an assertion, not provenance.
 		expect((await write({ trust: "verified-by-test" })).entry?.trust).toBe("agent-claimed");
+
+		const invented = await write({ trust: "verified-by-test", source_event: "evt_i-made-this-up" });
+		expect(invented.entry?.trust).toBe("agent-claimed");
+		expect(invented.trust_downgraded_from).toBe("verified-by-test");
+
+		knownEvents.add("evt_9");
 		const proven = await write({ trust: "verified-by-test", source_event: "evt_9" });
 		expect(proven.entry?.trust).toBe("verified-by-test");
 		expect(proven.trust_downgraded_from).toBeUndefined();
+	});
+
+	test("a ledger that cannot answer means unconfirmed, not assumed", async () => {
+		ledgerFails = "greptime unreachable";
+		knownEvents.add("evt_9");
+		const result = await write({ trust: "verified-by-test", source_event: "evt_9" });
+		expect(result.outcome).toBe("accepted");
+		expect(result.entry?.trust).toBe("agent-claimed");
+		expect(result.trust_downgraded_from).toBe("verified-by-test");
+	});
+
+	test("the ledger is consulted only when the answer could matter", async () => {
+		// An ordinary write must not pay a round trip for a claim it is not making.
+		const asked: string[] = [];
+		const result = await governMemoryWrite(
+			{ scope: "graph:ut-1", kind: "fact", text: "hermes finished n2", writer: "hermes", source_event: "evt_9" },
+			{
+				store,
+				isReviewToken: () => false,
+				now: () => new Date(store.clock),
+				newId: (prefix) => `${prefix}_${++ids}`,
+				verifySourceEvent: async (eventId) => {
+					asked.push(eventId);
+					return true;
+				},
+			},
+		);
+		expect(result.outcome).toBe("accepted");
+		expect(asked).toEqual([]);
+	});
+
+	test("the reply says which surface the write was attributed to", async () => {
+		// A token overrides a caller-named surface, so the caller has to be told which
+		// name RBAC was actually decided on.
+		expect((await write({ writer: "omp" })).writer).toBe("omp");
+		expect((await write({ writer: "unknown" })).writer).toBe("unknown");
+		expect((await write({ scope: "nonsense" })).writer).toBe("hermes");
 	});
 
 	test("a reviewer's token records the trust and the human actor", async () => {
