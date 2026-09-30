@@ -522,10 +522,16 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 				return {
 					outcome: "conflict",
 					reason: "write.superseded",
+					// The remedy must not offer a fresh key. The retry that owns this one may
+					// already have written the entry, and for an appending kind a fresh key is
+					// how one write becomes two. Re-submitting under the *same* key is always
+					// safe: it replays the accepted record, recovers the reserved row, or is
+					// told the key is still in flight.
 					remedy:
 						"This write held its idempotency key past the in-flight timeout, so a retry took the key over " +
-						"and owns it now. Nothing was written here. Read that retry's result rather than re-submitting, " +
-						"or write again under a fresh idempotency_key.",
+						"and owns it now. Nothing was written here, but that retry may already have written this " +
+						"entry. Read its result, or re-submit under the same idempotency_key — never a fresh one, " +
+						"which is how one write becomes two entries.",
 					verified_persisted: false,
 					idempotency_key: key,
 					strategy: plan.resolve,
