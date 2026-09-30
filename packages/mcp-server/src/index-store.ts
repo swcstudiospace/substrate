@@ -380,6 +380,23 @@ export class IndexStore implements MemoryStore {
 
 			const outcome = String(row.outcome);
 			const inFlight = outcome === "in-flight";
+			const priorEntry = row.entry_id === null || row.entry_id === undefined ? null : String(row.entry_id);
+
+			// What the claim's reservation actually holds — nothing, while the row it names is
+			// still only reserved.
+			//
+			// Read under the lock the hand-over already takes, which is what makes it a fact
+			// rather than a guess: `insertEntry` locks this same row before writing its entry,
+			// so the reserved row either exists by the time we look or belongs to an attempt
+			// that is about to find itself fenced out. Only an in-flight claim can pass its
+			// reservation on, so only that case pays for the read.
+			const reserved =
+				inFlight && priorEntry
+					? ((await tx`select entry_hash from memory_entries where id = ${priorEntry}`) as Array<
+							Record<string, unknown>
+						>)
+					: [];
+			const reservedHash = optional(reserved[0]?.entry_hash);
 
 			// Whether the held claim was taken out for *this* request.
 			//
@@ -393,15 +410,30 @@ export class IndexStore implements MemoryStore {
 			// So a key spent on a different ask is spent — the same answer `replay` gives for a
 			// finished record. Whether the attempt that spent it acknowledged itself or died
 			// still holding the key does not change what the key promised.
-			//
-			// A record with no `request_hash` predates the column, so there is nothing to
-			// compare it against and the older hand-over rule stands. The gate still refuses to
-			// call a recovered row this write's own when its content does not match.
 			const heldFor = optional(row.request_hash);
-			const sameAsk = heldFor === undefined || heldFor === input.requestHash;
+			const sameAsk = heldFor !== undefined && heldFor === input.requestHash;
+
+			// A record written before `request_hash` existed records no identity, and no
+			// identity is *unknown*, not "matches whoever asks". Reading it as a wildcard was
+			// how a legacy claim stranded the write that made it: any request could take the
+			// claim over, stamp its own hashes on it and keep the reservation; the gate then
+			// refused to hand back the row that reservation named — rightly, it was someone
+			// else's — and left the rewritten claim in flight. The write that committed that
+			// row came back to a key spent on another ask, was told `idempotency.reused`, and
+			// had no way left to reach its own entry.
+			//
+			// So an unidentified claim is handed over only where the hand-over can strand
+			// nothing: its reservation names no row yet, or names one already holding this
+			// write's content — which is the write that made it, retrying.
+			const reservationIsOurs = reservedHash === undefined || reservedHash === input.entryHash;
+			const legacyRecoverable = heldFor === undefined && reservationIsOurs;
 			const takeable =
 				(outcome !== "accepted" && !inFlight) ||
-				(inFlight && row.in_flight_stale === true && sameAsk) ||
+				// `reservationIsOurs` is redundant beside `sameAsk` — one request has one
+				// content hash — and kept because it is the invariant the inherited `entry_id`
+				// below actually depends on, which a record left inconsistent by an older
+				// hand-over would otherwise break silently.
+				(inFlight && row.in_flight_stale === true && (sameAsk || legacyRecoverable) && reservationIsOurs) ||
 				(outcome === "accepted" && row.explicit !== true && row.derived_stale === true);
 
 			if (!takeable) {
@@ -422,7 +454,6 @@ export class IndexStore implements MemoryStore {
 			// A finished attempt recorded its outcome, and an aged-out derived key belongs to
 			// a write we are deliberately allowing to happen again — so its `entry_id` names
 			// a row that is still in force and must not be reused.
-			const priorEntry = row.entry_id === null || row.entry_id === undefined ? null : String(row.entry_id);
 			const tookOverFrom = inFlight ? priorEntry : null;
 
 			await tx`
@@ -435,8 +466,9 @@ export class IndexStore implements MemoryStore {
 					-- row that already exists, and the successor has to resolve that before the
 					-- pointer can be thrown away; overwriting it here would orphan the row and
 					-- the retry after this one would duplicate it. Safe to inherit only because
-					-- the same-ask test above limits this hand-over to a retry of the same
-					-- request: the reserved row is then this write's own, not a stranger's.
+					-- the tests above let this hand-over through for a retry of the same request,
+					-- or for one whose content the reservation already holds: either way the
+					-- reserved row is this write's own, never a stranger's.
 					entry_id   = ${tookOverFrom ?? input.entryId},
 					holder     = ${holder},
 					claimed    = now()
@@ -451,6 +483,32 @@ export class IndexStore implements MemoryStore {
 		await this.sql`
 			update memory_writes set outcome = ${outcome}, entry_id = ${entryId}, claimed = now()
 			where idempotency_key = ${key} and holder = ${holder}`;
+	}
+
+	/**
+	 * Hand a taken-over claim back to the write that reserved it.
+	 *
+	 * The counterpart to `releaseWrite` for a claim that carries a reservation: deleting
+	 * the record would throw the pointer away with it, and the owner's retry would then
+	 * find a fresh key, look for nothing, and insert a second copy of the row it already
+	 * committed. So the record stays, restored to what the reservation says — that row,
+	 * its content, and an identity this attempt has no right to speak for.
+	 *
+	 * The holder is rotated to one nobody holds, and `claimed` backdated past the
+	 * in-flight timeout, so the claim is takeable again immediately rather than after
+	 * another wait. Conditional on `holder`, like every other statement about a claim.
+	 */
+	async restoreWrite(key: string, holder: string, reserved: { entryId: string; entryHash: string }): Promise<void> {
+		const staleSeconds = IN_FLIGHT_TIMEOUT_MS / 1000 + 1;
+		await this.sql`
+			update memory_writes set
+				outcome      = 'in-flight',
+				entry_id     = ${reserved.entryId},
+				entry_hash   = ${reserved.entryHash},
+				request_hash = null,
+				holder       = ${`hold_${randomUUID().replace(/-/g, "")}`},
+				claimed      = now() - make_interval(secs => ${staleSeconds}::float8)
+			where idempotency_key = ${key} and holder = ${holder} and outcome = 'in-flight'`;
 	}
 
 	/** Only an in-flight claim this holder still owns — a finished record is the audit trail. */

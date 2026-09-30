@@ -56,6 +56,15 @@ class FakeStore implements MemoryStore {
 	 * position deliberately.
 	 */
 	onInsert: (() => Promise<void>) | null = null;
+	/**
+	 * Restores the hand-over rule from before a claim with no `request_hash` was treated
+	 * as unidentified: it matched whoever asked, and its reservation went with it.
+	 *
+	 * The store no longer does that. The flag is how the gate's own check on a
+	 * reservation it did not make — defence in depth, and unreachable through a store
+	 * that keeps the rule — is still exercised.
+	 */
+	legacyClaimsMatchAnyAsk = false;
 
 	entries(): MemoryEntry[] {
 		return [...this.rows.values()].map((row) => row.entry);
@@ -77,14 +86,27 @@ class FakeStore implements MemoryStore {
 		const inFlight = existing?.outcome === "in-flight";
 		// An in-flight claim is only handed over to a retry of the same request, because
 		// that hand-over inherits the previous attempt's reserved `entry_id` — see the real
-		// store. A claim raised without a `requestHash` is a stand-in for one written before
-		// the column existed: nothing to compare, so the older rule stands.
-		const sameAsk = !existing?.request_hash || !input.requestHash || existing.request_hash === input.requestHash;
+		// store. A claim raised without a `requestHash` stands in for one written before the
+		// column existed: its identity is unknown, not a match for everyone, so it is handed
+		// over only where doing so can strand nothing — when the row it reserved does not
+		// exist yet, or already holds this write's content.
+		const reservedHash = existing?.entry_id ? this.rows.get(existing.entry_id)?.entry.entry_hash : undefined;
+		const reservationIsOurs =
+			this.legacyClaimsMatchAnyAsk || reservedHash === undefined || reservedHash === input.entryHash;
+		const sameAsk = Boolean(existing?.request_hash) && existing?.request_hash === input.requestHash;
+		const legacyRecoverable = !existing?.request_hash && reservationIsOurs;
+		// A claim raised straight from a test may carry no `requestHash`; the gate always
+		// sends one. It stands for "this hand-over is the same request's", which is how a
+		// test puts a takeover in a deliberate position — a seam in the fake, not a rule.
+		const raisedByTest = input.requestHash === undefined;
 		const free =
 			!existing ||
 			// A refused attempt wrote nothing, so re-asking is allowed a fresh answer.
 			(existing.outcome !== "accepted" && !inFlight) ||
-			(inFlight && age >= IN_FLIGHT_TIMEOUT_MS && sameAsk) ||
+			(inFlight &&
+				age >= IN_FLIGHT_TIMEOUT_MS &&
+				(sameAsk || legacyRecoverable || raisedByTest) &&
+				reservationIsOurs) ||
 			(existing.outcome === "accepted" && !existing.explicit && age >= DERIVED_KEY_WINDOW_MS);
 		if (!free) return { claimed: false, existing: { ...existing! } };
 
@@ -122,6 +144,23 @@ class FakeStore implements MemoryStore {
 	async releaseWrite(key: string, holder: string): Promise<void> {
 		const record = this.writes.get(key);
 		if (record?.holder === holder && record.outcome === "in-flight") this.writes.delete(key);
+	}
+
+	async restoreWrite(key: string, holder: string, reserved: { entryId: string; entryHash: string }): Promise<void> {
+		const record = this.writes.get(key);
+		if (record?.holder !== holder || record.outcome !== "in-flight") return;
+		this.writes.set(key, {
+			...record,
+			entry_id: reserved.entryId,
+			entry_hash: reserved.entryHash,
+			// This attempt has no right to speak for the write that reserved the row, so it
+			// leaves no identity behind and no holder anyone has. Backdated like the real
+			// store's, so the write that owns the claim can take it back now rather than
+			// after another timeout.
+			request_hash: null,
+			holder: `hold_${++this.holders}`,
+			claimed: this.clock - IN_FLIGHT_TIMEOUT_MS - 1,
+		});
 	}
 
 	async standingEntry(conflictKey: string): Promise<MemoryEntry | null> {
@@ -743,6 +782,87 @@ describe("exactly-once", () => {
 		expect(recovered.outcome).toBe("accepted");
 		expect(recovered.reason).toBe("recovered.orphan");
 		expect(recovered.entry?.id).toBe(String(committed?.id));
+		expect(recovered.verified_persisted).toBe(true);
+		expect(store.entries()).toHaveLength(1);
+	});
+
+	test("a claim recorded before request_hash is not a wildcard the next write can spend", async () => {
+		// The strand this closes. A record predating `request_hash` carries no identity, and
+		// reading that absence as "matches whoever asks" let any write take the claim over,
+		// stamp its own hashes on it and keep A's reservation. The gate then refused to hand
+		// A's row back — rightly, it is A's — but the rewritten claim was left in flight, so
+		// A's own retry read a key spent on a different ask, was told `idempotency.reused`,
+		// and could never reach the row it had already committed. `verified_persisted` was
+		// out of reach for a write that had in fact landed.
+
+		// A commits its row and dies before acknowledging it, leaving a claim that still
+		// reserves that row — and, being of the older shape, records no identity for it.
+		store.failFinish = "postgres: connection reset";
+		await expect(write({ idempotency_key: "k1", text: "hermes finished n2" })).rejects.toThrow("connection reset");
+		store.failFinish = null;
+		const committed = store.entries()[0];
+		const legacy = store.writes.get("k1");
+		if (!committed || !legacy) throw new Error("the first attempt should have left a row and its claim");
+		store.writes.set("k1", { ...legacy, request_hash: null });
+
+		store.clock += IN_FLIGHT_TIMEOUT_MS;
+
+		// A stranger on the same key is told what the key was spent on, not given it.
+		const stranger = await write({ idempotency_key: "k1", text: "omp finished n4" });
+		expect(stranger.outcome).toBe("conflict");
+		expect(stranger.reason).toBe("idempotency.reused");
+		expect(stranger.conflict_with).toBe(committed.id);
+		expect(stranger.verified_persisted).toBe(false);
+		expect(stranger.entry).toBeUndefined();
+
+		// And the claim is untouched: no identity of the stranger's on it, still reserving
+		// the row that was written. That is what keeps the next assertion possible.
+		const after = store.writes.get("k1");
+		expect(after?.request_hash).toBeNull();
+		expect(after?.entry_id).toBe(committed.id);
+		expect(after?.entry_hash).toBe(legacy.entry_hash);
+
+		// So the write that made the claim still recovers its own committed row.
+		const recovered = await write({ idempotency_key: "k1", text: "hermes finished n2" });
+		expect(recovered.outcome).toBe("accepted");
+		expect(recovered.reason).toBe("recovered.orphan");
+		expect(recovered.entry?.id).toBe(committed.id);
+		expect(recovered.verified_persisted).toBe(true);
+		expect(store.entries()).toHaveLength(1);
+	});
+
+	test("a reservation the gate will not honour is handed back, not held on to", async () => {
+		// Defence in depth for the rule above. A store that parts with a reservation only to
+		// the write that made it never gets here; the gate checks anyway, and refusing is
+		// only half the answer. Keeping the claim would leave it in flight carrying this
+		// request's hashes over another write's row — the exact record that locks that write
+		// out of its own entry. So it goes back to what it reserved, and this attempt lets go.
+		store.legacyClaimsMatchAnyAsk = true;
+
+		store.failFinish = "postgres: connection reset";
+		await expect(write({ idempotency_key: "k1", text: "hermes finished n2" })).rejects.toThrow("connection reset");
+		store.failFinish = null;
+		const committed = store.entries()[0];
+		const legacy = store.writes.get("k1");
+		if (!committed || !legacy) throw new Error("the first attempt should have left a row and its claim");
+		store.writes.set("k1", { ...legacy, request_hash: null });
+
+		store.clock += IN_FLIGHT_TIMEOUT_MS;
+		const stranger = await write({ idempotency_key: "k1", text: "omp finished n4" });
+		expect(stranger.reason).toBe("idempotency.reused");
+
+		const after = store.writes.get("k1");
+		expect(after?.request_hash).toBeNull();
+		expect(after?.entry_id).toBe(committed.id);
+		expect(after?.entry_hash).toBe(committed.entry_hash);
+		// Held by nobody: neither this attempt nor the one it displaced can finish it.
+		expect(after?.holder).not.toBe(legacy.holder);
+
+		store.legacyClaimsMatchAnyAsk = false;
+		const recovered = await write({ idempotency_key: "k1", text: "hermes finished n2" });
+		expect(recovered.outcome).toBe("accepted");
+		expect(recovered.reason).toBe("recovered.orphan");
+		expect(recovered.entry?.id).toBe(committed.id);
 		expect(recovered.verified_persisted).toBe(true);
 		expect(store.entries()).toHaveLength(1);
 	});

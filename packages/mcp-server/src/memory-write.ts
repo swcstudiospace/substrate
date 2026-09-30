@@ -99,7 +99,12 @@ export interface WriteRecord {
 	outcome: MemoryWriteOutcome | "in-flight";
 	entry_id: string | null;
 	entry_hash: string;
-	/** See `requestHash`. Null only on a record written before it existed. */
+	/**
+	 * See `requestHash`. Null where the record does not say which request holds it: one
+	 * written before the column existed, or one `restoreWrite` handed back — an attempt
+	 * that gives a claim up does not get to leave its own identity on it. Null is
+	 * "unknown", never "any"; what such a claim reserved is what identifies it.
+	 */
 	request_hash: string | null;
 }
 
@@ -120,9 +125,12 @@ export type ClaimResult =
 			 * the row is not there, insert under this same id rather than a new one. The
 			 * store keeps the reservation on the claim for exactly that reason.
 			 *
-			 * Only ever set for a takeover of the *same* request: a reservation inherited
-			 * across two different asks under one key names a row this write did not make,
-			 * which the gate would recover and later replay as this write's own.
+			 * Only ever set where the reserved row is this write's own: a takeover of the
+			 * same request, or — for a claim recorded before `request_hash` existed, whose
+			 * identity is therefore unknown — one whose reservation is still empty or
+			 * already holds this write's content. A reservation inherited across two
+			 * different asks under one key names a row this write did not make, which the
+			 * gate would recover and later replay as this write's own.
 			 */
 			tookOverFrom: string | null;
 	  }
@@ -153,6 +161,16 @@ export interface MemoryStore {
 	finishWrite(key: string, holder: string, outcome: MemoryWriteOutcome, entryId: string | null): Promise<void>;
 	/** Drops an in-flight claim only while `holder` still owns it. */
 	releaseWrite(key: string, holder: string): Promise<void>;
+	/**
+	 * Give a claim back to the write that reserved `reserved.entryId`, and let go of it.
+	 *
+	 * For the one case `releaseWrite` cannot answer: a claim that was handed over
+	 * carrying a reservation this attempt turns out to have no right to. Dropping it
+	 * would take the pointer to a committed row with it and have the owner's retry write
+	 * that row a second time, so the record is put back to what the reservation says and
+	 * left takeable instead. Conditional on `holder`, and a no-op once it is not held.
+	 */
+	restoreWrite(key: string, holder: string, reserved: { entryId: string; entryHash: string }): Promise<void>;
 	/** The current, un-superseded entry for a conflict identity. */
 	standingEntry(conflictKey: string): Promise<MemoryEntry | null>;
 	/**
@@ -434,14 +452,26 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 	// Failing the write instead costs a retry, which is recoverable; a duplicate memory
 	// is not.
 	const orphan = claim.tookOverFrom ? await store.readEntry(claim.tookOverFrom) : null;
-	// The reservation names a row holding different content. A store that hands the claim
-	// over only for the same request cannot reach this, and the gate checks anyway,
-	// because the alternative is the one lie this whole stage exists to prevent: replying
-	// `accepted` with a stranger's entry, and recording that entry against this key so the
-	// next retry reads it back as this write's own `verified_persisted` row. The claim is
-	// deliberately left as it is — the row it names is real, and has to stay findable by a
-	// retry of the write that actually made it.
-	if (orphan && orphan.entry_hash !== entryHash) return reused(key, grant.name, orphan);
+	// The reservation names a row holding different content. A store that parts with a
+	// reservation only to the write that made it cannot reach this, and the gate checks
+	// anyway, because the alternative is the one lie this whole stage exists to prevent:
+	// replying `accepted` with a stranger's entry, and recording that entry against this
+	// key so the next retry reads it back as this write's own `verified_persisted` row.
+	//
+	// Refusing is only half the answer, though. The claim is now in flight under this
+	// attempt, carrying this request's hashes over a row belonging to another write —
+	// which is how that write ends up locked out of its own entry: its retry reads a key
+	// spent on a different ask, is told `idempotency.reused`, and the row it committed
+	// stays unreachable for ever. So the claim goes back to what it reserved, and this
+	// attempt lets go of it.
+	//
+	// The restore is deliberately not caught. It is the whole reason this refusal is safe
+	// to give, and a refusal that quietly left the claim rewritten would strand the write
+	// it exists to protect; failing here costs a retry instead, which is recoverable.
+	if (orphan && orphan.entry_hash !== entryHash) {
+		await store.restoreWrite(key, holder, { entryId: orphan.id, entryHash: orphan.entry_hash });
+		return reused(key, grant.name, orphan);
+	}
 	if (orphan) {
 		// A recovered global write is installed, so its proposal is no longer pending —
 		// the acknowledgement died, not the review. Leaving it in the queue would have a
@@ -683,6 +713,18 @@ async function replay(
 		// only ever be refused — and the attempt holding it may already have written a row
 		// that a takeover would otherwise hand back as this one's.
 		if (existing.request_hash && existing.request_hash !== asked) return reused(key, grant, null);
+
+		// The same answer for the same reason, one step further out. A claim whose
+		// reservation already holds another write's content is one the store will not part
+		// with — it is holding it for the write that committed that row, so that write can
+		// come back and recover it — and no amount of waiting changes that either. It is the
+		// whole test for a record carrying no `request_hash`, where what was reserved is the
+		// only identity there is, and a backstop for one where the two disagree.
+		//
+		// Unguarded for the reason given below: a read that fails is not evidence of absence.
+		const reserved = existing.entry_id ? await store.readEntry(existing.entry_id) : null;
+		if (reserved && reserved.entry_hash !== entryHash) return reused(key, grant, reserved);
+
 		return refuse(
 			"conflict",
 			"write.in-flight",
