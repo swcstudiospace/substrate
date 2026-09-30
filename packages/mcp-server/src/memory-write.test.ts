@@ -28,7 +28,7 @@ class FakeStore implements MemoryStore {
 	readonly writes = new Map<string, WriteRecord & { holder: string; claimed: number }>();
 	private holders = 0;
 	readonly quarantined: Array<NewMemoryEntry & { reason: QuarantineReason; detail: string }> = [];
-	readonly reviews: Array<NewMemoryEntry & { reason: string; state: string; entry_id: string | null }> = [];
+	readonly reviews: Array<NewMemoryEntry & { reason: string; state: string; entry_id: string | null; created: number }> = [];
 
 	/** Makes the read-back miss, which is the only way to reach `verified_persisted: false`. */
 	hideFromReadBack = false;
@@ -47,6 +47,14 @@ class FakeStore implements MemoryStore {
 	failFinish: string | null = null;
 	/** Makes the read throw, which must never be read as "the row is not there". */
 	failReadEntry: string | null = null;
+	/**
+	 * Makes resolving a parked proposal throw, after the entry has committed.
+	 *
+	 * The shape of the repeat-approval bug: a duplicate key on the reviews table was
+	 * one way to reach it, and an outage is another. Either way the entry is in the
+	 * index, so the caller must not be told the write failed.
+	 */
+	failReleaseReviews: string | null = null;
 	/**
 	 * Runs at the top of `insertEntry`, before its claim check.
 	 *
@@ -174,7 +182,9 @@ class FakeStore implements MemoryStore {
 	async insertEntry(
 		row: NewMemoryEntry,
 		claim: { key: string; holder: string },
-	): Promise<{ ok: true; entry: MemoryEntry } | { ok: false; reason: "standing-moved" | "claim-lost" }> {
+	): Promise<
+		{ ok: true; entry: MemoryEntry } | { ok: false; reason: "standing-moved" | "claim-lost" | "standing-exists" }
+	> {
 		if (this.onInsert) await this.onInsert();
 		if (this.failInsert) throw new Error(this.failInsert);
 		// Fenced, like the real store: an attempt whose claim was taken over does not get
@@ -187,11 +197,17 @@ class FakeStore implements MemoryStore {
 		// `memory_standing_idx` is a unique partial index in the real store, so the fake
 		// enforces it too. Otherwise a row that should never have carried a conflict key
 		// passes here and fails only against Postgres.
+		//
+		// Refused rather than thrown, because that is what the real store does: the
+		// insert declines under `on conflict … do nothing` and the transaction rolls
+		// back. A throw here would be the bug this refusal replaced — the gate cannot
+		// tell a rolled-back statement from a committed one, so it keeps the loser's key
+		// in flight for a race the loser could have retried at once.
 		if (row.conflict_key) {
 			const clash = [...this.rows.values()].find(
 				(held) => held.conflict_key === row.conflict_key && !held.entry.superseded_by && held.entry.id !== row.supersedes,
 			);
-			if (clash) throw new Error(`duplicate key value violates unique constraint "memory_standing_idx"`);
+			if (clash) return { ok: false, reason: "standing-exists" };
 		}
 		if (row.supersedes) {
 			const predecessor = this.rows.get(row.supersedes);
@@ -243,14 +259,21 @@ class FakeStore implements MemoryStore {
 	async enqueueReview(row: NewMemoryEntry & { reason: string }): Promise<string> {
 		const existing = this.reviews.find((held) => held.entry_hash === row.entry_hash && held.state === "pending");
 		if (existing) return existing.id;
-		this.reviews.push({ ...row, state: "pending", entry_id: null });
+		this.reviews.push({ ...row, state: "pending", entry_id: null, created: this.clock });
 		return row.id;
 	}
 
 	async releaseReviews(entryHash: string, entryId: string): Promise<number> {
+		if (this.failReleaseReviews) throw new Error(this.failReleaseReviews);
+		const entry = this.rows.get(entryId);
+		if (!entry) return 0;
 		let released = 0;
 		for (const review of this.reviews) {
 			if (review.entry_hash !== entryHash || review.state !== "pending") continue;
+			// The real store's conditions, because they are what stops an entry resolving
+			// a proposal it does not answer — see `releaseReviews` there.
+			if (review.created > Date.parse(entry.entry.created)) continue;
+			if (review.ttl !== entry.entry.ttl) continue;
 			review.state = "approved";
 			review.entry_id = entryId;
 			released++;
@@ -402,6 +425,103 @@ describe("conflict — require-review for global", () => {
 		expect(store.reviews[0]?.entry_id).toBe(approved.entry?.id);
 	});
 
+	test("approving the same content twice is honest about what is stored", async () => {
+		// The same race one step on: the second proposal exists (parked before this fix,
+		// or by a store that allows it), and a reviewer approves it. The entry commits
+		// first and the proposal is resolved after, so a failure to resolve must never
+		// read back to the caller as "nothing was stored".
+		const request = { scope: "global", kind: "fact" as const, text: "eight agents share one host" };
+		await write(request);
+		const first = await write({ ...request, review_token: REVIEW_TOKEN });
+		store.reviews.push({ ...store.reviews[0]!, id: "memr_stale", state: "pending", entry_id: null });
+
+		store.clock += DERIVED_KEY_WINDOW_MS + 1;
+		const second = await write({ ...request, review_token: REVIEW_TOKEN });
+
+		expect(second.outcome).toBe("accepted");
+		expect(second.verified_persisted).toBe(true);
+		expect(second.entry?.id).not.toBe(first.entry?.id);
+		// Both proposals are resolved, and the second approval is recorded beside the
+		// first rather than colliding with it.
+		expect(store.reviews.every((review) => review.state === "approved")).toBe(true);
+	});
+
+	test("a proposal that cannot be resolved is not reported as a write that did not happen", async () => {
+		// The repeat-approval bug, at its root. Approving content that was approved
+		// before used to raise a duplicate key on the reviews table — *after* the entry
+		// had committed and the claim recorded it — and the caller was told nothing was
+		// stored. The index no longer collides, and this proves the caller is told the
+		// truth even when resolving the proposal fails for some other reason.
+		const request = { scope: "global", kind: "fact" as const, text: "eight agents share one host" };
+		await write(request);
+		store.failReleaseReviews = "reviews table unavailable";
+
+		const approved = await write({ ...request, review_token: REVIEW_TOKEN });
+
+		expect(approved.outcome).toBe("accepted");
+		expect(approved.verified_persisted).toBe(true);
+		expect(store.standing()).toHaveLength(1);
+		// The proposal stays pending — a reviewer sees a stale row, which is a far
+		// smaller problem than an agent believing its memory was not stored.
+		expect(store.reviews[0]?.state).toBe("pending");
+	});
+
+	test("a retry clears the proposal that the write could not resolve", async () => {
+		// The other half of guarding that call: the stale row has to be cleared by
+		// something, and nothing else ever reaches it — an explicit key replays for
+		// ever and never runs the accepted path again. So the retry reconciles.
+		const request = {
+			scope: "global",
+			kind: "fact" as const,
+			text: "eight agents share one host",
+			review_token: REVIEW_TOKEN,
+			idempotency_key: "k-review",
+		};
+		await write({ ...request, review_token: undefined });
+		store.failReleaseReviews = "reviews table unavailable";
+		const installed = await write(request);
+		expect(installed.outcome).toBe("accepted");
+		expect(store.reviews[0]?.state).toBe("pending");
+
+		store.failReleaseReviews = null;
+		const retried = await write(request);
+
+		expect(retried.reason).toBe("idempotent.replay");
+		expect(retried.entry?.id).toBe(installed.entry?.id);
+		expect(store.reviews[0]?.state).toBe("approved");
+		expect(store.reviews[0]?.entry_id).toBe(installed.entry?.id);
+		// And nothing was written a second time to achieve it.
+		expect(store.standing()).toHaveLength(1);
+	});
+
+	test("a replay does not approve a proposal raised after its entry", async () => {
+		// The reconciliation above must resolve the proposal its own write left behind,
+		// not whatever shares the content hash. A replay carries no review token — the
+		// token is not part of the request identity — so without this it is a way to
+		// take a live request out of a reviewer's queue: the proposal is marked approved
+		// against an entry that does not hold what it asked for, and nobody ever sees it.
+		const request = {
+			scope: "global",
+			kind: "fact" as const,
+			text: "eight agents share one host",
+			idempotency_key: "k-installed",
+		};
+		const installed = await write({ ...request, review_token: REVIEW_TOKEN });
+		expect(installed.outcome).toBe("accepted");
+
+		// Later, the same words are proposed again — but kept for 30 days rather than
+		// for ever, which is a different ask and one the queue does record.
+		store.clock += 1000;
+		const proposed = await write({ ...request, ttl: "30d", idempotency_key: "k-30d" });
+		expect(proposed.reason).toBe("review.required");
+
+		const replayed = await write({ ...request, review_token: REVIEW_TOKEN });
+
+		expect(replayed.reason).toBe("idempotent.replay");
+		// Still pending, still a reviewer's to decide.
+		expect(store.reviews.find((review) => review.ttl === "30d")?.state).toBe("pending");
+	});
+
 	test("the parked conflict does not pin the outcome forever", async () => {
 		// A refused write left nothing behind, so the key it spent must not stop the
 		// same content being re-decided — which is what makes approval-by-resubmit work
@@ -471,6 +591,42 @@ describe("conflict — versioned decisions", () => {
 		expect(store.standing()).toHaveLength(2);
 	});
 
+	test("two first decisions for one subject race cleanly, and the loser may retry at once", async () => {
+		// Different idempotency keys, same subject, nothing in force yet. Neither write
+		// retires a predecessor, so neither `standing-moved` check fires and nothing in
+		// the plan tells them apart — the identity goes to whichever insert reaches the
+		// unique index first. The loser used to get a raw duplicate-key error out of the
+		// store, which the gate cannot tell from a lost connection over a committed row:
+		// it held the key in flight, so the retry its remedy asked for was refused until
+		// the takeover timeout.
+		const hook = store.onInsert;
+		store.onInsert = async () => {
+			store.onInsert = hook;
+			await write({ ...decision, text: "the runtime is Orca", idempotency_key: "winner" });
+		};
+
+		const loser = await write({ ...decision, text: "the runtime is herdr", idempotency_key: "loser" });
+
+		expect(loser.outcome).toBe("conflict");
+		expect(loser.reason).toBe("standing.raced");
+		expect(loser.conflict_with).toBe(store.standing()[0]?.id);
+		expect(loser.remedy).toContain("expected_version");
+		expect(store.standing()).toHaveLength(1);
+		expect(store.standing()[0]?.text).toBe("the runtime is Orca");
+
+		// Refused, not in flight: the key records a conflict, so the same key is takeable
+		// now rather than after IN_FLIGHT_TIMEOUT_MS.
+		expect(store.writes.get("loser")?.outcome).toBe("conflict");
+		const retry = await write({
+			...decision,
+			text: "the runtime is herdr",
+			expected_version: 1,
+			idempotency_key: "loser",
+		});
+		expect(retry.outcome).toBe("accepted");
+		expect(retry.entry?.version).toBe(2);
+	});
+
 	test("losing the race to supersede is reported, not fought", async () => {
 		await write({ ...decision, text: "the runtime is herdr" });
 		// Another writer retires the standing entry in the window between this write
@@ -506,6 +662,30 @@ describe("accepted — last-write-wins todos", () => {
 		expect(second.conflict_with).toBe(first.entry?.id ?? "");
 		expect(store.standing()).toHaveLength(1);
 		expect(store.standing()[0]?.text).toBe("lockfile regenerated; verify in CI");
+	});
+
+	test("two first todos for one subject race cleanly too", async () => {
+		// Last-write-wins is not an excuse to skip the race: the second writer still has
+		// to see the entry it is replacing, and a todo that vanished into a store error
+		// is a todo nobody does.
+		const hook = store.onInsert;
+		store.onInsert = async () => {
+			store.onInsert = hook;
+			await write({ ...todo, text: "regenerate the lockfile", idempotency_key: "winner" });
+		};
+
+		const loser = await write({ ...todo, text: "bump the lockfile by hand", idempotency_key: "loser" });
+
+		expect(loser.outcome).toBe("conflict");
+		expect(loser.reason).toBe("standing.raced");
+		expect(loser.strategy).toBe("lww");
+		expect(store.standing()).toHaveLength(1);
+
+		// And the retry, which for `lww` needs no version, replaces it.
+		const retry = await write({ ...todo, text: "bump the lockfile by hand", idempotency_key: "loser" });
+		expect(retry.outcome).toBe("accepted");
+		expect(store.standing()).toHaveLength(1);
+		expect(store.standing()[0]?.text).toBe("bump the lockfile by hand");
 	});
 
 	test("a different subject is a different todo", async () => {

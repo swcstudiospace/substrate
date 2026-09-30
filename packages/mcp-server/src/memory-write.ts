@@ -187,14 +187,23 @@ export interface MemoryStore {
 	 * row is written, not only where the bookkeeping is.
 	 *
 	 * `standing-moved` means another writer retired the predecessor in between.
-	 * `claim-lost` means this attempt no longer holds the key — it ran past the
-	 * in-flight timeout and a retry took over. The gate reports both as a conflict
-	 * rather than racing them.
+	 * `standing-exists` means the identity this write believed free was filled while it
+	 * was deciding — two first writes for one subject, under different keys, neither
+	 * retiring anything. `claim-lost` means this attempt no longer holds the key — it
+	 * ran past the in-flight timeout and a retry took over. The gate reports all three
+	 * as a conflict rather than racing them.
+	 *
+	 * All three must *roll back*, and `standing-exists` in particular must not surface
+	 * as a store error: a throw leaves the gate unable to say whether a row landed, so
+	 * it keeps the key in flight and the loser cannot retry until the takeover timeout
+	 * — for a race it lost cleanly and could have retried at once.
 	 */
 	insertEntry(
 		row: NewMemoryEntry,
 		claim: { key: string; holder: string },
-	): Promise<{ ok: true; entry: MemoryEntry } | { ok: false; reason: "standing-moved" | "claim-lost" }>;
+	): Promise<
+		{ ok: true; entry: MemoryEntry } | { ok: false; reason: "standing-moved" | "claim-lost" | "standing-exists" }
+	>;
 	readEntry(id: string): Promise<MemoryEntry | null>;
 	/**
 	 * Park a classified write. Idempotent on `entry_hash` — a retried write that is
@@ -440,7 +449,23 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 	// may already exist is never overwritten before it has been resolved. See `rowId`.
 	const entryId = newId("mem");
 	const claim = await store.claimWrite({ key, explicit: explicitKey !== null, entryHash, requestHash: asked, entryId });
-	if (!claim.claimed) return await replay(store, key, claim.existing, grant.name, entryHash, asked);
+	if (!claim.claimed) {
+		const replayed = await replay(store, key, claim.existing, grant.name, entryHash, asked);
+		// Reconcile the proposal this key's write installed but may not have resolved.
+		//
+		// Resolving is guarded down in the accepted path, deliberately: the entry is
+		// committed by then, so a proposal that cannot be resolved is a stale row in a
+		// reviewer's queue rather than a write that did not happen. But nothing else
+		// would ever clear it — an explicit key replays for ever and never reaches that
+		// code again — so the retry is where it is picked up. Idempotent: the update
+		// matches only rows still pending for this content, and `scope.class ===
+		// "global"` is exactly `conflictPlan`'s `requiresReview`, which has not been
+		// computed yet here.
+		if (replayed.outcome === "accepted" && replayed.entry && scope.class === "global") {
+			await store.releaseReviews(entryHash, replayed.entry.id, writer).catch(() => undefined);
+		}
+		return replayed;
+	}
 	const { holder } = claim;
 
 	// Taking over an abandoned claim is not the same as finding nothing done. Look for
@@ -537,6 +562,16 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 		const actor = resolveActor(request.actor, reviewed);
 
 		if (plan.requiresReview && !reviewed) {
+			// Parked, even where this exact content is already the entry in force.
+			//
+			// An earlier revision of this fix refused to park in that case, which read
+			// well and was wrong in three ways: a global `fact` or `warning` is
+			// append-only and its trust decays, so restating one is how an agent refreshes
+			// it; `entry_hash` says nothing about the `ttl` or `trust` being asked for; and
+			// answering `accepted` there spent the content's derived key on a row this
+			// write never made. None of that is what the repeat-approval bug was about —
+			// the bug was the *approval* colliding with an earlier approved row, and that
+			// is fixed where it happened, in the uniqueness on `memory_reviews`.
 			const reviewId = await store.enqueueReview({
 				...baseRow,
 				id: newId("memr"),
@@ -625,6 +660,36 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 					grant: grant.name,
 				};
 			}
+			// Two first writes for one subject, under different keys — the usual shape.
+			// Neither saw a standing entry, so neither retired one, and the identity went
+			// to whichever insert reached the index first. Nothing landed here — the store
+			// rolled back — so the key records a conflict and is takeable again
+			// immediately, which is the half that used to be missing: the collision
+			// surfaced as a store error, the gate could not rule out a committed row, and
+			// the loser's key stayed in flight until the takeover timeout.
+			if (written.reason === "standing-exists") {
+				await store.finishWrite(key, holder, "conflict", null);
+				// Whoever won is the entry to re-submit against, and it is worth naming: the
+				// standing read above found nothing, so without this the reply could only say
+				// that something else got there first.
+				const winner = identity ? await store.standingEntry(identity).catch(() => null) : null;
+				return {
+					outcome: "conflict",
+					reason: "standing.raced",
+					remedy:
+						`Another writer put a ${kind} in force for this subject while this write was in flight` +
+						`${winner ? ` (${winner.id})` : ""}, and one entry is in force per subject. Nothing was written ` +
+						"here and this idempotency_key is free to use again: re-read the entry in force and re-submit " +
+						(plan.resolve === "versioned"
+							? "against it with expected_version set to its version."
+							: "against it."),
+					verified_persisted: false,
+					idempotency_key: key,
+					strategy: plan.resolve,
+					grant: grant.name,
+					...(winner ? { conflict_with: winner.id } : {}),
+				};
+			}
 			await store.finishWrite(key, holder, "conflict", null);
 			return {
 				outcome: "conflict",
@@ -652,7 +717,17 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 		const stored = await store.readEntry(inserted.id);
 		const verified = stored !== null && stored.entry_hash === entryHash;
 
-		if (verified && plan.requiresReview) await store.releaseReviews(entryHash, inserted.id, writer);
+		// Guarded, and this is the honest half of the repeat-approval fix rather than a
+		// nicety. The entry is committed and the claim already records it; a proposal
+		// that cannot be resolved is a stale row in a reviewer's queue, not a write that
+		// did not happen. Letting this throw is what reported an installed entry to its
+		// caller as `store.write-failed` — the duplicate key was only one way to reach
+		// it, and the others are outages nothing can rule out. The recovery path above
+		// guards the same call for the same reason.
+		if (verified && plan.requiresReview) {
+			// A failure here leaves a stale proposal, which the retry path above clears.
+			await store.releaseReviews(entryHash, inserted.id, writer).catch(() => undefined);
+		}
 
 		return {
 			outcome: "accepted",

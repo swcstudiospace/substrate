@@ -36,7 +36,7 @@ The order is the design, not an implementation detail.
 | 2 | RBAC, default-deny | `memory-policy.ts` | `denied` — `rbac.no-grant` |
 | 3 | Quarantine | `memory-classify.ts` | `quarantined` — `quarantine.secret` / `.pii` / `.speculative` |
 | 4 | Exactly-once | `memory-write.ts` | `conflict` — `write.in-flight`, `write.superseded`, `idempotency.reused`, or a replay |
-| 5 | Conflict, insert, read-back | `memory-write.ts` | `conflict` — `review.required`, `version.required`, `version.stale`, `version.raced` |
+| 5 | Conflict, insert, read-back | `memory-write.ts` | `conflict` — `review.required`, `version.required`, `version.stale`, `version.raced`, `standing.raced` |
 
 **Why RBAC before the content check.** Storing text from a writer that has no
 business at this scope is still storing it — even in the quarantine table. A
@@ -146,6 +146,43 @@ the same todo. Without a `subject` there is no identity, so the entry is appende
   in every repo. The write is parked in `memory_reviews` and answered `conflict /
   review.required` with the parked id. Re-submitting the same content with a
   `review_token` installs it and marks the proposal approved.
+
+  **Approving the same content twice is not a failure.** The refusal that parks a
+  proposal does not pin the key — that is what makes approval-by-resubmit work — so
+  the same content can be sent again without a token and parked again. Approving
+  *that* proposal used to raise a duplicate key on `memory_reviews (entry_hash,
+  state)`, and it raised it **after** the entry had committed: the caller was told
+  nothing was stored while the entry sat in the index. Two things fix it. Uniqueness
+  on `memory_reviews` now covers the **pending** rows only, which is all parking
+  needs — a retried proposal still finds its own row, and a decided one never blocks
+  a new one. And resolving a proposal can no longer fail the write: the entry is
+  committed and the claim records it by then, so a proposal that cannot be resolved
+  is a stale row in a reviewer's queue, not a write that did not happen. Such a row
+  is cleared by the next retry under the same key: the replay re-runs the release,
+  which is the only path that reaches it again once the key is spent.
+
+  **An entry resolves only the proposals it answers.** Content is not the whole of a
+  proposal, and a release matched on `entry_hash` alone would resolve any of them —
+  including one parked *after* the entry was written, or one asking for a different
+  `ttl`. Either would take a live request out of a reviewer's queue without
+  installing what it asked for, and a replay (which carries no review token, because
+  the token is not part of the request identity) reaches that call. So a proposal is
+  resolved only by an entry written no earlier than it was parked and holding the
+  retention it asked for. Retention is the only part of the ask the queue records: a
+  parked row always carries the unreviewed trust and actor, because a reviewer
+  decides those. Which is why the queue shows it — a reviewer installs a proposal by
+  re-submitting it, so they have to be able to see the `ttl` they need to send, or a
+  `30d` proposal is installed as `permanent` and stays pending with nothing on
+  screen to explain why. It is shown without a reviewer token, like `scope` and
+  `kind`: a retention class names no content.
+
+  A proposal is parked even where the same content is already in force. An earlier
+  attempt at this refused to park there, and it was wrong three ways: a global
+  `fact` or `warning` is append-only and its trust decays, so restating one is how
+  an agent refreshes it; `entry_hash` says nothing about the `ttl` or `trust` being
+  asked for; and answering `accepted` spent the content's derived key on a row that
+  write never made.
+
 - **`decision` → versioned.** Optimistic concurrency. A caller replacing a standing
   decision must send `expected_version`; a missing one is `version.required` and a
   wrong one is `version.stale`, both quoting the current version and id. On success
@@ -162,6 +199,15 @@ invariant rather than a convention. Which is why retiring the predecessor and
 inserting the replacement are one transaction: either order as two statements leaves
 a window where the invariant is false, or where a standing decision is hidden behind
 a write that never landed.
+
+**Two first writes for one subject.** Under different idempotency keys, both writers
+read no standing entry, so neither retires a predecessor and nothing in the plan
+tells them apart — the index is the only thing between them. The insert is
+`on conflict … do nothing` over `memory_standing_idx`, so the loser blocks until the
+winner commits and then writes nothing and is answered `conflict / standing.raced`,
+naming the entry that won. Its key records that conflict rather than staying in
+flight, so the retry the remedy asks for — with `expected_version` for a decision —
+is allowed immediately rather than after the takeover timeout.
 
 ## Provenance and trust decay
 
@@ -339,6 +385,20 @@ With no `SUBSTRATE_MEMORY_REVIEW_TOKENS` configured, every review path stays clo
 and the queue simply fills. That is the correct default — nothing forged gets
 through — but it does mean an operator who wants global memories has to configure a
 token.
+
+## Running the proofs
+
+```sh
+bun test                                  # the gate's decisions, against a fake store
+SUBSTRATE_TEST_PG_URL=postgres://… bun test index-store.memory
+```
+
+The gate's decisions are proved against a fake store, because the decisions are the
+point and a Postgres would only slow them down. The two races above are the
+exception: they are settled by a unique index, and a fake cannot reproduce an index
+rejecting the second of two inserts that each believed they were the first. So
+`index-store.memory.test.ts` runs them against a real database and skips, loudly,
+without one.
 
 ## The lock
 

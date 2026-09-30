@@ -66,6 +66,23 @@ const TERMINAL_STATUSES = ["Merged", "Resolved", "Done", "Won't Fix", "Closed", 
  */
 const CLAIM_ATTEMPTS = 3;
 
+/**
+ * Carries "the standing identity is already taken" out of `insertEntry`'s
+ * transaction, rolling it back on the way.
+ *
+ * A sentinel rather than a returned value because the transaction has to *not*
+ * commit: the insert declines quietly under `on conflict … do nothing`, and a
+ * retire in the same transaction would otherwise be committed without the row it
+ * was making way for. Private to this file, so it can never be confused with a
+ * store error a caller has to handle.
+ */
+class StandingTaken extends Error {
+	constructor() {
+		super("the standing entry for this conflict key was written by another writer");
+		this.name = "StandingTaken";
+	}
+}
+
 export class IndexStore implements MemoryStore {
 	private readonly sql: SQL;
 
@@ -232,7 +249,21 @@ export class IndexStore implements MemoryStore {
 		// What makes parking idempotent: a retried write finds its own parked row
 		// instead of adding another for a reviewer to wade through.
 		await this.sql`create unique index if not exists memory_quarantine_hash_idx on memory_quarantine (entry_hash)`;
-		await this.sql`create unique index if not exists memory_reviews_hash_idx on memory_reviews (entry_hash, state)`;
+		// One *pending* proposal per content, and nothing said about the decided ones.
+		//
+		// It used to be unique on `(entry_hash, state)`, which also forbade a second
+		// approved row — and that is a rule nobody wanted. Content approved once can be
+		// proposed again (the derived key for an unreviewed write is spent on a refusal,
+		// so re-asking is allowed by design), and approving that second proposal moves it
+		// to `approved` beside the first. Under the old index that UPDATE raised a
+		// duplicate key *after* the entry had already committed: the gate's catch held
+		// the claim, the caller was told the write failed, and the entry was sitting in
+		// the index all along. Uniqueness over the pending rows is what parking actually
+		// needs; the decided rows are an audit trail and may repeat.
+		await this.sql`
+			create unique index if not exists memory_reviews_pending_idx on memory_reviews (entry_hash)
+			where state = 'pending'`;
+		await this.sql`drop index if exists memory_reviews_hash_idx`;
 	}
 
 	// ── graph ──────────────────────────────────────────────────────────────────
@@ -894,8 +925,37 @@ export class IndexStore implements MemoryStore {
 	 * writes nothing, or this insert goes first and the takeover sees the entry it
 	 * reserved and recovers it. Checking ownership before the transaction would leave
 	 * exactly the window the fencing token exists to close.
+	 *
+	 * The insert itself is `on conflict … do nothing` over `memory_standing_idx`, which
+	 * is what makes a *first* write for an identity safe to race. Two writers under
+	 * different keys both read no standing entry, so neither retires anything and
+	 * neither `standing-moved` check fires; without the clause the second insert raised
+	 * a duplicate key, the gate could not tell a rolled-back statement from a committed
+	 * one, and it held the loser's idempotency key in flight until the takeover timeout
+	 * — blocking the retry the answer was asking for. With it, the loser blocks on the
+	 * index until the winner commits and then writes nothing and says `standing-exists`,
+	 * which the gate reports as an ordinary conflict and the loser can retry at once.
 	 */
 	async insertEntry(
+		row: NewMemoryEntry,
+		claim: { key: string; holder: string },
+	): Promise<
+		{ ok: true; entry: MemoryEntry } | { ok: false; reason: "standing-moved" | "claim-lost" | "standing-exists" }
+	> {
+		try {
+			return await this.insertEntryTx(row, claim);
+		} catch (cause) {
+			// Rolled back by the throw that carried it out of the transaction — which is
+			// the point of throwing rather than returning: a `do nothing` insert leaves the
+			// retire above it committable, and committing a retire whose replacement never
+			// landed would take the standing entry out of force and put nothing in its place.
+			if (cause instanceof StandingTaken) return { ok: false as const, reason: "standing-exists" as const };
+			throw cause;
+		}
+	}
+
+	/** The transaction itself. It never *returns* `standing-exists` — it throws it. */
+	private async insertEntryTx(
 		row: NewMemoryEntry,
 		claim: { key: string; holder: string },
 	): Promise<{ ok: true; entry: MemoryEntry } | { ok: false; reason: "standing-moved" | "claim-lost" }> {
@@ -928,8 +988,15 @@ export class IndexStore implements MemoryStore {
 					${row.writer}, ${row.actor}, ${row.trust}, ${row.ttl}, ${row.session_id}, ${row.graph_id},
 					${row.repo}, ${row.conflict_key}, ${row.version}, ${row.supersedes}, ${row.entry_hash},
 					${row.reverify_after}, ${row.idempotency_key})
+				-- The arbiter is memory_standing_idx, named by restating its predicate.
+				-- What it catches is an identity this write believed free — usually one with
+				-- no predecessor to retire, so nothing above it fired — that another writer
+				-- filled first.
+				on conflict (conflict_key) where conflict_key is not null and superseded_by is null
+				do nothing
 				returning *`) as Array<Record<string, unknown>>;
-			return { ok: true as const, entry: toMemoryEntry(inserted[0]!) };
+			if (!inserted[0]) throw new StandingTaken();
+			return { ok: true as const, entry: toMemoryEntry(inserted[0]) };
 		})) as { ok: true; entry: MemoryEntry } | { ok: false; reason: "standing-moved" | "claim-lost" };
 	}
 
@@ -970,7 +1037,9 @@ export class IndexStore implements MemoryStore {
 				${row.id}, ${row.scope}, ${row.kind}, ${redact(row.text)}, ${row.subject}, ${row.writer},
 				${row.source_event}, ${row.session_id}, ${row.graph_id}, ${row.repo}, ${row.ttl},
 				${row.entry_hash}, ${row.reason}, 'pending')
-			on conflict (entry_hash, state) do nothing
+			-- memory_reviews_pending_idx, named by restating its predicate: a retry finds
+			-- the proposal it already parked, and a decided row never blocks a new one.
+			on conflict (entry_hash) where state = 'pending' do nothing
 			returning id`) as Array<Record<string, unknown>>;
 		if (inserted[0]) return String(inserted[0].id);
 		const existing = (await this.sql`
@@ -980,13 +1049,37 @@ export class IndexStore implements MemoryStore {
 		return existing[0] ? String(existing[0].id) : row.id;
 	}
 
-	/** Close the loop: a reviewed write that landed resolves the proposal it came from. */
+	/**
+	 * Close the loop: a reviewed write that landed resolves the proposal it came from.
+	 *
+	 * Safe to run when this content was approved once before — the uniqueness on
+	 * `memory_reviews` covers the pending rows only, so a second approval lands beside
+	 * the first instead of raising a duplicate key on a write that has already
+	 * committed.
+	 */
 	async releaseReviews(entryHash: string, entryId: string, decidedBy: string): Promise<number> {
 		const rows = (await this.sql`
-			update memory_reviews
+			update memory_reviews r
 			set state = 'approved', entry_id = ${entryId}, decided = now(), decided_by = ${decidedBy}
-			where entry_hash = ${entryHash} and state = 'pending'
-			returning id`) as Array<Record<string, unknown>>;
+			from memory_entries e
+			where e.id = ${entryId}
+			  and r.entry_hash = ${entryHash} and r.state = 'pending'
+			  -- Content alone is not enough to say this entry answers this proposal, and
+			  -- resolving one it does not answer takes a live request out of a reviewer's
+			  -- queue without installing what it asked for.
+			  --
+			  -- Parked before the entry was written: a proposal raised afterwards is a new
+			  -- ask about the same words, and cannot have been the one this entry came
+			  -- from. Without it, any later write for this content — a replay, or a
+			  -- recovery — silently approves it.
+			  and r.created <= e.created
+			  -- And asking for the retention the entry actually has. entry_hash covers
+			  -- the words, not how long they are kept, so a proposal for 30d is not
+			  -- answered by a permanent entry. It is the only part of the ask the queue
+			  -- records — a parked row always carries the unreviewed trust and actor,
+			  -- because a reviewer decides those.
+			  and r.ttl = e.ttl
+			returning r.id`) as Array<Record<string, unknown>>;
 		return rows.length;
 	}
 
@@ -999,7 +1092,7 @@ export class IndexStore implements MemoryStore {
 	 */
 	async governanceQueue(limit = 20): Promise<{ reviews: GovernanceQueueRow[]; quarantined: GovernanceQueueRow[] }> {
 		const reviews = (await this.sql`
-			select id, scope, kind, body, subject, writer, reason, created
+			select id, scope, kind, body, subject, writer, reason, ttl, created
 			from memory_reviews where state = 'pending'
 			order by created desc limit ${limit}`) as Array<Record<string, unknown>>;
 		const quarantined = (await this.sql`
@@ -1128,6 +1221,9 @@ function toQueueRow(row: Record<string, unknown>): GovernanceQueueRow {
 		created: timestamp(row.created),
 		text: String(row.body),
 		...(optional(row.subject) ? { subject: optional(row.subject) } : {}),
+		// Review rows only: the quarantine table holds no retention, because a
+		// quarantined write never got as far as being kept for anything.
+		...(optional(row.ttl) ? { ttl: optional(row.ttl) } : {}),
 		...(optional(row.detail) ? { detail: optional(row.detail) } : {}),
 	};
 }
