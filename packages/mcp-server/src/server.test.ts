@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { loadConfig } from "./config.ts";
 import type { EventQuery } from "./greptime.ts";
-import { createHttpServer, healthStatus } from "./server.ts";
+import { createHttpServer, healthStatus, memoryWriteStatus } from "./server.ts";
 import { Substrate } from "./service.ts";
 import type { SubstrateEvent } from "./types.ts";
 
@@ -206,5 +206,32 @@ describe("routes", () => {
 		} finally {
 			await stop();
 		}
+	});
+});
+
+describe("memoryWriteStatus", () => {
+	/** Shorthand for a governance result; only the fields the mapping reads. */
+	function result(outcome: string, over: { reason?: string; verified_persisted?: boolean } = {}) {
+		return { outcome, reason: over.reason ?? outcome, verified_persisted: over.verified_persisted ?? true };
+	}
+
+	test("only a write that was read back gets a 200", () => {
+		// A hook that can see nothing but the status code still has to be able to tell
+		// "stored and confirmed" from "taken, not confirmed" — the same distinction
+		// /events already draws between 202 and 200.
+		expect(memoryWriteStatus(result("accepted"))).toBe(200);
+		expect(memoryWriteStatus(result("accepted", { verified_persisted: false }))).toBe(202);
+	});
+
+	test("the three refusals are distinguishable without parsing the body", () => {
+		expect(memoryWriteStatus(result("conflict", { reason: "review.required", verified_persisted: false }))).toBe(409);
+		expect(memoryWriteStatus(result("quarantined", { reason: "quarantine.secret", verified_persisted: false }))).toBe(422);
+		expect(memoryWriteStatus(result("denied", { reason: "rbac.no-grant", verified_persisted: false }))).toBe(403);
+	});
+
+	test("an outage is a 503, not a 403", () => {
+		// A monitor must not read "the index is down" as "this agent lacks permission".
+		expect(memoryWriteStatus(result("denied", { reason: "store.unavailable", verified_persisted: false }))).toBe(503);
+		expect(memoryWriteStatus(result("denied", { reason: "store.write-failed", verified_persisted: false }))).toBe(503);
 	});
 });
