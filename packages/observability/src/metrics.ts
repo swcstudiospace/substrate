@@ -386,11 +386,14 @@ export function matches(attributes: Attributes, where: Record<string, string>): 
 /**
  * The exact share of observations at or below one of the histogram's own bounds.
  *
- * This is the honest way to check "p95 < 800 ms" against bucketed data: the count
- * at or below the 800 ms boundary is known precisely, so the answer does not
- * depend on how a quantile is interpolated inside the bucket. `null` means the
- * bound is not one of this histogram's boundaries, so the question cannot be
- * answered exactly — the caller should say so rather than guess.
+ * Half of how "p95 < 800 ms" is checked against bucketed data: the count at or below
+ * the 800 ms boundary is known precisely, so the answer does not depend on how a
+ * quantile is interpolated inside the bucket. `null` means the bound is not one of
+ * this histogram's boundaries, so the question cannot be answered exactly — the caller
+ * should say so rather than guess.
+ *
+ * The other half is `exactFractionBelow`. This count is inclusive of the bound, so on
+ * its own it answers `<=` and not `<`.
  */
 export function exactFractionAtOrBelow(
 	point: Pick<HistogramPoint, "count" | "bucketCounts"> & { bounds: readonly number[] },
@@ -401,6 +404,31 @@ export function exactFractionAtOrBelow(
 	if (index < 0) return null;
 	let below = 0;
 	for (let i = 0; i <= index; i++) below += point.bucketCounts[i] ?? 0;
+	return below / point.count;
+}
+
+/**
+ * The exact share of observations **strictly below** one of the histogram's bounds.
+ *
+ * A bucket bound is an inclusive upper edge in OTLP, so the bucket ending at `bound`
+ * may hold observations of exactly `bound` and cannot be placed on either side of a
+ * strict `<`. This sums only the buckets that end below it, which is the share that is
+ * *provably* below.
+ *
+ * With `exactFractionAtOrBelow` it brackets the truth: anything between the two is
+ * decided by the boundary bucket, and a bucketed histogram cannot say which way — see
+ * `evaluateLatency`, which reports that case rather than guessing. `null` when the
+ * bound is not one of this histogram's boundaries.
+ */
+export function exactFractionBelow(
+	point: Pick<HistogramPoint, "count" | "bucketCounts"> & { bounds: readonly number[] },
+	bound: number,
+): number | null {
+	if (point.count === 0) return null;
+	const index = point.bounds.indexOf(bound);
+	if (index < 0) return null;
+	let below = 0;
+	for (let i = 0; i < index; i++) below += point.bucketCounts[i] ?? 0;
 	return below / point.count;
 }
 

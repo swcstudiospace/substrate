@@ -11,6 +11,7 @@ import {
 	attributeKey,
 	cleanAttributes,
 	exactFractionAtOrBelow,
+	exactFractionBelow,
 	findCounter,
 	findHistogram,
 	mergeHistogram,
@@ -197,6 +198,29 @@ describe("exactFractionAtOrBelow", () => {
 
 	test("an empty histogram answers null, not 0 or 1", () => {
 		expect(exactFractionAtOrBelow({ count: 0, bucketCounts: [0, 0], bounds: [10] }, 10)).toBeNull();
+	});
+});
+
+describe("exactFractionBelow", () => {
+	const point = { count: 100, bucketCounts: [0, 0, 0, 0, 0, 0, 0, 96, 4, 0, 0, 0], bounds: LATENCY_BUCKETS_MS };
+
+	test("excludes the bucket ending at the bound, because that bucket includes it", () => {
+		// The 96 observations sit in (400, 800]. Any of them could be exactly 800 ms, so
+		// none is *provably* below 800 ms — the pair of counts brackets the truth.
+		expect(exactFractionBelow(point, 800)).toBe(0);
+		expect(exactFractionAtOrBelow(point, 800)).toBeCloseTo(0.96, 10);
+	});
+
+	test("counts every bucket that ends below the bound", () => {
+		expect(exactFractionBelow({ ...point, bucketCounts: [0, 0, 0, 0, 0, 0, 96, 4, 0, 0, 0, 0] }, 800)).toBeCloseTo(0.96, 10);
+	});
+
+	test("refuses a bound that is not one of the histogram's own", () => {
+		expect(exactFractionBelow(point, 750)).toBeNull();
+	});
+
+	test("an empty histogram answers null, not 0 or 1", () => {
+		expect(exactFractionBelow({ count: 0, bucketCounts: [0, 0], bounds: [10] }, 10)).toBeNull();
 	});
 });
 

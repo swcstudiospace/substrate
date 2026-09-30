@@ -43,7 +43,7 @@ describe("the catalogue", () => {
 });
 
 describe("brief p95 < 800 ms", () => {
-	test("met when 95 % of briefs landed at or below the 800 ms boundary", () => {
+	test("met when 95 % of briefs landed below the 800 ms boundary", () => {
 		// 96 fast, 4 slow: the verdict is the exact count below the boundary, not an
 		// interpolated quantile.
 		const instruments = briefs([...Array.from({ length: 96 }, () => 400), ...Array.from({ length: 4 }, () => 3000)]);
@@ -62,23 +62,34 @@ describe("brief p95 < 800 ms", () => {
 		expect(breaches(evaluateSlos(instruments.snapshot())).map((entry) => entry.id)).toContain("brief.p95");
 	});
 
-	test("exactly 95 % at or below the threshold is met", () => {
+	test("exactly 95 % below the threshold is met", () => {
 		const instruments = briefs([...Array.from({ length: 95 }, () => 400), ...Array.from({ length: 5 }, () => 3000)]);
 		expect(slo(evaluateSlos(instruments.snapshot()), "brief.p95").status).toBe("ok");
 	});
 
-	test("a brief at exactly 800 ms counts as inside, and the objective says so rather than claiming `<`", () => {
+	test("briefs at exactly 800 ms are not reported as met — the objective is strict", () => {
 		// SPE-4793 words this `p95 < 800 ms`. A bucket bound is an inclusive upper edge in
 		// OTLP — the 800 ms bucket holds (400, 800] — so no bucketed histogram can separate
-		// 800.000 from 799.999, and `<= 800 ms` is the strongest claim this data supports.
-		// The fix was to state that in the objective instead of checking `<=` while calling
-		// it `<`, which handed out a green verdict at the stated failure boundary in silence.
+		// 800.000 from 799.999, and judging on the at-or-below count handed this run a green
+		// tick at the objective's own failure boundary. The answer is to report which of the
+		// three cases holds, not to restate the objective as the one the data can answer.
 		const result = slo(evaluateSlos(briefs(Array.from({ length: 30 }, () => 800)).snapshot()), "brief.p95");
 
-		expect(result.status).toBe("ok");
-		expect(result.statement).toContain("<= 800 ms");
-		expect(result.statement).not.toMatch(/p95 of \S+ < 800/);
-		expect(result.detail).toContain("exactly 800 ms counts as inside");
+		expect(result.status).toBe("unmeasurable");
+		expect(result.statement).toContain("< 800 ms");
+		expect(result.detail).toContain("0.00 % of 30 observations were below 800 ms");
+		expect(result.detail).toContain("cannot be split");
+	});
+
+	test("the boundary bucket deciding the verdict is `unmeasurable`, never `ok`", () => {
+		// 96 briefs somewhere in (400, 800]: at or below the threshold, but not provably
+		// below it. Neither proven met nor proven breached — and `breaches` leaves it out,
+		// so an evidence bundle is not failed on a maybe.
+		const instruments = briefs([...Array.from({ length: 96 }, () => 600), ...Array.from({ length: 4 }, () => 3000)]);
+		const results = evaluateSlos(instruments.snapshot());
+
+		expect(slo(results, "brief.p95").status).toBe("unmeasurable");
+		expect(breaches(results).map((entry) => entry.id)).not.toContain("brief.p95");
 	});
 
 	test("a brief a fraction above the boundary is outside it", () => {

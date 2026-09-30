@@ -26,6 +26,7 @@ export {
 	attributeKey,
 	cleanAttributes,
 	exactFractionAtOrBelow,
+	exactFractionBelow,
 	findCounter,
 	findHistogram,
 	matches,

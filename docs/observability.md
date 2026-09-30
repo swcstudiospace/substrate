@@ -135,7 +135,7 @@ durable signal.
 
 | Objective | Target | Why |
 | --- | --- | --- |
-| `brief.p95` | p95 of `substrate.brief.duration` ≤ **800 ms** | The brief is on the critical path of every prompt and the uplift hook's budget is 1.5 s, so 800 ms leaves room for the hook. |
+| `brief.p95` | p95 of `substrate.brief.duration` < **800 ms** | The brief is on the critical path of every prompt and the uplift hook's budget is 1.5 s, so 800 ms leaves room for the hook. |
 | `emit.success` | stored / total ≥ **99.5 %** | Appends are fail-closed at the ledger, so a dropped event is a hole in the trail. |
 | `lease.steal_rate` | stolen / claims ≤ **0.5 %** | Two agents believing they hold one node is the failure claims exist to prevent. |
 | `quarantine.rate` | quarantines / claims ≤ **1 %** | A node the substrate withdraws is work no agent picks up. |
@@ -147,23 +147,32 @@ monitor that read it as an outage would page on a slow hour.
 ### Two things the evaluator does on purpose
 
 **The p95 objective is checked as a count, not an interpolation.** 800 is one of the
-histogram's own bucket bounds, so the *exact* share of briefs at or below it is
-known. That share decides the verdict. The interpolated p95 is reported alongside
+histogram's own bucket bounds, so the *exact* share of briefs on each side of it is
+known. Those counts decide the verdict. The interpolated p95 is reported alongside
 for reading, and does not decide anything. A threshold that is not a bucket bound
 reports `unmeasurable` rather than being quietly interpolated — a bucketed
 histogram genuinely cannot answer it.
 
-**The comparison is `≤`, and the objective is worded to say so.** SPE-4793 states
-this as `p95 < 800 ms`. A bucket bound is an *inclusive* upper edge in OTLP — the
-800 ms bucket holds `(400, 800]` — so no bucketed histogram can separate 800.000 ms
-from 799.999 ms, and `≤ 800 ms` is the strongest claim the data supports. It is
-therefore what gets reported, rather than checking `≤` while calling it `<`, which
-would hand out a green verdict at the stated failure boundary in silence. The two
-differ only for a brief that takes precisely 800.000 ms.
+**The objective is strict, and the boundary does not count as met.** SPE-4793 states
+it as `p95 < 800 ms`. A bucket bound is an *inclusive* upper edge in OTLP — the 800 ms
+bucket holds `(400, 800]` — so no bucketed histogram can separate 800.000 ms from
+799.999 ms, and judging on the at-or-below count alone marked a run of briefs at
+exactly 800 ms as met: a green verdict at the objective's own failure boundary. Two
+counts bracket the truth, and the verdict says which of three cases holds:
 
-The alternative was to bucket with `<`, making the bound exclusive so the strict
-check became exact. That was rejected: it would misreport bucket membership to every
-standard collector, and an exported histogram has to mean what OTLP says it means.
+- at least 95 % **below** 800 ms → `ok`, proven;
+- fewer than 95 % **at or below** it → `breached`, also proven;
+- in between → `unmeasurable`, naming the band. The verdict turns on the
+  400–800 ms bucket, which cannot be split. Not `ok`, because the objective has not
+  been met; not `breached`, because it may well have been — and `breaches()` leaves it
+  out, so an evidence bundle is not failed on a maybe. An operator who needs a verdict
+  inside that band narrows it with a bucket bound just under the threshold.
+
+Two alternatives were rejected. Restating the objective as `≤ 800 ms` makes the check
+exact by weakening the claim, and still hands out `ok` at the boundary the ticket names
+as failure. Bucketing with `<` so the bound became exclusive makes the strict check
+exact locally, but misreports bucket membership to every standard collector — an
+exported histogram has to mean what OTLP says it means.
 
 **An objective with too few samples is never `ok`.** It reports
 `insufficient-data` with the count it has. A green SLO computed from three
