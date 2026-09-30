@@ -88,6 +88,23 @@ export interface SubstrateConfig {
 	handoffKeys: Map<string, string>;
 	/** The key id new packets are signed with. Null when no key is configured. */
 	handoffKeyId: string | null;
+	/**
+	 * Where the hash-chained MCP audit is written. `null` keeps it in memory.
+	 *
+	 * Separate from the Greptime ledger on purpose — see `docs/mcp-audit.md`. A
+	 * deployment sets `SUBSTRATE_AUDIT_PATH`; a bare local run does not, and boots
+	 * with a warning rather than refusing every fail-closed tool because
+	 * `/var/lib/substrate` does not exist.
+	 */
+	audit: { path: string | null };
+	/**
+	 * Withdraw a claim whose event did not reach the ledger.
+	 *
+	 * `null` means "decide from the deployment": on when a ledger is configured, off
+	 * when there is none, because a local run with no `GREPTIME_URL` would otherwise
+	 * have every claim withdrawn. `SUBSTRATE_CLAIM_REQUIRE_LEDGER` forces either way.
+	 */
+	requireRecordedClaims: boolean | null;
 }
 
 /** SUBSTRATE_TOKEN_GROK_BUILD → "grok-build" */
@@ -163,6 +180,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		memoryGrants: parseGrants(env.SUBSTRATE_MEMORY_GRANTS, (message) =>
 			process.stderr.write(`[substrate] ${message}\n`),
 		),
+		audit: { path: env.SUBSTRATE_AUDIT_PATH?.trim() || null },
+		requireRecordedClaims: booleanOrNull(env.SUBSTRATE_CLAIM_REQUIRE_LEDGER),
 	};
 }
 
@@ -176,6 +195,15 @@ function readReviewTokens(raw: string | undefined): Set<string> {
 			// would hand reviewer authority to anybody who guessed it.
 			.filter((token) => token.length >= 16),
 	);
+}
+
+/** `null` when unset, so the caller can tell "not configured" from "configured false". */
+function booleanOrNull(raw: string | undefined): boolean | null {
+	const value = raw?.trim();
+	if (!value) return null;
+	if (/^(1|true|yes)$/i.test(value)) return true;
+	if (/^(0|false|no)$/i.test(value)) return false;
+	return null;
 }
 
 function bearer(authorization: string | null): string | null {

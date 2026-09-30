@@ -10,14 +10,18 @@
     "packages/host",
     "packages/collectors",
     "packages/projector",
-    "packages/ledger"
+    "packages/ledger",
+    "packages/observability",
+    "packages/audit",
+    "packages/evidence"
   ],
   "scripts": {
     "test": "bun test",
     "check": "bunx tsc --noEmit",
     "mcp": "bun packages/mcp-server/src/index.ts",
     "substrate": "bun packages/cli/src/index.ts",
-    "smoke:greptime": "bun scripts/greptime-smoke.ts"
+    "smoke:greptime": "bun scripts/greptime-smoke.ts",
+    "smoke:chaos": "bun scripts/chaos-smoke.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",

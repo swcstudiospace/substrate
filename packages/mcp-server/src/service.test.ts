@@ -4,7 +4,7 @@ import { MAX_QUERY_LIMIT, type EventQuery } from "./greptime.ts";
 import { REDACTED } from "./redact.ts";
 import type { ClaimAction } from "./lease.ts";
 import { Substrate } from "./service.ts";
-import type { EventInput, SubstrateEvent } from "./types.ts";
+import type { EventInput, SubstrateEvent, Surface } from "./types.ts";
 
 /** Records what reached the event log, and stands in for the index. */
 function stubStores(
@@ -311,6 +311,241 @@ describe("releaseNode and completeNode", () => {
 
 		expect(stores.emitted[0]?.surface).toBe("hermes");
 		expect(stores.emitted[0]?.session_id).toBe("sess-a");
+	});
+});
+
+describe("claimNode is fail-closed on the ledger", () => {
+	/**
+	 * The index grants the claim; the ledger is what varies. `released` records
+	 * whether the withdrawal happened, which is the half a caller cannot see.
+	 */
+	function stores(options: { stored: boolean; releaseFails?: boolean; heldByAnother?: boolean }) {
+		const released: string[] = [];
+		const holder = { surface: "omp" as Surface, session_id: "sess-1" };
+		const lease = {
+			lease_id: "lse_new",
+			holder,
+			epoch: 4,
+			state: "held" as const,
+			claimed_at: null,
+			heartbeat_at: null,
+			expires_at: null,
+			expires_in_seconds: null,
+		};
+		const granted = {
+			action: "granted" as ClaimAction,
+			granted: true,
+			lease_id: lease.lease_id,
+			epoch: 4,
+			observed_epoch: 3,
+			ttl_seconds: 900,
+			evicted: null,
+			holder,
+			observed_expiry: null,
+		};
+		const index = {
+			claimNode: async (graph_id: string, node_id: string) => ({
+				claimed: true,
+				node: { graph_id, node_id, linear_identifier: "SPE-123" },
+				lease,
+				decision: granted,
+			}),
+			getGraph: async () => ({ repo: "swcstudiospace/x", branch: "main" }),
+			releaseNode: async (graph_id: string, node_id: string, request: { lease_id?: string | null } = {}) => {
+				if (options.releaseFails) throw new Error("postgres is down");
+				// The withdrawal is fenced like every other release: unless it carries the
+				// lease the claim was granted, it must not take the node. `heldByAnother`
+				// stands in for the node having been re-claimed since — the compare-and-swap
+				// matches no row, and the release reports a stale lease rather than clearing
+				// somebody else's hold.
+				if (options.heldByAnother || request.lease_id !== lease.lease_id) {
+					return {
+						released: false,
+						node: { graph_id, node_id },
+						decision: { ok: false as const, reason: "stale-lease" as const, holder, observed_epoch: 4 },
+					};
+				}
+				released.push(`${graph_id}/${node_id}`);
+				return {
+					released: true,
+					node: { graph_id, node_id },
+					decision: {
+						ok: true as const,
+						action: "released" as const,
+						lease_id: lease.lease_id,
+						evicted: null,
+						holder,
+						observed_epoch: 4,
+					},
+				};
+			},
+		};
+		const greptime = {
+			ensureAppendMode: async () => true,
+			lastHash: async () => null,
+			insertEvent: async () => {
+				if (!options.stored) throw new Error("greptime unreachable: connect ETIMEDOUT");
+			},
+		};
+		return { released, lease, index, greptime };
+	}
+
+	test("withdraws a claim whose event the ledger refused", async () => {
+		// A dropped event costs a line in the trail; a claim whose event dropped costs
+		// mutual exclusion — no other agent's brief would show the node as taken.
+		const { released, index, greptime } = stores({ stored: false });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+
+		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1");
+
+		expect(result.claimed).toBe(false);
+		expect(result.decision).toBe("revoked");
+		expect(result.reason).toContain("withdrawn");
+		// Scoped to the lease this claim was granted, not a bare release of the node.
+		expect(released).toEqual(["ut-1/n4"]);
+	});
+
+	test("does not clear a claim another surface has taken in the meantime", () => {
+		// The race: the node is released and re-claimed by someone else between the grant
+		// and the failed append. An unconditional release would clear *their* live claim
+		// and break the mutual exclusion this withdrawal exists to protect.
+		const { released, index, greptime } = stores({ stored: false, heldByAnother: true });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+
+		return substrate.claimNode("ut-1", "n4", "omp", "sess-1").then((result) => {
+			expect(result.claimed).toBe(false);
+			expect(result.reason).toContain("another surface already holds it");
+			expect(released).toEqual([]);
+		});
+	});
+
+	test("grants it when the ledger took the event", async () => {
+		const { released, index, greptime } = stores({ stored: true });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+
+		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1");
+
+		expect(result).toMatchObject({ claimed: true, decision: "granted", reason: null });
+		expect(released).toEqual([]);
+	});
+
+	test("does not require a recording when no ledger is configured at all", async () => {
+		// A local run with no ledger would otherwise have every claim withdrawn.
+		const { index } = stores({ stored: false });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null });
+
+		expect(await substrate.claimNode("ut-1", "n4", "omp", "sess-1")).toMatchObject({ claimed: true, decision: "granted" });
+	});
+
+	test("an operator can force fail-closed even with no ledger", async () => {
+		const { index } = stores({ stored: false });
+		const config = loadConfig({ SUBSTRATE_CLAIM_REQUIRE_LEDGER: "true" });
+		const substrate = new Substrate(config, { index: index as never, greptime: null });
+
+		expect((await substrate.claimNode("ut-1", "n4", "omp", "sess-1")).decision).toBe("revoked");
+	});
+
+	test("an operator can force fail-open with a ledger that is refusing", async () => {
+		const { index, greptime } = stores({ stored: false });
+		const config = loadConfig({ SUBSTRATE_CLAIM_REQUIRE_LEDGER: "false" });
+		const substrate = new Substrate(config, { index: index as never, greptime: greptime as never });
+
+		expect((await substrate.claimNode("ut-1", "n4", "omp", "sess-1")).decision).toBe("granted");
+	});
+
+	test("says so when the withdrawal itself failed, so the node is known to need a manual release", async () => {
+		const { index, greptime } = stores({ stored: false, releaseFails: true });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+
+		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1");
+
+		expect(result.claimed).toBe(false);
+		expect(result.reason).toContain("manual release");
+	});
+
+	test("reports contention rather than a withdrawal when another surface holds the node", async () => {
+		const { released, lease, index, greptime } = stores({ stored: false });
+		index.claimNode = async (graph_id: string, node_id: string) => ({
+			claimed: false,
+			node: { graph_id, node_id, linear_identifier: "SPE-123" },
+			// The lease that comes back on a refusal is the *other* surface's, which is
+			// what tells the caller to go and pick up something else.
+			lease: { ...lease, holder: { surface: "grok-bot" as Surface, session_id: "sess-other" } },
+			decision: {
+				action: "denied" as ClaimAction,
+				granted: false,
+				lease_id: "lse_theirs",
+				epoch: 3,
+				observed_epoch: 3,
+				ttl_seconds: 900,
+				evicted: null,
+				holder: { surface: "grok-bot" as Surface, session_id: "sess-other" },
+				observed_expiry: null,
+			},
+		});
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+
+		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1");
+
+		expect(result.decision).toBe("contended");
+		// Nothing to withdraw: the claim was never granted, and releasing would drop
+		// the *other* surface's claim.
+		expect(released).toEqual([]);
+	});
+
+	test("tells the observer what happened, including the quarantine reason", async () => {
+		const { index, greptime } = stores({ stored: false });
+		const claimed: unknown[] = [];
+		const substrate = new Substrate(
+			loadConfig({}),
+			{ index: index as never, greptime: greptime as never },
+			{ claimed: (sample) => claimed.push(sample) },
+		);
+
+		await substrate.claimNode("ut-1", "n4", "omp", "sess-1");
+
+		expect(claimed).toHaveLength(1);
+		expect(claimed[0]).toMatchObject({ decision: "revoked", quarantineReason: "unrecorded-claim", node_id: "n4" });
+	});
+});
+
+describe("the observer", () => {
+	test("sees a brief's latency whether it succeeded or threw", async () => {
+		// The SLO is about what the caller waited for, and a failure is a wait too.
+		const samples: Array<{ ok: boolean }> = [];
+		const substrate = new Substrate(
+			loadConfig({}),
+			{ index: null, greptime: null },
+			{ briefed: (sample) => samples.push(sample) },
+		);
+
+		await substrate.brief({ surface: "omp", graph_id: "ut-1" });
+		expect(samples).toHaveLength(1);
+		expect(samples[0]?.ok).toBe(true);
+	});
+
+	test("sees an emit's outcome and the payload its tokens are on", async () => {
+		const samples: Array<{ stored: boolean; payload: Record<string, unknown> }> = [];
+		const substrate = new Substrate(
+			loadConfig({}),
+			{ index: null, greptime: null },
+			{ emitted: (sample) => samples.push(sample) },
+		);
+
+		await substrate.emit({
+			surface: "omp",
+			kind: "prompt",
+			summary: "uplifted",
+			payload: { usage: { input_tokens: 42 } },
+		});
+
+		expect(samples[0]?.stored).toBe(false); // no ledger configured
+		expect(samples[0]?.payload).toMatchObject({ usage: { input_tokens: 42 } });
+	});
+
+	test("a substrate with no observer behaves exactly as before", async () => {
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: null });
+		expect(typeof (await substrate.brief({ surface: "omp" }))).toBe("string");
 	});
 });
 

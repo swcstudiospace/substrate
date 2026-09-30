@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { loadConfig } from "./config.ts";
 import type { EventQuery } from "./greptime.ts";
 import { memoryToolWriter } from "./mcp.ts";
+import { createObservability } from "./observe.ts";
 import { createHttpServer, healthStatus, memoryWriteStatus, memoryWriter } from "./server.ts";
 import { Substrate } from "./service.ts";
 import type { SubstrateEvent } from "./types.ts";
@@ -79,8 +80,13 @@ describe("routes", () => {
 	 */
 	async function serve(greptime: unknown, env: Record<string, string | undefined> = {}) {
 		const config = loadConfig(env);
-		const substrate = new Substrate(config, { index: null, greptime: greptime as never });
-		const server = createHttpServer(substrate, config);
+		// No SUBSTRATE_AUDIT_PATH in the env, so the audit chain stays in memory and the
+		// exporter is off: these routes are audited, and a test that skipped the plane
+		// entirely would not be running the code the server actually runs.
+		const observability = createObservability(config, env);
+		await observability.start();
+		const substrate = new Substrate(config, { index: null, greptime: greptime as never }, observability.observer);
+		const server = createHttpServer(substrate, config, observability);
 		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 		const address = server.address();
 		const port = typeof address === "object" && address ? address.port : 0;
@@ -91,7 +97,11 @@ describe("routes", () => {
 					headers: { "content-type": "application/json", ...headers },
 					body: JSON.stringify(body),
 				}),
-			stop: () => new Promise<void>((resolve) => server.close(() => resolve())),
+			stop: () =>
+				new Promise<void>((resolve) => {
+					observability.stop();
+					server.close(() => resolve());
+				}),
 		};
 	}
 

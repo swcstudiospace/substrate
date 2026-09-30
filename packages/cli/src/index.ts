@@ -8,13 +8,17 @@
  *   substrate verify <graph_id>              recompute the hash chain for a graph
  *   substrate drift [--repo R] [--path P]    compare git, the ledger and the claims
  *   substrate handoff --to S --goal G ...    record a signed handoff packet
+ *   substrate evidence --graph G             the evidence bundle, as JSON or HTML
  *
  * Exit status is always 0 for `brief`, `emit` and `handoff`. These run inside
  * git hooks and editor hooks, where a non-zero exit can abort the user's commit
- * or turn; the substrate is never allowed to do that. `verify` and `drift` do
- * report failure, because nothing depends on them succeeding — `drift` exits 1
- * when it found drift, so a hook or a cron can act on it.
+ * or turn; the substrate is never allowed to do that. `verify`, `drift` and
+ * `evidence` do report failure, because nothing depends on them succeeding and a
+ * silent empty answer would be worse than an error — `drift` exits 1 when it found
+ * drift, so a hook or a cron can act on it, and an evidence document nobody can
+ * tell from a missing one is not evidence.
  */
+import { chainStateOf, renderEvidenceHtml, type EvidenceBundle } from "@substrate/evidence";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -270,6 +274,123 @@ async function cmdHandoff(args: Record<string, string | true>): Promise<void> {
 	for (const gap of body.gaps ?? []) process.stderr.write(`[substrate] ${gap}\n`);
 }
 
+/**
+ * `substrate evidence --graph ut-… [--format json|html] [--out PATH]`
+ *
+ * The bundle is composed by `substrate-mcp`, not here: it is the process holding the
+ * metric snapshot and the audit chain, and a second composer would be a second
+ * answer to the same question. This command asks for it and puts it somewhere.
+ *
+ * A stub, deliberately — the bundle says so in its own `pending` list.
+ */
+async function cmdEvidence(args: Record<string, string | true>): Promise<number> {
+	const graphId = str(args.graph);
+	if (!graphId) {
+		process.stderr.write("usage: substrate evidence --graph <graph_id> [--format json|html] [--out PATH]\n");
+		return 2;
+	}
+	const format = str(args.format) ?? (str(args.out)?.endsWith(".html") ? "html" : "json");
+	if (format !== "json" && format !== "html") {
+		process.stderr.write(`[substrate] unknown --format ${format}; expected json or html\n`);
+		return 2;
+	}
+
+	// The bundle is always fetched as JSON, whatever is being written out, and the HTML
+	// is rendered from that same bundle here. Asking the server for HTML gave a document
+	// this command could not read, so `--format html` skipped the chain and SLO checks
+	// entirely and exited 0 over a broken chain. Asking twice would be worse: the two
+	// bundles are taken at different instants, so the verdict could describe numbers the
+	// document does not contain.
+	const response = await post("/evidence", { graph_id: graphId, format: "json" });
+	if (!response) {
+		process.stderr.write(`[substrate] unreachable at ${base()}; evidence needs a running substrate-mcp\n`);
+		return 1;
+	}
+	const body = await response.text();
+	if (!response.ok) {
+		process.stderr.write(`[substrate] evidence failed (${response.status}): ${body.slice(0, 300)}\n`);
+		return 1;
+	}
+
+	let bundle: EvidenceBundle;
+	try {
+		bundle = JSON.parse(body) as EvidenceBundle;
+	} catch {
+		process.stderr.write("[substrate] evidence was not valid JSON\n");
+		return 1;
+	}
+
+	// Rendering is not composing: the bundle is the answer, and this only presents it.
+	// `substrate-mcp` remains the only thing that decides what is in it.
+	const document = format === "html" ? renderEvidenceHtml(bundle) : JSON.stringify(bundle, null, 2);
+
+	const out = str(args.out);
+	if (out) {
+		try {
+			mkdirSync(dirname(out), { recursive: true });
+			writeFileSync(out, document.endsWith("\n") ? document : `${document}\n`);
+			process.stderr.write(`[substrate] wrote ${out}\n`);
+		} catch (cause) {
+			process.stderr.write(`[substrate] could not write ${out}: ${String(cause)}\n`);
+			return 1;
+		}
+	} else {
+		process.stdout.write(`${document}\n`);
+	}
+
+	// Non-zero when the evidence itself says something is wrong, so this composes in a
+	// script: a bundle whose chain is broken or whose objective is breached should not
+	// read as a clean run just because the request succeeded. Checked for both formats —
+	// the document that reports a broken chain must not exit 0 because it is HTML.
+	//
+	// **A chain that could not be verified counts.** The contract for this command is
+	// non-zero on an unreachable substrate, a chain that does not verify, or a breached
+	// objective — and "does not verify" covers a chain the ledger would not answer for,
+	// not only one that came back broken. It used to check `ok === false` alone, so a
+	// Greptime outage produced a bundle whose app chain was `unknown` and an exit status
+	// of 0 as long as no objective happened to be breached: a caller that trusted the
+	// status shipped an unverified document as a verified one. `not-configured` is the
+	// one state that is not a failure — a deployment with no ledger has no app chain to
+	// verify, and saying so is the honest answer rather than an error.
+	const chains = [
+		{ name: "Greptime app events", chain: bundle.chains?.app_events },
+		{ name: "MCP audit", chain: bundle.chains?.mcp_audit },
+	];
+	for (const { name, chain } of chains) {
+		if (!chain) continue;
+		const state = chainStateOf(chain);
+		if (state === "broken") {
+			process.stderr.write(`[substrate] the ${name} chain for ${graphId} does not verify: ${chain.reason ?? "broken"}\n`);
+			return 1;
+		}
+		if (state === "unverifiable") {
+			process.stderr.write(
+				`[substrate] the ${name} chain for ${graphId} could not be verified: ${chain.reason ?? "no reason given"}\n` +
+					"[substrate] the bundle was written, but it does not attest to that chain\n",
+			);
+			return 1;
+		}
+	}
+	// A bundle labelled for one graph whose audit decisions may be another's is not
+	// evidence about that graph, however complete it looks. Two identifiers that clean to
+	// the same stored string are indistinguishable once stored, so nothing downstream can
+	// separate them — which makes this the same kind of answer as a chain that could not be
+	// verified, and it gets the same exit status.
+	if (bundle.audit?.attribution === "ambiguous") {
+		process.stderr.write(
+			`[substrate] the audit decisions for ${graphId} cannot be attributed to it alone: its identifier is stored in a ` +
+				"cleaned form, and another graph cleaning to the same string would share this selection\n" +
+				"[substrate] the bundle was written, but its audit tally is not this graph's alone\n",
+		);
+		return 1;
+	}
+	if ((bundle.slo_summary?.breached ?? 0) > 0) {
+		process.stderr.write(`[substrate] ${bundle.slo_summary.breached} SLO(s) breached for ${graphId}\n`);
+		return 1;
+	}
+	return 0;
+}
+
 const [command, ...rest] = process.argv.slice(2);
 const args = parseArgs(rest);
 
@@ -289,6 +410,8 @@ switch (command) {
 	case "handoff":
 		await cmdHandoff(args);
 		process.exit(0);
+	case "evidence":
+		process.exit(await cmdEvidence(args));
 	default:
 		process.stdout.write(
 			"substrate brief [--repo R] [--branch B] [--graph G] [--surface S] [--write]\n" +
@@ -297,7 +420,8 @@ switch (command) {
 				"substrate verify <graph_id>\n" +
 				"substrate drift [--repo R] [--path P] [--idle SECONDS] [--json]\n" +
 				"substrate handoff --to S --goal G [--files a,b] [--dod 'x;y'] [--blockers 'z']\n" +
-				"                  [--graph G] [--node N] [--lease L] [--release] [--session I]\n",
+				"                  [--graph G] [--node N] [--lease L] [--release] [--session I]\n" +
+				"substrate evidence --graph <graph_id> [--format json|html] [--out PATH]\n",
 		);
 		process.exit(command ? 2 : 0);
 }
