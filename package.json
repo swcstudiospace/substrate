@@ -16,7 +16,8 @@
     "test": "bun test",
     "check": "bunx tsc --noEmit",
     "mcp": "bun packages/mcp-server/src/index.ts",
-    "substrate": "bun packages/cli/src/index.ts"
+    "substrate": "bun packages/cli/src/index.ts",
+    "smoke:greptime": "bun scripts/greptime-smoke.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",
