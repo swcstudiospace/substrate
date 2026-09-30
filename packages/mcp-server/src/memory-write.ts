@@ -375,7 +375,7 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 	// may already exist is never overwritten before it has been resolved. See `rowId`.
 	const entryId = newId("mem");
 	const claim = await store.claimWrite({ key, explicit: explicitKey !== null, entryHash, entryId });
-	if (!claim.claimed) return await replay(store, key, claim.existing, grant.name);
+	if (!claim.claimed) return await replay(store, key, claim.existing, grant.name, entryHash);
 	const { holder } = claim;
 
 	// Taking over an abandoned claim is not the same as finding nothing done. Look for
@@ -617,6 +617,7 @@ async function replay(
 	key: string,
 	existing: WriteRecord,
 	grant: string,
+	entryHash: string,
 ): Promise<Decision> {
 	if (existing.outcome === "in-flight") {
 		return refuse(
@@ -626,15 +627,38 @@ async function replay(
 			{ idempotency_key: key, grant },
 		);
 	}
+	// Unguarded on purpose. A read that fails must not read as "the row is absent" —
+	// that is the mistake the orphan lookup already made once. A throw here surfaces as
+	// `denied / store.write-failed`, which is the honest answer.
 	const entry = existing.entry_id ? await store.readEntry(existing.entry_id) : null;
-	const verified = entry !== null && entry.entry_hash === existing.entry_hash;
+
+	// A row under this key whose content is not this request's is a *different* write.
+	// Reporting that as `accepted` and handing the caller somebody else's entry would say
+	// their write landed when it never happened — and no remedy can make that honest, so
+	// it is a conflict.
+	if (entry && entry.entry_hash !== entryHash) {
+		return refuse(
+			"conflict",
+			"idempotency.reused",
+			`This idempotency_key was already spent on a different write (${entry.id}). A key is the promise that ` +
+				"one write happens once, so it cannot also stand for this one. Send this entry under its own " +
+				"idempotency_key — and never re-use a key across writes whose content differs.",
+			{ idempotency_key: key, conflict_with: entry.id, grant },
+		);
+	}
+
+	// Past the check above, any row there is this request's own content.
+	const verified = entry !== null;
 	return {
 		outcome: "accepted",
 		reason: "idempotent.replay",
 		remedy: verified
 			? "This key was already spent; the entry it wrote is returned unchanged. Nothing was written again."
-			: "This key was already spent, but the entry it recorded is not in the index. Investigate before " +
-				"relying on it, and use a fresh idempotency_key to write again.",
+			: // Nothing is in the index under this key, so a fresh key writes one entry rather
+				// than a second. That is only true because the read above proved the absence.
+				"This key was already spent, but the entry it recorded is no longer in the index. Nothing is stored " +
+				"under this key, so investigate how it was removed before relying on either outcome; a fresh " +
+				"idempotency_key will write this entry once.",
 		verified_persisted: verified,
 		idempotency_key: key,
 		deduplicated: true,

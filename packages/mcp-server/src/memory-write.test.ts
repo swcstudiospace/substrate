@@ -661,9 +661,26 @@ describe("claim ownership", () => {
 });
 
 describe("exactly-once", () => {
+	test("a key already spent on different content is a conflict, not a success", async () => {
+		// The dishonest version reported `accepted` and handed back the *other* write's
+		// entry. A caller that asked to store B and is told "accepted" will believe B is in
+		// force; nothing in the system would contradict it. No remedy makes that honest.
+		const first = await write({ idempotency_key: "k1", text: "hermes finished n2" });
+		const second = await write({ idempotency_key: "k1", text: "omp finished n4" });
+
+		expect(second.outcome).toBe("conflict");
+		expect(second.reason).toBe("idempotency.reused");
+		expect(second.conflict_with).toBe(first.entry?.id ?? "");
+		expect(second.entry).toBeUndefined();
+		expect(second.verified_persisted).toBe(false);
+		expect(store.entries()).toHaveLength(1);
+	});
+
 	test("the same explicit key never writes twice", async () => {
+		// A true retry: same key, same content. The reply is the first write's entry, and
+		// the second call is a read rather than a write.
 		const first = await write({ idempotency_key: "k1" });
-		const second = await write({ idempotency_key: "k1", text: "a different body entirely" });
+		const second = await write({ idempotency_key: "k1" });
 
 		expect(first.deduplicated).toBeUndefined();
 		expect(second.outcome).toBe("accepted");
@@ -811,7 +828,7 @@ describe("verified_persisted", () => {
 
 		expect(retry.deduplicated).toBe(true);
 		expect(retry.verified_persisted).toBe(false);
-		expect(retry.remedy).toContain("not in the index");
+		expect(retry.remedy).toContain("no longer in the index");
 	});
 
 	test("a write superseding another does not retire it until the replacement is really there", async () => {

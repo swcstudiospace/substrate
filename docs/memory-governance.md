@@ -35,7 +35,7 @@ The order is the design, not an implementation detail.
 | 1 | Shape | `memory-policy.ts` | `denied` — `scope.malformed`, `kind.unknown`, `ttl.unknown`, `text.empty` |
 | 2 | RBAC, default-deny | `memory-policy.ts` | `denied` — `rbac.no-grant` |
 | 3 | Quarantine | `memory-classify.ts` | `quarantined` — `quarantine.secret` / `.pii` / `.speculative` |
-| 4 | Exactly-once | `memory-write.ts` | `conflict` — `write.in-flight`, `write.superseded`, or a replay |
+| 4 | Exactly-once | `memory-write.ts` | `conflict` — `write.in-flight`, `write.superseded`, `idempotency.reused`, or a replay |
 | 5 | Conflict, insert, read-back | `memory-write.ts` | `conflict` — `review.required`, `version.required`, `version.stale`, `version.raced` |
 
 **Why RBAC before the content check.** Storing text from a writer that has no
@@ -224,6 +224,15 @@ the decision was ever taken.
 - **Only an `accepted` record replays.** A refused write left nothing behind, so
   re-asking is allowed a fresh answer — which is also what makes
   approval-by-resubmit work when the caller sends its own key.
+- **A key re-used for different content is `conflict / idempotency.reused`**, not a
+  replay. A key is the caller's promise that one write happens once; it cannot also
+  stand for a second, different one. Returning the original entry there would tell a
+  caller that asked to store B that B is in force, and nothing in the system would
+  contradict it. Only an explicit key can reach this — a derived key *is* the content,
+  so different content is a different key.
+- **No remedy ever advises a fresh key where a row may already exist under the old
+  one.** A remedy is what an agent acts on, so advice that can produce a duplicate is a
+  defect in the gate and not merely in the prose.
 - An in-flight claim answers `conflict / write.in-flight`; one abandoned for more
   than 60 seconds is taken over.
 - A write that throws **releases** its key — but only while no row can exist, which
