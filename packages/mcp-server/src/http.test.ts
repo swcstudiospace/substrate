@@ -517,10 +517,10 @@ describe("GET /healthz reports a lost audit trail", () => {
 
 		const second = await start({ SUBSTRATE_AUDIT_PATH: path });
 		const body = (await (await fetch(`${second.base}/healthz`)).json()) as {
-			auditMissingHistory?: { checkpointSeq: number; foundSeq: number };
+			auditMissingHistory?: { kind: string; checkpointSeq: number; foundSeq: number };
 		};
 
-		expect(body.auditMissingHistory).toEqual({ checkpointSeq: 1, foundSeq: 0 });
+		expect(body.auditMissingHistory).toEqual({ kind: "missing", checkpointSeq: 1, foundSeq: 0 });
 	});
 
 	test("and says nothing about it on a healthy chain", async () => {
@@ -529,5 +529,60 @@ describe("GET /healthz reports a lost audit trail", () => {
 
 		expect(body.auditMissingHistory).toBeUndefined();
 		expect(body.auditDurable).toBe(true);
+	});
+});
+
+describe("an unexpected fault in the audit path respects the tool's mode", () => {
+	/**
+	 * A body that parses inside the size limit and overflows the argument encoder.
+	 *
+	 * `canonicalJson` is recursive, so deep enough nesting throws a RangeError rather than
+	 * producing a digest — reachable by a caller, within `MAX_BODY_BYTES`.
+	 */
+	function deeplyNested(): string {
+		let body = '{"ignored":';
+		const depth = 20_000;
+		body += "[".repeat(depth) + "1" + "]".repeat(depth);
+		return `${body}}`;
+	}
+
+	test("a fail-open route is still served, because the audit must not fail a turn", async () => {
+		// Denying unconditionally made a fault in the audit path able to refuse `/brief`,
+		// which is fail-open precisely so the substrate cannot fail an agent's turn.
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory() });
+		const response = await fetch(`${harness.base}/brief`, { method: "POST", body: deeplyNested() });
+
+		expect(response.status).toBe(200);
+		expect(await response.text()).not.toContain("audit chain");
+		// And the fault really happened rather than the audit quietly succeeding: nothing
+		// was appended, because the encoder threw before a record existed. Without this the
+		// test would keep passing if the body stopped overflowing the encoder.
+		expect(harness.observability.audit.recent()).toEqual([]);
+	});
+
+	test("a fail-closed route is refused, because there the unrecorded write is worse", async () => {
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory() });
+		const response = await fetch(`${harness.base}/memory`, { method: "POST", body: deeplyNested() });
+
+		expect(response.status).toBe(503);
+		expect(((await response.json()) as { error: string }).error).toContain("memory_write");
+	});
+});
+
+describe("POST /evidence tallies every record for the graph", () => {
+	test("the counts cover records the listing does not", async () => {
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory() });
+		for (let i = 0; i < 3; i++) {
+			await fetch(`${harness.base}/events`, {
+				method: "POST",
+				body: JSON.stringify({ surface: "omp", kind: "shell", summary: `run ${i}`, graph_id: "ut-9" }),
+			});
+		}
+
+		const response = await fetch(`${harness.base}/evidence`, { method: "POST", body: JSON.stringify({ graph_id: "ut-9" }) });
+		const bundle = (await response.json()) as { audit: { total: number; records: unknown[] } };
+		// Three `/events` plus this request's own `evidence` record, all naming ut-9.
+		expect(bundle.audit.total).toBe(4);
+		expect(bundle.audit.records).toHaveLength(4);
 	});
 });

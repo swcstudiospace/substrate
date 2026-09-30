@@ -24,6 +24,7 @@
  */
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { auditMode } from "@substrate/audit";
 import { isOperator, surfaceForToken, type SubstrateConfig } from "./config.ts";
 import { formatDrift } from "./drift.ts";
 import { InvalidEventError } from "./event.ts";
@@ -166,11 +167,21 @@ async function auditRest(
 	const outcome = await auditToolCalls(observability, surface, [{ id: null, tool, args: body }], "rest").catch(
 		(cause: unknown) => {
 			// `auditToolCalls` turns an `AuditUnavailableError` into a denial itself, so
-			// reaching here means something else threw. A route that cannot be audited is
-			// refused rather than served unaudited: the tool's mode is what decides, and an
-			// unexpected fault is not a reason to pick the permissive answer.
+			// reaching here means something else threw — a body that overflows the argument
+			// encoder, say, which a caller can produce with deep enough nesting inside the
+			// body-size limit.
+			//
+			// **The tool's mode still decides.** Denying unconditionally made a fault in the
+			// audit path able to refuse `/brief`, which is fail-open precisely so that the
+			// substrate cannot fail an agent's turn — the audit becoming a new way to lose a
+			// brief is the thing the mode exists to prevent. A fail-closed route is refused,
+			// because there the unrecorded write is the worse outcome; a fail-open route is
+			// served, with the fault on stderr where an operator sees it.
 			process.stderr.write(`[substrate] audit of ${tool} failed unexpectedly: ${String(cause)}\n`);
-			return { denials: new Map<string, string>([["null", `the MCP audit chain could not take the record for ${tool}`]]) };
+			observability.instruments.recordAudit({ decision: "allowed", written: false });
+			return auditMode(tool) === "fail-closed"
+				? { denials: new Map<string, string>([["null", `the MCP audit chain could not take the record for ${tool}`]]) }
+				: { denials: new Map<string, string>() };
 		},
 	);
 	return outcome.denials.get("null") ?? null;
