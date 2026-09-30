@@ -548,6 +548,8 @@ export async function buildGraphEvidence(
 	substrate: Substrate,
 	graphId: string,
 	notes: string[] = [],
+	/** How many of the graph's records to list. Lowered by tests that exercise the bound. */
+	maxRecords: number = MAX_EVIDENCE_RECORDS,
 ): Promise<EvidenceBundle> {
 	const appChain = await substrate
 		.verifyGraph(graphId)
@@ -578,7 +580,7 @@ export async function buildGraphEvidence(
 		stats,
 		matched,
 		selector,
-	} = await observability.audit.verifiedView(graphId, MAX_EVIDENCE_RECORDS);
+	} = await observability.audit.verifiedView(graphId, maxRecords);
 
 	const lost = observability.audit.missingHistory;
 
@@ -605,13 +607,17 @@ export async function buildGraphEvidence(
 			attribution: selector === graphId ? "exact" : "ambiguous",
 		},
 		metrics: observability.snapshot(),
+		// Every note names the graph by `selector`, never by the raw `graphId`. A note is
+		// bundle content — it lands in the JSON, in the HTML rendered from it, and in whatever
+		// archive those end up in — so interpolating the requested identifier there put the
+		// credential back into the document that `graph_id` had just been cleaned to keep out.
 		notes: [
 			...(matched === 0 && total > 0
-				? [`No MCP audit record names ${graphId}; ${total} record(s) in the chain belong to other graphs or to none.`]
+				? [`No MCP audit record names ${selector}; ${total} record(s) in the chain belong to other graphs or to none.`]
 				: []),
 			...(matched > forGraph.length
 				? [
-						`${matched} audit records name ${graphId} and the ${forGraph.length} most recent are listed; the tally above ` +
+						`${matched} audit records name ${selector} and the ${forGraph.length} most recent are listed; the tally above ` +
 							`counts all ${matched}, and the chain verdict covers all ${total} record(s) in the file.`,
 					]
 				: []),

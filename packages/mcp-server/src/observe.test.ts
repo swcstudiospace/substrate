@@ -15,6 +15,7 @@ import {
 	createObservability,
 	normalizeRoute,
 	recordClaimWithdrawal,
+	renderEvidenceHtml,
 	toolCallsIn,
 	toolLabel,
 } from "./observe.ts";
@@ -817,5 +818,52 @@ describe("the boot warning tells a deleted file from a replaced one", () => {
 		const warnings = await createObservability(loadConfig({ SUBSTRATE_AUDIT_PATH: path })).start();
 		expect(warnings.join(" ")).toContain("has been rewritten");
 		expect(warnings.join(" ")).not.toContain("missing history");
+	});
+});
+
+describe("no note echoes the identifier the bundle was requested with", () => {
+	// A note is bundle content: it lands in the JSON, in the HTML rendered from it, and in
+	// whatever archive those end up in. Cleaning `graph_id` and then interpolating the raw
+	// identifier into a note puts the credential straight back into the document.
+	const graphId = `ut-sk-ant-${"a".repeat(30)}`;
+
+	async function bundleFor(records: Array<Record<string, unknown>>, limit?: number) {
+		const path = join(mkdtempSync(join(tmpdir(), "substrate-notes-")), "mcp-audit.jsonl");
+		const observed = createObservability(loadConfig({ SUBSTRATE_AUDIT_PATH: path }));
+		await observed.start();
+		for (const [index, args] of records.entries()) {
+			await auditToolCalls(observed, "omp", [{ id: index, tool: "graph_get", args }]);
+		}
+		const bundle = await buildGraphEvidence(
+			observed,
+			new Substrate(loadConfig({}), { index: null, greptime: null }),
+			graphId,
+			[],
+			limit,
+		);
+		observed.stop();
+		return bundle;
+	}
+
+	test("nor the note for a graph with no records of its own", async () => {
+		// `matched === 0 && total > 0`.
+		const bundle = await bundleFor([{ graph_id: "ut-other" }]);
+		expect(bundle.audit.total).toBe(0);
+		expect(bundle.notes.join(" ")).toContain("No MCP audit record names ut-[REDACTED]");
+		expect(JSON.stringify(bundle)).not.toContain("sk-ant-");
+	});
+
+	test("nor the note for a graph past the listing bound", async () => {
+		// `matched > forGraph.length`.
+		const bundle = await bundleFor([{ graph_id: graphId }, { graph_id: graphId }, { graph_id: graphId }], 2);
+		expect(bundle.audit.records).toHaveLength(2);
+		expect(bundle.audit.total).toBe(3);
+		expect(bundle.notes.join(" ")).toContain("3 audit records name ut-[REDACTED]");
+		expect(JSON.stringify(bundle)).not.toContain("sk-ant-");
+	});
+
+	test("and the rendered HTML carries none of it either", async () => {
+		const bundle = await bundleFor([{ graph_id: graphId }, { graph_id: graphId }, { graph_id: graphId }], 2);
+		expect(renderEvidenceHtml(bundle)).not.toContain("sk-ant-");
 	});
 });
