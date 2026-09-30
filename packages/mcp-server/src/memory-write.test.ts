@@ -248,19 +248,19 @@ class FakeStore implements MemoryStore {
 		return row.id;
 	}
 
-	async enqueueReview(row: NewMemoryEntry & { reason: string }): Promise<string> {
+	async enqueueReview(row: NewMemoryEntry & { reason: string }): Promise<string | null> {
 		const existing = this.reviews.find((held) => held.entry_hash === row.entry_hash && held.state === "pending");
 		if (existing) return existing.id;
+		// Declined where the content is already in force, in the insert itself — the real
+		// store makes it a `where not exists` for a reason, and a fake that checked
+		// afterwards would let a gate with the window back in pass here.
+		if (await this.standingByHash(row.entry_hash)) return null;
 		this.reviews.push({ ...row, state: "pending", entry_id: null });
 		return row.id;
 	}
 
-	async approvedReview(entryHash: string): Promise<{ id: string; entry_id: string } | null> {
-		// Latest first, like the real store's `order by decided desc`.
-		const approved = [...this.reviews]
-			.reverse()
-			.find((held) => held.entry_hash === entryHash && held.state === "approved" && held.entry_id !== null);
-		return approved ? { id: approved.id, entry_id: approved.entry_id! } : null;
+	async standingByHash(entryHash: string): Promise<MemoryEntry | null> {
+		return this.standing().find((entry) => entry.entry_hash === entryHash) ?? null;
 	}
 
 	async releaseReviews(entryHash: string, entryId: string): Promise<number> {
@@ -437,6 +437,62 @@ describe("conflict — require-review for global", () => {
 		expect(again.entry?.id).toBe(approved.entry?.id);
 		// Nothing written a second time, and nothing put back in front of a reviewer.
 		expect(store.entries()).toHaveLength(1);
+		expect(store.reviews.filter((review) => review.state === "pending")).toEqual([]);
+	});
+
+	test("a global write installed straight from a token is not re-proposed", async () => {
+		// No proposal was ever parked for this one. Asking the review table "was this
+		// approved" would miss it and put a decision already in force back in a
+		// reviewer's queue, so the question is asked of the index instead.
+		const request = { scope: "global", kind: "decision" as const, subject: "ledger", text: "the ledger is append-only" };
+		const direct = await write({ ...request, review_token: REVIEW_TOKEN });
+		expect(direct.outcome).toBe("accepted");
+		expect(store.reviews).toEqual([]);
+
+		const again = await write(request);
+
+		expect(again.reason).toBe("review.already-approved");
+		expect(again.entry?.id).toBe(direct.entry?.id);
+		expect(store.reviews).toEqual([]);
+	});
+
+	test("the short-circuit does not spend the content's derived key", async () => {
+		// Recording "already in force" as an `accepted` claim would pin the derived key
+		// to a row this write never made. Once that row is superseded, the next keyless
+		// submission of the same content would replay the superseded row as verified
+		// instead of reaching a reviewer — and could not be re-proposed until the
+		// dedup window expired.
+		const request = { scope: "global", kind: "decision" as const, subject: "runtime", text: "the runtime is herdr" };
+		await write(request);
+		await write({ ...request, review_token: REVIEW_TOKEN });
+		expect((await write(request)).reason).toBe("review.already-approved");
+
+		// Another decision takes its place, so the old text is no longer what any agent
+		// reads. Still inside the derived-key window.
+		await write({ ...request, text: "the runtime is Orca", expected_version: 1, review_token: REVIEW_TOKEN });
+
+		const third = await write(request);
+
+		expect(third.outcome).toBe("conflict");
+		expect(third.reason).toBe("review.required");
+		expect(store.reviews.filter((review) => review.state === "pending")).toHaveLength(1);
+	});
+
+	test("a re-submission asking for different retention is not answered with the old approval", async () => {
+		// `entry_hash` covers the words, not the retention or the confidence they are
+		// held with. Answering `accepted` with the standing row would report a ttl the
+		// caller never got — the same lie the request hash prevents one stage earlier.
+		const request = { scope: "global", kind: "fact" as const, text: "eight agents share one host" };
+		await write(request);
+		const approved = await write({ ...request, review_token: REVIEW_TOKEN });
+
+		const different = await write({ ...request, ttl: "30d" });
+
+		expect(different.outcome).toBe("conflict");
+		expect(different.reason).toBe("review.in-force");
+		expect(different.conflict_with).toBe(approved.entry?.id);
+		expect(different.remedy).toContain("ttl=30d");
+		// And it is not parked: a decision in force is not re-proposed, whatever the ask.
 		expect(store.reviews.filter((review) => review.state === "pending")).toEqual([]);
 	});
 

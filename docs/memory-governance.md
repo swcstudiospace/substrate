@@ -36,7 +36,7 @@ The order is the design, not an implementation detail.
 | 2 | RBAC, default-deny | `memory-policy.ts` | `denied` — `rbac.no-grant` |
 | 3 | Quarantine | `memory-classify.ts` | `quarantined` — `quarantine.secret` / `.pii` / `.speculative` |
 | 4 | Exactly-once | `memory-write.ts` | `conflict` — `write.in-flight`, `write.superseded`, `idempotency.reused`, or a replay |
-| 5 | Conflict, insert, read-back | `memory-write.ts` | `conflict` — `review.required`, `version.required`, `version.stale`, `version.raced`, `standing.raced` |
+| 5 | Conflict, insert, read-back | `memory-write.ts` | `conflict` — `review.required`, `review.in-force`, `review.raced`, `version.required`, `version.stale`, `version.raced`, `standing.raced` |
 
 **Why RBAC before the content check.** Storing text from a writer that has no
 business at this scope is still storing it — even in the quarantine table. A
@@ -145,14 +145,27 @@ the same todo. Without a `subject` there is no identity, so the entry is appende
 - **`global` → require-review.** The blast radius of a global memory is every agent
   in every repo. The write is parked in `memory_reviews` and answered `conflict /
   review.required` with the parked id. Re-submitting the same content with a
-  `review_token` installs it and marks the proposal approved. Sending that content
-  again *without* a token, once it is installed and still standing, is answered
-  `accepted / review.already-approved` with the entry itself: a decision in force
-  does not go back into a reviewer's queue. (It used to be parked a second time,
-  and approving that second proposal collided with the first approved row **after**
-  the entry had committed — so the caller was told nothing was stored while the
-  entry was in the index. Uniqueness on `memory_reviews` now covers the pending
-  rows only, which is all parking needs.)
+  `review_token` installs it and marks the proposal approved.
+
+  **A decision in force is not re-proposed.** Parking is refused where this exact
+  content is already the entry in force, and the refusal is a `where not exists` on
+  the insert rather than a check before it — a reviewer who installs the entry in
+  between would otherwise leave the proposal parked behind them. The question is
+  asked of `memory_entries`, not of the review queue: a global write installed
+  straight from a token was never parked, and an approved proposal whose entry has
+  since been superseded names something no agent reads. So a tokenless re-submission
+  is answered `accepted / review.already-approved` with the standing entry when it
+  asks for nothing different, and `conflict / review.in-force` when it asks for a
+  different `ttl`, `trust` or `actor` — `entry_hash` covers the words, not the
+  retention they are held with, and replying `accepted` there would report state that
+  was never recorded. Neither reply records the key as spent: nothing was written
+  under it, and pinning it would replay the row once it is superseded.
+
+  (Before this, the content was parked a second time, and approving that second
+  proposal collided with the first approved row **after** the entry had committed —
+  so the caller was told nothing was stored while the entry was in the index.
+  Uniqueness on `memory_reviews` now covers the pending rows only, which is all
+  parking needs.)
 - **`decision` → versioned.** Optimistic concurrency. A caller replacing a standing
   decision must send `expected_version`; a missing one is `version.required` and a
   wrong one is `version.stale`, both quoting the current version and id. On success

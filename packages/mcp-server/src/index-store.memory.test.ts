@@ -103,21 +103,39 @@ describeLive("memory governance against a live index", () => {
 		};
 	}
 
-	test("two first writes for one subject: one entry, and the other is told so", async () => {
+	test("a database carrying the old reviews index is migrated onto the new one", async () => {
+		// Declared first on purpose: the old index is unique over `(entry_hash, state)`,
+		// so it cannot be created once the repeat-approval test below has written two
+		// approved rows for one hash — which is the same fact this fix is about.
+		await raw`
+			create unique index if not exists memory_reviews_hash_idx on memory_reviews (entry_hash, state)`;
+
+		await a.migrate();
+
+		const indexes = ((await raw`
+			select indexname from pg_indexes where tablename = 'memory_reviews'`) as Array<{ indexname: string }>).map(
+			(row) => row.indexname,
+		);
+		expect(indexes).toContain("memory_reviews_pending_idx");
+		// The point of the migration, and the half a fresh database never exercises: the
+		// index that rejected the second approval is gone, not merely joined.
+		expect(indexes).not.toContain("memory_reviews_hash_idx");
+	});
+
+	test("a first write blocks on an uncommitted first write, then is told so", async () => {
 		// The shape the gate produces when two writers both read no standing entry:
 		// same conflict key, `supersedes: null` on both, different keys. Neither
 		// `standing-moved` check fires, so `memory_standing_idx` is the only thing
 		// between them — and it used to reject the loser with a duplicate-key error the
 		// gate could not tell from a connection lost over a committed row.
-		const keyA = `${MARKER}-race-a`;
+		//
+		// The winner is held *uncommitted* on a connection of its own rather than raced
+		// with `Promise.all`. Two inserts started together can still be serialised by
+		// the driver or the scheduler, and a test that passes because they happened to
+		// run one after the other proves nothing about the state the loser actually has
+		// to handle: a row in the index that no other transaction can yet see.
+		const identity = firstWriteRow({ id: "probe", idempotency_key: "probe" }).conflict_key!;
 		const keyB = `${MARKER}-race-b`;
-		const claimA = await a.claimWrite({
-			key: keyA,
-			explicit: true,
-			entryHash: "hash-mem_a",
-			requestHash: "req-a",
-			entryId: `mem_${MARKER}_a`,
-		});
 		const claimB = await b.claimWrite({
 			key: keyB,
 			explicit: true,
@@ -125,38 +143,60 @@ describeLive("memory governance against a live index", () => {
 			requestHash: "req-b",
 			entryId: `mem_${MARKER}_b`,
 		});
-		expect(claimA.claimed && claimB.claimed).toBe(true);
-		if (!claimA.claimed || !claimB.claimed) return;
+		expect(claimB.claimed).toBe(true);
+		if (!claimB.claimed) return;
 
-		// Both in flight at once: the loser blocks on the winner's uncommitted index
-		// entry and only then finds out, which is the whole point of doing this through
-		// two connections.
-		const [first, second] = await Promise.all([
-			a.insertEntry(firstWriteRow({ id: `mem_${MARKER}_a`, idempotency_key: keyA, text: `${MARKER} herdr` }), {
-				key: keyA,
-				holder: claimA.holder,
-			}),
-			b.insertEntry(firstWriteRow({ id: `mem_${MARKER}_b`, idempotency_key: keyB, text: `${MARKER} Orca` }), {
-				key: keyB,
-				holder: claimB.holder,
-			}),
-		]);
+		const blocker = new SQL(PG_URL!);
+		let winnerInserted: () => void = () => undefined;
+		let commitWinner: () => void = () => undefined;
+		const inserted = new Promise<void>((resolve) => {
+			winnerInserted = resolve;
+		});
+		const mayCommit = new Promise<void>((resolve) => {
+			commitWinner = resolve;
+		});
+		const held = blocker.begin(async (tx: SQL) => {
+			await tx`
+				insert into memory_entries (id, scope, kind, body, subject, writer, conflict_key, entry_hash, version)
+				values (${`mem_${MARKER}_a`}, ${SCOPE}, 'decision', ${`${MARKER} herdr`}, ${`runtime-${RUN}`},
+				        'hermes', ${identity}, 'hash-mem_a', 1)`;
+			winnerInserted();
+			await mayCommit;
+		});
 
-		const outcomes = [first, second];
-		expect(outcomes.filter((outcome) => outcome.ok)).toHaveLength(1);
-		// Refused, not thrown, and named as the collision it is rather than as a lost
-		// predecessor — those are two different things for the caller.
-		expect(outcomes.filter((outcome) => !outcome.ok && outcome.reason === "standing-exists")).toHaveLength(1);
+		try {
+			await inserted;
+			const loser = b.insertEntry(
+				firstWriteRow({ id: `mem_${MARKER}_b`, idempotency_key: keyB, text: `${MARKER} Orca` }),
+				{ key: keyB, holder: claimB.holder },
+			);
+			// It must *block*, not decide: until the winner commits or rolls back, the
+			// index cannot say whether the identity is taken, and either answer would be
+			// a guess. This is the half `on conflict … do nothing` is relied on for.
+			const raced = await Promise.race([
+				loser.then(() => "decided" as const),
+				Bun.sleep(300).then(() => "blocked" as const),
+			]);
+			expect(raced).toBe("blocked");
+
+			commitWinner();
+			await held;
+			// And now it decides, against a row that committed while it was waiting:
+			// refused, not thrown, and named as the collision it is rather than as a lost
+			// predecessor — those are two different things for the caller.
+			expect(await loser).toEqual({ ok: false, reason: "standing-exists" });
+		} finally {
+			commitWinner();
+			await held.catch(() => undefined);
+			await blocker.end().catch(() => undefined);
+		}
 
 		// One entry in force for the identity, and the loser wrote no row at all — the
 		// transaction it declined in was rolled back rather than half-committed.
-		const identity = firstWriteRow({ id: "probe", idempotency_key: "probe" }).conflict_key!;
 		const written = (await raw`
 			select id from memory_entries where conflict_key = ${identity}`) as Array<{ id: string }>;
-		const winnerId = first.ok ? first.entry.id : second.ok ? second.entry.id : "";
-		expect(written.map((row) => row.id)).toEqual([winnerId]);
-		const loserId = first.ok ? `mem_${MARKER}_b` : `mem_${MARKER}_a`;
-		expect(await a.readEntry(loserId)).toBeNull();
+		expect(written.map((row) => row.id)).toEqual([`mem_${MARKER}_a`]);
+		expect(await a.readEntry(`mem_${MARKER}_b`)).toBeNull();
 	});
 
 	test("the loser's key is spent on a conflict, so its retry is not blocked", async () => {
@@ -188,7 +228,7 @@ describeLive("memory governance against a live index", () => {
 			readEntry: (id) => b.readEntry(id),
 			quarantineEntry: (row) => b.quarantineEntry(row),
 			enqueueReview: (row) => b.enqueueReview(row),
-			approvedReview: (hash) => b.approvedReview(hash),
+			standingByHash: (hash) => b.standingByHash(hash),
 			releaseReviews: (hash, entryId, by) => b.releaseReviews(hash, entryId, by),
 		};
 
@@ -271,6 +311,36 @@ describeLive("memory governance against a live index", () => {
 		expect(rows[0]!.n).toBe(1);
 	});
 
+	test("parking is declined for content that is already in force", async () => {
+		// The window this closes is between a check and an insert: a reviewer who
+		// installs the entry there leaves the proposal parked behind them, for a
+		// decision already in force. So the store tests it in the insert.
+		const hash = `hash-${MARKER}-inforce`;
+		const proposal = {
+			...firstWriteRow({ id: `memr_${MARKER}_5`, idempotency_key: `${MARKER}-r5` }),
+			scope: "global",
+			subject: null,
+			entry_hash: hash,
+			text: `${MARKER} the ledger is append-only`,
+			conflict_key: null,
+			reason: "global scope requires review",
+		};
+		await raw`
+			insert into memory_entries (id, scope, kind, body, writer, entry_hash, version)
+			values (${`mem_${MARKER}_inforce`}, 'global', 'decision', ${proposal.text}, 'hermes', ${hash}, 1)`;
+
+		expect(await a.enqueueReview(proposal)).toBeNull();
+		expect((await a.standingByHash(hash))?.id).toBe(`mem_${MARKER}_inforce`);
+
+		// Superseded, and it is a proposal again: what is in force is what matters, not
+		// what was once approved.
+		await raw`
+			update memory_entries set superseded_by = 'mem_someone-else'
+			where id = ${`mem_${MARKER}_inforce`}`;
+		expect(await a.enqueueReview(proposal)).toBe(`memr_${MARKER}_5`);
+		expect(await a.standingByHash(hash)).toBeNull();
+	});
+
 	test("re-proposing an installed global decision reports the entry, not a failure", async () => {
 		// End to end, through the gate: propose, approve, then send the same content
 		// again without a token. That third write used to park a second proposal, and
@@ -302,9 +372,40 @@ describeLive("memory governance against a live index", () => {
 			select count(*)::int as n from memory_reviews
 			where entry_hash = ${approved.entry!.entry_hash} and state = 'pending'`) as Array<{ n: number }>;
 		expect(pending[0]!.n).toBe(0);
-		const entries = (await raw`
+		const installed = (await raw`
 			select count(*)::int as n from memory_entries where body like ${`%${MARKER} the runtime is herdr%`}
 			  and scope = 'global'`) as Array<{ n: number }>;
-		expect(entries[0]!.n).toBe(1);
+		expect(installed[0]!.n).toBe(1);
+	});
+
+	test("a global decision installed straight from a token is not re-proposed either", async () => {
+		// No proposal was ever parked for this one: a reviewer's token installs a global
+		// write directly. Asking the review table "was this approved" would miss it and
+		// put a decision already in force back in the queue — which is why the question
+		// is asked of the index instead.
+		const request = {
+			scope: "global",
+			kind: "decision" as const,
+			subject: `direct-${RUN}`,
+			text: `${MARKER} the ledger is append-only`,
+		};
+
+		const direct = await write(a, { ...request, review_token: REVIEW_TOKEN });
+		expect(direct.outcome).toBe("accepted");
+		const parked = (await raw`
+			select count(*)::int as n from memory_reviews where entry_hash = ${direct.entry!.entry_hash}`) as Array<{
+			n: number;
+		}>;
+		expect(parked[0]!.n).toBe(0);
+
+		const again = await write(b, request);
+		expect(again.outcome).toBe("accepted");
+		expect(again.reason).toBe("review.already-approved");
+		expect(again.entry?.id).toBe(direct.entry!.id);
+		const after = (await raw`
+			select count(*)::int as n from memory_reviews where entry_hash = ${direct.entry!.entry_hash}`) as Array<{
+			n: number;
+		}>;
+		expect(after[0]!.n).toBe(0);
 	});
 });
