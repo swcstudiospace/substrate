@@ -246,9 +246,6 @@ export class IndexStore implements MemoryStore {
 			create unique index if not exists memory_standing_idx on memory_entries (conflict_key)
 			where conflict_key is not null and superseded_by is null`;
 		await this.sql`create index if not exists memory_reverify_idx on memory_entries (reverify_after)`;
-		// What `enqueueReview` asks on every unreviewed global write, and what tells a
-		// re-proposal that its content is already in force.
-		await this.sql`create index if not exists memory_entry_hash_idx on memory_entries (entry_hash)`;
 		// What makes parking idempotent: a retried write finds its own parked row
 		// instead of adding another for a reviewer to wade through.
 		await this.sql`create unique index if not exists memory_quarantine_hash_idx on memory_quarantine (entry_hash)`;
@@ -1030,58 +1027,26 @@ export class IndexStore implements MemoryStore {
 		return existing[0] ? String(existing[0].id) : row.id;
 	}
 
-	/**
-	 * Park a proposal for review. Idempotent on the content hash while pending.
-	 *
-	 * Null means it declined: this content is already the entry in force, and a
-	 * decision a reviewer installed does not go back into their queue. The test is a
-	 * `where not exists` on the insert rather than a read before it, because a read
-	 * before it has a window — a reviewer who installs the entry in between leaves
-	 * this proposal parked behind them, for a decision that is already in force.
-	 */
-	async enqueueReview(row: NewMemoryEntry & { reason: string }): Promise<string | null> {
+	/** Park a proposal for review. Idempotent on the content hash while pending. */
+	async enqueueReview(row: NewMemoryEntry & { reason: string }): Promise<string> {
 		const inserted = (await this.sql`
 			insert into memory_reviews (
 				id, scope, kind, body, subject, writer, source_event, session_id, graph_id, repo, ttl,
 				entry_hash, reason, state)
-			select
+			values (
 				${row.id}, ${row.scope}, ${row.kind}, ${redact(row.text)}, ${row.subject}, ${row.writer},
 				${row.source_event}, ${row.session_id}, ${row.graph_id}, ${row.repo}, ${row.ttl},
-				${row.entry_hash}, ${row.reason}, 'pending'
-			where not exists (
-				select 1 from memory_entries
-				where entry_hash = ${row.entry_hash} and superseded_by is null)
+				${row.entry_hash}, ${row.reason}, 'pending')
 			-- memory_reviews_pending_idx, named by restating its predicate: a retry finds
 			-- the proposal it already parked, and a decided row never blocks a new one.
 			on conflict (entry_hash) where state = 'pending' do nothing
 			returning id`) as Array<Record<string, unknown>>;
 		if (inserted[0]) return String(inserted[0].id);
-		// Either a proposal for this content is already pending — return that one, which
-		// is what makes parking idempotent — or the insert declined because the content
-		// is in force. A pending row wins: something *is* parked, so that is the answer.
 		const existing = (await this.sql`
 			select id from memory_reviews where entry_hash = ${row.entry_hash} and state = 'pending'`) as Array<
 			Record<string, unknown>
 		>;
-		if (existing[0]) return String(existing[0].id);
-		return null;
-	}
-
-	/**
-	 * The entry in force whose content hashes to this.
-	 *
-	 * What `enqueueReview` declining actually means, read back so the gate can name
-	 * it. A question about the index, not about the review queue: an entry installed
-	 * straight from a reviewer's token was never parked at all.
-	 */
-	async standingByHash(entryHash: string): Promise<MemoryEntry | null> {
-		const rows = (await this.sql`
-			select * from memory_entries
-			where entry_hash = ${entryHash} and superseded_by is null
-			order by created desc
-			limit 1`) as Array<Record<string, unknown>>;
-		const row = rows[0];
-		return row ? toMemoryEntry(row) : null;
+		return existing[0] ? String(existing[0].id) : row.id;
 	}
 
 	/**

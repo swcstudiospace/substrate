@@ -107,8 +107,17 @@ describeLive("memory governance against a live index", () => {
 		// Declared first on purpose: the old index is unique over `(entry_hash, state)`,
 		// so it cannot be created once the repeat-approval test below has written two
 		// approved rows for one hash — which is the same fact this fix is about.
+		// Unique where the data still permits it, which is what a database written
+		// before this fix always looks like. Plain otherwise: the new schema allows two
+		// approved rows for one hash, so a suite re-run against a database that already
+		// holds a pair must not fail in its own setup instead of testing the migration.
+		// What is under test either way is `drop index if exists`, which goes by name.
 		await raw`
-			create unique index if not exists memory_reviews_hash_idx on memory_reviews (entry_hash, state)`;
+			create unique index if not exists memory_reviews_hash_idx on memory_reviews (entry_hash, state)`.catch(
+			async () => {
+				await raw`create index if not exists memory_reviews_hash_idx on memory_reviews (entry_hash, state)`;
+			},
+		);
 
 		await a.migrate();
 
@@ -228,7 +237,6 @@ describeLive("memory governance against a live index", () => {
 			readEntry: (id) => b.readEntry(id),
 			quarantineEntry: (row) => b.quarantineEntry(row),
 			enqueueReview: (row) => b.enqueueReview(row),
-			standingByHash: (hash) => b.standingByHash(hash),
 			releaseReviews: (hash, entryId, by) => b.releaseReviews(hash, entryId, by),
 		};
 
@@ -311,101 +319,44 @@ describeLive("memory governance against a live index", () => {
 		expect(rows[0]!.n).toBe(1);
 	});
 
-	test("parking is declined for content that is already in force", async () => {
-		// The window this closes is between a check and an insert: a reviewer who
-		// installs the entry there leaves the proposal parked behind them, for a
-		// decision already in force. So the store tests it in the insert.
-		const hash = `hash-${MARKER}-inforce`;
-		const proposal = {
-			...firstWriteRow({ id: `memr_${MARKER}_5`, idempotency_key: `${MARKER}-r5` }),
-			scope: "global",
-			subject: null,
-			entry_hash: hash,
-			text: `${MARKER} the ledger is append-only`,
-			conflict_key: null,
-			reason: "global scope requires review",
-		};
-		await raw`
-			insert into memory_entries (id, scope, kind, body, writer, entry_hash, version)
-			values (${`mem_${MARKER}_inforce`}, 'global', 'decision', ${proposal.text}, 'hermes', ${hash}, 1)`;
+	test("approving a re-proposal of installed content is accepted, not reported as lost", async () => {
+		// The reported bug, end to end through the gate and a real index. Propose,
+		// approve, send the same content again without a token — which parks a second
+		// proposal, because the key the first one spent was spent on a refusal — and
+		// then approve that one too.
+		//
+		// That last approval is where it went wrong: the entry committed, and resolving
+		// the proposal raised a duplicate key against the row the first approval had
+		// left. The caller was told `store.write-failed` with the entry sitting in the
+		// index. An appending kind, so the second approval really does write a row.
+		const request = { scope: "global", kind: "fact" as const, text: `${MARKER} eight agents share one host` };
 
-		expect(await a.enqueueReview(proposal)).toBeNull();
-		expect((await a.standingByHash(hash))?.id).toBe(`mem_${MARKER}_inforce`);
+		expect((await write(a, request)).reason).toBe("review.required");
+		const first = await write(a, { ...request, review_token: REVIEW_TOKEN, idempotency_key: `${MARKER}-ap1` });
+		expect(first.outcome).toBe("accepted");
 
-		// Superseded, and it is a proposal again: what is in force is what matters, not
-		// what was once approved.
-		await raw`
-			update memory_entries set superseded_by = 'mem_someone-else'
-			where id = ${`mem_${MARKER}_inforce`}`;
-		expect(await a.enqueueReview(proposal)).toBe(`memr_${MARKER}_5`);
-		expect(await a.standingByHash(hash)).toBeNull();
-	});
+		// Parked again: nothing pins the outcome of a refusal, which is what makes
+		// approval-by-resubmit work at all.
+		const reproposed = await write(b, request);
+		expect(reproposed.reason).toBe("review.required");
+		expect(reproposed.review_id).not.toBe(first.entry!.id);
 
-	test("re-proposing an installed global decision reports the entry, not a failure", async () => {
-		// End to end, through the gate: propose, approve, then send the same content
-		// again without a token. That third write used to park a second proposal, and
-		// approving *it* is where the caller was told nothing was stored while the
-		// entry was in the index.
-		const request = {
-			scope: "global",
-			kind: "decision" as const,
-			subject: `runtime-global-${RUN}`,
-			text: `${MARKER} the runtime is herdr`,
-		};
+		const second = await write(b, { ...request, review_token: REVIEW_TOKEN, idempotency_key: `${MARKER}-ap2` });
 
-		const proposed = await write(a, request);
-		expect(proposed.outcome).toBe("conflict");
-		expect(proposed.reason).toBe("review.required");
+		expect(second.outcome).toBe("accepted");
+		expect(second.verified_persisted).toBe(true);
+		expect(second.entry!.id).not.toBe(first.entry!.id);
 
-		const approved = await write(a, { ...request, review_token: REVIEW_TOKEN });
-		expect(approved.outcome).toBe("accepted");
-		expect(approved.verified_persisted).toBe(true);
-
-		const again = await write(b, request);
-		expect(again.outcome).toBe("accepted");
-		expect(again.reason).toBe("review.already-approved");
-		expect(again.verified_persisted).toBe(true);
-		expect(again.entry?.id).toBe(approved.entry!.id);
-
-		// Nothing new in front of a reviewer, and one entry in the index.
-		const pending = (await raw`
-			select count(*)::int as n from memory_reviews
-			where entry_hash = ${approved.entry!.entry_hash} and state = 'pending'`) as Array<{ n: number }>;
-		expect(pending[0]!.n).toBe(0);
-		const installed = (await raw`
-			select count(*)::int as n from memory_entries where body like ${`%${MARKER} the runtime is herdr%`}
-			  and scope = 'global'`) as Array<{ n: number }>;
-		expect(installed[0]!.n).toBe(1);
-	});
-
-	test("a global decision installed straight from a token is not re-proposed either", async () => {
-		// No proposal was ever parked for this one: a reviewer's token installs a global
-		// write directly. Asking the review table "was this approved" would miss it and
-		// put a decision already in force back in the queue — which is why the question
-		// is asked of the index instead.
-		const request = {
-			scope: "global",
-			kind: "decision" as const,
-			subject: `direct-${RUN}`,
-			text: `${MARKER} the ledger is append-only`,
-		};
-
-		const direct = await write(a, { ...request, review_token: REVIEW_TOKEN });
-		expect(direct.outcome).toBe("accepted");
-		const parked = (await raw`
-			select count(*)::int as n from memory_reviews where entry_hash = ${direct.entry!.entry_hash}`) as Array<{
+		// Both entries are in the index, both proposals are resolved, and the caller
+		// was told so — which is the whole of it.
+		const entries = (await raw`
+			select count(*)::int as n from memory_entries where entry_hash = ${first.entry!.entry_hash}`) as Array<{
 			n: number;
 		}>;
-		expect(parked[0]!.n).toBe(0);
-
-		const again = await write(b, request);
-		expect(again.outcome).toBe("accepted");
-		expect(again.reason).toBe("review.already-approved");
-		expect(again.entry?.id).toBe(direct.entry!.id);
-		const after = (await raw`
-			select count(*)::int as n from memory_reviews where entry_hash = ${direct.entry!.entry_hash}`) as Array<{
-			n: number;
-		}>;
-		expect(after[0]!.n).toBe(0);
+		expect(entries[0]!.n).toBe(2);
+		const reviews = (await raw`
+			select state, count(*)::int as n from memory_reviews where entry_hash = ${first.entry!.entry_hash}
+			group by state`) as Array<{ state: string; n: number }>;
+		expect(reviews).toEqual([{ state: "approved", n: 2 }]);
 	});
 });

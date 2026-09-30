@@ -211,27 +211,8 @@ export interface MemoryStore {
 	 * for a reviewer to wade through.
 	 */
 	quarantineEntry(row: NewMemoryEntry & { reason: QuarantineReason; detail: string }): Promise<string>;
-	/**
-	 * Park a proposal awaiting review, and answer with the row holding it.
-	 *
-	 * Idempotent on `entry_hash`, as above. **Null** means it declined because this
-	 * content is already the entry in force: a decision a reviewer has installed must
-	 * not go back into the queue, and approving that second proposal is the write
-	 * whose failure the caller hears about once the entry has committed.
-	 *
-	 * That test belongs to the insert, not to a check before it, or a reviewer
-	 * installing the entry in between leaves the proposal parked behind them.
-	 */
-	enqueueReview(row: NewMemoryEntry & { reason: string }): Promise<string | null>;
-	/**
-	 * The entry in force whose content hashes to this, or null.
-	 *
-	 * Asked when parking is declined, to say *what* is in force. Deliberately a
-	 * question about the index rather than about the review queue: content installed
-	 * straight from a reviewer's token was never parked, and an approved proposal
-	 * whose entry has since been superseded names something no agent reads.
-	 */
-	standingByHash(entryHash: string): Promise<MemoryEntry | null>;
+	/** Park a proposal awaiting review. Idempotent on `entry_hash`, as above. */
+	enqueueReview(row: NewMemoryEntry & { reason: string }): Promise<string>;
 	/** Mark parked proposals for this content reviewed, once a reviewer lands one. */
 	releaseReviews(entryHash: string, entryId: string, decidedBy: string): Promise<number>;
 }
@@ -565,100 +546,22 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 		const actor = resolveActor(request.actor, reviewed);
 
 		if (plan.requiresReview && !reviewed) {
-			// Parking is refused where this exact content is already the entry in force,
-			// and the store decides that in the *insert*, not here: a check followed by an
-			// insert has a window in which a reviewer installs the entry, and the proposal
-			// lands behind them — putting a decision already in force back in the queue.
+			// Parked, even where this exact content is already the entry in force.
 			//
-			// Asked of the index rather than of the review table. "Was this approved once"
-			// is the wrong question twice over: a global write installed straight from a
-			// reviewer's token leaves no approved proposal, and an approved proposal whose
-			// entry has since been superseded names something no agent reads any more.
-			// What matters is whether this content is what is in force now.
+			// An earlier revision of this fix refused to park in that case, which read
+			// well and was wrong in three ways: a global `fact` or `warning` is
+			// append-only and its trust decays, so restating one is how an agent refreshes
+			// it; `entry_hash` says nothing about the `ttl` or `trust` being asked for; and
+			// answering `accepted` there spent the content's derived key on a row this
+			// write never made. None of that is what the repeat-approval bug was about —
+			// the bug was the *approval* colliding with an earlier approved row, and that
+			// is fixed where it happened, in the uniqueness on `memory_reviews`.
 			const reviewId = await store.enqueueReview({
 				...baseRow,
 				id: newId("memr"),
 				idempotency_key: key,
 				reason: "global scope requires review",
 			});
-
-			if (reviewId === null) {
-				const inForce = await store.standingByHash(entryHash);
-				// Gone again between the refusal and this read — superseded or removed in
-				// between. Nothing is parked and nothing is in force, so the honest answer is
-				// to say so and let the caller send it again; the key records a refusal, so
-				// the retry is allowed at once.
-				if (!inForce) {
-					await store.finishWrite(key, holder, "conflict", null);
-					return {
-						outcome: "conflict",
-						reason: "review.raced",
-						remedy:
-							"This content was the entry in force when the proposal was written, and had been replaced " +
-							"again by the time it was read back, so it was neither parked nor installed. Re-read what is " +
-							"in force and re-submit; this idempotency_key is free to use again.",
-						verified_persisted: false,
-						idempotency_key: key,
-						strategy: "require-review",
-						grant: grant.name,
-					};
-				}
-
-				// Same content, but not the same *ask*. `entry_hash` covers the words, not the
-				// retention or the confidence they are held with — and this reply hands back a
-				// row that carries the earlier ones. Saying `accepted` here would report a ttl
-				// or a trust that was never recorded, which is the lie the request hash exists
-				// to prevent one step earlier.
-				const askedFor = [
-					...(inForce.ttl !== ttl ? [`ttl=${ttl} (in force: ${inForce.ttl})`] : []),
-					...(request.trust !== undefined && request.trust !== inForce.trust
-						? [`trust=${request.trust} (in force: ${inForce.trust})`]
-						: []),
-					...(request.actor !== undefined && request.actor !== inForce.actor
-						? [`actor=${request.actor} (in force: ${inForce.actor})`]
-						: []),
-				];
-				if (askedFor.length > 0) {
-					await store.finishWrite(key, holder, "conflict", null);
-					return {
-						outcome: "conflict",
-						reason: "review.in-force",
-						remedy:
-							`This text is already the ${kind} in force at global scope (${inForce.id}), but it asks for ` +
-							`${askedFor.join(", ")}. Nothing was written and nothing was parked — a decision in force is ` +
-							"not re-proposed. Supersede it deliberately with a review_token to record different retention " +
-							"or confidence.",
-						verified_persisted: false,
-						idempotency_key: key,
-						strategy: "require-review",
-						conflict_with: inForce.id,
-						grant: grant.name,
-					};
-				}
-
-				// Nothing was written *under this key*, so the key is not spent. Recording it
-				// as accepted would pin the derived key to a row this attempt did not write:
-				// once that entry is superseded, the next keyless submission of this content
-				// would replay the superseded row as verified instead of reaching a reviewer.
-				await store.releaseWrite(key, holder).catch(() => undefined);
-				return {
-					outcome: "accepted",
-					reason: "review.already-approved",
-					remedy:
-						"This exact content is already the entry in force at global scope, so it was not parked for " +
-						"review again and nothing was written. Send a changed text — or supersede the entry deliberately " +
-						"with a review_token — if this was meant to be a new proposal.",
-					// The row came back out of the index matched on this request's own content
-					// hash, which is the same verification every other `accepted` reply makes.
-					verified_persisted: true,
-					idempotency_key: key,
-					entry: inForce,
-					deduplicated: true,
-					strategy: "require-review",
-					grant: grant.name,
-				};
-			}
-
 			await store.finishWrite(key, holder, "conflict", null);
 			return {
 				outcome: "conflict",
@@ -798,7 +701,16 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 		const stored = await store.readEntry(inserted.id);
 		const verified = stored !== null && stored.entry_hash === entryHash;
 
-		if (verified && plan.requiresReview) await store.releaseReviews(entryHash, inserted.id, writer);
+		// Guarded, and this is the honest half of the repeat-approval fix rather than a
+		// nicety. The entry is committed and the claim already records it; a proposal
+		// that cannot be resolved is a stale row in a reviewer's queue, not a write that
+		// did not happen. Letting this throw is what reported an installed entry to its
+		// caller as `store.write-failed` — the duplicate key was only one way to reach
+		// it, and the others are outages nothing can rule out. The recovery path above
+		// guards the same call for the same reason.
+		if (verified && plan.requiresReview) {
+			await store.releaseReviews(entryHash, inserted.id, writer).catch(() => undefined);
+		}
 
 		return {
 			outcome: "accepted",

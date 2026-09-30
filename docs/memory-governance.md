@@ -36,7 +36,7 @@ The order is the design, not an implementation detail.
 | 2 | RBAC, default-deny | `memory-policy.ts` | `denied` — `rbac.no-grant` |
 | 3 | Quarantine | `memory-classify.ts` | `quarantined` — `quarantine.secret` / `.pii` / `.speculative` |
 | 4 | Exactly-once | `memory-write.ts` | `conflict` — `write.in-flight`, `write.superseded`, `idempotency.reused`, or a replay |
-| 5 | Conflict, insert, read-back | `memory-write.ts` | `conflict` — `review.required`, `review.in-force`, `review.raced`, `version.required`, `version.stale`, `version.raced`, `standing.raced` |
+| 5 | Conflict, insert, read-back | `memory-write.ts` | `conflict` — `review.required`, `version.required`, `version.stale`, `version.raced`, `standing.raced` |
 
 **Why RBAC before the content check.** Storing text from a writer that has no
 business at this scope is still storing it — even in the quarantine table. A
@@ -147,25 +147,25 @@ the same todo. Without a `subject` there is no identity, so the entry is appende
   review.required` with the parked id. Re-submitting the same content with a
   `review_token` installs it and marks the proposal approved.
 
-  **A decision in force is not re-proposed.** Parking is refused where this exact
-  content is already the entry in force, and the refusal is a `where not exists` on
-  the insert rather than a check before it — a reviewer who installs the entry in
-  between would otherwise leave the proposal parked behind them. The question is
-  asked of `memory_entries`, not of the review queue: a global write installed
-  straight from a token was never parked, and an approved proposal whose entry has
-  since been superseded names something no agent reads. So a tokenless re-submission
-  is answered `accepted / review.already-approved` with the standing entry when it
-  asks for nothing different, and `conflict / review.in-force` when it asks for a
-  different `ttl`, `trust` or `actor` — `entry_hash` covers the words, not the
-  retention they are held with, and replying `accepted` there would report state that
-  was never recorded. Neither reply records the key as spent: nothing was written
-  under it, and pinning it would replay the row once it is superseded.
+  **Approving the same content twice is not a failure.** The refusal that parks a
+  proposal does not pin the key — that is what makes approval-by-resubmit work — so
+  the same content can be sent again without a token and parked again. Approving
+  *that* proposal used to raise a duplicate key on `memory_reviews (entry_hash,
+  state)`, and it raised it **after** the entry had committed: the caller was told
+  nothing was stored while the entry sat in the index. Two things fix it. Uniqueness
+  on `memory_reviews` now covers the **pending** rows only, which is all parking
+  needs — a retried proposal still finds its own row, and a decided one never blocks
+  a new one. And resolving a proposal can no longer fail the write: the entry is
+  committed and the claim records it by then, so a proposal that cannot be resolved
+  is a stale row in a reviewer's queue, not a write that did not happen.
 
-  (Before this, the content was parked a second time, and approving that second
-  proposal collided with the first approved row **after** the entry had committed —
-  so the caller was told nothing was stored while the entry was in the index.
-  Uniqueness on `memory_reviews` now covers the pending rows only, which is all
-  parking needs.)
+  A proposal is parked even where the same content is already in force. An earlier
+  attempt at this refused to park there, and it was wrong three ways: a global
+  `fact` or `warning` is append-only and its trust decays, so restating one is how
+  an agent refreshes it; `entry_hash` says nothing about the `ttl` or `trust` being
+  asked for; and answering `accepted` spent the content's derived key on a row that
+  write never made.
+
 - **`decision` → versioned.** Optimistic concurrency. A caller replacing a standing
   decision must send `expected_version`; a missing one is `version.required` and a
   wrong one is `version.stale`, both quoting the current version and id. On success
