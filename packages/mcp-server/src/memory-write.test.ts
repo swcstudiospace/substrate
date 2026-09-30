@@ -255,6 +255,14 @@ class FakeStore implements MemoryStore {
 		return row.id;
 	}
 
+	async approvedReview(entryHash: string): Promise<{ id: string; entry_id: string } | null> {
+		// Latest first, like the real store's `order by decided desc`.
+		const approved = [...this.reviews]
+			.reverse()
+			.find((held) => held.entry_hash === entryHash && held.state === "approved" && held.entry_id !== null);
+		return approved ? { id: approved.id, entry_id: approved.entry_id! } : null;
+	}
+
 	async releaseReviews(entryHash: string, entryId: string): Promise<number> {
 		let released = 0;
 		for (const review of this.reviews) {
@@ -408,6 +416,49 @@ describe("conflict — require-review for global", () => {
 		expect(approved.verified_persisted).toBe(true);
 		expect(store.reviews[0]?.state).toBe("approved");
 		expect(store.reviews[0]?.entry_id).toBe(approved.entry?.id);
+	});
+
+	test("re-proposing content a reviewer already installed answers with the entry", async () => {
+		const request = { scope: "global", kind: "decision" as const, text: "Greptime is the events ledger only" };
+		await write(request);
+		const approved = await write({ ...request, review_token: REVIEW_TOKEN });
+
+		// The same content again, without a token — which the gate allows, because the
+		// key the unreviewed write spent was spent on a refusal. It used to park a
+		// *second* proposal for a decision already in force, and approving that one
+		// collided with the first approved row: the entry had committed by then, so the
+		// caller was told nothing was stored while the entry sat in the index.
+		const again = await write(request);
+
+		expect(again.outcome).toBe("accepted");
+		expect(again.reason).toBe("review.already-approved");
+		expect(again.verified_persisted).toBe(true);
+		expect(again.deduplicated).toBe(true);
+		expect(again.entry?.id).toBe(approved.entry?.id);
+		// Nothing written a second time, and nothing put back in front of a reviewer.
+		expect(store.entries()).toHaveLength(1);
+		expect(store.reviews.filter((review) => review.state === "pending")).toEqual([]);
+	});
+
+	test("approving the same content twice is honest about what is stored", async () => {
+		// The same race one step on: the second proposal exists (parked before this fix,
+		// or by a store that allows it), and a reviewer approves it. The entry commits
+		// first and the proposal is resolved after, so a failure to resolve must never
+		// read back to the caller as "nothing was stored".
+		const request = { scope: "global", kind: "fact" as const, text: "eight agents share one host" };
+		await write(request);
+		const first = await write({ ...request, review_token: REVIEW_TOKEN });
+		store.reviews.push({ ...store.reviews[0]!, id: "memr_stale", state: "pending", entry_id: null });
+
+		store.clock += DERIVED_KEY_WINDOW_MS + 1;
+		const second = await write({ ...request, review_token: REVIEW_TOKEN });
+
+		expect(second.outcome).toBe("accepted");
+		expect(second.verified_persisted).toBe(true);
+		expect(second.entry?.id).not.toBe(first.entry?.id);
+		// Both proposals are resolved, and the second approval is recorded beside the
+		// first rather than colliding with it.
+		expect(store.reviews.every((review) => review.state === "approved")).toBe(true);
 	});
 
 	test("the parked conflict does not pin the outcome forever", async () => {

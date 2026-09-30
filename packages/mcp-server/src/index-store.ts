@@ -249,7 +249,21 @@ export class IndexStore implements MemoryStore {
 		// What makes parking idempotent: a retried write finds its own parked row
 		// instead of adding another for a reviewer to wade through.
 		await this.sql`create unique index if not exists memory_quarantine_hash_idx on memory_quarantine (entry_hash)`;
-		await this.sql`create unique index if not exists memory_reviews_hash_idx on memory_reviews (entry_hash, state)`;
+		// One *pending* proposal per content, and nothing said about the decided ones.
+		//
+		// It used to be unique on `(entry_hash, state)`, which also forbade a second
+		// approved row — and that is a rule nobody wanted. Content approved once can be
+		// proposed again (the derived key for an unreviewed write is spent on a refusal,
+		// so re-asking is allowed by design), and approving that second proposal moves it
+		// to `approved` beside the first. Under the old index that UPDATE raised a
+		// duplicate key *after* the entry had already committed: the gate's catch held
+		// the claim, the caller was told the write failed, and the entry was sitting in
+		// the index all along. Uniqueness over the pending rows is what parking actually
+		// needs; the decided rows are an audit trail and may repeat.
+		await this.sql`
+			create unique index if not exists memory_reviews_pending_idx on memory_reviews (entry_hash)
+			where state = 'pending'`;
+		await this.sql`drop index if exists memory_reviews_hash_idx`;
 	}
 
 	// ── graph ──────────────────────────────────────────────────────────────────
@@ -1023,7 +1037,9 @@ export class IndexStore implements MemoryStore {
 				${row.id}, ${row.scope}, ${row.kind}, ${redact(row.text)}, ${row.subject}, ${row.writer},
 				${row.source_event}, ${row.session_id}, ${row.graph_id}, ${row.repo}, ${row.ttl},
 				${row.entry_hash}, ${row.reason}, 'pending')
-			on conflict (entry_hash, state) do nothing
+			-- memory_reviews_pending_idx, named by restating its predicate: a retry finds
+			-- the proposal it already parked, and a decided row never blocks a new one.
+			on conflict (entry_hash) where state = 'pending' do nothing
 			returning id`) as Array<Record<string, unknown>>;
 		if (inserted[0]) return String(inserted[0].id);
 		const existing = (await this.sql`
@@ -1033,7 +1049,34 @@ export class IndexStore implements MemoryStore {
 		return existing[0] ? String(existing[0].id) : row.id;
 	}
 
-	/** Close the loop: a reviewed write that landed resolves the proposal it came from. */
+	/**
+	 * The proposal a reviewer already approved for this content, and the entry it
+	 * installed.
+	 *
+	 * Read before parking a new proposal. Content that is already in force must not go
+	 * back into the queue: a reviewer would be asked to approve what they approved, and
+	 * the approval of that second row is the write the caller is then told failed.
+	 * `entry_id is not null` because a row approved without one installed nothing to
+	 * point at, and the gate answers with the entry or not at all.
+	 */
+	async approvedReview(entryHash: string): Promise<{ id: string; entry_id: string } | null> {
+		const rows = (await this.sql`
+			select id, entry_id from memory_reviews
+			where entry_hash = ${entryHash} and state = 'approved' and entry_id is not null
+			order by decided desc nulls last
+			limit 1`) as Array<Record<string, unknown>>;
+		const row = rows[0];
+		return row ? { id: String(row.id), entry_id: String(row.entry_id) } : null;
+	}
+
+	/**
+	 * Close the loop: a reviewed write that landed resolves the proposal it came from.
+	 *
+	 * Safe to run when this content was approved once before — the uniqueness on
+	 * `memory_reviews` covers the pending rows only, so a second approval lands beside
+	 * the first instead of raising a duplicate key on a write that has already
+	 * committed.
+	 */
 	async releaseReviews(entryHash: string, entryId: string, decidedBy: string): Promise<number> {
 		const rows = (await this.sql`
 			update memory_reviews

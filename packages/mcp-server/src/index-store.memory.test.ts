@@ -2,13 +2,20 @@
  * Memory governance, proven against a real Postgres.
  *
  * `memory-write.test.ts` proves the gate's decisions against a fake store; this
- * proves the place where the *index* is what decides: two first writes for one
- * subject, under different idempotency keys. Neither retires a predecessor, so
- * `memory_standing_idx` is what separates them, and the loser has to come back
- * as a conflict it can retry rather than as a store error with its key stuck in
- * flight. The fake store cannot reproduce that — a unique index rejecting the
- * second of two inserts that each believed they were the first is the thing
- * under test. *
+ * proves the two places where the *index* is what decides — the unique indexes
+ * over the entries in force and over the review queue. Both of the races below
+ * were invisible to the fake, because a fake cannot reproduce a unique index
+ * rejecting the second of two inserts that each believed they were the first:
+ *
+ *   1. Two first writes for one subject, under different idempotency keys.
+ *      Neither retires a predecessor, so `memory_standing_idx` is what separates
+ *      them, and the loser has to come back as a conflict it can retry rather
+ *      than as a store error with its key stuck in flight.
+ *   2. Content approved once and proposed again. Approving the second proposal
+ *      moves it to `approved` beside the first, which the old `(entry_hash,
+ *      state)` index rejected — after the memory entry had already committed, so
+ *      the caller was told nothing was stored while the entry was in the index.
+ *
  * Skipped unless a database is given, for the reason `index-store.lease.test.ts`
  * gives: mocking Postgres' concurrency would mock the one thing under test.
  *
@@ -181,6 +188,7 @@ describeLive("memory governance against a live index", () => {
 			readEntry: (id) => b.readEntry(id),
 			quarantineEntry: (row) => b.quarantineEntry(row),
 			enqueueReview: (row) => b.enqueueReview(row),
+			approvedReview: (hash) => b.approvedReview(hash),
 			releaseReviews: (hash, entryId, by) => b.releaseReviews(hash, entryId, by),
 		};
 
@@ -211,4 +219,92 @@ describeLive("memory governance against a live index", () => {
 		expect(retry.entry?.supersedes).toBe(winner.entry!.id);
 	});
 
+	test("approving content that was approved before does not collide", async () => {
+		// The store half of the repeat-approval bug, with nothing else in the way. The
+		// second `releaseReviews` used to raise a duplicate key on `(entry_hash, state)`
+		// — and in the gate it raised it *after* the entry had committed.
+		const hash = `hash-${MARKER}-twice`;
+		const proposal = {
+			...firstWriteRow({ id: `memr_${MARKER}_1`, idempotency_key: `${MARKER}-r1` }),
+			scope: "global",
+			subject: null,
+			entry_hash: hash,
+			text: `${MARKER} eight agents share one host`,
+			conflict_key: null,
+			reason: "global scope requires review",
+		};
+
+		expect(await a.enqueueReview(proposal)).toBe(`memr_${MARKER}_1`);
+		expect(await a.releaseReviews(hash, `mem_${MARKER}_r1`, "hermes")).toBe(1);
+
+		// Parked again — allowed, because the pending slot is free once the first was
+		// decided — and approved again.
+		expect(await a.enqueueReview({ ...proposal, id: `memr_${MARKER}_2` })).toBe(`memr_${MARKER}_2`);
+		expect(await a.releaseReviews(hash, `mem_${MARKER}_r2`, "hermes")).toBe(1);
+
+		const rows = (await raw`
+			select state, count(*)::int as n from memory_reviews where entry_hash = ${hash}
+			group by state`) as Array<{ state: string; n: number }>;
+		expect(rows).toEqual([{ state: "approved", n: 2 }]);
+	});
+
+	test("a pending proposal is still one per content", async () => {
+		// The uniqueness that parking actually needs, and the half that has to survive
+		// the index change: a retried proposal finds its own row rather than filling a
+		// reviewer's queue.
+		const hash = `hash-${MARKER}-pending`;
+		const proposal = {
+			...firstWriteRow({ id: `memr_${MARKER}_3`, idempotency_key: `${MARKER}-r3` }),
+			scope: "global",
+			subject: null,
+			entry_hash: hash,
+			text: `${MARKER} the poller runs on the host`,
+			conflict_key: null,
+			reason: "global scope requires review",
+		};
+
+		expect(await a.enqueueReview(proposal)).toBe(`memr_${MARKER}_3`);
+		expect(await b.enqueueReview({ ...proposal, id: `memr_${MARKER}_4` })).toBe(`memr_${MARKER}_3`);
+
+		const rows = (await raw`
+			select count(*)::int as n from memory_reviews where entry_hash = ${hash}`) as Array<{ n: number }>;
+		expect(rows[0]!.n).toBe(1);
+	});
+
+	test("re-proposing an installed global decision reports the entry, not a failure", async () => {
+		// End to end, through the gate: propose, approve, then send the same content
+		// again without a token. That third write used to park a second proposal, and
+		// approving *it* is where the caller was told nothing was stored while the
+		// entry was in the index.
+		const request = {
+			scope: "global",
+			kind: "decision" as const,
+			subject: `runtime-global-${RUN}`,
+			text: `${MARKER} the runtime is herdr`,
+		};
+
+		const proposed = await write(a, request);
+		expect(proposed.outcome).toBe("conflict");
+		expect(proposed.reason).toBe("review.required");
+
+		const approved = await write(a, { ...request, review_token: REVIEW_TOKEN });
+		expect(approved.outcome).toBe("accepted");
+		expect(approved.verified_persisted).toBe(true);
+
+		const again = await write(b, request);
+		expect(again.outcome).toBe("accepted");
+		expect(again.reason).toBe("review.already-approved");
+		expect(again.verified_persisted).toBe(true);
+		expect(again.entry?.id).toBe(approved.entry!.id);
+
+		// Nothing new in front of a reviewer, and one entry in the index.
+		const pending = (await raw`
+			select count(*)::int as n from memory_reviews
+			where entry_hash = ${approved.entry!.entry_hash} and state = 'pending'`) as Array<{ n: number }>;
+		expect(pending[0]!.n).toBe(0);
+		const entries = (await raw`
+			select count(*)::int as n from memory_entries where body like ${`%${MARKER} the runtime is herdr%`}
+			  and scope = 'global'`) as Array<{ n: number }>;
+		expect(entries[0]!.n).toBe(1);
+	});
 });

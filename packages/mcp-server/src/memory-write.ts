@@ -213,6 +213,16 @@ export interface MemoryStore {
 	quarantineEntry(row: NewMemoryEntry & { reason: QuarantineReason; detail: string }): Promise<string>;
 	/** Park a proposal awaiting review. Idempotent on `entry_hash`, as above. */
 	enqueueReview(row: NewMemoryEntry & { reason: string }): Promise<string>;
+	/**
+	 * The proposal a reviewer already approved for this content, and the entry it put
+	 * in force — or null where this content has never been approved.
+	 *
+	 * Asked before parking, because content already installed must not be proposed
+	 * again. The queue would hold a decision that is already in force, and approving
+	 * that second proposal is the write whose failure the caller hears about after the
+	 * entry has committed.
+	 */
+	approvedReview(entryHash: string): Promise<{ id: string; entry_id: string } | null>;
 	/** Mark parked proposals for this content reviewed, once a reviewer lands one. */
 	releaseReviews(entryHash: string, entryId: string, decidedBy: string): Promise<number>;
 }
@@ -546,6 +556,41 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 		const actor = resolveActor(request.actor, reviewed);
 
 		if (plan.requiresReview && !reviewed) {
+			// Already approved once, and still in force. Parking it again would put a
+			// decision a reviewer has installed back in their queue — and the approval of
+			// that second proposal is the write that then reports itself failed, because
+			// the entry commits before the proposal is resolved. So the honest answer is
+			// the entry: it is this content, it is in the index, and nothing was written
+			// again.
+			//
+			// Only where the installed row is still standing. A superseded one is no longer
+			// what any agent reads, so re-proposing the content is a real proposal and goes
+			// through review like any other. The hash is re-checked because `entry_hash` is
+			// what ties a proposal to its entry, and a mismatch means the pointer is wrong
+			// rather than that this content is in force.
+			const approved = await store.approvedReview(entryHash);
+			const installed = approved ? await store.readEntry(approved.entry_id) : null;
+			if (approved && installed && installed.entry_hash === entryHash && !installed.superseded_by) {
+				await store.finishWrite(key, holder, "accepted", installed.id);
+				return {
+					outcome: "accepted",
+					reason: "review.already-approved",
+					remedy:
+						"A reviewer already approved this exact content and it is the entry in force, so it was not " +
+						"parked for review again and nothing was written. Send a changed text — or supersede the entry " +
+						"deliberately — if this was meant to be a new proposal.",
+					// Read out of the index and hash-checked, like every other verification here.
+					verified_persisted: true,
+					idempotency_key: key,
+					entry: installed,
+					deduplicated: true,
+					strategy: "require-review",
+					review_id: approved.id,
+					grant: grant.name,
+					...(trust.downgradedFrom ? { trust_downgraded_from: trust.downgradedFrom } : {}),
+				};
+			}
+
 			const reviewId = await store.enqueueReview({
 				...baseRow,
 				id: newId("memr"),

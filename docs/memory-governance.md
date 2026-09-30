@@ -145,7 +145,14 @@ the same todo. Without a `subject` there is no identity, so the entry is appende
 - **`global` → require-review.** The blast radius of a global memory is every agent
   in every repo. The write is parked in `memory_reviews` and answered `conflict /
   review.required` with the parked id. Re-submitting the same content with a
-  `review_token` installs it and marks the proposal approved.
+  `review_token` installs it and marks the proposal approved. Sending that content
+  again *without* a token, once it is installed and still standing, is answered
+  `accepted / review.already-approved` with the entry itself: a decision in force
+  does not go back into a reviewer's queue. (It used to be parked a second time,
+  and approving that second proposal collided with the first approved row **after**
+  the entry had committed — so the caller was told nothing was stored while the
+  entry was in the index. Uniqueness on `memory_reviews` now covers the pending
+  rows only, which is all parking needs.)
 - **`decision` → versioned.** Optimistic concurrency. A caller replacing a standing
   decision must send `expected_version`; a missing one is `version.required` and a
   wrong one is `version.stale`, both quoting the current version and id. On success
@@ -348,6 +355,20 @@ With no `SUBSTRATE_MEMORY_REVIEW_TOKENS` configured, every review path stays clo
 and the queue simply fills. That is the correct default — nothing forged gets
 through — but it does mean an operator who wants global memories has to configure a
 token.
+
+## Running the proofs
+
+```sh
+bun test                                  # the gate's decisions, against a fake store
+SUBSTRATE_TEST_PG_URL=postgres://… bun test index-store.memory
+```
+
+The gate's decisions are proved against a fake store, because the decisions are the
+point and a Postgres would only slow them down. The two races above are the
+exception: they are settled by a unique index, and a fake cannot reproduce an index
+rejecting the second of two inserts that each believed they were the first. So
+`index-store.memory.test.ts` runs them against a real database and skips, loudly,
+without one.
 
 ## The lock
 
