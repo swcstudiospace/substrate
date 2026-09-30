@@ -31,7 +31,8 @@ export const EVENT_KINDS = [
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 
-export type Actor = "agent" | "human";
+export const ACTORS = ["agent", "human"] as const;
+export type Actor = (typeof ACTORS)[number];
 
 /** An event as a collector submits it. `id`, `ts`, `hash` and `prev` are filled in on ingest. */
 export interface EventInput {

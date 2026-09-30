@@ -1,10 +1,12 @@
 /**
  * HTTP surface for substrate-mcp.
  *
- *   POST /mcp      MCP over streamable HTTP, for agents
- *   POST /brief    the same briefing as plain text, for hooks
- *   POST /events   append an event, for hooks
- *   GET  /healthz  store reachability, and whether events can actually be written
+ *   POST /mcp           MCP over streamable HTTP, for agents
+ *   POST /brief         the same briefing as plain text, for hooks
+ *   POST /events        append an event, for hooks
+ *   POST /events/query  read a window of the ledger
+ *   POST /verify        recompute a graph's hash chain
+ *   GET  /healthz       store reachability, and whether events can actually be written
  *
  * Hooks get REST because a hook process cannot call an MCP tool — it has no
  * client. Both paths run the same service code.
@@ -111,6 +113,17 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig) 
 					...(result.error ? { error: result.error } : {}),
 					...(result.warning ? { warning: result.warning } : {}),
 				});
+				return;
+			}
+
+			// The read counterpart of `POST /events`, for callers that cannot speak MCP.
+			// Same service call as the `events_query` tool, so the two cannot drift.
+			if (req.method === "POST" && url.pathname === "/events/query") {
+				const raw = await readBody(req);
+				const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+				const result = await substrate.queryEvents(body as Parameters<Substrate["queryEvents"]>[0]);
+				// An empty window is a real answer, so 200; 503 is the ledger not answering.
+				sendJson(res, result.error ? 503 : 200, result);
 				return;
 			}
 

@@ -8,8 +8,9 @@
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT } from "./greptime.ts";
 import type { Substrate } from "./service.ts";
-import { EVENT_KINDS, MEMORY_KINDS, NODE_STATES, SURFACES, TRUST_LEVELS, type Surface } from "./types.ts";
+import { ACTORS, EVENT_KINDS, MEMORY_KINDS, NODE_STATES, SURFACES, TRUST_LEVELS, type Surface } from "./types.ts";
 
 const surfaceSchema = z.enum(SURFACES);
 
@@ -96,7 +97,7 @@ export function createMcpServer(substrate: Substrate, callerSurface: Surface | n
 				step: z.number().int().optional(),
 				repo: z.string().optional(),
 				branch: z.string().optional(),
-				actor: z.enum(["agent", "human"]).optional(),
+				actor: z.enum(ACTORS).optional(),
 				payload: z.record(z.string(), z.unknown()).optional(),
 			},
 		},
@@ -114,6 +115,56 @@ export function createMcpServer(substrate: Substrate, callerSurface: Surface | n
 				...(warning ? { warning } : {}),
 			});
 		},
+	);
+
+	server.registerTool(
+		"events_query",
+		{
+			title: "Query the event ledger",
+			description:
+				"Read a window of the append-only event ledger: what agents did, narrowed by session, graph, node, " +
+				"repo, branch, surface, kind, actor and a time range. This is the only read path onto the ledger — no " +
+				"caller needs its credentials. Newest first unless `order` is `asc`. `payload` is omitted unless " +
+				"`include_payload` is set, since it can be 16 KB an event. `ts` is collector-supplied, so it is " +
+				"display order, not append order: `hash` and `prev` chain each session, and `events_verify` checks them.",
+			inputSchema: {
+				session_id: z.string().optional(),
+				graph_id: z.string().optional().describe("ut-<ts36>-<8hex>"),
+				node_id: z.string().optional(),
+				linear_identifier: z.string().optional().describe("e.g. SPE-4789"),
+				repo: z.string().optional().describe("owner/name"),
+				branch: z.string().optional(),
+				surface: surfaceSchema.optional(),
+				kind: z.enum(EVENT_KINDS).optional(),
+				actor: z.enum(ACTORS).optional(),
+				since: z.string().optional().describe("inclusive ISO lower bound on ts"),
+				until: z.string().optional().describe("inclusive ISO upper bound on ts"),
+				limit: z
+					.number()
+					.int()
+					.min(1)
+					.max(MAX_QUERY_LIMIT)
+					.optional()
+					.describe(`rows, default ${DEFAULT_QUERY_LIMIT}, max ${MAX_QUERY_LIMIT}`),
+				order: z.enum(["asc", "desc"]).optional(),
+				include_payload: z.boolean().optional(),
+			},
+			annotations: { readOnlyHint: true },
+		},
+		async (args) => json(await substrate.queryEvents(args)),
+	);
+
+	server.registerTool(
+		"events_verify",
+		{
+			title: "Verify a graph's hash chain",
+			description:
+				"Recompute the ledger's hash chain for one Graph ID and report the first event that does not verify. " +
+				"Each session's events are chained separately; `ok` false names the event and why.",
+			inputSchema: { graph_id: z.string() },
+			annotations: { readOnlyHint: true },
+		},
+		async ({ graph_id }) => json(await substrate.verifyGraph(graph_id)),
 	);
 
 	server.registerTool(

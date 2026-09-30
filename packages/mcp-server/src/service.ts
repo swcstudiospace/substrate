@@ -7,19 +7,22 @@
  */
 import { composeBrief, type BriefRequest } from "./brief.ts";
 import type { SubstrateConfig } from "./config.ts";
-import { inChainOrder, normalizeEvent, normalizeIdentifier, verifyChain } from "./event.ts";
-import { GreptimeClient } from "./greptime.ts";
+import { InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, verifyChain } from "./event.ts";
+import { GreptimeClient, queryLimit, type EventQuery, type QueryableColumn } from "./greptime.ts";
 import { IndexStore } from "./index-store.ts";
 import { redact } from "./redact.ts";
-import type {
-	Actor,
-	EventInput,
-	EventKind,
-	MemoryEntry,
-	MemoryEntryInput,
-	NodeState,
-	Surface,
-	SubstrateEvent,
+import {
+	ACTORS,
+	EVENT_KINDS,
+	SURFACES,
+	type Actor,
+	type EventInput,
+	type EventKind,
+	type MemoryEntry,
+	type MemoryEntryInput,
+	type NodeState,
+	type Surface,
+	type SubstrateEvent,
 } from "./types.ts";
 
 /** Greptime gives back loosely typed rows; rebuild the exact shape that was hashed. */
@@ -50,6 +53,127 @@ function rowToEvent(row: Record<string, unknown>): SubstrateEvent {
 		hash: String(row.hash),
 		prev: text(row.prev),
 	};
+}
+
+/** A queried row, with `payload` dropped unless it was selected. */
+function rowToLedgerEvent(row: Record<string, unknown>, includePayload: boolean): LedgerEvent {
+	const { payload, ...rest } = rowToEvent(row);
+	return includePayload ? { ...rest, payload } : rest;
+}
+
+/**
+ * Filters arrive from two places, and only one of them is typed.
+ *
+ * The MCP tool's arguments are checked by zod before they reach here; a JSON body
+ * posted to `/events/query` is not, and the route does not re-state the schema — it
+ * would be a second copy to drift. So every filter is checked here, at the one door
+ * both surfaces come through. Anything that is not the declared type is refused,
+ * which is the difference between a 400 that names the field and a 500 from
+ * redaction being handed a number.
+ */
+function wrongType(what: string, expected: string): InvalidEventError {
+	return new InvalidEventError(`${what} must be ${expected}`);
+}
+
+/**
+ * A supplied identifier filter, normalised, or a refusal.
+ *
+ * Absent means the caller did not set the filter. Present-but-empty is not the same
+ * thing: `normalizeIdentifier("")` is null, and dropping the clause would *widen* the
+ * read to everything the other filters allow — the opposite of what a caller
+ * narrowing by session asked for. So an empty string is refused rather than ignored.
+ */
+function filterText(what: string, value: unknown): string | undefined {
+	if (value === undefined || value === null) return undefined;
+	if (typeof value !== "string") throw wrongType(what, "a string");
+	const normalized = normalizeIdentifier(value);
+	if (normalized === null) throw new InvalidEventError(`${what} is empty: omit it to leave the filter off`);
+	return normalized;
+}
+
+/**
+ * One of a closed set, or a refusal naming what was asked for.
+ *
+ * A filter on an unknown surface or kind would quietly match nothing, and a caller
+ * reading an empty ledger window cannot tell that from a typo in their own query.
+ */
+function oneOf<T extends string>(what: string, allowed: readonly T[], value: unknown): T | undefined {
+	if (value === undefined || value === null) return undefined;
+	if (typeof value !== "string") throw wrongType(what, "a string");
+	if (!(allowed as readonly string[]).includes(value)) {
+		throw new InvalidEventError(`unknown ${what}: ${value}`);
+	}
+	return value as T;
+}
+
+/**
+ * An ISO bound on `ts`, or a refusal. Quoted into SQL, so it is parsed before it is
+ * trusted — and a number is refused rather than read as epoch millis, because
+ * `new Date(123)` is a silently valid 1970 window that returns nothing.
+ */
+function bound(what: string, value: unknown): string | undefined {
+	if (value === undefined || value === null) return undefined;
+	if (typeof value !== "string") throw wrongType(what, "an ISO date string");
+	const date = new Date(value);
+	if (Number.isNaN(date.getTime())) throw new InvalidEventError(`invalid ${what}: ${value}`);
+	return date.toISOString();
+}
+
+/** A row count, clamped, or a refusal — `"10"` is a caller's bug, not a silent default. */
+function rows(value: unknown): number {
+	if (value === undefined || value === null) return queryLimit(undefined);
+	if (typeof value !== "number" || !Number.isFinite(value)) throw wrongType("limit", "a number");
+	return queryLimit(value);
+}
+
+function flag(what: string, value: unknown): boolean {
+	if (value === undefined || value === null) return false;
+	if (typeof value !== "boolean") throw wrongType(what, "a boolean");
+	return value;
+}
+
+/**
+ * A queried event.
+ *
+ * Every stored column except `payload`, which is present only when the caller asked
+ * for it — see `GreptimeClient.queryEvents`.
+ */
+export type LedgerEvent = Omit<SubstrateEvent, "payload"> & { payload?: Record<string, unknown> };
+
+/** A ledger read as a caller submits it: flat, snake_case, every field optional. */
+export interface EventQueryInput {
+	session_id?: string;
+	graph_id?: string;
+	node_id?: string;
+	linear_identifier?: string;
+	repo?: string;
+	branch?: string;
+	surface?: string;
+	kind?: string;
+	actor?: string;
+	/** Inclusive bounds on `ts`, in any form `new Date()` accepts. */
+	since?: string;
+	until?: string;
+	limit?: number;
+	order?: "asc" | "desc";
+	include_payload?: boolean;
+}
+
+export interface EventQueryResult {
+	events: LedgerEvent[];
+	count: number;
+	/**
+	 * The reply hit `limit`, so there may be more. Narrow the filters or raise `limit`.
+	 *
+	 * Not a page marker: `until` is a bound, not a cursor. Two events can share a
+	 * millisecond, so re-querying from a boundary timestamp either repeats the rows at
+	 * it or skips the ones that did not fit. Exhaustive paging needs a `(ts, id)`
+	 * cursor, which this window deliberately does not have — it is a browse, and a
+	 * complete read of a session or graph is `readEvents`, which takes no limit.
+	 */
+	truncated: boolean;
+	/** Set when the ledger could not be read. Redacted, as on the write path. */
+	error?: string;
 }
 
 /**
@@ -183,6 +307,56 @@ export class Substrate {
 			const error = redact(String(cause));
 			process.stderr.write(`[substrate] event ${event.id} not stored — ${error}\n`);
 			return { event, stored: false, error };
+		}
+	}
+
+	/**
+	 * Read a window of the ledger.
+	 *
+	 * The read half of the store lock: Greptime is the only source, and it is reached
+	 * only from here, so a desk seat gets the trail without a credential and without a
+	 * second door onto the table.
+	 *
+	 * Identifier filters are normalised the way the write path stores them — the same
+	 * rule `emit` follows when it looks up a session's chain tip. Querying the raw
+	 * value would silently match nothing for any identifier that redaction or the
+	 * length cap touched, and an empty answer is indistinguishable from an empty
+	 * ledger.
+	 *
+	 * Invalid input throws, as on the write path: a filter on a surface that does not
+	 * exist is a caller's bug and must not read as "nothing happened". A ledger that
+	 * is merely unavailable comes back as an empty window with `error` set, because a
+	 * missing store may not fail an agent's turn.
+	 */
+	async queryEvents(input: EventQueryInput = {}): Promise<EventQueryResult> {
+		const match: Partial<Record<QueryableColumn, string | null | undefined>> = {
+			session_id: filterText("session_id", input.session_id),
+			graph_id: filterText("graph_id", input.graph_id),
+			node_id: filterText("node_id", input.node_id),
+			linear_identifier: filterText("linear_identifier", input.linear_identifier),
+			repo: filterText("repo", input.repo),
+			branch: filterText("branch", input.branch),
+			surface: oneOf<Surface>("surface", SURFACES, input.surface),
+			kind: oneOf<EventKind>("kind", EVENT_KINDS, input.kind),
+			actor: oneOf<Actor>("actor", ACTORS, input.actor),
+		};
+		const order = oneOf<"asc" | "desc">("order", ["asc", "desc"], input.order);
+		const query: EventQuery = {
+			match,
+			since: bound("since", input.since),
+			until: bound("until", input.until),
+			limit: rows(input.limit),
+			order,
+			includePayload: flag("include_payload", input.include_payload),
+		};
+
+		if (!this.greptime) return { events: [], count: 0, truncated: false, error: "GREPTIME_URL is not set" };
+		try {
+			const rows = await this.greptime.queryEvents(query);
+			const events = rows.map((row) => rowToLedgerEvent(row, query.includePayload === true));
+			return { events, count: events.length, truncated: events.length >= (query.limit ?? 0) };
+		} catch (cause) {
+			return { events: [], count: 0, truncated: false, error: redact(String(cause)) };
 		}
 	}
 
