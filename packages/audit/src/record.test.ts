@@ -1,10 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import { canonicalJson as ledgerCanonicalJson, sha256Hex as ledgerSha256Hex } from "../../mcp-server/src/event.ts";
 import {
+	ChainWalker,
+	MAX_IDENTIFIER,
+	MAX_RECORD_BYTES,
+	MAX_TOOL_NAME,
+	NO_POSITION,
 	argDigest,
 	auditStats,
 	buildRecord,
 	canonicalJson,
+	isAuditRecord,
 	recordHash,
 	sealRecord,
 	sha256Hex,
@@ -243,5 +249,221 @@ describe("auditStats", () => {
 
 	test("an empty trail tallies to zero rather than throwing", () => {
 		expect(auditStats([])).toEqual({ total: 0, allowed: 0, denied: 0, byTool: [], bySurface: [] });
+	});
+});
+
+describe("what the audit stores of a caller's identifiers", () => {
+	const chain = { seq: 1, prev: null };
+	const now = new Date("2026-09-30T06:54:39.000Z");
+	// The same redactor shape `packages/mcp-server` injects: enough of it to prove the
+	// field is passed through one, not to re-test the rules.
+	const redact = (text: string) => text.replace(/sk-ant-[A-Za-z0-9_-]{20,}/g, "[REDACTED]");
+	const secret = `sk-ant-${"a".repeat(30)}`;
+
+	test("a credential in graph_id, node_id or session_id is redacted, not stored", () => {
+		// `buildRecord` runs before any tool validates its arguments, so these are whatever
+		// was in the envelope — including on a call that was refused and never ran, which
+		// is the call an audit is most likely to be holding. The app-event write path has
+		// stripped these since SPE-4791; a trail that kept what the ledger drops would be
+		// the more attractive copy of the two.
+		const record = buildRecord(
+			{
+				surface: "omp",
+				tool: "graph_claim",
+				decision: "allowed",
+				mode: "fail-closed",
+				graph_id: `ut-${secret}`,
+				node_id: secret,
+				session_id: `s-${secret}`,
+			},
+			chain,
+			now,
+			redact,
+		);
+
+		expect(JSON.stringify(record)).not.toContain("sk-ant-");
+		expect(record.graph_id).toBe("ut-[REDACTED]");
+		expect(record.node_id).toBe("[REDACTED]");
+		expect(record.session_id).toBe("s-[REDACTED]");
+	});
+
+	test("so is one in the tool name, the surface and the actor", () => {
+		const record = buildRecord(
+			{ surface: secret, tool: `tool_${secret}`, decision: "denied", mode: "fail-closed", actor: secret },
+			chain,
+			now,
+			redact,
+		);
+
+		expect(JSON.stringify(record)).not.toContain("sk-ant-");
+		expect(record.tool).toBe("tool_[REDACTED]");
+		expect(record.surface).toBe("[REDACTED]");
+		expect(record.actor).toBe("[REDACTED]");
+	});
+
+	test("and one in an argument *name*, which is stored where the values are not", () => {
+		const record = buildRecord(
+			{ surface: "omp", tool: "graph_get", decision: "allowed", mode: "fail-open", args: { [secret]: 1, graph_id: "ut-1" } },
+			chain,
+			now,
+			redact,
+		);
+
+		expect(record.arg_keys).toEqual(["[REDACTED]", "graph_id"]);
+		expect(JSON.stringify(record.arg_keys)).not.toContain("sk-ant-");
+	});
+
+	test("the digest is over the arguments as submitted, so redaction cannot move it", () => {
+		// The digest's whole job is proving that a request an investigator holds is the one
+		// that was allowed. Digesting a redacted copy would break that for every request
+		// with a credential-shaped string anywhere in it.
+		const args = { graph_id: secret };
+		const redacted = buildRecord(
+			{ surface: "omp", tool: "graph_get", decision: "allowed", mode: "fail-open", args },
+			chain,
+			now,
+			redact,
+		);
+		expect(redacted.arg_digest).toBe(argDigest(args).digest);
+	});
+
+	test("every stored field is capped, whatever the caller sends", () => {
+		const record = buildRecord(
+			{
+				surface: "s".repeat(4000),
+				tool: "t".repeat(4000),
+				decision: "denied",
+				mode: "fail-closed",
+				reason: "r".repeat(4000),
+				graph_id: "g".repeat(4000),
+				node_id: "n".repeat(4000),
+				session_id: "i".repeat(4000),
+				actor: "a".repeat(4000),
+			},
+			chain,
+			now,
+		);
+
+		expect(record.surface).toHaveLength(MAX_IDENTIFIER);
+		expect(record.graph_id).toHaveLength(MAX_IDENTIFIER);
+		expect(record.node_id).toHaveLength(MAX_IDENTIFIER);
+		expect(record.session_id).toHaveLength(MAX_IDENTIFIER);
+		expect(record.actor).toHaveLength(MAX_IDENTIFIER);
+		expect(record.tool).toHaveLength(MAX_TOOL_NAME);
+		// An identifier this substrate will actually accept is 512 bytes at most on the
+		// event path, so nothing it serves is truncated here.
+		expect(MAX_IDENTIFIER).toBe(512);
+	});
+
+	test("a record is smaller than the bound the recovery window is sized against", () => {
+		const args: Record<string, unknown> = {};
+		for (let i = 0; i < 400; i++) args[`${i}-${"k".repeat(900)}`] = i;
+		const record = buildRecord(
+			{
+				surface: "s".repeat(4000),
+				tool: "t".repeat(4000),
+				decision: "denied",
+				mode: "fail-closed",
+				reason: "r".repeat(4000),
+				graph_id: "g".repeat(4000),
+				node_id: "n".repeat(4000),
+				session_id: "i".repeat(4000),
+				actor: "a".repeat(4000),
+				args,
+			},
+			chain,
+			now,
+		);
+
+		expect(JSON.stringify(record).length).toBeLessThan(MAX_RECORD_BYTES);
+	});
+
+	test("an empty string is stored as null, not as an empty identifier", () => {
+		const record = buildRecord(
+			{ surface: "omp", tool: "graph_get", decision: "allowed", mode: "fail-open", graph_id: "" },
+			chain,
+			now,
+		);
+		expect(record.graph_id).toBeNull();
+	});
+});
+
+describe("isAuditRecord", () => {
+	test("rejects the JSON values that parse but are not records", () => {
+		// A line holding `null` is valid JSONL. Verification read `.hash` off it and threw,
+		// so `/evidence` answered 500 rather than reporting a corrupt audit file.
+		for (const value of [null, undefined, 1, "x", [], [1, 2], {}, { seq: 1 }, { hash: "h" }, { hash: "h", seq: 1.5 }]) {
+			expect(isAuditRecord(value)).toBe(false);
+		}
+	});
+
+	test("accepts a record, and one carrying a field it does not know about", () => {
+		const record = buildRecord(
+			{ surface: "omp", tool: "graph_get", decision: "allowed", mode: "fail-open" },
+			{ seq: 1, prev: null },
+			new Date(),
+		);
+		expect(isAuditRecord(record)).toBe(true);
+		expect(isAuditRecord({ ...record, somethingNew: true })).toBe(true);
+	});
+});
+
+describe("verifyAuditChain on a malformed line", () => {
+	test("reports a verdict instead of throwing", () => {
+		const first = buildRecord(
+			{ surface: "omp", tool: "graph_get", decision: "allowed", mode: "fail-open" },
+			{ seq: 1, prev: null },
+			new Date(),
+		);
+		const verdict = verifyAuditChain([first, null as unknown as AuditRecord]);
+
+		expect(verdict.ok).toBe(false);
+		expect(verdict.ok === false && verdict.brokenAt).toBe(NO_POSITION);
+		expect(verdict.ok === false && verdict.reason).toContain("is not an audit record");
+		expect(verdict.records).toBe(2);
+	});
+});
+
+describe("ChainWalker", () => {
+	function chainOf(count: number): AuditRecord[] {
+		const records: AuditRecord[] = [];
+		let prev: string | null = null;
+		for (let seq = 1; seq <= count; seq++) {
+			const record = buildRecord(
+				{ surface: "omp", tool: "graph_get", decision: "allowed", mode: "fail-open" },
+				{ seq, prev },
+				new Date(2026, 0, seq),
+			);
+			records.push(record);
+			prev = record.hash;
+		}
+		return records;
+	}
+
+	test("agrees with verifyAuditChain, which is the point of there being one of it", () => {
+		// The streaming caller and the in-memory one must not be able to disagree about
+		// whether a file verifies.
+		const records = chainOf(4);
+		const walker = new ChainWalker();
+		for (const record of records) walker.push(record);
+
+		expect(walker.verdict()).toEqual(verifyAuditChain(records));
+		expect(walker.ok).toBe(true);
+	});
+
+	test("keeps the first break and counts every record after it", () => {
+		const records = chainOf(4);
+		const tampered = [...records];
+		tampered[1] = { ...(records[1] as AuditRecord), surface: "muse" };
+		const walker = new ChainWalker();
+		for (const record of tampered) walker.push(record);
+
+		expect(walker.verdict()).toEqual({ ok: false, records: 4, brokenAt: 2, reason: "hash does not match contents" });
+	});
+
+	test("genesis: false lets a bounded window open past seq 1", () => {
+		const walker = new ChainWalker({ genesis: false });
+		for (const record of chainOf(3).slice(1)) walker.push(record);
+		expect(walker.verdict().ok).toBe(true);
 	});
 });

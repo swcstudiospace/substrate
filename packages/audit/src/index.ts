@@ -16,17 +16,32 @@ export {
 	type VerifyChainOptions,
 	AUDIT_DECISIONS,
 	AUDIT_TRANSPORTS,
+	ChainWalker,
+	MAX_ARG_KEY,
+	MAX_ARG_KEYS,
+	MAX_IDENTIFIER,
+	MAX_RECORD_BYTES,
+	MAX_TOOL_NAME,
+	NO_POSITION,
 	argDigest,
 	auditStats,
 	buildRecord,
 	canonicalJson,
+	isAuditRecord,
 	recordHash,
+	sanitizeField,
 	sealRecord,
 	sha256Hex,
 	verifyAuditChain,
 } from "./record.ts";
 
-export { type AuditAppend, type AuditLogOptions, AuditLog, AuditUnavailableError, NO_POSITION } from "./log.ts";
+export {
+	type AuditAppend,
+	type AuditLogOptions,
+	type MissingHistory,
+	AuditLog,
+	AuditUnavailableError,
+} from "./log.ts";
 
 export {
 	type ClaimDecision,
