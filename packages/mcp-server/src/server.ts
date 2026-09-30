@@ -4,7 +4,7 @@
  *   POST /mcp      MCP over streamable HTTP, for agents
  *   POST /brief    the same briefing as plain text, for hooks
  *   POST /events   append an event, for hooks
- *   GET  /healthz  store reachability
+ *   GET  /healthz  store reachability, and whether events can actually be written
  *
  * Hooks get REST because a hook process cannot call an MCP tool — it has no
  * client. Both paths run the same service code.
@@ -18,6 +18,27 @@ import type { Substrate } from "./service.ts";
 import type { Surface } from "./types.ts";
 
 const MAX_BODY_BYTES = 1_000_000;
+
+/**
+ * The status `/healthz` answers with.
+ *
+ * A deployment that configured a ledger and cannot write to it is **not** healthy,
+ * even while the brief still composes from the index: appends are fail-closed, so
+ * every event is being dropped on the floor and a monitor watching only the status
+ * code has to see that. Reporting it in the body alone would leave the one state
+ * this hardening exists to catch looking like 200.
+ *
+ * A run with no `GREPTIME_URL` is a different thing — local dev, or a deployment
+ * that deliberately has no ledger — and is judged on its remaining stores, as
+ * before.
+ */
+export function healthStatus(
+	health: { index: boolean; greptime: boolean; eventsWritable: boolean },
+	ledgerConfigured: boolean,
+): number {
+	if (ledgerConfigured && !health.eventsWritable) return 503;
+	return health.index || health.greptime ? 200 : 503;
+}
 
 async function readBody(req: IncomingMessage): Promise<string> {
 	const chunks: Buffer[] = [];
@@ -55,7 +76,7 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig) 
 		try {
 			if (req.method === "GET" && url.pathname === "/healthz") {
 				const health = await substrate.health();
-				sendJson(res, health.index || health.greptime ? 200 : 503, health);
+				sendJson(res, healthStatus(health, config.greptime !== null), health);
 				return;
 			}
 
@@ -75,11 +96,21 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig) 
 			if (req.method === "POST" && url.pathname === "/events") {
 				const raw = await readBody(req);
 				const body = JSON.parse(raw) as Record<string, unknown>;
-				const event = await substrate.emit({
+				const result = await substrate.emit({
 					...(body as object),
 					surface: (typeof body.surface === "string" ? (body.surface as Surface) : null) ?? surface ?? "claude-code",
 				} as Parameters<Substrate["emit"]>[0]);
-				sendJson(res, 202, { id: event.id, ts: event.ts, hash: event.hash });
+				// 503 when the ledger did not take it. The `substrate` CLI ignores the
+				// status and exits 0 either way — failing open is the client's job, and
+				// this surface owes its caller the truth about durability.
+				sendJson(res, result.stored ? 202 : 503, {
+					id: result.event.id,
+					ts: result.event.ts,
+					hash: result.event.hash,
+					stored: result.stored,
+					...(result.error ? { error: result.error } : {}),
+					...(result.warning ? { warning: result.warning } : {}),
+				});
 				return;
 			}
 

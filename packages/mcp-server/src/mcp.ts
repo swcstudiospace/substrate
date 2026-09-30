@@ -82,7 +82,9 @@ export function createMcpServer(substrate: Substrate, callerSurface: Surface | n
 		{
 			title: "Emit an event",
 			description:
-				"Append a normalised event to the substrate log. Redaction and the hash chain are applied on ingest.",
+				"Append a normalised event to the substrate's append-only event ledger. Redaction and the hash chain " +
+				"are applied on ingest, and this tool is the only way to write to the ledger. The reply's `stored` " +
+				"says whether the append landed — false means the event was normalised but not persisted.",
 			inputSchema: {
 				kind: z.enum(EVENT_KINDS),
 				summary: z.string(),
@@ -99,8 +101,18 @@ export function createMcpServer(substrate: Substrate, callerSurface: Surface | n
 			},
 		},
 		async (args) => {
-			const event = await substrate.emit({ ...args, surface: args.surface ?? callerSurface ?? "claude-code" });
-			return json({ id: event.id, ts: event.ts, hash: event.hash });
+			const { event, stored, error, warning } = await substrate.emit({
+				...args,
+				surface: args.surface ?? callerSurface ?? "claude-code",
+			});
+			return json({
+				id: event.id,
+				ts: event.ts,
+				hash: event.hash,
+				stored,
+				...(error ? { error } : {}),
+				...(warning ? { warning } : {}),
+			});
 		},
 	);
 

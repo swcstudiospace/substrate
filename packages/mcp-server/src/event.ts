@@ -45,14 +45,81 @@ function isKind(value: string): value is SubstrateEvent["kind"] {
 
 export class InvalidEventError extends Error {}
 
-/** Cap on a single summary, so one runaway collector cannot flood the log. */
+/**
+ * Caps on a single event, so one runaway collector cannot flood a log that
+ * nothing will ever compact or delete.
+ */
 const MAX_SUMMARY = 2000;
+const MAX_FIELD = 512;
+const MAX_PAYLOAD_STRING = 4000;
+const MAX_PAYLOAD_BYTES = 16_000;
+
+/**
+ * Redact, then cap, then treat empty as absent.
+ *
+ * The order matters: truncating first could cut a token in half so that its own
+ * pattern no longer matches, and the fragment would be stored. An empty result
+ * becomes `null` so the column is NULL rather than an empty string, which the
+ * brief's filters would otherwise treat as a value.
+ */
+function clean(value: string | null | undefined, limit: number): string | null {
+	if (value === undefined || value === null) return null;
+	const redacted = redact(value).slice(0, limit);
+	return redacted.length > 0 ? redacted : null;
+}
+
+/**
+ * Normalise an identifier the same way `normalizeEvent` stores it.
+ *
+ * `session_id`, `graph_id` and `repo` are query keys as well as stored values —
+ * `emit` looks up the previous hash by session, `verifyGraph` reads by graph, the
+ * brief reads by repo. Cleaning them on the write path but querying with the raw
+ * value would mean a lookup that never matches: every event would restart its
+ * session's chain, and verification would find no rows at all. Anything that
+ * reads by one of these columns goes through here, so the two agree by
+ * construction rather than by both remembering to.
+ */
+export function normalizeIdentifier(value: string | null | undefined): string | null {
+	return clean(value, MAX_FIELD);
+}
+
+/** Cap every string inside a JSON-shaped value. */
+function capStrings(value: unknown, limit: number): unknown {
+	if (typeof value === "string") return value.length > limit ? `${value.slice(0, limit)}…[truncated]` : value;
+	if (Array.isArray(value)) return value.map((inner) => capStrings(inner, limit));
+	if (value && typeof value === "object") {
+		const out: Record<string, unknown> = {};
+		for (const [key, inner] of Object.entries(value as Record<string, unknown>)) {
+			out[key] = capStrings(inner, limit);
+		}
+		return out;
+	}
+	return value;
+}
+
+/**
+ * Redact the payload, cap each string in it, then cap the whole thing.
+ *
+ * A collector that attaches a full diff or a command's entire stdout writes it
+ * into a log nothing can ever reclaim. Per-string capping keeps the useful keys
+ * intact; if the result is still oversized the payload is replaced outright,
+ * because a silently half-written object reads as complete and a marker does not.
+ */
+function normalizePayload(payload: Record<string, unknown> | undefined): Record<string, unknown> {
+	const capped = capStrings(redactValue(payload ?? {}), MAX_PAYLOAD_STRING) as Record<string, unknown>;
+	const bytes = Buffer.byteLength(JSON.stringify(capped) ?? "{}");
+	if (bytes <= MAX_PAYLOAD_BYTES) return capped;
+	return { _dropped: `payload exceeded ${MAX_PAYLOAD_BYTES} bytes`, _bytes: bytes };
+}
 
 /**
  * Validate, redact and chain an incoming event.
  *
  * Redaction happens here rather than in each collector's own code path: a
- * collector may forget, but nothing reaches storage without passing through this.
+ * collector may forget, but nothing reaches storage without passing through
+ * this. Every free-text field is redacted, not just the summary — a branch name
+ * or a session id is agent-supplied too, and there is no second chance once a
+ * row is in an append-only log.
  */
 export function normalizeEvent(input: EventInput, prev: string | null): SubstrateEvent {
 	if (!input || typeof input !== "object") throw new InvalidEventError("event must be an object");
@@ -73,21 +140,65 @@ export function normalizeEvent(input: EventInput, prev: string | null): Substrat
 		id: `evt_${randomUUID().replace(/-/g, "")}`,
 		ts: ts.toISOString(),
 		surface: input.surface,
-		session_id: input.session_id ?? null,
-		graph_id: input.graph_id ?? null,
-		node_id: input.node_id ?? null,
-		linear_identifier: input.linear_identifier ?? null,
-		step: typeof input.step === "number" ? input.step : null,
-		repo: input.repo ?? null,
-		branch: input.branch ?? null,
+		session_id: normalizeIdentifier(input.session_id),
+		graph_id: normalizeIdentifier(input.graph_id),
+		node_id: normalizeIdentifier(input.node_id),
+		linear_identifier: normalizeIdentifier(input.linear_identifier),
+		// A fractional or infinite step would reach a BIGINT column.
+		step: typeof input.step === "number" && Number.isFinite(input.step) ? Math.trunc(input.step) : null,
+		repo: normalizeIdentifier(input.repo),
+		branch: clean(input.branch, MAX_FIELD),
 		actor: input.actor === "human" ? "human" : "agent",
 		kind: input.kind,
-		summary: redact(input.summary).slice(0, MAX_SUMMARY),
-		payload: redactValue(input.payload ?? {}),
+		summary: clean(input.summary, MAX_SUMMARY) ?? "",
+		payload: normalizePayload(input.payload),
 		prev,
 	};
 
 	return { ...unhashed, hash: eventHash(unhashed) };
+}
+
+/**
+ * Put a session's events in chain order before verifying them.
+ *
+ * `ORDER BY "ts"` cannot do this on its own. `agent_events` is in append_mode, so
+ * two events may share a millisecond and Greptime is free to return them in
+ * either order — and `verifyChain` would then report a break in a chain that is
+ * perfectly intact. `prev` carries the order the timestamp lost, so follow it.
+ *
+ * This does not weaken what verification catches. `verifyChain` recomputes every
+ * hash, so tampering is still detected; an event spliced out leaves the events
+ * after it unreachable from the walk, and they are appended unlinked so the
+ * `prev` mismatch is still reported. A fork — two events claiming the same `prev`,
+ * which concurrent appends in one session can still produce — likewise leaves one
+ * branch unlinked and is reported. What it stops reporting is a database's
+ * arbitrary tie-break, which was never an integrity property.
+ */
+export function inChainOrder(events: SubstrateEvent[]): SubstrateEvent[] {
+	if (events.length < 2) return events;
+
+	const next = new Map<string | null, SubstrateEvent>();
+	for (const event of events) if (!next.has(event.prev)) next.set(event.prev, event);
+	const present = new Set(events.map((event) => event.hash));
+
+	// The chain starts at the event with no predecessor, or — when the rows do not
+	// reach back that far — at the one whose predecessor is not among them.
+	const start =
+		events.find((event) => event.prev === null) ?? events.find((event) => !present.has(event.prev ?? ""));
+	if (!start) return events; // every event is claimed: a cycle, for verifyChain to report
+
+	const ordered: SubstrateEvent[] = [];
+	const seen = new Set<string>();
+	let current: SubstrateEvent | undefined = start;
+	while (current && !seen.has(current.hash)) {
+		ordered.push(current);
+		seen.add(current.hash);
+		current = next.get(current.hash);
+	}
+	// Whatever did not link in is a real break. Keep it, so it is reported rather
+	// than quietly dropped from the count.
+	for (const event of events) if (!seen.has(event.hash)) ordered.push(event);
+	return ordered;
 }
 
 /**

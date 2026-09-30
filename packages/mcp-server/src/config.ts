@@ -25,6 +25,20 @@ export interface SubstrateConfig {
 	tokens: Map<string, Surface>;
 	/** When true, an unauthenticated caller is accepted and attributed by its payload. */
 	allowAnonymous: boolean;
+	/**
+	 * Accept a ledger that is not provably append-only.
+	 *
+	 * The default is to refuse: an `agent_events` without `append_mode` drops one
+	 * of two rows sharing a primary key and a millisecond, and a ledger that loses
+	 * rows while answering `stored: true` is worse than one that says it cannot
+	 * take the write. Recreating the table is the fix and is out of band — the
+	 * client refuses `ALTER` and `RENAME` by design.
+	 *
+	 * This exists so an operator can knowingly accept that loss while the recreate
+	 * is pending, rather than having no lever at all. It is never the quiet path:
+	 * the state is in `/healthz` and on every append either way.
+	 */
+	allowDeduplicatingLedger: boolean;
 }
 
 /** SUBSTRATE_TOKEN_GROK_BUILD → "grok-build" */
@@ -62,6 +76,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		// No tokens configured at all means a local dev run; requiring auth then
 		// would just lock the operator out of their own machine.
 		allowAnonymous: readTokens(env).size === 0,
+		allowDeduplicatingLedger: /^(1|true|yes)$/i.test(env.SUBSTRATE_ALLOW_DEDUPLICATING_LEDGER?.trim() ?? ""),
 	};
 }
 
