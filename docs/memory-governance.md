@@ -153,6 +153,37 @@ the same todo. Without a `subject` there is no identity, so the entry is appende
   the entry had committed — so the caller was told nothing was stored while the
   entry was in the index. Uniqueness on `memory_reviews` now covers the pending
   rows only, which is all parking needs.)
+
+  `review.already-approved` is an answer about **this** request, not only about this
+  content, and four things have to hold before it is given:
+
+  - The approved proposal points at a row that **exists and holds this content**.
+    `entry_hash` is the tie between a proposal and its entry; a mismatch means the
+    pointer is wrong, not that this content is in force.
+  - That row is **still standing**. A superseded entry is not what any agent reads, so
+    re-proposing the content is a real proposal and goes through review.
+  - It already records the **retention and confidence being asked for**. `entry_hash`
+    covers the content and deliberately not the `ttl`, `trust` or `actor`, because a
+    reviewed re-submission has to hash the same as the proposal it approves while asking
+    for different trust — so a write asking for `ttl: "30d"`, or for `human-confirmed`,
+    arrives hashing identically to an approved one. Answering it with the permanent,
+    agent-claimed entry under `verified_persisted: true` reports state nobody recorded,
+    so it is parked as its own proposal instead, naming the entry it differs from in
+    `conflict_with`. What the caller did *not* ask for does not count: naming no `trust`
+    is asking for the default, not asking for the entry in force to be downgraded to it.
+  - **Still true once the proposal is parked.** The lookup and the parking insert are two
+    statements, and a reviewer landing the content in between is ordinary — it is what
+    happens when an agent re-proposes at the moment its proposal is approved. The gate
+    looks again afterwards; where the content went into force in that window, the
+    reviewer's own decision resolves the row just parked and the caller is told what is
+    in force.
+
+  The answer **does not spend the idempotency key**, because nothing was written. For
+  the derived key a keyless re-proposal arrives under, recording `accepted` against a
+  row this write did not make is a 24-hour window in which the same content replays that
+  row — and once a reviewer supersedes it, the replay hands back a retired entry as this
+  write's own verified one. The claim is released instead, so the next ask is decided
+  against the index as it is *then*.
 - **`decision` → versioned.** Optimistic concurrency. A caller replacing a standing
   decision must send `expected_version`; a missing one is `version.required` and a
   wrong one is `version.stale`, both quoting the current version and id. On success
@@ -240,6 +271,10 @@ the decision was ever taken.
 - **Only an `accepted` record replays.** A refused write left nothing behind, so
   re-asking is allowed a fresh answer — which is also what makes
   approval-by-resubmit work when the caller sends its own key.
+- **A key is spent only on a row this write made.** An answer that hands back somebody
+  else's entry — `review.already-approved` is the one that can — releases the claim
+  instead. Recording `accepted` against that row would have the next ask under the key
+  replay it, and a row that is in force now can be superseded before then.
 - **A key re-used for a different request is `conflict / idempotency.reused`**, not a
   replay. A key is the caller's promise that one write happens once; it cannot also
   stand for a second, different one. Returning the original entry there would tell a
@@ -286,8 +321,8 @@ the decision was ever taken.
   the reservation rather than replacing it. So when a successor takes over an abandoned
   claim, it looks for that row first: if the dead attempt committed and died before
   acknowledging it, the entry is returned (`recovered.orphan`) rather than written a
-  second time — and a recovered global write also closes the proposal it came from,
-  since the acknowledgement died and not the review.
+  second time — and a recovered global write also closes the proposal it came from and
+  records the approval, since the acknowledgement died and not the review.
 - When that row turns out not to exist, the successor inserts **under the same reserved
   id**. A crash then stays recoverable without another write, and an attempt that was
   fenced out but is still running collides on the primary key instead of adding a second
@@ -351,6 +386,14 @@ A reviewer releases one by re-submitting the same content with a `review_token`:
 write is re-decided with reviewer authority, and any pending proposal with the same
 content hash is marked approved and pointed at the entry that landed.
 
+A reviewer may also install a global entry **outright**, with a token and nothing ever
+having been parked for it. That releases no proposal, so the approval is written down as
+its own `approved` row — otherwise the install is invisible to the next tokenless
+submission of the same content, which is parked as though no reviewer had ever seen it,
+and approving *that* is a second entry for a decision already in force. Resolving the
+pending rows and recording the approval are one statement, so a proposal parked between
+the two cannot be left pending for content already installed.
+
 With no `SUBSTRATE_MEMORY_REVIEW_TOKENS` configured, every review path stays closed
 and the queue simply fills. That is the correct default — nothing forged gets
 through — but it does mean an operator who wants global memories has to configure a
@@ -364,11 +407,13 @@ SUBSTRATE_TEST_PG_URL=postgres://… bun test index-store.memory
 ```
 
 The gate's decisions are proved against a fake store, because the decisions are the
-point and a Postgres would only slow them down. The two races above are the
-exception: they are settled by a unique index, and a fake cannot reproduce an index
-rejecting the second of two inserts that each believed they were the first. So
-`index-store.memory.test.ts` runs them against a real database and skips, loudly,
-without one.
+point and a Postgres would only slow them down. What the *index* decides is the
+exception, and `index-store.memory.test.ts` runs that against a real database, skipping
+loudly without one: a fake cannot reproduce a unique index rejecting the second of two
+inserts that each believed they were the first, and it cannot be migrated off the index
+shape an earlier build left behind. Both are arranged rather than hoped for — the racing
+inserts are held on the index by a third transaction and proved to be blocked before
+they are released, and the migration test seeds the old index first.
 
 ## The lock
 
