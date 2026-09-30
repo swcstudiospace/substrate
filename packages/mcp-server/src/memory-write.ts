@@ -99,6 +99,8 @@ export interface WriteRecord {
 	outcome: MemoryWriteOutcome | "in-flight";
 	entry_id: string | null;
 	entry_hash: string;
+	/** See `requestHash`. Null only on a record written before it existed. */
+	request_hash: string | null;
 }
 
 export type ClaimResult =
@@ -139,6 +141,7 @@ export interface MemoryStore {
 		key: string;
 		explicit: boolean;
 		entryHash: string;
+		requestHash: string;
 		entryId: string;
 	}): Promise<ClaimResult>;
 	/** Records an outcome only while `holder` still owns the claim. */
@@ -236,6 +239,36 @@ function contentHash(input: {
 	return sha256Hex(canonicalJson(input));
 }
 
+/**
+ * What makes two requests under one idempotency key *the same request*.
+ *
+ * Deliberately wider than `contentHash`, and it has to be a second hash rather than a
+ * wider first one: `contentHash` is how a parked proposal is matched to its reviewed
+ * re-submission, so the reviewed attempt must hash the same there even though it is
+ * asking for different trust. Two questions, two hashes.
+ *
+ * Everything the caller *asks to have recorded* is in here. A key re-used with the same
+ * text but a different `ttl` or a different requested `trust` is a request for different
+ * retention or different confidence; replaying the original would answer `accepted` for
+ * state that was never recorded, which is the same lie as replaying different text.
+ *
+ * `session_id` is left out on purpose: a retry legitimately arrives in a new session,
+ * and the session that wrote the row is honestly the one recorded. `graph_id` and `repo`
+ * are in, because they decide which briefs the entry appears in — a difference there is
+ * a difference in what the write does.
+ */
+function requestHash(input: {
+	entryHash: string;
+	ttl: MemoryTtl;
+	trust: Trust | undefined;
+	actor: Actor | undefined;
+	sourceEvent: string | null;
+	graphId: string | null;
+	repo: string | null;
+}): string {
+	return sha256Hex(canonicalJson(input));
+}
+
 export async function governMemoryWrite(
 	request: MemoryWriteRequest,
 	deps: GovernanceDeps,
@@ -312,6 +345,15 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 	const subject = normalizeSubject(request.subject);
 	const sourceEvent = normalizeIdentifier(request.source_event);
 	const entryHash = contentHash({ scope: scope.canonical, kind, subject, text, writer });
+	const asked = requestHash({
+		entryHash,
+		ttl,
+		trust: request.trust,
+		actor: request.actor,
+		sourceEvent,
+		graphId: normalizeIdentifier(request.graph_id),
+		repo: normalizeIdentifier(request.repo),
+	});
 
 	/**
 	 * The fields every row the gate can write shares; only the target table, the id
@@ -374,8 +416,8 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 	// reservation rather than replacing it with this one, so the pointer to a row that
 	// may already exist is never overwritten before it has been resolved. See `rowId`.
 	const entryId = newId("mem");
-	const claim = await store.claimWrite({ key, explicit: explicitKey !== null, entryHash, entryId });
-	if (!claim.claimed) return await replay(store, key, claim.existing, grant.name, entryHash);
+	const claim = await store.claimWrite({ key, explicit: explicitKey !== null, entryHash, requestHash: asked, entryId });
+	if (!claim.claimed) return await replay(store, key, claim.existing, grant.name, entryHash, asked);
 	const { holder } = claim;
 
 	// Taking over an abandoned claim is not the same as finding nothing done. Look for
@@ -618,6 +660,7 @@ async function replay(
 	existing: WriteRecord,
 	grant: string,
 	entryHash: string,
+	asked: string,
 ): Promise<Decision> {
 	if (existing.outcome === "in-flight") {
 		return refuse(
@@ -632,18 +675,26 @@ async function replay(
 	// `denied / store.write-failed`, which is the honest answer.
 	const entry = existing.entry_id ? await store.readEntry(existing.entry_id) : null;
 
-	// A row under this key whose content is not this request's is a *different* write.
-	// Reporting that as `accepted` and handing the caller somebody else's entry would say
-	// their write landed when it never happened — and no remedy can make that honest, so
-	// it is a conflict.
-	if (entry && entry.entry_hash !== entryHash) {
+	// A key already spent on a *different request* cannot also stand for this one.
+	// Reporting that as `accepted` and handing back the earlier entry would say this write
+	// landed when it never happened — and no remedy makes that honest, so it is a conflict.
+	//
+	// Checked against the request identity, not the text: the same words with a different
+	// `ttl` or a different requested `trust` ask for retention or confidence that the
+	// stored row does not have. `verified_persisted: true` on that reply would be a
+	// straight falsehood about state the caller is about to rely on.
+	//
+	// A record with no `request_hash` predates it; fall back to the content comparison
+	// rather than refusing a write whose identity simply was not recorded.
+	const divergent = existing.request_hash ? existing.request_hash !== asked : entry !== null && entry.entry_hash !== entryHash;
+	if (divergent) {
 		return refuse(
 			"conflict",
 			"idempotency.reused",
-			`This idempotency_key was already spent on a different write (${entry.id}). A key is the promise that ` +
-				"one write happens once, so it cannot also stand for this one. Send this entry under its own " +
-				"idempotency_key — and never re-use a key across writes whose content differs.",
-			{ idempotency_key: key, conflict_with: entry.id, grant },
+			`This idempotency_key was already spent on a different write${entry ? ` (${entry.id})` : ""}. A key is the ` +
+				"promise that one write happens once, so it cannot also stand for this one — and that covers the ttl " +
+				"and trust you asked for, not just the text. Send this entry under its own idempotency_key.",
+			{ idempotency_key: key, grant, ...(entry ? { conflict_with: entry.id } : {}) },
 		);
 	}
 
