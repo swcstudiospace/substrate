@@ -4,6 +4,7 @@
  * Deployment reads /etc/substrate/substrate.env via the systemd unit's
  * EnvironmentFile. Nothing here ever reads a secret from the repo.
  */
+import { parseGrants, type MemoryGrant } from "./memory-policy.ts";
 import type { Surface } from "./types.ts";
 
 export interface GreptimeConfig {
@@ -39,6 +40,24 @@ export interface SubstrateConfig {
 	 * the state is in `/healthz` and on every append either way.
 	 */
 	allowDeduplicatingLedger: boolean;
+	/**
+	 * Tokens that carry reviewer authority over memory.
+	 *
+	 * A reviewer's token is the only thing that installs a `global` memory, records
+	 * `human-confirmed` trust, claims `actor: "human"` or releases a reviewable
+	 * quarantine. It is deliberately not a surface token: a surface token says *who
+	 * is writing*, and this says *a person checked this*. Configuring none leaves
+	 * every one of those paths closed, which is the correct default — the queue
+	 * fills, nothing forged gets through.
+	 */
+	memoryReviewTokens: Set<string>;
+	/**
+	 * Grants appended to the default-deny memory policy, from JSON.
+	 *
+	 * They only ever widen it. There is no env var that narrows the defaults,
+	 * because a policy you can loosen by deleting a variable is not one.
+	 */
+	memoryGrants: readonly MemoryGrant[];
 }
 
 /** SUBSTRATE_TOKEN_GROK_BUILD → "grok-build" */
@@ -77,7 +96,23 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		// would just lock the operator out of their own machine.
 		allowAnonymous: readTokens(env).size === 0,
 		allowDeduplicatingLedger: /^(1|true|yes)$/i.test(env.SUBSTRATE_ALLOW_DEDUPLICATING_LEDGER?.trim() ?? ""),
+		memoryReviewTokens: readReviewTokens(env.SUBSTRATE_MEMORY_REVIEW_TOKENS),
+		memoryGrants: parseGrants(env.SUBSTRATE_MEMORY_GRANTS, (message) =>
+			process.stderr.write(`[substrate] ${message}\n`),
+		),
 	};
+}
+
+/** Comma- or whitespace-separated, so an operator can wrap the line in the env file. */
+function readReviewTokens(raw: string | undefined): Set<string> {
+	return new Set(
+		(raw ?? "")
+			.split(/[\s,]+/)
+			.map((token) => token.trim())
+			// A short string is a placeholder or a typo, not a token, and accepting one
+			// would hand reviewer authority to anybody who guessed it.
+			.filter((token) => token.length >= 16),
+	);
 }
 
 /** Resolve a request's bearer token to the surface it belongs to. */
@@ -85,4 +120,18 @@ export function surfaceForToken(config: SubstrateConfig, authorization: string |
 	if (!authorization) return null;
 	const token = authorization.replace(/^Bearer\s+/i, "").trim();
 	return config.tokens.get(token) ?? null;
+}
+
+/**
+ * Whether a presented token carries reviewer authority.
+ *
+ * Fail-closed by construction: a missing token, an empty one and an unknown one
+ * are the same answer, and with no reviewer tokens configured the answer is always
+ * no. Never logs the token — a rejected credential in a log is still a credential
+ * in a log.
+ */
+export function isReviewToken(config: SubstrateConfig, token: string | undefined): boolean {
+	if (typeof token !== "string") return false;
+	const trimmed = token.trim();
+	return trimmed.length > 0 && config.memoryReviewTokens.has(trimmed);
 }

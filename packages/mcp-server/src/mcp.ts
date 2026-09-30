@@ -9,7 +9,15 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Substrate } from "./service.ts";
-import { EVENT_KINDS, MEMORY_KINDS, NODE_STATES, SURFACES, TRUST_LEVELS, type Surface } from "./types.ts";
+import {
+	EVENT_KINDS,
+	MEMORY_KINDS,
+	MEMORY_TTLS,
+	NODE_STATES,
+	SURFACES,
+	TRUST_LEVELS,
+	type Surface,
+} from "./types.ts";
 
 const surfaceSchema = z.enum(SURFACES);
 
@@ -46,17 +54,51 @@ export function createMcpServer(substrate: Substrate, callerSurface: Surface | n
 		{
 			title: "Write a memory entry",
 			description:
-				"Record a decision, fact, warning, handoff or todo at a scope so other agents see it in their brief.",
+				"Record a decision, fact, warning, handoff or todo at a scope so other agents see it in their brief. " +
+				"Governed and default-deny: the reply's `outcome` is accepted | conflict | quarantined | denied, and " +
+				"`remedy` says what to do about it. Treat the write as durable only when `outcome` is accepted AND " +
+				"`verified_persisted` is true — anything else means no other agent will act on this. A `global` scope " +
+				"is a proposal until a reviewer releases it; a `decision` with a subject must name the `expected_version` " +
+				"it supersedes.",
 			inputSchema: {
 				scope: z.string().describe("graph:<id> | repo:<name> | global | agent:<surface> | person:<name>"),
 				kind: z.enum(MEMORY_KINDS),
 				text: z.string(),
-				trust: z.enum(TRUST_LEVELS).optional(),
-				ttl: z.string().optional().describe("graph | 30d | permanent"),
-				source_event: z.string().optional(),
+				subject: z
+					.string()
+					.optional()
+					.describe(
+						"a stable name for what this entry is about; two entries sharing one at the same scope and kind " +
+							"are the same claim over time, which is what lets a todo replace and a decision version",
+					),
+				trust: z
+					.enum(TRUST_LEVELS)
+					.optional()
+					.describe(
+						"human-confirmed needs a review_token; verified-by-test needs a source_event naming the run " +
+							"that proved it. Anything else is recorded as agent-claimed.",
+					),
+				ttl: z.enum(MEMORY_TTLS).optional(),
+				source_event: z.string().optional().describe("the event id this entry came from, for provenance"),
+				session_id: z.string().optional(),
+				graph_id: z.string().optional(),
+				repo: z.string().optional(),
+				expected_version: z
+					.number()
+					.int()
+					.min(0)
+					.optional()
+					.describe("the version of the entry this write supersedes; required to replace a standing decision"),
+				idempotency_key: z
+					.string()
+					.optional()
+					.describe("makes the write exactly-once — retry with the same key rather than writing twice"),
+				review_token: z.string().optional().describe("a reviewer's token; never stored or echoed"),
 				surface: surfaceSchema.optional().describe("defaults to the caller's own surface"),
 			},
-			annotations: { destructiveHint: false },
+			// Not destructive: a superseded entry is retired, never deleted. Idempotent
+			// where the caller supplies a key, which is the whole point of having one.
+			annotations: { destructiveHint: false, idempotentHint: true },
 		},
 		async ({ surface, ...entry }) =>
 			json(await substrate.writeMemory({ ...entry, writer: surface ?? callerSurface ?? "unknown" })),
@@ -66,15 +108,36 @@ export function createMcpServer(substrate: Substrate, callerSurface: Surface | n
 		"memory_search",
 		{
 			title: "Search memory",
-			description: "Full-text search over memory entries, optionally narrowed to one scope.",
+			description:
+				"Full-text search over memory entries, optionally narrowed to one scope. Superseded entries are " +
+				"excluded unless asked for, and quarantined or unreviewed writes are never returned. An entry with " +
+				"`needs_reverification` has outlived its trust: check it before acting on it.",
 			inputSchema: {
 				query: z.string(),
 				scope: z.string().optional(),
 				limit: z.number().int().min(1).max(100).optional(),
+				include_superseded: z
+					.boolean()
+					.optional()
+					.describe("include retired versions — how you read a decision's history"),
 			},
 			annotations: { readOnlyHint: true },
 		},
-		async ({ query, scope, limit }) => json(await substrate.searchMemory(query, scope, limit)),
+		async ({ query, scope, limit, include_superseded }) =>
+			json(await substrate.searchMemory(query, scope, limit, include_superseded)),
+	);
+
+	server.registerTool(
+		"memory_pending",
+		{
+			title: "Memory awaiting review",
+			description:
+				"Writes the governance gate parked: proposals waiting on a reviewer, and quarantined entries. Bodies " +
+				"are redacted. Neither reaches a brief or a search until released.",
+			inputSchema: { limit: z.number().int().min(1).max(100).optional() },
+			annotations: { readOnlyHint: true },
+		},
+		async ({ limit }) => json(await substrate.governanceQueue(limit)),
 	);
 
 	server.registerTool(

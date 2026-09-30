@@ -7,15 +7,26 @@
  * source of truth — a disagreement is resolved by refreshing from Notion/Linear.
  */
 import { SQL } from "bun";
-import { randomUUID } from "node:crypto";
+import { normalizeIdentifier } from "./event.ts";
+import { needsReverification } from "./memory-policy.ts";
+import {
+	DERIVED_KEY_WINDOW_MS,
+	IN_FLIGHT_TIMEOUT_MS,
+	type ClaimResult,
+	type MemoryStore,
+	type NewMemoryEntry,
+	type WriteRecord,
+} from "./memory-write.ts";
 import type {
+	Actor,
 	GraphIndexRow,
 	GraphNode,
 	GraphStep,
 	GraphView,
 	MemoryEntry,
-	MemoryEntryInput,
+	MemoryWriteOutcome,
 	NodeState,
+	QuarantineReason,
 	Surface,
 } from "./types.ts";
 import { redact } from "./redact.ts";
@@ -27,7 +38,7 @@ import { redact } from "./redact.ts";
  */
 const TERMINAL_STATUSES = ["Merged", "Resolved", "Done", "Won't Fix", "Closed", "Failed", "Canceled"];
 
-export class IndexStore {
+export class IndexStore implements MemoryStore {
 	private readonly sql: SQL;
 
 	constructor(connectionString: string) {
@@ -83,10 +94,94 @@ export class IndexStore {
 				ttl          text not null default 'permanent',
 				created      timestamptz not null default now()
 			)`;
+
+		// Governance columns, added rather than declared: `memory_entries` predates the
+		// gate and is live, so every one of these has to be safe on a table that
+		// already holds rows. The defaults are what an ungoverned Phase 0 entry
+		// honestly was — one version, written by an agent, superseding nothing.
+		await this.sql`
+			alter table memory_entries
+				add column if not exists subject         text,
+				add column if not exists actor           text not null default 'agent',
+				add column if not exists session_id      text,
+				add column if not exists graph_id        text,
+				add column if not exists repo            text,
+				add column if not exists conflict_key    text,
+				add column if not exists version         int not null default 1,
+				add column if not exists supersedes      text,
+				add column if not exists superseded_by   text,
+				add column if not exists entry_hash      text,
+				add column if not exists reverify_after  timestamptz,
+				add column if not exists idempotency_key text`;
+
+		// The idempotency ledger. One row per key ever spent; `claimed` is what makes
+		// an abandoned in-flight claim recoverable and a derived key expire.
+		await this.sql`
+			create table if not exists memory_writes (
+				idempotency_key text primary key,
+				explicit        boolean not null default false,
+				outcome         text not null,
+				entry_id        text,
+				entry_hash      text not null,
+				claimed         timestamptz not null default now()
+			)`;
+
+		// Parked writes. Both tables hold the *redacted* body: a quarantined secret is
+		// quarantined so a reviewer can see what was attempted, never so the substrate
+		// can keep the credential.
+		await this.sql`
+			create table if not exists memory_quarantine (
+				id           text primary key,
+				scope        text not null,
+				kind         text not null,
+				body         text not null,
+				subject      text,
+				writer       text not null,
+				source_event text,
+				session_id   text,
+				graph_id     text,
+				repo         text,
+				entry_hash   text not null,
+				reason       text not null,
+				detail       text not null,
+				created      timestamptz not null default now()
+			)`;
+		await this.sql`
+			create table if not exists memory_reviews (
+				id              text primary key,
+				scope           text not null,
+				kind            text not null,
+				body            text not null,
+				subject         text,
+				writer          text not null,
+				source_event    text,
+				session_id      text,
+				graph_id        text,
+				repo            text,
+				ttl             text not null default 'permanent',
+				entry_hash      text not null,
+				reason          text not null,
+				state           text not null default 'pending',
+				entry_id        text,
+				decided         timestamptz,
+				decided_by      text,
+				created         timestamptz not null default now()
+			)`;
+
 		await this.sql`create index if not exists graph_index_repo_idx on graph_index (repo)`;
 		await this.sql`create index if not exists graph_nodes_claimed_idx on graph_nodes (claimed_by)`;
 		await this.sql`create index if not exists memory_scope_idx on memory_entries (scope)`;
 		await this.sql`create index if not exists memory_fts_idx on memory_entries using gin (to_tsvector('english', body))`;
+		// The identity the lww and versioned strategies resolve against: one standing
+		// entry per conflict key, enforced rather than merely selected for.
+		await this.sql`
+			create unique index if not exists memory_standing_idx on memory_entries (conflict_key)
+			where conflict_key is not null and superseded_by is null`;
+		await this.sql`create index if not exists memory_reverify_idx on memory_entries (reverify_after)`;
+		// What makes parking idempotent: a retried write finds its own parked row
+		// instead of adding another for a reviewer to wade through.
+		await this.sql`create unique index if not exists memory_quarantine_hash_idx on memory_quarantine (entry_hash)`;
+		await this.sql`create unique index if not exists memory_reviews_hash_idx on memory_reviews (entry_hash, state)`;
 	}
 
 	// ── graph ──────────────────────────────────────────────────────────────────
@@ -216,39 +311,230 @@ export class IndexStore {
 	}
 
 	// ── memory ─────────────────────────────────────────────────────────────────
+	//
+	// Every write below is reached through `governMemoryWrite` — the gate in
+	// `memory-write.ts` decides RBAC, quarantine, idempotency and conflicts, and
+	// these methods are the thin, boring half. There is deliberately no ungoverned
+	// `writeMemory` here any more: the reason the gate cannot be forgotten is that
+	// there is no second door past it, the same argument that keeps the Greptime
+	// client inside this package.
 
-	async writeMemory(entry: MemoryEntryInput): Promise<MemoryEntry> {
-		const id = `mem_${randomUUID().replace(/-/g, "")}`;
-		const rows = (await this.sql`
-			insert into memory_entries (id, scope, kind, body, source_event, writer, trust, ttl)
-			values (${id}, ${entry.scope}, ${entry.kind}, ${redact(entry.text)}, ${entry.source_event ?? null},
-			        ${entry.writer}, ${entry.trust ?? "agent-claimed"}, ${entry.ttl ?? "permanent"})
-			returning id, scope, kind, body, source_event, writer, trust, ttl, created`) as Array<
-			Record<string, unknown>
-		>;
-		return toMemoryEntry(rows[0]!);
+	/**
+	 * Claim an idempotency key, or report the record that already holds it.
+	 *
+	 * One statement, because it is the only place in the gate where two concurrent
+	 * writes have to be ordered. The claim is handed over in exactly three cases: the
+	 * key is fresh; the previous attempt was refused, so nothing was written and
+	 * re-asking is allowed; or the holder is an in-flight claim that was abandoned,
+	 * or a derived key whose dedup window has passed. An `accepted` explicit key is
+	 * never handed over — that is what "exactly once" means.
+	 */
+	async claimWrite(input: { key: string; explicit: boolean; entryHash: string }): Promise<ClaimResult> {
+		const inFlightSeconds = IN_FLIGHT_TIMEOUT_MS / 1000;
+		const derivedSeconds = DERIVED_KEY_WINDOW_MS / 1000;
+		const claimed = (await this.sql`
+			insert into memory_writes (idempotency_key, explicit, outcome, entry_hash, claimed)
+			values (${input.key}, ${input.explicit}, 'in-flight', ${input.entryHash}, now())
+			on conflict (idempotency_key) do update set
+				outcome    = 'in-flight',
+				entry_id   = null,
+				explicit   = excluded.explicit,
+				entry_hash = excluded.entry_hash,
+				claimed    = now()
+			where memory_writes.outcome not in ('accepted', 'in-flight')
+			   or (memory_writes.outcome = 'in-flight'
+			       and memory_writes.claimed < now() - make_interval(secs => ${inFlightSeconds}))
+			   or (memory_writes.outcome = 'accepted' and memory_writes.explicit = false
+			       and memory_writes.claimed < now() - make_interval(secs => ${derivedSeconds}))
+			returning idempotency_key`) as Array<Record<string, unknown>>;
+		if (claimed.length > 0) return { claimed: true };
+
+		const existing = (await this.sql`
+			select idempotency_key, explicit, outcome, entry_id, entry_hash
+			from memory_writes where idempotency_key = ${input.key}`) as Array<Record<string, unknown>>;
+		const row = existing[0];
+		// The conflict cleared between the two statements: nothing holds the key now,
+		// so treat it as ours rather than reporting a holder that is not there.
+		if (!row) return { claimed: true };
+		return {
+			claimed: false,
+			existing: {
+				idempotency_key: String(row.idempotency_key),
+				explicit: row.explicit === true,
+				outcome: String(row.outcome) as WriteRecord["outcome"],
+				entry_id: row.entry_id === null || row.entry_id === undefined ? null : String(row.entry_id),
+				entry_hash: String(row.entry_hash),
+			},
+		};
 	}
 
-	async searchMemory(query: string, scope?: string, limit = 20): Promise<MemoryEntry[]> {
+	async finishWrite(key: string, outcome: MemoryWriteOutcome, entryId: string | null): Promise<void> {
+		await this.sql`
+			update memory_writes set outcome = ${outcome}, entry_id = ${entryId}, claimed = now()
+			where idempotency_key = ${key}`;
+	}
+
+	/** Only an in-flight claim is released — a finished record is the audit trail. */
+	async releaseWrite(key: string): Promise<void> {
+		await this.sql`delete from memory_writes where idempotency_key = ${key} and outcome = 'in-flight'`;
+	}
+
+	async standingEntry(conflictKey: string): Promise<MemoryEntry | null> {
 		const rows = (await this.sql`
-			select id, scope, kind, body, source_event, writer, trust, ttl, created
+			select * from memory_entries
+			where conflict_key = ${conflictKey} and superseded_by is null
+			order by version desc, created desc
+			limit 1`) as Array<Record<string, unknown>>;
+		const row = rows[0];
+		return row ? toMemoryEntry(row) : null;
+	}
+
+	/**
+	 * Insert an entry, retiring the one it supersedes in the same transaction.
+	 *
+	 * `memory_standing_idx` makes "one entry in force per conflict key" a database
+	 * invariant rather than a convention, which means the retire and the insert
+	 * cannot be two statements: either order leaves a window where the invariant is
+	 * false. So they are one.
+	 */
+	async insertEntry(row: NewMemoryEntry): Promise<{ ok: true; entry: MemoryEntry } | { ok: false; reason: "standing-moved" }> {
+		return (await this.sql.begin(async (tx: SQL) => {
+			if (row.supersedes) {
+				const retired = (await tx`
+					update memory_entries set superseded_by = ${row.id}
+					where id = ${row.supersedes} and superseded_by is null
+					returning id`) as Array<Record<string, unknown>>;
+				// Somebody else replaced it while this write was in flight. Rolling back is
+				// the honest answer; the gate turns it into a conflict.
+				if (retired.length === 0) return { ok: false as const, reason: "standing-moved" as const };
+			}
+			const inserted = (await tx`
+				insert into memory_entries (
+					id, scope, kind, body, subject, source_event, writer, actor, trust, ttl,
+					session_id, graph_id, repo, conflict_key, version, supersedes, entry_hash,
+					reverify_after, idempotency_key)
+				values (
+					${row.id}, ${row.scope}, ${row.kind}, ${redact(row.text)}, ${row.subject}, ${row.source_event},
+					${row.writer}, ${row.actor}, ${row.trust}, ${row.ttl}, ${row.session_id}, ${row.graph_id},
+					${row.repo}, ${row.conflict_key}, ${row.version}, ${row.supersedes}, ${row.entry_hash},
+					${row.reverify_after}, ${row.idempotency_key})
+				returning *`) as Array<Record<string, unknown>>;
+			return { ok: true as const, entry: toMemoryEntry(inserted[0]!) };
+		})) as { ok: true; entry: MemoryEntry } | { ok: false; reason: "standing-moved" };
+	}
+
+	async readEntry(id: string): Promise<MemoryEntry | null> {
+		const rows = (await this.sql`
+			select * from memory_entries where id = ${id}`) as Array<
+			Record<string, unknown>
+		>;
+		const row = rows[0];
+		return row ? toMemoryEntry(row) : null;
+	}
+
+	/** Park a classified write. Idempotent on the content hash. */
+	async quarantineEntry(row: NewMemoryEntry & { reason: QuarantineReason; detail: string }): Promise<string> {
+		const inserted = (await this.sql`
+			insert into memory_quarantine (
+				id, scope, kind, body, subject, writer, source_event, session_id, graph_id, repo,
+				entry_hash, reason, detail)
+			values (
+				${row.id}, ${row.scope}, ${row.kind}, ${redact(row.text)}, ${row.subject}, ${row.writer},
+				${row.source_event}, ${row.session_id}, ${row.graph_id}, ${row.repo}, ${row.entry_hash},
+				${row.reason}, ${row.detail})
+			on conflict (entry_hash) do nothing
+			returning id`) as Array<Record<string, unknown>>;
+		if (inserted[0]) return String(inserted[0].id);
+		const existing = (await this.sql`
+			select id from memory_quarantine where entry_hash = ${row.entry_hash}`) as Array<Record<string, unknown>>;
+		return existing[0] ? String(existing[0].id) : row.id;
+	}
+
+	/** Park a proposal for review. Idempotent on the content hash while pending. */
+	async enqueueReview(row: NewMemoryEntry & { reason: string }): Promise<string> {
+		const inserted = (await this.sql`
+			insert into memory_reviews (
+				id, scope, kind, body, subject, writer, source_event, session_id, graph_id, repo, ttl,
+				entry_hash, reason, state)
+			values (
+				${row.id}, ${row.scope}, ${row.kind}, ${redact(row.text)}, ${row.subject}, ${row.writer},
+				${row.source_event}, ${row.session_id}, ${row.graph_id}, ${row.repo}, ${row.ttl},
+				${row.entry_hash}, ${row.reason}, 'pending')
+			on conflict (entry_hash, state) do nothing
+			returning id`) as Array<Record<string, unknown>>;
+		if (inserted[0]) return String(inserted[0].id);
+		const existing = (await this.sql`
+			select id from memory_reviews where entry_hash = ${row.entry_hash} and state = 'pending'`) as Array<
+			Record<string, unknown>
+		>;
+		return existing[0] ? String(existing[0].id) : row.id;
+	}
+
+	/** Close the loop: a reviewed write that landed resolves the proposal it came from. */
+	async releaseReviews(entryHash: string, entryId: string, decidedBy: string): Promise<number> {
+		const rows = (await this.sql`
+			update memory_reviews
+			set state = 'approved', entry_id = ${entryId}, decided = now(), decided_by = ${decidedBy}
+			where entry_hash = ${entryHash} and state = 'pending'
+			returning id`) as Array<Record<string, unknown>>;
+		return rows.length;
+	}
+
+	/** What a reviewer has to look at. Bodies are redacted; nothing here is briefed. */
+	async governanceQueue(limit = 20): Promise<{
+		reviews: Array<Record<string, unknown>>;
+		quarantined: Array<Record<string, unknown>>;
+	}> {
+		const reviews = (await this.sql`
+			select id, scope, kind, body, subject, writer, reason, created
+			from memory_reviews where state = 'pending'
+			order by created desc limit ${limit}`) as Array<Record<string, unknown>>;
+		const quarantined = (await this.sql`
+			select id, scope, kind, body, subject, writer, reason, detail, created
+			from memory_quarantine
+			order by created desc limit ${limit}`) as Array<Record<string, unknown>>;
+		return { reviews, quarantined };
+	}
+
+	/**
+	 * Full-text search. Superseded entries are excluded by default: an agent asking
+	 * what is true wants what is in force, not every version of it. A decision log is
+	 * still readable — `includeSuperseded` is how you read it.
+	 */
+	async searchMemory(query: string, scope?: string, limit = 20, includeSuperseded = false): Promise<MemoryEntry[]> {
+		const rows = (await this.sql`
+			select *
 			from memory_entries
 			where (${scope ?? null}::text is null or scope = ${scope ?? null})
+			  and (${includeSuperseded} or superseded_by is null)
 			  and (${query ?? ""} = '' or to_tsvector('english', body) @@ plainto_tsquery('english', ${query}))
 			order by created desc
 			limit ${limit}`) as Array<Record<string, unknown>>;
 		return rows.map(toMemoryEntry);
 	}
 
-	/** Entries relevant to a brief: this graph, this repo, and globals. */
+	/**
+	 * Entries relevant to a brief: this graph, this repo, and globals.
+	 *
+	 * The scope strings are built with `normalizeIdentifier`, because the gate stores
+	 * them that way — querying the raw spelling would match nothing, the same trap
+	 * `emit` fell into with session ids.
+	 */
 	async memoryForBrief(repo: string | null, graphId: string | null, limit = 10): Promise<MemoryEntry[]> {
-		const scopes = ["global", ...(repo ? [`repo:${repo}`] : []), ...(graphId ? [`graph:${graphId}`] : [])];
+		const normalizedRepo = normalizeIdentifier(repo);
+		const normalizedGraph = normalizeIdentifier(graphId);
+		const scopes = [
+			"global",
+			...(normalizedRepo ? [`repo:${normalizedRepo}`] : []),
+			...(normalizedGraph ? [`graph:${normalizedGraph}`] : []),
+		];
 		// `in ${sql(array)}` is the form Bun's SQL expands to a value list. Passing
 		// the array straight to `any()` stringifies it into a malformed array literal.
 		const rows = (await this.sql`
-			select id, scope, kind, body, source_event, writer, trust, ttl, created
+			select *
 			from memory_entries
 			where scope in ${this.sql(scopes)}
+			  and superseded_by is null
 			order by created desc
 			limit ${limit}`) as Array<Record<string, unknown>>;
 		return rows.map(toMemoryEntry);
@@ -268,16 +554,43 @@ export class IndexStore {
 	}
 }
 
-function toMemoryEntry(row: Record<string, unknown>): MemoryEntry {
+/** Absent, null and the empty string all mean "not set" on the way out of Postgres. */
+function optional(value: unknown): string | undefined {
+	if (value === null || value === undefined) return undefined;
+	const text = value instanceof Date ? value.toISOString() : String(value);
+	return text.length > 0 ? text : undefined;
+}
+
+function timestamp(value: unknown): string {
+	return value instanceof Date ? value.toISOString() : String(value);
+}
+
+export function toMemoryEntry(row: Record<string, unknown>, now = Date.now()): MemoryEntry {
+	const reverifyAfter = optional(row.reverify_after);
 	return {
 		id: String(row.id),
 		scope: String(row.scope),
 		kind: row.kind as MemoryEntry["kind"],
 		text: String(row.body),
-		source_event: row.source_event === null ? undefined : String(row.source_event),
+		subject: optional(row.subject),
+		source_event: optional(row.source_event),
+		session_id: optional(row.session_id),
+		graph_id: optional(row.graph_id),
+		repo: optional(row.repo),
 		writer: String(row.writer),
+		actor: (row.actor === "human" ? "human" : "agent") as Actor,
 		trust: row.trust as MemoryEntry["trust"],
 		ttl: String(row.ttl),
-		created: row.created instanceof Date ? row.created.toISOString() : String(row.created),
+		created: timestamp(row.created),
+		// `version` predates the gate on rows written in Phase 0, where the column
+		// default backfilled it to 1 — which is what those entries honestly were.
+		version: Number(row.version ?? 1),
+		supersedes: optional(row.supersedes),
+		superseded_by: optional(row.superseded_by),
+		entry_hash: String(row.entry_hash ?? ""),
+		...(reverifyAfter ? { reverify_after: reverifyAfter } : {}),
+		// Derived, not stored: an entry decays where it sits, without a sweeper job.
+		needs_reverification: needsReverification(reverifyAfter, now),
+		idempotency_key: optional(row.idempotency_key),
 	};
 }
