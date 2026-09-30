@@ -413,10 +413,15 @@ export async function governMemoryWrite(
 	}
 }
 
+/**
+ * A caller-supplied key is stored and echoed, so it is redacted like every other
+ * free-text field. Redaction is deterministic, so the same key still dedupes
+ * against itself on a retry.
+ */
 function normalizeKey(value: unknown): string | null {
 	if (typeof value !== "string") return null;
-	const trimmed = value.trim().slice(0, MAX_KEY);
-	return trimmed.length > 0 ? trimmed : null;
+	const cleaned = redact(value.trim()).slice(0, MAX_KEY);
+	return cleaned.length > 0 ? cleaned : null;
 }
 
 /**

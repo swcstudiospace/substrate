@@ -50,6 +50,19 @@ describe("parseScope", () => {
 		expect(parseScope("global:everything")).toBeNull();
 	});
 
+	test("an agent id folds case, because it names a surface", () => {
+		// The `self` rule compares it against the writer, so `agent:HERMES` written by
+		// `hermes` has to be that agent's own scope and not a denial nobody can explain.
+		expect(parseScope("agent:HERMES")?.canonical).toBe("agent:hermes");
+		expect(grantFor("hermes", scope("agent:HERMES"), "fact")?.name).toBe("agent-self");
+	});
+
+	test("a repo id keeps its case, because the brief reads the original spelling", () => {
+		// GitHub slugs can carry case. Lowercasing the write while memoryForBrief queries
+		// what the caller passed is the lookup-that-never-matches bug.
+		expect(parseScope("repo:swcstudiospace/AutonoGrammer")?.canonical).toBe("repo:swcstudiospace/AutonoGrammer");
+	});
+
 	test("normalises the id the same way every other query key is", () => {
 		// The scope is written by the gate and read by memoryForBrief; a raw form here
 		// and a cleaned one there is the lookup-that-never-matches bug all over again.

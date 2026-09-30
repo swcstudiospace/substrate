@@ -56,7 +56,13 @@ export function parseScope(raw: unknown): MemoryScope | null {
 	// `global` takes no id, so `global:anything` is malformed rather than a scope.
 	if (family === "global") return null;
 
-	const id = normalizeIdentifier(trimmed.slice(split + 1).trim());
+	const rawId = trimmed.slice(split + 1).trim();
+	// An `agent:` id names a surface, and surfaces are lowercase — it is compared
+	// against the writer by the `self` rule, so `agent:HERMES` written by `hermes`
+	// has to be the same scope rather than a denial nobody can explain. A `repo:` id
+	// is left alone: GitHub slugs can carry case, and lowercasing the write while the
+	// brief reads the original spelling is the lookup-that-never-matches bug.
+	const id = normalizeIdentifier(family === "agent" ? rawId.toLowerCase() : rawId);
 	if (!id) return null;
 	return { class: family as MemoryScopeClass, id, canonical: `${family}:${id}` };
 }

@@ -343,9 +343,9 @@ export class IndexStore implements MemoryStore {
 				claimed    = now()
 			where memory_writes.outcome not in ('accepted', 'in-flight')
 			   or (memory_writes.outcome = 'in-flight'
-			       and memory_writes.claimed < now() - make_interval(secs => ${inFlightSeconds}))
+			       and memory_writes.claimed < now() - make_interval(secs => ${inFlightSeconds}::float8))
 			   or (memory_writes.outcome = 'accepted' and memory_writes.explicit = false
-			       and memory_writes.claimed < now() - make_interval(secs => ${derivedSeconds}))
+			       and memory_writes.claimed < now() - make_interval(secs => ${derivedSeconds}::float8))
 			returning idempotency_key`) as Array<Record<string, unknown>>;
 		if (claimed.length > 0) return { claimed: true };
 
@@ -506,7 +506,7 @@ export class IndexStore implements MemoryStore {
 			select *
 			from memory_entries
 			where (${scope ?? null}::text is null or scope = ${scope ?? null})
-			  and (${includeSuperseded} or superseded_by is null)
+			  and (${includeSuperseded}::boolean or superseded_by is null)
 			  and (${query ?? ""} = '' or to_tsvector('english', body) @@ plainto_tsquery('english', ${query}))
 			order by created desc
 			limit ${limit}`) as Array<Record<string, unknown>>;
