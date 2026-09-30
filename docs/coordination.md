@@ -75,10 +75,20 @@ still working on. Two details carry that:
 `force: true` prises a node loose from a holder that is gone. It is an
 **operator** action, not a peer's: every surface token is equally privileged, so
 a `force` any agent could use would make every lease advisory again for anyone
-who chose. It needs a token from `SUBSTRATE_OPERATOR_TOKENS`, and is refused
-with `force-requires-operator` rather than quietly downgraded to an ordinary
-release — a downgrade would read as success and leave the holder in place. An
-operator token is not a surface, so nothing it does is attributed to an agent.
+who chose. It needs a token listed in `SUBSTRATE_OPERATOR_TOKENS`, and is
+refused with `force-requires-operator` rather than quietly downgraded to an
+ordinary release — a downgrade would read as success and leave the holder in
+place.
+
+An operator token is a **surface token that is also listed as an operator's**,
+not a separate class of credential. That is deliberate. A token that
+authenticated while naming no surface would reach the authoring routes with no
+identity, and each of those falls back to the request body — so an operator
+credential could have signed a handoff as any agent it cared to name. Operator
+authority is an attribute of a surface token, so a forced release is always
+attributable to whoever used it. An operator token that is not also a surface
+token can never authenticate, and is reported at boot rather than left to look
+configured.
 
 Expiry is honoured lazily, so it is already correct without a reaper.
 `coord_reap_leases` exists to make it **visible**: rows stop naming holders that
@@ -133,6 +143,15 @@ to replay: the next agent would find the work abandoned and no account of it.
 Keeping the hold on a failed append is the recoverable half — the sender still
 holds its node and can retry — and `lease_released` in the reply reports what
 actually happened.
+
+Which means the packet's `handover_lease_id` names the lease the sender *meant*
+to hand over, and no outcome. It cannot honestly name one: the packet is signed
+before the release is attempted and is then immutable, while a lease's state is
+not — a packet asserting "this node is free" would be stale the moment another
+agent claimed it. So a receiver replaying a handoff does not read the node's
+state off the packet. It calls `graph_claim`, which answers authoritatively and
+is what it has to do anyway; whether the sender's release landed is a separate
+event in the same ledger.
 
 **Signed** because the packet is acted on by an agent that did not see it
 written. The order is the point: the packet is redacted, capped, size-fitted and

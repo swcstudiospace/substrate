@@ -609,6 +609,14 @@ export class GreptimeClient {
 	 * validated hex, so it cannot carry a LIKE wildcard, and the candidates are
 	 * returned rather than a boolean — seven hex characters can appear by
 	 * coincidence, so the caller confirms each against the sha it asked about.
+	 *
+	 * Both patterns are anchored to the shape the sha is actually *stored* in —
+	 * `commit <sha> <subject>` in the summary, `"sha":"<sha>"` in the payload —
+	 * which are the two places {@link extractCommitSha} reads it from. A bare
+	 * `%<prefix>%` would also match any event that merely mentioned those seven
+	 * characters somewhere in its text, and enough of those could fill the row
+	 * limit and push the real commit event out of the answer — reporting the tip
+	 * as unlogged because too many things talked about it.
 	 */
 	async commitEventsNaming(repo: string, sha: string, limit = 20): Promise<Array<Record<string, unknown>>> {
 		if (!/^[0-9a-f]{7,40}$/i.test(sha)) return [];
@@ -617,7 +625,7 @@ export class GreptimeClient {
 		return this.sql(
 			`SELECT "ts", "id", "surface", "summary", "payload" FROM "agent_events"
 			 WHERE "repo" = ${this.q(repo)} AND "kind" = 'commit'
-			   AND ("summary" LIKE ${this.q(`%${prefix}%`)} OR "payload" LIKE ${this.q(`%${prefix}%`)})
+			   AND ("summary" LIKE ${this.q(`%commit ${prefix}%`)} OR "payload" LIKE ${this.q(`%"sha":"${prefix}%`)})
 			 ORDER BY "ts" DESC LIMIT ${capped}`,
 		);
 	}

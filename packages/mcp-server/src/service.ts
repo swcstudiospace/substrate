@@ -793,7 +793,7 @@ export class Substrate {
 			repo: input.repo ?? place.repo ?? null,
 			branch: input.branch ?? place.branch ?? null,
 			prev_event_hash: prev,
-			released_lease_id: input.released_lease_id ?? null,
+			handover_lease_id: input.handover_lease_id ?? null,
 		});
 		const signer = this.config.handoffKeyId
 			? { key_id: this.config.handoffKeyId, key: this.config.handoffKeys.get(this.config.handoffKeyId) ?? "" }
@@ -819,12 +819,12 @@ export class Substrate {
 		// the hold on a failed append is the recoverable half of that trade: the
 		// sender still holds its node and can retry.
 		let leaseReleased: boolean | undefined;
-		if (input.release_lease && input.released_lease_id && input.graph_id && input.node_id) {
+		if (input.release_lease && input.handover_lease_id && input.graph_id && input.node_id) {
 			if (!result.stored) {
 				leaseReleased = false;
 			} else {
 				const released = await this.releaseNode(input.graph_id, input.node_id, {
-					lease_id: input.released_lease_id,
+					lease_id: input.handover_lease_id,
 				}).catch(() => null);
 				leaseReleased = released?.released === true;
 			}

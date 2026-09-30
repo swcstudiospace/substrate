@@ -14,6 +14,9 @@ import type { SubstrateEvent } from "./types.ts";
 
 const ENV = {
 	SUBSTRATE_TOKEN_HERMES: "tok-hermes",
+	// The operator credential is a surface token that is also listed as an
+	// operator's, so its extra authority never costs us knowing who used it.
+	SUBSTRATE_TOKEN_CURSOR: "tok-operator",
 	SUBSTRATE_OPERATOR_TOKENS: "tok-operator",
 	SUBSTRATE_HANDOFF_KEY: "a-test-signing-key",
 };
@@ -221,5 +224,46 @@ describe("the handoff sender is the token's surface", () => {
 			body: JSON.stringify({ to: "omp", goal: "x" }),
 		});
 		expect(response.status).toBe(401);
+	});
+
+	test("an operator credential signs as its own surface, not as the body's", async () => {
+		// The regression an earlier fix introduced: letting an operator token past the
+		// auth gate with no surface meant `/handoff` fell through to the body, so an
+		// operator credential could sign a packet as any agent it named. Operator
+		// authority is now an attribute of a surface token, so there is no such caller.
+		const response = await fetch(`${base}/handoff`, {
+			method: "POST",
+			headers: { "content-type": "application/json", authorization: "Bearer tok-operator" },
+			body: JSON.stringify({ to: "omp", goal: "take over n2", graph_id: "ut-1", surface: "grok-bot" }),
+		});
+		const result = (await response.json()) as { packet: { from: { surface: string } } };
+
+		expect(result.packet.from.surface).toBe("cursor");
+	});
+
+	test("a token that names no surface cannot be a sender at all", async () => {
+		// Belt and braces on the same class: even if such a caller existed, the body
+		// is consulted only when *nothing* is authenticated, never merely because
+		// this particular token named no surface.
+		const config = loadConfig({ SUBSTRATE_TOKEN_HERMES: "tok-hermes", SUBSTRATE_HANDOFF_KEY: "k" });
+		const substrate = new Substrate(config, { index: index as never, greptime: greptime as never });
+		const surfaceless = createHttpServer(substrate, {
+			...config,
+			// A deployment with tokens, and a caller holding one that resolves to no
+			// surface — the shape the auth gate now refuses outright.
+			tokens: new Map([["tok-hermes", "hermes"]]),
+			operatorTokens: new Set(["tok-ghost"]),
+		});
+		await new Promise<void>((resolve) => surfaceless.listen(0, "127.0.0.1", resolve));
+		const port = (surfaceless.address() as AddressInfo).port;
+
+		const response = await fetch(`http://127.0.0.1:${port}/handoff`, {
+			method: "POST",
+			headers: { "content-type": "application/json", authorization: "Bearer tok-ghost" },
+			body: JSON.stringify({ to: "omp", goal: "x", surface: "grok-bot" }),
+		});
+
+		expect(response.status).toBe(401);
+		surfaceless.close();
 	});
 });

@@ -404,6 +404,30 @@ describeLive("exclusive hold against a live index", () => {
 		expect(edges[0]?.kind).toBe("gated_by");
 	});
 
+	test("two registers racing on an empty edge set do not merge into their union", async () => {
+		// A DELETE that matches no row locks nothing, so both transactions used to
+		// delete zero rows and then both insert — and the result was the union of two
+		// authoritative replacements, leaving live a dependency one caller had
+		// removed. The row lock on the graph is what serialises them.
+		await a.registerGraph({
+			graph_id: GRAPH,
+			repo: "swcstudiospace/agent-substrate",
+			nodes: [{ node_id: "n20" }, { node_id: "n21" }],
+			edges: [],
+		});
+
+		await Promise.all([
+			a.registerGraph({ graph_id: GRAPH, edges: [{ from_node: "n21", to_node: "n20", kind: "requires" }] }),
+			b.registerGraph({ graph_id: GRAPH, edges: [{ from_node: "n21", to_node: "n20", kind: "gated_by" }] }),
+		]);
+
+		const edges = await edgesOfGraph();
+		// Exactly one of the two sets won; neither caller's replacement was merged
+		// with the other's.
+		expect(edges).toHaveLength(1);
+		expect(["requires", "gated_by"]).toContain(edges[0]?.kind ?? "");
+	});
+
 	test("an empty set clears them; omitting the field leaves them alone", async () => {
 		await a.registerGraph({
 			graph_id: GRAPH,

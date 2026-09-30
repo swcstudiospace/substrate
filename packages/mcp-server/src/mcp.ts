@@ -510,7 +510,14 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				to_session_id: z.string().optional(),
 				notes: z.string().optional(),
 				lease_id: z.string().optional().describe("Your lease on node_id. With release_lease, it is dropped once the packet is durable."),
-				release_lease: z.boolean().optional().describe("Release the lease so the receiver can claim the node."),
+				release_lease: z
+					.boolean()
+					.optional()
+					.describe(
+						"Release the lease so the receiver can claim the node. The reply's `lease_released` says whether " +
+							"it happened; the packet records only that you meant to hand it over, because a lease's state " +
+							"cannot be frozen into a signed packet. A receiver calls graph_claim rather than reading the packet.",
+					),
 			},
 		},
 		async ({ to, to_session_id, session_id, lease_id, release_lease, ...rest }) =>
@@ -522,7 +529,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 					// over a false identity, which is worse than an unsigned packet.
 					from: { surface: callerSurface ?? "claude-code", session_id: session_id ?? null },
 					to: { surface: to, session_id: to_session_id ?? null },
-					released_lease_id: lease_id ?? null,
+					handover_lease_id: lease_id ?? null,
 					...(release_lease === undefined ? {} : { release_lease }),
 				}),
 			),

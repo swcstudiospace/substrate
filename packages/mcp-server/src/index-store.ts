@@ -303,6 +303,13 @@ export class IndexStore implements MemoryStore {
 			// or the new one and never an empty moment in between — which would read as
 			// "this held node has no dependencies" and suppress a real finding.
 			await this.sql.begin(async (tx) => {
+				// Serialised on the graph's own row first. Without it, two registers
+				// racing on a graph whose edge set is empty both delete nothing and then
+				// both insert, and the result is the *union* of two authoritative
+				// replacements — so a dependency one caller removed stays live. A DELETE
+				// that matches no row locks nothing, so the lock has to come from
+				// somewhere that does exist, and the parent row always does by here.
+				await tx`select graph_id from graph_index where graph_id = ${plan.graph_id} for update`;
 				await tx`delete from graph_edges where graph_id = ${plan.graph_id}`;
 				for (const edge of edges) {
 					await tx`

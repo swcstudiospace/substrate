@@ -98,14 +98,21 @@ export interface HandoffPacket {
 	 */
 	prev_event_hash: string | null;
 	/**
-	 * The lease the sender is handing over, if any.
+	 * The lease the sender held and intends to hand over, if any.
 	 *
-	 * The lease it *held*, not proof that it has been dropped — the release
-	 * happens after the packet is durable, so the reply's `lease_released` is what
-	 * says whether the node is free. A receiver should claim the node rather than
-	 * assume this field frees it.
+	 * Named for the intent, not an outcome, because an outcome cannot honestly go
+	 * in here. The packet is signed before the release is attempted — it has to
+	 * be, since the release must not happen until the packet is durable — and it
+	 * is then immutable, while a lease's state is not: a packet asserting "this
+	 * node is free" would be stale the moment another agent claimed it.
+	 *
+	 * So a receiver replaying this does not read the node's state off the packet.
+	 * It calls `graph_claim`, which answers authoritatively and is what the
+	 * receiver has to do anyway. Whether the sender's release landed is a separate
+	 * fact in the same ledger — `releaseNode` appends its own event — and the
+	 * reply to the handoff call reports it as `lease_released` for the sender.
 	 */
-	released_lease_id: string | null;
+	handover_lease_id: string | null;
 	notes: string | null;
 	/** What had to be trimmed to fit the payload budget. Absent when nothing was. */
 	truncated?: { files?: number; dod?: number; blockers?: number; notes?: true };
@@ -126,7 +133,7 @@ export interface HandoffInput {
 	repo?: string | null;
 	branch?: string | null;
 	prev_event_hash?: string | null;
-	released_lease_id?: string | null;
+	handover_lease_id?: string | null;
 	notes?: string | null;
 	ts?: string;
 	handoff_id?: string;
@@ -222,7 +229,7 @@ export function buildHandoff(input: HandoffInput): HandoffPacket {
 		dod: dod.kept,
 		blockers: blockers.kept,
 		prev_event_hash: line(input.prev_event_hash, MAX_LINE),
-		released_lease_id: line(input.released_lease_id, MAX_LINE),
+		handover_lease_id: line(input.handover_lease_id, MAX_LINE),
 		notes: line(input.notes, MAX_NOTES),
 		...(Object.keys(truncated).length > 0 ? { truncated } : {}),
 		signature: null,

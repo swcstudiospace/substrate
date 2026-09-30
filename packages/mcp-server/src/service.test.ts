@@ -730,7 +730,7 @@ describe("handoff", () => {
 
 		// No ledger at all, so the append cannot land.
 		const unstorable = new Substrate(loadConfig(SIGNING_ENV), { index: index as never, greptime: null });
-		const refused = await unstorable.handoff({ ...input, released_lease_id: "lse_a", release_lease: true });
+		const refused = await unstorable.handoff({ ...input, handover_lease_id: "lse_a", release_lease: true });
 
 		expect(refused.stored).toBe(false);
 		expect(refused.lease_released).toBe(false);
@@ -739,7 +739,7 @@ describe("handoff", () => {
 		// And with a ledger that takes it, the release happens.
 		const { greptime } = ledger();
 		const stored = new Substrate(loadConfig(SIGNING_ENV), { index: index as never, greptime: greptime as never });
-		const done = await stored.handoff({ ...input, released_lease_id: "lse_a", release_lease: true });
+		const done = await stored.handoff({ ...input, handover_lease_id: "lse_a", release_lease: true });
 
 		expect(done.stored).toBe(true);
 		expect(done.lease_released).toBe(true);

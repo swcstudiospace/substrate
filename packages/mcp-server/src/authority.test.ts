@@ -14,13 +14,23 @@
  * and these are the tests that say so.
  */
 import { describe, expect, test } from "bun:test";
-import { isOperator, loadConfig, surfaceForToken } from "./config.ts";
+import { configWarnings, isOperator, loadConfig, surfaceForToken } from "./config.ts";
 import { Substrate } from "./service.ts";
 import type { SubstrateEvent } from "./types.ts";
 
+/**
+ * An operator credential is a *surface* token that is also listed as an
+ * operator's — `cursor` here, the surface a human on the host commits as.
+ *
+ * Not a separate class of credential, and that is the point: a token that
+ * authenticated while naming no surface would reach the authoring routes with
+ * no identity, and each of those falls back to the request body, so it could
+ * have signed a handoff as any agent it named.
+ */
 const TOKENS = {
 	SUBSTRATE_TOKEN_HERMES: "tok-hermes",
 	SUBSTRATE_TOKEN_GROK_BOT: "tok-grok",
+	SUBSTRATE_TOKEN_CURSOR: "tok-operator",
 	SUBSTRATE_OPERATOR_TOKENS: "tok-operator",
 };
 
@@ -32,14 +42,34 @@ describe("isOperator", () => {
 		expect(isOperator(config, "Bearer tok-grok")).toBe(false);
 	});
 
-	test("an operator token is", () => {
-		expect(isOperator(loadConfig(TOKENS), "Bearer tok-operator")).toBe(true);
+	test("an operator token is, and still names its surface", () => {
+		const config = loadConfig(TOKENS);
+		expect(isOperator(config, "Bearer tok-operator")).toBe(true);
+		// So a forced release is always attributable to whoever used it.
+		expect(surfaceForToken(config, "Bearer tok-operator")).toBe("cursor");
 	});
 
 	test("several operators may be configured", () => {
-		const config = loadConfig({ ...TOKENS, SUBSTRATE_OPERATOR_TOKENS: "tok-a, tok-b ,tok-c" });
+		const config = loadConfig({
+			...TOKENS,
+			SUBSTRATE_TOKEN_CURSOR: "tok-a",
+			SUBSTRATE_TOKEN_MUSE: "tok-b",
+			SUBSTRATE_TOKEN_PI: "tok-c",
+			SUBSTRATE_OPERATOR_TOKENS: "tok-a, tok-b ,tok-c",
+		});
 		for (const token of ["tok-a", "tok-b", "tok-c"]) expect(isOperator(config, `Bearer ${token}`)).toBe(true);
 		expect(isOperator(config, "Bearer tok-d")).toBe(false);
+	});
+
+	test("an operator token that names no surface is reported at boot, not left silent", () => {
+		// It could never authenticate — the HTTP surface requires a token that names
+		// a surface — so it would look configured and do nothing.
+		const stranded = loadConfig({ SUBSTRATE_TOKEN_HERMES: "tok-hermes", SUBSTRATE_OPERATOR_TOKENS: "tok-nowhere" });
+		expect(configWarnings(stranded)).toHaveLength(1);
+		expect(configWarnings(stranded)[0]).toContain("cannot authenticate");
+
+		expect(configWarnings(loadConfig(TOKENS))).toEqual([]);
+		expect(configWarnings(loadConfig({}))).toEqual([]);
 	});
 
 	test("no token, or an unknown one, is not an operator once tokens exist", () => {
@@ -65,10 +95,6 @@ describe("isOperator", () => {
 		const config = loadConfig({ SUBSTRATE_OPERATOR_TOKENS: "tok-operator" });
 		expect(isOperator(config, null)).toBe(false);
 		expect(isOperator(config, "Bearer tok-operator")).toBe(true);
-	});
-
-	test("operator tokens are not surfaces, so an operator cannot emit as one", () => {
-		expect(surfaceForToken(loadConfig(TOKENS), "Bearer tok-operator")).toBeNull();
 	});
 });
 

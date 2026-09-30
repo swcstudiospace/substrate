@@ -28,7 +28,7 @@ export interface SubstrateConfig {
 	/** When true, an unauthenticated caller is accepted and attributed by its payload. */
 	allowAnonymous: boolean;
 	/**
-	 * Tokens that may take a node off its holder.
+	 * Surface tokens that may also take a node off its holder.
 	 *
 	 * A forced release breaks the guarantee every other agent is relying on, so it
 	 * is not a peer's to use: with every surface's token equally privileged, an
@@ -36,6 +36,13 @@ export interface SubstrateConfig {
 	 * anyone who chose. It is an operator action, and this is who the operators
 	 * are. Empty on a bare local run, where `allowAnonymous` already means the
 	 * machine's owner is the only caller.
+	 *
+	 * These are **also** `SUBSTRATE_TOKEN_*` values, not a separate class of
+	 * credential. A token that authenticated but named no surface would reach the
+	 * authoring routes with no identity, and each of those falls back to the
+	 * request body — so an operator credential could sign a handoff as any agent
+	 * it cared to name. Operator authority is an attribute of a surface token, so
+	 * a forced release is always attributable to whoever used it.
 	 */
 	operatorTokens: Set<string>;
 	/**
@@ -188,9 +195,9 @@ export function surfaceForToken(config: SubstrateConfig, authorization: string |
  *
  * On a bare local run — no surface tokens at all, so `allowAnonymous` — the
  * caller is the machine's owner and the answer is yes; there is nobody else to
- * protect the lease from. Once tokens exist, a surface token is not enough: an
- * operator token must be presented, because a forced release is exactly the
- * thing one agent must not be able to do to another.
+ * protect the lease from. Once tokens exist, an ordinary surface token is not
+ * enough: the token must also be listed as an operator's, because a forced
+ * release is exactly the thing one agent must not be able to do to another.
  */
 export function isOperator(config: SubstrateConfig, authorization: string | null): boolean {
 	if (config.allowAnonymous && config.operatorTokens.size === 0) return true;
@@ -210,4 +217,26 @@ export function isReviewToken(config: SubstrateConfig, token: string | undefined
 	if (typeof token !== "string") return false;
 	const trimmed = token.trim();
 	return trimmed.length > 0 && config.memoryReviewTokens.has(trimmed);
+}
+
+/**
+ * Configuration that will not do what the operator intended, reported at boot.
+ *
+ * An operator token that is not also a surface token can never authenticate —
+ * the HTTP surface requires a token that names a surface — so it would look
+ * configured and silently do nothing. Better said once at boot than discovered
+ * the first time someone needs to prise a node loose.
+ */
+export function configWarnings(config: SubstrateConfig): string[] {
+	const warnings: string[] = [];
+	for (const token of config.operatorTokens) {
+		if (!config.tokens.has(token)) {
+			warnings.push(
+				"an operator token is not also a SUBSTRATE_TOKEN_* surface token, so it cannot authenticate at all; " +
+					"operator authority is an attribute of a surface token",
+			);
+			break;
+		}
+	}
+	return warnings;
 }

@@ -113,6 +113,11 @@ function sendJson(res: ServerResponse, status: number, value: unknown): void {
 	send(res, status, JSON.stringify(value), "application/json");
 }
 
+/** A surface named in a request body. Only ever trusted on an unauthenticated run. */
+function bodySurface(body: Record<string, unknown>): Surface | null {
+	return typeof body.surface === "string" ? (body.surface as Surface) : null;
+}
+
 export function createHttpServer(substrate: Substrate, config: SubstrateConfig) {
 	return createServer(async (req, res) => {
 		const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
@@ -123,14 +128,17 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig) 
 		// from this and never from an argument.
 		const caller: McpCaller = { surface, isOperator: isOperator(config, authorization) };
 
-		// A configured deployment requires a token; a bare local run does not,
-		// otherwise the operator is locked out of their own machine.
+		// A configured deployment requires a token that names a surface; a bare local
+		// run does not, otherwise the operator is locked out of their own machine.
 		//
-		// An operator token is an authorised caller in its own right. It is not a
-		// surface — nothing it does is attributed to an agent — so it does not pass
-		// `surfaceForToken`, and without this it could not reach the API it exists to
-		// reach.
-		if (!config.allowAnonymous && surface === null && !caller.isOperator) {
+		// Every authenticated caller therefore has a surface. That is deliberate and
+		// load-bearing: a caller with none would reach the authoring routes with no
+		// identity, and each of them falls back to the body — so an operator
+		// credential could have signed a handoff as any agent it named. An operator
+		// token is a *surface* token that is also listed in
+		// SUBSTRATE_OPERATOR_TOKENS, so its extra authority never comes at the cost
+		// of knowing who used it.
+		if (!config.allowAnonymous && surface === null) {
 			sendJson(res, 401, { error: "unknown or missing bearer token" });
 			return;
 		}
@@ -207,15 +215,20 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig) 
 					sendJson(res, 400, { error: "handoff needs `goal` and `to`" });
 					return;
 				}
+				// The sender is the token's surface, never the body's. A packet naming
+				// another agent would verify under a false identity — a forgery with a
+				// valid seal on it. The body is consulted only when *nothing* is
+				// authenticated (a bare local run), and never merely because this
+				// particular token named no surface.
+				const sender = surface ?? (config.allowAnonymous ? bodySurface(body) : null);
+				if (!sender) {
+					sendJson(res, 403, {
+						error: "this token names no surface, so it cannot be a handoff sender",
+					});
+					return;
+				}
 				const result = await substrate.handoff({
-					// The sender is the token's surface, never the body's. A packet naming
-					// another agent would verify under a false identity — a forgery with a
-					// valid seal on it. On a bare local run there is no token, and the body
-					// is all there is.
-					from: {
-						surface: surface ?? (typeof body.surface === "string" ? (body.surface as Surface) : null) ?? "claude-code",
-						session_id: typeof body.session_id === "string" ? body.session_id : null,
-					},
+					from: { surface: sender, session_id: typeof body.session_id === "string" ? body.session_id : null },
 					to: { surface: to, session_id: typeof body.to_session_id === "string" ? body.to_session_id : null },
 					goal: body.goal,
 					files: Array.isArray(body.files) ? (body.files as string[]) : undefined,
@@ -227,7 +240,7 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig) 
 					repo: typeof body.repo === "string" ? body.repo : null,
 					branch: typeof body.branch === "string" ? body.branch : null,
 					notes: typeof body.notes === "string" ? body.notes : null,
-					released_lease_id: typeof body.lease_id === "string" ? body.lease_id : null,
+					handover_lease_id: typeof body.lease_id === "string" ? body.lease_id : null,
 					release_lease: body.release_lease === true,
 				});
 				// 503 when the ledger did not take it, matching /events: the packet is
