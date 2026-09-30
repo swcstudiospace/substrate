@@ -46,6 +46,22 @@ export function chainStateOf(chain: Pick<ChainEvidence, "ok" | "state">): ChainS
 
 export interface EvidenceInput {
 	graph_id: string;
+	/**
+	 * The form this graph's identifier is **stored** under, when it differs.
+	 *
+	 * Both the audit record and the metric attribute hold a redacted, capped identifier —
+	 * `sanitizeField` and `normalizeIdentifier` are the same transform — so a graph whose
+	 * id contains a credential-shaped substring is keyed by its redacted form everywhere.
+	 * Reading usage back with the raw id then matched nothing and the bundle reported no
+	 * tokens or cost at all, which is indistinguishable from a graph that spent nothing.
+	 *
+	 * `normalizeIdentifier` says the rule outright: "cleaning them on the write path but
+	 * querying with the raw value would mean a lookup that never matches". This is how a
+	 * caller hands the cleaned value in, since the redactor lives in `packages/mcp-server`.
+	 * Omitted, `graph_id` is used, which is right whenever nothing was redacted — every
+	 * ordinary `ut-…` id.
+	 */
+	storedGraphId?: string;
 	generated?: Date;
 	service: { name: string; version: string; instance: string };
 	slos: SloResult[];
@@ -161,7 +177,8 @@ export function buildEvidence(input: EvidenceInput): EvidenceBundle {
 			unmeasurable: input.slos.filter((slo) => slo.status === "unmeasurable").length,
 		},
 		audit: { ...(input.audit.stats ?? auditStats(input.audit.records)), records: input.audit.records },
-		usage: usageForGraph(input.metrics, input.graph_id),
+		// Keyed by the stored form, not the requested one — see `storedGraphId`.
+		usage: usageForGraph(input.metrics, input.storedGraphId ?? input.graph_id),
 		pending: PENDING,
 		notes: [
 			...(input.audit.durable

@@ -577,6 +577,10 @@ export async function buildGraphEvidence(
 
 	return buildEvidence({
 		graph_id: graphId,
+		// The audit record and the metric attribute are keyed by the same cleaned form, so
+		// the usage lookup uses it too. Reading usage back with the raw id matched nothing,
+		// and "no tokens" is indistinguishable from a graph that spent nothing.
+		storedGraphId: selector,
 		service: observability.resource,
 		slos: observability.evaluate(),
 		appChain,
@@ -602,8 +606,9 @@ export async function buildGraphEvidence(
 				: []),
 			...(selector !== graphId
 				? [
-						`This graph's identifier contains content the audit redacts, so its records are stored and selected under ` +
-							`the redacted form. Another graph whose identifier redacts identically would share this selection.`,
+						`This graph's identifier is stored in a cleaned form (${selector}) because redaction or the length cap ` +
+							`changed it, so its audit records and its usage are both keyed by that form. Another graph whose ` +
+							`identifier cleans to the same string would share this selection.`,
 					]
 				: []),
 			...(lost

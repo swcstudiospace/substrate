@@ -422,6 +422,13 @@ The residual cost is that two identifiers redacting identically select each othe
 records; when the selection differs from the identifier asked for, the bundle says so
 rather than leaving it to be discovered.
 
+**The same key reads the usage back.** The metric attribute holds the normalised
+`graph_id` too — the observer is handed the identifier off the *stored* event, and
+`normalizeIdentifier` is the same redact-then-cap as `sanitizeField` — so looking usage up
+with the raw id matched nothing and the bundle reported no tokens or cost at all, which a
+reader cannot tell from a graph that spent nothing. `storedGraphId` is what `buildEvidence`
+selects on, so the audit records and the usage are keyed alike.
+
 ## What a record keeps of its caller, and what it does not
 
 Arguments are never stored — only their names and a digest. On top of that, **every

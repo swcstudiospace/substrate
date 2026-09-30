@@ -198,3 +198,60 @@ describe("usageForGraph", () => {
 		expect(usageForGraph(instruments.snapshot(), longer)).toEqual({ inputTokens: 2000, outputTokens: 0, costUsd: 90 });
 	});
 });
+
+describe("usage is read back by the form the identifier is stored under", () => {
+	test("a graph whose id redacts still gets its tokens and cost", () => {
+		// The metric attribute holds the *normalised* graph_id, because that is what the
+		// observer is handed off the stored event. Reading usage back with the raw id matched
+		// nothing, and a bundle reporting no tokens is indistinguishable from a graph that
+		// spent nothing — the same silent disappearance as selecting audit records raw.
+		const raw = `ut-sk-ant-${"a".repeat(30)}`;
+		const stored = "ut-[REDACTED]";
+		const instruments = new SubstrateInstruments();
+		instruments.recordEmit({
+			surface: "omp",
+			graph_id: stored,
+			kind: "prompt",
+			stored: true,
+			durationMs: 1,
+			payload: { usage: { input_tokens: 500, cost_usd: 0.25 } },
+		});
+
+		const bundle = buildEvidence({
+			graph_id: raw,
+			storedGraphId: stored,
+			service: { name: "substrate", version: "0.1.0", instance: "test" },
+			slos: [],
+			appChain: { ok: true, records: 0 },
+			audit: { chain: { ok: true, records: 0 }, durable: true, path: "/tmp/a.jsonl", records: [] },
+			metrics: instruments.snapshot(),
+		});
+
+		expect(bundle.usage).toEqual({ inputTokens: 500, outputTokens: 0, costUsd: 0.25 });
+		// The bundle still names the graph the caller asked about, not the stored form.
+		expect(bundle.graph_id).toBe(raw);
+	});
+
+	test("without it the raw id is used, which is right when nothing was cleaned", () => {
+		const instruments = new SubstrateInstruments();
+		instruments.recordEmit({
+			surface: "omp",
+			graph_id: "ut-mfk2p3-9a3b1c7d",
+			kind: "prompt",
+			stored: true,
+			durationMs: 1,
+			payload: { usage: { input_tokens: 7 } },
+		});
+
+		const bundle = buildEvidence({
+			graph_id: "ut-mfk2p3-9a3b1c7d",
+			service: { name: "substrate", version: "0.1.0", instance: "test" },
+			slos: [],
+			appChain: { ok: true, records: 0 },
+			audit: { chain: { ok: true, records: 0 }, durable: true, path: null, records: [] },
+			metrics: instruments.snapshot(),
+		});
+
+		expect(bundle.usage).toEqual({ inputTokens: 7, outputTokens: 0, costUsd: 0 });
+	});
+});
