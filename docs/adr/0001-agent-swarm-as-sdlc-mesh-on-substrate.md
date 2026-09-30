@@ -374,21 +374,37 @@ Acceptance criteria:
    test — generate into a temp workspace, then assert over every file produced.
    Store-lock rule 3 is the rule; the installer's test is where it is enforced
    for installed configs.
-3. **A surface token never lands in a file the installer writes.** The generated
-   config references the environment variable by name. This cannot lean on the
-   tracked-file secret scan: that matcher recognises
-   `GREPTIME_(URL|USER|PASSWORD)` and Railway hosts, and would pass a committed
-   `SUBSTRATE_TOKEN_*` without comment. Two things follow — the installer is
-   tested to emit no token literal, and the secret scan is extended to
-   `SUBSTRATE_TOKEN_*` so the gap is closed for everything else too.
-4. **Each agent's token reaches its own process, and the install proves it.**
-   Naming the variable is not delivering the value:
-   `/etc/substrate/substrate.env` is `EnvironmentFile=` on the *server's*
-   systemd unit, root-owned and 0600, and a workspace agent never reads it. Once
-   S1 configures the 15 tokens the deployment stops being anonymous, and
-   `server.ts` answers `!config.allowAnonymous && surface === null` with **401** —
-   so a fresh install that wires the config without provisioning the environment
-   fails on every call.
+3. **No token literal in any workspace artifact.** The generated config
+   references the environment variable by name, and the installer is tested to
+   emit no token value into anything it writes *under the workspace*. The scope
+   matters: criterion 4 has the installer write a credential file that does hold
+   one token, deliberately, outside the workspace — so the rule and its test are
+   about workspace artifacts, and the credential file is the single named
+   exception rather than a contradiction. This cannot lean on the tracked-file
+   secret scan either: that matcher recognises `GREPTIME_(URL|USER|PASSWORD)`
+   and Railway hosts and would pass a committed `SUBSTRATE_TOKEN*` without
+   comment, so the scan is extended to cover it for everything else.
+4. **Each agent's token reaches its own process under the name the client
+   expects, and the install proves it.** Naming a variable is not delivering a
+   value, and the two sides do not even use the same name:
+
+   | | Variable | Read by |
+   |---|---|---|
+   | Server | `SUBSTRATE_TOKEN_<SURFACE>`, one per surface | `substrate-mcp`, to build its token→surface map (`config.ts`) |
+   | Client | **`SUBSTRATE_TOKEN`**, exactly one — its own | `substrate` CLI (`cli/src/index.ts`) and the collectors (`collectors/src/grok.ts`) |
+
+   So the per-agent credential file sets `SUBSTRATE_TOKEN=<that agent's value>`,
+   and the *same secret* appears on the server as
+   `SUBSTRATE_TOKEN_SWARM_A05_BE`. One secret, two names, opposite ends. An agent
+   handed only the server-side name would send no bearer header at all — the
+   `substrate brief` and `substrate emit` hook calls read `SUBSTRATE_TOKEN` and
+   nothing else.
+
+   `/etc/substrate/substrate.env` is `EnvironmentFile=` on the *server's* unit,
+   root-owned and 0600; a workspace agent never reads it. Once S1 configures the
+   15 tokens the deployment stops being anonymous, and `server.ts` answers
+   `!config.allowAnonymous && surface === null` with **401** — so an install that
+   wires the config without provisioning the environment fails on every call.
 
    That failure is worse than loud, which is why this is a criterion and not a
    note: `/brief` fails open and returns empty, `events.emit` fails open and
@@ -397,19 +413,36 @@ Acceptance criteria:
    untraced — which is exactly the state the substrate's fail-open rule makes
    survivable and undiagnosable at the same time.
 
-   So S4 specifies delivery: a per-agent environment file outside every git
-   checkout and outside the workspace, 0600 and owned by the account that runs
-   that agent, referenced from the agent's launcher (its unit's
-   `EnvironmentFile=`, or the runtime's own env-file option), holding only that
-   agent's `SUBSTRATE_TOKEN_<SURFACE>`. The installer creates the reference and
-   the file, never a token inside the workspace; where it cannot write outside
-   the workspace it **prints exactly what the operator must create and exits
-   non-zero** rather than producing an install that will 401. Criterion 7's
-   fresh-install proof covers this: a brief that comes back non-empty and a claim
-   that is granted are the assertions, since both are 401 away from a silent
-   pass.
-5. Each agent's workspace resolves **its own** surface token, not a shared one: a
-   shared token collapses the 15 identities S1 established.
+   Delivery, then: a per-agent environment file outside every git checkout and
+   outside the workspace, 0600, owned by the principal that runs that agent,
+   referenced from the agent's launcher (its unit's `EnvironmentFile=`, or the
+   runtime's own env-file option), holding that agent's `SUBSTRATE_TOKEN` and
+   nothing else. Where the installer cannot write outside the workspace it
+   **prints exactly what the operator must create and exits non-zero** rather
+   than producing an install that will 401. Criterion 8's fresh-install proof
+   covers it: a non-empty brief and a granted claim are the assertions, since
+   both are one 401 away from a silent pass.
+5. Each agent resolves **its own** token, not a shared one: a shared token
+   collapses the 15 identities S1 established.
+
+   **And file permissions are where that separation stops.** `0600` isolates
+   across OS accounts and not within one, so two agents running as the same user
+   — which is what `swarm_run.py` does today, spawning every runtime from one
+   process — can each read the other's credential file and authenticate as the
+   other surface. Possession of a token *is* the identity, so nothing
+   server-side can tell the difference.
+
+   This ADR does not pretend otherwise. What S1's identity work buys is real and
+   bounded: it stops a caller **naming** another surface over its own token, and
+   it stops accidental misattribution and shared-holder lease renewal. It does
+   not make the 15 identities a security boundary between co-located processes.
+   Making them one needs a separate OS principal per agent, or a broker that
+   hands a process only its own short-lived credential — both larger than S4 and
+   neither required by the swarm's threat model, which treats its agents as
+   cooperating and its gates rather than its transport as the enforcement point.
+   So S4 documents the boundary and the swarm's own docs inherit it; a future
+   phase can raise it, and until one does, the trail is attributable but not
+   unforgeable **among agents sharing an account**.
 6. **The executing agents are MCP-capable, and that is a requirement rather than
    an assumption.** The REST doors are `/brief`, `/events`, `/events/query`,
    `/memory`, `/handoff`, `/drift` and `/verify` — there is **no REST route for
@@ -556,6 +589,7 @@ scan alone would not have.
 | The bridge becomes the thing that blocks a swarm run | The substrate's first non-negotiable is fail-open, and a bridge is new code on a hot path | S1 criterion 8 is the test: `substrate-mcp` stopped, full DAG completes. Memory is the deliberate exception, and it is an exception at the *server*, not the client |
 | **A green substrate test read as a swarm guarantee** | `store-lock.test.ts` scans *this* repository. It cannot see the swarm repo, nor the workspaces S4 installs into — so it can pass while a swarm agent still reads its own vector store, or while an installed config names Greptime as an MCP server. Both are criteria it appears to prove and cannot, and both are non-goals of this ADR. Drafting this document produced the same error twice, which is the argument for naming it as a standing trap rather than a fixed bug | The check moves to where the artifact is: S3 criterion 7 in the swarm repo's own suite, S4 criterion 2 in the installer's test over every generated file. Both say explicitly that the substrate suite passing does not satisfy them |
 | **Fail-open emission means the trail is never provably complete** | The anchor roots what reached Greptime, and S1 criterion 8 requires a run to finish with the tee down. So a lost event moves neither the root nor the count, and no amount of verification will surface it | Accepted, and stated in S5 criterion 5 rather than papered over. Integrity and ordering are attested; completeness is not. `ledger.silent` and `git.tip_unlogged` are the signals that something is not arriving. Reconciling against expected messages would mean the ledger deciding what *ought* to exist, which belongs to the bus and the Task Store |
+| **Token separation is not process isolation** | `0600` isolates across OS accounts, not within one, and `swarm_run.py` spawns every runtime from a single process as one user. Either of two co-located agents can read the other's credential file, and possession of a token *is* the surface, so the server cannot tell them apart | Stated as a boundary rather than papered over (S4 criterion 5). S1's identity work stops a caller naming another surface over its own token, and stops accidental misattribution and shared-holder lease renewal — it does not make the 15 identities a boundary between co-located processes. Raising it needs a principal per agent or a credential broker, both beyond S4 and beyond the swarm's threat model, which treats its agents as cooperating and its gates as the enforcement point |
 | **Fail-open makes a misconfigured agent look healthy** | Once S1 configures the 15 tokens the deployment is no longer anonymous, and a caller with no recognised token gets a 401 on everything. But `/brief` fails open to empty and `events.emit` fails open silently, so only a claim or a memory write refuses visibly. An agent whose token was never delivered to its process runs, unbriefed and untraced, looking almost fine | S4 criteria 4 and 9 make token delivery to each agent's own environment an install step with a proof, and make the fresh-install check assert a **non-empty** brief and a **granted** claim, both of which a 401 would otherwise pass silently. The general shape is worth remembering: fail-open is what keeps an outage survivable and is also what makes a misconfiguration quiet |
 | **A lease has no REST door** | S2 needs claim, heartbeat and complete; the server exposes `/brief`, `/events`, `/events/query`, `/memory`, `/handoff`, `/drift` and `/verify` and nothing for leases. A non-MCP executing agent could not hold a lease at all | Correct as the split stands — REST exists for hooks, and a hook never executes a node. S4 criterion 6 turns that into a requirement the install enforces rather than an assumption that fails at claim time, and says that adding the four routes is S2's designed work (with `lease_id` fencing and a server-decided session) if a non-MCP runtime ever must execute |
 | Greptime and the index are on infrastructure this host cannot see | Both are external Railway endpoints (`.planning/PROJECT.md`) | Unchanged by this ADR, and the reason the `sim` profile in S5 criterion 9 skips rather than mocks |
