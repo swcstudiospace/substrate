@@ -59,13 +59,16 @@ Details, and what each primitive deliberately does not promise, in
 ## Layout
 
 ```
-packages/mcp-server/     substrate-mcp on 127.0.0.1:7410     (TS)
-packages/cli/            substrate brief | emit | run | verify (TS)
+packages/mcp-server/     substrate-mcp on 127.0.0.1:7410      (TS)
+packages/cli/            substrate brief|emit|run|verify|evidence (TS)
 packages/host/           rivet-agentos host, openTask         (TS)
 packages/dispatcher/     Linear label → session               (Py)
 packages/collectors/     Orca tee, grok/muse tails, git hook  (TS)
 packages/projector/      substrate.yaml → per-agent config    (TS)
 packages/ledger/         Greptime writer, Merkle anchor       (TS)
+packages/observability/  OTLP metrics and traces, the SLOs    (TS)
+packages/audit/          hash-chained MCP audit, claim policy (TS)
+packages/evidence/       per-graph evidence bundle, JSON/HTML (TS)
 packages/connector-ext/  grok-hermes-connector v0.4 tools     (Py)
 packages/miner/          Hermes cron, skill → PR watcher      (Py)
 ```
@@ -105,6 +108,31 @@ concurrency for decisions, review for anything global. The reply is
 separate claim read back from the index: **anything other agents act on requires both.**
 
 `events.emit` still fails open. Details in [`docs/memory-governance.md`](docs/memory-governance.md).
+
+## Observability and audit
+
+Two more planes, both reached only through `substrate-mcp` and neither of them in Greptime:
+
+- **OTLP metrics and traces** — latency, errors and tokens/cost per `surface` and `graph_id`,
+  pushed as OTLP/HTTP JSON. Four SLOs are stated over them: brief p95 < 800 ms, emit success
+  ≥ 99.5 %, and ceilings on the lease-steal and quarantine rates. `GET /metrics` and
+  `GET /slo` serve them with no collector configured.
+- **A hash-chained MCP audit** of what agents asked for and whether it was allowed, in its own
+  local append-only file. Separate from `agent_events` on purpose: an audit has to survive an
+  outage of the store it audits, and `agent_events` is writable by the agents being audited.
+
+`substrate evidence --graph ut-… [--out evidence.html]` puts both chains' verdicts, the SLO
+results and the allowed/denied tally into one self-contained document. It is a stub and says
+so — Phase 6's Merkle anchor and Phase 2's Linear/Notion cross-check are named in its own
+`pending` list rather than left to read as nothing to report.
+
+`emit` fails open and `claimNode` fails **closed**: a claim whose event never reached the
+ledger is withdrawn, because a lock the substrate cannot tell another agent about is worse
+than no lock. `bun run smoke:chaos` proves it against a live deployment with the ledger
+blackholed for 60 s; `packages/audit/src/chaos.test.ts` proves the same decisions in CI.
+
+Details in [`docs/observability.md`](docs/observability.md) and
+[`docs/mcp-audit.md`](docs/mcp-audit.md).
 
 ## Non-negotiables
 

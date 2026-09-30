@@ -1,0 +1,198 @@
+# The MCP audit chain
+
+Tracked as SPE-4793. Owned by `packages/audit`; wired into `substrate-mcp` by
+`packages/mcp-server/src/observe.ts`.
+
+One hash-chained record per call an agent made to `substrate-mcp`, and whether it
+was **allowed** or **denied**.
+
+## Why this is not an `agent_events` row
+
+Greptime holds the substrate's *application* events — what agents did: edits,
+commits, claims, handoffs. This chain holds what agents **asked substrate-mcp to
+do**. Keeping them apart is the design, not an accident of layering:
+
+1. **An audit must survive the thing it audits.** Greptime is an external service
+   on a Railway account, reached over the public internet, and appends to it are
+   fail-closed. A Greptime outage is exactly when the record of what was denied
+   matters most — and an audit living in the store that is down records nothing.
+2. **`agent_events` is agent-writable.** Any surface with a token can append to it
+   through `events_emit`. An audit trail the audited party can write to is not one.
+3. **They answer different questions, on different retention.** A denied
+   `graph_claim` does not belong in every brief's "recent actions", which is what a
+   `tool.call` row in `agent_events` would become.
+
+Both chains use the **same digest construction** — sha256 over canonical JSON with
+`prev` inside the hash, so events cannot be reordered undetected — and
+`packages/audit/src/record.test.ts` pins the two encoders byte-for-byte against
+shared fixtures. That gives one verifier's reasoning to the other without a runtime
+dependency either way, which would be a cycle: `mcp-server` depends on `audit`.
+
+## The sink
+
+One JSON object per line, opened `O_APPEND`, **single writer**. `substrate-mcp` is
+the only process that writes it, which is what lets `seq` and `prev` need no
+coordination — the same property that makes `agent_events` redacted and chained.
+
+A local file rather than a remote one, for reason 1 above.
+
+```
+SUBSTRATE_AUDIT_PATH=/var/lib/substrate/mcp-audit.jsonl
+```
+
+Unset, the chain lives **in memory**: verifiable, bounded, and gone at restart.
+That is the local-dev shape. `GET /healthz` reports `auditDurable: false` and the
+service says so at boot, so a deployment cannot end up in it by accident. The
+parent directory is created on open, and writability is proved then — an operator
+hears about an unwritable path at boot rather than when the first claim is refused.
+
+It has no compaction and no rotation. Plan for `logrotate` with `copytruncate`
+**off** — truncating the file mid-chain is indistinguishable from tampering to
+`verify`. Rotate by moving the file and restarting the service, which starts a
+fresh chain whose first record has `prev: null`; keep the rotated files, since the
+chain they hold is only verifiable as a whole.
+
+## The record
+
+```json
+{
+  "seq": 412,
+  "ts": "2026-09-30T06:54:39.128Z",
+  "surface": "hermes",
+  "tool": "graph_claim",
+  "transport": "mcp",
+  "decision": "denied",
+  "mode": "fail-closed",
+  "reason": "refusing graph_claim: the MCP audit chain could not take the record — …",
+  "graph_id": "ut-mfk2p3-9a3b1c7d",
+  "node_id": "n4",
+  "session_id": "sess-…",
+  "actor": null,
+  "arg_keys": ["graph_id", "node_id", "session_id"],
+  "arg_digest": "9f2b…",
+  "prev": "a71c…",
+  "hash": "c0de…"
+}
+```
+
+### Arguments are never stored
+
+Only the argument **names**, sorted, and a sha256 over their canonical form.
+
+Storing the arguments would make the audit a second, permanent copy of everything
+every agent ever sent to the substrate — memory bodies, prompts, summaries — in a
+file that exists to be read by whoever is investigating an incident. The digest
+keeps the property that matters: an investigator holding a request can prove it is
+the one that was allowed, byte for byte, because the digest is over the canonical
+form of exactly those arguments.
+
+`reason` is redacted before it is stored. A denial routinely quotes an error, and
+an error routinely quotes a connection URL. The redactor is **injected** rather
+than imported — it lives in `packages/mcp-server`, which depends on this package.
+
+### Verification
+
+`verifyAuditChain` recomputes the chain and reports the first record that does not
+verify, three ways:
+
+- **contents do not match the hash** — a record was edited in place;
+- **`prev` does not match the preceding record** — a record was removed;
+- **`seq` jumped** — the chain was rewritten well enough to still link, which is
+  what someone who removed a record and re-chained the rest would produce. The
+  sequence number is what still gives it away.
+
+Unparseable lines — a process killed mid-write leaves a partial one — are counted
+and reported, never removed. This is an append-only file: a verifier reporting one
+bad line is better than a writer having quietly deleted evidence. The chain is
+continued from the last *parseable* record, because treating a partial line as the
+tip would chain every later record onto a hash no verifier can recompute.
+
+The chain tip advances **only on a successful write**, for the same reason.
+
+## Fail open, fail closed
+
+| | Tools | Why |
+| --- | --- | --- |
+| **fail-open** | `memory_brief`, `memory_search`, `graph_get`, `events_emit`, and the `/brief`, `/events`, `/verify`, `/evidence` routes | These sit inside a prompt's hook budget. The substrate is not allowed to fail an agent's turn, and an unwritable audit file is not a reason to start. The call still produces a record; it is just not a gate. |
+| **fail-closed** | `graph_claim`, `graph_release`, `graph_complete`, `graph_register`, `memory_write` | Everything that grants or transfers exclusive ownership of a node, or writes shared state another agent will act on. A claim nobody recorded is how two agents end up holding one node, and the whole point of `graph_claim` is that they cannot. |
+
+**An unknown tool is fail-closed.** Deny by default, like `assertAppendOnly` in the
+ledger client: a tool added without a decision about its audit mode is caught the
+first time it is called rather than becoming a permanent hole.
+
+## The gate sits in front of the dispatcher
+
+`handleMcp` audits the `tools/call` requests in the JSON-RPC body **before** it
+connects the transport. A fail-closed tool therefore cannot run unaudited even by
+accident, because nothing dispatches it until the chain has taken the record — the
+same reasoning that puts `assertAppendOnly` in the ledger client rather than at
+each call site.
+
+A refusal is a JSON-RPC error with code `-32000` and **HTTP 200**: the request was
+well-formed and the refusal is the answer to it, which is what an MCP client knows
+how to read.
+
+A batch is refused **whole**. Dispatching the allowed half would leave the caller
+holding a partial result it has no way to tell from a complete one, and MCP clients
+send one call per request in practice, so nothing real pays for the strictness.
+
+Handshake traffic — `initialize`, `tools/list`, notifications — is not audited. A
+trail of handshakes buries the decisions it exists to show.
+
+## REST is audited on the same chain
+
+A hook process cannot call an MCP tool, so REST is the door it uses. If only the
+MCP transport were audited, `/events` would be an unaudited door to the same action
+**by design** — the exact shape of hole the store lock exists to close. So
+`/brief`, `/events`, `/verify` and `/evidence` are audited too, with
+`transport: "rest"`.
+
+`/healthz`, `/metrics` and `/slo` are not: they are monitoring traffic, no agent
+action is behind them, and a trail dominated by a Prometheus scrape is one nobody
+reads.
+
+At roughly 400 bytes a record, a host doing a thousand prompts a day writes well
+under a megabyte a day.
+
+## `substrate evidence`
+
+```sh
+substrate evidence --graph ut-mfk2p3-9a3b1c7d                       # JSON to stdout
+substrate evidence --graph ut-mfk2p3-9a3b1c7d --out evidence.html   # the document
+```
+
+The bundle is composed by `substrate-mcp`, not by the CLI: that is the process
+holding the metric snapshot and the audit chain, and a second composer would be a
+second answer to the same question. `POST /evidence` is the same thing over HTTP.
+
+It carries both chain verdicts, the SLO results with their sample counts, the
+allowed/denied tally for that graph, and the tokens and cost attributed to it.
+
+The HTML is **one self-contained file** — no external script, stylesheet, font or
+fetch. Evidence has to render years from now, from a filesystem, with no network;
+and a page that fetched anything would also tell someone it had been opened. The
+machine-readable bundle is embedded in it verbatim, so the document and the JSON
+cannot disagree.
+
+Unlike `brief` and `emit`, the command **exits non-zero** — on an unreachable
+substrate, a chain that does not verify, or a breached objective. It does not sit
+in a hook, and a document nobody can tell from a missing one is not evidence.
+
+### It is a stub, and says so
+
+The bundle carries `"stub": true` and a `pending` list naming what it cannot yet
+attest to:
+
+- the Solana devnet Merkle anchor and signature over the hour containing these
+  events — **Phase 6**;
+- the per-node cross-check against the Linear issue and Notion page states —
+  **Phase 2**;
+- model spend reconciled against the provider's own billing, rather than as
+  collectors reported it.
+
+Naming them beats letting their absence read as nothing to report. An evidence
+document that overstates itself is worse than one that is honestly partial.
+
+Only audit records naming the graph are included. A record with no `graph_id`
+belongs to no graph, and folding those in would make every bundle a copy of the
+whole trail; when a bundle has none, it says which.
