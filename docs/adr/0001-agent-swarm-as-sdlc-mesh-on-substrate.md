@@ -140,7 +140,7 @@ make those six honest.
 | Task Store | claim / `task.status` progress / `task.result` completion over the lifecycle state machine; `task.assign` carries `lease_s` | `graph_claim` → `graph_heartbeat` → `graph_complete`, plus `graph_release`; `coord_handoff` for the packet | Substrate lease is authoritative for exclusivity; A01 stays authoritative for lifecycle state. The swarm lease becomes an advisory mirror of `lease_id`, not a second authority. `CHANGES_REQUESTED` → release-and-reclaim, not a silent re-run, so the trail shows the rework loop |
 | Memory | `memory.write` / `memory.query`, kinds `decision \| retro \| pattern`, "all write, read-all" | `memory_write` / `memory_search` / `memory_brief` through the governance gate | Kind mapping: `decision`→`decision` (versioned, needs `expected_version`), `retro`→`fact`, `pattern`→`fact`. **Read-all is not write-all**: `global` scope is require-review, so a swarm-wide pattern is a *proposal* until a reviewer token releases it. Gate verdicts are `warning`; handoff context is `handoff` |
 | Bus / telemetry | `evt.*` durable streams, `agent.heartbeat`, `gate.verdict`, `escalation.request` | `events_emit` (MCP) / `POST /events` (REST, for hooks) → `agent_events`; read back via `events_query` / `events_verify` | The bus is not replaced — see non-goals. Emission is a **tee**, at-least-once on both sides. **The tee is not idempotent for free**: `normalizeEvent` mints `evt_<random>` per call and `msg_id` is only payload, so a republished envelope or a retried tee appends a second row. Idempotent swarm handlers do not make the ledger idempotent — the tee dedupes on `msg_id` itself, or the trail shows one message twice. Swarm `type` maps onto the closed `EVENT_KINDS` set with the specific type in `payload.swarm_type`; the enum is not widened, because `kind` participates in the hash and `drift_scan` keys its findings off particular kinds |
-| Observability | OTel collector → traces/metrics/logs; A13 operates, all emit | substrate ledger + `events_verify` + `coord_drift_scan` | No duplication: OTel keeps runtime telemetry, the ledger keeps the auditable SDLC trail. `trace_id` on the event is the join. `drift_scan` compares git HEAD, the trail and the leases held. **`events_verify` chains per `session_id`, not per graph**: it buckets a Graph ID's events by session and verifies each chain separately, so it detects an altered row but attests no single order across agents or replicas. A graph-wide attestation is the Phase 6 Merkle anchor, not this call |
+| Observability | OTel collector → traces/metrics/logs; A13 operates, all emit | substrate ledger + `events_verify` + `coord_drift_scan` | No duplication: OTel keeps runtime telemetry, the ledger keeps the auditable SDLC trail. `trace_id` on the event is the join. `drift_scan` compares git HEAD, the trail and the leases held. **`events_verify` chains per `session_id`, not per graph**: it buckets a Graph ID's events by session and verifies each chain separately, so it detects an altered row but attests no single order across agents or replicas. Graph-wide ordering is the Phase 6 Merkle anchor; **completeness is attested by neither**, since fail-open emission means an event that never arrived changes no root. See S5 |
 | Gates | A08/A09/A10 conjunction, fail-closed; `gate.verdict` | recorded, **not enforced** — `warning`-kind events and `warning`-kind memory | Deliberate. `graph_claim` does not enforce graph edges either, for the same reason: the index is a cache, and refusing work on a stale record is worse than reporting a disagreement. The swarm's gate conjunction stays the enforcement point. **But `warning` is not a work kind**: `drift.ts`'s `WORK_KINDS` is `commit`, `file.edit`, `shell`, `tool.call`, `pr`, so a verdict emitted only as a `warning` leaves a gate agent looking idle to `lease.idle` and an unclaimed gate action invisible to `work.unclaimed`. A verdict therefore emits its `tool.call` too. See S5 |
 | Signing | ed25519 over the `swarm.v1` envelope (required for `task.assign`, gate verdicts, promote/rollback) | HMAC-SHA256 over the handoff packet, key from `SUBSTRATE_HANDOFF_KEY`, `key_id` for rotation | Two schemes, both kept. They sign different things — a message in flight vs. a packet replayed out of an append-only ledger. Unifying them is not in scope |
 | Artifact registry | Git + OCI, per-artifact single writer | unchanged | The substrate does not want to hold artifacts. `commit`, `pr` and `file.edit` events reference them |
@@ -233,11 +233,28 @@ Acceptance criteria — what must be TRUE:
    `graph_register` records the node set.
 5. Every `swarm.v1` envelope the swarm publishes is teed to `events.emit` with
    `surface` = the emitting agent, **`session_id` derived from the emitter's
-   `agent-id@replica`**, `graph_id`, `node_id` = `task_id`, `kind` from the
-   documented `type`→`EVENT_KINDS` map, and `trace_id`, `causation_id`, `msg_id`
-   and `swarm_type` in `payload`. `session_id` is required, not optional: `prev`
-   chains within a session, so events emitted without one all take
-   `prev: null` and the chain the S1 proof checks would not exist.
+   `agent-id@replica` *and its Graph ID***, `graph_id`, `node_id` = `task_id`,
+   `kind` from the documented `type`→`EVENT_KINDS` map, and `trace_id`,
+   `causation_id`, `msg_id` and `swarm_type` in `payload`.
+
+   `session_id` is required, not optional, and the Graph ID has to be part of it.
+   Two separate failures make that so, and both are properties of the code rather
+   than of the adapter:
+
+   - **Without a session at all**, `prev` is `null` on every row — `emit` only
+     looks up a chain tip when a `session_id` is present — so the chain the S1
+     proof checks would not exist.
+   - **With a session shared across graphs**, the chain interleaves. `emit`
+     resolves `prev` from `lastHash(session_id)` with no graph in the lookup, so
+     a long-lived replica emitting for graph A, then B, then A again gives that
+     second A row B's hash as its `prev`. `verifyGraph` reads only graph A's rows
+     and would report a broken chain although every append succeeded — a false
+     alarm on the healthy case, which is worse than no check.
+
+   So a session is one (agent, replica, Graph ID) triple, which is also what the
+   substrate's other surfaces already mean by a session: one run of one agent on
+   one task. A replica that works two graphs concurrently holds two sessions, and
+   a test covers the A→B→A interleaving specifically.
 6. **The tee dedupes on `msg_id`.** `normalizeEvent` mints a fresh
    `evt_<random>` per call, so a republished envelope or a retried tee appends a
    second row for one logical message. A dedupe window on
@@ -346,21 +363,42 @@ no agent is wired by hand and none is wired to a door that should not exist.
 Acceptance criteria:
 
 1. `packages/projector` emits, per swarm workspace, the `substrate-mcp` MCP
-   server entry and the surface token for that agent, alongside what
+   server entry for that agent, alongside what
    `build_agents.py --install-workspace` already writes for Claude, Grok and omp
    targets — appended to the existing config arrays, never replacing them, the
    same rule Phase 0 established for Cursor's `hooks.json`.
-2. **No generated config anywhere names Greptime as an MCP server.** This is
-   store-lock rule 3, and `store-lock.test.ts` already scans `.mcp.json` and
-   `.cursor/mcp.json` with `dot: true` — so the install path is proven against
-   the check that exists rather than by inspection.
-3. No generated config carries a Greptime credential or a Railway host; the
-   tracked-file secret scan covers whatever the installer commits.
-4. Agents that cannot call an MCP tool get the REST doors instead —
-   `POST /brief`, `POST /events`, `POST /memory` — because hooks cannot call MCP,
-   which is why those routes exist.
-5. Each agent's workspace carries **its own** surface token, not a shared one: a
+2. **No generated config anywhere names Greptime as an MCP server**, and that is
+   checked **where the configs land**. `store-lock.test.ts` cannot carry this
+   criterion either: it scans this checkout, and S4's artifacts are written into
+   a workspace outside it. So the assertion belongs to the installer's own
+   test — generate into a temp workspace, then assert over every file produced.
+   Store-lock rule 3 is the rule; the installer's test is where it is enforced
+   for installed configs.
+3. **A surface token never lands in a file the installer writes.** The generated
+   config references the environment variable and the tokens stay in
+   `/etc/substrate/substrate.env`. This cannot lean on the tracked-file secret
+   scan: that matcher recognises `GREPTIME_(URL|USER|PASSWORD)` and Railway
+   hosts, and would pass a committed `SUBSTRATE_TOKEN_*` without comment. Two
+   things follow — the installer is tested to emit no token literal, and the
+   secret scan is extended to `SUBSTRATE_TOKEN_*` so the gap is closed for
+   everything else too.
+4. Each agent's workspace resolves **its own** surface token, not a shared one: a
    shared token collapses the 15 identities S1 established.
+5. **The executing agents are MCP-capable, and that is a requirement rather than
+   an assumption.** The REST doors are `/brief`, `/events`, `/events/query`,
+   `/memory`, `/handoff`, `/drift` and `/verify` — there is **no REST route for
+   `graph_claim`, `graph_heartbeat`, `graph_release` or `graph_complete`**, so a
+   REST-only caller cannot hold a lease at all and could not satisfy criterion 7
+   or S2. That is the right split as it stands: REST exists because *hooks*
+   cannot call MCP, and a hook briefs and emits but never executes a node or
+   holds a lease. The swarm's runtimes (`claude`, `grok -p`, `omp -p`) are agent
+   CLIs that can call MCP, so the requirement is satisfiable — but it is now
+   written down, and the install refuses to wire a non-MCP runtime as an
+   executing agent rather than leaving it to fail at claim time. **If some
+   runtime must execute nodes without MCP, adding those four REST routes is S2's
+   work, not a workaround here** — and they would have to carry `lease_id`
+   fencing and a server-decided session, which is why it is a designed change
+   and not a thin wrapper.
 6. The installer keeps its existing refusals — nothing written inside the swarm
    checkout, at `$HOME`, under `~/.omp`, or through a symlink — and a dry run
    prints the substrate additions as part of the plan.
@@ -369,8 +407,8 @@ Acceptance criteria:
 
 **Proof:** install into an empty workspace, start a swarm run there, and it
 appears in the ledger and in another agent's brief without anything having been
-edited by hand — while `store-lock.test.ts` stays green against the generated
-configs.
+edited by hand — while the installer's own test asserts over every generated file
+that none names Greptime as an MCP server and none carries a token literal.
 
 ### S5 — Gate verdicts as substrate events, and verification (SPE-5056)
 
@@ -401,8 +439,21 @@ Acceptance criteria:
 5. `events_verify` over a whole `correlation_id` — via its bound Graph ID —
    flags a single altered row in any of the 15 agents' sessions. Its guarantee is
    stated as what it is: **one chain per `session_id`**, not one chain across the
-   graph. Ordering and completeness across agents are attested by the Phase 6
-   Merkle anchor, not by this call.
+   graph. Ordering across agents is attested by the Phase 6 Merkle anchor, not by
+   this call.
+
+   **Completeness is not attested by anything here, and the document says so.**
+   The anchor roots the events that reached Greptime, and S1 criterion 8 requires
+   a swarm run to complete with the tee unavailable — so a message that was never
+   stored changes neither the root nor the count, and a valid anchor is silent
+   about it. Nothing short of reconciling the ledger against the messages the
+   swarm *expected* to emit would close that, and that is deliberately not built:
+   it would make the ledger authoritative for what ought to exist, which is the
+   bus's and the Task Store's job. What the substrate offers is
+   **integrity and ordering of what it holds**, plus `drift_scan`'s
+   `ledger.silent` and `git.tip_unlogged` as the signals that something is not
+   arriving. A trail with a known hole is the accepted cost of fail-open
+   emission.
 6. `trace_id` on every emitted event resolves to the OTel trace, and A13 can go
    from an SLO burn to the Graph ID and back. Neither plane duplicates the
    other's data.
@@ -470,7 +521,9 @@ scan alone would not have.
 | The same delivery guarantee becomes a duplicated trail | `normalizeEvent` mints a random event id and `msg_id` is only payload, so the ledger has no natural dedupe and one republished envelope is two rows. An append-only store cannot be cleaned up afterwards | S1 criterion 6: the tee dedupes on `msg_id` before emitting, tested against a deliberate double-publish. Idempotent consumers were never the same claim as an idempotent tee |
 | `EVENT_KINDS` is closed and the swarm's `type` catalog is not | A type with no good mapping gets forced into `note` and the trail loses meaning | The map is documented and tested, `payload.swarm_type` always carries the exact type, and an unmapped type is a test failure rather than a silent `note`. Widening the enum is a separate, chain-affecting decision |
 | The bridge becomes the thing that blocks a swarm run | The substrate's first non-negotiable is fail-open, and a bridge is new code on a hot path | S1 criterion 8 is the test: `substrate-mcp` stopped, full DAG completes. Memory is the deliberate exception, and it is an exception at the *server*, not the client |
-| **A green substrate test read as a swarm guarantee** | `store-lock.test.ts` scans *this* repository. It cannot see the swarm repo, so it can pass while a swarm agent still reads its own vector store — and the criterion it appears to prove is exactly the memory-bypass non-goal | S3 criterion 7 puts that check in the swarm repo's own suite and says explicitly that the substrate test passing alone does not satisfy it |
+| **A green substrate test read as a swarm guarantee** | `store-lock.test.ts` scans *this* repository. It cannot see the swarm repo, nor the workspaces S4 installs into — so it can pass while a swarm agent still reads its own vector store, or while an installed config names Greptime as an MCP server. Both are criteria it appears to prove and cannot, and both are non-goals of this ADR. Drafting this document produced the same error twice, which is the argument for naming it as a standing trap rather than a fixed bug | The check moves to where the artifact is: S3 criterion 7 in the swarm repo's own suite, S4 criterion 2 in the installer's test over every generated file. Both say explicitly that the substrate suite passing does not satisfy them |
+| **Fail-open emission means the trail is never provably complete** | The anchor roots what reached Greptime, and S1 criterion 8 requires a run to finish with the tee down. So a lost event moves neither the root nor the count, and no amount of verification will surface it | Accepted, and stated in S5 criterion 5 rather than papered over. Integrity and ordering are attested; completeness is not. `ledger.silent` and `git.tip_unlogged` are the signals that something is not arriving. Reconciling against expected messages would mean the ledger deciding what *ought* to exist, which belongs to the bus and the Task Store |
+| **A lease has no REST door** | S2 needs claim, heartbeat and complete; the server exposes `/brief`, `/events`, `/events/query`, `/memory`, `/handoff`, `/drift` and `/verify` and nothing for leases. A non-MCP executing agent could not hold a lease at all | Correct as the split stands — REST exists for hooks, and a hook never executes a node. S4 criterion 5 turns that into a requirement the install enforces rather than an assumption that fails at claim time, and says that adding the four routes is S2's designed work (with `lease_id` fencing and a server-decided session) if a non-MCP runtime ever must execute |
 | Greptime and the index are on infrastructure this host cannot see | Both are external Railway endpoints (`.planning/PROJECT.md`) | Unchanged by this ADR, and the reason the `sim` profile in S5 criterion 9 skips rather than mocks |
 | Scope creep into replacing NATS | The tee makes it look adjacent and cheap | Non-goal 3, and no S1–S5 criterion mentions the transport |
 | The plan drifts from the tickets | An earlier draft of this ADR invented its own S1–S5 order, swapped memory and leases, and dropped the install/projector phase — owners following it would have worked the wrong acceptance criteria | The phase table names the ticket per phase, and the tickets' order is authoritative over this document. A phase this ADR cannot read (see S5's open item) is marked open rather than filled in |
