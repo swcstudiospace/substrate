@@ -174,6 +174,29 @@ describe("routes", () => {
 		}
 	});
 
+	test("a filter of the wrong JSON type is a 400 naming the field, not a 500", async () => {
+		// The route casts the body; the service is what checks it. A number reaching
+		// redaction used to throw inside `.replace` and surface as an internal error.
+		const { queries, greptime } = ledger();
+		const { post, stop } = await serve(greptime);
+		try {
+			for (const [body, field] of [
+				[{ session_id: 123 }, "session_id must be a string"],
+				[{ until: 123 }, "until must be an ISO date string"],
+				[{ limit: "10" }, "limit must be a number"],
+				[{ repo: "" }, "repo is empty"],
+			] as const) {
+				const response = await post("/events/query", body);
+				expect(response.status).toBe(400);
+				expect(String(((await response.json()) as Record<string, unknown>).error)).toContain(field);
+			}
+			// None of them reached the ledger.
+			expect(queries).toEqual([]);
+		} finally {
+			await stop();
+		}
+	});
+
 	test("a deployment with tokens refuses an unauthenticated read", async () => {
 		const { greptime } = ledger();
 		const { post, stop } = await serve(greptime, { SUBSTRATE_TOKEN_OMP: "tok-omp" });

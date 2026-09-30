@@ -457,3 +457,71 @@ describe("queryEvents", () => {
 		expect(result.error).not.toContain("hunter2");
 	});
 });
+
+describe("queryEvents input checks", () => {
+	/** A ledger stub that records the query it was handed. */
+	function reader() {
+		const queries: EventQuery[] = [];
+		return {
+			queries,
+			greptime: {
+				queryEvents: async (query: EventQuery) => {
+					queries.push(query);
+					return [];
+				},
+			},
+		};
+	}
+
+	function substrateWith(greptime: unknown) {
+		return new Substrate(loadConfig({}), { index: null, greptime: greptime as never });
+	}
+
+	test("refuses an identifier that was supplied but empty, rather than widening the read", async () => {
+		// `normalizeIdentifier("")` is null, and a dropped clause is not a narrower
+		// query — it is every event the other filters allow. A caller passing an unset
+		// variable would have been handed unrelated events.
+		const { queries, greptime } = reader();
+		const substrate = substrateWith(greptime);
+
+		await expect(substrate.queryEvents({ session_id: "" })).rejects.toThrow(/session_id is empty/);
+		await expect(substrate.queryEvents({ repo: "" })).rejects.toThrow(/repo is empty/);
+		expect(queries).toEqual([]);
+
+		// Absent is still absent: no clause, and no refusal.
+		await substrate.queryEvents({});
+		expect(queries[0]?.match?.session_id).toBeUndefined();
+	});
+
+	test("refuses a filter of the wrong type instead of failing inside redaction", async () => {
+		// A JSON body is not typed. `redact` is written for strings, so a number used to
+		// reach `.replace` and surface as a 500 rather than a 400 naming the field.
+		const { queries, greptime } = reader();
+		const substrate = substrateWith(greptime);
+
+		await expect(substrate.queryEvents({ session_id: 123 as never })).rejects.toThrow(
+			/session_id must be a string/,
+		);
+		await expect(substrate.queryEvents({ surface: 7 as never })).rejects.toThrow(/surface must be a string/);
+		await expect(substrate.queryEvents({ include_payload: "yes" as never })).rejects.toThrow(
+			/include_payload must be a boolean/,
+		);
+		await expect(substrate.queryEvents({ order: 1 as never })).rejects.toThrow(/order must be a string/);
+		expect(queries).toEqual([]);
+	});
+
+	test("refuses a numeric time bound rather than reading it as 1970", async () => {
+		// `new Date(123)` is a valid date, so this used to be a silently empty window.
+		await expect(substrateWith(reader().greptime).queryEvents({ until: 123 as never })).rejects.toThrow(
+			/until must be an ISO date string/,
+		);
+	});
+
+	test("refuses a limit that is not a number rather than silently using the default", async () => {
+		const { queries, greptime } = reader();
+		await expect(substrateWith(greptime).queryEvents({ limit: "10" as never })).rejects.toThrow(
+			/limit must be a number/,
+		);
+		expect(queries).toEqual([]);
+	});
+});

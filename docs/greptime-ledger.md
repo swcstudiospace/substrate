@@ -277,7 +277,20 @@ that cannot exist is *refused* — `400` over REST, a tool error over MCP — be
 would otherwise match nothing and read as "nothing happened". A ledger that is
 merely unreachable is an empty window with `error` set (`503` over REST), since a
 missing store may not fail an agent's turn. `truncated` says the reply hit `limit`,
-so a caller knows to narrow it rather than assuming it saw everything.
+so a caller knows to narrow it rather than assuming it saw everything. A filter that
+was *supplied but empty* is refused too, rather than dropped: dropping it would
+widen the read to everything the other filters allow, which is the opposite of what
+a caller narrowing by session asked for. Both surfaces are checked in
+`Substrate.queryEvents` rather than at each route, so a JSON body posting
+`{"session_id": 123}` gets a `400` naming the field instead of a `500` from
+redaction being handed a number.
+
+**A window, not a cursor.** `until` is a bound, and `truncated` is not a page
+marker. Two events can share a millisecond, so re-querying from a boundary
+timestamp either repeats the rows at it or skips the ones that did not fit — reading
+every event that way needs a `(ts, id)` cursor, which this deliberately does not
+have. `events_query` is a browse; the complete read of a session or graph is
+`readEvents`, which takes no limit and is what `events_verify` walks.
 
 Not built here: a `substrate events` CLI subcommand. Hooks and the CLI can already
 reach `POST /events/query`; nothing needed it yet.
