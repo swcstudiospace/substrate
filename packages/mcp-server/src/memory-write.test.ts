@@ -32,8 +32,17 @@ class FakeStore implements MemoryStore {
 
 	/** Makes the read-back miss, which is the only way to reach `verified_persisted: false`. */
 	hideFromReadBack = false;
-	/** Makes the insert throw, standing in for an index that went away mid-write. */
+	/** Makes the insert throw before writing anything, standing in for an index that is down. */
 	failInsert: string | null = null;
+	/**
+	 * Writes the row and *then* throws — a connection lost during the commit.
+	 *
+	 * The case that makes "did it land?" unanswerable from the exception, and the reason
+	 * the claim is held from the attempt rather than from the return.
+	 */
+	failAfterInsert: string | null = null;
+	/** Makes the standing-entry lookup throw: a failure that is certainly before the insert. */
+	failStanding: string | null = null;
 	/** Makes the acknowledgement throw, standing in for a crash right after the commit. */
 	failFinish: string | null = null;
 	/**
@@ -104,6 +113,7 @@ class FakeStore implements MemoryStore {
 	}
 
 	async standingEntry(conflictKey: string): Promise<MemoryEntry | null> {
+		if (this.failStanding) throw new Error(this.failStanding);
 		const found = [...this.rows.values()]
 			.filter((row) => row.conflict_key === conflictKey && !row.entry.superseded_by)
 			.sort((a, b) => b.entry.version - a.entry.version);
@@ -160,6 +170,9 @@ class FakeStore implements MemoryStore {
 			...(row.idempotency_key ? { idempotency_key: row.idempotency_key } : {}),
 		};
 		this.rows.set(row.id, { entry, conflict_key: row.conflict_key });
+		// The row is in. Throwing now is a connection lost after the commit: the caller
+		// gets an exception and the entry exists anyway.
+		if (this.failAfterInsert) throw new Error(this.failAfterInsert);
 		return { ok: true, entry };
 	}
 
@@ -635,15 +648,66 @@ describe("exactly-once", () => {
 		expect((await write({ idempotency_key: "k1" })).outcome).toBe("accepted");
 	});
 
-	test("a failed write releases its key, so the retry is not a replay of nothing", async () => {
-		store.failInsert = "postgres: connection reset";
-		await expect(write({ idempotency_key: "k1" })).rejects.toThrow("connection reset");
+	test("a failure before the insert releases its key, so the retry is not a replay of nothing", async () => {
+		// Nothing can have been written yet, so burning the key would cost a real write
+		// and buy nothing.
+		store.failStanding = "postgres: connection reset";
+		await expect(write({ kind: "todo", subject: "poller", idempotency_key: "k1" })).rejects.toThrow(
+			"connection reset",
+		);
 		expect(store.writes.size).toBe(0);
 
-		store.failInsert = null;
-		const retry = await write({ idempotency_key: "k1" });
+		store.failStanding = null;
+		const retry = await write({ kind: "todo", subject: "poller", idempotency_key: "k1" });
 		expect(retry.outcome).toBe("accepted");
 		expect(retry.deduplicated).toBeUndefined();
+	});
+
+	test("an insert that throws keeps its key, because the row may have landed anyway", async () => {
+		// A connection lost during the commit throws *and* commits. The exception cannot
+		// tell the two apart, so the claim is held from the attempt rather than from the
+		// return — releasing it here is how one write becomes two entries.
+		store.failInsert = "postgres: connection reset";
+		await expect(write({ kind: "warning", subject: "poller", idempotency_key: "k1" })).rejects.toThrow(
+			"connection reset",
+		);
+		expect(store.writes.get("k1")?.outcome).toBe("in-flight");
+
+		store.failInsert = null;
+		// Immediately, the key is still held and the caller is told to wait rather than
+		// being handed a second attempt at a write that might already exist.
+		const early = await write({ kind: "warning", subject: "poller", idempotency_key: "k1" });
+		expect(early.outcome).toBe("conflict");
+		expect(early.reason).toBe("write.in-flight");
+
+		// Past the timeout the successor takes over, finds no row under the id the dead
+		// attempt reserved, and writes it once.
+		store.clock += IN_FLIGHT_TIMEOUT_MS;
+		const retry = await write({ kind: "warning", subject: "poller", idempotency_key: "k1" });
+		expect(retry.outcome).toBe("accepted");
+		expect(store.entries()).toHaveLength(1);
+	});
+
+	test("a commit that threw is recovered by the retry, not written a second time", async () => {
+		// The other half of the same in-doubt window, and the one that actually duplicates:
+		// the row *did* land. An appending kind has nothing to collide on, so a second
+		// insert is simply a second warning about one thing — invisible until an agent
+		// reads its brief and sees it twice.
+		store.failAfterInsert = "postgres: connection reset";
+		await expect(write({ kind: "warning", subject: "poller", idempotency_key: "k1" })).rejects.toThrow(
+			"connection reset",
+		);
+		expect(store.entries()).toHaveLength(1);
+		expect(store.writes.get("k1")?.outcome).toBe("in-flight");
+
+		store.failAfterInsert = null;
+		store.clock += IN_FLIGHT_TIMEOUT_MS;
+		const retry = await write({ kind: "warning", subject: "poller", idempotency_key: "k1" });
+
+		expect(retry.outcome).toBe("accepted");
+		expect(retry.reason).toBe("recovered.orphan");
+		expect(retry.deduplicated).toBe(true);
+		expect(store.entries()).toHaveLength(1);
 	});
 });
 
