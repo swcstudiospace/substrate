@@ -597,9 +597,9 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 			// the entry: it is this content, it is in the index, and nothing was written
 			// again.
 			//
-			// Only where the installed row answers *this* request, which is two conditions
-			// and not one. It has to still be standing — a superseded row is no longer what
-			// any agent reads, so re-proposing the content is a real proposal — and it has to
+			// Only where the installed row answers *this* request, which is more than one
+			// condition. It has to still be standing — a superseded row is no longer what any
+			// agent reads, so re-proposing the content is a real proposal — and it has to
 			// already record the retention and the confidence being asked for. See
 			// `requestDiff`: `entry_hash` is content only, so a changed `ttl` or `trust`
 			// arrives here hashing identically while asking for something the entry in force
@@ -630,9 +630,8 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 			// then the parked proposal is a genuinely new ask and is meant to stay.
 			const raced = changed ? null : await standingApproval(store, entryHash);
 			if (raced && !requestDiff(raced.entry, want)) {
-				await store
-					.recordApproval({ ...baseRow, id: newId("memr"), idempotency_key: key, reason: APPROVAL_INSTALLED }, raced.entry.id, writer)
-					.catch(() => undefined);
+				const resolved = { ...baseRow, id: newId("memr"), idempotency_key: key, reason: APPROVAL_INSTALLED };
+				await store.recordApproval(resolved, raced.entry.id, writer).catch(() => undefined);
 				return await alreadyApproved(store, { key, holder }, raced, grant.name, trust);
 			}
 
@@ -643,9 +642,10 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 				remedy:
 					`A ${kind} at global scope is read by every agent in every repo, so it is a proposal until a ` +
 					`reviewer releases it. It is parked as ${reviewId}. ` +
-					(changed
-						? `This content is already in force as ${standing?.entry.id}, but with a different ${changed} — so ` +
-							"this is a new proposal, not a duplicate of it. Re-submit with a review_token to install it. "
+					(changed && standing
+						? `This content is already in force as ${standing.entry.id}, but with a different ${changed} — so ` +
+							"this is a new proposal rather than a duplicate of it, and re-submitting it with a review_token " +
+							"is what installs the change."
 						: "Re-submit the same write with a review_token to install it, or scope it to this repo or graph " +
 							"instead."),
 				verified_persisted: false,
