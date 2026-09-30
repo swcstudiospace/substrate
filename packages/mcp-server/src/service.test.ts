@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { loadConfig } from "./config.ts";
+import { isReviewToken, loadConfig } from "./config.ts";
 import { REDACTED } from "./redact.ts";
 import { Substrate } from "./service.ts";
 import type { EventInput, SubstrateEvent } from "./types.ts";
@@ -275,6 +275,136 @@ describe("append-mode enforcement", () => {
 		expect(health.appendOnly).toBe(true);
 		expect(health.quotingDialectKnown).toBe(false);
 		expect(health.eventsWritable).toBe(false);
+	});
+});
+
+describe("memory.write is fail-closed", () => {
+	const entry = { scope: "graph:ut-1", kind: "fact" as const, text: "hermes finished n2", writer: "hermes" };
+
+	/** Records what reached the ledger, so the audit trail can be asserted on. */
+	function auditing() {
+		const emitted: SubstrateEvent[] = [];
+		return {
+			emitted,
+			greptime: {
+				ensureAppendMode: async () => true,
+				lastHash: async () => null,
+				insertEvent: async (event: SubstrateEvent) => {
+					emitted.push(event);
+				},
+			},
+		};
+	}
+
+	test("no index is a denial, not an exception and never a silent success", async () => {
+		// `emit` hands a caller its event back when the ledger is gone, because a lost
+		// event costs the trail. Memory is what the next four sessions act on, so the
+		// same outage has to come back as a refusal — and as something an agent mid-turn
+		// can act on, which a thrown error is not.
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: null });
+
+		const result = await substrate.writeMemory(entry);
+
+		expect(result.outcome).toBe("denied");
+		expect(result.reason).toBe("store.unavailable");
+		expect(result.verified_persisted).toBe(false);
+		expect(result.remedy).toContain("SUBSTRATE_PG_URL");
+	});
+
+	test("an index that throws is a denial with the reason redacted", async () => {
+		// A connection error quotes the URL it failed to reach, password and all.
+		const index = {
+			claimWrite: async () => {
+				throw new Error("connect failed: postgres://user:hunter2@host/db");
+			},
+		};
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null });
+
+		const result = await substrate.writeMemory(entry);
+
+		expect(result.outcome).toBe("denied");
+		expect(result.reason).toBe("store.write-failed");
+		expect(result.remedy).not.toContain("hunter2");
+		expect(result.remedy).toContain(REDACTED);
+	});
+
+	test("a refused write is audited to the event log", async () => {
+		// Governance that leaves no trace is indistinguishable from no governance: a
+		// denial is otherwise visible only to the agent that was denied, which is the
+		// one party with an interest in not mentioning it.
+		const { emitted, greptime } = auditing();
+		const substrate = new Substrate(loadConfig({}), { index: {} as never, greptime: greptime as never });
+
+		const result = await substrate.writeMemory({ ...entry, scope: "person:ove" });
+
+		expect(result.outcome).toBe("denied");
+		expect(emitted).toHaveLength(1);
+		expect(emitted[0]?.kind).toBe("warning");
+		expect(emitted[0]?.summary).toContain("memory.write denied");
+		expect(emitted[0]?.payload).toMatchObject({ outcome: "denied", reason: "rbac.no-grant" });
+	});
+
+	test("the audit event carries the decision and never the body", async () => {
+		// The body may be exactly the secret that got the write quarantined, and copying
+		// it into an append-only ledger to record that it was quarantined is absurd.
+		const { emitted, greptime } = auditing();
+		const substrate = new Substrate(loadConfig({}), { index: {} as never, greptime: greptime as never });
+
+		await substrate.writeMemory({ ...entry, writer: "unknown", text: "PGPASSWORD=s3cr3t-do-not-log" });
+
+		expect(JSON.stringify(emitted)).not.toContain("s3cr3t");
+	});
+
+	test("an unattributed writer is refused without an event, because emit would reject it too", async () => {
+		// `unknown` is not a surface, so there is nothing to attribute the audit event
+		// to; the stderr line is its trail. The refusal still happens.
+		const { emitted, greptime } = auditing();
+		const substrate = new Substrate(loadConfig({}), { index: {} as never, greptime: greptime as never });
+
+		const result = await substrate.writeMemory({ ...entry, writer: "unknown" });
+
+		expect(result.outcome).toBe("denied");
+		expect(emitted).toEqual([]);
+	});
+
+	test("a ledger that cannot take the audit event does not change the decision", async () => {
+		// The audit is fail-open on top of a fail-closed decision. Losing the trail must
+		// not turn a denial into an exception.
+		const greptime = {
+			ensureAppendMode: async () => true,
+			lastHash: async () => null,
+			insertEvent: async () => {
+				throw new Error("greptime unreachable");
+			},
+		};
+		const substrate = new Substrate(loadConfig({}), { index: {} as never, greptime: greptime as never });
+
+		expect((await substrate.writeMemory({ ...entry, scope: "person:ove" })).outcome).toBe("denied");
+	});
+});
+
+describe("reviewer tokens", () => {
+	test("none configured means every review path stays closed", () => {
+		// The correct default: the queue fills, and nothing forged gets through.
+		const config = loadConfig({});
+		expect(config.memoryReviewTokens.size).toBe(0);
+		expect(isReviewToken(config, "anything")).toBe(false);
+		expect(isReviewToken(config, undefined)).toBe(false);
+	});
+
+	test("a configured token is accepted, and only that token", () => {
+		const config = loadConfig({ SUBSTRATE_MEMORY_REVIEW_TOKENS: "reviewer-token-that-is-long, second-token-also-long" });
+		expect(isReviewToken(config, "reviewer-token-that-is-long")).toBe(true);
+		expect(isReviewToken(config, "second-token-also-long")).toBe(true);
+		expect(isReviewToken(config, "reviewer-token")).toBe(false);
+		expect(isReviewToken(config, "")).toBe(false);
+	});
+
+	test("a short value is a placeholder, not a token", () => {
+		// Accepting `changeme` would hand reviewer authority to anybody who guessed it.
+		const config = loadConfig({ SUBSTRATE_MEMORY_REVIEW_TOKENS: "changeme" });
+		expect(config.memoryReviewTokens.size).toBe(0);
+		expect(isReviewToken(config, "changeme")).toBe(false);
 	});
 });
 

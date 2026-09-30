@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { healthStatus } from "./server.ts";
+import { healthStatus, memoryWriteStatus } from "./server.ts";
 
 /** Shorthand for a health report; every field defaults to the unhealthy value. */
 function health(over: Partial<Parameters<typeof healthStatus>[0]> = {}) {
@@ -28,5 +28,32 @@ describe("healthStatus", () => {
 		// ledger it never had must not fail it.
 		expect(healthStatus(health({ index: true }), false)).toBe(200);
 		expect(healthStatus(health(), false)).toBe(503);
+	});
+});
+
+describe("memoryWriteStatus", () => {
+	/** Shorthand for a governance result; only the fields the mapping reads. */
+	function result(outcome: string, over: { reason?: string; verified_persisted?: boolean } = {}) {
+		return { outcome, reason: over.reason ?? outcome, verified_persisted: over.verified_persisted ?? true };
+	}
+
+	test("only a write that was read back gets a 200", () => {
+		// A hook that can see nothing but the status code still has to be able to tell
+		// "stored and confirmed" from "taken, not confirmed" — the same distinction
+		// /events already draws between 202 and 200.
+		expect(memoryWriteStatus(result("accepted"))).toBe(200);
+		expect(memoryWriteStatus(result("accepted", { verified_persisted: false }))).toBe(202);
+	});
+
+	test("the three refusals are distinguishable without parsing the body", () => {
+		expect(memoryWriteStatus(result("conflict", { reason: "review.required", verified_persisted: false }))).toBe(409);
+		expect(memoryWriteStatus(result("quarantined", { reason: "quarantine.secret", verified_persisted: false }))).toBe(422);
+		expect(memoryWriteStatus(result("denied", { reason: "rbac.no-grant", verified_persisted: false }))).toBe(403);
+	});
+
+	test("an outage is a 503, not a 403", () => {
+		// A monitor must not read "the index is down" as "this agent lacks permission".
+		expect(memoryWriteStatus(result("denied", { reason: "store.unavailable", verified_persisted: false }))).toBe(503);
+		expect(memoryWriteStatus(result("denied", { reason: "store.write-failed", verified_persisted: false }))).toBe(503);
 	});
 });
