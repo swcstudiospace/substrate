@@ -371,6 +371,19 @@ async function cmdEvidence(args: Record<string, string | true>): Promise<number>
 			return 1;
 		}
 	}
+	// A bundle labelled for one graph whose audit decisions may be another's is not
+	// evidence about that graph, however complete it looks. Two identifiers that clean to
+	// the same stored string are indistinguishable once stored, so nothing downstream can
+	// separate them — which makes this the same kind of answer as a chain that could not be
+	// verified, and it gets the same exit status.
+	if (bundle.audit?.attribution === "ambiguous") {
+		process.stderr.write(
+			`[substrate] the audit decisions for ${graphId} cannot be attributed to it alone: its identifier is stored in a ` +
+				"cleaned form, and another graph cleaning to the same string would share this selection\n" +
+				"[substrate] the bundle was written, but its audit tally is not this graph's alone\n",
+		);
+		return 1;
+	}
 	if ((bundle.slo_summary?.breached ?? 0) > 0) {
 		process.stderr.write(`[substrate] ${bundle.slo_summary.breached} SLO(s) breached for ${graphId}\n`);
 		return 1;

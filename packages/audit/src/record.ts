@@ -393,6 +393,22 @@ export class ChainWalker {
 	}
 }
 
+/**
+ * Distinct keys a tally's breakdown keeps before collapsing into `TALLY_OVERFLOW`.
+ *
+ * Generous against every real deployment — this substrate serves under twenty tools and
+ * eleven surfaces — and a hard bound against a caller inventing names.
+ *
+ * A breakdown therefore holds at most `MAX_TALLY_KEYS + 1` entries: the overflow bucket is
+ * admitted beyond the cap rather than counted against it, the same way `MetricRegistry`
+ * admits its collapsed series, because refusing it would drop the counts it carries and the
+ * breakdown would stop summing to the total.
+ */
+export const MAX_TALLY_KEYS = 200;
+
+/** The bucket a tally's breakdown collapses into once it is full. Named like `OVERFLOW`. */
+export const TALLY_OVERFLOW = "_overflow";
+
 export interface AuditStats {
 	total: number;
 	allowed: number;
@@ -422,6 +438,8 @@ export class StatsAccumulator {
 	private readonly byTool = new Map<string, { allowed: number; denied: number }>();
 	private readonly bySurface = new Map<string, { allowed: number; denied: number }>();
 
+	constructor(private readonly maxKeys: number = MAX_TALLY_KEYS) {}
+
 	push(record: AuditRecord): void {
 		this.totalCount++;
 		const allowed = record.decision === "allowed";
@@ -431,11 +449,36 @@ export class StatsAccumulator {
 			[this.byTool, record.tool],
 			[this.bySurface, record.surface],
 		] as Array<[Map<string, { allowed: number; denied: number }>, string]>) {
-			const bucket = counts.get(key) ?? { allowed: 0, denied: 0 };
+			const bucket = counts.get(key) ?? this.admit(counts, key);
 			if (allowed) bucket.allowed++;
 			else bucket.denied++;
-			counts.set(key, bucket);
 		}
+	}
+
+	/**
+	 * The bucket a new key goes in, or the overflow bucket once the tally is full.
+	 *
+	 * The breakdown has to be bounded for the same reason the record listing is. `tool`
+	 * comes from a JSON-RPC `params.name` and is audited *before* the dispatcher validates
+	 * it — deliberately, so a tool added without an audit decision is caught the first time
+	 * it is called — so the set of distinct names in a file is the caller's to choose. Once
+	 * the tally was computed over every record rather than over the listed window, that set
+	 * became what `/evidence` builds and serialises, on the process serving every prompt on
+	 * the host. The totals stay exact; only the *breakdown* collapses, the same trade the
+	 * metric registry makes with `_overflow`.
+	 */
+	private admit(
+		counts: Map<string, { allowed: number; denied: number }>,
+		key: string,
+	): { allowed: number; denied: number } {
+		if (counts.size >= this.maxKeys) {
+			const overflow = counts.get(TALLY_OVERFLOW) ?? { allowed: 0, denied: 0 };
+			counts.set(TALLY_OVERFLOW, overflow);
+			return overflow;
+		}
+		const created = { allowed: 0, denied: 0 };
+		counts.set(key, created);
+		return created;
 	}
 
 	stats(): AuditStats {

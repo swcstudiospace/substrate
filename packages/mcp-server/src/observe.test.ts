@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AuditUnavailableError, type AuditRecordInput } from "@substrate/audit";
+import { AuditLog, AuditUnavailableError, type AuditRecordInput } from "@substrate/audit";
 import { METRIC, findCounter, sumCounter } from "@substrate/observability";
 import { loadConfig } from "./config.ts";
 import {
@@ -740,5 +740,82 @@ describe("the evidence bundle reads the audit file once", () => {
 		expect(bundle.chains.mcp_audit.ok).toBe(false);
 		expect(bundle.notes.join(" ")).toContain("missing history");
 		second.stop();
+	});
+});
+
+describe("audit attribution", () => {
+	const secret = `sk-ant-${"a".repeat(30)}`;
+
+	test("an ordinary graph id is attributed exactly", async () => {
+		const path = join(mkdtempSync(join(tmpdir(), "substrate-attr-")), "mcp-audit.jsonl");
+		const observed = createObservability(loadConfig({ SUBSTRATE_AUDIT_PATH: path }));
+		await observed.start();
+		await auditToolCalls(observed, "omp", [{ id: 1, tool: "graph_get", args: { graph_id: "ut-1" } }]);
+
+		const bundle = await buildGraphEvidence(observed, new Substrate(loadConfig({}), { index: null, greptime: null }), "ut-1");
+		expect(bundle.audit.attribution).toBe("exact");
+		observed.stop();
+	});
+
+	test("a graph stored under a cleaned id is ambiguous, not quietly presented as its own", async () => {
+		// Two identifiers that clean to the same stored string are indistinguishable once
+		// stored, so this selection may hold another graph's decisions and nothing in the file
+		// can say which. A bundle labelled for one graph must not present that tally as that
+		// graph's — a note saying it might not be is the overstatement this document exists
+		// not to make.
+		const path = join(mkdtempSync(join(tmpdir(), "substrate-attr-")), "mcp-audit.jsonl");
+		const observed = createObservability(loadConfig({ SUBSTRATE_AUDIT_PATH: path }));
+		await observed.start();
+		const graphId = `ut-${secret}`;
+		await auditToolCalls(observed, "omp", [{ id: 1, tool: "graph_get", args: { graph_id: graphId } }]);
+
+		const bundle = await buildGraphEvidence(observed, new Substrate(loadConfig({}), { index: null, greptime: null }), graphId);
+		expect(bundle.audit.attribution).toBe("ambiguous");
+		// The records are still there — an investigator needs them — and the note says what
+		// they are and names the form in use.
+		expect(bundle.audit.total).toBe(1);
+		expect(bundle.notes.join(" ")).toContain("stored form");
+		// And the document names the graph by its stored key, so the credential the caller put
+		// in the identifier is not echoed into an artefact that gets archived and shared.
+		expect(bundle.graph_id).toBe("ut-[REDACTED]");
+		expect(JSON.stringify(bundle)).not.toContain("sk-ant-");
+		observed.stop();
+	});
+});
+
+describe("the boot warning tells a deleted file from a replaced one", () => {
+	test("a truncated file warns about missing history", async () => {
+		const path = join(mkdtempSync(join(tmpdir(), "substrate-warn-")), "mcp-audit.jsonl");
+		const first = createObservability(loadConfig({ SUBSTRATE_AUDIT_PATH: path }));
+		await first.start();
+		await auditToolCalls(first, "omp", [{ id: 1, tool: "graph_get", args: { graph_id: "ut-1" } }]);
+		first.stop();
+		rmSync(path);
+
+		const warnings = await createObservability(loadConfig({ SUBSTRATE_AUDIT_PATH: path })).start();
+		expect(warnings.join(" ")).toContain("missing history");
+		expect(warnings.join(" ")).not.toContain("rewritten");
+	});
+
+	test("a replaced file warns about a rewrite, not about a deletion", async () => {
+		// The counts are equal in this case, so reporting it as missing history printed two
+		// identical numbers and sent the operator after a deletion that did not happen.
+		const directory = mkdtempSync(join(tmpdir(), "substrate-warn-"));
+		const path = join(directory, "mcp-audit.jsonl");
+		const first = createObservability(loadConfig({ SUBSTRATE_AUDIT_PATH: path }));
+		await first.start();
+		await auditToolCalls(first, "omp", [{ id: 1, tool: "graph_get", args: { graph_id: "ut-1" } }]);
+		first.stop();
+
+		// A different one-record chain, with no checkpoint of its own.
+		const other = join(directory, "impostor.jsonl");
+		const impostor = new AuditLog({ path: other, checkpointPath: false });
+		await impostor.open();
+		await impostor.append({ surface: "muse", tool: "graph_get", decision: "allowed", mode: "fail-open" });
+		writeFileSync(path, readFileSync(other, "utf8"));
+
+		const warnings = await createObservability(loadConfig({ SUBSTRATE_AUDIT_PATH: path })).start();
+		expect(warnings.join(" ")).toContain("has been rewritten");
+		expect(warnings.join(" ")).not.toContain("missing history");
 	});
 });

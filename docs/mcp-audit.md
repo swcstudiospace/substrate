@@ -412,15 +412,42 @@ So the counting is separated from the keeping: every matching record goes throug
 disagree) and only a window is retained. The bundle says how many records name the graph,
 how many are listed, and that the tally covers all of them.
 
+Two consequences of separating them, both handled:
+
+- **The breakdown is bounded even though the totals are not.** `tool` comes from a JSON-RPC
+  `params.name` and is audited *before* the dispatcher validates it, so the set of distinct
+  names in a file is a caller's to choose — and a tally over every record rather than over
+  the window made that set what `/evidence` builds and serialises. Past `MAX_TALLY_KEYS` the
+  breakdown collapses into `_overflow`, the same trade `MetricRegistry` makes; the totals
+  stay exact and the breakdown still sums to them.
+- **The window is a ring.** Appending and dropping the first entry shifted the whole window
+  per matching record, so a graph past the cap paid O(n·window) on the very request this
+  single-pass rework exists to make cheap. One write per match, one rotation at the end.
+
 **The graph id is sanitised the same way the records were.** `buildRecord` redacts and
 caps `graph_id` like every other stored field, so a graph whose identifier contains a
 credential-shaped substring is stored under its redacted form — and selecting on the raw
 identifier matched none of its own records, so its bundle silently omitted every decision
 made about it. The query is normalised to the stored form, which is what the ledger
 already does for the same reason (`verifyGraph` reads by `normalizeIdentifier(graphId)`).
-The residual cost is that two identifiers redacting identically select each other's
-records; when the selection differs from the identifier asked for, the bundle says so
-rather than leaving it to be discovered.
+The residual cost is that two identifiers cleaning to the same string are
+indistinguishable once stored, so the selection may hold another graph's decisions and
+nothing in the file can separate them. A note saying so is **not** enough: the bundle is
+labelled for one graph and a reader takes its tally as that graph's. So it is a state
+instead — `audit.attribution` is `ambiguous`, and `substrate evidence` exits non-zero on it
+exactly as it does for a chain it could not verify. The records are still listed, because an
+investigator needs them; what the bundle no longer does is claim they are one graph's.
+
+**The bundle also names the graph in its stored form, not the string it was asked with.**
+An evidence bundle is written to a file, served over HTTP and archived, and a caller can put
+a credential in a graph id — so echoing the raw identifier carried into the document, and
+into the HTML rendered from it, exactly the value every other field went to the trouble of
+removing. For every ordinary `ut-…` identifier the two forms are the same string.
+
+The real remedy is upstream of all of this: a graph identifier that redaction changes is not
+usable as a key, and rejecting it at registration would remove the collision everywhere
+rather than reporting it. That is a change to the shared event path rather than to these
+packages, so it is noted here rather than made.
 
 **The same key reads the usage back.** The metric attribute holds the normalised
 `graph_id` too — the observer is handed the identifier off the *stored* event, and

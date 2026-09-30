@@ -482,6 +482,20 @@ export class AuditLog {
 		let anchorSeen = false;
 		let anchorHeld = true;
 
+		/**
+		 * The window over the newest matches, as a real ring.
+		 *
+		 * Not a push-and-splice: dropping the first entry of a full window costs a shift of
+		 * the whole window, so a graph past the cap paid that per matching record and the
+		 * scan went quadratic — on the request this whole single-pass rework exists to make
+		 * cheap. One write per match here, and one rotation at the end.
+		 *
+		 * An unbounded window (`readAll`) needs no ring and gets none.
+		 */
+		const bounded = Number.isFinite(maxCollected);
+		const ring: AuditRecord[] = bounded ? new Array<AuditRecord>(Math.max(maxCollected, 0)) : [];
+		let written = 0;
+
 		const offer = (record: AuditRecord): void => {
 			if (!keep || !keep(record)) return;
 			matched++;
@@ -489,10 +503,12 @@ export class AuditLog {
 			// this selection, and the window below describes only what a bundle can list.
 			tally.push(record);
 			if (maxCollected <= 0) return;
-			collected.push(record);
-			// A window over the newest, kept as a ring. `shift` is O(n) per drop, which is
-			// fine at this size and keeps the array the caller was handed.
-			if (collected.length > maxCollected) collected.splice(0, collected.length - maxCollected);
+			if (!bounded) {
+				collected.push(record);
+				return;
+			}
+			ring[written % maxCollected] = record;
+			written++;
 		};
 
 		const checkAnchor = (record: AuditRecord): void => {
@@ -525,6 +541,15 @@ export class AuditLog {
 					offer(parsed);
 				}
 			}
+		}
+
+		// Unroll the ring once, oldest first. `written` past the cap means it wrapped, so
+		// the oldest kept entry is wherever the next write would have gone.
+		if (bounded && written > 0) {
+			const start = written % maxCollected;
+			const wrapped = written > maxCollected;
+			const order = wrapped ? [...ring.slice(start), ...ring.slice(0, start)] : ring.slice(0, written);
+			for (const record of order) collected.push(record);
 		}
 
 		// The anchor is checked here rather than only at boot because the file can be

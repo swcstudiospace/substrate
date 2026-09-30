@@ -178,8 +178,12 @@ async function auditRest(
 			// because there the unrecorded write is the worse outcome; a fail-open route is
 			// served, with the fault on stderr where an operator sees it.
 			process.stderr.write(`[substrate] audit of ${tool} failed unexpectedly: ${String(cause)}\n`);
-			observability.instruments.recordAudit({ decision: "allowed", written: false });
-			return auditMode(tool) === "fail-closed"
+			const refused = auditMode(tool) === "fail-closed";
+			// The decision recorded is the decision taken. Counting a refused write as
+			// `allowed` made the audit-failure metric disagree with what the caller was
+			// answered, which is the one thing that metric exists to show.
+			observability.instruments.recordAudit({ decision: refused ? "denied" : "allowed", written: false });
+			return refused
 				? { denials: new Map<string, string>([["null", `the MCP audit chain could not take the record for ${tool}`]]) }
 				: { denials: new Map<string, string>() };
 		},

@@ -27,6 +27,9 @@ import { METRIC, findCounter, sumCounter } from "@substrate/observability";
  */
 export type ChainState = "verified" | "broken" | "unverifiable" | "not-configured";
 
+/** Whether a bundle's audit section is about one graph only. See `EvidenceInput.audit`. */
+export type AuditAttribution = "exact" | "ambiguous";
+
 export interface ChainEvidence {
 	ok: boolean | null;
 	/** Optional for a bundle written before this field existed; treat its absence as `ok`. */
@@ -45,23 +48,28 @@ export function chainStateOf(chain: Pick<ChainEvidence, "ok" | "state">): ChainS
 }
 
 export interface EvidenceInput {
-	graph_id: string;
 	/**
-	 * The form this graph's identifier is **stored** under, when it differs.
+	 * The graph, in the form the substrate **stores** identifiers under.
 	 *
-	 * Both the audit record and the metric attribute hold a redacted, capped identifier —
-	 * `sanitizeField` and `normalizeIdentifier` are the same transform — so a graph whose
-	 * id contains a credential-shaped substring is keyed by its redacted form everywhere.
-	 * Reading usage back with the raw id then matched nothing and the bundle reported no
-	 * tokens or cost at all, which is indistinguishable from a graph that spent nothing.
+	 * Not the raw string a caller asked with. Two reasons, and the second is why this is
+	 * documented on the field rather than left to the call site.
 	 *
-	 * `normalizeIdentifier` says the rule outright: "cleaning them on the write path but
-	 * querying with the raw value would mean a lookup that never matches". This is how a
-	 * caller hands the cleaned value in, since the redactor lives in `packages/mcp-server`.
-	 * Omitted, `graph_id` is used, which is right whenever nothing was redacted — every
-	 * ordinary `ut-…` id.
+	 * *It is the key.* The audit record and the metric attribute both hold a redacted,
+	 * capped identifier — `sanitizeField` and `normalizeIdentifier` are the same transform —
+	 * so reading either back with the raw string matched nothing, and a bundle reporting no
+	 * tokens and no cost is indistinguishable from a graph that spent nothing.
+	 * `normalizeIdentifier` states the rule: "cleaning them on the write path but querying
+	 * with the raw value would mean a lookup that never matches".
+	 *
+	 * *It is a document.* An evidence bundle is written to a file, served over HTTP and
+	 * archived. A caller can put a credential in a graph id, and the audit record redacts it
+	 * — so echoing the raw string here would carry into the evidence document, and into the
+	 * HTML rendered from it, exactly the value every other field went to the trouble of
+	 * removing.
+	 *
+	 * For every ordinary `ut-…` identifier the two forms are the same string.
 	 */
-	storedGraphId?: string;
+	graph_id: string;
 	generated?: Date;
 	service: { name: string; version: string; instance: string };
 	slos: SloResult[];
@@ -83,6 +91,21 @@ export interface EvidenceInput {
 		 * computed from `records`, which is right when `records` is complete.
 		 */
 		stats?: AuditStats;
+		/**
+		 * Whether these decisions can be attributed to *this* graph and no other.
+		 *
+		 * `ambiguous` when the identifier is stored in a cleaned form, because two
+		 * identifiers that clean to the same string are indistinguishable once stored — so
+		 * the records and the tally may hold another graph's decisions, and nothing in the
+		 * file can say which. A note explaining that is not enough: this bundle is *labelled*
+		 * for one graph, and a reader takes its tally as that graph's. Saying so in prose
+		 * while presenting the numbers anyway is the overstatement this document exists not
+		 * to make, so it is a state a caller can act on and `substrate evidence` exits
+		 * non-zero for it.
+		 *
+		 * Absent means `exact`, which is every ordinary `ut-…` identifier.
+		 */
+		attribution?: AuditAttribution;
 	};
 	metrics?: MetricSnapshot[];
 	notes?: string[];
@@ -106,7 +129,7 @@ export interface EvidenceBundle {
 	};
 	slos: SloResult[];
 	slo_summary: { ok: number; breached: number; insufficient: number; unmeasurable: number };
-	audit: AuditStats & { records: AuditRecord[] };
+	audit: AuditStats & { records: AuditRecord[]; attribution: AuditAttribution };
 	usage: EvidenceUsage | null;
 	pending: string[];
 	notes: string[];
@@ -176,9 +199,13 @@ export function buildEvidence(input: EvidenceInput): EvidenceBundle {
 			insufficient: input.slos.filter((slo) => slo.status === "insufficient-data").length,
 			unmeasurable: input.slos.filter((slo) => slo.status === "unmeasurable").length,
 		},
-		audit: { ...(input.audit.stats ?? auditStats(input.audit.records)), records: input.audit.records },
-		// Keyed by the stored form, not the requested one — see `storedGraphId`.
-		usage: usageForGraph(input.metrics, input.storedGraphId ?? input.graph_id),
+		audit: {
+			...(input.audit.stats ?? auditStats(input.audit.records)),
+			records: input.audit.records,
+			attribution: input.audit.attribution ?? "exact",
+		},
+		// Keyed by the stored form, which is what `graph_id` is — see its doc comment.
+		usage: usageForGraph(input.metrics, input.graph_id),
 		pending: PENDING,
 		notes: [
 			...(input.audit.durable

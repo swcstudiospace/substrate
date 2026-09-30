@@ -5,6 +5,7 @@
  * Behind `substrate evidence --graph ut-…` and `POST /evidence`.
  */
 export {
+	type AuditAttribution,
 	type ChainEvidence,
 	type ChainState,
 	type EvidenceBundle,

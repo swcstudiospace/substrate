@@ -4,7 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AuditLog, AuditUnavailableError } from "./log.ts";
 import type { AuditRecordInput } from "./record.ts";
-import { MAX_ARG_KEY, MAX_ARG_KEYS, MAX_RECORD_BYTES, MAX_TOOL_NAME, verifyAuditChain } from "./record.ts";
+import {
+	MAX_ARG_KEY,
+	MAX_ARG_KEYS,
+	MAX_RECORD_BYTES,
+	MAX_TALLY_KEYS,
+	MAX_TOOL_NAME,
+	TALLY_OVERFLOW,
+	verifyAuditChain,
+} from "./record.ts";
 
 const directories: string[] = [];
 
@@ -777,5 +785,111 @@ describe("the evidence window keeps the newest records and counts them all", () 
 		expect(view.records).toHaveLength(3);
 		expect(view.matched).toBe(3);
 		expect(view.stats.total).toBe(3);
+	});
+});
+
+describe("the evidence window is a ring, not a shifting array", () => {
+	test("keeps the newest records in order across a wrap", async () => {
+		const path = join(temporaryDirectory(), "mcp-audit.jsonl");
+		const log = new AuditLog({ path });
+		await log.open();
+		for (let i = 0; i < 10; i++) await log.append({ ...allowed, graph_id: "ut-1" });
+
+		const view = await log.verifiedView("ut-1", 3);
+		// Oldest first within the window, and the window is the last three.
+		expect(view.records.map((record) => record.seq)).toEqual([8, 9, 10]);
+		expect(view.matched).toBe(10);
+	});
+
+	test("and before a wrap, when there are fewer matches than the cap", async () => {
+		const path = join(temporaryDirectory(), "mcp-audit.jsonl");
+		const log = new AuditLog({ path });
+		await log.open();
+		for (let i = 0; i < 2; i++) await log.append({ ...allowed, graph_id: "ut-1" });
+
+		expect((await log.verifiedView("ut-1", 5)).records.map((record) => record.seq)).toEqual([1, 2]);
+	});
+
+	test("exactly at the cap", async () => {
+		const path = join(temporaryDirectory(), "mcp-audit.jsonl");
+		const log = new AuditLog({ path });
+		await log.open();
+		for (let i = 0; i < 4; i++) await log.append({ ...allowed, graph_id: "ut-1" });
+
+		expect((await log.verifiedView("ut-1", 4)).records.map((record) => record.seq)).toEqual([1, 2, 3, 4]);
+	});
+
+	test("the scan does not go quadratic once the window is full", async () => {
+		// Push-and-splice shifted the whole window per matching record, so a graph past the
+		// cap paid O(n·window) on the request this single-pass rework exists to make cheap.
+		// Measured rather than asserted: doubling the records past a small cap must not
+		// anywhere near quadruple the work.
+		const path = join(temporaryDirectory(), "mcp-audit.jsonl");
+		const log = new AuditLog({ path });
+		await log.open();
+		for (let i = 0; i < 4000; i++) await log.append({ ...allowed, graph_id: "ut-1" });
+
+		const once = performance.now();
+		await log.verifiedView("ut-1", 50);
+		const half = performance.now() - once;
+
+		for (let i = 0; i < 4000; i++) await log.append({ ...allowed, graph_id: "ut-1" });
+		const twice = performance.now();
+		const view = await log.verifiedView("ut-1", 50);
+		const full = performance.now() - twice;
+
+		expect(view.matched).toBe(8000);
+		expect(view.records).toHaveLength(50);
+		expect(view.records.map((record) => record.seq)).toEqual(
+			Array.from({ length: 50 }, (_unused, index) => 7951 + index),
+		);
+		// Linear would be ~2x. Allow generous slack for a shared runner; quadratic in the
+		// window would have been far worse than this before the ring.
+		expect(full).toBeLessThan(Math.max(half * 6, 250));
+	});
+});
+
+describe("a tally's breakdown is bounded", () => {
+	test("an invented tool name cannot grow it without limit", async () => {
+		// `tool` comes from a JSON-RPC `params.name` and is audited before the dispatcher
+		// validates it, so the set of distinct names is the caller's to choose. Once the tally
+		// covered every record rather than the listed window, that set became what
+		// `/evidence` builds and serialises.
+		const path = join(temporaryDirectory(), "mcp-audit.jsonl");
+		const log = new AuditLog({ path });
+		await log.open();
+		for (let i = 0; i < MAX_TALLY_KEYS + 50; i++) {
+			await log.append({ ...allowed, tool: `invented_${i}`, graph_id: "ut-1" });
+		}
+
+		const view = await log.verifiedView("ut-1", 10);
+		// The cap, plus the overflow bucket that is admitted beyond it so the breakdown still
+		// sums to the total — the same trade `MetricRegistry` makes for its collapsed series.
+		expect(view.stats.byTool.length).toBe(MAX_TALLY_KEYS + 1);
+		// The totals stay exact; only the breakdown collapses.
+		expect(view.stats.total).toBe(MAX_TALLY_KEYS + 50);
+		expect(view.stats.allowed).toBe(MAX_TALLY_KEYS + 50);
+		const overflow = view.stats.byTool.find((entry) => entry.tool === TALLY_OVERFLOW);
+		expect(overflow?.allowed).toBe(50);
+		// And the sum of the breakdown still equals the total, so a reader can trust it.
+		expect(view.stats.byTool.reduce((sum, entry) => sum + entry.allowed, 0)).toBe(MAX_TALLY_KEYS + 50);
+	});
+
+	test("an ordinary deployment never reaches the cap", async () => {
+		const path = join(temporaryDirectory(), "mcp-audit.jsonl");
+		const log = new AuditLog({ path });
+		await log.open();
+		for (const tool of ["graph_get", "graph_claim", "memory_write", "events_emit"]) {
+			await log.append({ ...allowed, tool, graph_id: "ut-1" });
+		}
+
+		const view = await log.verifiedView("ut-1");
+		expect(view.stats.byTool.map((entry) => entry.tool)).toEqual([
+			"events_emit",
+			"graph_claim",
+			"graph_get",
+			"memory_write",
+		]);
+		expect(view.stats.byTool.some((entry) => entry.tool === TALLY_OVERFLOW)).toBe(false);
 	});
 });

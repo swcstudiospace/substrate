@@ -11,6 +11,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { METRIC, findCounter, sumCounter } from "@substrate/observability";
 import { loadConfig, type SubstrateConfig } from "./config.ts";
 import { createObservability, type Observability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
@@ -566,6 +567,54 @@ describe("an unexpected fault in the audit path respects the tool's mode", () =>
 
 		expect(response.status).toBe(503);
 		expect(((await response.json()) as { error: string }).error).toContain("memory_write");
+	});
+
+	test("and the refusal is counted as a denial, not as an allowed record that was lost", async () => {
+		// The decision recorded has to be the decision taken: counting a refused write as
+		// `allowed` made this metric disagree with what the caller was answered, which is the
+		// one thing it exists to show.
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory() });
+		await fetch(`${harness.base}/memory`, { method: "POST", body: deeplyNested() });
+
+		const appends = findCounter(harness.observability.snapshot(), METRIC.auditAppends)!;
+		expect(sumCounter(appends, { decision: "denied", outcome: "lost" })).toBe(1);
+		expect(sumCounter(appends, { decision: "allowed", outcome: "lost" })).toBe(0);
+	});
+
+	test("a fail-open route's fault is counted as an allowed record that was lost", async () => {
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory() });
+		await fetch(`${harness.base}/brief`, { method: "POST", body: deeplyNested() });
+
+		const appends = findCounter(harness.observability.snapshot(), METRIC.auditAppends)!;
+		expect(sumCounter(appends, { decision: "allowed", outcome: "lost" })).toBe(1);
+		expect(sumCounter(appends, { decision: "denied", outcome: "lost" })).toBe(0);
+	});
+});
+
+describe("substrate evidence and an ambiguous graph identifier", () => {
+	test("exits non-zero rather than presenting another graph's decisions as this one's", async () => {
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory() });
+		const graphId = `ut-sk-ant-${"a".repeat(30)}`;
+		const child = Bun.spawn(["bun", CLI, "evidence", "--graph", graphId], {
+			cwd: ROOT,
+			env: { ...process.env, SUBSTRATE_URL: harness.base },
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [exitCode, stdout, stderr] = await Promise.all([
+			child.exited,
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+		]);
+
+		expect(exitCode).toBe(1);
+		expect(stderr).toContain("cannot be attributed to it alone");
+		// The bundle is still written — an investigator needs it — and it neither claims the
+		// decisions are this graph's nor echoes the credential in the identifier.
+		const bundle = JSON.parse(stdout) as { graph_id: string; audit: { attribution: string } };
+		expect(bundle.audit.attribution).toBe("ambiguous");
+		expect(bundle.graph_id).toBe("ut-[REDACTED]");
+		expect(stdout).not.toContain("sk-ant-");
 	});
 });
 

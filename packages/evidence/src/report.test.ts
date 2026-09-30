@@ -205,7 +205,6 @@ describe("usage is read back by the form the identifier is stored under", () => 
 		// observer is handed off the stored event. Reading usage back with the raw id matched
 		// nothing, and a bundle reporting no tokens is indistinguishable from a graph that
 		// spent nothing — the same silent disappearance as selecting audit records raw.
-		const raw = `ut-sk-ant-${"a".repeat(30)}`;
 		const stored = "ut-[REDACTED]";
 		const instruments = new SubstrateInstruments();
 		instruments.recordEmit({
@@ -218,8 +217,7 @@ describe("usage is read back by the form the identifier is stored under", () => 
 		});
 
 		const bundle = buildEvidence({
-			graph_id: raw,
-			storedGraphId: stored,
+			graph_id: stored,
 			service: { name: "substrate", version: "0.1.0", instance: "test" },
 			slos: [],
 			appChain: { ok: true, records: 0 },
@@ -228,11 +226,13 @@ describe("usage is read back by the form the identifier is stored under", () => 
 		});
 
 		expect(bundle.usage).toEqual({ inputTokens: 500, outputTokens: 0, costUsd: 0.25 });
-		// The bundle still names the graph the caller asked about, not the stored form.
-		expect(bundle.graph_id).toBe(raw);
+		// The document names the graph by the key it is stored under, so the raw identifier —
+		// which is where the credential was — is not echoed into an archived artefact.
+		expect(bundle.graph_id).toBe(stored);
+		expect(JSON.stringify(bundle)).not.toContain("sk-ant-");
 	});
 
-	test("without it the raw id is used, which is right when nothing was cleaned", () => {
+	test("an identifier nothing cleaned is used as it is", () => {
 		const instruments = new SubstrateInstruments();
 		instruments.recordEmit({
 			surface: "omp",

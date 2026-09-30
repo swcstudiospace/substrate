@@ -228,13 +228,20 @@ export function createObservability(config: SubstrateConfig, env: Record<string,
 				);
 			}
 			if (opened.missingHistory) {
-				// Loud, at boot, and not only in a verdict somebody has to ask for. The file
-				// was deleted or truncated after records were written to it, and the operator
-				// is the one who can say whether that was a rotation, a disk, or someone.
+				// Loud, at boot, and not only in a verdict somebody has to ask for. The operator
+				// is the one who can say whether this was a rotation, a disk, or someone — and
+				// the two cases point at different answers, so they must not read alike. A
+				// rewritten file has the *same* count as was committed, so reporting it as
+				// missing history printed two equal numbers and sent the reader after a deletion
+				// that did not happen.
+				const { kind, checkpointSeq, foundSeq } = opened.missingHistory;
 				warnings.push(
-					`mcp audit chain is missing history — ${opened.missingHistory.checkpointSeq} record(s) were committed and the ` +
-						`file accounts for ${opened.missingHistory.foundSeq}; the chain continues from the checkpoint and every ` +
-						"verification will report the gap",
+					kind === "missing"
+						? `mcp audit chain is missing history — ${checkpointSeq} record(s) were committed and the file accounts ` +
+							`for ${foundSeq}; the chain continues from the checkpoint and every verification will report the gap`
+						: `mcp audit chain has been rewritten — the record at seq ${checkpointSeq} is not the one whose hash was ` +
+							"checkpointed, so the file holds a different chain than this deployment committed; the decisions it " +
+							"shows are not the decisions that were made, and every verification will report it",
 				);
 			}
 			if (!settings.exportEnabled) {
@@ -576,11 +583,11 @@ export async function buildGraphEvidence(
 	const lost = observability.audit.missingHistory;
 
 	return buildEvidence({
-		graph_id: graphId,
-		// The audit record and the metric attribute are keyed by the same cleaned form, so
-		// the usage lookup uses it too. Reading usage back with the raw id matched nothing,
-		// and "no tokens" is indistinguishable from a graph that spent nothing.
-		storedGraphId: selector,
+		// The cleaned form, not the string the caller asked with: it is the key both the audit
+		// records and the metric attributes are stored under, and this document must not echo
+		// a credential that every other field redacted. They are the same string for every
+		// ordinary identifier. See `EvidenceInput.graph_id`.
+		graph_id: selector,
 		service: observability.resource,
 		slos: observability.evaluate(),
 		appChain,
@@ -592,6 +599,10 @@ export async function buildGraphEvidence(
 			// The tally covers every record naming this graph; `records` is the listed window
 			// of them. Deriving the counts from the window would understate a busy graph.
 			stats,
+			// A cleaned identifier is not a unique key: another graph cleaning to the same
+			// string is indistinguishable once stored, so this selection cannot be claimed as
+			// one graph's. `substrate evidence` exits non-zero on it.
+			attribution: selector === graphId ? "exact" : "ambiguous",
 		},
 		metrics: observability.snapshot(),
 		notes: [
@@ -606,9 +617,10 @@ export async function buildGraphEvidence(
 				: []),
 			...(selector !== graphId
 				? [
-						`This graph's identifier is stored in a cleaned form (${selector}) because redaction or the length cap ` +
-							`changed it, so its audit records and its usage are both keyed by that form. Another graph whose ` +
-							`identifier cleans to the same string would share this selection.`,
+						"The identifier this bundle was requested with is not the one named above: redaction or the length cap " +
+							"changed it, so the graph is named, keyed and reported here in its stored form. Another graph whose " +
+							"identifier cleans to the same string would share this selection, and nothing in the audit file can " +
+							"separate them — which is why the attribution is `ambiguous`.",
 					]
 				: []),
 			...(lost
