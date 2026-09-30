@@ -18,7 +18,7 @@
  * drift, so a hook or a cron can act on it, and an evidence document nobody can
  * tell from a missing one is not evidence.
  */
-import { renderEvidenceHtml, type EvidenceBundle } from "@substrate/evidence";
+import { chainStateOf, renderEvidenceHtml, type EvidenceBundle } from "@substrate/evidence";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -342,9 +342,34 @@ async function cmdEvidence(args: Record<string, string | true>): Promise<number>
 	// script: a bundle whose chain is broken or whose objective is breached should not
 	// read as a clean run just because the request succeeded. Checked for both formats —
 	// the document that reports a broken chain must not exit 0 because it is HTML.
-	if (bundle.chains?.app_events?.ok === false || bundle.chains?.mcp_audit?.ok === false) {
-		process.stderr.write(`[substrate] a hash chain for ${graphId} does not verify\n`);
-		return 1;
+	//
+	// **A chain that could not be verified counts.** The contract for this command is
+	// non-zero on an unreachable substrate, a chain that does not verify, or a breached
+	// objective — and "does not verify" covers a chain the ledger would not answer for,
+	// not only one that came back broken. It used to check `ok === false` alone, so a
+	// Greptime outage produced a bundle whose app chain was `unknown` and an exit status
+	// of 0 as long as no objective happened to be breached: a caller that trusted the
+	// status shipped an unverified document as a verified one. `not-configured` is the
+	// one state that is not a failure — a deployment with no ledger has no app chain to
+	// verify, and saying so is the honest answer rather than an error.
+	const chains = [
+		{ name: "Greptime app events", chain: bundle.chains?.app_events },
+		{ name: "MCP audit", chain: bundle.chains?.mcp_audit },
+	];
+	for (const { name, chain } of chains) {
+		if (!chain) continue;
+		const state = chainStateOf(chain);
+		if (state === "broken") {
+			process.stderr.write(`[substrate] the ${name} chain for ${graphId} does not verify: ${chain.reason ?? "broken"}\n`);
+			return 1;
+		}
+		if (state === "unverifiable") {
+			process.stderr.write(
+				`[substrate] the ${name} chain for ${graphId} could not be verified: ${chain.reason ?? "no reason given"}\n` +
+					"[substrate] the bundle was written, but it does not attest to that chain\n",
+			);
+			return 1;
+		}
 	}
 	if ((bundle.slo_summary?.breached ?? 0) > 0) {
 		process.stderr.write(`[substrate] ${bundle.slo_summary.breached} SLO(s) breached for ${graphId}\n`);

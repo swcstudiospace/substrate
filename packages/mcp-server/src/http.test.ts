@@ -7,7 +7,7 @@
  * is the only honest way to prove the command works rather than the function it calls.
  */
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -27,11 +27,20 @@ interface Harness {
 
 const running: Harness[] = [];
 
-async function start(env: Record<string, string | undefined> = {}): Promise<Harness> {
+async function start(
+	env: Record<string, string | undefined> = {},
+	stores: Partial<{ index: unknown; greptime: unknown }> = {},
+): Promise<Harness> {
 	const config: SubstrateConfig = loadConfig(env);
 	const observability = createObservability(config, env);
 	await observability.start();
-	const substrate = new Substrate(config, { index: null, greptime: null }, observability.observer);
+	const substrate = new Substrate(
+		config,
+		// Duck-typed stores. A test that needs `verifyGraph` to fail wants a ledger whose
+		// read throws, and standing up a real client to get that would prove nothing extra.
+		{ index: null, greptime: null, ...stores } as ConstructorParameters<typeof Substrate>[1],
+		observability.observer,
+	);
 	const server = createHttpServer(substrate, config, observability);
 	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 	const { port } = server.address() as AddressInfo;
@@ -254,6 +263,84 @@ describe("REST is audited on the same chain as MCP", () => {
 
 		expect(harness.observability.audit.recent()).toEqual([]);
 	});
+
+	test("/memory is audited as memory_write, the same name MCP audits it under", async () => {
+		// It was not audited at all. `memory_write` over MCP is fail-closed and refused
+		// when the chain will not take the record; the same write through this route went
+		// through unrecorded, so the policy had an unlocked door beside it.
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory() });
+		await fetch(`${harness.base}/memory`, {
+			method: "POST",
+			body: JSON.stringify({ scope: "graph:ut-7", kind: "fact", subject: "s", body: "b", graph_id: "ut-7" }),
+		});
+
+		const [record] = harness.observability.audit.recent();
+		expect(record).toMatchObject({ tool: "memory_write", transport: "rest", graph_id: "ut-7" });
+	});
+
+	test("/handoff is audited as coord_handoff", async () => {
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory() });
+		await fetch(`${harness.base}/handoff`, {
+			method: "POST",
+			body: JSON.stringify({ surface: "omp", to: "muse", goal: "finish the migration", graph_id: "ut-7" }),
+		});
+
+		const [record] = harness.observability.audit.recent();
+		expect(record).toMatchObject({ tool: "coord_handoff", transport: "rest", graph_id: "ut-7" });
+	});
+
+	test("/events/query and /drift leave a record too", async () => {
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory() });
+		await fetch(`${harness.base}/events/query`, { method: "POST", body: JSON.stringify({ graph_id: "ut-7" }) });
+		await fetch(`${harness.base}/drift`, { method: "POST", body: JSON.stringify({ repo: "agent-substrate" }) });
+
+		expect(harness.observability.audit.recent().map((record) => record.tool)).toEqual(["events_query", "drift"]);
+	});
+
+	test("a fail-closed REST write the chain cannot record is refused, not served", async () => {
+		// The denial used to be discarded, which made every REST route effectively
+		// fail-open whatever its tool's audit mode said.
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: unwritablePath() });
+		const response = await fetch(`${harness.base}/memory`, {
+			method: "POST",
+			body: JSON.stringify({ scope: "graph:ut-7", kind: "fact", subject: "s", body: "b" }),
+		});
+		const body = (await response.json()) as { error: string };
+
+		// 503, not 403: an audit sink that cannot take the record is an outage of this
+		// substrate, not a permission decision about the caller.
+		expect(response.status).toBe(503);
+		expect(body.error).toContain("memory_write");
+	});
+
+	test("so is a handoff", async () => {
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: unwritablePath() });
+		const response = await fetch(`${harness.base}/handoff`, {
+			method: "POST",
+			body: JSON.stringify({ surface: "omp", to: "muse", goal: "finish the migration" }),
+		});
+
+		expect(response.status).toBe(503);
+		expect(((await response.json()) as { error: string }).error).toContain("coord_handoff");
+	});
+
+	test("a fail-open REST read is still served when the chain will not take the record", async () => {
+		// The other half. These sit inside a prompt's hook budget, and an unwritable audit
+		// file is not a reason to fail an agent's turn.
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: unwritablePath() });
+
+		for (const [route, body] of [
+			["/brief", {}],
+			["/events/query", { graph_id: "ut-7" }],
+			["/drift", { repo: "agent-substrate" }],
+		] as Array<[string, unknown]>) {
+			const response = await fetch(`${harness.base}${route}`, { method: "POST", body: JSON.stringify(body) });
+			// The route ran. `/events/query` answers 503 of its own when the ledger does not
+			// reply, which this harness has none of — so what is asserted is that the *audit*
+			// did not refuse it, which is what the body would say.
+			expect(await response.text()).not.toContain("MCP audit chain");
+		}
+	});
 });
 
 describe("substrate evidence", () => {
@@ -334,6 +421,47 @@ describe("substrate evidence", () => {
 		expect(result.stderr).toContain("unreachable");
 	});
 
+	test("exits non-zero when a chain could not be verified, not only when it came back broken", async () => {
+		// The contract is non-zero on an unreachable substrate, a chain that does not
+		// verify, or a breached objective. It checked `ok === false` alone, so a ledger
+		// outage produced a bundle whose app chain was `unknown` and an exit status of 0 as
+		// long as no objective happened to be breached — a caller that trusted the status
+		// shipped an unverified document as a verified one.
+		const harness = await start(
+			{},
+			{ greptime: { readEvents: () => Promise.reject(new Error("greptime unreachable: connect ETIMEDOUT")) } },
+		);
+
+		const result = await run(["evidence", "--graph", "ut-1"], { SUBSTRATE_URL: harness.base });
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toContain("could not be verified");
+		expect(result.stderr).toContain("does not attest");
+	});
+
+	test("the HTML form exits non-zero on an unverifiable chain too, and still writes it", async () => {
+		const harness = await start(
+			{},
+			{ greptime: { readEvents: () => Promise.reject(new Error("greptime unreachable")) } },
+		);
+		const out = join(mkdtempSync(join(tmpdir(), "substrate-cli-")), "evidence.html");
+
+		const result = await run(["evidence", "--graph", "ut-1", "--out", out], { SUBSTRATE_URL: harness.base });
+		expect(result.exitCode).toBe(1);
+		// The document is still written: an operator investigating an outage needs it, and
+		// it says on its face that the chain is unverified.
+		expect(await Bun.file(out).text()).toContain("unverified");
+	});
+
+	test("a deployment with no ledger is not a failure — there is no app chain to verify", async () => {
+		// The state `ok: null` used to be indistinguishable from the one above.
+		const harness = await start();
+		const result = await run(["evidence", "--graph", "ut-1"], { SUBSTRATE_URL: harness.base });
+
+		expect(result.exitCode).toBe(0);
+		const bundle = JSON.parse(result.stdout) as { chains: { app_events: { state: string } } };
+		expect(bundle.chains.app_events.state).toBe("not-configured");
+	});
+
 	test("exits non-zero when the evidence itself reports a breach, so it composes in a script", async () => {
 		// 60 refused appends with no ledger configured, which is a real emit-success
 		// breach: the bundle is served, and the command says it is not clean.
@@ -373,5 +501,33 @@ describe("substrate evidence", () => {
 		const html = await Bun.file(out).text();
 		expect(html).toContain("Emit success");
 		expect(html).toContain("pill--breached");
+	});
+});
+
+describe("GET /healthz reports a lost audit trail", () => {
+	test("so a monitor learns of it without anyone asking /evidence first", async () => {
+		const path = auditDirectory();
+		const first = await start({ SUBSTRATE_AUDIT_PATH: path });
+		await fetch(`${first.base}/events`, {
+			method: "POST",
+			body: JSON.stringify({ surface: "omp", kind: "shell", summary: "ran it", graph_id: "ut-1" }),
+		});
+		first.close();
+		rmSync(path);
+
+		const second = await start({ SUBSTRATE_AUDIT_PATH: path });
+		const body = (await (await fetch(`${second.base}/healthz`)).json()) as {
+			auditMissingHistory?: { checkpointSeq: number; foundSeq: number };
+		};
+
+		expect(body.auditMissingHistory).toEqual({ checkpointSeq: 1, foundSeq: 0 });
+	});
+
+	test("and says nothing about it on a healthy chain", async () => {
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory() });
+		const body = (await (await fetch(`${harness.base}/healthz`)).json()) as Record<string, unknown>;
+
+		expect(body.auditMissingHistory).toBeUndefined();
+		expect(body.auditDurable).toBe(true);
 	});
 });

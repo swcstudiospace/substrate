@@ -9,7 +9,8 @@
  * Every interpolated value goes through `escapeHtml`. Graph ids, denial reasons and
  * tool names are all agent-supplied text.
  */
-import type { EvidenceBundle } from "./report.ts";
+import type { ChainEvidence, EvidenceBundle } from "./report.ts";
+import { chainStateOf } from "./report.ts";
 import type { SloResult } from "@substrate/observability";
 
 export function escapeHtml(value: unknown): string {
@@ -39,24 +40,37 @@ function statusLabel(status: SloResult["status"]): string {
 	}
 }
 
-function chainRow(label: string, chain: { ok: boolean | null; records: number; brokenAt?: string | number; reason?: string }): string {
-	const state = chain.ok === null ? "unknown" : chain.ok ? "intact" : "broken";
+/**
+ * One chain's verdict.
+ *
+ * `state` decides the pill, not `ok`: "there is no such chain in this deployment" and
+ * "the chain exists and could not be verified" both arrive as `ok: null`, and telling an
+ * auditor they are the same thing is the sort of quiet overstatement this document
+ * exists not to make. A bundle written before `state` existed is read through
+ * `chainStateOf`, which derives it from `ok` as before.
+ */
+function chainRow(label: string, chain: ChainEvidence): string {
+	const state = chainStateOf(chain);
+	const pill = state === "verified" ? "intact" : state === "broken" ? "broken" : "unknown";
+	const word = state === "not-configured" ? "not configured" : state === "unverifiable" ? "unverified" : pill;
 	// Not every break has a position. An unparseable line is a real failure whose
 	// location is unknowable — the line that would have named it is the one that
 	// cannot be parsed — so the reason stands alone rather than being prefixed with a
 	// "broken at ?" that reads like missing data.
 	const reason = escapeHtml(chain.reason ?? "no reason given");
 	const detail =
-		chain.ok === false
+		state === "broken"
 			? chain.brokenAt === undefined
 				? reason
 				: `broken at ${escapeHtml(chain.brokenAt)} — ${reason}`
-			: chain.ok === null
-				? escapeHtml(chain.reason ?? "could not be verified")
-				: `${chain.records} record${chain.records === 1 ? "" : "s"} recomputed`;
+			: state === "not-configured"
+				? escapeHtml(chain.reason ?? "no store configured for this chain")
+				: state === "unverifiable"
+					? escapeHtml(chain.reason ?? "could not be verified")
+					: `${chain.records} record${chain.records === 1 ? "" : "s"} recomputed`;
 	return `<tr>
 			<th scope="row">${escapeHtml(label)}</th>
-			<td><span class="pill pill--${state}">${state}</span></td>
+			<td><span class="pill pill--${pill}">${word}</span></td>
 			<td>${detail}</td>
 		</tr>`;
 }

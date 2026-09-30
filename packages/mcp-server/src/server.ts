@@ -16,7 +16,11 @@
  * client. Both paths run the same service code.
  *
  * Every request is one server span and one latency observation, and every tool call
- * passes the MCP audit gate *before* it is dispatched — see `observe.ts`.
+ * passes the MCP audit gate *before* it is dispatched — see `observe.ts`. That holds
+ * for both transports: every route that reaches the service goes through `auditedRest`
+ * under the same tool name and the same audit mode its MCP equivalent has, and a
+ * fail-closed route whose record the chain refuses is answered 503 rather than served.
+ * Only `/healthz`, `/metrics` and `/slo` are exempt, and no agent action is behind them.
  */
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -135,27 +139,63 @@ function bodySurface(body: Record<string, unknown>): Surface | null {
 }
 
 /**
- * Audit a REST route the same way the MCP gate audits a tool call.
+ * Audit a REST route the same way the MCP gate audits a tool call, and report a denial.
  *
  * Both transports are covered on purpose. If MCP tool calls were audited and the
  * equivalent REST route were not, `/events` would be an unaudited door to the same
  * action — the exact shape of hole the store lock exists to close, and one a hook
  * would walk through by design, since a hook cannot call an MCP tool.
  *
+ * **The denial is returned, not swallowed.** This used to discard it, which made every
+ * REST route effectively fail-open whatever its tool's audit mode said: an unwritable
+ * audit file refused MCP `memory_write` and let the same write through `POST /memory`,
+ * so the fail-closed policy had a door beside it that was always unlocked. `auditedRest`
+ * is the wrapper every route goes through, so honouring it is not a line a future route
+ * has to remember.
+ *
  * `/healthz`, `/metrics` and `/slo` are not audited: they are monitoring traffic, no
  * agent action is behind them, and a trail dominated by a Prometheus scrape is a
- * trail nobody reads. Every audited REST route is fail-open, so this never throws.
+ * trail nobody reads.
  */
 async function auditRest(
 	observability: Observability,
 	surface: Surface | null,
 	tool: string,
 	body: Record<string, unknown>,
-): Promise<void> {
-	await auditToolCalls(observability, surface, [{ id: null, tool, args: body }], "rest").catch((cause: unknown) => {
-		process.stderr.write(`[substrate] audit of ${tool} failed unexpectedly: ${String(cause)}\n`);
-		return { denials: new Map<string, string>() };
-	});
+): Promise<string | null> {
+	const outcome = await auditToolCalls(observability, surface, [{ id: null, tool, args: body }], "rest").catch(
+		(cause: unknown) => {
+			// `auditToolCalls` turns an `AuditUnavailableError` into a denial itself, so
+			// reaching here means something else threw. A route that cannot be audited is
+			// refused rather than served unaudited: the tool's mode is what decides, and an
+			// unexpected fault is not a reason to pick the permissive answer.
+			process.stderr.write(`[substrate] audit of ${tool} failed unexpectedly: ${String(cause)}\n`);
+			return { denials: new Map<string, string>([["null", `the MCP audit chain could not take the record for ${tool}`]]) };
+		},
+	);
+	return outcome.denials.get("null") ?? null;
+}
+
+/**
+ * Audit a route, and answer the caller ourselves if the audit refuses.
+ *
+ * `true` means the handler may proceed. The 503 is deliberate: an audit sink that
+ * cannot take the record is an outage of this substrate, not a permission decision
+ * about the caller, and a hook reading only the status code must not learn "you may
+ * not" from it. It matches the code `/events` already answers with when the ledger
+ * will not take an append.
+ */
+async function auditedRest(
+	res: ServerResponse,
+	observability: Observability,
+	surface: Surface | null,
+	tool: string,
+	body: Record<string, unknown>,
+): Promise<boolean> {
+	const denial = await auditRest(observability, surface, tool, body);
+	if (denial === null) return true;
+	sendJson(res, 503, { error: denial });
+	return false;
 }
 
 export function createHttpServer(substrate: Substrate, config: SubstrateConfig, observability: Observability) {
@@ -211,6 +251,13 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig, 
 					// not a 503: the substrate is serving, and refusing would be worse.
 					auditDurable: observability.audit.durable,
 					auditRecords: observability.audit.seq,
+					// Reported here as well as in every verification verdict, because a monitor is
+					// what notices it: the audit file was deleted or truncated after records were
+					// written to it, and nobody is going to ask `/evidence` about a graph until they
+					// already have a reason to.
+					...(observability.audit.missingHistory
+						? { auditMissingHistory: observability.audit.missingHistory }
+						: {}),
 				});
 				return;
 			}
@@ -241,7 +288,7 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig, 
 					sendJson(res, 400, { error: "graph_id is required" });
 					return;
 				}
-				await auditRest(observability, surface, "evidence", body);
+				if (!(await auditedRest(res, observability, surface, "evidence", body))) return;
 				const bundle = await buildGraphEvidence(observability, substrate, body.graph_id);
 				if (body.format === "html") {
 					send(res, 200, renderEvidenceHtml(bundle), "text/html; charset=utf-8");
@@ -254,7 +301,7 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig, 
 			if (req.method === "POST" && url.pathname === "/brief") {
 				const raw = await readBody(req);
 				const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
-				await auditRest(observability, surface, "brief", body);
+				if (!(await auditedRest(res, observability, surface, "brief", body))) return;
 				const brief = await substrate.brief({
 					repo: typeof body.repo === "string" ? body.repo : undefined,
 					branch: typeof body.branch === "string" ? body.branch : undefined,
@@ -268,7 +315,7 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig, 
 			if (req.method === "POST" && url.pathname === "/events") {
 				const raw = await readBody(req);
 				const body = JSON.parse(raw) as Record<string, unknown>;
-				await auditRest(observability, surface, "events", body);
+				if (!(await auditedRest(res, observability, surface, "events", body))) return;
 				const result = await substrate.emit({
 					...(body as object),
 					surface: (typeof body.surface === "string" ? (body.surface as Surface) : null) ?? surface ?? "claude-code",
@@ -292,6 +339,9 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig, 
 			if (req.method === "POST" && url.pathname === "/events/query") {
 				const raw = await readBody(req);
 				const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+				// A read, so fail-open — but recorded. `/events/query` was the one REST door
+				// to a store that left no trace of who read it.
+				if (!(await auditedRest(res, observability, surface, "events_query", body))) return;
 				const result = await substrate.queryEvents(body as Parameters<Substrate["queryEvents"]>[0]);
 				// An empty window is a real answer, so 200; 503 is the ledger not answering.
 				sendJson(res, result.error ? 503 : 200, result);
@@ -301,6 +351,12 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig, 
 			if (req.method === "POST" && url.pathname === "/memory") {
 				const raw = await readBody(req);
 				const body = JSON.parse(raw) as Record<string, unknown>;
+				// Audited as `memory_write`, the name the MCP tool is audited under, so one
+				// action does not appear in the trail twice under two names. That tool is
+				// fail-closed and this route is the same action: auditing the tool and not the
+				// route meant an unwritable audit file refused `memory_write` over MCP and let
+				// the identical write through here, so the policy had an unlocked door beside it.
+				if (!(await auditedRest(res, observability, surface, "memory_write", body))) return;
 				const result = await substrate.writeMemory({
 					...(body as object),
 					writer: memoryWriter(surface, body.writer),
@@ -313,6 +369,10 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig, 
 			// the brief: a hook process has no MCP client. Same service code beneath.
 			if (req.method === "POST" && url.pathname === "/handoff") {
 				const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+				// `coord_handoff`, as MCP audits it, and fail-closed for the same reason: a
+				// handoff transfers work and a lease to another agent, and one nobody recorded
+				// is a transfer that cannot be reconstructed afterwards.
+				if (!(await auditedRest(res, observability, surface, "coord_handoff", body))) return;
 				const to = typeof body.to === "string" ? (body.to as Surface) : null;
 				if (typeof body.goal !== "string" || !to) {
 					sendJson(res, 400, { error: "handoff needs `goal` and `to`" });
@@ -360,6 +420,7 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig, 
 					sendJson(res, 400, { error: "drift needs `repo`" });
 					return;
 				}
+				if (!(await auditedRest(res, observability, surface, "drift", body))) return;
 				const report = await substrate.driftScan({
 					repo: body.repo,
 					path: typeof body.path === "string" ? body.path : null,
@@ -383,7 +444,7 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig, 
 					sendJson(res, 400, { error: "graph_id is required" });
 					return;
 				}
-				await auditRest(observability, surface, "verify", body);
+				if (!(await auditedRest(res, observability, surface, "verify", body))) return;
 				sendJson(res, 200, await substrate.verifyGraph(body.graph_id));
 				return;
 			}
