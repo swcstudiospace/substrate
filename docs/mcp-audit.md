@@ -78,8 +78,19 @@ With the checkpoint, the states are distinct:
 | | |
 | --- | --- |
 | no checkpoint, no file | a fresh install. `seq` starts at 1. |
-| checkpoint at `seq: N`, file accounts for `N` or more | sound. The chain continues from the file. |
+| checkpoint at `seq: N`, file holds `N` with the checkpointed hash | sound. The chain continues from the file. |
 | checkpoint at `seq: N`, file accounts for fewer | **missing history.** |
+| checkpoint at `seq: N`, file holds `N` with a *different* hash | **rewritten history.** |
+
+The last row is why the checkpoint stores the **hash** and not just the count. Comparing
+sequence numbers alone accepted a file replaced with a different, internally consistent
+chain that happened to end at the committed `seq`: every hash and `prev` in it follows,
+it opens at `seq: 1`, and nothing contradicted it — whereupon the next append rewrote the
+checkpoint to match the impostor, so the substitution erased its own evidence. The
+checkpoint read **at boot** is the anchor for the life of the process, and `scan` checks
+the record at its `seq` against it on every verification, which also covers a file
+replaced while the process is running and a file *ahead* of the checkpoint (where the tip
+alone proves nothing).
 
 In the last state the chain resumes from the checkpoint rather than from 1 — so nothing
 reuses a sequence number, and the file's own first record is no longer `seq: 1`, which
@@ -243,6 +254,15 @@ the reason: an audit sink that cannot take the record is an outage of this subst
 not a permission decision about the caller, and a hook reading only the status code must
 not learn "you may not" from it.
 
+The mode decides for an *unexpected* fault in the audit path too, not only for a sink
+that refused. A body can overflow the argument encoder — `canonicalJson` is recursive, so
+deep enough nesting throws inside the body-size limit — and treating that as a denial
+made a fault in the audit able to refuse `/brief`, which is fail-open precisely so the
+substrate cannot fail an agent's turn. The audit becoming a new way to lose a brief is
+the thing the mode exists to prevent. So a fail-open route is served with the fault on
+stderr, and a fail-closed route is refused, where the unrecorded write is the worse
+outcome.
+
 ## The gate sits in front of the dispatcher
 
 `handleMcp` audits the `tools/call` requests in the JSON-RPC body **before** it
@@ -374,9 +394,33 @@ few in a row could take down a process every prompt on this host waits for.
 than as one string, the chain is checked incrementally by the same rules
 `verifyAuditChain` applies in memory (one `ChainWalker`, so the two cannot drift), and
 what is held is *this graph's* records rather than all of them, bounded at
-`MAX_EVIDENCE_RECORDS` with a note when a graph has more. The cost is therefore
-proportional to the graph being asked about, whatever the file grew to around it, and the
-chain verdict still covers every record in it.
+`MAX_EVIDENCE_RECORDS`. The cost is therefore proportional to the graph being asked
+about, whatever the file grew to around it, and the chain verdict still covers every
+record in it.
+
+Two things about that window matter more than the bound itself.
+
+**It keeps the newest records, not the first.** A claim withdrawal and a batch correction
+come, by construction, *after* the record they correct — so a window over the oldest
+records dropped exactly the decisions a reader of the tally is looking for.
+
+**The tally is not bounded with the listing.** Counting from the listed window reported a
+busy graph as having only the decisions that happened to be listed, which is a wrong
+number rather than a partial one, and a note saying "truncated" does not make it right.
+So the counting is separated from the keeping: every matching record goes through
+`StatsAccumulator` (the fold `auditStats` is also written in terms of, so the two cannot
+disagree) and only a window is retained. The bundle says how many records name the graph,
+how many are listed, and that the tally covers all of them.
+
+**The graph id is sanitised the same way the records were.** `buildRecord` redacts and
+caps `graph_id` like every other stored field, so a graph whose identifier contains a
+credential-shaped substring is stored under its redacted form — and selecting on the raw
+identifier matched none of its own records, so its bundle silently omitted every decision
+made about it. The query is normalised to the stored form, which is what the ledger
+already does for the same reason (`verifyGraph` reads by `normalizeIdentifier(graphId)`).
+The residual cost is that two identifiers redacting identically select each other's
+records; when the selection differs from the identifier asked for, the bundle says so
+rather than leaving it to be discovered.
 
 ## What a record keeps of its caller, and what it does not
 
