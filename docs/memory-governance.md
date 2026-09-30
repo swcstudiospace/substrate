@@ -224,12 +224,23 @@ the decision was ever taken.
 - **Only an `accepted` record replays.** A refused write left nothing behind, so
   re-asking is allowed a fresh answer — which is also what makes
   approval-by-resubmit work when the caller sends its own key.
-- **A key re-used for different content is `conflict / idempotency.reused`**, not a
+- **A key re-used for a different request is `conflict / idempotency.reused`**, not a
   replay. A key is the caller's promise that one write happens once; it cannot also
   stand for a second, different one. Returning the original entry there would tell a
   caller that asked to store B that B is in force, and nothing in the system would
-  contradict it. Only an explicit key can reach this — a derived key *is* the content,
-  so different content is a different key.
+  contradict it. Only an explicit key can reach this — a derived key *is* the request.
+- "Different request" is wider than different text. It covers everything the caller
+  **asks to have recorded**: the content, the `ttl`, the requested `trust` and `actor`,
+  the `source_event`, and the `graph_id` / `repo` that decide which briefs the entry
+  reaches. The same words asking for `permanent` instead of `30d` are asking for
+  retention the stored row does not have, and answering `accepted` would be a
+  falsehood about state the caller is about to rely on. `session_id` is excluded: a
+  retry legitimately arrives in a new session, and the session that wrote the row is
+  honestly the one recorded.
+- This is a *second* hash, not a wider first one. The narrow content hash is how a
+  parked proposal is matched to its reviewed re-submission, which asks for different
+  trust on purpose — so widening it would break the review loop. Two questions, two
+  hashes.
 - **No remedy ever advises a fresh key where a row may already exist under the old
   one.** A remedy is what an agent acts on, so advice that can produce a duplicate is a
   defect in the gate and not merely in the prose.

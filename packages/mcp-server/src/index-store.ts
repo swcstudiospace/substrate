@@ -125,12 +125,14 @@ export class IndexStore implements MemoryStore {
 				outcome         text not null,
 				entry_id        text,
 				entry_hash      text not null,
+				request_hash    text,
 				holder          text,
 				claimed         timestamptz not null default now()
 			)`;
 		// Insurance for anyone who ran an earlier build of this migration, where the claim
 		// had no fencing token.
 		await this.sql`alter table memory_writes add column if not exists holder text`;
+		await this.sql`alter table memory_writes add column if not exists request_hash text`;
 
 		// Parked writes. Both tables hold the *redacted* body: a quarantined secret is
 		// quarantined so a reviewer can see what was attempted, never so the substrate
@@ -343,16 +345,23 @@ export class IndexStore implements MemoryStore {
 	 * on it. Without that, an attempt that merely ran slow past the in-flight timeout
 	 * could come back and finish — or delete — the claim that replaced it.
 	 */
-	async claimWrite(input: { key: string; explicit: boolean; entryHash: string; entryId: string }): Promise<ClaimResult> {
+	async claimWrite(input: {
+		key: string;
+		explicit: boolean;
+		entryHash: string;
+		requestHash: string;
+		entryId: string;
+	}): Promise<ClaimResult> {
 		const holder = `hold_${randomUUID().replace(/-/g, "")}`;
 		const inFlightSeconds = IN_FLIGHT_TIMEOUT_MS / 1000;
 		const derivedSeconds = DERIVED_KEY_WINDOW_MS / 1000;
 
 		return (await this.sql.begin(async (tx: SQL) => {
 			const fresh = (await tx`
-				insert into memory_writes (idempotency_key, explicit, outcome, entry_id, entry_hash, holder, claimed)
+				insert into memory_writes (
+					idempotency_key, explicit, outcome, entry_id, entry_hash, request_hash, holder, claimed)
 				values (${input.key}, ${input.explicit}, 'in-flight', ${input.entryId}, ${input.entryHash},
-				        ${holder}, now())
+				        ${input.requestHash}, ${holder}, now())
 				on conflict (idempotency_key) do nothing
 				returning idempotency_key`) as Array<Record<string, unknown>>;
 			if (fresh.length > 0) return { claimed: true as const, holder, tookOverFrom: null };
@@ -361,7 +370,7 @@ export class IndexStore implements MemoryStore {
 			// conclude that one abandoned claim is theirs. Staleness is computed by the
 			// database, against its own clock — the server's may not agree.
 			const rows = (await tx`
-				select outcome, explicit, entry_id, entry_hash,
+				select outcome, explicit, entry_id, entry_hash, request_hash,
 				       claimed < now() - make_interval(secs => ${inFlightSeconds}::float8) as in_flight_stale,
 				       claimed < now() - make_interval(secs => ${derivedSeconds}::float8) as derived_stale
 				from memory_writes where idempotency_key = ${input.key}
@@ -387,6 +396,7 @@ export class IndexStore implements MemoryStore {
 						outcome: outcome as WriteRecord["outcome"],
 						entry_id: row.entry_id === null || row.entry_id === undefined ? null : String(row.entry_id),
 						entry_hash: String(row.entry_hash),
+						request_hash: optional(row.request_hash) ?? null,
 					},
 				};
 			}
@@ -402,7 +412,8 @@ export class IndexStore implements MemoryStore {
 				update memory_writes set
 					outcome    = 'in-flight',
 					explicit   = ${input.explicit},
-					entry_hash = ${input.entryHash},
+					entry_hash   = ${input.entryHash},
+					request_hash = ${input.requestHash},
 					-- An in-flight claim's reservation is KEPT, not replaced. It may point at a
 					-- row that already exists, and the successor has to resolve that before the
 					-- pointer can be thrown away; overwriting it here would orphan the row and

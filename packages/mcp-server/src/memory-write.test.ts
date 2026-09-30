@@ -69,6 +69,7 @@ class FakeStore implements MemoryStore {
 		key: string;
 		explicit: boolean;
 		entryHash: string;
+		requestHash?: string;
 		entryId: string;
 	}): Promise<ClaimResult> {
 		const existing = this.writes.get(input.key);
@@ -93,6 +94,7 @@ class FakeStore implements MemoryStore {
 			// row that already exists, and overwriting it would orphan that row.
 			entry_id: tookOverFrom ?? input.entryId,
 			entry_hash: input.entryHash,
+			request_hash: input.requestHash ?? null,
 			holder,
 			claimed: this.clock,
 		});
@@ -673,6 +675,49 @@ describe("exactly-once", () => {
 		expect(second.conflict_with).toBe(first.entry?.id ?? "");
 		expect(second.entry).toBeUndefined();
 		expect(second.verified_persisted).toBe(false);
+		expect(store.entries()).toHaveLength(1);
+	});
+
+	test("the same words asking for a different ttl is a different request", async () => {
+		// The lie this closes: the content hash does not cover `ttl`, so the reply came
+		// back `accepted` / `verified_persisted: true` while the stored row still said 30d.
+		// The caller asked for permanent retention, was told its write landed, and would
+		// have believed the entry outlives the month.
+		await write({ idempotency_key: "k1", ttl: "30d" });
+		const second = await write({ idempotency_key: "k1", ttl: "permanent" });
+
+		expect(second.outcome).toBe("conflict");
+		expect(second.reason).toBe("idempotency.reused");
+		expect(second.remedy).toContain("ttl");
+		expect(store.entries()).toHaveLength(1);
+		expect(store.entries()[0]?.ttl).toBe("30d");
+	});
+
+	test("the same words asking for different trust is a different request", async () => {
+		// Same shape, and worse in effect: a reviewer's escalation silently not happening
+		// leaves the entry at agent-claimed with a reply that says otherwise.
+		await write({ idempotency_key: "k1" });
+		const escalated = await write({
+			idempotency_key: "k1",
+			trust: "human-confirmed",
+			review_token: REVIEW_TOKEN,
+		});
+
+		expect(escalated.outcome).toBe("conflict");
+		expect(escalated.reason).toBe("idempotency.reused");
+		expect(store.entries()[0]?.trust).toBe("agent-claimed");
+	});
+
+	test("a retry from a new session is still the same request", async () => {
+		// The other side of the line. A hook retrying after a restart arrives in a new
+		// session, and the session that wrote the row is honestly the one recorded — so
+		// this must replay, not refuse.
+		const first = await write({ idempotency_key: "k1", session_id: "sess-1" });
+		const retry = await write({ idempotency_key: "k1", session_id: "sess-2" });
+
+		expect(retry.outcome).toBe("accepted");
+		expect(retry.deduplicated).toBe(true);
+		expect(retry.entry?.id).toBe(first.entry?.id);
 		expect(store.entries()).toHaveLength(1);
 	});
 
