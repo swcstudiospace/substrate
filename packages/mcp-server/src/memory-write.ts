@@ -394,10 +394,20 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 	}
 
 	// ── 5. conflict, insert, read-back ─────────────────────────────────────────
-	// True once the entry has committed. From that point the claim is never released:
-	// releasing it would let a retry insert the row a second time, which for an
-	// appending kind means two visible entries for one write.
-	let committed = false;
+	// True from the moment the insert is *attempted*, not from the moment it returns.
+	//
+	// Whether the row landed is unknowable once the insert throws: a connection lost
+	// during the commit is exactly the failure that leaves a committed row and an
+	// exception. Releasing the key there hands a retry a fresh claim with a fresh
+	// reserved id, and for an appending kind that is the second visible entry this
+	// whole stage exists to prevent.
+	//
+	// So the claim is kept over the entire window in which a row might exist, and let
+	// go only where nothing can have been written. The cost is a key held for the
+	// in-flight timeout after a genuine outage; the successor then takes it over, looks
+	// for the id this attempt reserved, and either recovers that row or writes its own.
+	// Both are exactly-once. A released key in doubt is not.
+	let mayHaveWritten = false;
 	try {
 		const plan = conflictPlan(scope, kind, subject !== null);
 		// Only a `verified-by-test` claim standing on a source event needs the ledger
@@ -470,8 +480,12 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 			reverify_after: reverifyAfter(trust.trust, now).toISOString(),
 		};
 
+		mayHaveWritten = true;
 		const written = await store.insertEntry(row, { key, holder });
 		if (!written.ok) {
+			// A refusal is the store answering, not failing: it rolled back, so nothing
+			// landed and the key is safe to let go of again.
+			mayHaveWritten = false;
 			// A lost claim is not this attempt's to record an outcome for — the successor
 			// owns the key now, and `finishWrite` would be a fenced no-op anyway. Say so
 			// plainly rather than reporting somebody else's takeover as this write's race.
@@ -505,7 +519,6 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 		}
 
 		const inserted = written.entry;
-		committed = true;
 		// Record the commit *before* the read-back, not after. Everything below can throw,
 		// and if the acknowledgement were last then a crash in between would leave a row
 		// in the index that no claim points at — so the retry would write a second one.
@@ -535,12 +548,12 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 			...(trust.downgradedFrom ? { trust_downgraded_from: trust.downgradedFrom } : {}),
 		};
 	} catch (cause) {
-		// Let go of the key only while nothing has committed: an outage before the insert
-		// would otherwise burn it, and the retry would replay a write that never happened.
-		// Once the entry exists the claim stays — held if even the acknowledgement failed —
-		// because the alternative is a duplicate, and an abandoned claim is recoverable
-		// while a duplicate entry is not.
-		if (!committed) await store.releaseWrite(key, holder).catch(() => undefined);
+		// Let go of the key only where no row can exist: an outage before the insert was
+		// attempted would otherwise burn it, and the retry would replay a write that never
+		// happened. From the attempt onwards the claim stays — held even if it was only the
+		// acknowledgement that failed — because an abandoned claim is recoverable and a
+		// duplicate entry is not.
+		if (!mayHaveWritten) await store.releaseWrite(key, holder).catch(() => undefined);
 		throw cause;
 	}
 }

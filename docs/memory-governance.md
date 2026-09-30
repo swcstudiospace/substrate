@@ -226,9 +226,14 @@ the decision was ever taken.
   approval-by-resubmit work when the caller sends its own key.
 - An in-flight claim answers `conflict / write.in-flight`; one abandoned for more
   than 60 seconds is taken over.
-- A write that throws **releases** its key — but only while nothing has committed. Once
-  the entry exists the claim is kept, because an abandoned claim is recoverable and a
-  duplicate entry is not.
+- A write that throws **releases** its key — but only while no row can exist, which
+  means only before the insert was *attempted*. A connection lost during a commit
+  throws and commits, and the exception cannot tell that apart from one that wrote
+  nothing; treating it as "nothing happened" is how one write becomes two entries. So
+  the claim is held across the whole in-doubt window. The cost is a key held for the
+  in-flight timeout after a genuine outage, after which the successor takes it over and
+  either recovers the row this attempt reserved or writes its own — both exactly-once.
+  An abandoned claim is recoverable; a duplicate entry is not.
 - The commit is **acknowledged before the read-back**, not after. Everything after the
   insert can throw, and an unacknowledged row is a row the retry would write again.
 - Each hand-over mints a **fencing token**, and every later statement about the claim
