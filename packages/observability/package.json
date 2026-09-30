@@ -1,0 +1,11 @@
+{
+  "name": "@substrate/observability",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "OTLP metrics and traces for substrate-mcp, and the SLOs stated over them",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

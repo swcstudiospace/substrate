@@ -1,0 +1,440 @@
+/**
+ * In-process metric aggregation.
+ *
+ * Hand-rolled rather than `@opentelemetry/sdk-metrics`, for the same reason
+ * `greptime.ts` is a hand-rolled HTTP client: the substrate sits on the critical
+ * path of every prompt on this host, it must fail open, and the whole surface it
+ * needs is two instrument kinds and one snapshot. `otlp.ts` encodes the snapshot
+ * in OTLP/HTTP JSON, so a real collector still receives standard OTLP.
+ *
+ * Everything here is cumulative and monotonic. The exporter pushes the same
+ * running totals every interval and never resets, which is what makes a missed
+ * export harmless: the next one carries the events the lost one would have.
+ */
+
+export type AttributeValue = string | number | boolean;
+export type Attributes = Record<string, AttributeValue>;
+
+/**
+ * Latency buckets, in milliseconds.
+ *
+ * `800` is a boundary on purpose. The brief SLO is "p95 < 800 ms", and a bucketed
+ * histogram can answer *that* exactly — the share of observations at or below the
+ * 800 boundary is a count, not an interpolation — where the interpolated p95 it
+ * reports alongside is only an estimate. See `exactFractionAtOrBelow`.
+ */
+export const LATENCY_BUCKETS_MS: readonly number[] = [5, 10, 25, 50, 100, 200, 400, 800, 1600, 3200, 8000];
+
+/** Token and cost buckets are not needed: those are sums, not distributions. */
+
+/**
+ * Attributes whose value space is unbounded, so they are the ones dropped first
+ * when an instrument hits its series cap.
+ *
+ * `graph_id` is the substrate's task key — one per uplifted prompt — so a metric
+ * keyed by it grows without limit, and a collector billed per series would feel
+ * it. It is kept because "which graph is slow" is the question this ticket exists
+ * to answer; it is kept *bounded* because an observability plane that can exhaust
+ * a collector is an outage of its own.
+ */
+export const VOLATILE_ATTRIBUTES: readonly string[] = ["graph_id", "session_id", "node_id"];
+
+/** The value a volatile attribute collapses to once an instrument is at its cap. */
+export const OVERFLOW = "_overflow";
+
+/**
+ * Series per instrument before volatile attributes start collapsing into
+ * `_overflow`.
+ *
+ * A soft cap, and it bounds the *unbounded* growth rather than the total. Once it
+ * is reached, each further attribute combination folds into the `_overflow` series
+ * for its bounded attributes — and those overflow series are admitted beyond the
+ * cap, because refusing them would mean dropping observations the SLOs are
+ * computed from. The bounded attributes are `surface`, `kind`, `route`, `outcome`,
+ * `decision`, `direction`, `reason` and `model`: a few dozen combinations, not a
+ * few thousand.
+ */
+export const DEFAULT_MAX_SERIES = 500;
+
+export interface CounterPoint {
+	attributes: Attributes;
+	value: number;
+}
+
+export interface HistogramPoint {
+	attributes: Attributes;
+	count: number;
+	sum: number;
+	min: number;
+	max: number;
+	/** `bounds.length + 1` entries; the last counts everything above the last bound. */
+	bucketCounts: number[];
+}
+
+export interface CounterSnapshot {
+	kind: "counter";
+	name: string;
+	description: string;
+	unit: string;
+	valueType: "int" | "double";
+	points: CounterPoint[];
+	/** Series that collapsed into `_overflow` because the cap was reached. */
+	overflowed: number;
+}
+
+export interface HistogramSnapshot {
+	kind: "histogram";
+	name: string;
+	description: string;
+	unit: string;
+	bounds: readonly number[];
+	points: HistogramPoint[];
+	overflowed: number;
+}
+
+export type MetricSnapshot = CounterSnapshot | HistogramSnapshot;
+
+/**
+ * A stable key for an attribute set: keys sorted, values stringified, joined on
+ * control characters no attribute can contain. Two callers passing the same
+ * attributes in different order must land on the same series.
+ *
+ * Both separators are control characters, including the one between a key and its
+ * value. A printable one collides: with `=`, `{a: "b=c"}` and `{"a=b": "c"}` are
+ * two different attribute sets that produce the same key, and their observations
+ * would be silently added together.
+ */
+export function attributeKey(attributes: Attributes): string {
+	return Object.keys(attributes)
+		.sort()
+		.map((key) => `${key}\u0002${String(attributes[key])}`)
+		.join("\u0001");
+}
+
+/** Drop `undefined` and `null` so an absent attribute is absent, not the string "undefined". */
+export function cleanAttributes(attributes: Record<string, AttributeValue | null | undefined>): Attributes {
+	const out: Attributes = {};
+	for (const [key, value] of Object.entries(attributes)) {
+		if (value === null || value === undefined) continue;
+		out[key] = value;
+	}
+	return out;
+}
+
+/** Collapse every volatile attribute to `_overflow`, keeping the bounded ones. */
+function collapse(attributes: Attributes): Attributes {
+	const out: Attributes = {};
+	for (const [key, value] of Object.entries(attributes)) {
+		out[key] = VOLATILE_ATTRIBUTES.includes(key) ? OVERFLOW : value;
+	}
+	return out;
+}
+
+interface InstrumentOptions {
+	description?: string;
+	unit?: string;
+	maxSeries?: number;
+}
+
+/** Shared series bookkeeping, including the cardinality cap. */
+abstract class Instrument<S> {
+	protected readonly series = new Map<string, { attributes: Attributes; state: S }>();
+	protected overflowed = 0;
+	readonly description: string;
+	readonly unit: string;
+	private readonly maxSeries: number;
+
+	constructor(
+		readonly name: string,
+		options: InstrumentOptions = {},
+	) {
+		this.description = options.description ?? "";
+		this.unit = options.unit ?? "";
+		this.maxSeries = options.maxSeries ?? DEFAULT_MAX_SERIES;
+	}
+
+	protected abstract initial(): S;
+
+	/**
+	 * The series an observation belongs in, creating it if there is room.
+	 *
+	 * At the cap, the volatile attributes are collapsed and the observation is
+	 * folded into the `_overflow` series rather than dropped: losing the graph
+	 * breakdown is acceptable, losing the observation is not — the emit success
+	 * ratio would drift away from the truth.
+	 */
+	protected seriesFor(attributes: Attributes): S {
+		const key = attributeKey(attributes);
+		const existing = this.series.get(key);
+		if (existing) return existing.state;
+
+		if (this.series.size >= this.maxSeries) {
+			const collapsed = collapse(attributes);
+			const collapsedKey = attributeKey(collapsed);
+			const found = this.series.get(collapsedKey);
+			if (found) {
+				this.overflowed++;
+				return found.state;
+			}
+			// The collapsed series itself may still be new. Admit it — there are only
+			// as many of those as there are combinations of bounded attributes.
+			const created = { attributes: collapsed, state: this.initial() };
+			this.series.set(collapsedKey, created);
+			this.overflowed++;
+			return created.state;
+		}
+
+		const created = { attributes, state: this.initial() };
+		this.series.set(key, created);
+		return created.state;
+	}
+
+	get seriesCount(): number {
+		return this.series.size;
+	}
+}
+
+/** A monotonic cumulative sum. */
+export class Counter extends Instrument<{ value: number }> {
+	constructor(
+		name: string,
+		private readonly valueType: "int" | "double" = "int",
+		options: InstrumentOptions = {},
+	) {
+		super(name, options);
+	}
+
+	protected initial(): { value: number } {
+		return { value: 0 };
+	}
+
+	/**
+	 * Add to a series. A negative or non-finite delta is ignored rather than
+	 * thrown: a counter that can go backwards is not a counter, and a bad caller
+	 * must not be able to fail the turn it is instrumenting.
+	 */
+	add(value: number, attributes: Attributes = {}): void {
+		if (!Number.isFinite(value) || value < 0) return;
+		this.seriesFor(attributes).value += value;
+	}
+
+	snapshot(): CounterSnapshot {
+		return {
+			kind: "counter",
+			name: this.name,
+			description: this.description,
+			unit: this.unit,
+			valueType: this.valueType,
+			overflowed: this.overflowed,
+			points: [...this.series.values()].map(({ attributes, state }) => ({
+				attributes,
+				value: this.valueType === "int" ? Math.round(state.value) : state.value,
+			})),
+		};
+	}
+}
+
+interface HistogramState {
+	count: number;
+	sum: number;
+	min: number;
+	max: number;
+	buckets: number[];
+}
+
+/** An explicit-bucket cumulative histogram. */
+export class Histogram extends Instrument<HistogramState> {
+	constructor(
+		name: string,
+		readonly bounds: readonly number[] = LATENCY_BUCKETS_MS,
+		options: InstrumentOptions = {},
+	) {
+		super(name, options);
+	}
+
+	protected initial(): HistogramState {
+		return {
+			count: 0,
+			sum: 0,
+			min: Number.POSITIVE_INFINITY,
+			max: Number.NEGATIVE_INFINITY,
+			buckets: new Array<number>(this.bounds.length + 1).fill(0),
+		};
+	}
+
+	record(value: number, attributes: Attributes = {}): void {
+		if (!Number.isFinite(value) || value < 0) return;
+		const state = this.seriesFor(attributes);
+		state.count++;
+		state.sum += value;
+		if (value < state.min) state.min = value;
+		if (value > state.max) state.max = value;
+		// `<=` — a bound is the inclusive top of its bucket, as OTLP defines it, which
+		// is what lets the 800 ms boundary answer "p95 < 800 ms" without interpolating.
+		let index = this.bounds.findIndex((bound) => value <= bound);
+		if (index < 0) index = this.bounds.length;
+		state.buckets[index] = (state.buckets[index] ?? 0) + 1;
+	}
+
+	snapshot(): HistogramSnapshot {
+		return {
+			kind: "histogram",
+			name: this.name,
+			description: this.description,
+			unit: this.unit,
+			bounds: this.bounds,
+			overflowed: this.overflowed,
+			points: [...this.series.values()].map(({ attributes, state }) => ({
+				attributes,
+				count: state.count,
+				sum: state.sum,
+				min: state.count === 0 ? 0 : state.min,
+				max: state.count === 0 ? 0 : state.max,
+				bucketCounts: [...state.buckets],
+			})),
+		};
+	}
+}
+
+/**
+ * Merge a histogram's matching series into one distribution.
+ *
+ * SLOs are stated over the whole service ("brief p95 < 800 ms"), not per graph, so
+ * evaluation has to add the buckets up rather than pick a series.
+ */
+export function mergeHistogram(
+	snapshot: HistogramSnapshot,
+	where: Record<string, string> = {},
+): HistogramPoint & { bounds: readonly number[] } {
+	const merged: HistogramPoint & { bounds: readonly number[] } = {
+		attributes: {},
+		bounds: snapshot.bounds,
+		count: 0,
+		sum: 0,
+		min: Number.POSITIVE_INFINITY,
+		max: 0,
+		bucketCounts: new Array<number>(snapshot.bounds.length + 1).fill(0),
+	};
+	for (const point of snapshot.points) {
+		if (!matches(point.attributes, where)) continue;
+		merged.count += point.count;
+		merged.sum += point.sum;
+		if (point.count > 0 && point.min < merged.min) merged.min = point.min;
+		if (point.max > merged.max) merged.max = point.max;
+		point.bucketCounts.forEach((value, index) => {
+			merged.bucketCounts[index] = (merged.bucketCounts[index] ?? 0) + value;
+		});
+	}
+	if (merged.count === 0) merged.min = 0;
+	return merged;
+}
+
+/** Sum a counter's matching series. */
+export function sumCounter(snapshot: CounterSnapshot, where: Record<string, string> = {}): number {
+	return snapshot.points
+		.filter((point) => matches(point.attributes, where))
+		.reduce((total, point) => total + point.value, 0);
+}
+
+/** Whether every attribute in `where` is present on the point with that value. */
+export function matches(attributes: Attributes, where: Record<string, string>): boolean {
+	return Object.entries(where).every(([key, value]) => String(attributes[key] ?? "") === value);
+}
+
+/**
+ * The exact share of observations at or below one of the histogram's own bounds.
+ *
+ * This is the honest way to check "p95 < 800 ms" against bucketed data: the count
+ * at or below the 800 ms boundary is known precisely, so the answer does not
+ * depend on how a quantile is interpolated inside the bucket. `null` means the
+ * bound is not one of this histogram's boundaries, so the question cannot be
+ * answered exactly — the caller should say so rather than guess.
+ */
+export function exactFractionAtOrBelow(
+	point: Pick<HistogramPoint, "count" | "bucketCounts"> & { bounds: readonly number[] },
+	bound: number,
+): number | null {
+	if (point.count === 0) return null;
+	const index = point.bounds.indexOf(bound);
+	if (index < 0) return null;
+	let below = 0;
+	for (let i = 0; i <= index; i++) below += point.bucketCounts[i] ?? 0;
+	return below / point.count;
+}
+
+/**
+ * An interpolated quantile, for reporting.
+ *
+ * Linear within the bucket the quantile lands in. `null` when it lands above the
+ * last bound, because there is no upper edge to interpolate against and inventing
+ * one would understate a real tail.
+ */
+export function quantileFromBuckets(
+	point: Pick<HistogramPoint, "count" | "bucketCounts"> & { bounds: readonly number[] },
+	quantile: number,
+): number | null {
+	if (point.count === 0) return null;
+	const target = quantile * point.count;
+	let cumulative = 0;
+	for (let i = 0; i < point.bucketCounts.length; i++) {
+		const inBucket = point.bucketCounts[i] ?? 0;
+		if (cumulative + inBucket < target) {
+			cumulative += inBucket;
+			continue;
+		}
+		const upper = point.bounds[i];
+		if (upper === undefined) return null; // the unbounded top bucket
+		const lower = i === 0 ? 0 : (point.bounds[i - 1] ?? 0);
+		if (inBucket === 0) return upper;
+		return lower + ((target - cumulative) / inBucket) * (upper - lower);
+	}
+	return null;
+}
+
+/**
+ * Every instrument the process owns, plus the process start time.
+ *
+ * `startedAt` is the `start_time_unix_nano` every cumulative point carries: it is
+ * how a collector tells a counter that reset (process restart) from one that
+ * simply did not move.
+ */
+export class MetricRegistry {
+	private readonly counters = new Map<string, Counter>();
+	private readonly histograms = new Map<string, Histogram>();
+
+	constructor(readonly startedAt: number = Date.now()) {}
+
+	counter(name: string, options: InstrumentOptions & { valueType?: "int" | "double" } = {}): Counter {
+		const existing = this.counters.get(name);
+		if (existing) return existing;
+		const created = new Counter(name, options.valueType ?? "int", options);
+		this.counters.set(name, created);
+		return created;
+	}
+
+	histogram(name: string, options: InstrumentOptions & { bounds?: readonly number[] } = {}): Histogram {
+		const existing = this.histograms.get(name);
+		if (existing) return existing;
+		const created = new Histogram(name, options.bounds ?? LATENCY_BUCKETS_MS, options);
+		this.histograms.set(name, created);
+		return created;
+	}
+
+	snapshot(): MetricSnapshot[] {
+		return [
+			...[...this.counters.values()].map((instrument) => instrument.snapshot()),
+			...[...this.histograms.values()].map((instrument) => instrument.snapshot()),
+		];
+	}
+}
+
+/** Find one metric in a snapshot by name, narrowed to its kind. */
+export function findCounter(snapshot: MetricSnapshot[], name: string): CounterSnapshot | null {
+	const found = snapshot.find((metric) => metric.name === name);
+	return found?.kind === "counter" ? found : null;
+}
+
+export function findHistogram(snapshot: MetricSnapshot[], name: string): HistogramSnapshot | null {
+	const found = snapshot.find((metric) => metric.name === name);
+	return found?.kind === "histogram" ? found : null;
+}
