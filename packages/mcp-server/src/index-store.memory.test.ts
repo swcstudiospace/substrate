@@ -48,14 +48,40 @@ let raw: SQL;
 
 const describeLive = PG_URL ? describe : describe.skip;
 
+/** Thrown to roll a deliberately-held transaction back, the way `insertEntry` does. */
+class HeldOpen extends Error {}
+
+/**
+ * Whether `work` settles inside `ms`.
+ *
+ * How a test asserts that two statements really are contending: a `false` here is the
+ * blocked-on-the-index state that makes the race a race. The rejection handler is
+ * attached eagerly so a later failure is never an unhandled one.
+ */
+function settles(work: Promise<unknown>, ms: number): Promise<boolean> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const expiry = new Promise<boolean>((resolve) => {
+		timer = setTimeout(() => resolve(false), ms);
+	});
+	return Promise.race([
+		work.then(
+			() => true,
+			() => true,
+		),
+		expiry,
+	]).finally(() => clearTimeout(timer));
+}
+
 describeLive("memory governance against a live index", () => {
 	beforeAll(async () => {
 		a = new IndexStore(PG_URL!);
 		b = new IndexStore(PG_URL!);
 		raw = new SQL(PG_URL!);
 		await a.migrate();
-		// Idempotent, and on a database carrying the old `(entry_hash, state)` index it
-		// is the second run that replaces it — so running it twice is part of the proof.
+		// Run twice because the DDL is meant to be idempotent, and a second run is the
+		// cheapest proof of it. What it does *not* prove is the replacement of the old
+		// review index — a database this suite has already migrated no longer carries it —
+		// so that has a test of its own, which seeds the old shape first.
 		await a.migrate();
 	});
 
@@ -109,6 +135,7 @@ describeLive("memory governance against a live index", () => {
 		// `standing-moved` check fires, so `memory_standing_idx` is the only thing
 		// between them — and it used to reject the loser with a duplicate-key error the
 		// gate could not tell from a connection lost over a committed row.
+		const identity = firstWriteRow({ id: "probe", idempotency_key: "probe" }).conflict_key!;
 		const keyA = `${MARKER}-race-a`;
 		const keyB = `${MARKER}-race-b`;
 		const claimA = await a.claimWrite({
@@ -128,10 +155,42 @@ describeLive("memory governance against a live index", () => {
 		expect(claimA.claimed && claimB.claimed).toBe(true);
 		if (!claimA.claimed || !claimB.claimed) return;
 
-		// Both in flight at once: the loser blocks on the winner's uncommitted index
-		// entry and only then finds out, which is the whole point of doing this through
-		// two connections.
-		const [first, second] = await Promise.all([
+		// Both inserts have to be in flight *at once*, and `Promise.all` does not arrange
+		// that on its own: the two statements are free to serialise, the second finding the
+		// identity already taken and committed, and then the test passes without the index
+		// having arbitrated a race at all.
+		//
+		// So a third row takes the identity from inside a transaction that is held open.
+		// Both writers under test then block on `memory_standing_idx` — proved below, by
+		// neither of them settling while it is held — and rolling that transaction back is
+		// the starting pistol: they are released together, one commits, and the other finds
+		// out the only way that matters, from the index.
+		let release!: () => void;
+		const rolledBack = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let holding!: () => void;
+		const held = new Promise<void>((resolve) => {
+			holding = resolve;
+		});
+		const blocker = raw
+			.begin(async (tx: SQL) => {
+				await tx`
+					insert into memory_entries (id, scope, kind, body, writer, conflict_key, entry_hash)
+					values (${`mem_${MARKER}_block`}, ${SCOPE}, 'decision', ${`${MARKER} holding the identity`},
+					        'hermes', ${identity}, ${`hash-${MARKER}-block`})`;
+				holding();
+				await rolledBack;
+				// Undone: the two writers under test are the only ones that may end up holding
+				// the identity, or the assertions below would be about this row.
+				throw new HeldOpen();
+			})
+			.catch((cause: unknown) => {
+				if (!(cause instanceof HeldOpen)) throw cause;
+			});
+		await held;
+
+		const race = Promise.all([
 			a.insertEntry(firstWriteRow({ id: `mem_${MARKER}_a`, idempotency_key: keyA, text: `${MARKER} herdr` }), {
 				key: keyA,
 				holder: claimA.holder,
@@ -141,6 +200,16 @@ describeLive("memory governance against a live index", () => {
 				holder: claimB.holder,
 			}),
 		]);
+		// The overlap itself, measured rather than hoped for: while the identity is held,
+		// neither insert can get past the index. Asserted after the hand-over below, so a
+		// failure here does not leave the transaction open and every later test waiting on
+		// it.
+		const overlapped = !(await settles(race, 250));
+
+		release();
+		await blocker;
+		const [first, second] = await race;
+		expect(overlapped).toBe(true);
 
 		const outcomes = [first, second];
 		expect(outcomes.filter((outcome) => outcome.ok)).toHaveLength(1);
@@ -150,7 +219,6 @@ describeLive("memory governance against a live index", () => {
 
 		// One entry in force for the identity, and the loser wrote no row at all — the
 		// transaction it declined in was rolled back rather than half-committed.
-		const identity = firstWriteRow({ id: "probe", idempotency_key: "probe" }).conflict_key!;
 		const written = (await raw`
 			select id from memory_entries where conflict_key = ${identity}`) as Array<{ id: string }>;
 		const winnerId = first.ok ? first.entry.id : second.ok ? second.entry.id : "";
@@ -312,5 +380,123 @@ describeLive("memory governance against a live index", () => {
 			select count(*)::int as n from memory_entries where body like ${`%${MARKER} the runtime is herdr%`}
 			  and scope = 'global'`) as Array<{ n: number }>;
 		expect(entries[0]!.n).toBe(1);
+	});
+
+	test("an entry installed straight from a token leaves an approval to find", async () => {
+		// The install with no proposal behind it: a reviewer sends the write with a token
+		// and nothing is pending, so resolving pending rows resolves nothing. With no
+		// `approved` row left behind there was nothing for `approvedReview` to find, and the
+		// same content sent later without a token went back into the queue as though no
+		// reviewer had ever seen it — where approving it is a second entry for a decision
+		// already in force.
+		const request = {
+			scope: "global",
+			kind: "decision" as const,
+			subject: `direct-${RUN}`,
+			text: `${MARKER} the gate installs with a token`,
+		};
+
+		const installed = await write(a, { ...request, review_token: REVIEW_TOKEN });
+		expect(installed.outcome).toBe("accepted");
+		expect(installed.verified_persisted).toBe(true);
+
+		// Recorded although nothing was released — the half `releaseReviews` could not do.
+		const marker = (await raw`
+			select id, state, entry_id, decided_by from memory_reviews
+			where entry_hash = ${installed.entry!.entry_hash}`) as Array<Record<string, unknown>>;
+		expect(marker).toHaveLength(1);
+		expect(marker[0]!.state).toBe("approved");
+		expect(marker[0]!.entry_id).toBe(installed.entry!.id);
+		expect(await a.approvedReview(installed.entry!.entry_hash)).toEqual({
+			id: String(marker[0]!.id),
+			entry_id: installed.entry!.id,
+		});
+
+		// And the tokenless re-submission is answered with the entry rather than parked.
+		const again = await write(b, request);
+		expect(again.outcome).toBe("accepted");
+		expect(again.reason).toBe("review.already-approved");
+		expect(again.entry?.id).toBe(installed.entry!.id);
+		const pending = (await raw`
+			select count(*)::int as n from memory_reviews
+			where entry_hash = ${installed.entry!.entry_hash} and state = 'pending'`) as Array<{ n: number }>;
+		expect(pending[0]!.n).toBe(0);
+	});
+
+	test("a re-proposal asking for a different ttl is parked with the ttl it asked for", async () => {
+		// `entry_hash` is content only, so this write reaches the gate hashing exactly like
+		// the approved one while asking for retention the entry in force does not have.
+		const request = {
+			scope: "global",
+			kind: "fact" as const,
+			text: `${MARKER} the poller runs on the host`,
+		};
+		const approved = await write(a, { ...request, review_token: REVIEW_TOKEN });
+		expect(approved.outcome).toBe("accepted");
+		expect(approved.entry?.ttl).toBe("permanent");
+
+		const shorter = await write(b, { ...request, ttl: "30d" });
+
+		expect(shorter.outcome).toBe("conflict");
+		expect(shorter.reason).toBe("review.required");
+		expect(shorter.conflict_with).toBe(approved.entry!.id);
+		// Parked as its own proposal, carrying the retention actually asked for — not
+		// answered with the permanent entry under `verified_persisted: true`.
+		const parked = (await raw`
+			select ttl, state from memory_reviews where id = ${shorter.review_id!}`) as Array<Record<string, unknown>>;
+		expect(parked[0]).toMatchObject({ ttl: "30d", state: "pending" });
+		const standing = (await raw`
+			select ttl from memory_entries where entry_hash = ${approved.entry!.entry_hash}
+			  and superseded_by is null`) as Array<{ ttl: string }>;
+		expect(standing.map((row) => row.ttl)).toEqual(["permanent"]);
+	});
+
+	test("migrate replaces the old (entry_hash, state) uniqueness", async () => {
+		// The half of the repeat-approval fix that only a database can show: a schema
+		// carrying the *old* index, migrated. Running `migrate` twice in `beforeAll` proves
+		// it is idempotent and nothing about the replacement, because by then there is no
+		// old index left to replace.
+		//
+		// The old shape is unique over every state, so it cannot be created while the table
+		// holds two rows for one content in one state — which is exactly what the new shape
+		// allows and what the tests above have already left behind. Those rows are this
+		// suite's own audit trail and the assertions that needed them have run, so the
+		// duplicates go first.
+		await raw`
+			delete from memory_reviews r using memory_reviews o
+			where r.entry_hash = o.entry_hash and r.state = o.state and r.ctid > o.ctid`;
+		await raw`drop index if exists memory_reviews_pending_idx`;
+		await raw`create unique index memory_reviews_hash_idx on memory_reviews (entry_hash, state)`;
+
+		await a.migrate();
+
+		const indexes = (await raw`
+			select indexname from pg_indexes where tablename = 'memory_reviews'`) as Array<{ indexname: string }>;
+		const names = indexes.map((row) => row.indexname);
+		expect(names).not.toContain("memory_reviews_hash_idx");
+		expect(names).toContain("memory_reviews_pending_idx");
+
+		// And what the replacement is for: two approved rows for one content, which the old
+		// index rejected — in the gate, *after* the entry had already committed.
+		const hash = `hash-${MARKER}-migrated`;
+		const proposal = {
+			...firstWriteRow({ id: `memr_${MARKER}_5`, idempotency_key: `${MARKER}-r5` }),
+			scope: "global",
+			subject: null,
+			entry_hash: hash,
+			text: `${MARKER} migrations are idempotent`,
+			conflict_key: null,
+			reason: "global scope requires review",
+		};
+		await a.enqueueReview(proposal);
+		expect((await a.recordApproval(proposal, `mem_${MARKER}_r5`, "hermes")).released).toBe(1);
+		await a.enqueueReview({ ...proposal, id: `memr_${MARKER}_6` });
+		expect((await a.recordApproval({ ...proposal, id: `memr_${MARKER}_6` }, `mem_${MARKER}_r6`, "hermes")).released).toBe(
+			1,
+		);
+		const rows = (await raw`
+			select state, count(*)::int as n from memory_reviews where entry_hash = ${hash}
+			group by state`) as Array<{ state: string; n: number }>;
+		expect(rows).toEqual([{ state: "approved", n: 2 }]);
 	});
 });
