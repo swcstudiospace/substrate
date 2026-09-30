@@ -156,6 +156,16 @@ export type ChainVerdict =
 	| { ok: true; records: number }
 	| { ok: false; records: number; brokenAt: number; reason: string };
 
+export interface VerifyChainOptions {
+	/**
+	 * Require the chain to open at `seq: 1` with `prev: null`. On by default.
+	 *
+	 * Off only for a deliberate window over a chain whose start is not present — see
+	 * `verifyAuditChain`. It is not a way to quiet the check on a file.
+	 */
+	genesis?: boolean;
+}
+
 /**
  * Recompute a chain and report the first record that does not verify.
  *
@@ -179,8 +189,14 @@ export type ChainVerdict =
  * the writer does not open at `seq: 1`, and is reported broken rather than verified
  * in isolation. That is the truth about such a file — the chain it holds is only
  * verifiable together with the one it continues. See `docs/mcp-audit.md`.
+ *
+ * `options.genesis: false` is for the one caller holding a window it never claimed
+ * was a whole chain: a memory-only `AuditLog` keeps a bounded tail, so past its
+ * retention it legitimately opens past `seq: 1`. Everything else leaves it on, and a
+ * *file* chain always does — it holds every record ever appended.
  */
-export function verifyAuditChain(records: AuditRecord[]): ChainVerdict {
+export function verifyAuditChain(records: AuditRecord[], options: VerifyChainOptions = {}): ChainVerdict {
+	const requireGenesis = options.genesis ?? true;
 	let expectedPrev: string | null = null;
 	let expectedSeq: number | null = null;
 	for (const record of records) {
@@ -188,7 +204,7 @@ export function verifyAuditChain(records: AuditRecord[]): ChainVerdict {
 		if (recordHash(rest) !== hash) {
 			return { ok: false, records: records.length, brokenAt: record.seq, reason: "hash does not match contents" };
 		}
-		if (expectedSeq === null && (record.seq !== 1 || record.prev !== null)) {
+		if (expectedSeq === null && requireGenesis && (record.seq !== 1 || record.prev !== null)) {
 			return {
 				ok: false,
 				records: records.length,

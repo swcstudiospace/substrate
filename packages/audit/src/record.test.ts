@@ -188,6 +188,13 @@ describe("verifyAuditChain", () => {
 		expect((verdict as { reason: string }).reason).toContain("does not open at seq 1");
 	});
 
+	test("a deliberate window over a chain opts out of the head check", () => {
+		// What a memory-only `AuditLog` holds past its retention: a tail that never
+		// claimed to be a whole chain. Nothing that reads a file passes this.
+		expect(verifyAuditChain(chain(5).slice(2), { genesis: false })).toEqual({ ok: true, records: 3 });
+		expect(verifyAuditChain(chain(5).slice(2)).ok).toBe(false);
+	});
+
 	test("a head whose prev is set is caught even when its seq is 1", () => {
 		// The other half of the head check: a forged head could carry seq 1 while still
 		// pointing at a predecessor that is no longer there.

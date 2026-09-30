@@ -43,6 +43,18 @@ describe("a memory-only chain", () => {
 		expect(second.record.seq).toBe(2);
 		expect((await log.verify()).ok).toBe(true);
 	});
+
+	test("a chain past its retention window still verifies — it never claimed to start at seq 1", async () => {
+		// The genesis check is about a *file*, which holds every record ever appended.
+		// Memory answers from a bounded tail, so requiring `seq: 1` of it reported every
+		// local-dev process past its retention as a broken chain — a false alarm in the
+		// same bundle that check exists to protect.
+		const log = new AuditLog({ path: null, maxRetained: 3 });
+		for (let i = 0; i < 10; i++) await log.append(allowed);
+
+		expect(log.recent(100).map((record) => record.seq)).toEqual([8, 9, 10]);
+		expect((await log.verify()).ok).toBe(true);
+	});
 });
 
 describe("a file-backed chain", () => {

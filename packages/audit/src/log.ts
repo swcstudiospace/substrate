@@ -253,10 +253,17 @@ export class AuditLog {
 	 * The chain check runs first when it also fails, because a hash or `prev` mismatch
 	 * names a specific tampered position and is the more useful answer; an unparseable
 	 * line is reported when the readable records are otherwise sound.
+	 *
+	 * The genesis check applies to a **file**, which holds every record ever appended.
+	 * A memory-only chain answers from a bounded tail, so once it has dropped anything
+	 * it opens past `seq: 1` legitimately — requiring genesis of it reported every
+	 * local-dev process past its retention as a broken chain, which is a false alarm in
+	 * the same bundle the real check exists to protect.
 	 */
 	async verify(): Promise<ChainVerdict & { unparseable: number }> {
 		const { records, unparseable } = await this.readAll();
-		const verdict = verifyAuditChain(records);
+		const genesis = this.options.path !== null || this.retained.length === this.chainSeq;
+		const verdict = verifyAuditChain(records, { genesis });
 		if (!verdict.ok) return { ...verdict, unparseable };
 		if (unparseable > 0) {
 			return {

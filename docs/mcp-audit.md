@@ -116,6 +116,13 @@ open at `seq: 1`, and is reported broken rather than verified in isolation. That
 the truth about such a file — the chain it holds is only verifiable together with the
 one it continues.
 
+The head check applies to a **file**, which holds every record ever appended. A
+memory-only chain answers from a bounded tail (`maxRetained`), so once it has dropped
+anything it opens past `seq: 1` legitimately, and `verify` skips the head check for
+it. Requiring genesis of a window is a false alarm in the same bundle the real check
+exists to protect, and a false alarm there costs the check its credibility. The
+exemption is not available to a file.
+
 **An unparseable line fails the verdict.** A process killed mid-write leaves a
 partial one; it is counted and reported, never removed, because this is an
 append-only file and a verifier reporting a bad line is better than a writer having

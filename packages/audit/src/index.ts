@@ -13,6 +13,7 @@ export {
 	type AuditStats,
 	type AuditTransport,
 	type ChainVerdict,
+	type VerifyChainOptions,
 	AUDIT_DECISIONS,
 	AUDIT_TRANSPORTS,
 	argDigest,
