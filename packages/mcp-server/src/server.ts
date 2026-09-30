@@ -5,6 +5,7 @@
  *   POST /brief         the same briefing as plain text, for hooks
  *   POST /events        append an event, for hooks
  *   POST /events/query  read a window of the ledger
+ *   POST /memory        write a memory entry through the governance gate
  *   POST /verify        recompute a graph's hash chain
  *   GET  /healthz       store reachability, and whether events can actually be written
  *
@@ -40,6 +41,54 @@ export function healthStatus(
 ): number {
 	if (ledgerConfigured && !health.eventsWritable) return 503;
 	return health.index || health.greptime ? 200 : 503;
+}
+
+/**
+ * Who a memory write is attributed to, and therefore whose grants it gets.
+ *
+ * Only a token names a writer. `bodyWriter` is taken as a parameter so that
+ * discarding it is a thing a test can assert rather than a line somebody has to
+ * notice is missing.
+ *
+ * It used to be honoured on a deployment that configured no tokens, on the reasoning
+ * that a local run has no token to beat. But "no tokens configured" is exactly the
+ * state in which the 401 above is not applied, so that condition read: any anonymous
+ * caller may name itself `hermes` and collect hermes's graph, repo and `agent:hermes`
+ * grants. Default-deny that a request parameter defeats is not default-deny, and the
+ * convenience is not worth the hole — `unknown` holds no grants, matches no wildcard,
+ * and the denial's remedy says how to fix it.
+ *
+ * A local run that genuinely wants ungoverned memory says so out loud, with a grant
+ * naming `unknown` in `SUBSTRATE_MEMORY_GRANTS` or a surface token in
+ * `SUBSTRATE_TOKEN_<SURFACE>`.
+ * Both are one line, and both leave a record of the decision.
+ */
+export function memoryWriter(surface: Surface | null, bodyWriter: unknown): string {
+	return surface ?? "unknown";
+}
+
+/**
+ * The status code for a governed memory write.
+ *
+ * Only a write that was accepted *and* read back gets a 2xx a caller may rely on;
+ * an accepted-but-unverified write is 202, the same "taken, not confirmed" this
+ * server already uses for an event. The refusals are distinguishable without
+ * parsing the body, because a hook that can only see the status code still has to
+ * be able to tell "you may not" from "the index is down".
+ */
+export function memoryWriteStatus(result: { outcome: string; reason: string; verified_persisted: boolean }): number {
+	switch (result.outcome) {
+		case "accepted":
+			return result.verified_persisted ? 200 : 202;
+		case "conflict":
+			return 409;
+		case "quarantined":
+			return 422;
+		default:
+			// A store that is missing or refusing is an outage, not a policy decision, and
+			// a monitor must not read it as "this agent lacks permission".
+			return result.reason.startsWith("store.") ? 503 : 403;
+	}
 }
 
 async function readBody(req: IncomingMessage): Promise<string> {
@@ -124,6 +173,17 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig) 
 				const result = await substrate.queryEvents(body as Parameters<Substrate["queryEvents"]>[0]);
 				// An empty window is a real answer, so 200; 503 is the ledger not answering.
 				sendJson(res, result.error ? 503 : 200, result);
+				return;
+			}
+
+			if (req.method === "POST" && url.pathname === "/memory") {
+				const raw = await readBody(req);
+				const body = JSON.parse(raw) as Record<string, unknown>;
+				const result = await substrate.writeMemory({
+					...(body as object),
+					writer: memoryWriter(surface, body.writer),
+				} as Parameters<Substrate["writeMemory"]>[0]);
+				sendJson(res, memoryWriteStatus(result), result);
 				return;
 			}
 

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { loadConfig } from "./config.ts";
+import { isReviewToken, loadConfig } from "./config.ts";
 import { MAX_QUERY_LIMIT, type EventQuery } from "./greptime.ts";
 import { REDACTED } from "./redact.ts";
 import { Substrate } from "./service.ts";
@@ -279,6 +279,136 @@ describe("append-mode enforcement", () => {
 	});
 });
 
+describe("memory.write is fail-closed", () => {
+	const entry = { scope: "graph:ut-1", kind: "fact" as const, text: "hermes finished n2", writer: "hermes" };
+
+	/** Records what reached the ledger, so the audit trail can be asserted on. */
+	function auditing() {
+		const emitted: SubstrateEvent[] = [];
+		return {
+			emitted,
+			greptime: {
+				ensureAppendMode: async () => true,
+				lastHash: async () => null,
+				insertEvent: async (event: SubstrateEvent) => {
+					emitted.push(event);
+				},
+			},
+		};
+	}
+
+	test("no index is a denial, not an exception and never a silent success", async () => {
+		// `emit` hands a caller its event back when the ledger is gone, because a lost
+		// event costs the trail. Memory is what the next four sessions act on, so the
+		// same outage has to come back as a refusal — and as something an agent mid-turn
+		// can act on, which a thrown error is not.
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: null });
+
+		const result = await substrate.writeMemory(entry);
+
+		expect(result.outcome).toBe("denied");
+		expect(result.reason).toBe("store.unavailable");
+		expect(result.verified_persisted).toBe(false);
+		expect(result.remedy).toContain("SUBSTRATE_PG_URL");
+	});
+
+	test("an index that throws is a denial with the reason redacted", async () => {
+		// A connection error quotes the URL it failed to reach, password and all.
+		const index = {
+			claimWrite: async () => {
+				throw new Error("connect failed: postgres://user:hunter2@host/db");
+			},
+		};
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null });
+
+		const result = await substrate.writeMemory(entry);
+
+		expect(result.outcome).toBe("denied");
+		expect(result.reason).toBe("store.write-failed");
+		expect(result.remedy).not.toContain("hunter2");
+		expect(result.remedy).toContain(REDACTED);
+	});
+
+	test("a refused write is audited to the event log", async () => {
+		// Governance that leaves no trace is indistinguishable from no governance: a
+		// denial is otherwise visible only to the agent that was denied, which is the
+		// one party with an interest in not mentioning it.
+		const { emitted, greptime } = auditing();
+		const substrate = new Substrate(loadConfig({}), { index: {} as never, greptime: greptime as never });
+
+		const result = await substrate.writeMemory({ ...entry, scope: "person:ove" });
+
+		expect(result.outcome).toBe("denied");
+		expect(emitted).toHaveLength(1);
+		expect(emitted[0]?.kind).toBe("warning");
+		expect(emitted[0]?.summary).toContain("memory.write denied");
+		expect(emitted[0]?.payload).toMatchObject({ outcome: "denied", reason: "rbac.no-grant" });
+	});
+
+	test("the audit event carries the decision and never the body", async () => {
+		// The body may be exactly the secret that got the write quarantined, and copying
+		// it into an append-only ledger to record that it was quarantined is absurd.
+		const { emitted, greptime } = auditing();
+		const substrate = new Substrate(loadConfig({}), { index: {} as never, greptime: greptime as never });
+
+		await substrate.writeMemory({ ...entry, writer: "unknown", text: "PGPASSWORD=s3cr3t-do-not-log" });
+
+		expect(JSON.stringify(emitted)).not.toContain("s3cr3t");
+	});
+
+	test("an unattributed writer is refused without an event, because emit would reject it too", async () => {
+		// `unknown` is not a surface, so there is nothing to attribute the audit event
+		// to; the stderr line is its trail. The refusal still happens.
+		const { emitted, greptime } = auditing();
+		const substrate = new Substrate(loadConfig({}), { index: {} as never, greptime: greptime as never });
+
+		const result = await substrate.writeMemory({ ...entry, writer: "unknown" });
+
+		expect(result.outcome).toBe("denied");
+		expect(emitted).toEqual([]);
+	});
+
+	test("a ledger that cannot take the audit event does not change the decision", async () => {
+		// The audit is fail-open on top of a fail-closed decision. Losing the trail must
+		// not turn a denial into an exception.
+		const greptime = {
+			ensureAppendMode: async () => true,
+			lastHash: async () => null,
+			insertEvent: async () => {
+				throw new Error("greptime unreachable");
+			},
+		};
+		const substrate = new Substrate(loadConfig({}), { index: {} as never, greptime: greptime as never });
+
+		expect((await substrate.writeMemory({ ...entry, scope: "person:ove" })).outcome).toBe("denied");
+	});
+});
+
+describe("reviewer tokens", () => {
+	test("none configured means every review path stays closed", () => {
+		// The correct default: the queue fills, and nothing forged gets through.
+		const config = loadConfig({});
+		expect(config.memoryReviewTokens.size).toBe(0);
+		expect(isReviewToken(config, "anything")).toBe(false);
+		expect(isReviewToken(config, undefined)).toBe(false);
+	});
+
+	test("a configured token is accepted, and only that token", () => {
+		const config = loadConfig({ SUBSTRATE_MEMORY_REVIEW_TOKENS: "reviewer-token-that-is-long, second-token-also-long" });
+		expect(isReviewToken(config, "reviewer-token-that-is-long")).toBe(true);
+		expect(isReviewToken(config, "second-token-also-long")).toBe(true);
+		expect(isReviewToken(config, "reviewer-token")).toBe(false);
+		expect(isReviewToken(config, "")).toBe(false);
+	});
+
+	test("a short value is a placeholder, not a token", () => {
+		// Accepting `changeme` would hand reviewer authority to anybody who guessed it.
+		const config = loadConfig({ SUBSTRATE_MEMORY_REVIEW_TOKENS: "changeme" });
+		expect(config.memoryReviewTokens.size).toBe(0);
+		expect(isReviewToken(config, "changeme")).toBe(false);
+	});
+});
+
 describe("identifier lookups", () => {
 	test("looks the session up by the id it will store, not the one it was given", async () => {
 		// The bug: the raw id was used for the lookup while a cleaned one was stored,
@@ -523,5 +653,114 @@ describe("queryEvents input checks", () => {
 			/limit must be a number/,
 		);
 		expect(queries).toEqual([]);
+	});
+});
+
+describe("the governance queue withholds what quarantine was protecting", () => {
+	/** Two parked rows, one of each kind, as the index would return them. */
+	const index = {
+		governanceQueue: async () => ({
+			reviews: [
+				{
+					id: "memr_1",
+					scope: "global",
+					kind: "decision" as const,
+					writer: "hermes",
+					reason: "global scope requires review",
+					created: "2026-09-30T00:00:00.000Z",
+					text: "Greptime is the events ledger only",
+					subject: "store lock",
+				},
+			],
+			quarantined: [
+				{
+					id: "memq_1",
+					scope: "repo:a/b",
+					kind: "fact" as const,
+					writer: "omp",
+					reason: "pii",
+					created: "2026-09-30T00:00:00.000Z",
+					text: "escalate to someone@a-real-domain.test",
+					subject: "escalation",
+					detail: "the text carried an email address",
+				},
+			],
+		}),
+	};
+
+	function substrateWithTokens(tokens?: string) {
+		return new Substrate(loadConfig(tokens ? { SUBSTRATE_MEMORY_REVIEW_TOKENS: tokens } : {}), {
+			index: index as never,
+			greptime: null,
+		});
+	}
+
+	test("a caller with no reviewer token sees that something is parked, not what", async () => {
+		// Redaction strips credentials, not the email address that caused the quarantine.
+		// A queue that showed every body to every agent holding any surface token would
+		// publish exactly what quarantining it was meant to contain — to more readers
+		// than accepting the write would have.
+		const queue = await substrateWithTokens().governanceQueue({});
+
+		expect(queue.authorized).toBe(false);
+		expect(queue.quarantined[0]?.text).toBeUndefined();
+		expect(queue.quarantined[0]?.subject).toBeUndefined();
+		expect(JSON.stringify(queue)).not.toContain("a-real-domain.test");
+		// The parts worth knowing survive, and none of them is the payload.
+		expect(queue.quarantined[0]).toMatchObject({
+			id: "memq_1",
+			scope: "repo:a/b",
+			writer: "omp",
+			reason: "pii",
+			detail: "the text carried an email address",
+		});
+		expect(queue.reviews[0]?.text).toBeUndefined();
+	});
+
+	test("a reviewer sees the bodies", async () => {
+		const token = "reviewer-token-that-is-long";
+		const queue = await substrateWithTokens(token).governanceQueue({ review_token: token });
+
+		expect(queue.authorized).toBe(true);
+		expect(queue.quarantined[0]?.text).toContain("a-real-domain.test");
+		expect(queue.reviews[0]?.text).toContain("Greptime");
+	});
+
+	test("a wrong token is no token", async () => {
+		const queue = await substrateWithTokens("reviewer-token-that-is-long").governanceQueue({
+			review_token: "not-the-reviewer-token",
+		});
+		expect(queue.authorized).toBe(false);
+		expect(queue.quarantined[0]?.text).toBeUndefined();
+	});
+});
+
+describe("the audit line is redacted", () => {
+	test("a credential in a caller-supplied scope does not reach the journal", async () => {
+		// `scope` is caller-controlled and a refused write is exactly where a malformed one
+		// arrives. A credential in the journal is leaked whether or not the event that
+		// would have carried it was ever emitted.
+		const written: string[] = [];
+		const original = process.stderr.write.bind(process.stderr);
+		process.stderr.write = ((chunk: string | Uint8Array) => {
+			written.push(String(chunk));
+			return true;
+		}) as typeof process.stderr.write;
+		try {
+			const substrate = new Substrate(loadConfig({}), { index: {} as never, greptime: null });
+			await substrate.writeMemory({
+				scope: "graph:GITHUB_TOKEN=ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				kind: "fact",
+				text: "x",
+				writer: "hermes",
+			});
+		} finally {
+			process.stderr.write = original;
+		}
+
+		const log = written.join("");
+		expect(log).toContain("memory.write");
+		expect(log).not.toContain("ghp_aaaa");
+		expect(log).toContain(REDACTED);
 	});
 });

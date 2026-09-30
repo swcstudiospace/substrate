@@ -8,14 +8,27 @@
  */
 import { SQL } from "bun";
 import { randomUUID } from "node:crypto";
+import { normalizeIdentifier } from "./event.ts";
+import { needsReverification } from "./memory-policy.ts";
+import {
+	DERIVED_KEY_WINDOW_MS,
+	IN_FLIGHT_TIMEOUT_MS,
+	type ClaimResult,
+	type MemoryStore,
+	type NewMemoryEntry,
+	type WriteRecord,
+} from "./memory-write.ts";
 import type {
+	Actor,
+	GovernanceQueueRow,
 	GraphIndexRow,
 	GraphNode,
 	GraphStep,
 	GraphView,
 	MemoryEntry,
-	MemoryEntryInput,
+	MemoryWriteOutcome,
 	NodeState,
+	QuarantineReason,
 	Surface,
 } from "./types.ts";
 import { redact } from "./redact.ts";
@@ -27,7 +40,7 @@ import { redact } from "./redact.ts";
  */
 const TERMINAL_STATUSES = ["Merged", "Resolved", "Done", "Won't Fix", "Closed", "Failed", "Canceled"];
 
-export class IndexStore {
+export class IndexStore implements MemoryStore {
 	private readonly sql: SQL;
 
 	constructor(connectionString: string) {
@@ -83,10 +96,100 @@ export class IndexStore {
 				ttl          text not null default 'permanent',
 				created      timestamptz not null default now()
 			)`;
+
+		// Governance columns, added rather than declared: `memory_entries` predates the
+		// gate and is live, so every one of these has to be safe on a table that
+		// already holds rows. The defaults are what an ungoverned Phase 0 entry
+		// honestly was — one version, written by an agent, superseding nothing.
+		await this.sql`
+			alter table memory_entries
+				add column if not exists subject         text,
+				add column if not exists actor           text not null default 'agent',
+				add column if not exists session_id      text,
+				add column if not exists graph_id        text,
+				add column if not exists repo            text,
+				add column if not exists conflict_key    text,
+				add column if not exists version         int not null default 1,
+				add column if not exists supersedes      text,
+				add column if not exists superseded_by   text,
+				add column if not exists entry_hash      text,
+				add column if not exists reverify_after  timestamptz,
+				add column if not exists idempotency_key text`;
+
+		// The idempotency ledger. One row per key ever spent; `claimed` is what makes
+		// an abandoned in-flight claim recoverable and a derived key expire.
+		await this.sql`
+			create table if not exists memory_writes (
+				idempotency_key text primary key,
+				explicit        boolean not null default false,
+				outcome         text not null,
+				entry_id        text,
+				entry_hash      text not null,
+				request_hash    text,
+				holder          text,
+				claimed         timestamptz not null default now()
+			)`;
+		// Insurance for anyone who ran an earlier build of this migration, where the claim
+		// had no fencing token.
+		await this.sql`alter table memory_writes add column if not exists holder text`;
+		await this.sql`alter table memory_writes add column if not exists request_hash text`;
+
+		// Parked writes. Both tables hold the *redacted* body: a quarantined secret is
+		// quarantined so a reviewer can see what was attempted, never so the substrate
+		// can keep the credential.
+		await this.sql`
+			create table if not exists memory_quarantine (
+				id           text primary key,
+				scope        text not null,
+				kind         text not null,
+				body         text not null,
+				subject      text,
+				writer       text not null,
+				source_event text,
+				session_id   text,
+				graph_id     text,
+				repo         text,
+				entry_hash   text not null,
+				reason       text not null,
+				detail       text not null,
+				created      timestamptz not null default now()
+			)`;
+		await this.sql`
+			create table if not exists memory_reviews (
+				id              text primary key,
+				scope           text not null,
+				kind            text not null,
+				body            text not null,
+				subject         text,
+				writer          text not null,
+				source_event    text,
+				session_id      text,
+				graph_id        text,
+				repo            text,
+				ttl             text not null default 'permanent',
+				entry_hash      text not null,
+				reason          text not null,
+				state           text not null default 'pending',
+				entry_id        text,
+				decided         timestamptz,
+				decided_by      text,
+				created         timestamptz not null default now()
+			)`;
+
 		await this.sql`create index if not exists graph_index_repo_idx on graph_index (repo)`;
 		await this.sql`create index if not exists graph_nodes_claimed_idx on graph_nodes (claimed_by)`;
 		await this.sql`create index if not exists memory_scope_idx on memory_entries (scope)`;
 		await this.sql`create index if not exists memory_fts_idx on memory_entries using gin (to_tsvector('english', body))`;
+		// The identity the lww and versioned strategies resolve against: one standing
+		// entry per conflict key, enforced rather than merely selected for.
+		await this.sql`
+			create unique index if not exists memory_standing_idx on memory_entries (conflict_key)
+			where conflict_key is not null and superseded_by is null`;
+		await this.sql`create index if not exists memory_reverify_idx on memory_entries (reverify_after)`;
+		// What makes parking idempotent: a retried write finds its own parked row
+		// instead of adding another for a reviewer to wade through.
+		await this.sql`create unique index if not exists memory_quarantine_hash_idx on memory_quarantine (entry_hash)`;
+		await this.sql`create unique index if not exists memory_reviews_hash_idx on memory_reviews (entry_hash, state)`;
 	}
 
 	// ── graph ──────────────────────────────────────────────────────────────────
@@ -216,39 +319,386 @@ export class IndexStore {
 	}
 
 	// ── memory ─────────────────────────────────────────────────────────────────
+	//
+	// Every write below is reached through `governMemoryWrite` — the gate in
+	// `memory-write.ts` decides RBAC, quarantine, idempotency and conflicts, and
+	// these methods are the thin, boring half. There is deliberately no ungoverned
+	// `writeMemory` here any more: the reason the gate cannot be forgotten is that
+	// there is no second door past it, the same argument that keeps the ledger
+	// client inside its own file. (Naming that client here would trip the lock's
+	// other rule: a file in this package that both says its name and sends a
+	// statement is how a second SQL door onto the ledger would look.)
 
-	async writeMemory(entry: MemoryEntryInput): Promise<MemoryEntry> {
-		const id = `mem_${randomUUID().replace(/-/g, "")}`;
-		const rows = (await this.sql`
-			insert into memory_entries (id, scope, kind, body, source_event, writer, trust, ttl)
-			values (${id}, ${entry.scope}, ${entry.kind}, ${redact(entry.text)}, ${entry.source_event ?? null},
-			        ${entry.writer}, ${entry.trust ?? "agent-claimed"}, ${entry.ttl ?? "permanent"})
-			returning id, scope, kind, body, source_event, writer, trust, ttl, created`) as Array<
-			Record<string, unknown>
-		>;
-		return toMemoryEntry(rows[0]!);
+	/**
+	 * Claim an idempotency key, or report the record that already holds it.
+	 *
+	 * The only place in the gate where two concurrent writes have to be ordered, so it
+	 * runs as a transaction over a locked row rather than as one clever statement: the
+	 * decision has three cases and a reviewer has to be able to check them.
+	 *
+	 * The claim is handed over when the key is fresh; when the previous attempt was
+	 * refused, so nothing was written and re-asking is allowed; when an in-flight claim
+	 * was abandoned; or when a derived key's dedup window has passed. An `accepted`
+	 * explicit key is never handed over — that is what "exactly once" means.
+	 *
+	 * Every hand-over mints a new `holder`, and `finishWrite` and `releaseWrite` match
+	 * on it. Without that, an attempt that merely ran slow past the in-flight timeout
+	 * could come back and finish — or delete — the claim that replaced it.
+	 */
+	async claimWrite(input: {
+		key: string;
+		explicit: boolean;
+		entryHash: string;
+		requestHash: string;
+		entryId: string;
+	}): Promise<ClaimResult> {
+		const holder = `hold_${randomUUID().replace(/-/g, "")}`;
+		const inFlightSeconds = IN_FLIGHT_TIMEOUT_MS / 1000;
+		const derivedSeconds = DERIVED_KEY_WINDOW_MS / 1000;
+
+		return (await this.sql.begin(async (tx: SQL) => {
+			const fresh = (await tx`
+				insert into memory_writes (
+					idempotency_key, explicit, outcome, entry_id, entry_hash, request_hash, holder, claimed)
+				values (${input.key}, ${input.explicit}, 'in-flight', ${input.entryId}, ${input.entryHash},
+				        ${input.requestHash}, ${holder}, now())
+				on conflict (idempotency_key) do nothing
+				returning idempotency_key`) as Array<Record<string, unknown>>;
+			if (fresh.length > 0) return { claimed: true as const, holder, tookOverFrom: null };
+
+			// The key is held. Lock the row before judging it, so two retries cannot both
+			// conclude that one abandoned claim is theirs. Staleness is computed by the
+			// database, against its own clock — the server's may not agree.
+			const rows = (await tx`
+				select outcome, explicit, entry_id, entry_hash, request_hash,
+				       claimed < now() - make_interval(secs => ${inFlightSeconds}::float8) as in_flight_stale,
+				       claimed < now() - make_interval(secs => ${derivedSeconds}::float8) as derived_stale
+				from memory_writes where idempotency_key = ${input.key}
+				for update`) as Array<Record<string, unknown>>;
+			const row = rows[0];
+			// It cleared between the two statements: nothing holds the key, so treat it as
+			// ours rather than reporting a holder that is not there.
+			if (!row) return { claimed: true as const, holder, tookOverFrom: null };
+
+			const outcome = String(row.outcome);
+			const inFlight = outcome === "in-flight";
+			const priorEntry = row.entry_id === null || row.entry_id === undefined ? null : String(row.entry_id);
+
+			// What the claim's reservation actually holds — nothing, while the row it names is
+			// still only reserved.
+			//
+			// Read under the lock the hand-over already takes, which is what makes it a fact
+			// rather than a guess: `insertEntry` locks this same row before writing its entry,
+			// so the reserved row either exists by the time we look or belongs to an attempt
+			// that is about to find itself fenced out. Only an in-flight claim can pass its
+			// reservation on, so only that case pays for the read.
+			const reserved =
+				inFlight && priorEntry
+					? ((await tx`select entry_hash from memory_entries where id = ${priorEntry}`) as Array<
+							Record<string, unknown>
+						>)
+					: [];
+			const reservedHash = optional(reserved[0]?.entry_hash);
+
+			// Whether the held claim was taken out for *this* request.
+			//
+			// It gates the in-flight hand-over alone, because that is the one hand-over that
+			// keeps the previous attempt's `entry_id`. Handing that reservation to a different
+			// request, while replacing the hashes with the new one's, makes the record say a
+			// row holding A's content is what this key spent itself on B for: the successor
+			// recovers A, and B's next retry reads `accepted` off that record and is told its
+			// own write is `verified_persisted`. It never was.
+			//
+			// So a key spent on a different ask is spent — the same answer `replay` gives for a
+			// finished record. Whether the attempt that spent it acknowledged itself or died
+			// still holding the key does not change what the key promised.
+			const heldFor = optional(row.request_hash);
+			const sameAsk = heldFor !== undefined && heldFor === input.requestHash;
+
+			// A record written before `request_hash` existed records no identity, and no
+			// identity is *unknown*, not "matches whoever asks". Reading it as a wildcard was
+			// how a legacy claim stranded the write that made it: any request could take the
+			// claim over, stamp its own hashes on it and keep the reservation; the gate then
+			// refused to hand back the row that reservation named — rightly, it was someone
+			// else's — and left the rewritten claim in flight. The write that committed that
+			// row came back to a key spent on another ask, was told `idempotency.reused`, and
+			// had no way left to reach its own entry.
+			//
+			// So an unidentified claim is handed over only where the hand-over can strand
+			// nothing: its reservation names no row yet, or names one already holding this
+			// write's content — which is the write that made it, retrying.
+			const reservationIsOurs = reservedHash === undefined || reservedHash === input.entryHash;
+			const legacyRecoverable = heldFor === undefined && reservationIsOurs;
+			const takeable =
+				(outcome !== "accepted" && !inFlight) ||
+				// `reservationIsOurs` is redundant beside `sameAsk` — one request has one
+				// content hash — and kept because it is the invariant the inherited `entry_id`
+				// below actually depends on, which a record left inconsistent by an older
+				// hand-over would otherwise break silently.
+				(inFlight && row.in_flight_stale === true && (sameAsk || legacyRecoverable) && reservationIsOurs) ||
+				(outcome === "accepted" && row.explicit !== true && row.derived_stale === true);
+
+			if (!takeable) {
+				return {
+					claimed: false as const,
+					existing: {
+						idempotency_key: input.key,
+						explicit: row.explicit === true,
+						outcome: outcome as WriteRecord["outcome"],
+						entry_id: row.entry_id === null || row.entry_id === undefined ? null : String(row.entry_id),
+						entry_hash: String(row.entry_hash),
+						request_hash: optional(row.request_hash) ?? null,
+					},
+				};
+			}
+
+			// Only an abandoned *in-flight* claim can have left a row behind unacknowledged.
+			// A finished attempt recorded its outcome, and an aged-out derived key belongs to
+			// a write we are deliberately allowing to happen again — so its `entry_id` names
+			// a row that is still in force and must not be reused.
+			const tookOverFrom = inFlight ? priorEntry : null;
+
+			await tx`
+				update memory_writes set
+					outcome    = 'in-flight',
+					explicit   = ${input.explicit},
+					entry_hash   = ${input.entryHash},
+					request_hash = ${input.requestHash},
+					-- An in-flight claim's reservation is KEPT, not replaced. It may point at a
+					-- row that already exists, and the successor has to resolve that before the
+					-- pointer can be thrown away; overwriting it here would orphan the row and
+					-- the retry after this one would duplicate it. Safe to inherit only because
+					-- the tests above let this hand-over through for a retry of the same request,
+					-- or for one whose content the reservation already holds: either way the
+					-- reserved row is this write's own, never a stranger's.
+					entry_id   = ${tookOverFrom ?? input.entryId},
+					holder     = ${holder},
+					claimed    = now()
+				where idempotency_key = ${input.key}`;
+
+			return { claimed: true as const, holder, tookOverFrom };
+		})) as ClaimResult;
 	}
 
-	async searchMemory(query: string, scope?: string, limit = 20): Promise<MemoryEntry[]> {
+	/** Conditional on `holder`: a claim that was taken over is no longer this one's to finish. */
+	async finishWrite(key: string, holder: string, outcome: MemoryWriteOutcome, entryId: string | null): Promise<void> {
+		await this.sql`
+			update memory_writes set outcome = ${outcome}, entry_id = ${entryId}, claimed = now()
+			where idempotency_key = ${key} and holder = ${holder}`;
+	}
+
+	/**
+	 * Hand a taken-over claim back to the write that reserved it.
+	 *
+	 * The counterpart to `releaseWrite` for a claim that carries a reservation: deleting
+	 * the record would throw the pointer away with it, and the owner's retry would then
+	 * find a fresh key, look for nothing, and insert a second copy of the row it already
+	 * committed. So the record stays, restored to what the reservation says — that row,
+	 * its content, and an identity this attempt has no right to speak for.
+	 *
+	 * The holder is rotated to one nobody holds, and `claimed` backdated past the
+	 * in-flight timeout, so the claim is takeable again immediately rather than after
+	 * another wait. Conditional on `holder`, like every other statement about a claim.
+	 */
+	async restoreWrite(key: string, holder: string, reserved: { entryId: string; entryHash: string }): Promise<void> {
+		const staleSeconds = IN_FLIGHT_TIMEOUT_MS / 1000 + 1;
+		await this.sql`
+			update memory_writes set
+				outcome      = 'in-flight',
+				entry_id     = ${reserved.entryId},
+				entry_hash   = ${reserved.entryHash},
+				request_hash = null,
+				holder       = ${`hold_${randomUUID().replace(/-/g, "")}`},
+				claimed      = now() - make_interval(secs => ${staleSeconds}::float8)
+			where idempotency_key = ${key} and holder = ${holder} and outcome = 'in-flight'`;
+	}
+
+	/** Only an in-flight claim this holder still owns — a finished record is the audit trail. */
+	async releaseWrite(key: string, holder: string): Promise<void> {
+		await this.sql`
+			delete from memory_writes
+			where idempotency_key = ${key} and holder = ${holder} and outcome = 'in-flight'`;
+	}
+
+	async standingEntry(conflictKey: string): Promise<MemoryEntry | null> {
 		const rows = (await this.sql`
-			select id, scope, kind, body, source_event, writer, trust, ttl, created
+			select * from memory_entries
+			where conflict_key = ${conflictKey} and superseded_by is null
+			order by version desc, created desc
+			limit 1`) as Array<Record<string, unknown>>;
+		const row = rows[0];
+		return row ? toMemoryEntry(row) : null;
+	}
+
+	/**
+	 * Insert an entry, retiring the one it supersedes in the same transaction.
+	 *
+	 * `memory_standing_idx` makes "one entry in force per conflict key" a database
+	 * invariant rather than a convention, which means the retire and the insert
+	 * cannot be two statements: either order leaves a window where the invariant is
+	 * false. So they are one.
+	 *
+	 * The claim check is inside that same transaction, and takes the same row lock
+	 * `claimWrite` takes. That is what makes the fencing real rather than advisory: a
+	 * takeover and an insert under the one key serialise on the `memory_writes` row,
+	 * so either the takeover goes first and this insert finds a stranger's holder and
+	 * writes nothing, or this insert goes first and the takeover sees the entry it
+	 * reserved and recovers it. Checking ownership before the transaction would leave
+	 * exactly the window the fencing token exists to close.
+	 */
+	async insertEntry(
+		row: NewMemoryEntry,
+		claim: { key: string; holder: string },
+	): Promise<{ ok: true; entry: MemoryEntry } | { ok: false; reason: "standing-moved" | "claim-lost" }> {
+		return (await this.sql.begin(async (tx: SQL) => {
+			const held = (await tx`
+				select holder, outcome from memory_writes where idempotency_key = ${claim.key}
+				for update`) as Array<Record<string, unknown>>;
+			const owner = held[0];
+			// No row means the claim was released; a different holder means it was taken
+			// over. Both say the same thing: this attempt is no longer the one writing.
+			if (!owner || owner.holder !== claim.holder || String(owner.outcome) !== "in-flight") {
+				return { ok: false as const, reason: "claim-lost" as const };
+			}
+			if (row.supersedes) {
+				const retired = (await tx`
+					update memory_entries set superseded_by = ${row.id}
+					where id = ${row.supersedes} and superseded_by is null
+					returning id`) as Array<Record<string, unknown>>;
+				// Somebody else replaced it while this write was in flight. Rolling back is
+				// the honest answer; the gate turns it into a conflict.
+				if (retired.length === 0) return { ok: false as const, reason: "standing-moved" as const };
+			}
+			const inserted = (await tx`
+				insert into memory_entries (
+					id, scope, kind, body, subject, source_event, writer, actor, trust, ttl,
+					session_id, graph_id, repo, conflict_key, version, supersedes, entry_hash,
+					reverify_after, idempotency_key)
+				values (
+					${row.id}, ${row.scope}, ${row.kind}, ${redact(row.text)}, ${row.subject}, ${row.source_event},
+					${row.writer}, ${row.actor}, ${row.trust}, ${row.ttl}, ${row.session_id}, ${row.graph_id},
+					${row.repo}, ${row.conflict_key}, ${row.version}, ${row.supersedes}, ${row.entry_hash},
+					${row.reverify_after}, ${row.idempotency_key})
+				returning *`) as Array<Record<string, unknown>>;
+			return { ok: true as const, entry: toMemoryEntry(inserted[0]!) };
+		})) as { ok: true; entry: MemoryEntry } | { ok: false; reason: "standing-moved" | "claim-lost" };
+	}
+
+	async readEntry(id: string): Promise<MemoryEntry | null> {
+		const rows = (await this.sql`
+			select * from memory_entries where id = ${id}`) as Array<
+			Record<string, unknown>
+		>;
+		const row = rows[0];
+		return row ? toMemoryEntry(row) : null;
+	}
+
+	/** Park a classified write. Idempotent on the content hash. */
+	async quarantineEntry(row: NewMemoryEntry & { reason: QuarantineReason; detail: string }): Promise<string> {
+		const inserted = (await this.sql`
+			insert into memory_quarantine (
+				id, scope, kind, body, subject, writer, source_event, session_id, graph_id, repo,
+				entry_hash, reason, detail)
+			values (
+				${row.id}, ${row.scope}, ${row.kind}, ${redact(row.text)}, ${row.subject}, ${row.writer},
+				${row.source_event}, ${row.session_id}, ${row.graph_id}, ${row.repo}, ${row.entry_hash},
+				${row.reason}, ${row.detail})
+			on conflict (entry_hash) do nothing
+			returning id`) as Array<Record<string, unknown>>;
+		if (inserted[0]) return String(inserted[0].id);
+		const existing = (await this.sql`
+			select id from memory_quarantine where entry_hash = ${row.entry_hash}`) as Array<Record<string, unknown>>;
+		return existing[0] ? String(existing[0].id) : row.id;
+	}
+
+	/** Park a proposal for review. Idempotent on the content hash while pending. */
+	async enqueueReview(row: NewMemoryEntry & { reason: string }): Promise<string> {
+		const inserted = (await this.sql`
+			insert into memory_reviews (
+				id, scope, kind, body, subject, writer, source_event, session_id, graph_id, repo, ttl,
+				entry_hash, reason, state)
+			values (
+				${row.id}, ${row.scope}, ${row.kind}, ${redact(row.text)}, ${row.subject}, ${row.writer},
+				${row.source_event}, ${row.session_id}, ${row.graph_id}, ${row.repo}, ${row.ttl},
+				${row.entry_hash}, ${row.reason}, 'pending')
+			on conflict (entry_hash, state) do nothing
+			returning id`) as Array<Record<string, unknown>>;
+		if (inserted[0]) return String(inserted[0].id);
+		const existing = (await this.sql`
+			select id from memory_reviews where entry_hash = ${row.entry_hash} and state = 'pending'`) as Array<
+			Record<string, unknown>
+		>;
+		return existing[0] ? String(existing[0].id) : row.id;
+	}
+
+	/** Close the loop: a reviewed write that landed resolves the proposal it came from. */
+	async releaseReviews(entryHash: string, entryId: string, decidedBy: string): Promise<number> {
+		const rows = (await this.sql`
+			update memory_reviews
+			set state = 'approved', entry_id = ${entryId}, decided = now(), decided_by = ${decidedBy}
+			where entry_hash = ${entryHash} and state = 'pending'
+			returning id`) as Array<Record<string, unknown>>;
+		return rows.length;
+	}
+
+	/**
+	 * What a reviewer has to look at. Nothing here is briefed or searchable.
+	 *
+	 * Returns the bodies; withholding them from an unauthorised caller is the
+	 * service's job, because whether a caller holds reviewer authority is not
+	 * something the index knows.
+	 */
+	async governanceQueue(limit = 20): Promise<{ reviews: GovernanceQueueRow[]; quarantined: GovernanceQueueRow[] }> {
+		const reviews = (await this.sql`
+			select id, scope, kind, body, subject, writer, reason, created
+			from memory_reviews where state = 'pending'
+			order by created desc limit ${limit}`) as Array<Record<string, unknown>>;
+		const quarantined = (await this.sql`
+			select id, scope, kind, body, subject, writer, reason, detail, created
+			from memory_quarantine
+			order by created desc limit ${limit}`) as Array<Record<string, unknown>>;
+		return { reviews: reviews.map(toQueueRow), quarantined: quarantined.map(toQueueRow) };
+	}
+
+	/**
+	 * Full-text search. Superseded entries are excluded by default: an agent asking
+	 * what is true wants what is in force, not every version of it. A decision log is
+	 * still readable — `includeSuperseded` is how you read it.
+	 */
+	async searchMemory(query: string, scope?: string, limit = 20, includeSuperseded = false): Promise<MemoryEntry[]> {
+		const rows = (await this.sql`
+			select *
 			from memory_entries
 			where (${scope ?? null}::text is null or scope = ${scope ?? null})
+			  and (${includeSuperseded}::boolean or superseded_by is null)
 			  and (${query ?? ""} = '' or to_tsvector('english', body) @@ plainto_tsquery('english', ${query}))
 			order by created desc
 			limit ${limit}`) as Array<Record<string, unknown>>;
 		return rows.map(toMemoryEntry);
 	}
 
-	/** Entries relevant to a brief: this graph, this repo, and globals. */
+	/**
+	 * Entries relevant to a brief: this graph, this repo, and globals.
+	 *
+	 * The scope strings are built with `normalizeIdentifier`, because the gate stores
+	 * them that way — querying the raw spelling would match nothing, the same trap
+	 * `emit` fell into with session ids.
+	 */
 	async memoryForBrief(repo: string | null, graphId: string | null, limit = 10): Promise<MemoryEntry[]> {
-		const scopes = ["global", ...(repo ? [`repo:${repo}`] : []), ...(graphId ? [`graph:${graphId}`] : [])];
+		const normalizedRepo = normalizeIdentifier(repo);
+		const normalizedGraph = normalizeIdentifier(graphId);
+		const scopes = [
+			"global",
+			...(normalizedRepo ? [`repo:${normalizedRepo}`] : []),
+			...(normalizedGraph ? [`graph:${normalizedGraph}`] : []),
+		];
 		// `in ${sql(array)}` is the form Bun's SQL expands to a value list. Passing
 		// the array straight to `any()` stringifies it into a malformed array literal.
 		const rows = (await this.sql`
-			select id, scope, kind, body, source_event, writer, trust, ttl, created
+			select *
 			from memory_entries
 			where scope in ${this.sql(scopes)}
+			  and superseded_by is null
 			order by created desc
 			limit ${limit}`) as Array<Record<string, unknown>>;
 		return rows.map(toMemoryEntry);
@@ -268,16 +718,57 @@ export class IndexStore {
 	}
 }
 
-function toMemoryEntry(row: Record<string, unknown>): MemoryEntry {
+/** Absent, null and the empty string all mean "not set" on the way out of Postgres. */
+function optional(value: unknown): string | undefined {
+	if (value === null || value === undefined) return undefined;
+	const text = value instanceof Date ? value.toISOString() : String(value);
+	return text.length > 0 ? text : undefined;
+}
+
+function timestamp(value: unknown): string {
+	return value instanceof Date ? value.toISOString() : String(value);
+}
+
+function toQueueRow(row: Record<string, unknown>): GovernanceQueueRow {
+	return {
+		id: String(row.id),
+		scope: String(row.scope),
+		kind: row.kind as MemoryEntry["kind"],
+		writer: String(row.writer),
+		reason: String(row.reason),
+		created: timestamp(row.created),
+		text: String(row.body),
+		...(optional(row.subject) ? { subject: optional(row.subject) } : {}),
+		...(optional(row.detail) ? { detail: optional(row.detail) } : {}),
+	};
+}
+
+export function toMemoryEntry(row: Record<string, unknown>, now = Date.now()): MemoryEntry {
+	const reverifyAfter = optional(row.reverify_after);
 	return {
 		id: String(row.id),
 		scope: String(row.scope),
 		kind: row.kind as MemoryEntry["kind"],
 		text: String(row.body),
-		source_event: row.source_event === null ? undefined : String(row.source_event),
+		subject: optional(row.subject),
+		source_event: optional(row.source_event),
+		session_id: optional(row.session_id),
+		graph_id: optional(row.graph_id),
+		repo: optional(row.repo),
 		writer: String(row.writer),
+		actor: (row.actor === "human" ? "human" : "agent") as Actor,
 		trust: row.trust as MemoryEntry["trust"],
 		ttl: String(row.ttl),
-		created: row.created instanceof Date ? row.created.toISOString() : String(row.created),
+		created: timestamp(row.created),
+		// `version` predates the gate on rows written in Phase 0, where the column
+		// default backfilled it to 1 — which is what those entries honestly were.
+		version: Number(row.version ?? 1),
+		supersedes: optional(row.supersedes),
+		superseded_by: optional(row.superseded_by),
+		entry_hash: String(row.entry_hash ?? ""),
+		...(reverifyAfter ? { reverify_after: reverifyAfter } : {}),
+		// Derived, not stored: an entry decays where it sits, without a sweeper job.
+		needs_reverification: needsReverification(reverifyAfter, now),
+		idempotency_key: optional(row.idempotency_key),
 	};
 }

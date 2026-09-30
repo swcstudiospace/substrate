@@ -6,10 +6,11 @@
  * get MCP. Same code underneath.
  */
 import { composeBrief, type BriefRequest } from "./brief.ts";
-import type { SubstrateConfig } from "./config.ts";
+import { isReviewToken, type SubstrateConfig } from "./config.ts";
 import { InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, verifyChain } from "./event.ts";
 import { GreptimeClient, queryLimit, type EventQuery, type QueryableColumn } from "./greptime.ts";
 import { IndexStore } from "./index-store.ts";
+import { governMemoryWrite } from "./memory-write.ts";
 import { redact } from "./redact.ts";
 import {
 	ACTORS,
@@ -18,8 +19,11 @@ import {
 	type Actor,
 	type EventInput,
 	type EventKind,
+	type GovernanceQueue,
+	type GovernanceQueueRow,
 	type MemoryEntry,
-	type MemoryEntryInput,
+	type MemoryWriteRequest,
+	type MemoryWriteResult,
 	type NodeState,
 	type Surface,
 	type SubstrateEvent,
@@ -360,14 +364,140 @@ export class Substrate {
 		}
 	}
 
-	async writeMemory(entry: MemoryEntryInput): Promise<MemoryEntry> {
-		if (!this.index) throw new Error("memory requires SUBSTRATE_PG_URL");
-		return this.index.writeMemory(entry);
+	/**
+	 * Write a memory entry through the governance gate.
+	 *
+	 * **This is the fail-closed path.** `emit` hands a caller its event back even
+	 * when the ledger is unreachable, because a lost event costs the trail and
+	 * nothing else. Memory is different: it is what the next four sessions act on, so
+	 * a write the gate cannot authorise, decide and verify comes back as `denied` and
+	 * never as something another agent will read. A store that is missing or refusing
+	 * is a refusal, not a silent success — there is no `accepted` without a row.
+	 *
+	 * It does not throw. A caller gets an outcome and a remedy for every path,
+	 * including an outage, because "memory.write raised" is not something an agent
+	 * mid-turn can act on and `denied: store.unavailable` is.
+	 */
+	async writeMemory(request: MemoryWriteRequest): Promise<MemoryWriteResult> {
+		// Reported on every reply, including the ones the gate never sees, so a caller
+		// always learns which surface its write was attributed to.
+		const writer = typeof request.writer === "string" ? request.writer.trim() : "";
+		if (!this.index) {
+			return {
+				outcome: "denied",
+				reason: "store.unavailable",
+				remedy:
+					"memory.write needs the index: SUBSTRATE_PG_URL is not set, so there is nowhere to record this " +
+					"and nothing would read it back. Nothing was stored.",
+				verified_persisted: false,
+				idempotency_key: "",
+				writer,
+			};
+		}
+
+		let result: MemoryWriteResult;
+		try {
+			result = await governMemoryWrite(request, {
+				store: this.index,
+				isReviewToken: (token) => isReviewToken(this.config, token),
+				grants: this.config.memoryGrants,
+				// The one place memory consults the ledger, and it is a read of one column:
+				// `verified-by-test` rests on a source event, so the gate establishes that the
+				// event exists before honouring the trust. No ledger, unreachable ledger or
+				// unknown id all come back false, and the trust is downgraded rather than
+				// taken on the caller's word.
+				verifySourceEvent: async (eventId) =>
+					this.greptime ? await this.greptime.hasEvent(eventId).catch(() => false) : false,
+			});
+		} catch (cause) {
+			// Redacted for the reason `emit` redacts: a connection error quotes its URL,
+			// password and all.
+			const error = redact(String(cause));
+			result = {
+				outcome: "denied",
+				reason: "store.write-failed",
+				remedy: `The index refused the write (${error}). Nothing was stored; retry once it is reachable.`,
+				verified_persisted: false,
+				idempotency_key: "",
+				writer,
+			};
+		}
+
+		await this.auditMemoryWrite(request, result);
+		return result;
 	}
 
-	async searchMemory(query: string, scope?: string, limit?: number): Promise<MemoryEntry[]> {
+	/**
+	 * Put a refused or unverified memory write in the event log.
+	 *
+	 * Governance that leaves no trace is indistinguishable from no governance: a
+	 * denied write is otherwise visible only to the agent that was denied, which is
+	 * the one party with an interest in not mentioning it.
+	 *
+	 * The event carries the decision, never the body. The body may be exactly the
+	 * secret or the PII that got the write quarantined, and copying it into an
+	 * append-only ledger to record that it was quarantined would be absurd.
+	 */
+	private async auditMemoryWrite(request: MemoryWriteRequest, result: MemoryWriteResult): Promise<void> {
+		if (result.outcome === "accepted" && result.verified_persisted) return;
+		// Redacted, and redacted *here* rather than relying on the event path: `scope`,
+		// `kind` and `writer` are all caller-controlled, a refused write is exactly where
+		// a malformed one arrives, and a credential in the journal is a credential
+		// leaked whether or not the event that would have carried it was ever emitted.
+		const line = redact(`memory.write ${result.outcome}: ${result.reason} (${request.kind} at ${request.scope})`);
+		const writer = String(request.writer);
+		process.stderr.write(`[substrate] ${line} by ${redact(writer)}\n`);
+
+		// `emit` rejects an unknown surface, and an unattributed caller is precisely the
+		// one that default-deny refuses most often. The stderr line above is its trail.
+		if (!(SURFACES as readonly string[]).includes(writer)) return;
+		await this.emit({
+			surface: writer as Surface,
+			kind: result.outcome === "conflict" ? "note" : "warning",
+			summary: line,
+			graph_id: request.graph_id,
+			session_id: request.session_id,
+			repo: request.repo,
+			payload: {
+				outcome: result.outcome,
+				reason: result.reason,
+				scope: request.scope,
+				kind: request.kind,
+				...(result.strategy ? { strategy: result.strategy } : {}),
+				...(result.review_id ? { review_id: result.review_id } : {}),
+				...(result.quarantine_id ? { quarantine_id: result.quarantine_id } : {}),
+			},
+		}).catch(() => undefined);
+	}
+
+	async searchMemory(query: string, scope?: string, limit?: number, includeSuperseded?: boolean): Promise<MemoryEntry[]> {
 		if (!this.index) return [];
-		return this.index.searchMemory(query, scope, limit);
+		return this.index.searchMemory(query, scope, limit, includeSuperseded);
+	}
+
+	/**
+	 * What a reviewer has to look at: proposals awaiting review, and quarantined writes.
+	 *
+	 * Bodies and subjects need a reviewer's token. Redaction strips credentials, not the
+	 * email address or phone number that caused a PII quarantine — so a queue that
+	 * showed every body to every agent holding any surface token would publish exactly
+	 * what quarantining it was meant to contain, and would do it to *more* readers than
+	 * accepting the write would have.
+	 *
+	 * Without a token a caller still learns that something is parked, where, by whom and
+	 * why. That is the part worth knowing and none of it is the payload.
+	 */
+	async governanceQueue(options: { limit?: number; review_token?: string } = {}): Promise<GovernanceQueue> {
+		const authorized = isReviewToken(this.config, options.review_token);
+		if (!this.index) return { authorized, reviews: [], quarantined: [] };
+		const queue = await this.index.governanceQueue(options.limit);
+		const visible = (row: GovernanceQueueRow): GovernanceQueueRow =>
+			authorized ? row : { ...row, text: undefined, subject: undefined };
+		return {
+			authorized,
+			reviews: queue.reviews.map(visible),
+			quarantined: queue.quarantined.map(visible),
+		};
 	}
 
 	async getGraph(graphId: string) {
