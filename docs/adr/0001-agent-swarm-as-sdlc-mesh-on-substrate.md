@@ -375,20 +375,46 @@ Acceptance criteria:
    Store-lock rule 3 is the rule; the installer's test is where it is enforced
    for installed configs.
 3. **A surface token never lands in a file the installer writes.** The generated
-   config references the environment variable and the tokens stay in
-   `/etc/substrate/substrate.env`. This cannot lean on the tracked-file secret
-   scan: that matcher recognises `GREPTIME_(URL|USER|PASSWORD)` and Railway
-   hosts, and would pass a committed `SUBSTRATE_TOKEN_*` without comment. Two
-   things follow — the installer is tested to emit no token literal, and the
-   secret scan is extended to `SUBSTRATE_TOKEN_*` so the gap is closed for
-   everything else too.
-4. Each agent's workspace resolves **its own** surface token, not a shared one: a
+   config references the environment variable by name. This cannot lean on the
+   tracked-file secret scan: that matcher recognises
+   `GREPTIME_(URL|USER|PASSWORD)` and Railway hosts, and would pass a committed
+   `SUBSTRATE_TOKEN_*` without comment. Two things follow — the installer is
+   tested to emit no token literal, and the secret scan is extended to
+   `SUBSTRATE_TOKEN_*` so the gap is closed for everything else too.
+4. **Each agent's token reaches its own process, and the install proves it.**
+   Naming the variable is not delivering the value:
+   `/etc/substrate/substrate.env` is `EnvironmentFile=` on the *server's*
+   systemd unit, root-owned and 0600, and a workspace agent never reads it. Once
+   S1 configures the 15 tokens the deployment stops being anonymous, and
+   `server.ts` answers `!config.allowAnonymous && surface === null` with **401** —
+   so a fresh install that wires the config without provisioning the environment
+   fails on every call.
+
+   That failure is worse than loud, which is why this is a criterion and not a
+   note: `/brief` fails open and returns empty, `events.emit` fails open and
+   loses the trail, and only `graph_claim` and `memory.write` refuse visibly. A
+   misprovisioned agent therefore looks *almost* healthy — it runs, unbriefed and
+   untraced — which is exactly the state the substrate's fail-open rule makes
+   survivable and undiagnosable at the same time.
+
+   So S4 specifies delivery: a per-agent environment file outside every git
+   checkout and outside the workspace, 0600 and owned by the account that runs
+   that agent, referenced from the agent's launcher (its unit's
+   `EnvironmentFile=`, or the runtime's own env-file option), holding only that
+   agent's `SUBSTRATE_TOKEN_<SURFACE>`. The installer creates the reference and
+   the file, never a token inside the workspace; where it cannot write outside
+   the workspace it **prints exactly what the operator must create and exits
+   non-zero** rather than producing an install that will 401. Criterion 7's
+   fresh-install proof covers this: a brief that comes back non-empty and a claim
+   that is granted are the assertions, since both are 401 away from a silent
+   pass.
+5. Each agent's workspace resolves **its own** surface token, not a shared one: a
    shared token collapses the 15 identities S1 established.
-5. **The executing agents are MCP-capable, and that is a requirement rather than
+6. **The executing agents are MCP-capable, and that is a requirement rather than
    an assumption.** The REST doors are `/brief`, `/events`, `/events/query`,
    `/memory`, `/handoff`, `/drift` and `/verify` — there is **no REST route for
    `graph_claim`, `graph_heartbeat`, `graph_release` or `graph_complete`**, so a
-   REST-only caller cannot hold a lease at all and could not satisfy criterion 7
+   REST-only caller cannot hold a lease at all and could not satisfy criterion 8
    or S2. That is the right split as it stands: REST exists because *hooks*
    cannot call MCP, and a hook briefs and emits but never executes a node or
    holds a lease. The swarm's runtimes (`claude`, `grok -p`, `omp -p`) are agent
@@ -399,16 +425,23 @@ Acceptance criteria:
    work, not a workaround here** — and they would have to carry `lease_id`
    fencing and a server-decided session, which is why it is a designed change
    and not a thin wrapper.
-6. The installer keeps its existing refusals — nothing written inside the swarm
+7. The installer keeps its existing refusals — nothing written inside the swarm
    checkout, at `$HOME`, under `~/.omp`, or through a symlink — and a dry run
-   prints the substrate additions as part of the plan.
-7. A fresh workspace install is enough for a swarm run to brief, emit, claim and
+   prints the substrate additions, including the environment files it expects, as
+   part of the plan.
+8. A fresh workspace install is enough for a swarm run to brief, emit, claim and
    write memory with no manual step, and re-running the install is idempotent.
+9. S4 documents the `substrate.env` split it depends on: which variables the
+   *server's* unit needs, which the *agents* need, and which side owns each. The
+   two were conflated once already in this ADR's own drafting, and the failure it
+   produced is a silent 401.
 
 **Proof:** install into an empty workspace, start a swarm run there, and it
 appears in the ledger and in another agent's brief without anything having been
-edited by hand — while the installer's own test asserts over every generated file
-that none names Greptime as an MCP server and none carries a token literal.
+edited by hand — the brief non-empty and the claim granted, since a 401 would let
+an empty brief pass for a working one. Meanwhile the installer's own test asserts
+over every generated file that none names Greptime as an MCP server and none
+carries a token literal.
 
 ### S5 — Gate verdicts as substrate events, and verification (SPE-5056)
 
@@ -523,7 +556,8 @@ scan alone would not have.
 | The bridge becomes the thing that blocks a swarm run | The substrate's first non-negotiable is fail-open, and a bridge is new code on a hot path | S1 criterion 8 is the test: `substrate-mcp` stopped, full DAG completes. Memory is the deliberate exception, and it is an exception at the *server*, not the client |
 | **A green substrate test read as a swarm guarantee** | `store-lock.test.ts` scans *this* repository. It cannot see the swarm repo, nor the workspaces S4 installs into — so it can pass while a swarm agent still reads its own vector store, or while an installed config names Greptime as an MCP server. Both are criteria it appears to prove and cannot, and both are non-goals of this ADR. Drafting this document produced the same error twice, which is the argument for naming it as a standing trap rather than a fixed bug | The check moves to where the artifact is: S3 criterion 7 in the swarm repo's own suite, S4 criterion 2 in the installer's test over every generated file. Both say explicitly that the substrate suite passing does not satisfy them |
 | **Fail-open emission means the trail is never provably complete** | The anchor roots what reached Greptime, and S1 criterion 8 requires a run to finish with the tee down. So a lost event moves neither the root nor the count, and no amount of verification will surface it | Accepted, and stated in S5 criterion 5 rather than papered over. Integrity and ordering are attested; completeness is not. `ledger.silent` and `git.tip_unlogged` are the signals that something is not arriving. Reconciling against expected messages would mean the ledger deciding what *ought* to exist, which belongs to the bus and the Task Store |
-| **A lease has no REST door** | S2 needs claim, heartbeat and complete; the server exposes `/brief`, `/events`, `/events/query`, `/memory`, `/handoff`, `/drift` and `/verify` and nothing for leases. A non-MCP executing agent could not hold a lease at all | Correct as the split stands — REST exists for hooks, and a hook never executes a node. S4 criterion 5 turns that into a requirement the install enforces rather than an assumption that fails at claim time, and says that adding the four routes is S2's designed work (with `lease_id` fencing and a server-decided session) if a non-MCP runtime ever must execute |
+| **Fail-open makes a misconfigured agent look healthy** | Once S1 configures the 15 tokens the deployment is no longer anonymous, and a caller with no recognised token gets a 401 on everything. But `/brief` fails open to empty and `events.emit` fails open silently, so only a claim or a memory write refuses visibly. An agent whose token was never delivered to its process runs, unbriefed and untraced, looking almost fine | S4 criteria 4 and 9 make token delivery to each agent's own environment an install step with a proof, and make the fresh-install check assert a **non-empty** brief and a **granted** claim, both of which a 401 would otherwise pass silently. The general shape is worth remembering: fail-open is what keeps an outage survivable and is also what makes a misconfiguration quiet |
+| **A lease has no REST door** | S2 needs claim, heartbeat and complete; the server exposes `/brief`, `/events`, `/events/query`, `/memory`, `/handoff`, `/drift` and `/verify` and nothing for leases. A non-MCP executing agent could not hold a lease at all | Correct as the split stands — REST exists for hooks, and a hook never executes a node. S4 criterion 6 turns that into a requirement the install enforces rather than an assumption that fails at claim time, and says that adding the four routes is S2's designed work (with `lease_id` fencing and a server-decided session) if a non-MCP runtime ever must execute |
 | Greptime and the index are on infrastructure this host cannot see | Both are external Railway endpoints (`.planning/PROJECT.md`) | Unchanged by this ADR, and the reason the `sim` profile in S5 criterion 9 skips rather than mocks |
 | Scope creep into replacing NATS | The tee makes it look adjacent and cheap | Non-goal 3, and no S1–S5 criterion mentions the transport |
 | The plan drifts from the tickets | An earlier draft of this ADR invented its own S1–S5 order, swapped memory and leases, and dropped the install/projector phase — owners following it would have worked the wrong acceptance criteria | The phase table names the ticket per phase, and the tickets' order is authoritative over this document. A phase this ADR cannot read (see S5's open item) is marked open rather than filled in |
