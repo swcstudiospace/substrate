@@ -222,21 +222,37 @@ export function isReviewToken(config: SubstrateConfig, token: string | undefined
 /**
  * Configuration that will not do what the operator intended, reported at boot.
  *
- * An operator token that is not also a surface token can never authenticate —
- * the HTTP surface requires a token that names a surface — so it would look
- * configured and silently do nothing. Better said once at boot than discovered
- * the first time someone needs to prise a node loose.
+ * A warning has to say what is *actually* true of the running deployment, or it
+ * costs more than it saves: an operator reading the wrong reason fixes the wrong
+ * thing, and here the two reasons lead in opposite directions — one says add a
+ * surface token, the other says you have no authentication at all.
+ *
+ * With surface tokens configured, a token listed only as an operator's can never
+ * authenticate: the HTTP surface requires a token that names a surface, so it
+ * would look configured and silently do nothing.
+ *
+ * With no surface tokens at all, the opposite holds. `allowAnonymous` lets every
+ * caller in unauthenticated, and `isOperator` still honours the operator token —
+ * so it does work, and it is the only thing gating anything.
  */
 export function configWarnings(config: SubstrateConfig): string[] {
 	const warnings: string[] = [];
-	for (const token of config.operatorTokens) {
-		if (!config.tokens.has(token)) {
-			warnings.push(
-				"an operator token is not also a SUBSTRATE_TOKEN_* surface token, so it cannot authenticate at all; " +
-					"operator authority is an attribute of a surface token",
-			);
-			break;
-		}
+	if (config.operatorTokens.size === 0) return warnings;
+
+	if (config.allowAnonymous) {
+		warnings.push(
+			"operator tokens are set but no SUBSTRATE_TOKEN_* surface token is, so every caller is accepted " +
+				"unauthenticated and attributed by its own payload. The operator tokens do work — they gate a forced " +
+				"release — but nothing else is gated at all.",
+		);
+		return warnings;
+	}
+
+	if ([...config.operatorTokens].some((token) => !config.tokens.has(token))) {
+		warnings.push(
+			"an operator token is not also a SUBSTRATE_TOKEN_* surface token, so it cannot authenticate at all; " +
+				"operator authority is an attribute of a surface token",
+		);
 	}
 	return warnings;
 }

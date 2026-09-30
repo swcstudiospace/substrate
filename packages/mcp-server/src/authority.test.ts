@@ -72,6 +72,23 @@ describe("isOperator", () => {
 		expect(configWarnings(loadConfig({}))).toEqual([]);
 	});
 
+	test("with no surface tokens at all, the warning says the opposite — because the opposite is true", () => {
+		// A warning has to describe the running deployment. Here `allowAnonymous`
+		// lets every caller in and the operator token *does* work, so telling an
+		// operator it "cannot authenticate" would send them to fix the wrong thing —
+		// and the thing actually worth knowing is that nothing else is gated.
+		const anonymous = loadConfig({ SUBSTRATE_OPERATOR_TOKENS: "tok-operator" });
+		const warnings = configWarnings(anonymous);
+
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain("accepted unauthenticated");
+		expect(warnings[0]).not.toContain("cannot authenticate");
+		// And the claim it makes is the one the code actually implements.
+		expect(anonymous.allowAnonymous).toBe(true);
+		expect(isOperator(anonymous, "Bearer tok-operator")).toBe(true);
+		expect(isOperator(anonymous, null)).toBe(false);
+	});
+
 	test("no token, or an unknown one, is not an operator once tokens exist", () => {
 		const config = loadConfig(TOKENS);
 		expect(isOperator(config, null)).toBe(false);
