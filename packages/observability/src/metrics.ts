@@ -18,10 +18,12 @@ export type Attributes = Record<string, AttributeValue>;
 /**
  * Latency buckets, in milliseconds.
  *
- * `800` is a boundary on purpose. The brief SLO is "p95 < 800 ms", and a bucketed
+ * `800` is a boundary on purpose. The brief SLO is "p95 <= 800 ms", and a bucketed
  * histogram can answer *that* exactly — the share of observations at or below the
  * 800 boundary is a count, not an interpolation — where the interpolated p95 it
- * reports alongside is only an estimate. See `exactFractionAtOrBelow`.
+ * reports alongside is only an estimate. The bound is inclusive, as OTLP defines it,
+ * which is why the objective is stated with `<=` and not the `<` SPE-4793 words it
+ * with: see `exactFractionAtOrBelow` and `evaluateLatency`.
  */
 export const LATENCY_BUCKETS_MS: readonly number[] = [5, 10, 25, 50, 100, 200, 400, 800, 1600, 3200, 8000];
 
@@ -312,7 +314,7 @@ export class Histogram extends Instrument<HistogramState> {
 		if (value < state.min) state.min = value;
 		if (value > state.max) state.max = value;
 		// `<=` — a bound is the inclusive top of its bucket, as OTLP defines it, which
-		// is what lets the 800 ms boundary answer "p95 < 800 ms" without interpolating.
+		// is what lets the 800 ms boundary answer "p95 <= 800 ms" without interpolating.
 		let index = this.bounds.findIndex((bound) => value <= bound);
 		if (index < 0) index = this.bounds.length;
 		state.buckets[index] = (state.buckets[index] ?? 0) + 1;
@@ -341,7 +343,7 @@ export class Histogram extends Instrument<HistogramState> {
 /**
  * Merge a histogram's matching series into one distribution.
  *
- * SLOs are stated over the whole service ("brief p95 < 800 ms"), not per graph, so
+ * SLOs are stated over the whole service ("brief p95 <= 800 ms"), not per graph, so
  * evaluation has to add the buckets up rather than pick a series.
  */
 export function mergeHistogram(
@@ -386,14 +388,16 @@ export function matches(attributes: Attributes, where: Record<string, string>): 
 /**
  * The exact share of observations at or below one of the histogram's own bounds.
  *
- * Half of how "p95 < 800 ms" is checked against bucketed data: the count at or below
- * the 800 ms boundary is known precisely, so the answer does not depend on how a
- * quantile is interpolated inside the bucket. `null` means the bound is not one of
- * this histogram's boundaries, so the question cannot be answered exactly — the caller
+ * How "p95 <= 800 ms" is checked against bucketed data: the count at or below the
+ * 800 ms boundary is known precisely, so the answer does not depend on how a quantile
+ * is interpolated inside the bucket. `null` means the bound is not one of this
+ * histogram's boundaries, so the question cannot be answered exactly — the caller
  * should say so rather than guess.
  *
- * The other half is `exactFractionBelow`. This count is inclusive of the bound, so on
- * its own it answers `<=` and not `<`.
+ * This count is inclusive of the bound, as an OTLP bucket edge is, so it answers `<=`
+ * and not `<`; `evaluateLatency` decides on it, and states the objective in the same
+ * terms. Its companion `exactFractionBelow` is what tells the two apart, and is used
+ * to qualify the sentence rather than to move the verdict.
  */
 export function exactFractionAtOrBelow(
 	point: Pick<HistogramPoint, "count" | "bucketCounts"> & { bounds: readonly number[] },
@@ -416,9 +420,13 @@ export function exactFractionAtOrBelow(
  * *provably* below.
  *
  * With `exactFractionAtOrBelow` it brackets the truth: anything between the two is
- * decided by the boundary bucket, and a bucketed histogram cannot say which way — see
- * `evaluateLatency`, which reports that case rather than guessing. `null` when the
- * bound is not one of this histogram's boundaries.
+ * decided by the boundary bucket, and a bucketed histogram cannot say which way. This
+ * is not the verdict — an objective stated at an inclusive bound is judged on the
+ * at-or-below count, or no healthy run inside the boundary bucket could ever pass.
+ * `evaluateLatency` uses this to *qualify* such a pass: when the two disagree, the
+ * detail names the bucket the verdict rests on and says that observations at exactly
+ * the bound were counted as meeting the objective. `null` when the bound is not one
+ * of this histogram's boundaries.
  */
 export function exactFractionBelow(
 	point: Pick<HistogramPoint, "count" | "bucketCounts"> & { bounds: readonly number[] },

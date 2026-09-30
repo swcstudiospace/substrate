@@ -38,7 +38,7 @@ describe("cleanAttributes", () => {
 
 describe("Histogram", () => {
 	test("a bound is the inclusive top of its bucket", () => {
-		// This is what lets the 800 ms boundary answer "p95 < 800 ms" as a count
+		// This is what lets the 800 ms boundary answer "p95 <= 800 ms" as a count
 		// rather than an interpolation, so it is asserted rather than assumed.
 		const histogram = new Histogram("h", [10, 100]);
 		histogram.record(10);

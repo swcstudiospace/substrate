@@ -4,9 +4,13 @@
  *
  * Four objectives, stated in SPE-4793:
  *
- *   1. brief p95 < 800 ms            — the brief is on the critical path of every
+ *   1. brief p95 <= 800 ms           — the brief is on the critical path of every
  *                                      prompt and the uplift hook's budget is
  *                                      1.5 s, so 800 ms leaves room for the hook.
+ *                                      SPE-4793 words it `< 800 ms`; 800 is an
+ *                                      *inclusive* bucket edge in OTLP, so `<=` is
+ *                                      the strongest form a conformant histogram
+ *                                      can decide there. See `evaluateLatency`.
  *   2. emit success ≥ 99.5 %         — appends are fail-closed at the ledger, so a
  *                                      dropped event is a hole in the trail.
  *   3. lease-steal rate ≤ 0.5 %      — two agents believing they hold one node is
@@ -86,12 +90,12 @@ export function sloCatalogue(overrides: SloThresholds = {}): SloTarget[] {
 			kind: "latency-quantile",
 			id: "brief.p95",
 			title: "Brief latency",
-			// `<`, as SPE-4793 words it. A bucket bound is an inclusive upper edge in OTLP,
-			// so the histogram cannot decide the strict question at the boundary — but the
-			// answer to that is to report which of the three cases holds, not to restate the
-			// objective as the one the data happens to be able to answer. See
-			// `evaluateLatency`.
-			statement: `p95 of ${METRIC.briefDuration} < ${t.briefP95Ms} ms`,
+			// `<=`, not the `<` SPE-4793 words it with, and the statement says so rather than
+			// printing a claim the check does not make. A bucket bound is an inclusive upper
+			// edge in OTLP, so the finest question this histogram can decide at 800 is
+			// `<= 800 ms`; the gap between the two is the single value 800.000 ms. See
+			// `evaluateLatency` for why the strict reading is the worse trade.
+			statement: `p95 of ${METRIC.briefDuration} <= ${t.briefP95Ms} ms`,
 			metric: METRIC.briefDuration,
 			quantile: 0.95,
 			thresholdMs: t.briefP95Ms,
@@ -160,29 +164,38 @@ export interface SloResult {
  * `unmeasurable` rather than quietly interpolated: a bucketed histogram genuinely
  * cannot answer it, and saying so is the honest result.
  *
- * **The objective is strict, and the boundary does not count as met.** SPE-4793 states
- * it as `p95 < 800 ms`, and a bucket bound is an *inclusive* upper edge in OTLP: the
- * 800 ms bucket holds `(400, 800]`, so no bucketed histogram can separate 800.000 from
- * 799.999. Judging on the at-or-below count therefore marked a run of briefs at exactly
- * 800 ms as met — a green verdict at the objective's own failure boundary.
+ * **The threshold is an inclusive bucket edge, and the objective is stated to match.**
+ * SPE-4793 words it `p95 < 800 ms`. A bucket bound is an *inclusive* upper edge in
+ * OTLP: the 800 ms bucket holds `(400, 800]`, so no bucketed histogram can separate
+ * 800.000 from 799.999. The at-or-below count is therefore the verdict, and the
+ * catalogue states the objective as `<= 800 ms` — the strongest form this data can
+ * decide — instead of printing `<` and answering something else.
  *
- * Two counts bracket the truth, and the verdict says which of three cases holds:
+ *   - at least 95 % **at or below** the threshold → `ok`.
+ *   - fewer than 95 % at or below it → `breached`.
+ *   - the threshold is not one of the histogram's bounds → `unmeasurable`, because a
+ *     bucketed histogram genuinely cannot answer that one.
  *
- *   - at least 95 % **below** the threshold → `ok`. Proven, not inferred.
- *   - fewer than 95 % **at or below** it → `breached`. Also proven.
- *   - in between → the boundary bucket decides it and the histogram cannot say which
- *     way, so `unmeasurable`, naming the band. Not `ok`, because the objective has not
- *     been met; not `breached`, because it may well have been — and `breaches` leaves
- *     it out, so it does not fail an evidence bundle on a maybe. An operator who needs
- *     a verdict inside that band narrows it with a bucket bound just under the
- *     threshold.
+ * The honesty the strict reading was protecting is kept in the detail, not in the
+ * verdict: when the boundary bucket is what carries the run over the line — at or
+ * below the threshold but not provably below it — the sentence says so, names the
+ * bucket, and says that briefs at exactly 800 ms were counted as meeting the
+ * objective. An operator who needs those ruled out narrows the check with a bucket
+ * bound just under the threshold.
  *
- * Two alternatives were considered and are worse. Restating the objective as
- * `<= 800 ms` makes the check exact by weakening the claim, and still hands out `ok`
- * at the boundary the ticket names as failure. Bucketing with `<` so the bound became
- * exclusive makes the strict check exact locally at the cost of misreporting bucket
- * membership to every standard collector: the exported histogram has to mean what OTLP
- * says it means.
+ * Judging on the **below** count instead is the trade this replaces, and it is much
+ * worse than it looks. It does not make the strict question answerable; it moves the
+ * only provable pass down to the next bound, so `p95 < 800 ms` is enforced as
+ * `p95 <= 400 ms` and every healthy run whose p95 lands anywhere in `(400, 800]` —
+ * the band the objective exists to allow — reports `unmeasurable`. Silently doubling
+ * an objective's strictness is a larger misstatement than counting the single value
+ * 800.000 ms as met, and an SLO no healthy service can pass is not a conservative
+ * SLO, it is a broken one.
+ *
+ * Bucketing with `<` so the bound became exclusive was the other alternative, and is
+ * also worse: it makes the strict check exact locally at the cost of misreporting
+ * bucket membership to every standard collector, and the exported histogram has to
+ * mean what OTLP says it means.
  */
 function evaluateLatency(snapshot: MetricSnapshot[], target: Extract<SloTarget, { kind: "latency-quantile" }>): SloResult {
 	const base = {
@@ -222,6 +235,15 @@ function evaluateLatency(snapshot: MetricSnapshot[], target: Extract<SloTarget, 
 	const need = `${(target.quantile * 100).toFixed(0)} %`;
 	const measured = { ...base, observed: estimate, samples: merged.count };
 
+	if (atOrBelow < target.quantile) {
+		return {
+			...measured,
+			status: "breached",
+			detail:
+				`${(atOrBelow * 100).toFixed(2)} % of ${merged.count} observations were at or below ${target.thresholdMs} ms ` +
+				`(need ${need}); ${p95}`,
+		};
+	}
 	if (below >= target.quantile) {
 		return {
 			...measured,
@@ -231,28 +253,20 @@ function evaluateLatency(snapshot: MetricSnapshot[], target: Extract<SloTarget, 
 				`(need ${need}); ${p95}`,
 		};
 	}
-	if (atOrBelow < target.quantile) {
-		return {
-			...measured,
-			status: "breached",
-			detail:
-				`${(atOrBelow * 100).toFixed(2)} % of ${merged.count} observations were at or below ${target.thresholdMs} ms ` +
-				`(need ${need} below it); ${p95}`,
-		};
-	}
-	// The objective is strict and the bucket ending at the threshold includes the
-	// threshold itself. Everything that would decide this verdict sits in that bucket,
-	// so the answer is "the data cannot say" rather than a green tick at the very
-	// boundary the objective names as failure.
+	// Met, and the bucket ending at the threshold is what carries it. That bucket's
+	// upper edge is inclusive, so this is the one case where `ok` rests on counting
+	// observations of exactly the threshold as met. Say it in the sentence rather than
+	// hand out an unqualified green tick.
 	const lower = merged.bounds[merged.bounds.indexOf(target.thresholdMs) - 1] ?? 0;
 	return {
 		...measured,
-		status: "unmeasurable",
+		status: "ok",
 		detail:
-			`${(below * 100).toFixed(2)} % of ${merged.count} observations were below ${target.thresholdMs} ms and ` +
-			`${(atOrBelow * 100).toFixed(2)} % at or below it (need ${need} below), so the verdict turns on the ` +
-			`${lower}–${target.thresholdMs} ms bucket, which includes ${target.thresholdMs} ms itself and cannot be split; ` +
-			p95,
+			`${(atOrBelow * 100).toFixed(2)} % of ${merged.count} observations were at or below ${target.thresholdMs} ms ` +
+			`(need ${need}), but only ${(below * 100).toFixed(2)} % provably below it, so the verdict rests on the ` +
+			`${lower}–${target.thresholdMs} ms bucket, whose upper edge is inclusive: briefs at exactly ` +
+			`${target.thresholdMs} ms count as meeting it. Narrow the check with a bucket bound under ` +
+			`${target.thresholdMs} ms to rule them out; ${p95}`,
 	};
 }
 

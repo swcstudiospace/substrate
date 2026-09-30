@@ -114,7 +114,7 @@ export class SubstrateInstruments {
 
 		this.briefDuration = registry.histogram(METRIC.briefDuration, {
 			...ms,
-			description: "Time to compose a session brief. The SLO subject: p95 < 800 ms.",
+			description: "Time to compose a session brief. The SLO subject: p95 <= 800 ms.",
 		});
 		this.emitDuration = registry.histogram(METRIC.emitDuration, {
 			...ms,
