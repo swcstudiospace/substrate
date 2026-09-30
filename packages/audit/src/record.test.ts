@@ -175,6 +175,29 @@ describe("verifyAuditChain", () => {
 		expect(verifyAuditChain(records)).toMatchObject({ ok: false, brokenAt: 4 });
 	});
 
+	test("a deleted FIRST record is caught by the head check", () => {
+		// The hole this closes: remove line one and the untouched second record becomes
+		// the new head. Its own hash verifies, every later prev and seq still follows it,
+		// and without a head check the shortened chain reported intact — so an evidence
+		// bundle would have omitted the removed action and said nothing was wrong.
+		const records = chain(5).slice(1);
+
+		const verdict = verifyAuditChain(records);
+		expect(verdict.ok).toBe(false);
+		expect(verdict).toMatchObject({ brokenAt: 2 });
+		expect((verdict as { reason: string }).reason).toContain("does not open at seq 1");
+	});
+
+	test("a head whose prev is set is caught even when its seq is 1", () => {
+		// The other half of the head check: a forged head could carry seq 1 while still
+		// pointing at a predecessor that is no longer there.
+		const [head, ...rest] = chain(3);
+		const { hash, ...bare } = head as AuditRecord;
+		const forged = sealRecord({ ...bare, prev: "ab".repeat(32) });
+
+		expect(verifyAuditChain([forged, ...rest]).ok).toBe(false);
+	});
+
 	test("a rewritten chain that still links is caught by seq", () => {
 		// Someone who removed a record and re-chained the rest would produce a chain
 		// whose hashes all verify. The sequence number is what still gives it away.

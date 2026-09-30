@@ -32,9 +32,16 @@
  * one that actually tests whether the substrate fails open inside a hook's budget. A
  * `REJECT` returns immediately and proves much less.
  *
- * With no blackhole in place the script still runs and reports honestly — it will
- * say the ledger stayed healthy and that the fail-closed half was not exercised,
- * rather than passing vacuously.
+ * ## It cannot pass without exercising the outage
+ *
+ * A smoke that goes green having proven nothing is worse than no smoke. Two checks
+ * exist for exactly that: the run **fails** unless at least one emit was actually
+ * refused, and unless at least one claim was actually withdrawn. Run it with no
+ * blackhole and it exits non-zero saying which half did not happen.
+ *
+ * `CHAOS_REHEARSAL=1` turns those two into notes, for checking the script itself
+ * against a healthy deployment. It is the only way to get a green run without an
+ * outage, and it says so in the report.
  */
 
 const BASE = (process.env.SUBSTRATE_URL?.trim() || "http://127.0.0.1:7410").replace(/\/+$/, "");
@@ -44,6 +51,9 @@ const TICK_MS = Number(process.env.CHAOS_TICK_MS ?? 2000);
 const REQUEST_TIMEOUT_MS = Number(process.env.CHAOS_TIMEOUT_MS ?? 10_000);
 const GRAPH_ID = `ut-chaos-${Date.now().toString(36)}`;
 const SESSION_ID = `chaos-${Date.now().toString(36)}`;
+const NODE_ID = "n1";
+/** Allows a green run against a healthy deployment, for checking the script itself. */
+const REHEARSAL = /^(1|true|yes)$/i.test(process.env.CHAOS_REHEARSAL?.trim() ?? "");
 
 function headers(): Record<string, string> {
 	const token = process.env.SUBSTRATE_TOKEN?.trim();
@@ -91,6 +101,30 @@ function note(what: string, detail?: string): void {
 	process.stdout.write(`  --   ${what}${detail ? ` — ${detail}` : ""}\n`);
 }
 
+/** A check that only a rehearsal is allowed to skip. */
+function require_(ok: boolean, what: string, detail?: string): void {
+	if (ok || !REHEARSAL) check(ok, what, detail);
+	else note(`${what} (not exercised; CHAOS_REHEARSAL is set)`, detail);
+}
+
+/** One MCP tool call over `/mcp`, as JSON-RPC. */
+async function tool(id: number, name: string, args: Record<string, unknown>): Promise<Attempt> {
+	return call("/mcp", { jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+}
+
+/** The JSON a tool returned, or null if it errored or answered something else. */
+function toolResult(attempt: Attempt): Record<string, unknown> | null {
+	const body = attempt.body as { result?: { content?: Array<{ text?: string }> } } | null;
+	const text = body?.result?.content?.[0]?.text;
+	if (typeof text !== "string") return null;
+	try {
+		const parsed: unknown = JSON.parse(text);
+		return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+	} catch {
+		return null;
+	}
+}
+
 const host = (() => {
 	try {
 		return new URL(BASE).host;
@@ -123,7 +157,29 @@ check(
 	health.auditDurable ? undefined : "SUBSTRATE_AUDIT_PATH is unset, so the trail this smoke writes ends at the next restart",
 );
 
-// ── 1. the outage window ─────────────────────────────────────────────────────
+// ── 1. a node to claim ───────────────────────────────────────────────────────
+//
+// Registered before the window, while the ledger is still up. Without this the graph
+// is unknown to the index and `graph_claim` fails with "unknown node" *before* the
+// fail-closed logic runs — so every claim would come back not-granted and the check
+// below would pass without the withdrawal path ever executing. That is exactly the
+// vacuous pass this script must not produce.
+const registered = await tool(0, "graph_register", {
+	graph_id: GRAPH_ID,
+	repo: "swcstudiospace/agent-substrate",
+	branch: "chaos-smoke",
+	nodes: [{ node_id: NODE_ID }],
+});
+const graphRegistered = toolResult(registered) !== null;
+// A precondition for the claim half, so it is gated the same way: without it the
+// withdrawal path cannot run, and a run that cannot reach it must not read as a pass.
+require_(
+	graphRegistered,
+	`registered ${GRAPH_ID}/${NODE_ID}, so a claim reaches the withdrawal path`,
+	graphRegistered ? undefined : "graph_register did not answer with a graph; without an index there is no node to claim",
+);
+
+// ── 2. the outage window ─────────────────────────────────────────────────────
 process.stdout.write(`\nholding for ${Math.round(WINDOW_MS / 1000)} s, one emit and one claim every ${TICK_MS} ms\n\n`);
 
 const emits: Attempt[] = [];
@@ -143,23 +199,13 @@ while (Date.now() < deadline) {
 			payload: { usage: { input_tokens: 10, output_tokens: 5, cost_usd: 0.0001, model: "chaos-smoke" } },
 		}),
 	);
-	// `graph_claim` is MCP-only, so this goes through /mcp as JSON-RPC. A graph that is
-	// not in the index answers with an error rather than a claim — which is still the
-	// right probe: what is being tested is that the *call* is served and audited, and
-	// that a claim never succeeds unrecorded.
-	claims.push(
-		await call("/mcp", {
-			jsonrpc: "2.0",
-			id: tick,
-			method: "tools/call",
-			params: { name: "graph_claim", arguments: { graph_id: GRAPH_ID, node_id: "n1", session_id: SESSION_ID } },
-		}),
-	);
+	// `graph_claim` is MCP-only, so this goes through /mcp as JSON-RPC.
+	claims.push(await tool(tick, "graph_claim", { graph_id: GRAPH_ID, node_id: NODE_ID, session_id: SESSION_ID }));
 	const remaining = deadline - Date.now();
 	if (remaining > TICK_MS) await Bun.sleep(TICK_MS);
 }
 
-// ── 2. emit failed open ──────────────────────────────────────────────────────
+// ── 3. emit failed open ──────────────────────────────────────────────────────
 const emitAnswered = emits.filter((attempt) => attempt.status !== null);
 const emitStored = emits.filter((attempt) => (attempt.body as { stored?: boolean } | null)?.stored === true);
 const emitDropped = emits.filter((attempt) => (attempt.body as { stored?: boolean } | null)?.stored === false);
@@ -167,35 +213,37 @@ const slowest = Math.max(...emits.map((attempt) => attempt.elapsedMs));
 
 check(emitAnswered.length === emits.length, `every emit was answered (${emitAnswered.length}/${emits.length})`);
 check(
-	emitDropped.every((attempt) => attempt.status === 503),
-	"a refused append is reported as 503 with the normalised event, not as a silent success",
-);
-check(
 	emits.every((attempt) => (attempt.body as { id?: string } | null)?.id !== undefined),
 	"every emit got its normalised event back, stored or not — the caller can carry on",
 );
 note(`slowest emit ${Math.round(slowest)} ms`, `${emitStored.length} stored, ${emitDropped.length} dropped`);
 
-if (emitDropped.length === 0) {
-	note(
-		"the ledger stayed healthy for the whole window",
-		"the fail-open half was not exercised; blackhole the ledger and run again",
+// The outage has to have happened. A green run over a healthy ledger proves nothing
+// about failing open, and used to be only a note — so the smoke could exit 0 having
+// tested none of what it exists to test.
+require_(
+	emitDropped.length > 0,
+	`the ledger refused at least one append (${emitDropped.length} of ${emits.length})`,
+	emitDropped.length === 0 ? "the ledger stayed healthy for the whole window; blackhole it and run again" : undefined,
+);
+if (emitDropped.length > 0) {
+	check(
+		emitDropped.every((attempt) => attempt.status === 503),
+		"a refused append is reported as 503 with the normalised event, not as a silent success",
 	);
 }
 
-// ── 3. claim failed closed ───────────────────────────────────────────────────
-function claimGranted(attempt: Attempt): boolean {
-	const body = attempt.body as { result?: { content?: Array<{ text?: string }> } } | null;
-	const text = body?.result?.content?.[0]?.text ?? "";
-	try {
-		return (JSON.parse(text) as { claimed?: boolean }).claimed === true;
-	} catch {
-		return false;
-	}
-}
-
+// ── 4. claim failed closed ───────────────────────────────────────────────────
+//
+// Read from the claim's own `decision`, not from the absence of a grant. "Not granted"
+// is also what an unknown node, a missing index and a transport error all look like,
+// so it was a check that could pass for the wrong reason; `revoked` can only come from
+// the withdrawal path actually running.
 const claimsAnswered = claims.filter((attempt) => attempt.status !== null);
-const granted = claims.filter(claimGranted);
+const decisions = claims.map((attempt) => toolResult(attempt)?.decision);
+const granted = decisions.filter((decision) => decision === "granted");
+const revoked = decisions.filter((decision) => decision === "revoked");
+const undecided = claims.filter((attempt) => toolResult(attempt) === null);
 
 check(claimsAnswered.length === claims.length, `every claim call was answered (${claimsAnswered.length}/${claims.length})`);
 check(
@@ -203,19 +251,23 @@ check(
 	"no claim was granted while the ledger was refusing",
 	granted.length > 0 ? `${granted.length} claim(s) were granted — fail-closed did not hold` : undefined,
 );
-if (health.greptime !== true) {
-	// Said out loud rather than left to be inferred from a green run. With no ledger
-	// configured at all, claims are deliberately fail-open and a graph that is not in
-	// the index cannot be claimed either — so "no claim was granted" above passed, but
-	// not because the withdrawal path ran. A real proof needs both stores configured
-	// and the ledger blackholed.
+if (undecided.length > 0) {
 	note(
-		"claims are fail-open in this deployment",
-		"no ledger is configured, so the withdrawal path was not exercised; run against a deployment with both stores and blackhole the ledger",
+		`${undecided.length} claim call(s) returned no decision`,
+		"an error rather than a verdict — the withdrawal path did not run for those",
 	);
 }
+require_(
+	revoked.length > 0,
+	`the substrate withdrew at least one claim (${revoked.length} of ${claims.length})`,
+	revoked.length > 0
+		? undefined
+		: health.greptime !== true
+			? "no ledger is configured, so claims are deliberately fail-open; run against a deployment with both stores and blackhole the ledger"
+			: "no claim reported `revoked`; the withdrawal path was not exercised",
+);
 
-// ── 4. the audit chain holds both halves ─────────────────────────────────────
+// ── 5. the audit chain holds both halves ─────────────────────────────────────
 const evidence = await call("/evidence", { graph_id: GRAPH_ID });
 const bundle = evidence.body as {
 	chains?: { mcp_audit?: { ok?: boolean | null; records?: number; durable?: boolean } };
@@ -232,7 +284,7 @@ check(
 );
 note("audit tally", `${bundle?.audit?.allowed ?? 0} allowed, ${bundle?.audit?.denied ?? 0} denied`);
 
-// ── 5. the SLOs saw it ───────────────────────────────────────────────────────
+// ── 6. the SLOs saw it ───────────────────────────────────────────────────────
 for (const slo of bundle?.slos ?? []) note(`slo ${slo.id}`, `${slo.status} — ${slo.detail}`);
 
 const emitSuccess = bundle?.slos?.find((slo) => slo.id === "emit.success");
@@ -244,7 +296,7 @@ if (emitDropped.length > 0) {
 	);
 }
 
-// ── 6. tokens and cost were attributed ───────────────────────────────────────
+// ── 7. tokens and cost were attributed ───────────────────────────────────────
 check(
 	(bundle?.usage?.inputTokens ?? 0) > 0,
 	"the usage on those events was attributed to this graph",
@@ -257,6 +309,13 @@ process.stdout.write(`\n${results.length - failed.length}/${results.length} chec
 if (failed.length > 0) {
 	process.stdout.write("\nfailed:\n");
 	for (const result of failed) process.stdout.write(`  - ${result.what}${result.detail ? ` (${result.detail})` : ""}\n`);
+}
+if (REHEARSAL) {
+	// Never let a rehearsal be mistaken for a proof. It is green by a different rule.
+	process.stdout.write(
+		"\nCHAOS_REHEARSAL was set: the checks that require the outage to have actually happened were " +
+			"downgraded to notes. This run does not prove fail-open or fail-closed behaviour.\n",
+	);
 }
 process.stdout.write(
 	`\nThis appended ${emits.length} note event(s) under ${GRAPH_ID}. The ledger is append-only, so they stay; ` +

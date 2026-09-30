@@ -30,8 +30,15 @@ export interface OtlpResource {
 }
 
 export interface OtlpConfig {
-	/** Base endpoint, without `/v1/...`. */
-	endpoint: string;
+	/**
+	 * Base endpoints, without `/v1/...`, one per signal.
+	 *
+	 * Separate because a deployment may send metrics and traces to different
+	 * collectors — which is the whole reason OTEL defines signal-specific endpoint
+	 * variables. An empty string means that signal has nowhere to go and is not sent.
+	 */
+	metricsEndpoint: string;
+	tracesEndpoint: string;
 	headers: Record<string, string>;
 	timeoutMs: number;
 	resource: OtlpResource;
@@ -212,22 +219,23 @@ export class OtlpExporter {
 	}
 
 	async exportMetrics(snapshot: MetricSnapshot[], startedAt: number, now = Date.now()): Promise<ExportResult> {
+		if (this.config.metricsEndpoint.length === 0) return { ok: true, items: 0 };
 		const { body, items } = encodeMetrics(snapshot, this.config.resource, startedAt, now);
 		if (items === 0) return { ok: true, items: 0 };
-		return this.send("/v1/metrics", body, items);
+		return this.send(this.config.metricsEndpoint, "/v1/metrics", body, items);
 	}
 
 	async exportSpans(spans: SpanRecord[]): Promise<ExportResult> {
-		if (spans.length === 0) return { ok: true, items: 0 };
+		if (this.config.tracesEndpoint.length === 0 || spans.length === 0) return { ok: true, items: 0 };
 		const { body, items } = encodeSpans(spans, this.config.resource);
-		return this.send("/v1/traces", body, items);
+		return this.send(this.config.tracesEndpoint, "/v1/traces", body, items);
 	}
 
-	private async send(path: string, body: unknown, items: number): Promise<ExportResult> {
+	private async send(endpoint: string, path: string, body: unknown, items: number): Promise<ExportResult> {
 		const redact = this.deps.redact ?? ((text: string) => text);
 		const call = this.deps.fetch ?? fetch;
 		try {
-			const response = await call(`${this.config.endpoint}${path}`, {
+			const response = await call(`${endpoint}${path}`, {
 				method: "POST",
 				headers: { "content-type": "application/json", ...this.config.headers },
 				body: JSON.stringify(body),

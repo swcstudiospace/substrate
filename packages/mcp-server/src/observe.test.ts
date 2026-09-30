@@ -2,9 +2,18 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { AuditUnavailableError, type AuditRecordInput } from "@substrate/audit";
 import { METRIC, findCounter, sumCounter } from "@substrate/observability";
 import { loadConfig } from "./config.ts";
-import { auditRefusal, auditToolCalls, buildGraphEvidence, createObservability, normalizeRoute, toolCallsIn } from "./observe.ts";
+import {
+	auditRefusal,
+	auditToolCalls,
+	buildGraphEvidence,
+	createObservability,
+	normalizeRoute,
+	toolCallsIn,
+	toolLabel,
+} from "./observe.ts";
 import { Substrate } from "./service.ts";
 
 function rpc(method: string, params?: unknown, id: unknown = 1) {
@@ -161,6 +170,76 @@ describe("auditToolCalls", () => {
 		]);
 
 		expect(observed.audit.recent().map((record) => record.seq)).toEqual([1, 2]);
+	});
+
+	test("a refused batch leaves no `allowed` record for a call that never ran", async () => {
+		// The bug: each call was recorded `allowed` as the loop reached it, so a denial on
+		// a later call left the durable trail saying the earlier ones were permitted —
+		// when the batch is refused whole and none of them was dispatched. Fail-closed
+		// calls are now recorded first, and only they can produce a denial.
+		const observed = observability(unwritablePath());
+		await observed.start();
+
+		const { denials } = await auditToolCalls(observed, "omp", [
+			{ id: 1, tool: "memory_brief", args: {} },
+			{ id: 2, tool: "graph_claim", args: { graph_id: "ut-1" } },
+		]);
+
+		expect(denials.size).toBe(1);
+		const { records } = await observed.audit.readAll();
+		expect(records.some((record) => record.tool === "memory_brief" && record.decision === "allowed")).toBe(false);
+	});
+
+	test("a denial after an earlier success in the same batch appends a correction", async () => {
+		// Two fail-closed calls where only the first is recorded. The chain is append-only,
+		// so that `allowed` record cannot be withdrawn — it is corrected by appending a
+		// record saying the batch was refused and none of it was dispatched. A stub sink is
+		// used because a real one that refuses the second write refuses the correction too,
+		// and this is about the correction being attempted and recorded.
+		const appended: AuditRecordInput[] = [];
+		const audit = {
+			async append(input: AuditRecordInput) {
+				appended.push(input);
+				if (input.tool === "graph_claim" && input.decision === "allowed") {
+					throw new AuditUnavailableError(input.tool, "stubbed refusal");
+				}
+				return { record: {} as never, written: true };
+			},
+		};
+		const observed = observability(null);
+
+		const { denials } = await auditToolCalls(
+			{ audit: audit as never, instruments: observed.instruments },
+			"omp",
+			[
+				{ id: 2, tool: "graph_register", args: {} },
+				{ id: 3, tool: "graph_claim", args: {} },
+			],
+		);
+
+		expect(denials.size).toBe(1);
+		const correction = appended.find((record) => record.tool === "batch");
+		expect(correction).toMatchObject({ decision: "denied", mode: "fail-open" });
+		expect(correction?.reason).toContain("refused whole after 1 call(s)");
+		expect(correction?.reason).toContain("none of them was dispatched");
+	});
+
+	test("an unrecognised tool name is bucketed in the metric but kept exactly in the trail", async () => {
+		// `tool` came straight from a caller-supplied JSON-RPC `params.name`, so it let an
+		// authenticated caller mint one metric series per name it invented. The audit keeps
+		// the real name — that is a log, where the exact value is the point.
+		const observed = observability(null);
+		await observed.start();
+		await auditToolCalls(observed, "omp", [{ id: 1, tool: "wharrgarbl", args: {} }]);
+
+		expect(sumCounter(findCounter(observed.snapshot(), METRIC.toolCalls)!, { tool: "unrecognized" })).toBe(1);
+		expect(observed.audit.recent()[0]?.tool).toBe("wharrgarbl");
+	});
+
+	test("toolLabel keeps the tools that exist", () => {
+		expect(toolLabel("graph_claim")).toBe("graph_claim");
+		expect(toolLabel("events")).toBe("events");
+		expect(toolLabel("../../etc/passwd")).toBe("unrecognized");
 	});
 });
 

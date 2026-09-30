@@ -349,4 +349,29 @@ describe("substrate evidence", () => {
 		expect(result.exitCode).toBe(1);
 		expect(result.stderr).toContain("SLO(s) breached");
 	});
+
+	test("the HTML form reports a breach too, and still writes the document", async () => {
+		// The bug: asking the server for HTML gave the command a document it could not
+		// read, so `--format html` skipped the chain and SLO checks and exited 0 over a
+		// breached objective. The bundle is now always fetched as JSON and rendered here,
+		// so the exit status describes exactly the document that was written.
+		const harness = await start();
+		for (let i = 0; i < 60; i++) {
+			await fetch(`${harness.base}/events`, {
+				method: "POST",
+				body: JSON.stringify({ surface: "omp", kind: "shell", summary: `run ${i}`, graph_id: "ut-2" }),
+			});
+		}
+		const out = join(mkdtempSync(join(tmpdir(), "substrate-cli-")), "evidence.html");
+
+		const result = await run(["evidence", "--graph", "ut-2", "--out", out], { SUBSTRATE_URL: harness.base });
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toContain("SLO(s) breached");
+		// The document is still produced: the non-zero status is a verdict on its contents,
+		// not a refusal to write it.
+		const html = await Bun.file(out).text();
+		expect(html).toContain("Emit success");
+		expect(html).toContain("pill--breached");
+	});
 });

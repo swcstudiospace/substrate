@@ -4,8 +4,10 @@ import {
 	DEFAULT_MAX_SERIES,
 	Histogram,
 	LATENCY_BUCKETS_MS,
+	MAX_ATTRIBUTE_LENGTH,
 	MetricRegistry,
 	OVERFLOW,
+	VOLATILE_ATTRIBUTES,
 	attributeKey,
 	cleanAttributes,
 	exactFractionAtOrBelow,
@@ -131,6 +133,52 @@ describe("the cardinality cap", () => {
 
 	test("the default cap is high enough not to bite an ordinary day", () => {
 		expect(DEFAULT_MAX_SERIES).toBeGreaterThanOrEqual(100);
+	});
+
+	test("an attribute the soft cap does not collapse is still bounded by the hard ceiling", () => {
+		// The hole this closes: the soft cap only bounds growth if the attributes it does
+		// *not* collapse are genuinely bounded, and `tool` came from a caller-supplied
+		// JSON-RPC `params.name`. The cap collapsed the ids, found the collapsed key was
+		// equally new, and admitted it — one series per name a caller invented, forever.
+		const counter = new Counter("c", "int", { maxSeries: 4, hardMaxSeries: 8 });
+		for (let i = 0; i < 5000; i++) counter.add(1, { surface: "omp", tool: `invented_${i}` });
+
+		const snapshot = counter.snapshot();
+		expect(snapshot.points.length).toBeLessThanOrEqual(9); // the ceiling, plus its one overflow series
+		expect(snapshot.points.reduce((total, point) => total + point.value, 0)).toBe(5000);
+	});
+
+	test("at the hard ceiling every attribute collapses, so the count cannot grow again", () => {
+		const counter = new Counter("c", "int", { maxSeries: 2, hardMaxSeries: 3 });
+		for (let i = 0; i < 100; i++) counter.add(1, { surface: `s${i}`, tool: `t${i}` });
+		const settled = counter.snapshot().points.length;
+		for (let i = 100; i < 10_000; i++) counter.add(1, { surface: `s${i}`, tool: `t${i}` });
+
+		expect(counter.snapshot().points.length).toBe(settled);
+		const allCollapsed = counter.snapshot().points.find((point) => point.attributes.surface === OVERFLOW);
+		expect(allCollapsed?.attributes.tool).toBe(OVERFLOW);
+	});
+
+	test("the hard ceiling cannot be configured below the soft cap", () => {
+		const counter = new Counter("c", "int", { maxSeries: 10, hardMaxSeries: 1 });
+		for (let i = 0; i < 100; i++) counter.add(1, { graph_id: `ut-${i}` });
+
+		expect(counter.snapshot().points.reduce((total, point) => total + point.value, 0)).toBe(100);
+	});
+
+	test("model is volatile, because it arrives on a caller's payload", () => {
+		expect(VOLATILE_ATTRIBUTES).toContain("model");
+	});
+});
+
+describe("attribute values are length-bounded", () => {
+	test("a runaway value is truncated, because a series key is held for the life of the process", () => {
+		const value = "x".repeat(5000);
+		expect((cleanAttributes({ model: value }).model as string).length).toBe(MAX_ATTRIBUTE_LENGTH);
+	});
+
+	test("an ordinary value is untouched", () => {
+		expect(cleanAttributes({ surface: "omp", model: "opus" })).toEqual({ surface: "omp", model: "opus" });
 	});
 });
 

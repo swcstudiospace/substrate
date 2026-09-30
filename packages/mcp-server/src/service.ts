@@ -721,20 +721,28 @@ export class Substrate {
 		let reason = verdict.reason;
 		if (verdict.decision === "revoked") {
 			// Put the node back, so it is picked up rather than held by a surface that has
-			// been told it does not have it. Fenced on the lease the index just handed us,
-			// so the withdrawal cannot take a node somebody else has since claimed. A
-			// withdrawal that does not land is reported in the reason: the node then needs
-			// a manual release, and saying so beats leaving the caller to find out by being
-			// refused forever.
-			const withdrawn = await this.index
+			// been told it does not have it.
+			//
+			// Fenced on the lease this claim was granted, which is what scopes the
+			// withdrawal to *this* claim. The node can be released and re-claimed by
+			// someone else between the grant and the failed append, and an unconditional
+			// release would then clear that surface's live claim — breaking the mutual
+			// exclusion this withdrawal exists to protect. The fence refusing it is not a
+			// failure: the node is held by an agent that is working on it, and leaving it
+			// alone is right.
+			const outcome = await this.index
 				.releaseNode(graphId, nodeId, { lease_id: result.lease.lease_id })
-				.then((release) => release.released)
+				.then((release) => (release.released ? "withdrawn" : "superseded"))
 				.catch((cause: unknown) => {
 					process.stderr.write(`[substrate] could not withdraw ${graphId}/${nodeId}: ${redact(String(cause))}\n`);
-					return false;
+					return "failed";
 				});
-			if (!withdrawn) reason = `${reason}; the index still holds the claim and needs a manual release`;
-			process.stderr.write(`[substrate] claim ${graphId}/${nodeId} withdrawn for ${surface} — ${reason}\n`);
+			// A release that itself fails is reported in the reason: the node then needs a
+			// manual release, and saying so beats leaving the caller to find out by being
+			// refused forever.
+			if (outcome === "failed") reason = `${reason}; the index still holds the claim and needs a manual release`;
+			if (outcome === "superseded") reason = `${reason}; another surface already holds it, so it was left alone`;
+			process.stderr.write(`[substrate] claim ${graphId}/${nodeId} ${outcome} for ${surface} — ${reason}\n`);
 		}
 
 		this.observer.claimed?.({

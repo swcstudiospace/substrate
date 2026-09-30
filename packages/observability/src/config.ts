@@ -46,18 +46,34 @@ function optionalNumber(raw: string | undefined): number | undefined {
 	return raw !== undefined && raw.trim() !== "" && Number.isFinite(value) ? value : undefined;
 }
 
+/**
+ * Strip a trailing slash, and a trailing `/v1/metrics` or `/v1/traces` an operator
+ * may have pasted from a collector's docs — appending the path again would 404, and
+ * silently, since export fails open.
+ */
+function normalizeEndpoint(raw: string | undefined): string {
+	return (raw ?? "").trim().replace(/\/+$/, "").replace(/\/v1\/(?:metrics|traces)$/, "");
+}
+
 export function loadObservabilityConfig(
 	env: Record<string, string | undefined> = process.env,
 	version = "0.1.0",
 ): ObservabilityConfig {
-	// The metrics-specific endpoint wins, then the generic one. Both are trimmed of
-	// a trailing slash and of a trailing `/v1/metrics` an operator may have pasted
-	// from a collector's docs — appending `/v1/metrics` to that would 404.
-	const raw = (env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT ?? env.OTEL_EXPORTER_OTLP_ENDPOINT ?? "").trim();
-	const endpoint = raw.replace(/\/+$/, "").replace(/\/v1\/(?:metrics|traces)$/, "");
+	// Metrics and traces get **separate** endpoints, each resolved from its own
+	// signal-specific variable and falling back to the generic one.
+	//
+	// They were one endpoint, taken from whichever of the two was set. A deployment
+	// that sends metrics to one collector and traces to another — which is the reason
+	// the signal-specific variables exist — would have had its spans posted to the
+	// metrics collector's `/v1/traces`, and lost them if it does not serve traces.
+	const generic = normalizeEndpoint(env.OTEL_EXPORTER_OTLP_ENDPOINT);
+	const metricsEndpoint = normalizeEndpoint(env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT) || generic;
+	const tracesEndpoint = normalizeEndpoint(env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT) || generic;
 
 	return {
-		exportEnabled: endpoint.length > 0,
+		// Either signal being configured is enough to run the exporter; each is sent only
+		// where it has somewhere to go.
+		exportEnabled: metricsEndpoint.length > 0 || tracesEndpoint.length > 0,
 		intervalMs: numberOr(env.SUBSTRATE_OTLP_INTERVAL_MS, 30_000, 1000),
 		// Traces are sampled; metrics never are. A ratio below 1 loses individual
 		// requests from the trace view but cannot move a latency histogram, because
@@ -65,7 +81,8 @@ export function loadObservabilityConfig(
 		sampleRatio: Math.min(Math.max(numberOr(env.SUBSTRATE_TRACE_SAMPLE_RATIO, 1), 0), 1),
 		maxSpans: numberOr(env.SUBSTRATE_TRACE_BUFFER, 2048, 16),
 		otlp: {
-			endpoint,
+			metricsEndpoint,
+			tracesEndpoint,
 			headers: parseKeyValueList(env.OTEL_EXPORTER_OTLP_HEADERS),
 			timeoutMs: numberOr(env.OTEL_EXPORTER_OTLP_TIMEOUT, 5000, 100),
 			resource: {

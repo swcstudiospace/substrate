@@ -107,11 +107,25 @@ describe("token counts are counts, not credentials", () => {
 		});
 	});
 
-	test("a string under one of those keys is still redacted whole", () => {
-		// A count is a number. Anything else under `tokens` is not a count, whatever it
-		// is called, and the exemption must not become a way to smuggle a credential.
+	test("a numeric string survives too, because extractUsage accepts one", () => {
+		// Several collectors ship their counts as strings. Exempting only numbers meant
+		// the redactor blanked exactly those, so `extractUsage` never saw them and the
+		// usage was lost on the write path — the two have to agree.
+		expect(redactValue({ input_tokens: "1200" }).input_tokens).toBe("1200");
+		expect(redactValue({ tokens_out: "340" }).tokens_out).toBe("340");
+	});
+
+	test("a counter-shaped name that is not on the list is still redacted", () => {
+		// The exemption is an explicit list, not a pattern that grows on its own.
+		expect(redactValue({ cost_tokens: "0.5" }).cost_tokens).toBe(REDACTED);
+	});
+
+	test("a string that is not a count is still redacted whole", () => {
+		// The exemption must not become a way to smuggle a credential.
 		expect(redactValue({ tokens: "sk-ant-abcdefghijklmnopqrstuvwxyz" }).tokens).toBe(REDACTED);
 		expect(redactValue({ input_tokens: "lin_api_abcdefghijklmnopqrstuvwxyz" }).input_tokens).toBe(REDACTED);
+		expect(redactValue({ tokens: "1200; drop table" }).tokens).toBe(REDACTED);
+		expect(redactValue({ tokens: "-5" }).tokens).toBe(REDACTED);
 	});
 
 	test("a key that is not a count keeps its old treatment, number or not", () => {

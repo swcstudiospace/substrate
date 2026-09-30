@@ -159,11 +159,26 @@ export type ChainVerdict =
 /**
  * Recompute a chain and report the first record that does not verify.
  *
- * Three ways it breaks, and all three are reported by position rather than by
- * hash, because a tampered record's hash is not a useful name for it:
- * contents that do not match the hash, a `prev` that does not point at the
- * preceding record, and a `seq` that skipped — which is how a deleted line shows up
- * when the chain was rewritten well enough to still link.
+ * Four ways it breaks, all reported by position rather than by hash, because a
+ * tampered record's hash is not a useful name for it:
+ *
+ *   1. contents that do not match the hash;
+ *   2. a `prev` that does not point at the preceding record;
+ *   3. a `seq` that skipped — how a deleted line shows up when the chain was
+ *      rewritten well enough to still link;
+ *   4. **a chain that does not open at `seq: 1` with `prev: null`.**
+ *
+ * The fourth is not redundant, and leaving it out was a hole: delete the *first*
+ * line and the untouched second record becomes the new head. Its own hash verifies,
+ * every later `prev` and `seq` still follows it, and the shortened chain reports
+ * intact — so an evidence bundle would omit the removed action and say nothing was
+ * wrong. Only the head can be removed this way, which is exactly why the head has
+ * to be checked rather than assumed.
+ *
+ * The consequence is deliberate: a chain that has been rotated without restarting
+ * the writer does not open at `seq: 1`, and is reported broken rather than verified
+ * in isolation. That is the truth about such a file — the chain it holds is only
+ * verifiable together with the one it continues. See `docs/mcp-audit.md`.
  */
 export function verifyAuditChain(records: AuditRecord[]): ChainVerdict {
 	let expectedPrev: string | null = null;
@@ -172,6 +187,16 @@ export function verifyAuditChain(records: AuditRecord[]): ChainVerdict {
 		const { hash, ...rest } = record;
 		if (recordHash(rest) !== hash) {
 			return { ok: false, records: records.length, brokenAt: record.seq, reason: "hash does not match contents" };
+		}
+		if (expectedSeq === null && (record.seq !== 1 || record.prev !== null)) {
+			return {
+				ok: false,
+				records: records.length,
+				brokenAt: record.seq,
+				reason:
+					`the chain does not open at seq 1 with no predecessor: its first record is seq ${record.seq} ` +
+					`with prev ${record.prev === null ? "null" : "set"}, so records before it are missing`,
+			};
 		}
 		if (expectedPrev !== null && record.prev !== expectedPrev) {
 			return {

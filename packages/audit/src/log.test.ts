@@ -101,7 +101,70 @@ describe("a file-backed chain", () => {
 		await second.append(allowed);
 		const verdict = await second.verify();
 		expect(verdict.unparseable).toBe(1);
-		expect(verdict.ok).toBe(true);
+	});
+
+	test("the next record after a half-written line is not swallowed by it", async () => {
+		// The bug: appending straight onto an unterminated fragment joined the two into
+		// one unparseable line, so the new record vanished into it while `append`
+		// reported `written: true` — a fail-closed tool would have run with no readable
+		// record. Opening terminates the fragment first; the fragment itself is untouched.
+		const path = join(temporaryDirectory(), "mcp-audit.jsonl");
+		const first = new AuditLog({ path });
+		await first.open();
+		await first.append(allowed);
+		appendFileSync(path, '{"seq":2,"ts":"2026-0'); // no newline: a killed write
+
+		const second = new AuditLog({ path });
+		await second.open();
+		const result = await second.append(claim);
+
+		expect(result.written).toBe(true);
+		const { records, unparseable } = await second.readAll();
+		// Two readable records and exactly one bad line — the fragment, not the new record.
+		expect(records.map((record) => record.seq)).toEqual([1, 2]);
+		expect(unparseable).toBe(1);
+		expect(records[1]?.tool).toBe("graph_claim");
+	});
+
+	test("the fragment is terminated, not removed", async () => {
+		// Deleting it would be a writer erasing evidence from an append-only file.
+		const path = join(temporaryDirectory(), "mcp-audit.jsonl");
+		const first = new AuditLog({ path });
+		await first.open();
+		await first.append(allowed);
+		appendFileSync(path, '{"seq":2,"partial');
+
+		await new AuditLog({ path }).open();
+		expect(readFileSync(path, "utf8")).toContain('{"seq":2,"partial');
+	});
+
+	test("an unparseable line fails verification rather than sitting beside an ok verdict", async () => {
+		// A record that cannot be read cannot be verified, and "cannot be verified" is
+		// not "verified". The evidence bundle reads `ok` alone, so an intact verdict over
+		// a file with a hole in it would have been an attestation the data cannot support.
+		const path = join(temporaryDirectory(), "mcp-audit.jsonl");
+		const log = new AuditLog({ path });
+		await log.open();
+		await log.append(allowed);
+		appendFileSync(path, "not json\n");
+
+		const verdict = await log.verify();
+		expect(verdict.ok).toBe(false);
+		expect(verdict.unparseable).toBe(1);
+		expect((verdict as { reason: string }).reason).toContain("could not be parsed");
+	});
+
+	test("a tampered record is named ahead of an unparseable line", async () => {
+		// A hash mismatch names a specific position, which is the more useful answer; the
+		// unparseable count cannot name one.
+		const path = join(temporaryDirectory(), "mcp-audit.jsonl");
+		const log = new AuditLog({ path });
+		await log.open();
+		const first = await log.append(allowed);
+		writeFileSync(path, `${JSON.stringify({ ...first.record, decision: "denied" })}\nnot json\n`);
+
+		const verdict = await log.verify();
+		expect(verdict).toMatchObject({ ok: false, brokenAt: 1, reason: "hash does not match contents" });
 	});
 
 	test("recovers from a tail window that starts mid-line", async () => {

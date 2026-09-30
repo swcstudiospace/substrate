@@ -163,7 +163,13 @@ describe("encodeSpans", () => {
 });
 
 describe("OtlpExporter", () => {
-	const config = { endpoint: "https://collector.example", headers: { "x-key": "k" }, timeoutMs: 100, resource: RESOURCE };
+	const config = {
+		metricsEndpoint: "https://collector.example",
+		tracesEndpoint: "https://collector.example",
+		headers: { "x-key": "k" },
+		timeoutMs: 100,
+		resource: RESOURCE,
+	};
 
 	function registryWithOnePoint() {
 		const registry = new MetricRegistry(1000);
@@ -243,6 +249,73 @@ describe("OtlpExporter", () => {
 		expect(result.error).toBe("bad token [REDACTED]");
 	});
 
+	test("each signal goes to its own endpoint", async () => {
+		const calls: string[] = [];
+		const exporter = new OtlpExporter(
+			{
+				metricsEndpoint: "https://metrics.example",
+				tracesEndpoint: "https://traces.example",
+				headers: {},
+				timeoutMs: 100,
+				resource: RESOURCE,
+			},
+			{
+				fetch: async (url) => {
+					calls.push(url);
+					return new Response("", { status: 200 });
+				},
+			},
+		);
+
+		await exporter.exportMetrics(registryWithOnePoint().snapshot(), 1000);
+		await exporter.exportSpans([
+			{
+				traceId: "4bf92f3577b34da6a3ce929d0e0e4736",
+				spanId: "00f067aa0ba902b7",
+				parentSpanId: null,
+				name: "s",
+				kind: SPAN_KIND.internal,
+				startEpochMs: 1,
+				endEpochMs: 2,
+				attributes: {},
+				status: { code: SPAN_STATUS.ok },
+			},
+		]);
+
+		expect(calls).toEqual(["https://metrics.example/v1/metrics", "https://traces.example/v1/traces"]);
+	});
+
+	test("a signal with no endpoint is not sent anywhere", async () => {
+		// Rather than to the other signal's collector, which is where they used to go.
+		let called = false;
+		const exporter = new OtlpExporter(
+			{ metricsEndpoint: "https://metrics.example", tracesEndpoint: "", headers: {}, timeoutMs: 100, resource: RESOURCE },
+			{
+				fetch: async () => {
+					called = true;
+					return new Response("", { status: 200 });
+				},
+			},
+		);
+
+		expect(
+			await exporter.exportSpans([
+				{
+					traceId: "4bf92f3577b34da6a3ce929d0e0e4736",
+					spanId: "00f067aa0ba902b7",
+					parentSpanId: null,
+					name: "s",
+					kind: SPAN_KIND.internal,
+					startEpochMs: 1,
+					endEpochMs: 2,
+					attributes: {},
+					status: { code: SPAN_STATUS.ok },
+				},
+			]),
+		).toEqual({ ok: true, items: 0 });
+		expect(called).toBe(false);
+	});
+
 	test("a success resets the failure streak", async () => {
 		let fail = true;
 		const exporter = new OtlpExporter(config, {
@@ -266,7 +339,13 @@ describe("PeriodicExporter", () => {
 		registry.counter("c").add(1);
 		let drained = 0;
 		const exporter = new OtlpExporter(
-			{ endpoint: "https://collector.example", headers: {}, timeoutMs: 100, resource: RESOURCE },
+			{
+				metricsEndpoint: "https://collector.example",
+				tracesEndpoint: "https://collector.example",
+				headers: {},
+				timeoutMs: 100,
+				resource: RESOURCE,
+			},
 			{ fetch: async () => new Response("", { status: 200 }) },
 		);
 
@@ -289,7 +368,7 @@ describe("PeriodicExporter", () => {
 
 	test("stop is safe before start and idempotent after", () => {
 		const periodic = new PeriodicExporter({
-			exporter: new OtlpExporter({ endpoint: "x", headers: {}, timeoutMs: 1, resource: RESOURCE }),
+			exporter: new OtlpExporter({ metricsEndpoint: "x", tracesEndpoint: "x", headers: {}, timeoutMs: 1, resource: RESOURCE }),
 			snapshot: () => [],
 			drainSpans: () => [],
 			startedAt: 0,

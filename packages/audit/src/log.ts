@@ -53,6 +53,8 @@ export class AuditLog {
 	private retained: AuditRecord[] = [];
 	private opened = false;
 	private writable = false;
+	/** Set when an append threw, which may have left a half-written line behind. */
+	private mayHaveFragment = false;
 	private readonly redact: (text: string) => string;
 	private readonly now: () => Date;
 	private readonly tailBytes: number;
@@ -106,6 +108,16 @@ export class AuditLog {
 					this.chainSeq = last.seq;
 					this.chainTip = last.hash;
 				}
+				// Terminate a half-written trailing line before anything else is appended.
+				//
+				// A process killed mid-write leaves a fragment with no newline. Appending
+				// the next record straight onto it would join the two into a single
+				// unparseable line — swallowing the new record while `append` reported
+				// `written: true`, so a fail-closed tool would run with no readable record
+				// of it. This is not deleting evidence: the fragment stays exactly as it
+				// is, still unparseable and still counted by `verify`; it only stops being
+				// able to consume the record that follows it.
+				this.terminateTrailingFragment(path);
 			}
 			// Prove the sink is writable now rather than discovering it on the first
 			// fail-closed call, which would deny a claim for a reason an operator could
@@ -143,15 +155,45 @@ export class AuditLog {
 		}
 
 		try {
+			// A previous append threw, so it may have written part of a line. Close that
+			// fragment off before this record goes on, or the two would join into one
+			// unparseable line and this record would vanish into it.
+			if (this.mayHaveFragment) {
+				this.terminateTrailingFragment(path);
+				this.mayHaveFragment = false;
+			}
 			appendFileSync(path, `${JSON.stringify(record)}\n`);
 			this.commit(record);
 			return { record, written: true };
 		} catch (cause) {
 			const error = this.redact(String(cause));
 			this.writable = false;
+			this.mayHaveFragment = true;
 			if (input.mode === "fail-closed") throw new AuditUnavailableError(input.tool, error);
 			return { record, written: false, error };
 		}
+	}
+
+	/**
+	 * Append a newline if the file does not already end with one.
+	 *
+	 * One byte is read, so this is cheap enough to run at open and after any failed
+	 * append — `appendFileSync` can write part of a line and then throw (ENOSPC), which
+	 * leaves exactly the fragment this guards against.
+	 */
+	private terminateTrailingFragment(path: string): void {
+		const size = statSync(path).size;
+		if (size === 0) return;
+		const last = Buffer.alloc(1);
+		const fd = openSync(path, "r");
+		try {
+			readSync(fd, last, 0, 1, size - 1);
+		} finally {
+			closeSync(fd);
+		}
+		// A byte comparison is safe here: 0x0A never appears inside a multi-byte UTF-8
+		// sequence, so a trailing 0x0A is always a real line terminator.
+		if (last[0] !== 0x0a) appendFileSync(path, "\n");
 	}
 
 	private commit(record: AuditRecord): void {
@@ -170,7 +212,7 @@ export class AuditLog {
 	 * Every record on disk, oldest first.
 	 *
 	 * Memory-only chains answer from the retained buffer. Unparseable lines are
-	 * skipped and counted — `verify` is what reports them.
+	 * skipped and counted — `verify` is what reports them, and it fails on them.
 	 */
 	async readAll(): Promise<{ records: AuditRecord[]; unparseable: number }> {
 		const path = this.options.path;
@@ -190,9 +232,35 @@ export class AuditLog {
 		return { records, unparseable };
 	}
 
+	/**
+	 * Recompute the chain on disk.
+	 *
+	 * **An unparseable line fails the verdict.** It used to be counted alongside an
+	 * `ok: true`, which meant a file holding a corrupt or half-written record could be
+	 * reported as intact — and an evidence bundle reads `ok` alone, so it would have
+	 * attested to a chain with a hole in it. A record that cannot be read cannot be
+	 * verified, and "cannot be verified" is not "verified".
+	 *
+	 * The chain check runs first when it also fails, because a hash or `prev` mismatch
+	 * names a specific tampered position and is the more useful answer; an unparseable
+	 * line is reported when the readable records are otherwise sound.
+	 */
 	async verify(): Promise<ChainVerdict & { unparseable: number }> {
 		const { records, unparseable } = await this.readAll();
-		return { ...verifyAuditChain(records), unparseable };
+		const verdict = verifyAuditChain(records);
+		if (!verdict.ok) return { ...verdict, unparseable };
+		if (unparseable > 0) {
+			return {
+				ok: false,
+				records: records.length,
+				// The position is not knowable — the line that would have named it is the
+				// one that cannot be parsed — so the count is reported instead of a guess.
+				brokenAt: -1,
+				reason: `${unparseable} line(s) could not be parsed, so the records they hold cannot be verified`,
+				unparseable,
+			};
+		}
+		return { ...verdict, unparseable };
 	}
 
 	/**

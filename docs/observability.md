@@ -64,9 +64,21 @@ one carries what the lost one would have.
 
 `graph_id` is one per uplifted prompt, so a metric keyed by it grows without
 limit. Past a per-instrument cap (`DEFAULT_MAX_SERIES`, 500) the volatile
-attributes — `graph_id`, `session_id`, `node_id` — collapse into `_overflow`, and
-**the observation is still counted**: dropping it would drift the emit-success
-ratio the SLO is computed from. The cost is visible in exactly one place, and is
+attributes — `graph_id`, `session_id`, `node_id`, `model` — collapse into
+`_overflow`, and **the observation is still counted**: dropping it would drift the
+emit-success ratio the SLO is computed from.
+
+That soft cap only bounds growth if the attributes it does *not* collapse are
+genuinely bounded, which was an assumption each call site had to keep rather than a
+property the code enforced — and it did not hold: `tool` came straight from a
+caller-supplied JSON-RPC `params.name`, so one series per invented name could be
+minted without limit. Two things fix it. `observe.ts` maps an unrecognised tool name
+to a single `unrecognized` bucket, drawn from the list of tools the substrate
+actually serves — the audit chain still records the name exactly as sent, because
+that is a log, where the real value is the point. And `HARD_MAX_SERIES` is a ceiling
+past which *every* attribute collapses, so the bound no longer depends on each call
+site getting it right. Attribute values are capped at `MAX_ATTRIBUTE_LENGTH` too,
+since a series key is held for the life of the process. The cost is visible in exactly one place, and is
 reported there rather than papered over: a graph whose series collapsed has no
 separable token or cost total, so `substrate evidence` says so instead of printing
 another graph's numbers.
@@ -105,9 +117,17 @@ a trace is sampled whole or not at all. The histograms are recorded before the
 sampling decision is consulted, so `SUBSTRATE_TRACE_SAMPLE_RATIO` never moves a
 latency number.
 
+Metrics and traces have **separate endpoints**, each resolved from its own
+signal-specific variable and falling back to the generic one. A deployment sending
+metrics to one collector and traces to another — the reason those variables exist —
+would otherwise have had its spans posted to the metrics collector's `/v1/traces`.
+Either signal being configured is enough to run the exporter; each is sent only where
+it has somewhere to go.
+
 The span buffer is bounded and drops the **oldest** when full, keeping the spans
 that explain an outage in progress. Drops are exported as
-`substrate.trace.spans_dropped`, not swallowed. Spans drained for an export that
+`substrate.trace.spans_dropped` — as a *delta*, since `tracer.dropped` is itself
+cumulative and adding it whole each interval would multiply it. Spans drained for an export that
 then fails are lost — traces are best-effort by design; the metrics are the
 durable signal.
 
@@ -115,7 +135,7 @@ durable signal.
 
 | Objective | Target | Why |
 | --- | --- | --- |
-| `brief.p95` | p95 of `substrate.brief.duration` < **800 ms** | The brief is on the critical path of every prompt and the uplift hook's budget is 1.5 s, so 800 ms leaves room for the hook. |
+| `brief.p95` | p95 of `substrate.brief.duration` ≤ **800 ms** | The brief is on the critical path of every prompt and the uplift hook's budget is 1.5 s, so 800 ms leaves room for the hook. |
 | `emit.success` | stored / total ≥ **99.5 %** | Appends are fail-closed at the ledger, so a dropped event is a hole in the trail. |
 | `lease.steal_rate` | stolen / claims ≤ **0.5 %** | Two agents believing they hold one node is the failure claims exist to prevent. |
 | `quarantine.rate` | quarantines / claims ≤ **1 %** | A node the substrate withdraws is work no agent picks up. |
@@ -126,12 +146,24 @@ monitor that read it as an outage would page on a slow hour.
 
 ### Two things the evaluator does on purpose
 
-**"p95 < 800 ms" is checked as a count, not an interpolation.** 800 is one of the
+**The p95 objective is checked as a count, not an interpolation.** 800 is one of the
 histogram's own bucket bounds, so the *exact* share of briefs at or below it is
 known. That share decides the verdict. The interpolated p95 is reported alongside
 for reading, and does not decide anything. A threshold that is not a bucket bound
 reports `unmeasurable` rather than being quietly interpolated — a bucketed
 histogram genuinely cannot answer it.
+
+**The comparison is `≤`, and the objective is worded to say so.** SPE-4793 states
+this as `p95 < 800 ms`. A bucket bound is an *inclusive* upper edge in OTLP — the
+800 ms bucket holds `(400, 800]` — so no bucketed histogram can separate 800.000 ms
+from 799.999 ms, and `≤ 800 ms` is the strongest claim the data supports. It is
+therefore what gets reported, rather than checking `≤` while calling it `<`, which
+would hand out a green verdict at the stated failure boundary in silence. The two
+differ only for a brief that takes precisely 800.000 ms.
+
+The alternative was to bucket with `<`, making the bound exclusive so the strict
+check became exact. That was rejected: it would misreport bucket membership to every
+standard collector, and an exported histogram has to mean what OTLP says it means.
 
 **An objective with too few samples is never `ok`.** It reports
 `insufficient-data` with the count it has. A green SLO computed from three
@@ -205,9 +237,21 @@ sudo iptables -I OUTPUT -d <ledger-ip> -j DROP && sleep 60 \
 SUBSTRATE_URL=http://127.0.0.1:7410 SUBSTRATE_TOKEN=… bun run smoke:chaos
 ```
 
-With no blackhole in place it still runs and reports honestly — it says the ledger
-stayed healthy and that the fail-closed half was not exercised, rather than passing
-vacuously. `CHAOS_WINDOW_MS` and `CHAOS_TICK_MS` shorten it for a rehearsal.
+**It cannot pass without exercising the outage.** Two checks require it: at least
+one emit actually refused, and at least one claim actually withdrawn. Run it against
+a healthy deployment and it exits non-zero naming which half did not happen — a
+smoke that goes green having proven nothing is worse than no smoke.
+
+The claim half needs a node to claim, so the script registers its graph before the
+window. Without that, `graph_claim` fails with "unknown node" *before* the
+fail-closed logic and every claim comes back not-granted for the wrong reason. The
+check reads the claim's own `decision` rather than the absence of a grant: "not
+granted" is also what an unknown node, a missing index and a transport error look
+like, whereas `revoked` can only come from the withdrawal path running.
+
+`CHAOS_REHEARSAL=1` downgrades those checks to notes, for testing the script itself
+against a healthy deployment; the report says so, so a rehearsal cannot be mistaken
+for a proof. `CHAOS_WINDOW_MS` and `CHAOS_TICK_MS` shorten the window.
 
 It appends `note` events under a `ut-chaos-…` graph. The ledger is append-only so
 they stay; they carry no repo, so no brief shows them.
@@ -238,7 +282,8 @@ substrate-specific spelling.
 | Variable | Default | |
 | --- | --- | --- |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | — | Base URL. **Export is off when unset**; collection is not. |
-| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | — | Wins over the generic one. |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | — | Metrics only. Wins over the generic one. |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | — | Traces only. Wins over the generic one. |
 | `OTEL_EXPORTER_OTLP_HEADERS` | — | `k=v,k=v`. Where a collector token goes — it is a credential, so it belongs in `/etc/substrate/substrate.env`. |
 | `OTEL_EXPORTER_OTLP_TIMEOUT` | `5000` | ms |
 | `OTEL_SERVICE_NAME` | `substrate-mcp` | |

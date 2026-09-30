@@ -78,7 +78,13 @@ export function sloCatalogue(overrides: SloThresholds = {}): SloTarget[] {
 			kind: "latency-quantile",
 			id: "brief.p95",
 			title: "Brief latency",
-			statement: `p95 of ${METRIC.briefDuration} < ${t.briefP95Ms} ms`,
+			// `<=`, not `<`, and the difference is stated rather than glossed. See
+			// `evaluateLatency`: a bucket bound is an inclusive upper edge in OTLP, so a
+			// bucketed histogram can decide "at or below 800 ms" exactly and cannot decide
+			// "strictly below 800 ms" at all. SPE-4793 words the objective as `< 800 ms`;
+			// what is actually checked is `<= 800 ms`, which differs only for a brief that
+			// takes precisely 800.000 ms.
+			statement: `p95 of ${METRIC.briefDuration} <= ${t.briefP95Ms} ms (bucket edge; the ticket's "< ${t.briefP95Ms} ms")`,
 			metric: METRIC.briefDuration,
 			quantile: 0.95,
 			thresholdMs: t.briefP95Ms,
@@ -143,11 +149,22 @@ export interface SloResult {
  * Two numbers come out, and the distinction is the point. `observed` is the
  * interpolated p95, for reading. The **verdict** comes from the exact share of
  * observations at or below the threshold, because that is a count rather than an
- * estimate — so "p95 < 800 ms" is decided by whether at least 95 % of briefs landed
- * in a bucket ending at 800 ms. If the threshold is not one of the histogram's
- * bounds the objective is `unmeasurable` rather than quietly interpolated: a
- * bucketed histogram genuinely cannot answer it, and saying so is the honest
- * result.
+ * estimate. If the threshold is not one of the histogram's bounds the objective is
+ * `unmeasurable` rather than quietly interpolated: a bucketed histogram genuinely
+ * cannot answer it, and saying so is the honest result.
+ *
+ * **The comparison is `<=`, and the objective is worded to match.** SPE-4793 states
+ * the objective as `p95 < 800 ms`, but a bucket bound is an *inclusive* upper edge in
+ * OTLP: the 800 ms bucket holds `(400, 800]`, so an observation of exactly 800 ms is
+ * inside it and no bucketed histogram can separate 800.000 from 799.999. `<= 800 ms`
+ * is therefore the strongest claim this data supports, and it is what gets reported —
+ * rather than checking `<=` while calling it `<`, which would hand out a green verdict
+ * at the stated failure boundary.
+ *
+ * The alternative was bucketing with `<` so the bound became exclusive. That would
+ * make the strict check exact locally at the cost of misreporting bucket membership
+ * to every standard collector, which is a worse trade: the exported histogram has to
+ * mean what OTLP says it means.
  */
 function evaluateLatency(snapshot: MetricSnapshot[], target: Extract<SloTarget, { kind: "latency-quantile" }>): SloResult {
 	const base = {
@@ -191,7 +208,9 @@ function evaluateLatency(snapshot: MetricSnapshot[], target: Extract<SloTarget, 
 		detail:
 			`${(share * 100).toFixed(2)} % of ${merged.count} observations were at or below ${target.thresholdMs} ms ` +
 			`(need ${(target.quantile * 100).toFixed(0)} %); interpolated p95 ` +
-			`${estimate === null ? `> ${merged.bounds[merged.bounds.length - 1]}` : estimate.toFixed(0)} ms`,
+			`${estimate === null ? `> ${merged.bounds[merged.bounds.length - 1]}` : estimate.toFixed(0)} ms. ` +
+			`"At or below" is inclusive: a bucket bound is an inclusive upper edge, so an observation of exactly ` +
+			`${target.thresholdMs} ms counts as inside the objective.`,
 	};
 }
 

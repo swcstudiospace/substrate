@@ -98,19 +98,46 @@ than imported — it lives in `packages/mcp-server`, which depends on this packa
 ### Verification
 
 `verifyAuditChain` recomputes the chain and reports the first record that does not
-verify, three ways:
+verify, four ways:
 
 - **contents do not match the hash** — a record was edited in place;
 - **`prev` does not match the preceding record** — a record was removed;
 - **`seq` jumped** — the chain was rewritten well enough to still link, which is
   what someone who removed a record and re-chained the rest would produce. The
-  sequence number is what still gives it away.
+  sequence number is what still gives it away;
+- **the chain does not open at `seq: 1` with `prev: null`** — the *first* record was
+  removed. Only the head can be removed without breaking any later link: the
+  untouched second record becomes the new head, its own hash verifies, and every
+  later `prev` and `seq` still follows it. Checking the head is the only thing that
+  catches it, which is exactly why the head is checked rather than assumed.
 
-Unparseable lines — a process killed mid-write leaves a partial one — are counted
-and reported, never removed. This is an append-only file: a verifier reporting one
-bad line is better than a writer having quietly deleted evidence. The chain is
-continued from the last *parseable* record, because treating a partial line as the
-tip would chain every later record onto a hash no verifier can recompute.
+The consequence is deliberate: a file rotated without restarting the writer does not
+open at `seq: 1`, and is reported broken rather than verified in isolation. That is
+the truth about such a file — the chain it holds is only verifiable together with the
+one it continues.
+
+**An unparseable line fails the verdict.** A process killed mid-write leaves a
+partial one; it is counted and reported, never removed, because this is an
+append-only file and a verifier reporting a bad line is better than a writer having
+quietly deleted evidence. But it is not reported *beside* an `ok: true`: a record
+that cannot be read cannot be verified, and "cannot be verified" is not "verified" —
+the evidence bundle reads `ok` alone, so an intact verdict over a file with a hole in
+it would be an attestation the data does not support. A hash or `prev` mismatch is
+named ahead of it, because that identifies a specific position and the unparseable
+count cannot.
+
+Two things protect the record that follows a fragment:
+
+- the chain is continued from the last *parseable* record, because treating a partial
+  line as the tip would chain every later record onto a hash no verifier can
+  recompute;
+- **the fragment is terminated with a newline before anything else is appended.**
+  Without that, the next record was written straight onto it and the two joined into
+  one unparseable line — swallowing the new record while `append` reported
+  `written: true`, so a fail-closed tool ran with no readable record of it. The
+  fragment itself is untouched: still there, still unparseable, still counted. Only
+  its ability to consume the next record is removed. The same check runs after any
+  failed append, since `appendFileSync` can write part of a line and then throw.
 
 The chain tip advances **only on a successful write**, for the same reason.
 
@@ -141,6 +168,16 @@ A batch is refused **whole**. Dispatching the allowed half would leave the calle
 holding a partial result it has no way to tell from a complete one, and MCP clients
 send one call per request in practice, so nothing real pays for the strictness.
 
+Because of that, **fail-closed calls in a batch are recorded first**, whatever order
+they arrived in. Only a fail-closed append can produce a denial, so doing those first
+means a refused batch leaves no `allowed` record for a fail-open member that never
+ran — which is what recording each call as the loop reached it used to produce. Within
+the fail-closed group a denial can still follow an earlier success; the chain is
+append-only, so that record cannot be withdrawn, and a **correction** is appended
+instead: one `denied` record under the tool name `batch`, saying how many calls were
+recorded as allowed and that none of them was dispatched. An append-only chain is
+corrected by appending, never by editing.
+
 Handshake traffic — `initialize`, `tools/list`, notifications — is not audited. A
 trail of handshakes buries the decisions it exists to show.
 
@@ -169,6 +206,13 @@ substrate evidence --graph ut-mfk2p3-9a3b1c7d --out evidence.html   # the docume
 The bundle is composed by `substrate-mcp`, not by the CLI: that is the process
 holding the metric snapshot and the audit chain, and a second composer would be a
 second answer to the same question. `POST /evidence` is the same thing over HTTP.
+
+The CLI always fetches it as **JSON** and renders the HTML from that same bundle —
+rendering is presentation, not composition. Asking the server for HTML gave the
+command a document it could not read, so `--format html` skipped the chain and SLO
+checks and exited 0 over a breached objective. Asking twice would be worse: the two
+bundles are taken at different instants, so the verdict could describe numbers the
+document does not contain.
 
 It carries both chain verdicts, the SLO results with their sample counts, the
 allowed/denied tally for that graph, and the tokens and cost attributed to it.

@@ -319,7 +319,7 @@ describe("claimNode is fail-closed on the ledger", () => {
 	 * The index grants the claim; the ledger is what varies. `released` records
 	 * whether the withdrawal happened, which is the half a caller cannot see.
 	 */
-	function stores(options: { stored: boolean; releaseFails?: boolean }) {
+	function stores(options: { stored: boolean; releaseFails?: boolean; heldByAnother?: boolean }) {
 		const released: string[] = [];
 		const holder = { surface: "omp" as Surface, session_id: "sess-1" };
 		const lease = {
@@ -354,9 +354,11 @@ describe("claimNode is fail-closed on the ledger", () => {
 			releaseNode: async (graph_id: string, node_id: string, request: { lease_id?: string | null } = {}) => {
 				if (options.releaseFails) throw new Error("postgres is down");
 				// The withdrawal is fenced like every other release: unless it carries the
-				// lease the claim was just granted, it must not take the node — by then it
-				// could be somebody else's.
-				if (request.lease_id !== lease.lease_id) {
+				// lease the claim was granted, it must not take the node. `heldByAnother`
+				// stands in for the node having been re-claimed since — the compare-and-swap
+				// matches no row, and the release reports a stale lease rather than clearing
+				// somebody else's hold.
+				if (options.heldByAnother || request.lease_id !== lease.lease_id) {
 					return {
 						released: false,
 						node: { graph_id, node_id },
@@ -399,7 +401,22 @@ describe("claimNode is fail-closed on the ledger", () => {
 		expect(result.claimed).toBe(false);
 		expect(result.decision).toBe("revoked");
 		expect(result.reason).toContain("withdrawn");
+		// Scoped to the lease this claim was granted, not a bare release of the node.
 		expect(released).toEqual(["ut-1/n4"]);
+	});
+
+	test("does not clear a claim another surface has taken in the meantime", () => {
+		// The race: the node is released and re-claimed by someone else between the grant
+		// and the failed append. An unconditional release would clear *their* live claim
+		// and break the mutual exclusion this withdrawal exists to protect.
+		const { released, index, greptime } = stores({ stored: false, heldByAnother: true });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+
+		return substrate.claimNode("ut-1", "n4", "omp", "sess-1").then((result) => {
+			expect(result.claimed).toBe(false);
+			expect(result.reason).toContain("another surface already holds it");
+			expect(released).toEqual([]);
+		});
 	});
 
 	test("grants it when the ledger took the event", async () => {

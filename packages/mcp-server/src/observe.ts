@@ -77,6 +77,8 @@ export function createObservability(config: SubstrateConfig, env: Record<string,
 	const tracer = new Tracer({ maxSpans: settings.maxSpans, sampleRatio: settings.sampleRatio });
 	const audit = new AuditLog({ path: config.audit.path, redact });
 	const slos = sloCatalogue(settings.slo);
+	/** How much of `tracer.dropped` has already been added to the monotonic counter. */
+	let reportedSpanDrops = 0;
 
 	const exporter = settings.exportEnabled
 		? new PeriodicExporter({
@@ -88,7 +90,14 @@ export function createObservability(config: SubstrateConfig, env: Record<string,
 				onResult: (result) => {
 					// The tracer's own drops are a metric, not a silence: a buffer that is
 					// overflowing is a fact about the deployment.
-					instruments.recordDroppedSpans(tracer.dropped);
+					//
+					// The *delta*, not the total. `tracer.dropped` is itself cumulative, and
+					// adding it whole to a monotonic counter every interval multiplies it —
+					// five real drops would read as ten after two exports and fifteen after
+					// three, turning a diagnostic into a fiction.
+					const dropped = tracer.dropped;
+					instruments.recordDroppedSpans(dropped - reportedSpanDrops);
+					reportedSpanDrops = dropped;
 					for (const outcome of [result.metrics, result.traces]) {
 						if (!outcome.ok && outcome.items > 0) {
 							process.stderr.write(`[substrate] otlp export failed (${outcome.items} items): ${outcome.error ?? outcome.status}\n`);
@@ -199,6 +208,37 @@ export interface AuditOutcome {
 }
 
 /**
+ * Every tool this substrate actually serves.
+ *
+ * The `tool` metric attribute is drawn from this list, not from the request. A
+ * JSON-RPC `params.name` is an arbitrary caller-supplied string, so using it
+ * directly let an authenticated caller mint one metric series per name it invented —
+ * past the series cap, which collapses ids but kept `tool`. The audit chain still
+ * records the name exactly as sent: that is a log, where the real value is the point,
+ * and it is bounded by the file rather than by a process's live series map.
+ */
+const KNOWN_TOOLS: ReadonlySet<string> = new Set([
+	"memory_brief",
+	"memory_write",
+	"memory_search",
+	"events_emit",
+	"graph_get",
+	"graph_register",
+	"graph_claim",
+	"graph_release",
+	"graph_complete",
+	"brief",
+	"events",
+	"verify",
+	"evidence",
+]);
+
+/** The bounded form of a tool name, for a metric attribute. */
+export function toolLabel(tool: string): string {
+	return KNOWN_TOOLS.has(tool) ? tool : "unrecognized";
+}
+
+/**
  * Record each tool call, and report the ones that must not run.
  *
  * A fail-closed tool whose record the chain refuses is denied. The denial is then
@@ -206,6 +246,16 @@ export interface AuditOutcome {
  * sink is what failed, which is why it is also written to stderr. Recording the
  * attempt matters more than recording it durably: an operator reading the journal
  * still learns that a claim was turned away and why.
+ *
+ * **Fail-closed calls are recorded first**, whatever order they arrived in. A batch
+ * is refused whole, so a denial on the third call means the first two never ran —
+ * and recording them as `allowed` before knowing that would put a claim in the trail
+ * that the substrate never carried out. Only a fail-closed append can produce a
+ * denial, so doing those first means a refused batch leaves no false `allowed`
+ * record for any fail-open member. Within the fail-closed group a denial can still
+ * follow an earlier success, which is what `batchNotDispatched` is for: the trail
+ * gets an explicit record saying those calls were recorded but not dispatched,
+ * because an append-only chain is corrected by appending, never by editing.
  */
 export async function auditToolCalls(
 	observability: Pick<Observability, "audit" | "instruments">,
@@ -214,7 +264,13 @@ export async function auditToolCalls(
 	transport: AuditTransport = "mcp",
 ): Promise<AuditOutcome> {
 	const denials = new Map<string, string>();
-	for (const call of calls) {
+	const ordered = [...calls].sort(
+		(a, b) => Number(auditMode(a.tool) === "fail-open") - Number(auditMode(b.tool) === "fail-open"),
+	);
+	let recordedBeforeDenial = 0;
+
+	for (const call of ordered) {
+		const label = toolLabel(call.tool);
 		const context = {
 			surface: surface ?? "unknown",
 			tool: call.tool,
@@ -223,6 +279,12 @@ export async function auditToolCalls(
 			node_id: stringAt(call.args, "node_id"),
 			session_id: stringAt(call.args, "session_id"),
 		};
+		// Once the batch is refused, nothing else will be dispatched, so nothing else is
+		// recorded as allowed either.
+		if (denials.size > 0) {
+			observability.instruments.recordToolCall({ surface: context.surface, tool: label, decision: "denied" });
+			continue;
+		}
 		try {
 			const appended = await observability.audit.append({
 				...context,
@@ -231,7 +293,8 @@ export async function auditToolCalls(
 				args: call.args,
 			});
 			observability.instruments.recordAudit({ decision: "allowed", written: appended.written });
-			observability.instruments.recordToolCall({ surface: context.surface, tool: call.tool, decision: "allowed" });
+			observability.instruments.recordToolCall({ surface: context.surface, tool: label, decision: "allowed" });
+			recordedBeforeDenial++;
 		} catch (cause) {
 			if (!(cause instanceof AuditUnavailableError)) throw cause;
 			const message = redact(cause.message);
@@ -242,10 +305,43 @@ export async function auditToolCalls(
 				.then((appended) => appended.written)
 				.catch(() => false);
 			observability.instruments.recordAudit({ decision: "denied", written });
-			observability.instruments.recordToolCall({ surface: context.surface, tool: call.tool, decision: "denied" });
+			observability.instruments.recordToolCall({ surface: context.surface, tool: label, decision: "denied" });
+			await batchNotDispatched(observability, context.surface, transport, recordedBeforeDenial);
 		}
 	}
 	return { denials };
+}
+
+/**
+ * Append a correction when a refused batch had already recorded some calls allowed.
+ *
+ * The chain is append-only, so the earlier `allowed` records cannot be withdrawn.
+ * They are true about what was *asked and permitted*; what changed is that the batch
+ * was then refused whole and none of it ran. Saying so in its own record is the only
+ * honest way to express that, and it keeps an incident reader from concluding a
+ * claim was carried out.
+ */
+async function batchNotDispatched(
+	observability: Pick<Observability, "audit" | "instruments">,
+	surface: string,
+	transport: AuditTransport,
+	recorded: number,
+): Promise<void> {
+	if (recorded === 0) return;
+	const written = await observability.audit
+		.append({
+			surface,
+			tool: "batch",
+			transport,
+			decision: "denied",
+			mode: "fail-open",
+			reason:
+				`the batch was refused whole after ${recorded} call(s) had already been recorded as allowed; ` +
+				"none of them was dispatched",
+		})
+		.then((appended) => appended.written)
+		.catch(() => false);
+	observability.instruments.recordAudit({ decision: "denied", written });
 }
 
 const BATCH_REFUSED =

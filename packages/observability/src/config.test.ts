@@ -33,19 +33,50 @@ describe("loadObservabilityConfig", () => {
 			OTEL_EXPORTER_OTLP_ENDPOINT: "https://generic.example",
 			OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: "https://metrics.example",
 		});
-		expect(config.otlp.endpoint).toBe("https://metrics.example");
+		expect(config.otlp.metricsEndpoint).toBe("https://metrics.example");
 		expect(config.exportEnabled).toBe(true);
 	});
 
 	test("strips a path an operator pasted from a collector's docs", () => {
 		// Appending `/v1/metrics` to an endpoint that already ends in it would 404 on
 		// every export, and the failure would be silent because export fails open.
-		expect(loadObservabilityConfig({ OTEL_EXPORTER_OTLP_ENDPOINT: "https://c.example/v1/metrics" }).otlp.endpoint).toBe(
+		expect(loadObservabilityConfig({ OTEL_EXPORTER_OTLP_ENDPOINT: "https://c.example/v1/metrics" }).otlp.metricsEndpoint).toBe(
 			"https://c.example",
 		);
-		expect(loadObservabilityConfig({ OTEL_EXPORTER_OTLP_ENDPOINT: "https://c.example/" }).otlp.endpoint).toBe(
+		expect(loadObservabilityConfig({ OTEL_EXPORTER_OTLP_ENDPOINT: "https://c.example/" }).otlp.metricsEndpoint).toBe(
 			"https://c.example",
 		);
+	});
+
+	test("metrics and traces get separate endpoints", () => {
+		// They were one endpoint taken from whichever variable was set, so a deployment
+		// sending metrics to one collector and traces to another — the reason the
+		// signal-specific variables exist at all — had its spans posted to the metrics
+		// collector's /v1/traces, and lost them if it does not serve traces.
+		const config = loadObservabilityConfig({
+			OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: "https://metrics.example",
+			OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "https://traces.example",
+		});
+
+		expect(config.otlp.metricsEndpoint).toBe("https://metrics.example");
+		expect(config.otlp.tracesEndpoint).toBe("https://traces.example");
+	});
+
+	test("each signal falls back to the generic endpoint on its own", () => {
+		const config = loadObservabilityConfig({
+			OTEL_EXPORTER_OTLP_ENDPOINT: "https://both.example",
+			OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "https://traces.example",
+		});
+
+		expect(config.otlp.metricsEndpoint).toBe("https://both.example");
+		expect(config.otlp.tracesEndpoint).toBe("https://traces.example");
+	});
+
+	test("one signal configured is enough to run the exporter", () => {
+		const config = loadObservabilityConfig({ OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "https://traces.example" });
+
+		expect(config.exportEnabled).toBe(true);
+		expect(config.otlp.metricsEndpoint).toBe("");
 	});
 
 	test("clamps the sample ratio to [0, 1] and falls back on nonsense", () => {

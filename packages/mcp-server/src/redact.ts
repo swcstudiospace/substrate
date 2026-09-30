@@ -75,14 +75,24 @@ const SENSITIVE_KEY = /(?:password|passwd|secret|token|api[_-]?key|apikey|author
  * it is why the token and cost metrics need it: `extractUsage` reads these keys.
  *
  * Narrow on purpose. The exemption applies only to these exact names **and only when
- * the value is a finite number**, so `{"tokens": "sk-ant-…"}` is still redacted
- * whole: a string under one of these keys is not a count, whatever it is called.
+ * the value is a count** — a finite number, or a string of digits — so
+ * `{"tokens": "sk-ant-…"}` is still redacted whole.
  */
 const COUNTER_KEY =
 	/^(?:(?:input|output|prompt|completion|total|cached|cache_read|cache_write|max|min|reasoning)_)?tokens?(?:_(?:count|in|out|used))?$/i;
 
+/**
+ * Whether a value under a counter key is actually a count.
+ *
+ * A number, or a string of digits. The string form matters because `extractUsage`
+ * accepts `"1200"` — several collectors ship their counts as strings — and a redactor
+ * that only exempted numbers would blank exactly those, so the two would disagree and
+ * the usage would be lost on the write path. A purely numeric string carries no
+ * credential shape, and anything else under the key is still redacted whole.
+ */
 function isCount(value: unknown): boolean {
-	return typeof value === "number" && Number.isFinite(value);
+	if (typeof value === "number") return Number.isFinite(value);
+	return typeof value === "string" && /^\d+(?:\.\d+)?$/.test(value);
 }
 
 export function redactValue<T>(value: T): T {

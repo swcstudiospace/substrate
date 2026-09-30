@@ -18,6 +18,7 @@
  * drift, so a hook or a cron can act on it, and an evidence document nobody can
  * tell from a missing one is not evidence.
  */
+import { renderEvidenceHtml, type EvidenceBundle } from "@substrate/evidence";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -294,7 +295,13 @@ async function cmdEvidence(args: Record<string, string | true>): Promise<number>
 		return 2;
 	}
 
-	const response = await post("/evidence", { graph_id: graphId, format });
+	// The bundle is always fetched as JSON, whatever is being written out, and the HTML
+	// is rendered from that same bundle here. Asking the server for HTML gave a document
+	// this command could not read, so `--format html` skipped the chain and SLO checks
+	// entirely and exited 0 over a broken chain. Asking twice would be worse: the two
+	// bundles are taken at different instants, so the verdict could describe numbers the
+	// document does not contain.
+	const response = await post("/evidence", { graph_id: graphId, format: "json" });
 	if (!response) {
 		process.stderr.write(`[substrate] unreachable at ${base()}; evidence needs a running substrate-mcp\n`);
 		return 1;
@@ -305,42 +312,43 @@ async function cmdEvidence(args: Record<string, string | true>): Promise<number>
 		return 1;
 	}
 
+	let bundle: EvidenceBundle;
+	try {
+		bundle = JSON.parse(body) as EvidenceBundle;
+	} catch {
+		process.stderr.write("[substrate] evidence was not valid JSON\n");
+		return 1;
+	}
+
+	// Rendering is not composing: the bundle is the answer, and this only presents it.
+	// `substrate-mcp` remains the only thing that decides what is in it.
+	const document = format === "html" ? renderEvidenceHtml(bundle) : JSON.stringify(bundle, null, 2);
+
 	const out = str(args.out);
 	if (out) {
 		try {
 			mkdirSync(dirname(out), { recursive: true });
-			writeFileSync(out, body.endsWith("\n") ? body : `${body}\n`);
+			writeFileSync(out, document.endsWith("\n") ? document : `${document}\n`);
 			process.stderr.write(`[substrate] wrote ${out}\n`);
 		} catch (cause) {
 			process.stderr.write(`[substrate] could not write ${out}: ${String(cause)}\n`);
 			return 1;
 		}
 	} else {
-		process.stdout.write(`${body}\n`);
+		process.stdout.write(`${document}\n`);
 	}
 
 	// Non-zero when the evidence itself says something is wrong, so this composes in a
 	// script: a bundle whose chain is broken or whose objective is breached should not
-	// read as a clean run just because the request succeeded.
-	if (format === "json") {
-		try {
-			const bundle = JSON.parse(body) as {
-				chains?: { app_events?: { ok?: unknown }; mcp_audit?: { ok?: unknown } };
-				slo_summary?: { breached?: number };
-			};
-			const chainsBroken = bundle.chains?.app_events?.ok === false || bundle.chains?.mcp_audit?.ok === false;
-			if (chainsBroken) {
-				process.stderr.write(`[substrate] a hash chain for ${graphId} does not verify\n`);
-				return 1;
-			}
-			if ((bundle.slo_summary?.breached ?? 0) > 0) {
-				process.stderr.write(`[substrate] ${bundle.slo_summary?.breached} SLO(s) breached for ${graphId}\n`);
-				return 1;
-			}
-		} catch {
-			process.stderr.write("[substrate] evidence was not valid JSON\n");
-			return 1;
-		}
+	// read as a clean run just because the request succeeded. Checked for both formats —
+	// the document that reports a broken chain must not exit 0 because it is HTML.
+	if (bundle.chains?.app_events?.ok === false || bundle.chains?.mcp_audit?.ok === false) {
+		process.stderr.write(`[substrate] a hash chain for ${graphId} does not verify\n`);
+		return 1;
+	}
+	if ((bundle.slo_summary?.breached ?? 0) > 0) {
+		process.stderr.write(`[substrate] ${bundle.slo_summary.breached} SLO(s) breached for ${graphId}\n`);
+		return 1;
 	}
 	return 0;
 }

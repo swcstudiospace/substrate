@@ -37,7 +37,7 @@ export const LATENCY_BUCKETS_MS: readonly number[] = [5, 10, 25, 50, 100, 200, 4
  * to answer; it is kept *bounded* because an observability plane that can exhaust
  * a collector is an outage of its own.
  */
-export const VOLATILE_ATTRIBUTES: readonly string[] = ["graph_id", "session_id", "node_id"];
+export const VOLATILE_ATTRIBUTES: readonly string[] = ["graph_id", "session_id", "node_id", "model"];
 
 /** The value a volatile attribute collapses to once an instrument is at its cap. */
 export const OVERFLOW = "_overflow";
@@ -51,10 +51,27 @@ export const OVERFLOW = "_overflow";
  * for its bounded attributes — and those overflow series are admitted beyond the
  * cap, because refusing them would mean dropping observations the SLOs are
  * computed from. The bounded attributes are `surface`, `kind`, `route`, `outcome`,
- * `decision`, `direction`, `reason` and `model`: a few dozen combinations, not a
- * few thousand.
+ * `decision`, `direction` and `reason`: a few dozen combinations, not a few
+ * thousand.
  */
 export const DEFAULT_MAX_SERIES = 500;
+
+/**
+ * The hard ceiling. Past this, **every** attribute collapses.
+ *
+ * The soft cap above only bounds growth if the attributes it does *not* collapse
+ * are genuinely bounded, and that was an assumption the call sites had to keep
+ * rather than a property this code enforced. It did not hold: `tool` came straight
+ * from a JSON-RPC `params.name`, so an authenticated caller could mint one series
+ * per name it invented, past the soft cap, without limit — the cap collapsed the
+ * graph and session ids, found the collapsed key was equally new, and admitted it.
+ *
+ * The call sites are fixed too (`observe.ts` maps an unrecognised tool name to a
+ * single bucket), but the invariant no longer depends on them: once an instrument
+ * holds this many series, every further combination folds into one, and the series
+ * count cannot grow again. Observations are still counted, as always.
+ */
+export const HARD_MAX_SERIES = 4 * DEFAULT_MAX_SERIES;
 
 export interface CounterPoint {
 	attributes: Attributes;
@@ -111,12 +128,23 @@ export function attributeKey(attributes: Attributes): string {
 		.join("\u0001");
 }
 
+/**
+ * Longest attribute value kept. Anything longer is truncated.
+ *
+ * Several attribute values are caller-supplied — a `graph_id`, a `model` from an
+ * event payload — and a series key is held for the life of the process. Capping the
+ * length bounds what one caller can make this hold, alongside the series cap that
+ * bounds how many it can make.
+ */
+export const MAX_ATTRIBUTE_LENGTH = 120;
+
 /** Drop `undefined` and `null` so an absent attribute is absent, not the string "undefined". */
 export function cleanAttributes(attributes: Record<string, AttributeValue | null | undefined>): Attributes {
 	const out: Attributes = {};
 	for (const [key, value] of Object.entries(attributes)) {
 		if (value === null || value === undefined) continue;
-		out[key] = value;
+		out[key] =
+			typeof value === "string" && value.length > MAX_ATTRIBUTE_LENGTH ? value.slice(0, MAX_ATTRIBUTE_LENGTH) : value;
 	}
 	return out;
 }
@@ -130,10 +158,18 @@ function collapse(attributes: Attributes): Attributes {
 	return out;
 }
 
+/** Collapse *every* attribute. The one series an instrument at its hard ceiling folds into. */
+function collapseAll(attributes: Attributes): Attributes {
+	const out: Attributes = {};
+	for (const key of Object.keys(attributes)) out[key] = OVERFLOW;
+	return out;
+}
+
 interface InstrumentOptions {
 	description?: string;
 	unit?: string;
 	maxSeries?: number;
+	hardMaxSeries?: number;
 }
 
 /** Shared series bookkeeping, including the cardinality cap. */
@@ -143,6 +179,7 @@ abstract class Instrument<S> {
 	readonly description: string;
 	readonly unit: string;
 	private readonly maxSeries: number;
+	private readonly hardMaxSeries: number;
 
 	constructor(
 		readonly name: string,
@@ -151,6 +188,7 @@ abstract class Instrument<S> {
 		this.description = options.description ?? "";
 		this.unit = options.unit ?? "";
 		this.maxSeries = options.maxSeries ?? DEFAULT_MAX_SERIES;
+		this.hardMaxSeries = Math.max(options.hardMaxSeries ?? HARD_MAX_SERIES, this.maxSeries + 1);
 	}
 
 	protected abstract initial(): S;
@@ -169,16 +207,20 @@ abstract class Instrument<S> {
 		if (existing) return existing.state;
 
 		if (this.series.size >= this.maxSeries) {
-			const collapsed = collapse(attributes);
-			const collapsedKey = attributeKey(collapsed);
+			// Past the hard ceiling nothing new is admitted at all: every observation
+			// folds into the single all-collapsed series. This is what makes the bound a
+			// property of this code rather than a promise each call site has to keep.
+			const attrs = this.series.size >= this.hardMaxSeries ? collapseAll(attributes) : collapse(attributes);
+			const collapsedKey = attributeKey(attrs);
 			const found = this.series.get(collapsedKey);
 			if (found) {
 				this.overflowed++;
 				return found.state;
 			}
-			// The collapsed series itself may still be new. Admit it — there are only
-			// as many of those as there are combinations of bounded attributes.
-			const created = { attributes: collapsed, state: this.initial() };
+			// The collapsed series itself may still be new. Admit it — there are only as
+			// many of those as there are combinations of bounded attributes, and the hard
+			// ceiling above catches the case where an attribute turns out not to be.
+			const created = { attributes: attrs, state: this.initial() };
 			this.series.set(collapsedKey, created);
 			this.overflowed++;
 			return created.state;

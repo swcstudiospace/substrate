@@ -44,13 +44,23 @@ server.listen(config.port, config.host, () => {
 	);
 });
 
+/** How long the final OTLP export may take before shutdown stops waiting for it. */
+const SHUTDOWN_FLUSH_MS = 2000;
+
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
 	process.on(signal, () => {
-		// The last export before shutdown, so the counters a restart resets are not
-		// simply lost. It is best-effort: the process exits on the close callback either
-		// way, because a collector that is hanging must not delay a systemd stop.
-		void observability.exporter?.flush().catch(() => undefined);
 		observability.stop();
-		server.close(() => process.exit(0));
+		server.close(async () => {
+			// The last export before shutdown, so the counters a restart resets are not
+			// simply lost — and *awaited*, within a bound. Firing it and exiting
+			// immediately lost it on an idle server, where the close callback runs at once
+			// and killed the request mid-flight. The bound matters just as much: a
+			// collector that hangs must not delay a systemd stop into a SIGKILL.
+			await Promise.race([
+				observability.exporter?.flush().catch(() => undefined) ?? Promise.resolve(),
+				Bun.sleep(SHUTDOWN_FLUSH_MS),
+			]);
+			process.exit(0);
+		});
 	});
 }
