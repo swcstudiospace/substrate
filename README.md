@@ -137,6 +137,20 @@ blackholed for 60 s; `packages/audit/src/chaos.test.ts` proves the same decision
 Details in [`docs/observability.md`](docs/observability.md) and
 [`docs/mcp-audit.md`](docs/mcp-audit.md).
 
+## Agent Swarm runs on this
+
+[`swcstudiospace/agent-swarm`](https://github.com/swcstudiospace/agent-swarm) is a 15-agent
+SDLC mesh — A01 `ORCH` through A15 `DOC`, single-writer artifact ownership, fail-closed
+quality/review/security gates. It is a mesh of **roles**; the substrate is the **platform** it
+runs on. The swarm keeps its roster, its DAG and its gates; the substrate stays the source of
+record for events, governed memory, leases and handoffs, and the swarm reaches all of it
+through `substrate-mcp` and nothing else — one `correlation_id` is one Graph ID.
+
+[ADR 0001](docs/adr/0001-agent-swarm-as-sdlc-mesh-on-substrate.md) has the plane mapping, the
+non-goals (no second Greptime door, no memory-gate bypass, no NATS replacement, no big-bang
+delete of the swarm Task Store) and the phased plan S1–S5. Decisions live in
+[`docs/adr/`](docs/adr/).
+
 ## Non-negotiables
 
 - **Fail open — except memory.** A substrate outage must never block a prompt: every hook
