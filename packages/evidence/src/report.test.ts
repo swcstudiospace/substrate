@@ -168,4 +168,33 @@ describe("usageForGraph", () => {
 		expect(usageForGraph(undefined, "ut-1")).toBeNull();
 		expect(usageForGraph(new SubstrateInstruments().snapshot(), "ut-1")).toBeNull();
 	});
+
+	test("finds a long graph id, and does not hand it a longer one's totals", () => {
+		// The metric attribute used to be truncated at 120 characters while this searches
+		// with the full id, so a graph whose id was longer lost its usage — and an id of
+		// exactly 120 received the totals of every longer id sharing its prefix, reporting
+		// one graph's spend as another's.
+		const long = `ut-${"a".repeat(300)}`;
+		const longer = `${long}-child`;
+		const instruments = new SubstrateInstruments();
+		instruments.recordEmit({
+			surface: "omp",
+			graph_id: long,
+			kind: "prompt",
+			stored: true,
+			durationMs: 1,
+			payload: { usage: { input_tokens: 11, cost_usd: 0.5 } },
+		});
+		instruments.recordEmit({
+			surface: "omp",
+			graph_id: longer,
+			kind: "prompt",
+			stored: true,
+			durationMs: 1,
+			payload: { usage: { input_tokens: 2000, cost_usd: 90 } },
+		});
+
+		expect(usageForGraph(instruments.snapshot(), long)).toEqual({ inputTokens: 11, outputTokens: 0, costUsd: 0.5 });
+		expect(usageForGraph(instruments.snapshot(), longer)).toEqual({ inputTokens: 2000, outputTokens: 0, costUsd: 90 });
+	});
 });

@@ -4,7 +4,11 @@ import {
 	DEFAULT_MAX_SERIES,
 	Histogram,
 	LATENCY_BUCKETS_MS,
+	IDENTIFIER_ATTRIBUTES,
 	MAX_ATTRIBUTE_LENGTH,
+	MAX_IDENTIFIER_ATTRIBUTE_LENGTH,
+	boundValue,
+	limitFor,
 	MetricRegistry,
 	OVERFLOW,
 	VOLATILE_ATTRIBUTES,
@@ -180,6 +184,38 @@ describe("attribute values are length-bounded", () => {
 
 	test("an ordinary value is untouched", () => {
 		expect(cleanAttributes({ surface: "omp", model: "opus" })).toEqual({ surface: "omp", model: "opus" });
+	});
+
+	test("an identifier gets the longer cap, because evidence reads it back by its exact value", () => {
+		// `substrate evidence` finds a graph's token and cost totals by searching with the
+		// full id. At 120 characters the two ends disagreed: a longer id's usage could never
+		// be found again. 512 is the event path's own `MAX_FIELD`, so anything this
+		// substrate accepts is now carried whole.
+		const id = `ut-${"a".repeat(400)}`;
+		expect(MAX_IDENTIFIER_ATTRIBUTE_LENGTH).toBe(512);
+		expect(cleanAttributes({ graph_id: id }).graph_id).toBe(id);
+		expect(cleanAttributes({ node_id: id }).node_id).toBe(id);
+		expect(cleanAttributes({ session_id: id }).session_id).toBe(id);
+		expect(IDENTIFIER_ATTRIBUTES).toContain("graph_id");
+	});
+
+	test("two over-long identifiers sharing a prefix do not collide", () => {
+		// The misattribution this replaces. A plain slice is a prefix, so an id of exactly
+		// the cap length received the totals of every longer id that started with it —
+		// one graph's spend reported as another's, which is worse than losing it.
+		const shared = "ut-" + "a".repeat(600);
+		const first = boundValue(shared, MAX_IDENTIFIER_ATTRIBUTE_LENGTH);
+		const second = boundValue(`${shared}-other`, MAX_IDENTIFIER_ATTRIBUTE_LENGTH);
+
+		expect(first).not.toBe(second);
+		expect(first.length).toBe(MAX_IDENTIFIER_ATTRIBUTE_LENGTH);
+		expect(second.length).toBe(MAX_IDENTIFIER_ATTRIBUTE_LENGTH);
+	});
+
+	test("the bound is still a bound: nothing a caller sends exceeds it", () => {
+		expect(boundValue("x".repeat(100_000), MAX_ATTRIBUTE_LENGTH).length).toBe(MAX_ATTRIBUTE_LENGTH);
+		expect(limitFor("graph_id")).toBe(MAX_IDENTIFIER_ATTRIBUTE_LENGTH);
+		expect(limitFor("model")).toBe(MAX_ATTRIBUTE_LENGTH);
 	});
 });
 

@@ -131,22 +131,61 @@ export function attributeKey(attributes: Attributes): string {
 }
 
 /**
- * Longest attribute value kept. Anything longer is truncated.
+ * Longest attribute value kept. Anything longer is shortened by `boundValue`.
  *
- * Several attribute values are caller-supplied — a `graph_id`, a `model` from an
- * event payload — and a series key is held for the life of the process. Capping the
- * length bounds what one caller can make this hold, alongside the series cap that
- * bounds how many it can make.
+ * Several attribute values are caller-supplied — a `model` from an event payload, a
+ * `reason` — and a series key is held for the life of the process. Capping the length
+ * bounds what one caller can make this hold, alongside the series cap that bounds how
+ * many it can make.
  */
 export const MAX_ATTRIBUTE_LENGTH = 120;
+
+/**
+ * The cap for the attributes an identifier is *read back by*.
+ *
+ * `graph_id` is how `substrate evidence` finds a graph's token and cost totals, and it
+ * searches with the full id. At 120 characters the two ends disagreed: an id longer
+ * than that was recorded truncated and its usage could never be found again, and — worse
+ * — a 120-character id received the totals of every longer id sharing its prefix, so one
+ * graph's spend was reported as another's. `512` is `MAX_FIELD` on the event path and
+ * `MAX_IDENTIFIER` in the audit record, so an identifier this substrate accepts anywhere
+ * is now carried whole by the metrics too.
+ */
+export const MAX_IDENTIFIER_ATTRIBUTE_LENGTH = 512;
+
+/** Attributes that are looked up by their exact value, and so get the longer cap. */
+export const IDENTIFIER_ATTRIBUTES: readonly string[] = ["graph_id", "session_id", "node_id"];
+
+/**
+ * Shorten an over-long attribute value **without letting two values collide**.
+ *
+ * A plain `slice` is a prefix, and two different identifiers with a common prefix
+ * truncate to the same string — which in a metric means their observations are added
+ * together and attributed to whichever arrived first. A digest of the whole value,
+ * appended to the prefix, makes the result unique to the input while staying bounded:
+ * the series is still unreadable-long, but it is nobody else's.
+ *
+ * Nothing this substrate accepts reaches here — `MAX_IDENTIFIER_ATTRIBUTE_LENGTH`
+ * matches the event path's own cap — so this is the guard for a value that got past
+ * validation, not a routine path.
+ */
+export function boundValue(value: string, limit: number): string {
+	if (value.length <= limit) return value;
+	const digest = new Bun.CryptoHasher("sha256").update(value).digest("hex").slice(0, 12);
+	return `${value.slice(0, Math.max(limit - digest.length - 1, 0))}~${digest}`;
+}
+
+/** The length cap for one attribute, by name. */
+export function limitFor(key: string): number {
+	return IDENTIFIER_ATTRIBUTES.includes(key) ? MAX_IDENTIFIER_ATTRIBUTE_LENGTH : MAX_ATTRIBUTE_LENGTH;
+}
 
 /** Drop `undefined` and `null` so an absent attribute is absent, not the string "undefined". */
 export function cleanAttributes(attributes: Record<string, AttributeValue | null | undefined>): Attributes {
 	const out: Attributes = {};
 	for (const [key, value] of Object.entries(attributes)) {
 		if (value === null || value === undefined) continue;
-		out[key] =
-			typeof value === "string" && value.length > MAX_ATTRIBUTE_LENGTH ? value.slice(0, MAX_ATTRIBUTE_LENGTH) : value;
+		out[key] = typeof value === "string" ? boundValue(value, limitFor(key)) : value;
 	}
 	return out;
 }
