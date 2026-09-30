@@ -306,8 +306,8 @@ export class IndexStore implements MemoryStore {
 		const rows = (await this.sql`select * from graph_index where graph_id = ${graphId}`) as GraphIndexRow[];
 		const row = rows[0];
 		if (!row) return null;
-		const nodes = (await this.sql`
-			select * from graph_nodes where graph_id = ${graphId} order by node_id`) as GraphNode[];
+		const nodes = ((await this.sql`
+			select * from graph_nodes where graph_id = ${graphId} order by node_id`) as GraphNode[]).map(toNode);
 		const steps = (await this.sql`
 			select * from graph_steps where graph_id = ${graphId} order by node_id, step`) as GraphStep[];
 		const edges = (await this.sql`
@@ -326,8 +326,8 @@ export class IndexStore implements MemoryStore {
 			limit 10`) as GraphIndexRow[];
 		const out: GraphView[] = [];
 		for (const row of rows) {
-			const nodes = (await this.sql`
-				select * from graph_nodes where graph_id = ${row.graph_id} order by node_id`) as GraphNode[];
+			const nodes = ((await this.sql`
+				select * from graph_nodes where graph_id = ${row.graph_id} order by node_id`) as GraphNode[]).map(toNode);
 			out.push({ ...row, nodes, steps: [], edges: [] });
 		}
 		return out;
@@ -340,7 +340,7 @@ export class IndexStore implements MemoryStore {
 			select * from graph_nodes where graph_id = ${graphId} and node_id = ${nodeId}`) as GraphNode[];
 		const node = rows[0];
 		if (!node) throw new Error(`unknown node ${graphId}/${nodeId}`);
-		return node;
+		return toNode(node);
 	}
 
 	/**
@@ -415,7 +415,7 @@ export class IndexStore implements MemoryStore {
 							returning *`) as GraphNode[]);
 
 			const updated = rows[0];
-			if (updated) return { claimed: true, node: updated, lease: leaseView(leaseSnapshot(updated)), decision };
+			if (updated) return { claimed: true, node: toNode(updated), lease: leaseView(leaseSnapshot(updated)), decision };
 
 			// Lost the race, or the server disagreed about expiry. Look again.
 			node = await this.node(graphId, nodeId);
@@ -457,7 +457,7 @@ export class IndexStore implements MemoryStore {
 			returning *`) as GraphNode[];
 
 		const updated = rows[0];
-		if (updated) return { ok: true, node: updated, lease: leaseView(leaseSnapshot(updated)), decision };
+		if (updated) return { ok: true, node: toNode(updated), lease: leaseView(leaseSnapshot(updated)), decision };
 
 		// The statement matched nothing, so the lease went between the read and the
 		// write. Report what is true now rather than the decision that is no longer.
@@ -500,7 +500,7 @@ export class IndexStore implements MemoryStore {
 			returning *`) as GraphNode[];
 
 		const updated = rows[0];
-		if (updated) return { released: true, node: updated, decision };
+		if (updated) return { released: true, node: toNode(updated), decision };
 		const fresh = await this.node(graphId, nodeId);
 		return {
 			released: false,
@@ -580,19 +580,20 @@ export class IndexStore implements MemoryStore {
 
 	/** Every node in this repo that something holds — the claims a drift scan compares against. */
 	async claimedNodesForRepo(repo: string): Promise<Array<GraphNode & { repo: string | null; branch: string | null }>> {
-		return (await this.sql`
+		const rows = (await this.sql`
 			select n.*, g.repo, g.branch
 			from graph_nodes n join graph_index g using (graph_id)
 			where g.repo = ${repo} and n.claimed_by is not null
 			order by n.graph_id, n.node_id`) as Array<GraphNode & { repo: string | null; branch: string | null }>;
+		return rows.map((row) => ({ ...row, ...toNode(row) }));
 	}
 
 	/** Every node in this repo, claimed or not, for the edge checks a drift scan runs. */
 	async nodesForRepo(repo: string): Promise<GraphNode[]> {
-		return (await this.sql`
+		return ((await this.sql`
 			select n.* from graph_nodes n join graph_index g using (graph_id)
 			where g.repo = ${repo}
-			order by n.graph_id, n.node_id`) as GraphNode[];
+			order by n.graph_id, n.node_id`) as GraphNode[]).map(toNode);
 	}
 
 	async edgesForRepo(repo: string): Promise<GraphEdge[]> {
@@ -1017,6 +1018,25 @@ function isoOrNull(value: unknown): string | null {
 	if (value === null || value === undefined) return null;
 	if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString();
 	return String(value);
+}
+
+/**
+ * A node row as the rest of the substrate types it.
+ *
+ * Two driver quirks are corrected here rather than at each reader. Postgres
+ * hands back a BIGINT as a *string*, so `lease_epoch` would arrive as `"1"` —
+ * which serialises into the MCP reply beside a numeric `lease.epoch` and reads
+ * as two different values for one thing. And timestamps arrive as `Date`, which
+ * every caller either has to normalise or accidentally compares as an object.
+ */
+function toNode(row: GraphNode): GraphNode {
+	return {
+		...row,
+		claimed_at: isoOrNull(row.claimed_at),
+		lease_expires_at: isoOrNull(row.lease_expires_at),
+		lease_heartbeat_at: isoOrNull(row.lease_heartbeat_at),
+		lease_epoch: Number(row.lease_epoch ?? 0),
+	};
 }
 
 /** The lease columns of a node row, in the shape `lease.ts` reasons about. */

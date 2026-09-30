@@ -67,13 +67,16 @@ describe("the packet schema", () => {
 	test("redacts every free-text field before it is signed", () => {
 		// The packet is signed and then appended to a log nothing can rewrite, so a
 		// credential in a goal has exactly one chance to be caught: here.
+		// The credential shapes here are deliberately not `GREPTIME_*`: the store
+		// lock scans every tracked file for those, and it is right to — a fixture is
+		// not worth an exemption in the one test that keeps secrets out of the repo.
 		const built = packet({
-			goal: "resume the deploy with GREPTIME_PASSWORD=hunter2",
+			goal: "resume the deploy with PGPASSWORD=hunter2",
 			blockers: ["waiting on LINEAR_API_KEY=lin_api_abcdefghijklmnopqrstuvwx"],
 			notes: "ssh key: -----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----",
 		});
 
-		expect(built.goal).toBe(`resume the deploy with GREPTIME_PASSWORD=${REDACTED}`);
+		expect(built.goal).toBe(`resume the deploy with PGPASSWORD=${REDACTED}`);
 		expect(built.blockers[0]).toContain(REDACTED);
 		expect(built.blockers[0]).not.toContain("lin_api_abcdefghij");
 		expect(built.notes).toBe("ssh key: [REDACTED_PEM]");
