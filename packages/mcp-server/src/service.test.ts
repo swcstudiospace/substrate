@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { loadConfig } from "./config.ts";
+import { REDACTED } from "./redact.ts";
 import { Substrate } from "./service.ts";
-import type { SubstrateEvent } from "./types.ts";
+import type { EventInput, SubstrateEvent } from "./types.ts";
 
 /** Records what reached the event log, and stands in for the index. */
 function stubStores(graph: { repo?: string | null; branch?: string | null } | null) {
@@ -59,5 +60,103 @@ describe("claimNode", () => {
 
 		expect(result.claimed).toBe(true);
 		expect(emitted[0]?.repo).toBeNull();
+	});
+});
+
+describe("emit", () => {
+	const input: EventInput = { surface: "omp", kind: "shell", summary: "ran cargo test", session_id: "sess-1" };
+
+	/** A ledger stub that records what it was given and can be made to fail. */
+	function ledger(options: { lastHash?: string | null; fail?: string } = {}) {
+		const written: SubstrateEvent[] = [];
+		return {
+			written,
+			greptime: {
+				lastHash: async () => options.lastHash ?? null,
+				insertEvent: async (event: SubstrateEvent) => {
+					if (options.fail) throw new Error(options.fail);
+					written.push(event);
+				},
+			},
+		};
+	}
+
+	function substrateWith(greptime: unknown) {
+		return new Substrate(loadConfig({}), { index: null, greptime: greptime as never });
+	}
+
+	test("reports a stored event, redacted, chained onto the session's last hash", async () => {
+		const { written, greptime } = ledger({ lastHash: "prev-hash" });
+		const result = await substrateWith(greptime).emit({ ...input, summary: "exported PGPASSWORD=s3cr3t" });
+
+		expect(result.stored).toBe(true);
+		expect(result.error).toBeUndefined();
+		expect(written).toHaveLength(1);
+		expect(written[0]?.prev).toBe("prev-hash");
+		expect(written[0]?.summary).toBe(`exported PGPASSWORD=${REDACTED}`);
+		// The caller is handed exactly the row that was stored, hash included, so
+		// it can be quoted as a source_event.
+		expect(result.event.hash).toBe(written[0]?.hash ?? "");
+	});
+
+	test("says so rather than pretending, when no ledger is configured", async () => {
+		// The dishonest version of this returned the event and let the caller read
+		// it as a durable append.
+		const result = await substrateWith(null).emit(input);
+		expect(result.stored).toBe(false);
+		expect(result.error).toContain("GREPTIME_URL");
+		expect(result.event.hash).toMatch(/^[0-9a-f]{64}$/);
+	});
+
+	test("does not throw when the ledger refuses the write", async () => {
+		// Fail open: an unreachable event store must never fail an agent's turn.
+		const { greptime } = ledger({ fail: "greptime unreachable: connect ETIMEDOUT" });
+		const result = await substrateWith(greptime).emit(input);
+		expect(result.stored).toBe(false);
+		expect(result.error).toContain("ETIMEDOUT");
+	});
+
+	test("redacts the failure it reports back", async () => {
+		// A connection error can quote the URL it failed to reach, password and all.
+		const { greptime } = ledger({ fail: "greptime unreachable: postgres://user:hunter2@host/db refused" });
+		const result = await substrateWith(greptime).emit(input);
+		expect(result.error).not.toContain("hunter2");
+		expect(result.error).toContain(REDACTED);
+	});
+
+	test("still rejects an event that should never be stored", async () => {
+		// Invalid input is the caller's bug, not an outage — it surfaces as an error.
+		const { greptime } = ledger();
+		await expect(substrateWith(greptime).emit({ ...input, kind: "nope" as never })).rejects.toThrow();
+	});
+
+	test("a session's first event chains from nothing", async () => {
+		const { written, greptime } = ledger({ lastHash: null });
+		await substrateWith(greptime).emit(input);
+		expect(written[0]?.prev).toBeNull();
+	});
+
+	test("an unreadable previous hash starts a new chain rather than failing the append", async () => {
+		const greptime = {
+			lastHash: async () => {
+				throw new Error("greptime unreachable");
+			},
+			insertEvent: async () => undefined,
+		};
+		const result = await substrateWith(greptime).emit(input);
+		expect(result.stored).toBe(true);
+		expect(result.event.prev).toBeNull();
+	});
+});
+
+describe("migrate", () => {
+	test("surfaces a reachable-but-misconfigured ledger as degraded", async () => {
+		const greptime = { migrate: async () => ({ warnings: ["agent_events is not in append_mode"] }) };
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: greptime as never });
+
+		const result = await substrate.migrate();
+
+		expect(result.greptime).toBe(true);
+		expect(result.errors).toContain("greptime: agent_events is not in append_mode");
 	});
 });

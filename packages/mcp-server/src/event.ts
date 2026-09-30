@@ -45,14 +45,66 @@ function isKind(value: string): value is SubstrateEvent["kind"] {
 
 export class InvalidEventError extends Error {}
 
-/** Cap on a single summary, so one runaway collector cannot flood the log. */
+/**
+ * Caps on a single event, so one runaway collector cannot flood a log that
+ * nothing will ever compact or delete.
+ */
 const MAX_SUMMARY = 2000;
+const MAX_FIELD = 512;
+const MAX_PAYLOAD_STRING = 4000;
+const MAX_PAYLOAD_BYTES = 16_000;
+
+/**
+ * Redact, then cap, then treat empty as absent.
+ *
+ * The order matters: truncating first could cut a token in half so that its own
+ * pattern no longer matches, and the fragment would be stored. An empty result
+ * becomes `null` so the column is NULL rather than an empty string, which the
+ * brief's filters would otherwise treat as a value.
+ */
+function clean(value: string | null | undefined, limit: number): string | null {
+	if (value === undefined || value === null) return null;
+	const redacted = redact(value).slice(0, limit);
+	return redacted.length > 0 ? redacted : null;
+}
+
+/** Cap every string inside a JSON-shaped value. */
+function capStrings(value: unknown, limit: number): unknown {
+	if (typeof value === "string") return value.length > limit ? `${value.slice(0, limit)}…[truncated]` : value;
+	if (Array.isArray(value)) return value.map((inner) => capStrings(inner, limit));
+	if (value && typeof value === "object") {
+		const out: Record<string, unknown> = {};
+		for (const [key, inner] of Object.entries(value as Record<string, unknown>)) {
+			out[key] = capStrings(inner, limit);
+		}
+		return out;
+	}
+	return value;
+}
+
+/**
+ * Redact the payload, cap each string in it, then cap the whole thing.
+ *
+ * A collector that attaches a full diff or a command's entire stdout writes it
+ * into a log nothing can ever reclaim. Per-string capping keeps the useful keys
+ * intact; if the result is still oversized the payload is replaced outright,
+ * because a silently half-written object reads as complete and a marker does not.
+ */
+function normalizePayload(payload: Record<string, unknown> | undefined): Record<string, unknown> {
+	const capped = capStrings(redactValue(payload ?? {}), MAX_PAYLOAD_STRING) as Record<string, unknown>;
+	const bytes = Buffer.byteLength(JSON.stringify(capped) ?? "{}");
+	if (bytes <= MAX_PAYLOAD_BYTES) return capped;
+	return { _dropped: `payload exceeded ${MAX_PAYLOAD_BYTES} bytes`, _bytes: bytes };
+}
 
 /**
  * Validate, redact and chain an incoming event.
  *
  * Redaction happens here rather than in each collector's own code path: a
- * collector may forget, but nothing reaches storage without passing through this.
+ * collector may forget, but nothing reaches storage without passing through
+ * this. Every free-text field is redacted, not just the summary — a branch name
+ * or a session id is agent-supplied too, and there is no second chance once a
+ * row is in an append-only log.
  */
 export function normalizeEvent(input: EventInput, prev: string | null): SubstrateEvent {
 	if (!input || typeof input !== "object") throw new InvalidEventError("event must be an object");
@@ -73,17 +125,18 @@ export function normalizeEvent(input: EventInput, prev: string | null): Substrat
 		id: `evt_${randomUUID().replace(/-/g, "")}`,
 		ts: ts.toISOString(),
 		surface: input.surface,
-		session_id: input.session_id ?? null,
-		graph_id: input.graph_id ?? null,
-		node_id: input.node_id ?? null,
-		linear_identifier: input.linear_identifier ?? null,
-		step: typeof input.step === "number" ? input.step : null,
-		repo: input.repo ?? null,
-		branch: input.branch ?? null,
+		session_id: clean(input.session_id, MAX_FIELD),
+		graph_id: clean(input.graph_id, MAX_FIELD),
+		node_id: clean(input.node_id, MAX_FIELD),
+		linear_identifier: clean(input.linear_identifier, MAX_FIELD),
+		// A fractional or infinite step would reach a BIGINT column.
+		step: typeof input.step === "number" && Number.isFinite(input.step) ? Math.trunc(input.step) : null,
+		repo: clean(input.repo, MAX_FIELD),
+		branch: clean(input.branch, MAX_FIELD),
 		actor: input.actor === "human" ? "human" : "agent",
 		kind: input.kind,
-		summary: redact(input.summary).slice(0, MAX_SUMMARY),
-		payload: redactValue(input.payload ?? {}),
+		summary: clean(input.summary, MAX_SUMMARY) ?? "",
+		payload: normalizePayload(input.payload),
 		prev,
 	};
 

@@ -69,6 +69,72 @@ describe("normalizeEvent", () => {
 		const event = normalizeEvent({ ...base, summary: "x".repeat(5000) }, null);
 		expect(event.summary.length).toBe(2000);
 	});
+
+	test("redacts every free-text field, not only the summary", () => {
+		// A branch name and a session id are agent-supplied too, and there is no
+		// second chance once the row is in an append-only log.
+		const event = normalizeEvent(
+			{
+				...base,
+				branch: "fix/GITHUB_TOKEN=ghp_pasted_by_accident",
+				session_id: "sess-authorization: Bearer abcdefghijklmnop",
+				repo: "swcstudiospace/x",
+			},
+			null,
+		);
+		expect(event.branch).toBe(`fix/GITHUB_TOKEN=${REDACTED}`);
+		expect(event.session_id).toBe(`sess-authorization: ${REDACTED}`);
+		expect(event.repo).toBe("swcstudiospace/x");
+	});
+
+	test("redacts before truncating, so a cut-off token cannot survive", () => {
+		// Truncating first would leave a fragment the pattern no longer matches.
+		const token = `ghp_${"a".repeat(40)}`;
+		const event = normalizeEvent({ ...base, summary: `${"x".repeat(1990)} ${token}` }, null);
+		expect(event.summary).not.toContain("ghp_");
+	});
+
+	test("an empty optional field is stored as NULL, not as an empty string", () => {
+		const event = normalizeEvent({ ...base, branch: "", node_id: undefined }, null);
+		expect(event.branch).toBeNull();
+		expect(event.node_id).toBeNull();
+	});
+
+	test("keeps step a whole number", () => {
+		expect(normalizeEvent({ ...base, step: 2.7 }, null).step).toBe(2);
+		expect(normalizeEvent({ ...base, step: Number.NaN }, null).step).toBeNull();
+	});
+});
+
+describe("payload limits", () => {
+	test("caps an individual oversized string but keeps its siblings", () => {
+		const event = normalizeEvent({ ...base, payload: { diff: "d".repeat(9000), file: "ws.rs" } }, null);
+		expect(String(event.payload.diff)).toContain("[truncated]");
+		expect(String(event.payload.diff).length).toBeLessThan(4100);
+		expect(event.payload.file).toBe("ws.rs");
+	});
+
+	test("replaces a payload that is still oversized after capping", () => {
+		// Many medium strings pass the per-string cap and still bloat the log, so
+		// the whole payload is swapped for a marker rather than half-written.
+		const payload: Record<string, unknown> = {};
+		for (let i = 0; i < 20; i++) payload[`k${i}`] = "v".repeat(2000);
+		const event = normalizeEvent({ ...base, payload }, null);
+		expect(event.payload._dropped).toContain("exceeded");
+		expect(typeof event.payload._bytes).toBe("number");
+		expect(event.payload.k0).toBeUndefined();
+	});
+
+	test("caps strings nested in arrays and objects", () => {
+		const event = normalizeEvent({ ...base, payload: { runs: [{ out: "o".repeat(9000) }] } }, null);
+		const runs = event.payload.runs as Array<{ out: string }>;
+		expect(runs[0]?.out).toContain("[truncated]");
+	});
+
+	test("leaves a payload within the limits untouched", () => {
+		const payload = { cmd: "cargo test", exit: 0, ok: true, files: ["a.rs"] };
+		expect(normalizeEvent({ ...base, payload }, null).payload).toEqual(payload);
+	});
 });
 
 describe("hash chain", () => {

@@ -75,11 +75,20 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig) 
 			if (req.method === "POST" && url.pathname === "/events") {
 				const raw = await readBody(req);
 				const body = JSON.parse(raw) as Record<string, unknown>;
-				const event = await substrate.emit({
+				const result = await substrate.emit({
 					...(body as object),
 					surface: (typeof body.surface === "string" ? (body.surface as Surface) : null) ?? surface ?? "claude-code",
 				} as Parameters<Substrate["emit"]>[0]);
-				sendJson(res, 202, { id: event.id, ts: event.ts, hash: event.hash });
+				// 503 when the ledger did not take it. The `substrate` CLI ignores the
+				// status and exits 0 either way — failing open is the client's job, and
+				// this surface owes its caller the truth about durability.
+				sendJson(res, result.stored ? 202 : 503, {
+					id: result.event.id,
+					ts: result.event.ts,
+					hash: result.event.hash,
+					stored: result.stored,
+					...(result.error ? { error: result.error } : {}),
+				});
 				return;
 			}
 

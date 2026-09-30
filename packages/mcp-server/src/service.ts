@@ -8,8 +8,9 @@
 import { composeBrief, type BriefRequest } from "./brief.ts";
 import type { SubstrateConfig } from "./config.ts";
 import { normalizeEvent, verifyChain } from "./event.ts";
-import { GreptimeClient, quote } from "./greptime.ts";
+import { GreptimeClient } from "./greptime.ts";
 import { IndexStore } from "./index-store.ts";
+import { redact } from "./redact.ts";
 import type {
 	Actor,
 	EventInput,
@@ -51,6 +52,21 @@ function rowToEvent(row: Record<string, unknown>): SubstrateEvent {
 	};
 }
 
+/**
+ * The outcome of an append.
+ *
+ * `stored` is reported rather than assumed: the substrate fails open, so a
+ * caller gets its normalised event back even when the ledger is unreachable —
+ * and it would be dishonest to let that look like a durable write.
+ */
+export interface EmitResult {
+	event: SubstrateEvent;
+	/** False when the ledger is unconfigured, unreachable or refused the write. */
+	stored: boolean;
+	/** Why it was not stored. Redacted, because a connection error can quote a URL. */
+	error?: string;
+}
+
 export class Substrate {
 	readonly index: IndexStore | null;
 	readonly greptime: GreptimeClient | null;
@@ -83,8 +99,11 @@ export class Substrate {
 		}
 		if (this.greptime) {
 			try {
-				await this.greptime.migrate();
+				const { warnings } = await this.greptime.migrate();
 				greptimeOk = true;
+				// A reachable but misconfigured ledger is a degraded state, not a healthy
+				// one: it belongs in the same list the entry point prints at boot.
+				for (const warning of warnings) errors.push(`greptime: ${warning}`);
 			} catch (cause) {
 				errors.push(`greptime: ${String(cause)}`);
 			}
@@ -101,15 +120,27 @@ export class Substrate {
 	/**
 	 * Append an event. Chains onto the session's previous event when Greptime
 	 * knows of one; a session's first event has `prev: null`.
+	 *
+	 * Invalid input throws — a caller that sent an unknown kind wants to hear
+	 * about it. A ledger that is simply unavailable does not throw, because the
+	 * substrate is never allowed to fail an agent's turn; the failure comes back
+	 * as `stored: false` and is left to the caller to act on or ignore.
 	 */
-	async emit(input: EventInput): Promise<SubstrateEvent> {
+	async emit(input: EventInput): Promise<EmitResult> {
 		let prev: string | null = null;
 		if (this.greptime && input.session_id) {
 			prev = await this.greptime.lastHash(input.session_id).catch(() => null);
 		}
 		const event = normalizeEvent(input, prev);
-		if (this.greptime) await this.greptime.insertEvent(event);
-		return event;
+		if (!this.greptime) return { event, stored: false, error: "GREPTIME_URL is not set" };
+		try {
+			await this.greptime.insertEvent(event);
+			return { event, stored: true };
+		} catch (cause) {
+			const error = redact(String(cause));
+			process.stderr.write(`[substrate] event ${event.id} not stored — ${error}\n`);
+			return { event, stored: false, error };
+		}
 	}
 
 	async writeMemory(entry: MemoryEntryInput): Promise<MemoryEntry> {
@@ -183,11 +214,7 @@ export class Substrate {
 		graphId: string,
 	): Promise<{ ok: boolean; events: number; brokenAt?: string; reason?: string }> {
 		if (!this.greptime) return { ok: false, events: 0, reason: "greptime not configured" };
-		const rows = await this.greptime.sql(
-			`SELECT "ts", "id", "surface", "session_id", "graph_id", "node_id", "linear_identifier", "step",
-			        "repo", "branch", "actor", "kind", "summary", "payload", "hash", "prev"
-			 FROM "agent_events" WHERE "graph_id" = ${quote(graphId)} ORDER BY "ts"`,
-		);
+		const rows = await this.greptime.readEvents("graph_id", graphId);
 
 		const bySession = new Map<string, SubstrateEvent[]>();
 		for (const row of rows) {
