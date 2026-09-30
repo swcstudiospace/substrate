@@ -651,9 +651,15 @@ export class IndexStore implements MemoryStore {
 			order by e.graph_id, e.from_node`) as GraphEdge[];
 	}
 
-	async setNodeState(graphId: string, nodeId: string, state: NodeState): Promise<void> {
-		await this.sql`update graph_nodes set state = ${state} where graph_id = ${graphId} and node_id = ${nodeId}`;
-	}
+	// There is deliberately no `setNodeState`.
+	//
+	// It was the unconditional state write that made a completion unfenced, and it
+	// has no caller left: `releaseNode` writes the state inside the same guarded
+	// UPDATE that proves the hold. Leaving it exported would leave the hazard one
+	// call away — the next thing that needs to write a node's state would reach for
+	// it and lose the fence again, which is exactly how the completion path came to
+	// mark a second agent's live node completed. A state write that cannot name the
+	// lease it is writing under does not belong on this store.
 
 	async setGraphStatus(graphId: string, status: string, prUrl?: string | null): Promise<void> {
 		await this.sql`

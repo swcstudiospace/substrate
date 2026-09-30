@@ -176,7 +176,8 @@ describe("releaseNode and completeNode", () => {
 			// Deliberately present and expected never to fire: completion writes the
 			// state inside the release's own guarded statement now, because two
 			// statements let another agent claim the freed node in between and get
-			// their live node marked completed.
+			// their live node marked completed. The real store no longer has this
+			// method at all — the stub keeps it so the tripwire outlives the removal.
 			setNodeState: async () => {
 				throw new Error("completion must not write the state in a second statement");
 			},
