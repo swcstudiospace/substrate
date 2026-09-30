@@ -273,6 +273,17 @@ export interface SubstrateObserver {
 		graph_id: string;
 		node_id: string;
 		decision: ClaimDecision;
+		/**
+		 * What the *index* did: `granted`, `renewed`, `reclaimed`, `stolen` or `refused`.
+		 *
+		 * Carried alongside `decision` rather than folded into it because the two answer
+		 * different questions and only the pair is enough for the lease-steal SLO. A
+		 * takeover of another surface's expired lease is `decision: "granted"` with
+		 * `action: "stolen"`; without the action the observer saw only the grant, mapped it
+		 * to the `granted` metric outcome, and the lease-steal rate read zero for every
+		 * takeover that actually happened — an objective that cannot move is not one.
+		 */
+		action: string;
 		reason: string | null;
 		quarantineReason: string | null;
 	}): void;
@@ -750,6 +761,7 @@ export class Substrate {
 			graph_id: graphId,
 			node_id: nodeId,
 			decision: verdict.decision,
+			action: decision.action,
 			reason,
 			quarantineReason: verdict.quarantineReason,
 		});

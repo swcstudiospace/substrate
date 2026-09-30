@@ -6,10 +6,12 @@
  */
 export {
 	type ChainEvidence,
+	type ChainState,
 	type EvidenceBundle,
 	type EvidenceInput,
 	type EvidenceUsage,
 	buildEvidence,
+	chainStateOf,
 	usageForGraph,
 } from "./report.ts";
 

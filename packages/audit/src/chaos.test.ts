@@ -84,20 +84,40 @@ function harness() {
 
 	async function claim(surface: string, graphId: string, nodeId: string) {
 		const tool = "graph_claim";
-		// The index grants it first — the index is up; only the ledger is down.
-		const recorded = ledger.append().stored;
-		const verdict = decideClaim({ claimed: true, recorded, requireRecorded: true });
-
+		// Two appends, in the order `substrate-mcp` makes them, because the ordering is
+		// what the audit gets wrong if nobody models it. The gate in front of the
+		// dispatcher records the *call* as allowed before anything runs; only then does
+		// the claim's event fail to reach the ledger and the hold get withdrawn. A
+		// harness that wrote one record carrying the final verdict could not have caught
+		// the trail showing a withdrawn claim as allowed with nothing beside it.
 		await audit.append({
 			surface,
 			tool,
 			graph_id: graphId,
 			node_id: nodeId,
-			decision: verdict.decision === "granted" ? "allowed" : "denied",
+			decision: "allowed",
 			mode: auditMode(tool),
 			transport: "mcp",
-			reason: verdict.reason,
 		});
+
+		// The index grants it first — the index is up; only the ledger is down.
+		const recorded = ledger.append().stored;
+		const verdict = decideClaim({ claimed: true, recorded, requireRecorded: true });
+
+		if (verdict.decision !== "granted") {
+			// The correction, appended rather than edited: both records are true, and an
+			// append-only chain has no other way to say the second one.
+			await audit.append({
+				surface,
+				tool,
+				graph_id: graphId,
+				node_id: nodeId,
+				decision: "denied",
+				mode: "fail-open",
+				transport: "internal",
+				reason: `the claim was withdrawn after it was allowed: ${verdict.reason ?? "no reason given"}`,
+			});
+		}
 		instruments.recordClaim({
 			surface,
 			graph_id: graphId,
@@ -158,7 +178,8 @@ describe("Greptime down for 60 s", () => {
 
 		const verdict = await audit.verify();
 		expect(verdict.ok).toBe(true);
-		expect(verdict.records).toBe(12);
+		// Six emits, six claim calls allowed at the gate, six withdrawals recorded after.
+		expect(verdict.records).toBe(18);
 
 		const records = await audit.readAll();
 		const denials = records.records.filter((record) => record.decision === "denied");
@@ -166,11 +187,35 @@ describe("Greptime down for 60 s", () => {
 		expect(denials.every((record) => record.tool === "graph_claim")).toBe(true);
 		expect(denials.every((record) => (record.reason ?? "").includes("withdrawn"))).toBe(true);
 
+		// **Every claim allowed at the gate has its withdrawal beside it.** This is the
+		// property the trail lacked: the gate recorded `graph_claim` allowed, the hold was
+		// then withdrawn, and nothing wrote that — so the audit and the evidence bundle
+		// showed the opposite of the decision the substrate made, during the one outage
+		// this fail-closed behaviour exists for.
+		const claims = records.records.filter((record) => record.tool === "graph_claim");
+		expect(claims.filter((record) => record.decision === "allowed")).toHaveLength(6);
+		for (const node of ["n0", "n10", "n20", "n30", "n40", "n50"]) {
+			const forNode = claims.filter((record) => record.node_id === node);
+			expect(forNode.map((record) => record.decision)).toEqual(["allowed", "denied"]);
+		}
+
 		// The emits are recorded as allowed, because they were: the substrate accepted
 		// and normalised each one. Whether the ledger kept it is a separate fact, and it
 		// is the ledger's own `stored` that carries it.
-		const allowed = records.records.filter((record) => record.decision === "allowed");
-		expect(allowed.every((record) => record.tool === "events_emit")).toBe(true);
+		const emits = records.records.filter((record) => record.tool === "events_emit");
+		expect(emits).toHaveLength(6);
+		expect(emits.every((record) => record.decision === "allowed")).toBe(true);
+	});
+
+	test("a claim granted on a healthy ledger gets no withdrawal record", async () => {
+		// The other side of it: the correction exists because a withdrawal happened, not
+		// because a claim did. A trail that appended a denial beside every grant would be
+		// as misleading in the opposite direction.
+		const { claim, audit } = harness();
+		expect((await claim("omp", "ut-1", "n1")).decision).toBe("granted");
+
+		const { records } = await audit.readAll();
+		expect(records.map((record) => record.decision)).toEqual(["allowed"]);
 	});
 
 	test("the SLOs show the outage", async () => {

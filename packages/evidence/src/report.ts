@@ -15,11 +15,33 @@ import { auditStats } from "@substrate/audit";
 import type { MetricSnapshot, SloResult } from "@substrate/observability";
 import { METRIC, findCounter, sumCounter } from "@substrate/observability";
 
+/**
+ * What a chain's verdict says, in the three states a reader has to tell apart.
+ *
+ * `ok` alone could not: `null` meant both "this deployment has no such chain to check"
+ * and "the chain exists and the store would not answer", and only the second is a
+ * failure. `substrate evidence` exits non-zero on a chain it could not verify — that is
+ * its contract — and it used to exit 0 through a ledger outage because the bundle gave
+ * it no way to distinguish the two. `ok` is kept beside it: it is what the HTML renders
+ * and what the older readers of this schema check.
+ */
+export type ChainState = "verified" | "broken" | "unverifiable" | "not-configured";
+
 export interface ChainEvidence {
 	ok: boolean | null;
+	/** Optional for a bundle written before this field existed; treat its absence as `ok`. */
+	state?: ChainState;
 	records: number;
 	brokenAt?: string | number;
 	reason?: string;
+}
+
+/** The state a verdict's `ok` implies, for a caller that has only the boolean. */
+export function chainStateOf(chain: Pick<ChainEvidence, "ok" | "state">): ChainState {
+	if (chain.state) return chain.state;
+	if (chain.ok === true) return "verified";
+	if (chain.ok === false) return "broken";
+	return "unverifiable";
 }
 
 export interface EvidenceInput {
@@ -103,6 +125,10 @@ export function buildEvidence(input: EvidenceInput): EvidenceBundle {
 			app_events: input.appChain,
 			mcp_audit: {
 				ok: verdict.ok,
+				// The audit chain is always present — it is this process's own file, or its
+				// own memory — so it is never `not-configured`. `durable: false` is how a
+				// memory-only chain is reported, and it is reported below.
+				state: verdict.ok ? ("verified" as const) : ("broken" as const),
 				records: verdict.records,
 				// `brokenAt` is omitted when the verdict has no locatable position, so a
 				// reader sees the reason rather than a sentinel. `reason` is always carried.

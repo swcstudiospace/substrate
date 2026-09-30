@@ -19,7 +19,7 @@ import {
 	AuditUnavailableError,
 	auditMode,
 	auditStats,
-	type AuditRecord,
+	type ClaimDecision,
 	type AuditTransport,
 } from "@substrate/audit";
 import {
@@ -32,6 +32,7 @@ import {
 	loadObservabilityConfig,
 	parseTraceparent,
 	sloCatalogue,
+	type ClaimOutcome,
 	type MetricSnapshot,
 	type SloResult,
 	type SloTarget,
@@ -53,6 +54,72 @@ const KNOWN_ROUTES = ["/brief", "/events", "/verify", "/healthz", "/mcp", "/metr
 
 export function normalizeRoute(pathname: string): string {
 	return (KNOWN_ROUTES as readonly string[]).includes(pathname) ? pathname : "other";
+}
+
+/**
+ * The claim metric's outcome, from the substrate's verdict *and* the index's action.
+ *
+ * A takeover of another surface's expired lease is `decision: "granted"` with the
+ * index reporting `action: "stolen"`, and `stolen` is the only outcome that increments
+ * `substrate.lease.steals`. Reading the verdict alone mapped every takeover to
+ * `granted`, so the lease-steal rate the SLO is stated over could not leave zero no
+ * matter how many leases were taken — the objective existed and the numerator did not.
+ *
+ * The verdict wins where the two disagree: a steal whose event never reached the ledger
+ * is `revoked`, and it did not happen, so it is not a steal.
+ */
+export function claimOutcome(decision: ClaimDecision, action?: string): ClaimOutcome {
+	if (decision === "contended") return "contended";
+	if (decision === "revoked") return "revoked";
+	return action === "stolen" ? "stolen" : "granted";
+}
+
+/**
+ * Record a withdrawn claim as a denial on the audit chain.
+ *
+ * The gate in front of the dispatcher records `graph_claim` as `allowed` — which is
+ * true of the *call*: it was permitted to run. What happens next is that the claim's
+ * event does not reach the ledger and `claimNode` withdraws the hold. Nothing then
+ * wrote that to the chain, so the audit and the per-graph evidence bundle showed the
+ * claim allowed and said nothing about the withdrawal — the exact opposite of the
+ * decision the substrate made, in the document an incident is reconstructed from, and
+ * during the one outage this fail-closed behaviour exists for.
+ *
+ * Appended as its own `denied` record rather than by amending the earlier one: the
+ * chain is append-only, and both records are true — the call was allowed and the hold
+ * was then withdrawn. `fail-open`, because the withdrawal has already happened and
+ * refusing to write it cannot undo it; the reason is on stderr either way, and a
+ * failed append is counted like any other.
+ *
+ * Fire-and-forget, because `SubstrateObserver` is synchronous by contract: nothing in
+ * it may fail the turn it is instrumenting. The returned promise is awaited only by
+ * tests.
+ */
+export async function recordClaimWithdrawal(
+	audit: AuditLog,
+	instruments: SubstrateInstruments,
+	sample: { surface: string; graph_id: string; node_id: string; reason: string | null; quarantineReason: string | null },
+): Promise<void> {
+	const written = await audit
+		.append({
+			surface: sample.surface,
+			tool: "graph_claim",
+			transport: "internal",
+			decision: "denied",
+			mode: "fail-open",
+			graph_id: sample.graph_id,
+			node_id: sample.node_id,
+			reason:
+				`the claim was withdrawn after it was allowed: ${sample.reason ?? sample.quarantineReason ?? "no reason given"}`,
+		})
+		.then((appended) => appended.written)
+		.catch(() => false);
+	instruments.recordAudit({ decision: "denied", written });
+	if (!written) {
+		process.stderr.write(
+			`[substrate] withdrew claim ${sample.graph_id}/${sample.node_id} for ${sample.surface} and could not record it\n`,
+		);
+	}
 }
 
 export interface Observability {
@@ -118,7 +185,7 @@ export function createObservability(config: SubstrateConfig, env: Record<string,
 			instruments.recordClaim({
 				surface: sample.surface,
 				graph_id: sample.graph_id,
-				outcome: sample.decision === "granted" ? "granted" : sample.decision === "contended" ? "contended" : "revoked",
+				outcome: claimOutcome(sample.decision, sample.action),
 			});
 			if (sample.quarantineReason) {
 				instruments.recordQuarantine({
@@ -126,6 +193,11 @@ export function createObservability(config: SubstrateConfig, env: Record<string,
 					graph_id: sample.graph_id,
 					reason: sample.quarantineReason,
 				});
+			}
+			// A withdrawal is a decision the audit has to carry, and the pre-dispatch gate
+			// cannot know about it yet: see `recordClaimWithdrawal`.
+			if (sample.decision === "revoked") {
+				void recordClaimWithdrawal(audit, instruments, sample);
 			}
 		},
 	};
@@ -153,6 +225,16 @@ export function createObservability(config: SubstrateConfig, env: Record<string,
 					opened.error
 						? `mcp audit chain is not durable — ${opened.error}; fail-closed tools will be refused`
 						: "mcp audit chain is in memory only (SUBSTRATE_AUDIT_PATH is unset) and ends at the next restart",
+				);
+			}
+			if (opened.missingHistory) {
+				// Loud, at boot, and not only in a verdict somebody has to ask for. The file
+				// was deleted or truncated after records were written to it, and the operator
+				// is the one who can say whether that was a rotation, a disk, or someone.
+				warnings.push(
+					`mcp audit chain is missing history — ${opened.missingHistory.checkpointSeq} record(s) were committed and the ` +
+						`file accounts for ${opened.missingHistory.foundSeq}; the chain continues from the checkpoint and every ` +
+						"verification will report the gap",
 				);
 			}
 			if (!settings.exportEnabled) {
@@ -218,18 +300,31 @@ export interface AuditOutcome {
  * and it is bounded by the file rather than by a process's live series map.
  */
 const KNOWN_TOOLS: ReadonlySet<string> = new Set([
+	// MCP tools, as `mcp.ts` registers them.
 	"memory_brief",
 	"memory_write",
 	"memory_search",
+	"memory_pending",
 	"events_emit",
+	"events_query",
+	"events_verify",
 	"graph_get",
 	"graph_register",
 	"graph_claim",
+	"graph_heartbeat",
 	"graph_release",
 	"graph_complete",
+	"coord_handoff",
+	"coord_handoff_verify",
+	"coord_handoff_list",
+	"coord_drift_scan",
+	"coord_reap_leases",
+	// REST routes, as `server.ts` audits them. A route audited under a tool's own name
+	// (`/memory` as `memory_write`) is covered by that name above and not repeated.
 	"brief",
 	"events",
 	"verify",
+	"drift",
 	"evidence",
 ]);
 
@@ -422,12 +517,24 @@ export function startRequestSpan(
 
 // ── evidence ─────────────────────────────────────────────────────────────────
 
+/** How many of one graph's audit records a bundle carries. Beyond this, a note says so. */
+export const MAX_EVIDENCE_RECORDS = 5000;
+
 /**
  * Assemble the bundle for one graph.
  *
  * Only audit records naming the graph are included — a record with no `graph_id`
  * belongs to no graph, and folding those in would make every bundle a copy of the
  * whole trail.
+ *
+ * **One pass over the audit file, not two.** Verifying it and then selecting the
+ * graph's records used to be two whole reads and two whole parses, with the request's
+ * own record appended between them — so an ordinary authenticated `/evidence` call cost
+ * twice a trail that has no compaction, and a few of them in a row could take the MCP
+ * process down with the substrate on the critical path of every prompt on the host.
+ * `verifiedView` does both in one streaming pass, holds this graph's records rather
+ * than all of them, and stops collecting at `MAX_EVIDENCE_RECORDS` — so the cost is
+ * proportional to the graph being asked about, whatever the file grew to around it.
  */
 export async function buildGraphEvidence(
 	observability: Observability,
@@ -438,16 +545,26 @@ export async function buildGraphEvidence(
 	const appChain = await substrate
 		.verifyGraph(graphId)
 		.then((verdict) => ({
+			// `state`, not just `ok`. A null `ok` used to mean both "there is no ledger to
+			// check" and "the ledger would not answer", and those are opposite facts about
+			// an evidence document: one is a deployment that has no app chain, the other is
+			// a chain that exists and could not be verified. `substrate evidence` has to
+			// exit non-zero on the second and not on the first, so the bundle has to say
+			// which — see `chainState` and `cmdEvidence`.
+			state: verdict.reason === "greptime not configured" ? ("not-configured" as const) : chainState(verdict.ok),
 			ok: verdict.reason === "greptime not configured" ? null : verdict.ok,
 			records: verdict.events,
 			...(verdict.brokenAt ? { brokenAt: verdict.brokenAt } : {}),
 			...(verdict.reason ? { reason: verdict.reason } : {}),
 		}))
-		.catch((cause: unknown) => ({ ok: null, records: 0, reason: redact(String(cause)) }));
+		.catch((cause: unknown) => ({
+			state: "unverifiable" as const,
+			ok: null,
+			records: 0,
+			reason: redact(String(cause)),
+		}));
 
-	const chain = await observability.audit.verify();
-	const { records } = await observability.audit.readAll();
-	const forGraph = records.filter((record: AuditRecord) => record.graph_id === graphId);
+	const { verdict: chain, records: forGraph, total } = await observability.audit.verifiedView(graphId, MAX_EVIDENCE_RECORDS);
 
 	return buildEvidence({
 		graph_id: graphId,
@@ -462,12 +579,31 @@ export async function buildGraphEvidence(
 		},
 		metrics: observability.snapshot(),
 		notes: [
-			...(forGraph.length === 0 && records.length > 0
-				? [`No MCP audit record names ${graphId}; ${records.length} record(s) in the chain belong to other graphs or to none.`]
+			...(forGraph.length === 0 && total > 0
+				? [`No MCP audit record names ${graphId}; ${total} record(s) in the chain belong to other graphs or to none.`]
+				: []),
+			...(forGraph.length >= MAX_EVIDENCE_RECORDS
+				? [
+						`Only the first ${MAX_EVIDENCE_RECORDS} audit records naming ${graphId} are listed; the chain verdict above ` +
+							`covers all ${total} record(s) in the file.`,
+					]
+				: []),
+			...(observability.audit.missingHistory
+				? [
+						"The MCP audit file is missing history: this process committed more records than the file now accounts for, " +
+							"so decisions taken before the loss are not in this bundle and cannot be recovered from it.",
+					]
 				: []),
 			...notes,
 		],
 	});
+}
+
+/** A verdict's three-way state, for the `ok` a bundle carries alongside it. */
+export function chainState(ok: boolean | null): "verified" | "broken" | "unverifiable" {
+	if (ok === true) return "verified";
+	if (ok === false) return "broken";
+	return "unverifiable";
 }
 
 export { auditStats, renderEvidenceHtml };

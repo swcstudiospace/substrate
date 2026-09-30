@@ -1,16 +1,20 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AuditUnavailableError, type AuditRecordInput } from "@substrate/audit";
 import { METRIC, findCounter, sumCounter } from "@substrate/observability";
 import { loadConfig } from "./config.ts";
 import {
+	MAX_EVIDENCE_RECORDS,
 	auditRefusal,
 	auditToolCalls,
 	buildGraphEvidence,
+	chainState,
+	claimOutcome,
 	createObservability,
 	normalizeRoute,
+	recordClaimWithdrawal,
 	toolCallsIn,
 	toolLabel,
 } from "./observe.ts";
@@ -428,6 +432,7 @@ describe("createObservability", () => {
 			graph_id: "ut-1",
 			node_id: "n4",
 			decision: "revoked",
+			action: "granted",
 			reason: "withdrawn",
 			quarantineReason: "unrecorded-claim",
 		});
@@ -492,5 +497,248 @@ describe("buildGraphEvidence", () => {
 
 		expect(bundle.notes).toContain("collected during the chaos smoke");
 		observed.stop();
+	});
+});
+
+describe("claimOutcome", () => {
+	test("a takeover of an expired lease is stolen, not granted", () => {
+		// `stolen` is the only outcome that increments `substrate.lease.steals`. Reading the
+		// verdict alone mapped every takeover to `granted`, so the lease-steal rate the SLO
+		// is stated over could not leave zero however many leases were taken — an objective
+		// whose numerator cannot move is not one.
+		expect(claimOutcome("granted", "stolen")).toBe("stolen");
+	});
+
+	test("an ordinary grant, a renewal and a reclaim are granted", () => {
+		for (const action of ["granted", "renewed", "reclaimed", undefined]) {
+			expect(claimOutcome("granted", action)).toBe("granted");
+		}
+	});
+
+	test("the verdict wins: a withdrawn steal did not happen, so it is not a steal", () => {
+		expect(claimOutcome("revoked", "stolen")).toBe("revoked");
+		expect(claimOutcome("contended", "stolen")).toBe("contended");
+	});
+});
+
+describe("the claim observer", () => {
+	test("a steal increments the lease-steal counter the SLO reads", async () => {
+		const observed = createObservability(loadConfig({}));
+		await observed.start();
+		observed.observer.claimed?.({
+			surface: "omp",
+			graph_id: "ut-1",
+			node_id: "n4",
+			decision: "granted",
+			action: "stolen",
+			reason: null,
+			quarantineReason: null,
+		});
+
+		const snapshot = observed.snapshot();
+		expect(sumCounter(findCounter(snapshot, METRIC.leaseSteals)!, {})).toBe(1);
+		expect(sumCounter(findCounter(snapshot, METRIC.claims)!, { outcome: "stolen" })).toBe(1);
+		expect(sumCounter(findCounter(snapshot, METRIC.claims)!, { outcome: "granted" })).toBe(0);
+		observed.stop();
+	});
+
+	test("an ordinary grant does not", async () => {
+		const observed = createObservability(loadConfig({}));
+		await observed.start();
+		observed.observer.claimed?.({
+			surface: "omp",
+			graph_id: "ut-1",
+			node_id: "n4",
+			decision: "granted",
+			action: "granted",
+			reason: null,
+			quarantineReason: null,
+		});
+
+		expect(sumCounter(findCounter(observed.snapshot(), METRIC.leaseSteals)!, {})).toBe(0);
+		observed.stop();
+	});
+});
+
+describe("a withdrawn claim on the audit chain", () => {
+	test("is recorded as denied, so the trail does not read as allowed", async () => {
+		// The gate in front of the dispatcher records `graph_claim` as allowed — true of
+		// the call. The claim's event then does not reach the ledger and the hold is
+		// withdrawn, and nothing wrote that: the audit and the evidence bundle showed the
+		// claim allowed and said nothing about the withdrawal, during the one outage this
+		// fail-closed behaviour exists for.
+		const observed = createObservability(loadConfig({}));
+		await observed.start();
+		await auditToolCalls(observed, "omp", [{ id: 1, tool: "graph_claim", args: { graph_id: "ut-1", node_id: "n4" } }]);
+
+		await recordClaimWithdrawal(observed.audit, observed.instruments, {
+			surface: "omp",
+			graph_id: "ut-1",
+			node_id: "n4",
+			reason: "the claim event did not reach the ledger",
+			quarantineReason: "unrecorded-claim",
+		});
+
+		const { records } = await observed.audit.readAll();
+		expect(records.map((record) => [record.tool, record.decision])).toEqual([
+			["graph_claim", "allowed"],
+			["graph_claim", "denied"],
+		]);
+		const withdrawal = records[1]!;
+		expect(withdrawal.reason).toContain("withdrawn after it was allowed");
+		expect(withdrawal.graph_id).toBe("ut-1");
+		expect(withdrawal.node_id).toBe("n4");
+		expect(withdrawal.transport).toBe("internal");
+		// Fail-open: the withdrawal has already happened, and refusing to write it cannot
+		// undo it.
+		expect(withdrawal.mode).toBe("fail-open");
+		expect((await observed.audit.verify()).ok).toBe(true);
+		observed.stop();
+	});
+
+	test("the observer records it, and a revoked-but-not-withdrawn claim does not", async () => {
+		const observed = createObservability(loadConfig({}));
+		await observed.start();
+		observed.observer.claimed?.({
+			surface: "omp",
+			graph_id: "ut-1",
+			node_id: "n4",
+			decision: "contended",
+			action: "refused",
+			reason: "another surface holds this node",
+			quarantineReason: null,
+		});
+		observed.observer.claimed?.({
+			surface: "omp",
+			graph_id: "ut-1",
+			node_id: "n4",
+			decision: "revoked",
+			action: "granted",
+			reason: "withdrawn",
+			quarantineReason: "unrecorded-claim",
+		});
+		// The observer is synchronous by contract, so the append is fire-and-forget.
+		await Bun.sleep(0);
+
+		const { records } = await observed.audit.readAll();
+		expect(records).toHaveLength(1);
+		expect(records[0]?.decision).toBe("denied");
+		observed.stop();
+	});
+
+	test("it reaches the graph's evidence bundle beside the allowed record", async () => {
+		const observed = createObservability(loadConfig({}));
+		await observed.start();
+		await auditToolCalls(observed, "omp", [{ id: 1, tool: "graph_claim", args: { graph_id: "ut-1", node_id: "n4" } }]);
+		await recordClaimWithdrawal(observed.audit, observed.instruments, {
+			surface: "omp",
+			graph_id: "ut-1",
+			node_id: "n4",
+			reason: "the claim event did not reach the ledger",
+			quarantineReason: "unrecorded-claim",
+		});
+
+		const bundle = await buildGraphEvidence(observed, new Substrate(loadConfig({}), { index: null, greptime: null }), "ut-1");
+		expect(bundle.audit.allowed).toBe(1);
+		expect(bundle.audit.denied).toBe(1);
+		observed.stop();
+	});
+});
+
+describe("chainState", () => {
+	test("tells a chain that could not be verified from one that came back broken", () => {
+		// `ok: null` meant both "there is no such chain here" and "the chain exists and the
+		// store would not answer", and `substrate evidence` has to exit non-zero on the
+		// second and not the first.
+		expect(chainState(true)).toBe("verified");
+		expect(chainState(false)).toBe("broken");
+		expect(chainState(null)).toBe("unverifiable");
+	});
+});
+
+describe("the evidence bundle's app chain state", () => {
+	test("is not-configured when there is no ledger, which is not a failure", async () => {
+		const observed = createObservability(loadConfig({}));
+		await observed.start();
+		const bundle = await buildGraphEvidence(observed, new Substrate(loadConfig({}), { index: null, greptime: null }), "ut-1");
+
+		expect(bundle.chains.app_events.state).toBe("not-configured");
+		expect(bundle.chains.app_events.ok).toBeNull();
+		observed.stop();
+	});
+
+	test("is unverifiable when the ledger is configured and would not answer", async () => {
+		const observed = createObservability(loadConfig({}));
+		await observed.start();
+		const substrate = {
+			verifyGraph: () => Promise.reject(new Error("greptime unreachable")),
+		} as unknown as Substrate;
+
+		const bundle = await buildGraphEvidence(observed, substrate, "ut-1");
+		expect(bundle.chains.app_events.state).toBe("unverifiable");
+		expect(bundle.chains.app_events.reason).toContain("greptime unreachable");
+		observed.stop();
+	});
+
+	test("is verified when the chain checks out", async () => {
+		const observed = createObservability(loadConfig({}));
+		await observed.start();
+		const substrate = {
+			verifyGraph: () => Promise.resolve({ ok: true, events: 3, brokenAt: null, reason: null }),
+		} as unknown as Substrate;
+
+		expect((await buildGraphEvidence(observed, substrate, "ut-1")).chains.app_events.state).toBe("verified");
+		observed.stop();
+	});
+});
+
+describe("the evidence bundle reads the audit file once", () => {
+	test("and reports the whole file's verdict beside one graph's records", async () => {
+		const path = join(mkdtempSync(join(tmpdir(), "substrate-evidence-")), "mcp-audit.jsonl");
+		const observed = createObservability(loadConfig({ SUBSTRATE_AUDIT_PATH: path }));
+		await observed.start();
+		await auditToolCalls(observed, "omp", [{ id: 1, tool: "graph_get", args: { graph_id: "ut-1" } }]);
+		await auditToolCalls(observed, "omp", [{ id: 2, tool: "graph_get", args: { graph_id: "ut-2" } }]);
+
+		const bundle = await buildGraphEvidence(observed, new Substrate(loadConfig({}), { index: null, greptime: null }), "ut-1");
+		// The verdict covers the whole file, not just the two records this graph owns one of.
+		expect(bundle.chains.mcp_audit.records).toBe(2);
+		expect(bundle.audit.records.map((record) => record.graph_id)).toEqual(["ut-1"]);
+		expect(bundle.chains.mcp_audit.ok).toBe(true);
+		observed.stop();
+	});
+
+	test("says so when a graph has more records than a bundle carries", async () => {
+		const path = join(mkdtempSync(join(tmpdir(), "substrate-evidence-")), "mcp-audit.jsonl");
+		const observed = createObservability(loadConfig({ SUBSTRATE_AUDIT_PATH: path }));
+		await observed.start();
+		for (let i = 0; i < 4; i++) {
+			await auditToolCalls(observed, "omp", [{ id: i, tool: "graph_get", args: { graph_id: "ut-1" } }]);
+		}
+
+		// Through the log directly, so the bound is testable without four thousand appends.
+		const view = await observed.audit.verifiedView("ut-1", 2);
+		expect(view.records).toHaveLength(2);
+		expect(view.total).toBe(4);
+		expect(MAX_EVIDENCE_RECORDS).toBeGreaterThan(0);
+		observed.stop();
+	});
+
+	test("notes a missing-history audit file rather than attesting over it", async () => {
+		const path = join(mkdtempSync(join(tmpdir(), "substrate-evidence-")), "mcp-audit.jsonl");
+		const first = createObservability(loadConfig({ SUBSTRATE_AUDIT_PATH: path }));
+		await first.start();
+		await auditToolCalls(first, "omp", [{ id: 1, tool: "graph_get", args: { graph_id: "ut-1" } }]);
+		first.stop();
+		rmSync(path);
+
+		const second = createObservability(loadConfig({ SUBSTRATE_AUDIT_PATH: path }));
+		const warnings = await second.start();
+		expect(warnings.join(" ")).toContain("missing history");
+
+		const bundle = await buildGraphEvidence(second, new Substrate(loadConfig({}), { index: null, greptime: null }), "ut-1");
+		expect(bundle.chains.mcp_audit.ok).toBe(false);
+		expect(bundle.notes.join(" ")).toContain("missing history");
+		second.stop();
 	});
 });
