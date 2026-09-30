@@ -36,6 +36,15 @@ class FakeStore implements MemoryStore {
 	failInsert: string | null = null;
 	/** Makes the acknowledgement throw, standing in for a crash right after the commit. */
 	failFinish: string | null = null;
+	/**
+	 * Runs at the top of `insertEntry`, before its claim check.
+	 *
+	 * The real store does that check inside the insert's transaction and under the same
+	 * row lock `claimWrite` takes, so a takeover either lands before the insert or after
+	 * it and never halfway through. This hook is how a test puts one in the "before"
+	 * position deliberately.
+	 */
+	onInsert: (() => Promise<void>) | null = null;
 
 	entries(): MemoryEntry[] {
 		return [...this.rows.values()].map((row) => row.entry);
@@ -101,8 +110,19 @@ class FakeStore implements MemoryStore {
 		return found[0]?.entry ?? null;
 	}
 
-	async insertEntry(row: NewMemoryEntry): Promise<{ ok: true; entry: MemoryEntry } | { ok: false; reason: "standing-moved" }> {
+	async insertEntry(
+		row: NewMemoryEntry,
+		claim: { key: string; holder: string },
+	): Promise<{ ok: true; entry: MemoryEntry } | { ok: false; reason: "standing-moved" | "claim-lost" }> {
+		if (this.onInsert) await this.onInsert();
 		if (this.failInsert) throw new Error(this.failInsert);
+		// Fenced, like the real store: an attempt whose claim was taken over does not get
+		// to write its row. Enforced here too, or the one thing this check exists to stop
+		// passes in the tests and fails only against Postgres.
+		const owner = this.writes.get(claim.key);
+		if (owner?.holder !== claim.holder || owner.outcome !== "in-flight") {
+			return { ok: false, reason: "claim-lost" };
+		}
 		// `memory_standing_idx` is a unique partial index in the real store, so the fake
 		// enforces it too. Otherwise a row that should never have carried a conflict key
 		// passes here and fails only against Postgres.
@@ -486,6 +506,31 @@ describe("claim ownership", () => {
 		expect(record?.holder).toBe(second.holder);
 		expect(record?.outcome).toBe("in-flight");
 		expect(record?.entry_id).toBe("mem_b");
+	});
+
+	test("a timed-out writer cannot land the row either, not just the bookkeeping", async () => {
+		// Fencing `finishWrite` and `releaseWrite` stops a slow attempt corrupting the
+		// claim *record*. It does not stop the attempt reaching the insert — it is still
+		// running, and nothing on that path had asked whether it still held the key. For
+		// an appending kind that is two visible entries for one write, which is the
+		// duplicate the claim exists to prevent. So the insert is fenced too.
+		store.onInsert = async () => {
+			store.onInsert = null;
+			store.clock += IN_FLIGHT_TIMEOUT_MS;
+			// A retry decides the claim is abandoned and takes it over, mid-insert.
+			await store.claimWrite({ key: "k1", explicit: true, entryHash: "h2", entryId: "mem_retry" });
+		};
+
+		const result = await write({ kind: "warning", subject: "poller", idempotency_key: "k1" });
+
+		expect(result.outcome).toBe("conflict");
+		expect(result.reason).toBe("write.superseded");
+		expect(store.entries()).toEqual([]);
+		// And the successor's claim is untouched: still in flight, still reserving its
+		// own row, so the retry can go on to write exactly once.
+		const record = store.writes.get("k1");
+		expect(record?.outcome).toBe("in-flight");
+		expect(record?.entry_id).toBe("mem_retry");
 	});
 
 	test("a claim reserves the row it will write, so an unacknowledged commit is findable", async () => {

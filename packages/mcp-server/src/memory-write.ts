@@ -151,10 +151,22 @@ export interface MemoryStore {
 	 * hide a standing entry behind a write that never lands, and inserting first
 	 * leaves two entries in force for one identity.
 	 *
-	 * `standing-moved` means another writer retired the predecessor in between. The
-	 * gate reports that as a conflict rather than racing it.
+	 * `claim` fences the insert on the claim that authorised it, in the *same* step.
+	 * Fencing only `finishWrite` and `releaseWrite` stops a timed-out attempt
+	 * corrupting the claim record but not the thing that record exists to prevent: the
+	 * attempt still reaches this call and still inserts, so an appending kind ends up
+	 * with two visible entries for one write. Ownership has to be checked where the
+	 * row is written, not only where the bookkeeping is.
+	 *
+	 * `standing-moved` means another writer retired the predecessor in between.
+	 * `claim-lost` means this attempt no longer holds the key — it ran past the
+	 * in-flight timeout and a retry took over. The gate reports both as a conflict
+	 * rather than racing them.
 	 */
-	insertEntry(row: NewMemoryEntry): Promise<{ ok: true; entry: MemoryEntry } | { ok: false; reason: "standing-moved" }>;
+	insertEntry(
+		row: NewMemoryEntry,
+		claim: { key: string; holder: string },
+	): Promise<{ ok: true; entry: MemoryEntry } | { ok: false; reason: "standing-moved" | "claim-lost" }>;
 	readEntry(id: string): Promise<MemoryEntry | null>;
 	/**
 	 * Park a classified write. Idempotent on `entry_hash` — a retried write that is
@@ -458,8 +470,25 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 			reverify_after: reverifyAfter(trust.trust, now).toISOString(),
 		};
 
-		const written = await store.insertEntry(row);
+		const written = await store.insertEntry(row, { key, holder });
 		if (!written.ok) {
+			// A lost claim is not this attempt's to record an outcome for — the successor
+			// owns the key now, and `finishWrite` would be a fenced no-op anyway. Say so
+			// plainly rather than reporting somebody else's takeover as this write's race.
+			if (written.reason === "claim-lost") {
+				return {
+					outcome: "conflict",
+					reason: "write.superseded",
+					remedy:
+						"This write held its idempotency key past the in-flight timeout, so a retry took the key over " +
+						"and owns it now. Nothing was written here. Read that retry's result rather than re-submitting, " +
+						"or write again under a fresh idempotency_key.",
+					verified_persisted: false,
+					idempotency_key: key,
+					strategy: plan.resolve,
+					grant: grant.name,
+				};
+			}
 			await store.finishWrite(key, holder, "conflict", null);
 			return {
 				outcome: "conflict",
