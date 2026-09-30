@@ -10,6 +10,17 @@ Graph-of-Thought node and one sub-issue per Chain-of-Thought step.
 
 Notion and Linear are the source of truth. Postgres is an index. Greptime is the event log.
 
+## Store lock
+
+**Greptime is the append-only events ledger and nothing else** — not the source of record
+for memory, which lives in the Postgres/Timescale index. Every write and every read goes
+through `substrate-mcp`: no collector, CLI, hook or projector holds its own Greptime client,
+and no agent gets Greptime as an MCP server of its own. Redaction and the hash chain live on
+that one write path, so a second door would be an unredacted, unchained one.
+
+`packages/mcp-server/src/store-lock.test.ts` fails the build if that stops being true.
+Details in [`docs/greptime-ledger.md`](docs/greptime-ledger.md).
+
 ## Why
 
 Eight agents run on this host and none of them knows what the others just did. The substrate
@@ -37,6 +48,15 @@ bun install
 cp .env.example /etc/substrate/substrate.env   # then fill it in; chmod 0600
 bun run mcp                                    # substrate-mcp on :7410
 bun test
+bun run check                                  # tsc --noEmit
+```
+
+Against a live Greptime, `bun run smoke:greptime` proves the ledger end to end — append_mode,
+redaction, quoting, the hash chain and that UPDATE and DELETE are refused. It reads
+`GREPTIME_*` from the environment and prints no credential:
+
+```sh
+set -a; . /etc/substrate/substrate.env; set +a && bun run smoke:greptime
 ```
 
 `substrate-mcp` exposes MCP over streamable HTTP at `/mcp`, and — because agent hooks cannot
@@ -46,7 +66,11 @@ call MCP tools — the same briefing and event paths as plain `POST /brief` and 
 
 - **Fail open.** A substrate outage must never block a prompt. Every hook swallows its errors
   and returns empty within its timeout.
-- **Redact before emitting.** No credentials ever reach `agent_events`.
+- **Redact before emitting.** No credentials ever reach `agent_events`. Redaction is on the
+  write path inside `substrate-mcp`, not in each collector, so no collector can forget.
+- **Append only.** Nothing rewrites or removes an event. The ledger client refuses every verb
+  that could, and `agent_events` is in Greptime's `append_mode` so it cannot deduplicate one
+  away either.
 - Secrets live in `/etc/substrate/substrate.env`, never in this repo.
 
 Architecture: see [`.planning/PROJECT.md`](.planning/PROJECT.md) and the Notion build plan.
