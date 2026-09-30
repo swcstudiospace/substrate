@@ -282,18 +282,74 @@ describeLive("memory governance against a live index", () => {
 			reason: "global scope requires review",
 		};
 
+		// Real entries: resolution joins the row it is approving against, so that the
+		// proposal is only resolved by an entry that can actually answer it.
+		const install = async (id: string) => {
+			await raw`
+				insert into memory_entries (id, scope, kind, body, writer, entry_hash, ttl, version)
+				values (${id}, 'global', 'decision', ${proposal.text}, 'hermes', ${hash}, 'permanent', 1)`;
+		};
+
 		expect(await a.enqueueReview(proposal)).toBe(`memr_${MARKER}_1`);
+		await install(`mem_${MARKER}_r1`);
 		expect(await a.releaseReviews(hash, `mem_${MARKER}_r1`, "hermes")).toBe(1);
 
 		// Parked again — allowed, because the pending slot is free once the first was
 		// decided — and approved again.
 		expect(await a.enqueueReview({ ...proposal, id: `memr_${MARKER}_2` })).toBe(`memr_${MARKER}_2`);
+		await install(`mem_${MARKER}_r2`);
 		expect(await a.releaseReviews(hash, `mem_${MARKER}_r2`, "hermes")).toBe(1);
 
 		const rows = (await raw`
 			select state, count(*)::int as n from memory_reviews where entry_hash = ${hash}
 			group by state`) as Array<{ state: string; n: number }>;
 		expect(rows).toEqual([{ state: "approved", n: 2 }]);
+	});
+
+	test("an entry resolves only the proposals it answers", async () => {
+		// `releaseReviews` matches on the content hash, and content is not the whole of
+		// a proposal: one parked after the entry was written is a new ask, and one
+		// asking for a different retention is not answered by this entry at all.
+		// Resolving either takes a live request out of a reviewer's queue without
+		// installing what it asked for — and a replay, which carries no review token,
+		// reaches this call.
+		const hash = `hash-${MARKER}-answers`;
+		const proposal = {
+			...firstWriteRow({ id: `memr_${MARKER}_6`, idempotency_key: `${MARKER}-r6` }),
+			scope: "global",
+			subject: null,
+			entry_hash: hash,
+			text: `${MARKER} the host runs eight agents`,
+			conflict_key: null,
+			reason: "global scope requires review",
+		};
+
+		// Parked before the entry, asking for what the entry will hold.
+		expect(await a.enqueueReview(proposal)).toBe(`memr_${MARKER}_6`);
+		await raw`
+			insert into memory_entries (id, scope, kind, body, writer, entry_hash, ttl, version, created)
+			values (${`mem_${MARKER}_answers`}, 'global', 'decision', ${proposal.text}, 'hermes', ${hash},
+			        'permanent', 1, now())`;
+		expect(await a.releaseReviews(hash, `mem_${MARKER}_answers`, "hermes")).toBe(1);
+
+		// Raised afterwards, and for a different retention: neither is this entry's to
+		// resolve, and a second release must leave both alone.
+		await raw`
+			insert into memory_reviews (id, scope, kind, body, writer, ttl, entry_hash, reason, state, created)
+			values (${`memr_${MARKER}_later`}, 'global', 'decision', ${proposal.text}, 'hermes', 'permanent',
+			        ${hash}, 'r', 'pending', now() + interval '1 second')`;
+		expect(await a.releaseReviews(hash, `mem_${MARKER}_answers`, "hermes")).toBe(0);
+
+		await raw`update memory_reviews set state = 'approved' where id = ${`memr_${MARKER}_later`}`;
+		await raw`
+			insert into memory_reviews (id, scope, kind, body, writer, ttl, entry_hash, reason, state, created)
+			values (${`memr_${MARKER}_30d`}, 'global', 'decision', ${proposal.text}, 'hermes', '30d',
+			        ${hash}, 'r', 'pending', now() - interval '1 hour')`;
+		expect(await a.releaseReviews(hash, `mem_${MARKER}_answers`, "hermes")).toBe(0);
+
+		const pending = (await raw`
+			select id from memory_reviews where entry_hash = ${hash} and state = 'pending'`) as Array<{ id: string }>;
+		expect(pending.map((row) => row.id)).toEqual([`memr_${MARKER}_30d`]);
 	});
 
 	test("a pending proposal is still one per content", async () => {

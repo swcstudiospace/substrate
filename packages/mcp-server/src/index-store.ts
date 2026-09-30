@@ -1059,10 +1059,27 @@ export class IndexStore implements MemoryStore {
 	 */
 	async releaseReviews(entryHash: string, entryId: string, decidedBy: string): Promise<number> {
 		const rows = (await this.sql`
-			update memory_reviews
+			update memory_reviews r
 			set state = 'approved', entry_id = ${entryId}, decided = now(), decided_by = ${decidedBy}
-			where entry_hash = ${entryHash} and state = 'pending'
-			returning id`) as Array<Record<string, unknown>>;
+			from memory_entries e
+			where e.id = ${entryId}
+			  and r.entry_hash = ${entryHash} and r.state = 'pending'
+			  -- Content alone is not enough to say this entry answers this proposal, and
+			  -- resolving one it does not answer takes a live request out of a reviewer's
+			  -- queue without installing what it asked for.
+			  --
+			  -- Parked before the entry was written: a proposal raised afterwards is a new
+			  -- ask about the same words, and cannot have been the one this entry came
+			  -- from. Without it, any later write for this content — a replay, or a
+			  -- recovery — silently approves it.
+			  and r.created <= e.created
+			  -- And asking for the retention the entry actually has. entry_hash covers
+			  -- the words, not how long they are kept, so a proposal for 30d is not
+			  -- answered by a permanent entry. It is the only part of the ask the queue
+			  -- records — a parked row always carries the unreviewed trust and actor,
+			  -- because a reviewer decides those.
+			  and r.ttl = e.ttl
+			returning r.id`) as Array<Record<string, unknown>>;
 		return rows.length;
 	}
 

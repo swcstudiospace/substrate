@@ -161,6 +161,17 @@ the same todo. Without a `subject` there is no identity, so the entry is appende
   is cleared by the next retry under the same key: the replay re-runs the release,
   which is the only path that reaches it again once the key is spent.
 
+  **An entry resolves only the proposals it answers.** Content is not the whole of a
+  proposal, and a release matched on `entry_hash` alone would resolve any of them —
+  including one parked *after* the entry was written, or one asking for a different
+  `ttl`. Either would take a live request out of a reviewer's queue without
+  installing what it asked for, and a replay (which carries no review token, because
+  the token is not part of the request identity) reaches that call. So a proposal is
+  resolved only by an entry written no earlier than it was parked and holding the
+  retention it asked for. Retention is the only part of the ask the queue records: a
+  parked row always carries the unreviewed trust and actor, because a reviewer
+  decides those.
+
   A proposal is parked even where the same content is already in force. An earlier
   attempt at this refused to park there, and it was wrong three ways: a global
   `fact` or `warning` is append-only and its trust decays, so restating one is how

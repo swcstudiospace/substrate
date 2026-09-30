@@ -28,7 +28,7 @@ class FakeStore implements MemoryStore {
 	readonly writes = new Map<string, WriteRecord & { holder: string; claimed: number }>();
 	private holders = 0;
 	readonly quarantined: Array<NewMemoryEntry & { reason: QuarantineReason; detail: string }> = [];
-	readonly reviews: Array<NewMemoryEntry & { reason: string; state: string; entry_id: string | null }> = [];
+	readonly reviews: Array<NewMemoryEntry & { reason: string; state: string; entry_id: string | null; created: number }> = [];
 
 	/** Makes the read-back miss, which is the only way to reach `verified_persisted: false`. */
 	hideFromReadBack = false;
@@ -259,15 +259,21 @@ class FakeStore implements MemoryStore {
 	async enqueueReview(row: NewMemoryEntry & { reason: string }): Promise<string> {
 		const existing = this.reviews.find((held) => held.entry_hash === row.entry_hash && held.state === "pending");
 		if (existing) return existing.id;
-		this.reviews.push({ ...row, state: "pending", entry_id: null });
+		this.reviews.push({ ...row, state: "pending", entry_id: null, created: this.clock });
 		return row.id;
 	}
 
 	async releaseReviews(entryHash: string, entryId: string): Promise<number> {
 		if (this.failReleaseReviews) throw new Error(this.failReleaseReviews);
+		const entry = this.rows.get(entryId);
+		if (!entry) return 0;
 		let released = 0;
 		for (const review of this.reviews) {
 			if (review.entry_hash !== entryHash || review.state !== "pending") continue;
+			// The real store's conditions, because they are what stops an entry resolving
+			// a proposal it does not answer — see `releaseReviews` there.
+			if (review.created > Date.parse(entry.entry.created)) continue;
+			if (review.ttl !== entry.entry.ttl) continue;
 			review.state = "approved";
 			review.entry_id = entryId;
 			released++;
@@ -486,6 +492,34 @@ describe("conflict — require-review for global", () => {
 		expect(store.reviews[0]?.entry_id).toBe(installed.entry?.id);
 		// And nothing was written a second time to achieve it.
 		expect(store.standing()).toHaveLength(1);
+	});
+
+	test("a replay does not approve a proposal raised after its entry", async () => {
+		// The reconciliation above must resolve the proposal its own write left behind,
+		// not whatever shares the content hash. A replay carries no review token — the
+		// token is not part of the request identity — so without this it is a way to
+		// take a live request out of a reviewer's queue: the proposal is marked approved
+		// against an entry that does not hold what it asked for, and nobody ever sees it.
+		const request = {
+			scope: "global",
+			kind: "fact" as const,
+			text: "eight agents share one host",
+			idempotency_key: "k-installed",
+		};
+		const installed = await write({ ...request, review_token: REVIEW_TOKEN });
+		expect(installed.outcome).toBe("accepted");
+
+		// Later, the same words are proposed again — but kept for 30 days rather than
+		// for ever, which is a different ask and one the queue does record.
+		store.clock += 1000;
+		const proposed = await write({ ...request, ttl: "30d", idempotency_key: "k-30d" });
+		expect(proposed.reason).toBe("review.required");
+
+		const replayed = await write({ ...request, review_token: REVIEW_TOKEN });
+
+		expect(replayed.reason).toBe("idempotent.replay");
+		// Still pending, still a reviewer's to decide.
+		expect(store.reviews.find((review) => review.ttl === "30d")?.state).toBe("pending");
 	});
 
 	test("the parked conflict does not pin the outcome forever", async () => {
