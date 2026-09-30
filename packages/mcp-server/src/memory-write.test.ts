@@ -36,6 +36,8 @@ class FakeStore implements MemoryStore {
 	failInsert: string | null = null;
 	/** Makes the acknowledgement throw, standing in for a crash right after the commit. */
 	failFinish: string | null = null;
+	/** Makes the read throw, which must never be read as "the row is not there". */
+	failReadEntry: string | null = null;
 
 	entries(): MemoryEntry[] {
 		return [...this.rows.values()].map((row) => row.entry);
@@ -63,17 +65,20 @@ class FakeStore implements MemoryStore {
 		if (!free) return { claimed: false, existing: { ...existing! } };
 
 		const holder = `hold_${++this.holders}`;
+		const tookOverFrom = inFlight ? (existing?.entry_id ?? null) : null;
 		this.writes.set(input.key, {
 			idempotency_key: input.key,
 			explicit: input.explicit,
 			outcome: "in-flight",
-			// Reserved: the row this attempt will insert, recorded before it exists.
-			entry_id: input.entryId,
+			// Reserved: the row this attempt will insert, recorded before it exists. An
+			// in-flight claim's reservation is kept rather than replaced — it may point at a
+			// row that already exists, and overwriting it would orphan that row.
+			entry_id: tookOverFrom ?? input.entryId,
 			entry_hash: input.entryHash,
 			holder,
 			claimed: this.clock,
 		});
-		return { claimed: true, holder, tookOverFrom: inFlight ? (existing?.entry_id ?? null) : null };
+		return { claimed: true, holder, tookOverFrom };
 	}
 
 	async finishWrite(
@@ -144,6 +149,7 @@ class FakeStore implements MemoryStore {
 	}
 
 	async readEntry(id: string): Promise<MemoryEntry | null> {
+		if (this.failReadEntry) throw new Error(this.failReadEntry);
 		if (this.hideFromReadBack) return null;
 		return this.rows.get(id)?.entry ?? null;
 	}
@@ -485,7 +491,58 @@ describe("claim ownership", () => {
 		const record = store.writes.get("k1");
 		expect(record?.holder).toBe(second.holder);
 		expect(record?.outcome).toBe("in-flight");
-		expect(record?.entry_id).toBe("mem_b");
+		// And the reservation is the one it inherited, not the successor's own: `mem_a` may
+		// already exist, so the pointer to it survives the hand-over.
+		expect(record?.entry_id).toBe("mem_a");
+		expect(second.tookOverFrom).toBe("mem_a");
+	});
+
+	test("an inherited reservation is used for the insert, not a fresh id", async () => {
+		// Two reasons, and the second is the better one: the claim row already points at
+		// this id, so a crash stays recoverable without another write; and a fenced-out
+		// attempt that is still alive collides on the primary key instead of adding a row.
+		await store.claimWrite({ key: "k1", explicit: true, entryHash: "h1", entryId: "mem_reserved" });
+		store.clock += IN_FLIGHT_TIMEOUT_MS;
+
+		const result = await write({ idempotency_key: "k1" });
+
+		expect(result.entry?.id).toBe("mem_reserved");
+		expect(store.entries()).toHaveLength(1);
+	});
+
+	test("a read that fails is not evidence the row is absent", async () => {
+		// The duplicate this prevents: swallowing the read error made a transient failure
+		// look like "nothing was written", so the retry inserted a second entry under a key
+		// that already had one. Failing the write costs a retry; a duplicate memory cannot
+		// be taken back.
+		await store.claimWrite({ key: "k1", explicit: true, entryHash: "h1", entryId: "mem_maybe" });
+		store.clock += IN_FLIGHT_TIMEOUT_MS;
+		store.failReadEntry = "postgres: connection reset";
+
+		await expect(write({ idempotency_key: "k1" })).rejects.toThrow("connection reset");
+		expect(store.entries()).toEqual([]);
+		// And the reservation survives the failure, so the next retry looks for the same
+		// row rather than starting a fresh one it would then duplicate.
+		expect(store.writes.get("k1")?.entry_id).toBe("mem_maybe");
+	});
+
+	test("recovering a reviewed global write also closes its proposal", async () => {
+		// The acknowledgement died, not the review. Leaving the proposal pending would have
+		// a reviewer weighing a decision that is already in force.
+		const global = { scope: "global", kind: "decision" as const, text: "Greptime is the events ledger only" };
+		await write(global);
+		expect(store.reviews[0]?.state).toBe("pending");
+
+		store.failFinish = "postgres: connection reset";
+		await expect(write({ ...global, review_token: REVIEW_TOKEN, idempotency_key: "k1" })).rejects.toThrow();
+
+		store.failFinish = null;
+		store.clock += IN_FLIGHT_TIMEOUT_MS;
+		const recovered = await write({ ...global, review_token: REVIEW_TOKEN, idempotency_key: "k1" });
+
+		expect(recovered.reason).toBe("recovered.orphan");
+		expect(store.reviews[0]?.state).toBe("approved");
+		expect(store.reviews[0]?.entry_id).toBe(recovered.entry?.id);
 	});
 
 	test("a claim reserves the row it will write, so an unacknowledged commit is findable", async () => {

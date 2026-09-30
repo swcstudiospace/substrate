@@ -389,21 +389,28 @@ export class IndexStore implements MemoryStore {
 				};
 			}
 
+			// Only an abandoned *in-flight* claim can have left a row behind unacknowledged.
+			// A finished attempt recorded its outcome, and an aged-out derived key belongs to
+			// a write we are deliberately allowing to happen again — so its `entry_id` names
+			// a row that is still in force and must not be reused.
+			const priorEntry = row.entry_id === null || row.entry_id === undefined ? null : String(row.entry_id);
+			const tookOverFrom = inFlight ? priorEntry : null;
+
 			await tx`
 				update memory_writes set
 					outcome    = 'in-flight',
 					explicit   = ${input.explicit},
 					entry_hash = ${input.entryHash},
-					entry_id   = ${input.entryId},
+					-- An in-flight claim's reservation is KEPT, not replaced. It may point at a
+					-- row that already exists, and the successor has to resolve that before the
+					-- pointer can be thrown away; overwriting it here would orphan the row and
+					-- the retry after this one would duplicate it.
+					entry_id   = ${tookOverFrom ?? input.entryId},
 					holder     = ${holder},
 					claimed    = now()
 				where idempotency_key = ${input.key}`;
 
-			// Only an abandoned *in-flight* claim can have left a row behind unacknowledged.
-			// A finished attempt recorded its outcome, and an aged-out derived key belongs to
-			// a write we are deliberately allowing to happen again.
-			const priorEntry = row.entry_id === null || row.entry_id === undefined ? null : String(row.entry_id);
-			return { claimed: true as const, holder, tookOverFrom: inFlight ? priorEntry : null };
+			return { claimed: true as const, holder, tookOverFrom };
 		})) as ClaimResult;
 	}
 

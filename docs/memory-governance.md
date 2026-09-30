@@ -209,10 +209,20 @@ the decision was ever taken.
 - Each hand-over mints a **fencing token**, and every later statement about the claim
   carries it. Without one, an attempt that merely ran slow past the in-flight timeout
   could come back and finish — or delete — the claim that replaced it.
-- A claim **reserves the id** of the row it is about to write. So when a successor takes
-  over an abandoned claim, it looks for that row first: if the dead attempt committed
-  and died before acknowledging it, the entry is returned (`recovered.orphan`) rather
-  than written a second time.
+- A claim **reserves the id** of the row it is about to write, and a hand-over *keeps*
+  the reservation rather than replacing it. So when a successor takes over an abandoned
+  claim, it looks for that row first: if the dead attempt committed and died before
+  acknowledging it, the entry is returned (`recovered.orphan`) rather than written a
+  second time — and a recovered global write also closes the proposal it came from,
+  since the acknowledgement died and not the review.
+- When that row turns out not to exist, the successor inserts **under the same reserved
+  id**. A crash then stays recoverable without another write, and an attempt that was
+  fenced out but is still running collides on the primary key instead of adding a second
+  row: sharing the reservation makes the insert itself mutually exclusive.
+- That lookup's failure is **never swallowed**. An error is not evidence the row is
+  absent, and treating it as such would insert a second entry under a key that already
+  has one. Failing the write costs a retry, which is recoverable; a duplicate memory is
+  not.
 
 A replay re-runs the read-back, so a write that came back
 `accepted / verified_persisted: false` is confirmed by retrying it with the same
