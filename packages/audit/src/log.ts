@@ -10,29 +10,32 @@
  * With no path configured the chain lives in memory: verifiable, bounded, and gone
  * at restart. That is the local-dev shape, and `/healthz` reports `auditDurable:
  * false` so a deployment cannot end up in it by accident.
+ *
+ * Beside the file sits a **checkpoint**: the last `seq` and `hash` this process
+ * committed, rewritten after every append. It is what makes "the file is empty" a
+ * question with two answers rather than one — see `open`.
  */
-import { appendFileSync, existsSync, mkdirSync, openSync, readSync, closeSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, openSync, readSync, closeSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import {
 	type AuditRecord,
 	type AuditRecordInput,
 	type ChainVerdict,
+	ChainWalker,
+	MAX_RECORD_BYTES,
+	NO_POSITION,
 	buildRecord,
-	verifyAuditChain,
+	isAuditRecord,
 } from "./record.ts";
 
-/**
- * `brokenAt` for a failure that has no locatable position in the chain.
- *
- * Negative, so it can never collide with a real `seq` (which starts at 1), and named
- * so a caller rendering a verdict can tell "broken, position unknown" from "broken at
- * record N" instead of printing a sentinel at a reader.
- */
-export const NO_POSITION = -1;
+export { NO_POSITION };
 
 /** Thrown when a fail-closed call could not be recorded, so it must not proceed. */
 export class AuditUnavailableError extends Error {
-	constructor(readonly tool: string, cause: string) {
+	constructor(
+		readonly tool: string,
+		cause: string,
+	) {
 		super(`refusing ${tool}: the MCP audit chain could not take the record — ${cause}`);
 		this.name = "AuditUnavailableError";
 	}
@@ -45,6 +48,20 @@ export interface AuditAppend {
 	error?: string;
 }
 
+/**
+ * What the chain knows about records that are no longer in the file.
+ *
+ * Set when the checkpoint names a position the file cannot account for. It is carried
+ * into every `verify` verdict for the life of the process, because it is a fact about
+ * the file that no amount of subsequent appending repairs.
+ */
+export interface MissingHistory {
+	/** The `seq` the checkpoint last committed. */
+	checkpointSeq: number;
+	/** The highest `seq` the file still holds, or 0 when it holds none. */
+	foundSeq: number;
+}
+
 export interface AuditLogOptions {
 	/** `null` keeps the chain in memory only. */
 	path: string | null;
@@ -54,6 +71,22 @@ export interface AuditLogOptions {
 	tailBytes?: number;
 	/** Records kept in memory for `/evidence` and for a memory-only chain. */
 	maxRetained?: number;
+	/**
+	 * Where the last committed position is kept. Defaults to `<path>.checkpoint`.
+	 *
+	 * `false` opts out, for a caller that deliberately wants the pre-checkpoint
+	 * behaviour — a test asserting what the checkpoint is *for*, mostly.
+	 */
+	checkpointPath?: string | false;
+	/** How far back recovery will scan for a complete record before giving up. */
+	maxScanBytes?: number;
+}
+
+/** The checkpoint file's contents. Small on purpose: it is rewritten every append. */
+interface Checkpoint {
+	seq: number;
+	hash: string;
+	ts: string;
 }
 
 export class AuditLog {
@@ -64,16 +97,30 @@ export class AuditLog {
 	private writable = false;
 	/** Set when an append threw, which may have left a half-written line behind. */
 	private mayHaveFragment = false;
+	/** Set when the checkpoint names records the file no longer holds. */
+	private lostHistory: MissingHistory | null = null;
+	/** Why this chain will not append at all. Set when the position cannot be trusted. */
+	private refuseWrites: string | null = null;
 	private readonly redact: (text: string) => string;
 	private readonly now: () => Date;
 	private readonly tailBytes: number;
 	private readonly maxRetained: number;
+	private readonly checkpointPath: string | null;
+	private readonly maxScanBytes: number;
 
 	constructor(private readonly options: AuditLogOptions) {
 		this.redact = options.redact ?? ((text) => text);
 		this.now = options.now ?? (() => new Date());
-		this.tailBytes = options.tailBytes ?? 64 * 1024;
+		// Never smaller than the largest record this can build. A window below that bound
+		// would make "the last record did not fit" reachable by a caller choosing a long
+		// argument name, which is the hole `maxScanBytes` below is the second half of.
+		this.tailBytes = Math.max(options.tailBytes ?? 64 * 1024, MAX_RECORD_BYTES + 1024);
 		this.maxRetained = options.maxRetained ?? 1000;
+		this.checkpointPath =
+			options.checkpointPath === false
+				? null
+				: (options.checkpointPath ?? (options.path === null ? null : `${options.path}.checkpoint`));
+		this.maxScanBytes = Math.max(options.maxScanBytes ?? 64 * 1024 * 1024, this.tailBytes);
 	}
 
 	get path(): string | null {
@@ -92,17 +139,45 @@ export class AuditLog {
 		return this.chainTip;
 	}
 
+	/** Records the checkpoint says existed and the file no longer holds, or null. */
+	get missingHistory(): MissingHistory | null {
+		return this.lostHistory;
+	}
+
 	/**
 	 * Recover the chain's position, or start a new one.
 	 *
-	 * Only the tail is read. The chain is continued from the last *parseable* line:
+	 * Only the tail is read, and the chain is continued from the last *parseable* line:
 	 * a process killed mid-write leaves a partial line, and treating that as the tip
 	 * would chain every later record onto a hash no verifier can recompute. The
 	 * partial line is left in place — this is an append-only file, and a verifier
 	 * reporting one unparseable line is better than a writer having quietly deleted
 	 * evidence.
+	 *
+	 * **A missing or empty file is two different states, and they have to be told
+	 * apart.** A fresh installation has no file and legitimately starts at `seq: 1`. A
+	 * deployment whose audit file was deleted or truncated also has no records — and
+	 * used to start at `seq: 1` too, whereupon the new chain verified as intact and an
+	 * evidence bundle attested to it without a word about the decisions that had
+	 * disappeared. That is the one failure an audit cannot be allowed to have, because
+	 * the reader of an evidence document has nothing else to go on.
+	 *
+	 * So the position is checkpointed beside the file after every append, and it is the
+	 * checkpoint that answers the question: no checkpoint and no file is a fresh install;
+	 * a checkpoint naming records the file cannot account for is **missing history**. In
+	 * that state the chain resumes from the checkpoint rather than from 1, which keeps
+	 * the appends honest (the file's first record is then not `seq: 1`, so the genesis
+	 * check reports the gap on its own) and `verify` says so outright for as long as this
+	 * process lives. Appending still works: refusing every fail-closed tool forever after
+	 * a disk mishap would be an outage in the name of an audit.
 	 */
-	async open(): Promise<{ records: number; tip: string | null; durable: boolean; error?: string }> {
+	async open(): Promise<{
+		records: number;
+		tip: string | null;
+		durable: boolean;
+		error?: string;
+		missingHistory?: MissingHistory;
+	}> {
 		this.opened = true;
 		const path = this.options.path;
 		if (path === null) {
@@ -111,12 +186,34 @@ export class AuditLog {
 		}
 		try {
 			mkdirSync(dirname(path), { recursive: true });
-			if (existsSync(path)) {
-				const last = this.readLastRecord(path);
-				if (last) {
-					this.chainSeq = last.seq;
-					this.chainTip = last.hash;
-				}
+			const checkpoint = this.readCheckpoint();
+			const recovered = existsSync(path) ? this.readLastRecord(path) : { record: null, size: 0, exhausted: true };
+			if (recovered.record) {
+				this.chainSeq = recovered.record.seq;
+				this.chainTip = recovered.record.hash;
+			}
+
+			if (checkpoint && (!recovered.record || recovered.record.seq < checkpoint.seq)) {
+				// The file cannot account for records this process already committed. Resume
+				// from the checkpoint so nothing reuses a `seq` that has been used, and carry
+				// the state into every verdict — see `verify`.
+				this.lostHistory = { checkpointSeq: checkpoint.seq, foundSeq: recovered.record?.seq ?? 0 };
+				this.chainSeq = checkpoint.seq;
+				this.chainTip = checkpoint.hash;
+			} else if (!recovered.record && recovered.size > 0) {
+				// Bytes, but no record this can read, and no checkpoint to fall back on.
+				// Appending here would write `seq: 1` on top of a file that already holds
+				// something, producing a chain no verifier can reconstruct — so it appends
+				// nothing at all and every fail-closed tool is refused with a reason an
+				// operator can act on. This is the fail-closed answer, not a silent restart.
+				this.refuseWrites = recovered.exhausted
+					? `${path} holds ${recovered.size} byte(s) but no readable audit record, so the chain's position is unknown`
+					: `${path} holds no readable audit record in its last ${this.maxScanBytes} byte(s), so the chain's position is unknown`;
+				this.writable = false;
+				return { records: 0, tip: null, durable: false, error: this.refuseWrites };
+			}
+
+			if (recovered.size > 0) {
 				// Terminate a half-written trailing line before anything else is appended.
 				//
 				// A process killed mid-write leaves a fragment with no newline. Appending
@@ -133,10 +230,21 @@ export class AuditLog {
 			// have been told about at boot.
 			appendFileSync(path, "");
 			this.writable = true;
-			return { records: this.chainSeq, tip: this.chainTip, durable: true };
+			return {
+				records: this.chainSeq,
+				tip: this.chainTip,
+				durable: true,
+				...(this.lostHistory ? { missingHistory: this.lostHistory } : {}),
+			};
 		} catch (cause) {
 			this.writable = false;
-			return { records: this.chainSeq, tip: this.chainTip, durable: false, error: this.redact(String(cause)) };
+			return {
+				records: this.chainSeq,
+				tip: this.chainTip,
+				durable: false,
+				error: this.redact(String(cause)),
+				...(this.lostHistory ? { missingHistory: this.lostHistory } : {}),
+			};
 		}
 	}
 
@@ -162,6 +270,12 @@ export class AuditLog {
 			this.commit(record);
 			return { record, written: true };
 		}
+		if (this.refuseWrites !== null) {
+			// The position is not known, so there is no honest `seq` to write. Refusing is
+			// the whole point — see `open`.
+			if (input.mode === "fail-closed") throw new AuditUnavailableError(input.tool, this.refuseWrites);
+			return { record, written: false, error: this.refuseWrites };
+		}
 
 		try {
 			// A previous append threw, so it may have written part of a line. Close that
@@ -173,6 +287,7 @@ export class AuditLog {
 			}
 			appendFileSync(path, `${JSON.stringify(record)}\n`);
 			this.commit(record);
+			this.writeCheckpoint(record);
 			return { record, written: true };
 		} catch (cause) {
 			const error = this.redact(String(cause));
@@ -205,6 +320,64 @@ export class AuditLog {
 		if (last[0] !== 0x0a) appendFileSync(path, "\n");
 	}
 
+	/**
+	 * Record the committed position beside the file.
+	 *
+	 * Written through a temporary file and renamed, so a crash mid-write leaves either
+	 * the old checkpoint or the new one and never half of each — a torn checkpoint would
+	 * itself read as missing history and raise a false alarm about the thing it exists to
+	 * detect.
+	 *
+	 * A failure here is not an append failure: the record is already durable, and the
+	 * worst a stale checkpoint can do is name an *earlier* position, which the check in
+	 * `open` treats as sound. So it is swallowed rather than surfaced as a denial.
+	 */
+	private writeCheckpoint(record: AuditRecord): void {
+		const target = this.checkpointPath;
+		if (target === null) return;
+		const temporary = `${target}.tmp`;
+		try {
+			const checkpoint: Checkpoint = { seq: record.seq, hash: record.hash, ts: record.ts };
+			writeFileSync(temporary, `${JSON.stringify(checkpoint)}\n`);
+			renameSync(temporary, target);
+		} catch {
+			try {
+				unlinkSync(temporary);
+			} catch {
+				// Nothing to clean up, or nothing that can be. Either way the record stands.
+			}
+		}
+	}
+
+	/** The last committed position, or null when there is none to read. */
+	private readCheckpoint(): Checkpoint | null {
+		const target = this.checkpointPath;
+		if (target === null || !existsSync(target)) return null;
+		try {
+			const size = statSync(target).size;
+			// A checkpoint is a few dozen bytes. Anything larger is not one, and reading it
+			// whole would be trusting a file this is meant to be sceptical of.
+			if (size === 0 || size > 4096) return null;
+			const buffer = Buffer.alloc(size);
+			const fd = openSync(target, "r");
+			try {
+				readSync(fd, buffer, 0, size, 0);
+			} finally {
+				closeSync(fd);
+			}
+			const parsed: unknown = JSON.parse(buffer.toString("utf8"));
+			if (!parsed || typeof parsed !== "object") return null;
+			const { seq, hash, ts } = parsed as Partial<Checkpoint>;
+			if (typeof seq !== "number" || !Number.isInteger(seq) || seq < 1) return null;
+			if (typeof hash !== "string" || hash.length === 0) return null;
+			return { seq, hash, ts: typeof ts === "string" ? ts : "" };
+		} catch {
+			// An unreadable checkpoint is not evidence of loss. Treated as absent, which
+			// leaves the pre-checkpoint behaviour rather than inventing an alarm.
+			return null;
+		}
+	}
+
 	private commit(record: AuditRecord): void {
 		this.chainSeq = record.seq;
 		this.chainTip = record.hash;
@@ -222,37 +395,76 @@ export class AuditLog {
 	 *
 	 * Memory-only chains answer from the retained buffer. Unparseable lines are
 	 * skipped and counted — `verify` is what reports them, and it fails on them.
+	 *
+	 * Holds the whole trail in memory, so it is for a caller that genuinely needs every
+	 * record. `scan` is the bounded form and is what `/evidence` uses.
 	 */
 	async readAll(): Promise<{ records: AuditRecord[]; unparseable: number }> {
-		const path = this.options.path;
-		if (path === null) return { records: [...this.retained], unparseable: 0 };
-		if (!existsSync(path)) return { records: [], unparseable: 0 };
-		const text = await Bun.file(path).text();
-		const records: AuditRecord[] = [];
-		let unparseable = 0;
-		for (const line of text.split("\n")) {
-			if (line.trim().length === 0) continue;
-			try {
-				records.push(JSON.parse(line) as AuditRecord);
-			} catch {
-				unparseable++;
-			}
-		}
-		return { records, unparseable };
+		const collected: AuditRecord[] = [];
+		const { unparseable } = await this.scan({ collect: () => true, into: collected });
+		return { records: collected, unparseable };
 	}
 
 	/**
-	 * Recompute the chain on disk.
+	 * One streaming pass: verify the chain, and collect only the records asked for.
 	 *
-	 * **An unparseable line fails the verdict.** It used to be counted alongside an
-	 * `ok: true`, which meant a file holding a corrupt or half-written record could be
-	 * reported as intact — and an evidence bundle reads `ok` alone, so it would have
-	 * attested to a chain with a hole in it. A record that cannot be read cannot be
-	 * verified, and "cannot be verified" is not "verified".
+	 * This is the fix for `/evidence` costing two full reads and two full parses of a
+	 * file that has no compaction — one to verify and one to select the graph's records,
+	 * with a third append landing in between. Now the verdict and the selection come out
+	 * of the same pass, the file is read a line at a time rather than as one string, and
+	 * what is held is the *selected* records rather than all of them. A graph's evidence
+	 * therefore costs memory proportional to that graph's own records, whatever the trail
+	 * grew to around them.
 	 *
-	 * The chain check runs first when it also fails, because a hash or `prev` mismatch
-	 * names a specific tampered position and is the more useful answer; an unparseable
-	 * line is reported when the readable records are otherwise sound.
+	 * `collect` decides what is kept. Nothing is kept by default, which is what makes a
+	 * bare verification cost no memory at all beyond the walker.
+	 */
+	async scan(options: {
+		collect?: (record: AuditRecord) => boolean;
+		into?: AuditRecord[];
+		/** Stop collecting past this many records. The count is still complete. */
+		maxCollected?: number;
+	} = {}): Promise<{ verdict: ChainVerdict & { unparseable: number }; records: AuditRecord[]; unparseable: number }> {
+		const collected = options.into ?? [];
+		const keep = options.collect;
+		const maxCollected = options.maxCollected ?? Number.POSITIVE_INFINITY;
+		const path = this.options.path;
+
+		const walker = new ChainWalker({ genesis: this.requireGenesis() });
+		let unparseable = 0;
+
+		const offer = (record: AuditRecord): void => {
+			if (keep && collected.length < maxCollected && keep(record)) collected.push(record);
+		};
+
+		if (path === null) {
+			for (const record of this.retained) {
+				walker.push(record);
+				offer(record);
+			}
+		} else if (existsSync(path)) {
+			for await (const line of readLines(path)) {
+				if (line.trim().length === 0) continue;
+				let parsed: unknown;
+				try {
+					parsed = JSON.parse(line);
+				} catch {
+					unparseable++;
+					continue;
+				}
+				// A line that parses but is not a record is a *chain* fault, not an
+				// unparseable line: the walker reports it as one rather than throwing while
+				// reading fields off it — which used to reach `/evidence` as an HTTP 500.
+				walker.push(parsed);
+				if (isAuditRecord(parsed)) offer(parsed);
+			}
+		}
+
+		return { verdict: { ...walker.verdict(), unparseable }, records: collected, unparseable };
+	}
+
+	/**
+	 * Whether this chain is required to open at `seq: 1`.
 	 *
 	 * The genesis check applies to a **file**, which holds every record ever appended.
 	 * A memory-only chain answers from a bounded tail, so once it has dropped anything
@@ -260,24 +472,80 @@ export class AuditLog {
 	 * local-dev process past its retention as a broken chain, which is a false alarm in
 	 * the same bundle the real check exists to protect.
 	 */
+	private requireGenesis(): boolean {
+		return this.options.path !== null || this.retained.length === this.chainSeq;
+	}
+
+	/**
+	 * Recompute the chain on disk.
+	 *
+	 * **Missing history fails the verdict, whatever the surviving records say.** A file
+	 * whose earlier records were deleted can be internally consistent from its new first
+	 * line onward, and an evidence bundle reads `ok` alone — so the checkpoint's word
+	 * that there were more comes first. `open` documents how the two states are told
+	 * apart.
+	 *
+	 * **An unparseable line fails the verdict.** It used to be counted alongside an
+	 * `ok: true`, which meant a file holding a corrupt or half-written record could be
+	 * reported as intact — and it would have attested to a chain with a hole in it. A
+	 * record that cannot be read cannot be verified, and "cannot be verified" is not
+	 * "verified".
+	 *
+	 * The chain check runs before the unparseable count when it also fails, because a
+	 * hash or `prev` mismatch names a specific tampered position and is the more useful
+	 * answer; an unparseable line is reported when the readable records are otherwise
+	 * sound.
+	 */
 	async verify(): Promise<ChainVerdict & { unparseable: number }> {
-		const { records, unparseable } = await this.readAll();
-		const genesis = this.options.path !== null || this.retained.length === this.chainSeq;
-		const verdict = verifyAuditChain(records, { genesis });
-		if (!verdict.ok) return { ...verdict, unparseable };
-		if (unparseable > 0) {
+		const { verdict } = await this.scan();
+		return this.judge(verdict);
+	}
+
+	/**
+	 * The verdict, and the records for one graph, from a single pass over the file.
+	 *
+	 * What `/evidence` calls. See `scan` for why there is only one pass.
+	 */
+	async verifiedView(
+		graphId: string,
+		limit?: number,
+	): Promise<{ verdict: ChainVerdict & { unparseable: number }; records: AuditRecord[]; total: number }> {
+		const { verdict, records } = await this.scan({
+			collect: (record) => record.graph_id === graphId,
+			...(limit === undefined ? {} : { maxCollected: limit }),
+		});
+		return { verdict: this.judge(verdict), records, total: verdict.records };
+	}
+
+	/** The reported verdict: what the walker found, plus what the file cannot show. */
+	private judge(verdict: ChainVerdict & { unparseable: number }): ChainVerdict & { unparseable: number } {
+		if (this.lostHistory) {
+			const { checkpointSeq, foundSeq } = this.lostHistory;
 			return {
 				ok: false,
-				records: records.length,
-				// `NO_POSITION`, not a guess: the line that would have named the position is
-				// the one that cannot be parsed. Callers that render a verdict check for it
-				// rather than printing "broken at -1" — see `chainRow` in @substrate/evidence.
+				records: verdict.records,
+				// `NO_POSITION`: the records that would name the position are the ones that
+				// are gone. Callers rendering a verdict check for it rather than printing
+				// "broken at -1" — see `chainRow` in @substrate/evidence.
 				brokenAt: NO_POSITION,
-				reason: `${unparseable} line(s) could not be parsed, so the records they hold cannot be verified`,
-				unparseable,
+				reason:
+					`the audit file is missing history: this chain committed ${checkpointSeq} record(s) and the file now ` +
+					`accounts for ${foundSeq}, so ${checkpointSeq - foundSeq} earlier decision(s) are not in it — ` +
+					"the file was deleted or truncated after they were written",
+				unparseable: verdict.unparseable,
 			};
 		}
-		return { ...verdict, unparseable };
+		if (!verdict.ok) return verdict;
+		if (verdict.unparseable > 0) {
+			return {
+				ok: false,
+				records: verdict.records,
+				brokenAt: NO_POSITION,
+				reason: `${verdict.unparseable} line(s) could not be parsed, so the records they hold cannot be verified`,
+				unparseable: verdict.unparseable,
+			};
+		}
+		return verdict;
 	}
 
 	/**
@@ -287,31 +555,85 @@ export class AuditLog {
 	 * has no compaction. A tail that happens to start mid-line is handled by dropping
 	 * everything before the first newline — unless the whole file fits in the window,
 	 * where the first line is genuinely the first record.
+	 *
+	 * **The window grows when it has to.** A fixed 64 KiB tail assumed the last record
+	 * fit in it, and a caller could choose otherwise: a long enough argument name or tool
+	 * name produced a record that filled the window with nothing but its own fragments,
+	 * recovery found no complete record, and the writer restarted at `seq: 1` on top of a
+	 * file that already held a chain — so every later fail-closed call appended to
+	 * something no verifier could reconstruct. Records are size-bounded now
+	 * (`MAX_RECORD_BYTES`, and the window is never smaller than it), and the scan also
+	 * doubles its way back to `maxScanBytes` so a record written by some *other* version
+	 * of this code is found rather than skipped past. If nothing is found even so, the
+	 * caller refuses to append at all: see `open`.
 	 */
-	private readLastRecord(path: string): AuditRecord | null {
+	private readLastRecord(path: string): { record: AuditRecord | null; size: number; exhausted: boolean } {
 		const size = statSync(path).size;
-		if (size === 0) return null;
-		const length = Math.min(this.tailBytes, size);
-		const buffer = Buffer.alloc(length);
+		if (size === 0) return { record: null, size: 0, exhausted: true };
+		let window = Math.min(this.tailBytes, size);
+		for (;;) {
+			const record = this.scanTail(path, size, window);
+			if (record) return { record, size, exhausted: window >= size };
+			if (window >= size) return { record: null, size, exhausted: true };
+			if (window >= this.maxScanBytes) return { record: null, size, exhausted: false };
+			window = Math.min(size, Math.max(window * 2, this.tailBytes));
+		}
+	}
+
+	/** The last parseable record in the final `window` bytes, or null. */
+	private scanTail(path: string, size: number, window: number): AuditRecord | null {
+		const buffer = Buffer.alloc(window);
 		const fd = openSync(path, "r");
 		try {
-			readSync(fd, buffer, 0, length, size - length);
+			readSync(fd, buffer, 0, window, size - window);
 		} finally {
 			closeSync(fd);
 		}
 		let text = buffer.toString("utf8");
-		if (length < size) {
+		if (window < size) {
 			const firstNewline = text.indexOf("\n");
 			text = firstNewline < 0 ? "" : text.slice(firstNewline + 1);
 		}
 		const lines = text.split("\n").filter((line) => line.trim().length > 0);
 		for (let i = lines.length - 1; i >= 0; i--) {
 			try {
-				return JSON.parse(lines[i] as string) as AuditRecord;
+				const parsed: unknown = JSON.parse(lines[i] as string);
+				// The shape check matters here as much as in `verify`: continuing the chain
+				// from a line holding `null` would throw on `.seq` at boot.
+				if (isAuditRecord(parsed)) return parsed;
 			} catch {
 				// A partial trailing line, or a truncated tail window. Keep walking back.
 			}
 		}
 		return null;
 	}
+}
+
+/**
+ * The file's lines, one at a time.
+ *
+ * A stream rather than `Bun.file(path).text()`, so verifying a trail does not first
+ * hold the whole trail as one string. The remainder buffer is what makes a line split
+ * across two chunks still arrive whole.
+ */
+async function* readLines(path: string): AsyncGenerator<string> {
+	const decoder = new TextDecoder();
+	let rest = "";
+	for await (const chunk of Bun.file(path).stream()) {
+		rest += decoder.decode(chunk as Uint8Array, { stream: true });
+		// Cut the buffer once per chunk rather than once per line. Re-slicing after every
+		// line copies the whole remainder each time, which on a file of short records is
+		// quadratic in the chunk size — an accidental cost in the one place that exists to
+		// remove one.
+		let start = 0;
+		let newline = rest.indexOf("\n", start);
+		while (newline >= 0) {
+			yield rest.slice(start, newline);
+			start = newline + 1;
+			newline = rest.indexOf("\n", start);
+		}
+		rest = start === 0 ? rest : rest.slice(start);
+	}
+	rest += decoder.decode();
+	if (rest.length > 0) yield rest;
 }
