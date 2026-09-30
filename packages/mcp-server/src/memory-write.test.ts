@@ -75,11 +75,16 @@ class FakeStore implements MemoryStore {
 		const existing = this.writes.get(input.key);
 		const age = existing ? this.clock - existing.claimed : 0;
 		const inFlight = existing?.outcome === "in-flight";
+		// An in-flight claim is only handed over to a retry of the same request, because
+		// that hand-over inherits the previous attempt's reserved `entry_id` — see the real
+		// store. A claim raised without a `requestHash` is a stand-in for one written before
+		// the column existed: nothing to compare, so the older rule stands.
+		const sameAsk = !existing?.request_hash || !input.requestHash || existing.request_hash === input.requestHash;
 		const free =
 			!existing ||
 			// A refused attempt wrote nothing, so re-asking is allowed a fresh answer.
 			(existing.outcome !== "accepted" && !inFlight) ||
-			(inFlight && age >= IN_FLIGHT_TIMEOUT_MS) ||
+			(inFlight && age >= IN_FLIGHT_TIMEOUT_MS && sameAsk) ||
 			(existing.outcome === "accepted" && !existing.explicit && age >= DERIVED_KEY_WINDOW_MS);
 		if (!free) return { claimed: false, existing: { ...existing! } };
 
@@ -649,6 +654,25 @@ describe("claim ownership", () => {
 		expect(store.entries()).toHaveLength(1);
 	});
 
+	test("a recovered reservation holding another write's content is never this write's", async () => {
+		// Defence in depth for a claim raised before `request_hash` was recorded: the store
+		// cannot tell those two asks apart, so the gate compares the content it recovered
+		// before calling it this request's. `accepted` here would be the same falsehood by
+		// a different road — a caller handed somebody else's entry as proof of its own write.
+		const other = await write({ text: "hermes finished n2" });
+		await store.claimWrite({ key: "k1", explicit: true, entryHash: "h1", entryId: String(other.entry?.id) });
+		store.clock += IN_FLIGHT_TIMEOUT_MS;
+
+		const result = await write({ idempotency_key: "k1", text: "omp finished n4" });
+
+		expect(result.outcome).toBe("conflict");
+		expect(result.reason).toBe("idempotency.reused");
+		expect(result.conflict_with).toBe(String(other.entry?.id));
+		expect(result.verified_persisted).toBe(false);
+		expect(result.entry).toBeUndefined();
+		expect(store.entries()).toHaveLength(1);
+	});
+
 	test("an aged-out derived key is a new write, not an orphan to recover", async () => {
 		// The row from the earlier write is still in force; the point of the expiry is
 		// that the same fact may be stated again, so the old entry must not be replayed.
@@ -675,6 +699,51 @@ describe("exactly-once", () => {
 		expect(second.conflict_with).toBe(first.entry?.id ?? "");
 		expect(second.entry).toBeUndefined();
 		expect(second.verified_persisted).toBe(false);
+		expect(store.entries()).toHaveLength(1);
+	});
+
+	test("a key whose write lost its acknowledgement cannot be taken over for other content", async () => {
+		// The takeover this closes. A commits and then dies before acknowledging itself, so
+		// its claim is left in flight still pointing at A's row. B arrives on the same key,
+		// inherits that pointer and stamps its own hashes over the record — which now reads
+		// "this key was spent on B, and the row it wrote is A". Recovery hands A back, and
+		// B's next retry is told `accepted` / `verified_persisted: true` for a write that
+		// never happened. Exactly-once survived; the verified acknowledgement did not.
+		store.failFinish = "postgres: connection reset";
+		await expect(write({ idempotency_key: "k1", text: "hermes finished n2" })).rejects.toThrow("connection reset");
+		const committed = store.entries()[0];
+		expect(store.writes.get("k1")?.outcome).toBe("in-flight");
+
+		store.failFinish = null;
+		store.clock += IN_FLIGHT_TIMEOUT_MS;
+
+		const takeover = await write({ idempotency_key: "k1", text: "omp finished n4" });
+		expect(takeover.outcome).toBe("conflict");
+		expect(takeover.reason).toBe("idempotency.reused");
+		expect(takeover.verified_persisted).toBe(false);
+		expect(takeover.entry).toBeUndefined();
+		// The reservation is untouched, so it still names the row that was actually written.
+		expect(store.writes.get("k1")?.entry_id).toBe(String(committed?.id));
+
+		// The replay is where the lie used to surface: B asks again and the record, now
+		// carrying B's hashes and A's entry id, answers for a write nobody made.
+		const retry = await write({ idempotency_key: "k1", text: "omp finished n4" });
+		expect(retry.outcome).toBe("conflict");
+		expect(retry.reason).toBe("idempotency.reused");
+		expect(retry.verified_persisted).toBe(false);
+		expect(retry.entry).toBeUndefined();
+
+		// Nothing of B's is in the index, on either answer.
+		expect(store.entries()).toHaveLength(1);
+		expect(store.entries()[0]?.text).toBe("hermes finished n2");
+
+		// And the key is not bricked for the write that spent it: A's own retry still finds
+		// the row its dead attempt left behind, rather than writing a second one.
+		const recovered = await write({ idempotency_key: "k1", text: "hermes finished n2" });
+		expect(recovered.outcome).toBe("accepted");
+		expect(recovered.reason).toBe("recovered.orphan");
+		expect(recovered.entry?.id).toBe(String(committed?.id));
+		expect(recovered.verified_persisted).toBe(true);
 		expect(store.entries()).toHaveLength(1);
 	});
 

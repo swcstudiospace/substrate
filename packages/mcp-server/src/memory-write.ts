@@ -119,6 +119,10 @@ export type ClaimResult =
 			 * that it did, so the successor has to look before writing again — and, when
 			 * the row is not there, insert under this same id rather than a new one. The
 			 * store keeps the reservation on the claim for exactly that reason.
+			 *
+			 * Only ever set for a takeover of the *same* request: a reservation inherited
+			 * across two different asks under one key names a row this write did not make,
+			 * which the gate would recover and later replay as this write's own.
 			 */
 			tookOverFrom: string | null;
 	  }
@@ -129,7 +133,8 @@ export type ClaimResult =
  *
  * `claimWrite` carries the only concurrency requirement in the file: it must be
  * atomic, and it must hand the claim over only when the existing record is
- * finished-but-refused, an abandoned in-flight claim, or an expired derived key.
+ * finished-but-refused, an abandoned in-flight claim *for this same request*, or an
+ * expired derived key.
  */
 export interface MemoryStore {
 	/**
@@ -429,11 +434,19 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 	// Failing the write instead costs a retry, which is recoverable; a duplicate memory
 	// is not.
 	const orphan = claim.tookOverFrom ? await store.readEntry(claim.tookOverFrom) : null;
+	// The reservation names a row holding different content. A store that hands the claim
+	// over only for the same request cannot reach this, and the gate checks anyway,
+	// because the alternative is the one lie this whole stage exists to prevent: replying
+	// `accepted` with a stranger's entry, and recording that entry against this key so the
+	// next retry reads it back as this write's own `verified_persisted` row. The claim is
+	// deliberately left as it is — the row it names is real, and has to stay findable by a
+	// retry of the write that actually made it.
+	if (orphan && orphan.entry_hash !== entryHash) return reused(key, grant.name, orphan);
 	if (orphan) {
 		// A recovered global write is installed, so its proposal is no longer pending —
 		// the acknowledgement died, not the review. Leaving it in the queue would have a
 		// reviewer weighing a decision that is already in force.
-		if (orphan.entry_hash === entryHash && reviewed && scope.class === "global") {
+		if (reviewed && scope.class === "global") {
 			await store.releaseReviews(entryHash, orphan.id, writer).catch(() => undefined);
 		}
 		await store.finishWrite(key, holder, "accepted", orphan.id).catch(() => undefined);
@@ -443,7 +456,9 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 			remedy:
 				"A previous attempt under this key had already written this entry but died before acknowledging " +
 				"it. That entry is returned; nothing was written again.",
-			verified_persisted: orphan.entry_hash === entryHash,
+			// Read out of the index, and its content is this request's — checked above, so
+			// this is a verification rather than an assumption.
+			verified_persisted: true,
 			idempotency_key: key,
 			entry: orphan,
 			deduplicated: true,
@@ -663,6 +678,11 @@ async function replay(
 	asked: string,
 ): Promise<Decision> {
 	if (existing.outcome === "in-flight") {
+		// A key held for a *different* ask is spent, not merely busy. No amount of waiting
+		// turns it into this write's key, so "retry in a moment" would be advice that can
+		// only ever be refused — and the attempt holding it may already have written a row
+		// that a takeover would otherwise hand back as this one's.
+		if (existing.request_hash && existing.request_hash !== asked) return reused(key, grant, null);
 		return refuse(
 			"conflict",
 			"write.in-flight",
@@ -687,16 +707,7 @@ async function replay(
 	// A record with no `request_hash` predates it; fall back to the content comparison
 	// rather than refusing a write whose identity simply was not recorded.
 	const divergent = existing.request_hash ? existing.request_hash !== asked : entry !== null && entry.entry_hash !== entryHash;
-	if (divergent) {
-		return refuse(
-			"conflict",
-			"idempotency.reused",
-			`This idempotency_key was already spent on a different write${entry ? ` (${entry.id})` : ""}. A key is the ` +
-				"promise that one write happens once, so it cannot also stand for this one — and that covers the ttl " +
-				"and trust you asked for, not just the text. Send this entry under its own idempotency_key.",
-			{ idempotency_key: key, grant, ...(entry ? { conflict_with: entry.id } : {}) },
-		);
-	}
+	if (divergent) return reused(key, grant, entry);
 
 	// Past the check above, any row there is this request's own content.
 	const verified = entry !== null;
@@ -716,6 +727,26 @@ async function replay(
 		grant,
 		...(entry ? { entry } : {}),
 	};
+}
+
+/**
+ * One key, two different asks.
+ *
+ * Shared by the three places that can find out — a finished record, a claim still in
+ * flight, and a reservation recovered from an attempt that died — because the caller's
+ * position is identical in all three: this write did not happen, and nothing sent under
+ * this key will make it happen. A single wording also keeps the answer from drifting
+ * into one that sounds like a success on one path and a refusal on another.
+ */
+function reused(key: string, grant: string, entry: MemoryEntry | null): Decision {
+	return refuse(
+		"conflict",
+		"idempotency.reused",
+		`This idempotency_key was already spent on a different write${entry ? ` (${entry.id})` : ""}. A key is the ` +
+			"promise that one write happens once, so it cannot also stand for this one — and that covers the ttl " +
+			"and trust you asked for, not just the text. Send this entry under its own idempotency_key.",
+		{ idempotency_key: key, grant, ...(entry ? { conflict_with: entry.id } : {}) },
+	);
 }
 
 /** The optimistic-concurrency check that gives `versioned` its teeth. */

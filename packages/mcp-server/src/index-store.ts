@@ -380,9 +380,28 @@ export class IndexStore implements MemoryStore {
 
 			const outcome = String(row.outcome);
 			const inFlight = outcome === "in-flight";
+
+			// Whether the held claim was taken out for *this* request.
+			//
+			// It gates the in-flight hand-over alone, because that is the one hand-over that
+			// keeps the previous attempt's `entry_id`. Handing that reservation to a different
+			// request, while replacing the hashes with the new one's, makes the record say a
+			// row holding A's content is what this key spent itself on B for: the successor
+			// recovers A, and B's next retry reads `accepted` off that record and is told its
+			// own write is `verified_persisted`. It never was.
+			//
+			// So a key spent on a different ask is spent — the same answer `replay` gives for a
+			// finished record. Whether the attempt that spent it acknowledged itself or died
+			// still holding the key does not change what the key promised.
+			//
+			// A record with no `request_hash` predates the column, so there is nothing to
+			// compare it against and the older hand-over rule stands. The gate still refuses to
+			// call a recovered row this write's own when its content does not match.
+			const heldFor = optional(row.request_hash);
+			const sameAsk = heldFor === undefined || heldFor === input.requestHash;
 			const takeable =
 				(outcome !== "accepted" && !inFlight) ||
-				(inFlight && row.in_flight_stale === true) ||
+				(inFlight && row.in_flight_stale === true && sameAsk) ||
 				(outcome === "accepted" && row.explicit !== true && row.derived_stale === true);
 
 			if (!takeable) {
@@ -415,7 +434,9 @@ export class IndexStore implements MemoryStore {
 					-- An in-flight claim's reservation is KEPT, not replaced. It may point at a
 					-- row that already exists, and the successor has to resolve that before the
 					-- pointer can be thrown away; overwriting it here would orphan the row and
-					-- the retry after this one would duplicate it.
+					-- the retry after this one would duplicate it. Safe to inherit only because
+					-- the same-ask test above limits this hand-over to a retry of the same
+					-- request: the reserved row is then this write's own, not a stranger's.
 					entry_id   = ${tookOverFrom ?? input.entryId},
 					holder     = ${holder},
 					claimed    = now()
