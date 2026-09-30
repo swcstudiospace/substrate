@@ -39,9 +39,13 @@
  * refused, and unless at least one claim was actually withdrawn. Run it with no
  * blackhole and it exits non-zero saying which half did not happen.
  *
- * `CHAOS_REHEARSAL=1` turns those two into notes, for checking the script itself
+ * `CHAOS_REHEARSAL=1` turns those checks into notes, for checking the script itself
  * against a healthy deployment. It is the only way to get a green run without an
- * outage, and it says so in the report.
+ * outage, and it says so in the report. **Every check that only holds during the
+ * outage goes through `require_`**, including "no claim was granted": a healthy
+ * deployment grants claims, and that is the behaviour, so a rehearsal that failed on it
+ * was failing on the deployment being healthy — which is the one thing a rehearsal
+ * assumes.
  */
 
 const BASE = (process.env.SUBSTRATE_URL?.trim() || "http://127.0.0.1:7410").replace(/\/+$/, "");
@@ -291,7 +295,14 @@ const revoked = decisions.filter((decision) => decision === "revoked");
 const undecided = claims.filter((attempt) => toolResult(attempt) === null);
 
 check(claimsAnswered.length === claims.length, `every claim call was answered (${claimsAnswered.length}/${claims.length})`);
-check(
+// This is a statement about an outage, so it is one of the checks the outage has to have
+// happened for. It was unconditional, which made `CHAOS_REHEARSAL` self-contradictory: the
+// rehearsal exists to run the script against a *healthy* deployment, and against a healthy
+// deployment a claim is granted — the correct behaviour — so the rehearsal failed on it
+// while the two checks either side of it were being relaxed for exactly that reason. A
+// granted claim is a failure only when the ledger was refusing, which is what `require_`
+// already encodes.
+require_(
 	granted.length === 0,
 	"no claim was granted while the ledger was refusing",
 	granted.length > 0 ? `${granted.length} claim(s) were granted — fail-closed did not hold` : undefined,
