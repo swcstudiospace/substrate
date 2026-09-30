@@ -177,9 +177,18 @@ means a refused batch leaves no `allowed` record for a fail-open member that nev
 ran — which is what recording each call as the loop reached it used to produce. Within
 the fail-closed group a denial can still follow an earlier success; the chain is
 append-only, so that record cannot be withdrawn, and a **correction** is appended
-instead: one `denied` record under the tool name `batch`, saying how many calls were
+instead: a `denied` record under the tool name `batch`, saying how many calls were
 recorded as allowed and that none of them was dispatched. An append-only chain is
 corrected by appending, never by editing.
+
+The correction is written **once per graph the batch touched**, not once per batch. A
+record carries a single `graph_id` and `substrate evidence` selects by exactly that
+field, so a correction naming no graph would be filtered out of every bundle while the
+earlier `allowed` record — which does name its graph — was kept. That graph's evidence
+would then show a claim as allowed with nothing saying it never ran, which is the
+reading the correction exists to prevent. Each affected graph gets its own, counting
+only its own calls; a call that named no graph is corrected under a null one, the same
+place its `allowed` record sits.
 
 Handshake traffic — `initialize`, `tools/list`, notifications — is not audited. A
 trail of handshakes buries the decisions it exists to show.

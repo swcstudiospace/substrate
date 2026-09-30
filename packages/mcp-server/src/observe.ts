@@ -267,7 +267,8 @@ export async function auditToolCalls(
 	const ordered = [...calls].sort(
 		(a, b) => Number(auditMode(a.tool) === "fail-open") - Number(auditMode(b.tool) === "fail-open"),
 	);
-	let recordedBeforeDenial = 0;
+	/** The calls this batch has already recorded `allowed`, for a correction to name. */
+	const recorded: RecordedCall[] = [];
 
 	for (const call of ordered) {
 		const label = toolLabel(call.tool);
@@ -294,7 +295,7 @@ export async function auditToolCalls(
 			});
 			observability.instruments.recordAudit({ decision: "allowed", written: appended.written });
 			observability.instruments.recordToolCall({ surface: context.surface, tool: label, decision: "allowed" });
-			recordedBeforeDenial++;
+			recorded.push({ surface: context.surface, graph_id: context.graph_id });
 		} catch (cause) {
 			if (!(cause instanceof AuditUnavailableError)) throw cause;
 			const message = redact(cause.message);
@@ -306,10 +307,16 @@ export async function auditToolCalls(
 				.catch(() => false);
 			observability.instruments.recordAudit({ decision: "denied", written });
 			observability.instruments.recordToolCall({ surface: context.surface, tool: label, decision: "denied" });
-			await batchNotDispatched(observability, context.surface, transport, recordedBeforeDenial);
+			await batchNotDispatched(observability, transport, recorded);
 		}
 	}
 	return { denials };
+}
+
+/** A call already recorded `allowed` in this batch, for the correction to name. */
+interface RecordedCall {
+	surface: string;
+	graph_id: string | null;
 }
 
 /**
@@ -318,30 +325,49 @@ export async function auditToolCalls(
  * The chain is append-only, so the earlier `allowed` records cannot be withdrawn.
  * They are true about what was *asked and permitted*; what changed is that the batch
  * was then refused whole and none of it ran. Saying so in its own record is the only
- * honest way to express that, and it keeps an incident reader from concluding a
- * claim was carried out.
+ * honest way to express that, and it keeps an incident reader from concluding a claim
+ * was carried out.
+ *
+ * **One correction per graph the batch touched**, not one per batch. A record carries a
+ * single `graph_id`, and `buildGraphEvidence` selects by exactly that field — so a
+ * correction with no graph was filtered out of every bundle while the earlier
+ * `allowed` record, which *does* name its graph, was kept. That graph's evidence then
+ * showed a claim as allowed with nothing saying it never ran, which is precisely the
+ * reading this correction exists to prevent. Each affected graph gets its own, counting
+ * only its own calls; a call that named no graph is corrected under a null one, the same
+ * place its `allowed` record sits.
  */
 async function batchNotDispatched(
 	observability: Pick<Observability, "audit" | "instruments">,
-	surface: string,
 	transport: AuditTransport,
-	recorded: number,
+	recorded: RecordedCall[],
 ): Promise<void> {
-	if (recorded === 0) return;
-	const written = await observability.audit
-		.append({
-			surface,
-			tool: "batch",
-			transport,
-			decision: "denied",
-			mode: "fail-open",
-			reason:
-				`the batch was refused whole after ${recorded} call(s) had already been recorded as allowed; ` +
-				"none of them was dispatched",
-		})
-		.then((appended) => appended.written)
-		.catch(() => false);
-	observability.instruments.recordAudit({ decision: "denied", written });
+	if (recorded.length === 0) return;
+
+	const byGraph = new Map<string | null, { surface: string; count: number }>();
+	for (const call of recorded) {
+		const group = byGraph.get(call.graph_id);
+		if (group) group.count++;
+		else byGraph.set(call.graph_id, { surface: call.surface, count: 1 });
+	}
+
+	for (const [graph_id, { surface, count }] of byGraph) {
+		const written = await observability.audit
+			.append({
+				surface,
+				tool: "batch",
+				transport,
+				graph_id,
+				decision: "denied",
+				mode: "fail-open",
+				reason:
+					`the batch was refused whole after ${count} call(s)${graph_id ? " for this graph" : ""} had already ` +
+					"been recorded as allowed; none of them was dispatched",
+			})
+			.then((appended) => appended.written)
+			.catch(() => false);
+		observability.instruments.recordAudit({ decision: "denied", written });
+	}
 }
 
 const BATCH_REFUSED =

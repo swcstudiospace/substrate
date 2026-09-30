@@ -224,6 +224,114 @@ describe("auditToolCalls", () => {
 		expect(correction?.reason).toContain("none of them was dispatched");
 	});
 
+	test("the correction names the graph, so it reaches that graph's evidence", async () => {
+		// Without this the correction had no `graph_id`, and `buildGraphEvidence` selects
+		// by exactly that field — so it was filtered out of every bundle while the earlier
+		// `allowed` record, which does name its graph, was kept. That graph's evidence then
+		// showed a claim as allowed with nothing saying it never ran.
+		const appended: AuditRecordInput[] = [];
+		const audit = {
+			async append(input: AuditRecordInput) {
+				appended.push(input);
+				if (input.tool === "graph_claim" && input.decision === "allowed") {
+					throw new AuditUnavailableError(input.tool, "stubbed refusal");
+				}
+				return { record: {} as never, written: true };
+			},
+		};
+		const observed = observability(null);
+
+		await auditToolCalls({ audit: audit as never, instruments: observed.instruments }, "omp", [
+			{ id: 1, tool: "graph_register", args: { graph_id: "ut-1" } },
+			{ id: 2, tool: "graph_claim", args: { graph_id: "ut-1" } },
+		]);
+
+		const correction = appended.find((record) => record.tool === "batch");
+		expect(correction?.graph_id).toBe("ut-1");
+		expect(correction?.reason).toContain("for this graph");
+	});
+
+	test("a batch spanning two graphs gets one correction each, counting only its own calls", async () => {
+		// A record carries a single `graph_id`, so one correction could only ever reach one
+		// of the affected graphs' bundles.
+		const appended: AuditRecordInput[] = [];
+		const audit = {
+			async append(input: AuditRecordInput) {
+				appended.push(input);
+				if (input.tool === "graph_claim" && input.decision === "allowed") {
+					throw new AuditUnavailableError(input.tool, "stubbed refusal");
+				}
+				return { record: {} as never, written: true };
+			},
+		};
+		const observed = observability(null);
+
+		await auditToolCalls({ audit: audit as never, instruments: observed.instruments }, "omp", [
+			{ id: 1, tool: "graph_register", args: { graph_id: "ut-1" } },
+			{ id: 2, tool: "graph_register", args: { graph_id: "ut-1" } },
+			{ id: 3, tool: "graph_register", args: { graph_id: "ut-2" } },
+			{ id: 4, tool: "graph_claim", args: { graph_id: "ut-2" } },
+		]);
+
+		const corrections = appended.filter((record) => record.tool === "batch");
+		expect(corrections.map((record) => record.graph_id).sort()).toEqual(["ut-1", "ut-2"]);
+		expect(corrections.find((record) => record.graph_id === "ut-1")?.reason).toContain("after 2 call(s)");
+		expect(corrections.find((record) => record.graph_id === "ut-2")?.reason).toContain("after 1 call(s)");
+	});
+
+	test("a call naming no graph is corrected under a null one, where its allowed record sits", async () => {
+		const appended: AuditRecordInput[] = [];
+		const audit = {
+			async append(input: AuditRecordInput) {
+				appended.push(input);
+				if (input.tool === "graph_claim" && input.decision === "allowed") {
+					throw new AuditUnavailableError(input.tool, "stubbed refusal");
+				}
+				return { record: {} as never, written: true };
+			},
+		};
+		const observed = observability(null);
+
+		await auditToolCalls({ audit: audit as never, instruments: observed.instruments }, "omp", [
+			{ id: 1, tool: "memory_write", args: { scope: "global" } },
+			{ id: 2, tool: "graph_claim", args: {} },
+		]);
+
+		const correction = appended.find((record) => record.tool === "batch");
+		expect(correction?.graph_id).toBeNull();
+		expect(correction?.reason).not.toContain("for this graph");
+	});
+
+	test("a batch correction lands in the bundle for the graph it names", async () => {
+		// The other half of the property, over a real chain: `buildGraphEvidence` keeps a
+		// `tool: "batch"` record when its graph matches, so the correction is read
+		// alongside the record it corrects.
+		const observed = observability(null);
+		await observed.start();
+		await observed.audit.append({
+			surface: "omp",
+			tool: "graph_claim",
+			graph_id: "ut-9",
+			decision: "allowed",
+			mode: "fail-closed",
+		});
+		await observed.audit.append({
+			surface: "omp",
+			tool: "batch",
+			graph_id: "ut-9",
+			decision: "denied",
+			mode: "fail-open",
+			reason: "the batch was refused whole after 1 call(s) for this graph had already been recorded as allowed",
+		});
+
+		const bundle = await buildGraphEvidence(observed, new Substrate(loadConfig({}), { index: null, greptime: null }), "ut-9");
+
+		expect(bundle.audit.total).toBe(2);
+		expect(bundle.audit.denied).toBe(1);
+		expect(bundle.audit.byTool.map((row) => row.tool).sort()).toEqual(["batch", "graph_claim"]);
+		observed.stop();
+	});
+
 	test("an unrecognised tool name is bucketed in the metric but kept exactly in the trail", async () => {
 		// `tool` came straight from a caller-supplied JSON-RPC `params.name`, so it let an
 		// authenticated caller mint one metric series per name it invented. The audit keeps
