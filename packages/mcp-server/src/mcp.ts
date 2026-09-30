@@ -21,6 +21,29 @@ import {
 
 const surfaceSchema = z.enum(SURFACES);
 
+/**
+ * Who a `memory_write` through this server is attributed to.
+ *
+ * The token, or nobody. Everywhere else in this file a caller-supplied `surface` is
+ * attribution, and naming another surface is at worst a mislabelled event. On this one
+ * tool it is *authorisation*: the name decides which grants apply, so a caller holding
+ * the muse token that could pass `surface: "hermes"` would collect hermes's grants,
+ * including its own `agent:hermes` scope.
+ *
+ * The argument therefore loses to the token — and, when there is no token, it loses to
+ * `unknown` rather than winning by default. An unauthenticated caller is precisely the
+ * one with nothing to lose by naming a surface, and a server with no tokens configured
+ * is precisely where it can. `unknown` matches no wildcard grant, so it writes nothing
+ * until an operator grants it by name.
+ *
+ * `argSurface` is a parameter so that ignoring it is testable. The reply's `writer`
+ * reports what the write was actually attributed to, so a caller never has to guess
+ * whether its argument was taken.
+ */
+export function memoryToolWriter(callerSurface: Surface | null, argSurface: Surface | undefined): string {
+	return callerSurface ?? "unknown";
+}
+
 function text(value: string) {
 	return { content: [{ type: "text" as const, text: value }] };
 }
@@ -97,24 +120,20 @@ export function createMcpServer(substrate: Substrate, callerSurface: Surface | n
 				surface: surfaceSchema
 					.optional()
 					.describe(
-						"ignored when a bearer token already identifies you — your token's surface is what RBAC is " +
-							"decided on, and the reply's `writer` says which surface the write was attributed to",
+						"ignored on this tool — your token's surface is what RBAC is decided on, and with no token " +
+							"the write is attributed to `unknown`, which holds no grants. The reply's `writer` says " +
+							"which surface the write was attributed to.",
 					),
 			},
 			// Not destructive: a superseded entry is retired, never deleted. Idempotent
 			// where the caller supplies a key, which is the whole point of having one.
 			annotations: { destructiveHint: false, idempotentHint: true },
 		},
-		// The token wins over the argument, unlike every other tool here.
-		//
-		// Elsewhere `surface` is attribution and a caller naming another surface is at
-		// worst a mislabelled event. Here it is *authorisation*: a caller holding the
-		// muse token could otherwise pass `surface: "hermes"` and collect hermes's
-		// grants, including its own `agent:hermes` scope — which is default-deny
-		// defeated by a request parameter. The REST route has always resolved it this
-		// way round; this tool now matches it.
+		// The token decides the writer, and nothing else does — see `memoryToolWriter`.
+		// This is the one tool here where `surface` would be authorisation rather than
+		// attribution, and `POST /memory` resolves it the same way.
 		async ({ surface, ...entry }) =>
-			json(await substrate.writeMemory({ ...entry, writer: callerSurface ?? surface ?? "unknown" })),
+			json(await substrate.writeMemory({ ...entry, writer: memoryToolWriter(callerSurface, surface) })),
 	);
 
 	server.registerTool(

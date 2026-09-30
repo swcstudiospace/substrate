@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { memoryToolWriter } from "./mcp.ts";
 import { healthStatus, memoryWriteStatus, memoryWriter } from "./server.ts";
 
 /** Shorthand for a health report; every field defaults to the unhealthy value. */
@@ -62,20 +63,36 @@ describe("memoryWriter", () => {
 	test("the token wins, and a body-supplied writer cannot outrank it", () => {
 		// Attribution is what RBAC is decided on, so a caller naming its own surface
 		// would make default-deny a formality.
-		expect(memoryWriter("muse", "hermes", false)).toBe("muse");
-		expect(memoryWriter("muse", "hermes", true)).toBe("muse");
+		expect(memoryWriter("muse", "hermes")).toBe("muse");
 	});
 
-	test("a body-supplied writer is honoured only where no token exists at all", () => {
-		// A local run has no token to beat, and forcing `unknown` there would leave
-		// memory unwritable rather than protected.
-		expect(memoryWriter(null, "hermes", true)).toBe("hermes");
-		expect(memoryWriter(null, "hermes", false)).toBe("unknown");
+	test("an anonymous caller cannot name itself a surface", () => {
+		// The regression. A deployment with no tokens configured is the one that skips
+		// the 401, so honouring `body.writer` there — the only place it was ever
+		// honoured — handed hermes's graph, repo and `agent:hermes` grants to anybody
+		// who could reach the port and type the name.
+		expect(memoryWriter(null, "hermes")).toBe("unknown");
+		expect(memoryWriter(null, "claude-code")).toBe("unknown");
 	});
 
 	test("anything missing or empty is the writer that holds no grants", () => {
-		expect(memoryWriter(null, undefined, true)).toBe("unknown");
-		expect(memoryWriter(null, "   ", true)).toBe("unknown");
-		expect(memoryWriter(null, 42, true)).toBe("unknown");
+		expect(memoryWriter(null, undefined)).toBe("unknown");
+		expect(memoryWriter(null, "   ")).toBe("unknown");
+		expect(memoryWriter(null, 42)).toBe("unknown");
+	});
+});
+
+describe("memoryToolWriter", () => {
+	test("the token wins over the tool's own surface argument", () => {
+		// `surface` is attribution on every other MCP tool. On `memory_write` it would
+		// be authorisation, so the muse token cannot spend it to become hermes.
+		expect(memoryToolWriter("muse", "hermes")).toBe("muse");
+	});
+
+	test("an unauthenticated MCP caller cannot name itself a surface", () => {
+		// The same hole as the REST route's, through the other door: no token means
+		// `unknown`, never the surface the caller asked to be.
+		expect(memoryToolWriter(null, "hermes")).toBe("unknown");
+		expect(memoryToolWriter(null, undefined)).toBe("unknown");
 	});
 });
