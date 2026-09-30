@@ -88,8 +88,8 @@ decided on the writer's name, so a caller-supplied name is a caller-supplied
 permission.
 
 A local run that wants memory writable without tokens says so explicitly, with
-either a token in `SUBSTRATE_TOKENS` or a grant naming `unknown` in
-`SUBSTRATE_MEMORY_GRANTS`:
+either a surface token — `SUBSTRATE_TOKEN_CLAUDE_CODE=…`, one variable per surface — or
+a grant naming `unknown` in `SUBSTRATE_MEMORY_GRANTS`:
 
 ```json
 [{ "name": "local-dev", "surfaces": ["unknown"], "scopes": ["graph", "repo"], "kinds": ["fact", "warning", "todo"] }]
@@ -171,8 +171,8 @@ Every entry carries who wrote it (`writer`, `actor`), from where (`session_id`,
 
 **An agent cannot vouch for itself**, and it cannot be somebody else either: a bearer
 token overrides a caller-named `surface`, and every reply reports the `writer` the
-write was attributed to. On `POST /memory` a body-supplied writer is honoured only on
-a deployment with no tokens configured at all.
+write was attributed to. Neither door honours a caller-named writer at all — see
+"Only a token names a writer" above.
 
 | Requested trust | Granted when |
 |-----------------|--------------|

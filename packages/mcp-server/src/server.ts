@@ -57,7 +57,8 @@ export function healthStatus(
  * and the denial's remedy says how to fix it.
  *
  * A local run that genuinely wants ungoverned memory says so out loud, with a grant
- * naming `unknown` in `SUBSTRATE_MEMORY_GRANTS` or a token in `SUBSTRATE_TOKENS`.
+ * naming `unknown` in `SUBSTRATE_MEMORY_GRANTS` or a surface token in
+ * `SUBSTRATE_TOKEN_<SURFACE>`.
  * Both are one line, and both leave a record of the decision.
  */
 export function memoryWriter(surface: Surface | null, bodyWriter: unknown): string {

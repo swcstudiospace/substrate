@@ -601,6 +601,11 @@ describe("claim ownership", () => {
 		const record = store.writes.get("k1");
 		expect(record?.outcome).toBe("in-flight");
 		expect(record?.entry_id).toBe("mem_1");
+		// And the remedy must not send the caller to a fresh key. The retry that owns this
+		// one may already have written the entry, so for an appending kind a fresh key is
+		// how a caller turns one write into two by following our own advice.
+		expect(result.remedy).toContain("same idempotency_key");
+		expect(result.remedy).not.toMatch(/(?:write|submit|try) again (?:under|with) a (?:fresh|new)/i);
 	});
 
 	test("a claim reserves the row it will write, so an unacknowledged commit is findable", async () => {
