@@ -66,6 +66,23 @@ const TERMINAL_STATUSES = ["Merged", "Resolved", "Done", "Won't Fix", "Closed", 
  */
 const CLAIM_ATTEMPTS = 3;
 
+/**
+ * Carries "the standing identity is already taken" out of `insertEntry`'s
+ * transaction, rolling it back on the way.
+ *
+ * A sentinel rather than a returned value because the transaction has to *not*
+ * commit: the insert declines quietly under `on conflict … do nothing`, and a
+ * retire in the same transaction would otherwise be committed without the row it
+ * was making way for. Private to this file, so it can never be confused with a
+ * store error a caller has to handle.
+ */
+class StandingTaken extends Error {
+	constructor() {
+		super("the standing entry for this conflict key was written by another writer");
+		this.name = "StandingTaken";
+	}
+}
+
 export class IndexStore implements MemoryStore {
 	private readonly sql: SQL;
 
@@ -894,8 +911,37 @@ export class IndexStore implements MemoryStore {
 	 * writes nothing, or this insert goes first and the takeover sees the entry it
 	 * reserved and recovers it. Checking ownership before the transaction would leave
 	 * exactly the window the fencing token exists to close.
+	 *
+	 * The insert itself is `on conflict … do nothing` over `memory_standing_idx`, which
+	 * is what makes a *first* write for an identity safe to race. Two writers under
+	 * different keys both read no standing entry, so neither retires anything and
+	 * neither `standing-moved` check fires; without the clause the second insert raised
+	 * a duplicate key, the gate could not tell a rolled-back statement from a committed
+	 * one, and it held the loser's idempotency key in flight until the takeover timeout
+	 * — blocking the retry the answer was asking for. With it, the loser blocks on the
+	 * index until the winner commits and then writes nothing and says `standing-exists`,
+	 * which the gate reports as an ordinary conflict and the loser can retry at once.
 	 */
 	async insertEntry(
+		row: NewMemoryEntry,
+		claim: { key: string; holder: string },
+	): Promise<
+		{ ok: true; entry: MemoryEntry } | { ok: false; reason: "standing-moved" | "claim-lost" | "standing-exists" }
+	> {
+		try {
+			return await this.insertEntryTx(row, claim);
+		} catch (cause) {
+			// Rolled back by the throw that carried it out of the transaction — which is
+			// the point of throwing rather than returning: a `do nothing` insert leaves the
+			// retire above it committable, and committing a retire whose replacement never
+			// landed would take the standing entry out of force and put nothing in its place.
+			if (cause instanceof StandingTaken) return { ok: false as const, reason: "standing-exists" as const };
+			throw cause;
+		}
+	}
+
+	/** The transaction itself. It never *returns* `standing-exists` — it throws it. */
+	private async insertEntryTx(
 		row: NewMemoryEntry,
 		claim: { key: string; holder: string },
 	): Promise<{ ok: true; entry: MemoryEntry } | { ok: false; reason: "standing-moved" | "claim-lost" }> {
@@ -928,8 +974,15 @@ export class IndexStore implements MemoryStore {
 					${row.writer}, ${row.actor}, ${row.trust}, ${row.ttl}, ${row.session_id}, ${row.graph_id},
 					${row.repo}, ${row.conflict_key}, ${row.version}, ${row.supersedes}, ${row.entry_hash},
 					${row.reverify_after}, ${row.idempotency_key})
+				-- The arbiter is memory_standing_idx, named by restating its predicate.
+				-- What it catches is an identity this write believed free — usually one with
+				-- no predecessor to retire, so nothing above it fired — that another writer
+				-- filled first.
+				on conflict (conflict_key) where conflict_key is not null and superseded_by is null
+				do nothing
 				returning *`) as Array<Record<string, unknown>>;
-			return { ok: true as const, entry: toMemoryEntry(inserted[0]!) };
+			if (!inserted[0]) throw new StandingTaken();
+			return { ok: true as const, entry: toMemoryEntry(inserted[0]) };
 		})) as { ok: true; entry: MemoryEntry } | { ok: false; reason: "standing-moved" | "claim-lost" };
 	}
 

@@ -36,7 +36,7 @@ The order is the design, not an implementation detail.
 | 2 | RBAC, default-deny | `memory-policy.ts` | `denied` — `rbac.no-grant` |
 | 3 | Quarantine | `memory-classify.ts` | `quarantined` — `quarantine.secret` / `.pii` / `.speculative` |
 | 4 | Exactly-once | `memory-write.ts` | `conflict` — `write.in-flight`, `write.superseded`, `idempotency.reused`, or a replay |
-| 5 | Conflict, insert, read-back | `memory-write.ts` | `conflict` — `review.required`, `version.required`, `version.stale`, `version.raced` |
+| 5 | Conflict, insert, read-back | `memory-write.ts` | `conflict` — `review.required`, `version.required`, `version.stale`, `version.raced`, `standing.raced` |
 
 **Why RBAC before the content check.** Storing text from a writer that has no
 business at this scope is still storing it — even in the quarantine table. A
@@ -162,6 +162,15 @@ invariant rather than a convention. Which is why retiring the predecessor and
 inserting the replacement are one transaction: either order as two statements leaves
 a window where the invariant is false, or where a standing decision is hidden behind
 a write that never landed.
+
+**Two first writes for one subject.** Under different idempotency keys, both writers
+read no standing entry, so neither retires a predecessor and nothing in the plan
+tells them apart — the index is the only thing between them. The insert is
+`on conflict … do nothing` over `memory_standing_idx`, so the loser blocks until the
+winner commits and then writes nothing and is answered `conflict / standing.raced`,
+naming the entry that won. Its key records that conflict rather than staying in
+flight, so the retry the remedy asks for — with `expected_version` for a decision —
+is allowed immediately rather than after the takeover timeout.
 
 ## Provenance and trust decay
 

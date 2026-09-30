@@ -174,7 +174,9 @@ class FakeStore implements MemoryStore {
 	async insertEntry(
 		row: NewMemoryEntry,
 		claim: { key: string; holder: string },
-	): Promise<{ ok: true; entry: MemoryEntry } | { ok: false; reason: "standing-moved" | "claim-lost" }> {
+	): Promise<
+		{ ok: true; entry: MemoryEntry } | { ok: false; reason: "standing-moved" | "claim-lost" | "standing-exists" }
+	> {
 		if (this.onInsert) await this.onInsert();
 		if (this.failInsert) throw new Error(this.failInsert);
 		// Fenced, like the real store: an attempt whose claim was taken over does not get
@@ -187,11 +189,17 @@ class FakeStore implements MemoryStore {
 		// `memory_standing_idx` is a unique partial index in the real store, so the fake
 		// enforces it too. Otherwise a row that should never have carried a conflict key
 		// passes here and fails only against Postgres.
+		//
+		// Refused rather than thrown, because that is what the real store does: the
+		// insert declines under `on conflict … do nothing` and the transaction rolls
+		// back. A throw here would be the bug this refusal replaced — the gate cannot
+		// tell a rolled-back statement from a committed one, so it keeps the loser's key
+		// in flight for a race the loser could have retried at once.
 		if (row.conflict_key) {
 			const clash = [...this.rows.values()].find(
 				(held) => held.conflict_key === row.conflict_key && !held.entry.superseded_by && held.entry.id !== row.supersedes,
 			);
-			if (clash) throw new Error(`duplicate key value violates unique constraint "memory_standing_idx"`);
+			if (clash) return { ok: false, reason: "standing-exists" };
 		}
 		if (row.supersedes) {
 			const predecessor = this.rows.get(row.supersedes);
@@ -471,6 +479,42 @@ describe("conflict — versioned decisions", () => {
 		expect(store.standing()).toHaveLength(2);
 	});
 
+	test("two first decisions for one subject race cleanly, and the loser may retry at once", async () => {
+		// Different idempotency keys, same subject, nothing in force yet. Neither write
+		// retires a predecessor, so neither `standing-moved` check fires and nothing in
+		// the plan tells them apart — the identity goes to whichever insert reaches the
+		// unique index first. The loser used to get a raw duplicate-key error out of the
+		// store, which the gate cannot tell from a lost connection over a committed row:
+		// it held the key in flight, so the retry its remedy asked for was refused until
+		// the takeover timeout.
+		const hook = store.onInsert;
+		store.onInsert = async () => {
+			store.onInsert = hook;
+			await write({ ...decision, text: "the runtime is Orca", idempotency_key: "winner" });
+		};
+
+		const loser = await write({ ...decision, text: "the runtime is herdr", idempotency_key: "loser" });
+
+		expect(loser.outcome).toBe("conflict");
+		expect(loser.reason).toBe("standing.raced");
+		expect(loser.conflict_with).toBe(store.standing()[0]?.id);
+		expect(loser.remedy).toContain("expected_version");
+		expect(store.standing()).toHaveLength(1);
+		expect(store.standing()[0]?.text).toBe("the runtime is Orca");
+
+		// Refused, not in flight: the key records a conflict, so the same key is takeable
+		// now rather than after IN_FLIGHT_TIMEOUT_MS.
+		expect(store.writes.get("loser")?.outcome).toBe("conflict");
+		const retry = await write({
+			...decision,
+			text: "the runtime is herdr",
+			expected_version: 1,
+			idempotency_key: "loser",
+		});
+		expect(retry.outcome).toBe("accepted");
+		expect(retry.entry?.version).toBe(2);
+	});
+
 	test("losing the race to supersede is reported, not fought", async () => {
 		await write({ ...decision, text: "the runtime is herdr" });
 		// Another writer retires the standing entry in the window between this write
@@ -506,6 +550,30 @@ describe("accepted — last-write-wins todos", () => {
 		expect(second.conflict_with).toBe(first.entry?.id ?? "");
 		expect(store.standing()).toHaveLength(1);
 		expect(store.standing()[0]?.text).toBe("lockfile regenerated; verify in CI");
+	});
+
+	test("two first todos for one subject race cleanly too", async () => {
+		// Last-write-wins is not an excuse to skip the race: the second writer still has
+		// to see the entry it is replacing, and a todo that vanished into a store error
+		// is a todo nobody does.
+		const hook = store.onInsert;
+		store.onInsert = async () => {
+			store.onInsert = hook;
+			await write({ ...todo, text: "regenerate the lockfile", idempotency_key: "winner" });
+		};
+
+		const loser = await write({ ...todo, text: "bump the lockfile by hand", idempotency_key: "loser" });
+
+		expect(loser.outcome).toBe("conflict");
+		expect(loser.reason).toBe("standing.raced");
+		expect(loser.strategy).toBe("lww");
+		expect(store.standing()).toHaveLength(1);
+
+		// And the retry, which for `lww` needs no version, replaces it.
+		const retry = await write({ ...todo, text: "bump the lockfile by hand", idempotency_key: "loser" });
+		expect(retry.outcome).toBe("accepted");
+		expect(store.standing()).toHaveLength(1);
+		expect(store.standing()[0]?.text).toBe("bump the lockfile by hand");
 	});
 
 	test("a different subject is a different todo", async () => {
