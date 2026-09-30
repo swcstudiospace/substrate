@@ -174,6 +174,16 @@ export interface GovernanceQueueRow {
 	 */
 	text?: string;
 	subject?: string;
+	/**
+	 * The retention the proposal asked for, on a review row.
+	 *
+	 * A reviewer installs a proposal by re-submitting it with a token, and the write
+	 * they send has to ask for what the proposal asked for — a `30d` proposal is not
+	 * answered by a `permanent` entry, so leaving it out would install the wrong
+	 * retention and leave the proposal pending with nothing in the queue to say why.
+	 * Not withheld without a token: a retention class names no content.
+	 */
+	ttl?: string;
 	/** Which pattern fired. Names no value, so it is safe to show unauthorised. */
 	detail?: string;
 }

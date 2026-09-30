@@ -170,7 +170,11 @@ the same todo. Without a `subject` there is no identity, so the entry is appende
   resolved only by an entry written no earlier than it was parked and holding the
   retention it asked for. Retention is the only part of the ask the queue records: a
   parked row always carries the unreviewed trust and actor, because a reviewer
-  decides those.
+  decides those. Which is why the queue shows it — a reviewer installs a proposal by
+  re-submitting it, so they have to be able to see the `ttl` they need to send, or a
+  `30d` proposal is installed as `permanent` and stays pending with nothing on
+  screen to explain why. It is shown without a reviewer token, like `scope` and
+  `kind`: a retention class names no content.
 
   A proposal is parked even where the same content is already in force. An earlier
   attempt at this refused to park there, and it was wrong three ways: a global

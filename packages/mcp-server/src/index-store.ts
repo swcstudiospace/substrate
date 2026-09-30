@@ -1092,7 +1092,7 @@ export class IndexStore implements MemoryStore {
 	 */
 	async governanceQueue(limit = 20): Promise<{ reviews: GovernanceQueueRow[]; quarantined: GovernanceQueueRow[] }> {
 		const reviews = (await this.sql`
-			select id, scope, kind, body, subject, writer, reason, created
+			select id, scope, kind, body, subject, writer, reason, ttl, created
 			from memory_reviews where state = 'pending'
 			order by created desc limit ${limit}`) as Array<Record<string, unknown>>;
 		const quarantined = (await this.sql`
@@ -1221,6 +1221,9 @@ function toQueueRow(row: Record<string, unknown>): GovernanceQueueRow {
 		created: timestamp(row.created),
 		text: String(row.body),
 		...(optional(row.subject) ? { subject: optional(row.subject) } : {}),
+		// Review rows only: the quarantine table holds no retention, because a
+		// quarantined write never got as far as being kept for anything.
+		...(optional(row.ttl) ? { ttl: optional(row.ttl) } : {}),
 		...(optional(row.detail) ? { detail: optional(row.detail) } : {}),
 	};
 }

@@ -306,6 +306,32 @@ describeLive("memory governance against a live index", () => {
 		expect(rows).toEqual([{ state: "approved", n: 2 }]);
 	});
 
+	test("the queue tells a reviewer what retention to approve", async () => {
+		// A reviewer installs a proposal by re-submitting it with a token, and the
+		// release only resolves a proposal the entry answers — so the queue has to say
+		// what was asked for. Without it a `30d` proposal is approved as `permanent`
+		// and stays pending, with nothing on screen to explain why.
+		const parked = {
+			...firstWriteRow({ id: `memr_${MARKER}_ttl`, idempotency_key: `${MARKER}-r7` }),
+			scope: "global",
+			subject: null,
+			entry_hash: `hash-${MARKER}-ttl`,
+			text: `${MARKER} the runner is rebuilt weekly`,
+			conflict_key: null,
+			ttl: "30d" as const,
+			reason: "global scope requires review",
+		};
+		expect(await a.enqueueReview(parked)).toBe(`memr_${MARKER}_ttl`);
+
+		const queue = await a.governanceQueue(50);
+		const row = queue.reviews.find((review) => review.id === `memr_${MARKER}_ttl`);
+
+		expect(row?.ttl).toBe("30d");
+		// And a quarantine row carries none, because a parked secret was never kept
+		// for anything.
+		expect(queue.quarantined.every((quarantined) => quarantined.ttl === undefined)).toBe(true);
+	});
+
 	test("an entry resolves only the proposals it answers", async () => {
 		// `releaseReviews` matches on the content hash, and content is not the whole of
 		// a proposal: one parked after the entry was written is a new ask, and one
