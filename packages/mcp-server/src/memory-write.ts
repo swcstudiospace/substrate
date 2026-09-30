@@ -449,7 +449,23 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 	// may already exist is never overwritten before it has been resolved. See `rowId`.
 	const entryId = newId("mem");
 	const claim = await store.claimWrite({ key, explicit: explicitKey !== null, entryHash, requestHash: asked, entryId });
-	if (!claim.claimed) return await replay(store, key, claim.existing, grant.name, entryHash, asked);
+	if (!claim.claimed) {
+		const replayed = await replay(store, key, claim.existing, grant.name, entryHash, asked);
+		// Reconcile the proposal this key's write installed but may not have resolved.
+		//
+		// Resolving is guarded down in the accepted path, deliberately: the entry is
+		// committed by then, so a proposal that cannot be resolved is a stale row in a
+		// reviewer's queue rather than a write that did not happen. But nothing else
+		// would ever clear it — an explicit key replays for ever and never reaches that
+		// code again — so the retry is where it is picked up. Idempotent: the update
+		// matches only rows still pending for this content, and `scope.class ===
+		// "global"` is exactly `conflictPlan`'s `requiresReview`, which has not been
+		// computed yet here.
+		if (replayed.outcome === "accepted" && replayed.entry && scope.class === "global") {
+			await store.releaseReviews(entryHash, replayed.entry.id, writer).catch(() => undefined);
+		}
+		return replayed;
+	}
 	const { holder } = claim;
 
 	// Taking over an abandoned claim is not the same as finding nothing done. Look for
@@ -709,6 +725,7 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 		// it, and the others are outages nothing can rule out. The recovery path above
 		// guards the same call for the same reason.
 		if (verified && plan.requiresReview) {
+			// A failure here leaves a stale proposal, which the retry path above clears.
 			await store.releaseReviews(entryHash, inserted.id, writer).catch(() => undefined);
 		}
 

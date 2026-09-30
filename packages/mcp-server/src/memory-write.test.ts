@@ -460,6 +460,34 @@ describe("conflict — require-review for global", () => {
 		expect(store.reviews[0]?.state).toBe("pending");
 	});
 
+	test("a retry clears the proposal that the write could not resolve", async () => {
+		// The other half of guarding that call: the stale row has to be cleared by
+		// something, and nothing else ever reaches it — an explicit key replays for
+		// ever and never runs the accepted path again. So the retry reconciles.
+		const request = {
+			scope: "global",
+			kind: "fact" as const,
+			text: "eight agents share one host",
+			review_token: REVIEW_TOKEN,
+			idempotency_key: "k-review",
+		};
+		await write({ ...request, review_token: undefined });
+		store.failReleaseReviews = "reviews table unavailable";
+		const installed = await write(request);
+		expect(installed.outcome).toBe("accepted");
+		expect(store.reviews[0]?.state).toBe("pending");
+
+		store.failReleaseReviews = null;
+		const retried = await write(request);
+
+		expect(retried.reason).toBe("idempotent.replay");
+		expect(retried.entry?.id).toBe(installed.entry?.id);
+		expect(store.reviews[0]?.state).toBe("approved");
+		expect(store.reviews[0]?.entry_id).toBe(installed.entry?.id);
+		// And nothing was written a second time to achieve it.
+		expect(store.standing()).toHaveLength(1);
+	});
+
 	test("the parked conflict does not pin the outcome forever", async () => {
 		// A refused write left nothing behind, so the key it spent must not stop the
 		// same content being re-decided — which is what makes approval-by-resubmit work

@@ -157,7 +157,9 @@ the same todo. Without a `subject` there is no identity, so the entry is appende
   needs — a retried proposal still finds its own row, and a decided one never blocks
   a new one. And resolving a proposal can no longer fail the write: the entry is
   committed and the claim records it by then, so a proposal that cannot be resolved
-  is a stale row in a reviewer's queue, not a write that did not happen.
+  is a stale row in a reviewer's queue, not a write that did not happen. Such a row
+  is cleared by the next retry under the same key: the replay re-runs the release,
+  which is the only path that reaches it again once the key is spent.
 
   A proposal is parked even where the same content is already in force. An earlier
   attempt at this refused to park there, and it was wrong three ways: a global
