@@ -54,6 +54,24 @@ function read(path: string): string {
 	return readFileSync(join(ROOT, path), "utf8");
 }
 
+/**
+ * Whether a file's text holds a Greptime endpoint or credential.
+ *
+ * Line-based and comment-exempt: `.env.example` has to be able to show the shape
+ * of a Railway host and the docs have to be able to name one, while an assignment
+ * with anything after the `=` is a real value.
+ */
+function carriesCredential(body: string): boolean {
+	return body
+		.split("\n")
+		.filter((line) => !/^\s*(?:#|\/\/|\*|<!--)/.test(line))
+		.some(
+			(line) =>
+				/GREPTIME_(?:URL|USER|PASSWORD)\s*[:=]\s*\S/i.test(line) ||
+				/[a-z0-9-]+\.(?:up\.railway\.app|proxy\.rlwy\.net)/i.test(line),
+		);
+}
+
 /** Every file git tracks, so the secret scan covers what is actually committed. */
 function trackedFiles(): string[] {
 	const listed = Bun.spawnSync(["git", "ls-files", "-z"], { cwd: ROOT });
@@ -135,23 +153,41 @@ describe("no secrets in the repo", () => {
 		// repository*, so a tracked `.env.production` — exactly where a deployment
 		// credential would sit — has to be covered, while an operator's untracked
 		// local `.env` must not fail their test run.
-		const tracked = trackedFiles().filter((path) => path !== relative(ROOT, import.meta.path));
-
-		// Comments are exempt: `.env.example` has to be able to show the shape of a
-		// Railway host, and the docs have to be able to name one.
-		const isComment = (line: string) => /^\s*(?:#|\/\/|\*|<!--)/.test(line);
-
-		const offenders = tracked.filter((path) =>
-			read(path)
-				.split("\n")
-				.filter((line) => !isComment(line))
-				.some(
-					(line) =>
-						/GREPTIME_(?:URL|USER|PASSWORD)\s*[:=]\s*\S/.test(line) ||
-						/[a-z0-9-]+\.(?:up\.railway\.app|proxy\.rlwy\.net)/i.test(line),
-				),
-		);
+		const offenders = trackedFiles()
+			.filter((path) => path !== relative(ROOT, import.meta.path))
+			.filter((path) => carriesCredential(read(path)));
 
 		expect(offenders).toEqual([]);
+	});
+
+	test("the scan covers every tracked env file, whatever its suffix", () => {
+		// `git ls-files` is what makes this true without enumerating suffixes, so the
+		// list it returns is asserted rather than assumed.
+		const tracked = trackedFiles();
+		expect(tracked).toContain(".env.example");
+		expect(tracked.some((path) => path.endsWith("store-lock.test.ts"))).toBe(true);
+
+		// And the detector itself catches what such a file would hold.
+		for (const body of [
+			"GREPTIME_PASSWORD=hunter2",
+			"GREPTIME_URL=https://greptime-prod.up.railway.app",
+			"GREPTIME_USER=admin",
+			'  greptime_url: "https://x.proxy.rlwy.net:1234"',
+		]) {
+			expect(carriesCredential(body)).toBe(true);
+		}
+	});
+
+	test("the scan does not fire on a placeholder or a comment", () => {
+		// `.env.example` must be able to show the shape of a host, and the docs must
+		// be able to name one, without failing the lock.
+		for (const body of [
+			"GREPTIME_PASSWORD=",
+			"GREPTIME_DB=public",
+			"# e.g. https://greptime-xxxx.up.railway.app",
+			"// GREPTIME_URL=https://example.up.railway.app",
+		]) {
+			expect(carriesCredential(body)).toBe(false);
+		}
 	});
 });

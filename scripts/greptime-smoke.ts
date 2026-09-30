@@ -14,7 +14,8 @@
  * script is for. It goes through `Substrate` and `GreptimeClient` rather than
  * around them, so what it proves is the path `events_emit` actually takes:
  *
- *   1. migrate is idempotent, and `agent_events` is in append_mode
+ *   1. migrate is idempotent, and `agent_events` is in append_mode — appends are
+ *      fail-closed until it is, so this one gates the rest
  *   2. a credential in a summary is redacted before it is stored
  *   3. a summary containing a quote and a backslash round-trips byte-identically
  *      — the quoting dialect is right, which is what makes the hash chain
@@ -91,6 +92,19 @@ check(
 	appendOnly === null ? "could not read SHOW CREATE TABLE" : appendOnly ? undefined : "recreate the table; see docs",
 );
 
+// Writes are fail-closed, so on a table that is not yet append-only every check
+// below would fail for that one reason. Say so once and stop, rather than printing
+// six failures that all mean "recreate the table".
+if (appendOnly !== true && !config.allowDeduplicatingLedger) {
+	process.stdout.write(
+		"\nAppends are refused while agent_events is not provably append-only — this is the fail-closed\n" +
+			"behaviour working, not a separate fault. Recreate the table (docs/greptime-ledger.md), or re-run\n" +
+			"with SUBSTRATE_ALLOW_DEDUPLICATING_LEDGER=true to exercise the rest of the path and knowingly\n" +
+			"accept that a colliding event may be dropped.\n",
+	);
+	process.exit(1);
+}
+
 // ── 2–3. emit a chain through the real write path ────────────────────────────
 const graphId = `smoke-${randomUUID().slice(0, 8)}`;
 const sessionId = `smoke-${Date.now()}`;
@@ -154,6 +168,7 @@ for (const statement of [
 const failed = results.filter((result) => !result.ok);
 process.stdout.write(
 	`\n${results.length - failed.length}/${results.length} checks passed. ` +
-		`Rows written under graph_id ${graphId} stay in the ledger — it is append-only.\n`,
+		`Rows written under graph_id ${graphId} cannot be cleaned up` +
+		`${appendOnly === true ? " — the table is append-only" : ""}.\n`,
 );
 process.exit(failed.length === 0 ? 0 : 1);

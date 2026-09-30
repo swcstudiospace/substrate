@@ -86,25 +86,39 @@ INSERT INTO "agent_events_v2" SELECT * FROM "agent_events";
 Run it from Greptime's own console rather than through `substrate-mcp` — the
 client will not send those statements (see below), and that is deliberate.
 
-### Until it is recreated
+### Writes are fail-closed until it is recreated
 
 A table without `append_mode` is a real, current risk, not a theoretical one:
 rapid `file.edit` events from one collector share a surface, repo, graph and kind,
 so two in the same millisecond is plausible and one of them is dropped.
 
-The substrate does not pretend otherwise, and does not decide for the operator:
+So the substrate **refuses to append** while the ledger is not provably
+append-only. A boot warning is not enough — it scrolls away and the events keep
+coming — and answering `stored: true` to a write that may vanish is the one
+failure an events ledger must not have. A lost row also breaks the chain for every
+event after it.
 
-- `GET /healthz` reports `appendOnly: true | false | null`, so the state is
-  monitorable rather than known only to a boot log.
-- every `emit` that lands in a deduplicating ledger carries a `warning`, on both
-  `events_emit` and `POST /events`.
-- `SUBSTRATE_REQUIRE_APPEND_ONLY=true` makes it **refuse** to append instead,
-  returning `stored: false`.
+Concretely, when `append_mode` is absent or cannot be confirmed:
 
-That flag is **off by default**, deliberately. Turning it on before the table is
-recreated would stop the event trail on the first deploy, and losing every event
-is worse than losing the occasional colliding one. Recreate the table, then set
-it — from that point append-only is enforced rather than reported.
+- `emit` returns `stored: false` with the reason, and writes nothing.
+- `GET /healthz` returns **503** and reports `eventsWritable: false` alongside
+  `appendOnly: false | null`. Reachability and writability are separate fields on
+  purpose: this is the state where `ping` succeeds while every append is refused.
+- `SUBSTRATE_ALLOW_DEDUPLICATING_LEDGER=true` appends anyway, and every result
+  carries a `warning` saying the event may be dropped.
+
+Refusing is safe here precisely because the substrate fails open at the *client*:
+the `substrate` CLI and every hook exit 0 regardless of the response, so a refused
+append costs the trail, never the agent's turn.
+
+The override exists so an operator can knowingly accept that loss while the
+recreate is pending, rather than having no lever at all. It is never the quiet
+path. Recreate the table and leave it unset, and append-only is enforced rather
+than merely reported.
+
+`ensureAppendMode` caches a definite answer but retries while it is still unknown,
+so one transient `SHOW CREATE TABLE` failure does not leave the write path refusing
+every event for the life of the process.
 
 ## What the write path guarantees
 
@@ -204,7 +218,7 @@ Plus one switch, which is not a credential:
 
 | | |
 | --- | --- |
-| `SUBSTRATE_REQUIRE_APPEND_ONLY` | `true` refuses to append when the table is not in `append_mode`. Off by default; see above. |
+| `SUBSTRATE_ALLOW_DEDUPLICATING_LEDGER` | `true` appends even when the table is not provably in `append_mode`. Unset by default, which refuses; see above. |
 
 `.env.example` declares all four and fills none of them in. The real values live
 only in `/etc/substrate/substrate.env` on the VPS — root-owned, `chmod 0600`,
@@ -252,8 +266,15 @@ it. Two things need a live run:
 
 - whether the deployed GreptimeDB v1.1.4 accepts `WITH ('append_mode' = 'true')`
   — if it does not, `migrate` falls back to a plain `CREATE` and warns
-- whether the table already on Railway predates `append_mode`, which it almost
-  certainly does, since it was created before this change. Expect check 2 to
-  fail on the first live run and need the recreate above.
+- the table already on Railway **does** predate `append_mode`. Check 2 will fail on
+  the first live run, and because appends are fail-closed the script stops there
+  rather than reporting the same cause six more times. That is the new behaviour
+  working. The recreate above is out of band, with LEAD.
 
-Run `bun run smoke:greptime` on the VPS to close both.
+To exercise the rest of the write path before the recreate lands:
+
+```sh
+SUBSTRATE_ALLOW_DEDUPLICATING_LEDGER=true bun run smoke:greptime
+```
+
+which knowingly accepts that a colliding event may be dropped.

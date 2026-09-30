@@ -332,6 +332,11 @@ export class GreptimeClient {
 		`);
 
 		await this.probeDialect();
+		if (!this.dialectProbed) {
+			// Not fatal, but the ledger will refuse any event carrying a backslash
+			// until this succeeds, so it belongs in the boot report.
+			warnings.push("could not determine the server's quoting dialect; events containing a backslash are refused");
+		}
 
 		const appendOnly = await this.appendModeEnabled();
 		if (appendOnly === false) {
@@ -344,6 +349,19 @@ export class GreptimeClient {
 		}
 
 		return { warnings };
+	}
+
+	/**
+	 * Whether the ledger is proven append-only, asking again if it is not yet known.
+	 *
+	 * `appendMode` is cached once answered, so this costs a query only while the
+	 * answer is still `null` — a `SHOW CREATE TABLE` that failed at boot, say. That
+	 * retry matters: without it one transient failure would leave the write path
+	 * refusing every event for the life of the process.
+	 */
+	async ensureAppendMode(): Promise<boolean | null> {
+		if (this.appendMode !== null) return this.appendMode;
+		return this.appendModeEnabled();
 	}
 
 	/**
@@ -390,17 +408,26 @@ export class GreptimeClient {
 
 	/** Latest event hash for a session — the `prev` of the next one. */
 	async lastHash(sessionId: string): Promise<string | null> {
+		// `"id"` breaks a same-millisecond tie so the read order is at least stable
+		// across calls; it is a random UUID, so it is deterministic but arbitrary,
+		// which is why `chainTip` still decides which row is actually newest.
 		const rows = await this.sql(
 			`SELECT "hash", "prev" FROM "agent_events" WHERE "session_id" = ${this.q(sessionId)}
-			 ORDER BY "ts" DESC LIMIT ${TIP_WINDOW}`,
+			 ORDER BY "ts" DESC, "id" DESC LIMIT ${TIP_WINDOW}`,
 		);
 		return chainTip(rows);
 	}
 
-	/** Every stored column for one session or graph, oldest first, for chain verification. */
+	/**
+	 * Every stored column for one session or graph, oldest first, for chain
+	 * verification. `"id"` is a tie-breaker so two events in the same millisecond
+	 * come back in a stable order rather than an arbitrary one; `inChainOrder` then
+	 * puts them in the order `prev` actually records.
+	 */
 	async readEvents(column: "session_id" | "graph_id", value: string): Promise<Array<Record<string, unknown>>> {
 		return this.sql(
-			`SELECT ${EVENT_COLUMN_LIST} FROM "agent_events" WHERE "${column}" = ${this.q(value)} ORDER BY "ts"`,
+			`SELECT ${EVENT_COLUMN_LIST} FROM "agent_events" WHERE "${column}" = ${this.q(value)}
+			 ORDER BY "ts", "id"`,
 		);
 	}
 

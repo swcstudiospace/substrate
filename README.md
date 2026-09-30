@@ -68,9 +68,11 @@ call MCP tools — the same briefing and event paths as plain `POST /brief` and 
   and returns empty within its timeout.
 - **Redact before emitting.** No credentials ever reach `agent_events`. Redaction is on the
   write path inside `substrate-mcp`, not in each collector, so no collector can forget.
-- **Append only.** Nothing rewrites or removes an event. The ledger client refuses every verb
-  that could, and `agent_events` is in Greptime's `append_mode` so it cannot deduplicate one
-  away either.
+- **Append only, fail-closed.** Nothing rewrites or removes an event. The ledger client refuses
+  every verb that could, and `agent_events` must be in Greptime's `append_mode` — which stops it
+  deduplicating a row away — or the append is refused rather than silently at risk. Refusing is
+  safe because the *client* fails open: a hook exits 0 either way, so this costs the trail, never
+  the turn.
 - Secrets live in `/etc/substrate/substrate.env`, never in this repo.
 
 Architecture: see [`.planning/PROJECT.md`](.planning/PROJECT.md) and the Notion build plan.

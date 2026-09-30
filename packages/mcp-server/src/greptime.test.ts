@@ -326,7 +326,7 @@ describe("migrate", () => {
 			if (statement.includes("SHOW CREATE TABLE")) {
 				return records(["Create Table"], [['CREATE TABLE "agent_events" (...) ENGINE=mito']]);
 			}
-			return affected;
+			return defaultReply(statement);
 		});
 
 		const { warnings } = await new GreptimeClient(config).migrate();
@@ -336,10 +336,24 @@ describe("migrate", () => {
 
 	test("warns rather than throwing when append_mode cannot be confirmed", async () => {
 		stubFetch((statement) =>
-			statement.includes("SHOW CREATE TABLE") ? new Response("nope", { status: 500 }) : affected,
+			statement.includes("SHOW CREATE TABLE") ? new Response("nope", { status: 500 }) : defaultReply(statement),
 		);
 		const { warnings } = await new GreptimeClient(config).migrate();
 		expect(warnings).toEqual(["could not confirm agent_events is in append_mode"]);
+	});
+
+	test("warns at boot when the quoting dialect could not be determined", async () => {
+		// Visible from the start, because the ledger will refuse any event carrying a
+		// backslash until the probe succeeds.
+		stubFetch((statement) => {
+			if (statement.includes("LENGTH")) return new Response("nope", { status: 500 });
+			if (statement.includes("SHOW CREATE TABLE")) return records(["Create Table"], [["... append_mode = 'true'"]]);
+			return affected;
+		});
+
+		const { warnings } = await new GreptimeClient(config).migrate();
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain("quoting dialect");
 	});
 
 	test("falls back to a plain CREATE when the server rejects the option", async () => {
@@ -355,6 +369,42 @@ describe("migrate", () => {
 		expect(sql[1]).toContain('CREATE TABLE IF NOT EXISTS "agent_events"');
 		expect(sql[1]).not.toContain("append_mode");
 		expect(warnings.some((warning) => warning.includes("created without append_mode"))).toBe(true);
+	});
+});
+
+describe("ensureAppendMode", () => {
+	test("caches an answer rather than asking on every append", async () => {
+		const { sql } = stubFetch(() => records(["Create Table"], [["... append_mode = 'true'"]]));
+		const client = new GreptimeClient(config);
+
+		expect(await client.ensureAppendMode()).toBe(true);
+		expect(await client.ensureAppendMode()).toBe(true);
+		expect(sql).toHaveLength(1);
+	});
+
+	test("asks again while the answer is still unknown", async () => {
+		// Without this retry, one transient SHOW CREATE TABLE failure would leave a
+		// fail-closed write path refusing every event for the life of the process.
+		let attempt = 0;
+		stubFetch(() => {
+			attempt++;
+			return attempt === 1
+				? new Response("nope", { status: 500 })
+				: records(["Create Table"], [["... append_mode = 'true'"]]);
+		});
+		const client = new GreptimeClient(config);
+
+		expect(await client.ensureAppendMode()).toBeNull();
+		expect(await client.ensureAppendMode()).toBe(true);
+	});
+
+	test("does not re-ask once the answer is a definite no", async () => {
+		const { sql } = stubFetch(() => records(["Create Table"], [["CREATE TABLE ... ENGINE=mito"]]));
+		const client = new GreptimeClient(config);
+
+		expect(await client.ensureAppendMode()).toBe(false);
+		expect(await client.ensureAppendMode()).toBe(false);
+		expect(sql).toHaveLength(1);
 	});
 });
 

@@ -70,16 +70,31 @@ export interface EmitResult {
 }
 
 /**
- * What a deduplicating ledger is told on every append.
+ * Why a ledger that is not provably append-only refuses the write.
  *
- * Without `append_mode`, Greptime drops one of two rows sharing a primary key and
- * a millisecond, so `stored: true` is a weaker promise than it reads as. Saying
- * so once at boot is not enough: that line scrolls away and the events keep
- * coming.
+ * Fail closed. Without `append_mode` Greptime drops one of two rows sharing a
+ * primary key and a millisecond, and answering `stored: true` to a write that may
+ * vanish is the one failure an events ledger must not have — a lost row also
+ * breaks the chain for every event after it. A boot warning is not enough: it
+ * scrolls away and the events keep coming.
+ *
+ * Refusing is safe to do here precisely because the substrate fails open at the
+ * client: the CLI and every hook exit 0 regardless, so a refused append costs the
+ * trail, never the agent's turn.
  */
+const NOT_APPEND_ONLY =
+	"refusing to append: agent_events is not in append_mode, so an event sharing a surface, repo, graph, " +
+	"kind and millisecond with another may be silently dropped. Recreate the table (see " +
+	"docs/greptime-ledger.md), or set SUBSTRATE_ALLOW_DEDUPLICATING_LEDGER=true to accept that loss.";
+
+const APPEND_MODE_UNKNOWN =
+	"refusing to append: could not confirm agent_events is in append_mode. Fix the ledger's reachability, " +
+	"or set SUBSTRATE_ALLOW_DEDUPLICATING_LEDGER=true to append anyway.";
+
+/** Told to a caller whose append landed in a ledger it knows may drop it. */
 const DEDUP_WARNING =
-	"agent_events is not in append_mode: an event sharing a surface, repo, graph, kind and millisecond " +
-	"with another may be silently dropped. See docs/greptime-ledger.md.";
+	"agent_events is not in append_mode and SUBSTRATE_ALLOW_DEDUPLICATING_LEDGER is set: this event may be " +
+	"silently dropped if another shares its surface, repo, graph, kind and millisecond.";
 
 export class Substrate {
 	readonly index: IndexStore | null;
@@ -152,20 +167,18 @@ export class Substrate {
 		const event = normalizeEvent(input, prev);
 		if (!this.greptime) return { event, stored: false, error: "GREPTIME_URL is not set" };
 
-		// A ledger that deduplicates cannot honour append-only. Refusing is opt-in:
-		// on a table that predates the option, enforcing by default would take the
-		// event trail offline the moment this deploys.
-		if (this.greptime.appendMode === false && this.config.requireAppendOnly) {
-			return { event, stored: false, error: `SUBSTRATE_REQUIRE_APPEND_ONLY is set and ${DEDUP_WARNING}` };
+		// Fail closed: a ledger that may deduplicate does not get the write unless an
+		// operator has explicitly accepted that loss.
+		const appendOnly = await this.greptime.ensureAppendMode().catch(() => null);
+		if (appendOnly !== true && !this.config.allowDeduplicatingLedger) {
+			const error = appendOnly === false ? NOT_APPEND_ONLY : APPEND_MODE_UNKNOWN;
+			process.stderr.write(`[substrate] event ${event.id} not stored — ${error}\n`);
+			return { event, stored: false, error };
 		}
 
 		try {
 			await this.greptime.insertEvent(event);
-			return {
-				event,
-				stored: true,
-				...(this.greptime.appendMode === false ? { warning: DEDUP_WARNING } : {}),
-			};
+			return { event, stored: true, ...(appendOnly !== true ? { warning: DEDUP_WARNING } : {}) };
 		} catch (cause) {
 			const error = redact(String(cause));
 			process.stderr.write(`[substrate] event ${event.id} not stored — ${error}\n`);
@@ -264,13 +277,25 @@ export class Substrate {
 		return { ok: true, events: rows.length };
 	}
 
-	/** `appendOnly` is null when the ledger is absent or has not been asked yet. */
-	async health(): Promise<{ index: boolean; greptime: boolean; appendOnly: boolean | null }> {
+	/**
+	 * `greptime` is reachability; `eventsWritable` is whether an append would
+	 * actually be accepted. They differ on a reachable ledger that is not append-only
+	 * — which is exactly the state a monitor needs to see, because every `emit` is
+	 * being refused while `ping` succeeds.
+	 */
+	async health(): Promise<{
+		index: boolean;
+		greptime: boolean;
+		appendOnly: boolean | null;
+		eventsWritable: boolean;
+	}> {
+		const greptime = this.greptime ? await this.greptime.ping() : false;
+		const appendOnly = greptime ? await this.greptime?.ensureAppendMode().catch(() => null) ?? null : null;
 		return {
 			index: this.index ? await this.index.ping() : false,
-			greptime: this.greptime ? await this.greptime.ping() : false,
-			// Monitorable, so a deduplicating ledger is not something only a boot log knows.
-			appendOnly: this.greptime?.appendMode ?? null,
+			greptime,
+			appendOnly,
+			eventsWritable: greptime && (appendOnly === true || this.config.allowDeduplicatingLedger),
 		};
 	}
 }

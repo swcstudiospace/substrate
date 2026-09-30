@@ -4,7 +4,7 @@
  *   POST /mcp      MCP over streamable HTTP, for agents
  *   POST /brief    the same briefing as plain text, for hooks
  *   POST /events   append an event, for hooks
- *   GET  /healthz  store reachability
+ *   GET  /healthz  store reachability, and whether events can actually be written
  *
  * Hooks get REST because a hook process cannot call an MCP tool — it has no
  * client. Both paths run the same service code.
@@ -55,7 +55,9 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig) 
 		try {
 			if (req.method === "GET" && url.pathname === "/healthz") {
 				const health = await substrate.health();
-				sendJson(res, health.index || health.greptime ? 200 : 503, health);
+				// A reachable ledger that refuses every append is not healthy: the write
+				// path is what the events surface exists for.
+				sendJson(res, health.eventsWritable || health.index ? 200 : 503, health);
 				return;
 			}
 

@@ -26,15 +26,19 @@ export interface SubstrateConfig {
 	/** When true, an unauthenticated caller is accepted and attributed by its payload. */
 	allowAnonymous: boolean;
 	/**
-	 * Refuse to append when `agent_events` is not in append_mode.
+	 * Accept a ledger that is not provably append-only.
 	 *
-	 * Off by default: the table deployed before append_mode was set would otherwise
-	 * stop accepting events the moment this ships, and losing the whole trail is
-	 * worse than the rare same-millisecond collision it prevents. INFRA turns this
-	 * on once the table has been recreated, which makes append-only enforced rather
-	 * than merely reported.
+	 * The default is to refuse: an `agent_events` without `append_mode` drops one
+	 * of two rows sharing a primary key and a millisecond, and a ledger that loses
+	 * rows while answering `stored: true` is worse than one that says it cannot
+	 * take the write. Recreating the table is the fix and is out of band — the
+	 * client refuses `ALTER` and `RENAME` by design.
+	 *
+	 * This exists so an operator can knowingly accept that loss while the recreate
+	 * is pending, rather than having no lever at all. It is never the quiet path:
+	 * the state is in `/healthz` and on every append either way.
 	 */
-	requireAppendOnly: boolean;
+	allowDeduplicatingLedger: boolean;
 }
 
 /** SUBSTRATE_TOKEN_GROK_BUILD → "grok-build" */
@@ -72,7 +76,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		// No tokens configured at all means a local dev run; requiring auth then
 		// would just lock the operator out of their own machine.
 		allowAnonymous: readTokens(env).size === 0,
-		requireAppendOnly: /^(1|true|yes)$/i.test(env.SUBSTRATE_REQUIRE_APPEND_ONLY?.trim() ?? ""),
+		allowDeduplicatingLedger: /^(1|true|yes)$/i.test(env.SUBSTRATE_ALLOW_DEDUPLICATING_LEDGER?.trim() ?? ""),
 	};
 }
 

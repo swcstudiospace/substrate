@@ -15,6 +15,8 @@ function stubStores(graph: { repo?: string | null; branch?: string | null } | nu
 		getGraph: async () => (graph ? { repo: graph.repo ?? null, branch: graph.branch ?? null } : null),
 	};
 	const greptime = {
+		// Append-only, so `emit` is not fail-closed here; enforcement has its own tests.
+		ensureAppendMode: async () => true,
 		lastHash: async () => null,
 		insertEvent: async (event: SubstrateEvent) => {
 			emitted.push(event);
@@ -72,6 +74,7 @@ describe("emit", () => {
 		return {
 			written,
 			greptime: {
+				ensureAppendMode: async () => true,
 				lastHash: async () => options.lastHash ?? null,
 				insertEvent: async (event: SubstrateEvent) => {
 					if (options.fail) throw new Error(options.fail);
@@ -138,6 +141,7 @@ describe("emit", () => {
 
 	test("an unreadable previous hash starts a new chain rather than failing the append", async () => {
 		const greptime = {
+			ensureAppendMode: async () => true,
 			lastHash: async () => {
 				throw new Error("greptime unreachable");
 			},
@@ -166,10 +170,15 @@ describe("append-mode enforcement", () => {
 
 	function ledger(appendMode: boolean | null) {
 		const written: SubstrateEvent[] = [];
+		let asked = 0;
 		return {
 			written,
+			asked: () => asked,
 			greptime: {
-				appendMode,
+				ensureAppendMode: async () => {
+					asked++;
+					return appendMode;
+				},
 				lastHash: async () => null,
 				insertEvent: async (event: SubstrateEvent) => {
 					written.push(event);
@@ -179,45 +188,79 @@ describe("append-mode enforcement", () => {
 		};
 	}
 
-	test("warns on every append while the ledger deduplicates", async () => {
-		// One line at boot is not enough: it scrolls away and the events keep coming.
-		const { greptime } = ledger(false);
-		const substrate = new Substrate(loadConfig({}), { index: null, greptime: greptime as never });
+	function substrateWith(greptime: unknown, env: Record<string, string> = {}) {
+		return new Substrate(loadConfig(env), { index: null, greptime: greptime as never });
+	}
 
-		const result = await substrate.emit(input);
-
-		expect(result.stored).toBe(true);
-		expect(result.warning).toContain("append_mode");
-	});
-
-	test("says nothing extra once the table is append-only", async () => {
-		const { greptime } = ledger(true);
-		const substrate = new Substrate(loadConfig({}), { index: null, greptime: greptime as never });
-		expect((await substrate.emit(input)).warning).toBeUndefined();
-	});
-
-	test("refuses the append when SUBSTRATE_REQUIRE_APPEND_ONLY is set", async () => {
+	test("refuses the append when the table is not append-only", async () => {
+		// Fail closed. Answering `stored: true` to a write Greptime may drop is the
+		// one failure an events ledger must not have, and a lost row breaks the chain
+		// for every event after it.
 		const { written, greptime } = ledger(false);
-		const config = loadConfig({ SUBSTRATE_REQUIRE_APPEND_ONLY: "true" });
-		const substrate = new Substrate(config, { index: null, greptime: greptime as never });
 
-		const result = await substrate.emit(input);
+		const result = await substrateWith(greptime).emit(input);
 
 		expect(result.stored).toBe(false);
-		expect(result.error).toContain("SUBSTRATE_REQUIRE_APPEND_ONLY");
+		expect(result.error).toContain("append_mode");
 		expect(written).toEqual([]);
 	});
 
-	test("the flag is off unless asked for, so deploying this does not stop the trail", async () => {
-		expect(loadConfig({}).requireAppendOnly).toBe(false);
-		expect(loadConfig({ SUBSTRATE_REQUIRE_APPEND_ONLY: "1" }).requireAppendOnly).toBe(true);
-		expect(loadConfig({ SUBSTRATE_REQUIRE_APPEND_ONLY: "false" }).requireAppendOnly).toBe(false);
+	test("refuses the append when append_mode cannot be confirmed", async () => {
+		const { written, greptime } = ledger(null);
+
+		const result = await substrateWith(greptime).emit(input);
+
+		expect(result.stored).toBe(false);
+		expect(result.error).toContain("could not confirm");
+		expect(written).toEqual([]);
 	});
 
-	test("healthz reports append-only state, so it is monitorable", async () => {
+	test("does not throw while refusing, so an agent's turn is unaffected", async () => {
+		// Fail closed at the ledger, fail open at the client: the caller gets its
+		// normalised event and a reason, never an exception.
 		const { greptime } = ledger(false);
-		const substrate = new Substrate(loadConfig({}), { index: null, greptime: greptime as never });
-		expect(await substrate.health()).toEqual({ index: false, greptime: true, appendOnly: false });
+		const result = await substrateWith(greptime).emit(input);
+		expect(result.event.hash).toMatch(/^[0-9a-f]{64}$/);
+	});
+
+	test("appends without comment once the table is append-only", async () => {
+		const { written, greptime } = ledger(true);
+		const result = await substrateWith(greptime).emit(input);
+
+		expect(result.stored).toBe(true);
+		expect(result.warning).toBeUndefined();
+		expect(written).toHaveLength(1);
+	});
+
+	test("an operator can knowingly accept the loss, and is still told", async () => {
+		const { written, greptime } = ledger(false);
+		const result = await substrateWith(greptime, { SUBSTRATE_ALLOW_DEDUPLICATING_LEDGER: "true" }).emit(input);
+
+		expect(result.stored).toBe(true);
+		expect(result.warning).toContain("may be silently dropped");
+		expect(written).toHaveLength(1);
+	});
+
+	test("the override is off unless explicitly set", () => {
+		expect(loadConfig({}).allowDeduplicatingLedger).toBe(false);
+		expect(loadConfig({ SUBSTRATE_ALLOW_DEDUPLICATING_LEDGER: "1" }).allowDeduplicatingLedger).toBe(true);
+		expect(loadConfig({ SUBSTRATE_ALLOW_DEDUPLICATING_LEDGER: "false" }).allowDeduplicatingLedger).toBe(false);
+	});
+
+	test("healthz separates reachability from writability", async () => {
+		// The state a monitor has to see: `ping` succeeds while every append is refused.
+		const { greptime } = ledger(false);
+		expect(await substrateWith(greptime).health()).toEqual({
+			index: false,
+			greptime: true,
+			appendOnly: false,
+			eventsWritable: false,
+		});
+	});
+
+	test("healthz reports writable once the table is append-only", async () => {
+		const { greptime } = ledger(true);
+		expect((await substrateWith(greptime).health()).eventsWritable).toBe(true);
 	});
 });
 
@@ -227,7 +270,7 @@ describe("identifier lookups", () => {
 		// so lastHash never matched and every append restarted the chain.
 		const asked: string[] = [];
 		const greptime = {
-			appendMode: true,
+			ensureAppendMode: async () => true,
 			lastHash: async (sessionId: string) => {
 				asked.push(sessionId);
 				return "prev-hash";
@@ -247,7 +290,7 @@ describe("identifier lookups", () => {
 	test("verifyGraph reads by the stored form of the graph id", async () => {
 		const asked: Array<[string, string]> = [];
 		const greptime = {
-			appendMode: true,
+			ensureAppendMode: async () => true,
 			readEvents: async (column: "graph_id", value: string) => {
 				asked.push([column, value]);
 				return [];
