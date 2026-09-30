@@ -6,10 +6,11 @@
  * get MCP. Same code underneath.
  */
 import { composeBrief, type BriefRequest } from "./brief.ts";
-import type { SubstrateConfig } from "./config.ts";
+import { isReviewToken, type SubstrateConfig } from "./config.ts";
 import { InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, verifyChain } from "./event.ts";
 import { GreptimeClient, queryLimit, type EventQuery, type QueryableColumn } from "./greptime.ts";
 import { IndexStore } from "./index-store.ts";
+import { governMemoryWrite } from "./memory-write.ts";
 import { redact } from "./redact.ts";
 import {
 	ACTORS,
@@ -19,7 +20,8 @@ import {
 	type EventInput,
 	type EventKind,
 	type MemoryEntry,
-	type MemoryEntryInput,
+	type MemoryWriteRequest,
+	type MemoryWriteResult,
 	type NodeState,
 	type Surface,
 	type SubstrateEvent,
@@ -360,14 +362,105 @@ export class Substrate {
 		}
 	}
 
-	async writeMemory(entry: MemoryEntryInput): Promise<MemoryEntry> {
-		if (!this.index) throw new Error("memory requires SUBSTRATE_PG_URL");
-		return this.index.writeMemory(entry);
+	/**
+	 * Write a memory entry through the governance gate.
+	 *
+	 * **This is the fail-closed path.** `emit` hands a caller its event back even
+	 * when the ledger is unreachable, because a lost event costs the trail and
+	 * nothing else. Memory is different: it is what the next four sessions act on, so
+	 * a write the gate cannot authorise, decide and verify comes back as `denied` and
+	 * never as something another agent will read. A store that is missing or refusing
+	 * is a refusal, not a silent success — there is no `accepted` without a row.
+	 *
+	 * It does not throw. A caller gets an outcome and a remedy for every path,
+	 * including an outage, because "memory.write raised" is not something an agent
+	 * mid-turn can act on and `denied: store.unavailable` is.
+	 */
+	async writeMemory(request: MemoryWriteRequest): Promise<MemoryWriteResult> {
+		if (!this.index) {
+			return {
+				outcome: "denied",
+				reason: "store.unavailable",
+				remedy:
+					"memory.write needs the index: SUBSTRATE_PG_URL is not set, so there is nowhere to record this " +
+					"and nothing would read it back. Nothing was stored.",
+				verified_persisted: false,
+				idempotency_key: "",
+			};
+		}
+
+		let result: MemoryWriteResult;
+		try {
+			result = await governMemoryWrite(request, {
+				store: this.index,
+				isReviewToken: (token) => isReviewToken(this.config, token),
+				grants: this.config.memoryGrants,
+			});
+		} catch (cause) {
+			// Redacted for the reason `emit` redacts: a connection error quotes its URL,
+			// password and all.
+			const error = redact(String(cause));
+			result = {
+				outcome: "denied",
+				reason: "store.write-failed",
+				remedy: `The index refused the write (${error}). Nothing was stored; retry once it is reachable.`,
+				verified_persisted: false,
+				idempotency_key: "",
+			};
+		}
+
+		await this.auditMemoryWrite(request, result);
+		return result;
 	}
 
-	async searchMemory(query: string, scope?: string, limit?: number): Promise<MemoryEntry[]> {
+	/**
+	 * Put a refused or unverified memory write in the event log.
+	 *
+	 * Governance that leaves no trace is indistinguishable from no governance: a
+	 * denied write is otherwise visible only to the agent that was denied, which is
+	 * the one party with an interest in not mentioning it.
+	 *
+	 * The event carries the decision, never the body. The body may be exactly the
+	 * secret or the PII that got the write quarantined, and copying it into an
+	 * append-only ledger to record that it was quarantined would be absurd.
+	 */
+	private async auditMemoryWrite(request: MemoryWriteRequest, result: MemoryWriteResult): Promise<void> {
+		if (result.outcome === "accepted" && result.verified_persisted) return;
+		const line = `memory.write ${result.outcome}: ${result.reason} (${request.kind} at ${request.scope})`;
+		process.stderr.write(`[substrate] ${line} by ${String(request.writer)}\n`);
+
+		const writer = String(request.writer);
+		// `emit` rejects an unknown surface, and an unattributed caller is precisely the
+		// one that default-deny refuses most often. The stderr line above is its trail.
+		if (!(SURFACES as readonly string[]).includes(writer)) return;
+		await this.emit({
+			surface: writer as Surface,
+			kind: result.outcome === "conflict" ? "note" : "warning",
+			summary: line,
+			graph_id: request.graph_id,
+			session_id: request.session_id,
+			repo: request.repo,
+			payload: {
+				outcome: result.outcome,
+				reason: result.reason,
+				scope: request.scope,
+				kind: request.kind,
+				...(result.strategy ? { strategy: result.strategy } : {}),
+				...(result.review_id ? { review_id: result.review_id } : {}),
+				...(result.quarantine_id ? { quarantine_id: result.quarantine_id } : {}),
+			},
+		}).catch(() => undefined);
+	}
+
+	async searchMemory(query: string, scope?: string, limit?: number, includeSuperseded?: boolean): Promise<MemoryEntry[]> {
 		if (!this.index) return [];
-		return this.index.searchMemory(query, scope, limit);
+		return this.index.searchMemory(query, scope, limit, includeSuperseded);
+	}
+
+	/** What a reviewer has to look at: proposals awaiting review, and quarantined writes. */
+	async governanceQueue(limit?: number) {
+		if (!this.index) return { reviews: [], quarantined: [] };
+		return this.index.governanceQueue(limit);
 	}
 
 	async getGraph(graphId: string) {

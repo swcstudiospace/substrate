@@ -5,6 +5,7 @@
  *   POST /brief         the same briefing as plain text, for hooks
  *   POST /events        append an event, for hooks
  *   POST /events/query  read a window of the ledger
+ *   POST /memory        write a memory entry through the governance gate
  *   POST /verify        recompute a graph's hash chain
  *   GET  /healthz       store reachability, and whether events can actually be written
  *
@@ -40,6 +41,30 @@ export function healthStatus(
 ): number {
 	if (ledgerConfigured && !health.eventsWritable) return 503;
 	return health.index || health.greptime ? 200 : 503;
+}
+
+/**
+ * The status code for a governed memory write.
+ *
+ * Only a write that was accepted *and* read back gets a 2xx a caller may rely on;
+ * an accepted-but-unverified write is 202, the same "taken, not confirmed" this
+ * server already uses for an event. The refusals are distinguishable without
+ * parsing the body, because a hook that can only see the status code still has to
+ * be able to tell "you may not" from "the index is down".
+ */
+export function memoryWriteStatus(result: { outcome: string; reason: string; verified_persisted: boolean }): number {
+	switch (result.outcome) {
+		case "accepted":
+			return result.verified_persisted ? 200 : 202;
+		case "conflict":
+			return 409;
+		case "quarantined":
+			return 422;
+		default:
+			// A store that is missing or refusing is an outage, not a policy decision, and
+			// a monitor must not read it as "this agent lacks permission".
+			return result.reason.startsWith("store.") ? 503 : 403;
+	}
 }
 
 async function readBody(req: IncomingMessage): Promise<string> {
@@ -124,6 +149,20 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig) 
 				const result = await substrate.queryEvents(body as Parameters<Substrate["queryEvents"]>[0]);
 				// An empty window is a real answer, so 200; 503 is the ledger not answering.
 				sendJson(res, result.error ? 503 : 200, result);
+				return;
+			}
+
+			if (req.method === "POST" && url.pathname === "/memory") {
+				const raw = await readBody(req);
+				const body = JSON.parse(raw) as Record<string, unknown>;
+				const result = await substrate.writeMemory({
+					...(body as object),
+					// A body-supplied writer cannot outrank the token: attribution is what
+					// RBAC is decided on, so letting a caller name its own surface would make
+					// default-deny a formality. An anonymous local run has no token to beat.
+					writer: surface ?? (typeof body.writer === "string" ? body.writer : "unknown"),
+				} as Parameters<Substrate["writeMemory"]>[0]);
+				sendJson(res, memoryWriteStatus(result), result);
 				return;
 			}
 

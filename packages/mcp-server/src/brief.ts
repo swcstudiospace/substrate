@@ -76,6 +76,19 @@ function describeNode(node: GraphView["nodes"][number]): string {
 	return `${label} ${node.state ?? "todo"}`;
 }
 
+/**
+ * Mark an entry whose trust has decayed.
+ *
+ * A decayed entry is still shown — dropping it would quietly lose the only record
+ * that a decision was ever taken. What changes is that the brief stops presenting
+ * it as settled, which is the whole point of `needs_reverification`: the next agent
+ * is told to check before acting, not left to assume a year-old agent-claimed fact
+ * still holds.
+ */
+function staleness(entry: MemoryEntry): string {
+	return entry.needs_reverification ? " — needs reverification" : "";
+}
+
 /** Fail open, but never silently: a swallowed error still reaches the log. */
 function swallow<T>(what: string, fallback: T): (cause: unknown) => T {
 	return (cause) => {
@@ -164,13 +177,14 @@ export async function composeBrief(request: BriefRequest, sources: BriefSources)
 	if (decisions.length > 0) {
 		lines.push("", "Decisions in force");
 		for (const entry of decisions.slice(0, 4)) {
-			lines.push(`- ${entry.text} (${entry.writer}, ${entry.trust})`);
+			const version = entry.version > 1 ? `, v${entry.version}` : "";
+			lines.push(`- ${entry.text} (${entry.writer}, ${entry.trust}${version})${staleness(entry)}`);
 		}
 	}
 	if (warnings.length > 0) {
 		lines.push("", "Warnings");
 		for (const entry of warnings.slice(0, 4)) {
-			lines.push(`- ${entry.text} (${entry.writer}, ${relativeTime(entry.created)})`);
+			lines.push(`- ${entry.text} (${entry.writer}, ${relativeTime(entry.created)})${staleness(entry)}`);
 		}
 	}
 
