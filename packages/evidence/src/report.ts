@@ -57,6 +57,16 @@ export interface EvidenceInput {
 		path: string | null;
 		/** The records for this graph, plus any denial — a denial has no graph to file under. */
 		records: AuditRecord[];
+		/**
+		 * The tally over **every** record for this graph, when `records` is a window of them.
+		 *
+		 * A bundle lists a bounded number of records, because a trail has no compaction. The
+		 * counts must not be bounded with it: computing them from the listed window reported
+		 * a graph past the window as having only the decisions that happened to be listed,
+		 * which is a wrong number rather than a partial one. Omit it and the tally is
+		 * computed from `records`, which is right when `records` is complete.
+		 */
+		stats?: AuditStats;
 	};
 	metrics?: MetricSnapshot[];
 	notes?: string[];
@@ -150,7 +160,7 @@ export function buildEvidence(input: EvidenceInput): EvidenceBundle {
 			insufficient: input.slos.filter((slo) => slo.status === "insufficient-data").length,
 			unmeasurable: input.slos.filter((slo) => slo.status === "unmeasurable").length,
 		},
-		audit: { ...auditStats(input.audit.records), records: input.audit.records },
+		audit: { ...(input.audit.stats ?? auditStats(input.audit.records)), records: input.audit.records },
 		usage: usageForGraph(input.metrics, input.graph_id),
 		pending: PENDING,
 		notes: [

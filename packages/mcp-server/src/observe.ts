@@ -564,7 +564,16 @@ export async function buildGraphEvidence(
 			reason: redact(String(cause)),
 		}));
 
-	const { verdict: chain, records: forGraph, total } = await observability.audit.verifiedView(graphId, MAX_EVIDENCE_RECORDS);
+	const {
+		verdict: chain,
+		records: forGraph,
+		total,
+		stats,
+		matched,
+		selector,
+	} = await observability.audit.verifiedView(graphId, MAX_EVIDENCE_RECORDS);
+
+	const lost = observability.audit.missingHistory;
 
 	return buildEvidence({
 		graph_id: graphId,
@@ -576,22 +585,34 @@ export async function buildGraphEvidence(
 			durable: observability.audit.durable,
 			path: observability.audit.path,
 			records: forGraph,
+			// The tally covers every record naming this graph; `records` is the listed window
+			// of them. Deriving the counts from the window would understate a busy graph.
+			stats,
 		},
 		metrics: observability.snapshot(),
 		notes: [
-			...(forGraph.length === 0 && total > 0
+			...(matched === 0 && total > 0
 				? [`No MCP audit record names ${graphId}; ${total} record(s) in the chain belong to other graphs or to none.`]
 				: []),
-			...(forGraph.length >= MAX_EVIDENCE_RECORDS
+			...(matched > forGraph.length
 				? [
-						`Only the first ${MAX_EVIDENCE_RECORDS} audit records naming ${graphId} are listed; the chain verdict above ` +
-							`covers all ${total} record(s) in the file.`,
+						`${matched} audit records name ${graphId} and the ${forGraph.length} most recent are listed; the tally above ` +
+							`counts all ${matched}, and the chain verdict covers all ${total} record(s) in the file.`,
 					]
 				: []),
-			...(observability.audit.missingHistory
+			...(selector !== graphId
 				? [
-						"The MCP audit file is missing history: this process committed more records than the file now accounts for, " +
-							"so decisions taken before the loss are not in this bundle and cannot be recovered from it.",
+						`This graph's identifier contains content the audit redacts, so its records are stored and selected under ` +
+							`the redacted form. Another graph whose identifier redacts identically would share this selection.`,
+					]
+				: []),
+			...(lost
+				? [
+						lost.kind === "missing"
+							? "The MCP audit file is missing history: this process committed more records than the file now accounts " +
+								"for, so decisions taken before the loss are not in this bundle and cannot be recovered from it."
+							: "The MCP audit file has been replaced: the record at the last checkpointed position is not the one whose " +
+								"hash was committed, so the decisions this bundle lists are not the decisions that were made.",
 					]
 				: []),
 			...notes,
