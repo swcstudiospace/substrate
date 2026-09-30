@@ -42,6 +42,26 @@ export function healthStatus(
 }
 
 /**
+ * Who a memory write is attributed to, and therefore whose grants it gets.
+ *
+ * The token wins whenever there is one. A body-supplied writer is honoured only on a
+ * deployment that configured no tokens at all — a local run, where every caller is
+ * anonymous and forcing `unknown` would leave memory unwritable rather than
+ * protected.
+ *
+ * Today `surface` is always set when tokens exist, because the server 401s an
+ * unauthenticated request. This is written as an explicit condition anyway: it is the
+ * difference between "a caller cannot impersonate a surface" and "a caller cannot
+ * impersonate a surface as long as the auth check above stays exactly as it is", and
+ * only one of those survives somebody editing the route.
+ */
+export function memoryWriter(surface: Surface | null, bodyWriter: unknown, allowAnonymous: boolean): string {
+	if (surface) return surface;
+	if (allowAnonymous && typeof bodyWriter === "string" && bodyWriter.trim()) return bodyWriter.trim();
+	return "unknown";
+}
+
+/**
  * The status code for a governed memory write.
  *
  * Only a write that was accepted *and* read back gets a 2xx a caller may rely on;
@@ -144,10 +164,7 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig) 
 				const body = JSON.parse(raw) as Record<string, unknown>;
 				const result = await substrate.writeMemory({
 					...(body as object),
-					// A body-supplied writer cannot outrank the token: attribution is what
-					// RBAC is decided on, so letting a caller name its own surface would make
-					// default-deny a formality. An anonymous local run has no token to beat.
-					writer: surface ?? (typeof body.writer === "string" ? body.writer : "unknown"),
+					writer: memoryWriter(surface, body.writer, config.allowAnonymous),
 				} as Parameters<Substrate["writeMemory"]>[0]);
 				sendJson(res, memoryWriteStatus(result), result);
 				return;

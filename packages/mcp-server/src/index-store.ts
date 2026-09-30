@@ -7,6 +7,7 @@
  * source of truth — a disagreement is resolved by refreshing from Notion/Linear.
  */
 import { SQL } from "bun";
+import { randomUUID } from "node:crypto";
 import { normalizeIdentifier } from "./event.ts";
 import { needsReverification } from "./memory-policy.ts";
 import {
@@ -19,6 +20,7 @@ import {
 } from "./memory-write.ts";
 import type {
 	Actor,
+	GovernanceQueueRow,
 	GraphIndexRow,
 	GraphNode,
 	GraphStep,
@@ -123,8 +125,12 @@ export class IndexStore implements MemoryStore {
 				outcome         text not null,
 				entry_id        text,
 				entry_hash      text not null,
+				holder          text,
 				claimed         timestamptz not null default now()
 			)`;
+		// Insurance for anyone who ran an earlier build of this migration, where the claim
+		// had no fencing token.
+		await this.sql`alter table memory_writes add column if not exists holder text`;
 
 		// Parked writes. Both tables hold the *redacted* body: a quarantined secret is
 		// quarantined so a reviewer can see what was attempted, never so the substrate
@@ -322,61 +328,97 @@ export class IndexStore implements MemoryStore {
 	/**
 	 * Claim an idempotency key, or report the record that already holds it.
 	 *
-	 * One statement, because it is the only place in the gate where two concurrent
-	 * writes have to be ordered. The claim is handed over in exactly three cases: the
-	 * key is fresh; the previous attempt was refused, so nothing was written and
-	 * re-asking is allowed; or the holder is an in-flight claim that was abandoned,
-	 * or a derived key whose dedup window has passed. An `accepted` explicit key is
-	 * never handed over — that is what "exactly once" means.
+	 * The only place in the gate where two concurrent writes have to be ordered, so it
+	 * runs as a transaction over a locked row rather than as one clever statement: the
+	 * decision has three cases and a reviewer has to be able to check them.
+	 *
+	 * The claim is handed over when the key is fresh; when the previous attempt was
+	 * refused, so nothing was written and re-asking is allowed; when an in-flight claim
+	 * was abandoned; or when a derived key's dedup window has passed. An `accepted`
+	 * explicit key is never handed over — that is what "exactly once" means.
+	 *
+	 * Every hand-over mints a new `holder`, and `finishWrite` and `releaseWrite` match
+	 * on it. Without that, an attempt that merely ran slow past the in-flight timeout
+	 * could come back and finish — or delete — the claim that replaced it.
 	 */
-	async claimWrite(input: { key: string; explicit: boolean; entryHash: string }): Promise<ClaimResult> {
+	async claimWrite(input: { key: string; explicit: boolean; entryHash: string; entryId: string }): Promise<ClaimResult> {
+		const holder = `hold_${randomUUID().replace(/-/g, "")}`;
 		const inFlightSeconds = IN_FLIGHT_TIMEOUT_MS / 1000;
 		const derivedSeconds = DERIVED_KEY_WINDOW_MS / 1000;
-		const claimed = (await this.sql`
-			insert into memory_writes (idempotency_key, explicit, outcome, entry_hash, claimed)
-			values (${input.key}, ${input.explicit}, 'in-flight', ${input.entryHash}, now())
-			on conflict (idempotency_key) do update set
-				outcome    = 'in-flight',
-				entry_id   = null,
-				explicit   = excluded.explicit,
-				entry_hash = excluded.entry_hash,
-				claimed    = now()
-			where memory_writes.outcome not in ('accepted', 'in-flight')
-			   or (memory_writes.outcome = 'in-flight'
-			       and memory_writes.claimed < now() - make_interval(secs => ${inFlightSeconds}::float8))
-			   or (memory_writes.outcome = 'accepted' and memory_writes.explicit = false
-			       and memory_writes.claimed < now() - make_interval(secs => ${derivedSeconds}::float8))
-			returning idempotency_key`) as Array<Record<string, unknown>>;
-		if (claimed.length > 0) return { claimed: true };
 
-		const existing = (await this.sql`
-			select idempotency_key, explicit, outcome, entry_id, entry_hash
-			from memory_writes where idempotency_key = ${input.key}`) as Array<Record<string, unknown>>;
-		const row = existing[0];
-		// The conflict cleared between the two statements: nothing holds the key now,
-		// so treat it as ours rather than reporting a holder that is not there.
-		if (!row) return { claimed: true };
-		return {
-			claimed: false,
-			existing: {
-				idempotency_key: String(row.idempotency_key),
-				explicit: row.explicit === true,
-				outcome: String(row.outcome) as WriteRecord["outcome"],
-				entry_id: row.entry_id === null || row.entry_id === undefined ? null : String(row.entry_id),
-				entry_hash: String(row.entry_hash),
-			},
-		};
+		return (await this.sql.begin(async (tx: SQL) => {
+			const fresh = (await tx`
+				insert into memory_writes (idempotency_key, explicit, outcome, entry_id, entry_hash, holder, claimed)
+				values (${input.key}, ${input.explicit}, 'in-flight', ${input.entryId}, ${input.entryHash},
+				        ${holder}, now())
+				on conflict (idempotency_key) do nothing
+				returning idempotency_key`) as Array<Record<string, unknown>>;
+			if (fresh.length > 0) return { claimed: true as const, holder, tookOverFrom: null };
+
+			// The key is held. Lock the row before judging it, so two retries cannot both
+			// conclude that one abandoned claim is theirs. Staleness is computed by the
+			// database, against its own clock — the server's may not agree.
+			const rows = (await tx`
+				select outcome, explicit, entry_id, entry_hash,
+				       claimed < now() - make_interval(secs => ${inFlightSeconds}::float8) as in_flight_stale,
+				       claimed < now() - make_interval(secs => ${derivedSeconds}::float8) as derived_stale
+				from memory_writes where idempotency_key = ${input.key}
+				for update`) as Array<Record<string, unknown>>;
+			const row = rows[0];
+			// It cleared between the two statements: nothing holds the key, so treat it as
+			// ours rather than reporting a holder that is not there.
+			if (!row) return { claimed: true as const, holder, tookOverFrom: null };
+
+			const outcome = String(row.outcome);
+			const inFlight = outcome === "in-flight";
+			const takeable =
+				(outcome !== "accepted" && !inFlight) ||
+				(inFlight && row.in_flight_stale === true) ||
+				(outcome === "accepted" && row.explicit !== true && row.derived_stale === true);
+
+			if (!takeable) {
+				return {
+					claimed: false as const,
+					existing: {
+						idempotency_key: input.key,
+						explicit: row.explicit === true,
+						outcome: outcome as WriteRecord["outcome"],
+						entry_id: row.entry_id === null || row.entry_id === undefined ? null : String(row.entry_id),
+						entry_hash: String(row.entry_hash),
+					},
+				};
+			}
+
+			await tx`
+				update memory_writes set
+					outcome    = 'in-flight',
+					explicit   = ${input.explicit},
+					entry_hash = ${input.entryHash},
+					entry_id   = ${input.entryId},
+					holder     = ${holder},
+					claimed    = now()
+				where idempotency_key = ${input.key}`;
+
+			// Only an abandoned *in-flight* claim can have left a row behind unacknowledged.
+			// A finished attempt recorded its outcome, and an aged-out derived key belongs to
+			// a write we are deliberately allowing to happen again.
+			const priorEntry = row.entry_id === null || row.entry_id === undefined ? null : String(row.entry_id);
+			return { claimed: true as const, holder, tookOverFrom: inFlight ? priorEntry : null };
+		})) as ClaimResult;
 	}
 
-	async finishWrite(key: string, outcome: MemoryWriteOutcome, entryId: string | null): Promise<void> {
+	/** Conditional on `holder`: a claim that was taken over is no longer this one's to finish. */
+	async finishWrite(key: string, holder: string, outcome: MemoryWriteOutcome, entryId: string | null): Promise<void> {
 		await this.sql`
 			update memory_writes set outcome = ${outcome}, entry_id = ${entryId}, claimed = now()
-			where idempotency_key = ${key}`;
+			where idempotency_key = ${key} and holder = ${holder}`;
 	}
 
-	/** Only an in-flight claim is released — a finished record is the audit trail. */
-	async releaseWrite(key: string): Promise<void> {
-		await this.sql`delete from memory_writes where idempotency_key = ${key} and outcome = 'in-flight'`;
+	/** Only an in-flight claim this holder still owns — a finished record is the audit trail. */
+	async releaseWrite(key: string, holder: string): Promise<void> {
+		await this.sql`
+			delete from memory_writes
+			where idempotency_key = ${key} and holder = ${holder} and outcome = 'in-flight'`;
 	}
 
 	async standingEntry(conflictKey: string): Promise<MemoryEntry | null> {
@@ -480,11 +522,14 @@ export class IndexStore implements MemoryStore {
 		return rows.length;
 	}
 
-	/** What a reviewer has to look at. Bodies are redacted; nothing here is briefed. */
-	async governanceQueue(limit = 20): Promise<{
-		reviews: Array<Record<string, unknown>>;
-		quarantined: Array<Record<string, unknown>>;
-	}> {
+	/**
+	 * What a reviewer has to look at. Nothing here is briefed or searchable.
+	 *
+	 * Returns the bodies; withholding them from an unauthorised caller is the
+	 * service's job, because whether a caller holds reviewer authority is not
+	 * something the index knows.
+	 */
+	async governanceQueue(limit = 20): Promise<{ reviews: GovernanceQueueRow[]; quarantined: GovernanceQueueRow[] }> {
 		const reviews = (await this.sql`
 			select id, scope, kind, body, subject, writer, reason, created
 			from memory_reviews where state = 'pending'
@@ -493,7 +538,7 @@ export class IndexStore implements MemoryStore {
 			select id, scope, kind, body, subject, writer, reason, detail, created
 			from memory_quarantine
 			order by created desc limit ${limit}`) as Array<Record<string, unknown>>;
-		return { reviews, quarantined };
+		return { reviews: reviews.map(toQueueRow), quarantined: quarantined.map(toQueueRow) };
 	}
 
 	/**
@@ -563,6 +608,20 @@ function optional(value: unknown): string | undefined {
 
 function timestamp(value: unknown): string {
 	return value instanceof Date ? value.toISOString() : String(value);
+}
+
+function toQueueRow(row: Record<string, unknown>): GovernanceQueueRow {
+	return {
+		id: String(row.id),
+		scope: String(row.scope),
+		kind: row.kind as MemoryEntry["kind"],
+		writer: String(row.writer),
+		reason: String(row.reason),
+		created: timestamp(row.created),
+		text: String(row.body),
+		...(optional(row.subject) ? { subject: optional(row.subject) } : {}),
+		...(optional(row.detail) ? { detail: optional(row.detail) } : {}),
+	};
 }
 
 export function toMemoryEntry(row: Record<string, unknown>, now = Date.now()): MemoryEntry {

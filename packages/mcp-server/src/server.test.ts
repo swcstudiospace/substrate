@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { healthStatus, memoryWriteStatus } from "./server.ts";
+import { healthStatus, memoryWriteStatus, memoryWriter } from "./server.ts";
 
 /** Shorthand for a health report; every field defaults to the unhealthy value. */
 function health(over: Partial<Parameters<typeof healthStatus>[0]> = {}) {
@@ -55,5 +55,27 @@ describe("memoryWriteStatus", () => {
 		// A monitor must not read "the index is down" as "this agent lacks permission".
 		expect(memoryWriteStatus(result("denied", { reason: "store.unavailable", verified_persisted: false }))).toBe(503);
 		expect(memoryWriteStatus(result("denied", { reason: "store.write-failed", verified_persisted: false }))).toBe(503);
+	});
+});
+
+describe("memoryWriter", () => {
+	test("the token wins, and a body-supplied writer cannot outrank it", () => {
+		// Attribution is what RBAC is decided on, so a caller naming its own surface
+		// would make default-deny a formality.
+		expect(memoryWriter("muse", "hermes", false)).toBe("muse");
+		expect(memoryWriter("muse", "hermes", true)).toBe("muse");
+	});
+
+	test("a body-supplied writer is honoured only where no token exists at all", () => {
+		// A local run has no token to beat, and forcing `unknown` there would leave
+		// memory unwritable rather than protected.
+		expect(memoryWriter(null, "hermes", true)).toBe("hermes");
+		expect(memoryWriter(null, "hermes", false)).toBe("unknown");
+	});
+
+	test("anything missing or empty is the writer that holds no grants", () => {
+		expect(memoryWriter(null, undefined, true)).toBe("unknown");
+		expect(memoryWriter(null, "   ", true)).toBe("unknown");
+		expect(memoryWriter(null, 42, true)).toBe("unknown");
 	});
 });

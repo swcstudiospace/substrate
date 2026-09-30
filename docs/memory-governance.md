@@ -144,13 +144,23 @@ Every entry carries who wrote it (`writer`, `actor`), from where (`session_id`,
 `graph_id`, `repo`), on what basis (`trust`, `source_event`) and under which rule
 (`grant`, in the reply).
 
-**An agent cannot vouch for itself.**
+**An agent cannot vouch for itself**, and it cannot be somebody else either: a bearer
+token overrides a caller-named `surface`, and every reply reports the `writer` the
+write was attributed to. On `POST /memory` a body-supplied writer is honoured only on
+a deployment with no tokens configured at all.
 
 | Requested trust | Granted when |
 |-----------------|--------------|
 | `agent-claimed` | always |
-| `verified-by-test` | a `source_event` names the run that proved it, or a reviewer's token |
+| `verified-by-test` | a `source_event` **the ledger confirms exists**, or a reviewer's token |
 | `human-confirmed` | a reviewer's token, only |
+
+The ledger lookup is the point. An event id nobody checked is a string, and granting
+the verified label plus its longer shelf life on the strength of one would make
+`verified-by-test` a decoration rather than a claim. It is the one place the memory
+path reads Greptime, it reads a single column, and it runs only for a write actually
+making that claim — so an ordinary write pays nothing. No ledger, an unreachable
+ledger and an unknown id are the same answer: unconfirmed, so downgraded.
 
 Anything else is recorded as `agent-claimed` and the reply says
 `trust_downgraded_from`. `actor: "human"` needs a reviewer's token too — otherwise
@@ -191,8 +201,18 @@ the decision was ever taken.
   approval-by-resubmit work when the caller sends its own key.
 - An in-flight claim answers `conflict / write.in-flight`; one abandoned for more
   than 60 seconds is taken over.
-- A write that throws **releases** its key, so the retry is a real attempt and not a
-  replay of nothing.
+- A write that throws **releases** its key — but only while nothing has committed. Once
+  the entry exists the claim is kept, because an abandoned claim is recoverable and a
+  duplicate entry is not.
+- The commit is **acknowledged before the read-back**, not after. Everything after the
+  insert can throw, and an unacknowledged row is a row the retry would write again.
+- Each hand-over mints a **fencing token**, and every later statement about the claim
+  carries it. Without one, an attempt that merely ran slow past the in-flight timeout
+  could come back and finish — or delete — the claim that replaced it.
+- A claim **reserves the id** of the row it is about to write. So when a successor takes
+  over an abandoned claim, it looks for that row first: if the dead attempt committed
+  and died before acknowledging it, the entry is returned (`recovered.orphan`) rather
+  than written a second time.
 
 A replay re-runs the read-back, so a write that came back
 `accepted / verified_persisted: false` is confirmed by retrying it with the same
@@ -209,7 +229,8 @@ key — without writing a second row.
   "idempotency_key": "mwd_…",   // empty where nothing was spent
   "entry": { /* … */ },         // on accepted
   "strategy": "versioned",      // append | lww | versioned | require-review
-  "grant": "repo-working"
+  "grant": "repo-working",
+  "writer": "hermes"            // who it was attributed to, which may not be who asked
 }
 ```
 
@@ -235,11 +256,17 @@ state this gate exists to surface.
 
 ## Draining the queue
 
-`memory_pending` (MCP) lists pending proposals and quarantined writes, bodies
-redacted. A reviewer releases one by re-submitting the same content with a
-`review_token`: the write is re-decided with reviewer authority, and any pending
-proposal with the same content hash is marked approved and pointed at the entry that
-landed.
+`memory_pending` (MCP) lists pending proposals and quarantined writes. **Bodies and
+subjects require a `review_token`**: redaction strips credentials, not the email
+address or phone number that caused a PII quarantine, so a queue that showed every
+body to every agent holding any surface token would publish exactly what quarantining
+it was meant to contain — and to more readers than accepting the write would have.
+Without a token a caller still learns that something is parked, where, by whom and
+why, which is the part worth knowing and none of it is the payload.
+
+A reviewer releases one by re-submitting the same content with a `review_token`: the
+write is re-decided with reviewer authority, and any pending proposal with the same
+content hash is marked approved and pointed at the entry that landed.
 
 With no `SUBSTRATE_MEMORY_REVIEW_TOKENS` configured, every review path stays closed
 and the queue simply fills. That is the correct default — nothing forged gets

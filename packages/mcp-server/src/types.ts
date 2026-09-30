@@ -154,6 +154,36 @@ export interface MemoryEntry extends MemoryEntryInput {
 	idempotency_key?: string;
 }
 
+/** One parked write, as a reviewer's queue lists it. */
+export interface GovernanceQueueRow {
+	id: string;
+	scope: string;
+	kind: MemoryKind;
+	writer: string;
+	/** Why it is parked: a quarantine class, or what requires the review. */
+	reason: string;
+	created: string;
+	/**
+	 * The redacted body, and the subject it was filed under.
+	 *
+	 * Withheld from a caller that presents no reviewer token. Redaction strips
+	 * credentials, not the email address or phone number that caused a PII quarantine —
+	 * so a queue that showed every body to every agent would publish exactly what
+	 * quarantining it was meant to contain.
+	 */
+	text?: string;
+	subject?: string;
+	/** Which pattern fired. Names no value, so it is safe to show unauthorised. */
+	detail?: string;
+}
+
+export interface GovernanceQueue {
+	/** False when bodies and subjects were withheld for want of a reviewer token. */
+	authorized: boolean;
+	reviews: GovernanceQueueRow[];
+	quarantined: GovernanceQueueRow[];
+}
+
 /** A `memory.write` as it arrives at the governance gate. */
 export interface MemoryWriteRequest extends MemoryEntryInput {
 	/**
@@ -198,6 +228,14 @@ export interface MemoryWriteResult {
 	 * Empty where the write was refused before any key was spent.
 	 */
 	idempotency_key: string;
+	/**
+	 * The surface the write was attributed to, and the one RBAC was decided on.
+	 *
+	 * Always reported, because it is not always what the caller asked for: a bearer
+	 * token overrides a caller-named surface, and a silently ignored parameter is how
+	 * an agent ends up believing it wrote as somebody else.
+	 */
+	writer: string;
 	/** The stored entry, on `accepted`. */
 	entry?: MemoryEntry;
 	/** Set when the key had already been spent: this reply is a replay, not a write. */

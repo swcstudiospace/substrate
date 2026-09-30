@@ -94,14 +94,27 @@ export function createMcpServer(substrate: Substrate, callerSurface: Surface | n
 					.optional()
 					.describe("makes the write exactly-once — retry with the same key rather than writing twice"),
 				review_token: z.string().optional().describe("a reviewer's token; never stored or echoed"),
-				surface: surfaceSchema.optional().describe("defaults to the caller's own surface"),
+				surface: surfaceSchema
+					.optional()
+					.describe(
+						"ignored when a bearer token already identifies you — your token's surface is what RBAC is " +
+							"decided on, and the reply's `writer` says which surface the write was attributed to",
+					),
 			},
 			// Not destructive: a superseded entry is retired, never deleted. Idempotent
 			// where the caller supplies a key, which is the whole point of having one.
 			annotations: { destructiveHint: false, idempotentHint: true },
 		},
+		// The token wins over the argument, unlike every other tool here.
+		//
+		// Elsewhere `surface` is attribution and a caller naming another surface is at
+		// worst a mislabelled event. Here it is *authorisation*: a caller holding the
+		// muse token could otherwise pass `surface: "hermes"` and collect hermes's
+		// grants, including its own `agent:hermes` scope — which is default-deny
+		// defeated by a request parameter. The REST route has always resolved it this
+		// way round; this tool now matches it.
 		async ({ surface, ...entry }) =>
-			json(await substrate.writeMemory({ ...entry, writer: surface ?? callerSurface ?? "unknown" })),
+			json(await substrate.writeMemory({ ...entry, writer: callerSurface ?? surface ?? "unknown" })),
 	);
 
 	server.registerTool(
@@ -132,12 +145,17 @@ export function createMcpServer(substrate: Substrate, callerSurface: Surface | n
 		{
 			title: "Memory awaiting review",
 			description:
-				"Writes the governance gate parked: proposals waiting on a reviewer, and quarantined entries. Bodies " +
-				"are redacted. Neither reaches a brief or a search until released.",
-			inputSchema: { limit: z.number().int().min(1).max(100).optional() },
+				"Writes the governance gate parked: proposals waiting on a reviewer, and quarantined entries. Neither " +
+				"reaches a brief or a search until released. Bodies and subjects require a review_token — a quarantined " +
+				"entry's body still holds the PII that got it quarantined, so without one you see that something is " +
+				"parked, where, by whom and why, but not what.",
+			inputSchema: {
+				limit: z.number().int().min(1).max(100).optional(),
+				review_token: z.string().optional().describe("a reviewer's token; required to see bodies"),
+			},
 			annotations: { readOnlyHint: true },
 		},
-		async ({ limit }) => json(await substrate.governanceQueue(limit)),
+		async ({ limit, review_token }) => json(await substrate.governanceQueue({ limit, review_token })),
 	);
 
 	server.registerTool(

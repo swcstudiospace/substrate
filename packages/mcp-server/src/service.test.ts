@@ -447,3 +447,112 @@ describe("identifier lookups", () => {
 		expect(asked[0]?.[1].length).toBe(512);
 	});
 });
+
+describe("the governance queue withholds what quarantine was protecting", () => {
+	/** Two parked rows, one of each kind, as the index would return them. */
+	const index = {
+		governanceQueue: async () => ({
+			reviews: [
+				{
+					id: "memr_1",
+					scope: "global",
+					kind: "decision" as const,
+					writer: "hermes",
+					reason: "global scope requires review",
+					created: "2026-09-30T00:00:00.000Z",
+					text: "Greptime is the events ledger only",
+					subject: "store lock",
+				},
+			],
+			quarantined: [
+				{
+					id: "memq_1",
+					scope: "repo:a/b",
+					kind: "fact" as const,
+					writer: "omp",
+					reason: "pii",
+					created: "2026-09-30T00:00:00.000Z",
+					text: "escalate to someone@a-real-domain.test",
+					subject: "escalation",
+					detail: "the text carried an email address",
+				},
+			],
+		}),
+	};
+
+	function substrateWithTokens(tokens?: string) {
+		return new Substrate(loadConfig(tokens ? { SUBSTRATE_MEMORY_REVIEW_TOKENS: tokens } : {}), {
+			index: index as never,
+			greptime: null,
+		});
+	}
+
+	test("a caller with no reviewer token sees that something is parked, not what", async () => {
+		// Redaction strips credentials, not the email address that caused the quarantine.
+		// A queue that showed every body to every agent holding any surface token would
+		// publish exactly what quarantining it was meant to contain — to more readers
+		// than accepting the write would have.
+		const queue = await substrateWithTokens().governanceQueue({});
+
+		expect(queue.authorized).toBe(false);
+		expect(queue.quarantined[0]?.text).toBeUndefined();
+		expect(queue.quarantined[0]?.subject).toBeUndefined();
+		expect(JSON.stringify(queue)).not.toContain("a-real-domain.test");
+		// The parts worth knowing survive, and none of them is the payload.
+		expect(queue.quarantined[0]).toMatchObject({
+			id: "memq_1",
+			scope: "repo:a/b",
+			writer: "omp",
+			reason: "pii",
+			detail: "the text carried an email address",
+		});
+		expect(queue.reviews[0]?.text).toBeUndefined();
+	});
+
+	test("a reviewer sees the bodies", async () => {
+		const token = "reviewer-token-that-is-long";
+		const queue = await substrateWithTokens(token).governanceQueue({ review_token: token });
+
+		expect(queue.authorized).toBe(true);
+		expect(queue.quarantined[0]?.text).toContain("a-real-domain.test");
+		expect(queue.reviews[0]?.text).toContain("Greptime");
+	});
+
+	test("a wrong token is no token", async () => {
+		const queue = await substrateWithTokens("reviewer-token-that-is-long").governanceQueue({
+			review_token: "not-the-reviewer-token",
+		});
+		expect(queue.authorized).toBe(false);
+		expect(queue.quarantined[0]?.text).toBeUndefined();
+	});
+});
+
+describe("the audit line is redacted", () => {
+	test("a credential in a caller-supplied scope does not reach the journal", async () => {
+		// `scope` is caller-controlled and a refused write is exactly where a malformed one
+		// arrives. A credential in the journal is leaked whether or not the event that
+		// would have carried it was ever emitted.
+		const written: string[] = [];
+		const original = process.stderr.write.bind(process.stderr);
+		process.stderr.write = ((chunk: string | Uint8Array) => {
+			written.push(String(chunk));
+			return true;
+		}) as typeof process.stderr.write;
+		try {
+			const substrate = new Substrate(loadConfig({}), { index: {} as never, greptime: null });
+			await substrate.writeMemory({
+				scope: "graph:GITHUB_TOKEN=ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				kind: "fact",
+				text: "x",
+				writer: "hermes",
+			});
+		} finally {
+			process.stderr.write = original;
+		}
+
+		const log = written.join("");
+		expect(log).toContain("memory.write");
+		expect(log).not.toContain("ghp_aaaa");
+		expect(log).toContain(REDACTED);
+	});
+});
