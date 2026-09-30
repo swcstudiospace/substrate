@@ -12,9 +12,12 @@ import {
 	AppendOnlyViolation,
 	assertAppendOnly,
 	chainTip,
+	DEFAULT_QUERY_LIMIT,
 	EVENT_COLUMNS,
 	GreptimeClient,
 	GreptimeError,
+	MAX_QUERY_LIMIT,
+	queryLimit,
 	quote,
 } from "./greptime.ts";
 import type { GreptimeConfig } from "./config.ts";
@@ -571,5 +574,122 @@ describe("chainTip", () => {
 
 		globalThis.fetch = (() => Promise.reject(new Error("down"))) as unknown as typeof fetch;
 		expect(await new GreptimeClient(config).ping()).toBe(false);
+	});
+});
+
+describe("queryEvents", () => {
+	/** The read among the recorded statements — the dialect probe precedes it. */
+	function selectStatement(sql: string[]): string {
+		return sql.find((statement) => statement.startsWith("SELECT") && statement.includes("agent_events")) ?? "";
+	}
+
+	test("selects every column but the payload, newest first, under the default limit", async () => {
+		const { sql } = stubFetch();
+		await new GreptimeClient(config).queryEvents();
+
+		const statement = selectStatement(sql);
+		for (const column of EVENT_COLUMNS) {
+			if (column === "payload") continue;
+			expect(statement).toContain(`"${column}"`);
+		}
+		// Omitted because it is the one unbounded column: 16 KB an event, times the limit.
+		expect(statement).not.toContain('"payload"');
+		expect(statement).toContain('ORDER BY "ts" DESC, "id" DESC');
+		expect(statement).toContain(`LIMIT ${DEFAULT_QUERY_LIMIT}`);
+		// No filters means no WHERE at all, rather than a `WHERE 1=1` the server has to parse.
+		expect(statement).not.toContain("WHERE");
+	});
+
+	test("includes the payload only when asked", async () => {
+		const { sql } = stubFetch();
+		await new GreptimeClient(config).queryEvents({ includePayload: true });
+		expect(selectStatement(sql)).toContain('"payload"');
+	});
+
+	test("ANDs one equality clause per filter, and nothing for an absent one", async () => {
+		const { sql } = stubFetch();
+		await new GreptimeClient(config).queryEvents({
+			match: { repo: "swcstudiospace/autonogrammer", surface: "omp", kind: undefined, graph_id: null },
+			order: "asc",
+			limit: 7,
+		});
+
+		const statement = selectStatement(sql);
+		expect(statement).toContain(`WHERE "repo" = 'swcstudiospace/autonogrammer' AND "surface" = 'omp'`);
+		expect(statement).not.toContain('"kind"  =');
+		expect(statement).not.toContain('"graph_id" =');
+		expect(statement).toContain('ORDER BY "ts" ASC, "id" ASC');
+		expect(statement).toContain("LIMIT 7");
+	});
+
+	test("bounds ts inclusively at both ends", async () => {
+		const { sql } = stubFetch();
+		await new GreptimeClient(config).queryEvents({
+			since: "2026-09-30T00:00:00.000Z",
+			until: "2026-09-30T12:00:00.000Z",
+		});
+
+		expect(selectStatement(sql)).toContain(
+			`WHERE "ts" >= '2026-09-30T00:00:00.000Z' AND "ts" <= '2026-09-30T12:00:00.000Z'`,
+		);
+	});
+
+	test("a filter value cannot close its literal or add a clause of its own", async () => {
+		// The read path takes no SQL from a caller: column names come from
+		// QUERYABLE_COLUMNS and values are quoted, so this is stored text to match,
+		// not syntax. It matches nothing, which is the point.
+		const { sql } = stubFetch();
+		await new GreptimeClient(config).queryEvents({ match: { session_id: "x' OR 1=1; DROP TABLE agent_events --" } });
+
+		const statement = selectStatement(sql);
+		expect(statement).toContain(`"session_id" = 'x'' OR 1=1; DROP TABLE agent_events --'`);
+		// And the guard on the way out still sees one SELECT, because it blanks literals first.
+		expect(() => assertAppendOnly(statement)).not.toThrow();
+	});
+
+	test("no filter can name a column outside the queryable set", async () => {
+		const { sql } = stubFetch();
+		await new GreptimeClient(config).queryEvents({
+			// A caller that got past the typed surface still cannot reach `payload`, `hash`
+			// or a column of another table: the loop iterates the whitelist, not the input.
+			match: { payload: "x", hash: "y", summary: "z" } as never,
+		});
+
+		expect(selectStatement(sql)).not.toContain("WHERE");
+	});
+
+	test("the limit is clamped to the cap and to a whole row", () => {
+		expect(queryLimit(undefined)).toBe(DEFAULT_QUERY_LIMIT);
+		expect(queryLimit(Number.NaN)).toBe(DEFAULT_QUERY_LIMIT);
+		expect(queryLimit(MAX_QUERY_LIMIT + 1_000)).toBe(MAX_QUERY_LIMIT);
+		expect(queryLimit(0)).toBe(1);
+		expect(queryLimit(-5)).toBe(1);
+		expect(queryLimit(12.9)).toBe(12);
+	});
+
+	test("maps rows onto the columns the server names", async () => {
+		stubFetch((statement) =>
+			statement.startsWith("SELECT LENGTH")
+				? records(["n"], [[3]])
+				: records(["ts", "id", "summary"], [[1790186361859, "evt_1", "edited ws.rs"]]),
+		);
+
+		const rows = await new GreptimeClient(config).queryEvents({ match: { repo: "r" } });
+		expect(rows).toEqual([{ ts: 1790186361859, id: "evt_1", summary: "edited ws.rs" }]);
+	});
+
+	test("reads even while the quoting dialect is unknown", async () => {
+		// Unlike an append, a read cannot corrupt anything: the worst a wrongly quoted
+		// backslash does is match no rows. A ledger that cannot answer the probe must
+		// still be readable.
+		stubFetch((statement) =>
+			statement.startsWith("SELECT LENGTH")
+				? new Response("boom", { status: 500 })
+				: records(["id"], [["evt_1"]]),
+		);
+
+		expect(await new GreptimeClient(config).queryEvents({ match: { branch: "feat\\x" } })).toEqual([
+			{ id: "evt_1" },
+		]);
 	});
 });

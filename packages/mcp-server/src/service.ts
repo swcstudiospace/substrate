@@ -7,19 +7,22 @@
  */
 import { composeBrief, type BriefRequest } from "./brief.ts";
 import type { SubstrateConfig } from "./config.ts";
-import { inChainOrder, normalizeEvent, normalizeIdentifier, verifyChain } from "./event.ts";
-import { GreptimeClient } from "./greptime.ts";
+import { InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, verifyChain } from "./event.ts";
+import { GreptimeClient, queryLimit, type EventQuery, type QueryableColumn } from "./greptime.ts";
 import { IndexStore } from "./index-store.ts";
 import { redact } from "./redact.ts";
-import type {
-	Actor,
-	EventInput,
-	EventKind,
-	MemoryEntry,
-	MemoryEntryInput,
-	NodeState,
-	Surface,
-	SubstrateEvent,
+import {
+	ACTORS,
+	EVENT_KINDS,
+	SURFACES,
+	type Actor,
+	type EventInput,
+	type EventKind,
+	type MemoryEntry,
+	type MemoryEntryInput,
+	type NodeState,
+	type Surface,
+	type SubstrateEvent,
 } from "./types.ts";
 
 /** Greptime gives back loosely typed rows; rebuild the exact shape that was hashed. */
@@ -50,6 +53,70 @@ function rowToEvent(row: Record<string, unknown>): SubstrateEvent {
 		hash: String(row.hash),
 		prev: text(row.prev),
 	};
+}
+
+/** A queried row, with `payload` dropped unless it was selected. */
+function rowToLedgerEvent(row: Record<string, unknown>, includePayload: boolean): LedgerEvent {
+	const { payload, ...rest } = rowToEvent(row);
+	return includePayload ? { ...rest, payload } : rest;
+}
+
+/**
+ * One of a closed set, or a refusal naming what was asked for.
+ *
+ * A filter on an unknown surface or kind would quietly match nothing, and a caller
+ * reading an empty ledger window cannot tell that from a typo in their own query.
+ */
+function oneOf<T extends string>(what: string, allowed: readonly T[], value: string | undefined): T | undefined {
+	if (value === undefined) return undefined;
+	if (!(allowed as readonly string[]).includes(value)) {
+		throw new InvalidEventError(`unknown ${what}: ${value}`);
+	}
+	return value as T;
+}
+
+/** An ISO bound on `ts`, or a refusal. Quoted into SQL, so it is parsed before it is trusted. */
+function bound(what: string, value: string | undefined): string | undefined {
+	if (value === undefined) return undefined;
+	const date = new Date(value);
+	if (Number.isNaN(date.getTime())) throw new InvalidEventError(`invalid ${what}: ${value}`);
+	return date.toISOString();
+}
+
+/**
+ * A queried event.
+ *
+ * Every stored column except `payload`, which is present only when the caller asked
+ * for it — see `GreptimeClient.queryEvents`.
+ */
+export type LedgerEvent = Omit<SubstrateEvent, "payload"> & { payload?: Record<string, unknown> };
+
+/** A ledger read as a caller submits it: flat, snake_case, every field optional. */
+export interface EventQueryInput {
+	session_id?: string;
+	graph_id?: string;
+	node_id?: string;
+	linear_identifier?: string;
+	repo?: string;
+	branch?: string;
+	surface?: string;
+	kind?: string;
+	actor?: string;
+	/** Inclusive bounds on `ts`, in any form `new Date()` accepts. */
+	since?: string;
+	until?: string;
+	limit?: number;
+	order?: "asc" | "desc";
+	include_payload?: boolean;
+}
+
+export interface EventQueryResult {
+	events: LedgerEvent[];
+	count: number;
+	/** The reply hit `limit`, so there may be more. Narrow the query or page by `until`. */
+	truncated: boolean;
+	/** Set when the ledger could not be read. Redacted, as on the write path. */
+	error?: string;
 }
 
 /**
@@ -183,6 +250,58 @@ export class Substrate {
 			const error = redact(String(cause));
 			process.stderr.write(`[substrate] event ${event.id} not stored — ${error}\n`);
 			return { event, stored: false, error };
+		}
+	}
+
+	/**
+	 * Read a window of the ledger.
+	 *
+	 * The read half of the store lock: Greptime is the only source, and it is reached
+	 * only from here, so a desk seat gets the trail without a credential and without a
+	 * second door onto the table.
+	 *
+	 * Identifier filters are normalised the way the write path stores them — the same
+	 * rule `emit` follows when it looks up a session's chain tip. Querying the raw
+	 * value would silently match nothing for any identifier that redaction or the
+	 * length cap touched, and an empty answer is indistinguishable from an empty
+	 * ledger.
+	 *
+	 * Invalid input throws, as on the write path: a filter on a surface that does not
+	 * exist is a caller's bug and must not read as "nothing happened". A ledger that
+	 * is merely unavailable comes back as an empty window with `error` set, because a
+	 * missing store may not fail an agent's turn.
+	 */
+	async queryEvents(input: EventQueryInput = {}): Promise<EventQueryResult> {
+		const match: Partial<Record<QueryableColumn, string | null | undefined>> = {
+			session_id: normalizeIdentifier(input.session_id),
+			graph_id: normalizeIdentifier(input.graph_id),
+			node_id: normalizeIdentifier(input.node_id),
+			linear_identifier: normalizeIdentifier(input.linear_identifier),
+			repo: normalizeIdentifier(input.repo),
+			branch: normalizeIdentifier(input.branch),
+			surface: oneOf<Surface>("surface", SURFACES, input.surface),
+			kind: oneOf<EventKind>("kind", EVENT_KINDS, input.kind),
+			actor: oneOf<Actor>("actor", ACTORS, input.actor),
+		};
+		if (input.order !== undefined && input.order !== "asc" && input.order !== "desc") {
+			throw new InvalidEventError(`unknown order: ${String(input.order)}`);
+		}
+		const query: EventQuery = {
+			match,
+			since: bound("since", input.since),
+			until: bound("until", input.until),
+			limit: queryLimit(input.limit),
+			order: input.order,
+			includePayload: input.include_payload === true,
+		};
+
+		if (!this.greptime) return { events: [], count: 0, truncated: false, error: "GREPTIME_URL is not set" };
+		try {
+			const rows = await this.greptime.queryEvents(query);
+			const events = rows.map((row) => rowToLedgerEvent(row, query.includePayload === true));
+			return { events, count: events.length, truncated: events.length >= (query.limit ?? 0) };
+		} catch (cause) {
+			return { events: [], count: 0, truncated: false, error: redact(String(cause)) };
 		}
 	}
 

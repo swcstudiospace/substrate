@@ -112,6 +112,47 @@ describe("Greptime is reachable only through substrate-mcp", () => {
 	});
 });
 
+/**
+ * Files that may hand a statement to the ledger client.
+ *
+ * `greptime.ts` owns the statements; `brief.ts` composes the one read the briefing
+ * needs. Everything else — the MCP tools, the HTTP routes, the service — asks for
+ * events through a typed method. That is what keeps the read path from becoming an
+ * arbitrary SQL door onto `agent_events`: a caller supplies values, never syntax.
+ */
+const MAY_SEND_SQL = new Set(["greptime.ts", "brief.ts"]);
+
+describe("no caller reaches the ledger with SQL", () => {
+	test("only the ledger client and the brief compose statements", async () => {
+		const offenders = (await filesMatching(`${LEDGER_PACKAGE}/*.ts`))
+			.filter((path) => !path.endsWith(".test.ts"))
+			.filter((path) => !MAY_SEND_SQL.has(path.split("/").at(-1) ?? ""))
+			// A file that both names the ledger and sends a statement. `index-store.ts`
+			// sends plenty, but to Postgres — the index is not the ledger.
+			.filter((path) => {
+				const body = read(path);
+				return /greptime/i.test(body) && /\.sql\(/.test(body);
+			});
+
+		expect(offenders).toEqual([]);
+	});
+
+	test("the query tool's filters are columns this package names, not a caller's string", () => {
+		// `events_query` and `POST /events/query` take a fixed set of typed filters. If a
+		// tool ever took a statement, a summary, or a column name, the redaction and
+		// append-only guarantees on the write path would still hold — but every row in the
+		// ledger would be reachable by whatever SQL a caller cared to send.
+		for (const file of ["mcp.ts", "server.ts", "service.ts"]) {
+			// The offending lines, not the file: a failure here should read as a diff.
+			const offending = read(join(LEDGER_PACKAGE, file))
+				.split("\n")
+				.filter((line) => /\b(?:sql|statement)\s*:/.test(line) || /\bSELECT\s/i.test(line));
+
+			expect({ file, offending }).toEqual({ file, offending: [] });
+		}
+	});
+});
+
 describe("no native Greptime MCP wiring", () => {
 	test("no agent config registers Greptime as an MCP server", async () => {
 		// Config files only: prose in the README and in docs/ has to be free to say

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { loadConfig } from "./config.ts";
+import { MAX_QUERY_LIMIT, type EventQuery } from "./greptime.ts";
 import { REDACTED } from "./redact.ts";
 import { Substrate } from "./service.ts";
 import type { EventInput, SubstrateEvent } from "./types.ts";
@@ -315,5 +316,144 @@ describe("identifier lookups", () => {
 		await substrate.verifyGraph("ut-1".padEnd(900, "x"));
 
 		expect(asked[0]?.[1].length).toBe(512);
+	});
+});
+
+describe("queryEvents", () => {
+	/** A ledger stub that records the query it was handed and replies with fixed rows. */
+	function reader(rows: Array<Record<string, unknown>> = [], fail?: string) {
+		const queries: EventQuery[] = [];
+		return {
+			queries,
+			greptime: {
+				queryEvents: async (query: EventQuery) => {
+					queries.push(query);
+					if (fail) throw new Error(fail);
+					return rows;
+				},
+			},
+		};
+	}
+
+	function substrateWith(greptime: unknown) {
+		return new Substrate(loadConfig({}), { index: null, greptime: greptime as never });
+	}
+
+	/** One stored row, as Greptime hands it back: epoch millis, payload as JSON text. */
+	function row(over: Record<string, unknown> = {}) {
+		return {
+			ts: 1790186361859,
+			id: "evt_1",
+			surface: "omp",
+			session_id: "sess-1",
+			graph_id: "ut-1",
+			node_id: null,
+			linear_identifier: null,
+			step: null,
+			repo: "swcstudiospace/x",
+			branch: "main",
+			actor: "agent",
+			kind: "shell",
+			summary: "ran cargo test",
+			hash: "h1",
+			prev: null,
+			...over,
+		};
+	}
+
+	test("looks identifiers up in the form the write path stores them", async () => {
+		// The regression this shares with `emit`: the write path redacts and caps every
+		// identifier, so querying the raw value matches nothing — and an empty window is
+		// indistinguishable from an empty ledger.
+		const { queries, greptime } = reader();
+		await substrateWith(greptime).queryEvents({ session_id: `sess-${"x".repeat(600)}` });
+
+		const value = String(queries[0]?.match?.session_id);
+		expect(value.length).toBe(512);
+		expect(value.startsWith("sess-x")).toBe(true);
+	});
+
+	test("redacts a credential pasted into a filter rather than sending it", async () => {
+		const { queries, greptime } = reader();
+		await substrateWith(greptime).queryEvents({ branch: "feat/token-ghp_0123456789abcdefghijklmnopqrstuvwxyz" });
+
+		expect(String(queries[0]?.match?.branch)).toContain(REDACTED);
+	});
+
+	test("refuses a filter on a surface, kind, actor or order that cannot exist", async () => {
+		const substrate = substrateWith(reader().greptime);
+		// Each would quietly match nothing, which reads to the caller as "nothing happened".
+		await expect(substrate.queryEvents({ surface: "claude-cod" })).rejects.toThrow(/unknown surface/);
+		await expect(substrate.queryEvents({ kind: "file.edited" })).rejects.toThrow(/unknown kind/);
+		await expect(substrate.queryEvents({ actor: "robot" })).rejects.toThrow(/unknown actor/);
+		await expect(substrate.queryEvents({ order: "sideways" as never })).rejects.toThrow(/unknown order/);
+	});
+
+	test("refuses a time bound that is not a date", async () => {
+		await expect(substrateWith(reader().greptime).queryEvents({ since: "last tuesday" })).rejects.toThrow(
+			/invalid since/,
+		);
+		await expect(substrateWith(reader().greptime).queryEvents({ until: "soon" })).rejects.toThrow(/invalid until/);
+	});
+
+	test("normalises the time bounds to ISO", async () => {
+		const { queries, greptime } = reader();
+		await substrateWith(greptime).queryEvents({ since: "2026-09-30", until: "2026-09-30T12:00:00Z" });
+
+		expect(queries[0]?.since).toBe("2026-09-30T00:00:00.000Z");
+		expect(queries[0]?.until).toBe("2026-09-30T12:00:00.000Z");
+	});
+
+	test("rebuilds the event the chain was computed over", async () => {
+		const { greptime } = reader([row()]);
+		const { events, count, truncated } = await substrateWith(greptime).queryEvents({ graph_id: "ut-1" });
+
+		expect(count).toBe(1);
+		expect(truncated).toBe(false);
+		// Greptime returns a TIMESTAMP as an integer; the chain hashed an ISO string.
+		expect(events[0]?.ts).toBe("2026-09-23T17:59:21.859Z");
+		expect(events[0]?.hash).toBe("h1");
+		expect(events[0]?.node_id).toBeNull();
+	});
+
+	test("omits the payload unless it was asked for, and parses it when it was", async () => {
+		const withPayload = row({ payload: '{"file":"gateway/ws.rs"}' });
+
+		const bare = await substrateWith(reader([withPayload]).greptime).queryEvents({});
+		expect("payload" in (bare.events[0] ?? {})).toBe(false);
+
+		const full = await substrateWith(reader([withPayload]).greptime).queryEvents({ include_payload: true });
+		expect(full.events[0]?.payload).toEqual({ file: "gateway/ws.rs" });
+	});
+
+	test("reports a full window as truncated so the caller knows to narrow it", async () => {
+		const { greptime } = reader([row(), row({ id: "evt_2" })]);
+		expect((await substrateWith(greptime).queryEvents({ limit: 2 })).truncated).toBe(true);
+		expect((await substrateWith(greptime).queryEvents({ limit: 3 })).truncated).toBe(false);
+	});
+
+	test("clamps an oversized limit rather than refusing the read", async () => {
+		const { queries, greptime } = reader();
+		await substrateWith(greptime).queryEvents({ limit: 10_000 });
+		expect(queries[0]?.limit).toBe(MAX_QUERY_LIMIT);
+	});
+
+	test("an unconfigured ledger is an empty window with a reason, not a thrown error", async () => {
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: null });
+		expect(await substrate.queryEvents({})).toEqual({
+			events: [],
+			count: 0,
+			truncated: false,
+			error: "GREPTIME_URL is not set",
+		});
+	});
+
+	test("an unreachable ledger reports a redacted reason", async () => {
+		const { greptime } = reader([], "greptime unreachable: postgres://user:hunter2@host/db refused");
+		const result = await substrateWith(greptime).queryEvents({});
+
+		expect(result.events).toEqual([]);
+		expect(result.error).toContain(REDACTED);
+		expect(result.error).not.toContain("hunter2");
 	});
 });
