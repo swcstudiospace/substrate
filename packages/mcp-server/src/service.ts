@@ -7,9 +7,29 @@
  */
 import { composeBrief, type BriefRequest } from "./brief.ts";
 import { isReviewToken, type SubstrateConfig } from "./config.ts";
+import {
+	DEFAULT_IDLE_SECONDS,
+	analyzeDrift,
+	extractCommitSha,
+	type DriftEvent,
+	type DriftGitTip,
+	type DriftReport,
+} from "./drift.ts";
 import { InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, verifyChain } from "./event.ts";
+import { checkoutKnowsCommit, readGitTip } from "./git.ts";
 import { GreptimeClient, queryLimit, type EventQuery, type QueryableColumn } from "./greptime.ts";
-import { IndexStore } from "./index-store.ts";
+import { IndexStore, leaseSnapshot } from "./index-store.ts";
+import {
+	buildHandoff,
+	handoffGaps,
+	handoffSummary,
+	signHandoff,
+	verifyHandoff,
+	type HandoffInput,
+	type HandoffPacket,
+	type HandoffVerdict,
+} from "./handoff.ts";
+import { leaseView, normalizeTtlSeconds, type LeaseView } from "./lease.ts";
 import { governMemoryWrite } from "./memory-write.ts";
 import { redact } from "./redact.ts";
 import {
@@ -21,7 +41,10 @@ import {
 	type EventKind,
 	type GovernanceQueue,
 	type GovernanceQueueRow,
+	type GraphEdge,
+	type GraphNode,
 	type MemoryEntry,
+	type MemoryEntryInput,
 	type MemoryWriteRequest,
 	type MemoryWriteResult,
 	type NodeState,
@@ -510,44 +533,408 @@ export class Substrate {
 		return this.index.registerGraph(plan);
 	}
 
+	/** Where a node's events belong: the graph's repo, not whatever the caller said. */
+	private async placeOf(graphId: string): Promise<{ repo?: string; branch?: string }> {
+		// A claim event without a repo is invisible to every repo-scoped brief, which
+		// is exactly where a claim most needs to be seen.
+		const graph = await this.index?.getGraph(graphId).catch(() => null);
+		return { ...(graph?.repo ? { repo: graph.repo } : {}), ...(graph?.branch ? { branch: graph.branch } : {}) };
+	}
+
 	/**
-	 * Claim a node for a surface. Phase 0 records the claim in the index and the
-	 * event log; Phase 2 adds the Linear and Notion mirroring.
+	 * Take or extend the lease on a node.
+	 *
+	 * The index decides — one statement, compare-and-swapped on the lease epoch,
+	 * with expiry judged by Postgres' clock — so two agents asking at once cannot
+	 * both be granted. What happens here is the *telling*: the lease and its
+	 * holder go back to the caller, and the ledger gets an event for every change
+	 * of hold, because a node quietly changing hands is how two agents come to
+	 * disagree about who is doing what.
+	 *
+	 * A refused claim is not an error. The caller is told who holds the node and
+	 * until when, which is what it needs in order to pick up something else.
 	 */
-	async claimNode(graphId: string, nodeId: string, surface: Surface, sessionId: string) {
+	async claimNode(
+		graphId: string,
+		nodeId: string,
+		surface: Surface,
+		sessionId: string,
+		ttlSeconds?: number,
+	): Promise<{ claimed: boolean; node: GraphNode; lease: LeaseView; action: string; evicted: string | null }> {
 		if (!this.index) throw new Error("graph_claim requires SUBSTRATE_PG_URL");
-		const result = await this.index.claimNode(graphId, nodeId, surface, sessionId);
-		if (result.claimed) {
-			// The repo comes from the graph, not the caller: a claim event without one
-			// is invisible to every repo-scoped brief, which is exactly where a claim
-			// most needs to be seen.
-			const graph = await this.index.getGraph(graphId).catch(() => null);
+		const ttl = normalizeTtlSeconds(ttlSeconds, this.config.leaseTtlSeconds);
+		const result = await this.index.claimNode(graphId, nodeId, surface, sessionId, ttl);
+		const { decision } = result;
+		const identifier = result.node.linear_identifier;
+
+		if (result.claimed && decision.action !== "renewed") {
+			// A renewal is deliberately silent. A heartbeating agent renews for as
+			// long as it holds the node, and an event per renewal would bury the
+			// trail under the one thing in it that carries no information.
+			const evicted = decision.evicted;
+			const what =
+				decision.action === "stolen"
+					? `took over ${identifier ?? "node"} — ${evicted?.surface ?? "the previous holder"}'s lease had expired`
+					: decision.action === "reclaimed"
+						? `re-claimed ${identifier ?? "node"} after its own lease expired`
+						: `claimed ${identifier ?? "node"}`;
 			await this.emit({
 				surface,
-				kind: "claim",
-				// The brief already renders the node id alongside every action, so
-				// naming it here too reads as "claimed n4 (SPE-123) (n4)".
-				summary: result.node.linear_identifier ? `claimed ${result.node.linear_identifier}` : "claimed node",
+				// A steal is the one claim another agent has to notice, so it is a
+				// warning: the brief lists warnings, and the agent that was evicted
+				// may still believe it holds the node.
+				kind: decision.action === "stolen" ? "warning" : "claim",
+				summary: what,
+				graph_id: graphId,
+				node_id: nodeId,
+				linear_identifier: identifier ?? undefined,
+				session_id: sessionId,
+				payload: {
+					action: decision.action,
+					lease_id: result.lease.lease_id,
+					lease_epoch: result.lease.epoch,
+					ttl_seconds: ttl,
+					expires_at: result.lease.expires_at,
+					...(evicted ? { evicted } : {}),
+				},
+				...(await this.placeOf(graphId)),
+			}).catch(() => undefined);
+		}
+
+		return {
+			claimed: result.claimed,
+			node: result.node,
+			lease: result.lease,
+			action: decision.action,
+			evicted: decision.evicted ? `${decision.evicted.surface}/${decision.evicted.session_id}` : null,
+		};
+	}
+
+	/**
+	 * Extend a lease. No event: a heartbeat is the absence of news.
+	 *
+	 * A refusal is worth acting on, though — it means the holder has lost the node
+	 * — so it comes back with the reason and the current holder rather than as a
+	 * bare false.
+	 */
+	async heartbeatNode(graphId: string, nodeId: string, leaseId: string, ttlSeconds?: number) {
+		if (!this.index) throw new Error("graph_heartbeat requires SUBSTRATE_PG_URL");
+		const ttl = normalizeTtlSeconds(ttlSeconds, this.config.leaseTtlSeconds);
+		const result = await this.index.heartbeatNode(graphId, nodeId, leaseId, ttl);
+		return {
+			ok: result.ok,
+			lease: result.lease,
+			...(result.decision.ok ? {} : { reason: result.decision.reason }),
+			ttl_seconds: ttl,
+		};
+	}
+
+	/**
+	 * Drop a lease.
+	 *
+	 * Fenced on the lease id, so a holder whose lease lapsed cannot release the
+	 * node someone else has since claimed. A refusal names the real holder.
+	 */
+	async releaseNode(graphId: string, nodeId: string, request: { lease_id?: string | null; force?: boolean } = {}) {
+		if (!this.index) throw new Error("graph_release requires SUBSTRATE_PG_URL");
+		const result = await this.index.releaseNode(graphId, nodeId, request);
+		const { decision } = result;
+		if (result.released && decision.ok && decision.action !== "noop") {
+			const holder = decision.evicted ?? leaseView(leaseSnapshot(result.node)).holder;
+			await this.emit({
+				surface: holder?.surface ?? "claude-code",
+				kind: decision.action === "forced" ? "warning" : "note",
+				summary:
+					decision.action === "forced"
+						? `forced the lease off ${result.node.linear_identifier ?? "node"}, held by ${decision.evicted?.surface ?? "unknown"}`
+						: `released ${result.node.linear_identifier ?? "node"}`,
 				graph_id: graphId,
 				node_id: nodeId,
 				linear_identifier: result.node.linear_identifier ?? undefined,
-				session_id: sessionId,
-				repo: graph?.repo ?? undefined,
-				branch: graph?.branch ?? undefined,
+				...(holder?.session_id ? { session_id: holder.session_id } : {}),
+				payload: { action: decision.action, lease_id: decision.lease_id, ...(decision.evicted ? { evicted: decision.evicted } : {}) },
+				...(await this.placeOf(graphId)),
 			}).catch(() => undefined);
 		}
-		return result;
+		return {
+			released: result.released,
+			action: decision.ok ? decision.action : null,
+			...(decision.ok ? {} : { reason: decision.reason, holder: decision.holder }),
+			lease: leaseView(leaseSnapshot(result.node)),
+		};
 	}
 
-	async releaseNode(graphId: string, nodeId: string) {
-		if (!this.index) throw new Error("graph_release requires SUBSTRATE_PG_URL");
-		await this.index.releaseNode(graphId, nodeId);
-	}
-
-	async completeNode(graphId: string, nodeId: string, state: NodeState = "completed") {
+	/**
+	 * Mark a node complete and drop its lease.
+	 *
+	 * Fenced for the same reason a release is, and more sharply: an agent that
+	 * stalled past its TTL and woke up must not be able to close a node a second
+	 * agent has since claimed and is still working on. So the state is only
+	 * written once the release has been accepted.
+	 */
+	async completeNode(
+		graphId: string,
+		nodeId: string,
+		request: { lease_id?: string | null; force?: boolean; state?: NodeState } = {},
+	) {
 		if (!this.index) throw new Error("graph_complete requires SUBSTRATE_PG_URL");
-		await this.index.setNodeState(graphId, nodeId, state);
-		await this.index.releaseNode(graphId, nodeId);
+		const released = await this.releaseNode(graphId, nodeId, request);
+		if (!released.released) return { completed: false, ...released };
+		await this.index.setNodeState(graphId, nodeId, request.state ?? "completed");
+		return { completed: true, ...released };
+	}
+
+	/**
+	 * Clear every lapsed lease, and say so in the ledger.
+	 *
+	 * Expiry is honoured lazily everywhere else — a lapsed lease already reads as
+	 * free — so this exists to make the auto-release *visible*: the row stops
+	 * naming a holder that is gone, and each release becomes a warning another
+	 * agent will see in its brief.
+	 */
+	async reapExpiredLeases(repo?: string | null) {
+		if (!this.index) return [];
+		const reaped = await this.index.reapExpiredLeases(repo ?? null);
+		for (const lease of reaped) {
+			await this.emit({
+				surface: lease.holder?.surface ?? "claude-code",
+				kind: "warning",
+				summary: `lease on ${lease.linear_identifier ?? lease.node_id} expired and was released${lease.holder ? ` (held by ${lease.holder.surface})` : ""}`,
+				graph_id: lease.graph_id,
+				node_id: lease.node_id,
+				linear_identifier: lease.linear_identifier ?? undefined,
+				...(lease.holder?.session_id ? { session_id: lease.holder.session_id } : {}),
+				payload: { action: "expired", lease_id: lease.lease_id, expired_at: lease.expired_at, ...(lease.holder ? { evicted: lease.holder } : {}) },
+				...(await this.placeOf(lease.graph_id)),
+			}).catch(() => undefined);
+		}
+		return reaped;
+	}
+
+	// ── handoffs ───────────────────────────────────────────────────────────────
+
+	/**
+	 * Record a signed handoff packet.
+	 *
+	 * Three things happen in an order that matters. `prev_event_hash` is filled
+	 * from the sender's own chain tip unless it supplied one, which anchors the
+	 * packet to the trail that led to it. The packet is then built — redacted,
+	 * capped, fitted — and only then signed, so the bytes signed are the bytes
+	 * stored. Finally it is appended as a `handoff` event carrying the whole
+	 * packet, which is what makes the handoff replayable from the ledger alone.
+	 *
+	 * The reply says what is true rather than what was hoped for: `signed` is
+	 * false when no key is configured, `stored` is false when the ledger would not
+	 * take the event, and `gaps` names what a receiver will find missing.
+	 */
+	async handoff(
+		input: HandoffInput & { release_lease?: boolean },
+	): Promise<{
+		packet: HandoffPacket;
+		signed: boolean;
+		stored: boolean;
+		event: { id: string; ts: string; hash: string; prev: string | null };
+		gaps: string[];
+		error?: string;
+		warning?: string;
+		lease_released?: boolean;
+	}> {
+		const place = input.graph_id ? await this.placeOf(input.graph_id) : {};
+		const sessionId = normalizeIdentifier(input.from?.session_id);
+		// The sender's chain tip. Not supplied by the caller in the normal case: it
+		// is a fact about the ledger, and the ledger is here.
+		const prev =
+			input.prev_event_hash ?? (this.greptime && sessionId ? await this.greptime.lastHash(sessionId).catch(() => null) : null);
+
+		let releasedLeaseId: string | null = null;
+		let leaseReleased: boolean | undefined;
+		if (input.release_lease && input.released_lease_id && input.graph_id && input.node_id) {
+			// Released before the packet is built, so the packet can state honestly
+			// whether the node is free — a receiver reading "released" and finding the
+			// node still held would be worse than not being told.
+			const result = await this.releaseNode(input.graph_id, input.node_id, { lease_id: input.released_lease_id }).catch(
+				() => null,
+			);
+			leaseReleased = result?.released === true;
+			if (leaseReleased) releasedLeaseId = input.released_lease_id;
+		} else if (input.released_lease_id) {
+			releasedLeaseId = input.released_lease_id;
+		}
+
+		const built = buildHandoff({
+			...input,
+			repo: input.repo ?? place.repo ?? null,
+			branch: input.branch ?? place.branch ?? null,
+			prev_event_hash: prev,
+			released_lease_id: releasedLeaseId,
+		});
+		const signer = this.config.handoffKeyId
+			? { key_id: this.config.handoffKeyId, key: this.config.handoffKeys.get(this.config.handoffKeyId) ?? "" }
+			: null;
+		const packet = signHandoff(built, signer);
+
+		const result = await this.emit({
+			surface: packet.from.surface,
+			kind: "handoff",
+			summary: handoffSummary(packet),
+			graph_id: packet.graph_id ?? undefined,
+			node_id: packet.node_id ?? undefined,
+			linear_identifier: packet.linear_identifier ?? undefined,
+			session_id: packet.from.session_id ?? undefined,
+			repo: packet.repo ?? undefined,
+			branch: packet.branch ?? undefined,
+			payload: { handoff: packet },
+		});
+
+		return {
+			packet,
+			signed: packet.signature !== null,
+			stored: result.stored,
+			event: { id: result.event.id, ts: result.event.ts, hash: result.event.hash, prev: result.event.prev },
+			gaps: handoffGaps(packet),
+			...(result.error ? { error: result.error } : {}),
+			...(result.warning ? { warning: result.warning } : {}),
+			...(leaseReleased === undefined ? {} : { lease_released: leaseReleased }),
+		};
+	}
+
+	verifyHandoffPacket(packet: unknown): HandoffVerdict {
+		return verifyHandoff(packet, this.config.handoffKeys);
+	}
+
+	/**
+	 * Every handoff recorded for a graph, verified, oldest first.
+	 *
+	 * This is the replay path: the packets come back out of the append-only ledger
+	 * exactly as they were signed, each with its own verdict, so a receiving agent
+	 * can pick up a handoff it never saw being written. A packet that does not
+	 * verify is still returned — hiding it would leave a gap in the history with
+	 * no explanation for it — with the reason attached.
+	 */
+	async handoffsForGraph(graphId: string): Promise<
+		Array<{ event_id: string; ts: string; packet: HandoffPacket | null; verdict: HandoffVerdict }>
+	> {
+		if (!this.greptime) return [];
+		const rows = await this.greptime
+			.readEvents("graph_id", normalizeIdentifier(graphId) ?? graphId)
+			.catch(() => [] as Array<Record<string, unknown>>);
+		const out: Array<{ event_id: string; ts: string; packet: HandoffPacket | null; verdict: HandoffVerdict }> = [];
+		for (const row of rows) {
+			if (String(row.kind) !== "handoff") continue;
+			const event = rowToEvent(row);
+			const packet = (event.payload.handoff ?? null) as HandoffPacket | null;
+			out.push({
+				event_id: event.id,
+				ts: event.ts,
+				packet,
+				verdict: packet ? this.verifyHandoffPacket(packet) : { ok: false, reason: "malformed" },
+			});
+		}
+		return out;
+	}
+
+	// ── drift ──────────────────────────────────────────────────────────────────
+
+	/**
+	 * Compare the tree, the trail and the claims for one repo.
+	 *
+	 * Gathering only: every source is optional and every failure degrades to "not
+	 * compared" rather than throwing, because a scan that cannot read one record
+	 * can still report the disagreements among the other two — and a scan that
+	 * threw would tell an agent nothing at all. `analyzeDrift` does the comparing.
+	 */
+	async driftScan(request: {
+		repo: string;
+		path?: string | null;
+		git_tip?: string | null;
+		branch?: string | null;
+		idle_seconds?: number;
+		limit?: number;
+	}): Promise<DriftReport> {
+		const repo = request.repo;
+		const stored = normalizeIdentifier(repo) ?? repo;
+
+		// The tree. A caller that already knows the tip — a hook, which has just run
+		// in the checkout — passes it and no path is read at all.
+		let git: DriftGitTip = { sha: null, short_sha: null, subject: null, committed_at: null, branch: request.branch ?? null };
+		if (request.git_tip) {
+			git = { ...git, sha: request.git_tip, short_sha: request.git_tip.slice(0, 7) };
+		} else if (request.path) {
+			const tip = readGitTip(request.path);
+			git = { ...tip, branch: tip.branch ?? request.branch ?? null };
+		} else {
+			git = { ...git, unavailable: "no path or git_tip given, so the working tree was not read" };
+		}
+
+		// The trail.
+		let events: DriftEvent[] = [];
+		let ledgerOk = false;
+		if (this.greptime) {
+			const rows = await this.greptime.recentForRepo(stored, request.limit ?? 200).catch(() => null);
+			if (rows) {
+				ledgerOk = true;
+				events = rows.map((row) => {
+					const event = rowToEvent(row);
+					return {
+						id: event.id,
+						ts: event.ts,
+						surface: event.surface,
+						session_id: event.session_id,
+						kind: event.kind,
+						summary: event.summary,
+						graph_id: event.graph_id,
+						node_id: event.node_id,
+						sha: event.kind === "commit" ? extractCommitSha(event.summary, event.payload) : null,
+					};
+				});
+			}
+		}
+
+		// Whether the checkout holds the commit the trail names newest. Asked only
+		// when both are available, and only of the one sha that matters.
+		const newestCommit = events.find((event) => event.kind === "commit" && event.sha);
+		if (request.path && newestCommit?.sha) {
+			git = { ...git, knows_ledger_commit: checkoutKnowsCommit(request.path, newestCommit.sha) };
+		}
+
+		// The claims.
+		let claims: Awaited<ReturnType<IndexStore["claimedNodesForRepo"]>> = [];
+		let nodes: GraphNode[] = [];
+		let edges: GraphEdge[] = [];
+		let indexOk = false;
+		if (this.index) {
+			const gathered = await Promise.all([
+				this.index.claimedNodesForRepo(repo).catch(() => null),
+				this.index.nodesForRepo(repo).catch(() => null),
+				this.index.edgesForRepo(repo).catch(() => null),
+			]);
+			if (gathered[0] && gathered[1] && gathered[2]) {
+				indexOk = true;
+				[claims, nodes, edges] = [gathered[0], gathered[1], gathered[2]];
+			}
+		}
+
+		return analyzeDrift({
+			repo,
+			git,
+			events,
+			claims: claims.map((node) => ({
+				graph_id: node.graph_id,
+				node_id: node.node_id,
+				linear_identifier: node.linear_identifier,
+				state: node.state,
+				lease: leaseSnapshot(node),
+			})),
+			nodes: nodes.map((node) => ({
+				graph_id: node.graph_id,
+				node_id: node.node_id,
+				linear_identifier: node.linear_identifier,
+				state: node.state,
+			})),
+			edges,
+			idle_seconds: request.idle_seconds ?? DEFAULT_IDLE_SECONDS,
+			sources: { git: git.sha !== null, ledger: ledgerOk, index: indexOk },
+		});
 	}
 
 	/**

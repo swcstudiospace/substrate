@@ -578,6 +578,23 @@ export class GreptimeClient {
 		return rows.length > 0;
 	}
 
+	/**
+	 * A repo's newest events, newest first, for `coord.drift_scan`.
+	 *
+	 * Every stored column, because a drift scan compares the trail against two
+	 * other records and needs the session, the node and the payload to do it —
+	 * the payload in particular, since that is where the git collector puts the
+	 * commit sha. `"id"` breaks a same-millisecond tie so the window is stable
+	 * across calls.
+	 */
+	async recentForRepo(repo: string, limit = 200): Promise<Array<Record<string, unknown>>> {
+		const capped = Number.isFinite(limit) ? Math.min(2000, Math.max(1, Math.trunc(limit))) : 200;
+		return this.sql(
+			`SELECT ${EVENT_COLUMN_LIST} FROM "agent_events" WHERE "repo" = ${this.q(repo)}
+			 ORDER BY "ts" DESC, "id" DESC LIMIT ${capped}`,
+		);
+	}
+
 	async ping(): Promise<boolean> {
 		try {
 			await this.sql("SELECT 1");

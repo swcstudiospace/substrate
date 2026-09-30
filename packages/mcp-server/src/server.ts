@@ -15,7 +15,9 @@
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { surfaceForToken, type SubstrateConfig } from "./config.ts";
+import { formatDrift } from "./drift.ts";
 import { InvalidEventError } from "./event.ts";
+import { InvalidHandoffError } from "./handoff.ts";
 import { createMcpServer } from "./mcp.ts";
 import type { Substrate } from "./service.ts";
 import type { Surface } from "./types.ts";
@@ -187,6 +189,64 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig) 
 				return;
 			}
 
+			// Hooks get the coordination paths over REST for the same reason they get
+			// the brief: a hook process has no MCP client. Same service code beneath.
+			if (req.method === "POST" && url.pathname === "/handoff") {
+				const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+				const to = typeof body.to === "string" ? (body.to as Surface) : null;
+				if (typeof body.goal !== "string" || !to) {
+					sendJson(res, 400, { error: "handoff needs `goal` and `to`" });
+					return;
+				}
+				const result = await substrate.handoff({
+					from: {
+						surface: (typeof body.surface === "string" ? (body.surface as Surface) : null) ?? surface ?? "claude-code",
+						session_id: typeof body.session_id === "string" ? body.session_id : null,
+					},
+					to: { surface: to, session_id: typeof body.to_session_id === "string" ? body.to_session_id : null },
+					goal: body.goal,
+					files: Array.isArray(body.files) ? (body.files as string[]) : undefined,
+					dod: Array.isArray(body.dod) ? (body.dod as string[]) : undefined,
+					blockers: Array.isArray(body.blockers) ? (body.blockers as string[]) : undefined,
+					graph_id: typeof body.graph_id === "string" ? body.graph_id : null,
+					node_id: typeof body.node_id === "string" ? body.node_id : null,
+					linear_identifier: typeof body.linear_identifier === "string" ? body.linear_identifier : null,
+					repo: typeof body.repo === "string" ? body.repo : null,
+					branch: typeof body.branch === "string" ? body.branch : null,
+					notes: typeof body.notes === "string" ? body.notes : null,
+					released_lease_id: typeof body.lease_id === "string" ? body.lease_id : null,
+					release_lease: body.release_lease === true,
+				});
+				// 503 when the ledger did not take it, matching /events: the packet is
+				// still returned, because an unstorable handoff is better handed to the
+				// caller than lost, and the caller owes its user the truth either way.
+				sendJson(res, result.stored ? 202 : 503, result);
+				return;
+			}
+
+			if (req.method === "POST" && url.pathname === "/drift") {
+				const raw = await readBody(req);
+				const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+				if (typeof body.repo !== "string") {
+					sendJson(res, 400, { error: "drift needs `repo`" });
+					return;
+				}
+				const report = await substrate.driftScan({
+					repo: body.repo,
+					path: typeof body.path === "string" ? body.path : null,
+					git_tip: typeof body.git_tip === "string" ? body.git_tip : null,
+					branch: typeof body.branch === "string" ? body.branch : null,
+					idle_seconds: typeof body.idle_seconds === "number" ? body.idle_seconds : undefined,
+					limit: typeof body.limit === "number" ? body.limit : undefined,
+				});
+				if (body.format === "text") {
+					send(res, 200, `${formatDrift(report)}\n`, "text/plain; charset=utf-8");
+					return;
+				}
+				sendJson(res, 200, report);
+				return;
+			}
+
 			if (req.method === "POST" && url.pathname === "/verify") {
 				const raw = await readBody(req);
 				const body = JSON.parse(raw) as { graph_id?: unknown };
@@ -205,7 +265,7 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig) 
 
 			sendJson(res, 404, { error: `no route for ${req.method} ${url.pathname}` });
 		} catch (cause) {
-			if (cause instanceof InvalidEventError) {
+			if (cause instanceof InvalidEventError || cause instanceof InvalidHandoffError) {
 				sendJson(res, 400, { error: cause.message });
 				return;
 			}

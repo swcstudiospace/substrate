@@ -1,0 +1,321 @@
+/**
+ * Signed handoff packets.
+ *
+ * A handoff between two agents is the moment most likely to lose work, because
+ * everything the receiver needs lives in the sender's context and none of it is
+ * written down. A `handoff` event with a one-line summary — Phase 0's version —
+ * tells the next agent that a handoff happened, not what it was.
+ *
+ * A packet is that context, written down and closed over:
+ *
+ *   - **goal** — what the receiver is to achieve, in the sender's words.
+ *   - **files** — the paths the work touches, so the receiver does not rediscover
+ *     them by grep.
+ *   - **dod** — the Definition of Done, as checkable lines. This is the same gate
+ *     `hermes-linear-connector` applies on completion, stated up front.
+ *   - **blockers** — what is known to be in the way. An empty list is a claim,
+ *     not an omission.
+ *   - **prev_event_hash** — the sender's chain tip at the moment of handoff. It
+ *     ties the packet to the trail: the receiver can verify every event that led
+ *     here, and a packet quoting a hash the ledger does not have is a packet
+ *     from a session that did not happen as described.
+ *
+ * **Signed** because a packet is acted on by an agent that did not see it
+ * written. The substrate signs on ingest with a key from
+ * `/etc/substrate/substrate.env`, over the canonical JSON of everything above,
+ * so a packet replayed out of the ledger can be checked rather than trusted.
+ * Signing happens *after* redaction and size-fitting, so the bytes signed are
+ * the bytes stored — a signature that only verified before storage would be
+ * worse than none.
+ *
+ * Fail open, like the rest of the substrate: with no key configured a packet is
+ * emitted unsigned and says so, rather than the handoff failing.
+ */
+import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { canonicalJson } from "./event.ts";
+import { redact } from "./redact.ts";
+import type { Surface } from "./types.ts";
+
+export const HANDOFF_VERSION = 1 as const;
+export const HANDOFF_ALG = "hmac-sha256" as const;
+
+/** Per-field caps, so one packet cannot fill the payload budget on its own. */
+const MAX_GOAL = 1200;
+const MAX_LINE = 400;
+const MAX_FILES = 40;
+const MAX_DOD = 24;
+const MAX_BLOCKERS = 16;
+const MAX_NOTES = 1200;
+
+/**
+ * The byte budget a signed packet has to fit in.
+ *
+ * `normalizeEvent` replaces a payload over 16 kB outright, which would drop the
+ * packet from the very event that carries it. Fitting under that here — with
+ * room for the event's own fields — means a stored handoff is always the packet
+ * that was signed, and any trimming is recorded in the packet rather than
+ * discovered later.
+ */
+const MAX_PACKET_BYTES = 12_000;
+
+export interface HandoffParty {
+	surface: Surface;
+	session_id: string | null;
+}
+
+export interface HandoffSignature {
+	alg: typeof HANDOFF_ALG;
+	key_id: string;
+	signed_at: string;
+	/** Hex HMAC over the canonical JSON of the packet with this field removed. */
+	value: string;
+}
+
+export interface HandoffPacket {
+	version: typeof HANDOFF_VERSION;
+	handoff_id: string;
+	ts: string;
+	from: HandoffParty;
+	to: HandoffParty;
+	graph_id: string | null;
+	node_id: string | null;
+	linear_identifier: string | null;
+	repo: string | null;
+	branch: string | null;
+	/** What the receiver is to achieve. */
+	goal: string;
+	/** Paths the work touches, repo-relative. */
+	files: string[];
+	/** Definition of Done, one checkable line each. */
+	dod: string[];
+	/** What is known to be in the way. Empty means "nothing known". */
+	blockers: string[];
+	/** The sender's hash-chain tip at handoff, or null if it had emitted nothing. */
+	prev_event_hash: string | null;
+	/** The lease the sender held and dropped as part of this handoff, if any. */
+	released_lease_id: string | null;
+	notes: string | null;
+	/** What had to be trimmed to fit the payload budget. Absent when nothing was. */
+	truncated?: { files?: number; dod?: number; blockers?: number; notes?: true };
+	/** Null when no signing key is configured. */
+	signature: HandoffSignature | null;
+}
+
+export interface HandoffInput {
+	from: HandoffParty;
+	to: HandoffParty;
+	goal: string;
+	files?: string[];
+	dod?: string[];
+	blockers?: string[];
+	graph_id?: string | null;
+	node_id?: string | null;
+	linear_identifier?: string | null;
+	repo?: string | null;
+	branch?: string | null;
+	prev_event_hash?: string | null;
+	released_lease_id?: string | null;
+	notes?: string | null;
+	ts?: string;
+	handoff_id?: string;
+}
+
+export class InvalidHandoffError extends Error {}
+
+function line(value: unknown, limit: number): string | null {
+	if (typeof value !== "string") return null;
+	// Redact first, then cap: truncating first can cut a token in half so its own
+	// pattern no longer matches, and the fragment would be signed and stored.
+	const cleaned = redact(value).trim().slice(0, limit).trim();
+	return cleaned.length > 0 ? cleaned : null;
+}
+
+function lines(value: unknown, maxItems: number): { kept: string[]; dropped: number } {
+	if (!Array.isArray(value)) return { kept: [], dropped: 0 };
+	const cleaned = value.map((item) => line(item, MAX_LINE)).filter((item): item is string => item !== null);
+	return { kept: cleaned.slice(0, maxItems), dropped: Math.max(0, cleaned.length - maxItems) };
+}
+
+function packetBytes(packet: HandoffPacket): number {
+	return Buffer.byteLength(canonicalJson(packet));
+}
+
+/**
+ * Trim a packet until it fits, cheapest loss first, and record what went.
+ *
+ * Order matters: notes are prose the receiver can live without, file paths are
+ * recoverable from the diff, blockers and the Definition of Done are the parts
+ * that make the packet actionable and go last. Nothing is dropped silently —
+ * `truncated` is part of the signed body, so a receiver reading a trimmed packet
+ * knows it is reading a trimmed packet.
+ */
+function fitPacket(packet: HandoffPacket): HandoffPacket {
+	const out: HandoffPacket = { ...packet };
+	const truncated: NonNullable<HandoffPacket["truncated"]> = { ...(packet.truncated ?? {}) };
+
+	if (out.notes && packetBytes(out) > MAX_PACKET_BYTES) {
+		out.notes = null;
+		truncated.notes = true;
+	}
+	for (const field of ["files", "blockers", "dod"] as const) {
+		while (packetBytes(out) > MAX_PACKET_BYTES && out[field].length > 0) {
+			out[field] = out[field].slice(0, -1);
+			truncated[field] = (truncated[field] ?? 0) + 1;
+		}
+	}
+	// The goal is the one thing a handoff cannot be without, so it is capped
+	// rather than dropped — and the cap is already well inside the budget.
+	if (packetBytes(out) > MAX_PACKET_BYTES) out.goal = out.goal.slice(0, 500);
+
+	const any = Object.keys(truncated).length > 0;
+	return any ? { ...out, truncated } : out;
+}
+
+/**
+ * Build a packet from an agent's input: validated, redacted, capped and fitted.
+ *
+ * Unsigned — {@link signHandoff} is a separate step so the signature is always
+ * taken over the final bytes.
+ */
+export function buildHandoff(input: HandoffInput): HandoffPacket {
+	const goal = line(input.goal, MAX_GOAL);
+	if (!goal) throw new InvalidHandoffError("a handoff needs a goal");
+	if (!input.from?.surface) throw new InvalidHandoffError("a handoff needs a from.surface");
+	if (!input.to?.surface) throw new InvalidHandoffError("a handoff needs a to.surface");
+
+	const ts = input.ts ? new Date(input.ts) : new Date();
+	if (Number.isNaN(ts.getTime())) throw new InvalidHandoffError(`invalid ts: ${String(input.ts)}`);
+
+	const files = lines(input.files, MAX_FILES);
+	const dod = lines(input.dod, MAX_DOD);
+	const blockers = lines(input.blockers, MAX_BLOCKERS);
+	const truncated: NonNullable<HandoffPacket["truncated"]> = {};
+	if (files.dropped) truncated.files = files.dropped;
+	if (dod.dropped) truncated.dod = dod.dropped;
+	if (blockers.dropped) truncated.blockers = blockers.dropped;
+
+	const packet: HandoffPacket = {
+		version: HANDOFF_VERSION,
+		handoff_id: input.handoff_id ?? `hof_${randomUUID().replace(/-/g, "")}`,
+		ts: ts.toISOString(),
+		from: { surface: input.from.surface, session_id: line(input.from.session_id, MAX_LINE) },
+		to: { surface: input.to.surface, session_id: line(input.to.session_id, MAX_LINE) },
+		graph_id: line(input.graph_id, MAX_LINE),
+		node_id: line(input.node_id, MAX_LINE),
+		linear_identifier: line(input.linear_identifier, MAX_LINE),
+		repo: line(input.repo, MAX_LINE),
+		branch: line(input.branch, MAX_LINE),
+		goal,
+		files: files.kept,
+		dod: dod.kept,
+		blockers: blockers.kept,
+		prev_event_hash: line(input.prev_event_hash, MAX_LINE),
+		released_lease_id: line(input.released_lease_id, MAX_LINE),
+		notes: line(input.notes, MAX_NOTES),
+		...(Object.keys(truncated).length > 0 ? { truncated } : {}),
+		signature: null,
+	};
+
+	return fitPacket(packet);
+}
+
+/** The bytes a signature covers: the whole packet, with only `value` removed. */
+function signingInput(packet: HandoffPacket, header: Omit<HandoffSignature, "value">): string {
+	return canonicalJson({ ...packet, signature: header });
+}
+
+export interface SigningKey {
+	key_id: string;
+	key: string;
+}
+
+/**
+ * Sign a packet, or return it unsigned when no key is configured.
+ *
+ * `signed_at` is inside the signed body, so a packet cannot be back-dated by
+ * moving it, and the key id is too, so a verifier cannot be pointed at a
+ * different key than the signer used.
+ */
+export function signHandoff(packet: HandoffPacket, signer: SigningKey | null, now = new Date()): HandoffPacket {
+	if (!signer) return { ...packet, signature: null };
+	const header = { alg: HANDOFF_ALG, key_id: signer.key_id, signed_at: now.toISOString() } as const;
+	const value = createHmac("sha256", signer.key).update(signingInput(packet, header)).digest("hex");
+	return { ...packet, signature: { ...header, value } };
+}
+
+export type HandoffVerdict =
+	| { ok: true; key_id: string }
+	| {
+			ok: false;
+			reason:
+				| "unsigned"
+				| "unknown-alg"
+				| "unknown-key"
+				| "no-keys-configured"
+				| "bad-signature"
+				| "malformed";
+			detail?: string;
+	  };
+
+/**
+ * Recompute a packet's signature.
+ *
+ * Constant-time comparison, because a handoff is replayed from an append-only
+ * log that several agents can read: a timing oracle on this check would be a
+ * way to forge a packet, and the comparison costs nothing.
+ */
+export function verifyHandoff(packet: unknown, keys: Map<string, string>): HandoffVerdict {
+	if (!packet || typeof packet !== "object") return { ok: false, reason: "malformed" };
+	const candidate = packet as HandoffPacket;
+	const signature = candidate.signature;
+	if (!signature || typeof signature !== "object") return { ok: false, reason: "unsigned" };
+	if (signature.alg !== HANDOFF_ALG) {
+		return { ok: false, reason: "unknown-alg", detail: String(signature.alg) };
+	}
+	if (typeof signature.value !== "string" || typeof signature.key_id !== "string") {
+		return { ok: false, reason: "malformed" };
+	}
+	if (keys.size === 0) return { ok: false, reason: "no-keys-configured" };
+	const key = keys.get(signature.key_id);
+	if (!key) return { ok: false, reason: "unknown-key", detail: signature.key_id };
+
+	const expected = createHmac("sha256", key)
+		.update(signingInput(candidate, { alg: signature.alg, key_id: signature.key_id, signed_at: signature.signed_at }))
+		.digest();
+	let offered: Buffer;
+	try {
+		offered = Buffer.from(signature.value, "hex");
+	} catch {
+		return { ok: false, reason: "malformed" };
+	}
+	if (offered.length !== expected.length) return { ok: false, reason: "bad-signature" };
+	return timingSafeEqual(offered, expected)
+		? { ok: true, key_id: signature.key_id }
+		: { ok: false, reason: "bad-signature" };
+}
+
+/** One line for the event summary and the brief. The packet holds the detail. */
+export function handoffSummary(packet: HandoffPacket): string {
+	const goal = packet.goal.split("\n")[0] ?? packet.goal;
+	const blocked = packet.blockers.length > 0 ? ` (${packet.blockers.length} blocker${packet.blockers.length === 1 ? "" : "s"})` : "";
+	return `handoff to ${packet.to.surface}: ${goal}${blocked}`;
+}
+
+/**
+ * Whether a packet carries everything a receiver needs to start without asking.
+ *
+ * Reported rather than enforced: a handoff with no Definition of Done is still
+ * better than one that was refused and so never written down at all. The
+ * receiving agent is told what is thin, and can ask the sender while it is still
+ * there to ask.
+ */
+export function handoffGaps(packet: HandoffPacket): string[] {
+	const gaps: string[] = [];
+	if (packet.dod.length === 0) gaps.push("no Definition of Done: the receiver cannot tell when it is finished");
+	if (packet.files.length === 0) gaps.push("no files: the receiver has to rediscover the surface area");
+	if (!packet.graph_id) gaps.push("no graph_id: this handoff is not attached to a task graph");
+	if (!packet.prev_event_hash) {
+		gaps.push("no prev_event_hash: the packet is not anchored to the sender's event trail");
+	}
+	return gaps;
+}

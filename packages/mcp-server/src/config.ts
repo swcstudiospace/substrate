@@ -4,6 +4,7 @@
  * Deployment reads /etc/substrate/substrate.env via the systemd unit's
  * EnvironmentFile. Nothing here ever reads a secret from the repo.
  */
+import { normalizeTtlSeconds } from "./lease.ts";
 import { parseGrants, type MemoryGrant } from "./memory-policy.ts";
 import type { Surface } from "./types.ts";
 
@@ -58,6 +59,17 @@ export interface SubstrateConfig {
 	 * because a policy you can loosen by deleting a variable is not one.
 	 */
 	memoryGrants: readonly MemoryGrant[];
+	/** Default node-lease TTL in seconds. A caller may ask for less or more, within bounds. */
+	leaseTtlSeconds: number;
+	/**
+	 * Keys a handoff packet's signature is verified against, by key id.
+	 *
+	 * More than one so a key can be rotated without invalidating the packets
+	 * already in the ledger: the new key signs, the old one still verifies.
+	 */
+	handoffKeys: Map<string, string>;
+	/** The key id new packets are signed with. Null when no key is configured. */
+	handoffKeyId: string | null;
 }
 
 /** SUBSTRATE_TOKEN_GROK_BUILD → "grok-build" */
@@ -74,9 +86,36 @@ function readTokens(env: Record<string, string | undefined>): Map<string, Surfac
 	return tokens;
 }
 
+/**
+ * The signing key and whatever previous key is still being honoured.
+ *
+ * A packet names the key id it was signed with, so rotation is: move the live
+ * key to `SUBSTRATE_HANDOFF_KEY_PREV`, put the new one in
+ * `SUBSTRATE_HANDOFF_KEY`, give it a new id. Packets signed either side of that
+ * still verify, and nothing in the append-only ledger becomes unreadable.
+ */
+function readHandoffKeys(env: Record<string, string | undefined>): {
+	handoffKeys: Map<string, string>;
+	handoffKeyId: string | null;
+} {
+	const keys = new Map<string, string>();
+	const active = env.SUBSTRATE_HANDOFF_KEY?.trim();
+	const activeId = env.SUBSTRATE_HANDOFF_KEY_ID?.trim() || "k1";
+	const previous = env.SUBSTRATE_HANDOFF_KEY_PREV?.trim();
+	const previousId = env.SUBSTRATE_HANDOFF_KEY_PREV_ID?.trim() || "k0";
+	if (previous) keys.set(previousId, previous);
+	// Set last, so a misconfiguration that gives both keys the same id leaves the
+	// live key in place rather than the retired one.
+	if (active) keys.set(activeId, active);
+	return { handoffKeys: keys, handoffKeyId: active ? activeId : null };
+}
+
 export function loadConfig(env: Record<string, string | undefined> = process.env): SubstrateConfig {
 	const greptimeUrl = env.GREPTIME_URL?.trim();
+	const leaseTtl = Number(env.SUBSTRATE_LEASE_TTL_SECONDS);
 	return {
+		...readHandoffKeys(env),
+		leaseTtlSeconds: normalizeTtlSeconds(Number.isFinite(leaseTtl) ? leaseTtl : undefined),
 		host: env.SUBSTRATE_HOST?.trim() || "127.0.0.1",
 		port: Number(env.SUBSTRATE_PORT ?? 7410),
 		greptime: greptimeUrl

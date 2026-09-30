@@ -20,7 +20,9 @@ import {
 } from "./memory-write.ts";
 import type {
 	Actor,
+	EdgeKind,
 	GovernanceQueueRow,
+	GraphEdge,
 	GraphIndexRow,
 	GraphNode,
 	GraphStep,
@@ -31,6 +33,21 @@ import type {
 	QuarantineReason,
 	Surface,
 } from "./types.ts";
+import { EDGE_KINDS } from "./types.ts";
+import {
+	DEFAULT_LEASE_TTL_SECONDS,
+	decideClaim,
+	decideHeartbeat,
+	decideRelease,
+	leaseView,
+	normalizeTtlSeconds,
+	type ClaimDecision,
+	type HeartbeatDecision,
+	type LeaseHolder,
+	type LeaseSnapshot,
+	type LeaseView,
+	type ReleaseDecision,
+} from "./lease.ts";
 import { redact } from "./redact.ts";
 
 /**
@@ -39,6 +56,15 @@ import { redact } from "./redact.ts";
  * a shorter list leaves Closed and Resolved graphs showing up as live work.
  */
 const TERMINAL_STATUSES = ["Merged", "Resolved", "Done", "Won't Fix", "Closed", "Failed", "Canceled"];
+
+/**
+ * How many times a claim re-reads and retries after losing the compare-and-swap.
+ *
+ * More than one because the state it lost to may itself be a lease that has
+ * since lapsed; bounded because a node that changes hands three times while one
+ * agent is asking for it is contended, and the honest answer is the holder's name.
+ */
+const CLAIM_ATTEMPTS = 3;
 
 export class IndexStore implements MemoryStore {
 	private readonly sql: SQL;
@@ -73,6 +99,21 @@ export class IndexStore implements MemoryStore {
 				claimed_at        timestamptz,
 				claim_session     text,
 				primary key (graph_id, node_id)
+			)`;
+		// Leases were added after the table shipped, so the columns are added rather
+		// than declared: `create table if not exists` is a no-op against the Phase 0
+		// table and would leave a live index without them.
+		await this.sql`alter table graph_nodes add column if not exists lease_id text`;
+		await this.sql`alter table graph_nodes add column if not exists lease_expires_at timestamptz`;
+		await this.sql`alter table graph_nodes add column if not exists lease_heartbeat_at timestamptz`;
+		await this.sql`alter table graph_nodes add column if not exists lease_epoch bigint not null default 0`;
+		await this.sql`
+			create table if not exists graph_edges (
+				graph_id  text not null,
+				from_node text not null,
+				to_node   text not null,
+				kind      text not null,
+				primary key (graph_id, from_node, to_node, kind)
 			)`;
 		await this.sql`
 			create table if not exists graph_steps (
@@ -178,6 +219,8 @@ export class IndexStore implements MemoryStore {
 
 		await this.sql`create index if not exists graph_index_repo_idx on graph_index (repo)`;
 		await this.sql`create index if not exists graph_nodes_claimed_idx on graph_nodes (claimed_by)`;
+		await this.sql`create index if not exists graph_nodes_lease_idx on graph_nodes (lease_expires_at)`;
+		await this.sql`create index if not exists graph_edges_graph_idx on graph_edges (graph_id)`;
 		await this.sql`create index if not exists memory_scope_idx on memory_entries (scope)`;
 		await this.sql`create index if not exists memory_fts_idx on memory_entries using gin (to_tsvector('english', body))`;
 		// The identity the lww and versioned strategies resolve against: one standing
@@ -205,6 +248,7 @@ export class IndexStore implements MemoryStore {
 		pr_url?: string | null;
 		nodes?: Array<Partial<GraphNode> & { node_id: string }>;
 		steps?: Array<Partial<GraphStep> & { node_id: string; step: number }>;
+		edges?: Array<{ from_node: string; to_node: string; kind: EdgeKind }>;
 	}): Promise<GraphView> {
 		await this.sql`
 			insert into graph_index (graph_id, notion_task_page, repo, branch, surface, status, pr_url, updated)
@@ -242,6 +286,17 @@ export class IndexStore implements MemoryStore {
 					state               = coalesce(excluded.state,               graph_steps.state)`;
 		}
 
+		for (const edge of plan.edges ?? []) {
+			// An unknown kind is dropped rather than stored: `drift_scan` reads these
+			// to decide whether a claim is premature, and a kind it cannot interpret
+			// would be silently ignored there instead of here.
+			if (!(EDGE_KINDS as readonly string[]).includes(edge.kind)) continue;
+			await this.sql`
+				insert into graph_edges (graph_id, from_node, to_node, kind)
+				values (${plan.graph_id}, ${edge.from_node}, ${edge.to_node}, ${edge.kind})
+				on conflict (graph_id, from_node, to_node, kind) do nothing`;
+		}
+
 		const view = await this.getGraph(plan.graph_id);
 		if (!view) throw new Error(`graph ${plan.graph_id} vanished after register`);
 		return view;
@@ -255,7 +310,9 @@ export class IndexStore implements MemoryStore {
 			select * from graph_nodes where graph_id = ${graphId} order by node_id`) as GraphNode[];
 		const steps = (await this.sql`
 			select * from graph_steps where graph_id = ${graphId} order by node_id, step`) as GraphStep[];
-		return { ...row, nodes, steps };
+		const edges = (await this.sql`
+			select * from graph_edges where graph_id = ${graphId} order by from_node, to_node, kind`) as GraphEdge[];
+		return { ...row, nodes, steps, edges };
 	}
 
 	/** Graphs in a repo that are not finished — what "who else is working here" means. */
@@ -271,41 +328,278 @@ export class IndexStore implements MemoryStore {
 		for (const row of rows) {
 			const nodes = (await this.sql`
 				select * from graph_nodes where graph_id = ${row.graph_id} order by node_id`) as GraphNode[];
-			out.push({ ...row, nodes, steps: [] });
+			out.push({ ...row, nodes, steps: [], edges: [] });
 		}
 		return out;
 	}
 
+	// ── leases ─────────────────────────────────────────────────────────────────
+
+	private async node(graphId: string, nodeId: string): Promise<GraphNode> {
+		const rows = (await this.sql`
+			select * from graph_nodes where graph_id = ${graphId} and node_id = ${nodeId}`) as GraphNode[];
+		const node = rows[0];
+		if (!node) throw new Error(`unknown node ${graphId}/${nodeId}`);
+		return node;
+	}
+
 	/**
-	 * Claim a node for a surface. Returns the existing claim instead of
-	 * overwriting it, so two agents racing for the same node both learn the truth.
+	 * Take or extend the lease on a node.
+	 *
+	 * Two writes decide who holds a node, and both are one statement:
+	 *
+	 *   - a change of hold is guarded on `lease_epoch`, the epoch the decision was
+	 *     taken against. Of two agents that both read a free node, the second one's
+	 *     UPDATE matches no row, so it is told who won rather than overwriting them.
+	 *   - the same statement re-checks expiry against **Postgres' clock**, not the
+	 *     caller's. A caller with a fast clock must not be able to declare someone
+	 *     else's live lease expired and take the node.
+	 *
+	 * A lost CAS is retried, because the state it lost to may itself have been a
+	 * lease that has since lapsed; after {@link CLAIM_ATTEMPTS} it reports the
+	 * holder it found. `lease.ts` holds the decision rules and their tests.
 	 */
 	async claimNode(
 		graphId: string,
 		nodeId: string,
 		surface: Surface,
 		sessionId: string,
-	): Promise<{ claimed: boolean; node: GraphNode }> {
-		const rows = (await this.sql`
-			update graph_nodes
-			set claimed_by = ${surface}, claimed_at = now(), claim_session = ${sessionId}
-			where graph_id = ${graphId} and node_id = ${nodeId}
-			  and (claimed_by is null or claimed_by = ${surface})
-			returning *`) as GraphNode[];
-		const claimed = rows[0];
-		if (claimed) return { claimed: true, node: claimed };
+		ttlSeconds: number = DEFAULT_LEASE_TTL_SECONDS,
+	): Promise<{ claimed: boolean; node: GraphNode; lease: LeaseView; decision: ClaimDecision }> {
+		const ttl = normalizeTtlSeconds(ttlSeconds);
+		let node = await this.node(graphId, nodeId);
 
-		const existing = (await this.sql`
-			select * from graph_nodes where graph_id = ${graphId} and node_id = ${nodeId}`) as GraphNode[];
-		const node = existing[0];
-		if (!node) throw new Error(`unknown node ${graphId}/${nodeId}`);
-		return { claimed: false, node };
+		for (let attempt = 0; attempt < CLAIM_ATTEMPTS; attempt++) {
+			const decision = decideClaim(leaseSnapshot(node), { surface, session_id: sessionId, ttl_seconds: ttl }, Date.now());
+
+			if (!decision.granted) {
+				// Re-read before reporting a refusal: the lease may have lapsed between
+				// the read and the decision, and telling an agent it is blocked by a
+				// holder that is already gone is the drift this whole feature removes.
+				node = await this.node(graphId, nodeId);
+				if (decideClaim(leaseSnapshot(node), { surface, session_id: sessionId, ttl_seconds: ttl }, Date.now()).granted) {
+					continue;
+				}
+				return { claimed: false, node, lease: leaseView(leaseSnapshot(node)), decision };
+			}
+
+			const rows =
+				decision.action === "renewed"
+					? // A renewal only has to prove it is still the holder.
+						((await this.sql`
+							update graph_nodes set
+								lease_heartbeat_at = now(),
+								lease_expires_at   = now() + make_interval(secs => ${ttl}),
+								claimed_at         = coalesce(claimed_at, now())
+							where graph_id = ${graphId} and node_id = ${nodeId} and lease_id = ${decision.lease_id}
+							returning *`) as GraphNode[])
+					: // A change of hold is the compare-and-swap: the epoch must be the one
+						// the decision saw, and the lease must be free or lapsed by the
+						// server's own clock.
+						((await this.sql`
+							update graph_nodes set
+								lease_id           = ${decision.lease_id},
+								lease_epoch        = ${decision.epoch},
+								lease_heartbeat_at = now(),
+								lease_expires_at   = now() + make_interval(secs => ${ttl}),
+								claimed_by         = ${surface},
+								claim_session      = ${sessionId},
+								claimed_at         = now()
+							where graph_id = ${graphId} and node_id = ${nodeId}
+							  and lease_epoch = ${decision.observed_epoch}
+							  and (
+								claimed_by is null
+								or coalesce(lease_expires_at, claimed_at + make_interval(secs => ${DEFAULT_LEASE_TTL_SECONDS}))
+								   <= now()
+							  )
+							returning *`) as GraphNode[]);
+
+			const updated = rows[0];
+			if (updated) return { claimed: true, node: updated, lease: leaseView(leaseSnapshot(updated)), decision };
+
+			// Lost the race, or the server disagreed about expiry. Look again.
+			node = await this.node(graphId, nodeId);
+		}
+
+		return {
+			claimed: false,
+			node,
+			lease: leaseView(leaseSnapshot(node)),
+			decision: decideClaim(leaseSnapshot(node), { surface, session_id: sessionId, ttl_seconds: ttl }, Date.now()),
+		};
 	}
 
-	async releaseNode(graphId: string, nodeId: string): Promise<void> {
+	/**
+	 * Extend a lease this holder still holds.
+	 *
+	 * Fenced on `lease_id`: a holder whose lease lapsed and was taken over cannot
+	 * extend the lease that replaced it, because the id it remembers is gone. The
+	 * expiry predicate is the server's, for the same reason as in `claimNode`.
+	 */
+	async heartbeatNode(
+		graphId: string,
+		nodeId: string,
+		leaseId: string,
+		ttlSeconds: number = DEFAULT_LEASE_TTL_SECONDS,
+	): Promise<{ ok: boolean; node: GraphNode; lease: LeaseView; decision: HeartbeatDecision }> {
+		const ttl = normalizeTtlSeconds(ttlSeconds);
+		const observed = await this.node(graphId, nodeId);
+		const decision = decideHeartbeat(leaseSnapshot(observed), { lease_id: leaseId, ttl_seconds: ttl }, Date.now());
+		if (!decision.ok) return { ok: false, node: observed, lease: leaseView(leaseSnapshot(observed)), decision };
+
+		const rows = (await this.sql`
+			update graph_nodes set
+				lease_heartbeat_at = now(),
+				lease_expires_at   = now() + make_interval(secs => ${ttl})
+			where graph_id = ${graphId} and node_id = ${nodeId}
+			  and lease_id = ${leaseId}
+			  and coalesce(lease_expires_at, claimed_at + make_interval(secs => ${DEFAULT_LEASE_TTL_SECONDS})) > now()
+			returning *`) as GraphNode[];
+
+		const updated = rows[0];
+		if (updated) return { ok: true, node: updated, lease: leaseView(leaseSnapshot(updated)), decision };
+
+		// The statement matched nothing, so the lease went between the read and the
+		// write. Report what is true now rather than the decision that is no longer.
+		const fresh = await this.node(graphId, nodeId);
+		return {
+			ok: false,
+			node: fresh,
+			lease: leaseView(leaseSnapshot(fresh)),
+			decision: decideHeartbeat(leaseSnapshot(fresh), { lease_id: leaseId, ttl_seconds: ttl }, Date.now()),
+		};
+	}
+
+	/**
+	 * Drop the lease on a node.
+	 *
+	 * `lease_id` fences it: a stale holder cannot release — or, through
+	 * `completeNode`, close — a node that someone else has since claimed. `force`
+	 * is the operator's lever for a holder that is gone, and is reported as a
+	 * forced release rather than an ordinary one.
+	 */
+	async releaseNode(
+		graphId: string,
+		nodeId: string,
+		request: { lease_id?: string | null; force?: boolean } = {},
+	): Promise<{ released: boolean; node: GraphNode; decision: ReleaseDecision }> {
+		const observed = await this.node(graphId, nodeId);
+		const decision = decideRelease(leaseSnapshot(observed), request, Date.now());
+		if (!decision.ok) return { released: false, node: observed, decision };
+		if (decision.action === "noop") return { released: true, node: observed, decision };
+
+		// The epoch is left alone: it is monotonic per node, so the next claim cannot
+		// reuse a token some stale holder still remembers.
+		const rows = (await this.sql`
+			update graph_nodes set
+				claimed_by = null, claimed_at = null, claim_session = null,
+				lease_id = null, lease_expires_at = null, lease_heartbeat_at = null
+			where graph_id = ${graphId} and node_id = ${nodeId}
+			  and lease_epoch = ${decision.observed_epoch}
+			  and (${decision.lease_id ?? null}::text is null or lease_id = ${decision.lease_id ?? null})
+			returning *`) as GraphNode[];
+
+		const updated = rows[0];
+		if (updated) return { released: true, node: updated, decision };
+		const fresh = await this.node(graphId, nodeId);
+		return {
+			released: false,
+			node: fresh,
+			decision: { ok: false, reason: "stale-lease", holder: leaseView(leaseSnapshot(fresh)).holder, observed_epoch: fresh.lease_epoch },
+		};
+	}
+
+	/**
+	 * Clear every lapsed lease and say whose they were.
+	 *
+	 * Expiry is already honoured lazily — every reader treats a lapsed lease as
+	 * free — so this is not what makes the auto-release correct. It is what makes
+	 * it *visible*: the rows stop showing a holder that is gone, and the caller
+	 * gets a list it can turn into events, which is how another agent learns that
+	 * a node it wanted is free again.
+	 */
+	async reapExpiredLeases(
+		repo?: string | null,
+	): Promise<Array<{ graph_id: string; node_id: string; linear_identifier: string | null; holder: LeaseHolder | null; lease_id: string | null; expired_at: string | null }>> {
+		// The holders are read in a CTE rather than out of `returning`: an UPDATE's
+		// RETURNING gives the *new* row, where `claimed_by` is already NULL, so the
+		// reaper would clear the leases and then report that nobody held any of them.
+		//
+		// The update is also a compare-and-swap, on the exact lease each row was
+		// observed with. Without that, a claim landing between the CTE's read and the
+		// write would be clobbered by the reaper — expiry would race the claim it is
+		// supposed to enable.
+		const rows = (await this.sql`
+			with expiring as (
+				select graph_id, node_id, linear_identifier, claimed_by, claim_session, lease_id, lease_expires_at
+				from graph_nodes
+				where claimed_by is not null
+				  and coalesce(lease_expires_at, claimed_at + make_interval(secs => ${DEFAULT_LEASE_TTL_SECONDS})) <= now()
+				  and (${repo ?? null}::text is null
+				       or graph_id in (select graph_id from graph_index where repo = ${repo ?? null}))
+			),
+			cleared as (
+				update graph_nodes n set
+					claimed_by = null, claimed_at = null, claim_session = null,
+					lease_id = null, lease_expires_at = null, lease_heartbeat_at = null
+				from expiring e
+				where n.graph_id = e.graph_id and n.node_id = e.node_id
+				  and n.lease_id is not distinct from e.lease_id
+				  and n.claimed_by is not distinct from e.claimed_by
+				returning n.graph_id, n.node_id
+			)
+			select e.* from expiring e
+			join cleared c on c.graph_id = e.graph_id and c.node_id = e.node_id`) as Array<Record<string, unknown>>;
+		return rows.map((row) => ({
+			graph_id: String(row.graph_id),
+			node_id: String(row.node_id),
+			linear_identifier: row.linear_identifier === null ? null : String(row.linear_identifier),
+			holder: row.claimed_by ? { surface: row.claimed_by as Surface, session_id: String(row.claim_session ?? "") } : null,
+			lease_id: row.lease_id === null ? null : String(row.lease_id),
+			expired_at: isoOrNull(row.lease_expires_at),
+		}));
+	}
+
+	/**
+	 * Make a lease lapse now, leaving its holder recorded.
+	 *
+	 * Deliberately weaker than a forced release, and more useful for the case it
+	 * exists for: an operator who knows a session is dead hands the node back
+	 * through the *normal* expiry path, so `reapExpiredLeases` clears it and emits
+	 * the warning that names who was evicted, rather than the node going quiet.
+	 *
+	 * It is also how the live lease tests reach expiry: `now()` is the server's,
+	 * and no caller can talk the server out of it, so a test cannot fake a lapse
+	 * from outside — it would have to wait out a whole TTL.
+	 */
+	async expireLease(graphId: string, nodeId: string): Promise<void> {
 		await this.sql`
-			update graph_nodes set claimed_by = null, claimed_at = null, claim_session = null
-			where graph_id = ${graphId} and node_id = ${nodeId}`;
+			update graph_nodes set lease_expires_at = now()
+			where graph_id = ${graphId} and node_id = ${nodeId} and claimed_by is not null`;
+	}
+
+	/** Every node in this repo that something holds — the claims a drift scan compares against. */
+	async claimedNodesForRepo(repo: string): Promise<Array<GraphNode & { repo: string | null; branch: string | null }>> {
+		return (await this.sql`
+			select n.*, g.repo, g.branch
+			from graph_nodes n join graph_index g using (graph_id)
+			where g.repo = ${repo} and n.claimed_by is not null
+			order by n.graph_id, n.node_id`) as Array<GraphNode & { repo: string | null; branch: string | null }>;
+	}
+
+	/** Every node in this repo, claimed or not, for the edge checks a drift scan runs. */
+	async nodesForRepo(repo: string): Promise<GraphNode[]> {
+		return (await this.sql`
+			select n.* from graph_nodes n join graph_index g using (graph_id)
+			where g.repo = ${repo}
+			order by n.graph_id, n.node_id`) as GraphNode[];
+	}
+
+	async edgesForRepo(repo: string): Promise<GraphEdge[]> {
+		return (await this.sql`
+			select e.* from graph_edges e join graph_index g using (graph_id)
+			where g.repo = ${repo}
+			order by e.graph_id, e.from_node`) as GraphEdge[];
 	}
 
 	async setNodeState(graphId: string, nodeId: string, state: NodeState): Promise<void> {
@@ -716,6 +1010,27 @@ export class IndexStore implements MemoryStore {
 	async close(): Promise<void> {
 		await this.sql.end();
 	}
+}
+
+/** Postgres hands back `Date`; every surface that reports a lease wants ISO. */
+function isoOrNull(value: unknown): string | null {
+	if (value === null || value === undefined) return null;
+	if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString();
+	return String(value);
+}
+
+/** The lease columns of a node row, in the shape `lease.ts` reasons about. */
+export function leaseSnapshot(node: GraphNode): LeaseSnapshot {
+	return {
+		lease_id: node.lease_id ?? null,
+		surface: node.claimed_by ?? null,
+		session_id: node.claim_session ?? null,
+		claimed_at: node.claimed_at ?? null,
+		heartbeat_at: node.lease_heartbeat_at ?? null,
+		expires_at: node.lease_expires_at ?? null,
+		// A row written before the column existed reads as NULL through the driver.
+		epoch: Number(node.lease_epoch ?? 0),
+	};
 }
 
 /** Absent, null and the empty string all mean "not set" on the way out of Postgres. */

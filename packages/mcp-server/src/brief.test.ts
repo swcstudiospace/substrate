@@ -60,3 +60,93 @@ describe("composeBrief", () => {
 		expect(brief).toContain("## Substrate brief:");
 	});
 });
+
+describe("how the brief reports a lease", () => {
+	/** One graph, one node, with whatever lease the test wants on it. */
+	function indexWith(node: Record<string, unknown>) {
+		return {
+			getGraph: async () => ({
+				graph_id: "ut-1",
+				repo: "swcstudiospace/agent-substrate",
+				branch: "main",
+				surface: "hermes",
+				status: "In Progress",
+				pr_url: null,
+				nodes: [
+					{
+						graph_id: "ut-1",
+						node_id: "n2",
+						linear_identifier: "SPE-4792",
+						state: "started",
+						lease_epoch: 1,
+						...node,
+					},
+				],
+				steps: [],
+				edges: [],
+			}),
+			openGraphs: async () => [],
+			memoryForBrief: async () => [],
+		};
+	}
+
+	async function briefFor(node: Record<string, unknown>): Promise<string> {
+		return composeBrief(
+			{ repo: "swcstudiospace/agent-substrate", graph_id: "ut-1", surface: "omp" },
+			{ index: indexWith(node) as never, greptime: null },
+		);
+	}
+
+	test("a live lease is reported as held, by whom, and since when", async () => {
+		const brief = await briefFor({
+			claimed_by: "hermes",
+			claim_session: "sess-a",
+			claimed_at: new Date(Date.now() - 300_000).toISOString(),
+			lease_id: "lse_live",
+			lease_expires_at: new Date(Date.now() + 600_000).toISOString(),
+		});
+
+		expect(brief).toContain("n2 SPE-4792 held by hermes 5 min ago");
+	});
+
+	test("a lapsed lease is reported as free, naming who was last there", async () => {
+		// The line that matters most. Reading "started by hermes" off a lease that
+		// expired half an hour ago keeps the next agent off a node it may have, which
+		// is the deadlock leases exist to end — and it is exactly what the old brief said.
+		const brief = await briefFor({
+			claimed_by: "hermes",
+			claim_session: "sess-dead",
+			claimed_at: new Date(Date.now() - 7_200_000).toISOString(),
+			lease_id: "lse_dead",
+			lease_expires_at: new Date(Date.now() - 1_800_000).toISOString(),
+		});
+
+		expect(brief).toContain("n2 SPE-4792 free — hermes's lease expired 30 min ago");
+		expect(brief).not.toContain("held by");
+	});
+
+	test("a claim from before leases existed lapses in the brief too", async () => {
+		// A Phase 0 row: claimed_by and claimed_at, no lease columns. Held for one
+		// default TTL, then reported free, so the index heals rather than stranding it.
+		const brief = await briefFor({
+			claimed_by: "omp",
+			claim_session: null,
+			claimed_at: new Date(Date.now() - 86_400_000).toISOString(),
+			lease_id: null,
+			lease_expires_at: null,
+		});
+
+		expect(brief).toContain("free — omp's lease expired");
+	});
+
+	test("a completed node reads as done whatever its lease said", async () => {
+		const brief = await briefFor({ state: "completed", claimed_by: "hermes", lease_id: null, lease_expires_at: null });
+		expect(brief).toContain("n2 SPE-4792 done (hermes)");
+	});
+
+	test("an unclaimed node is neither held nor stale", async () => {
+		const brief = await briefFor({ claimed_by: null, claimed_at: null, lease_id: null, lease_expires_at: null });
+		expect(brief).toContain("n2 SPE-4792 started");
+		expect(brief).not.toContain("lease expired");
+	});
+});
