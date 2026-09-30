@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildRecord } from "@substrate/audit";
+import { NO_POSITION, buildRecord } from "@substrate/audit";
 import { SubstrateInstruments, evaluateSlos } from "@substrate/observability";
 import { escapeHtml, renderEvidenceHtml } from "./html.ts";
 import { buildEvidence, type EvidenceInput } from "./report.ts";
@@ -116,6 +116,46 @@ describe("renderEvidenceHtml", () => {
 
 		expect(html).toContain("pill--broken");
 		expect(html).toContain("evt_abc");
+	});
+
+	test("a break with no locatable position reads as its reason, not as a sentinel", () => {
+		// An unparseable line is a real failure whose position is unknowable — the line
+		// that would have named it is the one that cannot be parsed. Rendering the
+		// sentinel would put "broken at -1" in front of an auditor.
+		const html = renderEvidenceHtml(
+			buildEvidence(
+				input({
+					audit: {
+						chain: { ok: false, records: 3, brokenAt: NO_POSITION, reason: "2 line(s) could not be parsed", unparseable: 2 },
+						durable: true,
+						path: "/x",
+						records: [],
+					},
+				}),
+			),
+		);
+
+		expect(html).toContain("pill--broken");
+		expect(html).toContain("2 line(s) could not be parsed");
+		expect(html).not.toContain("broken at -1");
+		expect(html).not.toContain("broken at ?");
+	});
+
+	test("a break that does have a position still names it", () => {
+		const html = renderEvidenceHtml(
+			buildEvidence(
+				input({
+					audit: {
+						chain: { ok: false, records: 5, brokenAt: 3, reason: "hash does not match contents" },
+						durable: true,
+						path: "/x",
+						records: [],
+					},
+				}),
+			),
+		);
+
+		expect(html).toContain("broken at 3");
 	});
 
 	test("an unverifiable chain is neither intact nor broken", () => {

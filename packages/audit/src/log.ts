@@ -21,6 +21,15 @@ import {
 	verifyAuditChain,
 } from "./record.ts";
 
+/**
+ * `brokenAt` for a failure that has no locatable position in the chain.
+ *
+ * Negative, so it can never collide with a real `seq` (which starts at 1), and named
+ * so a caller rendering a verdict can tell "broken, position unknown" from "broken at
+ * record N" instead of printing a sentinel at a reader.
+ */
+export const NO_POSITION = -1;
+
 /** Thrown when a fail-closed call could not be recorded, so it must not proceed. */
 export class AuditUnavailableError extends Error {
 	constructor(readonly tool: string, cause: string) {
@@ -253,9 +262,10 @@ export class AuditLog {
 			return {
 				ok: false,
 				records: records.length,
-				// The position is not knowable — the line that would have named it is the
-				// one that cannot be parsed — so the count is reported instead of a guess.
-				brokenAt: -1,
+				// `NO_POSITION`, not a guess: the line that would have named the position is
+				// the one that cannot be parsed. Callers that render a verdict check for it
+				// rather than printing "broken at -1" — see `chainRow` in @substrate/evidence.
+				brokenAt: NO_POSITION,
 				reason: `${unparseable} line(s) could not be parsed, so the records they hold cannot be verified`,
 				unparseable,
 			};

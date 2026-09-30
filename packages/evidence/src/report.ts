@@ -104,7 +104,14 @@ export function buildEvidence(input: EvidenceInput): EvidenceBundle {
 			mcp_audit: {
 				ok: verdict.ok,
 				records: verdict.records,
-				...(verdict.ok ? {} : { brokenAt: verdict.brokenAt, reason: verdict.reason }),
+				// `brokenAt` is omitted when the verdict has no locatable position, so a
+				// reader sees the reason rather than a sentinel. `reason` is always carried.
+				...(verdict.ok
+					? {}
+					: {
+							...(verdict.brokenAt >= 0 ? { brokenAt: verdict.brokenAt } : {}),
+							reason: verdict.reason,
+						}),
 				durable: input.audit.durable,
 				path: input.audit.path,
 				unparseable: verdict.unparseable ?? 0,

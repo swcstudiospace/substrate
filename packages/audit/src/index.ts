@@ -25,7 +25,7 @@ export {
 	verifyAuditChain,
 } from "./record.ts";
 
-export { type AuditAppend, type AuditLogOptions, AuditLog, AuditUnavailableError } from "./log.ts";
+export { type AuditAppend, type AuditLogOptions, AuditLog, AuditUnavailableError, NO_POSITION } from "./log.ts";
 
 export {
 	type ClaimDecision,

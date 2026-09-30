@@ -41,9 +41,16 @@ function statusLabel(status: SloResult["status"]): string {
 
 function chainRow(label: string, chain: { ok: boolean | null; records: number; brokenAt?: string | number; reason?: string }): string {
 	const state = chain.ok === null ? "unknown" : chain.ok ? "intact" : "broken";
+	// Not every break has a position. An unparseable line is a real failure whose
+	// location is unknowable — the line that would have named it is the one that
+	// cannot be parsed — so the reason stands alone rather than being prefixed with a
+	// "broken at ?" that reads like missing data.
+	const reason = escapeHtml(chain.reason ?? "no reason given");
 	const detail =
 		chain.ok === false
-			? `broken at ${escapeHtml(chain.brokenAt ?? "?")} — ${escapeHtml(chain.reason ?? "no reason given")}`
+			? chain.brokenAt === undefined
+				? reason
+				: `broken at ${escapeHtml(chain.brokenAt)} — ${reason}`
 			: chain.ok === null
 				? escapeHtml(chain.reason ?? "could not be verified")
 				: `${chain.records} record${chain.records === 1 ? "" : "s"} recomputed`;

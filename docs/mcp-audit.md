@@ -124,7 +124,10 @@ that cannot be read cannot be verified, and "cannot be verified" is not "verifie
 the evidence bundle reads `ok` alone, so an intact verdict over a file with a hole in
 it would be an attestation the data does not support. A hash or `prev` mismatch is
 named ahead of it, because that identifies a specific position and the unparseable
-count cannot.
+count cannot — the line that would have named the position is the one that cannot be
+parsed. Such a verdict carries `brokenAt: NO_POSITION`, and a reader of it (the
+evidence bundle, the HTML document) reports the reason alone rather than putting a
+sentinel in front of an auditor.
 
 Two things protect the record that follows a fragment:
 

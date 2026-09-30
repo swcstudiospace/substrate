@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildRecord, type AuditRecord } from "@substrate/audit";
+import { NO_POSITION, buildRecord, type AuditRecord } from "@substrate/audit";
 import { SubstrateInstruments, evaluateSlos } from "@substrate/observability";
 import { buildEvidence, usageForGraph, type EvidenceInput } from "./report.ts";
 
@@ -69,6 +69,24 @@ describe("buildEvidence", () => {
 	test("a verified chain carries no brokenAt, so a reader cannot misread one", () => {
 		const bundle = buildEvidence(input());
 		expect("brokenAt" in bundle.chains.mcp_audit).toBe(false);
+	});
+
+	test("a break with no locatable position carries its reason but no brokenAt", () => {
+		const bundle = buildEvidence(
+			input({
+				audit: {
+					chain: { ok: false, records: 3, brokenAt: NO_POSITION, reason: "2 line(s) could not be parsed", unparseable: 2 },
+					durable: true,
+					path: "/x",
+					records: records(3),
+				},
+			}),
+		);
+
+		expect("brokenAt" in bundle.chains.mcp_audit).toBe(false);
+		expect(bundle.chains.mcp_audit.reason).toBe("2 line(s) could not be parsed");
+		expect(bundle.chains.mcp_audit.ok).toBe(false);
+		expect(bundle.chains.mcp_audit.unparseable).toBe(2);
 	});
 
 	test("says so, in the bundle, when the audit chain is not durable", () => {
