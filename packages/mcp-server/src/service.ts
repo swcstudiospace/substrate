@@ -11,6 +11,7 @@ import {
 	DEFAULT_IDLE_SECONDS,
 	analyzeDrift,
 	extractCommitSha,
+	shaMatches,
 	type DriftEvent,
 	type DriftGitTip,
 	type DriftReport,
@@ -635,12 +636,20 @@ export class Substrate {
 	 * Fenced on the lease id, so a holder whose lease lapsed cannot release the
 	 * node someone else has since claimed. A refusal names the real holder.
 	 */
-	async releaseNode(graphId: string, nodeId: string, request: { lease_id?: string | null; force?: boolean } = {}) {
+	async releaseNode(
+		graphId: string,
+		nodeId: string,
+		request: { lease_id?: string | null; force?: boolean } = {},
+		alsoSetState?: NodeState,
+	) {
 		if (!this.index) throw new Error("graph_release requires SUBSTRATE_PG_URL");
-		const result = await this.index.releaseNode(graphId, nodeId, request);
+		const result = await this.index.releaseNode(graphId, nodeId, request, alsoSetState);
 		const { decision } = result;
 		if (result.released && decision.ok && decision.action !== "noop") {
-			const holder = decision.evicted ?? leaseView(leaseSnapshot(result.node)).holder;
+			// The holder comes from the decision, which was taken against the row
+			// *before* it was cleared. Reading it off `result.node` would find null —
+			// the release nulls those very columns — and attribute the note to nobody.
+			const holder = decision.holder ?? decision.evicted;
 			await this.emit({
 				surface: holder?.surface ?? "claude-code",
 				kind: decision.action === "forced" ? "warning" : "note",
@@ -665,12 +674,19 @@ export class Substrate {
 	}
 
 	/**
-	 * Mark a node complete and drop its lease.
+	 * Mark a node complete and drop its lease, in one fenced operation.
 	 *
-	 * Fenced for the same reason a release is, and more sharply: an agent that
-	 * stalled past its TTL and woke up must not be able to close a node a second
-	 * agent has since claimed and is still working on. So the state is only
-	 * written once the release has been accepted.
+	 * Two things have to hold at once, and getting either wrong closes a node
+	 * somebody else is working on:
+	 *
+	 * - **One statement.** Releasing and then writing the state was two, and
+	 *   between them another agent can claim the node that has just been freed —
+	 *   whereupon the state write marks *their* live node completed. The index now
+	 *   writes the state inside the same guarded UPDATE as the release.
+	 * - **Ownership, not absence.** Releasing a node nobody holds succeeds as a
+	 *   no-op, which is right for a release and wrong as a licence to complete:
+	 *   it let any caller close any unheld node without ever holding it. A
+	 *   completion needs a lease it actually held, or an explicit force.
 	 */
 	async completeNode(
 		graphId: string,
@@ -678,9 +694,16 @@ export class Substrate {
 		request: { lease_id?: string | null; force?: boolean; state?: NodeState } = {},
 	) {
 		if (!this.index) throw new Error("graph_complete requires SUBSTRATE_PG_URL");
-		const released = await this.releaseNode(graphId, nodeId, request);
+		const released = await this.releaseNode(graphId, nodeId, request, request.state ?? "completed");
 		if (!released.released) return { completed: false, ...released };
-		await this.index.setNodeState(graphId, nodeId, request.state ?? "completed");
+		if (released.action === "noop") {
+			return {
+				completed: false,
+				...released,
+				reason: "unheld" as const,
+				detail: "nothing holds this node, so there is no lease to complete it under; claim it first",
+			};
+		}
 		return { completed: true, ...released };
 	}
 
@@ -716,19 +739,39 @@ export class Substrate {
 	/**
 	 * Record a signed handoff packet.
 	 *
-	 * Three things happen in an order that matters. `prev_event_hash` is filled
-	 * from the sender's own chain tip unless it supplied one, which anchors the
-	 * packet to the trail that led to it. The packet is then built — redacted,
-	 * capped, fitted — and only then signed, so the bytes signed are the bytes
-	 * stored. Finally it is appended as a `handoff` event carrying the whole
-	 * packet, which is what makes the handoff replayable from the ledger alone.
+	 * A signature turns attribution into a claim, so everything it covers that the
+	 * substrate can know for itself, the substrate decides for itself:
+	 *
+	 * - **the sender.** `from.surface` is whatever the transport authenticated; the
+	 *   caller cannot name another agent. Signing a body-supplied sender would let
+	 *   any agent with a token mint a packet that verifies as if it came from
+	 *   someone else, which is worse than no signature at all — a forgery with a
+	 *   valid seal on it.
+	 * - **the anchor.** `prev_event_hash` is read from the ledger, never taken from
+	 *   the caller. A caller-supplied hash would be signed without anything
+	 *   checking that it exists, and a receiver would get `ok: true` on a packet
+	 *   pointing at a trail that never happened.
+	 *
+	 * Then order: the packet is built — redacted, capped, fitted — and only then
+	 * signed, so the bytes signed are the bytes stored; and it is appended as a
+	 * `handoff` event carrying the whole packet, which is what makes the handoff
+	 * replayable from the ledger alone.
+	 *
+	 * The lease is released **after** the append, not before. Freeing the node
+	 * first meant a refused append left the node claimable with no packet to
+	 * replay: the next agent would find the work abandoned and no account of it.
 	 *
 	 * The reply says what is true rather than what was hoped for: `signed` is
 	 * false when no key is configured, `stored` is false when the ledger would not
-	 * take the event, and `gaps` names what a receiver will find missing.
+	 * take the event, `lease_released` reports the release that actually happened,
+	 * and `gaps` names what a receiver will find missing.
 	 */
 	async handoff(
-		input: HandoffInput & { release_lease?: boolean },
+		input: Omit<HandoffInput, "prev_event_hash" | "from"> & {
+			/** The authenticated sender. The transport supplies this, not the request body. */
+			from: HandoffInput["from"];
+			release_lease?: boolean;
+		},
 	): Promise<{
 		packet: HandoffPacket;
 		signed: boolean;
@@ -741,32 +784,16 @@ export class Substrate {
 	}> {
 		const place = input.graph_id ? await this.placeOf(input.graph_id) : {};
 		const sessionId = normalizeIdentifier(input.from?.session_id);
-		// The sender's chain tip. Not supplied by the caller in the normal case: it
-		// is a fact about the ledger, and the ledger is here.
-		const prev =
-			input.prev_event_hash ?? (this.greptime && sessionId ? await this.greptime.lastHash(sessionId).catch(() => null) : null);
-
-		let releasedLeaseId: string | null = null;
-		let leaseReleased: boolean | undefined;
-		if (input.release_lease && input.released_lease_id && input.graph_id && input.node_id) {
-			// Released before the packet is built, so the packet can state honestly
-			// whether the node is free — a receiver reading "released" and finding the
-			// node still held would be worse than not being told.
-			const result = await this.releaseNode(input.graph_id, input.node_id, { lease_id: input.released_lease_id }).catch(
-				() => null,
-			);
-			leaseReleased = result?.released === true;
-			if (leaseReleased) releasedLeaseId = input.released_lease_id;
-		} else if (input.released_lease_id) {
-			releasedLeaseId = input.released_lease_id;
-		}
+		// The sender's chain tip, read from the ledger. There is deliberately no way
+		// for a caller to supply this.
+		const prev = this.greptime && sessionId ? await this.greptime.lastHash(sessionId).catch(() => null) : null;
 
 		const built = buildHandoff({
 			...input,
 			repo: input.repo ?? place.repo ?? null,
 			branch: input.branch ?? place.branch ?? null,
 			prev_event_hash: prev,
-			released_lease_id: releasedLeaseId,
+			released_lease_id: input.released_lease_id ?? null,
 		});
 		const signer = this.config.handoffKeyId
 			? { key_id: this.config.handoffKeyId, key: this.config.handoffKeys.get(this.config.handoffKeyId) ?? "" }
@@ -785,6 +812,23 @@ export class Substrate {
 			branch: packet.branch ?? undefined,
 			payload: { handoff: packet },
 		});
+
+		// Only now, and only if the packet is durable. A release that ran first would
+		// leave the node claimable with nothing in the ledger accounting for it, so
+		// the next agent finds the work abandoned and no handoff to replay. Keeping
+		// the hold on a failed append is the recoverable half of that trade: the
+		// sender still holds its node and can retry.
+		let leaseReleased: boolean | undefined;
+		if (input.release_lease && input.released_lease_id && input.graph_id && input.node_id) {
+			if (!result.stored) {
+				leaseReleased = false;
+			} else {
+				const released = await this.releaseNode(input.graph_id, input.node_id, {
+					lease_id: input.released_lease_id,
+				}).catch(() => null);
+				leaseReleased = released?.released === true;
+			}
+		}
 
 		return {
 			packet,
@@ -867,12 +911,16 @@ export class Substrate {
 		}
 
 		// The trail.
+		const limit = request.limit ?? 200;
 		let events: DriftEvent[] = [];
 		let ledgerOk = false;
+		let eventsTruncated = false;
 		if (this.greptime) {
-			const rows = await this.greptime.recentForRepo(stored, request.limit ?? 200).catch(() => null);
+			const rows = await this.greptime.recentForRepo(stored, limit).catch(() => null);
 			if (rows) {
 				ledgerOk = true;
+				// A full window means its silence about anything proves nothing.
+				eventsTruncated = rows.length >= limit;
 				events = rows.map((row) => {
 					const event = rowToEvent(row);
 					return {
@@ -895,6 +943,30 @@ export class Substrate {
 		const newestCommit = events.find((event) => event.kind === "commit" && event.sha);
 		if (request.path && newestCommit?.sha) {
 			git = { ...git, knows_ledger_commit: checkoutKnowsCommit(request.path, newestCommit.sha) };
+		}
+
+		// And the other direction, asked of the whole ledger rather than of the
+		// window: a busy repo pushes a well-logged commit out of the newest N events,
+		// and inferring "unlogged" from that window's silence invents drift on exactly
+		// the repos that have the most of it.
+		let tipLogged: boolean | null = null;
+		if (this.greptime && ledgerOk && git.sha) {
+			const candidates = await this.greptime.commitEventsNaming(stored, git.sha).catch(() => null);
+			// Seven hex characters can collide, so each candidate is confirmed against
+			// the sha actually asked about rather than trusted from the LIKE.
+			tipLogged =
+				candidates === null
+					? null
+					: candidates.some((row) => {
+							let payload: Record<string, unknown> = {};
+							try {
+								payload = row.payload ? (JSON.parse(String(row.payload)) as Record<string, unknown>) : {};
+							} catch {
+								payload = {};
+							}
+							const sha = extractCommitSha(String(row.summary ?? ""), payload);
+							return shaMatches(sha, git.sha) || shaMatches(sha, git.short_sha);
+						});
 		}
 
 		// The claims.
@@ -933,6 +1005,8 @@ export class Substrate {
 			})),
 			edges,
 			idle_seconds: request.idle_seconds ?? DEFAULT_IDLE_SECONDS,
+			tip_logged: tipLogged,
+			events_truncated: eventsTruncated,
 			sources: { git: git.sha !== null, ledger: ledgerOk, index: indexOk },
 		});
 	}

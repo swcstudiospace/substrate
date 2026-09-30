@@ -61,10 +61,24 @@ under the epoch CAS, but it would make all three of those readers wrong.
 
 Release and complete are **fenced**. An agent that stalled past its TTL and woke
 up cannot release — or close — a node a second agent has since claimed and is
-still working on. `graph_complete` writes the state only once the release has
-been accepted, so `completed: false` means nothing changed. `force: true` is the
-operator's lever for a holder that is gone, and is recorded as a forced release
-rather than an ordinary one.
+still working on. Two details carry that:
+
+- **Completion is one statement.** The release and the state write go in the
+  same guarded `UPDATE`. As two statements, another agent could claim the
+  just-freed node in between and the state write would mark *their* live node
+  completed.
+- **A no-op release is not ownership.** Releasing a node nobody holds succeeds —
+  that is right for a release — but it does not license a completion, or any
+  caller could close any unheld node without ever holding it. `completed: false`
+  with `reason: "unheld"` means claim it first.
+
+`force: true` prises a node loose from a holder that is gone. It is an
+**operator** action, not a peer's: every surface token is equally privileged, so
+a `force` any agent could use would make every lease advisory again for anyone
+who chose. It needs a token from `SUBSTRATE_OPERATOR_TOKENS`, and is refused
+with `force-requires-operator` rather than quietly downgraded to an ordinary
+release — a downgrade would read as success and leave the holder in place. An
+operator token is not a surface, so nothing it does is attributed to an agent.
 
 Expiry is honoured lazily, so it is already correct without a reaper.
 `coord_reap_leases` exists to make it **visible**: rows stop naming holders that
@@ -96,13 +110,29 @@ A packet says what it was:
 | `blockers` | what is known to be in the way. Empty is a claim, not an omission |
 | `prev_event_hash` | the sender's chain tip at handoff |
 
-`prev_event_hash` is filled by the substrate from the sender's own session,
-because it is a fact about the ledger and the ledger is here — a caller that had
-to supply it would be free to supply the wrong one. It anchors the packet to the
-trail: the receiver can verify every event that led here, and a packet quoting a
-hash the ledger does not have is a packet from a session that did not happen as
-described. The `handoff` event carrying the packet chains from the same tip, so
-the packet and the event agree about where the sender had reached.
+A signature turns attribution into a claim, so everything it covers that the
+substrate can know for itself, the substrate decides for itself:
+
+- **The sender is the authenticated caller.** There is no `surface` argument on
+  the MCP tool, and the REST route takes the token's surface over the body's. A
+  packet naming another agent would carry a valid signature over a false
+  identity — a forgery with a seal on it, which is worse than no signature,
+  because the receiver has been given a reason to believe it.
+- **The anchor is read from the ledger.** `prev_event_hash` cannot be supplied
+  by the caller. A hash nothing checked would be signed and then believed: the
+  receiver would get `ok: true` on a packet pointing at a trail that never
+  happened.
+
+The anchor ties the packet to the trail — the receiver can verify every event
+that led here — and the `handoff` event carrying the packet chains from the same
+tip, so the packet and the event agree about where the sender had reached.
+
+With `release_lease`, the lease is dropped **after** the packet is durable.
+Freeing the node first meant a refused append left it claimable with no packet
+to replay: the next agent would find the work abandoned and no account of it.
+Keeping the hold on a failed append is the recoverable half — the sender still
+holds its node and can retry — and `lease_released` in the reply reports what
+actually happened.
 
 **Signed** because the packet is acted on by an agent that did not see it
 written. The order is the point: the packet is redacted, capped, size-fitted and
@@ -152,10 +182,29 @@ multi-agent host is a disagreement between two of them.
 | `work.unclaimed` | work landed on a node nothing holds; a second agent could take it mid-flight |
 | `edge.requires_incomplete` / `edge.gate_open` | a held node whose dependency is not done |
 
-Two things it is careful about. Only the **holder's own** events count as signs
-of life — counting any event in the repo would hide every dead session on a host
-where anything else is running. And a record it could not read is listed in
-`unavailable`, so empty findings is never mistaken for agreement.
+Four things it is careful about, three of them because getting them wrong makes
+the scan worse than no scan:
+
+- Only the **holder's own** events count as signs of life. Counting any event in
+  the repo would hide every dead session on a host where anything else is
+  running.
+- **A heartbeat is not work.** `lease.idle` measures work inactivity from the
+  last work event, with `claimed_at` as the floor — not from `lease_heartbeat_at`.
+  Counting renewal as life made the one case this finding exists for — a zombie
+  heartbeat loop with nothing happening under it — the one case it could never
+  see.
+- **`work.unclaimed` only fires on work that could still be in flight**: inside
+  the idle window, on a node that is not completed or canceled. Comparing every
+  event in the window against the leases held *now* reported every node an agent
+  had legitimately finished and released.
+- **A truncated window's silence is not evidence.** Whether the git tip was
+  logged is asked of the whole ledger, not inferred from the newest N events — a
+  busy repo pushes a well-logged commit out of that window, and inferring
+  "unlogged" invented drift on exactly the repos with the most activity. When
+  neither record can answer, it says so in `unavailable` rather than guessing.
+
+And a record it could not read is listed in `unavailable`, so empty findings is
+never mistaken for agreement.
 
 It reports; it changes nothing. Deciding what to do about a disagreement is the
 agent's.
@@ -172,6 +221,16 @@ every call is timed out.
 mirroring the Linear sub-issue relations the same nodes carry. They are held in
 the index so a scan can check a claim against them without a Linear round-trip
 on the critical path; Linear remains the source of truth.
+
+Edges **replace** rather than accumulate: `edges` present is the authoritative
+set for that graph, `edges` absent leaves them untouched, and `edges: []` clears
+them. Nodes and steps upsert field by field, because a partial register should
+not erase what it does not mention — but an edge has no fields to merge, it
+either holds or it does not. Insert-only meant a dependency removed upstream
+could never be removed here, and every later scan went on reporting a held node
+as blocked by a relation that no longer existed. The replacement runs in one
+transaction, so a concurrent scan sees the old set or the new one and never an
+empty moment in between.
 
 `graph_claim` does **not** enforce them. A dependency that is merely recorded
 should not be able to block an agent that knows better, and the index is a cache

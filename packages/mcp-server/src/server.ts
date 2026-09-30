@@ -14,11 +14,11 @@
  */
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { surfaceForToken, type SubstrateConfig } from "./config.ts";
+import { isOperator, surfaceForToken, type SubstrateConfig } from "./config.ts";
 import { formatDrift } from "./drift.ts";
 import { InvalidEventError } from "./event.ts";
 import { InvalidHandoffError } from "./handoff.ts";
-import { createMcpServer } from "./mcp.ts";
+import { createMcpServer, type McpCaller } from "./mcp.ts";
 import type { Substrate } from "./service.ts";
 import type { Surface } from "./types.ts";
 
@@ -118,10 +118,19 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig) 
 		const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
 		const authorization = req.headers.authorization ?? null;
 		const surface: Surface | null = surfaceForToken(config, authorization);
+		// What the transport establishes about the caller, before any request body is
+		// read. A signed handoff's sender and a forced release's authority are decided
+		// from this and never from an argument.
+		const caller: McpCaller = { surface, isOperator: isOperator(config, authorization) };
 
 		// A configured deployment requires a token; a bare local run does not,
 		// otherwise the operator is locked out of their own machine.
-		if (!config.allowAnonymous && surface === null) {
+		//
+		// An operator token is an authorised caller in its own right. It is not a
+		// surface — nothing it does is attributed to an agent — so it does not pass
+		// `surfaceForToken`, and without this it could not reach the API it exists to
+		// reach.
+		if (!config.allowAnonymous && surface === null && !caller.isOperator) {
 			sendJson(res, 401, { error: "unknown or missing bearer token" });
 			return;
 		}
@@ -199,8 +208,12 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig) 
 					return;
 				}
 				const result = await substrate.handoff({
+					// The sender is the token's surface, never the body's. A packet naming
+					// another agent would verify under a false identity — a forgery with a
+					// valid seal on it. On a bare local run there is no token, and the body
+					// is all there is.
 					from: {
-						surface: (typeof body.surface === "string" ? (body.surface as Surface) : null) ?? surface ?? "claude-code",
+						surface: surface ?? (typeof body.surface === "string" ? (body.surface as Surface) : null) ?? "claude-code",
 						session_id: typeof body.session_id === "string" ? body.session_id : null,
 					},
 					to: { surface: to, session_id: typeof body.to_session_id === "string" ? body.to_session_id : null },
@@ -259,7 +272,7 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig) 
 			}
 
 			if (url.pathname === "/mcp") {
-				await handleMcp(req, res, substrate, surface);
+				await handleMcp(req, res, substrate, caller);
 				return;
 			}
 
@@ -288,7 +301,7 @@ async function handleMcp(
 	req: IncomingMessage,
 	res: ServerResponse,
 	substrate: Substrate,
-	surface: Surface | null,
+	caller: McpCaller,
 ): Promise<void> {
 	if (req.method !== "POST") {
 		// Stateless mode has no server-initiated stream to attach to.
@@ -298,7 +311,7 @@ async function handleMcp(
 	const raw = await readBody(req);
 	const body: unknown = raw ? JSON.parse(raw) : undefined;
 
-	const server = createMcpServer(substrate, surface);
+	const server = createMcpServer(substrate, caller);
 	const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
 	res.on("close", () => {
 		void transport.close();

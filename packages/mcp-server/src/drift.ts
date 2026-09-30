@@ -119,6 +119,20 @@ export interface DriftInputs {
 	nodes: DriftNode[];
 	edges: GraphEdge[];
 	idle_seconds?: number;
+	/**
+	 * Whether the ledger holds a `commit` event naming the git tip, asked of the
+	 * whole ledger rather than of `events`.
+	 *
+	 * `events` is a window of recent activity, so its silence about a commit is
+	 * not evidence: a busy repo pushes a well-logged commit out of the newest N
+	 * events and the scan would invent `git.tip_unlogged`. A definite answer here
+	 * decides it; `null` means the question could not be asked, and then the
+	 * window is all there is — and a full window is treated as inconclusive
+	 * rather than as drift.
+	 */
+	tip_logged?: boolean | null;
+	/** True when `events` was truncated by the limit, so its silence proves nothing. */
+	events_truncated?: boolean;
 	/** Which of the three records could actually be read. */
 	sources: { git: boolean; ledger: boolean; index: boolean };
 }
@@ -183,6 +197,24 @@ function nodeKey(graphId: string, nodeId: string): string {
 	return `${graphId}/${nodeId}`;
 }
 
+/**
+ * Whether the ledger holds the git tip's commit event. `null` means unknown.
+ *
+ * A whole-ledger answer decides it either way. Without one, finding the commit
+ * in the window is proof it is there — but *not* finding it is only proof when
+ * the window held every event there was. A truncated window that does not show
+ * the commit is the case that used to be reported as drift, on repos busy
+ * enough to push a well-logged commit out of the newest N events.
+ */
+function tipIsLogged(
+	inputs: Pick<DriftInputs, "tip_logged" | "events_truncated">,
+	inWindow: boolean,
+): boolean | null {
+	if (inputs.tip_logged === true || inputs.tip_logged === false) return inputs.tip_logged;
+	if (inWindow) return true;
+	return inputs.events_truncated ? null : false;
+}
+
 function ago(from: number, now: number): string {
 	const minutes = Math.max(0, Math.round((now - from) / 60_000));
 	if (minutes < 60) return `${minutes} min`;
@@ -210,8 +242,17 @@ export function analyzeDrift(inputs: DriftInputs): DriftReport {
 
 	// ── the tree against the trail ────────────────────────────────────────────
 	if (inputs.sources.git && inputs.sources.ledger && inputs.git.sha) {
-		const logged = commits.find((event) => shaMatches(event.sha, inputs.git.sha) || shaMatches(event.sha, inputs.git.short_sha));
-		if (!logged && inputs.events.length === 0) {
+		const inWindow = commits.find(
+			(event) => shaMatches(event.sha, inputs.git.sha) || shaMatches(event.sha, inputs.git.short_sha),
+		);
+		const logged = tipIsLogged(inputs, inWindow !== undefined);
+		if (logged === null) {
+			// Neither record can answer it, so say that rather than guess. A truncated
+			// window's silence about a commit is not evidence the commit is missing.
+			unavailable.push(
+				"ledger: the git tip could not be looked up beyond the recent-activity window, so whether it was logged is unknown",
+			);
+		} else if (!logged && inputs.events.length === 0) {
 			findings.push({
 				kind: "ledger.silent",
 				severity: "warn",
@@ -303,14 +344,16 @@ export function analyzeDrift(inputs: DriftInputs): DriftReport {
 		}
 
 		if (inputs.sources.ledger) {
-			// Claiming and heartbeating both count as signs of life, so a lease taken
-			// two seconds ago is never idle.
+			// Work inactivity, measured apart from lease renewal — which is the whole
+			// point of this finding and what an earlier version got backwards. Counting
+			// `heartbeat_at` as a sign of life meant a holder that beat its lease
+			// forever without recording anything never crossed the threshold, so the
+			// one case `lease.idle` exists to reveal was the one case it could not see.
+			//
+			// `claimed_at` is the floor, so a lease taken two seconds ago is never idle;
+			// a heartbeat is not, because a heartbeat is not work.
 			const lastWork = holderEvents.find((event) => WORK_KINDS.includes(event.kind));
-			const since = Math.max(
-				parseTime(lastWork?.ts) ?? 0,
-				parseTime(claim.lease.heartbeat_at) ?? 0,
-				parseTime(claim.lease.claimed_at) ?? 0,
-			);
+			const since = Math.max(parseTime(lastWork?.ts) ?? 0, parseTime(claim.lease.claimed_at) ?? 0);
 			if (since > 0 && now - since > idleMs) {
 				findings.push({
 					kind: "lease.idle",
@@ -340,6 +383,15 @@ export function analyzeDrift(inputs: DriftInputs): DriftReport {
 			if (!WORK_KINDS.includes(event.kind)) continue;
 			const key = nodeKey(event.graph_id, event.node_id);
 			if (held.has(key) || reported.has(key)) continue;
+			// The finding is "a second agent could take this mid-flight", so it only
+			// holds for work that could still *be* in flight. Comparing every event in
+			// the window against the leases held *now* reported every node an agent had
+			// legitimately finished and released — normal completed work, flagged as a
+			// coordination failure, on every scan until it aged out of the window.
+			const at = parseTime(event.ts);
+			if (at === null || now - at > idleMs) continue;
+			const node = inputs.nodes.find((candidate) => nodeKey(candidate.graph_id, candidate.node_id) === key);
+			if (node && (node.state === "completed" || node.state === "canceled")) continue;
 			reported.add(key);
 			findings.push({
 				kind: "work.unclaimed",

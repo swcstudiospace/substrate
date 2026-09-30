@@ -28,6 +28,17 @@ export interface SubstrateConfig {
 	/** When true, an unauthenticated caller is accepted and attributed by its payload. */
 	allowAnonymous: boolean;
 	/**
+	 * Tokens that may take a node off its holder.
+	 *
+	 * A forced release breaks the guarantee every other agent is relying on, so it
+	 * is not a peer's to use: with every surface's token equally privileged, an
+	 * agent could evict any other and the lease would be advisory again for
+	 * anyone who chose. It is an operator action, and this is who the operators
+	 * are. Empty on a bare local run, where `allowAnonymous` already means the
+	 * machine's owner is the only caller.
+	 */
+	operatorTokens: Set<string>;
+	/**
 	 * Accept a ledger that is not provably append-only.
 	 *
 	 * The default is to refuse: an `agent_events` without `append_mode` drops one
@@ -134,6 +145,12 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		// No tokens configured at all means a local dev run; requiring auth then
 		// would just lock the operator out of their own machine.
 		allowAnonymous: readTokens(env).size === 0,
+		operatorTokens: new Set(
+			(env.SUBSTRATE_OPERATOR_TOKENS ?? "")
+				.split(",")
+				.map((token) => token.trim())
+				.filter((token) => token.length > 0),
+		),
 		allowDeduplicatingLedger: /^(1|true|yes)$/i.test(env.SUBSTRATE_ALLOW_DEDUPLICATING_LEDGER?.trim() ?? ""),
 		memoryReviewTokens: readReviewTokens(env.SUBSTRATE_MEMORY_REVIEW_TOKENS),
 		memoryGrants: parseGrants(env.SUBSTRATE_MEMORY_GRANTS, (message) =>
@@ -154,11 +171,31 @@ function readReviewTokens(raw: string | undefined): Set<string> {
 	);
 }
 
-/** Resolve a request's bearer token to the surface it belongs to. */
-export function surfaceForToken(config: SubstrateConfig, authorization: string | null): Surface | null {
+function bearer(authorization: string | null): string | null {
 	if (!authorization) return null;
 	const token = authorization.replace(/^Bearer\s+/i, "").trim();
-	return config.tokens.get(token) ?? null;
+	return token.length > 0 ? token : null;
+}
+
+/** Resolve a request's bearer token to the surface it belongs to. */
+export function surfaceForToken(config: SubstrateConfig, authorization: string | null): Surface | null {
+	const token = bearer(authorization);
+	return token === null ? null : config.tokens.get(token) ?? null;
+}
+
+/**
+ * Whether this request may take a node off its holder.
+ *
+ * On a bare local run — no surface tokens at all, so `allowAnonymous` — the
+ * caller is the machine's owner and the answer is yes; there is nobody else to
+ * protect the lease from. Once tokens exist, a surface token is not enough: an
+ * operator token must be presented, because a forced release is exactly the
+ * thing one agent must not be able to do to another.
+ */
+export function isOperator(config: SubstrateConfig, authorization: string | null): boolean {
+	if (config.allowAnonymous && config.operatorTokens.size === 0) return true;
+	const token = bearer(authorization);
+	return token !== null && config.operatorTokens.has(token);
 }
 
 /**

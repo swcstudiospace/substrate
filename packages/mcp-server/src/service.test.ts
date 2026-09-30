@@ -173,10 +173,27 @@ describe("releaseNode and completeNode", () => {
 		};
 		const index = {
 			getGraph: async () => ({ repo: "swcstudiospace/x", branch: "main" }),
-			setNodeState: async (_g: string, _n: string, next: string) => {
-				state = next;
+			// Deliberately present and expected never to fire: completion writes the
+			// state inside the release's own guarded statement now, because two
+			// statements let another agent claim the freed node in between and get
+			// their live node marked completed.
+			setNodeState: async () => {
+				throw new Error("completion must not write the state in a second statement");
 			},
-			releaseNode: async (_g: string, _n: string, request: { lease_id?: string | null; force?: boolean }) => {
+			releaseNode: async (
+				_g: string,
+				_n: string,
+				request: { lease_id?: string | null; force?: boolean },
+				alsoSetState?: string,
+			) => {
+				if (leaseId === null) {
+					// Nothing holds it: a successful no-op, carrying no holder.
+					return {
+						released: true,
+						node,
+						decision: { ok: true as const, action: "noop" as const, lease_id: null, evicted: null, holder: null, observed_epoch: 3 },
+					};
+				}
 				if (request.lease_id && request.lease_id !== leaseId) {
 					return {
 						released: false,
@@ -191,14 +208,18 @@ describe("releaseNode and completeNode", () => {
 						decision: { ok: false as const, reason: "lease-id-required" as const, holder: { surface: "hermes", session_id: "sess-a" }, observed_epoch: 3 },
 					};
 				}
+				// The state arrives with the release, in one call, and lands on the row
+				// the release returns.
+				if (alsoSetState !== undefined) state = alsoSetState;
 				return {
 					released: true,
-					node,
+					node: { ...node, ...(alsoSetState === undefined ? {} : { state: alsoSetState }) },
 					decision: {
 						ok: true as const,
 						action: request.force ? ("forced" as const) : ("released" as const),
 						lease_id: leaseId,
 						evicted: request.force ? { surface: "hermes" as const, session_id: "sess-a" } : null,
+						holder: { surface: "hermes" as const, session_id: "sess-a" },
 						observed_epoch: 3,
 					},
 				};
@@ -266,6 +287,29 @@ describe("releaseNode and completeNode", () => {
 
 		expect(result.completed).toBe(true);
 		expect(stores.stateAfter()).toBe("completed");
+	});
+
+	test("completing a node nobody holds is refused: a no-op release is not ownership", async () => {
+		// Releasing a free node succeeds as a no-op, which is right for a release and
+		// wrong as a licence to complete — it let any caller close any unheld node
+		// without ever holding it.
+		const stores = leasedIndex(null);
+		const result = await substrateFor(stores).completeNode("ut-1", "n2", { lease_id: "lse_whatever" });
+
+		expect(result.completed).toBe(false);
+		expect(result.reason).toBe("unheld");
+		expect(stores.stateAfter()).toBeNull();
+	});
+
+	test("the release note is attributed to the agent that let the node go", async () => {
+		// The row's holder columns are cleared by the release, so reading the holder
+		// off the returned row attributed every ordinary release to the fallback
+		// surface with no session. The decision saw the row before that.
+		const stores = leasedIndex("lse_live");
+		await substrateFor(stores).releaseNode("ut-1", "n2", { lease_id: "lse_live" });
+
+		expect(stores.emitted[0]?.surface).toBe("hermes");
+		expect(stores.emitted[0]?.session_id).toBe("sess-a");
 	});
 });
 
@@ -655,13 +699,51 @@ describe("handoff", () => {
 		expect(result.event.prev).toBe("tip-hash");
 	});
 
-	test("a caller may pin the anchor itself, for a replay", async () => {
+	test("a caller cannot pin the anchor: a hash nothing checked would be signed and believed", async () => {
+		// The signature says the substrate signed the packet, not that the hash is
+		// real — so a caller-supplied anchor would hand a receiver `ok: true` on a
+		// packet pointing at a trail that never happened. There is no input for it.
 		const { greptime } = ledger("tip-hash");
 		const substrate = new Substrate(loadConfig(SIGNING_ENV), { index: null, greptime: greptime as never });
 
-		const result = await substrate.handoff({ ...input, prev_event_hash: "d".repeat(64) });
+		const result = await substrate.handoff({ ...input, prev_event_hash: "d".repeat(64) } as never);
 
-		expect(result.packet.prev_event_hash).toBe("d".repeat(64));
+		expect(result.packet.prev_event_hash).toBe("tip-hash");
+	});
+
+	test("the lease is released only once the packet is durable", async () => {
+		// Freeing the node first meant a refused append left it claimable with no
+		// packet to replay: the next agent finds the work abandoned and no account of
+		// it. Keeping the hold is the recoverable half — the sender can retry.
+		const released: Array<{ node: string; lease: string | undefined }> = [];
+		const index = {
+			getGraph: async () => ({ repo: "swcstudiospace/x", branch: "main" }),
+			releaseNode: async (_g: string, nodeId: string, request: { lease_id?: string }) => {
+				released.push({ node: nodeId, lease: request.lease_id });
+				return {
+					released: true,
+					node: { graph_id: "ut-1", node_id: nodeId, linear_identifier: "SPE-4792", lease_epoch: 1 },
+					decision: { ok: true as const, action: "released" as const, lease_id: request.lease_id ?? null, evicted: null, holder: { surface: "grok-bot" as const, session_id: "sess-grok" }, observed_epoch: 1 },
+				};
+			},
+		};
+
+		// No ledger at all, so the append cannot land.
+		const unstorable = new Substrate(loadConfig(SIGNING_ENV), { index: index as never, greptime: null });
+		const refused = await unstorable.handoff({ ...input, released_lease_id: "lse_a", release_lease: true });
+
+		expect(refused.stored).toBe(false);
+		expect(refused.lease_released).toBe(false);
+		expect(released).toEqual([]);
+
+		// And with a ledger that takes it, the release happens.
+		const { greptime } = ledger();
+		const stored = new Substrate(loadConfig(SIGNING_ENV), { index: index as never, greptime: greptime as never });
+		const done = await stored.handoff({ ...input, released_lease_id: "lse_a", release_lease: true });
+
+		expect(done.stored).toBe(true);
+		expect(done.lease_released).toBe(true);
+		expect(released).toEqual([{ node: "n2", lease: "lse_a" }]);
 	});
 
 	test("the whole packet is in the event, signed, and verifies as stored", async () => {
@@ -813,6 +895,9 @@ describe("driftScan", () => {
 						repo: "swcstudiospace/agent-substrate",
 					},
 				],
+				// Asked of the whole ledger, not just the window: no commit event names
+				// this tip anywhere, so the finding is real rather than an artefact.
+				commitEventsNaming: async () => [],
 			} as never,
 		});
 

@@ -297,7 +297,23 @@ export type ReleaseRefusal =
 	| "lease-id-required";
 
 export type ReleaseDecision =
-	| { ok: true; action: ReleaseAction; lease_id: string | null; evicted: LeaseHolder | null; observed_epoch: number }
+	| {
+			ok: true;
+			action: ReleaseAction;
+			lease_id: string | null;
+			evicted: LeaseHolder | null;
+			/**
+			 * Who held the lease before this release.
+			 *
+			 * Carried on the success path, not just on `forced`, because the row is
+			 * about to have its holder columns cleared: a caller that read the holder
+			 * off the *returned* row would find null and attribute the release to
+			 * nobody. The ledger note for an ordinary release needs this to name the
+			 * agent that let the node go.
+			 */
+			holder: LeaseHolder | null;
+			observed_epoch: number;
+	  }
 	| { ok: false; reason: ReleaseRefusal; holder: LeaseHolder | null; observed_epoch: number };
 
 /**
@@ -317,19 +333,23 @@ export function decideRelease(
 	_now: number,
 ): ReleaseDecision {
 	const observed_epoch = current.epoch;
+	const held = holderOf(current);
 	if (!current.lease_id || !current.surface) {
-		return { ok: true, action: "noop", lease_id: null, evicted: null, observed_epoch };
+		// Nothing to release. `noop` is a success — releasing a free node is not an
+		// error — but it is emphatically *not* proof of ownership, and a caller that
+		// treats it as one (`completeNode` did) lets anyone close an unheld node.
+		return { ok: true, action: "noop", lease_id: null, evicted: null, holder: null, observed_epoch };
 	}
 	if (request.lease_id) {
 		if (request.lease_id !== current.lease_id) {
-			return { ok: false, reason: "stale-lease", holder: holderOf(current), observed_epoch };
+			return { ok: false, reason: "stale-lease", holder: held, observed_epoch };
 		}
-		return { ok: true, action: "released", lease_id: current.lease_id, evicted: null, observed_epoch };
+		return { ok: true, action: "released", lease_id: current.lease_id, evicted: null, holder: held, observed_epoch };
 	}
 	if (request.force) {
-		return { ok: true, action: "forced", lease_id: current.lease_id, evicted: holderOf(current), observed_epoch };
+		return { ok: true, action: "forced", lease_id: current.lease_id, evicted: held, holder: held, observed_epoch };
 	}
-	return { ok: false, reason: "lease-id-required", holder: holderOf(current), observed_epoch };
+	return { ok: false, reason: "lease-id-required", holder: held, observed_epoch };
 }
 
 /** The lease as the MCP and REST surfaces report it. */

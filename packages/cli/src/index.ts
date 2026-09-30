@@ -213,8 +213,19 @@ async function cmdDrift(args: Record<string, string | true>): Promise<number> {
 	}
 	const body = await response.text();
 	process.stdout.write(body.endsWith("\n") ? body : `${body}\n`);
-	// "no drift" is the only clean outcome; anything else is something to look at.
-	return args.json || body.includes("— no drift") ? 0 : 1;
+	// Exit 1 on drift in both modes. Reading the flag instead of the report meant
+	// `--json` always exited 0, so a hook or cron that branched on the status saw
+	// every scan as clean — the one thing the status code is for.
+	if (args.json) {
+		try {
+			const report = JSON.parse(body) as { ok?: boolean; findings?: unknown[] };
+			return report.ok === true || (report.findings?.length ?? 0) === 0 ? 0 : 1;
+		} catch {
+			// A reply that is not the report at all is not a clean scan either.
+			return 1;
+		}
+	}
+	return body.includes("— no drift") ? 0 : 1;
 }
 
 /**

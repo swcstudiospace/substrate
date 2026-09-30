@@ -341,6 +341,30 @@ describe("release is fenced", () => {
 		expect(released.ok === true && released.action).toBe("noop");
 	});
 
+	test("a no-op is not proof of ownership", async () => {
+		// It succeeded because there was nothing to release, not because the caller
+		// held anything — so it carries no holder. `completeNode` read `ok` alone and
+		// let any caller close any unheld node; the holder is what distinguishes them.
+		const node = new LeaseTable();
+		const released = await node.release({ lease_id: "lse_nothing" });
+
+		expect(released.ok === true && released.action).toBe("noop");
+		expect(released.ok === true && released.holder).toBeNull();
+	});
+
+	test("an ordinary release names the holder that let the node go", async () => {
+		// The row's holder columns are about to be cleared, so a caller reading the
+		// holder off the returned row would find null and attribute the release to
+		// nobody. The decision saw the row before that.
+		const node = new LeaseTable();
+		const claim = await node.claim(holder("hermes", "sess-a"));
+
+		const released = await node.release({ lease_id: claim.lease_id });
+
+		expect(released.ok === true && released.holder).toEqual(holder("hermes", "sess-a"));
+		expect(released.ok === true && released.evicted).toBeNull();
+	});
+
 	test("the epoch never goes backwards across a release", async () => {
 		// The CAS token has to stay monotonic, or a claim decided against an old
 		// epoch could land after a release and reuse a lease a stale holder remembers.

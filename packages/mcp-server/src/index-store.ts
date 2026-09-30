@@ -286,15 +286,31 @@ export class IndexStore implements MemoryStore {
 					state               = coalesce(excluded.state,               graph_steps.state)`;
 		}
 
-		for (const edge of plan.edges ?? []) {
+		// Edges replace rather than accumulate, and only when the caller supplies
+		// them. Nodes and steps upsert field by field because a partial register
+		// should not erase what it does not mention — but an edge has no fields to
+		// merge: it either holds or it does not. Insert-only meant a dependency
+		// removed in Linear could never be removed here, and every later drift scan
+		// went on reporting a held node as blocked by a relation that no longer
+		// existed. So `edges` present is the authoritative set for this graph, and
+		// `edges` absent leaves them untouched.
+		if (plan.edges) {
 			// An unknown kind is dropped rather than stored: `drift_scan` reads these
 			// to decide whether a claim is premature, and a kind it cannot interpret
 			// would be silently ignored there instead of here.
-			if (!(EDGE_KINDS as readonly string[]).includes(edge.kind)) continue;
-			await this.sql`
-				insert into graph_edges (graph_id, from_node, to_node, kind)
-				values (${plan.graph_id}, ${edge.from_node}, ${edge.to_node}, ${edge.kind})
-				on conflict (graph_id, from_node, to_node, kind) do nothing`;
+			const edges = plan.edges.filter((edge) => (EDGE_KINDS as readonly string[]).includes(edge.kind));
+			// In one transaction, so a drift scan reading concurrently sees the old set
+			// or the new one and never an empty moment in between — which would read as
+			// "this held node has no dependencies" and suppress a real finding.
+			await this.sql.begin(async (tx) => {
+				await tx`delete from graph_edges where graph_id = ${plan.graph_id}`;
+				for (const edge of edges) {
+					await tx`
+						insert into graph_edges (graph_id, from_node, to_node, kind)
+						values (${plan.graph_id}, ${edge.from_node}, ${edge.to_node}, ${edge.kind})
+						on conflict (graph_id, from_node, to_node, kind) do nothing`;
+				}
+			});
 		}
 
 		const view = await this.getGraph(plan.graph_id);
@@ -385,13 +401,22 @@ export class IndexStore implements MemoryStore {
 
 			const rows =
 				decision.action === "renewed"
-					? // A renewal only has to prove it is still the holder.
+					? // A renewal proves it is still the holder *and* that the lease has not
+						// lapsed since the decision was taken. Without the second half, a
+						// holder that decided "renewed" a moment before its expiry could land
+						// this UPDATE after it, reviving a lapsed lease under its old id and
+						// epoch — and every other reader had already been told the node was
+						// free. Matching no row sends the loop back to re-read, where the same
+						// request becomes a `reclaimed` with a fresh id.
 						((await this.sql`
 							update graph_nodes set
 								lease_heartbeat_at = now(),
 								lease_expires_at   = now() + make_interval(secs => ${ttl}),
 								claimed_at         = coalesce(claimed_at, now())
-							where graph_id = ${graphId} and node_id = ${nodeId} and lease_id = ${decision.lease_id}
+							where graph_id = ${graphId} and node_id = ${nodeId}
+							  and lease_id = ${decision.lease_id}
+							  and coalesce(lease_expires_at, claimed_at + make_interval(secs => ${DEFAULT_LEASE_TTL_SECONDS}))
+							      > now()
 							returning *`) as GraphNode[])
 					: // A change of hold is the compare-and-swap: the epoch must be the one
 						// the decision saw, and the lease must be free or lapsed by the
@@ -482,6 +507,8 @@ export class IndexStore implements MemoryStore {
 		graphId: string,
 		nodeId: string,
 		request: { lease_id?: string | null; force?: boolean } = {},
+		/** Written in the same statement as the release, for `completeNode`. */
+		alsoSetState?: NodeState,
 	): Promise<{ released: boolean; node: GraphNode; decision: ReleaseDecision }> {
 		const observed = await this.node(graphId, nodeId);
 		const decision = decideRelease(leaseSnapshot(observed), request, Date.now());
@@ -490,10 +517,16 @@ export class IndexStore implements MemoryStore {
 
 		// The epoch is left alone: it is monotonic per node, so the next claim cannot
 		// reuse a token some stale holder still remembers.
+		//
+		// The state is written *here* rather than by a second statement, because a
+		// second statement would not be fenced: between a release and an unguarded
+		// `setNodeState`, another agent can claim the node that has just been freed,
+		// and the state write would then mark that agent's live node completed.
 		const rows = (await this.sql`
 			update graph_nodes set
 				claimed_by = null, claimed_at = null, claim_session = null,
-				lease_id = null, lease_expires_at = null, lease_heartbeat_at = null
+				lease_id = null, lease_expires_at = null, lease_heartbeat_at = null,
+				state = coalesce(${alsoSetState ?? null}, state)
 			where graph_id = ${graphId} and node_id = ${nodeId}
 			  and lease_epoch = ${decision.observed_epoch}
 			  and (${decision.lease_id ?? null}::text is null or lease_id = ${decision.lease_id ?? null})
@@ -525,13 +558,19 @@ export class IndexStore implements MemoryStore {
 		// RETURNING gives the *new* row, where `claimed_by` is already NULL, so the
 		// reaper would clear the leases and then report that nobody held any of them.
 		//
-		// The update is also a compare-and-swap, on the exact lease each row was
-		// observed with. Without that, a claim landing between the CTE's read and the
-		// write would be clobbered by the reaper — expiry would race the claim it is
-		// supposed to enable.
+		// The update is also a compare-and-swap, on the exact lease *and the exact
+		// expiry* each row was observed with. The lease id alone is not enough: a
+		// heartbeat that commits between this statement's snapshot and its write
+		// extends `lease_expires_at` without touching `lease_id` or `claimed_by`, so
+		// a CAS on those two would let the reaper clear a lease that had just been
+		// renewed — taking the node off a holder that is alive and doing the work.
+		// A heartbeat always moves the expiry, so fencing on it is what makes this
+		// safe, and expiry racing the claim it exists to enable is ruled out the same
+		// way.
 		const rows = (await this.sql`
 			with expiring as (
-				select graph_id, node_id, linear_identifier, claimed_by, claim_session, lease_id, lease_expires_at
+				select graph_id, node_id, linear_identifier, claimed_by, claim_session, lease_id,
+				       lease_expires_at, lease_heartbeat_at
 				from graph_nodes
 				where claimed_by is not null
 				  and coalesce(lease_expires_at, claimed_at + make_interval(secs => ${DEFAULT_LEASE_TTL_SECONDS})) <= now()
@@ -546,6 +585,8 @@ export class IndexStore implements MemoryStore {
 				where n.graph_id = e.graph_id and n.node_id = e.node_id
 				  and n.lease_id is not distinct from e.lease_id
 				  and n.claimed_by is not distinct from e.claimed_by
+				  and n.lease_expires_at is not distinct from e.lease_expires_at
+				  and n.lease_heartbeat_at is not distinct from e.lease_heartbeat_at
 				returning n.graph_id, n.node_id
 			)
 			select e.* from expiring e

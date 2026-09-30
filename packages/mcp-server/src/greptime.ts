@@ -595,6 +595,33 @@ export class GreptimeClient {
 		);
 	}
 
+	/**
+	 * Commit events in this repo that might name `sha`, newest first.
+	 *
+	 * A drift scan cannot answer "was this commit logged?" from its window of
+	 * recent activity: a busy repo pushes a perfectly well-logged commit out of
+	 * the newest N events, and the scan then invents `git.tip_unlogged`. So the
+	 * question is asked directly instead of inferred from the window.
+	 *
+	 * Matched on the first seven characters, because the collector stores `git
+	 * rev-parse --short` and the caller has the full hash: any abbreviation git
+	 * produces is at least seven characters and begins with those. The prefix is
+	 * validated hex, so it cannot carry a LIKE wildcard, and the candidates are
+	 * returned rather than a boolean — seven hex characters can appear by
+	 * coincidence, so the caller confirms each against the sha it asked about.
+	 */
+	async commitEventsNaming(repo: string, sha: string, limit = 20): Promise<Array<Record<string, unknown>>> {
+		if (!/^[0-9a-f]{7,40}$/i.test(sha)) return [];
+		const prefix = sha.slice(0, 7).toLowerCase();
+		const capped = Math.min(100, Math.max(1, Math.trunc(limit)));
+		return this.sql(
+			`SELECT "ts", "id", "surface", "summary", "payload" FROM "agent_events"
+			 WHERE "repo" = ${this.q(repo)} AND "kind" = 'commit'
+			   AND ("summary" LIKE ${this.q(`%${prefix}%`)} OR "payload" LIKE ${this.q(`%${prefix}%`)})
+			 ORDER BY "ts" DESC LIMIT ${capped}`,
+		);
+	}
+
 	async ping(): Promise<boolean> {
 		try {
 			await this.sql("SELECT 1");

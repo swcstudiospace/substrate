@@ -157,6 +157,45 @@ describe("the tree against the trail", () => {
 		expect(report.findings[1]?.detail).toContain("unfetched");
 	});
 
+	test("a truncated window that does not show the tip is inconclusive, not drift", () => {
+		// A busy repo pushes a perfectly well-logged commit out of the newest N
+		// events, and inferring "unlogged" from that silence invented drift on
+		// exactly the repos that have the most activity.
+		const report = analyzeDrift(
+			inputs({
+				events: [event({ kind: "commit", sha: "9999999", summary: "commit 9999999 older work", ts: minutesAgo(90) })],
+				events_truncated: true,
+				tip_logged: null,
+			}),
+		);
+
+		expect(kinds(report)).not.toContain("git.tip_unlogged");
+		expect(report.unavailable.join(" ")).toContain("recent-activity window");
+	});
+
+	test("a whole-ledger answer outranks the window, both ways", () => {
+		const windowMisses = {
+			events: [event({ kind: "commit", sha: "9999999", summary: "commit 9999999 older work", ts: minutesAgo(90) })],
+			events_truncated: true,
+		};
+		// Found outside the window: no finding.
+		expect(kinds(analyzeDrift(inputs({ ...windowMisses, tip_logged: true })))).not.toContain("git.tip_unlogged");
+		// Definitively absent from the whole ledger: a real finding, window or not.
+		expect(kinds(analyzeDrift(inputs({ ...windowMisses, tip_logged: false })))).toContain("git.tip_unlogged");
+	});
+
+	test("an untruncated window that does not show the tip is still drift", () => {
+		// The window held everything there was, so its silence is evidence.
+		const report = analyzeDrift(
+			inputs({
+				events: [event({ kind: "commit", sha: "9999999", summary: "commit 9999999 older work", ts: minutesAgo(90) })],
+				events_truncated: false,
+				tip_logged: null,
+			}),
+		);
+		expect(kinds(report)).toEqual(["git.tip_unlogged"]);
+	});
+
 	test("an unreadable checkout is reported as not compared, not as agreement", () => {
 		// The distinction that keeps a clean report honest: nothing disagreed because
 		// nothing could be read.
@@ -221,8 +260,33 @@ describe("the claims against the trail", () => {
 
 		expect(kinds(report)).toContain("lease.idle");
 		const idle = report.findings.find((finding) => finding.kind === "lease.idle");
-		expect(idle?.evidence.idle_seconds).toBe(120 * 60);
+		// Measured from the last *work*, not from the last heartbeat — 150 minutes,
+		// not the 120 since it last renewed.
+		expect(idle?.evidence.idle_seconds).toBe(150 * 60);
 		expect(idle?.detail).toContain("the work may not be");
+	});
+
+	test("a heartbeat does not count as work, so a zombie renewal loop is still idle", () => {
+		// The case this finding exists for, and the one an earlier version could not
+		// see: the lease is beating on schedule and nothing is being done under it.
+		// Counting `heartbeat_at` as a sign of life made the finding unreachable.
+		const report = analyzeDrift(
+			inputs({
+				claims: [
+					claim({
+						lease: lease({
+							claimed_at: minutesAgo(300),
+							heartbeat_at: minutesAgo(0),
+							expires_at: new Date(NOW + 600_000).toISOString(),
+						}),
+					}),
+				],
+				events: [event({ kind: "commit", sha: "1a2b3c4", summary: "commit 1a2b3c4 feat: leases", ts: minutesAgo(6), surface: "omp" as Surface, session_id: "sess-omp" })],
+			}),
+		);
+
+		expect(kinds(report)).toContain("lease.idle");
+		expect(report.findings.find((finding) => finding.kind === "lease.idle")?.evidence.idle_seconds).toBe(300 * 60);
 	});
 
 	test("a heartbeat counts as life, so a lease taken seconds ago is never idle", () => {
@@ -294,6 +358,50 @@ describe("the trail against the claims", () => {
 			}),
 		);
 		expect(kinds(report)).not.toContain("work.unclaimed");
+	});
+
+	test("work an agent legitimately finished and released is not drift", () => {
+		// The false positive: comparing every event in the window against the leases
+		// held *now* reported every completed, released node as work done without a
+		// claim — normal finished work, flagged on every scan until it aged out.
+		const report = analyzeDrift(
+			inputs({
+				nodes: [{ graph_id: "ut-1", node_id: "n4", linear_identifier: "SPE-1", state: "completed" }],
+				events: [
+					event({ kind: "file.edit", node_id: "n4", ts: minutesAgo(2), surface: "omp", session_id: "sess-omp" }),
+					event({ kind: "commit", sha: "1a2b3c4", summary: "commit 1a2b3c4 feat: leases", ts: minutesAgo(6) }),
+				],
+			}),
+		);
+		expect(kinds(report)).not.toContain("work.unclaimed");
+	});
+
+	test("nor is work too old to still be in flight", () => {
+		const report = analyzeDrift(
+			inputs({
+				nodes: [{ graph_id: "ut-1", node_id: "n4", linear_identifier: "SPE-1", state: "started" }],
+				events: [
+					// Outside the idle window: whatever happened here, nobody is mid-flight
+					// on it now, so "a second agent could take it" is not a live concern.
+					event({ kind: "file.edit", node_id: "n4", ts: minutesAgo(180), surface: "omp", session_id: "sess-omp" }),
+					event({ kind: "commit", sha: "1a2b3c4", summary: "commit 1a2b3c4 feat: leases", ts: minutesAgo(6) }),
+				],
+			}),
+		);
+		expect(kinds(report)).not.toContain("work.unclaimed");
+	});
+
+	test("but recent work on an unfinished node nobody holds still is", () => {
+		const report = analyzeDrift(
+			inputs({
+				nodes: [{ graph_id: "ut-1", node_id: "n4", linear_identifier: "SPE-1", state: "started" }],
+				events: [
+					event({ kind: "file.edit", node_id: "n4", ts: minutesAgo(2), surface: "omp", session_id: "sess-omp" }),
+					event({ kind: "commit", sha: "1a2b3c4", summary: "commit 1a2b3c4 feat: leases", ts: minutesAgo(6) }),
+				],
+			}),
+		);
+		expect(kinds(report)).toContain("work.unclaimed");
 	});
 
 	test("a prompt or a note is not work, so it does not demand a claim", () => {

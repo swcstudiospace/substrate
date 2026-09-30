@@ -90,9 +90,21 @@ export interface HandoffPacket {
 	dod: string[];
 	/** What is known to be in the way. Empty means "nothing known". */
 	blockers: string[];
-	/** The sender's hash-chain tip at handoff, or null if it had emitted nothing. */
+	/**
+	 * The sender's hash-chain tip at handoff, or null if it had emitted nothing.
+	 *
+	 * Always read from the ledger by the substrate, never accepted from the
+	 * caller: a hash nothing checked would be signed and then believed.
+	 */
 	prev_event_hash: string | null;
-	/** The lease the sender held and dropped as part of this handoff, if any. */
+	/**
+	 * The lease the sender is handing over, if any.
+	 *
+	 * The lease it *held*, not proof that it has been dropped — the release
+	 * happens after the packet is durable, so the reply's `lease_released` is what
+	 * says whether the node is free. A receiver should claim the node rather than
+	 * assume this field frees it.
+	 */
 	released_lease_id: string | null;
 	notes: string | null;
 	/** What had to be trimmed to fit the payload budget. Absent when nothing was. */

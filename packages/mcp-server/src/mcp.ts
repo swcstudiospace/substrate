@@ -57,7 +57,25 @@ function json(value: unknown) {
 	return text(JSON.stringify(value, null, 2));
 }
 
-export function createMcpServer(substrate: Substrate, callerSurface: Surface | null): McpServer {
+/**
+ * What the transport established about this caller, as opposed to what the
+ * caller says about itself.
+ *
+ * `surface` is the token's surface, or null on an unauthenticated local run.
+ * `isOperator` is whether it may take a node off its holder. Both are decided
+ * before any tool argument is read, which is the point: a signed handoff's
+ * sender and a forced release's authority cannot be arguments.
+ */
+export interface McpCaller {
+	surface: Surface | null;
+	isOperator: boolean;
+}
+
+export function createMcpServer(substrate: Substrate, caller: McpCaller | Surface | null): McpServer {
+	// A bare surface is still accepted so existing callers and tests keep working;
+	// it means "authenticated as this surface, not an operator".
+	const { surface: callerSurface, isOperator } =
+		caller === null || typeof caller === "string" ? { surface: caller, isOperator: false } : caller;
 	const server = new McpServer({ name: "substrate", version: "0.1.0" });
 
 	server.registerTool(
@@ -399,23 +417,47 @@ export function createMcpServer(substrate: Substrate, callerSurface: Surface | n
 			json(await substrate.heartbeatNode(graph_id, node_id, lease_id, ttl_seconds)),
 	);
 
+	/**
+	 * A forced release is an operator action, not a peer's.
+	 *
+	 * Every surface token is equally privileged here, so if `force` were simply
+	 * passed through, any agent could evict any other and the lease would be
+	 * advisory again for anyone who chose to use it. Refused with the reason
+	 * rather than silently downgraded to an ordinary release, which would look
+	 * like success and leave the holder in place.
+	 */
+	const FORCE_REFUSED = {
+		released: false,
+		completed: false,
+		reason: "force-requires-operator",
+		detail:
+			"taking a node off its holder is an operator action: present a token from SUBSTRATE_OPERATOR_TOKENS. " +
+			"To release your own lease, pass the lease_id you were granted.",
+	} as const;
+
 	server.registerTool(
 		"graph_release",
 		{
 			title: "Release a node",
 			description:
 				"Drop your lease on a node without marking it complete. `lease_id` fences it: a holder whose lease " +
-				"lapsed cannot release the node someone else has since claimed. Use `force` only to prise a node " +
-				"loose from a holder that is gone — it is recorded as a forced release and warns the evicted holder.",
+				"lapsed cannot release the node someone else has since claimed. `force` prises a node loose from a " +
+				"holder that is gone, and is an operator action — it needs an operator token, not a surface token, " +
+				"because one agent evicting another would make every lease advisory.",
 			inputSchema: {
 				graph_id: z.string(),
 				node_id: z.string(),
 				lease_id: z.string().optional(),
-				force: z.boolean().optional().describe("Release whoever holds it. Required when no lease_id is given."),
+				force: z
+					.boolean()
+					.optional()
+					.describe("Release whoever holds it. Operators only. Required when no lease_id is given."),
 			},
 		},
-		async ({ graph_id, node_id, lease_id, force }) =>
-			json(await substrate.releaseNode(graph_id, node_id, { lease_id, force })),
+		async ({ graph_id, node_id, lease_id, force }) => {
+			if (force && !isOperator) return json(FORCE_REFUSED);
+			return json(await substrate.releaseNode(graph_id, node_id, { lease_id, force }));
+		},
 	);
 
 	server.registerTool(
@@ -423,20 +465,22 @@ export function createMcpServer(substrate: Substrate, callerSurface: Surface | n
 		{
 			title: "Complete a node",
 			description:
-				"Mark a node completed and drop its lease. Fenced on `lease_id` like graph_release, and for a sharper " +
-				"reason: an agent whose lease lapsed must not be able to close a node a second agent has since " +
-				"claimed and is still working. The state is written only once the release is accepted, so " +
-				"`completed: false` means nothing changed.",
+				"Mark a node completed and drop its lease, in one fenced operation. You must hold the lease: pass the " +
+				"`lease_id` you were granted. A node nobody holds cannot be completed — claim it first — and a lease " +
+				"that has lapsed cannot close a node a second agent has since claimed. `force` is an operator action, " +
+				"as in graph_release. `completed: false` means nothing changed, and says why.",
 			inputSchema: {
 				graph_id: z.string(),
 				node_id: z.string(),
 				lease_id: z.string().optional(),
-				force: z.boolean().optional(),
+				force: z.boolean().optional().describe("Operators only."),
 				state: z.enum(NODE_STATES).optional().describe("Defaults to completed."),
 			},
 		},
-		async ({ graph_id, node_id, lease_id, force, state }) =>
-			json(await substrate.completeNode(graph_id, node_id, { lease_id, force, state })),
+		async ({ graph_id, node_id, lease_id, force, state }) => {
+			if (force && !isOperator) return json(FORCE_REFUSED);
+			return json(await substrate.completeNode(graph_id, node_id, { lease_id, force, state }));
+		},
 	);
 
 	server.registerTool(
@@ -444,11 +488,13 @@ export function createMcpServer(substrate: Substrate, callerSurface: Surface | n
 		{
 			title: "Hand work to another agent",
 			description:
-				"Record a signed handoff packet: the goal, the files, the Definition of Done, the known blockers, and " +
-				"the hash of your last event — everything the receiving agent needs to start without asking you. The " +
-				"packet is redacted, signed by the substrate and appended to the ledger whole, so the receiver can " +
-				"replay it from the log alone and check it was not altered. The reply's `gaps` names what a receiver " +
-				"will find missing; `signed: false` means no signing key is configured, and the handoff was still recorded.",
+				"Record a signed handoff packet: the goal, the files, the Definition of Done and the known blockers — " +
+				"everything the receiving agent needs to start without asking you. The substrate adds the hash of " +
+				"your last event, signs the packet and appends it to the ledger whole, so the receiver can replay it " +
+				"from the log alone and check it was not altered. The sender is whoever this connection is " +
+				"authenticated as and cannot be set from here; the anchor is read from the ledger for the same " +
+				"reason. The reply's `gaps` names what a receiver will find missing; `signed: false` means no signing " +
+				"key is configured, and the handoff was still recorded.",
 			inputSchema: {
 				to: surfaceSchema.describe("The surface taking over."),
 				goal: z.string().describe("What the receiver is to achieve, in your words."),
@@ -463,17 +509,18 @@ export function createMcpServer(substrate: Substrate, callerSurface: Surface | n
 				session_id: z.string().optional().describe("Your session. Used to find the chain tip the packet is anchored to."),
 				to_session_id: z.string().optional(),
 				notes: z.string().optional(),
-				lease_id: z.string().optional().describe("Your lease on node_id. With release_lease, it is dropped as part of the handoff."),
+				lease_id: z.string().optional().describe("Your lease on node_id. With release_lease, it is dropped once the packet is durable."),
 				release_lease: z.boolean().optional().describe("Release the lease so the receiver can claim the node."),
-				prev_event_hash: z.string().optional().describe("Normally left out: the substrate fills it from your session's chain tip."),
-				surface: surfaceSchema.optional().describe("The surface handing off. Defaults to the caller's own."),
 			},
 		},
-		async ({ to, to_session_id, session_id, surface, lease_id, release_lease, ...rest }) =>
+		async ({ to, to_session_id, session_id, lease_id, release_lease, ...rest }) =>
 			json(
 				await substrate.handoff({
 					...rest,
-					from: { surface: surface ?? callerSurface ?? "claude-code", session_id: session_id ?? null },
+					// The sender is the authenticated caller. There is no argument for it:
+					// a packet naming someone else as sender would carry a valid signature
+					// over a false identity, which is worse than an unsigned packet.
+					from: { surface: callerSurface ?? "claude-code", session_id: session_id ?? null },
 					to: { surface: to, session_id: to_session_id ?? null },
 					released_lease_id: lease_id ?? null,
 					...(release_lease === undefined ? {} : { release_lease }),
