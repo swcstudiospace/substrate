@@ -40,6 +40,11 @@ A local file rather than a remote one, for reason 1 above.
 SUBSTRATE_AUDIT_PATH=/var/lib/substrate/mcp-audit.jsonl
 ```
 
+`infra/vps/substrate-mcp.service` carries `StateDirectory=substrate`, so systemd
+creates `/var/lib/substrate` at 0700 and keeps it writable under
+`ProtectSystem=full`. A chain that lands in a directory the unit cannot write is a
+chain that refuses every fail-closed tool.
+
 Unset, the chain lives **in memory**: verifiable, bounded, and gone at restart.
 That is the local-dev shape. `GET /healthz` reports `auditDurable: false` and the
 service says so at boot, so a deployment cannot end up in it by accident. The

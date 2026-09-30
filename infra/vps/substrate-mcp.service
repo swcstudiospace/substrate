@@ -18,6 +18,14 @@ ExecStart=/root/.local/share/reflex/bun/bin/bun packages/mcp-server/src/index.ts
 Restart=always
 RestartSec=3
 
+# /var/lib/substrate, created by systemd and writable under ProtectSystem=full.
+# This is where SUBSTRATE_AUDIT_PATH points: the MCP audit chain is a local
+# append-only file precisely so it survives an outage of the store it audits, and
+# a chain that lands in a directory the unit cannot write is a chain that refuses
+# every fail-closed tool. See docs/mcp-audit.md.
+StateDirectory=substrate
+StateDirectoryMode=0700
+
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=substrate-mcp
