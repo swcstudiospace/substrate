@@ -18,6 +18,11 @@ through `substrate-mcp`: no collector, CLI, hook or projector holds its own Grep
 and no agent gets Greptime as an MCP server of its own. Redaction and the hash chain live on
 that one write path, so a second door would be an unredacted, unchained one.
 
+Both halves of the events plane sit behind that one door: `events_emit` appends,
+`events_query` reads a window back and `events_verify` recomputes a graph's hash chain.
+No tool takes SQL — a query names filters, and the statement is built inside the ledger
+client — so no seat needs the credential and no seat can reach past the filters it is given.
+
 `packages/mcp-server/src/store-lock.test.ts` fails the build if that stops being true.
 Details in [`docs/greptime-ledger.md`](docs/greptime-ledger.md).
 
@@ -52,15 +57,17 @@ bun run check                                  # tsc --noEmit
 ```
 
 Against a live Greptime, `bun run smoke:greptime` proves the ledger end to end — append_mode,
-redaction, quoting, the hash chain and that UPDATE and DELETE are refused. It reads
-`GREPTIME_*` from the environment and prints no credential:
+redaction, quoting, the hash chain, reading those events back through `events_query`, and that
+UPDATE and DELETE are refused. It reads `GREPTIME_*` from the environment and prints no
+credential:
 
 ```sh
 set -a; . /etc/substrate/substrate.env; set +a && bun run smoke:greptime
 ```
 
 `substrate-mcp` exposes MCP over streamable HTTP at `/mcp`, and — because agent hooks cannot
-call MCP tools — the same briefing and event paths as plain `POST /brief` and `POST /events`.
+call MCP tools — the same briefing and event paths as plain `POST /brief`, `POST /events`,
+`POST /events/query` and `POST /verify`.
 
 ## Non-negotiables
 

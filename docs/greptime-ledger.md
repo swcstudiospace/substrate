@@ -29,6 +29,13 @@ build if any of them is broken:
 Writes go through `events_emit` (MCP) or `POST /events` (REST, for hooks that
 cannot call an MCP tool). Both call the same `Substrate.emit`.
 
+Reads go through `events_query` and `events_verify` (MCP) or
+`POST /events/query` and `POST /verify` (REST). Both call the same
+`Substrate.queryEvents` and `Substrate.verifyGraph`. A seat that could only write
+would have left the lock half-built: the trail exists to be read back, and a seat
+that had to read it any other way would need the credential rule 2 exists to
+withhold. See [Reading the ledger](#reading-the-ledger).
+
 ## Schema
 
 `agent_events`, created by `GreptimeClient.migrate()` and idempotent on every
@@ -227,6 +234,54 @@ regardless, because failing open is the *client's* job and this surface owes its
 caller the truth. Reported errors are redacted, since a connection failure can
 quote a URL.
 
+## Reading the ledger
+
+`events_query` is the read counterpart of `events_emit`, and the reason a desk seat
+needs no Greptime credential to look at the trail.
+
+| Filter | |
+| --- | --- |
+| `session_id`, `graph_id`, `node_id`, `linear_identifier` | equality |
+| `repo`, `branch` | equality |
+| `surface`, `kind`, `actor` | equality, against the closed sets in `types.ts` |
+| `since`, `until` | inclusive bounds on `ts`, any form `new Date()` accepts |
+| `limit`, `order` | 1–500 rows, default 50; `desc` (newest first) or `asc` |
+| `include_payload` | off by default |
+
+**A caller supplies values, never syntax.** The clause list is built by iterating
+`QUERYABLE_COLUMNS`, so no filter can name `payload`, `hash`, another table or a
+second clause; every value goes through the same `quote` the write path uses, and
+the statement still passes `assertAppendOnly` on its way out. Two store-lock tests
+hold this shape: only `greptime.ts` and `brief.ts` may compose a statement, and no
+tool or route may take one. A `sql` tool would have made the read path an arbitrary
+door onto every row in the ledger, redaction and chain notwithstanding.
+
+**Query keys are normalised like stored ones.** `Substrate.queryEvents` runs every
+identifier filter through `normalizeIdentifier`, for the same reason `emit` looks up
+a session's chain tip that way. Querying the raw value would match nothing for any
+identifier that redaction or the 512-character cap touched — and an empty window
+reads exactly like an empty ledger.
+
+**`payload` is excluded unless asked for.** It is the one unbounded column, up to
+16 KB an event, so a 500-row reply carrying it would be megabytes of MCP response
+for a question the summaries usually answer.
+
+**`ts` order is not append order.** `ts` is collector-supplied and two events can
+share a millisecond, so `ORDER BY "ts"` is presentation only. `hash` and `prev` come
+back on every row, so a caller can follow the chain itself, and `events_verify`
+(`Substrate.verifyGraph`) is what actually recomputes it — per session, since `prev`
+chains within one.
+
+**An honest empty answer.** A filter naming a surface, kind, actor, order or date
+that cannot exist is *refused* — `400` over REST, a tool error over MCP — because it
+would otherwise match nothing and read as "nothing happened". A ledger that is
+merely unreachable is an empty window with `error` set (`503` over REST), since a
+missing store may not fail an agent's turn. `truncated` says the reply hit `limit`,
+so a caller knows to narrow it rather than assuming it saw everything.
+
+Not built here: a `substrate events` CLI subcommand. Hooks and the CLI can already
+reach `POST /events/query`; nothing needed it yet.
+
 ## Configuration
 
 Four variables, read from the environment and never from this repo:
@@ -253,6 +308,22 @@ and the substrate never provisions it.
 Every call is timed out (5 s default) and every failure is the caller's to
 handle.
 
+### Transport: HTTPS with Basic auth, today
+
+`GREPTIME_URL` is the HTTP SQL API base over public HTTPS, and the credential is
+sent as an `Authorization: Basic` header — built per request, never placed in the
+URL, so it cannot leak through a log line, a redirect or an error this code quotes.
+This is the path INFRA probed green against the Railway service, and it is the one
+to keep using.
+
+A **Tailscale forwarder** is the preferred shape later: Greptime reachable only on
+the tailnet, with the VPS talking to a tailnet address instead of a public one. It
+changes nothing in this package and adds no variable — `GREPTIME_URL` would simply
+name the tailnet host, and Basic auth would stay on as defence in depth rather than
+as the only boundary. Until INFRA has probed that path end to end, HTTPS is what the
+deployment uses; the switch is theirs to make and is a one-line change in
+`/etc/substrate/substrate.env`.
+
 ## Smoke test
 
 ```sh
@@ -272,7 +343,11 @@ It prints the host and database only — no credential — and checks:
    the check that says the quoting dialect is right, and so that the chain is
    verifiable at all
 6. the chain over those events verifies
-7. the client refuses `UPDATE` and `DELETE`
+7. `Substrate.queryEvents` reads those events back: the hash each was stored
+   under, the `ts` round-tripping from Greptime's integer to the ISO string the
+   chain hashed, `payload` in and out, `truncated`, and an ISO time window
+   bounding a live `TIMESTAMP` column — the statement parsing no mock can prove
+8. the client refuses `UPDATE` and `DELETE`
 
 The rows it writes **stay in the ledger** — it is append-only, so there is
 nothing to clean up. They are tagged with a `smoke-` `graph_id` and `session_id`
@@ -281,12 +356,16 @@ and `kind: "note"`, and carry no `repo`, which keeps them out of every brief.
 ### Verification status
 
 Every behaviour above is covered by unit tests against a mocked Greptime
-(`greptime.test.ts`, `event.test.ts`, `service.test.ts`, `server.test.ts`), and the
-smoke script has been exercised end to end against a local fake that simulates both
-SQL literal dialects and a server that rejects `append_mode`.
+(`greptime.test.ts`, `event.test.ts`, `service.test.ts`), driven over a real MCP
+client (`mcp.test.ts`, via the SDK's in-memory transport) and over a real socket
+(`server.test.ts`), and the smoke script has been exercised end to end against a
+local fake that simulates both SQL literal dialects and a server that rejects
+`append_mode` — 20/20 with `append_mode`, and fail-closed without it.
 
 **Live:** SYSTEMS reports `bun run smoke:greptime` passing 11/11 on the VPS after
-INFRA's `append_mode` cutover. So the deployed GreptimeDB does accept
+INFRA's `append_mode` cutover — that run predates the read checks, so the live
+proof of `events_query` against the deployed server is still outstanding and is
+INFRA's to run. So the deployed GreptimeDB does accept
 `WITH ('append_mode' = 'true')`, the recreate has happened, and the default
 fail-closed write path is writable there. That run was not made from this session
 and is recorded here as reported, not as something this repo verified.
