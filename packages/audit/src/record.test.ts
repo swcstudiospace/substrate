@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { canonicalJson as ledgerCanonicalJson, sha256Hex as ledgerSha256Hex } from "../../mcp-server/src/event.ts";
 import {
 	ChainWalker,
+	StatsAccumulator,
 	MAX_IDENTIFIER,
 	MAX_RECORD_BYTES,
 	MAX_TOOL_NAME,
@@ -16,6 +17,7 @@ import {
 	sha256Hex,
 	verifyAuditChain,
 	type AuditRecord,
+	type AuditRecordInput,
 } from "./record.ts";
 
 describe("the digest agrees with the ledger's", () => {
@@ -465,5 +467,34 @@ describe("ChainWalker", () => {
 		const walker = new ChainWalker({ genesis: false });
 		for (const record of chainOf(3).slice(1)) walker.push(record);
 		expect(walker.verdict().ok).toBe(true);
+	});
+});
+
+describe("StatsAccumulator", () => {
+	function record(overrides: Partial<AuditRecordInput> = {}): AuditRecord {
+		return buildRecord(
+			{ surface: "omp", tool: "graph_get", decision: "allowed", mode: "fail-open", ...overrides },
+			{ seq: 1, prev: null },
+			new Date("2026-09-30T06:54:39.000Z"),
+		);
+	}
+
+	test("agrees with auditStats, which is the point of there being one of it", () => {
+		// The bundle's tally must cover every record for a graph while only a window of them
+		// is listed, so the counting had to be separable from the keeping. Two
+		// implementations of the same tally is how those two numbers drift apart.
+		const records = [
+			record(),
+			record({ decision: "denied", tool: "graph_claim" }),
+			record({ surface: "muse", tool: "graph_claim" }),
+		];
+		const accumulator = new StatsAccumulator();
+		for (const one of records) accumulator.push(one);
+
+		expect(accumulator.stats()).toEqual(auditStats(records));
+	});
+
+	test("counts nothing as nothing rather than as an empty shape with wrong totals", () => {
+		expect(new StatsAccumulator().stats()).toEqual(auditStats([]));
 	});
 });

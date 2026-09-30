@@ -401,22 +401,59 @@ export interface AuditStats {
 	bySurface: Array<{ surface: string; allowed: number; denied: number }>;
 }
 
-export function auditStats(records: AuditRecord[]): AuditStats {
-	const tally = (key: (record: AuditRecord) => string) => {
-		const counts = new Map<string, { allowed: number; denied: number }>();
-		for (const record of records) {
-			const bucket = counts.get(key(record)) ?? { allowed: 0, denied: 0 };
-			if (record.decision === "allowed") bucket.allowed++;
+/**
+ * `auditStats` as a fold, so a tally can be complete over records nobody kept.
+ *
+ * The evidence bundle lists a bounded window of a graph's records — a trail has no
+ * compaction, so listing all of them is not an option — but its allowed/denied tally
+ * must still describe *every* decision for that graph. Computing the tally from the
+ * listed window meant a graph past the window reported counts that silently omitted
+ * whatever fell outside it, including the claim withdrawals and batch corrections that
+ * are the entire reason a reader looks at the tally. A note saying "truncated" does not
+ * make a wrong number right.
+ *
+ * So the counting is separated from the keeping: `AuditLog.scan` pushes every matching
+ * record through this and retains only a window of them.
+ */
+export class StatsAccumulator {
+	private totalCount = 0;
+	private allowedCount = 0;
+	private deniedCount = 0;
+	private readonly byTool = new Map<string, { allowed: number; denied: number }>();
+	private readonly bySurface = new Map<string, { allowed: number; denied: number }>();
+
+	push(record: AuditRecord): void {
+		this.totalCount++;
+		const allowed = record.decision === "allowed";
+		if (allowed) this.allowedCount++;
+		else this.deniedCount++;
+		for (const [counts, key] of [
+			[this.byTool, record.tool],
+			[this.bySurface, record.surface],
+		] as Array<[Map<string, { allowed: number; denied: number }>, string]>) {
+			const bucket = counts.get(key) ?? { allowed: 0, denied: 0 };
+			if (allowed) bucket.allowed++;
 			else bucket.denied++;
-			counts.set(key(record), bucket);
+			counts.set(key, bucket);
 		}
-		return [...counts.entries()].sort(([a], [b]) => (a < b ? -1 : 1));
-	};
-	return {
-		total: records.length,
-		allowed: records.filter((record) => record.decision === "allowed").length,
-		denied: records.filter((record) => record.decision === "denied").length,
-		byTool: tally((record) => record.tool).map(([tool, counts]) => ({ tool, ...counts })),
-		bySurface: tally((record) => record.surface).map(([surface, counts]) => ({ surface, ...counts })),
-	};
+	}
+
+	stats(): AuditStats {
+		const sorted = (counts: Map<string, { allowed: number; denied: number }>) =>
+			[...counts.entries()].sort(([a], [b]) => (a < b ? -1 : 1));
+		return {
+			total: this.totalCount,
+			allowed: this.allowedCount,
+			denied: this.deniedCount,
+			byTool: sorted(this.byTool).map(([tool, counts]) => ({ tool, ...counts })),
+			bySurface: sorted(this.bySurface).map(([surface, counts]) => ({ surface, ...counts })),
+		};
+	}
 }
+
+export function auditStats(records: AuditRecord[]): AuditStats {
+	const accumulator = new StatsAccumulator();
+	for (const record of records) accumulator.push(record);
+	return accumulator.stats();
+}
+
