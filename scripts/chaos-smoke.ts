@@ -57,7 +57,44 @@ const REHEARSAL = /^(1|true|yes)$/i.test(process.env.CHAOS_REHEARSAL?.trim() ?? 
 
 function headers(): Record<string, string> {
 	const token = process.env.SUBSTRATE_TOKEN?.trim();
-	return { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) };
+	return {
+		"content-type": "application/json",
+		// Both media types, because `/mcp` is the MCP streamable transport and it answers
+		// a POST with **406** unless both are acceptable. Without this every tool call
+		// came back unreadable, and "unreadable" is what this script is careful not to
+		// read as a verdict — so the claim half could never run, whatever the ledger did.
+		accept: "application/json, text/event-stream",
+		...(token ? { authorization: `Bearer ${token}` } : {}),
+	};
+}
+
+/**
+ * The JSON in a response body, however it was framed.
+ *
+ * A refusal is JSON, a brief is markdown, and a **dispatched MCP tool result is one
+ * `text/event-stream` frame** — the transport streams unless JSON responses are
+ * enabled, so a tool result arrives as `data: {…}` rather than as bare JSON. Parsing
+ * only the bare form left every successful call looking like a call that answered
+ * nothing.
+ */
+function parseBody(text: string): unknown {
+	try {
+		return JSON.parse(text);
+	} catch {
+		// Fall through to the SSE framing.
+	}
+	const frames = text
+		.split("\n")
+		.filter((line) => line.startsWith("data:"))
+		.map((line) => line.slice(5).trim());
+	for (const frame of frames.reverse()) {
+		try {
+			return JSON.parse(frame);
+		} catch {
+			// Not this frame.
+		}
+	}
+	return text;
 }
 
 interface Attempt {
@@ -78,13 +115,7 @@ async function call(path: string, body?: unknown): Promise<Attempt> {
 			signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
 		});
 		const text = await response.text();
-		let parsed: unknown = text;
-		try {
-			parsed = JSON.parse(text);
-		} catch {
-			// A brief comes back as markdown. Keep the text.
-		}
-		return { status: response.status, body: parsed, elapsedMs: performance.now() - started };
+		return { status: response.status, body: parseBody(text), elapsedMs: performance.now() - started };
 	} catch (cause) {
 		return { status: null, body: null, elapsedMs: performance.now() - started, error: String(cause) };
 	}
@@ -110,6 +141,17 @@ function require_(ok: boolean, what: string, detail?: string): void {
 /** One MCP tool call over `/mcp`, as JSON-RPC. */
 async function tool(id: number, name: string, args: Record<string, unknown>): Promise<Attempt> {
 	return call("/mcp", { jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+}
+
+/** Why a call produced no decision: the layer that refused before the tool ran. */
+function whyNoDecision(attempt: Attempt): string | null {
+	if (attempt.status === null) return attempt.error ?? "no response";
+	if (attempt.status !== 200) return `HTTP ${attempt.status}`;
+	const body = attempt.body as { error?: { message?: string }; result?: { isError?: boolean } } | null;
+	if (body?.error?.message) return body.error.message;
+	if (body?.result?.isError === true) return "the tool reported an error";
+	if (!body?.result) return "no result in the reply";
+	return "the result was not the JSON a decision comes in";
 }
 
 /** The JSON a tool returned, or null if it errored or answered something else. */
@@ -176,7 +218,10 @@ const graphRegistered = toolResult(registered) !== null;
 require_(
 	graphRegistered,
 	`registered ${GRAPH_ID}/${NODE_ID}, so a claim reaches the withdrawal path`,
-	graphRegistered ? undefined : "graph_register did not answer with a graph; without an index there is no node to claim",
+	graphRegistered
+		? undefined
+		: `graph_register did not answer with a graph (${whyNoDecision(registered) ?? "unknown"}); ` +
+			"without an index there is no node to claim",
 );
 
 // ── 2. the outage window ─────────────────────────────────────────────────────
@@ -252,9 +297,14 @@ check(
 	granted.length > 0 ? `${granted.length} claim(s) were granted — fail-closed did not hold` : undefined,
 );
 if (undecided.length > 0) {
+	// With the reason attached: every one of these is a layer refusing before the tool
+	// ran — a transport status, the audit gate's JSON-RPC error, or the tool's own throw
+	// — and the operator is otherwise left to guess which.
 	note(
 		`${undecided.length} claim call(s) returned no decision`,
-		"an error rather than a verdict — the withdrawal path did not run for those",
+		`an error rather than a verdict — the withdrawal path did not run for those; first: ${
+			whyNoDecision(undecided[0] as Attempt) ?? "unknown"
+		}`,
 	);
 }
 require_(
