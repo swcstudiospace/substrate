@@ -18,8 +18,12 @@ through `substrate-mcp`: no collector, CLI, hook or projector holds its own Grep
 and no agent gets Greptime as an MCP server of its own. Redaction and the hash chain live on
 that one write path, so a second door would be an unredacted, unchained one.
 
-`packages/mcp-server/src/store-lock.test.ts` fails the build if that stops being true.
-Details in [`docs/greptime-ledger.md`](docs/greptime-ledger.md).
+The same holds for memory in the Postgres index: there is no ungoverned write path, so the
+governance gate cannot be skipped by writing around it.
+
+`packages/mcp-server/src/store-lock.test.ts` fails the build if either stops being true.
+Details in [`docs/greptime-ledger.md`](docs/greptime-ledger.md) and
+[`docs/memory-governance.md`](docs/memory-governance.md).
 
 ## Why
 
@@ -60,12 +64,29 @@ set -a; . /etc/substrate/substrate.env; set +a && bun run smoke:greptime
 ```
 
 `substrate-mcp` exposes MCP over streamable HTTP at `/mcp`, and — because agent hooks cannot
-call MCP tools — the same briefing and event paths as plain `POST /brief` and `POST /events`.
+call MCP tools — the same briefing, event and memory paths as plain `POST /brief`,
+`POST /events` and `POST /memory`.
+
+## Memory governance
+
+**Memory is the one plane that fails closed.** A lost event costs the trail; a memory that
+lands wrong sends the next four sessions down a road that does not exist. So every
+`memory.write` passes one gate: default-deny RBAC over surface × scope × kind, a quarantine
+pass for secrets, PII and speculation, an idempotency key claimed before anything is written,
+and a conflict strategy per target — last-write-wins for todos, versioned with optimistic
+concurrency for decisions, review for anything global. The reply is
+`accepted | conflict | quarantined | denied` plus a remedy, and `verified_persisted` is a
+separate claim read back from the index: **anything other agents act on requires both.**
+
+`events.emit` still fails open. Details in [`docs/memory-governance.md`](docs/memory-governance.md).
 
 ## Non-negotiables
 
-- **Fail open.** A substrate outage must never block a prompt. Every hook swallows its errors
-  and returns empty within its timeout.
+- **Fail open — except memory.** A substrate outage must never block a prompt: every hook
+  swallows its errors and returns empty within its timeout. Memory is the exception, and it
+  is an exception at the *server*, not the hook: a write the gate cannot authorise, decide and
+  verify comes back refused rather than as something the next agent will act on. The client
+  still exits 0.
 - **Redact before emitting.** No credentials ever reach `agent_events`. Redaction is on the
   write path inside `substrate-mcp`, not in each collector, so no collector can forget.
 - **Append only, fail-closed.** Nothing rewrites or removes an event. The ledger client refuses

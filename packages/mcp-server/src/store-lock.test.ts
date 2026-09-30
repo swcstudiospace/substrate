@@ -1,7 +1,7 @@
 /**
  * The store lock, enforced against the tree rather than only written down.
  *
- * Three rules that a reviewer would otherwise have to remember:
+ * Four rules that a reviewer would otherwise have to remember:
  *
  *   1. Greptime is reached only through substrate-mcp. If a collector, the CLI or
  *      the projector grew its own client, redaction and the hash chain would no
@@ -9,8 +9,11 @@
  *   2. No agent gets Greptime as an MCP server of its own. A native Greptime MCP
  *      would be a second, unredacted door to the same table.
  *   3. No Greptime credential is ever committed.
+ *   4. Memory is written only through the governance gate. Same argument as the
+ *      first rule: the reason RBAC, quarantine and exactly-once cannot be
+ *      forgotten is that there is no second door past them.
  *
- * See `docs/greptime-ledger.md`.
+ * See `docs/greptime-ledger.md` and `docs/memory-governance.md`.
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -109,6 +112,58 @@ describe("Greptime is reachable only through substrate-mcp", () => {
 			.filter((path) => /GREPTIME_/.test(read(path)));
 
 		expect(offenders).toEqual([]);
+	});
+});
+
+/**
+ * The two files allowed to know how a memory entry is written.
+ *
+ * `index-store.ts` holds the SQL; `memory-write.ts` is the gate that decides
+ * whether the SQL runs. Everything else — the MCP tools, the REST routes, the
+ * service — goes through `Substrate.writeMemory`, which goes through the gate.
+ */
+const MEMORY_WRITE_PATH = [join(LEDGER_PACKAGE, "index-store.ts"), join(LEDGER_PACKAGE, "memory-write.ts")];
+
+describe("memory is written only through the governance gate", () => {
+	test("nothing outside the MCP server names a memory table in SQL", async () => {
+		// A collector or hook writing memory directly would be a write with no RBAC
+		// check, no quarantine pass, no idempotency key and no read-back — which is
+		// every property the gate exists to provide.
+		const offenders = (await filesMatching("**/*.ts"))
+			.filter((path) => !path.startsWith(LEDGER_PACKAGE))
+			.filter((path) =>
+				/(FROM|INTO|UPDATE|TABLE)\s+"?memory_(entries|writes|reviews|quarantine)"?/i.test(read(path)),
+			);
+
+		expect(offenders).toEqual([]);
+	});
+
+	test("one file inserts an entry, and one file decides that it may", async () => {
+		// Asserted as a set rather than a ceiling: the failure mode is a *new* caller
+		// reaching past the gate, and that shows up here as an extra path.
+		const callers = (await filesMatching("**/*.ts"))
+			.filter((path) => !path.endsWith(".test.ts"))
+			.filter((path) => /\binsertEntry\b/.test(read(path)))
+			.sort();
+
+		expect(callers).toEqual([...MEMORY_WRITE_PATH].sort());
+	});
+
+	test("the service reaches memory only through the gate", async () => {
+		// `Substrate` holds the index, so it *could* call the store's write primitives
+		// directly. It calls governMemoryWrite instead, and that is the whole lock.
+		const service = read(join(LEDGER_PACKAGE, "service.ts"));
+
+		expect(service).toContain("governMemoryWrite");
+		for (const primitive of ["insertEntry", "claimWrite", "quarantineEntry", "enqueueReview", "supersede"]) {
+			expect(service).not.toContain(`index.${primitive}`);
+		}
+	});
+
+	test("no ungoverned writeMemory survives on the store", async () => {
+		// The Phase 0 method took an entry and inserted it. Leaving it in place beside
+		// the gate would have made the gate optional.
+		expect(read(join(LEDGER_PACKAGE, "index-store.ts"))).not.toMatch(/async\s+writeMemory\s*\(/);
 	});
 });
 
