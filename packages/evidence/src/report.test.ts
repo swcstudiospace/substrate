@@ -1,0 +1,153 @@
+import { describe, expect, test } from "bun:test";
+import { buildRecord, type AuditRecord } from "@substrate/audit";
+import { SubstrateInstruments, evaluateSlos } from "@substrate/observability";
+import { buildEvidence, usageForGraph, type EvidenceInput } from "./report.ts";
+
+const SERVICE = { name: "substrate-mcp", version: "0.1.0", instance: "vps-1" };
+
+function records(count: number, decision: "allowed" | "denied" = "allowed"): AuditRecord[] {
+	const out: AuditRecord[] = [];
+	let prev: string | null = null;
+	for (let i = 1; i <= count; i++) {
+		const record = buildRecord(
+			{ surface: "omp", tool: decision === "denied" ? "graph_claim" : "memory_brief", decision, mode: "fail-open" },
+			{ seq: i, prev },
+			new Date(1_790_186_361_000 + i),
+		);
+		out.push(record);
+		prev = record.hash;
+	}
+	return out;
+}
+
+function input(overrides: Partial<EvidenceInput> = {}): EvidenceInput {
+	return {
+		graph_id: "ut-abc123-deadbeef",
+		generated: new Date("2026-09-30T06:54:39.000Z"),
+		service: SERVICE,
+		slos: [],
+		appChain: { ok: true, records: 12 },
+		audit: { chain: { ok: true, records: 3 }, durable: true, path: "/var/lib/substrate/mcp-audit.jsonl", records: records(3) },
+		...overrides,
+	};
+}
+
+describe("buildEvidence", () => {
+	test("marks itself a stub and names what it cannot yet attest to", () => {
+		// An evidence document that overstates itself is worse than one that is honestly
+		// partial.
+		const bundle = buildEvidence(input());
+
+		expect(bundle.stub).toBe(true);
+		expect(bundle.schema).toBe("substrate.evidence/v0");
+		expect(bundle.pending.join(" ")).toContain("Merkle anchor");
+		expect(bundle.pending.join(" ")).toContain("Phase 2");
+	});
+
+	test("carries both chains, separately", () => {
+		const bundle = buildEvidence(input());
+
+		expect(bundle.chains.app_events).toMatchObject({ ok: true, records: 12 });
+		expect(bundle.chains.mcp_audit).toMatchObject({ ok: true, records: 3, durable: true });
+	});
+
+	test("a broken audit chain carries where and why", () => {
+		const bundle = buildEvidence(
+			input({
+				audit: {
+					chain: { ok: false, records: 5, brokenAt: 3, reason: "hash does not match contents" },
+					durable: true,
+					path: "/tmp/a.jsonl",
+					records: records(5),
+				},
+			}),
+		);
+
+		expect(bundle.chains.mcp_audit).toMatchObject({ ok: false, brokenAt: 3, reason: "hash does not match contents" });
+	});
+
+	test("a verified chain carries no brokenAt, so a reader cannot misread one", () => {
+		const bundle = buildEvidence(input());
+		expect("brokenAt" in bundle.chains.mcp_audit).toBe(false);
+	});
+
+	test("says so, in the bundle, when the audit chain is not durable", () => {
+		const bundle = buildEvidence(
+			input({ audit: { chain: { ok: true, records: 1 }, durable: false, path: null, records: records(1) } }),
+		);
+
+		expect(bundle.notes.join(" ")).toContain("not durable");
+		expect(bundle.chains.mcp_audit.path).toBeNull();
+	});
+
+	test("summarises the SLO verdicts without flattening the unjudged into passes", () => {
+		const instruments = new SubstrateInstruments();
+		for (let i = 0; i < 30; i++) instruments.recordBrief({ surface: "omp", ok: true, durationMs: 100 });
+		const slos = evaluateSlos(instruments.snapshot());
+		const bundle = buildEvidence(input({ slos }));
+
+		expect(bundle.slo_summary.ok).toBe(1);
+		expect(bundle.slo_summary.insufficient).toBe(3);
+		expect(bundle.slo_summary.ok + bundle.slo_summary.breached + bundle.slo_summary.insufficient + bundle.slo_summary.unmeasurable).toBe(
+			slos.length,
+		);
+	});
+
+	test("tallies the audit records it was given", () => {
+		const bundle = buildEvidence(input({ audit: { chain: { ok: true, records: 4 }, durable: true, path: "/x", records: records(4, "denied") } }));
+
+		expect(bundle.audit).toMatchObject({ total: 4, allowed: 0, denied: 4 });
+		expect(bundle.audit.byTool).toEqual([{ tool: "graph_claim", allowed: 0, denied: 4 }]);
+	});
+
+	test("an operator's note survives alongside the generated ones", () => {
+		const bundle = buildEvidence(input({ notes: ["collected during the SPE-4793 chaos smoke"] }));
+		expect(bundle.notes).toContain("collected during the SPE-4793 chaos smoke");
+	});
+});
+
+describe("usageForGraph", () => {
+	test("reads this graph's tokens and cost back out of the snapshot", () => {
+		const instruments = new SubstrateInstruments();
+		instruments.recordEmit({
+			surface: "omp",
+			graph_id: "ut-1",
+			kind: "prompt",
+			stored: true,
+			durationMs: 1,
+			payload: { usage: { input_tokens: 500, output_tokens: 100, cost_usd: 0.01 } },
+		});
+		instruments.recordEmit({
+			surface: "omp",
+			graph_id: "ut-2",
+			kind: "prompt",
+			stored: true,
+			durationMs: 1,
+			payload: { usage: { input_tokens: 999, cost_usd: 9 } },
+		});
+
+		expect(usageForGraph(instruments.snapshot(), "ut-1")).toEqual({ inputTokens: 500, outputTokens: 100, costUsd: 0.01 });
+	});
+
+	test("answers null rather than another graph's numbers when the series collapsed", () => {
+		// The cardinality guard being honest about its cost at the one place it is
+		// visible: a graph folded into `_overflow` is not separable, so its totals are
+		// not reported at all.
+		const instruments = new SubstrateInstruments();
+		instruments.recordEmit({
+			surface: "omp",
+			graph_id: "ut-other",
+			kind: "prompt",
+			stored: true,
+			durationMs: 1,
+			payload: { usage: { input_tokens: 7 } },
+		});
+
+		expect(usageForGraph(instruments.snapshot(), "ut-missing")).toBeNull();
+	});
+
+	test("answers null when there is no snapshot at all", () => {
+		expect(usageForGraph(undefined, "ut-1")).toBeNull();
+		expect(usageForGraph(new SubstrateInstruments().snapshot(), "ut-1")).toBeNull();
+	});
+});
