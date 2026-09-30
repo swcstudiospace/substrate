@@ -104,6 +104,11 @@ Concretely, when `append_mode` is absent or cannot be confirmed:
 - `GET /healthz` returns **503** and reports `eventsWritable: false` alongside
   `appendOnly: false | null`. Reachability and writability are separate fields on
   purpose: this is the state where `ping` succeeds while every append is refused.
+  The 503 holds **even when the index is healthy and the brief still composes** —
+  a deployment that configured a ledger and drops every event on the floor is not
+  healthy, and a monitor watching only the status code has to see that. A run with
+  no `GREPTIME_URL` at all is a different thing and is judged on its remaining
+  stores, as before.
 - `SUBSTRATE_ALLOW_DEDUPLICATING_LEDGER=true` appends anyway, and every result
   carries a `warning` saying the event may be dropped.
 

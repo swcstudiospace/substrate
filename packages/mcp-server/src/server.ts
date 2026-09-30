@@ -19,6 +19,27 @@ import type { Surface } from "./types.ts";
 
 const MAX_BODY_BYTES = 1_000_000;
 
+/**
+ * The status `/healthz` answers with.
+ *
+ * A deployment that configured a ledger and cannot write to it is **not** healthy,
+ * even while the brief still composes from the index: appends are fail-closed, so
+ * every event is being dropped on the floor and a monitor watching only the status
+ * code has to see that. Reporting it in the body alone would leave the one state
+ * this hardening exists to catch looking like 200.
+ *
+ * A run with no `GREPTIME_URL` is a different thing — local dev, or a deployment
+ * that deliberately has no ledger — and is judged on its remaining stores, as
+ * before.
+ */
+export function healthStatus(
+	health: { index: boolean; greptime: boolean; eventsWritable: boolean },
+	ledgerConfigured: boolean,
+): number {
+	if (ledgerConfigured && !health.eventsWritable) return 503;
+	return health.index || health.greptime ? 200 : 503;
+}
+
 async function readBody(req: IncomingMessage): Promise<string> {
 	const chunks: Buffer[] = [];
 	let size = 0;
@@ -55,9 +76,7 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig) 
 		try {
 			if (req.method === "GET" && url.pathname === "/healthz") {
 				const health = await substrate.health();
-				// A reachable ledger that refuses every append is not healthy: the write
-				// path is what the events surface exists for.
-				sendJson(res, health.eventsWritable || health.index ? 200 : 503, health);
+				sendJson(res, healthStatus(health, config.greptime !== null), health);
 				return;
 			}
 
