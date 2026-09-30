@@ -472,9 +472,22 @@ Acceptance criteria:
 **Proof:** install into an empty workspace, start a swarm run there, and it
 appears in the ledger and in another agent's brief without anything having been
 edited by hand — the brief non-empty and the claim granted, since a 401 would let
-an empty brief pass for a working one. Meanwhile the installer's own test asserts
-over every generated file that none names Greptime as an MCP server and none
-carries a token literal.
+an empty brief pass for a working one.
+
+Meanwhile the installer's own test asserts over what it produced, and the two
+assertions have **different scopes on purpose**, matching criteria 3 and 4:
+
+| Assertion | Over |
+|---|---|
+| Names Greptime as an MCP server | **every** generated file, workspace or not — store-lock rule 3 has no exception |
+| Carries a token literal | every generated file **under the workspace** — the credential file is the one place a token belongs |
+| Exists, is `0600`, sits outside the workspace and every git checkout, and holds exactly one `SUBSTRATE_TOKEN` and nothing else | the credential file specifically |
+
+Stating it as one sweep over "every generated file" is what made an earlier draft
+of this phase self-contradictory: the installer must write exactly one file that
+holds exactly one token, so a test forbidding token literals everywhere it writes
+could only be satisfied by an install that leaves its agents unable to
+authenticate.
 
 ### S5 — Gate verdicts as substrate events, and verification (SPE-5056)
 
