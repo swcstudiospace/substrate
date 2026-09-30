@@ -7,7 +7,7 @@
  */
 import { composeBrief, type BriefRequest } from "./brief.ts";
 import type { SubstrateConfig } from "./config.ts";
-import { normalizeEvent, verifyChain } from "./event.ts";
+import { inChainOrder, normalizeEvent, normalizeIdentifier, verifyChain } from "./event.ts";
 import { GreptimeClient } from "./greptime.ts";
 import { IndexStore } from "./index-store.ts";
 import { redact } from "./redact.ts";
@@ -65,7 +65,21 @@ export interface EmitResult {
 	stored: boolean;
 	/** Why it was not stored. Redacted, because a connection error can quote a URL. */
 	error?: string;
+	/** Set when the append landed in a ledger that is not configured append-only. */
+	warning?: string;
 }
+
+/**
+ * What a deduplicating ledger is told on every append.
+ *
+ * Without `append_mode`, Greptime drops one of two rows sharing a primary key and
+ * a millisecond, so `stored: true` is a weaker promise than it reads as. Saying
+ * so once at boot is not enough: that line scrolls away and the events keep
+ * coming.
+ */
+const DEDUP_WARNING =
+	"agent_events is not in append_mode: an event sharing a surface, repo, graph, kind and millisecond " +
+	"with another may be silently dropped. See docs/greptime-ledger.md.";
 
 export class Substrate {
 	readonly index: IndexStore | null;
@@ -128,14 +142,30 @@ export class Substrate {
 	 */
 	async emit(input: EventInput): Promise<EmitResult> {
 		let prev: string | null = null;
-		if (this.greptime && input.session_id) {
-			prev = await this.greptime.lastHash(input.session_id).catch(() => null);
+		// The session id is looked up in its stored form, not as it arrived: the
+		// write path normalises it, and querying the raw value would match nothing
+		// and restart the chain on every append.
+		const sessionId = normalizeIdentifier(input.session_id);
+		if (this.greptime && sessionId) {
+			prev = await this.greptime.lastHash(sessionId).catch(() => null);
 		}
 		const event = normalizeEvent(input, prev);
 		if (!this.greptime) return { event, stored: false, error: "GREPTIME_URL is not set" };
+
+		// A ledger that deduplicates cannot honour append-only. Refusing is opt-in:
+		// on a table that predates the option, enforcing by default would take the
+		// event trail offline the moment this deploys.
+		if (this.greptime.appendMode === false && this.config.requireAppendOnly) {
+			return { event, stored: false, error: `SUBSTRATE_REQUIRE_APPEND_ONLY is set and ${DEDUP_WARNING}` };
+		}
+
 		try {
 			await this.greptime.insertEvent(event);
-			return { event, stored: true };
+			return {
+				event,
+				stored: true,
+				...(this.greptime.appendMode === false ? { warning: DEDUP_WARNING } : {}),
+			};
 		} catch (cause) {
 			const error = redact(String(cause));
 			process.stderr.write(`[substrate] event ${event.id} not stored — ${error}\n`);
@@ -214,7 +244,9 @@ export class Substrate {
 		graphId: string,
 	): Promise<{ ok: boolean; events: number; brokenAt?: string; reason?: string }> {
 		if (!this.greptime) return { ok: false, events: 0, reason: "greptime not configured" };
-		const rows = await this.greptime.readEvents("graph_id", graphId);
+		// Read by the graph id in its stored form, for the same reason `emit` looks
+		// the session up by its normalised one.
+		const rows = await this.greptime.readEvents("graph_id", normalizeIdentifier(graphId) ?? graphId);
 
 		const bySession = new Map<string, SubstrateEvent[]>();
 		for (const row of rows) {
@@ -226,16 +258,19 @@ export class Substrate {
 		}
 
 		for (const events of bySession.values()) {
-			const result = verifyChain(events);
+			const result = verifyChain(inChainOrder(events));
 			if (!result.ok) return { ok: false, events: rows.length, brokenAt: result.brokenAt, reason: result.reason };
 		}
 		return { ok: true, events: rows.length };
 	}
 
-	async health(): Promise<{ index: boolean; greptime: boolean }> {
+	/** `appendOnly` is null when the ledger is absent or has not been asked yet. */
+	async health(): Promise<{ index: boolean; greptime: boolean; appendOnly: boolean | null }> {
 		return {
 			index: this.index ? await this.index.ping() : false,
 			greptime: this.greptime ? await this.greptime.ping() : false,
+			// Monitorable, so a deduplicating ledger is not something only a boot log knows.
+			appendOnly: this.greptime?.appendMode ?? null,
 		};
 	}
 }

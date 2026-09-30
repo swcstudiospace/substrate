@@ -54,6 +54,16 @@ function read(path: string): string {
 	return readFileSync(join(ROOT, path), "utf8");
 }
 
+/** Every file git tracks, so the secret scan covers what is actually committed. */
+function trackedFiles(): string[] {
+	const listed = Bun.spawnSync(["git", "ls-files", "-z"], { cwd: ROOT });
+	if (!listed.success) throw new Error(`git ls-files failed: ${listed.stderr.toString()}`);
+	return listed.stdout
+		.toString()
+		.split("\0")
+		.filter((path) => path.length > 0);
+}
+
 describe("Greptime is reachable only through substrate-mcp", () => {
 	test("no package outside the MCP server imports the ledger client", async () => {
 		const offenders = (await filesMatching("**/*.ts"))
@@ -120,11 +130,12 @@ describe("no secrets in the repo", () => {
 		}
 	});
 
-	test("no tracked file carries a Greptime endpoint or credential", async () => {
-		const tracked = [
-			...(await filesMatching("**/*.{ts,json,md,yaml,yml,toml,service,sh}")),
-			".env.example",
-		].filter((path) => path !== relative(ROOT, import.meta.path));
+	test("no tracked file carries a Greptime endpoint or credential", () => {
+		// Asked of git rather than of a glob: the claim is about what is *in the
+		// repository*, so a tracked `.env.production` — exactly where a deployment
+		// credential would sit — has to be covered, while an operator's untracked
+		// local `.env` must not fail their test run.
+		const tracked = trackedFiles().filter((path) => path !== relative(ROOT, import.meta.path));
 
 		// Comments are exempt: `.env.example` has to be able to show the shape of a
 		// Railway host, and the docs have to be able to name one.

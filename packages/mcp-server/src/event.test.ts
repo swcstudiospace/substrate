@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { canonicalJson, eventHash, InvalidEventError, normalizeEvent, verifyChain } from "./event.ts";
+import {
+	canonicalJson,
+	eventHash,
+	inChainOrder,
+	InvalidEventError,
+	normalizeEvent,
+	normalizeIdentifier,
+	verifyChain,
+} from "./event.ts";
 import { REDACTED } from "./redact.ts";
 import type { EventInput, SubstrateEvent } from "./types.ts";
 
@@ -171,5 +179,84 @@ describe("hash chain", () => {
 		const result = verifyChain([a, c]); // b removed
 		expect(result.ok).toBe(false);
 		if (!result.ok) expect(result.reason).toContain("prev");
+	});
+});
+
+describe("inChainOrder", () => {
+	const chain = () => {
+		const a = normalizeEvent(base, null);
+		const b = normalizeEvent({ ...base, summary: "ran cargo build" }, a.hash);
+		const c = normalizeEvent({ ...base, summary: "committed 3f2a1c" }, b.hash);
+		return { a, b, c };
+	};
+
+	test("restores the order a shared millisecond loses", () => {
+		// The regression: with append_mode both rows survive a same-millisecond
+		// append, and Greptime may return them in either order. Verifying what it
+		// happened to return would report a break in an intact chain.
+		const { a, b, c } = chain();
+		expect(verifyChain([c, a, b]).ok).toBe(false);
+		expect(verifyChain(inChainOrder([c, a, b]))).toEqual({ ok: true });
+	});
+
+	test("leaves an already-ordered chain alone", () => {
+		const { a, b, c } = chain();
+		expect(inChainOrder([a, b, c]).map((event) => event.id)).toEqual([a.id, b.id, c.id]);
+	});
+
+	test("orders rows that do not reach back to the first event", () => {
+		// A window into the middle of a session: nothing here has prev === null.
+		const { b, c } = chain();
+		expect(inChainOrder([c, b]).map((event) => event.id)).toEqual([b.id, c.id]);
+	});
+
+	test("still reports a spliced-out event rather than hiding the gap", () => {
+		const { a, c } = chain();
+		const result = verifyChain(inChainOrder([a, c]));
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.reason).toContain("prev");
+	});
+
+	test("still reports a tampered event", () => {
+		// Ordering by `prev` must not make the hash check vacuous.
+		const { a, b } = chain();
+		const result = verifyChain(inChainOrder([a, { ...b, summary: "ran rm -rf /" }]));
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.reason).toContain("hash");
+	});
+
+	test("reports a fork instead of silently following one branch", () => {
+		// Two events claiming the same prev, which concurrent appends can produce.
+		const { a, b } = chain();
+		const rival = normalizeEvent({ ...base, summary: "another agent, same session" }, a.hash);
+		const ordered = inChainOrder([a, b, rival]);
+		expect(ordered).toHaveLength(3); // nothing dropped from the count
+		expect(verifyChain(ordered).ok).toBe(false);
+	});
+
+	test("keeps every event when the chain is a cycle", () => {
+		const { a, b } = chain();
+		expect(inChainOrder([{ ...a, prev: b.hash }, b])).toHaveLength(2);
+	});
+});
+
+describe("normalizeIdentifier", () => {
+	test("matches what normalizeEvent stores, so a lookup by it can hit", () => {
+		// The bug this prevents: `emit` looked the session up by the raw id while
+		// storing a cleaned one, so every append restarted the chain.
+		const raw = `sess-GITHUB_TOKEN=ghp_${"a".repeat(40)}`;
+		expect(normalizeEvent({ ...base, session_id: raw }, null).session_id).toBe(normalizeIdentifier(raw));
+		expect(normalizeIdentifier(raw)).toContain(REDACTED);
+	});
+
+	test("agrees with the stored value for an over-long identifier", () => {
+		const raw = "g".repeat(900);
+		expect(normalizeEvent({ ...base, graph_id: raw }, null).graph_id).toBe(normalizeIdentifier(raw));
+		expect(normalizeIdentifier(raw)?.length).toBe(512);
+	});
+
+	test("leaves an ordinary identifier untouched", () => {
+		expect(normalizeIdentifier("ut-mz3k1q-8a1f2c3d")).toBe("ut-mz3k1q-8a1f2c3d");
+		expect(normalizeIdentifier(undefined)).toBeNull();
 	});
 });

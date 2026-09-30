@@ -11,6 +11,7 @@ import { normalizeEvent } from "./event.ts";
 import {
 	AppendOnlyViolation,
 	assertAppendOnly,
+	chainTip,
 	EVENT_COLUMNS,
 	GreptimeClient,
 	GreptimeError,
@@ -37,13 +38,27 @@ function records(columns: string[], rows: unknown[][]) {
 
 const affected = { output: [{ affectedrows: 1 }] };
 
+/**
+ * The default reply: an escaping dialect, plus `affectedrows` for everything
+ * else. `insertEvent` probes the dialect before it writes, so a stub that cannot
+ * answer the probe makes it refuse any event carrying a backslash.
+ */
+function defaultReply(statement: string): unknown {
+	return statement.includes("LENGTH") ? records(["n"], [[3]]) : affected;
+}
+
+/** The INSERT among the recorded statements — the probe may precede it. */
+function insertStatement(sql: string[]): string {
+	return sql.find((statement) => statement.startsWith("INSERT INTO")) ?? "";
+}
+
 const originalFetch = globalThis.fetch;
 afterEach(() => {
 	globalThis.fetch = originalFetch;
 });
 
 /** Replace `fetch`, recording each statement and replying from `responder`. */
-function stubFetch(responder: (sql: string) => unknown = () => affected): { sql: string[] } {
+function stubFetch(responder: (sql: string) => unknown = defaultReply): { sql: string[] } {
 	const sql: string[] = [];
 	globalThis.fetch = (async (_url: string, init: RequestInit) => {
 		const statement = new URLSearchParams(String(init.body)).get("sql") ?? "";
@@ -139,9 +154,7 @@ describe("insertEvent", () => {
 		const event = normalizeEvent(input, null);
 		await new GreptimeClient(config).insertEvent(event);
 
-		expect(sql).toHaveLength(1);
-		const statement = sql[0] ?? "";
-		expect(statement.startsWith('INSERT INTO "agent_events"')).toBe(true);
+		const statement = insertStatement(sql);
 		expect(statement).toContain(EVENT_COLUMNS.map((column) => `"${column}"`).join(", "));
 		expect(statement).toContain(`'${event.hash}'`);
 		expect(statement).toContain("NULL"); // node_id and prev are absent here
@@ -154,7 +167,42 @@ describe("insertEvent", () => {
 
 		// One literal, closed exactly once: the backslash is doubled and the quote
 		// is doubled, so nothing in the summary is parsed as SQL.
-		expect(sql[0]).toContain("'wrote C:\\\\new'', ''x'");
+		expect(insertStatement(sql)).toContain("'wrote C:\\\\new'', ''x'");
+	});
+
+	test("refuses a backslash before the quoting dialect is known", async () => {
+		// The write would store text that differs from the text the hash covers, and
+		// an append-only table cannot be corrected: that row would fail verification
+		// for as long as it exists. One lost event is the cheaper failure.
+		const { sql } = stubFetch((statement) =>
+			statement.includes("LENGTH") ? new Response("nope", { status: 500 }) : affected,
+		);
+		const event = normalizeEvent({ ...input, summary: "wrote C:\\new" }, null);
+
+		await expect(new GreptimeClient(config).insertEvent(event)).rejects.toThrow(/quoting dialect/);
+		expect(insertStatement(sql)).toBe("");
+	});
+
+	test("still appends an event with no backslash when the probe fails", async () => {
+		// Refusing is scoped to text the dialect actually affects; everything else is
+		// quoted identically either way.
+		const { sql } = stubFetch((statement) =>
+			statement.includes("LENGTH") ? new Response("nope", { status: 500 }) : affected,
+		);
+		await new GreptimeClient(config).insertEvent(normalizeEvent(input, null));
+		expect(insertStatement(sql)).toContain('INSERT INTO "agent_events"');
+	});
+
+	test("counts a backslash that only the payload's JSON encoding introduces", async () => {
+		// A newline in the payload reaches the column as a two-character `\n`, whose
+		// round-trip depends on the same dialect a literal backslash does.
+		const { sql } = stubFetch((statement) =>
+			statement.includes("LENGTH") ? new Response("nope", { status: 500 }) : affected,
+		);
+		const event = normalizeEvent({ ...input, payload: { out: "line one\nline two" } }, null);
+
+		await expect(new GreptimeClient(config).insertEvent(event)).rejects.toThrow(/quoting dialect/);
+		expect(insertStatement(sql)).toBe("");
 	});
 });
 
@@ -312,15 +360,63 @@ describe("migrate", () => {
 
 describe("reads", () => {
 	test("lastHash takes the newest event in the session", async () => {
-		const { sql } = stubFetch(() => records(["hash"], [["abc"]]));
+		const { sql } = stubFetch(() => records(["hash", "prev"], [["abc", "xyz"]]));
 		expect(await new GreptimeClient(config).lastHash("sess-1")).toBe("abc");
 		expect(sql[0]).toContain(`"session_id" = 'sess-1'`);
-		expect(sql[0]).toContain('ORDER BY "ts" DESC LIMIT 1');
+		expect(sql[0]).toContain('ORDER BY "ts" DESC');
 	});
 
 	test("lastHash is null for a session with no events", async () => {
-		stubFetch(() => records(["hash"], []));
+		stubFetch(() => records(["hash", "prev"], []));
 		expect(await new GreptimeClient(config).lastHash("sess-new")).toBeNull();
+	});
+
+	test("lastHash follows the chain when two events share a millisecond", async () => {
+		// The regression: with append_mode both rows survive, and `ORDER BY "ts" DESC`
+		// alone cannot say which came second — Greptime may return either first. Here
+		// it returns the older one first, and taking row 0 would chain onto a hash
+		// that already has a successor, forking the chain.
+		stubFetch(() =>
+			records(
+				["hash", "prev"],
+				[
+					["first", "older"],
+					["second", "first"],
+				],
+			),
+		);
+		expect(await new GreptimeClient(config).lastHash("sess-1")).toBe("second");
+	});
+});
+
+describe("chainTip", () => {
+	test("is the hash nothing else claims as its prev", () => {
+		expect(
+			chainTip([
+				{ hash: "b", prev: "a" },
+				{ hash: "c", prev: "b" },
+				{ hash: "a", prev: null },
+			]),
+		).toBe("c");
+	});
+
+	test("is null when there are no rows", () => {
+		expect(chainTip([])).toBeNull();
+	});
+
+	test("falls back to the newest row when every hash is claimed", () => {
+		// A cycle, or a window that happens to hold only claimed hashes. Rows arrive
+		// newest first, so row 0 is the best available answer.
+		expect(
+			chainTip([
+				{ hash: "a", prev: "b" },
+				{ hash: "b", prev: "a" },
+			]),
+		).toBe("a");
+	});
+
+	test("ignores a row with no usable hash", () => {
+		expect(chainTip([{ hash: null, prev: null }, { hash: "a", prev: null }])).toBe("a");
 	});
 
 	test("readEvents selects every column the chain was hashed over", async () => {

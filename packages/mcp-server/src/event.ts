@@ -68,6 +68,21 @@ function clean(value: string | null | undefined, limit: number): string | null {
 	return redacted.length > 0 ? redacted : null;
 }
 
+/**
+ * Normalise an identifier the same way `normalizeEvent` stores it.
+ *
+ * `session_id`, `graph_id` and `repo` are query keys as well as stored values —
+ * `emit` looks up the previous hash by session, `verifyGraph` reads by graph, the
+ * brief reads by repo. Cleaning them on the write path but querying with the raw
+ * value would mean a lookup that never matches: every event would restart its
+ * session's chain, and verification would find no rows at all. Anything that
+ * reads by one of these columns goes through here, so the two agree by
+ * construction rather than by both remembering to.
+ */
+export function normalizeIdentifier(value: string | null | undefined): string | null {
+	return clean(value, MAX_FIELD);
+}
+
 /** Cap every string inside a JSON-shaped value. */
 function capStrings(value: unknown, limit: number): unknown {
 	if (typeof value === "string") return value.length > limit ? `${value.slice(0, limit)}…[truncated]` : value;
@@ -125,13 +140,13 @@ export function normalizeEvent(input: EventInput, prev: string | null): Substrat
 		id: `evt_${randomUUID().replace(/-/g, "")}`,
 		ts: ts.toISOString(),
 		surface: input.surface,
-		session_id: clean(input.session_id, MAX_FIELD),
-		graph_id: clean(input.graph_id, MAX_FIELD),
-		node_id: clean(input.node_id, MAX_FIELD),
-		linear_identifier: clean(input.linear_identifier, MAX_FIELD),
+		session_id: normalizeIdentifier(input.session_id),
+		graph_id: normalizeIdentifier(input.graph_id),
+		node_id: normalizeIdentifier(input.node_id),
+		linear_identifier: normalizeIdentifier(input.linear_identifier),
 		// A fractional or infinite step would reach a BIGINT column.
 		step: typeof input.step === "number" && Number.isFinite(input.step) ? Math.trunc(input.step) : null,
-		repo: clean(input.repo, MAX_FIELD),
+		repo: normalizeIdentifier(input.repo),
 		branch: clean(input.branch, MAX_FIELD),
 		actor: input.actor === "human" ? "human" : "agent",
 		kind: input.kind,
@@ -141,6 +156,49 @@ export function normalizeEvent(input: EventInput, prev: string | null): Substrat
 	};
 
 	return { ...unhashed, hash: eventHash(unhashed) };
+}
+
+/**
+ * Put a session's events in chain order before verifying them.
+ *
+ * `ORDER BY "ts"` cannot do this on its own. `agent_events` is in append_mode, so
+ * two events may share a millisecond and Greptime is free to return them in
+ * either order — and `verifyChain` would then report a break in a chain that is
+ * perfectly intact. `prev` carries the order the timestamp lost, so follow it.
+ *
+ * This does not weaken what verification catches. `verifyChain` recomputes every
+ * hash, so tampering is still detected; an event spliced out leaves the events
+ * after it unreachable from the walk, and they are appended unlinked so the
+ * `prev` mismatch is still reported. A fork — two events claiming the same `prev`,
+ * which concurrent appends in one session can still produce — likewise leaves one
+ * branch unlinked and is reported. What it stops reporting is a database's
+ * arbitrary tie-break, which was never an integrity property.
+ */
+export function inChainOrder(events: SubstrateEvent[]): SubstrateEvent[] {
+	if (events.length < 2) return events;
+
+	const next = new Map<string | null, SubstrateEvent>();
+	for (const event of events) if (!next.has(event.prev)) next.set(event.prev, event);
+	const present = new Set(events.map((event) => event.hash));
+
+	// The chain starts at the event with no predecessor, or — when the rows do not
+	// reach back that far — at the one whose predecessor is not among them.
+	const start =
+		events.find((event) => event.prev === null) ?? events.find((event) => !present.has(event.prev ?? ""));
+	if (!start) return events; // every event is claimed: a cycle, for verifyChain to report
+
+	const ordered: SubstrateEvent[] = [];
+	const seen = new Set<string>();
+	let current: SubstrateEvent | undefined = start;
+	while (current && !seen.has(current.hash)) {
+		ordered.push(current);
+		seen.add(current.hash);
+		current = next.get(current.hash);
+	}
+	// Whatever did not link in is a real break. Keep it, so it is reported rather
+	// than quietly dropped from the count.
+	for (const event of events) if (!seen.has(event.hash)) ordered.push(event);
+	return ordered;
 }
 
 /**

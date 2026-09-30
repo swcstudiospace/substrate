@@ -160,3 +160,103 @@ describe("migrate", () => {
 		expect(result.errors).toContain("greptime: agent_events is not in append_mode");
 	});
 });
+
+describe("append-mode enforcement", () => {
+	const input: EventInput = { surface: "omp", kind: "shell", summary: "ran cargo test", session_id: "sess-1" };
+
+	function ledger(appendMode: boolean | null) {
+		const written: SubstrateEvent[] = [];
+		return {
+			written,
+			greptime: {
+				appendMode,
+				lastHash: async () => null,
+				insertEvent: async (event: SubstrateEvent) => {
+					written.push(event);
+				},
+				ping: async () => true,
+			},
+		};
+	}
+
+	test("warns on every append while the ledger deduplicates", async () => {
+		// One line at boot is not enough: it scrolls away and the events keep coming.
+		const { greptime } = ledger(false);
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: greptime as never });
+
+		const result = await substrate.emit(input);
+
+		expect(result.stored).toBe(true);
+		expect(result.warning).toContain("append_mode");
+	});
+
+	test("says nothing extra once the table is append-only", async () => {
+		const { greptime } = ledger(true);
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: greptime as never });
+		expect((await substrate.emit(input)).warning).toBeUndefined();
+	});
+
+	test("refuses the append when SUBSTRATE_REQUIRE_APPEND_ONLY is set", async () => {
+		const { written, greptime } = ledger(false);
+		const config = loadConfig({ SUBSTRATE_REQUIRE_APPEND_ONLY: "true" });
+		const substrate = new Substrate(config, { index: null, greptime: greptime as never });
+
+		const result = await substrate.emit(input);
+
+		expect(result.stored).toBe(false);
+		expect(result.error).toContain("SUBSTRATE_REQUIRE_APPEND_ONLY");
+		expect(written).toEqual([]);
+	});
+
+	test("the flag is off unless asked for, so deploying this does not stop the trail", async () => {
+		expect(loadConfig({}).requireAppendOnly).toBe(false);
+		expect(loadConfig({ SUBSTRATE_REQUIRE_APPEND_ONLY: "1" }).requireAppendOnly).toBe(true);
+		expect(loadConfig({ SUBSTRATE_REQUIRE_APPEND_ONLY: "false" }).requireAppendOnly).toBe(false);
+	});
+
+	test("healthz reports append-only state, so it is monitorable", async () => {
+		const { greptime } = ledger(false);
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: greptime as never });
+		expect(await substrate.health()).toEqual({ index: false, greptime: true, appendOnly: false });
+	});
+});
+
+describe("identifier lookups", () => {
+	test("looks the session up by the id it will store, not the one it was given", async () => {
+		// The bug: the raw id was used for the lookup while a cleaned one was stored,
+		// so lastHash never matched and every append restarted the chain.
+		const asked: string[] = [];
+		const greptime = {
+			appendMode: true,
+			lastHash: async (sessionId: string) => {
+				asked.push(sessionId);
+				return "prev-hash";
+			},
+			insertEvent: async () => undefined,
+		};
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: greptime as never });
+
+		const raw = `sess-GITHUB_TOKEN=ghp_${"a".repeat(40)}`;
+		const result = await substrate.emit({ surface: "omp", kind: "note", summary: "x", session_id: raw });
+
+		expect(asked).toEqual([result.event.session_id ?? ""]);
+		expect(asked[0]).not.toBe(raw);
+		expect(result.event.prev).toBe("prev-hash");
+	});
+
+	test("verifyGraph reads by the stored form of the graph id", async () => {
+		const asked: Array<[string, string]> = [];
+		const greptime = {
+			appendMode: true,
+			readEvents: async (column: "graph_id", value: string) => {
+				asked.push([column, value]);
+				return [];
+			},
+		};
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: greptime as never });
+
+		await substrate.verifyGraph("ut-1".padEnd(900, "x"));
+
+		expect(asked[0]?.[1].length).toBe(512);
+	});
+});

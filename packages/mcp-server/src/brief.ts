@@ -6,6 +6,7 @@
  * fewer sections is still useful, and a missing store must degrade rather than
  * throw, because this text sits on the critical path of every prompt.
  */
+import { normalizeIdentifier } from "./event.ts";
 import type { GreptimeClient } from "./greptime.ts";
 import { quote } from "./greptime.ts";
 import type { IndexStore } from "./index-store.ts";
@@ -114,12 +115,13 @@ export async function composeBrief(request: BriefRequest, sources: BriefSources)
 		lines.push("This graph is not in the index yet.");
 	}
 
-	// Recent actions in this repo, from any surface.
+	// Recent actions in this repo, from any surface. The repo is matched in the form
+	// the write path stores it, not as the caller spelled it — see normalizeIdentifier.
 	if (sources.greptime && repo) {
 		const rows = await sources.greptime
 			.sql(
 				`SELECT "ts", "surface", "summary", "node_id", "step" FROM "agent_events"
-				 WHERE "repo" = ${quote(repo)} AND "kind" NOT IN ('session.start','session.end')
+				 WHERE "repo" = ${quote(normalizeIdentifier(repo) ?? repo)} AND "kind" NOT IN ('session.start','session.end')
 				 ORDER BY "ts" DESC LIMIT ${RECENT_ACTION_LIMIT}`,
 			)
 			.catch(swallow("recent actions", [] as Array<Record<string, unknown>>));

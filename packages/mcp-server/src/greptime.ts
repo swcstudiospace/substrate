@@ -44,6 +44,45 @@ export const EVENT_COLUMNS = [
 /** `"ts", "id", …` — the column list as SQL, quoted because Greptime reserves `id`. */
 export const EVENT_COLUMN_LIST = EVENT_COLUMNS.map((column) => `"${column}"`).join(", ");
 
+/**
+ * How many of a session's newest rows `lastHash` reads to find the chain tip.
+ *
+ * More than one, because `ORDER BY "ts" DESC LIMIT 1` cannot break a tie: the
+ * table is in append_mode, so two events may share a millisecond and Greptime is
+ * free to return either first. Bounded, because this runs on every append.
+ */
+const TIP_WINDOW = 50;
+
+/**
+ * The tip of a hash chain: the event nothing else points back to.
+ *
+ * Within a window of a session's newest rows, the newest is the one whose `hash`
+ * no other row claims as its `prev`. The chain carries the order that a
+ * millisecond timestamp loses. Falls back to the first row — newest by `ts` —
+ * when the window holds no identifiable tip.
+ */
+/**
+ * Whether any value this event will store carries a backslash.
+ *
+ * The payload is stored as JSON, so its own escaping counts: a newline inside it
+ * reaches the column as a `\n` two-character sequence, and how the server reads
+ * that back depends on the same dialect a literal backslash does.
+ */
+function carriesBackslash(event: SubstrateEvent): boolean {
+	if (JSON.stringify(event.payload).includes("\\")) return true;
+	return EVENT_COLUMNS.some((column) => {
+		const value = event[column];
+		return typeof value === "string" && value.includes("\\");
+	});
+}
+
+export function chainTip(rows: Array<Record<string, unknown>>): string | null {
+	const hashes = rows.filter((row) => typeof row.hash === "string").map((row) => String(row.hash));
+	if (hashes.length === 0) return null;
+	const claimed = new Set(rows.filter((row) => typeof row.prev === "string").map((row) => String(row.prev)));
+	return hashes.find((hash) => !claimed.has(hash)) ?? hashes[0] ?? null;
+}
+
 interface GreptimeResponse {
 	output?: Array<{
 		records?: {
@@ -141,6 +180,13 @@ export class GreptimeClient {
 	/** Whether the server reads `\` in a literal as an escape. Assumed until probed. */
 	private backslashEscapes = true;
 	private dialectProbed = false;
+
+	/**
+	 * Whether `agent_events` is in append_mode, as last observed. `null` until
+	 * asked. Cached so callers can report a deduplicating ledger on every append,
+	 * rather than it being one line in a boot log that has scrolled away.
+	 */
+	appendMode: boolean | null = null;
 
 	constructor(
 		private readonly config: GreptimeConfig,
@@ -315,10 +361,24 @@ export class GreptimeClient {
 			.join(" ");
 		// Greptime prints the option unquoted (`append_mode = 'true'`); the DDL we
 		// send quotes the key. Tolerate both rather than reporting a false mismatch.
-		return /append_mode'?\s*=\s*'?true/i.test(ddl);
+		this.appendMode = /append_mode'?\s*=\s*'?true/i.test(ddl);
+		return this.appendMode;
 	}
 
 	async insertEvent(event: SubstrateEvent): Promise<void> {
+		// Retried until it succeeds, because until the dialect is known a backslash
+		// cannot be quoted safely. The probe is one small SELECT and its answer is
+		// cached for the process.
+		await this.probeDialect();
+		if (!this.dialectProbed && carriesBackslash(event)) {
+			// Refusing costs one event. Writing would store text that differs from the
+			// text the hash was computed over, and an append-only table cannot be
+			// corrected — that row would fail verification for as long as it exists,
+			// and take its session's chain with it.
+			throw new GreptimeError(
+				"refusing to append an event containing a backslash before the server's quoting dialect is known",
+			);
+		}
 		const cell = (column: (typeof EVENT_COLUMNS)[number]): string => {
 			if (column === "payload") return this.q(JSON.stringify(event.payload));
 			const value = event[column];
@@ -331,10 +391,10 @@ export class GreptimeClient {
 	/** Latest event hash for a session — the `prev` of the next one. */
 	async lastHash(sessionId: string): Promise<string | null> {
 		const rows = await this.sql(
-			`SELECT "hash" FROM "agent_events" WHERE "session_id" = ${this.q(sessionId)} ORDER BY "ts" DESC LIMIT 1`,
+			`SELECT "hash", "prev" FROM "agent_events" WHERE "session_id" = ${this.q(sessionId)}
+			 ORDER BY "ts" DESC LIMIT ${TIP_WINDOW}`,
 		);
-		const hash = rows[0]?.hash;
-		return typeof hash === "string" ? hash : null;
+		return chainTip(rows);
 	}
 
 	/** Every stored column for one session or graph, oldest first, for chain verification. */

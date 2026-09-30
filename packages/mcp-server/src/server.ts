@@ -88,6 +88,7 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig) 
 					hash: result.event.hash,
 					stored: result.stored,
 					...(result.error ? { error: result.error } : {}),
+					...(result.warning ? { warning: result.warning } : {}),
 				});
 				return;
 			}

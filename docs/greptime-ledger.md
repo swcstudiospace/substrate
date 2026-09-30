@@ -86,6 +86,26 @@ INSERT INTO "agent_events_v2" SELECT * FROM "agent_events";
 Run it from Greptime's own console rather than through `substrate-mcp` — the
 client will not send those statements (see below), and that is deliberate.
 
+### Until it is recreated
+
+A table without `append_mode` is a real, current risk, not a theoretical one:
+rapid `file.edit` events from one collector share a surface, repo, graph and kind,
+so two in the same millisecond is plausible and one of them is dropped.
+
+The substrate does not pretend otherwise, and does not decide for the operator:
+
+- `GET /healthz` reports `appendOnly: true | false | null`, so the state is
+  monitorable rather than known only to a boot log.
+- every `emit` that lands in a deduplicating ledger carries a `warning`, on both
+  `events_emit` and `POST /events`.
+- `SUBSTRATE_REQUIRE_APPEND_ONLY=true` makes it **refuse** to append instead,
+  returning `stored: false`.
+
+That flag is **off by default**, deliberately. Turning it on before the table is
+recreated would stop the event trail on the first deploy, and losing every event
+is worse than losing the occasional colliding one. Recreate the table, then set
+it — from that point append-only is enforced rather than reported.
+
 ## What the write path guarantees
 
 `Substrate.emit` → `normalizeEvent` → `GreptimeClient.insertEvent`.
@@ -103,11 +123,34 @@ patterns are in `redact.ts`, ported from `grok-hermes-connector`'s
 whole payload 16 KB, above which it is replaced by a marker rather than
 half-written.
 
+**Consistent identifiers.** `session_id`, `graph_id` and `repo` are query keys as
+well as stored values — `emit` finds the previous hash by session, `verifyGraph`
+reads by graph, the brief reads by repo. Because the write path redacts and caps
+them, every read goes through the same `normalizeIdentifier`, so the stored and
+queried forms agree by construction. Cleaning on write while querying the raw
+value would mean a lookup that never matches: every event would restart its
+session's chain, and verification would find no rows at all.
+
 **The hash chain, computed on ingest.** `hash` is sha256 over the canonical JSON
 of every other field, `prev` included, so reordering is detectable. `prev` is the
 previous event's hash *within the session*. Phase 6 anchors hourly Merkle roots
 to Solana, but you cannot retrofit integrity onto an append-only log, so the
 chain is correct from row one. `substrate verify <graph_id>` recomputes it.
+
+**Chain order, not timestamp order.** Once the table is append-only, two events
+can share a millisecond and both survive — and Greptime is then free to return
+them in either order. So `ORDER BY "ts"` alone is not enough: `lastHash` reads a
+bounded window of a session's newest rows and takes the tip, the hash no other row
+claims as its `prev`; `verifyGraph` puts each session's events in chain order
+before verifying. This does not weaken verification — hashes are still recomputed,
+and a spliced-out event, a tampered one or a fork all leave events that do not link
+into the walk, which are kept so the break is still reported. What it stops
+reporting is a database's arbitrary tie-break, which was never an integrity
+property.
+
+Two genuinely concurrent appends in one session can still read the same `prev` and
+fork the chain. That is inherent to computing `prev` with a read-then-write and no
+sequence column; the fork is *detected* by `verify`, not prevented.
 
 **Append-only, structurally.** Every statement passes `assertAppendOnly` before
 it leaves the client. It is deny-by-default — only `select`, `insert`, `create`,
@@ -125,9 +168,17 @@ depends on the server, and getting it wrong either corrupts the stored text —
 which breaks the chain the moment the row is read back, since the hash was
 computed over the text as submitted — or lets a summary close its own literal.
 So the client asks: `SELECT LENGTH('a\\b')` is 3 where backslash escapes and 4
-where it does not. The answer is probed once at migrate and cached. Until it is
-known, the client assumes the escaping dialect, whose failure mode is a doubled
-backslash rather than an injection.
+where it does not. The answer is probed once at migrate and cached, and retried on
+each append until it succeeds.
+
+While it is still unknown, an event whose stored text carries **no** backslash is
+appended normally — it quotes identically either way — and one that does is
+**refused**, surfacing as `stored: false`. Writing it would store text that
+differs from the text its hash covers, and an append-only table cannot be
+corrected: that row would fail verification for as long as it exists and take its
+session's chain with it. One lost event is the cheaper failure. The payload counts
+here too, since it is stored as JSON and a newline inside it reaches the column as
+a two-character `\n`.
 
 **An honest result.** `emit` returns `stored`. The substrate fails open — an
 unreachable event store must never fail an agent's turn — but a caller that gets
@@ -148,6 +199,12 @@ Four variables, read from the environment and never from this repo:
 | `GREPTIME_USER` | basic-auth user; sent as a header, never in the URL |
 | `GREPTIME_PASSWORD` | basic-auth password |
 | `GREPTIME_DB` | database; defaults to `public` |
+
+Plus one switch, which is not a credential:
+
+| | |
+| --- | --- |
+| `SUBSTRATE_REQUIRE_APPEND_ONLY` | `true` refuses to append when the table is not in `append_mode`. Off by default; see above. |
 
 `.env.example` declares all four and fills none of them in. The real values live
 only in `/etc/substrate/substrate.env` on the VPS — root-owned, `chmod 0600`,

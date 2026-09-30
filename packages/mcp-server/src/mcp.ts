@@ -101,11 +101,18 @@ export function createMcpServer(substrate: Substrate, callerSurface: Surface | n
 			},
 		},
 		async (args) => {
-			const { event, stored, error } = await substrate.emit({
+			const { event, stored, error, warning } = await substrate.emit({
 				...args,
 				surface: args.surface ?? callerSurface ?? "claude-code",
 			});
-			return json({ id: event.id, ts: event.ts, hash: event.hash, stored, ...(error ? { error } : {}) });
+			return json({
+				id: event.id,
+				ts: event.ts,
+				hash: event.hash,
+				stored,
+				...(error ? { error } : {}),
+				...(warning ? { warning } : {}),
+			});
 		},
 	);
 
