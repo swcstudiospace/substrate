@@ -35,7 +35,7 @@ The order is the design, not an implementation detail.
 | 1 | Shape | `memory-policy.ts` | `denied` — `scope.malformed`, `kind.unknown`, `ttl.unknown`, `text.empty` |
 | 2 | RBAC, default-deny | `memory-policy.ts` | `denied` — `rbac.no-grant` |
 | 3 | Quarantine | `memory-classify.ts` | `quarantined` — `quarantine.secret` / `.pii` / `.speculative` |
-| 4 | Exactly-once | `memory-write.ts` | `conflict` — `write.in-flight`, or a replay |
+| 4 | Exactly-once | `memory-write.ts` | `conflict` — `write.in-flight`, `write.superseded`, or a replay |
 | 5 | Conflict, insert, read-back | `memory-write.ts` | `conflict` — `review.required`, `version.required`, `version.stale`, `version.raced` |
 
 **Why RBAC before the content check.** Storing text from a writer that has no
@@ -234,6 +234,12 @@ the decision was ever taken.
 - Each hand-over mints a **fencing token**, and every later statement about the claim
   carries it. Without one, an attempt that merely ran slow past the in-flight timeout
   could come back and finish — or delete — the claim that replaced it.
+- **The insert carries the token too**, checked inside the insert's own transaction and
+  under the same row lock the hand-over takes. Fencing only the bookkeeping leaves the
+  timed-out attempt still running and still reaching the insert, which for an appending
+  kind is two visible entries for one write — the duplicate the claim exists to
+  prevent. A fenced-out attempt writes nothing and answers
+  `conflict / write.superseded`; the retry that took the key over owns the write.
 - A claim **reserves the id** of the row it is about to write. So when a successor takes
   over an abandoned claim, it looks for that row first: if the dead attempt committed
   and died before acknowledging it, the entry is returned (`recovered.orphan`) rather

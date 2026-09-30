@@ -440,9 +440,29 @@ export class IndexStore implements MemoryStore {
 	 * invariant rather than a convention, which means the retire and the insert
 	 * cannot be two statements: either order leaves a window where the invariant is
 	 * false. So they are one.
+	 *
+	 * The claim check is inside that same transaction, and takes the same row lock
+	 * `claimWrite` takes. That is what makes the fencing real rather than advisory: a
+	 * takeover and an insert under the one key serialise on the `memory_writes` row,
+	 * so either the takeover goes first and this insert finds a stranger's holder and
+	 * writes nothing, or this insert goes first and the takeover sees the entry it
+	 * reserved and recovers it. Checking ownership before the transaction would leave
+	 * exactly the window the fencing token exists to close.
 	 */
-	async insertEntry(row: NewMemoryEntry): Promise<{ ok: true; entry: MemoryEntry } | { ok: false; reason: "standing-moved" }> {
+	async insertEntry(
+		row: NewMemoryEntry,
+		claim: { key: string; holder: string },
+	): Promise<{ ok: true; entry: MemoryEntry } | { ok: false; reason: "standing-moved" | "claim-lost" }> {
 		return (await this.sql.begin(async (tx: SQL) => {
+			const held = (await tx`
+				select holder, outcome from memory_writes where idempotency_key = ${claim.key}
+				for update`) as Array<Record<string, unknown>>;
+			const owner = held[0];
+			// No row means the claim was released; a different holder means it was taken
+			// over. Both say the same thing: this attempt is no longer the one writing.
+			if (!owner || owner.holder !== claim.holder || String(owner.outcome) !== "in-flight") {
+				return { ok: false as const, reason: "claim-lost" as const };
+			}
 			if (row.supersedes) {
 				const retired = (await tx`
 					update memory_entries set superseded_by = ${row.id}
@@ -464,7 +484,7 @@ export class IndexStore implements MemoryStore {
 					${row.reverify_after}, ${row.idempotency_key})
 				returning *`) as Array<Record<string, unknown>>;
 			return { ok: true as const, entry: toMemoryEntry(inserted[0]!) };
-		})) as { ok: true; entry: MemoryEntry } | { ok: false; reason: "standing-moved" };
+		})) as { ok: true; entry: MemoryEntry } | { ok: false; reason: "standing-moved" | "claim-lost" };
 	}
 
 	async readEntry(id: string): Promise<MemoryEntry | null> {
