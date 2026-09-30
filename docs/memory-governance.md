@@ -232,8 +232,9 @@ the decision was ever taken.
   nothing; treating it as "nothing happened" is how one write becomes two entries. So
   the claim is held across the whole in-doubt window. The cost is a key held for the
   in-flight timeout after a genuine outage, after which the successor takes it over and
-  either recovers the row this attempt reserved or writes its own — both exactly-once.
-  An abandoned claim is recoverable; a duplicate entry is not.
+  either recovers the row this attempt reserved or, inheriting the same reservation,
+  writes it — both exactly-once. An abandoned claim is recoverable; a duplicate entry
+  is not.
 - The commit is **acknowledged before the read-back**, not after. Everything after the
   insert can throw, and an unacknowledged row is a row the retry would write again.
 - Each hand-over mints a **fencing token**, and every later statement about the claim
@@ -245,10 +246,20 @@ the decision was ever taken.
   kind is two visible entries for one write — the duplicate the claim exists to
   prevent. A fenced-out attempt writes nothing and answers
   `conflict / write.superseded`; the retry that took the key over owns the write.
-- A claim **reserves the id** of the row it is about to write. So when a successor takes
-  over an abandoned claim, it looks for that row first: if the dead attempt committed
-  and died before acknowledging it, the entry is returned (`recovered.orphan`) rather
-  than written a second time.
+- A claim **reserves the id** of the row it is about to write, and a hand-over *keeps*
+  the reservation rather than replacing it. So when a successor takes over an abandoned
+  claim, it looks for that row first: if the dead attempt committed and died before
+  acknowledging it, the entry is returned (`recovered.orphan`) rather than written a
+  second time — and a recovered global write also closes the proposal it came from,
+  since the acknowledgement died and not the review.
+- When that row turns out not to exist, the successor inserts **under the same reserved
+  id**. A crash then stays recoverable without another write, and an attempt that was
+  fenced out but is still running collides on the primary key instead of adding a second
+  row: sharing the reservation makes the insert itself mutually exclusive.
+- That lookup's failure is **never swallowed**. An error is not evidence the row is
+  absent, and treating it as such would insert a second entry under a key that already
+  has one. Failing the write costs a retry, which is recoverable; a duplicate memory is
+  not.
 
 A replay re-runs the read-back, so a write that came back
 `accepted / verified_persisted: false` is confirmed by retrying it with the same

@@ -114,7 +114,9 @@ export type ClaimResult =
 			/**
 			 * The entry id reserved by the abandoned attempt this claim took over, or null
 			 * for a fresh claim. An attempt can insert its row and die before recording
-			 * that it did, so the successor has to look before writing again.
+			 * that it did, so the successor has to look before writing again — and, when
+			 * the row is not there, insert under this same id rather than a new one. The
+			 * store keeps the reservation on the claim for exactly that reason.
 			 */
 			tookOverFrom: string | null;
 	  }
@@ -367,6 +369,10 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 	// row and then dies is otherwise indistinguishable from one that never got that far,
 	// and its successor has to guess — which means either duplicating the row or losing
 	// it. Reserving the id removes the guess.
+	//
+	// On taking over an abandoned in-flight claim the store keeps that claim's
+	// reservation rather than replacing it with this one, so the pointer to a row that
+	// may already exist is never overwritten before it has been resolved. See `rowId`.
 	const entryId = newId("mem");
 	const claim = await store.claimWrite({ key, explicit: explicitKey !== null, entryHash, entryId });
 	if (!claim.claimed) return await replay(store, key, claim.existing, grant.name);
@@ -374,24 +380,46 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 
 	// Taking over an abandoned claim is not the same as finding nothing done. Look for
 	// the row that attempt reserved before writing another one.
-	if (claim.tookOverFrom) {
-		const orphan = await store.readEntry(claim.tookOverFrom).catch(() => null);
-		if (orphan) {
-			await store.finishWrite(key, holder, "accepted", orphan.id).catch(() => undefined);
-			return {
-				outcome: "accepted",
-				reason: "recovered.orphan",
-				remedy:
-					"A previous attempt under this key had already written this entry but died before acknowledging " +
-					"it. That entry is returned; nothing was written again.",
-				verified_persisted: orphan.entry_hash === entryHash,
-				idempotency_key: key,
-				entry: orphan,
-				deduplicated: true,
-				grant: grant.name,
-			};
+	//
+	// This read is deliberately *not* caught. An error here is not evidence that the
+	// row is absent, and treating it as such would insert a second entry under a key
+	// that already has one — the precise failure the reservation exists to prevent.
+	// Failing the write instead costs a retry, which is recoverable; a duplicate memory
+	// is not.
+	const orphan = claim.tookOverFrom ? await store.readEntry(claim.tookOverFrom) : null;
+	if (orphan) {
+		// A recovered global write is installed, so its proposal is no longer pending —
+		// the acknowledgement died, not the review. Leaving it in the queue would have a
+		// reviewer weighing a decision that is already in force.
+		if (orphan.entry_hash === entryHash && reviewed && scope.class === "global") {
+			await store.releaseReviews(entryHash, orphan.id, writer).catch(() => undefined);
 		}
+		await store.finishWrite(key, holder, "accepted", orphan.id).catch(() => undefined);
+		return {
+			outcome: "accepted",
+			reason: "recovered.orphan",
+			remedy:
+				"A previous attempt under this key had already written this entry but died before acknowledging " +
+				"it. That entry is returned; nothing was written again.",
+			verified_persisted: orphan.entry_hash === entryHash,
+			idempotency_key: key,
+			entry: orphan,
+			deduplicated: true,
+			grant: grant.name,
+		};
 	}
+
+	/**
+	 * The id this attempt will insert under.
+	 *
+	 * When an abandoned claim's reserved row turned out not to exist, this attempt takes
+	 * that id over rather than minting a fresh one. Two reasons, and the second is the
+	 * better one: the claim row already points at it, so a crash here stays recoverable
+	 * without another write; and if the attempt we fenced out is in fact still alive and
+	 * inserts after us, it collides on the primary key instead of adding a second row.
+	 * Sharing the reservation makes the insert itself mutually exclusive.
+	 */
+	const rowId = claim.tookOverFrom ?? entryId;
 
 	// ── 5. conflict, insert, read-back ─────────────────────────────────────────
 	// True from the moment the insert is *attempted*, not from the moment it returns.
@@ -405,8 +433,9 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 	// So the claim is kept over the entire window in which a row might exist, and let
 	// go only where nothing can have been written. The cost is a key held for the
 	// in-flight timeout after a genuine outage; the successor then takes it over, looks
-	// for the id this attempt reserved, and either recovers that row or writes its own.
-	// Both are exactly-once. A released key in doubt is not.
+	// for the id this attempt reserved, and either recovers that row or — since it
+	// inherits the same reservation — writes it. Both are exactly-once. A released key
+	// in doubt is not.
 	let mayHaveWritten = false;
 	try {
 		const plan = conflictPlan(scope, kind, subject !== null);
@@ -470,7 +499,7 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 
 		const row: NewMemoryEntry = {
 			...baseRow,
-			id: entryId,
+			id: rowId,
 			idempotency_key: key,
 			conflict_key: identity,
 			version: standing ? standing.version + 1 : 1,
