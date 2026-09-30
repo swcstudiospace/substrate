@@ -45,13 +45,17 @@ export const EVENT_COLUMNS = [
 export const EVENT_COLUMN_LIST = EVENT_COLUMNS.map((column) => `"${column}"`).join(", ");
 
 /**
- * How many of a session's newest rows `lastHash` reads to find the chain tip.
+ * Upper bound on the rows `lastHash` will pull for one session.
  *
- * More than one, because `ORDER BY "ts" DESC LIMIT 1` cannot break a tie: the
- * table is in append_mode, so two events may share a millisecond and Greptime is
- * free to return either first. Bounded, because this runs on every append.
+ * This is a memory guard, not an ordering assumption. It deliberately cannot be
+ * reached by ordinary use — a window small enough to be crossed would reintroduce
+ * the bug it replaced, where a backfill appending older source timestamps pushed
+ * the real chain tip out of view and the next append forked the chain.
  */
-const TIP_WINDOW = 50;
+const MAX_SESSION_ROWS = 10_000;
+
+/** How long a definite `append_mode` answer is trusted before it is asked again. */
+const APPEND_MODE_TTL_MS = 30_000;
 
 /**
  * The tip of a hash chain: the event nothing else points back to.
@@ -187,6 +191,7 @@ export class GreptimeClient {
 	 * rather than it being one line in a boot log that has scrolled away.
 	 */
 	appendMode: boolean | null = null;
+	private appendModeCheckedAt = 0;
 
 	constructor(
 		private readonly config: GreptimeConfig,
@@ -200,6 +205,18 @@ export class GreptimeClient {
 			headers.authorization = `Basic ${basic}`;
 		}
 		return headers;
+	}
+
+	/**
+	 * Whether the server's quoting dialect is known.
+	 *
+	 * While it is not, every event carrying a backslash is refused — including one
+	 * whose payload JSON introduces it — so the ledger is only partly writable, and
+	 * a health check that ignored this would report a writable ledger while events
+	 * were being turned away.
+	 */
+	get quotingDialectKnown(): boolean {
+		return this.dialectProbed;
 	}
 
 	/** Quote using whatever dialect the server reported. */
@@ -352,16 +369,30 @@ export class GreptimeClient {
 	}
 
 	/**
-	 * Whether the ledger is proven append-only, asking again if it is not yet known.
+	 * Whether the ledger is proven append-only, re-asking when the answer is stale.
 	 *
-	 * `appendMode` is cached once answered, so this costs a query only while the
-	 * answer is still `null` — a `SHOW CREATE TABLE` that failed at boot, say. That
-	 * retry matters: without it one transient failure would leave the write path
-	 * refusing every event for the life of the process.
+	 * The answer cannot be cached for the life of the process. Fixing a
+	 * deduplicating table means recreating it *outside* this process — the client
+	 * refuses `ALTER` and `RENAME` by design — so a permanently cached `false` would
+	 * leave the write path refusing every event, and `/healthz` red, until someone
+	 * thought to restart the service. The operator would have done the documented
+	 * fix and seen nothing change. The converse matters too: a table swapped back to
+	 * a deduplicating one must stop being treated as safe.
+	 *
+	 * So a definite answer is trusted for {@link APPEND_MODE_TTL_MS} and an unknown
+	 * one is retried immediately, which also keeps a transient `SHOW CREATE TABLE`
+	 * failure from becoming a lasting outage. The steady-state cost is one cheap
+	 * query per TTL, not one per append.
 	 */
-	async ensureAppendMode(): Promise<boolean | null> {
-		if (this.appendMode !== null) return this.appendMode;
-		return this.appendModeEnabled();
+	async ensureAppendMode(now = Date.now()): Promise<boolean | null> {
+		if (this.appendMode !== null && now - this.appendModeCheckedAt < APPEND_MODE_TTL_MS) {
+			return this.appendMode;
+		}
+		const answer = await this.appendModeEnabled();
+		// A failed check leaves the previous answer in place rather than widening the
+		// refusal; the next call retries, because `appendModeCheckedAt` did not move.
+		if (answer !== null) this.appendModeCheckedAt = now;
+		return answer ?? this.appendMode;
 	}
 
 	/**
@@ -406,14 +437,25 @@ export class GreptimeClient {
 		await this.sql(`INSERT INTO "agent_events" (${EVENT_COLUMN_LIST}) VALUES (${values})`);
 	}
 
-	/** Latest event hash for a session — the `prev` of the next one. */
+	/**
+	 * Latest event hash for a session — the `prev` of the next one.
+	 *
+	 * Reads the whole session rather than a window of its newest rows, because `ts`
+	 * is collector-supplied and so is not append order: the Grok collector passes
+	 * the source timestamp through, and its backfill pass appends events older than
+	 * everything already stored. A window ordered by `ts` would not contain the real
+	 * chain tip, and the next append would chain onto a hash that already had a
+	 * successor — forking the session. Only `hash` and `prev` are selected, so the
+	 * read stays small even for a long session.
+	 *
+	 * `"id"` breaks a same-millisecond tie so the order is at least stable across
+	 * calls; it is a random UUID, so deterministic but arbitrary, which is why
+	 * `chainTip` decides the tip from `prev` rather than from position.
+	 */
 	async lastHash(sessionId: string): Promise<string | null> {
-		// `"id"` breaks a same-millisecond tie so the read order is at least stable
-		// across calls; it is a random UUID, so it is deterministic but arbitrary,
-		// which is why `chainTip` still decides which row is actually newest.
 		const rows = await this.sql(
 			`SELECT "hash", "prev" FROM "agent_events" WHERE "session_id" = ${this.q(sessionId)}
-			 ORDER BY "ts" DESC, "id" DESC LIMIT ${TIP_WINDOW}`,
+			 ORDER BY "ts" DESC, "id" DESC LIMIT ${MAX_SESSION_ROWS}`,
 		);
 		return chainTip(rows);
 	}

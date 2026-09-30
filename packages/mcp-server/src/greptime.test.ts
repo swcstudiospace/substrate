@@ -382,6 +382,47 @@ describe("ensureAppendMode", () => {
 		expect(sql).toHaveLength(1);
 	});
 
+	test("re-asks once a definite answer goes stale, so an out-of-band recreate is seen", async () => {
+		// The trap this closes: the documented fix recreates the table *outside* this
+		// process, so a permanently cached `false` would leave every append refused and
+		// /healthz red until someone restarted the service — the operator would do the
+		// documented fix and see nothing change.
+		let ddl = "CREATE TABLE ... ENGINE=mito";
+		stubFetch(() => records(["Create Table"], [[ddl]]));
+		const client = new GreptimeClient(config);
+
+		expect(await client.ensureAppendMode(0)).toBe(false);
+		ddl = "... WITH( append_mode = 'true' )";
+		expect(await client.ensureAppendMode(1_000)).toBe(false); // still inside the TTL
+		expect(await client.ensureAppendMode(60_000)).toBe(true); // past it
+	});
+
+	test("notices a table swapped back to a deduplicating one", async () => {
+		let ddl = "... WITH( append_mode = 'true' )";
+		stubFetch(() => records(["Create Table"], [[ddl]]));
+		const client = new GreptimeClient(config);
+
+		expect(await client.ensureAppendMode(0)).toBe(true);
+		ddl = "CREATE TABLE ... ENGINE=mito";
+		expect(await client.ensureAppendMode(60_000)).toBe(false);
+	});
+
+	test("keeps the last definite answer when a re-check fails", async () => {
+		// A blip should not widen the refusal; the next call retries because the
+		// checked-at stamp did not move.
+		let fail = false;
+		stubFetch(() =>
+			fail ? new Response("nope", { status: 500 }) : records(["Create Table"], [["... append_mode = 'true'"]]),
+		);
+		const client = new GreptimeClient(config);
+
+		expect(await client.ensureAppendMode(0)).toBe(true);
+		fail = true;
+		expect(await client.ensureAppendMode(60_000)).toBe(true);
+		fail = false;
+		expect(await client.ensureAppendMode(60_001)).toBe(true);
+	});
+
 	test("asks again while the answer is still unknown", async () => {
 		// Without this retry, one transient SHOW CREATE TABLE failure would leave a
 		// fail-closed write path refusing every event for the life of the process.
@@ -414,6 +455,33 @@ describe("reads", () => {
 		expect(await new GreptimeClient(config).lastHash("sess-1")).toBe("abc");
 		expect(sql[0]).toContain(`"session_id" = 'sess-1'`);
 		expect(sql[0]).toContain('ORDER BY "ts" DESC');
+	});
+
+	test("lastHash reads the whole session, not a window of its newest rows", async () => {
+		// The regression: `ts` is collector-supplied, and the Grok collector's backfill
+		// pass appends events *older* than everything stored. A small window ordered by
+		// `ts` would not hold the real chain tip, and the next append would chain onto a
+		// hash that already had a successor — forking the session.
+		const { sql } = stubFetch(() => records(["hash", "prev"], []));
+		await new GreptimeClient(config).lastHash("sess-1");
+
+		const limit = Number(sql[0]?.match(/LIMIT (\d+)/)?.[1]);
+		expect(limit).toBeGreaterThanOrEqual(10_000);
+	});
+
+	test("lastHash finds a tip whose timestamp is older than the rest", async () => {
+		// A backfilled event sorts last by `ts` but is the real tip: nothing claims it.
+		stubFetch(() =>
+			records(
+				["hash", "prev"],
+				[
+					["recent-b", "recent-a"],
+					["recent-a", null],
+					["backfilled", "recent-b"],
+				],
+			),
+		);
+		expect(await new GreptimeClient(config).lastHash("sess-1")).toBe("backfilled");
 	});
 
 	test("lastHash is null for a session with no events", async () => {
@@ -467,6 +535,27 @@ describe("chainTip", () => {
 
 	test("ignores a row with no usable hash", () => {
 		expect(chainTip([{ hash: null, prev: null }, { hash: "a", prev: null }])).toBe("a");
+	});
+
+	test("a window of the newest rows by ts is what forked the chain", () => {
+		// The concrete regression. Three events arrive live, then the Grok collector's
+		// backfill pass appends one carrying an older source timestamp — so it is the
+		// real chain tip but sorts last by `ts`.
+		const session = [
+			// newest by ts first, as the query returns them
+			{ hash: "recent-c", prev: "recent-b" },
+			{ hash: "recent-b", prev: "recent-a" },
+			{ hash: "recent-a", prev: null },
+			{ hash: "backfilled", prev: "recent-c" },
+		];
+
+		// Windowed to the newest three, the backfilled tip is invisible and `recent-c`
+		// looks unclaimed — so the next append would chain onto it, forking the session,
+		// because `backfilled` already claims it.
+		expect(chainTip(session.slice(0, 3))).toBe("recent-c");
+
+		// Reading the whole session finds the actual tip.
+		expect(chainTip(session)).toBe("backfilled");
 	});
 
 	test("readEvents selects every column the chain was hashed over", async () => {

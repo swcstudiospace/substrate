@@ -168,7 +168,7 @@ describe("migrate", () => {
 describe("append-mode enforcement", () => {
 	const input: EventInput = { surface: "omp", kind: "shell", summary: "ran cargo test", session_id: "sess-1" };
 
-	function ledger(appendMode: boolean | null) {
+	function ledger(appendMode: boolean | null, quotingDialectKnown = true) {
 		const written: SubstrateEvent[] = [];
 		let asked = 0;
 		return {
@@ -179,6 +179,8 @@ describe("append-mode enforcement", () => {
 					asked++;
 					return appendMode;
 				},
+				probeDialect: async () => quotingDialectKnown,
+				quotingDialectKnown,
 				lastHash: async () => null,
 				insertEvent: async (event: SubstrateEvent) => {
 					written.push(event);
@@ -254,6 +256,7 @@ describe("append-mode enforcement", () => {
 			index: false,
 			greptime: true,
 			appendOnly: false,
+			quotingDialectKnown: true,
 			eventsWritable: false,
 		});
 	});
@@ -261,6 +264,17 @@ describe("append-mode enforcement", () => {
 	test("healthz reports writable once the table is append-only", async () => {
 		const { greptime } = ledger(true);
 		expect((await substrateWith(greptime).health()).eventsWritable).toBe(true);
+	});
+
+	test("an unknown quoting dialect is not a writable ledger either", async () => {
+		// It refuses only events carrying a backslash, but a trail with holes in it is
+		// not writable, and calling it so would hide the failure this reports.
+		const { greptime } = ledger(true, false);
+		const health = await substrateWith(greptime).health();
+
+		expect(health.appendOnly).toBe(true);
+		expect(health.quotingDialectKnown).toBe(false);
+		expect(health.eventsWritable).toBe(false);
 	});
 });
 

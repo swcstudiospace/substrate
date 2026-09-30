@@ -278,24 +278,39 @@ export class Substrate {
 	}
 
 	/**
-	 * `greptime` is reachability; `eventsWritable` is whether an append would
-	 * actually be accepted. They differ on a reachable ledger that is not append-only
-	 * — which is exactly the state a monitor needs to see, because every `emit` is
-	 * being refused while `ping` succeeds.
+	 * `greptime` is reachability; `eventsWritable` is whether **every** event would
+	 * be accepted. They differ on a reachable ledger that is refusing, which is
+	 * exactly the state a monitor needs to see because `ping` still succeeds.
+	 *
+	 * Two things make a reachable ledger unwritable, and both belong here:
+	 * a table that is not append-only refuses everything, and an unknown quoting
+	 * dialect refuses any event carrying a backslash. The second is partial, but a
+	 * trail with holes in it is not a writable ledger, and calling it one would hide
+	 * the very failure this reports.
+	 *
+	 * Probing here is deliberate: a monitor's own request retries both checks, so a
+	 * ledger that recovers — or a table recreated out of band — is picked up without
+	 * waiting for a restart.
 	 */
 	async health(): Promise<{
 		index: boolean;
 		greptime: boolean;
 		appendOnly: boolean | null;
+		quotingDialectKnown: boolean;
 		eventsWritable: boolean;
 	}> {
 		const greptime = this.greptime ? await this.greptime.ping() : false;
-		const appendOnly = greptime ? await this.greptime?.ensureAppendMode().catch(() => null) ?? null : null;
+		const appendOnly = greptime ? (await this.greptime?.ensureAppendMode().catch(() => null)) ?? null : null;
+		const quotingDialectKnown = greptime
+			? await this.greptime?.probeDialect().then(() => this.greptime?.quotingDialectKnown === true).catch(() => false) ?? false
+			: false;
 		return {
 			index: this.index ? await this.index.ping() : false,
 			greptime,
 			appendOnly,
-			eventsWritable: greptime && (appendOnly === true || this.config.allowDeduplicatingLedger),
+			quotingDialectKnown,
+			eventsWritable:
+				greptime && quotingDialectKnown && (appendOnly === true || this.config.allowDeduplicatingLedger),
 		};
 	}
 }

@@ -121,9 +121,20 @@ recreate is pending, rather than having no lever at all. It is never the quiet
 path. Recreate the table and leave it unset, and append-only is enforced rather
 than merely reported.
 
-`ensureAppendMode` caches a definite answer but retries while it is still unknown,
-so one transient `SHOW CREATE TABLE` failure does not leave the write path refusing
-every event for the life of the process.
+### The check cannot be cached for the life of the process
+
+Recreating the table happens **outside** this process, so a permanently cached
+answer would break the fix it documents: after the recreate, appends would go on
+being refused and `/healthz` would stay 503 until someone thought to restart the
+service. The operator would have done exactly the right thing and seen nothing
+change. The converse matters too — a table swapped back to a deduplicating one
+must stop being treated as safe.
+
+So `ensureAppendMode` trusts a definite answer for 30 seconds and retries an
+unknown one immediately. A recreate is picked up within the TTL, with no restart;
+a transient `SHOW CREATE TABLE` failure leaves the previous answer in place rather
+than widening the refusal, and is retried on the next call. The steady-state cost
+is one cheap query per TTL, not one per append.
 
 ## What the write path guarantees
 
@@ -156,12 +167,20 @@ previous event's hash *within the session*. Phase 6 anchors hourly Merkle roots
 to Solana, but you cannot retrofit integrity onto an append-only log, so the
 chain is correct from row one. `substrate verify <graph_id>` recomputes it.
 
-**Chain order, not timestamp order.** Once the table is append-only, two events
-can share a millisecond and both survive — and Greptime is then free to return
-them in either order. So `ORDER BY "ts"` alone is not enough: `lastHash` reads a
-bounded window of a session's newest rows and takes the tip, the hash no other row
-claims as its `prev`; `verifyGraph` puts each session's events in chain order
-before verifying. This does not weaken verification — hashes are still recomputed,
+**Chain order, not timestamp order.** `ts` is not append order. It is
+collector-supplied — the Grok collector passes a session's source timestamps
+through, and its backfill pass appends events older than everything already
+stored — and, now that the table is append-only, two events can also share a
+millisecond and both survive, with Greptime free to return them in either order.
+
+So `ORDER BY "ts"` cannot identify the newest event. `lastHash` reads the whole
+session (just `hash` and `prev`, so the read stays small) and takes the tip: the
+hash no other row claims as its `prev`. A *window* of the newest rows by `ts` is
+what must not be used — a backfilled event is the real tip while sorting last, so a
+window would leave an already-claimed hash looking unclaimed and the next append
+would fork the session. The `LIMIT` in that query is a memory guard set far above
+any real session, not an ordering assumption. `verifyGraph` puts each session's
+events in chain order before verifying. This does not weaken verification — hashes are still recomputed,
 and a spliced-out event, a tampered one or a fork all leave events that do not link
 into the walk, which are kept so the break is still reported. What it stops
 reporting is a database's arbitrary tie-break, which was never an integrity
@@ -262,24 +281,23 @@ and `kind: "note"`, and carry no `repo`, which keeps them out of every brief.
 ### Verification status
 
 Every behaviour above is covered by unit tests against a mocked Greptime
-(`greptime.test.ts`, `event.test.ts`, `service.test.ts`) and the smoke script has
-been exercised end to end against a local fake that simulates both SQL literal
-dialects and a server that rejects `append_mode`.
+(`greptime.test.ts`, `event.test.ts`, `service.test.ts`, `server.test.ts`), and the
+smoke script has been exercised end to end against a local fake that simulates both
+SQL literal dialects and a server that rejects `append_mode`.
 
-**Not yet verified against live Railway Greptime.** This session has no route to
-it. Two things need a live run:
+**Live:** SYSTEMS reports `bun run smoke:greptime` passing 11/11 on the VPS after
+INFRA's `append_mode` cutover. So the deployed GreptimeDB does accept
+`WITH ('append_mode' = 'true')`, the recreate has happened, and the default
+fail-closed write path is writable there. That run was not made from this session
+and is recorded here as reported, not as something this repo verified.
 
-- whether the deployed GreptimeDB v1.1.4 accepts `WITH ('append_mode' = 'true')`
-  — if it does not, `migrate` falls back to a plain `CREATE` and warns
-- the table already on Railway **does** predate `append_mode`. Check 2 will fail on
-  the first live run, and because appends are fail-closed the script stops there
-  rather than reporting the same cause six more times. That is the new behaviour
-  working. The recreate above is out of band, with LEAD.
+If the table is ever recreated again while `substrate-mcp` keeps running, no
+restart is needed: `ensureAppendMode` re-checks within its TTL and both the write
+path and `/healthz` recover on their own.
 
-To exercise the rest of the write path before the recreate lands:
+While a ledger is *not* append-only, this exercises the rest of the write path and
+knowingly accepts that a colliding event may be dropped:
 
 ```sh
 SUBSTRATE_ALLOW_DEDUPLICATING_LEDGER=true bun run smoke:greptime
 ```
-
-which knowingly accepts that a colliding event may be dropped.

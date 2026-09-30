@@ -58,18 +58,22 @@ function read(path: string): string {
  * Whether a file's text holds a Greptime endpoint or credential.
  *
  * Line-based and comment-exempt: `.env.example` has to be able to show the shape
- * of a Railway host and the docs have to be able to name one, while an assignment
- * with anything after the `=` is a real value.
+ * of a Railway host and the docs have to be able to name one.
+ *
+ * The key may be quoted and so may the value, because a credential is as likely to
+ * sit in a tracked JSON or YAML config (`"GREPTIME_PASSWORD": "…"`) as in an env
+ * file. The value must start with something that is neither whitespace nor a quote,
+ * so an empty placeholder — `GREPTIME_PASSWORD=` or `"GREPTIME_PASSWORD": ""` —
+ * does not read as a secret.
  */
+const CREDENTIAL = /GREPTIME_(?:URL|USER|PASSWORD)["']?\s*[:=]\s*["']?[^\s"']/i;
+const RAILWAY_HOST = /[a-z0-9-]+\.(?:up\.railway\.app|proxy\.rlwy\.net)/i;
+
 function carriesCredential(body: string): boolean {
 	return body
 		.split("\n")
 		.filter((line) => !/^\s*(?:#|\/\/|\*|<!--)/.test(line))
-		.some(
-			(line) =>
-				/GREPTIME_(?:URL|USER|PASSWORD)\s*[:=]\s*\S/i.test(line) ||
-				/[a-z0-9-]+\.(?:up\.railway\.app|proxy\.rlwy\.net)/i.test(line),
-		);
+		.some((line) => CREDENTIAL.test(line) || RAILWAY_HOST.test(line));
 }
 
 /** Every file git tracks, so the secret scan covers what is actually committed. */
@@ -178,12 +182,25 @@ describe("no secrets in the repo", () => {
 		}
 	});
 
+	test("the scan catches a credential whose key is quoted", () => {
+		// A credential is as likely to sit in a tracked JSON or YAML config as in an
+		// env file, and requiring `:` immediately after the key missed all of those.
+		for (const body of [
+			'{ "GREPTIME_PASSWORD": "hunter2" }',
+			"  'GREPTIME_USER' = 'admin'",
+			'greptime:\n  GREPTIME_PASSWORD: "hunter2"',
+		]) {
+			expect(carriesCredential(body)).toBe(true);
+		}
+	});
+
 	test("the scan does not fire on a placeholder or a comment", () => {
 		// `.env.example` must be able to show the shape of a host, and the docs must
 		// be able to name one, without failing the lock.
 		for (const body of [
 			"GREPTIME_PASSWORD=",
 			"GREPTIME_DB=public",
+			'{ "GREPTIME_PASSWORD": "" }',
 			"# e.g. https://greptime-xxxx.up.railway.app",
 			"// GREPTIME_URL=https://example.up.railway.app",
 		]) {
