@@ -362,7 +362,7 @@ describe("a deleted or truncated audit file", () => {
 
 		const second = new AuditLog({ path });
 		const opened = await second.open();
-		expect(opened.missingHistory).toEqual({ checkpointSeq: 2, foundSeq: 0 });
+		expect(opened.missingHistory).toEqual({ kind: "missing", checkpointSeq: 2, foundSeq: 0 });
 
 		const verdict = await second.verify();
 		expect(verdict.ok).toBe(false);
@@ -381,7 +381,7 @@ describe("a deleted or truncated audit file", () => {
 		writeFileSync(path, `${kept.join("\n")}\n`);
 
 		const second = new AuditLog({ path });
-		expect((await second.open()).missingHistory).toEqual({ checkpointSeq: 4, foundSeq: 2 });
+		expect((await second.open()).missingHistory).toEqual({ kind: "missing", checkpointSeq: 4, foundSeq: 2 });
 		const verdict = await second.verify();
 		expect(verdict.ok).toBe(false);
 		expect(verdict.ok === false && verdict.reason).toContain("2 earlier decision(s) are not in it");
@@ -602,5 +602,180 @@ describe("verifiedView", () => {
 		const view = await log.verifiedView("ut-1");
 		expect(view.verdict).toEqual({ ok: true, records: 1, unparseable: 0 });
 		expect(view.records).toHaveLength(1);
+	});
+});
+
+describe("a rewritten audit file", () => {
+	// The checkpoint holds the committed *hash*, not just the count. Comparing sequence
+	// numbers alone accepted a file replaced with a different, internally consistent chain
+	// ending at the same seq — and the next append then rewrote the checkpoint to match the
+	// impostor, so the substitution erased its own evidence.
+
+	/** A valid chain of `count` records written from scratch, with a marker in each. */
+	async function chainInto(path: string, count: number, surface: string): Promise<AuditLog> {
+		const log = new AuditLog({ path, checkpointPath: false });
+		await log.open();
+		for (let i = 0; i < count; i++) await log.append({ ...allowed, surface });
+		return log;
+	}
+
+	test("is reported as rewritten, not accepted because the count matches", async () => {
+		const path = join(temporaryDirectory(), "mcp-audit.jsonl");
+		const real = new AuditLog({ path });
+		await real.open();
+		for (let i = 0; i < 3; i++) await real.append({ ...allowed, surface: "omp" });
+
+		// Replace the file with a different chain of the same length. It verifies on its
+		// own terms: opens at seq 1, every hash and prev follows.
+		const impostor = join(temporaryDirectory(), "impostor.jsonl");
+		await chainInto(impostor, 3, "muse");
+		writeFileSync(path, readFileSync(impostor, "utf8"));
+
+		const reopened = new AuditLog({ path });
+		const opened = await reopened.open();
+		expect(opened.missingHistory).toEqual({ kind: "rewritten", checkpointSeq: 3, foundSeq: 3 });
+
+		const verdict = await reopened.verify();
+		expect(verdict.ok).toBe(false);
+		expect(verdict.ok === false && verdict.reason).toContain("replaced with a different chain");
+	});
+
+	test("and the next append does not launder the checkpoint", async () => {
+		const path = join(temporaryDirectory(), "mcp-audit.jsonl");
+		const real = new AuditLog({ path });
+		await real.open();
+		await real.append({ ...allowed, surface: "omp" });
+
+		const impostor = join(temporaryDirectory(), "impostor.jsonl");
+		await chainInto(impostor, 1, "muse");
+		writeFileSync(path, readFileSync(impostor, "utf8"));
+
+		const reopened = new AuditLog({ path });
+		await reopened.open();
+		await reopened.append(claim);
+		// Still broken after appending: the chain resumed from the checkpoint's hash, so the
+		// new record's `prev` does not follow the impostor's record.
+		expect((await reopened.verify()).ok).toBe(false);
+	});
+
+	test("a substitution while the process runs is caught by the anchor on the next verify", async () => {
+		const path = join(temporaryDirectory(), "mcp-audit.jsonl");
+		const first = new AuditLog({ path });
+		await first.open();
+		await first.append({ ...allowed, surface: "omp" });
+		await first.append({ ...allowed, surface: "omp" });
+
+		// A second process opens it — its anchor is the checkpoint at seq 2 — and then the
+		// file's earlier records are swapped out underneath it.
+		const second = new AuditLog({ path });
+		await second.open();
+		const impostor = join(temporaryDirectory(), "impostor.jsonl");
+		await chainInto(impostor, 2, "muse");
+		writeFileSync(path, readFileSync(impostor, "utf8"));
+
+		const verdict = await second.verify();
+		expect(verdict.ok).toBe(false);
+		expect(second.missingHistory?.kind).toBe("rewritten");
+	});
+
+	test("an untouched file still verifies across a restart", async () => {
+		// The anchor must not cry wolf on the ordinary case, which is every restart.
+		const path = join(temporaryDirectory(), "mcp-audit.jsonl");
+		const first = new AuditLog({ path });
+		await first.open();
+		for (let i = 0; i < 3; i++) await first.append(allowed);
+
+		const second = new AuditLog({ path });
+		expect((await second.open()).missingHistory).toBeUndefined();
+		await second.append(claim);
+		expect((await second.verify()).ok).toBe(true);
+		expect(second.missingHistory).toBeNull();
+	});
+});
+
+describe("verifiedView selects the way the records were stored", () => {
+	const redact = (text: string) => text.replace(/sk-ant-[A-Za-z0-9_-]{20,}/g, "[REDACTED]");
+	const secret = `sk-ant-${"a".repeat(30)}`;
+
+	test("a graph whose id the audit redacts still finds its own records", async () => {
+		// `buildRecord` redacts `graph_id` like every other stored field, so selecting on the
+		// raw identifier matched none of the graph's own records and its evidence bundle
+		// silently omitted every decision made about it. The ledger already normalises its
+		// query for the same reason — `verifyGraph` reads by `normalizeIdentifier(graphId)`.
+		const path = join(temporaryDirectory(), "mcp-audit.jsonl");
+		const graphId = `ut-${secret}`;
+		const log = new AuditLog({ path, redact });
+		await log.open();
+		await log.append({ ...allowed, graph_id: graphId });
+		await log.append({ ...claim, graph_id: graphId });
+		await log.append({ ...allowed, graph_id: "ut-other" });
+
+		const view = await log.verifiedView(graphId);
+		expect(view.records).toHaveLength(2);
+		expect(view.stats.total).toBe(2);
+		// And it says the selection is not the identifier that was asked for.
+		expect(view.selector).toBe("ut-[REDACTED]");
+		expect(view.records.every((record) => record.graph_id === "ut-[REDACTED]")).toBe(true);
+	});
+
+	test("an ordinary graph id selects itself, unchanged", async () => {
+		const path = join(temporaryDirectory(), "mcp-audit.jsonl");
+		const log = new AuditLog({ path, redact });
+		await log.open();
+		await log.append({ ...allowed, graph_id: "ut-mfk2p3-9a3b1c7d" });
+
+		const view = await log.verifiedView("ut-mfk2p3-9a3b1c7d");
+		expect(view.selector).toBe("ut-mfk2p3-9a3b1c7d");
+		expect(view.records).toHaveLength(1);
+	});
+});
+
+describe("the evidence window keeps the newest records and counts them all", () => {
+	test("a later denial is listed, not dropped for an older allowed record", async () => {
+		// The window used to keep the first N, so a claim withdrawal or a batch correction —
+		// which by construction comes *after* the record it corrects — was the first thing
+		// to fall out of a busy graph's bundle.
+		const path = join(temporaryDirectory(), "mcp-audit.jsonl");
+		const log = new AuditLog({ path });
+		await log.open();
+		for (let i = 0; i < 5; i++) await log.append({ ...allowed, graph_id: "ut-1" });
+		await log.append({ ...claim, decision: "denied", mode: "fail-open", graph_id: "ut-1", reason: "withdrawn" });
+
+		const view = await log.verifiedView("ut-1", 2);
+		expect(view.records).toHaveLength(2);
+		expect(view.records.map((record) => record.seq)).toEqual([5, 6]);
+		expect(view.records.at(-1)?.decision).toBe("denied");
+	});
+
+	test("the tally covers every record for the graph, not just the listed window", async () => {
+		const path = join(temporaryDirectory(), "mcp-audit.jsonl");
+		const log = new AuditLog({ path });
+		await log.open();
+		for (let i = 0; i < 4; i++) await log.append({ ...allowed, graph_id: "ut-1" });
+		for (let i = 0; i < 3; i++) {
+			await log.append({ ...claim, decision: "denied", mode: "fail-open", graph_id: "ut-1", reason: "no" });
+		}
+		await log.append({ ...allowed, graph_id: "ut-other" });
+
+		const view = await log.verifiedView("ut-1", 2);
+		expect(view.records).toHaveLength(2);
+		expect(view.matched).toBe(7);
+		// A wrong number is worse than a partial list: these count all seven.
+		expect(view.stats.total).toBe(7);
+		expect(view.stats.allowed).toBe(4);
+		expect(view.stats.denied).toBe(3);
+		expect(view.stats.byTool.find((entry) => entry.tool === "graph_claim")?.denied).toBe(3);
+	});
+
+	test("with no limit the window is the whole selection", async () => {
+		const path = join(temporaryDirectory(), "mcp-audit.jsonl");
+		const log = new AuditLog({ path });
+		await log.open();
+		for (let i = 0; i < 3; i++) await log.append({ ...allowed, graph_id: "ut-1" });
+
+		const view = await log.verifiedView("ut-1");
+		expect(view.records).toHaveLength(3);
+		expect(view.matched).toBe(3);
+		expect(view.stats.total).toBe(3);
 	});
 });

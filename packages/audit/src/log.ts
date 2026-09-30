@@ -20,12 +20,16 @@ import { dirname } from "node:path";
 import {
 	type AuditRecord,
 	type AuditRecordInput,
+	type AuditStats,
 	type ChainVerdict,
 	ChainWalker,
+	MAX_IDENTIFIER,
 	MAX_RECORD_BYTES,
 	NO_POSITION,
+	StatsAccumulator,
 	buildRecord,
 	isAuditRecord,
+	sanitizeField,
 } from "./record.ts";
 
 export { NO_POSITION };
@@ -49,13 +53,22 @@ export interface AuditAppend {
 }
 
 /**
- * What the chain knows about records that are no longer in the file.
+ * What the chain knows that the file does not agree with.
  *
- * Set when the checkpoint names a position the file cannot account for. It is carried
- * into every `verify` verdict for the life of the process, because it is a fact about
- * the file that no amount of subsequent appending repairs.
+ * Set when the checkpoint contradicts the file, either way round. Carried into every
+ * `verify` verdict for the life of the process, because it is a fact about the file
+ * that no amount of subsequent appending repairs.
+ *
+ * `missing` is the file having fewer records than were committed — deleted or
+ * truncated. `rewritten` is the file having the right *number* of records and the
+ * wrong ones: a different, internally consistent chain put in its place. Comparing
+ * sequence numbers alone caught only the first, so a wholesale substitution that
+ * happened to end at the committed `seq` passed as intact and the next append then
+ * overwrote the checkpoint with the impostor's hash. The checkpoint stores the
+ * committed *hash*, so it can and now does anchor the contents too.
  */
 export interface MissingHistory {
+	kind: "missing" | "rewritten";
 	/** The `seq` the checkpoint last committed. */
 	checkpointSeq: number;
 	/** The highest `seq` the file still holds, or 0 when it holds none. */
@@ -97,8 +110,10 @@ export class AuditLog {
 	private writable = false;
 	/** Set when an append threw, which may have left a half-written line behind. */
 	private mayHaveFragment = false;
-	/** Set when the checkpoint names records the file no longer holds. */
+	/** Set when the checkpoint and the file disagree. See `MissingHistory`. */
 	private lostHistory: MissingHistory | null = null;
+	/** The checkpoint as it stood at boot, before this process wrote anything. */
+	private anchor: Checkpoint | null = null;
 	/** Why this chain will not append at all. Set when the position cannot be trusted. */
 	private refuseWrites: string | null = null;
 	private readonly redact: (text: string) => string;
@@ -193,11 +208,27 @@ export class AuditLog {
 				this.chainTip = recovered.record.hash;
 			}
 
+			// The checkpoint read at boot is the anchor for the life of this process: it is
+			// the last position committed *before* anything here wrote, so it is the one
+			// value the file cannot have talked its way out of. `scan` checks the record at
+			// its `seq` against it on every verification — see `anchor`.
+			this.anchor = checkpoint;
+
 			if (checkpoint && (!recovered.record || recovered.record.seq < checkpoint.seq)) {
 				// The file cannot account for records this process already committed. Resume
 				// from the checkpoint so nothing reuses a `seq` that has been used, and carry
 				// the state into every verdict — see `verify`.
-				this.lostHistory = { checkpointSeq: checkpoint.seq, foundSeq: recovered.record?.seq ?? 0 };
+				this.lostHistory = { kind: "missing", checkpointSeq: checkpoint.seq, foundSeq: recovered.record?.seq ?? 0 };
+				this.chainSeq = checkpoint.seq;
+				this.chainTip = checkpoint.hash;
+			} else if (checkpoint && recovered.record && recovered.record.seq === checkpoint.seq && recovered.record.hash !== checkpoint.hash) {
+				// Same count, different contents: the file was replaced with another chain that
+				// ends where this one did. Comparing `seq` alone accepted it, and the next
+				// append would have rewritten the checkpoint to match the impostor — so the
+				// substitution erased its own evidence. Resume from the checkpoint's hash
+				// instead, which keeps the anchor and makes the next record's `prev` disagree
+				// with the file, exactly as it should.
+				this.lostHistory = { kind: "rewritten", checkpointSeq: checkpoint.seq, foundSeq: recovered.record.seq };
 				this.chainSeq = checkpoint.seq;
 				this.chainTip = checkpoint.hash;
 			} else if (!recovered.record && recovered.size > 0) {
@@ -416,25 +447,58 @@ export class AuditLog {
 	 * therefore costs memory proportional to that graph's own records, whatever the trail
 	 * grew to around them.
 	 *
-	 * `collect` decides what is kept. Nothing is kept by default, which is what makes a
-	 * bare verification cost no memory at all beyond the walker.
+	 * `collect` decides what is *matched*. Every match is counted; only a bounded window
+	 * of them is kept, and it is the **most recent** window, not the first. Keeping the
+	 * first meant a graph past the cap listed its oldest records and dropped everything
+	 * after — so a claim withdrawal or a batch correction, which by construction comes
+	 * *after* the record it corrects, was the first thing to fall out. Nothing is kept at
+	 * all by default, which is what makes a bare verification cost no memory beyond the
+	 * walker and the tally.
 	 */
 	async scan(options: {
 		collect?: (record: AuditRecord) => boolean;
 		into?: AuditRecord[];
-		/** Stop collecting past this many records. The count is still complete. */
+		/** How many matched records to keep. The tally covers every match regardless. */
 		maxCollected?: number;
-	} = {}): Promise<{ verdict: ChainVerdict & { unparseable: number }; records: AuditRecord[]; unparseable: number }> {
+	} = {}): Promise<{
+		verdict: ChainVerdict & { unparseable: number };
+		records: AuditRecord[];
+		unparseable: number;
+		/** Complete over every matched record, including those outside the window. */
+		stats: AuditStats;
+		/** How many records matched, which may exceed `records.length`. */
+		matched: number;
+	}> {
 		const collected = options.into ?? [];
 		const keep = options.collect;
 		const maxCollected = options.maxCollected ?? Number.POSITIVE_INFINITY;
 		const path = this.options.path;
 
 		const walker = new ChainWalker({ genesis: this.requireGenesis() });
+		const tally = new StatsAccumulator();
 		let unparseable = 0;
+		let matched = 0;
+		/** Whether the record at the boot checkpoint's `seq` still hashes to its hash. */
+		let anchorSeen = false;
+		let anchorHeld = true;
 
 		const offer = (record: AuditRecord): void => {
-			if (keep && collected.length < maxCollected && keep(record)) collected.push(record);
+			if (!keep || !keep(record)) return;
+			matched++;
+			// Counted first and unconditionally: the tally describes every decision for
+			// this selection, and the window below describes only what a bundle can list.
+			tally.push(record);
+			if (maxCollected <= 0) return;
+			collected.push(record);
+			// A window over the newest, kept as a ring. `shift` is O(n) per drop, which is
+			// fine at this size and keeps the array the caller was handed.
+			if (collected.length > maxCollected) collected.splice(0, collected.length - maxCollected);
+		};
+
+		const checkAnchor = (record: AuditRecord): void => {
+			if (!this.anchor || record.seq !== this.anchor.seq) return;
+			anchorSeen = true;
+			if (record.hash !== this.anchor.hash) anchorHeld = false;
 		};
 
 		if (path === null) {
@@ -456,11 +520,28 @@ export class AuditLog {
 				// unparseable line: the walker reports it as one rather than throwing while
 				// reading fields off it — which used to reach `/evidence` as an HTTP 500.
 				walker.push(parsed);
-				if (isAuditRecord(parsed)) offer(parsed);
+				if (isAuditRecord(parsed)) {
+					checkAnchor(parsed);
+					offer(parsed);
+				}
 			}
 		}
 
-		return { verdict: { ...walker.verdict(), unparseable }, records: collected, unparseable };
+		// The anchor is checked here rather than only at boot because the file can be
+		// replaced while the process runs, and because a file *ahead* of the checkpoint
+		// cannot be judged by its tip alone — the record at the committed `seq` is the one
+		// that has to still be the committed record.
+		if (this.anchor && anchorSeen && !anchorHeld && !this.lostHistory) {
+			this.lostHistory = { kind: "rewritten", checkpointSeq: this.anchor.seq, foundSeq: this.chainSeq };
+		}
+
+		return {
+			verdict: { ...walker.verdict(), unparseable },
+			records: collected,
+			unparseable,
+			stats: tally.stats(),
+			matched,
+		};
 	}
 
 	/**
@@ -502,36 +583,65 @@ export class AuditLog {
 	}
 
 	/**
-	 * The verdict, and the records for one graph, from a single pass over the file.
+	 * The verdict, and one graph's records, from a single pass over the file.
 	 *
 	 * What `/evidence` calls. See `scan` for why there is only one pass.
+	 *
+	 * **The graph id is sanitised the same way the records were.** `buildRecord` redacts
+	 * and caps `graph_id` like every other stored field, so a graph whose identifier
+	 * contains a credential-shaped substring is stored under its redacted form — and
+	 * selecting on the raw identifier then matched none of its own records, so its
+	 * evidence bundle silently omitted every decision made about it. Normalising the
+	 * query to match the stored form is what the ledger already does for the same reason
+	 * (`verifyGraph` reads by `normalizeIdentifier(graphId)`), so the two paths agree.
+	 *
+	 * `selector` is returned so a caller can say when it differs from what was asked for:
+	 * two identifiers that redact identically select each other's records, which is the
+	 * residual cost of storing a redacted key and belongs in the bundle rather than in a
+	 * comment.
 	 */
 	async verifiedView(
 		graphId: string,
 		limit?: number,
-	): Promise<{ verdict: ChainVerdict & { unparseable: number }; records: AuditRecord[]; total: number }> {
-		const { verdict, records } = await this.scan({
-			collect: (record) => record.graph_id === graphId,
+	): Promise<{
+		verdict: ChainVerdict & { unparseable: number };
+		records: AuditRecord[];
+		/** Records in the file, for comparison with the graph's own count. */
+		total: number;
+		/** Complete over every record naming this graph, not just the listed window. */
+		stats: AuditStats;
+		/** How many records name this graph, which may exceed `records.length`. */
+		matched: number;
+		/** The form the selection actually used. Differs from `graphId` only if redacted. */
+		selector: string;
+	}> {
+		const selector = sanitizeField(graphId, MAX_IDENTIFIER, this.redact) ?? graphId;
+		const { verdict, records, stats, matched } = await this.scan({
+			collect: (record) => record.graph_id === selector,
 			...(limit === undefined ? {} : { maxCollected: limit }),
 		});
-		return { verdict: this.judge(verdict), records, total: verdict.records };
+		return { verdict: this.judge(verdict), records, total: verdict.records, stats, matched, selector };
 	}
 
 	/** The reported verdict: what the walker found, plus what the file cannot show. */
 	private judge(verdict: ChainVerdict & { unparseable: number }): ChainVerdict & { unparseable: number } {
 		if (this.lostHistory) {
-			const { checkpointSeq, foundSeq } = this.lostHistory;
+			const { kind, checkpointSeq, foundSeq } = this.lostHistory;
 			return {
 				ok: false,
 				records: verdict.records,
 				// `NO_POSITION`: the records that would name the position are the ones that
-				// are gone. Callers rendering a verdict check for it rather than printing
-				// "broken at -1" — see `chainRow` in @substrate/evidence.
+				// are gone or replaced. Callers rendering a verdict check for it rather than
+				// printing "broken at -1" — see `chainRow` in @substrate/evidence.
 				brokenAt: NO_POSITION,
 				reason:
-					`the audit file is missing history: this chain committed ${checkpointSeq} record(s) and the file now ` +
-					`accounts for ${foundSeq}, so ${checkpointSeq - foundSeq} earlier decision(s) are not in it — ` +
-					"the file was deleted or truncated after they were written",
+					kind === "missing"
+						? `the audit file is missing history: this chain committed ${checkpointSeq} record(s) and the file now ` +
+							`accounts for ${foundSeq}, so ${checkpointSeq - foundSeq} earlier decision(s) are not in it — ` +
+							"the file was deleted or truncated after they were written"
+						: `the audit file does not hold the records this chain committed: the record at seq ${checkpointSeq} is ` +
+							"not the one whose hash was checkpointed, so the file has been replaced with a different chain — " +
+							"the decisions it now shows are not the decisions that were made",
 				unparseable: verdict.unparseable,
 			};
 		}

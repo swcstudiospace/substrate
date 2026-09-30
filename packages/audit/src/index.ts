@@ -23,6 +23,7 @@ export {
 	MAX_RECORD_BYTES,
 	MAX_TOOL_NAME,
 	NO_POSITION,
+	StatsAccumulator,
 	argDigest,
 	auditStats,
 	buildRecord,
