@@ -316,8 +316,10 @@ export class IndexStore implements MemoryStore {
 	// `memory-write.ts` decides RBAC, quarantine, idempotency and conflicts, and
 	// these methods are the thin, boring half. There is deliberately no ungoverned
 	// `writeMemory` here any more: the reason the gate cannot be forgotten is that
-	// there is no second door past it, the same argument that keeps the Greptime
-	// client inside this package.
+	// there is no second door past it, the same argument that keeps the ledger
+	// client inside its own file. (Naming that client here would trip the lock's
+	// other rule: a file in this package that both says its name and sends a
+	// statement is how a second SQL door onto the ledger would look.)
 
 	/**
 	 * Claim an idempotency key, or report the record that already holds it.

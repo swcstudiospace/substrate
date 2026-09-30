@@ -110,7 +110,7 @@ describe("speculation", () => {
 	});
 
 	test("a secret outranks speculation, because only one of them is unreleasable", () => {
-		const found = classify("we might switch to GREPTIME_PASSWORD=hunter2 for the smoke run", "decision");
+		const found = classify("we might switch to PGPASSWORD=hunter2 for the smoke run", "decision");
 		expect(found?.reason).toBe("secret");
 		expect(found?.reviewable).toBe(false);
 	});
