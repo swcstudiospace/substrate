@@ -56,8 +56,8 @@ describe("decideClaim", () => {
 	});
 
 	test("does not require a recording when no ledger is configured at all", () => {
-		// Otherwise a local dev run with no GREPTIME_URL would have every claim
-		// withdrawn.
+		// Otherwise a local dev run with no ledger URL in its environment would have
+		// every claim withdrawn.
 		expect(decideClaim({ claimed: true, recorded: false, requireRecorded: false }).decision).toBe("granted");
 	});
 

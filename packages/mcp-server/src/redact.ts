@@ -65,13 +65,35 @@ export function redact(text: string): string {
  */
 const SENSITIVE_KEY = /(?:password|passwd|secret|token|api[_-]?key|apikey|authorization|credential|private[_-]?key)/i;
 
+/**
+ * Keys that contain a credential word but name a **count**, not a credential.
+ *
+ * `input_tokens` is how much a model was billed for. The rule above matched the
+ * substring `token` and replaced the number with `[REDACTED]`, so every token count
+ * any collector reported was destroyed on the write path — invisible, because a
+ * redacted field looks like redaction working. That is what this exists to stop, and
+ * it is why the token and cost metrics need it: `extractUsage` reads these keys.
+ *
+ * Narrow on purpose. The exemption applies only to these exact names **and only when
+ * the value is a finite number**, so `{"tokens": "sk-ant-…"}` is still redacted
+ * whole: a string under one of these keys is not a count, whatever it is called.
+ */
+const COUNTER_KEY =
+	/^(?:(?:input|output|prompt|completion|total|cached|cache_read|cache_write|max|min|reasoning)_)?tokens?(?:_(?:count|in|out|used))?$/i;
+
+function isCount(value: unknown): boolean {
+	return typeof value === "number" && Number.isFinite(value);
+}
+
 export function redactValue<T>(value: T): T {
 	if (typeof value === "string") return redact(value) as T;
 	if (Array.isArray(value)) return value.map(redactValue) as T;
 	if (value && typeof value === "object") {
 		const out: Record<string, unknown> = {};
 		for (const [key, inner] of Object.entries(value as Record<string, unknown>)) {
-			out[key] = SENSITIVE_KEY.test(key) && inner !== null && inner !== undefined ? REDACTED : redactValue(inner);
+			const sensitive =
+				SENSITIVE_KEY.test(key) && !(COUNTER_KEY.test(key) && isCount(inner)) && inner !== null && inner !== undefined;
+			out[key] = sensitive ? REDACTED : redactValue(inner);
 		}
 		return out as T;
 	}

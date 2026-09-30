@@ -7,10 +7,16 @@
  *   POST /events/query  read a window of the ledger
  *   POST /memory        write a memory entry through the governance gate
  *   POST /verify        recompute a graph's hash chain
+ *   POST /evidence      the per-graph evidence bundle, as JSON or HTML
  *   GET  /healthz       store reachability, and whether events can actually be written
+ *   GET  /metrics       the OTLP metric snapshot this process holds
+ *   GET  /slo           the SLO verdicts computed from it
  *
  * Hooks get REST because a hook process cannot call an MCP tool — it has no
  * client. Both paths run the same service code.
+ *
+ * Every request is one server span and one latency observation, and every tool call
+ * passes the MCP audit gate *before* it is dispatched — see `observe.ts`.
  */
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -19,6 +25,16 @@ import { formatDrift } from "./drift.ts";
 import { InvalidEventError } from "./event.ts";
 import { InvalidHandoffError } from "./handoff.ts";
 import { createMcpServer, type McpCaller } from "./mcp.ts";
+import {
+	auditRefusal,
+	auditToolCalls,
+	buildGraphEvidence,
+	normalizeRoute,
+	renderEvidenceHtml,
+	startRequestSpan,
+	toolCallsIn,
+	type Observability,
+} from "./observe.ts";
 import type { Substrate } from "./service.ts";
 import type { Surface } from "./types.ts";
 
@@ -118,7 +134,31 @@ function bodySurface(body: Record<string, unknown>): Surface | null {
 	return typeof body.surface === "string" ? (body.surface as Surface) : null;
 }
 
-export function createHttpServer(substrate: Substrate, config: SubstrateConfig) {
+/**
+ * Audit a REST route the same way the MCP gate audits a tool call.
+ *
+ * Both transports are covered on purpose. If MCP tool calls were audited and the
+ * equivalent REST route were not, `/events` would be an unaudited door to the same
+ * action — the exact shape of hole the store lock exists to close, and one a hook
+ * would walk through by design, since a hook cannot call an MCP tool.
+ *
+ * `/healthz`, `/metrics` and `/slo` are not audited: they are monitoring traffic, no
+ * agent action is behind them, and a trail dominated by a Prometheus scrape is a
+ * trail nobody reads. Every audited REST route is fail-open, so this never throws.
+ */
+async function auditRest(
+	observability: Observability,
+	surface: Surface | null,
+	tool: string,
+	body: Record<string, unknown>,
+): Promise<void> {
+	await auditToolCalls(observability, surface, [{ id: null, tool, args: body }], "rest").catch((cause: unknown) => {
+		process.stderr.write(`[substrate] audit of ${tool} failed unexpectedly: ${String(cause)}\n`);
+		return { denials: new Map<string, string>() };
+	});
+}
+
+export function createHttpServer(substrate: Substrate, config: SubstrateConfig, observability: Observability) {
 	return createServer(async (req, res) => {
 		const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
 		const authorization = req.headers.authorization ?? null;
@@ -127,6 +167,24 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig) 
 		// read. A signed handoff's sender and a forced release's authority are decided
 		// from this and never from an argument.
 		const caller: McpCaller = { surface, isOperator: isOperator(config, authorization) };
+		const route = normalizeRoute(url.pathname);
+
+		// Measured from `finish` rather than at each `send` call site: that way every
+		// exit — a 401 below, a thrown handler, the MCP transport writing its own
+		// response — lands in the histogram with the status the client actually saw.
+		const started = performance.now();
+		const span = startRequestSpan(observability, req, route, surface);
+		res.on("finish", () => {
+			span.setAttribute("http.response.status_code", res.statusCode);
+			if (res.statusCode >= 500) span.fail(`HTTP ${res.statusCode}`);
+			span.end();
+			observability.instruments.recordRequest({
+				surface: surface ?? "unattributed",
+				route,
+				status: res.statusCode,
+				durationMs: performance.now() - started,
+			});
+		});
 
 		// A configured deployment requires a token that names a surface; a bare local
 		// run does not, otherwise the operator is locked out of their own machine.
@@ -146,13 +204,57 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig) 
 		try {
 			if (req.method === "GET" && url.pathname === "/healthz") {
 				const health = await substrate.health();
-				sendJson(res, healthStatus(health, config.greptime !== null), health);
+				sendJson(res, healthStatus(health, config.greptime !== null), {
+					...health,
+					// A deployment whose audit chain is in memory is one restart from having no
+					// trail. That is a fact about the deployment, so it is reported — but it is
+					// not a 503: the substrate is serving, and refusing would be worse.
+					auditDurable: observability.audit.durable,
+					auditRecords: observability.audit.seq,
+				});
+				return;
+			}
+
+			if (req.method === "GET" && url.pathname === "/metrics") {
+				// The snapshot this process holds, in the shape `otlp.ts` encodes. Served
+				// whether or not a collector is configured, so an operator can read the same
+				// numbers the SLOs are computed from without standing one up.
+				sendJson(res, 200, { startedAt: new Date(observability.startedAt).toISOString(), metrics: observability.snapshot() });
+				return;
+			}
+
+			if (req.method === "GET" && url.pathname === "/slo") {
+				const results = observability.evaluate();
+				// 200 either way. A breached objective is information, not a broken service,
+				// and a monitor that read this as an outage would page on a slow hour.
+				sendJson(res, 200, {
+					results,
+					breached: results.filter((result) => result.status === "breached").map((result) => result.id),
+				});
+				return;
+			}
+
+			if (req.method === "POST" && url.pathname === "/evidence") {
+				const raw = await readBody(req);
+				const body = raw ? (JSON.parse(raw) as { graph_id?: unknown; format?: unknown }) : {};
+				if (typeof body.graph_id !== "string" || body.graph_id.length === 0) {
+					sendJson(res, 400, { error: "graph_id is required" });
+					return;
+				}
+				await auditRest(observability, surface, "evidence", body);
+				const bundle = await buildGraphEvidence(observability, substrate, body.graph_id);
+				if (body.format === "html") {
+					send(res, 200, renderEvidenceHtml(bundle), "text/html; charset=utf-8");
+					return;
+				}
+				sendJson(res, 200, bundle);
 				return;
 			}
 
 			if (req.method === "POST" && url.pathname === "/brief") {
 				const raw = await readBody(req);
 				const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+				await auditRest(observability, surface, "brief", body);
 				const brief = await substrate.brief({
 					repo: typeof body.repo === "string" ? body.repo : undefined,
 					branch: typeof body.branch === "string" ? body.branch : undefined,
@@ -166,6 +268,7 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig) 
 			if (req.method === "POST" && url.pathname === "/events") {
 				const raw = await readBody(req);
 				const body = JSON.parse(raw) as Record<string, unknown>;
+				await auditRest(observability, surface, "events", body);
 				const result = await substrate.emit({
 					...(body as object),
 					surface: (typeof body.surface === "string" ? (body.surface as Surface) : null) ?? surface ?? "claude-code",
@@ -280,12 +383,13 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig) 
 					sendJson(res, 400, { error: "graph_id is required" });
 					return;
 				}
+				await auditRest(observability, surface, "verify", body);
 				sendJson(res, 200, await substrate.verifyGraph(body.graph_id));
 				return;
 			}
 
 			if (url.pathname === "/mcp") {
-				await handleMcp(req, res, substrate, caller);
+				await handleMcp(req, res, substrate, caller, observability);
 				return;
 			}
 
@@ -309,12 +413,19 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig) 
  * Stateless MCP: a fresh server and transport per request. The substrate holds
  * no per-session state of its own — everything it knows lives in Postgres and
  * Greptime — so there is nothing for a long-lived session to protect.
+ *
+ * The audit gate runs here, between reading the body and connecting the transport.
+ * Putting it in front of the dispatcher rather than inside each tool is what makes
+ * "a fail-closed tool cannot run unaudited" structural instead of a rule every
+ * future tool has to remember — the same reasoning as `assertAppendOnly` living in
+ * the ledger client rather than at each call site.
  */
 async function handleMcp(
 	req: IncomingMessage,
 	res: ServerResponse,
 	substrate: Substrate,
 	caller: McpCaller,
+	observability: Observability,
 ): Promise<void> {
 	if (req.method !== "POST") {
 		// Stateless mode has no server-initiated stream to attach to.
@@ -323,6 +434,14 @@ async function handleMcp(
 	}
 	const raw = await readBody(req);
 	const body: unknown = raw ? JSON.parse(raw) : undefined;
+
+	const { denials } = await auditToolCalls(observability, caller.surface, toolCallsIn(body));
+	if (denials.size > 0) {
+		// 200 with a JSON-RPC error, not an HTTP error: the request was well-formed and
+		// the refusal is the answer to it, which is what an MCP client knows how to read.
+		sendJson(res, 200, auditRefusal(body, denials));
+		return;
+	}
 
 	const server = createMcpServer(substrate, caller);
 	const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });

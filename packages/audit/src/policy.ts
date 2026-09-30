@@ -80,7 +80,9 @@ export interface ClaimVerdict {
  * substrate handing out a lock it cannot tell anyone about.
  *
  * `requireRecorded` is false when no ledger is configured at all: a local dev run
- * with no `GREPTIME_URL` would otherwise have every claim withdrawn.
+ * with no ledger URL in its environment would otherwise have every claim withdrawn.
+ * This package never reads that variable — only `packages/mcp-server` does, which is
+ * what the store lock is there to keep true — so the caller passes the answer in.
  */
 export function decideClaim(input: {
 	claimed: boolean;

@@ -5,6 +5,7 @@
  * surfaces cannot drift. Hooks need REST (they cannot call MCP tools); agents
  * get MCP. Same code underneath.
  */
+import { decideClaim, type ClaimDecision } from "@substrate/audit";
 import { composeBrief, type BriefRequest } from "./brief.ts";
 import { isReviewToken, type SubstrateConfig } from "./config.ts";
 import {
@@ -248,19 +249,78 @@ const DEDUP_WARNING =
 	"agent_events is not in append_mode and SUBSTRATE_ALLOW_DEDUPLICATING_LEDGER is set: this event may be " +
 	"silently dropped if another shares its surface, repo, graph, kind and millisecond.";
 
+/**
+ * Where the service reports what it measured.
+ *
+ * A narrow port of plain samples rather than the instrument objects themselves, so
+ * the service stays testable without building a metric registry, and so nothing
+ * here can fail a turn: every method is synchronous, returns nothing and is called
+ * from a position where throwing would be a bug in the observer, not in the
+ * substrate. `observe.ts` implements it over `@substrate/observability`.
+ */
+export interface SubstrateObserver {
+	briefed?(sample: { surface: Surface; graph_id: string | null; ok: boolean; durationMs: number }): void;
+	emitted?(sample: {
+		surface: Surface;
+		graph_id: string | null;
+		kind: EventKind;
+		stored: boolean;
+		durationMs: number;
+		payload: Record<string, unknown>;
+	}): void;
+	claimed?(sample: {
+		surface: Surface;
+		graph_id: string;
+		node_id: string;
+		decision: ClaimDecision;
+		reason: string | null;
+		quarantineReason: string | null;
+	}): void;
+}
+
+/** What `claimNode` answers. `claimed` stays the field every existing caller reads. */
+export interface ClaimResult {
+	claimed: boolean;
+	node: GraphNode;
+	/** The lease as the index reported it, so a holder has the id every fenced call needs. */
+	lease: LeaseView;
+	/** What the index did: granted, renewed, reclaimed, stolen, or refused. */
+	action: string;
+	/** The holder this claim displaced, as `surface/session`. */
+	evicted: string | null;
+	/** Whether the hold stands once the ledger has been accounted for. */
+	decision: ClaimDecision;
+	/** Why, when the claim was refused or withdrawn. */
+	reason: string | null;
+}
+
 export class Substrate {
 	readonly index: IndexStore | null;
 	readonly greptime: GreptimeClient | null;
+	private readonly observer: SubstrateObserver;
 
 	/** `stores` is a test seam; production always builds them from config. */
 	constructor(
 		readonly config: SubstrateConfig,
 		stores?: { index?: IndexStore | null; greptime?: GreptimeClient | null },
+		observer: SubstrateObserver = {},
 	) {
 		this.index =
 			stores?.index !== undefined ? stores.index : config.postgresUrl ? new IndexStore(config.postgresUrl) : null;
 		this.greptime =
 			stores?.greptime !== undefined ? stores.greptime : config.greptime ? new GreptimeClient(config.greptime) : null;
+		this.observer = observer;
+	}
+
+	/**
+	 * Whether a claim needs its event in the ledger to stand.
+	 *
+	 * Derived from whether a ledger exists at all, not from whether it is up: a
+	 * ledger that is down is exactly the case fail-closed is for. An explicit
+	 * `SUBSTRATE_CLAIM_REQUIRE_LEDGER` overrides both ways.
+	 */
+	get requireRecordedClaims(): boolean {
+		return this.config.requireRecordedClaims ?? this.greptime !== null;
 	}
 
 	/** Idempotent. Missing stores are reported, not fatal — the server still serves what it can. */
@@ -295,7 +355,22 @@ export class Substrate {
 	}
 
 	async brief(request: BriefRequest): Promise<string> {
-		return composeBrief(request, { index: this.index, greptime: this.greptime });
+		const started = performance.now();
+		let ok = false;
+		try {
+			const brief = await composeBrief(request, { index: this.index, greptime: this.greptime });
+			ok = true;
+			return brief;
+		} finally {
+			// Timed in `finally` so a brief that threw is still in the histogram. The SLO
+			// is about what the caller waited for, and a failure is a wait too.
+			this.observer.briefed?.({
+				surface: request.surface,
+				graph_id: normalizeIdentifier(request.graph_id),
+				ok,
+				durationMs: performance.now() - started,
+			});
+		}
 	}
 
 	/**
@@ -308,6 +383,23 @@ export class Substrate {
 	 * as `stored: false` and is left to the caller to act on or ignore.
 	 */
 	async emit(input: EventInput): Promise<EmitResult> {
+		const started = performance.now();
+		const result = await this.append(input);
+		// Reported after the append rather than around it, because the sample carries
+		// `stored` — and because the payload is where a collector puts the tokens and
+		// cost this event is accountable for.
+		this.observer.emitted?.({
+			surface: result.event.surface,
+			graph_id: result.event.graph_id,
+			kind: result.event.kind,
+			stored: result.stored,
+			durationMs: performance.now() - started,
+			payload: result.event.payload,
+		});
+		return result;
+	}
+
+	private async append(input: EventInput): Promise<EmitResult> {
 		let prev: string | null = null;
 		// The session id is looked up in its stored form, not as it arrived: the
 		// write path normalises it, and querying the raw value would match nothing
@@ -543,7 +635,7 @@ export class Substrate {
 	}
 
 	/**
-	 * Take or extend the lease on a node.
+	 * Take or extend the lease on a node, and stand by the hold only if it was recorded.
 	 *
 	 * The index decides — one statement, compare-and-swapped on the lease epoch,
 	 * with expiry judged by Postgres' clock — so two agents asking at once cannot
@@ -554,6 +646,20 @@ export class Substrate {
 	 *
 	 * A refused claim is not an error. The caller is told who holds the node and
 	 * until when, which is what it needs in order to pick up something else.
+	 *
+	 * **Fail closed on the telling.** A change of hold whose event did not reach the
+	 * ledger is withdrawn. `emit` deliberately fails open — a dropped event costs a
+	 * line in the trail, and refusing the turn over it would mean a substrate outage
+	 * blocking every prompt on the host — but a claim is not an event, it is a lock.
+	 * The index is what keeps two agents from holding the same node; the ledger is how
+	 * every *other* agent learns the node is taken, because the only place they read it
+	 * is the brief, whose recent actions come from the ledger. A hold the ledger never
+	 * took is one the substrate cannot tell anyone about, so handing it out would be
+	 * worse than refusing it: the next agent would see an idle node and start the same
+	 * work. A renewal is exempt — it emits nothing by design, so there is no news to
+	 * lose.
+	 *
+	 * See `decideClaim` in `@substrate/audit` and `docs/observability.md`.
 	 */
 	async claimNode(
 		graphId: string,
@@ -561,13 +667,16 @@ export class Substrate {
 		surface: Surface,
 		sessionId: string,
 		ttlSeconds?: number,
-	): Promise<{ claimed: boolean; node: GraphNode; lease: LeaseView; action: string; evicted: string | null }> {
+	): Promise<ClaimResult> {
 		if (!this.index) throw new Error("graph_claim requires SUBSTRATE_PG_URL");
 		const ttl = normalizeTtlSeconds(ttlSeconds, this.config.leaseTtlSeconds);
 		const result = await this.index.claimNode(graphId, nodeId, surface, sessionId, ttl);
 		const { decision } = result;
 		const identifier = result.node.linear_identifier;
 
+		// Nothing emitted means nothing that could have been lost: a refused claim and a
+		// silent renewal are both already consistent with what the ledger says.
+		let recorded = true;
 		if (result.claimed && decision.action !== "renewed") {
 			// A renewal is deliberately silent. A heartbeating agent renews for as
 			// long as it holds the node, and an event per renewal would bury the
@@ -579,7 +688,7 @@ export class Substrate {
 					: decision.action === "reclaimed"
 						? `re-claimed ${identifier ?? "node"} after its own lease expired`
 						: `claimed ${identifier ?? "node"}`;
-			await this.emit({
+			const emitted = await this.emit({
 				surface,
 				// A steal is the one claim another agent has to notice, so it is a
 				// warning: the brief lists warnings, and the agent that was evicted
@@ -599,15 +708,56 @@ export class Substrate {
 					...(evicted ? { evicted } : {}),
 				},
 				...(await this.placeOf(graphId)),
-			}).catch(() => undefined);
+			}).catch(() => null);
+			recorded = emitted?.stored === true;
 		}
 
-		return {
+		const verdict = decideClaim({
 			claimed: result.claimed,
+			recorded,
+			requireRecorded: this.requireRecordedClaims,
+		});
+
+		let reason = verdict.reason;
+		if (verdict.decision === "revoked") {
+			// Put the node back, so it is picked up rather than held by a surface that has
+			// been told it does not have it. Fenced on the lease the index just handed us,
+			// so the withdrawal cannot take a node somebody else has since claimed. A
+			// withdrawal that does not land is reported in the reason: the node then needs
+			// a manual release, and saying so beats leaving the caller to find out by being
+			// refused forever.
+			const withdrawn = await this.index
+				.releaseNode(graphId, nodeId, { lease_id: result.lease.lease_id })
+				.then((release) => release.released)
+				.catch((cause: unknown) => {
+					process.stderr.write(`[substrate] could not withdraw ${graphId}/${nodeId}: ${redact(String(cause))}\n`);
+					return false;
+				});
+			if (!withdrawn) reason = `${reason}; the index still holds the claim and needs a manual release`;
+			process.stderr.write(`[substrate] claim ${graphId}/${nodeId} withdrawn for ${surface} — ${reason}\n`);
+		}
+
+		this.observer.claimed?.({
+			surface,
+			graph_id: graphId,
+			node_id: nodeId,
+			decision: verdict.decision,
+			reason,
+			quarantineReason: verdict.quarantineReason,
+		});
+
+		return {
+			claimed: verdict.decision === "granted",
 			node: result.node,
+			// The lease as the index reported it. On a withdrawal it names a hold that has
+			// just been dropped, which is harmless — `claimed` is false and every fenced
+			// call on that id is refused — and re-reading the row to say so would be one
+			// more query on the path a ledger outage already degraded.
 			lease: result.lease,
 			action: decision.action,
 			evicted: decision.evicted ? `${decision.evicted.surface}/${decision.evicted.session_id}` : null,
+			decision: verdict.decision,
+			reason,
 		};
 	}
 

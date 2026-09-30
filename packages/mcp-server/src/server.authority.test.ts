@@ -8,6 +8,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { AddressInfo } from "node:net";
 import { loadConfig } from "./config.ts";
+import { createObservability, type Observability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
 import type { SubstrateEvent } from "./types.ts";
@@ -67,16 +68,22 @@ const greptime = {
 
 let base: string;
 let server: ReturnType<typeof createHttpServer>;
+let observability: Observability;
 
 beforeAll(async () => {
 	const config = loadConfig(ENV);
-	const substrate = new Substrate(config, { index: index as never, greptime: greptime as never });
-	server = createHttpServer(substrate, config);
+	// The audit chain stays in memory: ENV names no SUBSTRATE_AUDIT_PATH, and the gate
+	// in front of the dispatcher is part of the boundary this file drives.
+	observability = createObservability(config, ENV);
+	await observability.start();
+	const substrate = new Substrate(config, { index: index as never, greptime: greptime as never }, observability.observer);
+	server = createHttpServer(substrate, config, observability);
 	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 	base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
 
 afterAll(() => {
+	observability.stop();
 	server.close();
 });
 
@@ -247,13 +254,17 @@ describe("the handoff sender is the token's surface", () => {
 		// this particular token named no surface.
 		const config = loadConfig({ SUBSTRATE_TOKEN_HERMES: "tok-hermes", SUBSTRATE_HANDOFF_KEY: "k" });
 		const substrate = new Substrate(config, { index: index as never, greptime: greptime as never });
-		const surfaceless = createHttpServer(substrate, {
-			...config,
-			// A deployment with tokens, and a caller holding one that resolves to no
-			// surface — the shape the auth gate now refuses outright.
-			tokens: new Map([["tok-hermes", "hermes"]]),
-			operatorTokens: new Set(["tok-ghost"]),
-		});
+		const surfaceless = createHttpServer(
+			substrate,
+			{
+				...config,
+				// A deployment with tokens, and a caller holding one that resolves to no
+				// surface — the shape the auth gate now refuses outright.
+				tokens: new Map([["tok-hermes", "hermes"]]),
+				operatorTokens: new Set(["tok-ghost"]),
+			},
+			observability,
+		);
 		await new Promise<void>((resolve) => surfaceless.listen(0, "127.0.0.1", resolve));
 		const port = (surfaceless.address() as AddressInfo).port;
 
