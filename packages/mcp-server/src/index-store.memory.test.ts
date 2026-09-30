@@ -322,14 +322,29 @@ describeLive("memory governance against a live index", () => {
 			reason: "global scope requires review",
 		};
 		expect(await a.enqueueReview(parked)).toBe(`memr_${MARKER}_ttl`);
+		// A real quarantine row, so the other half of this assertion is about something:
+		// an empty queue satisfies `every` without proving anything at all.
+		await a.quarantineEntry({
+			...firstWriteRow({ id: `memq_${MARKER}_ttl`, idempotency_key: `${MARKER}-q7` }),
+			scope: "global",
+			subject: null,
+			entry_hash: `hash-${MARKER}-quarantined`,
+			text: `${MARKER} it might be the poller`,
+			conflict_key: null,
+			ttl: "30d" as const,
+			reason: "speculative" as const,
+			detail: "hedged language",
+		});
 
 		const queue = await a.governanceQueue(50);
 		const row = queue.reviews.find((review) => review.id === `memr_${MARKER}_ttl`);
 
 		expect(row?.ttl).toBe("30d");
-		// And a quarantine row carries none, because a parked secret was never kept
-		// for anything.
-		expect(queue.quarantined.every((quarantined) => quarantined.ttl === undefined)).toBe(true);
+		// And the quarantine row carries none even though the write asked for one: that
+		// table holds no retention, because a parked write was never kept for anything.
+		const quarantined = queue.quarantined.find((held) => held.id === `memq_${MARKER}_ttl`);
+		expect(quarantined).toBeDefined();
+		expect(quarantined?.ttl).toBeUndefined();
 	});
 
 	test("an entry resolves only the proposals it answers", async () => {
