@@ -5,12 +5,16 @@
  * Boots the HTTP surface even when a store is unreachable: an agent that gets a
  * thin brief is better off than one whose prompt hangs waiting for Railway.
  */
-import { loadConfig } from "./config.ts";
+import { configWarnings, loadConfig } from "./config.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
 
 const config = loadConfig();
 const substrate = new Substrate(config);
+
+for (const warning of configWarnings(config)) {
+	process.stderr.write(`[substrate] misconfigured — ${warning}\n`);
+}
 
 const migration = await substrate.migrate();
 for (const problem of migration.errors) {

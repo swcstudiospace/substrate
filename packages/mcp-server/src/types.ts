@@ -276,6 +276,35 @@ export interface GraphNode {
 	claimed_by: Surface | null;
 	claimed_at: string | null;
 	claim_session: string | null;
+	/** The current lease's id, or null when nothing holds the node. See `lease.ts`. */
+	lease_id: string | null;
+	/** When the lease lapses. A row claimed before leases existed has none. */
+	lease_expires_at: string | null;
+	lease_heartbeat_at: string | null;
+	/** Monotonic per node, bumped on every change of holder. The CAS token. */
+	lease_epoch: number;
+}
+
+/**
+ * Edges between Graph-of-Thought nodes, mirroring the Linear sub-issue
+ * relations the same nodes carry.
+ *
+ * `requires`: `from_node` cannot proceed until `to_node` completes.
+ * `blocks`:   the inverse, written from the blocking side.
+ * `gated_by`: `from_node` waits on `to_node` for a reason outside the work
+ *             itself — a review, a deploy, a human decision.
+ *
+ * They are held here so a claim can be checked against them without a Linear
+ * round-trip on the critical path; Linear remains the source of truth.
+ */
+export const EDGE_KINDS = ["requires", "blocks", "gated_by"] as const;
+export type EdgeKind = (typeof EDGE_KINDS)[number];
+
+export interface GraphEdge {
+	graph_id: string;
+	from_node: string;
+	to_node: string;
+	kind: EdgeKind;
 }
 
 export interface GraphStep {
@@ -302,4 +331,5 @@ export interface GraphIndexRow {
 export interface GraphView extends GraphIndexRow {
 	nodes: GraphNode[];
 	steps: GraphStep[];
+	edges: GraphEdge[];
 }

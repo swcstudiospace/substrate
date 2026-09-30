@@ -8,10 +8,13 @@
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { DEFAULT_IDLE_SECONDS, formatDrift } from "./drift.ts";
 import { DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT } from "./greptime.ts";
+import { MAX_LEASE_TTL_SECONDS, MIN_LEASE_TTL_SECONDS } from "./lease.ts";
 import type { Substrate } from "./service.ts";
 import {
 	ACTORS,
+	EDGE_KINDS,
 	EVENT_KINDS,
 	MEMORY_KINDS,
 	MEMORY_TTLS,
@@ -54,7 +57,25 @@ function json(value: unknown) {
 	return text(JSON.stringify(value, null, 2));
 }
 
-export function createMcpServer(substrate: Substrate, callerSurface: Surface | null): McpServer {
+/**
+ * What the transport established about this caller, as opposed to what the
+ * caller says about itself.
+ *
+ * `surface` is the token's surface, or null on an unauthenticated local run.
+ * `isOperator` is whether it may take a node off its holder. Both are decided
+ * before any tool argument is read, which is the point: a signed handoff's
+ * sender and a forced release's authority cannot be arguments.
+ */
+export interface McpCaller {
+	surface: Surface | null;
+	isOperator: boolean;
+}
+
+export function createMcpServer(substrate: Substrate, caller: McpCaller | Surface | null): McpServer {
+	// A bare surface is still accepted so existing callers and tests keep working;
+	// it means "authenticated as this surface, not an operator".
+	const { surface: callerSurface, isOperator } =
+		caller === null || typeof caller === "string" ? { surface: caller, isOperator: false } : caller;
 	const server = new McpServer({ name: "substrate", version: "0.1.0" });
 
 	server.registerTool(
@@ -318,38 +339,124 @@ export function createMcpServer(substrate: Substrate, callerSurface: Surface | n
 						}),
 					)
 					.optional(),
+				edges: z
+					.array(
+						z.object({
+							from_node: z.string(),
+							to_node: z.string(),
+							kind: z.enum(EDGE_KINDS),
+						}),
+					)
+					.optional()
+					.describe(
+						"Dependencies between this graph's nodes, mirroring the Linear sub-issue relations: " +
+							"requires | blocks | gated_by. graph_claim does not enforce them; coord_drift_scan reports a " +
+							"held node whose dependency is not complete.",
+					),
 			},
 		},
 		async (args) => json(await substrate.registerGraph({ ...args, surface: args.surface ?? callerSurface })),
 	);
 
+	const ttlSchema = z
+		.number()
+		.int()
+		.min(MIN_LEASE_TTL_SECONDS)
+		.max(MAX_LEASE_TTL_SECONDS)
+		.optional()
+		.describe("How long the lease lasts without a heartbeat. Defaults to SUBSTRATE_LEASE_TTL_SECONDS (900).");
+
 	server.registerTool(
 		"graph_claim",
 		{
-			title: "Claim a node",
+			title: "Take a lease on a node",
 			description:
-				"Claim a Graph-of-Thought node for this surface. If another agent already holds it, their claim is returned unchanged rather than overwritten.",
+				"Take the lease on a Graph-of-Thought node. A node has at most one holder, identified by surface AND " +
+				"session_id, so two sessions of the same agent are two holders. The lease expires after ttl_seconds " +
+				"unless graph_heartbeat extends it, and a lapsed lease is taken over by the next claimant — so a " +
+				"session that dies releases its node by doing nothing. If another agent holds it, `claimed` is false " +
+				"and their lease comes back instead: pick up something else rather than retrying. Keep the `lease_id` " +
+				"from the reply — graph_heartbeat, graph_release and graph_complete all require it.",
 			inputSchema: {
 				graph_id: z.string(),
 				node_id: z.string(),
-				session_id: z.string(),
+				session_id: z.string().describe("This session's id. Half of the holder's identity, so it must be stable and yours."),
+				ttl_seconds: ttlSchema,
 				surface: surfaceSchema.optional(),
 			},
 		},
-		async ({ graph_id, node_id, session_id, surface }) =>
-			json(await substrate.claimNode(graph_id, node_id, surface ?? callerSurface ?? "claude-code", session_id)),
+		async ({ graph_id, node_id, session_id, ttl_seconds, surface }) =>
+			json(
+				await substrate.claimNode(
+					graph_id,
+					node_id,
+					surface ?? callerSurface ?? "claude-code",
+					session_id,
+					ttl_seconds,
+				),
+			),
 	);
+
+	server.registerTool(
+		"graph_heartbeat",
+		{
+			title: "Extend a lease you hold",
+			description:
+				"Push out the expiry on a lease. Call it well inside ttl_seconds for as long as you are working the " +
+				"node — every other reader treats a lapsed lease as free. `ok: false` means you no longer hold it: " +
+				"`lost` if someone else does, `expired` if it lapsed (re-claim rather than beat), `unheld` if nothing " +
+				"does. Stop working the node on a refusal; the reply names the current holder.",
+			inputSchema: {
+				graph_id: z.string(),
+				node_id: z.string(),
+				lease_id: z.string().describe("From graph_claim. Proves you are the holder."),
+				ttl_seconds: ttlSchema,
+			},
+		},
+		async ({ graph_id, node_id, lease_id, ttl_seconds }) =>
+			json(await substrate.heartbeatNode(graph_id, node_id, lease_id, ttl_seconds)),
+	);
+
+	/**
+	 * A forced release is an operator action, not a peer's.
+	 *
+	 * Every surface token is equally privileged here, so if `force` were simply
+	 * passed through, any agent could evict any other and the lease would be
+	 * advisory again for anyone who chose to use it. Refused with the reason
+	 * rather than silently downgraded to an ordinary release, which would look
+	 * like success and leave the holder in place.
+	 */
+	const FORCE_REFUSED = {
+		released: false,
+		completed: false,
+		reason: "force-requires-operator",
+		detail:
+			"taking a node off its holder is an operator action: present a token from SUBSTRATE_OPERATOR_TOKENS. " +
+			"To release your own lease, pass the lease_id you were granted.",
+	} as const;
 
 	server.registerTool(
 		"graph_release",
 		{
 			title: "Release a node",
-			description: "Drop this surface's claim on a node without marking it complete.",
-			inputSchema: { graph_id: z.string(), node_id: z.string() },
+			description:
+				"Drop your lease on a node without marking it complete. `lease_id` fences it: a holder whose lease " +
+				"lapsed cannot release the node someone else has since claimed. `force` prises a node loose from a " +
+				"holder that is gone, and is an operator action — it needs an operator token, not a surface token, " +
+				"because one agent evicting another would make every lease advisory.",
+			inputSchema: {
+				graph_id: z.string(),
+				node_id: z.string(),
+				lease_id: z.string().optional(),
+				force: z
+					.boolean()
+					.optional()
+					.describe("Release whoever holds it. Operators only. Required when no lease_id is given."),
+			},
 		},
-		async ({ graph_id, node_id }) => {
-			await substrate.releaseNode(graph_id, node_id);
-			return text(`Released ${graph_id}/${node_id}.`);
+		async ({ graph_id, node_id, lease_id, force }) => {
+			if (force && !isOperator) return json(FORCE_REFUSED);
+			return json(await substrate.releaseNode(graph_id, node_id, { lease_id, force }));
 		},
 	);
 
@@ -357,13 +464,149 @@ export function createMcpServer(substrate: Substrate, callerSurface: Surface | n
 		"graph_complete",
 		{
 			title: "Complete a node",
-			description: "Mark a node completed and drop its claim.",
-			inputSchema: { graph_id: z.string(), node_id: z.string() },
+			description:
+				"Mark a node completed and drop its lease, in one fenced operation. You must hold the lease: pass the " +
+				"`lease_id` you were granted. A node nobody holds cannot be completed — claim it first — and a lease " +
+				"that has lapsed cannot close a node a second agent has since claimed. `force` is an operator action, " +
+				"as in graph_release. `completed: false` means nothing changed, and says why.",
+			inputSchema: {
+				graph_id: z.string(),
+				node_id: z.string(),
+				lease_id: z.string().optional(),
+				force: z.boolean().optional().describe("Operators only."),
+				state: z.enum(NODE_STATES).optional().describe("Defaults to completed."),
+			},
 		},
-		async ({ graph_id, node_id }) => {
-			await substrate.completeNode(graph_id, node_id);
-			return text(`Completed ${graph_id}/${node_id}.`);
+		async ({ graph_id, node_id, lease_id, force, state }) => {
+			if (force && !isOperator) return json(FORCE_REFUSED);
+			return json(await substrate.completeNode(graph_id, node_id, { lease_id, force, state }));
 		},
+	);
+
+	server.registerTool(
+		"coord_handoff",
+		{
+			title: "Hand work to another agent",
+			description:
+				"Record a signed handoff packet: the goal, the files, the Definition of Done and the known blockers — " +
+				"everything the receiving agent needs to start without asking you. The substrate adds the hash of " +
+				"your last event, signs the packet and appends it to the ledger whole, so the receiver can replay it " +
+				"from the log alone and check it was not altered. The sender is whoever this connection is " +
+				"authenticated as and cannot be set from here; the anchor is read from the ledger for the same " +
+				"reason. The reply's `gaps` names what a receiver will find missing; `signed: false` means no signing " +
+				"key is configured, and the handoff was still recorded.",
+			inputSchema: {
+				to: surfaceSchema.describe("The surface taking over."),
+				goal: z.string().describe("What the receiver is to achieve, in your words."),
+				files: z.array(z.string()).optional().describe("Repo-relative paths the work touches."),
+				dod: z.array(z.string()).optional().describe("Definition of Done, one checkable line each."),
+				blockers: z.array(z.string()).optional().describe("What is known to be in the way. Empty is a claim, not an omission."),
+				graph_id: z.string().optional(),
+				node_id: z.string().optional(),
+				linear_identifier: z.string().optional(),
+				repo: z.string().optional().describe("Defaults to the graph's repo."),
+				branch: z.string().optional(),
+				session_id: z.string().optional().describe("Your session. Used to find the chain tip the packet is anchored to."),
+				to_session_id: z.string().optional(),
+				notes: z.string().optional(),
+				lease_id: z.string().optional().describe("Your lease on node_id. With release_lease, it is dropped once the packet is durable."),
+				release_lease: z
+					.boolean()
+					.optional()
+					.describe(
+						"Release the lease so the receiver can claim the node. The reply's `lease_released` says whether " +
+							"it happened; the packet records only that you meant to hand it over, because a lease's state " +
+							"cannot be frozen into a signed packet. A receiver calls graph_claim rather than reading the packet.",
+					),
+			},
+		},
+		async ({ to, to_session_id, session_id, lease_id, release_lease, ...rest }) =>
+			json(
+				await substrate.handoff({
+					...rest,
+					// The sender is the authenticated caller. There is no argument for it:
+					// a packet naming someone else as sender would carry a valid signature
+					// over a false identity, which is worse than an unsigned packet.
+					from: { surface: callerSurface ?? "claude-code", session_id: session_id ?? null },
+					to: { surface: to, session_id: to_session_id ?? null },
+					handover_lease_id: lease_id ?? null,
+					...(release_lease === undefined ? {} : { release_lease }),
+				}),
+			),
+	);
+
+	server.registerTool(
+		"coord_handoff_verify",
+		{
+			title: "Verify a handoff packet",
+			description:
+				"Recompute the signature on a handoff packet. Call this before acting on one you did not watch being " +
+				"written. `ok: false` with `unsigned` or `no-keys-configured` means the packet is unauthenticated " +
+				"rather than forged; `bad-signature` means it does not match what was signed.",
+			inputSchema: { packet: z.record(z.string(), z.unknown()) },
+			annotations: { readOnlyHint: true },
+		},
+		async ({ packet }) => json(substrate.verifyHandoffPacket(packet)),
+	);
+
+	server.registerTool(
+		"coord_handoff_list",
+		{
+			title: "Replay a graph's handoffs",
+			description:
+				"Every handoff packet recorded for a Graph ID, oldest first, each with its own verification verdict. " +
+				"This is how a receiving agent picks up work it never saw being handed over. A packet that fails " +
+				"verification is still listed, with the reason.",
+			inputSchema: { graph_id: z.string() },
+			annotations: { readOnlyHint: true },
+		},
+		async ({ graph_id }) => json(await substrate.handoffsForGraph(graph_id)),
+	);
+
+	server.registerTool(
+		"coord_drift_scan",
+		{
+			title: "Scan a repo for coordination drift",
+			description:
+				"Compare the three records of what is happening in a repo — git's HEAD, the event ledger, and the " +
+				"leases the index holds — and report where they disagree. Catches a commit no collector logged, a " +
+				"trail naming a commit this checkout has not fetched, a lease held by a session that ended, a lease " +
+				"alive with no work behind it, work on a node nobody holds, and a held node whose dependency is not " +
+				"done. Reports only; it changes nothing. A record that could not be read is listed in `unavailable`, " +
+				"so an empty `findings` is not mistaken for agreement.",
+			inputSchema: {
+				repo: z.string().describe("owner/name, as the events record it."),
+				path: z.string().optional().describe("Absolute path to a local checkout, to read HEAD from. Omitted means the tree is not compared."),
+				git_tip: z.string().optional().describe("The tip sha, if you already know it. Cheaper than a path, and no filesystem is touched."),
+				branch: z.string().optional(),
+				idle_seconds: z
+					.number()
+					.int()
+					.min(60)
+					.optional()
+					.describe(`How long a live lease may show no work before that is drift. Default ${DEFAULT_IDLE_SECONDS}.`),
+				limit: z.number().int().min(1).max(2000).optional().describe("How many recent events to compare against."),
+				format: z.enum(["json", "text"]).optional().describe("`text` for a few printable lines instead of the full report."),
+			},
+			annotations: { readOnlyHint: true },
+		},
+		async ({ format, ...request }) => {
+			const report = await substrate.driftScan(request);
+			return format === "text" ? text(formatDrift(report)) : json(report);
+		},
+	);
+
+	server.registerTool(
+		"coord_reap_leases",
+		{
+			title: "Clear lapsed leases",
+			description:
+				"Clear every lease whose TTL has passed and record each release in the ledger. Expiry is already " +
+				"honoured everywhere — a lapsed lease reads as free — so this is housekeeping that makes the " +
+				"auto-release visible: the rows stop naming holders that are gone, and other agents see the warnings.",
+			inputSchema: { repo: z.string().optional().describe("Narrow to one repo. Omitted means every graph in the index.") },
+		},
+		async ({ repo }) => json(await substrate.reapExpiredLeases(repo)),
 	);
 
 	return server;

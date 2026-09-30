@@ -33,8 +33,28 @@ Details in [`docs/greptime-ledger.md`](docs/greptime-ledger.md) and
 ## Why
 
 Eight agents run on this host and none of them knows what the others just did. The substrate
-adds the two things the Notion and Linear rows do not hold: a **per-node claim** with a
-timestamp, and the **action-level trail** — which files, which commands, which commits.
+adds the two things the Notion and Linear rows do not hold: a **per-node lease** with a TTL,
+and the **action-level trail** — which files, which commands, which commits.
+
+## Coordination
+
+A node has at most one holder. `graph_claim` takes a **lease**, keyed on the pair
+(surface, `session_id`) so two sessions of one agent are two holders, expiring after a TTL
+so a killed session releases its node by doing nothing, and granted by a compare-and-swap on
+a per-node epoch so of two agents racing for a free node exactly one wins. `graph_heartbeat`
+extends a lease; `graph_release` and `graph_complete` are fenced on its id, so an agent that
+stalled past its TTL cannot close a node someone else has since claimed.
+
+`coord_handoff` writes a **signed packet** — goal, files, Definition of Done, blockers and
+the sender's chain tip — redacted and fitted and *then* signed, so a receiving agent can
+replay the handoff out of the append-only ledger alone and check it was not altered.
+
+`coord_drift_scan` compares the three records of what is happening in a repo — git's HEAD,
+the event trail, the leases held — and names where they disagree. It reports; it changes
+nothing.
+
+Details, and what each primitive deliberately does not promise, in
+[`docs/coordination.md`](docs/coordination.md).
 
 ## Layout
 

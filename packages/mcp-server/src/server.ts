@@ -14,9 +14,11 @@
  */
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { surfaceForToken, type SubstrateConfig } from "./config.ts";
+import { isOperator, surfaceForToken, type SubstrateConfig } from "./config.ts";
+import { formatDrift } from "./drift.ts";
 import { InvalidEventError } from "./event.ts";
-import { createMcpServer } from "./mcp.ts";
+import { InvalidHandoffError } from "./handoff.ts";
+import { createMcpServer, type McpCaller } from "./mcp.ts";
 import type { Substrate } from "./service.ts";
 import type { Surface } from "./types.ts";
 
@@ -111,14 +113,31 @@ function sendJson(res: ServerResponse, status: number, value: unknown): void {
 	send(res, status, JSON.stringify(value), "application/json");
 }
 
+/** A surface named in a request body. Only ever trusted on an unauthenticated run. */
+function bodySurface(body: Record<string, unknown>): Surface | null {
+	return typeof body.surface === "string" ? (body.surface as Surface) : null;
+}
+
 export function createHttpServer(substrate: Substrate, config: SubstrateConfig) {
 	return createServer(async (req, res) => {
 		const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
 		const authorization = req.headers.authorization ?? null;
 		const surface: Surface | null = surfaceForToken(config, authorization);
+		// What the transport establishes about the caller, before any request body is
+		// read. A signed handoff's sender and a forced release's authority are decided
+		// from this and never from an argument.
+		const caller: McpCaller = { surface, isOperator: isOperator(config, authorization) };
 
-		// A configured deployment requires a token; a bare local run does not,
-		// otherwise the operator is locked out of their own machine.
+		// A configured deployment requires a token that names a surface; a bare local
+		// run does not, otherwise the operator is locked out of their own machine.
+		//
+		// Every authenticated caller therefore has a surface. That is deliberate and
+		// load-bearing: a caller with none would reach the authoring routes with no
+		// identity, and each of them falls back to the body — so an operator
+		// credential could have signed a handoff as any agent it named. An operator
+		// token is a *surface* token that is also listed in
+		// SUBSTRATE_OPERATOR_TOKENS, so its extra authority never comes at the cost
+		// of knowing who used it.
 		if (!config.allowAnonymous && surface === null) {
 			sendJson(res, 401, { error: "unknown or missing bearer token" });
 			return;
@@ -187,6 +206,73 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig) 
 				return;
 			}
 
+			// Hooks get the coordination paths over REST for the same reason they get
+			// the brief: a hook process has no MCP client. Same service code beneath.
+			if (req.method === "POST" && url.pathname === "/handoff") {
+				const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+				const to = typeof body.to === "string" ? (body.to as Surface) : null;
+				if (typeof body.goal !== "string" || !to) {
+					sendJson(res, 400, { error: "handoff needs `goal` and `to`" });
+					return;
+				}
+				// The sender is the token's surface, never the body's. A packet naming
+				// another agent would verify under a false identity — a forgery with a
+				// valid seal on it. The body is consulted only when *nothing* is
+				// authenticated (a bare local run), and never merely because this
+				// particular token named no surface.
+				const sender = surface ?? (config.allowAnonymous ? bodySurface(body) : null);
+				if (!sender) {
+					sendJson(res, 403, {
+						error: "this token names no surface, so it cannot be a handoff sender",
+					});
+					return;
+				}
+				const result = await substrate.handoff({
+					from: { surface: sender, session_id: typeof body.session_id === "string" ? body.session_id : null },
+					to: { surface: to, session_id: typeof body.to_session_id === "string" ? body.to_session_id : null },
+					goal: body.goal,
+					files: Array.isArray(body.files) ? (body.files as string[]) : undefined,
+					dod: Array.isArray(body.dod) ? (body.dod as string[]) : undefined,
+					blockers: Array.isArray(body.blockers) ? (body.blockers as string[]) : undefined,
+					graph_id: typeof body.graph_id === "string" ? body.graph_id : null,
+					node_id: typeof body.node_id === "string" ? body.node_id : null,
+					linear_identifier: typeof body.linear_identifier === "string" ? body.linear_identifier : null,
+					repo: typeof body.repo === "string" ? body.repo : null,
+					branch: typeof body.branch === "string" ? body.branch : null,
+					notes: typeof body.notes === "string" ? body.notes : null,
+					handover_lease_id: typeof body.lease_id === "string" ? body.lease_id : null,
+					release_lease: body.release_lease === true,
+				});
+				// 503 when the ledger did not take it, matching /events: the packet is
+				// still returned, because an unstorable handoff is better handed to the
+				// caller than lost, and the caller owes its user the truth either way.
+				sendJson(res, result.stored ? 202 : 503, result);
+				return;
+			}
+
+			if (req.method === "POST" && url.pathname === "/drift") {
+				const raw = await readBody(req);
+				const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+				if (typeof body.repo !== "string") {
+					sendJson(res, 400, { error: "drift needs `repo`" });
+					return;
+				}
+				const report = await substrate.driftScan({
+					repo: body.repo,
+					path: typeof body.path === "string" ? body.path : null,
+					git_tip: typeof body.git_tip === "string" ? body.git_tip : null,
+					branch: typeof body.branch === "string" ? body.branch : null,
+					idle_seconds: typeof body.idle_seconds === "number" ? body.idle_seconds : undefined,
+					limit: typeof body.limit === "number" ? body.limit : undefined,
+				});
+				if (body.format === "text") {
+					send(res, 200, `${formatDrift(report)}\n`, "text/plain; charset=utf-8");
+					return;
+				}
+				sendJson(res, 200, report);
+				return;
+			}
+
 			if (req.method === "POST" && url.pathname === "/verify") {
 				const raw = await readBody(req);
 				const body = JSON.parse(raw) as { graph_id?: unknown };
@@ -199,13 +285,13 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig) 
 			}
 
 			if (url.pathname === "/mcp") {
-				await handleMcp(req, res, substrate, surface);
+				await handleMcp(req, res, substrate, caller);
 				return;
 			}
 
 			sendJson(res, 404, { error: `no route for ${req.method} ${url.pathname}` });
 		} catch (cause) {
-			if (cause instanceof InvalidEventError) {
+			if (cause instanceof InvalidEventError || cause instanceof InvalidHandoffError) {
 				sendJson(res, 400, { error: cause.message });
 				return;
 			}
@@ -228,7 +314,7 @@ async function handleMcp(
 	req: IncomingMessage,
 	res: ServerResponse,
 	substrate: Substrate,
-	surface: Surface | null,
+	caller: McpCaller,
 ): Promise<void> {
 	if (req.method !== "POST") {
 		// Stateless mode has no server-initiated stream to attach to.
@@ -238,7 +324,7 @@ async function handleMcp(
 	const raw = await readBody(req);
 	const body: unknown = raw ? JSON.parse(raw) : undefined;
 
-	const server = createMcpServer(substrate, surface);
+	const server = createMcpServer(substrate, caller);
 	const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
 	res.on("close", () => {
 		void transport.close();

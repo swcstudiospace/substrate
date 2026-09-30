@@ -2,16 +2,33 @@ import { describe, expect, test } from "bun:test";
 import { isReviewToken, loadConfig } from "./config.ts";
 import { MAX_QUERY_LIMIT, type EventQuery } from "./greptime.ts";
 import { REDACTED } from "./redact.ts";
+import type { ClaimAction } from "./lease.ts";
 import { Substrate } from "./service.ts";
 import type { EventInput, SubstrateEvent } from "./types.ts";
 
 /** Records what reached the event log, and stands in for the index. */
-function stubStores(graph: { repo?: string | null; branch?: string | null } | null) {
+function stubStores(
+	graph: { repo?: string | null; branch?: string | null } | null,
+	claim: { action?: ClaimAction; claimed?: boolean; evicted?: { surface: string; session_id: string } } = {},
+) {
 	const emitted: SubstrateEvent[] = [];
+	const action = claim.action ?? "granted";
 	const index = {
-		claimNode: async (graph_id: string, node_id: string) => ({
-			claimed: true,
+		claimNode: async (graph_id: string, node_id: string, surface: string, session_id: string) => ({
+			claimed: claim.claimed ?? true,
 			node: { graph_id, node_id, linear_identifier: "SPE-123" },
+			lease: { lease_id: "lse_1", epoch: 1, expires_at: "2026-09-30T12:15:00.000Z", state: "held" },
+			decision: {
+				action,
+				granted: action !== "denied",
+				lease_id: "lse_1",
+				epoch: 1,
+				observed_epoch: 0,
+				ttl_seconds: 900,
+				evicted: claim.evicted ?? null,
+				holder: { surface, session_id },
+				observed_expiry: null,
+			},
 		}),
 		getGraph: async () => (graph ? { repo: graph.repo ?? null, branch: graph.branch ?? null } : null),
 	};
@@ -63,6 +80,237 @@ describe("claimNode", () => {
 
 		expect(result.claimed).toBe(true);
 		expect(emitted[0]?.repo).toBeNull();
+	});
+
+	test("hands the caller the lease it is now holding", async () => {
+		const { index, greptime } = stubStores({ repo: "r" });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+
+		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1");
+
+		expect(result.action).toBe("granted");
+		expect(result.lease.lease_id).toBe("lse_1");
+		expect(result.lease.expires_at).toBe("2026-09-30T12:15:00.000Z");
+	});
+
+	test("a renewal writes no event — a heartbeat is the absence of news", async () => {
+		// An event per renewal would bury the trail under the one thing in it that
+		// carries no information, and a heartbeating agent renews for hours.
+		const { emitted, index, greptime } = stubStores({ repo: "r" }, { action: "renewed" });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+
+		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1");
+
+		expect(result.claimed).toBe(true);
+		expect(result.action).toBe("renewed");
+		expect(emitted).toEqual([]);
+	});
+
+	test("a steal is a warning, naming who was evicted", async () => {
+		// The one claim another agent has to notice: the evicted holder may still
+		// believe it holds the node, and the brief lists warnings.
+		const { emitted, index, greptime } = stubStores(
+			{ repo: "swcstudiospace/x" },
+			{ action: "stolen", evicted: { surface: "grok-bot", session_id: "sess-dead" } },
+		);
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+
+		const result = await substrate.claimNode("ut-1", "n2", "hermes", "sess-live");
+
+		expect(result.evicted).toBe("grok-bot/sess-dead");
+		expect(emitted[0]?.kind).toBe("warning");
+		expect(emitted[0]?.summary).toContain("took over SPE-123");
+		expect(emitted[0]?.summary).toContain("grok-bot");
+		expect(emitted[0]?.payload).toMatchObject({ action: "stolen", lease_id: "lse_1" });
+	});
+
+	test("a re-claim after its own lease lapsed says so, and evicts nobody", async () => {
+		const { emitted, index, greptime } = stubStores({ repo: "r" }, { action: "reclaimed" });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+
+		const result = await substrate.claimNode("ut-1", "n2", "hermes", "sess-live");
+
+		expect(result.evicted).toBeNull();
+		expect(emitted[0]?.kind).toBe("claim");
+		expect(emitted[0]?.summary).toContain("re-claimed SPE-123");
+	});
+
+	test("a refused claim writes nothing and reports the holder", async () => {
+		const { emitted, index, greptime } = stubStores({ repo: "r" }, { action: "denied", claimed: false });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+
+		const result = await substrate.claimNode("ut-1", "n2", "hermes", "sess-live");
+
+		expect(result.claimed).toBe(false);
+		expect(emitted).toEqual([]);
+	});
+
+	test("without an index there is no durable lease, so the claim is refused outright", async () => {
+		// Fail loudly rather than granting a lease that only this process knows
+		// about: an in-memory hold is exactly the false exclusivity leases replace.
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: null });
+		await expect(substrate.claimNode("ut-1", "n2", "hermes", "sess-1")).rejects.toThrow("SUBSTRATE_PG_URL");
+		await expect(substrate.heartbeatNode("ut-1", "n2", "lse_1")).rejects.toThrow("SUBSTRATE_PG_URL");
+	});
+});
+
+describe("releaseNode and completeNode", () => {
+	/** An index stub whose one node holds `lease_id`, with the real fencing rules. */
+	function leasedIndex(leaseId: string | null) {
+		const emitted: SubstrateEvent[] = [];
+		let state: string | null = null;
+		const node = {
+			graph_id: "ut-1",
+			node_id: "n2",
+			linear_identifier: "SPE-123",
+			claimed_by: "hermes",
+			claim_session: "sess-a",
+			claimed_at: new Date().toISOString(),
+			lease_id: leaseId,
+			lease_expires_at: new Date(Date.now() + 600_000).toISOString(),
+			lease_heartbeat_at: new Date().toISOString(),
+			lease_epoch: 3,
+		};
+		const index = {
+			getGraph: async () => ({ repo: "swcstudiospace/x", branch: "main" }),
+			// Deliberately present and expected never to fire: completion writes the
+			// state inside the release's own guarded statement now, because two
+			// statements let another agent claim the freed node in between and get
+			// their live node marked completed. The real store no longer has this
+			// method at all — the stub keeps it so the tripwire outlives the removal.
+			setNodeState: async () => {
+				throw new Error("completion must not write the state in a second statement");
+			},
+			releaseNode: async (
+				_g: string,
+				_n: string,
+				request: { lease_id?: string | null; force?: boolean },
+				alsoSetState?: string,
+			) => {
+				if (leaseId === null) {
+					// Nothing holds it: a successful no-op, carrying no holder.
+					return {
+						released: true,
+						node,
+						decision: { ok: true as const, action: "noop" as const, lease_id: null, evicted: null, holder: null, observed_epoch: 3 },
+					};
+				}
+				if (request.lease_id && request.lease_id !== leaseId) {
+					return {
+						released: false,
+						node,
+						decision: { ok: false as const, reason: "stale-lease" as const, holder: { surface: "hermes", session_id: "sess-a" }, observed_epoch: 3 },
+					};
+				}
+				if (!request.lease_id && !request.force) {
+					return {
+						released: false,
+						node,
+						decision: { ok: false as const, reason: "lease-id-required" as const, holder: { surface: "hermes", session_id: "sess-a" }, observed_epoch: 3 },
+					};
+				}
+				// The state arrives with the release, in one call, and lands on the row
+				// the release returns.
+				if (alsoSetState !== undefined) state = alsoSetState;
+				return {
+					released: true,
+					node: { ...node, ...(alsoSetState === undefined ? {} : { state: alsoSetState }) },
+					decision: {
+						ok: true as const,
+						action: request.force ? ("forced" as const) : ("released" as const),
+						lease_id: leaseId,
+						evicted: request.force ? { surface: "hermes" as const, session_id: "sess-a" } : null,
+						holder: { surface: "hermes" as const, session_id: "sess-a" },
+						observed_epoch: 3,
+					},
+				};
+			},
+		};
+		const greptime = {
+			ensureAppendMode: async () => true,
+			lastHash: async () => null,
+			insertEvent: async (event: SubstrateEvent) => {
+				emitted.push(event);
+			},
+		};
+		return { emitted, index, greptime, stateAfter: () => state };
+	}
+
+	function substrateFor(stores: ReturnType<typeof leasedIndex>) {
+		return new Substrate(loadConfig({}), { index: stores.index as never, greptime: stores.greptime as never });
+	}
+
+	test("the holder's release writes a note naming the node", async () => {
+		const stores = leasedIndex("lse_live");
+		const result = await substrateFor(stores).releaseNode("ut-1", "n2", { lease_id: "lse_live" });
+
+		expect(result.released).toBe(true);
+		expect(result.action).toBe("released");
+		expect(stores.emitted[0]?.kind).toBe("note");
+		expect(stores.emitted[0]?.summary).toBe("released SPE-123");
+		expect(stores.emitted[0]?.repo).toBe("swcstudiospace/x");
+	});
+
+	test("a stale lease id is refused and writes nothing", async () => {
+		const stores = leasedIndex("lse_live");
+		const result = await substrateFor(stores).releaseNode("ut-1", "n2", { lease_id: "lse_old" });
+
+		expect(result.released).toBe(false);
+		expect(result.reason).toBe("stale-lease");
+		expect(result.holder).toEqual({ surface: "hermes", session_id: "sess-a" });
+		expect(stores.emitted).toEqual([]);
+	});
+
+	test("a forced release is a warning, not a note", async () => {
+		const stores = leasedIndex("lse_live");
+		const result = await substrateFor(stores).releaseNode("ut-1", "n2", { force: true });
+
+		expect(result.action).toBe("forced");
+		expect(stores.emitted[0]?.kind).toBe("warning");
+		expect(stores.emitted[0]?.summary).toContain("forced the lease off");
+	});
+
+	test("completing a node a stale holder no longer owns does not close it", async () => {
+		// The sharpest case for fencing: an agent that stalled past its TTL wakes up
+		// and "finishes" a node a second agent has since claimed and is working on.
+		const stores = leasedIndex("lse_live");
+
+		const result = await substrateFor(stores).completeNode("ut-1", "n2", { lease_id: "lse_old" });
+
+		expect(result.completed).toBe(false);
+		expect(result.reason).toBe("stale-lease");
+		expect(stores.stateAfter()).toBeNull();
+	});
+
+	test("the holder completing its own node writes the state", async () => {
+		const stores = leasedIndex("lse_live");
+		const result = await substrateFor(stores).completeNode("ut-1", "n2", { lease_id: "lse_live" });
+
+		expect(result.completed).toBe(true);
+		expect(stores.stateAfter()).toBe("completed");
+	});
+
+	test("completing a node nobody holds is refused: a no-op release is not ownership", async () => {
+		// Releasing a free node succeeds as a no-op, which is right for a release and
+		// wrong as a licence to complete — it let any caller close any unheld node
+		// without ever holding it.
+		const stores = leasedIndex(null);
+		const result = await substrateFor(stores).completeNode("ut-1", "n2", { lease_id: "lse_whatever" });
+
+		expect(result.completed).toBe(false);
+		expect(result.reason).toBe("unheld");
+		expect(stores.stateAfter()).toBeNull();
+	});
+
+	test("the release note is attributed to the agent that let the node go", async () => {
+		// The row's holder columns are cleared by the release, so reading the holder
+		// off the returned row attributed every ordinary release to the fallback
+		// surface with no session. The decision saw the row before that.
+		const stores = leasedIndex("lse_live");
+		await substrateFor(stores).releaseNode("ut-1", "n2", { lease_id: "lse_live" });
+
+		expect(stores.emitted[0]?.surface).toBe("hermes");
+		expect(stores.emitted[0]?.session_id).toBe("sess-a");
 	});
 });
 
@@ -406,6 +654,334 @@ describe("reviewer tokens", () => {
 		const config = loadConfig({ SUBSTRATE_MEMORY_REVIEW_TOKENS: "changeme" });
 		expect(config.memoryReviewTokens.size).toBe(0);
 		expect(isReviewToken(config, "changeme")).toBe(false);
+	});
+});
+
+describe("handoff", () => {
+	const SIGNING_ENV = { SUBSTRATE_HANDOFF_KEY: "test-signing-key", SUBSTRATE_HANDOFF_KEY_ID: "k1" };
+
+	function ledger(lastHash: string | null = null) {
+		const written: SubstrateEvent[] = [];
+		return {
+			written,
+			greptime: {
+				ensureAppendMode: async () => true,
+				lastHash: async () => lastHash,
+				insertEvent: async (event: SubstrateEvent) => {
+					written.push(event);
+				},
+			},
+		};
+	}
+
+	const input = {
+		from: { surface: "grok-bot" as const, session_id: "sess-grok" },
+		to: { surface: "hermes" as const, session_id: null },
+		goal: "finish the lease CAS path",
+		files: ["packages/mcp-server/src/index-store.ts"],
+		dod: ["bun test green"],
+		blockers: [],
+		graph_id: "ut-1",
+		node_id: "n2",
+	};
+
+	test("anchors the packet to the sender's chain tip without being told it", async () => {
+		// `prev_event_hash` is a fact about the ledger, and the ledger is here. A
+		// caller that had to supply it would be free to supply the wrong one.
+		const { written, greptime } = ledger("tip-hash");
+		const substrate = new Substrate(loadConfig(SIGNING_ENV), { index: null, greptime: greptime as never });
+
+		const result = await substrate.handoff(input);
+
+		expect(result.packet.prev_event_hash).toBe("tip-hash");
+		// The handoff event chains from the same tip, so the packet and the event it
+		// arrived in agree about where the sender's trail had reached.
+		expect(written[0]?.prev).toBe("tip-hash");
+		expect(result.event.prev).toBe("tip-hash");
+	});
+
+	test("a caller cannot pin the anchor: a hash nothing checked would be signed and believed", async () => {
+		// The signature says the substrate signed the packet, not that the hash is
+		// real — so a caller-supplied anchor would hand a receiver `ok: true` on a
+		// packet pointing at a trail that never happened. There is no input for it.
+		const { greptime } = ledger("tip-hash");
+		const substrate = new Substrate(loadConfig(SIGNING_ENV), { index: null, greptime: greptime as never });
+
+		const result = await substrate.handoff({ ...input, prev_event_hash: "d".repeat(64) } as never);
+
+		expect(result.packet.prev_event_hash).toBe("tip-hash");
+	});
+
+	test("the lease is released only once the packet is durable", async () => {
+		// Freeing the node first meant a refused append left it claimable with no
+		// packet to replay: the next agent finds the work abandoned and no account of
+		// it. Keeping the hold is the recoverable half — the sender can retry.
+		const released: Array<{ node: string; lease: string | undefined }> = [];
+		const index = {
+			getGraph: async () => ({ repo: "swcstudiospace/x", branch: "main" }),
+			releaseNode: async (_g: string, nodeId: string, request: { lease_id?: string }) => {
+				released.push({ node: nodeId, lease: request.lease_id });
+				return {
+					released: true,
+					node: { graph_id: "ut-1", node_id: nodeId, linear_identifier: "SPE-4792", lease_epoch: 1 },
+					decision: { ok: true as const, action: "released" as const, lease_id: request.lease_id ?? null, evicted: null, holder: { surface: "grok-bot" as const, session_id: "sess-grok" }, observed_epoch: 1 },
+				};
+			},
+		};
+
+		// No ledger at all, so the append cannot land.
+		const unstorable = new Substrate(loadConfig(SIGNING_ENV), { index: index as never, greptime: null });
+		const refused = await unstorable.handoff({ ...input, handover_lease_id: "lse_a", release_lease: true });
+
+		expect(refused.stored).toBe(false);
+		expect(refused.lease_released).toBe(false);
+		expect(released).toEqual([]);
+
+		// And with a ledger that takes it, the release happens.
+		const { greptime } = ledger();
+		const stored = new Substrate(loadConfig(SIGNING_ENV), { index: index as never, greptime: greptime as never });
+		const done = await stored.handoff({ ...input, handover_lease_id: "lse_a", release_lease: true });
+
+		expect(done.stored).toBe(true);
+		expect(done.lease_released).toBe(true);
+		expect(released).toEqual([{ node: "n2", lease: "lse_a" }]);
+	});
+
+	test("the whole packet is in the event, signed, and verifies as stored", async () => {
+		const { written, greptime } = ledger();
+		const substrate = new Substrate(loadConfig(SIGNING_ENV), { index: null, greptime: greptime as never });
+
+		const result = await substrate.handoff(input);
+
+		expect(result.signed).toBe(true);
+		expect(result.stored).toBe(true);
+		expect(written[0]?.kind).toBe("handoff");
+		expect(written[0]?.summary).toBe("handoff to hermes: finish the lease CAS path");
+		// Read back out of the row that was stored, not out of the reply.
+		expect(substrate.verifyHandoffPacket(written[0]?.payload.handoff)).toEqual({ ok: true, key_id: "k1" });
+	});
+
+	test("with no key configured the handoff still happens and says it is unsigned", async () => {
+		// Fail open: a handoff that was refused for want of a key is context lost
+		// outright, which is worse than context that cannot be authenticated.
+		const { written, greptime } = ledger();
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: greptime as never });
+
+		const result = await substrate.handoff(input);
+
+		expect(result.signed).toBe(false);
+		expect(result.packet.signature).toBeNull();
+		expect(written).toHaveLength(1);
+	});
+
+	test("an unstorable ledger does not lose the packet, and says it did not store it", async () => {
+		const substrate = new Substrate(loadConfig(SIGNING_ENV), { index: null, greptime: null });
+
+		const result = await substrate.handoff(input);
+
+		expect(result.stored).toBe(false);
+		expect(result.error).toContain("GREPTIME_URL");
+		expect(substrate.verifyHandoffPacket(result.packet).ok).toBe(true);
+	});
+
+	test("takes the repo from the graph, so the handoff shows up in that repo's brief", async () => {
+		const { written, greptime } = ledger();
+		const index = { getGraph: async () => ({ repo: "swcstudiospace/agent-substrate", branch: "main" }) };
+		const substrate = new Substrate(loadConfig(SIGNING_ENV), { index: index as never, greptime: greptime as never });
+
+		const result = await substrate.handoff(input);
+
+		expect(result.packet.repo).toBe("swcstudiospace/agent-substrate");
+		expect(written[0]?.repo).toBe("swcstudiospace/agent-substrate");
+	});
+
+	test("names what a receiver will find missing rather than refusing a thin packet", async () => {
+		const { greptime } = ledger();
+		const substrate = new Substrate(loadConfig(SIGNING_ENV), { index: null, greptime: greptime as never });
+
+		const result = await substrate.handoff({ ...input, dod: [], files: [] });
+
+		expect(result.gaps.join(" ")).toContain("Definition of Done");
+		expect(result.signed).toBe(true);
+	});
+
+	test("replays a graph's handoffs back out of the ledger, each with its own verdict", async () => {
+		const { written, greptime } = ledger();
+		const substrate = new Substrate(loadConfig(SIGNING_ENV), { index: null, greptime: greptime as never });
+		await substrate.handoff(input);
+
+		// The ledger hands back loosely typed rows; the replay has to rebuild the
+		// packet from them and verify what it rebuilt.
+		const row = written[0]!;
+		const replay = new Substrate(loadConfig(SIGNING_ENV), {
+			index: null,
+			greptime: {
+				readEvents: async () => [
+					{ ...row, ts: Date.parse(row.ts), payload: JSON.stringify(row.payload), step: null },
+					{ ...row, id: "evt_other", kind: "note", payload: "{}", ts: Date.parse(row.ts), step: null },
+				],
+			} as never,
+		});
+
+		const handoffs = await replay.handoffsForGraph("ut-1");
+
+		expect(handoffs).toHaveLength(1);
+		expect(handoffs[0]?.verdict).toEqual({ ok: true, key_id: "k1" });
+		expect(handoffs[0]?.packet?.goal).toBe("finish the lease CAS path");
+		expect(handoffs[0]?.packet?.dod).toEqual(["bun test green"]);
+	});
+
+	test("a packet that does not verify is still returned, with the reason", async () => {
+		// Hiding it would leave a gap in the history with no explanation for it.
+		const substrate = new Substrate(loadConfig(SIGNING_ENV), {
+			index: null,
+			greptime: {
+				readEvents: async () => [
+					{
+						id: "evt_1",
+						ts: Date.now(),
+						surface: "grok-bot",
+						kind: "handoff",
+						summary: "handoff to hermes: x",
+						payload: JSON.stringify({ handoff: { goal: "x", signature: null } }),
+						hash: "h",
+						prev: null,
+						actor: "agent",
+						step: null,
+					},
+				],
+			} as never,
+		});
+
+		const handoffs = await substrate.handoffsForGraph("ut-1");
+
+		expect(handoffs).toHaveLength(1);
+		expect(handoffs[0]?.verdict).toEqual({ ok: false, reason: "unsigned" });
+	});
+});
+
+describe("driftScan", () => {
+	test("reports each record as not compared rather than throwing when it cannot be read", async () => {
+		// A scan that threw would tell an agent nothing; one that reported agreement
+		// would tell it something false.
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: null });
+
+		const report = await substrate.driftScan({ repo: "swcstudiospace/agent-substrate" });
+
+		expect(report.ok).toBe(true);
+		expect(report.findings).toEqual([]);
+		expect(report.unavailable).toHaveLength(3);
+		expect(report.unavailable[0]).toContain("no path or git_tip given");
+		expect(report.sources).toEqual({ git: false, ledger: false, index: false });
+	});
+
+	test("compares a supplied git tip against the trail, without reading a checkout", async () => {
+		// The hook's path: it has just run in the checkout, so it knows the tip and
+		// the substrate need not touch the filesystem at all.
+		const substrate = new Substrate(loadConfig({}), {
+			index: null,
+			greptime: {
+				recentForRepo: async () => [
+					{
+						id: "evt_1",
+						ts: Date.now() - 60_000,
+						surface: "cursor",
+						kind: "commit",
+						summary: "commit 9999999 something else",
+						payload: JSON.stringify({ sha: "9999999" }),
+						hash: "h",
+						prev: null,
+						actor: "human",
+						step: null,
+						repo: "swcstudiospace/agent-substrate",
+					},
+				],
+				// Asked of the whole ledger, not just the window: no commit event names
+				// this tip anywhere, so the finding is real rather than an artefact.
+				commitEventsNaming: async () => [],
+			} as never,
+		});
+
+		const report = await substrate.driftScan({
+			repo: "swcstudiospace/agent-substrate",
+			git_tip: "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b",
+			branch: "main",
+		});
+
+		expect(report.findings.map((finding) => finding.kind)).toEqual(["git.tip_unlogged"]);
+		expect(report.git.short_sha).toBe("1a2b3c4");
+		expect(report.ledger.last_commit).toMatchObject({ sha: "9999999", surface: "cursor" });
+	});
+
+	test("reads the repo from the ledger in the form the write path stores it", async () => {
+		// The same trap as `emit` and `verifyGraph`: querying the raw value would
+		// match nothing and report a silent ledger for a busy repo.
+		const asked: string[] = [];
+		const substrate = new Substrate(loadConfig({}), {
+			index: null,
+			greptime: {
+				recentForRepo: async (repo: string) => {
+					asked.push(repo);
+					return [];
+				},
+			} as never,
+		});
+
+		await substrate.driftScan({ repo: `swcstudiospace/x-GITHUB_TOKEN=ghp_${"a".repeat(40)}` });
+
+		expect(asked[0]).not.toContain("ghp_aaaa");
+		expect(asked[0]).toContain("[REDACTED]");
+	});
+
+	test("a lapsed lease in the index is named even with no ledger at all", async () => {
+		const substrate = new Substrate(loadConfig({}), {
+			index: {
+				claimedNodesForRepo: async () => [
+					{
+						graph_id: "ut-1",
+						node_id: "n2",
+						linear_identifier: "SPE-4792",
+						state: "started",
+						claimed_by: "grok-bot",
+						claim_session: "sess-dead",
+						claimed_at: new Date(Date.now() - 3_600_000).toISOString(),
+						lease_id: "lse_dead",
+						lease_expires_at: new Date(Date.now() - 1_800_000).toISOString(),
+						lease_heartbeat_at: new Date(Date.now() - 1_900_000).toISOString(),
+						lease_epoch: 2,
+					},
+				],
+				nodesForRepo: async () => [],
+				edgesForRepo: async () => [],
+			} as never,
+			greptime: null,
+		});
+
+		const report = await substrate.driftScan({ repo: "swcstudiospace/agent-substrate" });
+
+		expect(report.findings.map((finding) => finding.kind)).toEqual(["lease.expired"]);
+		expect(report.findings[0]?.surface).toBe("grok-bot");
+		expect(report.claims[0]?.lease.state).toBe("expired");
+	});
+
+	test("one failing index query degrades the whole index record rather than half-comparing", async () => {
+		// Comparing claims against edges that could not be read would report every
+		// held node as unblocked, which is a confident wrong answer.
+		const substrate = new Substrate(loadConfig({}), {
+			index: {
+				claimedNodesForRepo: async () => [],
+				nodesForRepo: async () => [],
+				edgesForRepo: async () => {
+					throw new Error("postgres is down");
+				},
+			} as never,
+			greptime: null,
+		});
+
+		const report = await substrate.driftScan({ repo: "swcstudiospace/agent-substrate" });
+
+		expect(report.sources.index).toBe(false);
+		expect(report.unavailable.some((line) => line.startsWith("index:"))).toBe(true);
 	});
 });
 

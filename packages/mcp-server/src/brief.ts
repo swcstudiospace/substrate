@@ -9,7 +9,8 @@
 import { normalizeIdentifier } from "./event.ts";
 import type { GreptimeClient } from "./greptime.ts";
 import { quote } from "./greptime.ts";
-import type { IndexStore } from "./index-store.ts";
+import { leaseSnapshot, type IndexStore } from "./index-store.ts";
+import { leaseState } from "./lease.ts";
 import type { GraphView, MemoryEntry, Surface } from "./types.ts";
 
 export interface BriefRequest {
@@ -65,12 +66,26 @@ function clock(value: unknown): string {
 	return toDate(value)?.toISOString().slice(11, 16) ?? "--:--";
 }
 
-function describeNode(node: GraphView["nodes"][number]): string {
+/**
+ * One node, as a line in the brief.
+ *
+ * The lease state matters more than `claimed_by` here. A node whose lease has
+ * lapsed is *free* — the next claim takes it — so reporting it as "started by
+ * hermes" would tell the reading agent the one thing it must not believe, and
+ * would keep it off a node it is entitled to. It is named as stale instead,
+ * because who was there last is still worth knowing.
+ */
+function describeNode(node: GraphView["nodes"][number], now = Date.now()): string {
 	const label = node.linear_identifier ? `${node.node_id} ${node.linear_identifier}` : node.node_id;
 	if (node.state === "completed") return `${label} done${node.claimed_by ? ` (${node.claimed_by})` : ""}`;
 	if (node.claimed_by) {
-		const since = node.claimed_at ? ` ${relativeTime(node.claimed_at)}` : "";
-		return `${label} started by ${node.claimed_by}${since}`;
+		const state = leaseState(leaseSnapshot(node), now);
+		if (state === "held") {
+			const since = node.claimed_at ? ` ${relativeTime(node.claimed_at, now)}` : "";
+			return `${label} held by ${node.claimed_by}${since}`;
+		}
+		const lapsed = node.lease_expires_at ? ` ${relativeTime(node.lease_expires_at, now)}` : "";
+		return `${label} free — ${node.claimed_by}'s lease expired${lapsed}`;
 	}
 	if (node.state === "canceled") return `${label} canceled`;
 	return `${label} ${node.state ?? "todo"}`;
@@ -122,7 +137,9 @@ export async function composeBrief(request: BriefRequest, sources: BriefSources)
 			.join(" · ");
 		lines.push(summary);
 		if (graph.nodes.length > 0) {
-			lines.push(`Nodes: ${graph.nodes.map(describeNode).join(" · ")}`);
+			// Not `map(describeNode)`: map would pass the array index as the `now`
+			// argument, and every lease would read as live against a clock at epoch 0.
+			lines.push(`Nodes: ${graph.nodes.map((node) => describeNode(node)).join(" · ")}`);
 		}
 	} else if (graphId) {
 		lines.push("This graph is not in the index yet.");
@@ -154,11 +171,14 @@ export async function composeBrief(request: BriefRequest, sources: BriefSources)
 			const described = others
 				.slice(0, 4)
 				.map((other) => {
-					const started = other.nodes.filter((n) => n.claimed_by).length;
+					// Live leases only. A graph whose every lease has lapsed has nobody
+					// on it, and counting those as started would make the repo look busier
+					// than it is — which is the reading that stops an agent picking work up.
+					const started = other.nodes.filter((n) => leaseState(leaseSnapshot(n), Date.now()) === "held").length;
 					const parts = [
 						other.surface,
 						other.status,
-						started > 0 ? `${started} node${started === 1 ? "" : "s"} started` : null,
+						started > 0 ? `${started} node${started === 1 ? "" : "s"} held` : null,
 					].filter(Boolean);
 					return `${other.graph_id} (${parts.join(", ")})`;
 				})

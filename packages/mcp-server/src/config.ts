@@ -4,6 +4,7 @@
  * Deployment reads /etc/substrate/substrate.env via the systemd unit's
  * EnvironmentFile. Nothing here ever reads a secret from the repo.
  */
+import { normalizeTtlSeconds } from "./lease.ts";
 import { parseGrants, type MemoryGrant } from "./memory-policy.ts";
 import type { Surface } from "./types.ts";
 
@@ -26,6 +27,24 @@ export interface SubstrateConfig {
 	tokens: Map<string, Surface>;
 	/** When true, an unauthenticated caller is accepted and attributed by its payload. */
 	allowAnonymous: boolean;
+	/**
+	 * Surface tokens that may also take a node off its holder.
+	 *
+	 * A forced release breaks the guarantee every other agent is relying on, so it
+	 * is not a peer's to use: with every surface's token equally privileged, an
+	 * agent could evict any other and the lease would be advisory again for
+	 * anyone who chose. It is an operator action, and this is who the operators
+	 * are. Empty on a bare local run, where `allowAnonymous` already means the
+	 * machine's owner is the only caller.
+	 *
+	 * These are **also** `SUBSTRATE_TOKEN_*` values, not a separate class of
+	 * credential. A token that authenticated but named no surface would reach the
+	 * authoring routes with no identity, and each of those falls back to the
+	 * request body — so an operator credential could sign a handoff as any agent
+	 * it cared to name. Operator authority is an attribute of a surface token, so
+	 * a forced release is always attributable to whoever used it.
+	 */
+	operatorTokens: Set<string>;
 	/**
 	 * Accept a ledger that is not provably append-only.
 	 *
@@ -58,6 +77,17 @@ export interface SubstrateConfig {
 	 * because a policy you can loosen by deleting a variable is not one.
 	 */
 	memoryGrants: readonly MemoryGrant[];
+	/** Default node-lease TTL in seconds. A caller may ask for less or more, within bounds. */
+	leaseTtlSeconds: number;
+	/**
+	 * Keys a handoff packet's signature is verified against, by key id.
+	 *
+	 * More than one so a key can be rotated without invalidating the packets
+	 * already in the ledger: the new key signs, the old one still verifies.
+	 */
+	handoffKeys: Map<string, string>;
+	/** The key id new packets are signed with. Null when no key is configured. */
+	handoffKeyId: string | null;
 }
 
 /** SUBSTRATE_TOKEN_GROK_BUILD → "grok-build" */
@@ -74,9 +104,36 @@ function readTokens(env: Record<string, string | undefined>): Map<string, Surfac
 	return tokens;
 }
 
+/**
+ * The signing key and whatever previous key is still being honoured.
+ *
+ * A packet names the key id it was signed with, so rotation is: move the live
+ * key to `SUBSTRATE_HANDOFF_KEY_PREV`, put the new one in
+ * `SUBSTRATE_HANDOFF_KEY`, give it a new id. Packets signed either side of that
+ * still verify, and nothing in the append-only ledger becomes unreadable.
+ */
+function readHandoffKeys(env: Record<string, string | undefined>): {
+	handoffKeys: Map<string, string>;
+	handoffKeyId: string | null;
+} {
+	const keys = new Map<string, string>();
+	const active = env.SUBSTRATE_HANDOFF_KEY?.trim();
+	const activeId = env.SUBSTRATE_HANDOFF_KEY_ID?.trim() || "k1";
+	const previous = env.SUBSTRATE_HANDOFF_KEY_PREV?.trim();
+	const previousId = env.SUBSTRATE_HANDOFF_KEY_PREV_ID?.trim() || "k0";
+	if (previous) keys.set(previousId, previous);
+	// Set last, so a misconfiguration that gives both keys the same id leaves the
+	// live key in place rather than the retired one.
+	if (active) keys.set(activeId, active);
+	return { handoffKeys: keys, handoffKeyId: active ? activeId : null };
+}
+
 export function loadConfig(env: Record<string, string | undefined> = process.env): SubstrateConfig {
 	const greptimeUrl = env.GREPTIME_URL?.trim();
+	const leaseTtl = Number(env.SUBSTRATE_LEASE_TTL_SECONDS);
 	return {
+		...readHandoffKeys(env),
+		leaseTtlSeconds: normalizeTtlSeconds(Number.isFinite(leaseTtl) ? leaseTtl : undefined),
 		host: env.SUBSTRATE_HOST?.trim() || "127.0.0.1",
 		port: Number(env.SUBSTRATE_PORT ?? 7410),
 		greptime: greptimeUrl
@@ -95,6 +152,12 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		// No tokens configured at all means a local dev run; requiring auth then
 		// would just lock the operator out of their own machine.
 		allowAnonymous: readTokens(env).size === 0,
+		operatorTokens: new Set(
+			(env.SUBSTRATE_OPERATOR_TOKENS ?? "")
+				.split(",")
+				.map((token) => token.trim())
+				.filter((token) => token.length > 0),
+		),
 		allowDeduplicatingLedger: /^(1|true|yes)$/i.test(env.SUBSTRATE_ALLOW_DEDUPLICATING_LEDGER?.trim() ?? ""),
 		memoryReviewTokens: readReviewTokens(env.SUBSTRATE_MEMORY_REVIEW_TOKENS),
 		memoryGrants: parseGrants(env.SUBSTRATE_MEMORY_GRANTS, (message) =>
@@ -115,11 +178,31 @@ function readReviewTokens(raw: string | undefined): Set<string> {
 	);
 }
 
-/** Resolve a request's bearer token to the surface it belongs to. */
-export function surfaceForToken(config: SubstrateConfig, authorization: string | null): Surface | null {
+function bearer(authorization: string | null): string | null {
 	if (!authorization) return null;
 	const token = authorization.replace(/^Bearer\s+/i, "").trim();
-	return config.tokens.get(token) ?? null;
+	return token.length > 0 ? token : null;
+}
+
+/** Resolve a request's bearer token to the surface it belongs to. */
+export function surfaceForToken(config: SubstrateConfig, authorization: string | null): Surface | null {
+	const token = bearer(authorization);
+	return token === null ? null : config.tokens.get(token) ?? null;
+}
+
+/**
+ * Whether this request may take a node off its holder.
+ *
+ * On a bare local run — no surface tokens at all, so `allowAnonymous` — the
+ * caller is the machine's owner and the answer is yes; there is nobody else to
+ * protect the lease from. Once tokens exist, an ordinary surface token is not
+ * enough: the token must also be listed as an operator's, because a forced
+ * release is exactly the thing one agent must not be able to do to another.
+ */
+export function isOperator(config: SubstrateConfig, authorization: string | null): boolean {
+	if (config.allowAnonymous && config.operatorTokens.size === 0) return true;
+	const token = bearer(authorization);
+	return token !== null && config.operatorTokens.has(token);
 }
 
 /**
@@ -134,4 +217,42 @@ export function isReviewToken(config: SubstrateConfig, token: string | undefined
 	if (typeof token !== "string") return false;
 	const trimmed = token.trim();
 	return trimmed.length > 0 && config.memoryReviewTokens.has(trimmed);
+}
+
+/**
+ * Configuration that will not do what the operator intended, reported at boot.
+ *
+ * A warning has to say what is *actually* true of the running deployment, or it
+ * costs more than it saves: an operator reading the wrong reason fixes the wrong
+ * thing, and here the two reasons lead in opposite directions — one says add a
+ * surface token, the other says you have no authentication at all.
+ *
+ * With surface tokens configured, a token listed only as an operator's can never
+ * authenticate: the HTTP surface requires a token that names a surface, so it
+ * would look configured and silently do nothing.
+ *
+ * With no surface tokens at all, the opposite holds. `allowAnonymous` lets every
+ * caller in unauthenticated, and `isOperator` still honours the operator token —
+ * so it does work, and it is the only thing gating anything.
+ */
+export function configWarnings(config: SubstrateConfig): string[] {
+	const warnings: string[] = [];
+	if (config.operatorTokens.size === 0) return warnings;
+
+	if (config.allowAnonymous) {
+		warnings.push(
+			"operator tokens are set but no SUBSTRATE_TOKEN_* surface token is, so every caller is accepted " +
+				"unauthenticated and attributed by its own payload. The operator tokens do work — they gate a forced " +
+				"release — but nothing else is gated at all.",
+		);
+		return warnings;
+	}
+
+	if ([...config.operatorTokens].some((token) => !config.tokens.has(token))) {
+		warnings.push(
+			"an operator token is not also a SUBSTRATE_TOKEN_* surface token, so it cannot authenticate at all; " +
+				"operator authority is an attribute of a surface token",
+		);
+	}
+	return warnings;
 }

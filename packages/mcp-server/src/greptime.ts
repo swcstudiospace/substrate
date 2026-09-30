@@ -578,6 +578,58 @@ export class GreptimeClient {
 		return rows.length > 0;
 	}
 
+	/**
+	 * A repo's newest events, newest first, for `coord.drift_scan`.
+	 *
+	 * Every stored column, because a drift scan compares the trail against two
+	 * other records and needs the session, the node and the payload to do it —
+	 * the payload in particular, since that is where the git collector puts the
+	 * commit sha. `"id"` breaks a same-millisecond tie so the window is stable
+	 * across calls.
+	 */
+	async recentForRepo(repo: string, limit = 200): Promise<Array<Record<string, unknown>>> {
+		const capped = Number.isFinite(limit) ? Math.min(2000, Math.max(1, Math.trunc(limit))) : 200;
+		return this.sql(
+			`SELECT ${EVENT_COLUMN_LIST} FROM "agent_events" WHERE "repo" = ${this.q(repo)}
+			 ORDER BY "ts" DESC, "id" DESC LIMIT ${capped}`,
+		);
+	}
+
+	/**
+	 * Commit events in this repo that might name `sha`, newest first.
+	 *
+	 * A drift scan cannot answer "was this commit logged?" from its window of
+	 * recent activity: a busy repo pushes a perfectly well-logged commit out of
+	 * the newest N events, and the scan then invents `git.tip_unlogged`. So the
+	 * question is asked directly instead of inferred from the window.
+	 *
+	 * Matched on the first seven characters, because the collector stores `git
+	 * rev-parse --short` and the caller has the full hash: any abbreviation git
+	 * produces is at least seven characters and begins with those. The prefix is
+	 * validated hex, so it cannot carry a LIKE wildcard, and the candidates are
+	 * returned rather than a boolean — seven hex characters can appear by
+	 * coincidence, so the caller confirms each against the sha it asked about.
+	 *
+	 * Both patterns are anchored to the shape the sha is actually *stored* in —
+	 * `commit <sha> <subject>` in the summary, `"sha":"<sha>"` in the payload —
+	 * which are the two places {@link extractCommitSha} reads it from. A bare
+	 * `%<prefix>%` would also match any event that merely mentioned those seven
+	 * characters somewhere in its text, and enough of those could fill the row
+	 * limit and push the real commit event out of the answer — reporting the tip
+	 * as unlogged because too many things talked about it.
+	 */
+	async commitEventsNaming(repo: string, sha: string, limit = 20): Promise<Array<Record<string, unknown>>> {
+		if (!/^[0-9a-f]{7,40}$/i.test(sha)) return [];
+		const prefix = sha.slice(0, 7).toLowerCase();
+		const capped = Math.min(100, Math.max(1, Math.trunc(limit)));
+		return this.sql(
+			`SELECT "ts", "id", "surface", "summary", "payload" FROM "agent_events"
+			 WHERE "repo" = ${this.q(repo)} AND "kind" = 'commit'
+			   AND ("summary" LIKE ${this.q(`%commit ${prefix}%`)} OR "payload" LIKE ${this.q(`%"sha":"${prefix}%`)})
+			 ORDER BY "ts" DESC LIMIT ${capped}`,
+		);
+	}
+
 	async ping(): Promise<boolean> {
 		try {
 			await this.sql("SELECT 1");
