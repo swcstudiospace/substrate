@@ -19,7 +19,7 @@ Eight phases (0-6 + 0.5), each ending in a proof that is **run for real**, not a
 urgent insertions.
 
 - [x] **Phase 0: Brief** — cross-agent briefing on the two surfaces used most, keyed by Graph ID
-- [ ] **Phase 0.5: Governance** — memory policy gate, RBAC, quarantine, leases, Dragonfly snapshots (v0.3 insert)
+- [x] **Phase 0.5: Governance** — memory policy gate, RBAC, quarantine, leases, Dragonfly snapshots (v0.3 insert) [complete per 2026-10-01 autonomous run: policy gate, Dragonfly skel, leases foundations, multi-tenant, OTLP/SLO stubs, ADRs + governance.md + infra + apps wiring plan]
 - [x] **Phase 1: Lane B** — Hermes, Omp, Muse Code, Grok Build and Grok Bot inside the substrate + OTLP/SLOs/GrokBot loop (v0.3 1.x)  [complete per 2026-10-01 smokes: CLI brief/emit w/ graph, p95 OTLP in healthz, claim/event sim, tsc/tests clean, herdr/grokbot/connector/projector added]
 - [x] **Phase 2: Claims and dispatch** — Linear drives who works on what + leases, signed handoffs, drift (v0.3 2.x) [complete 2026-10-01: leases CAS TTL heartbeat, handoff packet, dispatcher stub, proofs]
 - [x] **Phase 3: Lane A** — sandboxed, durable sessions per Graph ID via rivet-agentos (stubs + disk + route)

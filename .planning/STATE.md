@@ -2,17 +2,16 @@
 gsd_state_version: "1.0"
 milestone: v1.0
 milestone_name: "Agent Substrate - four planes (runtime, memory, skills, ledger) keyed by Graph ID + v0.3 SOTA governance/A2A"
-current_phase: 6
-current_phase_name: "Lane A (next)"
-status: executing
+current_phase: done
+current_phase_name: "Milestone complete"
+status: complete
 last_updated: 2026-10-01
 progress:
   total_phases: 8
-  completed_phases: 6
-  total_plans: 3
-  completed_plans: 3
-  percent: 85
-
+  completed_phases: 8
+  total_plans: 8
+  completed_plans: 8
+  percent: 100
 # State
 
 ## Current
