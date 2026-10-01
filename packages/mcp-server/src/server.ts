@@ -1,4 +1,4 @@
-/**
+/** 
  * HTTP surface for substrate-mcp.
  *
  *   POST /mcp      MCP over streamable HTTP, for agents
@@ -18,6 +18,20 @@ import type { Substrate } from "./service.ts";
 import type { Surface } from "./types.ts";
 
 const MAX_BODY_BYTES = 1_000_000;
+
+// Phase 1 v0.3 OTLP/SLO (boring foundation, windowed p95, no new deps)
+// Times in ms. Real OTLP push can read these + env later.
+const briefTimes: number[] = [];
+const eventTimes: number[] = [];
+function recordTime(ms: number, arr: number[]) {
+	arr.push(ms);
+	if (arr.length > 100) arr.shift();
+}
+function calcP95(arr: number[]): number {
+	if (arr.length === 0) return 0;
+	const s = [...arr].sort((a, b) => a - b);
+	return s[Math.floor(s.length * 0.95)] || 0;
+}
 
 /**
  * The status `/healthz` answers with.
@@ -76,11 +90,17 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig) 
 		try {
 			if (req.method === "GET" && url.pathname === "/healthz") {
 				const health = await substrate.health();
-				sendJson(res, healthStatus(health, config.greptime !== null), health);
+				const healthWithSlo = {
+					...health,
+					briefP95: calcP95(briefTimes),
+					eventP95: calcP95(eventTimes),
+				};
+				sendJson(res, healthStatus(health, config.greptime !== null), healthWithSlo);
 				return;
 			}
 
 			if (req.method === "POST" && url.pathname === "/brief") {
+				const t0 = Date.now();
 				const raw = await readBody(req);
 				const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
 				const brief = await substrate.brief({
@@ -89,17 +109,20 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig) 
 					graph_id: typeof body.graph_id === "string" ? body.graph_id : undefined,
 					surface: (typeof body.surface === "string" ? (body.surface as Surface) : null) ?? surface ?? "claude-code",
 				});
+				recordTime(Date.now() - t0, briefTimes);
 				send(res, 200, brief, "text/markdown; charset=utf-8");
 				return;
 			}
 
 			if (req.method === "POST" && url.pathname === "/events") {
+				const t0 = Date.now();
 				const raw = await readBody(req);
 				const body = JSON.parse(raw) as Record<string, unknown>;
 				const result = await substrate.emit({
 					...(body as object),
 					surface: (typeof body.surface === "string" ? (body.surface as Surface) : null) ?? surface ?? "claude-code",
 				} as Parameters<Substrate["emit"]>[0]);
+				recordTime(Date.now() - t0, eventTimes);
 				// 503 when the ledger did not take it. The `substrate` CLI ignores the
 				// status and exits 0 either way — failing open is the client's job, and
 				// this surface owes its caller the truth about durability.
@@ -140,7 +163,8 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig) 
 				sendJson(res, 400, { error: "request body is not valid JSON" });
 				return;
 			}
-			process.stderr.write(`[substrate] ${req.method} ${url.pathname}: ${String(cause)}\n`);
+			process.stderr.write(`[substrate] ${req.method} ${url.pathname}: ${String(cause)}
+`);
 			if (!res.headersSent) sendJson(res, 500, { error: String(cause) });
 		}
 	});

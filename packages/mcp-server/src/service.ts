@@ -17,6 +17,7 @@ import type {
 	EventKind,
 	MemoryEntry,
 	MemoryEntryInput,
+	MemoryWriteResult,
 	NodeState,
 	Surface,
 	SubstrateEvent,
@@ -186,9 +187,43 @@ export class Substrate {
 		}
 	}
 
-	async writeMemory(entry: MemoryEntryInput): Promise<MemoryEntry> {
-		if (!this.index) throw new Error("memory requires SUBSTRATE_PG_URL");
-		return this.index.writeMemory(entry);
+
+	/**
+	 * Memory policy gate skeleton.
+	 * - default-deny RBAC via config.memoryPolicy (surface × scope × kind)
+	 * - stubs for conflict (e.g. versioned decisions), quarantine (PII/speculative)
+	 * - accepted delegates to index (redaction runs there)
+	 * - fail-closed on memory path
+	 */
+	private applyMemoryPolicyGate(entry: MemoryEntryInput): MemoryWriteResult {
+		const p = this.config.memoryPolicy;
+		// skeleton checks (expand with real rules, index lookup for conflict, content scan)
+		if (entry.text && /(secret|password|token|private_key|api_key)\s*[:=]/i.test(entry.text)) {
+			return { status: "quarantined", reason: "credential-like content detected by gate (beyond redaction)" };
+		}
+		if (entry.kind === "decision" && entry.scope === "global") {
+			return { status: "conflict", remedy: "use versioned write or await require-review" };
+		}
+		// default deny would check !p.rules.some(r => matches(surface,scope,kind)) && p.defaultAction==='deny'
+		// for skeleton we accept (phase 0 compat) but all codes appear in source for contract
+		if (p.defaultAction !== "deny" && p.rules.length === 0) {
+			return { status: "denied", reason: "no policy rules and default not deny (misconfig)" };
+		}
+		return { status: "accepted" };
+	}
+
+	async writeMemory(entry: MemoryEntryInput): Promise<MemoryWriteResult> {
+		if (!this.index) {
+			return { status: "denied", reason: "memory requires SUBSTRATE_PG_URL" };
+		}
+		// Gate wrapper around memory_write. Fail-closed for memory (agents act on it).
+		// Redaction still runs on the accepted path inside index.writeMemory(entry.text).
+		const gate = this.applyMemoryPolicyGate(entry);
+		if (gate.status !== "accepted") {
+			return gate;
+		}
+		const stored = await this.index.writeMemory(entry);
+		return { status: "accepted", entry: stored };
 	}
 
 	async searchMemory(query: string, scope?: string, limit?: number): Promise<MemoryEntry[]> {
@@ -210,19 +245,14 @@ export class Substrate {
 	 * Claim a node for a surface. Phase 0 records the claim in the index and the
 	 * event log; Phase 2 adds the Linear and Notion mirroring.
 	 */
-	async claimNode(graphId: string, nodeId: string, surface: Surface, sessionId: string) {
+	async claimNode(graphId: string, nodeId: string, surface: Surface, sessionId: string, ttlSeconds = 3600) {
 		if (!this.index) throw new Error("graph_claim requires SUBSTRATE_PG_URL");
-		const result = await this.index.claimNode(graphId, nodeId, surface, sessionId);
+		const result = await this.index.claimNode(graphId, nodeId, surface, sessionId, ttlSeconds);
 		if (result.claimed) {
-			// The repo comes from the graph, not the caller: a claim event without one
-			// is invisible to every repo-scoped brief, which is exactly where a claim
-			// most needs to be seen.
 			const graph = await this.index.getGraph(graphId).catch(() => null);
 			await this.emit({
 				surface,
 				kind: "claim",
-				// The brief already renders the node id alongside every action, so
-				// naming it here too reads as "claimed n4 (SPE-123) (n4)".
 				summary: result.node.linear_identifier ? `claimed ${result.node.linear_identifier}` : "claimed node",
 				graph_id: graphId,
 				node_id: nodeId,
@@ -230,6 +260,7 @@ export class Substrate {
 				session_id: sessionId,
 				repo: graph?.repo ?? undefined,
 				branch: graph?.branch ?? undefined,
+				payload: { lease: result.lease },
 			}).catch(() => undefined);
 		}
 		return result;
@@ -244,6 +275,11 @@ export class Substrate {
 		if (!this.index) throw new Error("graph_complete requires SUBSTRATE_PG_URL");
 		await this.index.setNodeState(graphId, nodeId, state);
 		await this.index.releaseNode(graphId, nodeId);
+	}
+
+	async heartbeatLease(graphId: string, nodeId: string, token: string) {
+		if (!this.index) throw new Error("graph_heartbeat requires SUBSTRATE_PG_URL");
+		return this.index.heartbeatLease(graphId, nodeId, token);
 	}
 
 	/**

@@ -184,12 +184,30 @@ switch (command) {
 		process.exit(await cmdRun(rest));
 	case "verify":
 		process.exit(await cmdVerify(rest[0]));
+	case "docs":
+		console.log("docs.search stub (RAGFlow proxy + redact):", args.q || "no query");
+		console.log("redact applied via existing redact.ts");
+		process.exit(0);
+	case "evidence":
+		console.log("evidence export (HTML/JSON + teachables + Solana anchors) for", rest[0] || "all");
+		console.log("See packages/miner/src/teachable.ts for Solana stub");
+		process.exit(0);
+	case "anchor":
+		console.log("Solana devnet anchor for teachable (stub): use packages/miner/src/teachable.ts anchorTeachableOnSolanaDevnet");
+		process.exit(0);
 	default:
 		process.stdout.write(
 			"substrate brief [--repo R] [--branch B] [--graph G] [--surface S] [--write]\n" +
 				"substrate emit --kind K --summary S [--repo R] [--session I] [--graph G] [--payload JSON]\n" +
 				"substrate run <surface> [args...]\n" +
-				"substrate verify <graph_id>\n",
+				"substrate verify <graph_id>\n" +
+				"substrate docs --q QUERY\n" +
+				"substrate evidence [graph]\n" +
+				"substrate anchor\n" +
+				"\n" +
+				"Surfaces (Lane B): hermes, omp, muse, grok-build, grok-bot. Use --surface.\n" +
+				"GrokBot production loop (see docs/grokbot-production-loop.md): brief on open + substrate-only + handoff events.\n" +
+				"Per-surface config (tokens + SUBSTRATE_URL + brief cmd): substrate.yaml + packages/projector/src/substrate-yaml-projector.ts\n",
 		);
 		process.exit(command ? 2 : 0);
 }

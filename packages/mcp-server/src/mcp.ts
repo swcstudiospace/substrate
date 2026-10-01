@@ -46,7 +46,8 @@ export function createMcpServer(substrate: Substrate, callerSurface: Surface | n
 		{
 			title: "Write a memory entry",
 			description:
-				"Record a decision, fact, warning, handoff or todo at a scope so other agents see it in their brief.",
+				"Record a decision, fact, warning, handoff or todo at a scope so other agents see it in their brief. " +
+				"Gated by memory policy: returns {status: 'accepted'|'conflict'|'quarantined'|'denied', entry?, reason?, remedy?}.",
 			inputSchema: {
 				scope: z.string().describe("graph:<id> | repo:<name> | global | agent:<surface> | person:<name>"),
 				kind: z.enum(MEMORY_KINDS),
@@ -58,8 +59,10 @@ export function createMcpServer(substrate: Substrate, callerSurface: Surface | n
 			},
 			annotations: { destructiveHint: false },
 		},
-		async ({ surface, ...entry }) =>
-			json(await substrate.writeMemory({ ...entry, writer: surface ?? callerSurface ?? "unknown" })),
+		async ({ surface, ...entry }) => {
+			const result = await substrate.writeMemory({ ...entry, writer: surface ?? callerSurface ?? "unknown" });
+			return json(result);
+		},
 	);
 
 	server.registerTool(
@@ -176,16 +179,17 @@ export function createMcpServer(substrate: Substrate, callerSurface: Surface | n
 		{
 			title: "Claim a node",
 			description:
-				"Claim a Graph-of-Thought node for this surface. If another agent already holds it, their claim is returned unchanged rather than overwritten.",
+				"Claim a Graph-of-Thought node for this surface. Phase 2: returns lease (expires, token) or existing. CAS prevents overwrite.",
 			inputSchema: {
 				graph_id: z.string(),
 				node_id: z.string(),
 				session_id: z.string(),
 				surface: surfaceSchema.optional(),
+				ttl_seconds: z.number().optional(),
 			},
 		},
-		async ({ graph_id, node_id, session_id, surface }) =>
-			json(await substrate.claimNode(graph_id, node_id, surface ?? callerSurface ?? "claude-code", session_id)),
+		async ({ graph_id, node_id, session_id, surface, ttl_seconds }) =>
+			json(await substrate.claimNode(graph_id, node_id, surface ?? callerSurface ?? "claude-code", session_id, ttl_seconds ?? 3600)),
 	);
 
 	server.registerTool(
@@ -211,6 +215,45 @@ export function createMcpServer(substrate: Substrate, callerSurface: Surface | n
 		async ({ graph_id, node_id }) => {
 			await substrate.completeNode(graph_id, node_id);
 			return text(`Completed ${graph_id}/${node_id}.`);
+		},
+	);
+
+	server.registerTool(
+		"graph_heartbeat",
+		{
+			title: "Heartbeat lease",
+			description: "Refresh lease TTL for active claim using token from claim result.",
+			inputSchema: { graph_id: z.string(), node_id: z.string(), token: z.string() },
+		},
+		async ({ graph_id, node_id, token }) => {
+			const ok = await substrate.heartbeatLease(graph_id, node_id, token);
+			return json({ ok, graph_id, node_id });
+		},
+	);
+
+	server.registerTool(
+		"graph_handoff",
+		{
+			title: "Signed handoff packet",
+			description: "Record/return a signed handoff for a node (goal, files, DoD, blockers, prev_hash). Phase 2 stub.",
+			inputSchema: {
+				graph_id: z.string(),
+				node_id: z.string(),
+				goal: z.string(),
+				files: z.array(z.string()).optional(),
+				dod: z.array(z.string()).optional(),
+				blockers: z.array(z.string()).optional(),
+			},
+		},
+		async (args) => {
+			// Phase 2: emit as memory or event; return packet hash
+			const packet = {
+				...args,
+				ts: new Date().toISOString(),
+				prev_event_hash: "TODO-chain",
+			};
+			// TODO wire to memory or event with kind handoff
+			return json({ handoff: packet, hash: "sha256-stub" });
 		},
 	);
 

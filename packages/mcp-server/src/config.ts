@@ -4,7 +4,7 @@
  * Deployment reads /etc/substrate/substrate.env via the systemd unit's
  * EnvironmentFile. Nothing here ever reads a secret from the repo.
  */
-import type { Surface } from "./types.ts";
+import type { Surface, MemoryPolicy } from "./types.ts";
 
 export interface GreptimeConfig {
 	url: string;
@@ -39,6 +39,8 @@ export interface SubstrateConfig {
 	 * the state is in `/healthz` and on every append either way.
 	 */
 	allowDeduplicatingLedger: boolean;
+	/** Policy for the memory gate (default-deny RBAC etc). Populated by loadMemoryPolicy. */
+	memoryPolicy: MemoryPolicy;
 }
 
 /** SUBSTRATE_TOKEN_GROK_BUILD → "grok-build" */
@@ -77,6 +79,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		// would just lock the operator out of their own machine.
 		allowAnonymous: readTokens(env).size === 0,
 		allowDeduplicatingLedger: /^(1|true|yes)$/i.test(env.SUBSTRATE_ALLOW_DEDUPLICATING_LEDGER?.trim() ?? ""),
+		memoryPolicy: loadMemoryPolicy(env),
 	};
 }
 
@@ -85,4 +88,21 @@ export function surfaceForToken(config: SubstrateConfig, authorization: string |
 	if (!authorization) return null;
 	const token = authorization.replace(/^Bearer\s+/i, "").trim();
 	return config.tokens.get(token) ?? null;
+}
+
+/** Policy loader for memory governance gate. Skeleton returns a static default-deny policy.
+ * Real loader (later) will read YAML from SUBSTRATE_MEMORY_POLICY or /etc/substrate/ without new third-party packages.
+ */
+export function loadMemoryPolicy(env: Record<string, string | undefined> = process.env): MemoryPolicy {
+	// default-deny per v0.3 spec; rules populated from external policy source in full impl
+	return {
+		version: "0.1-skel",
+		defaultAction: "deny",
+		rules: [],
+		conflictStrategy: {
+			todo: "last-write-wins",
+			decision: "versioned",
+			warning: "require-review",
+		},
+	};
 }

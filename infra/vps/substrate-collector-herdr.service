@@ -1,0 +1,32 @@
+[Unit]
+Description=Agent Substrate — herdr (OMP) session collector
+Documentation=https://github.com/swcstudiospace/agent-substrate
+After=substrate-mcp.service
+Wants=substrate-mcp.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/substrate/substrate.env
+WorkingDirectory=/root/src/repos/agent-substrate
+ExecStart=/root/.local/share/reflex/bun/bin/bun packages/collectors/src/herdr.ts --watch
+Restart=always
+RestartSec=5
+
+StateDirectory=substrate
+Environment=SUBSTRATE_COLLECTOR_STATE=/var/lib/substrate/herdr-offsets.json
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=substrate-collector-herdr
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

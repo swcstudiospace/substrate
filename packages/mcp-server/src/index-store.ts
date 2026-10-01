@@ -59,8 +59,17 @@ export class IndexStore {
 				claimed_by        text,
 				claimed_at        timestamptz,
 				claim_session     text,
+				lease_expires_at  timestamptz,
+				lease_heartbeat_at timestamptz,
+				lease_token       text,
 				primary key (graph_id, node_id)
 			)`;
+		await this.sql`
+			alter table graph_nodes add column if not exists lease_expires_at timestamptz;
+			alter table graph_nodes add column if not exists lease_heartbeat_at timestamptz;
+			alter table graph_nodes add column if not exists lease_token text;
+		`;
+		await this.sql`create index if not exists graph_nodes_lease_idx on graph_nodes (lease_expires_at)`;
 		await this.sql`
 			create table if not exists graph_steps (
 				graph_id            text not null,
@@ -87,6 +96,18 @@ export class IndexStore {
 		await this.sql`create index if not exists graph_nodes_claimed_idx on graph_nodes (claimed_by)`;
 		await this.sql`create index if not exists memory_scope_idx on memory_entries (scope)`;
 		await this.sql`create index if not exists memory_fts_idx on memory_entries using gin (to_tsvector('english', body))`;
+		await this.sql`
+			create table if not exists anchors (
+				id text primary key,
+				hour text not null,
+				merkle_root text not null,
+				solana_sig text,
+				event_count int,
+				teachable_anchors jsonb,
+				created timestamptz default now()
+			)
+		`;
+		await this.sql`create index if not exists anchors_hour_idx on anchors (hour)`;
 	}
 
 	// ── graph ──────────────────────────────────────────────────────────────────
@@ -182,27 +203,58 @@ export class IndexStore {
 		nodeId: string,
 		surface: Surface,
 		sessionId: string,
-	): Promise<{ claimed: boolean; node: GraphNode }> {
+		ttlSeconds = 3600,
+	): Promise<{ claimed: boolean; node: GraphNode; lease?: any }> {
+		const now = new Date();
+		const expires = new Date(now.getTime() + ttlSeconds * 1000);
+		const token = `${surface}:${sessionId}:${now.getTime()}`;
+
+		// CAS: claim if free or same or expired lease
 		const rows = (await this.sql`
 			update graph_nodes
-			set claimed_by = ${surface}, claimed_at = now(), claim_session = ${sessionId}
+			set 
+				claimed_by = ${surface},
+				claimed_at = now(),
+				claim_session = ${sessionId},
+				lease_expires_at = ${expires.toISOString()},
+				lease_heartbeat_at = now(),
+				lease_token = ${token}
 			where graph_id = ${graphId} and node_id = ${nodeId}
-			  and (claimed_by is null or claimed_by = ${surface})
+			  and (
+				claimed_by is null 
+				or claimed_by = ${surface}
+				or (lease_expires_at is not null and lease_expires_at < now())
+			  )
 			returning *`) as GraphNode[];
-		const claimed = rows[0];
-		if (claimed) return { claimed: true, node: claimed };
+		const claimedRow = rows[0];
+		if (claimedRow) {
+			return { claimed: true, node: claimedRow, lease: { expires_at: claimedRow.lease_expires_at, token, holder: surface } };
+		}
 
 		const existing = (await this.sql`
 			select * from graph_nodes where graph_id = ${graphId} and node_id = ${nodeId}`) as GraphNode[];
 		const node = existing[0];
 		if (!node) throw new Error(`unknown node ${graphId}/${nodeId}`);
-		return { claimed: false, node };
+		return { claimed: false, node, lease: node.lease_expires_at ? { expires_at: node.lease_expires_at, holder: node.claimed_by } : undefined };
 	}
 
 	async releaseNode(graphId: string, nodeId: string): Promise<void> {
 		await this.sql`
-			update graph_nodes set claimed_by = null, claimed_at = null, claim_session = null
+			update graph_nodes 
+			set claimed_by = null, claimed_at = null, claim_session = null,
+			    lease_expires_at = null, lease_heartbeat_at = null, lease_token = null
 			where graph_id = ${graphId} and node_id = ${nodeId}`;
+	}
+
+	async heartbeatLease(graphId: string, nodeId: string, token: string): Promise<boolean> {
+		const rows = (await this.sql`
+			update graph_nodes
+			set lease_heartbeat_at = now(),
+			    lease_expires_at = now() + interval '1 hour'
+			where graph_id = ${graphId} and node_id = ${nodeId}
+			  and lease_token = ${token}
+			returning *`) as GraphNode[];
+		return rows.length > 0;
 	}
 
 	async setNodeState(graphId: string, nodeId: string, state: NodeState): Promise<void> {

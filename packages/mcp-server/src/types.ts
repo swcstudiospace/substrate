@@ -73,7 +73,7 @@ export interface SubstrateEvent {
 	prev: string | null;
 }
 
-export const MEMORY_KINDS = ["decision", "fact", "warning", "handoff", "todo"] as const;
+export const MEMORY_KINDS = ["decision", "fact", "warning", "handoff", "todo", "teachable"] as const;
 export type MemoryKind = (typeof MEMORY_KINDS)[number];
 
 export const TRUST_LEVELS = ["agent-claimed", "human-confirmed", "verified-by-test"] as const;
@@ -120,6 +120,9 @@ export interface GraphNode {
 	claimed_by: Surface | null;
 	claimed_at: string | null;
 	claim_session: string | null;
+	lease_expires_at: string | null;
+	lease_heartbeat_at: string | null;
+	lease_token: string | null;
 }
 
 export interface GraphStep {
@@ -147,3 +150,56 @@ export interface GraphView extends GraphIndexRow {
 	nodes: GraphNode[];
 	steps: GraphStep[];
 }
+
+/** A2A Agent Card (Linux Foundation draft + user Teachable Moments). */
+export interface AgentCard {
+  agent: string;
+  surface: Surface;
+  version: string;
+  skills: Array<{ name: string; framing: string; tags: string[] }>;
+  teachables: TeachableMoment[];
+}
+
+/** Teachable Moment: reverse skill from session (observations, edge cases, learnings) — not recall. */
+export interface TeachableMoment {
+  graph_id: string;
+  node_id?: string;
+  framing: string;           // short name for AgentCard.skills[]
+  observations: string[];
+  edges: string[];
+  learnings: string[];
+  session_summary?: string;
+  prev_event_hash?: string;
+  solana_anchor?: string;    // tx sig or memo id on devnet
+  ts: string;
+}
+
+/** Return codes for the memory policy gate (v0.3 contract). memory_write now returns one of these. */
+export type MemoryWriteStatus = "accepted" | "conflict" | "quarantined" | "denied";
+
+/** Result wrapper returned by gated memory writes. Non-accepted outcomes carry diagnostic info instead of (or in addition to) an entry. */
+export interface MemoryWriteResult {
+	status: MemoryWriteStatus;
+	/** The stored entry. Only populated for "accepted" (and some "conflict" cases that resolve to a winner). */
+	entry?: MemoryEntry;
+	/** Why the gate produced a non-accepted status. */
+	reason?: string;
+	/** Actionable guidance back to the caller. */
+	remedy?: string;
+}
+
+/** In-memory representation of the memory governance policy. Default-deny RBAC over surface×scope×kind. */
+export interface MemoryPolicy {
+	version: string;
+	defaultAction: "deny";
+	rules: Array<{
+		surface: Surface | "*";
+		scope: string | "*";
+		kind: MemoryKind | "*";
+		action: "allow" | MemoryWriteStatus;
+	}>;
+	conflictStrategy: Partial<Record<MemoryKind, "last-write-wins" | "versioned" | "require-review">>;
+}
+
+/** Signature for the policy loader (implemented in config; real version will read YAML without adding runtime deps for the skeleton). */
+export type PolicyLoader = (env?: Record<string, string | undefined>) => MemoryPolicy;

@@ -12,6 +12,7 @@ build/
 
 # Local state
 .substrate/
+.projected/
 *.db
 *.sqlite
 *.sqlite3

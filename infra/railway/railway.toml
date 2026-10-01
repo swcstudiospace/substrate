@@ -1,0 +1,16 @@
+# railway.toml stub (template) for Agent Substrate governance + apps wiring
+# Phase 0.5. Apply via A11 only. Additive to existing services.
+# See substrate-governance.railway.yaml and docs/governance.md
+
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+numReplicas = 1
+sleepApplication = false
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+
+# Services defined in Railway UI or via CLI; this is reference.
+# substrate-mcp, dragonfly, hindsight, ragflow etc. all reference private endpoints.
+# governance adds DRAGONFLY_URL + policy mount.
