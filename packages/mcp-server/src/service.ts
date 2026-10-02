@@ -11,6 +11,7 @@ import { inChainOrder, normalizeEvent, normalizeIdentifier, verifyChain } from "
 import { GreptimeClient } from "./greptime.ts";
 import { IndexStore } from "./index-store.ts";
 import { redact } from "./redact.ts";
+import { hindsightRecall } from "./planes.ts";
 import type {
 	Actor,
 	EventInput,
@@ -144,7 +145,14 @@ export class Substrate {
 	}
 
 	async brief(request: BriefRequest): Promise<string> {
-		return composeBrief(request, { index: this.index, greptime: this.greptime });
+		const text = await composeBrief(request, { index: this.index, greptime: this.greptime });
+		const hindsight = this.config.hindsight;
+		if (!hindsight) return text;
+		const recalled = await hindsightRecall(hindsight, request.repo ?? request.graph_id ?? "recent substrate work").catch(
+			() => [] as string[],
+		);
+		if (recalled.length === 0) return text;
+		return `${text}\n\nHindsight (${hindsight.bank})\n${recalled.map((line) => `- ${line}`).join("\n")}`;
 	}
 
 	/**

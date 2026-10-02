@@ -184,17 +184,38 @@ switch (command) {
 		process.exit(await cmdRun(rest));
 	case "verify":
 		process.exit(await cmdVerify(rest[0]));
-	case "docs":
-		console.log("docs.search stub (RAGFlow proxy + redact):", args.q || "no query");
-		console.log("redact applied via existing redact.ts");
-		process.exit(0);
+	case "docs": {
+		const { ragflowSearch } = await import("../../mcp-server/src/planes.ts");
+		const url = process.env.RAGFLOW_URL?.trim();
+		const apiKey = process.env.RAGFLOW_API_KEY?.trim();
+		if (!url || !apiKey) {
+			process.stderr.write("RAGFLOW_URL or RAGFLOW_API_KEY is not set\n");
+			process.exit(1);
+		}
+		const result = await ragflowSearch({ url, apiKey }, String(args.q ?? ""));
+		process.stdout.write(`${result}\n`);
+		process.exit(result.startsWith("ragflow ") ? 1 : 0);
+	}
 	case "evidence":
 		console.log("evidence export (HTML/JSON + teachables + Solana anchors) for", rest[0] || "all");
 		console.log("See packages/miner/src/teachable.ts for Solana stub");
 		process.exit(0);
-	case "anchor":
-		console.log("Solana devnet anchor for teachable (stub): use packages/miner/src/teachable.ts anchorTeachableOnSolanaDevnet");
+	case "anchor": {
+		const { anchorTeachableOnSolanaDevnet } = await import("../../miner/src/teachable.ts");
+		const result = await anchorTeachableOnSolanaDevnet({
+			graph_id: String(args.graph ?? "live-probe"),
+			framing: "devnet-memo",
+			observations: [],
+			edges: [],
+			learnings: [],
+			prev_event_hash: "0",
+			ts: new Date().toISOString(),
+		});
+		process.stdout.write(`${result.note}\n`);
+		if (!result.solana_anchor) process.exit(1);
+		process.stdout.write(`${result.solana_anchor}\n`);
 		process.exit(0);
+	}
 	default:
 		process.stdout.write(
 			"substrate brief [--repo R] [--branch B] [--graph G] [--surface S] [--write]\n" +

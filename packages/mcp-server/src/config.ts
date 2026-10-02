@@ -5,6 +5,7 @@
  * EnvironmentFile. Nothing here ever reads a secret from the repo.
  */
 import type { Surface, MemoryPolicy } from "./types.ts";
+import { planesFromEnv } from "./planes.ts";
 
 export interface GreptimeConfig {
 	url: string;
@@ -41,6 +42,11 @@ export interface SubstrateConfig {
 	allowDeduplicatingLedger: boolean;
 	/** Policy for the memory gate (default-deny RBAC etc). Populated by loadMemoryPolicy. */
 	memoryPolicy: MemoryPolicy;
+	/** Optional live planes. Absent env means the plane is not configured, not broken. */
+	hindsight: { url: string; apiKey: string; bank: string } | null;
+	ragflow: { url: string; apiKey: string } | null;
+	dragonflyUrl: string | undefined;
+	solana: { rpcUrl: string; keypairPath: string } | null;
 }
 
 /** SUBSTRATE_TOKEN_GROK_BUILD → "grok-build" */
@@ -80,6 +86,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		allowAnonymous: readTokens(env).size === 0,
 		allowDeduplicatingLedger: /^(1|true|yes)$/i.test(env.SUBSTRATE_ALLOW_DEDUPLICATING_LEDGER?.trim() ?? ""),
 		memoryPolicy: loadMemoryPolicy(env),
+		...planesFromEnv(env),
 	};
 }
 

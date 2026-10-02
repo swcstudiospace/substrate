@@ -257,5 +257,31 @@ export function createMcpServer(substrate: Substrate, callerSurface: Surface | n
 		},
 	);
 
+	server.registerTool(
+		"docs_search",
+		{
+			title: "Search product docs",
+			description: "Retrieval against RAGFlow. Returns citations when a dataset answers, or a clear error when the plane is not configured.",
+			inputSchema: { query: z.string() },
+			annotations: { readOnlyHint: true },
+		},
+		async ({ query }) => {
+			const ragflow = substrate.config.ragflow;
+			if (!ragflow) return json({ ok: false, error: "RAGFLOW_URL or RAGFLOW_API_KEY is not set" });
+			try {
+				const response = await fetch(`${ragflow.url}/api/v1/retrieval`, {
+					method: "POST",
+					headers: { authorization: `Bearer ${ragflow.apiKey}`, "content-type": "application/json" },
+					body: JSON.stringify({ question: query, page: 1, page_size: 4 }),
+					signal: AbortSignal.timeout(4000),
+				});
+				const body = await response.json().catch(() => ({}));
+				return json({ ok: response.ok, status: response.status, body });
+			} catch (cause) {
+				return json({ ok: false, error: String(cause) });
+			}
+		},
+	);
+
 	return server;
 }

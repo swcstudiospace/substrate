@@ -6,6 +6,7 @@
  */
 
 import type { TeachableMoment, AgentCard, Surface } from "../../mcp-server/src/types.ts";
+import { anchorMemoOnDevnet, planesFromEnv } from "../../mcp-server/src/planes.ts";
 
 export function extractTeachableFromEvents(graphId: string, events: any[], sessionSummary?: string): TeachableMoment {
   const observations: string[] = [];
@@ -45,12 +46,19 @@ export function makeAgentCard(agent: string, surface: Surface, teachables: Teach
   };
 }
 
-export function anchorTeachableOnSolanaDevnet(teachable: TeachableMoment): { solana_anchor: string; note: string } {
-  // Stub: in real, use @solana/web3.js to send memo with graph+framing+hash to devnet
-  const anchor = `solana-devnet-memo:${teachable.graph_id}:${teachable.framing}:${Date.now()}`;
-  return { solana_anchor: anchor, note: "devnet memo; real tx would carry prev_hash + edges for replay" };
+export async function anchorTeachableOnSolanaDevnet(
+	teachable: TeachableMoment,
+): Promise<{ solana_anchor: string; note: string }> {
+	const solana = planesFromEnv().solana;
+	if (!solana) {
+		return { solana_anchor: "", note: "SOLANA_RPC_URL or SOLANA_ANCHOR_KEYPAIR is not set" };
+	}
+	const memo = `substrate:${teachable.graph_id}:${teachable.framing}`;
+	const result = await anchorMemoOnDevnet(solana, memo);
+	if (!result.signature) return { solana_anchor: "", note: result.error ?? "devnet memo failed" };
+	return { solana_anchor: result.signature, note: "devnet memo" };
 }
 
 export function verifyTeachableAnchor(teachable: TeachableMoment): boolean {
-  return !!teachable.solana_anchor && teachable.solana_anchor.includes("solana-devnet");
+	return /^[1-9A-HJ-NP-Za-km-z]{64,88}$/.test(teachable.solana_anchor ?? "");
 }
