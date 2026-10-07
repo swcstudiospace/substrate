@@ -39,6 +39,7 @@ import {
 	decideClaim,
 	decideHeartbeat,
 	decideRelease,
+	holderLeaseView,
 	leaseView,
 	normalizeTtlSeconds,
 	type ClaimDecision,
@@ -434,28 +435,36 @@ export class IndexStore implements MemoryStore {
 	 * A lost CAS is retried, because the state it lost to may itself have been a
 	 * lease that has since lapsed; after {@link CLAIM_ATTEMPTS} it reports the
 	 * holder it found. `lease.ts` holds the decision rules and their tests.
+	 *
+	 * `caller` is the token's surface, null on an anonymous run. A claim naming
+	 * the current holder from another surface's token is denied `not-holder`
+	 * without touching the row: renewing is the holder's act, not anyone's who
+	 * can read its public session id.
 	 */
 	async claimNode(
 		graphId: string,
 		nodeId: string,
 		surface: Surface,
 		sessionId: string,
+		caller: Surface | null,
 		ttlSeconds: number = DEFAULT_LEASE_TTL_SECONDS,
 	): Promise<{ claimed: boolean; node: GraphNode; lease: LeaseView; decision: ClaimDecision }> {
 		const ttl = normalizeTtlSeconds(ttlSeconds);
+		const request = { surface, session_id: sessionId, ttl_seconds: ttl, caller };
 		let node = await this.node(graphId, nodeId);
 
 		for (let attempt = 0; attempt < CLAIM_ATTEMPTS; attempt++) {
-			const decision = decideClaim(leaseSnapshot(node), { surface, session_id: sessionId, ttl_seconds: ttl }, Date.now());
+			const decision = decideClaim(leaseSnapshot(node), request, Date.now());
 
 			if (!decision.granted) {
 				// Re-read before reporting a refusal: the lease may have lapsed between
 				// the read and the decision, and telling an agent it is blocked by a
 				// holder that is already gone is the drift this whole feature removes.
 				node = await this.node(graphId, nodeId);
-				if (decideClaim(leaseSnapshot(node), { surface, session_id: sessionId, ttl_seconds: ttl }, Date.now()).granted) {
+				if (decideClaim(leaseSnapshot(node), request, Date.now()).granted) {
 					continue;
 				}
+				// The public view: the loser learns who holds it and until when, never the id.
 				return { claimed: false, node, lease: leaseView(leaseSnapshot(node)), decision };
 			}
 
@@ -500,7 +509,7 @@ export class IndexStore implements MemoryStore {
 							returning *`) as GraphNode[]);
 
 			const updated = rows[0];
-			if (updated) return { claimed: true, node: toNode(updated), lease: leaseView(leaseSnapshot(updated)), decision };
+			if (updated) return { claimed: true, node: toNode(updated), lease: holderLeaseView(leaseSnapshot(updated)), decision };
 
 			// Lost the race, or the server disagreed about expiry. Look again.
 			node = await this.node(graphId, nodeId);
@@ -510,7 +519,7 @@ export class IndexStore implements MemoryStore {
 			claimed: false,
 			node,
 			lease: leaseView(leaseSnapshot(node)),
-			decision: decideClaim(leaseSnapshot(node), { surface, session_id: sessionId, ttl_seconds: ttl }, Date.now()),
+			decision: decideClaim(leaseSnapshot(node), request, Date.now()),
 		};
 	}
 
@@ -520,16 +529,23 @@ export class IndexStore implements MemoryStore {
 	 * Fenced on `lease_id`: a holder whose lease lapsed and was taken over cannot
 	 * extend the lease that replaced it, because the id it remembers is gone. The
 	 * expiry predicate is the server's, for the same reason as in `claimNode`.
+	 *
+	 * `caller` is the token's surface (null on an anonymous run), and the holder
+	 * check is made against the observed row only. That is enough without a
+	 * `claimed_by` predicate in the UPDATE: a change of holder always mints a new
+	 * lease id, so the `lease_id` fence already pins the holder the decision saw.
 	 */
 	async heartbeatNode(
 		graphId: string,
 		nodeId: string,
 		leaseId: string,
+		caller: Surface | null,
 		ttlSeconds: number = DEFAULT_LEASE_TTL_SECONDS,
 	): Promise<{ ok: boolean; node: GraphNode; lease: LeaseView; decision: HeartbeatDecision }> {
 		const ttl = normalizeTtlSeconds(ttlSeconds);
+		const request = { lease_id: leaseId, ttl_seconds: ttl, caller };
 		const observed = await this.node(graphId, nodeId);
-		const decision = decideHeartbeat(leaseSnapshot(observed), { lease_id: leaseId, ttl_seconds: ttl }, Date.now());
+		const decision = decideHeartbeat(leaseSnapshot(observed), request, Date.now());
 		if (!decision.ok) return { ok: false, node: observed, lease: leaseView(leaseSnapshot(observed)), decision };
 
 		const rows = (await this.sql`
@@ -542,7 +558,7 @@ export class IndexStore implements MemoryStore {
 			returning *`) as GraphNode[];
 
 		const updated = rows[0];
-		if (updated) return { ok: true, node: toNode(updated), lease: leaseView(leaseSnapshot(updated)), decision };
+		if (updated) return { ok: true, node: toNode(updated), lease: holderLeaseView(leaseSnapshot(updated)), decision };
 
 		// The statement matched nothing, so the lease went between the read and the
 		// write. Report what is true now rather than the decision that is no longer.
@@ -551,7 +567,7 @@ export class IndexStore implements MemoryStore {
 			ok: false,
 			node: fresh,
 			lease: leaseView(leaseSnapshot(fresh)),
-			decision: decideHeartbeat(leaseSnapshot(fresh), { lease_id: leaseId, ttl_seconds: ttl }, Date.now()),
+			decision: decideHeartbeat(leaseSnapshot(fresh), request, Date.now()),
 		};
 	}
 
@@ -561,17 +577,19 @@ export class IndexStore implements MemoryStore {
 	 * `lease_id` fences it: a stale holder cannot release — or, through
 	 * `completeNode`, close — a node that someone else has since claimed. `force`
 	 * is the operator's lever for a holder that is gone, and is reported as a
-	 * forced release rather than an ordinary one.
+	 * forced release rather than an ordinary one. `caller` is the token's surface,
+	 * held to the holder's as in `heartbeatNode`.
 	 */
 	async releaseNode(
 		graphId: string,
 		nodeId: string,
-		request: { lease_id?: string | null; force?: boolean } = {},
+		request: { lease_id?: string | null; force?: boolean },
+		caller: Surface | null,
 		/** Written in the same statement as the release, for `completeNode`. */
 		alsoSetState?: NodeState,
 	): Promise<{ released: boolean; node: GraphNode; decision: ReleaseDecision }> {
 		const observed = await this.node(graphId, nodeId);
-		const decision = decideRelease(leaseSnapshot(observed), request, Date.now());
+		const decision = decideRelease(leaseSnapshot(observed), { ...request, caller }, Date.now());
 		if (!decision.ok) return { released: false, node: observed, decision };
 		if (decision.action === "noop") return { released: true, node: observed, decision };
 
@@ -609,11 +627,12 @@ export class IndexStore implements MemoryStore {
 	 * free — so this is not what makes the auto-release correct. It is what makes
 	 * it *visible*: the rows stop showing a holder that is gone, and the caller
 	 * gets a list it can turn into events, which is how another agent learns that
-	 * a node it wanted is free again.
+	 * a node it wanted is free again. The list names the epoch, not the lease id:
+	 * it goes to whoever asked and into the ledger, and neither is the holder.
 	 */
 	async reapExpiredLeases(
 		repo?: string | null,
-	): Promise<Array<{ graph_id: string; node_id: string; linear_identifier: string | null; holder: LeaseHolder | null; lease_id: string | null; expired_at: string | null }>> {
+	): Promise<Array<{ graph_id: string; node_id: string; linear_identifier: string | null; holder: LeaseHolder | null; lease_epoch: number; expired_at: string | null }>> {
 		// The holders are read in a CTE rather than out of `returning`: an UPDATE's
 		// RETURNING gives the *new* row, where `claimed_by` is already NULL, so the
 		// reaper would clear the leases and then report that nobody held any of them.
@@ -629,7 +648,7 @@ export class IndexStore implements MemoryStore {
 		// way.
 		const rows = (await this.sql`
 			with expiring as (
-				select graph_id, node_id, linear_identifier, claimed_by, claim_session, lease_id,
+				select graph_id, node_id, linear_identifier, claimed_by, claim_session, lease_id, lease_epoch,
 				       lease_expires_at, lease_heartbeat_at
 				from graph_nodes
 				where claimed_by is not null
@@ -656,7 +675,7 @@ export class IndexStore implements MemoryStore {
 			node_id: String(row.node_id),
 			linear_identifier: row.linear_identifier === null ? null : String(row.linear_identifier),
 			holder: row.claimed_by ? { surface: row.claimed_by as Surface, session_id: String(row.claim_session ?? "") } : null,
-			lease_id: row.lease_id === null ? null : String(row.lease_id),
+			lease_epoch: Number(row.lease_epoch ?? 0),
 			expired_at: isoOrNull(row.lease_expires_at),
 		}));
 	}

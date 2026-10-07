@@ -45,6 +45,7 @@ import {
 	type GovernanceQueueRow,
 	type GraphEdge,
 	type GraphNode,
+	type GraphView,
 	type MemoryEntry,
 	type MemoryEntryInput,
 	type MemoryWriteRequest,
@@ -82,6 +83,17 @@ function rowToEvent(row: Record<string, unknown>): SubstrateEvent {
 		hash: String(row.hash),
 		prev: text(row.prev),
 	};
+}
+
+/**
+ * A graph as any reader sees it: every node's `lease_id` nulled.
+ *
+ * The id is the token heartbeat, release and complete take as proof of holding,
+ * and its holder already has it from its own grant. Holder, session, epoch and
+ * expiry stay, because they are what another agent needs to pick other work.
+ */
+function withoutLeaseIds(graph: GraphView): GraphView {
+	return { ...graph, nodes: graph.nodes.map((node) => ({ ...node, lease_id: null })) };
 }
 
 /** A queried row, with `payload` dropped unless it was selected. */
@@ -292,8 +304,9 @@ export interface SubstrateObserver {
 /** What `claimNode` answers. `claimed` stays the field every existing caller reads. */
 export interface ClaimResult {
 	claimed: boolean;
+	/** The node row, with `lease_id` nulled: the id travels in `lease`, to its holder only. */
 	node: GraphNode;
-	/** The lease as the index reported it, so a holder has the id every fenced call needs. */
+	/** The lease. `lease_id` is set only when `claimed` is true; a refusal shows holder and expiry. */
 	lease: LeaseView;
 	/** What the index did: granted, renewed, reclaimed, stolen, or refused. */
 	action: string;
@@ -303,6 +316,8 @@ export interface ClaimResult {
 	decision: ClaimDecision;
 	/** Why, when the claim was refused or withdrawn. */
 	reason: string | null;
+	/** The TTL the hold was granted for, after clamping, so a holder can pace its heartbeats; null when no hold stands. */
+	ttl_seconds: number | null;
 }
 
 /** A swarm run's correlation id: 1..200 characters of `[A-Za-z0-9._:-]`. */
@@ -671,12 +686,15 @@ export class Substrate {
 
 	async getGraph(graphId: string) {
 		if (!this.index) return null;
-		return this.index.getGraph(graphId);
+		const graph = await this.index.getGraph(graphId);
+		return graph && withoutLeaseIds(graph);
 	}
 
 	async registerGraph(plan: Parameters<IndexStore["registerGraph"]>[0]) {
 		if (!this.index) throw new Error("graph_register requires SUBSTRATE_PG_URL");
-		return this.index.registerGraph(plan);
+		// Re-registering a graph whose nodes are held echoes them back, so this reply
+		// is a reader's view as much as `graph_get` is.
+		return withoutLeaseIds(await this.index.registerGraph(plan));
 	}
 
 	/**
@@ -743,7 +761,8 @@ export class Substrate {
 	 * disagree about who is doing what.
 	 *
 	 * A refused claim is not an error. The caller is told who holds the node and
-	 * until when, which is what it needs in order to pick up something else.
+	 * until when, which is what it needs in order to pick up something else — and
+	 * not the holder's lease id, which would let it release the node instead.
 	 *
 	 * **Fail closed on the telling.** A change of hold whose event did not reach the
 	 * ledger is withdrawn. `emit` deliberately fails open — a dropped event costs a
@@ -757,6 +776,11 @@ export class Substrate {
 	 * work. A renewal is exempt — it emits nothing by design, so there is no news to
 	 * lose.
 	 *
+	 * **Renewal is the holder's.** `caller` is the token's surface, null on an
+	 * anonymous run. A claim that names the current holder renews its lease and
+	 * returns its id, so it must come from the holder's own surface: any other
+	 * token is refused `not-holder`, with nothing changed, no id and no event.
+	 *
 	 * See `decideClaim` in `@substrate/audit` and `docs/observability.md`.
 	 */
 	async claimNode(
@@ -764,11 +788,12 @@ export class Substrate {
 		nodeId: string,
 		surface: Surface,
 		sessionId: string,
+		caller: Surface | null,
 		ttlSeconds?: number,
 	): Promise<ClaimResult> {
 		if (!this.index) throw new Error("graph_claim requires SUBSTRATE_PG_URL");
 		const ttl = normalizeTtlSeconds(ttlSeconds, this.config.leaseTtlSeconds);
-		const result = await this.index.claimNode(graphId, nodeId, surface, sessionId, ttl);
+		const result = await this.index.claimNode(graphId, nodeId, surface, sessionId, caller, ttl);
 		const { decision } = result;
 		const identifier = result.node.linear_identifier;
 
@@ -797,9 +822,10 @@ export class Substrate {
 				node_id: nodeId,
 				linear_identifier: identifier ?? undefined,
 				session_id: sessionId,
+				// The epoch, not the lease id: the ledger is readable by every agent, and
+				// the id is the one thing in a lease that must reach only its holder.
 				payload: {
 					action: decision.action,
-					lease_id: result.lease.lease_id,
 					lease_epoch: result.lease.epoch,
 					ttl_seconds: ttl,
 					expires_at: result.lease.expires_at,
@@ -816,7 +842,8 @@ export class Substrate {
 			requireRecorded: this.requireRecordedClaims,
 		});
 
-		let reason = verdict.reason;
+		// A `not-holder` refusal says so in the same word the fenced calls use.
+		let reason = !result.claimed && decision.reason === "not-holder" ? "not-holder" : verdict.reason;
 		if (verdict.decision === "revoked") {
 			// Put the node back, so it is picked up rather than held by a surface that has
 			// been told it does not have it.
@@ -829,7 +856,7 @@ export class Substrate {
 			// failure: the node is held by an agent that is working on it, and leaving it
 			// alone is right.
 			const outcome = await this.index
-				.releaseNode(graphId, nodeId, { lease_id: result.lease.lease_id })
+				.releaseNode(graphId, nodeId, { lease_id: result.lease.lease_id }, surface)
 				.then((release) => (release.released ? "withdrawn" : "superseded"))
 				.catch((cause: unknown) => {
 					process.stderr.write(`[substrate] could not withdraw ${graphId}/${nodeId}: ${redact(String(cause))}\n`);
@@ -853,18 +880,19 @@ export class Substrate {
 			quarantineReason: verdict.quarantineReason,
 		});
 
+		const granted = verdict.decision === "granted";
 		return {
-			claimed: verdict.decision === "granted",
-			node: result.node,
-			// The lease as the index reported it. On a withdrawal it names a hold that has
-			// just been dropped, which is harmless — `claimed` is false and every fenced
-			// call on that id is refused — and re-reading the row to say so would be one
-			// more query on the path a ledger outage already degraded.
-			lease: result.lease,
+			claimed: granted,
+			node: { ...result.node, lease_id: null },
+			// The lease id goes back only with a hold that stands. On a withdrawal it
+			// would name a hold that has just been dropped, and on a denial the index
+			// has already left it out.
+			lease: granted ? result.lease : { ...result.lease, lease_id: null },
 			action: decision.action,
 			evicted: decision.evicted ? `${decision.evicted.surface}/${decision.evicted.session_id}` : null,
 			decision: verdict.decision,
 			reason,
+			ttl_seconds: granted ? ttl : null,
 		};
 	}
 
@@ -873,12 +901,13 @@ export class Substrate {
 	 *
 	 * A refusal is worth acting on, though — it means the holder has lost the node
 	 * — so it comes back with the reason and the current holder rather than as a
-	 * bare false.
+	 * bare false. `caller` is the token's surface, null on an anonymous run; a
+	 * caller that is not the holder's surface is refused `not-holder`.
 	 */
-	async heartbeatNode(graphId: string, nodeId: string, leaseId: string, ttlSeconds?: number) {
+	async heartbeatNode(graphId: string, nodeId: string, leaseId: string, caller: Surface | null, ttlSeconds?: number) {
 		if (!this.index) throw new Error("graph_heartbeat requires SUBSTRATE_PG_URL");
 		const ttl = normalizeTtlSeconds(ttlSeconds, this.config.leaseTtlSeconds);
-		const result = await this.index.heartbeatNode(graphId, nodeId, leaseId, ttl);
+		const result = await this.index.heartbeatNode(graphId, nodeId, leaseId, caller, ttl);
 		return {
 			ok: result.ok,
 			lease: result.lease,
@@ -891,16 +920,19 @@ export class Substrate {
 	 * Drop a lease.
 	 *
 	 * Fenced on the lease id, so a holder whose lease lapsed cannot release the
-	 * node someone else has since claimed. A refusal names the real holder.
+	 * node someone else has since claimed, and on `caller`, so a surface that is
+	 * not the holder cannot release it even with the right id. A refusal names
+	 * the real holder, never its id.
 	 */
 	async releaseNode(
 		graphId: string,
 		nodeId: string,
-		request: { lease_id?: string | null; force?: boolean } = {},
+		request: { lease_id?: string | null; force?: boolean },
+		caller: Surface | null,
 		alsoSetState?: NodeState,
 	) {
 		if (!this.index) throw new Error("graph_release requires SUBSTRATE_PG_URL");
-		const result = await this.index.releaseNode(graphId, nodeId, request, alsoSetState);
+		const result = await this.index.releaseNode(graphId, nodeId, request, caller, alsoSetState);
 		const { decision } = result;
 		if (result.released && decision.ok && decision.action !== "noop") {
 			// The holder comes from the decision, which was taken against the row
@@ -918,7 +950,11 @@ export class Substrate {
 				node_id: nodeId,
 				linear_identifier: result.node.linear_identifier ?? undefined,
 				...(holder?.session_id ? { session_id: holder.session_id } : {}),
-				payload: { action: decision.action, lease_id: decision.lease_id, ...(decision.evicted ? { evicted: decision.evicted } : {}) },
+				payload: {
+					action: decision.action,
+					lease_epoch: decision.observed_epoch,
+					...(decision.evicted ? { evicted: decision.evicted } : {}),
+				},
 				...(await this.placeOf(graphId)),
 			}).catch(() => undefined);
 		}
@@ -948,10 +984,11 @@ export class Substrate {
 	async completeNode(
 		graphId: string,
 		nodeId: string,
-		request: { lease_id?: string | null; force?: boolean; state?: NodeState } = {},
+		request: { lease_id?: string | null; force?: boolean; state?: NodeState },
+		caller: Surface | null,
 	) {
 		if (!this.index) throw new Error("graph_complete requires SUBSTRATE_PG_URL");
-		const released = await this.releaseNode(graphId, nodeId, request, request.state ?? "completed");
+		const released = await this.releaseNode(graphId, nodeId, request, caller, request.state ?? "completed");
 		if (!released.released) return { completed: false, ...released };
 		if (released.action === "noop") {
 			return {
@@ -984,7 +1021,7 @@ export class Substrate {
 				node_id: lease.node_id,
 				linear_identifier: lease.linear_identifier ?? undefined,
 				...(lease.holder?.session_id ? { session_id: lease.holder.session_id } : {}),
-				payload: { action: "expired", lease_id: lease.lease_id, expired_at: lease.expired_at, ...(lease.holder ? { evicted: lease.holder } : {}) },
+				payload: { action: "expired", lease_epoch: lease.lease_epoch, expired_at: lease.expired_at, ...(lease.holder ? { evicted: lease.holder } : {}) },
 				...(await this.placeOf(lease.graph_id)),
 			}).catch(() => undefined);
 		}
@@ -1080,9 +1117,16 @@ export class Substrate {
 			if (!result.stored) {
 				leaseReleased = false;
 			} else {
-				const released = await this.releaseNode(input.graph_id, input.node_id, {
-					lease_id: input.handover_lease_id,
-				}).catch(() => null);
+				// Held to the sender, like any release. `from.surface` is the token's on an
+				// authenticated deployment; on an anonymous one there is no identity to
+				// hold anybody to, so nothing is checked, as for every other fenced call.
+				const caller = this.config.allowAnonymous ? null : input.from.surface;
+				const released = await this.releaseNode(
+					input.graph_id,
+					input.node_id,
+					{ lease_id: input.handover_lease_id },
+					caller,
+				).catch(() => null);
 				leaseReleased = released?.released === true;
 			}
 		}

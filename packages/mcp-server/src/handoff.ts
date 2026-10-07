@@ -98,7 +98,7 @@ export interface HandoffPacket {
 	 */
 	prev_event_hash: string | null;
 	/**
-	 * The lease the sender held and intends to hand over, if any.
+	 * Whether the sender meant to hand its lease on `node_id` over.
 	 *
 	 * Named for the intent, not an outcome, because an outcome cannot honestly go
 	 * in here. The packet is signed before the release is attempted — it has to
@@ -106,13 +106,30 @@ export interface HandoffPacket {
 	 * is then immutable, while a lease's state is not: a packet asserting "this
 	 * node is free" would be stale the moment another agent claimed it.
 	 *
+	 * And not the lease id: the packet is replayable by every agent through
+	 * `coord_handoff_list`, and the id is the one part of a lease that only its
+	 * holder may see. The id the sender quoted is a request field for the release,
+	 * never signed or stored.
+	 *
 	 * So a receiver replaying this does not read the node's state off the packet.
 	 * It calls `graph_claim`, which answers authoritatively and is what the
 	 * receiver has to do anyway. Whether the sender's release landed is a separate
 	 * fact in the same ledger — `releaseNode` appends its own event — and the
 	 * reply to the handoff call reports it as `lease_released` for the sender.
+	 *
+	 * Optional on this type because it is the type packets are *read* as, and the
+	 * ledger is append-only: a packet signed before this field existed does not
+	 * have it, and adding it would break its signature. `buildHandoff` always
+	 * writes it. Absent means a legacy packet; such a packet may carry
+	 * `handover_lease_id` instead, whose presence is the same intent.
 	 */
-	handover_lease_id: string | null;
+	lease_handover?: boolean;
+	/**
+	 * The lease id itself, as packets signed before `lease_handover` carried it.
+	 * Never written now. Typed so a replayed old packet reads as what it is; its
+	 * signature covers the field, so it is left exactly as stored.
+	 */
+	handover_lease_id?: string | null;
 	notes: string | null;
 	/** What had to be trimmed to fit the payload budget. Absent when nothing was. */
 	truncated?: { files?: number; dod?: number; blockers?: number; notes?: true };
@@ -133,6 +150,7 @@ export interface HandoffInput {
 	repo?: string | null;
 	branch?: string | null;
 	prev_event_hash?: string | null;
+	/** The sender's lease on `node_id`, for the release only: it is not put in the packet. */
 	handover_lease_id?: string | null;
 	notes?: string | null;
 	ts?: string;
@@ -229,7 +247,7 @@ export function buildHandoff(input: HandoffInput): HandoffPacket {
 		dod: dod.kept,
 		blockers: blockers.kept,
 		prev_event_hash: line(input.prev_event_hash, MAX_LINE),
-		handover_lease_id: line(input.handover_lease_id, MAX_LINE),
+		lease_handover: line(input.handover_lease_id, MAX_LINE) !== null,
 		notes: line(input.notes, MAX_NOTES),
 		...(Object.keys(truncated).length > 0 ? { truncated } : {}),
 		signature: null,

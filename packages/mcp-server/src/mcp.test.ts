@@ -330,4 +330,90 @@ describe("a swarm token names the caller", () => {
 
 		expect(claimedAs.map((claim) => claim.surface)).toEqual(["hermes"]);
 	});
+
+	test("graph_claim: a non-swarm token naming a swarm surface is refused, and the index is never asked", async () => {
+		// A swarm holder's session is public; claiming as it would renew its lease.
+		const { claimedAs, index } = claimIndex();
+		const client = await connectWith("hermes", index, ledger().greptime);
+
+		const reply = await call(client, "graph_claim", {
+			graph_id: "ut-1",
+			node_id: "n1",
+			session_id: "A05@r0:ut-1",
+			surface: "swarm-a05-be",
+		});
+
+		expect(reply.isError).toBe(true);
+		expect(String(reply.json().error)).toBe("this token is hermes and cannot claim as swarm-a05-be");
+		expect(claimedAs).toEqual([]);
+	});
+
+	test("graph_claim: a swarm session naming another agent, a bad replica or another graph is refused, never rewritten", async () => {
+		const { claimedAs, index } = claimIndex();
+		const client = await connectWith("swarm-a05-be", index, ledger().greptime);
+
+		const sessions = ["A09@r0:ut-1", "A05@r 0:ut-1", "A05@r0:ut-2", "sess-1"];
+		const replies = await Promise.all(
+			sessions.map((session_id) => call(client, "graph_claim", { graph_id: "ut-1", node_id: "n1", session_id })),
+		);
+
+		for (const [i, reply] of replies.entries()) {
+			expect(reply.isError, sessions[i]).toBe(true);
+			expect(String(reply.json().error), sessions[i]).toContain("swarm-a05-be session_id");
+		}
+		expect(claimedAs).toEqual([]);
+	});
+
+	test("graph_claim: a lease held as a swarm surface has the swarm session shape, whoever asks for it", async () => {
+		// An anonymous caller may still name a swarm surface, but the hold it takes
+		// then reads like any other swarm hold, so the rule follows the holder.
+		const { claimedAs, index } = claimIndex();
+		const client = await connectWith(null, index, ledger().greptime);
+
+		const bad = await call(client, "graph_claim", { graph_id: "ut-1", node_id: "n1", session_id: "s", surface: "swarm-a09-rev" });
+		await call(client, "graph_claim", { graph_id: "ut-1", node_id: "n1", session_id: "A09@r0:ut-1", surface: "swarm-a09-rev" });
+
+		expect(bad.isError).toBe(true);
+		expect(claimedAs).toEqual([{ surface: "swarm-a09-rev", session_id: "A09@r0:ut-1" }]);
+	});
+});
+
+describe("a lease id reaches only its holder", () => {
+	const heldNode = {
+		graph_id: "ut-1",
+		node_id: "n1",
+		linear_identifier: "SPE-1",
+		claimed_by: "swarm-a05-be",
+		claim_session: "A05@r0:ut-1",
+		lease_id: "lse_secret",
+		lease_expires_at: "2026-10-07T12:15:00.000Z",
+		lease_epoch: 2,
+	};
+	const graph = { graph_id: "ut-1", repo: "swcstudiospace/x", nodes: [heldNode], steps: [], edges: [] };
+
+	async function connectAs(surface: Surface | null) {
+		const index = { getGraph: async () => graph, registerGraph: async () => graph };
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: ledger().greptime as never });
+		const server = createMcpServer(substrate, surface);
+		const client = new Client({ name: "substrate-test", version: "0.0.0" });
+		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+		await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+		return client;
+	}
+
+	test("graph_get and graph_register show the holder, session, epoch and expiry, and no lease id", async () => {
+		// A reader with the id could heartbeat, release or complete a node it never held.
+		const client = await connectAs("swarm-a09-rev");
+
+		for (const reply of [await call(client, "graph_get", { graph_id: "ut-1" }), await call(client, "graph_register", { graph_id: "ut-1" })]) {
+			expect(reply.text).not.toContain("lse_secret");
+			expect((reply.json().nodes as Array<Record<string, unknown>>)[0]).toMatchObject({
+				claimed_by: "swarm-a05-be",
+				claim_session: "A05@r0:ut-1",
+				lease_epoch: 2,
+				lease_expires_at: "2026-10-07T12:15:00.000Z",
+				lease_id: null,
+			});
+		}
+	});
 });

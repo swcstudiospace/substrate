@@ -15,7 +15,8 @@ deliberately does not.
 | Expiry | never | `ttl_seconds`, default 900 |
 | Renewal | re-claiming | `graph_heartbeat` |
 | Exclusivity | `claimed_by is null or claimed_by = surface` | compare-and-swap on a per-node epoch |
-| Release | anyone | fenced on `lease_id` |
+| Release | anyone | fenced on `lease_id` and on the caller's token surface |
+| Who sees the `lease_id` | n/a | the holder only |
 
 Two failures made the old claim unusable as a coordination primitive, and both
 are gone:
@@ -46,14 +47,60 @@ through two connections to a real Postgres.
 
 ### The contract an agent has to keep
 
-1. Keep the `lease_id` from `graph_claim`. `graph_heartbeat`, `graph_release`
-   and `graph_complete` all need it.
+1. Keep the `lease_id` from `graph_claim`. It is shown to you **once**, in the
+   reply that grants it, and `graph_heartbeat`, `graph_release` and
+   `graph_complete` all need it. Lost it? Re-claim with the same `session_id`,
+   from the same token: that renews the lease and returns the same id.
 2. Heartbeat well inside the TTL for as long as you are working the node.
 3. **Stop on a refusal.** `ok: false` from a heartbeat means you no longer hold
    the node: `lost` if someone else does, `expired` if it lapsed — re-claim
-   rather than beat — `unheld` if nothing does.
+   rather than beat — `unheld` if nothing does, and `not-holder` if your token
+   is not the holder's surface.
 4. A refused claim is not an error. You are told who holds it and until when;
    pick up something else rather than retrying.
+5. Beat, release and complete with the **same token** you claimed with. The
+   lease belongs to that token's surface.
+
+### Only the holder sees, or uses, a lease
+
+The `lease_id` is the fencing token: whoever presents it can extend, release
+or complete the node. So it reaches its holder and nobody else:
+
+- **Disclosure.** A reply carries `lease_id` only when it grants the lease or
+  answers a call that presented it and was accepted. A denied `graph_claim`, a
+  refused `graph_heartbeat` / `graph_release` / `graph_complete`, `graph_get`,
+  `graph_register`, `coord_drift_scan` and `/drift` all show `lease_id: null`
+  beside the holder's surface and session, the epoch and the expiry — which is
+  everything another agent needs to pick other work. `coord_reap_leases` names
+  the epoch it cleared. The `claim`, `warning` and `note` events a lease writes
+  carry `lease_epoch`, never the id, and a handoff packet records only
+  `lease_handover: true|false` (absent on packets signed before the field
+  existed, which may carry the old `handover_lease_id` instead).
+- **Holder check.** `graph_heartbeat`, `graph_release` and `graph_complete`
+  refuse a caller whose token surface is not the holder's with `not-holder`,
+  even when it presents the right `lease_id`. The check runs before the id is
+  compared, so the refusal confirms nothing about the id. It is surface-level:
+  two sessions of one surface share a token, and the `lease_id` is what tells
+  them apart. Anonymous local runs (no `SUBSTRATE_TOKEN_*` configured) have no
+  identity to compare and are not checked; the id still fences them.
+- **Renewal is the holder's too.** The holder's surface and session are public,
+  and a `graph_claim` naming them renews a live lease (returning its id) or
+  re-claims a lapsed one. So a claim that names the current holder from a token
+  whose surface is not the holder's is denied `not-holder`: the expiry and epoch
+  are unchanged, the reply has no `lease_id`, and no event is written. And a
+  non-swarm token cannot name a `swarm-*` surface on `graph_claim` at all — it
+  is refused before the index is asked.
+- **Claiming for another surface locks you out.** A non-swarm token may still
+  name another non-swarm surface on `graph_claim` (collectors rely on
+  supplied-first attribution), and that first claim of a free or lapsed node is
+  granted — but the lease then belongs to the surface it named. The token that
+  took it is refused `not-holder` on every fenced call afterwards, and on every
+  attempt to renew it by re-claiming; the lease lapses by TTL, or an operator
+  forces it. Claim as yourself.
+
+Events and packets written before this rule still hold ids in the append-only
+ledger. They cannot be scrubbed, and the holder check is what makes them
+useless to anybody but the holder's own token.
 
 A lapsed lease reads as **free** everywhere — in the brief, in a drift scan, to
 the next claimant. That is why a heartbeat will not revive one: it would be safe
@@ -78,7 +125,8 @@ a `force` any agent could use would make every lease advisory again for anyone
 who chose. It needs a token listed in `SUBSTRATE_OPERATOR_TOKENS`, and is
 refused with `force-requires-operator` rather than quietly downgraded to an
 ordinary release — a downgrade would read as success and leave the holder in
-place.
+place. Force is not held to the holder's surface: taking a node off someone
+else is what it is for.
 
 An operator token is a **surface token that is also listed as an operator's**,
 not a separate class of credential. That is deliberate. A token that
@@ -89,6 +137,12 @@ authority is an attribute of a surface token, so a forced release is always
 attributable to whoever used it. An operator token that is not also a surface
 token can never authenticate, and is reported at boot rather than left to look
 configured.
+
+**No swarm surface is an operator.** A `swarm-*` token listed in
+`SUBSTRATE_OPERATOR_TOKENS` is still refused `force` (fail closed), and boot
+warns, naming the surface (never the token). The swarm runs agents unattended
+against each other's nodes; one of them able to force another is the advisory
+lease again.
 
 Expiry is honoured lazily, so it is already correct without a reaper.
 `coord_reap_leases` exists to make it **visible**: rows stop naming holders that
@@ -103,6 +157,9 @@ are gone, and each release becomes a warning another agent sees in its brief.
 | `renewed` | *(none)* | an event per heartbeat would bury the trail under the one thing in it that carries no information |
 | `released` | `note` | |
 | `forced`, expiry | `warning` | somebody lost a node they did not release |
+
+Each payload names the `action` and the `lease_epoch`, never the `lease_id`:
+the ledger is readable by every agent through `events_query`.
 
 ## Signed handoff packets
 
@@ -144,14 +201,19 @@ Keeping the hold on a failed append is the recoverable half — the sender still
 holds its node and can retry — and `lease_released` in the reply reports what
 actually happened.
 
-Which means the packet's `handover_lease_id` names the lease the sender *meant*
-to hand over, and no outcome. It cannot honestly name one: the packet is signed
-before the release is attempted and is then immutable, while a lease's state is
-not — a packet asserting "this node is free" would be stale the moment another
-agent claimed it. So a receiver replaying a handoff does not read the node's
-state off the packet. It calls `graph_claim`, which answers authoritatively and
-is what it has to do anyway; whether the sender's release landed is a separate
-event in the same ledger.
+Which means the packet's `lease_handover` records that the sender *meant* to
+hand its lease over, and no outcome. It cannot honestly record one: the packet
+is signed before the release is attempted and is then immutable, while a
+lease's state is not — a packet asserting "this node is free" would be stale the
+moment another agent claimed it. Nor does it carry the lease id: every agent can
+replay the packet, and the id is for the holder alone. The `lease_id` the sender
+passes is used for the release (held, like any release, to the sender's token
+surface) and is never signed or stored. Packets signed before this change carry
+`handover_lease_id` instead; their signature covers it, so they are replayed and
+verified exactly as stored. A receiver replaying a handoff does not read the
+node's state off the packet. It calls `graph_claim`, which answers
+authoritatively and is what it has to do anyway; whether the sender's release
+landed is a separate event in the same ledger.
 
 **Signed** because the packet is acted on by an agent that did not see it
 written. The order is the point: the packet is redacted, capped, size-fitted and

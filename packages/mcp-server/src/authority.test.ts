@@ -17,7 +17,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { configWarnings, isOperator, loadConfig, surfaceForToken, swarmTokenWarnings, tokenEnvName } from "./config.ts";
-import { attributedSurface } from "./mcp.ts";
+import { attributedSurface, claimAttribution, swarmSessionRefusal } from "./mcp.ts";
 import { Substrate } from "./service.ts";
 import { SURFACES, SWARM_SURFACES, type SubstrateEvent } from "./types.ts";
 
@@ -115,6 +115,34 @@ describe("isOperator", () => {
 		const config = loadConfig({ SUBSTRATE_OPERATOR_TOKENS: "tok-operator" });
 		expect(isOperator(config, null)).toBe(false);
 		expect(isOperator(config, "Bearer tok-operator")).toBe(true);
+	});
+
+	test("a swarm token is never an operator, even when it is listed as one", () => {
+		// Fail closed: one swarm agent able to force another's node is the advisory
+		// lease again, and the list is a configuration someone can get wrong.
+		const config = loadConfig({
+			...TOKENS,
+			SUBSTRATE_TOKEN_SWARM_A05_BE: "tok-a05",
+			SUBSTRATE_OPERATOR_TOKENS: "tok-operator,tok-a05",
+		});
+
+		expect(isOperator(config, "Bearer tok-a05")).toBe(false);
+		expect(isOperator(config, "Bearer tok-operator")).toBe(true);
+	});
+
+	test("and boot says which swarm surface was listed, without printing its token", () => {
+		const config = loadConfig({
+			...TOKENS,
+			SUBSTRATE_TOKEN_SWARM_A05_BE: "tok-a05",
+			SUBSTRATE_TOKEN_SWARM_A09_REV: "tok-a09",
+			SUBSTRATE_OPERATOR_TOKENS: "tok-operator,tok-a05",
+		});
+		const warnings = configWarnings(config);
+
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain("swarm-a05-be");
+		expect(warnings[0]).not.toContain("swarm-a09-rev");
+		expect(warnings[0]).not.toContain("tok-a05");
 	});
 });
 
@@ -267,5 +295,60 @@ describe("attributedSurface", () => {
 		expect(attributedSurface("cursor", undefined)).toEqual({ surface: "cursor" });
 		expect(attributedSurface(null, "hermes")).toEqual({ surface: "hermes" });
 		expect(attributedSurface(null, undefined)).toEqual({ surface: "claude-code" });
+	});
+});
+
+describe("claimAttribution", () => {
+	test("a non-swarm token cannot claim as a swarm surface", () => {
+		expect(claimAttribution("hermes", "swarm-a05-be")).toEqual({
+			refused: "this token is hermes and cannot claim as swarm-a05-be",
+		});
+	});
+
+	test("a swarm token claims as itself, and is refused as anyone else", () => {
+		expect(claimAttribution("swarm-a05-be", undefined)).toEqual({ surface: "swarm-a05-be" });
+		expect(claimAttribution("swarm-a05-be", "swarm-a05-be")).toEqual({ surface: "swarm-a05-be" });
+		expect("refused" in claimAttribution("swarm-a05-be", "swarm-a09-rev")).toBe(true);
+	});
+
+	test("a non-swarm token naming another non-swarm surface, and an anonymous run, are unchanged", () => {
+		expect(claimAttribution("cursor", "hermes")).toEqual({ surface: "hermes" });
+		expect(claimAttribution(null, "swarm-a09-rev")).toEqual({ surface: "swarm-a09-rev" });
+		expect(claimAttribution(null, undefined)).toEqual({ surface: "claude-code" });
+	});
+});
+
+describe("swarmSessionRefusal", () => {
+	const GRAPH = "ut-mg3k2p-1a2b3c4d";
+
+	test("<AGENT>@<replica>:<graph_id> naming the token's own agent is accepted", () => {
+		expect(swarmSessionRefusal("swarm-a05-be", `A05@r1:${GRAPH}`, GRAPH)).toBeNull();
+		expect(swarmSessionRefusal("swarm-a15-doc", `A15@host-2.pod_7:${GRAPH}`, GRAPH)).toBeNull();
+		expect(swarmSessionRefusal("swarm-a05-be", `A05@${"r".repeat(64)}:${GRAPH}`, GRAPH)).toBeNull();
+	});
+
+	test("a session naming another agent is refused", () => {
+		expect(swarmSessionRefusal("swarm-a05-be", `A09@r1:${GRAPH}`, GRAPH)).toContain("must name agent A05");
+		expect(swarmSessionRefusal("swarm-a05-be", `a05@r1:${GRAPH}`, GRAPH)).toContain("must name agent A05");
+	});
+
+	test("a replica outside [A-Za-z0-9._-]{1,64} is refused", () => {
+		for (const replica of ["", "r 1", "r/1", "r@1", "rép", "r".repeat(65)]) {
+			expect(swarmSessionRefusal("swarm-a05-be", `A05@${replica}:${GRAPH}`, GRAPH), replica).not.toBeNull();
+		}
+	});
+
+	test("the graph must equal graph_id, not merely look like one", () => {
+		expect(swarmSessionRefusal("swarm-a05-be", "A05@r1:ut-mg3k2p-00000000", GRAPH)).toContain("must end in");
+		expect(swarmSessionRefusal("swarm-a05-be", `A05@r1:${GRAPH}x`, GRAPH)).toContain("must end in");
+		expect(swarmSessionRefusal("swarm-a05-be", "A05@r1:", GRAPH)).toContain("must end in");
+		// Equality, not a pattern: a graph id the uplift never minted is fine if it is this claim's.
+		expect(swarmSessionRefusal("swarm-a05-be", "A05@r1:ut-1", "ut-1")).toBeNull();
+	});
+
+	test("a session that is not in the shape at all is refused", () => {
+		for (const session of ["sess-1", "A05", "A05@r1", `A05:${GRAPH}`, ""]) {
+			expect(swarmSessionRefusal("swarm-a05-be", session, GRAPH), session).toContain(`A05@<replica>:${GRAPH}`);
+		}
 	});
 });

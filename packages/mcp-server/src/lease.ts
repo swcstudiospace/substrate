@@ -14,7 +14,11 @@
  *   - **TTL.** A lease expires. A dead holder releases its node by doing
  *     nothing, which is the only thing a dead holder reliably does.
  *   - **Heartbeat.** A live holder extends its own lease, and only its own:
- *     every extension is fenced by the `lease_id` it was granted.
+ *     every extension is fenced by the `lease_id` it was granted, and by the
+ *     caller's authenticated surface being the holder's.
+ *   - **Secrecy.** The `lease_id` is the fencing token, so only the holder is
+ *     shown it: in the reply that grants it and in replies to calls that
+ *     already presented it. Every other view carries `lease_id: null`.
  *   - **Epoch.** A monotonic counter per node, bumped on every change of
  *     holder. It is the compare-and-swap token: the index only applies a
  *     decision that was taken against the epoch still on the row, so of two
@@ -46,7 +50,10 @@ export function normalizeTtlSeconds(seconds: unknown, fallback = DEFAULT_LEASE_T
 	return Math.min(MAX_LEASE_TTL_SECONDS, Math.max(MIN_LEASE_TTL_SECONDS, asked));
 }
 
-/** Lease ids are opaque and unguessable: holding one is what proves you are the holder. */
+/**
+ * Lease ids are opaque and unguessable: holding one is what proves you are the
+ * holder, which is why no reply shows one to anybody else (see {@link leaseView}).
+ */
 export function newLeaseId(): string {
 	return `lse_${randomUUID().replace(/-/g, "")}`;
 }
@@ -154,6 +161,12 @@ export type ClaimAction =
 
 export interface ClaimRequest extends LeaseHolder {
 	ttl_seconds: number;
+	/**
+	 * The authenticated token's surface, null on an anonymous local run. A claim
+	 * that would renew or re-claim an existing hold must come from the holder's
+	 * own surface; see {@link decideClaim}.
+	 */
+	caller: Surface | null;
 }
 
 export interface ClaimDecision {
@@ -173,6 +186,12 @@ export interface ClaimDecision {
 	holder: LeaseHolder;
 	/** When the lease being displaced or extended was due to lapse. */
 	observed_expiry: string | null;
+	/**
+	 * Why a `denied` claim was refused, when it was not plain contention:
+	 * `not-holder` means the request named the holder but the caller's token is
+	 * another surface. Null on every grant and on an ordinary denial.
+	 */
+	reason: "not-holder" | null;
 }
 
 function iso(millis: number | null): string | null {
@@ -186,6 +205,15 @@ function iso(millis: number | null): string | null {
  * decision, so a test can replay a race deterministically. The decision is a
  * proposal — it is only true once a store has applied it against
  * `observed_epoch`.
+ *
+ * **Renewal is a holder's act.** A claim naming the current holder — surface and
+ * session — renews a live lease (and returns its id) or re-claims a lapsed one.
+ * The holder's surface and session are both public, so naming them proves
+ * nothing; when the caller is authenticated, its token must also be the
+ * holder's surface, or the claim is `denied` with reason `not-holder` and
+ * nothing changes. Otherwise any token could stretch or shorten another agent's
+ * hold and be handed its lease id. An anonymous caller (null) is not checked,
+ * as in the fenced calls.
  */
 export function decideClaim(
 	current: LeaseSnapshot,
@@ -203,29 +231,36 @@ export function decideClaim(
 		ttl_seconds: ttl,
 		observed_expiry: expiry,
 	};
+	// The holder's id stays out of a denial. Every fenced call takes it as proof
+	// of holding, so handing it to the loser of a race would hand over the node.
+	const denied = (reason: "not-holder" | null): ClaimDecision => ({
+		...base,
+		action: "denied",
+		granted: false,
+		lease_id: null,
+		evicted: null,
+		holder: holderOf(current) ?? holder,
+		reason,
+	});
+
+	const ownHold = state !== "free" && sameHolder(current, holder);
+	if (ownHold && isStranger(current, request.caller)) return denied("not-holder");
 
 	if (state === "held") {
-		if (sameHolder(current, holder)) {
+		if (ownHold) {
 			// A renewal keeps the lease id: the holder's fencing token must survive
 			// its own re-claim, or every claim would invalidate the heartbeat loop
 			// that the same agent is running.
-			return { ...base, action: "renewed", granted: true, lease_id: current.lease_id, evicted: null, holder };
+			return { ...base, action: "renewed", granted: true, lease_id: current.lease_id, evicted: null, holder, reason: null };
 		}
-		return {
-			...base,
-			action: "denied",
-			granted: false,
-			lease_id: current.lease_id,
-			evicted: null,
-			holder: holderOf(current) ?? holder,
-		};
+		return denied(null);
 	}
 
 	// Free or lapsed: the hold changes, so the epoch moves and the lease id is new.
 	// A fresh id is what stops a holder whose lease lapsed from heartbeating it
 	// back to life after someone else has been there.
 	const evicted = state === "expired" ? holderOf(current) : null;
-	const action: ClaimAction = evicted === null ? "granted" : sameHolder(current, holder) ? "reclaimed" : "stolen";
+	const action: ClaimAction = evicted === null ? "granted" : ownHold ? "reclaimed" : "stolen";
 	return {
 		...base,
 		action,
@@ -234,12 +269,15 @@ export function decideClaim(
 		epoch: current.epoch + 1,
 		evicted: action === "reclaimed" ? null : evicted,
 		holder,
+		reason: null,
 	};
 }
 
 export type HeartbeatRefusal =
 	/** Nothing holds the node. */
 	| "unheld"
+	/** Another surface holds it. The caller's token cannot act for that holder, whatever id it presents. */
+	| "not-holder"
 	/** Someone else holds it: this lease id is stale. */
 	| "lost"
 	/** This lease lapsed. Re-claim rather than extend — someone may have been here since. */
@@ -248,6 +286,18 @@ export type HeartbeatRefusal =
 export type HeartbeatDecision =
 	| { ok: true; lease_id: string; ttl_seconds: number; observed_epoch: number }
 	| { ok: false; reason: HeartbeatRefusal; holder: LeaseHolder | null; observed_expiry: string | null };
+
+/**
+ * Whether an authenticated caller is a different surface from the holder.
+ *
+ * `caller` is the token's surface, null on an anonymous local run. Null is never
+ * a stranger: with no tokens there is no identity to compare, and the machine's
+ * owner is the only caller there is. Both fenced decisions run this before they
+ * compare the lease id, so a refusal says nothing about whether the id was right.
+ */
+function isStranger(current: LeaseSnapshot, caller: Surface | null): boolean {
+	return caller !== null && current.surface !== null && current.surface !== caller;
+}
 
 /**
  * Decide whether a heartbeat may extend a lease.
@@ -261,12 +311,15 @@ export type HeartbeatDecision =
  */
 export function decideHeartbeat(
 	current: LeaseSnapshot,
-	request: { lease_id: string; ttl_seconds: number },
+	request: { lease_id: string; ttl_seconds: number; caller: Surface | null },
 	now: number,
 ): HeartbeatDecision {
 	const expiry = iso(leaseExpiry(current));
 	if (!current.lease_id || !current.surface) {
 		return { ok: false, reason: "unheld", holder: null, observed_expiry: expiry };
+	}
+	if (isStranger(current, request.caller)) {
+		return { ok: false, reason: "not-holder", holder: holderOf(current), observed_expiry: expiry };
 	}
 	if (current.lease_id !== request.lease_id) {
 		return { ok: false, reason: "lost", holder: holderOf(current), observed_expiry: expiry };
@@ -291,6 +344,8 @@ export type ReleaseAction =
 	| "forced";
 
 export type ReleaseRefusal =
+	/** Another surface holds it. Only the holder's own token, or an operator's force, can drop it. */
+	| "not-holder"
 	/** The lease id offered is not the one on the node — a stale holder. */
 	| "stale-lease"
 	/** No lease id offered, and no explicit force. */
@@ -323,13 +378,16 @@ export type ReleaseDecision =
  * Without it, an agent that stalled past its TTL and then woke up would release
  * — or complete — a node that a second agent has since claimed and is working
  * on, and the second agent would never learn. So a release quotes the lease id
- * it believes it holds and is refused if that is not the current one. An
- * operator prising a node loose from a holder that is gone says `force`, and
- * that is recorded rather than looking like an ordinary release.
+ * it believes it holds and is refused if that is not the current one, and it is
+ * refused outright when the caller's surface is not the holder's. An operator
+ * prising a node loose from a holder that is gone says `force`, and that is
+ * recorded rather than looking like an ordinary release. Force skips the holder
+ * check: taking a node off someone else is what it is for, and the transport has
+ * already decided that this caller may.
  */
 export function decideRelease(
 	current: LeaseSnapshot,
-	request: { lease_id?: string | null; force?: boolean },
+	request: { lease_id?: string | null; force?: boolean; caller: Surface | null },
 	_now: number,
 ): ReleaseDecision {
 	const observed_epoch = current.epoch;
@@ -339,6 +397,9 @@ export function decideRelease(
 		// error — but it is emphatically *not* proof of ownership, and a caller that
 		// treats it as one (`completeNode` did) lets anyone close an unheld node.
 		return { ok: true, action: "noop", lease_id: null, evicted: null, holder: null, observed_epoch };
+	}
+	if (!request.force && isStranger(current, request.caller)) {
+		return { ok: false, reason: "not-holder", holder: held, observed_epoch };
 	}
 	if (request.lease_id) {
 		if (request.lease_id !== current.lease_id) {
@@ -354,6 +415,10 @@ export function decideRelease(
 
 /** The lease as the MCP and REST surfaces report it. */
 export interface LeaseView {
+	/**
+	 * Null unless this reply is to the holder: the grant that minted it, or a call
+	 * that presented it and was accepted. Holder, epoch and expiry are public.
+	 */
 	lease_id: string | null;
 	holder: LeaseHolder | null;
 	epoch: number;
@@ -365,7 +430,25 @@ export interface LeaseView {
 	expires_in_seconds: number | null;
 }
 
+/**
+ * The lease as anyone may see it: everything but the id.
+ *
+ * The default, because a reader is never entitled to the id. The holder got it
+ * from its own grant, and a holder that lost it re-claims with the same session
+ * from its own surface's token, which renews and returns it. Every place that used to show it to a reader was
+ * a way for a second agent to release or complete a node it never held.
+ */
 export function leaseView(snapshot: LeaseSnapshot, now = Date.now()): LeaseView {
+	return { ...holderLeaseView(snapshot, now), lease_id: null };
+}
+
+/**
+ * The lease as its holder sees it, id included.
+ *
+ * Only for a reply whose request proved the hold: the grant that minted the id,
+ * or a call that presented it and was accepted. Anywhere else, {@link leaseView}.
+ */
+export function holderLeaseView(snapshot: LeaseSnapshot, now = Date.now()): LeaseView {
 	const expiry = leaseExpiry(snapshot);
 	return {
 		lease_id: snapshot.lease_id,
