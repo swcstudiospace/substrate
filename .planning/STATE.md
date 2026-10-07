@@ -2,17 +2,18 @@
 gsd_state_version: "1.0"
 milestone: v1.1
 milestone_name: Swarm correlation, governed memory and orchestrate integrations
-current_phase_name: 7-10
-status: All phases complete — ready to ship
-last_updated: "2026-10-07T15:16:05.152Z"
+current_phase: "8.1"
+current_phase_name: gap closure
+status: Executing phase 8.1 — gap closure
+last_updated: "2026-10-07T16:47:21.511Z"
 last_activity: 2026-10-07
-state_head: 05f15dd2aed4757be31c3c004578dfc28c599909
+state_head: 7eba2fcc351c311908265ef534be758f5a1b9693
 progress:
-  total_phases: 4
+  total_phases: 5
   completed_phases: 4
   total_plans: 4
   completed_plans: 4
-  percent: 100
+  percent: 80
 ---
 
 # State
@@ -98,6 +99,10 @@ written but still only dry-run.
 - `/root/agent-skills` is not a git checkout: 14 real dirs + 26 symlinks.
 - Ports 7410 and 6420 are free; `auctioning-greptime-1` on :4000 belongs to another project.
 
+### Roadmap Evolution
+
+- Phase 8.1 inserted after Phase 8: Gap closure: a version conflict now reports the decision's current version, so a swarm rewrite works when the decision is not in the newest 100 entries (MEM-02) (URGENT)
+
 ## Blockers
 
 _(No open blockers. Credential rotation was considered and declined by the
@@ -140,7 +145,7 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Current Position
 
-Phase: All phases complete (7-10)
+Phase: 8.1 (gap closure)
 Plan: —
-Status: All phases complete — ready to ship
+Status: Executing phase 8.1 — gap closure
 Last activity: 2026-10-07
