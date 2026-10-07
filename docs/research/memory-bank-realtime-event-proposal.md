@@ -113,7 +113,8 @@ The storage design below is the original proposal. **It was superseded by the De
 - An optional derived `phase_lifecycles` table in the index would be a new table. Its DDL would live in `index-store.ts` migrate.
 
 **Realtime transport (proposal, later tier):**
-- A polling consumer over today's `events_query` is not reliable. Its `since`/`until` bounds apply to `ts`, which collectors supply, not to the order events were appended, and its capped result has no cursor. A poller that advances a timestamp checkpoint misses a later backfill that carries an older `ts`, and it cannot page past a full window. A correct poller first needs an append-order cursor on `events_query` (for example a server receive sequence), which is new server work.
+- A polling consumer over today's `events_query` is not reliable. Its `since`/`until` bounds apply to `ts`, which collectors supply, not to the order events were appended, and its capped result has no cursor. A poller that advances a timestamp checkpoint misses a later backfill that carries an older `ts`, and it cannot page past a full window.
+- A sequence handed out when an event arrives does not fix this on its own. Concurrent emits are not serialized, so event B can take sequence 2 and commit before event A, which holds sequence 1. A poller that checkpoints 2 then misses A for good. Tier 2 needs a cursor that stays safe when in-flight events commit out of order. One option: a server-assigned sequence plus a settle horizon, where the poller reads only up to the oldest sequence still in flight (or up to a receive time older than the emit timeout), re-reads a small overlap window, and dedupes on event `id`. Another option: a sequence assigned by a single committer, in commit order. Choosing between them is Tier 2 work, and it is new server work either way.
 - An outbox, an SSE/websocket tail or webhook fan-out would each be a new component. Dragonfly would be a new dependency, not an extension.
 - Exactly-once delivery can lean on the per-session hash chain for ordering and tamper evidence. A consumer still has to dedupe on event `id` itself.
 - No LISTEN/NOTIFY without a decision on the Postgres primary.
@@ -177,10 +178,16 @@ Approved by the user. **Each lesson is one governed `fact` entry, written throug
 
 **How a lesson is cited and found:**
 - **Citation id.** The returned `entry.id` (`mem_…`). It is used only when `outcome === "accepted" && verified_persisted === true`; any other outcome yields no citation.
-- **Retrieval.** Today `memory_search` matches bodies only and returns at most the newest 100 matches per call, with no cursor, so a broad query in a busy scope pushes older lessons out before they can be ranked. Tier 1 therefore adds a read-side `subject_prefix` filter and a `before` cursor (on `created`) to `memory_search`. It changes no write path and keeps `store-lock.test.ts` green. Discuss-time recall then pages through every `lesson:` entry in the scope and ranks client-side by recency × keyword/tag match × score.
+- **Retrieval.** Today `memory_search` matches bodies only and returns at most the newest 100 matches per call, with no cursor, so a broad query in a busy scope pushes older lessons out before they can be ranked. Tier 1 therefore adds a read-side `subject_prefix` filter and a keyset cursor to `memory_search`, with no write-path change and `store-lock.test.ts` still green.
+  - The cursor is the pair (`created`, `id`). The order is `created desc, id desc`, and the next page is every row strictly before `(before, before_id)` in that order. Two entries that share a `created` timestamp at a page boundary are therefore neither skipped nor repeated.
+  - At discuss time, recall pages through three prefixes in the scope:
+    - `lesson:`, the candidates;
+    - `lesson-digest:`, whose bodies list the lesson ids to leave out of ranking;
+    - `lesson-outcome:`, the outcome facts that each name a lesson id and feed its read-time score.
+  - It then ranks the remaining lessons client-side by recency × keyword/tag match × score.
   - Facts are not shown in the brief (`brief.ts`), so lessons reach a session only through this explicit retrieval.
-- **Scores.** Computed at read time from outcome facts appended later, each naming the lesson's entry id. Scores are never mutated in place: `fact` appends, and last-write-wins is `todo`-only (`conflictPlan`).
-- **Digest.** A milestone digest is itself a `fact` with `subject = lesson-digest:<milestone>`, and its body lists the entry ids it rolls up. The originals stay, since there is no delete path, and the client excludes digested lessons from ranking.
+- **Scores.** Computed at read time from the `lesson-outcome:` facts appended later, each naming the lesson's entry id, which recall reads with the lessons. Scores are never mutated in place: `fact` appends, and last-write-wins is `todo`-only (`conflictPlan`).
+- **Digest.** A milestone digest is itself a `fact` with `subject = lesson-digest:<milestone>`, and its body lists the entry ids it rolls up. The originals stay, since there is no delete path. Recall reads the digests with the lessons and excludes every digested id from ranking.
 - **Sign-off.** The human reviews the extracted lessons before they are written, and can veto any of them by subject.
 
 **Moved to a later tier:** the realtime and outbox half. That covers phase lifecycle events, the outbox/SSE stub, `phase_lifecycles` and any Dragonfly use. When it is picked up, lifecycle events are `note` events with a payload type field, not new `EVENT_KINDS`.

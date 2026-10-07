@@ -79,8 +79,11 @@ The bank is an auditable, success-weighted and prunable set of lessons. Lessons 
 - Both go through the gate as `fact` entries, with `source_path`, phase and milestone in the body header. They are written only at the discuss/plan boundary, never mid-execute, and only after a human reviews the extracted lessons.
 
 ### Retrieval
-- At discuss time, before CONTEXT.md is written, recall pages through the scope's `lesson:` entries with `memory_search`'s read-side `subject_prefix` filter and `before` cursor (both added in Tier 1), so older lessons are not lost behind the newest-100 window.
-- The client ranks them by recency × tag/keyword match × read-time score. The top K go under `## Prior Lessons (from self-improving bank; cite IDs)`.
+- At discuss time, before CONTEXT.md is written, recall uses `memory_search`'s read-side `subject_prefix` filter and its keyset cursor `(created, id)` (both added in Tier 1) to page through three prefixes in the scope, so older lessons are not lost behind the newest-100 window and no entry sharing a timestamp at a page boundary is skipped or repeated:
+  - `lesson:`, the candidates;
+  - `lesson-digest:`, whose listed ids are excluded from ranking;
+  - `lesson-outcome:`, which feeds each lesson's read-time score.
+- The client ranks the remaining lessons by recency × tag/keyword match × read-time score. The top K go under `## Prior Lessons (from self-improving bank; cite IDs)`.
 - PLAN.md cites lessons by entry id.
 - Fail-open: if the bank is unreachable, nothing is injected.
 
@@ -125,9 +128,9 @@ Approved by the user. **The self-improving lessons bank is stored as governed `f
 
 **How a lesson is cited and found:**
 - **Citation id.** The returned `entry.id`. It is used only when `outcome === "accepted" && verified_persisted === true`.
-- **Retrieval.** `memory_search` with a read-side `subject_prefix` filter and a `before` cursor on `created`, so recall pages through every lesson in the scope; ranking is done client-side.
-- **Scores.** Computed at read time from outcome facts appended later that name the lesson's entry id. Scores are never mutated in place: `fact` appends, and last-write-wins is `todo`-only.
-- **Digest.** A milestone digest is itself a `fact` with `subject = lesson-digest:<milestone>`.
+- **Retrieval.** `memory_search` with a read-side `subject_prefix` filter and a keyset cursor `(created, id)`, paged over `lesson:`, `lesson-digest:` and `lesson-outcome:`; ranking is done client-side.
+- **Scores.** Computed at read time from the `lesson-outcome:` facts appended later that name the lesson's entry id. Scores are never mutated in place: `fact` appends, and last-write-wins is `todo`-only.
+- **Digest.** A milestone digest is itself a `fact` with `subject = lesson-digest:<milestone>`. Recall reads the digests and excludes every id they list.
 
 **Moved to a later tier:** the realtime and outbox half. That covers phase lifecycle events, the outbox/SSE stub, `phase_lifecycles` and Dragonfly. If lifecycle events are built, they are `note` events with a payload type field, because `EVENT_KINDS` is closed: `kind` participates in the event hash (ADR 0001).
 
