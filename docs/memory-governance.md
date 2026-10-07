@@ -70,6 +70,17 @@ implicit allow.
   unauthenticated caller arrives as `unknown` and writes nothing at all. This
   is the teeth: default-deny that a wildcard quietly defeats is not default-deny.
 
+**Swarm surfaces (ADR 0001 S3).** The 15 `swarm-a01-orch` … `swarm-a15-doc` surfaces are
+known surfaces, so the `"*"` grants above already cover them; no swarm-specific grant
+exists and none is needed. Their working set is `decision`/`fact` at `graph:`, `repo:`
+and their own `agent:<surface>` scope; another surface's `agent:` scope and every
+`person:` scope are refused, and `global` is a proposal until a reviewer token releases
+it. `warning` (gate verdicts) and `handoff` stay grantable on purpose — the ADR routes
+both through this gate. `teachable` is not a memory kind. A swarm `decision` can only be
+written at `graph`, `repo` (and `global` as a proposal), never at `agent:` scope, so the
+swarm client must treat `decision` + `agent` as a denial. Proven in
+`memory-write.test.ts` ("swarm surfaces — default-deny proven from the outside").
+
 Passing RBAC at `global` is permission to **propose** a global memory, not to
 install one — see review, below.
 

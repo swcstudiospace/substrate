@@ -116,6 +116,6 @@ mapping table lives with the swarm's tee, not here.
 ## Not in S1
 
 - Leases and handoffs for swarm tasks — S2 (SPE-5053).
-- Swarm memory through the `memory_write` gate, and grants for the new surfaces — S3 (SPE-5054).
+- Swarm memory through the `memory_write` gate, and grants for the new surfaces — S3 (SPE-5054); see the swarm-surfaces note in [memory-governance.md](memory-governance.md).
 - Wiring `substrate-mcp` into swarm workspaces, the projector — S4 (SPE-5055).
 - Gate verdicts as substrate events and their verification — S5 (SPE-5056).
