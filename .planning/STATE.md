@@ -1,19 +1,16 @@
 ---
 gsd_state_version: "1.0"
-milestone: v1.1
-status: completed
-last_updated: "2026-10-07T17:38:22.477Z"
+milestone: v1.2
+milestone_name: Swarm leases, workspace install and lessons bank
+status: planning
+last_updated: "2026-10-07T18:40:02.667Z"
 last_activity: 2026-10-07
-last_activity_desc: Milestone v1.1 completed and archived
-state_head: 7ca167ae100a6f000f0b09543af05307303b90cd
 progress:
-  total_phases: 5
-  completed_phases: 5
-  total_plans: 5
-  completed_plans: 5
-  percent: 100
-milestone_name: Swarm correlation, governed memory and orchestrate integrations
-current_phase_name: 7, 8, 8.1, 9, 10
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # State
@@ -145,10 +142,10 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Current Position
 
-Phase: Milestone v1.1 complete
+Phase: Not started (defining requirements)
 Plan: —
-Status: v1.1 milestone complete
-Last activity: 2026-10-07 — Milestone v1.1 completed and archived
+Status: Defining requirements
+Last activity: 2026-10-07 — Milestone v1.2 started
 
 ## Deferred Items
 

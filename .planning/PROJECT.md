@@ -4,9 +4,16 @@
 **Control plane:** Notion "Agent Task Graph" + Linear team Spectrum Web Co
 **Repo:** `swcstudiospace/agent-substrate` (private)
 
-## Current Milestone
+## Current Milestone: v1.2 Swarm leases, workspace install and lessons bank
 
-**v1.1 Swarm correlation, governed memory and orchestrate integrations** — shipped 2026-10-07 (5 phases: 7, 8, 8.1 inserted, 9, 10; 18/18 requirements). Next milestone not yet defined.
+**Goal:** Swarm agents work nodes under substrate leases with signed handoffs, every swarm workspace is wired to `substrate-mcp` with one token per agent process, and lessons from finished phases become governed, citable memory.
+
+**Target features:**
+- ADR 0001 S2 (SPE-5053): lease authority on the server (swarm session shape, holder-only `lease_id` and fenced calls, no swarm operator), then the swarm runner claiming, heartbeating and completing each task's node, with signed `coord_handoff` packets at accountable-agent boundaries.
+- ADR 0001 S4 (SPE-5055): the projector writes the `substrate-mcp` entry into every swarm workspace runtime, each agent gets its own 0600 token file, and the runner gives each child only its own `SUBSTRATE_TOKEN`.
+- Lessons bank Tier 1 (SPE-5830): lessons as governed `fact` entries through `memory_write`, with a `substrate lessons` CLI to add, recall (with citation ids) and digest them.
+
+Shipped before: **v1.1 Swarm correlation, governed memory and orchestrate integrations** (2026-10-07; 5 phases: 7, 8, 8.1 inserted, 9, 10; 18/18 requirements).
 
 ## Current State
 
@@ -20,12 +27,10 @@ Shipped **v1.1** (2026-10-07): ADR 0001 slices S1 (SPE-5052) and S3 (SPE-5054), 
 
 ## Next Milestone Goals
 
-Candidates only, not commitments — the next milestone is not yet defined:
+Candidates only, not commitments:
 
-- ADR S2 leases/handoffs (SPE-5053).
-- ADR S4 `substrate-mcp` wiring into swarm workspaces, one token per agent process (SPE-5055).
 - ADR S5 gate verdicts as events (SPE-5056).
-- Self-improving lessons bank (SPE-5830; governed fact entries recommended).
+- Lessons bank Tier 2: phase lifecycle events, realtime delivery, an outbox and automatic injection at the GSD discuss step.
 - Carried: v1.0 Phase 0 UAT (8 scenarios pending, acknowledged as deferred at the v1.1 close).
 
 ## What this is
@@ -127,5 +132,22 @@ brief does not call either API on every prompt.
 | `graph_bind` is MCP-only; no new event kinds, no `POST /graph` door | ADR 0001 forbids a single agent-swarm surface, new event kinds and a `POST /graph` door | ✓ Good |
 | Versioned conflicts report `current_version` instead of adding a subject search filter | `memory_search` matches bodies only and returns the newest 100 per scope; the re-read stays only as the older-server fallback | ✓ Good |
 
+## Evolution
+
+This document evolves at phase transitions and milestone boundaries.
+
+**After each phase transition** (via `/gsd-transition`):
+1. Requirements invalidated? → Move to Out of Scope with reason
+2. Requirements validated? → Move to Validated with phase reference
+3. New requirements emerged? → Add to Active
+4. Decisions to log? → Add to Key Decisions
+5. "What This Is" still accurate? → Update if drifted
+
+**After each milestone** (via `/gsd:complete-milestone`):
+1. Full review of all sections
+2. Core Value check — still the right priority?
+3. Audit Out of Scope — reasons still valid?
+4. Update Context with current state
+
 ---
-*Last updated: 2026-10-07 after v1.1 milestone*
+*Last updated: 2026-10-07 at the start of milestone v1.2*
