@@ -702,6 +702,9 @@ export class Substrate {
 					kind: "note",
 					summary: `bound correlation ${correlationId} to ${result.graph_id}`,
 					graph_id: result.graph_id,
+					// Its own one-event session: a sessionless event has no chain to join, and
+					// two bindings on one graph would otherwise share the "" bucket in `verifyGraph`.
+					session_id: `bind:${result.graph_id}:${correlationId}`,
 					actor: "agent",
 					payload: { correlation_id: correlationId, bound_by: boundBy },
 				}).catch(() => undefined);
