@@ -4,10 +4,12 @@
 **Core Value:** Every agent on the host shares one brief, one event log, one governed memory plane and one Graph ID.
 
 Source of truth for this milestone:
+
 - ADR 0001 `docs/adr/0001-agent-swarm-as-sdlc-mesh-on-substrate.md` on `origin/main` (accepted design), phases S2 (Linear SPE-5053) and S4 (SPE-5055).
 - The approved Tier 1 of the self-improving lessons bank (SPE-5830). The research is in `docs/research/memory-bank-realtime-event-proposal.md` and `docs/research/self-improving-memory-bank-proposal.md`. Storage decision 2026-10-07: lessons are governed `fact` entries written through `memory_write`.
 
 Decisions confirmed with the milestone summary (2026-10-07):
+
 - **Who holds the lease.** The swarm runner holds each task's lease on the executing agent's behalf, using that agent's surface token. Agent prompts don't change, and the heartbeat dies with the process that holds it.
 - **Claim outcomes.** A denied claim skips dispatch. An unreachable substrate dispatches unleased and logs it.
 
@@ -15,18 +17,18 @@ Decisions confirmed with the milestone summary (2026-10-07):
 
 ### Lease authority (repo `agent-substrate`, SPE-5053)
 
-- [ ] **LEASE-01**: A swarm surface's `graph_claim` carries a `session_id` of the form `<AGENT>@<replica>:<graph_id>`. The agent must match the token's surface, the replica uses only `[A-Za-z0-9._-]`, and the graph must equal `graph_id`. Any other session is refused (MCP `isError`), never rewritten. Other surfaces keep today's behavior.
-- [ ] **LEASE-02**: A `lease_id` is disclosed only to its holder. Every reply that today can carry another holder's live `lease_id` stops carrying it: a denied `graph_claim`, a refused `graph_heartbeat` / `graph_release` / `graph_complete`, `graph_get`, `coord_drift_scan` and `/drift`, and `coord_reap_leases`. So do the claim, warning and note event payloads written from now on, and the replayable `coord_handoff` packet. Holder surface, session, epoch and expiry still show. Packets already signed with the old field still verify.
-- [ ] **LEASE-03**: `graph_heartbeat`, `graph_release` and `graph_complete` act only for the holder. A caller whose token surface is not the holder's surface is refused with a `not-holder` reason, even when it presents the right `lease_id`. Anonymous local runs (no tokens configured) are not checked, and operator `force` is unchanged.
-- [ ] **LEASE-04**: A swarm surface's token is never an operator. Even when listed in `SUBSTRATE_OPERATOR_TOKENS` it is refused `force` (fail-closed), and boot warns, naming the surface. Tests prove both.
+- [x] **LEASE-01**: A swarm surface's `graph_claim` carries a `session_id` of the form `<AGENT>@<replica>:<graph_id>`. The agent must match the token's surface, the replica uses only `[A-Za-z0-9._-]`, and the graph must equal `graph_id`. Any other session is refused (MCP `isError`), never rewritten. Other surfaces keep today's behavior.
+- [x] **LEASE-02**: A `lease_id` is disclosed only to its holder. Every reply that today can carry another holder's live `lease_id` stops carrying it: a denied `graph_claim`, a refused `graph_heartbeat` / `graph_release` / `graph_complete`, `graph_get`, `coord_drift_scan` and `/drift`, and `coord_reap_leases`. So do the claim, warning and note event payloads written from now on, and the replayable `coord_handoff` packet. Holder surface, session, epoch and expiry still show. Packets already signed with the old field still verify.
+- [x] **LEASE-03**: `graph_heartbeat`, `graph_release` and `graph_complete` act only for the holder. A caller whose token surface is not the holder's surface is refused with a `not-holder` reason, even when it presents the right `lease_id`. Anonymous local runs (no tokens configured) are not checked, and operator `force` is unchanged.
+- [x] **LEASE-04**: A swarm surface's token is never an operator. Even when listed in `SUBSTRATE_OPERATOR_TOKENS` it is refused `force` (fail-closed), and boot warns, naming the surface. Tests prove both.
 
 ### Swarm lease bridge (repo `agent-swarm`, SPE-5053)
 
-- [ ] **LEASE-05**: Before a task moves to `CLAIMED`, the runner calls `graph_claim` for the task's node as the executing agent's surface, with session `<AGENT>@<replica>:<graph_id>`. It keeps the `lease_id` and sets the assignment's `lease_s` from the granted TTL. A denied claim leaves the task undispatched. An unreachable substrate dispatches unleased and records that it did (fail-open).
-- [ ] **LEASE-06**: While the agent runs, the runner heartbeats well inside the TTL. A `lost`, `expired` or `unheld` refusal stops the agent's session and applies a defined transition from a tested table; `expired` re-claims rather than beating.
-- [ ] **LEASE-07**: `DONE` goes through `graph_complete`, fenced on `lease_id`. `CHANGES_REQUESTED` releases and re-claims, so the rework loop is visible in the trail. `FAILED` and `CANCELLED` release.
-- [ ] **LEASE-08**: When two replicas of one agent class race for a node, exactly one is granted. A killed replica's node reads as free to the next claimant within one TTL, with no reaper on the path.
-- [ ] **LEASE-09**: The bridge is additive. The Task Store keeps the DAG, budgets, bids and arbitration records, and nothing is deleted from it. With the substrate unreachable, swarm runs complete as before.
+- [x] **LEASE-05**: Before a task moves to `CLAIMED`, the runner calls `graph_claim` for the task's node as the executing agent's surface, with session `<AGENT>@<replica>:<graph_id>`. It keeps the `lease_id` and sets the assignment's `lease_s` from the granted TTL. A denied claim leaves the task undispatched. An unreachable substrate dispatches unleased and records that it did (fail-open).
+- [x] **LEASE-06**: While the agent runs, the runner heartbeats well inside the TTL. A `lost`, `expired` or `unheld` refusal stops the agent's session and applies a defined transition from a tested table; `expired` re-claims rather than beating.
+- [x] **LEASE-07**: `DONE` goes through `graph_complete`, fenced on `lease_id`. `CHANGES_REQUESTED` releases and re-claims, so the rework loop is visible in the trail. `FAILED` and `CANCELLED` release.
+- [x] **LEASE-08**: When two replicas of one agent class race for a node, exactly one is granted. A killed replica's node reads as free to the next claimant within one TTL, with no reaper on the path.
+- [x] **LEASE-09**: The bridge is additive. The Task Store keeps the DAG, budgets, bids and arbitration records, and nothing is deleted from it. With the substrate unreachable, swarm runs complete as before.
 
 ### Handoffs (repo `agent-swarm`, SPE-5053)
 
@@ -78,15 +80,15 @@ Decisions confirmed with the milestone summary (2026-10-07):
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| LEASE-01 | Phase 11 | Pending |
-| LEASE-02 | Phase 11 | Pending |
-| LEASE-03 | Phase 11 | Pending |
-| LEASE-04 | Phase 11 | Pending |
-| LEASE-05 | Phase 12 | Pending |
-| LEASE-06 | Phase 12 | Pending |
-| LEASE-07 | Phase 12 | Pending |
-| LEASE-08 | Phase 12 | Pending |
-| LEASE-09 | Phase 12 | Pending |
+| LEASE-01 | Phase 11 | Complete |
+| LEASE-02 | Phase 11 | Complete |
+| LEASE-03 | Phase 11 | Complete |
+| LEASE-04 | Phase 11 | Complete |
+| LEASE-05 | Phase 12 | Complete |
+| LEASE-06 | Phase 12 | Complete |
+| LEASE-07 | Phase 12 | Complete |
+| LEASE-08 | Phase 12 | Complete |
+| LEASE-09 | Phase 12 | Complete |
 | HAND-01 | Phase 13 | Pending |
 | HAND-02 | Phase 13 | Pending |
 | HAND-03 | Phase 13 | Pending |

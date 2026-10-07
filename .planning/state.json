@@ -4,39 +4,14 @@
   "milestone": "v1.2 — Swarm leases, workspace install and lessons bank",
   "phases": [
     {
-      "number": "7",
-      "name": "Database structures",
-      "status": "complete"
-    },
-    {
-      "number": "8",
-      "name": "Memory structures",
-      "status": "complete"
-    },
-    {
-      "number": "8.1",
-      "name": "Version conflicts carry the standing version (INSERTED)",
-      "status": "complete"
-    },
-    {
-      "number": "9",
-      "name": "claude-ultrathink integration",
-      "status": "complete"
-    },
-    {
-      "number": "10",
-      "name": "Swarm orchestrate integration",
-      "status": "complete"
-    },
-    {
       "number": "11",
       "name": "Lease authority",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "12",
       "name": "Swarm lease bridge",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "13",
@@ -56,8 +31,8 @@
   ],
   "next": {
     "command": "/gsd:progress --next",
-    "label": "Advance to the next step (plan phase 11)",
-    "reason": "Phase 11 of 5 — needs a plan"
+    "label": "Advance to the next step (plan phase 12)",
+    "reason": "Phase 12 of 5 — needs a plan"
   },
-  "updated_at": "2026-10-07T18:45:36.444Z"
+  "updated_at": "2026-10-07T19:33:13.134Z"
 }

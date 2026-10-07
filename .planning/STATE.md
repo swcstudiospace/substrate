@@ -2,15 +2,19 @@
 gsd_state_version: "1.0"
 milestone: v1.2
 milestone_name: Swarm leases, workspace install and lessons bank
-current_phase: 11
-current_phase_name: Lease authority
+current_phase: 12
+current_phase_name: Swarm lease bridge
 status: planning
-last_updated: "2026-10-07T18:44:18.088Z"
+last_updated: "2026-10-07T19:33:12.950Z"
 last_activity: 2026-10-07
-last_activity_desc: "v1.2 roadmap created: 5 phases (11-15), 25/25 requirements mapped"
-state_head: 65ae71256aa15f62a234866435e3dcf839cb5b6b
+state_head: 214f326d57fecfdbd4d0c8de24e7f85b9615b45c
 progress:
   total_phases: 5
+  completed_phases: 2
+  total_plans: 2
+  completed_plans: 2
+  percent: 40
+last_activity_desc: Phase 11 complete, transitioned to Phase 12
 ---
 
 # State
@@ -142,11 +146,11 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Current Position
 
-Phase: 11 of Phases 11-15 (Lease authority) — not started
+Phase: 12 — Swarm lease bridge
 Total Phases: 5 (Phases 11-15)
-Plan: — (Plans TBD)
+Plan: Not started
 Status: Ready to plan
-Last activity: 2026-10-07 — v1.2 roadmap created: 5 phases (11-15), 25/25 requirements mapped
+Last activity: 2026-10-07
 
 ## Deferred Items
 
