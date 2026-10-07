@@ -6,7 +6,7 @@
  */
 import { normalizeTtlSeconds } from "./lease.ts";
 import { parseGrants, type MemoryGrant } from "./memory-policy.ts";
-import type { Surface } from "./types.ts";
+import { SWARM_SURFACES, type Surface } from "./types.ts";
 
 export interface GreptimeConfig {
 	url: string;
@@ -105,6 +105,11 @@ export interface SubstrateConfig {
 	 * have every claim withdrawn. `SUBSTRATE_CLAIM_REQUIRE_LEDGER` forces either way.
 	 */
 	requireRecordedClaims: boolean | null;
+}
+
+/** "swarm-a05-be" → "SUBSTRATE_TOKEN_SWARM_A05_BE": the inverse of `envSuffixToSurface`. */
+export function tokenEnvName(surface: Surface): string {
+	return `SUBSTRATE_TOKEN_${surface.toUpperCase().replace(/-/g, "_")}`;
 }
 
 /** SUBSTRATE_TOKEN_GROK_BUILD → "grok-build" */
@@ -283,4 +288,30 @@ export function configWarnings(config: SubstrateConfig): string[] {
 		);
 	}
 	return warnings;
+}
+
+/**
+ * Swarm surfaces that have no token, reported at boot.
+ *
+ * Only a deployment that has authentication is told: a bare local run (no
+ * `SUBSTRATE_TOKEN_*` at all) accepts every caller anonymously, and a warning there
+ * would be noise about a setup that is working as intended. Once any token is set, an
+ * agent without its own cannot authenticate — the server answers it 401 rather than
+ * accepting it anonymously — so a missing one is a swarm seat that will be locked out
+ * and the operator should hear about it at boot, not from the first failed run.
+ *
+ * Separate from `configWarnings` because it describes an absence the operator may have
+ * chosen (a deployment that does not run the swarm), not a configuration that
+ * contradicts itself. One message, naming every variable, so the list is one grep.
+ */
+export function swarmTokenWarnings(config: SubstrateConfig): string[] {
+	if (config.allowAnonymous) return [];
+	const held = new Set(config.tokens.values());
+	const missing = SWARM_SURFACES.filter((surface) => !held.has(surface));
+	if (missing.length === 0) return [];
+	return [
+		`no token for ${missing.length} swarm surface${missing.length === 1 ? "" : "s"} ` +
+			`(${missing.map(tokenEnvName).join(", ")}); a swarm agent without its own token is refused with 401, ` +
+			"not accepted anonymously",
+	];
 }

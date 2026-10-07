@@ -29,7 +29,7 @@ import { isOperator, surfaceForToken, type SubstrateConfig } from "./config.ts";
 import { formatDrift } from "./drift.ts";
 import { InvalidEventError } from "./event.ts";
 import { InvalidHandoffError } from "./handoff.ts";
-import { createMcpServer, type McpCaller } from "./mcp.ts";
+import { attributedSurface, createMcpServer, type McpCaller } from "./mcp.ts";
 import {
 	auditRefusal,
 	auditToolCalls,
@@ -331,9 +331,17 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig, 
 				const raw = await readBody(req);
 				const body = JSON.parse(raw) as Record<string, unknown>;
 				if (!(await auditedRest(res, observability, surface, "events", body))) return;
+				// A swarm token is its surface: naming another one is refused, not re-attributed.
+				// Every other caller keeps the body-first attribution collectors rely on — see
+				// `attributedSurface`.
+				const attribution = attributedSurface(surface, typeof body.surface === "string" ? body.surface : null);
+				if ("refused" in attribution) {
+					sendJson(res, 403, { error: attribution.refused });
+					return;
+				}
 				const result = await substrate.emit({
 					...(body as object),
-					surface: (typeof body.surface === "string" ? (body.surface as Surface) : null) ?? surface ?? "claude-code",
+					surface: attribution.surface,
 				} as Parameters<Substrate["emit"]>[0]);
 				// 503 when the ledger did not take it. The `substrate` CLI ignores the
 				// status and exits 0 either way — failing open is the client's job, and

@@ -83,6 +83,17 @@ class StandingTaken extends Error {
 	}
 }
 
+/**
+ * What a correlation bind answers. `graph_id` is always the stored winner, and
+ * `conflict` is true when that is not the Graph ID the caller offered.
+ */
+export interface GraphBindResult {
+	status: "created" | "existing";
+	correlation_id: string;
+	graph_id: string;
+	conflict: boolean;
+}
+
 export class IndexStore implements MemoryStore {
 	private readonly sql: SQL;
 
@@ -141,6 +152,16 @@ export class IndexStore implements MemoryStore {
 				notion_page         text,
 				state               text,
 				primary key (graph_id, node_id, step)
+			)`;
+		// A swarm run's correlation_id bound to exactly one Graph ID. The primary key is
+		// what makes two runs racing one correlation_id resolve to a winner and a reader;
+		// no foreign key to graph_index, because a run binds before it registers its nodes.
+		await this.sql`
+			create table if not exists graph_bindings (
+				correlation_id text primary key,
+				graph_id       text not null,
+				bound_by       text,
+				created        timestamptz not null default now()
 			)`;
 		await this.sql`
 			create table if not exists memory_entries (
@@ -238,6 +259,7 @@ export class IndexStore implements MemoryStore {
 		await this.sql`create index if not exists graph_nodes_claimed_idx on graph_nodes (claimed_by)`;
 		await this.sql`create index if not exists graph_nodes_lease_idx on graph_nodes (lease_expires_at)`;
 		await this.sql`create index if not exists graph_edges_graph_idx on graph_edges (graph_id)`;
+		await this.sql`create index if not exists graph_bindings_graph_idx on graph_bindings (graph_id)`;
 		await this.sql`create index if not exists memory_scope_idx on memory_entries (scope)`;
 		await this.sql`create index if not exists memory_fts_idx on memory_entries using gin (to_tsvector('english', body))`;
 		// The identity the lww and versioned strategies resolve against: one standing
@@ -696,6 +718,53 @@ export class IndexStore implements MemoryStore {
 		await this.sql`
 			update graph_index set status = ${status}, pr_url = coalesce(${prUrl ?? null}, pr_url), updated = now()
 			where graph_id = ${graphId}`;
+	}
+
+	// ── correlation bindings ───────────────────────────────────────────────────
+
+	/**
+	 * Bind a correlation id to a Graph ID, or report the Graph ID it is already bound to.
+	 *
+	 * `insert … on conflict do nothing` rather than select-then-insert: the unique key is
+	 * the arbiter, so of two concurrent binds exactly one inserts (`created`) and the other
+	 * waits on the winner's commit, inserts nothing and reads the stored row (`existing`).
+	 * The returned `graph_id` is always the stored one; `conflict` says it is not the one
+	 * offered, and the caller must adopt it.
+	 */
+	async bindCorrelation(correlationId: string, graphId: string, boundBy: string | null): Promise<GraphBindResult> {
+		// A second pass is only ever needed if the winning row vanished between the insert
+		// and the read, which nothing in this codebase does — bounded rather than assumed.
+		for (let attempt = 0; attempt < 3; attempt++) {
+			const inserted = (await this.sql`
+				insert into graph_bindings (correlation_id, graph_id, bound_by)
+				values (${correlationId}, ${graphId}, ${boundBy})
+				on conflict (correlation_id) do nothing
+				returning graph_id`) as Array<{ graph_id: string }>;
+			if (inserted[0]) {
+				return { status: "created", correlation_id: correlationId, graph_id: inserted[0].graph_id, conflict: false };
+			}
+			const stored = await this.graphForCorrelation(correlationId);
+			if (stored !== null) {
+				return { status: "existing", correlation_id: correlationId, graph_id: stored, conflict: stored !== graphId };
+			}
+		}
+		throw new Error(`correlation ${correlationId} could be neither bound nor read back`);
+	}
+
+	/** The Graph ID a correlation id is bound to, or null. */
+	async graphForCorrelation(correlationId: string): Promise<string | null> {
+		const rows = (await this.sql`
+			select graph_id from graph_bindings where correlation_id = ${correlationId}`) as Array<{ graph_id: string }>;
+		return rows[0]?.graph_id ?? null;
+	}
+
+	/** Every correlation id bound to a Graph ID, oldest first. */
+	async correlationsForGraph(graphId: string): Promise<string[]> {
+		const rows = (await this.sql`
+			select correlation_id from graph_bindings
+			where graph_id = ${graphId}
+			order by created, correlation_id`) as Array<{ correlation_id: string }>;
+		return rows.map((row) => row.correlation_id);
 	}
 
 	// ── memory ─────────────────────────────────────────────────────────────────

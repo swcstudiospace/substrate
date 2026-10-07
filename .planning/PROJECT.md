@@ -4,6 +4,12 @@
 **Control plane:** Notion "Agent Task Graph" + Linear team Spectrum Web Co
 **Repo:** `swcstudiospace/agent-substrate` (private)
 
+## Current Milestone
+
+**v1.1 Swarm correlation, governed memory and orchestrate integrations** (2026-10-07, complete)
+
+Re-grounded on `origin/main` and ADR 0001. v1.1 builds the swarm bridge the accepted ADR specifies: S1 (swarm surfaces, token-names-the-caller, the `correlation_id` to Graph ID binding, the swarm event tee, ultrathink's plan record) and S3 (swarm memory through the governance gate). Postgres stays the index, the ledger stays behind `substrate-mcp` only, every client fails open. The self-improving memory bank from PR #10's research is deferred pending your decision (see REQUIREMENTS.md).
+
 ## What this is
 
 Four planes — runtime, memory, skills, ledger — bound by **MCP** for agent-to-substrate and

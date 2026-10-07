@@ -11,7 +11,7 @@ import { z } from "zod";
 import { DEFAULT_IDLE_SECONDS, formatDrift } from "./drift.ts";
 import { DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT } from "./greptime.ts";
 import { MAX_LEASE_TTL_SECONDS, MIN_LEASE_TTL_SECONDS } from "./lease.ts";
-import type { Substrate } from "./service.ts";
+import { CORRELATION_ID_PATTERN, GRAPH_ID_PATTERN, InvalidBindError, type Substrate } from "./service.ts";
 import {
 	ACTORS,
 	EDGE_KINDS,
@@ -20,6 +20,7 @@ import {
 	MEMORY_TTLS,
 	NODE_STATES,
 	SURFACES,
+	isSwarmSurface,
 	TRUST_LEVELS,
 	type Surface,
 } from "./types.ts";
@@ -55,6 +56,39 @@ function text(value: string) {
 
 function json(value: unknown) {
 	return text(JSON.stringify(value, null, 2));
+}
+
+/** Who an `events_emit` / `graph_claim` is attributed to — or why it is refused. */
+export type Attribution = { surface: Surface } | { refused: string };
+
+/**
+ * The surface an event or a claim is attributed to, where the token may name the caller.
+ *
+ * **A swarm token is its surface.** The ADR's mesh rests on one accountable writer per
+ * artifact, so a caller authenticated as a `swarm-*` surface cannot act as another one:
+ * a supplied `surface` that differs is *refused*, never silently re-attributed — a
+ * quiet rewrite would hide the bug or the compromise that sent it. Absent or equal, the
+ * token's own surface is used.
+ *
+ * **Deliberately only swarm surfaces.** Every other authenticated caller, and an
+ * anonymous local run, keeps the long-standing behaviour: a supplied `surface` is
+ * attribution and wins over the token's, then the token's, then `claude-code`. The
+ * collectors and hooks rely on that — one `cursor` or `hermes` token legitimately emits
+ * for the other surfaces it observes — and narrowing it is not this boundary's business.
+ * `memory_write` and `coord_handoff` are stricter still and are untouched.
+ *
+ * `supplied` is any string, not a `Surface`, because REST bodies are unchecked.
+ */
+export function attributedSurface(callerSurface: Surface | null, supplied: string | null | undefined): Attribution {
+	if (isSwarmSurface(callerSurface)) {
+		if (supplied === undefined || supplied === null || supplied === callerSurface) return { surface: callerSurface };
+		return { refused: `this token is ${callerSurface} and cannot act as ${supplied}` };
+	}
+	return { surface: (supplied as Surface | null | undefined) ?? callerSurface ?? "claude-code" };
+}
+
+function refusal(message: string) {
+	return { ...json({ error: message }), isError: true };
 }
 
 /**
@@ -224,9 +258,11 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			},
 		},
 		async (args) => {
+			const attribution = attributedSurface(callerSurface, args.surface);
+			if ("refused" in attribution) return refusal(attribution.refused);
 			const { event, stored, error, warning } = await substrate.emit({
 				...args,
-				surface: args.surface ?? callerSurface ?? "claude-code",
+				surface: attribution.surface,
 			});
 			return json({
 				id: event.id,
@@ -358,6 +394,39 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 		async (args) => json(await substrate.registerGraph({ ...args, surface: args.surface ?? callerSurface })),
 	);
 
+	server.registerTool(
+		"graph_bind",
+		{
+			title: "Bind a correlation id to a Graph ID",
+			description:
+				"Bind a swarm run's `correlation_id` to exactly one Graph ID, or look a binding up. Both given: an " +
+				"atomic insert-or-get on the unique `correlation_id` — `status` is `created` or `existing`, and the " +
+				"returned `graph_id` is ALWAYS the stored winner; `conflict: true` means it differs from the one " +
+				"you offered, so adopt it. Only `correlation_id`: forward lookup, `status` `existing` | `unbound`. " +
+				"Only `graph_id`: reverse lookup, the `correlation_ids` bound to it. At least one is required. " +
+				"A new binding is also recorded as a `note` event; the index row is the lookup.",
+			inputSchema: {
+				correlation_id: z
+					.string()
+					.regex(CORRELATION_ID_PATTERN)
+					.optional()
+					.describe("1..200 characters of [A-Za-z0-9._:-]"),
+				graph_id: z.string().regex(GRAPH_ID_PATTERN).optional().describe("ut-<ts36>-<8hex>"),
+			},
+		},
+		async (args) => {
+			try {
+				return json(await substrate.bindGraph(args, callerSurface));
+			} catch (cause) {
+				// A caller's mistake is a tool error carrying the reason; a store that is
+				// missing or failing propagates as the SDK's own tool error, like the other
+				// graph tools.
+				if (cause instanceof InvalidBindError) return refusal(cause.message);
+				throw cause;
+			}
+		},
+	);
+
 	const ttlSchema = z
 		.number()
 		.int()
@@ -385,16 +454,11 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				surface: surfaceSchema.optional(),
 			},
 		},
-		async ({ graph_id, node_id, session_id, ttl_seconds, surface }) =>
-			json(
-				await substrate.claimNode(
-					graph_id,
-					node_id,
-					surface ?? callerSurface ?? "claude-code",
-					session_id,
-					ttl_seconds,
-				),
-			),
+		async ({ graph_id, node_id, session_id, ttl_seconds, surface }) => {
+			const attribution = attributedSurface(callerSurface, surface);
+			if ("refused" in attribution) return refusal(attribution.refused);
+			return json(await substrate.claimNode(graph_id, node_id, attribution.surface, session_id, ttl_seconds));
+		},
 	);
 
 	server.registerTool(

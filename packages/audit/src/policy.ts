@@ -19,6 +19,7 @@ export const FAIL_CLOSED_TOOLS: ReadonlySet<string> = new Set([
 	"graph_complete",
 	"graph_register",
 	"graph_heartbeat",
+	"graph_bind",
 	"memory_write",
 	"coord_handoff",
 	"coord_reap_leases",

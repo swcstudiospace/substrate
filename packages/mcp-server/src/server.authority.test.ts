@@ -18,6 +18,8 @@ const ENV = {
 	// The operator credential is a surface token that is also listed as an
 	// operator's, so its extra authority never costs us knowing who used it.
 	SUBSTRATE_TOKEN_CURSOR: "tok-operator",
+	SUBSTRATE_TOKEN_SWARM_A05_BE: "tok-a05",
+	SUBSTRATE_TOKEN_SWARM_A09_REV: "tok-a09",
 	SUBSTRATE_OPERATOR_TOKENS: "tok-operator",
 	SUBSTRATE_HANDOFF_KEY: "a-test-signing-key",
 };
@@ -39,8 +41,20 @@ const heldNode = {
 	lease_epoch: 1,
 };
 
+/** Every surface the index was asked to claim as, so a refused claim is shown to have asked nobody. */
+const claimedAs: string[] = [];
+
 const index = {
 	getGraph: async () => ({ repo: "swcstudiospace/agent-substrate", branch: "main" }),
+	claimNode: async (graph_id: string, node_id: string, surface: string) => {
+		claimedAs.push(surface);
+		return {
+			claimed: true,
+			node: { graph_id, node_id, linear_identifier: null },
+			lease: { lease_id: "lse_swarm", holder: { surface, session_id: "s" }, epoch: 1, state: "held", expires_at: null },
+			decision: { action: "granted", evicted: null },
+		};
+	},
 	releaseNode: async (_g: string, _n: string, request: { lease_id?: string | null; force?: boolean }) => {
 		released.push(request);
 		return {
@@ -276,5 +290,90 @@ describe("the handoff sender is the token's surface", () => {
 
 		expect(response.status).toBe(401);
 		surfaceless.close();
+	});
+});
+
+describe("a swarm token names the caller over the wire", () => {
+	async function postEvent(token: string | null, body: Record<string, unknown>): Promise<Response> {
+		return fetch(`${base}/events`, {
+			method: "POST",
+			headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
+			body: JSON.stringify({ kind: "note", summary: "x", ...body }),
+		});
+	}
+
+	test("REST /events: A05's token cannot emit as A09 — 403, and nothing is written", async () => {
+		written.length = 0;
+
+		const response = await postEvent("tok-a05", { surface: "swarm-a09-rev" });
+		const body = (await response.json()) as { error: string };
+
+		expect(response.status).toBe(403);
+		expect(body.error).toContain("cannot act as swarm-a09-rev");
+		expect(written).toEqual([]);
+	});
+
+	test("REST /events: the same token emitting as itself, or by default, is accepted as itself", async () => {
+		written.length = 0;
+
+		const explicit = await postEvent("tok-a05", { surface: "swarm-a05-be" });
+		const implicit = await postEvent("tok-a05", {});
+
+		expect(explicit.status).toBe(202);
+		expect(implicit.status).toBe(202);
+		expect(written.map((event) => event.surface)).toEqual(["swarm-a05-be", "swarm-a05-be"]);
+	});
+
+	test("REST /events: a non-swarm token naming another surface is attributed as it always was", async () => {
+		written.length = 0;
+
+		const response = await postEvent("tok-hermes", { surface: "grok-bot" });
+
+		expect(response.status).toBe(202);
+		expect(written[0]?.surface).toBe("grok-bot");
+	});
+
+	test("MCP events_emit: refused for a swarm token naming another surface, honoured as itself", async () => {
+		written.length = 0;
+
+		const refused = (await callTool("tok-a05", "events_emit", { kind: "note", summary: "x", surface: "swarm-a09-rev" })) as {
+			error: string;
+		};
+		const own = (await callTool("tok-a05", "events_emit", { kind: "note", summary: "x", surface: "swarm-a05-be" })) as {
+			stored: boolean;
+		};
+
+		expect(refused.error).toContain("cannot act as swarm-a09-rev");
+		expect(own.stored).toBe(true);
+		expect(written.map((event) => event.surface)).toEqual(["swarm-a05-be"]);
+	});
+
+	test("MCP graph_claim: A05's token cannot claim as A09, and can claim as itself", async () => {
+		claimedAs.length = 0;
+
+		const refused = (await callTool("tok-a05", "graph_claim", {
+			graph_id: "ut-1",
+			node_id: "n2",
+			session_id: "A09@r0:ut-1",
+			surface: "swarm-a09-rev",
+		})) as { error: string };
+		const own = (await callTool("tok-a05", "graph_claim", {
+			graph_id: "ut-1",
+			node_id: "n2",
+			session_id: "A05@r0:ut-1",
+		})) as { claimed: boolean };
+
+		expect(refused.error).toContain("cannot act as swarm-a09-rev");
+		expect(own.claimed).toBe(true);
+		// The refused claim never reached the index; the accepted one is A05's.
+		expect(claimedAs).toEqual(["swarm-a05-be"]);
+	});
+
+	test("MCP graph_claim: a non-swarm token naming another surface is unchanged", async () => {
+		claimedAs.length = 0;
+
+		await callTool("tok-hermes", "graph_claim", { graph_id: "ut-1", node_id: "n3", session_id: "s", surface: "grok-bot" });
+
+		expect(claimedAs).toEqual(["grok-bot"]);
 	});
 });

@@ -65,7 +65,7 @@ describe("auditMode", () => {
 	test("the write tools are all fail-closed, explicitly rather than by default", () => {
 		// Default-deny catches a tool nobody decided about; it should not be what is
 		// carrying the decision for a tool somebody did.
-		for (const tool of ["graph_heartbeat", "coord_handoff", "coord_reap_leases"]) {
+		for (const tool of ["graph_heartbeat", "graph_bind", "coord_handoff", "coord_reap_leases"]) {
 			expect(FAIL_CLOSED_TOOLS.has(tool)).toBe(true);
 		}
 	});

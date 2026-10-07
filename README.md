@@ -148,10 +148,12 @@ swarm reaches all of it through `substrate-mcp` and nothing else — one `correl
 Graph ID.
 
 **None of that is live yet.** There is no adapter in either repo: today's swarm runs are not
-recorded by the substrate, and no swarm agent is a surface here. The integration is phased
-across S1–S5 (SPE-5052 … SPE-5056), and S1 has to close one gap in this repo first —
-`events_emit` and `graph_claim` still take a caller-supplied `surface` over the token's, which
-is fine for a collector and not enough for a single-writer mesh.
+recorded by the substrate, and no swarm agent calls it. The integration is phased
+across S1–S5 (SPE-5052 … SPE-5056). S1 closes one gap in this repo first: for the 15 `swarm-*`
+surfaces the token now names the caller — `events_emit`, `graph_claim` and `POST /events` refuse
+(REST 403, MCP tool error) a `surface` that differs from the token's. Every other surface keeps
+the old behaviour, where a caller-supplied `surface` wins over the token's, because a collector
+legitimately emits for the surfaces it observes. See [`docs/swarm-correlation.md`](docs/swarm-correlation.md).
 
 [ADR 0001](docs/adr/0001-agent-swarm-as-sdlc-mesh-on-substrate.md) has the plane mapping, the
 non-goals (no second Greptime door, no memory-gate bypass, no NATS replacement, no big-bang

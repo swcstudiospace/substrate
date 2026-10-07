@@ -1,5 +1,32 @@
 /** Shared shapes for the substrate. Mirrors Notion §5.2 and §5.3. */
 
+/**
+ * The 15 Agent Swarm agents, A01..A15 in order, one surface each.
+ *
+ * Real surfaces rather than one shared `swarm` surface: memory RBAC is default-deny
+ * per surface and a lease holder is (surface, session_id), so a shared surface would
+ * make all 15 agents one memory writer and one lease holder. Server-side each has its
+ * own `SUBSTRATE_TOKEN_<SURFACE>`; see `docs/swarm-correlation.md`.
+ */
+export const SWARM_SURFACES = [
+	"swarm-a01-orch",
+	"swarm-a02-req",
+	"swarm-a03-arch",
+	"swarm-a04-uxd",
+	"swarm-a05-be",
+	"swarm-a06-fe",
+	"swarm-a07-data",
+	"swarm-a08-qa",
+	"swarm-a09-rev",
+	"swarm-a10-sec",
+	"swarm-a11-devops",
+	"swarm-a12-rel",
+	"swarm-a13-obs",
+	"swarm-a14-maint",
+	"swarm-a15-doc",
+] as const;
+export type SwarmSurface = (typeof SWARM_SURFACES)[number];
+
 export const SURFACES = [
 	"claude-code",
 	"cursor",
@@ -12,8 +39,13 @@ export const SURFACES = [
 	"opencode",
 	"pi",
 	"rivet-agentos",
+	...SWARM_SURFACES,
 ] as const;
 export type Surface = (typeof SURFACES)[number];
+
+export function isSwarmSurface(surface: string | null | undefined): surface is SwarmSurface {
+	return typeof surface === "string" && (SWARM_SURFACES as readonly string[]).includes(surface);
+}
 
 export const EVENT_KINDS = [
 	"session.start",
