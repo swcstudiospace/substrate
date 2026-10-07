@@ -229,11 +229,11 @@ Plans:
   2. The swarm client re-submits from `current_version` without searching memory.
   3. On the real gate, a decision behind 100+ newer entries in its scope is rewritten.
 
-**Plans:** 1 plan
+**Plans:** 1/1 plans complete
 
 Plans:
 
-- [ ] 08.1-01: current_version on versioned conflicts; swarm client uses it
+- [x] 08.1-01: current_version on versioned conflicts; swarm client uses it
 
 ### Phase 9: claude-ultrathink integration
 
@@ -276,6 +276,6 @@ Plans:
 |-------|-----------|----------------|--------|-----------|
 | 7. Database structures | v1.1 | 1/1 | Complete | 2026-10-07 |
 | 8. Memory structures | v1.1 | 1/1 | Complete | 2026-10-07 |
-| 8.1. Version conflicts carry the standing version (INSERTED) | v1.1 | 0/1 | Planned | - |
+| 8.1. Version conflicts carry the standing version (INSERTED) | v1.1 | 1/1 | Complete    | 2026-10-07 |
 | 9. claude-ultrathink integration | v1.1 | 1/1 | Complete | 2026-10-07 |
 | 10. Swarm orchestrate integration | v1.1 | 1/1 | Complete | 2026-10-07 |

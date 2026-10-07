@@ -59,14 +59,27 @@ Source of truth for this milestone: ADR 0001 `docs/adr/0001-agent-swarm-as-sdlc-
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| DB-01, DB-02, ID-01, ID-02, ID-03 | Phase 7 | Complete |
-| MEM-01, MEM-02, MEM-03, MEM-04, MEM-05 | Phase 8 | Complete |
-| UT-01, UT-02 | Phase 9 | Complete |
-| TEE-01, TEE-02, TEE-03, TEE-04, GID-01 | Phase 10 | Complete |
-| PROOF-01 | Phase 7 + 10 | Complete |
+| DB-01 | Phase 7 | Complete |
+| DB-02 | Phase 7 | Complete |
+| ID-01 | Phase 7 | Complete |
+| ID-02 | Phase 7 | Complete |
+| ID-03 | Phase 7 | Complete |
+| MEM-01 | Phase 8 | Complete |
+| MEM-02 | Phase 8, 8.1 | Complete |
+| MEM-03 | Phase 8 | Complete |
+| MEM-04 | Phase 8 | Complete |
+| MEM-05 | Phase 8 | Complete |
+| UT-01 | Phase 9 | Complete |
+| UT-02 | Phase 9 | Complete |
+| TEE-01 | Phase 10 | Complete |
+| TEE-02 | Phase 10 | Complete |
+| TEE-03 | Phase 10 | Complete |
+| TEE-04 | Phase 10 | Complete |
+| GID-01 | Phase 10 | Complete |
+| PROOF-01 | Phase 7, 10 | Complete |
 
 **Coverage:** 18 requirements, 18 mapped, 0 unmapped.
 
 ---
 *Requirements defined: 2026-10-07*
-*Last updated: 2026-10-07 after re-grounding on origin/main and ADR 0001*
+*Last updated: 2026-10-07 after phase 8.1 closed the MEM-02 gap found after the first audit*
