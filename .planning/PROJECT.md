@@ -6,9 +6,27 @@
 
 ## Current Milestone
 
-**v1.1 Swarm correlation, governed memory and orchestrate integrations** (2026-10-07, complete)
+**v1.1 Swarm correlation, governed memory and orchestrate integrations** — shipped 2026-10-07 (5 phases: 7, 8, 8.1 inserted, 9, 10; 18/18 requirements). Next milestone not yet defined.
 
-Re-grounded on `origin/main` and ADR 0001. v1.1 builds the swarm bridge the accepted ADR specifies: S1 (swarm surfaces, token-names-the-caller, the `correlation_id` to Graph ID binding, the swarm event tee, ultrathink's plan record) and S3 (swarm memory through the governance gate). Postgres stays the index, the ledger stays behind `substrate-mcp` only, every client fails open. The self-improving memory bank from PR #10's research is deferred pending your decision (see REQUIREMENTS.md).
+## Current State
+
+Shipped **v1.1** (2026-10-07): ADR 0001 slices S1 (SPE-5052) and S3 (SPE-5054), re-grounded on `origin/main` and ADR 0001. Postgres stays the index, the ledger stays behind `substrate-mcp` only, every client fails open.
+
+- **Swarm identity and binding:** 15 swarm surfaces `swarm-a01-orch`..`swarm-a15-doc` with per-surface tokens; a swarm token cannot emit or claim as another surface (refusal, never re-attribution); MCP-only `graph_bind` binds correlation id to Graph ID race-safely (one winner). agent-substrate #11.
+- **Swarm orchestrate tee:** the swarm run log is teed under one Graph ID per run, attributed per agent, 13 swarm types mapped to existing `EVENT_KINDS`, deduped, fail-open; `orch_plan` mints/binds/registers the Graph ID. agent-swarm #5.
+- **Governed swarm memory:** `swarm/memory.py` writes through the governance gate with no grant change; versioned conflicts carry `current_version` so the client re-submits without searching (Phase 8.1). agent-substrate #12, #13; agent-swarm #6, #7, #8.
+- **ultrathink plan record:** one fail-open `note` event carrying the Graph ID (no prompt text) after planning. claude-ultrathink #19.
+- **Proof:** live end-to-end on real Postgres + GreptimeDB against the three merged mains: 24/24 integration, 7/7 governed swarm memory, and the 8.1 regression (2 POSTs, 0 searches).
+
+## Next Milestone Goals
+
+Candidates only, not commitments — the next milestone is not yet defined:
+
+- ADR S2 leases/handoffs (SPE-5053).
+- ADR S4 `substrate-mcp` wiring into swarm workspaces, one token per agent process (SPE-5055).
+- ADR S5 gate verdicts as events (SPE-5056).
+- Self-improving lessons bank (SPE-5830; governed fact entries recommended).
+- Carried: v1.0 Phase 0 UAT (8 scenarios pending, acknowledged as deferred at the v1.1 close).
 
 ## What this is
 
@@ -90,3 +108,24 @@ brief does not call either API on every prompt.
   Railway or Greptime credentials in `agent_events`.
 - **No KVM on this host** — cua runs the Docker path; the QEMU path is out.
 - Secrets live in `/etc/substrate/substrate.env` (0600, root), never in the repo.
+
+## Validated
+
+- ✓ Swarm identity: 15 per-surface swarm tokens; cross-surface emit/claim refused (REST 403 / MCP `isError`), other surfaces unchanged — v1.1
+- ✓ Binding: `graph_bind` (MCP-only) binds correlation id ↔ Graph ID, race-safe with one winner; binding notes in their own session keep `events_verify` green — v1.1
+- ✓ Tee: swarm run log teed per agent, 13 swarm types mapped to existing `EVENT_KINDS`, deduped, fail-open; hardened transport (no redirects, deadline, proxies, dry runs never tee) — v1.1
+- ✓ Graph ID: `orch_plan` mints, binds and registers one Graph ID per run — v1.1
+- ✓ Memory: swarm memory through the governance gate (kind/scope maps, idempotency key, every gate outcome handled, ok only when accepted and verified_persisted); versioned conflicts carry `current_version` — v1.1
+- ✓ ultrathink: one fail-open `note` event with the Graph ID after planning, session `<host session>:<graph id>` — v1.1
+- ✓ Proof: live end-to-end 24/24 and 7/7 on real Postgres + GreptimeDB, plus the 8.1 regression — v1.1
+
+## Key Decisions
+
+| Decision | Rationale | Outcome |
+|----------|-----------|---------|
+| A swarm token emitting or claiming as another swarm surface is refused, never re-attributed | Token names the caller; silent re-attribution would corrupt attribution | ✓ Good |
+| `graph_bind` is MCP-only; no new event kinds, no `POST /graph` door | ADR 0001 forbids a single agent-swarm surface, new event kinds and a `POST /graph` door | ✓ Good |
+| Versioned conflicts report `current_version` instead of adding a subject search filter | `memory_search` matches bodies only and returns the newest 100 per scope; the re-read stays only as the older-server fallback | ✓ Good |
+
+---
+*Last updated: 2026-10-07 after v1.1 milestone*

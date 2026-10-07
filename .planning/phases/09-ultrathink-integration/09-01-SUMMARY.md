@@ -1,6 +1,7 @@
 ---
 phase: 09-ultrathink-integration
 plan: 01
+one-liner: "A planned ultrathink prompt records its Graph ID in the substrate ledger, with no prompt text, inside the planning budget and without ever changing the hook's result."
 subsystem: claude-ultrathink hook / substrate client
 tags: [ultrathink, substrate, ledger, fail-open, graph-id]
 provides:
@@ -31,7 +32,7 @@ status: complete
 
 # 09-01 Summary
 
-PR claude-ultrathink #19, branch `feat/substrate-plan-event`, commits `9ef87a6` + `6b3a76f`.
+PR claude-ultrathink #19, branch `feat/substrate-plan-event`, commits `9ef87a6` + `6b3a76f`. Merged 2026-10-07 as adff86c after Greptile 5/5 with no open threads.
 
 ## What changed
 - `runPromptSubmit` sends one `note` event via `emitEvent` after planning and writing the session record, through the new `HookDeps.emit` seam.
@@ -42,7 +43,7 @@ PR claude-ultrathink #19, branch `feat/substrate-plan-event`, commits `9ef87a6` 
 ## Evidence
 - Branch: `tsc` clean, 2241 pass / 0 fail.
 - Live S1 smoke (/tmp/s1-live-smoke.sh, 24/24): the ultrathink `emitEvent` client was accepted by the live server and its note stored under the same Graph ID.
-- Greptile review on #19 in progress; findings so far fixed in `6b3a76f`.
+- Greptile findings (planning budget, elapsed time) fixed in `6b3a76f`; review closed at 5/5.
 
 ## Deliberate exclusions
 - No hook-side graph registration (would need a REST door the ADR does not allow).
