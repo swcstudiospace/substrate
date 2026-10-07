@@ -36,10 +36,12 @@ urgent insertions.
 ## Phase Details
 
 ### Phase 0: Brief
+
 **Goal**: A Claude Code prompt on the VPS is preceded by a brief that names what other agents
 and surfaces did in that repo, sourced from a real event store and a real index.
 **Depends on**: Nothing (first phase)
 **Success Criteria** (what must be TRUE):
+
   1. `substrate-mcp` listens on `127.0.0.1:7410` under systemd and serves `memory.brief`,
      `memory.write`, `memory.search`, `events.emit`, `graph.get`, `graph.register` over MCP,
      plus `POST /brief` and `POST /events` as plain HTTP for hooks.
@@ -53,14 +55,17 @@ and surfaces did in that repo, sourced from a real event store and a real index.
   6. Cursor `hooks.json` has substrate commands **appended** to the GSD-managed arrays, not
      replacing them; a git post-commit hook emits `commit` events.
   7. Stopping `substrate-mcp` leaves every agent working, just unbriefed.
+
 **Proof**: Edit a file in Cursor, then start Claude Code on the VPS — the uplift echo shows a
 brief naming that edit and the open graphs in that repo.
 **Plans**: TBD
 
 ### Phase 1: Lane B
+
 **Goal**: Hermes, Omp, Muse Code, Grok Build and Grok Bot all read the brief and emit events.
 **Depends on**: Phase 0
 **Success Criteria**:
+
   1. Hermes redesign per its own `.planning/PROJECT.md`: the Python `pre_llm_call` hook calls
      the TypeScript engine, which returns the brief with the uplift XML and graph.
   2. Hermes Kanban is retired as a tracker; `hermes-linear-connector` keeps its Linear→Hermes
@@ -76,9 +81,11 @@ lists both the handoff and the claim.
 **Plans**: TBD
 
 ### Phase 2: Claims and dispatch
+
 **Goal**: Labelling a Linear issue for an agent starts that agent on that node.
 **Depends on**: Phase 1
 **Success Criteria**:
+
   1. `graph.claim` moves the Linear issue to `started`, adds `agent:<surface>`, posts a
      one-line comment with the session id, sets `Agent` on the Notion Issue row, and writes
      `claimed_by` in the index. A second agent asking for the same node gets the existing claim.
@@ -92,23 +99,28 @@ Notion Issue row shows Agent hermes, and Claude Code's brief shows it within a m
 **Plans**: TBD
 
 ### Phase 3: Lane A
+
 **Goal**: Sandboxed, durable Claude Code sessions, one VM per Graph ID.
 **Depends on**: Phase 2
 **Success Criteria**:
+
   1. Free disk verified before pulling images (host is at 90%).
   2. rivet-agentos host runs; `openTask` writes shared skills, `SUBSTRATE_BRIEF.md` and the
      substrate/notion/linear MCP config into `/home/agentos`.
   3. The dispatcher routes `dispatch:claude-code` to a VM; `permissionPolicy: "ask"` surfaces
      approvals to Telegram through the existing stop-notify path.
   4. `claude-ultrathink` runs inside the VM, so kickoff and sync still write Notion and Linear.
+
 **Proof**: A labelled issue opens a VM, the session survives a host restart, the PR lands and
 `ultrathink-sync` closes the loop.
 **Plans**: TBD
 
 ### Phase 4: Skills
+
 **Goal**: One git-backed library every agent reads; the three existing miners propose into it.
 **Depends on**: Phase 1
 **Success Criteria**:
+
   1. `/root/agent-skills` is a git checkout of `swcstudiospace/agent-skills` with the **real
      content vendored** — all 26 symlinks dereferenced, no dangling links for any agent.
   2. The docs-scraper pipeline publishes into the repo instead of its own exports dir.
@@ -123,9 +135,11 @@ Build without either being touched.
 **Plans**: TBD
 
 ### Phase 5: Docs and desktop
+
 **Goal**: Product docs and GUI tasks reachable from any agent.
 **Depends on**: Phase 0
 **Success Criteria**:
+
   1. `docs.search` proxies the existing RAGFlow MCP endpoint (`ragflow_retrieval`).
   2. `docs.ingest` runs the redactor before ingesting.
   3. `desktop.run` drives cua on the Docker path or the existing `recruitment-desktop` webtop.
@@ -134,13 +148,16 @@ Build without either being touched.
 **Plans**: TBD
 
 ### Phase 6: Ledger
+
 **Goal**: Tamper-evident history.
 **Depends on**: Phase 1
 **Success Criteria**:
+
   1. Every collector computes `hash` over the canonical event JSON and carries `prev`.
   2. An hourly systemd timer Merkle-roots the hour's events into a Solana **devnet** memo and
      records root, signature and event count in an `anchors` table.
   3. `substrate verify <graph_id>` recomputes the chain and checks roots against signatures.
+
 **Proof**: Alter one event row — `verify` flags the graph.
 **Plans**: TBD
 
@@ -166,58 +183,91 @@ Execution order is 7, then 9 and 10 in parallel, then 8 (phase 8 needs phase 7's
 ## Phase Details
 
 ### Phase 7: Database structures
+
 **Goal**: A swarm correlation id maps to one Graph ID in the index, and a swarm token can only speak as its own surface.
 **Depends on**: Nothing
 **Requirements**: [DB-01, DB-02, ID-01, ID-02, ID-03]
 **Success Criteria** (what must be TRUE):
+
   1. `graph_bindings` exists in the index DDL with a unique `correlation_id`; `graph_bind` creates, resolves forward and reverse, and two concurrent binds give one winner.
   2. `SURFACES` has the 15 swarm surfaces and `.env.example` names their 15 tokens.
   3. A `swarm-a05-be` token is refused when it emits or claims as `swarm-a09-rev`.
   4. `EVENT_KINDS` is unchanged and `store-lock.test.ts` passes.
+
 **Plans**: 1 plan
 
 Plans:
+
 - [x] 07-01: surfaces, identity, `graph_bindings` and `graph_bind`, docs
 
 ### Phase 8: Memory structures
+
 **Goal**: Swarm memory is substrate memory and a refusal is handled, not worked around.
 **Depends on**: Phase 7, Phase 10
 **Requirements**: [MEM-01, MEM-02, MEM-03, MEM-04, MEM-05]
 **Success Criteria** (what must be TRUE):
+
   1. Swarm `memory.write` resolves to `memory_write` with the documented kind and scope maps.
   2. `denied`, `quarantined` and both `conflict` flavors each have a tested handler; nothing acts unless `accepted && verified_persisted`.
   3. A swarm surface writing outside its grant is refused, asserted from the outside.
   4. The swarm suite proves no swarm-side store feeds an agent's context.
+
 **Plans**: 1 plan
 
 Plans:
+
 - [x] 08-01: default grants for swarm surfaces; swarm memory client and handlers
 
+### Phase 08.1: Version conflicts carry the standing version (INSERTED)
+
+**Goal:** A rewrite of a decision works however many newer entries share its scope.
+**Requirements**: [MEM-02]
+**Depends on:** Phase 8
+**Success Criteria** (what must be TRUE):
+
+  1. Versioned conflicts (`version.required|stale|raced`, `standing.raced` on a decision with a subject) carry `current_version`, the version of the decision in force or `null`.
+  2. The swarm client re-submits from `current_version` without searching memory.
+  3. On the real gate, a decision behind 100+ newer entries in its scope is rewritten.
+
+**Plans:** 1/1 plans complete
+
+Plans:
+
+- [x] 08.1-01: current_version on versioned conflicts; swarm client uses it
+
 ### Phase 9: claude-ultrathink integration
+
 **Goal**: A planned prompt leaves a Graph ID record in the ledger without ever affecting the hook.
 **Depends on**: Nothing
 **Requirements**: [UT-01, UT-02]
 **Success Criteria** (what must be TRUE):
+
   1. A planned prompt yields one `note` event carrying the Graph ID and no prompt text.
   2. Skipped prompts, unknown sessions and failed state writes emit nothing.
   3. A rejecting or absent substrate leaves the hook result identical.
+
 **Plans**: 1 plan
 
 Plans:
+
 - [x] 09-01: emit seam and hook wiring
 
 ### Phase 10: Swarm orchestrate integration
+
 **Goal**: The swarm's event stream reaches the ledger under one Graph ID per run, attributed to the agent that produced it.
 **Depends on**: Phase 7
 **Requirements**: [TEE-01, TEE-02, TEE-03, TEE-04, GID-01, PROOF-01]
 **Success Criteria** (what must be TRUE):
+
   1. Every `runlog.emit` record is teed with the surface, session, graph, node, kind and payload fields from the contract.
   2. The swarm-type table is exhaustive and a double-publish sends one request.
   3. With the substrate down, `orch_plan` completes as before.
   4. Against a real Postgres and GreptimeDB, `events_verify` is green for the run's Graph ID and a mismatched token is refused.
+
 **Plans**: 1 plan
 
 Plans:
+
 - [x] 10-01: substrate client, tee, minting and binding, tests, docs
 
 ## Progress
@@ -226,5 +276,6 @@ Plans:
 |-------|-----------|----------------|--------|-----------|
 | 7. Database structures | v1.1 | 1/1 | Complete | 2026-10-07 |
 | 8. Memory structures | v1.1 | 1/1 | Complete | 2026-10-07 |
+| 8.1. Version conflicts carry the standing version (INSERTED) | v1.1 | 1/1 | Complete    | 2026-10-07 |
 | 9. claude-ultrathink integration | v1.1 | 1/1 | Complete | 2026-10-07 |
 | 10. Swarm orchestrate integration | v1.1 | 1/1 | Complete | 2026-10-07 |

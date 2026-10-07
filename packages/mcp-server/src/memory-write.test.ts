@@ -196,15 +196,25 @@ class FakeStore implements MemoryStore {
 		if (owner?.holder !== claim.holder || owner.outcome !== "in-flight") {
 			return { ok: false, reason: "claim-lost" };
 		}
+		// Same order as the real store, which retires the predecessor before it inserts:
+		// a predecessor somebody else already replaced is `standing-moved`, whatever the
+		// insert would have met. Checked before the conflict key, or a rewrite that lost
+		// to another rewrite reads here as the identity race Postgres never reports for it.
+		if (row.supersedes) {
+			const predecessor = this.rows.get(row.supersedes);
+			if (!predecessor || predecessor.entry.superseded_by) return { ok: false, reason: "standing-moved" };
+		}
 		// `memory_standing_idx` is a unique partial index in the real store, so the fake
 		// enforces it too. Otherwise a row that should never have carried a conflict key
-		// passes here and fails only against Postgres.
+		// passes here and fails only against Postgres. The predecessor is excluded because
+		// the real store has already retired it by the time its insert meets the index.
 		//
 		// Refused rather than thrown, because that is what the real store does: the
 		// insert declines under `on conflict … do nothing` and the transaction rolls
-		// back. A throw here would be the bug this refusal replaced — the gate cannot
-		// tell a rolled-back statement from a committed one, so it keeps the loser's key
-		// in flight for a race the loser could have retried at once.
+		// back, retire included — which is why nothing here is mutated before both
+		// checks pass. A throw here would be the bug this refusal replaced — the gate
+		// cannot tell a rolled-back statement from a committed one, so it keeps the
+		// loser's key in flight for a race the loser could have retried at once.
 		if (row.conflict_key) {
 			const clash = [...this.rows.values()].find(
 				(held) => held.conflict_key === row.conflict_key && !held.entry.superseded_by && held.entry.id !== row.supersedes,
@@ -213,8 +223,7 @@ class FakeStore implements MemoryStore {
 		}
 		if (row.supersedes) {
 			const predecessor = this.rows.get(row.supersedes);
-			if (!predecessor || predecessor.entry.superseded_by) return { ok: false, reason: "standing-moved" };
-			predecessor.entry = { ...predecessor.entry, superseded_by: row.id };
+			if (predecessor) predecessor.entry = { ...predecessor.entry, superseded_by: row.id };
 		}
 		const entry: MemoryEntry = {
 			id: row.id,
@@ -554,6 +563,9 @@ describe("conflict — versioned decisions", () => {
 		expect(second.reason).toBe("version.required");
 		expect(second.conflict_with).toBe(first.entry?.id ?? "");
 		expect(second.remedy).toContain("version 1");
+		// The version to re-submit against travels with the refusal, so the caller does
+		// not have to find the decision again — a search it may not be able to win.
+		expect(second.current_version).toBe(1);
 		expect(store.standing()).toHaveLength(1);
 		expect(store.standing()[0]?.text).toBe("the runtime is herdr");
 	});
@@ -563,11 +575,14 @@ describe("conflict — versioned decisions", () => {
 		const stale = await write({ ...decision, text: "the runtime is Orca", expected_version: 7 });
 		expect(stale.reason).toBe("version.stale");
 		expect(stale.remedy).toContain("version 1");
+		expect(stale.current_version).toBe(1);
 	});
 
 	test("expecting a version where nothing is in force is a conflict too", async () => {
 		const result = await write({ ...decision, text: "the runtime is Orca", expected_version: 3 });
 		expect(result.reason).toBe("version.stale");
+		// Present and null: nothing is in force, so the re-submit carries no expectation.
+		expect(result).toHaveProperty("current_version", null);
 		expect(store.entries()).toEqual([]);
 	});
 
@@ -613,6 +628,7 @@ describe("conflict — versioned decisions", () => {
 		expect(loser.reason).toBe("standing.raced");
 		expect(loser.conflict_with).toBe(store.standing()[0]?.id);
 		expect(loser.remedy).toContain("expected_version");
+		expect(loser.current_version).toBe(1);
 		expect(store.standing()).toHaveLength(1);
 		expect(store.standing()[0]?.text).toBe("the runtime is Orca");
 
@@ -647,6 +663,103 @@ describe("conflict — versioned decisions", () => {
 		expect(result.outcome).toBe("conflict");
 		expect(result.reason).toBe("version.raced");
 		expect(store.entries()).toHaveLength(1);
+		// The entry it was replacing is retired and nothing replaced it here, so nothing
+		// is in force now — said as null rather than left out.
+		expect(result).toHaveProperty("current_version", null);
+		expect(result.remedy).toContain("without expected_version");
+	});
+
+	test("a decision replaced under a write reports the version in force now, not the one it read", async () => {
+		const first = await write({ ...decision, text: "the runtime is herdr" });
+		// Another rewrite against the same v1 lands between this write's read and its
+		// insert. The real store retires the predecessor before it inserts, so it finds
+		// v1 already retired and answers `standing-moved` — a version race, not the
+		// identity race the winner's row would suggest if the insert were checked first.
+		const hook = store.onInsert;
+		store.onInsert = async () => {
+			store.onInsert = hook;
+			await write({ ...decision, text: "the runtime is Orca", expected_version: 1, idempotency_key: "winner" });
+		};
+
+		const loser = await write({
+			...decision,
+			text: "the runtime is Zellij",
+			expected_version: 1,
+			idempotency_key: "loser",
+		});
+
+		expect(loser.outcome).toBe("conflict");
+		expect(loser.reason).toBe("version.raced");
+		// The version to re-submit against is the winner's, not the v1 this write read.
+		expect(loser.current_version).toBe(2);
+		// `conflict_with` names the entry this write was replacing.
+		expect(loser.conflict_with).toBe(first.entry?.id);
+		// Rolled back, retire included: the winner stays in force and v1 stays retired by it.
+		expect(store.standing()).toHaveLength(1);
+		expect(store.standing()[0]?.text).toBe("the runtime is Orca");
+		expect(store.entries()).toHaveLength(2);
+		expect(store.writes.get("loser")?.outcome).toBe("conflict");
+
+		const retry = await write({
+			...decision,
+			text: "the runtime is Zellij",
+			expected_version: loser.current_version ?? undefined,
+			idempotency_key: "loser",
+		});
+		expect(retry.outcome).toBe("accepted");
+		expect(retry.entry?.version).toBe(3);
+	});
+
+	test("a race whose winner cannot be looked up leaves current_version out rather than reporting none", async () => {
+		// Null would tell the caller to re-submit with no expectation against a decision
+		// that may well be in force. Absence sends it back to reading instead.
+		const hook = store.onInsert;
+		store.onInsert = async () => {
+			store.onInsert = hook;
+			await write({ ...decision, text: "the runtime is Orca", idempotency_key: "winner" });
+			store.failStanding = "postgres: connection reset";
+		};
+
+		const loser = await write({ ...decision, text: "the runtime is herdr", idempotency_key: "loser" });
+
+		expect(loser.reason).toBe("standing.raced");
+		expect("current_version" in loser).toBe(false);
+		expect(loser.remedy).toContain("re-read");
+	});
+
+	test("a superseding race whose lookup fails leaves current_version out too", async () => {
+		await write({ ...decision, text: "the runtime is herdr" });
+		const read = store.standingEntry.bind(store);
+		store.standingEntry = async (key) => {
+			const found = await read(key);
+			const held = found ? store.rows.get(found.id) : undefined;
+			if (held) held.entry = { ...held.entry, superseded_by: "mem_someone-else" };
+			// Only the gate's first read succeeds; the lookup after the race does not.
+			store.failStanding = "postgres: connection reset";
+			return found;
+		};
+
+		const result = await write({ ...decision, text: "the runtime is Orca", expected_version: 1 });
+
+		expect(result.reason).toBe("version.raced");
+		expect("current_version" in result).toBe(false);
+		expect(result.remedy).toContain("re-read");
+	});
+
+	test("a conflict that is not about a version carries no current_version", async () => {
+		const parked = await write({
+			scope: "global",
+			kind: "decision",
+			subject: "runtime",
+			text: "Greptime is the events ledger only",
+		});
+		expect(parked.reason).toBe("review.required");
+		expect("current_version" in parked).toBe(false);
+
+		await store.claimWrite({ key: "k1", explicit: true, entryHash: "whatever", entryId: "mem_someone-else" });
+		const busy = await write({ ...decision, text: "the runtime is herdr", idempotency_key: "k1" });
+		expect(busy.reason).toBe("write.in-flight");
+		expect("current_version" in busy).toBe(false);
 	});
 });
 
@@ -681,6 +794,8 @@ describe("accepted — last-write-wins todos", () => {
 		expect(loser.outcome).toBe("conflict");
 		expect(loser.reason).toBe("standing.raced");
 		expect(loser.strategy).toBe("lww");
+		// Not a versioned write, so there is no version to report.
+		expect("current_version" in loser).toBe(false);
 		expect(store.standing()).toHaveLength(1);
 
 		// And the retry, which for `lww` needs no version, replaces it.

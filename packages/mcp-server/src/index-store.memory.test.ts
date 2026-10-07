@@ -16,6 +16,9 @@
  *      state)` index rejected — after the memory entry had already committed, so
  *      the caller was told nothing was stored while the entry was in the index.
  *
+ * It also holds the real-gate regression for `current_version`: a decision buried
+ * under 120 newer entries in its scope is still rewritten without a search.
+ *
  * Skipped unless a database is given, for the reason `index-store.lease.test.ts`
  * gives: mocking Postgres' concurrency would mock the one thing under test.
  *
@@ -455,5 +458,132 @@ describeLive("memory governance against a live index", () => {
 			select state, count(*)::int as n from memory_reviews where entry_hash = ${first.entry!.entry_hash}
 			group by state`) as Array<{ state: string; n: number }>;
 		expect(reviews).toEqual([{ state: "approved", n: 2 }]);
+	});
+
+	test("a version conflict names the version in force, however buried the decision is", async () => {
+		// The gap this closes: a client learned the version to re-submit against by
+		// searching memory, and search matches only the body and returns the newest 100.
+		// A decision whose body lacks its subject's words, under 100+ newer entries in its
+		// scope, could never be found again — so the rewrite stayed refused at v1. The
+		// refusal now carries the version, and no search is needed at all.
+		const repo = `memtest-${RUN}/scratch`;
+		const scope = `repo:${repo}`;
+		const subject = `db-choice-${RUN}`;
+		const first = await write(a, {
+			scope,
+			repo,
+			subject,
+			// Neither "db" nor "choice" appears in the body.
+			text: `${MARKER} use postgres 16`,
+			idempotency_key: `${MARKER}-cv-decision-1`,
+		});
+		expect(first.outcome).toBe("accepted");
+		expect(first.entry?.version).toBe(1);
+
+		for (let i = 0; i < 120; i++) {
+			const fact = await write(a, {
+				scope,
+				repo,
+				kind: "fact",
+				text: `${MARKER} scratch fact ${i}: the build cache was warm`,
+				idempotency_key: `${MARKER}-cv-fact-${i}`,
+			});
+			expect(fact.outcome).toBe("accepted");
+		}
+
+		const rewrite = {
+			scope,
+			repo,
+			subject,
+			text: `${MARKER} use postgres 17`,
+			idempotency_key: `${MARKER}-cv-decision-2`,
+		};
+		const refused = await write(b, rewrite);
+		expect(refused.outcome).toBe("conflict");
+		expect(refused.reason).toBe("version.required");
+		expect(refused.conflict_with).toBe(first.entry!.id);
+		expect(refused.current_version).toBe(1);
+
+		// Straight back, same key, with the version the refusal named.
+		const retry = await write(b, { ...rewrite, expected_version: refused.current_version ?? undefined });
+		expect(retry.outcome).toBe("accepted");
+		expect(retry.verified_persisted).toBe(true);
+		expect(retry.idempotency_key).toBe(`${MARKER}-cv-decision-2`);
+		expect(retry.entry?.version).toBe(2);
+		expect(retry.entry?.supersedes).toBe(first.entry!.id);
+	}, 60_000);
+
+	test("a rewrite whose predecessor is replaced under it is a version race, and its key retries at once", async () => {
+		// Two rewrites of one v1, under different keys. The competing one lands in the
+		// window between the loser's read and its insert — run from inside the loser's
+		// `insertEntry`, before it delegates. The real store retires the predecessor
+		// before it inserts, so the loser finds v1 already retired and answers
+		// `standing-moved`: a version race, never the identity race the winner's row
+		// would suggest if the index were met first.
+		const subject = `raced-${RUN}`;
+		const first = await write(a, { subject, text: `${MARKER} the scheduler is cron`, idempotency_key: `${MARKER}-vr-1` });
+		expect(first.outcome).toBe("accepted");
+		expect(first.entry?.version).toBe(1);
+
+		// Held on an object, not a `let`: TypeScript narrows a `let` assigned only inside
+		// a closure to its initial `undefined` at the reads below.
+		const competing: { result?: MemoryWriteResult; raced: boolean } = { raced: false };
+		const racing: MemoryStore = {
+			claimWrite: (input) => b.claimWrite(input),
+			finishWrite: (key, holder, outcome, entryId) => b.finishWrite(key, holder, outcome, entryId),
+			releaseWrite: (key, holder) => b.releaseWrite(key, holder),
+			restoreWrite: (key, holder, reserved) => b.restoreWrite(key, holder, reserved),
+			standingEntry: (identity) => b.standingEntry(identity),
+			insertEntry: async (row, claim) => {
+				if (!competing.raced) {
+					competing.raced = true;
+					competing.result = await write(a, {
+						subject,
+						text: `${MARKER} the scheduler is systemd timers`,
+						expected_version: 1,
+						idempotency_key: `${MARKER}-vr-k2`,
+					});
+				}
+				return await b.insertEntry(row, claim);
+			},
+			readEntry: (id) => b.readEntry(id),
+			quarantineEntry: (row) => b.quarantineEntry(row),
+			enqueueReview: (row) => b.enqueueReview(row),
+			releaseReviews: (hash, entryId, by) => b.releaseReviews(hash, entryId, by),
+		};
+
+		const rewrite = {
+			subject,
+			text: `${MARKER} the scheduler is a Greptime job`,
+			idempotency_key: `${MARKER}-vr-k1`,
+		};
+		const loser = await write(racing, { ...rewrite, expected_version: 1 });
+
+		const competitor = competing.result;
+		expect(competitor?.outcome).toBe("accepted");
+		expect(competitor?.entry?.version).toBe(2);
+		expect(loser.outcome).toBe("conflict");
+		expect(loser.reason).toBe("version.raced");
+		expect(loser.verified_persisted).toBe(false);
+		// The version in force now — the competitor's — not the v1 this write read.
+		expect(loser.current_version).toBe(2);
+
+		// Rolled back: the competitor is the one entry in force, and nothing of the
+		// loser's landed.
+		const standing = (await raw`
+			select id, version from memory_entries
+			where subject = ${subject} and superseded_by is null`) as Array<{ id: string; version: number }>;
+		expect(standing.map((row) => row.id)).toEqual([competitor!.entry!.id]);
+		const record = (await raw`
+			select outcome from memory_writes where idempotency_key = ${`${MARKER}-vr-k1`}`) as Array<{ outcome: string }>;
+		expect(record[0]?.outcome).toBe("conflict");
+
+		// Straight back, same key, against the version the conflict named.
+		const retry = await write(b, { ...rewrite, expected_version: loser.current_version ?? undefined });
+		expect(retry.outcome).toBe("accepted");
+		expect(retry.verified_persisted).toBe(true);
+		expect(retry.idempotency_key).toBe(`${MARKER}-vr-k1`);
+		expect(retry.entry?.version).toBe(3);
+		expect(retry.entry?.supersedes).toBe(competitor!.entry!.id);
 	});
 });

@@ -202,6 +202,20 @@ the same todo. Without a `subject` there is no identity, so the entry is appende
   the new entry is version *n+1*, `supersedes` the old, and the old is retired
   rather than deleted — "why did this change" is what a decision log is for.
   `memory_search` with `include_superseded` reads the history.
+
+  **Every versioned conflict carries `current_version`** — `version.required`,
+  `version.stale`, `version.raced` and `standing.raced` on a decision with a
+  subject. It is the `version` of the decision in force *now* for that scope and
+  subject, looked up when the refusal is made (after a race, that is the winner's,
+  not the one the write read). `null` means nothing is in force, so the re-submit
+  carries no `expected_version`. A client re-submits with `expected_version` set to
+  it and the same `idempotency_key`, without re-reading memory first — which matters,
+  because `memory_search` matches only the body and returns the newest 100 entries,
+  so a decision whose body lacks its subject's words and sits under 100 newer
+  entries cannot be found by searching. The field is absent on every other reply,
+  including a non-versioned `standing.raced`, and when the gate's own lookup of the
+  entry in force failed: absence never means "nothing in force", and a client that
+  sees none falls back to reading the entry.
 - **`todo` → last-write-wins.** A todo has one current state and no interesting
   history. Making agents version their todo list would only teach them to stop
   writing todos.
@@ -360,7 +374,8 @@ key — without writing a second row.
 }
 ```
 
-Plus, where they apply: `deduplicated`, `conflict_with`, `review_id`,
+Plus, where they apply: `deduplicated`, `conflict_with`, `current_version` (a
+versioned conflict; see [Conflict strategies](#conflict-strategies)), `review_id`,
 `quarantine_id`, `quarantine_reason`, `trust_downgraded_from`.
 
 **The contract for anything other agents act on is
