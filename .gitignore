@@ -12,7 +12,6 @@ build/
 
 # Local state
 .substrate/
-.projected/
 *.db
 *.sqlite
 *.sqlite3
@@ -30,35 +29,3 @@ venv/
 .DS_Store
 .idea/
 *.swp
-
-# ── GSD baseline (auto-generated) ──
-.gsd
-.gsd-worktrees/
-.gsd-backups/
-.gsd-id
-.mcp.json
-.bg-shell/
-Thumbs.db
-nul
-nul.*
-con
-con.*
-prn
-prn.*
-aux
-aux.*
-com[1-9]
-com[1-9].*
-lpt[1-9]
-lpt[1-9].*
-*.swo
-*~
-.vscode/
-*.code-workspace
-.next/
-*.pyc
-target/
-vendor/
-coverage/
-.cache/
-tmp/
