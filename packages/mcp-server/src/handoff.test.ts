@@ -121,6 +121,7 @@ describe("signing", () => {
 			["repo", { ...signed, repo: "swcstudiospace/somewhere-else" }],
 			["ts", { ...signed, ts: new Date(0).toISOString() }],
 			["truncated", { ...signed, truncated: { files: 12 } }],
+			["lease_handover", { ...signed, lease_handover: !signed.lease_handover }],
 		];
 
 		for (const [field, packetWith] of tampered) {
@@ -174,6 +175,19 @@ describe("signing", () => {
 		expect(verifyHandoff(old, KEYS)).toEqual({ ok: false, reason: "unknown-key", detail: "k0" });
 	});
 
+	test("a packet signed before lease_handover, carrying the old lease id field, still verifies", () => {
+		// Packets in the append-only ledger were signed over `handover_lease_id` and
+		// cannot be re-signed. Verification recomputes over the packet as stored, so
+		// the field the builder no longer writes is still covered where it exists.
+		const { lease_handover: _dropped, ...current } = packet();
+		// The shape the pre-v1.2 builder produced, which the current type only reads.
+		const legacy = { ...current, handover_lease_id: "lse_0123456789abcdef0123456789abcdef" } as unknown as HandoffPacket;
+		const stored = JSON.parse(JSON.stringify(signHandoff(legacy, SIGNER))) as HandoffPacket;
+
+		expect(verifyHandoff(stored, KEYS)).toEqual({ ok: true, key_id: "k1" });
+		expect(verifyHandoff({ ...stored, handover_lease_id: "lse_forged" }, KEYS)).toEqual({ ok: false, reason: "bad-signature" });
+	});
+
 	test("an unknown algorithm is refused rather than assumed", () => {
 		const signed = signHandoff(packet(), SIGNER);
 		expect(verifyHandoff({ ...signed, signature: { ...signed.signature!, alg: "none" as never } }, KEYS)).toEqual({
@@ -198,6 +212,20 @@ describe("signing", () => {
 			ok: false,
 			reason: "bad-signature",
 		});
+	});
+});
+
+describe("the lease in a packet", () => {
+	test("records that the sender meant to hand its lease over, never the id", () => {
+		// Every agent can replay a packet through `coord_handoff_list`, and the id is
+		// the token that releases or completes the node.
+		const handing = packet({ handover_lease_id: "lse_0123456789abcdef0123456789abcdef" });
+		const keeping = packet();
+
+		expect(handing.lease_handover).toBe(true);
+		expect(keeping.lease_handover).toBe(false);
+		expect(canonicalJson(signHandoff(handing, SIGNER))).not.toContain("lse_0123456789abcdef0123456789abcdef");
+		expect(handing).not.toHaveProperty("handover_lease_id");
 	});
 });
 

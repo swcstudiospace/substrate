@@ -242,6 +242,33 @@ describe("the claims against the trail", () => {
 		expect(report.findings[0]?.session_id).toBe("sess-hermes");
 	});
 
+	test("no finding or claim carries the holder's lease id, though holder, epoch and expiry show", () => {
+		// The scan is open to every agent (`coord_drift_scan`, `/drift`), and orphaned
+		// and idle leases are live: their id would let a reader release the node.
+		const report = analyzeDrift(
+			inputs({
+				claims: [
+					claim({ node_id: "n2" }),
+					claim({ node_id: "n3", lease: lease({ claimed_at: minutesAgo(180), heartbeat_at: minutesAgo(120) }) }),
+					claim({ node_id: "n4", lease: lease({ expires_at: minutesAgo(20) }) }),
+				],
+				events: [
+					event({ kind: "commit", sha: "1a2b3c4", summary: "commit 1a2b3c4 feat: leases", ts: minutesAgo(6) }),
+					event({ kind: "session.end", ts: minutesAgo(4), summary: "session ended" }),
+				],
+			}),
+		);
+
+		expect(kinds(report)).toEqual(expect.arrayContaining(["lease.orphaned", "lease.expired"]));
+		expect(JSON.stringify(report)).not.toContain("lse_live");
+		expect(report.claims[0]?.lease).toMatchObject({
+			lease_id: null,
+			holder: { surface: "hermes", session_id: "sess-hermes" },
+			epoch: 1,
+			expires_at: new Date(NOW + 600_000).toISOString(),
+		});
+	});
+
 	test("a live lease with nothing happening for an hour is idle", () => {
 		const report = analyzeDrift(
 			inputs({

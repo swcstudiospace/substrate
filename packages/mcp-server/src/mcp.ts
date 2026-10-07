@@ -21,6 +21,7 @@ import {
 	NODE_STATES,
 	SURFACES,
 	isSwarmSurface,
+	type SwarmSurface,
 	TRUST_LEVELS,
 	type Surface,
 } from "./types.ts";
@@ -85,6 +86,40 @@ export function attributedSurface(callerSurface: Surface | null, supplied: strin
 		return { refused: `this token is ${callerSurface} and cannot act as ${supplied}` };
 	}
 	return { surface: (supplied as Surface | null | undefined) ?? callerSurface ?? "claude-code" };
+}
+
+/** A swarm session's replica: it can never carry the `@` or `:` that delimit the session. */
+export const SWARM_REPLICA_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+
+/**
+ * Why a swarm claim's `session_id` is refused, or null when it is well formed.
+ *
+ * Half of a lease holder's identity is the session, so for a swarm surface it has to
+ * say which agent, which replica and which graph — `<AGENT>@<replica>:<graph_id>` —
+ * or two replicas of one agent could not be told apart and a lease could not be traced
+ * back to the run that took it. The agent is read off the surface (`swarm-a05-be` is
+ * `A05`), so the roster stays one list. The graph is compared by equality with the
+ * claim's own `graph_id`, never by pattern: a session naming a different graph is a
+ * runner bug or a replay, and either way the lease must not be taken under it.
+ *
+ * A bad session is refused, never rewritten, for the same reason a swarm token naming
+ * another surface is: a quiet fix would hide whatever sent it.
+ */
+export function swarmSessionRefusal(surface: SwarmSurface, sessionId: string, graphId: string): string | null {
+	const agent = surface.split("-")[1]?.toUpperCase();
+	const expected = `${agent}@<replica>:${graphId}`;
+	const at = sessionId.indexOf("@");
+	const colon = at < 0 ? -1 : sessionId.indexOf(":", at + 1);
+	if (colon < 0) return `a ${surface} session_id must be ${expected}, not ${JSON.stringify(sessionId)}`;
+	const named = sessionId.slice(0, at);
+	const replica = sessionId.slice(at + 1, colon);
+	const graph = sessionId.slice(colon + 1);
+	if (named !== agent) return `a ${surface} session_id must name agent ${agent}, not ${JSON.stringify(named)}`;
+	if (!SWARM_REPLICA_PATTERN.test(replica)) {
+		return `a ${surface} session_id's replica must be 1..64 characters of [A-Za-z0-9._-], not ${JSON.stringify(replica)}`;
+	}
+	if (graph !== graphId) return `a ${surface} session_id must end in this claim's graph_id ${graphId}, not ${JSON.stringify(graph)}`;
+	return null;
 }
 
 function refusal(message: string) {
@@ -444,12 +479,21 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				"session_id, so two sessions of the same agent are two holders. The lease expires after ttl_seconds " +
 				"unless graph_heartbeat extends it, and a lapsed lease is taken over by the next claimant — so a " +
 				"session that dies releases its node by doing nothing. If another agent holds it, `claimed` is false " +
-				"and their lease comes back instead: pick up something else rather than retrying. Keep the `lease_id` " +
-				"from the reply — graph_heartbeat, graph_release and graph_complete all require it.",
+				"and the reply names the holder and its expiry, never its lease_id: pick up something else rather " +
+				"than retrying. Keep the `lease_id` from a granted reply — it is shown to you once, here, and " +
+				"graph_heartbeat, graph_release and graph_complete all require it (re-claiming with the same " +
+				"session renews and returns it). Only your token's surface can use the lease afterwards. A swarm " +
+				"surface's session_id must be `<AGENT>@<replica>:<graph_id>`, e.g. `A05@r0:<graph_id>`.",
 			inputSchema: {
 				graph_id: z.string(),
 				node_id: z.string(),
-				session_id: z.string().describe("This session's id. Half of the holder's identity, so it must be stable and yours."),
+				session_id: z
+					.string()
+					.describe(
+						"This session's id. Half of the holder's identity, so it must be stable and yours. Swarm surfaces: " +
+							"`<AGENT>@<replica>:<graph_id>`, the agent matching the token, the replica [A-Za-z0-9._-]{1,64}, " +
+							"the graph equal to graph_id.",
+					),
 				ttl_seconds: ttlSchema,
 				surface: surfaceSchema.optional(),
 			},
@@ -457,6 +501,10 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 		async ({ graph_id, node_id, session_id, ttl_seconds, surface }) => {
 			const attribution = attributedSurface(callerSurface, surface);
 			if ("refused" in attribution) return refusal(attribution.refused);
+			if (isSwarmSurface(attribution.surface)) {
+				const refused = swarmSessionRefusal(attribution.surface, session_id, graph_id);
+				if (refused) return refusal(refused);
+			}
 			return json(await substrate.claimNode(graph_id, node_id, attribution.surface, session_id, ttl_seconds));
 		},
 	);
@@ -469,7 +517,8 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				"Push out the expiry on a lease. Call it well inside ttl_seconds for as long as you are working the " +
 				"node — every other reader treats a lapsed lease as free. `ok: false` means you no longer hold it: " +
 				"`lost` if someone else does, `expired` if it lapsed (re-claim rather than beat), `unheld` if nothing " +
-				"does. Stop working the node on a refusal; the reply names the current holder.",
+				"does, `not-holder` if your token is not the holder's surface (whatever lease_id you sent). Stop " +
+				"working the node on a refusal; the reply names the current holder, not its lease_id.",
 			inputSchema: {
 				graph_id: z.string(),
 				node_id: z.string(),
@@ -478,7 +527,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			},
 		},
 		async ({ graph_id, node_id, lease_id, ttl_seconds }) =>
-			json(await substrate.heartbeatNode(graph_id, node_id, lease_id, ttl_seconds)),
+			json(await substrate.heartbeatNode(graph_id, node_id, lease_id, callerSurface, ttl_seconds)),
 	);
 
 	/**
@@ -505,9 +554,11 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			title: "Release a node",
 			description:
 				"Drop your lease on a node without marking it complete. `lease_id` fences it: a holder whose lease " +
-				"lapsed cannot release the node someone else has since claimed. `force` prises a node loose from a " +
-				"holder that is gone, and is an operator action — it needs an operator token, not a surface token, " +
-				"because one agent evicting another would make every lease advisory.",
+				"lapsed cannot release the node someone else has since claimed, and a token that is not the " +
+				"holder's surface is refused `not-holder` even with the right id. `force` prises a node loose from " +
+				"a holder that is gone, and is an operator action — it needs an operator token, not a surface " +
+				"token, because one agent evicting another would make every lease advisory. No swarm token is an " +
+				"operator. A refusal names the holder, never its lease_id.",
 			inputSchema: {
 				graph_id: z.string(),
 				node_id: z.string(),
@@ -520,7 +571,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 		},
 		async ({ graph_id, node_id, lease_id, force }) => {
 			if (force && !isOperator) return json(FORCE_REFUSED);
-			return json(await substrate.releaseNode(graph_id, node_id, { lease_id, force }));
+			return json(await substrate.releaseNode(graph_id, node_id, { lease_id, force }, callerSurface));
 		},
 	);
 
@@ -530,9 +581,10 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			title: "Complete a node",
 			description:
 				"Mark a node completed and drop its lease, in one fenced operation. You must hold the lease: pass the " +
-				"`lease_id` you were granted. A node nobody holds cannot be completed — claim it first — and a lease " +
-				"that has lapsed cannot close a node a second agent has since claimed. `force` is an operator action, " +
-				"as in graph_release. `completed: false` means nothing changed, and says why.",
+				"`lease_id` you were granted, with the token whose surface holds it (`not-holder` otherwise). A node " +
+				"nobody holds cannot be completed — claim it first — and a lease that has lapsed cannot close a node " +
+				"a second agent has since claimed. `force` is an operator action, as in graph_release. " +
+				"`completed: false` means nothing changed, and says why.",
 			inputSchema: {
 				graph_id: z.string(),
 				node_id: z.string(),
@@ -543,7 +595,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 		},
 		async ({ graph_id, node_id, lease_id, force, state }) => {
 			if (force && !isOperator) return json(FORCE_REFUSED);
-			return json(await substrate.completeNode(graph_id, node_id, { lease_id, force, state }));
+			return json(await substrate.completeNode(graph_id, node_id, { lease_id, force, state }, callerSurface));
 		},
 	);
 
@@ -573,14 +625,18 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				session_id: z.string().optional().describe("Your session. Used to find the chain tip the packet is anchored to."),
 				to_session_id: z.string().optional(),
 				notes: z.string().optional(),
-				lease_id: z.string().optional().describe("Your lease on node_id. With release_lease, it is dropped once the packet is durable."),
+				lease_id: z
+					.string()
+					.optional()
+					.describe("Your lease on node_id. With release_lease, it is dropped once the packet is durable. Never put in the packet."),
 				release_lease: z
 					.boolean()
 					.optional()
 					.describe(
 						"Release the lease so the receiver can claim the node. The reply's `lease_released` says whether " +
-							"it happened; the packet records only that you meant to hand it over, because a lease's state " +
-							"cannot be frozen into a signed packet. A receiver calls graph_claim rather than reading the packet.",
+							"it happened; the packet records only that you meant to hand it over (`lease_handover`), because " +
+							"a lease's state cannot be frozen into a signed packet and its id is for its holder alone. A " +
+							"receiver calls graph_claim rather than reading the packet.",
 					),
 			},
 		},

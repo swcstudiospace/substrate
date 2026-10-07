@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { isReviewToken, loadConfig } from "./config.ts";
 import { MAX_QUERY_LIMIT, type EventQuery } from "./greptime.ts";
 import { REDACTED } from "./redact.ts";
-import type { ClaimAction } from "./lease.ts";
+import { leaseSnapshot } from "./index-store.ts";
+import { decideRelease, type ClaimAction } from "./lease.ts";
 import { Substrate } from "./service.ts";
 import type { EventInput, SubstrateEvent, Surface } from "./types.ts";
 
@@ -121,7 +122,9 @@ describe("claimNode", () => {
 		expect(emitted[0]?.kind).toBe("warning");
 		expect(emitted[0]?.summary).toContain("took over SPE-123");
 		expect(emitted[0]?.summary).toContain("grok-bot");
-		expect(emitted[0]?.payload).toMatchObject({ action: "stolen", lease_id: "lse_1" });
+		expect(emitted[0]?.payload).toMatchObject({ action: "stolen", lease_epoch: 1 });
+		// The ledger is readable by every agent; the lease id reaches only its holder.
+		expect(emitted[0]?.payload).not.toHaveProperty("lease_id");
 	});
 
 	test("a re-claim after its own lease lapsed says so, and evicts nobody", async () => {
@@ -135,13 +138,17 @@ describe("claimNode", () => {
 		expect(emitted[0]?.summary).toContain("re-claimed SPE-123");
 	});
 
-	test("a refused claim writes nothing and reports the holder", async () => {
+	test("a refused claim writes nothing, reports the holder and hides its lease id", async () => {
 		const { emitted, index, greptime } = stubStores({ repo: "r" }, { action: "denied", claimed: false });
 		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
 
 		const result = await substrate.claimNode("ut-1", "n2", "hermes", "sess-live");
 
 		expect(result.claimed).toBe(false);
+		expect(result.lease.lease_id).toBeNull();
+		expect(result.node.lease_id).toBeNull();
+		expect(result.lease.epoch).toBe(1);
+		expect(result.lease.expires_at).toBe("2026-09-30T12:15:00.000Z");
 		expect(emitted).toEqual([]);
 	});
 
@@ -150,12 +157,12 @@ describe("claimNode", () => {
 		// about: an in-memory hold is exactly the false exclusivity leases replace.
 		const substrate = new Substrate(loadConfig({}), { index: null, greptime: null });
 		await expect(substrate.claimNode("ut-1", "n2", "hermes", "sess-1")).rejects.toThrow("SUBSTRATE_PG_URL");
-		await expect(substrate.heartbeatNode("ut-1", "n2", "lse_1")).rejects.toThrow("SUBSTRATE_PG_URL");
+		await expect(substrate.heartbeatNode("ut-1", "n2", "lse_1", null)).rejects.toThrow("SUBSTRATE_PG_URL");
 	});
 });
 
 describe("releaseNode and completeNode", () => {
-	/** An index stub whose one node holds `lease_id`, with the real fencing rules. */
+	/** An index stub whose one node holds `lease_id`, judged by the real `decideRelease`. */
 	function leasedIndex(leaseId: string | null) {
 		const emitted: SubstrateEvent[] = [];
 		let state: string | null = null;
@@ -185,44 +192,18 @@ describe("releaseNode and completeNode", () => {
 				_g: string,
 				_n: string,
 				request: { lease_id?: string | null; force?: boolean },
+				caller: Surface | null,
 				alsoSetState?: string,
 			) => {
-				if (leaseId === null) {
-					// Nothing holds it: a successful no-op, carrying no holder.
-					return {
-						released: true,
-						node,
-						decision: { ok: true as const, action: "noop" as const, lease_id: null, evicted: null, holder: null, observed_epoch: 3 },
-					};
-				}
-				if (request.lease_id && request.lease_id !== leaseId) {
-					return {
-						released: false,
-						node,
-						decision: { ok: false as const, reason: "stale-lease" as const, holder: { surface: "hermes", session_id: "sess-a" }, observed_epoch: 3 },
-					};
-				}
-				if (!request.lease_id && !request.force) {
-					return {
-						released: false,
-						node,
-						decision: { ok: false as const, reason: "lease-id-required" as const, holder: { surface: "hermes", session_id: "sess-a" }, observed_epoch: 3 },
-					};
-				}
+				const decision = decideRelease(leaseSnapshot(node as never), { ...request, caller }, Date.now());
+				if (!decision.ok || decision.action === "noop") return { released: decision.ok, node, decision };
 				// The state arrives with the release, in one call, and lands on the row
 				// the release returns.
 				if (alsoSetState !== undefined) state = alsoSetState;
 				return {
 					released: true,
 					node: { ...node, ...(alsoSetState === undefined ? {} : { state: alsoSetState }) },
-					decision: {
-						ok: true as const,
-						action: request.force ? ("forced" as const) : ("released" as const),
-						lease_id: leaseId,
-						evicted: request.force ? { surface: "hermes" as const, session_id: "sess-a" } : null,
-						holder: { surface: "hermes" as const, session_id: "sess-a" },
-						observed_epoch: 3,
-					},
+					decision,
 				};
 			},
 		};
@@ -242,32 +223,49 @@ describe("releaseNode and completeNode", () => {
 
 	test("the holder's release writes a note naming the node", async () => {
 		const stores = leasedIndex("lse_live");
-		const result = await substrateFor(stores).releaseNode("ut-1", "n2", { lease_id: "lse_live" });
+		const result = await substrateFor(stores).releaseNode("ut-1", "n2", { lease_id: "lse_live" }, "hermes");
 
 		expect(result.released).toBe(true);
 		expect(result.action).toBe("released");
 		expect(stores.emitted[0]?.kind).toBe("note");
 		expect(stores.emitted[0]?.summary).toBe("released SPE-123");
 		expect(stores.emitted[0]?.repo).toBe("swcstudiospace/x");
+		expect(stores.emitted[0]?.payload).toEqual({ action: "released", lease_epoch: 3 });
+	});
+
+	test("another surface is refused not-holder with the right id, sees no id, and writes nothing", async () => {
+		const stores = leasedIndex("lse_live");
+		const release = await substrateFor(stores).releaseNode("ut-1", "n2", { lease_id: "lse_live" }, "omp");
+		const complete = await substrateFor(stores).completeNode("ut-1", "n2", { lease_id: "lse_live" }, "omp");
+
+		expect(release).toMatchObject({ released: false, reason: "not-holder", holder: { surface: "hermes", session_id: "sess-a" } });
+		expect(release.lease.lease_id).toBeNull();
+		expect(release.lease.epoch).toBe(3);
+		expect(complete).toMatchObject({ completed: false, reason: "not-holder" });
+		expect(complete.lease.lease_id).toBeNull();
+		expect(stores.stateAfter()).toBeNull();
+		expect(stores.emitted).toEqual([]);
 	});
 
 	test("a stale lease id is refused and writes nothing", async () => {
 		const stores = leasedIndex("lse_live");
-		const result = await substrateFor(stores).releaseNode("ut-1", "n2", { lease_id: "lse_old" });
+		const result = await substrateFor(stores).releaseNode("ut-1", "n2", { lease_id: "lse_old" }, "hermes");
 
 		expect(result.released).toBe(false);
 		expect(result.reason).toBe("stale-lease");
 		expect(result.holder).toEqual({ surface: "hermes", session_id: "sess-a" });
+		expect(result.lease.lease_id).toBeNull();
 		expect(stores.emitted).toEqual([]);
 	});
 
 	test("a forced release is a warning, not a note", async () => {
 		const stores = leasedIndex("lse_live");
-		const result = await substrateFor(stores).releaseNode("ut-1", "n2", { force: true });
+		const result = await substrateFor(stores).releaseNode("ut-1", "n2", { force: true }, "omp");
 
 		expect(result.action).toBe("forced");
 		expect(stores.emitted[0]?.kind).toBe("warning");
 		expect(stores.emitted[0]?.summary).toContain("forced the lease off");
+		expect(stores.emitted[0]?.payload).not.toHaveProperty("lease_id");
 	});
 
 	test("completing a node a stale holder no longer owns does not close it", async () => {
@@ -275,7 +273,7 @@ describe("releaseNode and completeNode", () => {
 		// and "finishes" a node a second agent has since claimed and is working on.
 		const stores = leasedIndex("lse_live");
 
-		const result = await substrateFor(stores).completeNode("ut-1", "n2", { lease_id: "lse_old" });
+		const result = await substrateFor(stores).completeNode("ut-1", "n2", { lease_id: "lse_old" }, "hermes");
 
 		expect(result.completed).toBe(false);
 		expect(result.reason).toBe("stale-lease");
@@ -284,7 +282,7 @@ describe("releaseNode and completeNode", () => {
 
 	test("the holder completing its own node writes the state", async () => {
 		const stores = leasedIndex("lse_live");
-		const result = await substrateFor(stores).completeNode("ut-1", "n2", { lease_id: "lse_live" });
+		const result = await substrateFor(stores).completeNode("ut-1", "n2", { lease_id: "lse_live" }, "hermes");
 
 		expect(result.completed).toBe(true);
 		expect(stores.stateAfter()).toBe("completed");
@@ -295,7 +293,7 @@ describe("releaseNode and completeNode", () => {
 		// wrong as a licence to complete — it let any caller close any unheld node
 		// without ever holding it.
 		const stores = leasedIndex(null);
-		const result = await substrateFor(stores).completeNode("ut-1", "n2", { lease_id: "lse_whatever" });
+		const result = await substrateFor(stores).completeNode("ut-1", "n2", { lease_id: "lse_whatever" }, "hermes");
 
 		expect(result.completed).toBe(false);
 		expect(result.reason).toBe("unheld");
@@ -307,7 +305,7 @@ describe("releaseNode and completeNode", () => {
 		// off the returned row attributed every ordinary release to the fallback
 		// surface with no session. The decision saw the row before that.
 		const stores = leasedIndex("lse_live");
-		await substrateFor(stores).releaseNode("ut-1", "n2", { lease_id: "lse_live" });
+		await substrateFor(stores).releaseNode("ut-1", "n2", { lease_id: "lse_live" }, "hermes");
 
 		expect(stores.emitted[0]?.surface).toBe("hermes");
 		expect(stores.emitted[0]?.session_id).toBe("sess-a");
@@ -351,8 +349,17 @@ describe("claimNode is fail-closed on the ledger", () => {
 				decision: granted,
 			}),
 			getGraph: async () => ({ repo: "swcstudiospace/x", branch: "main" }),
-			releaseNode: async (graph_id: string, node_id: string, request: { lease_id?: string | null } = {}) => {
+			releaseNode: async (graph_id: string, node_id: string, request: { lease_id?: string | null }, caller: Surface | null) => {
 				if (options.releaseFails) throw new Error("postgres is down");
+				// Held to the holder's surface like any release, so a withdrawal made as
+				// anybody but the claimant would leave the node held.
+				if (caller !== holder.surface) {
+					return {
+						released: false,
+						node: { graph_id, node_id },
+						decision: { ok: false as const, reason: "not-holder" as const, holder, observed_epoch: 4 },
+					};
+				}
 				// The withdrawal is fenced like every other release: unless it carries the
 				// lease the claim was granted, it must not take the node. `heldByAnother`
 				// stands in for the node having been re-claimed since — the compare-and-swap
@@ -403,6 +410,8 @@ describe("claimNode is fail-closed on the ledger", () => {
 		expect(result.reason).toContain("withdrawn");
 		// Scoped to the lease this claim was granted, not a bare release of the node.
 		expect(released).toEqual(["ut-1/n4"]);
+		// A withdrawn hold is not a hold: its id is not handed out.
+		expect(result.lease.lease_id).toBeNull();
 	});
 
 	test("does not clear a claim another surface has taken in the meantime", () => {
@@ -491,6 +500,7 @@ describe("claimNode is fail-closed on the ledger", () => {
 		// Nothing to withdraw: the claim was never granted, and releasing would drop
 		// the *other* surface's claim.
 		expect(released).toEqual([]);
+		expect(result.lease.lease_id).toBeNull();
 	});
 
 	test("tells the observer what happened, including the quarantine reason", async () => {
@@ -954,7 +964,7 @@ describe("handoff", () => {
 		const released: Array<{ node: string; lease: string | undefined }> = [];
 		const index = {
 			getGraph: async () => ({ repo: "swcstudiospace/x", branch: "main" }),
-			releaseNode: async (_g: string, nodeId: string, request: { lease_id?: string }) => {
+			releaseNode: async (_g: string, nodeId: string, request: { lease_id?: string }, _caller: Surface | null) => {
 				released.push({ node: nodeId, lease: request.lease_id });
 				return {
 					released: true,
@@ -980,6 +990,85 @@ describe("handoff", () => {
 		expect(done.stored).toBe(true);
 		expect(done.lease_released).toBe(true);
 		expect(released).toEqual([{ node: "n2", lease: "lse_a" }]);
+	});
+
+	test("the packet records that a lease was handed over, never its id", async () => {
+		// `coord_handoff_list` replays packets to every agent, so an id in one would
+		// let any of them release or complete the sender's node while it still holds it.
+		const { written, greptime } = ledger();
+		const substrate = new Substrate(loadConfig(SIGNING_ENV), { index: null, greptime: greptime as never });
+
+		const result = await substrate.handoff({ ...input, handover_lease_id: "lse_secret" });
+
+		expect(result.packet.lease_handover).toBe(true);
+		expect(result.packet).not.toHaveProperty("handover_lease_id");
+		expect(JSON.stringify(written[0]?.payload)).not.toContain("lse_secret");
+		expect(substrate.verifyHandoffPacket(written[0]?.payload.handoff)).toEqual({ ok: true, key_id: "k1" });
+		expect((await substrate.handoff(input)).packet.lease_handover).toBe(false);
+	});
+
+	test("the handoff's release is held to the authenticated sender", async () => {
+		// On a deployment with tokens the sender is the token's surface, so a sender
+		// that is not the holder cannot use a handoff to drop someone else's lease.
+		const node = {
+			graph_id: "ut-1",
+			node_id: "n2",
+			linear_identifier: "SPE-4792",
+			claimed_by: "hermes",
+			claim_session: "sess-h",
+			claimed_at: new Date().toISOString(),
+			lease_id: "lse_h",
+			lease_expires_at: new Date(Date.now() + 600_000).toISOString(),
+			lease_heartbeat_at: null,
+			lease_epoch: 1,
+		};
+		const index = {
+			getGraph: async () => ({ repo: "swcstudiospace/x", branch: "main" }),
+			releaseNode: async (_g: string, _n: string, request: { lease_id?: string }, caller: Surface | null) => {
+				const decision = decideRelease(leaseSnapshot(node as never), { ...request, caller }, Date.now());
+				return { released: decision.ok, node, decision };
+			},
+		};
+		const { greptime } = ledger();
+		const env = { ...SIGNING_ENV, SUBSTRATE_TOKEN_HERMES: "tok-h", SUBSTRATE_TOKEN_GROK_BOT: "tok-g" };
+		const substrate = new Substrate(loadConfig(env), { index: index as never, greptime: greptime as never });
+		const release = { handover_lease_id: "lse_h", release_lease: true };
+
+		const stranger = await substrate.handoff({ ...input, ...release });
+		const holder = await substrate.handoff({ ...input, ...release, from: { surface: "hermes", session_id: "sess-h" } });
+
+		expect(stranger.lease_released).toBe(false);
+		expect(holder.lease_released).toBe(true);
+	});
+
+	test("an anonymous run's handoff release is not held to the sender", async () => {
+		// No tokens, so `from` is whatever the caller said and there is no identity
+		// to hold it to; the lease id still fences the release.
+		const node = {
+			graph_id: "ut-1",
+			node_id: "n2",
+			linear_identifier: "SPE-4792",
+			claimed_by: "omp",
+			claim_session: "sess-o",
+			claimed_at: new Date().toISOString(),
+			lease_id: "lse_o",
+			lease_expires_at: new Date(Date.now() + 600_000).toISOString(),
+			lease_heartbeat_at: null,
+			lease_epoch: 1,
+		};
+		const index = {
+			getGraph: async () => ({ repo: "swcstudiospace/x", branch: "main" }),
+			releaseNode: async (_g: string, _n: string, request: { lease_id?: string }, caller: Surface | null) => {
+				const decision = decideRelease(leaseSnapshot(node as never), { ...request, caller }, Date.now());
+				return { released: decision.ok, node, decision };
+			},
+		};
+		const { greptime } = ledger();
+		const substrate = new Substrate(loadConfig(SIGNING_ENV), { index: index as never, greptime: greptime as never });
+
+		const done = await substrate.handoff({ ...input, handover_lease_id: "lse_o", release_lease: true });
+
+		expect(done.lease_released).toBe(true);
 	});
 
 	test("the whole packet is in the event, signed, and verifies as stored", async () => {

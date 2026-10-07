@@ -21,6 +21,7 @@ import {
 	decideClaim,
 	decideHeartbeat,
 	decideRelease,
+	holderLeaseView,
 	leaseExpiry,
 	leaseState,
 	leaseView,
@@ -72,8 +73,9 @@ class LeaseTable {
 		return decision;
 	}
 
-	async heartbeat(leaseId: string, ttlSeconds = DEFAULT_LEASE_TTL_SECONDS) {
-		const decision = decideHeartbeat({ ...this.row }, { lease_id: leaseId, ttl_seconds: ttlSeconds }, this.now);
+	/** `caller` is the token's surface; null is an anonymous local run, which is not checked. */
+	async heartbeat(leaseId: string, ttlSeconds = DEFAULT_LEASE_TTL_SECONDS, caller: Surface | null = null) {
+		const decision = decideHeartbeat({ ...this.row }, { lease_id: leaseId, ttl_seconds: ttlSeconds, caller }, this.now);
 		await this.yieldOnce();
 		if (!decision.ok) return decision;
 		if (this.row.lease_id !== leaseId) return { ok: false as const, reason: "lost" as const, holder: null, observed_expiry: null };
@@ -85,8 +87,8 @@ class LeaseTable {
 		return decision;
 	}
 
-	async release(request: { lease_id?: string | null; force?: boolean }) {
-		const decision = decideRelease({ ...this.row }, request, this.now);
+	async release(request: { lease_id?: string | null; force?: boolean }, caller: Surface | null = null) {
+		const decision = decideRelease({ ...this.row }, { ...request, caller }, this.now);
 		await this.yieldOnce();
 		if (!decision.ok) return decision;
 		if (this.row.epoch !== decision.observed_epoch) {
@@ -157,6 +159,20 @@ describe("exclusive hold", () => {
 		expect(second.granted).toBe(false);
 		expect(second.action).toBe("denied");
 		expect(second.holder).toEqual(holder("hermes", "sess-a"));
+	});
+
+	test("a denied claim names the holder but never hands over its lease id", async () => {
+		// Every fenced call takes the id as proof of holding, so a loser told the id
+		// could release or complete the winner's node.
+		const node = new LeaseTable();
+		const first = await node.claim(holder("swarm-a05-be", "A05@r0:ut-x"));
+
+		const denied = await node.claim(holder("swarm-a09-rev", "A09@r0:ut-x"));
+
+		expect(denied.granted).toBe(false);
+		expect(denied.lease_id).toBeNull();
+		expect(denied.holder).toEqual(holder("swarm-a05-be", "A05@r0:ut-x"));
+		expect(first.lease_id).toMatch(/^lse_/);
 	});
 
 	test("the holder re-claiming its own live lease keeps the same lease id", async () => {
@@ -284,6 +300,78 @@ describe("heartbeat", () => {
 	});
 });
 
+describe("only the holder's surface may beat or release", () => {
+	test("another surface is refused not-holder even with the right lease id", async () => {
+		const node = new LeaseTable();
+		const claim = await node.claim(holder("swarm-a05-be", "A05@r0:ut-x"), 60);
+		const before = node.row.expires_at;
+
+		const beat = await node.heartbeat(claim.lease_id ?? "", 600, "swarm-a09-rev");
+		const release = await node.release({ lease_id: claim.lease_id }, "swarm-a09-rev");
+
+		expect(beat.ok === false && beat.reason).toBe("not-holder");
+		expect(beat.ok === false && beat.holder).toEqual(holder("swarm-a05-be", "A05@r0:ut-x"));
+		expect(release.ok === false && release.reason).toBe("not-holder");
+		expect(node.holder()).toEqual(holder("swarm-a05-be", "A05@r0:ut-x"));
+		expect(node.row.expires_at).toBe(before);
+	});
+
+	test("the refusal is the same whatever id the stranger sends, so it confirms nothing", async () => {
+		const node = new LeaseTable();
+		const claim = await node.claim(holder("hermes", "sess-a"));
+
+		const right = await node.heartbeat(claim.lease_id ?? "", 60, "omp");
+		const wrong = await node.heartbeat("lse_guess", 60, "omp");
+		const missing = await node.release({}, "omp");
+
+		expect(right).toEqual(wrong);
+		expect(missing.ok === false && missing.reason).toBe("not-holder");
+	});
+
+	test("the holder's own surface beats and releases as before", async () => {
+		const node = new LeaseTable();
+		const claim = await node.claim(holder("swarm-a05-be", "A05@r0:ut-x"), 60);
+
+		const beat = await node.heartbeat(claim.lease_id ?? "", 60, "swarm-a05-be");
+		const released = await node.release({ lease_id: claim.lease_id }, "swarm-a05-be");
+
+		expect(beat.ok).toBe(true);
+		expect(released.ok === true && released.action).toBe("released");
+		expect(node.holder()).toBeNull();
+	});
+
+	test("an anonymous local run is not checked", async () => {
+		// No tokens configured means no identity to compare; the lease id still fences.
+		const node = new LeaseTable();
+		const claim = await node.claim(holder("omp", "sess-a"), 60);
+
+		expect((await node.heartbeat(claim.lease_id ?? "", 60, null)).ok).toBe(true);
+		const stale = await node.release({ lease_id: "lse_stale" }, null);
+		expect(stale.ok === false && stale.reason).toBe("stale-lease");
+		expect((await node.release({ lease_id: claim.lease_id }, null)).ok).toBe(true);
+	});
+
+	test("an operator's force is not held to the holder's surface", async () => {
+		const node = new LeaseTable();
+		await node.claim(holder("swarm-a05-be", "A05@r0:ut-x"));
+
+		const forced = await node.release({ force: true }, "hermes");
+
+		expect(forced.ok === true && forced.action).toBe("forced");
+		expect(forced.ok === true && forced.evicted).toEqual(holder("swarm-a05-be", "A05@r0:ut-x"));
+		expect(node.holder()).toBeNull();
+	});
+
+	test("a free node is unheld or a no-op for anyone, stranger or not", async () => {
+		const node = new LeaseTable();
+
+		const beat = await node.heartbeat("lse_x", 60, "omp");
+		expect(beat.ok === false && beat.reason).toBe("unheld");
+		const released = await node.release({ lease_id: "lse_x" }, "omp");
+		expect(released.ok === true && released.action).toBe("noop");
+	});
+});
+
 describe("release is fenced", () => {
 	test("a stale holder cannot release the lease that replaced its own", async () => {
 		// The failure this prevents: an agent stalls past its TTL, a second agent
@@ -396,23 +484,20 @@ describe("TTL bounds", () => {
 });
 
 describe("leaseView", () => {
-	test("reports the hold as a reader sees it, expiry included", () => {
-		const now = Date.parse("2026-09-30T12:00:00.000Z");
-		const view = leaseView(
-			{
-				lease_id: "lse_abc",
-				surface: "hermes",
-				session_id: "sess-a",
-				claimed_at: new Date(now - 120_000),
-				heartbeat_at: new Date(now - 10_000),
-				expires_at: new Date(now + 300_000),
-				epoch: 4,
-			},
-			now,
-		);
+	const now = Date.parse("2026-09-30T12:00:00.000Z");
+	const held: LeaseSnapshot = {
+		lease_id: "lse_abc",
+		surface: "hermes",
+		session_id: "sess-a",
+		claimed_at: new Date(now - 120_000),
+		heartbeat_at: new Date(now - 10_000),
+		expires_at: new Date(now + 300_000),
+		epoch: 4,
+	};
 
-		expect(view).toEqual({
-			lease_id: "lse_abc",
+	test("reports the hold as a reader sees it, expiry included, and no lease id", () => {
+		expect(leaseView(held, now)).toEqual({
+			lease_id: null,
 			holder: { surface: "hermes", session_id: "sess-a" },
 			epoch: 4,
 			state: "held",
@@ -421,6 +506,10 @@ describe("leaseView", () => {
 			expires_at: new Date(now + 300_000).toISOString(),
 			expires_in_seconds: 300,
 		});
+	});
+
+	test("the holder's view is the same hold with its id", () => {
+		expect(holderLeaseView(held, now)).toEqual({ ...leaseView(held, now), lease_id: "lse_abc" });
 	});
 
 	test("a lapsed lease reports negative time and state expired", () => {

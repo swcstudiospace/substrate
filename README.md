@@ -43,7 +43,9 @@ A node has at most one holder. `graph_claim` takes a **lease**, keyed on the pai
 so a killed session releases its node by doing nothing, and granted by a compare-and-swap on
 a per-node epoch so of two agents racing for a free node exactly one wins. `graph_heartbeat`
 extends a lease; `graph_release` and `graph_complete` are fenced on its id, so an agent that
-stalled past its TTL cannot close a node someone else has since claimed.
+stalled past its TTL cannot close a node someone else has since claimed. The `lease_id` is
+shown only to its holder, and only the holder's token surface may beat, release or complete
+(`not-holder` otherwise).
 
 `coord_handoff` writes a **signed packet** — goal, files, Definition of Done, blockers and
 the sender's chain tip — redacted and fitted and *then* signed, so a receiving agent can
@@ -153,7 +155,9 @@ across S1–S5 (SPE-5052 … SPE-5056). S1 closes one gap in this repo first: fo
 surfaces the token now names the caller — `events_emit`, `graph_claim` and `POST /events` refuse
 (REST 403, MCP tool error) a `surface` that differs from the token's. Every other surface keeps
 the old behaviour, where a caller-supplied `surface` wins over the token's, because a collector
-legitimately emits for the surfaces it observes. See [`docs/swarm-correlation.md`](docs/swarm-correlation.md).
+legitimately emits for the surfaces it observes. S2's server half adds swarm leases: a swarm
+claim's session is `<AGENT>@<replica>:<graph_id>`, a `lease_id` reaches only its holder, and
+no swarm token is an operator. See [`docs/swarm-correlation.md`](docs/swarm-correlation.md).
 
 [ADR 0001](docs/adr/0001-agent-swarm-as-sdlc-mesh-on-substrate.md) has the plane mapping, the
 non-goals (no second Greptime door, no memory-gate bypass, no NATS replacement, no big-bang

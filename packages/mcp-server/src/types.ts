@@ -330,7 +330,10 @@ export interface GraphNode {
 	claimed_by: Surface | null;
 	claimed_at: string | null;
 	claim_session: string | null;
-	/** The current lease's id, or null when nothing holds the node. See `lease.ts`. */
+	/**
+	 * The current lease's id, or null when nothing holds the node. The index reads
+	 * it; every reply nulls it, because only the holder may see it. See `lease.ts`.
+	 */
 	lease_id: string | null;
 	/** When the lease lapses. A row claimed before leases existed has none. */
 	lease_expires_at: string | null;

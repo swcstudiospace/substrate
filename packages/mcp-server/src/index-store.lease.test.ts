@@ -51,7 +51,7 @@ describeLive("exclusive hold against a live index", () => {
 			repo: "swcstudiospace/agent-substrate",
 			nodes: [{ node_id: nodeId, linear_identifier: "SPE-4792" }],
 		});
-		await a.releaseNode(GRAPH, nodeId, { force: true });
+		await a.releaseNode(GRAPH, nodeId, { force: true }, null);
 	}
 
 	test("two connections racing for one node: exactly one lease", async () => {
@@ -66,14 +66,16 @@ describeLive("exclusive hold against a live index", () => {
 		const winner = first.claimed ? first : second;
 		const loser = first.claimed ? second : first;
 		expect(loser.lease.holder).toEqual(winner.lease.holder);
-		expect(loser.lease.lease_id).toBe(winner.lease.lease_id);
+		// The loser learns who won and until when, never the winner's lease id.
+		expect(loser.lease.lease_id).toBeNull();
+		expect(winner.lease.lease_id).toMatch(/^lse_/);
 		expect(winner.lease.state).toBe("held");
 	});
 
 	test("ten concurrent claims leave one lease and one epoch bump", async () => {
 		await freshNode("n3");
 		const before = (await a.claimNode(GRAPH, "n3", "omp", "sess-seed", 300)).lease.epoch;
-		await a.releaseNode(GRAPH, "n3", { force: true });
+		await a.releaseNode(GRAPH, "n3", { force: true }, null);
 
 		const results = await Promise.all(
 			Array.from({ length: 10 }, (_, i) =>
@@ -128,17 +130,22 @@ describeLive("exclusive hold against a live index", () => {
 	});
 
 	test("a stale lease id cannot heartbeat the lease that replaced it", async () => {
+		// Two sessions of one surface — two replicas of one agent — so the holder
+		// check passes and the lease id is what refuses it.
 		await freshNode("n7");
-		const first = await a.claimNode(GRAPH, "n7", "grok-bot", "sess-grok", 30);
+		const first = await a.claimNode(GRAPH, "n7", "hermes", "sess-old", 30);
 		await a.expireLease(GRAPH, "n7");
-		const second = await b.claimNode(GRAPH, "n7", "hermes", "sess-hermes", 300);
+		const second = await b.claimNode(GRAPH, "n7", "hermes", "sess-new", 300);
 
-		const beat = await a.heartbeatNode(GRAPH, "n7", first.lease.lease_id ?? "", 3600);
+		const beat = await a.heartbeatNode(GRAPH, "n7", first.lease.lease_id ?? "", "hermes", 3600);
 
 		expect(beat.ok).toBe(false);
 		expect(beat.decision.ok === false && beat.decision.reason).toBe("lost");
+		// It is told who holds it now, but not the id that would let it act as them.
+		expect(beat.lease.holder).toEqual({ surface: "hermes", session_id: "sess-new" });
+		expect(beat.lease.lease_id).toBeNull();
+		expect(beat.lease.epoch).toBe(second.lease.epoch);
 		// And the live lease was not extended by the attempt.
-		expect(beat.lease.lease_id).toBe(second.lease.lease_id);
 		expect(Date.parse(beat.lease.expires_at ?? "")).toBeLessThan(Date.now() + 400_000);
 	});
 
@@ -146,31 +153,32 @@ describeLive("exclusive hold against a live index", () => {
 		await freshNode("n8");
 		const claim = await a.claimNode(GRAPH, "n8", "hermes", "sess-a", 60);
 
-		const beat = await a.heartbeatNode(GRAPH, "n8", claim.lease.lease_id ?? "", 600);
+		const beat = await a.heartbeatNode(GRAPH, "n8", claim.lease.lease_id ?? "", "hermes", 600);
 
 		expect(beat.ok).toBe(true);
+		expect(beat.lease.lease_id).toBe(claim.lease.lease_id);
 		expect(beat.lease.epoch).toBe(claim.lease.epoch);
 		expect(Date.parse(beat.lease.expires_at ?? "")).toBeGreaterThan(Date.parse(claim.lease.expires_at ?? ""));
 	});
 
 	test("a stale holder cannot release the node someone else now holds", async () => {
 		await freshNode("n9");
-		const first = await a.claimNode(GRAPH, "n9", "grok-bot", "sess-grok", 30);
+		const first = await a.claimNode(GRAPH, "n9", "hermes", "sess-old", 30);
 		await a.expireLease(GRAPH, "n9");
-		const second = await b.claimNode(GRAPH, "n9", "hermes", "sess-hermes", 300);
+		await b.claimNode(GRAPH, "n9", "hermes", "sess-new", 300);
 
-		const refused = await a.releaseNode(GRAPH, "n9", { lease_id: first.lease.lease_id });
+		const refused = await a.releaseNode(GRAPH, "n9", { lease_id: first.lease.lease_id }, "hermes");
 
 		expect(refused.released).toBe(false);
 		expect(refused.decision.ok === false && refused.decision.reason).toBe("stale-lease");
-		expect(refused.node.lease_id).toBe(second.lease.lease_id);
+		expect(refused.node.claim_session).toBe("sess-new");
 	});
 
 	test("a release with no lease id and no force changes nothing", async () => {
 		await freshNode("n10");
 		await a.claimNode(GRAPH, "n10", "hermes", "sess-a", 300);
 
-		const refused = await a.releaseNode(GRAPH, "n10", {});
+		const refused = await a.releaseNode(GRAPH, "n10", {}, "hermes");
 
 		expect(refused.released).toBe(false);
 		expect(refused.decision.ok === false && refused.decision.reason).toBe("lease-id-required");
@@ -180,22 +188,24 @@ describeLive("exclusive hold against a live index", () => {
 	test("the epoch never goes backwards across a release", async () => {
 		await freshNode("n11");
 		const first = await a.claimNode(GRAPH, "n11", "hermes", "sess-a", 300);
-		await a.releaseNode(GRAPH, "n11", { lease_id: first.lease.lease_id });
+		await a.releaseNode(GRAPH, "n11", { lease_id: first.lease.lease_id }, "hermes");
 
 		const second = await b.claimNode(GRAPH, "n11", "omp", "sess-b", 300);
 
 		expect(second.lease.epoch).toBeGreaterThan(first.lease.epoch);
 	});
 
-	test("reaping clears lapsed leases and names whose they were", async () => {
+	test("reaping clears lapsed leases and names whose they were, by epoch rather than lease id", async () => {
 		await freshNode("n12");
-		await a.claimNode(GRAPH, "n12", "grok-bot", "sess-grok", 30);
+		const claim = await a.claimNode(GRAPH, "n12", "grok-bot", "sess-grok", 30);
 		await a.expireLease(GRAPH, "n12");
 
 		const reaped = await a.reapExpiredLeases("swcstudiospace/agent-substrate");
 
 		const ours = reaped.find((lease) => lease.graph_id === GRAPH && lease.node_id === "n12");
 		expect(ours?.holder).toEqual({ surface: "grok-bot", session_id: "sess-grok" });
+		expect(ours?.lease_epoch).toBe(claim.lease.epoch);
+		expect(ours).not.toHaveProperty("lease_id");
 		const after = await a.nodesForRepo("swcstudiospace/agent-substrate");
 		expect(after.find((node) => node.graph_id === GRAPH && node.node_id === "n12")?.claimed_by).toBeNull();
 	});
@@ -232,7 +242,7 @@ describeLive("exclusive hold against a live index", () => {
 		const first = await a.claimNode(GRAPH, "n17", "hermes", "sess-a", 300);
 		await a.expireLease(GRAPH, "n17");
 
-		const beat = await a.heartbeatNode(GRAPH, "n17", first.lease.lease_id ?? "", 3600);
+		const beat = await a.heartbeatNode(GRAPH, "n17", first.lease.lease_id ?? "", "hermes", 3600);
 
 		expect(beat.ok).toBe(false);
 		expect(beat.decision.ok === false && beat.decision.reason).toBe("expired");
@@ -276,7 +286,7 @@ describeLive("exclusive hold against a live index", () => {
 		await freshNode("n19");
 		const claim = await a.claimNode(GRAPH, "n19", "hermes", "sess-a", 300);
 
-		const done = await a.releaseNode(GRAPH, "n19", { lease_id: claim.lease.lease_id }, "completed");
+		const done = await a.releaseNode(GRAPH, "n19", { lease_id: claim.lease.lease_id }, "hermes", "completed");
 
 		expect(done.released).toBe(true);
 		expect(done.node.state).toBe("completed");
@@ -286,22 +296,57 @@ describeLive("exclusive hold against a live index", () => {
 
 	test("a stale holder's completion leaves both the lease and the state alone", async () => {
 		await freshNode("n22");
-		const first = await a.claimNode(GRAPH, "n22", "grok-bot", "sess-grok", 30);
+		const first = await a.claimNode(GRAPH, "n22", "hermes", "sess-old", 30);
 		await a.expireLease(GRAPH, "n22");
-		const second = await b.claimNode(GRAPH, "n22", "hermes", "sess-hermes", 600);
+		await b.claimNode(GRAPH, "n22", "hermes", "sess-new", 600);
 
-		const refused = await a.releaseNode(GRAPH, "n22", { lease_id: first.lease.lease_id }, "completed");
+		const refused = await a.releaseNode(GRAPH, "n22", { lease_id: first.lease.lease_id }, "hermes", "completed");
 
 		expect(refused.released).toBe(false);
 		expect(refused.node.state).not.toBe("completed");
-		expect(refused.node.lease_id).toBe(second.lease.lease_id);
+		expect(refused.node.claim_session).toBe("sess-new");
+	});
+
+	test("another surface cannot beat, release or complete a held node, even with its lease id", async () => {
+		await freshNode("n24");
+		const claim = await a.claimNode(GRAPH, "n24", "swarm-a05-be", `A05@r0:${GRAPH}`, 300);
+		const leaseId = claim.lease.lease_id ?? "";
+
+		const beat = await b.heartbeatNode(GRAPH, "n24", leaseId, "swarm-a09-rev", 3600);
+		const release = await b.releaseNode(GRAPH, "n24", { lease_id: leaseId }, "swarm-a09-rev");
+		const complete = await b.releaseNode(GRAPH, "n24", { lease_id: leaseId }, "swarm-a09-rev", "completed");
+
+		expect(beat.decision.ok === false && beat.decision.reason).toBe("not-holder");
+		expect(beat.lease.lease_id).toBeNull();
+		expect(beat.lease.holder).toEqual({ surface: "swarm-a05-be", session_id: `A05@r0:${GRAPH}` });
+		expect(beat.lease.expires_at).toBe(claim.lease.expires_at);
+		expect(release.decision.ok === false && release.decision.reason).toBe("not-holder");
+		expect(complete.decision.ok === false && complete.decision.reason).toBe("not-holder");
+		expect(complete.node.state).not.toBe("completed");
+		expect(complete.node.claimed_by).toBe("swarm-a05-be");
+
+		// The holder's own surface still can.
+		const own = await a.heartbeatNode(GRAPH, "n24", leaseId, "swarm-a05-be", 600);
+		expect(own.ok).toBe(true);
+		expect(own.lease.lease_id).toBe(leaseId);
+	});
+
+	test("an operator's forced release is not held to the holder's surface", async () => {
+		await freshNode("n25");
+		await a.claimNode(GRAPH, "n25", "swarm-a05-be", `A05@r0:${GRAPH}`, 300);
+
+		const forced = await b.releaseNode(GRAPH, "n25", { force: true }, "hermes");
+
+		expect(forced.released).toBe(true);
+		expect(forced.decision.ok === true && forced.decision.action).toBe("forced");
+		expect(forced.node.claimed_by).toBeNull();
 	});
 
 	test("an ordinary release reports the holder it took the node from", async () => {
 		await freshNode("n23");
 		const claim = await a.claimNode(GRAPH, "n23", "hermes", "sess-a", 300);
 
-		const released = await a.releaseNode(GRAPH, "n23", { lease_id: claim.lease.lease_id });
+		const released = await a.releaseNode(GRAPH, "n23", { lease_id: claim.lease.lease_id }, "hermes");
 
 		expect(released.decision.ok === true && released.decision.holder).toEqual({
 			surface: "hermes",
@@ -357,7 +402,9 @@ describeLive("exclusive hold against a live index", () => {
 		const refused = await b.claimNode(GRAPH, "n14", "grok-bot", "sess-grok", 300);
 
 		expect(refused.claimed).toBe(false);
-		expect(refused.lease.lease_id).toBe(held.lease.lease_id);
+		expect(refused.lease.holder).toEqual({ surface: "hermes", session_id: "sess-a" });
+		expect(refused.lease.epoch).toBe(held.lease.epoch);
+		expect(refused.lease.lease_id).toBeNull();
 	});
 
 	async function edgesOfGraph() {

@@ -1,4 +1,4 @@
-# Swarm correlation and identity (S1)
+# Swarm correlation, identity and leases (S1, S2)
 
 What the substrate provides so that Agent Swarm can run on it
 ([ADR 0001](adr/0001-agent-swarm-as-sdlc-mesh-on-substrate.md), phase S1, SPE-5052):
@@ -107,15 +107,58 @@ JSON is `result.content[0].text`.
 `graph_bind` is named in the fail-closed audit list, explicitly rather than by the
 unknown-tool default (see `mcp-audit.md`).
 
+## Swarm leases
+
+What the substrate enforces so that a swarm agent can hold a node and nobody else can
+use the hold (ADR 0001 S2, SPE-5053, requirements LEASE-01..04). The general lease
+contract is in [coordination.md](coordination.md); this is what is specific to swarm
+surfaces.
+
+**Session shape.** A `graph_claim` whose holder surface is a swarm surface must carry
+`session_id` = `<AGENT>@<replica>:<graph_id>`, for example `A05@r1:ut-mg3k2p-1a2b3c4d`:
+
+- `<AGENT>` is the `Axx` of the surface (`swarm-a05-be` → `A05`), read off the surface
+  itself, uppercase;
+- `<replica>` is 1..64 characters of `[A-Za-z0-9._-]`, so it can never hold the `@` or
+  `:` that delimit the session;
+- `<graph_id>` equals the claim's own `graph_id`, compared by equality, not by pattern.
+
+Anything else is refused with MCP `isError: true` and `{"error": …}` naming what was
+wrong, and never rewritten. The index is not asked. The rule follows the holder, not
+the caller: a non-swarm or anonymous caller that names a swarm `surface` on
+`graph_claim` is held to it too, so every swarm hold reads the same way. Non-swarm
+surfaces claim with any `session_id`, as before. Two replicas of one agent are two
+holders, because their sessions differ.
+
+**Holder-only ids.** The `lease_id` is shown only in the reply that grants it (or a
+call that presented it and was accepted). A denied claim, any refused heartbeat,
+release or complete, `graph_get`, `graph_register`, `coord_drift_scan`, `/drift` and
+`coord_reap_leases` show the holder's surface and session, the epoch and the expiry,
+with `lease_id: null`. Lease events carry `lease_epoch`, and handoff packets carry
+`lease_handover: true|false`, never the id. An A05 replica that lost its id re-claims
+with its own session and gets it back.
+
+**`not-holder`.** `graph_heartbeat`, `graph_release` and `graph_complete` refuse a
+token whose surface is not the holder's with reason `not-holder`, even when the
+`lease_id` is right. So A09's token cannot beat, release or complete A05's node with an
+id it found in an old event. The check is per surface; between replicas of one agent,
+which share a token, the `lease_id` is the fence.
+
+**No swarm operators.** A swarm token is never an operator. Listed in
+`SUBSTRATE_OPERATOR_TOKENS` by mistake, it is still refused `force`
+(`force-requires-operator`), and boot warns, naming the surface. Taking a node off a
+dead swarm replica is a human operator's call, or the TTL's.
+
 ## The closed enum
 
 `EVENT_KINDS` stays the closed set of 12. A swarm event type maps onto one of those kinds
 and carries the specific type in `payload.swarm_type`; the enum is not widened. The
-mapping table lives with the swarm's tee, not here.
+mapping table lives with the swarm's tee, not here. The lease rules above add no kind.
 
-## Not in S1
+## Not here
 
-- Leases and handoffs for swarm tasks — S2 (SPE-5053).
+- The swarm runner claiming, heartbeating and completing nodes, and its handoffs — S2's
+  agent-swarm half (SPE-5053).
 - Swarm memory client wiring — S3 (SPE-5054). The new surfaces already inherit the default `graph-any`, `repo-working`, `agent-self`, and `global-standing` grants; global memories still require review. What a swarm surface may and may not write is pinned by tests and described in [memory-governance.md](memory-governance.md).
 - Wiring `substrate-mcp` into swarm workspaces, the projector — S4 (SPE-5055).
 - Gate verdicts as substrate events and their verification — S5 (SPE-5056).

@@ -6,7 +6,7 @@
  */
 import { normalizeTtlSeconds } from "./lease.ts";
 import { parseGrants, type MemoryGrant } from "./memory-policy.ts";
-import { SWARM_SURFACES, type Surface } from "./types.ts";
+import { SWARM_SURFACES, isSwarmSurface, type Surface } from "./types.ts";
 
 export interface GreptimeConfig {
 	url: string;
@@ -231,11 +231,18 @@ export function surfaceForToken(config: SubstrateConfig, authorization: string |
  * protect the lease from. Once tokens exist, an ordinary surface token is not
  * enough: the token must also be listed as an operator's, because a forced
  * release is exactly the thing one agent must not be able to do to another.
+ *
+ * A swarm surface's token is never an operator, listed or not. The swarm runs
+ * agents unattended against each other's nodes, so a listed swarm token would be
+ * one agent able to evict any other, which is the advisory lease again. Refusing
+ * it here, rather than trusting the list, fails closed on a misconfiguration
+ * that `configWarnings` reports at boot.
  */
 export function isOperator(config: SubstrateConfig, authorization: string | null): boolean {
 	if (config.allowAnonymous && config.operatorTokens.size === 0) return true;
 	const token = bearer(authorization);
-	return token !== null && config.operatorTokens.has(token);
+	if (token === null || !config.operatorTokens.has(token)) return false;
+	return !isSwarmSurface(config.tokens.get(token));
 }
 
 /**
@@ -285,6 +292,15 @@ export function configWarnings(config: SubstrateConfig): string[] {
 		warnings.push(
 			"an operator token is not also a SUBSTRATE_TOKEN_* surface token, so it cannot authenticate at all; " +
 				"operator authority is an attribute of a surface token",
+		);
+	}
+
+	// Named by surface, never by token: the warning goes to a log.
+	const swarmOperators = [...config.operatorTokens].map((token) => config.tokens.get(token)).filter(isSwarmSurface);
+	if (swarmOperators.length > 0) {
+		warnings.push(
+			`SUBSTRATE_OPERATOR_TOKENS lists the token of ${swarmOperators.join(", ")}; a swarm surface is never an ` +
+				"operator, so it is refused `force` like any other agent. Remove it from the list.",
 		);
 	}
 	return warnings;

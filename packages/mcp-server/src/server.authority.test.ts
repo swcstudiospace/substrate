@@ -8,10 +8,12 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { AddressInfo } from "node:net";
 import { loadConfig } from "./config.ts";
+import { leaseSnapshot } from "./index-store.ts";
+import { decideHeartbeat, decideRelease, leaseView } from "./lease.ts";
 import { createObservability, type Observability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
-import type { SubstrateEvent } from "./types.ts";
+import type { Surface, SubstrateEvent } from "./types.ts";
 
 const ENV = {
 	SUBSTRATE_TOKEN_HERMES: "tok-hermes",
@@ -20,20 +22,22 @@ const ENV = {
 	SUBSTRATE_TOKEN_CURSOR: "tok-operator",
 	SUBSTRATE_TOKEN_SWARM_A05_BE: "tok-a05",
 	SUBSTRATE_TOKEN_SWARM_A09_REV: "tok-a09",
-	SUBSTRATE_OPERATOR_TOKENS: "tok-operator",
+	// tok-a09 is listed by mistake, the misconfiguration LEASE-04 fails closed on:
+	// a swarm token is never an operator.
+	SUBSTRATE_OPERATOR_TOKENS: "tok-operator,tok-a09",
 	SUBSTRATE_HANDOFF_KEY: "a-test-signing-key",
 };
 
 const released: Array<{ lease_id?: string | null; force?: boolean }> = [];
 const written: SubstrateEvent[] = [];
 
-/** A node held by grok-bot, so a forced release has something to take. */
+/** A node held by hermes, judged by the real lease rules, so a forced release has something to take. */
 const heldNode = {
 	graph_id: "ut-1",
 	node_id: "n2",
 	linear_identifier: "SPE-4792",
-	claimed_by: "grok-bot",
-	claim_session: "sess-grok",
+	claimed_by: "hermes",
+	claim_session: "sess-hermes",
 	claimed_at: new Date().toISOString(),
 	lease_id: "lse_live",
 	lease_expires_at: new Date(Date.now() + 600_000).toISOString(),
@@ -55,20 +59,16 @@ const index = {
 			decision: { action: "granted", evicted: null },
 		};
 	},
-	releaseNode: async (_g: string, _n: string, request: { lease_id?: string | null; force?: boolean }) => {
-		released.push(request);
-		return {
-			released: true,
-			node: heldNode,
-			decision: {
-				ok: true as const,
-				action: request.force ? ("forced" as const) : ("released" as const),
-				lease_id: "lse_live",
-				evicted: { surface: "grok-bot" as const, session_id: "sess-grok" },
-				holder: { surface: "grok-bot" as const, session_id: "sess-grok" },
-				observed_epoch: 1,
-			},
-		};
+	heartbeatNode: async (_g: string, _n: string, leaseId: string, caller: Surface | null, ttl: number) => {
+		const decision = decideHeartbeat(leaseSnapshot(heldNode as never), { lease_id: leaseId, ttl_seconds: ttl, caller }, Date.now());
+		return { ok: decision.ok, node: heldNode, lease: leaseView(leaseSnapshot(heldNode as never)), decision };
+	},
+	releaseNode: async (_g: string, _n: string, request: { lease_id?: string | null; force?: boolean }, caller: Surface | null) => {
+		const decision = decideRelease(leaseSnapshot(heldNode as never), { ...request, caller }, Date.now());
+		// Only what the rules let through counts as released; the row itself is left
+		// alone so every test sees the same holder.
+		if (decision.ok) released.push(request);
+		return { released: decision.ok, node: heldNode, decision };
 	},
 };
 
@@ -179,6 +179,53 @@ describe("force is an operator action", () => {
 		expect(result.released).toBe(true);
 		expect(result.action).toBe("released");
 		expect(released[0]?.lease_id).toBe("lse_live");
+	});
+});
+
+describe("only the holder's surface may use a lease", () => {
+	test("another surface's token is refused not-holder, even with the holder's lease id, and sees no id", async () => {
+		released.length = 0;
+		const args = { graph_id: "ut-1", node_id: "n2", lease_id: "lse_live" };
+
+		const beat = (await callTool("tok-a09", "graph_heartbeat", args)) as { ok: boolean; reason: string };
+		const release = (await callTool("tok-a09", "graph_release", args)) as {
+			released: boolean;
+			reason: string;
+			holder: unknown;
+			lease: { lease_id: string | null; epoch: number };
+		};
+		const complete = (await callTool("tok-a09", "graph_complete", args)) as { completed: boolean; reason: string };
+
+		expect(beat).toMatchObject({ ok: false, reason: "not-holder" });
+		expect(release).toMatchObject({ released: false, reason: "not-holder", holder: { surface: "hermes", session_id: "sess-hermes" } });
+		expect(release.lease.lease_id).toBeNull();
+		expect(release.lease.epoch).toBe(1);
+		expect(complete).toMatchObject({ completed: false, reason: "not-holder" });
+		expect(released).toEqual([]);
+	});
+
+	test("the holder's own token beats its lease", async () => {
+		const beat = (await callTool("tok-hermes", "graph_heartbeat", { graph_id: "ut-1", node_id: "n2", lease_id: "lse_live" })) as {
+			ok: boolean;
+		};
+		expect(beat.ok).toBe(true);
+	});
+
+	test("a swarm token listed in SUBSTRATE_OPERATOR_TOKENS is still refused force", async () => {
+		released.length = 0;
+
+		const release = (await callTool("tok-a09", "graph_release", { graph_id: "ut-1", node_id: "n2", force: true })) as {
+			released: boolean;
+			reason: string;
+		};
+		const complete = (await callTool("tok-a09", "graph_complete", { graph_id: "ut-1", node_id: "n2", force: true })) as {
+			completed: boolean;
+			reason: string;
+		};
+
+		expect(release).toMatchObject({ released: false, reason: "force-requires-operator" });
+		expect(complete).toMatchObject({ completed: false, reason: "force-requires-operator" });
+		expect(released).toEqual([]);
 	});
 });
 
@@ -375,5 +422,20 @@ describe("a swarm token names the caller over the wire", () => {
 		await callTool("tok-hermes", "graph_claim", { graph_id: "ut-1", node_id: "n3", session_id: "s", surface: "grok-bot" });
 
 		expect(claimedAs).toEqual(["grok-bot"]);
+	});
+
+	test("MCP graph_claim: A05's token with a session naming another agent or graph is refused before the index", async () => {
+		claimedAs.length = 0;
+
+		const otherAgent = (await callTool("tok-a05", "graph_claim", { graph_id: "ut-1", node_id: "n2", session_id: "A09@r0:ut-1" })) as {
+			error: string;
+		};
+		const otherGraph = (await callTool("tok-a05", "graph_claim", { graph_id: "ut-1", node_id: "n2", session_id: "A05@r1:ut-2" })) as {
+			error: string;
+		};
+
+		expect(otherAgent.error).toContain("must name agent A05");
+		expect(otherGraph.error).toContain("must end in this claim's graph_id ut-1");
+		expect(claimedAs).toEqual([]);
 	});
 });
