@@ -32,33 +32,33 @@ Decisions confirmed with the milestone summary (2026-10-07):
 
 ### Handoffs (repo `agent-swarm`, SPE-5053)
 
-- [ ] **HAND-01**: Every producer→consumer boundary that changes the accountable agent writes a `coord_handoff` packet: `goal`, `files`, `dod` from the task's `acceptance[]`, `blockers`, `graph_id` and `node_id`. It is sent with the sender's own surface token, so no agent can sign as another.
-- [ ] **HAND-02**: A receiving agent's task context can be rebuilt from `coord_handoff_list` (each packet with its verdict) and `events_query` alone, with no bus replay and no Task Store read. A test proves it.
-- [ ] **HAND-03**: With `SUBSTRATE_HANDOFF_KEY` unset, packets are recorded unsigned and say so, and the swarm run still completes.
+- [x] **HAND-01**: Every producer→consumer boundary that changes the accountable agent writes a `coord_handoff` packet: `goal`, `files`, `dod` from the task's `acceptance[]`, `blockers`, `graph_id` and `node_id`. It is sent with the sender's own surface token, so no agent can sign as another.
+- [x] **HAND-02**: A receiving agent's task context can be rebuilt from `coord_handoff_list` (each packet with its verdict) and `events_query` alone, with no bus replay and no Task Store read. A test proves it.
+- [x] **HAND-03**: With `SUBSTRATE_HANDOFF_KEY` unset, packets are recorded unsigned and say so, and the swarm run still completes.
 
 ### Workspace install (repos `agent-substrate` and `agent-swarm`, SPE-5055)
 
-- [ ] **INST-01**: `packages/projector` emits the `substrate-mcp` server entry, per swarm workspace, for each runtime that `build_agents.py --install-workspace` already configures (Claude Code, Grok Build, omp). Entries are appended to existing config, never replacing it, and re-running the install is idempotent.
-- [ ] **INST-02**: No generated file names Greptime as an MCP server, and no workspace artifact contains a token literal: configs name the token's environment variable only. The installer's own test proves this over every generated file. The tracked-file secret scan covers `SUBSTRATE_TOKEN*`.
-- [ ] **INST-03**: Each agent's token reaches only its own process. The install writes a per-agent env file outside every git checkout and outside the workspace, mode 0600, holding that agent's `SUBSTRATE_TOKEN` and nothing else. When it cannot write the file, it prints what the operator must create and exits non-zero. The runner starts each agent with only its own `SUBSTRATE_TOKEN` and strips every other `SUBSTRATE_TOKEN*` from the child's environment.
-- [ ] **INST-04**: The install refuses to wire a non-MCP runtime as an executing agent. It keeps its existing refusals (inside the swarm checkout, `$HOME`, `~/.omp`, symlinks), and a dry run prints the substrate additions and the env files it expects.
-- [ ] **INST-05**: The docs record the `substrate.env` split: which variables the server needs, which the agents need, and who owns each. They also record the shared-account limit: 0600 separates OS accounts, not processes of one account.
+- [x] **INST-01**: `packages/projector` emits the `substrate-mcp` server entry, per swarm workspace, for each runtime that `build_agents.py --install-workspace` already configures (Claude Code, Grok Build, omp). Entries are appended to existing config, never replacing it, and re-running the install is idempotent.
+- [x] **INST-02**: No generated file names Greptime as an MCP server, and no workspace artifact contains a token literal: configs name the token's environment variable only. The installer's own test proves this over every generated file. The tracked-file secret scan covers `SUBSTRATE_TOKEN*`.
+- [x] **INST-03**: Each agent's token reaches only its own process. The install writes a per-agent env file outside every git checkout and outside the workspace, mode 0600, holding that agent's `SUBSTRATE_TOKEN` and nothing else. When it cannot write the file, it prints what the operator must create and exits non-zero. The runner starts each agent with only its own `SUBSTRATE_TOKEN` and strips every other `SUBSTRATE_TOKEN*` from the child's environment.
+- [x] **INST-04**: The install refuses to wire a non-MCP runtime as an executing agent. It keeps its existing refusals (inside the swarm checkout, `$HOME`, `~/.omp`, symlinks), and a dry run prints the substrate additions and the env files it expects.
+- [x] **INST-05**: The docs record the `substrate.env` split: which variables the server needs, which the agents need, and who owns each. They also record the shared-account limit: 0600 separates OS accounts, not processes of one account.
 
 ### Lessons bank (repo `agent-substrate`, SPE-5830)
 
-- [ ] **LES-01**: A lesson is one governed `fact` written through `memory_write` / `POST /memory`. It has subject `lesson:<milestone>/<phase>/<slug>`, an idempotency key derived from its source and content, and a structured header (milestone, phase, outcome, tags, source path). It is used only when `accepted` and `verified_persisted`. There is no new table, kind or write path, and `store-lock.test.ts` still passes.
-- [ ] **LES-02**: `substrate lessons add` writes lessons from text or from a SUMMARY.md lessons section. Quarantined lessons (hedged wording) are reported, not retried.
-- [ ] **LES-03**: `substrate lessons recall` returns the top lessons for a query and repo, ranked client-side by recency and keyword/tag match, as a `## Prior Lessons` block that cites each entry id.
-- [ ] **LES-04**: `substrate lessons digest <milestone>` writes one `fact` with subject `lesson-digest:<milestone>`, listing the cited lesson ids. Originals are never deleted, and digested lessons are left out of recall.
-- [ ] **LES-05**: A lesson's success score is computed at read time from appended outcome facts that reference its id. Nothing is mutated in place.
+- [x] **LES-01**: A lesson is one governed `fact` written through `memory_write` / `POST /memory`. It has subject `lesson:<milestone>/<phase>/<slug>`, an idempotency key derived from its source and content, and a structured header (milestone, phase, outcome, tags, source path). It is used only when `accepted` and `verified_persisted`. There is no new table, kind or write path, and `store-lock.test.ts` still passes.
+- [x] **LES-02**: `substrate lessons add` writes lessons from text or from a SUMMARY.md lessons section. Quarantined lessons (hedged wording) are reported, not retried.
+- [x] **LES-03**: `substrate lessons recall` returns the top lessons for a query and repo, ranked client-side by recency and keyword/tag match, as a `## Prior Lessons` block that cites each entry id.
+- [x] **LES-04**: `substrate lessons digest <milestone>` writes one `fact` with subject `lesson-digest:<milestone>`, listing the cited lesson ids. Originals are never deleted, and digested lessons are left out of recall.
+- [x] **LES-05**: A lesson's success score is computed at read time from appended outcome facts that reference its id. Nothing is mutated in place.
 
 ### Proof (cross-repo)
 
-- [ ] **PROOF-02**: S2 proof, against a real Postgres and a real GreptimeDB:
+- [x] **PROOF-02**: S2 proof, against a real Postgres and a real GreptimeDB:
   - Kill an A05 replica mid-task. A second A05 claims the node within one TTL, the trail shows the expiry as a `warning`, and no two replicas ever hold the node at once.
   - A05 then hands a failed gate to A14 with the swarm bus stopped between them, and A14's context is rebuilt from `coord_handoff_list` and `events_query` alone.
-- [ ] **PROOF-03**: S4 proof: install into an empty workspace and run the swarm. The run appears in the ledger and in another agent's brief, the brief is non-empty, and the claim is granted.
-- [ ] **PROOF-04**: Lessons proof. A lesson from an archived v1.1 SUMMARY becomes an accepted, verified `fact` id. It is recalled into a v1.2 phase CONTEXT.md and cited in that phase's PLAN, and a digest `fact` is written at the v1.2 close.
+- [x] **PROOF-03**: S4 proof: install into an empty workspace and run the swarm. The run appears in the ledger and in another agent's brief, the brief is non-empty, and the claim is granted.
+- [x] **PROOF-04**: Lessons proof. A lesson from an archived v1.1 SUMMARY becomes an accepted, verified `fact` id. It is recalled into a v1.2 phase CONTEXT.md and cited in that phase's PLAN, and a digest `fact` is written at the v1.2 close.
 
 ## Future Requirements
 
@@ -89,22 +89,22 @@ Decisions confirmed with the milestone summary (2026-10-07):
 | LEASE-07 | Phase 12 | Complete |
 | LEASE-08 | Phase 12 | Complete |
 | LEASE-09 | Phase 12 | Complete |
-| HAND-01 | Phase 13 | Pending |
-| HAND-02 | Phase 13 | Pending |
-| HAND-03 | Phase 13 | Pending |
-| PROOF-02 | Phase 13 | Pending |
-| INST-01 | Phase 14 | Pending |
-| INST-02 | Phase 14 | Pending |
-| INST-03 | Phase 14 | Pending |
-| INST-04 | Phase 14 | Pending |
-| INST-05 | Phase 14 | Pending |
-| PROOF-03 | Phase 14 | Pending |
-| LES-01 | Phase 15 | Pending |
-| LES-02 | Phase 15 | Pending |
-| LES-03 | Phase 15 | Pending |
-| LES-04 | Phase 15 | Pending |
-| LES-05 | Phase 15 | Pending |
-| PROOF-04 | Phase 15 | Pending |
+| HAND-01 | Phase 13 | Complete |
+| HAND-02 | Phase 13 | Complete |
+| HAND-03 | Phase 13 | Complete |
+| PROOF-02 | Phase 13 | Complete |
+| INST-01 | Phase 14 | Complete |
+| INST-02 | Phase 14 | Complete |
+| INST-03 | Phase 14 | Complete |
+| INST-04 | Phase 14 | Complete |
+| INST-05 | Phase 14 | Complete |
+| PROOF-03 | Phase 14 | Complete |
+| LES-01 | Phase 15 | Complete |
+| LES-02 | Phase 15 | Complete |
+| LES-03 | Phase 15 | Complete |
+| LES-04 | Phase 15 | Complete |
+| LES-05 | Phase 15 | Complete |
+| PROOF-04 | Phase 15 | Complete |
 
 **Coverage:** 25/25 v1.2 requirements mapped to Phases 11-15; no orphans, no duplicates.
 

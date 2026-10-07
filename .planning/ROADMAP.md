@@ -49,9 +49,9 @@ Execution order: 11, then 12, then 13 and 14 in parallel. Phase 15 depends on no
 
 - [x] **Phase 11: Lease authority** — swarm session shape, holder-only `lease_id` and fenced calls, no swarm operator (agent-substrate) (completed 2026-10-07)
 - [x] **Phase 12: Swarm lease bridge** — the runner claims, heartbeats, completes and releases each task's node for its agent (agent-swarm) (completed 2026-10-07)
-- [ ] **Phase 13: Signed handoffs** — `coord_handoff` packets at accountable-agent boundaries, context rebuilt from the ledger alone (agent-swarm)
-- [ ] **Phase 14: Workspace install** — `substrate-mcp` wired into every swarm workspace runtime, one token per agent process (agent-substrate, agent-swarm)
-- [ ] **Phase 15: Lessons bank** — `substrate lessons add | recall | digest` over governed `fact` entries (agent-substrate)
+- [x] **Phase 13: Signed handoffs** — `coord_handoff` packets at accountable-agent boundaries, context rebuilt from the ledger alone (agent-swarm) (completed 2026-10-07)
+- [x] **Phase 14: Workspace install** — `substrate-mcp` wired into every swarm workspace runtime, one token per agent process (agent-substrate, agent-swarm) (completed 2026-10-07)
+- [x] **Phase 15: Lessons bank** — `substrate lessons add | recall | digest` over governed `fact` entries (agent-substrate) (completed 2026-10-07)
 
 ## Phase Details
 
@@ -146,6 +146,6 @@ Execution order: 11, then 12, then 13 and 14 in parallel. Phase 15 depends on no
 |-------|-----------|----------------|--------|-----------|
 | 11. Lease authority | v1.2 | 1/1 | Complete    | 2026-10-07 |
 | 12. Swarm lease bridge | v1.2 | 1/1 | Complete    | 2026-10-07 |
-| 13. Signed handoffs | v1.2 | 0/TBD | Not started | - |
-| 14. Workspace install | v1.2 | 0/TBD | Not started | - |
-| 15. Lessons bank | v1.2 | 0/TBD | Not started | - |
+| 13. Signed handoffs | v1.2 | 1/1 | Complete    | 2026-10-07 |
+| 14. Workspace install | v1.2 | 1/1 | Complete    | 2026-10-07 |
+| 15. Lessons bank | v1.2 | 1/1 | Complete    | 2026-10-07 |
