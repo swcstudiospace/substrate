@@ -116,6 +116,6 @@ mapping table lives with the swarm's tee, not here.
 ## Not in S1
 
 - Leases and handoffs for swarm tasks — S2 (SPE-5053).
-- Swarm memory client wiring — S3 (SPE-5054). The new surfaces already inherit the default `graph-any`, `repo-working`, `agent-self`, and `global-standing` grants; global memories still require review.
+- Swarm memory client wiring — S3 (SPE-5054). The new surfaces already inherit the default `graph-any`, `repo-working`, `agent-self`, and `global-standing` grants; global memories still require review. What a swarm surface may and may not write is pinned by tests and described in [memory-governance.md](memory-governance.md).
 - Wiring `substrate-mcp` into swarm workspaces, the projector — S4 (SPE-5055).
 - Gate verdicts as substrate events and their verification — S5 (SPE-5056).
