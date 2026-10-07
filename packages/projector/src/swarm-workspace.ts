@@ -26,20 +26,29 @@
  * checkout at install time, so it applies a vendored copy of that spec (agent-swarm `swarm/substrate_mcp.json`)
  * with the same rules; the PROOF-03 script diffs the two.
  *
- * Exit codes: 0 done (or nothing to do), 1 `--check` found changes, 2 refused or bad usage. Nothing is written
- * unless every file of the plan can be written.
+ * Exit codes: 0 done (or nothing to do), 1 `--check` found changes, 2 refused or bad usage. All files are staged
+ * before commit; a failed commit rolls back only files that still belong to this apply.
  */
 import {
-	copyFileSync,
+	closeSync,
+	constants,
+	fchmodSync,
+	fstatSync,
+	linkSync,
 	existsSync,
 	lstatSync,
 	mkdirSync,
+	openSync,
 	readFileSync,
 	realpathSync,
 	renameSync,
+	rmdirSync,
 	statSync,
+	unlinkSync,
 	writeFileSync,
 } from "node:fs";
+import { randomUUID } from "node:crypto";
+import type { Stats } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 export const SERVER = "substrate";
@@ -255,23 +264,237 @@ export function plan(workspace: string, runtimes: readonly string[] = RUNTIMES):
 	return changes;
 }
 
+type Snapshot = { stat: Stats; bytes: Buffer } | null;
+type Directory = { path: string; fd: number; anchor: string; stat: Stats };
+type StagedFile = { path: string; snapshot: NonNullable<Snapshot> };
+type Write = {
+	path: string;
+	directory: Directory;
+	name: string;
+	before: Snapshot;
+	next: StagedFile;
+	restore: StagedFile | null;
+	committed: boolean;
+};
+
+function sameIdentity(a: Stats, b: Stats): boolean {
+	return a.dev === b.dev && a.ino === b.ino;
+}
+
+function sameSnapshot(a: Snapshot, b: Snapshot): boolean {
+	return a === null || b === null
+		? a === b
+		: sameIdentity(a.stat, b.stat) &&
+				a.stat.mode === b.stat.mode &&
+				a.stat.mtimeMs === b.stat.mtimeMs &&
+				a.stat.ctimeMs === b.stat.ctimeMs &&
+				a.bytes.equals(b.bytes);
+}
+
+/** Reading an already-open regular file never follows a substituted final symlink. */
+function snapshot(path: string): Snapshot {
+	const entry = lstatSync(path, { throwIfNoEntry: false });
+	if (!entry) return null;
+	if (!entry.isFile()) throw new ProjectionRefused(`${path} is not a regular file`);
+	const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+	try {
+		const stat = fstatSync(fd);
+		if (!stat.isFile() || !sameIdentity(entry, stat)) {
+			throw new ProjectionRefused(`${path} changed while it was read`);
+		}
+		const bytes = readFileSync(fd);
+		const after = fstatSync(fd);
+		if (stat.size !== after.size || stat.mtimeMs !== after.mtimeMs || stat.ctimeMs !== after.ctimeMs) {
+			throw new ProjectionRefused(`${path} changed while it was read`);
+		}
+		return { stat: after, bytes };
+	} finally {
+		closeSync(fd);
+	}
+}
+
 /**
- * Write the changes `plan` returned. Refuses the lot if any file changed since it was planned. A file that existed is
- * copied to `<file>.substrate-backup` first; each write is a rename, so a reader never sees half a file.
+ * Stage the entire plan before publishing anything. Directory descriptors pin each destination: even a directory
+ * swapped for a symlink between a check and a syscall cannot redirect writes. Each publication is atomic. On error,
+ * restore prior files/backups only if their identity and bytes still match our publication; report conflicts instead
+ * of overwriting another writer. This is a recoverable transaction, not a crash-atomic multi-file filesystem primitive.
  */
 export function apply(changes: readonly Change[]): Change[] {
 	const pending = changes.filter((change) => change.status !== "current");
-	for (const change of pending) {
-		const now = existsSync(change.path) ? readFileSync(change.path, "utf8") : null;
-		if (now !== change.before) throw new ProjectionRefused(`${change.path} changed since it was planned; re-run`);
+	const directories = new Map<string, Directory>();
+	const createdDirectories: Directory[] = [];
+	const staged: StagedFile[] = [];
+	const writes: Write[] = [];
+	const failures: string[] = [];
+	let applyError: unknown;
+
+	function checkDirectory(directory: Directory): void {
+		refuseSymlinks("/", directory.path);
+		const now = lstatSync(directory.path, { throwIfNoEntry: false });
+		if (!now?.isDirectory() || !sameIdentity(now, directory.stat)) {
+			throw new ProjectionRefused(`${directory.path} changed during apply`);
+		}
 	}
-	for (const change of pending) {
-		mkdirSync(dirname(change.path), { recursive: true });
-		if (change.before !== null) copyFileSync(change.path, `${change.path}.substrate-backup`);
-		const tmp = `${change.path}.substrate-tmp-${process.pid}`;
-		writeFileSync(tmp, change.after);
-		renameSync(tmp, change.path);
+
+	function pinDirectory(path: string, create: boolean): Directory {
+		const pinned = directories.get(path);
+		if (pinned) {
+			checkDirectory(pinned);
+			return pinned;
+		}
+		refuseSymlinks("/", path);
+		let created = false;
+		let source = path;
+		if (create) {
+			const parent = pinDirectory(dirname(path), false);
+			checkDirectory(parent);
+			source = join(parent.anchor, path.slice(dirname(path).length + 1));
+			if (!lstatSync(source, { throwIfNoEntry: false })) {
+				mkdirSync(source);
+				created = true;
+			}
+		}
+		const fd = openSync(source, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+		const stat = fstatSync(fd);
+		// Bun supports Linux and macOS. Refuse rather than fall back to race-prone path writes if neither FD mount works.
+		const anchor = [`/proc/self/fd/${fd}`, `/dev/fd/${fd}`].find((candidate) => {
+			try {
+				return sameIdentity(statSync(`${candidate}/.`), stat);
+			} catch {
+				return false;
+			}
+		});
+		if (!anchor) {
+			closeSync(fd);
+			throw new ProjectionRefused(`no directory-descriptor filesystem is available for ${path}`);
+		}
+		const directory = { path, fd, anchor, stat };
+		directories.set(path, directory);
+		if (created) createdDirectories.push(directory);
+		checkDirectory(directory);
+		return directory;
 	}
+
+	function stage(directory: Directory, bytes: string | Buffer, mode?: number): StagedFile {
+		checkDirectory(directory);
+		const path = join(directory.anchor, `.substrate-tmp-${randomUUID()}`);
+		const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+		// Register ownership immediately so a failed write can still clean up its own partial file.
+		const file: StagedFile = { path, snapshot: { stat: fstatSync(fd), bytes: Buffer.alloc(0) } };
+		staged.push(file);
+		try {
+			writeFileSync(fd, bytes);
+			fchmodSync(fd, mode === undefined ? 0o666 & ~process.umask() : mode & 0o777);
+			file.snapshot.stat = fstatSync(fd);
+		} finally {
+			closeSync(fd);
+		}
+		file.snapshot = snapshot(path)!;
+		return file;
+	}
+
+	function prepare(path: string, directory: Directory, before: Snapshot, bytes: string | Buffer, mode?: number): void {
+		const name = join(directory.anchor, path.slice(dirname(path).length + 1));
+		const next = stage(directory, bytes, mode);
+		const restore = before ? stage(directory, before.bytes, before.stat.mode) : null;
+		writes.push({ path, directory, name, before, next, restore, committed: false });
+	}
+
+	try {
+		for (const change of pending) {
+			// The plan's absolute file and relative runtime path recover its canonical workspace root.
+			const root = resolve(change.path, ...change.file.split("/").map(() => ".."));
+			pinDirectory(root, false);
+			const directory = pinDirectory(dirname(change.path), true);
+			const name = join(directory.anchor, change.file.split("/").at(-1)!);
+			const before = snapshot(name);
+			if ((before?.bytes.toString("utf8") ?? null) !== change.before) {
+				throw new ProjectionRefused(`${change.path} changed since it was planned; re-run`);
+			}
+			if (before) {
+				const backupPath = `${change.path}.substrate-backup`;
+				const backup = snapshot(`${name}.substrate-backup`);
+				prepare(backupPath, directory, backup, before.bytes, before.stat.mode);
+			}
+			prepare(change.path, directory, before, change.after, before?.stat.mode);
+		}
+		// Detect changes during staging before the first publication, then recheck immediately before each one.
+		for (const write of writes) {
+			checkDirectory(write.directory);
+			if (!sameSnapshot(snapshot(write.name), write.before)) {
+				throw new ProjectionRefused(`${write.path} changed during staging; re-run`);
+			}
+		}
+		for (const write of writes) {
+			checkDirectory(write.directory);
+			if (!sameSnapshot(snapshot(write.name), write.before)) {
+				throw new ProjectionRefused(`${write.path} changed during apply; re-run`);
+			}
+			if (!sameSnapshot(snapshot(write.next.path), write.next.snapshot)) {
+				throw new ProjectionRefused(`${write.path} staging file changed during apply`);
+			}
+			if (write.before) {
+				renameSync(write.next.path, write.name);
+			} else {
+				// Unlike rename, link refuses an intervening creation. The staged file is already complete.
+				linkSync(write.next.path, write.name);
+			}
+			write.committed = true;
+			// link/rename changes ctime; retain the installed identity, not an unrelated replacement's snapshot.
+			const installed = snapshot(write.name);
+			if (!installed || !sameIdentity(installed.stat, write.next.snapshot.stat) ||
+				!installed.bytes.equals(write.next.snapshot.bytes)) {
+				throw new ProjectionRefused(`${write.path} changed during publication`);
+			}
+			write.next.snapshot = installed;
+			checkDirectory(write.directory);
+		}
+	} catch (cause) {
+		applyError = cause;
+		for (const write of [...writes].reverse()) {
+			if (!write.committed) continue;
+			try {
+				// Use the pinned directory even if its old pathname was replaced. Never follow the replacement.
+				if (!sameSnapshot(snapshot(write.name), write.next.snapshot)) {
+					throw new Error("changed externally; preserved instead of overwriting");
+				}
+				if (write.restore) {
+					if (!sameSnapshot(snapshot(write.restore.path), write.restore.snapshot)) {
+						throw new Error("rollback staging file changed externally");
+					}
+					renameSync(write.restore.path, write.name);
+				} else unlinkSync(write.name);
+			} catch (rollbackCause) {
+				failures.push(`${write.path}: ${String(rollbackCause)}`);
+			}
+		}
+	} finally {
+		for (const file of staged) {
+			try {
+				const current = lstatSync(file.path, { throwIfNoEntry: false });
+				// A substituted pathname is not ours to delete, even if it lives in our temp namespace.
+				if (current && sameIdentity(current, file.snapshot.stat)) unlinkSync(file.path);
+			} catch (cause) {
+				failures.push(`staging cleanup: ${String(cause)}`);
+			}
+		}
+		// Only remove a directory we created, still at its original location, and still empty.
+		for (const directory of [...createdDirectories].reverse()) {
+			try {
+				checkDirectory(directory);
+				rmdirSync(directory.path);
+			} catch (cause) {
+				if ((cause as NodeJS.ErrnoException).code !== "ENOTEMPTY") failures.push(`directory cleanup: ${String(cause)}`);
+			}
+		}
+		for (const directory of directories.values()) closeSync(directory.fd);
+	}
+	if (applyError !== undefined) {
+		throw new ProjectionRefused(
+			`${String(applyError)}; ${failures.length ? `rollback incomplete: ${failures.join("; ")}` : "no config or backup changes retained"}`,
+		);
+	}
+	if (failures.length) throw new ProjectionRefused(`apply completed but cleanup incomplete: ${failures.join("; ")}`);
 	return pending;
 }
 
@@ -331,7 +554,7 @@ function main(argv: string[]): number {
 		return 0;
 	} catch (cause) {
 		if (cause instanceof ProjectionRefused) {
-			process.stderr.write(`[projector] refused: ${cause.message}. Nothing was written.\n`);
+			process.stderr.write(`[projector] refused: ${cause.message}.\n`);
 			return 2;
 		}
 		throw cause;

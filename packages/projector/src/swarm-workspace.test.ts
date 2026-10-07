@@ -6,10 +6,13 @@
  * every file the run leaves, and "carries a token literal" over every file under the workspace. The projector writes
  * no credential file, so both scopes are the workspace.
  */
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import * as crypto from "node:crypto";
+import * as fs from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { apply, plan, ProjectionRefused } from "./swarm-workspace";
 
 const CLI = join(import.meta.dir, "swarm-workspace.ts");
 /** What a real token would be: if the projector ever expanded the environment, this is the string that would leak. */
@@ -193,7 +196,6 @@ describe("refusals: exit 2 and nothing written anywhere", () => {
 			const before = files();
 			const r = run("--workspace", ws, "--apply");
 			expect(r.code).toBe(2);
-			expect(r.err).toContain("Nothing was written");
 			expect(files()).toEqual(before);
 		});
 	}
@@ -209,5 +211,182 @@ describe("refusals: exit 2 and nothing written anywhere", () => {
 		const r = run("--workspace", join(ws, "missing"), "--apply");
 		expect(r.code).toBe(2);
 		expect(files()).toEqual({});
+	});
+});
+
+describe("safe staged apply", () => {
+	test("refuses a planted backup symlink without touching its victim or earlier files", () => {
+		put(".mcp.json", EXISTING_JSON);
+		put(".grok/config.toml", EXISTING_TOML);
+		const victim = put("victim", "UNCHANGED");
+		const backup = join(ws, ".grok/config.toml.substrate-backup");
+		symlinkSync(victim, backup);
+		const before = files();
+		expect(run("--workspace", ws, "--apply").code).toBe(2);
+		expect(files()).toEqual(before);
+		expect(readFileSync(victim, "utf8")).toBe("UNCHANGED");
+		expect(lstatSync(backup).isSymbolicLink()).toBe(true);
+	});
+
+	test("ignores old predictable temp links and refuses a collision at its exclusive staging path", () => {
+		const victim = put("victim", "UNCHANGED");
+		const config = put(".mcp.json", EXISTING_JSON);
+		const legacy = `${config}.substrate-tmp-${process.pid}`;
+		symlinkSync(victim, legacy);
+		const planned = plan(ws, ["claude"]);
+		const id = "00000000-0000-0000-0000-000000000000";
+		const collision = join(ws, `.substrate-tmp-${id}`);
+		symlinkSync(victim, collision);
+		const before = files();
+		const uuid = spyOn(crypto, "randomUUID").mockReturnValue(id);
+		try {
+			expect(() => apply(planned)).toThrow(ProjectionRefused);
+		} finally {
+			uuid.mockRestore();
+		}
+		expect(files()).toEqual(before);
+		expect(readFileSync(victim, "utf8")).toBe("UNCHANGED");
+		expect(lstatSync(collision).isSymbolicLink()).toBe(true);
+		apply(planned);
+		expect(readFileSync(victim, "utf8")).toBe("UNCHANGED");
+		expect(lstatSync(legacy).isSymbolicLink()).toBe(true);
+		expect(lstatSync(collision).isSymbolicLink()).toBe(true);
+		const first = files();
+		expect(apply(plan(ws, ["claude"]))).toEqual([]);
+		expect(files()).toEqual(first);
+	});
+
+	test("rechecks final and parent symlinks introduced after planning", () => {
+		const config = put(".mcp.json", EXISTING_JSON);
+		put(".grok/config.toml", EXISTING_TOML);
+		const planned = plan(ws);
+		const victim = put("victim", EXISTING_JSON);
+		rmSync(config);
+		symlinkSync(victim, config);
+		expect(() => apply(planned)).toThrow(ProjectionRefused);
+		expect(readFileSync(victim, "utf8")).toBe(EXISTING_JSON);
+		rmSync(config);
+		writeFileSync(config, EXISTING_JSON);
+		renameSync(join(ws, ".grok"), `${ws}-elsewhere`);
+		symlinkSync(`${ws}-elsewhere`, join(ws, ".grok"));
+		const before = files();
+		expect(() => apply(planned)).toThrow(ProjectionRefused);
+		expect(files()).toEqual(before);
+		expect(readFileSync(join(`${ws}-elsewhere`, "config.toml"), "utf8")).toBe(EXISTING_TOML);
+	});
+
+	test("a late staging write failure leaves all configs and existing backups untouched", () => {
+		put(".mcp.json", EXISTING_JSON);
+		put(".mcp.json.substrate-backup", "older JSON backup");
+		put(".grok/config.toml", EXISTING_TOML);
+		put(".grok/config.toml.substrate-backup", "older TOML backup");
+		const planned = plan(ws);
+		const before = files();
+		const realWrite = fs.writeFileSync;
+		let count = 0;
+		const write = spyOn(fs, "writeFileSync").mockImplementation((...args) => {
+			if (++count === 5) throw new Error("injected staging failure");
+			return realWrite(...args);
+		});
+		try {
+			expect(() => apply(planned)).toThrow("injected staging failure");
+		} finally {
+			write.mockRestore();
+		}
+		expect(files()).toEqual(before);
+	});
+
+	test("a later commit failure rolls back configs, replaced backups, and their modes", () => {
+		const config = put(".mcp.json", EXISTING_JSON);
+		const backup = put(".mcp.json.substrate-backup", "older JSON backup");
+		put(".grok/config.toml", EXISTING_TOML);
+		put(".grok/config.toml.substrate-backup", "older TOML backup");
+		chmodSync(config, 0o640);
+		chmodSync(backup, 0o600);
+		const planned = plan(ws);
+		const before = files();
+		const realRename = fs.renameSync;
+		const rename = spyOn(fs, "renameSync").mockImplementation((source, destination) => {
+			if (String(destination).endsWith("/config.toml")) throw new Error("injected commit failure");
+			return realRename(source, destination);
+		});
+		try {
+			expect(() => apply(planned)).toThrow("injected commit failure");
+		} finally {
+			rename.mockRestore();
+		}
+		expect(files()).toEqual(before);
+		expect(statSync(config).mode & 0o777).toBe(0o640);
+		expect(statSync(backup).mode & 0o777).toBe(0o600);
+		apply(plan(ws));
+		expect(statSync(config).mode & 0o777).toBe(0o640);
+		expect(statSync(backup).mode & 0o777).toBe(0o640);
+		const first = files();
+		expect(apply(plan(ws))).toEqual([]);
+		expect(files()).toEqual(first);
+	});
+
+	test("a later commit failure removes only files and directories it created", () => {
+		const planned = plan(ws);
+		const realLink = fs.linkSync;
+		const link = spyOn(fs, "linkSync").mockImplementation((source, destination) => {
+			if (String(destination).endsWith("/config.toml")) throw new Error("injected create failure");
+			return realLink(source, destination);
+		});
+		try {
+			expect(() => apply(planned)).toThrow("injected create failure");
+		} finally {
+			link.mockRestore();
+		}
+		expect(readdirSync(ws)).toEqual([]);
+	});
+
+	test("rollback preserves an intervening external config edit and explicitly reports the conflict", () => {
+		const config = put(".mcp.json", EXISTING_JSON);
+		put(".grok/config.toml", EXISTING_TOML);
+		const planned = plan(ws);
+		const external = '{"external":"keep this edit"}\n';
+		const realRename = fs.renameSync;
+		const rename = spyOn(fs, "renameSync").mockImplementation((source, destination) => {
+			if (String(destination).endsWith("/config.toml")) {
+				writeFileSync(config, external);
+				throw new Error("injected commit failure");
+			}
+			return realRename(source, destination);
+		});
+		try {
+			expect(() => apply(planned)).toThrow("rollback incomplete");
+		} finally {
+			rename.mockRestore();
+		}
+		expect(files()).toEqual({ ".mcp.json": external, ".grok/config.toml": EXISTING_TOML });
+	});
+
+	test("a directory replaced inside a commit syscall cannot redirect writes through its symlink", () => {
+		put(".mcp.json", EXISTING_JSON);
+		put(".grok/config.toml", EXISTING_TOML);
+		const planned = plan(ws);
+		mkdirSync(`${ws}-elsewhere`);
+		const victim = join(`${ws}-elsewhere`, "config.toml");
+		writeFileSync(victim, "UNCHANGED");
+		const realRename = fs.renameSync;
+		let swapped = false;
+		const rename = spyOn(fs, "renameSync").mockImplementation((source, destination) => {
+			if (!swapped && String(destination).endsWith("/config.toml")) {
+				swapped = true;
+				realRename(join(ws, ".grok"), join(ws, "saved-grok"));
+				symlinkSync(`${ws}-elsewhere`, join(ws, ".grok"));
+			}
+			return realRename(source, destination);
+		});
+		try {
+			expect(() => apply(planned)).toThrow(ProjectionRefused);
+		} finally {
+			rename.mockRestore();
+		}
+		expect(readFileSync(victim, "utf8")).toBe("UNCHANGED");
+		expect(readFileSync(join(ws, ".mcp.json"), "utf8")).toBe(EXISTING_JSON);
+		expect(readFileSync(join(ws, "saved-grok/config.toml"), "utf8")).toBe(EXISTING_TOML);
+		expect(readdirSync(join(ws, "saved-grok"))).toEqual(["config.toml"]);
 	});
 });

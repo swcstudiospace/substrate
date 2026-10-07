@@ -37,8 +37,20 @@ The rules are the ones Phase 0 set for Cursor's `hooks.json`, adapted to servers
 - **Refuse what it cannot read.** Unparsable JSON or TOML, an `mcpServers` that is not an object, or an inline
   `mcp_servers = { … }` table that an appended `[mcp_servers.substrate]` cannot extend is refused, never reset. So is a
   symlink anywhere between the workspace and the file, a dangling one included.
-- **All or nothing.** Every file is planned before any is written, and `--apply` refuses if a file changed since it was
-  planned. A file that existed is copied to `<file>.substrate-backup` first.
+- **Staged, recoverable apply.** Every config and backup is staged before any destination is published. `--apply`
+  refuses if a file changed since planning, rechecks directory identities and destination snapshots immediately before
+  commit, and rolls back earlier publications if a later one fails. Rollback restores original bytes and permissions,
+  including an older `<file>.substrate-backup`; it does not overwrite a detected intervening external edit. Such a
+  conflict is reported explicitly as **rollback incomplete**, not as a successful rollback.
+- **Safe filesystem publication.** Existing configs retain their permissions; a backup receives the original config's
+  bytes and permissions. Staging uses unpredictable, exclusive, no-follow files and destination directories pinned by
+  file descriptors, so planted backup/temp symlinks cannot redirect writes. Config and backup symlinks are refused,
+  including links introduced after planning. A descriptor filesystem (`/proc/self/fd` or `/dev/fd`) is required;
+  unavailable support is refused rather than replaced with unsafe path writes. Cleanup removes only owned staging
+  files and owned empty directories, never unrelated files or links. Operator permissions are not repaired.
+- **Atomic per file, not crash-atomic across files.** Readers see complete individual files. A running apply can undo
+  its own failed commits, but a process crash or machine loss is not a multi-file transaction; concurrent writers should
+  still be excluded operationally. Detected external edits are preserved and require operator reconciliation.
 - A runtime with no entry here is refused: an executing swarm agent must reach `substrate-mcp`, because a node is leased
   over MCP only (there is no REST `graph_claim`; ADR 0001 S4 criterion 6).
 
