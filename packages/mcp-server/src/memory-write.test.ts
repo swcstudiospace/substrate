@@ -11,7 +11,7 @@ import {
 	type NewMemoryEntry,
 	type WriteRecord,
 } from "./memory-write.ts";
-import type { MemoryEntry, MemoryWriteRequest, MemoryWriteResult, QuarantineReason } from "./types.ts";
+import type { MemoryEntry, MemoryKind, MemoryWriteRequest, MemoryWriteResult, QuarantineReason } from "./types.ts";
 
 const REVIEW_TOKEN = "a-reviewer-token-long-enough";
 const START = Date.parse("2026-09-30T00:00:00.000Z");
@@ -1395,7 +1395,7 @@ describe("swarm surfaces — default-deny proven from the outside (ADR 0001 S3)"
 		write({ writer: "swarm-a05-be", scope: "repo:acme/widgets", kind: "fact", ...request });
 	// `accepted` alone is a governance verdict, not a durability claim: a success is only
 	// a success when it was read back and the row is actually in the store.
-	const expectStored = (result: MemoryWriteResult, scope: string, kind: string) => {
+	const expectStored = (result: MemoryWriteResult, scope: string, kind: MemoryKind) => {
 		expect(result.outcome).toBe("accepted");
 		expect(result.verified_persisted).toBe(true);
 		const row = store.rows.get(result.entry?.id ?? "");
