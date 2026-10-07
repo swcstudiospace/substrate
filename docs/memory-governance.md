@@ -72,15 +72,16 @@ implicit allow.
 
 **Swarm surfaces (ADR 0001 S3).** The 15 `swarm-a01-orch` … `swarm-a15-doc` surfaces are
 known surfaces, so the `"*"` grants above already cover them; no swarm-specific grant
-exists and none is needed. Their working set is `decision`/`fact` at `graph:` and
-`repo:` scope, and `fact` (never `decision`) at their own `agent:<surface>` scope;
-another surface's `agent:` scope and every `person:` scope are refused, and `global`
-(`decision`/`fact`) is a proposal until a reviewer token releases
+exists and none is needed. Under the default grants their working set is
+`decision`/`fact` at `graph:` and `repo:` scope, and `fact` (not `decision`) at their own
+`agent:<surface>` scope; another surface's `agent:` scope and every `person:` scope are
+refused, and `global` (`decision`/`fact`) is a proposal until a reviewer token releases
 it. `warning` (gate verdicts) and `handoff` stay grantable on purpose — the ADR routes
-both through this gate. `teachable` is not a memory kind. A swarm `decision` can only be
-written at `graph`, `repo` (and `global` as a proposal), never at `agent:` scope, so the
-swarm client must treat `decision` + `agent` as a denial. Proven in
-`memory-write.test.ts` ("swarm surfaces — default-deny proven from the outside").
+both through this gate. `teachable` is not a memory kind. With the default grants a swarm
+`decision` at `agent:` scope is denied (`rbac.no-grant`); an operator grant in
+`SUBSTRATE_MEMORY_GRANTS` can widen that, so a client acts on the gate's verdict rather
+than refusing the write itself. Proven in `memory-write.test.ts` ("swarm surfaces —
+default-deny proven from the outside").
 
 Passing RBAC at `global` is permission to **propose** a global memory, not to
 install one — see review, below.
