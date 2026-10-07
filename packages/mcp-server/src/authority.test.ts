@@ -14,9 +14,12 @@
  * and these are the tests that say so.
  */
 import { describe, expect, test } from "bun:test";
-import { configWarnings, isOperator, loadConfig, surfaceForToken } from "./config.ts";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { configWarnings, isOperator, loadConfig, surfaceForToken, swarmTokenWarnings, tokenEnvName } from "./config.ts";
+import { attributedSurface } from "./mcp.ts";
 import { Substrate } from "./service.ts";
-import type { SubstrateEvent } from "./types.ts";
+import { SURFACES, SWARM_SURFACES, type SubstrateEvent } from "./types.ts";
 
 /**
  * An operator credential is a *surface* token that is also listed as an
@@ -182,5 +185,87 @@ describe("the signed sender is the authenticated caller", () => {
 		} as never);
 
 		expect(result.packet.prev_event_hash).toBe("tip-hash");
+	});
+});
+
+describe("the swarm surfaces", () => {
+	test("are the 15 agents, in A01..A15 order, after the original 11", () => {
+		expect(SWARM_SURFACES).toHaveLength(15);
+		expect(SURFACES).toHaveLength(26);
+		expect(SURFACES.slice(11)).toEqual([...SWARM_SURFACES]);
+		expect(SWARM_SURFACES[0]).toBe("swarm-a01-orch");
+		expect(SWARM_SURFACES[4]).toBe("swarm-a05-be");
+		expect(SWARM_SURFACES[14]).toBe("swarm-a15-doc");
+	});
+
+	test("each one's token env name resolves back to that surface", () => {
+		for (const surface of SWARM_SURFACES) {
+			const config = loadConfig({ [tokenEnvName(surface)]: `tok-${surface}` });
+			expect(surfaceForToken(config, `Bearer tok-${surface}`)).toBe(surface);
+		}
+		expect(tokenEnvName("swarm-a05-be")).toBe("SUBSTRATE_TOKEN_SWARM_A05_BE");
+	});
+
+	test(".env.example lists a blank SUBSTRATE_TOKEN_* line for every one", () => {
+		const example = readFileSync(join(import.meta.dir, "..", "..", "..", ".env.example"), "utf8").split("\n");
+		for (const surface of SWARM_SURFACES) {
+			expect(example).toContain(`${tokenEnvName(surface)}=`);
+		}
+	});
+});
+
+describe("swarmTokenWarnings", () => {
+	test("a bare local run is silent", () => {
+		expect(swarmTokenWarnings(loadConfig({}))).toEqual([]);
+	});
+
+	test("a deployment with tokens names every swarm surface that has none", () => {
+		const warnings = swarmTokenWarnings(loadConfig({ SUBSTRATE_TOKEN_HERMES: "tok-hermes" }));
+		expect(warnings).toHaveLength(1);
+		for (const surface of SWARM_SURFACES) expect(warnings[0]).toContain(tokenEnvName(surface));
+		expect(warnings[0]).toContain("15 swarm surfaces");
+		// Never a token value.
+		expect(warnings[0]).not.toContain("tok-hermes");
+	});
+
+	test("lists only the ones still missing, and is silent when none are", () => {
+		const some = loadConfig({
+			SUBSTRATE_TOKEN_HERMES: "tok-hermes",
+			SUBSTRATE_TOKEN_SWARM_A05_BE: "tok-a05",
+		});
+		const warnings = swarmTokenWarnings(some);
+		expect(warnings[0]).toContain("14 swarm surfaces");
+		expect(warnings[0]).not.toContain("SUBSTRATE_TOKEN_SWARM_A05_BE");
+		expect(warnings[0]).toContain("SUBSTRATE_TOKEN_SWARM_A09_REV");
+
+		const all = Object.fromEntries(SWARM_SURFACES.map((surface) => [tokenEnvName(surface), `tok-${surface}`]));
+		expect(swarmTokenWarnings(loadConfig(all))).toEqual([]);
+	});
+});
+
+describe("attributedSurface", () => {
+	test("a swarm token cannot act as another swarm surface", () => {
+		const result = attributedSurface("swarm-a05-be", "swarm-a09-rev");
+		expect(result).toEqual({ refused: "this token is swarm-a05-be and cannot act as swarm-a09-rev" });
+	});
+
+	test("a swarm token cannot act as a non-swarm surface either", () => {
+		expect("refused" in attributedSurface("swarm-a05-be", "hermes")).toBe(true);
+	});
+
+	test("a swarm token naming itself, or nothing, is itself", () => {
+		expect(attributedSurface("swarm-a05-be", "swarm-a05-be")).toEqual({ surface: "swarm-a05-be" });
+		expect(attributedSurface("swarm-a05-be", undefined)).toEqual({ surface: "swarm-a05-be" });
+		expect(attributedSurface("swarm-a05-be", null)).toEqual({ surface: "swarm-a05-be" });
+	});
+
+	test("every other caller keeps the long-standing supplied-first behaviour", () => {
+		// The deliberate boundary: collectors and hooks emit for the surfaces they
+		// observe, and an anonymous local run has no token to name it.
+		expect(attributedSurface("cursor", "hermes")).toEqual({ surface: "hermes" });
+		expect(attributedSurface("cursor", "swarm-a09-rev")).toEqual({ surface: "swarm-a09-rev" });
+		expect(attributedSurface("cursor", undefined)).toEqual({ surface: "cursor" });
+		expect(attributedSurface(null, "hermes")).toEqual({ surface: "hermes" });
+		expect(attributedSurface(null, undefined)).toEqual({ surface: "claude-code" });
 	});
 });

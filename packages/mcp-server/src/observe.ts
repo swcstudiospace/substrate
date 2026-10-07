@@ -317,6 +317,7 @@ const KNOWN_TOOLS: ReadonlySet<string> = new Set([
 	"events_verify",
 	"graph_get",
 	"graph_register",
+	"graph_bind",
 	"graph_claim",
 	"graph_heartbeat",
 	"graph_release",

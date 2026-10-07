@@ -20,7 +20,7 @@ import {
 import { InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, verifyChain } from "./event.ts";
 import { checkoutKnowsCommit, readGitTip } from "./git.ts";
 import { GreptimeClient, queryLimit, type EventQuery, type QueryableColumn } from "./greptime.ts";
-import { IndexStore, leaseSnapshot } from "./index-store.ts";
+import { IndexStore, leaseSnapshot, type GraphBindResult } from "./index-store.ts";
 import {
 	buildHandoff,
 	handoffGaps,
@@ -303,6 +303,48 @@ export interface ClaimResult {
 	decision: ClaimDecision;
 	/** Why, when the claim was refused or withdrawn. */
 	reason: string | null;
+}
+
+/** A swarm run's correlation id: 1..200 characters of `[A-Za-z0-9._:-]`. */
+export const CORRELATION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/;
+/** A Graph ID as minted by the ultrathink uplift: `ut-<ts36>-<8hex>`. */
+export const GRAPH_ID_PATTERN = /^ut-[a-z0-9]+-[0-9a-f]{8}$/;
+
+export class InvalidBindError extends Error {}
+
+/** The three shapes of `graph_bind`, decided by which of the two ids were given. */
+export type BindOutcome =
+	| GraphBindResult
+	| { status: "existing" | "unbound"; correlation_id: string; graph_id: string | null }
+	| { graph_id: string; correlation_ids: string[] };
+
+/**
+ * Validate a `graph_bind` request. At least one id is required, and each one given
+ * must have the documented shape — a malformed Graph ID stored as a binding is a
+ * lookup that can never match anything the swarm minted.
+ */
+export function parseBindRequest(input: { correlation_id?: unknown; graph_id?: unknown }): {
+	correlation_id?: string;
+	graph_id?: string;
+} {
+	const present = (value: unknown): boolean => value !== undefined && value !== null;
+	if (!present(input.correlation_id) && !present(input.graph_id)) {
+		throw new InvalidBindError("graph_bind needs `correlation_id`, `graph_id`, or both");
+	}
+	const out: { correlation_id?: string; graph_id?: string } = {};
+	if (present(input.correlation_id)) {
+		if (typeof input.correlation_id !== "string" || !CORRELATION_ID_PATTERN.test(input.correlation_id)) {
+			throw new InvalidBindError("`correlation_id` must be 1..200 characters of [A-Za-z0-9._:-]");
+		}
+		out.correlation_id = input.correlation_id;
+	}
+	if (present(input.graph_id)) {
+		if (typeof input.graph_id !== "string" || !GRAPH_ID_PATTERN.test(input.graph_id)) {
+			throw new InvalidBindError("`graph_id` must match ut-<ts36>-<8hex>");
+		}
+		out.graph_id = input.graph_id;
+	}
+	return out;
 }
 
 export class Substrate {
@@ -635,6 +677,48 @@ export class Substrate {
 	async registerGraph(plan: Parameters<IndexStore["registerGraph"]>[0]) {
 		if (!this.index) throw new Error("graph_register requires SUBSTRATE_PG_URL");
 		return this.index.registerGraph(plan);
+	}
+
+	/**
+	 * Bind a swarm `correlation_id` to a Graph ID, or look a binding up either way.
+	 *
+	 * Both ids: an atomic insert-or-get on the unique `correlation_id`, answering with the
+	 * stored winner. Only `correlation_id`: forward lookup. Only `graph_id`: reverse lookup.
+	 *
+	 * The index row is the lookup; the `note` event emitted on `created` is the record of
+	 * the binding that the ledger will not let anyone rewrite. It is fail-open like every
+	 * event — a ledger that is down costs the record, never the bind, and a bind that is
+	 * already stored is not announced a second time.
+	 */
+	async bindGraph(request: { correlation_id?: unknown; graph_id?: unknown }, boundBy: Surface | null): Promise<BindOutcome> {
+		const { correlation_id: correlationId, graph_id: graphId } = parseBindRequest(request);
+		if (!this.index) throw new Error("graph_bind requires SUBSTRATE_PG_URL");
+
+		if (correlationId !== undefined && graphId !== undefined) {
+			const result = await this.index.bindCorrelation(correlationId, graphId, boundBy);
+			if (result.status === "created") {
+				await this.emit({
+					surface: boundBy ?? "claude-code",
+					kind: "note",
+					summary: `bound correlation ${correlationId} to ${result.graph_id}`,
+					graph_id: result.graph_id,
+					actor: "agent",
+					payload: { correlation_id: correlationId, bound_by: boundBy },
+				}).catch(() => undefined);
+			}
+			return result;
+		}
+		if (correlationId !== undefined) {
+			const stored = await this.index.graphForCorrelation(correlationId);
+			return {
+				status: stored === null ? "unbound" : "existing",
+				correlation_id: correlationId,
+				graph_id: stored,
+			};
+		}
+		// parseBindRequest guarantees one of the two is present.
+		const reverse = graphId as string;
+		return { graph_id: reverse, correlation_ids: await this.index.correlationsForGraph(reverse) };
 	}
 
 	/** Where a node's events belong: the graph's repo, not whatever the caller said. */

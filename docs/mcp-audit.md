@@ -224,7 +224,7 @@ The chain tip advances **only on a successful write**, for the same reason.
 | | Tools | Why |
 | --- | --- | --- |
 | **fail-open** | every read — `memory_brief`, `memory_search`, `memory_pending`, `events_query`, `events_verify`, `graph_get`, `coord_handoff_verify`, `coord_handoff_list`, `coord_drift_scan` — plus `events_emit`, and the `/brief`, `/events`, `/events/query`, `/verify`, `/drift`, `/evidence` routes | These sit inside a prompt's hook budget. The substrate is not allowed to fail an agent's turn, and an unwritable audit file is not a reason to start. The call still produces a record; it is just not a gate. |
-| **fail-closed** | `graph_claim`, `graph_release`, `graph_complete`, `graph_register`, `graph_heartbeat`, `memory_write`, `coord_handoff`, `coord_reap_leases` | Everything that grants or transfers exclusive ownership of a node, or writes shared state another agent will act on. A claim nobody recorded is how two agents end up holding one node, and the whole point of `graph_claim` is that they cannot. |
+| **fail-closed** | `graph_claim`, `graph_release`, `graph_complete`, `graph_register`, `graph_heartbeat`, `graph_bind`, `memory_write`, `coord_handoff`, `coord_reap_leases` | Everything that grants or transfers exclusive ownership of a node, or writes shared state another agent will act on. A claim nobody recorded is how two agents end up holding one node, and the whole point of `graph_claim` is that they cannot. |
 
 **An unknown tool is fail-closed.** Deny by default, like `assertAppendOnly` in the
 ledger client: a tool added without a decision about its audit mode is caught the

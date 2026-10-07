@@ -215,3 +215,119 @@ describe("events_verify", () => {
 		expect(reply.json().reason).toBe("hash does not match contents");
 	});
 });
+
+/**
+ * A swarm token is its surface on the two paths the swarm leans on — `events_emit` and
+ * `graph_claim` — and naming another surface is refused, not re-attributed. Every other
+ * caller is unchanged: collectors and hooks name the surface they observed.
+ */
+describe("a swarm token names the caller", () => {
+	/** An index whose claim records the surface it was asked to claim as. */
+	function claimIndex() {
+		const claimedAs: Array<{ surface: string; session_id: string }> = [];
+		const holder = { surface: "swarm-a05-be" as Surface, session_id: "A05@r0:ut-1" };
+		return {
+			claimedAs,
+			index: {
+				claimNode: async (graph_id: string, node_id: string, surface: string, session_id: string) => {
+					claimedAs.push({ surface, session_id });
+					return {
+						claimed: true,
+						node: { graph_id, node_id, linear_identifier: null },
+						lease: { lease_id: "lse_1", holder, epoch: 1, state: "held", expires_at: null },
+						decision: { action: "granted", evicted: null },
+					};
+				},
+				getGraph: async () => null,
+				releaseNode: async () => ({ released: true }),
+			},
+		};
+	}
+
+	async function connectWith(surface: Surface | null, index: unknown, greptime: unknown) {
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		const server = createMcpServer(substrate, surface);
+		const client = new Client({ name: "substrate-test", version: "0.0.0" });
+		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+		await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+		return client;
+	}
+
+	test("events_emit: A05's token cannot emit as A09, and nothing is written", async () => {
+		const { written, greptime } = ledger();
+		const { client } = await connect(greptime, "swarm-a05-be");
+
+		const reply = await call(client, "events_emit", { kind: "note", summary: "forged", surface: "swarm-a09-rev" });
+
+		expect(reply.isError).toBe(true);
+		expect(String(reply.json().error)).toContain("cannot act as swarm-a09-rev");
+		expect(written).toEqual([]);
+	});
+
+	test("events_emit: the same token emitting as itself, or by default, works", async () => {
+		const { written, greptime } = ledger();
+		const { client } = await connect(greptime, "swarm-a05-be");
+
+		const explicit = await call(client, "events_emit", { kind: "note", summary: "mine", surface: "swarm-a05-be" });
+		const implicit = await call(client, "events_emit", { kind: "note", summary: "also mine" });
+
+		expect(explicit.isError).toBe(false);
+		expect(implicit.isError).toBe(false);
+		expect(written.map((event) => event.surface)).toEqual(["swarm-a05-be", "swarm-a05-be"]);
+	});
+
+	test("events_emit: a non-swarm token naming another surface behaves as it always did", async () => {
+		const { written, greptime } = ledger();
+		const { client } = await connect(greptime, "omp");
+
+		const reply = await call(client, "events_emit", { kind: "note", summary: "observed", surface: "hermes" });
+
+		expect(reply.isError).toBe(false);
+		expect(written[0]?.surface).toBe("hermes");
+	});
+
+	test("events_emit: an anonymous caller naming a swarm surface is unchanged", async () => {
+		const { written, greptime } = ledger();
+		const { client } = await connect(greptime, null);
+
+		const reply = await call(client, "events_emit", { kind: "note", summary: "local", surface: "swarm-a09-rev" });
+
+		expect(reply.isError).toBe(false);
+		expect(written[0]?.surface).toBe("swarm-a09-rev");
+	});
+
+	test("graph_claim: A05's token cannot claim as A09, and the index is never asked", async () => {
+		const { claimedAs, index } = claimIndex();
+		const client = await connectWith("swarm-a05-be", index, ledger().greptime);
+
+		const reply = await call(client, "graph_claim", {
+			graph_id: "ut-1",
+			node_id: "n1",
+			session_id: "A09@r0:ut-1",
+			surface: "swarm-a09-rev",
+		});
+
+		expect(reply.isError).toBe(true);
+		expect(String(reply.json().error)).toContain("cannot act as swarm-a09-rev");
+		expect(claimedAs).toEqual([]);
+	});
+
+	test("graph_claim: the same token claims as itself, with or without naming itself", async () => {
+		const { claimedAs, index } = claimIndex();
+		const client = await connectWith("swarm-a05-be", index, ledger().greptime);
+
+		await call(client, "graph_claim", { graph_id: "ut-1", node_id: "n1", session_id: "A05@r0:ut-1", surface: "swarm-a05-be" });
+		await call(client, "graph_claim", { graph_id: "ut-1", node_id: "n2", session_id: "A05@r0:ut-1" });
+
+		expect(claimedAs.map((claim) => claim.surface)).toEqual(["swarm-a05-be", "swarm-a05-be"]);
+	});
+
+	test("graph_claim: a non-swarm token naming another surface behaves as it always did", async () => {
+		const { claimedAs, index } = claimIndex();
+		const client = await connectWith("omp", index, ledger().greptime);
+
+		await call(client, "graph_claim", { graph_id: "ut-1", node_id: "n1", session_id: "s", surface: "hermes" });
+
+		expect(claimedAs.map((claim) => claim.surface)).toEqual(["hermes"]);
+	});
+});
