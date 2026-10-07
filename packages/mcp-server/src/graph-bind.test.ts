@@ -150,6 +150,24 @@ describe("Substrate.bindGraph", () => {
 		});
 	});
 
+	test("two bindings on one graph leave a ledger that verifies", async () => {
+		const { index } = fakeIndex();
+		const { written, greptime } = ledger();
+		const stored = {
+			...greptime,
+			lastHash: async (sessionId: string) => written.filter((e) => e.session_id === sessionId).at(-1)?.hash ?? null,
+			readEvents: async () =>
+				written.map((event) => ({ ...event, ts: Date.parse(event.ts), payload: JSON.stringify(event.payload) })),
+		};
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: stored as never });
+
+		await substrate.bindGraph({ correlation_id: "run-1", graph_id: GRAPH_A }, "swarm-a01-orch");
+		await substrate.bindGraph({ correlation_id: "run-2", graph_id: GRAPH_A }, "swarm-a01-orch");
+
+		expect(written.map((event) => event.session_id)).toEqual([`bind:${GRAPH_A}:run-1`, `bind:${GRAPH_A}:run-2`]);
+		expect(await substrate.verifyGraph(GRAPH_A)).toEqual({ ok: true, events: 2 });
+	});
+
 	test("both ids, same pair again: existing, no conflict, and not announced twice", async () => {
 		const { index } = fakeIndex();
 		const { written, greptime } = ledger();
