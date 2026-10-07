@@ -232,7 +232,7 @@ Milestone v1.1 rolls up 3 lessons.
 - The `lessons:` line is the contract. When the body would pass 4000 characters the
   per-lesson lines are shortened, then dropped; a digest whose id list alone does not fit
   is refused, so split it with `--ids`.
-- The key hashes the milestone, the sorted ids and the text, so re-running a digest over
+- The key hashes the scope, milestone, sorted ids and text, so re-running a digest over
   the same lessons is the same entry.
 
 ## Outcomes and the success score
@@ -264,7 +264,7 @@ $$\text{score} = \frac{1 + \sum w}{2 + n}, \qquad w_{\text{success}} = 1,\ w_{\t
 
 where $n$ counts one report per citing phase, the newest. A phase that changes its
 verdict appends a second outcome, and the newer one replaces the older in the score
-instead of adding a second vote. The key hashes the lesson id, the citing
+instead of adding a second vote. The key hashes the scope, lesson id, citing
 milestone/phase, the result and the note, so recording the same report twice is one
 entry. `outcome` refuses an id that is not a lesson or digest in the scope, because an
 outcome is permanent; `--unchecked` records it anyway.
