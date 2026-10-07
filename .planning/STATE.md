@@ -2,15 +2,15 @@
 gsd_state_version: "1.0"
 milestone: v1.2
 milestone_name: Swarm leases, workspace install and lessons bank
+current_phase: 11
+current_phase_name: Lease authority
 status: planning
-last_updated: "2026-10-07T18:40:02.667Z"
+last_updated: "2026-10-07T18:44:18.088Z"
 last_activity: 2026-10-07
+last_activity_desc: "v1.2 roadmap created: 5 phases (11-15), 25/25 requirements mapped"
+state_head: 65ae71256aa15f62a234866435e3dcf839cb5b6b
 progress:
-  total_phases: 0
-  completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
-  percent: 0
+  total_phases: 5
 ---
 
 # State
@@ -142,10 +142,11 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Current Position
 
-Phase: Not started (defining requirements)
-Plan: —
-Status: Defining requirements
-Last activity: 2026-10-07 — Milestone v1.2 started
+Phase: 11 of Phases 11-15 (Lease authority) — not started
+Total Phases: 5 (Phases 11-15)
+Plan: — (Plans TBD)
+Status: Ready to plan
+Last activity: 2026-10-07 — v1.2 roadmap created: 5 phases (11-15), 25/25 requirements mapped
 
 ## Deferred Items
 
@@ -157,4 +158,4 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Operator Next Steps
 
-- Start the next milestone with /gsd-new-milestone
+- Discuss Phase 11 (Lease authority) with /gsd-discuss-phase 11. Phase 15 (Lessons bank) has no dependencies and can start alongside it.

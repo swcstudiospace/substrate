@@ -78,8 +78,33 @@ Decisions confirmed with the milestone summary (2026-10-07):
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
+| LEASE-01 | Phase 11 | Pending |
+| LEASE-02 | Phase 11 | Pending |
+| LEASE-03 | Phase 11 | Pending |
+| LEASE-04 | Phase 11 | Pending |
+| LEASE-05 | Phase 12 | Pending |
+| LEASE-06 | Phase 12 | Pending |
+| LEASE-07 | Phase 12 | Pending |
+| LEASE-08 | Phase 12 | Pending |
+| LEASE-09 | Phase 12 | Pending |
+| HAND-01 | Phase 13 | Pending |
+| HAND-02 | Phase 13 | Pending |
+| HAND-03 | Phase 13 | Pending |
+| PROOF-02 | Phase 13 | Pending |
+| INST-01 | Phase 14 | Pending |
+| INST-02 | Phase 14 | Pending |
+| INST-03 | Phase 14 | Pending |
+| INST-04 | Phase 14 | Pending |
+| INST-05 | Phase 14 | Pending |
+| PROOF-03 | Phase 14 | Pending |
+| LES-01 | Phase 15 | Pending |
+| LES-02 | Phase 15 | Pending |
+| LES-03 | Phase 15 | Pending |
+| LES-04 | Phase 15 | Pending |
+| LES-05 | Phase 15 | Pending |
+| PROOF-04 | Phase 15 | Pending |
 
-**Coverage:** 25 requirements; mapping is filled in by the roadmap.
+**Coverage:** 25/25 v1.2 requirements mapped to Phases 11-15; no orphans, no duplicates.
 
 ---
 *Requirements defined: 2026-10-07*
