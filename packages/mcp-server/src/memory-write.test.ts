@@ -1393,25 +1393,38 @@ describe("remedies", () => {
 describe("swarm surfaces — default-deny proven from the outside (ADR 0001 S3)", () => {
 	const swarm = (request: Partial<MemoryWriteRequest>) =>
 		write({ writer: "swarm-a05-be", scope: "repo:acme/widgets", kind: "fact", ...request });
+	// `accepted` alone is a governance verdict, not a durability claim: a success is only
+	// a success when it was read back and the row is actually in the store.
+	const expectStored = (result: MemoryWriteResult, scope: string, kind: string) => {
+		expect(result.outcome).toBe("accepted");
+		expect(result.verified_persisted).toBe(true);
+		const row = store.rows.get(result.entry?.id ?? "");
+		expect(row).toBeDefined();
+		expect(row?.entry.scope).toBe(scope);
+		expect(row?.entry.kind).toBe(kind);
+		expect(row?.entry.writer).toBe("swarm-a05-be");
+	};
 
 	test("a swarm surface writes fact at graph, repo and its own agent scope, and decision at repo", async () => {
 		for (const scope of ["repo:acme/widgets", "graph:ut-abc-0123abcd", "agent:swarm-a05-be"]) {
 			const result = await swarm({ scope, text: `fact at ${scope}` });
-			expect(result.outcome).toBe("accepted");
-			expect(result.verified_persisted).toBe(true);
+			expectStored(result, scope, "fact");
 		}
 		const decision = await swarm({ kind: "decision", text: "use postgres" });
-		expect(decision.outcome).toBe("accepted");
+		expectStored(decision, "repo:acme/widgets", "decision");
+		expect(store.entries()).toHaveLength(4);
 	});
 
-	test("another surface's agent scope and any person scope are refused", async () => {
-		const before = store.entries().length;
+	test("another surface's agent scope, any person scope, and a decision at its own agent scope are refused", async () => {
 		for (const scope of ["agent:swarm-a09-rev", "person:ove"]) {
 			const result = await swarm({ scope, text: `refused at ${scope}` });
 			expect(result.outcome).toBe("denied");
 			expect(result.reason).toBe("rbac.no-grant");
 		}
-		expect(store.entries().length).toBe(before);
+		const decision = await swarm({ scope: "agent:swarm-a05-be", kind: "decision", text: "use postgres" });
+		expect(decision.outcome).toBe("denied");
+		expect(decision.reason).toBe("rbac.no-grant");
+		expect(store.entries()).toEqual([]);
 	});
 
 	test("teachable is not a memory kind, so it is refused before any grant is consulted", async () => {
@@ -1425,15 +1438,25 @@ describe("swarm surfaces — default-deny proven from the outside (ADR 0001 S3)"
 		const result = await swarm({ writer: "unknown" });
 		expect(result.outcome).toBe("denied");
 		expect(result.reason).toBe("rbac.no-grant");
+		expect(store.entries()).toEqual([]);
 	});
 
 	test("a global write by a swarm surface is a proposal, not an entry, without a reviewer token", async () => {
 		const result = await swarm({ scope: "global", text: "swarm-wide pattern" });
 		expect(result.outcome).toBe("conflict");
 		expect(result.reason).toBe("review.required");
+		expect(result.verified_persisted).toBe(false);
+		expect(result.review_id).toBe(store.reviews[0]?.id);
+		expect(store.reviews[0]?.state).toBe("pending");
 		expect(store.entries()).toEqual([]);
+
 		const released = await swarm({ scope: "global", text: "swarm-wide pattern", review_token: REVIEW_TOKEN });
-		expect(released.outcome).toBe("accepted");
+		expectStored(released, "global", "fact");
+		expect(store.entries()).toHaveLength(1);
+		// The proposal is released by the entry that answers it, not left pending beside it.
+		expect(store.reviews).toHaveLength(1);
+		expect(store.reviews[0]?.state).toBe("approved");
+		expect(store.reviews[0]?.entry_id).toBe(released.entry?.id);
 	});
 
 	test("all 15 swarm surfaces hold working grants, own-agent only, and never person", () => {
