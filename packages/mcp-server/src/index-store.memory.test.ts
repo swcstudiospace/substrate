@@ -512,4 +512,78 @@ describeLive("memory governance against a live index", () => {
 		expect(retry.entry?.version).toBe(2);
 		expect(retry.entry?.supersedes).toBe(first.entry!.id);
 	}, 60_000);
+
+	test("a rewrite whose predecessor is replaced under it is a version race, and its key retries at once", async () => {
+		// Two rewrites of one v1, under different keys. The competing one lands in the
+		// window between the loser's read and its insert — run from inside the loser's
+		// `insertEntry`, before it delegates. The real store retires the predecessor
+		// before it inserts, so the loser finds v1 already retired and answers
+		// `standing-moved`: a version race, never the identity race the winner's row
+		// would suggest if the index were met first.
+		const subject = `raced-${RUN}`;
+		const first = await write(a, { subject, text: `${MARKER} the scheduler is cron`, idempotency_key: `${MARKER}-vr-1` });
+		expect(first.outcome).toBe("accepted");
+		expect(first.entry?.version).toBe(1);
+
+		// Held on an object, not a `let`: TypeScript narrows a `let` assigned only inside
+		// a closure to its initial `undefined` at the reads below.
+		const competing: { result?: MemoryWriteResult; raced: boolean } = { raced: false };
+		const racing: MemoryStore = {
+			claimWrite: (input) => b.claimWrite(input),
+			finishWrite: (key, holder, outcome, entryId) => b.finishWrite(key, holder, outcome, entryId),
+			releaseWrite: (key, holder) => b.releaseWrite(key, holder),
+			restoreWrite: (key, holder, reserved) => b.restoreWrite(key, holder, reserved),
+			standingEntry: (identity) => b.standingEntry(identity),
+			insertEntry: async (row, claim) => {
+				if (!competing.raced) {
+					competing.raced = true;
+					competing.result = await write(a, {
+						subject,
+						text: `${MARKER} the scheduler is systemd timers`,
+						expected_version: 1,
+						idempotency_key: `${MARKER}-vr-k2`,
+					});
+				}
+				return await b.insertEntry(row, claim);
+			},
+			readEntry: (id) => b.readEntry(id),
+			quarantineEntry: (row) => b.quarantineEntry(row),
+			enqueueReview: (row) => b.enqueueReview(row),
+			releaseReviews: (hash, entryId, by) => b.releaseReviews(hash, entryId, by),
+		};
+
+		const rewrite = {
+			subject,
+			text: `${MARKER} the scheduler is a Greptime job`,
+			idempotency_key: `${MARKER}-vr-k1`,
+		};
+		const loser = await write(racing, { ...rewrite, expected_version: 1 });
+
+		const competitor = competing.result;
+		expect(competitor?.outcome).toBe("accepted");
+		expect(competitor?.entry?.version).toBe(2);
+		expect(loser.outcome).toBe("conflict");
+		expect(loser.reason).toBe("version.raced");
+		expect(loser.verified_persisted).toBe(false);
+		// The version in force now — the competitor's — not the v1 this write read.
+		expect(loser.current_version).toBe(2);
+
+		// Rolled back: the competitor is the one entry in force, and nothing of the
+		// loser's landed.
+		const standing = (await raw`
+			select id, version from memory_entries
+			where subject = ${subject} and superseded_by is null`) as Array<{ id: string; version: number }>;
+		expect(standing.map((row) => row.id)).toEqual([competitor!.entry!.id]);
+		const record = (await raw`
+			select outcome from memory_writes where idempotency_key = ${`${MARKER}-vr-k1`}`) as Array<{ outcome: string }>;
+		expect(record[0]?.outcome).toBe("conflict");
+
+		// Straight back, same key, against the version the conflict named.
+		const retry = await write(b, { ...rewrite, expected_version: loser.current_version ?? undefined });
+		expect(retry.outcome).toBe("accepted");
+		expect(retry.verified_persisted).toBe(true);
+		expect(retry.idempotency_key).toBe(`${MARKER}-vr-k1`);
+		expect(retry.entry?.version).toBe(3);
+		expect(retry.entry?.supersedes).toBe(competitor!.entry!.id);
+	});
 });

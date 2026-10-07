@@ -196,15 +196,25 @@ class FakeStore implements MemoryStore {
 		if (owner?.holder !== claim.holder || owner.outcome !== "in-flight") {
 			return { ok: false, reason: "claim-lost" };
 		}
+		// Same order as the real store, which retires the predecessor before it inserts:
+		// a predecessor somebody else already replaced is `standing-moved`, whatever the
+		// insert would have met. Checked before the conflict key, or a rewrite that lost
+		// to another rewrite reads here as the identity race Postgres never reports for it.
+		if (row.supersedes) {
+			const predecessor = this.rows.get(row.supersedes);
+			if (!predecessor || predecessor.entry.superseded_by) return { ok: false, reason: "standing-moved" };
+		}
 		// `memory_standing_idx` is a unique partial index in the real store, so the fake
 		// enforces it too. Otherwise a row that should never have carried a conflict key
-		// passes here and fails only against Postgres.
+		// passes here and fails only against Postgres. The predecessor is excluded because
+		// the real store has already retired it by the time its insert meets the index.
 		//
 		// Refused rather than thrown, because that is what the real store does: the
 		// insert declines under `on conflict … do nothing` and the transaction rolls
-		// back. A throw here would be the bug this refusal replaced — the gate cannot
-		// tell a rolled-back statement from a committed one, so it keeps the loser's key
-		// in flight for a race the loser could have retried at once.
+		// back, retire included — which is why nothing here is mutated before both
+		// checks pass. A throw here would be the bug this refusal replaced — the gate
+		// cannot tell a rolled-back statement from a committed one, so it keeps the
+		// loser's key in flight for a race the loser could have retried at once.
 		if (row.conflict_key) {
 			const clash = [...this.rows.values()].find(
 				(held) => held.conflict_key === row.conflict_key && !held.entry.superseded_by && held.entry.id !== row.supersedes,
@@ -213,8 +223,7 @@ class FakeStore implements MemoryStore {
 		}
 		if (row.supersedes) {
 			const predecessor = this.rows.get(row.supersedes);
-			if (!predecessor || predecessor.entry.superseded_by) return { ok: false, reason: "standing-moved" };
-			predecessor.entry = { ...predecessor.entry, superseded_by: row.id };
+			if (predecessor) predecessor.entry = { ...predecessor.entry, superseded_by: row.id };
 		}
 		const entry: MemoryEntry = {
 			id: row.id,
@@ -661,7 +670,11 @@ describe("conflict — versioned decisions", () => {
 	});
 
 	test("a decision replaced under a write reports the version in force now, not the one it read", async () => {
-		await write({ ...decision, text: "the runtime is herdr" });
+		const first = await write({ ...decision, text: "the runtime is herdr" });
+		// Another rewrite against the same v1 lands between this write's read and its
+		// insert. The real store retires the predecessor before it inserts, so it finds
+		// v1 already retired and answers `standing-moved` — a version race, not the
+		// identity race the winner's row would suggest if the insert were checked first.
 		const hook = store.onInsert;
 		store.onInsert = async () => {
 			store.onInsert = hook;
@@ -676,9 +689,16 @@ describe("conflict — versioned decisions", () => {
 		});
 
 		expect(loser.outcome).toBe("conflict");
-		expect(loser.reason).toBe("standing.raced");
+		expect(loser.reason).toBe("version.raced");
+		// The version to re-submit against is the winner's, not the v1 this write read.
 		expect(loser.current_version).toBe(2);
-		expect(loser.conflict_with).toBe(store.standing()[0]?.id);
+		// `conflict_with` names the entry this write was replacing.
+		expect(loser.conflict_with).toBe(first.entry?.id);
+		// Rolled back, retire included: the winner stays in force and v1 stays retired by it.
+		expect(store.standing()).toHaveLength(1);
+		expect(store.standing()[0]?.text).toBe("the runtime is Orca");
+		expect(store.entries()).toHaveLength(2);
+		expect(store.writes.get("loser")?.outcome).toBe("conflict");
 
 		const retry = await write({
 			...decision,
