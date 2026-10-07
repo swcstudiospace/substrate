@@ -45,13 +45,67 @@ export const EVENT_COLUMNS = [
 export const EVENT_COLUMN_LIST = EVENT_COLUMNS.map((column) => `"${column}"`).join(", ");
 
 /**
- * How many of a session's newest rows `lastHash` reads to find the chain tip.
+ * Columns a caller may narrow a ledger read by.
  *
- * More than one, because `ORDER BY "ts" DESC LIMIT 1` cannot break a tie: the
- * table is in append_mode, so two events may share a millisecond and Greptime is
- * free to return either first. Bounded, because this runs on every append.
+ * A fixed set, and the only place a column name reaches a `WHERE` clause: a
+ * queried column is never a caller's string, so no filter can name `payload`,
+ * reach another table or add a clause of its own. What a caller supplies is only
+ * ever a *value*, and every value goes through {@link quote}.
  */
-const TIP_WINDOW = 50;
+export const QUERYABLE_COLUMNS = [
+	"session_id",
+	"graph_id",
+	"node_id",
+	"linear_identifier",
+	"repo",
+	"branch",
+	"surface",
+	"kind",
+	"actor",
+] as const satisfies ReadonlyArray<keyof SubstrateEvent>;
+export type QueryableColumn = (typeof QUERYABLE_COLUMNS)[number];
+
+/**
+ * Rows one read may return.
+ *
+ * The cap is the reply's, not the ledger's: a query answers an agent over MCP, and
+ * 500 events already exceeds what is useful to read in a turn. `payload` is up to
+ * 16 KB an event, which is why it is only selected when asked for.
+ */
+export const MAX_QUERY_LIMIT = 500;
+export const DEFAULT_QUERY_LIMIT = 50;
+
+/** A ledger read. Values are expected already normalised — see `Substrate.queryEvents`. */
+export interface EventQuery {
+	/** Equality filters, keyed by column. `undefined` and `null` values are dropped. */
+	match?: Partial<Record<QueryableColumn, string | null | undefined>>;
+	/** Inclusive ISO bounds on `ts`. */
+	since?: string;
+	until?: string;
+	limit?: number;
+	/** `desc` (the default) reads the newest events first. */
+	order?: "asc" | "desc";
+	includePayload?: boolean;
+}
+
+/** Clamp to a whole number of rows inside the cap; anything unusable falls back to the default. */
+export function queryLimit(limit: number | undefined): number {
+	if (limit === undefined || !Number.isFinite(limit)) return DEFAULT_QUERY_LIMIT;
+	return Math.min(Math.max(Math.trunc(limit), 1), MAX_QUERY_LIMIT);
+}
+
+/**
+ * Upper bound on the rows `lastHash` will pull for one session.
+ *
+ * This is a memory guard, not an ordering assumption. It deliberately cannot be
+ * reached by ordinary use — a window small enough to be crossed would reintroduce
+ * the bug it replaced, where a backfill appending older source timestamps pushed
+ * the real chain tip out of view and the next append forked the chain.
+ */
+const MAX_SESSION_ROWS = 10_000;
+
+/** How long a definite `append_mode` answer is trusted before it is asked again. */
+const APPEND_MODE_TTL_MS = 30_000;
 
 /**
  * The tip of a hash chain: the event nothing else points back to.
@@ -187,6 +241,7 @@ export class GreptimeClient {
 	 * rather than it being one line in a boot log that has scrolled away.
 	 */
 	appendMode: boolean | null = null;
+	private appendModeCheckedAt = 0;
 
 	constructor(
 		private readonly config: GreptimeConfig,
@@ -200,6 +255,18 @@ export class GreptimeClient {
 			headers.authorization = `Basic ${basic}`;
 		}
 		return headers;
+	}
+
+	/**
+	 * Whether the server's quoting dialect is known.
+	 *
+	 * While it is not, every event carrying a backslash is refused — including one
+	 * whose payload JSON introduces it — so the ledger is only partly writable, and
+	 * a health check that ignored this would report a writable ledger while events
+	 * were being turned away.
+	 */
+	get quotingDialectKnown(): boolean {
+		return this.dialectProbed;
 	}
 
 	/** Quote using whatever dialect the server reported. */
@@ -352,16 +419,30 @@ export class GreptimeClient {
 	}
 
 	/**
-	 * Whether the ledger is proven append-only, asking again if it is not yet known.
+	 * Whether the ledger is proven append-only, re-asking when the answer is stale.
 	 *
-	 * `appendMode` is cached once answered, so this costs a query only while the
-	 * answer is still `null` — a `SHOW CREATE TABLE` that failed at boot, say. That
-	 * retry matters: without it one transient failure would leave the write path
-	 * refusing every event for the life of the process.
+	 * The answer cannot be cached for the life of the process. Fixing a
+	 * deduplicating table means recreating it *outside* this process — the client
+	 * refuses `ALTER` and `RENAME` by design — so a permanently cached `false` would
+	 * leave the write path refusing every event, and `/healthz` red, until someone
+	 * thought to restart the service. The operator would have done the documented
+	 * fix and seen nothing change. The converse matters too: a table swapped back to
+	 * a deduplicating one must stop being treated as safe.
+	 *
+	 * So a definite answer is trusted for {@link APPEND_MODE_TTL_MS} and an unknown
+	 * one is retried immediately, which also keeps a transient `SHOW CREATE TABLE`
+	 * failure from becoming a lasting outage. The steady-state cost is one cheap
+	 * query per TTL, not one per append.
 	 */
-	async ensureAppendMode(): Promise<boolean | null> {
-		if (this.appendMode !== null) return this.appendMode;
-		return this.appendModeEnabled();
+	async ensureAppendMode(now = Date.now()): Promise<boolean | null> {
+		if (this.appendMode !== null && now - this.appendModeCheckedAt < APPEND_MODE_TTL_MS) {
+			return this.appendMode;
+		}
+		const answer = await this.appendModeEnabled();
+		// A failed check leaves the previous answer in place rather than widening the
+		// refusal; the next call retries, because `appendModeCheckedAt` did not move.
+		if (answer !== null) this.appendModeCheckedAt = now;
+		return answer ?? this.appendMode;
 	}
 
 	/**
@@ -406,16 +487,68 @@ export class GreptimeClient {
 		await this.sql(`INSERT INTO "agent_events" (${EVENT_COLUMN_LIST}) VALUES (${values})`);
 	}
 
-	/** Latest event hash for a session — the `prev` of the next one. */
+	/**
+	 * Latest event hash for a session — the `prev` of the next one.
+	 *
+	 * Reads the whole session rather than a window of its newest rows, because `ts`
+	 * is collector-supplied and so is not append order: the Grok collector passes
+	 * the source timestamp through, and its backfill pass appends events older than
+	 * everything already stored. A window ordered by `ts` would not contain the real
+	 * chain tip, and the next append would chain onto a hash that already had a
+	 * successor — forking the session. Only `hash` and `prev` are selected, so the
+	 * read stays small even for a long session.
+	 *
+	 * `"id"` breaks a same-millisecond tie so the order is at least stable across
+	 * calls; it is a random UUID, so deterministic but arbitrary, which is why
+	 * `chainTip` decides the tip from `prev` rather than from position.
+	 */
 	async lastHash(sessionId: string): Promise<string | null> {
-		// `"id"` breaks a same-millisecond tie so the read order is at least stable
-		// across calls; it is a random UUID, so it is deterministic but arbitrary,
-		// which is why `chainTip` still decides which row is actually newest.
 		const rows = await this.sql(
 			`SELECT "hash", "prev" FROM "agent_events" WHERE "session_id" = ${this.q(sessionId)}
-			 ORDER BY "ts" DESC, "id" DESC LIMIT ${TIP_WINDOW}`,
+			 ORDER BY "ts" DESC, "id" DESC LIMIT ${MAX_SESSION_ROWS}`,
 		);
 		return chainTip(rows);
+	}
+
+	/**
+	 * A window of the ledger, narrowed by whole-column equality and a time bound.
+	 *
+	 * The read counterpart of `insertEvent`, and the reason a desk seat needs no
+	 * Greptime credential to look at the trail: the statement is built here from
+	 * {@link QUERYABLE_COLUMNS}, so a caller contributes values and never SQL.
+	 *
+	 * `payload` is excluded unless asked for. It is the one unbounded column — up to
+	 * 16 KB an event — and a 500-row reply carrying it would be megabytes of MCP
+	 * response for a question usually answered by the summaries.
+	 *
+	 * `ORDER BY "ts"` is presentation order, not append order: `ts` is
+	 * collector-supplied and two events can share a millisecond. `hash` and `prev`
+	 * come back on every row so a caller can follow the chain itself, and
+	 * `verifyGraph` is what actually checks it.
+	 */
+	async queryEvents(query: EventQuery = {}): Promise<Array<Record<string, unknown>>> {
+		// A read cannot corrupt anything, so an unknown dialect is not fatal here as it
+		// is on the write path: quoting defaults to escaping, which is the injection-safe
+		// assumption either way. Probing only sharpens matching on a value that carries a
+		// backslash, which against the other dialect would simply match no rows.
+		await this.probeDialect().catch(() => undefined);
+
+		const columns = query.includePayload ? EVENT_COLUMNS : EVENT_COLUMNS.filter((column) => column !== "payload");
+		const where: string[] = [];
+		for (const column of QUERYABLE_COLUMNS) {
+			const value = query.match?.[column];
+			if (value === undefined || value === null) continue;
+			where.push(`"${column}" = ${this.q(value)}`);
+		}
+		if (query.since !== undefined) where.push(`"ts" >= ${this.q(query.since)}`);
+		if (query.until !== undefined) where.push(`"ts" <= ${this.q(query.until)}`);
+
+		const direction = query.order === "asc" ? "ASC" : "DESC";
+		return this.sql(
+			`SELECT ${columns.map((column) => `"${column}"`).join(", ")} FROM "agent_events"` +
+				`${where.length > 0 ? ` WHERE ${where.join(" AND ")}` : ""}` +
+				` ORDER BY "ts" ${direction}, "id" ${direction} LIMIT ${queryLimit(query.limit)}`,
+		);
 	}
 
 	/**
@@ -428,6 +561,72 @@ export class GreptimeClient {
 		return this.sql(
 			`SELECT ${EVENT_COLUMN_LIST} FROM "agent_events" WHERE "${column}" = ${this.q(value)}
 			 ORDER BY "ts", "id"`,
+		);
+	}
+
+	/**
+	 * Whether an event id names a real event.
+	 *
+	 * Exists so the memory governance gate can check a `source_event` before honouring
+	 * the `verified-by-test` trust that rests on it. Reads one column and returns a
+	 * boolean rather than the row: the caller is establishing that provenance exists,
+	 * not reading it, and a lookup that handed back the event would invite callers to
+	 * start using this as a general event fetch.
+	 */
+	async hasEvent(eventId: string): Promise<boolean> {
+		const rows = await this.sql(`SELECT "id" FROM "agent_events" WHERE "id" = ${this.q(eventId)} LIMIT 1`);
+		return rows.length > 0;
+	}
+
+	/**
+	 * A repo's newest events, newest first, for `coord.drift_scan`.
+	 *
+	 * Every stored column, because a drift scan compares the trail against two
+	 * other records and needs the session, the node and the payload to do it —
+	 * the payload in particular, since that is where the git collector puts the
+	 * commit sha. `"id"` breaks a same-millisecond tie so the window is stable
+	 * across calls.
+	 */
+	async recentForRepo(repo: string, limit = 200): Promise<Array<Record<string, unknown>>> {
+		const capped = Number.isFinite(limit) ? Math.min(2000, Math.max(1, Math.trunc(limit))) : 200;
+		return this.sql(
+			`SELECT ${EVENT_COLUMN_LIST} FROM "agent_events" WHERE "repo" = ${this.q(repo)}
+			 ORDER BY "ts" DESC, "id" DESC LIMIT ${capped}`,
+		);
+	}
+
+	/**
+	 * Commit events in this repo that might name `sha`, newest first.
+	 *
+	 * A drift scan cannot answer "was this commit logged?" from its window of
+	 * recent activity: a busy repo pushes a perfectly well-logged commit out of
+	 * the newest N events, and the scan then invents `git.tip_unlogged`. So the
+	 * question is asked directly instead of inferred from the window.
+	 *
+	 * Matched on the first seven characters, because the collector stores `git
+	 * rev-parse --short` and the caller has the full hash: any abbreviation git
+	 * produces is at least seven characters and begins with those. The prefix is
+	 * validated hex, so it cannot carry a LIKE wildcard, and the candidates are
+	 * returned rather than a boolean — seven hex characters can appear by
+	 * coincidence, so the caller confirms each against the sha it asked about.
+	 *
+	 * Both patterns are anchored to the shape the sha is actually *stored* in —
+	 * `commit <sha> <subject>` in the summary, `"sha":"<sha>"` in the payload —
+	 * which are the two places {@link extractCommitSha} reads it from. A bare
+	 * `%<prefix>%` would also match any event that merely mentioned those seven
+	 * characters somewhere in its text, and enough of those could fill the row
+	 * limit and push the real commit event out of the answer — reporting the tip
+	 * as unlogged because too many things talked about it.
+	 */
+	async commitEventsNaming(repo: string, sha: string, limit = 20): Promise<Array<Record<string, unknown>>> {
+		if (!/^[0-9a-f]{7,40}$/i.test(sha)) return [];
+		const prefix = sha.slice(0, 7).toLowerCase();
+		const capped = Math.min(100, Math.max(1, Math.trunc(limit)));
+		return this.sql(
+			`SELECT "ts", "id", "surface", "summary", "payload" FROM "agent_events"
+			 WHERE "repo" = ${this.q(repo)} AND "kind" = 'commit'
+			   AND ("summary" LIKE ${this.q(`%commit ${prefix}%`)} OR "payload" LIKE ${this.q(`%"sha":"${prefix}%`)})
+			 ORDER BY "ts" DESC LIMIT ${capped}`,
 		);
 	}
 

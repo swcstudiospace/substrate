@@ -21,7 +21,9 @@
  *      — the quoting dialect is right, which is what makes the hash chain
  *      verifiable at all
  *   4. the chain over the events just written verifies
- *   5. the client refuses to UPDATE or DELETE what it wrote
+ *   5. `events_query` reads those events back — the WHERE, ORDER BY, LIMIT and ISO
+ *      time bound that only a real server's parser can confirm
+ *   6. the client refuses to UPDATE or DELETE what it wrote
  *
  * It appends to the real ledger, which is append-only, so the rows it writes
  * cannot be cleaned up afterwards. They are tagged with a `smoke-` graph id and
@@ -149,7 +151,69 @@ check(
 const verified = await substrate.verifyGraph(graphId);
 check(verified.ok, `the hash chain over ${graphId} verifies`, verified.ok ? undefined : verified.reason);
 
-// ── 5. the ledger refuses to be rewritten ────────────────────────────────────
+// ── 5. the read path a desk seat takes ───────────────────────────────────────
+// `readEvents` above is the verifier's read: one column, no bounds. This is the
+// statement `events_query` builds, and the parts no mock can prove are how a real
+// server parses an ISO literal against a TIMESTAMP column and how it orders and
+// limits the result.
+const queried = await substrate.queryEvents({ graph_id: graphId, order: "asc", limit: 10 });
+check(
+	queried.error === undefined && queried.count === emitted.length,
+	`events_query returns ${queried.count} of ${emitted.length} rows for ${graphId}`,
+	queried.error,
+);
+
+const byHash = new Map(queried.events.map((event) => [event.hash, event]));
+check(
+	emitted.every((result) => byHash.has(result.event.hash)),
+	"every appended event comes back under the hash it was stored with",
+);
+// Greptime hands a TIMESTAMP back as an integer; the chain hashed an ISO string, so
+// this is the round trip the chain depends on.
+check(
+	emitted.every((result) => byHash.get(result.event.hash)?.ts === result.event.ts),
+	"a queried timestamp round-trips to the ISO string the chain hashed",
+);
+check(
+	queried.events.every((event) => !("payload" in event)),
+	"the payload is left out of a query that did not ask for it",
+);
+
+const oneRow = await substrate.queryEvents({ graph_id: graphId, include_payload: true, limit: 1 });
+check(
+	oneRow.error === undefined && oneRow.count === 1 && typeof oneRow.events[0]?.payload === "object",
+	"include_payload returns one parsed payload",
+	oneRow.error,
+);
+check(oneRow.truncated, "a full window reports itself truncated");
+
+const firstTs = Date.parse(emitted[0]?.event.ts ?? "");
+const window = await substrate.queryEvents({
+	graph_id: graphId,
+	since: new Date(firstTs - 60_000).toISOString(),
+	until: new Date(Date.now() + 60_000).toISOString(),
+});
+check(
+	window.error === undefined && window.count === emitted.length,
+	"an ISO time window bounds a live TIMESTAMP column",
+	window.error,
+);
+
+const before = await substrate.queryEvents({ graph_id: graphId, until: new Date(firstTs - 60_000).toISOString() });
+check(
+	before.error === undefined && before.count === 0,
+	"a window that excludes them is empty rather than an error",
+	before.error,
+);
+
+const otherKind = await substrate.queryEvents({ graph_id: graphId, kind: "warning" });
+check(
+	otherKind.error === undefined && otherKind.count === 0,
+	"a filter matching nothing is an empty window, not a failure",
+	otherKind.error,
+);
+
+// ── 6. the ledger refuses to be rewritten ────────────────────────────────────
 for (const statement of [
 	`UPDATE "agent_events" SET "summary" = 'rewritten' WHERE "graph_id" = '${graphId}'`,
 	`DELETE FROM "agent_events" WHERE "graph_id" = '${graphId}'`,

@@ -1,17 +1,41 @@
 # Project: Agent Substrate
 
-**Source of truth for architecture:** [Agent Substrate — Build Plan](https://app.notion.com/p/3e4bc1a0c7ae81baafffd1ebd773123d) (Draft v0.2) + [v0.3 SOTA Addendum](https://app.notion.com/p/3ebbc1a0c7ae81b88166e6d28a671e48) (locked 30 Sep 2026)
+**Source of truth for architecture:** [Agent Substrate — Build Plan](https://app.notion.com/p/3e4bc1a0c7ae81baafffd1ebd773123d) (Draft v0.2)
 **Control plane:** Notion "Agent Task Graph" + Linear team Spectrum Web Co
 **Repo:** `swcstudiospace/agent-substrate` (private)
+
+## Current Milestone
+
+**v1.1 Swarm correlation, governed memory and orchestrate integrations** — shipped 2026-10-07 (5 phases: 7, 8, 8.1 inserted, 9, 10; 18/18 requirements). Next milestone not yet defined.
+
+## Current State
+
+Shipped **v1.1** (2026-10-07): ADR 0001 slices S1 (SPE-5052) and S3 (SPE-5054), re-grounded on `origin/main` and ADR 0001. Postgres stays the index, the ledger stays behind `substrate-mcp` only, every client fails open.
+
+- **Swarm identity and binding:** 15 swarm surfaces `swarm-a01-orch`..`swarm-a15-doc` with per-surface tokens; a swarm token cannot emit or claim as another surface (refusal, never re-attribution); MCP-only `graph_bind` binds correlation id to Graph ID race-safely (one winner). agent-substrate #11.
+- **Swarm orchestrate tee:** the swarm run log is teed under one Graph ID per run, attributed per agent, 13 swarm types mapped to existing `EVENT_KINDS`, deduped, fail-open; `orch_plan` mints/binds/registers the Graph ID. agent-swarm #5.
+- **Governed swarm memory:** `swarm/memory.py` writes through the governance gate with no grant change; versioned conflicts carry `current_version` so the client re-submits without searching (Phase 8.1). agent-substrate #12, #13; agent-swarm #6, #7, #8.
+- **ultrathink plan record:** one fail-open `note` event carrying the Graph ID (no prompt text) after planning. claude-ultrathink #19.
+- **Proof:** live end-to-end on real Postgres + GreptimeDB against the three merged mains: 24/24 integration, 7/7 governed swarm memory, and the 8.1 regression (2 POSTs, 0 searches).
+
+## Next Milestone Goals
+
+Candidates only, not commitments — the next milestone is not yet defined:
+
+- ADR S2 leases/handoffs (SPE-5053).
+- ADR S4 `substrate-mcp` wiring into swarm workspaces, one token per agent process (SPE-5055).
+- ADR S5 gate verdicts as events (SPE-5056).
+- Self-improving lessons bank (SPE-5830; governed fact entries recommended).
+- Carried: v1.0 Phase 0 UAT (8 scenarios pending, acknowledged as deferred at the v1.1 close).
 
 ## What this is
 
 Four planes — runtime, memory, skills, ledger — bound by **MCP** for agent-to-substrate and
 **ACP** for client-to-agent, so that every agent on this VPS shares one briefing, one event
-log, one skills library and one task key. v0.3 SOTA adds governance (memory policy, leases, OTLP/SLOs), A2A Agent Cards for Teachable Moments (reverse skills: session observations/edge cases/learnings tracked on Solana devnet), Dragonfly snapshots, all Railway apps (hindsight, ragflow, dragonfly, timescale etc) on/through the substrate.
+log, one skills library and one task key.
 
 Agents in scope: Claude Code, Codex, OpenCode, Pi (Lane A, rivet-agentos) · Hermes, Omp,
-Muse Code, Grok Build (Lane B, Orca + herdr) · Cursor and Grok Bot (Lane C). All apps integrate via connectors/proxies.
+Muse Code, Grok Build (Lane B, Orca) · Cursor and Grok Bot (Lane C).
 
 ## The task key
 
@@ -49,10 +73,7 @@ brief does not call either API on every prompt.
 - **GreptimeDB (events)** — append-only `agent_events` with a `hash`/`prev` chain. External,
   on a separate Railway account.
 - **RAGFlow (docs)** — behind `docs.search`. External. Phase 5.
-- **Dragonfly (cache/snapshots/outbox)** — Railway, for v0.3 circuit breakers and degraded mode.
-- **Hindsight (api/control/llm-bridge/worker)** — Railway observability/evidence, integrated under governance.
 - **Langfuse** keeps LLM traces; Greptime holds the substrate's own log. No duplication.
-**Railway INFRA-R1 apps (from build plan):** greptimedb, timescale, dragonfly, tailscale-vpn, hindsight-api/control/llm-bridge, ragflow + oauth variants, es/redis/storage/mysql, hindsight-worker. All must use substrate (no direct raw access from seats).
 
 ## Departures from the Notion brief (§11), carried forward
 
@@ -64,10 +85,9 @@ brief does not call either API on every prompt.
 - Grok Bot goes through the existing `grok-hermes-connector` (OAuth, redactor, audit log).
 - The skills library is `/root/agent-skills`; the three existing miners are redirected, not
   replaced.
-- A2A Agent Cards (v1.0 Linux Foundation) + Teachable Moments as skills[] (reverse, session-derived) anchored on Solana devnet.
 - `rivet-agentos` is named that way everywhere, to avoid the Agno `agentos-api` container on
   the same host.
-- Solana **devnet**, not testnet. Roots only, never event contents. Teachable anchors included.
+- Solana **devnet**, not testnet. Roots only, never event contents.
 
 ## Corrections found on the VPS (2026-09-23)
 
@@ -78,7 +98,6 @@ brief does not call either API on every prompt.
 - RAGFlow and GreptimeDB are on a **Railway account this MCP connection cannot see**. Both are
   consumed as external endpoints via `/etc/substrate/substrate.env`.
 - Ports 7410 and 6420 are free. Disk is at 90% (40 GB free) — gates Phase 3.
-- v0.3 locked: full memory governance, leases/signed handoffs/drift, OTLP/SLOs/evidence, Grok Bot production loop.
 
 ## Constraints
 
@@ -88,22 +107,25 @@ brief does not call either API on every prompt.
 - **Redact before emitting.** Reuse the connector's `redactor.py` patterns. No Linear, Notion,
   Railway or Greptime credentials in `agent_events`.
 - **No KVM on this host** — cua runs the Docker path; the QEMU path is out.
-- **Enterprise production (v0.3 + user):** per-agent bearer, Dragonfly degraded, multi-tenant (tenant=swc), SLOs (brief p95<800ms, emit≥99.5%), circuit breakers, shared redaction CI, runbooks (red/quarantine/lease), no silos for apps.
 - Secrets live in `/etc/substrate/substrate.env` (0600, root), never in the repo.
-## Governance Plane (Phase 0.5 / v0.3 SOTA)
 
-See `docs/governance.md` for the full plane (policy YAML example, RBAC, quarantine, Dragonfly snapshots/outbox, leases foundations, cross-app wiring plan, C4 diagram).
+## Validated
 
-ADRs (docs/adr/):
-- ADR-0001 Adopt memory governance policy gate with default-deny RBAC and quarantine
-- ADR-0002 Integrate DragonflyDB on Railway for brief snapshots, write outbox and circuit breakers
-- ADR-0003 Lease model and signed handoff foundations for graph coordination
-- ADR-0004 All Railway apps wire through substrate governance (no silos)
-- ADR-0005 Produce governance.md and infra/railway configs (additive)
+- ✓ Swarm identity: 15 per-surface swarm tokens; cross-surface emit/claim refused (REST 403 / MCP `isError`), other surfaces unchanged — v1.1
+- ✓ Binding: `graph_bind` (MCP-only) binds correlation id ↔ Graph ID, race-safe with one winner; binding notes in their own session keep `events_verify` green — v1.1
+- ✓ Tee: swarm run log teed per agent, 13 swarm types mapped to existing `EVENT_KINDS`, deduped, fail-open; hardened transport (no redirects, deadline, proxies, dry runs never tee) — v1.1
+- ✓ Graph ID: `orch_plan` mints, binds and registers one Graph ID per run — v1.1
+- ✓ Memory: swarm memory through the governance gate (kind/scope maps, idempotency key, every gate outcome handled, ok only when accepted and verified_persisted); versioned conflicts carry `current_version` — v1.1
+- ✓ ultrathink: one fail-open `note` event with the Graph ID after planning, session `<host session>:<graph id>` — v1.1
+- ✓ Proof: live end-to-end 24/24 and 7/7 on real Postgres + GreptimeDB, plus the 8.1 regression — v1.1
 
-All changes are additive. No breaking changes to v0.2 brief, events, graph, or MCP tool surfaces. Policy gate sits in front of memory_write only. Dragonfly and leases are new optional paths for degraded/coord.
+## Key Decisions
 
-## Constraints (governance additions)
-- Policy enforced at substrate-mcp (single writer).
-- All Railway apps (hindsight, dragonfly, ragflow, backing) must use substrate paths (bearer or MCP).
-- Tenant=swc on all rows.
+| Decision | Rationale | Outcome |
+|----------|-----------|---------|
+| A swarm token emitting or claiming as another swarm surface is refused, never re-attributed | Token names the caller; silent re-attribution would corrupt attribution | ✓ Good |
+| `graph_bind` is MCP-only; no new event kinds, no `POST /graph` door | ADR 0001 forbids a single agent-swarm surface, new event kinds and a `POST /graph` door | ✓ Good |
+| Versioned conflicts report `current_version` instead of adding a subject search filter | `memory_search` matches bodies only and returns the newest 100 per scope; the re-read stays only as the older-server fallback | ✓ Good |
+
+---
+*Last updated: 2026-10-07 after v1.1 milestone*

@@ -4,8 +4,9 @@
  * Deployment reads /etc/substrate/substrate.env via the systemd unit's
  * EnvironmentFile. Nothing here ever reads a secret from the repo.
  */
-import type { Surface, MemoryPolicy } from "./types.ts";
-import { planesFromEnv } from "./planes.ts";
+import { normalizeTtlSeconds } from "./lease.ts";
+import { parseGrants, type MemoryGrant } from "./memory-policy.ts";
+import { SWARM_SURFACES, type Surface } from "./types.ts";
 
 export interface GreptimeConfig {
 	url: string;
@@ -27,6 +28,24 @@ export interface SubstrateConfig {
 	/** When true, an unauthenticated caller is accepted and attributed by its payload. */
 	allowAnonymous: boolean;
 	/**
+	 * Surface tokens that may also take a node off its holder.
+	 *
+	 * A forced release breaks the guarantee every other agent is relying on, so it
+	 * is not a peer's to use: with every surface's token equally privileged, an
+	 * agent could evict any other and the lease would be advisory again for
+	 * anyone who chose. It is an operator action, and this is who the operators
+	 * are. Empty on a bare local run, where `allowAnonymous` already means the
+	 * machine's owner is the only caller.
+	 *
+	 * These are **also** `SUBSTRATE_TOKEN_*` values, not a separate class of
+	 * credential. A token that authenticated but named no surface would reach the
+	 * authoring routes with no identity, and each of those falls back to the
+	 * request body — so an operator credential could sign a handoff as any agent
+	 * it cared to name. Operator authority is an attribute of a surface token, so
+	 * a forced release is always attributable to whoever used it.
+	 */
+	operatorTokens: Set<string>;
+	/**
 	 * Accept a ledger that is not provably append-only.
 	 *
 	 * The default is to refuse: an `agent_events` without `append_mode` drops one
@@ -40,13 +59,57 @@ export interface SubstrateConfig {
 	 * the state is in `/healthz` and on every append either way.
 	 */
 	allowDeduplicatingLedger: boolean;
-	/** Policy for the memory gate (default-deny RBAC etc). Populated by loadMemoryPolicy. */
-	memoryPolicy: MemoryPolicy;
-	/** Optional live planes. Absent env means the plane is not configured, not broken. */
-	hindsight: { url: string; apiKey: string; bank: string } | null;
-	ragflow: { url: string; apiKey: string } | null;
-	dragonflyUrl: string | undefined;
-	solana: { rpcUrl: string; keypairPath: string } | null;
+	/**
+	 * Tokens that carry reviewer authority over memory.
+	 *
+	 * A reviewer's token is the only thing that installs a `global` memory, records
+	 * `human-confirmed` trust, claims `actor: "human"` or releases a reviewable
+	 * quarantine. It is deliberately not a surface token: a surface token says *who
+	 * is writing*, and this says *a person checked this*. Configuring none leaves
+	 * every one of those paths closed, which is the correct default — the queue
+	 * fills, nothing forged gets through.
+	 */
+	memoryReviewTokens: Set<string>;
+	/**
+	 * Grants appended to the default-deny memory policy, from JSON.
+	 *
+	 * They only ever widen it. There is no env var that narrows the defaults,
+	 * because a policy you can loosen by deleting a variable is not one.
+	 */
+	memoryGrants: readonly MemoryGrant[];
+	/** Default node-lease TTL in seconds. A caller may ask for less or more, within bounds. */
+	leaseTtlSeconds: number;
+	/**
+	 * Keys a handoff packet's signature is verified against, by key id.
+	 *
+	 * More than one so a key can be rotated without invalidating the packets
+	 * already in the ledger: the new key signs, the old one still verifies.
+	 */
+	handoffKeys: Map<string, string>;
+	/** The key id new packets are signed with. Null when no key is configured. */
+	handoffKeyId: string | null;
+	/**
+	 * Where the hash-chained MCP audit is written. `null` keeps it in memory.
+	 *
+	 * Separate from the Greptime ledger on purpose — see `docs/mcp-audit.md`. A
+	 * deployment sets `SUBSTRATE_AUDIT_PATH`; a bare local run does not, and boots
+	 * with a warning rather than refusing every fail-closed tool because
+	 * `/var/lib/substrate` does not exist.
+	 */
+	audit: { path: string | null };
+	/**
+	 * Withdraw a claim whose event did not reach the ledger.
+	 *
+	 * `null` means "decide from the deployment": on when a ledger is configured, off
+	 * when there is none, because a local run with no `GREPTIME_URL` would otherwise
+	 * have every claim withdrawn. `SUBSTRATE_CLAIM_REQUIRE_LEDGER` forces either way.
+	 */
+	requireRecordedClaims: boolean | null;
+}
+
+/** "swarm-a05-be" → "SUBSTRATE_TOKEN_SWARM_A05_BE": the inverse of `envSuffixToSurface`. */
+export function tokenEnvName(surface: Surface): string {
+	return `SUBSTRATE_TOKEN_${surface.toUpperCase().replace(/-/g, "_")}`;
 }
 
 /** SUBSTRATE_TOKEN_GROK_BUILD → "grok-build" */
@@ -63,9 +126,36 @@ function readTokens(env: Record<string, string | undefined>): Map<string, Surfac
 	return tokens;
 }
 
+/**
+ * The signing key and whatever previous key is still being honoured.
+ *
+ * A packet names the key id it was signed with, so rotation is: move the live
+ * key to `SUBSTRATE_HANDOFF_KEY_PREV`, put the new one in
+ * `SUBSTRATE_HANDOFF_KEY`, give it a new id. Packets signed either side of that
+ * still verify, and nothing in the append-only ledger becomes unreadable.
+ */
+function readHandoffKeys(env: Record<string, string | undefined>): {
+	handoffKeys: Map<string, string>;
+	handoffKeyId: string | null;
+} {
+	const keys = new Map<string, string>();
+	const active = env.SUBSTRATE_HANDOFF_KEY?.trim();
+	const activeId = env.SUBSTRATE_HANDOFF_KEY_ID?.trim() || "k1";
+	const previous = env.SUBSTRATE_HANDOFF_KEY_PREV?.trim();
+	const previousId = env.SUBSTRATE_HANDOFF_KEY_PREV_ID?.trim() || "k0";
+	if (previous) keys.set(previousId, previous);
+	// Set last, so a misconfiguration that gives both keys the same id leaves the
+	// live key in place rather than the retired one.
+	if (active) keys.set(activeId, active);
+	return { handoffKeys: keys, handoffKeyId: active ? activeId : null };
+}
+
 export function loadConfig(env: Record<string, string | undefined> = process.env): SubstrateConfig {
 	const greptimeUrl = env.GREPTIME_URL?.trim();
+	const leaseTtl = Number(env.SUBSTRATE_LEASE_TTL_SECONDS);
 	return {
+		...readHandoffKeys(env),
+		leaseTtlSeconds: normalizeTtlSeconds(Number.isFinite(leaseTtl) ? leaseTtl : undefined),
 		host: env.SUBSTRATE_HOST?.trim() || "127.0.0.1",
 		port: Number(env.SUBSTRATE_PORT ?? 7410),
 		greptime: greptimeUrl
@@ -84,32 +174,144 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		// No tokens configured at all means a local dev run; requiring auth then
 		// would just lock the operator out of their own machine.
 		allowAnonymous: readTokens(env).size === 0,
+		operatorTokens: new Set(
+			(env.SUBSTRATE_OPERATOR_TOKENS ?? "")
+				.split(",")
+				.map((token) => token.trim())
+				.filter((token) => token.length > 0),
+		),
 		allowDeduplicatingLedger: /^(1|true|yes)$/i.test(env.SUBSTRATE_ALLOW_DEDUPLICATING_LEDGER?.trim() ?? ""),
-		memoryPolicy: loadMemoryPolicy(env),
-		...planesFromEnv(env),
+		memoryReviewTokens: readReviewTokens(env.SUBSTRATE_MEMORY_REVIEW_TOKENS),
+		memoryGrants: parseGrants(env.SUBSTRATE_MEMORY_GRANTS, (message) =>
+			process.stderr.write(`[substrate] ${message}\n`),
+		),
+		audit: { path: env.SUBSTRATE_AUDIT_PATH?.trim() || null },
+		requireRecordedClaims: booleanOrNull(env.SUBSTRATE_CLAIM_REQUIRE_LEDGER),
 	};
+}
+
+/** Comma- or whitespace-separated, so an operator can wrap the line in the env file. */
+function readReviewTokens(raw: string | undefined): Set<string> {
+	return new Set(
+		(raw ?? "")
+			.split(/[\s,]+/)
+			.map((token) => token.trim())
+			// A short string is a placeholder or a typo, not a token, and accepting one
+			// would hand reviewer authority to anybody who guessed it.
+			.filter((token) => token.length >= 16),
+	);
+}
+
+/** `null` when unset, so the caller can tell "not configured" from "configured false". */
+function booleanOrNull(raw: string | undefined): boolean | null {
+	const value = raw?.trim();
+	if (!value) return null;
+	if (/^(1|true|yes)$/i.test(value)) return true;
+	if (/^(0|false|no)$/i.test(value)) return false;
+	return null;
+}
+
+function bearer(authorization: string | null): string | null {
+	if (!authorization) return null;
+	const token = authorization.replace(/^Bearer\s+/i, "").trim();
+	return token.length > 0 ? token : null;
 }
 
 /** Resolve a request's bearer token to the surface it belongs to. */
 export function surfaceForToken(config: SubstrateConfig, authorization: string | null): Surface | null {
-	if (!authorization) return null;
-	const token = authorization.replace(/^Bearer\s+/i, "").trim();
-	return config.tokens.get(token) ?? null;
+	const token = bearer(authorization);
+	return token === null ? null : config.tokens.get(token) ?? null;
 }
 
-/** Policy loader for memory governance gate. Skeleton returns a static default-deny policy.
- * Real loader (later) will read YAML from SUBSTRATE_MEMORY_POLICY or /etc/substrate/ without new third-party packages.
+/**
+ * Whether this request may take a node off its holder.
+ *
+ * On a bare local run — no surface tokens at all, so `allowAnonymous` — the
+ * caller is the machine's owner and the answer is yes; there is nobody else to
+ * protect the lease from. Once tokens exist, an ordinary surface token is not
+ * enough: the token must also be listed as an operator's, because a forced
+ * release is exactly the thing one agent must not be able to do to another.
  */
-export function loadMemoryPolicy(env: Record<string, string | undefined> = process.env): MemoryPolicy {
-	// default-deny per v0.3 spec; rules populated from external policy source in full impl
-	return {
-		version: "0.1-skel",
-		defaultAction: "deny",
-		rules: [],
-		conflictStrategy: {
-			todo: "last-write-wins",
-			decision: "versioned",
-			warning: "require-review",
-		},
-	};
+export function isOperator(config: SubstrateConfig, authorization: string | null): boolean {
+	if (config.allowAnonymous && config.operatorTokens.size === 0) return true;
+	const token = bearer(authorization);
+	return token !== null && config.operatorTokens.has(token);
+}
+
+/**
+ * Whether a presented token carries reviewer authority.
+ *
+ * Fail-closed by construction: a missing token, an empty one and an unknown one
+ * are the same answer, and with no reviewer tokens configured the answer is always
+ * no. Never logs the token — a rejected credential in a log is still a credential
+ * in a log.
+ */
+export function isReviewToken(config: SubstrateConfig, token: string | undefined): boolean {
+	if (typeof token !== "string") return false;
+	const trimmed = token.trim();
+	return trimmed.length > 0 && config.memoryReviewTokens.has(trimmed);
+}
+
+/**
+ * Configuration that will not do what the operator intended, reported at boot.
+ *
+ * A warning has to say what is *actually* true of the running deployment, or it
+ * costs more than it saves: an operator reading the wrong reason fixes the wrong
+ * thing, and here the two reasons lead in opposite directions — one says add a
+ * surface token, the other says you have no authentication at all.
+ *
+ * With surface tokens configured, a token listed only as an operator's can never
+ * authenticate: the HTTP surface requires a token that names a surface, so it
+ * would look configured and silently do nothing.
+ *
+ * With no surface tokens at all, the opposite holds. `allowAnonymous` lets every
+ * caller in unauthenticated, and `isOperator` still honours the operator token —
+ * so it does work, and it is the only thing gating anything.
+ */
+export function configWarnings(config: SubstrateConfig): string[] {
+	const warnings: string[] = [];
+	if (config.operatorTokens.size === 0) return warnings;
+
+	if (config.allowAnonymous) {
+		warnings.push(
+			"operator tokens are set but no SUBSTRATE_TOKEN_* surface token is, so every caller is accepted " +
+				"unauthenticated and attributed by its own payload. The operator tokens do work — they gate a forced " +
+				"release — but nothing else is gated at all.",
+		);
+		return warnings;
+	}
+
+	if ([...config.operatorTokens].some((token) => !config.tokens.has(token))) {
+		warnings.push(
+			"an operator token is not also a SUBSTRATE_TOKEN_* surface token, so it cannot authenticate at all; " +
+				"operator authority is an attribute of a surface token",
+		);
+	}
+	return warnings;
+}
+
+/**
+ * Swarm surfaces that have no token, reported at boot.
+ *
+ * Only a deployment that has authentication is told: a bare local run (no
+ * `SUBSTRATE_TOKEN_*` at all) accepts every caller anonymously, and a warning there
+ * would be noise about a setup that is working as intended. Once any token is set, an
+ * agent without its own cannot authenticate — the server answers it 401 rather than
+ * accepting it anonymously — so a missing one is a swarm seat that will be locked out
+ * and the operator should hear about it at boot, not from the first failed run.
+ *
+ * Separate from `configWarnings` because it describes an absence the operator may have
+ * chosen (a deployment that does not run the swarm), not a configuration that
+ * contradicts itself. One message, naming every variable, so the list is one grep.
+ */
+export function swarmTokenWarnings(config: SubstrateConfig): string[] {
+	if (config.allowAnonymous) return [];
+	const held = new Set(config.tokens.values());
+	const missing = SWARM_SURFACES.filter((surface) => !held.has(surface));
+	if (missing.length === 0) return [];
+	return [
+		`no token for ${missing.length} swarm surface${missing.length === 1 ? "" : "s"} ` +
+			`(${missing.map(tokenEnvName).join(", ")}); a swarm agent without its own token is refused with 401, ` +
+			"not accepted anonymously",
+	];
 }

@@ -12,9 +12,12 @@ import {
 	AppendOnlyViolation,
 	assertAppendOnly,
 	chainTip,
+	DEFAULT_QUERY_LIMIT,
 	EVENT_COLUMNS,
 	GreptimeClient,
 	GreptimeError,
+	MAX_QUERY_LIMIT,
+	queryLimit,
 	quote,
 } from "./greptime.ts";
 import type { GreptimeConfig } from "./config.ts";
@@ -382,6 +385,47 @@ describe("ensureAppendMode", () => {
 		expect(sql).toHaveLength(1);
 	});
 
+	test("re-asks once a definite answer goes stale, so an out-of-band recreate is seen", async () => {
+		// The trap this closes: the documented fix recreates the table *outside* this
+		// process, so a permanently cached `false` would leave every append refused and
+		// /healthz red until someone restarted the service — the operator would do the
+		// documented fix and see nothing change.
+		let ddl = "CREATE TABLE ... ENGINE=mito";
+		stubFetch(() => records(["Create Table"], [[ddl]]));
+		const client = new GreptimeClient(config);
+
+		expect(await client.ensureAppendMode(0)).toBe(false);
+		ddl = "... WITH( append_mode = 'true' )";
+		expect(await client.ensureAppendMode(1_000)).toBe(false); // still inside the TTL
+		expect(await client.ensureAppendMode(60_000)).toBe(true); // past it
+	});
+
+	test("notices a table swapped back to a deduplicating one", async () => {
+		let ddl = "... WITH( append_mode = 'true' )";
+		stubFetch(() => records(["Create Table"], [[ddl]]));
+		const client = new GreptimeClient(config);
+
+		expect(await client.ensureAppendMode(0)).toBe(true);
+		ddl = "CREATE TABLE ... ENGINE=mito";
+		expect(await client.ensureAppendMode(60_000)).toBe(false);
+	});
+
+	test("keeps the last definite answer when a re-check fails", async () => {
+		// A blip should not widen the refusal; the next call retries because the
+		// checked-at stamp did not move.
+		let fail = false;
+		stubFetch(() =>
+			fail ? new Response("nope", { status: 500 }) : records(["Create Table"], [["... append_mode = 'true'"]]),
+		);
+		const client = new GreptimeClient(config);
+
+		expect(await client.ensureAppendMode(0)).toBe(true);
+		fail = true;
+		expect(await client.ensureAppendMode(60_000)).toBe(true);
+		fail = false;
+		expect(await client.ensureAppendMode(60_001)).toBe(true);
+	});
+
 	test("asks again while the answer is still unknown", async () => {
 		// Without this retry, one transient SHOW CREATE TABLE failure would leave a
 		// fail-closed write path refusing every event for the life of the process.
@@ -414,6 +458,33 @@ describe("reads", () => {
 		expect(await new GreptimeClient(config).lastHash("sess-1")).toBe("abc");
 		expect(sql[0]).toContain(`"session_id" = 'sess-1'`);
 		expect(sql[0]).toContain('ORDER BY "ts" DESC');
+	});
+
+	test("lastHash reads the whole session, not a window of its newest rows", async () => {
+		// The regression: `ts` is collector-supplied, and the Grok collector's backfill
+		// pass appends events *older* than everything stored. A small window ordered by
+		// `ts` would not hold the real chain tip, and the next append would chain onto a
+		// hash that already had a successor — forking the session.
+		const { sql } = stubFetch(() => records(["hash", "prev"], []));
+		await new GreptimeClient(config).lastHash("sess-1");
+
+		const limit = Number(sql[0]?.match(/LIMIT (\d+)/)?.[1]);
+		expect(limit).toBeGreaterThanOrEqual(10_000);
+	});
+
+	test("lastHash finds a tip whose timestamp is older than the rest", async () => {
+		// A backfilled event sorts last by `ts` but is the real tip: nothing claims it.
+		stubFetch(() =>
+			records(
+				["hash", "prev"],
+				[
+					["recent-b", "recent-a"],
+					["recent-a", null],
+					["backfilled", "recent-b"],
+				],
+			),
+		);
+		expect(await new GreptimeClient(config).lastHash("sess-1")).toBe("backfilled");
 	});
 
 	test("lastHash is null for a session with no events", async () => {
@@ -469,6 +540,27 @@ describe("chainTip", () => {
 		expect(chainTip([{ hash: null, prev: null }, { hash: "a", prev: null }])).toBe("a");
 	});
 
+	test("a window of the newest rows by ts is what forked the chain", () => {
+		// The concrete regression. Three events arrive live, then the Grok collector's
+		// backfill pass appends one carrying an older source timestamp — so it is the
+		// real chain tip but sorts last by `ts`.
+		const session = [
+			// newest by ts first, as the query returns them
+			{ hash: "recent-c", prev: "recent-b" },
+			{ hash: "recent-b", prev: "recent-a" },
+			{ hash: "recent-a", prev: null },
+			{ hash: "backfilled", prev: "recent-c" },
+		];
+
+		// Windowed to the newest three, the backfilled tip is invisible and `recent-c`
+		// looks unclaimed — so the next append would chain onto it, forking the session,
+		// because `backfilled` already claims it.
+		expect(chainTip(session.slice(0, 3))).toBe("recent-c");
+
+		// Reading the whole session finds the actual tip.
+		expect(chainTip(session)).toBe("backfilled");
+	});
+
 	test("readEvents selects every column the chain was hashed over", async () => {
 		const { sql } = stubFetch(() => records(["id"], []));
 		await new GreptimeClient(config).readEvents("graph_id", "ut-1");
@@ -482,5 +574,122 @@ describe("chainTip", () => {
 
 		globalThis.fetch = (() => Promise.reject(new Error("down"))) as unknown as typeof fetch;
 		expect(await new GreptimeClient(config).ping()).toBe(false);
+	});
+});
+
+describe("queryEvents", () => {
+	/** The read among the recorded statements — the dialect probe precedes it. */
+	function selectStatement(sql: string[]): string {
+		return sql.find((statement) => statement.startsWith("SELECT") && statement.includes("agent_events")) ?? "";
+	}
+
+	test("selects every column but the payload, newest first, under the default limit", async () => {
+		const { sql } = stubFetch();
+		await new GreptimeClient(config).queryEvents();
+
+		const statement = selectStatement(sql);
+		for (const column of EVENT_COLUMNS) {
+			if (column === "payload") continue;
+			expect(statement).toContain(`"${column}"`);
+		}
+		// Omitted because it is the one unbounded column: 16 KB an event, times the limit.
+		expect(statement).not.toContain('"payload"');
+		expect(statement).toContain('ORDER BY "ts" DESC, "id" DESC');
+		expect(statement).toContain(`LIMIT ${DEFAULT_QUERY_LIMIT}`);
+		// No filters means no WHERE at all, rather than a `WHERE 1=1` the server has to parse.
+		expect(statement).not.toContain("WHERE");
+	});
+
+	test("includes the payload only when asked", async () => {
+		const { sql } = stubFetch();
+		await new GreptimeClient(config).queryEvents({ includePayload: true });
+		expect(selectStatement(sql)).toContain('"payload"');
+	});
+
+	test("ANDs one equality clause per filter, and nothing for an absent one", async () => {
+		const { sql } = stubFetch();
+		await new GreptimeClient(config).queryEvents({
+			match: { repo: "swcstudiospace/autonogrammer", surface: "omp", kind: undefined, graph_id: null },
+			order: "asc",
+			limit: 7,
+		});
+
+		const statement = selectStatement(sql);
+		expect(statement).toContain(`WHERE "repo" = 'swcstudiospace/autonogrammer' AND "surface" = 'omp'`);
+		expect(statement).not.toContain('"kind"  =');
+		expect(statement).not.toContain('"graph_id" =');
+		expect(statement).toContain('ORDER BY "ts" ASC, "id" ASC');
+		expect(statement).toContain("LIMIT 7");
+	});
+
+	test("bounds ts inclusively at both ends", async () => {
+		const { sql } = stubFetch();
+		await new GreptimeClient(config).queryEvents({
+			since: "2026-09-30T00:00:00.000Z",
+			until: "2026-09-30T12:00:00.000Z",
+		});
+
+		expect(selectStatement(sql)).toContain(
+			`WHERE "ts" >= '2026-09-30T00:00:00.000Z' AND "ts" <= '2026-09-30T12:00:00.000Z'`,
+		);
+	});
+
+	test("a filter value cannot close its literal or add a clause of its own", async () => {
+		// The read path takes no SQL from a caller: column names come from
+		// QUERYABLE_COLUMNS and values are quoted, so this is stored text to match,
+		// not syntax. It matches nothing, which is the point.
+		const { sql } = stubFetch();
+		await new GreptimeClient(config).queryEvents({ match: { session_id: "x' OR 1=1; DROP TABLE agent_events --" } });
+
+		const statement = selectStatement(sql);
+		expect(statement).toContain(`"session_id" = 'x'' OR 1=1; DROP TABLE agent_events --'`);
+		// And the guard on the way out still sees one SELECT, because it blanks literals first.
+		expect(() => assertAppendOnly(statement)).not.toThrow();
+	});
+
+	test("no filter can name a column outside the queryable set", async () => {
+		const { sql } = stubFetch();
+		await new GreptimeClient(config).queryEvents({
+			// A caller that got past the typed surface still cannot reach `payload`, `hash`
+			// or a column of another table: the loop iterates the whitelist, not the input.
+			match: { payload: "x", hash: "y", summary: "z" } as never,
+		});
+
+		expect(selectStatement(sql)).not.toContain("WHERE");
+	});
+
+	test("the limit is clamped to the cap and to a whole row", () => {
+		expect(queryLimit(undefined)).toBe(DEFAULT_QUERY_LIMIT);
+		expect(queryLimit(Number.NaN)).toBe(DEFAULT_QUERY_LIMIT);
+		expect(queryLimit(MAX_QUERY_LIMIT + 1_000)).toBe(MAX_QUERY_LIMIT);
+		expect(queryLimit(0)).toBe(1);
+		expect(queryLimit(-5)).toBe(1);
+		expect(queryLimit(12.9)).toBe(12);
+	});
+
+	test("maps rows onto the columns the server names", async () => {
+		stubFetch((statement) =>
+			statement.startsWith("SELECT LENGTH")
+				? records(["n"], [[3]])
+				: records(["ts", "id", "summary"], [[1790186361859, "evt_1", "edited ws.rs"]]),
+		);
+
+		const rows = await new GreptimeClient(config).queryEvents({ match: { repo: "r" } });
+		expect(rows).toEqual([{ ts: 1790186361859, id: "evt_1", summary: "edited ws.rs" }]);
+	});
+
+	test("reads even while the quoting dialect is unknown", async () => {
+		// Unlike an append, a read cannot corrupt anything: the worst a wrongly quoted
+		// backslash does is match no rows. A ledger that cannot answer the probe must
+		// still be readable.
+		stubFetch((statement) =>
+			statement.startsWith("SELECT LENGTH")
+				? new Response("boom", { status: 500 })
+				: records(["id"], [["evt_1"]]),
+		);
+
+		expect(await new GreptimeClient(config).queryEvents({ match: { branch: "feat\\x" } })).toEqual([
+			{ id: "evt_1" },
+		]);
 	});
 });

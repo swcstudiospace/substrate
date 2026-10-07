@@ -1,0 +1,15 @@
+{
+  "name": "@substrate/evidence",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Per-graph evidence bundle — chain verdicts, SLO results and the MCP audit tally — as JSON and HTML",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@substrate/audit": "workspace:*",
+    "@substrate/observability": "workspace:*"
+  }
+}

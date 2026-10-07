@@ -1,0 +1,14 @@
+{
+  "name": "@substrate/audit",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Hash-chained MCP audit trail (allowed/denied), separate from the Greptime app-event ledger",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "devDependencies": {
+    "@substrate/observability": "workspace:*"
+  }
+}

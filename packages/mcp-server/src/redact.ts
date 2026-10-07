@@ -65,13 +65,45 @@ export function redact(text: string): string {
  */
 const SENSITIVE_KEY = /(?:password|passwd|secret|token|api[_-]?key|apikey|authorization|credential|private[_-]?key)/i;
 
+/**
+ * Keys that contain a credential word but name a **count**, not a credential.
+ *
+ * `input_tokens` is how much a model was billed for. The rule above matched the
+ * substring `token` and replaced the number with `[REDACTED]`, so every token count
+ * any collector reported was destroyed on the write path — invisible, because a
+ * redacted field looks like redaction working. That is what this exists to stop, and
+ * it is why the token and cost metrics need it: `extractUsage` reads these keys.
+ *
+ * Narrow on purpose. The exemption applies only to these exact names **and only when
+ * the value is a count** — a finite number, or a string of digits — so
+ * `{"tokens": "sk-ant-…"}` is still redacted whole.
+ */
+const COUNTER_KEY =
+	/^(?:(?:input|output|prompt|completion|total|cached|cache_read|cache_write|max|min|reasoning)_)?tokens?(?:_(?:count|in|out|used))?$/i;
+
+/**
+ * Whether a value under a counter key is actually a count.
+ *
+ * A number, or a string of digits. The string form matters because `extractUsage`
+ * accepts `"1200"` — several collectors ship their counts as strings — and a redactor
+ * that only exempted numbers would blank exactly those, so the two would disagree and
+ * the usage would be lost on the write path. A purely numeric string carries no
+ * credential shape, and anything else under the key is still redacted whole.
+ */
+function isCount(value: unknown): boolean {
+	if (typeof value === "number") return Number.isFinite(value);
+	return typeof value === "string" && /^\d+(?:\.\d+)?$/.test(value);
+}
+
 export function redactValue<T>(value: T): T {
 	if (typeof value === "string") return redact(value) as T;
 	if (Array.isArray(value)) return value.map(redactValue) as T;
 	if (value && typeof value === "object") {
 		const out: Record<string, unknown> = {};
 		for (const [key, inner] of Object.entries(value as Record<string, unknown>)) {
-			out[key] = SENSITIVE_KEY.test(key) && inner !== null && inner !== undefined ? REDACTED : redactValue(inner);
+			const sensitive =
+				SENSITIVE_KEY.test(key) && !(COUNTER_KEY.test(key) && isCount(inner)) && inner !== null && inner !== undefined;
+			out[key] = sensitive ? REDACTED : redactValue(inner);
 		}
 		return out as T;
 	}

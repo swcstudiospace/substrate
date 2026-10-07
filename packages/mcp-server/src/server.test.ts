@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { healthStatus } from "./server.ts";
+import { loadConfig } from "./config.ts";
+import type { EventQuery } from "./greptime.ts";
+import { memoryToolWriter } from "./mcp.ts";
+import { createObservability } from "./observe.ts";
+import { createHttpServer, healthStatus, memoryWriteStatus, memoryWriter } from "./server.ts";
+import { Substrate } from "./service.ts";
+import type { SubstrateEvent } from "./types.ts";
 
 /** Shorthand for a health report; every field defaults to the unhealthy value. */
 function health(over: Partial<Parameters<typeof healthStatus>[0]> = {}) {
@@ -28,5 +34,253 @@ describe("healthStatus", () => {
 		// ledger it never had must not fail it.
 		expect(healthStatus(health({ index: true }), false)).toBe(200);
 		expect(healthStatus(health(), false)).toBe(503);
+	});
+});
+
+/**
+ * The HTTP surface, against a real listener.
+ *
+ * Hooks and the CLI reach the substrate this way, so the routes are driven over a
+ * socket rather than by calling the service: a route that is unregistered, reading
+ * the wrong body field or answering the wrong status fails here. The ledger is a
+ * stub — this is about the wiring.
+ */
+describe("routes", () => {
+	/** A ledger stub that records appends and replies to reads with fixed rows. */
+	function ledger(rows: Array<Record<string, unknown>> = []) {
+		const written: SubstrateEvent[] = [];
+		const queries: EventQuery[] = [];
+		return {
+			written,
+			queries,
+			greptime: {
+				ping: async () => true,
+				ensureAppendMode: async () => true,
+				probeDialect: async () => true,
+				quotingDialectKnown: true,
+				lastHash: async () => null,
+				insertEvent: async (event: SubstrateEvent) => {
+					written.push(event);
+				},
+				queryEvents: async (query: EventQuery) => {
+					queries.push(query);
+					return rows;
+				},
+			},
+		};
+	}
+
+	/**
+	 * Boot the real server on an ephemeral port; `stop` closes it.
+	 *
+	 * The ledger is injected rather than built from the environment, so nothing here
+	 * needs a Greptime endpoint in its config — `/events` and `/events/query` reach the
+	 * store through the substrate, and only `/healthz` asks the config whether a ledger
+	 * was configured at all.
+	 */
+	async function serve(greptime: unknown, env: Record<string, string | undefined> = {}) {
+		const config = loadConfig(env);
+		// No SUBSTRATE_AUDIT_PATH in the env, so the audit chain stays in memory and the
+		// exporter is off: these routes are audited, and a test that skipped the plane
+		// entirely would not be running the code the server actually runs.
+		const observability = createObservability(config, env);
+		await observability.start();
+		const substrate = new Substrate(config, { index: null, greptime: greptime as never }, observability.observer);
+		const server = createHttpServer(substrate, config, observability);
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		const address = server.address();
+		const port = typeof address === "object" && address ? address.port : 0;
+		return {
+			post: (path: string, body: unknown, headers: Record<string, string> = {}) =>
+				fetch(`http://127.0.0.1:${port}${path}`, {
+					method: "POST",
+					headers: { "content-type": "application/json", ...headers },
+					body: JSON.stringify(body),
+				}),
+			stop: () =>
+				new Promise<void>((resolve) => {
+					observability.stop();
+					server.close(() => resolve());
+				}),
+		};
+	}
+
+	test("POST /events appends and answers 202", async () => {
+		const { written, greptime } = ledger();
+		const { post, stop } = await serve(greptime);
+		try {
+			const response = await post("/events", { kind: "commit", summary: "wired the read path", session_id: "s" });
+			const body = (await response.json()) as Record<string, unknown>;
+
+			expect(response.status).toBe(202);
+			expect(body.stored).toBe(true);
+			expect(written[0]?.summary).toBe("wired the read path");
+		} finally {
+			await stop();
+		}
+	});
+
+	test("POST /events answers 503 when the ledger refused the row", async () => {
+		const { greptime } = ledger();
+		greptime.insertEvent = async () => {
+			throw new Error("greptime unreachable: connect ETIMEDOUT");
+		};
+		const { post, stop } = await serve(greptime);
+		try {
+			const response = await post("/events", { kind: "note", summary: "still working" });
+
+			// The surface owes its caller the truth about durability; the CLI exits 0 anyway.
+			expect(response.status).toBe(503);
+			expect(((await response.json()) as Record<string, unknown>).stored).toBe(false);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("POST /events/query reads the ledger back", async () => {
+		const { queries, greptime } = ledger([
+			{ ts: 1790186361859, id: "evt_1", surface: "omp", kind: "shell", summary: "ran bun test", hash: "h1" },
+		]);
+		const { post, stop } = await serve(greptime);
+		try {
+			const response = await post("/events/query", { repo: "swcstudiospace/agent-substrate", limit: 5 });
+			const body = (await response.json()) as { count: number; events: Array<Record<string, unknown>> };
+
+			expect(response.status).toBe(200);
+			expect(body.count).toBe(1);
+			expect(body.events[0]?.summary).toBe("ran bun test");
+			expect(queries[0]?.limit).toBe(5);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("POST /events/query with no filters is a valid read, not a bad request", async () => {
+		const { greptime } = ledger();
+		const { post, stop } = await serve(greptime);
+		try {
+			const response = await post("/events/query", {});
+			expect(response.status).toBe(200);
+			expect(((await response.json()) as Record<string, unknown>).count).toBe(0);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("POST /events/query answers 400 for a filter that cannot match and 503 for a ledger that will not answer", async () => {
+		const { greptime } = ledger();
+		const { post, stop } = await serve(greptime);
+		try {
+			const bad = await post("/events/query", { kind: "file.edited" });
+			expect(bad.status).toBe(400);
+			expect(String(((await bad.json()) as Record<string, unknown>).error)).toContain("unknown kind");
+
+			greptime.queryEvents = async () => {
+				throw new Error("greptime unreachable: connect ETIMEDOUT");
+			};
+			const down = await post("/events/query", { repo: "r" });
+			expect(down.status).toBe(503);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("a filter of the wrong JSON type is a 400 naming the field, not a 500", async () => {
+		// The route casts the body; the service is what checks it. A number reaching
+		// redaction used to throw inside `.replace` and surface as an internal error.
+		const { queries, greptime } = ledger();
+		const { post, stop } = await serve(greptime);
+		try {
+			for (const [body, field] of [
+				[{ session_id: 123 }, "session_id must be a string"],
+				[{ until: 123 }, "until must be an ISO date string"],
+				[{ limit: "10" }, "limit must be a number"],
+				[{ repo: "" }, "repo is empty"],
+			] as const) {
+				const response = await post("/events/query", body);
+				expect(response.status).toBe(400);
+				expect(String(((await response.json()) as Record<string, unknown>).error)).toContain(field);
+			}
+			// None of them reached the ledger.
+			expect(queries).toEqual([]);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("a deployment with tokens refuses an unauthenticated read", async () => {
+		const { greptime } = ledger();
+		const { post, stop } = await serve(greptime, { SUBSTRATE_TOKEN_OMP: "tok-omp" });
+		try {
+			expect((await post("/events/query", {})).status).toBe(401);
+			expect((await post("/events/query", {}, { authorization: "Bearer tok-omp" })).status).toBe(200);
+		} finally {
+			await stop();
+		}
+	});
+});
+
+describe("memoryWriteStatus", () => {
+	/** Shorthand for a governance result; only the fields the mapping reads. */
+	function result(outcome: string, over: { reason?: string; verified_persisted?: boolean } = {}) {
+		return { outcome, reason: over.reason ?? outcome, verified_persisted: over.verified_persisted ?? true };
+	}
+
+	test("only a write that was read back gets a 200", () => {
+		// A hook that can see nothing but the status code still has to be able to tell
+		// "stored and confirmed" from "taken, not confirmed" — the same distinction
+		// /events already draws between 202 and 200.
+		expect(memoryWriteStatus(result("accepted"))).toBe(200);
+		expect(memoryWriteStatus(result("accepted", { verified_persisted: false }))).toBe(202);
+	});
+
+	test("the three refusals are distinguishable without parsing the body", () => {
+		expect(memoryWriteStatus(result("conflict", { reason: "review.required", verified_persisted: false }))).toBe(409);
+		expect(memoryWriteStatus(result("quarantined", { reason: "quarantine.secret", verified_persisted: false }))).toBe(422);
+		expect(memoryWriteStatus(result("denied", { reason: "rbac.no-grant", verified_persisted: false }))).toBe(403);
+	});
+
+	test("an outage is a 503, not a 403", () => {
+		// A monitor must not read "the index is down" as "this agent lacks permission".
+		expect(memoryWriteStatus(result("denied", { reason: "store.unavailable", verified_persisted: false }))).toBe(503);
+		expect(memoryWriteStatus(result("denied", { reason: "store.write-failed", verified_persisted: false }))).toBe(503);
+	});
+});
+
+describe("memoryWriter", () => {
+	test("the token wins, and a body-supplied writer cannot outrank it", () => {
+		// Attribution is what RBAC is decided on, so a caller naming its own surface
+		// would make default-deny a formality.
+		expect(memoryWriter("muse", "hermes")).toBe("muse");
+	});
+
+	test("an anonymous caller cannot name itself a surface", () => {
+		// The regression. A deployment with no tokens configured is the one that skips
+		// the 401, so honouring `body.writer` there — the only place it was ever
+		// honoured — handed hermes's graph, repo and `agent:hermes` grants to anybody
+		// who could reach the port and type the name.
+		expect(memoryWriter(null, "hermes")).toBe("unknown");
+		expect(memoryWriter(null, "claude-code")).toBe("unknown");
+	});
+
+	test("anything missing or empty is the writer that holds no grants", () => {
+		expect(memoryWriter(null, undefined)).toBe("unknown");
+		expect(memoryWriter(null, "   ")).toBe("unknown");
+		expect(memoryWriter(null, 42)).toBe("unknown");
+	});
+});
+
+describe("memoryToolWriter", () => {
+	test("the token wins over the tool's own surface argument", () => {
+		// `surface` is attribution on every other MCP tool. On `memory_write` it would
+		// be authorisation, so the muse token cannot spend it to become hermes.
+		expect(memoryToolWriter("muse", "hermes")).toBe("muse");
+	});
+
+	test("an unauthenticated MCP caller cannot name itself a surface", () => {
+		// The same hole as the REST route's, through the other door: no token means
+		// `unknown`, never the surface the caller asked to be.
+		expect(memoryToolWriter(null, "hermes")).toBe("unknown");
+		expect(memoryToolWriter(null, undefined)).toBe("unknown");
 	});
 });
