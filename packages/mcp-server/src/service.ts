@@ -316,6 +316,8 @@ export interface ClaimResult {
 	decision: ClaimDecision;
 	/** Why, when the claim was refused or withdrawn. */
 	reason: string | null;
+	/** The TTL the hold was granted for, after clamping, so a holder can pace its heartbeats; null when no hold stands. */
+	ttl_seconds: number | null;
 }
 
 /** A swarm run's correlation id: 1..200 characters of `[A-Za-z0-9._:-]`. */
@@ -883,6 +885,7 @@ export class Substrate {
 			evicted: decision.evicted ? `${decision.evicted.surface}/${decision.evicted.session_id}` : null,
 			decision: verdict.decision,
 			reason,
+			ttl_seconds: granted ? ttl : null,
 		};
 	}
 

@@ -83,15 +83,17 @@ describe("claimNode", () => {
 		expect(emitted[0]?.repo).toBeNull();
 	});
 
-	test("hands the caller the lease it is now holding", async () => {
+	test("hands the caller the lease it is now holding, and the TTL it was granted", async () => {
 		const { index, greptime } = stubStores({ repo: "r" });
 		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
 
-		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1");
+		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", 5);
 
 		expect(result.action).toBe("granted");
 		expect(result.lease.lease_id).toBe("lse_1");
 		expect(result.lease.expires_at).toBe("2026-09-30T12:15:00.000Z");
+		// Below the minimum: the hold is granted for the clamped TTL, which is what the holder must pace itself by.
+		expect(result.ttl_seconds).toBe(30);
 	});
 
 	test("a renewal writes no event — a heartbeat is the absence of news", async () => {
@@ -150,6 +152,7 @@ describe("claimNode", () => {
 		expect(result.lease.epoch).toBe(1);
 		expect(result.lease.expires_at).toBe("2026-09-30T12:15:00.000Z");
 		expect(emitted).toEqual([]);
+		expect(result.ttl_seconds).toBeNull();
 	});
 
 	test("without an index there is no durable lease, so the claim is refused outright", async () => {
