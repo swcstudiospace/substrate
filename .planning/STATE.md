@@ -1,17 +1,18 @@
 ---
 gsd_state_version: "1.0"
-milestone: v1.0
-milestone_name: "Agent Substrate — four planes (runtime, memory, skills, ledger) keyed by Graph ID"
-current_phase: 1
-current_phase_name: "Lane B"
-status: executing
-last_updated: 2026-09-23
+milestone: v1.1
+milestone_name: Swarm correlation, governed memory and orchestrate integrations
+current_phase_name: 7-10
+status: All phases complete — ready to ship
+last_updated: "2026-10-07T15:16:05.152Z"
+last_activity: 2026-10-07
+state_head: 05f15dd2aed4757be31c3c004578dfc28c599909
 progress:
-  total_phases: 7
-  completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
-  percent: 32
+  total_phases: 4
+  completed_phases: 4
+  total_plans: 4
+  completed_plans: 4
+  percent: 100
 ---
 
 # State
@@ -33,6 +34,7 @@ both on Railway. The local dev containers have been deleted and the service
 remains healthy, which is the proof it no longer depends on them.
 
 Done:
+
 - `substrate-mcp` on `127.0.0.1:7410` — MCP at `/mcp` plus `POST /brief`,
   `/events`, `/verify` and `GET /healthz`. Tools: `memory_brief`,
   `memory_write`, `memory_search`, `events_emit`, `graph_get`,
@@ -135,3 +137,10 @@ Railway networking, learned the hard way: `.railway.internal` and
 needs the TCP proxy (`…proxy.rlwy.net:PORT`), which must be enabled per service
 under Settings → Networking. HTTP services get a public domain automatically,
 which is why Greptime worked immediately and Postgres did not.
+
+## Current Position
+
+Phase: All phases complete (7-10)
+Plan: —
+Status: All phases complete — ready to ship
+Last activity: 2026-10-07
