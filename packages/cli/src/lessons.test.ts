@@ -326,12 +326,15 @@ describe("lesson identity", () => {
 		expect(citableLesson({ id: "mem_3", kind: "warning", subject: "lesson:v1.1/x/y", text: "x", created: "" })).toBeNull();
 	});
 
-	test("the key is the source and the content, so re-wrapping a lesson does not make it a new one", () => {
-		const key = lessonKey(ARCHIVED, "One key\n  across retries.");
-		expect(key).toBe(lessonKey(ARCHIVED, "One key across retries."));
+	test("the key is the scope, the source and the content, so re-wrapping a lesson does not make it a new one", () => {
+		const scope = "repo:acme/widgets";
+		const key = lessonKey(scope, ARCHIVED, "One key\n  across retries.");
+		expect(key).toBe(lessonKey(scope, ARCHIVED, "One key across retries."));
 		expect(key).toMatch(/^lesson:[0-9a-f]{64}$/);
-		expect(key).not.toBe(lessonKey("other/SUMMARY.md", "One key across retries."));
-		expect(key).not.toBe(lessonKey(ARCHIVED, "Two keys across retries."));
+		expect(key).not.toBe(lessonKey(scope, "other/SUMMARY.md", "One key across retries."));
+		expect(key).not.toBe(lessonKey(scope, ARCHIVED, "Two keys across retries."));
+		// The server's keys are global: the same lesson in another scope must not reuse this one.
+		expect(key).not.toBe(lessonKey("repo:acme/gadgets", ARCHIVED, "One key across retries."));
 	});
 });
 
@@ -409,7 +412,7 @@ describe("lessons add", () => {
 			subject: "lesson:v1.1/08-memory-structures/version-conflicts-carry-standing-version",
 		});
 		expect(fake.writes[1]?.idempotency_key).toBe(
-			lessonKey(ARCHIVED, "The swarm client reuses one idempotency key across retries of the same write."),
+			lessonKey("repo:acme/widgets", ARCHIVED, "The swarm client reuses one idempotency key across retries of the same write."),
 		);
 		// The SUMMARY's own tags travel with every lesson in it.
 		expect(fake.entries[0]?.text).toContain("tags: decisions, memory, governance");

@@ -58,7 +58,7 @@ A **lesson** is a `fact` at the scope:
 
 ```text
 subject:          lesson:<milestone>/<phase>/<slug>
-idempotency_key:  lesson:<sha256(source path + "\n" + whitespace-collapsed text)>
+idempotency_key:  lesson:<sha256(scope + "\n" + source path + "\n" + whitespace-collapsed text)>
 body:
 [lessonbank]
 milestone: v1.1
@@ -76,11 +76,14 @@ quarantined and review.required are returned to the caller, never retried.
 - `outcome` is how the phase that taught the lesson went: `success` (default),
   `partial`, `blocked` or `deferred`.
 - `source` is the SUMMARY's path relative to the checkout, or
-  `inline:<milestone>/<phase>` for `--text`. The key hashes the source and the text and
-  nothing else, so **adding a lesson twice yields one entry**: the second write replays
-  the first and comes back `duplicate` with the same id. Re-wrapping the text does not
-  change the key. Changing the header (tags, outcome) under the same key is a `conflict`
-  (`idempotency.reused`): the entry already recorded stands.
+  `inline:<milestone>/<phase>` for `--text`. The key hashes the scope, the source and the
+  text and nothing else, so **adding a lesson twice to one scope yields one entry**: the
+  second write replays the first and comes back `duplicate` with the same id. Re-wrapping
+  the text does not change the key. The scope is in the key because the server's
+  idempotency keys are global; the same lesson added to another scope becomes that scope's
+  own entry. Changing the header (tags, outcome) under the same key is a `conflict`
+  (`idempotency.reused`): the entry already recorded stands. Digest and outcome keys
+  include the scope for the same reason.
 - A body longer than 4000 characters, the gate's cap, is refused before it is sent rather
   than cut.
 

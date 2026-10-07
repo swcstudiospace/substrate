@@ -183,11 +183,13 @@ export function normalizeText(text: string): string {
 }
 
 /**
- * `lesson:` + sha256 of the source path and the content, as the Decision fixes it:
- * the same text from the same artifact is one lesson however often it is added.
+ * `lesson:` + sha256 of the scope, the source path and the content: the same text from the same
+ * artifact is one lesson in a scope however often it is added. The scope is part of the key because
+ * the server's idempotency keys are global: without it, adding the same lesson to a second scope would
+ * be refused as `idempotency.reused` instead of becoming that scope's own entry.
  */
-export function lessonKey(source: string, text: string): string {
-	return `${SUBJECT.lesson}${sha256(`${source}\n${normalizeText(text)}`)}`;
+export function lessonKey(scope: string, source: string, text: string): string {
+	return `${SUBJECT.lesson}${sha256(`${scope}\n${source}\n${normalizeText(text)}`)}`;
 }
 
 /** The marker line, `key: value` header lines, a blank line, then the lesson. */
@@ -1054,7 +1056,7 @@ async function add(args: Args, deps: LessonsDeps): Promise<number> {
 		};
 		return {
 			subject: lessonSubject(m, p, slug),
-			key: lessonKey(source, item.text),
+			key: lessonKey(scope, source, item.text),
 			body: lessonBody(lesson),
 			skipped: skip.has(slug),
 		};
@@ -1285,7 +1287,7 @@ async function digest(args: Args, positional: string | undefined, deps: LessonsD
 	}
 	const ids = chosen.map(idOf).sort();
 	const subject = `${SUBJECT.digest}${milestone}`;
-	const key = `${SUBJECT.digest}${sha256([milestone, ...ids, normalizeText(text ?? "")].join("\n"))}`;
+	const key = `${SUBJECT.digest}${sha256([scope, milestone, ...ids, normalizeText(text ?? "")].join("\n"))}`;
 	if (args["dry-run"]) {
 		printPlanned([{ subject, key, body, skipped: false }], scope, args.json === true, deps);
 		return 0;
@@ -1347,7 +1349,7 @@ async function outcome(args: Args, positional: string | undefined, deps: Lessons
 	}
 
 	const subject = `${SUBJECT.outcome}${lessonId}`;
-	const key = `${SUBJECT.outcome}${sha256([lessonId, `${milestone}/${phase}`, result, note].join("\n"))}`;
+	const key = `${SUBJECT.outcome}${sha256([scope, lessonId, `${milestone}/${phase}`, result, note].join("\n"))}`;
 	const body = [
 		`[${MARKERS.outcome}]`,
 		`lesson: ${lessonId}`,
