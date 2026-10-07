@@ -1,6 +1,7 @@
 ---
 phase: 08-memory-structures
 plan: 01
+one-liner: "Swarm memory goes through the substrate's governed memory_write: one client with kind and scope maps, idempotency keys and a handler for every gate outcome, with default-deny proven from outside."
 subsystem: memory-governance
 tags: [memory, governance, swarm, grants, idempotency, adr-0001-s3, SPE-5054]
 provides:
@@ -20,7 +21,7 @@ key-files:
 key-decisions:
   - "Requirement correction (MEM-04): no grant change in memory-policy.ts. The 15 swarm surfaces already inherit the wildcard default grants; adding explicit grants would duplicate them. The substance of MEM-04 (default-deny proven from outside) is met by tests."
   - "Kind map decision/retro/pattern -> decision/fact/fact; scope map graph/repo/agent/global; patterns default to repo scope."
-  - "Idempotency key = sha256(correlation|task|attempt|kind|scope|text), reused on unverified retries."
+  - "Idempotency key = sha256 of the JSON array [correlation, task, attempt, kind, scope, normalized subject, text], reused on unverified retries. Review replaced a '|'-joined key on which subject-only differences and '|' inside fields collided."
   - "quarantined and review.required are returned to the caller, never retried."
   - "No versioned migration runner, no new event kinds, no POST /graph (ADR 0001)."
   - "Self-improving lessons bank deferred pending user decision (governed fact entries vs. changing the single-write-door rule)."
@@ -42,5 +43,7 @@ status: complete
 ## Deviations
 - MEM-04 text asked for explicit default grants; not needed (wildcard already covers the swarm surfaces). Recorded as requirement correction above.
 
-## Open
-- Greptile review in progress on #12 (doc consistency, stronger assertions) and on the stacked swarm #5 base; fixes being applied, not yet done.
+## Final state
+- agent-substrate #12 merged 2026-10-07 as 7eba2fc. Review fixes: 751fd26 and 8416e5f (consistent decision-scope docs; every success asserts verified_persisted and the stored row), 2d3e407 (the decision-at-agent denial stated as the default policy, which operator grants can widen).
+- agent-swarm #6 merged 2026-10-07 as a25c02a. Review fixes: 8804823 (unambiguous idempotency key, targeted version re-read, nested-module and TypeScript import scans, `unavailable` documented as an unknown result) and d5b0dc1 (tests moved to the client's `_open` transport seam). Doc follow-up: agent-swarm #7 (8c11231).
+- A MEM-02 gap found after the first audit (the version re-read could not find a decision behind 100+ newer entries) is closed by phase 8.1.

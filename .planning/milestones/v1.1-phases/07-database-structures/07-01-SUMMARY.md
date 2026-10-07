@@ -1,6 +1,7 @@
 ---
 phase: 07-database-structures
 plan: 01
+one-liner: "Swarm agents get their own substrate identities: 15 swarm surfaces whose tokens cannot act as another agent, and a race-safe binding of a swarm correlation id to one Graph ID (graph_bindings + MCP graph_bind)."
 subsystem: mcp-server
 tags: [swarm, identity, graph-bindings, adr-0001, s1, spe-5052]
 provides:
@@ -54,7 +55,7 @@ status: complete
 - Live smoke `/tmp/s1-live-smoke.sh` (with agent-swarm S1, real `postgres:16` + `greptime/greptimedb:v0.14.4`): 24/24 checks.
 
 ## Delivery
-PR agent-substrate #11, branch `feat/s1-swarm-identity-binding`, commits 933f970 + 05f15dd. Greptile review in progress; a fix made from review so far: binding notes got their own session.
+PR agent-substrate #11, branch `feat/s1-swarm-identity-binding`, commits 933f970 + 05f15dd (review fix: binding notes get their own session) + fc3d5e3 (v1.1 planning record). Merged 2026-10-07 as cc65cf9 after Greptile 5/5 with no open threads.
 
 ## Deviations
 None from the plan. Self-improving lessons bank is deferred pending the user's decision (not part of this phase).

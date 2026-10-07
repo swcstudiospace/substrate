@@ -1,7 +1,7 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v1.1 — Swarm correlation, governed memory and orchestrate integrations",
+  "milestone": "v1.1",
   "phases": [
     {
       "number": "7",
@@ -34,5 +34,5 @@
     "label": "Start a new milestone",
     "reason": "All phases complete — start a new milestone"
   },
-  "updated_at": "2026-10-07T17:16:50.524Z"
+  "updated_at": "2026-10-07T17:38:22.669Z"
 }

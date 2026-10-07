@@ -3,7 +3,7 @@
 ## Milestones
 
 - 📦 **v1.0 build plan (phases 0-6)** — the original plan below. On main, Phase 0 is complete and phases 1-6 are recorded as open; the working checkout closed v1.0 on 2026-10-01 with a milestone audit of `passed` (an earlier audit on 2026-09-28 was `gaps_found`), and that archive and audit are on PR #10, not on main.
-- ✅ **v1.1 Swarm correlation, governed memory and orchestrate integrations** — Phases 7-10, complete 2026-10-07 (ADR 0001 S1 and S3).
+- ✅ **v1.1 Swarm correlation, governed memory and orchestrate integrations** — Phases 7-10 with inserted 8.1, shipped 2026-10-07 (ADR 0001 S1 and S3). Archive: [milestones/v1.1-ROADMAP.md](milestones/v1.1-ROADMAP.md)
 
 <details>
 <summary>v1.0 build plan (phases 0-6), as recorded on main</summary>
@@ -163,112 +163,20 @@ Build without either being touched.
 
 </details>
 
-## v1.1 Swarm correlation, governed memory and orchestrate integrations
-
-## Overview
-
-`origin/main` already has governed memory, leases, signed handoffs, audit and OTLP. What it lacks is the bridge the accepted ADR 0001 specifies between the substrate, `agent-swarm` and `claude-ultrathink`. v1.1 builds S1 (correlation, identity and the event tee, SPE-5052) end to end and S3 (swarm memory through the governance gate, SPE-5054). Code lands on branches cut from each repo's `origin/main`. Every client fails open.
-
-Execution order is 7, then 9 and 10 in parallel, then 8 (phase 8 needs phase 7's surfaces and phase 10's client module). Phase numbers follow the requirement groups, not the order.
-
 ## Phases
 
-**Phase Numbering:** integer phases continue from v1.0 (last phase 6).
+<details>
+<summary>✅ v1.1 Swarm correlation, governed memory and orchestrate integrations (Phases 7-10, with 8.1) — SHIPPED 2026-10-07</summary>
 
-- [x] **Phase 7: Database structures** — 15 swarm surfaces, token-names-the-caller, `graph_bindings` (agent-substrate)
-- [x] **Phase 8: Memory structures** — swarm memory through the governance gate, default grants (agent-substrate, agent-swarm)
-- [x] **Phase 9: claude-ultrathink integration** — fail-open `note` event carrying the Graph ID (claude-ultrathink)
-- [x] **Phase 10: Swarm orchestrate integration** — event tee, Graph ID minting and binding (agent-swarm)
+- [x] Phase 7: Database structures (1/1 plans) — completed 2026-10-07
+- [x] Phase 8: Memory structures (1/1 plans) — completed 2026-10-07
+- [x] Phase 8.1: Version conflicts carry the standing version (INSERTED) (1/1 plans) — completed 2026-10-07
+- [x] Phase 9: claude-ultrathink integration (1/1 plans) — completed 2026-10-07
+- [x] Phase 10: Swarm orchestrate integration (1/1 plans) — completed 2026-10-07
 
-## Phase Details
+Phase details: [milestones/v1.1-ROADMAP.md](milestones/v1.1-ROADMAP.md) · requirements: [milestones/v1.1-REQUIREMENTS.md](milestones/v1.1-REQUIREMENTS.md) · audit: [milestones/v1.1-MILESTONE-AUDIT.md](milestones/v1.1-MILESTONE-AUDIT.md) · phase folders: `milestones/v1.1-phases/`
 
-### Phase 7: Database structures
-
-**Goal**: A swarm correlation id maps to one Graph ID in the index, and a swarm token can only speak as its own surface.
-**Depends on**: Nothing
-**Requirements**: [DB-01, DB-02, ID-01, ID-02, ID-03]
-**Success Criteria** (what must be TRUE):
-
-  1. `graph_bindings` exists in the index DDL with a unique `correlation_id`; `graph_bind` creates, resolves forward and reverse, and two concurrent binds give one winner.
-  2. `SURFACES` has the 15 swarm surfaces and `.env.example` names their 15 tokens.
-  3. A `swarm-a05-be` token is refused when it emits or claims as `swarm-a09-rev`.
-  4. `EVENT_KINDS` is unchanged and `store-lock.test.ts` passes.
-
-**Plans**: 1 plan
-
-Plans:
-
-- [x] 07-01: surfaces, identity, `graph_bindings` and `graph_bind`, docs
-
-### Phase 8: Memory structures
-
-**Goal**: Swarm memory is substrate memory and a refusal is handled, not worked around.
-**Depends on**: Phase 7, Phase 10
-**Requirements**: [MEM-01, MEM-02, MEM-03, MEM-04, MEM-05]
-**Success Criteria** (what must be TRUE):
-
-  1. Swarm `memory.write` resolves to `memory_write` with the documented kind and scope maps.
-  2. `denied`, `quarantined` and both `conflict` flavors each have a tested handler; nothing acts unless `accepted && verified_persisted`.
-  3. A swarm surface writing outside its grant is refused, asserted from the outside.
-  4. The swarm suite proves no swarm-side store feeds an agent's context.
-
-**Plans**: 1 plan
-
-Plans:
-
-- [x] 08-01: default grants for swarm surfaces; swarm memory client and handlers
-
-### Phase 08.1: Version conflicts carry the standing version (INSERTED)
-
-**Goal:** A rewrite of a decision works however many newer entries share its scope.
-**Requirements**: [MEM-02]
-**Depends on:** Phase 8
-**Success Criteria** (what must be TRUE):
-
-  1. Versioned conflicts (`version.required|stale|raced`, `standing.raced` on a decision with a subject) carry `current_version`, the version of the decision in force or `null`.
-  2. The swarm client re-submits from `current_version` without searching memory.
-  3. On the real gate, a decision behind 100+ newer entries in its scope is rewritten.
-
-**Plans:** 1/1 plans complete
-
-Plans:
-
-- [x] 08.1-01: current_version on versioned conflicts; swarm client uses it
-
-### Phase 9: claude-ultrathink integration
-
-**Goal**: A planned prompt leaves a Graph ID record in the ledger without ever affecting the hook.
-**Depends on**: Nothing
-**Requirements**: [UT-01, UT-02]
-**Success Criteria** (what must be TRUE):
-
-  1. A planned prompt yields one `note` event carrying the Graph ID and no prompt text.
-  2. Skipped prompts, unknown sessions and failed state writes emit nothing.
-  3. A rejecting or absent substrate leaves the hook result identical.
-
-**Plans**: 1 plan
-
-Plans:
-
-- [x] 09-01: emit seam and hook wiring
-
-### Phase 10: Swarm orchestrate integration
-
-**Goal**: The swarm's event stream reaches the ledger under one Graph ID per run, attributed to the agent that produced it.
-**Depends on**: Phase 7
-**Requirements**: [TEE-01, TEE-02, TEE-03, TEE-04, GID-01, PROOF-01]
-**Success Criteria** (what must be TRUE):
-
-  1. Every `runlog.emit` record is teed with the surface, session, graph, node, kind and payload fields from the contract.
-  2. The swarm-type table is exhaustive and a double-publish sends one request.
-  3. With the substrate down, `orch_plan` completes as before.
-  4. Against a real Postgres and GreptimeDB, `events_verify` is green for the run's Graph ID and a mismatched token is refused.
-
-**Plans**: 1 plan
-
-Plans:
-
-- [x] 10-01: substrate client, tee, minting and binding, tests, docs
+</details>
 
 ## Progress
 
@@ -276,6 +184,6 @@ Plans:
 |-------|-----------|----------------|--------|-----------|
 | 7. Database structures | v1.1 | 1/1 | Complete | 2026-10-07 |
 | 8. Memory structures | v1.1 | 1/1 | Complete | 2026-10-07 |
-| 8.1. Version conflicts carry the standing version (INSERTED) | v1.1 | 1/1 | Complete    | 2026-10-07 |
+| 8.1. Version conflicts carry the standing version (INSERTED) | v1.1 | 1/1 | Complete | 2026-10-07 |
 | 9. claude-ultrathink integration | v1.1 | 1/1 | Complete | 2026-10-07 |
 | 10. Swarm orchestrate integration | v1.1 | 1/1 | Complete | 2026-10-07 |
