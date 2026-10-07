@@ -1,7 +1,7 @@
 ---
 status: partial
 phase: 00-brief
-source: .planning/ROADMAP.md (Phase 0 success criteria) — no SUMMARY.md exists; Phase 0 was built directly from the approved plan rather than through plan-phase/execute-phase
+source: .planning/milestones/v1.0-ROADMAP.md (Phase 0 success criteria) — no SUMMARY.md exists; Phase 0 was built directly from the approved plan rather than through plan-phase/execute-phase
 started: 2026-09-23T18:55:00Z
 updated: 2026-09-23T18:55:00Z
 audit_acknowledged:

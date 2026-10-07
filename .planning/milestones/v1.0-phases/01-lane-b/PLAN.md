@@ -1,10 +1,10 @@
 # Phase 1 — Lane B: Plan
 
-**Goal (from ROADMAP)**: Hermes, Omp, Muse Code, Grok Build and Grok Bot all read the brief and emit events. + v0.3 OTLP/SLOs/GrokBot production loop.
+**Goal (from the v1.0 roadmap, now `milestones/v1.0-ROADMAP.md`)**: Hermes, Omp, Muse Code, Grok Build and Grok Bot all read the brief and emit events. + v0.3 OTLP/SLOs/GrokBot production loop.
 
 **Depends on**: Phase 0 (done), Phase 0.5 (governance done).
 
-**Context reference**: phases/01-lane-b/CONTEXT.md (Orca/herdr both used; native floor first; Hermes plugins at /root/.hermes/plugins and /root/src/repos/hermes-engineering-board; Grok collector done; sensitive live edits).
+**Context reference**: `milestones/v1.0-phases/01-lane-b/CONTEXT.md` (Orca/herdr both used; native floor first; Hermes plugins at /root/.hermes/plugins and /root/src/repos/hermes-engineering-board; Grok collector done; sensitive live edits).
 
 **Success Criteria (ROADMAP verbatim, mapped to work)**:
 1. Hermes redesign: pre_llm_call hook calls TS engine for brief with uplift XML + graph. Kanban retired as tracker; hermes-linear-connector keeps Linear dispatch/mirroring/DoD; eng-board -> events.emit.
@@ -70,13 +70,13 @@
 - If blocker (e.g. no hermes source edit rights), fall back to docs + substrate-only.
 
 **Files touched (this repo primary)**:
-- .planning/phases/01-lane-b/PLAN.md, SUMMARY.md
+- .planning/phases/01-lane-b/PLAN.md, SUMMARY.md (archived to `milestones/v1.0-phases/01-lane-b/`)
 - packages/mcp-server/src/{service,server,types?} (OTLP)
 - packages/projector/
 - packages/collectors/ (if)
 - packages/connector-ext/src/
 - packages/cli/ (if)
-- .planning/STATE.md, ROADMAP.md
+- .planning/STATE.md, ROADMAP.md (the v1.0 roadmap is archived as `milestones/v1.0-ROADMAP.md`)
 - External (hermes*): hooks for injection (additive calls to `substrate` CLI or fetch).
 
 **Acceptance**:

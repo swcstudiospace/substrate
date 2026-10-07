@@ -71,7 +71,7 @@ Reading memory:
 
 ## Proposed Design: Self-Improving Memory Bank
 
-The bank is an auditable, success-weighted and prunable set of lessons. Lessons are written when a phase closes or added by hand. They are retrieved only at GSD discuss time and cited by id. **Storage follows the Decision section.** The original `lessons` table draft (tags `text[]`, `success_score float`, GIN and FTS indexes) was **withdrawn**, because store-lock forbids a second memory table and insert path.
+The bank is an auditable, success-weighted and prunable set of lessons. Lessons are written when a phase closes or added by hand. They are retrieved only at GSD discuss time and cited by id. **Storage follows the Decision section.** The original `lessons` table draft (tags `text[]`, `success_score float`, GIN and FTS indexes) was **withdrawn** in favour of governed `fact` entries, which keep every write behind the one gate. A test does not force this choice; the Decision section lists the alternatives.
 
 ### Write Triggers
 - Automatic: when a phase SUMMARY.md is finalized, the phase outcome is captured as a lesson.
@@ -79,8 +79,8 @@ The bank is an auditable, success-weighted and prunable set of lessons. Lessons 
 - Both go through the gate as `fact` entries, with `source_path`, phase and milestone in the body header. They are written only at the discuss/plan boundary, never mid-execute, and only after a human reviews the extracted lessons.
 
 ### Retrieval
-- At discuss time, before CONTEXT.md is written, `memory_search` runs over the repo scope.
-- The client keeps `lesson:` subjects and ranks them by recency × tag/keyword match × read-time score. The top K go under `## Prior Lessons (from self-improving bank; cite IDs)`.
+- At discuss time, before CONTEXT.md is written, recall pages through the scope's `lesson:` entries with `memory_search`'s read-side `subject_prefix` filter and `before` cursor (both added in Tier 1), so older lessons are not lost behind the newest-100 window.
+- The client ranks them by recency × tag/keyword match × read-time score. The top K go under `## Prior Lessons (from self-improving bank; cite IDs)`.
 - PLAN.md cites lessons by entry id.
 - Fail-open: if the bank is unreachable, nothing is injected.
 
@@ -97,7 +97,7 @@ The bank is an auditable, success-weighted and prunable set of lessons. Lessons 
 ## Tradeoffs
 - **+** Lessons accumulate across runs and are fully auditable: an id, a source path, the writer and trust, all through the existing gate.
 - **+** No schema change. RBAC, quarantine, exactly-once and the review of global entries all come with the gate.
-- **−** Tags, phase and score live in the body and in client-side ranking, not in columns. `memory_search` returns at most 100 entries per call.
+- **−** Tags, phase and score live in the body and in client-side ranking, not in columns. Today `memory_search` returns at most 100 entries per call with no cursor, so Tier 1 adds a read-side `subject_prefix` filter and a `before` cursor.
 - **−** Lessons must be phrased declaratively, or they are quarantined.
 - **−** Lessons stay out of the brief, by design: facts are not briefed.
 - **−** There is no vector similarity: retrieval is keyword only. This is not a live event bus.
@@ -112,8 +112,9 @@ The bank is an auditable, success-weighted and prunable set of lessons. Lessons 
 
 Approved by the user. **The self-improving lessons bank is stored as governed `fact` entries, written through the existing `memory_write` gate**: MCP `memory_write`, or REST `POST /memory` (`packages/mcp-server/src/server.ts`).
 
-**What it rules out:**
-- No lessons table, no new memory kind and no new `insertEntry` caller. `store-lock.test.ts` asserts that the `insertEntry` callers are exactly `index-store.ts` and `memory-write.ts`, and that no memory-table SQL appears outside the MCP server.
+**What it rules out, and why:**
+- No lessons table, no new memory kind and no new `insertEntry` caller. This is a design choice, not something a test forces. `store-lock.test.ts` asserts only that the `insertEntry` callers are exactly `index-store.ts` and `memory-write.ts` and that no memory-table SQL appears outside the MCP server package. A table in `IndexStore.migrate` behind its own gated write path, or a new kind with grants, would pass it.
+- Alternatives: a `lessons` table in the server package (typed tags and scores, but a second write door to govern), or a new `lesson` kind (kind-level grants and filtering, but it widens a closed set the policy, the classifier and every grant key on). Governed facts were chosen to keep one write door and add no storage. The price is body-encoded metadata and a read-side search filter.
 
 **How a lesson is written:**
 - **Identity.** `subject = lesson:<milestone>/<phase>/<slug>`. It is lowercased and capped at 200 characters by `normalizeSubject`.
@@ -124,7 +125,7 @@ Approved by the user. **The self-improving lessons bank is stored as governed `f
 
 **How a lesson is cited and found:**
 - **Citation id.** The returned `entry.id`. It is used only when `outcome === "accepted" && verified_persisted === true`.
-- **Retrieval.** `memory_search`, with ranking done client-side.
+- **Retrieval.** `memory_search` with a read-side `subject_prefix` filter and a `before` cursor on `created`, so recall pages through every lesson in the scope; ranking is done client-side.
 - **Scores.** Computed at read time from outcome facts appended later that name the lesson's entry id. Scores are never mutated in place: `fact` appends, and last-write-wins is `todo`-only.
 - **Digest.** A milestone digest is itself a `fact` with `subject = lesson-digest:<milestone>`.
 

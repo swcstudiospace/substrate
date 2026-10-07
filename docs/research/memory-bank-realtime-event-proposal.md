@@ -113,7 +113,7 @@ The storage design below is the original proposal. **It was superseded by the De
 - An optional derived `phase_lifecycles` table in the index would be a new table. Its DDL would live in `index-store.ts` migrate.
 
 **Realtime transport (proposal, later tier):**
-- A polling consumer over `events_query` needs no new infrastructure.
+- A polling consumer over today's `events_query` is not reliable. Its `since`/`until` bounds apply to `ts`, which collectors supply, not to the order events were appended, and its capped result has no cursor. A poller that advances a timestamp checkpoint misses a later backfill that carries an older `ts`, and it cannot page past a full window. A correct poller first needs an append-order cursor on `events_query` (for example a server receive sequence), which is new server work.
 - An outbox, an SSE/websocket tail or webhook fan-out would each be a new component. Dragonfly would be a new dependency, not an extension.
 - Exactly-once delivery can lean on the per-session hash chain for ordering and tamper evidence. A consumer still has to dedupe on event `id` itself.
 - No LISTEN/NOTIFY without a decision on the Postgres primary.
@@ -123,7 +123,7 @@ The storage design below is the original proposal. **It was superseded by the De
 - Greptime retention or compaction settings. None are configured today.
 
 **Tradeoffs:**
-- **Polling over the existing ledger:** lowest risk, latency of seconds, no new service.
+- **Polling over the existing ledger:** lowest risk and no new service, but only after `events_query` gains an append-order cursor; latency of seconds.
 - **New outbox/SSE service:** push latency, but a new component to run, plus a new dependency if it is backed by Dragonfly.
 - **Postgres LISTEN/NOTIFY:** needs the primary confirmed and approval.
 - **SQLite:** duplicates the index and adds a new client and migration path. Not recommended.
@@ -146,7 +146,7 @@ The storage design below is the original proposal. **It was superseded by the De
 - Read-time scoring and milestone digests as `fact` entries.
 
 **Tier 2 (later, separate approval):**
-- Phase lifecycle as `note` events with `payload.lifecycle_type`, and a polling consumer.
+- Phase lifecycle as `note` events with `payload.lifecycle_type`, an append-order cursor on `events_query`, and a polling consumer over it.
 - An outbox with an SSE or webhook dashboard. This is a new component, and Dragonfly only if it is approved as a new dependency.
 - Timescale hypertables and continuous aggregates.
 
@@ -161,8 +161,12 @@ The storage design below is the original proposal. **It was superseded by the De
 
 Approved by the user. **Each lesson is one governed `fact` entry, written through the existing `memory_write` gate**: MCP `memory_write`, or REST `POST /memory` (`server.ts`), both of which reach `governMemoryWrite` (`memory-write.ts`).
 
-**What it rules out:**
-- No lessons table, no new memory kind and no new `insertEntry` caller. `store-lock.test.ts` rule 4 fails on any of them.
+**What it rules out, and why:**
+- No lessons table, no new memory kind and no new `insertEntry` caller. This is a design choice, not something a test forces. `store-lock.test.ts` fails only on a new `insertEntry` caller or on memory-table SQL outside the MCP server package; a table added in `IndexStore.migrate` behind its own gated write path, or a new memory kind with its own grants, would pass it.
+- The alternatives and their tradeoffs:
+  - **A `lessons` table in the server package**, with its own gated insert path. Typed tags and scores and indexed filters, but a second write door to govern, audit and keep in step with `memory-write.ts`.
+  - **A new `lesson` memory kind.** Kind-level grants and filtering, but it widens a closed set that the policy, the classifier and every default grant key on.
+  - **Governed `fact` entries (chosen).** Every write goes through the one gate and Tier 1 needs no new storage. The costs: tags and phase live in the body, and retrieval needs the read-side filter described below.
 
 **How a lesson is written:**
 - **Identity.** `subject = lesson:<milestone>/<phase>/<slug>`. `normalizeSubject` lowercases it and caps it at 200 characters.
@@ -173,7 +177,7 @@ Approved by the user. **Each lesson is one governed `fact` entry, written throug
 
 **How a lesson is cited and found:**
 - **Citation id.** The returned `entry.id` (`mem_…`). It is used only when `outcome === "accepted" && verified_persisted === true`; any other outcome yields no citation.
-- **Retrieval.** `memory_search {query, scope, limit ≤ 100}` at discuss time. The client filters to `lesson:` subjects and ranks by recency × keyword/tag match × score.
+- **Retrieval.** Today `memory_search` matches bodies only and returns at most the newest 100 matches per call, with no cursor, so a broad query in a busy scope pushes older lessons out before they can be ranked. Tier 1 therefore adds a read-side `subject_prefix` filter and a `before` cursor (on `created`) to `memory_search`. It changes no write path and keeps `store-lock.test.ts` green. Discuss-time recall then pages through every `lesson:` entry in the scope and ranks client-side by recency × keyword/tag match × score.
   - Facts are not shown in the brief (`brief.ts`), so lessons reach a session only through this explicit retrieval.
 - **Scores.** Computed at read time from outcome facts appended later, each naming the lesson's entry id. Scores are never mutated in place: `fact` appends, and last-write-wins is `todo`-only (`conflictPlan`).
 - **Digest.** A milestone digest is itself a `fact` with `subject = lesson-digest:<milestone>`, and its body lists the entry ids it rolls up. The originals stay, since there is no delete path, and the client excludes digested lessons from ranking.
