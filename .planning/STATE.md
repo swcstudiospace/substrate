@@ -21,7 +21,7 @@ current_phase_name: 7, 8, 8.1, 9, 10
 ## Current
 
 **Phase 1 (Lane B) in progress.** Orca-vs-herdr resolved in favour of Orca
-(herdr not needed — see phases/01-lane-b/CONTEXT.md). Grok Build collector
+(herdr not needed — see milestones/v1.0-phases/01-lane-b/CONTEXT.md). Grok Build collector
 built, tested and running under systemd. Hermes probed but not started.
 
 Paused at 65% context, deliberately, rather than starting the Hermes plugin
@@ -156,7 +156,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 | Category | Item | Status | Deferred At | Milestone |
 |----------|------|--------|-------------|-----------|
-| uat_gaps | 00/0-UAT.md | partial (8 scenarios pending) | 2026-10-07 | v1.1 |
+| uat_gaps | milestones/v1.0-phases/00-brief/0-UAT.md | partial (8 scenarios pending) | 2026-10-07 | v1.1 |
 
 ## Operator Next Steps
 
