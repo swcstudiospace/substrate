@@ -2,18 +2,18 @@
 gsd_state_version: "1.0"
 milestone: v1.1
 milestone_name: Swarm correlation, governed memory and orchestrate integrations
-current_phase_name: 7, 8, 8.1, 9, 10
-status: All phases complete — ready to ship
-last_updated: "2026-10-07T17:16:22.128Z"
+status: Awaiting next milestone
+last_updated: "2026-10-07T17:27:01.237Z"
 last_activity: 2026-10-07
-state_head: db30d03311d6c103a1cb0ba3966c60538c09d28f
+last_activity_desc: Milestone v1.1 completed and archived
+state_head: 294961a0b380443aad7a9fcacf4499063dba41b2
 progress:
   total_phases: 5
   completed_phases: 5
   total_plans: 5
   completed_plans: 5
   percent: 100
-last_activity_desc: Phase 08.1 complete; all v1.1 phases complete
+current_phase_name: 7, 8, 8.1, 9, 10
 ---
 
 # State
@@ -145,7 +145,19 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Current Position
 
-Phase: All phases complete (7, 8, 8.1, 9, 10)
-Plan: All 5 plans complete
-Status: All phases complete — ready to ship
-Last activity: 2026-10-07
+Phase: Milestone v1.1 complete
+Plan: —
+Status: Awaiting next milestone
+Last activity: 2026-10-07 — Milestone v1.1 completed and archived
+
+## Deferred Items
+
+Items acknowledged and deferred at milestone close, most recent first:
+
+| Category | Item | Status | Deferred At | Milestone |
+|----------|------|--------|-------------|-----------|
+| uat_gaps | 00/0-UAT.md | partial (8 scenarios pending) | 2026-10-07 | v1.1 |
+
+## Operator Next Steps
+
+- Start the next milestone with /gsd-new-milestone
