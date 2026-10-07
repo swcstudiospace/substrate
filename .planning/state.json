@@ -4,40 +4,35 @@
   "milestone": "v1.1",
   "phases": [
     {
-      "number": "1",
-      "name": "Lane B",
-      "status": "pending"
+      "number": "7",
+      "name": "Database structures",
+      "status": "complete"
     },
     {
-      "number": "2",
-      "name": "Claims and dispatch",
-      "status": "pending"
+      "number": "8",
+      "name": "Memory structures",
+      "status": "complete"
     },
     {
-      "number": "3",
-      "name": "Lane A",
-      "status": "pending"
+      "number": "8.1",
+      "name": "Version conflicts carry the standing version (INSERTED)",
+      "status": "complete"
     },
     {
-      "number": "4",
-      "name": "Skills",
-      "status": "pending"
+      "number": "9",
+      "name": "claude-ultrathink integration",
+      "status": "complete"
     },
     {
-      "number": "5",
-      "name": "Docs and desktop",
-      "status": "pending"
-    },
-    {
-      "number": "6",
-      "name": "Ledger",
-      "status": "pending"
+      "number": "10",
+      "name": "Swarm orchestrate integration",
+      "status": "complete"
     }
   ],
   "next": {
-    "command": "/gsd:progress",
-    "label": "Show progress",
-    "reason": "Unsure of state — showing progress"
+    "command": "/gsd:new-milestone",
+    "label": "Start a new milestone",
+    "reason": "All phases complete — start a new milestone"
   },
-  "updated_at": "2026-10-07T17:28:21.988Z"
+  "updated_at": "2026-10-07T17:38:22.669Z"
 }

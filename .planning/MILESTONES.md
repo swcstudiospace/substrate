@@ -2,7 +2,7 @@
 
 ## v1.1 Swarm correlation, governed memory and orchestrate integrations (Shipped: 2026-10-07)
 
-**Phases completed:** 5 phases, 5 plans, 0 tasks
+**Phases completed:** 5 phases, 5 plans, 22 tasks
 
 **Key accomplishments:**
 

@@ -177,3 +177,13 @@ Build without either being touched.
 Phase details: [milestones/v1.1-ROADMAP.md](milestones/v1.1-ROADMAP.md) · requirements: [milestones/v1.1-REQUIREMENTS.md](milestones/v1.1-REQUIREMENTS.md) · audit: [milestones/v1.1-MILESTONE-AUDIT.md](milestones/v1.1-MILESTONE-AUDIT.md) · phase folders: `milestones/v1.1-phases/`
 
 </details>
+
+## Progress
+
+| Phase | Milestone | Plans Complete | Status | Completed |
+|-------|-----------|----------------|--------|-----------|
+| 7. Database structures | v1.1 | 1/1 | Complete | 2026-10-07 |
+| 8. Memory structures | v1.1 | 1/1 | Complete | 2026-10-07 |
+| 8.1. Version conflicts carry the standing version (INSERTED) | v1.1 | 1/1 | Complete | 2026-10-07 |
+| 9. claude-ultrathink integration | v1.1 | 1/1 | Complete | 2026-10-07 |
+| 10. Swarm orchestrate integration | v1.1 | 1/1 | Complete | 2026-10-07 |
