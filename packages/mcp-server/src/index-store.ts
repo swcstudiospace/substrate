@@ -28,6 +28,8 @@ import type {
 	GraphStep,
 	GraphView,
 	MemoryEntry,
+	MemorySearch,
+	MemorySearchPage,
 	MemoryWriteOutcome,
 	NodeState,
 	QuarantineReason,
@@ -1194,17 +1196,53 @@ export class IndexStore implements MemoryStore {
 	 * Full-text search. Superseded entries are excluded by default: an agent asking
 	 * what is true wants what is in force, not every version of it. A decision log is
 	 * still readable — `includeSuperseded` is how you read it.
+	 *
+	 * The newest `limit` matches and nothing more; `searchMemoryPage` is how a caller
+	 * reads past them.
 	 */
 	async searchMemory(query: string, scope?: string, limit = 20, includeSuperseded = false): Promise<MemoryEntry[]> {
+		return (await this.searchMemoryPage({ query, scope, limit, includeSuperseded })).entries;
+	}
+
+	/**
+	 * One page of a search, newest first, and the cursor for the page after it.
+	 *
+	 * Ordered `created desc, id desc`. `created` alone is not an order: `now()` is the
+	 * transaction's start, so every entry one transaction writes shares it, and a
+	 * cursor on the timestamp alone would skip or repeat whichever of them a page
+	 * boundary fell between. `id` breaks the tie, and the cursor is the pair.
+	 *
+	 * The cursor's timestamp is rendered here, to the microsecond Postgres stores,
+	 * rather than taken from the entry's `created` — that is a JS `Date`, cut to the
+	 * millisecond, and a cursor cut short sits *after* the entries it was cut from,
+	 * so the next page would skip any of them the boundary had not yet reached.
+	 *
+	 * `subjectPrefix` arrives normalised and is matched with `left()`, so `%`, `_`
+	 * and `\` in it are the characters they are rather than LIKE patterns.
+	 */
+	async searchMemoryPage(search: MemorySearch): Promise<MemorySearchPage> {
+		const limit = search.limit ?? 20;
+		const query = search.query ?? "";
+		const prefix = search.subjectPrefix ?? null;
+		const before = search.before ?? null;
+		const beforeId = search.beforeId ?? null;
 		const rows = (await this.sql`
-			select *
+			select *, to_char(created at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as cursor_created
 			from memory_entries
-			where (${scope ?? null}::text is null or scope = ${scope ?? null})
-			  and (${includeSuperseded}::boolean or superseded_by is null)
-			  and (${query ?? ""} = '' or to_tsvector('english', body) @@ plainto_tsquery('english', ${query}))
-			order by created desc
+			where (${search.scope ?? null}::text is null or scope = ${search.scope ?? null})
+			  and (${search.includeSuperseded ?? false}::boolean or superseded_by is null)
+			  and (${query} = '' or to_tsvector('english', body) @@ plainto_tsquery('english', ${query}))
+			  and (${prefix}::text is null or left(subject, char_length(${prefix}::text)) = ${prefix}::text)
+			  and (${before}::timestamptz is null
+			       or created < ${before}::timestamptz
+			       or (${beforeId}::text is not null and created = ${before}::timestamptz and id < ${beforeId}::text))
+			order by created desc, id desc
 			limit ${limit}`) as Array<Record<string, unknown>>;
-		return rows.map(toMemoryEntry);
+		const last = rows.length === limit ? rows[rows.length - 1] : undefined;
+		return {
+			entries: rows.map((row) => toMemoryEntry(row)),
+			next: last ? { before: String(last.cursor_created), before_id: String(last.id) } : null,
+		};
 	}
 
 	/**

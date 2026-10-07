@@ -32,6 +32,7 @@ import {
 	type HandoffVerdict,
 } from "./handoff.ts";
 import { leaseView, normalizeTtlSeconds, type LeaseView } from "./lease.ts";
+import { normalizeSubject } from "./memory-policy.ts";
 import { governMemoryWrite } from "./memory-write.ts";
 import { redact } from "./redact.ts";
 import {
@@ -48,6 +49,8 @@ import {
 	type GraphView,
 	type MemoryEntry,
 	type MemoryEntryInput,
+	type MemorySearch,
+	type MemorySearchPage,
 	type MemoryWriteRequest,
 	type MemoryWriteResult,
 	type NodeState,
@@ -362,6 +365,72 @@ export function parseBindRequest(input: { correlation_id?: unknown; graph_id?: u
 	return out;
 }
 
+export class InvalidSearchError extends Error {}
+
+/**
+ * An ISO-8601 instant with an explicit zone, to the microsecond at most — what a
+ * `memory_search` cursor is, and nothing Postgres would read some other way.
+ */
+export const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/;
+
+/** `memory_search`'s arguments, as the tool takes them. */
+export interface MemorySearchRequest {
+	query?: string;
+	scope?: string;
+	limit?: number;
+	include_superseded?: boolean;
+	subject_prefix?: string;
+	before?: string;
+	before_id?: string;
+}
+
+/** Whether a search asks for a page — a cursor back, rather than the bare newest-N list. */
+export function isPagedSearch(request: MemorySearchRequest): boolean {
+	return request.subject_prefix !== undefined || request.before !== undefined || request.before_id !== undefined;
+}
+
+/**
+ * Validate a paged `memory_search`.
+ *
+ * `query` may be left out once `subject_prefix` names what to list: that is how a
+ * caller reads every entry under a subject family rather than the newest 100
+ * mentioning a word. The prefix goes through `normalizeSubject`, because a stored
+ * subject went through it — a prefix that kept its capitals would match nothing.
+ *
+ * `before_id` only breaks a tie at `before`, so it means nothing without it.
+ */
+export function parseMemorySearch(request: MemorySearchRequest): MemorySearch {
+	const search: MemorySearch = {
+		query: request.query,
+		scope: request.scope,
+		limit: request.limit,
+		includeSuperseded: request.include_superseded,
+	};
+	if (request.subject_prefix !== undefined) {
+		const prefix = normalizeSubject(request.subject_prefix);
+		if (!prefix) throw new InvalidSearchError("`subject_prefix` is empty once normalised");
+		search.subjectPrefix = prefix;
+	}
+	if (search.query === undefined && search.subjectPrefix === undefined) {
+		throw new InvalidSearchError("memory_search needs `query`, or `subject_prefix` to list a subject family");
+	}
+	if (request.before !== undefined) {
+		// The fraction is cut to milliseconds only to ask the JS parser whether the
+		// calendar fields are real; Postgres reads the full value.
+		const valid =
+			ISO_TIMESTAMP_PATTERN.test(request.before) &&
+			Number.isFinite(Date.parse(request.before.replace(/(\.\d{3})\d+/, "$1")));
+		if (!valid) throw new InvalidSearchError("`before` must be an ISO-8601 timestamp with a zone, as a page's `next.before` gives it");
+		search.before = request.before;
+	}
+	if (request.before_id !== undefined) {
+		if (search.before === undefined) throw new InvalidSearchError("`before_id` breaks a tie at `before`, and needs it");
+		if (request.before_id.length === 0) throw new InvalidSearchError("`before_id` is empty");
+		search.beforeId = request.before_id;
+	}
+	return search;
+}
+
 export class Substrate {
 	readonly index: IndexStore | null;
 	readonly greptime: GreptimeClient | null;
@@ -657,6 +726,18 @@ export class Substrate {
 	async searchMemory(query: string, scope?: string, limit?: number, includeSuperseded?: boolean): Promise<MemoryEntry[]> {
 		if (!this.index) return [];
 		return this.index.searchMemory(query, scope, limit, includeSuperseded);
+	}
+
+	/**
+	 * A paged search: `subject_prefix` and the `(before, before_id)` cursor. The
+	 * visibility rules are `searchMemory`'s — this reads the same entries, only
+	 * further back — so nothing quarantined, parked or retired is reachable here
+	 * that was not before.
+	 */
+	async searchMemoryPage(request: MemorySearchRequest): Promise<MemorySearchPage> {
+		const search = parseMemorySearch(request);
+		if (!this.index) return { entries: [], next: null };
+		return this.index.searchMemoryPage(search);
 	}
 
 	/**

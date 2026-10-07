@@ -187,6 +187,43 @@ export interface MemoryEntry extends MemoryEntryInput {
 	idempotency_key?: string;
 }
 
+/**
+ * A memory search as the index runs it: every field already validated, and
+ * `subjectPrefix` already normalised the way the gate normalises a subject.
+ */
+export interface MemorySearch {
+	/** Full-text over the body; absent or empty matches every body. */
+	query?: string;
+	scope?: string;
+	limit?: number;
+	includeSuperseded?: boolean;
+	/** Only entries whose stored subject starts with this, literally. */
+	subjectPrefix?: string;
+	/** Only entries created before this ISO timestamp — or, with `beforeId`, at it with a smaller id. */
+	before?: string;
+	beforeId?: string;
+}
+
+/** A keyset cursor: the `(created, id)` of the last entry a page returned. */
+export interface MemorySearchCursor {
+	/** ISO-8601, to the microsecond the index stores. */
+	before: string;
+	before_id: string;
+}
+
+/**
+ * One page of a paged `memory_search`, ordered `created desc, id desc`.
+ *
+ * `next` is the pair to pass back as `before` and `before_id` for the page after
+ * this one: set whenever the page came back full, null otherwise, so null is the
+ * end. Its `before` carries the microseconds the index stores; an entry's own
+ * `created` is cut to the millisecond and is not a cursor.
+ */
+export interface MemorySearchPage {
+	entries: MemoryEntry[];
+	next: MemorySearchCursor | null;
+}
+
 /** One parked write, as a reviewer's queue lists it. */
 export interface GovernanceQueueRow {
 	id: string;

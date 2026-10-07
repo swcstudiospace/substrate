@@ -210,9 +210,10 @@ the same todo. Without a `subject` there is no identity, so the entry is appende
   not the one the write read). `null` means nothing is in force, so the re-submit
   carries no `expected_version`. A client re-submits with `expected_version` set to
   it and the same `idempotency_key`, without re-reading memory first — which matters,
-  because `memory_search` matches only the body and returns the newest 100 entries,
-  so a decision whose body lacks its subject's words and sits under 100 newer
-  entries cannot be found by searching. The field is absent on every other reply,
+  because a plain `memory_search` matches only the body and returns the newest 100
+  entries, so a decision whose body lacks its subject's words and sits under 100
+  newer entries cannot be found by one search (paging by `subject_prefix`, below,
+  reaches it, one page at a time). The field is absent on every other reply,
   including a non-versioned `standing.raced`, and when the gate's own lookup of the
   entry in force failed: absence never means "nothing in force", and a client that
   sees none falls back to reading the entry.
@@ -395,6 +396,55 @@ state this gate exists to surface.
 | 403 | denied by policy |
 | 503 | denied because the index is missing or refusing |
 
+## Reading memory back: `memory_search`
+
+`memory_search` (MCP) is the read path. It sees exactly what is in force in
+`memory_entries`: never a quarantined write or an unreviewed proposal (those live in
+their own tables), and a superseded entry only with `include_superseded`. Scope is the
+caller's filter, not an authorisation: reads carry no per-scope RBAC, as before.
+
+| Argument | Meaning |
+|---|---|
+| `query` | Full-text over bodies (`plainto_tsquery('english', …)`). Required unless `subject_prefix` is given; empty matches every body. |
+| `scope` | Exactly this scope. |
+| `limit` | 1–100, default 20. |
+| `include_superseded` | Also retired versions: a decision's history. |
+| `subject_prefix` | Only entries whose stored subject starts with this. Normalised like a subject (`normalizeSubject`: trimmed and lowercased) and matched literally with `left()`, so `%`, `_` and `\` are characters, not LIKE patterns. An entry with no subject never matches. |
+| `before` | Cursor: an ISO-8601 instant with a zone. Only entries created strictly before it. |
+| `before_id` | Cursor tie-break, only with `before`: also entries created *at* `before` whose id sorts below this. |
+
+**Without `subject_prefix`, `before` or `before_id` nothing changed**: the reply is the
+bare list of the newest `limit` matches, as it always was. The only difference is a
+deterministic tie-break on `id` among entries with one `created`, where the order used
+to be whatever Postgres returned.
+
+**With any of them the reply is a page**:
+
+```json
+{ "entries": [ … ], "next": { "before": "2026-10-07T12:00:00.123456Z", "before_id": "mem_…" } }
+```
+
+The order is `created desc, id desc` and the cursor is that keyset pair: a page holds
+the entries strictly before `(before, before_id)` in that order. `next` is the pair of
+the page's last entry whenever the page came back full, and `null` otherwise; pass it
+back as `before` and `before_id` until it is null. Two properties make that exact:
+
+- **The pair, not the timestamp.** `created` defaults to `now()`, the transaction's
+  start, so every entry one transaction writes shares it. A cursor on `created` alone
+  would skip or repeat whichever of them a page boundary fell between.
+- **Microseconds.** `next.before` is rendered by Postgres to the microsecond it stores.
+  An entry's own `created` in the reply is a JS `Date`, cut to the millisecond; used as
+  a cursor it would sit after entries it was cut from and skip them. Use `next`, never
+  the last entry's `created`.
+
+`query` and `subject_prefix` combine. Listing a subject family is
+`{ scope, subject_prefix: "lesson:", limit: 100 }` and then the cursor until `next` is
+null; this is how [`substrate lessons`](lessons-bank.md) reads every lesson in a scope
+rather than the newest 100. To page a plain query from the top, give `before` any time
+later than every entry. A malformed `before`, a `before_id` without `before`, an empty
+prefix, or neither `query` nor `subject_prefix` is refused with `{ "error": … }` and
+reads nothing.
+
 ## Draining the queue
 
 `memory_pending` (MCP) lists pending proposals and quarantined writes. **Bodies and
@@ -418,7 +468,7 @@ token.
 
 ```sh
 bun test                                  # the gate's decisions, against a fake store
-SUBSTRATE_TEST_PG_URL=postgres://… bun test index-store.memory
+SUBSTRATE_TEST_PG_URL=postgres://… bun test index-store.memory index-store.search
 ```
 
 The gate's decisions are proved against a fake store, because the decisions are the
@@ -426,7 +476,8 @@ point and a Postgres would only slow them down. The two races above are the
 exception: they are settled by a unique index, and a fake cannot reproduce an index
 rejecting the second of two inserts that each believed they were the first. So
 `index-store.memory.test.ts` runs them against a real database and skips, loudly,
-without one.
+without one. `index-store.search.test.ts` does the same for the read side: the literal
+prefix, and the cursor through ties at one timestamp and within one millisecond.
 
 ## The lock
 
