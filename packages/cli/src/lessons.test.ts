@@ -60,6 +60,8 @@ class FakeSubstrate {
 	keys = new Map<string, { asked: string; id: string }>();
 	/** Replies to send instead of deciding, for the next writes in order. */
 	scripted: Reply[] = [];
+	/** Raw HTTP replies for exercising diagnostic boundaries without replacing fetch. */
+	rawReplies: Response[] = [];
 	/** Every `memory_search` call's arguments, in order. */
 	searches: Array<Record<string, unknown>> = [];
 	legacy = false;
@@ -73,6 +75,7 @@ class FakeSubstrate {
 		this.writes = [];
 		this.keys.clear();
 		this.scripted = [];
+		this.rawReplies = [];
 		this.searches = [];
 		this.legacy = false;
 		this.clock = Date.parse("2026-10-01T00:00:00Z");
@@ -99,6 +102,8 @@ class FakeSubstrate {
 
 	private write(request: Reply): Response {
 		this.writes.push(request);
+		const raw = this.rawReplies.shift();
+		if (raw) return raw;
 		const scripted = this.scripted.shift();
 		if (scripted) return Response.json(scripted, { status: 202 });
 		const scope = String(request.scope);
@@ -155,6 +160,8 @@ class FakeSubstrate {
 		const given = params && typeof params === "object" && "arguments" in params ? params.arguments : null;
 		const args: Record<string, unknown> = given && typeof given === "object" ? { ...given } : {};
 		this.searches.push(args);
+		const raw = this.rawReplies.shift();
+		if (raw) return raw;
 		const reply = (value: unknown, isError = false) => {
 			const result = { content: [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value) }], ...(isError ? { isError } : {}) };
 			return new Response(`event: message\ndata: ${JSON.stringify({ jsonrpc: "2.0", id: body.id, result })}\n\n`, {
@@ -517,6 +524,15 @@ describe("score and ranking", () => {
 		});
 	});
 
+	test.each(["2026-10-03T00:00:00.123Z", "2026-10-03T00:00:00.123456Z"])(
+		"scoring preserves server newest-first order when %s ties at millisecond precision",
+		(created) => {
+			const newest = { ...reported("l", "failure", "11", created), id: "mem_a" };
+			const older = { ...reported("l", "success", "11", "2026-10-03T00:00:00.123Z"), id: "mem_z" };
+			expect(scoreOf([newest, older])).toEqual({ score: 1 / 3, count: 1 });
+		},
+	);
+
 	test("a tag match outranks a passing mention, a newer lesson outranks an older one, and a non-match is left out", () => {
 		const items = [
 			lessonAt("mention", "2026-10-06T00:00:00Z", "The lease table is in Postgres."),
@@ -589,6 +605,183 @@ describe("recall, digest and outcome", () => {
 		expect(fake.entries).toHaveLength(5);
 	});
 
+	test.each(["disjoint", "overlapping"])("partial %s digest batches remain citable until a later digest covers each whole batch", async (overlap) => {
+		const ids = await seed();
+		expect(await harness().run(["digest", "v1.1", "--ids", `${ids.lease},${ids.heartbeat}`])).toBe(0);
+		const first = fake.entries.at(-1)?.id ?? "";
+		const nextIds = overlap === "overlapping" ? `${ids.heartbeat},${ids.quarantine}` : ids.quarantine;
+		expect(await harness().run(["digest", "v1.1", "--ids", nextIds])).toBe(0);
+		const second = fake.entries.at(-1)?.id ?? "";
+
+		const recall = harness();
+		expect(await recall.run(["recall", "--json"])).toBe(0);
+		const cited = (JSON.parse(recall.out()) as Array<{ id: string }>).map((entry) => entry.id);
+		expect(cited.sort()).toEqual([first, second, ids.current].sort());
+		const topic = harness();
+		expect(await topic.run(["recall", "takeover", "--json"])).toBe(0);
+		expect((JSON.parse(topic.out()) as Array<{ id: string }>).map((entry) => entry.id)).toEqual([first]);
+
+		expect(await harness().run(["digest", "v1.1"])).toBe(0);
+		const covering = fake.entries.at(-1)?.id ?? "";
+		const after = harness();
+		expect(await after.run(["recall", "--json"])).toBe(0);
+		expect((JSON.parse(after.out()) as Array<{ id: string }>).map((entry) => entry.id).sort()).toEqual(
+			[covering, ids.current].sort(),
+		);
+	});
+
+	test("an oversized digest preserves topic recall by refusing until a summary fits beside all ids", async () => {
+		const ids = Array.from({ length: 90 }, (_, i) =>
+			fake.plant(
+				`lesson:v1.1/08-memory-structures/entry-${i}`,
+				i === 0 ? "Zircon leases fence stale holders." : `Cache entry ${i} persists across restarts.`,
+			),
+		);
+		const refused = harness();
+		expect(await refused.run(["digest", "v1.1"])).toBe(1);
+		expect(fake.writes).toHaveLength(0);
+		expect(refused.err()).toContain("--text");
+		const original = harness();
+		expect(await original.run(["recall", "zircon", "--json"])).toBe(0);
+		expect((JSON.parse(original.out()) as Array<{ id: string }>).map((entry) => entry.id)).toEqual(ids.slice(0, 1));
+
+		const summary = "Zircon leases fence stale holders; cache entries persist across restarts.";
+		expect(await harness().run(["digest", "v1.1", "--text", summary])).toBe(0);
+		const digest = fake.entries.at(-1);
+		expect(digest?.text).toContain(`lessons: ${ids.join(", ")}`);
+		expect(digest?.text).toContain(summary);
+		expect(digest?.text.length).toBeLessThanOrEqual(4000);
+		const recalled = harness();
+		expect(await recalled.run(["recall", "zircon", "--json"])).toBe(0);
+		expect((JSON.parse(recalled.out()) as Array<{ id: string }>).map((entry) => entry.id)).toEqual([digest?.id ?? ""]);
+	});
+
+	test("unchecked digest ids require summary content and still refuse an oversized id list", async () => {
+		const refused = harness();
+		expect(await refused.run(["digest", "v1.1", "--ids", "mem_unknown", "--unchecked"])).toBe(1);
+		expect(fake.writes).toHaveLength(0);
+		expect(refused.err()).toContain("--text");
+		expect(
+			await harness().run(["digest", "v1.1", "--ids", "mem_unknown", "--unchecked", "--text", "Lease holders are fenced by epoch."]),
+		).toBe(0);
+		const digest = fake.entries.at(-1)?.id ?? "";
+		const recalled = harness();
+		expect(await recalled.run(["recall", "epoch", "--json"])).toBe(0);
+		expect((JSON.parse(recalled.out()) as Array<{ id: string }>).map((entry) => entry.id)).toEqual([digest]);
+
+		const tooMany = Array.from({ length: 120 }, (_, i) => `mem_${i.toString(16).padStart(32, "0")}`).join(",");
+		const over = harness();
+		expect(await over.run(["digest", "v1.1", "--ids", tooMany, "--unchecked", "--text", "Lease epochs fence holders."])).toBe(1);
+		expect(fake.writes).toHaveLength(1);
+		expect(over.err()).toContain("--ids");
+	});
+
+	test("returning to an earlier outcome appends a correction while every identical retry stays duplicate", async () => {
+		const ids = await seed();
+		const lessonBefore = { ...fake.entries[0] };
+		const command = (result: string, note = "Takeover held under load.") =>
+			["outcome", ids.lease, "--result", result, "--phase", "15-lessons-bank", "--note", note, "--json"];
+		const keys: string[] = [];
+		const outcomeIds: string[] = [];
+		for (const result of ["success", "failure", "success"]) {
+			const cli = harness();
+			expect(await cli.run(command(result))).toBe(0);
+			const report = JSON.parse(cli.out());
+			expect(report.status).toBe("recorded");
+			expect(report.score_after).toEqual({ score: result === "success" ? 2 / 3 : 1 / 3, count: 1 });
+			keys.push(report.key);
+			outcomeIds.push(report.id);
+
+			const retry = harness();
+			expect(await retry.run(command(result, "Takeover held\n  under load."))).toBe(0);
+			expect(JSON.parse(retry.out())).toMatchObject({ status: "duplicate", id: report.id, key: report.key });
+		}
+		expect(new Set(keys).size).toBe(3);
+		expect(fake.entries.filter((entry) => entry.subject === `lesson-outcome:${ids.lease}`).map((entry) => entry.id)).toEqual(outcomeIds);
+		expect(fake.entries[0]).toEqual(lessonBefore as FakeEntry);
+		const recall = harness();
+		expect(await recall.run(["recall", "lease", "--json"])).toBe(0);
+		expect((JSON.parse(recall.out()) as Array<{ id: string }>).find((entry) => entry.id === ids.lease)).toMatchObject({
+			score: 2 / 3,
+			outcomes: 1,
+		});
+	});
+
+	test("note-only corrections get new keys, independent of reports by other phases or scopes", async () => {
+		const ids = await seed();
+		const command = (note: string, scope = "repo:acme/widgets", phase = "15-lessons-bank") =>
+			["outcome", ids.lease, "--result", "success", "--phase", phase, "--note", note, "--scope", scope, "--unchecked", "--json"];
+		const first = harness();
+		expect(await first.run(command("Takeover held."))).toBe(0);
+		const original = JSON.parse(first.out());
+		const otherPhase = harness();
+		expect(await otherPhase.run(command("Other phase held.", "repo:acme/widgets", "16-next-phase"))).toBe(0);
+		const retry = harness();
+		expect(await retry.run(command("Takeover held."))).toBe(0);
+		expect(JSON.parse(retry.out())).toMatchObject({ status: "duplicate", id: original.id, key: original.key });
+
+		const corrected = harness();
+		expect(await corrected.run(command("Takeover held under load."))).toBe(0);
+		const correction = JSON.parse(corrected.out());
+		expect(correction).toMatchObject({ status: "recorded", score_after: { score: 3 / 4, count: 2 } });
+		expect(correction.key).not.toBe(original.key);
+		const restored = harness();
+		expect(await restored.run(command("Takeover held."))).toBe(0);
+		const restoration = JSON.parse(restored.out());
+		expect(restoration.status).toBe("recorded");
+		expect(restoration.key).not.toBe(original.key);
+		expect(restoration.key).not.toBe(correction.key);
+
+		const otherScope = harness();
+		expect(await otherScope.run(command("Takeover held.", "repo:acme/gadgets"))).toBe(0);
+		const scoped = JSON.parse(otherScope.out());
+		expect(scoped).toMatchObject({ status: "recorded", score_after: { score: 2 / 3, count: 1 } });
+		expect(scoped.key).not.toBe(original.key);
+		const scopeRetry = harness();
+		expect(await scopeRetry.run(command("Takeover held.", "repo:acme/gadgets"))).toBe(0);
+		expect(JSON.parse(scopeRetry.out())).toMatchObject({ status: "duplicate", id: scoped.id, key: scoped.key });
+	});
+
+	test("an outcome correction reuses its key for the governed unverified-write retry", async () => {
+		const ids = await seed();
+		const command = ["outcome", ids.lease, "--phase", "15-lessons-bank", "--note", "Takeover held."];
+		expect(await harness().run([...command, "--result", "success"])).toBe(0);
+		expect(await harness().run([...command, "--result", "failure"])).toBe(0);
+		const before = fake.writes.length;
+		fake.scripted = [{ outcome: "accepted", reason: "accepted.unverified", verified_persisted: false }];
+		const corrected = harness();
+		expect(await corrected.run([...command, "--result", "success", "--json"])).toBe(0);
+		const report = JSON.parse(corrected.out());
+		expect(report).toMatchObject({ status: "recorded", score_after: { score: 2 / 3, count: 1 } });
+		expect(fake.writes.slice(before).map((write) => write.idempotency_key)).toEqual([report.key, report.key]);
+		const retry = harness();
+		expect(await retry.run([...command, "--result", "success", "--json"])).toBe(0);
+		expect(JSON.parse(retry.out())).toMatchObject({ status: "duplicate", id: report.id, key: report.key });
+	});
+
+	test("outcomes accept exactly 4000 body characters and refuse 4001 before writing", async () => {
+		const ids = await seed();
+		const command = ["outcome", ids.lease, "--result", "success", "--phase", "15-lessons-bank"];
+		const preview = harness();
+		expect(await preview.run([...command, "--note", "x", "--dry-run", "--json"])).toBe(0);
+		const [planned] = JSON.parse(preview.out()) as Array<{ body: string }>;
+		if (!planned) throw new Error("outcome dry-run did not return a planned write");
+		const note = "x".repeat(4000 - planned.body.length + 1);
+		const before = fake.writes.length;
+		const refused = harness();
+		expect(await refused.run([...command, "--note", `${note}x`])).toBe(1);
+		expect(refused.err()).toContain("4001");
+		expect(fake.writes).toHaveLength(before);
+		const dry = harness();
+		expect(await dry.run([...command, "--note", `${note}x`, "--dry-run"])).toBe(1);
+		expect(fake.writes).toHaveLength(before);
+
+		const accepted = harness();
+		expect(await accepted.run([...command, "--note", note, "--json"])).toBe(0);
+		expect(JSON.parse(accepted.out()).status).toBe("recorded");
+		expect(fake.entries.at(-1)?.text.length).toBe(4000);
+	});
+
 	test("an outcome appends a fact naming the lesson and moves its score, and the lesson is untouched", async () => {
 		const ids = await seed();
 		const lessonBefore = { ...fake.entries[0] };
@@ -627,6 +820,91 @@ describe("recall, digest and outcome", () => {
 		expect(await cli.run(["recall", "lease"])).toBe(0);
 		expect(cli.out()).toBe("");
 		expect(cli.err()).toContain("HTTP 401");
+	});
+});
+
+describe("lesson transport diagnostics", () => {
+	test("an unreachable credentialed URL never exposes its userinfo, query or fragment", async () => {
+		const cli = harness({
+			memory: httpMemory({
+				url: "http://canary-user:canary%2Dpassword@127.0.0.1:1/?access_token=canary-query#canary-fragment",
+				token: "canary-bearer",
+				timeoutMs: 500,
+			}),
+		});
+		expect(await cli.run(["recall", "lease"])).toBe(0);
+		expect(cli.out()).toBe("");
+		expect(cli.err()).toContain("127.0.0.1:1");
+		expect(cli.err()).toContain("did not answer");
+		for (const secret of ["canary-user", "canary%2Dpassword", "canary-password", "canary-query", "canary-fragment", "canary-bearer"]) {
+			expect(cli.err()).not.toContain(secret);
+		}
+	});
+
+	test.each(["non-JSON", "HTTP error", "JSON-RPC error", "tool error", "invalid result"])(
+		"%s search diagnostics redact credential echoes and retain the HTTP status",
+		async (shape) => {
+			const reason = `denied ${fake.token} canary-query Bearer remote-canary-token http://remote-user:remote-pass@example.test/route?token=remote-query`;
+			const status = shape === "tool error" || shape === "invalid result" ? 200 : 403;
+			const payload = shape === "HTTP error"
+				? { error: reason }
+				: shape === "JSON-RPC error"
+					? { error: { code: -32000, message: reason } }
+					: { result: { isError: shape === "tool error", content: [{ type: "text", text: reason }] } };
+			fake.rawReplies = [shape === "non-JSON" ? new Response(reason, { status }) : Response.json(payload, { status })];
+			// Existing URL construction still sends to /mcp with its query intact.
+			const memory = httpMemory({ url: `${fake.url}/mcp?access_token=canary-query`, token: fake.token, timeoutMs: 2000 });
+			const failure = await memory.page({ scope: "repo:acme/widgets", subject_prefix: "lesson:", limit: 100 }).catch((cause: unknown) => cause);
+			if (!(failure instanceof Error)) throw new Error("memory_search accepted a refused or malformed reply");
+			expect(failure.message).toContain(`HTTP ${status}`);
+			expect(failure.message).toContain(shape === "invalid result" ? "invalid result" : "denied");
+			for (const secret of [fake.token, "canary-query", "remote-canary-token", "remote-user", "remote-pass", "remote-query"]) {
+				expect(failure.message).not.toContain(secret);
+			}
+		},
+	);
+
+	test("non-JSON write refusals redact before truncating and preserve the request and HTTP status", async () => {
+		const remoteToken = "z".repeat(64);
+		fake.rawReplies = [new Response(`denied ${fake.token} ${".".repeat(155)} Bearer ${remoteToken}`, { status: 503 })];
+		const cli = harness();
+		expect(await cli.run(["add", "--text", "Lease epochs fence stale holders.", "--phase", "15-lessons-bank", "--json"])).toBe(1);
+		const [report] = JSON.parse(cli.out()) as Array<{ status: string; reason: string }>;
+		expect(report).toMatchObject({ status: "refused" });
+		expect(report?.reason).toContain("HTTP 503");
+		expect(report?.reason).toContain("denied");
+		expect(cli.out()).not.toContain(fake.token);
+		expect(cli.out()).not.toContain("zzzz");
+		expect(fake.writes).toHaveLength(1);
+		expect(fake.writes[0]).toMatchObject({ kind: "fact", subject: "lesson:v1.2/15-lessons-bank/lease-epochs-fence-stale-holders" });
+		expect(fake.writes[0]?.text).toContain("Lease epochs fence stale holders.");
+	});
+
+	test("governed refusal reason and remedy are scrubbed without changing the denial", async () => {
+		fake.scripted = [{
+			outcome: "denied",
+			reason: `rbac.no-grant ${fake.token}`,
+			remedy: "Contact http://remote-user:remote-pass@example.test/help?token=remote-query with Bearer remote-canary-token",
+		}];
+		const cli = harness();
+		expect(await cli.run(["add", "--text", "Lease epochs fence stale holders.", "--phase", "15-lessons-bank", "--json"])).toBe(1);
+		const [report] = JSON.parse(cli.out()) as Array<{ status: string; reason: string; remedy: string; id: string | null }>;
+		expect(report).toMatchObject({ status: "denied", id: null });
+		expect(report?.reason).toContain("rbac.no-grant");
+		expect(report?.remedy).toContain("example.test/help");
+		for (const secret of [fake.token, "remote-user", "remote-pass", "remote-query", "remote-canary-token"]) {
+			expect(cli.out()).not.toContain(secret);
+		}
+		expect(fake.entries).toHaveLength(0);
+	});
+
+	test("successful recall keeps lesson URL content untouched by diagnostic redaction", async () => {
+		const text = "Lease documentation lives at https://example.test/guide?topic=lease#renewal.";
+		const id = fake.plant("lesson:v1.2/15-lessons-bank/documentation", text);
+		const cli = harness();
+		expect(await cli.run(["recall", "lease", "--json"])).toBe(0);
+		expect(JSON.parse(cli.out())).toMatchObject([{ id, text }]);
+		expect(cli.err()).toBe("");
 	});
 });
 

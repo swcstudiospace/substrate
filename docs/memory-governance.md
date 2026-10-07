@@ -445,6 +445,66 @@ later than every entry. A malformed `before`, a `before_id` without `before`, an
 prefix, or neither `query` nor `subject_prefix` is refused with `{ "error": … }` and
 reads nothing.
 
+### Scoped paging cost
+
+Boot migration adds the idempotent, non-partial
+`memory_scope_created_id_idx (scope, created desc, id desc)` B-tree. Scoped reads
+emit a direct `scope = …` predicate and paired cursors emit
+`(created, id) < (…::timestamptz, …::text)`, so Postgres can seek to the boundary
+and return rows in page order instead of restarting at the scope's newest row.
+A timestamp-only cursor still emits `created < …` and excludes the whole tie.
+Optional predicates are omitted when absent, rather than hidden inside nullable
+OR conditions that inhibit index bounds in generic prepared plans.
+
+The index includes retired entries so the same access path supports history.
+Visibility, literal prefixes and full-text conditions still filter candidates;
+sparse matches can require more reads than the page size. The planner may prefer
+the existing full-text GIN index and a sort for selective body queries. Unscoped
+reads retain their semantics but this scope-leading index does not promise a
+global ordered seek. The additional index costs storage and write maintenance;
+its first boot-time build follows the existing non-concurrent migration pattern.
+
+For a deep-page plan check, run the following with
+`psql "$SUBSTRATE_TEST_PG_URL" -X -v ON_ERROR_STOP=1` against an **isolated test
+database after migration**, never production. The temporary copy inherits the
+actual migrated indexes and disappears on rollback; no durable memory is written.
+The cursor is about 90,000 entries into a 100,000-entry scope, with shared
+microsecond timestamps. No planner scan method is disabled.
+
+```sql
+begin;
+create temp table memory_paging_probe
+  (like memory_entries including defaults including indexes) on commit drop;
+insert into memory_paging_probe (id, scope, kind, body, subject, writer, created)
+select 'mem_explain_' || s || '_' || lpad(g::text, 6, '0'),
+       'repo:explain-' || s, 'fact', 'paging plan fixture', 'lesson:fixture', 'test',
+       timestamptz '2026-01-01T00:00:00Z' + (g / 7) * interval '1 microsecond'
+from generate_series(1, 100000) g cross join (values ('a'), ('b')) scopes(s);
+analyze memory_paging_probe;
+set local plan_cache_mode = force_generic_plan;
+prepare memory_page_probe(text, timestamptz, text, text, int) as
+  select *, to_char(created at time zone 'UTC',
+                    'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as cursor_created
+  from memory_paging_probe
+  where scope = $1 and superseded_by is null
+    and left(subject, char_length($4)) = $4
+    and (created, id) < ($2, $3)
+  order by created desc, id desc limit $5;
+explain (analyze, buffers)
+  execute memory_page_probe('repo:explain-a',
+    '2026-01-01T00:00:00.001428Z', 'mem_explain_a_010000', 'lesson:', 100);
+deallocate memory_page_probe;
+rollback;
+```
+
+The acceptance evidence is an ordered index scan beneath `Limit`, with **both**
+scope equality and the `(created, id)` comparison in `Index Cond`, no `Sort`, and
+100 returned rows without discarding the 90,000 newer rows. Merely seeing an index
+name is insufficient: a cursor left in `Filter` still rescans earlier pages.
+For the before-only variant, prepare the same statement with
+`created < $2` instead of the row comparison; the timestamp must remain in
+`Index Cond`. Omitting `superseded_by is null` checks the history path.
+
 ## Draining the queue
 
 `memory_pending` (MCP) lists pending proposals and quarantined writes. **Bodies and

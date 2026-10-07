@@ -52,6 +52,12 @@ configured deployment the server answers 401, and on an anonymous one the writer
 rather than the hooks' 1.5 s: nothing waits on a lessons command, and a write cut off
 mid-flight is one whose outcome nobody knows.
 
+Transport diagnostics remove URL userinfo, queries and fragments, redact configured
+credential values and recognised credential patterns, then cap each remote diagnostic
+at 200 characters. HTTP status and a scrubbed reason remain available, including for
+refused writes. This affects diagnostics only: the request URL, authorization and body,
+governed write decisions, and successfully recalled lesson content are not rewritten.
+
 ## What gets written
 
 A **lesson** is a `fact` at the scope:
@@ -168,8 +174,10 @@ $$\text{rank} = \text{match} \times 0.5^{\,\text{age}/\text{half-life}} \times (
 - **age** halves the weight every `--half-life` days (default 90).
 - **score** is the read-time success score below, 0.5 when nobody has reported on the
   lesson.
-- `--limit` defaults to 5 (at most 20). Lessons digested by any digest are left out; the
-  newest digest of their milestone is ranked in their place.
+- `--limit` defaults to 5 (at most 20). Digested lessons are left out in favor of their
+  digests. Earlier partial batches remain candidates until a newer digest of the same
+  milestone covers every id in the earlier batch; disjoint or partially overlapping
+  batches do not replace one another.
 
 The candidates are every lesson in the scope, every digest and every outcome, read as
 described next; ranking happens over all of them.
@@ -226,12 +234,16 @@ Milestone v1.1 rolls up 3 lessons.
 - By default it rolls up every lesson filed under the milestone (`lesson:<milestone>/…`).
   `--ids a,b` names the set instead, for example the lessons the
   milestone's plans cited; an id that is not a lesson in the scope is refused unless
-  `--unchecked`. `--text` replaces the generated first line.
+  `--unchecked`. `--text` supplies a summary in place of the generated first line;
+  it is required when any selected id has no readable lesson content.
 - **Nothing is deleted.** There is no delete path, and the originals stay readable through
   `memory_search`. Recall leaves the listed ids out and cites the digest instead.
-- The `lessons:` line is the contract. When the body would pass 4000 characters the
-  per-lesson lines are shortened, then dropped; a digest whose id list alone does not fit
-  is refused, so split it with `--ids`.
+- The `lessons:` line is the contract. Generated digests retain a subject and an excerpt
+  (up to 200 characters) for every selected lesson. If those lines and all ids do not fit
+  within 4000 characters, the command refuses without writing: split the set with
+  `--ids`, or provide a concise `--text` summary that preserves the lessons' topics.
+  With explicit `--text`, the per-lesson lines can be omitted, but the summary and every
+  id must still fit. An ids-only digest with a generic roll-up sentence is never generated.
 - The key hashes the scope, milestone, sorted ids and text, so re-running a digest over
   the same lessons is the same entry.
 
@@ -262,12 +274,23 @@ read from the outcome facts that name the lesson:
 
 $$\text{score} = \frac{1 + \sum w}{2 + n}, \qquad w_{\text{success}} = 1,\ w_{\text{partial}} = \tfrac12,\ w_{\text{failure}} = 0$$
 
-where $n$ counts one report per citing phase, the newest. A phase that changes its
-verdict appends a second outcome, and the newer one replaces the older in the score
-instead of adding a second vote. The key hashes the scope, lesson id, citing
-milestone/phase, the result and the note, so recording the same report twice is one
-entry. `outcome` refuses an id that is not a lesson or digest in the scope, because an
-outcome is permanent; `--unchecked` records it anyway.
+where $n$ counts one report per citing phase, the newest. When timestamps tie at
+JavaScript's millisecond precision, the server's newest-first order decides which
+report counts. A phase that changes its verdict appends another outcome, and the newer
+one replaces the older in the score instead of adding another vote.
+
+The key hashes the scope, lesson id, citing milestone/phase, result and
+whitespace-collapsed note, plus the id of that phase's newest prior report with a
+different result or note (when one exists). Identical retries skip identical reports
+when finding that prior state, so they reuse the key even after persistence. A
+success → failure → success correction therefore appends a new success rather than
+replaying the first one. Note-only corrections follow the same rule; reports from
+another phase or scope do not change this key.
+
+`outcome` refuses an id that is not a lesson or digest in the scope, because an outcome
+is permanent; `--unchecked` records it anyway. An outcome body exceeding 4000 characters
+(including its header) is refused before writing, also during `--dry-run`; shorten the
+note and try again.
 
 ## In the GSD loop
 

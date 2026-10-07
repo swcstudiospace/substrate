@@ -161,8 +161,56 @@ describeLive("memory search against a live index", () => {
 		const after = await store.searchMemoryPage({ scope, subjectPrefix: "lesson:", before: tie, limit: 100 });
 		const createdOf = new Map(rows.map((row) => [row.id, row.created] as const));
 		expect(after.entries.some((entry) => createdOf.get(entry.id) === tie)).toBe(false);
-		expect(after.entries[0]?.id).toBe(expected.find((id) => createdOf.get(id)! < tie));
+		expect(after.entries.map((entry) => entry.id)).toEqual(expected.filter((id) => createdOf.get(id)! < tie));
 	}, 60_000);
+
+	test("keyset boundaries compose with literal prefixes, full text, scope and retired history", async () => {
+		const scope = `repo:searchtest-${RUN}/combined`;
+		const subjectPrefix = "lesson:%_\\/";
+		const id = (suffix: string) => `mem_${MARKER}_combined_${suffix}`;
+		const tie = "2026-02-02T00:00:00.123456Z";
+		const matching = { scope, subject: `${subjectPrefix}match`, body: `${MARKER} quartz`, created: tie };
+		await insert([
+			{ ...matching, id: id("z"), created: "2026-02-02T00:00:00.123457Z" },
+			{ ...matching, id: id("y"), superseded_by: id("z") },
+			{ ...matching, id: id("x"), subject: "lesson:anything/match" },
+			{ ...matching, id: id("w"), body: `${MARKER} granite` },
+			{ ...matching, id: id("v") },
+			{ ...matching, id: id("u") },
+			{ ...matching, id: id("t"), created: "2026-02-02T00:00:00.123455Z" },
+			{ ...matching, id: id("s"), subject: null },
+			{ ...matching, id: id("r"), scope: `${scope}/neighbour` },
+		]);
+
+		for (const scoped of [true, false]) {
+			for (const includeSuperseded of [false, true]) {
+				const search = { query: `${MARKER} quartz`, subjectPrefix, includeSuperseded, ...(scoped ? { scope } : {}) };
+				const expected = ["z", ...(includeSuperseded ? ["y"] : []), "v", "u", ...(scoped ? [] : ["r"]), "t"].map(id);
+				const seen: string[] = [];
+				let cursor: MemorySearchCursor | null = null;
+				for (let page = 0; page < 10; page++) {
+					const result = await store.searchMemoryPage({
+						...search,
+						limit: 2,
+						...(cursor ? { before: cursor.before, beforeId: cursor.before_id } : {}),
+					});
+					seen.push(...result.entries.map((entry) => entry.id));
+					cursor = result.next;
+					if (!cursor) break;
+				}
+				expect(cursor).toBeNull();
+				expect(seen).toEqual(expected);
+				const beforeOnly = await store.searchMemoryPage({ ...search, before: tie, limit: 100 });
+				expect(beforeOnly.entries.map((entry) => entry.id)).toEqual([id("t")]);
+			}
+		}
+
+		// A boundary is a value pair, not a lookup of a still-existing entry.
+		const missingBoundary = await store.searchMemoryPage({
+			scope, query: `${MARKER} quartz`, subjectPrefix, before: tie, beforeId: `${id("v")}0`, limit: 100,
+		});
+		expect(missingBoundary.entries.map((entry) => entry.id)).toEqual(["v", "u", "t"].map(id));
+	});
 
 	test("with neither new parameter the search is what it was: newest first, superseded left out", async () => {
 		// 130 rows, every even one a lesson; the newest lesson, n128, has been superseded.

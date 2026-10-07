@@ -497,6 +497,64 @@ describe("memory_search", () => {
 		expect(stub.paged).toEqual([]);
 	});
 
+	test.each([
+		"2026-02-30T00:00:00Z",
+		"2026-02-29T00:00:00Z",
+		"1900-02-29T00:00:00Z",
+		"2100-02-29T00:00:00Z",
+		"2026-04-31T00:00:00Z",
+		"2026-01-00T00:00:00Z",
+		"2026-00-01T00:00:00Z",
+		"2026-13-01T00:00:00Z",
+		"0000-01-01T00:00:00Z",
+		"2026-02-30T23:30:00.123456-01:00",
+		"2026-01-01T25:00:00Z",
+		"2026-01-01T24:01:00Z",
+		"2026-01-01T24:00:01Z",
+		"2026-01-01T24:00:00.000001Z",
+		"2026-01-01T00:60:00Z",
+		"2026-01-01T00:00:60Z",
+		"2026-01-01T00:00:00+16:00",
+		"2026-01-01T00:00:00-16:00",
+		"2026-01-01T00:00:00+01:60",
+		"2026-01-01T00:00:00-01:60",
+	])("an impossible cursor %s is refused before either index search", async (before) => {
+		const stub = searchIndex();
+		const client = await connectIndex(stub.index);
+		const reply = await call(client, "memory_search", { subject_prefix: "lesson:", before });
+
+		expect(reply.isError).toBe(true);
+		// A structured refusal is the InvalidSearchError path, not a database or SDK error.
+		expect(reply.json().error).toContain("`before`");
+		expect(stub.paged).toEqual([]);
+		expect(stub.plain).toEqual([]);
+	});
+
+	test.each([
+		"2024-02-29T23:59:59.123456Z",
+		"2000-02-29T00:00:00Z",
+		"2024-03-01T00:15:00.000001+01:00",
+		"2024-02-29T23:45:00.999999-01:00",
+		"2026-01-01T00:00:00+15:59",
+		"2026-01-01T00:00:00-15:59",
+		"2026-01-01T24:00:00.000000Z",
+		"0001-01-01T00:00:00Z",
+	])("a valid cursor %s keeps its precision and zone in query and prefix pages", async (before) => {
+		const stub = searchIndex();
+		const client = await connectIndex(stub.index);
+
+		for (const selector of [{ query: "lease" }, { subject_prefix: "  Lesson:" }]) {
+			const reply = await call(client, "memory_search", { ...selector, before, before_id: "mem_1" });
+			expect(reply.isError).toBe(false);
+			expect(reply.json()).toMatchObject({ entries: [{ id: "mem_1" }] });
+		}
+		expect(stub.paged).toMatchObject([
+			{ query: "lease", before, beforeId: "mem_1" },
+			{ subjectPrefix: "lesson:", before, beforeId: "mem_1" },
+		]);
+		expect(stub.plain).toEqual([]);
+	});
+
 	test("a malformed cursor is refused rather than read some other way", async () => {
 		const stub = searchIndex();
 		const client = await connectIndex(stub.index);

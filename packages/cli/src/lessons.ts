@@ -20,6 +20,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { REDACTED, redact, redactValue } from "../../mcp-server/src/redact.ts";
 import { list, parseArgs, str, type Args } from "./args.ts";
 
 /** The gate's cap. A longer body would be cut silently, so it is refused here instead. */
@@ -209,26 +210,26 @@ export function lessonBody(lesson: Lesson): string {
 /**
  * A digest names every lesson it rolls up — that list is what recall excludes by —
  * and then what those lessons said, so the digest is worth recalling in their place.
- * When the whole does not fit the gate's 4000 characters the summaries go first and
- * the ids stay; a digest that cannot list all its ids is refused (null), not cut.
+ * Generated per-lesson summaries must all fit. Otherwise an explicit summary is
+ * required; ids without recall content must never retire the original lessons.
  */
 export function digestBody(milestone: string, lessons: ReadonlyArray<Citable | string>, text?: string): string | null {
 	const ids = lessons.map((lesson) => (typeof lesson === "string" ? lesson : lesson.id));
 	const header = [`[${MARKERS.digest}]`, `milestone: ${milestone}`, `lessons: ${ids.join(", ")}`, ""];
-	const intro = text?.trim()
-		? normalizeText(text)
-		: `Milestone ${milestone} rolls up ${ids.length} lesson${ids.length === 1 ? "" : "s"}.`;
-	const full = lessons.map((lesson) => {
-		if (typeof lesson === "string") return `- ${lesson}`;
-		const said = normalizeText(lesson.text);
-		return `- ${lesson.id} ${lesson.subject}: ${said.length > 200 ? `${said.slice(0, 199)}…` : said}`;
-	});
-	const bare = lessons.map((lesson) => (typeof lesson === "string" ? `- ${lesson}` : `- ${lesson.id} ${lesson.subject}`));
-	for (const lines of [full, bare, []]) {
-		const body = [...header, intro, ...lines].join("\n");
+	const summary = normalizeText(text ?? "");
+	const intro = summary || `Milestone ${milestone} rolls up ${ids.length} lesson${ids.length === 1 ? "" : "s"}.`;
+	const hasContent = lessons.every((lesson) => typeof lesson !== "string" && normalizeText(lesson.text).length > 0);
+	if (hasContent || summary) {
+		const full = lessons.map((lesson) => {
+			if (typeof lesson === "string") return `- ${lesson}`;
+			const said = normalizeText(lesson.text);
+			return `- ${lesson.id} ${lesson.subject}: ${said.length > 200 ? `${said.slice(0, 199)}…` : said}`;
+		});
+		const body = [...header, intro, ...full].join("\n");
 		if (body.length <= MAX_BODY) return body;
 	}
-	return null;
+	const summarized = [...header, summary].join("\n");
+	return summary && summarized.length <= MAX_BODY ? summarized : null;
 }
 
 // ── reading entries back ─────────────────────────────────────────────────────
@@ -332,10 +333,13 @@ export function outcomeRecord(entry: StoredEntry): OutcomeRecord | null {
  */
 export function scoreOf(outcomes: readonly OutcomeRecord[]): { score: number; count: number } {
 	const latest = new Map<string, OutcomeRecord>();
-	for (const outcome of [...outcomes].sort((a, b) => Date.parse(a.created) - Date.parse(b.created))) {
+	for (const outcome of outcomes) {
 		// A report that names no phase cannot be matched to another use, so it stands alone.
 		const use = outcome.milestone && outcome.phase ? `${outcome.milestone}/${outcome.phase}` : outcome.id;
-		latest.set(use, outcome);
+		const held = latest.get(use);
+		// The server is newest first, including precision JS dates lose. Keep its first
+		// report on a tie, but still accept unordered callers with distinct timestamps.
+		if (!held || Date.parse(outcome.created) > Date.parse(held.created)) latest.set(use, outcome);
 	}
 	let sum = 0;
 	for (const outcome of latest.values()) sum += RESULT_WEIGHT[outcome.result];
@@ -397,23 +401,28 @@ export interface Ranked {
  * matching none of the query is left out rather than ranked last: a block of
  * unrelated lessons pasted into CONTEXT.md is worse than a short one.
  *
- * Digested lessons stand behind their digest, and only the newest digest of a
- * milestone is a candidate, so rolling a milestone up again does not cite it twice.
+ * Digested lessons stand behind their digest. Earlier partial batches remain
+ * candidates until a newer digest of the same milestone covers every one of their ids.
  */
 export function rankLessons(items: readonly Citable[], outcomes: readonly OutcomeRecord[], options: RankOptions): Ranked[] {
 	const terms = queryTerms(options.query);
-	const digested = new Set(items.filter((item) => item.digest).flatMap((item) => item.rollsUp));
-	const newestDigest = new Map<string, Citable>();
-	for (const item of items) {
-		if (!item.digest) continue;
-		const held = newestDigest.get(item.milestone);
-		if (!held || Date.parse(item.created) > Date.parse(held.created)) newestDigest.set(item.milestone, item);
+	const digests = items.filter((item) => item.digest).sort((a, b) => Date.parse(b.created) - Date.parse(a.created));
+	const activeDigests = new Set<Citable>();
+	const coverage = new Map<string, Set<string>[]>();
+	const digested = new Set<string>();
+	for (const item of digests) {
+		const newer = coverage.get(item.milestone) ?? [];
+		if (newer.some((ids) => item.rollsUp.every((id) => ids.has(id)))) continue;
+		activeDigests.add(item);
+		newer.push(new Set(item.rollsUp));
+		coverage.set(item.milestone, newer);
+		for (const id of item.rollsUp) digested.add(id);
 	}
 	const reports = new Map<string, OutcomeRecord[]>();
 	for (const outcome of outcomes) reports.set(outcome.lesson, [...(reports.get(outcome.lesson) ?? []), outcome]);
 
 	return items
-		.filter((item) => !digested.has(item.id) && (!item.digest || newestDigest.get(item.milestone) === item))
+		.filter((item) => item.digest ? activeDigests.has(item) : !digested.has(item.id))
 		.map((item) => {
 			const { score, count } = scoreOf(reports.get(item.id) ?? []);
 			const match = matchScore(terms, item);
@@ -748,6 +757,20 @@ class SearchRefused extends Error {
 /** JSON-RPC's invalid-params code. */
 const INVALID_PARAMS = -32602;
 
+/** Diagnostics keep the endpoint, never URL credentials, query values or fragments. */
+function diagnosticUrl(value: string): string {
+	try {
+		const url = new URL(value);
+		url.username = "";
+		url.password = "";
+		url.search = "";
+		url.hash = "";
+		return url.toString();
+	} catch {
+		return "[invalid URL]";
+	}
+}
+
 /**
  * Writes go to `POST /memory`. Reads go to the MCP `memory_search` tool, because
  * REST has no search route: one JSON-RPC `tools/call` POSTed to `/mcp`, which the
@@ -760,6 +783,32 @@ export function httpMemory(connection: Connection): MemoryApi {
 		accept: "application/json, text/event-stream",
 		...(connection.token ? { authorization: `Bearer ${connection.token}` } : {}),
 	};
+	// A configured token may have no recognisable shape, and a refusal may echo it
+	// without a header. URL components can likewise be echoed decoded or encoded.
+	const secrets = new Set([connection.token ?? ""]);
+	try {
+		const url = new URL(connection.url);
+		for (const value of [url.username, url.password, ...url.searchParams.values(), url.hash.slice(1)]) {
+			if (!value) continue;
+			secrets.add(value);
+			secrets.add(encodeURIComponent(value));
+			try {
+				secrets.add(decodeURIComponent(value));
+			} catch {
+				// An invalid escape is still covered by its literal value.
+			}
+		}
+	} catch {
+		secrets.add(connection.url);
+	}
+	const secretValues = [...secrets].filter(Boolean).sort((a, b) => b.length - a.length);
+	function diagnostic(value: string): string {
+		let cleaned = value.replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi, diagnosticUrl);
+		for (const secret of secretValues) cleaned = cleaned.replaceAll(secret, REDACTED);
+		// Match the storage boundary: redact before capping, so a truncated token
+		// cannot survive as a fragment that the credential patterns no longer match.
+		return redact(cleaned).slice(0, 200);
+	}
 	async function send(path: string, body: unknown): Promise<{ status: number; text: string }> {
 		try {
 			const response = await fetch(`${base}${path}`, {
@@ -770,7 +819,7 @@ export function httpMemory(connection: Connection): MemoryApi {
 			});
 			return { status: response.status, text: await response.text() };
 		} catch (cause) {
-			throw new Unreachable(`${base}${path} did not answer: ${message(cause)}`);
+			throw new Unreachable(`${diagnostic(`${base}${path}`)} did not answer: ${diagnostic(message(cause))}`);
 		}
 	}
 	/** One `memory_search` call, and the parsed JSON of its reply. */
@@ -786,15 +835,15 @@ export function httpMemory(connection: Connection): MemoryApi {
 		try {
 			envelope = JSON.parse(data);
 		} catch {
-			throw new Error(`memory_search answered HTTP ${status} with no JSON-RPC reply: ${text.slice(0, 200)}`);
+			throw new Error(`memory_search answered HTTP ${status} with no JSON-RPC reply: ${diagnostic(text)}`);
 		}
 		// No `result` is a refusal: a JSON-RPC error from the audit gate, or a plain
 		// `{ error }` from the HTTP layer such as a 401 for a missing token.
 		if (!envelope?.result) {
 			const error = envelope?.error as { code?: unknown; message?: unknown } | string | undefined;
-			const reason = typeof error === "string" ? error : typeof error?.message === "string" ? error.message : text.slice(0, 200);
+			const reason = typeof error === "string" ? error : typeof error?.message === "string" ? error.message : JSON.stringify(redactValue(envelope));
 			const invalid = typeof error === "object" && error?.code === INVALID_PARAMS;
-			throw new SearchRefused(`memory_search answered HTTP ${status}: ${reason}`, invalid);
+			throw new SearchRefused(`memory_search answered HTTP ${status}: ${diagnostic(reason)}`, invalid);
 		}
 		const content = envelope.result.content?.[0]?.text ?? "";
 		if (envelope.result.isError) {
@@ -802,20 +851,31 @@ export function httpMemory(connection: Connection): MemoryApi {
 			// still requires it says to a paged call. A current server never refuses on
 			// `query` this way, so a malformed cursor is not taken for an older server.
 			const invalid = /Invalid arguments for tool memory_search/.test(content) && /\bquery\b/.test(content);
-			throw new SearchRefused(`memory_search failed: ${content}`, invalid);
+			throw new SearchRefused(`memory_search failed (HTTP ${status}): ${diagnostic(content)}`, invalid);
 		}
-		return JSON.parse(content) as unknown;
+		try {
+			return JSON.parse(content) as unknown;
+		} catch (cause) {
+			throw new Error(`memory_search answered HTTP ${status} with an invalid result: ${diagnostic(message(cause))}`);
+		}
 	}
 	return {
 		async write(request) {
 			const { status, text } = await send("/memory", request);
 			try {
 				const reply = JSON.parse(text) as unknown;
-				if (reply && typeof reply === "object") return reply as WriteReply;
+				if (reply && typeof reply === "object") {
+					const decision = reply as WriteReply;
+					for (const field of ["reason", "remedy", "error", "conflict_with", "quarantine_id", "review_id"] as const) {
+						const value = decision[field];
+						if (typeof value === "string") decision[field] = diagnostic(value);
+					}
+					return decision;
+				}
 			} catch {
 				// Not JSON at all; reported below with what came back.
 			}
-			return { error: `HTTP ${status}: ${text.slice(0, 200)}` };
+			return { error: `HTTP ${status}: ${diagnostic(text)}` };
 		},
 		async search(query, scope, limit) {
 			const entries = await memorySearch({ query, scope, limit });
@@ -1282,7 +1342,7 @@ async function digest(args: Args, positional: string | undefined, deps: LessonsD
 	const text = str(args.text);
 	const body = digestBody(milestone, chosen, text);
 	if (body === null) {
-		deps.err(`[substrate] ${chosen.length} ids do not fit one ${MAX_BODY}-character digest; split them with --ids\n`);
+		deps.err(`[substrate] ${chosen.length} lessons need recall content within a ${MAX_BODY}-character digest; provide a concise --text summary or split them with --ids\n`);
 		return 1;
 	}
 	const ids = chosen.map(idOf).sort();
@@ -1302,11 +1362,11 @@ async function digest(args: Args, positional: string | undefined, deps: LessonsD
  * matches the outcomes of any longer id that begins with this one, so the lesson each
  * record names is compared exactly.
  */
-async function outcomesFor(reader: BankReader, lessonId: string): Promise<OutcomeRecord[]> {
+async function outcomesFor(reader: BankReader, lessonId: string): Promise<Array<OutcomeRecord & { note: string }>> {
 	const entries = await reader.list(`${SUBJECT.outcome}${lessonId}`, [`${MARKERS.outcome} ${lessonId}`]);
 	return entries.flatMap((entry) => {
 		const record = outcomeRecord(entry);
-		return record && record.lesson === lessonId ? [record] : [];
+		return record && record.lesson === lessonId ? [{ ...record, note: normalizeText(parseBody(entry.text).text) }] : [];
 	});
 }
 
@@ -1328,7 +1388,7 @@ async function outcome(args: Args, positional: string | undefined, deps: Lessons
 	const note = normalizeText(str(args.note) ?? "");
 	const reader = new BankReader(deps.memory, scope, deps.err);
 
-	let before: OutcomeRecord[];
+	let before: Array<OutcomeRecord & { note: string }>;
 	try {
 		// An outcome is a permanent fact, so one filed against a mistyped id would sit in
 		// the bank forever, scoring nothing.
@@ -1349,7 +1409,12 @@ async function outcome(args: Args, positional: string | undefined, deps: Lessons
 	}
 
 	const subject = `${SUBJECT.outcome}${lessonId}`;
-	const key = `${SUBJECT.outcome}${sha256([scope, lessonId, `${milestone}/${phase}`, result, note].join("\n"))}`;
+	// The newest differing state anchors this transition. Skipping identical reports
+	// keeps retries stable after persistence, while A -> B -> A gets a new key.
+	const previous = before.find((record) =>
+		record.milestone === milestone && record.phase === phase && (record.result !== result || record.note !== note),
+	);
+	const key = `${SUBJECT.outcome}${sha256([scope, lessonId, `${milestone}/${phase}`, result, note, ...(previous ? [previous.id] : [])].join("\n"))}`;
 	const body = [
 		`[${MARKERS.outcome}]`,
 		`lesson: ${lessonId}`,
@@ -1358,6 +1423,10 @@ async function outcome(args: Args, positional: string | undefined, deps: Lessons
 		`phase: ${phase}`,
 		...(note ? ["", note] : []),
 	].join("\n");
+	if (body.length > MAX_BODY) {
+		deps.err(`[substrate] the outcome body is ${body.length} characters and the gate keeps ${MAX_BODY}; shorten the note\n`);
+		return 1;
+	}
 	if (args["dry-run"]) {
 		printPlanned([{ subject, key, body, skipped: false }], scope, args.json === true, deps);
 		return 0;

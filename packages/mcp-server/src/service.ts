@@ -373,6 +373,34 @@ export class InvalidSearchError extends Error {}
  */
 export const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/;
 
+/** Check calendar fields without Date.parse's day rollover or loss of microseconds. */
+function isValidMemoryCursor(value: string): boolean {
+	if (!ISO_TIMESTAMP_PATTERN.test(value)) return false;
+	const year = Number(value.slice(0, 4));
+	const month = Number(value.slice(5, 7));
+	const day = Number(value.slice(8, 10));
+	if (year === 0 || month < 1 || month > 12) return false;
+	const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+	const daysInMonth = month === 2 ? (leapYear ? 29 : 28) : (month === 4 || month === 6 || month === 9 || month === 11 ? 30 : 31);
+	if (day < 1 || day > daysInMonth) return false;
+
+	const hour = Number(value.slice(11, 13));
+	const minute = Number(value.slice(14, 16));
+	const second = Number(value.slice(17, 19));
+	if (hour > 24 || minute > 59 || second > 59) return false;
+	const utc = value.endsWith("Z");
+	const zoneStart = utc ? value.length - 1 : value.length - 6;
+	// ISO end-of-day midnight remains valid, but even one microsecond past it is not.
+	if (hour === 24 && (minute !== 0 || second !== 0 || (zoneStart > 19 && !/^\.0+$/.test(value.slice(19, zoneStart))))) {
+		return false;
+	}
+	if (!utc) {
+		// PostgreSQL accepts numeric zone displacement only below sixteen hours.
+		if (Number(value.slice(zoneStart + 1, zoneStart + 3)) > 15 || Number(value.slice(zoneStart + 4)) > 59) return false;
+	}
+	return true;
+}
+
 /** `memory_search`'s arguments, as the tool takes them. */
 export interface MemorySearchRequest {
 	query?: string;
@@ -415,12 +443,9 @@ export function parseMemorySearch(request: MemorySearchRequest): MemorySearch {
 		throw new InvalidSearchError("memory_search needs `query`, or `subject_prefix` to list a subject family");
 	}
 	if (request.before !== undefined) {
-		// The fraction is cut to milliseconds only to ask the JS parser whether the
-		// calendar fields are real; Postgres reads the full value.
-		const valid =
-			ISO_TIMESTAMP_PATTERN.test(request.before) &&
-			Number.isFinite(Date.parse(request.before.replace(/(\.\d{3})\d+/, "$1")));
-		if (!valid) throw new InvalidSearchError("`before` must be an ISO-8601 timestamp with a zone, as a page's `next.before` gives it");
+		if (!isValidMemoryCursor(request.before)) {
+			throw new InvalidSearchError("`before` must be an ISO-8601 timestamp with a zone, as a page's `next.before` gives it");
+		}
 		search.before = request.before;
 	}
 	if (request.before_id !== undefined) {

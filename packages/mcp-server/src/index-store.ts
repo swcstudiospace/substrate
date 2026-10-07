@@ -264,6 +264,10 @@ export class IndexStore implements MemoryStore {
 		await this.sql`create index if not exists graph_edges_graph_idx on graph_edges (graph_id)`;
 		await this.sql`create index if not exists graph_bindings_graph_idx on graph_bindings (graph_id)`;
 		await this.sql`create index if not exists memory_scope_idx on memory_entries (scope)`;
+		// Seek directly to a scoped page boundary in its output order, including history.
+		await this.sql`
+			create index if not exists memory_scope_created_id_idx
+			on memory_entries (scope, created desc, id desc)`;
 		await this.sql`create index if not exists memory_fts_idx on memory_entries using gin (to_tsvector('english', body))`;
 		// The identity the lww and versioned strategies resolve against: one standing
 		// entry per conflict key, enforced rather than merely selected for.
@@ -1226,16 +1230,22 @@ export class IndexStore implements MemoryStore {
 		const prefix = search.subjectPrefix ?? null;
 		const before = search.before ?? null;
 		const beforeId = search.beforeId ?? null;
+		// Emit predicates, not nullable OR wrappers: even a generic prepared plan can
+		// use scope equality and the row comparison as a single B-tree index bound.
+		const cursor = before === null
+			? this.sql``
+			: beforeId === null
+				? this.sql`and created < ${before}::timestamptz`
+				: this.sql`and (created, id) < (${before}::timestamptz, ${beforeId}::text)`;
 		const rows = (await this.sql`
 			select *, to_char(created at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as cursor_created
 			from memory_entries
-			where (${search.scope ?? null}::text is null or scope = ${search.scope ?? null})
-			  and (${search.includeSuperseded ?? false}::boolean or superseded_by is null)
-			  and (${query} = '' or to_tsvector('english', body) @@ plainto_tsquery('english', ${query}))
-			  and (${prefix}::text is null or left(subject, char_length(${prefix}::text)) = ${prefix}::text)
-			  and (${before}::timestamptz is null
-			       or created < ${before}::timestamptz
-			       or (${beforeId}::text is not null and created = ${before}::timestamptz and id < ${beforeId}::text))
+			where true
+			  ${search.scope == null ? this.sql`` : this.sql`and scope = ${search.scope}`}
+			  ${search.includeSuperseded ? this.sql`` : this.sql`and superseded_by is null`}
+			  ${query === "" ? this.sql`` : this.sql`and to_tsvector('english', body) @@ plainto_tsquery('english', ${query})`}
+			  ${prefix === null ? this.sql`` : this.sql`and left(subject, char_length(${prefix}::text)) = ${prefix}::text`}
+			  ${cursor}
 			order by created desc, id desc
 			limit ${limit}`) as Array<Record<string, unknown>>;
 		const last = rows.length === limit ? rows[rows.length - 1] : undefined;
