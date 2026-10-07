@@ -435,26 +435,33 @@ export class IndexStore implements MemoryStore {
 	 * A lost CAS is retried, because the state it lost to may itself have been a
 	 * lease that has since lapsed; after {@link CLAIM_ATTEMPTS} it reports the
 	 * holder it found. `lease.ts` holds the decision rules and their tests.
+	 *
+	 * `caller` is the token's surface, null on an anonymous run. A claim naming
+	 * the current holder from another surface's token is denied `not-holder`
+	 * without touching the row: renewing is the holder's act, not anyone's who
+	 * can read its public session id.
 	 */
 	async claimNode(
 		graphId: string,
 		nodeId: string,
 		surface: Surface,
 		sessionId: string,
+		caller: Surface | null,
 		ttlSeconds: number = DEFAULT_LEASE_TTL_SECONDS,
 	): Promise<{ claimed: boolean; node: GraphNode; lease: LeaseView; decision: ClaimDecision }> {
 		const ttl = normalizeTtlSeconds(ttlSeconds);
+		const request = { surface, session_id: sessionId, ttl_seconds: ttl, caller };
 		let node = await this.node(graphId, nodeId);
 
 		for (let attempt = 0; attempt < CLAIM_ATTEMPTS; attempt++) {
-			const decision = decideClaim(leaseSnapshot(node), { surface, session_id: sessionId, ttl_seconds: ttl }, Date.now());
+			const decision = decideClaim(leaseSnapshot(node), request, Date.now());
 
 			if (!decision.granted) {
 				// Re-read before reporting a refusal: the lease may have lapsed between
 				// the read and the decision, and telling an agent it is blocked by a
 				// holder that is already gone is the drift this whole feature removes.
 				node = await this.node(graphId, nodeId);
-				if (decideClaim(leaseSnapshot(node), { surface, session_id: sessionId, ttl_seconds: ttl }, Date.now()).granted) {
+				if (decideClaim(leaseSnapshot(node), request, Date.now()).granted) {
 					continue;
 				}
 				// The public view: the loser learns who holds it and until when, never the id.
@@ -512,7 +519,7 @@ export class IndexStore implements MemoryStore {
 			claimed: false,
 			node,
 			lease: leaseView(leaseSnapshot(node)),
-			decision: decideClaim(leaseSnapshot(node), { surface, session_id: sessionId, ttl_seconds: ttl }, Date.now()),
+			decision: decideClaim(leaseSnapshot(node), request, Date.now()),
 		};
 	}
 

@@ -10,27 +10,37 @@ import type { EventInput, SubstrateEvent, Surface } from "./types.ts";
 /** Records what reached the event log, and stands in for the index. */
 function stubStores(
 	graph: { repo?: string | null; branch?: string | null } | null,
-	claim: { action?: ClaimAction; claimed?: boolean; evicted?: { surface: string; session_id: string } } = {},
+	claim: {
+		action?: ClaimAction;
+		claimed?: boolean;
+		evicted?: { surface: string; session_id: string };
+		reason?: "not-holder" | null;
+	} = {},
 ) {
 	const emitted: SubstrateEvent[] = [];
+	const callers: Array<Surface | null> = [];
 	const action = claim.action ?? "granted";
 	const index = {
-		claimNode: async (graph_id: string, node_id: string, surface: string, session_id: string) => ({
-			claimed: claim.claimed ?? true,
-			node: { graph_id, node_id, linear_identifier: "SPE-123" },
-			lease: { lease_id: "lse_1", epoch: 1, expires_at: "2026-09-30T12:15:00.000Z", state: "held" },
-			decision: {
-				action,
-				granted: action !== "denied",
-				lease_id: "lse_1",
-				epoch: 1,
-				observed_epoch: 0,
-				ttl_seconds: 900,
-				evicted: claim.evicted ?? null,
-				holder: { surface, session_id },
-				observed_expiry: null,
-			},
-		}),
+		claimNode: async (graph_id: string, node_id: string, surface: string, session_id: string, caller: Surface | null) => {
+			callers.push(caller);
+			return {
+				claimed: claim.claimed ?? true,
+				node: { graph_id, node_id, linear_identifier: "SPE-123" },
+				lease: { lease_id: "lse_1", epoch: 1, expires_at: "2026-09-30T12:15:00.000Z", state: "held" },
+				decision: {
+					action,
+					granted: action !== "denied",
+					lease_id: "lse_1",
+					epoch: 1,
+					observed_epoch: 0,
+					ttl_seconds: 900,
+					evicted: claim.evicted ?? null,
+					holder: { surface, session_id },
+					observed_expiry: null,
+					reason: claim.reason ?? null,
+				},
+			};
+		},
 		getGraph: async () => (graph ? { repo: graph.repo ?? null, branch: graph.branch ?? null } : null),
 	};
 	const greptime = {
@@ -41,7 +51,7 @@ function stubStores(
 			emitted.push(event);
 		},
 	};
-	return { emitted, index, greptime };
+	return { emitted, index, greptime, callers };
 }
 
 describe("claimNode", () => {
@@ -51,7 +61,7 @@ describe("claimNode", () => {
 		const { emitted, index, greptime } = stubStores({ repo: "swcstudiospace/x", branch: "main" });
 		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
 
-		await substrate.claimNode("ut-1", "n4", "omp", "sess-1");
+		await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
 
 		expect(emitted).toHaveLength(1);
 		expect(emitted[0]?.kind).toBe("claim");
@@ -64,7 +74,7 @@ describe("claimNode", () => {
 		const { emitted, index, greptime } = stubStores({ repo: "r" });
 		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
 
-		await substrate.claimNode("ut-1", "n4", "omp", "sess-1");
+		await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
 
 		expect(emitted[0]?.summary).toBe("claimed SPE-123");
 		expect(emitted[0]?.summary).not.toContain("n4");
@@ -77,7 +87,7 @@ describe("claimNode", () => {
 		};
 		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
 
-		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1");
+		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
 
 		expect(result.claimed).toBe(true);
 		expect(emitted[0]?.repo).toBeNull();
@@ -87,7 +97,7 @@ describe("claimNode", () => {
 		const { index, greptime } = stubStores({ repo: "r" });
 		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
 
-		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", 5);
+		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null, 5);
 
 		expect(result.action).toBe("granted");
 		expect(result.lease.lease_id).toBe("lse_1");
@@ -102,7 +112,7 @@ describe("claimNode", () => {
 		const { emitted, index, greptime } = stubStores({ repo: "r" }, { action: "renewed" });
 		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
 
-		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1");
+		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
 
 		expect(result.claimed).toBe(true);
 		expect(result.action).toBe("renewed");
@@ -118,7 +128,7 @@ describe("claimNode", () => {
 		);
 		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
 
-		const result = await substrate.claimNode("ut-1", "n2", "hermes", "sess-live");
+		const result = await substrate.claimNode("ut-1", "n2", "hermes", "sess-live", null);
 
 		expect(result.evicted).toBe("grok-bot/sess-dead");
 		expect(emitted[0]?.kind).toBe("warning");
@@ -133,7 +143,7 @@ describe("claimNode", () => {
 		const { emitted, index, greptime } = stubStores({ repo: "r" }, { action: "reclaimed" });
 		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
 
-		const result = await substrate.claimNode("ut-1", "n2", "hermes", "sess-live");
+		const result = await substrate.claimNode("ut-1", "n2", "hermes", "sess-live", null);
 
 		expect(result.evicted).toBeNull();
 		expect(emitted[0]?.kind).toBe("claim");
@@ -144,7 +154,7 @@ describe("claimNode", () => {
 		const { emitted, index, greptime } = stubStores({ repo: "r" }, { action: "denied", claimed: false });
 		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
 
-		const result = await substrate.claimNode("ut-1", "n2", "hermes", "sess-live");
+		const result = await substrate.claimNode("ut-1", "n2", "hermes", "sess-live", null);
 
 		expect(result.claimed).toBe(false);
 		expect(result.lease.lease_id).toBeNull();
@@ -155,11 +165,26 @@ describe("claimNode", () => {
 		expect(result.ttl_seconds).toBeNull();
 	});
 
+	test("a renewal from another surface's token is refused not-holder, with no id and no event", async () => {
+		const { emitted, index, greptime, callers } = stubStores(
+			{ repo: "r" },
+			{ action: "denied", claimed: false, reason: "not-holder" },
+		);
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+
+		const result = await substrate.claimNode("ut-1", "n2", "swarm-a05-be", "A05@r0:ut-1", "hermes");
+
+		expect(callers).toEqual(["hermes"]);
+		expect(result).toMatchObject({ claimed: false, decision: "contended", reason: "not-holder", ttl_seconds: null });
+		expect(result.lease.lease_id).toBeNull();
+		expect(emitted).toEqual([]);
+	});
+
 	test("without an index there is no durable lease, so the claim is refused outright", async () => {
 		// Fail loudly rather than granting a lease that only this process knows
 		// about: an in-memory hold is exactly the false exclusivity leases replace.
 		const substrate = new Substrate(loadConfig({}), { index: null, greptime: null });
-		await expect(substrate.claimNode("ut-1", "n2", "hermes", "sess-1")).rejects.toThrow("SUBSTRATE_PG_URL");
+		await expect(substrate.claimNode("ut-1", "n2", "hermes", "sess-1", null)).rejects.toThrow("SUBSTRATE_PG_URL");
 		await expect(substrate.heartbeatNode("ut-1", "n2", "lse_1", null)).rejects.toThrow("SUBSTRATE_PG_URL");
 	});
 });
@@ -406,7 +431,7 @@ describe("claimNode is fail-closed on the ledger", () => {
 		const { released, index, greptime } = stores({ stored: false });
 		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
 
-		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1");
+		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
 
 		expect(result.claimed).toBe(false);
 		expect(result.decision).toBe("revoked");
@@ -424,7 +449,7 @@ describe("claimNode is fail-closed on the ledger", () => {
 		const { released, index, greptime } = stores({ stored: false, heldByAnother: true });
 		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
 
-		return substrate.claimNode("ut-1", "n4", "omp", "sess-1").then((result) => {
+		return substrate.claimNode("ut-1", "n4", "omp", "sess-1", null).then((result) => {
 			expect(result.claimed).toBe(false);
 			expect(result.reason).toContain("another surface already holds it");
 			expect(released).toEqual([]);
@@ -435,7 +460,7 @@ describe("claimNode is fail-closed on the ledger", () => {
 		const { released, index, greptime } = stores({ stored: true });
 		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
 
-		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1");
+		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
 
 		expect(result).toMatchObject({ claimed: true, decision: "granted", reason: null });
 		expect(released).toEqual([]);
@@ -446,7 +471,7 @@ describe("claimNode is fail-closed on the ledger", () => {
 		const { index } = stores({ stored: false });
 		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null });
 
-		expect(await substrate.claimNode("ut-1", "n4", "omp", "sess-1")).toMatchObject({ claimed: true, decision: "granted" });
+		expect(await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null)).toMatchObject({ claimed: true, decision: "granted" });
 	});
 
 	test("an operator can force fail-closed even with no ledger", async () => {
@@ -454,7 +479,7 @@ describe("claimNode is fail-closed on the ledger", () => {
 		const config = loadConfig({ SUBSTRATE_CLAIM_REQUIRE_LEDGER: "true" });
 		const substrate = new Substrate(config, { index: index as never, greptime: null });
 
-		expect((await substrate.claimNode("ut-1", "n4", "omp", "sess-1")).decision).toBe("revoked");
+		expect((await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null)).decision).toBe("revoked");
 	});
 
 	test("an operator can force fail-open with a ledger that is refusing", async () => {
@@ -462,14 +487,14 @@ describe("claimNode is fail-closed on the ledger", () => {
 		const config = loadConfig({ SUBSTRATE_CLAIM_REQUIRE_LEDGER: "false" });
 		const substrate = new Substrate(config, { index: index as never, greptime: greptime as never });
 
-		expect((await substrate.claimNode("ut-1", "n4", "omp", "sess-1")).decision).toBe("granted");
+		expect((await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null)).decision).toBe("granted");
 	});
 
 	test("says so when the withdrawal itself failed, so the node is known to need a manual release", async () => {
 		const { index, greptime } = stores({ stored: false, releaseFails: true });
 		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
 
-		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1");
+		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
 
 		expect(result.claimed).toBe(false);
 		expect(result.reason).toContain("manual release");
@@ -497,7 +522,7 @@ describe("claimNode is fail-closed on the ledger", () => {
 		});
 		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
 
-		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1");
+		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
 
 		expect(result.decision).toBe("contended");
 		// Nothing to withdraw: the claim was never granted, and releasing would drop
@@ -515,7 +540,7 @@ describe("claimNode is fail-closed on the ledger", () => {
 			{ claimed: (sample) => claimed.push(sample) },
 		);
 
-		await substrate.claimNode("ut-1", "n4", "omp", "sess-1");
+		await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
 
 		expect(claimed).toHaveLength(1);
 		expect(claimed[0]).toMatchObject({ decision: "revoked", quarantineReason: "unrecorded-claim", node_id: "n4" });

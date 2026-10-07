@@ -50,15 +50,23 @@ class LeaseTable {
 		await new Promise<void>((resolve) => setTimeout(resolve, 0));
 	}
 
-	/** Read, decide, then apply only if nothing moved underneath — the real sequence. */
-	async claim(holder: LeaseHolder, ttlSeconds = DEFAULT_LEASE_TTL_SECONDS): Promise<ClaimDecision> {
+	/**
+	 * Read, decide, then apply only if nothing moved underneath — the real sequence.
+	 * `caller` is the token's surface; null is an anonymous local run, which is not checked.
+	 */
+	async claim(
+		holder: LeaseHolder,
+		ttlSeconds = DEFAULT_LEASE_TTL_SECONDS,
+		caller: Surface | null = null,
+	): Promise<ClaimDecision> {
 		const observed = { ...this.row };
-		const decision = decideClaim(observed, { ...holder, ttl_seconds: ttlSeconds }, this.now);
+		const request = { ...holder, ttl_seconds: ttlSeconds, caller };
+		const decision = decideClaim(observed, request, this.now);
 		await this.yieldOnce();
 		if (!decision.granted) return decision;
 		if (this.row.epoch !== decision.observed_epoch) {
 			// Lost the race. Report what is true now rather than what was decided.
-			return { ...decideClaim({ ...this.row }, { ...holder, ttl_seconds: ttlSeconds }, this.now), action: "denied", granted: false };
+			return { ...decideClaim({ ...this.row }, request, this.now), action: "denied", granted: false };
 		}
 		this.row = {
 			lease_id: decision.lease_id,
@@ -369,6 +377,73 @@ describe("only the holder's surface may beat or release", () => {
 		expect(beat.ok === false && beat.reason).toBe("unheld");
 		const released = await node.release({ lease_id: "lse_x" }, "omp");
 		expect(released.ok === true && released.action).toBe("noop");
+	});
+
+	test("re-claiming as the holder from another surface's token renews nothing", async () => {
+		// The holder's surface and session are public — a denial names them — so a
+		// claim naming them proves nothing. Renewing would move the holder's expiry
+		// and hand back its lease id.
+		const node = new LeaseTable();
+		const a05 = holder("swarm-a05-be", "A05@r0:ut-x");
+		const claim = await node.claim(a05, 600, "swarm-a05-be");
+		const before = { ...node.row };
+		node.now += 60_000;
+
+		const renewal = await node.claim(a05, 30, "hermes");
+
+		expect(renewal).toMatchObject({ action: "denied", granted: false, reason: "not-holder", lease_id: null });
+		expect(renewal.holder).toEqual(a05);
+		expect(node.row).toEqual(before);
+		expect(node.history).toHaveLength(1);
+		expect(claim.lease_id).toMatch(/^lse_/);
+	});
+
+	test("re-claiming as the holder of a lapsed lease from another surface's token is refused too", async () => {
+		const node = new LeaseTable();
+		const a05 = holder("swarm-a05-be", "A05@r0:ut-x");
+		await node.claim(a05, 60, "swarm-a05-be");
+		const before = { ...node.row };
+		node.now += 61_000;
+
+		const reclaim = await node.claim(a05, 600, "hermes");
+
+		expect(reclaim).toMatchObject({ action: "denied", reason: "not-holder", lease_id: null });
+		expect(node.row).toEqual(before);
+	});
+
+	test("the holder's own surface still renews and re-claims", async () => {
+		const node = new LeaseTable();
+		const a05 = holder("swarm-a05-be", "A05@r0:ut-x");
+		const first = await node.claim(a05, 60, "swarm-a05-be");
+		node.now += 30_000;
+
+		const renewed = await node.claim(a05, 60, "swarm-a05-be");
+		expect(renewed).toMatchObject({ action: "renewed", granted: true, lease_id: first.lease_id, reason: null });
+
+		node.now += 61_000;
+		const reclaimed = await node.claim(a05, 60, "swarm-a05-be");
+		expect(reclaimed.action).toBe("reclaimed");
+		expect(reclaimed.lease_id).not.toBe(first.lease_id);
+	});
+
+	test("an anonymous re-claim is not checked", async () => {
+		const node = new LeaseTable();
+		const first = await node.claim(holder("omp", "sess-a"), 60, null);
+
+		const renewed = await node.claim(holder("omp", "sess-a"), 60, null);
+
+		expect(renewed).toMatchObject({ action: "renewed", lease_id: first.lease_id });
+	});
+
+	test("another surface's token still takes a free node, but cannot renew it afterwards", async () => {
+		// Supplied-first attribution: a non-swarm token may claim as another non-swarm
+		// surface. The lease then belongs to the surface it named.
+		const node = new LeaseTable();
+		const granted = await node.claim(holder("omp", "sess-a"), 60, "hermes");
+		expect(granted.action).toBe("granted");
+
+		const renewal = await node.claim(holder("omp", "sess-a"), 60, "hermes");
+		expect(renewal).toMatchObject({ action: "denied", reason: "not-holder", lease_id: null });
 	});
 });
 

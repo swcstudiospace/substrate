@@ -331,6 +331,23 @@ describe("a swarm token names the caller", () => {
 		expect(claimedAs.map((claim) => claim.surface)).toEqual(["hermes"]);
 	});
 
+	test("graph_claim: a non-swarm token naming a swarm surface is refused, and the index is never asked", async () => {
+		// A swarm holder's session is public; claiming as it would renew its lease.
+		const { claimedAs, index } = claimIndex();
+		const client = await connectWith("hermes", index, ledger().greptime);
+
+		const reply = await call(client, "graph_claim", {
+			graph_id: "ut-1",
+			node_id: "n1",
+			session_id: "A05@r0:ut-1",
+			surface: "swarm-a05-be",
+		});
+
+		expect(reply.isError).toBe(true);
+		expect(String(reply.json().error)).toBe("this token is hermes and cannot claim as swarm-a05-be");
+		expect(claimedAs).toEqual([]);
+	});
+
 	test("graph_claim: a swarm session naming another agent, a bad replica or another graph is refused, never rewritten", async () => {
 		const { claimedAs, index } = claimIndex();
 		const client = await connectWith("swarm-a05-be", index, ledger().greptime);
@@ -348,8 +365,8 @@ describe("a swarm token names the caller", () => {
 	});
 
 	test("graph_claim: a lease held as a swarm surface has the swarm session shape, whoever asks for it", async () => {
-		// A non-swarm or anonymous caller may still name a swarm surface, but the hold
-		// it takes then reads like any other swarm hold, so the rule follows the holder.
+		// An anonymous caller may still name a swarm surface, but the hold it takes
+		// then reads like any other swarm hold, so the rule follows the holder.
 		const { claimedAs, index } = claimIndex();
 		const client = await connectWith(null, index, ledger().greptime);
 

@@ -88,6 +88,26 @@ export function attributedSurface(callerSurface: Surface | null, supplied: strin
 	return { surface: (supplied as Surface | null | undefined) ?? callerSurface ?? "claude-code" };
 }
 
+/**
+ * The surface a `graph_claim` is taken as — `attributedSurface`, narrowed once more.
+ *
+ * A swarm surface's lease is that agent's alone, so an authenticated caller may claim
+ * as `swarm-*` only with that swarm surface's own token. A `hermes` or `cursor` token
+ * naming `surface: swarm-a05-be` is refused here, before the index is asked: its
+ * session id is public, and a claim naming the holder renews the hold. The index
+ * refuses the renewal too (`not-holder`), but taking a swarm lease the token can
+ * never use afterwards is never right either. An anonymous local run is not checked:
+ * it has no token to compare.
+ */
+export function claimAttribution(callerSurface: Surface | null, supplied: string | null | undefined): Attribution {
+	const attribution = attributedSurface(callerSurface, supplied);
+	if ("refused" in attribution) return attribution;
+	if (callerSurface !== null && isSwarmSurface(attribution.surface) && attribution.surface !== callerSurface) {
+		return { refused: `this token is ${callerSurface} and cannot claim as ${attribution.surface}` };
+	}
+	return attribution;
+}
+
 /** A swarm session's replica: it can never carry the `@` or `:` that delimit the session. */
 export const SWARM_REPLICA_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 
@@ -482,8 +502,10 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				"and the reply names the holder and its expiry, never its lease_id: pick up something else rather " +
 				"than retrying. Keep the `lease_id` from a granted reply — it is shown to you once, here, and " +
 				"graph_heartbeat, graph_release and graph_complete all require it (re-claiming with the same " +
-				"session renews and returns it). Only your token's surface can use the lease afterwards. A swarm " +
-				"surface's session_id must be `<AGENT>@<replica>:<graph_id>`, e.g. `A05@r0:<graph_id>`.",
+				"session renews and returns it). Only your token's surface can use the lease afterwards, and only " +
+				"the holder's own token can renew it by re-claiming (`not-holder` otherwise, with nothing changed). " +
+				"Claiming as a swarm surface takes that surface's own token. A swarm surface's session_id must be " +
+				"`<AGENT>@<replica>:<graph_id>`, e.g. `A05@r0:<graph_id>`.",
 			inputSchema: {
 				graph_id: z.string(),
 				node_id: z.string(),
@@ -499,13 +521,15 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			},
 		},
 		async ({ graph_id, node_id, session_id, ttl_seconds, surface }) => {
-			const attribution = attributedSurface(callerSurface, surface);
+			const attribution = claimAttribution(callerSurface, surface);
 			if ("refused" in attribution) return refusal(attribution.refused);
 			if (isSwarmSurface(attribution.surface)) {
 				const refused = swarmSessionRefusal(attribution.surface, session_id, graph_id);
 				if (refused) return refusal(refused);
 			}
-			return json(await substrate.claimNode(graph_id, node_id, attribution.surface, session_id, ttl_seconds));
+			return json(
+				await substrate.claimNode(graph_id, node_id, attribution.surface, session_id, callerSurface, ttl_seconds),
+			);
 		},
 	);
 

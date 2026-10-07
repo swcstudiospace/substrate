@@ -116,8 +116,14 @@ export interface HandoffPacket {
 	 * receiver has to do anyway. Whether the sender's release landed is a separate
 	 * fact in the same ledger — `releaseNode` appends its own event — and the
 	 * reply to the handoff call reports it as `lease_released` for the sender.
+	 *
+	 * Optional on this type because it is the type packets are *read* as, and the
+	 * ledger is append-only: a packet signed before this field existed does not
+	 * have it, and adding it would break its signature. `buildHandoff` always
+	 * writes it. Absent means a legacy packet; such a packet may carry
+	 * `handover_lease_id` instead, whose presence is the same intent.
 	 */
-	lease_handover: boolean;
+	lease_handover?: boolean;
 	/**
 	 * The lease id itself, as packets signed before `lease_handover` carried it.
 	 * Never written now. Typed so a replayed old packet reads as what it is; its

@@ -61,6 +61,11 @@ longer hold or renew a lease as another.
 local run, keeps the long-standing behaviour on those paths: a supplied `surface` is
 attribution and wins over the token's, then the token's, then `claude-code`. Collectors
 and hooks rely on that — one token legitimately emits for the surfaces it observes.
+One exception, on `graph_claim` only: an authenticated non-swarm token naming a
+`swarm-*` surface is refused the same way (`this token is hermes and cannot claim as
+swarm-a05-be`), before the index is asked. A swarm holder's session is public, so
+without this a `hermes` token could name A05's surface and session and renew A05's
+lease. An anonymous local run may still claim as a swarm surface.
 `memory_write` and `coord_handoff` were already token-only and are unchanged; other tools
 that take an optional `surface` (`memory_brief`, `graph_register`) are unchanged too.
 
@@ -125,24 +130,27 @@ surfaces.
 
 Anything else is refused with MCP `isError: true` and `{"error": …}` naming what was
 wrong, and never rewritten. The index is not asked. The rule follows the holder, not
-the caller: a non-swarm or anonymous caller that names a swarm `surface` on
-`graph_claim` is held to it too, so every swarm hold reads the same way. Non-swarm
-surfaces claim with any `session_id`, as before. Two replicas of one agent are two
-holders, because their sessions differ.
+the caller: an anonymous caller that names a swarm `surface` on `graph_claim` is held
+to it too, so every swarm hold reads the same way. Non-swarm surfaces claim with any
+`session_id`, as before. Two replicas of one agent are two holders, because their
+sessions differ.
 
 **Holder-only ids.** The `lease_id` is shown only in the reply that grants it (or a
 call that presented it and was accepted). A denied claim, any refused heartbeat,
 release or complete, `graph_get`, `graph_register`, `coord_drift_scan`, `/drift` and
 `coord_reap_leases` show the holder's surface and session, the epoch and the expiry,
 with `lease_id: null`. Lease events carry `lease_epoch`, and handoff packets carry
-`lease_handover: true|false`, never the id. An A05 replica that lost its id re-claims
-with its own session and gets it back.
+`lease_handover: true|false`, never the id (packets signed before that field existed
+lack it, and may carry the old `handover_lease_id`). An A05 replica that lost its id
+re-claims with its own token and session and gets it back.
 
 **`not-holder`.** `graph_heartbeat`, `graph_release` and `graph_complete` refuse a
 token whose surface is not the holder's with reason `not-holder`, even when the
 `lease_id` is right. So A09's token cannot beat, release or complete A05's node with an
-id it found in an old event. The check is per surface; between replicas of one agent,
-which share a token, the `lease_id` is the fence.
+id it found in an old event. `graph_claim` holds a renewal to the same rule: a claim that
+names the holder's surface and session, live or lapsed, from another surface's token is
+refused `not-holder` — no expiry change, no `lease_id`, no event. The check is per
+surface; between replicas of one agent, which share a token, the `lease_id` is the fence.
 
 **No swarm operators.** A swarm token is never an operator. Listed in
 `SUBSTRATE_OPERATOR_TOKENS` by mistake, it is still refused `force`

@@ -180,12 +180,26 @@ describe("signing", () => {
 		// cannot be re-signed. Verification recomputes over the packet as stored, so
 		// the field the builder no longer writes is still covered where it exists.
 		const { lease_handover: _dropped, ...current } = packet();
-		// The shape the pre-v1.2 builder produced, which the current type only reads.
-		const legacy = { ...current, handover_lease_id: "lse_0123456789abcdef0123456789abcdef" } as unknown as HandoffPacket;
+		// The shape the pre-v1.2 builder produced. The read type admits it as is: no
+		// `lease_handover`, and the old id field instead.
+		const legacy: HandoffPacket = { ...current, handover_lease_id: "lse_0123456789abcdef0123456789abcdef" };
 		const stored = JSON.parse(JSON.stringify(signHandoff(legacy, SIGNER))) as HandoffPacket;
 
+		expect(stored).not.toHaveProperty("lease_handover");
+		expect(stored.lease_handover).toBeUndefined();
 		expect(verifyHandoff(stored, KEYS)).toEqual({ ok: true, key_id: "k1" });
 		expect(verifyHandoff({ ...stored, handover_lease_id: "lse_forged" }, KEYS)).toEqual({ ok: false, reason: "bad-signature" });
+		// Adding the field a legacy packet never had would change the signed bytes too.
+		expect(verifyHandoff({ ...stored, lease_handover: true }, KEYS)).toEqual({ ok: false, reason: "bad-signature" });
+	});
+
+	test("a packet signed before any lease field reads with lease_handover absent and still verifies", () => {
+		const { lease_handover: _dropped, ...legacy } = packet();
+		const stored = JSON.parse(JSON.stringify(signHandoff(legacy, SIGNER))) as HandoffPacket;
+
+		expect(stored.lease_handover).toBeUndefined();
+		expect(stored.handover_lease_id).toBeUndefined();
+		expect(verifyHandoff(stored, KEYS)).toEqual({ ok: true, key_id: "k1" });
 	});
 
 	test("an unknown algorithm is refused rather than assumed", () => {

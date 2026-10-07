@@ -49,8 +49,8 @@ through two connections to a real Postgres.
 
 1. Keep the `lease_id` from `graph_claim`. It is shown to you **once**, in the
    reply that grants it, and `graph_heartbeat`, `graph_release` and
-   `graph_complete` all need it. Lost it? Re-claim with the same `session_id`:
-   that renews the lease and returns the same id.
+   `graph_complete` all need it. Lost it? Re-claim with the same `session_id`,
+   from the same token: that renews the lease and returns the same id.
 2. Heartbeat well inside the TTL for as long as you are working the node.
 3. **Stop on a refusal.** `ok: false` from a heartbeat means you no longer hold
    the node: `lost` if someone else does, `expired` if it lapsed — re-claim
@@ -74,7 +74,8 @@ or complete the node. So it reaches its holder and nobody else:
   everything another agent needs to pick other work. `coord_reap_leases` names
   the epoch it cleared. The `claim`, `warning` and `note` events a lease writes
   carry `lease_epoch`, never the id, and a handoff packet records only
-  `lease_handover: true|false`.
+  `lease_handover: true|false` (absent on packets signed before the field
+  existed, which may carry the old `handover_lease_id` instead).
 - **Holder check.** `graph_heartbeat`, `graph_release` and `graph_complete`
   refuse a caller whose token surface is not the holder's with `not-holder`,
   even when it presents the right `lease_id`. The check runs before the id is
@@ -82,11 +83,20 @@ or complete the node. So it reaches its holder and nobody else:
   two sessions of one surface share a token, and the `lease_id` is what tells
   them apart. Anonymous local runs (no `SUBSTRATE_TOKEN_*` configured) have no
   identity to compare and are not checked; the id still fences them.
+- **Renewal is the holder's too.** The holder's surface and session are public,
+  and a `graph_claim` naming them renews a live lease (returning its id) or
+  re-claims a lapsed one. So a claim that names the current holder from a token
+  whose surface is not the holder's is denied `not-holder`: the expiry and epoch
+  are unchanged, the reply has no `lease_id`, and no event is written. And a
+  non-swarm token cannot name a `swarm-*` surface on `graph_claim` at all — it
+  is refused before the index is asked.
 - **Claiming for another surface locks you out.** A non-swarm token may still
-  name another surface on `graph_claim` (collectors rely on supplied-first
-  attribution), but the lease then belongs to the surface it named. The token
-  that took it is refused `not-holder` on every fenced call afterwards; the
-  lease lapses by TTL, or an operator forces it. Claim as yourself.
+  name another non-swarm surface on `graph_claim` (collectors rely on
+  supplied-first attribution), and that first claim of a free or lapsed node is
+  granted — but the lease then belongs to the surface it named. The token that
+  took it is refused `not-holder` on every fenced call afterwards, and on every
+  attempt to renew it by re-claiming; the lease lapses by TTL, or an operator
+  forces it. Claim as yourself.
 
 Events and packets written before this rule still hold ids in the append-only
 ledger. They cannot be scrubbed, and the holder check is what makes them

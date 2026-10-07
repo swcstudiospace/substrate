@@ -776,6 +776,11 @@ export class Substrate {
 	 * work. A renewal is exempt — it emits nothing by design, so there is no news to
 	 * lose.
 	 *
+	 * **Renewal is the holder's.** `caller` is the token's surface, null on an
+	 * anonymous run. A claim that names the current holder renews its lease and
+	 * returns its id, so it must come from the holder's own surface: any other
+	 * token is refused `not-holder`, with nothing changed, no id and no event.
+	 *
 	 * See `decideClaim` in `@substrate/audit` and `docs/observability.md`.
 	 */
 	async claimNode(
@@ -783,11 +788,12 @@ export class Substrate {
 		nodeId: string,
 		surface: Surface,
 		sessionId: string,
+		caller: Surface | null,
 		ttlSeconds?: number,
 	): Promise<ClaimResult> {
 		if (!this.index) throw new Error("graph_claim requires SUBSTRATE_PG_URL");
 		const ttl = normalizeTtlSeconds(ttlSeconds, this.config.leaseTtlSeconds);
-		const result = await this.index.claimNode(graphId, nodeId, surface, sessionId, ttl);
+		const result = await this.index.claimNode(graphId, nodeId, surface, sessionId, caller, ttl);
 		const { decision } = result;
 		const identifier = result.node.linear_identifier;
 
@@ -836,7 +842,8 @@ export class Substrate {
 			requireRecorded: this.requireRecordedClaims,
 		});
 
-		let reason = verdict.reason;
+		// A `not-holder` refusal says so in the same word the fenced calls use.
+		let reason = !result.claimed && decision.reason === "not-holder" ? "not-holder" : verdict.reason;
 		if (verdict.decision === "revoked") {
 			// Put the node back, so it is picked up rather than held by a surface that has
 			// been told it does not have it.

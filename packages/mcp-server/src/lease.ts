@@ -161,6 +161,12 @@ export type ClaimAction =
 
 export interface ClaimRequest extends LeaseHolder {
 	ttl_seconds: number;
+	/**
+	 * The authenticated token's surface, null on an anonymous local run. A claim
+	 * that would renew or re-claim an existing hold must come from the holder's
+	 * own surface; see {@link decideClaim}.
+	 */
+	caller: Surface | null;
 }
 
 export interface ClaimDecision {
@@ -180,6 +186,12 @@ export interface ClaimDecision {
 	holder: LeaseHolder;
 	/** When the lease being displaced or extended was due to lapse. */
 	observed_expiry: string | null;
+	/**
+	 * Why a `denied` claim was refused, when it was not plain contention:
+	 * `not-holder` means the request named the holder but the caller's token is
+	 * another surface. Null on every grant and on an ordinary denial.
+	 */
+	reason: "not-holder" | null;
 }
 
 function iso(millis: number | null): string | null {
@@ -193,6 +205,15 @@ function iso(millis: number | null): string | null {
  * decision, so a test can replay a race deterministically. The decision is a
  * proposal — it is only true once a store has applied it against
  * `observed_epoch`.
+ *
+ * **Renewal is a holder's act.** A claim naming the current holder — surface and
+ * session — renews a live lease (and returns its id) or re-claims a lapsed one.
+ * The holder's surface and session are both public, so naming them proves
+ * nothing; when the caller is authenticated, its token must also be the
+ * holder's surface, or the claim is `denied` with reason `not-holder` and
+ * nothing changes. Otherwise any token could stretch or shorten another agent's
+ * hold and be handed its lease id. An anonymous caller (null) is not checked,
+ * as in the fenced calls.
  */
 export function decideClaim(
 	current: LeaseSnapshot,
@@ -210,31 +231,36 @@ export function decideClaim(
 		ttl_seconds: ttl,
 		observed_expiry: expiry,
 	};
+	// The holder's id stays out of a denial. Every fenced call takes it as proof
+	// of holding, so handing it to the loser of a race would hand over the node.
+	const denied = (reason: "not-holder" | null): ClaimDecision => ({
+		...base,
+		action: "denied",
+		granted: false,
+		lease_id: null,
+		evicted: null,
+		holder: holderOf(current) ?? holder,
+		reason,
+	});
+
+	const ownHold = state !== "free" && sameHolder(current, holder);
+	if (ownHold && isStranger(current, request.caller)) return denied("not-holder");
 
 	if (state === "held") {
-		if (sameHolder(current, holder)) {
+		if (ownHold) {
 			// A renewal keeps the lease id: the holder's fencing token must survive
 			// its own re-claim, or every claim would invalidate the heartbeat loop
 			// that the same agent is running.
-			return { ...base, action: "renewed", granted: true, lease_id: current.lease_id, evicted: null, holder };
+			return { ...base, action: "renewed", granted: true, lease_id: current.lease_id, evicted: null, holder, reason: null };
 		}
-		// The holder's id stays out of a denial. Every fenced call takes it as proof
-		// of holding, so handing it to the loser of a race would hand over the node.
-		return {
-			...base,
-			action: "denied",
-			granted: false,
-			lease_id: null,
-			evicted: null,
-			holder: holderOf(current) ?? holder,
-		};
+		return denied(null);
 	}
 
 	// Free or lapsed: the hold changes, so the epoch moves and the lease id is new.
 	// A fresh id is what stops a holder whose lease lapsed from heartbeating it
 	// back to life after someone else has been there.
 	const evicted = state === "expired" ? holderOf(current) : null;
-	const action: ClaimAction = evicted === null ? "granted" : sameHolder(current, holder) ? "reclaimed" : "stolen";
+	const action: ClaimAction = evicted === null ? "granted" : ownHold ? "reclaimed" : "stolen";
 	return {
 		...base,
 		action,
@@ -243,6 +269,7 @@ export function decideClaim(
 		epoch: current.epoch + 1,
 		evicted: action === "reclaimed" ? null : evicted,
 		holder,
+		reason: null,
 	};
 }
 
@@ -407,8 +434,8 @@ export interface LeaseView {
  * The lease as anyone may see it: everything but the id.
  *
  * The default, because a reader is never entitled to the id. The holder got it
- * from its own grant, and a holder that lost it re-claims with the same session,
- * which renews and returns it. Every place that used to show it to a reader was
+ * from its own grant, and a holder that lost it re-claims with the same session
+ * from its own surface's token, which renews and returns it. Every place that used to show it to a reader was
  * a way for a second agent to release or complete a node it never held.
  */
 export function leaseView(snapshot: LeaseSnapshot, now = Date.now()): LeaseView {

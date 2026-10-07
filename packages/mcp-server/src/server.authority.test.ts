@@ -47,11 +47,14 @@ const heldNode = {
 
 /** Every surface the index was asked to claim as, so a refused claim is shown to have asked nobody. */
 const claimedAs: string[] = [];
+/** The authenticated caller each claim reached the index with. */
+const claimCallers: Array<Surface | null> = [];
 
 const index = {
 	getGraph: async () => ({ repo: "swcstudiospace/agent-substrate", branch: "main" }),
-	claimNode: async (graph_id: string, node_id: string, surface: string) => {
+	claimNode: async (graph_id: string, node_id: string, surface: string, _session: string, caller: Surface | null) => {
 		claimedAs.push(surface);
+		claimCallers.push(caller);
 		return {
 			claimed: true,
 			node: { graph_id, node_id, linear_identifier: null },
@@ -416,12 +419,31 @@ describe("a swarm token names the caller over the wire", () => {
 		expect(claimedAs).toEqual(["swarm-a05-be"]);
 	});
 
-	test("MCP graph_claim: a non-swarm token naming another surface is unchanged", async () => {
+	test("MCP graph_claim: a non-swarm token naming another non-swarm surface is unchanged, and the index sees the token", async () => {
 		claimedAs.length = 0;
+		claimCallers.length = 0;
 
 		await callTool("tok-hermes", "graph_claim", { graph_id: "ut-1", node_id: "n3", session_id: "s", surface: "grok-bot" });
 
 		expect(claimedAs).toEqual(["grok-bot"]);
+		// The token's surface travels with the claim, so the index can refuse a renewal.
+		expect(claimCallers).toEqual(["hermes"]);
+	});
+
+	test("MCP graph_claim: a non-swarm token naming a swarm surface is refused before the index", async () => {
+		// A05's session id is public, so a hermes token naming swarm-a05-be and that
+		// session would otherwise renew A05's lease and be handed its id.
+		claimedAs.length = 0;
+
+		const refused = (await callTool("tok-hermes", "graph_claim", {
+			graph_id: "ut-1",
+			node_id: "n2",
+			session_id: "A05@r0:ut-1",
+			surface: "swarm-a05-be",
+		})) as { error: string };
+
+		expect(refused.error).toBe("this token is hermes and cannot claim as swarm-a05-be");
+		expect(claimedAs).toEqual([]);
 	});
 
 	test("MCP graph_claim: A05's token with a session naming another agent or graph is refused before the index", async () => {

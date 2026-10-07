@@ -17,7 +17,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { configWarnings, isOperator, loadConfig, surfaceForToken, swarmTokenWarnings, tokenEnvName } from "./config.ts";
-import { attributedSurface, swarmSessionRefusal } from "./mcp.ts";
+import { attributedSurface, claimAttribution, swarmSessionRefusal } from "./mcp.ts";
 import { Substrate } from "./service.ts";
 import { SURFACES, SWARM_SURFACES, type SubstrateEvent } from "./types.ts";
 
@@ -295,6 +295,26 @@ describe("attributedSurface", () => {
 		expect(attributedSurface("cursor", undefined)).toEqual({ surface: "cursor" });
 		expect(attributedSurface(null, "hermes")).toEqual({ surface: "hermes" });
 		expect(attributedSurface(null, undefined)).toEqual({ surface: "claude-code" });
+	});
+});
+
+describe("claimAttribution", () => {
+	test("a non-swarm token cannot claim as a swarm surface", () => {
+		expect(claimAttribution("hermes", "swarm-a05-be")).toEqual({
+			refused: "this token is hermes and cannot claim as swarm-a05-be",
+		});
+	});
+
+	test("a swarm token claims as itself, and is refused as anyone else", () => {
+		expect(claimAttribution("swarm-a05-be", undefined)).toEqual({ surface: "swarm-a05-be" });
+		expect(claimAttribution("swarm-a05-be", "swarm-a05-be")).toEqual({ surface: "swarm-a05-be" });
+		expect("refused" in claimAttribution("swarm-a05-be", "swarm-a09-rev")).toBe(true);
+	});
+
+	test("a non-swarm token naming another non-swarm surface, and an anonymous run, are unchanged", () => {
+		expect(claimAttribution("cursor", "hermes")).toEqual({ surface: "hermes" });
+		expect(claimAttribution(null, "swarm-a09-rev")).toEqual({ surface: "swarm-a09-rev" });
+		expect(claimAttribution(null, undefined)).toEqual({ surface: "claude-code" });
 	});
 });
 
