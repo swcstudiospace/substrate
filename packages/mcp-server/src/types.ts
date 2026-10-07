@@ -286,6 +286,18 @@ export interface MemoryWriteResult {
 	strategy?: ConflictStrategy;
 	/** The entry a `conflict` collided with, or the one an `lww` write replaced. */
 	conflict_with?: string;
+	/**
+	 * The version of the decision in force *now* for this write's subject, so a
+	 * `versioned` conflict can be re-submitted without re-reading memory first.
+	 *
+	 * Present exactly on a `conflict` whose reason is `version.required`,
+	 * `version.stale`, `version.raced` or `standing.raced`, for a write that resolves
+	 * `versioned` (a `decision` with a subject), and only where the gate's lookup of
+	 * the entry in force succeeded. `null` means no decision is in force for that
+	 * subject, so the re-submit carries no `expected_version`. Absent on every other
+	 * reply, including when the lookup failed — absence is never "nothing in force".
+	 */
+	current_version?: number | null;
 	/** Where a parked or refused write went, so a reviewer can find it. */
 	review_id?: string;
 	quarantine_id?: string;

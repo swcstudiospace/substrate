@@ -554,6 +554,9 @@ describe("conflict — versioned decisions", () => {
 		expect(second.reason).toBe("version.required");
 		expect(second.conflict_with).toBe(first.entry?.id ?? "");
 		expect(second.remedy).toContain("version 1");
+		// The version to re-submit against travels with the refusal, so the caller does
+		// not have to find the decision again — a search it may not be able to win.
+		expect(second.current_version).toBe(1);
 		expect(store.standing()).toHaveLength(1);
 		expect(store.standing()[0]?.text).toBe("the runtime is herdr");
 	});
@@ -563,11 +566,14 @@ describe("conflict — versioned decisions", () => {
 		const stale = await write({ ...decision, text: "the runtime is Orca", expected_version: 7 });
 		expect(stale.reason).toBe("version.stale");
 		expect(stale.remedy).toContain("version 1");
+		expect(stale.current_version).toBe(1);
 	});
 
 	test("expecting a version where nothing is in force is a conflict too", async () => {
 		const result = await write({ ...decision, text: "the runtime is Orca", expected_version: 3 });
 		expect(result.reason).toBe("version.stale");
+		// Present and null: nothing is in force, so the re-submit carries no expectation.
+		expect(result).toHaveProperty("current_version", null);
 		expect(store.entries()).toEqual([]);
 	});
 
@@ -613,6 +619,7 @@ describe("conflict — versioned decisions", () => {
 		expect(loser.reason).toBe("standing.raced");
 		expect(loser.conflict_with).toBe(store.standing()[0]?.id);
 		expect(loser.remedy).toContain("expected_version");
+		expect(loser.current_version).toBe(1);
 		expect(store.standing()).toHaveLength(1);
 		expect(store.standing()[0]?.text).toBe("the runtime is Orca");
 
@@ -647,6 +654,92 @@ describe("conflict — versioned decisions", () => {
 		expect(result.outcome).toBe("conflict");
 		expect(result.reason).toBe("version.raced");
 		expect(store.entries()).toHaveLength(1);
+		// The entry it was replacing is retired and nothing replaced it here, so nothing
+		// is in force now — said as null rather than left out.
+		expect(result).toHaveProperty("current_version", null);
+		expect(result.remedy).toContain("without expected_version");
+	});
+
+	test("a decision replaced under a write reports the version in force now, not the one it read", async () => {
+		await write({ ...decision, text: "the runtime is herdr" });
+		const hook = store.onInsert;
+		store.onInsert = async () => {
+			store.onInsert = hook;
+			await write({ ...decision, text: "the runtime is Orca", expected_version: 1, idempotency_key: "winner" });
+		};
+
+		const loser = await write({
+			...decision,
+			text: "the runtime is Zellij",
+			expected_version: 1,
+			idempotency_key: "loser",
+		});
+
+		expect(loser.outcome).toBe("conflict");
+		expect(loser.reason).toBe("standing.raced");
+		expect(loser.current_version).toBe(2);
+		expect(loser.conflict_with).toBe(store.standing()[0]?.id);
+
+		const retry = await write({
+			...decision,
+			text: "the runtime is Zellij",
+			expected_version: loser.current_version ?? undefined,
+			idempotency_key: "loser",
+		});
+		expect(retry.outcome).toBe("accepted");
+		expect(retry.entry?.version).toBe(3);
+	});
+
+	test("a race whose winner cannot be looked up leaves current_version out rather than reporting none", async () => {
+		// Null would tell the caller to re-submit with no expectation against a decision
+		// that may well be in force. Absence sends it back to reading instead.
+		const hook = store.onInsert;
+		store.onInsert = async () => {
+			store.onInsert = hook;
+			await write({ ...decision, text: "the runtime is Orca", idempotency_key: "winner" });
+			store.failStanding = "postgres: connection reset";
+		};
+
+		const loser = await write({ ...decision, text: "the runtime is herdr", idempotency_key: "loser" });
+
+		expect(loser.reason).toBe("standing.raced");
+		expect("current_version" in loser).toBe(false);
+		expect(loser.remedy).toContain("re-read");
+	});
+
+	test("a superseding race whose lookup fails leaves current_version out too", async () => {
+		await write({ ...decision, text: "the runtime is herdr" });
+		const read = store.standingEntry.bind(store);
+		store.standingEntry = async (key) => {
+			const found = await read(key);
+			const held = found ? store.rows.get(found.id) : undefined;
+			if (held) held.entry = { ...held.entry, superseded_by: "mem_someone-else" };
+			// Only the gate's first read succeeds; the lookup after the race does not.
+			store.failStanding = "postgres: connection reset";
+			return found;
+		};
+
+		const result = await write({ ...decision, text: "the runtime is Orca", expected_version: 1 });
+
+		expect(result.reason).toBe("version.raced");
+		expect("current_version" in result).toBe(false);
+		expect(result.remedy).toContain("re-read");
+	});
+
+	test("a conflict that is not about a version carries no current_version", async () => {
+		const parked = await write({
+			scope: "global",
+			kind: "decision",
+			subject: "runtime",
+			text: "Greptime is the events ledger only",
+		});
+		expect(parked.reason).toBe("review.required");
+		expect("current_version" in parked).toBe(false);
+
+		await store.claimWrite({ key: "k1", explicit: true, entryHash: "whatever", entryId: "mem_someone-else" });
+		const busy = await write({ ...decision, text: "the runtime is herdr", idempotency_key: "k1" });
+		expect(busy.reason).toBe("write.in-flight");
+		expect("current_version" in busy).toBe(false);
 	});
 });
 
@@ -681,6 +774,8 @@ describe("accepted — last-write-wins todos", () => {
 		expect(loser.outcome).toBe("conflict");
 		expect(loser.reason).toBe("standing.raced");
 		expect(loser.strategy).toBe("lww");
+		// Not a versioned write, so there is no version to report.
+		expect("current_version" in loser).toBe(false);
 		expect(store.standing()).toHaveLength(1);
 
 		// And the retry, which for `lww` needs no version, replaces it.

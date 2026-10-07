@@ -16,6 +16,9 @@
  *      state)` index rejected — after the memory entry had already committed, so
  *      the caller was told nothing was stored while the entry was in the index.
  *
+ * It also holds the real-gate regression for `current_version`: a decision buried
+ * under 120 newer entries in its scope is still rewritten without a search.
+ *
  * Skipped unless a database is given, for the reason `index-store.lease.test.ts`
  * gives: mocking Postgres' concurrency would mock the one thing under test.
  *
@@ -456,4 +459,57 @@ describeLive("memory governance against a live index", () => {
 			group by state`) as Array<{ state: string; n: number }>;
 		expect(reviews).toEqual([{ state: "approved", n: 2 }]);
 	});
+
+	test("a version conflict names the version in force, however buried the decision is", async () => {
+		// The gap this closes: a client learned the version to re-submit against by
+		// searching memory, and search matches only the body and returns the newest 100.
+		// A decision whose body lacks its subject's words, under 100+ newer entries in its
+		// scope, could never be found again — so the rewrite stayed refused at v1. The
+		// refusal now carries the version, and no search is needed at all.
+		const repo = `memtest-${RUN}/scratch`;
+		const scope = `repo:${repo}`;
+		const subject = `db-choice-${RUN}`;
+		const first = await write(a, {
+			scope,
+			repo,
+			subject,
+			// Neither "db" nor "choice" appears in the body.
+			text: `${MARKER} use postgres 16`,
+			idempotency_key: `${MARKER}-cv-decision-1`,
+		});
+		expect(first.outcome).toBe("accepted");
+		expect(first.entry?.version).toBe(1);
+
+		for (let i = 0; i < 120; i++) {
+			const fact = await write(a, {
+				scope,
+				repo,
+				kind: "fact",
+				text: `${MARKER} scratch fact ${i}: the build cache was warm`,
+				idempotency_key: `${MARKER}-cv-fact-${i}`,
+			});
+			expect(fact.outcome).toBe("accepted");
+		}
+
+		const rewrite = {
+			scope,
+			repo,
+			subject,
+			text: `${MARKER} use postgres 17`,
+			idempotency_key: `${MARKER}-cv-decision-2`,
+		};
+		const refused = await write(b, rewrite);
+		expect(refused.outcome).toBe("conflict");
+		expect(refused.reason).toBe("version.required");
+		expect(refused.conflict_with).toBe(first.entry!.id);
+		expect(refused.current_version).toBe(1);
+
+		// Straight back, same key, with the version the refusal named.
+		const retry = await write(b, { ...rewrite, expected_version: refused.current_version ?? undefined });
+		expect(retry.outcome).toBe("accepted");
+		expect(retry.verified_persisted).toBe(true);
+		expect(retry.idempotency_key).toBe(`${MARKER}-cv-decision-2`);
+		expect(retry.entry?.version).toBe(2);
+		expect(retry.entry?.supersedes).toBe(first.entry!.id);
+	}, 60_000);
 });

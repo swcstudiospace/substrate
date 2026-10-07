@@ -615,6 +615,7 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 					strategy: "versioned",
 					grant: grant.name,
 					...(standing ? { conflict_with: standing.id } : {}),
+					current_version: standing ? standing.version : null,
 				};
 			}
 		}
@@ -672,36 +673,41 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 				// Whoever won is the entry to re-submit against, and it is worth naming: the
 				// standing read above found nothing, so without this the reply could only say
 				// that something else got there first.
-				const winner = identity ? await store.standingEntry(identity).catch(() => null) : null;
+				const winner = await inForce(store, identity);
 				return {
 					outcome: "conflict",
 					reason: "standing.raced",
 					remedy:
 						`Another writer put a ${kind} in force for this subject while this write was in flight` +
 						`${winner ? ` (${winner.id})` : ""}, and one entry is in force per subject. Nothing was written ` +
-						"here and this idempotency_key is free to use again: re-read the entry in force and re-submit " +
-						(plan.resolve === "versioned"
-							? "against it with expected_version set to its version."
-							: "against it."),
+						"here and this idempotency_key is free to use again: " +
+						(plan.resolve === "versioned" ? resubmitAgainst(winner) : "re-read the entry in force and re-submit against it."),
 					verified_persisted: false,
 					idempotency_key: key,
 					strategy: plan.resolve,
 					grant: grant.name,
 					...(winner ? { conflict_with: winner.id } : {}),
+					...currentVersion(plan.resolve === "versioned", winner),
 				};
 			}
+			// The entry this write was replacing was superseded under it. Looked up again
+			// for the same reason as above: the version to re-submit against is the one in
+			// force now, not the one this write read.
 			await store.finishWrite(key, holder, "conflict", null);
+			const current = plan.resolve === "versioned" ? await inForce(store, identity) : undefined;
 			return {
 				outcome: "conflict",
 				reason: "version.raced",
 				remedy:
-					"Another writer superseded the entry this write was replacing while it was in flight. Re-read the " +
-					"current entry and re-submit against it.",
+					"Another writer superseded the entry this write was replacing while it was in flight. Nothing was " +
+					"written here: " +
+					(plan.resolve === "versioned" ? resubmitAgainst(current) : "re-read the current entry and re-submit against it."),
 				verified_persisted: false,
 				idempotency_key: key,
 				strategy: plan.resolve,
 				grant: grant.name,
 				...(standing ? { conflict_with: standing.id } : {}),
+				...currentVersion(plan.resolve === "versioned", current),
 			};
 		}
 
@@ -866,6 +872,35 @@ function reused(key: string, grant: string, entry: MemoryEntry | null): Decision
 	);
 }
 
+/**
+ * The entry in force for `identity` now, or `undefined` when the lookup failed.
+ *
+ * Used only on a reply that has already lost a race, so a failure must not fail the
+ * write — but it must not read as "nothing in force" either: `null` tells a caller to
+ * re-submit without `expected_version`, which would be wrong against an entry the
+ * gate merely could not see.
+ */
+async function inForce(store: MemoryStore, identity: string | null): Promise<MemoryEntry | null | undefined> {
+	if (!identity) return null;
+	return store.standingEntry(identity).catch(() => undefined);
+}
+
+/** `current_version` for a conflict reply: only on a `versioned` write whose lookup succeeded. */
+function currentVersion(
+	versioned: boolean,
+	current: MemoryEntry | null | undefined,
+): { current_version?: number | null } {
+	if (!versioned || current === undefined) return {};
+	return { current_version: current ? current.version : null };
+}
+
+/** What a `versioned` write that lost a race should send next, given the entry in force now. */
+function resubmitAgainst(current: MemoryEntry | null | undefined): string {
+	if (current === undefined) return "re-read the entry in force and re-submit with expected_version set to its version.";
+	if (current === null) return "nothing is in force for this subject now, so re-submit without expected_version.";
+	return `re-submit with expected_version set to ${current.version} (current_version, ${current.id}).`;
+}
+
 /** The optimistic-concurrency check that gives `versioned` its teeth. */
 function versionMismatch(
 	standing: MemoryEntry | null,
@@ -885,7 +920,7 @@ function versionMismatch(
 			reason: "version.required",
 			remedy:
 				`A decision is already in force for this subject (${standing.id}, version ${standing.version}). ` +
-				"Read it, then re-submit with expected_version set to that version to supersede it deliberately.",
+				"Re-submit with expected_version set to that version (current_version) to supersede it deliberately.",
 		};
 	}
 	if (expected !== standing.version) {
@@ -893,7 +928,7 @@ function versionMismatch(
 			reason: "version.stale",
 			remedy:
 				`The decision in force is version ${standing.version} (${standing.id}), not ${expected}. ` +
-				"Re-read it — somebody changed it since — and re-submit against the current version.",
+				"Somebody changed it since — re-submit against the current version (current_version).",
 		};
 	}
 	return null;
