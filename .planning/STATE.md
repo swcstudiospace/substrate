@@ -3,13 +3,13 @@ gsd_state_version: "1.0"
 milestone: v1.3
 milestone_name: Build plan completion
 current_phase: 16
-current_phase_name: production-parity-and-rehearsal-harness
+current_phase_name: Production parity and rehearsal harness
 status: executing
 stopped_at: "v1.3 roadmap approved 2026-10-08 (phases 16-33, 68/68 requirements); PR #21 ships the milestone-definition docs; Phase 16 discuss done on gsd/v1.3-p16-production-parity."
-last_updated: "2026-10-08T20:12:48.856Z"
+last_updated: "2026-10-08T20:15:52.000Z"
 last_activity: 2026-10-08
-last_activity_desc: v1.3 roadmap created (Phases 16–33, 68/68 requirements mapped)
-state_head: 3993b48a98039d1d100161c17f37c087dc60bee0
+last_activity_desc: Phase 16 execution started
+state_head: a9b1c342d7b35fbe56f26b682472851d9c275293
 progress:
   total_phases: 18
   completed_phases: 0
@@ -154,10 +154,10 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Current Position
 
-Phase: 16 (production-parity-and-rehearsal-harness) — READY TO EXECUTE
-Plan: Not started (Plans: TBD)
-Status: Ready to execute
-Last activity: 2026-10-08 — v1.3 roadmap created (Phases 16–33, 68/68 requirements mapped)
+Phase: 16 (Production parity and rehearsal harness) — EXECUTING
+Plan: 1 of 5
+Status: Executing Phase 16
+Last activity: 2026-10-08 — Phase 16 execution started
 
 ## Deferred Items
 
