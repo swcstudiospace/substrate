@@ -97,7 +97,7 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 - [x] 16-02-PLAN.md
 - [x] 16-03-PLAN.md
 - [x] 16-04-PLAN.md
-- [ ] 16-05-PLAN.md
+- [x] 16-05-PLAN.md
 
 ### Phase 17: Event vocabulary and audit policy
 
@@ -371,7 +371,7 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
-| 16. Production parity and rehearsal harness | v1.3 | 4/5 | In Progress | - |
+| 16. Production parity and rehearsal harness | v1.3 | 5/5 | In Progress | - |
 | 17. Event vocabulary and audit policy | v1.3 | 0/? | Not started | - |
 | 18. Guard rails and shared redactor | v1.3 | 0/? | Not started | - |
 | 19. Lane B collectors | v1.3 | 0/? | Not started | - |

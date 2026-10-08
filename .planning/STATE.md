@@ -5,7 +5,7 @@ milestone_name: Build plan completion
 current_phase: 16
 current_phase_name: Production parity and rehearsal harness
 status: executing
-stopped_at: "16-05 Task 2 checkpoint (human-verify, blocking-human): awaiting operator-approved production parity:check; Task 3 rh- counts pending"
+stopped_at: "Completed 16-05-PLAN.md"
 last_updated: "2026-10-08T20:59:25.049Z"
 last_activity: 2026-10-08
 last_activity_desc: Phase 16 execution started
@@ -156,8 +156,8 @@ which is why Greptime worked immediately and Postgres did not.
 
 Phase: 16 (Production parity and rehearsal harness) — EXECUTING
 Plan: 5 of 5
-Status: Ready to execute
-Last activity: 2026-10-08 — Phase 16 execution started
+Status: Complete (16-05 evidence recorded; seal inputs ready)
+Last activity: 2026-10-08 — Completed 16-05-PLAN.md
 
 ## Deferred Items
 
@@ -173,8 +173,8 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-08T20:59:25.011Z
-Stopped at: 16-05 Task 2 — checkpoint:human-verify gate=blocking-human, awaiting operator-approved production parity:check; Task 3 operator rh- counts also pending
+Last session: 2026-10-08T21:29:12Z
+Stopped at: Completed 16-05-PLAN.md
 Resume file: None
 
 ## Performance Metrics
