@@ -174,7 +174,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 ## Session Continuity
 
 Last session: 2026-10-08T20:59:25.011Z
-Stopped at: Completed 16-04-PLAN.md
+Stopped at: 16-05 Task 2 — checkpoint:human-verify gate=blocking-human, awaiting operator-approved production parity:check; Task 3 operator rh- counts also pending
 Resume file: None
 
 ## Performance Metrics
