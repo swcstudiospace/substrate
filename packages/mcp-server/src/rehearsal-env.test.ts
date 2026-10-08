@@ -9,7 +9,7 @@
  */
 import { describe, expect, test, afterAll } from "bun:test";
 import { randomBytes } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -23,8 +23,11 @@ import {
 	assertLoopback,
 	assertOperatorAllowed,
 	buildRehearsalEnv,
+	consumerEnvRecord,
 	LEDGER_KEYS,
 	RehearsalEnvError,
+	storesEnvRecord,
+	toShellExports,
 	type BuildRehearsalEnvInput,
 	type ScratchSecrets,
 } from "./rehearsal-env.ts";
@@ -166,5 +169,105 @@ describe("refusals", () => {
 		expect(() => buildRehearsalEnv(scratchInput({ surfaces: ["nope" as Surface], operator: null }))).toThrow(
 			RehearsalEnvError,
 		);
+	});
+});
+
+/** What a production value would be: if the builder ever forwarded the parent env, this string would leak. */
+const SENTINEL = "rh-leak-9f3a";
+
+describe("allowlist", () => {
+	test("parent production values never reach the built env", () => {
+		const parentEnv: Record<string, string | undefined> = {
+			PATH: "/usr/bin:/bin",
+			HOME: "/root",
+			BUN_INSTALL: "/root/.bun",
+			LINEAR_API_KEY: SENTINEL,
+			NOTION_API_KEY: SENTINEL,
+			OTEL_EXPORTER_OTLP_ENDPOINT: SENTINEL,
+			SUBSTRATE_PG_URL: SENTINEL,
+			SUBSTRATE_OPERATOR_TOKENS: SENTINEL,
+			SUBSTRATE_TOKEN_HERMES: SENTINEL,
+			[LEDGER_KEYS.url]: SENTINEL,
+			[LEDGER_KEYS.user]: SENTINEL,
+		};
+		const env = buildRehearsalEnv(scratchInput({ parentEnv }));
+		expect(JSON.stringify(env)).not.toContain(SENTINEL);
+	});
+
+	test("built env holds exactly the allowlist plus the scratch keys", () => {
+		const env = buildRehearsalEnv(
+			scratchInput({
+				parentEnv: { PATH: "/usr/bin:/bin", HOME: "/root", BUN_INSTALL: "/root/.bun" },
+			}),
+		);
+		const expected = new Set([
+			"PATH",
+			"HOME",
+			"BUN_INSTALL",
+			"SUBSTRATE_HOST",
+			"SUBSTRATE_PORT",
+			LEDGER_KEYS.url,
+			LEDGER_KEYS.user,
+			LEDGER_KEYS.password,
+			LEDGER_KEYS.db,
+			"SUBSTRATE_PG_URL",
+			...UNDER_TEST.map(tokenEnvName),
+			"SUBSTRATE_OPERATOR_TOKENS",
+			"SUBSTRATE_AUDIT_PATH",
+			"SUBSTRATE_HANDOFF_KEY",
+		]);
+		expect(new Set(Object.keys(env))).toEqual(expected);
+	});
+});
+
+describe("stores and consumer records", () => {
+	test("stores record carries the ledger keys and loads as the server greptime shape", () => {
+		const input = scratchInput();
+		const stores = storesEnvRecord({ ports: input.ports, secrets: input.secrets });
+		expect(stores[LEDGER_KEYS.url]).toBe("http://127.0.0.1:15400");
+		expect(stores[LEDGER_KEYS.db]).toBe("public");
+		expect(stores.SUBSTRATE_PG_URL).toContain("127.0.0.1:15432");
+		expect(new Set(Object.keys(stores))).toEqual(
+			new Set([LEDGER_KEYS.url, LEDGER_KEYS.user, LEDGER_KEYS.password, LEDGER_KEYS.db, "SUBSTRATE_PG_URL"]),
+		);
+		expect(loadConfig(stores).greptime?.url).toBe("http://127.0.0.1:15400");
+	});
+
+	test("consumer record holds the five contract keys and no ledger key", () => {
+		const server = buildRehearsalEnv(scratchInput());
+		const token = server[tokenEnvName(UNDER_TEST[0] ?? "claude-code")] ?? "";
+		const runDir = tempDir();
+		const out = consumerEnvRecord({
+			mcpPort: 17410,
+			firstToken: token,
+			runDir,
+			name: "default",
+			testPgUrl: server.SUBSTRATE_PG_URL ?? "",
+		});
+		expect(out.SUBSTRATE_URL).toBe("http://127.0.0.1:17410");
+		expect(out.SUBSTRATE_TOKEN).toBe(token);
+		expect(out.SUBSTRATE_REHEARSAL_TOKENS_DIR).toBe(join(runDir, "tokens"));
+		expect(out.SUBSTRATE_REHEARSAL_NAME).toBe("default");
+		expect(out.SUBSTRATE_TEST_PG_URL).toBe(server.SUBSTRATE_PG_URL);
+		expect(Object.keys(out)).toHaveLength(5);
+		for (const key of Object.values(LEDGER_KEYS)) expect(out).not.toHaveProperty(key);
+	});
+
+	test("toShellExports renders sorted single-quoted lines", () => {
+		expect(toShellExports({ B_KEY: "b'b", A_KEY: "a a" })).toBe(
+			"export A_KEY='a a'\nexport B_KEY='b'\\''b'\n",
+		);
+	});
+
+	test("toShellExports output sources cleanly in sh", () => {
+		const dir = tempDir();
+		const file = join(dir, "consumer.env");
+		writeFileSync(
+			file,
+			toShellExports({ SUBSTRATE_URL: "http://127.0.0.1:17410", SUBSTRATE_REHEARSAL_NAME: "it's quoted" }),
+		);
+		const run = Bun.spawnSync(["sh", "-c", `. "$0"; printf "%s|%s" "$SUBSTRATE_URL" "$SUBSTRATE_REHEARSAL_NAME"`, file]);
+		expect(run.exitCode).toBe(0);
+		expect(run.stdout.toString()).toBe("http://127.0.0.1:17410|it's quoted");
 	});
 });

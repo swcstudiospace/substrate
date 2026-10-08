@@ -161,3 +161,60 @@ export function buildRehearsalEnv(input: BuildRehearsalEnvInput): Record<string,
 	env.SUBSTRATE_HANDOFF_KEY = input.secrets.handoffKey;
 	return env;
 }
+
+export interface ScratchStoresInput {
+	ports: ScratchPorts;
+	secrets: ScratchSecrets;
+}
+
+export interface ConsumerEnvInput {
+	/** Scratch MCP port the twin listens on. */
+	mcpPort: number;
+	/** Bearer value of the first surface; the client's whole credential. */
+	firstToken: string;
+	/** Instance run directory; per-surface token files live in `tokens/`. */
+	runDir: string;
+	/** Instance name, so a proof states which twin it drove. */
+	name: string;
+	/** Scratch Postgres URL the live index tests run against. */
+	testPgUrl: string;
+}
+
+/**
+ * The `stores.env` record: scratch ledger and Postgres connection values for
+ * the proofs that legitimately hold a store client. Same computed-key shape
+ * as the server env.
+ */
+export function storesEnvRecord(input: ScratchStoresInput): Record<string, string> {
+	return scratchStoreRecords(input.ports, input.secrets);
+}
+
+/**
+ * The `consumer.env` contract: everything a proof needs, and deliberately no
+ * ledger key — clients reach the ledger only through the twin.
+ */
+export function consumerEnvRecord(input: ConsumerEnvInput): Record<string, string> {
+	// Short local, never a long name: a 16+ character identifier after the
+	// client token key would trip the store lock's token scan.
+	const token = input.firstToken;
+	const out: Record<string, string> = {};
+	out.SUBSTRATE_URL = `http://127.0.0.1:${input.mcpPort}`;
+	out.SUBSTRATE_TOKEN = token;
+	out.SUBSTRATE_REHEARSAL_TOKENS_DIR = join(input.runDir, "tokens");
+	out.SUBSTRATE_REHEARSAL_NAME = input.name;
+	out.SUBSTRATE_TEST_PG_URL = input.testPgUrl;
+	return out;
+}
+
+/**
+ * Render an env record as sourceable `export` lines: one
+ * `export KEY='value'` per line, keys sorted, single quotes escaped.
+ */
+export function toShellExports(record: Record<string, string>): string {
+	return (
+		Object.entries(record)
+			.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+			.map(([key, value]) => `export ${key}='${value.replace(/'/g, "'\\''")}'`)
+			.join("\n") + "\n"
+	);
+}
