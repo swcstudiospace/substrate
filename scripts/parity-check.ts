@@ -176,6 +176,53 @@ export function parityVerdict(facts: ParityFacts, opts: VerdictOptions = {}): Pa
 	return { pass: failures.length === 0, failures, warnings: [...facts.warnings] };
 }
 
+/** MainPID, start epoch and restart count from parsed `systemctl show` props. */
+export function parseUnitVitals(props: Map<string, string>): {
+	mainPid: number | null;
+	startEpoch: number | null;
+	nRestarts: number | null;
+} {
+	const mainPidRaw = Number(props.get("MainPID") ?? "");
+	const mainPid = Number.isInteger(mainPidRaw) && mainPidRaw > 0 ? mainPidRaw : null;
+	const startEpoch = systemdTimestampToEpoch(props.get("ExecMainStartTimestamp"));
+	const nRestartsRaw = Number(props.get("NRestarts") ?? "");
+	const nRestarts = Number.isInteger(nRestartsRaw) && nRestartsRaw >= 0 ? nRestartsRaw : null;
+	return { mainPid, startEpoch, nRestarts };
+}
+
+/**
+ * The unit vitals plus the :7410 owners at one instant; the check reads
+ * them before the probes and again after, and fails on any movement.
+ */
+export interface StabilityReading {
+	mainPid: number | null;
+	startEpoch: number | null;
+	nRestarts: number | null;
+	ownerPids: readonly number[];
+}
+
+/**
+ * Failures when the unit moved during the check: a restart between the
+ * first and final readings would mix two lifetimes into one verdict, so
+ * any movement fails and `--expect-*` compares the final readings.
+ */
+export function diffStability(before: StabilityReading, after: StabilityReading): string[] {
+	const failures: string[] = [];
+	if (before.mainPid !== after.mainPid) {
+		failures.push(`MainPID moved during the check (${before.mainPid ?? "(none)"} -> ${after.mainPid ?? "(none)"}); refusing a mixed reading`);
+	}
+	if (before.startEpoch !== after.startEpoch) {
+		failures.push(`process start moved during the check (${before.startEpoch ?? "?"} -> ${after.startEpoch ?? "?"}); refusing a mixed reading`);
+	}
+	if (before.nRestarts !== after.nRestarts) {
+		failures.push(`NRestarts moved during the check (${before.nRestarts ?? "?"} -> ${after.nRestarts ?? "?"}); refusing a mixed reading`);
+	}
+	if (before.ownerPids.join(",") !== after.ownerPids.join(",")) {
+		failures.push(`:7410 owners moved during the check ([${before.ownerPids.join(", ")}] -> [${after.ownerPids.join(", ")}]); refusing a mixed reading`);
+	}
+	return failures;
+}
+
 // ── CLI main (read-only fact gathering) ──────────────────────────────────────
 
 /** Server paths that decide "from main". */
@@ -286,12 +333,8 @@ export async function main(argv: string[]): Promise<number> {
 	const show = spawn(["systemctl", "show", "substrate-mcp", "-p", SYSTEMCTL_PROPS, "--timestamp=unix"]);
 	if (show === null || show.code !== 0) return dead("could not read substrate-mcp via systemctl show.");
 	const props = parseSystemctlShow(show.out);
-	const mainPidRaw = Number(props.get("MainPID") ?? "");
-	const mainPid = Number.isInteger(mainPidRaw) && mainPidRaw > 0 ? mainPidRaw : null;
+	const { mainPid, startEpoch, nRestarts } = parseUnitVitals(props);
 	const workdir = props.get("WorkingDirectory") ?? null;
-	const startEpoch = systemdTimestampToEpoch(props.get("ExecMainStartTimestamp"));
-	const nRestartsRaw = Number(props.get("NRestarts") ?? "");
-	const nRestarts = Number.isInteger(nRestartsRaw) && nRestartsRaw >= 0 ? nRestartsRaw : null;
 	const activeState = props.get("ActiveState") ?? null;
 	const subState = props.get("SubState") ?? null;
 
@@ -385,14 +428,31 @@ export async function main(argv: string[]): Promise<number> {
 		}
 	}
 
+	// The probes above take seconds; re-read the vitals and the listener so
+	// the verdict never mixes two unit lifetimes. `--expect-*` compares
+	// these final readings, and any movement during the check fails.
+	const show2 = spawn(["systemctl", "show", "substrate-mcp", "-p", SYSTEMCTL_PROPS, "--timestamp=unix"]);
+	if (show2 === null || show2.code !== 0) return dead("could not re-read substrate-mcp after the probes.");
+	const vitals = parseUnitVitals(parseSystemctlShow(show2.out));
+	const ss2 = spawn(["ss", "-ltnpH"]);
+	if (ss2 === null || ss2.code !== 0) return dead("could not re-read listeners after the probes.");
+	const owners2 = parseSsListeners(ss2.out).get(7410) ?? [];
+	const stability = diffStability(
+		{ mainPid, startEpoch, nRestarts, ownerPids: owners },
+		{ mainPid: vitals.mainPid, startEpoch: vitals.startEpoch, nRestarts: vitals.nRestarts, ownerPids: owners2 },
+	);
+	const finalPid = vitals.mainPid;
+	const finalStart = vitals.startEpoch;
+	const finalRestarts = vitals.nRestarts;
+
 	const verdict = parityVerdict(
 		{
-			mainPid,
+			mainPid: finalPid,
 			activeState,
 			subState,
-			nRestarts,
-			startEpoch,
-			ssOwnerPids: owners,
+			nRestarts: finalRestarts,
+			startEpoch: finalStart,
+			ssOwnerPids: owners2,
 			cgroup,
 			procCwd,
 			workingDirectory: workdir,
@@ -405,21 +465,23 @@ export async function main(argv: string[]): Promise<number> {
 		},
 		{ expectRestarts, expectStart },
 	);
+	const failures = [...verdict.failures, ...stability];
+	const pass = failures.length === 0;
 
 	process.stdout.write(
-		`[parity:check] MainPID=${mainPid ?? "(none)"} ${activeState ?? "?"}/${subState ?? "?"} NRestarts=${nRestarts ?? "?"} start=${startEpoch ?? "?"}\n` +
-			`[parity:check] :7410 owners=[${owners.join(", ")}] cgroup=${cgroup ?? "(unknown)"} entry=${entryPoint}\n` +
+		`[parity:check] MainPID=${finalPid ?? "(none)"} ${activeState ?? "?"}/${subState ?? "?"} NRestarts=${finalRestarts ?? "?"} start=${finalStart ?? "?"}\n` +
+			`[parity:check] :7410 owners=[${owners2.join(", ")}] cgroup=${cgroup ?? "(unknown)"} entry=${entryPoint}\n` +
 			`[parity:check] tree=${workdir ?? "(unknown)"} HEAD=${headSha ?? "?"} origin=${originSha ?? "?"} healthz=${healthzStatus ?? "(unreachable)"}\n`,
 	);
-	for (const failure of verdict.failures) process.stdout.write(` FAIL  ${failure}\n`);
+	for (const failure of failures) process.stdout.write(` FAIL  ${failure}\n`);
 	for (const warning of verdict.warnings) process.stdout.write(`  --   ${warning}\n`);
 	if (json) {
 		process.stdout.write(
-			`${JSON.stringify({ pass: verdict.pass, failures: verdict.failures, warnings: verdict.warnings, mainPid, nRestarts, startEpoch, headSha, originSha, healthzStatus }, null, 2)}\n`,
+			`${JSON.stringify({ pass, failures, warnings: verdict.warnings, mainPid: finalPid, nRestarts: finalRestarts, startEpoch: finalStart, headSha, originSha, healthzStatus }, null, 2)}\n`,
 		);
 	}
-	process.stdout.write(verdict.pass ? "[parity:check] PASS\n" : `[parity:check] FAIL — ${verdict.failures.length} criterion(s) failed\n`);
-	return verdict.pass ? 0 : 1;
+	process.stdout.write(pass ? "[parity:check] PASS\n" : `[parity:check] FAIL — ${failures.length} criterion(s) failed\n`);
+	return pass ? 0 : 1;
 }
 
 if (import.meta.main) process.exit(await main(process.argv.slice(2)));

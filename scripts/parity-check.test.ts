@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
+	diffStability,
 	parityVerdict,
 	parseCgroup,
 	parseReflogTime,
 	parseSsListeners,
 	parseSystemctlShow,
+	parseUnitVitals,
 	procStartSeconds,
 	type ParityFacts,
 } from "./parity-check.ts";
@@ -281,5 +283,27 @@ describe("parseReflogTime", () => {
 		// %ct is commit time; the move time lives inside HEAD@{…}.
 		const line = "ab62c918ff7790a64fb4119e54c54d60a2e0d947 HEAD@{1791469658} pull origin main: Fast-forward";
 		expect(parseReflogTime(line)).toBe(1791469658);
+	});
+});
+
+describe("parseUnitVitals", () => {
+	test("reads MainPID, start and restarts from show props", () => {
+		const vitals = parseUnitVitals(parseSystemctlShow(SYSTEMCTL_READING));
+		expect(vitals).toEqual({ mainPid: 1525582, startEpoch: 1791479652, nRestarts: 0 });
+	});
+});
+
+describe("diffStability", () => {
+	const reading = { mainPid: 1525582, startEpoch: 1791479652, nRestarts: 0, ownerPids: [1525582] };
+
+	test("identical readings are stable", () => {
+		expect(diffStability(reading, { ...reading })).toEqual([]);
+	});
+
+	test("any movement during the check fails", () => {
+		expect(diffStability(reading, { ...reading, mainPid: 1525583 })[0]).toContain("MainPID moved");
+		expect(diffStability(reading, { ...reading, startEpoch: 1791479700 })[0]).toContain("process start moved");
+		expect(diffStability(reading, { ...reading, nRestarts: 1 })[0]).toContain("NRestarts moved");
+		expect(diffStability(reading, { ...reading, ownerPids: [1525582, 99] })[0]).toContain(":7410 owners moved");
 	});
 });
