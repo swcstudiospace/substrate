@@ -25,6 +25,38 @@ describe("secrets", () => {
 		expect(classify("credentials live in /etc/substrate/substrate.env, 0600 and root-owned", "fact")).toBeNull();
 		expect(classify("rotate the Linear key when the poller 401s", "decision")).toBeNull();
 	});
+
+	test("a private-tag memory body is quarantined as secret", () => {
+		// Assembled at runtime so no literal tag shape sits in the source.
+		const body = "remember this: <" + "private>keep this between us</" + "private> for later";
+		const found = classify(body, "fact");
+		expect(found?.reason).toBe("secret");
+		expect(found?.reviewable).toBe(false);
+	});
+
+	test("a D-04-shaped memory body is quarantined as secret", () => {
+		// Runtime-assembled AWS access key id: the source never holds the shape.
+		const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+		const suffix = Array.from({ length: 16 }, (_, i) => alphabet[(i * 7 + 3) % alphabet.length]).join("");
+		const found = classify(`rotated the deploy key AKIA${suffix} this morning`, "fact");
+		expect(found?.reason).toBe("secret");
+		expect(found?.reviewable).toBe(false);
+	});
+
+	test("a digit-bearing pk- key body is quarantined as secret", () => {
+		const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+		const tail = Array.from({ length: 21 }, (_, i) => alphabet[(i * 7 + 3) % alphabet.length]).join("");
+		const found = classify(`the frontend ships with pk-lf-${tail} baked in`, "fact");
+		expect(found?.reason).toBe("secret");
+		expect(found?.reviewable).toBe(false);
+	});
+
+	test("prose and word-only pk-/rk- slugs are not quarantined", () => {
+		expect(classify("kept private notes on the migration rollout", "fact")).toBeNull();
+		// Word-only slugs carry no digit, so the narrowed pk-rk rule leaves them alone (D18-21).
+		expect(classify("on branch pk-fix-the-bug-in-store today", "fact")).toBeNull();
+		expect(classify("see rk-release-notes-for-october for details", "fact")).toBeNull();
+	});
 });
 
 describe("PII", () => {
