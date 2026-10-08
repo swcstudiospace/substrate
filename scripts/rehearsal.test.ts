@@ -1,0 +1,234 @@
+/**
+ * The rehearsal harness, driven through its pure guards and through its CLI
+ * the way an operator runs it. No test here needs Docker: every refusal exits
+ * before the first container call, and the store file is treated as opaque.
+ */
+import { describe, expect, test } from "bun:test";
+import { createServer } from "node:net";
+import { join } from "node:path";
+import {
+	buildServerSpawnArgv,
+	isPortFree,
+	mayStop,
+	parseDockerPortLine,
+	parseName,
+	parseOperator,
+	parseShellExports,
+	parseSurfaces,
+	pickFreePort,
+	refuseCheckoutDir,
+	refusePort,
+	refuseSmokeUrl,
+	type ProcFacts,
+} from "./rehearsal.ts";
+
+const CLI = join(import.meta.dir, "rehearsal.ts");
+/** What a real token would be: if the CLI ever printed the environment, this is the string that would leak. */
+const SENTINEL = "rh-test-sentinel";
+
+/** Safe-to-stop facts; each refusal test overrides one field. */
+function proc(over: Partial<ProcFacts> = {}): ProcFacts {
+	return {
+		pid: 424242,
+		argv: ["/root/.local/share/reflex/bun/bin/bun", "--no-env-file", "packages/mcp-server/src/index.ts"],
+		cwd: "/tmp/wt-checkout",
+		cgroup: "0::/user.slice/user-0.slice/session-1.scope",
+		startSeconds: 1791479652.17,
+		listensOn: [17410],
+		...over,
+	};
+}
+
+const STATE = { pid: 424242, checkout: "/tmp/wt-checkout", startSeconds: 1791479652.17 };
+
+function runCli(...args: string[]): { code: number; out: string; err: string } {
+	const child = Bun.spawnSync([process.execPath, CLI, ...args], {
+		env: { ...process.env, SUBSTRATE_TOKEN: SENTINEL },
+	});
+	return { code: child.exitCode ?? -1, out: child.stdout.toString(), err: child.stderr.toString() };
+}
+
+describe("mayStop", () => {
+	test("stops the verified twin", () => {
+		expect(mayStop(proc(), STATE)).toBeNull();
+	});
+
+	test("refuses a pid that differs from state.json", () => {
+		expect(mayStop(proc({ pid: 999999 }), STATE)).toContain("pid differs");
+	});
+
+	test("refuses a reused pid whose start time moved", () => {
+		expect(mayStop(proc({ startSeconds: 1791479999.5 }), STATE)).toContain("reused");
+	});
+
+	test("refuses a wrong cmdline", () => {
+		expect(mayStop(proc({ argv: ["/usr/bin/bun", "packages/cli/src/index.ts"] }), STATE)).toContain("entry point");
+	});
+
+	test("refuses a cwd outside the recorded checkout", () => {
+		expect(mayStop(proc({ cwd: "/root/src/repos/agent-substrate" }), STATE)).toContain("cwd");
+	});
+
+	test("refuses a process in system.slice", () => {
+		expect(mayStop(proc({ cgroup: "0::/system.slice/substrate-mcp.service" }), STATE)).toContain("system.slice");
+	});
+
+	test("refuses a process that owns a production port", () => {
+		expect(mayStop(proc({ listensOn: [17410, 7410] }), STATE)).toContain("production port");
+	});
+});
+
+describe("refusePort", () => {
+	test("refuses the production ports", () => {
+		for (const port of [7410, 7411, 6420]) {
+			expect(refusePort(port, [])).toContain("reserved");
+		}
+	});
+
+	test("refuses a port that is already listening", () => {
+		expect(refusePort(17410, [17410, 17411])).toContain("listening");
+	});
+
+	test("accepts a free scratch port and port 0", () => {
+		expect(refusePort(17410, [])).toBeNull();
+		expect(refusePort(0, [])).toBeNull();
+	});
+
+	test("pickFreePort yields a bindable port outside the reserved set", async () => {
+		const picked = await pickFreePort();
+		expect(refusePort(picked, [])).toBeNull();
+		const srv = createServer();
+		await new Promise<void>((resolve) => srv.listen(picked, "127.0.0.1", () => resolve()));
+		expect(await isPortFree(picked)).toBe(false);
+		await new Promise<void>((resolve) => srv.close(() => resolve()));
+		expect(await isPortFree(picked)).toBe(true);
+	});
+});
+
+describe("parseName", () => {
+	test("accepts lower alnum plus dash", () => {
+		expect(parseName("default")).toBe("default");
+		expect(parseName("wf-16-smoke-2")).toBe("wf-16-smoke-2");
+		expect(parseName(undefined)).toBe("default");
+	});
+
+	test("refuses upper case, spaces and long names", () => {
+		for (const bad of ["Default", "has space", "has_dot", "x".repeat(32), ""]) {
+			expect(() => parseName(bad)).toThrow("bad instance name");
+		}
+	});
+});
+
+describe("parseSurfaces", () => {
+	test("defaults to the four launch surfaces", () => {
+		expect(parseSurfaces(undefined)).toEqual(["claude-code", "cursor", "hermes", "omp"]);
+	});
+
+	test("splits and trims a custom list", () => {
+		expect(parseSurfaces("hermes, omp")).toEqual(["hermes", "omp"]);
+	});
+
+	test("refuses unknown and empty lists", () => {
+		expect(() => parseSurfaces("claude-code,nope")).toThrow("unknown surface");
+		expect(() => parseSurfaces(" , ")).toThrow("at least one surface");
+	});
+});
+
+describe("parseOperator", () => {
+	test("defaults to the first listed surface", () => {
+		expect(parseOperator(undefined, ["cursor", "hermes"], false)).toBe("cursor");
+	});
+
+	test("accepts an explicit member surface", () => {
+		expect(parseOperator("hermes", ["cursor", "hermes"], false)).toBe("hermes");
+	});
+
+	test("anonymous has no operator", () => {
+		expect(parseOperator(undefined, ["cursor"], true)).toBeNull();
+	});
+
+	test("refuses a swarm surface even when listed", () => {
+		expect(() => parseOperator("swarm-a05-be", ["claude-code", "swarm-a05-be"], false)).toThrow("swarm surface");
+	});
+
+	test("refuses a name outside --surfaces", () => {
+		expect(() => parseOperator("omp", ["cursor"], false)).toThrow("not in --surfaces");
+	});
+});
+
+describe("refuseCheckoutDir", () => {
+	test("refuses the production checkout, allows a worktree", () => {
+		expect(refuseCheckoutDir("/root/src/repos/agent-substrate")).toContain("production checkout");
+		expect(refuseCheckoutDir("/root/src/worktrees/agent-substrate-v13-phase")).toBeNull();
+	});
+});
+
+describe("refuseSmokeUrl", () => {
+	test("refuses :7410 even on loopback", () => {
+		expect(refuseSmokeUrl("http://127.0.0.1:7410")).toContain(":7410");
+	});
+
+	test("refuses non-loopback hosts on any port", () => {
+		expect(refuseSmokeUrl("http://10.0.0.5:17410")).toContain("non-loopback");
+		expect(refuseSmokeUrl("http://example.com:17410")).toContain("non-loopback");
+	});
+
+	test("accepts loopback twins and rejects garbage", () => {
+		expect(refuseSmokeUrl("http://127.0.0.1:17410")).toBeNull();
+		expect(refuseSmokeUrl("http://localhost:17410")).toBeNull();
+		expect(refuseSmokeUrl("not a url")).toContain("unparseable");
+	});
+});
+
+describe("parseShellExports", () => {
+	test("round-trips exports with quotes and escapes", () => {
+		const record = parseShellExports(
+			"export BETA='second'\nexport ALPHA='first'\nexport QUOTED='a'\\''b'\nexport EMPTY=''\n# a comment\n",
+		);
+		expect(record).toEqual({ ALPHA: "first", BETA: "second", QUOTED: "a'b", EMPTY: "" });
+	});
+});
+
+describe("spawn argv", () => {
+	test("carries --no-env-file and the entry point", () => {
+		const argv = buildServerSpawnArgv();
+		expect(argv).toContain("--no-env-file");
+		expect(argv.at(-1)).toBe("packages/mcp-server/src/index.ts");
+		expect(argv[0]).toBe(process.execPath);
+	});
+});
+
+describe("parseDockerPortLine", () => {
+	test("reads docker port output", () => {
+		expect(parseDockerPortLine("127.0.0.1:49832\n")).toEqual({ host: "127.0.0.1", port: 49832 });
+		expect(parseDockerPortLine("garbage")).toBeNull();
+	});
+});
+
+describe("CLI refusals", () => {
+	test("bare invocation exits 2 with usage", () => {
+		const run = runCli();
+		expect(run.code).toBe(2);
+		expect(run.err).toContain("usage: rehearsal");
+		expect(`${run.out}${run.err}`).not.toContain(SENTINEL);
+	});
+
+	test("--port 7410 exits 2 without touching Docker", () => {
+		const run = runCli("up", "--name", "rh-refuse-port", "--port", "7410");
+		expect(run.code).toBe(2);
+		expect(run.err).toContain("reserved");
+		expect(`${run.out}${run.err}`).not.toContain(SENTINEL);
+	});
+
+	test("a swarm --operator exits 2 without touching Docker", () => {
+		const run = runCli("up", "--name", "rh-refuse-op", "--operator", "swarm-a05-be");
+		expect(run.code).toBe(2);
+		expect(`${run.out}${run.err}`).not.toContain(SENTINEL);
+	});
+
+	test("down with no prior up exits 0 removing nothing", () => {
+		const run = runCli("down", "--name", "rh-nobody-here");
+		expect(run.code).toBe(0);
+		expect(run.out).toContain("nothing to remove");
+	});
+});
