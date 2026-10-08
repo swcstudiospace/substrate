@@ -2,11 +2,16 @@
 gsd_state_version: "1.0"
 milestone: v1.3
 milestone_name: Build plan completion
+current_phase: 16
+current_phase_name: Production parity and rehearsal harness
 status: planning
-last_updated: "2026-10-08T16:19:14.151Z"
+stopped_at: "v1.3 roadmap approved 2026-10-08 (phases 16-33, 68/68 requirements). Next: ship the milestone-definition PR, then Phase 16."
+last_updated: "2026-10-08T17:10:09.139Z"
 last_activity: 2026-10-08
+last_activity_desc: v1.3 roadmap created (Phases 16–33, 68/68 requirements mapped)
+state_head: c468440636e6712837bb76989dacf542dd1fb47a
 progress:
-  total_phases: 0
+  total_phases: 18
   completed_phases: 0
   total_plans: 0
   completed_plans: 0
@@ -17,15 +22,17 @@ progress:
 
 ## Current
 
-**v1.2 complete and shipped:** All 5 phases (11-15), 5 plans, 43 tasks, and 25 requirements complete and verified. All 6 pull requests across both repositories are merged into their respective `main` branches:
-- `agent-substrate` [PR #16](https://github.com/swcstudiospace/agent-substrate/pull/16) (Phase 11 Lease authority) merged at `1791393`
-- `agent-swarm` [PR #9](https://github.com/swcstudiospace/agent-swarm/pull/9) (Phase 12 Swarm lease bridge) merged at `5edd55f`
-- `agent-swarm` [PR #10](https://github.com/swcstudiospace/agent-swarm/pull/10) (Phase 13 Signed handoffs) merged at `3e513c9`
-- `agent-substrate` [PR #17](https://github.com/swcstudiospace/agent-substrate/pull/17) (Phase 15 Lessons bank) merged at `746a38a`
-- `agent-substrate` [PR #18](https://github.com/swcstudiospace/agent-substrate/pull/18) (Phase 14 Projector MCP) merged at `e7b5990`
-- `agent-swarm` [PR #11](https://github.com/swcstudiospace/agent-swarm/pull/11) (Phase 14 Workspace install) merged at `24f4761`
+**v1.3 Build plan completion is planned:** 18 phases (16–33), 68 requirements, roadmap approved by the operator on 2026-10-08. Research: `.planning/research/` (SUMMARY.md first). Primary port source: branch `docs/data-planes-tailscale` (`acc30a8`), ported onto `main`'s v1.2 lease model.
 
-All 10 verification and security reports (Phases 11-15 VALIDATION.md / SECURITY.md) verified with zero open risks or gaps. Trackers (Notion task `3f2bc1a0c7ae8157ac03da5707c85b58` and Linear `SPE-7579`) are fully synchronized. Milestone artifacts archived in `.planning/milestones/v1.2-*`.
+**v1.3 decisions (operator, 2026-10-08):**
+
+- Scope: finish the build plan — every unfinished area, in build-plan order, plus the deferred Phase 0 UAT.
+- Shipping: one PR per phase, each cut from `main`; the milestone-definition docs ship first. `ultrathink-ship` runs with `--ignore-gsd` per phase (the operator's explicit choice), Greptile 5/5 with no open threads, auto-merge.
+- Defaults accepted for user-visible choices: swarm-surface claims add only a note in Linear (no label or state change); Lane A claims as `claude-code`; the data planes are reached only through the substrate and Hindsight retains only gate-accepted memories; teachables are tagged governed facts, anchored by hash only; `desktop_run` is fail-closed to operator-listed surfaces; production tokens are provisioned in Phase 20 after the collectors carry them; the stray process on `:7410` is stopped in an operator-approved window in Phase 16.
+- Run rules: grey areas auto-accept unless they change a user-visible contract; every live run (production service, real stores, Linear or Notion writes, devnet, GitHub PRs on other repos, model quota) waits for operator approval; failures already present at HEAD are recorded, not fixed.
+- Baseline at `ab62c91`: `bun test` 1129 pass / 56 skip / 0 fail across 40 files; `bunx tsc --noEmit` clean.
+
+Shipped before: **v1.2** (2026-10-08), archived in `.planning/milestones/v1.2-*`.
 
 ## Historical v1.0 execution record
 
@@ -147,10 +154,10 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Current Position
 
-Phase: Not started (defining requirements)
-Plan: —
-Status: Defining requirements
-Last activity: 2026-10-08 — Milestone v1.3 started
+Phase: 16 of 33 (Production parity and rehearsal harness)
+Plan: Not started (Plans: TBD)
+Status: Ready to plan
+Last activity: 2026-10-08 — v1.3 roadmap created (Phases 16–33, 68/68 requirements mapped)
 
 ## Deferred Items
 

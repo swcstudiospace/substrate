@@ -19,7 +19,7 @@
 - Lane A: a rivet-agentos host whose `openTask` is keyed by Graph ID, reached from `dispatch:claude-code`, gated on free disk.
 - The eight deferred Phase 0 UAT scenarios (`milestones/v1.0-phases/00-brief/0-UAT.md`).
 
-**Key context:** Code for the collectors, the claim mirror, the dispatcher and the RAGFlow/Hindsight/Dragonfly/devnet clients exists on unmerged September branches (`substrate/ut-mughkkc0-73909228`, commit `21652a2`); it is ported where it still fits `main`. Production `substrate-mcp` runs from the operator's checkout on a non-`main` branch, so phase proofs use isolated stores and every live run (production service, real stores, devnet, Linear labels) waits for the operator's approval.
+**Key context:** The September implementation of build-plan phases 1–6 lives on the unmerged branch `docs/data-planes-tailscale` (`acc30a8`, a superset of `substrate/ut-mughkkc0-73909228`); it is ported file by file onto `main`'s v1.2 lease model, and commit `21652a2` is treated as stubs. `substrate-mcp.service` points at the operator's checkout (now on `main`) but crash-loops, because a stray process started 2026-10-01 still holds `127.0.0.1:7410` and serves that day's code; the herdr and Muse collector, dispatcher and host units point at code `main` lacks, and the skills timers fail every five minutes. Phase proofs use isolated stores, and every live run (production service, real stores, devnet, Linear labels) waits for the operator's approval.
 
 Shipped before: **v1.2 Swarm leases, workspace install and lessons bank** (2026-10-08; phases 11-15; 25/25 requirements).
 

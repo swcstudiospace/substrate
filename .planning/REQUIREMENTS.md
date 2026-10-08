@@ -152,12 +152,80 @@ Which phases cover which requirements. Filled in by the roadmap.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
+| FOUND-01 | Phase 16 | Pending |
+| FOUND-02 | Phase 17 | Pending |
+| FOUND-03 | Phase 16 | Pending |
+| FOUND-04 | Phase 20 | Pending |
+| LANEB-01 | Phase 19 | Pending |
+| LANEB-02 | Phase 19 | Pending |
+| LANEB-03 | Phase 19 | Pending |
+| LANEB-04 | Phase 19 | Pending |
+| LANEB-05 | Phase 19 | Pending |
+| LANEB-06 | Phase 18 | Pending |
+| LANEB-07 | Phase 19 | Pending |
+| SKILL-01 | Phase 21 | Pending |
+| SKILL-02 | Phase 22 | Pending |
+| SKILL-03 | Phase 22 | Pending |
+| SKILL-04 | Phase 22 | Pending |
+| SKILL-05 | Phase 22 | Pending |
+| SKILL-06 | Phase 19 | Pending |
+| SKILL-07 | Phase 22 | Pending |
+| MIRROR-01 | Phase 23 | Pending |
+| MIRROR-02 | Phase 23 | Pending |
+| MIRROR-03 | Phase 23 | Pending |
+| MIRROR-04 | Phase 23 | Pending |
+| MIRROR-05 | Phase 23 | Pending |
+| MIRROR-06 | Phase 23 | Pending |
+| MIRROR-07 | Phase 23 | Pending |
+| MIRROR-08 | Phase 23 | Pending |
+| DISP-01 | Phase 24 | Pending |
+| DISP-02 | Phase 24 | Pending |
+| DISP-03 | Phase 24 | Pending |
+| DISP-04 | Phase 24 | Pending |
+| DISP-05 | Phase 24 | Pending |
+| DISP-06 | Phase 24 | Pending |
+| DISP-07 | Phase 24 | Pending |
+| DISP-08 | Phase 24 | Pending |
+| DOCS-01 | Phase 25 | Pending |
+| DOCS-02 | Phase 25 | Pending |
+| DOCS-03 | Phase 25 | Pending |
+| DOCS-04 | Phase 26 | Pending |
+| DOCS-05 | Phase 26 | Pending |
+| DOCS-06 | Phase 26 | Pending |
+| DOCS-07 | Phase 26 | Pending |
+| ANCHOR-01 | Phase 27 | Pending |
+| ANCHOR-02 | Phase 27 | Pending |
+| ANCHOR-03 | Phase 28 | Pending |
+| ANCHOR-04 | Phase 28 | Pending |
+| ANCHOR-05 | Phase 28 | Pending |
+| ANCHOR-06 | Phase 28 | Pending |
+| CARD-01 | Phase 29 | Pending |
+| CARD-02 | Phase 29 | Pending |
+| CARD-03 | Phase 29 | Pending |
+| CARD-04 | Phase 29 | Pending |
+| DESK-01 | Phase 30 | Pending |
+| DESK-02 | Phase 30 | Pending |
+| DESK-03 | Phase 30 | Pending |
+| DESK-04 | Phase 30 | Pending |
+| DESK-05 | Phase 30 | Pending |
+| LANEA-01 | Phase 31 | Pending |
+| LANEA-02 | Phase 32 | Pending |
+| LANEA-03 | Phase 32 | Pending |
+| LANEA-04 | Phase 33 | Pending |
+| LANEA-05 | Phase 31 | Pending |
+| LANEA-06 | Phase 33 | Pending |
+| LANEA-07 | Phase 32 | Pending |
+| LANEA-08 | Phase 33 | Pending |
+| UAT-01 | Phase 20 | Pending |
+| UAT-02 | Phase 20 | Pending |
+| UAT-03 | Phase 20 | Pending |
+| UAT-04 | Phase 20 | Pending |
 
 **Coverage:**
 - v1.3 requirements: 68 total
-- Mapped to phases: 0
-- Unmapped: 68
+- Mapped to phases: 68 (Phases 16–33)
+- Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-10-08*
-*Last updated: 2026-10-08 after milestone v1.3 research*
+*Last updated: 2026-10-08 after the v1.3 roadmap (traceability filled)*
