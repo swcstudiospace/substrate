@@ -2,6 +2,7 @@ import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { classify } from "../../mcp-server/src/memory-classify.ts";
 import {
 	type Citable,
 	citableLesson,
@@ -44,8 +45,8 @@ function lexemes(text: string): string[] {
 /**
  * A fake substrate, reached over real HTTP.
  *
- * `POST /memory` runs a toy gate with the real one's reply shapes: a bearer token or
- * 401, `person:` scopes denied, a hedge word quarantined, and an explicit key that
+ * `POST /memory` uses the production quarantine classifier with simulated gate
+ * replies: a bearer token or 401, `person:` scopes denied, and an explicit key that
  * replays its first write and refuses a different one. `POST /mcp` answers
  * `memory_search` the way the index does — exact scope, every query lexeme present,
  * newest first, a limit — as an SSE frame, as the stateless transport does. With
@@ -118,12 +119,13 @@ class FakeSubstrate {
 				{ status: 403 },
 			);
 		}
-		if (/\b(?:probably|might|likely)\b/i.test(text)) {
+		const classification = classify(text, "fact");
+		if (classification) {
 			return Response.json(
 				{
 					...base,
 					outcome: "quarantined",
-					reason: "quarantine.speculative",
+					reason: `quarantine.${classification.reason}`,
 					remedy: "State it as a fact.",
 					quarantine_id: `memq_${++this.counter}`,
 				},
@@ -838,8 +840,6 @@ describe("recall, digest and outcome", () => {
 			return planned;
 		};
 		const first = await plannedKey(base("success", "r1", "Takeover held."));
-		expect(JSON.stringify(first)).toContain("r1");
-		expect(first.body).toContain("r1");
 		expect((await plannedKey(base("failure", "r1", "Takeover slipped."))).key).toBe(first.key);
 		expect(await harness().run(["outcome", ids.lease, "--result", "success", "--phase", "15-lessons-bank", "--note", "Takeover held.", "--report-id", "r1", "--json"])).toBe(0);
 		expect((await plannedKey(base("success", "r1", "Takeover held."))).key).toBe(first.key);
@@ -884,6 +884,27 @@ describe("recall, digest and outcome", () => {
 		expect(a.key).not.toBe(b.key);
 		expect(reportOf(a)).toBe("case-id_1");
 		expect(reportOf(b)).toBe("CASE-ID_1");
+	});
+
+	test("opaque report identities are not claims, but speculative outcome notes still quarantine", async () => {
+		const ids = await seed();
+		const base = ["outcome", ids.lease, "--result", "success", "--phase", "15-lessons-bank", "--json"];
+		const command = [...base, "--report-id", "retry-unverified-1"];
+		const first = harness();
+		expect(await first.run(command)).toBe(0);
+		const accepted = JSON.parse(first.out());
+		expect(accepted).toMatchObject({
+			status: "recorded",
+			report: "retry-unverified-1",
+			score_after: { score: 2 / 3, count: 1 },
+		});
+		const retry = harness();
+		expect(await retry.run(command)).toBe(0);
+		expect(JSON.parse(retry.out())).toMatchObject({ status: "duplicate", id: accepted.id });
+
+		const speculative = harness();
+		expect(await speculative.run([...base, "--report-id", "honest-report", "--note", "Takeover is unverified."])).toBe(1);
+		expect(JSON.parse(speculative.out()).status).toBe("quarantined");
 	});
 
 	test("reusing a report id with different content is a governed conflict, not a new write", async () => {
@@ -936,7 +957,6 @@ describe("recall, digest and outcome", () => {
 		expect(cli.out()).toContain(`score of ${ids.lease}: 0.50 (0 outcomes) -> 0.67 (1 outcome)`);
 		const appended = fake.entries.at(-1);
 		expect(appended).toMatchObject({ kind: "fact", subject: `lesson-outcome:${ids.lease}`, scope: "repo:acme/widgets" });
-		expect(appended?.text).toContain("r1");
 		expect(fake.entries[0]).toEqual(lessonBefore as FakeEntry);
 
 		const recall = harness();

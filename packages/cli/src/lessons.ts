@@ -1430,13 +1430,14 @@ async function outcome(args: Args, positional: string | undefined, deps: Lessons
 	// reports, the verdict or the note, so a lost reply cannot undo a newer verdict;
 	// reusing an id with different content is the gate's idempotency conflict.
 	const key = `${SUBJECT.outcome}${sha256([scope, lessonId, `${milestone}/${phase}`, reportId].join("\n"))}`;
+	// An opaque identity must not be classified as the fact's claim.
 	const body = [
 		`[${MARKERS.outcome}]`,
 		`lesson: ${lessonId}`,
 		`result: ${result}`,
 		`milestone: ${milestone}`,
 		`phase: ${phase}`,
-		`report: ${reportId}`,
+		`report: ${sha256(reportId)}`,
 		...(note ? ["", note] : []),
 	].join("\n");
 	if (body.length > MAX_BODY) {

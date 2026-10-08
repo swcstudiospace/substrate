@@ -263,9 +263,10 @@ substrate lessons outcome mem_3f… --result success --phase 12-swarm-leases --r
 logical report retried under the same id replays instead of writing again, while a
 correction mints a fresh id and appends another outcome. It is the caller's exact
 identity, case-preserving, of letters, digits, `.` `_` `:` and `-`, 1–200 characters;
-a missing, empty or misshapen id is refused before anything is read or sent. The id
-travels in the body and in the planned and written reports, so a dry run shows the
-identity that will be recorded.
+a missing, empty or misshapen id is refused before anything is read or sent. Planned
+and written CLI reports show the original identity. The fact body stores its SHA-256
+digest: an opaque id such as `retry-unverified-1` cannot turn a clean outcome into a
+speculative claim. The note remains subject to the normal fact gate.
 
 This appends one `fact` with subject `lesson-outcome:<lesson id>`, in the `repo-working`
 grant like the lesson itself:
@@ -276,7 +277,7 @@ lesson: mem_3f…
 result: success
 milestone: v1.2
 phase: 12-swarm-leases
-report: 12-swarm-leases-1
+report: 73515f8e2b16cbf81ff7c8878bae4a5d57f0b76eae5d8e3cccd91f1014714011
 
 Takeover held under load.
 ```
