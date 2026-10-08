@@ -654,7 +654,9 @@ Not a rename or migration phase. Included only to rule out state that would outl
 | A4 | `POST /events` returns 400 for `InvalidEventError` (from CONTEXT; the catch block was not re-read this session) | Pattern 4 | Only the refusal path's status changes; the smoke treats any non-202 as a refusal anyway |
 | A5 | The recommended `EVENT_SOURCES` ids, split rows and `SILENT_SOURCES` list are my design inside the CONTEXT discretion; they are not operator-confirmed | Pattern 1 | Cosmetic; later phases test against whatever ids ship |
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+Resolution pointers: Q1 → 17-03 ships its own `refuseTarget`/`parseConsumerEnv` (RESOLVED); Q2 → not required by SC-3, left optional in 17-03 (RESOLVED); Q3 → 17-03 runs `bun run smoke:vocabulary --name p17` (RESOLVED); Q4 → 17-01's doc task records the Lane A rationale (RESOLVED).
 
 1. **Does Phase 16 export a reusable smoke URL guard / `consumer.env` reader?**
    - What we know: 16-03 plans a "smoke URL guard" inside `scripts/rehearsal.ts` and `toShellExports` in `rehearsal-env.ts`. Neither name is pinned for reuse, and neither is on `main`.
