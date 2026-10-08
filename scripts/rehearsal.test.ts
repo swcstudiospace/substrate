@@ -212,6 +212,12 @@ describe("refuseSmokeUrl", () => {
 		expect(refuseSmokeUrl("http://localhost:17410")).toBeNull();
 		expect(refuseSmokeUrl("not a url")).toContain("unparseable");
 	});
+
+	test("refuses every production port and accepts bracketed IPv6 loopback", () => {
+		expect(refuseSmokeUrl("http://127.0.0.1:7411")).toContain("production");
+		expect(refuseSmokeUrl("http://127.0.0.1:6420")).toContain("production");
+		expect(refuseSmokeUrl("http://[::1]:17410")).toBeNull();
+	});
 });
 
 describe("parseShellExports", () => {

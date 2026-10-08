@@ -859,7 +859,7 @@ async function runStatus(name: string): Promise<number> {
 const SMOKE_LOOPBACK_HOSTS: Record<string, true> = { "127.0.0.1": true, "::1": true, localhost: true };
 
 /**
- * Refuse a smoke target before any request: port 7410 or a non-loopback host.
+ * Refuse a smoke target before any request: a production port or a non-loopback host.
  * Returns the reason, or null when the target is a scratch twin.
  */
 export function refuseSmokeUrl(raw: string): string | null {
@@ -869,8 +869,11 @@ export function refuseSmokeUrl(raw: string): string | null {
 	} catch {
 		return `unparseable smoke target ${raw}`;
 	}
-	if (url.port === "7410") return "refusing to smoke production :7410";
-	if (SMOKE_LOOPBACK_HOSTS[url.hostname] !== true) return `refusing non-loopback smoke host ${url.hostname}`;
+	if ((PRODUCTION_PORTS as readonly number[]).includes(Number(url.port))) {
+		return `refusing to smoke production :${url.port}`;
+	}
+	const host = url.hostname.replace(/^\[(.*)\]$/, "$1");
+	if (SMOKE_LOOPBACK_HOSTS[host] !== true) return `refusing non-loopback smoke host ${url.hostname}`;
 	return null;
 }
 
