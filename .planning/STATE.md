@@ -5,16 +5,16 @@ milestone_name: Build plan completion
 current_phase: 16
 current_phase_name: Production parity and rehearsal harness
 status: executing
-stopped_at: "v1.3 roadmap approved 2026-10-08 (phases 16-33, 68/68 requirements); PR #21 ships the milestone-definition docs; Phase 16 discuss done on gsd/v1.3-p16-production-parity."
-last_updated: "2026-10-08T20:15:52.000Z"
+stopped_at: Completed 16-01-PLAN.md
+last_updated: "2026-10-08T20:27:07.597Z"
 last_activity: 2026-10-08
 last_activity_desc: Phase 16 execution started
-state_head: a9b1c342d7b35fbe56f26b682472851d9c275293
+state_head: 3de4b6c603702125e9c089babb5130d874a05de9
 progress:
   total_phases: 18
   completed_phases: 0
   total_plans: 5
-  completed_plans: 0
+  completed_plans: 1
   percent: 0
 ---
 
@@ -155,8 +155,8 @@ which is why Greptime worked immediately and Postgres did not.
 ## Current Position
 
 Phase: 16 (Production parity and rehearsal harness) — EXECUTING
-Plan: 1 of 5
-Status: Executing Phase 16
+Plan: 2 of 5
+Status: Ready to execute
 Last activity: 2026-10-08 — Phase 16 execution started
 
 ## Deferred Items
@@ -173,6 +173,16 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-08T19:25:55.520Z
-Stopped at: v1.3 roadmap approved 2026-10-08 (phases 16-33, 68/68 requirements); PR #21 ships the milestone-definition docs; Phase 16 discuss done on gsd/v1.3-p16-production-parity.
-Resume file: None; current progress is recorded in the phase summaries and ultrathink ship state.
+Last session: 2026-10-08T20:27:04.155Z
+Stopped at: Completed 16-01-PLAN.md
+Resume file: None
+
+## Performance Metrics
+
+| Plan | Duration | Tasks | Files |
+|------|----------|-------|-------|
+| Phase 16 P16-01 | 15min | 2 tasks | 2 files |
+
+## Decisions
+
+- [Phase 16]: 16-01: rehearsal-env builder is pure with caller-supplied secrets; operator checks precede token materialization

@@ -93,6 +93,11 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 
 **Proof**: The harness is proven in isolation: start, brief, emit, claim, tear down, with production row counts unchanged. Parity needs the live system: the operator retires the stray process in an approved window (agents do not kill processes), and the check afterwards is read-only (`systemctl`, `ss`, `/healthz`).
 **Plans**: TBD
+- [x] 16-01-PLAN.md
+- [ ] 16-02-PLAN.md
+- [ ] 16-03-PLAN.md
+- [ ] 16-04-PLAN.md
+- [ ] 16-05-PLAN.md
 
 ### Phase 17: Event vocabulary and audit policy
 
@@ -366,7 +371,7 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
-| 16. Production parity and rehearsal harness | v1.3 | 0/? | Not started | - |
+| 16. Production parity and rehearsal harness | v1.3 | 1/5 | In Progress | - |
 | 17. Event vocabulary and audit policy | v1.3 | 0/? | Not started | - |
 | 18. Guard rails and shared redactor | v1.3 | 0/? | Not started | - |
 | 19. Lane B collectors | v1.3 | 0/? | Not started | - |
