@@ -426,6 +426,11 @@ async function waitForHealth(
 	return last;
 }
 
+/** A twin `up` may declare ready: /healthz reported a writable index and ledger. */
+export function isTwinHealthy(health: { index: boolean; ledger: boolean; writable: boolean } | null): boolean {
+	return health !== null && health.index && health.ledger && health.writable;
+}
+
 function killOwn(pid: number): void {
 	if (!pidAlive(pid)) return;
 	try {
@@ -677,10 +682,10 @@ async function runUp(opts: UpOptions, checkout: string): Promise<number> {
 	const firstSurface = surfaces[0];
 	const firstToken = firstSurface !== undefined ? secrets.surfaceTokens[firstSurface] : undefined;
 	const health = await waitForHealth(`http://127.0.0.1:${mcpPort}`, firstToken ?? null, READY_TIMEOUT_MS);
-	if (health === null) {
+	if (!isTwinHealthy(health)) {
 		killVerifiedSpawn(server.pid, checkout, facts.startSeconds);
 		removeLabelledContainers(opts.name);
-		process.stderr.write(`[rehearsal] twin never reached healthy /healthz; log kept at ${logPath}.\n`);
+		process.stderr.write(`[rehearsal] twin never reached healthy /healthz (index=${health?.index} ledger=${health?.ledger} writable=${health?.writable}); log kept at ${logPath}.\n`);
 		return 1;
 	}
 

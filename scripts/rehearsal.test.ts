@@ -10,6 +10,7 @@ import { join } from "node:path";
 import {
 	buildServerSpawnArgv,
 	isPortFree,
+	isTwinHealthy,
 	killVerifiedSpawn,
 	mayStop,
 	parseDockerPortLine,
@@ -87,6 +88,19 @@ describe("killVerifiedSpawn", () => {
 
 	test("never signals a live pid that fails the ownership check", () => {
 		expect(killVerifiedSpawn(process.pid, "/tmp/wt-checkout", 0)).toBe(false);
+	});
+});
+
+describe("isTwinHealthy", () => {
+	test("accepts only a fully healthy twin", () => {
+		expect(isTwinHealthy({ index: true, ledger: true, writable: true })).toBe(true);
+	});
+
+	test("refuses a partially healthy twin", () => {
+		expect(isTwinHealthy({ index: true, ledger: false, writable: true })).toBe(false);
+		expect(isTwinHealthy({ index: false, ledger: true, writable: true })).toBe(false);
+		expect(isTwinHealthy({ index: true, ledger: true, writable: false })).toBe(false);
+		expect(isTwinHealthy(null)).toBe(false);
 	});
 });
 
