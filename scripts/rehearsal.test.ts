@@ -9,6 +9,7 @@ import { createServer } from "node:net";
 import { join } from "node:path";
 import {
 	buildServerSpawnArgv,
+	flag,
 	isPortFree,
 	isTwinHealthy,
 	killVerifiedSpawn,
@@ -250,6 +251,15 @@ describe("parseDockerPortLine", () => {
 	});
 });
 
+describe("flag", () => {
+	test("reads a value, reports absence, and never swallows the next flag", () => {
+		expect(flag(["down", "--name", "wf-1"], "--name")).toBe("wf-1");
+		expect(flag(["down"], "--name")).toBeUndefined();
+		expect(flag(["down", "--name"], "--name")).toBeNull();
+		expect(flag(["up", "--operator", "--anonymous"], "--operator")).toBeNull();
+	});
+});
+
 describe("CLI refusals", () => {
 	test("bare invocation exits 2 with usage", () => {
 		const run = runCli();
@@ -269,6 +279,12 @@ describe("CLI refusals", () => {
 		const run = runCli("up", "--name", "rh-refuse-op", "--operator", "swarm-a05-be");
 		expect(run.code).toBe(2);
 		expect(`${run.out}${run.err}`).not.toContain(SENTINEL);
+	});
+
+	test("down --name with no value exits 2 instead of stopping default", () => {
+		const run = runCli("down", "--name");
+		expect(run.code).toBe(2);
+		expect(run.err).toContain("--name needs a value");
 	});
 
 	test("down with no prior up exits 0 removing nothing", () => {

@@ -999,10 +999,11 @@ async function runSmoke(name: string): Promise<number> {
 	return passed === results.length ? 0 : 1;
 }
 
-function flag(argv: string[], name: string): string | undefined {
+export function flag(argv: string[], name: string): string | undefined | null {
 	const at = argv.indexOf(name);
 	if (at < 0) return undefined;
-	return argv[at + 1];
+	const value = argv[at + 1];
+	return value === undefined || value.startsWith("--") ? null : value;
 }
 
 function usage(message: string): never {
