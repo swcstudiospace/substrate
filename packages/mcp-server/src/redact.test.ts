@@ -1,6 +1,17 @@
 import { describe, expect, test } from "bun:test";
-import { REDACTED, REDACTION_RULES, redact, redactValue } from "./redact.ts";
-import type { RedactionRuleName } from "./redact.ts";
+import * as redactModule from "./redact.ts";
+import {
+	REDACTED,
+	REDACTION_RULES,
+	SKILL_EXCLUSIONS,
+	SKILL_HIGH_CONFIDENCE_RULES,
+	SKILL_RULE_NAMES,
+	redact,
+	redactSkillContent,
+	redactValue,
+	scanSkillFiles,
+} from "./redact.ts";
+import type { RedactionRuleName, SkillRedactionRule } from "./redact.ts";
 
 describe("redact", () => {
 	test("leaves ordinary event summaries alone", () => {
@@ -316,5 +327,219 @@ describe("D-04 near-misses stay unredacted", () => {
 		const keyOut = redact(`shipped pk-${pkBody} to staging`);
 		expect(keyOut).toContain(REDACTED);
 		expect(keyOut).not.toContain(pkBody);
+	});
+});
+// ── Skill content (D18-07, D18-08) ────────────────────────────────────────────
+// Runtime-assembled fixtures: the source never holds a literal token shape.
+const SKILL_GITHUB = "ghp_" + rnd(ALNUM, 36);
+const SKILL_PEM_MIDDLE = rnd(ALNUM, 32);
+const SKILL_PEM = ["-----BEGIN " + "RSA PRIVATE KEY-----", SKILL_PEM_MIDDLE, "-----END " + "RSA PRIVATE KEY-----"].join("\n");
+const SKILL_JWT_LAST = rnd(ALNUM, 27);
+const SKILL_JWT = ["eyJ" + "hbGciOiJIUzI1NiJ9", "eyJzdWIiOiIxMjM0NTY3ODkwIn0", SKILL_JWT_LAST].join(".");
+describe("redactSkillContent keeps env references and placeholders", () => {
+	test("working auth lines and placeholder values come back unchanged with nothing reported", () => {
+		for (const line of [
+			"Authorization: Bearer $PARALLEL_API_KEY",
+			"API_KEY=${OPENAI_API_KEY}",
+			"TOKEN=<your-token>",
+			"password: changeme",
+			"SECRET=xxxxxxxx",
+			"KEY=...",
+			"postgres://user:***@host/db",
+		]) {
+			expect(redactSkillContent(line)).toEqual({ text: line, redactions: [], findings: [] });
+		}
+	});
+	test("a key with nothing after it on its line takes nothing from the next line", () => {
+		const yaml = "password:\n  type: string\nAPI_KEY:\n  description: the key";
+		expect(redactSkillContent(yaml)).toEqual({ text: yaml, redactions: [], findings: [] });
+	});
+	test("an env reference with Markdown-escaped underscores, as scraped docs write it, is kept", () => {
+		const line = '-H "Authorization: Bearer $OPENAI\\_API\\_KEY"';
+		expect(redactSkillContent(line)).toEqual({ text: line, redactions: [], findings: [] });
+	});
+});
+describe("redactSkillContent redacts real values", () => {
+	test("a literal assignment is redacted and reported as one assignment", () => {
+		const value = rnd(ALNUM, 16);
+		expect(redactSkillContent(`LINEAR_API_KEY=${value}`)).toEqual({
+			text: `LINEAR_API_KEY=${REDACTED}`,
+			redactions: [{ line: 1, rule: "assignment" }],
+			findings: [],
+		});
+	});
+	test("a Bearer header carrying a 40-character literal is redacted as bearer", () => {
+		const literal = "a1B2".repeat(10);
+		const out = redactSkillContent(`curl -H "Authorization: Bearer ${literal}" https://api.example.test`);
+		expect(out.text).toBe(`curl -H "Authorization: Bearer ${REDACTED}" https://api.example.test`);
+		expect(out.redactions).toEqual([{ line: 1, rule: "bearer" }]);
+		expect(out.findings).toEqual([]);
+	});
+	test("a connection URL keeps its host and loses its password", () => {
+		expect(redactSkillContent("postgres://u:hunter2@h/db")).toEqual({
+			text: `postgres://u:${REDACTED}@h/db`,
+			redactions: [{ line: 1, rule: "url-password" }],
+			findings: [],
+		});
+	});
+	test("redacting already-redacted text changes nothing more", () => {
+		const once = redactSkillContent(`LINEAR_API_KEY=${rnd(ALNUM, 16)}\nAuthorization: Bearer ` + "z".repeat(40));
+		expect(redactSkillContent(once.text)).toEqual({ text: once.text, redactions: [], findings: [] });
+	});
+});
+describe("redactSkillContent rejects high-confidence secrets", () => {
+	test("github, pem, jwt and aws shapes are findings, and no result field carries the value", () => {
+		const cases: Array<[string, SkillRedactionRule, string]> = [
+			[`GITHUB_TOKEN=${SKILL_GITHUB}`, "github", SKILL_GITHUB],
+			[`key:\n${SKILL_PEM}`, "pem", SKILL_PEM_MIDDLE],
+			[`token=${SKILL_JWT}`, "jwt", SKILL_JWT_LAST],
+			[`aws_access_key_id = ${awsFixture}`, "aws", awsFixture],
+		];
+		for (const [text, rule, secret] of cases) {
+			const out = redactSkillContent(text);
+			expect(out.findings).toEqual([{ line: rule === "pem" ? 2 : 1, rule }]);
+			expect(out.redactions).toEqual([]);
+			expect(JSON.stringify(out)).not.toContain(secret);
+		}
+	});
+	test("every high-confidence rule reports a finding rather than a redaction", () => {
+		const samples: Partial<Record<SkillRedactionRule, string>> = {
+			pem: SKILL_PEM,
+			jwt: SKILL_JWT,
+			github: SKILL_GITHUB,
+			openai: "sk-" + "Q9w8".repeat(12),
+			anthropic: "sk-ant-api03-" + "Z_y-".repeat(10),
+			xai: "xai-" + "R7t6".repeat(16),
+			linear: "lin_api_" + "P0o9".repeat(10),
+			notion: "ntn_" + "L1k2".repeat(12),
+			tailscale: "tskey-" + "auth-" + rnd(ALNUM, 12),
+			aws: awsFixture,
+			google: "AIza" + rnd(ALNUM, 35),
+			slack: "xoxb-" + rnd(ALNUM, 24),
+			npm: "npm_" + rnd(ALNUM, 36),
+			gitlab: "glpat-" + rnd(ALNUM, 20),
+			digitalocean: "dop_v1_" + rnd(HEX, 64),
+			"openai-proj": "sk-proj-" + rnd(ALNUM, 40),
+		};
+		for (const rule of SKILL_HIGH_CONFIDENCE_RULES) {
+			const sample = samples[rule];
+			expect(sample).toBeDefined();
+			const out = redactSkillContent(`value ${sample}`);
+			expect(out.findings).toEqual([{ line: 1, rule }]);
+			expect(out.redactions).toEqual([]);
+		}
+	});
+});
+describe("redactSkillContent documentation examples", () => {
+	test("allowed pem and jwt spans are replaced and reported as redactions; a github token is still a finding", () => {
+		const out = redactSkillContent(`${SKILL_PEM}\njwt: ${SKILL_JWT}\ngh: ${SKILL_GITHUB}`, {
+			allowDocExamples: new Set(["pem", "jwt"] as const),
+		});
+		expect(out.text).toBe(`[REDACTED_PEM]\njwt: ${REDACTED}\ngh: ${REDACTED}`);
+		expect(out.redactions).toEqual([
+			{ line: 1, rule: "pem" },
+			{ line: 4, rule: "jwt" },
+		]);
+		expect(out.findings).toEqual([{ line: 5, rule: "github" }]);
+	});
+});
+describe("redactSkillContent line numbers", () => {
+	test("are 1-based and count lines of the original text, before a multi-line block collapses", () => {
+		const tokenValue = rnd(ALNUM, 16);
+		const passwordValue = rnd(ALNUM, 10);
+		const text = `intro\n${SKILL_PEM}\n\nDB_TOKEN=${tokenValue}\n  password: ${passwordValue}`;
+		const out = redactSkillContent(text, { allowDocExamples: new Set(["pem"] as const) });
+		expect(out.text).toBe(`intro\n[REDACTED_PEM]\n\nDB_TOKEN=${REDACTED}\n  password: ${REDACTED}`);
+		expect(out.redactions).toEqual([
+			{ line: 2, rule: "pem" },
+			{ line: 6, rule: "assignment" },
+			{ line: 7, rule: "password" },
+		]);
+	});
+});
+describe("scanSkillFiles", () => {
+	test("reports redactions and findings per file and returns the redacted file map", () => {
+		const tokenValue = rnd(ALNUM, 16);
+		const out = scanSkillFiles({
+			"SKILL.md": `---\nname: demo\n---\nTOKEN=${tokenValue}\nAuthorization: Bearer $DEMO_KEY\n`,
+			"references/a.md": `intro\n${SKILL_GITHUB}\n`,
+		});
+		expect(out.files).toEqual({
+			"SKILL.md": `---\nname: demo\n---\nTOKEN=${REDACTED}\nAuthorization: Bearer $DEMO_KEY\n`,
+			"references/a.md": `intro\n${REDACTED}\n`,
+		});
+		expect(out.redactions).toEqual([{ file: "SKILL.md", line: 4, rule: "assignment" }]);
+		expect(out.findings).toEqual([{ file: "references/a.md", line: 2, rule: "github" }]);
+	});
+	test("scanSkillFiles is the only exported scan", () => {
+		const scanners = Object.keys(redactModule).filter((key) => /^scan/i.test(key));
+		expect(scanners).toEqual(["scanSkillFiles"]);
+	});
+});
+describe("event redactor stays liberal", () => {
+	test("redact() still rewrites a working $VAR auth line that the skill redactor keeps", () => {
+		const line = "Authorization: Bearer $PARALLEL_API_KEY";
+		expect(redact(line)).toBe(`Authorization: ${REDACTED}`);
+		expect(redactSkillContent(line).text).toBe(line);
+	});
+});
+describe("skill api-key-lower keeps placeholders and redacts real values (D18-08)", () => {
+	test("dollar-variable, angle-bracket and your-key placeholders are kept as written", () => {
+		for (const line of ["api_key: $OPENAI_API_KEY", "apiKey: <your-key>", "api_key: your-api-key-goes-here"]) {
+			expect(redactSkillContent(line)).toEqual({ text: line, redactions: [], findings: [] });
+		}
+	});
+	test("a real api_key value redacts as api-key-lower", () => {
+		const value = rnd(ALNUM, 24);
+		expect(redactSkillContent(`api_key: ${value}`)).toEqual({
+			text: `api_key: ${REDACTED}`,
+			redactions: [{ line: 1, rule: "api-key-lower" }],
+			findings: [],
+		});
+	});
+	test("a private-tag block holding a GitHub token reports the github finding", () => {
+		const token = "ghp_" + rnd(ALNUM, 36);
+		const block = "<" + "private>deploy with " + token + " inside</" + "private>";
+		const out = redactSkillContent(block);
+		expect(out.findings).toEqual([{ line: 1, rule: "github" }]);
+		expect(out.redactions).toEqual([]);
+		expect(out.text).toBe("<" + "private>deploy with " + REDACTED + " inside</" + "private>");
+		expect(JSON.stringify(out)).not.toContain(token);
+	});
+});
+describe("skill pk-rk needs a digit in the tail (D18-21)", () => {
+	test("word-only pk-/rk- slugs produce no skill hit", () => {
+		for (const slug of ["pk-fix-the-bug-in-store", "rk-release-notes-for-october"]) {
+			const text = `on branch ${slug} today`;
+			expect(redactSkillContent(text)).toEqual({ text, redactions: [], findings: [] });
+			const scanned = scanSkillFiles({ "SKILL.md": `${text}\n` });
+			expect(scanned.findings).toEqual([]);
+			expect(scanned.redactions).toEqual([]);
+		}
+	});
+	test("a digit-bearing pk-lf- key is a pk-rk redaction", () => {
+		const key = `pk-${pkBody}`;
+		const out = redactSkillContent(`key is ${key} here`);
+		expect(out.redactions).toEqual([{ line: 1, rule: "pk-rk" }]);
+		expect(out.findings).toEqual([]);
+		expect(out.text).toBe(`key is ${REDACTED} here`);
+		expect(JSON.stringify(out)).not.toContain(pkBody);
+	});
+});
+describe("event/skill parity (D18-09)", () => {
+	test("every named event rule has a same-name skill rule or a reasoned exclusion", () => {
+		const missing = REDACTION_RULES.map((entry) => entry.name).filter(
+			(name) => !SKILL_RULE_NAMES.includes(name) && !(name in SKILL_EXCLUSIONS),
+		);
+		expect(missing).toEqual([]);
+	});
+	test("every exclusion names a real rule and carries a reason", () => {
+		for (const [name, reason] of Object.entries(SKILL_EXCLUSIONS)) {
+			expect(REDACTION_RULES.some((entry) => entry.name === name)).toBe(true);
+			expect(typeof reason === "string" && reason.length > 0).toBe(true);
+		}
+	});
+	test("the exclusion list holds exactly keypair-array", () => {
+		expect(Object.keys(SKILL_EXCLUSIONS).sort()).toEqual(["keypair-array"]);
 	});
 });
