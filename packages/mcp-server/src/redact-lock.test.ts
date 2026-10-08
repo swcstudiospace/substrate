@@ -389,3 +389,174 @@ describe("redaction lock", () => {
 		expect(callers).toEqual([]);
 	});
 });
+
+describe("detector self-tests", () => {
+	// Every prefix below is assembled at runtime from fragments, never written
+	// whole, so no literal token shape sits in git. The bodies echo in the
+	// assertions without ever carrying a real value: only canary words and
+	// character classes.
+	const GH = "gh" + "p_";
+	const SK_ANT = "sk-an" + "t-";
+	const LIN_API = "lin" + "_api_";
+	const LIN_OAUTH = "lin" + "_oauth_";
+	const GITHUB_PAT = "github" + "_pat_";
+
+	const RULE1_OFFENDERS: Array<{ file: string; body: string }> = [
+		// A copied redact.ts under another package: the binding is right, the path is not.
+		{ file: "packages/collectors/src/copy.ts", body: 'import { redact } from "./redact.ts";' },
+		// A binding the module never exports, from a redactor-sounding module.
+		{ file: "packages/cli/src/tool.ts", body: 'import { scrub } from "../lib/redactor.ts";' },
+		// A multi-line clause still names the binding on its `from` line.
+		{
+			file: "packages/mcp-server/src/dup.ts",
+			body: 'import {\n\ttype SkillFileHit,\n\tscanSkillFiles,\n} from "./copy.ts";',
+		},
+		// A Python import can never resolve to the TypeScript module.
+		{ file: "packages/miner/mine.py", body: "from substrate.redact import redact" },
+		{ file: "packages/miner/mine.py", body: "import substrate.redact" },
+	];
+
+	const RULE1_NON_OFFENDERS: Array<{ file: string; body: string }> = [
+		// The CLI import of the shared module.
+		{
+			file: "packages/cli/src/lessons.ts",
+			body: 'import { REDACTED, redact, redactValue } from "../../mcp-server/src/redact.ts";',
+		},
+		// The scripts import of the shared module.
+		{
+			file: "scripts/greptime-smoke.ts",
+			body: 'import { REDACTED } from "../packages/mcp-server/src/redact.ts";',
+		},
+		// A future skills/propose import of the shared module.
+		{
+			file: "packages/mcp-server/src/skills/propose.ts",
+			body: 'import { redact, redactSkillContent, scanSkillFiles } from "../redact.ts";',
+		},
+		// Type-only imports are kept, and this one resolves.
+		{
+			file: "packages/mcp-server/src/service.ts",
+			body: 'import type { RedactionRuleName } from "./redact.ts";',
+		},
+		// A code-generation template holding an import inside a string literal
+		// starts with a quote, so the anchored match never sees it.
+		{
+			file: "packages/projector/src/muse.ts",
+			body: '\'import { redact, redactValue } from "__REDACT_MODULE__";\'',
+		},
+	];
+
+	const RULE2_OFFENDERS: string[] = [
+		"function redactSecrets(value: string): string {\n\treturn value;\n}",
+		"export const redactLine = (line: string): string => line;",
+		"class TokenRedactor {\n\tclean(value: string): string {\n\t\treturn value;\n\t}\n}",
+		"const scanForSecrets = async (t: string) => t;",
+		"def redact_secrets(value):\n\treturn value",
+	];
+
+	const RULE2_NON_OFFENDERS: string[] = [
+		// The past participle every call site holds is not a definition.
+		"const redacted = redact(value).slice(0, limit);",
+		// The injected-seam signatures, verbatim from the tree.
+		"redact: (text: string) => string = (text) => text,",
+		"private readonly deps: { fetch?: FetchLike; redact?: (text: string) => string } = {},",
+		"// redaction happens on the write path, never in the collector",
+	];
+
+	const RULE3_OFFENDERS: string[] = [
+		'const tag = "[REDACTED]";',
+		// The hand-rolled step this phase migrated out of lessons.ts.
+		"cleaned = cleaned.replaceAll(secret, REDACTED);",
+	];
+
+	const RULE3_NON_OFFENDERS: string[] = [
+		// The smoke harness reads the marker through the imported binding.
+		"summaries.some((summary) => summary.includes(REDACTED))",
+		// A generic replace spelling no marker is just string code.
+		"out = out.replace(pattern, replacement);",
+	];
+
+	// One planted offender per non-null detector: a hand-rolled pattern holding
+	// the shape the shared rule names, in the form a copy would take (a regex
+	// literal, a `RegExp`, a `re.compile`, a shell `grep`).
+	const SHAPE_OFFENDERS: Array<{ rule: RedactionRuleName; file: string; body: string }> = [
+		{ rule: "private-tag", file: "shape.ts", body: `const closed = /<${"priv" + "ate>"}[\\s\\S]*?<\\/private>/.test(text);` },
+		{ rule: "pem", file: "shape.ts", body: `new RegExp("-----BEGIN ${"RSA PRIV" + "ATE KEY"}-----")` },
+		{ rule: "tailscale", file: "shape.ts", body: `const key = /${"tskey" + "-"}[A-Za-z0-9_-]+/;` },
+		{ rule: "linear-api", file: "shape.ts", body: `if (/${LIN_API}[A-Za-z0-9]{20,}/.test(id)) {` },
+		{ rule: "linear-oauth", file: "shape.ts", body: `if (/${LIN_OAUTH}[A-Za-z0-9]{20,}/.test(id)) {` },
+		{ rule: "notion", file: "shape.ts", body: `if (/${"nt" + "n_"}[A-Za-z0-9]{30,}/.test(id)) {` },
+		{ rule: "github", file: "shape.ts", body: `const found = /${GH}[A-Za-z0-9]{36}/g.test(value);` },
+		{ rule: "github-pat", file: "shape.ts", body: `if (/${GITHUB_PAT}[A-Za-z0-9_]{20,}/.test(id)) {` },
+		{ rule: "xai", file: "shape.ts", body: `if (/${"xa" + "i-"}[A-Za-z0-9]{20,}/.test(id)) {` },
+		{ rule: "anthropic", file: "shape.ts", body: `if (/${SK_ANT}[A-Za-z0-9_-]{20,}/.test(id)) {` },
+		{ rule: "openai", file: "shape.ts", body: `if (/${"sk" + "-"}[A-Za-z0-9]{20,}/.test(id)) {` },
+		{ rule: "aws", file: "mine.py", body: `m = re.compile(r"${"AK" + "IA"}[0-9A-Z]{16}")` },
+		{ rule: "google", file: "shape.ts", body: `if (/${"AI" + "za"}[0-9A-Za-z_-]{35}/.test(id)) {` },
+		{ rule: "slack", file: "shape.ts", body: `new RegExp("${"xox" + "b-"}[0-9]+")` },
+		{ rule: "npm", file: "shape.ts", body: `if (/${"np" + "m_"}[A-Za-z0-9]{36}/.test(id)) {` },
+		{ rule: "gitlab", file: "scan.sh", body: `grep -E '${"glp" + "at-"}[0-9A-Za-z_-]{20,}' scope.txt` },
+		{ rule: "digitalocean", file: "shape.ts", body: `if (/${"dop" + "_v1_"}[a-f0-9]{64}/.test(id)) {` },
+		{ rule: "openai-proj", file: "shape.ts", body: `if (/${"sk-pr" + "oj-"}[A-Za-z0-9_-]{20,}/.test(id)) {` },
+		{ rule: "pk-rk", file: "shape.ts", body: `if (/(?:${"pk" + "|rk"})-[A-Za-z0-9_-]{20,}/.test(key)) {` },
+		{ rule: "jwt", file: "shape.ts", body: `if (/${"e" + "yJ"}[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}/.test(id)) {` },
+	];
+
+	const RULE4_NON_OFFENDERS: string[] = [
+		// The runtime-assembled smoke decoy is a string, not a detector.
+		'const DECOY = `' + GH + '${"A".repeat(36)}`;',
+		// Division is not a regex literal.
+		"const ratio = a / b / c;",
+		"if (done / total > 0.5) {",
+		// A comment naming a shape detects nothing.
+		"// tokens shaped like " + GH + "… are redacted on write",
+	];
+
+	test("rule 1 catches planted offenders and passes the shared-module imports", () => {
+		for (const { file, body } of RULE1_OFFENDERS) {
+			expect({ body, caught: rule1Offenders(file, body).length > 0 }).toEqual({ body, caught: true });
+		}
+		for (const { file, body } of RULE1_NON_OFFENDERS) {
+			expect({ body, offenders: rule1Offenders(file, body) }).toEqual({ body, offenders: [] });
+		}
+	});
+
+	test("rule 2 catches planted definitions and passes usages and seam signatures", () => {
+		for (const body of RULE2_OFFENDERS) {
+			expect({ body, caught: rule2Offenders("shape.ts", body).length > 0 }).toEqual({ body, caught: true });
+		}
+		for (const body of RULE2_NON_OFFENDERS) {
+			expect({ body, offenders: rule2Offenders("shape.ts", body) }).toEqual({ body, offenders: [] });
+		}
+	});
+
+	test("rule 3 catches planted markers and passes the binding read", () => {
+		for (const body of RULE3_OFFENDERS) {
+			expect({ body, caught: rule3Offenders("shape.ts", body).length > 0 }).toEqual({ body, caught: true });
+		}
+		for (const body of RULE3_NON_OFFENDERS) {
+			expect({ body, offenders: rule3Offenders("shape.ts", body) }).toEqual({ body, offenders: [] });
+		}
+	});
+
+	test("every non-null detector catches its planted offender through the pipeline", () => {
+		const uncovered = Object.entries(DETECTOR)
+			.filter((entry): entry is [string, RegExp] => entry[1] !== null)
+			.map(([name]) => name)
+			.filter((name) => !SHAPE_OFFENDERS.some((planted) => planted.rule === name));
+		expect(uncovered).toEqual([]);
+		for (const { rule, file, body } of SHAPE_OFFENDERS) {
+			const detector = DETECTOR[rule];
+			expect(detector, rule).not.toBeNull();
+			expect({ rule, caught: detector!.test(body) }).toEqual({ rule, caught: true });
+			expect({ rule, pipeline: rule4Offenders(file, body).length > 0 }).toEqual({ rule, pipeline: true });
+		}
+	});
+
+	test("rule 4 passes the decoy, division and comments", () => {
+		for (const body of RULE4_NON_OFFENDERS) {
+			expect({ body, offenders: rule4Offenders("shape.ts", body) }).toEqual({ body, offenders: [] });
+		}
+		expect(RULE4_NON_OFFENDERS[0]).toContain('${"A".repeat(36)}');
+		expect(RULE4_NON_OFFENDERS[3]).toContain(GH);
+	});
+});
