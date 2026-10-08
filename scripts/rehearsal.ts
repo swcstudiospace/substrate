@@ -30,6 +30,7 @@ import { join } from "node:path";
 import {
 	buildRehearsalEnv,
 	consumerEnvRecord,
+	RehearsalEnvError,
 	storesEnvRecord,
 	toShellExports,
 } from "../packages/mcp-server/src/rehearsal-env.ts";
@@ -122,6 +123,7 @@ export function parseOperator(
 	if (raw === undefined) {
 		const first = surfaces[0];
 		if (first === undefined) throw new RehearsalRefused("no surfaces to pick an operator from");
+		if (isSwarmSurface(first)) throw new RehearsalRefused(`operator surface ${first} is a swarm surface; pass --operator`);
 		return first;
 	}
 	if (!surfaces.includes(raw as Surface)) {
@@ -644,14 +646,22 @@ async function runUp(opts: UpOptions, checkout: string): Promise<number> {
 	for (const [key, value] of Object.entries(process.env)) {
 		if (key.startsWith("BUN_")) parentEnv[key] = value;
 	}
-	const serverEnv = buildRehearsalEnv({
-		ports: { mcp: mcpPort, ledger: ledgerHost.port, postgres: pgHost.port },
-		secrets,
-		surfaces,
-		operator: opts.operator,
-		runDir,
-		parentEnv,
-	});
+	let serverEnv: Record<string, string>;
+	try {
+		serverEnv = buildRehearsalEnv({
+			ports: { mcp: mcpPort, ledger: ledgerHost.port, postgres: pgHost.port },
+			secrets,
+			surfaces,
+			operator: opts.operator,
+			runDir,
+			parentEnv,
+		});
+	} catch (cause) {
+		// The scratch containers are already healthy here; a builder throw must
+		// not leak them, and must exit 2 instead of a stack trace.
+		removeLabelledContainers(opts.name);
+		throw cause instanceof RehearsalEnvError ? new RehearsalRefused(cause.message) : cause;
+	}
 
 	const logPath = join(runDir, "server.log");
 	const fd = openSync(logPath, "a", 0o600);

@@ -177,6 +177,10 @@ describe("parseOperator", () => {
 		expect(() => parseOperator("swarm-a05-be", ["claude-code", "swarm-a05-be"], false)).toThrow("swarm surface");
 	});
 
+	test("refuses a swarm surface on the default path too", () => {
+		expect(() => parseOperator(undefined, ["swarm-a05-be", "hermes"], false)).toThrow("swarm surface");
+	});
+
 	test("refuses a name outside --surfaces", () => {
 		expect(() => parseOperator("omp", ["cursor"], false)).toThrow("not in --surfaces");
 	});
