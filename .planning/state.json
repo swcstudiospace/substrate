@@ -6,7 +6,7 @@
     {
       "number": "16",
       "name": "Production parity and rehearsal harness",
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "number": "17",
@@ -99,5 +99,5 @@
     "label": "Advance to the next step",
     "reason": "Phase 16 of 18 · 0% · executing"
   },
-  "updated_at": "2026-10-08T20:26:59.114Z"
+  "updated_at": "2026-10-08T20:39:34.801Z"
 }

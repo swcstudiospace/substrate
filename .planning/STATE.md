@@ -5,16 +5,16 @@ milestone_name: Build plan completion
 current_phase: 16
 current_phase_name: Production parity and rehearsal harness
 status: executing
-stopped_at: Completed 16-01-PLAN.md
-last_updated: "2026-10-08T20:27:07.597Z"
+stopped_at: Completed 16-02-PLAN.md
+last_updated: "2026-10-08T20:39:54.508Z"
 last_activity: 2026-10-08
 last_activity_desc: Phase 16 execution started
-state_head: 3de4b6c603702125e9c089babb5130d874a05de9
+state_head: 362d4a91ffb6f79b7eca7f414c21730936471f1d
 progress:
   total_phases: 18
   completed_phases: 0
   total_plans: 5
-  completed_plans: 1
+  completed_plans: 2
   percent: 0
 ---
 
@@ -155,7 +155,7 @@ which is why Greptime worked immediately and Postgres did not.
 ## Current Position
 
 Phase: 16 (Production parity and rehearsal harness) — EXECUTING
-Plan: 2 of 5
+Plan: 3 of 5
 Status: Ready to execute
 Last activity: 2026-10-08 — Phase 16 execution started
 
@@ -173,8 +173,8 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-08T20:27:04.155Z
-Stopped at: Completed 16-01-PLAN.md
+Last session: 2026-10-08T20:39:54.472Z
+Stopped at: Completed 16-02-PLAN.md
 Resume file: None
 
 ## Performance Metrics
@@ -182,7 +182,10 @@ Resume file: None
 | Plan | Duration | Tasks | Files |
 |------|----------|-------|-------|
 | Phase 16 P16-01 | 15min | 2 tasks | 2 files |
+| Phase 16 P16-02 | 9min | 3 tasks | 4 files |
 
 ## Decisions
 
 - [Phase 16]: 16-01: rehearsal-env builder is pure with caller-supplied secrets; operator checks precede token materialization
+- [Phase 16]: 16-02: parity startEpoch from ExecMainStartTimestamp (@unix); /proc start is a disagree-warning only
+- [Phase 16]: 16-02: originShaKnown null fails closed with its own reason, distinct from sha-absent
