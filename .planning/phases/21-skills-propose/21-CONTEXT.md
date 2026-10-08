@@ -119,7 +119,8 @@ Execution starts from a base that holds all three.
     - `SUBSTRATE_SKILLS_REMOTE_URL` (default `https://github.com/swcstudiospace/agent-skills.git`);
     - `SUBSTRATE_SKILLS_STATE` (default `/var/lib/substrate/skills`);
     - `SUBSTRATE_SKILLS_GH` (default `gh`).
-  - A non-default repository or remote is accepted only when the remote is a local `file://` path. Configuration therefore cannot point the owner's GitHub credential at another GitHub repository. Any other combination is a startup configuration error.
+  - A non-default repository or remote is accepted only when the remote is a local `file://` path *and* `SUBSTRATE_SKILLS_GH` is an absolute path to a non-default `gh`, so a typo can never send the real `gh` and the owner's credential at another repository (research Pitfall 5).
+  - **An invalid combination does not crash the server** (research Pitfall 4: a throw in `loadConfig` would crash-loop briefs and claims under `Restart=always`). `configWarnings` reports it at boot on the existing `misconfigured —` channel, and every proposal is refused with a `ProposeFailed` naming the bad key until it is fixed. No proposal ever runs with an invalid combination.
   - The origin check, the PR-URL check and the event's `repo` all use the configured slug.
 - **D21-14: State and ledger compatibility.** The default state dir and the ledger format (`proposals.jsonl` lines `{ts, content_sha256, name, surface, branch, state, pr_url?, pr_number?}`) stay September's, so the host's existing ledger keeps deduplicating content proposed in September.
   - A missing `mirror.git` is a `ProposeFailed` that names the missing mirror and the 04-02 bootstrap command. The server does not create it.
@@ -145,11 +146,11 @@ Execution starts from a base that holds all three.
   - A `ProposeRefused` is a `warning`:
     - payload: `action: "skill.propose"`, `status: "refused"`, `name` if valid, the `reason`, and `rules` (rule names only, never a value or a span).
   - A `ProposeFailed` is a `warning` with `status: "failed"` and the redacted reason.
-    - This adds one status value to Phase 17's documented row. `docs/event-vocabulary.md` and `EVENT_SOURCES` are updated in the same PR, as Phase 17 requires for any change to the table.
+    - It gets its own `EVENT_SOURCES` row (`skills.propose.failed`) beside Phase 17's `skills.propose` and `skills.propose.refused`, because the document's table has no status column. `docs/event-vocabulary.md` and `EVENT_SOURCES` change in the same PR, as Phase 17 requires for any change to the table. If the base already models statuses another way, follow the base.
   - These emit no event:
     - `dry_run`;
     - anonymous calls (no surface to attribute);
-    - 403 attribution refusals. The audit chain records those.
+    - 403 attribution refusals and malformed bodies (400 from the shape check, before the engine). The audit chain records those.
   - An event that fails to store never changes the proposal's answer.
   - A unit test asserts the emitted kind and action equal the `EVENT_SOURCES` row.
 - **D21-18: Registration (criterion 3).**
@@ -195,7 +196,7 @@ Execution starts from a base that holds all three.
     - (a) A valid skill through MCP, the route and the CLI each answers `opened`, with branch `skill/<surface>/<name>-<UTC ms ts>-<4 hex>` present in the throwaway repository and one recorded `gh pr create` each.
     - (b) Resubmitting identical content answers `existing`. After the fake `gh` marks that PR closed, it answers `declined`. Content equal to `main` answers `unchanged`, and none of the three pushes a branch or opens a second PR.
     - (c) Each of these is refused with no new branch and no `gh` call: a bad name, a `..` path, missing or mismatched frontmatter, and a planted runtime-assembled secret. The secret refusal carries a finding that names file, line and rule, and the value appears nowhere in the response, the ledger, the events or the audit file.
-    - (d) No token gives 401, and the MCP call is refused. A body surface naming another surface gives 403.
+    - (d) No token gives 401 on `/skills/propose` and on `/mcp`, from the server's token gate. A body surface naming another surface gives 403, and an operator-only option sent with a non-operator token from `tokens/<surface>` gives 403. `consumer.env`'s `SUBSTRATE_TOKEN` is the operator's. The in-route and in-tool refusals of `surface === null` are reachable only on an anonymous run, so unit tests prove them.
     - (e) The bare repository's reflog shows no non-fast-forward update.
     - (f) `POST /events/query` returns the `note`/`warning` rows with `action: "skill.propose"`, and the audit file holds `skills_propose` records.
   - Proof run:
