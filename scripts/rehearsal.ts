@@ -406,15 +406,19 @@ function writeMode(path: string, body: string): void {
 	}
 }
 
-function gitOutput(checkout: string, args: string[]): string | null {
+/**
+ * One read-only git call: trimmed stdout on success ("" when the command
+ * succeeds with no output, e.g. a clean `status --porcelain`), null only
+ * when git failed. Callers must not mistake "" for failure.
+ */
+export function gitOutput(checkout: string, args: string[]): string | null {
 	const run = Bun.spawnSync(["git", "-C", checkout, ...args], {
 		stdout: "pipe",
 		stderr: "pipe",
 		timeout: DOCKER_TIMEOUT_MS,
 	});
 	if (run.exitCode !== 0) return null;
-	const out = run.stdout.toString().trim();
-	return out.length > 0 ? out : null;
+	return run.stdout.toString().trim();
 }
 
 interface UpOptions {

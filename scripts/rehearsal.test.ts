@@ -12,6 +12,7 @@ import {
 	buildServerSpawnArgv,
 	ensurePrivateDir,
 	flag,
+	gitOutput,
 	isPortFree,
 	isTwinHealthy,
 	killVerifiedSpawn,
@@ -354,5 +355,32 @@ describe("smokeToolResult", () => {
 			body: { result: { content: [{ text: JSON.stringify({ claimed: true }) }] } },
 		};
 		expect(smokeToolResult(ok)).toEqual({ claimed: true });
+	});
+});
+
+describe("gitOutput", () => {
+	test("returns '' for successful empty output, null only on failure", () => {
+		const dir = mkdtempSync(join(tmpdir(), "rh-git-"));
+		try {
+			const git = (...args: string[]): void => {
+				const run = Bun.spawnSync(["git", ...args], { cwd: dir, stdout: "pipe", stderr: "pipe" });
+				if (run.exitCode !== 0) throw new Error(`git ${args.join(" ")} failed`);
+			};
+			git("init", "-q");
+			git("config", "user.email", "rh-test@example.com");
+			git("config", "user.name", "rh-test");
+			writeFileSync(join(dir, "f.txt"), "x\n");
+			git("add", "f.txt");
+			git("commit", "-qm", "seed");
+			// A clean checkout prints dirty=false, not dirty=unknown.
+			expect(gitOutput(dir, ["status", "--porcelain=v1"])).toBe("");
+			const sha = gitOutput(dir, ["log", "-1", "--pretty=%H"]);
+			expect(sha).not.toBeNull();
+			expect(sha).toMatch(/^[0-9a-f]{40}$/);
+			expect(gitOutput(dir, ["rev-parse", "no-such-ref"])).toBeNull();
+			expect(gitOutput(join(dir, "missing"), ["status", "--porcelain=v1"])).toBeNull();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });
