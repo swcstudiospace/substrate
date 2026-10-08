@@ -15,44 +15,71 @@ const REDACTED_PEM = "[REDACTED_PEM]";
 const REDACTED_TSKEY = "[REDACTED_TSKEY]";
 
 /** Ordered: broader structural patterns first, then token shapes. */
-const RULES: ReadonlyArray<readonly [RegExp, string]> = [
+const RULES = [
+	// ── D-04 structural: a <private> block, first so a PEM inside it goes as one block ─
+	{ name: "private-tag", pattern: /<private>[\s\S]*?<\/private>/gi, replacement: REDACTED },
 	// ── from redactor.py ──────────────────────────────────────────────────────
-	[/-----BEGIN[ A-Z]*PRIVATE KEY-----[\s\S]*?-----END[ A-Z]*PRIVATE KEY-----/g, REDACTED_PEM],
-	[/tskey-[A-Za-z0-9_-]+/g, REDACTED_TSKEY],
-	[/(password\s*[:=]\s*)(\S+)/gi, `$1${REDACTED}`],
-	[/\b([A-Z0-9_]*(?:PASSWORD|PASSWD|PASS)\s*=\s*)(\S+)/gi, `$1${REDACTED}`],
-	[/\b(DAYTONA_(?:API_)?KEY\s*=\s*)(\S+)/gi, `$1${REDACTED}`],
-	[/\b((?:VAULT_TOKEN|VAULT_TOKEN_ID|X-VAULT-TOKEN)\s*[:=]\s*)(\S+)/gi, `$1${REDACTED}`],
+	{ name: "pem", pattern: /-----BEGIN[ A-Z]*PRIVATE KEY-----[\s\S]*?-----END[ A-Z]*PRIVATE KEY-----/g, replacement: REDACTED_PEM },
+	{ name: "tailscale", pattern: /tskey-[A-Za-z0-9_-]+/g, replacement: REDACTED_TSKEY },
+	{ name: "password", pattern: /(password\s*[:=]\s*)(\S+)/gi, replacement: `$1${REDACTED}` },
+	{ name: "password-env", pattern: /\b([A-Z0-9_]*(?:PASSWORD|PASSWD|PASS)\s*=\s*)(\S+)/gi, replacement: `$1${REDACTED}` },
+	{ name: "daytona", pattern: /\b(DAYTONA_(?:API_)?KEY\s*=\s*)(\S+)/gi, replacement: `$1${REDACTED}` },
+	{ name: "vault", pattern: /\b((?:VAULT_TOKEN|VAULT_TOKEN_ID|X-VAULT-TOKEN)\s*[:=]\s*)(\S+)/gi, replacement: `$1${REDACTED}` },
 
 	// ── credentials this substrate touches ────────────────────────────────────
 	// Any FOO_TOKEN / FOO_KEY_BAR / FOO_SECRET assignment, incl. our own
 	// SUBSTRATE_TOKEN_* where the keyword sits mid-name. The keyword must be a
 	// whole underscore-delimited segment, so KEYBOARD_LAYOUT is not a secret.
-	[/\b((?:[A-Z0-9]+_)*(?:API_?KEY|APIKEY|TOKEN|SECRET|KEY)(?:_[A-Z0-9]+)*\s*[:=]\s*)(\S+)/g, `$1${REDACTED}`],
+	{ name: "assignment", pattern: /\b((?:[A-Z0-9]+_)*(?:API_?KEY|APIKEY|TOKEN|SECRET|KEY)(?:_[A-Z0-9]+)*\s*[:=]\s*)(\S+)/g, replacement: `$1${REDACTED}` },
+	// D-04 api-key-lower: api_key / apiKey / api-key assignments, any case; keeps the key.
+	{ name: "api-key-lower", pattern: /\b(api[_-]?key)(\s*[:=]\s*["']?)[A-Za-z0-9_\-/.+]{16,}/gi, replacement: `$1$2${REDACTED}` },
 	// Authorization headers, however cased.
-	[/\b(authorization\s*[:=]\s*)(?:bearer\s+)?(\S+)/gi, `$1${REDACTED}`],
-	[/\bBearer\s+[A-Za-z0-9._~+/-]{12,}=*/g, `Bearer ${REDACTED}`],
+	{ name: "authorization", pattern: /\b(authorization\s*[:=]\s*)(?:bearer\s+)?(\S+)/gi, replacement: `$1${REDACTED}` },
+	{ name: "bearer", pattern: /\bBearer\s+[A-Za-z0-9._~+/-]{12,}=*/g, replacement: `Bearer ${REDACTED}` },
 	// Connection URLs carrying a password.
-	[/\b([a-z][a-z0-9+.-]*:\/\/[^\s:/@]+):([^\s@]+)@/gi, `$1:${REDACTED}@`],
+	{ name: "url-password", pattern: /\b([a-z][a-z0-9+.-]*:\/\/[^\s:/@]+):([^\s@]+)@/gi, replacement: `$1:${REDACTED}@` },
 	// Provider token shapes.
-	[/\blin_api_[A-Za-z0-9]{20,}/g, REDACTED],
-	[/\blin_oauth_[A-Za-z0-9]{20,}/g, REDACTED],
-	[/\b(?:ntn_|secret_)[A-Za-z0-9]{30,}/g, REDACTED],
-	[/\bgh[pousr]_[A-Za-z0-9]{20,}/g, REDACTED],
-	[/\bgithub_pat_[A-Za-z0-9_]{20,}/g, REDACTED],
-	[/\bxai-[A-Za-z0-9]{20,}/g, REDACTED],
-	[/\bsk-ant-[A-Za-z0-9_-]{20,}/g, REDACTED],
-	[/\bsk-(?!ant-)[A-Za-z0-9]{20,}/g, REDACTED],
+	{ name: "linear-api", pattern: /\blin_api_[A-Za-z0-9]{20,}/g, replacement: REDACTED },
+	{ name: "linear-oauth", pattern: /\blin_oauth_[A-Za-z0-9]{20,}/g, replacement: REDACTED },
+	{ name: "notion", pattern: /\b(?:ntn_|secret_)[A-Za-z0-9]{30,}/g, replacement: REDACTED },
+	{ name: "github", pattern: /\bgh[pousr]_[A-Za-z0-9]{20,}/g, replacement: REDACTED },
+	{ name: "github-pat", pattern: /\bgithub_pat_[A-Za-z0-9_]{20,}/g, replacement: REDACTED },
+	{ name: "xai", pattern: /\bxai-[A-Za-z0-9]{20,}/g, replacement: REDACTED },
+	{ name: "anthropic", pattern: /\bsk-ant-[A-Za-z0-9_-]{20,}/g, replacement: REDACTED },
+	{ name: "openai", pattern: /\bsk-(?!ant-)[A-Za-z0-9]{20,}/g, replacement: REDACTED },
+	// ── D-04: shapes agentmemory's /remember does not filter ──────────────────
+	// aws: AWS access key id.
+	{ name: "aws", pattern: /\bAKIA[0-9A-Z]{16}\b/g, replacement: REDACTED },
+	// google: Google API key.
+	{ name: "google", pattern: /\bAIza[0-9A-Za-z_-]{35}/g, replacement: REDACTED },
+	// slack: Slack bot token.
+	{ name: "slack", pattern: /\bxoxb-[0-9A-Za-z-]{10,}/g, replacement: REDACTED },
+	// npm: npm access token.
+	{ name: "npm", pattern: /\bnpm_[A-Za-z0-9]{36}/g, replacement: REDACTED },
+	// gitlab: GitLab personal access token.
+	{ name: "gitlab", pattern: /\bglpat-[A-Za-z0-9_-]{20,}/g, replacement: REDACTED },
+	// digitalocean: DigitalOcean personal access token.
+	{ name: "digitalocean", pattern: /\bdop_v1_[a-f0-9]{64}/g, replacement: REDACTED },
+	// openai-proj: OpenAI project key (the sk- rule above stops at its second hyphen).
+	{ name: "openai-proj", pattern: /\bsk-proj-[A-Za-z0-9_-]{20,}/g, replacement: REDACTED },
+	// pk / rk: publishable and restricted keys. D18-21 narrowed: the matched tail
+	// must contain at least one digit, so word-only slugs are not secrets.
+	{ name: "pk-rk", pattern: /\b(?:pk|rk)-(?=[A-Za-z0-9_-]*[0-9])[A-Za-z0-9][A-Za-z0-9_-]{19,}/g, replacement: REDACTED },
 	// JWTs.
-	[/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, REDACTED],
+	{ name: "jwt", pattern: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, replacement: REDACTED },
 	// Private keypair arrays, e.g. a Solana keypair pasted into a summary.
-	[/\[\s*(?:\d{1,3}\s*,\s*){31,}\d{1,3}\s*\]/g, REDACTED],
-];
+	{ name: "keypair-array", pattern: /\[\s*(?:\d{1,3}\s*,\s*){31,}\d{1,3}\s*\]/g, replacement: REDACTED },
+] as const satisfies ReadonlyArray<{ name: string; pattern: RegExp; replacement: string }>;
+
+export type RedactionRuleName = (typeof RULES)[number]["name"];
+
+/** Read-only view for tests and docs. `redact()` is the only thing that applies it. */
+export const REDACTION_RULES: ReadonlyArray<{ readonly name: RedactionRuleName; readonly pattern: RegExp; readonly replacement: string }> = RULES;
 
 /** Redact a single string. Returns it unchanged when nothing matches. */
 export function redact(text: string): string {
 	let out = text;
-	for (const [pattern, replacement] of RULES) out = out.replace(pattern, replacement);
+	for (const { pattern, replacement } of RULES) out = out.replace(pattern, replacement);
 	return out;
 }
 
