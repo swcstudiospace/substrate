@@ -709,6 +709,37 @@ export function confirmSpawnedTwin(
 	return null;
 }
 
+/**
+ * Arm cleanup for an interruptible `up`: the first SIGINT/SIGTERM runs
+ * cleanup, then the signal is re-raised with the handlers removed so the
+ * process still dies from the signal. Returns a disarm function the caller
+ * runs once the twin is saved (or torn down through the normal paths).
+ * The cleanup itself must never throw — a throwing signal handler would
+ * mask the interruption.
+ */
+export function installUpCleanup(cleanup: () => void): () => void {
+	let fired = false;
+	const disarm = (): void => {
+		process.removeListener("SIGINT", onInt);
+		process.removeListener("SIGTERM", onTerm);
+	};
+	const handler = (signal: "SIGINT" | "SIGTERM"): void => {
+		if (fired) return;
+		fired = true;
+		try {
+			cleanup();
+		} finally {
+			disarm();
+			process.kill(process.pid, signal);
+		}
+	};
+	const onInt = (): void => handler("SIGINT");
+	const onTerm = (): void => handler("SIGTERM");
+	process.once("SIGINT", onInt);
+	process.once("SIGTERM", onTerm);
+	return disarm;
+}
+
 async function runUp(opts: UpOptions, checkout: string): Promise<number> {
 	const runDir = runDirFor(opts.name);
 	const lock = acquireNameLock(runDir, opts.name);
@@ -957,34 +988,17 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 		throw new RehearsalRefused(`twin would not be stoppable: ${stopReason}`);
 	}
 
-	const firstSurface = surfaces[0];
-	const firstToken = firstSurface !== undefined ? secrets.surfaceTokens[firstSurface] : undefined;
-	const smokeSurface = pickSmokeSurface(surfaces, opts.operator);
-	const smokeToken = smokeSurface !== undefined ? secrets.surfaceTokens[smokeSurface] : undefined;
-	const health = await waitForHealth(`http://127.0.0.1:${mcpPort}`, firstToken ?? null, READY_TIMEOUT_MS);
-	if (!isTwinHealthy(health)) {
-		killVerifiedSpawn(server.pid, checkout, facts.startSeconds);
-		removeLabelledContainers(opts.name);
-		process.stderr.write(`[rehearsal] twin never reached healthy /healthz (index=${health?.index} ledger=${health?.ledger} writable=${health?.writable}); log kept at ${logPath}.\n`);
-		return 1;
-	}
-
-	// Readiness proves something answered; this proves it was our spawn.
-	const confirmReason = confirmSpawnedTwin(server.pid, mcpPort, facts.startSeconds);
-	if (confirmReason !== null) {
-		killVerifiedSpawn(server.pid, checkout, facts.startSeconds);
-		removeLabelledContainers(opts.name);
-		throw new RehearsalRefused(confirmReason);
-	}
-
-	const commit = gitOutput(checkout, ["log", "-1", "--pretty=%H"]) ?? "unknown";
-	const dirtyOut = gitOutput(checkout, ["status", "--porcelain=v1", "--", "packages", "package.json", "bun.lock"]);
+	// The twin is verified but no state exists yet: an interruption in the
+	// health wait below would orphan a detached server no `down` can find.
+	// Save the verified identity first so `down` (and the signal handler)
+	// can stop it, then arm interruption cleanup for the wait.
+	let saved = false;
 	const state: TwinState = {
 		name: opts.name,
 		pid: server.pid,
 		startSeconds: facts.startSeconds,
 		checkout,
-		commit,
+		commit: "unknown",
 		mcpPort,
 		pgHostPort: pgHost.port,
 		ledgerHostPort: ledgerHost.port,
@@ -997,25 +1011,82 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 		anonymous: opts.anonymous,
 	};
 	writeMode(statePath, `${JSON.stringify(state, null, 2)}\n`);
-	const testPgUrl = `postgresql://postgres:${secrets.pgPassword}@127.0.0.1:${pgHost.port}/postgres`;
-	writeMode(join(runDir, "consumer.env"), toShellExports(consumerEnvRecord({
-		mcpPort,
-		firstToken: smokeToken ?? "",
-		runDir,
-		name: opts.name,
-		testPgUrl,
-	})));
-	writeMode(join(runDir, "stores.env"), toShellExports(storesEnvRecord({
-		ports: { mcp: mcpPort, ledger: ledgerHost.port, postgres: pgHost.port },
-		secrets,
-	})));
+	const interruptCleanup = (): void => {
+		killVerifiedSpawn(server.pid, checkout, facts.startSeconds);
+		try {
+			removeLabelledContainers(opts.name);
+		} catch {
+			// A signal handler must not throw; the kept provisional state
+			// lets a later `down` retry the removal.
+			return;
+		}
+		if (!saved) rmSync(statePath, { force: true });
+	};
+	const disarm = installUpCleanup(interruptCleanup);
+	try {
+		const firstSurface = surfaces[0];
+		const firstToken = firstSurface !== undefined ? secrets.surfaceTokens[firstSurface] : undefined;
+		const smokeSurface = pickSmokeSurface(surfaces, opts.operator);
+		const smokeToken = smokeSurface !== undefined ? secrets.surfaceTokens[smokeSurface] : undefined;
+		const health = await waitForHealth(`http://127.0.0.1:${mcpPort}`, firstToken ?? null, READY_TIMEOUT_MS);
+		if (!isTwinHealthy(health)) {
+			killVerifiedSpawn(server.pid, checkout, facts.startSeconds);
+			removeLabelledContainers(opts.name);
+			rmSync(statePath, { force: true });
+			process.stderr.write(`[rehearsal] twin never reached healthy /healthz (index=${health?.index} ledger=${health?.ledger} writable=${health?.writable}); log kept at ${logPath}.\n`);
+			return 1;
+		}
 
-	const url = `http://127.0.0.1:${mcpPort}`;
-	process.stdout.write(`[rehearsal] up ${opts.name} ${url}\n`);
-	process.stdout.write(`[rehearsal] consumer.env: ${join(runDir, "consumer.env")}\n`);
-	process.stdout.write(`[rehearsal] commit ${commit} dirty=${dirtyOut === null ? "unknown" : String(dirtyOut.length > 0)}\n`);
-	process.stdout.write(`[rehearsal] images pg=${pgImage} ledger=${ledgerImage}\n`);
-	return 0;
+		// Readiness proves something answered; this proves it was our spawn.
+		const confirmReason = confirmSpawnedTwin(server.pid, mcpPort, facts.startSeconds);
+		if (confirmReason !== null) {
+			killVerifiedSpawn(server.pid, checkout, facts.startSeconds);
+			removeLabelledContainers(opts.name);
+			rmSync(statePath, { force: true });
+			throw new RehearsalRefused(confirmReason);
+		}
+
+		state.commit = gitOutput(checkout, ["log", "-1", "--pretty=%H"]) ?? "unknown";
+		const dirtyOut = gitOutput(checkout, ["status", "--porcelain=v1", "--", "packages", "package.json", "bun.lock"]);
+		writeMode(statePath, `${JSON.stringify(state, null, 2)}\n`);
+		saved = true;
+		const testPgUrl = `postgresql://postgres:${secrets.pgPassword}@127.0.0.1:${pgHost.port}/postgres`;
+		writeMode(join(runDir, "consumer.env"), toShellExports(consumerEnvRecord({
+			mcpPort,
+			firstToken: smokeToken ?? "",
+			runDir,
+			name: opts.name,
+			testPgUrl,
+		})));
+		writeMode(join(runDir, "stores.env"), toShellExports(storesEnvRecord({
+			ports: { mcp: mcpPort, ledger: ledgerHost.port, postgres: pgHost.port },
+			secrets,
+		})));
+
+		const url = `http://127.0.0.1:${mcpPort}`;
+		process.stdout.write(`[rehearsal] up ${opts.name} ${url}\n`);
+		process.stdout.write(`[rehearsal] consumer.env: ${join(runDir, "consumer.env")}\n`);
+		process.stdout.write(`[rehearsal] commit ${state.commit} dirty=${dirtyOut === null ? "unknown" : String(dirtyOut.length > 0)}\n`);
+		process.stdout.write(`[rehearsal] images pg=${pgImage} ledger=${ledgerImage}\n`);
+		return 0;
+	} catch (cause) {
+		// An unexpected throw after the spawn must not leak the twin: stop
+		// it and remove its containers, then rethrow. The expected failures
+		// above already cleaned up, so this is a no-op for them (the kill
+		// is identity-checked; the removal finds nothing). The removal is
+		// best-effort here so the original error survives; the provisional
+		// state stays so a later `down` can retry it.
+		killVerifiedSpawn(server.pid, checkout, facts.startSeconds);
+		try {
+			removeLabelledContainers(opts.name);
+		} catch {
+			throw cause;
+		}
+		if (!saved) rmSync(statePath, { force: true });
+		throw cause;
+	} finally {
+		disarm();
+	}
 }
 
 async function runDown(name: string): Promise<number> {

@@ -17,6 +17,7 @@ import {
 	flag,
 	freeBytes,
 	gitOutput,
+	installUpCleanup,
 	isPortFree,
 	isTwinHealthy,
 	killVerifiedSpawn,
@@ -539,5 +540,21 @@ describe("confirmSpawnedTwin", () => {
 		expect(confirmSpawnedTwin(424242, 17410, 1791479000, deps())).toContain("reused");
 		expect(confirmSpawnedTwin(424242, 17410, 1791479652.17, deps({ ports: [9999] }))).toContain("does not own port");
 		expect(confirmSpawnedTwin(424242, 17410, 1791479652.17, deps({ ports: null }))).toContain("could not read");
+	});
+});
+
+describe("installUpCleanup", () => {
+	test("arms interruption handlers and disarms them", () => {
+		const intBefore = process.listenerCount("SIGINT");
+		const termBefore = process.listenerCount("SIGTERM");
+		let cleaned = 0;
+		const disarm = installUpCleanup(() => { cleaned++; });
+		expect(process.listenerCount("SIGINT")).toBe(intBefore + 1);
+		expect(process.listenerCount("SIGTERM")).toBe(termBefore + 1);
+		expect(cleaned).toBe(0);
+		disarm();
+		expect(process.listenerCount("SIGINT")).toBe(intBefore);
+		expect(process.listenerCount("SIGTERM")).toBe(termBefore);
+		disarm(); // Double disarm is safe.
 	});
 });
