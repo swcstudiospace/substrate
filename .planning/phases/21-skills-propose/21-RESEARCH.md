@@ -699,7 +699,16 @@ const planted = prefix + randomBytes(27).toString("base64url").replace(/[^A-Za-z
 | A5 | systemd may not set `HOME` for a root service without `User=` | Pitfall 11 | Covered by the `/root` fallback either way |
 | A6 | Phase 17/18 final plans keep the row ids, `EventSource` fields, exports and lock rules quoted here (both are under revision) | §2, §3 | Planner must re-read the base before Wave 1 |
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+Resolved 2026-10-08 by the orchestrator in CONTEXT (D21-13, D21-17, D21-22 amended) and adopted by the plans:
+- Q1 → RESOLVED: own row `skills.propose.failed` unless the base models statuses otherwise (D21-17; plan 21-02).
+- Q2 → RESOLVED: warn at boot and refuse every proposal, never crash (D21-13; plan 21-01).
+- Q3 → RESOLVED: absolute non-default `SUBSTRATE_SKILLS_GH` required with a non-default library (D21-13; plan 21-01).
+- Q4 → RESOLVED: malformed body emits no event, audited only (D21-17; plan 21-02).
+- Q5 → RESOLVED: plan 21-01 Task 1 checks the base and stops with BLOCKED if a prerequisite is missing.
+
+Original questions:
 
 1. **Phase 17's final shape for statuses.** What we know: rows `skills.propose` (note, repo) and `skills.propose.refused` (warning, no repo); the doc table has no status column. Unclear: whether Revise17 changes this. Recommendation: add `skills.propose.failed` as its own row unless the base already models a status list; re-read `event-sources.ts` on the execution base first.
 2. **"Startup configuration error" semantics (D21-13).** A throw in `loadConfig` crash-loops the whole substrate under `Restart=always`. Recommendation: report at boot via the `misconfigured —` warning channel and refuse every proposal with `ProposeFailed` naming the bad key; this keeps D21-13's guarantee (no proposal ever runs with an invalid combination) without making a skills typo an outage of briefs and claims. If the planner prefers a hard stop, throw a typed error with a clear message.
