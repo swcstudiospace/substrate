@@ -79,6 +79,21 @@ function carriesCredential(body: string): boolean {
 		.some((line) => CREDENTIAL.test(line) || RAILWAY_HOST.test(line));
 }
 
+/**
+ * A substrate bearer token assigned a literal value (ADR 0001 S4 criterion 3).
+ *
+ * The key is any `SUBSTRATE_TOKEN*`: the server's `SUBSTRATE_TOKEN_<SURFACE>` and the client's `SUBSTRATE_TOKEN` are
+ * the same secret under two names. A value counts when it is at least 16 token characters, which a generated token is
+ * (docs/swarm-workspace.md says 32 random bytes) and which the test fixtures (`tok-a05`) and the docs' placeholders
+ * (`…`, `<that agent's token>`, `${SUBSTRATE_TOKEN}`) are not. Code that reads the variable rather than holding a
+ * value, `SUBSTRATE_TOKEN: process.env.X`, is not a value either.
+ *
+ * Unlike the Greptime matcher, a comment is not exempt: a token pasted into a comment is just as committed. The
+ * separator is matched within one line, so an empty `SUBSTRATE_TOKEN_X=` followed by the next variable's name (as in
+ * `.env.example`) is not read as a value.
+ */
+const TOKEN_LITERAL = /SUBSTRATE_TOKEN[A-Z0-9_]*["']?[ \t]*[:=][ \t]*["']?(?!process\.env|os\.environ|Bun\.env|env\.)[\w.~+/=-]{16,}/;
+
 /** Every file git tracks, so the secret scan covers what is actually committed. */
 function trackedFiles(): string[] {
 	const listed = Bun.spawnSync(["git", "ls-files", "-z"], { cwd: ROOT });
@@ -216,7 +231,9 @@ describe("no native Greptime MCP wiring", () => {
 			...(await filesMatching("**/*.json")),
 			...(await filesMatching("**/*.{yaml,yml}")),
 			...(await filesMatching("**/*.toml")),
-			...(await filesMatching("packages/projector/**/*.ts")),
+			// The projector's sources, not its tests: a test asserting that no generated file names
+			// Greptime has to name it, and is the enforcement of this rule where the configs land.
+			...(await filesMatching("packages/projector/**/*.ts")).filter((path) => !path.endsWith(".test.ts")),
 		];
 
 		const offenders = configs.filter((path) => {
@@ -301,6 +318,45 @@ describe("no secrets in the repo", () => {
 			"// GREPTIME_URL=https://example.up.railway.app",
 		]) {
 			expect(carriesCredential(body)).toBe(false);
+		}
+	});
+
+	test("no tracked file assigns a substrate token a value", () => {
+		// The swarm workspace install names `${SUBSTRATE_TOKEN}` in every config it writes and keeps the value in
+		// an env file outside every checkout. A committed value, under either the server's or the client's name,
+		// would undo both halves.
+		const offenders = trackedFiles()
+			.filter((path) => path !== relative(ROOT, import.meta.path))
+			.filter((path) => TOKEN_LITERAL.test(read(path)));
+
+		expect(offenders).toEqual([]);
+	});
+
+	test("the token scan catches a value under either name, in an env file or a config", () => {
+		for (const body of [
+			"SUBSTRATE_TOKEN=3f9a1c0e7b2d4a6f8e1c3b5d7a9f0e2c",
+			"SUBSTRATE_TOKEN_SWARM_A05_BE=3f9a1c0e7b2d4a6f8e1c3b5d7a9f0e2c",
+			'{ "SUBSTRATE_TOKEN_HERMES": "N2Q4YjVmZTMtOTc0Ni00Y2Jm" }',
+			"  SUBSTRATE_TOKEN_CURSOR: 'sk_live_0123456789abcdef'",
+			"# SUBSTRATE_TOKEN=3f9a1c0e7b2d4a6f8e1c3b5d7a9f0e2c",
+		]) {
+			expect({ body, caught: TOKEN_LITERAL.test(body) }).toEqual({ body, caught: true });
+		}
+	});
+
+	test("the token scan does not fire on a blank, a placeholder, a reference or a short fixture", () => {
+		for (const body of [
+			"SUBSTRATE_TOKEN_SWARM_A05_BE=",
+			// An empty value followed by the next variable, as `.env.example` lists them: not a value.
+			"SUBSTRATE_TOKEN_CLAUDE_CODE=\nSUBSTRATE_TOKEN_HERMES=\n",
+			"SUBSTRATE_TOKEN_CLAUDE_CODE=…",
+			"SUBSTRATE_TOKEN=<that agent's token>",
+			'headers = { Authorization = "Bearer ${SUBSTRATE_TOKEN}" }',
+			"SUBSTRATE_TOKEN=${SUBSTRATE_TOKEN_SWARM_A05_BE}",
+			'SUBSTRATE_TOKEN_HERMES: "tok-hermes",',
+			"SUBSTRATE_TOKEN: process.env.SUBSTRATE_TOKEN_SWARM_A05_BE,",
+		]) {
+			expect({ body, caught: TOKEN_LITERAL.test(body) }).toEqual({ body, caught: false });
 		}
 	});
 });

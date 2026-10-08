@@ -34,7 +34,10 @@ surface and a lease holder is (surface, `session_id`), so a shared surface would
 The variable name is the **server's** convention (`SUBSTRATE_TOKEN_<SURFACE>`, `-` → `_`,
 uppercased). A swarm client process holds exactly one token, in `SUBSTRATE_TOKEN`, and
 sends it as `Authorization: Bearer <token>`. The names are listed, blank, in
-`.env.example`; values live only in `/etc/substrate/substrate.env`.
+`.env.example`; on the server the values live only in `/etc/substrate/substrate.env`. On the
+agent side each value lives in that agent's 0600 env file, written by the swarm's workspace
+install, which also wires the `substrate` MCP entry: see [swarm-workspace.md](swarm-workspace.md)
+for the projector, the split between the two ends and who owns each.
 
 **Boot report.** When the deployment has any `SUBSTRATE_TOKEN_*` set, boot prints one
 warning naming every swarm surface that has none (`swarmTokenWarnings` in `config.ts`). A
