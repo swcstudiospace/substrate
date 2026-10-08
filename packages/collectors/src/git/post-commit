@@ -8,9 +8,12 @@
 # abort it — but this still exits 0 unconditionally and backgrounds the call so
 # a slow or dead substrate never delays the user's shell.
 #
-# A non-ok response prints one stderr line (status and the server's error, never
-# the commit payload) and the commit still succeeds. SUBSTRATE_HOOK_WAIT=1 waits
-# for that post; git does not set it.
+# A non-ok response prints one line (status and the server's error, never the
+# commit payload) and the commit still succeeds. On a terminal that line is on
+# the terminal. With no controlling terminal it is appended to
+# SUBSTRATE_HOOK_LOG, or $XDG_STATE_HOME/substrate/post-commit.log, or
+# ~/.local/state/substrate/post-commit.log. SUBSTRATE_HOOK_WAIT=1 waits for the
+# post and prints the line on this process's stderr; git does not set it.
 
 set -u
 
@@ -92,18 +95,42 @@ try {
 )
 }
 
+# Where a headless refusal goes. A terminal still sees the line on /dev/tty.
+# A commit with no controlling terminal — a background agent, a captured job —
+# must not inherit the hook's pipes, and must not throw the line away either.
+hook_log() {
+	if [ -n "${SUBSTRATE_HOOK_LOG:-}" ]; then
+		printf '%s\n' "$SUBSTRATE_HOOK_LOG"
+		return
+	fi
+	if [ -n "${XDG_STATE_HOME:-}" ]; then
+		printf '%s\n' "$XDG_STATE_HOME/substrate/post-commit.log"
+		return
+	fi
+	if [ -n "${HOME:-}" ]; then
+		printf '%s\n' "$HOME/.local/state/substrate/post-commit.log"
+		return
+	fi
+	printf '%s\n' "/tmp/substrate-post-commit.log"
+}
+
 # SUBSTRATE_HOOK_WAIT=1 is the test: the line has to land on this process's
 # stderr. Anything else must not inherit these pipes. A caller that captures
 # `git commit` and waits for both of them to close would otherwise sit out the
-# substrate timeout after the hook itself has exited. A terminal still sees the
-# refusal; a captured run does not keep the pipe open to show it.
+# substrate timeout after the hook itself has exited.
 if [ "${SUBSTRATE_HOOK_WAIT:-}" = "1" ]; then
 	post_emit || true
 elif ( : >/dev/tty ) 2>/dev/null; then
 	post_emit </dev/null >/dev/tty 2>&1 &
 	disown 2>/dev/null || true
 else
-	post_emit </dev/null >/dev/null 2>&1 &
+	log="$(hook_log)"
+	mkdir -p "$(dirname "$log")" 2>/dev/null || true
+	if [ -w "$(dirname "$log")" ]; then
+		post_emit </dev/null >>"$log" 2>&1 &
+	else
+		post_emit </dev/null >/dev/null 2>&1 &
+	fi
 	disown 2>/dev/null || true
 fi
 

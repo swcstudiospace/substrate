@@ -128,6 +128,45 @@ describe("post-commit", () => {
 		}
 	});
 
+	test("a headless refusal is appended to the hook log and the hook still returns", async () => {
+		const subject = "payload-secret-marker";
+		const repo = await repoWithCommit(subject);
+		const server = await listen(400, "unknown kind: nope");
+		const log = join(repo, "hook.log");
+		const started = Date.now();
+		try {
+			// setsid drops the controlling terminal, which is the branch that used
+			// to discard the line. The hook must not inherit this process's pipes.
+			const child = Bun.spawn(["setsid", "bash", HOOK], {
+				cwd: repo,
+				env: {
+					...process.env,
+					SUBSTRATE_URL: server.url,
+					SUBSTRATE_TIMEOUT_MS: "1000",
+					SUBSTRATE_HOOK_WAIT: "",
+					SUBSTRATE_HOOK_LOG: log,
+				},
+				stdout: "ignore",
+				stderr: "ignore",
+			});
+			const exitCode = await child.exited;
+			expect(exitCode).toBe(0);
+			expect(Date.now() - started).toBeLessThan(1500);
+
+			const deadline = Date.now() + 2000;
+			let text = "";
+			while (Date.now() < deadline) {
+				text = await Bun.file(log).text().catch(() => "");
+				if (text.includes("status=400")) break;
+				await new Promise((resolve) => setTimeout(resolve, 50));
+			}
+			expect(text).toContain("[substrate] post-commit emit refused: status=400 error=unknown kind: nope");
+			expect(text).not.toContain(subject);
+		} finally {
+			server.close();
+		}
+	});
+
 	test("returns before the substrate answers when it is not told to wait", async () => {
 		const repo = await repoWithCommit("slow");
 		let release: () => void = () => {};
