@@ -11,6 +11,7 @@
  * lock-taking git call (every git argv starts with --no-optional-locks), and
  * it prints pids, states and commits only — never an environment value.
  */
+import { readFileSync, readlinkSync } from "node:fs";
 
 /** Production ports the check watches in `ss` output. */
 export const WATCHED_PORTS = [7410, 7411, 6420] as const;
@@ -175,20 +176,250 @@ export function parityVerdict(facts: ParityFacts, opts: VerdictOptions = {}): Pa
 	return { pass: failures.length === 0, failures, warnings: [...facts.warnings] };
 }
 
-function usage(): never {
-	process.stderr.write(
-		"[parity:check] read-only production parity check\nusage: parity-check.ts [--json] [--expect-restarts N] [--expect-start EPOCH]\n",
-	);
+// ── CLI main (read-only fact gathering) ──────────────────────────────────────
+
+/** Server paths that decide "from main". */
+const SERVER_PATHS = ["packages", "package.json", "bun.lock"];
+
+const SYSTEMCTL_PROPS =
+	"MainPID,ActiveState,SubState,NRestarts,ExecMainStartTimestamp,WorkingDirectory,ExecStart,FragmentPath,ConditionResult,Result";
+
+const HEALTHZ_URL = "http://127.0.0.1:7410/healthz";
+const SPAWN_TIMEOUT_MS = 15_000;
+const REQUEST_TIMEOUT_MS = 10_000;
+const INSTALLED_UNIT_FALLBACK = "/etc/systemd/system/substrate-mcp.service";
+
+interface SpawnResult {
+	code: number;
+	out: string;
+}
+
+/** Fixed argv, no shell, bounded: every systemctl, ss and git call goes here. */
+function spawn(argv: string[]): SpawnResult | null {
+	try {
+		const run = Bun.spawnSync(argv, { stdout: "pipe", stderr: "pipe", timeout: SPAWN_TIMEOUT_MS });
+		return { code: run.exitCode ?? -1, out: run.stdout.toString() };
+	} catch {
+		return null;
+	}
+}
+
+/** Every git argv leads with --no-optional-locks: the operator .git is shared with every worktree. */
+function gitWork(dir: string, args: string[]): SpawnResult | null {
+	return spawn(["git", "--no-optional-locks", "-C", dir, ...args]);
+}
+
+function readText(path: string): string | null {
+	try {
+		return readFileSync(path, "utf8");
+	} catch {
+		return null;
+	}
+}
+
+function readBtime(): number | null {
+	const stat = readText("/proc/stat");
+	if (!stat) return null;
+	const m = /^btime (\d+)$/m.exec(stat);
+	return m?.[1] ? Number(m[1]) : null;
+}
+
+/** ExecMainStartTimestamp in --timestamp=unix form (@epoch); human form as fallback. */
+function systemdTimestampToEpoch(value: string | undefined): number | null {
+	if (!value) return null;
+	const at = /^@(\d+)$/.exec(value.trim());
+	if (at?.[1]) return Number(at[1]);
+	const ms = Date.parse(value);
+	return Number.isFinite(ms) ? Math.floor(ms / 1000) : null;
+}
+
+/** One GET to /healthz with the caller's bearer when set; the token is never printed. */
+async function probeHealthz(): Promise<number | null> {
+	const token = process.env.SUBSTRATE_TOKEN?.trim();
+	try {
+		const res = await fetch(HEALTHZ_URL, {
+			headers: token ? { authorization: `Bearer ${token}` } : {},
+			signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+		});
+		await res.text();
+		return res.status;
+	} catch {
+		return null;
+	}
+}
+
+function dead(message: string): 2 {
+	process.stderr.write(`[parity:check] ${message}\n`);
+	return 2;
+}
+
+function usage(message?: string): never {
+	if (message) process.stderr.write(`[parity:check] ${message}\n`);
+	process.stderr.write("usage: parity-check.ts [--json] [--expect-restarts N] [--expect-start EPOCH]\n");
 	process.exit(2);
 }
 
-/** Fact gathering lands here (task 2); the parsers and verdict above are final. */
 export async function main(argv: string[]): Promise<number> {
 	if (argv.includes("--help") || argv.includes("-h")) {
 		process.stdout.write("usage: parity-check.ts [--json] [--expect-restarts N] [--expect-start EPOCH]\n");
 		return 0;
 	}
-	usage();
+	let json = false;
+	let expectRestarts: number | undefined;
+	let expectStart: number | undefined;
+	for (let i = 0; i < argv.length; i++) {
+		const arg = argv[i] ?? "";
+		if (arg === "--json") {
+			json = true;
+		} else if (arg === "--expect-restarts" || arg === "--expect-start") {
+			const raw = argv[i + 1];
+			const value = raw === undefined ? NaN : Number(raw);
+			if (!Number.isInteger(value) || value < 0) usage(`${arg} needs a non-negative integer`);
+			i++;
+			if (arg === "--expect-restarts") expectRestarts = value;
+			else expectStart = value;
+		} else {
+			usage(`unknown argument: ${arg}`);
+		}
+	}
+
+	const show = spawn(["systemctl", "show", "substrate-mcp", "-p", SYSTEMCTL_PROPS, "--timestamp=unix"]);
+	if (show === null || show.code !== 0) return dead("could not read substrate-mcp via systemctl show.");
+	const props = parseSystemctlShow(show.out);
+	const mainPidRaw = Number(props.get("MainPID") ?? "");
+	const mainPid = Number.isInteger(mainPidRaw) && mainPidRaw > 0 ? mainPidRaw : null;
+	const workdir = props.get("WorkingDirectory") ?? null;
+	const startEpoch = systemdTimestampToEpoch(props.get("ExecMainStartTimestamp"));
+	const nRestartsRaw = Number(props.get("NRestarts") ?? "");
+	const nRestarts = Number.isInteger(nRestartsRaw) && nRestartsRaw >= 0 ? nRestartsRaw : null;
+	const activeState = props.get("ActiveState") ?? null;
+	const subState = props.get("SubState") ?? null;
+
+	const ss = spawn(["ss", "-ltnpH"]);
+	if (ss === null || ss.code !== 0) return dead("could not read listeners via ss.");
+	const owners = parseSsListeners(ss.out).get(7410) ?? [];
+
+	let cgroup: string | null = null;
+	let procCwd: string | null = null;
+	let procStart: number | null = null;
+	let entryPoint = "(unknown)";
+	if (mainPid !== null) {
+		const cgroupRaw = readText(`/proc/${mainPid}/cgroup`);
+		const statRaw = readText(`/proc/${mainPid}/stat`);
+		const cmdRaw = readText(`/proc/${mainPid}/cmdline`);
+		let cwd: string | null = null;
+		try {
+			cwd = readlinkSync(`/proc/${mainPid}/cwd`);
+		} catch {
+			cwd = null;
+		}
+		if (cgroupRaw === null || statRaw === null || cwd === null) {
+			return dead(`pid ${mainPid} vanished while reading /proc.`);
+		}
+		cgroup = parseCgroup(cgroupRaw);
+		procCwd = cwd;
+		const btime = readBtime();
+		procStart = btime === null ? null : procStartSeconds(btime, statRaw);
+		const tail = cmdRaw?.split("\0").filter(Boolean).at(-1) ?? null;
+		if (tail) entryPoint = tail;
+	}
+
+	const healthzStatus = await probeHealthz();
+
+	let headMoveEpoch: number | null = null;
+	let dirtyPaths: string[] = [];
+	let originDiffPaths: string[] = [];
+	let originShaKnown: boolean | null = null;
+	let headSha: string | null = null;
+	let originSha: string | null = null;
+	if (workdir !== null) {
+		const log = gitWork(workdir, ["log", "-g", "-n", "1", "--format=%H %gd %gs", "--date=unix", "HEAD"]);
+		if (log === null || log.code !== 0) return dead(`could not read the reflog of ${workdir}.`);
+		const line = log.out.trim();
+		const first = line.split(/\s+/)[0];
+		headSha = first ? first : null;
+		headMoveEpoch = parseReflogTime(line);
+		const status = gitWork(workdir, ["status", "--porcelain=v1", "--", ...SERVER_PATHS]);
+		if (status === null || status.code !== 0) return dead(`could not read the status of ${workdir}.`);
+		dirtyPaths = status.out
+			.split("\n")
+			.filter((l) => l.trim())
+			.map((l) => {
+				const path = l.slice(3);
+				const arrow = path.indexOf(" -> ");
+				return arrow >= 0 ? path.slice(arrow + 4) : path;
+			});
+		const remote = gitWork(workdir, ["ls-remote", "origin", "refs/heads/main"]);
+		if (remote !== null && remote.code === 0) {
+			const sha = remote.out.trim().split(/\s+/)[0];
+			originSha = sha ? sha : null;
+		}
+		if (originSha) {
+			const known = gitWork(workdir, ["cat-file", "-e", `${originSha}^{commit}`]);
+			originShaKnown = known === null ? null : known.code === 0;
+			if (originShaKnown === true) {
+				const diff = gitWork(workdir, ["diff", "--name-only", "HEAD", originSha, "--", ...SERVER_PATHS]);
+				if (diff === null || diff.code !== 0) return dead(`could not diff HEAD against origin/main in ${workdir}.`);
+				originDiffPaths = diff.out.split("\n").map((l) => l.trim()).filter(Boolean);
+			}
+		}
+	}
+
+	const warnings: string[] = [];
+	if (startEpoch !== null && procStart !== null && Math.abs(startEpoch - procStart) > 2) {
+		warnings.push(`systemd start ${startEpoch} disagrees with /proc start ${Math.floor(procStart)}`);
+	}
+	const fragment = props.get("FragmentPath") ?? INSTALLED_UNIT_FALLBACK;
+	const installed = readText(fragment);
+	const repoUnit = workdir === null ? null : readText(`${workdir}/infra/vps/substrate-mcp.service`);
+	if (installed === null) warnings.push(`installed unit is unreadable at ${fragment}`);
+	else if (repoUnit === null) warnings.push("repo unit is unreadable; unit-file diff skipped");
+	else if (installed !== repoUnit) warnings.push("installed unit differs from the repo unit");
+	const siblings = spawn(["systemctl", "list-units", "substrate-*", "--all", "--no-legend", "--plain"]);
+	if (siblings === null || siblings.code !== 0) {
+		warnings.push("could not list sibling substrate units");
+	} else {
+		for (const line of siblings.out.split("\n")) {
+			const trimmed = line.trim();
+			if (trimmed) warnings.push(`unit: ${trimmed}`);
+		}
+	}
+
+	const verdict = parityVerdict(
+		{
+			mainPid,
+			activeState,
+			subState,
+			nRestarts,
+			startEpoch,
+			ssOwnerPids: owners,
+			cgroup,
+			procCwd,
+			workingDirectory: workdir,
+			headMoveEpoch,
+			dirtyPaths,
+			originDiffPaths,
+			originShaKnown,
+			healthzStatus,
+			warnings,
+		},
+		{ expectRestarts, expectStart },
+	);
+
+	process.stdout.write(
+		`[parity:check] MainPID=${mainPid ?? "(none)"} ${activeState ?? "?"}/${subState ?? "?"} NRestarts=${nRestarts ?? "?"} start=${startEpoch ?? "?"}\n` +
+			`[parity:check] :7410 owners=[${owners.join(", ")}] cgroup=${cgroup ?? "(unknown)"} entry=${entryPoint}\n` +
+			`[parity:check] tree=${workdir ?? "(unknown)"} HEAD=${headSha ?? "?"} origin=${originSha ?? "?"} healthz=${healthzStatus ?? "(unreachable)"}\n`,
+	);
+	for (const failure of verdict.failures) process.stdout.write(` FAIL  ${failure}\n`);
+	for (const warning of verdict.warnings) process.stdout.write(`  --   ${warning}\n`);
+	if (json) {
+		process.stdout.write(
+			`${JSON.stringify({ pass: verdict.pass, failures: verdict.failures, warnings: verdict.warnings, mainPid, nRestarts, startEpoch, headSha, originSha, healthzStatus }, null, 2)}\n`,
+		);
+	}
+	process.stdout.write(verdict.pass ? "[parity:check] PASS\n" : `[parity:check] FAIL — ${verdict.failures.length} criterion(s) failed\n`);
+	return verdict.pass ? 0 : 1;
 }
 
 if (import.meta.main) process.exit(await main(process.argv.slice(2)));
