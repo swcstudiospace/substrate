@@ -169,7 +169,8 @@ Two rollbacks, both operator only:
    recorded in the header table in the operator checkout, run
    `systemctl restart substrate-mcp`, and re-run the check. Rollback never
    starts the server from a user session, because that recreates the stray
-   process.
+   process. After a real rollback a FAIL naming only server-path drift from
+   `origin/main` is expected: HEAD no longer matches the remote by design.
 2. **The installed unit file goes wrong.** Restore the backup taken at
    install time, `daemon-reload`, restart, re-run the check:
 
