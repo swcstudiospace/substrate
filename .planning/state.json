@@ -1,38 +1,38 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v1.1",
+  "milestone": "v1.2 — Swarm leases, workspace install and lessons bank (In Progress)",
   "phases": [
     {
-      "number": "7",
-      "name": "Database structures",
+      "number": "11",
+      "name": "Lease authority",
       "status": "complete"
     },
     {
-      "number": "8",
-      "name": "Memory structures",
+      "number": "12",
+      "name": "Swarm lease bridge",
       "status": "complete"
     },
     {
-      "number": "8.1",
-      "name": "Version conflicts carry the standing version (INSERTED)",
+      "number": "13",
+      "name": "Signed handoffs",
       "status": "complete"
     },
     {
-      "number": "9",
-      "name": "claude-ultrathink integration",
+      "number": "14",
+      "name": "Workspace install",
       "status": "complete"
     },
     {
-      "number": "10",
-      "name": "Swarm orchestrate integration",
+      "number": "15",
+      "name": "Lessons bank",
       "status": "complete"
     }
   ],
   "next": {
-    "command": "/gsd:new-milestone",
-    "label": "Start a new milestone",
-    "reason": "All phases complete — start a new milestone"
+    "command": "/gsd:progress",
+    "label": "Show progress",
+    "reason": "Unsure of state — showing progress"
   },
-  "updated_at": "2026-10-07T17:38:22.669Z"
+  "updated_at": "2026-10-08T05:50:35.097Z"
 }
