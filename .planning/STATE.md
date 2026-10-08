@@ -5,7 +5,7 @@ milestone_name: Build plan completion
 current_phase: 16
 current_phase_name: Production parity and rehearsal harness
 status: executing
-stopped_at: Completed 16-04-PLAN.md
+stopped_at: "16-05 Task 2 checkpoint (human-verify, blocking-human): awaiting operator-approved production parity:check; Task 3 rh- counts pending"
 last_updated: "2026-10-08T20:59:25.049Z"
 last_activity: 2026-10-08
 last_activity_desc: Phase 16 execution started
