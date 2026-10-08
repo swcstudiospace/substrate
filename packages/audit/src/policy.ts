@@ -23,6 +23,10 @@ export const FAIL_CLOSED_TOOLS: ReadonlySet<string> = new Set([
 	"memory_write",
 	"coord_handoff",
 	"coord_reap_leases",
+	// Phase 17: planned v1.3 writes, decided before they ship.
+	"skills_propose", // Phase 21: opens a PR other agents receive after merge.
+	"docs_ingest", // Phase 25: writes a shared dataset every agent reads.
+	"desktop_run", // Phase 30: acts on a desktop (DESK-03).
 ]);
 
 /**
@@ -37,10 +41,11 @@ export const FAIL_CLOSED_TOOLS: ReadonlySet<string> = new Set([
  * unwritable audit file refused `events_query`, `events_verify`, `memory_pending`,
  * `coord_handoff_list` and `coord_drift_scan` while both their backing stores were
  * healthy — the audit sink failing took out reads it was never meant to gate, which is
- * the opposite of the stated policy. The two sets below are exhaustive over the tools in
- * `mcp.ts` and the REST routes in `server.ts`, so the default-deny catches only a name
- * this substrate does not serve; `policy.test.ts` pins that, and a tool added without a
- * decision about its audit mode still fails closed the first time it is called.
+ * the opposite of the stated policy. The two sets below cover the served tools in
+ * `mcp.ts` and the REST routes in `server.ts` plus the v1.3 planned tools marked
+ * by phase, so the default-deny catches only a name this substrate does not serve;
+ * `policy.test.ts` pins that, and a tool added without a decision about its audit
+ * mode still fails closed the first time it is called.
  */
 export const FAIL_OPEN_TOOLS: ReadonlySet<string> = new Set([
 	// MCP reads.
@@ -65,6 +70,12 @@ export const FAIL_OPEN_TOOLS: ReadonlySet<string> = new Set([
 	"metrics",
 	"slo",
 	"evidence",
+	// Phase 17: planned v1.3 reads, decided before they ship.
+	"docs_search", // Phase 25: a read inside an agent's turn.
+	"issue_get", // Phase 23: a read of untrusted tracker text.
+	"graph_find", // Phase 23: a read of the index.
+	"memory_recall", // Phase 26: a read like `memory_search`.
+	"agent_card", // Phase 29: the Agent Card REST route is a read.
 ]);
 
 /**
