@@ -57,7 +57,7 @@ Phase details: [milestones/v1.2-ROADMAP.md](milestones/v1.2-ROADMAP.md) · requi
 
 Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 → 23 → 24 → 31 → 32 → 33. Side chains: 18 → 21 → 22 → 25 → 26 (skills, then docs and memory); 18 → 27 → 28 → 29 (ledger, then Agent Cards, which also need 21); 17 and 18 → 30 (`desktop_run`, floating).
 
-- [ ] **Phase 16: Production parity and rehearsal harness** - Production `substrate-mcp` serves `main`, and an isolated twin exists for every later proof
+- [x] **Phase 16: Production parity and rehearsal harness** - Production `substrate-mcp` serves `main`, and an isolated twin exists for every later proof (completed 2026-10-08)
 - [ ] **Phase 17: Event vocabulary and audit policy** - Every v1.3 event source is mapped onto the existing kinds and surfaces before any of them ships
 - [ ] **Phase 18: Guard rails and shared redactor** - One redactor, carrying the September rules and main's counter exemption, guards every publication path
 - [ ] **Phase 19: Lane B collectors** - herdr, Muse and the Cursor `stop` hook emit from `main` under main's vocabulary, and each Muse repo carries a fresh brief
@@ -371,7 +371,7 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
-| 16. Production parity and rehearsal harness | v1.3 | 5/5 | In Progress | - |
+| 16. Production parity and rehearsal harness | v1.3 | 5/5 | Complete    | 2026-10-08 |
 | 17. Event vocabulary and audit policy | v1.3 | 0/? | Not started | - |
 | 18. Guard rails and shared redactor | v1.3 | 0/? | Not started | - |
 | 19. Lane B collectors | v1.3 | 0/? | Not started | - |

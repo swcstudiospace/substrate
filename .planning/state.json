@@ -6,7 +6,7 @@
     {
       "number": "16",
       "name": "Production parity and rehearsal harness",
-      "status": "in_progress"
+      "status": "complete"
     },
     {
       "number": "17",
@@ -96,8 +96,8 @@
   ],
   "next": {
     "command": "/gsd:progress --next",
-    "label": "Advance to the next step",
-    "reason": "Phase 16 of 18 · 0% · executing"
+    "label": "Advance to the next step (plan phase 17)",
+    "reason": "Phase 17 of 18 — needs a plan"
   },
-  "updated_at": "2026-10-08T20:59:20.952Z"
+  "updated_at": "2026-10-08T22:05:13.871Z"
 }

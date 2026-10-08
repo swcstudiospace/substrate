@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.3
 milestone_name: Build plan completion
-current_phase: 16
-current_phase_name: Production parity and rehearsal harness
-status: executing
-stopped_at: "Completed 16-05-PLAN.md"
-last_updated: "2026-10-08T20:59:25.049Z"
+current_phase: 17
+current_phase_name: Event vocabulary and audit policy
+status: planning
+stopped_at: Phase 16 complete, ready to plan Phase 17
+last_updated: "2026-10-08T22:05:13.855Z"
 last_activity: 2026-10-08
-last_activity_desc: Phase 16 execution started
-state_head: ee7a82beef96906ac2dec905b3b561abaac1669c
+last_activity_desc: Phase 16 complete, transitioned to Phase 17
+state_head: 0d63ec04db815495d66ea9278c256b4f7a42108d
 progress:
   total_phases: 18
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 5
-  completed_plans: 4
-  percent: 0
+  completed_plans: 5
+  percent: 6
 ---
 
 # State
@@ -154,10 +154,10 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Current Position
 
-Phase: 16 (Production parity and rehearsal harness) — EXECUTING
-Plan: 5 of 5
-Status: Complete (16-05 evidence recorded; seal inputs ready)
-Last activity: 2026-10-08 — Completed 16-05-PLAN.md
+Phase: 17 — Event vocabulary and audit policy
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-10-08 — Phase 16 complete, transitioned to Phase 17
 
 ## Deferred Items
 
@@ -174,7 +174,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 ## Session Continuity
 
 Last session: 2026-10-08T21:29:12Z
-Stopped at: Completed 16-05-PLAN.md
+Stopped at: Phase 16 complete, ready to plan Phase 17
 Resume file: None
 
 ## Performance Metrics
