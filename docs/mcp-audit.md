@@ -226,11 +226,30 @@ The chain tip advances **only on a successful write**, for the same reason.
 | **fail-open** | every read — `memory_brief`, `memory_search`, `memory_pending`, `events_query`, `events_verify`, `graph_get`, `coord_handoff_verify`, `coord_handoff_list`, `coord_drift_scan` — plus `events_emit`, and the `/brief`, `/events`, `/events/query`, `/verify`, `/drift`, `/evidence` routes | These sit inside a prompt's hook budget. The substrate is not allowed to fail an agent's turn, and an unwritable audit file is not a reason to start. The call still produces a record; it is just not a gate. |
 | **fail-closed** | `graph_claim`, `graph_release`, `graph_complete`, `graph_register`, `graph_heartbeat`, `graph_bind`, `memory_write`, `coord_handoff`, `coord_reap_leases` | Everything that grants or transfers exclusive ownership of a node, or writes shared state another agent will act on. A claim nobody recorded is how two agents end up holding one node, and the whole point of `graph_claim` is that they cannot. |
 
+### Planned in v1.3
+
+The audit mode of every MCP tool v1.3 plans to add is decided here, before any of
+them ships, so no publication path ever runs undecided. Each tool's own phase does
+its `registerTool` and `KNOWN_TOOLS` registration and inherits the mode below.
+The event side of the same contract — which kinds and surfaces v1.3 sources emit —
+lives in [event-vocabulary.md](event-vocabulary.md).
+
+| Tool (phase) | Mode | Why |
+| --- | --- | --- |
+| `skills_propose` (21) | fail-closed | Opens a PR other agents will receive after merge; a proposal nobody recorded is an unaudited publication. |
+| `docs_ingest` (25) | fail-closed | Writes a shared dataset every agent reads; it is also a publication path. |
+| `desktop_run` (30) | fail-closed | Acts on a desktop (DESK-03 fixes this). |
+| `docs_search` (25) | fail-open | A read inside an agent's turn. |
+| `issue_get` (23) | fail-open | A read of untrusted tracker text. |
+| `graph_find` (23) | fail-open | A read of the index. |
+| `memory_recall` (26) | fail-open | A read like `memory_search`. |
+| `agent_card` (29) | fail-open | The Agent Card REST route is a read, audited under this name. |
+
 **An unknown tool is fail-closed.** Deny by default, like `assertAppendOnly` in the
 ledger client: a tool added without a decision about its audit mode is caught the
 first time it is called rather than becoming a permanent hole.
 
-**Both lists are exhaustive over the tools this substrate serves**, and `policy.test.ts`
+**Both lists cover the tools this substrate serves plus the v1.3 planned tools marked by phase**, and `policy.test.ts`
 pins that. Default-deny is there to catch a tool nobody has decided about; it is not
 meant to be what carries the decision for one somebody has. Leaving the read tools out
 of the fail-open list meant an unwritable audit file refused `events_query`,
@@ -245,6 +264,10 @@ MCP tool's own name where there is one: `POST /memory` is audited as `memory_wri
 `POST /handoff` as `coord_handoff`, so one action does not appear in the trail twice
 under two names. Only `/healthz`, `/metrics` and `/slo` are exempt; no agent action is
 behind them and a trail dominated by a Prometheus scrape is one nobody reads.
+
+REST twins of planned v1.3 tools (`POST /skills/propose`, `/docs/search`,
+`/docs/ingest`, `/issue`) are audited under their tool's own name when they land,
+and inherit that tool's mode.
 
 **A REST route inherits its tool's mode, denial included.** Auditing MCP `memory_write`
 as fail-closed while `POST /memory` wrote shared memory unaudited left the policy with an
