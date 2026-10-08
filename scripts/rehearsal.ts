@@ -716,6 +716,17 @@ async function runUp(opts: UpOptions, checkout: string): Promise<number> {
 		throw new RehearsalRefused(`could not verify the spawned twin (pid ${server.pid}); refusing to signal an unverified process`);
 	}
 
+	const stopReason = mayStop(facts, { pid: server.pid, checkout, startSeconds: facts.startSeconds });
+	if (stopReason !== null) {
+		// Only our own spawn is signalled (killVerifiedSpawn re-checks the
+		// identity); the containers are always removed. Without this early
+		// refusal `up` succeeds and every later `down` refuses, e.g. from a
+		// system.slice context the twin inherits.
+		killVerifiedSpawn(server.pid, checkout, facts.startSeconds);
+		removeLabelledContainers(opts.name);
+		throw new RehearsalRefused(`twin would not be stoppable: ${stopReason}`);
+	}
+
 	const firstSurface = surfaces[0];
 	const firstToken = firstSurface !== undefined ? secrets.surfaceTokens[firstSurface] : undefined;
 	const health = await waitForHealth(`http://127.0.0.1:${mcpPort}`, firstToken ?? null, READY_TIMEOUT_MS);
