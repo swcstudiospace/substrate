@@ -4,11 +4,12 @@
  * before the first container call, and the store file is treated as opaque.
  */
 import { describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	acquireNameLock,
 	buildServerSpawnArgv,
 	clearDirectory,
 	ensurePrivateDir,
@@ -493,5 +494,29 @@ describe("pickSmokeSurface", () => {
 		expect(pickSmokeSurface(["cursor", "hermes"], null)).toBe("cursor");
 		expect(pickSmokeSurface(["cursor", "hermes"], "hermes")).toBe("hermes");
 		expect(pickSmokeSurface([], null)).toBeUndefined();
+	});
+});
+
+describe("acquireNameLock", () => {
+	test("serializes one instance name and steals stale locks", () => {
+		const base = mkdtempSync(join(tmpdir(), "rh-lock-"));
+		try {
+			const runDir = join(base, "substrate-rehearsal", "x");
+			const first = acquireNameLock(runDir, "x");
+			expect(() => acquireNameLock(runDir, "x")).toThrow("locked by another operation");
+			first.release();
+			acquireNameLock(runDir, "x").release();
+			// A lock whose holder is gone is stolen.
+			const lockDir = `${runDir}.lock`;
+			mkdirSync(lockDir);
+			writeFileSync(join(lockDir, "owner"), "2147483647\n");
+			acquireNameLock(runDir, "x").release();
+			// A fresh lock with no readable owner is left alone.
+			mkdirSync(lockDir);
+			expect(() => acquireNameLock(runDir, "x")).toThrow("locked by another operation");
+			rmSync(lockDir, { recursive: true, force: true });
+		} finally {
+			rmSync(base, { recursive: true, force: true });
+		}
 	});
 });

@@ -24,6 +24,7 @@ import {
 	readFileSync,
 	readlinkSync,
 	rmSync,
+	statSync,
 	statfsSync,
 	writeFileSync,
 } from "node:fs";
@@ -615,9 +616,85 @@ export function killVerifiedSpawn(pid: number, checkout: string, startSeconds: n
 	killOwn(pid);
 	return true;
 }
+/**
+ * An exclusive per-instance lock, held across startup and teardown: a
+ * concurrent `up`/`down` on one name must not read state or remove
+ * containers under each other. The lock is a directory (mkdir is atomic)
+ * beside the run dir; the owner file names the holder pid. A lock whose
+ * holder is gone is stolen; a fresh lock with an unreadable owner is left
+ * alone (its holder may be mid-write) — remove it by hand if it is stale.
+ */
+export interface NameLock {
+	release(): void;
+}
+
+/** A lock with no readable owner is stolen only after this age. */
+export const LOCK_STALE_MS = 60_000;
+
+function readLockOwner(lockDir: string): number | null {
+	try {
+		const pid = Number(readFileSync(join(lockDir, "owner"), "utf8").trim().split("\n")[0]);
+		return Number.isInteger(pid) && pid > 0 ? pid : null;
+	} catch {
+		return null;
+	}
+}
+
+function lockOwnerAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+export function acquireNameLock(runDir: string, name: string): NameLock {
+	// The base must exist before the atomic mkdir below; runDir itself may
+	// not exist yet on a fresh `up`, so harden the parent instead.
+	ensurePrivateDir(dirname(runDir));
+	const lockDir = `${runDir}.lock`;
+	for (;;) {
+		try {
+			mkdirSync(lockDir);
+		} catch (cause) {
+			if ((cause as NodeJS.ErrnoException)?.code !== "EEXIST") throw cause;
+			const owner = readLockOwner(lockDir);
+			if (owner !== null && lockOwnerAlive(owner)) {
+				throw new RehearsalRefused(`instance ${name} is locked by another operation (pid ${owner})`);
+			}
+			if (owner === null) {
+				let age: number | null = null;
+				try {
+					age = Date.now() - statSync(lockDir).mtimeMs;
+				} catch {
+					continue; // Raced a release; retry the mkdir.
+				}
+				if (age < LOCK_STALE_MS) {
+					throw new RehearsalRefused(`instance ${name} is locked by another operation; remove ${lockDir} if it is stale`);
+				}
+			}
+			// Stale lock: the holder is gone (or never finished writing).
+			rmSync(lockDir, { recursive: true, force: true });
+			continue;
+		}
+		writeFileSync(join(lockDir, "owner"), `${process.pid}\n`);
+		return { release: () => { rmSync(lockDir, { recursive: true, force: true }); } };
+	}
+}
+
 
 async function runUp(opts: UpOptions, checkout: string): Promise<number> {
 	const runDir = runDirFor(opts.name);
+	const lock = acquireNameLock(runDir, opts.name);
+	try {
+		return await runUpInner(opts, checkout, runDir);
+	} finally {
+		lock.release();
+	}
+}
+
+async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Promise<number> {
 	const statePath = join(runDir, "state.json");
 
 	const prev = readState(statePath);
@@ -910,6 +987,15 @@ async function runUp(opts: UpOptions, checkout: string): Promise<number> {
 
 async function runDown(name: string): Promise<number> {
 	const runDir = runDirFor(name);
+	const lock = acquireNameLock(runDir, name);
+	try {
+		return await runDownInner(name, runDir);
+	} finally {
+		lock.release();
+	}
+}
+
+async function runDownInner(name: string, runDir: string): Promise<number> {
 	const dockerRefused = refuseDockerEnv({ DOCKER_HOST: process.env.DOCKER_HOST, DOCKER_CONTEXT: process.env.DOCKER_CONTEXT });
 	if (dockerRefused !== null) throw new RehearsalRefused(dockerRefused);
 	const state = readState(join(runDir, "state.json"));
