@@ -25,6 +25,7 @@ import {
 	refuseCheckoutDir,
 	refusePort,
 	refuseSmokeUrl,
+	smokeToolResult,
 	type ProcFacts,
 } from "./rehearsal.ts";
 
@@ -323,5 +324,25 @@ describe("CLI refusals", () => {
 		const run = runCli("down", "--name", "rh-nobody-here");
 		expect(run.code).toBe(0);
 		expect(run.out).toContain("nothing to remove");
+	});
+});
+
+describe("smokeToolResult", () => {
+	test("fails a refused registration even with JSON text", () => {
+		const refused = {
+			status: 200,
+			contentType: "application/json",
+			body: { result: { isError: true, content: [{ text: JSON.stringify({ error: "refused" }) }] } },
+		};
+		expect(smokeToolResult(refused)).toBeNull();
+	});
+
+	test("passes a successful tool result through", () => {
+		const ok = {
+			status: 200,
+			contentType: "application/json",
+			body: { result: { content: [{ text: JSON.stringify({ claimed: true }) }] } },
+		};
+		expect(smokeToolResult(ok)).toEqual({ claimed: true });
 	});
 });

@@ -955,8 +955,9 @@ async function smokeTool(
 }
 
 /** The JSON a tool returned, or null when it errored or answered otherwise. */
-function smokeToolResult(attempt: SmokeAttempt): Record<string, unknown> | null {
-	const body = attempt.body as { result?: { content?: Array<{ text?: string }> } } | null;
+export function smokeToolResult(attempt: SmokeAttempt): Record<string, unknown> | null {
+	const body = attempt.body as { result?: { isError?: boolean; content?: Array<{ text?: string }> } } | null;
+	if (body?.result?.isError === true) return null;
 	const text = body?.result?.content?.[0]?.text;
 	if (typeof text !== "string") return null;
 	try {
