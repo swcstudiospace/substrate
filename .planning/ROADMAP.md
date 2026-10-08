@@ -105,6 +105,7 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
   1. A mapping document names, for each new v1.3 event source (herdr, Muse, Cursor `stop`, skills propose, docs ingest, desktop actions, anchoring, teachables), the existing kind and surface it uses.
   2. `EVENT_KINDS` is identical to its v1.2 value, and against the Phase 16 harness one sample event per mapped source is stored with zero refusals.
   3. A phase-close check runs `packages/mcp-server/src/store-lock.test.ts` and diffs `EVENT_KINDS` against v1.2, and it passes on this phase and is part of every later phase's verification.
+  4. `packages/audit/src/policy.ts` records fail-open or fail-closed for every MCP tool v1.3 plans to add (`skills_propose`, `docs_search`, `docs_ingest`, `graph_find`, `issue_get`, `desktop_run` and any recall tool), and a policy test fails when a planned tool has no entry or has the opposite decision.
 
 **Proof**: Isolated, against the Phase 16 harness: the sample emits and the phase-close check. No live system.
 **Plans**: TBD
@@ -309,7 +310,7 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 
   1. `desktop_run` accepts only click, type, key and screenshot, at most 50 actions, a 1–120 s timeout, a fixed `docker exec` argv and one run at a time; screenshots return as MCP image blocks and are kept at mode 0600 for 200 runs or 7 days.
   2. Each action produces one event under an existing kind, typed text is recorded only as its length and sha256, and no image block enters the audit record.
-  3. Anonymous callers and VM guests are refused, and `desktop_run` is fail-closed in the audit policy.
+  3. `desktop_run` serves only surfaces on an operator-maintained allowlist: an unlisted surface holding a valid token, an anonymous caller and a VM guest are each refused, with a test for each, and `desktop_run` is fail-closed in the audit policy.
   4. The lifecycle script runs the container only with ≥ 10 GiB free, `--pull never`, loopback port 6081 behind basic auth, unprivileged and without the Docker socket, and never touches `recruitment-desktop`.
   5. A headless session's `desktop_run` returns a screenshot whose pixels show the typed marker.
 

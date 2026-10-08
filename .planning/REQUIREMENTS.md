@@ -22,7 +22,7 @@ Decisions confirmed when the milestone was opened (2026-10-08):
 ### Foundation and production parity
 
 - [ ] **FOUND-01**: An isolated rehearsal harness starts main's `substrate-mcp` on a scratch port against scratch Postgres and GreptimeDB, with configurable surface tokens, and tears it down. Every v1.3 proof can point `SUBSTRATE_URL` at it, and no production store is touched by it.
-- [ ] **FOUND-02**: `EVENT_KINDS` is unchanged after every phase, each new event source documents its mapping onto existing kinds and surfaces, and `packages/mcp-server/src/store-lock.test.ts` passes at every phase close.
+- [ ] **FOUND-02**: `EVENT_KINDS` is unchanged after every phase, each new event source documents its mapping onto existing kinds and surfaces, and `packages/mcp-server/src/store-lock.test.ts` passes at every phase close. The audit policy records fail-open or fail-closed for every tool v1.3 adds, and a policy test catches a missing or contrary entry.
 - [ ] **FOUND-03**: Production parity, with operator approval: the stray process holding `127.0.0.1:7410` is retired so `substrate-mcp.service` serves `main`; a runbook records the check (unit PID owns the port, `/healthz` answers) and the rollback.
 - [ ] **FOUND-04**: Production identity, with operator approval: a runbook lists every client of `substrate-mcp` and the token it needs; per-surface tokens, the operator token, `SUBSTRATE_HANDOFF_KEY` and `SUBSTRATE_AUDIT_PATH` are provisioned by name in `/etc/substrate/substrate.env` (values never in the repo), and no listed client is left without a token when they switch on.
 
@@ -98,7 +98,7 @@ Decisions confirmed when the milestone was opened (2026-10-08):
 
 - [ ] **DESK-01**: `desktop_run` drives the dedicated `substrate-desktop` webtop with a closed vocabulary (click, type, key, screenshot), at most 50 actions, a 1–120 s timeout, a fixed `docker exec` argv and one run at a time; screenshots return as MCP image blocks and are kept at mode 0600 for 200 runs or 7 days.
 - [ ] **DESK-02**: Each action produces one event under an existing kind; typed text is recorded only as its length and sha256; image blocks never enter the audit record.
-- [ ] **DESK-03**: Only authenticated surfaces may call `desktop_run`; it is fail-closed in the audit policy and refused to VM guests and anonymous callers.
+- [ ] **DESK-03**: Only surfaces on an operator-maintained allowlist may call `desktop_run` (operator decision 2026-10-08); an unlisted surface with a valid token, an anonymous caller and a VM guest are each refused, with a test for each; it is fail-closed in the audit policy.
 - [ ] **DESK-04**: A lifecycle script runs the container only with ≥ 10 GiB free, `--pull never`, loopback port 6081 behind basic auth, unprivileged and without the Docker socket, and never touches `recruitment-desktop`.
 - [ ] **DESK-05**: Proof (isolated): a headless session's `desktop_run` returns a screenshot whose pixels show the typed marker, one event per action lands, and `recruitment-desktop` is untouched.
 
