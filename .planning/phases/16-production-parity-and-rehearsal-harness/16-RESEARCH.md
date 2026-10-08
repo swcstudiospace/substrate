@@ -717,16 +717,19 @@ Semantics [CITED: `man systemd.unit`, "Conditions and Asserts", installed v255]:
 | A4 | `import.meta.main` semantics in Bun 1.4.0 as documented | §9 | Tests would run CLI side effects; mitigated by putting pure code in a sibling module |
 | A5 | Readiness: pg ≈ 2–5 s, greptime ≈ 3–10 s, server boot+migrate ≈ 2–5 s on this host; 60 s ceilings are generous | Discretion | Only affects timeouts |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Who executes the production `rh-` prefix counts?**
    - What we know: they are approved (Operator answers). Agents hold no production credentials and must not read `/etc/substrate/substrate.env` values. The store lock forbids a `.ts` outside the package from naming `agent_events` in SQL.
    - What's unclear: whether the operator runs them in their own console or approves an agent-run path.
    - Recommendation: the runbook carries the two SQL statements above; the plan's live step asks the operator to run them and paste the two numbers. The harness smoke prints the exact run tag (`rh-<name>-<ts>`) so exact-match variants are available too.
+   - RESOLVED: the operator runs them. CONTEXT forbids agents reading environment values, so the plan's live step (16-05, `checkpoint:human-action`) asks the operator to run the runbook's two statements and report both numbers (must be 0).
 2. **`NRestarts` / start-time baseline for "has not grown".**
    - Recommendation: `parity:check --json` emits the reading. The runbook keeps a dated table of readings, and the check takes an optional `--expect-restarts N --expect-start @epoch` to compare. Without a baseline it reports the current values and passes on `NRestarts=0`-since-start semantics (MainPID start == `ExecMainStartTimestamp`).
+   - RESOLVED (Claude's discretion per CONTEXT): adopted as recommended; implemented in 16-02 (`--json`, `--expect-*`) and the runbook readings table (16-04).
 3. **`parity:check` after Phase 20 enables tokens.**
    - Recommendation: send `SUBSTRATE_TOKEN` from the caller's own env if set (never print it). On 401, exit 1 with "auth on; supply a token". Phase 20 updates the runbook.
+   - RESOLVED: adopted as recommended; implemented in 16-02. Production is anonymous today, so the check requires 200.
 
 ## Environment Availability
 
