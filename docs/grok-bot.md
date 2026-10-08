@@ -48,7 +48,7 @@ The gateway's document fallback calls a substrate tool named `docs_search`. This
 
 ## `docs/data-planes.md` is stale on this route
 
-[`docs/data-planes.md`](data-planes.md) still describes a substrate-only memory path: the writer is `substrate-mcp`, `memory_write` maps to Hindsight `retain`, `memory_search` maps to `recall`, and the desk gateway calls the substrate rather than Hindsight. That is the path this repository's server implements, and it is not the path the gateway takes when `HINDSIGHT_URL` and `HINDSIGHT_API_KEY` are set. The gateway code at programming-desk `61c7900` is the route above. This pull request does not edit `docs/data-planes.md`.
+[`docs/data-planes.md`](data-planes.md) still describes a substrate-only memory path: the writer is `substrate-mcp`, `memory_write` maps to Hindsight `retain`, `memory_search` maps to `recall`, and the desk gateway calls the substrate rather than Hindsight. This repository does not implement that mapping. `writeMemory` and `searchMemory` use the Postgres `IndexStore` (`packages/mcp-server/src/service.ts`, `packages/mcp-server/src/index-store.ts`), and `loadConfig` ignores `HINDSIGHT_*`. The gateway calls Hindsight directly when `HINDSIGHT_URL` and `HINDSIGHT_API_KEY` are set. The gateway code at programming-desk `61c7900` is the route above. This pull request does not edit `docs/data-planes.md`.
 
 The network half of that document still holds: Programming Desk seats use HTTPS to the desk gateway, and substrate-mcp stays on loopback.
 
