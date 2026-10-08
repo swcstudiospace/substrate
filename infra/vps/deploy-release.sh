@@ -22,6 +22,7 @@ HEALTH_URL="${SUBSTRATE_HEALTH_URL:-http://127.0.0.1:7410/healthz}"
 HEALTH_TIMEOUT="${SUBSTRATE_HEALTH_TIMEOUT:-5}"
 HEALTH_DEADLINE="${SUBSTRATE_HEALTH_DEADLINE:-30}"
 HEALTH_INTERVAL="${SUBSTRATE_HEALTH_INTERVAL:-1}"
+UNIT_SETTLE="${SUBSTRATE_UNIT_SETTLE:-2}"
 lockdir=""
 tmp_link=""
 health_config=""
@@ -88,6 +89,7 @@ prepare_root() {
 	[[ "$HEALTH_TIMEOUT" =~ ^[1-9][0-9]{0,2}$ ]] || die "SUBSTRATE_HEALTH_TIMEOUT must be 1-999 seconds"
 	[[ "$HEALTH_DEADLINE" =~ ^[1-9][0-9]{0,3}$ ]] || die "SUBSTRATE_HEALTH_DEADLINE must be 1-9999 seconds"
 	[[ "$HEALTH_INTERVAL" =~ ^[0-9]{1,2}$ ]] || die "SUBSTRATE_HEALTH_INTERVAL must be 0-99 seconds"
+	[[ "$UNIT_SETTLE" =~ ^[0-9]{1,2}$ ]] || die "SUBSTRATE_UNIT_SETTLE must be 0-99 seconds"
 }
 
 acquire_lock() {
@@ -146,6 +148,54 @@ swap_link() {
 	tmp_link=""
 }
 
+# ActiveState, SubState, and NRestarts. Empty or unexpected values fail closed.
+unit_snapshot() {
+	local unit="$1" line key value active="" sub="" restarts=""
+	while IFS= read -r line; do
+		[[ "$line" == *=* ]] || continue
+		key="${line%%=*}"
+		value="${line#*=}"
+		case "$key" in
+		ActiveState) active="$value" ;;
+		SubState) sub="$value" ;;
+		NRestarts) restarts="$value" ;;
+		esac
+	done < <(systemctl show -p ActiveState -p SubState -p NRestarts --no-pager -- "$unit")
+	[[ "$active" =~ ^[A-Za-z-]{1,32}$ ]] || return 1
+	[[ "$sub" =~ ^[A-Za-z-]{1,32}$ ]] || return 1
+	[[ "$restarts" =~ ^[0-9]{1,6}$ ]] || return 1
+	printf '%s %s %s\n' "$active" "$sub" "$restarts"
+}
+
+# Type=simple is active before Bun exits. Wait, then require the same NRestarts
+# and a running substate so a collector crash loop cannot look healthy.
+units_settled() {
+	local unit snapshot active sub restarts baseline i
+	local -a watched=() bases=()
+	[[ "$RESTART" == "1" ]] || return 0
+	for unit in "${units[@]}"; do
+		snapshot=$(unit_snapshot "$unit") || return 1
+		read -r active sub restarts <<< "$snapshot"
+		watched+=("$unit")
+		bases+=("$restarts")
+	done
+	sleep "$UNIT_SETTLE"
+	for i in "${!watched[@]}"; do
+		unit="${watched[$i]}"
+		baseline="${bases[$i]}"
+		if ! systemctl is-active --quiet "$unit"; then
+			printf '%s\n' "deploy-release: ${unit} is not active after ${UNIT_SETTLE}s" >&2
+			return 1
+		fi
+		snapshot=$(unit_snapshot "$unit") || return 1
+		read -r active sub restarts <<< "$snapshot"
+		if [[ "$active" != "active" || "$sub" == "auto-restart" || "$restarts" != "$baseline" ]]; then
+			printf '%s\n' "deploy-release: ${unit} is restart-looping after ${UNIT_SETTLE}s" >&2
+			return 1
+		fi
+	done
+}
+
 restart_units() {
 	local unit status=0
 	[[ "$RESTART" == "1" ]] || return 0
@@ -157,18 +207,8 @@ restart_units() {
 	for unit in "${units[@]}"; do
 		systemctl restart "$unit" || status=1
 	done
-	return "$status"
-}
-
-units_active() {
-	local unit
-	[[ "$RESTART" == "1" ]] || return 0
-	for unit in "${units[@]}"; do
-		if ! systemctl is-active --quiet "$unit"; then
-			printf '%s\n' "deploy-release: ${unit} is not active" >&2
-			return 1
-		fi
-	done
+	[[ "$status" -eq 0 ]] || return "$status"
+	units_settled
 }
 
 # Last ExecStart in the unit file and its drop-ins wins, matching systemd.
@@ -398,7 +438,7 @@ cmd_deploy() {
 		fi
 	fi
 	swap_link "$ROOT/current" "releases/$sha"
-	if ! restart_units || ! units_active || ! health_ok; then
+	if ! restart_units || ! health_ok; then
 		printf '%s\n' "deploy-release: health check failed; rolling back" >&2
 		restore_current "$old"
 		exit 1
@@ -432,7 +472,7 @@ cmd_rollback() {
 		fi
 	fi
 	swap_link "$ROOT/current" "$prev"
-	if ! restart_units || ! units_active || ! health_ok; then
+	if ! restart_units || ! health_ok; then
 		printf '%s\n' "deploy-release: rollback health check failed; restoring current" >&2
 		restore_current "$cur"
 		exit 1

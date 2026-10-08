@@ -83,8 +83,28 @@ mkdir -p node_modules
 		join(bin, "systemctl"),
 		`#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "$STUB_LOG/systemctl"
+if [[ "$1" == "show" ]]; then
+  unit="\${!#}"
+  key="$STUB_LOG/show-count-\$unit"
+  count=0
+  if [[ -f "\$key" ]]; then count=\$(cat "\$key"); fi
+  count=\$((count + 1))
+  printf '%s\\n' "\$count" > "\$key"
+  if [[ "\${FAIL_LOOP:-}" == "1" && "\$unit" == "substrate-collector-grok.service" && \$((count % 2)) -eq 0 ]]; then
+    printf 'ActiveState=activating\\nSubState=auto-restart\\nNRestarts=1\\n'
+  else
+    printf 'ActiveState=active\\nSubState=running\\nNRestarts=0\\n'
+  fi
+  exit 0
+fi
 if [[ "$1" == "is-active" && "\${FAIL_ACTIVE:-}" == "1" ]]; then exit 1; fi
 if [[ "\${FAIL_SYSTEMCTL:-}" == "1" ]]; then exit 1; fi
+`,
+	);
+	writeExec(
+		join(bin, "sleep"),
+		`#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$STUB_LOG/sleep"
 `,
 	);
 	writeExec(
@@ -124,11 +144,13 @@ printf '%s\\n' ok >> "$STUB_LOG/health"
 			SUBSTRATE_HEALTH_CMD: health,
 			SUBSTRATE_HEALTH_DEADLINE: "5",
 			SUBSTRATE_HEALTH_INTERVAL: "0",
+			SUBSTRATE_UNIT_SETTLE: "0",
 			STUB_LOG: log,
 			STUB_STATE: state,
 			FAIL_BUN: "",
 			FAIL_SYSTEMCTL: "",
 			FAIL_ACTIVE: "",
+			FAIL_LOOP: "",
 		},
 	};
 }
@@ -304,6 +326,24 @@ describe("deploy-release.sh", () => {
 		expect(existsSync(join(h.log, "systemctl"))).toBe(false);
 	});
 
+	test("a collector that restart-loops during the settle window rolls current back", () => {
+		const h = harness();
+		stage(h.env, "v1", SHA1, true);
+		stage(h.env, "v2", SHA2, true);
+		expect(deploy(h, ["v1"]).status).toBe(0);
+		const failed = deploy(h, ["v2"], { ...h.env, FAIL_LOOP: "1", SUBSTRATE_UNIT_SETTLE: "2" });
+		expect(failed.status).not.toBe(0);
+		expect(failed.stderr).toContain("substrate-collector-grok.service");
+		expect(failed.stderr).toContain("restart-looping");
+		expect(failed.stderr).toContain("rolling back");
+		expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA1}`);
+		expect(readFileSync(join(h.log, "sleep"), "utf8")).toContain("2");
+		const shown = readFileSync(join(h.log, "systemctl"), "utf8");
+		expect(shown).toContain("show");
+		expect(shown).toContain("NRestarts");
+		expect(shown).toContain("substrate-collector-grok.service");
+	});
+
 	test("a unit that is not active rolls current back", () => {
 		const h = harness();
 		stage(h.env, "v1", SHA1, true);
@@ -410,6 +450,7 @@ describe("operator runbook", () => {
 			"no previous release",
 			"SUBSTRATE_HEALTH_TOKEN_FILE",
 			"SUBSTRATE_RELEASE_RESTART=0",
+			"SUBSTRATE_UNIT_SETTLE",
 		]) {
 			expect(readme).toContain(phrase);
 		}
