@@ -7,16 +7,25 @@
 # post-commit runs after the commit is already written, so nothing here can
 # abort it — but this still exits 0 unconditionally and backgrounds the call so
 # a slow or dead substrate never delays the user's shell.
+#
+# A non-ok response prints one stderr line (status and the server's error, never
+# the commit payload) and the commit still succeeds. SUBSTRATE_HOOK_WAIT=1 waits
+# for that post; git does not set it.
 
 set -u
 
-SUBSTRATE_CLI="${SUBSTRATE_CLI:-/root/src/repos/agent-substrate/packages/cli/src/index.ts}"
-[ -r "$SUBSTRATE_CLI" ] || exit 0
 command -v bun >/dev/null 2>&1 || exit 0
+command -v git >/dev/null 2>&1 || exit 0
 
 sha="$(git rev-parse --short HEAD 2>/dev/null)" || exit 0
-subject="$(git log -1 --pretty=%s 2>/dev/null)"
+subject="$(git log -1 --pretty=%s 2>/dev/null || true)"
 files="$(git diff-tree --no-commit-id --name-only -r HEAD 2>/dev/null | head -20 | jq -R . | jq -s -c . 2>/dev/null || echo '[]')"
+origin="$(git remote get-url origin 2>/dev/null || true)"
+repo=""
+if [ -n "$origin" ]; then
+	repo="$(printf '%s\n' "$origin" | sed -n 's#.*[:/]\([^/:]*\/[^/]*\)\(\.git\)\{0,1\}$#\1#p')"
+fi
+branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
 
 # SUBSTRATE_SURFACE lets a wrapper attribute the commit; a bare terminal commit
 # is the human's, not an agent's.
@@ -24,13 +33,62 @@ surface="${SUBSTRATE_SURFACE:-cursor}"
 actor="${SUBSTRATE_ACTOR:-human}"
 
 (
-  bun "$SUBSTRATE_CLI" emit \
-    --kind commit \
-    --summary "commit ${sha} ${subject}" \
-    --surface "$surface" \
-    --actor "$actor" \
-    --payload "{\"sha\":\"${sha}\",\"files\":${files}}" \
-    >/dev/null 2>&1
+	set +e
+	export SUBSTRATE_HOOK_SHA="$sha"
+	export SUBSTRATE_HOOK_SUBJECT="$subject"
+	export SUBSTRATE_HOOK_SURFACE="$surface"
+	export SUBSTRATE_HOOK_ACTOR="$actor"
+	export SUBSTRATE_HOOK_FILES="$files"
+	export SUBSTRATE_HOOK_REPO="$repo"
+	export SUBSTRATE_HOOK_BRANCH="$branch"
+	bun -e '
+const rawTimeout = Number(process.env.SUBSTRATE_TIMEOUT_MS);
+const timeoutMs = Number.isFinite(rawTimeout) && rawTimeout > 0 ? rawTimeout : 3000;
+const base = (process.env.SUBSTRATE_URL || "http://127.0.0.1:7410").replace(/\/+$/, "");
+const token = (process.env.SUBSTRATE_TOKEN || "").trim();
+let files = [];
+try { files = JSON.parse(process.env.SUBSTRATE_HOOK_FILES || "[]"); } catch { files = []; }
+if (!Array.isArray(files)) files = [];
+const event = {
+  kind: "commit",
+  summary: "commit " + (process.env.SUBSTRATE_HOOK_SHA || "") + " " + (process.env.SUBSTRATE_HOOK_SUBJECT || ""),
+  surface: process.env.SUBSTRATE_HOOK_SURFACE || "cursor",
+  actor: process.env.SUBSTRATE_HOOK_ACTOR || "human",
+  payload: { sha: process.env.SUBSTRATE_HOOK_SHA || "", files: files },
+};
+if (process.env.SUBSTRATE_HOOK_REPO) event.repo = process.env.SUBSTRATE_HOOK_REPO;
+if (process.env.SUBSTRATE_HOOK_BRANCH) event.branch = process.env.SUBSTRATE_HOOK_BRANCH;
+function report(status, error) {
+  const safe = String(error || "").replace(/[\r\n]/g, " ").slice(0, 200);
+  const suffix = safe ? " error=" + safe : "";
+  process.stderr.write("[substrate] post-commit emit refused: status=" + status + suffix + "\n");
+}
+try {
+  const response = await fetch(base + "/events", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      ...(token ? { authorization: "Bearer " + token } : {}),
+    },
+    body: JSON.stringify(event),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!response.ok) {
+    let error = "";
+    try {
+      const body = await response.json();
+      if (body && typeof body.error === "string") error = body.error;
+    } catch {}
+    report(response.status, error);
+  }
+} catch {
+  report(0, "unreachable");
+}
+'
 ) &
+
+if [ "${SUBSTRATE_HOOK_WAIT:-}" = "1" ]; then
+	wait || true
+fi
 
 exit 0

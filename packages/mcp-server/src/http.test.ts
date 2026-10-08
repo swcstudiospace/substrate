@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { METRIC, findCounter, sumCounter } from "@substrate/observability";
 import { loadConfig, type SubstrateConfig } from "./config.ts";
 import { createObservability, type Observability } from "./observe.ts";
-import { createHttpServer } from "./server.ts";
+import { createHttpServer, type HttpServerOptions } from "./server.ts";
 import { Substrate } from "./service.ts";
 
 const ROOT = join(import.meta.dir, "..", "..", "..");
@@ -31,6 +31,7 @@ const running: Harness[] = [];
 async function start(
 	env: Record<string, string | undefined> = {},
 	stores: Partial<{ index: unknown; greptime: unknown }> = {},
+	options?: HttpServerOptions,
 ): Promise<Harness> {
 	const config: SubstrateConfig = loadConfig(env);
 	const observability = createObservability(config, env);
@@ -42,7 +43,7 @@ async function start(
 		{ index: null, greptime: null, ...stores } as ConstructorParameters<typeof Substrate>[1],
 		observability.observer,
 	);
-	const server = createHttpServer(substrate, config, observability);
+	const server = createHttpServer(substrate, config, observability, options);
 	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 	const { port } = server.address() as AddressInfo;
 	const harness: Harness = {
@@ -633,5 +634,272 @@ describe("POST /evidence tallies every record for the graph", () => {
 		// Three `/events` plus this request's own `evidence` record, all naming ut-9.
 		expect(bundle.audit.total).toBe(4);
 		expect(bundle.audit.records).toHaveLength(4);
+	});
+});
+
+const BRIDGE = { SUBSTRATE_ALLOW_ANONYMOUS: "1", SUBSTRATE_TOKEN_GROK_BOT: "tok-grok" };
+
+function ledger() {
+	const written: Array<{ surface: string; kind: string }> = [];
+	return {
+		written,
+		greptime: {
+			ensureAppendMode: async () => true,
+			lastHash: async () => null,
+			insertEvent: async (event: { surface: string; kind: string }) => {
+				written.push(event);
+			},
+		},
+	};
+}
+
+describe("the anonymous bridge", () => {
+	test("a bearer is attributed to grok-bot and an untokened caller still succeeds", async () => {
+		// Fails on 6417c92. With a token configured, allowAnonymous is false no matter
+		// what SUBSTRATE_ALLOW_ANONYMOUS says, so the untokened post is 401.
+		const { written, greptime } = ledger();
+		const harness = await start(BRIDGE, { greptime });
+
+		const tokened = await fetch(`${harness.base}/events`, {
+			method: "POST",
+			headers: { authorization: "Bearer tok-grok" },
+			body: JSON.stringify({ kind: "note", summary: "from the gateway" }),
+		});
+		const untokened = await fetch(`${harness.base}/events`, {
+			method: "POST",
+			body: JSON.stringify({ kind: "note", summary: "from a collector", surface: "hermes" }),
+		});
+
+		expect(tokened.status).toBe(202);
+		expect(written[0]?.surface).toBe("grok-bot");
+		expect(untokened.status).toBe(202);
+		expect(written[1]?.surface).toBe("hermes");
+	});
+
+	test("unset plus a token keeps today's 401", async () => {
+		const harness = await start({ SUBSTRATE_TOKEN_GROK_BOT: "tok-grok" });
+		const response = await fetch(`${harness.base}/events`, {
+			method: "POST",
+			body: JSON.stringify({ kind: "note", summary: "no token" }),
+		});
+
+		expect(response.status).toBe(401);
+	});
+
+	test("a recognised token's memory write is grok-bot even when the body names another writer", async () => {
+		const harness = await start(BRIDGE);
+		const response = await fetch(`${harness.base}/memory`, {
+			method: "POST",
+			headers: { authorization: "Bearer tok-grok" },
+			body: JSON.stringify({
+				scope: "agent:grok-bot",
+				kind: "fact",
+				subject: "bridge",
+				body: "the gateway wrote this",
+				writer: "hermes",
+			}),
+		});
+		const body = (await response.json()) as { writer: string };
+
+		expect(response.status).not.toBe(401);
+		expect(body.writer).toBe("grok-bot");
+	});
+
+	async function callMemory(harness: Harness, token: string | null, surface: string) {
+		const response = await fetch(`${harness.base}/mcp`, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				accept: "application/json, text/event-stream",
+				...(token ? { authorization: `Bearer ${token}` } : {}),
+			},
+			body: JSON.stringify({
+				jsonrpc: "2.0",
+				id: 1,
+				method: "tools/call",
+				params: {
+					name: "memory_write",
+					arguments: { scope: "agent:grok-bot", kind: "fact", subject: "bridge", text: "from mcp", surface },
+				},
+			}),
+		});
+		const raw = await response.text();
+		const data = raw
+			.split("\n")
+			.find((line) => line.startsWith("data: "))
+			?.slice(6);
+		const envelope = JSON.parse(data ?? raw) as { result?: { content?: Array<{ text?: string }> } };
+		return JSON.parse(envelope.result?.content?.[0]?.text ?? "null") as { writer?: string };
+	}
+
+	test("MCP memory_write attributes the bearer to grok-bot and ignores the argument", async () => {
+		const harness = await start(BRIDGE);
+		const result = await callMemory(harness, "tok-grok", "hermes");
+		expect(result.writer).toBe("grok-bot");
+	});
+
+	test("an untokened MCP memory_write cannot name grok-bot", async () => {
+		const harness = await start(BRIDGE);
+		const result = await callMemory(harness, null, "grok-bot");
+		expect(result.writer).toBe("unknown");
+	});
+
+	test("an untokened memory write stays unknown and cannot claim grok-bot", async () => {
+		const harness = await start(BRIDGE);
+		const response = await fetch(`${harness.base}/memory`, {
+			method: "POST",
+			body: JSON.stringify({
+				scope: "agent:grok-bot",
+				kind: "fact",
+				subject: "bridge",
+				body: "pretending",
+				writer: "grok-bot",
+			}),
+		});
+		const body = (await response.json()) as { writer: string };
+
+		expect(response.status).not.toBe(401);
+		expect(body.writer).toBe("unknown");
+	});
+
+	test("an untokened handoff does not default to claude-code", async () => {
+		const harness = await start({ ...BRIDGE, SUBSTRATE_HANDOFF_KEY: "k" });
+		const response = await fetch(`${harness.base}/handoff`, {
+			method: "POST",
+			body: JSON.stringify({ to: "muse", goal: "finish the migration" }),
+		});
+		const body = (await response.json()) as { error?: string; packet?: { from: { surface: string } } };
+
+		expect(response.status).toBe(403);
+		expect(body.packet?.from.surface).not.toBe("claude-code");
+		expect(body.error ?? "").not.toContain("claude-code signed");
+		expect(JSON.stringify(body)).not.toContain('"surface":"claude-code"');
+	});
+
+	test("an untokened handoff cannot name a surface that has a token", async () => {
+		const harness = await start({ ...BRIDGE, SUBSTRATE_HANDOFF_KEY: "k" });
+		const response = await fetch(`${harness.base}/handoff`, {
+			method: "POST",
+			body: JSON.stringify({ to: "muse", goal: "finish the migration", surface: "grok-bot" }),
+		});
+		const body = (await response.json()) as { error?: string; packet?: { from: { surface: string } } };
+
+		expect(response.status).toBe(403);
+		expect(body.packet).toBeUndefined();
+		expect(body.error ?? "").toContain("token");
+	});
+
+	test("an untokened event cannot name a surface that has a token", async () => {
+		const { written, greptime } = ledger();
+		const harness = await start(BRIDGE, { greptime });
+		const response = await fetch(`${harness.base}/events`, {
+			method: "POST",
+			body: JSON.stringify({ kind: "note", summary: "impersonating", surface: "grok-bot" }),
+		});
+
+		expect(response.status).toBe(403);
+		expect(written).toEqual([]);
+	});
+
+	test("anonymous callers are counted by route and claimed surface, and logged once an hour", async () => {
+		const lines: string[] = [];
+		let now = 1_000;
+		const harness = await start(BRIDGE, {}, {
+			now: () => now,
+			anonymousLog: (line) => {
+				lines.push(line);
+			},
+			anonymousIntervalMs: 60 * 60 * 1000,
+		});
+
+		await fetch(`${harness.base}/events`, {
+			method: "POST",
+			body: JSON.stringify({ kind: "note", summary: "payload-secret-marker", surface: "hermes" }),
+		});
+		expect(lines).toEqual([]);
+
+		const body = (await (await fetch(`${harness.base}/metrics`)).json()) as {
+			metrics: Array<{ name: string; points: Array<{ attributes: Record<string, string>; value: number }> }>;
+		};
+		const point = body.metrics
+			.find((metric) => metric.name === "substrate.anonymous.requests")
+			?.points.find((entry) => entry.attributes.claimed_surface === "hermes");
+		expect(point?.attributes.route).toBe("/events");
+		expect(point?.value).toBe(1);
+
+		now += 60 * 60 * 1000;
+		await fetch(`${harness.base}/healthz`);
+		expect(lines).toHaveLength(1);
+		expect(lines[0]).toContain("/events");
+		expect(lines[0]).toContain("claimed=hermes");
+		expect(lines[0]).not.toContain("payload-secret-marker");
+	});
+});
+
+describe("refused /events posts are counted by reason", () => {
+	async function refused(harness: Harness, reason: string, token?: string) {
+		const response = await fetch(`${harness.base}/metrics`, {
+			headers: token ? { authorization: `Bearer ${token}` } : {},
+		});
+		const body = (await response.json()) as {
+			metrics?: Array<{ name: string; points: Array<{ attributes: Record<string, string>; value: number }> }>;
+		};
+		const counter = body.metrics?.find((metric) => metric.name === "substrate.events.refused");
+		return counter?.points.find((point) => point.attributes.reason === reason)?.value ?? 0;
+	}
+
+	test("auth, validation, attribution and graph_id each have their own count", async () => {
+		const closed = await start({ SUBSTRATE_TOKEN_GROK_BOT: "tok-grok" });
+		await fetch(`${closed.base}/events`, {
+			method: "POST",
+			body: JSON.stringify({ kind: "note", summary: "missing bearer" }),
+		});
+		expect(await refused(closed, "auth", "tok-grok")).toBe(1);
+
+		const harness = await start(BRIDGE);
+		await fetch(`${harness.base}/events`, {
+			method: "POST",
+			body: JSON.stringify({ kind: "not-a-kind", summary: "bad", surface: "hermes" }),
+		});
+		await fetch(`${harness.base}/events`, {
+			method: "POST",
+			body: JSON.stringify({ kind: "note", summary: "impersonating", surface: "grok-bot" }),
+		});
+		await fetch(`${harness.base}/events`, {
+			method: "POST",
+			body: JSON.stringify({ kind: "note", summary: "bad id", surface: "hermes", graph_id: 1 }),
+		});
+
+		expect(await refused(harness, "validation")).toBe(1);
+		expect(await refused(harness, "attribution")).toBe(1);
+		expect(await refused(harness, "graph_id")).toBe(1);
+	});
+});
+
+describe("a 500 does not echo the cause", () => {
+	test("the body is generic and the log carries a correlation id", async () => {
+		const harness = await start();
+		const lines: string[] = [];
+		const original = process.stderr.write.bind(process.stderr);
+		process.stderr.write = ((chunk: string | Uint8Array) => {
+			lines.push(String(chunk));
+			return true;
+		}) as typeof process.stderr.write;
+		try {
+			const response = await fetch(`${harness.base}/brief`, {
+				method: "POST",
+				body: "x".repeat(1_000_001),
+			});
+			const body = (await response.json()) as { error: string; correlation_id?: string };
+
+			expect(response.status).toBe(500);
+			expect(body.error).toBe("internal error");
+			expect(JSON.stringify(body)).not.toContain("request body too large");
+			const correlationId = body.correlation_id ?? "";
+			expect(correlationId).toMatch(/^[0-9a-f-]{36}$/);
+			expect(lines.join("")).toContain(correlationId);
+		} finally {
+			process.stderr.write = original;
+		}
 	});
 });
