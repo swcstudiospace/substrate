@@ -43,7 +43,7 @@ One PR on agent-substrate (ANCHOR-01, ANCHOR-02). Every closed UTC hour has exac
 - **D27-03: `chain.ts` is not ported.** Main keeps its per-session `hash`/`prev` chain. Ingest order is used for anchoring only (ARCHITECTURE Pattern 4).
 - **D27-04: The ledger package stays pure.** It holds no Greptime client, names no table in SQL and reads no `GREPTIME_*` variable; store-lock rule 1 already enforces this. `rpc.ts` and `solana.ts` are ported now but get their first caller in Phase 28. Their tests pin the D-06 contract: an argv with only the keypair path, `execFile` and no shell, and memo text accepted only from memo-program instructions.
 - **D27-05: `@substrate/mcp-server` depends on `@substrate/ledger` (`workspace:*`).** It imports `merkleRootHex`, `formatMemo`, `hourStart`, `hourEnd` and `isClosed` from it. It does not reimplement any of them.
-- **D27-06: The memo program-ID comment keeps its `[UNVERIFIED]` status.** The comment says solana-cli 4.2.2 writes `Memo4c2p…`. Phase 28's devnet transaction is the first chance to check it.
+- **D27-06: The memo program-ID claim stays unverified, and `memo.ts` is not edited.** Its comment says solana-cli 4.2.2 writes `Memo4c2p…` but carries no `[UNVERIFIED]` marker. Adding one would break D27-01's byte-identity, so the phase summary records the claim as unverified instead. Phase 28's devnet transaction is the first chance to check it.
 
 ### Recording ingest order
 - **D27-07: A new append-only table, `event_ingest`, records ingest order.** `migrate()` creates it:
@@ -124,7 +124,7 @@ One PR on agent-substrate (ANCHOR-01, ANCHOR-02). Every closed UTC hour has exac
     1. `migrate` creates `event_ingest` and the canonical `anchors` on scratch.
     2. It emits a burst that includes a backdated `ts`.
     3. Every emitted event has exactly one ingest record.
-    4. `hourDigest` with `now` set past the hour's lag gives the same root and memo twice, and `event_count` equals the burst.
+    4. `hourDigest` with `now` set past the lag, run for every hour the burst touches, gives the same root and memo twice. The burst's events are all members, in the order they were emitted. Exact `event_count` equality is not asserted: other writers can ingest into the same scratch hour, and a burst can cross an hour boundary (research Open Question 4).
     5. The backdated event is a member of the ingest hour.
     6. The graph's chain still verifies and its stored hashes are unchanged.
 - **D27-23: The version gap is stated in the verification.** The local harness image is GreptimeDB v0.14.4, and production runs v1.1.4.
