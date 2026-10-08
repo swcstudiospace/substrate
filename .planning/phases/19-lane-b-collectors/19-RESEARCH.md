@@ -753,7 +753,14 @@ Use `Promise.withResolvers()` for the one-shot call helper (repo rules prefer it
 | A6 | `EVENT_SOURCES` field names (`carriesRepo`, `runtime`, `actions`, `surface` rule) ship as Phase 17 planned | Pattern 4 | Low: tests adapt to the merged names; D19 says "the mappers use whatever ids ship there" |
 | A7 | Phase 18's final lock regexes equal its research prototypes | Pitfall 7 | Low: if the lock flags the template, D19-19 allows one scoped exemption |
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+How each question was settled:
+- OQ1: RESOLVED by the amended D19-10. The `muse` row is added in plan 19-02.
+- OQ2: RESOLVED as out of scope (amended D19-18). The gap is documented in `docs/collectors.md` (plan 19-04).
+- OQ3: RESOLVED by the amended D19-15. The writer gets a `/healthz` pre-check in plan 19-03.
+- OQ4: RESOLVED as a reserved `counters` key in the grok state file (plan 19-01).
+- OQ5: RESOLVED with the `tokenFile` default `/etc/substrate/substrate-collector-muse.env` (amended D19-18, plan 19-04). Phase 20 provisions the file.
 
 1. **Map herdr agent `muse` → surface `muse`?**
    - What we know: `pane.report_agent.agent` is a free string. Muse 1.4.4 ships a herdr integration that reports `agent: "muse"`, `source: "muse:herdr"` [VERIFIED]. Phase 17's research table listed `Muse → muse`; D19-10 says "herdr has no Muse id".
