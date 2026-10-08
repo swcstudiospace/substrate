@@ -683,6 +683,31 @@ export function acquireNameLock(runDir: string, name: string): NameLock {
 	}
 }
 
+/**
+ * Before saving state, prove the spawned pid is still itself and owns the
+ * requested listener: alive, same start time (against pid reuse), and the
+ * MCP port among its listeners. Readiness alone does not say which pid
+ * answered. Returns the refusal reason, or null when the twin is confirmed.
+ */
+export function confirmSpawnedTwin(
+	pid: number,
+	port: number,
+	startSeconds: number,
+	deps: {
+		alive: (pid: number) => boolean;
+		startOf: (pid: number) => number | null;
+		listensOn: (pid: number) => number[] | null;
+	} = { alive: pidAlive, startOf: readStartSeconds, listensOn: readListeningPorts },
+): string | null {
+	if (!deps.alive(pid)) return `twin pid ${pid} is gone; refusing to save state for a dead process`;
+	const start = deps.startOf(pid);
+	if (start === null) return `could not verify the start of twin pid ${pid}`;
+	if (start !== startSeconds) return `twin pid ${pid} was reused (start time differs)`;
+	const ports = deps.listensOn(pid);
+	if (ports === null) return `could not read the listeners of twin pid ${pid}`;
+	if (!ports.includes(port)) return `twin pid ${pid} does not own port ${port}; refusing to claim a stranger's listener`;
+	return null;
+}
 
 async function runUp(opts: UpOptions, checkout: string): Promise<number> {
 	const runDir = runDirFor(opts.name);
@@ -942,6 +967,14 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 		removeLabelledContainers(opts.name);
 		process.stderr.write(`[rehearsal] twin never reached healthy /healthz (index=${health?.index} ledger=${health?.ledger} writable=${health?.writable}); log kept at ${logPath}.\n`);
 		return 1;
+	}
+
+	// Readiness proves something answered; this proves it was our spawn.
+	const confirmReason = confirmSpawnedTwin(server.pid, mcpPort, facts.startSeconds);
+	if (confirmReason !== null) {
+		killVerifiedSpawn(server.pid, checkout, facts.startSeconds);
+		removeLabelledContainers(opts.name);
+		throw new RehearsalRefused(confirmReason);
 	}
 
 	const commit = gitOutput(checkout, ["log", "-1", "--pretty=%H"]) ?? "unknown";

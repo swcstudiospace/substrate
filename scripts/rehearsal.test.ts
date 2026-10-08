@@ -11,6 +11,7 @@ import { join } from "node:path";
 import {
 	acquireNameLock,
 	buildServerSpawnArgv,
+	confirmSpawnedTwin,
 	clearDirectory,
 	ensurePrivateDir,
 	flag,
@@ -518,5 +519,25 @@ describe("acquireNameLock", () => {
 		} finally {
 			rmSync(base, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("confirmSpawnedTwin", () => {
+	const deps = (over: {
+		alive?: boolean;
+		start?: number | null;
+		ports?: number[] | null;
+	} = {}): { alive: (pid: number) => boolean; startOf: (pid: number) => number | null; listensOn: (pid: number) => number[] | null } => ({
+		alive: () => over.alive ?? true,
+		startOf: () => over.start ?? 1791479652.17,
+		listensOn: () => (over.ports === undefined ? [17410] : over.ports),
+	});
+
+	test("confirms the live owner and refuses strangers", () => {
+		expect(confirmSpawnedTwin(424242, 17410, 1791479652.17, deps())).toBeNull();
+		expect(confirmSpawnedTwin(424242, 17410, 1791479652.17, deps({ alive: false }))).toContain("is gone");
+		expect(confirmSpawnedTwin(424242, 17410, 1791479000, deps())).toContain("reused");
+		expect(confirmSpawnedTwin(424242, 17410, 1791479652.17, deps({ ports: [9999] }))).toContain("does not own port");
+		expect(confirmSpawnedTwin(424242, 17410, 1791479652.17, deps({ ports: null }))).toContain("could not read");
 	});
 });
