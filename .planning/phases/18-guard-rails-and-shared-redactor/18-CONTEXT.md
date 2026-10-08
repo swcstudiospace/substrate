@@ -2,7 +2,7 @@
 
 **Gathered:** 2026-10-08
 **Status:** Ready for planning
-**Mode:** Smart discuss, auto-accepted under the v1.3 run rules (`.planning/STATE.md`, "v1.3 decisions"). No answer changes a user-visible contract beyond what LANEB-06 already asks for. The operator's 2026-10-08 answer on the `pk`/`rk` rule is recorded as D18-21 below.
+**Mode:** Smart discuss, auto-accepted under the v1.3 run rules (`.planning/STATE.md`, "v1.3 decisions"). No answer changes a user-visible contract beyond what LANEB-06 already asks for. One accepted default is listed for the operator under "Open for the operator" below; the plan uses it unless the operator overrides it.
 
 <domain>
 ## Phase Boundary
@@ -36,75 +36,75 @@ One PR on agent-substrate (LANEB-06). It delivers three things:
 ## Implementation Decisions
 
 ### Merging the D-04 rules into main's redactor
-- **D18-01:** Port the September regexes verbatim, in September's order, into main's `RULES`:
+- **Port the September regexes verbatim, in September's order**, into main's `RULES`:
   - `<private>…</private>` goes first, so a PEM inside it goes as one block.
   - `api-key-lower` goes right after the uppercase assignment rule.
   - `aws`, `google`, `slack`, `npm`, `gitlab`, `digitalocean`, `openai-proj` and `pk`/`rk` go after the provider shapes and before the JWT rule.
-  - Criterion 1 says "every September D-04 pattern", so nothing is re-tuned in this phase, except `pk`/`rk`, which the operator narrowed on 2026-10-08 (D18-21).
-- **D18-02:** Keep main's `redactValue` untouched: `SENSITIVE_KEY`, `COUNTER_KEY`, `isCount` and the null/undefined pass-through. Take nothing from September's `redactValue`, which predates the exemption.
-- **D18-03:** Every rule gets a stable name. The rule table becomes labelled entries (name, pattern, replacement), and names are unique per pattern entry, e.g. `linear-api` and `linear-oauth`, not one shared `linear`.
+  - Criterion 1 says "every September D-04 pattern", so nothing is re-tuned in this phase.
+- **Keep main's `redactValue` untouched**: `SENSITIVE_KEY`, `COUNTER_KEY`, `isCount` and the null/undefined pass-through. Take nothing from September's `redactValue`, which predates the exemption.
+- **Every rule gets a stable name.** The rule table becomes labelled entries (name, pattern, replacement), and names are unique per pattern entry, e.g. `linear-api` and `linear-oauth`, not one shared `linear`.
   - The names are exported read-only for tests and docs.
   - `redact()` keeps its signature and output. No caller changes.
-- **D18-04:** "One test per rule" is a fixture corpus keyed by rule name, with one planted secret per name. Each fixture is checked three ways:
+- **"One test per rule" is a fixture corpus keyed by rule name**, with one planted secret per name. Each fixture is checked three ways:
   - the value is gone, and the surrounding text stays in place;
   - redaction is idempotent;
   - the fixture still matches when wrapped in `redactValue` under a key that is not sensitive.
   A coverage test fails if any rule name has no fixture, so a later phase cannot add a rule without a planted secret.
   - Fixtures are assembled at runtime, as September's `rnd()` and main's `DECOY` already are, so no literal token shape sits in git. That keeps them out of the store-lock and Greptile secret scans.
-- **D18-05:** Counter exemption under the new rules: tests show that `input_tokens`, `output_tokens` and the other `COUNTER_KEY` names keep their numeric and digit-string values after the merge. `{tokens: "<D-04 fixture>"}` and `api_key: "short"` are still redacted whole.
-- **D18-06:** Keep September's near-miss tests (`AKIA` with 15 characters, `api_key: short`, an unclosed `<private>`, a short `pk-`, a short `npm_`) and main's over-redaction guards (`KEYBOARD_LAYOUT`, `MONKEY`).
+- **Counter exemption under the new rules:** tests show that `input_tokens`, `output_tokens` and the other `COUNTER_KEY` names keep their numeric and digit-string values after the merge. `{tokens: "<D-04 fixture>"}` and `api_key: "short"` are still redacted whole.
+- **Keep September's near-miss tests** (`AKIA` with 15 characters, `api_key: short`, an unclosed `<private>`, a short `pk-`, a short `npm_`) and main's over-redaction guards (`KEYBOARD_LAYOUT`, `MONKEY`).
 
 ### Skill-content redaction and scan in the same module
-- **D18-07:** Port the September skill engine verbatim into `redact.ts`:
+- **Port the September engine verbatim** into `redact.ts`:
   - `SkillRedactionRule`, `SKILL_HIGH_CONFIDENCE_RULES`, `SkillDocExampleRule`, `SkillRedactionOptions`;
   - the hit types, `SKILL_RULES`, the placeholder logic, `redactSkillContent` and `scanSkillFiles`;
   - all of September's skill tests.
   `redact()` and `redactValue()` stay the liberal event-path pass, as September's "event redactor stays liberal" test asserts.
-- **D18-08:** Close the gap D-04 left in the skill pass. `SKILL_RULES` was written in 04-02, before D-04 (07-03), so a skill holding a Slack or npm token would pass the scan without even being redacted. The skill pass gains:
+- **Close the gap D-04 left in the skill pass.** `SKILL_RULES` was written in 04-02, before D-04 (07-03), so a skill holding a Slack or npm token would pass the scan without even being redacted. The skill pass gains:
   - **high-confidence findings** (refused by callers): `google`, `slack`, `npm`, `gitlab`, `digitalocean` and `openai-proj`. `aws` is already one.
   - **contextual redactions:**
     - `pk`/`rk`, because publishable keys are public by design and the shape can collide with hyphenated slugs;
     - `private-tag`;
     - `api-key-lower`, with the usual placeholder handling, so `api_key: $OPENAI_API_KEY` and `apiKey: <your-key>` are kept as written.
   - The skill patterns keep their `[ \t]` line-local whitespace and their `d` flag.
-- **D18-09:** Drift guard between the two passes. A parity test fails when a named event-path rule has no skill rule of the same name and is not on an explicit exclusion list with a reason. Today that list is `keypair-array`, because byte arrays are ordinary code in docs.
+- **Drift guard between the two passes.** A parity test fails when a named event-path rule has no skill rule of the same name and is not on an explicit exclusion list with a reason. Today that list is `keypair-array`, because byte arrays are ordinary code in docs.
   - This replaces deriving one table from the other: the two passes differ in whitespace, ordering and capture groups, and a derivation would hide that.
-- **D18-10:** No new generic scan API in this phase. `scanSkillFiles` is the publication-path scan: findings by file, line and rule, never the value.
+- **No new generic scan API in this phase.** `scanSkillFiles` is the publication-path scan: findings by file, line and rule, never the value.
   - Phase 25 decides whether `docs_ingest` reuses it as-is or adds a docs profile.
   - Whatever it adds must live in `redact.ts`; the lock enforces that.
-- **D18-11:** Known-value scrubbing moves into the module. `packages/cli/src/lessons.ts:811` replaces the client's own token and connection-string values with `REDACTED` through its own `replaceAll` before calling `redact()`. That is a second redaction step outside the module.
+- **Known-value scrubbing moves into the module.** `packages/cli/src/lessons.ts:811` replaces the client's own token and connection-string values with `REDACTED` through its own `replaceAll` before calling `redact()`. That is a second redaction step outside the module.
   - `redact.ts` gains a small exported helper, e.g. `redactKnown(text, values)`: longest value first, an empty value ignored.
   - `lessons.ts` calls the helper, and its existing tests keep passing unchanged.
 
 ### The redaction lock (repo check)
-- **D18-12:** The lock's location and style: a new `packages/mcp-server/src/redact-lock.test.ts`, the sibling of `store-lock.test.ts`.
+- **Location and style:** a new `packages/mcp-server/src/redact-lock.test.ts`, the sibling of `store-lock.test.ts`.
   - It reuses the same idioms: `Bun.Glob` with `dot: true`, ignoring `node_modules/`, `.git/` and `dist/`, and `git ls-files` for non-TS sources.
   - Each rule asserts an offender list equal to `[]`.
   - It runs in plain `bun test`, so it is in every later phase's verification without wiring.
   - `store-lock.test.ts` is not edited.
-- **D18-13:** What counts as redacting through something else. Scope: every tracked source file (`.ts`, `.tsx`, `.js`, `.mjs`, `.cjs`, `.py`, `.sh` and extensionless hook scripts under `packages/`, `scripts/` and `infra/`), excluding `redact.ts` itself and `*.test.ts`.
+- **What counts as redacting through something else.** Scope: every tracked source file (`.ts`, `.tsx`, `.js`, `.mjs`, `.cjs`, `.py`, `.sh` and extensionless hook scripts under `packages/`, `scripts/` and `infra/`), excluding `redact.ts` itself and `*.test.ts`.
   1. **Imports.** Any import of a binding named `redact`, `redactValue`, `redactKnown`, `redactSkillContent`, `scanSkillFiles` or `REDACTED`, or of any module whose specifier basename matches `redact`, must resolve to `packages/mcp-server/src/redact.ts`. The specifier is resolved against the importing file's directory.
   2. **Definitions.** No function, method, const or Python `def` named like a redactor or secret scanner (`redact*`, `*Redactor`, `scan*Secret*`, `scanSkill*`) is defined anywhere else.
   3. **Markers.** No `[REDACTED` string literal anywhere else, and no `.replace`/`.replaceAll` whose replacement argument is `REDACTED`.
   4. **Credential-shape detectors.** No regex literal or `new RegExp` holding a credential prefix that `redact.ts` names (for example `gh[pousr]_`, `sk-ant-`, `lin_api_`, `AKIA`, `AIza`, `xoxb-`, `glpat-`, `npm_`, `dop_v1_`, `tskey-`, `PRIVATE KEY`).
      - Runtime-assembled decoys stay legal: `scripts/greptime-smoke.ts`'s `` `ghp_${…}` `` is a string, not a detector.
-- **D18-14:** Injected seams are allowed, but must be fed the shared redactor. `packages/audit` (`log.ts`, `record.ts`) and `packages/observability` (`otlp.ts`) take `redact` as an injected `(text: string) => string` parameter, because importing it would be a cycle (mcp-server depends on them). They are allowlisted by path, with that reason. A companion rule asserts two things:
+- **Injected seams are allowed, but must be fed the shared redactor.** `packages/audit` (`log.ts`, `record.ts`) and `packages/observability` (`otlp.ts`) take `redact` as an injected `(text: string) => string` parameter, because importing it would be a cycle (mcp-server depends on them). They are allowlisted by path, with that reason. A companion rule asserts two things:
   - every non-test `new AuditLog(` and `new OtlpExporter(` passes a `redact` that its file imports from the shared module (today: `observe.ts:145,152`);
   - no non-test file outside those packages calls `buildRecord`/`sanitizeField` with a redactor of its own.
-- **D18-15:** Detector self-tests, as `store-lock.test.ts` does for `carriesCredential` and `TOKEN_LITERAL`:
+- **Detector self-tests.** As `store-lock.test.ts` does for `carriesCredential` and `TOKEN_LITERAL`:
   - each rule's detector is run against planted in-memory offenders (a copied `redact.ts` under another package, a local `function redactSecrets`, a `"[REDACTED]"` literal, a hand-written `/ghp_[A-Za-z0-9]{36}/`, a Python `def redact`);
   - it is also run against planted non-offenders (an import of the shared module from `../../mcp-server/src/redact.ts`, the smoke decoy, the injected-seam signatures).
   A detector that silently matches nothing therefore fails.
-- **D18-16:** Installed copies are not second sources. Phase 19's Muse hook imports the redactor "from a stable installed path". The lock is a check on the repository, so an installed artifact built from `redact.ts` is not a second source.
+- **Installed copies are not second sources.** Phase 19's Muse hook imports the redactor "from a stable installed path". The lock is a check on the repository, so an installed artifact built from `redact.ts` is not a second source.
   - Phase 19 must keep its template's placeholder specifier passing rule 1, or add a narrowly scoped, reasoned exemption in its own PR.
   - This phase does not exempt it in advance.
 
 ### Behaviour changes, docs and proof
-- **D18-17:** Accepted write-path effects (these are LANEB-06 itself, already covered by the accepted defaults and `docs/data-planes.md` "secrets (D-04 redaction)"):
+- **Accepted write-path effects** (these are LANEB-06 itself, already covered by the accepted defaults and `docs/data-planes.md` "secrets (D-04 redaction)"):
   - D-04 shapes in event summaries and payloads are stored as `[REDACTED]`.
   - Memory bodies holding a D-04 shape or a `<private>` block now classify as `secret` (quarantined, unreleasable) through `memory-classify.ts`'s `redact(text) !== text`.
   - Tests cover one `<private>` memory body and one D-04 shape in `classify()`.
-- **D18-18:** Docs:
+- **Docs:**
   - New flat topic doc `docs/redaction.md`. It covers:
     - the named rule table, in two columns: the event pass and the skill pass;
     - the counter exemption;
@@ -114,7 +114,7 @@ One PR on agent-substrate (LANEB-06). It delivers three things:
     - how to add a rule (a name, a fixture, a skill counterpart or a reasoned exclusion).
   - Pointers from `docs/greptime-ledger.md` (the "patterns are in `redact.ts`" paragraph), `docs/memory-governance.md` (the `secret` row) and `docs/observability.md` (the counter-exemption note).
   - Shipped as a PR change, so no CHANGELOG entry is needed unless the repo has one at execution time.
-- **D18-19:** Proof:
+- **Proof:**
   1. The full `bun test` run and a clean `bunx tsc --noEmit`, compared with the v1.3 baseline (1129 pass / 56 skip / 0 fail at `ab62c91`).
      - New failures are fixed.
      - Failures already present at HEAD are recorded, not fixed.
@@ -126,13 +126,13 @@ One PR on agent-substrate (LANEB-06). It delivers three things:
      - assert that no fixture value survived and the counts did;
      - `rehearsal down`.
      It sources only `consumer.env`, and it touches no production store.
-- **D18-20:** PR live-effect line: "Redaction widens on the production write path at the operator's next approved restart of `substrate-mcp`; nothing restarts in this PR."
+- **PR live-effect line:** "Redaction widens on the production write path at the operator's next approved restart of `substrate-mcp`; nothing restarts in this PR."
 
-### Operator answer (2026-10-08)
-- **D18-21:** The `pk`/`rk` rule requires at least one digit in the matched tail (operator, 2026-10-08; documented, tested deviation from the verbatim September rule).
-  - September's regex `\b(?:pk|rk)-[A-Za-z0-9][A-Za-z0-9_-]{19,}` also matched word-only slugs such as a branch name starting `pk-` or `rk-`, which showed `[REDACTED]` on the event path and quarantined memory bodies as `secret`.
-  - Narrowed pattern (event and skill pass): `\b(?:pk|rk)-(?=[A-Za-z0-9_-]*[0-9])[A-Za-z0-9][A-Za-z0-9_-]{19,}` (skill pass keeps its `dg` flags). This is the only D-04 pattern that is not byte-identical to September.
-  - Tests: a Langfuse-shaped `pk-lf-…` key containing digits is redacted; `pk-fix-the-bug-in-store` and `rk-release-notes-for-october` are not redacted, and `classify()` no longer quarantines them; `docs/redaction.md` lists the deviation.
+### Open for the operator (default applied)
+- **The `pk`/`rk` rule matches long hyphenated slugs.**
+  - The September regex `\b(?:pk|rk)-[A-Za-z0-9][A-Za-z0-9_-]{19,}` also matches an ordinary identifier such as a 20-character branch name starting `pk-` or `rk-`. On the event path, such a summary will show `[REDACTED]`.
+  - Default: keep the regex verbatim, because criterion 1 requires every September pattern, and add a test that records this accepted over-redaction.
+  - Alternative: require a digit in the body, which narrows false positives but departs from September.
 
 ### Claude's Discretion
 - The exact shape of the labelled rule table and of the exported name list, as long as `redact()`'s output and signature are unchanged.
@@ -206,5 +206,6 @@ One PR on agent-substrate (LANEB-06). It delivers three things:
 - Redaction rules for RAGFlow and Hindsight key formats, base58 secret keys, and Railway and tailnet hostnames (PITFALLS 6). They belong to the phase that first handles each class (25, 26, 27/28), and are added to `redact.ts` under the lock.
 - A docs-specific scan profile and the refuse-on-findings policy for `docs_ingest` (Phase 25).
 - Reconciling `grok-hermes-connector`'s `redactor.py` with this module (another repository; a cross-repo test-vector exchange is a candidate for a later milestone).
+- Tuning `pk`/`rk` to require a digit, if the operator overrides the default above.
 
 </deferred>
