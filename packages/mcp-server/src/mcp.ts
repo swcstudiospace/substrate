@@ -11,7 +11,15 @@ import { z } from "zod";
 import { DEFAULT_IDLE_SECONDS, formatDrift } from "./drift.ts";
 import { DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT } from "./greptime.ts";
 import { MAX_LEASE_TTL_SECONDS, MIN_LEASE_TTL_SECONDS } from "./lease.ts";
-import { CORRELATION_ID_PATTERN, GRAPH_ID_PATTERN, InvalidBindError, type Substrate } from "./service.ts";
+import {
+	CORRELATION_ID_PATTERN,
+	GRAPH_ID_PATTERN,
+	ISO_TIMESTAMP_PATTERN,
+	InvalidBindError,
+	InvalidSearchError,
+	isPagedSearch,
+	type Substrate,
+} from "./service.ts";
 import {
 	ACTORS,
 	EDGE_KINDS,
@@ -255,20 +263,51 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			description:
 				"Full-text search over memory entries, optionally narrowed to one scope. Superseded entries are " +
 				"excluded unless asked for, and quarantined or unreviewed writes are never returned. An entry with " +
-				"`needs_reverification` has outlived its trust: check it before acting on it.",
+				"`needs_reverification` has outlived its trust: check it before acting on it. Without `subject_prefix`, " +
+				"`before` or `before_id` the reply is a list of the newest `limit` matches, newest first. With any of " +
+				"them it is a page, `{ entries, next }`, ordered `created desc, id desc`: entries strictly before the " +
+				"keyset pair `(before, before_id)`, so ties at a page boundary are neither skipped nor repeated. `next` " +
+				"is `{ before, before_id }` whenever the page is full — pass both back for the next page — and null at " +
+				"the end. `query` may be left out when `subject_prefix` is given, to list every entry under a subject " +
+				"family. To page a plain query from the top, give `before` a time later than any entry.",
 			inputSchema: {
-				query: z.string(),
+				query: z.string().optional().describe("full-text over bodies; required unless `subject_prefix` is given"),
 				scope: z.string().optional(),
 				limit: z.number().int().min(1).max(100).optional(),
 				include_superseded: z
 					.boolean()
 					.optional()
 					.describe("include retired versions — how you read a decision's history"),
+				subject_prefix: z
+					.string()
+					.optional()
+					.describe("only entries whose subject starts with this, literally; normalised like a subject, so lowercased"),
+				before: z
+					.string()
+					.regex(ISO_TIMESTAMP_PATTERN)
+					.optional()
+					.describe("cursor: only entries created before this ISO-8601 instant — a previous page's `next.before`"),
+				before_id: z
+					.string()
+					.min(1)
+					.optional()
+					.describe("cursor tie-break: with `before`, also entries created at it whose id sorts below this"),
 			},
 			annotations: { readOnlyHint: true },
 		},
-		async ({ query, scope, limit, include_superseded }) =>
-			json(await substrate.searchMemory(query, scope, limit, include_superseded)),
+		async (request) => {
+			try {
+				if (isPagedSearch(request)) return json(await substrate.searchMemoryPage(request));
+				// The reply a caller got before paging existed, to the byte.
+				if (request.query === undefined) {
+					return refusal("memory_search needs `query`, or `subject_prefix` to list a subject family");
+				}
+				return json(await substrate.searchMemory(request.query, request.scope, request.limit, request.include_superseded));
+			} catch (cause) {
+				if (cause instanceof InvalidSearchError) return refusal(cause.message);
+				throw cause;
+			}
+		},
 	);
 
 	server.registerTool(

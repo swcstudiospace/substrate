@@ -9,16 +9,20 @@
  *   substrate drift [--repo R] [--path P]    compare git, the ledger and the claims
  *   substrate handoff --to S --goal G ...    record a signed handoff packet
  *   substrate evidence --graph G             the evidence bundle, as JSON or HTML
+ *   substrate lessons add|recall|digest|outcome   the lessons bank (docs/lessons-bank.md)
  *
  * Exit status is always 0 for `brief`, `emit` and `handoff`. These run inside
  * git hooks and editor hooks, where a non-zero exit can abort the user's commit
- * or turn; the substrate is never allowed to do that. `verify`, `drift` and
- * `evidence` do report failure, because nothing depends on them succeeding and a
- * silent empty answer would be worse than an error — `drift` exits 1 when it found
- * drift, so a hook or a cron can act on it, and an evidence document nobody can
- * tell from a missing one is not evidence.
+ * or turn; the substrate is never allowed to do that. `verify`, `drift`,
+ * `evidence` and the `lessons` writes do report failure, because nothing depends
+ * on them succeeding and a silent empty answer would be worse than an error —
+ * `drift` exits 1 when it found drift, so a hook or a cron can act on it, and an
+ * evidence document nobody can tell from a missing one is not evidence. `lessons
+ * recall` fails open instead: an unreachable bank injects nothing into a phase.
  */
 import { chainStateOf, renderEvidenceHtml, type EvidenceBundle } from "@substrate/evidence";
+import { list, parseArgs, str } from "./args.ts";
+import { httpMemory, lessonsTimeout, runLessons } from "./lessons.ts";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -38,27 +42,6 @@ function headers(): Record<string, string> {
 function timeout(): number {
 	const raw = Number(process.env.SUBSTRATE_TIMEOUT_MS);
 	return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_TIMEOUT_MS;
-}
-
-/** Parse `--key value` and `--flag` into a map. Unknown keys are kept, not rejected. */
-function parseArgs(argv: string[]): Record<string, string | true> {
-	const out: Record<string, string | true> = {};
-	for (let i = 0; i < argv.length; i++) {
-		const arg = argv[i];
-		if (!arg?.startsWith("--")) continue;
-		const key = arg.slice(2);
-		const next = argv[i + 1];
-		if (next === undefined || next.startsWith("--")) out[key] = true;
-		else {
-			out[key] = next;
-			i++;
-		}
-	}
-	return out;
-}
-
-function str(value: string | true | undefined): string | undefined {
-	return typeof value === "string" ? value : undefined;
 }
 
 function git(args: string[], cwd = process.cwd()): string {
@@ -175,17 +158,6 @@ async function cmdVerify(graphId: string | undefined): Promise<number> {
 	}
 	process.stderr.write(`chain BROKEN for ${graphId} at ${body.brokenAt}: ${body.reason}\n`);
 	return 1;
-}
-
-/** `--files a.ts,b.ts` or `--dod "green;reviewed"` — a list without shell quoting games. */
-function list(value: string | true | undefined): string[] | undefined {
-	const raw = str(value);
-	if (raw === undefined) return undefined;
-	const items = raw
-		.split(/[,;\n]/)
-		.map((item) => item.trim())
-		.filter((item) => item.length > 0);
-	return items.length > 0 ? items : undefined;
 }
 
 /**
@@ -412,6 +384,22 @@ switch (command) {
 		process.exit(0);
 	case "evidence":
 		process.exit(await cmdEvidence(args));
+	case "lessons":
+		process.exit(
+			await runLessons(rest, {
+				memory: httpMemory({
+					url: base(),
+					token: process.env.SUBSTRATE_TOKEN?.trim() || undefined,
+					timeoutMs: lessonsTimeout(process.env.SUBSTRATE_TIMEOUT_MS),
+				}),
+				repo: repoSlug(),
+				root: git(["rev-parse", "--show-toplevel"]) || process.cwd(),
+				cwd: process.cwd(),
+				now: () => new Date(),
+				out: (text) => process.stdout.write(text),
+				err: (text) => process.stderr.write(text),
+			}),
+		);
 	default:
 		process.stdout.write(
 			"substrate brief [--repo R] [--branch B] [--graph G] [--surface S] [--write]\n" +
@@ -421,7 +409,8 @@ switch (command) {
 				"substrate drift [--repo R] [--path P] [--idle SECONDS] [--json]\n" +
 				"substrate handoff --to S --goal G [--files a,b] [--dod 'x;y'] [--blockers 'z']\n" +
 				"                  [--graph G] [--node N] [--lease L] [--release] [--session I]\n" +
-				"substrate evidence --graph <graph_id> [--format json|html] [--out PATH]\n",
+				"substrate evidence --graph <graph_id> [--format json|html] [--out PATH]\n" +
+				"substrate lessons add|recall|digest|outcome ...   (substrate lessons help)\n",
 		);
 		process.exit(command ? 2 : 0);
 }

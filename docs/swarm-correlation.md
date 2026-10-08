@@ -140,9 +140,10 @@ sessions differ.
 
 **Holder-only ids.** The `lease_id` is shown only in the reply that grants it (or a
 call that presented it and was accepted). A denied claim, any refused heartbeat,
-release or complete, `graph_get`, `graph_register`, `coord_drift_scan`, `/drift` and
-`coord_reap_leases` show the holder's surface and session, the epoch and the expiry,
-with `lease_id: null`. Lease events carry `lease_epoch`, and handoff packets carry
+release or complete, `graph_get`, `graph_register`, `coord_drift_scan` and `/drift`
+show the holder's surface and session, the epoch and the expiry, with `lease_id: null`.
+`coord_reap_leases` omits the id and reports `lease_epoch` and `expired_at` instead.
+Lease events carry `lease_epoch`, and handoff packets carry
 `lease_handover: true|false`, never the id (packets signed before that field existed
 lack it, and may carry the old `handover_lease_id`). An A05 replica that lost its id
 re-claims with its own token and session and gets it back.
