@@ -72,8 +72,8 @@ const REDACTED_TSKEY = "[REDACTED_TSKEY]";
 	[/\bdop_v1_[a-f0-9]{64}/g, REDACTED],
 	// openai-proj: OpenAI project key (the sk- rule above stops at its second hyphen).
 	[/\bsk-proj-[A-Za-z0-9_-]{20,}/g, REDACTED],
-	// pk / rk: publishable and restricted keys.
-	[/\b(?:pk|rk)-[A-Za-z0-9][A-Za-z0-9_-]{19,}/g, REDACTED],
+	// pk / rk: publishable and restricted keys (D18-21 narrowed: digit required in the tail; the only D-04 pattern not byte-identical to September).
+	[/\b(?:pk|rk)-(?=[A-Za-z0-9_-]*[0-9])[A-Za-z0-9][A-Za-z0-9_-]{19,}/g, REDACTED],
 	// JWTs.  (then keypair-array last)
 ```
 The 30 names, in order, are in RESEARCH §"Rule inventory (event pass)": `private-tag, pem, tailscale, password, password-env, daytona, vault, assignment, api-key-lower, authorization, bearer, url-password, linear-api, linear-oauth, notion, github, github-pat, xai, anthropic, openai, aws, google, slack, npm, gitlab, digitalocean, openai-proj, pk-rk, jwt, keypair-array`.
@@ -203,7 +203,7 @@ Add the own-pattern check (`text.replace(rule.pattern, "") !== text`, never `.te
 			expect(sample).toBeDefined();
 ```
 
-**Over-redaction pin (main 145-149 style).** Add `pk-rk` beside `KEYBOARD_LAYOUT`/`MONKEY`:
+**Narrowed pk-rk tests (D18-21, main 145-149 style).** Beside the `KEYBOARD_LAYOUT`/`MONKEY` guards:
 ```ts
 describe("over-redaction guards", () => {
 	test("a word merely containing KEY is not treated as a secret", () => {
@@ -211,7 +211,7 @@ describe("over-redaction guards", () => {
 		expect(redact("MONKEY=banana")).toBe("MONKEY=banana");
 	});
 ```
-→ a new test that records the accepted over-redaction: `redact("branch pk-add-retry-to-the-poller-loop")` → `` `branch ${REDACTED}` ``.
+→ new tests proving the digit-required deviation: a runtime-assembled digit-bearing `pk-lf-` key redacts, while `pk-fix-the-bug-in-store` and `rk-release-notes-for-october` survive `redact()` unchanged. The pk-rk fixtures (pk- and rk- bodies) must each contain a digit.
 
 **Counter exemption under D-04 (main 74-143 voice: a regression comment explaining why, then exact `toEqual`/`toBe`):** `redactValue({ usage: { input_tokens: 1200, output_tokens: "340" }, tokens: <npm fixture>, api_key: "short" })`.
 
@@ -485,7 +485,7 @@ Required sections (CONTEXT §Docs):
 - the lock rules and allowlist (seams + `trace.ts:222` `describe = String` noted as dormant);
 - how a new package redacts;
 - how to add a rule;
-- the accepted over-redaction (`pk-rk`) and the verbatim-port gaps (RESEARCH "Verified behaviour": `openai_api_key:`, JSON `"api_key":`, fixed-length tails);
+- the pk-rk digit-required deviation from September (D18-21, operator 2026-10-08), with its rationale, and the verbatim-port gaps (RESEARCH "Verified behaviour": `openai_api_key:`, JSON `"api_key":`, fixed-length tails);
 - pre-restart rows (RESEARCH Runtime State Inventory).
 
 **Desk-rule constraint:** no literal token shapes, tailnet names or internal hostnames. Describe each rule by its prefix in prose or backticks (`ghp_`-style), never a full value.

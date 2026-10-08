@@ -14,7 +14,7 @@
   - `<private>…</private>` goes first, so a PEM inside it goes as one block.
   - `api-key-lower` goes right after the uppercase assignment rule.
   - `aws`, `google`, `slack`, `npm`, `gitlab`, `digitalocean`, `openai-proj` and `pk`/`rk` go after the provider shapes and before the JWT rule.
-  - Criterion 1 says "every September D-04 pattern", so nothing is re-tuned in this phase.
+  - Criterion 1 says "every September D-04 pattern", so nothing is re-tuned in this phase, except `pk-rk`, which ships in the D18-21 narrowed digit-required form (operator 2026-10-08), the only D-04 pattern not byte-identical to September.
 - **Keep main's `redactValue` untouched**: `SENSITIVE_KEY`, `COUNTER_KEY`, `isCount` and the null/undefined pass-through. Take nothing from September's `redactValue`, which predates the exemption.
 - **Every rule gets a stable name.** The rule table becomes labelled entries (name, pattern, replacement), and names are unique per pattern entry, e.g. `linear-api` and `linear-oauth`, not one shared `linear`.
   - The names are exported read-only for tests and docs.
@@ -102,11 +102,11 @@
      It sources only `consumer.env`, and it touches no production store.
 - **PR live-effect line:** "Redaction widens on the production write path at the operator's next approved restart of `substrate-mcp`; nothing restarts in this PR."
 
-#### Open for the operator (default applied)
-- **The `pk`/`rk` rule matches long hyphenated slugs.**
+#### Operator answer (2026-10-08)
+- **The `pk`/`rk` rule requires a digit in the matched tail (D18-21).**
   - The September regex `\b(?:pk|rk)-[A-Za-z0-9][A-Za-z0-9_-]{19,}` also matches an ordinary identifier such as a 20-character branch name starting `pk-` or `rk-`. On the event path, such a summary will show `[REDACTED]`.
-  - Default: keep the regex verbatim, because criterion 1 requires every September pattern, and add a test that records this accepted over-redaction.
-  - Alternative: require a digit in the body, which narrows false positives but departs from September.
+  - Shipped (D18-21): narrowed pattern `\b(?:pk|rk)-(?=[A-Za-z0-9_-]*[0-9])[A-Za-z0-9][A-Za-z0-9_-]{19,}`; word-only slugs such as `pk-fix-the-bug-in-store` survive; a digit-bearing Langfuse `pk-lf-` key is redacted; no accepted-over-redaction test.
+  - This is a documented, tested deviation from September, listed in `docs/redaction.md`.
 
 ### Claude's Discretion
 - The exact shape of the labelled rule table and of the exported name list, as long as `redact()`'s output and signature are unchanged.
@@ -120,7 +120,6 @@
 - Redaction rules for RAGFlow and Hindsight key formats, base58 secret keys, and Railway and tailnet hostnames (PITFALLS 6). They belong to the phase that first handles each class (25, 26, 27/28), and are added to `redact.ts` under the lock.
 - A docs-specific scan profile and the refuse-on-findings policy for `docs_ingest` (Phase 25).
 - Reconciling `grok-hermes-connector`'s `redactor.py` with this module (another repository; a cross-repo test-vector exchange is a candidate for a later milestone).
-- Tuning `pk`/`rk` to require a digit, if the operator overrides the default above.
 </user_constraints>
 
 <phase_requirements>
@@ -139,7 +138,7 @@ The skill engine ports verbatim. The planner needs one design decision the CONTE
 
 The lock is cheap to make precise. Line-anchored regexes over the source run on 45 in-scope files at HEAD. They report exactly one offender: `packages/cli/src/lessons.ts:811`, rule 3, which this phase migrates to `redactKnown`. They catch all 15 planted offenders, false-positive on none of 9 planted non-offenders, and report zero offenders over September's 70-file consumer tree. That last result includes the Muse hook template, because the anchored import regex ignores imports inside string literals. Phases 19/21/22 therefore inherit the lock without exemptions. `Bun.Transpiler.scanImports` should not be the primary import parser, because it drops type-only imports.
 
-**Primary recommendation:** Convert `RULES` to an `as const satisfies` labelled table and derive `RedactionRuleName` from it. Insert the 11 September entries verbatim at September's positions. Port the skill engine with a `name` per entry. Type the fixture corpus, skill exclusions and lock prefix map as `Record<RedactionRuleName, …>`, so `tsc` and the tests both fail when a rule lacks a fixture, a skill counterpart or a detector decision. Build the lock from copied store-lock helpers plus line-anchored regex detectors. Put the harness round trip in `redact.test.ts` as a `describe` gated on `SUBSTRATE_REHEARSAL_NAME`.
+**Primary recommendation:** Convert `RULES` to an `as const satisfies` labelled table and derive `RedactionRuleName` from it. Insert 10 September entries verbatim at September's positions plus `pk-rk` in the D18-21 narrowed digit-required form. Port the skill engine with a `name` per entry. Type the fixture corpus, skill exclusions and lock prefix map as `Record<RedactionRuleName, …>`, so `tsc` and the tests both fail when a rule lacks a fixture, a skill counterpart or a detector decision. Build the lock from copied store-lock helpers plus line-anchored regex detectors. Put the harness round trip in `redact.test.ts` as a `describe` gated on `SUBSTRATE_REHEARSAL_NAME`.
 
 ## Architectural Responsibility Map
 
@@ -203,13 +202,13 @@ The order is September's file order, which is main's order with three insertions
 | 25 | `gitlab` (new) | `/\bglpat-[A-Za-z0-9_-]{20,}/g` | `REDACTED` | 61 | — | new `gitlab` (finding) |
 | 26 | `digitalocean` (new) | `/\bdop_v1_[a-f0-9]{64}/g` | `REDACTED` | 63 | — | new `digitalocean` (finding) |
 | 27 | `openai-proj` (new) | `/\bsk-proj-[A-Za-z0-9_-]{20,}/g` | `REDACTED` | 65 | — | new `openai-proj` (finding) |
-| 28 | `pk-rk` (new) | `/\b(?:pk\|rk)-[A-Za-z0-9][A-Za-z0-9_-]{19,}/g` | `REDACTED` | 67 | — | new `pk-rk` (contextual) |
+| 28 | `pk-rk` (new, D18-21 narrowed — the only D-04 pattern not byte-identical to September) | `/\b(?:pk\|rk)-(?=[A-Za-z0-9_-]*[0-9])[A-Za-z0-9][A-Za-z0-9_-]{19,}/g` | `REDACTED` | 67 | — | new `pk-rk` (contextual) |
 | 29 | `jwt` | `/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g` | `REDACTED` | 69 | 47 | `jwt` (finding; doc-example allowable) |
 | 30 | `keypair-array` | `/\[\s*(?:\d{1,3}\s*,\s*){31,}\d{1,3}\s*\]/g` | `REDACTED` | 71 | 49 | **excluded**: "byte arrays are ordinary code in docs" |
 
 (`\|` in the table is the Markdown escape of a regex `|`.)
 
-`pk-rk` is one regex in September, and September's test corpus has two fixtures for it (`pk`, `rk`) [VERIFIED: acc30a8 redact.test.ts:253-254]. Keep it as **one** entry named `pk-rk` and give it two fixtures. The name rule is per pattern entry.
+`pk-rk` is one regex in September, and September's test corpus has two fixtures for it (`pk`, `rk`) [VERIFIED: acc30a8 redact.test.ts:253-254]. Keep it as **one** entry named `pk-rk` and give it two fixtures (both digit-bearing per D18-21). The name rule is per pattern entry. Per operator answer D18-21 (2026-10-08) the shipped pattern is the narrowed digit-required form above, not the byte-identical September regex.
 
 Constants in main: `export const REDACTED = "[REDACTED]"`, `const REDACTED_PEM = "[REDACTED_PEM]"`, `const REDACTED_TSKEY = "[REDACTED_TSKEY]"` [VERIFIED: redact.ts:13-15]. `SENSITIVE_KEY` (line 66) and `COUNTER_KEY` (lines 81-82, quoted below) are unchanged:
 
@@ -233,7 +232,7 @@ September `SKILL_RULES` [VERIFIED: acc30a8 redact.ts:175-197], quoted verbatim, 
 { rule: "digitalocean", pattern: /\bdop_v1_[a-f0-9]{64}/dg, value: 0, replacement: REDACTED },
 { rule: "openai-proj", pattern: /\bsk-proj-[A-Za-z0-9_-]{20,}/dg, value: 0, replacement: REDACTED },
 { rule: "private-tag", pattern: /<private>[\s\S]*?<\/private>/dgi, value: 0, replacement: REDACTED },
-{ rule: "pk-rk", pattern: /\b(?:pk|rk)-[A-Za-z0-9][A-Za-z0-9_-]{19,}/dg, value: 0, replacement: REDACTED },
+{ rule: "pk-rk", pattern: /\b(?:pk|rk)-(?=[A-Za-z0-9_-]*[0-9])[A-Za-z0-9][A-Za-z0-9_-]{19,}/dg, value: 0, replacement: REDACTED },
 // …after the generic `assignment` entry:
 { rule: "api-key-lower", pattern: /\b(api[_-]?key)([ \t]*[:=][ \t]*["']?)([A-Za-z0-9_\-/.+]{16,})/dgi, value: 3, replacement: REDACTED },
 ```
@@ -253,14 +252,14 @@ Experiments ran in `/tmp/p18research`: a scratch `git archive HEAD` copy, protot
 | `API_KEY=…` is caught by `assignment` first; api-key-lower never double-processes it (`[` is outside its value class) | exp1 `API_KEY=[REDACTED]` |
 | api-key-lower **misses** `openai_api_key: <24>` (no `\b` between `_` and `a`) and JSON `{"api_key":"<24>"}` (the closing quote sits between key and colon) | exp1 unchanged. A verbatim port keeps these gaps; record them in docs, do not tune |
 | On the event path api-key-lower **crosses a newline** (`\s*`): `api_key:\n  description_of_the_field_here` → `api_key:\n  [REDACTED]` | exp1. The skill pass's `[ \t]` form keeps it |
-| `pk-rk` redacts hyphenated slugs such as `pk-add-retry-to-the-poller-loop` and `branch rk-2026-10-08-fix-flaky-tests` | exp1 `[REDACTED]`, `branch [REDACTED]` (the accepted over-redaction in the operator default) |
+| `pk-rk` (D18-21 narrowed) redacts a digit-bearing `pk-lf-…` key but leaves word-only slugs such as `pk-fix-the-bug-in-store` and `rk-release-notes-for-october` untouched | narrowed pattern: digit-bearing key → `[REDACTED]`; the two slugs survive `redact()` unchanged |
 | `npm_`, `AIza` and `dop_v1_` are fixed-length without a trailing `\b`, so a longer run leaves a tail (`npm_`+40 → `[REDACTED]HOVc`) | exp1. Verbatim, so record it, do not tune |
 | `redactValue({input_tokens:1200, output_tokens:"34", tokens:<npm fixture>, api_key:"short", note:<aws>})` → counts kept, `tokens` and `api_key` whole-redacted. Main today leaves `note`'s AKIA intact | exp1 |
 | The September skill pass today lets google/slack/npm/gitlab/digitalocean/openai-proj/pk/rk/private/api-key through **unchanged** (aws is a finding) | exp1 "gap" block |
 | Prototype engine with the 9 new skill entries: September's skill+event tests 30/31 pass; the only failure is `every high-confidence rule…` (`expect(sample).toBeDefined()` for the new rules) | `bun test sept-after.test.ts sept-first.test.ts` → 60 pass / 2 fail (one per prototype) |
 | Skill pass: `api_key: $OPENAI_API_KEY`, `apiKey: <your-key>`, `api_key: your-api-key-goes-here`, `api_key = "xxxx…"` kept, nothing reported. Real `api_key: <24>` → redaction `api-key-lower`. `API_KEY=<24>` → still `assignment`. `GITLAB_TOKEN=glpat-…` → finding `gitlab` (not a silent `assignment` redaction). `Authorization: Bearer npm_…` → finding `npm` | exp2 |
 | `private-tag` ordering: **after** the high-confidence block, a `<private>` block holding a GitHub token → finding `github`, rest of block left in the text; with `allowDocExamples:{pem}`, a PEM inside `<private>` → `pem` redaction and the block's other text **survives**. **First** in the table, both cases become one silent `private-tag` redaction (no finding) | exp2 |
-| `classify()` on a `<private>` body, on an AKIA body and on `pk-add-retry-to-the-poller-loop` → `secret`, `reviewable:false`; "we keep private notes…" → `null` | Scratch tree after the merge |
+| `classify()` on a `<private>` body, on an AKIA body and on a digit-bearing `pk-lf-…` key body → `secret`, `reviewable:false`; bodies holding `pk-fix-the-bug-in-store` or `rk-release-notes-for-october` → `null`; "we keep private notes…" → `null` | D18-21 narrowed expectation (operator 2026-10-08) |
 | `lessons.ts` migrated to `redactKnown` (prototype): `lessons.test.ts` 60 pass / 0 fail, `bunx tsc --noEmit` exit 0 | Scratch tree |
 | Baseline at HEAD `4752ef0` (no `packages/` or `scripts/` diff from `ab62c91`): `bun test` **1129 pass / 56 skip / 0 fail, 4094 expect() calls, 1185 tests across 40 files**; `bunx tsc --noEmit` exit 0. The run prints two `[substrate] audit of … failed unexpectedly: RangeError: Maximum call stack size exceeded` lines on stderr. This is pre-existing noise from the audit-fault tests, not a failure | Run this session |
 
@@ -311,7 +310,7 @@ docs/observability.md       # pointer in the counter note (:115-120)
 **What:** One table is the single source of rule names. `as const satisfies` keeps names as literal types, so `Record<RedactionRuleName, …>` elsewhere is checked by `tsc`.
 **When:** The `RULES` rewrite in `redact.ts`.
 ```ts
-// Shape only; patterns are the verbatim ones in the Rule inventory table.
+// Shape only; patterns are the 10 verbatim September patterns plus the D18-21 narrowed pk-rk in the Rule inventory table.
 const RULES = [
 	{ name: "private-tag", pattern: /<private>[\s\S]*?<\/private>/gi, replacement: REDACTED },
 	{ name: "pem", pattern: /-----BEGIN[ A-Z]*PRIVATE KEY-----[\s\S]*?-----END[ A-Z]*PRIVATE KEY-----/g, replacement: REDACTED_PEM },
@@ -383,7 +382,7 @@ The coverage test is `Object.keys(FIXTURES)` sorted equal to the `REDACTION_RULE
 | github / github-pat | `"ghp_" + rnd(ALNUM,36)` / `"github_pat_" + rnd(ALNUM,40)` |
 | xai / anthropic / openai | `"xai-" + rnd(ALNUM,64)` / `"sk-ant-api03-" + rnd(ALNUM,40)` / `"sk-" + rnd(ALNUM,48)` |
 | aws, google, slack, npm, gitlab, digitalocean, openai-proj | September's `D04_FIXTURES` (acc30a8 redact.test.ts:246-252) |
-| pk-rk | `"pk-" + rnd(ALNUM,24)` and `"rk-" + rnd(ALNUM,24)` |
+| pk-rk | `"pk-" + digit-bearing body` and `"rk-" + digit-bearing body` (each body must contain a digit per D18-21; e.g. a `pk-lf-…` shape assembled at runtime) |
 | jwt | `["eyJ" + "hbGciOiJIUzI1NiJ9", "eyJzdWIiOiIxMjM0NTY3ODkwIn0", rnd(ALNUM,27)].join(".")` |
 | keypair-array | `"[" + Array.from({length:64}, (_, i) => (i*37) % 256).join(", ") + "]"` |
 
@@ -476,7 +475,7 @@ describeRehearsal("round trip through the rehearsal twin", () => {
 Run: `bun run rehearsal up --name p18`, then `set -a; . "${XDG_RUNTIME_DIR:-/tmp}/substrate-rehearsal/p18/consumer.env"; set +a; bun test packages/mcp-server/src/redact.test.ts`, then `bun run rehearsal down --name p18`. If Phase 16 ships `assertLoopback` in `packages/mcp-server/src/rehearsal-env.ts` (planned in 16-01), import it instead of the two inline `expect`s once it is on the base. Do not import it while it is absent, or `tsc` fails.
 
 ### Anti-Patterns to Avoid
-- **Taking September's `redact.ts` whole:** it loses `COUNTER_KEY`, and `input_tokens` gets redacted (ARCHITECTURE anti-pattern 2). Insert the 11 entries; never copy `redactValue`.
+- **Taking September's `redact.ts` whole:** it loses `COUNTER_KEY`, and `input_tokens` gets redacted (ARCHITECTURE anti-pattern 2). Insert the 10 verbatim entries plus the D18-21 narrowed `pk-rk`; never copy `redactValue`.
 - **Renaming skill hit `rule` values to per-pattern names:** this breaks September's tests (`rule: "github"`, `"assignment"`, `"password"`) and Phase 21's `propose.ts` PR-body format (`- ${hit.file}:${hit.line} ${hit.rule}`, acc30a8 propose.ts:374). Add `name`; keep `rule`.
 - **Deriving the skill table from the event table:** CONTEXT forbids it, because whitespace, capture groups and ordering differ.
 - **Literal token shapes in tests/docs:** assemble at runtime. Do not write `SUBSTRATE_TOKEN…=` with 16+ chars, a `GREPTIME_URL|USER|PASSWORD` key with a value, or a Railway proxy/app host in any tracked file, docs included. The store-lock `CREDENTIAL`, `RAILWAY_HOST` and `TOKEN_LITERAL` scans cover all tracked files [VERIFIED: store-lock.test.ts:72-95, 268-276, 324-332].
@@ -556,14 +555,14 @@ Run: `bun run rehearsal up --name p18`, then `set -a; . "${XDG_RUNTIME_DIR:-/tmp
 	[/\bglpat-[A-Za-z0-9_-]{20,}/g, REDACTED],
 	[/\bdop_v1_[a-f0-9]{64}/g, REDACTED],
 	[/\bsk-proj-[A-Za-z0-9_-]{20,}/g, REDACTED],
-	[/\b(?:pk|rk)-[A-Za-z0-9][A-Za-z0-9_-]{19,}/g, REDACTED],
+	[/\b(?:pk|rk)-(?=[A-Za-z0-9_-]*[0-9])[A-Za-z0-9][A-Za-z0-9_-]{19,}/g, REDACTED], // D18-21 narrowed (digit required); the other rows above are verbatim September text
 ```
 Source: acc30a8 `packages/mcp-server/src/redact.ts:20-21, 35-36, 51-67`. Convert these to `{ name, pattern, replacement }` objects.
 
 ### Tests to carry over or add
 - Main `redact.test.ts:1-155`: keep all of it (counter exemption 73-143, guards 145-155).
 - September `redact.test.ts:86-234` (skill) and `236-310` (D-04 near-misses, idempotency, multi-line private, `redactValue` reach). Merge the duplicate `describe("redact")`/`describe("redactValue")` blocks rather than keeping both copies.
-- New tests: corpus × 4 checks; coverage and uniqueness; parity; pinned `pk-rk` over-redaction (`redact("branch pk-add-retry-to-the-poller-loop")` → `branch [REDACTED]`); counters under D-04 (`redactValue({ usage: { input_tokens: 1200, output_tokens: "340" }, tokens: <npm fixture>, api_key: "short" })`); skill placeholder cases for `api-key-lower`; both `private-tag` ordering cases; `redactKnown` (longest first: `["ab","abc"]` over `"abc"` → `[REDACTED]` not `[REDACTED]c`; empty ignored); the gated round trip.
+- New tests: corpus × 4 checks (pk-rk fixtures digit-bearing); coverage and uniqueness; parity; D18-21 narrowed `pk-rk` tests (a runtime-assembled digit-bearing `pk-lf-` key redacts; `pk-fix-the-bug-in-store` and `rk-release-notes-for-october` survive `redact()` and `classify()` returns null for them); counters under D-04 (`redactValue({ usage: { input_tokens: 1200, output_tokens: "340" }, tokens: <npm fixture>, api_key: "short" })`); skill placeholder cases for `api-key-lower`; both `private-tag` ordering cases; `redactKnown` (longest first: `["ab","abc"]` over `"abc"` → `[REDACTED]` not `[REDACTED]c`; empty ignored); the gated round trip.
 - `memory-classify.test.ts`: `classify("<private>…</private>", "fact")?.reason === "secret"` and `reviewable === false`; one D-04 shape (e.g. the AKIA fixture) → `secret`.
 
 ## State of the Art
@@ -585,14 +584,13 @@ Source: acc30a8 `packages/mcp-server/src/redact.ts:20-21, 35-36, 51-67`. Convert
 
 ## Open Questions (RESOLVED)
 
-- Q1 RESOLVED: the CONTEXT D18-21 default (verbatim regex plus a pinned test) is planned in 18-01.
+- Q1 RESOLVED: the operator answer (2026-10-08, CONTEXT D18-21) narrowed the pk-rk rule to require a digit in the tail; 18-01 ships the narrowed pattern with pinned tests.
 - Q2 RESOLVED: both branches of the gated round trip (D18-19) are planned in 18-04.
 - Q3 RESOLVED: Phase 17's `check:phase-close` is intentionally not edited; `redact-lock.test.ts` runs in plain `bun test`.
 
-1. **The `pk-rk` default (operator).**
-   - What we know: the rule redacts 20+-char `pk-`/`rk-` slugs, including branch names, on the event path. A memory body containing one becomes an unreleasable `secret` [VERIFIED: classify experiment].
-   - What's unclear: whether the operator keeps the verbatim regex (the CONTEXT default).
-   - Recommendation: ship the default with a pinned test and a doc note. A digit requirement remains the deferred alternative.
+1. **The `pk-rk` rule (operator — ANSWERED 2026-10-08).**
+   - What we know: September's rule redacted 20+-char `pk-`/`rk-` slugs, including branch names, on the event path, and a memory body containing one became an unreleasable `secret` [VERIFIED: classify experiment]. The operator narrowed it (D18-21): the shipped pattern requires at least one digit in the matched tail, so a digit-bearing `pk-lf-…` key still redacts while `pk-fix-the-bug-in-store` and `rk-release-notes-for-october` survive `redact()` and return null from `classify()`.
+   - Shipped: the narrowed pattern on both passes with pinned tests and a `docs/redaction.md` deviation note. The verbatim September regex is superseded for this rule only.
 2. **Is Phase 16's harness on the base at execution time?**
    - What we know: the base today has no `scripts/rehearsal.ts` and no `rehearsal` package script [VERIFIED: `ls scripts`, package.json]. Docker 29.6.2 is available.
    - Recommendation: the gated test is real code that skips when not sourced. The final plan's proof step runs it if `scripts/rehearsal.ts` exists after rebasing. Otherwise it records "harness round trip not run: Phase 16 not on base", which is CONTEXT's conditional, and states that in the PR.
@@ -625,7 +623,7 @@ Source: acc30a8 `packages/mcp-server/src/redact.ts:20-21, 35-36, 51-67`. Convert
 |--------|----------|-----------|-------------------|-------------|
 | LANEB-06 (SC1) | Every September D-04 pattern is redacted, one fixture per named rule (4 checks each), coverage and unique names | unit | `bun test packages/mcp-server/src/redact.test.ts` | ✅ extend |
 | LANEB-06 (SC1) | `COUNTER_KEY` counts survive under the new rules; `{tokens: <fixture>}`, `api_key: "short"` whole-redacted | unit | same | ✅ extend |
-| LANEB-06 (SC1) | Near-misses kept; KEYBOARD_LAYOUT/MONKEY guards; pk-rk over-redaction pinned | unit | same | ✅ extend |
+| LANEB-06 (SC1) | Near-misses kept; KEYBOARD_LAYOUT/MONKEY guards; D18-21 narrowed pk-rk pinned (digit-bearing key redacts, word-only slugs survive) | unit | same | ✅ extend |
 | LANEB-06 (SC2) | Skill engine in the same module; September skill tests; new findings/redactions; placeholders; parity with exclusions | unit | same | ✅ extend |
 | LANEB-06 (SC2) | The repo check fails on any other redaction path; clean on the tree; catches planted offenders; seam rule | unit (repo) | `bun test packages/mcp-server/src/redact-lock.test.ts` | ❌ Wave 0 (new) |
 | LANEB-06 | `redactKnown` semantics; `lessons.ts` unchanged behaviour | unit | `bun test packages/mcp-server/src/redact.test.ts packages/cli/src/lessons.test.ts` | ✅ |

@@ -2,7 +2,7 @@
 
 **Gathered:** 2026-10-08
 **Status:** Ready for planning
-**Mode:** Smart discuss, auto-accepted under the v1.3 run rules (`.planning/STATE.md`, "v1.3 decisions"). No answer changes a user-visible contract beyond what LANEB-06 already asks for. One accepted default is listed for the operator under "Open for the operator" below; the plan uses it unless the operator overrides it.
+**Mode:** Smart discuss, auto-accepted under the v1.3 run rules (`.planning/STATE.md`, "v1.3 decisions"). No answer changes a user-visible contract beyond what LANEB-06 already asks for. The operator's 2026-10-08 answer on the `pk`/`rk` rule is recorded as D18-21 below.
 
 <domain>
 ## Phase Boundary
@@ -40,7 +40,7 @@ One PR on agent-substrate (LANEB-06). It delivers three things:
   - `<private>…</private>` goes first, so a PEM inside it goes as one block.
   - `api-key-lower` goes right after the uppercase assignment rule.
   - `aws`, `google`, `slack`, `npm`, `gitlab`, `digitalocean`, `openai-proj` and `pk`/`rk` go after the provider shapes and before the JWT rule.
-  - Criterion 1 says "every September D-04 pattern", so nothing is re-tuned in this phase.
+  - Criterion 1 says "every September D-04 pattern", so nothing is re-tuned in this phase, except `pk`/`rk`, which the operator narrowed on 2026-10-08 (D18-21).
 - **D18-02:** Keep main's `redactValue` untouched: `SENSITIVE_KEY`, `COUNTER_KEY`, `isCount` and the null/undefined pass-through. Take nothing from September's `redactValue`, which predates the exemption.
 - **D18-03:** Every rule gets a stable name. The rule table becomes labelled entries (name, pattern, replacement), and names are unique per pattern entry, e.g. `linear-api` and `linear-oauth`, not one shared `linear`.
   - The names are exported read-only for tests and docs.
@@ -128,11 +128,11 @@ One PR on agent-substrate (LANEB-06). It delivers three things:
      It sources only `consumer.env`, and it touches no production store.
 - **D18-20:** PR live-effect line: "Redaction widens on the production write path at the operator's next approved restart of `substrate-mcp`; nothing restarts in this PR."
 
-### Open for the operator (default applied)
-- **D18-21:** The `pk`/`rk` rule matches long hyphenated slugs (default applied, open for the operator).
-  - The September regex `\b(?:pk|rk)-[A-Za-z0-9][A-Za-z0-9_-]{19,}` also matches an ordinary identifier such as a 20-character branch name starting `pk-` or `rk-`. On the event path, such a summary will show `[REDACTED]`.
-  - Default: keep the regex verbatim, because criterion 1 requires every September pattern, and add a test that records this accepted over-redaction.
-  - Alternative: require a digit in the body, which narrows false positives but departs from September.
+### Operator answer (2026-10-08)
+- **D18-21:** The `pk`/`rk` rule requires at least one digit in the matched tail (operator, 2026-10-08; documented, tested deviation from the verbatim September rule).
+  - September's regex `\b(?:pk|rk)-[A-Za-z0-9][A-Za-z0-9_-]{19,}` also matched word-only slugs such as a branch name starting `pk-` or `rk-`, which showed `[REDACTED]` on the event path and quarantined memory bodies as `secret`.
+  - Narrowed pattern (event and skill pass): `\b(?:pk|rk)-(?=[A-Za-z0-9_-]*[0-9])[A-Za-z0-9][A-Za-z0-9_-]{19,}` (skill pass keeps its `dg` flags). This is the only D-04 pattern that is not byte-identical to September.
+  - Tests: a Langfuse-shaped `pk-lf-…` key containing digits is redacted; `pk-fix-the-bug-in-store` and `rk-release-notes-for-october` are not redacted, and `classify()` no longer quarantines them; `docs/redaction.md` lists the deviation.
 
 ### Claude's Discretion
 - The exact shape of the labelled rule table and of the exported name list, as long as `redact()`'s output and signature are unchanged.
@@ -206,6 +206,5 @@ One PR on agent-substrate (LANEB-06). It delivers three things:
 - Redaction rules for RAGFlow and Hindsight key formats, base58 secret keys, and Railway and tailnet hostnames (PITFALLS 6). They belong to the phase that first handles each class (25, 26, 27/28), and are added to `redact.ts` under the lock.
 - A docs-specific scan profile and the refuse-on-findings policy for `docs_ingest` (Phase 25).
 - Reconciling `grok-hermes-connector`'s `redactor.py` with this module (another repository; a cross-repo test-vector exchange is a candidate for a later milestone).
-- Tuning `pk`/`rk` to require a digit, if the operator overrides the default above.
 
 </deferred>
