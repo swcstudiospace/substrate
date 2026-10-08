@@ -164,7 +164,8 @@ function planJson(path: string, before: string | null): Pick<Change, "status" | 
 		throw new ProjectionRefused(`${path} is not valid JSON, refusing to touch it: ${String(cause)}`);
 	}
 	if (!isObject(parsed)) throw new ProjectionRefused(`${path} is not a JSON object, refusing to touch it`);
-	const servers = parsed.mcpServers ?? {};
+	// null is present but unusable. Only a missing key starts an empty map; never replace a non-object.
+	const servers = parsed.mcpServers === undefined ? {} : parsed.mcpServers;
 	if (!isObject(servers)) throw new ProjectionRefused(`${path} has an mcpServers that is not an object`);
 	const existing = servers[SERVER];
 	if (existing !== undefined) {
@@ -238,7 +239,7 @@ export function plan(workspace: string, runtimes: readonly string[] = RUNTIMES):
 	}
 	// the real path, so the symlink walk below stops at the workspace however it was spelled
 	const root = realpathSync(workspace);
-	const unknown = runtimes.filter((runtime) => !(runtime in RUNTIME_FILES));
+	const unknown = runtimes.filter((runtime) => !Object.hasOwn(RUNTIME_FILES, runtime));
 	if (unknown.length > 0) {
 		throw new ProjectionRefused(
 			`no MCP entry for runtime ${unknown.join(", ")}: an executing swarm agent must reach substrate-mcp, and ` +
@@ -257,7 +258,8 @@ export function plan(workspace: string, runtimes: readonly string[] = RUNTIMES):
 	for (const [rel, { format, runtimes: users }] of byPath) {
 		const path = join(root, rel);
 		refuseSymlinks(root, path);
-		const before = existsSync(path) ? readFileSync(path, "utf8") : null;
+		// The same no-follow, non-blocking regular-file read as apply. A named pipe must not block planning.
+		const before = snapshot(path)?.bytes.toString("utf8") ?? null;
 		const planned = format === "json" ? planJson(path, before) : planToml(path, before);
 		changes.push({ path, file: rel, runtimes: users, format, before, ...planned });
 	}
@@ -275,6 +277,8 @@ type Write = {
 	next: StagedFile;
 	restore: StagedFile | null;
 	committed: boolean;
+	/** False until the post-publication snapshot records the ctime rename/link changed. */
+	verified: boolean;
 };
 
 function sameIdentity(a: Stats, b: Stats): boolean {
@@ -289,6 +293,20 @@ function sameSnapshot(a: Snapshot, b: Snapshot): boolean {
 				a.stat.mtimeMs === b.stat.mtimeMs &&
 				a.stat.ctimeMs === b.stat.ctimeMs &&
 				a.bytes.equals(b.bytes);
+}
+
+/** Publication changes ctime before its verification read. A failed read must not make that look like another writer. */
+function ownsPublished(current: Snapshot, write: Write): boolean {
+	const expected = write.next.snapshot;
+	if (
+		!current ||
+		!sameIdentity(current.stat, expected.stat) ||
+		current.stat.mode !== expected.stat.mode ||
+		!current.bytes.equals(expected.bytes)
+	) {
+		return false;
+	}
+	return write.verified ? sameSnapshot(current, expected) : true;
 }
 
 /** Reading an already-open regular file never follows a substituted final symlink. */
@@ -322,7 +340,7 @@ function snapshot(path: string): Snapshot {
 export function apply(changes: readonly Change[]): Change[] {
 	const pending = changes.filter((change) => change.status !== "current");
 	const directories = new Map<string, Directory>();
-	const createdDirectories: Directory[] = [];
+	const createdDirectories: { path: string; stat: Stats }[] = [];
 	const staged: StagedFile[] = [];
 	const writes: Write[] = [];
 	const failures: string[] = [];
@@ -343,7 +361,6 @@ export function apply(changes: readonly Change[]): Change[] {
 			return pinned;
 		}
 		refuseSymlinks("/", path);
-		let created = false;
 		let source = path;
 		if (create) {
 			const parent = pinDirectory(dirname(path), false);
@@ -351,7 +368,9 @@ export function apply(changes: readonly Change[]): Change[] {
 			source = join(parent.anchor, path.slice(dirname(path).length + 1));
 			if (!lstatSync(source, { throwIfNoEntry: false })) {
 				mkdirSync(source);
-				created = true;
+				const stat = lstatSync(source);
+				// Record ownership before open. A failed open must still remove this empty directory.
+				createdDirectories.push({ path, stat });
 			}
 		}
 		const fd = openSync(source, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
@@ -370,7 +389,6 @@ export function apply(changes: readonly Change[]): Change[] {
 		}
 		const directory = { path, fd, anchor, stat };
 		directories.set(path, directory);
-		if (created) createdDirectories.push(directory);
 		checkDirectory(directory);
 		return directory;
 	}
@@ -397,7 +415,7 @@ export function apply(changes: readonly Change[]): Change[] {
 		const name = join(directory.anchor, path.slice(dirname(path).length + 1));
 		const next = stage(directory, bytes, mode);
 		const restore = before ? stage(directory, before.bytes, before.stat.mode) : null;
-		writes.push({ path, directory, name, before, next, restore, committed: false });
+		writes.push({ path, directory, name, before, next, restore, committed: false, verified: false });
 	}
 
 	try {
@@ -440,13 +458,14 @@ export function apply(changes: readonly Change[]): Change[] {
 				linkSync(write.next.path, write.name);
 			}
 			write.committed = true;
-			// link/rename changes ctime; retain the installed identity, not an unrelated replacement's snapshot.
+			// link/rename changes ctime. If this read fails, rollback still owns the staged inode and bytes.
 			const installed = snapshot(write.name);
 			if (!installed || !sameIdentity(installed.stat, write.next.snapshot.stat) ||
 				!installed.bytes.equals(write.next.snapshot.bytes)) {
 				throw new ProjectionRefused(`${write.path} changed during publication`);
 			}
 			write.next.snapshot = installed;
+			write.verified = true;
 			checkDirectory(write.directory);
 		}
 	} catch (cause) {
@@ -455,7 +474,7 @@ export function apply(changes: readonly Change[]): Change[] {
 			if (!write.committed) continue;
 			try {
 				// Use the pinned directory even if its old pathname was replaced. Never follow the replacement.
-				if (!sameSnapshot(snapshot(write.name), write.next.snapshot)) {
+				if (!ownsPublished(snapshot(write.name), write)) {
 					throw new Error("changed externally; preserved instead of overwriting");
 				}
 				if (write.restore) {
@@ -481,7 +500,11 @@ export function apply(changes: readonly Change[]): Change[] {
 		// Only remove a directory we created, still at its original location, and still empty.
 		for (const directory of [...createdDirectories].reverse()) {
 			try {
-				checkDirectory(directory);
+				const now = lstatSync(directory.path, { throwIfNoEntry: false });
+				if (!now) continue;
+				if (!now.isDirectory() || !sameIdentity(now, directory.stat)) {
+					throw new Error(`${directory.path} changed externally; preserved instead of removing`);
+				}
 				rmdirSync(directory.path);
 			} catch (cause) {
 				if ((cause as NodeJS.ErrnoException).code !== "ENOTEMPTY") failures.push(`directory cleanup: ${String(cause)}`);

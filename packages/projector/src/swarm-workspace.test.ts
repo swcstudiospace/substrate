@@ -187,6 +187,7 @@ describe("refusals: exit 2 and nothing written anywhere", () => {
 			},
 		],
 		["a dangling symlink where the file goes", () => symlinkSync(join(ws, "nowhere"), join(ws, ".mcp.json"))],
+		["a null mcpServers map", () => put(".mcp.json", '{"mcpServers":null}\n')],
 	];
 
 	for (const [name, setup] of cases) {
@@ -205,6 +206,22 @@ describe("refusals: exit 2 and nothing written anywhere", () => {
 		expect(r.code).toBe(2);
 		expect(r.err).toContain("no MCP entry for runtime trae");
 		expect(files()).toEqual({});
+	});
+
+	test("prototype names are refused instead of being treated as runtimes", () => {
+		const r = run("--workspace", ws, "--runtimes", "toString,constructor", "--apply");
+		expect(r.code).toBe(2);
+		expect(r.err).toContain("no MCP entry for runtime toString, constructor");
+		expect(files()).toEqual({});
+	});
+
+	test("a named pipe is refused instead of blocking planning", () => {
+		const pipe = join(ws, ".mcp.json");
+		expect(Bun.spawnSync(["mkfifo", pipe]).exitCode).toBe(0);
+		const started = Date.now();
+		expect(() => plan(ws, ["claude"])).toThrow("not a regular file");
+		expect(Date.now() - started).toBeLessThan(1000);
+		expect(lstatSync(pipe).isFIFO()).toBe(true);
 	});
 
 	test("a workspace that does not exist", () => {
@@ -324,6 +341,55 @@ describe("safe staged apply", () => {
 		const first = files();
 		expect(apply(plan(ws))).toEqual([]);
 		expect(files()).toEqual(first);
+	});
+
+	test("a one-off read error after publication still restores the published file", () => {
+		put(".mcp.json", EXISTING_JSON);
+		put(".grok/config.toml", EXISTING_TOML);
+		const planned = plan(ws);
+		const before = files();
+		const realRead = fs.readFileSync;
+		const realRename = fs.renameSync;
+		let arm = false;
+		let failed = false;
+		const read = spyOn(fs, "readFileSync").mockImplementation(((
+			path: fs.PathOrFileDescriptor,
+			options?: Parameters<typeof realRead>[1],
+		) => {
+			if (arm && !failed && typeof path === "number") {
+				failed = true;
+				throw new Error("injected read error");
+			}
+			return (options === undefined ? realRead(path) : realRead(path, options)) as ReturnType<typeof realRead>;
+		}) as typeof fs.readFileSync);
+		const rename = spyOn(fs, "renameSync").mockImplementation((source, destination) => {
+			const result = realRename(source, destination);
+			if (String(destination).endsWith("/.mcp.json")) arm = true;
+			return result;
+		});
+		try {
+			expect(() => apply(planned)).toThrow("injected read error");
+		} finally {
+			read.mockRestore();
+			rename.mockRestore();
+		}
+		expect(failed).toBe(true);
+		expect(files()).toEqual(before);
+	});
+
+	test("a directory whose descriptor cannot be opened is removed", () => {
+		const planned = plan(ws, ["grok"]);
+		const realOpen = fs.openSync;
+		const open = spyOn(fs, "openSync").mockImplementation((path, flags, mode) => {
+			if (String(path).endsWith("/.grok")) throw new Error("injected open failure");
+			return realOpen(path, flags, mode);
+		});
+		try {
+			expect(() => apply(planned)).toThrow("injected open failure");
+		} finally {
+			open.mockRestore();
+		}
+		expect(readdirSync(ws)).toEqual([]);
 	});
 
 	test("a later commit failure removes only files and directories it created", () => {

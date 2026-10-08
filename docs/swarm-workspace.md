@@ -34,20 +34,25 @@ The rules are the ones Phase 0 set for Cursor's `hooks.json`, adapted to servers
 - **Idempotent.** An identical `substrate` entry, in any key order, is left alone; a second run writes nothing.
 - **Never replace.** A `substrate` entry that differs is refused rather than overwritten: the projector cannot tell an
   older projection from an operator's edit. Remove it and re-run.
-- **Refuse what it cannot read.** Unparsable JSON or TOML, an `mcpServers` that is not an object, or an inline
-  `mcp_servers = { … }` table that an appended `[mcp_servers.substrate]` cannot extend is refused, never reset. So is a
-  symlink anywhere between the workspace and the file, a dangling one included.
+- **Refuse what it cannot read.** Unparsable JSON or TOML, a present `mcpServers`/`mcp_servers` that is not an object
+  (`null` included; a missing key is the only empty map), or an inline `mcp_servers = { … }` table that an appended
+  `[mcp_servers.substrate]` cannot extend is refused, never reset. So is a symlink anywhere between the workspace and
+  the file, a dangling one included, and any non-regular file such as a named pipe. Planning uses the same no-follow,
+  non-blocking read as apply, so a pipe cannot stall it.
 - **Staged, recoverable apply.** Every config and backup is staged before any destination is published. `--apply`
   refuses if a file changed since planning, rechecks directory identities and destination snapshots immediately before
-  commit, and rolls back earlier publications if a later one fails. Rollback restores original bytes and permissions,
-  including an older `<file>.substrate-backup`; it does not overwrite a detected intervening external edit. Such a
-  conflict is reported explicitly as **rollback incomplete**, not as a successful rollback.
+  commit, and rolls back earlier publications if a later one fails. `rename` and `link` change ctime before the
+  publication can be reread. If that one read fails, rollback still treats the staged inode, mode and bytes as its own
+  publication; a later external replacement is still preserved. Rollback restores original bytes and permissions,
+  including an older `<file>.substrate-backup`. A detected intervening external edit is reported explicitly as
+  **rollback incomplete**, not as a successful rollback.
 - **Safe filesystem publication.** Existing configs retain their permissions; a backup receives the original config's
   bytes and permissions. Staging uses unpredictable, exclusive, no-follow files and destination directories pinned by
   file descriptors, so planted backup/temp symlinks cannot redirect writes. Config and backup symlinks are refused,
   including links introduced after planning. A descriptor filesystem (`/proc/self/fd` or `/dev/fd`) is required;
-  unavailable support is refused rather than replaced with unsafe path writes. Cleanup removes only owned staging
-  files and owned empty directories, never unrelated files or links. Operator permissions are not repaired.
+  unavailable support is refused rather than replaced with unsafe path writes. A directory this apply creates is
+  recorded before its descriptor is opened, so a failed open still removes that empty directory. Cleanup removes only
+  owned staging files and owned empty directories, never unrelated files or links. Operator permissions are not repaired.
 - **Atomic per file, not crash-atomic across files.** Readers see complete individual files. A running apply can undo
   its own failed commits, but a process crash or machine loss is not a multi-file transaction; concurrent writers should
   still be excluded operationally. Detected external edits are preserved and require operator reconciliation.
