@@ -205,6 +205,19 @@ the proof the scratch run added nothing to production:
 - In the production Postgres graph tables, `count(*)` for rows whose graph
   or session id starts with the run's `rh-` tag is 0.
 
+Copyable read-only statements (no credentials here — run them through the
+operator's existing authenticated sessions):
+
+```sql
+-- Production Greptime (agent_events):
+SELECT count(*) FROM agent_events WHERE "graph_id" LIKE 'rh-%' OR "session_id" LIKE 'rh-%';
+
+-- Production Postgres (graph tables):
+SELECT count(*) FROM graph_index WHERE graph_id LIKE 'rh-%';
+SELECT count(*) FROM graph_nodes WHERE graph_id LIKE 'rh-%' OR claim_session LIKE 'rh-%';
+SELECT count(*) FROM graph_steps WHERE graph_id LIKE 'rh-%';
+```
+
 Raw production row counts move with live traffic, so they cannot show that a
 run added nothing; the tag counts can. Record both results beside the proof
 row in the evidence table.
