@@ -660,6 +660,8 @@ export interface WriteReport {
 	id: string | null;
 	reason: string | null;
 	remedy: string | null;
+	/** The caller's report identity, on outcome reports: the `--report-id` the key is scoped to. */
+	report?: string;
 }
 
 /** The two statuses that carry an id anyone may cite. */
@@ -866,9 +868,14 @@ export function httpMemory(connection: Connection): MemoryApi {
 				const reply = JSON.parse(text) as unknown;
 				if (reply && typeof reply === "object") {
 					const decision = reply as WriteReply;
-					for (const field of ["reason", "remedy", "error", "conflict_with", "quarantine_id", "review_id"] as const) {
+					// `interpret` branches on the raw protocol fields, so only displayed
+					// diagnostic text is scrubbed here and identifiers stay exact: a
+					// credential-shaped token must never flip the decision or rewrite an
+					// id it overlaps. `review.required` is the protocol's own constant,
+					// not diagnostic text, so it is kept verbatim.
+					for (const field of ["reason", "remedy", "error"] as const) {
 						const value = decision[field];
-						if (typeof value === "string") decision[field] = diagnostic(value);
+						if (typeof value === "string" && value !== "review.required") decision[field] = diagnostic(value);
 					}
 					return decision;
 				}
@@ -924,7 +931,7 @@ const USAGE =
 	"substrate lessons add --from SUMMARY.md [--key-decisions] [--milestone M] [--phase P] [--tags a,b] [--skip slug,...]\n" +
 	"substrate lessons recall [QUERY] [--limit N] [--half-life DAYS]\n" +
 	"substrate lessons digest <milestone> [--ids a,b [--unchecked]] [--text T]\n" +
-	"substrate lessons outcome <lesson id> --result success|partial|failure --phase P [--milestone M] [--note T] [--unchecked]\n" +
+	"substrate lessons outcome <lesson id> --result success|partial|failure --phase P --report-id ID [--milestone M] [--note T] [--unchecked]\n" +
 	"  every command: [--scope S | --repo owner/name] [--json]; add, digest and outcome also take --dry-run\n" +
 	`  --outcome, how the phase that taught the lesson went: ${LESSON_OUTCOMES.join(", ")} (default success)\n`;
 
@@ -1031,6 +1038,8 @@ interface Planned {
 	key: string;
 	body: string;
 	skipped: boolean;
+	/** The caller's report identity, on outcome dry runs: the `--report-id` the key is scoped to. */
+	report?: string;
 }
 
 function printPlanned(planned: readonly Planned[], scope: string, json: boolean, deps: LessonsDeps): void {
@@ -1374,10 +1383,16 @@ async function outcome(args: Args, positional: string | undefined, deps: Lessons
 	const lessonId = (str(args.lesson) ?? positional ?? "").trim().toLowerCase();
 	const result = str(args.result)?.trim().toLowerCase();
 	if (!/^[a-z0-9_-]+$/.test(lessonId) || !result) {
-		throw new UsageError("usage: substrate lessons outcome <lesson id> --result success|partial|failure --phase P");
+		throw new UsageError("usage: substrate lessons outcome <lesson id> --result success|partial|failure --phase P --report-id ID");
 	}
 	if (!(OUTCOME_RESULTS as readonly string[]).includes(result)) {
 		throw new UsageError(`--result must be one of ${OUTCOME_RESULTS.join(", ")}`);
+	}
+	// The report's identity: exact and case-preserving, so the same logical report
+	// retried under the same id replays while a correction mints a fresh id.
+	const reportId = str(args["report-id"]);
+	if (reportId === undefined || !/^[A-Za-z0-9._:-]{1,200}$/.test(reportId)) {
+		throw new UsageError("usage: substrate lessons outcome <lesson id> --result success|partial|failure --phase P --report-id ID (letters, digits, . _ : -, 1-200 characters)");
 	}
 	const milestone = identifier(str(args.milestone) ?? currentMilestone(deps) ?? "");
 	const phase = identifier(str(args.phase) ?? "");
@@ -1409,18 +1424,19 @@ async function outcome(args: Args, positional: string | undefined, deps: Lessons
 	}
 
 	const subject = `${SUBJECT.outcome}${lessonId}`;
-	// The newest differing state anchors this transition. Skipping identical reports
-	// keeps retries stable after persistence, while A -> B -> A gets a new key.
-	const previous = before.find((record) =>
-		record.milestone === milestone && record.phase === phase && (record.result !== result || record.note !== note),
-	);
-	const key = `${SUBJECT.outcome}${sha256([scope, lessonId, `${milestone}/${phase}`, result, note, ...(previous ? [previous.id] : [])].join("\n"))}`;
+	// The report id is the transition's identity: the same logical report retried
+	// under the same id reuses this key and replays instead of writing again, while
+	// a correction mints a fresh id and appends. The key never depends on stored
+	// reports, the verdict or the note, so a lost reply cannot undo a newer verdict;
+	// reusing an id with different content is the gate's idempotency conflict.
+	const key = `${SUBJECT.outcome}${sha256([scope, lessonId, `${milestone}/${phase}`, reportId].join("\n"))}`;
 	const body = [
 		`[${MARKERS.outcome}]`,
 		`lesson: ${lessonId}`,
 		`result: ${result}`,
 		`milestone: ${milestone}`,
 		`phase: ${phase}`,
+		`report: ${reportId}`,
 		...(note ? ["", note] : []),
 	].join("\n");
 	if (body.length > MAX_BODY) {
@@ -1428,13 +1444,14 @@ async function outcome(args: Args, positional: string | undefined, deps: Lessons
 		return 1;
 	}
 	if (args["dry-run"]) {
-		printPlanned([{ subject, key, body, skipped: false }], scope, args.json === true, deps);
+		printPlanned([{ subject, key, body, report: reportId, skipped: false }], scope, args.json === true, deps);
 		return 0;
 	}
 
 	const report: WriteReport = {
 		subject,
 		key,
+		report: reportId,
 		...(await writeGoverned(deps.memory, { scope, kind: "fact", subject, text: body, idempotency_key: key })),
 	};
 	const was = scoreOf(before);

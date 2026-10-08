@@ -18,7 +18,7 @@ substrate lessons add --from .planning/phases/15-lessons-bank/15-01-SUMMARY.md -
 substrate lessons add --from .planning/phases/15-lessons-bank/15-01-SUMMARY.md
 substrate lessons add --text "Leases expire lazily; no reaper is on the path." --phase 11-lease-authority --tags lease
 substrate lessons recall "lease heartbeat"
-substrate lessons outcome mem_… --result success --phase 12-swarm-leases
+substrate lessons outcome mem_… --result success --phase 12-swarm-leases --report-id 12-swarm-leases-1
 substrate lessons digest v1.1
 ```
 
@@ -28,7 +28,7 @@ substrate lessons digest v1.1
 | `add --from SUMMARY.md [--key-decisions] [--milestone M] [--phase P] [--tags a,b] [--skip slug,…]` | one lesson per bullet | same |
 | `recall [QUERY] [--limit N] [--half-life DAYS]` | nothing | always 0: it fails open |
 | `digest <milestone> [--ids a,b [--unchecked]] [--text T]` | one digest | 0 when `recorded` or `duplicate`, else 1 |
-| `outcome <lesson id> --result success\|partial\|failure --phase P [--milestone M] [--note T] [--unchecked]` | one outcome | same |
+| `outcome <lesson id> --result success\|partial\|failure --phase P --report-id ID [--milestone M] [--note T] [--unchecked]` | one outcome | same |
 
 Every command takes `--scope S` or `--repo owner/name` and `--json`. `add`, `digest` and
 `outcome` take `--dry-run`, which prints the subject, key and body and sends nothing. That
@@ -55,7 +55,10 @@ mid-flight is one whose outcome nobody knows.
 Transport diagnostics remove URL userinfo, queries and fragments, redact configured
 credential values and recognised credential patterns, then cap each remote diagnostic
 at 200 characters. HTTP status and a scrubbed reason remain available, including for
-refused writes. This affects diagnostics only: the request URL, authorization and body,
+refused writes. Only the displayed reason, remedy and error text is scrubbed: the
+gate's decision fields (entry, quarantine, review and conflict ids, and the
+`review.required` reason) stay exact, so a credential-shaped token can neither flip a
+decision nor rewrite an id it overlaps. This affects diagnostics only: the request URL, authorization and body,
 governed write decisions, and successfully recalled lesson content are not rewritten.
 
 ## What gets written
@@ -88,8 +91,9 @@ quarantined and review.required are returned to the caller, never retried.
   the text does not change the key. The scope is in the key because the server's
   idempotency keys are global; the same lesson added to another scope becomes that scope's
   own entry. Changing the header (tags, outcome) under the same key is a `conflict`
-  (`idempotency.reused`): the entry already recorded stands. Digest and outcome keys
-  include the scope for the same reason.
+  (`idempotency.reused`): the entry already recorded stands. Digest keys include the
+  scope for the same reason; outcome keys hash the scope with the lesson, the citing
+  milestone/phase and the report id (see [Outcomes and the success score](#outcomes-and-the-success-score)).
 - A body longer than 4000 characters, the gate's cap, is refused before it is sent rather
   than cut.
 
@@ -252,8 +256,16 @@ Milestone v1.1 rolls up 3 lessons.
 After a phase that cited a lesson is verified, report how the lesson worked out:
 
 ```sh
-substrate lessons outcome mem_3f… --result success --phase 12-swarm-leases --note "Takeover held under load."
+substrate lessons outcome mem_3f… --result success --phase 12-swarm-leases --report-id 12-swarm-leases-1 --note "Takeover held under load."
 ```
+
+`--report-id` is required, including for `--dry-run`, and names the report: the same
+logical report retried under the same id replays instead of writing again, while a
+correction mints a fresh id and appends another outcome. It is the caller's exact
+identity, case-preserving, of letters, digits, `.` `_` `:` and `-`, 1–200 characters;
+a missing, empty or misshapen id is refused before anything is read or sent. The id
+travels in the body and in the planned and written reports, so a dry run shows the
+identity that will be recorded.
 
 This appends one `fact` with subject `lesson-outcome:<lesson id>`, in the `repo-working`
 grant like the lesson itself:
@@ -264,6 +276,7 @@ lesson: mem_3f…
 result: success
 milestone: v1.2
 phase: 12-swarm-leases
+report: 12-swarm-leases-1
 
 Takeover held under load.
 ```
@@ -279,13 +292,16 @@ JavaScript's millisecond precision, the server's newest-first order decides whic
 report counts. A phase that changes its verdict appends another outcome, and the newer
 one replaces the older in the score instead of adding another vote.
 
-The key hashes the scope, lesson id, citing milestone/phase, result and
-whitespace-collapsed note, plus the id of that phase's newest prior report with a
-different result or note (when one exists). Identical retries skip identical reports
-when finding that prior state, so they reuse the key even after persistence. A
-success → failure → success correction therefore appends a new success rather than
-replaying the first one. Note-only corrections follow the same rule; reports from
-another phase or scope do not change this key.
+The key hashes the scope, lesson id, citing milestone/phase and report id, and nothing
+else: never the stored reports, the verdict or the note. Retrying the same logical
+report under the same id therefore reuses the key even after persistence — a landed
+write replays as `duplicate` with the original entry id, and a lost reply can never
+undo a newer verdict. A success → failure → success sequence is two ids: the retry of
+the first success returns the original `duplicate` and leaves the score alone, while a
+fresh id for the second success appends and moves the score. Reusing an id with
+different content is the gate's idempotency conflict (`idempotency.reused`): the entry
+already recorded stands, reported as `conflict`, never a second write. Reports from
+another phase, scope or id do not change this key.
 
 `outcome` refuses an id that is not a lesson or digest in the scope, because an outcome
 is permanent; `--unchecked` records it anyway. An outcome body exceeding 4000 characters
@@ -310,7 +326,7 @@ verification, and written at phase close.
    `… heartbeat at a third of the TTL [lesson mem_3f…].` The id is the only stable
    reference: subjects are not unique, and the text can be rolled into a digest.
 3. **Verify.** For each cited lesson, record whether it held:
-   `substrate lessons outcome <id> --result success|partial|failure --phase <phase>`.
+   `substrate lessons outcome <id> --result success|partial|failure --phase <phase> --report-id <phase>-1`.
 4. **Phase close.** Put the phase's lessons under `## Lessons` in its SUMMARY.md, review
    them with `substrate lessons add --from <SUMMARY> --dry-run`, then write them.
 5. **Milestone close.** `substrate lessons digest <milestone>`.
