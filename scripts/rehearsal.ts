@@ -183,6 +183,18 @@ export function refuseDockerEnv(env: { DOCKER_HOST?: string; DOCKER_CONTEXT?: st
 	return null;
 }
 
+/**
+ * The surface whose token the smoke drives: the operator when set (never a
+ * swarm surface — parseOperator enforces that), else the first non-swarm
+ * surface. A swarm-first `--surfaces` list must not hand the smoke a swarm
+ * token: a swarm token needs a `<AGENT>@<replica>:<graph_id>` session,
+ * while the smoke claims with a plain run-tag session.
+ */
+export function pickSmokeSurface(surfaces: readonly Surface[], operator: Surface | null): Surface | undefined {
+	if (operator !== null) return operator;
+	return surfaces.find((s) => !isSwarmSurface(s)) ?? surfaces[0];
+}
+
 /** A checkout the twin may run from: never the production unit's checkout. */
 export function refuseCheckoutDir(cwd: string): string | null {
 	if (cwd === UNIT_WORKING_DIRECTORY) return `refusing to run from the production checkout ${cwd}`;
@@ -845,6 +857,8 @@ async function runUp(opts: UpOptions, checkout: string): Promise<number> {
 
 	const firstSurface = surfaces[0];
 	const firstToken = firstSurface !== undefined ? secrets.surfaceTokens[firstSurface] : undefined;
+	const smokeSurface = pickSmokeSurface(surfaces, opts.operator);
+	const smokeToken = smokeSurface !== undefined ? secrets.surfaceTokens[smokeSurface] : undefined;
 	const health = await waitForHealth(`http://127.0.0.1:${mcpPort}`, firstToken ?? null, READY_TIMEOUT_MS);
 	if (!isTwinHealthy(health)) {
 		killVerifiedSpawn(server.pid, checkout, facts.startSeconds);
@@ -876,7 +890,7 @@ async function runUp(opts: UpOptions, checkout: string): Promise<number> {
 	const testPgUrl = `postgresql://postgres:${secrets.pgPassword}@127.0.0.1:${pgHost.port}/postgres`;
 	writeMode(join(runDir, "consumer.env"), toShellExports(consumerEnvRecord({
 		mcpPort,
-		firstToken: firstToken ?? "",
+		firstToken: smokeToken ?? "",
 		runDir,
 		name: opts.name,
 		testPgUrl,

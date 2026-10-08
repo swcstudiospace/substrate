@@ -13,12 +13,13 @@ import {
 	clearDirectory,
 	ensurePrivateDir,
 	flag,
+	freeBytes,
 	gitOutput,
 	isPortFree,
 	isTwinHealthy,
 	killVerifiedSpawn,
 	mayStop,
-	freeBytes,
+	parseDockerIds,
 	parseDockerPortLine,
 	parseDockerRootDir,
 	parseName,
@@ -26,13 +27,13 @@ import {
 	parseShellExports,
 	parseSurfaces,
 	pickFreePort,
+	pickSmokeSurface,
 	refuseCheckoutDir,
 	refuseDockerEnv,
 	refuseExtraArgs,
-	parseDockerIds,
 	refusePort,
-	resolveContainerRemoval,
 	refuseSmokeUrl,
+	resolveContainerRemoval,
 	smokeToolResult,
 	type ProcFacts,
 } from "./rehearsal.ts";
@@ -483,5 +484,14 @@ describe("clearDirectory", () => {
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("pickSmokeSurface", () => {
+	test("a swarm-first list smokes with a non-swarm token", () => {
+		expect(pickSmokeSurface(["swarm-a01-orch", "cursor"], null)).toBe("cursor");
+		expect(pickSmokeSurface(["cursor", "hermes"], null)).toBe("cursor");
+		expect(pickSmokeSurface(["cursor", "hermes"], "hermes")).toBe("hermes");
+		expect(pickSmokeSurface([], null)).toBeUndefined();
 	});
 });
