@@ -4,6 +4,8 @@
 **Domain:** Closed event vocabulary (TypeScript const enums + typed mapping table), Bun test guards, read-only git baseline diff, HTTP sample-emit smoke against the Phase 16 rehearsal harness, audit-mode policy sets
 **Confidence:** HIGH (all load-bearing facts read from the worktree at `dcc4f4c` / baseline `ab62c91` this session; Phase 16 contracts are planned, not merged, and are marked as such)
 
+> **Superseded by the 2026-10-08 operator decision (see 17-CONTEXT.md "Operator decisions"):** host jobs get exactly one reviewed system surface, `substrate`, appended last to `SURFACES` (27 total; `EVENT_KINDS` stays at 12). Every "26 surfaces", "no SURFACES change", "no surface is added", "`job-token` / token-surface with `claude-code` fallback", and "dedicated surface not taken" statement below is stale; plans follow CONTEXT, not those lines.
+
 <user_constraints>
 ## User Constraints (from CONTEXT.md)
 

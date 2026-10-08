@@ -2,21 +2,21 @@
 
 **Gathered:** 2026-10-08
 **Status:** Ready for planning
-**Mode:** Smart discuss, auto-accepted under the v1.3 run rules (`.planning/STATE.md`, "v1.3 decisions"). Mapping new sources onto the existing kinds and surfaces is already the operator's decision ("`EVENT_KINDS` stays unchanged", REQUIREMENTS "Vocabulary"). One residual attribution choice is listed for the operator under "Open for the operator"; the plan uses the recommended answer unless the operator overrides it.
+**Mode:** Smart discuss, auto-accepted under the v1.3 run rules (`.planning/STATE.md`, "v1.3 decisions"). Mapping new sources onto the existing kinds is already the operator's decision ("`EVENT_KINDS` stays unchanged", REQUIREMENTS "Vocabulary"). The residual host-job attribution question was answered by the operator on 2026-10-08 (see "Operator decisions").
 
 <domain>
 ## Phase Boundary
 
 One PR on agent-substrate (FOUND-02) that settles policy before any v1.3 source or tool ships:
 
-1. **Event mapping.** Every event source v1.3 adds has a documented, tested mapping onto the existing 12 `EVENT_KINDS` and the existing 26 `SURFACES`. The mapping is written down once, in `docs/event-vocabulary.md`, and encoded once, in a typed table inside `packages/mcp-server/src`. Later phases implement against that table and add no kind and no surface.
-2. **Vocabulary lock and phase-close check.** A test pins `EVENT_KINDS` (and `SURFACES`) to their v1.2 values. A phase-close check runs `store-lock.test.ts` and diffs `EVENT_KINDS` against the v1.2 baseline commit. It passes on this phase and every later phase runs it.
+1. **Event mapping.** Every event source v1.3 adds has a documented, tested mapping onto the existing 12 `EVENT_KINDS` and onto `SURFACES`, which gains exactly one reviewed system surface, `substrate`, for host jobs (operator, 2026-10-08): 26 v1.2 surfaces plus `substrate` = 27. The mapping is written down once, in `docs/event-vocabulary.md`, and encoded once, in a typed table inside `packages/mcp-server/src`. Later phases implement against that table and add no kind and no surface.
+2. **Vocabulary lock and phase-close check.** A test pins `EVENT_KINDS` to its v1.2 value and `SURFACES` to the v1.2 list plus `substrate`. A phase-close check runs `store-lock.test.ts` and diffs `EVENT_KINDS` against the v1.2 baseline commit (unchanged), and checks `SURFACES` equals the v1.2 list plus `substrate`. It passes on this phase and every later phase runs it.
 3. **Sample emits.** Against the Phase 16 rehearsal harness, one sample event per mapped source is posted to `POST /events` and stored, with zero refusals.
 4. **Audit policy.** `packages/audit/src/policy.ts` records fail-open or fail-closed for every MCP tool v1.3 plans to add, and `policy.test.ts` fails when a planned tool has no entry or has the opposite decision.
 
 **Out of scope:**
 - The tools, routes and collectors themselves (Phases 19–33). Phase 17 does not touch `mcp.ts` tool registration or `observe.ts` `KNOWN_TOOLS`; each tool's phase does those two registrations and inherits the audit mode decided here.
-- Any change to `EVENT_KINDS`, `SURFACES`, `normalizeEvent`, `MEMORY_KINDS` or the hash chain.
+- Any change to `EVENT_KINDS`, `normalizeEvent`, `MEMORY_KINDS` or the hash chain; any `SURFACES` change other than adding `substrate`.
 - The shared redactor (Phase 18), production tokens (Phase 20).
 - Fixing live producers in other repos (hermes-engineering-board, see Deferred).
 
@@ -28,7 +28,8 @@ One PR on agent-substrate (FOUND-02) that settles policy before any v1.3 source 
 ## Implementation Decisions
 
 ### Mapping rules (apply to every source)
-- **Closed vocabulary, both enums.** No kind and no surface is added; `normalizeEvent` (`event.ts:124-131`) keeps refusing anything else. A source with no fitting surface is not emitted under a wrong one: it is dropped and counted by its emitter (LANEB-05 / A-T5 counting).
+- **Closed vocabulary, both enums.** No kind is added; the only surface added is `substrate` (host jobs, operator 2026-10-08). `normalizeEvent` (`event.ts:124-131`) keeps refusing anything else. A source with no fitting surface is not emitted under a wrong one: it is dropped and counted by its emitter (LANEB-05 / A-T5 counting).
+- **Host jobs emit as `substrate`.** The hourly anchor, the skills sync, the dispatcher and any other non-agent host job emit under surface `substrate`, with `payload.runtime` naming the job (`anchor`, `skills-sync`, `dispatcher`, …). The token is `SUBSTRATE_TOKEN_SUBSTRATE` (`tokenEnvName("substrate")`; `surfaceForToken` resolves it to `substrate`). A `substrate` token is bound to its surface like a swarm token: `attributedSurface` refuses it naming any other surface.
 - **`payload.action` is the discriminator** for events a component records about itself, following main's existing use (`service.ts:1130` `action: "expired"`, lease events' `action: "released" | "stolen"`). September's would-be kinds become `payload.action` values: `skill.propose`, `docs.ingest`, `docs.search`, `teachable`, `anchor`, `mirror`, `dispatch`, `approval`, `skills.sync`.
 - **`payload.runtime` names a non-agent producer** acting for an agent or for the host (`herdr`, `agentos`, `anchor`, `dispatcher`, `skills-sync`), as LANEB-02 already fixes for herdr.
 - **The original type always travels.** Where a source has its own event type (herdr's `pane.*`), the exact type is kept in a payload field (`payload.herdr_type`), the v1.1 swarm precedent (`payload.swarm_type`, ADR 0001 risk table). An unmapped type is a test failure in that source's mapper, not a silent `note`; at runtime an unknown herdr type still becomes a `note` carrying `herdr_type`, as `grok-map.ts`'s default does.
@@ -49,18 +50,18 @@ One PR on agent-substrate (FOUND-02) that settles policy before any v1.3 source 
 | Cursor `stop` hook (19) | `session.end` | `cursor` | `actor: "human"` (as the projector's existing hooks), `session_id` = conversation id, `conversation_id`, `transcript_ref`, `status`, `reason?` |
 | `skills_propose` outcome (21) | `note` | the authenticated caller's surface (never body-supplied) | `action: "skill.propose"`, `name`, `status` (`opened`/`existing`/`declined`/`unchanged`), `pr_url`, `content_sha256`; `repo` = `swcstudiospace/agent-skills` |
 | `skills_propose` refused (21) | `warning` | same | `action: "skill.propose"`, `status: "refused"`, `reason`, rule names only |
-| skills sync refusal (22) | `warning` | the sync job's token surface | `action: "skills.sync"`, `runtime: "skills-sync"`, `reason` (`dirty`/`off-branch`/`diverged`) |
+| skills sync refusal (22) | `warning` | `substrate` | `action: "skills.sync"`, `runtime: "skills-sync"`, `reason` (`dirty`/`off-branch`/`diverged`) |
 | `docs_search` (25) | `note` | caller | `action: "docs.search"`, `dataset_ids`, `urls` (returned source URLs, DOCS-01), `count`; an error is a `warning` with `reason` |
 | `docs_ingest` (25) | `note` | caller | `action: "docs.ingest"`, `dataset_id`, `source_url`, `content_sha256`, `status` (`uploaded`/`unchanged`) |
 | `docs_ingest` refused (25) | `warning` | caller | `action: "docs.ingest"`, `status: "refused"`, `reason`, rule names only |
 | Hindsight retain failure (26) | `warning` | the memory's writer | `action: "memory.retain"`, `reason`; a successful retain and every recall emit nothing (reads do not emit, like `memory_search`) |
 | `desktop_run`, one per action (30) | `tool.call` | caller | `tool: "desktop_run"`, `action` (`click`/`type`/`key`/`screenshot`), `run_id`, `i`, `ok`, `ms`; typed text as `text_len` + `text_sha256`; screenshots as `sha256`, `width`, `height` |
-| Hourly anchor written or adopted (28) | `note` | the anchor job's token surface | `action: "anchor"`, `runtime: "anchor"`, `period_start`, `period_end`, `root`, `event_count`, `tx_sig`, `cluster`, `adopted`; it lands in the hour after the one it anchors |
+| Hourly anchor written or adopted (28) | `note` | `substrate` | `action: "anchor"`, `runtime: "anchor"`, `period_start`, `period_end`, `root`, `event_count`, `tx_sig`, `cluster`, `adopted`; it lands in the hour after the one it anchors |
 | Anchor root mismatch or send failure (28) | `warning` | same | `action: "anchor"`, `runtime: "anchor"`, `period_start`, `reason` |
 | Teachable accepted (29) | `note` | the memory writer | `action: "teachable"`, `memory_id`, `subject`, `content_sha256`; never the text. Emitted on an accepted, verified teachable `fact` write (main emits nothing for accepted writes today), which puts it inside the hourly anchor's coverage (CARD-03) |
 | Claim-mirror failure (23) | `warning` | the lease holder | `action: "mirror"`, `target` (`linear`/`notion`), `op`, `reason` (MIRROR B-T5: one per failed target) |
 | DoD gate (23) | existing lease events | holder | Existing release/complete events keep their shape; the gated path adds `payload.dod`; a gate refusal or error is a `warning` with `action: "dod"`, `reason` |
-| Dispatcher outcome (24) | `note` / `warning` | the dispatcher's token surface | `action: "dispatch"`, `runtime: "dispatcher"`, `outcome`, `graph_id`; the launched agent's own events use its own surface |
+| Dispatcher outcome (24) | `note` / `warning` | `substrate` | `action: "dispatch"`, `runtime: "dispatcher"`, `outcome`, `graph_id`; the launched agent's own events use its own surface |
 | Lane A VM session (32) | `session.start` / `session.end` | `claude-code` | `runtime: "agentos"`, `graph_id`, `node_id` |
 | Lane A permission request (33) | `note` / `warning` | `claude-code` | `action: "approval"`, `decision` (`requested`/`approved`/`denied`/`timeout`) |
 
@@ -75,16 +76,16 @@ One PR on agent-substrate (FOUND-02) that settles policy before any v1.3 source 
 - **Later phases' mappers test against the table.** For example the Phase 19 herdr mapper asserts its output kind and action equal the `EVENT_SOURCES` row. The table is the contract; changing it is a reviewed change to `docs/event-vocabulary.md` in the same PR.
 
 ### Vocabulary lock and the phase-close check
-- **`vocabulary-lock.test.ts`** in `packages/mcp-server/src` pins `EVENT_KINDS` to the v1.2 literal, in order (12 kinds), and `SURFACES` to its v1.2 literal (26 surfaces; the existing `authority.test.ts:220-227` already pins the count and order and stays). It runs in plain `bun test`, so every phase's normal verification already catches a change.
+- **`vocabulary-lock.test.ts`** in `packages/mcp-server/src` pins `EVENT_KINDS` to the v1.2 literal, in order (12 kinds), and `SURFACES` to the v1.2 literal plus `substrate` (27 surfaces). `authority.test.ts:220-227`'s count/order pin is updated to the same list. It runs in plain `bun test`, so every phase's normal verification already catches a change.
 - **`scripts/phase-close-check.ts`, run as `bun run check:phase-close`.** It:
   1. runs `bun test packages/mcp-server/src/store-lock.test.ts packages/mcp-server/src/vocabulary-lock.test.ts packages/mcp-server/src/event-sources.test.ts packages/audit/src/policy.test.ts`;
-  2. reads the `EVENT_KINDS` block from `git show ab62c91:packages/mcp-server/src/types.ts` (the v1.2 baseline named in STATE.md) and diffs it against the imported `EVENT_KINDS`, printing the diff on failure;
+  2. reads the `EVENT_KINDS` block from `git show ab62c91:packages/mcp-server/src/types.ts` (the v1.2 baseline named in STATE.md) and diffs it against the imported `EVENT_KINDS`, printing the diff on failure; and requires the imported `SURFACES` to equal the baseline `SURFACES` plus `substrate`;
   3. exits 0 only if both pass. Git calls use `--no-optional-locks` and only read objects; it never fetches or checks out.
 - **Every later phase runs it.** `docs/event-vocabulary.md` states it, and the orchestrator adds `bun run check:phase-close` to the verification of Phases 18–33 (ROADMAP bookkeeping is the orchestrator's; this phase does not edit ROADMAP or STATE).
 
 ### Sample-emit proof against the Phase 16 harness
 - **`scripts/vocabulary-smoke.ts`, run as `bun run smoke:vocabulary`.** It sources only the harness's `consumer.env`, refuses a `SUBSTRATE_URL` on port 7410 or a non-loopback host (the Phase 16 smoke guard), posts every `EVENT_SOURCES` sample to `POST /events` with `SUBSTRATE_TOKEN`, and requires `202` with `stored: true` for each. Any 4xx (an unknown kind or surface) or 503 fails the run, and the count of refusals is printed (must be 0).
-- **Attribution in the proof.** A non-swarm token may name another surface on `/events` (`attributedSurface`, `mcp.ts:91-97`), so the harness's default token (a non-swarm surface) can post every sample's own surface; no harness flag is needed.
+- **Attribution in the proof.** A non-swarm, non-`substrate` token may name another surface on `/events` (`attributedSurface`, `mcp.ts:91-97`), so the harness's default token can post every sample's own surface, including `substrate` rows; no harness flag is needed. The binding of a `substrate` token is proven by unit tests, not the smoke.
 - **Run-tagged.** Every sample's `session_id` and `graph_id` carry a `rh-vocab-<timestamp>` tag, and the script reads them back through `POST /events/query` to confirm one stored row per source.
 - **Proof run:** `bun run rehearsal up --name p17` → `bun run smoke:vocabulary` → `bun run check:phase-close` → `bun run rehearsal down --name p17`. Isolated, no live system, no operator approval needed.
 
@@ -158,10 +159,11 @@ One PR on agent-substrate (FOUND-02) that settles policy before any v1.3 source 
 
 - **hermes-engineering-board** (`substrate_client.py:24`, FEATURES P3) emits as surface `hermes-eng-board`, which main refuses. Its mapping is surface `hermes` with `payload.runtime: "eng-board"`, recorded in `docs/event-vocabulary.md`; the fix is a change in that plugin's repo, which no v1.3 phase owns. Raise with the operator.
 - Per-action event durability for `desktop_run` (stop the run when an action's event is not stored, versus continue and report) is Phase 30's decision; the recommendation recorded for it is to stop, since the tool is fail-closed and DESK-02 requires one event per action.
-- A dedicated non-agent surface (for example `substrate`) for host jobs would need a reviewed `SURFACES` change; not taken in v1.3.
+- (Resolved 2026-10-08: host jobs get the dedicated `substrate` surface; see "Operator decisions".)
 
 </deferred>
 
-## Open for the operator
+## Operator decisions
 
-- **Which existing surface do host jobs (the anchor timer, skills sync, the dispatcher) emit under?** `SURFACES` stays closed, so a job must borrow an agent surface, and that surface is what `events_query` and the brief show. Recommendation: each job emits under the surface of the token Phase 20's identity runbook assigns it, with `payload.runtime` naming the job; the default for a job with no assigned token is `claude-code`, the fallback main already uses for unattributed server events (`attributedSurface(null)`, the reaper and `graph_bind`). Alternative: add a `substrate` surface in a dedicated reviewed PR. The plan proceeds with the recommendation.
+- **2026-10-08, operator: host jobs get their own surface.** Phase 17 adds exactly one reviewed system surface, `substrate`, to `SURFACES`, used by host jobs (the hourly anchor, the skills sync, the dispatcher, and any other non-agent host job), with `payload.runtime` naming the job. `EVENT_KINDS` stays unchanged. This replaces the earlier recommendation to borrow the job token's agent surface (default `claude-code`).
+- REQUIREMENTS FOUND-02 and ROADMAP Phase 17 text will be updated by the orchestrator to read "existing kinds; one added surface `substrate`". This phase does not edit them.
