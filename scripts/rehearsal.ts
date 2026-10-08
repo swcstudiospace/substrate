@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Scratch rehearsal harness (`bun run rehearsal up|down|status`).
+ * Scratch rehearsal harness (`bun run rehearsal up|down|status|smoke`).
  *
  * One command starts this checkout's substrate-mcp on a scratch loopback port
  * against a scratch Postgres and a scratch ledger in local Docker containers,
@@ -781,6 +781,188 @@ async function runStatus(name: string): Promise<number> {
 	return health === "200" ? 0 : 1;
 }
 
+/** Loopback hosts the smoke may drive; anything else is a production risk. */
+const SMOKE_LOOPBACK_HOSTS: Record<string, true> = { "127.0.0.1": true, "::1": true, localhost: true };
+
+/**
+ * Refuse a smoke target before any request: port 7410 or a non-loopback host.
+ * Returns the reason, or null when the target is a scratch twin.
+ */
+export function refuseSmokeUrl(raw: string): string | null {
+	let url: URL;
+	try {
+		url = new URL(raw);
+	} catch {
+		return `unparseable smoke target ${raw}`;
+	}
+	if (url.port === "7410") return "refusing to smoke production :7410";
+	if (SMOKE_LOOPBACK_HOSTS[url.hostname] !== true) return `refusing non-loopback smoke host ${url.hostname}`;
+	return null;
+}
+
+/** Parse `export KEY='value'` lines, undoing the single-quote escape. */
+export function parseShellExports(text: string): Record<string, string> {
+	const out: Record<string, string> = {};
+	for (const line of text.split("\n")) {
+		const trimmed = line.trim();
+		if (!trimmed.startsWith("export ")) continue;
+		const rest = trimmed.slice("export ".length);
+		const eq = rest.indexOf("=");
+		if (eq <= 0) continue;
+		const key = rest.slice(0, eq).trim();
+		let value = rest.slice(eq + 1).trim();
+		if (value.length >= 2 && value.startsWith("'") && value.endsWith("'")) {
+			value = value.slice(1, -1).replace(/'\\''/g, "'");
+		}
+		out[key] = value;
+	}
+	return out;
+}
+
+interface SmokeAttempt {
+	status: number | null;
+	body: unknown;
+	contentType: string | null;
+	error?: string;
+}
+
+function smokeHeaders(token: string): Record<string, string> {
+	return {
+		"content-type": "application/json",
+		accept: "application/json, text/event-stream",
+		...(token ? { authorization: `Bearer ${token}` } : {}),
+	};
+}
+
+/** A response body as JSON, else the last SSE data frame, else raw text. */
+function parseSmokeBody(text: string): unknown {
+	try {
+		return JSON.parse(text);
+	} catch {
+		// Fall through to the SSE framing.
+	}
+	const frames = text
+		.split("\n")
+		.filter((line) => line.startsWith("data:"))
+		.map((line) => line.slice(5).trim());
+	for (const frame of frames.reverse()) {
+		try {
+			return JSON.parse(frame);
+		} catch {
+			// Not this frame.
+		}
+	}
+	return text;
+}
+
+async function smokeCall(base: string, token: string, path: string, body?: unknown): Promise<SmokeAttempt> {
+	try {
+		const res = await fetch(`${base}${path}`, {
+			method: body === undefined ? "GET" : "POST",
+			headers: smokeHeaders(token),
+			...(body === undefined ? {} : { body: JSON.stringify(body) }),
+			signal: AbortSignal.timeout(10_000),
+		});
+		return { status: res.status, body: parseSmokeBody(await res.text()), contentType: res.headers.get("content-type") };
+	} catch (cause) {
+		return { status: null, body: null, contentType: null, error: String(cause) };
+	}
+}
+
+/** One stateless MCP tool call over /mcp as JSON-RPC. */
+async function smokeTool(
+	base: string,
+	token: string,
+	id: number,
+	name: string,
+	args: Record<string, unknown>,
+): Promise<SmokeAttempt> {
+	return smokeCall(base, token, "/mcp", { jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+}
+
+/** The JSON a tool returned, or null when it errored or answered otherwise. */
+function smokeToolResult(attempt: SmokeAttempt): Record<string, unknown> | null {
+	const body = attempt.body as { result?: { content?: Array<{ text?: string }> } } | null;
+	const text = body?.result?.content?.[0]?.text;
+	if (typeof text !== "string") return null;
+	try {
+		const parsed: unknown = JSON.parse(text);
+		return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Fixed-order wire proof over the twin: brief, then emit, then register,
+ * then claim, one ok/FAIL line per step. Reads only consumer.env and refuses
+ * a production target before any request. Prints booleans and decisions only.
+ */
+async function runSmoke(name: string): Promise<number> {
+	const runDir = runDirFor(name);
+	const text = readText(join(runDir, "consumer.env"));
+	if (text === null) throw new RehearsalRefused(`no consumer.env for instance ${name}: run rehearsal up first`);
+	const record = parseShellExports(text);
+	const base = (record["SUBSTRATE_URL"] ?? "").replace(/\/+$/, "");
+	const tok = record["SUBSTRATE_TOKEN"] ?? "";
+	if (!base) throw new RehearsalRefused(`consumer.env for ${name} has no twin url`);
+	const refused = refuseSmokeUrl(base);
+	if (refused !== null) throw new RehearsalRefused(refused);
+
+	const boot = await smokeCall(base, tok, "/healthz");
+	if (boot.status !== 200) {
+		throw new RehearsalRefused(`twin at ${base} is not answering /healthz`);
+	}
+
+	const tag = `rh-${name}-${Date.now().toString(36)}`;
+	const results: boolean[] = [];
+	const check = (ok: boolean, what: string, detail?: string): void => {
+		results.push(ok);
+		process.stdout.write(`${ok ? "  ok  " : " FAIL "} ${what}${detail ? ` — ${detail}` : ""}\n`);
+	};
+	process.stdout.write(`\n[rehearsal] smoke ${name} ${tag}\n\n`);
+
+	const brief = await smokeCall(base, tok, "/brief", {
+		repo: "swcstudiospace/agent-substrate",
+		branch: "rehearsal",
+		graph_id: tag,
+	});
+	check(brief.status === 200 && (brief.contentType ?? "").includes("text/markdown"), "brief");
+
+	const emit = await smokeCall(base, tok, "/events", {
+		kind: "note",
+		summary: `rehearsal smoke ${tag}`,
+		graph_id: tag,
+		session_id: tag,
+	});
+	check(emit.status === 202 && (emit.body as { stored?: boolean } | null)?.stored === true, "emit");
+
+	const registered = await smokeTool(base, tok, 1, "graph_register", {
+		graph_id: tag,
+		repo: "swcstudiospace/agent-substrate",
+		branch: "rehearsal",
+		nodes: [{ node_id: "n1" }],
+	});
+	check(smokeToolResult(registered) !== null, "register");
+
+	const claim = await smokeTool(base, tok, 2, "graph_claim", {
+		graph_id: tag,
+		node_id: "n1",
+		session_id: tag,
+	});
+	const claimBody = smokeToolResult(claim);
+	const granted = claimBody?.claimed === true && claimBody?.decision === "granted";
+	check(
+		granted,
+		"claim",
+		claimBody ? `claimed ${String(claimBody.claimed)} decision ${String(claimBody.decision)}` : "no result",
+	);
+
+	const passed = results.filter(Boolean).length;
+	process.stdout.write(`\n${passed}/${results.length} smoke checks passed\n`);
+	return passed === results.length ? 0 : 1;
+}
+
 function flag(argv: string[], name: string): string | undefined {
 	const at = argv.indexOf(name);
 	if (at < 0) return undefined;
@@ -789,7 +971,7 @@ function flag(argv: string[], name: string): string | undefined {
 
 function usage(message: string): never {
 	process.stderr.write(
-		`[rehearsal] ${message}\nusage: rehearsal up|down|status [--name <n>] [--port <N>] [--surfaces a,b] [--operator <s>] [--anonymous]\n`,
+		`[rehearsal] ${message}\nusage: rehearsal up|down|status|smoke [--name <n>] [--port <N>] [--surfaces a,b] [--operator <s>] [--anonymous]\n`,
 	);
 	process.exit(2);
 }
@@ -797,7 +979,7 @@ function usage(message: string): never {
 async function main(argv: string[]): Promise<number> {
 	const sub = argv[0];
 	if (sub === undefined) usage("need a subcommand");
-	if (sub !== "up" && sub !== "down" && sub !== "status") usage(`unknown subcommand ${sub}`);
+	if (sub !== "up" && sub !== "down" && sub !== "status" && sub !== "smoke") usage(`unknown subcommand ${sub}`);
 
 	const nameRaw = flag(argv, "--name");
 	const portRaw = flag(argv, "--port");
@@ -816,6 +998,7 @@ async function main(argv: string[]): Promise<number> {
 		const name = parseName(nameRaw ?? undefined);
 		if (sub === "down") return await runDown(name);
 		if (sub === "status") return await runStatus(name);
+		if (sub === "smoke") return await runSmoke(name);
 		const port = Number(portRaw ?? String(DEFAULT_MCP_PORT));
 		if (!Number.isInteger(port) || port < 0 || port > 65535) usage(`bad --port ${portRaw ?? ""}`);
 		const surfaces = parseSurfaces(surfacesRaw ?? undefined);
