@@ -24,6 +24,7 @@ import {
 	parseSurfaces,
 	pickFreePort,
 	refuseCheckoutDir,
+	refuseDockerEnv,
 	refusePort,
 	refuseSmokeUrl,
 	smokeToolResult,
@@ -382,5 +383,24 @@ describe("gitOutput", () => {
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("refuseDockerEnv", () => {
+	test("accepts an unset or local daemon and refuses remote ones", () => {
+		expect(refuseDockerEnv({})).toBeNull();
+		expect(refuseDockerEnv({ DOCKER_HOST: "unix:///var/run/docker.sock" })).toBeNull();
+		expect(refuseDockerEnv({ DOCKER_CONTEXT: "default" })).toBeNull();
+		expect(refuseDockerEnv({ DOCKER_HOST: "tcp://192.0.2.10:2375" })).toContain("DOCKER_HOST");
+		expect(refuseDockerEnv({ DOCKER_HOST: "ssh://root@db.example.com" })).toContain("DOCKER_HOST");
+		expect(refuseDockerEnv({ DOCKER_CONTEXT: "vps-remote" })).toContain("context");
+	});
+
+	test("a remote DOCKER_HOST refuses before any container call", () => {
+		const run = Bun.spawnSync([process.execPath, CLI, "down", "--name", "rh-remote-daemon"], {
+			env: { ...process.env, SUBSTRATE_TOKEN: SENTINEL, DOCKER_HOST: "tcp://192.0.2.10:2375" },
+		});
+		expect(run.exitCode).toBe(2);
+		expect(run.stderr.toString()).toContain("DOCKER_HOST");
 	});
 });

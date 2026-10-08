@@ -139,6 +139,24 @@ export function parseOperator(
 	return raw as Surface;
 }
 
+/**
+ * Refuse a non-local Docker daemon before creating or removing anything: a
+ * DOCKER_HOST that is not a local unix socket, or a docker context that is
+ * not a known-local one, could point the harness at someone else's engine.
+ * Returns the reason, or null when the daemon resolves locally.
+ */
+export function refuseDockerEnv(env: { DOCKER_HOST?: string; DOCKER_CONTEXT?: string }): string | null {
+	const host = (env.DOCKER_HOST ?? "").trim();
+	if (host !== "" && !host.startsWith("unix://")) {
+		return `refusing non-local DOCKER_HOST ${host}`;
+	}
+	const context = (env.DOCKER_CONTEXT ?? "").trim();
+	if (context !== "" && context !== "default" && context !== "desktop-linux") {
+		return `refusing non-local docker context ${context}`;
+	}
+	return null;
+}
+
 /** A checkout the twin may run from: never the production unit's checkout. */
 export function refuseCheckoutDir(cwd: string): string | null {
 	if (cwd === UNIT_WORKING_DIRECTORY) return `refusing to run from the production checkout ${cwd}`;
@@ -525,6 +543,8 @@ async function runUp(opts: UpOptions, checkout: string): Promise<number> {
 
 	const checkoutRefused = refuseCheckoutDir(checkout);
 	if (checkoutRefused !== null) throw new RehearsalRefused(checkoutRefused);
+	const dockerRefused = refuseDockerEnv(process.env);
+	if (dockerRefused !== null) throw new RehearsalRefused(dockerRefused);
 	if (!existsSync(join(checkout, "node_modules"))) {
 		throw new RehearsalRefused(`no node_modules in ${checkout}: run bun install --frozen-lockfile first`);
 	}
@@ -787,6 +807,8 @@ async function runUp(opts: UpOptions, checkout: string): Promise<number> {
 
 async function runDown(name: string): Promise<number> {
 	const runDir = runDirFor(name);
+	const dockerRefused = refuseDockerEnv(process.env);
+	if (dockerRefused !== null) throw new RehearsalRefused(dockerRefused);
 	const state = readState(join(runDir, "state.json"));
 	if (state === null) {
 		removeLabelledContainers(name);
