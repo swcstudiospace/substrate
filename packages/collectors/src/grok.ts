@@ -101,6 +101,8 @@ function findSessionLogs(): SessionLog[] {
 }
 
 const refusalLoggedAt = new Map<string, number>();
+/** A burst of distinct reasons cannot grow the map without bound. */
+const REFUSAL_CACHE_LIMIT = 32;
 
 /** Forget the rate limit. Tests call this; the collector does not. */
 export function resetEmitRefusalLog(): void {
@@ -108,8 +110,19 @@ export function resetEmitRefusalLog(): void {
 }
 
 /**
+ * The part of a server error that stays put when the rejected value changes.
+ *
+ * `invalid ts: 1` and `invalid ts: 2` are one reason. Keying the rate limit on
+ * the whole message would log every one of them and keep a map entry for each.
+ */
+function refusalReason(error: string): string {
+	const colon = error.indexOf(":");
+	return (colon === -1 ? error : error.slice(0, colon)).trim();
+}
+
+/**
  * One stderr line for a refused emit: status and the server's error, never the
- * event we posted. Repeat refusals of the same status and error are swallowed
+ * event we posted. Repeat refusals of the same status and reason are swallowed
  * until the interval passes, so a rejected backlog cannot fill the log.
  *
  * Returns whether a line was written.
@@ -122,10 +135,24 @@ export function logEmitRefusal(
 		process.stderr.write(line);
 	},
 ): boolean {
+	for (const [key, at] of refusalLoggedAt) {
+		if (now - at >= REFUSAL_LOG_INTERVAL_MS) refusalLoggedAt.delete(key);
+	}
 	const safe = (error ?? "").replace(/[\r\n]/g, " ").slice(0, 200);
-	const key = `${status}\n${safe}`;
+	const key = `${status}\n${refusalReason(safe)}`;
 	const previous = refusalLoggedAt.get(key);
 	if (previous !== undefined && now - previous < REFUSAL_LOG_INTERVAL_MS) return false;
+	if (refusalLoggedAt.size >= REFUSAL_CACHE_LIMIT) {
+		let oldestKey: string | null = null;
+		let oldestAt = Infinity;
+		for (const [cached, at] of refusalLoggedAt) {
+			if (at < oldestAt) {
+				oldestKey = cached;
+				oldestAt = at;
+			}
+		}
+		if (oldestKey !== null) refusalLoggedAt.delete(oldestKey);
+	}
 	refusalLoggedAt.set(key, now);
 	write(`[grok-collector] substrate refused emit: status=${status}${safe ? ` error=${safe}` : ""}\n`);
 	return true;

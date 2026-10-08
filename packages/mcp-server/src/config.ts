@@ -274,7 +274,26 @@ export function isOperator(config: SubstrateConfig, authorization: string | null
 	if (config.tokens.size === 0 && config.allowAnonymous && config.operatorTokens.size === 0) return true;
 	const token = bearer(authorization);
 	if (token === null || !config.operatorTokens.has(token)) return false;
-	return !isSwarmSurface(config.tokens.get(token));
+	const named = config.tokens.get(token);
+	// Once any surface token exists, operator authority is an attribute of one of
+	// them. A bearer listed only in SUBSTRATE_OPERATOR_TOKENS used to be 401; the
+	// bridge must not turn that 401 into `force` with no named surface.
+	// `isSwarmSurface(undefined)` is false, which is how that bearer used to pass.
+	if (named === undefined) return config.tokens.size === 0;
+	return !isSwarmSurface(named);
+}
+
+/**
+ * A presented bearer that names no surface, once any surface token exists.
+ *
+ * The bridge accepts a *missing* token. It does not accept a token that is not
+ * configured: that request used to be 401, and admitting it would make an
+ * operator-only bearer look like an anonymous caller.
+ */
+export function unmappedBearer(config: SubstrateConfig, authorization: string | null): boolean {
+	if (config.tokens.size === 0) return false;
+	const token = bearer(authorization);
+	return token !== null && !config.tokens.has(token);
 }
 
 /**

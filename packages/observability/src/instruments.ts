@@ -34,6 +34,13 @@ export const EVENT_REFUSAL_REASONS = ["auth", "validation", "attribution", "grap
 export type EventRefusalReason = (typeof EVENT_REFUSAL_REASONS)[number];
 
 /**
+ * The only 400 whose reason is `graph_id`. Matched whole, because the message
+ * of every other 400 can quote a caller-supplied value — `unknown kind: graph_id`
+ * is a bad kind, not a bad graph id.
+ */
+const GRAPH_ID_REFUSAL = "graph_id must be a string";
+
+/**
  * Which refusal bucket a `POST /events` 4xx belongs in.
  *
  * `graph_id` is its own bucket rather than validation: a bad graph id is the
@@ -45,7 +52,7 @@ export function classifyEventRefusal(status: number, error: string | undefined):
 	if (status === 401) return "auth";
 	if (status === 403) return "attribution";
 	if (status !== 400) return null;
-	return error !== undefined && /\bgraph_id\b/i.test(error) ? "graph_id" : "validation";
+	return error === GRAPH_ID_REFUSAL ? "graph_id" : "validation";
 }
 
 /** Why a claim ended the way it did. Drives both the lease-steal and quarantine SLOs. */

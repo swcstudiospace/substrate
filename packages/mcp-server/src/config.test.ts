@@ -56,6 +56,17 @@ describe("SUBSTRATE_ALLOW_ANONYMOUS", () => {
 		expect(isOperator(config, "Bearer tok-grok")).toBe(false);
 	});
 
+	test("an operator token that is not a surface token stays powerless on the bridge", () => {
+		const config = loadConfig({
+			SUBSTRATE_ALLOW_ANONYMOUS: "1",
+			SUBSTRATE_TOKEN_GROK_BOT: "tok-grok",
+			SUBSTRATE_OPERATOR_TOKENS: "tok-nowhere",
+		});
+
+		expect(isOperator(config, "Bearer tok-nowhere")).toBe(false);
+		expect(surfaceForToken(config, "Bearer tok-nowhere")).toBeNull();
+	});
+
 	test("the bridge does not report that no surface token is configured", () => {
 		const config = loadConfig({
 			SUBSTRATE_ALLOW_ANONYMOUS: "1",

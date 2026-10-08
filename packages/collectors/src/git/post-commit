@@ -23,7 +23,10 @@ files="$(git diff-tree --no-commit-id --name-only -r HEAD 2>/dev/null | head -20
 origin="$(git remote get-url origin 2>/dev/null || true)"
 repo=""
 if [ -n "$origin" ]; then
-	repo="$(printf '%s\n' "$origin" | sed -n 's#.*[:/]\([^/:]*\/[^/]*\)\(\.git\)\{0,1\}$#\1#p')"
+	# Strip a trailing .git before the slug match. A greedy `[^/]*` would
+	# otherwise keep it (`git@host:owner/repo.git` → `owner/repo.git`) and
+	# briefs that query `owner/repo` would miss the commit.
+	repo="$(printf '%s\n' "$origin" | sed -E 's#\.git$##' | sed -nE 's#^.*[:/]([^/:]+/[^/]+)$#\1#p')"
 fi
 branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
 
@@ -32,6 +35,7 @@ branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
 surface="${SUBSTRATE_SURFACE:-cursor}"
 actor="${SUBSTRATE_ACTOR:-human}"
 
+post_emit() {
 (
 	set +e
 	export SUBSTRATE_HOOK_SHA="$sha"
@@ -85,10 +89,22 @@ try {
   report(0, "unreachable");
 }
 '
-) &
+)
+}
 
+# SUBSTRATE_HOOK_WAIT=1 is the test: the line has to land on this process's
+# stderr. Anything else must not inherit these pipes. A caller that captures
+# `git commit` and waits for both of them to close would otherwise sit out the
+# substrate timeout after the hook itself has exited. A terminal still sees the
+# refusal; a captured run does not keep the pipe open to show it.
 if [ "${SUBSTRATE_HOOK_WAIT:-}" = "1" ]; then
-	wait || true
+	post_emit || true
+elif ( : >/dev/tty ) 2>/dev/null; then
+	post_emit </dev/null >/dev/tty 2>&1 &
+	disown 2>/dev/null || true
+else
+	post_emit </dev/null >/dev/null 2>&1 &
+	disown 2>/dev/null || true
 fi
 
 exit 0

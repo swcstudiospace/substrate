@@ -70,6 +70,7 @@ describe("isOperator", () => {
 		const stranded = loadConfig({ SUBSTRATE_TOKEN_HERMES: "tok-hermes", SUBSTRATE_OPERATOR_TOKENS: "tok-nowhere" });
 		expect(configWarnings(stranded)).toHaveLength(1);
 		expect(configWarnings(stranded)[0]).toContain("cannot authenticate");
+		expect(isOperator(stranded, "Bearer tok-nowhere")).toBe(false);
 
 		expect(configWarnings(loadConfig(TOKENS))).toEqual([]);
 		expect(configWarnings(loadConfig({}))).toEqual([]);

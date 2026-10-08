@@ -46,10 +46,13 @@ async function start(
 	const server = createHttpServer(substrate, config, observability, options);
 	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 	const { port } = server.address() as AddressInfo;
+	let closed = false;
 	const harness: Harness = {
 		base: `http://127.0.0.1:${port}`,
 		observability,
 		close() {
+			if (closed) return;
+			closed = true;
 			observability.stop();
 			server.close();
 		},
@@ -834,6 +837,101 @@ describe("the anonymous bridge", () => {
 		expect(lines[0]).toContain("claimed=hermes");
 		expect(lines[0]).not.toContain("payload-secret-marker");
 	});
+
+	test("a quiet window is logged when the server closes", async () => {
+		const lines: string[] = [];
+		const harness = await start(BRIDGE, {}, {
+			anonymousLog: (line) => {
+				lines.push(line);
+			},
+		});
+
+		await fetch(`${harness.base}/events`, {
+			method: "POST",
+			body: JSON.stringify({ kind: "note", summary: "payload-secret-marker", surface: "hermes" }),
+		});
+		expect(lines).toEqual([]);
+
+		harness.close();
+		expect(lines).toHaveLength(1);
+		expect(lines[0]).toContain("claimed=hermes");
+		expect(lines[0]).not.toContain("payload-secret-marker");
+	});
+
+	async function callTool(harness: Harness, name: string, args: Record<string, unknown>, token?: string) {
+		const response = await fetch(`${harness.base}/mcp`, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				accept: "application/json, text/event-stream",
+				...(token ? { authorization: `Bearer ${token}` } : {}),
+			},
+			body: JSON.stringify({
+				jsonrpc: "2.0",
+				id: 1,
+				method: "tools/call",
+				params: { name, arguments: args },
+			}),
+		});
+		const raw = await response.text();
+		const data = raw
+			.split("\n")
+			.find((line) => line.startsWith("data: "))
+			?.slice(6);
+		const envelope = JSON.parse(data ?? raw) as { result?: { content?: Array<{ text?: string }> } };
+		return JSON.parse(envelope.result?.content?.[0]?.text ?? "null") as { error?: string; stored?: boolean };
+	}
+
+	test("an untokened MCP events_emit cannot name a tokened surface", async () => {
+		const { written, greptime } = ledger();
+		const harness = await start(BRIDGE, { greptime });
+		const refused = await callTool(harness, "events_emit", {
+			kind: "note",
+			summary: "impersonating",
+			surface: "grok-bot",
+		});
+		const allowed = await callTool(harness, "events_emit", {
+			kind: "note",
+			summary: "from a collector",
+			surface: "hermes",
+		});
+
+		expect(refused.error ?? "").toContain("token");
+		expect(allowed.error).toBeUndefined();
+		expect(written.map((event) => event.surface)).toEqual(["hermes"]);
+	});
+
+	test("an untokened MCP handoff does not default to claude-code", async () => {
+		const harness = await start({ ...BRIDGE, SUBSTRATE_HANDOFF_KEY: "k" });
+		const result = await callTool(harness, "coord_handoff", { to: "muse", goal: "finish the migration" });
+
+		expect(result.error ?? "").toContain("claude-code");
+		expect(JSON.stringify(result)).not.toContain('"from"');
+	});
+
+	test("an untokened MCP claim cannot renew a tokened surface", async () => {
+		const harness = await start(BRIDGE);
+		const result = await callTool(harness, "graph_claim", {
+			graph_id: "ut-1",
+			node_id: "n1",
+			session_id: "sess-public",
+			surface: "grok-bot",
+		});
+
+		expect(result.error ?? "").toContain("token");
+		expect(JSON.stringify(result)).not.toContain("lease_id");
+	});
+
+	test("a bearer that is not a surface token is refused on the bridge", async () => {
+		const harness = await start({ ...BRIDGE, SUBSTRATE_OPERATOR_TOKENS: "tok-nowhere" });
+		const response = await fetch(`${harness.base}/events`, {
+			method: "POST",
+			headers: { authorization: "Bearer tok-nowhere" },
+			body: JSON.stringify({ kind: "note", summary: "unnamed operator" }),
+		});
+
+		expect(response.status).toBe(401);
+	});
 });
 
 describe("refused /events posts are counted by reason", () => {
@@ -873,6 +971,17 @@ describe("refused /events posts are counted by reason", () => {
 		expect(await refused(harness, "validation")).toBe(1);
 		expect(await refused(harness, "attribution")).toBe(1);
 		expect(await refused(harness, "graph_id")).toBe(1);
+
+		await fetch(`${harness.base}/events`, {
+			method: "POST",
+			body: JSON.stringify({ kind: "graph_id", summary: "bad field", surface: "hermes" }),
+		});
+		await fetch(`${harness.base}/events`, { method: "POST", body: "42" });
+		await fetch(`${closed.base}/events`);
+
+		expect(await refused(harness, "validation")).toBe(3);
+		expect(await refused(harness, "graph_id")).toBe(1);
+		expect(await refused(closed, "auth", "tok-grok")).toBe(1);
 	});
 });
 

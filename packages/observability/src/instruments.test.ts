@@ -138,6 +138,7 @@ describe("refused events and anonymous callers", () => {
 		expect(classifyEventRefusal(401, "unknown or missing bearer token")).toBe("auth");
 		expect(classifyEventRefusal(403, "cannot act as grok-bot")).toBe("attribution");
 		expect(classifyEventRefusal(400, "unknown kind: nope")).toBe("validation");
+		expect(classifyEventRefusal(400, "unknown kind: graph_id")).toBe("validation");
 		expect(classifyEventRefusal(400, "graph_id must be a string")).toBe("graph_id");
 		expect(classifyEventRefusal(503, "ledger down")).toBeNull();
 		expect(classifyEventRefusal(202, undefined)).toBeNull();

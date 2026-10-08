@@ -14,7 +14,7 @@ async function repoWithCommit(subject: string): Promise<string> {
 	const repo = mkdtempSync(join(tmpdir(), "substrate-hook-"));
 	mkdirSync(repo, { recursive: true });
 	const git = (args: string[]) => {
-		const result = Bun.spawnSync(["git", ...args], {
+		const result = Bun.spawnSync(["git", "-c", "commit.gpgsign=false", ...args], {
 			cwd: repo,
 			env: {
 				...process.env,
@@ -106,5 +106,60 @@ describe("post-commit", () => {
 		expect(result.exitCode).toBe(0);
 		expect(result.stderr.trim()).toBe("[substrate] post-commit emit refused: status=0 error=unreachable");
 		expect(result.stderr).not.toContain("offline");
+	});
+
+	test("SSH and HTTPS origins drop a trailing .git", async () => {
+		const repo = await repoWithCommit("slug");
+		const server = await listen(202, "");
+		const git = (args: string[]) => {
+			const result = Bun.spawnSync(["git", "-c", "commit.gpgsign=false", ...args], { cwd: repo });
+			if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+		};
+		try {
+			git(["remote", "add", "origin", "git@github.com:swcstudiospace/agent-substrate.git"]);
+			await runHook(repo, { SUBSTRATE_URL: server.url, SUBSTRATE_TIMEOUT_MS: "1000" });
+			git(["remote", "set-url", "origin", "https://github.com/swcstudiospace/agent-substrate.git"]);
+			await runHook(repo, { SUBSTRATE_URL: server.url, SUBSTRATE_TIMEOUT_MS: "1000" });
+
+			const slugs = server.bodies.map((body) => (JSON.parse(body) as { repo?: string }).repo);
+			expect(slugs).toEqual(["swcstudiospace/agent-substrate", "swcstudiospace/agent-substrate"]);
+		} finally {
+			server.close();
+		}
+	});
+
+	test("returns before the substrate answers when it is not told to wait", async () => {
+		const repo = await repoWithCommit("slow");
+		let release: () => void = () => {};
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const server = createServer(async (_req, res) => {
+			await held;
+			res.writeHead(202, { "content-type": "application/json" });
+			res.end("{}");
+		});
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		const { port } = server.address() as AddressInfo;
+		const started = Date.now();
+		try {
+			const child = Bun.spawn(["bash", HOOK], {
+				cwd: repo,
+				env: {
+					...process.env,
+					SUBSTRATE_URL: `http://127.0.0.1:${port}`,
+					SUBSTRATE_TIMEOUT_MS: "5000",
+					SUBSTRATE_HOOK_WAIT: "",
+				},
+				stdout: "ignore",
+				stderr: "ignore",
+			});
+			const exitCode = await child.exited;
+			expect(exitCode).toBe(0);
+			expect(Date.now() - started).toBeLessThan(1500);
+		} finally {
+			release();
+			server.close();
+		}
 	});
 });

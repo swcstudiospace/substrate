@@ -47,6 +47,17 @@ describe("logEmitRefusal", () => {
 		expect(later).toBe(true);
 		expect(lines).toHaveLength(2);
 	});
+
+	test("varying details of one reason share a window", () => {
+		const lines: string[] = [];
+		const write = (line: string) => lines.push(line);
+
+		expect(logEmitRefusal(400, "invalid ts: 1", 1_000, write)).toBe(true);
+		expect(logEmitRefusal(400, "invalid ts: 2", 1_000 + 10, write)).toBe(false);
+		expect(logEmitRefusal(400, "unknown kind: nope", 1_000 + 10, write)).toBe(true);
+		expect(logEmitRefusal(400, "invalid ts: 3", 1_000 + REFUSAL_LOG_INTERVAL_MS, write)).toBe(true);
+		expect(lines).toHaveLength(3);
+	});
 });
 
 describe("emitToSubstrate", () => {

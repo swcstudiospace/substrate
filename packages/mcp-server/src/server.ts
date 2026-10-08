@@ -27,7 +27,14 @@ import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { auditMode } from "@substrate/audit";
 import { classifyEventRefusal, type EventRefusalReason } from "@substrate/observability";
-import { anonymousBridge, isOperator, surfaceForToken, tokenedSurfaces, type SubstrateConfig } from "./config.ts";
+import {
+	anonymousBridge,
+	isOperator,
+	surfaceForToken,
+	tokenedSurfaces,
+	unmappedBearer,
+	type SubstrateConfig,
+} from "./config.ts";
 import { formatDrift } from "./drift.ts";
 import { InvalidEventError } from "./event.ts";
 import { InvalidHandoffError } from "./handoff.ts";
@@ -106,12 +113,31 @@ export class AnonymousCallerLog {
 	private readonly intervalMs: number;
 	private readonly now: () => number;
 	private readonly write: (line: string) => void;
+	private timer: ReturnType<typeof setInterval> | null = null;
 
 	constructor(intervalMs?: number, now?: () => number, write?: (line: string) => void) {
 		this.intervalMs = intervalMs ?? ANONYMOUS_LOG_INTERVAL_MS;
 		this.now = now ?? Date.now;
 		this.write = write ?? ((line) => process.stderr.write(line));
 		this.windowStart = this.now();
+	}
+
+	/** Flush on the hour even when no later request arrives to notice it. */
+	start(): void {
+		if (this.timer) return;
+		this.timer = setInterval(() => {
+			if (this.counts.size > 0 && this.now() - this.windowStart >= this.intervalMs) this.flush();
+		}, this.intervalMs);
+		this.timer.unref?.();
+	}
+
+	/** Drop the timer and write whatever this window still holds. */
+	stop(): void {
+		if (this.timer) {
+			clearInterval(this.timer);
+			this.timer = null;
+		}
+		this.flush();
 	}
 
 	record(route: string, claimedSurface: string): void {
@@ -316,14 +342,20 @@ export function createHttpServer(
 	options: HttpServerOptions = {},
 ) {
 	const anonymousLog = new AnonymousCallerLog(options.anonymousIntervalMs, options.now, options.anonymousLog);
-	return createServer(async (req, res) => {
+	anonymousLog.start();
+	const server = createServer(async (req, res) => {
 		const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
 		const authorization = req.headers.authorization ?? null;
 		const surface: Surface | null = surfaceForToken(config, authorization);
 		// What the transport establishes about the caller, before any request body is
 		// read. A signed handoff's sender and a forced release's authority are decided
 		// from this and never from an argument.
-		const caller: McpCaller = { surface, isOperator: isOperator(config, authorization) };
+		const caller: McpCaller = {
+			surface,
+			isOperator: isOperator(config, authorization),
+			// Only while the bridge is on. A bare local run keeps the MCP defaults.
+			...(anonymousBridge(config) ? { tokenedSurfaces: tokenedSurfaces(config) } : {}),
+		};
 		const route = normalizeRoute(url.pathname);
 
 		// Measured from `finish` rather than at each `send` call site: that way every
@@ -344,7 +376,8 @@ export function createHttpServer(
 				status: res.statusCode,
 				durationMs: performance.now() - started,
 			});
-			if (route === "/events" && eventRefusal) {
+			// POST only. A GET or a probe of the path is not a refused event post.
+			if (req.method === "POST" && route === "/events" && eventRefusal) {
 				observability.instruments.recordEventRefusal({ reason: eventRefusal });
 			}
 			// Accepted untokened callers only. A 401 was refused, not served anonymously.
@@ -367,8 +400,10 @@ export function createHttpServer(
 		// token is a *surface* token that is also listed in
 		// SUBSTRATE_OPERATOR_TOKENS, so its extra authority never comes at the cost
 		// of knowing who used it.
-		if (!config.allowAnonymous && surface === null) {
-			if (url.pathname === "/events") eventRefusal = "auth";
+		// A bearer that names no surface is not an untokened caller. The bridge
+		// accepts the absence of a token; this used to be 401 and still is.
+		if (unmappedBearer(config, authorization) || (!config.allowAnonymous && surface === null)) {
+			if (req.method === "POST" && url.pathname === "/events") eventRefusal = "auth";
 			sendJson(res, 401, { error: "unknown or missing bearer token" });
 			return;
 		}
@@ -448,7 +483,15 @@ export function createHttpServer(
 
 			if (req.method === "POST" && url.pathname === "/events") {
 				const raw = await readBody(req);
-				const body = JSON.parse(raw) as Record<string, unknown>;
+				const parsed: unknown = JSON.parse(raw);
+				// `"graph_id" in 42` throws, and that throw used to become a 500.
+				// A scalar or an array is the caller's mistake.
+				if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+					eventRefusal = "validation";
+					sendJson(res, 400, { error: "event must be an object" });
+					return;
+				}
+				const body = parsed as Record<string, unknown>;
 				rememberClaim(claim, body);
 				// A non-string graph id used to fall through to redaction and come back as a
 				// 500 that echoed the throw. It is the caller's mistake, and it is its own
@@ -640,14 +683,14 @@ export function createHttpServer(
 			sendJson(res, 404, { error: `no route for ${req.method} ${url.pathname}` });
 		} catch (cause) {
 			if (cause instanceof InvalidEventError || cause instanceof InvalidHandoffError) {
-				if (url.pathname === "/events" && cause instanceof InvalidEventError) {
+				if (req.method === "POST" && url.pathname === "/events" && cause instanceof InvalidEventError) {
 					eventRefusal = classifyEventRefusal(400, cause.message) ?? "validation";
 				}
 				sendJson(res, 400, { error: cause.message });
 				return;
 			}
 			if (cause instanceof SyntaxError) {
-				if (url.pathname === "/events") eventRefusal = "validation";
+				if (req.method === "POST" && url.pathname === "/events") eventRefusal = "validation";
 				sendJson(res, 400, { error: "request body is not valid JSON" });
 				return;
 			}
@@ -658,6 +701,12 @@ export function createHttpServer(
 			if (!res.headersSent) sendJson(res, 500, { error: "internal error", correlation_id: correlationId });
 		}
 	});
+	const close = server.close.bind(server);
+	server.close = ((callback?: (err?: Error) => void) => {
+		anonymousLog.stop();
+		return close(callback);
+	}) as typeof server.close;
+	return server;
 }
 
 /**
