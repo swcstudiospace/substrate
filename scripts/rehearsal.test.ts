@@ -17,7 +17,9 @@ import {
 	isTwinHealthy,
 	killVerifiedSpawn,
 	mayStop,
+	freeBytes,
 	parseDockerPortLine,
+	parseDockerRootDir,
 	parseName,
 	parseOperator,
 	parseShellExports,
@@ -451,5 +453,17 @@ describe("resolveContainerRemoval", () => {
 
 	test("a clean removal reports the truthful count", () => {
 		expect(resolveContainerRemoval("x", ok("a\nb\n"), ok("a\nb\n"), ok(""))).toBe(2);
+	});
+});
+
+describe("docker data-root disk guard", () => {
+	test("parses the DockerRootDir line and reads free bytes", () => {
+		expect(parseDockerRootDir("/var/lib/docker\n")).toBe("/var/lib/docker");
+		expect(parseDockerRootDir("  \n")).toBeNull();
+		expect(parseDockerRootDir("")).toBeNull();
+		const free = freeBytes(tmpdir());
+		expect(free).not.toBeNull();
+		expect(free as number).toBeGreaterThan(0);
+		expect(freeBytes(join(tmpdir(), "rh-no-such-dir-xyz"))).toBeNull();
 	});
 });

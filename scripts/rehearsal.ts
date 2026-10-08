@@ -52,8 +52,33 @@ export const DEFAULT_MCP_PORT = 17410;
 /** Default `--surfaces` value. */
 export const DEFAULT_SURFACES_RAW = "claude-code,cursor,hermes,omp";
 
-/** Preflight refuses below this free-disk floor; it never prunes. */
+/** Preflight refuses below this free-disk floor on Docker's data root; it never prunes. */
 export const DISK_FLOOR_BYTES = 2 * 1024 * 1024 * 1024;
+
+/** The run directory's own small floor: logs, state and token files only. */
+export const RUN_DIR_FLOOR_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Docker's data-root line (`docker info --format '{{.DockerRootDir}}'`)
+ * into a path, or null when docker answered nothing usable.
+ */
+export function parseDockerRootDir(text: string): string | null {
+	const dir = text.trim();
+	return dir.length > 0 ? dir : null;
+}
+
+/**
+ * Free bytes on the filesystem holding path; null when it cannot be read.
+ * Stat an ancestor that exists — the run dir itself may not exist yet.
+ */
+export function freeBytes(path: string): number | null {
+	try {
+		const fs = statfsSync(path);
+		return Number(fs.bavail) * Number(fs.bsize);
+	} catch {
+		return null;
+	}
+}
 
 /** The production unit's checkout: a twin never runs from here. */
 export const UNIT_WORKING_DIRECTORY = "/root/src/repos/agent-substrate";
@@ -582,7 +607,7 @@ async function runUp(opts: UpOptions, checkout: string): Promise<number> {
 
 	const checkoutRefused = refuseCheckoutDir(checkout);
 	if (checkoutRefused !== null) throw new RehearsalRefused(checkoutRefused);
-	const dockerRefused = refuseDockerEnv(process.env);
+	const dockerRefused = refuseDockerEnv({ DOCKER_HOST: process.env.DOCKER_HOST, DOCKER_CONTEXT: process.env.DOCKER_CONTEXT });
 	if (dockerRefused !== null) throw new RehearsalRefused(dockerRefused);
 	if (!existsSync(join(checkout, "node_modules"))) {
 		throw new RehearsalRefused(`no node_modules in ${checkout}: run bun install --frozen-lockfile first`);
@@ -603,16 +628,26 @@ async function runUp(opts: UpOptions, checkout: string): Promise<number> {
 			throw new RehearsalRefused(`image ${image} is not present locally; the harness never pulls`);
 		}
 	}
-	try {
-		// Stat an ancestor that exists: runDir may not exist yet, and a statfs
-		// failure must refuse, never skip the floor silently.
-		const fs = statfsSync(process.env.XDG_RUNTIME_DIR ?? "/tmp");
-		if (Number(fs.bavail) * Number(fs.bsize) < DISK_FLOOR_BYTES) {
-			throw new RehearsalRefused("free disk below the 2 GiB floor; the harness never prunes");
-		}
-	} catch (cause) {
-		if (cause instanceof RehearsalRefused) throw cause;
-		throw new RehearsalRefused("could not read free disk; refusing without the 2 GiB floor proof");
+	// The floor applies to Docker's storage filesystem — the scratch stores
+	// live in Docker's data root, not in XDG_RUNTIME_DIR — plus a small
+	// check that the run directory's own filesystem holds logs and tokens.
+	// Stat an ancestor that exists: runDir may not exist yet, and a statfs
+	// failure must refuse, never skip a floor silently.
+	const rootDirOut = docker(["info", "--format", "{{.DockerRootDir}}"]);
+	const dockerRoot = rootDirOut.ok ? parseDockerRootDir(rootDirOut.out) : null;
+	if (dockerRoot === null) {
+		throw new RehearsalRefused("could not read Docker's data root; refusing without the 2 GiB floor proof");
+	}
+	const dockerFree = freeBytes(dockerRoot);
+	if (dockerFree === null) {
+		throw new RehearsalRefused(`could not read free disk on ${dockerRoot}; refusing without the 2 GiB floor proof`);
+	}
+	if (dockerFree < DISK_FLOOR_BYTES) {
+		throw new RehearsalRefused(`free disk on ${dockerRoot} below the 2 GiB floor; the harness never prunes`);
+	}
+	const runFree = freeBytes(process.env.XDG_RUNTIME_DIR ?? "/tmp");
+	if (runFree === null || runFree < RUN_DIR_FLOOR_BYTES) {
+		throw new RehearsalRefused("could not prove 64 MiB free for the run directory; refusing");
 	}
 
 	// A stale run dir (crashed up) keeps its label, so label-scoped cleanup
@@ -846,7 +881,7 @@ async function runUp(opts: UpOptions, checkout: string): Promise<number> {
 
 async function runDown(name: string): Promise<number> {
 	const runDir = runDirFor(name);
-	const dockerRefused = refuseDockerEnv(process.env);
+	const dockerRefused = refuseDockerEnv({ DOCKER_HOST: process.env.DOCKER_HOST, DOCKER_CONTEXT: process.env.DOCKER_CONTEXT });
 	if (dockerRefused !== null) throw new RehearsalRefused(dockerRefused);
 	const state = readState(join(runDir, "state.json"));
 	if (state === null) {
