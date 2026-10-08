@@ -107,8 +107,8 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 **Requirements**: [FOUND-02]
 **Success Criteria** (what must be TRUE):
 
-  1. A mapping document names, for each new v1.3 event source (herdr, Muse, Cursor `stop`, skills propose, docs ingest, desktop actions, anchoring, teachables), the existing kind and surface it uses.
-  2. `EVENT_KINDS` is identical to its v1.2 value, and against the Phase 16 harness one sample event per mapped source is stored with zero refusals.
+  1. A mapping document names, for each new v1.3 event source (herdr, Muse, Cursor `stop`, skills propose, docs ingest, desktop actions, anchoring, teachables), the existing kind and the surface it uses; host jobs (anchor, skills sync, dispatcher) use the one added system surface `substrate`.
+  2. `EVENT_KINDS` is identical to its v1.2 value, `SURFACES` equals the v1.2 list plus `substrate` only, and against the Phase 16 harness one sample event per mapped source is stored with zero refusals.
   3. A phase-close check runs `packages/mcp-server/src/store-lock.test.ts` and diffs `EVENT_KINDS` against v1.2, and it passes on this phase and is part of every later phase's verification.
   4. `packages/audit/src/policy.ts` records fail-open or fail-closed for every MCP tool v1.3 plans to add (`skills_propose`, `docs_search`, `docs_ingest`, `graph_find`, `issue_get`, `desktop_run` and any recall tool), and a policy test fails when a planned tool has no entry or has the opposite decision.
 
