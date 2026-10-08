@@ -17,6 +17,7 @@ import {
 	closeSync,
 	chmodSync,
 	existsSync,
+	lstatSync,
 	mkdirSync,
 	openSync,
 	readFileSync,
@@ -26,7 +27,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { createServer } from "node:net";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
 	buildRehearsalEnv,
 	consumerEnvRecord,
@@ -188,6 +189,36 @@ export function parseDockerPortLine(line: string): { host: string; port: number 
 /** Instance run directory, outside every checkout. */
 export function runDirFor(name: string): string {
 	return `${process.env.XDG_RUNTIME_DIR ?? "/tmp"}/substrate-rehearsal/${name}`;
+}
+
+/**
+ * A directory the harness writes bearer tokens into: created when missing,
+ * then proven to be a real directory (never a symlink), owned by this user,
+ * with exactly mode 0700. A pre-existing dir owned by this user is repaired
+ * to 0700; a foreign-owned one refuses. chmod failures are never swallowed:
+ * without the mode proof the tokens stay unwritten.
+ */
+export function ensurePrivateDir(path: string): void {
+	try {
+		mkdirSync(path, { recursive: true, mode: 0o700 });
+	} catch (cause) {
+		if ((cause as NodeJS.ErrnoException)?.code !== "EEXIST") throw cause;
+	}
+	const st = lstatSync(path);
+	if (st.isSymbolicLink() || !st.isDirectory()) {
+		throw new RehearsalRefused(`refusing to use ${path}: not a real directory`);
+	}
+	if (typeof process.getuid === "function" && st.uid !== process.getuid()) {
+		throw new RehearsalRefused(`refusing to use ${path}: not owned by this user`);
+	}
+	try {
+		chmodSync(path, 0o700);
+	} catch {
+		throw new RehearsalRefused(`refusing to use ${path}: cannot set mode 0700`);
+	}
+	if ((lstatSync(path).mode & 0o777) !== 0o700) {
+		throw new RehearsalRefused(`refusing to use ${path}: not mode 0700`);
+	}
 }
 
 /** Pick a free loopback port by binding port 0. */
@@ -532,19 +563,12 @@ async function runUp(opts: UpOptions, checkout: string): Promise<number> {
 	const surfaces = opts.anonymous ? [] : opts.surfaces;
 	for (const surface of surfaces) secrets.surfaceTokens[surface] = hex(32);
 
-	mkdirSync(runDir, { recursive: true, mode: 0o700 });
-	try {
-		chmodSync(runDir, 0o700);
-	} catch {
-		// Mode argument already applied.
-	}
+	// Harden the shared base first: a pre-existing world-readable, foreign-owned
+	// or symlinked /tmp/substrate-rehearsal refuses instead of being trusted.
+	ensurePrivateDir(dirname(runDir));
+	ensurePrivateDir(runDir);
 	const tokensDir = join(runDir, "tokens");
-	mkdirSync(tokensDir, { recursive: true, mode: 0o700 });
-	try {
-		chmodSync(tokensDir, 0o700);
-	} catch {
-		// Mode argument already applied.
-	}
+	ensurePrivateDir(tokensDir);
 	for (const surface of surfaces) {
 		const tok = secrets.surfaceTokens[surface];
 		if (tok !== undefined) writeMode(join(tokensDir, surface), `${tok}\n`);

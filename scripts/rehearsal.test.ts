@@ -4,11 +4,13 @@
  * before the first container call, and the store file is treated as opaque.
  */
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	buildServerSpawnArgv,
+	ensurePrivateDir,
 	flag,
 	isPortFree,
 	isTwinHealthy,
@@ -257,6 +259,36 @@ describe("flag", () => {
 		expect(flag(["down"], "--name")).toBeUndefined();
 		expect(flag(["down", "--name"], "--name")).toBeNull();
 		expect(flag(["up", "--operator", "--anonymous"], "--operator")).toBeNull();
+	});
+});
+
+describe("ensurePrivateDir", () => {
+	test("creates a 0700 dir and repairs a wider mode", () => {
+		const base = mkdtempSync(join(tmpdir(), "rh-priv-"));
+		try {
+			const dir = join(base, "run");
+			ensurePrivateDir(dir);
+			expect(statSync(dir).mode & 0o777).toBe(0o700);
+			chmodSync(dir, 0o755);
+			ensurePrivateDir(dir);
+			expect(statSync(dir).mode & 0o777).toBe(0o700);
+		} finally {
+			rmSync(base, { recursive: true, force: true });
+		}
+	});
+
+	test("refuses a symlink and a plain file", () => {
+		const base = mkdtempSync(join(tmpdir(), "rh-priv-"));
+		try {
+			const link = join(base, "link");
+			symlinkSync(base, link);
+			expect(() => ensurePrivateDir(link)).toThrow("not a real directory");
+			const file = join(base, "file");
+			writeFileSync(file, "x");
+			expect(() => ensurePrivateDir(file)).toThrow("not a real directory");
+		} finally {
+			rmSync(base, { recursive: true, force: true });
+		}
 	});
 });
 
