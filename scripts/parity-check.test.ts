@@ -229,6 +229,17 @@ describe("parseSsListeners", () => {
 		expect(parseSsListeners(text).get(7410)).toEqual([99, 100, 7]);
 	});
 
+	test("deduplicates one owner seen on two fds and two addresses", () => {
+		// One owner on two fds (or IPv4 plus IPv6 loopback) is still exactly MainPID.
+		const text = [
+			'LISTEN 0 512 127.0.0.1:7410 0.0.0.0:* users:(("bun",pid=1525582,fd=21),("bun",pid=1525582,fd=22))',
+			'LISTEN 0 512 [::1]:7410 [::]:* users:(("bun",pid=1525582,fd=23))',
+		].join("\n");
+		const owners = parseSsListeners(text).get(7410) ?? [];
+		expect(owners).toEqual([1525582]);
+		expect(parityVerdict(facts({ ssOwnerPids: owners })).pass).toBe(true);
+	});
+
 	test("ignores ports outside the watch set", () => {
 		expect(parseSsListeners("LISTEN 0 128 127.0.0.1:5432 0.0.0.0:* users:((\"postgres\",pid=11,fd=6))").size).toBe(0);
 	});

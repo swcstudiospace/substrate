@@ -48,7 +48,7 @@ export function parseSsListeners(text: string, ports: readonly number[] = WATCHE
 		if (!wanted.has(port)) continue;
 		const pids: number[] = [];
 		for (const m of line.matchAll(/pid=(\d+)/g)) pids.push(Number(m[1]));
-		out.set(port, [...(out.get(port) ?? []), ...pids]);
+		out.set(port, [...new Set([...(out.get(port) ?? []), ...pids])]);
 	}
 	return out;
 }
