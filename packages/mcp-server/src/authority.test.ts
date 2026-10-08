@@ -15,9 +15,12 @@
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { configWarnings, isOperator, loadConfig, surfaceForToken, swarmTokenWarnings, tokenEnvName } from "./config.ts";
 import { attributedSurface, claimAttribution, swarmSessionRefusal } from "./mcp.ts";
+import { createObservability } from "./observe.ts";
+import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
 import { SURFACES, SWARM_SURFACES, type SubstrateEvent } from "./types.ts";
 
@@ -246,6 +249,72 @@ describe("the swarm surfaces", () => {
 		const example = readFileSync(join(import.meta.dir, "..", "..", "..", ".env.example"), "utf8").split("\n");
 		for (const surface of SWARM_SURFACES) {
 			expect(example).toContain(`${tokenEnvName(surface)}=`);
+		}
+	});
+});
+
+describe("a substrate token is its surface", () => {
+	test("attributedSurface binds it exactly like a swarm token", () => {
+		// Own surface or nothing resolves to itself; naming another surface is
+		// refused, never silently re-attributed — a job emitting as another
+		// surface would corrupt attribution the same way a swarm agent would.
+		expect(attributedSurface("substrate", "substrate")).toEqual({ surface: "substrate" });
+		expect(attributedSurface("substrate", null)).toEqual({ surface: "substrate" });
+		expect(attributedSurface("substrate", undefined)).toEqual({ surface: "substrate" });
+		const refused = attributedSurface("substrate", "claude-code");
+		expect("refused" in refused ? refused.refused : "").toContain("cannot act as claude-code");
+	});
+
+	test("every other non-swarm caller keeps body-first attribution", () => {
+		// The collectors rely on this: one token legitimately emits for the
+		// surfaces it observes, including the host-job surface.
+		expect(attributedSurface("hermes", "substrate")).toEqual({ surface: "substrate" });
+		expect(attributedSurface("hermes", "grok-bot")).toEqual({ surface: "grok-bot" });
+		expect(attributedSurface(null, "substrate")).toEqual({ surface: "substrate" });
+	});
+
+	test("POST /events: the substrate token stores as itself, is refused as another surface", async () => {
+		const written: SubstrateEvent[] = [];
+		const greptime = {
+			ensureAppendMode: async () => true,
+			lastHash: async () => "tip-hash",
+			insertEvent: async (event: SubstrateEvent) => {
+				written.push(event);
+			},
+		};
+		const env = { SUBSTRATE_TOKEN_SUBSTRATE: "tok-substrate", SUBSTRATE_TOKEN_HERMES: "tok-hermes" };
+		const config = loadConfig(env);
+		const observability = createObservability(config, env);
+		await observability.start();
+		const substrate = new Substrate(config, { index: null, greptime: greptime as never }, observability.observer);
+		const server = createHttpServer(substrate, config, observability);
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+		try {
+			const postEvent = (token: string, body: Record<string, unknown>) =>
+				fetch(`${base}/events`, {
+					method: "POST",
+					headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+					body: JSON.stringify({ kind: "note", summary: "anchor check", ...body }),
+				});
+
+			const own = await postEvent("tok-substrate", { surface: "substrate" });
+			expect(own.status).toBe(202);
+
+			const cross = await postEvent("tok-substrate", { surface: "claude-code" });
+			const crossBody = (await cross.json()) as { error: string };
+			expect(cross.status).toBe(403);
+			expect(crossBody.error).toContain("cannot act as claude-code");
+
+			// A non-swarm, non-substrate token keeps body-first attribution and
+			// can still post a host-job row — which is what the smoke relies on.
+			const borrowed = await postEvent("tok-hermes", { surface: "substrate" });
+			expect(borrowed.status).toBe(202);
+
+			expect(written.map((event) => event.surface)).toEqual(["substrate", "substrate"]);
+		} finally {
+			server.close();
+			observability.stop();
 		}
 	});
 });

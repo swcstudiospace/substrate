@@ -73,13 +73,15 @@ export type Attribution = { surface: Surface } | { refused: string };
 /**
  * The surface an event or a claim is attributed to, where the token may name the caller.
  *
- * **A swarm token is its surface.** The ADR's mesh rests on one accountable writer per
+ * **A swarm token is its surface, and so is a `substrate` token.** The ADR's mesh rests on one accountable writer per
  * artifact, so a caller authenticated as a `swarm-*` surface cannot act as another one:
  * a supplied `surface` that differs is *refused*, never silently re-attributed — a
  * quiet rewrite would hide the bug or the compromise that sent it. Absent or equal, the
- * token's own surface is used.
+ * token's own surface is used. Host jobs hold the single `substrate` token for the same
+ * reason: a job emitting as another surface would corrupt attribution the same way.
+ * (Phase 17, operator 2026-10-08; see `docs/event-vocabulary.md`.)
  *
- * **Deliberately only swarm surfaces.** Every other authenticated caller, and an
+ * **Deliberately only swarm and `substrate` surfaces.** Every other authenticated caller, and an
  * anonymous local run, keeps the long-standing behaviour: a supplied `surface` is
  * attribution and wins over the token's, then the token's, then `claude-code`. The
  * collectors and hooks rely on that — one `cursor` or `hermes` token legitimately emits
@@ -89,7 +91,7 @@ export type Attribution = { surface: Surface } | { refused: string };
  * `supplied` is any string, not a `Surface`, because REST bodies are unchecked.
  */
 export function attributedSurface(callerSurface: Surface | null, supplied: string | null | undefined): Attribution {
-	if (isSwarmSurface(callerSurface)) {
+	if (isSwarmSurface(callerSurface) || callerSurface === "substrate") {
 		if (supplied === undefined || supplied === null || supplied === callerSurface) return { surface: callerSurface };
 		return { refused: `this token is ${callerSurface} and cannot act as ${supplied}` };
 	}
