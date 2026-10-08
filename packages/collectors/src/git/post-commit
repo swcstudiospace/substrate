@@ -126,11 +126,13 @@ elif ( : >/dev/tty ) 2>/dev/null; then
 else
 	log="$(hook_log)"
 	mkdir -p "$(dirname "$log")" 2>/dev/null || true
-	if [ -w "$(dirname "$log")" ]; then
-		post_emit </dev/null >>"$log" 2>&1 &
-	else
-		post_emit </dev/null >/dev/null 2>&1 &
-	fi
+	# Open the log in the child. Redirecting `>>` in the parent skips post_emit
+	# when the file itself is not writable, even if its directory is, and the
+	# commit event is never sent. A failed open falls back to /dev/null.
+	(
+		exec >>"$log" 2>&1 || exec >/dev/null 2>&1
+		post_emit
+	) </dev/null >/dev/null 2>&1 &
 	disown 2>/dev/null || true
 fi
 

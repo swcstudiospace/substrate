@@ -2,7 +2,7 @@
  * The post-commit hook stays fail-open and says when the substrate refused the emit.
  */
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -162,6 +162,37 @@ describe("post-commit", () => {
 			}
 			expect(text).toContain("[substrate] post-commit emit refused: status=400 error=unknown kind: nope");
 			expect(text).not.toContain(subject);
+		} finally {
+			server.close();
+		}
+	});
+
+	test("a read-only hook log does not drop the commit event", async () => {
+		const repo = await repoWithCommit("readonly-log");
+		const server = await listen(202, "");
+		const log = join(repo, "hook.log");
+		writeFileSync(log, "");
+		chmodSync(log, 0o444);
+		try {
+			const child = Bun.spawn(["setsid", "bash", HOOK], {
+				cwd: repo,
+				env: {
+					...process.env,
+					SUBSTRATE_URL: server.url,
+					SUBSTRATE_TIMEOUT_MS: "1000",
+					SUBSTRATE_HOOK_WAIT: "",
+					SUBSTRATE_HOOK_LOG: log,
+				},
+				stdout: "ignore",
+				stderr: "ignore",
+			});
+			expect(await child.exited).toBe(0);
+			const deadline = Date.now() + 2000;
+			while (Date.now() < deadline && server.bodies.length === 0) {
+				await new Promise((resolve) => setTimeout(resolve, 50));
+			}
+			expect(server.bodies.length).toBeGreaterThan(0);
+			expect(server.bodies[0]).toContain("readonly-log");
 		} finally {
 			server.close();
 		}
