@@ -23,7 +23,7 @@ The twin is isolated by construction, not by discipline:
   points at its own container ports.
 - Each instance lives outside every checkout in its own run directory,
   `${XDG_RUNTIME_DIR:-/tmp}/substrate-rehearsal/<name>/`, mode 0700:
-  - `state.json` — container ids, server pid, ports, checkout path and commit;
+  - `state.json` — container names, server pid, ports, checkout path and commit;
   - `server.log` — the twin's stdout and stderr;
   - `consumer.env` — the five-key contract every proof sources (below);
   - `stores.env` — the scratch store connection values, for store clients only;
@@ -88,9 +88,10 @@ step passes. Claim success needs `claimed` true **and** `decision` granted.
 
 Each `up` generates a random Postgres password, a random ledger user and
 password (which exercises production's Basic-auth path), one random bearer
-token per surface, a random handoff key and an operator token. All of them go
-only into 0600 files in the run directory. Nothing is printed, and nothing is
-committed.
+token per surface and a random handoff key. The operator authenticates with
+its own surface's bearer token; there is no separately generated operator
+token. All of them go only into 0600 files in the run directory. Nothing is
+printed, and nothing is committed.
 
 The default instance runs with tokens, an audit path inside the run directory
 and a random handoff key — the shape production reaches after Phase 20.
@@ -132,9 +133,9 @@ bun run rehearsal smoke --name <n>
 ## Exits
 
 `0` pass, `1` failed, `2` usage or refused. Unreachable preconditions — a
-missing `consumer.env`, a twin that never reaches healthy `/healthz`, a
-production-looking smoke target — refuse with exit `2` before proving
-anything.
+missing `consumer.env`, a production-looking smoke target — refuse with exit
+`2` before proving anything. Scratch stores or a twin that never reach
+healthy stay exit `1`: the harness ran, and the proof failed.
 
 ## Named instances, tmpfs, no pull
 
