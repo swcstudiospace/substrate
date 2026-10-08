@@ -53,7 +53,7 @@ No new npm packages for A, B, D, E, F, G. Keep pins in a port milestone (no MCP 
 - **Bun 1.4.0** — mcp-server, CLI, collectors, projector, ledger; built-in `RedisClient` replaces the RESP parser that breaks on `\r\n` in bulk values.
 - **Node 24.18** — `packages/host` only (`@rivet-dev/agentos` 0.2.21 pinned, 0.2.22 latest; native `better-sqlite3`; own `package-lock.json`; declare `@agentos-software/claude-code@0.2.7` explicitly).
 - **solana-cli 4.2.2 (absolute path) + `fetch` JSON-RPC** — key never enters process memory (D-06); `@solana/kit` only if anchoring moves off-host.
-- **RFC 6962 Merkle** from `acc30a8:packages/ledger/src/merkle.ts` — domain-separated, odd leaf promoted.
+- **RFC 6962 Merkle** from the ledger package's `merkle.ts` at commit `acc30a8` — domain-separated, odd leaf promoted.
 - **Python 3.12 system + httpx 0.28.1 + pytest 9.1.1** — no venv; add a root `test:py` script (main has no Python test entry point).
 - **RAGFlow HTTP `/api/v1/retrieval`** behind `docs_search`, not RAGFlow MCP (v0.26.1 Python MCP broken, #16369).
 - **A2A v1.0 static Agent Card JSON** at `/.well-known/agent-card.json`; no SDK. Current `makeAgentCard` output is not spec-valid.
@@ -73,7 +73,7 @@ No new npm packages for A, B, D, E, F, G. Keep pins in a port milestone (no MCP 
 
 ### Architecture Approach (ARCHITECTURE.md)
 
-All side effects hang off main's lease verdicts (`claimNode`/`releaseNode`/`completeNode`); the mirror never decides ownership; DoD gate runs before the lease-fenced release and on failure keeps the lease (Pattern 1). Every new tool needs four registrations: `mcp.ts`, `observe.ts KNOWN_TOOLS`, `audit/src/policy.ts` fail-open/closed set, and `KNOWN_ROUTES`/`auditedRest` for REST twins (Pattern 2). Every out-of-process piece is a thin REST client with its own surface token in a 0600 env file (Pattern 3). Anchoring stamps server-side `ingested_at` outside the hash and anchors closed UTC ingest hours over the existing per-session chain (Pattern 4). Keep D's file layout so installed units are repaired without unit changes.
+All side effects hang off main's lease verdicts (`claimNode`/`releaseNode`/`completeNode`); the mirror never decides ownership; DoD gate runs before the lease-fenced release and on failure keeps the lease (Pattern 1). Every new tool needs four registrations: `mcp.ts`, `observe.ts KNOWN_TOOLS`, `packages/audit/src/policy.ts` fail-open/closed set, and `KNOWN_ROUTES`/`auditedRest` for REST twins (Pattern 2). Every out-of-process piece is a thin REST client with its own surface token in a 0600 env file (Pattern 3). Anchoring stamps server-side `ingested_at` outside the hash and anchors closed UTC ingest hours over the existing per-session chain (Pattern 4). Keep D's file layout so installed units are repaired without unit changes.
 
 **Major components:** `substrate-mcp` (auth, tools, leases, ledger, mirror) · mirror (`mirror/linear/notion/dod-gate.ts`) · `substrate-dispatcher` (Python) · collectors · projector (Muse, skills sync, Omp ext) · miner (Python) · `planes/` (new split) · ledger (+ new `anchor.ts`) · desktop · `substrate-host` (Node) · A2A cards (new).
 
