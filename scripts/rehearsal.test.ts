@@ -25,6 +25,7 @@ import {
 	pickFreePort,
 	refuseCheckoutDir,
 	refuseDockerEnv,
+	refuseExtraArgs,
 	refusePort,
 	refuseSmokeUrl,
 	smokeToolResult,
@@ -402,5 +403,21 @@ describe("refuseDockerEnv", () => {
 		});
 		expect(run.exitCode).toBe(2);
 		expect(run.stderr.toString()).toContain("DOCKER_HOST");
+	});
+});
+
+describe("refuseExtraArgs", () => {
+	test("accepts known flags and rejects typos and strays", () => {
+		expect(refuseExtraArgs(["down", "--name", "x"])).toBeNull();
+		expect(refuseExtraArgs(["up", "--name", "x", "--port", "0", "--anonymous"])).toBeNull();
+		expect(refuseExtraArgs(["down", "--nmae", "other"])).toContain("--nmae");
+		expect(refuseExtraArgs(["down", "--name", "x", "extra"])).toContain("extra");
+		expect(refuseExtraArgs(["smoke", "--verbose"])).toContain("--verbose");
+	});
+
+	test("a mistyped --name never stops the default instance", () => {
+		const run = runCli("down", "--nmae", "other");
+		expect(run.code).toBe(2);
+		expect(run.err).toContain("--nmae");
 	});
 });

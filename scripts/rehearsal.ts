@@ -1070,6 +1070,28 @@ async function runSmoke(name: string): Promise<number> {
 	return passed === results.length ? 0 : 1;
 }
 
+/**
+ * Refuse unknown `--options` and stray positional arguments before
+ * dispatching any command: a typo like `down --nmae other` must exit 2,
+ * never silently stop the `default` instance. Returns the reason, or null
+ * when argv holds only the subcommand and known flags.
+ */
+export function refuseExtraArgs(argv: string[]): string | null {
+	const valued: Record<string, true> = { "--name": true, "--port": true, "--surfaces": true, "--operator": true };
+	const bare: Record<string, true> = { "--anonymous": true };
+	for (let i = 1; i < argv.length; i++) {
+		const token = argv[i] ?? "";
+		if (valued[token] === true) {
+			i++;
+			continue;
+		}
+		if (bare[token] === true) continue;
+		if (token.startsWith("--")) return `unknown option ${token}`;
+		return `unexpected argument ${token}`;
+	}
+	return null;
+}
+
 export function flag(argv: string[], name: string): string | undefined | null {
 	const at = argv.indexOf(name);
 	if (at < 0) return undefined;
@@ -1101,6 +1123,8 @@ async function main(argv: string[]): Promise<number> {
 	] as const) {
 		if (value === null) usage(`${key} needs a value`);
 	}
+	const extra = refuseExtraArgs(argv);
+	if (extra !== null) usage(extra);
 	const anonymous = argv.includes("--anonymous");
 	try {
 		const name = parseName(nameRaw ?? undefined);
