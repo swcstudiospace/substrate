@@ -1,6 +1,6 @@
 ---
 phase: 15-lessons-bank
-verified: 2026-10-08T02:07:11Z
+verified: 2026-10-08T02:18:33Z
 status: passed
 score: 5/5 must-haves verified
 ---
@@ -8,7 +8,7 @@ score: 5/5 must-haves verified
 # Phase 15 Verification: Lessons bank
 
 **Phase Goal:** A lesson from a finished phase becomes governed memory that a later phase can recall and cite by id.
-**Verified:** 2026-10-08T02:07:11Z (parent records the completed current-goal reassessment; replaces the worker's date-only midnight timestamp)
+**Verified:** 2026-10-08T02:18:33Z (current-goal reassessment plus parent reconciliation of the unchanged-head merge receipt)
 **Status:** passed
 **Re-verification:** Yes — after review-driven corrections (report identity, stored header, structured diagnostics)
 
@@ -74,7 +74,7 @@ None for the phase goal — every truth above carries parent-executed behavioral
 ### Limits (not certification)
 
 - **Separate security gate:** P15SecurityClosure returned SECURED (4 fresh delta controls, 11 retained historical closures, 15 closed/0 open/0 accepted risks); parent records it in `15-SECURITY.md`. This verifier did not perform that security audit, run scans or claim full ASVS certification.
-- **Separate shipping gate:** final published head `f956ec22e36401219d71c01562693261f0094f63` passed configured Greptile 5/5, zero open comments, round 4, ready-to-merge CI/mergeability gate. Parent has not yet merged PR #17. No deployment, release, tag or archive claim.
+- **Separate shipping receipt:** configured CLI merged [PR #17](https://github.com/swcstudiospace/agent-substrate/pull/17) at `2026-10-08T02:11:45Z`, squash `746a38a4aaa0cbe25cdea54d64d4babb6bda37bd`, after exact head `f956ec22e36401219d71c01562693261f0094f63` passed Greptile 5/5, zero open comments, round 4. GitHub's configured check is Greptile Review (SUCCESS); no separate build/test CI claimed. No code changed for this receipt reconciliation, so current-goal evidence above remains valid. Remote branch deleted, local Git sync failed; trackers synchronized. No production deployment or milestone-completion claim.
 - Production substrate `:7410` never used; smoke ports 7508/7509 and isolated PG/GreptimeDB only; original dirty `/root/src/repos/agent-substrate` status unchanged.
 
 ### Gaps Summary

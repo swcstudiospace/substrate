@@ -4,30 +4,31 @@ milestone: v1.2
 milestone_name: Swarm leases, workspace install and lessons bank
 current_phase: 15
 status: completed
-last_updated: "2026-10-07T20:21:57.448Z"
-last_activity: 2026-10-07
-state_head: af8af91cbac4898e7439820983f313b21610e587
+last_updated: "2026-10-08T02:18:33Z"
+last_activity: 2026-10-08
+state_head: c7c7f3d200af13339d2cb5cb3b7d5b8aa884247d
 progress:
   total_phases: 5
   completed_phases: 5
   total_plans: 5
   completed_plans: 5
   percent: 100
-last_activity_desc: Phase 15 complete
+last_activity_desc: Lessons bank PR17 merged; handoff/P12 corrections and workspace deliveries remain gated
 ---
 
 # State
 
 ## Current
 
-**Phase 1 (Lane B) in progress.** Orca-vs-herdr resolved in favour of Orca
-(herdr not needed — see milestones/v1.0-phases/01-lane-b/CONTEXT.md). Grok Build collector
-built, tested and running under systemd. Hermes probed but not started.
+**v1.2 behavioral work is complete:** five phases, five plans, 43 numbered tasks and 25 requirements. Canonical manager projects all five phases complete/passed. All ten Nyquist/security reports exist; Phase 15 has current-goal re-verification and independent F-15-02 closure, with no accepted risks.
 
-Paused at 65% context, deliberately, rather than starting the Hermes plugin
-edits mid-window — those touch a running install.
+Tested code: agent-substrate lessons `439fb50` (documentation-only final head `f956ec2`) and projector `fe946a1`; agent-swarm handoffs/lease corrections `ce13342` and integrated workspace `8bbe668`. Parent gates/live proofs are recorded per phase. Phase 15: 60 focused/1146 full live-PG, clean typecheck/LSP, 18 real-store and 4 structured-diagnostic actual-CLI checks; 31-check bank proof retained at `e7be626`.
 
-## Phase 0 (complete)
+**Delivery is not complete.** Agent-substrate [PR #17](https://github.com/swcstudiospace/agent-substrate/pull/17) merged at `746a38a4aaa0cbe25cdea54d64d4babb6bda37bd` after exact-head Greptile 5/5, zero comments, round 4. GitHub's configured check was Greptile Review; no separate build/test CI claimed. Handoff/P12-correction and both workspace shipments, final milestone audit, archive, tag and planning closeout PR remain gated. Local ship Git sync failed; no local-main update is assumed. User checkouts and production were not changed.
+
+## Historical v1.0 execution record
+
+The following implementation notes predate v1.2. They are retained as history, not current deployment or pending-work assertions.
 
 Phase 0 (Brief) is **complete and live on production infrastructure**.
 `substrate-mcp` runs under systemd against GreptimeDB v1.1.4 and TimescaleDB,
@@ -65,7 +66,7 @@ Not done: a reachable Postgres URL for the index; `graph_register` call inside
 the `ultrathink-kickoff` skill; git post-commit hook and Cursor hooks are
 written but still only dry-run.
 
-## Accumulated context
+## Historical implementation context
 
 **Decisions**
 
@@ -103,16 +104,16 @@ written but still only dry-run.
 
 - Phase 8.1 inserted after Phase 8: Gap closure: a version conflict now reports the decision's current version, so a swarm rewrite works when the decision is not in the newest 100 entries (MEM-02) (URGENT)
 
-## Blockers
+## Historical blocker notes
 
 _(No open blockers. Credential rotation was considered and declined by the
 owner — recorded here so it is not re-raised.)_
 
-## Pending todos
+## Historical pending work
 
 - Review and merge claude-ultrathink PR #1 (`substrate/brief` → `master`).
 
-## Published
+## Historical publication record
 
 - `swcstudiospace/agent-substrate` (private) — `main` pushed.
 - `swcstudiospace/claude-ultrathink` PR #1 — the `fetchBrief` integration,
@@ -125,13 +126,13 @@ clean branch failed against `master`. In a shared checkout, stage hunks or
 verify the diff against the target branch before pushing — not just the file
 list.
 
-## Deferred
+## Historical investigation notes
 
 - Notion §12 unknowns, each probed at the start of the phase that needs it: Orca's session/event
   query API, Muse's plugin API, Omp's skills directory, which Cursor hooks fire for the CLI,
   rivet-agentos `openSession` option names and the Codex adapter package name.
 
-## Deployment
+## Historical deployment record
 
 `substrate-mcp` runs under systemd — `systemctl status substrate-mcp`,
 `journalctl -u substrate-mcp -f`. Credentials at `/etc/substrate/substrate.env`
@@ -147,9 +148,9 @@ which is why Greptime worked immediately and Postgres did not.
 
 Phase: 15
 Total Phases: 5 (Phases 11-15)
-Plan: Not started
-Status: All phases complete
-Last activity: 2026-10-07
+Plan: 5/5 implemented and behaviorally verified; 10/10 formal reports complete
+Status: Milestone close awaits gated PR merges, final audit, archive and planning closeout
+Last activity: 2026-10-08 — PR17 merged, remaining deliveries in progress
 
 ## Deferred Items
 
@@ -161,4 +162,10 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Operator Next Steps
 
-- Discuss Phase 11 (Lease authority) with /gsd-discuss-phase 11. Phase 15 (Lessons bank) has no dependencies and can start alongside it.
+- Ship the handoff/P12-correction branch, then both workspace branches through the serialized configured gate. PR17 is merged and its receipt is synchronized. Update delivery evidence, perform a fresh v1.2 integration audit and complete the approved archive/cleanup workflow. Tag publication/destructive branch pruning require their workflow checkpoints; preserve user worktrees and shared fixtures.
+
+## Session Continuity
+
+Last session: 2026-10-08
+Stopped at: PR17 merged at 746a38a; Phase15 current goal/security gates passed, all five canonical phases complete/passed. Handoff/P12-correction branch assessment started. Totals: lessons 1146 Bun/60 focused/18 real-store/4 diagnostics; projector 1074 Bun; handoffs 757 Python; integrated workspace 828 Python/1378 omp; retained live proofs 42/24/49/51/31.
+Resume file: None; current progress is recorded in the phase summaries and ultrathink ship state.
