@@ -133,8 +133,14 @@ recorded here — never values.
 - `down`: stopped the twin pid, removed 2 containers. The
   label-filtered `docker ps -a` listing is empty and the run directory is
   gone.
-- Still pending (operator steps): the Task 2 `parity:check` readings row
-  above, and the Task 3 `rh-` tag counts (both must be 0) beside this row.
+- Zero-write evidence (reported 2026-10-08 ~20:40 UTC; counts run by the
+  orchestrator under operator approval; proof run tag
+  `rh-p16-proof-mv00v314`, filter `'rh-%'` covering every harness run
+  tag): production Greptime `agent_events` rows with `graph_id` or
+  `session_id` like `'rh-%'` = 0 (HTTP 200); production Postgres
+  `graph_index` (`graph_id` like `'rh-%'`) = 0, `graph_nodes`
+  (`graph_id` or `claim_session` like `'rh-%'`) = 0, `graph_steps`
+  (`graph_id` like `'rh-%'`) = 0.
 
 ## Operator step: installing the repo unit
 
@@ -192,6 +198,13 @@ the proof the scratch run added nothing to production:
 Raw production row counts move with live traffic, so they cannot show that a
 run added nothing; the tag counts can. Record both results beside the proof
 row in the evidence table.
+
+Results for the proof run (2026-10-08 ~20:40 UTC; counts run by the
+orchestrator under operator approval; proof run tag
+`rh-p16-proof-mv00v314`, filter `'rh-%'` covering every harness run
+tag): production Greptime `agent_events` = 0; production Postgres
+`graph_index` = 0, `graph_nodes` = 0, `graph_steps` = 0. Both probes at
+0, so the scratch run added nothing to production.
 
 ## Who does what
 
