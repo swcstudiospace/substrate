@@ -141,6 +141,62 @@ describe("parityVerdict", () => {
 		expect(verdict.pass).toBe(true);
 		expect(verdict.warnings).toHaveLength(2);
 	});
+
+	test("fails when the process cwd is not the unit WorkingDirectory", () => {
+		// A process serving :7410 from another checkout is not the unit's tree.
+		const verdict = parityVerdict(facts({ procCwd: "/root/src/worktrees/agent-substrate-v13-phase" }));
+		expect(verdict.pass).toBe(false);
+		expect(verdict.failures.join("\n")).toContain("WorkingDirectory");
+	});
+
+	test("fails closed when either cwd side is unreadable", () => {
+		// An unknown cwd is a missing proof, never an implicit match.
+		expect(parityVerdict(facts({ procCwd: null })).pass).toBe(false);
+		expect(parityVerdict(facts({ workingDirectory: null })).pass).toBe(false);
+	});
+
+	test("fails when healthz does not answer at all", () => {
+		// A silent port is a failed check (exit 1), reported as not answering.
+		const verdict = parityVerdict(facts({ healthzStatus: null }));
+		expect(verdict.pass).toBe(false);
+		expect(verdict.failures.join("\n")).toContain("not answering");
+	});
+
+	test("fails closed with its own reason when origin/main could not be asked", () => {
+		// Tri-state: "could not ask" is distinct from "sha absent", and both fail.
+		const verdict = parityVerdict(facts({ originShaKnown: null }));
+		expect(verdict.pass).toBe(false);
+		const text = verdict.failures.join("\n");
+		expect(text).toContain("could not ask");
+		expect(text).not.toContain("operator action");
+	});
+
+	test("fails when MainPID shares the port with another holder", () => {
+		// The owner set must be exactly the MainPID singleton, not merely include it.
+		expect(parityVerdict(facts({ ssOwnerPids: [1525582, 3149064] })).pass).toBe(false);
+	});
+
+	test("fails when MainPID is unknown", () => {
+		// No MainPID means no owner to compare against, even with one holder present.
+		expect(parityVerdict(facts({ mainPid: null })).pass).toBe(false);
+	});
+
+	test("fails closed when the start or HEAD-move epoch is unknown", () => {
+		// An unreadable timestamp cannot prove the process postdates the tree.
+		expect(parityVerdict(facts({ startEpoch: null })).pass).toBe(false);
+		expect(parityVerdict(facts({ headMoveEpoch: null })).pass).toBe(false);
+	});
+
+	test("expect options pass when the reading matches the baseline", () => {
+		// The runbook baseline comparison only fails on a real move.
+		expect(parityVerdict(facts(), { expectRestarts: 0, expectStart: 1791479652 }).pass).toBe(true);
+	});
+
+	test("collects every failing criterion at once", () => {
+		// The verdict reports the full list, not just the first failure.
+		const verdict = parityVerdict(facts({ activeState: "failed", healthzStatus: 503, dirtyPaths: ["bun.lock"] }));
+		expect(verdict.failures).toHaveLength(3);
+	});
 });
 
 describe("parseSystemctlShow", () => {
@@ -175,6 +231,14 @@ describe("parseSsListeners", () => {
 
 	test("ignores ports outside the watch set", () => {
 		expect(parseSsListeners("LISTEN 0 128 127.0.0.1:5432 0.0.0.0:* users:((\"postgres\",pid=11,fd=6))").size).toBe(0);
+	});
+
+	test("matches the bare-star wildcard local and skips blank or short lines", () => {
+		// `ss` prints `*:PORT` for an all-address bind; noise lines never produce owners.
+		const text = ["", "garbage", "LISTEN 0 4096 *:6420 *:* users:((\"node\",pid=55,fd=9))"].join("\n");
+		const owners = parseSsListeners(text);
+		expect(owners.get(6420)).toEqual([55]);
+		expect(owners.size).toBe(1);
 	});
 });
 

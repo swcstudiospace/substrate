@@ -4,6 +4,7 @@
  * before the first container call, and the store file is treated as opaque.
  */
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import {
@@ -195,6 +196,21 @@ describe("spawn argv", () => {
 		expect(argv).toContain("--no-env-file");
 		expect(argv.at(-1)).toBe("packages/mcp-server/src/index.ts");
 		expect(argv[0]).toBe(process.execPath);
+	});
+
+	test("is exactly bun, the no-autoload flag and the entry point, with no value slot", () => {
+		// Secrets reach the twin through its spawn env only; the argv has nowhere to carry one.
+		const argv = buildServerSpawnArgv();
+		expect(argv).toEqual([process.execPath, "--no-env-file", "packages/mcp-server/src/index.ts"]);
+		for (const arg of argv) expect(arg).not.toContain("=");
+	});
+
+	test("every docker -e names a variable and never carries a value", () => {
+		// Docker secrets travel by env name with the spawn env; `-e KEY=value` would put them in argv.
+		const source = readFileSync(join(import.meta.dir, "rehearsal.ts"), "utf8");
+		const next = [...source.matchAll(/"-e",\s*(\S+)/g)].map((m) => m[1] ?? "");
+		expect(next.length).toBeGreaterThanOrEqual(2);
+		for (const token of next) expect(token).toMatch(/^"[A-Z][A-Z0-9_]*",$/);
 	});
 });
 
