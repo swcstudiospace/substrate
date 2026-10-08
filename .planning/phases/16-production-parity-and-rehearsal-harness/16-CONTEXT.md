@@ -155,6 +155,11 @@ The live step therefore shrinks to two things: the operator confirms that window
   - If a stray process is found at proof time, the runbook's window procedure applies again.
   - The dispatcher kill switch (`SUBSTRATE_DISPATCH_DISABLED=1`) stays as it is; disposing of the orphaned units is not Phase 16's live action.
 
+### Operator answers (2026-10-08)
+- **Unit guard:** approved. `infra/vps/substrate-mcp.service` gains `ConditionPathExists=` on the server entry point and keeps `StartLimitIntervalSec=0`; it takes effect when the operator installs the unit.
+- **Parity window:** the operator confirmed they retired the stray pid 3149064 at about 17:14 UTC on 2026-10-08. The runbook records the operator as the actor and that time as the window; criterion 3's evidence is the read-only check run after it.
+- **Production probes:** approved for this phase's proof: the read-only `GET /healthz` on `127.0.0.1:7410` and the read-only `count(*)` of `rh-`-tagged rows in production Greptime and Postgres (must be 0). Nothing else touches production.
+
 ### Claude's Discretion
 - The exact readiness timeouts, the free-disk floor value and the default surface list.
 - Whether the server is detached with `Bun.spawn` and `unref` or with `setsid`.
@@ -225,7 +230,4 @@ The live step therefore shrinks to two things: the operator confirms that window
 
 ## Open for the operator (user-visible)
 
-- **ConditionPathExists on `substrate-mcp.service`.**
-  - *Question:* should `infra/vps/substrate-mcp.service` gain `ConditionPathExists=/root/src/repos/agent-substrate/packages/mcp-server/src/index.ts`, keeping `StartLimitIntervalSec=0`?
-  - *Why it is user-visible:* it changes unit behaviour. If the entry point is missing (for example after a checkout switch), the unit is skipped and stays down, with a condition-failed status and no restart loop, where today it crash-loops and fills the journal.
-  - *Recommended:* yes. It turns a silent 100k-restart loop into one visible condition failure that `parity:check` reports. It takes effect only when the operator installs the unit.
+None. The `ConditionPathExists` question was answered on 2026-10-08 (approved); see "Operator answers".
