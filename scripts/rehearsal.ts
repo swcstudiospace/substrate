@@ -446,6 +446,25 @@ function killOwn(pid: number): void {
 	}
 }
 
+/**
+ * Stop a just-spawned twin during `up` cleanup. Re-reads /proc and applies
+ * the same ownership check `down` enforces through `mayStop` (pid, start
+ * time against reuse, twin entry point, recorded checkout) before signalling,
+ * so a reused or mismatched pid is never killed. A twin that fails only the
+ * stoppability tail (system.slice, production port) is still our spawn, so it
+ * is signalled: leaking it would leave a process no future `down` can stop.
+ * Returns true when the pid was signalled.
+ */
+export function killVerifiedSpawn(pid: number, checkout: string, startSeconds: number): boolean {
+	const cur = readProcFacts(pid);
+	if (cur === null) return false;
+	if (cur.pid !== pid || cur.startSeconds !== startSeconds) return false;
+	if (!cur.argv.at(-1)?.endsWith("packages/mcp-server/src/index.ts")) return false;
+	if (cur.cwd !== checkout) return false;
+	killOwn(pid);
+	return true;
+}
+
 async function runUp(opts: UpOptions, checkout: string): Promise<number> {
 	const runDir = runDirFor(opts.name);
 	const statePath = join(runDir, "state.json");
@@ -648,16 +667,18 @@ async function runUp(opts: UpOptions, checkout: string): Promise<number> {
 
 	const facts = readProcFacts(server.pid);
 	if (facts === null) {
-		killOwn(server.pid);
+		// Unverifiable means unsignallable: a blind killOwn could hit a reused
+		// pid. Containers are still removed; the twin (if it is ours) is orphaned
+		// rather than risking someone else's process.
 		removeLabelledContainers(opts.name);
-		throw new RehearsalRefused(`could not verify the spawned twin (pid ${server.pid}); it was stopped`);
+		throw new RehearsalRefused(`could not verify the spawned twin (pid ${server.pid}); refusing to signal an unverified process`);
 	}
 
 	const firstSurface = surfaces[0];
 	const firstToken = firstSurface !== undefined ? secrets.surfaceTokens[firstSurface] : undefined;
 	const health = await waitForHealth(`http://127.0.0.1:${mcpPort}`, firstToken ?? null, READY_TIMEOUT_MS);
 	if (health === null) {
-		killOwn(server.pid);
+		killVerifiedSpawn(server.pid, checkout, facts.startSeconds);
 		removeLabelledContainers(opts.name);
 		process.stderr.write(`[rehearsal] twin never reached healthy /healthz; log kept at ${logPath}.\n`);
 		return 1;

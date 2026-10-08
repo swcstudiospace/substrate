@@ -10,6 +10,7 @@ import { join } from "node:path";
 import {
 	buildServerSpawnArgv,
 	isPortFree,
+	killVerifiedSpawn,
 	mayStop,
 	parseDockerPortLine,
 	parseName,
@@ -76,6 +77,16 @@ describe("mayStop", () => {
 
 	test("refuses a process that owns a production port", () => {
 		expect(mayStop(proc({ listensOn: [17410, 7410] }), STATE)).toContain("production port");
+	});
+});
+
+describe("killVerifiedSpawn", () => {
+	test("never signals an unverifiable pid", () => {
+		expect(killVerifiedSpawn(2 ** 30, "/tmp/wt-checkout", 0)).toBe(false);
+	});
+
+	test("never signals a live pid that fails the ownership check", () => {
+		expect(killVerifiedSpawn(process.pid, "/tmp/wt-checkout", 0)).toBe(false);
 	});
 });
 
