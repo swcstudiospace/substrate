@@ -136,3 +136,205 @@ export function redactValue<T>(value: T): T {
 	}
 	return value;
 }
+// ── skill content (D-18) ────────────────────────────────────────────────────
+// Skill files are instructions: `Authorization: Bearer $PARALLEL_API_KEY` is a
+// working line an agent has to read, which `redact()` above would destroy.
+// Skills therefore get their own pass: env references and placeholders survive,
+// real values after the contextual rules are redacted, and a high-confidence
+// token shape is never redacted silently — it is a finding the caller rejects
+// on, unless its rule is an allowed documentation example (pem, jwt). Results
+// name the line and the rule, never the value. `redact()` and `redactValue()`
+// (the event path) are not affected.
+export type SkillRedactionRule =
+	| "pem"
+	| "jwt"
+	| "github"
+	| "openai"
+	| "anthropic"
+	| "xai"
+	| "linear"
+	| "notion"
+	| "tailscale"
+	| "aws"
+	| "google"
+	| "slack"
+	| "npm"
+	| "gitlab"
+	| "digitalocean"
+	| "openai-proj"
+	| "private-tag"
+	| "pk-rk"
+	| "api-key-lower"
+	| "assignment"
+	| "authorization"
+	| "bearer"
+	| "url-password"
+	| "password";
+export const SKILL_HIGH_CONFIDENCE_RULES: readonly SkillRedactionRule[] = [
+	"pem",
+	"jwt",
+	"github",
+	"openai",
+	"anthropic",
+	"xai",
+	"linear",
+	"notion",
+	"tailscale",
+	"aws",
+	"google",
+	"slack",
+	"npm",
+	"gitlab",
+	"digitalocean",
+	"openai-proj",
+];
+/** The only high-confidence rules a caller may downgrade from finding to redaction. */
+export type SkillDocExampleRule = "pem" | "jwt";
+export interface SkillRedactionOptions {
+	allowDocExamples?: ReadonlySet<SkillDocExampleRule>;
+}
+export interface SkillRedactionHit {
+	line: number;
+	rule: SkillRedactionRule;
+}
+export interface SkillFileHit extends SkillRedactionHit {
+	file: string;
+}
+interface SkillRule {
+	/** The event-path rule this entry mirrors; the parity test compares these. */
+	name: RedactionRuleName;
+	/** What a hit reports. A family: both GitHub shapes report `github`. */
+	rule: SkillRedactionRule;
+	pattern: RegExp;
+	/** Capture group holding the value that is replaced (0 = the whole match). */
+	value: number;
+	replacement: string;
+}
+// The patterns of `RULES`, labelled, plus the D-04 skill entries (D18-08).
+// High-confidence shapes come first so a contextual rule can never claim, and
+// quietly redact, a real token. Around a key the whitespace stays on its line
+// (`[ \t]`, not `\s`), so a YAML `password:` at a line end never takes the first
+// word of the next line as its value. The keypair-array rule has no skill
+// counterpart: byte arrays are ordinary code in docs.
+const SKILL_RULES: readonly SkillRule[] = [
+	{ name: "pem", rule: "pem", pattern: /-----BEGIN[ A-Z]*PRIVATE KEY-----[\s\S]*?-----END[ A-Z]*PRIVATE KEY-----/dg, value: 0, replacement: REDACTED_PEM },
+	{ name: "jwt", rule: "jwt", pattern: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/dg, value: 0, replacement: REDACTED },
+	{ name: "github", rule: "github", pattern: /\bgh[pousr]_[A-Za-z0-9]{20,}/dg, value: 0, replacement: REDACTED },
+	{ name: "github-pat", rule: "github", pattern: /\bgithub_pat_[A-Za-z0-9_]{20,}/dg, value: 0, replacement: REDACTED },
+	{ name: "anthropic", rule: "anthropic", pattern: /\bsk-ant-[A-Za-z0-9_-]{20,}/dg, value: 0, replacement: REDACTED },
+	{ name: "openai", rule: "openai", pattern: /\bsk-(?!ant-)[A-Za-z0-9]{20,}/dg, value: 0, replacement: REDACTED },
+	{ name: "xai", rule: "xai", pattern: /\bxai-[A-Za-z0-9]{20,}/dg, value: 0, replacement: REDACTED },
+	{ name: "linear-api", rule: "linear", pattern: /\blin_api_[A-Za-z0-9]{20,}/dg, value: 0, replacement: REDACTED },
+	{ name: "linear-oauth", rule: "linear", pattern: /\blin_oauth_[A-Za-z0-9]{20,}/dg, value: 0, replacement: REDACTED },
+	{ name: "notion", rule: "notion", pattern: /\b(?:ntn_|secret_)[A-Za-z0-9]{30,}/dg, value: 0, replacement: REDACTED },
+	{ name: "tailscale", rule: "tailscale", pattern: /tskey-[A-Za-z0-9_-]+/dg, value: 0, replacement: REDACTED_TSKEY },
+	{ name: "aws", rule: "aws", pattern: /\bAKIA[0-9A-Z]{16}\b/dg, value: 0, replacement: REDACTED },
+	{ name: "google", rule: "google", pattern: /\bAIza[0-9A-Za-z_-]{35}/dg, value: 0, replacement: REDACTED },
+	{ name: "slack", rule: "slack", pattern: /\bxoxb-[0-9A-Za-z-]{10,}/dg, value: 0, replacement: REDACTED },
+	{ name: "npm", rule: "npm", pattern: /\bnpm_[A-Za-z0-9]{36}/dg, value: 0, replacement: REDACTED },
+	{ name: "gitlab", rule: "gitlab", pattern: /\bglpat-[A-Za-z0-9_-]{20,}/dg, value: 0, replacement: REDACTED },
+	{ name: "digitalocean", rule: "digitalocean", pattern: /\bdop_v1_[a-f0-9]{64}/dg, value: 0, replacement: REDACTED },
+	{ name: "openai-proj", rule: "openai-proj", pattern: /\bsk-proj-[A-Za-z0-9_-]{20,}/dg, value: 0, replacement: REDACTED },
+	{ name: "private-tag", rule: "private-tag", pattern: /<private>[\s\S]*?<\/private>/dgi, value: 0, replacement: REDACTED },
+	// pk / rk: D18-21 narrowed — the matched tail must contain at least one digit,
+	// so word-only slugs are not findings. Skill pass keeps its `dg` flags.
+	{ name: "pk-rk", rule: "pk-rk", pattern: /\b(?:pk|rk)-(?=[A-Za-z0-9_-]*[0-9])[A-Za-z0-9][A-Za-z0-9_-]{19,}/dg, value: 0, replacement: REDACTED },
+	{ name: "password", rule: "password", pattern: /(password[ \t]*[:=][ \t]*)(\S+)/dgi, value: 2, replacement: REDACTED },
+	{ name: "password-env", rule: "password", pattern: /\b([A-Z0-9_]*(?:PASSWORD|PASSWD|PASS)[ \t]*=[ \t]*)(\S+)/dgi, value: 2, replacement: REDACTED },
+	{ name: "daytona", rule: "assignment", pattern: /\b(DAYTONA_(?:API_)?KEY[ \t]*=[ \t]*)(\S+)/dgi, value: 2, replacement: REDACTED },
+	{ name: "vault", rule: "assignment", pattern: /\b((?:VAULT_TOKEN|VAULT_TOKEN_ID|X-VAULT-TOKEN)[ \t]*[:=][ \t]*)(\S+)/dgi, value: 2, replacement: REDACTED },
+	{ name: "assignment", rule: "assignment", pattern: /\b((?:[A-Z0-9]+_)*(?:API_?KEY|APIKEY|TOKEN|SECRET|KEY)(?:_[A-Z0-9]+)*[ \t]*[:=][ \t]*)(\S+)/dg, value: 2, replacement: REDACTED },
+	{ name: "api-key-lower", rule: "api-key-lower", pattern: /\b(api[_-]?key)([ \t]*[:=][ \t]*["']?)([A-Za-z0-9_\-/.+]{16,})/dgi, value: 3, replacement: REDACTED },
+	// Before `authorization`, so a literal after "Authorization: Bearer" is reported as bearer.
+	{ name: "bearer", rule: "bearer", pattern: /\b(Bearer[ \t]+)([A-Za-z0-9._~+/-]{12,}=*)/dg, value: 2, replacement: REDACTED },
+	{ name: "authorization", rule: "authorization", pattern: /\b(authorization[ \t]*[:=][ \t]*)(?:bearer[ \t]+)?(\S+)/dgi, value: 2, replacement: REDACTED },
+	{ name: "url-password", rule: "url-password", pattern: /\b([a-z][a-z0-9+.-]*:\/\/[^\s:/@]+):([^\s@]+)@/dgi, value: 2, replacement: REDACTED },
+];
+/** Event rules with no skill counterpart, and why. */
+export const SKILL_EXCLUSIONS: Partial<Record<RedactionRuleName, string>> = {
+	"keypair-array": "byte arrays are ordinary code in docs",
+};
+/** Read-only view of the skill entry names for the parity test and docs. */
+export const SKILL_RULE_NAMES: ReadonlyArray<RedactionRuleName> = SKILL_RULES.map((entry) => entry.name);
+const PLACEHOLDER_PREFIXES = ["your", "xxx", "...", "***", "example", "changeme", "placeholder", "redacted"];
+// Env references, `<…>` and the placeholder words; `[REDACTED…]` so a second
+// pass is a no-op. Scraped Markdown escapes underscores, so `$OPENAI\_API\_KEY`
+// is an env reference too.
+function isPlaceholder(captured: string): boolean {
+	const value = captured.replace(/^["'`]+/, "").replace(/["'`,;)]+$/, "");
+	if (/^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(value.replaceAll("\\_", "_"))) return true;
+	if (/^<[^>]*>$/.test(value)) return true;
+	if (/^\[REDACTED[A-Z_]*\]$/.test(value)) return true;
+	const lower = value.toLowerCase();
+	return PLACEHOLDER_PREFIXES.some((prefix) => lower.startsWith(prefix));
+}
+interface Claim {
+	start: number;
+	end: number;
+	rule: SkillRedactionRule;
+	/** Absent when the value is a placeholder: the span is claimed but left as written. */
+	replace?: { start: number; end: number; with: string };
+	kind: "redaction" | "finding" | "kept";
+}
+/** Redact one skill file. Line numbers are 1-based, counted in the original text. */
+export function redactSkillContent(
+	text: string,
+	opts: SkillRedactionOptions = {},
+): { text: string; redactions: SkillRedactionHit[]; findings: SkillRedactionHit[] } {
+	const claims: Claim[] = [];
+	for (const { rule, pattern, value, replacement } of SKILL_RULES) {
+		const highConfidence = SKILL_HIGH_CONFIDENCE_RULES.includes(rule);
+		for (const match of text.matchAll(pattern)) {
+			const whole = match.indices?.[0];
+			const span = match.indices?.[value];
+			const captured = match[value];
+			if (!whole || !span || captured === undefined) continue;
+			const [start, end] = whole;
+			if (claims.some((claim) => start < claim.end && claim.start < end)) continue;
+			if (!highConfidence && isPlaceholder(captured)) {
+				claims.push({ start, end, rule, kind: "kept" });
+				continue;
+			}
+			const allowed = (rule === "pem" || rule === "jwt") && opts.allowDocExamples?.has(rule) === true;
+			claims.push({
+				start,
+				end,
+				rule,
+				replace: { start: span[0], end: span[1], with: replacement },
+				kind: highConfidence && !allowed ? "finding" : "redaction",
+			});
+		}
+	}
+	claims.sort((a, b) => a.start - b.start);
+	const redactions: SkillRedactionHit[] = [];
+	const findings: SkillRedactionHit[] = [];
+	let out = "";
+	let copied = 0;
+	let line = 1;
+	let counted = 0;
+	for (const claim of claims) {
+		if (claim.kind === "kept" || !claim.replace) continue;
+		for (let i = text.indexOf("\n", counted); i !== -1 && i < claim.start; i = text.indexOf("\n", i + 1)) line++;
+		counted = claim.start;
+		(claim.kind === "finding" ? findings : redactions).push({ line, rule: claim.rule });
+		out += text.slice(copied, claim.replace.start) + claim.replace.with;
+		copied = claim.replace.end;
+	}
+	return { text: out + text.slice(copied), redactions, findings };
+}
+/** Redact a skill's files (relative path → text); every hit names its file. */
+export function scanSkillFiles(
+	files: Record<string, string>,
+	opts: SkillRedactionOptions = {},
+): { files: Record<string, string>; redactions: SkillFileHit[]; findings: SkillFileHit[] } {
+	const out: Record<string, string> = {};
+	const redactions: SkillFileHit[] = [];
+	const findings: SkillFileHit[] = [];
+	for (const [file, text] of Object.entries(files).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+		const result = redactSkillContent(text, opts);
+		out[file] = result.text;
+		for (const hit of result.redactions) redactions.push({ file, ...hit });
+		for (const hit of result.findings) findings.push({ file, ...hit });
+	}
+	return { files: out, redactions, findings };
+}
