@@ -198,6 +198,39 @@ describe("post-commit", () => {
 		}
 	});
 
+	test("a hook log that is a directory does not drop the commit event", async () => {
+		// Opening a directory for append fails for every user, including root.
+		// chmod 0444 does not: root can still write that file, so that case
+		// never exercises the fallback.
+		const repo = await repoWithCommit("directory-log");
+		const server = await listen(202, "");
+		const log = join(repo, "hook-log-dir");
+		mkdirSync(log);
+		try {
+			const child = Bun.spawn(["setsid", "bash", HOOK], {
+				cwd: repo,
+				env: {
+					...process.env,
+					SUBSTRATE_URL: server.url,
+					SUBSTRATE_TIMEOUT_MS: "1000",
+					SUBSTRATE_HOOK_WAIT: "",
+					SUBSTRATE_HOOK_LOG: log,
+				},
+				stdout: "ignore",
+				stderr: "ignore",
+			});
+			expect(await child.exited).toBe(0);
+			const deadline = Date.now() + 2000;
+			while (Date.now() < deadline && server.bodies.length === 0) {
+				await new Promise((resolve) => setTimeout(resolve, 50));
+			}
+			expect(server.bodies.length).toBeGreaterThan(0);
+			expect(server.bodies[0]).toContain("directory-log");
+		} finally {
+			server.close();
+		}
+	});
+
 	test("returns before the substrate answers when it is not told to wait", async () => {
 		const repo = await repoWithCommit("slow");
 		let release: () => void = () => {};
