@@ -7,6 +7,7 @@ import {
 	SKILL_HIGH_CONFIDENCE_RULES,
 	SKILL_RULE_NAMES,
 	redact,
+	redactKnown,
 	redactSkillContent,
 	redactValue,
 	scanSkillFiles,
@@ -79,6 +80,24 @@ describe("redactValue", () => {
 
 	test("passes non-string scalars through untouched", () => {
 		expect(redactValue({ exit: 0, ok: true, missing: null })).toEqual({ exit: 0, ok: true, missing: null });
+	});
+});
+
+describe("redactKnown", () => {
+	test("replaces the longest value first, so a shorter secret never leaves a tail", () => {
+		const out = redactKnown("q=canary-query", ["canary", "canary-query"]);
+		expect(out).toBe(`q=${REDACTED}`);
+	});
+
+	test("ignores empty values, which would otherwise splice the marker everywhere", () => {
+		expect(redactKnown("plain", [""])).toBe("plain");
+		expect(redactKnown("plain canary here", ["", "canary"])).toBe(`plain ${REDACTED} here`);
+	});
+
+	test("is idempotent and drops duplicates", () => {
+		const once = redactKnown("canary-query and canary", ["canary", "canary-query", "canary"]);
+		expect(once).toBe(`${REDACTED} and ${REDACTED}`);
+		expect(redactKnown(once, ["canary", "canary-query"])).toBe(once);
 	});
 });
 

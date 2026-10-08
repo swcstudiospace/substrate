@@ -136,6 +136,20 @@ export function redactValue<T>(value: T): T {
 	}
 	return value;
 }
+/**
+ * Scrub caller-known values (a token, a URL component) out of a diagnostic string.
+ *
+ * Longest value first, so a query string never survives as the tail of a longer
+ * secret replaced short-first; an empty value ignored, because replacing it would
+ * splice the marker between every character. The caller still runs the result
+ * through `redact()`, for shapes this list cannot name.
+ */
+export function redactKnown(text: string, values: Iterable<string>): string {
+	const needles = [...new Set(values)].filter((value) => value.length > 0).sort((a, b) => b.length - a.length);
+	let out = text;
+	for (const needle of needles) out = out.replaceAll(needle, REDACTED);
+	return out;
+}
 // ── skill content (D-18) ────────────────────────────────────────────────────
 // Skill files are instructions: `Authorization: Bearer $PARALLEL_API_KEY` is a
 // working line an agent has to read, which `redact()` above would destroy.

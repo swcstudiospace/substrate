@@ -20,7 +20,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { REDACTED, redact, redactValue } from "../../mcp-server/src/redact.ts";
+import { redact, redactKnown, redactValue } from "../../mcp-server/src/redact.ts";
 import { list, parseArgs, str, type Args } from "./args.ts";
 
 /** The gate's cap. A longer body would be cut silently, so it is refused here instead. */
@@ -807,8 +807,7 @@ export function httpMemory(connection: Connection): MemoryApi {
 	for (const value of [...secrets]) secrets.add(JSON.stringify(value).slice(1, -1));
 	const secretValues = [...secrets].filter(Boolean).sort((a, b) => b.length - a.length);
 	function diagnostic(value: string): string {
-		let cleaned = value.replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi, diagnosticUrl);
-		for (const secret of secretValues) cleaned = cleaned.replaceAll(secret, REDACTED);
+		const cleaned = redactKnown(value.replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi, diagnosticUrl), secretValues);
 		// Match the storage boundary: redact before capping, so a truncated token
 		// cannot survive as a fragment that the credential patterns no longer match.
 		return redact(cleaned).slice(0, 200);
