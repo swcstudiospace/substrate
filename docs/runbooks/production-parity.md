@@ -96,6 +96,33 @@ fail-closed)", and the checkout at `ab62c91` equal to `origin/main`.
 The previous restart counter had reached 119855 before the window; the
 counter starts over at 0 with the clean start above.
 
+## Isolated harness proof (SC-2, plan 16-05 Task 1)
+
+Proven 2026-10-08 from the worktree, instance `p16-proof`, run tag
+`rh-p16-proof-mv00v314`. Only hosts, ports, key names and booleans are
+recorded here — never values.
+
+- `up`: twin on `http://127.0.0.1:17410`, images
+  `postgres:16-alpine` and `greptime/greptimedb:v0.14.4`, checkout commit
+  `33bfeb9ffc57a2c4216866f762c3ff387bcd1b0a`.
+- `smoke` 4/4: `brief` ok, `emit` ok, `register` ok, `claim` ok
+  (`claimed` true, `decision` granted).
+- `ss -tnp` for the twin pid during the instance lifetime, hosts and ports
+  only: `LISTEN` on `127.0.0.1:17410`; established peers all
+  `127.0.0.1` to `127.0.0.1` on the two container host ports (scratch
+  Postgres, scratch ledger). No `7410`, no non-loopback host.
+- Scratch index live tests against `SUBSTRATE_TEST_PG_URL` (`graph-bind`,
+  `index-store.{lease,memory,search}`): 68 pass / 0 fail.
+- Targeted harness tests (`rehearsal-env`, `rehearsal`, `store-lock`):
+  64 pass / 0 fail. Full `bun test`: 1198 pass / 56 skip / 0 fail
+  (baseline 1129 pass held, growth from plans 16-01–16-04 tests).
+  `bunx tsc --noEmit`: clean.
+- `down`: stopped the twin pid, removed 2 containers. The
+  label-filtered `docker ps -a` listing is empty and the run directory is
+  gone.
+- Still pending (operator steps): the Task 2 `parity:check` readings row
+  above, and the Task 3 `rh-` tag counts (both must be 0) beside this row.
+
 ## Operator step: installing the repo unit
 
 `infra/vps/substrate-mcp.service` on `main` is ahead of the installed unit:
