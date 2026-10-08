@@ -417,3 +417,161 @@ describe("a lease id reaches only its holder", () => {
 		}
 	});
 });
+
+describe("memory_search", () => {
+	/** An index stub that records which search ran and with what. */
+	function searchIndex() {
+		const plain: unknown[][] = [];
+		const paged: Array<Record<string, unknown>> = [];
+		const entry = { id: "mem_1", scope: "repo:acme/widgets", kind: "fact", text: "x", created: "2026-10-01T00:00:00.000Z" };
+		return {
+			plain,
+			paged,
+			index: {
+				searchMemory: async (...args: unknown[]) => {
+					plain.push(args);
+					return [entry];
+				},
+				searchMemoryPage: async (search: Record<string, unknown>) => {
+					paged.push(search);
+					return { entries: [entry], next: { before: "2026-10-01T00:00:00.123456Z", before_id: "mem_1" } };
+				},
+			},
+		};
+	}
+
+	async function connectIndex(index: unknown) {
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null });
+		const server = createMcpServer(substrate, "omp");
+		const client = new Client({ name: "substrate-test", version: "0.0.0" });
+		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+		await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+		return client;
+	}
+
+	test("with neither new parameter, the reply is the bare list it always was", async () => {
+		const stub = searchIndex();
+		const client = await connectIndex(stub.index);
+		const reply = await call(client, "memory_search", { query: "lease", scope: "repo:acme/widgets", limit: 5 });
+
+		expect(reply.isError).toBe(false);
+		expect(Array.isArray(JSON.parse(reply.text))).toBe(true);
+		expect(stub.plain).toEqual([["lease", "repo:acme/widgets", 5, undefined]]);
+		expect(stub.paged).toEqual([]);
+	});
+
+	test("subject_prefix lists without a query, normalised like a subject, and answers a page with its next pair", async () => {
+		const stub = searchIndex();
+		const client = await connectIndex(stub.index);
+		const reply = await call(client, "memory_search", { scope: "repo:acme/widgets", subject_prefix: "  Lesson:V1.2/", limit: 100 });
+
+		expect(reply.isError).toBe(false);
+		expect(reply.json()).toMatchObject({ entries: [{ id: "mem_1" }], next: { before: "2026-10-01T00:00:00.123456Z", before_id: "mem_1" } });
+		expect(stub.paged).toEqual([
+			{ query: undefined, scope: "repo:acme/widgets", limit: 100, includeSuperseded: undefined, subjectPrefix: "lesson:v1.2/" },
+		]);
+	});
+
+	test("the keyset pair is passed through as the cursor", async () => {
+		const stub = searchIndex();
+		const client = await connectIndex(stub.index);
+		await call(client, "memory_search", {
+			subject_prefix: "lesson:",
+			before: "2026-10-01T00:00:00.123456Z",
+			before_id: "mem_1",
+		});
+
+		expect(stub.paged[0]).toMatchObject({ before: "2026-10-01T00:00:00.123456Z", beforeId: "mem_1" });
+	});
+
+	test("a search with neither a query nor a prefix is refused, and nothing is read", async () => {
+		const stub = searchIndex();
+		const client = await connectIndex(stub.index);
+
+		for (const args of [{}, { before: "2026-10-01T00:00:00Z" }]) {
+			const reply = await call(client, "memory_search", args);
+			expect(reply.isError).toBe(true);
+			expect(reply.text).toContain("subject_prefix");
+		}
+		expect(stub.plain).toEqual([]);
+		expect(stub.paged).toEqual([]);
+	});
+
+	test.each([
+		"2026-02-30T00:00:00Z",
+		"2026-02-29T00:00:00Z",
+		"1900-02-29T00:00:00Z",
+		"2100-02-29T00:00:00Z",
+		"2026-04-31T00:00:00Z",
+		"2026-01-00T00:00:00Z",
+		"2026-00-01T00:00:00Z",
+		"2026-13-01T00:00:00Z",
+		"0000-01-01T00:00:00Z",
+		"2026-02-30T23:30:00.123456-01:00",
+		"2026-01-01T25:00:00Z",
+		"2026-01-01T24:01:00Z",
+		"2026-01-01T24:00:01Z",
+		"2026-01-01T24:00:00.000001Z",
+		"2026-01-01T00:60:00Z",
+		"2026-01-01T00:00:60Z",
+		"2026-01-01T00:00:00+16:00",
+		"2026-01-01T00:00:00-16:00",
+		"2026-01-01T00:00:00+01:60",
+		"2026-01-01T00:00:00-01:60",
+	])("an impossible cursor %s is refused before either index search", async (before) => {
+		const stub = searchIndex();
+		const client = await connectIndex(stub.index);
+		const reply = await call(client, "memory_search", { subject_prefix: "lesson:", before });
+
+		expect(reply.isError).toBe(true);
+		// A structured refusal is the InvalidSearchError path, not a database or SDK error.
+		expect(reply.json().error).toContain("`before`");
+		expect(stub.paged).toEqual([]);
+		expect(stub.plain).toEqual([]);
+	});
+
+	test.each([
+		"2024-02-29T23:59:59.123456Z",
+		"2000-02-29T00:00:00Z",
+		"2024-03-01T00:15:00.000001+01:00",
+		"2024-02-29T23:45:00.999999-01:00",
+		"2026-01-01T00:00:00+15:59",
+		"2026-01-01T00:00:00-15:59",
+		"2026-01-01T24:00:00.000000Z",
+		"0001-01-01T00:00:00Z",
+	])("a valid cursor %s keeps its precision and zone in query and prefix pages", async (before) => {
+		const stub = searchIndex();
+		const client = await connectIndex(stub.index);
+
+		for (const selector of [{ query: "lease" }, { subject_prefix: "  Lesson:" }]) {
+			const reply = await call(client, "memory_search", { ...selector, before, before_id: "mem_1" });
+			expect(reply.isError).toBe(false);
+			expect(reply.json()).toMatchObject({ entries: [{ id: "mem_1" }] });
+		}
+		expect(stub.paged).toMatchObject([
+			{ query: "lease", before, beforeId: "mem_1" },
+			{ subjectPrefix: "lesson:", before, beforeId: "mem_1" },
+		]);
+		expect(stub.plain).toEqual([]);
+	});
+
+	test("a malformed cursor is refused rather than read some other way", async () => {
+		const stub = searchIndex();
+		const client = await connectIndex(stub.index);
+
+		const tieOnly = await call(client, "memory_search", { subject_prefix: "lesson:", before_id: "mem_1" });
+		expect(tieOnly.isError).toBe(true);
+		expect(tieOnly.text).toContain("before_id");
+
+		const notATime = await call(client, "memory_search", { subject_prefix: "lesson:", before: "yesterday" });
+		expect(notATime.isError).toBe(true);
+
+		const notADate = await call(client, "memory_search", { subject_prefix: "lesson:", before: "2026-13-40T00:00:00Z" });
+		expect(notADate.isError).toBe(true);
+
+		const emptyPrefix = await call(client, "memory_search", { subject_prefix: "   " });
+		expect(emptyPrefix.isError).toBe(true);
+
+		expect(stub.paged).toEqual([]);
+	});
+});

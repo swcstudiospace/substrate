@@ -32,6 +32,7 @@ import {
 	type HandoffVerdict,
 } from "./handoff.ts";
 import { leaseView, normalizeTtlSeconds, type LeaseView } from "./lease.ts";
+import { normalizeSubject } from "./memory-policy.ts";
 import { governMemoryWrite } from "./memory-write.ts";
 import { redact } from "./redact.ts";
 import {
@@ -48,6 +49,8 @@ import {
 	type GraphView,
 	type MemoryEntry,
 	type MemoryEntryInput,
+	type MemorySearch,
+	type MemorySearchPage,
 	type MemoryWriteRequest,
 	type MemoryWriteResult,
 	type NodeState,
@@ -362,6 +365,97 @@ export function parseBindRequest(input: { correlation_id?: unknown; graph_id?: u
 	return out;
 }
 
+export class InvalidSearchError extends Error {}
+
+/**
+ * An ISO-8601 instant with an explicit zone, to the microsecond at most — what a
+ * `memory_search` cursor is, and nothing Postgres would read some other way.
+ */
+export const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/;
+
+/** Check calendar fields without Date.parse's day rollover or loss of microseconds. */
+function isValidMemoryCursor(value: string): boolean {
+	if (!ISO_TIMESTAMP_PATTERN.test(value)) return false;
+	const year = Number(value.slice(0, 4));
+	const month = Number(value.slice(5, 7));
+	const day = Number(value.slice(8, 10));
+	if (year === 0 || month < 1 || month > 12) return false;
+	const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+	const daysInMonth = month === 2 ? (leapYear ? 29 : 28) : (month === 4 || month === 6 || month === 9 || month === 11 ? 30 : 31);
+	if (day < 1 || day > daysInMonth) return false;
+
+	const hour = Number(value.slice(11, 13));
+	const minute = Number(value.slice(14, 16));
+	const second = Number(value.slice(17, 19));
+	if (hour > 24 || minute > 59 || second > 59) return false;
+	const utc = value.endsWith("Z");
+	const zoneStart = utc ? value.length - 1 : value.length - 6;
+	// ISO end-of-day midnight remains valid, but even one microsecond past it is not.
+	if (hour === 24 && (minute !== 0 || second !== 0 || (zoneStart > 19 && !/^\.0+$/.test(value.slice(19, zoneStart))))) {
+		return false;
+	}
+	if (!utc) {
+		// PostgreSQL accepts numeric zone displacement only below sixteen hours.
+		if (Number(value.slice(zoneStart + 1, zoneStart + 3)) > 15 || Number(value.slice(zoneStart + 4)) > 59) return false;
+	}
+	return true;
+}
+
+/** `memory_search`'s arguments, as the tool takes them. */
+export interface MemorySearchRequest {
+	query?: string;
+	scope?: string;
+	limit?: number;
+	include_superseded?: boolean;
+	subject_prefix?: string;
+	before?: string;
+	before_id?: string;
+}
+
+/** Whether a search asks for a page — a cursor back, rather than the bare newest-N list. */
+export function isPagedSearch(request: MemorySearchRequest): boolean {
+	return request.subject_prefix !== undefined || request.before !== undefined || request.before_id !== undefined;
+}
+
+/**
+ * Validate a paged `memory_search`.
+ *
+ * `query` may be left out once `subject_prefix` names what to list: that is how a
+ * caller reads every entry under a subject family rather than the newest 100
+ * mentioning a word. The prefix goes through `normalizeSubject`, because a stored
+ * subject went through it — a prefix that kept its capitals would match nothing.
+ *
+ * `before_id` only breaks a tie at `before`, so it means nothing without it.
+ */
+export function parseMemorySearch(request: MemorySearchRequest): MemorySearch {
+	const search: MemorySearch = {
+		query: request.query,
+		scope: request.scope,
+		limit: request.limit,
+		includeSuperseded: request.include_superseded,
+	};
+	if (request.subject_prefix !== undefined) {
+		const prefix = normalizeSubject(request.subject_prefix);
+		if (!prefix) throw new InvalidSearchError("`subject_prefix` is empty once normalised");
+		search.subjectPrefix = prefix;
+	}
+	if (search.query === undefined && search.subjectPrefix === undefined) {
+		throw new InvalidSearchError("memory_search needs `query`, or `subject_prefix` to list a subject family");
+	}
+	if (request.before !== undefined) {
+		if (!isValidMemoryCursor(request.before)) {
+			throw new InvalidSearchError("`before` must be an ISO-8601 timestamp with a zone, as a page's `next.before` gives it");
+		}
+		search.before = request.before;
+	}
+	if (request.before_id !== undefined) {
+		if (search.before === undefined) throw new InvalidSearchError("`before_id` breaks a tie at `before`, and needs it");
+		if (request.before_id.length === 0) throw new InvalidSearchError("`before_id` is empty");
+		search.beforeId = request.before_id;
+	}
+	return search;
+}
+
 export class Substrate {
 	readonly index: IndexStore | null;
 	readonly greptime: GreptimeClient | null;
@@ -657,6 +751,18 @@ export class Substrate {
 	async searchMemory(query: string, scope?: string, limit?: number, includeSuperseded?: boolean): Promise<MemoryEntry[]> {
 		if (!this.index) return [];
 		return this.index.searchMemory(query, scope, limit, includeSuperseded);
+	}
+
+	/**
+	 * A paged search: `subject_prefix` and the `(before, before_id)` cursor. The
+	 * visibility rules are `searchMemory`'s — this reads the same entries, only
+	 * further back — so nothing quarantined, parked or retired is reachable here
+	 * that was not before.
+	 */
+	async searchMemoryPage(request: MemorySearchRequest): Promise<MemorySearchPage> {
+		const search = parseMemorySearch(request);
+		if (!this.index) return { entries: [], next: null };
+		return this.index.searchMemoryPage(search);
 	}
 
 	/**

@@ -327,13 +327,19 @@ describe("only the holder's surface may beat or release", () => {
 	test("the refusal is the same whatever id the stranger sends, so it confirms nothing", async () => {
 		const node = new LeaseTable();
 		const claim = await node.claim(holder("hermes", "sess-a"));
+		const before = { ...node.row };
 
 		const right = await node.heartbeat(claim.lease_id ?? "", 60, "omp");
 		const wrong = await node.heartbeat("lse_guess", 60, "omp");
 		const missing = await node.release({}, "omp");
+		const rightRelease = await node.release({ lease_id: claim.lease_id }, "omp");
+		const wrongRelease = await node.release({ lease_id: "lse_guess" }, "omp");
 
 		expect(right).toEqual(wrong);
 		expect(missing.ok === false && missing.reason).toBe("not-holder");
+		expect(rightRelease).toEqual(wrongRelease);
+		expect(rightRelease).toEqual(missing);
+		expect(node.row).toEqual(before);
 	});
 
 	test("the holder's own surface beats and releases as before", async () => {

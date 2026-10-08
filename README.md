@@ -62,7 +62,7 @@ Details, and what each primitive deliberately does not promise, in
 
 ```
 packages/mcp-server/     substrate-mcp on 127.0.0.1:7410      (TS)
-packages/cli/            substrate brief|emit|run|verify|evidence (TS)
+packages/cli/            substrate brief|emit|run|verify|evidence|lessons (TS)
 packages/host/           rivet-agentos host, openTask         (TS)
 packages/dispatcher/     Linear label → session               (Py)
 packages/collectors/     Orca tee, grok/muse tails, git hook  (TS)
@@ -110,6 +110,12 @@ concurrency for decisions, review for anything global. The reply is
 separate claim read back from the index: **anything other agents act on requires both.**
 
 `events.emit` still fails open. Details in [`docs/memory-governance.md`](docs/memory-governance.md).
+
+The lessons bank is built on the same gate rather than beside it: a lesson from a finished
+phase is one governed `fact` with subject `lesson:<milestone>/<phase>/<slug>`, recalled at
+discuss time by `substrate lessons recall`, cited by entry id in the plan, scored on read
+from outcome facts and rolled up into milestone digests, with no table, kind or write path
+of its own. Details in [`docs/lessons-bank.md`](docs/lessons-bank.md).
 
 ## Observability and audit
 
