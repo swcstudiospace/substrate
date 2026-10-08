@@ -1,13 +1,15 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { normalizeEvent } from "./event.ts";
-import { EVENT_SOURCES } from "./event-sources.ts";
-
+import { EVENT_SOURCES, SILENT_SOURCES } from "./event-sources.ts";
 /**
  * Proof for the v1.3 event-source table.
  *
  * Every `EVENT_SOURCES` sample must survive `normalizeEvent` — the real
- * write-path gate — unchanged in kind, surface and payload. Coverage, repo
- * and no-content rules hold over the full inventory.
+ * write-path gate — unchanged in kind, surface and payload, and the reviewed
+ * document `docs/event-vocabulary.md` must name the same sources, kinds and
+ * actions as this table, so the two cannot drift.
  */
 
 describe("EVENT_SOURCES samples survive the write-path gate", () => {
@@ -75,6 +77,63 @@ describe("the no-content rule", () => {
 			const keys = Object.keys(row.sample().payload ?? {});
 			const banned = keys.filter((key) => BANNED[key]);
 			expect({ id: row.id, banned }).toEqual({ id: row.id, banned: [] });
+		}
+	});
+});
+
+describe("docs/event-vocabulary.md equals the table", () => {
+	const DOC = join(import.meta.dir, "..", "..", "..", "docs", "event-vocabulary.md");
+
+	function parseMarkedTable(markdown: string): Array<Record<string, string>> {
+		const start = markdown.indexOf("<!-- event-sources:start -->");
+		const end = markdown.indexOf("<!-- event-sources:end -->");
+		if (start < 0 || end < start) throw new Error("event-sources markers missing");
+		const rows = markdown
+			.slice(start, end)
+			.split("\n")
+			.filter((line) => line.trimStart().startsWith("|"));
+		const [header, , ...body] = rows;
+		const keys = (header ?? "")
+			.trim()
+			.replace(/^\||\|$/g, "")
+			.split("|")
+			.map((cell) => cell.trim().replace(/`/g, ""));
+		return body.map((line) => {
+			const values = line
+				.trim()
+				.replace(/^\||\|$/g, "")
+				.split("|")
+				.map((cell) => cell.trim().replace(/`/g, ""));
+			return Object.fromEntries(values.map((value, i) => [keys[i] ?? `col${i}`, value]));
+		});
+	}
+
+	test("the marked table names exactly the table's ids", () => {
+		const docRows = parseMarkedTable(readFileSync(DOC, "utf8"));
+		const docIds = [...docRows.map((row) => row["id"] ?? "")].sort();
+		const tableIds = [...EVENT_SOURCES.map((row) => row.id), ...SILENT_SOURCES.map((row) => row.id)].sort();
+		expect({ docIds }).toEqual({ docIds: tableIds });
+	});
+
+	test("each doc row carries its row's kind and actions", () => {
+		const docRows = parseMarkedTable(readFileSync(DOC, "utf8"));
+		const byId = new Map(docRows.map((row) => [row["id"], row]));
+		for (const row of EVENT_SOURCES) {
+			const doc = byId.get(row.id);
+			expect({ id: row.id, kind: doc?.["kind"], actions: doc?.["action"] }).toEqual({
+				id: row.id,
+				kind: row.kind,
+				actions: row.actions ? [...row.actions].join(", ") : "—",
+			});
+		}
+		// Silent sources deliberately emit nothing: the doc holds an em dash.
+		for (const row of SILENT_SOURCES) {
+			const doc = byId.get(row.id);
+			expect({ id: row.id, kind: doc?.["kind"], actions: doc?.["action"] }).toEqual({
+				id: row.id,
+				kind: "—",
+				actions: "—",
+			});
 		}
 	});
 });
