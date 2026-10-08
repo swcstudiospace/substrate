@@ -803,6 +803,8 @@ export function httpMemory(connection: Connection): MemoryApi {
 	} catch {
 		secrets.add(connection.url);
 	}
+	// Structured diagnostics escape string values before they reach the scrubber.
+	for (const value of [...secrets]) secrets.add(JSON.stringify(value).slice(1, -1));
 	const secretValues = [...secrets].filter(Boolean).sort((a, b) => b.length - a.length);
 	function diagnostic(value: string): string {
 		let cleaned = value.replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi, diagnosticUrl);
@@ -875,7 +877,9 @@ export function httpMemory(connection: Connection): MemoryApi {
 					// not diagnostic text, so it is kept verbatim.
 					for (const field of ["reason", "remedy", "error"] as const) {
 						const value = decision[field];
-						if (typeof value === "string" && value !== "review.required") decision[field] = diagnostic(value);
+						if (value !== undefined && value !== null && !(field === "reason" && value === "review.required")) {
+							decision[field] = diagnostic(typeof value === "string" ? value : JSON.stringify(redactValue(value)));
+						}
 					}
 					return decision;
 				}

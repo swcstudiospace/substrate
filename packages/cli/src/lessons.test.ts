@@ -1065,6 +1065,40 @@ describe("lesson transport diagnostics", () => {
 		expect(fake.entries).toHaveLength(0);
 	});
 
+	test("structured reason and remedy redact escaped credentials in JSON without changing the denial", async () => {
+		fake.token = 'tok-structured"fixture\\key';
+		fake.scripted = [{
+			outcome: "denied",
+			reason: { code: "rbac.no-grant", detail: fake.token },
+			remedy: ["https://remote-canary-user:remote-canary-pass@example.test/help?token=remote-canary-query", fake.token],
+		}];
+		const cli = harness();
+		expect(await cli.run(["add", "--text", "Lease epochs fence stale holders.", "--phase", "15-lessons-bank", "--json"])).toBe(1);
+		const [report] = JSON.parse(cli.out()) as Array<{ status: string; reason: string; remedy: string }>;
+		expect(report).toMatchObject({ status: "denied" });
+		expect(report?.reason).toContain("rbac.no-grant");
+		expect(report?.remedy).toContain("example.test/help");
+		expect(cli.out()).not.toContain("tok-structured");
+		expect(cli.out()).not.toContain("remote-canary");
+		expect(report?.reason.length).toBeLessThanOrEqual(200);
+		expect(report?.remedy.length).toBeLessThanOrEqual(200);
+	});
+
+	test("array errors with a null reason redact credentials in human output and remain refusals", async () => {
+		fake.token = 'tok-structured"fixture\\key';
+		fake.scripted = [{
+			reason: null,
+			error: ["proxy refused", fake.token, "https://remote-canary-user:remote-canary-pass@example.test/help?token=remote-canary-query"],
+		}];
+		const cli = harness();
+		expect(await cli.run(["add", "--text", "Lease epochs fence stale holders.", "--phase", "15-lessons-bank"])).toBe(1);
+		expect(cli.out()).toMatch(/^refused {2}/);
+		expect(cli.out()).toContain("proxy refused");
+		expect(cli.out()).toContain("example.test/help");
+		expect(cli.out()).not.toContain("tok-structured");
+		expect(cli.out()).not.toContain("remote-canary");
+	});
+
 	test("a 'review' bearer token keeps review.required and proposal ids exact while other secrets stay redacted", async () => {
 		fake.token = "review";
 		const add = ["add", "--text", "Lease epochs fence stale holders.", "--phase", "15-lessons-bank", "--json"];
@@ -1092,14 +1126,15 @@ describe("lesson transport diagnostics", () => {
 		fake.scripted = [{
 			outcome: "quarantined",
 			reason: "quarantine.speculative",
-			remedy: "State it as a fact.",
+			remedy: "review.required",
 			quarantine_id: "memq_review_1",
 		}];
 		const heldBack = harness();
 		expect(await heldBack.run(add)).toBe(1);
-		const [quarantined] = JSON.parse(heldBack.out()) as Array<{ status: string; id: string | null; reason: string }>;
+		const [quarantined] = JSON.parse(heldBack.out()) as Array<{ status: string; id: string | null; reason: string; remedy: string }>;
 		expect(quarantined).toMatchObject({ status: "quarantined", id: "memq_review_1" });
 		expect(quarantined?.reason).toContain("quarantine.speculative");
+		expect(quarantined?.remedy).not.toContain(fake.token);
 	});
 
 	test("successful recall keeps lesson URL content untouched by diagnostic redaction", async () => {

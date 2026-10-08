@@ -296,13 +296,15 @@ one replaces the older in the score instead of adding another vote.
 The key hashes the scope, lesson id, citing milestone/phase and report id, and nothing
 else: never the stored reports, the verdict or the note. Retrying the same logical
 report under the same id therefore reuses the key even after persistence — a landed
-write replays as `duplicate` with the original entry id, and a lost reply can never
-undo a newer verdict. A success → failure → success sequence is two ids: the retry of
-the first success returns the original `duplicate` and leaves the score alone, while a
-fresh id for the second success appends and moves the score. Reusing an id with
-different content is the gate's idempotency conflict (`idempotency.reused`): the entry
-already recorded stands, reported as `conflict`, never a second write. Reports from
-another phase, scope or id do not change this key.
+write replays as `duplicate` with the original entry id. A committed success report r1,
+failure correction r2, and retry of r1 retain two records and the failure score. An
+intentional return to success uses a fresh r3, appends a third outcome, and moves the
+score. This guarantee concerns replay of a report already persisted before its
+correction; first persistence and concurrent commits are ordered by the server, not
+by the report identifier. Reusing an id with different content is the gate's
+idempotency conflict (`idempotency.reused`): the entry already recorded stands,
+reported as `conflict`, never a second write. Reports from another phase, scope or id
+do not change this key.
 
 `outcome` refuses an id that is not a lesson or digest in the scope, because an outcome
 is permanent; `--unchecked` records it anyway. An outcome body exceeding 4000 characters
