@@ -583,7 +583,11 @@ Source: acc30a8 `packages/mcp-server/src/redact.ts:20-21, 35-36, 51-67`. Convert
 | A3 | Phase 16 lands `scripts/rehearsal.ts`, `consumer.env` keys (`SUBSTRATE_URL`, `SUBSTRATE_TOKEN`, `SUBSTRATE_REHEARSAL_TOKENS_DIR`, `SUBSTRATE_REHEARSAL_NAME`, `SUBSTRATE_TEST_PG_URL`) and `assertLoopback` as planned | Pattern 6 | Medium. The plans exist (16-01/16-03), but the code is not on the base yet. Re-read the as-built names before wiring |
 | A4 | Stripe-style keys use underscores (`pk_live_…`), so September's hyphen `pk-`/`rk-` rule mostly matches non-Stripe shapes and slugs | Open Questions | Low. Informs the operator's default only |
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+- Q1 RESOLVED: the CONTEXT D18-21 default (verbatim regex plus a pinned test) is planned in 18-01.
+- Q2 RESOLVED: both branches of the gated round trip (D18-19) are planned in 18-04.
+- Q3 RESOLVED: Phase 17's `check:phase-close` is intentionally not edited; `redact-lock.test.ts` runs in plain `bun test`.
 
 1. **The `pk-rk` default (operator).**
    - What we know: the rule redacts 20+-char `pk-`/`rk-` slugs, including branch names, on the event path. A memory body containing one becomes an unreleasable `secret` [VERIFIED: classify experiment].
