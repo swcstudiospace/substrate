@@ -1,7 +1,7 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v1.2 — Swarm leases, workspace install and lessons bank (In Progress)",
+  "milestone": "v1.3",
   "phases": [
     {
       "number": "11",
@@ -30,9 +30,9 @@
     }
   ],
   "next": {
-    "command": "/gsd:progress",
-    "label": "Show progress",
-    "reason": "Unsure of state — showing progress"
+    "command": "/gsd:discuss-phase",
+    "label": "Discuss the first phase",
+    "reason": "Project initialized — plan your first phase"
   },
-  "updated_at": "2026-10-08T05:50:35.097Z"
+  "updated_at": "2026-10-08T16:19:14.154Z"
 }

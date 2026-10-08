@@ -1,20 +1,16 @@
 ---
 gsd_state_version: "1.0"
-milestone: v1.2
-milestone_name: Swarm leases, workspace install and lessons bank (Shipped)
-status: Milestone v1.2 complete and shipped
-stopped_at: "Milestone v1.2 complete. All pull requests across agent-substrate and agent-swarm merged: substrate PR #16, #17, #18; swarm PR #9, #10, #11. All 10 verification and security reports verified with zero open risks."
-last_updated: "2026-10-08T05:52:00.000Z"
+milestone: v1.3
+milestone_name: Build plan completion
+status: planning
+last_updated: "2026-10-08T16:19:14.151Z"
 last_activity: 2026-10-08
-last_activity_desc: Milestone v1.2 completed and archived
-state_head: 62cddf92fc13fe36bfa8cc4e4ba07cb9d6f91655
 progress:
-  total_phases: 5
-  completed_phases: 5
-  total_plans: 5
-  completed_plans: 5
-  percent: 100
-current_phase: 15
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # State
@@ -151,10 +147,10 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Current Position
 
-Phase: Milestone v1.2 complete
+Phase: Not started (defining requirements)
 Plan: —
-Status: Awaiting next milestone
-Last activity: 2026-10-08 — Milestone v1.2 completed and archived
+Status: Defining requirements
+Last activity: 2026-10-08 — Milestone v1.3 started
 
 ## Deferred Items
 
