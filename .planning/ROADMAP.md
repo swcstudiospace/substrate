@@ -116,7 +116,7 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 **Plans**: TBD
 - [x] 17-01-PLAN.md
 - [x] 17-02-PLAN.md
-- [ ] 17-03-PLAN.md
+- [x] 17-03-PLAN.md
 
 ### Phase 18: Guard rails and shared redactor
 
@@ -375,7 +375,7 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
 | 16. Production parity and rehearsal harness | v1.3 | 5/5 | Complete    | 2026-10-08 |
-| 17. Event vocabulary and audit policy | v1.3 | 2/3 | In Progress | - |
+| 17. Event vocabulary and audit policy | v1.3 | 3/3 | In Progress | - |
 | 18. Guard rails and shared redactor | v1.3 | 0/? | Not started | - |
 | 19. Lane B collectors | v1.3 | 0/? | Not started | - |
 | 20. Production identity and Phase 0 UAT | v1.3 | 0/? | Not started | - |
