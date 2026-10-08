@@ -507,12 +507,15 @@ async function runUp(opts: UpOptions, checkout: string): Promise<number> {
 		}
 	}
 	try {
-		const fs = statfsSync(runDir.startsWith("/tmp") ? "/tmp" : runDir);
+		// Stat an ancestor that exists: runDir may not exist yet, and a statfs
+		// failure must refuse, never skip the floor silently.
+		const fs = statfsSync(process.env.XDG_RUNTIME_DIR ?? "/tmp");
 		if (Number(fs.bavail) * Number(fs.bsize) < DISK_FLOOR_BYTES) {
 			throw new RehearsalRefused("free disk below the 2 GiB floor; the harness never prunes");
 		}
 	} catch (cause) {
 		if (cause instanceof RehearsalRefused) throw cause;
+		throw new RehearsalRefused("could not read free disk; refusing without the 2 GiB floor proof");
 	}
 
 	// A stale run dir (crashed up) keeps its label, so label-scoped cleanup
