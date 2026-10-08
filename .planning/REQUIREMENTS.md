@@ -21,7 +21,7 @@ Decisions confirmed when the milestone was opened (2026-10-08):
 
 ### Foundation and production parity
 
-- [x] **FOUND-01**: An isolated rehearsal harness starts main's `substrate-mcp` on a scratch port against scratch Postgres and GreptimeDB, with configurable surface tokens, and tears it down. Every v1.3 proof can point `SUBSTRATE_URL` at it, and no production store is touched by it.
+- [ ] **FOUND-01**: An isolated rehearsal harness starts main's `substrate-mcp` on a scratch port against scratch Postgres and GreptimeDB, with configurable surface tokens, and tears it down. Every v1.3 proof can point `SUBSTRATE_URL` at it, and no production store is touched by it.
 - [ ] **FOUND-02**: `EVENT_KINDS` is unchanged after every phase, each new event source documents its mapping onto existing kinds and surfaces, and `packages/mcp-server/src/store-lock.test.ts` passes at every phase close. The audit policy records fail-open or fail-closed for every tool v1.3 adds, and a policy test catches a missing or contrary entry.
 - [ ] **FOUND-03**: Production parity, with operator approval: the stray process holding `127.0.0.1:7410` is retired so `substrate-mcp.service` serves `main`; a runbook records the check (unit PID owns the port, `/healthz` answers) and the rollback.
 - [ ] **FOUND-04**: Production identity, with operator approval: a runbook lists every client of `substrate-mcp` and the token it needs; per-surface tokens, the operator token, `SUBSTRATE_HANDOFF_KEY` and `SUBSTRATE_AUDIT_PATH` are provisioned by name in `/etc/substrate/substrate.env` (values never in the repo), and no listed client is left without a token when they switch on.
@@ -152,7 +152,7 @@ Which phases cover which requirements. Filled in by the roadmap.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| FOUND-01 | Phase 16 | Complete |
+| FOUND-01 | Phase 16 | Pending |
 | FOUND-02 | Phase 17 | Pending |
 | FOUND-03 | Phase 16 | Pending |
 | FOUND-04 | Phase 20 | Pending |
