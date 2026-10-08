@@ -4,12 +4,13 @@
  * before the first container call, and the store file is treated as opaque.
  */
 import { describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	buildServerSpawnArgv,
+	clearDirectory,
 	ensurePrivateDir,
 	flag,
 	gitOutput,
@@ -465,5 +466,22 @@ describe("docker data-root disk guard", () => {
 		expect(free).not.toBeNull();
 		expect(free as number).toBeGreaterThan(0);
 		expect(freeBytes(join(tmpdir(), "rh-no-such-dir-xyz"))).toBeNull();
+	});
+});
+
+describe("clearDirectory", () => {
+	test("a restarted run drops stale token files but keeps the dir", () => {
+		const dir = mkdtempSync(join(tmpdir(), "rh-tokens-"));
+		try {
+			ensurePrivateDir(dir);
+			writeFileSync(join(dir, "cursor"), "stale\n");
+			writeFileSync(join(dir, "swarm-a01-orch"), "stale\n");
+			clearDirectory(dir);
+			expect(readdirSync(dir)).toEqual([]);
+			expect(statSync(dir).isDirectory()).toBe(true);
+			expect(statSync(dir).mode & 0o777).toBe(0o700);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });

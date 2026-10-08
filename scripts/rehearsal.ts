@@ -20,6 +20,7 @@ import {
 	lstatSync,
 	mkdirSync,
 	openSync,
+	readdirSync,
 	readFileSync,
 	readlinkSync,
 	rmSync,
@@ -264,6 +265,17 @@ export function ensurePrivateDir(path: string): void {
 	}
 	if ((lstatSync(path).mode & 0o777) !== 0o700) {
 		throw new RehearsalRefused(`refusing to use ${path}: not mode 0700`);
+	}
+}
+
+/**
+ * Empty a proven-private directory without removing it: a crashed run's
+ * stale token files must not survive into the new run. Call only after
+ * ensurePrivateDir proved the path a real 0700 directory (never a symlink).
+ */
+export function clearDirectory(dir: string): void {
+	for (const entry of readdirSync(dir)) {
+		rmSync(join(dir, entry), { recursive: true, force: true });
 	}
 }
 
@@ -670,6 +682,9 @@ async function runUp(opts: UpOptions, checkout: string): Promise<number> {
 	ensurePrivateDir(runDir);
 	const tokensDir = join(runDir, "tokens");
 	ensurePrivateDir(tokensDir);
+	// A restarted instance (crashed up, narrower --surfaces) must not keep
+	// stale bearer files: clear before writing this run's tokens.
+	clearDirectory(tokensDir);
 	for (const surface of surfaces) {
 		const tok = secrets.surfaceTokens[surface];
 		if (tok !== undefined) writeMode(join(tokensDir, surface), `${tok}\n`);
