@@ -5,16 +5,16 @@ milestone_name: Build plan completion
 current_phase: 16
 current_phase_name: Production parity and rehearsal harness
 status: executing
-stopped_at: Completed 16-03-PLAN.md
-last_updated: "2026-10-08T20:53:44.579Z"
+stopped_at: Completed 16-04-PLAN.md
+last_updated: "2026-10-08T20:59:25.049Z"
 last_activity: 2026-10-08
 last_activity_desc: Phase 16 execution started
-state_head: 15412c93915fc5255bdd8e341c258df4c337e427
+state_head: ee7a82beef96906ac2dec905b3b561abaac1669c
 progress:
   total_phases: 18
   completed_phases: 0
   total_plans: 5
-  completed_plans: 3
+  completed_plans: 4
   percent: 0
 ---
 
@@ -155,7 +155,7 @@ which is why Greptime worked immediately and Postgres did not.
 ## Current Position
 
 Phase: 16 (Production parity and rehearsal harness) — EXECUTING
-Plan: 4 of 5
+Plan: 5 of 5
 Status: Ready to execute
 Last activity: 2026-10-08 — Phase 16 execution started
 
@@ -173,8 +173,8 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-08T20:53:44.546Z
-Stopped at: Completed 16-03-PLAN.md
+Last session: 2026-10-08T20:59:25.011Z
+Stopped at: Completed 16-04-PLAN.md
 Resume file: None
 
 ## Performance Metrics
@@ -184,6 +184,7 @@ Resume file: None
 | Phase 16 P16-01 | 15min | 2 tasks | 2 files |
 | Phase 16 P16-02 | 9min | 3 tasks | 4 files |
 | Phase 16 P16-03 | 14min | 3 tasks | 3 files |
+| Phase 16 P16-04 | 5min | 3 tasks | 4 files |
 
 ## Decisions
 
@@ -193,3 +194,4 @@ Resume file: None
 - [Phase 16]: 16-03: ledger image override key composed at runtime so the store-lock substring scan stays green
 - [Phase 16]: 16-03: smoke reads only consumer.env and refuses :7410/non-loopback before any request; claim needs claimed true plus granted
 - [Phase 16]: 16-03: requirements-completed left empty, FOUND-01 stays open until the 16-05 live proof
+- [Phase 16]: 16-04: docs carry key names only, no connection-string shapes; production-mutating steps framed operator-only
