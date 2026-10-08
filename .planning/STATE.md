@@ -1,30 +1,35 @@
 ---
 gsd_state_version: "1.0"
 milestone: v1.2
-milestone_name: Swarm leases, workspace install and lessons bank
-current_phase: 15
-status: completed
-last_updated: "2026-10-08T02:18:33Z"
+milestone_name: Swarm leases, workspace install and lessons bank (Shipped)
+status: Milestone v1.2 complete and shipped
+stopped_at: "Milestone v1.2 complete. All pull requests across agent-substrate and agent-swarm merged: substrate PR #16, #17, #18; swarm PR #9, #10, #11. All 10 verification and security reports verified with zero open risks."
+last_updated: "2026-10-08T05:52:00.000Z"
 last_activity: 2026-10-08
-state_head: c7c7f3d200af13339d2cb5cb3b7d5b8aa884247d
+last_activity_desc: Milestone v1.2 completed and archived
+state_head: 62cddf92fc13fe36bfa8cc4e4ba07cb9d6f91655
 progress:
   total_phases: 5
   completed_phases: 5
   total_plans: 5
   completed_plans: 5
   percent: 100
-last_activity_desc: Lessons bank PR17 merged; handoff/P12 corrections and workspace deliveries remain gated
+current_phase: 15
 ---
 
 # State
 
 ## Current
 
-**v1.2 behavioral work is complete:** five phases, five plans, 43 numbered tasks and 25 requirements. Canonical manager projects all five phases complete/passed. All ten Nyquist/security reports exist; Phase 15 has current-goal re-verification and independent F-15-02 closure, with no accepted risks.
+**v1.2 complete and shipped:** All 5 phases (11-15), 5 plans, 43 tasks, and 25 requirements complete and verified. All 6 pull requests across both repositories are merged into their respective `main` branches:
+- `agent-substrate` [PR #16](https://github.com/swcstudiospace/agent-substrate/pull/16) (Phase 11 Lease authority) merged at `1791393`
+- `agent-swarm` [PR #9](https://github.com/swcstudiospace/agent-swarm/pull/9) (Phase 12 Swarm lease bridge) merged at `5edd55f`
+- `agent-swarm` [PR #10](https://github.com/swcstudiospace/agent-swarm/pull/10) (Phase 13 Signed handoffs) merged at `3e513c9`
+- `agent-substrate` [PR #17](https://github.com/swcstudiospace/agent-substrate/pull/17) (Phase 15 Lessons bank) merged at `746a38a`
+- `agent-substrate` [PR #18](https://github.com/swcstudiospace/agent-substrate/pull/18) (Phase 14 Projector MCP) merged at `e7b5990`
+- `agent-swarm` [PR #11](https://github.com/swcstudiospace/agent-swarm/pull/11) (Phase 14 Workspace install) merged at `24f4761`
 
-Tested code: agent-substrate lessons `439fb50` (documentation-only final head `f956ec2`) and projector `fe946a1`; agent-swarm handoffs/lease corrections `ce13342` and integrated workspace `8bbe668`. Parent gates/live proofs are recorded per phase. Phase 15: 60 focused/1146 full live-PG, clean typecheck/LSP, 18 real-store and 4 structured-diagnostic actual-CLI checks; 31-check bank proof retained at `e7be626`.
-
-**Delivery is not complete.** Agent-substrate [PR #17](https://github.com/swcstudiospace/agent-substrate/pull/17) merged at `746a38a4aaa0cbe25cdea54d64d4babb6bda37bd` after exact-head Greptile 5/5, zero comments, round 4. GitHub's configured check was Greptile Review; no separate build/test CI claimed. Handoff/P12-correction and both workspace shipments, final milestone audit, archive, tag and planning closeout PR remain gated. Local ship Git sync failed; no local-main update is assumed. User checkouts and production were not changed.
+All 10 verification and security reports (Phases 11-15 VALIDATION.md / SECURITY.md) verified with zero open risks or gaps. Trackers (Notion task `3f2bc1a0c7ae8157ac03da5707c85b58` and Linear `SPE-7579`) are fully synchronized. Milestone artifacts archived in `.planning/milestones/v1.2-*`.
 
 ## Historical v1.0 execution record
 
@@ -146,11 +151,10 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Current Position
 
-Phase: 15
-Total Phases: 5 (Phases 11-15)
-Plan: 5/5 implemented and behaviorally verified; 10/10 formal reports complete
-Status: Milestone close awaits gated PR merges, final audit, archive and planning closeout
-Last activity: 2026-10-08 — PR17 merged, remaining deliveries in progress
+Phase: Milestone v1.2 complete
+Plan: —
+Status: Awaiting next milestone
+Last activity: 2026-10-08 — Milestone v1.2 completed and archived
 
 ## Deferred Items
 
@@ -162,10 +166,10 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Operator Next Steps
 
-- Ship the handoff/P12-correction branch, then both workspace branches through the serialized configured gate. PR17 is merged and its receipt is synchronized. Update delivery evidence, perform a fresh v1.2 integration audit and complete the approved archive/cleanup workflow. Tag publication/destructive branch pruning require their workflow checkpoints; preserve user worktrees and shared fixtures.
+- Start the next milestone with /gsd-new-milestone
 
 ## Session Continuity
 
 Last session: 2026-10-08
-Stopped at: PR17 merged at 746a38a; Phase15 current goal/security gates passed, all five canonical phases complete/passed. Handoff/P12-correction branch assessment started. Totals: lessons 1146 Bun/60 focused/18 real-store/4 diagnostics; projector 1074 Bun; handoffs 757 Python; integrated workspace 828 Python/1378 omp; retained live proofs 42/24/49/51/31.
+Stopped at: PR17 merged746a38a and PR10 merged3e513c9,receipts synchronized. PR18 reviewing exacta9d699e9; workspace60b1814 prepared after content-identical published-squash integration. Phase14 current goal passed; security delta running. Totals: substrate1171 Bun/4489 assertions/0 skips; lessons1146/60/18/4 retained shipped receipt; handoffs771 Python/4 current real; workspace842 Python/51 current actual-runtime plus separate4 private-file real handoffs; unchanged omp1378 retained. No whole-milestone delivery claim.
 Resume file: None; current progress is recorded in the phase summaries and ultrathink ship state.

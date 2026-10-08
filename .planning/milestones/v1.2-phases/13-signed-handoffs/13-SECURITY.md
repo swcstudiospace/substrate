@@ -8,15 +8,17 @@ block_on: high
 register_authored_at_plan_time: false
 created: "2026-10-07"
 audit_mode: retroactive-stride
-execution_status: passed-parent-gates-and-live-proof
-source_commit: ce1334294260224ac0d08c97a60d0c3200ff0a3f
+execution_status: passed-parent-current-delta-and-qualified-retained-proof
+source_commit: f2686c7d8995c6e500417031c99d9d4418455238
+audit_verdict: SECURED
+refreshed: "2026-10-08"
 ---
 
 # Phase 13 — Security
 
 > Retroactive STRIDE register and ASVS L1 source-evidence review. **SECURED: eight threats closed, zero blocking or non-blocking open findings**, after remediation, parent full regression gates and fresh real-server proof. No risks accepted.
 
-**Final status:** verified at `ce1334294260224ac0d08c97a60d0c3200ff0a3f`. Baseline finding narratives and intermediate pending updates are preserved as chronological audit evidence; the **Final Closure** section supersedes their former open/pending gate states. Original source-line references identify the baseline unless explicitly listed as remediation evidence.
+**Current status:** verified at `f2686c7d8995c6e500417031c99d9d4418455238`, independently reassessed against the existing eight-threat register. Baseline findings, older source anchors and intermediate pending updates remain chronological evidence. The exact-head reassessment below supersedes former gate states; unchanged lease paths retain explicitly qualified runtime evidence rather than a fabricated final-head rerun.
 
 ## Scope and evidence rules
 
@@ -199,3 +201,23 @@ The fresh output verifies:
 | 2026-10-07 | 8 | 8 | 0 | 0 | Source remediation review + parent757-test gates + inspected fresh49-check live proof; final commit ce1334294260224ac0d08c97a60d0c3200ff0a3f |
 
 **Final approval:** verified; `threats_open: 0`; **no accepted risks**. The previously documented same-OS-account credential-isolation limitation remains a scope assumption, not a new waiver. Phase14 integration and milestone-wide shipping are separate gates and are not declared complete by this Phase13 report.
+
+## Exact-head reassessment — 2026-10-08
+
+The native security auditor returned **SECURED** for `f2686c7d8995c6e500417031c99d9d4418455238`: eight registered threats closed, zero blocking/non-blocking opens, zero unmapped flags, no ninth threat and no new risk acceptance. Read-only source/test/docs review; this auditor executed no checks or git commands. Full structured verdict: `agent://P13SecurityClosure`; parent execution/provenance: `local://p13-oct08-review-evidence.json`.
+
+| Existing threat | Current correction and source evidence | Fresh coverage |
+|---|---|---|
+| T-13-02, replay integrity | `substrate_handoff.py:65-113,181-193,435-499,553-581`: shared structural validation rejects malformed receiving rows even with a purported good verdict; protected logical boundary time selects current context while audit packets retain storage order. Dependency time anchors to immutable `task.created_at`, gate/escalation to transition `updated_at`; old packets fall back to signed `packet.ts`. | Eight signed/unsigned × one/two rework × flush/redispatch cases and four malformed receiving cases; real scenarios 1,3,4. |
+| T-13-03, replay dedupe | `substrate_handoff.py:282-313,354-399`: uncertain writes invalidate the cache revision; fresh reads merge concurrent local confirmations, preserve independent in-flight reservations and defer if another uncertain write crossed the snapshot. Key and time headers remain within 1200 UTF-16 notes units and the 9000-byte request/envelope budget. | Persisted lost-reply and deterministic concurrent-confirmation regressions; real scenario 2 remains one actual signed ledger packet. |
+| T-13-08, outage/reconstruction | `substrate_handoff.py:315-418,536-581`: an unanswered refresh does not authorize another append; malformed rows do not erase healthy context; only `stored:true` confirms delivery. Existing bounded transport, visible refusal and run-local/non-durable retry semantics remain. | Current full suite and four actual-server controlled failure paths; no raw ledger corruption or durable retry queue claimed. |
+
+Parent final executable-logic gate: **771 Python tests passed, 0 failures, 94.10s**, including all fourteen new consumer regressions; changed-file Ruff passed. Subsequent changes before commit were docstring/product-documentation wording only.
+
+Current real proof: **4/4** against signed server `a9d699e9e70ee7f112a4fe793572852054eff572` on isolated `:7512`, real Postgres `:55432` and GreptimeDB `:54000`; `/tmp/p13-review-real-m9092cl5`, graph `ut-muyyxewt-3f8b2d21`. Packets: rework `hof_845466c4f0e24e11a9587f2fc413b72e`, lost reply `hof_80c45d04fed5489fadfadfb2d3bafda4`. Actual storage/signatures/reconstruction, controlled before-write outage, lost committed reply and malformed receiving response.
+
+Qualified retained normal-path proof: **49/49, 67.05s**, `artifact://119`, `/tmp/p13-proof-1791428380`, same server on `:7511`. Client was the intermediate review-fix tree **before the final cache-generation and immutable-created_at refinements**, not a 49-case execution at `f2686c7`. Unchanged keeper/handover/A14 paths showed eight CPU loops, renewals beyond35s, takeover24.9s within TTL30,231 samples, one holder transition, epoch+1, handoff `03:00:47.236Z` before release `03:00:47.250Z`, and separate A14 ledger-only recovery with local state/broker absent. Do not combine these with the four current scenarios into an exact-head 53-check claim.
+
+Scope remains ASVS L1 source mitigation plus bounded parent execution, not backend authorization/key-management/storage rescan or exhaustive race certification. No separate live crossed-generation reservation exercise was supplied; that fence was traced in source and the concurrent-confirmation regression is current. Trusted Task Store timestamps are not a distributed causal clock; same-OS-account credential isolation, explicit unauthenticated unsigned operation and non-durable retries remain declared boundaries. No full LLM run, new waiver or milestone-wide completion is claimed.
+
+**Current approval: verified; SECURED, 8/8 closed, `threats_open: 0`, no accepted risks.** PR10 and both Phase14 deliveries remain separately receipt-bound delivery gates.

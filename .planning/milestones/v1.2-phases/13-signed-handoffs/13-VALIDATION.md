@@ -8,6 +8,8 @@ created: "2026-10-07"
 audit_mode: retrospective-source-review
 execution_status: passed-parent-gates-and-live-proof
 source_commit: ce1334294260224ac0d08c97a60d0c3200ff0a3f
+refreshed: "2026-10-08T03:29:27Z"
+refresh_source_commit: f2686c7d8995c6e500417031c99d9d4418455238
 ---
 
 # Phase 13 — Validation Strategy
@@ -216,3 +218,44 @@ Observed proof outcomes:
 | G13-03 | HAND-01 | CLOSED: multibyte packet-bound/key-retention and oversized-routing refusal regressions pass |
 
 **Open validation findings: none within this phase scope.** All nine tasks and all four requirements are covered; no Wave 0 references remain missing. Final Nyquist sign-off is approved. Permanent `/tmp` proof archival is a milestone evidence-management responsibility, not a missing Phase 13 behavioral criterion.
+
+
+## Exact-head refresh — 2026-10-08T03:29:27Z (`f2686c7d8995c6e500417031c99d9d4418455238`)
+
+Static source review at the published PR #10 head. Product root `/root/src/worktrees/agent-swarm-p13`
+observed at `f2686c7`; the commit touches only `docs/substrate-handoffs.md`,
+`swarm/substrate_handoff.py` (604 lines), and `tests/test_substrate_handoff.py` (868 lines, 25 test
+functions) — every other cited product file is unchanged since `ce13342`, so its `ce13342`-era line
+citations below remain valid. Inputs incorporated: `local://p13-oct08-review-evidence.json` and the
+parent receipt appended to `13-01-SUMMARY.md` ("Exact-head review correction — 2026-10-08"), read after
+that append. No checks were executed here; parent gate/runtime numbers below are parent-reported.
+State A = implemented in exact-head source + bound to named tests present in exact-head test source +
+no open gap. All nine tasks are in State A; requirement dispositions are unchanged (all PASS).
+
+| Task | Exact-head source binding | Requirement | State |
+|------|---------------------------|-------------|-------|
+| 13-01-01 | `swarm/substrate_client.py:61-69` `own_token`/`_token` split (unchanged since `ce13342`); handoff sending guard refuses the general fallback (`swarm/substrate_handoff.py:333-358`) | HAND-01 | A |
+| 13-01-02 | `has_own_token` seam (`swarm/substrate_lease.py:130-134`, unchanged); `handed_over` drops the released lease and mirrors released/handover (`:617-625`, observed); reentrant per-task lock shared across escalation path | HAND-01, PROOF-02 | A |
+| 13-01-03 | `boundary()` with signed `occurred_at` header (`:181-192`, `BOUNDARY_TIME_PREFIX` `:47`); `_fit_packet` preserves key + time header (`:196-230`); sender guard/dedupe/fenced refresh/storage (`:282-412`); boundaries (`:421-502`); two-read `reconstruct` + `trust_of` + `_valid_packet` + logical-time current (`:65-115`, `:536-584`); A14/A01 routing (`escalation_owner` `:232`) | HAND-01, HAND-02, HAND-03 | A |
+| 13-01-04 | `handoff.unsent`/`refused`/`unsigned`/`misattributed` emission (`:315-331`, `:369-412`); tee warning mapping retained (`swarm/substrate_tee.py:90-93`, unchanged) | HAND-01, HAND-03 | A |
+| 13-01-05 | `swarm/results.py:267-300` (observed): verdicts captured before transition; rework-cap escalation attempted before explicit settle; transition→handoff→settle share the keeper's per-task lock | HAND-01, PROOF-02 | A |
+| 13-01-06 | Runner wiring retained (bridge on exactly when leases are; max-attempt escalation; dependency send before prompt; per-round/final flush; prompt insertion — `scripts/swarm_run.py`, unchanged); new `occurred_at` call sites anchored to `created_at`/`updated_at` (`substrate_handoff.py:437,463,492`) | HAND-01, HAND-02, HAND-03 | A |
+| 13-01-07 | 25 test functions (`tests/test_substrate_handoff.py`, 868 lines): retained H01-H17 catalogue + keeper-enabled escalation matrix (`:332-442`) + rejected/malformed ledger rows (`:711-752`) + multibyte fitting (`:754-806`); **14 new**: late/redispatch ×8 (`:507-533`), lost committed reply (`:536-561`), interleaved refresh (`:564-621`), malformed receiving rows ×4 (`:624-642`); rerun dedupe now signed/unsigned/no-keys (`:685-709`) | HAND-01, HAND-02, HAND-03, PROOF-02 | A |
+| 13-01-08 | `docs/substrate-handoffs.md` updated at head: `boundary-at` anchor contract, refresh-after-uncertain-write rule, malformed-row rejection, corrected 9 kB / 1,500 B reserve / 12 kB server / 1,200-unit notes limits; lease + tee docs retained | HAND-01, HAND-02, HAND-03, PROOF-02 | A |
+| 13-01-09 | Proof: retained 49/49 intermediate-tree leg (qualified — NOT a head run) + parent-reported fresh gates at final logic (**771 Python / 94.10 s**, Ruff clean) + fresh changed-path real-server **4/4** (`:7512` vs `a9d699e`, real Postgres/GreptimeDB, fixture credentials only) | PROOF-02, HAND-01, HAND-02 | A |
+
+**G13-01..04 status at head:** remain CLOSED. The head commit extends the G13-01 fence (uncertain-write
+refresh can no longer duplicate or drop a handover confirmation) and the G13-02 receiver rule (malformed
+rows rejected even when claiming a good verdict); G13-03 bounds and G13-04 failure paths are untouched.
+No new gaps opened: `occurred_at` values come from the existing Task Store (`created_at`/`updated_at`),
+no new storage or clock was added, and the key/time header survives fitting by construction (`:196-230`).
+
+**Provenance deltas vs the 2026-10-07 Final Closure:** `source_commit: ce13342…` above is retained
+history. Live-execution authority at head is: 771-test suite + Ruff (final logic, docstring-only delta
+mid-run, committed/pushed without later semantic change) and the 4-scenario real-server run
+(graph `ut-muyyxewt-3f8b2d21`, rework packet `hof_845466c4f0e24e11a9587f2fc413b72e`, lost-reply packet
+`hof_80c45d04fed5489fadfadfb2d3bafda4`, root `/tmp/p13-review-real-m9092cl5`). The 49/49 S2 leg, the
+757/705-test suites, generator/TS receipts, and the bun bundle are retained history (see VERIFICATION
+refresh for exact qualifications). Failing-before controls `artifact://112/114/129/131` cover the new14.
+No new security verdict, no merge claim (review run 30258836 pending), no full-LLM or ledger-corruption
+claim. Nyquist `wave_0_complete` / compliance posture is unchanged by this refresh.

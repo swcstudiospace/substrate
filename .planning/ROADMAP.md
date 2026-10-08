@@ -4,7 +4,7 @@
 
 - ⚠️ **v1.0 build plan (phases 0-6 + 0.5)** — closed 2026-10-01 with known gaps. Archive: [milestones/v1.0-ROADMAP.md](milestones/v1.0-ROADMAP.md) · audit: [milestones/v1.0-MILESTONE-AUDIT.md](milestones/v1.0-MILESTONE-AUDIT.md)
 - ✅ **v1.1 Swarm correlation, governed memory and orchestrate integrations** — Phases 7-10 with inserted 8.1, shipped 2026-10-07 (ADR 0001 S1 and S3). Archive: [milestones/v1.1-ROADMAP.md](milestones/v1.1-ROADMAP.md)
-- 🚧 **v1.2 Swarm leases, workspace install and lessons bank** — Phases 11-15 (in progress)
+- ✅ **v1.2 Swarm leases, workspace install and lessons bank** — Phases 11-15, shipped 2026-10-08 (ADR 0001 S2, S4, SPE-5830). Archive: [milestones/v1.2-ROADMAP.md](milestones/v1.2-ROADMAP.md) · audit: [milestones/v1.2-MILESTONE-AUDIT.md](milestones/v1.2-MILESTONE-AUDIT.md)
 
 ## Phases
 
@@ -37,21 +37,18 @@ Phase details: [milestones/v1.1-ROADMAP.md](milestones/v1.1-ROADMAP.md) · requi
 
 </details>
 
-### 🚧 v1.2 Swarm leases, workspace install and lessons bank (In Progress)
+<details>
+<summary>✅ v1.2 Swarm leases, workspace install and lessons bank (Phases 11-15) — SHIPPED 2026-10-08</summary>
 
-**Milestone Goal:** Swarm agents work nodes under substrate leases with signed handoffs, every swarm workspace is wired to `substrate-mcp` with one token per agent process, and lessons from finished phases become governed, citable memory.
+- [x] **Phase 11: Lease authority** (1/1 plans) — completed 2026-10-07
+- [x] **Phase 12: Swarm lease bridge** (1/1 plans) — completed 2026-10-07
+- [x] **Phase 13: Signed handoffs** (1/1 plans) — completed 2026-10-07
+- [x] **Phase 14: Workspace install** (1/1 plans) — completed 2026-10-07
+- [x] **Phase 15: Lessons bank** (1/1 plans) — completed 2026-10-07
 
-v1.2 builds ADR 0001 S2 (SPE-5053) and S4 (SPE-5055) and Tier 1 of the lessons bank (SPE-5830). Code lands on branches cut from each repo's `origin/main`, every client still fails open, and each phase ends in a proof that is run for real against a real Postgres and a real GreptimeDB.
+Phase details: [milestones/v1.2-ROADMAP.md](milestones/v1.2-ROADMAP.md) · requirements: [milestones/v1.2-REQUIREMENTS.md](milestones/v1.2-REQUIREMENTS.md) · audit: [milestones/v1.2-MILESTONE-AUDIT.md](milestones/v1.2-MILESTONE-AUDIT.md) · phase folders: `milestones/v1.2-phases/`
 
-Execution order: 11, then 12, then 13 and 14 in parallel. Phase 15 depends on nothing and runs alongside 11-14; running it early lets its `substrate lessons recall` feed the discuss step of a later v1.2 phase, which PROOF-04 needs.
-
-**Phase Numbering:** integer phases continue from v1.1 (last phase 10).
-
-- [x] **Phase 11: Lease authority** — swarm session shape, holder-only `lease_id` and fenced calls, no swarm operator (agent-substrate) (completed 2026-10-07)
-- [x] **Phase 12: Swarm lease bridge** — the runner claims, heartbeats, completes and releases each task's node for its agent (agent-swarm) (completed 2026-10-07)
-- [x] **Phase 13: Signed handoffs** — `coord_handoff` packets at accountable-agent boundaries, context rebuilt from the ledger alone (agent-swarm) (completed 2026-10-07)
-- [x] **Phase 14: Workspace install** — `substrate-mcp` wired into every swarm workspace runtime, one token per agent process (agent-substrate, agent-swarm) (completed 2026-10-07)
-- [x] **Phase 15: Lessons bank** — `substrate lessons add | recall | digest` over governed `fact` entries (agent-substrate) (completed 2026-10-07)
+</details>
 
 ## Phase Details
 
@@ -70,7 +67,7 @@ Execution order: 11, then 12, then 13 and 14 in parallel. Phase 15 depends on no
   5. `EVENT_KINDS` is unchanged and `store-lock.test.ts` passes.
 
 **Proof**: On the running server against a real Postgres and GreptimeDB, a node claimed by `swarm-a05-be` is read by `swarm-a09-rev` through every disclosing reply with no `lease_id` in any of them, and `swarm-a09-rev`'s heartbeat with A05's `lease_id` is refused `not-holder`.
-**Plans**: TBD
+**Plans**: 1/1 complete — 11-01 lease authority and holder-only fencing.
 
 ### Phase 12: Swarm lease bridge
 
@@ -87,7 +84,7 @@ Execution order: 11, then 12, then 13 and 14 in parallel. Phase 15 depends on no
   5. The Task Store keeps the DAG, budgets, bids and arbitration records with nothing deleted, and with the substrate unreachable a swarm run completes as before.
 
 **Proof**: Against the Phase 11 server on a real Postgres and GreptimeDB, two A05 replicas race for one node and exactly one is granted, and a task sent back with `CHANGES_REQUESTED` shows its release and re-claim in the trail.
-**Plans**: TBD
+**Plans**: 1/1 complete — 12-01 runner lease lifecycle and refusal transitions.
 
 ### Phase 13: Signed handoffs
 
@@ -104,7 +101,7 @@ Execution order: 11, then 12, then 13 and 14 in parallel. Phase 15 depends on no
   5. A05 hands a failed gate to A14 with the swarm bus stopped between them, and A14's context is rebuilt from `coord_handoff_list` and `events_query` alone.
 
 **Proof** (PROOF-02): criteria 4 and 5 run end to end against a real Postgres and a real GreptimeDB.
-**Plans**: TBD
+**Plans**: 1/1 complete — 13-01 signed boundaries and ledger-only reconstruction.
 
 ### Phase 14: Workspace install
 
@@ -121,7 +118,7 @@ Execution order: 11, then 12, then 13 and 14 in parallel. Phase 15 depends on no
   5. The install refuses a non-MCP runtime as an executing agent and keeps its refusals (inside the swarm checkout, `$HOME`, `~/.omp`, symlinks). A dry run prints the substrate additions and the env files it expects, and the docs record the `substrate.env` split between server and agents and the shared-account limit of 0600.
 
 **Proof** (PROOF-03): install into an empty workspace and start a swarm run there with nothing edited by hand; the run appears in the ledger and in another agent's brief, the brief is non-empty and the claim is granted.
-**Plans**: TBD
+**Plans**: 1/1 complete — 14-01 workspace projection and per-agent runtime credentials.
 
 ### Phase 15: Lessons bank
 
@@ -138,7 +135,7 @@ Execution order: 11, then 12, then 13 and 14 in parallel. Phase 15 depends on no
   5. There is no new table, memory kind or write path, and `store-lock.test.ts` still passes.
 
 **Proof** (PROOF-04): against the live substrate, a lesson from an archived v1.1 SUMMARY becomes an accepted, verified `fact` id, is recalled into a later v1.2 phase's CONTEXT.md and is cited in that phase's PLAN. The digest command is proven on a real milestone digest run against the live substrate, writing the v1.2 digest `fact` at the milestone close.
-**Plans**: TBD
+**Plans**: 1/1 complete — 15-01 governed lessons, recall, outcomes and milestone digest.
 
 ## Progress
 

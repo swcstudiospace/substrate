@@ -2,6 +2,34 @@
 
 *A living document updated after each milestone. Lessons feed forward into future planning.*
 
+## Milestone: v1.2 — Swarm leases, workspace install and lessons bank
+
+**Shipped:** 2026-10-08
+**Phases:** 5 | **Plans:** 5
+
+### What Was Built
+- Phase 11 Lease authority: swarm session validation (names own agent, valid replica and graph); holder-only `lease_id` and disclosure redactions; caller-bound renewal, heartbeat, completion and release; operator-token misconfiguration refused (agent-substrate #16, 1791393).
+- Phase 12 Swarm lease bridge: the runner claims, heartbeats, completes and releases each task's node for its executing agent; busy expired-lease reclaim without dispatch stalling; local saturation handled; two replicas never work one node (agent-swarm #9, 5edd55f).
+- Phase 13 Signed handoffs: `coord_handoff` packets written at accountable-agent boundaries; task execution context reconstructed from ledger events alone without Task Store reads; killed replica takeover within TTL with no two holders (agent-swarm #10, 3e513c9).
+- Phase 14 Workspace install: `substrate-mcp` wired into every swarm workspace runtime (Claude, Grok, omp); one 0600 token file per agent in private directory outside checkout; live disabled sessions strip credentials and child MCP access; replay strips runner token; atomic transactions with nonblocking recovery open (agent-substrate #18, e7b5990; agent-swarm #11, 24f4761).
+- Phase 15 Lessons bank: `substrate lessons add | recall | digest` over governed `fact` entries; read-time scoring and cursor paging; digests retire lessons without deletion; real-store double-run proof (agent-substrate #17, 746a38a).
+
+### What Worked
+- Strict, multi-round Greptile review on every PR caught critical edge cases: nonblocking recovery open in shared workspaces, replay command runner-token unsetting, child MCP access on disabled sessions, busy reclaim deferral, and rework preservation across delayed handoff writes.
+- Real-store integration testing across PostgreSQL and GreptimeDB before merging ensured 0 regressions across all 5 phases.
+- Pinned directory descriptors and atomic file transactions secured workspace configuration and private token storage against symlink and FIFO attacks.
+
+### What Was Inefficient
+- Greptile reviews for large diffs took multiple iterations (up to 4 rounds per PR), requiring patience and targeted fixes rather than broad refactoring.
+- Worktree branch locks prevented automatic local main sync during `ultrathink-ship merge`, requiring manual awareness of worktree allocations.
+
+### Key Lessons
+1. Replay invocations must carefully unset ambient runner secrets when child credentials are not present, avoiding accidental privilege inheritance.
+2. File recovery and rollback in multi-tenant or shared workspaces must always open with `O_NONBLOCK` before validating regular file types.
+3. Keep credential lookup unified in a single helper (`credential()`) shared by sessions, leases, handoffs, and event forwarding.
+
+---
+
 ## Milestone: v1.1 — Swarm correlation, governed memory and orchestrate integrations
 
 **Shipped:** 2026-10-07
