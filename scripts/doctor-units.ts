@@ -254,7 +254,19 @@ export function listReleaseTree(release: string): Set<string> {
 		throw new DoctorError(`release directory does not exist: ${release}`);
 	}
 	const tree = new Set<string>();
+	const seen = new Set<string>();
+	function inside(resolved: string): boolean {
+		return resolved === root || resolved.startsWith(`${root}${sep}`);
+	}
 	function walk(dir: string): void {
+		let realDir: string;
+		try {
+			realDir = realpathSync(dir);
+		} catch {
+			return;
+		}
+		if (!inside(realDir) || seen.has(realDir)) return;
+		seen.add(realDir);
 		for (const entry of readdirSync(dir, { withFileTypes: true })) {
 			if (entry.name === "node_modules" || entry.name === ".git") continue;
 			const full = join(dir, entry.name);
@@ -265,10 +277,21 @@ export function listReleaseTree(release: string): Set<string> {
 				} catch {
 					continue;
 				}
-				if (resolved !== root && !resolved.startsWith(root + sep)) continue;
-				const st = statSync(resolved);
-				if (st.isDirectory()) walk(resolved);
-				else tree.add(relative(root, resolved).split(sep).join("/"));
+				if (!inside(resolved)) continue;
+				let st;
+				try {
+					st = statSync(resolved);
+				} catch {
+					continue;
+				}
+				// Record the link path for a file. Walk a directory target once;
+				// a link back to a directory already seen stops, so a loop cannot recurse.
+				if (st.isDirectory()) {
+					walk(resolved);
+					continue;
+				}
+				const linkPath = relative(root, full).split(sep).join("/");
+				if (linkPath !== "") tree.add(linkPath);
 				continue;
 			}
 			if (entry.isDirectory()) walk(full);
@@ -288,12 +311,15 @@ export function formatReport(findings: readonly Finding[]): string {
 	return `${lines.join("\n")}\n`;
 }
 
-type Entry = { kind: "path"; path: string } | { kind: "module"; module: string };
+type Entry = { kind: "path"; path: string; absolute: boolean } | { kind: "module"; module: string };
 
 function locatedEntry(workingDirectory: string | null, entry: Entry | null): Entry | null {
 	if (entry === null || entry.kind === "module") return entry;
+	// An absolute ExecStart is already a repo path. Joining WorkingDirectory again
+	// turns /opt/.../current/packages/.../index.ts under a nested directory into a miss.
+	if (entry.absolute) return entry;
 	const path = qualify(workingDirectory, entry.path);
-	return path === null ? null : { kind: "path", path };
+	return path === null ? null : { kind: "path", path, absolute: false };
 }
 
 /** A relative entry is repo-root-relative when WorkingDirectory is the checkout root, and nested under it otherwise. */
@@ -338,9 +364,10 @@ export function entryFromExecStart(execStart: string): Entry | null {
 			index += 1;
 			continue;
 		}
+		const absolute = token.startsWith("/");
 		const path = repoPath(token);
 		if (path === null) return null;
-		return { kind: "path", path };
+		return { kind: "path", path, absolute };
 	}
 	return null;
 }

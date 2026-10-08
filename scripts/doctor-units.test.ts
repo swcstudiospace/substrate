@@ -31,10 +31,12 @@ describe("entryFromExecStart", () => {
 		expect(entryFromExecStart("/root/.local/share/reflex/bun/bin/bun packages/mcp-server/src/index.ts")).toEqual({
 			kind: "path",
 			path: MCP_ENTRY,
+			absolute: false,
 		});
 		expect(entryFromExecStart("/root/.local/share/reflex/bun/bin/bun packages/collectors/src/grok.ts --watch")).toEqual({
 			kind: "path",
 			path: GROK_ENTRY,
+			absolute: false,
 		});
 	});
 
@@ -50,7 +52,11 @@ describe("entryFromExecStart", () => {
 	});
 
 	test("an absolute entry under current is repo-relative, and .. is refused", () => {
-		expect(entryFromExecStart(`${RELEASE_CURRENT}/${MCP_ENTRY}`)).toEqual({ kind: "path", path: MCP_ENTRY });
+		expect(entryFromExecStart(`${RELEASE_CURRENT}/${MCP_ENTRY}`)).toEqual({
+			kind: "path",
+			path: MCP_ENTRY,
+			absolute: true,
+		});
 		expect(entryFromExecStart("/root/.local/share/reflex/bun/bin/bun ../../etc/passwd")).toBeNull();
 	});
 });
@@ -79,6 +85,29 @@ Restart=always
 		);
 		const findings = diagnose([unit], treeOf(GROK_ENTRY));
 		expect(findings.map((finding) => finding.code)).toEqual(["dev-checkout", "shared-env"]);
+	});
+
+	test("an absolute entry under a nested working directory is not joined twice", () => {
+		const unit = parseUnit(
+			"substrate-mcp.service",
+			`[Service]
+WorkingDirectory=${RELEASE_CURRENT}/packages/mcp-server
+ExecStart=${RELEASE_CURRENT}/${MCP_ENTRY}
+Restart=always
+EnvironmentFile=${SHARED_ENV_FILE}
+`,
+		);
+		expect(diagnose([unit], treeOf(MCP_ENTRY))).toEqual([]);
+		const relative = parseUnit(
+			"substrate-mcp.service",
+			`[Service]
+WorkingDirectory=${RELEASE_CURRENT}/packages/mcp-server
+ExecStart=/root/.local/share/reflex/bun/bin/bun src/index.ts
+Restart=always
+EnvironmentFile=${SHARED_ENV_FILE}
+`,
+		);
+		expect(diagnose([relative], treeOf(MCP_ENTRY))).toEqual([]);
 	});
 
 	test("a release unit with its own env file has no findings", () => {
@@ -287,5 +316,14 @@ describe("release tree", () => {
 		symlinkSync(outside, join(dir, "escape"));
 		const escaped = listReleaseTree(dir);
 		expect([...escaped].some((path) => path.includes("secret.ts"))).toBe(false);
+
+		symlinkSync(MCP_ENTRY, join(dir, "entry.ts"));
+		mkdirSync(join(dir, "nested"));
+		symlinkSync("..", join(dir, "nested/up"));
+		symlinkSync(".", join(dir, "loop"));
+		const linked = listReleaseTree(dir);
+		expect(linked.has("entry.ts")).toBe(true);
+		expect(linked.has(MCP_ENTRY)).toBe(true);
+		expect([...linked].some((path) => path.includes("secret.ts"))).toBe(false);
 	});
 });

@@ -14,9 +14,13 @@ Ming approves every operator step below separately, one at a time, and a read-on
 /opt/agent-substrate/previous  -> releases/<previous sha>
 ```
 
-The sha is the tag peeled to a commit. `bun install --frozen-lockfile` runs in that directory. `current` is replaced with `mv -T` on a new symlink, so readers see either the old target or the new one. A failed health check points `current` back at the previous target and restarts the units. After a successful deploy only the new release and one previous directory remain.
+The sha is the tag peeled to a commit. `bun install --frozen-lockfile` runs in that directory. `current` is replaced with `mv -T` on a new symlink, so readers see either the old target or the new one. A failed health check points `current` back at the previous target and restarts the units. After a successful health-checked deploy only the new release and one previous directory remain. A deploy with `SUBSTRATE_RELEASE_RESTART=0` does not delete release directories.
 
-Override the root with `SUBSTRATE_RELEASE_ROOT` (tests do; production uses the default). `SUBSTRATE_REPO` is the local git directory the tag is read from. `git archive` exports the commit, not a dirty worktree. `SUBSTRATE_RELEASE_RESTART=0` builds the tree and does not restart or health-check. `SUBSTRATE_HEALTH_CMD`, when set, is an absolute executable path with no shell. Otherwise the check is `curl -fsS` of `SUBSTRATE_HEALTH_URL` (default `http://127.0.0.1:7410/healthz`) and a URL with credentials in it is refused.
+Override the root with `SUBSTRATE_RELEASE_ROOT` (tests do; production uses the default). `SUBSTRATE_REPO` is the local git directory the tag is read from. `git archive` exports the commit, not a dirty worktree. `SUBSTRATE_RELEASE_RESTART=0` builds the tree, checks that each unit's entry file is in it, swaps `current`, and does not restart, health-check, or prune. A later deploy with restart enabled prunes down to `current` and one previous only after the units are active and the health check passes.
+
+Before the swap, the script reads `ExecStart` from the unit files beside it and refuses to publish a release that is missing one of those entry files. After restart it runs `systemctl daemon-reload` and requires `systemctl is-active` for each unit.
+
+`SUBSTRATE_HEALTH_CMD`, when set, is an absolute executable path with no shell, and a non-zero exit fails the deploy immediately. Otherwise the check polls `SUBSTRATE_HEALTH_URL` (default `http://127.0.0.1:7410/healthz`) until it returns a 2xx or `SUBSTRATE_HEALTH_DEADLINE` seconds pass (default 30). Connection refused is retried. Any other HTTP response fails immediately. A URL with credentials in it is refused. When the server requires a bearer, set `SUBSTRATE_HEALTH_TOKEN_FILE` to an absolute root-only file that contains only that token, or set `SUBSTRATE_HEALTH_CMD`. The script passes the token to curl through a mode-0600 config file and does not print it. A 401 with neither set fails the deploy.
 
 `deploy-release.sh rollback` swaps `current` back to `previous` and health-checks again.
 
@@ -76,6 +80,15 @@ Each step is its own approved window. After each one, run the doctor read-only (
 2. **Stop the dispatcher restart loop.** The installed dispatcher uses `Restart=always` and idles on `SUBSTRATE_DISPATCH_DISABLED=1`, so a clean exit is started again every few seconds. Stop and disable `substrate-dispatcher.service`. Leave `SUBSTRATE_DISPATCH_DISABLED=1` set. Do not start it again in this window.
 3. **Give the audit chain a durable path.** Set `SUBSTRATE_AUDIT_PATH` in `/etc/substrate/substrate.env`. The name is already in `.env.example`; the unit's `StateDirectory=substrate` is `/var/lib/substrate`. Restart `substrate-mcp` only, then confirm `/healthz` reports the chain as durable.
 4. **Do not restart herdr or muse.** Wait until Phase 19 has put their code on `main`.
-5. **Install the first pinned release** (after this PR is merged, still its own window). This is the cutover Phase 16's parity runbook calls: install the unit files and drop-ins, run `deploy-release.sh` on a tag of `main`, then `systemctl daemon-reload` and restart only `substrate-mcp` and `substrate-collector-grok`. Run the doctor read-only. Confirm `/healthz` answers and that `readlink /opt/agent-substrate/current` is `releases/<sha>` for that tag. Rollback is `deploy-release.sh rollback` (the previous symlink), then the doctor again.
+5. **Install the first pinned release** (after this PR is merged, still its own window). The units loaded today still use the checkout as `WorkingDirectory`. A deploy that restarts them before the new unit files are loaded health-checks the old code, and a reload that happens only after the script returns starts the new code outside that check.
 
-Create `/etc/substrate/collector-grok.env` before the collector restart in step 5. A missing `EnvironmentFile` keeps that unit from starting.
+   a. Build the first tree without restarting production: `SUBSTRATE_RELEASE_RESTART=0 deploy-release.sh <tag>`. This creates `/opt/agent-substrate/current` and leaves every older directory on disk. It does not restart units.
+   b. Create `/etc/substrate/collector-grok.env` (root-owned, mode 0600) with only the names the collector reads. A missing `EnvironmentFile` keeps that unit from starting.
+   c. Install the unit files and drop-ins from this directory.
+   d. Run `deploy-release.sh <tag>` again on the same tag. The tree is already built. The script runs `systemctl daemon-reload`, restarts only `substrate-mcp` and `substrate-collector-grok`, requires each unit to be active, and polls `/healthz` until it answers. Do not reload again after the script returns. Run the doctor read-only. Confirm `readlink /opt/agent-substrate/current` is `releases/<sha>` for that tag.
+
+   **First-cutover rollback.** The first successful publish has no `previous` symlink, so `deploy-release.sh rollback` exits with `no previous release`. Restore the unit files from the commit before this change (`WorkingDirectory=/root/src/repos/agent-substrate`, and `EnvironmentFile=/etc/substrate/substrate.env` on both units), run `systemctl daemon-reload`, and restart those two units. They run the checkout again. Leave the release directory in place; the restored units do not use it.
+
+   **Later rollbacks.** Once a previous release exists, rollback is `deploy-release.sh rollback`, then the doctor again.
+
+   When any `SUBSTRATE_TOKEN_*` is set, `/healthz` requires a bearer. Point `SUBSTRATE_HEALTH_TOKEN_FILE` at a root-only file that contains only one token, or set `SUBSTRATE_HEALTH_CMD` to an absolute executable. Do not put the token in the URL or on the command line.

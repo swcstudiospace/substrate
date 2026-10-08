@@ -83,6 +83,7 @@ mkdir -p node_modules
 		join(bin, "systemctl"),
 		`#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "$STUB_LOG/systemctl"
+if [[ "$1" == "is-active" && "\${FAIL_ACTIVE:-}" == "1" ]]; then exit 1; fi
 if [[ "\${FAIL_SYSTEMCTL:-}" == "1" ]]; then exit 1; fi
 `,
 	);
@@ -90,6 +91,17 @@ if [[ "\${FAIL_SYSTEMCTL:-}" == "1" ]]; then exit 1; fi
 		join(bin, "curl"),
 		`#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "$STUB_LOG/curl"
+if [[ -f "$STUB_LOG/curl-codes" ]]; then
+  count=0
+  if [[ -f "$STUB_LOG/curl-count" ]]; then count=$(cat "$STUB_LOG/curl-count"); fi
+  count=$((count + 1))
+  printf '%s\\n' "$count" > "$STUB_LOG/curl-count"
+  line=$(sed -n "\${count}p" "$STUB_LOG/curl-codes")
+  if [[ -z "$line" ]]; then line=$(tail -n 1 "$STUB_LOG/curl-codes"); fi
+  printf '%s' "$line"
+else
+  printf '200'
+fi
 `,
 	);
 	const health = join(bin, "health");
@@ -110,10 +122,13 @@ printf '%s\\n' ok >> "$STUB_LOG/health"
 			SUBSTRATE_RELEASE_ROOT: root,
 			SUBSTRATE_REPO: repo,
 			SUBSTRATE_HEALTH_CMD: health,
+			SUBSTRATE_HEALTH_DEADLINE: "5",
+			SUBSTRATE_HEALTH_INTERVAL: "0",
 			STUB_LOG: log,
 			STUB_STATE: state,
 			FAIL_BUN: "",
 			FAIL_SYSTEMCTL: "",
+			FAIL_ACTIVE: "",
 		},
 	};
 }
@@ -122,9 +137,12 @@ function stage(env: NodeJS.ProcessEnv, tag: string, sha: string, onMain: boolean
 	const state = env.STUB_STATE ?? "";
 	writeFileSync(join(state, "tags", tag), `${sha}\n`);
 	const tree = join(state, "trees", sha);
-	mkdirSync(tree, { recursive: true });
+	mkdirSync(join(tree, "packages/mcp-server/src"), { recursive: true });
+	mkdirSync(join(tree, "packages/collectors/src"), { recursive: true });
 	writeFileSync(join(tree, "package.json"), "{}\n");
 	writeFileSync(join(tree, "bun.lock"), "{}\n");
+	writeFileSync(join(tree, "packages/mcp-server/src/index.ts"), "");
+	writeFileSync(join(tree, "packages/collectors/src/grok.ts"), "");
 	if (onMain) writeFileSync(join(state, "main"), `${readFileSync(join(state, "main"), "utf8")}${sha}\n`);
 }
 
@@ -155,6 +173,8 @@ describe("deploy-release.sh", () => {
 		expect(releases(h.root)).toEqual([SHA2, SHA3]);
 		expect(readFileSync(join(h.log, "bun"), "utf8")).toContain("install --frozen-lockfile");
 		const restarted = readFileSync(join(h.log, "systemctl"), "utf8");
+		expect(restarted).toContain("daemon-reload");
+		expect(restarted).toContain("is-active --quiet substrate-mcp.service");
 		expect(restarted).toContain("restart substrate-mcp.service");
 		expect(restarted).toContain("restart substrate-collector-grok.service");
 		expect(restarted).not.toContain("herdr");
@@ -259,8 +279,8 @@ describe("deploy-release.sh", () => {
 		delete env.SUBSTRATE_HEALTH_CMD;
 		expect(deploy(h, ["v1"], env).status).toBe(0);
 		const curl = readFileSync(join(h.log, "curl"), "utf8");
-		expect(curl).toContain("-fsS");
 		expect(curl).toContain("--max-time");
+		expect(curl).toContain("http_code");
 		expect(curl).toContain("http://127.0.0.1:7410/healthz");
 
 		const envBad = { ...env, SUBSTRATE_HEALTH_URL: "http://user:secret@127.0.0.1:7410/healthz" };
@@ -270,6 +290,92 @@ describe("deploy-release.sh", () => {
 		expect(refused.stderr).toContain("refusing health url");
 		expect(readFileSync(join(h.log, "curl"), "utf8")).not.toContain("secret");
 		expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA1}`);
+	});
+
+	test("a release missing a unit entry is not published", () => {
+		const h = harness();
+		stage(h.env, "v1", SHA1, true);
+		const tree = join(h.env.STUB_STATE ?? "", "trees", SHA1);
+		rmSync(join(tree, "packages/collectors/src/grok.ts"));
+		const failed = deploy(h, ["v1"]);
+		expect(failed.status).not.toBe(0);
+		expect(failed.stderr).toContain("missing packages/collectors/src/grok.ts");
+		expect(existsSync(join(h.root, "current"))).toBe(false);
+		expect(existsSync(join(h.log, "systemctl"))).toBe(false);
+	});
+
+	test("a unit that is not active rolls current back", () => {
+		const h = harness();
+		stage(h.env, "v1", SHA1, true);
+		stage(h.env, "v2", SHA2, true);
+		expect(deploy(h, ["v1"]).status).toBe(0);
+		const failed = deploy(h, ["v2"], { ...h.env, FAIL_ACTIVE: "1" });
+		expect(failed.status).not.toBe(0);
+		expect(failed.stderr).toContain("is not active");
+		expect(failed.stderr).toContain("rolling back");
+		expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA1}`);
+	});
+
+	test("connection refused is retried and a later 200 is accepted", () => {
+		const h = harness();
+		stage(h.env, "v1", SHA1, true);
+		writeFileSync(join(h.log, "curl-codes"), "000\n200\n");
+		const env = { ...h.env };
+		delete env.SUBSTRATE_HEALTH_CMD;
+		expect(deploy(h, ["v1"], env).status).toBe(0);
+		expect(readFileSync(join(h.log, "curl"), "utf8").trim().split("\n")).toHaveLength(2);
+		expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA1}`);
+	});
+
+	test("healthz 401 fails closed and names the token file without a secret", () => {
+		const h = harness();
+		stage(h.env, "v1", SHA1, true);
+		writeFileSync(join(h.log, "curl-codes"), "401\n");
+		const env = { ...h.env };
+		delete env.SUBSTRATE_HEALTH_CMD;
+		const failed = deploy(h, ["v1"], env);
+		expect(failed.status).not.toBe(0);
+		expect(failed.stderr).toContain("401");
+		expect(failed.stderr).toContain("SUBSTRATE_HEALTH_TOKEN_FILE");
+		expect(failed.stderr).not.toContain("failed after");
+		expect(readFileSync(join(h.log, "curl"), "utf8").trim().split("\n")).toHaveLength(1);
+		expect(existsSync(join(h.root, "current"))).toBe(false);
+	});
+
+	test("a bearer file is passed to curl as a config and is not printed", () => {
+		const h = harness();
+		stage(h.env, "v1", SHA1, true);
+		const token = "substrate-test-token-value";
+		const tokenFile = join(h.log, "token");
+		writeFileSync(tokenFile, `${token}\n`);
+		const env = { ...h.env, SUBSTRATE_HEALTH_TOKEN_FILE: tokenFile };
+		delete env.SUBSTRATE_HEALTH_CMD;
+		const result = deploy(h, ["v1"], env);
+		expect(result.status).toBe(0);
+		expect(result.stdout).not.toContain(token);
+		expect(result.stderr).not.toContain(token);
+		const curl = readFileSync(join(h.log, "curl"), "utf8");
+		expect(curl).not.toContain(token);
+		expect(curl).toContain("-K ");
+		const config = /-K (\S+)/.exec(curl)?.[1] ?? "";
+		expect(config).not.toBe("");
+		expect(existsSync(config)).toBe(false);
+	});
+
+	test("a no-restart publish keeps every release directory", () => {
+		const h = harness();
+		stage(h.env, "v1", SHA1, true);
+		stage(h.env, "v2", SHA2, true);
+		stage(h.env, "v3", SHA3, true);
+		const env = { ...h.env, SUBSTRATE_RELEASE_RESTART: "0" };
+		expect(deploy(h, ["v1"], env).status).toBe(0);
+		expect(deploy(h, ["v2"], env).status).toBe(0);
+		expect(deploy(h, ["v3"], env).status).toBe(0);
+		expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA3}`);
+		expect(releases(h.root)).toEqual([SHA1, SHA2, SHA3]);
+		expect(existsSync(join(h.log, "systemctl"))).toBe(false);
+		expect(deploy(h, ["v3"]).status).toBe(0);
+		expect(releases(h.root)).toEqual([SHA2, SHA3]);
 	});
 
 	test("deploying the same tag again does not reinstall", () => {
@@ -300,6 +406,10 @@ describe("operator runbook", () => {
 			"/healthz",
 			"rollback",
 			"one at a time",
+			"daemon-reload",
+			"no previous release",
+			"SUBSTRATE_HEALTH_TOKEN_FILE",
+			"SUBSTRATE_RELEASE_RESTART=0",
 		]) {
 			expect(readme).toContain(phrase);
 		}

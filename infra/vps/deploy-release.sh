@@ -2,7 +2,8 @@
 # Build an immutable release from a tagged commit on main and atomically swap
 # /opt/agent-substrate/current. A failed health check points current back at
 # the previous release and restarts the units. Only that previous release
-# directory is kept.
+# directory is kept after a health-checked deploy. SUBSTRATE_RELEASE_RESTART=0
+# does not prune.
 #
 # The script never reads /etc/substrate, never prints an environment file,
 # and never talks to a host other than the health URL (loopback by default).
@@ -19,8 +20,11 @@ MAIN_REF="${SUBSTRATE_MAIN_REF:-main}"
 RESTART="${SUBSTRATE_RELEASE_RESTART:-1}"
 HEALTH_URL="${SUBSTRATE_HEALTH_URL:-http://127.0.0.1:7410/healthz}"
 HEALTH_TIMEOUT="${SUBSTRATE_HEALTH_TIMEOUT:-5}"
+HEALTH_DEADLINE="${SUBSTRATE_HEALTH_DEADLINE:-30}"
+HEALTH_INTERVAL="${SUBSTRATE_HEALTH_INTERVAL:-1}"
 lockdir=""
 tmp_link=""
+health_config=""
 units=()
 
 die() {
@@ -46,6 +50,10 @@ cleanup() {
 	[[ "${BASH_SUBSHELL:-0}" -eq 0 ]] || return 0
 	if [[ -n "$tmp_link" ]]; then
 		rm -f -- "$tmp_link"
+	fi
+	if [[ -n "$health_config" ]]; then
+		rm -f -- "$health_config"
+		health_config=""
 	fi
 	if [[ -n "$lockdir" ]]; then
 		rmdir -- "$lockdir" 2>/dev/null || true
@@ -78,6 +86,8 @@ prepare_root() {
 	[[ -n "$ROOT" && "$ROOT" != "/" && "$ROOT" != "$REPO" ]] || die "refusing release root"
 	[[ "$RESTART" == "0" || "$RESTART" == "1" ]] || die "SUBSTRATE_RELEASE_RESTART must be 0 or 1"
 	[[ "$HEALTH_TIMEOUT" =~ ^[1-9][0-9]{0,2}$ ]] || die "SUBSTRATE_HEALTH_TIMEOUT must be 1-999 seconds"
+	[[ "$HEALTH_DEADLINE" =~ ^[1-9][0-9]{0,3}$ ]] || die "SUBSTRATE_HEALTH_DEADLINE must be 1-9999 seconds"
+	[[ "$HEALTH_INTERVAL" =~ ^[0-9]{1,2}$ ]] || die "SUBSTRATE_HEALTH_INTERVAL must be 0-99 seconds"
 }
 
 acquire_lock() {
@@ -139,6 +149,10 @@ swap_link() {
 restart_units() {
 	local unit status=0
 	[[ "$RESTART" == "1" ]] || return 0
+	# Reload the unit files that are installed now, then restart. A reload that
+	# happens only after this script returns would start the new code outside
+	# the health check and outside rollback.
+	systemctl daemon-reload || return 1
 	# Called from `if`, where set -e does not stop the loop. Remember every failure.
 	for unit in "${units[@]}"; do
 		systemctl restart "$unit" || status=1
@@ -146,23 +160,169 @@ restart_units() {
 	return "$status"
 }
 
-health_ok() {
+units_active() {
+	local unit
 	[[ "$RESTART" == "1" ]] || return 0
-	if [[ -n "${SUBSTRATE_HEALTH_CMD:-}" ]]; then
-		if [[ "${SUBSTRATE_HEALTH_CMD}" != /* || ! -x "${SUBSTRATE_HEALTH_CMD}" ]]; then
-			printf '%s\n' "deploy-release: SUBSTRATE_HEALTH_CMD must be an absolute executable path" >&2
+	for unit in "${units[@]}"; do
+		if ! systemctl is-active --quiet "$unit"; then
+			printf '%s\n' "deploy-release: ${unit} is not active" >&2
 			return 1
 		fi
+	done
+}
+
+# Last ExecStart in the unit file and its drop-ins wins, matching systemd.
+unit_exec_start() {
+	local unit="$1" file line key value section="" exec="" dropin
+	local -a files=()
+	files=("$SCRIPT_DIR/$unit")
+	shopt -s nullglob
+	for dropin in "$SCRIPT_DIR/${unit}.d"/*.conf; do
+		files+=("$dropin")
+	done
+	shopt -u nullglob
+	for file in "${files[@]}"; do
+		[[ -f "$file" && ! -L "$file" ]] || continue
+		section=""
+		while IFS= read -r line || [[ -n "$line" ]]; do
+			line="${line#"${line%%[![:space:]]*}"}"
+			line="${line%"${line##*[![:space:]]}"}"
+			[[ -z "$line" || "$line" == \#* ]] && continue
+			if [[ "$line" =~ ^\[([^]]+)\]$ ]]; then
+				section="${BASH_REMATCH[1]}"
+				continue
+			fi
+			[[ "$section" == "Service" ]] || continue
+			[[ "$line" == *=* ]] || continue
+			key="${line%%=*}"
+			value="${line#*=}"
+			key="${key%"${key##*[![:space:]]}"}"
+			if [[ "$key" == "ExecStart" ]]; then
+				exec="$value"
+			fi
+		done < "$file"
+	done
+	printf '%s\n' "$exec"
+}
+
+# Repo-relative entry after the interpreter. -m is a module, not a file in the tree.
+entry_from_exec() {
+	local exec="$1" token
+	local -a tokens=()
+	local index=0
+	read -r -a tokens <<< "$exec"
+	[[ ${#tokens[@]} -gt 0 ]] || return 1
+	index=1
+	while [[ "$index" -lt ${#tokens[@]} ]]; do
+		token="${tokens[$index]}"
+		if [[ "$token" == "-m" ]]; then
+			return 1
+		fi
+		if [[ "$token" == -* ]]; then
+			index=$((index + 1))
+			continue
+		fi
+		[[ "$token" == /* || "$token" == *".."* ]] && return 1
+		printf '%s\n' "$token"
+		return 0
+	done
+	return 1
+}
+
+require_release_entries() {
+	local dest="$1" unit exec entry
+	for unit in "${units[@]}"; do
+		exec=$(unit_exec_start "$unit")
+		[[ -n "$exec" ]] || die "unit ${unit} has no ExecStart"
+		if ! entry=$(entry_from_exec "$exec"); then
+			die "unit ${unit} has no release entry"
+		fi
+		[[ "$entry" =~ ^[A-Za-z0-9._/-]+$ ]] || die "refusing entry path"
+		if [[ ! -f "$dest/$entry" || -L "$dest/$entry" ]]; then
+			die "release is missing ${entry}"
+		fi
+	done
+}
+
+# Write a mode-0600 curl config. The token stays out of argv and out of the log.
+write_health_config() {
+	local file="${SUBSTRATE_HEALTH_TOKEN_FILE:-}" token
+	[[ -n "$file" ]] || return 0
+	[[ -n "$health_config" ]] && return 0
+	[[ "$file" == /* && -f "$file" && ! -L "$file" ]] || die "SUBSTRATE_HEALTH_TOKEN_FILE must be an absolute regular file"
+	token=$(<"$file") || die "refusing health token file"
+	token="${token//$'\r'/}"
+	token="${token%$'\n'}"
+	[[ "$token" != *$'\n'* && "$token" =~ ^[A-Za-z0-9._~+/=-]{16,512}$ ]] || die "refusing health token file"
+	health_config=$(mktemp "${TMPDIR:-/tmp}/substrate-health.XXXXXX")
+	chmod 600 "$health_config"
+	printf 'header = "Authorization: Bearer %s"\n' "$token" > "$health_config"
+}
+
+prepare_health() {
+	[[ "$RESTART" == "1" ]] || return 0
+	if [[ -n "${SUBSTRATE_HEALTH_CMD:-}" ]]; then
+		if [[ "${SUBSTRATE_HEALTH_CMD}" != /* || ! -x "${SUBSTRATE_HEALTH_CMD}" || -L "${SUBSTRATE_HEALTH_CMD}" ]]; then
+			die "SUBSTRATE_HEALTH_CMD must be an absolute executable path"
+		fi
+		return 0
+	fi
+	if [[ "$HEALTH_URL" == *"@"* || ! "$HEALTH_URL" =~ ^https?://[^[:space:]]+$ ]]; then
+		die "refusing health url"
+	fi
+	write_health_config
+}
+
+# 0 healthy, 7 still starting (retry), 22 definitive HTTP failure.
+health_once() {
+	local code
+	local -a args=()
+	if [[ -n "${SUBSTRATE_HEALTH_CMD:-}" ]]; then
 		"${SUBSTRATE_HEALTH_CMD}"
 		return $?
 	fi
-	# A bad URL is a failed check, not a hard exit, so current is rolled back.
-	if [[ "$HEALTH_URL" == *"@"* || ! "$HEALTH_URL" =~ ^https?://[^[:space:]]+$ ]]; then
-		printf '%s\n' "deploy-release: refusing health url" >&2
-		return 1
+	args=(-sS --max-time "$HEALTH_TIMEOUT" -o /dev/null -w '%{http_code}')
+	if [[ -n "$health_config" ]]; then
+		args+=(-K "$health_config")
 	fi
-	curl -fsS --max-time "$HEALTH_TIMEOUT" -o /dev/null -- "$HEALTH_URL"
-	return $?
+	code=$(curl "${args[@]}" -- "$HEALTH_URL" || true)
+	case "$code" in
+	2[0-9][0-9]) return 0 ;;
+	000 | "") return 7 ;;
+	401)
+		printf '%s\n' "deploy-release: healthz returned 401; set SUBSTRATE_HEALTH_TOKEN_FILE or SUBSTRATE_HEALTH_CMD" >&2
+		return 22
+		;;
+	*)
+		printf '%s\n' "deploy-release: healthz returned ${code}" >&2
+		return 22
+		;;
+	esac
+}
+
+health_ok() {
+	local start now status
+	[[ "$RESTART" == "1" ]] || return 0
+	start=$(date +%s)
+	while true; do
+		# `if cmd` clears $? when cmd fails, so the status has to be captured here.
+		status=0
+		health_once || status=$?
+		if [[ "$status" -eq 0 ]]; then
+			return 0
+		fi
+		# A custom command and any HTTP answer are the verdict. Connection
+		# refused is the Type=simple gap before the port is open.
+		if [[ "$status" -eq 22 || -n "${SUBSTRATE_HEALTH_CMD:-}" ]]; then
+			return 1
+		fi
+		now=$(date +%s)
+		if (( now - start >= HEALTH_DEADLINE )); then
+			printf '%s\n' "deploy-release: health check failed after ${HEALTH_DEADLINE}s" >&2
+			return 1
+		fi
+		sleep "$HEALTH_INTERVAL"
+	done
 }
 
 build_release() {
@@ -230,13 +390,15 @@ cmd_deploy() {
 	fi
 	load_units
 	build_release "$sha"
+	require_release_entries "$ROOT/releases/$sha"
+	prepare_health
 	if [[ -L "$ROOT/current" ]]; then
 		if ! old=$(read_rel "$ROOT/current"); then
 			die "refusing current symlink"
 		fi
 	fi
 	swap_link "$ROOT/current" "releases/$sha"
-	if ! restart_units || ! health_ok; then
+	if ! restart_units || ! units_active || ! health_ok; then
 		printf '%s\n' "deploy-release: health check failed; rolling back" >&2
 		restore_current "$old"
 		exit 1
@@ -250,13 +412,17 @@ cmd_deploy() {
 		fi
 		keep_prev=$(sha_of "$prev_rel")
 	fi
-	prune_releases "$sha" "$keep_prev"
+	# A no-restart publish must not delete a tree a process may still be running from.
+	if [[ "$RESTART" == "1" ]]; then
+		prune_releases "$sha" "$keep_prev"
+	fi
 	printf '%s\n' "current -> releases/$sha"
 }
 
 cmd_rollback() {
 	local prev="" cur=""
 	load_units
+	prepare_health
 	if ! prev=$(read_rel "$ROOT/previous"); then
 		die "no previous release to roll back to"
 	fi
@@ -266,7 +432,7 @@ cmd_rollback() {
 		fi
 	fi
 	swap_link "$ROOT/current" "$prev"
-	if ! restart_units || ! health_ok; then
+	if ! restart_units || ! units_active || ! health_ok; then
 		printf '%s\n' "deploy-release: rollback health check failed; restoring current" >&2
 		restore_current "$cur"
 		exit 1
