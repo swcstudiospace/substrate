@@ -1,0 +1,14 @@
+---
+description: Desk rules for Cursor cloud agents and Grok Bot working in agent-substrate
+alwaysApply: true
+---
+
+# Desk rules
+
+Cursor cloud agents working in this repository follow these rules. Grok Bot is the `grok-bot` surface; the access path is `docs/grok-bot.md`.
+
+- **Draft PR only.** Open a draft pull request into the default branch. No merge: do not merge, enable auto-merge, force-push, or delete branches.
+- **No secrets.** Never print, commit, or echo tokens, keys, passphrases, or bus secrets. Reference environment variables by name only. Do not write tailnet names or internal hostnames into the repo, the pull request, or the session transcript.
+- **Greptile gate via Desk Quality.** Every pull request goes through the Greptile merge gate run by Desk Quality via Programming Lead. Do not claim merge-ready while any Greptile finding is unaddressed. A FAILED, SKIPPED, or unavailable review is a blocker to report, never a pass.
+
+`substrate-mcp` listens on loopback. A cloud agent does not call it directly.
