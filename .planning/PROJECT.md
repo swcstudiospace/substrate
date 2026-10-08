@@ -4,34 +4,42 @@
 **Control plane:** Notion "Agent Task Graph" + Linear team Spectrum Web Co
 **Repo:** `swcstudiospace/agent-substrate` (private)
 
-## Current Milestone: v1.2 Swarm leases, workspace install and lessons bank
+## Current Milestone: v1.3 Build plan completion
 
-**Goal:** Swarm agents work nodes under substrate leases with signed handoffs, every swarm workspace is wired to `substrate-mcp` with one token per agent process, and lessons from finished phases become governed, citable memory.
+**Goal:** Land on `main` everything the Notion build plan still lacks, each part ending in a proof run for real: Linear-driven dispatch with mirrored claims, the docs and memory planes, the hourly Solana devnet anchor, the skills library with propose-only miners and Agent Cards, `desktop_run`, the Lane A host, and the deferred Phase 0 UAT.
 
 **Target features:**
-- ADR 0001 S2 (SPE-5053): lease authority on the server (swarm session shape, holder-only `lease_id` and fenced calls, no swarm operator), then the swarm runner claiming, heartbeating and completing each task's node, with signed `coord_handoff` packets at accountable-agent boundaries.
-- ADR 0001 S4 (SPE-5055): the projector writes the `substrate-mcp` entry into every swarm workspace runtime, each agent gets its own 0600 token file, and the runner gives each child only its own `SUBSTRATE_TOKEN`.
-- Lessons bank Tier 1 (SPE-5830): lessons as governed `fact` entries through `memory_write`, with a `substrate lessons` CLI to add, recall (with citation ids) and digest them.
+- Lane B collectors: herdr (the persistent runtime) and Muse collectors, plus the Muse projector with its `.substrate/BRIEF.md` fallback.
+- Claim mirror: `graph_claim` / `graph_release` / `graph_complete` mirror to Linear (state, `agent:<surface>` label, one-line session comment) and to the Notion Issue row's `Agent`; completion passes the `hermes-linear-connector` Definition-of-Done gate.
+- `substrate-dispatcher`: a `dispatch:<surface>` label on an unstarted Linear issue starts a session for that Graph ID in a per-Graph-ID worktree; the label becomes `agent:<surface>` when the claim lands.
+- Docs plane: `docs_search` over RAGFlow with citations and a redacting `docs_ingest`; Hindsight recall and the Dragonfly cache as `docs/data-planes.md` specifies.
+- Ledger anchor: an hourly Merkle root of `agent_events` written to a Solana devnet memo and an `anchors` table; `substrate verify` checks roots against their signatures.
+- Skills plane: `skills.propose` opens a branch and PR on `swcstudiospace/agent-skills`; the skills sync and Hermes bridge timers run from code on `main`; A2A Agent Cards carry teachable moments.
+- `desktop_run` on cua's Docker path or the existing webtop container.
+- Lane A: a rivet-agentos host whose `openTask` is keyed by Graph ID, reached from `dispatch:claude-code`, gated on free disk.
+- The eight deferred Phase 0 UAT scenarios (`milestones/v1.0-phases/00-brief/0-UAT.md`).
 
-Shipped before: **v1.1 Swarm correlation, governed memory and orchestrate integrations** (2026-10-07; 5 phases: 7, 8, 8.1 inserted, 9, 10; 18/18 requirements).
+**Key context:** The September implementation of build-plan phases 1–6 lives on the unmerged branch `docs/data-planes-tailscale` (`acc30a8`, a superset of `substrate/ut-mughkkc0-73909228`); it is ported file by file onto `main`'s v1.2 lease model, and commit `21652a2` is treated as stubs. `substrate-mcp.service` points at the operator's checkout (now on `main`) but crash-loops, because a stray process started 2026-10-01 still holds `127.0.0.1:7410` and serves that day's code; the herdr and Muse collector, dispatcher and host units point at code `main` lacks, and the skills timers fail every five minutes. Phase proofs use isolated stores, and every live run (production service, real stores, devnet, Linear labels) waits for the operator's approval.
+
+Shipped before: **v1.2 Swarm leases, workspace install and lessons bank** (2026-10-08; phases 11-15; 25/25 requirements).
 
 ## Current State
 
-Shipped **v1.1** (2026-10-07): ADR 0001 slices S1 (SPE-5052) and S3 (SPE-5054), re-grounded on `origin/main` and ADR 0001. Postgres stays the index, the ledger stays behind `substrate-mcp` only, every client fails open.
+Shipped **v1.2** (2026-10-08): ADR 0001 S2 (SPE-5053), S4 (SPE-5055) and lessons-bank Tier 1 (SPE-5830).
 
-- **Swarm identity and binding:** 15 swarm surfaces `swarm-a01-orch`..`swarm-a15-doc` with per-surface tokens; a swarm token cannot emit or claim as another surface (refusal, never re-attribution); MCP-only `graph_bind` binds correlation id to Graph ID race-safely (one winner). agent-substrate #11.
-- **Swarm orchestrate tee:** the swarm run log is teed under one Graph ID per run, attributed per agent, 13 swarm types mapped to existing `EVENT_KINDS`, deduped, fail-open; `orch_plan` mints/binds/registers the Graph ID. agent-swarm #5.
-- **Governed swarm memory:** `swarm/memory.py` writes through the governance gate with no grant change; versioned conflicts carry `current_version` so the client re-submits without searching (Phase 8.1). agent-substrate #12, #13; agent-swarm #6, #7, #8.
-- **ultrathink plan record:** one fail-open `note` event carrying the Graph ID (no prompt text) after planning. claude-ultrathink #19.
-- **Proof:** live end-to-end on real Postgres + GreptimeDB against the three merged mains: 24/24 integration, 7/7 governed swarm memory, and the 8.1 regression (2 POSTs, 0 searches).
+- **Lease authority:** swarm sessions name their own agent, replica and graph; a `lease_id` reaches only its holder; only the holder's surface can beat, release or complete; a swarm token is never an operator. agent-substrate #16.
+- **Swarm lease bridge and signed handoffs:** the runner claims, heartbeats, completes or releases each task's node under a lease for the executing agent; accountable-agent boundaries write signed `coord_handoff` packets that rebuild context from the ledger alone. agent-swarm #9, #10.
+- **Workspace install:** one `substrate-mcp` entry per runtime naming the token variable, a 0600 token file per agent outside every checkout, each child given only its own `SUBSTRATE_TOKEN`. agent-substrate #18; agent-swarm #11.
+- **Lessons bank:** `substrate lessons add | recall | digest | outcome` over governed `fact` entries, scores computed at read time. agent-substrate #17.
+
+Shipped **v1.1** (2026-10-07): swarm identities and `graph_bind`, the swarm orchestrate tee, governed swarm memory and the ultrathink plan record (ADR 0001 S1 and S3).
 
 ## Next Milestone Goals
 
-Candidates only, not commitments:
+Candidates after v1.3, not commitments:
 
 - ADR S5 gate verdicts as events (SPE-5056).
 - Lessons bank Tier 2: phase lifecycle events, realtime delivery, an outbox and automatic injection at the GSD discuss step.
-- Carried: v1.0 Phase 0 UAT (8 scenarios pending, acknowledged as deferred at the v1.1 close).
 
 ## What this is
 
@@ -135,6 +143,11 @@ Revised 2026-09-30 — policy in `docs/data-planes.md`, network in `docs/railway
 - ✓ Memory: swarm memory through the governance gate (kind/scope maps, idempotency key, every gate outcome handled, ok only when accepted and verified_persisted); versioned conflicts carry `current_version` — v1.1
 - ✓ ultrathink: one fail-open `note` event with the Graph ID after planning, session `<host session>:<graph id>` — v1.1
 - ✓ Proof: live end-to-end 24/24 and 7/7 on real Postgres + GreptimeDB, plus the 8.1 regression — v1.1
+- ✓ Lease authority: holder-only `lease_id`, `not-holder` refusals on heartbeat/release/complete, swarm tokens never operators — v1.2
+- ✓ Swarm lease bridge: claim before dispatch, heartbeat, complete on DONE, release and re-claim on rework; one grant per node across replicas — v1.2
+- ✓ Signed handoffs: one `coord_handoff` packet per accountable-agent boundary; context rebuilt from `coord_handoff_list` and `events_query` alone — v1.2
+- ✓ Workspace install: per-runtime `substrate-mcp` entries, 0600 per-agent token files, one token per child — v1.2
+- ✓ Lessons bank: governed lesson facts with recall citations, read-time scores and non-destructive digests — v1.2
 
 ## Key Decisions
 
@@ -162,4 +175,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-10-07 at the start of milestone v1.2*
+*Last updated: 2026-10-08 at the start of milestone v1.3*

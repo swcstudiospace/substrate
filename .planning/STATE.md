@@ -1,35 +1,38 @@
 ---
 gsd_state_version: "1.0"
-milestone: v1.2
-milestone_name: Swarm leases, workspace install and lessons bank (Shipped)
-status: Milestone v1.2 complete and shipped
-stopped_at: "Milestone v1.2 complete. All pull requests across agent-substrate and agent-swarm merged: substrate PR #16, #17, #18; swarm PR #9, #10, #11. All 10 verification and security reports verified with zero open risks."
-last_updated: "2026-10-08T05:52:00.000Z"
+milestone: v1.3
+milestone_name: Build plan completion
+current_phase: 16
+current_phase_name: Production parity and rehearsal harness
+status: planning
+stopped_at: "v1.3 roadmap approved 2026-10-08 (phases 16-33, 68/68 requirements); PR #21 ships the milestone-definition docs; Phase 16 discuss done on gsd/v1.3-p16-production-parity."
+last_updated: "2026-10-08T19:25:55.535Z"
 last_activity: 2026-10-08
-last_activity_desc: Milestone v1.2 completed and archived
-state_head: 62cddf92fc13fe36bfa8cc4e4ba07cb9d6f91655
+last_activity_desc: v1.3 roadmap created (Phases 16–33, 68/68 requirements mapped)
+state_head: 3e04ee1e502f4aae872a53494607d1d995351a71
 progress:
-  total_phases: 5
-  completed_phases: 5
-  total_plans: 5
-  completed_plans: 5
-  percent: 100
-current_phase: 15
+  total_phases: 18
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # State
 
 ## Current
 
-**v1.2 complete and shipped:** All 5 phases (11-15), 5 plans, 43 tasks, and 25 requirements complete and verified. All 6 pull requests across both repositories are merged into their respective `main` branches:
-- `agent-substrate` [PR #16](https://github.com/swcstudiospace/agent-substrate/pull/16) (Phase 11 Lease authority) merged at `1791393`
-- `agent-swarm` [PR #9](https://github.com/swcstudiospace/agent-swarm/pull/9) (Phase 12 Swarm lease bridge) merged at `5edd55f`
-- `agent-swarm` [PR #10](https://github.com/swcstudiospace/agent-swarm/pull/10) (Phase 13 Signed handoffs) merged at `3e513c9`
-- `agent-substrate` [PR #17](https://github.com/swcstudiospace/agent-substrate/pull/17) (Phase 15 Lessons bank) merged at `746a38a`
-- `agent-substrate` [PR #18](https://github.com/swcstudiospace/agent-substrate/pull/18) (Phase 14 Projector MCP) merged at `e7b5990`
-- `agent-swarm` [PR #11](https://github.com/swcstudiospace/agent-swarm/pull/11) (Phase 14 Workspace install) merged at `24f4761`
+**v1.3 Build plan completion is planned:** 18 phases (16–33), 68 requirements, roadmap approved by the operator on 2026-10-08. Research: `.planning/research/` (SUMMARY.md first). Primary port source: branch `docs/data-planes-tailscale` (`acc30a8`), ported onto `main`'s v1.2 lease model.
 
-All 10 verification and security reports (Phases 11-15 VALIDATION.md / SECURITY.md) verified with zero open risks or gaps. Trackers (Notion task `3f2bc1a0c7ae8157ac03da5707c85b58` and Linear `SPE-7579`) are fully synchronized. Milestone artifacts archived in `.planning/milestones/v1.2-*`.
+**v1.3 decisions (operator, 2026-10-08):**
+
+- Scope: finish the build plan — every unfinished area, in build-plan order, plus the deferred Phase 0 UAT.
+- Shipping: one PR per phase, each cut from `main`; the milestone-definition docs ship first. `ultrathink-ship` runs with `--ignore-gsd` per phase (the operator's explicit choice), Greptile 5/5 with no open threads, auto-merge.
+- Defaults accepted for user-visible choices: swarm-surface claims add only a note in Linear (no label or state change); Lane A claims as `claude-code`; the data planes are reached only through the substrate and Hindsight retains only gate-accepted memories; teachables are tagged governed facts, anchored by hash only; `desktop_run` is fail-closed to operator-listed surfaces; production tokens are provisioned in Phase 20 after the collectors carry them; the stray process on `:7410` is stopped in an operator-approved window in Phase 16.
+- Run rules: grey areas auto-accept unless they change a user-visible contract; every live run (production service, real stores, Linear or Notion writes, devnet, GitHub PRs on other repos, model quota) waits for operator approval; failures already present at HEAD are recorded, not fixed.
+- Baseline at `ab62c91`: `bun test` 1129 pass / 56 skip / 0 fail across 40 files; `bunx tsc --noEmit` clean.
+
+Shipped before: **v1.2** (2026-10-08), archived in `.planning/milestones/v1.2-*`.
 
 ## Historical v1.0 execution record
 
@@ -151,10 +154,10 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Current Position
 
-Phase: Milestone v1.2 complete
-Plan: —
-Status: Awaiting next milestone
-Last activity: 2026-10-08 — Milestone v1.2 completed and archived
+Phase: 16 of 33 (Production parity and rehearsal harness)
+Plan: Not started (Plans: TBD)
+Status: Ready to plan
+Last activity: 2026-10-08 — v1.3 roadmap created (Phases 16–33, 68/68 requirements mapped)
 
 ## Deferred Items
 
@@ -170,6 +173,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-08
-Stopped at: PR17 merged746a38a and PR10 merged3e513c9,receipts synchronized. PR18 reviewing exacta9d699e9; workspace60b1814 prepared after content-identical published-squash integration. Phase14 current goal passed; security delta running. Totals: substrate1171 Bun/4489 assertions/0 skips; lessons1146/60/18/4 retained shipped receipt; handoffs771 Python/4 current real; workspace842 Python/51 current actual-runtime plus separate4 private-file real handoffs; unchanged omp1378 retained. No whole-milestone delivery claim.
+Last session: 2026-10-08T19:25:55.520Z
+Stopped at: v1.3 roadmap approved 2026-10-08 (phases 16-33, 68/68 requirements); PR #21 ships the milestone-definition docs; Phase 16 discuss done on gsd/v1.3-p16-production-parity.
 Resume file: None; current progress is recorded in the phase summaries and ultrathink ship state.

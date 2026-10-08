@@ -1,38 +1,103 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v1.2 — Swarm leases, workspace install and lessons bank (In Progress)",
+  "milestone": "v1.3 — Build plan completion",
   "phases": [
     {
-      "number": "11",
-      "name": "Lease authority",
-      "status": "complete"
+      "number": "16",
+      "name": "Production parity and rehearsal harness",
+      "status": "pending"
     },
     {
-      "number": "12",
-      "name": "Swarm lease bridge",
-      "status": "complete"
+      "number": "17",
+      "name": "Event vocabulary and audit policy",
+      "status": "pending"
     },
     {
-      "number": "13",
-      "name": "Signed handoffs",
-      "status": "complete"
+      "number": "18",
+      "name": "Guard rails and shared redactor",
+      "status": "pending"
     },
     {
-      "number": "14",
-      "name": "Workspace install",
-      "status": "complete"
+      "number": "19",
+      "name": "Lane B collectors",
+      "status": "pending"
     },
     {
-      "number": "15",
-      "name": "Lessons bank",
-      "status": "complete"
+      "number": "20",
+      "name": "Production identity and Phase 0 UAT",
+      "status": "pending"
+    },
+    {
+      "number": "21",
+      "name": "skills_propose",
+      "status": "pending"
+    },
+    {
+      "number": "22",
+      "name": "Skills sync, bridge and miners",
+      "status": "pending"
+    },
+    {
+      "number": "23",
+      "name": "Claim mirror and DoD gate",
+      "status": "pending"
+    },
+    {
+      "number": "24",
+      "name": "substrate-dispatcher",
+      "status": "pending"
+    },
+    {
+      "number": "25",
+      "name": "Docs search and ingest (RAGFlow)",
+      "status": "pending"
+    },
+    {
+      "number": "26",
+      "name": "Hindsight recall and Dragonfly cache",
+      "status": "pending"
+    },
+    {
+      "number": "27",
+      "name": "Ledger primitives and ingest order",
+      "status": "pending"
+    },
+    {
+      "number": "28",
+      "name": "Hourly anchor job and verify",
+      "status": "pending"
+    },
+    {
+      "number": "29",
+      "name": "Agent Cards and teachable moments",
+      "status": "pending"
+    },
+    {
+      "number": "30",
+      "name": "desktop_run",
+      "status": "pending"
+    },
+    {
+      "number": "31",
+      "name": "Lane A runtime: spike, packaging and VM host",
+      "status": "pending"
+    },
+    {
+      "number": "32",
+      "name": "Lane A host core",
+      "status": "pending"
+    },
+    {
+      "number": "33",
+      "name": "Lane A dispatch route and approvals",
+      "status": "pending"
     }
   ],
   "next": {
-    "command": "/gsd:progress",
-    "label": "Show progress",
-    "reason": "Unsure of state — showing progress"
+    "command": "/gsd:progress --next",
+    "label": "Advance to the next step (plan phase 16)",
+    "reason": "Phase 16 of 18 — needs a plan"
   },
-  "updated_at": "2026-10-08T05:50:35.097Z"
+  "updated_at": "2026-10-08T19:26:08.422Z"
 }
