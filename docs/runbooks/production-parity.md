@@ -86,12 +86,25 @@ row per run.
 | Date (UTC) | MainPID | NRestarts | ExecMainStartTimestamp | healthz |
 | --- | --- | --- | --- | --- |
 | 2026-10-08 ~17:14 (discuss-time read) | 1525582 | 0 | 17:14:12 | pending proof run |
-| _proof run (plan 16-05)_ | | | | |
+| 2026-10-08 ~20:40 (proof run, plan 16-05) | 1525582 | 0 | 17:14:12 (epoch 1791479652) | 200 |
 
 The discuss-time read also recorded: cgroup
 `system.slice/substrate-mcp.service`, the journal line "listening on
 `http://127.0.0.1:7410` (index + greptime, anonymous, audit in memory, claims
 fail-closed)", and the checkout at `ab62c91` equal to `origin/main`.
+
+The proof run (`bun run parity:check --json`, exit 0, PASS, run by the
+orchestrator under operator approval on 2026-10-08 ~20:40 UTC) also
+recorded: `:7410` owned by pid 1525582 (equal to `MainPID`), cgroup
+`0::/system.slice/substrate-mcp.service`, server entry
+`packages/mcp-server/src/index.ts`; operator checkout HEAD `ab62c918`
+vs `origin/main` `6417c92f` differing only by PR #21's `.planning` docs,
+so the check counted it as serving `main`; `healthz` 200. Non-failing
+warnings: the installed unit differs from the repo unit; inventory
+`collector-grok`, `collector-herdr`, `collector-muse` and `dispatcher`
+active/running, `host` inactive/dead, `skills-bridge` and `skills-sync`
+failed, both timers active/waiting. The parity window itself was the
+operator at about 17:14 UTC, as in the header.
 
 The previous restart counter had reached 119855 before the window; the
 counter starts over at 0 with the clean start above.
