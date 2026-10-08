@@ -264,7 +264,7 @@ logical report retried under the same id replays instead of writing again, while
 correction mints a fresh id and appends another outcome. It is the caller's exact
 identity, case-preserving, of letters, digits, `.` `_` `:` and `-`, 1–200 characters;
 a missing, empty or misshapen id is refused before anything is read or sent. Planned
-and written CLI reports show the original identity. The fact body stores its SHA-256
+and written JSON reports show the original identity. The fact body stores its SHA-256
 digest: an opaque id such as `retry-unverified-1` cannot turn a clean outcome into a
 speculative claim. The note remains subject to the normal fact gate.
 
