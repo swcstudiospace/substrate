@@ -784,7 +784,9 @@ verifyGraph { ok: true, events: 4 }
 | A3 | Duplicate ingest records arise only from `insertEvent`'s single retry (and a future repair writer) | Q2 lookback | If another writer appears, the unbounded lookback still keeps D27-10 semantics. A bounded lookback would not |
 | A4 | Production hour volumes keep `IN` batches and the unbounded lookback scan cheap | Q2, Open Q1 | Slower digests. Fix: bound the lookback (Open Q1) |
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+All four were settled during planning. Q1: no lookback bound, so the lookback query is unbounded (27-02). Q2: `semantic_type` is compared too (27-02). Q3: `INGEST_LAG_MS` is exported from `greptime.ts` (27-02). Q4: the smoke asserts that the burst's events are all members, in emitted order (CONTEXT D27-22, 27-04).
 
 1. **Bound the lookback statement (b) or not?**
    - What we know: both forms work on v0.14.4. Unbounded matches D27-10 literally and survives a future repair writer.
