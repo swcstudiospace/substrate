@@ -266,7 +266,7 @@ Execution starts from a base that holds all three.
 
 ## Open for the operator
 
-These recommended answers change a user-visible contract relative to September. The plan applies them unless the operator overrides:
+**Answered 2026-10-08: the operator accepted all three below as written.** They are locked decisions, not open questions. The record follows.
 
 1. **The propose key is dropped (D21-01).**
    - Proposals authenticate with surface tokens only.
