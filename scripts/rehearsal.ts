@@ -120,7 +120,10 @@ export function parseOperator(
 	surfaces: readonly Surface[],
 	anonymous: boolean,
 ): Surface | null {
-	if (anonymous) return null;
+	if (anonymous) {
+		if (raw !== undefined) throw new RehearsalRefused("--anonymous conflicts with --operator; pass one or the other");
+		return null;
+	}
 	if (raw === undefined) {
 		const first = surfaces[0];
 		if (first === undefined) throw new RehearsalRefused("no surfaces to pick an operator from");

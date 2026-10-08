@@ -188,6 +188,10 @@ describe("parseOperator", () => {
 	test("refuses a name outside --surfaces", () => {
 		expect(() => parseOperator("omp", ["cursor"], false)).toThrow("not in --surfaces");
 	});
+
+	test("refuses --anonymous with an explicit --operator", () => {
+		expect(() => parseOperator("hermes", ["hermes"], true)).toThrow("conflicts with --operator");
+	});
 });
 
 describe("refuseCheckoutDir", () => {
