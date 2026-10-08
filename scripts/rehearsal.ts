@@ -399,16 +399,55 @@ function readState(path: string): TwinState | null {
 	}
 }
 
-function removeLabelledContainers(name: string): number {
-	const ps = docker(["ps", "-aq", "--filter", `label=${REHEARSAL_LABEL}=${name}`]);
-	if (!ps.ok) return 0;
-	const ids = ps.out
+/** Container ids from a `docker ps -aq` listing. */
+export function parseDockerIds(text: string): string[] {
+	return text
 		.split("\n")
 		.map((s) => s.trim())
 		.filter((s) => s.length > 0);
+}
+
+/**
+ * The `down`/`up`-cleanup verdict over three docker calls: a failed `ps`
+ * refuses (never "0 removed"), a failed `rm` refuses with docker's first
+ * error line, and survivors found by the verify listing refuse too — the
+ * caller's state is kept until removal truly succeeds. Returns the number
+ * of containers actually gone.
+ */
+export function resolveContainerRemoval(
+	name: string,
+	ps: { ok: boolean; out: string; err: string },
+	rm: { ok: boolean; out: string; err: string } | null,
+	verify: { ok: boolean; out: string; err: string } | null,
+): number {
+	if (!ps.ok) {
+		throw new RehearsalRefused(`could not list scratch containers for ${name}; keeping state`);
+	}
+	const ids = parseDockerIds(ps.out);
 	if (ids.length === 0) return 0;
-	docker(["rm", "-f", ...ids]);
+	if (rm === null || !rm.ok) {
+		const detail = rm?.err.trim().split("\n")[0];
+		throw new RehearsalRefused(
+			`could not remove scratch containers for ${name}${detail ? `: ${detail}` : ""}; keeping state`,
+		);
+	}
+	if (verify === null || !verify.ok) {
+		throw new RehearsalRefused(`could not verify scratch removal for ${name}; keeping state`);
+	}
+	const remaining = parseDockerIds(verify.out);
+	if (remaining.length > 0) {
+		throw new RehearsalRefused(`${remaining.length} scratch containers for ${name} survived removal; keeping state`);
+	}
 	return ids.length;
+}
+
+function removeLabelledContainers(name: string): number {
+	const filter = `label=${REHEARSAL_LABEL}=${name}`;
+	const ps = docker(["ps", "-aq", "--filter", filter]);
+	const ids = !ps.ok ? [] : parseDockerIds(ps.out);
+	const rm = ids.length === 0 ? null : docker(["rm", "-f", ...ids]);
+	const verify = ids.length === 0 || rm === null || !rm.ok ? null : docker(["ps", "-aq", "--filter", filter]);
+	return resolveContainerRemoval(name, ps, rm, verify);
 }
 
 function hex(bytes: number): string {

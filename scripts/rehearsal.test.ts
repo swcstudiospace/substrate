@@ -26,7 +26,9 @@ import {
 	refuseCheckoutDir,
 	refuseDockerEnv,
 	refuseExtraArgs,
+	parseDockerIds,
 	refusePort,
+	resolveContainerRemoval,
 	refuseSmokeUrl,
 	smokeToolResult,
 	type ProcFacts,
@@ -419,5 +421,35 @@ describe("refuseExtraArgs", () => {
 		const run = runCli("down", "--nmae", "other");
 		expect(run.code).toBe(2);
 		expect(run.err).toContain("--nmae");
+	});
+});
+
+describe("resolveContainerRemoval", () => {
+	const ok = (out: string): { ok: boolean; out: string; err: string } => ({ ok: true, out, err: "" });
+	const fail = (err: string): { ok: boolean; out: string; err: string } => ({ ok: false, out: "", err });
+
+	test("empty listing removes nothing without an rm call", () => {
+		expect(parseDockerIds("  \n")).toEqual([]);
+		expect(resolveContainerRemoval("x", ok(""), null, null)).toBe(0);
+	});
+
+	test("a failed ps refuses instead of reporting 0 removed", () => {
+		expect(() => resolveContainerRemoval("x", fail("Cannot connect"), null, null)).toThrow("could not list");
+	});
+
+	test("a failed rm refuses with docker's error and keeps state", () => {
+		expect(() => resolveContainerRemoval("x", ok("abc123\n"), fail("Error: No such container"), null)).toThrow(
+			/No such container.*keeping state/,
+		);
+	});
+
+	test("survivors in the verify listing refuse", () => {
+		expect(() => resolveContainerRemoval("x", ok("abc123\n"), ok("abc123\n"), ok("abc123\n"))).toThrow(
+			/survived removal/,
+		);
+	});
+
+	test("a clean removal reports the truthful count", () => {
+		expect(resolveContainerRemoval("x", ok("a\nb\n"), ok("a\nb\n"), ok(""))).toBe(2);
 	});
 });
