@@ -40,6 +40,10 @@ export const SURFACES = [
 	"pi",
 	"rivet-agentos",
 	...SWARM_SURFACES,
+	// Phase 17 (2026-10-08 operator decision): host jobs (anchor, skills sync,
+	// dispatcher) emit under this reviewed system surface with payload.runtime
+	// naming the job. EVENT_KINDS is unchanged. See docs/event-vocabulary.md.
+	"substrate",
 ] as const;
 export type Surface = (typeof SURFACES)[number];
 

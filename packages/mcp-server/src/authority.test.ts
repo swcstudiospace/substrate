@@ -218,10 +218,11 @@ describe("the signed sender is the authenticated caller", () => {
 });
 
 describe("the swarm surfaces", () => {
-	test("are the 15 agents, in A01..A15 order, after the original 11", () => {
+	test("are the 15 agents, in A01..A15 order, after the original 11, with substrate last", () => {
 		expect(SWARM_SURFACES).toHaveLength(15);
-		expect(SURFACES).toHaveLength(26);
-		expect(SURFACES.slice(11)).toEqual([...SWARM_SURFACES]);
+		expect(SURFACES).toHaveLength(27);
+		expect(SURFACES.slice(11, 26)).toEqual([...SWARM_SURFACES]);
+		expect(SURFACES[26]).toBe("substrate");
 		expect(SWARM_SURFACES[0]).toBe("swarm-a01-orch");
 		expect(SWARM_SURFACES[4]).toBe("swarm-a05-be");
 		expect(SWARM_SURFACES[14]).toBe("swarm-a15-doc");
@@ -233,6 +234,12 @@ describe("the swarm surfaces", () => {
 			expect(surfaceForToken(config, `Bearer tok-${surface}`)).toBe(surface);
 		}
 		expect(tokenEnvName("swarm-a05-be")).toBe("SUBSTRATE_TOKEN_SWARM_A05_BE");
+	});
+
+	test("the substrate surface resolves its token env name back to itself", () => {
+		expect(tokenEnvName("substrate")).toBe("SUBSTRATE_TOKEN_SUBSTRATE");
+		const config = loadConfig({ SUBSTRATE_TOKEN_SUBSTRATE: "tok-substrate" });
+		expect(surfaceForToken(config, "Bearer tok-substrate")).toBe("substrate");
 	});
 
 	test(".env.example lists a blank SUBSTRATE_TOKEN_* line for every one", () => {
