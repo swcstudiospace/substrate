@@ -1,10 +1,10 @@
 ---
 phase: 18-guard-rails-and-shared-redactor
-verified: 2026-10-09T09:30:01Z
+verified: 2026-10-09T10:58:00Z
 status: passed
 score: 21/21 must-haves verified
-covered_files: [".planning/phases/18-guard-rails-and-shared-redactor/18-01-PLAN.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-01-SUMMARY.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-02-PLAN.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-02-SUMMARY.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-03-PLAN.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-03-SUMMARY.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-04-PLAN.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-04-SUMMARY.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-REVIEW-DISPOSITION.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-REVIEW.md", "docs/greptime-ledger.md", "docs/memory-governance.md", "docs/observability.md", "docs/redaction.md", "packages/cli/src/lessons.ts", "packages/mcp-server/src/memory-classify.test.ts", "packages/mcp-server/src/redact-contract.test.ts", "packages/mcp-server/src/redact-lock.test.ts", "packages/mcp-server/src/redact.test.ts", "packages/mcp-server/src/redact.ts", "packages/mcp-server/src/store-lock.test.ts"]
-covered_digest: "v3:sha256:ad29aaafdd626d1193faeae4360919a9c7b2c667974f35dded53e78651496d37"
+covered_files: [".planning/phases/18-guard-rails-and-shared-redactor/18-01-PLAN.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-01-SUMMARY.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-02-PLAN.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-02-SUMMARY.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-03-PLAN.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-03-SUMMARY.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-04-PLAN.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-04-SUMMARY.md", "docs/greptime-ledger.md", "docs/memory-governance.md", "docs/observability.md", "docs/redaction.md", "packages/cli/src/lessons.ts", "packages/mcp-server/src/memory-classify.test.ts", "packages/mcp-server/src/redact-adversarial.test.ts", "packages/mcp-server/src/redact-contract.test.ts", "packages/mcp-server/src/redact-lock.test.ts", "packages/mcp-server/src/redact.test.ts", "packages/mcp-server/src/redact.ts", "packages/mcp-server/src/store-lock.test.ts"]
+covered_digest: "v3:sha256:0ad0726217efb7ad08c3c9d08eb8355bbd13e8f8eff5441f64ab7b96a40721e4"
 behavior_unverified: 0
 overrides_applied: 0
 re_verification:
@@ -145,3 +145,35 @@ Phase 18 was rebased again, onto `main` at `28b5b99` (Phases 16 and 17 merged). 
 
 Fingerprint refreshed with `verification.fingerprint` (v3), which covers the declared files plus the phase artifacts.
 
+## Re-verification after Greptile review round 2 (2026-10-09)
+
+Greptile scored the first round 0/5 with six P1 and six P2 findings on the redactor and its lock. Each was reproduced, fixed, and pinned by a test that was mutation-checked against the old behaviour (the old behaviour fails it).
+
+| Finding | Fix | Pinned by |
+|---|---|---|
+| `redactKnown` trusted any `[REDACTED...]` lookalike | only the three markers the module writes are skipped | `redact-adversarial.test.ts` "a marker-shaped lookalike does not shield a value" |
+| Overlapping values left a fragment | every occurrence span, overlapping ones included, replaced as a union | the `CANARY`/`beforeCAN` case, both orders, nested and repeated values |
+| `private-tag` and `pk-rk` rescan from every opening (4.25 s for 360 KB; 2.23 s for 120 KB) | single-pass `apply` functions; a missing close ends the scan; the `pk-` run is matched once and tested for its digit | 600-string differential test against the patterns, plus repeated-prefix timing tests; `pem` and `url-password` (a prefilter) got the same treatment |
+| `api_key: yoursecretpassword!2024` kept as a placeholder | the value runs to the end of the token and a placeholder is judged whole | punctuation case on both passes |
+| a PEM crossing a private block's edge produced no finding | a high-confidence match touching a block is a finding and is replaced with it as one span | three crossing layouts and the doc-example variant, with exact outputs |
+| `PLACEHOLDER_VALUE` backtracked exponentially | one parse per word; quote trimming by index | 35, 300 and 3000 repeated words, and 200 000 quotes, each under half a second |
+| a file named `__proto__` vanished | the output map has no prototype | the `__proto__`, `constructor` and ordinary-file case |
+| lock: dynamic imports escaped | bound names are checked for `require`, `await import` and `.then(({...}) =>` | planted offenders and non-offenders |
+| lock: formatted patterns escaped | patterns are read from the whole file and reported on the right line | wrapped `new RegExp(` and a regex literal after a newline |
+| lock: `redact: redactLocal` passed | the constructor must hand over `redact` itself | seven planted wrong callbacks |
+| lock: older Notion shape escaped | the detector covers `secret_` | one planted case per prefix |
+| large skill scans were quadratic | claims checked by binary search; per-rule merge of sorted ranges | 64 000 placeholders, 30 000 private blocks and 20 000 secrets in seconds, not minutes |
+
+Gates on the final head (`a92d798`, rebased onto `main` `b66c453`, which carries the verification-gate PR):
+
+| Gate | Result |
+|---|---|
+| `bun run verify --audit` (install, tsc, full suite, repo locks, audit) | all ok; 1700 pass / 57 skip / 0 fail |
+| full suite with a scratch Postgres sourced (the live tests) | 1748 pass / 0 fail / 0 skip |
+| flake probe `--rerun-each 3` over the four redactor test files | 702 pass / 3 skip / 0 fail |
+| coverage of `redact.ts` | 100% functions, 100% lines |
+| harness: `rehearsal smoke`, `smoke:greptime` | 4/4 and 20/20; instance torn down |
+| perf gate (`redact()` is on the event path): 200 sequential `POST /events` and `POST /brief`, base against head, three interleaved rounds | events p50 8.6 to 7.9 ms, p95 12.9 to 10.9 ms; brief unchanged. No regression |
+| mutations (marker pattern, the old pk-rk pattern, the old placeholder grammar, the merge-overlap branch; and four in the lock) | each caught by a named test |
+
+Known limit, recorded not fixed: `url-password` stays quadratic on text that repeats `://` with a long colon-led run and no `@`. It predates this phase; it is in `docs/redaction.md` and goes on the follow-up list.
