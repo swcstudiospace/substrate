@@ -180,3 +180,13 @@ that body. It cannot tell a degraded 200 from a healthy one.
 Muse `PostToolUse` runs only after a successful tool call. Failures go to
 `PostToolUseFailure`, which this hook does not subscribe to, so `outcome` is
 usually absent.
+
+## Finding a refused sender
+
+`/metrics` counts refused event posts by reason (`substrate.events.refused`). Once an hour substrate-mcp also writes one stderr line per window:
+
+```text
+[substrate] refused events: reason=validation status=400 caller=untokened surface=muse kind=unrecognised:brief.delivered 335
+```
+
+`caller` is the token's surface, `untokened`, or `unmapped-bearer`. For a body the server parsed, `surface` and `kind` are the names it claimed: a known name as-is, an unknown name as `unrecognised:<name>` only when it is a short slug, and `unrecognised:invalid` otherwise. A `reason=auth` row is refused before the body is read, so it always shows `surface=none kind=none`. The line has no summary, payload, or token. After 50 distinct keys in one window, the rest are counted as `other`. `journalctl -u substrate-mcp | grep 'refused events'` names the sender to fix.

@@ -15,7 +15,7 @@ import { METRIC, findCounter, sumCounter } from "@substrate/observability";
 import { loadConfig, type SubstrateConfig } from "./config.ts";
 import { createDesktopDriver } from "./desktop/driver.ts";
 import { createObservability, type Observability } from "./observe.ts";
-import { createHttpServer, type HttpServerOptions } from "./server.ts";
+import { createHttpServer, type HttpServerOptions, refusalShape } from "./server.ts";
 import { Substrate } from "./service.ts";
 import {
 	ProposeFailed,
@@ -846,6 +846,83 @@ describe("the anonymous bridge", () => {
 		expect(lines[0]).toContain("/events");
 		expect(lines[0]).toContain("claimed=hermes");
 		expect(lines[0]).not.toContain("payload-secret-marker");
+	});
+
+	test("refused events are logged hourly by reason, caller, surface and kind, without payload", async () => {
+		const lines: string[] = [];
+		let now = 1_000;
+		const harness = await start(BRIDGE, {}, {
+			now: () => now,
+			anonymousLog: () => {},
+			refusalLog: (line) => {
+				lines.push(line);
+			},
+			anonymousIntervalMs: 60 * 60 * 1000,
+		});
+
+		await fetch(`${harness.base}/events`, {
+			method: "POST",
+			body: JSON.stringify({ kind: "brief.delivered", summary: "payload-secret-marker", surface: "muse" }),
+		});
+		await fetch(`${harness.base}/events`, {
+			method: "POST",
+			body: JSON.stringify({ kind: "note", summary: "payload-secret-marker", surface: "docs-scraper" }),
+		});
+		await fetch(`${harness.base}/events`, {
+			method: "POST",
+			body: JSON.stringify({ kind: "note", summary: "payload-secret-marker", surface: "grok-bot" }),
+		});
+		expect(lines).toEqual([]);
+
+		now += 60 * 60 * 1000;
+		await fetch(`${harness.base}/healthz`);
+		expect(lines).toHaveLength(1);
+		expect(lines[0]).toContain("[substrate] refused events:");
+		expect(lines[0]).toContain("reason=validation status=400 caller=untokened surface=muse kind=unrecognised:brief.delivered 1");
+		expect(lines[0]).toContain("surface=unrecognised:docs-scraper kind=note");
+		expect(lines[0]).toContain("reason=attribution status=403 caller=untokened surface=grok-bot kind=note 1");
+		expect(lines[0]).not.toContain("payload-secret-marker");
+	});
+
+	test("the refused-event log caps distinct keys per window and counts the rest as other", async () => {
+		const lines: string[] = [];
+		let now = 1_000;
+		const harness = await start(BRIDGE, {}, {
+			now: () => now,
+			anonymousLog: () => {},
+			refusalLog: (line) => {
+				lines.push(line);
+			},
+			anonymousIntervalMs: 60 * 60 * 1000,
+		});
+		const post = (surface: string) =>
+			fetch(`${harness.base}/events`, { method: "POST", body: JSON.stringify({ kind: "note", summary: "x", surface }) });
+		const name = (i: number) => `made-up-${String(i).padStart(2, "0")}`;
+
+		for (let i = 1; i <= 52; i++) await post(name(i));
+		await post(name(1));
+		await post(name(52));
+		now += 60 * 60 * 1000;
+		await fetch(`${harness.base}/healthz`);
+		expect(lines).toHaveLength(1);
+		const parts = lines[0]?.replace("[substrate] refused events: ", "").trim().split(", ") ?? [];
+		expect(parts).toHaveLength(51);
+		expect(parts).toContain(`reason=validation status=400 caller=untokened surface=unrecognised:${name(1)} kind=note 2`);
+		expect(parts).toContain("other 3");
+		expect(lines[0]).not.toContain(name(51));
+
+		await post(name(60));
+		now += 60 * 60 * 1000;
+		await fetch(`${harness.base}/healthz`);
+		expect(lines).toHaveLength(2);
+		expect(lines[1]).toContain(`surface=unrecognised:${name(60)} kind=note 1`);
+		expect(lines[1]).not.toContain("other");
+	});
+
+	test("refusalShape keeps only slugs of unknown names", () => {
+		expect(refusalShape({ surface: "cursor", kind: "commit" })).toEqual({ surface: "cursor", kind: "commit" });
+		expect(refusalShape({ surface: "Bearer abc def", kind: 42 })).toEqual({ surface: "unrecognised:invalid", kind: "none" });
+		expect(refusalShape(null)).toEqual({ surface: "none", kind: "none" });
 	});
 
 	test("a quiet window is logged when the server closes", async () => {
