@@ -1016,6 +1016,20 @@ describe("hourLeaves", () => {
 		await expect(new GreptimeClient(config).hourLeaves(H10)).rejects.toThrow(E1);
 	});
 
+	test.each([
+		["ingested_at is text", "not-a-time", E1TS],
+		["event_ts is text", TIE, "not-a-time"],
+		["ingested_at is null", null, E1TS],
+		["event_ts is empty", TIE, ""],
+	] as const)("throws naming the event when an ingest record's time is not a number (%s)", async (_case, ingested, ts) => {
+		stubFetch((statement) =>
+			statement.includes('FROM "event_ingest"')
+				? records(["event_id", "ingested_at", "event_ts"], [[E1, ingested, ts]])
+				: defaultReply(statement),
+		);
+		await expect(new GreptimeClient(config).hourLeaves(H10)).rejects.toThrow(E1);
+	});
+
 	test("an empty hour reads nothing further and returns no leaves", async () => {
 		const { sql } = stubFetch((statement) =>
 			statement.includes('FROM "event_ingest"')

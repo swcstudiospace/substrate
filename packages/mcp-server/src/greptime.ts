@@ -126,6 +126,11 @@ export interface HourLeaf {
  */
 const IN_BATCH = 500;
 
+/** A TIMESTAMP cell as epoch milliseconds; NaN for null, empty or non-numeric, which `Number()` would turn into 0. */
+function epochMs(value: unknown): number {
+	return value === null || value === undefined || value === "" ? Number.NaN : Number(value);
+}
+
 /** Clamp to a whole number of rows inside the cap; anything unusable falls back to the default. */
 export function queryLimit(limit: number | undefined): number {
 	if (limit === undefined || !Number.isFinite(limit)) return DEFAULT_QUERY_LIMIT;
@@ -708,9 +713,15 @@ export class GreptimeClient {
 		const first = new Map<string, { at: number; ts: number }>();
 		for (const row of rows) {
 			const id = String(row.event_id);
-			const ingested = Number(row.ingested_at);
+			const ingested = epochMs(row.ingested_at);
+			const ts = epochMs(row.event_ts);
+			// A time that is not a number would sort unpredictably or make the hash
+			// read's bounds throw a bare RangeError; name the event instead.
+			if (!Number.isFinite(ingested) || !Number.isFinite(ts)) {
+				throw new GreptimeError(`hour member ${id} has an ingest record with a time that is not a number`);
+			}
 			const seen = first.get(id);
-			if (!seen || ingested < seen.at) first.set(id, { at: ingested, ts: Number(row.event_ts) });
+			if (!seen || ingested < seen.at) first.set(id, { at: ingested, ts });
 		}
 		const ids = [...first.keys()];
 		for (let i = 0; i < ids.length; i += IN_BATCH) {
