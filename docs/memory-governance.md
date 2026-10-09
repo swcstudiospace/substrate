@@ -131,7 +131,9 @@ caught it can be argued with. What it costs is *visibility*: nothing in
 `memory_quarantine` reaches a brief or a search.
 
 A secret is the one class no token releases. The quarantine row holds the redacted
-body, so nothing the redactor caught is persisted anywhere.
+body, so nothing the redactor caught is persisted anywhere. The named rules live in
+[`redaction.md`](redaction.md): `<private>` blocks and D-04 shapes now quarantine as
+`secret` through the write-path redactor.
 
 The classifier is as much about what must **not** fire:
 

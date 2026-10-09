@@ -33,7 +33,7 @@ Decisions confirmed when the milestone was opened (2026-10-08):
 - [ ] **LANEB-03**: The Muse brief writer, for each repo in `SUBSTRATE_MUSE_REPOS`, fetches `POST /brief` as surface `muse` keyed by repo slug, writes a redacted `<repo>/.substrate/BRIEF.md` and an idempotent `AGENTS.md` pointer, refreshes every 5 minutes and keeps the last good file when a fetch fails.
 - [ ] **LANEB-04**: The Muse plugin is projected, validated and approved; its PostToolUse hook emits `tool.call` as surface `muse` with repo and branch from git, importing the redactor from a stable installed path rather than the operator checkout.
 - [ ] **LANEB-05**: Collectors never block an agent, keep their offsets across restarts, and count refused emits where the operator can see them (a periodic `warning` or a counter), so a vocabulary mismatch can no longer drop events silently.
-- [ ] **LANEB-06**: One shared redactor: main's `redact.ts` gains the September D-04 rules while keeping its `COUNTER_KEY` exemption, and every collector, `docs_ingest`, `skills_propose` and anything anchored uses it.
+- [x] **LANEB-06**: One shared redactor: main's `redact.ts` gains the September D-04 rules while keeping its `COUNTER_KEY` exemption, and every collector, `docs_ingest`, `skills_propose` and anything anchored uses it.
 - [ ] **LANEB-07**: Proof (isolated): a herdr pane going working → idle in repo R and a Muse tool call in R appear in `events_query(repo=R)` within 10 s under main-valid surfaces and kinds, with zero refused emits, and R's `.substrate/BRIEF.md` lists them on its next refresh.
 
 ### Skills plane (build plan §6, Phase 4)
@@ -161,7 +161,7 @@ Which phases cover which requirements. Filled in by the roadmap.
 | LANEB-03 | Phase 19 | Pending |
 | LANEB-04 | Phase 19 | Pending |
 | LANEB-05 | Phase 19 | Pending |
-| LANEB-06 | Phase 18 | Pending |
+| LANEB-06 | Phase 18 | Complete |
 | LANEB-07 | Phase 19 | Pending |
 | SKILL-01 | Phase 21 | Pending |
 | SKILL-02 | Phase 22 | Pending |

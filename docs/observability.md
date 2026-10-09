@@ -117,7 +117,8 @@ below). An event with no usage contributes nothing rather than a zero, so a
 > invisibly, because a redacted field looks like redaction working. The exemption
 > added in `redact.ts` is an explicit list of counter names *and* requires a finite
 > numeric value: `{"tokens": "sk-ant-…"}` is still redacted whole, and so is
-> `{"password": 123456}`. A number is not inherently safe; a named count is.
+> `{"password": 123456}`. A number is not inherently safe; a named count is. The full
+> exemption is documented in the counter-exemption section of [`redaction.md`](redaction.md).
 
 ## Traces
 

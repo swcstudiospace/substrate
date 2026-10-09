@@ -153,7 +153,9 @@ free-text field — summary, payload, and also `repo`, `branch`, `session_id`,
 Redaction runs *before* truncation, because truncating first could cut a token
 so that its own pattern no longer matches and the fragment would be stored. The
 patterns are in `redact.ts`, ported from `grok-hermes-connector`'s
-`redactor.py`. There is no second chance once a row is in an append-only log.
+`redactor.py`. The named rules and the D-04 classes are listed in
+[`redaction.md`](redaction.md). There is no second chance once a row is in an
+append-only log.
 
 **Caps, so one collector cannot flood a log nothing will ever reclaim.** Summary
 2000 chars; each other text field 512; each string in the payload 4000; the
