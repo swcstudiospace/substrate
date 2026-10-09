@@ -301,6 +301,16 @@ describe("readSkillDir, the timeout and the cap", () => {
 		expect(DirRefused.prototype).toBeInstanceOf(Error);
 	});
 
+	test("a directory over the cap is refused from the file sizes, before any file is read", () => {
+		const dir = skillDir({ "one.txt": "x".repeat(600_000), "two.txt": "y".repeat(600_000) });
+		expect(() => readSkillDir(dir)).toThrow(DirRefused);
+		expect(() => readSkillDir(dir)).toThrow("over the limit of 1000000 bytes");
+		// A file that alone is over the cap is refused too, even if it is not valid UTF-8 (so it was never decoded).
+		const binary = skillDir();
+		writeFileSync(join(binary, "huge.bin"), Buffer.alloc(MAX_BODY_BYTES + 1, 0xff));
+		expect(() => readSkillDir(binary)).toThrow("over the limit");
+	});
+
 	test("the timeout defaults near 180 s and is overridable", () => {
 		expect(DEFAULT_TIMEOUT_MS).toBe(180_000);
 		expect(skillsTimeout(undefined)).toBe(180_000);

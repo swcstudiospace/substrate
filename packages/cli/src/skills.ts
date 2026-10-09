@@ -49,11 +49,13 @@ export class DirRefused extends Error {}
 /**
  * Every file under `dir` as UTF-8 text, keyed by its relative path. Nothing is skipped
  * silently: a symlink, a special file or a file that is not valid UTF-8 refuses the whole
- * directory, naming it.
+ * directory, naming it, and so does a total size over the route's cap (counted from file sizes
+ * before any file is read).
  */
 export function readSkillDir(dir: string): Record<string, string> {
 	const files: Record<string, string> = {};
 	const decoder = new TextDecoder("utf-8", { fatal: true });
+	let bytes = 0;
 	const walk = (absolute: string, relative: string) => {
 		for (const entry of readdirSync(absolute).sort()) {
 			const path = join(absolute, entry);
@@ -63,6 +65,9 @@ export function readSkillDir(dir: string): Record<string, string> {
 			if (stat.isDirectory()) walk(path, relativePath);
 			else if (!stat.isFile()) throw new DirRefused(`${relativePath} is not a regular file`);
 			else {
+				// Counted before the file is read, so a huge file cannot be pulled into memory just to be refused.
+				bytes += stat.size;
+				if (bytes > MAX_BODY_BYTES) throw new DirRefused(`the directory is over the limit of ${MAX_BODY_BYTES} bytes`);
 				try {
 					files[relativePath] = decoder.decode(readFileSync(path));
 				} catch {
