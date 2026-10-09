@@ -95,15 +95,16 @@ One PR on agent-substrate (ANCHOR-01, ANCHOR-02). Every closed UTC hour has exac
   - Phase 28 schedules its timer around this constant.
 
 ### The `anchors` DDL and production reconciliation
-- **D27-17: The canonical `anchors` DDL in `migrate()` is the production table's shape.**
+- **D27-17: The canonical `anchors` DDL in `migrate()` is the production table's shape. CONFIRMED against production 2026-10-08 (see "Production schema probe" below).**
   - Expected, from September's 06-05 record and `acc30a8`'s `greptime.ts`: 11 columns, no tag, `period_start TIMESTAMP TIME INDEX`, then `period_end TIMESTAMP`, `root STRING`, `event_count BIGINT`, `memo STRING`, `tx_sig STRING`, `signer STRING`, `cluster STRING`, `slot BIGINT`, `anchored_at TIMESTAMP` and `stale_hashes BIGINT`, with no `PRIMARY KEY` and no `append_mode`.
-  - The exact column order, types and options are taken from an operator-approved read-only check against production: `SHOW TABLES`, `SHOW CREATE TABLE "anchors"` and `DESCRIBE "anchors"`.
-  - The check runs through `GreptimeClient.sql`, whose `assertAppendOnly` admits only read verbs.
+  - **Live result:** the production table has exactly this column list, in this order, with these types (`TIMESTAMP` echoes as `TIMESTAMP(3)`), no tag, no `PRIMARY KEY`, no `WITH(...)` options (so no `append_mode`), `ENGINE=mito`, and 0 rows. Nothing differs from the assumption, so the canonical DDL in 27-02 stands as written.
+  - The exact column order, types and options were taken from an operator-approved read-only check against production: `SHOW TABLES`, `SHOW CREATE TABLE anchors` and `DESCRIBE anchors` (plus `SHOW CREATE TABLE agent_events` and `SELECT count(*) FROM anchors`).
+  - The approved check was run as a one-off read-only HTTP SQL request outside `GreptimeClient` (every statement is a read verb that `assertAppendOnly` admits). Nothing was written.
   - What is recorded is the column list, the options and the row count, never a host or credential.
-  - `SHOW TABLES` also confirms that the name `event_ingest` is free.
-- **D27-18: If the operator defers the check, the plan proceeds on the recorded shape.**
-  - The DDL comes from the 06-05 record and `acc30a8`, and is marked `[UNVERIFIED against live]` in the summary and the verification.
-  - Phase 28 must run the check before its first `anchors` write.
+  - `SHOW TABLES` confirms that the name `event_ingest` is free.
+- **D27-18: Superseded. The operator approved the check and it ran on 2026-10-08.**
+  - The `[UNVERIFIED against live]` marker and the deferral fallback do not apply. The `anchors` DDL is verified against live.
+  - Phase 28 does not need to re-run the shape check before its first `anchors` write, but `migrate()`'s D27-19 shape warning still guards against later drift.
 - **D27-19: Main's 5-column, root-keyed DDL is replaced, not kept beside the new one.**
   - `CREATE TABLE IF NOT EXISTS` stays a no-op on production.
   - `migrate()` reads the live `anchors` columns (`DESCRIBE` or `information_schema.columns`, read-only) and pushes a boot warning if they differ from the canonical list. Example: a scratch or dev store built by the old DDL.
@@ -194,13 +195,48 @@ One PR on agent-substrate (ANCHOR-01, ANCHOR-02). Every closed UTC hour has exac
 
 </deferred>
 
-## Open for the operator
+## Operator answers (2026-10-08)
 
-Defaults the plan uses. Each can be overridden before execution.
+The operator accepted all four defaults on 2026-10-08. They are now decisions, not open items.
 
-1. **Anchoring covers events from the deploy onward, with no backfill.** Events stored before Phase 27 runs in production belong to no hour (D27-12). This covers the D-era window and main-era rows since 2026-10-01. *Why it matters:* `verify` will never show those events as anchored. *Recommendation:* accept. A backfilled record would assert an ingest order the server never saw.
-2. **A new production table, `event_ingest`, is created on the first restart after merge.** It also means one extra insert per event (D27-07, D27-23). *Why it matters:* a production schema addition happens at deploy, which already needs approval under the run rules. *Recommendation:* accept, and approve the deploy window when Phase 27 ships.
-3. **An emit whose ingest record fails still reports `stored: true`, with a warning** (D27-09). *Why it matters:* the caller sees a stored event that will not be anchored, rather than a failure that tempts a duplicate retry. *Recommendation:* accept.
-4. **Production's September `agent_events.ingested_at` column stays unused** (D27-11). *Why it matters:* an extra nullable column stays in the live table, and its D-era values are not reused. *Recommendation:* accept, because reusing it would need an `agent_events` write path change.
+1. **Accepted: anchoring covers events from the deploy onward, with no backfill.** Events stored before Phase 27 runs in production belong to no hour (D27-12). This covers the D-era window and main-era rows since 2026-10-01. `verify` will never show those events as anchored.
+2. **Accepted: a new production table, `event_ingest`, is created by `migrate()` on the first restart after merge, plus one extra insert per event** (D27-07, D27-23). The restart itself is a deploy and is still executed outside this phase (D27-23).
+3. **Accepted: an emit whose ingest record fails still reports `stored: true`, with a warning that the event will not be anchored** (D27-09).
+4. **Accepted: production's September `agent_events.ingested_at` column stays unused** (D27-11). It is neither read nor written.
 
-**Live step needing approval:** the read-only `SHOW TABLES` / `SHOW CREATE TABLE "anchors"` / `DESCRIBE "anchors"` against production GreptimeDB (D27-17). If it is deferred, D27-18 applies.
+**Live step:** approved by the operator (2026-10-08) and run; see the next section. D27-18 does not apply.
+
+## Production schema probe (operator-approved, read-only) — 2026-10-08
+
+Statements sent, and nothing else: `SHOW TABLES`, `SHOW CREATE TABLE anchors`, `DESCRIBE anchors`, `SHOW CREATE TABLE agent_events`, `SELECT count(*) FROM anchors`. No writes. Only names, types and options are recorded here; no host, credential or row content.
+
+**Tables:** `agent_events`, `agent_events_pre_append_20260930`, `anchors`. `event_ingest` is free.
+
+**`anchors`** (`ENGINE=mito`, no `WITH(...)` options, so no `append_mode`; no `PRIMARY KEY`; `TIME INDEX ("period_start")`):
+
+| # | Column | DDL type | DESCRIBE type | Key | Null | Semantic type |
+|---|--------|----------|---------------|-----|------|---------------|
+| 1 | `period_start` | `TIMESTAMP(3) NOT NULL` | `TimestampMillisecond` | PRI | NO | TIMESTAMP |
+| 2 | `period_end` | `TIMESTAMP(3) NULL` | `TimestampMillisecond` | | YES | FIELD |
+| 3 | `root` | `STRING NULL` | `String` | | YES | FIELD |
+| 4 | `event_count` | `BIGINT NULL` | `Int64` | | YES | FIELD |
+| 5 | `memo` | `STRING NULL` | `String` | | YES | FIELD |
+| 6 | `tx_sig` | `STRING NULL` | `String` | | YES | FIELD |
+| 7 | `signer` | `STRING NULL` | `String` | | YES | FIELD |
+| 8 | `cluster` | `STRING NULL` | `String` | | YES | FIELD |
+| 9 | `slot` | `BIGINT NULL` | `Int64` | | YES | FIELD |
+| 10 | `anchored_at` | `TIMESTAMP(3) NULL` | `TimestampMillisecond` | | YES | FIELD |
+| 11 | `stale_hashes` | `BIGINT NULL` | `Int64` | | YES | FIELD |
+
+`DESCRIBE` marks the time index `PRI`; `SHOW CREATE TABLE` has no `PRIMARY KEY` clause, so there is no tag. `SELECT count(*) FROM anchors` = **0**.
+
+**`agent_events`** (`ENGINE=mito`, `WITH( append_mode = 'true' )`, `TIME INDEX ("ts")`, `PRIMARY KEY ("surface", "graph_id", "repo", "kind")`): `ts TIMESTAMP(3) NOT NULL`, then `id`, `surface`, `session_id`, `graph_id`, `node_id`, `linear_identifier` (`STRING NULL`), `step BIGINT NULL`, `repo`, `branch`, `actor`, `kind`, `summary`, `payload`, `hash`, `prev` (`STRING NULL`), `ingested_at TIMESTAMP(3) NULL` (17 columns). The D-era `ingested_at` column is present as D27-11 assumes.
+
+**Match against the plans:** every Phase 27 assumption holds.
+- 27-02 Task (canonical `anchors` CREATE): the 11 columns, order, types, no PK and no `append_mode` match production exactly. No change.
+- 27-02 shape check (`information_schema.columns`, `timestamp(3)`/`string`/`bigint`): consistent with the live types (`TimestampMillisecond`/`String`/`Int64` in `DESCRIBE`). No change.
+- D27-11 (`agent_events.ingested_at` exists, `TIMESTAMP(3)` nullable FIELD, untouched): confirmed. No change.
+- D27-07 (`event_ingest` name free): confirmed. No change.
+- D27-20 (`anchors` has no tag and no `append_mode`, so same-`period_start` rows deduplicate last-write-wins; 0 rows today): confirmed. No change.
+- 27-04 operator-check task: its outcome is now **APPROVED** with the facts above; the executor transcribes this section into the 27-04 summary instead of asking the operator again. The D27-18 `[UNVERIFIED against live]` branch is not taken in 27-02 or 27-04.
+- Not covered by this probe: the production GreptimeDB server version (no version statement was approved). The v0.14.4 scratch vs v1.1.4 production gap (D27-23) stands as recorded.
