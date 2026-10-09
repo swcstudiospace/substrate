@@ -508,6 +508,9 @@ describe("the opt-in tracker block", () => {
 		}
 		expect(first.LINEAR_API_KEY).not.toBe(second.LINEAR_API_KEY);
 		expect(first.NOTION_API_KEY).not.toBe(second.NOTION_API_KEY);
+	});
+});
+
 describe("the ragflow fixture's settings", () => {
 	const ragflowEnv = (runDir: string): Record<string, string> => ({
 		RAGFLOW_URL: "http://127.0.0.1:19380",
