@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { METRIC, findCounter, sumCounter } from "@substrate/observability";
 import { loadConfig, type SubstrateConfig } from "./config.ts";
+import { createDesktopDriver } from "./desktop/driver.ts";
 import { createObservability, type Observability } from "./observe.ts";
 import { createHttpServer, type HttpServerOptions } from "./server.ts";
 import { Substrate } from "./service.ts";
@@ -24,6 +25,7 @@ import {
 	type SkillProposer,
 } from "./skills/propose.ts";
 import { REDACTED } from "./redact.ts";
+import type { SubstrateEvent } from "./types.ts";
 
 const ROOT = join(import.meta.dir, "..", "..", "..");
 const CLI = join(ROOT, "packages", "cli", "src", "index.ts");
@@ -38,7 +40,7 @@ const running: Harness[] = [];
 
 async function start(
 	env: Record<string, string | undefined> = {},
-	stores: Partial<{ index: unknown; greptime: unknown; skills: SkillProposer }> = {},
+	stores: Partial<{ index: unknown; greptime: unknown; skills: SkillProposer; desktop: unknown }> = {},
 	options?: HttpServerOptions,
 ): Promise<Harness> {
 	const config: SubstrateConfig = loadConfig(env);
@@ -1233,3 +1235,194 @@ describe("POST /skills/propose", () => {
 	});
 });
 
+describe("desktop_run at the HTTP gate", () => {
+	/** 4x3 test image: pixel (x, y) is RGB (10x+1, 20y+2, 7x+5y+3). */
+	function httpXwd(): Buffer {
+		const W = 4;
+		const H = 3;
+		const name = Buffer.from("xwdtest\0");
+		const unit = 4;
+		const bytesPerLine = W * unit + 4;
+		const header = Buffer.alloc(100);
+		const fields = [100 + name.length, 7, 2, 24, W, H, 0, 0, 32, 0, 32, 32, bytesPerLine, 4, 0xff0000, 0xff00, 0xff, 8, 256, 0, W, H, 0, 0, 0];
+		fields.forEach((value, i) => header.writeUInt32BE(value, i * 4));
+		const pixels = Buffer.alloc(bytesPerLine * H);
+		for (let y = 0; y < H; y++) {
+			for (let x = 0; x < W; x++) {
+				pixels.writeUIntLE(((10 * x + 1) << 16) | ((20 * y + 2) << 8) | (7 * x + 5 * y + 3), y * bytesPerLine + x * unit, unit);
+			}
+		}
+		return Buffer.concat([header, name, pixels]);
+	}
+
+	interface DesktopRig {
+		harness: Harness;
+		calls: string[][];
+		written: SubstrateEvent[];
+	}
+
+	/** A harness with tokens, an omp-only allowlist and a recording fake runner behind the driver. */
+	async function startDesktop(
+		envExtra: Record<string, string | undefined> = {},
+	): Promise<DesktopRig> {
+		const calls: string[][] = [];
+		const written: SubstrateEvent[] = [];
+		const shot = httpXwd();
+		const dir = mkdtempSync(join(tmpdir(), "substrate-desktop-http-"));
+		const harness = await start(
+			{
+				SUBSTRATE_TOKEN_OMP: "tok-omp",
+				SUBSTRATE_TOKEN_CURSOR: "tok-cursor",
+				SUBSTRATE_DESKTOP_SURFACES: "omp",
+				SUBSTRATE_DESKTOP_DIR: dir,
+				SUBSTRATE_AUDIT_PATH: auditDirectory(),
+				...envExtra,
+			},
+			{
+				greptime: {
+					ensureAppendMode: async () => true,
+					lastHash: async (): Promise<string | null> => null,
+					insertEvent: async (event: SubstrateEvent) => {
+						written.push(event);
+					},
+					queryEvents: async () => [],
+					readEvents: async () => [],
+				},
+				desktop: createDesktopDriver({
+					run: async (argv: readonly string[]) => {
+						calls.push([...argv]);
+						if (argv.includes("getdisplaygeometry")) return { code: 0, stdout: Buffer.from("1280 800\n"), stderr: "" };
+						if (argv.includes("getwindowname")) return { code: 0, stdout: Buffer.from("stub-window\n"), stderr: "" };
+						if (argv.includes("xwd")) return { code: 0, stdout: shot, stderr: "" };
+						return { code: 0, stdout: Buffer.from(""), stderr: "" };
+					},
+					dir,
+					sleep: async () => {},
+				}),
+			},
+		);
+		return { harness, calls, written };
+	}
+
+	async function mcpCall(
+		base: string,
+		token: string | null,
+		name: string,
+		args: unknown,
+		extraHeaders: Record<string, string> = {},
+	) {
+		const response = await fetch(`${base}/mcp`, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				accept: "application/json, text/event-stream",
+				...(token ? { authorization: `Bearer ${token}` } : {}),
+				...extraHeaders,
+			},
+			body: JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { name, arguments: args } }),
+		});
+		return { status: response.status, raw: await response.text() };
+	}
+
+	/** The tool result out of the SSE stream, or the JSON-RPC error when the gate refused. */
+	function toolResult(raw: string): { isError: boolean; text: string; error?: { code: number; message: string } } {
+		const data = raw
+			.split("\n")
+			.find((line) => line.startsWith("data: "))
+			?.slice(6);
+		const envelope = JSON.parse(data ?? raw) as {
+			result?: { content?: Array<{ type: string; text?: string }>; isError?: boolean };
+			error?: { code: number; message: string };
+		};
+		if (envelope.error) return { isError: true, text: "", error: envelope.error };
+		const content = envelope.result?.content ?? [];
+		return { isError: envelope.result?.isError === true, text: content[0]?.text ?? "" };
+	}
+
+	test("no bearer is 401 before the runner or the audit ever see the call", async () => {
+		const { harness, calls } = await startDesktop();
+
+		const { status } = await mcpCall(harness.base, null, "desktop_run", { actions: [{ type: "screenshot" }] });
+
+		expect(status).toBe(401);
+		expect(calls).toEqual([]);
+		expect(harness.observability.audit.recent().filter((record) => record.tool === "desktop_run")).toEqual([]);
+	});
+
+	test("a bogus bearer is 401 and runs nothing", async () => {
+		const { harness, calls } = await startDesktop();
+
+		const { status } = await mcpCall(harness.base, "nope", "desktop_run", { actions: [{ type: "screenshot" }] });
+
+		expect(status).toBe(401);
+		expect(calls).toEqual([]);
+		expect(harness.observability.audit.recent().filter((record) => record.tool === "desktop_run")).toEqual([]);
+	});
+
+	test("an unlisted surface with a valid token is refused and runs nothing", async () => {
+		const { harness, calls, written } = await startDesktop();
+
+		const { status, raw } = await mcpCall(harness.base, "tok-cursor", "desktop_run", { actions: [{ type: "screenshot" }] });
+		const result = toolResult(raw);
+
+		expect(status).toBe(200);
+		expect(result.isError).toBe(true);
+		expect(result.text).toContain("nothing was run");
+		expect(calls).toEqual([]);
+		expect(written).toEqual([]);
+	});
+
+	test("self-attribution through an argument or a header is rejected, never honoured", async () => {
+		const { harness, calls, written } = await startDesktop();
+
+		// September's propose header is gone from the server; sending it must change
+		// nothing, and the strict schema drops the surface argument before dispatch.
+		const { status, raw } = await mcpCall(
+			harness.base,
+			"tok-omp",
+			"desktop_run",
+			{ actions: [{ type: "screenshot" }], surface: "omp" },
+			{ "x-substrate-propose-key": "whatever" },
+		);
+		const result = toolResult(raw);
+
+		expect(status).toBe(200);
+		expect(result.isError).toBe(true);
+		expect(calls).toEqual([]);
+		expect(written).toEqual([]);
+	});
+
+	test("an audit chain that will not take the record denies the fail-closed tool", async () => {
+		const { harness, calls } = await startDesktop({ SUBSTRATE_AUDIT_PATH: unwritablePath() });
+
+		const { status, raw } = await mcpCall(harness.base, "tok-omp", "desktop_run", { actions: [{ type: "screenshot" }] });
+		const result = toolResult(raw);
+
+		expect(status).toBe(200);
+		expect(result.error?.code).toBe(-32000);
+		expect(result.error?.message).toContain("desktop_run");
+		expect(calls).toEqual([]);
+	});
+
+	test("the audit record carries keys plus digest only, in fail-closed mode", async () => {
+		const { harness, calls } = await startDesktop();
+		const sentinel = "AUDIT-SILENCE-SENTINEL";
+
+		const { status, raw } = await mcpCall(harness.base, "tok-omp", "desktop_run", {
+			actions: [{ type: "type", text: sentinel }, { type: "screenshot" }],
+		});
+		const result = toolResult(raw);
+
+		expect(status).toBe(200);
+		expect(result.isError).toBe(false);
+		expect(calls.length).toBeGreaterThan(0);
+		const records = harness.observability.audit.recent().filter((record) => record.tool === "desktop_run");
+		expect(records).toHaveLength(1);
+		expect(records[0]).toMatchObject({ tool: "desktop_run", mode: "fail-closed" });
+		for (const key of records[0]?.arg_keys ?? []) {
+			expect(["actions", "timeout"]).toContain(key);
+		}
+		expect(JSON.stringify(records)).not.toContain(sentinel);
+		expect(JSON.stringify(records)).not.toContain("iVBOR");
+	});
+});
