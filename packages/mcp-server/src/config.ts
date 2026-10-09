@@ -263,9 +263,11 @@ export function surfaceForToken(config: SubstrateConfig, authorization: string |
  *
  * A swarm surface's token is never an operator, listed or not. The swarm runs
  * agents unattended against each other's nodes, so a listed swarm token would be
- * one agent able to evict any other, which is the advisory lease again. Refusing
- * it here, rather than trusting the list, fails closed on a misconfiguration
- * that `configWarnings` reports at boot.
+ * one agent able to evict any other, which is the advisory lease again. The
+ * `substrate` host-job surface is held by unattended host jobs (anchor,
+ * skills-sync, dispatcher) under the same threat model, so its token is never
+ * an operator either. Refusing both here, rather than trusting the list, fails
+ * closed on a misconfiguration that `configWarnings` reports at boot.
  */
 export function isOperator(config: SubstrateConfig, authorization: string | null): boolean {
 	// A bare local run — no surface tokens at all — is its own operator. The bridge
@@ -280,7 +282,7 @@ export function isOperator(config: SubstrateConfig, authorization: string | null
 	// bridge must not turn that 401 into `force` with no named surface.
 	// `isSwarmSurface(undefined)` is false, which is how that bearer used to pass.
 	if (named === undefined) return config.tokens.size === 0;
-	return !isSwarmSurface(named);
+	return !isSwarmSurface(named) && named !== "substrate";
 }
 
 /**
@@ -351,6 +353,13 @@ export function configWarnings(config: SubstrateConfig): string[] {
 	if (swarmOperators.length > 0) {
 		warnings.push(
 			`SUBSTRATE_OPERATOR_TOKENS lists the token of ${swarmOperators.join(", ")}; a swarm surface is never an ` +
+				"operator, so it is refused `force` like any other agent. Remove it from the list.",
+		);
+	}
+	// Named by surface, never by token: the warning goes to a log.
+	if ([...config.operatorTokens].some((token) => config.tokens.get(token) === "substrate")) {
+		warnings.push(
+			"SUBSTRATE_OPERATOR_TOKENS lists the token of substrate; the host-job surface is never an " +
 				"operator, so it is refused `force` like any other agent. Remove it from the list.",
 		);
 	}
