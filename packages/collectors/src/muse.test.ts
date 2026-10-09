@@ -13,6 +13,7 @@ import {
 	emptyState,
 	ensurePointer,
 	fetchBrief,
+	ledgerAvailable,
 	MARKER_END,
 	MARKER_START,
 	pass,
@@ -309,5 +310,29 @@ describe("muse writer", () => {
 		process.env.SUBSTRATE_URL = "http://127.0.0.1:9";
 		stubFetch({ brief: "", status: 200 });
 		expect(await fetchBrief("acme/widgets", "main")).toEqual({ ok: false, reason: "empty" });
+	});
+});
+
+describe("ledger gate", () => {
+	test("healthz carries the bearer a token-gated server demands", async () => {
+		process.env.SUBSTRATE_URL = "http://127.0.0.1:9";
+		process.env.SUBSTRATE_TOKEN = "tok";
+		let seen: string | null = "missing";
+		let status = 401;
+		globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+			seen = new Headers(init?.headers).get("authorization");
+			return new Response(JSON.stringify({ greptime: true }), { status });
+		}) as typeof fetch;
+		expect(await ledgerAvailable()).toBe(false);
+		expect(seen).toBe("Bearer tok");
+		status = 200;
+		expect(await ledgerAvailable()).toBe(true);
+	});
+
+	test("healthz without the ledger flag stays unavailable", async () => {
+		process.env.SUBSTRATE_URL = "http://127.0.0.1:9";
+		delete process.env.SUBSTRATE_TOKEN;
+		globalThis.fetch = (async (_input: Parameters<typeof fetch>[0]) => new Response(JSON.stringify({ greptime: false }), { status: 200 })) as typeof fetch;
+		expect(await ledgerAvailable()).toBe(false);
 	});
 });

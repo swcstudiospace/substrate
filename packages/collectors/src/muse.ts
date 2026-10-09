@@ -155,10 +155,13 @@ export function pointerBlock(): string {
 	].join("\n");
 }
 
-/** One `GET /healthz` per pass. The ledger is usable only when `greptime` is true. */
+/** One `GET /healthz` per pass, with the same bearer the brief fetch uses. The ledger is usable only when `greptime` is true. */
 export async function ledgerAvailable(): Promise<boolean> {
 	try {
-		const response = await fetch(`${substrateUrl()}/healthz`, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+		const response = await fetch(`${substrateUrl()}/healthz`, {
+			headers: { ...bearer() },
+			signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+		});
 		if (!response.ok) return false;
 		const body = (await response.json()) as { greptime?: unknown };
 		return body.greptime === true;
