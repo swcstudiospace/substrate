@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { isReviewToken, loadConfig } from "./config.ts";
-import { MAX_QUERY_LIMIT, type EventQuery } from "./greptime.ts";
+import { formatMemo, hourEnd, merkleRootHex, parseMemo } from "@substrate/ledger";
+import { isReviewToken, loadConfig, type GreptimeConfig } from "./config.ts";
+import { InvalidEventError } from "./event.ts";
+import { GreptimeClient, INGEST_LAG_MS, IngestNotRecorded, MAX_QUERY_LIMIT, type EventQuery } from "./greptime.ts";
 import { REDACTED } from "./redact.ts";
 import { leaseSnapshot } from "./index-store.ts";
 import { decideRelease, type ClaimAction } from "./lease.ts";
@@ -1692,3 +1694,279 @@ describe("the audit line is redacted", () => {
 		expect(log).toContain(REDACTED);
 	});
 });
+
+/** Run `body` with stderr captured, restoring it whatever happens. */
+async function captureStderr<T>(body: () => Promise<T>): Promise<{ result: T; log: string }> {
+	const written: string[] = [];
+	const original = process.stderr.write.bind(process.stderr);
+	process.stderr.write = ((chunk: string | Uint8Array) => {
+		written.push(String(chunk));
+		return true;
+	}) as typeof process.stderr.write;
+	try {
+		return { result: await body(), log: written.join("") };
+	} finally {
+		process.stderr.write = original;
+	}
+}
+
+describe("emit when the ingest record is not recorded", () => {
+	const input: EventInput = { surface: "omp", kind: "shell", summary: "ran cargo test", session_id: "sess-1" };
+
+	/** A ledger whose event row lands and whose ingest record does or does not. */
+	function ledger(options: { appendMode?: boolean; ingestFails?: string; insertFails?: string } = {}) {
+		const written: SubstrateEvent[] = [];
+		return {
+			written,
+			greptime: {
+				ensureAppendMode: async () => options.appendMode ?? true,
+				lastHash: async () => null,
+				insertEvent: async (event: SubstrateEvent) => {
+					if (options.insertFails) throw new Error(options.insertFails);
+					written.push(event);
+					if (options.ingestFails) throw new IngestNotRecorded(event.id, new Error(options.ingestFails));
+				},
+			},
+		};
+	}
+
+	const substrateWith = (greptime: unknown, env: Record<string, string> = {}) =>
+		new Substrate(loadConfig(env), { index: null, greptime: greptime as never });
+
+	test("the event is stored, so the caller is told it is stored, with a warning and no error", async () => {
+		const { written, greptime } = ledger({ ingestFails: "connect ETIMEDOUT" });
+		const { result, log } = await captureStderr(() => substrateWith(greptime).emit(input));
+
+		expect(result.stored).toBe(true);
+		expect(result.error).toBeUndefined();
+		expect(result.warning).toContain("hourly anchor will not cover it");
+		expect(result.warning).toContain("Do not re-emit");
+		expect(written).toHaveLength(1);
+		expect(result.event.hash).toBe(written[0]?.hash ?? "");
+		// One journal line names the event, so an operator can find the unanchored row.
+		expect(log).toContain(`[substrate] event ${result.event.id} stored but not anchored`);
+	});
+
+	test("the warning also carries the dedup caveat when the ledger may deduplicate", async () => {
+		const { greptime } = ledger({ appendMode: false, ingestFails: "connect ETIMEDOUT" });
+		const { result } = await captureStderr(() =>
+			substrateWith(greptime, { SUBSTRATE_ALLOW_DEDUPLICATING_LEDGER: "true" }).emit(input),
+		);
+
+		expect(result.stored).toBe(true);
+		expect(result.warning).toContain("hourly anchor will not cover it");
+		expect(result.warning).toContain("may be silently dropped");
+	});
+
+	test("an append-only ledger gets only the anchoring warning", async () => {
+		const { greptime } = ledger({ ingestFails: "connect ETIMEDOUT" });
+		const { result } = await captureStderr(() => substrateWith(greptime).emit(input));
+		expect(result.warning).not.toContain("append_mode");
+	});
+
+	test("the journal line is redacted, as a connection error can quote a URL", async () => {
+		const { greptime } = ledger({ ingestFails: "postgres://user:hunter2@host/db refused" });
+		const { result, log } = await captureStderr(() => substrateWith(greptime).emit(input));
+
+		expect(log).not.toContain("hunter2");
+		expect(log).toContain(REDACTED);
+		expect(JSON.stringify(result)).not.toContain("hunter2");
+	});
+
+	test("an insert that fails before the event row lands is still stored: false", async () => {
+		const { written, greptime } = ledger({ insertFails: "greptime unreachable: connect ETIMEDOUT" });
+		const { result, log } = await captureStderr(() => substrateWith(greptime).emit(input));
+
+		expect(result.stored).toBe(false);
+		expect(result.error).toContain("ETIMEDOUT");
+		expect(result.warning).toBeUndefined();
+		expect(written).toEqual([]);
+		expect(log).toContain("not stored");
+	});
+
+	test("the observer sees the event as stored", async () => {
+		const { greptime } = ledger({ ingestFails: "connect ETIMEDOUT" });
+		const seen: boolean[] = [];
+		const substrate = new Substrate(
+			loadConfig({}),
+			{ index: null, greptime: greptime as never },
+			{ emitted: (sample) => seen.push(sample.stored) },
+		);
+		await captureStderr(() => substrate.emit(input));
+		expect(seen).toEqual([true]);
+	});
+});
+
+describe("hourDigest", () => {
+	const H10 = Date.UTC(2026, 8, 26, 10);
+	const CLOSED = hourEnd(H10) + INGEST_LAG_MS;
+	const HASHES = ["a", "b", "c", "d", "e"].map((digit) => digit.repeat(64));
+	const leaf = (n: number) => ({ event_id: `evt_${n}`, ingested_at: H10 + n * 1000, hash: HASHES[n] as string });
+
+	/** A ledger stub that returns fixed leaves and counts the reads. */
+	function ledger(leaves: Array<{ event_id: string; ingested_at: number; hash: string }>) {
+		const reads: number[] = [];
+		return {
+			reads,
+			greptime: {
+				hourLeaves: async (startMs: number) => {
+					reads.push(startMs);
+					return leaves;
+				},
+			},
+		};
+	}
+
+	const substrateWith = (greptime: unknown) => new Substrate(loadConfig({}), { index: null, greptime: greptime as never });
+
+	test("refuses a start that is not a whole UTC hour, without reading the ledger", async () => {
+		const { reads, greptime } = ledger([]);
+		const substrate = substrateWith(greptime);
+		for (const start of [H10 + 1, H10 + 60_000, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER, 2 ** 60]) {
+			await expect(substrate.hourDigest(start, CLOSED)).rejects.toThrow(InvalidEventError);
+		}
+		await expect(substrate.hourDigest(H10 + 1, CLOSED)).rejects.toThrow("whole UTC hour");
+		expect(reads).toEqual([]);
+	});
+
+	test("an hour counts as closed exactly at its end plus the ingest lag", async () => {
+		const { reads, greptime } = ledger([]);
+		const substrate = substrateWith(greptime);
+
+		await expect(substrate.hourDigest(H10, CLOSED - 1)).rejects.toThrow("is not closed yet");
+		expect(reads).toEqual([]);
+
+		await substrate.hourDigest(H10, CLOSED);
+		expect(reads).toEqual([H10]);
+		expect(INGEST_LAG_MS).toBe(300_000);
+	});
+
+	test("says so when no ledger is configured", async () => {
+		await expect(substrateWith(null).hourDigest(H10, CLOSED)).rejects.toThrow("GREPTIME_URL is not set");
+	});
+
+	test("an empty hour digests to a null root and memo", async () => {
+		const { greptime } = ledger([]);
+		expect(await substrateWith(greptime).hourDigest(H10, CLOSED)).toEqual({
+			period_start: "2026-09-26T10:00:00.000Z",
+			period_end: "2026-09-26T11:00:00.000Z",
+			event_count: 0,
+			root: null,
+			memo: null,
+			event_ids: [],
+		});
+	});
+
+	test("a single leaf gives the RFC 6962 0x00-prefixed hash and a v1 memo", async () => {
+		const { greptime } = ledger([leaf(0)]);
+		const digest = await substrateWith(greptime).hourDigest(H10, CLOSED);
+
+		const prefixed = new Bun.CryptoHasher("sha256").update(Buffer.concat([Buffer.from([0]), Buffer.from(HASHES[0] as string, "hex")])).digest("hex");
+		expect(digest.root).toBe(prefixed);
+		expect(digest.root).not.toBe(HASHES[0]);
+		expect(digest.event_count).toBe(1);
+		expect(digest.memo).toBe(`substrate:v1:2026-09-26T10:00:00.000Z:${prefixed}:1`);
+		expect(digest.event_ids).toEqual(["evt_0"]);
+	});
+
+	test("several leaves match the pure ledger functions and keep position order", async () => {
+		const leaves = [leaf(0), leaf(1), leaf(2), leaf(3), leaf(4)];
+		const { greptime } = ledger(leaves);
+		const digest = await substrateWith(greptime).hourDigest(H10, CLOSED);
+
+		const root = merkleRootHex(HASHES);
+		expect(digest.root).toBe(root);
+		expect(digest.memo).toBe(formatMemo({ periodStartMs: H10, rootHex: root, count: 5 }));
+		expect(parseMemo(digest.memo ?? "")).toEqual({ periodStartMs: H10, rootHex: root, count: 5 });
+		expect(digest.event_ids).toEqual(["evt_0", "evt_1", "evt_2", "evt_3", "evt_4"]);
+		expect(digest.period_end).toBe("2026-09-26T11:00:00.000Z");
+	});
+
+	test("the same events always give the same digest, and position and content both matter", async () => {
+		const leaves = [leaf(0), leaf(1), leaf(2), leaf(3)];
+		const base = await substrateWith(ledger(leaves).greptime).hourDigest(H10, CLOSED);
+		const again = await substrateWith(ledger(leaves).greptime).hourDigest(H10, CLOSED);
+		expect(again).toEqual(base);
+
+		const reordered = await substrateWith(ledger([leaves[1], leaves[0], leaves[2], leaves[3]] as typeof leaves).greptime).hourDigest(H10, CLOSED);
+		expect(reordered.root).not.toBe(base.root);
+
+		const altered = await substrateWith(ledger([leaves[0], leaves[1], { ...leaves[2], hash: "f".repeat(64) }, leaves[3]] as typeof leaves).greptime).hourDigest(H10, CLOSED);
+		expect(altered.root).not.toBe(base.root);
+		expect(altered.event_count).toBe(base.event_count);
+	});
+
+	test("the memo carries the hour, the root and the count, never an event id or text", async () => {
+		const { greptime } = ledger([leaf(0), leaf(1)]);
+		const { memo } = await substrateWith(greptime).hourDigest(H10, CLOSED);
+		expect(memo).toMatch(/^substrate:v1:2026-09-26T10:00:00\.000Z:[0-9a-f]{64}:2$/);
+		expect(memo).not.toContain("evt_");
+	});
+
+	test("a read that fails, naming an event, rejects instead of returning a partial root", async () => {
+		const greptime = {
+			hourLeaves: async () => {
+				throw new Error("hour member evt_3 has no event row");
+			},
+		};
+		await expect(substrateWith(greptime).hourDigest(H10, CLOSED)).rejects.toThrow("evt_3");
+	});
+});
+
+describe("hourDigest over a real ledger client", () => {
+	const H10 = Date.UTC(2026, 8, 26, 10);
+	const CLOSED = hourEnd(H10) + INGEST_LAG_MS;
+	const greptimeConfig: GreptimeConfig = { url: "http://greptime.test", user: "u", password: "p", db: "substrate" };
+	const HASH: Record<string, string> = { evt_1: "1".repeat(64), evt_2: "2".repeat(64), evt_3: "3".repeat(64) };
+	/** evt_3 was collected in September but ingested in this hour; evt_1 and evt_2 share a millisecond. */
+	const INGEST: Array<[string, number, number]> = [
+		["evt_2", H10 + 5000, H10 + 4000],
+		["evt_3", H10 + 9000, Date.UTC(2026, 8, 1, 3)],
+		["evt_1", H10 + 5000, H10 + 4500],
+	];
+
+	/** The real `hourLeaves`, with only the server's answers replaced and put in the order given. */
+	function client(ingest: Array<[string, number, number]>, hashes: Record<string, string> = HASH) {
+		return new (class extends GreptimeClient {
+			override async sql(statement: string): Promise<Array<Record<string, unknown>>> {
+				if (statement.includes("SELECT DISTINCT")) return [];
+				if (statement.includes('FROM "agent_events"')) {
+					return Object.entries(hashes)
+						.filter(([id]) => statement.includes(`'${id}'`))
+						.map(([id, hash]) => ({ id, hash }));
+				}
+				if (statement.includes('FROM "event_ingest"')) {
+					return ingest.map(([event_id, ingested_at, event_ts]) => ({ event_id, ingested_at, event_ts }));
+				}
+				return [];
+			}
+		})(greptimeConfig);
+	}
+
+	const digestOf = (greptime: GreptimeClient) =>
+		new Substrate(loadConfig({}), { index: null, greptime: greptime as never }).hourDigest(H10, CLOSED);
+
+	test("membership and position follow ingest order, whatever order the server answers in", async () => {
+		const [a, b, c] = INGEST as [(typeof INGEST)[number], (typeof INGEST)[number], (typeof INGEST)[number]];
+		const first = await digestOf(client([a, b, c]));
+		const second = await digestOf(client([c, b, a]));
+		const third = await digestOf(client([b, c, a]));
+
+		// evt_1 and evt_2 share an ingest millisecond, so event id breaks the tie; the
+		// backdated evt_3 sits in the hour it was ingested in.
+		expect(first.event_ids).toEqual(["evt_1", "evt_2", "evt_3"]);
+		expect(first.root).toBe(merkleRootHex([HASH.evt_1 as string, HASH.evt_2 as string, HASH.evt_3 as string]));
+		expect(second).toEqual(first);
+		expect(third).toEqual(first);
+	});
+
+	test("an event whose row is missing fails the digest by name", async () => {
+		const withoutEvt2 = { evt_1: HASH.evt_1 as string, evt_3: HASH.evt_3 as string };
+		await expect(digestOf(client(INGEST, withoutEvt2))).rejects.toThrow("evt_2");
+	});
+
+	test("an event with a malformed hash fails the digest by name", async () => {
+		await expect(digestOf(client(INGEST, { ...HASH, evt_3: "not-a-hash" }))).rejects.toThrow("evt_3");
+	});
+});
+
