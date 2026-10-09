@@ -37,7 +37,7 @@ describe("each sample matches its own row", () => {
 			const payload = sample.payload ?? {};
 			expect({ id: row.id, kind: sample.kind }).toEqual({ id: row.id, kind: row.kind });
 			if (row.actions) {
-				expect(row.actions).toContain(payload["action"]);
+				expect(row.actions as readonly unknown[]).toContain(payload["action"]);
 			} else {
 				expect({ id: row.id, action: payload["action"] ?? null }).toEqual({ id: row.id, action: null });
 			}
