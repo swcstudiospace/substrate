@@ -1,7 +1,13 @@
 name: CI
 
-# The repository's verification gate. It runs the same commands a contributor runs locally
-# (docs/ci.md), plus the Postgres-backed tests that skip on a machine without a database.
+# The repository's verification gate. `bun run verify` runs the same commands locally
+# (docs/ci.md) and scripts/verify.test.ts fails if the two drift apart. CI adds the
+# Postgres-backed tests that skip on a machine without a database.
+#
+# Both jobs are switched by the repository variable CI_ENABLED. While it is unset they are
+# skipped, which GitHub reports as a skipped (not failed) check and which uses no runner
+# minutes. `gh variable set CI_ENABLED --body true` turns the gate on once Actions can run
+# for the organisation; `gh variable delete CI_ENABLED` is the kill switch.
 on:
   pull_request:
   push:
@@ -20,7 +26,7 @@ permissions:
 jobs:
   verify:
     name: Typecheck, tests and repo locks
-    if: github.event_name != 'schedule'
+    if: vars.CI_ENABLED == 'true' && github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     services:
@@ -79,7 +85,7 @@ jobs:
     name: Known-vulnerability audit
     # Advisories appear without any change here, so this never gates a pull request. It runs
     # on main, on demand and weekly; a red run is the signal to upgrade.
-    if: github.event_name != 'pull_request'
+    if: vars.CI_ENABLED == 'true' && github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
