@@ -187,6 +187,7 @@ async function cmdVerify(graphId: string | undefined): Promise<number> {
 		chain?: { ok: boolean; brokenAt?: string; reason?: string };
 		hours?: Array<{ period_start: string; status: string; tx_sig?: string; reason?: string }>;
 		uncovered?: { count: number; ids: string[] };
+		missing?: { count: number; ids: string[] };
 	};
 	// The chain line reports the chain, not the anchors: an anchor failure
 	// still prints `chain intact` here, and the hour lines carry the failure.
@@ -211,6 +212,9 @@ async function cmdVerify(graphId: string | undefined): Promise<number> {
 	}
 	if ((body.uncovered?.count ?? 0) > 0) {
 		process.stderr.write(`uncovered events with no ingest record: ${(body.uncovered?.ids ?? []).join(", ")}\n`);
+	}
+	if ((body.missing?.count ?? 0) > 0) {
+		process.stderr.write(`events with an ingest record but no event row: ${(body.missing?.ids ?? []).join(", ")}\n`);
 	}
 	return body.ok ? 0 : 1;
 }

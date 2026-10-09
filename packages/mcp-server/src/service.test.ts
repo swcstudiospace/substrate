@@ -3829,4 +3829,25 @@ describe("verifyGraph hour report", () => {
 		expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "anchored" });
 		expect(verdict.ok).toBe(true);
 	});
+
+	test("an event moved to another graph fails naming the event", async () => {
+		// The tip event now reads under a different graph_id: the chain over
+		// what remains is intact, and the hour still digests to its anchored
+		// root (the stored hash is found by event id), so only the retained
+		// ingest record with no row in this graph's read can catch it.
+		const world = sessionRows();
+		const moved = world.events[1]?.id ?? "evt_moved";
+		const substrate = substrateWith({
+			readEvents: async () => world.rows.slice(0, 1),
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(world.memo) as never });
+		expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "anchored" });
+		expect(verdict.missing).toEqual({ count: 1, ids: [moved] });
+		expect(verdict.reason).toContain(moved);
+		expect(verdict.ok).toBe(false);
+	});
 });

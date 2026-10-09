@@ -443,8 +443,9 @@ describe("runAnchorJob adopt and alarm", () => {
 		expect(failed(emitted)[0]?.payload).toMatchObject({ reason: "root-mismatch" });
 	});
 
-	test("an unconfirmed hint sends", async () => {
-		const memo = formatMemo({ periodStartMs: H10, rootHex: ROOT, count: 3 });
+	test("a hint for another hour never blocks the send", async () => {
+		const otherMemo = formatMemo({ periodStartMs: H10 + HOUR, rootHex: ROOT, count: 3 });
+		const sentMemo = formatMemo({ periodStartMs: H10, rootHex: ROOT, count: 3 });
 		const hintSig = "6".repeat(87);
 		const { deps: d, inserts, invocations } = deps({
 			rpc: {
@@ -452,7 +453,7 @@ describe("runAnchorJob adopt and alarm", () => {
 					signature === hintSig
 						? null
 						: {
-								memo,
+								memo: sentMemo,
 								payer: PUBKEY,
 								payerSigned: true,
 								err: null,
@@ -460,7 +461,7 @@ describe("runAnchorJob adopt and alarm", () => {
 								slot: 42,
 								blockTime: 1,
 							},
-				addressMemos: async () => [{ signature: hintSig, memo, err: null, slot: 1 }],
+				addressMemos: async () => [{ signature: hintSig, memo: otherMemo, err: null, slot: 1 }],
 				balance: async () => 1_000_000,
 				getGenesisHash: async () => DEVNET_GENESIS_HASH,
 			},
@@ -469,6 +470,29 @@ describe("runAnchorJob adopt and alarm", () => {
 		expect(result.anchored).toBe(1);
 		expect(invocations.length).toBeGreaterThan(0);
 		expect(inserts[0]?.tx_sig).toBeDefined();
+	});
+
+	test("a period-matching hint whose transaction cannot be read stops the run", async () => {
+		// The memo may already anchor this hour (a send followed by a lost
+		// row write): sending again would anchor it twice, so the run stops
+		// with rpc-unreadable instead.
+		const memo = formatMemo({ periodStartMs: H10, rootHex: ROOT, count: 3 });
+		const hintSig = "6".repeat(87);
+		const { deps: d, emitted, inserts, invocations } = deps({
+			rpc: {
+				transactionMemo: async () => null,
+				addressMemos: async () => [{ signature: hintSig, memo, err: null, slot: 1 }],
+				balance: async () => 1_000_000,
+				getGenesisHash: async () => DEVNET_GENESIS_HASH,
+			},
+		});
+		const result = await runAnchorJob(d);
+		expect(result.code).toBe(1);
+		expect(result.anchored).toBe(0);
+		expect(result.failed).toBe(1);
+		expect(invocations).toEqual([]);
+		expect(inserts).toEqual([]);
+		expect(failed(emitted)[0]?.payload).toMatchObject({ reason: "rpc-unreadable" });
 	});
 });
 
@@ -592,9 +616,14 @@ describe("runAnchorJob failures", () => {
 		expect(failed(emitted)[0]?.payload).toMatchObject({ reason: "store-failed" });
 	});
 
-	test("an adoption whose anchor note is not stored is reported", async () => {
+	test("an adoption whose anchor note is not stored stops the run", async () => {
+		// H10 adopts but its note is lost; H11 is closed and would send, and
+		// must never be touched after the store already failed one write.
+		const later = H10 + HOUR;
 		const memo = formatMemo({ periodStartMs: H10, rootHex: ROOT, count: 3 });
+		let lastSentMemo = "";
 		const { deps: d, emitted, inserts, invocations } = deps({
+			clock: () => later + HOUR + INGEST_LAG_MS + 60_000,
 			substrate: {
 				hourDigest: async (hour: number) => digest(hour),
 				emit: async (input: EventInput) => {
@@ -602,9 +631,16 @@ describe("runAnchorJob failures", () => {
 					return { stored: false, event: input } as unknown as EmitResult;
 				},
 			} as unknown as AnchorDeps["substrate"],
+			runner: async (argv: readonly string[]) => {
+				invocations.push([...argv]);
+				if (argv[1] === "pubkey") return { code: 0, stdout: `${PUBKEY}\n`, stderr: "" };
+				const flag = argv.indexOf("--with-memo");
+				lastSentMemo = flag >= 0 ? String(argv[flag + 1] ?? "") : "";
+				return { code: 0, stdout: `{"signature":"${SIG}"}`, stderr: "" };
+			},
 			rpc: {
 				transactionMemo: async () => ({
-					memo,
+					memo: lastSentMemo || memo,
 					payer: PUBKEY,
 					payerSigned: true,
 					err: null,
@@ -623,6 +659,7 @@ describe("runAnchorJob failures", () => {
 		expect(result.failed).toBe(1);
 		expect(invocations).toEqual([]);
 		expect(inserts).toHaveLength(1);
+		expect(inserts[0]?.period_start).toBe(new Date(H10).toISOString());
 		expect(failed(emitted)[0]?.payload).toMatchObject({ reason: "store-failed" });
 	});
 });

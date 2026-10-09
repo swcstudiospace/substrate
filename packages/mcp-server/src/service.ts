@@ -362,6 +362,13 @@ export interface VerifyVerdict {
 	hours: HourReport[];
 	uncovered: { count: number; ids: string[] };
 	legacy: { count: number; ids: string[] };
+	/**
+	 * Retained ingest events with no event row in this graph's read (D28-22):
+	 * deleted outright, or moved to another graph. Either way the event
+	 * escaped its chain check while its hash still anchors the hour, so any
+	 * entry here fails the verify naming the event.
+	 */
+	missing: { count: number; ids: string[] };
 }
 /** Options for {@link Substrate.verifyGraph}: evidence passes `anchors: false`. */
 export interface VerifyOptions {
@@ -2518,7 +2525,7 @@ export class Substrate {
 	async verifyGraph(graphId: string, opts: VerifyOptions = {}): Promise<VerifyVerdict> {
 		const withAnchors = opts.anchors !== false;
 		const now = opts.now ?? Date.now();
-		if (!this.greptime) return { ok: false, events: 0, reason: "greptime not configured", chain: { ok: false, reason: "greptime not configured" }, hours: [], uncovered: { count: 0, ids: [] }, legacy: { count: 0, ids: [] } };
+		if (!this.greptime) return { ok: false, events: 0, reason: "greptime not configured", chain: { ok: false, reason: "greptime not configured" }, hours: [], uncovered: { count: 0, ids: [] }, legacy: { count: 0, ids: [] }, missing: { count: 0, ids: [] } };
 		// Read by the graph id in its stored form, for the same reason `emit` looks
 		// the session up by its normalised one.
 		const stored = normalizeIdentifier(graphId) ?? graphId;
@@ -2553,6 +2560,7 @@ export class Substrate {
 			hours: [],
 			uncovered: { count: 0, ids: [] },
 			legacy: { count: 0, ids: [] },
+			missing: { count: 0, ids: [] },
 		};
 		if (!withAnchors) return emptyHours;
 		return this.hourReport(stored, rows, chain, now, opts.rpc);
@@ -2564,8 +2572,10 @@ export class Substrate {
 	 * Reads the graph's ingest records by stored graph id, maps each event to
 	 * its first record's hour, splits pre-coverage record-less events to legacy
 	 * (counted, never failing) and post-coverage ones to uncovered (fail, naming
-	 * ids), then digests each distinct hour whole and checks it once. Devnet
-	 * reads run sequentially — the concurrency cap is one — under the
+	 * ids), requires every retained ingest event to appear in the graph's rows
+	 * (D28-22: a retained record with no row is deleted or moved, and fails
+	 * naming ids), then digests each distinct hour whole and checks it once.
+	 * Devnet reads run sequentially — the concurrency cap is one — under the
 	 * whole-verify budget; an hour never reached in budget reads `unverified`.
 	 */
 	private async hourReport(
@@ -2611,6 +2621,12 @@ export class Substrate {
 			const hour = hourStart(record.ingested_at);
 			if (!byHour.has(hour)) byHour.set(hour, []);
 		}
+		// Retained ingest events with no event row in this graph's read
+		// (D28-22): deleted outright, or moved to another graph. Either way
+		// the event escaped the chain check above while its stored hash still
+		// anchors the hour below, so the verdict fails naming them outright.
+		const rowIds = new Set(rows.map((row) => String(row.id)));
+		const missing = ingest.map((record) => record.event_id).filter((id) => !rowIds.has(id)).sort();
 
 		const pubkey = this.config.solana.pubkey;
 		let rpc: Rpc | null = injectedRpc ?? null;
@@ -2654,14 +2670,16 @@ export class Substrate {
 		}
 
 		const failing = hours.find((hour) => hour.status !== "anchored" && hour.status !== "pending");
-		const ok = chain.ok && !failing && uncovered.length === 0;
+		const ok = chain.ok && !failing && uncovered.length === 0 && missing.length === 0;
 		const reason = !chain.ok
 			? chain.reason
 			: uncovered.length > 0
 				? `${uncovered.length} uncovered event${uncovered.length === 1 ? "" : "s"} with no ingest record: ${uncovered.join(", ")}`
-				: failing
-					? `hour ${failing.period_start} ${failing.status}${failing.reason ? `: ${failing.reason}` : ""}`
-					: undefined;
+				: missing.length > 0
+					? `${missing.length} event${missing.length === 1 ? "" : "s"} with an ingest record but no event row: ${missing.join(", ")}`
+					: failing
+						? `hour ${failing.period_start} ${failing.status}${failing.reason ? `: ${failing.reason}` : ""}`
+						: undefined;
 		return {
 			ok,
 			events: rows.length,
@@ -2671,6 +2689,7 @@ export class Substrate {
 			hours,
 			uncovered: { count: uncovered.length, ids: [...uncovered].sort() },
 			legacy: { count: legacy.length, ids: [...legacy].sort() },
+			missing: { count: missing.length, ids: [...missing] },
 		};
 	}
 

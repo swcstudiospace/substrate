@@ -267,7 +267,14 @@ async function checkAdopt(deps: AnchorDeps, periodStartMs: number, digest: HourD
 		} catch (cause) {
 			throw new SystemicError("rpc-unreadable", `getTransaction failed: ${redact(String(cause).slice(0, 200))}`);
 		}
-		if (confirmed === null || confirmed.memo === null) continue;
+		// A listing hint for this hour whose transaction cannot be read is
+		// ambiguous: the memo may already anchor this hour (a send followed
+		// by a lost row write). Skipping it would send a second transaction,
+		// so stop with rpc-unreadable and retry later instead.
+		if (confirmed === null) {
+			throw new SystemicError("rpc-unreadable", `anchor transaction ${hint.signature} for ${hourIso(periodStartMs)} could not be read`);
+		}
+		if (confirmed.memo === null) continue;
 		if (confirmed.payer !== env.pubkey || !confirmed.payerSigned || confirmed.err !== null) continue;
 		const memo = parseMemo(confirmed.memo);
 		if (memo === null || memo.periodStartMs !== periodStartMs) continue;
@@ -457,15 +464,17 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 					return result;
 				}
 			}
-			const note = await emitWritten(substrate, digest, verdict.signature, true).catch(() => null);
-			if (!note || note.stored !== true) {
-				await failHour(periodIso, "store-failed");
-				process.stderr.write(`[anchor] ${periodIso} adopted but the anchor note was not stored\n`);
-			} else {
-				result.adopted += 1;
-				process.stdout.write(`[anchor] ${periodIso} adopted ${verdict.signature}\n`);
-			}
-			continue;
+		const note = await emitWritten(substrate, digest, verdict.signature, true).catch(() => null);
+		if (!note || note.stored !== true) {
+			// The store already failed one write: a later hour must not send
+			// a new transaction after that. Report and stop like the send path.
+			await failHour(periodIso, "store-failed");
+			process.stderr.write(`[anchor] ${periodIso} adopted but the anchor note was not stored\n`);
+			return result;
+		}
+		result.adopted += 1;
+		process.stdout.write(`[anchor] ${periodIso} adopted ${verdict.signature}\n`);
+		continue;
 		}
 
 		// An anchored hour whose memo fell out of the listing window is left
