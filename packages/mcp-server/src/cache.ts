@@ -245,6 +245,8 @@ export class ReadThroughCache {
 		load: () => Promise<T>;
 		/** When the loaded value stops being true. Null uses the class TTL. */
 		refreshAt?: (value: T) => number | null;
+		/** False skips the write. The caller still receives `load`'s value. */
+		store?: (value: T) => boolean;
 	}): Promise<T> {
 		if (!this.enabled || !this.redis) {
 			this.count("bypass");
@@ -297,6 +299,9 @@ export class ReadThroughCache {
 
 		if (!malformed) this.count("miss");
 		const value = await request.load();
+		// An incomplete source answer (a brief built while a read failed) must
+		// not sit in the cache until the class TTL. The caller still gets it.
+		if (request.store?.(value) === false) return value;
 		let encoded: string;
 		try {
 			encoded = JSON.stringify({ v: value });
@@ -311,9 +316,9 @@ export class ReadThroughCache {
 			await this.attempt(() => redis.set(key, encoded, ttl));
 			this.noteConnected();
 		} catch (cause) {
-			// The caller already has the source value. Count the error; do not
-			// retry the write.
-			this.fail(cause, false);
+			// The caller already has the source value, and nothing was saved.
+			// That is a bypass: the next read has to take the source path too.
+			this.fail(cause, true);
 		}
 		const roundTrip = parseEnvelope<T>(encoded, request.klass);
 		return roundTrip.ok ? roundTrip.value : value;
@@ -360,7 +365,8 @@ export class ReadThroughCache {
 	}
 
 	/**
-	 * Command failed. `bypass` is set when the read did not use the cache at all.
+	 * Command failed. `bypass` is set when the caller was not served from a
+	 * stored entry: the read missed the cache entirely, or the save was rejected.
 	 * The line is redacted and emitted at most once a minute.
 	 */
 	private fail(cause: unknown, bypass: boolean): void {

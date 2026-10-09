@@ -643,6 +643,7 @@ export class Substrate {
 		let ok = false;
 		try {
 			const noted: Array<number | null> = [];
+			let complete = true;
 			const brief = await this.cache.getOrLoad({
 				klass: "brief",
 				surface: request.surface,
@@ -658,10 +659,18 @@ export class Substrate {
 					? [MEMORY_GENERATION_KEY, GRAPHS_GENERATION_KEY, graphGenerationKey(request.graph_id)]
 					: [MEMORY_GENERATION_KEY, GRAPHS_GENERATION_KEY],
 				refreshAt: () => noted.at(-1) ?? null,
+				store: () => complete,
 				load: () =>
-					composeBrief(request, { index: this.index, greptime: this.greptime }, (at) => {
-						noted.push(at);
-					}),
+					composeBrief(
+						request,
+						{ index: this.index, greptime: this.greptime },
+						(at) => {
+							noted.push(at);
+						},
+						() => {
+							complete = false;
+						},
+					),
 			});
 			ok = true;
 			return brief;
@@ -996,9 +1005,15 @@ export class Substrate {
 		if (!this.index) throw new Error("graph_register requires SUBSTRATE_PG_URL");
 		// Re-registering a graph whose nodes are held echoes them back, so this reply
 		// is a reader's view as much as `graph_get` is.
-		const graph = withoutLeaseIds(await this.index.registerGraph(plan));
-		await this.bumpGraph(plan.graph_id);
-		return graph;
+		//
+		// The index commits graph and node rows before its final read-back. A throw
+		// from that read, or from any later statement, can leave Postgres ahead of
+		// the cache. Refresh either way; a throw still reaches the caller.
+		try {
+			return withoutLeaseIds(await this.index.registerGraph(plan));
+		} finally {
+			await this.bumpGraph(plan.graph_id);
+		}
 	}
 
 	/**

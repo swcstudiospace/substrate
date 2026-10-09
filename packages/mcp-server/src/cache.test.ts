@@ -30,6 +30,8 @@ class FakeRedis implements CacheRedis {
 	readonly values = new Map<string, string>();
 	readonly ttls: number[] = [];
 	fail = false;
+	/** GET succeeds and SET rejects, so a save failure is distinct from a dead server. */
+	failSet = false;
 	hang = false;
 	failMessage = "connect ECONNREFUSED redis://default:s3cret@db.internal:6379";
 	sets = 0;
@@ -44,7 +46,7 @@ class FakeRedis implements CacheRedis {
 	async set(key: string, value: string, ttlSeconds: number): Promise<void> {
 		this.sets += 1;
 		if (this.hang) await new Promise<void>((resolve) => this.waiting.push(resolve));
-		if (this.fail) throw new Error(this.failMessage);
+		if (this.fail || this.failSet) throw new Error(this.failMessage);
 		this.values.set(key, value);
 		this.ttls.push(ttlSeconds);
 	}
@@ -121,6 +123,32 @@ describe("ReadThroughCache", () => {
 		await cache.bump(MEMORY_GENERATION_KEY);
 		expect(await cache.getOrLoad({ ...read, load })).toEqual(["after"]);
 		expect(cache.health()).toMatchObject({ hits: 1, misses: 2 });
+	});
+
+	test("a rejected SET returns the source value and counts a bypass", async () => {
+		const redis = new FakeRedis();
+		redis.failSet = true;
+		const cache = cacheOf(redis);
+		expect(await cache.getOrLoad({ ...read, load: async () => [{ text: "from source" }] })).toEqual([
+			{ text: "from source" },
+		]);
+		expect(redis.values.size).toBe(0);
+		expect(cache.health()).toMatchObject({ hits: 0, misses: 1, bypasses: 1, errors: 1 });
+	});
+
+	test("store false returns the value and does not write it", async () => {
+		const redis = new FakeRedis();
+		const cache = cacheOf(redis);
+		let loads = 0;
+		const load = async () => {
+			loads += 1;
+			return [{ text: `load ${loads}` }];
+		};
+		expect(await cache.getOrLoad({ ...read, load, store: () => false })).toEqual([{ text: "load 1" }]);
+		expect(await cache.getOrLoad({ ...read, load, store: () => false })).toEqual([{ text: "load 2" }]);
+		expect(loads).toBe(2);
+		expect(redis.sets).toBe(0);
+		expect(cache.health()).toMatchObject({ hits: 0, misses: 2, bypasses: 0, errors: 0 });
 	});
 
 	test("an unreachable server returns the source value, counts a bypass, and redacts the line", async () => {
@@ -365,6 +393,51 @@ describe("the same answer with the cache off, on and broken", () => {
 		expect(a).toContain("keep the prefix");
 	});
 
+	test("a brief built while a source read fails is not cached", async () => {
+		let down = true;
+		let loads = 0;
+		const index = {
+			getGraph: async () => {
+				loads += 1;
+				if (down) throw new Error("postgres is down");
+				return {
+					graph_id: "ut-1",
+					notion_task_page: null,
+					repo: "acme/app",
+					branch: null,
+					surface: "cursor",
+					status: "active",
+					pr_url: null,
+					created: null,
+					updated: null,
+					nodes: [],
+					steps: [],
+					edges: [],
+				};
+			},
+			openGraphs: async () => [],
+			memoryForBrief: async () => [],
+		};
+		const redis = new FakeRedis();
+		const substrate = new Substrate(loadConfig({}), {
+			index: index as never,
+			greptime: null,
+			cache: cacheOf(redis),
+		});
+		const request = { surface: "cursor" as const, repo: "acme/app", graph_id: "ut-1" };
+		const thin = await substrate.brief(request);
+		expect(thin).toContain("not in the index yet");
+		expect(redis.sets).toBe(0);
+		expect(loads).toBe(1);
+
+		down = false;
+		const recovered = await substrate.brief(request);
+		expect(recovered).toContain("active");
+		expect(recovered).not.toContain("not in the index yet");
+		expect(loads).toBe(2);
+		expect(redis.sets).toBe(1);
+	});
+
 	test("graph_get matches", async () => {
 		const graph = {
 			graph_id: "ut-mv10s1se-50878383",
@@ -458,6 +531,41 @@ describe("the same answer with the cache off, on and broken", () => {
 		expect(redis.values.get(graphGenerationKey("ut-other"))).toBe("1");
 		await substrate.brief(request);
 		expect(loads).toBe(2);
+	});
+
+	test("a register that throws after it may have committed still refreshes the graph", async () => {
+		let status = "old";
+		const index = {
+			getGraph: async () => ({
+				graph_id: "ut-1",
+				notion_task_page: null,
+				repo: null,
+				branch: null,
+				surface: "cursor",
+				status,
+				pr_url: null,
+				created: null,
+				updated: null,
+				nodes: [],
+				steps: [],
+				edges: [],
+			}),
+			registerGraph: async () => {
+				status = "new";
+				throw new Error("read-back failed");
+			},
+		};
+		const redis = new FakeRedis();
+		const substrate = new Substrate(loadConfig({}), {
+			index: index as never,
+			greptime: null,
+			cache: cacheOf(redis),
+		});
+		expect((await substrate.getGraph("ut-1", "cursor"))?.status).toBe("old");
+		await expect(substrate.registerGraph({ graph_id: "ut-1" } as never)).rejects.toThrow("read-back failed");
+		expect(redis.values.get(graphGenerationKey("ut-1"))).toBe("1");
+		expect(redis.values.get(GRAPHS_GENERATION_KEY)).toBe("1");
+		expect((await substrate.getGraph("ut-1", "cursor"))?.status).toBe("new");
 	});
 
 	test("reaping several graphs bumps the shared generation once", async () => {
