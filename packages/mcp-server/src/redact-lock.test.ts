@@ -272,10 +272,92 @@ interface Candidate {
 }
 
 /**
+ * Tokens after which `/` opens a regex literal rather than division.
+ *
+ * Whitespace is not enough: `a / b` is division, and treating it as a regex
+ * would swallow a `//` comment later on the line. `}` and `)` are excluded for
+ * the same reason (`{ a: 1 } / 2`). A newline is a fresh statement, so a `/`
+ * there can open a literal.
+ */
+const REGEX_OPENER = new Set(["=", "(", ",", ":", ";", "!", "&", "|", "?", "{", "[", "~", "^", "<", ">", "*", "%"]);
+const REGEX_KEYWORD = new Set(["return", "throw", "case", "else", "typeof", "void", "delete", "yield", "await", "do", "of", "in", "instanceof"]);
+const REGEX_FLAG = new Set(["d", "g", "i", "m", "s", "u", "y", "v"]);
+
+function previousNonSpace(chars: string[], from: number): number {
+	let j = from;
+	while (j >= 0 && (chars[j] === " " || chars[j] === "\t" || chars[j] === "\r")) j--;
+	return j;
+}
+
+/** Whether `/` at `slash` can open a regex, from the token before it. */
+function regexOpener(chars: string[], slash: number): boolean {
+	const j = previousNonSpace(chars, slash - 1);
+	if (j < 0 || chars[j] === "\n") return true;
+	const c = chars[j] ?? "";
+	if (c === ">" && chars[j - 1] === "=") return true;
+	if (c === "+" || c === "-") {
+		if (chars[j - 1] !== c) return true;
+		const k = previousNonSpace(chars, j - 2);
+		const prev = k >= 0 ? chars[k] : "";
+		// Postfix `++`/`--` ends an expression, so the slash is division.
+		return !(prev !== undefined && (/[A-Za-z0-9_$)\]]/.test(prev) || prev === "}"));
+	}
+	if (REGEX_OPENER.has(c)) return true;
+	if (/[A-Za-z0-9_$]/.test(c)) {
+		let k = j;
+		while (k >= 0 && /[A-Za-z0-9_$]/.test(chars[k] ?? "")) k--;
+		return REGEX_KEYWORD.has(chars.slice(k + 1, j + 1).join(""));
+	}
+	return false;
+}
+
+/**
+ * Exclusive end of a regex literal starting at `slash`, or -1.
+ *
+ * Character classes and escapes are part of the literal, so `/*` inside
+ * `/[/*]/` is not a comment. An unclosed slash (division, or a `//` comment)
+ * returns -1 and the caller keeps scanning.
+ */
+function regexLiteralEnd(chars: string[], slash: number): number {
+	const next = chars[slash + 1];
+	if (next === undefined || next === "/" || next === "*" || next === "\n") return -1;
+	if (!regexOpener(chars, slash)) return -1;
+	let j = slash + 1;
+	let inClass = false;
+	while (j < chars.length) {
+		const c = chars[j] ?? "";
+		if (c === "\n") return -1;
+		if (c === "\\") {
+			j += 2;
+			continue;
+		}
+		if (inClass) {
+			if (c === "]") inClass = false;
+			j++;
+			continue;
+		}
+		if (c === "[") {
+			inClass = true;
+			j++;
+			continue;
+		}
+		if (c === "/") {
+			j++;
+			while (j < chars.length && REGEX_FLAG.has(chars[j] ?? "")) j++;
+			return j;
+		}
+		j++;
+	}
+	return -1;
+}
+
+/**
  * Blank line and block comments so a regex example written in one is not a detector.
  *
- * Strings keep their text: a `//` inside quotes is not a comment. Length and
- * newlines stay, so a match index is still a position in the original file.
+ * Strings keep their text: a `//` inside quotes is not a comment. Regex literals
+ * are skipped first, character class and all, so `/*` inside `/[/*]/` does not
+ * blank the rest of the file. Length and newlines stay, so a match index is
+ * still a position in the original file.
  */
 function maskComments(body: string): string {
 	const chars = body.split("");
@@ -285,6 +367,13 @@ function maskComments(body: string): string {
 		const c = chars[i] ?? "";
 		const n = chars[i + 1];
 		if (state === "code") {
+			if (c === "/") {
+				const end = regexLiteralEnd(chars, i);
+				if (end > i) {
+					i = end;
+					continue;
+				}
+			}
 			if (c === "/" && n === "/") {
 				chars[i] = " ";
 				chars[i + 1] = " ";
@@ -736,5 +825,19 @@ describe("detector self-tests", () => {
 		expect(rule4Offenders("shape.ts", `const found = ${shape}; // Example: ${shape}`)).toEqual(["shape.ts:1 rule-4-detector"]);
 		expect(rule4Offenders("shape.ts", `// Example: ${shape}\nconst found = ${shape};`)).toEqual(["shape.ts:2 rule-4-detector"]);
 		expect(rule4Offenders("shape.ts", `const url = "https://example.test", found = ${shape};`)).toEqual(["shape.ts:1 rule-4-detector"]);
+	});
+
+	test("a regex character class does not hide a later detector", () => {
+		const shape = `/${GH}[A-Za-z0-9]{36}/g`;
+		// `/*` inside the class is not a block comment, so the next line stays visible.
+		expect(rule4Offenders("shape.ts", `const punctuation = /[/*]/g;\nconst found = ${shape};`)).toEqual(["shape.ts:2 rule-4-detector"]);
+		// Escapes and a class that itself holds the comment closer.
+		expect(rule4Offenders("shape.ts", `const punctuation = /\\/\\*[/*]\\//g;\nconst found = ${shape};`)).toEqual([
+			"shape.ts:2 rule-4-detector",
+		]);
+		// A comment after the class, and a comment after division, are still comments.
+		expect(rule4Offenders("shape.ts", `const punctuation = /[/*]/g; // ${shape}\nconst ok = 1;`)).toEqual([]);
+		expect(rule4Offenders("shape.ts", `const ratio = a / b; // ${shape}`)).toEqual([]);
+		expect(rule4Offenders("shape.ts", `const ratio = done / total > 0.5 ? 1 : 0; // ${shape}`)).toEqual([]);
 	});
 });
