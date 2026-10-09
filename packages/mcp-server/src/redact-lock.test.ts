@@ -105,6 +105,15 @@ const BINDING = /\b(?:redactValue|redactKnown|redactSkillContent|scanSkillFiles|
 const IMPORT =
 	/^[ \t]*(?:import|export)\s+(?:type\s+)?((?:[\w$*\s,]|\{[^}]*\})+?)\s*\bfrom\s*["']([^"']+)["']/gm;
 const DYNAMIC = /\b(?:import|require)\s*\(\s*["']([^"']+)["']\s*\)/g;
+/**
+ * A dynamic import or `require` whose result is bound: `const { redact } = require("./other")`,
+ * `const x = await import("./other")`. The static import checks the names it brings in; so does this.
+ */
+const DYNAMIC_BOUND =
+	/\b(?:const|let|var)\s+(\{[^}]*\}|[\w$]+)\s*=\s*(?:await\s+)?(?:import|require)\s*\(\s*["']([^"']+)["']\s*\)/g;
+/** `import("./other").then(({ redact }) => …)`: the names arrive as the callback's parameter. */
+const DYNAMIC_THEN =
+	/\b(?:import|require)\s*\(\s*["']([^"']+)["']\s*\)\s*\.then\s*\(\s*(?:async\s*)?\(?\s*(\{[^}]*\}|[\w$]+)/g;
 const PY_FROM_IMPORT = /^\s*from\s+([\w.]+)\s+import\s+(.+)$/gm;
 const PY_IMPORT = /^\s*import\s+[\w.]*redact\b/gm;
 
@@ -130,6 +139,14 @@ function rule1Offenders(file: string, body: string): Offender[] {
 		const spec = match[1] ?? "";
 		if (/redact/i.test(specBasename(spec)) && !resolvesToShared(file, spec)) {
 			offenders.push(`${file}:${lineAt(body, match.index ?? 0)} rule-1-import`);
+		}
+	}
+	for (const pattern of [DYNAMIC_BOUND, DYNAMIC_THEN]) {
+		for (const match of body.matchAll(pattern)) {
+			const [spec, clause] = pattern === DYNAMIC_BOUND ? [match[2] ?? "", match[1] ?? ""] : [match[1] ?? "", match[2] ?? ""];
+			if ((BINDING.test(clause) || /redact/i.test(specBasename(spec))) && !resolvesToShared(file, spec)) {
+				offenders.push(`${file}:${lineAt(body, match.index ?? 0)} rule-1-import`);
+			}
 		}
 	}
 	// A Python import can never resolve to the TypeScript module, so any match offends.
@@ -227,7 +244,7 @@ const DETECTOR: Record<RedactionRuleName, RegExp | null> = {
 	"url-password": null,
 	"linear-api": /lin_api_/,
 	"linear-oauth": /lin_oauth_/,
-	notion: /ntn_/,
+	notion: /ntn_|secret_/,
 	github: /gh\[pousr\]_|\bgh[pousr]_/,
 	"github-pat": /github_pat_/,
 	xai: /xai-/,
@@ -245,29 +262,37 @@ const DETECTOR: Record<RedactionRuleName, RegExp | null> = {
 	"keypair-array": null,
 };
 
-function patternCandidates(file: string, body: string): string[] {
-	const candidates: string[] = [];
-	for (const match of body.matchAll(REGEX_LITERAL)) candidates.push(match[1] ?? "");
-	for (const match of body.matchAll(REGEXP_NEW)) candidates.push(match[1] ?? match[2] ?? match[3] ?? "");
-	for (const match of body.matchAll(PY_PATTERN_ARG)) candidates.push(match[1] ?? match[2] ?? "");
+/** A pattern's text and where in the file it starts, so a hit can be reported on the right line. */
+interface Candidate {
+	text: string;
+	index: number;
+}
+
+/**
+ * Pulled from the whole file, not line by line: a formatted `new RegExp(` call puts its pattern on
+ * the next line, and a split file would lose the connection between the call and its argument.
+ */
+function patternCandidates(file: string, body: string): Candidate[] {
+	const candidates: Candidate[] = [];
+	// The opening slash, not the character before it, which can be the newline of the previous line.
+	for (const match of body.matchAll(REGEX_LITERAL)) {
+		candidates.push({ text: match[1] ?? "", index: (match.index ?? 0) + match[0].indexOf("/") });
+	}
+	for (const match of body.matchAll(REGEXP_NEW)) candidates.push({ text: match[1] ?? match[2] ?? match[3] ?? "", index: match.index ?? 0 });
+	for (const match of body.matchAll(PY_PATTERN_ARG)) candidates.push({ text: match[1] ?? match[2] ?? "", index: match.index ?? 0 });
 	if (file.endsWith(".sh") || !/\.[A-Za-z0-9]+$/.test(file)) {
-		for (const match of body.matchAll(SHELL_TOOL_LINE)) candidates.push(match[0] ?? "");
+		for (const match of body.matchAll(SHELL_TOOL_LINE)) candidates.push({ text: match[0] ?? "", index: match.index ?? 0 });
 	}
 	return candidates;
 }
 
 function rule4Offenders(file: string, body: string): Offender[] {
-	const offenders: Offender[] = [];
 	const detectors = Object.entries(DETECTOR).filter((entry): entry is [string, RegExp] => entry[1] !== null);
-	body
-		.split("\n")
-		.forEach((line, index) => {
-			const hit = patternCandidates(file, line).some((candidate) =>
-				detectors.some(([, detector]) => detector.test(candidate)),
-			);
-			if (hit) offenders.push(`${file}:${index + 1} rule-4-detector`);
-		});
-	return offenders;
+	const lines = new Set<number>();
+	for (const { text, index } of patternCandidates(file, body)) {
+		if (detectors.some(([, detector]) => detector.test(text))) lines.add(lineAt(body, index));
+	}
+	return [...lines].sort((a, b) => a - b).map((line) => `${file}:${line} rule-4-detector`);
 }
 
 // ── Rule 5: injected seams stay injected ──────────────────────────────────────
@@ -289,6 +314,16 @@ const INJECTED_SEAMS: Record<string, string> = {
 };
 
 const OBSERVE = join("packages", "mcp-server", "src", "observe.ts");
+
+/**
+ * Whether a constructor's argument text hands over the shared `redact` itself: the shorthand
+ * `{ …, redact, … }` or `redact: redact`, with nothing after the value but the next property or
+ * the end of the object. `redact: redactLocal`, `redact: redact ?? String` and `redact: redact.bind(x)`
+ * all name something else, and each would leave text unredacted behind a green lock.
+ */
+function passesSharedRedact(args: string): boolean {
+	return /[{,]\s*redact\s*(?=[,}])/.test(args) || /[{,]\s*redact\s*:\s*redact\s*(?=[,}])/.test(args);
+}
 
 function callArgs(body: string, callIndex: number): string | null {
 	const open = body.indexOf("(", callIndex);
@@ -390,7 +425,7 @@ describe("redaction lock", () => {
 		const observe = read(OBSERVE);
 		for (const match of observe.matchAll(/new\s+(?:AuditLog|OtlpExporter)\s*\(/g)) {
 			const args = callArgs(observe, match.index ?? 0) ?? "";
-			expect({ call: match[0]?.trim(), shared: /[{,]\s*redact\s*[,}]|redact\s*:\s*redact/.test(args) }).toEqual({
+			expect({ call: match[0]?.trim(), shared: passesSharedRedact(args) }).toEqual({
 				call: match[0]?.trim(),
 				shared: true,
 			});
@@ -428,6 +463,11 @@ describe("detector self-tests", () => {
 			file: "packages/mcp-server/src/dup.ts",
 			body: 'import {\n\ttype SkillFileHit,\n\tscanSkillFiles,\n} from "./copy.ts";',
 		},
+		// A dynamic import or require binds names too, whatever the module is called.
+		{ file: "packages/cli/src/tool.ts", body: 'const { redact } = require("./other-cleaner");' },
+		{ file: "packages/cli/src/tool.ts", body: 'const { scanSkillFiles: scan } = await import("./other-cleaner.ts");' },
+		{ file: "packages/cli/src/tool.ts", body: 'const cleaner = require("./redact-lite");' },
+		{ file: "packages/cli/src/tool.ts", body: 'import("./other-cleaner").then(({ redactValue }) => redactValue(x));' },
 		// A Python import can never resolve to the TypeScript module.
 		{ file: "packages/miner/mine.py", body: "from substrate.redact import redact" },
 		{ file: "packages/miner/mine.py", body: "import substrate.redact" },
@@ -454,6 +494,10 @@ describe("detector self-tests", () => {
 			file: "packages/mcp-server/src/service.ts",
 			body: 'import type { RedactionRuleName } from "./redact.ts";',
 		},
+		// A dynamic import of the shared module resolves, and unrelated bindings are fine.
+		{ file: "packages/mcp-server/src/skills/propose.ts", body: 'const { redact } = await import("../redact.ts");' },
+		{ file: "packages/cli/src/tool.ts", body: 'const { join } = require("node:path");' },
+		{ file: "packages/cli/src/tool.ts", body: 'const lessons = await import("./lessons.ts");' },
 		// A code-generation template holding an import inside a string literal
 		// starts with a quote, so the anchored match never sees it.
 		{
@@ -502,6 +546,8 @@ describe("detector self-tests", () => {
 		{ rule: "linear-api", file: "shape.ts", body: `if (/${LIN_API}[A-Za-z0-9]{20,}/.test(id)) {` },
 		{ rule: "linear-oauth", file: "shape.ts", body: `if (/${LIN_OAUTH}[A-Za-z0-9]{20,}/.test(id)) {` },
 		{ rule: "notion", file: "shape.ts", body: `if (/${"nt" + "n_"}[A-Za-z0-9]{30,}/.test(id)) {` },
+		// The older Notion shape the shared rule also names.
+		{ rule: "notion", file: "shape.ts", body: `const legacyShape = /\\b${"sec" + "ret_"}[A-Za-z0-9]{30,}/g;` },
 		{ rule: "github", file: "shape.ts", body: `const found = /${GH}[A-Za-z0-9]{36}/g.test(value);` },
 		{ rule: "github-pat", file: "shape.ts", body: `if (/${GITHUB_PAT}[A-Za-z0-9_]{20,}/.test(id)) {` },
 		{ rule: "xai", file: "shape.ts", body: `if (/${"xa" + "i-"}[A-Za-z0-9]{20,}/.test(id)) {` },
@@ -565,8 +611,45 @@ describe("detector self-tests", () => {
 			const detector = DETECTOR[rule];
 			expect(detector, rule).not.toBeNull();
 			expect({ rule, caught: detector!.test(body) }).toEqual({ rule, caught: true });
-			expect({ rule, extracted: patternCandidates(file, body).some((candidate) => detector!.test(candidate)) }).toEqual({ rule, extracted: true });
+			expect({ rule, extracted: patternCandidates(file, body).some((candidate) => detector!.test(candidate.text)) }).toEqual({ rule, extracted: true });
 			expect({ rule, pipeline: rule4Offenders(file, body).length > 0 }).toEqual({ rule, pipeline: true });
+		}
+	});
+
+	test("rule 4 reads a pattern the formatter moved onto the next line, and reports the call's line", () => {
+		const slack = "xox" + "b-";
+		const wrapped = `const ok = 1;\nconst found = new RegExp(\n\t"${slack}[0-9A-Za-z-]{10,}",\n\t"g",\n);\n`;
+		expect(rule4Offenders("shape.ts", wrapped)).toEqual(["shape.ts:2 rule-4-detector"]);
+		// Two hits on one line are one offender; a hit after a formatted call keeps its own line.
+		const two = `const a = /${slack}[0-9]+/, b = /${slack}[0-9]+/;\nconst c = new RegExp(\n"${slack}[0-9]+"\n);\n`;
+		expect(rule4Offenders("shape.ts", two)).toEqual(["shape.ts:1 rule-4-detector", "shape.ts:2 rule-4-detector"]);
+		// A pattern with no credential shape, however it is formatted, is not an offender.
+		expect(rule4Offenders("shape.ts", 'const ok = new RegExp(\n\t"^[a-z]+$",\n\t"g",\n);')).toEqual([]);
+		// A regex literal is reported on its own line, not the previous one.
+		expect(rule4Offenders("shape.ts", `const x = 1;\n/${slack}[0-9]+/.test(y);\n`)).toEqual(["shape.ts:2 rule-4-detector"]);
+	});
+
+	test("the Notion detector covers both prefixes, each planted on its own", () => {
+		for (const prefix of ["nt" + "n_", "sec" + "ret_"]) {
+			const body = `const shape = /\\b${prefix}[A-Za-z0-9]{30,}/g;`;
+			expect({ prefix, offenders: rule4Offenders("shape.ts", body) }).toEqual({ prefix, offenders: ["shape.ts:1 rule-4-detector"] });
+		}
+	});
+
+	test("a constructor passes the shared redact only if it hands over redact itself", () => {
+		for (const args of ["{ path, redact }", "{ redact, path }", "{ path, redact: redact }", "{\n\tredact: redact,\n\tpath,\n}", "{ redact: redact }"]) {
+			expect({ args, shared: passesSharedRedact(args) }).toEqual({ args, shared: true });
+		}
+		for (const args of [
+			"{ path, redact: redactLocal }",
+			"{ path, redact: redact ?? String }",
+			"{ path, redact: redact.bind(null) }",
+			"{ path, redact: String }",
+			"{ path, redactor: redact }",
+			"{ path, redactLocal }",
+			"{ path }",
+		]) {
+			expect({ args, shared: passesSharedRedact(args) }).toEqual({ args, shared: false });
 		}
 	});
 
