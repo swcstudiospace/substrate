@@ -60,6 +60,7 @@ These apply to every source:
 | `cursor.stop` | 19 | `session.end` | `cursor` | — | — | — | no |
 | `skills.propose` | 21 | `note` | `caller` | `skill.propose` | — | `swcstudiospace/agent-skills` | no |
 | `skills.propose.refused` | 21 | `warning` | `caller` | `skill.propose` | — | — | no |
+| `skills.propose.failed` | 21 | `warning` | `caller` | `skill.propose` | — | — | no |
 | `skills.sync.refused` | 22 | `warning` | `substrate` | `skills.sync` | `skills-sync` | — | yes |
 | `docs.search` | 25 | `note` | `caller` | `docs.search` | — | — | no |
 | `docs.search.failed` | 25 | `warning` | `caller` | `docs.search` | — | — | no |
