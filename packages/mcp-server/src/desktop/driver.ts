@@ -18,15 +18,16 @@
  * - An event that is not stored stops the run (D30-12): `stored: false` or a throwing emit
  *   ends the run with no image blocks.
  * - Exclusion is host-wide (D30-21): the module-scope `active` flag stops a second
- *   call in this process, and a lock file in the runtime dir stops a second server
- *   process — separate rehearsal instances each start their own server, but all
- *   drive the same display. A second run while one holds the lock is refused at
- *   once, naming the active run (D30-08).
+ *   call in this process, and a loopback bind stops a second server process —
+ *   separate rehearsal instances each start their own server, but all drive the
+ *   same display. The bind is atomic and OS-held, so there is no claim to race
+ *   or go stale. A second run while one holds the mutex is refused at once,
+ *   naming the active run (D30-08).
  */
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createConnection, createServer, type Socket } from "node:net";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { redact } from "../redact.ts";
@@ -134,88 +135,85 @@ export class DesktopBusy extends Error {
 /** Module scope: createMcpServer is rebuilt per request, so per-driver state would not exclude. */
 let active: string | null = null;
 
-/** Lock-file name for the host-wide desktop_run exclusion (D30-21). */
-const DESKTOP_LOCK_NAME = "substrate-desktop-run.lock";
+/**
+ * Well-known loopback mutex for the host-wide desktop_run exclusion (D30-21):
+ * every server process on one host drives the same display, so the in-process
+ * `active` flag alone cannot exclude. A file claim cannot do it either — the
+ * claim is readable before it is written and deletable after, so two servers
+ * can both conclude they hold it. A bind is atomic and the operating system
+ * owns it: exactly one process holds the port, and a crashed holder releases
+ * it. There is no claim file to read, delete, or go stale.
+ */
+export const DESKTOP_LOCK_PORT = 45931;
+/** How long a refused caller waits for the holder to name its run. */
+const LOCK_IDENTITY_TIMEOUT_MS = 2000;
+
+/** Ask the lock holder for its run id; null when it cannot answer. */
+function readDesktopIdentity(port: number): Promise<string | null> {
+	const { promise, resolve } = Promise.withResolvers<string | null>();
+	let text = "";
+	const socket = createConnection(port, "127.0.0.1");
+	const timer = setTimeout(() => {
+		socket.destroy();
+		resolve(null);
+	}, LOCK_IDENTITY_TIMEOUT_MS);
+	socket.setEncoding("utf8");
+	socket.on("data", (chunk: string) => {
+		text += chunk;
+	});
+	socket.on("end", () => {
+		clearTimeout(timer);
+		const runId = text.trim().split(/\s+/)[1];
+		resolve(runId !== undefined && RUN_ID.test(runId) ? runId : null);
+	});
+	socket.on("error", () => {
+		clearTimeout(timer);
+		resolve(null);
+	});
+	return promise;
+}
+
+/** The bind outcome: held with its release, held elsewhere, or unbindable. */
+type DesktopPortClaim = { release: () => void } | { other: string | null } | { unavailable: true };
 
 /**
- * Host-wide lock path: the runtime dir, never a rehearsal's `desktopDir`.
- * Drivers with different shot dirs still drive the same display, so keying
- * the lock by dir would let two servers overlap.
+ * Take the host mutex for `runId`. The holder serves its run id to refused
+ * callers over the same port. Anything that keeps the port unbindable refuses
+ * the run fail-closed.
  */
-export function desktopLockPath(): string {
-	const runtime = process.env.XDG_RUNTIME_DIR;
-	const base = runtime !== undefined && runtime !== "" ? runtime : tmpdir();
-	return join(base, DESKTOP_LOCK_NAME);
-}
-
-/** A parsed lock claim: the holder's pid plus the run it guards. */
-interface DesktopLockClaim {
-	pid: number;
-	runId: string;
-}
-
-/** Read the current claim; null when no claim is on file or it does not parse. */
-function readDesktopLock(lockPath: string): DesktopLockClaim | null {
-	let text: string;
-	try {
-		text = readFileSync(lockPath, "utf8");
-	} catch {
-		return null;
-	}
-	const [pidText, runId] = text.trim().split(/\s+/, 2);
-	const pid = Number(pidText);
-	if (pidText === undefined || pidText === "" || !Number.isSafeInteger(pid) || pid <= 0 || runId === undefined || runId === "") return null;
-	return { pid, runId };
-}
-
-/** True when `pid` names a live process; EPERM means alive but unkillable. */
-function isLivePid(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		return (error as NodeJS.ErrnoException)?.code === "EPERM";
-	}
-}
-
-/**
- * Claim the host lock for `runId`. Returns the competing run id when a live
- * holder owns it, null once this process holds it. A claim from a dead
- * process — or one that does not parse — is unlinked and retried, so a
- * crashed server cannot wedge the display; anything else that keeps the
- * file claimed refuses the run fail-closed.
- */
-function claimDesktopLock(lockPath: string, runId: string): string | null {
-	for (let attempt = 0; attempt < 3; attempt++) {
+function claimDesktopPort(port: number, runId: string): Promise<DesktopPortClaim> {
+	const { promise, resolve } = Promise.withResolvers<DesktopPortClaim>();
+	const sockets = new Set<Socket>();
+	const server = createServer((socket) => {
+		sockets.add(socket);
+		socket.once("close", () => sockets.delete(socket));
+		socket.end(`${process.pid} ${runId}`, "utf8");
+	});
+	server.on("error", (error) => {
+		// A bound server only sees accept-time failures; the bind outcome
+		// is decided below, once, while `listening` is still false.
+		if (server.listening) return;
+		const code = (error as NodeJS.ErrnoException)?.code;
 		try {
-			const fd = openSync(lockPath, "wx", 0o600);
-			try {
-				writeSync(fd, `${process.pid} ${runId}`);
-			} finally {
-				closeSync(fd);
-			}
-			return null;
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") throw new Error("desktop_run lock unavailable; nothing was run");
-		}
-		const other = readDesktopLock(lockPath);
-		if (other !== null && isLivePid(other.pid)) return other.runId;
-		try {
-			unlinkSync(lockPath);
+			server.close();
 		} catch {
-			// Lost a steal race or the file vanished: re-read on the next pass.
+			// Never bound: nothing to release.
 		}
-	}
-	throw new Error("desktop_run lock unavailable; nothing was run");
-}
-
-/** Release the host lock, but only when it still holds this run's claim. */
-function releaseDesktopLock(lockPath: string, runId: string): void {
-	try {
-		if (readDesktopLock(lockPath)?.runId === runId) unlinkSync(lockPath);
-	} catch {
-		// Housekeeping must never fail the run it guarded.
-	}
+		if (code === "EADDRINUSE") {
+			void readDesktopIdentity(port).then((other) => resolve({ other }));
+		} else {
+			resolve({ unavailable: true });
+		}
+	});
+	server.listen(port, "127.0.0.1", () =>
+		resolve({
+			release: () => {
+				for (const socket of sockets) socket.destroy();
+				server.close();
+			},
+		}),
+	);
+	return promise;
 }
 
 const sha256 = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
@@ -300,13 +298,13 @@ export function createDesktopDriver(deps: {
 	dir: string;
 	now?: () => number;
 	sleep?: (ms: number) => Promise<unknown>;
-	/** Host-lock override; the runtime-dir default keeps every server process exclusive. Tests pass a tmp file. */
-	lockPath?: string;
+	/** Host-mutex port override; the well-known default keeps every server process exclusive. Tests pass an ephemeral port. */
+	lockPort?: number;
 }): DesktopDriver {
 	const dir = deps.dir;
 	const now = deps.now ?? Date.now;
 	const sleep = deps.sleep ?? delay;
-	const lockPath = deps.lockPath ?? desktopLockPath();
+	const lockPort = deps.lockPort ?? DESKTOP_LOCK_PORT;
 
 	/** The runner raced against the driver's own timer; a hung call resolves to TIMEOUT. */
 	const TIMEOUT = Symbol("timeout");
@@ -466,21 +464,24 @@ export function createDesktopDriver(deps: {
 	return {
 		async run(input, { surface, emit }) {
 			const parsed = DesktopRunInput.parse(input);
-			// Synchronous check-and-set: no await runs between the in-process
-			// check, the host-file claim and the set, so neither two calls in
-			// this process nor two server processes on one host can overlap.
+			// The in-process flag is set synchronously, so two calls in this
+			// process cannot both reach the host claim; the loopback bind then
+			// excludes separate server processes on one host.
 			if (active !== null) throw new DesktopBusy(active);
 			const started = now();
 			const stamp = new Date(started).toISOString().replace(/[-:]/g, "").slice(0, 15);
 			const runId = `dr-${stamp}Z-${randomBytes(3).toString("hex")}`;
-			const other = claimDesktopLock(lockPath, runId);
-			if (other !== null) throw new DesktopBusy(RUN_ID.test(other) ? other : "unknown");
 			active = runId;
+			let release: (() => void) | null = null;
 			try {
+				const claim = await claimDesktopPort(lockPort, runId);
+				if ("unavailable" in claim) throw new Error("desktop_run lock unavailable; nothing was run");
+				if ("other" in claim) throw new DesktopBusy(claim.other ?? "unknown");
+				release = claim.release;
 				return await execute(parsed, surface, emit, runId, started);
 			} finally {
 				active = null;
-				releaseDesktopLock(lockPath, runId);
+				release?.();
 			}
 		},
 	};

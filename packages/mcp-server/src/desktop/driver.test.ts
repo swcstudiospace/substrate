@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { EventInput } from "../types.ts";
@@ -462,44 +463,53 @@ describe("createDesktopDriver", () => {
 	});
 
 	describe("host-wide exclusion (D30-21)", () => {
-		function lockFile(): string {
-			const parent = mkdtempSync(join(tmpdir(), "desktop-lock-"));
-			dirs.push(parent);
-			return join(parent, "run.lock");
+		/** A port no other test holds: bound ephemeral, then released. */
+		async function freePort(): Promise<number> {
+			const probe = createServer();
+			await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", () => resolve()));
+			const port = (probe.address() as AddressInfo).port;
+			await new Promise<void>((resolve) => probe.close(() => resolve()));
+			return port;
 		}
 
 		test("a live lock from another process refuses the run, naming its run", async () => {
-			const lockPath = lockFile();
+			const port = await freePort();
 			const other = "dr-20260901T000000Z-abcdef";
-			writeFileSync(lockPath, `${process.pid} ${other}`, { mode: 0o600 });
-			const { calls, run } = recorder();
-			const driver = createDesktopDriver({ run, dir: tmpShots(), lockPath, sleep: noSleep });
+			const holder = createServer((socket) => socket.end(`${process.pid} ${other}`, "utf8"));
+			await new Promise<void>((resolve) => holder.listen(port, "127.0.0.1", () => resolve()));
+			try {
+				const { calls, run } = recorder();
+				const driver = createDesktopDriver({ run, dir: tmpShots(), lockPort: port, sleep: noSleep });
 
-			const refused = await driver
-				.run({ actions: [{ type: "key", keys: "Return" }] }, { surface: "omp", emit: storedTrue })
-				.then(
-					() => null,
-					(error: unknown) => error,
-				);
+				const refused = await driver
+					.run({ actions: [{ type: "key", keys: "Return" }] }, { surface: "omp", emit: storedTrue })
+					.then(
+						() => null,
+						(error: unknown) => error,
+					);
 
-			expect(refused).toBeInstanceOf(DesktopBusy);
-			expect((refused as DesktopBusy).runId).toBe(other);
-			expect((refused as Error).message).toContain(other);
-			expect(calls).toEqual([]);
+				expect(refused).toBeInstanceOf(DesktopBusy);
+				expect((refused as DesktopBusy).runId).toBe(other);
+				expect((refused as Error).message).toContain(other);
+				expect(calls).toEqual([]);
+			} finally {
+				await new Promise<void>((resolve) => holder.close(() => resolve()));
+			}
 		});
 
-		test("a stale lock from a dead process is stolen and the run proceeds", async () => {
-			const lockPath = lockFile();
-			const dead = Bun.spawnSync(["true"], { stdout: "ignore", stderr: "ignore" }).pid;
-			writeFileSync(lockPath, `${dead} dr-20260901T000000Z-abcdef`, { mode: 0o600 });
-			const events: EventInput[] = [];
-			const driver = createDesktopDriver({ run: recorder().run, dir: tmpShots(), lockPath, sleep: noSleep });
+		test("the mutex releases when the run ends, so the next run proceeds", async () => {
+			const port = await freePort();
+			const driver = createDesktopDriver({ run: recorder().run, dir: tmpShots(), lockPort: port, sleep: noSleep });
 
-			const result = await driver.run({ actions: [{ type: "key", keys: "Return" }] }, { surface: "omp", emit: recording(events) });
+			const first = await driver.run({ actions: [{ type: "key", keys: "Return" }] }, { surface: "omp", emit: storedTrue });
+			expect(first.log[0]?.ok).toBe(true);
+			const second = await driver.run({ actions: [{ type: "key", keys: "Return" }] }, { surface: "omp", emit: storedTrue });
+			expect(second.log[0]?.ok).toBe(true);
 
-			expect(result.log[0]?.ok).toBe(true);
-			expect(events).toHaveLength(1);
-			expect(existsSync(lockPath)).toBe(false);
+			// The port is free again: another server can bind it.
+			const probe = createServer();
+			await new Promise<void>((resolve) => probe.listen(port, "127.0.0.1", () => resolve()));
+			await new Promise<void>((resolve) => probe.close(() => resolve()));
 		});
 	});
 
@@ -511,7 +521,7 @@ describe("createDesktopDriver", () => {
 			writeFileSync(shotFile, "not a dir");
 			const { run } = recorder();
 			const events: EventInput[] = [];
-			const driver = createDesktopDriver({ run, dir: shotFile, lockPath: join(parent, "run.lock"), sleep: noSleep });
+			const driver = createDesktopDriver({ run, dir: shotFile, sleep: noSleep });
 
 			const result = await driver.run({ actions: [{ type: "screenshot" }] }, { surface: "omp", emit: recording(events) });
 

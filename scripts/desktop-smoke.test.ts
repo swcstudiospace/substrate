@@ -77,12 +77,17 @@ describe("nonceRgb", () => {
 });
 
 describe("shouldRetryNonce", () => {
-	test("retries a polluted baseline until attempts run out", () => {
-		expect(shouldRetryNonce(1, 1)).toBe(true);
-		expect(shouldRetryNonce(140, 2)).toBe(true);
-		expect(shouldRetryNonce(0, 1)).toBe(false);
-		expect(shouldRetryNonce(1, 3)).toBe(false);
-		expect(shouldRetryNonce(0, 3)).toBe(false);
+	test("retries a polluted baseline from a clean run until attempts run out", () => {
+		expect(shouldRetryNonce(1, 1, true)).toBe(true);
+		expect(shouldRetryNonce(140, 2, true)).toBe(true);
+		expect(shouldRetryNonce(0, 1, true)).toBe(false);
+		expect(shouldRetryNonce(1, 3, true)).toBe(false);
+		expect(shouldRetryNonce(0, 3, true)).toBe(false);
+	});
+
+	test("never retries an attempt whose actions did not all succeed", () => {
+		expect(shouldRetryNonce(1, 1, false)).toBe(false);
+		expect(shouldRetryNonce(140, 2, false)).toBe(false);
 	});
 });
 

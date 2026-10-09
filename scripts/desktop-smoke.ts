@@ -217,8 +217,11 @@ const BAND_MIN_PIXELS = 1500;
 const MAX_NONCE_ATTEMPTS = 3;
 
 /** True while another nonce is worth trying after a polluted baseline. */
-export function shouldRetryNonce(baselineCount: number, attempt: number): boolean {
-	return baselineCount !== 0 && attempt < MAX_NONCE_ATTEMPTS;
+export function shouldRetryNonce(baselineCount: number, attempt: number, logClean: boolean): boolean {
+	// A failed closing `type "exit"` still returns a normal reply: retrying on
+	// colour would let a later success mask the terminal left open, so only a
+	// fully successful attempt earns another nonce.
+	return baselineCount !== 0 && logClean && attempt < MAX_NONCE_ATTEMPTS;
 }
 
 function readText(path: string): string | null {
@@ -625,7 +628,10 @@ export async function main(argv: string[]): Promise<number> {
 			break;
 		}
 		chosen = current;
-		if (!shouldRetryNonce(current.baseline.count, attempt)) break;
+		const logClean =
+			current.text.log.length === current.actionCount &&
+			current.text.log.every((entry) => typeof entry === "object" && entry !== null && "ok" in entry && entry.ok === true);
+		if (!shouldRetryNonce(current.baseline.count, attempt, logClean)) break;
 		process.stdout.write(`nonce colour already on screen (baseline ${current.baseline.count}); retrying with a fresh nonce\n`);
 	}
 	check(chosen !== null, "marker run accepted", chosen === null ? (rpcError ?? "no reply") : "run answered");
