@@ -50,6 +50,7 @@
         "@modelcontextprotocol/sdk": "^1.32.1",
         "@substrate/audit": "workspace:*",
         "@substrate/evidence": "workspace:*",
+        "@substrate/ledger": "workspace:*",
         "@substrate/observability": "workspace:*",
         "zod": "^4.6.5",
       },
