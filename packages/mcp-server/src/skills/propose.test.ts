@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
+import { redact } from "../redact.ts";
 import type { Surface } from "../types.ts";
 import { parseFrontmatter } from "./frontmatter.ts";
 import {
@@ -634,9 +635,35 @@ describe("proposeSkill ledger idempotence", () => {
 		});
 		const error = await proposeSkill(input(), options(f.run)).catch((e: unknown) => e);
 		expect(error).toBeInstanceOf(ProposeFailed);
-		expect((error as Error).message).toMatch(/pushed skill\/claude-code\/demo-skill-.* but could not record it.*gh pr create --repo swcstudiospace\/agent-skills --head skill\/.* --base main/);
+		expect((error as Error).message).toMatch(/could not record the pushed branch.*gh pr create --repo swcstudiospace\/agent-skills --head skill\/.* --base main/);
 		expect(f.steps()).toContain("push");
 		expect(f.steps()).not.toContain("gh pr create");
+	});
+
+	test("the capped recovery reply keeps the whole command at the longest name and repo", async () => {
+		const longName = "a".repeat(64);
+		const repo = `o-${"o".repeat(31)}/r-${"r".repeat(29)}`;
+		expect(repo.length).toBe(65);
+		const library: SkillsLibrary = { repo, remoteUrl: `file:///tmp/rehearsal/${repo}.git` };
+		const ledgerPath = join(state, "proposals.jsonl");
+		const f = fake({
+			replies: { "get-url": { stdout: `${library.remoteUrl}\n` } },
+			onCall: (s) => {
+				if (s === "push") {
+					rmSync(ledgerPath, { recursive: true, force: true });
+					mkdirSync(ledgerPath, { recursive: true });
+				}
+			},
+		});
+		const error = await proposeSkill(
+			{ name: longName, files: { "SKILL.md": skillMd(longName) }, rationale: "because", surface: "swarm-a11-devops" },
+			options(f.run, { library }),
+		).catch((e: unknown) => e);
+		expect(error).toBeInstanceOf(ProposeFailed);
+		// What the caller actually sees: proposalFailure redacts and caps at 400.
+		const capped = redact((error as Error).message).slice(0, 400);
+		expect(capped).toContain(`--repo ${repo}`);
+		expect(capped).toContain("--base main`");
 	});
 
 	test("a failing step is ProposeFailed with at most 400 redacted characters of output", async () => {

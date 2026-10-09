@@ -1006,7 +1006,7 @@ export async function proposeSkill(input: ProposeInput, opts: ProposeOptions): P
 			ledgerAppend(paths.ledger, { content_sha256: v.content_sha256, name: v.name, surface: v.surface, branch, state: "pushed", repo: library.repo });
 		} catch (cause) {
 			const code = (cause as NodeJS.ErrnoException).code ?? "EIO";
-			throw new ProposeFailed(`pushed ${branch} but could not record it in the proposal ledger (${code}); recover with \`gh pr create --repo ${library.repo} --head ${branch} --base main\` or delete the branch`);
+			throw new ProposeFailed(`could not record the pushed branch in the proposal ledger (${code}); recover with \`gh pr create --repo ${library.repo} --head ${branch} --base main\` or delete the branch`);
 		}
 		return await openPr(run, v, input, branch, paths.ledger, library);
 	} finally {
