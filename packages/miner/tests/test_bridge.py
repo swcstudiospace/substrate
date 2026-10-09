@@ -318,7 +318,7 @@ def test_token_resolve_rejects_bad_surfaces_and_oversize_files(env):
 
 def test_token_resolve_uses_default_dir_when_unset(monkeypatch):
     monkeypatch.delenv("SUBSTRATE_TOKENS_DIR", raising=False)
-    assert token_module.resolve("hermes", {"SUBSTRATE_TOKENS_DIR": "/nonexistent-tokens-dir"}) is None
+    assert token_module.resolve("hermes", {"SUBSTRATE_TOKENS_DIR": "/no/tokens"}) is None
 
 
 def test_single_token_refusal_names_the_variable_never_a_value():
@@ -413,11 +413,11 @@ def test_run_once_413_holds_as_oversize_and_does_not_resend(env):
 
 def test_run_once_never_sends_a_body_over_the_route_cap(env, monkeypatch):
     monkeypatch.setattr(bridge, "ROUTE_MAX_BYTES", 2_000)
-    (env["library"] / "lib-skill" / "references" / "big.md").write_text("x" * 10_000)
-    lib_patch(env)
+    path = stage(env["pending"], "aaaa0001", {"action": "write_file", "name": "lib-skill",
+                                              "file_path": "references/big.md", "file_content": "x" * 5_000})
     client, seen = mock_client(env, reply(200, OPENED))
     run(env, client)
-    assert seen == []
+    assert seen == [] and path.exists()
     [line] = log_lines(env)
     assert line["status"] == "held" and line["reason"] == "oversize"
 
