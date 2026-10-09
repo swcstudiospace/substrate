@@ -192,6 +192,31 @@ describe("ReadThroughCache", () => {
 		expect(redis.values.get(key)).toBe(JSON.stringify({ v: "fresh" }));
 	});
 
+	test("a malformed value whose replacement SET fails counts one bypass", async () => {
+		const redis = new FakeRedis();
+		redis.failSet = true;
+		const key = cacheKey("memory-search", "cursor", "0", { query: "lease" });
+		redis.values.set(key, "{not json");
+		const cache = cacheOf(redis);
+
+		expect(await cache.getOrLoad({ ...read, load: async () => "fresh" })).toBe("fresh");
+		expect(redis.values.get(key)).toBe("{not json");
+		expect(cache.health()).toMatchObject({ errors: 2, bypasses: 1, misses: 0, hits: 0 });
+	});
+
+	test("skipping a store still records that Dragonfly answered", async () => {
+		const redis = new FakeRedis();
+		redis.fail = true;
+		const cache = cacheOf(redis);
+		await cache.getOrLoad({ ...read, load: async () => "down" });
+		expect(cache.health()).toMatchObject({ connected: false, mode: "degraded" });
+
+		redis.fail = false;
+		expect(await cache.getOrLoad({ ...read, load: async () => "partial", store: () => false })).toBe("partial");
+		expect(redis.sets).toBe(0);
+		expect(cache.health()).toMatchObject({ connected: true, mode: "on" });
+	});
+
 	test("a command that does not return is a bypass, and the budgets stay within 150 ms", async () => {
 		expect(COMMAND_TIMEOUT_MS).toBeLessThanOrEqual(150);
 		expect(CONNECT_TIMEOUT_MS).toBeLessThanOrEqual(150);

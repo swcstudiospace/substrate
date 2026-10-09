@@ -301,7 +301,11 @@ export class ReadThroughCache {
 		const value = await request.load();
 		// An incomplete source answer (a brief built while a read failed) must
 		// not sit in the cache until the class TTL. The caller still gets it.
-		if (request.store?.(value) === false) return value;
+		// The GETs already landed, so Dragonfly is up even when the source is not.
+		if (request.store?.(value) === false) {
+			this.noteConnected();
+			return value;
+		}
 		let encoded: string;
 		try {
 			encoded = JSON.stringify({ v: value });
@@ -317,8 +321,9 @@ export class ReadThroughCache {
 			this.noteConnected();
 		} catch (cause) {
 			// The caller already has the source value, and nothing was saved.
-			// That is a bypass: the next read has to take the source path too.
-			this.fail(cause, true);
+			// A malformed value already counted its bypass; count this one only
+			// when that did not happen.
+			this.fail(cause, !malformed);
 		}
 		const roundTrip = parseEnvelope<T>(encoded, request.klass);
 		return roundTrip.ok ? roundTrip.value : value;
