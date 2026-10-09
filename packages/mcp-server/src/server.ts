@@ -206,7 +206,8 @@ const MAX_BODY_BYTES = 1_000_000;
 
 /**
  * A body over `MAX_BODY_BYTES`. Final for that body, so `/skills/propose` and
- * `/docs/ingest` answer it 413. Every other route still answers it with the
+ * `/docs/ingest` answer it 413, and `/docs/search` answers the empty
+ * invalid-request reply. Every other route still answers it with the
  * generic 500 it always has.
  */
 export class BodyTooLargeError extends Error {
@@ -782,7 +783,20 @@ export function createHttpServer(
 			// `reason`, never in the status (D25-03). Anonymous callers are answered
 			// `unauthenticated` by the service with no RAGFlow call (D25-06).
 			if (req.method === "POST" && url.pathname === "/docs/search") {
-				const raw = await readBody(req);
+				let raw: string;
+				try {
+					raw = await readBody(req);
+				} catch (cause) {
+					if (!(cause instanceof BodyTooLargeError)) throw cause;
+					// An oversized body rides the same 200 invalid-request path as
+					// malformed JSON — with the search event — instead of the
+					// generic 500 the shared catch uses for other reads.
+					const empty: Record<string, unknown> = {};
+					rememberClaim(claim, empty);
+					if (!(await auditedRest(res, observability, surface, "docs_search", empty))) return;
+					sendJson(res, 200, await substrate.docsSearch(undefined, { surface, session_id: undefined }));
+					return;
+				}
 				let parsed: unknown;
 				try {
 					parsed = raw ? JSON.parse(raw) : {};

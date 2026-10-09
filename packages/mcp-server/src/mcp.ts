@@ -929,7 +929,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 					.array(z.string())
 					.optional()
 					.describe("Registry dataset names; omitted searches every dataset whose id is known."),
-				limit: z.number().int().min(1).max(10).optional().describe("How many results, 1 to 10. Default 5."),
+				limit: z.number().optional().describe("How many results, 1 to 10. Default 5."),
 				similarity_threshold: z.number().optional().describe("RAGFlow's default unless set."),
 				session_id: z.string().optional().describe("Your session, for the one attributable search event."),
 			},

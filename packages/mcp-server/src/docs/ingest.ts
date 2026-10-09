@@ -622,11 +622,18 @@ export async function ingestPage(input: IngestPageInput, deps: IngestDeps): Prom
 		}));
 		return { status: "refused", reason: "secret", findings };
 	}
-	// Explicit titles bypass content redaction, so the title gets its own
-	// publication/redaction check before it reaches section text or
-	// meta_fields: findings refuse, quiet redactions apply in place.
+	// Explicit titles bypass the content pass, so image markup is stripped
+	// and publication checks run before the title is split into section
+	// text or stored in meta_fields. Findings refuse; quiet redactions
+	// apply in place; stripped images count with the page.
 	let finalTitle = checked.title;
 	let titleRedactions = 0;
+	let titleImages = 0;
+	if (finalTitle) {
+		const titleStripped = stripImages(finalTitle);
+		titleImages = titleStripped.imagesStripped;
+		finalTitle = titleStripped.text.trim();
+	}
 	if (finalTitle) {
 		const titleRedacted = redactSkillContent(finalTitle);
 		if (titleRedacted.findings.length > 0) {
@@ -662,7 +669,7 @@ export async function ingestPage(input: IngestPageInput, deps: IngestDeps): Prom
 		contentSha256,
 		sections: split.sections.length,
 		redactions: redacted.redactions.length + titleRedactions,
-		imagesStripped: stripped.imagesStripped,
+		imagesStripped: stripped.imagesStripped + titleImages,
 	};
 	const sections = split.sections;
 	if (input.dryRun) {

@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { MAX_CONTENT_BYTES as SERVER_CAP, TEXT_EXTENSIONS as SERVER_EXTS } from "../../mcp-server/src/docs/ingest.ts";
@@ -643,6 +643,10 @@ describe("docs tick (D25-18, D25-21 catch-up)", () => {
 		expect(await runDocsTick(first.base)).toBe(0);
 		expect(joined(first.out)).toContain("status=refreshed");
 		expect(readFileSync(join(first.stateDir, "guide", "last-refresh-commit"), "utf8").trim()).toBe(origin.commit);
+		writeFileSync(
+			join(first.stateDir, "guide", "manifest.json"),
+			JSON.stringify({ version: 1, dataset: "guide", current: origin.commit, versions: [], paths: {} }),
+		);
 		const posted = stub.posts.length;
 		expect(posted).toBeGreaterThan(0);
 
@@ -650,6 +654,24 @@ describe("docs tick (D25-18, D25-21 catch-up)", () => {
 		expect(await runDocsTick(second.base)).toBe(0);
 		expect(joined(second.out)).toContain("status=unchanged");
 		expect(stub.posts.length).toBe(posted);
+	});
+
+	test("a matching marker with a missing or corrupt manifest refreshes again", async () => {
+		const origin = gitRepo({ "docs/a.md": "# A\n" });
+		const stub = tickStub();
+		const tick = tickBase({ fetch: stub.fetch, remoteTemplate: origin.dir, watch: "guide=example/guide" });
+		expect(await runDocsTick(tick.base)).toBe(0);
+		const posted = stub.posts.length;
+		expect(posted).toBeGreaterThan(0);
+
+		expect(await runDocsTick(tick.base)).toBe(0);
+		expect(joined(tick.out)).toContain("status=refreshed");
+		expect(stub.posts.length).toBeGreaterThan(posted);
+
+		writeFileSync(join(tick.stateDir, "guide", "manifest.json"), "{not-json");
+		const afterCorrupt = stub.posts.length;
+		expect(await runDocsTick(tick.base)).toBe(0);
+		expect(stub.posts.length).toBeGreaterThan(afterCorrupt);
 	});
 
 	test("a new origin commit refreshes again", async () => {
@@ -683,6 +705,20 @@ describe("docs tick (D25-18, D25-21 catch-up)", () => {
 		dead.base.watch = "guide=example/guide";
 		expect(await runDocsTick(dead.base)).toBe(1);
 		expect(joined(dead.out)).toContain("status=failed");
+	});
+
+	test("a failed clone is counted and the next dataset still refreshes", async () => {
+		const origin = gitRepo({ "docs/a.md": "# A\n" });
+		const root = mkdtempSync(join(scratch, "remotes-"));
+		mkdirSync(join(root, "example"));
+		symlinkSync(origin.dir, join(root, "example", "guide"));
+		const stub = tickStub();
+		const tick = tickBase({ fetch: stub.fetch, remoteTemplate: join(root, "{slug}") });
+		tick.base.watch = "missing=example/missing guide=example/guide";
+		expect(await runDocsTick(tick.base)).toBe(1);
+		expect(joined(tick.out)).toContain("dataset=missing status=failed");
+		expect(joined(tick.out)).toContain("dataset=guide status=refreshed");
+		expect(stub.posts.some((post) => post.body.dataset === "guide")).toBe(true);
 	});
 
 	test("agent-skills catches up from the checkout read-only, never cloning", async () => {

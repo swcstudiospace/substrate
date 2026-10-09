@@ -3810,6 +3810,21 @@ describe("docsIngest (Substrate door)", () => {
 		expect(stateEntries).toEqual([]);
 	});
 
+	test("a refused dry_run emits no warning", async () => {
+		const outside = await docsWorld();
+		const refused = await outside.substrate.docsIngest(
+			docsPage({
+				dry_run: true,
+				source_url: "https://" + "github.com/example/other/blob/" + DOCS_COMMIT + "/docs/x.md",
+			}),
+			{ surface: "substrate", isOperator: false },
+		);
+		expect(refused.status).toBe(400);
+		expect((refused.body as Record<string, unknown>).reason).toBe("outside-roots");
+		expect(outside.fake.totalCalls()).toBe(0);
+		expect(outside.emitted).toEqual([]);
+	});
+
 	test("content refusals are 400 with no RAGFlow call and one warning event", async () => {
 		const outside = await docsWorld();
 		const refused = await outside.substrate.docsIngest(

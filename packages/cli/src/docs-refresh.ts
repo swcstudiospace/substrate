@@ -27,6 +27,7 @@
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { loadManifest } from "../../mcp-server/src/docs/manifest.ts";
 import { findDataset, loadRegistry } from "../../mcp-server/src/docs/registry.ts";
 import { parseArgs, str, type Args } from "./args.ts";
 
@@ -357,9 +358,17 @@ interface GitResult {
 	stderr: string;
 }
 
-function git(args: string[], cwd: string): GitResult {
+function git(args: string[], cwd: string, timeoutMs?: number): GitResult {
 	try {
-		const result = spawnSync("git", args, { cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+		const result = spawnSync("git", args, {
+			cwd,
+			encoding: "utf8",
+			maxBuffer: 64 * 1024 * 1024,
+			// Clone and fetch are the only calls that wait on a remote. A hung
+			// remote must die here so the tick can count the dataset failed
+			// and move on; local rev-parse / ls-tree / show stay unbounded.
+			...(timeoutMs !== undefined && timeoutMs > 0 ? { timeout: timeoutMs, killSignal: "SIGKILL" as const } : {}),
+		});
 		if (result.error) return { ok: false, stdout: "", stderr: String((result.error as Error).message) };
 		return { ok: result.status === 0, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 	} catch (cause) {
@@ -703,7 +712,7 @@ export async function runDocsTick(deps: TickDeps): Promise<number> {
 			if (!existsSync(repoDir)) {
 				mkdirSync(dirname(repoDir), { recursive: true });
 				const remote = deps.remoteTemplate.replace("{slug}", slug);
-				const cloned = git(["clone", "--mirror", remote, repoDir], process.cwd());
+				const cloned = git(["clone", "--mirror", remote, repoDir], process.cwd(), deps.timeoutMs);
 				if (!cloned.ok) {
 					failed += 1;
 					deps.out(`dataset=${dataset} status=failed\n`);
@@ -711,7 +720,7 @@ export async function runDocsTick(deps: TickDeps): Promise<number> {
 					continue;
 				}
 			} else {
-				const fetched = git(["-C", repoDir, "fetch", "origin"], repoDir);
+				const fetched = git(["-C", repoDir, "fetch", "origin"], repoDir, deps.timeoutMs);
 				if (!fetched.ok) {
 					failed += 1;
 					deps.out(`dataset=${dataset} status=failed\n`);
@@ -735,9 +744,20 @@ export async function runDocsTick(deps: TickDeps): Promise<number> {
 			last = "";
 		}
 		if (last === head.head) {
-			unchanged += 1;
-			deps.out(`dataset=${dataset} status=unchanged commit=${head.head}\n`);
-			continue;
+			// The marker is not proof the refresh is done. A missing or corrupt
+			// manifest (loadManifest yields an empty one, current null) still
+			// needs a rebuild even when the commit has not moved.
+			let savedCurrent: string | null = null;
+			try {
+				savedCurrent = (await loadManifest(dataset, { stateDir: deps.stateDir, env })).current;
+			} catch {
+				savedCurrent = null;
+			}
+			if (savedCurrent === head.head) {
+				unchanged += 1;
+				deps.out(`dataset=${dataset} status=unchanged commit=${head.head}\n`);
+				continue;
+			}
 		}
 		const code = await runDocsRefresh(
 			["--dataset", dataset, "--commit", head.head, "--repo", repoDir, "--slug", slug],

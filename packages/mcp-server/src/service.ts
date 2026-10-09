@@ -1629,15 +1629,19 @@ export class Substrate {
 			return { status: 200, body: result as unknown as Record<string, unknown> };
 		}
 		if (result.status === "refused") {
-			const rules =
-				result.reason === "secret" ? [...new Set((result.findings ?? []).map((finding) => finding.rule))] : undefined;
-			await this.emit({
-				surface,
-				kind: "warning",
-				summary: `docs ingest refused: ${result.reason}`,
-				...where,
-				payload: { action: "docs.ingest", status: "refused", reason: result.reason, ...(rules ? { rules } : {}) },
-			}).catch(() => undefined);
+			// dry_run validates and reports without writing, and emits no event —
+			// including when the preview is refused.
+			if (dryRun !== true) {
+				const rules =
+					result.reason === "secret" ? [...new Set((result.findings ?? []).map((finding) => finding.rule))] : undefined;
+				await this.emit({
+					surface,
+					kind: "warning",
+					summary: `docs ingest refused: ${result.reason}`,
+					...where,
+					payload: { action: "docs.ingest", status: "refused", reason: result.reason, ...(rules ? { rules } : {}) },
+				}).catch(() => undefined);
+			}
 			return {
 				status: result.reason === "forbidden" ? 403 : 400,
 				body: result as unknown as Record<string, unknown>,

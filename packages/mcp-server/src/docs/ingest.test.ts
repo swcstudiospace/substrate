@@ -733,6 +733,22 @@ describe("pipeline success", () => {
 		expect(JSON.stringify(docs)).not.toContain(value);
 	});
 
+	test("an explicit title's remote image is stripped before section text and counted", async () => {
+		const remote = "https://example.com/diagram.png";
+		const result = await ingestPage(
+			input({ title: `Guide ![diagram](${remote})`, content: "# Ignored\n\nHello.\n" }),
+			{ registry: REGISTRY, client: fake, stateDir },
+		);
+		expect(result.status).toBe("uploaded");
+		if (result.status !== "uploaded") throw new Error("unreachable");
+		expect(result.imagesStripped).toBe(1);
+		expect(result.title).toBe("Guide [image: diagram]");
+		const stored = [...fake.datasets.get("ds-test")!.docs.values()];
+		const blob = JSON.stringify(stored);
+		expect(blob).not.toContain(remote);
+		expect(blob).toContain("[image: diagram]");
+	});
+
 	test("stored source URLs are canonical", async () => {
 		const mixed = `https://GitHub.com/ExampleOrg/test-docs/blob/${COMMIT_A}/docs/guide.md`;
 		const result = await ingestPage(input({ sourceUrl: mixed, content: "# Guide\n\nHello.\n" }), {

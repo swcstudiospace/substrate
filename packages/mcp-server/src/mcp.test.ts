@@ -899,6 +899,24 @@ describe("docs_search", () => {
 		expect(reply.json().reason).toBe("unauthenticated");
 		expect(fake.calls.retrieval).toBe(0);
 	});
+
+	test("limit 0 is an invalid-request reply and a docs.search event, not an MCP error", async () => {
+		clearDatasetCache();
+		const book = ledger();
+		const fake = new FakeDocsMcp();
+		const { client } = await connect(book.greptime, "omp", fake);
+
+		const reply = await call(client, "docs_search", { query: "how?", limit: 0 });
+		expect(reply.isError).toBe(false);
+		expect(reply.json().results).toEqual([]);
+		expect(reply.json().reason).toBe("invalid-request");
+		expect(fake.calls.retrieval).toBe(0);
+		const searches = book.written.filter(
+			(event) => (event.payload as Record<string, unknown>).action === "docs.search",
+		);
+		expect(searches).toHaveLength(1);
+		expect((searches[0]!.payload as Record<string, unknown>).reason).toBe("invalid-request");
+	});
 });
 
 describe("docs_ingest", () => {

@@ -529,6 +529,32 @@ describe("docs routes", () => {
 		}
 	});
 
+	test("POST /docs/search routes an oversized body through the 200 invalid-request reply", async () => {
+		const fake = new FakeDocs();
+		const store = ledger();
+		const { postRaw, stop } = await docsServe(fake, agentEnv, store.greptime);
+		try {
+			const response = await postRaw(
+				"/docs/search",
+				`{"query":"${"x".repeat(1_000_000)}"}`,
+				bearer("tok-omp"),
+			);
+			const body = (await response.json()) as Record<string, unknown>;
+			expect(response.status).toBe(200);
+			expect(body.results).toEqual([]);
+			expect(body.reason).toBe("invalid-request");
+			expect(body.untrusted).toBe(true);
+			expect(fake.totalCalls()).toBe(0);
+			const searches = store.written.filter(
+				(event) => (event.payload as Record<string, unknown>).action === "docs.search",
+			);
+			expect(searches).toHaveLength(1);
+			expect((searches[0]!.payload as Record<string, unknown>).reason).toBe("invalid-request");
+		} finally {
+			await stop();
+		}
+	});
+
 
 	test("POST /docs/ingest refuses anonymous 401 before the body is read", async () => {
 		const fake = new FakeDocs();
