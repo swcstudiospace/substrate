@@ -58,7 +58,9 @@ case "$surface" in
 		;;
 	*) safe_surface="";;
 esac
-bearer="${SUBSTRATE_TOKEN:-}"
+# A whitespace-only direct value trims to absent, exactly like resolveBearer:
+# otherwise it skips both file fallbacks and the emit carries no bearer.
+bearer="$(printf '%s' "${SUBSTRATE_TOKEN:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' 2>/dev/null)"
 if [ -z "$bearer" ] && [ -n "${SUBSTRATE_TOKEN_FILE:-}" ]; then
 	bearer="$(first_line "$SUBSTRATE_TOKEN_FILE")"
 fi

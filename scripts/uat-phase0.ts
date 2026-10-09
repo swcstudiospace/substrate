@@ -254,6 +254,24 @@ export function expectOutageBounds(elapsedMs: number): string[] {
 	return elapsedMs <= OUTAGE_BUDGET_MS ? [] : [`answered in ${Math.round(elapsedMs)} ms, over the ${OUTAGE_BUDGET_MS} ms budget`];
 }
 
+/** Scenario 7's hang guard: a callee whose own timeout broke cannot hang the proof past `ms`. */
+export const PLUGIN_HANG_GUARD_MS = 10_000;
+export function raceGuard<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+	const { promise: guarded, resolve, reject } = Promise.withResolvers<T>();
+	const timer = setTimeout(() => reject(new Error(`${label} hung past ${ms} ms`)), ms);
+	promise.then(
+		(value) => {
+			clearTimeout(timer);
+			resolve(value);
+		},
+		(cause) => {
+			clearTimeout(timer);
+			reject(cause);
+		},
+	);
+	return guarded;
+}
+
 /** Scenario 8's cross-surface read: the cursor line plus the claude-code hold. */
 export function expectCrossSurface(brief: string, repo: string, holder: string): string[] {
 	const problems: string[] = [];
@@ -296,6 +314,33 @@ export function expectBackfillCounts(nodes: number, identifiers: number): string
 /** The substrate MCP entry's Authorization header names the token variable. */
 export function namesSubstrateToken(authorization: unknown): boolean {
 	return typeof authorization === "string" && /Bearer \$\{SUBSTRATE_TOKEN(?::-[^}]*)?\}/.test(authorization);
+}
+
+/**
+ * Scenario 5's MCP entry check: an HTTP transport into the target's `/mcp`.
+ * The URL is matched by suffix, never by equality: the config may name a
+ * hostname while the run targets loopback (or the reverse), so only the
+ * scheme and the path are asserted.
+ */
+export function expectMcpTarget(entry: unknown): string[] {
+	const problems: string[] = [];
+	const record = (entry ?? {}) as Record<string, unknown>;
+	if (record.type !== "http") problems.push(`substrate entry type ${JSON.stringify(record.type ?? null)} is not "http"`);
+	let protocol: string | null = null;
+	let path: string | null = null;
+	try {
+		const parsed = new URL(String(record.url ?? ""));
+		protocol = parsed.protocol;
+		path = parsed.pathname;
+	} catch {
+		protocol = null;
+		path = null;
+	}
+	if (protocol !== "http:" && protocol !== "https:") problems.push("substrate entry url is not an http(s) URL");
+	else if (path !== "/mcp" && !path?.endsWith("/mcp")) {
+		problems.push(`substrate entry url ${JSON.stringify(record.url)} does not point at /mcp`);
+	}
+	return problems;
 }
 
 /** Count read-back events whose payload.conversation_id equals the run-tagged id. */
@@ -403,10 +448,11 @@ async function scenario2(ctx: RunContext): Promise<ScenarioVerdict> {
 		if (read === null) problems.push("graph_get answered nothing usable");
 		else evidence.push("graph_get: graph with nodes returned");
 
-		const searched = await mcpTool(ctx.base, ctx.bearer, "memory_search", { query: "the", limit: 5 });
-		const entryCount = Array.isArray(searched) ? searched.length : -1;
-		if (entryCount <= 0) problems.push(`memory_search returned ${entryCount} rows`);
-		evidence.push(`memory_search: ${entryCount} rows`);
+		// An empty query lists the newest rows: `the` is an English stop word
+		// the full-text index never matches, so a term query fails healthy runs.
+		const searched = await mcpTool(ctx.base, ctx.bearer, "memory_search", { query: "", limit: 5 });
+		problems.push(...expectMemorySearch(searched));
+		evidence.push(`memory_search: ${Array.isArray(searched) ? searched.length : -1} rows`);
 
 		evidence.push("anchors shape and raw row counts: operator-approved read-only SQL step, recorded separately");
 		return problems;
@@ -550,6 +596,8 @@ async function scenario5(ctx: RunContext): Promise<ScenarioVerdict> {
 			servers = null;
 		}
 		const substrate = (servers?.["substrate"] ?? null) as {
+			type?: unknown;
+			url?: unknown;
 			headers?: Record<string, string>;
 			headersHelper?: string;
 		} | null;
@@ -559,7 +607,10 @@ async function scenario5(ctx: RunContext): Promise<ScenarioVerdict> {
 			const authorization = headers.Authorization ?? headers.authorization ?? "";
 			const namesToken = namesSubstrateToken(authorization);
 			if (!namesToken) problems.push("substrate entry names no token variable in its Authorization header");
-			evidence.push(`substrate MCP entry present, Authorization names token variable: ${namesToken}`);
+			const targetProblems = expectMcpTarget(substrate);
+			problems.push(...targetProblems);
+			if (namesToken && targetProblems.length === 0) evidence.push("substrate MCP entry: HTTP transport into the target /mcp");
+			else evidence.push(`substrate MCP entry present, Authorization names token variable: ${namesToken}`);
 		}
 		if (ctx.graph) {
 			const read = await mcpTool(ctx.base, ctx.bearer, "graph_get", { graph_id: ctx.graph });
@@ -772,6 +823,23 @@ async function scenario7(ctx: RunContext): Promise<ScenarioVerdict> {
 					if (brief !== "") problems.push("fetchBrief answered against a dead port");
 					problems.push(...expectOutageBounds(elapsed).map((problem) => `fetchBrief: ${problem}`));
 					evidence.push(`fetchBrief: empty in ${Math.round(elapsed)} ms`);
+					// The dead port refuses fast, so it never exercises the
+					// plugin's own timeout: hang the socket too, under a guard so
+					// a broken plugin timeout cannot hang the proof itself.
+					try {
+						const hangStarted = performance.now();
+						const hangBrief = await raceGuard(
+							mod.fetchBrief({ repo: "uat/outage", surface: "cursor" }, { SUBSTRATE_URL: hangBase }),
+							PLUGIN_HANG_GUARD_MS,
+							"plugin fetchBrief",
+						);
+						const hangElapsed = performance.now() - hangStarted;
+						if (hangBrief !== "") problems.push("fetchBrief answered against a hanging listener");
+						problems.push(...expectOutageBounds(hangElapsed).map((problem) => `fetchBrief (hanging): ${problem}`));
+						if (hangBrief === "") evidence.push(`fetchBrief (hanging): empty in ${Math.round(hangElapsed)} ms`);
+					} catch (cause) {
+						problems.push(`fetchBrief against a hanging listener failed open loudly: ${cause instanceof Error ? cause.message : String(cause)}`);
+					}
 				} catch (cause) {
 					problems.push(`fetchBrief threw instead of failing open: ${cause instanceof Error ? cause.message : String(cause)}`);
 				}
@@ -813,10 +881,13 @@ async function scenario8(ctx: RunContext): Promise<ScenarioVerdict> {
 		});
 		if (registered === null) return ["graph_register answered nothing usable"];
 
+		// Pinned to the holder the brief below requires: the server otherwise
+		// claims as the bearer's surface, so surface order would flip the verdict.
 		const claimed = (await mcpTool(ctx.base, ctx.bearer, "graph_claim", {
 			graph_id: graph,
 			node_id: "n1",
 			session_id: session,
+			surface: "claude-code",
 		})) as { decision?: unknown; granted?: unknown; claimed?: unknown } | null;
 		const decision = claimed === null ? null : (claimed.decision ?? (claimed.granted === true || claimed.claimed === true ? "granted" : null));
 		if (decision !== "granted") problems.push(`graph_claim decision ${decision === null ? "unusable" : String(decision)}`);

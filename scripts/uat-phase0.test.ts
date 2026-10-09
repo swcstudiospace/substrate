@@ -15,6 +15,7 @@ import {
 	expectGraphIdentifiers,
 	expectHealthz,
 	expectMemorySearch,
+	expectMcpTarget,
 	expectOutageBounds,
 	expectToolsList,
 	flag,
@@ -22,6 +23,8 @@ import {
 	parseOptions,
 	parseScenarios,
 	parseUatBody,
+	PLUGIN_HANG_GUARD_MS,
+	raceGuard,
 	refuseWriteScenarios,
 	renderReport,
 	resolvePlugin,
@@ -323,5 +326,47 @@ describe("child deadline", () => {
 	test("outage bounds hold canned elapsed values", () => {
 		expect(expectOutageBounds(120)).toEqual([]);
 		expect(expectOutageBounds(1751)).toHaveLength(1);
+	});
+});
+
+describe("mcp entry target", () => {
+	test("the projected entry passes", () => {
+		expect(
+			expectMcpTarget({
+				type: "http",
+				url: "http://127.0.0.1:7410/mcp",
+				headers: { Authorization: "Bearer ${SUBSTRATE_TOKEN}" },
+			}),
+		).toEqual([]);
+	});
+	test("the url matches by suffix, never by equality", () => {
+		// A hostname config against a loopback run (or the reverse) still
+		// points at the target's /mcp: only scheme and path are asserted.
+		expect(expectMcpTarget({ type: "http", url: "http://substrate.example.com:7410/mcp" })).toEqual([]);
+		expect(expectMcpTarget({ type: "http", url: "https://substrate.example.com/mcp" })).toEqual([]);
+	});
+	test("a stale or non-HTTP entry fails", () => {
+		expect(expectMcpTarget({ type: "http", url: "http://127.0.0.1:9999/healthz" }).length).toBeGreaterThan(0);
+		expect(expectMcpTarget({ type: "http", url: "http://127.0.0.1:7410/" }).length).toBeGreaterThan(0);
+		expect(expectMcpTarget({ type: "sse", url: "http://127.0.0.1:7410/mcp" }).length).toBeGreaterThan(0);
+		expect(expectMcpTarget({ command: "substrate-mcp" }).length).toBeGreaterThan(0);
+		expect(expectMcpTarget(null).length).toBeGreaterThan(0);
+	});
+});
+
+describe("hang guard", () => {
+	test("the proof guard is ten seconds", () => {
+		expect(PLUGIN_HANG_GUARD_MS).toBe(10_000);
+	});
+	test("a fast promise passes through", async () => {
+		await expect(raceGuard(Promise.resolve("brief"), 50, "fast")).resolves.toBe("brief");
+	});
+	test("a hanging promise rejects inside the guard", async () => {
+		const started = performance.now();
+		await expect(raceGuard(new Promise(() => {}), 50, "hanging")).rejects.toThrow("hanging hung past 50 ms");
+		expect(performance.now() - started).toBeLessThan(5000);
+	});
+	test("a callee rejection still rejects", async () => {
+		await expect(raceGuard(Promise.reject(new Error("boom")), 50, "failing")).rejects.toThrow("boom");
 	});
 });

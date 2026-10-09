@@ -274,10 +274,12 @@ and the metrics evidence, then removes the old value and restarts once
 more. The old value stays valid until it is removed, so rotation never
 strands a client that has not picked up the new file yet.
 
-The handoff key rotates the same way through its previous variable: the
-old key moves to the previous variable, the fresh key takes the primary
-one, and the previous line is dropped after the soak. The audit path is
-not a secret and rotates by mere replacement.
+When rotating the handoff key, move the old key to
+`SUBSTRATE_HANDOFF_KEY_PREV` and its active ID to
+`SUBSTRATE_HANDOFF_KEY_PREV_ID`. Put the fresh key in
+`SUBSTRATE_HANDOFF_KEY` and give `SUBSTRATE_HANDOFF_KEY_ID` a new ID.
+Drop the previous key after the soak. The audit path is not a secret and
+rotates by mere replacement.
 
 ## External clients
 
