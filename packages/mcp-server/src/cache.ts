@@ -7,13 +7,14 @@
  * drops every key, and generation counters make a write visible without a scan.
  *
  * The client is Bun's `RedisClient` (Bun 1.4). It is constructed on the first
- * command, with a short connect timeout, no offline queue and no reconnect
- * retries, so one request never waits on a second attempt.
+ * command, with a 150 ms connect timeout and the same budget on every command,
+ * no offline queue and no reconnect retries, so one request never waits on a
+ * second attempt.
  */
 import { createHash } from "node:crypto";
 import { RedisClient } from "bun";
 import type { SubstrateConfig } from "./config.ts";
-import { redact } from "./redact.ts";
+import { REDACTED, redact } from "./redact.ts";
 
 export const CACHE_PREFIX = "substrate:v1";
 
@@ -65,8 +66,9 @@ export interface ReadThroughOptions {
 	record?: (sample: CacheSample) => void;
 }
 
-const COMMAND_TIMEOUT_MS = 250;
-const CONNECT_TIMEOUT_MS = 250;
+/** A request waits at most this long for one command, connect included. */
+export const COMMAND_TIMEOUT_MS = 150;
+export const CONNECT_TIMEOUT_MS = 150;
 const LOG_INTERVAL_MS = 60_000;
 
 /**
@@ -201,6 +203,7 @@ export class ReadThroughCache {
 		}
 
 		const key = cacheKey(request.klass, request.surface, generation, request.args);
+		let malformed = false;
 		try {
 			const raw = await this.attempt(() => redis.get(key));
 			if (raw !== null) {
@@ -211,15 +214,19 @@ export class ReadThroughCache {
 					this.count("hit");
 					return parsed.value;
 				}
+				// A bad payload is not a miss: the key was there, and the caller
+				// is served from the source. The fresh envelope replaces it below.
 				this.count("error");
+				this.count("bypass");
 				this.note("malformed cache value");
+				malformed = true;
 			}
 		} catch (cause) {
 			this.fail(cause, true);
 			return request.load();
 		}
 
-		this.count("miss");
+		if (!malformed) this.count("miss");
 		const value = await request.load();
 		let encoded: string;
 		try {
@@ -287,7 +294,7 @@ export class ReadThroughCache {
 		const now = this.now();
 		if (now - this.lastLogAt < LOG_INTERVAL_MS) return;
 		this.lastLogAt = now;
-		this.log(`[substrate] cache bypass: ${redact(reason)}\n`);
+		this.log(`[substrate] cache bypass: ${redact(stripRedisUrl(reason))}\n`);
 	}
 
 	private attempt<T>(run: () => Promise<T>): Promise<T> {
@@ -307,6 +314,11 @@ export class ReadThroughCache {
 			);
 		});
 	}
+}
+
+/** Drop any Redis URL before redaction. `redis://:password@host` has no user, so the password rule does not match it. */
+function stripRedisUrl(text: string): string {
+	return text.replace(/\b(?:redis|rediss):\/\/\S+/gi, `redis://${REDACTED}`);
 }
 
 function parseEnvelope<T>(raw: string): { ok: true; value: T } | { ok: false } {

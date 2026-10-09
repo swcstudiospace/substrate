@@ -11,6 +11,8 @@ import type { AddressInfo } from "node:net";
 import { findCounter, sumCounter, type MetricSnapshot } from "@substrate/observability";
 import {
 	CACHE_TTL,
+	COMMAND_TIMEOUT_MS,
+	CONNECT_TIMEOUT_MS,
 	MEMORY_GENERATION_KEY,
 	ReadThroughCache,
 	cacheKey,
@@ -25,25 +27,36 @@ class FakeRedis implements CacheRedis {
 	readonly values = new Map<string, string>();
 	readonly ttls: number[] = [];
 	fail = false;
+	hang = false;
+	failMessage = "connect ECONNREFUSED redis://default:s3cret@db.internal:6379";
 	sets = 0;
+	private readonly waiting: Array<() => void> = [];
 
 	async get(key: string): Promise<string | null> {
-		if (this.fail) throw new Error("connect ECONNREFUSED redis://default:s3cret@db.internal:6379");
+		if (this.hang) await new Promise<void>((resolve) => this.waiting.push(resolve));
+		if (this.fail) throw new Error(this.failMessage);
 		return this.values.get(key) ?? null;
 	}
 
 	async set(key: string, value: string, ttlSeconds: number): Promise<void> {
 		this.sets += 1;
-		if (this.fail) throw new Error("connect ECONNREFUSED redis://default:s3cret@db.internal:6379");
+		if (this.hang) await new Promise<void>((resolve) => this.waiting.push(resolve));
+		if (this.fail) throw new Error(this.failMessage);
 		this.values.set(key, value);
 		this.ttls.push(ttlSeconds);
 	}
 
 	async incr(key: string): Promise<number> {
-		if (this.fail) throw new Error("connect ECONNREFUSED redis://default:s3cret@db.internal:6379");
+		if (this.hang) await new Promise<void>((resolve) => this.waiting.push(resolve));
+		if (this.fail) throw new Error(this.failMessage);
 		const next = Number(this.values.get(key) ?? "0") + 1;
 		this.values.set(key, String(next));
 		return next;
+	}
+
+	release(): void {
+		const pending = this.waiting.splice(0);
+		for (const resolve of pending) resolve();
 	}
 }
 
@@ -144,8 +157,52 @@ describe("ReadThroughCache", () => {
 
 		expect(value).toBe("fresh");
 		expect(loads).toBe(1);
-		expect(cache.health()).toMatchObject({ errors: 1, misses: 1, hits: 0 });
+		expect(cache.health()).toMatchObject({ errors: 1, bypasses: 1, misses: 0, hits: 0 });
 		expect(redis.values.get(key)).toBe(JSON.stringify({ v: "fresh" }));
+	});
+
+	test("a command that does not return is a bypass, and the budgets stay within 150 ms", async () => {
+		expect(COMMAND_TIMEOUT_MS).toBeLessThanOrEqual(150);
+		expect(CONNECT_TIMEOUT_MS).toBeLessThanOrEqual(150);
+
+		const redis = new FakeRedis();
+		redis.hang = true;
+		const lines: string[] = [];
+		const cache = new ReadThroughCache({
+			redis,
+			enabled: true,
+			log: (line) => lines.push(line),
+			now: () => 9_000,
+			commandTimeoutMs: 30,
+		});
+		const started = Date.now();
+		expect(await cache.getOrLoad({ ...read, load: async () => "source" })).toBe("source");
+		expect(Date.now() - started).toBeLessThan(500);
+		expect(cache.health()).toMatchObject({
+			mode: "degraded",
+			connected: false,
+			bypasses: 1,
+			errors: 1,
+			hits: 0,
+			misses: 0,
+		});
+		expect(lines).toHaveLength(1);
+		expect(lines[0]).not.toContain("s3cret");
+		redis.release();
+	});
+
+	test("a user-less redis URL is stripped before it is logged", async () => {
+		const redis = new FakeRedis();
+		redis.fail = true;
+		redis.failMessage = "connect ECONNREFUSED redis://:s3cret@db.internal:6379";
+		const lines: string[] = [];
+		const cache = cacheOf(redis, (line) => lines.push(line), () => 11_000);
+
+		expect(await cache.getOrLoad({ ...read, load: async () => "source" })).toBe("source");
+		expect(lines).toHaveLength(1);
+		expect(lines[0]).not.toContain("s3cret");
+		expect(lines[0]).not.toContain("db.internal");
+		expect(lines[0]).toContain("[REDACTED]");
 	});
 
 	test("two surfaces do not share a key", async () => {
@@ -194,6 +251,95 @@ describe("the same answer with the cache off, on and broken", () => {
 		expect(b).toEqual(a);
 		expect(c).toEqual(a);
 		expect(await live.searchMemory("lease", undefined, undefined, undefined, "cursor")).toEqual(a);
+		expect(on.sets).toBe(1);
+	});
+
+	test("brief matches", async () => {
+		const memory = [
+			{
+				kind: "decision",
+				text: "keep the prefix",
+				writer: "cursor",
+				trust: "verified",
+				version: 1,
+				needs_reverification: false,
+			},
+		];
+		function substrate(cache?: ReadThroughCache): Substrate {
+			const index = {
+				getGraph: async () => null,
+				memoryForBrief: async () => memory,
+			};
+			return new Substrate(loadConfig({}), { index: index as never, greptime: null, ...(cache ? { cache } : {}) });
+		}
+		const on = new FakeRedis();
+		const broken = new FakeRedis();
+		broken.fail = true;
+		const request = { surface: "cursor" as const, graph_id: "ut-mv10s1se-50878383" };
+		const off = substrate();
+		const live = substrate(cacheOf(on));
+		const down = substrate(cacheOf(broken));
+
+		const a = await off.brief(request);
+		const b = await live.brief(request);
+		const c = await down.brief(request);
+		expect(b).toEqual(a);
+		expect(c).toEqual(a);
+		expect(await live.brief(request)).toEqual(a);
+		expect(on.sets).toBe(1);
+		expect(a).toContain("keep the prefix");
+	});
+
+	test("graph_get matches", async () => {
+		const graph = {
+			graph_id: "ut-mv10s1se-50878383",
+			notion_task_page: null,
+			repo: "swcstudiospace/agent-substrate",
+			branch: "main",
+			surface: "cursor",
+			status: "active",
+			pr_url: null,
+			created: "2026-10-09T00:00:00.000Z",
+			updated: "2026-10-09T00:00:00.000Z",
+			nodes: [
+				{
+					graph_id: "ut-mv10s1se-50878383",
+					node_id: "n3",
+					linear_issue_id: null,
+					linear_identifier: "SPE-9228",
+					notion_page: null,
+					state: "todo",
+					claimed_by: null,
+					claimed_at: null,
+					claim_session: null,
+					lease_id: "secret-lease",
+					lease_expires_at: null,
+					lease_heartbeat_at: null,
+					lease_epoch: 0,
+				},
+			],
+			steps: [],
+			edges: [],
+		};
+		function substrate(cache?: ReadThroughCache): Substrate {
+			const index = { getGraph: async () => graph };
+			return new Substrate(loadConfig({}), { index: index as never, greptime: null, ...(cache ? { cache } : {}) });
+		}
+		const on = new FakeRedis();
+		const broken = new FakeRedis();
+		broken.fail = true;
+		const off = substrate();
+		const live = substrate(cacheOf(on));
+		const down = substrate(cacheOf(broken));
+
+		const a = await off.getGraph("ut-mv10s1se-50878383", "cursor");
+		const b = await live.getGraph("ut-mv10s1se-50878383", "cursor");
+		const c = await down.getGraph("ut-mv10s1se-50878383", "cursor");
+		expect(b).toEqual(a);
+		expect(c).toEqual(a);
+		expect(await live.getGraph("ut-mv10s1se-50878383", "cursor")).toEqual(a);
+		expect(a).toMatchObject({ nodes: [{ node_id: "n3", lease_id: null }] });
+		expect(JSON.stringify(b)).not.toContain("secret-lease");
 		expect(on.sets).toBe(1);
 	});
 
