@@ -88,6 +88,10 @@ part in ordering. The table keeps `append_mode` for the same reason `agent_event
 does, and unlike `agent_events` it has **no** plain-`CREATE` fallback: without
 `append_mode` two events ingested in the same millisecond would collapse into one
 record, so a server that rejects the option gets a boot warning instead.
+`CREATE TABLE IF NOT EXISTS` does not add the option to a table that already
+exists. Before an ingest record is written, and before hourly membership is
+read, the live DDL is asked; a definite no skips the insert (writing could
+replace another event's record) and refuses the hour read.
 
 ### `anchors`: one row per anchored hour
 
@@ -314,9 +318,14 @@ throws naming the event, so a digest is never a partial root.
 An hour counts as closed 300 000 ms after it ends (`INGEST_LAG_MS`), far above the
 write timeout. If a record lands after its hour already closed, the substrate writes
 one journal line naming the event and the hour, since a root computed earlier would
-differ when recomputed. If the record cannot be written at all, the event is still
-stored: `emit` answers `stored: true` with a warning that no hourly anchor will cover
-it, and the caller must not re-emit it, because a retry would store a second event.
+differ when recomputed. If the ingest write cannot be confirmed — the attempts
+failed, or the live table is not in `append_mode` — the event is still stored:
+`emit` answers `stored: true` with a warning that coverage may be missing, and the
+caller must not re-emit it, because a retry would store a second event. The two
+attempts share a 1 s budget (`INGEST_BUDGET_MS`), inside the 1.5 s `substrate emit`
+deadline and the 3 s collector and git-hook deadlines when the event row itself
+landed quickly. A timeout is not proof the write was lost, so the warning does not
+say the hour will be uncovered.
 There is **no backfill**: events stored before this table first existed belong to no
 hour, and the first anchored hour is Phase 28's decision.
 

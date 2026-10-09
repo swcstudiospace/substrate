@@ -297,13 +297,14 @@ const DEDUP_WARNING =
 	"silently dropped if another shares its surface, repo, graph, kind and millisecond.";
 
 /**
- * Told to a caller whose event is stored but whose ingest record is not (D27-09).
+ * Told to a caller whose event is stored but whose ingest write could not be confirmed (D27-09).
  *
  * The event is durable, so the caller must not re-emit it: a retry would store a
- * second event with a new id. It is only left out of the hourly anchor.
+ * second event with a new id. A failed attempt is not proof the record is absent,
+ * so the warning says coverage may be missing.
  */
 const INGEST_NOT_RECORDED =
-	"the event is stored, but its ingest order could not be recorded, so an hourly anchor will not cover it. " +
+	"the event is stored, but its ingest write could not be confirmed, so hourly coverage may be missing. " +
 	"Do not re-emit it: a retry would store a second event.";
 
 /**
@@ -632,7 +633,7 @@ export class Substrate {
 			if (cause instanceof IngestNotRecorded) {
 				// Branch first: this error means the event row is already stored. Reporting
 				// it as `stored: false` would invite a retry that mints a second event.
-				process.stderr.write(`[substrate] event ${event.id} stored but not anchored — ${error}\n`);
+				process.stderr.write(`[substrate] event ${event.id} stored but ingest unconfirmed — ${error}\n`);
 				return {
 					event,
 					stored: true,

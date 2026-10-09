@@ -1739,12 +1739,13 @@ describe("emit when the ingest record is not recorded", () => {
 
 		expect(result.stored).toBe(true);
 		expect(result.error).toBeUndefined();
-		expect(result.warning).toContain("hourly anchor will not cover it");
+		expect(result.warning).toContain("could not be confirmed");
+		expect(result.warning).toContain("may be missing");
 		expect(result.warning).toContain("Do not re-emit");
 		expect(written).toHaveLength(1);
 		expect(result.event.hash).toBe(written[0]?.hash ?? "");
-		// One journal line names the event, so an operator can find the unanchored row.
-		expect(log).toContain(`[substrate] event ${result.event.id} stored but not anchored`);
+		// One journal line names the event, without claiming the hour is certainly uncovered.
+		expect(log).toContain(`[substrate] event ${result.event.id} stored but ingest unconfirmed`);
 	});
 
 	test("the warning also carries the dedup caveat when the ledger may deduplicate", async () => {
@@ -1754,7 +1755,8 @@ describe("emit when the ingest record is not recorded", () => {
 		);
 
 		expect(result.stored).toBe(true);
-		expect(result.warning).toContain("hourly anchor will not cover it");
+		expect(result.warning).toContain("could not be confirmed");
+		expect(result.warning).toContain("may be missing");
 		expect(result.warning).toContain("may be silently dropped");
 	});
 
@@ -1929,6 +1931,9 @@ describe("hourDigest over a real ledger client", () => {
 	function client(ingest: Array<[string, number, number]>, hashes: Record<string, string> = HASH) {
 		return new (class extends GreptimeClient {
 			override async sql(statement: string): Promise<Array<Record<string, unknown>>> {
+				if (statement.includes('SHOW CREATE TABLE "event_ingest"')) {
+					return [{ "Create Table": "... WITH( append_mode = 'true' )" }];
+				}
 				if (statement.includes("SELECT DISTINCT")) return [];
 				if (statement.includes('FROM "agent_events"')) {
 					return Object.entries(hashes)

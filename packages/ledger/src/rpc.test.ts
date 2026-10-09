@@ -12,7 +12,7 @@ const IDS = [
 ];
 const SYSTEM = "11111111111111111111111111111111";
 
-type Reply = { result: unknown } | { error: { code: number; message: string } } | Error;
+type Reply = { result: unknown } | { error: { code: number; message: string } } | Error | string;
 
 /** A fake fetch answering from `replies` in order and recording every JSON-RPC request body. */
 function fakeRpc(replies: Reply[], attempts = 3) {
@@ -23,6 +23,7 @@ function fakeRpc(replies: Reply[], attempts = 3) {
 		const reply = replies.shift();
 		if (!reply) throw new Error("no reply scripted");
 		if (reply instanceof Error) throw reply;
+		if (typeof reply === "string") return new Response(reply, { status: 200 });
 		return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, ...reply }));
 	}) as unknown as typeof fetch;
 	const rpc = createRpc({
@@ -123,6 +124,23 @@ describe("retries and errors", () => {
 		const { rpc, requests } = fakeRpc([new Error("a"), new Error("b"), new Error("c"), { result: { value: 5 } }]);
 		await expect(rpc.balance(PAYER)).rejects.toBeInstanceOf(RpcError);
 		expect(requests.length).toBe(3);
+	});
+
+	test("null, a non-object, and an object with neither result nor error are retried", async () => {
+		const { rpc, requests } = fakeRpc(["null", "[]", '{"jsonrpc":"2.0","id":1}', { result: { value: 5 } }], 4);
+		expect(await rpc.balance(PAYER)).toBe(5);
+		expect(requests).toHaveLength(4);
+	});
+
+	test("malformed replies that exhaust the attempts throw RpcError", async () => {
+		const { rpc } = fakeRpc(["null", "{}", "null"]);
+		await expect(rpc.transactionMemo(SIG, "confirmed")).rejects.toBeInstanceOf(RpcError);
+	});
+
+	test("a JSON-RPC error is not retried", async () => {
+		const { rpc, requests } = fakeRpc([{ error: { code: 1, message: "no" } }, { result: { value: 5 } }]);
+		await expect(rpc.balance(PAYER)).rejects.toBeInstanceOf(RpcError);
+		expect(requests).toHaveLength(1);
 	});
 
 	test("a JSON-RPC error names the code and carries at most 200 characters of message", async () => {

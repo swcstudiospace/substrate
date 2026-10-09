@@ -115,11 +115,25 @@ export function createRpc({ url, timeoutMs, attempts, backoffMs, fetchImpl = fet
 				lastFailure = (cause instanceof Error ? cause.message : String(cause)).slice(0, ERROR_EXCERPT_CHARS);
 				continue;
 			}
-			let body: { result?: T; error?: { code?: unknown; message?: unknown } };
+			let parsed: unknown;
 			try {
-				body = JSON.parse(text);
+				parsed = JSON.parse(text);
 			} catch {
 				lastFailure = `non-JSON response: ${text.slice(0, ERROR_EXCERPT_CHARS)}`;
+				continue;
+			}
+			// `null`, an array, or an object with neither result nor error is not a
+			// JSON-RPC reply. Reading it as one throws (a null body) or returns
+			// undefined, which callers then treat as a transaction. Retry instead.
+			if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+				lastFailure = `malformed JSON-RPC response: ${text.slice(0, ERROR_EXCERPT_CHARS)}`;
+				continue;
+			}
+			const body = parsed as { result?: T; error?: { code?: unknown; message?: unknown } };
+			const hasResult = Object.prototype.hasOwnProperty.call(body, "result");
+			const hasError = Object.prototype.hasOwnProperty.call(body, "error") && body.error != null;
+			if (!hasResult && !hasError) {
+				lastFailure = `malformed JSON-RPC response: ${text.slice(0, ERROR_EXCERPT_CHARS)}`;
 				continue;
 			}
 			if (body.error) {
