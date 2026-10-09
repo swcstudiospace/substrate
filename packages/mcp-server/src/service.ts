@@ -363,13 +363,11 @@ export interface VerifyVerdict {
 	uncovered: { count: number; ids: string[] };
 	legacy: { count: number; ids: string[] };
 	/**
-	 * Retained ingest events with no event row in this graph's read (D28-22):
-	 * deleted outright, or moved to another graph. Either way the event
-	 * escaped its chain check while its hash still anchors the hour, so any
-	 * entry here fails the verify naming the event. Records from the
-	 * still-open hour are not entries: on a live graph an event appended
-	 * between the event read and the ingest read appears only in the later
-	 * result, and its hour is pending by definition, never digest-checked.
+	 * Retained ingest events with no event row in this graph's reads
+	 * (D28-22): deleted outright, or moved to another graph. Either way the
+	 * event escaped its chain check while its hash still anchors the hour,
+	 * so any entry here fails the verify naming the event. A live append
+	 * racing the two reads is not an entry: the re-read finds its row.
 	 */
 	missing: { count: number; ids: string[] };
 }
@@ -2579,12 +2577,11 @@ export class Substrate {
 	 * Reads the graph's ingest records by stored graph id, maps each event to
 	 * its first record's hour, splits pre-coverage record-less events to legacy
 	 * (counted, never failing) and post-coverage ones to uncovered (fail, naming
-	 * ids), requires every retained ingest event from a closed hour to appear
-	 * in the graph's rows (D28-22: a retained record with no row is deleted
-	 * or moved, and fails naming ids; records from the still-open hour are
-	 * live appends between the two reads, pending by definition, so they
-	 * are not missing), then digests each distinct hour whole and checks it
-	 * once.
+	 * ids), requires every retained ingest event to appear in the graph's
+	 * rows (D28-22: a retained record with no row is deleted or moved, and
+	 * fails naming ids; a record racing the reads is re-read first, so a
+	 * live append settles instead of failing), then digests each distinct
+	 * hour whole and checks it once.
 	 * Devnet reads run sequentially — the concurrency cap is one — under the
 	 * whole-verify budget; an hour never reached in budget reads `unverified`.
 	 */
@@ -2632,18 +2629,20 @@ export class Substrate {
 			if (!byHour.has(hour)) byHour.set(hour, []);
 		}
 	// Retained ingest events with no event row in this graph's read
-	// (D28-22): deleted outright, or moved to another graph. Either way
-	// the event escaped the chain check above while its stored hash still
-	// anchors the hour below, so the verdict fails naming them outright.
-	// Records from the still-open hour are not missing: on a live graph an
-	// event appended between the event read and the ingest read appears
-	// only in the later result, and its hour is pending by definition, so
-	// it settles on the next read instead of failing a healthy graph.
+	// (D28-22): deleted outright, moved to another graph — or appended on
+	// a live graph between the event read above and the ingest read. The
+	// event row is stored before its ingest record, so an observed record
+	// implies its row is already readable: re-read, and only ids still
+	// absent fail the verdict naming them. A live append lands in the
+	// re-read and settles; a deletion or move stays absent at any hour.
 	const rowIds = new Set(rows.map((row) => String(row.id)));
-	const missing = ingest
-		.filter((record) => !rowIds.has(record.event_id) && isClosed(hourStart(record.ingested_at), now, INGEST_LAG_MS))
-		.map((record) => record.event_id)
-		.sort();
+	const gap = ingest.map((record) => record.event_id).filter((id) => !rowIds.has(id));
+	let missing: string[] = [];
+	if (gap.length > 0) {
+		const fresh = await greptime.readEvents("graph_id", storedGraphId);
+		const freshIds = new Set(fresh.map((row) => String(row.id)));
+		missing = gap.filter((id) => !freshIds.has(id)).sort();
+	}
 
 		const pubkey = this.config.solana.pubkey;
 		let rpc: Rpc | null = injectedRpc ?? null;

@@ -3853,26 +3853,48 @@ describe("verifyGraph hour report", () => {
 
 	test("an event appended between the reads is pending, not missing", async () => {
 		// Live-graph race: the event row read ran first, then the append
-		// landed its ingest record before the ingest read. The record's hour
-		// is still open, so it is pending by definition — not a deletion or
-		// a move, and the healthy graph still verifies.
+		// landed its row and ingest record before the ingest read. The
+		// re-read finds the row, so the record settles: its hour is still
+		// open, pending by definition, and the healthy graph verifies.
 		const world = sessionRows();
 		const liveAt = H + 5 * HOUR + 1000;
 		const liveRecord = { event_id: "evt_live", event_ts: liveAt, ingested_at: liveAt };
+		const liveRow = { id: "evt_live", ts: liveAt, payload: "{}" };
+		let reads = 0;
 		const substrate = substrateWith({
-			readEvents: async () => world.rows,
+			readEvents: async () => (++reads === 1 ? world.rows : [...world.rows, liveRow]),
 			graphIngest: async () => [...world.records, liveRecord],
 			firstIngestMs: async () => H,
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
 		const verdict = await substrate.verifyGraph("ut-1", { now: liveAt + 60_000, rpc: rpcReturning(world.memo) as never });
+		expect(reads).toBe(2);
 		expect(verdict.ok).toBe(true);
 		expect(verdict.missing).toEqual({ count: 0, ids: [] });
 		expect(verdict.reason).toBeUndefined();
 		expect(verdict.hours).toHaveLength(2);
 		expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "anchored" });
 		expect(verdict.hours[1]).toMatchObject({ status: "pending", event_count: 0 });
+	});
+
+	test("a deletion in the still-open hour still fails naming the event", async () => {
+		// The re-read — not the hour — tells a live append from a deletion:
+		// a row gone at every read fails even while its hour is pending.
+		const world = sessionRows();
+		const deleted = world.events[1]?.id ?? "evt_deleted";
+		const substrate = substrateWith({
+			readEvents: async () => world.rows.slice(0, 1),
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 30 * 60_000, rpc: rpcReturning(world.memo) as never });
+		expect(verdict.hours[0]).toMatchObject({ status: "pending" });
+		expect(verdict.missing).toEqual({ count: 1, ids: [deleted] });
+		expect(verdict.reason).toContain(deleted);
+		expect(verdict.ok).toBe(false);
 	});
 
 	test("a slow event read spends the budget before the first hour", async () => {
