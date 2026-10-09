@@ -491,6 +491,7 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 		kind: "note",
 		surface: { fixed: "claude-code" },
 		actions: ["approval"],
+		runtime: "agentos",
 		carriesRepo: false,
 		periodic: false,
 		sample: () => ({
@@ -499,7 +500,7 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 			summary: "lane A approval requested for ut-p17-lanea",
 			session_id: "sess-p17-lanea-approval",
 			graph_id: "ut-p17-lanea",
-			payload: { action: "approval", decision: "requested" },
+			payload: { action: "approval", runtime: "agentos", decision: "requested" },
 		}),
 	},
 	{
@@ -508,6 +509,7 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 		kind: "warning",
 		surface: { fixed: "claude-code" },
 		actions: ["approval"],
+		runtime: "agentos",
 		carriesRepo: false,
 		periodic: false,
 		sample: () => ({
@@ -516,7 +518,7 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 			summary: "lane A approval denied for ut-p17-lanea",
 			session_id: "sess-p17-lanea-approval",
 			graph_id: "ut-p17-lanea",
-			payload: { action: "approval", decision: "denied", reason: "operator-denied" },
+			payload: { action: "approval", runtime: "agentos", decision: "denied", reason: "operator-denied" },
 		}),
 	},
 	{

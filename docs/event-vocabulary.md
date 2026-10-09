@@ -77,8 +77,8 @@ These apply to every source:
 | `dispatch.failed` | 24 | `warning` | `substrate` | `dispatch` | `dispatcher` | — | yes |
 | `lanea.session_start` | 32 | `session.start` | `claude-code` | — | `agentos` | — | no |
 | `lanea.session_end` | 32 | `session.end` | `claude-code` | — | `agentos` | — | no |
-| `lanea.approval` | 33 | `note` | `claude-code` | `approval` | — | — | no |
-| `lanea.approval.denied` | 33 | `warning` | `claude-code` | `approval` | — | — | no |
+ | `lanea.approval` | 33 | `note` | `claude-code` | `approval` | `agentos` | — | no |
+ | `lanea.approval.denied` | 33 | `warning` | `claude-code` | `approval` | `agentos` | — | no |
 | `muse.brief_writer` | 19 | — | — | — | — | — | no |
 | `memory.retain` | 26 | — | — | — | — | — | no |
 | `memory.recall` | 26 | — | — | — | — | — | no |
