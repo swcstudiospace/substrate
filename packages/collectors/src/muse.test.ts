@@ -342,6 +342,18 @@ describe("muse writer", () => {
 		expect(briefPathFor(repo)).toBeNull();
 	});
 
+	test("briefPathFor follows a linked repo root but still rejects a linked .substrate", () => {
+		const repo = tempGit({ origin: "https://github.com/acme/widgets.git" });
+		mkdirSync(join(repo, ".substrate"));
+		const linkParent = mkdtempSync(join(tmpdir(), "muse-link-"));
+		made.push(linkParent);
+		const link = join(linkParent, "repo-link");
+		symlinkSync(repo, link);
+		expect(briefPathFor(link)).toBe(join(link, ".substrate", "BRIEF.md"));
+		rmSync(join(repo, ".substrate"), { recursive: true, force: true });
+		expect(briefPathFor(link)).toBe(join(link, ".substrate", "BRIEF.md"));
+	});
+
 	test("fetchBrief reports an empty body as a failure", async () => {
 		process.env.SUBSTRATE_URL = "http://127.0.0.1:9";
 		stubFetch({ brief: "", status: 200 });

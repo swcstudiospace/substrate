@@ -133,6 +133,35 @@ describe("reconcile", () => {
 		expect(unknown.unmapped["not-a-real-agent"]).toBe(1);
 	});
 
+	test("reserved agent names keep own numeric totals across a save", () => {
+		const panes = [
+			pane({ pane_id: "w1:p1", terminal_id: "term_a", agent: "constructor" }),
+			pane({ pane_id: "w1:p2", terminal_id: "term_b", agent: "__proto__" }),
+			pane({ pane_id: "w1:p3", terminal_id: "term_c", agent: "toString" }),
+		];
+		const first = reconcile(emptyHerdrState(), panes, { now: NOW, attribute });
+		expect(first.transitions).toEqual([]);
+		for (const agent of ["constructor", "__proto__", "toString"]) {
+			expect(typeof first.unmapped[agent]).toBe("number");
+			expect(first.unmapped[agent]).toBe(1);
+		}
+		expect(Object.hasOwn(first.unmapped, "__proto__")).toBe(true);
+		const counted = commitReconcile(emptyHerdrState(), first, []);
+		const dir = mkdtempSync(join(tmpdir(), "herdr-state-"));
+		const path = join(dir, "herdr-offsets.json");
+		expect(saveHerdrState(path, counted)).toBe(true);
+		const loaded = loadHerdrState(path);
+		expect(loaded.firstRun).toBe(false);
+		for (const agent of ["constructor", "__proto__", "toString"]) {
+			expect(loaded.state.counters.unmapped[agent]).toBe(1);
+		}
+		const again = reconcile(counted, panes, { now: LATER, attribute });
+		expect(again.transitions).toEqual([]);
+		for (const agent of ["constructor", "__proto__", "toString"]) {
+			expect(again.unmapped[agent]).toBe(1);
+		}
+	});
+
 	test("a directory with no origin still starts, without repo", () => {
 		const result = reconcile(emptyHerdrState(), [pane()], { now: NOW, attribute: () => ({}) });
 		expect(result.transitions[0]?.event.repo).toBeUndefined();

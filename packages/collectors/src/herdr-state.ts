@@ -98,6 +98,28 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Own-property read of an unmapped total. A plain `map[agent] ?? 0` resolves
+ * `constructor` through the prototype to a function, turning its total into
+ * a string on the next bump.
+ */
+function unmappedCount(map: Record<string, number>, agent: string): number {
+	const count = Object.prototype.hasOwnProperty.call(map, agent) ? map[agent] : 0;
+	return typeof count === "number" ? count : 0;
+}
+
+/**
+ * Own-property write of an unmapped total. A plain `map[agent] = n` invokes
+ * the `__proto__` setter and creates no count; defining the data property
+ * keeps arbitrary agent names as real keys. (`seen` needs no equivalent:
+ * its keys are `paneId|terminalId` identities, which always contain `|` and
+ * can never collide with a prototype name. Copies by spread are already
+ * safe — spread defines data properties instead of assigning.)
+ */
+function setUnmappedCount(map: Record<string, number>, agent: string, count: number): void {
+	Object.defineProperty(map, agent, { value: count, enumerable: true, configurable: true, writable: true });
+}
+
 function normalizeState(raw: Record<string, unknown>): HerdrStateFile {
 	const panes: Record<string, HerdrPaneRecord> = {};
 	if (isRecord(raw.panes)) {
@@ -130,7 +152,7 @@ function normalizeState(raw: Record<string, unknown>): HerdrStateFile {
 		}
 		if (isRecord(raw.counters.unmapped)) {
 			for (const [agent, count] of Object.entries(raw.counters.unmapped)) {
-				if (typeof count === "number" && Number.isFinite(count)) counters.unmapped[agent] = count;
+				if (typeof count === "number" && Number.isFinite(count)) setUnmappedCount(counters.unmapped, agent, count);
 			}
 		}
 	}
@@ -254,7 +276,7 @@ export function reconcile(state: HerdrStateFile, panes: readonly HerdrPane[], op
 			const surface = surfaceForHerdrAgent(agent);
 			if (!surface) {
 				seeded.seen_unmapped[identity] = agent;
-				seeded.counters.unmapped[agent] = (seeded.counters.unmapped[agent] ?? 0) + 1;
+				setUnmappedCount(seeded.counters.unmapped, agent, unmappedCount(seeded.counters.unmapped, agent) + 1);
 				continue;
 			}
 			seeded.panes[identity] = recordFor(pane, agent, surface, now, options);
@@ -282,7 +304,7 @@ export function reconcile(state: HerdrStateFile, panes: readonly HerdrPane[], op
 		const surface = surfaceForHerdrAgent(agent);
 		if (!surface) {
 			if (seen[identity] !== agent) {
-				unmapped[agent] = (unmapped[agent] ?? 0) + 1;
+				setUnmappedCount(unmapped, agent, unmappedCount(unmapped, agent) + 1);
 				seen[identity] = agent;
 			}
 			if (prev) transitions.push(endOf(identity, prev, "agent_released"));

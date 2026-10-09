@@ -25,7 +25,7 @@ environment value.
 ```sh
 # 1. Back up the checkout and the installed units first — the rollback below
 #    restores from this tarball. Then pull main, so both entry files exist.
-tar -czf "/root/substrate-cutover-backup-$(date +%Y%m%dT%H%M%S).tgz" -C /root/src/repos/agent-substrate . --exclude=.git
+tar -czf "/root/substrate-cutover-backup-$(date +%Y%m%dT%H%M%S).tgz" --exclude=.git -C /root/src/repos/agent-substrate . || exit 1
 cp /etc/systemd/system/substrate-collector-herdr.service /etc/systemd/system/substrate-collector-muse.service /root/ 2>/dev/null || true
 git -C /root/src/repos/agent-substrate pull --ff-only origin main
 

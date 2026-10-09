@@ -157,6 +157,7 @@ describe("transport", () => {
 		panes = [{ pane_id: "w1:p1", terminal_id: "term_a", agent: "omp", agent_status: "working", cwd: "/tmp/repo" }];
 		const push = `${JSON.stringify({ event: "pane_agent_detected", data: { agent: "omp", pane_id: "w1:p1", type: "pane_agent_detected" } })}\n`;
 		global?.socket.write(push);
+		global?.socket.write(push);
 		await wait(120);
 		expect(posted).toHaveLength(1);
 		expect(posted[0]?.kind).toBe("session.start");

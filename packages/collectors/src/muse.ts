@@ -323,7 +323,8 @@ function noteFailure(state: MuseState, repo: string, reason: string, now: string
  * The `BRIEF.md` path when `<repo>/.substrate` is a real directory inside the
  * repo. Null when the component is a symlink or resolves outside the repo —
  * the writer follows neither, so a linked `.substrate` can never redirect the
- * brief into another directory.
+ * brief into another directory. The repo root itself is resolved first, so a
+ * checkout named through a directory link still refreshes its brief.
  */
 export function briefPathFor(repo: string): string | null {
 	const dir = join(repo, ".substrate");
@@ -333,14 +334,21 @@ export function briefPathFor(repo: string): string | null {
 		// Absent: resolved below after creation. Anything else is refused.
 		if (existsSync(dir)) return null;
 	}
+	const root = repo.replace(/\/+$/, "");
+	let realRoot: string;
+	try {
+		realRoot = realpathSync(root);
+	} catch {
+		realRoot = root;
+	}
 	let realDir: string;
 	try {
 		realDir = realpathSync(dir);
 	} catch {
-		realDir = dir;
+		// Absent: creation lands `<realRoot>/.substrate`, so compare that.
+		realDir = join(realRoot, ".substrate");
 	}
-	const root = repo.replace(/\/+$/, "");
-	if (realDir !== root && !realDir.startsWith(`${root}/`)) return null;
+	if (realDir !== realRoot && !realDir.startsWith(`${realRoot}/`)) return null;
 	return join(dir, "BRIEF.md");
 }
 
