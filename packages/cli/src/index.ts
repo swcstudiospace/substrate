@@ -449,7 +449,7 @@ switch (command) {
 		process.exit(
 			await runDocs(rest, {
 				url: base(),
-				token: process.env.SUBSTRATE_TOKEN?.trim() || undefined,
+				token: resolveBearer("substrate", process.env) ?? undefined,
 				timeoutMs: docsTimeout(process.env.SUBSTRATE_DOCS_TIMEOUT_MS),
 				cwd: process.cwd(),
 				out: (text) => process.stdout.write(text),

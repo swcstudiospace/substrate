@@ -30,6 +30,7 @@ import { dirname, join, resolve } from "node:path";
 import { loadManifest } from "../../mcp-server/src/docs/manifest.ts";
 import { findDataset, loadRegistry } from "../../mcp-server/src/docs/registry.ts";
 import { parseArgs, str, type Args } from "./args.ts";
+import { resolveBearer } from "./token.ts";
 
 /**
  * The page-content cap, pinned equal to the server's own cap: a file bigger
@@ -784,7 +785,7 @@ if (import.meta.main) {
 		watch: process.env.SUBSTRATE_DOCS_WATCH ?? "",
 		stateDir: process.env.SUBSTRATE_DOCS_STATE?.trim() || "/var/lib/substrate/docs",
 		url: process.env.SUBSTRATE_URL?.trim() || DEFAULT_URL,
-		token: process.env.SUBSTRATE_TOKEN?.trim() || undefined,
+		token: resolveBearer("substrate", process.env) ?? undefined,
 		timeoutMs: docsTimeout(process.env.SUBSTRATE_DOCS_TIMEOUT_MS),
 		agentSkillsPath: process.env.SUBSTRATE_AGENT_SKILLS_PATH?.trim() || "/root/agent-skills",
 		remoteTemplate: process.env.SUBSTRATE_DOCS_REMOTE_TEMPLATE?.trim() || "https://github.com/{slug}.git",

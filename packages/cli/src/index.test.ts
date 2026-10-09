@@ -124,6 +124,21 @@ describe("substrate docs ingest", () => {
 		expect(stub.seen[0]?.authorization).toBe("Bearer tok-real");
 		expect(stub.seen[0]?.path).toBe("/docs/ingest");
 	});
+	test("a token file without the env value still authenticates", async () => {
+		stub.seen = [];
+		stub.reply = { status: 200, body: { ...UPLOADED, status: "dry_run", wouldUpload: true } };
+		const dir = mkdtempSync(join(scratch, "tokdir-"));
+		const file = join(dir, "bearer");
+		writeFileSync(file, "tok-file\n");
+		const result = await spawn(base(page("via-file.md", "# Hi\n"), ["--dry-run"]), {
+			SUBSTRATE_URL: stub.url,
+			SUBSTRATE_TOKEN_FILE: file,
+			SUBSTRATE_TOKENS_DIR: dir,
+		});
+		expect(result.code).toBe(0);
+		expect(stub.seen).toHaveLength(1);
+		expect(stub.seen[0]?.authorization).toBe("Bearer tok-file");
+	});
 
 	test("a file over the cap is refused before anything is posted", async () => {
 		stub.seen = [];
