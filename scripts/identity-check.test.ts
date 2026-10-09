@@ -203,10 +203,12 @@ describe("the tracked manifest", () => {
 		for (const client of manifest.clients) {
 			if (isLive(client.state)) expect(required.has(tokenEnvName(client.surface as Surface))).toBe(true);
 		}
+		// Skills sync is a live substrate client, so the server must hold its bearer.
+		expect(required.has("SUBSTRATE_TOKEN_SUBSTRATE")).toBe(true);
 		// Surfaces with no live client stay out: swarm workspaces provision
 		// on install, herdr-only and muse surfaces ride the collector gate,
 		// and dormant phases restore in their own window.
-		for (const name of ["SUBSTRATE_TOKEN_SWARM_A01_ORCH", "SUBSTRATE_TOKEN_CODEX", "SUBSTRATE_TOKEN_MUSE", "SUBSTRATE_TOKEN_SUBSTRATE"]) {
+		for (const name of ["SUBSTRATE_TOKEN_SWARM_A01_ORCH", "SUBSTRATE_TOKEN_CODEX", "SUBSTRATE_TOKEN_MUSE"]) {
 			expect(required.has(name)).toBe(false);
 		}
 	});

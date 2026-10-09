@@ -11,9 +11,9 @@ ConditionPathExists=/opt/agent-substrate/current/packages/miner/src/substrate_mi
 
 [Service]
 Type=oneshot
-# This tick must not load /etc/substrate/substrate.env. Its drop-in
+# This tick must not load the MCP server's shared env file. Its drop-in
 # substrate-skills-bridge.service.d/10-environment.conf points at
-# /etc/substrate/skills-bridge.env (names only in infra/vps/README.md), which
+# /etc/substrate/substrate-bridge.env (names only in infra/vps/README.md), which
 # must never define a single-token variable: the bridge refuses to run while
 # one is set and serves hermes, omp and grok-build from the tokens dir instead.
 # One tick: group ~/.hermes/pending/skills by skill name, propose library

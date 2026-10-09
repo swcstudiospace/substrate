@@ -11,9 +11,9 @@ ConditionPathExists=/opt/agent-substrate/current/packages/projector/src/skills-s
 
 [Service]
 Type=oneshot
-# This tick must not load /etc/substrate/substrate.env. Its drop-in
+# This tick must not load the MCP server's shared env file. Its drop-in
 # substrate-skills-sync.service.d/10-environment.conf points at
-# /etc/substrate/skills-sync.env (names only in infra/vps/README.md).
+# /etc/substrate/substrate-skills-sync.env (names only in infra/vps/README.md).
 # One tick: refuse a dirty tree, a branch other than main or a diverged
 # history with a warning event; otherwise fetch + merge --ff-only
 # origin/main in /root/agent-skills, then the skills projector. Nothing else

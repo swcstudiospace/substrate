@@ -221,7 +221,7 @@ EnvironmentFile=${SHARED_ENV_FILE}
 		);
 		const units = loadUnits(dir, true);
 		const findings = diagnose(units, treeOf("packages/dispatcher/src/substrate_dispatcher/__main__.py"));
-		expect(findings.map((finding) => finding.code)).toEqual(["restart-loop"]);
+		expect(findings.map((finding) => finding.code)).toEqual(["restart-loop", "shared-env"]);
 		expect(findings[0]?.detail).toContain("SUBSTRATE_DISPATCH_DISABLED=1");
 		expect(JSON.stringify(findings)).not.toContain("PLANE_SECRET");
 		expect(JSON.stringify(findings)).not.toContain("should-not-surface");
@@ -278,7 +278,7 @@ describe("skills units", () => {
 			`[Service]
 WorkingDirectory=${RELEASE_CURRENT}
 ExecStart=/root/.local/share/reflex/bun/bin/bun ${SYNC_ENTRY}
-EnvironmentFile=/etc/substrate/skills-sync.env
+EnvironmentFile=/etc/substrate/substrate-skills-sync.env
 `,
 		);
 		expect(diagnose([unit], treeOf(SYNC_ENTRY))).toEqual([]);
@@ -293,7 +293,7 @@ WorkingDirectory=${RELEASE_CURRENT}
 ExecStart=/usr/bin/python3 -m substrate_miner bridge --once
 Environment=PYTHONPATH=${RELEASE_CURRENT}/packages/miner/src
 Environment=PYTHONDONTWRITEBYTECODE=1
-EnvironmentFile=/etc/substrate/skills-bridge.env
+EnvironmentFile=/etc/substrate/substrate-bridge.env
 `,
 		);
 		expect(diagnose([unit], treeOf(BRIDGE_MAIN))).toEqual([]);
@@ -320,7 +320,7 @@ EnvironmentFile=${SHARED_ENV_FILE}
 			[
 				`[Service]
 EnvironmentFile=
-EnvironmentFile=/etc/substrate/skills-bridge.env
+EnvironmentFile=/etc/substrate/substrate-bridge.env
 `,
 			],
 		);
@@ -338,7 +338,7 @@ EnvironmentFile=/etc/substrate/skills-bridge.env
 			expect(text).not.toMatch(/SUBSTRATE_TOKEN_FILE\s*=/);
 			expect(text).not.toContain(SHARED_ENV_FILE);
 		}
-		expect(dropIn).toContain("EnvironmentFile=/etc/substrate/skills-bridge.env");
+		expect(dropIn).toContain("EnvironmentFile=/etc/substrate/substrate-bridge.env");
 	});
 
 	test("the skills timers keep the five-minute tick with boot delays", () => {
@@ -399,10 +399,10 @@ describe("repo units", () => {
 		// Phase 22 put the skills ticks on the same release shape with their own
 		// env files: neither may load the shared server env.
 		const sync = units.find((unit) => unit.name === "substrate-skills-sync.service");
-		expect(sync?.environmentFiles).toEqual(["/etc/substrate/skills-sync.env"]);
+		expect(sync?.environmentFiles).toEqual(["/etc/substrate/substrate-skills-sync.env"]);
 		expect(sync?.environmentFiles).not.toContain(SHARED_ENV_FILE);
 		const bridge = units.find((unit) => unit.name === "substrate-skills-bridge.service");
-		expect(bridge?.environmentFiles).toEqual(["/etc/substrate/skills-bridge.env"]);
+		expect(bridge?.environmentFiles).toEqual(["/etc/substrate/substrate-bridge.env"]);
 		expect(bridge?.environmentFiles).not.toContain(SHARED_ENV_FILE);
 		expect(bridge?.environment.get("PYTHONPATH")).toBe("/opt/agent-substrate/current/packages/miner/src");
 		expect(bridge?.environment.get("PYTHONDONTWRITEBYTECODE")).toBe("1");

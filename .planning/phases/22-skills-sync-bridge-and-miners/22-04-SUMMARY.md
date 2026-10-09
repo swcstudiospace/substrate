@@ -28,7 +28,7 @@ doc plus README/propose edits that make the L1-L8 cutover mechanical.
   `ConditionPathExists` guard on the miner `__main__`; timer keeps the 5 min
   tick with `OnBootSec=3min`.
 - Two drop-ins (`*.service.d/10-environment.conf`) pointing at
-  `/etc/substrate/skills-sync.env` and `/etc/substrate/skills-bridge.env`
+  `/etc/substrate/substrate-skills-sync.env` and `/etc/substrate/substrate-bridge.env`
   (root-owned, mode 0600, names only in the README); the bridge drop-in states
   the no-single-token rule.
 - `scripts/doctor-units.ts` — `shared-env` now covers every non-`substrate-mcp`

@@ -36,8 +36,8 @@ All six units in this directory use `WorkingDirectory=/opt/agent-substrate/curre
 | `substrate-collector-grok.service` | `substrate-collector-grok.service.d/10-environment.conf` | `/etc/substrate/collector-grok.env` |
 | `substrate-collector-herdr.service` | `substrate-collector-herdr.service.d/10-environment.conf` | `/etc/substrate/substrate-collector-herdr.env` |
 | `substrate-collector-muse.service` | `substrate-collector-muse.service.d/10-environment.conf` | `/etc/substrate/substrate-collector-muse.env` |
-| `substrate-skills-sync.service` | `substrate-skills-sync.service.d/10-environment.conf` | `/etc/substrate/skills-sync.env` |
-| `substrate-skills-bridge.service` | `substrate-skills-bridge.service.d/10-environment.conf` | `/etc/substrate/skills-bridge.env` |
+| `substrate-skills-sync.service` | `substrate-skills-sync.service.d/10-environment.conf` | `/etc/substrate/substrate-skills-sync.env` |
+| `substrate-skills-bridge.service` | `substrate-skills-bridge.service.d/10-environment.conf` | `/etc/substrate/substrate-bridge.env` |
 
 The MCP server is the process that needs the shared env file. The Grok collector must not load it. Create `collector-grok.env` (root-owned, mode 0600) with only the names this process reads: `SUBSTRATE_URL`, `SUBSTRATE_TOKEN`, and optionally `GROK_SESSIONS_DIR`. `SUBSTRATE_COLLECTOR_STATE` is already set on the unit. Do not put database URLs, plane keys, handoff keys, or review tokens in that file. No values belong in git.
 
@@ -45,7 +45,7 @@ The same rule holds for the other two collectors. `substrate-collector-herdr.env
 
 The herdr and muse file names carry the `substrate-` prefix and the Grok one does not. Those are the paths `infra/identity/clients.json` delivers each token to (and the Muse hook's default `tokenFile`), so `bun run identity:check` reads the same file the unit loads. `scripts/doctor-units.test.ts` pins the two together.
 
-The skills ticks follow the same rule with their own files. `skills-sync.env` holds `SUBSTRATE_URL`, the `substrate` bearer (`SUBSTRATE_TOKEN`, or a token file named by `SUBSTRATE_TOKEN_FILE`, or the tokens dir), and optionally `SUBSTRATE_SKILLS_LIBRARY` or `SUBSTRATE_SKILLS_STATE`. `skills-bridge.env` holds `SUBSTRATE_URL` and optionally `SUBSTRATE_TOKENS_DIR`; it must never define a single-token variable, because the bridge refuses to run while one is set and serves `hermes`, `omp` and `grok-build` from the tokens dir instead. Both files are root-owned, mode 0600, names only here and values only on the host.
+The skills ticks follow the same rule with their own files. `substrate-skills-sync.env` holds `SUBSTRATE_URL`, the `substrate` bearer (`SUBSTRATE_TOKEN`, which is the name `identity:check` requires in that file; a token file named by `SUBSTRATE_TOKEN_FILE` or the tokens dir also resolves), and optionally `SUBSTRATE_SKILLS_LIBRARY` or `SUBSTRATE_SKILLS_STATE`. `substrate-bridge.env` holds `SUBSTRATE_URL` (the name `identity:check` requires there) and optionally `SUBSTRATE_TOKENS_DIR`; it must never define `SUBSTRATE_TOKEN` or `SUBSTRATE_TOKEN_FILE`, because the bridge refuses to run while one is set and serves `hermes`, `omp` and `grok-build` from the tokens dir instead. Both files are root-owned, mode 0600, names only here and values only on the host.
 
 The two skills timers (`substrate-skills-sync.timer`, `substrate-skills-bridge.timer`) tick every 5 minutes with a 30 s accuracy and their boot delays. Both services are oneshot, so they pick up the release on their next tick: a deploy never restarts the timers, and a rollback (`deploy-release.sh rollback`) takes effect at the next fire with no restart either. `SUBSTRATE_RELEASE_UNITS` can still name them for an explicit restart, but the default list leaves them alone.
 

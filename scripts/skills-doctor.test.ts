@@ -86,7 +86,7 @@ describe("hermesApprovalFindings", () => {
 
 describe("bridgeEnvFindings", () => {
 	test("a tokenless env file is clean", () => {
-		expect(bridgeEnvFindings("/etc/substrate/skills-bridge.env", "SUBSTRATE_URL=http://127.0.0.1:7410\n")).toEqual(
+		expect(bridgeEnvFindings("/etc/substrate/substrate-bridge.env", "SUBSTRATE_URL=http://127.0.0.1:7410\n")).toEqual(
 			[],
 		);
 	});
@@ -94,7 +94,7 @@ describe("bridgeEnvFindings", () => {
 	test("a single-token variable names the variable and never its value", () => {
 		for (const name of ["SUBSTRATE_TOKEN", "SUBSTRATE_TOKEN_FILE"] as const) {
 			const findings = bridgeEnvFindings(
-				"/etc/substrate/skills-bridge.env",
+				"/etc/substrate/substrate-bridge.env",
 				`${name}=hunter2-bridge-secret\n`,
 			);
 			expect(findings.map((finding) => finding.code)).toEqual(["bridge-env"]);
@@ -104,7 +104,7 @@ describe("bridgeEnvFindings", () => {
 	});
 
 	test("a missing env file is a finding", () => {
-		expect(bridgeEnvFindings("/etc/substrate/skills-bridge.env", null).map((finding) => finding.code)).toEqual([
+		expect(bridgeEnvFindings("/etc/substrate/substrate-bridge.env", null).map((finding) => finding.code)).toEqual([
 			"bridge-env",
 		]);
 	});

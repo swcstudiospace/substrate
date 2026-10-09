@@ -63,7 +63,7 @@ export interface DoctorPaths {
 
 export const LIBRARY_DIR_DEFAULT = "/root/agent-skills";
 export const HOME_DEFAULT = "/root";
-export const BRIDGE_ENV_DEFAULT = "/etc/substrate/skills-bridge.env";
+export const BRIDGE_ENV_DEFAULT = "/etc/substrate/substrate-bridge.env";
 export const OMP_LINK_REL = ".omp/agent/extensions/substrate-skills.ts";
 export const OMP_LINK_TARGET = "/opt/agent-substrate/current/packages/projector/omp/substrate-skills.ts";
 export const HERMES_CONFIG_REL = ".hermes/config.yaml";
