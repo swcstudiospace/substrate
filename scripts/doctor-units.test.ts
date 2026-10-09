@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -284,10 +284,27 @@ describe("repo units", () => {
 		const mcp = units.find((unit) => unit.name === "substrate-mcp.service");
 		expect(mcp?.environmentFiles).toEqual([SHARED_ENV_FILE]);
 		// The lane-B cutover (infra/vps/README.md operator step 4) moved herdr and
-		// muse onto the release tree with collector-only env files, like grok.
+		// muse onto the release tree with collector-only env files, like grok. Each
+		// unit loads exactly the file the identity manifest delivers its token to, so
+		// identity:check and the running collector read the same file.
+		const manifest = JSON.parse(readFileSync(join(repoRoot, "infra/identity/clients.json"), "utf8")) as {
+			clients: { id: string; delivery: { path?: string } }[];
+			herdr_env_files: string[];
+		};
+		const deliveredTo = (id: string) => manifest.clients.find((client) => client.id === id)?.delivery.path ?? "";
+		const expected = {
+			grok: deliveredTo("collector-grok"),
+			herdr: manifest.herdr_env_files[0] ?? "",
+			muse: deliveredTo("writer-muse"),
+		} as const;
+		expect(expected).toEqual({
+			grok: "/etc/substrate/collector-grok.env",
+			herdr: "/etc/substrate/substrate-collector-herdr.env",
+			muse: "/etc/substrate/substrate-collector-muse.env",
+		});
 		for (const name of ["grok", "herdr", "muse"] as const) {
 			const unit = units.find((candidate) => candidate.name === `substrate-collector-${name}.service`);
-			expect(unit?.environmentFiles).toEqual([`/etc/substrate/collector-${name}.env`]);
+			expect(unit?.environmentFiles).toEqual([expected[name]]);
 			expect(unit?.environmentFiles).not.toContain(SHARED_ENV_FILE);
 		}
 		expect(diagnose(units, listGitTree(repoRoot, "HEAD"))).toEqual([]);

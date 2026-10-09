@@ -28,7 +28,7 @@ cp -a /var/lib/substrate/herdr-offsets.json /var/lib/substrate/muse-offsets.json
 #    its process reads: herdr SUBSTRATE_URL, SUBSTRATE_TOKEN (and optionally
 #    HERDR_SOCKET_PATH / HERDR_SESSION); muse SUBSTRATE_URL, SUBSTRATE_TOKEN,
 #    SUBSTRATE_MUSE_REPOS. Never point a collector at /etc/substrate/substrate.env.
-#    Files: /etc/substrate/collector-herdr.env, /etc/substrate/collector-muse.env
+#    Files: /etc/substrate/substrate-collector-herdr.env, /etc/substrate/substrate-collector-muse.env
 
 # 3. Install a unit and its drop-in from the release tree, then reload.
 cd /opt/agent-substrate/current
