@@ -30,6 +30,26 @@ describe("EVENT_SOURCES samples survive the write-path gate", () => {
 	}
 });
 
+describe("each sample matches its own row", () => {
+	for (const row of EVENT_SOURCES) {
+		test(`sample of ${row.id} carries its row's kind, action and runtime`, () => {
+			const sample = row.sample();
+			const payload = sample.payload ?? {};
+			expect({ id: row.id, kind: sample.kind }).toEqual({ id: row.id, kind: row.kind });
+			if (row.actions) {
+				expect(row.actions).toContain(payload["action"]);
+			} else {
+				expect({ id: row.id, action: payload["action"] ?? null }).toEqual({ id: row.id, action: null });
+			}
+			if (row.runtime) {
+				expect({ id: row.id, runtime: payload["runtime"] }).toEqual({ id: row.id, runtime: row.runtime });
+			} else {
+				expect({ id: row.id, runtime: payload["runtime"] ?? null }).toEqual({ id: row.id, runtime: null });
+			}
+		});
+	}
+});
+
 describe("every roadmap source has at least one row", () => {
 	// One prefix per source CONTEXT names, so an emptied table cannot pass:
 	// a vacuous EVENT_SOURCES fails here before it fails anywhere else.
@@ -147,19 +167,20 @@ describe("docs/event-vocabulary.md equals the table", () => {
 		expect({ docIds }).toEqual({ docIds: tableIds });
 	});
 
-	test("each doc row carries its row's kind, surface and actions", () => {
-		const docRows = parseMarkedTable(readFileSync(DOC, "utf8"));
-		const byId = new Map(docRows.map((row) => [row["id"], row]));
-		for (const row of EVENT_SOURCES) {
-			const doc = byId.get(row.id);
-			expect({ id: row.id, kind: doc?.["kind"], surface: doc?.["surface"], actions: doc?.["action"] }).toEqual({
-				id: row.id,
-				kind: row.kind,
-				surface: typeof row.surface === "string" ? row.surface : row.surface.fixed,
-				actions: row.actions ? [...row.actions].join(", ") : "—",
-			});
-		}
-		// Silent sources deliberately emit nothing: the doc holds an em dash.
+	test("each doc row carries its row's kind, surface, actions and runtime", () => {
+ 		const docRows = parseMarkedTable(readFileSync(DOC, "utf8"));
+ 		const byId = new Map(docRows.map((row) => [row["id"], row]));
+ 		for (const row of EVENT_SOURCES) {
+ 			const doc = byId.get(row.id);
+ 			expect({ id: row.id, kind: doc?.["kind"], surface: doc?.["surface"], actions: doc?.["action"] }).toEqual({
+ 				id: row.id,
+ 				kind: row.kind,
+ 				surface: typeof row.surface === "string" ? row.surface : row.surface.fixed,
+ 				actions: row.actions ? [...row.actions].join(", ") : "—",
+ 			});
+ 			expect({ id: row.id, runtime: doc?.["runtime"] }).toEqual({ id: row.id, runtime: row.runtime ?? "—" });
+ 		}
+ 		// Silent sources deliberately emit nothing: the doc holds an em dash.
 		for (const row of SILENT_SOURCES) {
 			const doc = byId.get(row.id);
 			expect({ id: row.id, kind: doc?.["kind"], surface: doc?.["surface"], actions: doc?.["action"] }).toEqual({
