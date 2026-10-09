@@ -2029,6 +2029,27 @@ describe("proposeSkill", () => {
 		return error as SkillProposalDenied;
 	};
 
+	test("an invalid skills library is refused before the proposer runs", async () => {
+		const calls: unknown[] = [];
+		const proposer: SkillProposer = {
+			propose: async () => {
+				calls.push("ran");
+				return opened;
+			},
+		};
+		const config = loadConfig({});
+		config.skills.problem = "SUBSTRATE_SKILLS_REMOTE_URL must be a file:// path to propose to a non-default library";
+		const substrate = new Substrate(config, {
+			index: null,
+			greptime: { ensureAppendMode: async () => true, lastHash: async () => null, insertEvent: async () => undefined } as never,
+			skills: proposer,
+		});
+		const error = await substrate.proposeSkill(request, asAgent).catch((cause: unknown) => cause);
+		expect(error).toBeInstanceOf(ProposeFailed);
+		expect((error as Error).message).toContain("SUBSTRATE_SKILLS_REMOTE_URL");
+		expect(calls).toEqual([]);
+	});
+
 	test("an anonymous caller is refused 401 before the proposer runs, and nothing is emitted", async () => {
 		const { substrate, calls, events } = world(opened);
 		const error = await denied(substrate.proposeSkill(request, { surface: null, isOperator: false }));

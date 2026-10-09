@@ -6,7 +6,7 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import type { Surface } from "../types.ts";
@@ -30,6 +30,7 @@ import {
 	missingMirrorMessage,
 	nameStatusArgv,
 	originUrlArgv,
+	PR_BODY_MAX,
 	prBody,
 	prCreateArgv,
 	prListHeadArgv,
@@ -45,6 +46,7 @@ import {
 	type RunResult,
 	type Runner,
 	setUrlArgv,
+	stagedArgv,
 	type SkillsLibrary,
 	validateProposal,
 	writeTree,
@@ -82,7 +84,7 @@ afterEach(() => {
 function step(argv: readonly string[]): string {
 	if (argv[0] === "gh") return `gh ${argv[1]} ${argv[2]}`;
 	if (argv[1] === "clone") return "clone";
-	const sub = argv.find((a) => ["fetch", "remote", "checkout", "add", "diff", "commit", "push"].includes(a)) ?? "?";
+	const sub = argv.find((a) => ["fetch", "remote", "checkout", "add", "diff", "commit", "push", "ls-files"].includes(a)) ?? "?";
 	if (sub === "remote") return argv.includes("set-url") ? "set-url" : "get-url";
 	if (sub === "diff") return argv.includes("--quiet") ? "diff-quiet" : "name-status";
 	return sub;
@@ -118,7 +120,8 @@ function fake(opts: FakeOptions = {}): { run: Runner; calls: string[][]; steps: 
 		}
 		await opts.onCall?.(s, argv);
 		await Promise.resolve();
-		return { code: 0, stdout: "", stderr: "", ...replies[s] };
+		const stdout = s === "ls-files" ? trackedNames(argv[2] as string) : "";
+		return { code: 0, stdout, stderr: "", ...replies[s] };
 	};
 	return { run, calls, steps: () => calls.map(step) };
 }
@@ -137,7 +140,25 @@ function ledgerLines(): Record<string, unknown>[] {
 }
 
 function writeLedger(line: Record<string, unknown>): void {
-	writeFileSync(join(state, "proposals.jsonl"), `${JSON.stringify(line)}\n`, { mode: 0o600 });
+	const record: Record<string, unknown> = { repo: LIBRARY_REPO, ...line };
+	if (line.repo === null) delete record.repo;
+	writeFileSync(join(state, "proposals.jsonl"), `${JSON.stringify(record)}\n`, { mode: 0o600 });
+}
+
+/** Files `git ls-files` would print after writeTree, for the fake runner. */
+function trackedNames(dir: string): string {
+	if (!existsSync(dir)) return "";
+	const out: string[] = [];
+	const walk = (current: string, rel: string) => {
+		for (const entry of readdirSync(current, { withFileTypes: true })) {
+			if (entry.isSymbolicLink()) continue;
+			const next = rel ? `${rel}/${entry.name}` : entry.name;
+			if (entry.isDirectory()) walk(join(current, entry.name), next);
+			else out.push(next);
+		}
+	};
+	walk(dir, "");
+	return out.length > 0 ? `${out.sort().join("\n")}\n` : "";
 }
 
 function sha(inp: ProposeInput = input(), mode: "overlay" | "replace" = "overlay"): string {
@@ -212,6 +233,49 @@ describe("validateProposal refusals (before any Runner call)", () => {
 		const error = await proposeSkill(big, options(f.run, { maxBytes: 1_000 })).catch((e: unknown) => e);
 		expect(error).toBeInstanceOf(ProposeRefused);
 		expect((error as Error).message).toContain("1000");
+		expect(f.calls).toEqual([]);
+	});
+
+	test("refuses a file that is also a parent of another file, before any runner call", async () => {
+		const f = fake();
+		const error = await proposeSkill(input({ files: { "SKILL.md": skillMd(), a: "x", "a/b.txt": "y" } }), options(f.run)).catch((e: unknown) => e);
+		expect(error).toBeInstanceOf(ProposeRefused);
+		expect((error as Error).message).toContain("a/b.txt");
+		expect(f.calls).toEqual([]);
+	});
+
+	test("refuses a credential in a path, a removal, a session id or a graph id without echoing it", async () => {
+		const token = `ghp_${"C".repeat(36)}`;
+		for (const overrides of [
+			{ files: { "SKILL.md": skillMd(), [`notes/${token}.md`]: "x" } },
+			{ remove: [`notes/${token}.md`] },
+			{ session_id: token },
+			{ graph_id: token },
+		]) {
+			const f = fake();
+			const error = await proposeSkill(input(overrides), options(f.run)).catch((e: unknown) => e);
+			expect(error).toBeInstanceOf(ProposeRefused);
+			expect((error as Error).message).toContain("secret-like");
+			expect((error as Error).message).not.toContain(token);
+			expect(f.calls).toEqual([]);
+		}
+	});
+
+	test("refuses frontmatter that redaction would stop being a string", async () => {
+		const f = fake();
+		const md = `---\nname: ${NAME}\ndescription: <private>local-only note</private>\n---\n\n# ${NAME}\n`;
+		const error = await proposeSkill(input({ files: { "SKILL.md": md } }), options(f.run)).catch((e: unknown) => e);
+		expect(error).toBeInstanceOf(ProposeRefused);
+		expect((error as Error).message).toContain("after redaction");
+		expect(f.calls).toEqual([]);
+	});
+
+	test("refuses a pull request body over the cap before any runner call", async () => {
+		const f = fake();
+		const remove = Array.from({ length: 2_000 }, (_, i) => `references/old-${i}.md`);
+		const error = await proposeSkill(input({ remove }), options(f.run)).catch((e: unknown) => e);
+		expect(error).toBeInstanceOf(ProposeRefused);
+		expect((error as Error).message).toContain(String(PR_BODY_MAX));
 		expect(f.calls).toEqual([]);
 	});
 });
@@ -309,6 +373,26 @@ describe("writeTree", () => {
 		expect(readFileSync(join(clone, "other", "SKILL.md"), "utf8")).toBe("other");
 		expect(existsSync(join(state, "SKILL.md"))).toBe(false);
 	});
+
+	test("a dangling symlink is removed instead of being followed", () => {
+		const clone = seeded();
+		const outside = join(state, "outside.txt");
+		rmSync(join(clone, NAME, "SKILL.md"));
+		symlinkSync(outside, join(clone, NAME, "SKILL.md"));
+		writeTree(clone, NAME, { "SKILL.md": "new" }, [], "overlay");
+		expect(readFileSync(join(clone, NAME, "SKILL.md"), "utf8")).toBe("new");
+		expect(existsSync(outside)).toBe(false);
+		expect(lstatSync(join(clone, NAME, "SKILL.md")).isSymbolicLink()).toBe(false);
+	});
+
+	test("a symlink parent is refused and the link target is untouched", () => {
+		const clone = seeded();
+		rmSync(join(clone, NAME, "references"), { recursive: true });
+		symlinkSync(join(clone, "other"), join(clone, NAME, "references"));
+		expect(() => writeTree(clone, NAME, { "references/x.md": "pwn" }, [], "overlay")).toThrow(/symlink/);
+		expect(readFileSync(join(clone, "other", "SKILL.md"), "utf8")).toBe("other");
+		expect(existsSync(join(clone, "other", "x.md"))).toBe(false);
+	});
 });
 
 describe("branch and argv builders", () => {
@@ -339,6 +423,7 @@ describe("branch and argv builders", () => {
 			setUrlArgv(dir, LIBRARY_URL),
 			checkoutArgv(dir, br),
 			addArgv(dir, "x"),
+			stagedArgv(dir, "x"),
 			nameStatusArgv(dir),
 			commitArgv(dir, "m"),
 			originUrlArgv(dir),
@@ -419,7 +504,7 @@ describe("proposeSkill ledger idempotence", () => {
 		const f = fake({ replies: { "diff-quiet": { code: 0 } } });
 		const result = await proposeSkill(input(), options(f.run));
 		expect(result).toMatchObject({ status: "unchanged", content_sha256: sha() });
-		expect(f.steps()).toEqual(["fetch", "clone", "set-url", "checkout", "add", "diff-quiet"]);
+		expect(f.steps()).toEqual(["fetch", "clone", "set-url", "checkout", "add", "ls-files", "diff-quiet"]);
 		expect(ledgerLines()).toEqual([]);
 	});
 
@@ -428,7 +513,7 @@ describe("proposeSkill ledger idempotence", () => {
 		const result = await proposeSkill(input(), options(f.run));
 		expect(result).toMatchObject({ status: "opened", pr_url: PR_URL, pr_number: 7, content_sha256: sha(), redactions: [] });
 		expect(result.branch).toMatch(/^skill\/claude-code\/demo-skill-\d{8}T\d{9}Z-[0-9a-f]{4}$/);
-		expect(f.steps()).toEqual(["fetch", "clone", "set-url", "checkout", "add", "diff-quiet", "commit", "get-url", "push", "gh pr create"]);
+		expect(f.steps()).toEqual(["fetch", "clone", "set-url", "checkout", "add", "ls-files", "diff-quiet", "commit", "get-url", "push", "gh pr create"]);
 		const lines = ledgerLines();
 		expect(lines.map((line) => line.state)).toEqual(["pushed", "opened"]);
 		expect(lines[1]).toMatchObject({ content_sha256: sha(), name: NAME, surface: "claude-code", branch: result.branch, pr_url: PR_URL, pr_number: 7 });
@@ -472,6 +557,11 @@ describe("proposeSkill ledger idempotence", () => {
 			[{ replies: { commit: { code: 1 } } }, {}],
 			[{}, { dryRun: true }],
 		];
+		for (const [fakeOpts, optOverrides] of runs) {
+			const f = fake(fakeOpts);
+			await proposeSkill(input(), options(f.run, optOverrides)).catch(() => undefined);
+			expect({ opts: optOverrides, left: proposeDirEntries() }).toEqual({ opts: optOverrides, left: [] });
+		}
 	});
 
 	test("dryRun counts the staged diff and makes no push, gh call or ledger line", async () => {
@@ -481,7 +571,7 @@ describe("proposeSkill ledger idempotence", () => {
 		});
 		const result = await proposeSkill(input(), options(f.run, { dryRun: true }));
 		expect(result).toMatchObject({ status: "dry_run", diff_added: 2, diff_changed: 1, diff_deleted: 1, content_sha256: sha() });
-		expect(f.steps()).toEqual(["fetch", "clone", "set-url", "checkout", "add", "name-status"]);
+		expect(f.steps()).toEqual(["fetch", "clone", "set-url", "checkout", "add", "ls-files", "name-status"]);
 		expect(ledgerLines()).toEqual([]);
 	});
 
@@ -529,6 +619,15 @@ describe("PR title and body", () => {
 		expect(body).toContain("Redacted spans");
 		expect(body).toContain("SKILL.md:10 assignment");
 		expect(body).not.toContain("abcdefghijklmnop1234");
+	});
+
+	test("a private block in the rationale is redacted before the cap, so the private text never reaches the body", () => {
+		const secret = "z".repeat(2_500);
+		const v = validateProposal(input(), { maxBytes: ROUTE_MAX_BYTES, mode: "overlay" });
+		const body = prBody(v, { rationale: `<private>${secret}</private>`, session_id: "sess", graph_id: "graph" });
+		expect(body).not.toContain(secret);
+		expect(body).toContain("[REDACTED]");
+		expect(body.length).toBeLessThanOrEqual(PR_BODY_MAX);
 	});
 
 	test("prBody names replace mode", () => {
@@ -613,6 +712,44 @@ describe("non-default library", () => {
 		expect(prUrlOf(`${REHEARSAL_PR_URL}\n`, REHEARSAL_LIBRARY.repo)).toEqual({ url: REHEARSAL_PR_URL, number: 9 });
 	});
 
+	test("a record for another library does not decide this one", async () => {
+		writeLedger({
+			ts: "t",
+			content_sha256: sha(),
+			name: NAME,
+			surface: "claude-code",
+			branch: "b1",
+			state: "opened",
+			repo: "someone/else",
+			pr_url: "https://github.com/someone/else/pull/3",
+			pr_number: 3,
+		});
+		const f = fake();
+		const result = await proposeSkill(input(), options(f.run));
+		expect(result).toMatchObject({ status: "opened", pr_url: PR_URL });
+		expect(f.steps()).not.toContain("gh pr view");
+		expect(f.steps()).toContain("push");
+	});
+
+	test("a record with no library identity is refused before any runner call", async () => {
+		writeLedger({
+			ts: "t",
+			content_sha256: sha(),
+			name: NAME,
+			surface: "claude-code",
+			branch: "b1",
+			state: "opened",
+			repo: null,
+			pr_url: PR_URL,
+			pr_number: 7,
+		});
+		const f = fake();
+		const error = await proposeSkill(input(), options(f.run)).catch((e: unknown) => e);
+		expect(error).toBeInstanceOf(ProposeFailed);
+		expect((error as Error).message).toContain("no library identity");
+		expect(f.calls).toEqual([]);
+	});
+
 	test("the default library is September's slug and remote", () => {
 		expect(DEFAULT_LIBRARY).toEqual({ repo: LIBRARY_REPO, remoteUrl: LIBRARY_URL });
 	});
@@ -623,10 +760,19 @@ describe("child environment", () => {
 		expect(childEnv("/home/svc")).toEqual({
 			PATH: process.env.PATH ?? "",
 			HOME: "/home/svc",
+			GIT_CONFIG_GLOBAL: "/dev/null",
+			GIT_CONFIG_SYSTEM: "/dev/null",
 			GIT_TERMINAL_PROMPT: "0",
 			GH_PROMPT_DISABLED: "1",
 		});
-		expect(Object.keys(childEnv("/home/svc")).sort()).toEqual(["GH_PROMPT_DISABLED", "GIT_TERMINAL_PROMPT", "HOME", "PATH"]);
+		expect(Object.keys(childEnv("/home/svc")).sort()).toEqual([
+			"GH_PROMPT_DISABLED",
+			"GIT_CONFIG_GLOBAL",
+			"GIT_CONFIG_SYSTEM",
+			"GIT_TERMINAL_PROMPT",
+			"HOME",
+			"PATH",
+		]);
 	});
 
 	test("childBinary maps only gh to the configured binary", () => {

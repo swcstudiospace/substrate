@@ -162,6 +162,28 @@ function refusePath(path: string, where: string): void {
 	if (problem) throw new ProposeRefused(`${where} ${JSON.stringify(path.slice(0, 200))}: ${problem}`);
 }
 
+/** A path that is also a prefix of another (`a` and `a/b.txt`) cannot be written as both a file and a directory. */
+function conflictingPaths(paths: readonly string[]): string | null {
+	const sorted = [...paths].sort();
+	for (let i = 0; i < sorted.length; i++) {
+		const parent = sorted[i] ?? "";
+		for (let j = i + 1; j < sorted.length; j++) {
+			const child = sorted[j] ?? "";
+			if (!child.startsWith(parent)) break;
+			if (child.startsWith(`${parent}/`)) return `${JSON.stringify(parent)} is both a file and a parent of ${JSON.stringify(child)}`;
+		}
+	}
+	return null;
+}
+
+/**
+ * Filenames, removals and ids leave the server in the tree or the PR body, and the file scan
+ * never sees them. Refuse when the shared redactor would change the text, and do not echo it.
+ */
+function refuseSecretText(label: string, value: string): void {
+	if (redact(value) !== value) throw new ProposeRefused(`${label} contains secret-like content`);
+}
+
 /**
  * Every content guard in one place, before any git or gh call: name, surface, paths, SKILL.md and
  * its frontmatter, text only, the byte cap, the removals, then the skill redactor's findings.
@@ -183,12 +205,15 @@ export function validateProposal(
 
 	let bytes = 0;
 	for (const [path, text] of Object.entries(files)) {
+		refuseSecretText("a file path", path);
 		refusePath(path, "file");
 		if (typeof text !== "string") throw new ProposeRefused(`file ${JSON.stringify(path)} is not text`);
 		if (text.includes("\u0000")) throw new ProposeRefused(`file ${JSON.stringify(path)} contains NUL (binary content is not proposed)`);
 		bytes += Buffer.byteLength(text, "utf8");
 	}
 	if (bytes > opts.maxBytes) throw new ProposeRefused(`proposal is ${bytes} bytes, over the limit of ${opts.maxBytes} bytes`);
+	const conflict = conflictingPaths(Object.keys(files));
+	if (conflict) throw new ProposeRefused(conflict);
 
 	const skillMd = files["SKILL.md"];
 	if (typeof skillMd !== "string") throw new ProposeRefused("files must contain SKILL.md");
@@ -203,14 +228,27 @@ export function validateProposal(
 	if (!Array.isArray(remove)) throw new ProposeRefused("remove must be an array of relative paths");
 	for (const path of remove) {
 		if (typeof path !== "string") throw new ProposeRefused("remove must be an array of relative paths");
+		refuseSecretText("a remove path", path);
 		refusePath(path, "remove");
 		if (path === "SKILL.md") throw new ProposeRefused("remove must never name SKILL.md");
 		if (Object.hasOwn(files, path)) throw new ProposeRefused(`${JSON.stringify(path)} is in both files and remove`);
 	}
+	if (input.session_id !== undefined) refuseSecretText("session_id", input.session_id);
+	if (input.graph_id !== undefined) refuseSecretText("graph_id", input.graph_id);
 
 	const scan = scanSkillFiles(files, opts.allowDocExamples ? { allowDocExamples: opts.allowDocExamples } : {});
 	if (scan.findings.length > 0) {
 		throw new ProposeRefused(`secret-like content in ${scan.findings.length} place(s); remove it or use an env reference`, scan.findings);
+	}
+
+	// Redaction can turn a string field into YAML that no longer matches the contract
+	// (`description: [REDACTED]` is an array). The text that will be committed is what is checked.
+	const redactedMd = scan.files["SKILL.md"];
+	const redactedFrontmatter = typeof redactedMd === "string" ? parseFrontmatter(redactedMd) : null;
+	if (!redactedFrontmatter) throw new ProposeRefused("SKILL.md frontmatter is not valid after redaction");
+	if (redactedFrontmatter.name !== name) throw new ProposeRefused(`SKILL.md frontmatter name must equal ${JSON.stringify(name)} after redaction`);
+	if (typeof redactedFrontmatter.description !== "string" || redactedFrontmatter.description.trim().length === 0) {
+		throw new ProposeRefused("SKILL.md frontmatter needs a non-empty string description after redaction");
 	}
 
 	const sortedRemove = [...new Set(remove)].sort();
@@ -231,6 +269,16 @@ export function validateProposal(
 
 // ── tree ────────────────────────────────────────────────────────────────────
 
+/** True when `path` is a symlink, including a dangling one (`existsSync` follows and would miss it). */
+function symlinkAt(path: string): boolean {
+	try {
+		return lstatSync(path).isSymbolicLink();
+	} catch (cause) {
+		if ((cause as NodeJS.ErrnoException).code === "ENOENT") return false;
+		throw cause;
+	}
+}
+
 /** The absolute target of `rel` under root, refusing anything that resolves outside or crosses a symlink. */
 function confined(root: string, rel: string): string {
 	const problem = pathProblem(rel);
@@ -240,7 +288,7 @@ function confined(root: string, rel: string): string {
 	let current = root;
 	for (const segment of rel.split("/").slice(0, -1)) {
 		current = join(current, segment);
-		if (existsSync(current) && lstatSync(current).isSymbolicLink()) {
+		if (symlinkAt(current)) {
 			throw new ProposeFailed(`refusing tree path ${JSON.stringify(rel)}: ${segment} is a symlink`);
 		}
 	}
@@ -257,13 +305,14 @@ export function writeTree(cloneDir: string, name: string, files: Record<string, 
 	const root = resolve(cloneDir, name);
 	const targets = Object.entries(files).map(([rel, text]) => [confined(root, rel), text] as const);
 	const removals = remove.map((rel) => confined(root, rel));
-	if (existsSync(root) && lstatSync(root).isSymbolicLink()) throw new ProposeFailed(`refusing skill dir ${name}: a symlink`);
+	if (symlinkAt(root)) throw new ProposeFailed(`refusing skill dir ${name}: a symlink`);
 	if (mode === "replace") rmSync(root, { recursive: true, force: true });
 	mkdirSync(root, { recursive: true });
 	for (const target of removals) rmSync(target, { recursive: true, force: true });
 	for (const [target, text] of targets) {
 		mkdirSync(dirname(target), { recursive: true });
-		if (existsSync(target) && lstatSync(target).isSymbolicLink()) rmSync(target);
+		// `existsSync` is false for a dangling link, and `writeFileSync` would follow it.
+		if (symlinkAt(target)) rmSync(target);
 		writeFileSync(target, text);
 	}
 }
@@ -294,6 +343,11 @@ export function checkoutArgv(dir: string, branch: string): string[] {
 /** Explicit pathspec: git ≥ 2.0 stages the removals under it too; never `add -A` on the whole clone. */
 export function addArgv(dir: string, name: string): string[] {
 	return ["git", "-C", dir, "add", "--", name];
+}
+
+/** What `git add` actually staged. An ignored path is absent, which the engine refuses. */
+export function stagedArgv(dir: string, name: string): string[] {
+	return ["git", "-C", dir, "ls-files", "--full-name", "--", name];
 }
 
 export function diffQuietArgv(dir: string): string[] {
@@ -372,7 +426,9 @@ export function prBody(v: ValidatedProposal, input: Pick<ProposeInput, "rational
 		"",
 		"## Rationale",
 		"",
-		redactSkillContent(input.rationale.slice(0, RATIONALE_MAX)).text || "(none given)",
+		// Redact the whole rationale first. Capping first can cut a `<private>` block in half and
+		// copy the private text into the PR.
+		redactSkillContent(input.rationale).text.slice(0, RATIONALE_MAX) || "(none given)",
 		"",
 		"## Redacted spans",
 		"",
@@ -401,12 +457,15 @@ export type Runner = (argv: readonly string[]) => Promise<RunResult>;
  * The exact environment git and gh children run with (D21-15): PATH, HOME, and the two
  * no-prompt flags. Store URLs, surface tokens and the handoff key never reach a child.
  * HOME is the configured or inherited home, /root when unset, so gh's stored credential
- * answers under systemd.
+ * answers under systemd. Git's own config is not: a host `url.*.insteadOf` must not
+ * redirect the push. That does not change where gh reads credentials.
  */
 export function childEnv(home?: string): Record<string, string> {
 	return {
 		PATH: process.env.PATH ?? "",
 		HOME: home ?? process.env.HOME ?? "/root",
+		GIT_CONFIG_GLOBAL: "/dev/null",
+		GIT_CONFIG_SYSTEM: "/dev/null",
 		GIT_TERMINAL_PROMPT: "0",
 		GH_PROMPT_DISABLED: "1",
 	};
@@ -499,18 +558,20 @@ type LedgerLine = {
 	surface: string;
 	branch: string;
 	state: LedgerState;
+	/** The library slug this record was opened against. Absent on a line written before it was recorded. */
+	repo?: string;
 	pr_url?: string;
 	pr_number?: number;
 };
 
-function ledgerLookup(path: string, sha: string): LedgerLine | null {
-	if (!existsSync(path)) return null;
-	let found: LedgerLine | null = null;
+function ledgerMatches(path: string, sha: string): LedgerLine[] {
+	if (!existsSync(path)) return [];
+	const found: LedgerLine[] = [];
 	for (const line of readFileSync(path, "utf8").split("\n")) {
 		if (!line.includes(sha)) continue;
 		try {
 			const parsed = JSON.parse(line) as LedgerLine;
-			if (parsed.content_sha256 === sha) found = parsed;
+			if (parsed.content_sha256 === sha) found.push(parsed);
 		} catch {
 			// a torn line never decides anything
 		}
@@ -561,7 +622,7 @@ async function openPr(
 	const created = await must(run, "gh pr create", prCreateArgv(branch, prTitle(v.name, v.surface), prBody(v, input), library.repo));
 	const pr = prUrlOf(created.stdout, library.repo);
 	if (!pr) throw new ProposeFailed(`gh pr create printed no pull request URL for ${library.repo}`);
-	ledgerAppend(ledger, { content_sha256: v.content_sha256, name: v.name, surface: v.surface, branch, state: "opened", pr_url: pr.url, pr_number: pr.number });
+	ledgerAppend(ledger, { content_sha256: v.content_sha256, name: v.name, surface: v.surface, branch, state: "opened", repo: library.repo, pr_url: pr.url, pr_number: pr.number });
 	return { status: "opened", pr_url: pr.url, pr_number: pr.number, branch, content_sha256: v.content_sha256, redactions: v.redactions };
 }
 
@@ -578,7 +639,14 @@ async function fromLedger(
 	ledger: string,
 ): Promise<ProposeResult | null> {
 	const library = opts.library ?? DEFAULT_LIBRARY;
-	const known = ledgerLookup(ledger, v.content_sha256);
+	const knownLines = ledgerMatches(ledger, v.content_sha256);
+	if (knownLines.length === 0) return null;
+	// A line with no library was written before the slug was recorded. It must not decide a
+	// proposal for whichever library this process now targets.
+	if (knownLines.some((line) => typeof line.repo !== "string" || line.repo.length === 0)) {
+		throw new ProposeFailed(`proposal ledger has no library identity; use a separate state directory before proposing to ${library.repo}`);
+	}
+	const known = [...knownLines].reverse().find((line) => line.repo === library.repo);
 	if (!known) return null;
 	const base = { content_sha256: v.content_sha256, redactions: v.redactions, branch: known.branch };
 	if (known.pr_url) {
@@ -611,7 +679,16 @@ async function fromLedger(
 	}
 	const open = prs.map((p) => (typeof p.url === "string" ? prUrlOf(p.url, library.repo) : null)).find((p) => p !== null);
 	if (open) {
-		ledgerAppend(ledger, { content_sha256: v.content_sha256, name: v.name, surface: v.surface, branch: known.branch, state: "opened", pr_url: open.url, pr_number: open.number });
+		ledgerAppend(ledger, {
+			content_sha256: v.content_sha256,
+			name: v.name,
+			surface: v.surface,
+			branch: known.branch,
+			state: "opened",
+			repo: library.repo,
+			pr_url: open.url,
+			pr_number: open.number,
+		});
 		return { status: "existing", ...base, pr_url: open.url, pr_number: open.number };
 	}
 	return openPr(run, v, input, known.branch, ledger, library);
@@ -635,6 +712,11 @@ function countNameStatus(stdout: string): { diff_added: number; diff_changed: nu
  */
 export async function proposeSkill(input: ProposeInput, opts: ProposeOptions): Promise<ProposeResult> {
 	const v = validateProposal(input, opts);
+	// The removal list sits in the body header. Cap the whole body before any git work, so a
+	// pushed branch is never left behind a `gh` that cannot accept the argument.
+	if (prBody(v, input).length > PR_BODY_MAX) {
+		throw new ProposeRefused(`pull request body is over the limit of ${PR_BODY_MAX} characters`);
+	}
 	const paths = pathsFor(opts);
 	const library = opts.library ?? DEFAULT_LIBRARY;
 	if (!existsSync(join(paths.mirror, "HEAD"))) {
@@ -668,6 +750,13 @@ export async function proposeSkill(input: ProposeInput, opts: ProposeOptions): P
 		await must(run, "git checkout", checkoutArgv(clone, branch));
 		writeTree(clone, v.name, v.files, v.remove, v.mode);
 		await must(run, "git add", addArgv(clone, v.name));
+		const staged = await must(run, "git ls-files", stagedArgv(clone, v.name));
+		const stagedSet = new Set(staged.stdout.split("\n").filter((line) => line.length > 0));
+		for (const rel of Object.keys(v.files)) {
+			if (!stagedSet.has(`${v.name}/${rel}`)) {
+				throw new ProposeFailed(`refusing to propose ${JSON.stringify(rel)}: git did not stage it`);
+			}
+		}
 
 		const base = { content_sha256: v.content_sha256, redactions: v.redactions };
 		if (opts.dryRun) {
@@ -682,7 +771,7 @@ export async function proposeSkill(input: ProposeInput, opts: ProposeOptions): P
 		const origin = await must(run, "git remote get-url", originUrlArgv(clone));
 		if (!originMatches(origin.stdout, library.repo)) throw new ProposeFailed(`clone origin is not ${library.repo}; refusing to push`);
 		await must(run, "git push", pushArgv(clone, branch));
-		ledgerAppend(paths.ledger, { content_sha256: v.content_sha256, name: v.name, surface: v.surface, branch, state: "pushed" });
+		ledgerAppend(paths.ledger, { content_sha256: v.content_sha256, name: v.name, surface: v.surface, branch, state: "pushed", repo: library.repo });
 		return await openPr(run, v, input, branch, paths.ledger, library);
 	} finally {
 		if (clone) rmSync(clone, { recursive: true, force: true });

@@ -111,7 +111,7 @@ export function buildSkillsFixture(runDir: string): SkillsFixture {
 	const ghState = join(fixture, "gh-state.json");
 	writeFileSync(gh, fakeGhScript({ bun: process.execPath, statePath: ghState }), { mode: 0o700 });
 	chmodSync(gh, 0o700);
-	writeState(ghState, { ...EMPTY_STATE, prs: [], calls: [] });
+	writeState(ghState, { ...EMPTY_STATE, prs: [], calls: [], repo: FIXTURE_REPO, origin });
 
 	return {
 		env: {

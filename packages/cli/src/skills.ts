@@ -53,7 +53,8 @@ export class DirRefused extends Error {}
  * before any file is read).
  */
 export function readSkillDir(dir: string): Record<string, string> {
-	const files: Record<string, string> = {};
+	// No prototype: assigning a file named `__proto__` must keep the file, not set the prototype.
+	const files: Record<string, string> = Object.create(null);
 	const decoder = new TextDecoder("utf-8", { fatal: true });
 	let bytes = 0;
 	const walk = (absolute: string, relative: string) => {
@@ -69,7 +70,12 @@ export function readSkillDir(dir: string): Record<string, string> {
 				bytes += stat.size;
 				if (bytes > MAX_BODY_BYTES) throw new DirRefused(`the directory is over the limit of ${MAX_BODY_BYTES} bytes`);
 				try {
-					files[relativePath] = decoder.decode(readFileSync(path));
+					Object.defineProperty(files, relativePath, {
+						value: decoder.decode(readFileSync(path)),
+						enumerable: true,
+						writable: true,
+						configurable: true,
+					});
 				} catch {
 					throw new DirRefused(`${relativePath} is not valid UTF-8`);
 				}
@@ -104,11 +110,26 @@ interface ErrorBody {
 }
 
 const DOC_EXAMPLE_RULES: readonly string[] = ["pem", "jwt"];
+const PROPOSE_STATUSES = new Set(["opened", "existing", "unchanged", "declined", "dry_run"]);
+const KNOWN_FLAGS = new Set(["dir", "name", "rationale", "remove", "session", "graph", "dry-run", "replace", "reopen", "allow-doc-examples", "surface", "help"]);
+
+function proposeResult(value: unknown): ProposeResult | null {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+	const record = value as Record<string, unknown>;
+	if (typeof record.status !== "string" || !PROPOSE_STATUSES.has(record.status)) return null;
+	if (typeof record.content_sha256 !== "string" || record.content_sha256.length === 0) return null;
+	return value as ProposeResult;
+}
 
 export async function runSkills(argv: string[], deps: SkillsDeps): Promise<number> {
 	if (argv[0] !== "propose") {
 		deps.err(USAGE);
 		return 2;
+	}
+	// Before the directory is read or anything is posted, including when --dir is also present.
+	if (argv.includes("--help") || argv.includes("-h")) {
+		deps.out(USAGE);
+		return 0;
 	}
 	return propose(parseArgs(argv.slice(1)), deps);
 }
@@ -131,6 +152,8 @@ async function propose(args: Args, deps: SkillsDeps): Promise<number> {
 	if (args.surface !== undefined) {
 		return refused("there is no --surface flag: a proposal is made as the surface SUBSTRATE_TOKEN belongs to");
 	}
+	const unknown = Object.keys(args).find((key) => !KNOWN_FLAGS.has(key));
+	if (unknown !== undefined) return refused(`unknown flag --${unknown}`);
 	const dirArg = str(args.dir);
 	if (!dirArg) return refused("--dir PATH is required");
 	if (!deps.token) {
@@ -200,8 +223,9 @@ async function propose(args: Args, deps: SkillsDeps): Promise<number> {
 	} catch {
 		parsed = null;
 	}
-	if (response.status === 200 && parsed !== null && typeof parsed === "object") {
-		const result = parsed as ProposeResult;
+	if (response.status === 200) {
+		const result = proposeResult(parsed);
+		if (result === null) return failed(`the substrate answered 200 without a proposal result`);
 		field("status", result.status);
 		field("pr_url", result.pr_url);
 		field("pr_number", result.pr_number);

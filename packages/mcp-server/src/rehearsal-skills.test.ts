@@ -59,14 +59,24 @@ describe("fakeGh", () => {
 	test("pr list answers only the open PRs for that head in that library", () => {
 		const state = freshState();
 		fakeGh(createArgv("skill/omp/a-1-abcd"), state);
+		state.prs[0]!.state = "CLOSED";
 		fakeGh(createArgv("skill/omp/a-1-abcd"), state);
 		fakeGh(createArgv("skill/omp/other"), state);
-		state.prs[1]!.state = "CLOSED";
 		fakeGh(createArgv("skill/omp/a-1-abcd", "someone/else"), state);
 
 		const listed = fakeGh(["pr", "list", "--repo", FIXTURE_REPO, "--head", "skill/omp/a-1-abcd", "--state", "open", "--json", "url,number"], state);
-		expect(JSON.parse(listed.stdout)).toEqual([{ url: `https://github.com/${FIXTURE_REPO}/pull/1`, number: 1 }]);
+		expect(JSON.parse(listed.stdout)).toEqual([{ url: `https://github.com/${FIXTURE_REPO}/pull/2`, number: 2 }]);
 		expect(JSON.parse(fakeGh(["pr", "list", "--repo", FIXTURE_REPO, "--head", "nope"], state).stdout)).toEqual([]);
+	});
+
+	test("a second open pull request for the same head and base is refused", () => {
+		const state = freshState();
+		expect(fakeGh(createArgv("skill/omp/a-1-abcd"), state).code).toBe(0);
+		const again = fakeGh(createArgv("skill/omp/a-1-abcd"), state);
+		expect(again.code).toBe(1);
+		expect(again.stderr).toContain("already exists");
+		expect(state.prs).toHaveLength(1);
+		expect(state.next).toBe(2);
 	});
 
 	test("every invocation is recorded first, the unsupported ones included", () => {
@@ -96,8 +106,10 @@ describe("the installed gh script", () => {
 	test("answers as a child with an allowlisted environment, keeping the state in its file", () => {
 		const run = tempRun();
 		const fixture = buildSkillsFixture(run);
-		const env = { PATH: process.env.PATH ?? "", HOME: run, GIT_TERMINAL_PROMPT: "0", GH_PROMPT_DISABLED: "1" };
+		const env = { PATH: process.env.PATH ?? "", HOME: run, GIT_TERMINAL_PROMPT: "0", GH_PROMPT_DISABLED: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" };
 		const gh = (...argv: string[]) => Bun.spawnSync([fixture.gh, ...argv], { env });
+		const ref = Bun.spawnSync(["git", "--git-dir", fixture.origin, "update-ref", "refs/heads/skill/omp/a-1-abcd", "refs/heads/main"], { env });
+		expect(ref.exitCode).toBe(0);
 
 		const created = gh(...createArgv("skill/omp/a-1-abcd"));
 		expect(created.exitCode).toBe(0);
@@ -114,9 +126,44 @@ describe("the installed gh script", () => {
 
 	test("is a bun script with this module and its own state path baked in", () => {
 		const script = fakeGhScript({ bun: "/usr/bin/bun", statePath: "/run/x/gh-state.json" });
-		expect(script.split("\n")[0]).toBe("#!/usr/bin/bun");
+		expect(script.split("\n")[0]).toBe("#!/bin/sh");
+		expect(script).toContain("--no-env-file");
 		expect(script).toContain('"/run/x/gh-state.json"');
 		expect(script).toContain("rehearsal-fake-gh.ts");
+	});
+
+	test("two concurrent creates do not share a pull request number", async () => {
+		const run = tempRun();
+		const fixture = buildSkillsFixture(run);
+		const env = { PATH: process.env.PATH ?? "", HOME: run, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" };
+		for (const head of ["a", "b"]) {
+			const ref = Bun.spawnSync(["git", "--git-dir", fixture.origin, "update-ref", `refs/heads/${head}`, "refs/heads/main"], { env });
+			expect(ref.exitCode).toBe(0);
+		}
+		const spawn = (head: string) => Bun.spawn([fixture.gh, ...createArgv(head)], { env, stdout: "pipe", stderr: "pipe" });
+		const first = spawn("a");
+		const second = spawn("b");
+		const [left, right, leftCode, rightCode] = await Promise.all([
+			new Response(first.stdout).text(),
+			new Response(second.stdout).text(),
+			first.exited,
+			second.exited,
+		]);
+		expect(leftCode).toBe(0);
+		expect(rightCode).toBe(0);
+		expect(new Set([left.trim(), right.trim()]).size).toBe(2);
+		expect(readState(fixture.ghState).prs).toHaveLength(2);
+	});
+
+	test("refuses a head that was never pushed", () => {
+		const run = tempRun();
+		const fixture = buildSkillsFixture(run);
+		const env = { PATH: process.env.PATH ?? "", HOME: run, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" };
+		const gh = (...argv: string[]) => Bun.spawnSync([fixture.gh, ...argv], { env });
+		const missing = gh(...createArgv("skill/omp/missing"));
+		expect(missing.exitCode).toBe(1);
+		expect(missing.stderr.toString()).toContain("does not exist");
+		expect(readState(fixture.ghState).prs).toEqual([]);
 	});
 });
 
@@ -144,7 +191,7 @@ describe("buildSkillsFixture", () => {
 
 		// The gh is an executable only its owner may run, and starts with no PRs.
 		expect(statSync(fixture.gh).mode & 0o777).toBe(0o700);
-		expect(readState(fixture.ghState)).toEqual({ next: 1, prs: [], calls: [] });
+		expect(readState(fixture.ghState)).toEqual({ next: 1, prs: [], calls: [], repo: FIXTURE_REPO, origin: fixture.origin });
 	});
 
 	test("names exactly the four server settings, all inside the run directory", () => {

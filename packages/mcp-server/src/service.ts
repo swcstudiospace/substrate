@@ -998,6 +998,11 @@ export class Substrate {
 		if (privileged.length > 0 && !caller.isOperator) {
 			throw new SkillProposalDenied(403, `${privileged.join(", ")} need an operator token; nothing was proposed`);
 		}
+		// Boot only warns. A non-default library that is not a local file remote, or one that
+		// still points at the real `gh`, must not reach the proposer.
+		if (this.config.skills.problem) {
+			throw new ProposeFailed(`skill proposals are refused until the skills library is fixed: ${this.config.skills.problem}`);
+		}
 
 		const input: ProposeInput = {
 			name: request.name,

@@ -252,6 +252,7 @@ describe("the skills fixture's settings", () => {
 		expect(config.skills.remoteUrl.startsWith("file://")).toBe(true);
 		expect(config.skills.gh).toBe(join(runDir, "skills-fixture", "gh"));
 		expect(configWarnings(config)).toEqual([]);
+		expect(env.HOME).toBe(join(runDir, "home"));
 	});
 
 	test("refuse a key the harness does not add", () => {

@@ -9,11 +9,12 @@
  * `pr create` calls it made.
  *
  * The decisions are `fakeGh`, a pure function of the argv and the state. `runFakeGh` adds the
- * file, and `fakeGhScript` is the one-line executable the engine spawns as `gh`: the engine
+ * file, and `fakeGhScript` is the executable the engine spawns as `gh`: the engine
  * hands its children an allowlisted environment, so the state path is baked into the script
  * rather than passed through one.
  */
-import { renameSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 export interface FakePr {
 	number: number;
@@ -29,6 +30,10 @@ export interface FakeGhState {
 	prs: FakePr[];
 	/** Every invocation's argv, in order, supported or not. */
 	calls: string[][];
+	/** The fixture library slug. When set, `pr create` refuses any other `--repo`. */
+	repo?: string;
+	/** Bare repository. When set, `pr create` requires the head and base refs to exist. */
+	origin?: string;
 }
 
 export interface FakeGhResult {
@@ -58,11 +63,20 @@ export function fakeGh(argv: readonly string[], state: FakeGhState): FakeGhResul
 	if (verb === "create") {
 		const repo = flag(argv, "--repo");
 		const head = flag(argv, "--head");
+		const base = flag(argv, "--base");
 		const title = flag(argv, "--title");
-		if (!repo || !head || title === undefined) return fail(2, "fake gh: pr create needs --repo, --head and --title");
+		if (!repo || !head || !base || title === undefined) return fail(2, "fake gh: pr create needs --repo, --head, --base and --title");
+		if (state.repo !== undefined && repo !== state.repo) return fail(1, `fake gh: repo is not ${state.repo}`);
+		if (state.prs.some((pr) => pr.head === head && pr.base === base && pr.state === "OPEN" && pr.url.startsWith(`https://github.com/${repo}/pull/`))) {
+			return fail(1, `fake gh: an open pull request already exists for ${head}`);
+		}
+		if (state.origin !== undefined) {
+			if (!refExists(state.origin, head)) return fail(1, `fake gh: head ${head} does not exist`);
+			if (!refExists(state.origin, base)) return fail(1, `fake gh: base ${base} does not exist`);
+		}
 		const number = state.next++;
 		const url = `https://github.com/${repo}/pull/${number}`;
-		state.prs.push({ number, url, head, base: flag(argv, "--base") ?? "main", title, state: "OPEN" });
+		state.prs.push({ number, url, head, base, title, state: "OPEN" });
 		return { code: 0, stdout: `${url}\n`, stderr: "" };
 	}
 
@@ -85,11 +99,37 @@ export function fakeGh(argv: readonly string[], state: FakeGhState): FakeGhResul
 	return fail(2, `fake gh: unsupported command pr ${String(verb)}`);
 }
 
+/** A branch name that is safe to pass as a git ref and cannot escape `refs/heads`. */
+function safeRef(name: string): boolean {
+	return /^[A-Za-z0-9][A-Za-z0-9._/-]{0,200}$/.test(name) && !name.includes("..") && !name.endsWith("/") && !name.includes("//");
+}
+
+function refExists(origin: string, name: string): boolean {
+	if (!safeRef(name)) return false;
+	const result = Bun.spawnSync(["git", "--git-dir", origin, "rev-parse", "--verify", "--quiet", `refs/heads/${name}`], {
+		stdout: "ignore",
+		stderr: "ignore",
+		env: {
+			PATH: process.env.PATH ?? "",
+			GIT_CONFIG_GLOBAL: "/dev/null",
+			GIT_CONFIG_SYSTEM: "/dev/null",
+			GIT_TERMINAL_PROMPT: "0",
+		},
+	});
+	return result.exitCode === 0;
+}
+
 /** Read the state file; a missing or unreadable one is the empty state. */
 export function readState(statePath: string): FakeGhState {
 	try {
 		const parsed = JSON.parse(readFileSync(statePath, "utf8")) as Partial<FakeGhState>;
-		return { next: parsed.next ?? 1, prs: parsed.prs ?? [], calls: parsed.calls ?? [] };
+		return {
+			next: parsed.next ?? 1,
+			prs: parsed.prs ?? [],
+			calls: parsed.calls ?? [],
+			...(typeof parsed.repo === "string" ? { repo: parsed.repo } : {}),
+			...(typeof parsed.origin === "string" ? { origin: parsed.origin } : {}),
+		};
 	} catch {
 		return { next: 1, prs: [], calls: [] };
 	}
@@ -102,21 +142,74 @@ export function writeState(statePath: string, state: FakeGhState): void {
 	renameSync(temp, statePath);
 }
 
-/** What the installed script runs: answer on stdout and stderr, return the exit code. */
-export function runFakeGh(argv: readonly string[], statePath: string): number {
-	const state = readState(statePath);
-	const result = fakeGh(argv, state);
-	writeState(statePath, state);
-	process.stdout.write(result.stdout);
-	process.stderr.write(result.stderr);
-	return result.code;
+function pidAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (cause) {
+		return (cause as NodeJS.ErrnoException).code === "EPERM";
+	}
 }
 
-/** The executable the engine spawns as `gh`: bun by absolute path, this module, this state file. */
+/**
+ * One lock around the whole read, change and write. An atomic rename of the state file
+ * does not stop two children from reading the same `next` and returning the same PR number.
+ */
+function acquireStateLock(statePath: string): () => void {
+	const lock = `${statePath}.lock`;
+	const started = Date.now();
+	const pause = new Int32Array(new SharedArrayBuffer(4));
+	for (;;) {
+		try {
+			mkdirSync(lock, { mode: 0o700 });
+			writeFileSync(join(lock, "pid"), String(process.pid));
+			return () => rmSync(lock, { recursive: true, force: true });
+		} catch (cause) {
+			if ((cause as NodeJS.ErrnoException).code !== "EEXIST") throw cause;
+		}
+		let pid = Number.NaN;
+		try {
+			pid = Number(readFileSync(join(lock, "pid"), "utf8").trim());
+		} catch {
+			// the owner is between mkdir and the pid write
+		}
+		if (Number.isInteger(pid) && pid > 0 && !pidAlive(pid)) {
+			rmSync(lock, { recursive: true, force: true });
+			continue;
+		}
+		if (Date.now() - started > 5_000) throw new Error("fake gh state lock busy");
+		Atomics.wait(pause, 0, 0, 5);
+	}
+}
+
+/** What the installed script runs: answer on stdout and stderr, return the exit code. */
+export function runFakeGh(argv: readonly string[], statePath: string): number {
+	const release = acquireStateLock(statePath);
+	try {
+		const state = readState(statePath);
+		const result = fakeGh(argv, state);
+		writeState(statePath, state);
+		process.stdout.write(result.stdout);
+		process.stderr.write(result.stderr);
+		return result.code;
+	} finally {
+		release();
+	}
+}
+
+function shellSingle(value: string): string {
+	return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * The executable the engine spawns as `gh`.
+ *
+ * A shell wrapper so `bun --no-env-file` is actually passed: a shebang can take only one
+ * argument, and without the flag the child would reload `.env` from the checkout.
+ */
 export function fakeGhScript({ bun, statePath }: { bun: string; statePath: string }): string {
-	return (
-		`#!${bun}\n` +
+	const program =
 		`import { runFakeGh } from ${JSON.stringify(FAKE_GH_MODULE)};\n` +
-		`process.exit(runFakeGh(process.argv.slice(2), ${JSON.stringify(statePath)}));\n`
-	);
+		`process.exit(runFakeGh(process.argv.slice(1), ${JSON.stringify(statePath)}));\n`;
+	return `#!/bin/sh\nexec ${shellSingle(bun)} --no-env-file -e ${shellSingle(program)} "$@"\n`;
 }

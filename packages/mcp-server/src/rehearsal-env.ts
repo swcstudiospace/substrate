@@ -12,6 +12,7 @@
  * added. The parent environment is never spread, the deployment env file is
  * never read, and every store URL must be loopback before it is emitted.
  */
+import { mkdirSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { tokenEnvName } from "./config.ts";
 import { SURFACES, isSwarmSurface, type Surface } from "./types.ts";
@@ -202,7 +203,16 @@ export function buildRehearsalEnv(input: BuildRehearsalEnvInput): Record<string,
 	// Always inside the run directory, so a twin can never write the host's skills state; without a
 	// fixture there is no mirror there, and a proposal fails before any git or gh call.
 	env.SUBSTRATE_SKILLS_STATE = join(input.runDir, "skills");
-	if (input.skillsFixture) Object.assign(env, fixtureEnv(input.skillsFixture, input.runDir));
+	if (input.skillsFixture) {
+		Object.assign(env, fixtureEnv(input.skillsFixture, input.runDir));
+		// The proposer's git and gh children inherit HOME. An empty directory inside the run
+		// keeps a host `url.*.insteadOf` (and the operator's gh credentials) out of a fixture
+		// proof. A rehearsal without a fixture keeps the operator home so production gh still
+		// finds its credentials.
+		const home = join(input.runDir, "home");
+		mkdirSync(home, { recursive: true, mode: 0o700 });
+		env.HOME = home;
+	}
 	return env;
 }
 

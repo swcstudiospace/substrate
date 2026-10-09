@@ -223,6 +223,20 @@ describe("what the CLI refuses before posting", () => {
 		expect(code).toBe(2);
 		expect(err).toContain("substrate skills propose");
 	});
+
+	test("--help prints usage and does not read or post, even when --dir is present", async () => {
+		const { code, out } = await run(["propose", "--dir", skillDir(), "--help"]);
+		expect(code).toBe(0);
+		expect(out).toContain("--dir PATH");
+		expect(stub.seen).toEqual([]);
+	});
+
+	test("an unknown flag is refused before anything is posted", async () => {
+		const { code, err } = await run(["propose", "--dir", skillDir(), "--dryrun"]);
+		expect(code).toBe(1);
+		expect(err).toContain("unknown flag --dryrun");
+		expect(stub.seen).toEqual([]);
+	});
 });
 
 describe("how the CLI reports the server's answer", () => {
@@ -235,6 +249,15 @@ describe("how the CLI reports the server's answer", () => {
 				`status=${status}\npr_url=${opened.pr_url}\npr_number=12\nbranch=${opened.branch}\ncontent_sha256=${opened.content_sha256}\n` +
 					"redactions=1\ndiff_added=1\ndiff_changed=2\ndiff_deleted=3\n",
 			);
+		}
+	});
+
+	test("an empty, array, or unknown-status 200 is a failure", async () => {
+		for (const body of [{}, [], { status: "nope", content_sha256: "ab".repeat(32) }, { status: "opened" }]) {
+			stub.reply = { status: 200, body };
+			const { code, err } = await run(["propose", "--dir", skillDir()]);
+			expect({ body, code }).toEqual({ body, code: 1 });
+			expect(err).toContain("without a proposal result");
 		}
 	});
 
@@ -297,6 +320,10 @@ describe("readSkillDir, the timeout and the cap", () => {
 	test("reads every file in sorted order and refuses a special file by name", () => {
 		const dir = skillDir();
 		expect(Object.keys(readSkillDir(dir))).toEqual(["SKILL.md", "scripts/run.sh"]);
+		writeFileSync(join(dir, "__proto__"), "kept\n");
+		const withProto = readSkillDir(dir);
+		expect(Object.keys(withProto).sort()).toEqual(["SKILL.md", "__proto__", "scripts/run.sh"]);
+		expect(withProto["__proto__"]).toBe("kept\n");
 		expect(() => readSkillDir(join(dir, "missing"))).toThrow();
 		expect(DirRefused.prototype).toBeInstanceOf(Error);
 	});

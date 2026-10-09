@@ -13,7 +13,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createExecFileRunner, proposeSkill, type Runner, type RunResult, ROUTE_MAX_BYTES } from "./propose.ts";
+import { createExecFileRunner, proposeSkill, ProposeFailed, type Runner, type RunResult, ROUTE_MAX_BYTES } from "./propose.ts";
 
 const made: string[] = [];
 afterAll(() => {
@@ -124,6 +124,29 @@ describe("proposeSkill against real git", () => {
 		expect(lines[0]?.split(" ")[0]).toBe("0".repeat(40));
 		expect(fake.calls.filter((argv) => argv[2] === "create")).toHaveLength(1);
 		expect(existsSync(join(fx.stateDir, "proposals.jsonl"))).toBe(true);
+	});
+
+	test("a file the skill tree ignores is refused and not pushed", async () => {
+		const fx = fixture();
+		const work = mkdtempSync(join(tmpdir(), "propose-ignore-"));
+		made.push(work);
+		git(["clone", "-q", fx.bare, work]);
+		mkdirSync(join(work, "new-skill"), { recursive: true });
+		writeFileSync(join(work, "new-skill", "SKILL.md"), skillMd("new-skill"));
+		writeFileSync(join(work, "new-skill", ".gitignore"), "secret.md\n");
+		git(["-C", work, "add", "."]);
+		git(["-C", work, "-c", "user.name=Substrate Test", "-c", "user.email=test@example.invalid", "commit", "-q", "-m", "ignore"]);
+		git(["-C", work, "push", "-q", fx.bare, "main"]);
+		const fake: FakeGh = { prs: [], next: 1, calls: [] };
+		const error = await proposeSkill(
+			{ name: "new-skill", files: { "SKILL.md": skillMd("new-skill"), "secret.md": "plain\n" }, rationale: "because", surface: "claude-code" },
+			{ maxBytes: ROUTE_MAX_BYTES, mode: "overlay", run: fakeGhRunner(fx, fake), stateDir: fx.stateDir, library: { repo: fx.repo, remoteUrl: fx.remoteUrl } },
+		).catch((cause: unknown) => cause);
+		expect(error).toBeInstanceOf(ProposeFailed);
+		expect((error as Error).message).toContain("secret.md");
+		expect(fake.calls).toEqual([]);
+		const heads = gitText(["--git-dir", fx.bare, "for-each-ref", "--format=%(refname)", "refs/heads"]).trim().split("\n");
+		expect(heads).toEqual(["refs/heads/main"]);
 	});
 
 	test("resubmitting identical content is existing with no second push or PR", async () => {
