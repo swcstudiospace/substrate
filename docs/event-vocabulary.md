@@ -54,12 +54,13 @@ These apply to every source:
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `herdr.agent_detected` | 19 | `session.start` | `herdr-agent` | — | `herdr` | pane cwd slug | no |
 | `herdr.status_changed` | 19 | `note` | `herdr-agent` | — | `herdr` | pane cwd slug | no |
-| `herdr.pane_exited` | 19 | `session.end` | `herdr-agent` | — | `herdr` | — | no |
+| `herdr.pane_exited` | 19 | `session.end` | `herdr-agent` | — | `herdr` | pane cwd slug | no |
 | `herdr.other` | 19 | `note` | `herdr-agent` | — | `herdr` | — | no |
 | `muse.tool_call` | 19 | `tool.call` | `muse` | — | — | pane cwd slug, plus branch | no |
 | `cursor.stop` | 19 | `session.end` | `cursor` | — | — | — | no |
 | `skills.propose` | 21 | `note` | `caller` | `skill.propose` | — | `swcstudiospace/agent-skills` | no |
 | `skills.propose.refused` | 21 | `warning` | `caller` | `skill.propose` | — | — | no |
+| `skills.propose.failed` | 21 | `warning` | `caller` | `skill.propose` | — | — | no |
 | `skills.sync.refused` | 22 | `warning` | `substrate` | `skills.sync` | `skills-sync` | — | yes |
 | `docs.search` | 25 | `note` | `caller` | `docs.search` | — | — | no |
 | `docs.search.failed` | 25 | `warning` | `caller` | `docs.search` | — | — | no |
@@ -96,6 +97,12 @@ Surface rule names: `herdr-agent` is the agent herdr detected, mapped onto
 never body-supplied; `memory-writer` is the memory's writer; `lease-holder`
 is the lease holder. A fixed name is always that surface.
 
+The three `skills.propose` rows share `payload.action: "skill.propose"` and are told
+apart by kind and `payload.status`: a `note` for an outcome, a `warning` with status
+`refused` for a guard's refusal, a `warning` with status `failed` for a git or `gh`
+step that failed. Their payloads carry hashes, names and rule names, never skill
+content; the detail is in [skills-propose.md](skills-propose.md).
+
 ## Silent sources
 
 These deliberately emit nothing. A successful retain and every recall emit
@@ -110,12 +117,27 @@ the writer's local counters are its trail.
 
 ## herdr agent to surface
 
-[UNVERIFIED] herdr's exact agent identifiers are pinned by Phase 19 from
-`herdr api schema`. The fixed table will map each identifier onto `SURFACES`
-(expected shape, to be pinned by Phase 19 — e.g. Claude to `claude-code`,
-Codex to `codex`, OpenCode to `opencode`, Pi to `pi`, Cursor to `cursor`,
-Hermes to `hermes`, Omp to `omp`, Grok to `grok-build`, Muse to `muse`).
-An agent with no row is not emitted and is counted as unmapped.
+Pinned from herdr 0.9.1's `IntegrationTarget` enum (`herdr api schema`) plus
+the separate Muse reporter row. `HERDR_AGENT_SURFACES` in
+`packages/collectors/src/herdr-map.ts` is the same table.
+
+| herdr agent | surface |
+| --- | --- |
+| `claude` | `claude-code` |
+| `codex` | `codex` |
+| `opencode` | `opencode` |
+| `pi` | `pi` |
+| `omp` | `omp` |
+| `hermes` | `hermes` |
+| `cursor` | `cursor` |
+| `grok` | `grok-build` |
+| `muse` | `muse` |
+
+`muse` is not an enum id. Muse reports `agent: "muse"` through
+`pane.report_agent`, which takes a free-form string. The remaining enum ids
+(`copilot`, `devin`, `droid`, `kimi`, `kilo`, `qodercli`, `qwen`,
+`mastracode`, `antigravity_cli`) and any unknown id are not emitted. They
+are counted as unmapped, by agent id. A pane with no agent emits nothing.
 
 ## Deferred producers
 

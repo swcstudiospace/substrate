@@ -50,7 +50,17 @@ import type { Surface } from "./types.ts";
 export const SUBSTRATE_VERSION = "0.1.0";
 
 /** Routes that exist. Anything else is `other`, so the attribute stays bounded. */
-const KNOWN_ROUTES = ["/brief", "/events", "/verify", "/healthz", "/mcp", "/metrics", "/slo", "/evidence"] as const;
+const KNOWN_ROUTES = [
+	"/brief",
+	"/events",
+	"/verify",
+	"/healthz",
+	"/mcp",
+	"/metrics",
+	"/slo",
+	"/evidence",
+	"/skills/propose",
+] as const;
 
 export function normalizeRoute(pathname: string): string {
 	return (KNOWN_ROUTES as readonly string[]).includes(pathname) ? pathname : "other";
@@ -330,6 +340,7 @@ const KNOWN_TOOLS: ReadonlySet<string> = new Set([
 	"coord_handoff_list",
 	"coord_drift_scan",
 	"coord_reap_leases",
+	"skills_propose",
 	// REST routes, as `server.ts` audits them. A route audited under a tool's own name
 	// (`/memory` as `memory_write`) is covered by that name above and not repeated.
 	"brief",

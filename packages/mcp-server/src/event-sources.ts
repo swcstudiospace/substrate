@@ -107,13 +107,16 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 		kind: "session.end",
 		surface: "herdr-agent",
 		runtime: "herdr",
-		carriesRepo: false,
+		// Phase 19 (D19-11): the exit is found by events_query(repo=R). The
+		// brief excludes session.start and session.end, so this does not crowd it.
+		carriesRepo: true,
 		periodic: false,
 		sample: () => ({
 			surface: "claude-code",
 			kind: "session.end",
 			summary: "herdr pane-7 exited",
 			session_id: "sess-p17-herdr-exited",
+			repo: "swcstudiospace/agent-substrate",
 			payload: { runtime: "herdr", herdr_type: "pane.exited", pane_id: "pane-7" },
 		}),
 	},
@@ -170,6 +173,22 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 			summary: "refused skill proposal p17-demo: policy",
 			session_id: "sess-p17-skills-propose",
 			payload: { action: "skill.propose", status: "refused", reason: "policy", rules: ["skill-propose-policy"] },
+		}),
+	},
+	{
+		id: "skills.propose.failed",
+		phase: 21,
+		kind: "warning",
+		surface: "caller",
+		actions: ["skill.propose"],
+		carriesRepo: false,
+		periodic: false,
+		sample: () => ({
+			surface: "claude-code",
+			kind: "warning",
+			summary: "skill proposal p17-demo failed: git push exited 1",
+			session_id: "sess-p17-skills-propose",
+			payload: { action: "skill.propose", status: "failed", name: "p17-demo", reason: "git push exited 1" },
 		}),
 	},
 	{

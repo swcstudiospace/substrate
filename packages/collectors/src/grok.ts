@@ -15,10 +15,10 @@
  * overrides that when the history is actually wanted.
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { decodeSessionCwd, mapGrokEvent, type GrokEvent } from "./grok-map.ts";
-import type { EventInput } from "../../mcp-server/src/types.ts";
+import { COUNTERS_KEY, countOutcome, emptyCounters, postEvent, type EmitCounters } from "./emit.ts";
+import { branchFor, repoSlug } from "./git-context.ts";
 
 const POLL_MS = 5000;
 /** One line per status and server error, not one per event. A busy session must not flood the unit log. */
@@ -32,18 +32,38 @@ function stateFile(): string {
 	return process.env.SUBSTRATE_COLLECTOR_STATE ?? "/var/lib/substrate/grok-offsets.json";
 }
 
-function substrateUrl(): string {
-	return (process.env.SUBSTRATE_URL ?? "http://127.0.0.1:7410").replace(/\/+$/, "");
-}
-
-type Offsets = Record<string, number>;
+type Offsets = Record<string, number | EmitCounters>;
 
 function loadOffsets(): Offsets {
+	let raw: unknown;
 	try {
-		return JSON.parse(readFileSync(stateFile(), "utf8")) as Offsets;
+		raw = JSON.parse(readFileSync(stateFile(), "utf8")) as unknown;
 	} catch {
 		return {};
 	}
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {};
+	const offsets: Offsets = {};
+	for (const [key, value] of Object.entries(raw)) {
+		// The live flat path-to-offset map keeps working: only finite numbers
+		// survive as offsets, and the counters live under their reserved key.
+		if (key === COUNTERS_KEY) {
+			if (typeof value === "object" && value !== null) offsets[key] = value as EmitCounters;
+			continue;
+		}
+		if (typeof value === "number" && Number.isFinite(value)) offsets[key] = value;
+	}
+	return offsets;
+}
+
+/** The cumulative outcome counters in a state file, created on first use. */
+function countersOf(offsets: Offsets): EmitCounters {
+	const found = offsets[COUNTERS_KEY];
+	const counters = typeof found === "object" && found !== null ? (found as EmitCounters) : emptyCounters();
+	for (const key of ["stored", "refused", "failed"] as const) {
+		if (typeof counters[key] !== "number" || !Number.isFinite(counters[key])) counters[key] = 0;
+	}
+	offsets[COUNTERS_KEY] = counters;
+	return counters;
 }
 
 function saveOffsets(offsets: Offsets): void {
@@ -53,22 +73,6 @@ function saveOffsets(offsets: Offsets): void {
 	} catch (cause) {
 		process.stderr.write(`[grok-collector] cannot persist offsets: ${String(cause)}\n`);
 	}
-}
-
-/** owner/name for a working directory, or undefined when it is not a git repo. */
-const repoCache = new Map<string, string | undefined>();
-function repoFor(cwd: string): string | undefined {
-	if (repoCache.has(cwd)) return repoCache.get(cwd);
-	const result = spawnSync("git", ["-C", cwd, "remote", "get-url", "origin"], { encoding: "utf8" });
-	const slug =
-		result.status === 0 ? result.stdout.trim().match(/[:/]([^/:]+\/[^/]+?)(?:\.git)?$/)?.[1] : undefined;
-	repoCache.set(cwd, slug);
-	return slug;
-}
-
-function branchFor(cwd: string): string | undefined {
-	const result = spawnSync("git", ["-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"], { encoding: "utf8" });
-	return result.status === 0 ? result.stdout.trim() || undefined : undefined;
 }
 
 interface SessionLog {
@@ -158,61 +162,10 @@ export function logEmitRefusal(
 	return true;
 }
 
-/**
- * Post one event. A non-ok response or a transport failure is logged and
- * reported as false. It does not throw: the caller advances its offset either
- * way, which is the fail-open the collector already had.
- */
-export async function emitToSubstrate(
-	event: EventInput,
-	options: {
-		url?: string;
-		token?: string;
-		fetchImpl?: (input: string, init?: RequestInit) => Promise<Response>;
-		now?: () => number;
-		write?: (line: string) => void;
-	} = {},
-): Promise<boolean> {
-	const fetchImpl = options.fetchImpl ?? fetch;
-	const now = options.now ?? Date.now;
-	const write = options.write;
-	const url = (options.url ?? substrateUrl()).replace(/\/+$/, "");
-	const token = options.token ?? process.env.SUBSTRATE_TOKEN;
-	try {
-		const response = await fetchImpl(`${url}/events`, {
-			method: "POST",
-			headers: {
-				"content-type": "application/json",
-				...(token ? { authorization: `Bearer ${token}` } : {}),
-			},
-			body: JSON.stringify(event),
-			signal: AbortSignal.timeout(3000),
-		});
-		if (response.ok) return true;
-		let error: string | undefined;
-		try {
-			const body = (await response.json()) as { error?: unknown };
-			if (typeof body.error === "string") error = body.error;
-		} catch {
-			// A body that is not JSON still has a status, and the status is the part
-			// an operator can act on. The body itself is not the payload we sent.
-			error = undefined;
-		}
-		logEmitRefusal(response.status, error, now(), write);
-		return false;
-	} catch {
-		logEmitRefusal(0, "unreachable", now(), write);
-		return false;
-	}
-}
-
-async function emit(event: EventInput): Promise<boolean> {
-	return emitToSubstrate(event);
-}
-
 export async function pass(offsets: Offsets, backfill: boolean): Promise<{ read: number; emitted: number }> {
 	let read = 0;
 	let emitted = 0;
+	const counters = countersOf(offsets);
 
 	for (const log of findSessionLogs()) {
 		let size: number;
@@ -222,13 +175,14 @@ export async function pass(offsets: Offsets, backfill: boolean): Promise<{ read:
 			continue;
 		}
 
-		const known = offsets[log.path];
+		const atPath = offsets[log.path];
+		const known = typeof atPath === "number" ? atPath : undefined;
 		if (known === undefined) {
 			// First sight: start at the end unless history was asked for.
 			offsets[log.path] = backfill ? 0 : size;
 			if (!backfill) continue;
 		}
-		let from = offsets[log.path] ?? 0;
+		let from = known ?? 0;
 		// Grok rotates a log by truncating it; a shrunken file means start over.
 		if (from > size) from = 0;
 		if (from === size) continue;
@@ -248,7 +202,7 @@ export async function pass(offsets: Offsets, backfill: boolean): Promise<{ read:
 		const cwd = log.cwd;
 		const context = {
 			sessionId: log.sessionId,
-			repo: cwd ? repoFor(cwd) : undefined,
+			repo: cwd ? repoSlug(cwd) : undefined,
 			branch: cwd ? branchFor(cwd) : undefined,
 		};
 
@@ -263,7 +217,14 @@ export async function pass(offsets: Offsets, backfill: boolean): Promise<{ read:
 			}
 			const event = mapGrokEvent(parsed, context);
 			if (!event) continue;
-			if (await emit(event)) emitted++;
+			// The shared emit never throws and records refusals itself; the
+			// collector only counts the outcome and keeps its rate-limited
+			// journal summary. Offsets advance either way: fail-open (D19-06).
+			const outcome = await postEvent(event, { timeoutMs: 3000, collector: "grok", source: "grok" });
+			countOutcome(counters, outcome);
+			if (outcome.kind === "stored") emitted++;
+			else if (outcome.kind === "refused") logEmitRefusal(outcome.status, outcome.error);
+			else logEmitRefusal(outcome.status ?? 0, outcome.error ?? "unreachable");
 		}
 
 		offsets[log.path] = from + consumed;
