@@ -172,6 +172,39 @@ export function parseOperator(
 }
 
 /**
+ * The desktop allowlist: `--desktop-surfaces`, defaulting to empty (nobody may
+ * call desktop_run). Each name must be in SURFACES and in `--surfaces`, and
+ * the flag is refused with `--anonymous` since tokenless runs would only be
+ * refused by the tool. Throws naming surfaces only.
+ */
+export function parseDesktopSurfaces(
+	raw: string | undefined,
+	surfaces: readonly Surface[],
+	anonymous: boolean,
+): Surface[] {
+	if (anonymous) {
+		if (raw !== undefined) {
+			throw new RehearsalRefused("--anonymous conflicts with --desktop-surfaces; pass one or the other");
+		}
+		return [];
+	}
+	if (raw === undefined) return [];
+	const list = raw
+		.split(",")
+		.map((name) => name.trim())
+		.filter((name) => name.length > 0);
+	for (const name of list) {
+		if (!(SURFACES as readonly string[]).includes(name)) {
+			throw new RehearsalRefused(`desktop surface ${name} is not a known surface`);
+		}
+		if (!surfaces.includes(name as Surface)) {
+			throw new RehearsalRefused(`desktop surface ${name} is not in --surfaces`);
+		}
+	}
+	return list as Surface[];
+}
+
+/**
  * Refuse a non-local Docker daemon before creating or removing anything: a
  * DOCKER_HOST that is not a local unix socket, or a docker context that is
  * not a known-local one, could point the harness at someone else's engine.
@@ -489,6 +522,7 @@ export interface TwinState {
 	ledgerImage: string;
 	surfaces: Surface[];
 	operator: Surface | null;
+	desktopSurfaces: Surface[];
 	anonymous: boolean;
 	/** Started with `--skills-fixture`. Absent in a state file an older `up` wrote. */
 	skillsFixture?: boolean;
@@ -586,6 +620,7 @@ interface UpOptions {
 	port: number;
 	surfaces: Surface[];
 	operator: Surface | null;
+	desktopSurfaces: Surface[];
 	anonymous: boolean;
 	/** Build the skills library fixture (`--skills-fixture`): a throwaway bare repository, a mirror and a recording `gh`. */
 	skillsFixture: boolean;
@@ -1065,6 +1100,7 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 			secrets,
 			surfaces,
 			operator: opts.operator,
+			desktopSurfaces: opts.desktopSurfaces,
 			runDir,
 			parentEnv,
 			skillsFixture: skills?.env ?? null,
@@ -1135,6 +1171,7 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 		ledgerImage,
 		surfaces,
 		operator: opts.operator,
+		desktopSurfaces: opts.desktopSurfaces,
 		anonymous: opts.anonymous,
 		skillsFixture: opts.skillsFixture,
 	};
@@ -1519,7 +1556,7 @@ async function runSmokeInner(name: string, runDir: string): Promise<number> {
  * when argv holds only the subcommand and known flags.
  */
 export function refuseExtraArgs(argv: string[]): string | null {
-	const valued: Record<string, true> = { "--name": true, "--port": true, "--surfaces": true, "--operator": true };
+	const valued: Record<string, true> = { "--name": true, "--port": true, "--surfaces": true, "--operator": true, "--desktop-surfaces": true };
 	const bare: Record<string, true> = { "--anonymous": true, "--skills-fixture": true };
 	for (let i = 1; i < argv.length; i++) {
 		const token = argv[i] ?? "";
@@ -1543,7 +1580,7 @@ export function flag(argv: string[], name: string): string | undefined | null {
 
 function usage(message: string): never {
 	process.stderr.write(
-		`[rehearsal] ${message}\nusage: rehearsal up|down|status|smoke [--name <n>] [--port <N>] [--surfaces a,b] [--operator <s>] [--anonymous] [--skills-fixture]\n`,
+		`[rehearsal] ${message}\nusage: rehearsal up|down|status|smoke [--name <n>] [--port <N>] [--surfaces a,b] [--operator <s>] [--desktop-surfaces a,b] [--anonymous] [--skills-fixture]\n`,
 	);
 	process.exit(2);
 }
@@ -1557,11 +1594,13 @@ async function main(argv: string[]): Promise<number> {
 	const portRaw = flag(argv, "--port");
 	const surfacesRaw = flag(argv, "--surfaces");
 	const operatorRaw = flag(argv, "--operator");
+	const desktopSurfacesRaw = flag(argv, "--desktop-surfaces");
 	for (const [key, value] of [
 		["--name", nameRaw],
 		["--port", portRaw],
 		["--surfaces", surfacesRaw],
 		["--operator", operatorRaw],
+		["--desktop-surfaces", desktopSurfacesRaw],
 	] as const) {
 		if (value === null) usage(`${key} needs a value`);
 	}
@@ -1578,7 +1617,8 @@ async function main(argv: string[]): Promise<number> {
 		if (!Number.isInteger(port) || port < 0 || port > 65535) usage(`bad --port ${portRaw ?? ""}`);
 		const surfaces = parseSurfaces(surfacesRaw ?? undefined);
 		const operator = parseOperator(operatorRaw ?? undefined, surfaces, anonymous);
-		return await runUp({ name, port, surfaces, operator, anonymous, skillsFixture }, process.cwd());
+		const desktopSurfaces = parseDesktopSurfaces(desktopSurfacesRaw ?? undefined, surfaces, anonymous);
+		return await runUp({ name, port, surfaces, operator, desktopSurfaces, anonymous, skillsFixture }, process.cwd());
 	} catch (cause) {
 		if (cause instanceof RehearsalRefused) {
 			process.stderr.write(`[rehearsal] refused: ${cause.message}.\n`);

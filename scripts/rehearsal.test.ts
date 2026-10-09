@@ -27,6 +27,7 @@ import {
 	parseDockerIds,
 	parseDockerPortLine,
 	parseDockerRootDir,
+	parseDesktopSurfaces,
 	parseName,
 	parseOperator,
 	parseShellExports,
@@ -43,6 +44,7 @@ import {
 	smokeToolResult,
 	type ProcFacts,
 } from "./rehearsal.ts";
+import type { Surface } from "../packages/mcp-server/src/types.ts";
 
 const CLI = join(import.meta.dir, "rehearsal.ts");
 /** What a real token would be: if the CLI ever printed the environment, this is the string that would leak. */
@@ -241,6 +243,30 @@ describe("parseOperator", () => {
 
 	test("refuses --anonymous with an explicit --operator", () => {
 		expect(() => parseOperator("hermes", ["hermes"], true)).toThrow("conflicts with --operator");
+	});
+});
+
+describe("parseDesktopSurfaces", () => {
+	test("defaults to an empty allowlist", () => {
+		expect(parseDesktopSurfaces(undefined, ["omp", "cursor"], false)).toEqual([]);
+	});
+
+	test("accepts a valid subset", () => {
+		expect(parseDesktopSurfaces("omp", ["omp", "cursor"], false)).toEqual(["omp"]);
+		expect(parseDesktopSurfaces("omp, cursor", ["omp", "cursor"], false)).toEqual(["omp", "cursor"]);
+	});
+
+	test("refuses a name outside --surfaces", () => {
+		expect(() => parseDesktopSurfaces("omp", ["cursor"], false)).toThrow("not in --surfaces");
+	});
+
+	test("refuses an unknown surface", () => {
+		expect(() => parseDesktopSurfaces("nope", ["omp", "nope" as Surface], false)).toThrow("not a known surface");
+	});
+
+	test("refuses --anonymous with an explicit flag", () => {
+		expect(() => parseDesktopSurfaces("omp", ["omp"], true)).toThrow("conflicts with --desktop-surfaces");
+		expect(parseDesktopSurfaces(undefined, ["omp"], true)).toEqual([]);
 	});
 });
 
@@ -574,6 +600,7 @@ describe("refuseExtraArgs", () => {
 		expect(refuseExtraArgs(["up", "--name", "x", "--skills-fixture"])).toBeNull();
 		expect(refuseExtraArgs(["up", "--name", "x", "--skills-fixtures"])).toBe("unknown option --skills-fixtures");
 		expect(refuseExtraArgs(["up", "--skills-fixture", "extra"])).toBe("unexpected argument extra");
+		expect(refuseExtraArgs(["up", "--desktop-surfaces", "omp"])).toBeNull();
 		expect(refuseExtraArgs(["down", "--nmae", "other"])).toContain("--nmae");
 		expect(refuseExtraArgs(["down", "--name", "x", "extra"])).toContain("extra");
 		expect(refuseExtraArgs(["smoke", "--verbose"])).toContain("--verbose");
