@@ -1,0 +1,14 @@
+[Unit]
+Description=Anchor closed substrate ingest hours hourly (substrate-anchor.service)
+Documentation=https://github.com/swcstudiospace/agent-substrate
+
+[Timer]
+# Literally hourly; the 5-minute ingest lag lives in the job (INGEST_LAG_MS),
+# so an hour anchors at the second tick after it ends — pending for about 2 h,
+# inside verify's 3 h window (D28-04).
+OnCalendar=hourly
+Persistent=true
+Unit=substrate-anchor.service
+
+[Install]
+WantedBy=timers.target

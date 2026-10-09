@@ -28,7 +28,7 @@ The script restarts `substrate-mcp.service`, `substrate-collector-grok.service`,
 
 ## Units
 
-All four units in this directory use `WorkingDirectory=/opt/agent-substrate/current`. The MCP, herdr and muse units also set `ConditionPathExists` on their entry file under that symlink, so a missing entry skips the start instead of crash-looping. The Grok unit has no such guard. Install the matching drop-in with each unit:
+Every service in this directory uses `WorkingDirectory=/opt/agent-substrate/current`. The MCP, herdr and muse units also set `ConditionPathExists` on their entry file under that symlink, so a missing entry skips the start instead of crash-looping. The Grok unit has no such guard. Install the matching drop-in with each unit:
 
 | Unit | Drop-in | EnvironmentFile |
 | --- | --- | --- |
@@ -36,12 +36,21 @@ All four units in this directory use `WorkingDirectory=/opt/agent-substrate/curr
 | `substrate-collector-grok.service` | `substrate-collector-grok.service.d/10-environment.conf` | `/etc/substrate/collector-grok.env` |
 | `substrate-collector-herdr.service` | `substrate-collector-herdr.service.d/10-environment.conf` | `/etc/substrate/substrate-collector-herdr.env` |
 | `substrate-collector-muse.service` | `substrate-collector-muse.service.d/10-environment.conf` | `/etc/substrate/substrate-collector-muse.env` |
+| `substrate-anchor.service` (+ `substrate-anchor.timer`) | `substrate-anchor.service.d/10-environment.conf` | `/etc/substrate/substrate.env` |
 
 The MCP server is the process that needs the shared env file. The Grok collector must not load it. Create `collector-grok.env` (root-owned, mode 0600) with only the names this process reads: `SUBSTRATE_URL`, `SUBSTRATE_TOKEN`, and optionally `GROK_SESSIONS_DIR`. `SUBSTRATE_COLLECTOR_STATE` is already set on the unit. Do not put database URLs, plane keys, handoff keys, or review tokens in that file. No values belong in git.
 
 The same rule holds for the other two collectors. `substrate-collector-herdr.env` holds `SUBSTRATE_URL`, `SUBSTRATE_TOKEN`, and optionally `HERDR_SOCKET_PATH` or `HERDR_SESSION` (the socket defaults to `/root/.config/herdr/herdr.sock`). `substrate-collector-muse.env` holds `SUBSTRATE_URL`, `SUBSTRATE_TOKEN`, and `SUBSTRATE_MUSE_REPOS`. `SUBSTRATE_COLLECTOR_STATE` and `SUBSTRATE_STATE_DIR` are set on the units.
 
 The herdr and muse file names carry the `substrate-` prefix and the Grok one does not. Those are the paths `infra/identity/clients.json` delivers each token to (and the Muse hook's default `tokenFile`), so `bun run identity:check` reads the same file the unit loads. `scripts/doctor-units.test.ts` pins the two together.
+
+### Hourly anchor job
+
+`substrate-anchor.timer` fires `substrate-anchor.service` hourly (`OnCalendar=hourly`, `Persistent=true`). The service is `Type=oneshot` with no `Restart=`: a failing run already shows failed, and the next tick retries. It runs `bun packages/mcp-server/src/anchor-run.ts` from the pinned release, so a deploy needs no change — a oneshot reads `current` on every tick — and `deploy-release.sh` does not restart this oneshot.
+
+Trigger it only through `systemctl start substrate-anchor.service`: systemd never runs a second instance of an active oneshot, and the job re-checks the chain for the period immediately before every send, so two triggers cannot double-anchor an hour. Timing: the 5-minute ingest lag lives in the job, so an hour anchors at the second tick after it ends — pending for about 2 h, inside verify's 3 h window.
+
+The production key is used by the production unit only. A memo for some hour signed by that key from any other ledger would make production alarm on that hour, so the rehearsal harness never carries `SOLANA_*` names — check `env`, not values, if a scratch run looks anchored. The doctor covers the anchor unit like the server: `bun scripts/doctor-units.ts --dry-run` must stay green.
 
 ### Root and ProtectHome=false
 
