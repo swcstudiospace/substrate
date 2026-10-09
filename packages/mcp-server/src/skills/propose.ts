@@ -243,7 +243,7 @@ export function validateProposal(
 	}
 
 	// Redaction can turn a string field into YAML that no longer matches the contract
-	// (`description: [REDACTED]` is an array). The text that will be committed is what is checked.
+	// (a description that is only the redaction marker parses as an array). The committed text is what is checked.
 	const redactedMd = scan.files["SKILL.md"];
 	const redactedFrontmatter = typeof redactedMd === "string" ? parseFrontmatter(redactedMd) : null;
 	if (!redactedFrontmatter) throw new ProposeRefused("SKILL.md frontmatter is not valid after redaction");
