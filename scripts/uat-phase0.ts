@@ -441,6 +441,9 @@ async function scenario3(ctx: RunContext): Promise<ScenarioVerdict> {
 			const nodesValue = typeof read === "object" && read !== null && "nodes" in read ? read.nodes : undefined;
 			const nodeCount = Array.isArray(nodesValue) ? nodesValue.length : 0;
 			evidence.push(`graph_get: operator-exported graph returned with ${nodeCount} nodes`);
+			// Production scenario 3 is a read-only check: the scratch fixture
+			// loop below registers synthetic graphs and must never run here.
+			return [];
 		}
 		const fixturePath = new URL("./uat/fixtures/notion-rows.json", import.meta.url);
 		const raw: unknown = JSON.parse(readFileSync(fixturePath, "utf8"));

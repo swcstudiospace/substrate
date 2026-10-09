@@ -371,6 +371,12 @@ export interface IdentityReport {
 	/** Boot-style contradictions; names of variables only, never values. */
 	errors: string[];
 	strandedLive: string[];
+	/**
+	 * Rollout-scoped absent names: the globals plus live-client surfaces
+	 * that hold nothing assignable. Other manifest rows still list under
+	 * serverNames for visibility but never fail the pass.
+	 */
+	missing: string[];
 	pass: boolean;
 }
 
@@ -384,6 +390,33 @@ export function expectedServerNames(manifest: Manifest): Set<string> {
 		out.add(tokenEnvName(client.surface as Surface));
 	}
 	return out;
+}
+
+/**
+ * Server names the rollout needs: the global settings plus the token
+ * variable of every live-client surface. `not-installed`, dormant and
+ * `after-phase-19` rows stay in the full listing for visibility but never
+ * fail the verdict: uninstalled workspaces provision on install, dormant
+ * phases restore in their own window, and the collector cutover is gated
+ * procedurally by the runbook's step 1.
+ */
+export function rolloutServerNames(manifest: Manifest): Set<string> {
+	const out = new Set<string>(manifest.required_server_names);
+	for (const client of manifest.clients) {
+		if (isLive(client.state)) out.add(tokenEnvName(client.surface as Surface));
+	}
+	return out;
+}
+
+/** Rollout-scoped absent names, sorted: missing or empty at parse time. */
+function missingRolloutNames(manifest: Manifest, section: ServerSection): string[] {
+	const byName = new Map(section.serverNames.map((entry) => [entry.name, entry]));
+	return [...rolloutServerNames(manifest)]
+		.filter((name) => {
+			const entry = byName.get(name);
+			return entry === undefined || !entry.present || entry.empty;
+		})
+		.sort();
 }
 
 interface ServerSection {
@@ -452,7 +485,7 @@ function herdrErrors(herdrEnv: Array<{ path: string; text: string | null }>): st
  * env files keep names only. External deliveries report their note and pass:
  * they live in another repo or the operator's procedure, so this script can
  * name them but cannot strand on them. Unknown server suffixes, a shared
- * bare bearer in a herdr file, or a missing expected name still fail the pass.
+ * bare bearer in a herdr file, or a missing rollout name still fail the pass.
  */
 export function checkNames(
 	manifest: Manifest,
@@ -527,6 +560,7 @@ export function checkNames(
 	});
 	const strandedLive = clients.filter((c) => isLive(c.state) && c.status !== "ok" && c.status !== "external").map((c) => c.id);
 	const errors = [...unknownSurfaceErrors(names), ...herdrErrors(herdrEnv)];
+	const missing = missingRolloutNames(manifest, section);
 	return {
 		manifestPath: "",
 		serverEnv,
@@ -538,7 +572,8 @@ export function checkNames(
 		warnings,
 		errors,
 		strandedLive,
-		pass: strandedLive.length === 0 && errors.length === 0 && section.serverNames.every((entry) => entry.present && !entry.empty),
+		missing,
+		pass: strandedLive.length === 0 && errors.length === 0 && missing.length === 0,
 	};
 }
 
@@ -569,7 +604,7 @@ function splitList(raw: string): string[] {
  * External deliveries report unchecked and never fail. The report still
  * carries the names section plus boot's own validator errors, so a
  * duplicated value or an unknown suffix fails before the restart. A shared
- * bare bearer in a herdr file or a missing expected name fails the same way.
+ * bare bearer in a herdr file or a missing rollout name fails the same way.
  */
 export function checkValues(
 	manifest: Manifest,
@@ -621,6 +656,7 @@ export function checkValues(
 		.filter((c) => isLive(c.state) && (c.status === "missing" || c.status === "mismatch"))
 		.map((c) => c.id);
 	const allErrors = [...errors, ...herdrErrors(herdrEnv)];
+	const missing = missingRolloutNames(manifest, section);
 	return {
 		manifestPath: "",
 		serverEnv,
@@ -632,7 +668,8 @@ export function checkValues(
 		warnings: section.warnings,
 		errors: allErrors,
 		strandedLive,
-		pass: strandedLive.length === 0 && allErrors.length === 0 && section.serverNames.every((entry) => entry.present && !entry.empty),
+		missing,
+		pass: strandedLive.length === 0 && allErrors.length === 0 && missing.length === 0,
 	};
 }
 
@@ -647,7 +684,7 @@ export function formatReport(report: IdentityReport, json: boolean): string {
 					serverEnv: report.serverEnv,
 					tokensDir: report.tokensDir,
 					strandedLive: report.strandedLive,
-					clients: report.clients,
+					missing: report.missing,
 					serverNames: report.serverNames,
 					unexpected: report.unexpected,
 					warnings: report.warnings,
@@ -668,9 +705,10 @@ export function formatReport(report: IdentityReport, json: boolean): string {
 	for (const client of report.clients) {
 		lines.push(`${IDENTITY_PREFIX} ${client.id} ${client.surface} ${client.state} ${client.status} — ${client.detail}`);
 	}
-	const missing = report.serverNames.filter((n) => !n.present || n.empty).map((n) => n.name);
-	if (report.errors.length > 0 || missing.length > 0) {
-		const reasons = [...report.errors, ...missing.map((name) => `missing ${name}`)];
+	// The not-ready line names rollout blockers only: other manifest rows
+	// still list under serverNames above but never contradict a PASS.
+	if (report.errors.length > 0 || report.missing.length > 0) {
+		const reasons = [...report.errors, ...report.missing.map((name) => `missing ${name}`)];
 		lines.push(`${IDENTITY_PREFIX} server not ready: ${reasons.join("; ")}`);
 	}
 	lines.push(

@@ -290,6 +290,26 @@ describe("post-commit", () => {
 		}
 	});
 
+	test("a token file without a final newline still resolves", async () => {
+		const repo = await repoWithCommit("newline-less bearer");
+		const dir = mkdtempSync(join(tmpdir(), "hook-tokens-"));
+		writeFileSync(join(dir, "cursor"), "hook-cursor-noeol");
+		const server = await listen(202, "");
+		try {
+			const result = await runHook(repo, {
+				SUBSTRATE_URL: server.url,
+				SUBSTRATE_TIMEOUT_MS: "1000",
+				SUBSTRATE_TOKEN: "",
+				SUBSTRATE_TOKENS_DIR: dir,
+				SUBSTRATE_SURFACE: "cursor",
+			});
+			expect(result.exitCode).toBe(0);
+			expect(server.auths).toEqual(["Bearer hook-cursor-noeol"]);
+		} finally {
+			server.close();
+		}
+	});
+
 	test("the environment value wins over the tokens-dir file", async () => {
 		const repo = await repoWithCommit("env wins");
 		const dir = mkdtempSync(join(tmpdir(), "hook-tokens-"));

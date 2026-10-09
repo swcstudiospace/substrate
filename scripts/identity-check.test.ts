@@ -22,6 +22,7 @@ import {
 	main,
 	parseEnvNames,
 	parseEnvValues,
+	rolloutServerNames,
 	sha256Hex,
 	tokensFileVerdict,
 	type FileStat,
@@ -193,6 +194,21 @@ describe("the tracked manifest", () => {
 		const expected = expectedServerNames(manifest);
 		for (const name of manifest.required_server_names) expect(expected.has(name)).toBe(true);
 		for (const client of manifest.clients) expect(expected.has(tokenEnvName(client.surface as Surface))).toBe(true);
+	});
+
+	test("rollout names cover globals and live surfaces only", () => {
+		const manifest = loadManifest(MANIFEST_PATH);
+		const required = rolloutServerNames(manifest);
+		for (const name of manifest.required_server_names) expect(required.has(name)).toBe(true);
+		for (const client of manifest.clients) {
+			if (isLive(client.state)) expect(required.has(tokenEnvName(client.surface as Surface))).toBe(true);
+		}
+		// Surfaces with no live client stay out: swarm workspaces provision
+		// on install, herdr-only and muse surfaces ride the collector gate,
+		// and dormant phases restore in their own window.
+		for (const name of ["SUBSTRATE_TOKEN_SWARM_A01_ORCH", "SUBSTRATE_TOKEN_CODEX", "SUBSTRATE_TOKEN_MUSE", "SUBSTRATE_TOKEN_SUBSTRATE"]) {
+			expect(required.has(name)).toBe(false);
+		}
 	});
 });
 
@@ -463,6 +479,66 @@ describe("checkNames", () => {
 			for (const value of [V1, V2, V3, V4]) expect(out).not.toContain(value);
 		}
 	});
+
+	test("uninstalled, dormant and post-cutover rows never block the rollout", () => {
+		const dir = makeTmp();
+		const manifest = fixtureManifest(dir);
+		manifest.clients.push(
+			{ id: "swarm", surface: "codex", delivery: { kind: "external", note: "provisioned on install" }, state: "not-installed", evidence: "unit" },
+			{ id: "old", surface: "pi", delivery: { kind: "tokens-dir" }, state: "after-phase-19", evidence: "unit" },
+		);
+		const td = join(dir, "td");
+		mkdirSync(td);
+		const srv = join(dir, "srv.env");
+		const report = checkNames(
+			manifest,
+			fixtureReads(
+				{
+					[srv]: `SUBSTRATE_TOKEN_CLAUDE_CODE=${V1}\nSUBSTRATE_TOKEN_CURSOR=${V3}\nSUBSTRATE_TOKEN_HERMES=${V1}\nSUBSTRATE_OPERATOR_TOKENS=${V2}\n`,
+					[join(dir, "cli.env")]: `SUBSTRATE_TOKEN=${V1}\n`,
+				},
+				{ [join(td, "cursor")]: GOOD_STAT },
+			),
+			srv,
+			td,
+		);
+		expect(report.pass).toBe(true);
+		expect(report.missing).toEqual([]);
+		// The full listing still shows the unprovisioned rows for visibility.
+		expect(report.serverNames.find((n) => n.name === "SUBSTRATE_TOKEN_CODEX")?.present).toBe(false);
+		expect(report.serverNames.find((n) => n.name === "SUBSTRATE_TOKEN_PI")?.present).toBe(false);
+		expect(report.serverNames.find((n) => n.name === "SUBSTRATE_TOKEN_SUBSTRATE")?.present).toBe(false);
+		const out = formatReport({ ...report, manifestPath: "m" }, false);
+		expect(out).toContain("PASS");
+		expect(out).not.toContain("server not ready");
+	});
+
+	test("a missing live surface token fails with a missing reason", () => {
+		const dir = makeTmp();
+		const manifest = fixtureManifest(dir);
+		const td = join(dir, "td");
+		mkdirSync(td);
+		const srv = join(dir, "srv.env");
+		const report = checkNames(
+			manifest,
+			fixtureReads(
+				{
+					[srv]: `SUBSTRATE_TOKEN_CLAUDE_CODE=${V1}\nSUBSTRATE_TOKEN_SUBSTRATE=${V4}\nSUBSTRATE_TOKEN_HERMES=${V1}\nSUBSTRATE_OPERATOR_TOKENS=${V2}\n`,
+					[join(dir, "cli.env")]: `SUBSTRATE_TOKEN=${V1}\n`,
+				},
+				{ [join(td, "cursor")]: GOOD_STAT },
+			),
+			srv,
+			td,
+		);
+		expect(report.strandedLive).toEqual([]);
+		expect(report.pass).toBe(false);
+		expect(report.missing).toEqual(["SUBSTRATE_TOKEN_CURSOR"]);
+		const out = formatReport({ ...report, manifestPath: "m" }, false);
+		expect(out).toContain("FAIL");
+		expect(out).toContain("server not ready");
+		expect(out).toContain("missing SUBSTRATE_TOKEN_CURSOR");
+	});
 });
 
 describe("checkValues", () => {
@@ -608,6 +684,37 @@ describe("checkValues", () => {
 			expect(out).not.toContain("server not ready");
 			for (const value of [V1, V2, V3, V4, OTHER]) expect(out).not.toContain(value);
 		}
+	});
+
+	test("uninstalled, dormant and post-cutover rows never block values mode", () => {
+		const dir = makeTmp();
+		const manifest = fixtureManifest(dir);
+		manifest.clients.push(
+			{ id: "swarm", surface: "codex", delivery: { kind: "external", note: "provisioned on install" }, state: "not-installed", evidence: "unit" },
+			{ id: "old", surface: "pi", delivery: { kind: "tokens-dir" }, state: "after-phase-19", evidence: "unit" },
+		);
+		const report = checkValues(
+			manifest,
+			new Map([
+				["SUBSTRATE_TOKEN_CLAUDE_CODE", V1],
+				["SUBSTRATE_TOKEN_CURSOR", V3],
+				["SUBSTRATE_TOKEN_HERMES", OTHER],
+				["SUBSTRATE_OPERATOR_TOKENS", V2],
+			]),
+			new Map([
+				["cli", V1],
+				["cur", V3],
+			]),
+			join(dir, "srv.env"),
+			join(dir, "td"),
+		);
+		expect(report.strandedLive).toEqual([]);
+		expect(report.pass).toBe(true);
+		expect(report.missing).toEqual([]);
+		const out = formatReport({ ...report, manifestPath: "m" }, false) + formatReport({ ...report, manifestPath: "m" }, true);
+		expect(out).toContain("PASS");
+		expect(out).not.toContain("server not ready");
+		for (const value of [V1, V2, V3, OTHER]) expect(out).not.toContain(value);
 	});
 });
 

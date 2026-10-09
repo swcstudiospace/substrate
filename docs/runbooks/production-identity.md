@@ -28,8 +28,11 @@ It exits `0` when no live client would be stranded, `1` when one would,
 `2` when it could not ask. The default mode is agent-safe: it reads
 variable names only and reports, per client, whether its delivery target
 exists and names the right variable, and whether the server env file names
-every required surface token variable plus the operator, handoff and audit
-names. The `--values` mode is operator only: it compares each client's
+the token variable of every live-client surface plus the operator, handoff
+and audit names. Rows that are `not-installed`, dormant, or gated by the
+step-1 collector cutover still list under the server names for visibility
+but never fail the verdict: swarm workspaces provision on install.
+The `--values` mode is operator only: it compares each client's
 value with the server's list in memory and prints only `match`,
 `missing` or `mismatch` per client. Neither mode prints, logs or writes a
 value. `--json` emits the same verdicts for the evidence table below.
