@@ -379,10 +379,54 @@ describe("CLI refusals", () => {
 		expect(run.err).toContain("--name needs a value");
 	});
 
-	test("down with no prior up exits 0 removing nothing", () => {
-		const run = runCli("down", "--name", "rh-nobody-here");
-		expect(run.code).toBe(0);
-		expect(run.out).toContain("nothing to remove");
+	test("down with no prior up exits 0 removing nothing without a live daemon", () => {
+		// Daemon-independent: the fake answers the locality probe and the
+		// empty listing, while DOCKER_HOST names a socket that does not
+		// exist — a pass proves the real daemon was never needed.
+		const base = mkdtempSync(join(tmpdir(), "rh-down-fresh-"));
+		const fake = fakeDocker();
+		try {
+			const run = runIsolated(["down", "--name", "rh-nobody-here"], {
+				XDG_RUNTIME_DIR: base,
+				PATH: `${fake.bin}:${process.env.PATH ?? ""}`,
+				DOCKER_HOST: "unix:///nonexistent.sock",
+				DOCKER_CONTEXT: "",
+			});
+			expect(run.code).toBe(0);
+			expect(run.out).toContain("nothing to remove");
+		} finally {
+			rmSync(base, { recursive: true, force: true });
+			rmSync(fake.dir, { recursive: true, force: true });
+		}
+	});
+
+	test("down with an unreachable daemon fails non-zero instead of reporting 0 removed", () => {
+		// The listing failure must refuse (keeping state), never read as
+		// "nothing to remove": the fake answers the locality probe, then
+		// fails every store call the way a dead daemon does.
+		const base = mkdtempSync(join(tmpdir(), "rh-down-dead-"));
+		const dir = mkdtempSync(join(tmpdir(), "rh-fakedocker-"));
+		const bin = join(dir, "bin");
+		mkdirSync(bin, { recursive: true });
+		const log = join(dir, "calls.log");
+		writeFileSync(
+			join(bin, "docker"),
+			`#!/bin/sh\necho "$*" >> "${log}"\nif [ "$1" = "context" ]; then echo "unix:///var/run/docker.sock"; exit 0; fi\necho "Cannot connect to the Docker daemon" >&2\nexit 1\n`,
+		);
+		chmodSync(join(bin, "docker"), 0o755);
+		try {
+			const run = runIsolated(["down", "--name", "rh-nobody-here"], {
+				XDG_RUNTIME_DIR: base,
+				PATH: `${bin}:${process.env.PATH ?? ""}`,
+				DOCKER_HOST: "",
+				DOCKER_CONTEXT: "",
+			});
+			expect(run.code).toBe(2);
+			expect(run.err).toContain("could not list");
+		} finally {
+			rmSync(base, { recursive: true, force: true });
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });
 
