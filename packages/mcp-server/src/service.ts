@@ -5,6 +5,7 @@
  * surfaces cannot drift. Hooks need REST (they cannot call MCP tools); agents
  * get MCP. Same code underneath.
  */
+import { randomUUID } from "node:crypto";
 import { decideClaim, type ClaimDecision } from "@substrate/audit";
 import { formatMemo, hourEnd, hourIso, hourStart, isClosed, merkleRootHex } from "@substrate/ledger";
 import { composeBrief, type BriefRequest } from "./brief.ts";
@@ -42,8 +43,19 @@ import {
 import { leaseView, normalizeTtlSeconds, type LeaseView } from "./lease.ts";
 import { normalizeSubject } from "./memory-policy.ts";
 import { governMemoryWrite } from "./memory-write.ts";
-import { redact } from "./redact.ts";
-import { createExecFileRunner, createSkillProposer, type SkillProposer } from "./skills/propose.ts";
+import { redact, type SkillDocExampleRule } from "./redact.ts";
+import {
+	createExecFileRunner,
+	createSkillProposer,
+	ProposeFailed,
+	ProposeRefused,
+	ROUTE_MAX_BYTES,
+	SKILL_NAME_RE,
+	type ProposeInput,
+	type ProposeResult,
+	type SkillProposer,
+	type TreeMode,
+} from "./skills/propose.ts";
 import {
 	ACTORS,
 	EVENT_KINDS,
@@ -373,6 +385,41 @@ export const CORRELATION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/;
 export const GRAPH_ID_PATTERN = /^ut-[a-z0-9]+-[0-9a-f]{8}$/;
 
 export class InvalidBindError extends Error {}
+
+/**
+ * Why `proposeSkill` would not act for this caller. `status` is the HTTP class the route
+ * answers with: 401 for no authenticated surface, 403 for a surface mismatch or an
+ * operator-only option from a non-operator. Nothing reached git or `gh`.
+ */
+export class SkillProposalDenied extends Error {
+	constructor(
+		readonly status: 401 | 403,
+		message: string,
+	) {
+		super(message);
+		this.name = "SkillProposalDenied";
+	}
+}
+
+/** What a proposal names, as the route, the tool and the CLI hand it over. */
+export interface SkillProposalRequest {
+	name: string;
+	files: Record<string, string>;
+	rationale: string;
+	remove?: string[];
+	/** The caller's own surface, or absent. A different one is refused, never re-attributed. */
+	surface?: string;
+	session_id?: string;
+	graph_id?: string;
+	/** Validate, redact, clone and count the diff; push nothing, call no `gh`, emit nothing. */
+	dry_run?: boolean;
+	/** Operator-only. */
+	mode?: TreeMode;
+	/** Operator-only. */
+	reopen?: boolean;
+	/** Operator-only. */
+	allow_doc_examples?: SkillDocExampleRule[];
+}
 
 /** The three shapes of `graph_bind`, decided by which of the two ids were given. */
 export type BindOutcome =
@@ -909,6 +956,115 @@ export class Substrate {
 		// parseBindRequest guarantees one of the two is present.
 		const reverse = graphId as string;
 		return { graph_id: reverse, correlation_ids: await this.index.correlationsForGraph(reverse) };
+	}
+
+	/**
+	 * Propose a skill as a reviewable PR on the configured skills library. The one method
+	 * the route, the MCP tool and the CLI all end in, and the only code that reaches git or
+	 * `gh`.
+	 *
+	 * Authority comes before anything else. An anonymous caller is refused even on a run
+	 * with no tokens, because a proposal spends the owner's GitHub credential. The proposal
+	 * is attributed to the caller's token surface: a body that names a different surface is
+	 * refused rather than re-attributed, since the branch, the PR title and the event all
+	 * carry it. Replacing a skill's tree, reopening a declined proposal and allowing
+	 * documentation examples are operator-only. Every refusal here happens before the
+	 * proposer runs and emits nothing; the audit chain is the record of those.
+	 *
+	 * After that the outcome is recorded as one fail-open event: a `note` for an outcome,
+	 * a `warning` carrying rule names only for a refusal, a `warning` carrying the redacted
+	 * reason for a failed git or `gh` step. A `dry_run` emits nothing at all. An event that
+	 * cannot be stored never changes the answer.
+	 */
+	async proposeSkill(
+		request: SkillProposalRequest,
+		caller: { surface: Surface | null; isOperator: boolean },
+	): Promise<ProposeResult> {
+		const surface = caller.surface;
+		if (surface === null) {
+			throw new SkillProposalDenied(401, "skills_propose needs an authenticated surface; nothing was proposed");
+		}
+		if (request.surface !== undefined && request.surface !== surface) {
+			throw new SkillProposalDenied(
+				403,
+				`skills_propose proposes as the calling surface (${surface}), not ${JSON.stringify(String(request.surface).slice(0, 80))}; nothing was proposed`,
+			);
+		}
+		const privileged = [
+			...(request.mode === "replace" ? ["mode replace"] : []),
+			...(request.reopen === true ? ["reopen"] : []),
+			...((request.allow_doc_examples?.length ?? 0) > 0 ? ["allow_doc_examples"] : []),
+		];
+		if (privileged.length > 0 && !caller.isOperator) {
+			throw new SkillProposalDenied(403, `${privileged.join(", ")} need an operator token; nothing was proposed`);
+		}
+
+		const input: ProposeInput = {
+			name: request.name,
+			files: request.files,
+			rationale: request.rationale,
+			surface,
+			...(request.remove !== undefined ? { remove: request.remove } : {}),
+			...(request.session_id !== undefined ? { session_id: request.session_id } : {}),
+			...(request.graph_id !== undefined ? { graph_id: request.graph_id } : {}),
+		};
+		const dryRun = request.dry_run === true;
+		const where = {
+			session_id: request.session_id ?? `skills-propose:${randomUUID()}`,
+			...(request.graph_id !== undefined ? { graph_id: request.graph_id } : {}),
+		};
+		const name = typeof request.name === "string" && SKILL_NAME_RE.test(request.name) ? request.name : undefined;
+		try {
+			const result = await this.skills.propose(input, {
+				maxBytes: ROUTE_MAX_BYTES,
+				mode: request.mode ?? "overlay",
+				dryRun,
+				reopen: request.reopen === true,
+				allowDocExamples: new Set(request.allow_doc_examples ?? []),
+			});
+			if (!dryRun) {
+				await this.emit({
+					surface,
+					kind: "note",
+					summary: `proposed skill ${request.name}: ${result.status}`,
+					repo: this.config.skills.repo,
+					...where,
+					payload: {
+						action: "skill.propose",
+						name: request.name,
+						status: result.status,
+						...(result.pr_url !== undefined ? { pr_url: result.pr_url } : {}),
+						content_sha256: result.content_sha256,
+						redactions: result.redactions.length,
+					},
+				}).catch(() => undefined);
+			}
+			return result;
+		} catch (cause) {
+			if (!dryRun && cause instanceof ProposeRefused) {
+				// Rule names only: a finding's file and line are in the refusal the caller gets,
+				// and a value or a span must never reach an append-only ledger.
+				const rules = [...new Set((cause.findings ?? []).map((finding) => finding.rule))];
+				const reason = redact(cause.message).slice(0, 300);
+				await this.emit({
+					surface,
+					kind: "warning",
+					summary: `refused skill proposal ${name ?? "(invalid name)"}: ${reason}`,
+					...where,
+					payload: { action: "skill.propose", status: "refused", ...(name ? { name } : {}), reason, rules },
+				}).catch(() => undefined);
+			} else if (!dryRun && cause instanceof ProposeFailed) {
+				const reason = redact(cause.message).slice(0, 400);
+				await this.emit({
+					surface,
+					kind: "warning",
+					summary: `skill proposal ${name ?? "(invalid name)"} failed: ${reason}`,
+					...where,
+					payload: { action: "skill.propose", status: "failed", ...(name ? { name } : {}), reason },
+				}).catch(() => undefined);
+			}
+			throw cause;
+		}
 	}
 
 	/** Where a node's events belong: the graph's repo, not whatever the caller said. */
