@@ -562,3 +562,82 @@ describe("event/skill parity (D18-09)", () => {
 		expect(Object.keys(SKILL_EXCLUSIONS).sort()).toEqual(["keypair-array"]);
 	});
 });
+// ── Harness round trip (D18-19 item 3) ─────────────────────────────────────────
+// Runs only under the rehearsal twin: SUBSTRATE_REHEARSAL_NAME is set by sourcing
+// the harness's consumer.env, and only for this file — never the full suite with
+// that env sourced. The twin guard below refuses a production target before any
+// request, and `rehearsal down` closes the twin afterwards. No Phase 16 module is
+// imported; the twin is driven over its HTTP doors only.
+const describeRoundTrip = process.env.SUBSTRATE_REHEARSAL_NAME ? describe : describe.skip;
+const D04_NAMES = [
+	"private-tag",
+	"api-key-lower",
+	"aws",
+	"google",
+	"slack",
+	"npm",
+	"gitlab",
+	"digitalocean",
+	"openai-proj",
+	"pk-rk",
+] as const satisfies ReadonlyArray<RedactionRuleName>;
+describeRoundTrip("harness round trip through the rehearsal twin", () => {
+	test("D-04 fixtures do not survive the write path while counts do", async () => {
+		// Twin guard (T-18-08): loopback host and never the production port,
+		// asserted before any request — health check included.
+		const base = (process.env.SUBSTRATE_URL ?? "").replace(/\/+$/, "");
+		expect(base.length).toBeGreaterThan(0);
+		const twin = new URL(base);
+		const host = twin.hostname.replace(/^\[(.*)\]$/, "$1");
+		expect(["127.0.0.1", "::1", "localhost"]).toContain(host);
+		expect(Number(twin.port)).not.toBe(7410);
+		const headers = {
+			"content-type": "application/json",
+			authorization: `Bearer ${process.env.SUBSTRATE_TOKEN ?? ""}`,
+		};
+		const tag = `rh-p18-${Date.now().toString(36)}`;
+		const texts = D04_NAMES.flatMap((name) => FIXTURES[name].map((fixture) => fixture.text));
+		const secrets = D04_NAMES.flatMap((name) => FIXTURES[name].map((fixture) => fixture.secret));
+		const summary = `redaction round trip ${tag} ${texts.join(" ")}`;
+		// The summary cap is 2000; the joined fixtures must fit under it.
+		expect(summary.length).toBeLessThan(2000);
+		const emit = await fetch(`${base}/events`, {
+			method: "POST",
+			headers,
+			body: JSON.stringify({
+				kind: "note",
+				summary,
+				session_id: tag,
+				graph_id: tag,
+				payload: { fixtures: texts.join("\n"), input_tokens: 1200, output_tokens: 340 },
+			}),
+		});
+		expect(emit.status).toBe(202);
+		const emitBody: unknown = await emit.json();
+		const stored =
+			typeof emitBody === "object" && emitBody !== null && "stored" in emitBody ? emitBody.stored : undefined;
+		expect(stored).toBe(true);
+		// Read back through events_query, the same service call as the MCP tool.
+		const query = await fetch(`${base}/events/query`, {
+			method: "POST",
+			headers,
+			body: JSON.stringify({ session_id: tag, include_payload: true, limit: 10 }),
+		});
+		expect(query.status).toBe(200);
+		const queryBody: unknown = await query.json();
+		const events =
+			typeof queryBody === "object" && queryBody !== null && "events" in queryBody && Array.isArray(queryBody.events)
+				? queryBody.events
+				: [];
+		const found = events.find(
+			(event): event is { session_id?: string; summary?: string; payload?: Record<string, unknown> } =>
+				typeof event === "object" && event !== null,
+		);
+		const roundTripped = found?.session_id === tag ? found : undefined;
+		expect(roundTripped).toBeDefined();
+		expect(roundTripped!.summary).toContain("REDACTED");
+		for (const secret of secrets) expect(JSON.stringify(roundTripped)).not.toContain(secret);
+		expect(roundTripped!.payload?.input_tokens).toBe(1200);
+		expect(roundTripped!.payload?.output_tokens).toBe(340);
+	});
+});
