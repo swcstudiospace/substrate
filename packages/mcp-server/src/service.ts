@@ -1260,9 +1260,9 @@ export class Substrate {
 	async reapExpiredLeases(repo?: string | null) {
 		if (!this.index) return [];
 		const reaped = await this.index.reapExpiredLeases(repo ?? null);
-		for (const graphId of new Set(reaped.map((lease) => lease.graph_id))) {
-			await this.bumpGraph(graphId);
-		}
+		const graphIds = [...new Set(reaped.map((lease) => lease.graph_id))];
+		for (const graphId of graphIds) await this.cache.bump(graphGenerationKey(graphId));
+		if (graphIds.length > 0) await this.cache.bump(GRAPHS_GENERATION_KEY);
 		for (const lease of reaped) {
 			await this.emit({
 				surface: lease.holder?.surface ?? "claude-code",

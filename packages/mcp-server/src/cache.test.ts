@@ -460,6 +460,27 @@ describe("the same answer with the cache off, on and broken", () => {
 		expect(loads).toBe(2);
 	});
 
+	test("reaping several graphs bumps the shared generation once", async () => {
+		const redis = new FakeRedis();
+		const index = {
+			reapExpiredLeases: async () => [
+				{ graph_id: "ut-a", node_id: "n1", linear_identifier: null, holder: null, lease_epoch: 1, expired_at: "2026-10-09T00:00:00.000Z" },
+				{ graph_id: "ut-a", node_id: "n2", linear_identifier: null, holder: null, lease_epoch: 1, expired_at: "2026-10-09T00:00:00.000Z" },
+				{ graph_id: "ut-b", node_id: "n3", linear_identifier: null, holder: null, lease_epoch: 1, expired_at: "2026-10-09T00:00:00.000Z" },
+			],
+			getGraph: async () => null,
+		};
+		const substrate = new Substrate(loadConfig({}), {
+			index: index as never,
+			greptime: null,
+			cache: cacheOf(redis),
+		});
+		await substrate.reapExpiredLeases();
+		expect(redis.values.get(graphGenerationKey("ut-a"))).toBe("1");
+		expect(redis.values.get(graphGenerationKey("ut-b"))).toBe("1");
+		expect(redis.values.get(GRAPHS_GENERATION_KEY)).toBe("1");
+	});
+
 	test("an unverified accept and an uncertain commit both refresh memory", async () => {
 		const redis = new FakeRedis();
 		const row = {
@@ -647,26 +668,44 @@ describe("Bun RedisClient", () => {
 		"",
 	].join("\r\n");
 
-	function reply(store: Map<string, string>, text: string): string {
+	/** Answers every whole command in `text` and returns the unparsed tail. */
+	function takeCommands(store: Map<string, string>, text: string): { answer: string; rest: string } {
 		const out: string[] = [];
 		let i = 0;
 		while (i < text.length && text[i] === "*") {
 			const header = text.indexOf("\r\n", i);
+			if (header < 0) break;
 			const count = Number(text.slice(i + 1, header));
-			i = header + 2;
+			if (!Number.isInteger(count) || count < 0) break;
+			let cursor = header + 2;
 			const args: string[] = [];
+			let complete = true;
 			for (let n = 0; n < count; n++) {
-				const lenEnd = text.indexOf("\r\n", i);
-				const len = Number(text.slice(i + 1, lenEnd));
+				if (text[cursor] !== "$") {
+					complete = false;
+					break;
+				}
+				const lenEnd = text.indexOf("\r\n", cursor);
+				if (lenEnd < 0) {
+					complete = false;
+					break;
+				}
+				const len = Number(text.slice(cursor + 1, lenEnd));
 				const start = lenEnd + 2;
+				if (!Number.isInteger(len) || len < 0 || text.length < start + len + 2) {
+					complete = false;
+					break;
+				}
 				args.push(text.slice(start, start + len));
-				i = start + len + 2;
+				cursor = start + len + 2;
 			}
+			if (!complete) break;
+			i = cursor;
 			const [command, key, value] = args;
 			if (command === "HELLO") out.push(hello);
 			else if (command === "GET") {
 				const stored = key ? store.get(key) : undefined;
-				out.push(stored === undefined ? "$-1\r\n" : `$${stored.length}\r\n${stored}\r\n`);
+				out.push(stored === undefined ? "$-1\r\n" : `$${Buffer.byteLength(stored)}\r\n${stored}\r\n`);
 			} else if (command === "SET" && key !== undefined && value !== undefined) {
 				store.set(key, value);
 				out.push("+OK\r\n");
@@ -676,8 +715,20 @@ describe("Bun RedisClient", () => {
 				out.push(`:${next}\r\n`);
 			}
 		}
-		return out.join("");
+		return { answer: out.join(""), rest: text.slice(i) };
 	}
+
+	test("a command split across chunks is answered only once it is whole", () => {
+		const store = new Map<string, string>();
+		const command = "*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n";
+		const first = takeCommands(store, command.slice(0, 8));
+		expect(first.answer).toBe("");
+		expect(store.size).toBe(0);
+		const second = takeCommands(store, first.rest + command.slice(8));
+		expect(second.answer).toBe("+OK\r\n");
+		expect(second.rest).toBe("");
+		expect(store.get("k")).toBe("v");
+	});
 
 	test("a dropped socket fails open, and the next command recovers", async () => {
 		const store = new Map<string, string>();
@@ -687,9 +738,12 @@ describe("Bun RedisClient", () => {
 				socket.destroy();
 				return;
 			}
+			let pending = "";
 			socket.on("data", (buf) => {
-				const answer = reply(store, buf.toString("utf8"));
-				if (answer.length > 0) socket.write(answer);
+				pending += buf.toString("utf8");
+				const taken = takeCommands(store, pending);
+				pending = taken.rest;
+				if (taken.answer.length > 0) socket.write(taken.answer);
 			});
 			socket.on("error", () => {});
 		});
