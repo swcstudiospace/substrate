@@ -17,6 +17,7 @@
   ],
   "scripts": {
     "test": "bun test",
+    "test:py": "python3 -m pytest packages/miner",
     "check": "bunx tsc --noEmit",
     "mcp": "bun packages/mcp-server/src/index.ts",
     "substrate": "bun packages/cli/src/index.ts",
