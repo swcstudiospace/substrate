@@ -538,6 +538,55 @@ describe("runAnchorJob adopt and alarm", () => {
 });
 
 describe("runAnchorJob failures", () => {
+	test("24 digest-failed hours do not prevent a later healthy hour from being selected", async () => {
+		// Damaged hours are reported and skipped during the peek, so they
+		// must not fill the 24-slot budget and starve the hour after them.
+		const late = H10 + MAX_HOURS_PER_RUN * HOUR;
+		const damaged = new Map<number, HourDigest | Error>();
+		for (let h = H10; h < late; h += HOUR) {
+			damaged.set(h, new GreptimeError("hour member evt_1 has no event row"));
+		}
+		const { deps: d, emitted, inserts, invocations } = deps({
+			clock: () => late + HOUR + INGEST_LAG_MS + 60_000,
+			digests: damaged,
+		});
+		const result = await runAnchorJob(d);
+		expect(result.failed).toBe(MAX_HOURS_PER_RUN);
+		expect(result.anchored).toBe(1);
+		expect(result.code).toBe(1);
+		expect(inserts).toHaveLength(1);
+		expect(inserts[0]?.period_start).toBe(new Date(late).toISOString());
+		expect(failed(emitted)).toHaveLength(MAX_HOURS_PER_RUN);
+		expect(failed(emitted).every((event) => event.payload?.reason === "digest-failed")).toBe(true);
+		expect(invocations.filter((argv) => argv.includes("--with-memo"))).toHaveLength(1);
+	});
+
+	test("a dry-run digest failure does not spend a candidate slot", async () => {
+		const late = H10 + HOUR;
+		const lines: string[] = [];
+		const write = process.stdout.write.bind(process.stdout);
+		process.stdout.write = ((chunk: string | Uint8Array) => {
+			lines.push(String(chunk));
+			return write(chunk as never);
+		}) as typeof process.stdout.write;
+		try {
+			const { deps: d, emitted, inserts, invocations } = deps({
+				options: { dryRun: true },
+				clock: () => late + HOUR + INGEST_LAG_MS + 60_000,
+				digests: new Map<number, HourDigest | Error>([[H10, new GreptimeError("hour member evt_1 has no event row")]]),
+			});
+			const result = await runAnchorJob(d);
+			expect(result).toEqual({ code: 0, anchored: 0, adopted: 0, failed: 0 });
+			expect(invocations).toEqual([]);
+			expect(inserts).toEqual([]);
+			expect(emitted).toEqual([]);
+			expect(lines.some((line) => line.includes(`would fail ${new Date(H10).toISOString()} (digest-failed)`))).toBe(true);
+			expect(lines.some((line) => line.includes(`would anchor ${new Date(late).toISOString()}`))).toBe(true);
+		} finally {
+			process.stdout.write = write;
+		}
+	});
+
 	test("a per-hour digest failure continues to the next hour", async () => {
 		const later = H10 + HOUR;
 		const { deps: d, emitted } = deps({

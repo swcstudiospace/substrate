@@ -2688,8 +2688,11 @@ export class Substrate {
 	// absent fail the verdict naming them. A re-read hit clears only after
 	// its whole fresh session re-chains — a restored row with edited
 	// content keeps its old hash and fails there instead, and a burst whose
-	// earlier link landed in the re-read but not the ingest read still
-	// links. Retained ids are finally compared against the checked re-read,
+	// earlier link landed in the re-read stays in that re-chain. A fresh
+	// row that is not legacy and still has no ingest record after the same
+	// bounded ingest refresh is uncovered, and a gap id is not cleared
+	// while a session sibling is still record-less. Retained ids are
+	// finally compared against the checked re-read,
 	// not the first: an id present at first but deleted before the re-read
 	// was never in the gap, and only the fresh comparison catches it. The
 	// re-read shares the whole-verify budget: past the allowance the gap
@@ -2730,12 +2733,79 @@ export class Substrate {
 					if (gapSet.has(member.id)) touched.add(member.session_id ?? "");
 				}
 			}
+			// A row that appeared in this re-read and still has no ingest
+			// record was not in the first uncovered set. Non-legacy ids get
+			// the same bounded ingest refresh before they fail; legacy ids
+			// are counted and never failing. The refresh runs before the
+			// gap clear so a sibling whose record lands is not record-less.
+			const freshRecordLess: string[] = [];
+			const seenFresh = new Set<string>();
+			for (const row of fresh) {
+				const eventId = String(row.id);
+				if (seenFresh.has(eventId)) continue;
+				seenFresh.add(eventId);
+				if (byEvent.has(eventId)) continue;
+				const ts = Number(row.ts);
+				if (coverageStartMs === null || (Number.isFinite(ts) && ts < coverageStartMs)) {
+					if (!legacy.includes(eventId)) legacy.push(eventId);
+					continue;
+				}
+				freshRecordLess.push(eventId);
+			}
+			if (freshRecordLess.length > 0 && budgetMs - (Date.now() - startedAt) > margin) {
+				const allowance = budgetMs - (Date.now() - startedAt) - margin;
+				const refreshed = await new Promise<typeof ingest | null>((resolve) => {
+					const timer = setTimeout(() => resolve(null), Math.max(0, allowance));
+					timer.unref?.();
+					greptime.graphIngest(storedGraphId).then(
+						(read) => {
+							clearTimeout(timer);
+							resolve(read);
+						},
+						() => {
+							clearTimeout(timer);
+							resolve(null);
+						},
+					);
+				});
+				if (refreshed) {
+					for (const record of refreshed) {
+						if (!byEvent.has(record.event_id)) {
+							byEvent.set(record.event_id, record);
+							ingest.push(record);
+						}
+					}
+					const still: string[] = [];
+					for (const id of freshRecordLess) {
+						const record = byEvent.get(id);
+						if (!record) {
+							still.push(id);
+							continue;
+						}
+						const at = uncovered.indexOf(id);
+						if (at >= 0) uncovered.splice(at, 1);
+						const hour = hourStart(record.ingested_at);
+						const bucket = byHour.get(hour);
+						if (bucket) {
+							if (!bucket.includes(id)) bucket.push(id);
+						} else byHour.set(hour, [id]);
+					}
+					freshRecordLess.length = 0;
+					freshRecordLess.push(...still);
+				}
+			}
+			for (const id of freshRecordLess) {
+				if (!uncovered.includes(id)) uncovered.push(id);
+			}
 			for (const key of touched) {
 				const members = freshBySession.get(key) ?? [];
-				if (verifyChain(inChainOrder(members)).ok) {
-					for (const member of members) {
-						if (gapSet.has(member.id)) cleared.add(member.id);
-					}
+				if (!verifyChain(inChainOrder(members)).ok) continue;
+				// The chain can verify while an earlier sibling still has
+				// no ingest record. That gap id stays missing.
+				const recordLessSibling = members.some((member) => !byEvent.has(member.id) && !legacy.includes(member.id));
+				if (recordLessSibling) continue;
+				for (const member of members) {
+					if (gapSet.has(member.id)) cleared.add(member.id);
 				}
 			}
 		}

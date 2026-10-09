@@ -9,15 +9,17 @@
  * Per run: read the coverage start (hour of the earliest ingest record) and
  * the anchors window, take the closed, non-empty, unanchored hours ascending
  * (at most 24 non-empty hours per run under a 7-day lookback; empty hours
- * never receive a row, so they never consume the budget), and for each one
+ * never receive a row, and damaged hours are reported and skipped, so
+ * neither consumes the budget), and for each one
  * adopt an existing signer-checked memo or send the digest memo through the
  * solana CLI, then write the production 11-column anchors row and emit
  * `anchor.written`. A `--period` re-run consults that hour's row directly, so
  * an hour older than the lookback is never anchored twice; a send-path hour
  * the sweep map calls absent re-checks its row too, so a memo aged out of
  * the 100-signature listing never anchors an hour twice. Bad hour data
- * emits `anchor.failed` and continues to the next hour (a root mismatch
- * also alarms and exits 1); a failed store read, a lost `anchor.failed`
+ * emits `anchor.failed` during the peek and is skipped, so a later healthy
+ * hour still fits in the budget (a root mismatch also alarms and exits 1);
+ * a failed store read, a lost `anchor.failed`
  * warning, and a lost `anchor.written` note are reported as store-failed
  * without resending the transaction. Systemic failures (wrong cluster,
  * signer mismatch, unfunded key, unreadable RPC, CLI or store failure)
@@ -403,7 +405,10 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 		// Empty hours never receive an anchors row, so they must not consume
 		// the per-run budget: peek the digest and only count non-empty hours,
 		// or a long empty gap replays every run and starves later hours.
-		// A digest failure stays a candidate so the main loop reports it.
+		// Damaged hour data is reported here and skipped, so it does not
+		// take a slot either: later healthy hours still fit. A store failure
+		// stops the run before any send. Dry-run logs would-fail and
+		// likewise spends nothing.
 		for (let h = coverageHour; isClosed(h, now, INGEST_LAG_MS); h += HOUR_MS) {
 			if (h < windowStart) continue;
 			if (anchored[hourIso(h)] === true) continue;
@@ -411,15 +416,37 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 				const preview = await substrate.hourDigest(h, now);
 				if (preview.root === null || preview.event_count === 0 || preview.memo === null) continue;
 				peeked.set(h, preview);
-			} catch {
-				// Fall through: the main loop digests again and reports it.
+			} catch (cause) {
+				const periodIso = hourIso(h);
+				// A failed store read must not look like a bad hour, and must
+				// not fall through into a send: later hours may already be
+				// readable, and continuing would anchor them while the store
+				// is unavailable.
+				if (!isHourDataError(cause)) {
+					await failHour(periodIso, "store-failed");
+					process.stderr.write(`[anchor] ${periodIso} store-failed: ${redact(String(cause).slice(0, 200))}\n`);
+					return result;
+				}
+				if (dryRun) {
+					process.stdout.write(`[anchor] would fail ${periodIso} (digest-failed)\n`);
+					continue;
+				}
+				const warned = await failHour(periodIso, "digest-failed");
+				process.stderr.write(`[anchor] ${periodIso} digest failed: ${redact(String(cause).slice(0, 200))}\n`);
+				if (!warned) {
+					process.stderr.write(`[anchor] ${periodIso} store-failed: the anchor.failed warning was not stored\n`);
+					return result;
+				}
+				continue;
 			}
 			candidates.push(h);
 			if (candidates.length >= MAX_HOURS_PER_RUN) break;
 		}
 	}
 	if (candidates.length === 0) {
-		process.stdout.write("[anchor] nothing to anchor\n");
+		// Damaged hours already reported above are not "nothing": the run
+		// failed them and simply has no send left.
+		if (result.failed === 0) process.stdout.write("[anchor] nothing to anchor\n");
 		return result;
 	}
 	if (dryRun) {

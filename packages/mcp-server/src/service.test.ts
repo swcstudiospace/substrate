@@ -3949,8 +3949,49 @@ describe("verifyGraph hour report", () => {
 	test("a burst whose first link missed the ingest read still clears", async () => {
 		// Two linked appends land between the reads; the first event's row
 		// is saved but its ingest record is still in flight, so only the
-		// second enters the gap. The re-read holds both rows, and the whole
-		// fresh session re-chains — the earlier link is not dropped.
+		// second enters the gap. The re-read holds both rows. The bounded
+		// ingest refresh then finds the earlier record, so the sibling is
+		// no longer record-less, and the whole fresh session re-chains —
+		// the earlier link is not dropped and the gap clears.
+		const world = sessionRows();
+		const liveAt = H + 5 * HOUR + 1000;
+		const first = normalizeEvent(
+			{ surface: "omp", kind: "note", summary: "burst-1", session_id: "sess-1", graph_id: "ut-1", actor: "agent" },
+			world.events[1]?.hash ?? null,
+		);
+		const second = normalizeEvent(
+			{ surface: "omp", kind: "note", summary: "burst-2", session_id: "sess-1", graph_id: "ut-1", actor: "agent" },
+			first.hash,
+		);
+		const toRow = (event: typeof first) => ({ ...event, ts: Date.parse(event.ts), payload: JSON.stringify(event.payload) });
+		const firstRecord = { event_id: first.id, event_ts: Date.parse(first.ts), ingested_at: liveAt };
+		const secondRecord = { event_id: second.id, event_ts: Date.parse(second.ts), ingested_at: liveAt };
+		let reads = 0;
+		let ingests = 0;
+		const substrate = substrateWith({
+			readEvents: async () => (++reads === 1 ? world.rows : [...world.rows, toRow(first), toRow(second)]),
+			graphIngest: async () => {
+				ingests += 1;
+				return ingests === 1 ? [...world.records, secondRecord] : [...world.records, firstRecord, secondRecord];
+			},
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: liveAt + 60_000, rpc: rpcReturning(world.memo) as never });
+		expect(reads).toBe(2);
+		expect(ingests).toBe(2);
+		expect(verdict.ok).toBe(true);
+		expect(verdict.uncovered).toEqual({ count: 0, ids: [] });
+		expect(verdict.missing).toEqual({ count: 0, ids: [] });
+		expect(verdict.reason).toBeUndefined();
+	});
+
+	test("two fresh rows where only the later one has an ingest record do not verify ok", async () => {
+		// The earlier append is in the re-read and its ingest record never
+		// lands, including on the bounded refresh. The later row has a
+		// record and is the gap. That record-less sibling keeps the gap
+		// from clearing, and the earlier id stays uncovered.
 		const world = sessionRows();
 		const liveAt = H + 5 * HOUR + 1000;
 		const first = normalizeEvent(
@@ -3964,18 +4005,24 @@ describe("verifyGraph hour report", () => {
 		const toRow = (event: typeof first) => ({ ...event, ts: Date.parse(event.ts), payload: JSON.stringify(event.payload) });
 		const secondRecord = { event_id: second.id, event_ts: Date.parse(second.ts), ingested_at: liveAt };
 		let reads = 0;
+		let ingests = 0;
 		const substrate = substrateWith({
 			readEvents: async () => (++reads === 1 ? world.rows : [...world.rows, toRow(first), toRow(second)]),
-			graphIngest: async () => [...world.records, secondRecord],
+			graphIngest: async () => {
+				ingests += 1;
+				return [...world.records, secondRecord];
+			},
 			firstIngestMs: async () => H,
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
 		const verdict = await substrate.verifyGraph("ut-1", { now: liveAt + 60_000, rpc: rpcReturning(world.memo) as never });
 		expect(reads).toBe(2);
-		expect(verdict.ok).toBe(true);
-		expect(verdict.missing).toEqual({ count: 0, ids: [] });
-		expect(verdict.reason).toBeUndefined();
+		expect(ingests).toBe(2);
+		expect(verdict.ok).toBe(false);
+		expect(verdict.uncovered.ids).toContain(first.id);
+		expect(verdict.missing.ids).toContain(second.id);
+		expect(verdict.reason).toContain(first.id);
 	});
 
 	test("a deletion in the still-open hour still fails naming the event", async () => {
