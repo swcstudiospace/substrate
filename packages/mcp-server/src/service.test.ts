@@ -3851,6 +3851,30 @@ describe("verifyGraph hour report", () => {
 		expect(verdict.ok).toBe(false);
 	});
 
+	test("an event appended between the reads is pending, not missing", async () => {
+		// Live-graph race: the event row read ran first, then the append
+		// landed its ingest record before the ingest read. The record's hour
+		// is still open, so it is pending by definition — not a deletion or
+		// a move, and the healthy graph still verifies.
+		const world = sessionRows();
+		const liveAt = H + 5 * HOUR + 1000;
+		const liveRecord = { event_id: "evt_live", event_ts: liveAt, ingested_at: liveAt };
+		const substrate = substrateWith({
+			readEvents: async () => world.rows,
+			graphIngest: async () => [...world.records, liveRecord],
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: liveAt + 60_000, rpc: rpcReturning(world.memo) as never });
+		expect(verdict.ok).toBe(true);
+		expect(verdict.missing).toEqual({ count: 0, ids: [] });
+		expect(verdict.reason).toBeUndefined();
+		expect(verdict.hours).toHaveLength(2);
+		expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "anchored" });
+		expect(verdict.hours[1]).toMatchObject({ status: "pending", event_count: 0 });
+	});
+
 	test("a slow event read spends the budget before the first hour", async () => {
 		// The CLI times the whole request, so the deadline starts before the
 		// event read: a read slower than the budget leaves no allowance, and
