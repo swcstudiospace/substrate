@@ -64,6 +64,8 @@ export interface Rpc {
 	transactionMemo(signature: string, commitment: Commitment): Promise<TransactionMemo | null>;
 	/** Recent signatures touching `pubkey`, memo text only as a hint (confirm with transactionMemo). */
 	addressMemos(pubkey: string, limit: number): Promise<AddressMemo[]>;
+	/** The cluster's genesis hash, for the job's devnet gate. Thin `getGenesisHash` call. */
+	getGenesisHash(): Promise<string>;
 	/** Lamports held by `pubkey`. */
 	balance(pubkey: string): Promise<number>;
 }
@@ -190,6 +192,12 @@ export function createRpc({ url, timeoutMs, attempts, backoffMs, fetchImpl = fet
 			const result = await call<{ value?: unknown }>("getBalance", [pubkey]);
 			if (typeof result?.value !== "number") throw new RpcError("getBalance returned no value");
 			return result.value;
+		},
+
+		async getGenesisHash(): Promise<string> {
+			const hash = await call<unknown>("getGenesisHash", []);
+			if (typeof hash !== "string" || hash.length === 0) throw new RpcError("getGenesisHash returned no hash");
+			return hash;
 		},
 	};
 }

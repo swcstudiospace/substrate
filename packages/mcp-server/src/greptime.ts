@@ -285,6 +285,73 @@ export function quote(value: string | number | null, backslashEscapes = true): s
 	return `'${escaped.replace(/'/g, "''")}'`;
 }
 
+/**
+ * One row of the production `anchors` table (D27-17), as the job reads it.
+ *
+ * Times are ISO strings; the table holds TIMESTAMPs and the HTTP API answers
+ * them as epoch milliseconds, so the parse accepts either. `stale_hashes` is
+ * NULL on every row the job writes — the column exists in production's shape
+ * but has no meaning yet (deferred: giving it one).
+ */
+export interface AnchorRow {
+	period_start: string;
+	period_end: string;
+	root: string;
+	event_count: number;
+	memo: string;
+	tx_sig: string;
+	signer: string;
+	cluster: string;
+	slot: number;
+	anchored_at: string;
+	stale_hashes: number | null;
+}
+
+/** What the anchor job writes: every column but `stale_hashes`, which stays NULL. */
+export interface NewAnchor {
+	period_start: string;
+	period_end: string;
+	root: string;
+	event_count: number;
+	memo: string;
+	tx_sig: string;
+	signer: string;
+	/** Always `"devnet"`: mainnet is forbidden, and the type says so. */
+	cluster: "devnet";
+	slot: number;
+	anchored_at: string;
+}
+
+/** The SELECT list every anchors read uses, in DDL column order. */
+const ANCHOR_COLUMNS =
+	`"period_start", "period_end", "root", "event_count", "memo", "tx_sig", ` +
+	`"signer", "cluster", "slot", "anchored_at", "stale_hashes"`;
+
+/** A TIMESTAMP cell as an ISO string, whether the server answered millis or text. */
+function isoTime(value: unknown): string {
+	const ms = typeof value === "number" ? value : Number(value);
+	if (Number.isFinite(ms)) return new Date(ms).toISOString();
+	const parsed = Date.parse(String(value));
+	if (!Number.isFinite(parsed)) throw new GreptimeError("anchors row holds a time that is not a number");
+	return new Date(parsed).toISOString();
+}
+
+function parseAnchorRow(row: Record<string, unknown>): AnchorRow {
+	return {
+		period_start: isoTime(row.period_start),
+		period_end: isoTime(row.period_end),
+		root: String(row.root),
+		event_count: Number(row.event_count),
+		memo: String(row.memo),
+		tx_sig: String(row.tx_sig),
+		signer: String(row.signer),
+		cluster: String(row.cluster),
+		slot: Number(row.slot),
+		anchored_at: isoTime(row.anchored_at),
+		stale_hashes: row.stale_hashes === null || row.stale_hashes === undefined ? null : Number(row.stale_hashes),
+	};
+}
+
 export class GreptimeClient {
 	/** Whether the server reads `\` in a literal as an escape. Assumed until probed. */
 	private backslashEscapes = true;
@@ -847,6 +914,71 @@ export class GreptimeClient {
 			return { event_id, ingested_at, hash };
 		});
 	}
+
+	/**
+	 * Anchors rows whose period starts inside `[windowStartMs, windowEndMs)`.
+	 *
+	 * The job's one window read per run: ascending by period, so candidates
+	 * come out in anchor order. Values are quoted, never syntax.
+	 */
+	async anchorsBetween(windowStartMs: number, windowEndMs: number): Promise<AnchorRow[]> {
+		const at = (ms: number): string => this.q(new Date(ms).toISOString());
+		const rows = await this.sql(
+			`SELECT ${ANCHOR_COLUMNS} FROM "anchors" ` +
+				`WHERE "period_start" >= ${at(windowStartMs)} AND "period_start" < ${at(windowEndMs)} ` +
+				`ORDER BY "period_start" ASC`,
+		);
+		return rows.map(parseAnchorRow);
+	}
+
+	/**
+	 * The anchors row for one hour, or null when the hour is not anchored.
+	 *
+	 * A single-period read for verify's per-hour check and the job's dedup:
+	 * an hour that already has a row is never written again.
+	 */
+	async anchorForPeriod(periodStartMs: number): Promise<AnchorRow | null> {
+		const rows = await this.sql(
+			`SELECT ${ANCHOR_COLUMNS} FROM "anchors" WHERE "period_start" = ${this.q(new Date(periodStartMs).toISOString())}`,
+		);
+		const first = rows[0];
+		return first === undefined ? null : parseAnchorRow(first);
+	}
+
+	/**
+	 * Write one anchors row in the production 11-column shape (D27-17).
+	 *
+	 * `stale_hashes` is always NULL — the column exists but has no meaning
+	 * yet. The table deduplicates by `period_start`; callers check
+	 * {@link anchorForPeriod} first and never write an hour twice.
+	 */
+	async insertAnchor(row: NewAnchor): Promise<void> {
+		const v = (value: string | number): string => this.q(value);
+		await this.sql(
+			`INSERT INTO "anchors" ("period_start", "period_end", "root", "event_count", "memo", ` +
+				`"tx_sig", "signer", "cluster", "slot", "anchored_at", "stale_hashes") VALUES (` +
+				`${v(row.period_start)}, ${v(row.period_end)}, ${v(row.root)}, ${v(row.event_count)}, ` +
+				`${v(row.memo)}, ${v(row.tx_sig)}, ${v(row.signer)}, ${v(row.cluster)}, ` +
+				`${v(row.slot)}, ${v(row.anchored_at)}, NULL)`,
+		);
+	}
+
+	/**
+	 * The hour of the earliest `event_ingest` record — the coverage start.
+	 *
+	 * No hour before this is ever anchored (D28-05): the deploy hour is
+	 * partial but well defined. Null when the store holds no ingest record.
+	 * One row ordered ascending, not an aggregate, so the statement stays in
+	 * the shapes the scratch server has answered.
+	 */
+	async firstIngestMs(): Promise<number | null> {
+		const rows = await this.sql(`SELECT "ingested_at" FROM "event_ingest" ORDER BY "ingested_at" ASC LIMIT 1`);
+		if (rows.length === 0) return null;
+		const at = epochMs(rows[0]?.ingested_at);
+		return Number.isFinite(at) ? at : null;
+	}
+
+
 
 	/**
 	 * A repo's newest events, newest first, for `coord.drift_scan`.

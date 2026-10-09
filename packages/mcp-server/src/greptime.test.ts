@@ -1148,3 +1148,105 @@ describe("hourLeaves", () => {
 		expect(sql.filter((s) => s.includes('FROM "agent_events"'))).toHaveLength(2);
 	});
 });
+
+describe("anchors", () => {
+	const H10 = Date.UTC(2026, 8, 26, 10);
+	const H11 = H10 + 3_600_000;
+	const H12 = H11 + 3_600_000;
+	const ROOT = "a".repeat(64);
+	const MEMO = `substrate:v1:2026-09-26T10:00:00.000Z:${ROOT}:3`;
+	const SIG = "5".repeat(87);
+
+	function anchorRow(periodMs: number): unknown[] {
+		return [
+			periodMs,
+			periodMs + 3_600_000,
+			ROOT,
+			3,
+			MEMO,
+			SIG,
+			"4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T",
+			"devnet",
+			42,
+			periodMs + 3_600_000 + 300_000,
+			null,
+		];
+	}
+
+	const COLUMNS = [
+		"period_start",
+		"period_end",
+		"root",
+		"event_count",
+		"memo",
+		"tx_sig",
+		"signer",
+		"cluster",
+		"slot",
+		"anchored_at",
+		"stale_hashes",
+	];
+
+	test("anchorsBetween reads the window ascending with quoted ISO bounds", async () => {
+		const { sql } = stubFetch((statement) =>
+			statement.includes('FROM "anchors"')
+				? records(COLUMNS, [anchorRow(H10), anchorRow(H11)])
+				: defaultReply(statement),
+		);
+		const rows = await new GreptimeClient(config).anchorsBetween(H10, H12);
+		expect(rows.map((row) => row.period_start)).toEqual(["2026-09-26T10:00:00.000Z", "2026-09-26T11:00:00.000Z"]);
+		expect(rows[0]).toMatchObject({ root: ROOT, event_count: 3, cluster: "devnet", slot: 42, stale_hashes: null });
+		const read = sql.find((s) => s.includes('FROM "anchors"')) ?? "";
+		expect(read).toContain("'2026-09-26T10:00:00.000Z'");
+		expect(read).toContain("'2026-09-26T12:00:00.000Z'");
+		expect(read).toContain("ORDER BY");
+		expect(() => assertAppendOnly(read)).not.toThrow();
+	});
+
+	test("anchorForPeriod returns the row, or null when the hour is unanchored", async () => {
+		const found = stubFetch((statement) =>
+			statement.includes('FROM "anchors"') ? records(COLUMNS, [anchorRow(H10)]) : defaultReply(statement),
+		);
+		const row = await new GreptimeClient(config).anchorForPeriod(H10);
+		expect(row?.tx_sig).toBe(SIG);
+		expect(found.sql.find((s) => s.includes('FROM "anchors"'))).toContain("'2026-09-26T10:00:00.000Z'");
+
+		stubFetch((statement) => (statement.includes('FROM "anchors"') ? records(COLUMNS, []) : defaultReply(statement)));
+		expect(await new GreptimeClient(config).anchorForPeriod(H11)).toBeNull();
+	});
+
+	test("insertAnchor writes all 11 production columns with stale_hashes NULL and cluster devnet", async () => {
+		const { sql } = stubFetch();
+		await new GreptimeClient(config).insertAnchor({
+			period_start: "2026-09-26T10:00:00.000Z",
+			period_end: "2026-09-26T11:00:00.000Z",
+			root: ROOT,
+			event_count: 3,
+			memo: MEMO,
+			tx_sig: SIG,
+			signer: "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T",
+			cluster: "devnet",
+			slot: 42,
+			anchored_at: "2026-09-26T11:05:00.000Z",
+		});
+		const insert = insertStatement(sql);
+		for (const column of COLUMNS) expect(insert).toContain(`"${column}"`);
+		expect(insert).toContain("'devnet'");
+		expect(insert).toContain(`'${MEMO}'`);
+		expect(insert).toContain(`'${SIG}'`);
+		expect(insert).toMatch(/NULL\)$/);
+		expect(() => assertAppendOnly(insert)).not.toThrow();
+	});
+
+	test("firstIngestMs returns the earliest record, or null on an empty store", async () => {
+		stubFetch((statement) =>
+			statement.includes('FROM "event_ingest"') ? records(["ingested_at"], [[H10 + 7_000]]) : defaultReply(statement),
+		);
+		expect(await new GreptimeClient(config).firstIngestMs()).toBe(H10 + 7_000);
+
+		stubFetch((statement) =>
+			statement.includes('FROM "event_ingest"') ? records(["ingested_at"], []) : defaultReply(statement),
+		);
+		expect(await new GreptimeClient(config).firstIngestMs()).toBeNull();
+	});
+});
