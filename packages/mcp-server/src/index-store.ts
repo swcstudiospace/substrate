@@ -421,12 +421,24 @@ export class IndexStore implements MemoryStore {
 
 	// ── leases ─────────────────────────────────────────────────────────────────
 
-	private async node(graphId: string, nodeId: string): Promise<GraphNode> {
+	/**
+	 * One node as stored, or null when it is unknown. Unlike `getNode` this
+	 * throws on a database failure, so completion gating can tell "no such
+	 * node" (fall through to the fenced path, which refuses in its own words)
+	 * from "the read failed" (refuse: an unread node must never complete
+	 * without the gate that a Linear reference would require).
+	 */
+	async readNode(graphId: string, nodeId: string): Promise<GraphNode | null> {
 		const rows = (await this.sql`
 			select * from graph_nodes where graph_id = ${graphId} and node_id = ${nodeId}`) as GraphNode[];
-		const node = rows[0];
-		if (!node) throw new Error(`unknown node ${graphId}/${nodeId}`);
-		return toNode(node);
+		const row = rows[0];
+		return row ? toNode(row) : null;
+	}
+
+	private async node(graphId: string, nodeId: string): Promise<GraphNode> {
+		const found = await this.readNode(graphId, nodeId);
+		if (!found) throw new Error(`unknown node ${graphId}/${nodeId}`);
+		return found;
 	}
 
 	/**
@@ -600,14 +612,16 @@ export class IndexStore implements MemoryStore {
 				from graph_nodes n join graph_index g on g.graph_id = n.graph_id
 				where n.linear_issue_id = ${ref.linearIssueId}
 				limit 2`) as LinearNodeMatch[];
-			if (rows.length > 0) return rows;
+			if (rows.length > 0) return rows.map(toLinearNodeMatch);
 		}
 		if (!ref.linearIdentifier) return [];
-		return (await this.sql`
+		return (
+			(await this.sql`
 			select n.*, g.repo, g.branch, g.status as graph_status
 			from graph_nodes n join graph_index g on g.graph_id = n.graph_id
 			where n.linear_identifier = ${ref.linearIdentifier}
-			limit 2`) as LinearNodeMatch[];
+			limit 2`) as LinearNodeMatch[]
+		).map(toLinearNodeMatch);
 	}
 
 	/**
@@ -1405,6 +1419,18 @@ function toNode(row: GraphNode): GraphNode {
 		lease_epoch: Number(row.lease_epoch ?? 0),
 	};
 }
+/**
+ * A `findNodesByLinear` row as `graph_find` types it: the node columns
+ * through `toNode` (Postgres hands `lease_epoch` back as a string, which
+ * would otherwise serialise beside the numeric `lease.epoch` as a second
+ * value for the same thing), with the joined graph columns carried across.
+ * Exported for the mapping test: the SQL itself needs a live Postgres.
+ */
+export function toLinearNodeMatch(row: LinearNodeMatch): LinearNodeMatch {
+	const { repo, branch, graph_status } = row;
+	return { ...toNode(row), repo, branch, graph_status };
+}
+
 
 /** The lease columns of a node row, in the shape `lease.ts` reasons about. */
 export function leaseSnapshot(node: GraphNode): LeaseSnapshot {

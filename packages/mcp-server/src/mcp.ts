@@ -694,7 +694,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				"(`summary`, `tests_pass`): without it the node parks at `started_review` with the lease held and the " +
 				"result is `dod-required`, and only the hermes-linear-connector gate's explicit approval moves the " +
 				"issue to Done. A swarm surface's completion is not gated: it completes and leaves only a " +
-				"`Completed by` comment. `completed: false` means nothing changed, and says why.",
+				"`Completed by` comment. `completed: false` can still change review state and lease expiry; inspect `reason` and the returned lease.",
 			inputSchema: {
 				graph_id: z.string(),
 				node_id: z.string(),

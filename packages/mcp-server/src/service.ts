@@ -144,6 +144,9 @@ export interface DodNote {
 	summary_chars: number;
 }
 
+/** Headroom past the connector wait for the Linear reads and tracker calls around it. */
+const GATE_TTL_BUFFER_SECONDS = 60;
+
 /** The DoD evidence cap, matching the `graph_complete` tool schema. */
 const DOD_SUMMARY_LIMIT = 2000;
 
@@ -608,6 +611,8 @@ export class Substrate {
 	private readonly cache: ReadThroughCache;
 	/** Connector-gate overrides for tests (connector fetch, URL, timeout); production reads config. */
 	private readonly dodGateTest: { fetchImpl?: typeof fetch; hermesLinearUrl?: string; timeoutMs?: number };
+	/** `graphId/nodeId` → tail of that node's gated-completion chain. */
+	private readonly completionChains = new Map<string, Promise<void>>();
 
 	/** `stores` is a test seam; production always builds them from config. */
 	constructor(
@@ -1289,9 +1294,28 @@ export class Substrate {
 	 * `mirror.failed` warning per failed target and never rolls anything back.
 	 * A mirror that throws despite its never-throws contract is one warning,
 	 * not a failed tool call.
+	 *
+	 * Release-side ops (release, expire, force, close) clear another surface's
+	 * labels and the Notion Agent, so a stale one must not run: the mirror
+	 * queue orders by arrival, while the decision order lives in the epoch —
+	 * a re-claim since (a higher epoch on the row) means a newer hold owns
+	 * the trackers, and the stale clear is dropped silently. Claim-side and
+	 * completion ops always run: a claim is the newer hold, and review/done
+	 * record what Linear already shows.
 	 */
 	private async runMirror(ctx: MirrorContext, op: MirrorOp): Promise<void> {
 		if (!this.mirror) return;
+		if ((op === "release" || op === "expire" || op === "force" || op === "close") && this.index) {
+			// A guard that cannot read fails open toward mirroring: the mirror
+			// reports the decision, and must never break the tool call behind it.
+			let current: GraphNode | null = null;
+			try {
+				current = await this.index.getNode(ctx.graphId, ctx.nodeId);
+			} catch {
+				current = null;
+			}
+			if (current && Number(current.lease_epoch ?? 0) > ctx.epoch) return;
+		}
 		let failures: MirrorFailure[];
 		try {
 			failures = await this.mirror[op](ctx);
@@ -1301,6 +1325,30 @@ export class Substrate {
 			];
 		}
 		await this.emitMirrorFailures(ctx, failures);
+	}
+
+	/**
+	 * One gated completion at a time per node. The review write is fenced,
+	 * but the Linear state read and the connector call that follow it are
+	 * not: two completions on one live lease could otherwise interleave —
+	 * one reading the issue open, the other moving it to Done, the first
+	 * then mirroring In Review over the top and reopening it. The chain
+	 * covers the whole gated sequence, so the second completion reads the
+	 * state the first one left.
+	 */
+	private async serializedCompletion<T>(graphId: string, nodeId: string, fn: () => Promise<T>): Promise<T> {
+		const key = `${graphId}/${nodeId}`;
+		const prev = this.completionChains.get(key) ?? Promise.resolve();
+		const { promise: gate, resolve: done } = Promise.withResolvers<void>();
+		const tail = prev.then(() => gate);
+		this.completionChains.set(key, tail);
+		await prev;
+		try {
+			return await fn();
+		} finally {
+			done();
+			if (this.completionChains.get(key) === tail) this.completionChains.delete(key);
+		}
 	}
 
 	/** One `mirror.failed` warning per failed target: surface and session are the holder's, and there is no repo. */
@@ -1662,10 +1710,27 @@ export class Substrate {
 		// review write has nothing to stand on, so fall through to main's
 		// path, which refuses in its own words.
 		if (!request.force && targetState === "completed" && this.mirror && request.lease_id) {
-			const node = await this.index.getNode(graphId, nodeId).catch(() => null);
+			// A failed lookup is not a node without a Linear reference: the
+			// throwing read tells the two apart, and a read that fails stops
+			// here — falling through would let `fencedRelease` mark a
+			// Linear-linked node completed with no dod and no connector check.
+			let node: GraphNode | null;
+			try {
+				node = await this.index.readNode(graphId, nodeId);
+			} catch {
+				return {
+					completed: false,
+					released: false,
+					action: null,
+					reason: "index-unavailable" as const,
+					detail: "the node could not be read, so the gate cannot tell whether Linear approval is needed; retry rather than completing blind",
+				};
+			}
 			const linearRef = node?.linear_issue_id ?? node?.linear_identifier ?? null;
 			if (node && linearRef && !isSwarmSurface(node.claimed_by)) {
-				return this.gatedComplete(graphId, nodeId, request, caller, node, linearRef);
+				return this.serializedCompletion(graphId, nodeId, () =>
+					this.gatedComplete(graphId, nodeId, request, caller, node, linearRef),
+				);
 			}
 		}
 		const released = await this.fencedRelease(graphId, nodeId, request, caller, targetState);
@@ -1743,18 +1808,34 @@ export class Substrate {
 			};
 		}
 		// Step 1: the fenced review write — the only new state write of the
-		// phase. A refusal returns main's shape and writes no tracker.
-		const reviewed = await this.index!.reviewNode(graphId, nodeId, leaseId, caller, this.config.leaseTtlSeconds);
-		if (!reviewed.decision.ok) {
+		// phase. A refusal returns main's shape and writes no tracker. The
+		// write must outlive the gate wait that follows it: with a 30 s TTL
+		// and a 35 s connector timeout the lease could lapse mid-gate, letting
+		// the reaper or a second agent take a node Linear already shows Done.
+		// The review TTL therefore covers the gate wait plus a minute for
+		// the Linear reads and tracker calls around it.
+		const timeoutMs = this.dodGateTest.timeoutMs ?? this.config.dodGateTimeoutMs;
+		const gateTtl = normalizeTtlSeconds(this.config.leaseTtlSeconds + Math.ceil(timeoutMs / 1000) + GATE_TTL_BUFFER_SECONDS);
+		const reviewed = await this.index!.reviewNode(graphId, nodeId, leaseId, caller, gateTtl);
+		if (!reviewed.ok || !reviewed.decision.ok) {
+			// `reviewed.ok` is the write landing; `decision.ok` is the read
+			// taken before it. Near expiry the UPDATE can match no row while
+			// the earlier decision still says ok — an unmatched write must
+			// stop the gate before any tracker call, in the refusal's words.
+			const decision = reviewed.decision;
 			return {
 				completed: false,
 				released: false,
 				action: null,
-				reason: reviewed.decision.reason,
-				holder: reviewed.decision.holder,
+				reason: decision.ok ? ("stale-lease" as const) : decision.reason,
+				holder: decision.ok ? (holderOf(leaseSnapshot(reviewed.node)) ?? null) : decision.holder,
 				lease: reviewed.lease,
 			};
 		}
+		// The review write moved state and expiry with no release to follow on
+		// the refusal paths, so clear the cached answers now — or `graph_get`
+		// and the brief keep serving the pre-review node for minutes.
+		await this.bumpGraph(graphId);
 		const ctx: MirrorContext = {
 			graphId,
 			nodeId,
@@ -1772,7 +1853,7 @@ export class Substrate {
 				mirror: this.mirror!,
 				fetchImpl: this.dodGateTest.fetchImpl,
 				hermesLinearUrl: this.dodGateTest.hermesLinearUrl ?? this.config.hermesLinearUrl,
-				timeoutMs: this.dodGateTest.timeoutMs ?? this.config.dodGateTimeoutMs,
+				timeoutMs,
 			},
 			ctx,
 			request.dod,
@@ -1864,7 +1945,7 @@ export class Substrate {
 		if (!node) return { found: false, reason: `no node ${nodeId} in ${graphId}` };
 		if (!this.mirror) return { found: false, reason: "linear mirror off" };
 		const text = await this.mirror.issueText({ linearRef: node.linear_issue_id ?? node.linear_identifier ?? null });
-		if (!text.ok) return { found: false, reason: text.reason };
+		if (!text.ok) return { found: false, reason: redact(text.reason) };
 		const title = redact(text.title);
 		const description = redact(text.description ?? "");
 		return {

@@ -7,7 +7,7 @@
  * governance gate meets a type that now expects governance columns.
  */
 import { describe, expect, test } from "bun:test";
-import { toMemoryEntry } from "./index-store.ts";
+import { toLinearNodeMatch, toMemoryEntry, type LinearNodeMatch } from "./index-store.ts";
 
 const CREATED = new Date("2026-09-30T00:00:00.000Z");
 
@@ -106,5 +106,36 @@ describe("toMemoryEntry", () => {
 	test("a timestamptz that arrived as a string is still an ISO string out", () => {
 		const entry = toMemoryEntry(row({ created: "2026-09-30 00:00:00+00" }));
 		expect(entry.created).toBe("2026-09-30 00:00:00+00");
+	});
+});
+
+describe("toLinearNodeMatch", () => {
+	test("a Postgres BIGINT epoch arrives numeric with the joined graph columns intact", () => {
+		// The driver hands lease_epoch back as a string, which would otherwise
+		// serialise beside the numeric lease.epoch as a second value for one thing.
+		const match = toLinearNodeMatch({
+			graph_id: "ut-1",
+			node_id: "n2",
+			linear_issue_id: "uuid-SWC-467",
+			linear_identifier: "SWC-467",
+			notion_page: null,
+			state: "started",
+			claimed_by: "hermes",
+			claimed_at: "2026-10-09T00:00:00.000Z",
+			claim_session: "sess-a",
+			lease_id: "lse_live",
+			lease_expires_at: "2026-10-09T01:00:00.000Z",
+			lease_heartbeat_at: "2026-10-09T00:00:00.000Z",
+			lease_epoch: "3" as unknown as number,
+			repo: "swcstudiospace/x",
+			branch: "main",
+			graph_status: "open",
+		} as unknown as LinearNodeMatch);
+
+		expect(match.lease_epoch).toBe(3);
+		expect(typeof match.lease_epoch).toBe("number");
+		expect(match.repo).toBe("swcstudiospace/x");
+		expect(match.branch).toBe("main");
+		expect(match.graph_status).toBe("open");
 	});
 });

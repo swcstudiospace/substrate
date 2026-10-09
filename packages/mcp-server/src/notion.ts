@@ -122,6 +122,40 @@ export class NotionClient {
 		const id = (await this.taskGraphPage(pageId)).id;
 		await this.request("PATCH", id, { properties });
 	}
+	/**
+	 * One shaped write: a single GET (with the task-graph parent check) whose
+	 * response supplies the property types, then one PATCH of the values
+	 * shaped for those types. Returns a description per skipped property —
+	 * unwritable types and missing properties are named together while the
+	 * rest is still sent. At most one GET and one PATCH per call.
+	 */
+	async writeShaped(pageId: string, wants: Record<string, PropertyValue>): Promise<string[]> {
+		const refused = Object.keys(wants).filter((name) => !(NOTION_WRITABLE as readonly string[]).includes(name));
+		if (refused.length) {
+			throw new NotionError(
+				`refusing to write ${refused.join(", ")}: substrate writes only ${NOTION_WRITABLE.join(", ")} (D-07)`,
+			);
+		}
+		const page = await this.taskGraphPage(pageId);
+		const skipped: string[] = [];
+		const properties: Record<string, unknown> = {};
+		for (const [name, value] of Object.entries(wants)) {
+			const type = page.properties?.[name]?.type;
+			const shaped = type ? buildProperty(type, value) : null;
+			if (shaped) {
+				properties[name] = shaped;
+			} else {
+				skipped.push(
+					type
+						? `"${name}" on page ${page.id} is a ${type} property, which substrate cannot write`
+						: `page ${page.id} has no "${name}" property`,
+				);
+			}
+		}
+		if (Object.keys(properties).length > 0) await this.request("PATCH", page.id, { properties });
+		return skipped;
+	}
+
 
 	/** GET a page and require its parent to be the configured data source. */
 	private async taskGraphPage(pageId: string): Promise<PageResponse & { id: string }> {

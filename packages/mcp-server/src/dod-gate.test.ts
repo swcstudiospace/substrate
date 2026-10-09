@@ -228,3 +228,45 @@ describe("gate leak hygiene", () => {
 		expect(JSON.stringify(calls)).not.toContain(LEASE_ID);
 	});
 });
+
+describe("connector body failures refuse the gate", () => {
+	test("headers followed by a broken body are dod-unavailable, never a throw", async () => {
+		const { mirror } = fakeMirrorGate([{ name: "Doing", type: "started" }], false);
+		const { fetchImpl } = fakeConnector(
+			() =>
+				new Response(
+					new ReadableStream({
+						start(controller) {
+							controller.error(new Error("socket hangup mid-body"));
+						},
+					}),
+				),
+		);
+
+		const result = await runDodGate(deps(mirror, fetchImpl), ctx(), DOD);
+
+		expect(result).toEqual({
+			gate: "refused",
+			reason: "dod-unavailable",
+			detail: expect.stringContaining("body unreadable"),
+			mirrorFailures: [],
+		});
+	});
+});
+
+describe("upstream error text is redacted before the cap", () => {
+	test("connector bodies and reasons never forward credential-shaped text", async () => {
+		const secret = `api_key: ${"k7".repeat(12)}`;
+		const { mirror } = fakeMirrorGate([{ name: "Doing", type: "started" }], false);
+		const refusedFetch = fakeConnector(() => Response.json({ completed: false, reason: `denied: ${secret}` }));
+		const refused = await runDodGate(deps(mirror, refusedFetch.fetchImpl), ctx(), DOD);
+		if (refused.gate !== "refused") throw new Error("expected a refusal");
+		expect(refused.detail).not.toContain("k7".repeat(12));
+
+		const errorFetch = fakeConnector(() => new Response(`boom ${secret}`, { status: 502 }));
+		const errored = await runDodGate(deps(mirror, errorFetch.fetchImpl), ctx(), DOD);
+		if (errored.gate !== "refused") throw new Error("expected a refusal");
+		expect(errored.detail).toContain("502");
+		expect(errored.detail).not.toContain("k7".repeat(12));
+	});
+});

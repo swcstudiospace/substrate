@@ -15,9 +15,9 @@
  * The mirror never sees a lease id (D23-04): MirrorContext carries scalar refs
  * only, and comments carry surface, session, graph and node.
  *
- * A leaf module: imports only ./types.ts, ./config.ts (type-only) and the
- * ./linear.ts + ./notion.ts clients — never service.ts, index-store.ts or
- * lease.ts.
+ * A leaf module: imports only ./types.ts, ./config.ts (type-only), ./redact.ts
+ * and the ./linear.ts + ./notion.ts clients — never service.ts, index-store.ts
+ * or lease.ts.
  */
 import type { SubstrateConfig } from "./config.ts";
 import {
@@ -27,7 +27,8 @@ import {
 	type IssueContext,
 	LinearClient,
 } from "./linear.ts";
-import { buildProperty, NotionClient, notionPageId, type PropertyValue } from "./notion.ts";
+import { NotionClient, notionPageId, type PropertyValue } from "./notion.ts";
+import { redact } from "./redact.ts";
 import { isSwarmSurface, type Surface } from "./types.ts";
 
 export type MirrorOp = "claim" | "steal" | "release" | "expire" | "force" | "review" | "done" | "close";
@@ -259,9 +260,13 @@ export class Mirror {
 		try {
 			return { ok: true, ...(await this.linear.issueText(node.linearRef)) };
 		} catch (cause) {
-			return { ok: false, reason: `linear read failed: ${reasonOf(cause)}` };
+			// Upstream text is untrusted and may carry a credential-shaped
+			// fragment (a password-bearing URL in a GraphQL error, say), so the
+			// reason MCP forwards is redacted before it is capped.
+			return { ok: false, reason: `linear read failed: ${redact(reasonOf(cause))}` };
 		}
 	}
+
 
 	/** One transition serialized behind earlier transitions for the same node. */
 	private async serialized<T>(ctx: MirrorContext, fn: () => Promise<T>): Promise<T> {
@@ -309,7 +314,16 @@ export class Mirror {
 				linearState = await linearStep(this.linear);
 				linearOk = true;
 			} catch (cause) {
-				failures.push({ target: "linear", op, reason: reasonOf(cause) });
+				if (cause instanceof ClaimCommentFailed) {
+					// The state move landed and only the courtesy comment did
+					// not: Notion must still show the state Linear now has,
+					// with the comment failure kept as its own warning.
+					linearState = cause.state;
+					linearOk = true;
+					failures.push({ target: "linear", op, reason: `comment failed: ${reasonOf(cause.cause)}` });
+				} else {
+					failures.push({ target: "linear", op, reason: reasonOf(cause) });
+				}
 			}
 		}
 		if (this.notion) {
@@ -320,9 +334,9 @@ export class Mirror {
 	}
 
 	/**
-	 * One PATCH on the node's Issue row, each value shaped for the type the row
-	 * itself reports. At most one failure: unshapable properties are skipped
-	 * and named together, and the rest are still sent.
+	 * One shaped write on the node's Issue row: a single GET for the row's
+	 * own property types, then one PATCH. At most one failure: unshapable
+	 * properties are skipped and named together, and the rest are still sent.
 	 */
 	private async notionStep(
 		notion: NotionClient,
@@ -334,23 +348,7 @@ export class Mirror {
 		if (!pageId) return `notion_page holds no Notion page id: ${ctx.notionPage.slice(0, 100)}`;
 
 		try {
-			const types = await notion.getPage(pageId);
-			const skipped: string[] = [];
-			const properties: Record<string, unknown> = {};
-			for (const [name, value] of Object.entries(wants)) {
-				const type = types[name];
-				const shaped = type ? buildProperty(type, value) : null;
-				if (shaped) {
-					properties[name] = shaped;
-				} else {
-					skipped.push(
-						type
-							? `"${name}" on page ${pageId} is a ${type} property, which substrate cannot write`
-							: `page ${pageId} has no "${name}" property`,
-					);
-				}
-			}
-			if (Object.keys(properties).length > 0) await notion.updatePage(pageId, properties);
+			const skipped = await notion.writeShaped(pageId, wants);
 			return skipped.length ? skipped.join("; ").slice(0, REASON_LIMIT) : null;
 		} catch (cause) {
 			return reasonOf(cause);
@@ -379,7 +377,13 @@ export class Mirror {
 			.map((l) => l.id);
 		await linear.updateIssue(issue.id, { stateId, addedLabelIds: [agentLabelId], removedLabelIds });
 		const body = transitionComment(ctx.evictedHolder ? "steal" : "claim", ctx);
-		if (!issue.comments.includes(body)) await linear.createComment(issue.id, body);
+		if (!issue.comments.includes(body)) {
+			try {
+				await linear.createComment(issue.id, body);
+			} catch (cause) {
+				throw new ClaimCommentFailed(stateNameById(issue, stateId), cause);
+			}
+		}
 		return stateNameById(issue, stateId);
 	}
 
@@ -392,6 +396,21 @@ export class Mirror {
 			removedLabelIds: issue.labels.filter((l) => l.name.startsWith("agent:")).map((l) => l.id),
 		});
 		return stateNameById(issue, stateId);
+	}
+}
+	/**
+	 * The claim comment did not land, but the state move it followed did.
+	 * Carries the state name `run` must still mirror to Notion so a failed
+	 * courtesy comment never hides a state Linear already has.
+	 */
+
+class ClaimCommentFailed extends Error {
+	readonly state: string;
+	readonly cause: unknown;
+	constructor(state: string, cause: unknown) {
+		super(`claim comment failed after the state move to ${state}`);
+		this.state = state;
+		this.cause = cause;
 	}
 }
 

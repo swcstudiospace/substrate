@@ -10,6 +10,7 @@ import { EVENT_SOURCES } from "./event-sources.ts";
 import { Substrate, SkillProposalDenied, type SkillProposalRequest } from "./service.ts";
 import { ProposeFailed, ProposeRefused, type ProposeOptions, type ProposeResult, type SkillProposer } from "./skills/propose.ts";
 import type { EventInput, SubstrateEvent, Surface } from "./types.ts";
+import { GRAPHS_GENERATION_KEY, graphGenerationKey } from "./cache.ts";
 
 /** Records what reached the event log, and stands in for the index. */
 function stubStores(
@@ -212,6 +213,10 @@ describe("releaseNode and completeNode", () => {
 		};
 		const index = {
 			getGraph: async () => ({ repo: "swcstudiospace/x", branch: "main" }),
+			// The throwing read completion gating uses: unknown rows come back
+			// null (the fenced path refuses in its own words), while a database
+			// failure rejects and stops the completion before any gate skip.
+			readNode: async () => ({ ...node }),
 			// Deliberately present and expected never to fire: completion writes the
 			// state inside the release's own guarded statement now, because two
 			// statements let another agent claim the freed node in between and get
@@ -274,6 +279,7 @@ describe("releaseNode and completeNode", () => {
 		expect(release.lease.lease_id).toBeNull();
 		expect(release.lease.epoch).toBe(3);
 		expect(complete).toMatchObject({ completed: false, reason: "not-holder" });
+		if (!("lease" in complete)) throw new Error("expected the refusal to carry the lease");
 		expect(complete.lease.lease_id).toBeNull();
 		expect(stores.stateAfter()).toBeNull();
 		expect(stores.emitted).toEqual([]);
@@ -2652,9 +2658,17 @@ describe("completeNode DoD gate (D23-14, D23-15)", () => {
 		holder?: string;
 		reviewOk?: boolean;
 		reviewReason?: "not-holder" | "lost" | "expired" | "unheld";
+		/** The review UPDATE matches no row while the earlier decision still says ok. */
+		reviewRace?: boolean;
+		/** The gating read rejects instead of returning the row. */
+		readFails?: boolean;
+		/** What `getNode` reports after the decision was taken: a higher epoch means a re-claim. */
+		reclaimedEpoch?: number;
 		linearState?: { name: string; type: string } | null;
 		connector?: { status: number; body: unknown } | { fail: "unreachable" | "timeout" };
 		reviewFailures?: Array<{ target: "linear" | "notion"; op: "review"; reason: string }>;
+		/** Probed by the serialization test to observe gate event order. */
+		onGateEvent?: (name: "state" | "review" | "connector") => void;
 		releaseFails?: boolean;
 	}
 
@@ -2663,6 +2677,8 @@ describe("completeNode DoD gate (D23-14, D23-15)", () => {
 		const emitted: SubstrateEvent[] = [];
 		const mirrorCalls: Array<{ op: string; ctx: Record<string, unknown> }> = [];
 		const connectorCalls: Array<{ url: string; body: unknown }> = [];
+		const reviewTtls: Array<number | undefined> = [];
+		const bumps: string[] = [];
 		let state = "started";
 		let reviewWrites = 0;
 		const node = {
@@ -2683,8 +2699,23 @@ describe("completeNode DoD gate (D23-14, D23-15)", () => {
 		const holderOfRow = () => ({ surface: node.claimed_by, session_id: node.claim_session });
 		const index = {
 			getGraph: async () => ({ repo: "swcstudiospace/x", branch: "main" }),
-			getNode: async () => ({ ...node, state }),
-			reviewNode: async (_g: string, _n: string, leaseId: string, caller: Surface | null) => {
+			getNode: async () => ({ ...node, state, lease_epoch: knobs.reclaimedEpoch ?? node.lease_epoch }),
+			readNode: async () => {
+				if (knobs.readFails) throw new Error("connection refused");
+				return { ...node, state };
+			},
+			reviewNode: async (_g: string, _n: string, leaseId: string, caller: Surface | null, ttlSeconds?: number) => {
+				reviewTtls.push(ttlSeconds);
+				if (knobs.reviewRace) {
+					// Near expiry the UPDATE matches no row after a live read:
+					// the write did not land, but the stale decision still says ok.
+					return {
+						ok: false,
+						node: { ...node, state },
+						lease: { lease_id: null, holder: holderOfRow(), epoch: 3 },
+						decision: { ok: true, lease_id: leaseId, ttl_seconds: 900, observed_epoch: 3 },
+					};
+				}
 				const decision = decideRelease(leaseSnapshot(node as never), { lease_id: leaseId, caller }, Date.now());
 				if (knobs.reviewOk === false || !decision.ok) {
 					const reason = knobs.reviewReason ?? (!decision.ok ? "stale-lease" : "not-holder");
@@ -2727,9 +2758,13 @@ describe("completeNode DoD gate (D23-14, D23-15)", () => {
 		const mirror = {
 			review: async (ctx: Record<string, unknown>) => {
 				mirrorCalls.push({ op: "review", ctx });
+				knobs.onGateEvent?.("review");
 				return knobs.reviewFailures ?? [];
 			},
-			linearState: async () => knobs.linearState ?? null,
+			linearState: async () => {
+				knobs.onGateEvent?.("state");
+				return knobs.linearState ?? null;
+			},
 			done: async (ctx: Record<string, unknown>) => {
 				mirrorCalls.push({ op: "done", ctx });
 				return [];
@@ -2742,6 +2777,7 @@ describe("completeNode DoD gate (D23-14, D23-15)", () => {
 		const fetchImpl = (async (url: string, init: { body?: string }) => {
 			const body = init.body ? (JSON.parse(init.body) as unknown) : null;
 			connectorCalls.push({ url, body });
+			knobs.onGateEvent?.("connector");
 			const connector = knobs.connector ?? { status: 200, body: { completed: true } };
 			if ("fail" in connector) {
 				if (connector.fail === "timeout") {
@@ -2760,13 +2796,28 @@ describe("completeNode DoD gate (D23-14, D23-15)", () => {
 				emitted.push(event);
 			},
 		};
+		const cache = {
+			bump: async (key: string) => {
+				bumps.push(key);
+			},
+		};
 		const substrate = new Substrate(loadConfig({}), {
 			index: index as never,
 			greptime: greptime as never,
 			mirror: mirror as never,
 			dodGate: { fetchImpl },
+			cache: cache as never,
 		});
-		return { emitted, mirrorCalls, connectorCalls, substrate, stateAfter: () => state, reviewWrites: () => reviewWrites };
+		return {
+			emitted,
+			mirrorCalls,
+			connectorCalls,
+			substrate,
+			stateAfter: () => state,
+			reviewWrites: () => reviewWrites,
+			reviewTtls,
+			bumps,
+		};
 	}
 
 	const dodWarnings = (emitted: SubstrateEvent[]) => emitted.filter((e) => e.payload["action"] === "dod");
@@ -2953,6 +3004,105 @@ describe("completeNode DoD gate (D23-14, D23-15)", () => {
 		expect(world.mirrorCalls).toEqual([]);
 		expect(world.connectorCalls).toEqual([]);
 		expect(world.emitted).toEqual([]);
+	});
+	test("an unmatched review write stops the gate before any tracker call", async () => {
+		// Near expiry the UPDATE matches no row while the earlier decision
+		// still says ok: checking only the decision would write trackers and
+		// call the connector on a review that never landed.
+		const world = gateWorld({ reviewRace: true });
+
+		const result = await world.substrate.completeNode(
+			"ut-1",
+			"n2",
+			{ lease_id: "lse_live", dod: { summary: "s", tests_pass: true } },
+			"hermes",
+		);
+
+		expect(result).toMatchObject({ completed: false, reason: "stale-lease" });
+		expect(world.mirrorCalls).toEqual([]);
+		expect(world.connectorCalls).toEqual([]);
+		expect(world.emitted).toEqual([]);
+	});
+
+	test("a failed gating read refuses instead of completing blind", async () => {
+		// getNode swallows the database error into null, which reads like a
+		// node with no Linear reference — and the fenced path would then mark
+		// a Linear-linked node completed with no dod and no connector check.
+		const world = gateWorld({ readFails: true });
+
+		const result = await world.substrate.completeNode(
+			"ut-1",
+			"n2",
+			{ lease_id: "lse_live", dod: { summary: "s", tests_pass: true } },
+			"hermes",
+		);
+
+		expect(result).toMatchObject({ completed: false, reason: "index-unavailable" });
+		expect(world.stateAfter()).toBe("started");
+		expect(world.mirrorCalls).toEqual([]);
+		expect(world.connectorCalls).toEqual([]);
+	});
+
+	test("the review write clears cached answers and outlives the gate wait", async () => {
+		const world = gateWorld();
+
+		const result = await world.substrate.completeNode("ut-1", "n2", { lease_id: "lse_live" }, "hermes");
+
+		expect(result).toMatchObject({ completed: false, reason: "dod-required" });
+		// Both generations: graph_get answers and the briefs that embed them.
+		expect(world.bumps).toContain(graphGenerationKey("ut-1"));
+		expect(world.bumps).toContain(GRAPHS_GENERATION_KEY);
+		// Default 900 s TTL plus the 35 s connector wait plus headroom, so a
+		// short-TTL lease cannot lapse mid-gate and lose the node to a re-claim.
+		expect(world.reviewTtls).toEqual([900 + 35 + 60]);
+	});
+
+	test("a stale release-side mirror is dropped after a re-claim", async () => {
+		// The forced release was decided at epoch 3, but getNode now reports
+		// epoch 4: a newer hold owns the trackers, so the close must not strip
+		// its labels or clear its Notion Agent.
+		const world = gateWorld({ reclaimedEpoch: 4 });
+
+		const result = await world.substrate.completeNode("ut-1", "n2", { lease_id: "lse_live", force: true }, "hermes");
+
+		expect(result.completed).toBe(true);
+		expect(world.mirrorCalls).toEqual([]);
+	});
+
+	test("the approved done mirror still runs after a re-claim", async () => {
+		// Linear is Done by the connector's hand: the Notion row must say so
+		// even though the index has moved on. Only release-side clears drop.
+		const world = gateWorld({ reclaimedEpoch: 4 });
+
+		const result = await world.substrate.completeNode(
+			"ut-1",
+			"n2",
+			{ lease_id: "lse_live", dod: { summary: "s", tests_pass: true } },
+			"hermes",
+		);
+
+		expect(result.completed).toBe(true);
+		expect(world.mirrorCalls.map((c) => c.op)).toEqual(["review", "done"]);
+	});
+
+	test("concurrent gated completions run the gate one at a time", async () => {
+		// The Linear read and the connector call sit outside any fence: without
+		// the per-node chain the two completions interleave their gate steps,
+		// and the first mirrors In Review over the second's Done. Serialized,
+		// each completion's whole gate sequence precedes the next one's.
+		const events: Array<"state" | "review" | "connector"> = [];
+		const world = gateWorld({ onGateEvent: (name) => events.push(name) });
+
+		const args = { lease_id: "lse_live", dod: { summary: "s", tests_pass: true } } as const;
+		const [first, second] = await Promise.all([
+			world.substrate.completeNode("ut-1", "n2", { ...args }, "hermes"),
+			world.substrate.completeNode("ut-1", "n2", { ...args }, "hermes"),
+		]);
+
+		expect(events).toEqual(["state", "review", "connector", "state", "review", "connector"]);
+		expect(world.connectorCalls).toHaveLength(2);
+		expect(first.completed).toBe(true);
+		expect(second.completed).toBe(true);
 	});
 
 	test("malformed dod is refused before the review write", async () => {

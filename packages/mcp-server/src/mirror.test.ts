@@ -52,7 +52,10 @@ interface MutationInput {
 }
 
 /** A Linear GraphQL stand-in answering from one mutable fixture and recording mutations. */
-function fakeLinear(fixture: IssueFixture, hooks?: { down?: boolean; onUpdate?: (input: MutationInput) => Promise<void> }) {
+function fakeLinear(
+	fixture: IssueFixture,
+	hooks?: { down?: boolean; onUpdate?: (input: MutationInput) => Promise<void>; onComment?: (input: MutationInput) => Promise<void> },
+) {
 	const mutations: LinearMutation[] = [];
 	const requests: Array<{ url: string; body: string }> = [];
 	const fetchImpl = (async (url: string, init: RequestInit) => {
@@ -100,6 +103,7 @@ function fakeLinear(fixture: IssueFixture, hooks?: { down?: boolean; onUpdate?: 
 		}
 		if (query.includes("CommentCreate")) {
 			const input = variables.input as MutationInput;
+			await hooks?.onComment?.(input);
 			mutations.push({ kind: "comment", body: input.body });
 			fixture.comments.push(input.body);
 			return Response.json({ data: { commentCreate: { success: true } } });
@@ -197,6 +201,15 @@ describe("claim (granted/reclaimed)", () => {
 		const patch = notion.mutations.find((m) => m.method === "PATCH");
 		expect(patch?.properties?.Agent).toEqual({ rich_text: [{ text: { content: "hermes" } }] });
 		expect(patch?.properties?.["Linear State"]).toEqual({ select: { name: "Doing" } });
+	});
+
+	test("one shaped write costs a single GET and a single PATCH", async () => {
+		const { notion, mirror } = harness();
+
+		expect(await mirror.claim(ctx())).toEqual([]);
+
+		expect(notion.mutations.filter((m) => m.method === "GET")).toHaveLength(1);
+		expect(notion.mutations.filter((m) => m.method === "PATCH")).toHaveLength(1);
 	});
 
 	test("an identical comment among the last 20 posts no write; same-session reclaim posts nothing new", async () => {
@@ -404,6 +417,38 @@ describe("failure semantics: fail-open warnings, never throws (D23-17/18)", () =
 		const failures = await mirror.claim(ctx({ linearRef: "SWC-999" }));
 
 		expect(failures).toEqual([{ target: "linear", op: "claim", reason: expect.any(String) }]);
+	});
+
+	test("a failed claim comment keeps the state Linear already has", async () => {
+		// The issueUpdate landed and only the courtesy comment did not: the
+		// comment failure warns on its own while Notion still shows Doing.
+		const fix: IssueFixture = { labels: [], comments: [], knownLabels: [] };
+		const linear = fakeLinear(fix, {
+			onComment: async () => {
+				throw new Error("commentCreate on issue-1 did not succeed");
+			},
+		});
+		const notion = fakeNotion();
+		const mirror = new Mirror({ linear: linear.client, notion: notion.client });
+
+		const failures = await mirror.claim(ctx());
+
+		expect(failures).toEqual([{ target: "linear", op: "claim", reason: expect.stringContaining("comment failed") }]);
+		expect(updatesOf(linear.mutations)).toHaveLength(1);
+		const patch = notion.mutations.find((m) => m.method === "PATCH");
+		expect(patch?.properties?.["Linear State"]).toEqual({ select: { name: "Doing" } });
+	});
+
+	test("a failed issue read is redacted before it is forwarded", async () => {
+		const secret = `api_key: ${"k7".repeat(12)}`;
+		const fetchImpl = (async () => new Response(`upstream blew up: ${secret}`, { status: 502 })) as unknown as typeof fetch;
+		const mirror = new Mirror({ linear: new LinearClient(LIN_KEY, { fetchImpl, endpoint: "https://linear.test/graphql" }), notion: null });
+
+		const result = await mirror.issueText({ linearRef: "SWC-1" });
+
+		if (result.ok) throw new Error("expected the read to fail");
+		expect(result.reason).toContain("linear read failed");
+		expect(result.reason).not.toContain("k7".repeat(12));
 	});
 
 	test("per-node calls serialize: a release cannot overtake its claim", async () => {

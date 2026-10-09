@@ -158,9 +158,9 @@ describe("updateIssue is additive only", () => {
 		const input = requests[0]!.body.variables.input as Record<string, unknown>;
 		expect(input).toEqual({ stateId: "st-progress", addedLabelIds: ["l1"], removedLabelIds: ["l2"] });
 		expect(input).not.toHaveProperty("labelIds");
-		// Type-level: this assignment must not compile if a labelIds parameter is added.
-		const noLabelIds: Parameters<LinearClient["updateIssue"]>[1] = { addedLabelIds: ["l1"] };
-		expect(noLabelIds).not.toHaveProperty("labelIds");
+		// Adding labelIds must make this assignment fail to compile.
+		const noLabelIds: "labelIds" extends keyof Parameters<LinearClient["updateIssue"]>[1] ? never : true = true;
+		expect(noLabelIds).toBe(true);
 	});
 });
 
@@ -201,14 +201,17 @@ describe("ensureLabel (D23-07)", () => {
 });
 
 describe("endpoint default", () => {
-	test("defaults to the real Linear GraphQL API", () => {
+	test("defaults to the real Linear GraphQL API", async () => {
 		expect(LINEAR_API_URL).toBe("https://api.linear.app/graphql");
+		let called = false;
 		const client = new LinearClient(KEY, {
 			fetchImpl: (async (url: string) => {
+				called = true;
 				expect(url).toBe("https://api.linear.app/graphql");
 				return reply({ data: { issue: null } });
 			}) as unknown as typeof fetch,
 		});
-		expect(client).toBeInstanceOf(LinearClient);
+		await expect(client.issueState("SWC-1")).rejects.toThrow("issue SWC-1 not found");
+		expect(called).toBe(true);
 	});
 });

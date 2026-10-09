@@ -25,10 +25,11 @@
  * The gate never sees a lease id: it takes a MirrorContext, and the connector
  * request carries only the issue ref and the evidence. Never throws.
  *
- * A leaf module: imports only ./mirror.ts types — never service.ts,
- * index-store.ts or lease.ts.
+ * A leaf module: imports only ./mirror.ts types and ./redact.ts — never
+ * service.ts, index-store.ts or lease.ts.
  */
 import type { Mirror, MirrorContext, MirrorFailure } from "./mirror.ts";
+import { redact } from "./redact.ts";
 
 /** Pinned from hermes-linear-connector@6e532fe `webhook_app.py:126-141`. */
 export const CONNECTOR_COMPLETE_PATH = "/v1/complete-issue";
@@ -58,8 +59,17 @@ export type DodGateResult =
 const DETAIL_LIMIT = 300;
 
 function detailOf(cause: unknown): string {
+	// Upstream text is untrusted: a connector or Linear error can carry a
+	// credential assignment or a password-bearing URL, so every detail MCP
+	// forwards is redacted before it is capped — as the issue-text path is.
 	const message = cause instanceof Error ? cause.message : String(cause);
-	return message.slice(0, DETAIL_LIMIT);
+	return redact(message).slice(0, DETAIL_LIMIT);
+}
+
+/** Redact-then-cap for a connector body already read into memory. */
+
+function bodyDetail(prefix: string, text: string): string {
+	return `${prefix}${redact(text).slice(0, DETAIL_LIMIT)}`;
 }
 
 export async function runDodGate(
@@ -111,7 +121,10 @@ export async function runDodGate(
 			return {
 				gate: "refused",
 				reason: "dod-unavailable",
-				detail: `connector timed out after ${deps.timeoutMs}ms and Linear still shows ${settled?.name ?? "unknown"}`,
+				detail: redact(`connector timed out after ${deps.timeoutMs}ms and Linear still shows ${settled?.name ?? "unknown"}`).slice(
+					0,
+					DETAIL_LIMIT,
+				),
 				mirrorFailures,
 			};
 		}
@@ -123,12 +136,24 @@ export async function runDodGate(
 		};
 	}
 
-	const text = await reply.text();
+	// The body read is part of the guarded request: a connector that sends
+	// headers and then disconnects must refuse the gate, never throw it.
+	let text: string;
+	try {
+		text = await reply.text();
+	} catch (cause) {
+		return {
+			gate: "refused",
+			reason: "dod-unavailable",
+			detail: `connector body unreadable: ${detailOf(cause)}`,
+			mirrorFailures,
+		};
+	}
 	if (!reply.ok) {
 		return {
 			gate: "refused",
 			reason: "dod-unavailable",
-			detail: `connector ${reply.status}: ${text.slice(0, DETAIL_LIMIT)}`,
+			detail: bodyDetail(`connector ${reply.status}: `, text),
 			mirrorFailures,
 		};
 	}
@@ -140,7 +165,7 @@ export async function runDodGate(
 		return {
 			gate: "refused",
 			reason: "dod-unavailable",
-			detail: `connector returned non-JSON: ${text.slice(0, DETAIL_LIMIT)}`,
+			detail: bodyDetail("connector returned non-JSON: ", text),
 			mirrorFailures,
 		};
 	}
@@ -148,7 +173,7 @@ export async function runDodGate(
 		return {
 			gate: "refused",
 			reason: "dod-unavailable",
-			detail: `connector reply has no completed flag: ${text.slice(0, DETAIL_LIMIT)}`,
+			detail: bodyDetail("connector reply has no completed flag: ", text),
 			mirrorFailures,
 		};
 	}
@@ -157,5 +182,5 @@ export async function runDodGate(
 		"reason" in body && typeof body.reason === "string" && body.reason.length > 0
 			? body.reason
 			: "connector refused";
-	return { gate: "refused", reason: "dod-refused", detail: reason.slice(0, DETAIL_LIMIT), mirrorFailures };
+	return { gate: "refused", reason: "dod-refused", detail: redact(reason).slice(0, DETAIL_LIMIT), mirrorFailures };
 }
