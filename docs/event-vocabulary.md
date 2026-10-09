@@ -86,6 +86,8 @@ These apply to every source:
 | `verify` | 28 | — | — | — | — | — | no |
 | `issue_get` | 23 | — | — | — | — | — | no |
 | `graph_find` | 23 | — | — | — | — | — | no |
+| `skills.sync` | 22 | — | — | — | — | — | no |
+| `mirror` | 23 | — | — | — | — | — | no |
 
 <!-- event-sources:end -->
 
@@ -98,7 +100,10 @@ is the lease holder. A fixed name is always that surface.
 
 These deliberately emit nothing. A successful retain and every recall emit
 nothing (reads do not emit, like `memory_search`); Agent Cards and `verify`
-are reads; `issue_get` and `graph_find` are reads. The Muse brief writer is
+are reads; `issue_get` and `graph_find` are reads. A successful skills sync
+emits nothing — only a refusal is a warning — and the synced tree is its
+trail; a successful mirror emits nothing — only a failure is a warning — and
+the Linear comment is its trail. The Muse brief writer is
 deliberately not an event: a `note` with `repo` per refresh would enter that
 repo's brief, change it, and re-trigger itself — the written `BRIEF.md` and
 the writer's local counters are its trail.

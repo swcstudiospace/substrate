@@ -590,4 +590,14 @@ export const SILENT_SOURCES: readonly SilentSource[] = [
 		phase: 23,
 		reason: "A read of the index; it emits nothing.",
 	},
+	{
+		id: "skills.sync",
+		phase: 22,
+		reason: "A successful sync emits nothing; only a refusal is a warning. The synced tree is its trail.",
+	},
+	{
+		id: "mirror",
+		phase: 23,
+		reason: "A successful mirror emits nothing; only a failure is a warning. The Linear comment is its trail.",
+	},
 ];
