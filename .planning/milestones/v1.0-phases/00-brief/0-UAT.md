@@ -3,7 +3,7 @@ status: partial
 phase: 00-brief
 source: .planning/milestones/v1.0-ROADMAP.md (Phase 0 success criteria) — no SUMMARY.md exists; Phase 0 was built directly from the approved plan rather than through plan-phase/execute-phase
 started: 2026-09-23T18:55:00Z
-updated: 2026-09-23T18:55:00Z
+updated: 2026-10-09T17:00:00Z
 audit_acknowledged:
   milestone: v1.1
   at: 2026-10-07
@@ -12,62 +12,64 @@ audit_acknowledged:
 
 ## Current Test
 
-[testing paused — 8 items outstanding; superseded by /gsd-autonomous]
-
-Test 1 was presented with live evidence (9 MCP tools, 4 REST routes all
-answering) but never answered — the session moved to autonomous execution.
-Evidence for tests 1-3 is recorded below and can be re-confirmed cheaply.
+[testing — 6 of 8 passing on the Phase 16 harness (Phase 20 plan 20-04, run uat-p20proof2); scenarios 2 and 5 are live-gated for the plan 20-06 production window]
 
 ## Tests
 
 ### 1. substrate-mcp serves both surfaces
 
-expected: 9 MCP tools listed; GET /healthz, POST /brief, POST /events, POST /verify all answer
-result: [pending]
-evidence: "9 tools live (memory_brief/write/search, events_emit, graph_get/register/claim/release/complete); /healthz 200, /brief 200, /events 202, /verify 200" 
+expected: MCP tools/list contains the 9 named v1.0 tools among today's set (not "exactly 9"); GET /healthz 200, POST /brief 200, POST /events 202, POST /verify 200
+result: [pass]
+evidence: "harness uat-p20proof2: tools/list 20 tools with 9 v1 names present; /healthz 200, /brief 200, /events 202 stored true, graph_register 1 node, /verify 200 ok true"
 
 ### 2. Schemas exist and hold real data
 
-expected: graph_index/graph_nodes/graph_steps/memory_entries in Postgres, agent_events/anchors in Greptime, all on Railway
-result: [pending]
-evidence: "postgres: graph_index(6 rows), graph_nodes(15), graph_steps, memory_entries(1); greptime: agent_events(8 rows), anchors" 
+expected: /healthz reports index, greptime, appendOnly true; events_query, a graph read and memory_search return rows through the API only (anchors shape and raw row counts are an operator-approved read-only SQL step recorded as evidence, never in the script)
+result: [pending — live-gated for the plan 20-06 production window]
+evidence: "none yet"
 
 ### 3. Index backfilled from the Notion Agent Task Graph
 
-expected: real graphs and nodes from the live database, with Linear identifiers
-result: [pending]
+expected: on the harness, backfill-run shape over exported Notion rows then graph_get shows graphs with Linear identifiers; on production, graph_get of graph ids from an operator-approved read-only Notion export
+result: [pass]
+evidence: "harness uat-p20proof2: 2 graphs backfilled from exported rows, 3 nodes, 3 Linear identifiers"
 
 ### 4. The brief reaches a Claude Code session
 
-expected: fetchBrief runs before the Graph of Thought and injects the brief into prompt context
-result: [pending]
+expected: installed plugin fetchBrief with SUBSTRATE_URL always in env returns a non-empty brief, and formatPromptContext contains ## Agent Substrate brief, with no model quota spent; plugin version and commit recorded
+result: [pass]
+evidence: "harness uat-p20proof2: fetchBrief non-empty brief (255 bytes), prompt-context header present; plugin 0.3.0 @ 85ca1ac"
 
 ### 5. ultrathink-kickoff calls graph_register
 
-expected: a newly tracked Task registers itself in the index automatically
-result: [pending]
+expected: read-only — Claude Code config has an MCP server named substrate whose Authorization header names the token variable; live — given --graph from a real kickoff, graph_get returns it with nodes and Linear identifiers, registered by surface claude-code
+result: [pending — live-gated for the plan 20-06 production window]
+evidence: "none yet"
 
 ### 6. Cursor hooks and the git post-commit collector are installed
 
-expected: a Cursor session writes .substrate/BRIEF.md; a commit emits a commit event
-result: [pending]
+expected: cursor --check reports the three substrate entries current and the stop script present, install-git-hook --check reports the hook present; sessionStart writes .substrate/BRIEF.md and emits no event; harness — synthetic envelopes in a scratch repo plus a commit through the installed hook, matched by surface, kind, repo and since; production — a real Cursor session and a real commit
+result: [pass]
+evidence: "harness uat-p20proof2: 3 desired entries; BRIEF.md written, no event emitted; stop exit 0 stdout empty; hook present; 1 commit event matched by surface, kind, repo and since; tool.call read-back 1 row"
 
 ### 7. A substrate outage does not block any agent
 
-expected: with substrate-mcp stopped, prompts proceed normally, just unbriefed
-result: [pending]
+expected: against its own dead port and its own hanging listener (never the target) — fetchBrief returns "" within 1500 ms plus 250 ms slack, substrate brief exits 0 with empty stdout within budget, hook commands exit 0 with nothing on stdout
+result: [pass]
+evidence: "harness uat-p20proof2: fetchBrief empty in 1 ms; CLI brief exit 0 empty stdout in 43 ms; hook brief exit 0 stdout empty in 1547 ms"
 
 ### 8. Phase proof — cross-surface brief
 
-expected: work done on one surface appears in another surface's brief, keyed by Graph ID
-result: [pending]
+expected: graph G with run-tagged repo R and node n1, n1 claimed as claude-code, file.edit emitted as cursor with repo R and graph G, then POST /brief as hermes with repo R and graph G lists the cursor edit line and n1 held by claude-code
+result: [pass]
+evidence: "harness uat-p20proof2: graph_claim decision granted; file.edit emit 202 stored true; brief 200 with cross-surface lines"
 
 ## Summary
 
 total: 8
-passed: 0
+passed: 6
 issues: 0
-pending: 8
+pending: 2
 skipped: 0
 blocked: 0
 
