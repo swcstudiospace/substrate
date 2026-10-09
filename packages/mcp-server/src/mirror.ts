@@ -238,13 +238,16 @@ export class Mirror {
 	}
 
 	/**
-	 * The node's issue state as Linear has it now, or null when Linear is off,
-	 * the node has no issue or the read fails. Never throws. Lets completion
-	 * tell an issue the connector already moved to Done from one still open.
+	 * The node's issue state as Linear has it now, or null when Linear is off
+	 * or the node has no issue. A failed read throws rather than returning
+	 * null: the DoD gate must tell "could not read" apart from "still open",
+	 * so it never mirrors In Review onto an issue the connector may already
+	 * have moved to Done. Its only reader is the gate, which refuses as
+	 * unavailable on a throw.
 	 */
 	async linearState(ctx: Pick<MirrorContext, "linearRef">): Promise<{ name: string; type: string } | null> {
 		if (!this.linear || !ctx.linearRef) return null;
-		return this.linear.issueState(ctx.linearRef).catch(() => null);
+		return this.linear.issueState(ctx.linearRef);
 	}
 
 	/**

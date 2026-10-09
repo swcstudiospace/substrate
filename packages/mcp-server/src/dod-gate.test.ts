@@ -186,6 +186,34 @@ describe("timeout settles by reading Linear state", () => {
 	});
 });
 
+describe("unreadable Linear state refuses before any tracker write", () => {
+	test("a failed state read is dod-unavailable with no review mirror and no connector call", async () => {
+		const calls: string[] = [];
+		const mirror = {
+			linearState: async () => {
+				calls.push("linearState");
+				throw new Error("linear 502: upstream");
+			},
+			review: async () => {
+				calls.push("review");
+				return [];
+			},
+		} as unknown as Mirror;
+		const { calls: connectorCalls, fetchImpl } = fakeConnector(() => Response.json({ completed: true }));
+
+		const result = await runDodGate(deps(mirror, fetchImpl), ctx(), DOD);
+
+		expect(result).toEqual({
+			gate: "refused",
+			reason: "dod-unavailable",
+			detail: expect.stringContaining("unreadable"),
+			mirrorFailures: [],
+		});
+		expect(calls).toEqual(["linearState"]);
+		expect(connectorCalls).toHaveLength(0);
+	});
+});
+
 describe("already-Done skips review and the connector", () => {
 	test("Linear completed at step 2 approves with no further tracker or connector calls", async () => {
 		const { calls, mirror } = fakeMirrorGate([{ name: "Done", type: "completed" }], false);

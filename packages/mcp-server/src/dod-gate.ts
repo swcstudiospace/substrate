@@ -81,7 +81,20 @@ export async function runDodGate(
 
 	// Step 2: an earlier gate may have timed out after the connector moved the
 	// issue. Linear already Done means approved without another review or call.
-	const state = await deps.mirror.linearState(ctx);
+	// A failed read is not "still open": it refuses as unavailable before any
+	// tracker write, so a retry never mirrors In Review onto an issue the
+	// connector already moved to Done.
+	let state: { name: string; type: string } | null;
+	try {
+		state = await deps.mirror.linearState(ctx);
+	} catch (cause) {
+		return {
+			gate: "refused",
+			reason: "dod-unavailable",
+			detail: `linear state unreadable: ${detailOf(cause)}`.slice(0, DETAIL_LIMIT),
+			mirrorFailures,
+		};
+	}
 	if (state?.type === "completed") return { gate: "approved", alreadyDone: true, mirrorFailures };
 
 	// Step 3: review mirror. A failure is a warning; the sequence continues.
@@ -115,8 +128,9 @@ export async function runDodGate(
 	} catch (cause) {
 		if (cause instanceof Error && cause.name === "TimeoutError") {
 			// The connector may have moved the issue before the wait ran out.
-			// Settle by reading Linear, never by assuming.
-			const settled = await deps.mirror.linearState(ctx);
+			// Settle by reading Linear, never by assuming — and an unreadable
+			// state settles as unknown, which refuses below.
+			const settled = await deps.mirror.linearState(ctx).catch(() => null);
 			if (settled?.type === "completed") return { gate: "approved", alreadyDone: true, mirrorFailures };
 			return {
 				gate: "refused",

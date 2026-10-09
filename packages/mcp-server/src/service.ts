@@ -1709,7 +1709,7 @@ export class Substrate {
 		// Done. It needs the caller's lease up front: without one the fenced
 		// review write has nothing to stand on, so fall through to main's
 		// path, which refuses in its own words.
-		if (!request.force && targetState === "completed" && this.mirror && request.lease_id) {
+		if (!request.force && targetState === "completed" && request.lease_id) {
 			// A failed lookup is not a node without a Linear reference: the
 			// throwing read tells the two apart, and a read that fails stops
 			// here — falling through would let `fencedRelease` mark a
@@ -1728,6 +1728,23 @@ export class Substrate {
 			}
 			const linearRef = node?.linear_issue_id ?? node?.linear_identifier ?? null;
 			if (node && linearRef && !isSwarmSurface(node.claimed_by)) {
+				// Missing tracker credentials must not switch a required
+				// check off: with no mirror the gate cannot read Linear state,
+				// mirror In Review or ask the connector, so refuse rather than
+				// let `fencedRelease` complete the node blind below.
+				if (!this.mirror) {
+					return {
+						completed: false,
+						released: false,
+						action: null,
+						reason: "dod-unavailable" as const,
+						detail: "the node links a Linear issue but the tracker mirror is off (no Linear or Notion key); wire tracker credentials rather than completing without dod and connector approval",
+						holder: node.claimed_by
+							? { surface: node.claimed_by as Surface, session_id: node.claim_session ?? "" }
+							: null,
+						lease: leaseView(leaseSnapshot(node)),
+					};
+				}
 				return this.serializedCompletion(graphId, nodeId, () =>
 					this.gatedComplete(graphId, nodeId, request, caller, node, linearRef),
 				);
@@ -1832,6 +1849,25 @@ export class Substrate {
 				lease: reviewed.lease,
 			};
 		}
+		// The `linearRef` above was read before this completion queued: a
+		// `graph_register` refresh can relink the node while it waits, so the
+		// checked row's reference governs from here. Approving the stale one
+		// would move the old issue to Done while completing the newly linked
+		// node, so a relink stops the gate with the lease kept — a retry
+		// re-reads and approves the current issue.
+		const checkedRef = reviewed.node.linear_issue_id ?? reviewed.node.linear_identifier ?? null;
+		if (checkedRef !== linearRef) {
+			await this.bumpGraph(graphId);
+			return {
+				completed: false,
+				released: false,
+				action: null,
+				reason: "linear-changed" as const,
+				detail: "the node was relinked to a different Linear issue after the gating read; retry so the gate approves the current issue",
+				holder: holderOf(leaseSnapshot(reviewed.node)),
+				lease: leaseView(leaseSnapshot(reviewed.node)),
+			};
+		}
 		// The review write moved state and expiry with no release to follow on
 		// the refusal paths, so clear the cached answers now — or `graph_get`
 		// and the brief keep serving the pre-review node for minutes.
@@ -1842,7 +1878,7 @@ export class Substrate {
 			holder: reviewed.node.claimed_by as Surface,
 			sessionId: reviewed.node.claim_session ?? "",
 			epoch: reviewed.node.lease_epoch,
-			linearRef,
+			linearRef: checkedRef,
 			notionPage: reviewed.node.notion_page ?? null,
 		};
 		// Steps 2-4: skip when Linear already shows Done, mirror review, ask
@@ -1899,6 +1935,23 @@ export class Substrate {
 				: undefined,
 		);
 		const { decision: _gate, node: _gated, ...reply } = released;
+		// The connector approved `checkedRef`, but a register refresh in the
+		// gate wait can relink the row before this final write lands. The
+		// fence outcome stands — Linear is Done either way — so a mismatch is
+		// a warning for the ledger, never a silent success.
+		const releasedRef = released.node.linear_issue_id ?? released.node.linear_identifier ?? null;
+		if (releasedRef !== checkedRef) {
+			await this.emit({
+				surface: ctx.holder,
+				kind: "warning",
+				summary: `linear relinked during gated completion of ${reviewed.node.linear_identifier ?? nodeId}: approved ${checkedRef} but the row now links ${releasedRef ?? "no issue"}`,
+				graph_id: graphId,
+				node_id: nodeId,
+				session_id: ctx.sessionId,
+				payload: { action: "dod", reason: "linear-changed" },
+				...place,
+			}).catch(() => undefined);
+		}
 		// Notion records Done whether or not the fence below held: Linear is
 		// Done, and the row must say so.
 		await this.runMirror(ctx, "done");

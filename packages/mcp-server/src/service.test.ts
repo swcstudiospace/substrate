@@ -196,13 +196,17 @@ describe("claimNode", () => {
 
 describe("releaseNode and completeNode", () => {
 	/** An index stub whose one node holds `lease_id`, judged by the real `decideRelease`. */
-	function leasedIndex(leaseId: string | null) {
+	function leasedIndex(leaseId: string | null, linked = true) {
 		const emitted: SubstrateEvent[] = [];
 		let state: string | null = null;
+		// Unlinked for the `completeNode` fence tests: a linked node without a
+		// mirror now stops at the DoD gate (dod-unavailable) before main's
+		// fence, so the fence shapes are pinned on a node with no Linear
+		// reference. The release tests keep the SPE-123 link for their notes.
 		const node = {
 			graph_id: "ut-1",
 			node_id: "n2",
-			linear_identifier: "SPE-123",
+			linear_identifier: linked ? "SPE-123" : null,
 			claimed_by: "hermes",
 			claim_session: "sess-a",
 			claimed_at: new Date().toISOString(),
@@ -271,7 +275,7 @@ describe("releaseNode and completeNode", () => {
 	});
 
 	test("another surface is refused not-holder with the right id, sees no id, and writes nothing", async () => {
-		const stores = leasedIndex("lse_live");
+		const stores = leasedIndex("lse_live", false);
 		const release = await substrateFor(stores).releaseNode("ut-1", "n2", { lease_id: "lse_live" }, "omp");
 		const complete = await substrateFor(stores).completeNode("ut-1", "n2", { lease_id: "lse_live" }, "omp");
 
@@ -309,7 +313,7 @@ describe("releaseNode and completeNode", () => {
 	test("completing a node a stale holder no longer owns does not close it", async () => {
 		// The sharpest case for fencing: an agent that stalled past its TTL wakes up
 		// and "finishes" a node a second agent has since claimed and is working on.
-		const stores = leasedIndex("lse_live");
+		const stores = leasedIndex("lse_live", false);
 
 		const result = await substrateFor(stores).completeNode("ut-1", "n2", { lease_id: "lse_old" }, "hermes");
 
@@ -319,7 +323,7 @@ describe("releaseNode and completeNode", () => {
 	});
 
 	test("the holder completing its own node writes the state", async () => {
-		const stores = leasedIndex("lse_live");
+		const stores = leasedIndex("lse_live", false);
 		const result = await substrateFor(stores).completeNode("ut-1", "n2", { lease_id: "lse_live" }, "hermes");
 
 		expect(result.completed).toBe(true);
@@ -330,7 +334,7 @@ describe("releaseNode and completeNode", () => {
 		// Releasing a free node succeeds as a no-op, which is right for a release and
 		// wrong as a licence to complete — it let any caller close any unheld node
 		// without ever holding it.
-		const stores = leasedIndex(null);
+		const stores = leasedIndex(null, false);
 		const result = await substrateFor(stores).completeNode("ut-1", "n2", { lease_id: "lse_whatever" }, "hermes");
 
 		expect(result.completed).toBe(false);
@@ -2662,6 +2666,12 @@ describe("completeNode DoD gate (D23-14, D23-15)", () => {
 		reviewRace?: boolean;
 		/** The gating read rejects instead of returning the row. */
 		readFails?: boolean;
+		/** A register refresh relinks the node between the gating read and the review write. */
+		relinkedIssueId?: string;
+		/** A register refresh relinks the node during the gate wait, before the final write lands. */
+		releasedIssueId?: string;
+		/** No tracker keys: the substrate runs with a null mirror. */
+		mirrorOff?: boolean;
 		/** What `getNode` reports after the decision was taken: a higher epoch means a re-claim. */
 		reclaimedEpoch?: number;
 		linearState?: { name: string; type: string } | null;
@@ -2730,7 +2740,13 @@ describe("completeNode DoD gate (D23-14, D23-15)", () => {
 				state = "started_review";
 				return {
 					ok: true,
-					node: { ...node, state },
+					// A register refresh relinking the node while the completion
+					// queued: the review write returns the relinked row.
+					node: {
+						...node,
+						state,
+						...(knobs.relinkedIssueId !== undefined ? { linear_issue_id: knobs.relinkedIssueId } : {}),
+					},
 					lease: { lease_id: leaseId, holder: holderOfRow(), epoch: 3 },
 					decision: { ok: true, lease_id: leaseId, ttl_seconds: 900, observed_epoch: 3 },
 				};
@@ -2752,7 +2768,17 @@ describe("completeNode DoD gate (D23-14, D23-15)", () => {
 				const decision = decideRelease(leaseSnapshot({ ...node, state } as never), { ...request, caller }, Date.now());
 				if (!decision.ok || decision.action === "noop") return { released: decision.ok, node: { ...node, state }, decision };
 				if (alsoSetState !== undefined) state = alsoSetState;
-				return { released: true, node: { ...node, state }, decision };
+				// A register refresh relinking the row during the gate wait: the
+				// final write lands on the relinked row.
+				return {
+					released: true,
+					node: {
+						...node,
+						state,
+						...(knobs.releasedIssueId !== undefined ? { linear_issue_id: knobs.releasedIssueId } : {}),
+					},
+					decision,
+				};
 			},
 		};
 		const mirror = {
@@ -2804,7 +2830,8 @@ describe("completeNode DoD gate (D23-14, D23-15)", () => {
 		const substrate = new Substrate(loadConfig({}), {
 			index: index as never,
 			greptime: greptime as never,
-			mirror: mirror as never,
+			// No tracker keys: the gate's required checks are unavailable.
+			mirror: (knobs.mirrorOff ? null : mirror) as never,
 			dodGate: { fetchImpl },
 			cache: cache as never,
 		});
@@ -3040,6 +3067,74 @@ describe("completeNode DoD gate (D23-14, D23-15)", () => {
 		expect(result).toMatchObject({ completed: false, reason: "index-unavailable" });
 		expect(world.stateAfter()).toBe("started");
 		expect(world.mirrorCalls).toEqual([]);
+		expect(world.connectorCalls).toEqual([]);
+	});
+
+	test("a relink between the gating read and the review write stops the gate", async () => {
+		// A register refresh replaces the issue while the completion queues:
+		// the checked row links uuid-SWC-999, so approving the stale
+		// uuid-SWC-467 would move the old issue to Done while completing the
+		// newly linked node. The lease is kept for a retry.
+		const world = gateWorld({ relinkedIssueId: "uuid-SWC-999" });
+
+		const result = await world.substrate.completeNode(
+			"ut-1",
+			"n2",
+			{ lease_id: "lse_live", dod: { summary: "s", tests_pass: true } },
+			"hermes",
+		);
+
+		expect(result).toMatchObject({ completed: false, reason: "linear-changed" });
+		expect(world.stateAfter()).toBe("started_review");
+		expect(world.mirrorCalls).toEqual([]);
+		expect(world.connectorCalls).toEqual([]);
+	});
+
+	test("a relink during the gate wait approves the checked issue and warns", async () => {
+		// The connector approves the checked row's uuid-SWC-467; the final
+		// write then lands on a row relinked to uuid-SWC-999. The fence
+		// outcome stands, with a warning for the ledger.
+		const world = gateWorld({ releasedIssueId: "uuid-SWC-999" });
+
+		const result = await world.substrate.completeNode(
+			"ut-1",
+			"n2",
+			{ lease_id: "lse_live", dod: { summary: "s", tests_pass: true } },
+			"hermes",
+		);
+
+		expect(result.completed).toBe(true);
+		expect(world.connectorCalls).toHaveLength(1);
+		expect(world.connectorCalls[0]?.body).toMatchObject({ linear_issue_id: "uuid-SWC-467" });
+		const warnings = dodWarnings(world.emitted);
+		expect(warnings.map((w) => w.payload["reason"])).toContain("linear-changed");
+	});
+
+	test("a Linear-linked completion with no mirror refuses instead of completing blind", async () => {
+		// Both tracker keys unset: the gate cannot read Linear state, mirror
+		// In Review or ask the connector, so the node stays put.
+		const world = gateWorld({ mirrorOff: true });
+
+		const result = await world.substrate.completeNode(
+			"ut-1",
+			"n2",
+			{ lease_id: "lse_live", dod: { summary: "s", tests_pass: true } },
+			"hermes",
+		);
+
+		expect(result).toMatchObject({ completed: false, reason: "dod-unavailable" });
+		expect(world.stateAfter()).toBe("started");
+		expect(world.mirrorCalls).toEqual([]);
+		expect(world.connectorCalls).toEqual([]);
+	});
+
+	test("a node with no tracker reference still completes with no mirror", async () => {
+		const world = gateWorld({ mirrorOff: true, linearIssueId: null, linearIdentifier: null, notionPage: null });
+
+		const result = await world.substrate.completeNode("ut-1", "n2", { lease_id: "lse_live" }, "hermes");
+
+		expect(result.completed).toBe(true);
+		expect(world.stateAfter()).toBe("completed");
 		expect(world.connectorCalls).toEqual([]);
 	});
 
