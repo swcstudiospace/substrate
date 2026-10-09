@@ -281,7 +281,9 @@ describe("desktop_run registration", () => {
 		const tool = (await client.listTools()).tools.find((candidate) => candidate.name === "desktop_run");
 
 		expect(tool).toBeDefined();
-		expect(tool?.annotations?.readOnlyHint).not.toBe(true);
+		// A listed agent can type a terminal command or click a delete button,
+		// so the tool must advertise itself as destructive.
+		expect(tool?.annotations).toMatchObject({ destructiveHint: true, openWorldHint: true });
 		expect((tool?.inputSchema as { additionalProperties?: unknown } | undefined)?.additionalProperties).toBe(false);
 	});
 });
@@ -293,6 +295,8 @@ describe("desktop production wiring", () => {
 		const allowed: Record<string, true> = {
 			[join("packages", "mcp-server", "src", "desktop", "driver.ts")]: true,
 			[join("packages", "mcp-server", "src", "index.ts")]: true,
+			// The driver's own leak regression test drives bufferRunner directly.
+			[join("packages", "mcp-server", "src", "desktop", "driver.test.ts")]: true,
 			[relative(ROOT, import.meta.path)]: true,
 		};
 		const offenders = listed.stdout

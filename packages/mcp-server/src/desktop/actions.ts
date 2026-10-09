@@ -110,3 +110,12 @@ export function titleArgv(): string[] {
 export function geometryArgv(): string[] {
 	return [...EXEC, "xdotool", "getdisplaygeometry"];
 }
+
+/**
+ * The locality probe: the effective docker endpoint with the same client
+ * config the child sees. Client-local (`context`, never `exec`), so it moves
+ * no input and touches no desktop wherever it points.
+ */
+export function contextArgv(): string[] {
+	return ["docker", "context", "inspect", "--format", "{{.Endpoints.docker.Host}}"];
+}

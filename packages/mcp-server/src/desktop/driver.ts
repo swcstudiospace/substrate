@@ -5,7 +5,10 @@
  * - The runner is Buffer-mode: an xwd of 1280×800 is ~4.1 MB of binary that a utf8 runner (and
  *   its 4 MiB maxBuffer) would corrupt or kill.
  * - The child environment is an allowlist — PATH and HOME only (D30-07). Spreading
- *   `process.env` would hand every `SUBSTRATE_TOKEN_*` to the child.
+ *   `process.env` would hand every `SUBSTRATE_TOKEN_*` to the child. Because the
+ *   child inherits HOME, a saved docker context could still select another engine,
+ *   so each run first probes the effective endpoint through the same runner and
+ *   proceeds only on a local `unix://` socket.
  * - Screenshots are decoded from XWD and written as PNG under `<dir>/<run_id>/` (dirs 0700,
  *   files 0600), newest 200 runs and 7 days kept.
  * - Every executed action emits one `tool.call` event (D30-11). Typed text is recorded only
@@ -28,6 +31,7 @@ import type { EventInput, Surface } from "../types.ts";
 import {
 	boundsRefusal,
 	clickArgv,
+	contextArgv,
 	DEFAULT_SETTLE_MS,
 	type DesktopAction,
 	DesktopRunInput,
@@ -76,7 +80,11 @@ export const bufferRunner: BufferRunner = (argv, timeoutMs) => {
 		{ encoding: "buffer", maxBuffer: 16 << 20, timeout: timeoutMs, env: childEnv(process.env) },
 		(error, stdout, stderr) => {
 			const code = error ? (typeof error.code === "number" ? error.code : null) : 0;
-			resolve({ code, stdout, stderr: stderr.toString("utf8") || (error?.message ?? "") });
+			// Never `error.message`: the runtime embeds the full argv there, so an
+			// empty-stderr failure would publish a failed `type` action's text in
+			// the stored event's `error`. An empty stderr stays empty; `code`
+			// still reports the failure and `failure()` names it without content.
+			resolve({ code, stdout, stderr: stderr.toString("utf8") });
 		},
 	);
 	return promise;
@@ -125,9 +133,15 @@ let active: string | null = null;
 
 const sha256 = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
+/**
+ * The failure diagnostic is fixed text: stderr is matched for the not-running
+ * case but never echoed. A child can repeat the action's arguments in its
+ * error output, so echoing the tail would store a failed `type` action's text
+ * in the shared event's `error`, where `redact` preserves ordinary text.
+ */
 function failure(result: BufferRunResult): string {
 	if (NOT_RUNNING.test(result.stderr)) return "substrate-desktop is not running";
-	return redact(`exit ${result.code}: ${result.stderr.trim().slice(-ERROR_CHARS)}`);
+	return `action failed with exit ${result.code}`;
 }
 
 /** Remove run dirs beyond the newest RETAIN_RUNS or older than RETAIN_MS; `keep` always stays. */
@@ -228,6 +242,23 @@ export function createDesktopDriver(deps: {
 		const deadline = started + input.timeout * 1000;
 		const runDir = join(dir, runId);
 		const result: DesktopRunResult = { run_id: runId, screenshots: [], log: [], images: [] };
+
+		// Locality preflight: root's saved docker context can select another engine,
+		// and the child inherits HOME (where that context lives) while DOCKER_*
+		// never reaches it — so the fixed EXEC prefix alone does not pin the local
+		// desktop. The probe runs through the same runner, hence the same child
+		// environment, and only `unix://` endpoints proceed, as the rehearsal
+		// harness's `refuseDockerEnv`/`refuseDockerEndpoint` already require. A
+		// failed or empty probe proves nothing and proceeds: the client is broken,
+		// so every later docker call fails with its own truthful error and nothing
+		// remote can happen.
+		const locality = await call(contextArgv(), Math.max(1, Math.min(ACTION_TIMEOUT_MS, deadline - now())));
+		if (locality !== TIMEOUT && locality.code === 0) {
+			const endpoint = locality.stdout.toString("utf8").trim().split("\n")[0] ?? "";
+			if (endpoint !== "" && !endpoint.startsWith("unix://")) {
+				throw new Error(`docker context endpoint is not local (${endpoint}); refusing desktop_run`);
+			}
+		}
 
 		const geo = await call(geometryArgv(), Math.max(1, Math.min(ACTION_TIMEOUT_MS, deadline - now())));
 		if (geo === TIMEOUT) throw new Error("substrate-desktop did not answer the geometry read");

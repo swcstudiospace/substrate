@@ -84,6 +84,16 @@ export function sha256Hex(data: Buffer | string): string {
 	return createHash("sha256").update(data).digest("hex");
 }
 
+/**
+ * True when a JSON dump (ledger rows) or the JSONL audit text holds typed
+ * text. Dumps escape newlines and backslashes, so the raw marker — which ends
+ * in a real newline — never appears verbatim even when stored: compare the
+ * JSON-escaped form instead.
+ */
+export function dumpedHoldsTyped(dumped: string, typed: string[]): boolean {
+	return typed.some((text) => dumped.includes(JSON.stringify(text).slice(1, -1)));
+}
+
 /** An RGB colour derived from the run nonce, readable in `R,G,B` numbers. */
 export interface NonceRgb {
 	r: number;
@@ -420,6 +430,35 @@ async function querySession(base: string, bearer: string, session: string): Prom
 	return rows;
 }
 
+/**
+ * Ids of every stored `desktop_run` tool.call for one surface, oldest first.
+ * The refusal probe must prove no new event anywhere: a mistakenly run action
+ * would carry a fresh run id, hence a different session, so re-querying the
+ * marker session alone would miss it.
+ */
+async function queryDesktopIds(base: string, bearer: string, surface: string): Promise<string[] | null> {
+	const attempt = await postJson(
+		`${base}/events/query`,
+		bearer,
+		{ surface, kind: "tool.call", include_payload: true, limit: 100, order: "asc" },
+		REQUEST_TIMEOUT_MS,
+	);
+	if (attempt.status !== 200) return null;
+	const body: unknown = parseRpcBody(attempt.text);
+	if (body === null || typeof body !== "object" || Array.isArray(body)) return null;
+	if (!("events" in body) || !Array.isArray(body.events)) return null;
+	const ids: string[] = [];
+	for (const row of body.events) {
+		const item = readRow(row);
+		if (item === null) return null;
+		const payload: unknown = item.payload;
+		if (payload !== null && typeof payload === "object" && !Array.isArray(payload) && "tool" in payload && payload.tool === "desktop_run") {
+			ids.push(String(item.id));
+		}
+	}
+	return ids;
+}
+
 /** Read one screenshot entry's path and sha after proving each field. */
 function readShot(entry: unknown): { path: string; sha256: string } | null {
 	if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return null;
@@ -503,6 +542,13 @@ export async function main(argv: string[]): Promise<number> {
 	const imageBlocks = call.reply.content.filter((block) => block.type === "image" && typeof block.data === "string");
 	const text = readRunText(textBlock?.text ?? "null");
 	check(text.runId !== "" && text.shots.length === 2 && text.log.length === run.actions.length, "run text names id plus 2 shots and 5 log entries", `shots ${text.shots.length} log ${text.log.length}`);
+	// The reply log must show every planned action succeeded: a failed final
+	// `type "exit"` still stores its event and returns both screenshots, so the
+	// events check alone would pass with the terminal left open.
+	const logOk =
+		text.log.length === run.actions.length &&
+		text.log.every((entry) => typeof entry === "object" && entry !== null && "ok" in entry && entry.ok === true);
+	check(logOk, "every planned action reports ok in the run log", `${text.log.length}/${run.actions.length} entries`);
 
 	const stored: StoredShot[] = [];
 	for (const entry of text.shots) {
@@ -561,10 +607,18 @@ export async function main(argv: string[]): Promise<number> {
 	const session = `desktop:${text.runId}`;
 	const rows = text.runId === "" ? null : await querySession(base, bearer, session);
 	const typed = [marker, exitText];
-	const typedShas = typed.map((text) => sha256Hex(text));
-	const blockShas = stored.map((shot) => sha256Hex(shot.image));
+	// The expected digest per action index: type actions name the exact typed
+	// text's sha, screenshots the verified block's sha — never any hash from
+	// the run, and each row must match its own index.
+	const expectedDigest: Array<{ action: string; sha: string | null }> = [
+		{ action: "screenshot", sha: stored[0]?.sha256 ?? null },
+		{ action: "key", sha: null },
+		{ action: "type", sha: sha256Hex(marker) },
+		{ action: "screenshot", sha: stored[1]?.sha256 ?? null },
+		{ action: "type", sha: sha256Hex(exitText) },
+	];
 	let eventsOk = false;
-	if (rows !== null && rows.length === run.actions.length) {
+	if (rows !== null && rows.length === run.actions.length && stored.length === 2) {
 		eventsOk = rows.every((row, i) => {
 			if (row.kind !== "tool.call" || row.session_id !== session || row.surface !== opts.surface) return false;
 			const payload: unknown = row.payload;
@@ -572,26 +626,33 @@ export async function main(argv: string[]): Promise<number> {
 			if (!("tool" in payload) || payload.tool !== "desktop_run") return false;
 			if (!("run_id" in payload) || payload.run_id !== text.runId) return false;
 			if (!("i" in payload) || payload.i !== i) return false;
-			if (!("action" in payload)) return false;
-			if (payload.action === "type" && "text_sha256" in payload && typeof payload.text_sha256 === "string") {
-				return typedShas.includes(payload.text_sha256);
+			// A failed final `type "exit"` still stores its event: the smoke must
+			// not pass with the terminal left open.
+			if (!("ok" in payload) || payload.ok !== true) return false;
+			const expected = expectedDigest[i];
+			if (expected === undefined || !("action" in payload) || payload.action !== expected.action) return false;
+			if (expected.action === "type" && "text_sha256" in payload && typeof payload.text_sha256 === "string") {
+				return payload.text_sha256 === expected.sha;
 			}
-			if (payload.action === "screenshot" && "sha256" in payload && typeof payload.sha256 === "string") {
-				return blockShas.includes(payload.sha256);
+			if (expected.action === "screenshot" && "sha256" in payload && typeof payload.sha256 === "string") {
+				return payload.sha256 === expected.sha;
 			}
-			return payload.action === "key";
+			return expected.action === "key";
 		});
 		const dumped = JSON.stringify(rows);
-		if (typed.some((text) => dumped.includes(text)) || dumped.includes("iVBOR")) eventsOk = false;
+		if (dumpedHoldsTyped(dumped, typed) || dumped.includes("iVBOR")) eventsOk = false;
 	}
 	check(eventsOk, "one stored tool.call per action with hashes only", rows === null ? "query failed" : `${rows.length}/${run.actions.length} rows`);
 
+	const idsBefore = await queryDesktopIds(base, bearer, opts.surface);
 	const probe = await callTool(base, unlistedBearer, 2, "desktop_run", { actions: [{ type: "screenshot" }], timeout: 30 }, PROBE_CALL_TIMEOUT_MS);
 	const probeText = probe.reply?.content.find((block) => block.type === "text")?.text ?? "";
 	const probeRefused = probe.reply !== null && probe.reply.isError && probeText.includes("not enabled");
 	check(probeRefused, "unlisted token refused", probe.reply === null ? (probe.rpcError ?? "no reply") : `isError ${probe.reply.isError}`);
-	const rowsAfter = text.runId === "" ? null : await querySession(base, bearer, session);
-	check(rowsAfter !== null && rows !== null && rowsAfter.length === rows.length, "refusal stored no new event", rowsAfter === null || rows === null ? "query failed" : `${rowsAfter.length} rows`);
+	const idsAfter = await queryDesktopIds(base, bearer, opts.surface);
+	const refusalClean =
+		idsBefore !== null && idsAfter !== null && idsBefore.length === idsAfter.length && idsBefore.every((id, i) => idsAfter[i] === id);
+	check(refusalClean, "refusal stored no new desktop event on the surface", idsBefore === null || idsAfter === null ? "query failed" : `${idsBefore.length}→${idsAfter.length} events`);
 
 	const noToken = await postJson(`${base}/mcp`, "", { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "desktop_run", arguments: { actions: [{ type: "screenshot" }] } } }, REQUEST_TIMEOUT_MS);
 	check(noToken.status === 401, "no token 401", `status ${noToken.status ?? "unreachable"}`);
@@ -629,7 +690,7 @@ export async function main(argv: string[]): Promise<number> {
 			if (!Array.isArray(parsed.arg_keys) || !parsed.arg_keys.every((key) => key === "actions" || key === "timeout")) auditBroken = true;
 		}
 		if (desktopCount === 0) auditBroken = true;
-		if (typed.some((text) => auditText.includes(text)) || auditText.includes("iVBOR")) auditBroken = true;
+		if (dumpedHoldsTyped(auditText, typed) || auditText.includes("iVBOR")) auditBroken = true;
 	}
 	check(!auditBroken, "audit holds fail-closed desktop_run with no content", auditText === null ? "audit file unreadable" : `${desktopCount} desktop_run records`);
 

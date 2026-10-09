@@ -4,9 +4,10 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, ut
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { EventInput } from "../types.ts";
-import { geometryArgv, keyArgv, shotArgv, titleArgv, typeArgv, type DesktopRunInput } from "./actions.ts";
+import { contextArgv, geometryArgv, keyArgv, shotArgv, titleArgv, typeArgv, type DesktopRunInput } from "./actions.ts";
 import {
 	ACTION_TIMEOUT_MS,
+	bufferRunner,
 	type BufferRunner,
 	type BufferRunResult,
 	childEnv,
@@ -142,7 +143,7 @@ describe("childEnv (D30-07 allowlist)", () => {
 });
 
 describe("createDesktopDriver", () => {
-	test("runs geometry first, then each action and a title read; writes a 0600 PNG; emits 4 tool.call events", async () => {
+	test("runs a locality probe, then geometry, then each action and a title read; writes a 0600 PNG; emits 4 tool.call events", async () => {
 		const shotsDir = tmpShots();
 		const { calls, run } = recorder();
 		const events: EventInput[] = [];
@@ -151,6 +152,7 @@ describe("createDesktopDriver", () => {
 		const result = await driver.run(SMOKE, { surface: "omp", emit: recording(events) });
 
 		expect(calls).toEqual([
+			contextArgv(),
 			geometryArgv(),
 			keyArgv({ type: "key", keys: "ctrl+alt+t" }),
 			titleArgv(),
@@ -164,10 +166,10 @@ describe("createDesktopDriver", () => {
 		expect(result.run_id).toMatch(/^dr-20260926T183005Z-[0-9a-f]{6}$/);
 		expect(result.error).toBeUndefined();
 		expect(result.log.map((l) => [l.i, l.type, l.ok, l.active_window])).toEqual([
-			[0, "key", true, "Terminal 3"],
-			[1, "type", true, "Terminal 5"],
-			[2, "key", true, "Terminal 7"],
-			[3, "screenshot", true, "Terminal 9"],
+			[0, "key", true, "Terminal 4"],
+			[1, "type", true, "Terminal 6"],
+			[2, "key", true, "Terminal 8"],
+			[3, "screenshot", true, "Terminal 10"],
 		]);
 
 		const path = join(shotsDir, result.run_id, "1.png");
@@ -239,7 +241,7 @@ describe("createDesktopDriver", () => {
 		);
 
 		await expect(outcome).rejects.toThrow(/outside the 1280x800 display/);
-		expect(calls).toEqual([geometryArgv()]);
+		expect(calls).toEqual([contextArgv(), geometryArgv()]);
 		expect(events).toEqual([]);
 	});
 
@@ -261,13 +263,15 @@ describe("createDesktopDriver", () => {
 		);
 
 		expect(result.log).toEqual([{ i: 0, type: "key", ok: false, ms: expect.any(Number), active_window: null, error: "timeout" }]);
-		expect(calls).toHaveLength(2);
+		expect(calls).toHaveLength(3);
 		expect(events.map((e) => e.payload!.error)).toEqual(["timeout"]);
 	});
 
 	test("the run deadline stops the remaining actions with deadline and no event for the not-started action", async () => {
 		let clock = FIXED;
-		const { calls, run } = recorder(() => {
+		const { calls, run } = recorder((argv) => {
+			// The local probe answers at once: the test's clock models docker round trips.
+			if (argv[1] === "context") return res("unix:///var/run/docker.sock\n");
 			clock += 20_000;
 			return undefined;
 		});
@@ -289,9 +293,10 @@ describe("createDesktopDriver", () => {
 
 	test("a type action's budget grows with its text; the title read keeps the full budget after the deadline", async () => {
 		let clock = FIXED;
-		const budgets: Array<[string, number]> = [];
+		const budgets: Array<[string | undefined, number]> = [];
 		const run: BufferRunner = async (argv, timeoutMs) => {
-			budgets.push([argv[6]!, timeoutMs]);
+			budgets.push([argv[6], timeoutMs]);
+			if (argv[1] === "context") return res("unix:///var/run/docker.sock\n");
 			if (argv.includes("type")) clock = FIXED + 120_000; // typing ends exactly at the run deadline
 			return res(argv.includes("getdisplaygeometry") ? "1280 800\n" : "w\n");
 		};
@@ -303,6 +308,8 @@ describe("createDesktopDriver", () => {
 		);
 
 		expect(budgets).toEqual([
+			// The locality probe leads: five argv hold no sixth word.
+			[undefined, ACTION_TIMEOUT_MS],
 			["getdisplaygeometry", ACTION_TIMEOUT_MS],
 			["type", ACTION_TIMEOUT_MS + 300 * TYPE_MS_PER_CHAR],
 			["getactivewindow", ACTION_TIMEOUT_MS],
@@ -376,7 +383,7 @@ describe("createDesktopDriver", () => {
 
 		expect((refused as DesktopBusy).runId).toBe(done.run_id);
 		expect((refused as Error).message).toContain(done.run_id);
-		expect(calls).toEqual([geometryArgv(), keyArgv({ type: "key", keys: "Return" }), titleArgv()]);
+		expect(calls).toEqual([contextArgv(), geometryArgv(), keyArgv({ type: "key", keys: "Return" }), titleArgv()]);
 	});
 
 	test("retention keeps at most 200 runs, none older than 7 days, and always the new run", async () => {
@@ -397,5 +404,60 @@ describe("createDesktopDriver", () => {
 		expect(left.length).toBeLessThanOrEqual(200);
 		expect(left).toContain(result.run_id);
 		for (const name of left) expect(now - statSync(join(shotsDir, name)).mtimeMs).toBeLessThan(7 * 86_400_000);
+	});
+	describe("docker locality preflight", () => {
+		test("a non-local context endpoint refuses the run before anything runs", async () => {
+			const { calls, run } = recorder((argv) => (argv[1] === "context" ? res("tcp://other-host:2375\n") : undefined));
+			const driver = createDesktopDriver({ run, dir: tmpShots(), sleep: noSleep });
+
+			await expect(driver.run(SMOKE, { surface: "omp", emit: storedTrue })).rejects.toThrow("is not local");
+			expect(calls).toEqual([contextArgv()]);
+		});
+
+		test("a local socket endpoint proceeds to the geometry read", async () => {
+			const { calls, run } = recorder((argv) => (argv[1] === "context" ? res("unix:///var/run/docker.sock\n") : undefined));
+			const events: EventInput[] = [];
+			const driver = createDesktopDriver({ run, dir: tmpShots(), sleep: noSleep });
+
+			const result = await driver.run({ actions: [{ type: "key", keys: "Return" }] }, { surface: "omp", emit: recording(events) });
+
+			expect(result.log[0]?.ok).toBe(true);
+			expect(calls[0]).toEqual(contextArgv());
+			expect(events).toHaveLength(1);
+		});
+
+		test("a failed probe proves nothing and proceeds; later calls fail truthfully", async () => {
+			const { calls, run } = recorder((argv) => (argv[1] === "context" ? res("", 1, "cannot connect to the Docker daemon") : undefined));
+			const driver = createDesktopDriver({ run, dir: tmpShots(), sleep: noSleep });
+
+			const result = await driver.run({ actions: [{ type: "key", keys: "Return" }] }, { surface: "omp", emit: storedTrue });
+
+			expect(result.log[0]?.ok).toBe(true);
+			expect(calls[0]).toEqual(contextArgv());
+		});
+	});
+
+	describe("failure diagnostics carry no caller text", () => {
+		test("bufferRunner never substitutes the argv-bearing error message for empty stderr", async () => {
+			const result = await bufferRunner(["/definitely/not/a/real/binary-9f3k", "TYPE-TEXT-MUST-NOT-LEAK"], 5000);
+
+			expect(result.code).not.toBe(0);
+			expect(result.stderr).toBe("");
+		});
+
+		test("a failed type whose child echoes the text stores only the fixed diagnostic", async () => {
+			const secret = "TYPE-TEXT-MUST-NOT-LEAK";
+			const { run } = recorder((argv) => (argv.includes("type") ? res(`xdotool failed typing ${secret}\n`, 1, `cannot type ${secret}\n`) : undefined));
+			const events: EventInput[] = [];
+			const driver = createDesktopDriver({ run, dir: tmpShots(), sleep: noSleep });
+
+			const result = await driver.run({ actions: [{ type: "type", text: secret }], timeout: 30 }, { surface: "omp", emit: recording(events) });
+
+			expect(result.log).toEqual([{ i: 0, type: "type", ok: false, ms: expect.any(Number), active_window: null, error: "action failed with exit 1" }]);
+			expect(events).toHaveLength(1);
+			expect(events[0]?.payload).toMatchObject({ ok: false, error: "action failed with exit 1" });
+			expect(JSON.stringify(events)).not.toContain(secret);
+			expect(JSON.stringify(result)).not.toContain(secret);
+		});
 	});
 });

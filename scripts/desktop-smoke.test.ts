@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { DesktopRunInput } from "../packages/mcp-server/src/desktop/actions.ts";
 import { decodePng, encodePng } from "../packages/mcp-server/src/desktop/png.ts";
 import { RehearsalRefused, refuseSmokeUrl } from "./rehearsal.ts";
-import { findBand, markerText, nonceRgb, parseRpcBody, parseSmokeArgs, sha256Hex, type NonceRgb } from "./desktop-smoke.ts";
+import { dumpedHoldsTyped, findBand, markerText, nonceRgb, parseRpcBody, parseSmokeArgs, sha256Hex, type NonceRgb } from "./desktop-smoke.ts";
 
 /** Paint a test frame: background wash plus solid exact-RGB rectangles. */
 function paintImage(width: number, height: number, bg: NonceRgb, rects: Array<{ x: number; y: number; w: number; h: number; color: NonceRgb }>): Buffer {
@@ -179,5 +179,22 @@ describe("parseRpcBody", () => {
 
 	test("garbage yields null", () => {
 		expect(parseRpcBody("not json at all")).toBeNull();
+	});
+});
+
+describe("dumpedHoldsTyped", () => {
+	test("catches the full marker stored in a payload, trailing newline included", () => {
+		const marker = markerText("abcdef01", { r: 0xc0, g: 0x11, b: 0x22 });
+		// A ledger row (or audit line) as the smoke reads it: parsed, then
+		// re-stringified — newlines and backslashes escaped.
+		const dumped = JSON.stringify([{ kind: "tool.call", payload: { tool: "desktop_run", action: "type", text_len: marker.length } }, marker]);
+		expect(marker.endsWith("\n")).toBe(true);
+		expect(dumped.includes(marker)).toBe(false);
+		expect(dumpedHoldsTyped(dumped, [marker, "exit\n"])).toBe(true);
+	});
+
+	test("clean rows with hashes only do not trip it", () => {
+		const dumped = JSON.stringify([{ kind: "tool.call", payload: { tool: "desktop_run", action: "type", text_len: 90, text_sha256: "ab".repeat(32) } }]);
+		expect(dumpedHoldsTyped(dumped, ["exit\n"])).toBe(false);
 	});
 });

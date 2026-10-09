@@ -892,7 +892,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				"Each executed action is recorded as one tool.call event carrying hashes and lengths only, " +
 				"never typed text or image bytes.",
 			inputSchema: DesktopRunInput,
-			annotations: { destructiveHint: false, openWorldHint: true },
+		annotations: { destructiveHint: true, openWorldHint: true },
 		},
 		async (input) => {
 			try {
