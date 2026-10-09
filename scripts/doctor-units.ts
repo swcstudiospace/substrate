@@ -410,7 +410,10 @@ function restartLoopDetail(unit: Unit, enabled: ReadonlyMap<string, string>): st
 
 function sharedEnvDetail(unit: Unit): string | null {
 	if (unit.environmentFiles.length === 0) return "EnvironmentFile is unset";
-	if (unit.name.includes("collector") && unit.environmentFiles.includes(SHARED_ENV_FILE)) {
+	// substrate-mcp is the process that needs the shared server env file. Every
+	// other substrate unit (collectors, the skills sync and bridge ticks) runs
+	// with its own env file through its drop-in.
+	if (unit.name !== "substrate-mcp.service" && unit.environmentFiles.includes(SHARED_ENV_FILE)) {
 		return `EnvironmentFile=${SHARED_ENV_FILE}`;
 	}
 	return null;

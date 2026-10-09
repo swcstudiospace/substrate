@@ -1,0 +1,47 @@
+[Unit]
+Description=Agent Substrate — Hermes pending-skill bridge and queue drain
+Documentation=https://github.com/swcstudiospace/agent-substrate
+After=network-online.target substrate-mcp.service
+Wants=substrate-mcp.service
+# A missing entry skips the tick instead of crash-looping into six-figure
+# NRestarts. The path is the pinned release, not the checkout:
+# ConditionPathExists follows the current symlink.
+StartLimitIntervalSec=0
+ConditionPathExists=/opt/agent-substrate/current/packages/miner/src/substrate_miner/__main__.py
+
+[Service]
+Type=oneshot
+# This tick must not load /etc/substrate/substrate.env. Its drop-in
+# substrate-skills-bridge.service.d/10-environment.conf points at
+# /etc/substrate/skills-bridge.env (names only in infra/vps/README.md), which
+# must never define a single-token variable: the bridge refuses to run while
+# one is set and serves hermes, omp and grok-build from the tokens dir instead.
+# One tick: group ~/.hermes/pending/skills by skill name, propose library
+# skills and new foreground-created skills, hold everything else for the
+# owner, then drain the Omp and Grok queued-proposal dirs. Never reads
+# ~/.hermes/pending/memory.
+WorkingDirectory=/opt/agent-substrate/current
+Environment=HOME=/root
+# A release tree is immutable: the miner resolves against the release copy
+# and never writes bytecode into it.
+Environment=PYTHONPATH=/opt/agent-substrate/current/packages/miner/src
+Environment=PYTHONDONTWRITEBYTECODE=1
+# System python3: httpx is already installed; no venv.
+ExecStart=/usr/bin/python3 -m substrate_miner bridge --once
+
+StateDirectory=substrate
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=substrate-skills-bridge
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
