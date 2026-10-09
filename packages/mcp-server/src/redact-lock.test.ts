@@ -35,7 +35,7 @@ import { REDACTION_RULES } from "./redact.ts";
 import type { RedactionRuleName } from "./redact.ts";
 
 const ROOT = join(import.meta.dir, "..", "..", "..");
-const IGNORED = ["node_modules/", ".git/", "dist/"];
+const IGNORED = /(?:^|\/)(?:node_modules|\.git|dist|build|\.venv|venv|__pycache__)\//;
 
 /** The one module every publication path redacts through. */
 const SHARED_REDACT = join("packages", "mcp-server", "src", "redact.ts");
@@ -55,7 +55,7 @@ function lineAt(body: string, index: number): number {
 async function filesMatching(pattern: string): Promise<string[]> {
 	const found: string[] = [];
 	for await (const path of new Bun.Glob(pattern).scan({ cwd: ROOT, dot: true })) {
-		if (!IGNORED.some((prefix) => path.includes(prefix))) found.push(path);
+		if (!IGNORED.test(path)) found.push(path);
 	}
 	return found;
 }
