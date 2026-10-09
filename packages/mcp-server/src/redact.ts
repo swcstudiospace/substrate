@@ -189,6 +189,9 @@ const RULES = [
 	{ name: "digitalocean", pattern: /\bdop_v1_[a-f0-9]{64}/g, replacement: REDACTED },
 	// openai-proj: OpenAI project key (the sk- rule above stops at its second hyphen).
 	{ name: "openai-proj", pattern: /\bsk-proj-[A-Za-z0-9_-]{20,}/g, replacement: REDACTED },
+	// ragflow: RAGFlow API key (D25-23). High-confidence on both passes, so a
+	// key pasted into a doc page is refused, never uploaded.
+	{ name: "ragflow", pattern: /\bragflow-[A-Za-z0-9]{20,}/g, replacement: REDACTED },
 	// pk / rk: publishable and restricted keys. D18-21 narrowed: the matched tail
 	// must contain at least one digit, so word-only slugs are not secrets.
 	{
@@ -364,6 +367,7 @@ export type SkillRedactionRule =
 	| "gitlab"
 	| "digitalocean"
 	| "openai-proj"
+	| "ragflow"
 	| "private-tag"
 	| "pk-rk"
 	| "api-key-lower"
@@ -389,6 +393,7 @@ export const SKILL_HIGH_CONFIDENCE_RULES: readonly SkillRedactionRule[] = [
 	"gitlab",
 	"digitalocean",
 	"openai-proj",
+	"ragflow",
 ];
 /** The only high-confidence rules a caller may downgrade from finding to redaction. */
 export type SkillDocExampleRule = "pem" | "jwt";
@@ -460,6 +465,7 @@ const SKILL_RULES: readonly SkillRule[] = [
 	{ name: "gitlab", rule: "gitlab", pattern: /\bglpat-[A-Za-z0-9_-]{20,}/dg, value: 0, replacement: REDACTED },
 	{ name: "digitalocean", rule: "digitalocean", pattern: /\bdop_v1_[a-f0-9]{64}/dg, value: 0, replacement: REDACTED },
 	{ name: "openai-proj", rule: "openai-proj", pattern: /\bsk-proj-[A-Za-z0-9_-]{20,}/dg, value: 0, replacement: REDACTED },
+	{ name: "ragflow", rule: "ragflow", pattern: /\bragflow-[A-Za-z0-9]{20,}/dg, value: 0, replacement: REDACTED },
 	{
 		name: "private-tag",
 		rule: "private-tag",

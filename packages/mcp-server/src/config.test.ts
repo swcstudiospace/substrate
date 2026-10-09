@@ -17,6 +17,8 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+	DEFAULT_DOCS_STATE,
+	DEFAULT_RAGFLOW_TIMEOUT_MS,
 	DEFAULT_SKILLS_GH,
 	DEFAULT_SKILLS_REMOTE_URL,
 	DEFAULT_SKILLS_REPO,
@@ -256,5 +258,113 @@ describe("mirror and DoD-gate config (D23-25)", () => {
 		expect(config.linearApiKey).toBe("lin-x");
 		expect(config.notionTaskGraphDataSource).toBe("ds-1");
 		expect(config.notionApiKey).toBeUndefined();
+	});
+});
+describe("RAGFLOW_* and SUBSTRATE_DOCS_* (D25-23)", () => {
+	// The key below is an inert test value assembled at runtime, never a
+	// credential; the URLs are loopback or single-label fixtures.
+	const key = () => "test-" + "key-9f8e7d6c5b4a";
+
+	test("an empty env leaves ragflow unconfigured with docs defaults, without throwing", () => {
+		const config = loadConfig({});
+
+		expect(config.ragflow).toBeNull();
+		expect(config.docs).toEqual({
+			stateDir: DEFAULT_DOCS_STATE,
+			embeddingModel: undefined,
+			datasetsFile: undefined,
+		});
+		expect(DEFAULT_DOCS_STATE).toBe("/var/lib/substrate/docs");
+		expect(DEFAULT_RAGFLOW_TIMEOUT_MS).toBe(10_000);
+	});
+
+	test("https anywhere and http to loopback or single-label hosts are accepted", () => {
+		for (const url of [
+			"https://ragflow.example.test:9380",
+			"http://localhost:9380",
+			"http://127.0.0.1:9380",
+			"http://[::1]:9380",
+			"http://ragflow:9380",
+		]) {
+			const config = loadConfig({ RAGFLOW_URL: url, RAGFLOW_API_KEY: key() });
+			expect({ url, problem: config.ragflow?.problem }).toEqual({ url, problem: null });
+		}
+	});
+
+	test("http to a dotted public host is rejected with a warning, never a throw", () => {
+		const config = loadConfig({ RAGFLOW_URL: "http://example.test:9380", RAGFLOW_API_KEY: key() });
+
+		expect(config.ragflow?.problem).toContain("RAGFLOW_URL");
+		const warnings = configWarnings(config);
+		expect(warnings.join("\n")).toContain("RAGFLOW_URL");
+		expect(warnings.join("\n")).not.toContain("example.test");
+	});
+
+	test("a malformed URL is rejected without echoing it", () => {
+		const config = loadConfig({ RAGFLOW_URL: "not a url with spaces", RAGFLOW_API_KEY: key() });
+
+		expect(config.ragflow?.problem).toContain("RAGFLOW_URL");
+		expect(JSON.stringify(config.ragflow)).not.toContain("not a url");
+	});
+
+	test("partial config warns: a key without a URL, and a URL without a key", () => {
+		const keyOnly = loadConfig({ RAGFLOW_API_KEY: key() });
+		expect(keyOnly.ragflow?.problem).toContain("RAGFLOW_URL");
+		expect(configWarnings(keyOnly).join("\n")).toContain("RAGFLOW_URL");
+
+		const urlOnly = loadConfig({ RAGFLOW_URL: "http://localhost:9380" });
+		expect(urlOnly.ragflow?.problem).toContain("RAGFLOW_API_KEY");
+		expect(configWarnings(urlOnly).join("\n")).toContain("RAGFLOW_API_KEY");
+	});
+
+	test("no docs/ragflow input makes loadConfig throw", () => {
+		const inputs: Array<Record<string, string | undefined>> = [
+			{},
+			{ RAGFLOW_URL: "http://example.test" },
+			{ RAGFLOW_API_KEY: key() },
+			{ RAGFLOW_URL: "gopher://example.test" },
+			{ SUBSTRATE_RAGFLOW_TIMEOUT_MS: "nan" },
+			{ SUBSTRATE_DOCS_STATE: "" },
+			{ SUBSTRATE_DOCS_EMBEDDING_MODEL: "bge-small", SUBSTRATE_DOCS_DATASETS: "/run/docs.json" },
+		];
+		for (const env of inputs) {
+			let config = loadConfig(env);
+			expect(config.docs.stateDir.length).toBeGreaterThan(0);
+			config = loadConfig({ ...env, SUBSTRATE_TOKEN_CURSOR: "tok", SUBSTRATE_OPERATOR_TOKENS: "tok" });
+			configWarnings(config);
+		}
+	});
+
+	test("timeout defaults to 10 s and parses a valid override", () => {
+		expect(loadConfig({ RAGFLOW_URL: "http://localhost:9380", RAGFLOW_API_KEY: key() }).ragflow?.timeoutMs).toBe(
+			10_000,
+		);
+		expect(
+			loadConfig({
+				RAGFLOW_URL: "http://localhost:9380",
+				RAGFLOW_API_KEY: key(),
+				SUBSTRATE_RAGFLOW_TIMEOUT_MS: "2500",
+			}).ragflow?.timeoutMs,
+		).toBe(2500);
+		expect(
+			loadConfig({
+				RAGFLOW_URL: "http://localhost:9380",
+				RAGFLOW_API_KEY: key(),
+				SUBSTRATE_RAGFLOW_TIMEOUT_MS: "nan",
+			}).ragflow?.timeoutMs,
+		).toBe(10_000);
+	});
+
+	test("docs block reads state, model and datasets file", () => {
+		const config = loadConfig({
+			SUBSTRATE_DOCS_STATE: "/run/docs",
+			SUBSTRATE_DOCS_EMBEDDING_MODEL: "bge-small",
+			SUBSTRATE_DOCS_DATASETS: "/run/docs.json",
+		});
+		expect(config.docs).toEqual({
+			stateDir: "/run/docs",
+			embeddingModel: "bge-small",
+			datasetsFile: "/run/docs.json",
+		});
 	});
 });

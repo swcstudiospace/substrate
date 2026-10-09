@@ -188,6 +188,19 @@ export interface SubstrateConfig {
 	 */
 	desktopDirRejected: string | null;
 	/**
+	 * How the substrate reaches RAGFlow. `null` when neither `RAGFLOW_URL` nor
+	 * `RAGFLOW_API_KEY` is set — a bare local run with no docs plane.
+	 *
+	 * Never throws: an invalid or partial combination sets `problem` (naming
+	 * the bad key, never the value) and `configWarnings` reports it at boot,
+	 * because a throw here would crash-loop every deployment under
+	 * `Restart=always`. While `problem` is set every docs call answers
+	 * `not-configured`.
+	 */
+	ragflow: RagflowConfig | null;
+	/** Where docs state lives and which embedding model new datasets use. */
+	docs: DocsConfig;
+	/**
 	 * Withdraw a claim whose event did not reach the ledger.
 	 *
 	 * `null` means "decide from the deployment": on when a ledger is configured, off
@@ -224,6 +237,86 @@ function readSkills(env: Record<string, string | undefined>): SubstrateConfig["s
 		}
 	}
 	return { repo, remoteUrl, stateDir, gh, problem };
+}
+
+export interface RagflowConfig {
+	url: string;
+	apiKey: string | undefined;
+	timeoutMs: number;
+	/** Why the block is unusable; null when usable. Names keys, never values. */
+	problem: string | null;
+}
+
+export interface DocsConfig {
+	stateDir: string;
+	embeddingModel: string | undefined;
+	datasetsFile: string | undefined;
+}
+
+/** Request timeout for RAGFlow calls (D25-03): 10 s, never inside the 1.5 s brief budget. */
+export const DEFAULT_RAGFLOW_TIMEOUT_MS = 10_000;
+export const DEFAULT_DOCS_STATE = "/var/lib/substrate/docs";
+
+/** Loopback or a single-label host (a MagicDNS short name): plain http is safe there. */
+function ragflowHttpHostOk(hostname: string): boolean {
+	const host = hostname.toLowerCase();
+	// WHATWG URL keeps the brackets on an IPv6 literal: `[::1]`.
+	if (host === "localhost" || host === "::1" || host === "[::1]") return true;
+	if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+	return !host.includes(".") && !host.includes(":");
+}
+
+/**
+ * The RAGFlow block, in the `loadConfig` trim-or-default style.
+ *
+ * Never throws: `new URL` runs inside the try, and every bad combination
+ * sets `problem`. `https:` is accepted anywhere; `http:` only to loopback or
+ * a single-label host, because the key would otherwise cross the internet in
+ * plain text. A malformed URL is never echoed back — the problem names the
+ * key, never the value.
+ */
+function readRagflow(env: Record<string, string | undefined>): RagflowConfig | null {
+	const rawUrl = env.RAGFLOW_URL?.trim() || "";
+	const apiKey = env.RAGFLOW_API_KEY?.trim() || undefined;
+	const timeoutRaw = Number(env.SUBSTRATE_RAGFLOW_TIMEOUT_MS);
+	const timeoutMs =
+		Number.isFinite(timeoutRaw) && timeoutRaw > 0 ? Math.floor(timeoutRaw) : DEFAULT_RAGFLOW_TIMEOUT_MS;
+	if (!rawUrl && !apiKey) return null;
+	if (!rawUrl) {
+		return { url: "", apiKey, timeoutMs, problem: "RAGFLOW_URL is not set, so docs calls answer not-configured" };
+	}
+	let url: URL;
+	try {
+		url = new URL(rawUrl);
+	} catch {
+		return { url: "", apiKey, timeoutMs, problem: "RAGFLOW_URL is not a valid URL" };
+	}
+	if (url.protocol !== "https:" && !(url.protocol === "http:" && ragflowHttpHostOk(url.hostname))) {
+		return {
+			url: "",
+			apiKey,
+			timeoutMs,
+			problem: "RAGFLOW_URL must be https:, or http: to a loopback or single-label host",
+		};
+	}
+	if (!apiKey) {
+		return {
+			url: url.toString().replace(/\/+$/, ""),
+			apiKey,
+			timeoutMs,
+			problem: "RAGFLOW_API_KEY is not set, so docs calls answer not-configured",
+		};
+	}
+	return { url: url.toString().replace(/\/+$/, ""), apiKey, timeoutMs, problem: null };
+}
+
+/** The docs block: plain defaults, never throws. */
+function readDocs(env: Record<string, string | undefined>): DocsConfig {
+	return {
+		stateDir: env.SUBSTRATE_DOCS_STATE?.trim() || DEFAULT_DOCS_STATE,
+		embeddingModel: env.SUBSTRATE_DOCS_EMBEDDING_MODEL?.trim() || undefined,
+		datasetsFile: env.SUBSTRATE_DOCS_DATASETS?.trim() || undefined,
+	};
 }
 /** "swarm-a05-be" → "SUBSTRATE_TOKEN_SWARM_A05_BE": the inverse of the suffix mapping in `tokenConfig`. */
 export function tokenEnvName(surface: Surface): string {
@@ -393,6 +486,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		),
 		audit: { path: env.SUBSTRATE_AUDIT_PATH?.trim() || null },
 		skills: readSkills(env),
+		ragflow: readRagflow(env),
+		docs: readDocs(env),
 		requireRecordedClaims: booleanOrNull(env.SUBSTRATE_CLAIM_REQUIRE_LEDGER),
 		desktopSurfaces: new Set(desktopNames.filter(isKnownDesktopSurface)),
 		desktopDir: desktopDirRaw.startsWith("/") ? desktopDirRaw : DEFAULT_DESKTOP_DIR,
@@ -531,6 +626,12 @@ export function configWarnings(config: SubstrateConfig): string[] {
 	// Named by key, never by value: the warning goes to a log.
 	if (config.skills.problem) {
 		warnings.push(`skill proposals are refused until the skills library is fixed: ${config.skills.problem}`);
+	}
+	// Same placement: an unusable RAGFlow block must be heard on every
+	// deployment, because every docs call answers not-configured until fixed.
+	// Named by key, never by value: the warning goes to a log.
+	if (config.ragflow?.problem) {
+		warnings.push(`docs calls answer not-configured until the RAGFlow block is fixed: ${config.ragflow.problem}`);
 	}
 	if (config.operatorTokens.size === 0) return warnings;
 
