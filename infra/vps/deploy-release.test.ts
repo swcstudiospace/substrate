@@ -82,24 +82,52 @@ mkdir -p node_modules
 	writeExec(
 		join(bin, "systemctl"),
 		`#!/usr/bin/env bash
-printf '%s\\n' "$*" >> "$STUB_LOG/systemctl"
-if [[ "$1" == "show" ]]; then
-  unit="\${!#}"
-  key="$STUB_LOG/show-count-\$unit"
-  count=0
-  if [[ -f "\$key" ]]; then count=\$(cat "\$key"); fi
-  count=\$((count + 1))
-  printf '%s\\n' "\$count" > "\$key"
-  if [[ "\${FAIL_LOOP:-}" == "1" && "\$unit" == "substrate-collector-grok.service" && \$((count % 2)) -eq 0 ]]; then
-    printf 'ActiveState=activating\\nSubState=auto-restart\\nNRestarts=1\\n'
-  else
-    printf 'ActiveState=active\\nSubState=running\\nNRestarts=0\\n'
-  fi
-  exit 0
-fi
-if [[ "$1" == "is-active" && "\${FAIL_ACTIVE:-}" == "1" ]]; then exit 1; fi
-if [[ "\${FAIL_SYSTEMCTL:-}" == "1" ]]; then exit 1; fi
-`,
+	printf '%s\\n' "$*" >> "$STUB_LOG/systemctl"
+	if [[ "$1" == "show" ]]; then
+	  unit="\${!#}"
+	  if [[ "$*" == *"Type"* ]]; then
+	    if [[ "\$unit" == "substrate-docs-refresh.service" ]]; then
+	      printf 'Type=oneshot\\n'
+	    else
+	      printf 'Type=simple\\n'
+	    fi
+	    exit 0
+	  fi
+	  if [[ "$*" == *"Result"* ]]; then
+	    if [[ "\${FAIL_ONESHOT:-}" == "1" && "\$unit" == "substrate-docs-refresh.service" ]]; then
+	      printf 'Result=failed\\n'
+	    else
+	      printf 'Result=success\\n'
+	    fi
+	    exit 0
+	  fi
+	  key="$STUB_LOG/show-count-\$unit"
+	  count=0
+	  if [[ -f "\$key" ]]; then count=\$(cat "\$key"); fi
+	  count=\$((count + 1))
+	  printf '%s\\n' "\$count" > "\$key"
+	  if [[ "\${FAIL_LOOP:-}" == "1" && "\$unit" == "substrate-collector-grok.service" && \$((count % 2)) -eq 0 ]]; then
+	    printf 'ActiveState=activating\\nSubState=auto-restart\\nNRestarts=1\\n'
+	  else
+	    printf 'ActiveState=active\\nSubState=running\\nNRestarts=0\\n'
+	  fi
+	  exit 0
+	fi
+	if [[ "$1" == "is-active" ]]; then
+	  unit="\${!#}"
+	  # A Type=oneshot tick is never active after it runs; the gate checks its
+	  # completion instead, so the stub reports it inactive like the host does.
+	  if [[ "\$unit" == "substrate-docs-refresh.service" ]]; then exit 1; fi
+	  if [[ "\${FAIL_ACTIVE:-}" == "1" ]]; then exit 1; fi
+	  exit 0
+	fi
+	if [[ "$1" == "is-failed" ]]; then
+	  unit="\${!#}"
+	  if [[ "\${FAIL_ONESHOT:-}" == "1" && "\$unit" == "substrate-docs-refresh.service" ]]; then exit 0; fi
+	  exit 1
+	fi
+	if [[ "\${FAIL_SYSTEMCTL:-}" == "1" ]]; then exit 1; fi
+	`,
 	);
 	writeExec(
 		join(bin, "sleep"),
@@ -151,6 +179,7 @@ printf '%s\\n' ok >> "$STUB_LOG/health"
 			FAIL_SYSTEMCTL: "",
 			FAIL_ACTIVE: "",
 			FAIL_LOOP: "",
+			FAIL_ONESHOT: "",
 		},
 	};
 }
@@ -369,6 +398,32 @@ describe("deploy-release.sh", () => {
 		const failed = deploy(h, ["v2"], { ...h.env, FAIL_ACTIVE: "1" });
 		expect(failed.status).not.toBe(0);
 		expect(failed.stderr).toContain("is not active");
+		expect(failed.stderr).toContain("rolling back");
+		expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA1}`);
+	});
+
+	test("a healthy oneshot docs refresh is gated on completion, not activeness", () => {
+		// The stub reports substrate-docs-refresh.service inactive (a
+		// Type=oneshot tick is never active after it runs) with
+		// Result=success and not failed: the deploy must succeed instead of
+		// rolling back on "is not active".
+		const h = harness();
+		stage(h.env, "v1", SHA1, true);
+		const result = deploy(h, ["v1"]);
+		expect(result.status).toBe(0);
+		expect(result.stderr).not.toContain("is not active");
+		expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA1}`);
+	});
+
+	test("a failed oneshot docs refresh rolls current back", () => {
+		const h = harness();
+		stage(h.env, "v1", SHA1, true);
+		stage(h.env, "v2", SHA2, true);
+		expect(deploy(h, ["v1"]).status).toBe(0);
+		const failed = deploy(h, ["v2"], { ...h.env, FAIL_ONESHOT: "1" });
+		expect(failed.status).not.toBe(0);
+		expect(failed.stderr).toContain("substrate-docs-refresh.service");
+		expect(failed.stderr).toContain("is failed");
 		expect(failed.stderr).toContain("rolling back");
 		expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA1}`);
 	});

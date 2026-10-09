@@ -113,6 +113,12 @@ describe("healthStatus", () => {
 					headers: { "content-type": "application/json", ...headers },
 					body: JSON.stringify(body),
 				}),
+			postRaw: (path: string, rawBody: string, headers: Record<string, string> = {}) =>
+				fetch(`http://127.0.0.1:${port}${path}`, {
+					method: "POST",
+					headers: { "content-type": "application/json", ...headers },
+					body: rawBody,
+				}),
 			stop: () =>
 				new Promise<void>((resolve) => {
 					observability.stop();
@@ -495,6 +501,28 @@ describe("docs routes", () => {
 			await stop();
 		}
 	});
+	test("POST /docs/search routes malformed JSON through the 200 invalid-request reply", async () => {
+		const fake = new FakeDocs();
+		const store = ledger();
+		const { postRaw, stop } = await docsServe(fake, agentEnv, store.greptime);
+		try {
+			const response = await postRaw("/docs/search", "{broken json", bearer("tok-omp"));
+			const body = (await response.json()) as Record<string, unknown>;
+			expect(response.status).toBe(200);
+			expect(body.results).toEqual([]);
+			expect(body.reason).toBe("invalid-request");
+			expect(body.untrusted).toBe(true);
+			expect(fake.totalCalls()).toBe(0);
+			const searches = store.written.filter(
+				(event) => (event.payload as Record<string, unknown>).action === "docs.search",
+			);
+			expect(searches).toHaveLength(1);
+			expect((searches[0]!.payload as Record<string, unknown>).reason).toBe("invalid-request");
+		} finally {
+			await stop();
+		}
+	});
+
 
 	test("POST /docs/ingest refuses anonymous 401 before the body is read", async () => {
 		const fake = new FakeDocs();

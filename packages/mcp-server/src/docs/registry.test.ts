@@ -12,8 +12,28 @@ import {
 	resolveDatasetId,
 } from "./registry.ts";
 import type { DatasetEntry } from "./registry.ts";
+import { ingestPage } from "./ingest.ts";
+import type { DocsRagflow } from "./manifest.ts";
 
 const NAMES = BUILTIN_REGISTRY.map((entry) => entry.name);
+
+/**
+ * Shape/exclude refusals and `dry_run` return before any RAGFlow or manifest
+ * touch, so path-matching tests fail loudly if that ever changes.
+ */
+function unreachable(reason: string): never {
+	throw new Error(reason);
+}
+
+const untouched: DocsRagflow = {
+	listDatasets: () => Promise.reject(unreachable("must never reach RAGFlow")),
+	listDocuments: () => Promise.reject(unreachable("must never reach RAGFlow")),
+	uploadDocuments: () => Promise.reject(unreachable("must never reach RAGFlow")),
+	parseDocuments: () => Promise.reject(unreachable("must never reach RAGFlow")),
+	updateDocument: () => Promise.reject(unreachable("must never reach RAGFlow")),
+	deleteDocuments: () => Promise.reject(unreachable("must never reach RAGFlow")),
+	ensureDataset: () => Promise.reject(unreachable("must never reach RAGFlow")),
+};
 
 describe("builtin registry", () => {
 	test("holds all eight datasets", () => {
@@ -31,6 +51,45 @@ describe("builtin registry", () => {
 	test("no registry entry ingests docs/receipts/**", () => {
 		for (const entry of BUILTIN_REGISTRY) {
 			expect(entry.include.some((glob) => glob.includes("receipts"))).toBe(false);
+		}
+	});
+
+	test("docs/receipts/r.md is refused by actual path matching on every entry", async () => {
+		for (const entry of BUILTIN_REGISTRY) {
+			const sha = "d".repeat(40);
+			const result = await ingestPage(
+				{
+					dataset: entry.name,
+					sourceUrl: `https://github.com/${entry.slug}/blob/${sha}/docs/receipts/r.md`,
+					commit: sha,
+					content: "# Receipt\n\nBody.\n",
+					surface: "substrate",
+					isSubstrateOrOperator: true,
+				},
+				{ registry: BUILTIN_REGISTRY, client: untouched },
+			);
+			expect(result).toEqual({ status: "refused", reason: "outside-roots" });
+		}
+	});
+
+	test("the receipts exclude stays scoped: ordinary docs pages still match", async () => {
+		for (const name of ["agent-substrate", "programming-desk", "kanbanos", "desklanes", "clippyos", "auctioning"]) {
+			const entry = findDataset(BUILTIN_REGISTRY, name);
+			if (!entry) throw new Error(`missing registry entry ${name}`);
+			const sha = "e".repeat(40);
+			const result = await ingestPage(
+				{
+					dataset: entry.name,
+					sourceUrl: `https://github.com/${entry.slug}/blob/${sha}/docs/guide.md`,
+					commit: sha,
+					content: "# Guide\n\nBody.\n",
+					dryRun: true,
+					surface: "substrate",
+					isSubstrateOrOperator: true,
+				},
+				{ registry: BUILTIN_REGISTRY, client: untouched },
+			);
+			expect(result.status).toBe("dry_run");
 		}
 	});
 

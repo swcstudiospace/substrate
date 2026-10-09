@@ -10,7 +10,10 @@ import {
 	DOCS_PARSE_DEADLINE_MS,
 	DOCS_POLL_INTERVAL_MS,
 	DOCS_TEXT_EXTENSIONS,
+	decodePathSegments,
+	docsSourceUrl,
 	docsTimeout,
+	encodePathSegments,
 	parseDeadlineMs,
 	pollIntervalMs,
 	runDocsIngest,
@@ -248,6 +251,37 @@ describe("docs ingest (D25-12)", () => {
 			expect(source).not.toContain("redactSkillContent");
 		}
 	});
+
+	test("a file that is not valid UTF-8 is refused before anything is posted", async () => {
+		const stub = stubFetch(() => ({ status: 200, body: UPLOADED }));
+		const path = join(scratch, "bad-ingest.md");
+		writeFileSync(path, Buffer.from([0x23, 0x20, 0x54, 0x0a, 0xff, 0xfe, 0x0a]));
+		const { deps, out, err } = capture({ fetch: stub.fetch });
+		expect(await runDocsIngest(INGEST(path), deps)).toBe(1);
+		expect(joined(out)).toContain("status=refused");
+		expect(joined(err)).toContain("not valid UTF-8");
+		expect(stub.posts).toHaveLength(0);
+	});
+});
+
+describe("docs refresh source_url round-trip", () => {
+	test("encode leaves simple paths alone and escapes spaces, #, ?, %", () => {
+		expect(encodePathSegments("docs/a.md")).toBe("docs/a.md");
+		expect(encodePathSegments("docs/Setup Guide.md")).toBe("docs/Setup%20Guide.md");
+		expect(encodePathSegments("docs/a#b.md")).toBe("docs/a%23b.md");
+		expect(encodePathSegments("docs/q?x.md")).toBe("docs/q%3Fx.md");
+		expect(encodePathSegments("docs/100%.md")).toBe("docs/100%25.md");
+		expect(docsSourceUrl(SLUG, COMMIT_A, "docs/Setup Guide.md")).toBe(SOURCE(COMMIT_A, "docs/Setup%20Guide.md"));
+	});
+
+	test("decode inverts encode and refuses escapes and traversal", () => {
+		for (const path of ["docs/a.md", "docs/Setup Guide.md", "docs/a#b.md", "docs/q?x.md", "docs/100%.md", "docs/üñï.md", "README.md"]) {
+			expect(decodePathSegments(encodePathSegments(path))).toEqual({ ok: true, path });
+		}
+		for (const bad of ["docs/../x.md", "docs/%2E%2E/x.md", "docs/%2Fx.md", "docs/%5Cx.md", "docs/%ZZ.md", "docs/%", "", "docs//x.md"]) {
+			expect(decodePathSegments(bad)).toEqual({ ok: false });
+		}
+	});
 });
 
 // ── refresh ──────────────────────────────────────────────────────────────────
@@ -445,6 +479,122 @@ describe("docs refresh (D25-19/D25-20)", () => {
 
 		const noSlug = refreshDeps(stub);
 		expect(await runDocsRefresh(["--dataset", "guide", "--commit", repo.commit, "--repo", repo.dir], noSlug.deps)).toBe(1);
+	});
+
+	test("pages with spaces, #, and ? round-trip source_url into paths_present", async () => {
+		const files = ["docs/Setup Guide.md", "docs/a#b.md", "docs/q?x.md"];
+		const repo = gitRepo(Object.fromEntries(files.map((path) => [path, `# ${path}\n`])));
+		// The stub mirrors the server: the manifest key is the URL pathname
+		// remainder, echoed back as `path`; finalize only keeps present paths
+		// that were actually stored.
+		const keys = new Set<string>();
+		const stub = stubFetch((body) => {
+			if (body.finalize === true) {
+				const present: unknown[] = Array.isArray(body.paths_present) ? body.paths_present : [];
+				const matched = present.filter((path): path is string => typeof path === "string" && keys.has(path));
+				return { status: 200, body: { status: "version-cut", dataset: "guide", datasetId: "ds-9", commit: repo.commit, paths: matched, versions: 1, deletedDocumentIds: [] } };
+			}
+			const url = new URL(String(body.source_url));
+			expect(url.hash).toBe("");
+			expect(url.search).toBe("");
+			expect(String(body.source_url)).not.toContain(" ");
+			const key = url.pathname.split("/").slice(5).join("/");
+			keys.add(key);
+			return { status: 200, body: { ...UPLOADED, path: key } };
+		});
+		const { deps, out } = refreshDeps(stub);
+		expect(await runDocsRefresh(["--dataset", "guide", "--commit", repo.commit, "--repo", repo.dir, "--slug", SLUG], deps)).toBe(0);
+		expect(stub.posts.filter((post) => post.body.finalize !== true)).toHaveLength(3);
+		const finalize = stub.posts.find((post) => post.body.finalize === true);
+		const finalizePaths: unknown = finalize?.body.paths_present;
+		const present: unknown[] = Array.isArray(finalizePaths) ? finalizePaths : [];
+		expect(present).toHaveLength(3);
+		expect(present.every((path) => typeof path === "string" && keys.has(path))).toBe(true);
+		expect(joined(out)).toContain("status=cut");
+	});
+
+	test("a 413 body-size refusal counts as refused and the version still cuts", async () => {
+		const repo = gitRepo({ "docs/ok.md": "# Ok\n", "docs/huge.md": "# Huge\n" });
+		const stub = stubFetch((body) => {
+			if (body.finalize === true) {
+				const present: unknown[] = Array.isArray(body.paths_present) ? body.paths_present : [];
+				return { status: 200, body: { status: "version-cut", dataset: "guide", datasetId: "ds-9", commit: repo.commit, paths: present, versions: 1, deletedDocumentIds: [] } };
+			}
+			if (String(body.source_url).endsWith("/docs/huge.md")) {
+				return { status: 413, body: { error: "request body too large" } };
+			}
+			return { status: 200, body: UPLOADED };
+		});
+		const { deps, out, err } = refreshDeps(stub);
+		expect(await runDocsRefresh(["--dataset", "guide", "--commit", repo.commit, "--repo", repo.dir, "--slug", SLUG], deps)).toBe(0);
+		expect(joined(out)).toContain("refused=1");
+		expect(joined(out)).toContain("uploaded=1");
+		expect(joined(out)).toContain("status=cut");
+		expect(joined(err)).toContain("skipped docs/huge.md: request body too large");
+	});
+
+	test("a committed file over the page cap is refused before posting", async () => {
+		const repo = gitRepo({ "docs/ok.md": "# Ok\n", "docs/big.md": "x".repeat(DOCS_MAX_CONTENT_BYTES + 1) });
+		const stub = stubFetch((body) => {
+			if (body.finalize === true) {
+				const present: unknown[] = Array.isArray(body.paths_present) ? body.paths_present : [];
+				return { status: 200, body: { status: "version-cut", dataset: "guide", datasetId: "ds-9", commit: repo.commit, paths: present, versions: 1, deletedDocumentIds: [] } };
+			}
+			return { status: 200, body: UPLOADED };
+		});
+		const { deps, out, err } = refreshDeps(stub);
+		expect(await runDocsRefresh(["--dataset", "guide", "--commit", repo.commit, "--repo", repo.dir, "--slug", SLUG], deps)).toBe(0);
+		expect(stub.posts.filter((post) => post.body.finalize !== true)).toHaveLength(1);
+		expect(stub.posts.some((post) => String(post.body.source_url ?? "").endsWith("/docs/big.md"))).toBe(false);
+		expect(joined(out)).toContain("refused=1");
+		expect(joined(out)).toContain("status=cut");
+		expect(joined(err)).toContain("over the 256 KiB page cap");
+	});
+
+	test("files outside the registry roots are skipped before posting", async () => {
+		const registryFile = join(scratch, "roots-datasets.json");
+		writeFileSync(
+			registryFile,
+			JSON.stringify([{ name: "guide", slug: SLUG, include: ["docs/**"], exclude: ["docs/drafts/**"], trigger: "merge-to-main" }]),
+		);
+		const repo = gitRepo({ "docs/a.md": "# A\n", "other/b.md": "# B\n", "docs/drafts/c.md": "# C\n" });
+		const stub = stubFetch((body) => {
+			if (body.finalize === true) {
+				const present: unknown[] = Array.isArray(body.paths_present) ? body.paths_present : [];
+				return { status: 200, body: { status: "version-cut", dataset: "guide", datasetId: "ds-9", commit: repo.commit, paths: present, versions: 1, deletedDocumentIds: [] } };
+			}
+			return { status: 200, body: UPLOADED };
+		});
+		const { deps, out } = refreshDeps(stub, { SUBSTRATE_DOCS_DATASETS: registryFile });
+		expect(await runDocsRefresh(["--dataset", "guide", "--commit", repo.commit, "--repo", repo.dir, "--slug", SLUG], deps)).toBe(0);
+		const pages = stub.posts.filter((post) => post.body.finalize !== true);
+		expect(pages).toHaveLength(1);
+		expect(String(pages[0]?.body.source_url)).toBe(SOURCE(repo.commit, "docs/a.md"));
+		expect(joined(out)).toContain("skipped=2");
+		expect(joined(out)).toContain("status=cut");
+	});
+
+	test("a committed file with invalid UTF-8 is skipped, never posted", async () => {
+		const repo = gitRepo({ "docs/ok.md": "# Ok\n" });
+		writeFileSync(join(repo.dir, "docs/bad.md"), Buffer.from([0x23, 0x20, 0x42, 0x0a, 0xff, 0xfe, 0x0a]));
+		const added = spawnSync("git", ["add", "docs/bad.md"], { cwd: repo.dir, encoding: "utf8" });
+		expect(added.status).toBe(0);
+		const committed = spawnSync("git", ["commit", "-m", "bad bytes"], { cwd: repo.dir, encoding: "utf8" });
+		expect(committed.status).toBe(0);
+		const head = spawnSync("git", ["rev-parse", "HEAD"], { cwd: repo.dir, encoding: "utf8" }).stdout.trim();
+		const stub = stubFetch((body) => {
+			if (body.finalize === true) {
+				const present: unknown[] = Array.isArray(body.paths_present) ? body.paths_present : [];
+				return { status: 200, body: { status: "version-cut", dataset: "guide", datasetId: "ds-9", commit: head, paths: present, versions: 1, deletedDocumentIds: [] } };
+			}
+			return { status: 200, body: UPLOADED };
+		});
+		const { deps, out, err } = refreshDeps(stub);
+		expect(await runDocsRefresh(["--dataset", "guide", "--commit", head, "--repo", repo.dir, "--slug", SLUG], deps)).toBe(0);
+		expect(stub.posts.some((post) => String(post.body.source_url ?? "").endsWith("/docs/bad.md"))).toBe(false);
+		expect(joined(out)).toContain("skipped=1");
+		expect(joined(out)).toContain("status=cut");
+		expect(joined(err)).toContain("skipped docs/bad.md");
 	});
 });
 

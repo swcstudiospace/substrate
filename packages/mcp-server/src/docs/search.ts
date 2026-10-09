@@ -307,10 +307,20 @@ export async function runSearch(input: unknown, deps: RunSearchDeps): Promise<Se
 		return emptyReply(mapped.reason, mapped.detail);
 	}
 
+	const docListCache = new Map<string, Promise<RagflowDocument[]>>();
 	const lookupDocument =
 		deps.lookupDocument ??
 		(async (datasetId: string, documentId: string): Promise<SourceMeta | undefined> => {
-			const docs = await client.listDocuments(datasetId);
+			// One listDocuments per dataset per search: hits routinely share a
+			// dataset (and a document), and a per-hit list repeats the call.
+			// The promise itself is cached, so a rejection is shared too and
+			// every hit on the dataset drops without another call.
+			let pending = docListCache.get(datasetId);
+			if (!pending) {
+				pending = client.listDocuments(datasetId);
+				docListCache.set(datasetId, pending);
+			}
+			const docs = await pending;
 			const match = docs.find((doc) => doc.id === documentId);
 			return match ? metaFromDocument(match) : undefined;
 		});

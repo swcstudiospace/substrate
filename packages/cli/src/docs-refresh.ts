@@ -24,9 +24,10 @@
  * `/root/agent-skills` (D25-18, D25-21). Enabling the timer is a live step.
  */
 
-import { spawnSync } from "node:child_process";
+import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { findDataset, loadRegistry } from "../../mcp-server/src/docs/registry.ts";
 import { parseArgs, str, type Args } from "./args.ts";
 
 /**
@@ -107,6 +108,95 @@ export async function runDocs(argv: string[], deps: DocsDeps): Promise<number> {
 	return 2;
 }
 
+/** Fatal UTF-8 decoder: invalid bytes throw instead of becoming U+FFFD. */
+const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
+
+/**
+ * Decode bytes that must be UTF-8 text. Invalid bytes are an error, never
+ * silent U+FFFD replacement (review: invalid text gets replaced).
+ */
+function decodeUtf8Bytes(bytes: Uint8Array): { content: string } | { error: string } {
+	try {
+		return { content: utf8Decoder.decode(bytes) };
+	} catch {
+		return { error: "not valid UTF-8" };
+	}
+}
+
+/**
+ * Encode one repo-relative path into a `source_url` suffix: every segment is
+ * `encodeURIComponent`-escaped, so spaces, `#`, `?` (and a literal `%`) never
+ * become URL delimiters or vanish in URL parsing (review: file names lose pages).
+ */
+export function encodePathSegments(path: string): string {
+	return path
+		.split("/")
+		.map((segment) => encodeURIComponent(segment))
+		.join("/");
+}
+
+/**
+ * The inverse of `encodePathSegments`: decode back to the same repo-relative
+ * path, refusing anything malformed, empty, or able to escape (`.`, `..`,
+ * slashes, backslashes, NUL) instead of guessing.
+ */
+export function decodePathSegments(encoded: string): { ok: true; path: string } | { ok: false } {
+	const parts: string[] = [];
+	for (const segment of encoded.split("/")) {
+		let decoded: string;
+		try {
+			decoded = decodeURIComponent(segment);
+		} catch {
+			return { ok: false };
+		}
+		if (decoded === "" || decoded === "." || decoded === ".." || decoded.includes("/") || decoded.includes("\\") || decoded.includes("\0")) {
+			return { ok: false };
+		}
+		parts.push(decoded);
+	}
+	return { ok: true, path: parts.join("/") };
+}
+
+/** Canonical page URL for a repo-relative path (segments encoded). */
+export function docsSourceUrl(slug: string, commit: string, path: string): string {
+	return `https://github.com/${slug}/blob/${commit}/${encodePathSegments(path)}`;
+}
+
+/**
+ * Client mirror of the server's `globToRegExp` in
+ * `packages/mcp-server/src/docs/ingest.ts`: a double-star prefix crosses
+ * directories, `*` stays inside one segment, `?` is one non-slash character.
+ * A pre-post filter only — the server re-checks every post, so a file
+ * wrongly let through is still refused there; this copy must stay identical
+ * to the server's.
+ */
+function docsGlobToRegExp(pattern: string): RegExp {
+	let out = "^";
+	let i = 0;
+	while (i < pattern.length) {
+		if (pattern.startsWith("**/", i)) {
+			out += "(.*/)?";
+			i += 3;
+		} else if (pattern[i] === "*") {
+			out += pattern[i + 1] === "*" ? ".*" : "[^/]*";
+			i += pattern[i + 1] === "*" ? 2 : 1;
+		} else if (pattern[i] === "?") {
+			out += "[^/]";
+			i += 1;
+		} else {
+			const char = pattern[i] ?? "";
+			out += char.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+			i += 1;
+		}
+	}
+	return new RegExp(`${out}$`);
+}
+
+/** Client mirror of the server's `matchesAny` (same file): any glob matches. */
+function matchesDocsGlobs(patterns: readonly string[], path: string): boolean {
+	return patterns.some((pattern) => docsGlobToRegExp(pattern).test(path));
+}
+
 // ── ingest (D25-12) ──────────────────────────────────────────────────────────
 
 const INGEST_FLAGS: Record<string, true> = { dataset: true, file: true, "source-url": true, commit: true, title: true, "dry-run": true, help: true };
@@ -171,16 +261,23 @@ export async function runDocsIngest(argv: string[], deps: DocsDeps): Promise<num
 	}
 
 	const file = resolve(deps.cwd, fileArg);
-	let content: string;
+	let raw: Buffer;
 	try {
-		content = readFileSync(file, "utf8");
+		raw = readFileSync(file);
 	} catch (cause) {
 		return refused(`cannot read ${fileArg}: ${(cause as Error).message}`);
 	}
+	// Fatal decode: invalid bytes refuse here instead of reaching the server
+	// as U+FFFD, which `hasBadEncoding` could no longer recognise.
+	const decodedFile = decodeUtf8Bytes(raw);
+	if ("error" in decodedFile) {
+		return refused(`${fileArg} is not valid UTF-8; nothing was posted`);
+	}
+	const content = decodedFile.content;
 	// The 256 KiB pre-check happens before posting (D25-12). The server
 	// measures after image stripping, so this client-side check is
 	// conservative on image-heavy pages — and never a redaction.
-	const size = Buffer.byteLength(content, "utf8");
+	const size = raw.length;
 	if (size > DOCS_MAX_CONTENT_BYTES) {
 		return refused(`the file is ${size} bytes, over the 256 KiB page cap; nothing was posted`);
 	}
@@ -293,10 +390,19 @@ function lsTreeBlobs(repoDir: string, commit: string): { paths: string[] } | { e
 	return { paths };
 }
 
-function showAt(repoDir: string, commit: string, path: string): { content: string } | { error: string } {
-	const shown = git(["-C", repoDir, "show", `${commit}:${path}`], repoDir);
-	if (!shown.ok) return { error: shown.stderr.trim().slice(0, 200) };
-	return { content: shown.stdout };
+function showAt(repoDir: string, commit: string, path: string): { bytes: Buffer } | { error: string } {
+	// Bytes out of git, never replacement-decoded text: the caller
+	// fatal-decodes, so invalid UTF-8 stays detectable instead of laundering
+	// into U+FFFD before the server's `hasBadEncoding` can refuse it.
+	let result: SpawnSyncReturns<Buffer>;
+	try {
+		result = spawnSync("git", ["-C", repoDir, "show", `${commit}:${path}`], { cwd: repoDir, maxBuffer: 64 * 1024 * 1024 });
+	} catch (cause) {
+		return { error: String((cause as Error).message).slice(0, 200) };
+	}
+	if (result.error) return { error: String(result.error.message).slice(0, 200) };
+	if (result.status !== 0) return { error: result.stderr.toString("utf8").trim().slice(0, 200) };
+	return { bytes: result.stdout };
 }
 
 /** owner/name from the origin remote; `--slug` wins when the remote is absent. */
@@ -386,8 +492,16 @@ export async function runDocsRefresh(argv: string[], deps: DocsDeps): Promise<nu
 		});
 
 	const ingestedPaths: string[] = [];
+	// Registry roots are a pre-post filter only, and only for datasets the
+	// registry knows: unknown datasets keep today's behaviour and the server
+	// stays the final arbiter (any 400 still refuses the post).
+	const entry = findDataset(loadRegistry(env), dataset);
 	for (const path of listed.paths) {
 		if (!DOCS_TEXT_EXTENSIONS[extensionOf(path)]) {
+			counts.skipped += 1;
+			continue;
+		}
+		if (entry !== undefined && (!matchesDocsGlobs(entry.include, path) || matchesDocsGlobs(entry.exclude, path))) {
 			counts.skipped += 1;
 			continue;
 		}
@@ -397,13 +511,28 @@ export async function runDocsRefresh(argv: string[], deps: DocsDeps): Promise<nu
 			deps.err(`[substrate] docs refresh skipped ${path}: ${shown.error}\n`);
 			continue;
 		}
+		const decoded = decodeUtf8Bytes(shown.bytes);
+		if ("error" in decoded) {
+			counts.skipped += 1;
+			deps.err(`[substrate] docs refresh skipped ${path}: not valid UTF-8; nothing was posted\n`);
+			continue;
+		}
+		// The ingest-side cap, checked before posting (the same conservative
+		// pre-check `runDocsIngest` does): a page this big would be refused
+		// as too-large — or bounce off the route body cap as a 413 — so it
+		// is a refused page without a wasted post.
+		if (shown.bytes.length > DOCS_MAX_CONTENT_BYTES) {
+			counts.refused += 1;
+			deps.err(`[substrate] docs refresh skipped ${path}: the file is ${shown.bytes.length} bytes, over the 256 KiB page cap; nothing was posted\n`);
+			continue;
+		}
 		let response: Response;
 		try {
 			response = await post({
 				dataset,
-				source_url: `https://github.com/${slug}/blob/${commit}/${path}`,
+				source_url: docsSourceUrl(slug, commit, path),
 				commit,
-				content: shown.content,
+				content: decoded.content,
 				session_id: sessionId,
 			});
 		} catch (cause) {
@@ -418,7 +547,12 @@ export async function runDocsRefresh(argv: string[], deps: DocsDeps): Promise<nu
 		}
 		const body = asRecord(parsed);
 		if (response.status === 200 && (body?.status === "uploaded" || body?.status === "unchanged")) {
-			ingestedPaths.push(path);
+			// Finalize matches on the server's manifest key, which is derived
+			// from `source_url`: store the echoed key when it decodes back to
+			// this exact file, so spaces, `#`, and `?` survive the round-trip.
+			const echoed = typeof body?.path === "string" ? body.path : undefined;
+			const back = echoed === undefined ? null : decodePathSegments(echoed);
+			ingestedPaths.push(echoed !== undefined && back !== null && back.ok && back.path === path ? echoed : path);
 			if (body.status === "uploaded") counts.uploaded += 1;
 			else counts.unchanged += 1;
 			if (Array.isArray(body.documentIds)) {
@@ -430,6 +564,14 @@ export async function runDocsRefresh(argv: string[], deps: DocsDeps): Promise<nu
 		if (response.status === 400 && body?.status === "refused") {
 			counts.refused += 1;
 			const reason = typeof body.reason === "string" ? body.reason : "refused";
+			deps.err(`[substrate] docs refresh skipped ${path}: ${reason}\n`);
+			continue;
+		}
+		// A body-size refusal is a refused page, not a failed run: the file
+		// stays out of the version and everything else still finalizes.
+		if (response.status === 413) {
+			counts.refused += 1;
+			const reason = typeof body?.error === "string" ? body.error : text.slice(0, 200) || "request body too large";
 			deps.err(`[substrate] docs refresh skipped ${path}: ${reason}\n`);
 			continue;
 		}

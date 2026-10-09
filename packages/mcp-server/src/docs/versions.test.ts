@@ -368,4 +368,80 @@ describe("finalize", () => {
 		expect(fake.totalCalls()).toBe(0);
 		expect(await readdir(stateDir)).toEqual([]);
 	});
+
+	test("overlapping runs cut their own run's documents via a per-run snapshot", async () => {
+		const first = await ingest("docs/guide.md", 1);
+		// An overlapping run re-ingests the same page before this run finalizes.
+		await ingest("docs/guide.md", 2);
+		const cut = await finalize(
+			{
+				dataset: "test-docs",
+				commit: commit(1),
+				pathsPresent: ["docs/guide.md"],
+				pages: [{ path: "docs/guide.md", hash: first.contentSha256, documentIds: [...first.documentIds] }],
+				...writer(),
+			},
+			{ registry: REGISTRY, client: fake, stateDir },
+		);
+		expect(cut.status).toBe("version-cut");
+		const manifest = await loadManifest("test-docs", { stateDir });
+		expect(manifest.current).toBe(commit(1));
+		expect([...currentDocumentIds(manifest)].sort()).toEqual([...first.documentIds].sort());
+	});
+
+	test("a snapshot with unparsed documents blocks the cut", async () => {
+		const first = await ingest("docs/guide.md", 1);
+		for (const id of first.documentIds) fake.setRun(id, "FAIL");
+		const cut = await finalize(
+			{
+				dataset: "test-docs",
+				commit: commit(1),
+				pathsPresent: ["docs/guide.md"],
+				pages: [{ path: "docs/guide.md", hash: first.contentSha256, documentIds: [...first.documentIds] }],
+				...writer(),
+			},
+			{ registry: REGISTRY, client: fake, stateDir },
+		);
+		expect(cut.status).toBe("failed");
+		if (cut.status !== "failed") throw new Error("unreachable");
+		expect(cut.message).toContain("FAIL");
+	});
+
+	test("a page pruned out of retention re-ingests instead of reusing deleted ids", async () => {
+		const content = "# Return\n\nSame.\n";
+		await ingest("docs/return.md", 1, content);
+		const first = await finalize(
+			{ dataset: "test-docs", commit: commit(1), pathsPresent: ["docs/return.md"], ...writer() },
+			{ registry: REGISTRY, client: fake, stateDir },
+		);
+		expect(first.status).toBe("version-cut");
+		for (let version = 2; version <= 6; version += 1) {
+			const cut = await finalize(
+				{ dataset: "test-docs", commit: commit(version), pathsPresent: [], ...writer() },
+				{ registry: REGISTRY, client: fake, stateDir },
+			);
+			expect(cut.status).toBe("version-cut");
+		}
+		const pruned = await loadManifest("test-docs", { stateDir });
+		expect(pruned.paths["docs/return.md"]).toBeUndefined();
+		const restored = await ingestPage(
+			{
+				dataset: "test-docs",
+				sourceUrl: url(commit(7), "docs/return.md"),
+				commit: commit(7),
+				content,
+				...writer(),
+			},
+			{ registry: REGISTRY, client: fake, stateDir },
+		);
+		expect(restored.status).toBe("uploaded");
+		if (restored.status !== "uploaded") throw new Error("unreachable");
+		const cut = await finalize(
+			{ dataset: "test-docs", commit: commit(7), pathsPresent: ["docs/return.md"], ...writer() },
+			{ registry: REGISTRY, client: fake, stateDir },
+		);
+		expect(cut).toMatchObject({ status: "version-cut", paths: ["docs/return.md"] });
+		const manifest = await loadManifest("test-docs", { stateDir });
+		expect([...currentDocumentIds(manifest)].sort()).toEqual([...restored.documentIds].sort());
+	});
 });

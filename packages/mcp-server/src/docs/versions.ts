@@ -14,11 +14,14 @@
  *
  * A version is cut only after every page's parse finished: finalize verifies
  * each present page's documents report `run: DONE` and refuses the cut
- * otherwise. Any failure leaves the previous version current — the manifest
+ * otherwise. `pages` carries the run's own ingest snapshot, so an overlapping
+ * run cannot cross-record commits; paths without a snapshot read the latest
+ * manifest entry (unchanged-page reuse). Pruning also drops path entries no
+ * live version references, so a restored page re-uploads instead of reusing
+ * deleted ids. Any failure leaves the previous version current — the manifest
  * is written once, after every RAGFlow call succeeds. `finalize` is
  * attributed as `docs_ingest` under the same writer rule as ingestPage.
  */
-
 import { findDataset, loadRegistry } from "./registry.ts";
 import type { DatasetEntry } from "./registry.ts";
 import { RagflowError } from "./ragflow.ts";
@@ -30,11 +33,29 @@ import { resolveIngestDatasetId } from "./ingest.ts";
 /** Only the last five versions survive (D25-17). */
 export const KEEP_VERSIONS = 5;
 
+export interface FinalizePageSnapshot {
+	/** Repo-relative path this refresh run ingested. */
+	path: string;
+	/** Content hash this run's ingestPage result reported. */
+	hash: string;
+	/** Document ids this run's ingestPage result reported. */
+	documentIds: string[];
+}
+
 export interface FinalizeInput {
 	dataset: string;
 	commit: string;
 	/** Repo-relative paths present at this commit (refused pages simply absent). */
 	pathsPresent: string[];
+	/**
+	 * Per-run snapshot: what this refresh run's own ingestPage calls reported
+	 * (`uploaded` and `unchanged` results both carry documentIds). A snapshot
+	 * entry wins over the latest manifest.paths, so an overlapping run that
+	 * re-ingested the same page cannot cross-record commits into this cut.
+	 * Paths without a snapshot fall back to manifest.paths, preserving
+	 * unchanged-page reuse for drivers that only snapshot changed pages.
+	 */
+	pages?: FinalizePageSnapshot[];
 	surface: string;
 	isSubstrateOrOperator: boolean;
 }
@@ -115,10 +136,19 @@ export async function finalize(input: FinalizeInput, deps: FinalizeDeps): Promis
 			const listed = await listAllDocuments(deps.client, datasetId);
 			const runById = new Map(listed.map((doc) => [doc.id, doc.run]));
 			// The cut needs every present page parsed: any document still
-			// queued, failed, or missing blocks the version (D25-20).
-			const paths = input.pathsPresent.filter((path) => manifest.paths[path] !== undefined);
+			// queued, failed, or missing blocks the version (D25-20). Ids come
+			// from the run's own snapshot when present, so an overlapping run
+			// that re-ingested the same page cannot cross-record commits.
+			const snapshots: Record<string, FinalizePageSnapshot> = Object.fromEntries(
+				(input.pages ?? []).map((page) => [page.path, page]),
+			);
+			const idsFor = (path: string): string[] =>
+				snapshots[path]?.documentIds ?? manifest.paths[path]!.documentIds;
+			const paths = input.pathsPresent.filter(
+				(path) => snapshots[path] !== undefined || manifest.paths[path] !== undefined,
+			);
 			for (const path of paths) {
-				for (const id of manifest.paths[path]!.documentIds) {
+				for (const id of idsFor(path)) {
 					const run = runById.get(id);
 					if (run !== "DONE") {
 						throw new FinalizeHalt(
@@ -127,7 +157,7 @@ export async function finalize(input: FinalizeInput, deps: FinalizeDeps): Promis
 					}
 				}
 			}
-			const documentIds = [...new Set(paths.flatMap((path) => manifest.paths[path]!.documentIds))];
+			const documentIds = [...new Set(paths.flatMap((path) => idsFor(path)))];
 			const versions = [
 				...manifest.versions,
 				{
@@ -140,7 +170,30 @@ export async function finalize(input: FinalizeInput, deps: FinalizeDeps): Promis
 			const live = new Set(versions.flatMap((version) => version.documentIds));
 			const stale = listed.map((doc) => doc.id).filter((id) => !live.has(id));
 			if (stale.length > 0) await deps.client.deleteDocuments(datasetId, stale);
-			const next: DocsManifest = { ...manifest, current: input.commit, versions };
+			// This run's own snapshot wins for paths it covers: the just-cut
+			// version resolves through `manifest.paths`, so the entry must hold
+			// this run's documents — not an overlapping run's newer entry, which
+			// would cross-record commits into the cut.
+			const nextPaths = { ...manifest.paths };
+			for (const path of paths) {
+				const snapshot = snapshots[path];
+				if (snapshot === undefined) continue;
+				const prev = nextPaths[path];
+				nextPaths[path] = {
+					hash: snapshot.hash,
+					documentIds: [...snapshot.documentIds],
+					meta: prev?.meta ?? [],
+					updatedCommit: input.commit,
+				};
+			}
+			// Drop path entries no live version references: their documents are
+			// gone, so an unchanged re-ingest must upload fresh documents rather
+			// than reuse deleted ids (which would fail the cut above forever).
+			const livePaths = new Set(versions.flatMap((version) => version.paths));
+			for (const path of Object.keys(nextPaths)) {
+				if (!livePaths.has(path)) delete nextPaths[path];
+			}
+			const next: DocsManifest = { ...manifest, current: input.commit, versions, paths: nextPaths };
 			await saveManifest(input.dataset, next, { stateDir: deps.stateDir, env: deps.env });
 			return {
 				status: "version-cut",

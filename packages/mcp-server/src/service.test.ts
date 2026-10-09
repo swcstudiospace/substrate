@@ -3630,6 +3630,23 @@ describe("docsSearch (Substrate door)", () => {
 		expect(JSON.stringify(emitted[0])).not.toContain(query);
 	});
 
+	test("an invalid request answers without any RAGFlow call", async () => {
+		const { substrate, fake, emitted } = await docsWorld();
+
+		const empty = await substrate.docsSearch({ query: "" }, { surface: "claude-code" });
+		expect(empty.results).toEqual([]);
+		expect(empty.reason).toBe("invalid-request");
+		expect(fake.totalCalls()).toBe(0);
+
+		const unknown = await substrate.docsSearch({ query: "how?", datasets: ["nope"] }, { surface: "claude-code" });
+		expect(unknown.results).toEqual([]);
+		expect(unknown.reason).toBe("unknown-dataset");
+		expect(fake.totalCalls()).toBe(0);
+
+		expect(emitted).toHaveLength(2);
+		expect(emitted.every((event) => event.kind === "warning")).toBe(true);
+	});
+
 	test("an anonymous search short-circuits with no RAGFlow call and no event", async () => {
 		const { substrate, fake, emitted } = await docsWorld();
 		fake.hits = [docsHit()];

@@ -237,6 +237,27 @@ describe("stripImages", () => {
 		expect(withoutDef.imagesStripped).toBe(0);
 		expect(withoutDef.text).toContain("![Pic]");
 	});
+
+	test("balanced parens in the destination strip as one image", () => {
+		const { text, imagesStripped } = stripImages("See ![plot](images/plot_(wide).png) now.");
+		expect(imagesStripped).toBe(1);
+		expect(text).toBe("See [image: plot] now.");
+	});
+
+	test("nested brackets in the alt text strip as one image", () => {
+		const { text, imagesStripped } = stripImages("See ![outer [inner]](plot.png) now.");
+		expect(imagesStripped).toBe(1);
+		expect(text).toBe("See [image: outer [inner]] now.");
+	});
+
+	test("many shortcut references resolve against one definition set", () => {
+		const refs = Array.from({ length: 20 }, (_, i) => `See ![Pic${i}] here.`).join("\n");
+		const defs = Array.from({ length: 20 }, (_, i) => `[Pic${i}]: https://example.com/p${i}.png`).join("\n");
+		const { text, imagesStripped } = stripImages(`${refs}\n\n${defs}\n`);
+		expect(imagesStripped).toBe(20);
+		expect(text).not.toContain("![Pic");
+		expect(text).not.toContain("[Pic0]:");
+	});
 });
 
 describe("splitSections", () => {
@@ -288,6 +309,14 @@ describe("hashPage", () => {
 		expect(hashPage("final text", "docs/a.md")).toBe(a);
 		expect(hashPage("other text", "docs/a.md")).not.toBe(a);
 		expect(hashPage("final text", "docs/b.md")).not.toBe(a);
+	});
+
+	test("title-only edits hash differently", () => {
+		const a = hashPage("final text", "docs/a.md", "Guide");
+		expect(a).toMatch(/^[0-9a-f]{64}$/);
+		expect(hashPage("final text", "docs/a.md", "Guide")).toBe(a);
+		expect(hashPage("final text", "docs/a.md", "Other")).not.toBe(a);
+		expect(hashPage("final text", "docs/a.md")).not.toBe(a);
 	});
 });
 
@@ -421,6 +450,45 @@ describe("pipeline refusals never reach RAGFlow", () => {
 		expect(result.status).toBe("refused");
 		if (result.status !== "refused") throw new Error("unreachable");
 		expect(result.reason).toBe("secret");
+		await expectPristine();
+	});
+
+	test("an explicit title carrying a secret refuses without a call", async () => {
+		const result = await ingestPage(input({ title: SECRET }), {
+			registry: REGISTRY,
+			client: fake,
+			stateDir,
+		});
+		expect(result.status).toBe("refused");
+		if (result.status !== "refused") throw new Error("unreachable");
+		expect(result.reason).toBe("secret");
+		expect(result.findings).toEqual([{ line: 1, rule: "github" }]);
+		expect(JSON.stringify(result)).not.toContain(SECRET);
+		expect(JSON.stringify(result)).not.toContain("c".repeat(36));
+		await expectPristine();
+	});
+
+	test("source URLs with credentials, query, or fragment refuse", async () => {
+		const base = url(COMMIT_A, "docs/guide.md");
+		const bad = [`${base}?token=abc`, `${base}#section`, base.replace("https://", "https://user:pass@")];
+		for (const sourceUrl of bad) {
+			const result = await ingestPage(input({ sourceUrl }), {
+				registry: REGISTRY,
+				client: fake,
+				stateDir,
+			});
+			expect(result).toEqual({ status: "refused", reason: "outside-roots" });
+		}
+		await expectPristine();
+	});
+
+	test("an H1-derived title over the cap refuses", async () => {
+		const result = await ingestPage(input({ content: `# ${"t".repeat(201)}\n\nBody.\n` }), {
+			registry: REGISTRY,
+			client: fake,
+			stateDir,
+		});
+		expect(result).toEqual({ status: "refused", reason: "too-large" });
 		await expectPristine();
 	});
 });
@@ -577,6 +645,86 @@ describe("pipeline success", () => {
 		fake.failUploadsWith = new RagflowError("ragflow error 109: bad");
 		const errored = await ingestPage(input(), { registry: REGISTRY, client: fake, stateDir });
 		expect(errored.status).toBe("failed");
+	});
+
+	test("a quiet title redaction applies in place and counts", async () => {
+		const value = "hunter2x9qwert";
+		const result = await ingestPage(input({ title: `password: ${value}`, content: "# Guide\n\nHello.\n" }), {
+			registry: REGISTRY,
+			client: fake,
+			stateDir,
+		});
+		expect(result.status).toBe("uploaded");
+		if (result.status !== "uploaded") throw new Error("unreachable");
+		expect(result.redactions).toBe(1);
+		expect(result.title).toBe("password: [REDACTED]");
+		const docs = await fake.listDocuments("ds-test");
+		expect(docs[0]!.metaFields.title).toBe("password: [REDACTED]");
+		expect(JSON.stringify(docs)).not.toContain(value);
+	});
+
+	test("stored source URLs are canonical", async () => {
+		const mixed = `https://GitHub.com/ExampleOrg/test-docs/blob/${COMMIT_A}/docs/guide.md`;
+		const result = await ingestPage(input({ sourceUrl: mixed, content: "# Guide\n\nHello.\n" }), {
+			registry: REGISTRY,
+			client: fake,
+			stateDir,
+		});
+		expect(result.status).toBe("uploaded");
+		if (result.status !== "uploaded") throw new Error("unreachable");
+		const docs = await fake.listDocuments("ds-test");
+		expect(docs[0]!.metaFields.source_url).toBe(url(COMMIT_A, "docs/guide.md"));
+	});
+
+	test("an H1-derived title at exactly the cap uploads", async () => {
+		const result = await ingestPage(input({ content: `# ${"t".repeat(200)}\n\nBody.\n` }), {
+			registry: REGISTRY,
+			client: fake,
+			stateDir,
+		});
+		expect(result.status).toBe("uploaded");
+		if (result.status !== "uploaded") throw new Error("unreachable");
+		expect([...result.title].length).toBe(200);
+	});
+
+	test("a title-only edit re-uploads; the same title short-circuits", async () => {
+		const first = await ingestPage(input(), { registry: REGISTRY, client: fake, stateDir });
+		expect(first.status).toBe("uploaded");
+		const renamed = await ingestPage(input({ title: "New Title" }), {
+			registry: REGISTRY,
+			client: fake,
+			stateDir,
+		});
+		expect(renamed.status).toBe("uploaded");
+		if (renamed.status !== "uploaded") throw new Error("unreachable");
+		expect(renamed.title).toBe("New Title");
+		const same = await ingestPage(input({ title: "New Title" }), {
+			registry: REGISTRY,
+			client: fake,
+			stateDir,
+		});
+		expect(same.status).toBe("unchanged");
+		if (same.status !== "unchanged") throw new Error("unreachable");
+		expect(same.documentIds).toEqual(renamed.documentIds);
+	});
+
+	test("failed and missing prior parses re-upload instead of short-circuiting", async () => {
+		const first = await ingestPage(input(), { registry: REGISTRY, client: fake, stateDir });
+		expect(first.status).toBe("uploaded");
+		if (first.status !== "uploaded") throw new Error("unreachable");
+		const stored = fake.datasets.get("ds-test")!;
+		for (const id of first.documentIds) stored.docs.get(id)!.run = "FAIL";
+		const retried = await ingestPage(input(), { registry: REGISTRY, client: fake, stateDir });
+		expect(retried.status).toBe("uploaded");
+		if (retried.status !== "uploaded") throw new Error("unreachable");
+		expect(retried.documentIds).not.toEqual(first.documentIds);
+		expect(fake.calls.uploadDocuments).toBe(2);
+		expect(fake.calls.parseDocuments).toBe(2);
+		// Documents deleted out of band re-upload too.
+		for (const id of retried.documentIds) stored.docs.delete(id);
+		const replaced = await ingestPage(input(), { registry: REGISTRY, client: fake, stateDir });
+		expect(replaced.status).toBe("uploaded");
+		expect(fake.calls.uploadDocuments).toBe(3);
 	});
 
 	test("the real client satisfies the DocsRagflow seam", () => {

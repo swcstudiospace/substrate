@@ -338,6 +338,20 @@ describe("runSearch mapping (D25-02/D25-04)", () => {
 			commit: COMMIT,
 		});
 	});
+	test("the document fallback lists once per dataset, not once per hit", async () => {
+		const state = fakeState({
+			hits: [
+				hit({ chunkId: "c1", documentId: "doc-1", datasetId: "ds-guide" }),
+				hit({ chunkId: "c2", documentId: "doc-1", datasetId: "ds-guide" }),
+				hit({ chunkId: "c3", documentId: "doc-9", datasetId: "ds-api" }),
+			],
+			docs: [doc(), doc({ id: "doc-9" })],
+		});
+		const reply = await runSearch({ query: "q" }, depsFor(state));
+		expect(state.listCalls).toEqual(["ds-guide", "ds-api"]);
+		expect(reply.results).toHaveLength(3);
+		expect("reason" in reply).toBe(false);
+	});
 
 	test("a failing document fallback drops the chunk instead of failing", async () => {
 		const state = fakeState({ hits: [hit()], docFailure: new RagflowError("ragflow error 101: gone") });

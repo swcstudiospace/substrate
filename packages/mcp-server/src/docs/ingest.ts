@@ -107,6 +107,64 @@ function altOf(tag: string): string {
 }
 
 /**
+ * Scan for markdown inline images `![alt](dest)` with balanced brackets in
+ * the alt text and balanced parens in the destination, so alts like
+ * `outer [inner]` and destinations like `images/plot_(wide).png` strip as
+ * one image. A newline before the brackets or parens close is not an image.
+ */
+function stripInlineImages(text: string): { text: string; imagesStripped: number } {
+	let out = "";
+	let stripped = 0;
+	let cursor = 0;
+	while (cursor < text.length) {
+		const start = text.indexOf("![", cursor);
+		if (start === -1) break;
+		let depth = 1;
+		let j = start + 2;
+		while (j < text.length && depth > 0) {
+			const ch = text[j]!;
+			if (ch === "\n") break;
+			if (ch === "\\") {
+				j += 2;
+				continue;
+			}
+			if (ch === "[") depth += 1;
+			else if (ch === "]") depth -= 1;
+			j += 1;
+		}
+		if (depth !== 0 || text[j] !== "(") {
+			const resume = depth !== 0 ? start + 2 : j;
+			out += text.slice(cursor, resume);
+			cursor = resume;
+			continue;
+		}
+		const alt = text.slice(start + 2, j - 1);
+		let parens = 1;
+		let k = j + 1;
+		while (k < text.length && parens > 0) {
+			const ch = text[k]!;
+			if (ch === "\n") break;
+			if (ch === "\\") {
+				k += 2;
+				continue;
+			}
+			if (ch === "(") parens += 1;
+			else if (ch === ")") parens -= 1;
+			k += 1;
+		}
+		if (parens !== 0) {
+			out += text.slice(cursor, j + 1);
+			cursor = j + 1;
+			continue;
+		}
+		stripped += 1;
+		out += text.slice(cursor, start) + placeholderFor(alt);
+		cursor = k;
+	}
+	return { text: out + text.slice(cursor), imagesStripped: stripped };
+}
+
+/**
  * Remove every image — markdown inline/reference, `<img>`,
  * `<picture>`/`<source>`, `data:` URIs — replacing each with
  * `[image: <alt>]` or nothing. Links are kept. Returns the stripped text and
@@ -125,15 +183,22 @@ export function stripImages(text: string): { text: string; imagesStripped: numbe
 		count += 1;
 		return tag.toLowerCase().startsWith("<img") ? placeholderFor(altOf(tag)) : "";
 	});
-	// Markdown inline images, including `data:` URIs: `![alt](dest)`.
-	out = out.replace(/!\[([^\]\n]*)\]\([^()\n]*\)/g, (_match, alt: string) => {
-		count += 1;
-		return placeholderFor(alt);
-	});
+	// Markdown inline images, including `data:` URIs: `![alt](dest)`. The
+	// alt brackets and destination parens balance, so nested brackets and
+	// parens in either strip as one image.
+	const inline = stripInlineImages(out);
+	out = inline.text;
+	count += inline.imagesStripped;
 	// Reference images drain their definitions below; a label shared with a
 	// plain link keeps its definition (links are kept).
 	const imageLabels = new Set<string>();
 	const linkLabels = new Set<string>();
+	// Every reference definition, collected once: each shortcut/full usage
+	// below is a set lookup instead of a whole-document scan per reference.
+	const definitions = new Set<string>();
+	for (const match of out.matchAll(/^ {0,3}\[([^\]]+)\]:/gim)) {
+		definitions.add(match[1]!.toLowerCase());
+	}
 	for (const match of out.matchAll(/!\[([^\]\n]*)\]\[([^\]\n]*)\]/g)) {
 		count += 1;
 		imageLabels.add((match[2] || match[1] || "").toLowerCase());
@@ -147,8 +212,7 @@ export function stripImages(text: string): { text: string; imagesStripped: numbe
 	// Shortcut reference `![alt]` is an image only where a definition exists.
 	out = out.replace(/!\[([^\]\n]+)\](?!\[|\()/g, (match, alt: string) => {
 		const label = alt.toLowerCase();
-		const defined = new RegExp(`^ {0,3}\\[${escapeRegExp(alt)}\\]:`, "mi").test(out);
-		if (!defined) return match;
+		if (!definitions.has(label)) return match;
 		count += 1;
 		imageLabels.add(label);
 		return placeholderFor(alt);
@@ -162,8 +226,7 @@ export function stripImages(text: string): { text: string; imagesStripped: numbe
 		if (/^ {0,3}\[[^\]]+\]:/.test(line)) continue;
 		const text = match[1] ?? "";
 		const label = text.toLowerCase();
-		const defined = new RegExp(`^ {0,3}\\[${escapeRegExp(text)}\\]:`, "mi").test(out);
-		if (defined) linkLabels.add(label);
+		if (definitions.has(label)) linkLabels.add(label);
 	}
 	// Drop definition lines owned solely by stripped images.
 	out = out
@@ -191,15 +254,18 @@ export interface SplitPage {
 // --- Hash (D25-15) ----------------------------------------------------------
 
 /**
- * SHA-256 over the final stripped/redacted text plus the normalised path.
- * The commit is excluded, so an unchanged page at a new commit hashes the
- * same and short-circuits the upload.
+ * SHA-256 over the final stripped/redacted text plus the normalised path and
+ * the final checked title. The commit is excluded, so an unchanged page at a
+ * new commit hashes the same and short-circuits the upload; the title is
+ * included, so a title-only edit re-uploads instead of short-circuiting.
  */
-export function hashPage(finalText: string, normalisedPath: string): string {
+export function hashPage(finalText: string, normalisedPath: string, title = ""): string {
 	return createHash("sha256")
 		.update(finalText, "utf8")
 		.update("\0path:", "utf8")
 		.update(normalisedPath, "utf8")
+		.update("\0title:", "utf8")
+		.update(title, "utf8")
 		.digest("hex");
 }
 
@@ -338,6 +404,8 @@ function hasBadEncoding(content: string): boolean {
 interface CheckedPage {
 	path: string;
 	title: string;
+	/** Canonical blob URL rebuilt from the checked parts (D25-08). */
+	sourceUrl: string;
 }
 
 function checkShape(input: IngestPageInput, entry: DatasetEntry): CheckedPage | IngestRefusalReason {
@@ -350,6 +418,10 @@ function checkShape(input: IngestPageInput, entry: DatasetEntry): CheckedPage | 
 		return "outside-roots";
 	}
 	if (url.protocol !== "https:" || url.hostname.toLowerCase() !== "github.com") return "outside-roots";
+	// Only canonical blob URLs reach the pipeline: credentials, query
+	// strings, and fragments are refused, and the stored URL below is
+	// rebuilt from the checked parts so nothing carried survives.
+	if (url.username || url.password || url.search || url.hash) return "outside-roots";
 	if (/%2f|%5c/i.test(url.pathname)) return "outside-roots";
 	const segments = url.pathname.split("/");
 	if (segments.length < 6 || !segments[1] || !segments[2] || segments[3] !== "blob") {
@@ -366,7 +438,11 @@ function checkShape(input: IngestPageInput, entry: DatasetEntry): CheckedPage | 
 	if (!TEXT_EXTENSIONS.has(extensionOf(normalised.path))) return "not-text";
 	if (hasBadEncoding(input.content)) return "not-text";
 	if (input.title !== undefined && [...input.title].length > MAX_TITLE_CHARS) return "too-large";
-	return { path: normalised.path, title: input.title?.trim() || "" };
+	return {
+		path: normalised.path,
+		title: input.title?.trim() || "",
+		sourceUrl: `https://github.com/${entry.slug}/blob/${input.commit}/${normalised.path}`,
+	};
 }
 
 function failedFrom(error: unknown): IngestResult {
@@ -398,6 +474,48 @@ export async function resolveIngestDatasetId(
 }
 
 // --- Step 5: the pipeline -----------------------------------------------------
+
+/** Parse-run states that never recover without a fresh upload (D25-15). */
+const FAILED_RUNS: Record<string, true> = {
+	FAIL: true,
+	CANCEL: true,
+	// Numeric forms of the same states (see the ragflow RESEARCH note).
+	"2": true,
+	"4": true,
+};
+
+/**
+ * Ids of a prior upload that must be replaced before the unchanged
+ * fast-path may fire, or null when the prior upload is intact. A document
+ * is stale when RAGFlow no longer lists it or its parse run failed or was
+ * cancelled; in-flight runs (UNSTART/RUNNING) still short-circuit.
+ */
+async function staleDocumentIds(
+	client: DocsRagflow,
+	datasetId: string,
+	documentIds: string[],
+): Promise<string[] | null> {
+	const wanted = new Set(documentIds);
+	const seen = new Set<string>();
+	const stale: string[] = [];
+	let page = 1;
+	for (;;) {
+		const rows = await client.listDocuments(datasetId, page, 100);
+		if (rows.length === 0) break;
+		for (const row of rows) {
+			if (!wanted.has(row.id)) continue;
+			seen.add(row.id);
+			if (FAILED_RUNS[row.run]) stale.push(row.id);
+		}
+		if (rows.length < 100 || seen.size === wanted.size) break;
+		page += 1;
+	}
+	// Only listed documents are deleted; ids RAGFlow no longer knows need
+	// no delete — the fresh upload below replaces them.
+	const missing = [...wanted].some((id) => !seen.has(id));
+	if (stale.length === 0 && !missing) return null;
+	return stale;
+}
 
 function sectionMeta(
 	section: PageSection,
@@ -439,15 +557,36 @@ export async function ingestPage(input: IngestPageInput, deps: IngestDeps): Prom
 		}));
 		return { status: "refused", reason: "secret", findings };
 	}
-	const contentSha256 = hashPage(redacted.text, checked.path);
+	// Explicit titles bypass content redaction, so the title gets its own
+	// publication/redaction check before it reaches section text or
+	// meta_fields: findings refuse, quiet redactions apply in place.
+	let finalTitle = checked.title;
+	let titleRedactions = 0;
+	if (finalTitle) {
+		const titleRedacted = redactSkillContent(finalTitle);
+		if (titleRedacted.findings.length > 0) {
+			// Findings name line + rule only — never a value (T-25-04).
+			const findings: SkillRedactionHit[] = titleRedacted.findings.map((hit) => ({
+				line: hit.line,
+				rule: hit.rule,
+			}));
+			return { status: "refused", reason: "secret", findings };
+		}
+		finalTitle = titleRedacted.text.trim();
+		titleRedactions = titleRedacted.redactions.length;
+	}
+	const contentSha256 = hashPage(redacted.text, checked.path, finalTitle);
 	const split = splitSections({
 		text: redacted.text,
 		path: checked.path,
-		sourceUrl: input.sourceUrl,
+		sourceUrl: checked.sourceUrl,
 		commit: input.commit,
-		title: checked.title || undefined,
+		title: finalTitle || undefined,
 		contentSha256,
 	});
+	// The shape cap covers only explicit titles; H1-derived and file-name
+	// titles are capped here instead.
+	if ([...split.title].length > MAX_TITLE_CHARS) return { status: "refused", reason: "too-large" };
 	if (split.sections.length > MAX_SECTIONS) return { status: "refused", reason: "too-large" };
 	const base: IngestOk = {
 		dataset: input.dataset,
@@ -457,7 +596,7 @@ export async function ingestPage(input: IngestPageInput, deps: IngestDeps): Prom
 		title: split.title,
 		contentSha256,
 		sections: split.sections.length,
-		redactions: redacted.redactions.length,
+		redactions: redacted.redactions.length + titleRedactions,
 		imagesStripped: stripped.imagesStripped,
 	};
 	const sections = split.sections;
@@ -476,7 +615,15 @@ export async function ingestPage(input: IngestPageInput, deps: IngestDeps): Prom
 			});
 			const existing = manifest.paths[checked.path];
 			if (existing && existing.hash === contentSha256) {
-				return { ...base, datasetId, status: "unchanged", documentIds: [...existing.documentIds] };
+				// A manifest entry is saved right after the parse is queued,
+				// so a FAIL/CANCEL run (or a document deleted out of band)
+				// would short-circuit forever. Replace stale documents and
+				// fall through to a fresh upload instead.
+				const stale = await staleDocumentIds(deps.client, datasetId, existing.documentIds);
+				if (stale === null) {
+					return { ...base, datasetId, status: "unchanged", documentIds: [...existing.documentIds] };
+				}
+				if (stale.length > 0) await deps.client.deleteDocuments(datasetId, stale);
 			}
 			const uploaded = await deps.client.uploadDocuments(
 				datasetId,

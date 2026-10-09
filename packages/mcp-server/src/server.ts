@@ -769,7 +769,21 @@ export function createHttpServer(
 			// `unauthenticated` by the service with no RAGFlow call (D25-06).
 			if (req.method === "POST" && url.pathname === "/docs/search") {
 				const raw = await readBody(req);
-				const parsed: unknown = raw ? JSON.parse(raw) : {};
+				let parsed: unknown;
+				try {
+					parsed = raw ? JSON.parse(raw) : {};
+				} catch {
+					// Malformed JSON rides the same 200 invalid-request path as
+					// any other bad shape — with the search event — instead of
+					// the shared 400 that carries no results, no reason, and no
+					// record of the search.
+					const empty: Record<string, unknown> = {};
+					rememberClaim(claim, empty);
+					// Audited under the tool's own name, fail-open like the read it is.
+					if (!(await auditedRest(res, observability, surface, "docs_search", empty))) return;
+					sendJson(res, 200, await substrate.docsSearch(undefined, { surface, session_id: undefined }));
+					return;
+				}
 				const body =
 					parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
 						? (parsed as Record<string, unknown>)

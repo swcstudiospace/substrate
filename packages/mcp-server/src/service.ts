@@ -1347,15 +1347,17 @@ export class Substrate {
 	 * manifests for every registry dataset and resolve document ids against
 	 * the manifest of the hit's own dataset. Never throws — any failure
 	 * yields a lookup that answers undefined and the RAGFlow document
-	 * fallback in `runSearch` covers the hit.
+	 * fallback in `runSearch` covers the hit. The dataset list arrives
+	 * through the caller's shared `listDatasets` so validation, the preload,
+	 * and `runSearch` share one RAGFlow list per search.
 	 */
 	private async docsLookupSource(
 		registry: readonly { name: string }[],
-		client: DocsClient | null,
+		listDatasets: () => Promise<readonly RagflowDatasetSummary[]>,
 		stateDir: string,
 	): Promise<(documentId: string, datasetId: string) => SourceMeta | undefined> {
 		try {
-			const summaries = client ? await client.listDatasets() : [];
+			const summaries = await listDatasets();
 			const idToName: Record<string, string> = {};
 			for (const summary of summaries) idToName[summary.id] = summary.name;
 			const manifests: Record<string, DocsManifest> = {};
@@ -1394,12 +1396,33 @@ export class Substrate {
 		const surface = caller.surface;
 		const registry = this.docsRegistry();
 		const client = this.ragflow;
-		// Anonymous short-circuits inside runSearch with no RAGFlow call
-		// (D25-06): skip the manifest preload's dataset list on that path.
-		const lookupSource = surface === null ? undefined : await this.docsLookupSource(registry, client, this.config.docs.stateDir);
+		// One RAGFlow dataset list per search, shared by validation, the
+		// manifest preload, and runSearch. The promise itself is cached, so
+		// a rejection is shared too and never retried within the search.
+		const listDatasetsBase = this.docsListDatasets(client);
+		let shared: Promise<readonly RagflowDatasetSummary[]> | undefined;
+		const listDatasets = (): Promise<readonly RagflowDatasetSummary[]> => (shared ??= listDatasetsBase());
+		let lookupSource: ((documentId: string, datasetId: string) => SourceMeta | undefined) | undefined;
+		let datasetIds: string[] = [];
+		if (surface !== null) {
+			// Validate before the manifest preload: an invalid request (empty
+			// query, unknown dataset) answers without any RAGFlow call instead
+			// of waiting out the preload's listDatasets timeout first.
+			let valid = false;
+			try {
+				const pre = await validateSearchInput(input, { registry, listDatasets });
+				if (pre.ok) {
+					valid = true;
+					datasetIds = pre.datasetIds;
+				}
+			} catch {
+				valid = false;
+			}
+			if (valid) lookupSource = await this.docsLookupSource(registry, listDatasets, this.config.docs.stateDir);
+		}
 		const reply = await runSearch(input, {
 			registry,
-			listDatasets: this.docsListDatasets(client),
+			listDatasets,
 			client,
 			authenticated: surface !== null,
 			lookupSource,
@@ -1410,16 +1433,6 @@ export class Substrate {
 		const where = { session_id: docsSessionId(caller.session_id, "docs-search") };
 		const query = docsQueryIdentity(input);
 		if (reply.reason === undefined) {
-			let datasetIds: string[] = [];
-			try {
-				const validated = await validateSearchInput(input, {
-					registry,
-					listDatasets: this.docsListDatasets(client),
-				});
-				if (validated.ok) datasetIds = validated.datasetIds;
-			} catch {
-				datasetIds = [];
-			}
 			const urls = [...new Set(reply.results.map((result) => result.source_url))];
 			await this.emit({
 				surface,

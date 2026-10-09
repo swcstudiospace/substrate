@@ -102,9 +102,9 @@ acquire_lock() {
 	lockdir="$candidate"
 }
 
-	# Timers (substrate-docs-refresh.timer) are not restart units: they have no
-	# ExecStart entry to check, and a deploy's daemon-reload already picks up
-	# their file changes. Enabling a timer on the host is a live step.
+	# substrate-docs-refresh.service is Type=oneshot (driven by its timer), so
+	# it is restarted with the rest but gated on completion, not activeness,
+	# in units_settled. Enabling a timer on the host is a live step.
 load_units() {
 	local raw="${SUBSTRATE_RELEASE_UNITS:-substrate-mcp.service substrate-collector-grok.service substrate-collector-herdr.service substrate-collector-muse.service substrate-docs-refresh.service}"
 	local unit
@@ -170,13 +170,65 @@ unit_snapshot() {
 	printf '%s %s %s\n' "$active" "$sub" "$restarts"
 }
 
+# The service type of a unit. Empty or unexpected values fail closed.
+unit_type() {
+	local unit="$1" line key value type=""
+	while IFS= read -r line; do
+		[[ "$line" == *=* ]] || continue
+		key="${line%%=*}"
+		value="${line#*=}"
+		if [[ "$key" == "Type" ]]; then
+			type="$value"
+		fi
+	done < <(systemctl show -p Type --no-pager -- "$unit")
+	[[ "$type" =~ ^[A-Za-z-]{1,32}$ ]] || return 1
+	printf '%s\n' "$type"
+}
+
+# The result of a unit's last run. Empty or unexpected values fail closed.
+unit_result() {
+	local unit="$1" line key value result=""
+	while IFS= read -r line; do
+		[[ "$line" == *=* ]] || continue
+		key="${line%%=*}"
+		value="${line#*=}"
+		if [[ "$key" == "Result" ]]; then
+			result="$value"
+		fi
+	done < <(systemctl show -p Result --no-pager -- "$unit")
+	[[ "$result" =~ ^[A-Za-z-]{1,32}$ ]] || return 1
+	printf '%s\n' "$result"
+}
+
+# A timer-driven Type=oneshot tick runs and exits, so it is never active:
+# gating it on activeness would roll back every healthy deploy. Its real
+# completed state is "not failed" with Result=success.
+oneshot_settled() {
+	local unit="$1" result
+	if systemctl is-failed --quiet "$unit"; then
+		printf '%s\n' "deploy-release: ${unit} is failed" >&2
+		return 1
+	fi
+	result=$(unit_result "$unit") || return 1
+	if [[ "$result" != "success" ]]; then
+		printf '%s\n' "deploy-release: ${unit} has not completed (Result=${result})" >&2
+		return 1
+	fi
+}
+
 # Type=simple is active before Bun exits. Wait, then require the same NRestarts
 # and a running substate so a collector crash loop cannot look healthy.
+# Type=oneshot ticks are gated on completion instead (see oneshot_settled).
 units_settled() {
-	local unit snapshot active sub restarts baseline i
-	local -a watched=() bases=()
+	local unit snapshot active sub restarts baseline i type
+	local -a watched=() bases=() oneshots=()
 	[[ "$RESTART" == "1" ]] || return 0
 	for unit in "${units[@]}"; do
+		type=$(unit_type "$unit") || return 1
+		if [[ "$type" == "oneshot" ]]; then
+			oneshots+=("$unit")
+			continue
+		fi
 		snapshot=$(unit_snapshot "$unit") || return 1
 		read -r active sub restarts <<< "$snapshot"
 		watched+=("$unit")
@@ -196,6 +248,9 @@ units_settled() {
 			printf '%s\n' "deploy-release: ${unit} is restart-looping after ${UNIT_SETTLE}s" >&2
 			return 1
 		fi
+	done
+	for unit in "${oneshots[@]}"; do
+		oneshot_settled "$unit" || return 1
 	done
 }
 

@@ -47,7 +47,8 @@ export const BUILTIN_REGISTRY: readonly DatasetEntry[] = [
 		name: "programming-desk",
 		slug: "swcstudiospace/programming-desk",
 		include: ["docs/**", "skills/**", "contracts/**", "ARCHITECTURE.md", "prompts-assembled/**"],
-		exclude: [],
+		// Receipts are a "Never" for RAGFlow in the data-planes table.
+		exclude: ["docs/receipts/**"],
 		trigger: "merge-to-main",
 	},
 	// Provisional entries (operator open question 3 in 25-CONTEXT.md): the
@@ -56,28 +57,32 @@ export const BUILTIN_REGISTRY: readonly DatasetEntry[] = [
 		name: "kanbanos",
 		slug: "swcstudiospace/kanbanos",
 		include: ["README.md", "docs/**"],
-		exclude: [],
+		// Receipts are a "Never" for RAGFlow in the data-planes table.
+		exclude: ["docs/receipts/**"],
 		trigger: "merge-to-main",
 	},
 	{
 		name: "desklanes",
 		slug: "swcstudiospace/desklanes",
 		include: ["README.md", "docs/**"],
-		exclude: [],
+		// Receipts are a "Never" for RAGFlow in the data-planes table.
+		exclude: ["docs/receipts/**"],
 		trigger: "merge-to-main",
 	},
 	{
 		name: "clippyos",
 		slug: "swcstudiospace/clippyos",
 		include: ["README.md", "docs/**"],
-		exclude: [],
+		// Receipts are a "Never" for RAGFlow in the data-planes table.
+		exclude: ["docs/receipts/**"],
 		trigger: "merge-to-main",
 	},
 	{
 		name: "auctioning",
 		slug: "swcstudiospace/auctioning",
 		include: ["README.md", "docs/**"],
-		exclude: [],
+		// Receipts are a "Never" for RAGFlow in the data-planes table.
+		exclude: ["docs/receipts/**"],
 		trigger: "merge-to-main",
 	},
 ];

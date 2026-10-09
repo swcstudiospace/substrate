@@ -175,7 +175,19 @@ export class RagflowClient {
 	}
 
 	private async readBody(response: Response): Promise<unknown> {
-		const text = await response.text();
+		let text: string;
+		try {
+			text = await response.text();
+		} catch (cause) {
+			// A body that stalls past the budget aborts with TimeoutError (or
+			// AbortError) while reading — the same budget the transport maps
+			// above. Without this, a stalled body surfaces a plain Error and
+			// classifies as ragflow-error instead of ragflow-timeout.
+			if (cause instanceof DOMException && (cause.name === "AbortError" || cause.name === "TimeoutError")) {
+				throw new RagflowError(`ragflow timeout after ${this.timeoutMs}ms`);
+			}
+			throw new RagflowError(`ragflow unreachable: ${this.sanitized(String(cause))}`);
+		}
 		if (!response.ok) throw new RagflowError(`ragflow ${response.status}: ${this.sanitized(text)}`);
 		let body: unknown;
 		try {

@@ -108,6 +108,18 @@ describe("failure mapping without network", () => {
 		const message = await fails(client.listDatasets());
 		expect(message).toContain("timeout after 20ms");
 	});
+	test("a stalled body maps to a timeout, not a generic error", async () => {
+		const client = new RagflowClient(config({ timeoutMs: 50 }), async () => {
+			const response = json({ code: 0, data: [] });
+			Object.defineProperty(response, "text", {
+				value: () => Promise.reject(new DOMException("timed out", "TimeoutError")),
+			});
+			return response;
+		});
+		const message = await fails(client.listDatasets());
+		expect(message).toContain("timeout after 50ms");
+	});
+
 
 	test("a non-zero code redacts and cuts the message", async () => {
 		const long = `${PLANTED} ${"padding ".repeat(60)}`;
