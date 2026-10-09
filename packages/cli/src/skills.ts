@@ -154,6 +154,11 @@ async function propose(args: Args, deps: SkillsDeps): Promise<number> {
 	}
 	const unknown = Object.keys(args).find((key) => !KNOWN_FLAGS.has(key));
 	if (unknown !== undefined) return refused(`unknown flag --${unknown}`);
+	// A flag that takes a value with none given parses as `true`; `str` and `list` would
+	// silently drop it, posting a live proposal without the removals or identifiers the
+	// user asked for. Refuse before the directory is read or anything is posted.
+	const missing = ["dir", "name", "rationale", "remove", "session", "graph"].find((key) => args[key] === true);
+	if (missing !== undefined) return refused(`--${missing} takes a value`);
 	const dirArg = str(args.dir);
 	if (!dirArg) return refused("--dir PATH is required");
 	if (!deps.token) {

@@ -12,6 +12,7 @@ import { join, relative } from "node:path";
 import type { Surface } from "../types.ts";
 import { parseFrontmatter } from "./frontmatter.ts";
 import {
+	acquireLock,
 	addArgv,
 	branchName,
 	checkoutArgv,
@@ -28,6 +29,7 @@ import {
 	LIBRARY_REPO,
 	LIBRARY_URL,
 	MIRROR,
+	mirrorOriginUrl,
 	missingMirrorMessage,
 	nameStatusArgv,
 	originUrlArgv,
@@ -199,6 +201,9 @@ describe("parseFrontmatter", () => {
 	});
 });
 
+/** An embedded NUL, spelled without an escape so the source never holds a control byte. */
+const NUL = String.fromCharCode(0);
+
 describe("validateProposal refusals (before any Runner call)", () => {
 	const cases: Array<[string, Partial<ProposeInput>]> = [
 		["name Bad_Name", { name: "Bad_Name", files: { "SKILL.md": skillMd("Bad_Name") } }],
@@ -216,7 +221,10 @@ describe("validateProposal refusals (before any Runner call)", () => {
 		["path refs/.hidden", { files: { "SKILL.md": skillMd(), "refs/.hidden": "x" } }],
 		["path __pycache__/c.pyc", { files: { "SKILL.md": skillMd(), "__pycache__/c.pyc": "x" } }],
 		["path x.pyc", { files: { "SKILL.md": skillMd(), "x.pyc": "x" } }],
-		["NUL in a file", { files: { "SKILL.md": skillMd(), "scripts/a.sh": "a\u0000b" } }],
+		["NUL in a file", { files: { "SKILL.md": skillMd(), "scripts/a.sh": `a${NUL}b` } }],
+		["NUL in rationale", { rationale: `why${NUL}now` }],
+		["NUL in session_id", { session_id: `sess${NUL}x` }],
+		["NUL in graph_id", { graph_id: `g${NUL}x` }],
 		["remove SKILL.md", { remove: ["SKILL.md"] }],
 		["remove ../x", { remove: ["../x"] }],
 		["a path in both files and remove", { files: { "SKILL.md": skillMd(), "references/a.md": "x" }, remove: ["references/a.md"] }],
@@ -230,6 +238,24 @@ describe("validateProposal refusals (before any Runner call)", () => {
 			expect(ledgerLines()).toEqual([]);
 		});
 	}
+
+	test("refuses a non-string session or graph id, and never echoes the NUL text", async () => {
+		for (const overrides of [
+			{ session_id: 42 as unknown as string },
+			{ graph_id: ["g"] as unknown as string },
+		]) {
+			const f = fake();
+			const error = await proposeSkill(input(overrides), options(f.run)).catch((e: unknown) => e);
+			expect(error).toBeInstanceOf(ProposeRefused);
+			expect((error as Error).message).toContain("must be a string");
+			expect(f.calls).toEqual([]);
+		}
+		const f = fake();
+		const nul = await proposeSkill(input({ rationale: `why${NUL}now` }), options(f.run)).catch((e: unknown) => e);
+		expect(nul).toBeInstanceOf(ProposeRefused);
+		expect((nul as Error).message).toBe("rationale contains NUL");
+		expect(f.calls).toEqual([]);
+	});
 
 	test("refuses a total over maxBytes and names the limit", async () => {
 		const f = fake();
@@ -405,6 +431,24 @@ describe("writeTree", () => {
 		expect(() => writeTree(clone, NAME, { "references/x.md": "pwn" }, [], "overlay")).toThrow(/symlink/);
 		expect(readFileSync(join(clone, "other", "SKILL.md"), "utf8")).toBe("other");
 		expect(existsSync(join(clone, "other", "x.md"))).toBe(false);
+	});
+
+	test("a file where the tree has a directory is refused, naming the path", () => {
+		const clone = seeded();
+		expect(() => writeTree(clone, NAME, { "SKILL.md": "new", references: "x" }, [], "overlay")).toThrow(/"references" clashes/);
+		expect(readFileSync(join(clone, NAME, "references", "x.md"), "utf8")).toBe("x");
+	});
+
+	test("a file under an existing file is refused, naming the parent", () => {
+		const clone = seeded();
+		expect(() => writeTree(clone, NAME, { "SKILL.md/a.md": "x" }, [], "overlay")).toThrow(/"SKILL\.md" exists and is not a directory/);
+		expect(readFileSync(join(clone, NAME, "SKILL.md"), "utf8")).toBe("old");
+	});
+
+	test("a removal that clears the clash still applies", () => {
+		const clone = seeded();
+		writeTree(clone, NAME, { "SKILL.md": "new", references: "x" }, ["references"], "overlay");
+		expect(readFileSync(join(clone, NAME, "references"), "utf8")).toBe("x");
 	});
 });
 
@@ -899,5 +943,72 @@ describe("createSkillProposer", () => {
 		const result = await proposer.propose(input(), { maxBytes: ROUTE_MAX_BYTES, mode: "overlay" });
 		expect(result).toMatchObject({ status: "opened", pr_url: REHEARSAL_PR_URL, pr_number: 9 });
 		expect(f.steps()).toContain("gh pr create");
+	});
+});
+
+describe("mirror origin", () => {
+	function configMirror(url: string | null): void {
+		if (url === null) return;
+		writeFileSync(
+			join(state, "mirror.git", "config"),
+			`[core]\n\trepositoryformatversion = 0\n[remote "origin"]\n\turl = ${url}\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n`,
+		);
+	}
+
+	test("mirrorOriginUrl reads the origin url among other sections", () => {
+		configMirror("https://github.com/swcstudiospace/agent-skills.git");
+		expect(mirrorOriginUrl(join(state, "mirror.git"))).toBe("https://github.com/swcstudiospace/agent-skills.git");
+	});
+
+	test("mirrorOriginUrl is null without a config or an origin", () => {
+		expect(mirrorOriginUrl(join(state, "mirror.git"))).toBeNull();
+		writeFileSync(join(state, "mirror.git", "config"), '[core]\n\trepositoryformatversion = 0\n');
+		expect(mirrorOriginUrl(join(state, "mirror.git"))).toBeNull();
+	});
+
+	test("a mirror naming the configured library proceeds", async () => {
+		configMirror(LIBRARY_URL);
+		const result = await proposeSkill(input(), options(fake().run));
+		expect(result.status).toBe("opened");
+	});
+
+	test("a mirror pointing at another library is refused before any Runner call", async () => {
+		configMirror("https://github.com/other/library.git");
+		const f = fake();
+		const error = await proposeSkill(input(), options(f.run)).catch((e: unknown) => e);
+		expect(error).toBeInstanceOf(ProposeFailed);
+		expect((error as Error).message).toContain("points at");
+		expect((error as Error).message).toContain(LIBRARY_REPO);
+		expect(f.calls).toEqual([]);
+		expect(ledgerLines()).toEqual([]);
+	});
+});
+
+describe("lock takeover and release", () => {
+	test("the release removes only the lock its caller still owns", async () => {
+		const path = join(state, "locks", "owned");
+		const release = await acquireLock(path, "proposal", 500);
+		// Another process takes the path meanwhile: the stale release must not delete it.
+		rmSync(path, { recursive: true, force: true });
+		mkdirSync(path, { recursive: true });
+		writeFileSync(join(path, "pid"), "42424242");
+		release();
+		expect(existsSync(path)).toBe(true);
+		expect(readFileSync(join(path, "pid"), "utf8")).toBe("42424242");
+		rmSync(path, { recursive: true, force: true });
+	});
+
+	test("two racers on one stale lock serialize with no stale leftovers", async () => {
+		const path = join(state, "locks", "raced");
+		mkdirSync(path, { recursive: true });
+		writeFileSync(join(path, "pid"), String(DEAD_PID));
+		const first = await acquireLock(path, "proposal", 5_000);
+		// The contender starts while the lock is live; releasing hands it over without a timer.
+		const pending = acquireLock(path, "proposal", 5_000);
+		await Promise.resolve();
+		first();
+		(await pending)();
+		expect(existsSync(path)).toBe(false);
+		expect(readdirSync(join(state, "locks")).filter((entry) => entry.includes(".stale."))).toEqual([]);
 	});
 });

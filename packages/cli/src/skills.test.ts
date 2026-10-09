@@ -237,6 +237,15 @@ describe("what the CLI refuses before posting", () => {
 		expect(err).toContain("unknown flag --dryrun");
 		expect(stub.seen).toEqual([]);
 	});
+
+	test("a value flag with no value is refused before the directory is read or anything is posted", async () => {
+		for (const flag of ["--remove", "--name", "--rationale", "--session", "--graph"]) {
+			const { code, err } = await run(["propose", "--dir", join(scratch, "nope"), flag]);
+			expect(code).toBe(1);
+			expect(err).toContain(`${flag} takes a value`);
+		}
+		expect(stub.seen).toEqual([]);
+	});
 });
 
 describe("how the CLI reports the server's answer", () => {

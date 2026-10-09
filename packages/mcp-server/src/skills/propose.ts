@@ -18,9 +18,12 @@ import {
 	lstatSync,
 	mkdirSync,
 	readFileSync,
+	renameSync,
+	rmdirSync,
 	rmSync,
 	statSync,
 	writeFileSync,
+	type Stats,
 } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { redact, redactSkillContent, type SkillDocExampleRule, type SkillFileHit, scanSkillFiles } from "../redact.ts";
@@ -157,6 +160,16 @@ function pathProblem(path: string): string | null {
 	return null;
 }
 
+/**
+ * Free text that leaves the server in the PR body or the commit, where the file scan
+ * never looks. NUL reaches `gh` argv through `prBody` and `execFile` rejects it only
+ * after the branch is pushed and the push recorded — so refuse it here, before any
+ * git work, without echoing the value.
+ */
+function refuseNulText(label: string, value: string): void {
+	if (value.includes(String.fromCharCode(0))) throw new ProposeRefused(`${label} contains NUL`);
+}
+
 function refusePath(path: string, where: string): void {
 	const problem = pathProblem(path);
 	if (problem) throw new ProposeRefused(`${where} ${JSON.stringify(path.slice(0, 200))}: ${problem}`);
@@ -201,6 +214,7 @@ export function validateProposal(
 	}
 	if (!(SURFACES as readonly string[]).includes(surface)) throw new ProposeRefused(`unknown surface ${JSON.stringify(String(surface).slice(0, 80))}`);
 	if (typeof rationale !== "string") throw new ProposeRefused("rationale must be a string");
+	refuseNulText("rationale", rationale);
 	if (files === null || typeof files !== "object" || Array.isArray(files)) throw new ProposeRefused("files must be an object of relative path to text");
 	if (opts.mode !== "overlay" && opts.mode !== "replace") throw new ProposeRefused("mode must be overlay or replace");
 
@@ -234,8 +248,16 @@ export function validateProposal(
 		if (path === "SKILL.md") throw new ProposeRefused("remove must never name SKILL.md");
 		if (Object.hasOwn(files, path)) throw new ProposeRefused(`${JSON.stringify(path)} is in both files and remove`);
 	}
-	if (input.session_id !== undefined) refuseSecretText("session_id", input.session_id);
-	if (input.graph_id !== undefined) refuseSecretText("graph_id", input.graph_id);
+	if (input.session_id !== undefined) {
+		if (typeof input.session_id !== "string") throw new ProposeRefused("session_id must be a string");
+		refuseSecretText("session_id", input.session_id);
+		refuseNulText("session_id", input.session_id);
+	}
+	if (input.graph_id !== undefined) {
+		if (typeof input.graph_id !== "string") throw new ProposeRefused("graph_id must be a string");
+		refuseSecretText("graph_id", input.graph_id);
+		refuseNulText("graph_id", input.graph_id);
+	}
 
 	const scan = scanSkillFiles(files, opts.allowDocExamples ? { allowDocExamples: opts.allowDocExamples } : {});
 	if (scan.findings.length > 0) {
@@ -315,17 +337,44 @@ function confined(root: string, rel: string): string {
  * Write a proposal into `<cloneDir>/<name>/`. overlay: the named files are (re)written, `remove`
  * paths are deleted, everything else of the skill is kept. replace: the skill dir is emptied
  * first, so it holds exactly the proposed files. Nothing outside `<cloneDir>/<name>/` is touched.
+ *
+ * A file the proposal names can clash with the library's tree: an existing directory where the
+ * file goes, or an existing file where a parent directory goes. Those reach `writeFileSync`
+ * and `mkdirSync` as raw filesystem errors (and a 500 that names nothing), so refuse them here
+ * with the path the caller must change. Checked after the removals, so a removal that clears
+ * the clash still applies.
  */
+function treeClash(root: string, rel: string, target: string): string | null {
+	let current = root;
+	for (const segment of rel.split("/").slice(0, -1)) {
+		current = join(current, segment);
+		let ancestor: Stats | null = null;
+		try {
+			ancestor = lstatSync(current);
+		} catch (cause) {
+			if ((cause as NodeJS.ErrnoException).code !== "ENOENT") return `${JSON.stringify(segment)} cannot be inspected`;
+		}
+		if (ancestor !== null && !ancestor.isDirectory()) return `${JSON.stringify(segment)} exists and is not a directory`;
+	}
+	try {
+		if (lstatSync(target).isDirectory()) return "a directory already exists there";
+	} catch (cause) {
+		if ((cause as NodeJS.ErrnoException).code !== "ENOENT") return "the path cannot be inspected";
+	}
+	return null;
+}
 export function writeTree(cloneDir: string, name: string, files: Record<string, string>, remove: readonly string[], mode: TreeMode): void {
 	if (!SKILL_NAME_RE.test(name)) throw new ProposeFailed(`refusing skill name ${JSON.stringify(name)}`);
 	const root = resolve(cloneDir, name);
-	const targets = Object.entries(files).map(([rel, text]) => [confined(root, rel), text] as const);
+	const targets = Object.entries(files).map(([rel, text]) => ({ rel, target: confined(root, rel), text }));
 	const removals = remove.map((rel) => confined(root, rel));
 	if (symlinkAt(root)) throw new ProposeFailed(`refusing skill dir ${name}: a symlink`);
 	if (mode === "replace") rmSync(root, { recursive: true, force: true });
 	mkdirSync(root, { recursive: true });
 	for (const target of removals) rmSync(target, { recursive: true, force: true });
-	for (const [target, text] of targets) {
+	for (const { rel, target, text } of targets) {
+		const clash = treeClash(root, rel, target);
+		if (clash !== null) throw new ProposeRefused(`file ${JSON.stringify(rel)} clashes with the skill tree: ${clash}`);
 		mkdirSync(dirname(target), { recursive: true });
 		// `existsSync` is false for a dangling link, and `writeFileSync` would follow it.
 		if (symlinkAt(target)) rmSync(target);
@@ -405,6 +454,35 @@ export function originMatches(url: string, slug: string): boolean {
 	if (norm.endsWith(".git")) norm = norm.slice(0, -".git".length);
 	const want = slug.toLowerCase();
 	return norm === want || norm.endsWith(`/${want}`) || norm.endsWith(`:${want}`);
+}
+
+/**
+ * The `url` of the mirror's `origin` remote, read from its git config — null when the
+ * mirror has no origin or its config cannot be read. The mirror is bootstrapped once by
+ * the operator (`git clone --bare`), so a missing origin means hand-built state, not a
+ * second library: only a present-but-foreign URL refuses the proposal.
+ */
+export function mirrorOriginUrl(mirror: string): string | null {
+	let config: string;
+	try {
+		config = readFileSync(join(mirror, "config"), "utf8");
+	} catch {
+		return null;
+	}
+	let inOrigin = false;
+	for (const line of config.split("\n")) {
+		const section = /^\s*\[\s*remote\s+"origin"\s*\]\s*$/i.exec(line);
+		if (section) {
+			inOrigin = true;
+			continue;
+		}
+		if (/^\s*\[/.test(line)) inOrigin = false;
+		else if (inOrigin) {
+			const url = /^\s*url\s*=\s*(\S.*?)\s*$/.exec(line);
+			if (url?.[1]) return url[1];
+		}
+	}
+	return null;
 }
 
 const PR_URL_RE = /^https:\/\/github\.com\/([^/\s]+\/[^/\s]+)\/pull\/(\d+)$/;
@@ -540,32 +618,95 @@ function pidAlive(pid: number): boolean {
 		return (cause as NodeJS.ErrnoException).code === "EPERM";
 	}
 }
+let lockTakeoverSeq = 0;
+
+/** The PID the lock directory names, or NaN when it names none (being written, or left without one). */
+function lockPidOf(dir: string): number {
+	try {
+		return Number(readFileSync(join(dir, "pid"), "utf8").trim());
+	} catch {
+		return Number.NaN;
+	}
+}
+
+/** Whether the lock instance at `dir` is free to take under the wait's staleness rule. */
+function lockIsStale(dir: string, waitMs: number): boolean {
+	const pid = lockPidOf(dir);
+	if (Number.isInteger(pid) && pid > 0) return !pidAlive(pid);
+	const age = Date.now() - (existsSync(dir) ? statSync(dir).mtimeMs : Date.now());
+	return age > waitMs;
+}
+
+/**
+ * Remove the stale lock without ever deleting a fresh one: rename it aside (atomic, so
+ * concurrent recoverers of the same lock elect exactly one winner), re-check the renamed
+ * copy, and restore that exact instance untouched when its owner showed up mid-takeover.
+ * Returns true when the stale instance is gone and the caller may try to acquire again.
+ */
+async function takeStaleLock(path: string, waitMs: number): Promise<boolean> {
+	const stale = `${path}.stale.${process.pid}.${lockTakeoverSeq++}`;
+	try {
+		renameSync(path, stale);
+	} catch {
+		return false;
+	}
+	if (!lockIsStale(stale, waitMs)) {
+		// Its owner arrived mid-takeover: put that exact instance back. A fresh lock may
+		// occupy the path for a moment; wait for it to drain rather than strand a live lock.
+		const deadline = Date.now() + 2_000;
+		for (;;) {
+			try {
+				renameSync(stale, path);
+				return false;
+			} catch {
+				if (Date.now() >= deadline) return false;
+				await Bun.sleep(LOCK_POLL_MS);
+			}
+		}
+	}
+	try {
+		rmSync(stale, { recursive: true, force: true });
+	} catch {
+		// A uniquely named leftover keeps its old mtime, so a later recovery reclaims it.
+	}
+	return true;
+}
 
 /**
  * A directory lock holding the owner's PID. A lock whose PID is gone (or that never got a PID
  * within the wait) is reclaimed; a live one is waited for, then ProposeFailed(`<label> busy`).
+ * Recovery takes the stale instance aside rather than deleting the live path, and the release
+ * removes only the lock this caller still owns — never a replacement another process took since.
  */
-async function acquireLock(path: string, label: string, waitMs: number): Promise<() => void> {
+export async function acquireLock(path: string, label: string, waitMs: number): Promise<() => void> {
 	const started = Date.now();
 	mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
 	for (;;) {
 		try {
 			mkdirSync(path, { mode: 0o700 });
-			writeFileSync(join(path, "pid"), String(process.pid));
-			return () => rmSync(path, { recursive: true, force: true });
+			try {
+				writeFileSync(join(path, "pid"), String(process.pid));
+			} catch (writeCause) {
+				// Our mkdir won but the pid never landed: drop exactly that half-made
+				// instance. `rmdirSync` only removes an empty directory, so a lock another
+				// process claimed since is never deleted wholesale.
+				try {
+					rmdirSync(path);
+				} catch {
+					// Taken over or claimed meanwhile; age-based recovery covers leftovers.
+				}
+				throw writeCause;
+			}
+			const owner = process.pid;
+			return () => {
+				if (lockPidOf(path) !== owner) return;
+				rmSync(path, { recursive: true, force: true });
+			};
 		} catch (cause) {
 			if ((cause as NodeJS.ErrnoException).code !== "EEXIST") throw cause;
 		}
-		let pid = Number.NaN;
-		try {
-			pid = Number(readFileSync(join(path, "pid"), "utf8").trim());
-		} catch {
-			// being written by its owner, or left without a PID
-		}
-		const age = Date.now() - (existsSync(path) ? statSync(path).mtimeMs : Date.now());
-		const stale = Number.isInteger(pid) && pid > 0 ? !pidAlive(pid) : age > waitMs;
-		if (stale) {
-			rmSync(path, { recursive: true, force: true });
+		if (lockIsStale(path, waitMs)) {
+			await takeStaleLock(path, waitMs);
 			continue;
 		}
 		if (Date.now() - started >= waitMs) throw new ProposeFailed(`${label} busy`);
@@ -786,6 +927,16 @@ export async function proposeSkill(input: ProposeInput, opts: ProposeOptions): P
 	const library = opts.library ?? DEFAULT_LIBRARY;
 	if (!existsSync(join(paths.mirror, "HEAD"))) {
 		throw new ProposeFailed(missingMirrorMessage(paths.mirror, library.remoteUrl));
+	}
+	// The state directory outlives the configuration: an operator who changes the library
+	// while keeping SUBSTRATE_SKILLS_STATE would otherwise fetch the old library's history
+	// and build the branch from its tree, answering `unchanged` or pushing wrongly. Refuse
+	// a mirror whose origin names another library before any fetch or clone.
+	const mirrorOrigin = mirrorOriginUrl(paths.mirror);
+	if (mirrorOrigin !== null && !originMatches(mirrorOrigin, library.repo)) {
+		throw new ProposeFailed(
+			`mirror ${paths.mirror} points at ${JSON.stringify(mirrorOrigin.slice(0, 120))}, not ${library.repo}; re-bootstrap it for the configured library before proposing`,
+		);
 	}
 	const waitMs = opts.lockWaitMs ?? LOCK_WAIT_MS;
 	const run = opts.run;
