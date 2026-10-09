@@ -13,7 +13,8 @@
     "packages/ledger",
     "packages/observability",
     "packages/audit",
-    "packages/evidence"
+    "packages/evidence",
+    "packages/dispatcher"
   ],
   "scripts": {
     "test": "bun test",
