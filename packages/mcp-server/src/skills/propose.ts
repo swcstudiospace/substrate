@@ -749,6 +749,20 @@ function ledgerAppend(path: string, line: Omit<LedgerLine, "ts">): void {
 	appendFileSync(path, `${JSON.stringify({ ts: new Date().toISOString(), ...line })}\n`, { mode: 0o600 });
 	if (fresh) chmodSync(path, 0o600);
 }
+/**
+ * The push/ledger window: a pushed branch with no ledger line is invisible to a
+ * retry, which pushes a second branch. Touch the ledger before pushing so a
+ * read-only file or directory refuses here, before the branch exists remotely.
+ */
+function assertLedgerWritable(ledger: string, branch: string): void {
+	try {
+		mkdirSync(dirname(ledger), { recursive: true, mode: 0o700 });
+		appendFileSync(ledger, "", { mode: 0o600 });
+	} catch (cause) {
+		const code = (cause as NodeJS.ErrnoException).code ?? "EIO";
+		throw new ProposeFailed(`proposal ledger is not writable (${code}); refusing to push ${branch}`);
+	}
+}
 
 // ── propose ─────────────────────────────────────────────────────────────────
 
@@ -986,8 +1000,14 @@ export async function proposeSkill(input: ProposeInput, opts: ProposeOptions): P
 		await must(run, "git commit", commitArgv(clone, commitMessage(v)));
 		const origin = await must(run, "git remote get-url", originUrlArgv(clone));
 		if (!originMatches(origin.stdout, library.repo)) throw new ProposeFailed(`clone origin is not ${library.repo}; refusing to push`);
+		assertLedgerWritable(paths.ledger, branch);
 		await must(run, "git push", pushArgv(clone, branch));
-		ledgerAppend(paths.ledger, { content_sha256: v.content_sha256, name: v.name, surface: v.surface, branch, state: "pushed", repo: library.repo });
+		try {
+			ledgerAppend(paths.ledger, { content_sha256: v.content_sha256, name: v.name, surface: v.surface, branch, state: "pushed", repo: library.repo });
+		} catch (cause) {
+			const code = (cause as NodeJS.ErrnoException).code ?? "EIO";
+			throw new ProposeFailed(`pushed ${branch} but could not record it in the proposal ledger (${code}); recover with \`gh pr create --head ${branch}\` or delete the branch`);
+		}
 		return await openPr(run, v, input, branch, paths.ledger, library);
 	} finally {
 		if (clone) rmSync(clone, { recursive: true, force: true });

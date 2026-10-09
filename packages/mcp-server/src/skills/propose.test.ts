@@ -610,6 +610,34 @@ describe("proposeSkill ledger idempotence", () => {
 		expect(f.steps()).not.toContain("push");
 		expect(ledgerLines()).toEqual([]);
 	});
+	test("an unwritable ledger refuses before the push, leaving no branch to recover", async () => {
+		writeFileSync(join(state, "not-a-directory"), "");
+		const ledgerPath = join(state, "not-a-directory", "proposals.jsonl");
+		const f = fake();
+		const error = await proposeSkill(input(), options(f.run, { ledgerPath })).catch((e: unknown) => e);
+		expect(error).toBeInstanceOf(ProposeFailed);
+		expect((error as Error).message).toMatch(/ledger is not writable.*refusing to push skill\//);
+		expect(f.steps()).not.toContain("push");
+		expect(f.steps()).not.toContain("gh pr create");
+		expect(existsSync(ledgerPath)).toBe(false);
+	});
+
+	test("a ledger that breaks after the push names the branch for recovery", async () => {
+		const ledgerPath = join(state, "proposals.jsonl");
+		const f = fake({
+			onCall: (s) => {
+				if (s === "push") {
+					rmSync(ledgerPath, { recursive: true, force: true });
+					mkdirSync(ledgerPath, { recursive: true });
+				}
+			},
+		});
+		const error = await proposeSkill(input(), options(f.run)).catch((e: unknown) => e);
+		expect(error).toBeInstanceOf(ProposeFailed);
+		expect((error as Error).message).toMatch(/pushed skill\/claude-code\/demo-skill-.* but could not record it.*gh pr create --head skill\//);
+		expect(f.steps()).toContain("push");
+		expect(f.steps()).not.toContain("gh pr create");
+	});
 
 	test("a failing step is ProposeFailed with at most 400 redacted characters of output", async () => {
 		const token = `ghp_${"B".repeat(36)}`;
