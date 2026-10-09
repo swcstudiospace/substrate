@@ -13,6 +13,7 @@
  */
 import type { GreptimeConfig } from "./config.ts";
 import type { SubstrateEvent } from "./types.ts";
+import { hourEnd, hourStart, isClosed } from "@substrate/ledger";
 
 const DEFAULT_TIMEOUT_MS = 5000;
 
@@ -20,6 +21,24 @@ export class GreptimeError extends Error {}
 
 /** A statement the ledger client refuses to send. See `assertAppendOnly`. */
 export class AppendOnlyViolation extends GreptimeError {}
+/**
+ * The event row is stored but its ingest record is not, so the event will not
+ * be anchored. `Substrate.append` maps this to `stored: true` with a warning
+ * rather than un-storing the event — retrying the emit would mint a second
+ * event with a new id. See D27-09.
+ */
+export class IngestNotRecorded extends GreptimeError {
+	constructor(readonly eventId: string, cause: unknown) {
+		super(`event ${eventId} stored, but its ingest order was not recorded: ${String(cause)}`);
+	}
+}
+
+/**
+ * How long after an hour ends before it counts as closed. Far above the 5 s
+ * write timeout, so a record stamped inside an hour is visible before the hour
+ * counts as closed. Phase 28 schedules its anchor timer around this constant.
+ */
+export const INGEST_LAG_MS = 300_000;
 
 /** Columns of `agent_events`, in the order every statement uses them. */
 export const EVENT_COLUMNS = [
@@ -246,6 +265,7 @@ export class GreptimeClient {
 	constructor(
 		private readonly config: GreptimeConfig,
 		private readonly timeoutMs = DEFAULT_TIMEOUT_MS,
+		private readonly clock: () => number = Date.now,
 	) {}
 
 	private headers(): Record<string, string> {
@@ -387,16 +407,54 @@ export class GreptimeClient {
 			warnings.push(`agent_events created without append_mode: ${String(cause)}`);
 		}
 
+		try {
+			await this.sql(
+				`CREATE TABLE IF NOT EXISTS "event_ingest" ("ingested_at" TIMESTAMP TIME INDEX, "event_id" STRING, "event_ts" TIMESTAMP, "graph_id" STRING) WITH ('append_mode' = 'true')`,
+			);
+		} catch (cause) {
+			// Unlike agent_events above, there is no plain-CREATE fallback here: a
+			// table without append_mode and without a primary key deduplicates on
+			// the time index alone, so two events ingested in the same millisecond
+			// would silently lose a record. A warning is cheaper than that loss.
+			warnings.push(`event_ingest not created in append_mode: ${String(cause)}`);
+		}
+
 		await this.sql(`
 			CREATE TABLE IF NOT EXISTS "anchors" (
 				"period_start" TIMESTAMP TIME INDEX,
 				"period_end"   TIMESTAMP,
 				"root"         STRING,
-				"tx_sig"       STRING,
 				"event_count"  BIGINT,
-				PRIMARY KEY ("root")
+				"memo"         STRING,
+				"tx_sig"       STRING,
+				"signer"       STRING,
+				"cluster"      STRING,
+				"slot"         BIGINT,
+				"anchored_at"  TIMESTAMP,
+				"stale_hashes" BIGINT
 			)
 		`);
+
+		// Production's period-keyed anchors, as information_schema spells the types
+		// (verified against live on 2026-10-08, D27-17). `CREATE TABLE IF NOT
+		// EXISTS` is a no-op against a table the old 5-column DDL built, so the
+		// live shape is asked directly — and only a definite mismatch warns. An
+		// empty or failed read stays silent: a fresh store has no anchors yet,
+		// and boot must not cry wolf. This never ALTERs, DROPs or recreates.
+		const liveAnchors = await this.sql(
+			`SELECT "column_name", "data_type", "semantic_type" FROM "information_schema"."columns" ` +
+				`WHERE "table_schema" = ${this.q(this.config.db)} AND "table_name" = ${this.q("anchors")} ORDER BY "ordinal_position"`,
+		).catch(() => []);
+		const liveShape = liveAnchors
+			.map((row) => `${String(row.column_name)} ${String(row.data_type).toLowerCase()} ${String(row.semantic_type).toLowerCase()}`)
+			.join(", ");
+		const canonicalShape =
+			"period_start timestamp(3) timestamp, period_end timestamp(3) field, root string field, " +
+			"event_count bigint field, memo string field, tx_sig string field, signer string field, " +
+			"cluster string field, slot bigint field, anchored_at timestamp(3) field, stale_hashes bigint field";
+		if (liveAnchors.length > 0 && liveShape !== canonicalShape) {
+			warnings.push(`anchors does not match production's period-keyed shape (live: ${liveShape}); see docs/greptime-ledger.md.`);
+		}
 
 		await this.probeDialect();
 		if (!this.dialectProbed) {
@@ -485,6 +543,37 @@ export class GreptimeClient {
 		};
 		const values = EVENT_COLUMNS.map(cell).join(", ");
 		await this.sql(`INSERT INTO "agent_events" (${EVENT_COLUMN_LIST}) VALUES (${values})`);
+
+		// The ingest record goes second: it must never name an event that does not
+		// exist. Each attempt takes a fresh stamp immediately before its INSERT; a
+		// duplicate can only appear when the retry follows an ambiguous timeout
+		// that had in fact landed, and the hour read collapses it (D27-10).
+		// `quote(null)` renders a null graph_id as NULL with no branch (D27-07).
+		let failure: unknown;
+		for (let attempt = 0; attempt < 2; attempt++) {
+			const ingestedAt = this.clock();
+			try {
+				await this.sql(
+					`INSERT INTO "event_ingest" ("ingested_at", "event_id", "event_ts", "graph_id") VALUES (` +
+						`${this.q(new Date(ingestedAt).toISOString())}, ${this.q(event.id)}, ${this.q(event.ts)}, ${this.q(event.graph_id)})`,
+				);
+			} catch (cause) {
+				failure = cause;
+				continue;
+			}
+			const hour = hourStart(ingestedAt);
+			if (isClosed(hour, this.clock(), INGEST_LAG_MS)) {
+				// The record landed after its hour already closed: a root computed
+				// before now would differ when recomputed, and this line is how
+				// that is diagnosed. It names the event and the hour only (D27-16).
+				process.stderr.write(
+					`[substrate] event ${event.id} ingest record landed after hour ${new Date(hour).toISOString()} closed; ` +
+						"a root computed before it landed would differ\n",
+				);
+			}
+			return;
+		}
+		throw new IngestNotRecorded(event.id, failure);
 	}
 
 	/**
