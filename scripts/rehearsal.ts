@@ -1148,6 +1148,20 @@ async function runDownInner(name: string, runDir: string): Promise<number> {
 
 async function runStatus(name: string): Promise<number> {
 	const runDir = runDirFor(name);
+	const lock = acquireNameLock(runDir, name);
+	try {
+		return await runStatusInner(name, runDir);
+	} finally {
+		lock.release();
+	}
+}
+
+/**
+ * `status` only reads, but it takes the same exclusive lock `up`/`down` hold
+ * so it never observes a half-written run dir while `up` saves state or
+ * `down` removes it. Every state read in this file runs under the lock.
+ */
+async function runStatusInner(name: string, runDir: string): Promise<number> {
 	const state = readState(join(runDir, "state.json"));
 	if (state === null) {
 		process.stdout.write(`[rehearsal] status ${name}: no instance.\n`);
@@ -1300,6 +1314,19 @@ export function smokeToolResult(attempt: SmokeAttempt): Record<string, unknown> 
  */
 async function runSmoke(name: string): Promise<number> {
 	const runDir = runDirFor(name);
+	const lock = acquireNameLock(runDir, name);
+	try {
+		return await runSmokeInner(name, runDir);
+	} finally {
+		lock.release();
+	}
+}
+
+/**
+ * The smoke only reads `consumer.env`, but it takes the same exclusive lock
+ * so a concurrent `down` cannot delete the run directory under it mid-proof.
+ */
+async function runSmokeInner(name: string, runDir: string): Promise<number> {
 	const text = readText(join(runDir, "consumer.env"));
 	if (text === null) throw new RehearsalRefused(`no consumer.env for instance ${name}: run rehearsal up first`);
 	const record = parseShellExports(text);

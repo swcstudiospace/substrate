@@ -1,7 +1,8 @@
 /**
  * The rehearsal harness, driven through its pure guards and through its CLI
- * the way an operator runs it. No test here needs Docker: every refusal exits
- * before the first container call, and the store file is treated as opaque.
+ * the way an operator runs it. No test here needs a live daemon: every refusal
+ * exits before the first container call, and paths that must reach Docker run
+ * against a fake `docker` on PATH that records its argv, never the daemon.
  */
 import { describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
@@ -521,6 +522,68 @@ describe("acquireNameLock", () => {
 			rmSync(base, { recursive: true, force: true });
 		}
 	});
+});
+
+/**
+ * The lock precedes every store touch: with the lock held elsewhere, each
+ * subcommand must refuse before reading state or invoking Docker. The fake
+ * `docker` below answers locality and listing calls with an empty store and
+ * records every invocation, so an empty log proves the refusal came first.
+ */
+describe("per-name lock precedes every store touch", () => {
+	function fakeDocker(): { dir: string; bin: string; log: string } {
+		const dir = mkdtempSync(join(tmpdir(), "rh-fakedocker-"));
+		const bin = join(dir, "bin");
+		mkdirSync(bin, { recursive: true });
+		const log = join(dir, "calls.log");
+		writeFileSync(
+			join(bin, "docker"),
+			`#!/bin/sh\necho "$*" >> "${log}"\nif [ "$1" = "context" ]; then echo "unix:///var/run/docker.sock"; fi\nexit 0\n`,
+		);
+		chmodSync(join(bin, "docker"), 0o755);
+		return { dir, bin, log };
+	}
+
+	function runIsolated(args: string[], extraEnv: Record<string, string>): { code: number; out: string; err: string } {
+		const child = Bun.spawnSync([process.execPath, CLI, ...args], {
+			env: { ...process.env, SUBSTRATE_TOKEN: SENTINEL, ...extraEnv },
+		});
+		return { code: child.exitCode ?? -1, out: child.stdout.toString(), err: child.stderr.toString() };
+	}
+
+	function dockerCalls(log: string): string {
+		try {
+			return readFileSync(log, "utf8");
+		} catch {
+			return "";
+		}
+	}
+
+	for (const args of [
+		["down", "--name", "rh-locked"],
+		["up", "--name", "rh-locked", "--port", "0"],
+		["status", "--name", "rh-locked"],
+		["smoke", "--name", "rh-locked"],
+	]) {
+		test(`${args[0]} while the lock is held refuses without calling docker`, () => {
+			const base = mkdtempSync(join(tmpdir(), "rh-lock-precede-"));
+			const fake = fakeDocker();
+			const held = acquireNameLock(join(base, "substrate-rehearsal", "rh-locked"), "rh-locked");
+			try {
+				const run = runIsolated(args, {
+					XDG_RUNTIME_DIR: base,
+					PATH: `${fake.bin}:${process.env.PATH ?? ""}`,
+				});
+				expect(run.code).toBe(2);
+				expect(run.err).toContain("locked by another operation");
+				expect(dockerCalls(fake.log)).toBe("");
+			} finally {
+				held.release();
+				rmSync(base, { recursive: true, force: true });
+				rmSync(fake.dir, { recursive: true, force: true });
+			}
+		});
+	}
 });
 
 describe("confirmSpawnedTwin", () => {
