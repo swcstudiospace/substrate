@@ -578,6 +578,62 @@ export class IndexStore implements MemoryStore {
 	}
 
 	/**
+	 * One node as stored, or null when it is unknown. A read for completion
+	 * gating (does the node link Linear, who holds it); never a write.
+	 */
+	async getNode(graphId: string, nodeId: string): Promise<GraphNode | null> {
+		return this.node(graphId, nodeId).catch(() => null);
+	}
+
+	/**
+	 * Mark a node under review for the DoD gate, in one fenced statement.
+	 *
+	 * The only new state write of the claim-mirror phase: it sets
+	 * `started_review` under the caller's lease — fenced on `lease_id`,
+	 * unexpired, with the holder check `decideHeartbeat` makes — and extends
+	 * the lease by the TTL, because the gate may take up to 35 s. A refusal
+	 * (`not-holder`, `lost`, `expired`, `unheld`) returns the heartbeat refusal
+	 * shape and writes nothing, including no tracker.
+	 */
+	async reviewNode(
+		graphId: string,
+		nodeId: string,
+		leaseId: string,
+		caller: Surface | null,
+		ttlSeconds: number = DEFAULT_LEASE_TTL_SECONDS,
+	): Promise<{ ok: boolean; node: GraphNode; lease: LeaseView; decision: HeartbeatDecision }> {
+		const ttl = normalizeTtlSeconds(ttlSeconds);
+		const request = { lease_id: leaseId, ttl_seconds: ttl, caller };
+		const observed = await this.node(graphId, nodeId);
+		const decision = decideHeartbeat(leaseSnapshot(observed), request, Date.now());
+		if (!decision.ok) return { ok: false, node: observed, lease: leaseView(leaseSnapshot(observed)), decision };
+
+		const rows = (await this.sql`
+			update graph_nodes set
+				state = 'started_review',
+				lease_heartbeat_at = now(),
+				lease_expires_at   = now() + make_interval(secs => ${ttl})
+			where graph_id = ${graphId} and node_id = ${nodeId}
+			  and lease_id = ${leaseId}
+			  and coalesce(lease_expires_at, claimed_at + make_interval(secs => ${DEFAULT_LEASE_TTL_SECONDS})) > now()
+			returning *`) as GraphNode[];
+
+		const updated = rows[0];
+		if (updated) return { ok: true, node: toNode(updated), lease: holderLeaseView(leaseSnapshot(updated)), decision };
+
+		// The statement matched nothing, so the lease went between the read and
+		// the write. Report what is true now rather than the decision that is
+		// no longer.
+		const fresh = await this.node(graphId, nodeId);
+		return {
+			ok: false,
+			node: fresh,
+			lease: leaseView(leaseSnapshot(fresh)),
+			decision: decideHeartbeat(leaseSnapshot(fresh), request, Date.now()),
+		};
+	}
+
+	/**
 	 * Drop the lease on a node.
 	 *
 	 * `lease_id` fences it: a stale holder cannot release — or, through

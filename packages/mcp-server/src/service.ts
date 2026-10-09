@@ -53,6 +53,7 @@ import {
 } from "./handoff.ts";
 import { leaseView, normalizeTtlSeconds, type LeaseView } from "./lease.ts";
 import { createMirror, type Mirror, type MirrorContext, type MirrorFailure, type MirrorOp } from "./mirror.ts";
+import { runDodGate, type DodEvidence } from "./dod-gate.ts";
 import { normalizeSubject } from "./memory-policy.ts";
 import { governMemoryWrite } from "./memory-write.ts";
 import { redact, type SkillDocExampleRule } from "./redact.ts";
@@ -1261,6 +1262,11 @@ export class Substrate {
 				{ target: "linear", op, reason: (cause instanceof Error ? cause.message : String(cause)).slice(0, 300) },
 			];
 		}
+		await this.emitMirrorFailures(ctx, failures);
+	}
+
+	/** One `mirror.failed` warning per failed target: surface and session are the holder's, and there is no repo. */
+	private async emitMirrorFailures(ctx: MirrorContext, failures: MirrorFailure[]): Promise<void> {
 		for (const failure of failures) {
 			await this.emit({
 				surface: ctx.holder,
