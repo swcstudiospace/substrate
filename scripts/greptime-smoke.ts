@@ -21,18 +21,32 @@
  *      — the quoting dialect is right, which is what makes the hash chain
  *      verifiable at all
  *   4. the chain over the events just written verifies
- *   5. `events_query` reads those events back — the WHERE, ORDER BY, LIMIT and ISO
+ *   5. a burst through three sessions leaves exactly one ingest record per event,
+ *      and the hour digest over every hour the burst touched is identical when
+ *      computed twice, holds the burst in ingest order and puts a backdated event
+ *      in the hour it was ingested in, not the hour its `ts` names — with the
+ *      chain intact and every stored hash unchanged afterwards
+ *   6. `events_query` reads those events back — the WHERE, ORDER BY, LIMIT and ISO
  *      time bound that only a real server's parser can confirm
- *   6. the client refuses to UPDATE or DELETE what it wrote
+ *   7. the client refuses to UPDATE or DELETE what it wrote
  *
  * It appends to the real ledger, which is append-only, so the rows it writes
  * cannot be cleaned up afterwards. They are tagged with a `smoke-` graph id and
  * session id and `kind: "note"` so they are easy to tell apart, and the brief
  * ignores them because they carry no repo.
+ *
+ * Prove it on scratch stores, never on production: the rehearsal harness starts a
+ * throwaway Greptime and Postgres, and `stores.env` carries their credentials.
+ *
+ *   bun run rehearsal up --name p27
+ *   set -a; . "${XDG_RUNTIME_DIR:-/tmp}/substrate-rehearsal/p27/stores.env"; set +a
+ *   bun run smoke:greptime
+ *   bun run rehearsal down --name p27
  */
 import { randomUUID } from "node:crypto";
+import { hourEnd, hourStart } from "../packages/ledger/src/index.ts";
 import { loadConfig } from "../packages/mcp-server/src/config.ts";
-import { AppendOnlyViolation } from "../packages/mcp-server/src/greptime.ts";
+import { AppendOnlyViolation, INGEST_LAG_MS, quote } from "../packages/mcp-server/src/greptime.ts";
 import { Substrate } from "../packages/mcp-server/src/service.ts";
 import { REDACTED } from "../packages/mcp-server/src/redact.ts";
 
@@ -151,7 +165,112 @@ check(
 const verified = await substrate.verifyGraph(graphId);
 check(verified.ok, `the hash chain over ${graphId} verifies`, verified.ok ? undefined : verified.reason);
 
-// ── 5. the read path a desk seat takes ───────────────────────────────────────
+// ── 5. ingest order and the hour digest ─────────────────────────────────────
+// Three sessions emit three events each at once through the path `events_emit`
+// takes, one of them backdated to September. What only a real server can
+// confirm: each event leaves exactly one ingest record, the digest over every
+// hour the burst touched is the same twice and holds the burst in ingest order,
+// and a backdated event sits in the hour it was ingested in. The ledger already
+// holds the events from sections 2–3, so the burst is checked as a subset of
+// each hour, never against an exact count.
+const burstGraph = `${graphId}-ingest`;
+const BACKDATED_TS = "2026-09-01T03:00:00.000Z";
+const burst = (
+	await Promise.all(
+		[0, 1, 2].map(async (lane) => {
+			const lanes = [];
+			for (let step = 0; step < 3; step++) {
+				lanes.push(
+					await substrate.emit({
+						...common,
+						session_id: `${sessionId}-lane${lane}`,
+						graph_id: burstGraph,
+						summary: `ingest order burst ${lane}.${step}`,
+						...(lane === 0 && step === 1 ? { ts: BACKDATED_TS } : {}),
+					}),
+				);
+			}
+			return lanes;
+		}),
+	)
+).flat();
+check(
+	burst.length === 9 && burst.every((result) => result.stored && result.warning === undefined),
+	`appended ${burst.length} events across 3 sessions as ${burstGraph}`,
+	burst.find((result) => !result.stored || result.warning)?.error ?? burst.find((result) => result.warning)?.warning,
+);
+
+const burstIds = burst.map((result) => result.event.id);
+const ingestRows = await greptime
+	.sql(`SELECT "event_id", "ingested_at" FROM "event_ingest" WHERE "event_id" IN (${burstIds.map((id) => quote(id)).join(", ")})`)
+	.catch(() => []);
+check(
+	ingestRows.length === burstIds.length && burstIds.every((id) => ingestRows.filter((row) => row.event_id === id).length === 1),
+	"every burst event has exactly one ingest record",
+	`${ingestRows.length} records for ${burstIds.length} events`,
+);
+
+const ingestAt = new Map(ingestRows.map((row) => [String(row.event_id), Number(row.ingested_at)]));
+const hours = [...new Set([...ingestAt.values()].map((at) => hourStart(at)))].sort((a, b) => a - b);
+const hourIso = (start: number) => new Date(start).toISOString();
+for (const hour of hours) {
+	const now = hourEnd(hour) + INGEST_LAG_MS;
+	const once = await substrate.hourDigest(hour, now).catch((cause: unknown) => cause as Error);
+	const twice = await substrate.hourDigest(hour, now).catch((cause: unknown) => cause as Error);
+	if (once instanceof Error || twice instanceof Error) {
+		check(false, `hour ${hourIso(hour)} digests`, String(once instanceof Error ? once : twice));
+		continue;
+	}
+	check(
+		JSON.stringify(once) === JSON.stringify(twice) &&
+			/^[0-9a-f]{64}$/.test(once.root ?? "") &&
+			once.memo?.startsWith("substrate:v1:") === true &&
+			once.event_count === once.event_ids.length,
+		`hour ${hourIso(hour)} digests to the same root and memo twice`,
+		`${once.event_count} events`,
+	);
+	// The order is recomputed from the raw ingest rows, independently of hourLeaves.
+	const expected = burstIds
+		.filter((id) => hourStart(ingestAt.get(id) ?? Number.NaN) === hour)
+		.sort((a, b) => (ingestAt.get(a) ?? 0) - (ingestAt.get(b) ?? 0) || (a < b ? -1 : a > b ? 1 : 0));
+	check(
+		JSON.stringify(once.event_ids.filter((id) => burstIds.includes(id))) === JSON.stringify(expected),
+		`the burst is in ingest order within hour ${hourIso(hour)}`,
+		`${expected.length} of the burst`,
+	);
+}
+
+// The backdated event keeps its September `ts`, but its place is its ingest hour.
+const backdated = burst[1]?.event;
+const backdatedHour = hourStart(ingestAt.get(backdated?.id ?? "") ?? Number.NaN);
+const backdatedDigest = Number.isNaN(backdatedHour)
+	? new Error("no ingest record for the backdated event")
+	: await substrate.hourDigest(backdatedHour, hourEnd(backdatedHour) + INGEST_LAG_MS).catch((cause: unknown) => cause as Error);
+check(
+	backdated?.ts === BACKDATED_TS && !(backdatedDigest instanceof Error) && backdatedDigest.event_ids.includes(backdated?.id ?? ""),
+	"a backdated event is a member of the hour it was ingested in",
+	backdatedDigest instanceof Error ? backdatedDigest.message : undefined,
+);
+const septemberHour = hourStart(Date.parse(BACKDATED_TS));
+const september = await substrate
+	.hourDigest(septemberHour, hourEnd(septemberHour) + INGEST_LAG_MS)
+	.catch((cause: unknown) => cause as Error);
+check(
+	!(september instanceof Error) && september.event_count === 0 && september.root === null && september.memo === null,
+	"the hour its ts names holds nothing: collector time plays no part",
+	september instanceof Error ? september.message : undefined,
+);
+
+const burstVerified = await substrate.verifyGraph(burstGraph);
+check(burstVerified.ok, `the hash chain over ${burstGraph} verifies`, burstVerified.ok ? undefined : burstVerified.reason);
+const burstRows = await greptime.readEvents("graph_id", burstGraph).catch(() => []);
+check(
+	burstRows.length === burst.length &&
+		burst.every((result) => burstRows.some((row) => row.id === result.event.id && row.hash === result.event.hash)),
+	"the digest reads left every stored event hash unchanged",
+);
+
+// ── 6. the read path a desk seat takes ───────────────────────────────────────
 // `readEvents` above is the verifier's read: one column, no bounds. This is the
 // statement `events_query` builds, and the parts no mock can prove are how a real
 // server parses an ISO literal against a TIMESTAMP column and how it orders and
@@ -213,7 +332,7 @@ check(
 	otherKind.error,
 );
 
-// ── 6. the ledger refuses to be rewritten ────────────────────────────────────
+// ── 7. the ledger refuses to be rewritten ────────────────────────────────────
 for (const statement of [
 	`UPDATE "agent_events" SET "summary" = 'rewritten' WHERE "graph_id" = '${graphId}'`,
 	`DELETE FROM "agent_events" WHERE "graph_id" = '${graphId}'`,
