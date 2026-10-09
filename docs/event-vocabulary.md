@@ -97,6 +97,12 @@ Surface rule names: `herdr-agent` is the agent herdr detected, mapped onto
 never body-supplied; `memory-writer` is the memory's writer; `lease-holder`
 is the lease holder. A fixed name is always that surface.
 
+The three `skills.propose` rows share `payload.action: "skill.propose"` and are told
+apart by kind and `payload.status`: a `note` for an outcome, a `warning` with status
+`refused` for a guard's refusal, a `warning` with status `failed` for a git or `gh`
+step that failed. Their payloads carry hashes, names and rule names, never skill
+content; the detail is in [skills-propose.md](skills-propose.md).
+
 ## Silent sources
 
 These deliberately emit nothing. A successful retain and every recall emit

@@ -265,7 +265,8 @@ MCP tool's own name where there is one: `POST /memory` is audited as `memory_wri
 under two names. Only `/healthz`, `/metrics` and `/slo` are exempt; no agent action is
 behind them and a trail dominated by a Prometheus scrape is one nobody reads.
 
-REST twins of planned v1.3 tools (`POST /skills/propose`, `/docs/search`,
+REST twins of planned v1.3 tools (`POST /skills/propose` has landed, see
+[skills-propose.md](skills-propose.md); `/docs/search`,
 `/docs/ingest`, `/issue`) are audited under their tool's own name when they land,
 and inherit that tool's mode.
 
