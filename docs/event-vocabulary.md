@@ -54,7 +54,7 @@ These apply to every source:
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `herdr.agent_detected` | 19 | `session.start` | `herdr-agent` | — | `herdr` | pane cwd slug | no |
 | `herdr.status_changed` | 19 | `note` | `herdr-agent` | — | `herdr` | pane cwd slug | no |
-| `herdr.pane_exited` | 19 | `session.end` | `herdr-agent` | — | `herdr` | — | no |
+| `herdr.pane_exited` | 19 | `session.end` | `herdr-agent` | — | `herdr` | pane cwd slug | no |
 | `herdr.other` | 19 | `note` | `herdr-agent` | — | `herdr` | — | no |
 | `muse.tool_call` | 19 | `tool.call` | `muse` | — | — | pane cwd slug, plus branch | no |
 | `cursor.stop` | 19 | `session.end` | `cursor` | — | — | — | no |
@@ -110,12 +110,27 @@ the writer's local counters are its trail.
 
 ## herdr agent to surface
 
-[UNVERIFIED] herdr's exact agent identifiers are pinned by Phase 19 from
-`herdr api schema`. The fixed table will map each identifier onto `SURFACES`
-(expected shape, to be pinned by Phase 19 — e.g. Claude to `claude-code`,
-Codex to `codex`, OpenCode to `opencode`, Pi to `pi`, Cursor to `cursor`,
-Hermes to `hermes`, Omp to `omp`, Grok to `grok-build`, Muse to `muse`).
-An agent with no row is not emitted and is counted as unmapped.
+Pinned from herdr 0.9.1's `IntegrationTarget` enum (`herdr api schema`) plus
+the separate Muse reporter row. `HERDR_AGENT_SURFACES` in
+`packages/collectors/src/herdr-map.ts` is the same table.
+
+| herdr agent | surface |
+| --- | --- |
+| `claude` | `claude-code` |
+| `codex` | `codex` |
+| `opencode` | `opencode` |
+| `pi` | `pi` |
+| `omp` | `omp` |
+| `hermes` | `hermes` |
+| `cursor` | `cursor` |
+| `grok` | `grok-build` |
+| `muse` | `muse` |
+
+`muse` is not an enum id. Muse reports `agent: "muse"` through
+`pane.report_agent`, which takes a free-form string. The remaining enum ids
+(`copilot`, `devin`, `droid`, `kimi`, `kilo`, `qodercli`, `qwen`,
+`mastracode`, `antigravity_cli`) and any unknown id are not emitted. They
+are counted as unmapped, by agent id. A pane with no agent emits nothing.
 
 ## Deferred producers
 
