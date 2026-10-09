@@ -795,7 +795,13 @@ export function createHttpServer(
 	server.close = ((callback?: (err?: Error) => void) => {
 		anonymousLog.stop();
 		refusalLog.stop();
-		return close(callback);
+		// A request still in flight can finish after the timers stop. Flush once more when
+		// the server has actually closed, so its count still reaches stderr.
+		return close((err?: Error) => {
+			anonymousLog.flush();
+			refusalLog.flush();
+			callback?.(err);
+		});
 	}) as typeof server.close;
 	return server;
 }

@@ -189,4 +189,4 @@ usually absent.
 [substrate] refused events: reason=validation status=400 caller=untokened surface=muse kind=unrecognised:brief.delivered 335
 ```
 
-`caller` is the token's surface, `untokened`, or `unmapped-bearer`. `surface` and `kind` are the names the body claimed: a known name as-is, an unknown name as `unrecognised:<name>` only when it is a short slug, and `unrecognised:invalid` otherwise. The line has no summary, payload, or token. After 50 distinct keys in one window, the rest are counted as `other`. `journalctl -u substrate-mcp | grep 'refused events'` names the sender to fix.
+`caller` is the token's surface, `untokened`, or `unmapped-bearer`. For a body the server parsed, `surface` and `kind` are the names it claimed: a known name as-is, an unknown name as `unrecognised:<name>` only when it is a short slug, and `unrecognised:invalid` otherwise. A `reason=auth` row is refused before the body is read, so it always shows `surface=none kind=none`. The line has no summary, payload, or token. After 50 distinct keys in one window, the rest are counted as `other`. `journalctl -u substrate-mcp | grep 'refused events'` names the sender to fix.

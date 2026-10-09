@@ -884,6 +884,41 @@ describe("the anonymous bridge", () => {
 		expect(lines[0]).not.toContain("payload-secret-marker");
 	});
 
+	test("the refused-event log caps distinct keys per window and counts the rest as other", async () => {
+		const lines: string[] = [];
+		let now = 1_000;
+		const harness = await start(BRIDGE, {}, {
+			now: () => now,
+			anonymousLog: () => {},
+			refusalLog: (line) => {
+				lines.push(line);
+			},
+			anonymousIntervalMs: 60 * 60 * 1000,
+		});
+		const post = (surface: string) =>
+			fetch(`${harness.base}/events`, { method: "POST", body: JSON.stringify({ kind: "note", summary: "x", surface }) });
+		const name = (i: number) => `made-up-${String(i).padStart(2, "0")}`;
+
+		for (let i = 1; i <= 52; i++) await post(name(i));
+		await post(name(1));
+		await post(name(52));
+		now += 60 * 60 * 1000;
+		await fetch(`${harness.base}/healthz`);
+		expect(lines).toHaveLength(1);
+		const parts = lines[0]?.replace("[substrate] refused events: ", "").trim().split(", ") ?? [];
+		expect(parts).toHaveLength(51);
+		expect(parts).toContain(`reason=validation status=400 caller=untokened surface=unrecognised:${name(1)} kind=note 2`);
+		expect(parts).toContain("other 3");
+		expect(lines[0]).not.toContain(name(51));
+
+		await post(name(60));
+		now += 60 * 60 * 1000;
+		await fetch(`${harness.base}/healthz`);
+		expect(lines).toHaveLength(2);
+		expect(lines[1]).toContain(`surface=unrecognised:${name(60)} kind=note 1`);
+		expect(lines[1]).not.toContain("other");
+	});
+
 	test("refusalShape keeps only slugs of unknown names", () => {
 		expect(refusalShape({ surface: "cursor", kind: "commit" })).toEqual({ surface: "cursor", kind: "commit" });
 		expect(refusalShape({ surface: "Bearer abc def", kind: 42 })).toEqual({ surface: "unrecognised:invalid", kind: "none" });
