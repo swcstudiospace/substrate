@@ -3788,4 +3788,45 @@ describe("verifyGraph hour report", () => {
 		expect(verdict.hours[0]?.reason).toContain("timed out checking this hour");
 		expect(verdict.ok).toBe(false);
 	});
+
+	test("an open hour stays pending even on an exhausted budget", async () => {
+		// Pending needs no devnet read and no digest, so it never spends the
+		// budget: a 1 ms whole-verify budget must not turn it unverified.
+		const world = sessionRows();
+		const substrate = substrateWith(
+			{
+				readEvents: async () => world.rows,
+				graphIngest: async () => world.records,
+				firstIngestMs: async () => H,
+				hourLeaves: async () => {
+					throw new Error("an open hour must never be digested");
+				},
+				anchorForPeriod: async () => {
+					throw new Error("an open hour must never read its row");
+				},
+			},
+			{ SUBSTRATE_VERIFY_TIMEOUT_MS: "1" },
+		);
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 30 * 60_000 });
+		expect(verdict.hours).toHaveLength(1);
+		expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "pending", root: null });
+		expect(verdict.ok).toBe(true);
+	});
+
+	test("a short budget still runs quick checks under a scaled margin", async () => {
+		const world = sessionRows();
+		const substrate = substrateWith(
+			{
+				readEvents: async () => world.rows,
+				graphIngest: async () => world.records,
+				firstIngestMs: async () => H,
+				hourLeaves: async () => world.leaves,
+				anchorForPeriod: async () => anchorRow(world),
+			},
+			{ SUBSTRATE_VERIFY_TIMEOUT_MS: "1000" },
+		);
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(world.memo) as never });
+		expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "anchored" });
+		expect(verdict.ok).toBe(true);
+	});
 });

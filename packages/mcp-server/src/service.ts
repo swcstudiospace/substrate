@@ -384,10 +384,12 @@ export const VERIFY_RPC_TIMEOUT_MS = 5_000;
 export const VERIFY_RPC_ATTEMPTS = 2;
 export const VERIFY_RPC_BACKOFF_MS = 200;
 /**
- * Time reserved for the `/verify` response after the last hour check (D28-18).
- * The CLI waits out the whole-verify budget, so every hour check must finish
- * inside it with room to spare: the caller gets the hour report, not
- * `unreachable` from its own timeout.
+ * Cap on the time reserved for the `/verify` response after the last hour
+ * check (D28-18). The CLI waits out the whole-verify budget, so every hour
+ * check must finish inside it with room to spare: the caller gets the hour
+ * report, not `unreachable` from its own timeout. Short budgets reserve a
+ * fifth instead, so a fixed margin cannot swallow every hour on a small
+ * budget — see the loop below.
  */
 export const VERIFY_RESPONSE_MARGIN_MS = 2_000;
 
@@ -2625,10 +2627,19 @@ export class Substrate {
 		};
 
 		const hours: HourReport[] = [];
+		// A fifth of the budget, capped: short budgets still run their quick
+		// checks instead of losing every hour to a fixed margin.
+		const margin = Math.min(VERIFY_RESPONSE_MARGIN_MS, Math.ceil(budgetMs / 5));
 		for (const hour of [...byHour.keys()].sort((a, b) => a - b)) {
 			const memberCount = byHour.get(hour)?.length ?? 0;
+			// An hour that is still open needs no devnet read and no digest —
+			// it is pending by definition — so it never spends the budget.
+			if (!isClosed(hour, now, INGEST_LAG_MS)) {
+				hours.push({ period_start: hourIso(hour), period_end: hourIso(hourEnd(hour)), status: "pending", event_count: memberCount, root: null });
+				continue;
+			}
 			const remaining = budgetMs - (Date.now() - startedAt);
-			if (remaining <= VERIFY_RESPONSE_MARGIN_MS) {
+			if (remaining <= margin) {
 				hours.push({
 					period_start: hourIso(hour),
 					period_end: hourIso(hourEnd(hour)),
@@ -2639,7 +2650,7 @@ export class Substrate {
 				});
 				continue;
 			}
-			hours.push(await this.checkHourWithBudget(hour, now, readRpc, pubkey, memberCount, remaining - VERIFY_RESPONSE_MARGIN_MS));
+			hours.push(await this.checkHourWithBudget(hour, now, readRpc, pubkey, memberCount, remaining - margin));
 		}
 
 		const failing = hours.find((hour) => hour.status !== "anchored" && hour.status !== "pending");
