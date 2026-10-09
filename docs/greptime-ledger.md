@@ -577,6 +577,47 @@ The memo program-id comment in `packages/ledger` (`Memo v4 … written by solana
 4.2.2`) is carried over unverified; the first devnet transaction in Phase 28 is the
 first chance to check it.
 
+**Hourly anchor (Phase 28):** the isolated fake-chain proof recorded 47/47 on
+**scratch** GreptimeDB v0.14.4 (image `greptime/greptimedb:v0.14.4`, same as the
+Phase 27 run):
+
+```sh
+bun run rehearsal up --name p28anchor --port 17441
+set -a; . "${XDG_RUNTIME_DIR:-/tmp}/substrate-rehearsal/p28anchor/stores.env"; set +a
+bun run smoke:greptime
+bun run rehearsal down --name p28anchor
+```
+
+(`--name p28anchor --port 17441`: this session's port 17410 was already held by
+another rehearsal run; the name is a label only.) Section 8 of
+`scripts/greptime-smoke.ts` runs the anchor job with `now` past the lag against
+a local fake chain — a stub CLI at an absolute tmp path plus a loopback
+JSON-RPC stub serving `getTransaction`, `getSignaturesForAddress`,
+`getBalance` and `getGenesisHash` with devnet's hash — and proves all six
+beats: the send path through the real CLI stub, adopt-after-crash (injected
+lost row write: memo on chain, no row; next run adopts with `adopted: true`
+and sends nothing), a silent re-run, untouched-verify with every hour
+`anchored`, and tamper-by-append (chain still verifies; the hour reads
+`mismatch` naming the hour, exit-equivalent `ok: false`). Anchor ledger events
+are recorded by a fake emit, never written — a real one would land in the
+anchored hour itself on the real scratch clock and move the root under proof —
+and the harness carries no production key names. First run on these stores also
+caught and fixed a real bug: the open current hour digested to "not closed yet"
+and failed the whole verify; it now reads `pending` per D28-15, pinned by a
+regression test.
+
+**Live proof: DEFERRED.** L1–L10 need an operator-approved window with a funded
+key and were **not run** from here: no devnet packet left this session (the
+only chain ever touched is the loopback stub above), no production ledger row
+was written, no host config or systemd step was taken. The runbook with the
+per-step gates lives in `28-04-SUMMARY.md`. The 0-lamport question and the memo
+program id (D27-06) stay [UNVERIFIED] until L8.
+
+Rollback for this slice is proof-additive: delete section 8 and the tmp stub
+it writes at runtime; nothing on any ledger needs undoing (production rows
+from a future L7–L8, if approved, are append-only and stay, tagged proof-graph
+ids).
+
 If the table is ever recreated again while `substrate-mcp` keeps running, no
 restart is needed: `ensureAppendMode` re-checks within its TTL and both the write
 path and `/healthz` recover on their own.

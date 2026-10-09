@@ -44,11 +44,16 @@
  *   bun run rehearsal down --name p27
  */
 import { randomUUID } from "node:crypto";
-import { hourEnd, hourStart } from "../packages/ledger/src/index.ts";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { HOUR_MS, createRpc, execFileRunner, hourEnd, hourStart } from "../packages/ledger/src/index.ts";
+import { DEVNET_GENESIS_HASH, runAnchorJob } from "../packages/mcp-server/src/anchor.ts";
 import { loadConfig } from "../packages/mcp-server/src/config.ts";
 import { AppendOnlyViolation, INGEST_LAG_MS, quote } from "../packages/mcp-server/src/greptime.ts";
 import { Substrate } from "../packages/mcp-server/src/service.ts";
 import { REDACTED } from "../packages/mcp-server/src/redact.ts";
+import type { EventInput } from "../packages/mcp-server/src/types.ts";
 
 /** A token-shaped string, assembled at runtime so no token pattern sits in git. */
 const DECOY = `ghp_${"A".repeat(36)}`;
@@ -346,6 +351,222 @@ for (const statement of [
 	}
 	check(refused, `the client refuses ${verb}`);
 }
+
+// ── 8. fake-chain anchor proof (Phase 28, ANCHOR-06 isolated half) ──────────
+// No approval needed: every devnet packet is a loopback stub, the rehearsal
+// harness never carries the production key names, and Greptime is reached only
+// through typed methods — no SQL is composed here. The fake chain is a file a
+// stub CLI at an absolute path appends to, plus a loopback JSON-RPC stub
+// serving the four calls the job and verify make. The anchor job runs against
+// it through its injected Runner/Rpc/clock seams with `now` past the lag.
+//
+// The six D28-20 beats: emit a proof graph, anchor it (send path), verify
+// untouched (every hour anchored), re-run (sends nothing), crash between send
+// and row write (memo on chain, no row; next run adopts), tamper by appending
+// one event to the proof session (chain still verifies; the hour mismatches).
+// The append is the tamper the root comparison guards: any membership change
+// after anchoring moves the root. Anchor `note`/`warning` events are recorded
+// by a fake emit, never written: a real one would land in the anchored hour
+// itself (the scratch clock is real) and move the very root being proven.
+const FAKE_PUBKEY = "F".repeat(44);
+const fakeState = mkdtempSync(join(tmpdir(), "p28-fakechain-"));
+mkdirSync(join(fakeState, "bin"));
+writeFileSync(join(fakeState, "counter"), "0\n");
+writeFileSync(join(fakeState, "chain.txt"), "");
+const stubSolana =
+	"#!/usr/bin/env bash\nset -u\nstate=" + JSON.stringify(fakeState) + "\n" +
+	`if [[ "\${1:-}" == "pubkey" ]]; then printf '%s\\n' "${FAKE_PUBKEY}"; exit 0; fi\n` +
+	`memo=""; prev=""\nfor arg in "$@"; do if [[ "$prev" == "--with-memo" ]]; then memo="$arg"; fi; prev="$arg"; done\n` +
+	`n=$(cat "$state/counter"); n=$((n + 1)); printf '%s\\n' "$n" > "$state/counter"\n` +
+	`alphabet="123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"\n` +
+	`sig="$(printf '5%.0s' {1..86})\${alphabet:$((n % 58)):1}\${alphabet:$(((n / 58) % 58)):1}"\n` +
+	`printf '%s %s\\n' "$sig" "$memo" >> "$state/chain.txt"\n` +
+	`printf '{"signature": "%s"}\\n' "$sig"\n`;
+writeFileSync(join(fakeState, "bin", "solana"), stubSolana);
+writeFileSync(join(fakeState, "bin", "solana-keygen"), `#!/usr/bin/env bash\nprintf '%s\\n' "${FAKE_PUBKEY}"\n`);
+chmodSync(join(fakeState, "bin", "solana"), 0o700);
+chmodSync(join(fakeState, "bin", "solana-keygen"), 0o700);
+const sendCount = () => Number(readFileSync(join(fakeState, "counter"), "utf8").trim());
+const chainSigs = () =>
+	readFileSync(join(fakeState, "chain.txt"), "utf8")
+		.split("\n")
+		.filter((line) => line !== "")
+		.map((line) => ({ sig: line.split(" ")[0] ?? "", memo: line.split(" ").slice(1).join(" ") }));
+// The memo program id readers accept (v3; see packages/ledger/src/memo.ts).
+const FAKE_MEMO_PROGRAM = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
+const rpcServer = Bun.serve({
+	port: 0,
+	hostname: "127.0.0.1",
+	fetch: async (req) => {
+		const body = (await req.json()) as { method: string; params: unknown[]; id: unknown };
+		const entries = new Map(chainSigs().map((entry) => [entry.sig, entry.memo]));
+		let result: unknown = null;
+		if (body.method === "getGenesisHash") result = DEVNET_GENESIS_HASH;
+		else if (body.method === "getBalance") result = { value: 5_000_000 };
+		else if (body.method === "getSignaturesForAddress") {
+			result = [...entries].reverse().map(([signature, memo]) => ({ signature, memo, err: null, slot: 1001 }));
+		} else if (body.method === "getTransaction") {
+			const memo = entries.get(String(body.params[0]));
+			result =
+				memo === undefined
+					? null
+					: {
+							slot: 1001,
+							blockTime: null,
+							meta: { err: null, fee: 5000 },
+							transaction: {
+								message: {
+									accountKeys: [{ pubkey: FAKE_PUBKEY, signer: true }],
+									instructions: [{ programId: FAKE_MEMO_PROGRAM, parsed: memo }],
+								},
+							},
+						};
+		}
+		return Response.json({ jsonrpc: "2.0", id: body.id, result });
+	},
+});
+const fakeRpc = createRpc({ url: `http://127.0.0.1:${rpcServer.port}`, timeoutMs: 5000, attempts: 2, backoffMs: 100 });
+const emittedAnchor: EventInput[] = [];
+const jobSubstrate = {
+	hourDigest: substrate.hourDigest.bind(substrate),
+	emit: async (input: EventInput) => {
+		emittedAnchor.push(input);
+		return { event: input, stored: true } as never;
+	},
+};
+// Crash injection: the first anchors-row write is lost, exactly the
+// send-then-crash window. Everything else delegates to the live client.
+let dropNextInsert = true;
+const jobGreptime = new Proxy(greptime, {
+	get(target, prop) {
+		if (prop === "insertAnchor") {
+			return async (...args: unknown[]) => {
+				if (dropNextInsert) {
+					dropNextInsert = false;
+					throw new Error("injected crash: anchors row write lost");
+				}
+				return (target.insertAnchor as (...args: unknown[]) => Promise<void>)(...args);
+			};
+		}
+		const value = Reflect.get(target, prop);
+		return typeof value === "function" ? value.bind(target) : value;
+	},
+});
+const jobEnv = {
+	rpcUrl: `http://127.0.0.1:${rpcServer.port}`,
+	keypairPath: join(fakeState, "fake-keypair.json"),
+	pubkey: FAKE_PUBKEY,
+	cli: join(fakeState, "bin", "solana"),
+};
+
+const proofGraph = `${graphId}-anchor`;
+const proofSession = `${sessionId}-anchor`;
+const proof = [];
+for (let i = 0; i < 3; i++) {
+	proof.push(
+		await substrate.emit({
+			surface: "claude-code",
+			kind: "note",
+			session_id: proofSession,
+			graph_id: proofGraph,
+			summary: `anchor proof event ${i}`,
+		}),
+	);
+}
+check(
+	proof.every((result) => result.stored),
+	`emitted ${proof.length} chained events as the proof graph ${proofGraph}`,
+);
+const H = hourStart(Date.now());
+const H_ISO = new Date(H).toISOString();
+const fakeNow = H + 2 * HOUR_MS;
+
+// Beat 1 — the send path, then the crash: one stub-CLI send, row write lost.
+const crashed = await runAnchorJob({
+	greptime: jobGreptime as never,
+	substrate: jobSubstrate as never,
+	runner: execFileRunner,
+	rpc: fakeRpc,
+	env: jobEnv,
+	clock: () => fakeNow,
+});
+const sigA = chainSigs()[0]?.sig ?? "";
+check(crashed.code === 1 && crashed.failed === 1, "the lost row write fails the run (send-then-crash)");
+check(sendCount() === 1, "the crash run sent exactly once through the stub CLI", `${sendCount()} sends`);
+check((await greptime.anchorForPeriod(H).catch(() => null)) === null, "no anchors row survived the crash");
+check(
+	emittedAnchor.some((input) => input.kind === "warning" && (input.payload?.reason as string) === "store-failed"),
+	"the crash emitted anchor.failed store-failed",
+);
+
+// Beat 2 — the next run adopts the memo: row written, nothing sent.
+const adopted = await runAnchorJob({
+	greptime: greptime as never,
+	substrate: jobSubstrate as never,
+	runner: execFileRunner,
+	rpc: fakeRpc,
+	env: jobEnv,
+	clock: () => fakeNow,
+});
+check(adopted.code === 0 && adopted.adopted === 1, "the next run adopts the on-chain memo");
+check(sendCount() === 1, "the adopt run sent nothing", `${sendCount()} sends`);
+const adoptedRow = await greptime.anchorForPeriod(H).catch(() => null);
+check(adoptedRow?.tx_sig === sigA, "the adopted row carries the found tx_sig", adoptedRow?.tx_sig);
+check(
+	emittedAnchor.some((input) => (input.payload as Record<string, unknown>)?.adopted === true),
+	"the adopt run emitted anchor.written adopted:true",
+);
+
+// Beat 3 — a re-run sends nothing.
+const rerun = await runAnchorJob({
+	greptime: greptime as never,
+	substrate: jobSubstrate as never,
+	runner: execFileRunner,
+	rpc: fakeRpc,
+	env: jobEnv,
+	clock: () => fakeNow,
+});
+check(rerun.code === 0 && rerun.anchored === 0 && rerun.adopted === 0, "a re-run anchors nothing");
+check(sendCount() === 1, "the re-run sent nothing", `${sendCount()} sends`);
+
+// Beat 4 — the untouched proof graph verifies with every hour anchored.
+const proofSubstrate = new Substrate({ ...config, solana: { ...config.solana, pubkey: FAKE_PUBKEY } }, { index: null, greptime });
+const untouched = await proofSubstrate.verifyGraph(proofGraph, { now: fakeNow, rpc: fakeRpc });
+check(untouched.ok, `the untouched proof graph verifies`, untouched.ok ? undefined : untouched.reason);
+check(
+	untouched.hours.length === 1 && untouched.hours[0]?.status === "anchored" && untouched.hours[0]?.tx_sig === sigA,
+	`its hour ${H_ISO} is anchored`,
+	untouched.hours[0]?.status,
+);
+
+// Beat 5 — tamper: one more event on the proof session. The chain still
+// verifies (it links onto the previous hash), but the hour's root moved, so
+// verify must fail naming the hour — the root comparison, not the
+// duplicate-hash guard (every id still has exactly one hash).
+const extra = await substrate.emit({
+	surface: "claude-code",
+	kind: "note",
+	session_id: proofSession,
+	graph_id: proofGraph,
+	summary: "anchor proof event appended after anchoring",
+});
+check(extra.stored, "appended one event to the proof session after anchoring");
+const extraRecords = await greptime.graphIngest(proofGraph).catch(() => []);
+check(
+	extraRecords.some((record) => record.event_id === extra.event.id && hourStart(record.ingested_at) === H),
+	"the appended event landed in the anchored hour",
+	"hour boundary crossed mid-proof; re-run",
+);
+const tampered = await proofSubstrate.verifyGraph(proofGraph, { now: fakeNow, rpc: fakeRpc });
+check(!tampered.ok, "verify fails after the append", "verify still passes");
+check(tampered.chain.ok, "the per-session chain still verifies");
+check(
+	tampered.hours[0]?.status === "mismatch" && (tampered.reason ?? "").includes(H_ISO),
+	`verify names hour ${H_ISO} mismatch`,
+	tampered.hours[0]?.status,
+);
+check(sendCount() === 1, "the tamper caused no send", `${sendCount()} sends`);
+rpcServer.stop();
 
 // ── report ───────────────────────────────────────────────────────────────────
 const failed = results.filter((result) => !result.ok);
