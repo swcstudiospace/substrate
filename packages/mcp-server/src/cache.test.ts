@@ -7,15 +7,18 @@
  * broken. `/healthz` reports the counters and does not take its status from them.
  */
 import { afterAll, describe, expect, test } from "bun:test";
-import type { AddressInfo } from "node:net";
+import net, { type AddressInfo } from "node:net";
 import { findCounter, sumCounter, type MetricSnapshot } from "@substrate/observability";
 import {
 	CACHE_TTL,
 	COMMAND_TIMEOUT_MS,
 	CONNECT_TIMEOUT_MS,
+	GRAPHS_GENERATION_KEY,
 	MEMORY_GENERATION_KEY,
 	ReadThroughCache,
 	cacheKey,
+	createReadThroughCache,
+	graphGenerationKey,
 	type CacheRedis,
 } from "./cache.ts";
 import { loadConfig } from "./config.ts";
@@ -78,11 +81,11 @@ describe("ReadThroughCache", () => {
 		let loads = 0;
 		const load = async () => {
 			loads += 1;
-			return { text: "held by cursor" };
+			return [{ text: "held by cursor" }];
 		};
 
-		expect(await cache.getOrLoad({ ...read, load })).toEqual({ text: "held by cursor" });
-		expect(await cache.getOrLoad({ ...read, load })).toEqual({ text: "held by cursor" });
+		expect(await cache.getOrLoad({ ...read, load })).toEqual([{ text: "held by cursor" }]);
+		expect(await cache.getOrLoad({ ...read, load })).toEqual([{ text: "held by cursor" }]);
 
 		expect(loads).toBe(1);
 		expect(redis.sets).toBe(1);
@@ -110,13 +113,13 @@ describe("ReadThroughCache", () => {
 		const redis = new FakeRedis();
 		const cache = cacheOf(redis);
 		let value = "before";
-		const load = async () => value;
+		const load = async () => [value];
 
-		expect(await cache.getOrLoad({ ...read, load })).toBe("before");
+		expect(await cache.getOrLoad({ ...read, load })).toEqual(["before"]);
 		value = "after";
-		expect(await cache.getOrLoad({ ...read, load })).toBe("before");
+		expect(await cache.getOrLoad({ ...read, load })).toEqual(["before"]);
 		await cache.bump(MEMORY_GENERATION_KEY);
-		expect(await cache.getOrLoad({ ...read, load })).toBe("after");
+		expect(await cache.getOrLoad({ ...read, load })).toEqual(["after"]);
 		expect(cache.health()).toMatchObject({ hits: 1, misses: 2 });
 	});
 
@@ -205,18 +208,90 @@ describe("ReadThroughCache", () => {
 		expect(lines[0]).toContain("[REDACTED]");
 	});
 
+	test("valid JSON of the wrong shape is a bypass", async () => {
+		const redis = new FakeRedis();
+		const briefKey = cacheKey("brief", "cursor", "0", {});
+		redis.values.set(briefKey, JSON.stringify({ v: 42 }));
+		const searchKey = cacheKey("memory-search", "cursor", "0", { query: "lease" });
+		redis.values.set(searchKey, JSON.stringify({ v: {} }));
+		const cache = cacheOf(redis);
+
+		expect(
+			await cache.getOrLoad({
+				klass: "brief",
+				surface: "cursor",
+				args: {},
+				generations: [MEMORY_GENERATION_KEY],
+				load: async () => "a brief",
+			}),
+		).toBe("a brief");
+		expect(await cache.getOrLoad({ ...read, load: async () => [{ id: "mem-1" }] })).toEqual([{ id: "mem-1" }]);
+
+		expect(cache.health()).toMatchObject({ hits: 0, bypasses: 2, errors: 2 });
+		expect(redis.values.get(briefKey)).toBe(JSON.stringify({ v: "a brief" }));
+	});
+
+	test("a failed bump keeps later reads on the source until a bump lands", async () => {
+		const redis = new FakeRedis();
+		const cache = cacheOf(redis);
+		let value = "before";
+		expect(await cache.getOrLoad({ ...read, load: async () => [value] })).toEqual(["before"]);
+
+		redis.fail = true;
+		redis.failMessage = "incr failed";
+		await cache.bump(MEMORY_GENERATION_KEY);
+		redis.fail = false;
+		value = "after";
+
+		expect(await cache.getOrLoad({ ...read, load: async () => [value] })).toEqual(["after"]);
+		expect(await cache.getOrLoad({ ...read, load: async () => [value] })).toEqual(["after"]);
+		expect(cache.health().hits).toBe(0);
+		expect(cache.health().mode).toBe("degraded");
+
+		await cache.bump(MEMORY_GENERATION_KEY);
+		expect(await cache.getOrLoad({ ...read, load: async () => ["landed"] })).toEqual(["landed"]);
+		expect(await cache.getOrLoad({ ...read, load: async () => ["stale"] })).toEqual(["landed"]);
+		expect(cache.health()).toMatchObject({ hits: 1, mode: "on" });
+	});
+
+	test("a stored answer expires when its deadline does", async () => {
+		const redis = new FakeRedis();
+		const now = 1_000_000;
+		const cache = new ReadThroughCache({ redis, enabled: true, log: () => {}, now: () => now });
+
+		await cache.getOrLoad({
+			klass: "memory-search",
+			surface: "cursor",
+			args: { query: "lease" },
+			generations: [MEMORY_GENERATION_KEY],
+			refreshAt: () => now + 20_000,
+			load: async () => [],
+		});
+		await cache.getOrLoad({
+			klass: "brief",
+			surface: "cursor",
+			args: {},
+			generations: [MEMORY_GENERATION_KEY],
+			refreshAt: () => now - 1,
+			load: async () => "already due",
+		});
+
+		expect(redis.ttls).toEqual([20]);
+		expect(redis.sets).toBe(1);
+	});
+
 	test("two surfaces do not share a key", async () => {
 		const redis = new FakeRedis();
 		const cache = cacheOf(redis);
 		let loads = 0;
 		const load = async () => {
 			loads += 1;
-			return loads;
+			return [loads];
 		};
 
-		expect(await cache.getOrLoad({ ...read, surface: "cursor", load })).toBe(1);
-		expect(await cache.getOrLoad({ ...read, surface: "grok-bot", load })).toBe(2);
-		expect(await cache.getOrLoad({ ...read, surface: "cursor", load })).toBe(1);
+		expect(await cache.getOrLoad({ ...read, surface: "cursor", load })).toEqual([1]);
+		expect(await cache.getOrLoad({ ...read, surface: "grok-bot", load })).toEqual([2]);
+		expect(await cache.getOrLoad({ ...read, surface: "cursor", load })).toEqual([1]);
 	});
 
 	test("SUBSTRATE_CACHE=0 and a missing URL leave the cache off", () => {
@@ -343,6 +418,165 @@ describe("the same answer with the cache off, on and broken", () => {
 		expect(on.sets).toBe(1);
 	});
 
+	test("a graph write refreshes a repo brief", async () => {
+		let loads = 0;
+		const index = {
+			getGraph: async () => null,
+			memoryForBrief: async () => {
+				loads += 1;
+				return [];
+			},
+			openGraphs: async () => [],
+			registerGraph: async () => ({
+				graph_id: "ut-other",
+				notion_task_page: null,
+				repo: "acme/app",
+				branch: null,
+				surface: null,
+				status: "active",
+				pr_url: null,
+				created: null,
+				updated: null,
+				nodes: [],
+				steps: [],
+				edges: [],
+			}),
+		};
+		const redis = new FakeRedis();
+		const substrate = new Substrate(loadConfig({}), {
+			index: index as never,
+			greptime: null,
+			cache: cacheOf(redis),
+		});
+		const request = { surface: "cursor" as const, repo: "acme/app" };
+		await substrate.brief(request);
+		await substrate.brief(request);
+		expect(loads).toBe(1);
+
+		await substrate.registerGraph({ graph_id: "ut-other" } as never);
+		expect(redis.values.get(GRAPHS_GENERATION_KEY)).toBe("1");
+		expect(redis.values.get(graphGenerationKey("ut-other"))).toBe("1");
+		await substrate.brief(request);
+		expect(loads).toBe(2);
+	});
+
+	test("an unverified accept and an uncertain commit both refresh memory", async () => {
+		const redis = new FakeRedis();
+		const row = {
+			id: "mem-1",
+			scope: "graph:ut-1",
+			kind: "fact",
+			subject: null,
+			text: "hermes finished n2",
+			writer: "hermes",
+			actor: "agent",
+			trust: "agent-claimed",
+			ttl: "30d",
+			created: "2026-10-09T00:00:00.000Z",
+			version: 1,
+			entry_hash: "abc",
+			needs_reverification: false,
+		};
+		const accepted = {
+			claimWrite: async () => ({ claimed: true, holder: "h1", tookOverFrom: null }),
+			standingEntry: async () => null,
+			insertEntry: async (entry: typeof row) => ({ ok: true, entry }),
+			finishWrite: async () => undefined,
+			readEntry: async () => null,
+		};
+		const unverified = new Substrate(loadConfig({}), {
+			index: accepted as never,
+			greptime: null,
+			cache: cacheOf(redis),
+		});
+		const result = await unverified.writeMemory({
+			scope: "graph:ut-1",
+			kind: "fact",
+			text: "hermes finished n2",
+			writer: "hermes",
+		});
+		expect(result.outcome).toBe("accepted");
+		expect(result.verified_persisted).toBe(false);
+		expect(redis.values.get(MEMORY_GENERATION_KEY)).toBe("1");
+
+		const throwing = new Substrate(loadConfig({}), {
+			index: {
+				...accepted,
+				readEntry: async () => {
+					throw new Error("read failed after insert");
+				},
+			} as never,
+			greptime: null,
+			cache: cacheOf(redis),
+		});
+		const denied = await throwing.writeMemory({
+			scope: "graph:ut-1",
+			kind: "fact",
+			text: "hermes finished n2",
+			writer: "hermes",
+		});
+		expect(denied.outcome).toBe("denied");
+		expect(redis.values.get(MEMORY_GENERATION_KEY)).toBe("2");
+
+		const refused = new Substrate(loadConfig({}), {
+			index: {} as never,
+			greptime: null,
+			cache: cacheOf(redis),
+		});
+		expect((await refused.writeMemory({ ...{ scope: "person:ove", kind: "fact" as const, text: "no", writer: "hermes" } })).outcome).toBe(
+			"denied",
+		);
+		expect(redis.values.get(MEMORY_GENERATION_KEY)).toBe("2");
+	});
+
+	test("a brief's TTL stops at the next lease expiry", async () => {
+		const redis = new FakeRedis();
+		const expires = new Date(Date.now() + 25_000).toISOString();
+		const index = {
+			getGraph: async () => ({
+				graph_id: "ut-1",
+				notion_task_page: null,
+				repo: null,
+				branch: null,
+				surface: "cursor",
+				status: "active",
+				pr_url: null,
+				created: null,
+				updated: null,
+				nodes: [
+					{
+						graph_id: "ut-1",
+						node_id: "n1",
+						linear_issue_id: null,
+						linear_identifier: null,
+						notion_page: null,
+						state: "todo",
+						claimed_by: "cursor",
+						claimed_at: new Date().toISOString(),
+						claim_session: null,
+						lease_id: "lease",
+						lease_expires_at: expires,
+						lease_heartbeat_at: null,
+						lease_epoch: 1,
+					},
+				],
+				steps: [],
+				edges: [],
+			}),
+			memoryForBrief: async () => [],
+		};
+		const substrate = new Substrate(loadConfig({}), {
+			index: index as never,
+			greptime: null,
+			cache: new ReadThroughCache({ redis, enabled: true, log: () => {}, now: Date.now }),
+		});
+		await substrate.brief({ surface: "cursor", graph_id: "ut-1" });
+		expect(redis.ttls).toHaveLength(1);
+		expect(redis.ttls[0]).toBeLessThanOrEqual(25);
+		expect(redis.ttls[0]).toBeGreaterThanOrEqual(1);
+		expect(redis.ttls[0]).toBeLessThan(CACHE_TTL.brief);
+	});
+
 	test("a brief is cached until its generation moves, and events are not", async () => {
 		let graphs = 0;
 		let queries = 0;
@@ -379,6 +613,103 @@ describe("the same answer with the cache off, on and broken", () => {
 		await substrate.queryEvents({ graph_id: "ut-1" });
 		await substrate.queryEvents({ graph_id: "ut-1" });
 		expect(queries).toBe(2);
+	});
+});
+
+describe("Bun RedisClient", () => {
+	const hello = [
+		"%7",
+		"$6",
+		"server",
+		"$5",
+		"redis",
+		"$7",
+		"version",
+		"$5",
+		"7.2.4",
+		"$5",
+		"proto",
+		":3",
+		"$2",
+		"id",
+		":10",
+		"$4",
+		"mode",
+		"$10",
+		"standalone",
+		"$4",
+		"role",
+		"$6",
+		"master",
+		"$7",
+		"modules",
+		"*0",
+		"",
+	].join("\r\n");
+
+	function reply(store: Map<string, string>, text: string): string {
+		const out: string[] = [];
+		let i = 0;
+		while (i < text.length && text[i] === "*") {
+			const header = text.indexOf("\r\n", i);
+			const count = Number(text.slice(i + 1, header));
+			i = header + 2;
+			const args: string[] = [];
+			for (let n = 0; n < count; n++) {
+				const lenEnd = text.indexOf("\r\n", i);
+				const len = Number(text.slice(i + 1, lenEnd));
+				const start = lenEnd + 2;
+				args.push(text.slice(start, start + len));
+				i = start + len + 2;
+			}
+			const [command, key, value] = args;
+			if (command === "HELLO") out.push(hello);
+			else if (command === "GET") {
+				const stored = key ? store.get(key) : undefined;
+				out.push(stored === undefined ? "$-1\r\n" : `$${stored.length}\r\n${stored}\r\n`);
+			} else if (command === "SET" && key !== undefined && value !== undefined) {
+				store.set(key, value);
+				out.push("+OK\r\n");
+			} else if (command === "INCR" && key !== undefined) {
+				const next = Number(store.get(key) ?? "0") + 1;
+				store.set(key, String(next));
+				out.push(`:${next}\r\n`);
+			}
+		}
+		return out.join("");
+	}
+
+	test("a dropped socket fails open, and the next command recovers", async () => {
+		const store = new Map<string, string>();
+		let drop = true;
+		const server = net.createServer((socket) => {
+			if (drop) {
+				socket.destroy();
+				return;
+			}
+			socket.on("data", (buf) => {
+				const answer = reply(store, buf.toString("utf8"));
+				if (answer.length > 0) socket.write(answer);
+			});
+			socket.on("error", () => {});
+		});
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		const port = (server.address() as AddressInfo).port;
+		try {
+			const cache = createReadThroughCache(loadConfig({ DRAGONFLY_URL: `redis://127.0.0.1:${port}` }), () => {});
+			const request = { ...read, klass: "brief" as const, args: {}, load: async () => "source" };
+			const started = Date.now();
+			expect(await cache.getOrLoad(request)).toBe("source");
+			expect(Date.now() - started).toBeLessThan(1_000);
+			expect(cache.health()).toMatchObject({ bypasses: 1, errors: 1, hits: 0, mode: "degraded" });
+
+			drop = false;
+			expect(await cache.getOrLoad(request)).toBe("source");
+			expect(await cache.getOrLoad(request)).toBe("source");
+			expect(cache.health()).toMatchObject({ hits: 1, misses: 1, mode: "on", connected: true });
+		} finally {
+			server.close();
+		}
 	});
 });
 

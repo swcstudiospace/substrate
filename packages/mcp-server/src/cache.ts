@@ -31,8 +31,26 @@ export type CacheResult = "hit" | "miss" | "bypass" | "error";
 
 export const MEMORY_GENERATION_KEY = `${CACHE_PREFIX}:gen:memory`;
 
+/** Bumped on every graph write, so a brief that lists other graphs refreshes too. */
+export const GRAPHS_GENERATION_KEY = `${CACHE_PREFIX}:gen:graphs`;
+
 export function graphGenerationKey(graphId: string): string {
 	return `${CACHE_PREFIX}:gen:graph:${graphId}`;
+}
+
+/**
+ * Soonest future timestamp, in epoch ms. A cached answer must not outlive the
+ * next lease expiry or reverify deadline baked into it.
+ */
+export function earliestRefreshAt(stamps: ReadonlyArray<string | null | undefined>, now = Date.now()): number | null {
+	let best: number | null = null;
+	for (const stamp of stamps) {
+		if (!stamp) continue;
+		const ms = Date.parse(stamp);
+		if (!Number.isFinite(ms) || ms <= now) continue;
+		if (best === null || ms < best) best = ms;
+	}
+	return best;
 }
 
 export interface CacheHealth {
@@ -105,20 +123,62 @@ export function cacheKey(klass: CacheClass, surface: string, generation: string,
 
 function bunRedis(url: string): CacheRedis {
 	let client: RedisClient | null = null;
-	const connect = (): RedisClient => {
-		client ??= new RedisClient(url, {
+	let opening: Promise<RedisClient> | null = null;
+
+	const discard = (redis: RedisClient): void => {
+		if (client !== redis) return;
+		client = null;
+		opening = null;
+		try {
+			redis.close();
+		} catch {
+			// The socket is already gone.
+		}
+	};
+
+	const open = (): Promise<RedisClient> => {
+		if (client?.connected) return Promise.resolve(client);
+		if (opening) return opening;
+		// Built on the first command. `enableOfflineQueue: false` rejects a
+		// command sent before connect, so connect finishes first. A failure
+		// drops this client; the next request opens a new one. That is not a
+		// retry of the request that just failed.
+		const next = new RedisClient(url, {
 			connectionTimeout: CONNECT_TIMEOUT_MS,
 			idleTimeout: 0,
 			autoReconnect: false,
 			maxRetries: 0,
 			enableOfflineQueue: false,
 		});
-		return client;
+		client = next;
+		const flight = next.connect().then(
+			() => next,
+			(cause: unknown) => {
+				discard(next);
+				throw cause;
+			},
+		);
+		const settled = flight.finally(() => {
+			if (opening === settled) opening = null;
+		});
+		opening = settled;
+		return settled;
 	};
+
+	const run = async <T>(op: (redis: RedisClient) => Promise<T>): Promise<T> => {
+		const redis = await open();
+		try {
+			return await op(redis);
+		} catch (cause) {
+			discard(redis);
+			throw cause;
+		}
+	};
+
 	return {
-		get: (key) => connect().get(key),
-		set: (key, value, ttlSeconds) => connect().set(key, value, "EX", ttlSeconds).then(() => undefined),
-		incr: (key) => connect().incr(key),
+		get: (key) => run((redis) => redis.get(key)),
+		set: (key, value, ttlSeconds) => run((redis) => redis.set(key, value, "EX", ttlSeconds).then(() => undefined)),
+		incr: (key) => run((redis) => redis.incr(key)),
 	};
 }
 
@@ -149,6 +209,7 @@ export class ReadThroughCache {
 	private errors = 0;
 	private degraded = false;
 	private connected = false;
+	private readonly staleGenerations = new Set<string>();
 	private lastLogAt = Number.NEGATIVE_INFINITY;
 
 	constructor(options: ReadThroughOptions) {
@@ -182,10 +243,19 @@ export class ReadThroughCache {
 		args: unknown;
 		generations: readonly string[];
 		load: () => Promise<T>;
+		/** When the loaded value stops being true. Null uses the class TTL. */
+		refreshAt?: (value: T) => number | null;
 	}): Promise<T> {
 		if (!this.enabled || !this.redis) {
 			this.count("bypass");
 			this.note("cache off");
+			return request.load();
+		}
+		// A bump that did not land leaves the previous generation readable. Stay
+		// on the source until a later bump advances it. A successful GET does not.
+		if (request.generations.some((key) => this.staleGenerations.has(key))) {
+			this.count("bypass");
+			this.note("generation not advanced");
 			return request.load();
 		}
 		const redis = this.redis;
@@ -207,10 +277,9 @@ export class ReadThroughCache {
 		try {
 			const raw = await this.attempt(() => redis.get(key));
 			if (raw !== null) {
-				const parsed = parseEnvelope<T>(raw);
+				const parsed = parseEnvelope<T>(raw, request.klass);
 				if (parsed.ok) {
-					this.connected = true;
-					this.degraded = false;
+					this.noteConnected();
 					this.count("hit");
 					return parsed.value;
 				}
@@ -236,34 +305,46 @@ export class ReadThroughCache {
 			this.count("error");
 			return value;
 		}
+		const ttl = cacheTtl(request.klass, request.refreshAt?.(value) ?? null, this.now());
+		if (ttl === null) return value;
 		try {
-			await this.attempt(() => redis.set(key, encoded, CACHE_TTL[request.klass]));
-			this.connected = true;
-			this.degraded = false;
+			await this.attempt(() => redis.set(key, encoded, ttl));
+			this.noteConnected();
 		} catch (cause) {
 			// The caller already has the source value. Count the error; do not
 			// retry the write.
 			this.fail(cause, false);
 		}
-		const roundTrip = parseEnvelope<T>(encoded);
+		const roundTrip = parseEnvelope<T>(encoded, request.klass);
 		return roundTrip.ok ? roundTrip.value : value;
 	}
 
-	/** Bump a generation. A failure leaves the previous entries until their TTL. */
+	/**
+	 * Bump a generation. A failure marks that generation stale: later reads of it
+	 * bypass until a bump succeeds. Leaving the old key readable would serve the
+	 * pre-write answer for the whole TTL.
+	 */
 	async bump(key: string): Promise<void> {
 		if (!this.enabled || !this.redis) return;
 		try {
 			await this.attempt(() => this.redis!.incr(key));
-			this.connected = true;
-			this.degraded = false;
+			this.staleGenerations.delete(key);
+			this.noteConnected();
 		} catch (cause) {
+			this.staleGenerations.add(key);
 			this.fail(cause, false);
 		}
 	}
 
 	private mode(): CacheMode {
 		if (!this.enabled) return "off";
-		return this.degraded ? "degraded" : "on";
+		return this.degraded || this.staleGenerations.size > 0 ? "degraded" : "on";
+	}
+
+	/** A live command. A stale generation stays degraded until its bump lands. */
+	private noteConnected(): void {
+		this.connected = true;
+		if (this.staleGenerations.size === 0) this.degraded = false;
 	}
 
 	private count(result: CacheResult): void {
@@ -321,10 +402,32 @@ function stripRedisUrl(text: string): string {
 	return text.replace(/\b(?:redis|rediss):\/\/\S+/gi, `redis://${REDACTED}`);
 }
 
-function parseEnvelope<T>(raw: string): { ok: true; value: T } | { ok: false } {
+/** Class TTL, or sooner when the value names its own deadline. Null means do not store. */
+function cacheTtl(klass: CacheClass, refreshAt: number | null, now: number): number | null {
+	const cap = CACHE_TTL[klass];
+	if (refreshAt === null || !Number.isFinite(refreshAt)) return cap;
+	const seconds = Math.floor((refreshAt - now) / 1000);
+	if (seconds < 1) return null;
+	return Math.min(cap, seconds);
+}
+
+function shapeOk(klass: CacheClass, value: unknown): boolean {
+	if (klass === "brief") return typeof value === "string";
+	if (klass === "memory-search") {
+		if (Array.isArray(value)) return true;
+		return !!value && typeof value === "object" && Array.isArray((value as { entries?: unknown }).entries);
+	}
+	if (value === null) return true;
+	if (!value || typeof value !== "object") return false;
+	const graph = value as { graph_id?: unknown; nodes?: unknown };
+	return typeof graph.graph_id === "string" && Array.isArray(graph.nodes);
+}
+
+function parseEnvelope<T>(raw: string, klass: CacheClass): { ok: true; value: T } | { ok: false } {
 	try {
-		const parsed = JSON.parse(raw) as { v?: T };
+		const parsed = JSON.parse(raw) as { v?: unknown };
 		if (!parsed || typeof parsed !== "object" || !("v" in parsed)) return { ok: false };
+		if (!shapeOk(klass, parsed.v)) return { ok: false };
 		return { ok: true, value: parsed.v as T };
 	} catch {
 		return { ok: false };

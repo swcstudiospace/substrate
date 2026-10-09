@@ -9,8 +9,10 @@ import { decideClaim, type ClaimDecision } from "@substrate/audit";
 import { formatMemo, hourEnd, hourIso, hourStart, isClosed, merkleRootHex } from "@substrate/ledger";
 import { composeBrief, type BriefRequest } from "./brief.ts";
 import {
+	GRAPHS_GENERATION_KEY,
 	MEMORY_GENERATION_KEY,
 	createReadThroughCache,
+	earliestRefreshAt,
 	graphGenerationKey,
 	type CacheHealth,
 	type CacheSample,
@@ -578,6 +580,7 @@ export class Substrate {
 		const started = performance.now();
 		let ok = false;
 		try {
+			const noted: Array<number | null> = [];
 			const brief = await this.cache.getOrLoad({
 				klass: "brief",
 				surface: request.surface,
@@ -586,10 +589,17 @@ export class Substrate {
 					branch: request.branch ?? null,
 					graph_id: request.graph_id ?? null,
 				},
+				// The shared graphs generation covers repo briefs and the other
+				// graphs a single-graph brief lists. The graph's own key still
+				// moves when that graph is written.
 				generations: request.graph_id
-					? [MEMORY_GENERATION_KEY, graphGenerationKey(request.graph_id)]
-					: [MEMORY_GENERATION_KEY],
-				load: () => composeBrief(request, { index: this.index, greptime: this.greptime }),
+					? [MEMORY_GENERATION_KEY, GRAPHS_GENERATION_KEY, graphGenerationKey(request.graph_id)]
+					: [MEMORY_GENERATION_KEY, GRAPHS_GENERATION_KEY],
+				refreshAt: () => noted.at(-1) ?? null,
+				load: () =>
+					composeBrief(request, { index: this.index, greptime: this.greptime }, (at) => {
+						noted.push(at);
+					}),
 			});
 			ok = true;
 			return brief;
@@ -754,6 +764,7 @@ export class Substrate {
 		}
 
 		let result: MemoryWriteResult;
+		let commitUncertain = false;
 		try {
 			result = await governMemoryWrite(request, {
 				store: this.index,
@@ -779,10 +790,13 @@ export class Substrate {
 				idempotency_key: "",
 				writer,
 			};
+			// The gate throws once an insert may already have committed, including
+			// a read-back that fails after the row landed. Treat that like a write.
+			commitUncertain = true;
 		}
 
 		await this.auditMemoryWrite(request, result);
-		if (result.outcome === "accepted" && result.verified_persisted) await this.cache.bump(MEMORY_GENERATION_KEY);
+		if (result.outcome === "accepted" || commitUncertain) await this.cache.bump(MEMORY_GENERATION_KEY);
 		return result;
 	}
 
@@ -841,6 +855,7 @@ export class Substrate {
 			surface,
 			args: { query, scope: scope ?? null, limit: limit ?? null, includeSuperseded: includeSuperseded ?? false },
 			generations: [MEMORY_GENERATION_KEY],
+			refreshAt: (entries) => earliestRefreshAt(entries.map((entry) => entry.reverify_after)),
 			load: async () => {
 				if (!this.index) return [];
 				return this.index.searchMemory(query, scope, limit, includeSuperseded);
@@ -861,6 +876,7 @@ export class Substrate {
 			surface,
 			args: search,
 			generations: [MEMORY_GENERATION_KEY],
+			refreshAt: (page) => earliestRefreshAt(page.entries.map((entry) => entry.reverify_after)),
 			load: async () => {
 				if (!this.index) return { entries: [], next: null };
 				return this.index.searchMemoryPage(search);
@@ -899,6 +915,7 @@ export class Substrate {
 			surface,
 			args: { graph_id: graphId },
 			generations: [graphGenerationKey(graphId)],
+			refreshAt: (graph) => earliestRefreshAt((graph?.nodes ?? []).map((node) => node.lease_expires_at)),
 			load: async () => {
 				if (!this.index) return null;
 				const graph = await this.index.getGraph(graphId);
@@ -907,12 +924,18 @@ export class Substrate {
 		});
 	}
 
+	/** One graph's generation, and the shared one every brief embeds. */
+	private async bumpGraph(graphId: string): Promise<void> {
+		await this.cache.bump(graphGenerationKey(graphId));
+		await this.cache.bump(GRAPHS_GENERATION_KEY);
+	}
+
 	async registerGraph(plan: Parameters<IndexStore["registerGraph"]>[0]) {
 		if (!this.index) throw new Error("graph_register requires SUBSTRATE_PG_URL");
 		// Re-registering a graph whose nodes are held echoes them back, so this reply
 		// is a reader's view as much as `graph_get` is.
 		const graph = withoutLeaseIds(await this.index.registerGraph(plan));
-		await this.cache.bump(graphGenerationKey(plan.graph_id));
+		await this.bumpGraph(plan.graph_id);
 		return graph;
 	}
 
@@ -934,7 +957,7 @@ export class Substrate {
 		if (correlationId !== undefined && graphId !== undefined) {
 			const result = await this.index.bindCorrelation(correlationId, graphId, boundBy);
 			if (result.status === "created") {
-				await this.cache.bump(graphGenerationKey(result.graph_id));
+				await this.bumpGraph(result.graph_id);
 				await this.emit({
 					surface: boundBy ?? "claude-code",
 					kind: "note",
@@ -1101,7 +1124,7 @@ export class Substrate {
 		});
 
 		const granted = verdict.decision === "granted";
-		if (result.claimed) await this.cache.bump(graphGenerationKey(graphId));
+		if (result.claimed) await this.bumpGraph(graphId);
 		return {
 			claimed: granted,
 			node: { ...result.node, lease_id: null },
@@ -1129,7 +1152,7 @@ export class Substrate {
 		if (!this.index) throw new Error("graph_heartbeat requires SUBSTRATE_PG_URL");
 		const ttl = normalizeTtlSeconds(ttlSeconds, this.config.leaseTtlSeconds);
 		const result = await this.index.heartbeatNode(graphId, nodeId, leaseId, caller, ttl);
-		if (result.ok) await this.cache.bump(graphGenerationKey(graphId));
+		if (result.ok) await this.bumpGraph(graphId);
 		return {
 			ok: result.ok,
 			lease: result.lease,
@@ -1181,7 +1204,7 @@ export class Substrate {
 			}).catch(() => undefined);
 		}
 		if (result.released && decision.ok && decision.action !== "noop") {
-			await this.cache.bump(graphGenerationKey(graphId));
+			await this.bumpGraph(graphId);
 		}
 		return {
 			released: result.released,
@@ -1238,7 +1261,7 @@ export class Substrate {
 		if (!this.index) return [];
 		const reaped = await this.index.reapExpiredLeases(repo ?? null);
 		for (const graphId of new Set(reaped.map((lease) => lease.graph_id))) {
-			await this.cache.bump(graphGenerationKey(graphId));
+			await this.bumpGraph(graphId);
 		}
 		for (const lease of reaped) {
 			await this.emit({
