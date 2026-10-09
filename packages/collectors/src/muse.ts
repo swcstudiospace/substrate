@@ -13,10 +13,10 @@
  * `SUBSTRATE_MUSE_REPOS` is required — a colon-separated list of absolute
  * roots. There is no inferred default. The operator names the blast radius.
  *
- * PLAN 19-04: `docs/collectors.md` does not exist yet. Record there that
  * `/brief` can still return 200 after `/healthz` reported the ledger up, if
  * the ledger drops between the check and the fetch. This writer cannot see
- * that race; a degraded 200 would be written like any other brief.
+ * that race; a degraded 200 is written like any other brief. The gap is
+ * recorded in `docs/collectors.md`.
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
