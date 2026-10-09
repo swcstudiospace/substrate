@@ -20,11 +20,16 @@
  * `drift` exits 1 when it found drift, so a hook or a cron can act on it, and an
  * evidence document nobody can tell from a missing one is not evidence. `lessons
  * recall` fails open instead: an unreachable bank injects nothing into a phase.
+ *
+ * The bearer for a surface comes from the token resolver: the environment
+ * value first, then the token-file variable, then the per-surface file in
+ * the tokens dir. Commands without a surface send as `claude-code`.
  * `skills propose` reports failure like `verify` and `drift`: it is not a hook command, and
  * a proposal that was refused or never reached the server must not look like one that landed.
  */
 import { chainStateOf, renderEvidenceHtml, type EvidenceBundle } from "@substrate/evidence";
 import { list, parseArgs, str } from "./args.ts";
+import { resolveBearer } from "./token.ts";
 import { httpMemory, lessonsTimeout, runLessons } from "./lessons.ts";
 import { runSkills, skillsTimeout } from "./skills.ts";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -38,8 +43,13 @@ function base(): string {
 	return (process.env.SUBSTRATE_URL?.trim() || DEFAULT_URL).replace(/\/+$/, "");
 }
 
-function headers(): Record<string, string> {
-	const token = process.env.SUBSTRATE_TOKEN?.trim();
+/**
+ * The bearer for a surface comes from the token resolver: the environment
+ * value first, else the token-file variable, else the per-surface file in
+ * the tokens dir. Absent everywhere means no header, as before.
+ */
+function headers(surface: string): Record<string, string> {
+	const token = resolveBearer(surface, process.env);
 	return { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) };
 }
 
@@ -64,11 +74,11 @@ function branch(cwd = process.cwd()): string | undefined {
 	return git(["rev-parse", "--abbrev-ref", "HEAD"], cwd) || undefined;
 }
 
-async function post(path: string, body: unknown): Promise<Response | null> {
+async function post(path: string, body: unknown, surface = "claude-code"): Promise<Response | null> {
 	try {
 		return await fetch(`${base()}${path}`, {
 			method: "POST",
-			headers: headers(),
+			headers: headers(surface),
 			body: JSON.stringify(body),
 			signal: AbortSignal.timeout(timeout()),
 		});
@@ -79,12 +89,17 @@ async function post(path: string, body: unknown): Promise<Response | null> {
 
 async function cmdBrief(args: Record<string, string | true>): Promise<void> {
 	const repo = str(args.repo) ?? repoSlug();
-	const response = await post("/brief", {
-		repo,
-		branch: str(args.branch) ?? branch(),
-		graph_id: str(args.graph),
-		surface: str(args.surface) ?? "claude-code",
-	});
+	const surface = str(args.surface) ?? "claude-code";
+	const response = await post(
+		"/brief",
+		{
+			repo,
+			branch: str(args.branch) ?? branch(),
+			graph_id: str(args.graph),
+			surface,
+		},
+		surface,
+	);
 	const brief = response?.ok ? (await response.text()).trim() : "";
 	if (!brief) return; // fail-open and silent: nothing useful to say
 
@@ -119,18 +134,23 @@ async function cmdEmit(args: Record<string, string | true>): Promise<void> {
 			process.stderr.write("[substrate] --payload is not valid JSON; dropping it\n");
 		}
 	}
-	await post("/events", {
-		kind,
-		summary,
-		surface: str(args.surface) ?? "claude-code",
-		session_id: str(args.session),
-		graph_id: str(args.graph),
-		node_id: str(args.node),
-		repo: str(args.repo) ?? repoSlug(),
-		branch: str(args.branch) ?? branch(),
-		actor: str(args.actor) ?? "agent",
-		payload,
-	});
+	const surface = str(args.surface) ?? "claude-code";
+	await post(
+		"/events",
+		{
+			kind,
+			summary,
+			surface,
+			session_id: str(args.session),
+			graph_id: str(args.graph),
+			node_id: str(args.node),
+			repo: str(args.repo) ?? repoSlug(),
+			branch: str(args.branch) ?? branch(),
+			actor: str(args.actor) ?? "agent",
+			payload,
+		},
+		surface,
+	);
 }
 
 /** Write the brief to disk, then exec the agent. For surfaces with no hook API. */
@@ -220,23 +240,28 @@ async function cmdHandoff(args: Record<string, string | true>): Promise<void> {
 		process.stderr.write("[substrate] handoff needs --to and --goal\n");
 		return;
 	}
-	const response = await post("/handoff", {
-		to,
-		goal,
-		files: list(args.files),
-		dod: list(args.dod),
-		blockers: list(args.blockers),
-		graph_id: str(args.graph),
-		node_id: str(args.node),
-		linear_identifier: str(args.linear),
-		repo: str(args.repo) ?? repoSlug(),
-		branch: str(args.branch) ?? branch(),
-		session_id: str(args.session),
-		surface: str(args.surface) ?? "claude-code",
-		notes: str(args.notes),
-		lease_id: str(args.lease),
-		release_lease: args.release === true || str(args.release) === "true",
-	});
+	const surface = str(args.surface) ?? "claude-code";
+	const response = await post(
+		"/handoff",
+		{
+			to,
+			goal,
+			files: list(args.files),
+			dod: list(args.dod),
+			blockers: list(args.blockers),
+			graph_id: str(args.graph),
+			node_id: str(args.node),
+			linear_identifier: str(args.linear),
+			repo: str(args.repo) ?? repoSlug(),
+			branch: str(args.branch) ?? branch(),
+			session_id: str(args.session),
+			surface,
+			notes: str(args.notes),
+			lease_id: str(args.lease),
+			release_lease: args.release === true || str(args.release) === "true",
+		},
+		surface,
+	);
 	if (!response) {
 		process.stderr.write("[substrate] unreachable; the handoff was not recorded\n");
 		return;
@@ -393,7 +418,7 @@ switch (command) {
 			await runLessons(rest, {
 				memory: httpMemory({
 					url: base(),
-					token: process.env.SUBSTRATE_TOKEN?.trim() || undefined,
+					token: resolveBearer("claude-code", process.env) ?? undefined,
 					timeoutMs: lessonsTimeout(process.env.SUBSTRATE_TIMEOUT_MS),
 				}),
 				repo: repoSlug(),

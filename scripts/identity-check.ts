@@ -18,7 +18,7 @@ import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tokenConfig, tokenEnvName } from "../packages/mcp-server/src/config.ts";
-import { SURFACES } from "../packages/mcp-server/src/types.ts";
+import { SURFACES, type Surface } from "../packages/mcp-server/src/types.ts";
 import { DEFAULT_TOKENS_DIR, firstLine } from "../packages/cli/src/token.ts";
 
 /** Every line this script prints starts here. */
@@ -367,7 +367,12 @@ export interface IdentityReport {
 /** Every server variable name the manifest expects to see. */
 export function expectedServerNames(manifest: Manifest): Set<string> {
 	const out = new Set<string>(manifest.required_server_names);
-	for (const client of manifest.clients) out.add(tokenEnvName(client.surface));
+	for (const client of manifest.clients) {
+		// Surface membership is a test lock, not a refusal: an unknown surface
+		// still yields its deterministic variable name, so the report shows it
+		// as missing instead of silently dropping the client.
+		out.add(tokenEnvName(client.surface as Surface));
+	}
 	return out;
 }
 

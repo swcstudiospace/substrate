@@ -9,7 +9,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { tokenEnvName } from "../packages/mcp-server/src/config.ts";
-import { SURFACES } from "../packages/mcp-server/src/types.ts";
+import { SURFACES, type Surface } from "../packages/mcp-server/src/types.ts";
 import {
 	checkNames,
 	checkValues,
@@ -126,7 +126,7 @@ describe("the tracked manifest", () => {
 		const ids = new Set(manifest.clients.map((c) => c.id));
 		expect(ids.size).toBe(manifest.clients.length);
 		for (const client of manifest.clients) {
-			expect([...SURFACES]).toContain(client.surface);
+			expect([...(SURFACES as readonly string[])]).toContain(client.surface);
 			expect(isLive(client.state) || client.state === "after-phase-19" || isDormant(client.state) || client.state === "not-installed").toBe(
 				true,
 			);
@@ -159,7 +159,7 @@ describe("the tracked manifest", () => {
 		const example = readFileSync(ENV_EXAMPLE, "utf8").split("\n");
 		const manifest = loadManifest(MANIFEST_PATH);
 		for (const surface of new Set(manifest.clients.map((c) => c.surface))) {
-			expect(example).toContain(`${tokenEnvName(surface)}=`);
+			expect(example).toContain(`${tokenEnvName(surface as Surface)}=`);
 		}
 	});
 
@@ -178,7 +178,7 @@ describe("the tracked manifest", () => {
 		const manifest = loadManifest(MANIFEST_PATH);
 		const expected = expectedServerNames(manifest);
 		for (const name of manifest.required_server_names) expect(expected.has(name)).toBe(true);
-		for (const client of manifest.clients) expect(expected.has(tokenEnvName(client.surface))).toBe(true);
+		for (const client of manifest.clients) expect(expected.has(tokenEnvName(client.surface as Surface))).toBe(true);
 	});
 });
 

@@ -194,22 +194,71 @@ function readSkills(env: Record<string, string | undefined>): SubstrateConfig["s
 	}
 	return { repo, remoteUrl, stateDir, gh, problem };
 }
-/** "swarm-a05-be" → "SUBSTRATE_TOKEN_SWARM_A05_BE": the inverse of `envSuffixToSurface`. */
-
+/** "swarm-a05-be" → "SUBSTRATE_TOKEN_SWARM_A05_BE": the inverse of the suffix mapping in `tokenConfig`. */
 export function tokenEnvName(surface: Surface): string {
 	return `SUBSTRATE_TOKEN_${surface.toUpperCase().replace(/-/g, "_")}`;
 }
 
-/** SUBSTRATE_TOKEN_GROK_BUILD → "grok-build" */
-function envSuffixToSurface(suffix: string): Surface {
-	return suffix.toLowerCase().replace(/_/g, "-") as Surface;
+/**
+ * A surface-token configuration that contradicts itself, reported at boot.
+ *
+ * The message names variables only, never values: it goes to stderr, and a
+ * refused credential in a log is still a credential in a log.
+ */
+export class ConfigError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "ConfigError";
+	}
 }
 
-function readTokens(env: Record<string, string | undefined>): Map<string, Surface> {
+/**
+ * bearer token → surface, from every `SUBSTRATE_TOKEN_*` variable.
+ *
+ * Each variable holds a comma-separated list, so one surface can have several
+ * values — the operator, the gateway and the connector each hold their own —
+ * and one value stays valid, so the change is backward compatible. Entries
+ * split on commas and whitespace like the reviewer tokens, trimmed with
+ * empties dropped; a repeat under one variable is silently one entry.
+ *
+ * Pure, so boot and `identity:check --values` share it. It throws ConfigError,
+ * naming variables only, when a variable names no surface in SURFACES or when
+ * one value is listed under two surfaces: today's Map.set would silently
+ * re-attribute that token to whichever variable came last.
+ */
+export function tokenConfig(env: Record<string, string | undefined>): Map<string, Surface> {
+	const prefix = "SUBSTRATE_TOKEN_";
 	const tokens = new Map<string, Surface>();
+	const firstVar = new Map<string, string>();
 	for (const [key, value] of Object.entries(env)) {
-		if (!key.startsWith("SUBSTRATE_TOKEN_") || !value) continue;
-		tokens.set(value, envSuffixToSurface(key.slice("SUBSTRATE_TOKEN_".length)));
+		if (!key.startsWith(prefix)) continue;
+		const surface = key.slice(prefix.length).toLowerCase().replace(/_/g, "-");
+		if (!(SURFACES as readonly string[]).includes(surface)) {
+			throw new ConfigError(
+				`${key} names no known surface; remove it or rename it to the SUBSTRATE_TOKEN_<SURFACE> ` +
+					`of the surface its value authenticates as`,
+			);
+		}
+		if (!value) continue;
+		for (const entry of new Set(
+			value
+				.split(/[\s,]+/)
+				.map((token) => token.trim())
+				.filter((token) => token.length > 0),
+		)) {
+			const other = firstVar.get(entry);
+			if (other === undefined) {
+				firstVar.set(entry, key);
+				// Narrowed by the SURFACES membership throw above; the cast says
+				// so at the one place a Surface is produced.
+				tokens.set(entry, surface as Surface);
+			} else if (other !== key) {
+				throw new ConfigError(
+					`the same token value is listed under both ${other} and ${key}; a token names exactly ` +
+						`one surface, so the server refuses to choose between them`,
+				);
+			}
+		}
 	}
 	return tokens;
 }
@@ -270,7 +319,7 @@ function isKnownDesktopSurface(value: string): value is Surface {
 export function loadConfig(env: Record<string, string | undefined> = process.env): SubstrateConfig {
 	const greptimeUrl = env.GREPTIME_URL?.trim();
 	const leaseTtl = Number(env.SUBSTRATE_LEASE_TTL_SECONDS);
-	const tokens = readTokens(env);
+	const tokens = tokenConfig(env);
 	const desktopNames = (env.SUBSTRATE_DESKTOP_SURFACES ?? "")
 		.split(",")
 		.map((name) => name.trim())
