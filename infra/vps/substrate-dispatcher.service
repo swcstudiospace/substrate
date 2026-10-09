@@ -1,0 +1,59 @@
+[Unit]
+Description=Agent Substrate — Linear dispatch to Hermes sessions
+Documentation=https://github.com/swcstudiospace/agent-substrate
+After=network-online.target substrate-mcp.service
+Wants=network-online.target
+# A disabled kill switch sleeps the tick instead of exiting, and a busy
+# flock exits 0, so neither path must trip the start limit and leave the
+# unit dead. This key only takes effect in [Unit] — systemd ignores it
+# under [Service].
+StartLimitIntervalSec=0
+# A missing entry point skips the start silently instead of crash-looping into
+# six-figure NRestarts. The path is the pinned release, not the checkout:
+# ConditionPathExists follows the current symlink.
+ConditionPathExists=/opt/agent-substrate/current/packages/dispatcher/src/index.ts
+
+[Service]
+Type=simple
+# Credentials only; nothing secret lives in the repo. The drop-in
+# substrate-dispatcher.service.d/10-environment.conf is the EnvironmentFile, so a
+# collector unit cannot inherit this dispatcher's file. See infra/vps/README.md.
+# There is deliberately no Environment=SUBSTRATE_DISPATCH_DISABLED here: the
+# entry re-reads the env file every pass, and a baked-in disable value plus
+# Restart=always is the documented restart loop.
+WorkingDirectory=/opt/agent-substrate/current
+# Machine-specific: `command -v bun`. The binary on this host is under
+# /root/.local, which is why the unit still runs as root (no User=) and why
+# ProtectHome=false stays. The code itself is the release at WorkingDirectory.
+# The flock is in-process (DISP-01): no /usr/bin/flock wrapper belongs here,
+# or the doctor reads the lock path as the repo entry.
+ExecStart=/root/.local/share/reflex/bun/bin/bun packages/dispatcher/src/index.ts
+# Disabled sleeps the tick and a duplicate lock exits 0; only a thrown tick
+# error exits non-zero, which is the only restart worth taking.
+Restart=on-failure
+RestartSec=5
+
+# /var/lib/substrate, created by systemd and writable under ProtectSystem=full.
+# This is where the dispatcher lock, the worktrees, and the given-up set live.
+StateDirectory=substrate
+StateDirectoryMode=0700
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=substrate-dispatcher
+
+# It polls Linear, dials the Lane A loopback host, and talks to Postgres
+# through substrate-mcp. Nothing else.
+# ProtectHome=false is the remaining exception: ExecStart's bun lives under
+# /root/.local, so ProtectHome=true would hide the interpreter. The mutable
+# checkout under /root/src/repos is not a reason for it anymore.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

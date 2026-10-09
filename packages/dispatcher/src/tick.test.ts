@@ -142,6 +142,7 @@ function tickDeps(overrides: {
 	config?: string | null;
 	alive?: boolean | (() => boolean);
 	nowRef?: { now: number };
+	dialClaudeCode?: () => Promise<"host-unreachable" | "host-refused">;
 }): { deps: TickDeps; base: string; worktreeDir: string; spawns: Spawned[]; signals: string[] } {
 	const base = makeTmp();
 	const givenUpDir = join(base, "given-up");
@@ -155,12 +156,17 @@ function tickDeps(overrides: {
 		linear: overrides.linear.client,
 		substrate: overrides.substrate.client,
 		givenUpDir,
-		worktree: overrides.worktree ?? (async () => ({ ok: true as const, path: worktreeDir, reused: false })),
-		readHermesConfig: () => (overrides.config === undefined ? SUBSTRATE_CONFIG : overrides.config),
-		spawn: (argv, options) => {
-			spawns.push({ argv, options });
-			return { pid: 4242 };
-		},
+	dialClaudeCode:
+		overrides.dialClaudeCode ??
+		(async () => {
+			throw new Error("dialClaudeCode not stubbed: tests never open real sockets");
+		}),
+	worktree: overrides.worktree ?? (async () => ({ ok: true as const, path: worktreeDir, reused: false })),
+	readHermesConfig: () => (overrides.config === undefined ? SUBSTRATE_CONFIG : overrides.config),
+	spawn: (argv, options) => {
+		spawns.push({ argv, options });
+		return { pid: 4242 };
+	},
 		childEnvSource: {
 			HOME: "/root",
 			PATH: "/usr/bin",
@@ -398,14 +404,14 @@ describe("tick boundaries", () => {
 		expect(substrate.graphCalls).toBe(0);
 	});
 
-	test("non-hermes surfaces defer without side effects", async () => {
+	test("non-hermes, non-claude-code surfaces defer without side effects", async () => {
 		const linear = linearFake([HERMES_ISSUE]);
 		const substrate = substrateFake(foundNode(), [FREE_GRAPH]);
 		const { deps, spawns } = tickDeps({ linear, substrate });
 
-		const result = await dispatchIssue(HERMES_ISSUE, "claude-code", deps);
+		const result = await dispatchIssue(HERMES_ISSUE, "substrate", deps);
 
-		expect(result).toEqual({ status: "deferred", surface: "claude-code" });
+		expect(result).toEqual({ status: "deferred", surface: "substrate" });
 		expect(spawns).toEqual([]);
 		expect(linear.comments).toEqual([]);
 		expect(linear.updates).toEqual([]);
@@ -459,5 +465,101 @@ describe("tick boundaries", () => {
 		for (const comment of linear.comments) {
 			expect(comment.body).not.toContain(CANARY);
 		}
+	});
+});
+
+describe("claude-code dial", () => {
+	const CLAUDE_ISSUE: PollIssue = {
+		id: "iss-claude-1",
+		identifier: "ENG-201",
+		labels: [{ id: "lbl-cc", name: "dispatch:claude-code" }],
+	};
+
+	function dialLinear(seeds: Record<string, string[]> = {}): LinearFake {
+		const comments: LinearFake["comments"] = [];
+		const updates: LinearFake["updates"] = [];
+		const client: PollingClient = {
+			listUnstartedIssues: async () => ({ nodes: [CLAUDE_ISSUE], pageInfo: { hasNextPage: false, endCursor: null } }),
+			graphql: async <T>(query: string, variables: Record<string, unknown>): Promise<T> => {
+				expect(query).toContain("DispatchMarkerComments");
+				const issueId = variables["id"];
+				expect(typeof issueId).toBe("string");
+				const bodies = [
+					...(seeds[issueId as string] ?? []),
+					...comments.filter((comment) => comment.issueId === issueId).map((comment) => comment.body),
+				];
+				return {
+					issue: { comments: { nodes: bodies.map((body) => ({ body })), pageInfo: { hasNextPage: false, endCursor: null } } },
+				} as unknown as T;
+			},
+			createComment: async (issueId: string, body: string) => void comments.push({ issueId, body }),
+			updateIssue: async (id: string, input: { removedLabelIds?: string[] }) => void updates.push({ id, input }),
+		};
+		return { client, comments, updates };
+	}
+
+	test("a refused dial marks host-unreachable with no give-up, worktree, or spawn", async () => {
+		const linear = dialLinear();
+		const substrate = substrateFake(foundNode(), []);
+		let worktreeCalls = 0;
+		const { deps, spawns } = tickDeps({
+			linear,
+			substrate,
+			worktree: async () => {
+				worktreeCalls += 1;
+				return { ok: false as const, outcome: "low-disk" as const };
+			},
+			dialClaudeCode: async () => "host-unreachable",
+		});
+
+		const result = await dispatchIssue(CLAUDE_ISSUE, "claude-code", deps);
+
+		expect(result).toEqual({ status: "marked", outcome: "host-unreachable" });
+		expect(worktreeCalls).toBe(0);
+		expect(spawns).toEqual([]);
+		expect(linear.comments).toEqual([{ issueId: CLAUDE_ISSUE.id, body: "substrate-dispatch: host-unreachable" }]);
+		expect(linear.updates).toEqual([]);
+		expect(isGivenUp(deps.givenUpDir, CLAUDE_ISSUE.id)).toBe(false);
+		expect(substrate.graphCalls).toBe(0);
+		expectVocabularyClosed(substrate.events);
+		const marked = substrate.events[0];
+		if (!marked) throw new Error("expected one emitted event");
+		expect(marked.payload).toMatchObject({ outcome: "failed", reason: "host-unreachable" });
+	});
+
+	test("an answered dial marks host-refused and keeps the label", async () => {
+		const linear = dialLinear();
+		const substrate = substrateFake(foundNode(), []);
+		const { deps, spawns } = tickDeps({ linear, substrate, dialClaudeCode: async () => "host-refused" });
+
+		const result = await dispatchIssue(CLAUDE_ISSUE, "claude-code", deps);
+
+		expect(result).toEqual({ status: "marked", outcome: "host-refused" });
+		expect(spawns).toEqual([]);
+		expect(linear.comments).toEqual([{ issueId: CLAUDE_ISSUE.id, body: "substrate-dispatch: host-refused" }]);
+		expect(linear.updates).toEqual([]);
+		expect(isGivenUp(deps.givenUpDir, CLAUDE_ISSUE.id)).toBe(false);
+		expectVocabularyClosed(substrate.events);
+	});
+
+	test("host-unreachable is once-only and never joins the given-up set", async () => {
+		const linear = dialLinear({ [CLAUDE_ISSUE.id]: ["substrate-dispatch: host-unreachable"] });
+		const substrate = substrateFake(foundNode(), []);
+		let dials = 0;
+		const { deps } = tickDeps({
+			linear,
+			substrate,
+			dialClaudeCode: async () => {
+				dials += 1;
+				return "host-unreachable";
+			},
+		});
+
+		const result = await dispatchIssue(CLAUDE_ISSUE, "claude-code", deps);
+
+		expect(result).toEqual({ status: "marked", outcome: "host-unreachable" });
+		expect(dials).toBe(1);
+		expect(linear.comments).toEqual([]);
+		expect(isGivenUp(deps.givenUpDir, CLAUDE_ISSUE.id)).toBe(false);
 	});
 });

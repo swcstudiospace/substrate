@@ -7,10 +7,12 @@
  * config, ensure the verified worktree, spawn headless Hermes over an
  * ids-only prompt, and watch `graph_get` for the triple-condition landing.
  *
- * Non-hermes dispatchable surfaces defer silently: `dispatch:claude-code`
- * routing belongs to plan 24-04, and nothing here may claim, comment, or
- * label on its behalf. Landed launches leave tracker labels alone — the
- * Mirror swaps `dispatch:*` for `agent:hermes` when the Hermes token's
+ * Non-hermes dispatchable surfaces defer silently, except
+ * `dispatch:claude-code`, which dials the Lane A loopback host without
+ * sending anything: refused or timeout marks `host-unreachable`, an
+ * answered dial marks `host-refused`, and neither gives the issue up.
+ * Nothing here may claim, worktree, or spawn on its behalf.
+ * The Mirror swaps `dispatch:*` for `agent:hermes` when the Hermes token's
  * claim stands. Unclaimed endings (exit, 900 s) persist given-up first via
  * the watch, then comment and remove only the dispatch label.
  *
@@ -30,6 +32,7 @@ import {
 	writePromptFile,
 	type SpawnFn,
 } from "./launch-hermes.ts";
+import type { ClaudeCodeDialOutcome } from "./launch-claude-code.ts";
 import { isGivenUp, isLiveLease, watchClaim, type GivenUpOutcome, type WatchedNode } from "./watch.ts";
 import { InvalidGraphIdError, InvalidRepoError, type EnsureWorktreeResult } from "./worktree.ts";
 
@@ -98,7 +101,11 @@ export interface TickDeps {
 	hermesPresent?: () => boolean | Promise<boolean>;
 	/** Injected spawner: the real `hermes` binary is never executed here. */
 	spawn: SpawnFn;
-	/** Dispatcher process env source for the child allowlist. */
+	/**
+	 * Claude Code dial. Production passes the loopback dial; tests pass a
+	 * fake, so no test opens a real socket to the Lane A port.
+	 */
+	dialClaudeCode: () => Promise<ClaudeCodeDialOutcome>;
 	childEnvSource: Record<string, string | undefined>;
 	substrateUrl: string;
 	hermesToken: string;
@@ -128,8 +135,8 @@ export async function dispatchIssue(
 	deps: TickDeps,
 ): Promise<DispatchIssueResult> {
 	if (isGivenUp(deps.givenUpDir, issue.id)) return { status: "skipped", reason: "given-up" };
+	if (surface === "claude-code") return dispatchClaudeCode(issue, deps);
 	if (surface !== "hermes") return { status: "deferred", surface };
-
 	const resolved = await deps.substrate.findNode({
 		linear_issue_id: issue.id,
 		linear_identifier: issue.identifier,
@@ -209,6 +216,21 @@ export async function dispatchIssue(
 	return { status: "unclaimed", outcome: watched.status };
 }
 
+/**
+ * Dial the Lane A host for one `dispatch:claude-code` issue. Refused and
+ * timeout are `host-unreachable`; an answered dial is `host-refused`.
+ * Both outcomes post the once-only marker and keep the label without
+ * touching the given-up set: no worktree, no spawn, nothing to claim.
+ */
+export async function dispatchClaudeCode(
+	issue: PollIssue,
+	deps: Pick<TickDeps, "linear" | "substrate" | "givenUpDir" | "dialClaudeCode">,
+): Promise<DispatchIssueResult> {
+	const outcome = await deps.dialClaudeCode();
+	await ensureMarkerComment(deps.linear, issue.id, outcome);
+	await deps.substrate.emitEvent(failedEvent(issue.identifier, outcome));
+	return { status: "marked", outcome };
+}
 export interface TickIssueSummary {
 	issue: PollIssue;
 	surface: string | null;
