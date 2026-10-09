@@ -547,12 +547,12 @@ const reply = await client.callTool({ name: "desktop_run", arguments: run }, und
 | A4 | Docker CLI needs nothing beyond PATH and HOME on this host | Port delta | A future `DOCKER_HOST`/`DOCKER_CONFIG` deployment would need the allowlist widened |
 | A5 | `xrefresh` forces Expose/repaint of every window | Spike step 4 | Only a candidate; spike verifies |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **C6 key rule** — tighten (recommended) or keep D30-11 literally? Plan with the tighter predicate and record it as an operator-visible change in the runbook; revert is a one-function change.
-2. **First-event-before-ledger (C8)** — add the pre-run ledger refusal? Recommended yes.
-3. **Response size** — 50 screenshots ≈ 35 MB in one MCP reply. No cap in the locked vocabulary; document it; consider later.
-4. **September evidence PNGs** — first production run prunes them; copy aside or let retention take them (operator).
+1. **C6 key rule** — RESOLVED: CONTEXT D30-11 adopts the tightened predicate (implemented in plan 30-01; listed for the operator as CONTEXT open item 5; recorded in the plan 30-07 runbook).
+2. **First-event-before-ledger (C8)** — RESOLVED: CONTEXT D30-04a refuses before any action when no ledger is configured (plan 30-04).
+3. **Response size** — RESOLVED as a documented residual: 50 screenshots ≈ 35 MB in one MCP reply; no cap in the locked vocabulary; recorded in the plan 30-07 runbook (T-30-09).
+4. **September evidence PNGs** — RESOLVED as an operator item: the first production run after merge prunes runs older than 7 days from `/var/lib/substrate/desktop`, which includes September's evidence; the harness proof uses its own run directory and never prunes them. The runbook (plan 30-07) tells the operator to copy them aside first if wanted.
 
 ## Environment Availability
 
