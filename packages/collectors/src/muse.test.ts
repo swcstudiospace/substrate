@@ -38,8 +38,9 @@ afterEach(() => {
 	else process.env.SUBSTRATE_COLLECTOR_STATE = originalEnv.state;
 	if (originalEnv.url === undefined) delete process.env.SUBSTRATE_URL;
 	else process.env.SUBSTRATE_URL = originalEnv.url;
-	if (originalEnv.token === undefined) delete process.env.SUBSTRATE_TOKEN;
-	else process.env.SUBSTRATE_TOKEN = originalEnv.token;
+	const savedToken = originalEnv.token;
+	if (savedToken === undefined) delete process.env.SUBSTRATE_TOKEN;
+	else process.env.SUBSTRATE_TOKEN = savedToken;
 	for (const dir of made) rmSync(dir, { recursive: true, force: true });
 	made.length = 0;
 });
@@ -136,7 +137,7 @@ describe("muse writer", () => {
 		const { state } = arm(repo);
 		const secret = `${"ts"}${"key-"}abcDEF123456ghiJKL`;
 		const raw = `note token=${secret}`;
-		process.env.SUBSTRATE_TOKEN = "collector-token";
+		process.env.SUBSTRATE_TOKEN = "tok";
 		const seen = stubFetch({ brief: raw });
 		const now = "2026-10-09T12:00:00.000Z";
 		await pass([repo], state, now);
@@ -145,7 +146,7 @@ describe("muse writer", () => {
 		expect(seen.healthz).toBe(1);
 		expect(seen.briefs).toHaveLength(1);
 		expect(seen.briefs[0]?.body).toEqual({ repo: "acme/widgets", branch: "main", surface: "muse" });
-		expect(seen.briefs[0]?.authorization).toBe("Bearer collector-token");
+		expect(seen.briefs[0]?.authorization).toBe("Bearer tok");
 		const written = readFileSync(briefPath(repo), "utf8");
 		expect(written).toBe(redact(raw));
 		expect(written).not.toContain(secret);
