@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { DesktopRunInput } from "../packages/mcp-server/src/desktop/actions.ts";
 import { decodePng, encodePng } from "../packages/mcp-server/src/desktop/png.ts";
 import { RehearsalRefused, refuseSmokeUrl } from "./rehearsal.ts";
-import { dumpedHoldsTyped, findBand, markerText, nonceRgb, parseRpcBody, parseSmokeArgs, sha256Hex, type NonceRgb } from "./desktop-smoke.ts";
+import { dumpedHoldsTyped, findBand, markerText, nonceRgb, parseRpcBody, parseSmokeArgs, sha256Hex, shouldRetryNonce, type NonceRgb } from "./desktop-smoke.ts";
 
 /** Paint a test frame: background wash plus solid exact-RGB rectangles. */
 function paintImage(width: number, height: number, bg: NonceRgb, rects: Array<{ x: number; y: number; w: number; h: number; color: NonceRgb }>): Buffer {
@@ -73,6 +73,16 @@ describe("nonceRgb", () => {
 
 	test("the same nonce derives the same colour", () => {
 		expect(nonceRgb("stable-nonce")).toEqual(nonceRgb("stable-nonce"));
+	});
+});
+
+describe("shouldRetryNonce", () => {
+	test("retries a polluted baseline until attempts run out", () => {
+		expect(shouldRetryNonce(1, 1)).toBe(true);
+		expect(shouldRetryNonce(140, 2)).toBe(true);
+		expect(shouldRetryNonce(0, 1)).toBe(false);
+		expect(shouldRetryNonce(1, 3)).toBe(false);
+		expect(shouldRetryNonce(0, 3)).toBe(false);
 	});
 });
 

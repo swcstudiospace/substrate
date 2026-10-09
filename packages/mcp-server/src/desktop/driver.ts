@@ -17,13 +17,16 @@
  *   the tool's reply, never in the event.
  * - An event that is not stored stops the run (D30-12): `stored: false` or a throwing emit
  *   ends the run with no image blocks.
- * - The exclusivity flag lives at module scope: createMcpServer is rebuilt per request, and
- *   two agents interleaving input on one display would corrupt both runs. A second call
- *   while a run is active is refused at once (D30-08).
+ * - Exclusion is host-wide (D30-21): the module-scope `active` flag stops a second
+ *   call in this process, and a lock file in the runtime dir stops a second server
+ *   process — separate rehearsal instances each start their own server, but all
+ *   drive the same display. A second run while one holds the lock is refused at
+ *   once, naming the active run (D30-08).
  */
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { redact } from "../redact.ts";
@@ -131,6 +134,90 @@ export class DesktopBusy extends Error {
 /** Module scope: createMcpServer is rebuilt per request, so per-driver state would not exclude. */
 let active: string | null = null;
 
+/** Lock-file name for the host-wide desktop_run exclusion (D30-21). */
+const DESKTOP_LOCK_NAME = "substrate-desktop-run.lock";
+
+/**
+ * Host-wide lock path: the runtime dir, never a rehearsal's `desktopDir`.
+ * Drivers with different shot dirs still drive the same display, so keying
+ * the lock by dir would let two servers overlap.
+ */
+export function desktopLockPath(): string {
+	const runtime = process.env.XDG_RUNTIME_DIR;
+	const base = runtime !== undefined && runtime !== "" ? runtime : tmpdir();
+	return join(base, DESKTOP_LOCK_NAME);
+}
+
+/** A parsed lock claim: the holder's pid plus the run it guards. */
+interface DesktopLockClaim {
+	pid: number;
+	runId: string;
+}
+
+/** Read the current claim; null when no claim is on file or it does not parse. */
+function readDesktopLock(lockPath: string): DesktopLockClaim | null {
+	let text: string;
+	try {
+		text = readFileSync(lockPath, "utf8");
+	} catch {
+		return null;
+	}
+	const [pidText, runId] = text.trim().split(/\s+/, 2);
+	const pid = Number(pidText);
+	if (pidText === undefined || pidText === "" || !Number.isSafeInteger(pid) || pid <= 0 || runId === undefined || runId === "") return null;
+	return { pid, runId };
+}
+
+/** True when `pid` names a live process; EPERM means alive but unkillable. */
+function isLivePid(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException)?.code === "EPERM";
+	}
+}
+
+/**
+ * Claim the host lock for `runId`. Returns the competing run id when a live
+ * holder owns it, null once this process holds it. A claim from a dead
+ * process — or one that does not parse — is unlinked and retried, so a
+ * crashed server cannot wedge the display; anything else that keeps the
+ * file claimed refuses the run fail-closed.
+ */
+function claimDesktopLock(lockPath: string, runId: string): string | null {
+	for (let attempt = 0; attempt < 3; attempt++) {
+		try {
+			const fd = openSync(lockPath, "wx", 0o600);
+			try {
+				writeSync(fd, `${process.pid} ${runId}`);
+			} finally {
+				closeSync(fd);
+			}
+			return null;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") throw new Error("desktop_run lock unavailable; nothing was run");
+		}
+		const other = readDesktopLock(lockPath);
+		if (other !== null && isLivePid(other.pid)) return other.runId;
+		try {
+			unlinkSync(lockPath);
+		} catch {
+			// Lost a steal race or the file vanished: re-read on the next pass.
+		}
+	}
+	throw new Error("desktop_run lock unavailable; nothing was run");
+}
+
+/** Release the host lock, but only when it still holds this run's claim. */
+function releaseDesktopLock(lockPath: string, runId: string): void {
+	try {
+		if (readDesktopLock(lockPath)?.runId === runId) unlinkSync(lockPath);
+	} catch {
+		// Housekeeping must never fail the run it guarded.
+	}
+}
+
 const sha256 = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
 /**
@@ -213,10 +300,13 @@ export function createDesktopDriver(deps: {
 	dir: string;
 	now?: () => number;
 	sleep?: (ms: number) => Promise<unknown>;
+	/** Host-lock override; the runtime-dir default keeps every server process exclusive. Tests pass a tmp file. */
+	lockPath?: string;
 }): DesktopDriver {
 	const dir = deps.dir;
 	const now = deps.now ?? Date.now;
 	const sleep = deps.sleep ?? delay;
+	const lockPath = deps.lockPath ?? desktopLockPath();
 
 	/** The runner raced against the driver's own timer; a hung call resolves to TIMEOUT. */
 	const TIMEOUT = Symbol("timeout");
@@ -311,8 +401,11 @@ export function createDesktopDriver(deps: {
 					result.screenshots.push({ path, width, height, sha256: digest });
 					result.images.push(png.toString("base64"));
 					Object.assign(details, { sha256: digest, width, height });
-				} catch (cause) {
-					entry.error = redact((cause instanceof Error ? cause.message : String(cause)).slice(0, ERROR_CHARS));
+				} catch {
+					// Fixed text: mkdir/write errors name the run dir, and the
+					// screenshot path must stay in the caller's reply, never in
+					// the shared event's `error`.
+					entry.error = "screenshot failed";
 				}
 			}
 			if (entry.error === undefined) {
@@ -373,17 +466,21 @@ export function createDesktopDriver(deps: {
 	return {
 		async run(input, { surface, emit }) {
 			const parsed = DesktopRunInput.parse(input);
-			// Synchronous check-and-set: no await runs between the check and the set, so two
-			// concurrent calls cannot both take the lock.
+			// Synchronous check-and-set: no await runs between the in-process
+			// check, the host-file claim and the set, so neither two calls in
+			// this process nor two server processes on one host can overlap.
 			if (active !== null) throw new DesktopBusy(active);
 			const started = now();
 			const stamp = new Date(started).toISOString().replace(/[-:]/g, "").slice(0, 15);
 			const runId = `dr-${stamp}Z-${randomBytes(3).toString("hex")}`;
+			const other = claimDesktopLock(lockPath, runId);
+			if (other !== null) throw new DesktopBusy(RUN_ID.test(other) ? other : "unknown");
 			active = runId;
 			try {
 				return await execute(parsed, surface, emit, runId, started);
 			} finally {
 				active = null;
+				releaseDesktopLock(lockPath, runId);
 			}
 		},
 	};

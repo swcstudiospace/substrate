@@ -24,7 +24,7 @@ ENV_FILE=${SUBSTRATE_DESKTOP_ENV_FILE:-/etc/substrate/substrate-desktop.env}  # 
 LABEL=org.swcstudio.substrate.role=desktop
 PUBLISH=127.0.0.1:6081:3000
 MIN_FREE_BYTES=10737418240
-GEOMETRY_WAIT_S=60
+GEOMETRY_WAIT_S=${SUBSTRATE_DESKTOP_GEOMETRY_WAIT_S:-60}  # test seam; operators leave it unset
 
 LABEL_KEY=${LABEL%%=*}
 LABEL_VALUE=${LABEL#*=}
@@ -123,7 +123,11 @@ cmd_up() {
 
 	local deadline=$((SECONDS + GEOMETRY_WAIT_S)) last=""
 	while :; do
-		last=$(geometry || true)
+		# Bound by the time left in the window: an unresponsive docker exec
+		# must not outlive the readiness deadline and hang `up` forever.
+		local remain=$((deadline - SECONDS))
+		[ "$remain" -gt 0 ] || die "display not 1280 800 after ${GEOMETRY_WAIT_S} s; last output: ${last:-<none>}"
+		last=$(timeout "$remain" docker exec -e DISPLAY=:1 "$NAME" xdotool getdisplaygeometry 2>&1 || true)
 		[ "$last" = "1280 800" ] && break
 		[ "$SECONDS" -lt "$deadline" ] || die "display not 1280 800 after ${GEOMETRY_WAIT_S} s; last output: ${last:-<none>}"
 		sleep 2

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { EventInput } from "../types.ts";
@@ -458,6 +458,68 @@ describe("createDesktopDriver", () => {
 			expect(events[0]?.payload).toMatchObject({ ok: false, error: "action failed with exit 1" });
 			expect(JSON.stringify(events)).not.toContain(secret);
 			expect(JSON.stringify(result)).not.toContain(secret);
+		});
+	});
+
+	describe("host-wide exclusion (D30-21)", () => {
+		function lockFile(): string {
+			const parent = mkdtempSync(join(tmpdir(), "desktop-lock-"));
+			dirs.push(parent);
+			return join(parent, "run.lock");
+		}
+
+		test("a live lock from another process refuses the run, naming its run", async () => {
+			const lockPath = lockFile();
+			const other = "dr-20260901T000000Z-abcdef";
+			writeFileSync(lockPath, `${process.pid} ${other}`, { mode: 0o600 });
+			const { calls, run } = recorder();
+			const driver = createDesktopDriver({ run, dir: tmpShots(), lockPath, sleep: noSleep });
+
+			const refused = await driver
+				.run({ actions: [{ type: "key", keys: "Return" }] }, { surface: "omp", emit: storedTrue })
+				.then(
+					() => null,
+					(error: unknown) => error,
+				);
+
+			expect(refused).toBeInstanceOf(DesktopBusy);
+			expect((refused as DesktopBusy).runId).toBe(other);
+			expect((refused as Error).message).toContain(other);
+			expect(calls).toEqual([]);
+		});
+
+		test("a stale lock from a dead process is stolen and the run proceeds", async () => {
+			const lockPath = lockFile();
+			const dead = Bun.spawnSync(["true"], { stdout: "ignore", stderr: "ignore" }).pid;
+			writeFileSync(lockPath, `${dead} dr-20260901T000000Z-abcdef`, { mode: 0o600 });
+			const events: EventInput[] = [];
+			const driver = createDesktopDriver({ run: recorder().run, dir: tmpShots(), lockPath, sleep: noSleep });
+
+			const result = await driver.run({ actions: [{ type: "key", keys: "Return" }] }, { surface: "omp", emit: recording(events) });
+
+			expect(result.log[0]?.ok).toBe(true);
+			expect(events).toHaveLength(1);
+			expect(existsSync(lockPath)).toBe(false);
+		});
+	});
+
+	describe("screenshot storage errors stay out of the event", () => {
+		test("a failed screenshot write stores the fixed diagnostic, never the path", async () => {
+			const parent = mkdtempSync(join(tmpdir(), "desktop-lock-"));
+			dirs.push(parent);
+			const shotFile = join(parent, "shots");
+			writeFileSync(shotFile, "not a dir");
+			const { run } = recorder();
+			const events: EventInput[] = [];
+			const driver = createDesktopDriver({ run, dir: shotFile, lockPath: join(parent, "run.lock"), sleep: noSleep });
+
+			const result = await driver.run({ actions: [{ type: "screenshot" }] }, { surface: "omp", emit: recording(events) });
+
+			expect(result.log).toEqual([{ i: 0, type: "screenshot", ok: false, ms: expect.any(Number), active_window: null, error: "screenshot failed" }]);
+			expect(events).toHaveLength(1);
+			expect(events[0]?.payload).toMatchObject({ ok: false, error: "screenshot failed" });
+			expect(JSON.stringify(events)).not.toContain(shotFile);
+			expect(JSON.stringify(result)).not.toContain(shotFile);
 		});
 	});
 });

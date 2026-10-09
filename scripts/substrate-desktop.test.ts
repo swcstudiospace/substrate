@@ -65,7 +65,10 @@ echo "docker $*" >>"$STUB_LOG"
 	;;
 exec*)
 	case "$*" in
-	*getdisplaygeometry*) echo "1280 800" ;;
+	*getdisplaygeometry*)
+		if [ "$STUB_GEOMETRY" = "hang" ]; then sleep 30; fi
+		echo "1280 800"
+		;;
 	*) echo "" ;;
 	esac
 	exit 0
@@ -110,6 +113,7 @@ type Knobs = {
 	image?: "present" | "absent";
 	container?: ContainerKnob;
 	endpoint?: "local" | "remote" | "broken" | "empty";
+	geometry?: "ok" | "hang";
 };
 
 interface Rig {
@@ -141,6 +145,7 @@ function baseEnv(rig: Rig, knobs: Knobs): Record<string, string> {
 		STUB_IMAGE: knobs.image ?? "present",
 		STUB_CONTAINER: knobs.container ?? "absent",
 		STUB_ENDPOINT: knobs.endpoint ?? "local",
+		STUB_GEOMETRY: knobs.geometry ?? "ok",
 		SUBSTRATE_DESKTOP_ENV_FILE: rig.envFile,
 	};
 }
@@ -285,6 +290,15 @@ describe("substrate-desktop.sh up", () => {
 		expect(r.code).not.toBe(0);
 		expect(r.err).toContain("without locality proof");
 		expect(dockerLines(r.log).some((line) => line.startsWith("docker run "))).toBe(false);
+		assertCleanArgv(r.log);
+	});
+
+	itRoot("a hanging geometry read cannot outlive the readiness window", () => {
+		const start = Date.now();
+		const r = runScript("up", { container: "absent", geometry: "hang" }, { SUBSTRATE_DESKTOP_GEOMETRY_WAIT_S: "2" });
+		expect(r.code).not.toBe(0);
+		expect(r.err).toContain("display not 1280 800");
+		expect(Date.now() - start).toBeLessThan(30_000);
 		assertCleanArgv(r.log);
 	});
 

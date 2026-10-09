@@ -208,6 +208,18 @@ const PROBE_CALL_TIMEOUT_MS = (30 + 60) * 1000;
 const SPAWN_TIMEOUT_MS = 30_000;
 /** The marker band pass threshold (D30-17). */
 const BAND_MIN_PIXELS = 1500;
+/**
+ * Marker-run attempts: the nonce colour may already paint the desktop — one
+ * matching pixel in a panel or window fails the baseline check even when the
+ * marker typed and painted correctly — so a polluted baseline retries with a
+ * fresh nonce instead of failing the proof.
+ */
+const MAX_NONCE_ATTEMPTS = 3;
+
+/** True while another nonce is worth trying after a polluted baseline. */
+export function shouldRetryNonce(baselineCount: number, attempt: number): boolean {
+	return baselineCount !== 0 && attempt < MAX_NONCE_ATTEMPTS;
+}
 
 function readText(path: string): string | null {
 	try {
@@ -484,6 +496,95 @@ function readRunText(raw: string): { runId: string; shots: unknown[]; log: unkno
 	return { runId, shots, log };
 }
 
+/** One marker run plus its decoded band evidence, before any verdict. */
+interface MarkerAttempt {
+	replyOk: boolean;
+	rpcError: string | null;
+	marker: string;
+	exitText: string;
+	actionCount: number;
+	text: { runId: string; shots: unknown[]; log: unknown[] };
+	stored: StoredShot[];
+	decoded: boolean;
+	band: BandResult;
+	baseline: BandResult;
+	blockSizes: string;
+}
+
+/** Run the marker once with a fresh nonce and decode both blocks. */
+async function markerAttempt(base: string, bearer: string): Promise<MarkerAttempt> {
+	const nonce = randomBytes(4).toString("hex");
+	const rgb = nonceRgb(nonce);
+	const marker = markerText(nonce, rgb);
+	const exitText = "exit\n";
+	process.stdout.write(`marker nonce ${nonce} rgb ${rgb.r},${rgb.g},${rgb.b} marker ${marker.length} chars\n`);
+
+	const run = {
+		actions: [
+			{ type: "screenshot" },
+			{ type: "key", keys: "ctrl+alt+t", settle_ms: 5000 },
+			{ type: "type", text: marker, settle_ms: 1500 },
+			{ type: "screenshot" },
+			{ type: "type", text: exitText },
+		],
+		timeout: RUN_TIMEOUT_S,
+	};
+	const call = await callTool(base, bearer, 1, "desktop_run", run, RUN_CALL_TIMEOUT_MS);
+	const empty: MarkerAttempt = {
+		replyOk: false,
+		rpcError: call.rpcError,
+		marker,
+		exitText,
+		actionCount: run.actions.length,
+		text: { runId: "", shots: [], log: [] },
+		stored: [],
+		decoded: false,
+		band: { count: 0, rect: null, solid: false },
+		baseline: { count: 0, rect: null, solid: false },
+		blockSizes: "no blocks",
+	};
+	if (call.reply === null || call.reply.isError) return empty;
+	const textBlock = call.reply.content.find((block) => block.type === "text");
+	const imageBlocks = call.reply.content.filter((block) => block.type === "image" && typeof block.data === "string");
+	const text = readRunText(textBlock?.text ?? "null");
+
+	const stored: StoredShot[] = [];
+	for (const entry of text.shots) {
+		if (stored.length >= 2) break;
+		const shot = readShot(entry);
+		const block = imageBlocks[stored.length];
+		if (shot === null || block?.data === undefined) break;
+		let image: Buffer | null = null;
+		try {
+			image = Buffer.from(block.data, "base64");
+		} catch {
+			image = null;
+		}
+		if (image === null) break;
+		stored.push({ path: shot.path, sha256: shot.sha256, image });
+	}
+
+	let band: BandResult = { count: 0, rect: null, solid: false };
+	let baseline: BandResult = { count: 0, rect: null, solid: false };
+	let decoded = false;
+	let blockSizes = "no blocks";
+	const firstStored = stored[0];
+	const secondStored = stored[1];
+	if (firstStored !== undefined && secondStored !== undefined) {
+		blockSizes = `${firstStored.image.length}/${secondStored.image.length} bytes`;
+		try {
+			const first = decodePng(firstStored.image);
+			const second = decodePng(secondStored.image);
+			baseline = findBand(first.rgb, first.width, first.height, rgb);
+			band = findBand(second.rgb, second.width, second.height, rgb);
+			decoded = true;
+		} catch {
+			decoded = false;
+		}
+	}
+	return { replyOk: true, rpcError: null, marker, exitText, actionCount: run.actions.length, text, stored, decoded, band, baseline, blockSizes };
+}
+
 export async function main(argv: string[]): Promise<number> {
 	const opts = parseSmokeArgs(argv);
 	const runDir = runDirFor(opts.name);
@@ -515,76 +616,36 @@ export async function main(argv: string[]): Promise<number> {
 	const status = desktopStatus();
 	check(status !== null, "substrate-desktop.sh status answers", status === null ? "status failed" : `${Object.keys(status).length} keys`);
 
-	const nonce = randomBytes(4).toString("hex");
-	const rgb = nonceRgb(nonce);
-	const marker = markerText(nonce, rgb);
-	const exitText = "exit\n";
-	process.stdout.write(`marker nonce ${nonce} rgb ${rgb.r},${rgb.g},${rgb.b} marker ${marker.length} chars\n`);
-
-	const run = {
-		actions: [
-			{ type: "screenshot" },
-			{ type: "key", keys: "ctrl+alt+t", settle_ms: 5000 },
-			{ type: "type", text: marker, settle_ms: 1500 },
-			{ type: "screenshot" },
-			{ type: "type", text: exitText },
-		],
-		timeout: RUN_TIMEOUT_S,
-	};
-	const call = await callTool(base, bearer, 1, "desktop_run", run, RUN_CALL_TIMEOUT_MS);
-	check(call.reply !== null && !call.reply.isError, "marker run accepted", call.reply === null ? (call.rpcError ?? "no reply") : "run answered");
-	if (call.reply === null || call.reply.isError) {
+	let chosen: MarkerAttempt | null = null;
+	let rpcError: string | null = null;
+	for (let attempt = 1; attempt <= MAX_NONCE_ATTEMPTS; attempt++) {
+		const current = await markerAttempt(base, bearer);
+		if (!current.replyOk) {
+			rpcError = current.rpcError;
+			break;
+		}
+		chosen = current;
+		if (!shouldRetryNonce(current.baseline.count, attempt)) break;
+		process.stdout.write(`nonce colour already on screen (baseline ${current.baseline.count}); retrying with a fresh nonce\n`);
+	}
+	check(chosen !== null, "marker run accepted", chosen === null ? (rpcError ?? "no reply") : "run answered");
+	if (chosen === null) {
 		const passed = results.filter(Boolean).length;
 		process.stdout.write(`\n${passed}/${results.length} smoke checks passed\n`);
 		return 1;
 	}
-	const textBlock = call.reply.content.find((block) => block.type === "text");
-	const imageBlocks = call.reply.content.filter((block) => block.type === "image" && typeof block.data === "string");
-	const text = readRunText(textBlock?.text ?? "null");
-	check(text.runId !== "" && text.shots.length === 2 && text.log.length === run.actions.length, "run text names id plus 2 shots and 5 log entries", `shots ${text.shots.length} log ${text.log.length}`);
+	const { text, stored, decoded, band, baseline, blockSizes, marker, exitText, actionCount } = chosen;
+	check(text.runId !== "" && text.shots.length === 2 && text.log.length === actionCount, "run text names id plus 2 shots and 5 log entries", `shots ${text.shots.length} log ${text.log.length}`);
 	// The reply log must show every planned action succeeded: a failed final
 	// `type "exit"` still stores its event and returns both screenshots, so the
 	// events check alone would pass with the terminal left open.
 	const logOk =
-		text.log.length === run.actions.length &&
+		text.log.length === actionCount &&
 		text.log.every((entry) => typeof entry === "object" && entry !== null && "ok" in entry && entry.ok === true);
-	check(logOk, "every planned action reports ok in the run log", `${text.log.length}/${run.actions.length} entries`);
+	check(logOk, "every planned action reports ok in the run log", `${text.log.length}/${actionCount} entries`);
 
-	const stored: StoredShot[] = [];
-	for (const entry of text.shots) {
-		if (stored.length >= 2) break;
-		const shot = readShot(entry);
-		const block = imageBlocks[stored.length];
-		if (shot === null || block?.data === undefined) break;
-		let image: Buffer | null = null;
-		try {
-			image = Buffer.from(block.data, "base64");
-		} catch {
-			image = null;
-		}
-		if (image === null) break;
-		stored.push({ path: shot.path, sha256: shot.sha256, image });
-	}
 	check(stored.length === 2, "both image blocks decode from base64", `${stored.length}/2`);
 
-	let band: BandResult = { count: 0, rect: null, solid: false };
-	let baseline: BandResult = { count: 0, rect: null, solid: false };
-	let decoded = false;
-	let blockSizes = "no blocks";
-	const firstStored = stored[0];
-	const secondStored = stored[1];
-	if (firstStored !== undefined && secondStored !== undefined) {
-		blockSizes = `${firstStored.image.length}/${secondStored.image.length} bytes`;
-		try {
-			const first = decodePng(firstStored.image);
-			const second = decodePng(secondStored.image);
-			baseline = findBand(first.rgb, first.width, first.height, rgb);
-			band = findBand(second.rgb, second.width, second.height, rgb);
-			decoded = true;
-		} catch {
-			decoded = false;
-		}
-	}
 	check(decoded, "both blocks decode as PNG", blockSizes);
 	check(
 		decoded && band.count >= BAND_MIN_PIXELS && band.solid && baseline.count === 0,
@@ -618,7 +679,7 @@ export async function main(argv: string[]): Promise<number> {
 		{ action: "type", sha: sha256Hex(exitText) },
 	];
 	let eventsOk = false;
-	if (rows !== null && rows.length === run.actions.length && stored.length === 2) {
+	if (rows !== null && rows.length === actionCount && stored.length === 2) {
 		eventsOk = rows.every((row, i) => {
 			if (row.kind !== "tool.call" || row.session_id !== session || row.surface !== opts.surface) return false;
 			const payload: unknown = row.payload;
@@ -642,7 +703,7 @@ export async function main(argv: string[]): Promise<number> {
 		const dumped = JSON.stringify(rows);
 		if (dumpedHoldsTyped(dumped, typed) || dumped.includes("iVBOR")) eventsOk = false;
 	}
-	check(eventsOk, "one stored tool.call per action with hashes only", rows === null ? "query failed" : `${rows.length}/${run.actions.length} rows`);
+	check(eventsOk, "one stored tool.call per action with hashes only", rows === null ? "query failed" : `${rows.length}/${actionCount} rows`);
 
 	const idsBefore = await queryDesktopIds(base, bearer, opts.surface);
 	const probe = await callTool(base, unlistedBearer, 2, "desktop_run", { actions: [{ type: "screenshot" }], timeout: 30 }, PROBE_CALL_TIMEOUT_MS);
