@@ -27,7 +27,8 @@
     "verify": "bun scripts/verify.ts",
     "parity:check": "bun scripts/parity-check.ts",
     "rehearsal": "bun scripts/rehearsal.ts",
-    "collectors:status": "bun packages/collectors/src/status.ts"
+    "collectors:status": "bun packages/collectors/src/status.ts",
+    "proof:laneb": "bun scripts/laneb-proof.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",
