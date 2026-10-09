@@ -311,7 +311,7 @@ export interface PageSection {
 function slugify(heading: string): string {
 	return heading
 		.toLowerCase()
-		.replace(/[^a-z0-9 _-]/g, "")
+		.replace(/[^\p{L}\p{N} _-]/gu, "")
 		.trim()
 		.replace(/\s+/g, "-")
 		.replace(/-+/g, "-");
@@ -365,9 +365,19 @@ export function splitSections(options: {
 		}
 	}
 	const title = options.title?.trim() || firstH1 || basename(options.path);
+	// GitHub-style unique anchors: the second `## Install` on a page links
+	// to `#install-1`, the third to `#install-2`. Counts run across the
+	// whole page so stored `sourceUrl` fragments never collide.
+	const seen = new Map<string, number>();
 	const sections = blocks.map((block, index) => {
 		const crumb = block.headingPath.length > 0 ? block.headingPath.join(" / ") : title;
-		const anchor = block.headingPath.length > 0 ? slugify(block.headingPath[block.headingPath.length - 1]!) : null;
+		let anchor: string | null = null;
+		if (block.headingPath.length > 0) {
+			const baseAnchor = slugify(block.headingPath[block.headingPath.length - 1]!);
+			const used = seen.get(baseAnchor) ?? 0;
+			seen.set(baseAnchor, used + 1);
+			anchor = used === 0 ? baseAnchor : `${baseAnchor}-${used}`;
+		}
 		return {
 			index,
 			headingPath: block.headingPath,

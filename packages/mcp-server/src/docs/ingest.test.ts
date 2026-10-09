@@ -331,6 +331,14 @@ describe("splitSections", () => {
 		expect(split.sections[1]!.text).toContain("# not a heading");
 		expect(split.sections[1]!.text).toContain("#### H4 stays");
 	});
+	test("repeated headings get GitHub-style unique anchors and non-ASCII letters survive", () => {
+		const text = ["# Install", "", "First.", "", "## Install", "", "Second.", "", "## Install", "", "Third."].join("\n");
+		const split = splitSections({ ...base, text });
+		expect(split.sections.map((section) => section.anchor)).toEqual([null, "install", "install-1", "install-2"]);
+		expect(split.sections[3]!.sourceUrl).toBe(`${base.sourceUrl}#install-2`);
+		const umlaut = splitSections({ ...base, text: "# Über uns\n\nBody.\n" });
+		expect(umlaut.sections[1]!.anchor).toBe("über-uns");
+	});
 });
 
 describe("hashPage", () => {
