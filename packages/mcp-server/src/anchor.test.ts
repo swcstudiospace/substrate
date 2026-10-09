@@ -7,7 +7,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { formatMemo } from "@substrate/ledger";
-import { INGEST_LAG_MS } from "./greptime.ts";
+import { GreptimeError, INGEST_LAG_MS } from "./greptime.ts";
 import {
 	ADDRESS_MEMO_LIMIT,
 	ANCHOR_LOOKBACK_MS,
@@ -352,6 +352,47 @@ describe("runAnchorJob send path", () => {
 		expect(inserts).toEqual([]);
 		expect(failed(emitted)[0]?.payload).toMatchObject({ reason: "send-failed" });
 	});
+
+	test("a row the sweep missed plus an aged-out memo never resends", async () => {
+		// Crash variant: the send-path map says absent (the row landed after
+		// the anchors-window read) and the memo aged out of the 100-signature
+		// listing, so checkAdopt reads none. The durable re-check finds the
+		// row and the hour is left alone, never anchored twice.
+		const anchored = {
+			period_start: new Date(H10).toISOString(),
+			period_end: new Date(H10 + HOUR).toISOString(),
+			root: ROOT,
+			event_count: 3,
+			memo: "m",
+			tx_sig: "old",
+			signer: PUBKEY,
+			cluster: "devnet",
+			slot: 1,
+			anchored_at: new Date(H10).toISOString(),
+			stale_hashes: null,
+		};
+		const { deps: d, emitted, inserts, invocations } = deps({
+			greptime: {
+				firstIngestMs: async () => H10,
+				anchorsBetween: async () => [],
+				anchorForPeriod: async () => anchored,
+				insertAnchor: async () => {
+					throw new Error("must never write an anchored hour again");
+				},
+			} as unknown as AnchorDeps["greptime"],
+			rpc: {
+				transactionMemo: async () => null,
+				addressMemos: async () => [],
+				balance: async () => 1_000_000,
+				getGenesisHash: async () => DEVNET_GENESIS_HASH,
+			},
+		});
+		const result = await runAnchorJob(d);
+		expect(result).toEqual({ code: 0, anchored: 0, adopted: 0, failed: 0 });
+		expect(invocations).toEqual([]);
+		expect(inserts).toEqual([]);
+		expect(emitted).toEqual([]);
+	});
 });
 
 describe("runAnchorJob adopt and alarm", () => {
@@ -501,7 +542,7 @@ describe("runAnchorJob failures", () => {
 		const later = H10 + HOUR;
 		const { deps: d, emitted } = deps({
 			clock: () => later + HOUR + INGEST_LAG_MS + 60_000,
-			digests: new Map<number, HourDigest | Error>([[H10, new Error("hour member evt_1 has no event row")]]),
+			digests: new Map<number, HourDigest | Error>([[H10, new GreptimeError("hour member evt_1 has no event row")]]),
 		});
 		const result = await runAnchorJob(d);
 		expect(result.code).toBe(1);
@@ -511,6 +552,84 @@ describe("runAnchorJob failures", () => {
 			period_start: new Date(H10).toISOString(),
 			reason: "digest-failed",
 		});
+	});
+
+	test("a store failure reading the digest stops the run as store-failed", async () => {
+		// The ledger is unreadable, not the hour bad: later hours may hold
+		// cached digests, so continuing could send again while the store is
+		// down and lose another row.
+		const later = H10 + HOUR;
+		const { deps: d, emitted, inserts, invocations } = deps({
+			clock: () => later + HOUR + INGEST_LAG_MS + 60_000,
+			digests: new Map<number, HourDigest | Error>([[H10, new Error("greptime unreachable: connection refused")]]),
+		});
+		const result = await runAnchorJob(d);
+		expect(result.code).toBe(1);
+		expect(result.failed).toBe(1);
+		expect(result.anchored).toBe(0);
+		expect(invocations).toEqual([]);
+		expect(inserts).toEqual([]);
+		expect(failed(emitted)[0]?.payload).toMatchObject({
+			period_start: new Date(H10).toISOString(),
+			reason: "store-failed",
+		});
+	});
+
+	test("a lost anchor.failed warning stops the run", async () => {
+		// H10 holds bad hour data, but its warning never reaches the store;
+		// H11 is closed and would send, and must never be touched after the
+		// store already failed one write.
+		const later = H10 + HOUR;
+		const { deps: d, emitted, invocations } = deps({
+			clock: () => later + HOUR + INGEST_LAG_MS + 60_000,
+			substrate: {
+				hourDigest: async (hour: number) => {
+					if (hour === H10) throw new GreptimeError("hour member evt_1 has no event row");
+					return digest(hour);
+				},
+				emit: async (input: EventInput) => {
+					emitted.push(input as never);
+					return { stored: false, event: input } as unknown as EmitResult;
+				},
+			} as unknown as AnchorDeps["substrate"],
+		});
+		const result = await runAnchorJob(d);
+		expect(result.code).toBe(1);
+		expect(result.failed).toBe(1);
+		expect(result.anchored).toBe(0);
+		expect(invocations).toEqual([]);
+		expect(failed(emitted)[0]?.payload).toMatchObject({
+			period_start: new Date(H10).toISOString(),
+			reason: "digest-failed",
+		});
+	});
+
+	test("a store failure on the pre-send row re-check stops without sending", async () => {
+		// checkAdopt reads none and the sweep map says absent, but the
+		// durable row cannot be read: fail closed before any send.
+		const { deps: d, emitted, inserts, invocations } = deps({
+			greptime: {
+				firstIngestMs: async () => H10,
+				anchorsBetween: async () => [],
+				anchorForPeriod: async () => {
+					throw new Error("unreachable");
+				},
+				insertAnchor: async () => {},
+			} as unknown as AnchorDeps["greptime"],
+			rpc: {
+				transactionMemo: async () => null,
+				addressMemos: async () => [],
+				balance: async () => 1_000_000,
+				getGenesisHash: async () => DEVNET_GENESIS_HASH,
+			},
+		});
+		const result = await runAnchorJob(d);
+		expect(result.code).toBe(1);
+		expect(result.failed).toBe(1);
+		expect(result.anchored).toBe(0);
+		expect(invocations).toEqual([]);
+		expect(inserts).toEqual([]);
+		expect(failed(emitted)[0]?.payload).toMatchObject({ reason: "store-failed" });
 	});
 
 	test("wrong cluster stops before the first send", async () => {

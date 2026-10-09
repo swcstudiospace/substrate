@@ -2576,12 +2576,14 @@ export class Substrate {
 	 *
 	 * Reads the graph's ingest records by stored graph id, maps each event to
 	 * its first record's hour, splits pre-coverage record-less events to legacy
-	 * (counted, never failing) and post-coverage ones to uncovered (fail, naming
-	 * ids), requires every retained ingest event to appear in the graph's
-	 * rows (D28-22: a retained record with no row is deleted or moved, and
-	 * fails naming ids; a record racing the reads is re-read first, so a
-	 * live append settles instead of failing), then digests each distinct
-	 * hour whole and checks it once.
+	 * (counted, never failing) and post-coverage ones to uncovered (a record
+	 * racing the reads is re-fetched first, so a normal append settles
+	 * instead of failing; only the remainder fails, naming ids), requires
+	 * every retained ingest event to appear in the graph's rows (D28-22: a
+	 * retained record with no row is deleted or moved, and fails naming ids;
+	 * a record racing the reads is re-read first, so a live append settles
+	 * instead of failing), then digests each distinct hour whole and checks
+	 * it once.
 	 * Devnet reads run sequentially — the concurrency cap is one — under the
 	 * whole-verify budget; an hour never reached in budget reads `unverified`.
 	 */
@@ -2621,6 +2623,56 @@ export class Substrate {
 			if (bucket) bucket.push(eventId);
 			else byHour.set(hour, [eventId]);
 		}
+	// A fifth of the budget, capped: short budgets still run their quick
+	// checks instead of losing every hour to a fixed margin. Both re-reads
+	// below share it.
+	const margin = Math.min(VERIFY_RESPONSE_MARGIN_MS, Math.ceil(budgetMs / 5));
+	// The mirror race: `insertEvent` stores the event row before its ingest
+	// record, so a row read while the second write is still in flight is
+	// uncovered on the first ingest read. When uncovered is non-empty and
+	// the budget allows, re-fetch ingest under the same margin/timeout
+	// pattern as the event re-read below, merge newly landed records, and
+	// move newly-covered ids into their hour buckets; only the remainder
+	// fails. Past the allowance the first read stands, fail-closed.
+	if (uncovered.length > 0 && budgetMs - (Date.now() - startedAt) > margin) {
+		const allowance = budgetMs - (Date.now() - startedAt) - margin;
+		const refreshed = await new Promise<typeof ingest | null>((resolve) => {
+			const timer = setTimeout(() => resolve(null), Math.max(0, allowance));
+			timer.unref?.();
+			greptime.graphIngest(storedGraphId).then(
+				(read) => {
+					clearTimeout(timer);
+					resolve(read);
+				},
+				() => {
+					clearTimeout(timer);
+					resolve(null);
+				},
+			);
+		});
+		if (refreshed) {
+			for (const record of refreshed) {
+				if (!byEvent.has(record.event_id)) {
+					byEvent.set(record.event_id, record);
+					ingest.push(record);
+				}
+			}
+			const still: string[] = [];
+			for (const id of uncovered) {
+				const record = byEvent.get(id);
+				if (!record) {
+					still.push(id);
+					continue;
+				}
+				const hour = hourStart(record.ingested_at);
+				const bucket = byHour.get(hour);
+				if (bucket) bucket.push(id);
+				else byHour.set(hour, [id]);
+			}
+			uncovered.length = 0;
+			uncovered.push(...still);
+		}
+	}
 		// Hours whose every event row was deleted still hold retained ingest
 		// records: visit them with an empty bucket so the whole-hour digest
 		// throws naming the missing member instead of passing unseen.
@@ -2644,9 +2696,6 @@ export class Substrate {
 	// stays missing, fail-closed, and the report still reaches the CLI.
 	const rowIds = new Set(rows.map((row) => String(row.id)));
 	const gap = ingest.map((record) => record.event_id).filter((id) => !rowIds.has(id));
-	// A fifth of the budget, capped: short budgets still run their quick
-	// checks instead of losing every hour to a fixed margin.
-	const margin = Math.min(VERIFY_RESPONSE_MARGIN_MS, Math.ceil(budgetMs / 5));
 	const cleared = new Set<string>();
 	let fresh: Array<Record<string, unknown>> | null = null;
 	if (gap.length > 0 && budgetMs - (Date.now() - startedAt) > margin) {

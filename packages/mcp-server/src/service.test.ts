@@ -3705,6 +3705,60 @@ describe("verifyGraph hour report", () => {
 		expect(verdict.reason).toContain(extra.id);
 	});
 
+	test("an ingest record landing between the reads clears the uncovered id", async () => {
+		// Mirror race: the event row is stored before its ingest record, so
+		// the first ingest read misses it and the row reads uncovered. The
+		// bounded re-fetch finds the landed record, moves the id into its
+		// hour bucket, and the healthy graph verifies.
+		const world = sessionRows();
+		const extra = normalizeEvent(
+			{ surface: "omp", kind: "note", summary: "settling", session_id: "sess-new", graph_id: "ut-1", actor: "agent" },
+			null,
+		);
+		const extraRow = { ...extra, ts: Date.parse(extra.ts), payload: JSON.stringify(extra.payload) };
+		const extraRecord = { event_id: extra.id, event_ts: Date.parse(extra.ts), ingested_at: H + 2000 };
+		let ingests = 0;
+		const substrate = substrateWith({
+			readEvents: async () => [...world.rows, extraRow],
+			graphIngest: async () => (++ingests === 1 ? world.records : [...world.records, extraRecord]),
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(world.memo) as never });
+		expect(ingests).toBe(2);
+		expect(verdict.uncovered).toEqual({ count: 0, ids: [] });
+		expect(verdict.ok).toBe(true);
+		expect(verdict.reason).toBeUndefined();
+	});
+
+	test("an event with no record at any read still fails naming the id", async () => {
+		// Genuinely record-less, not racing: the re-fetch runs and finds
+		// nothing new, so only the remainder fails.
+		const world = sessionRows();
+		const extra = normalizeEvent(
+			{ surface: "omp", kind: "note", summary: "new", session_id: "sess-new", graph_id: "ut-1", actor: "agent" },
+			null,
+		);
+		const rows = [...world.rows, { ...extra, ts: Date.parse(extra.ts), payload: JSON.stringify(extra.payload) }];
+		let ingests = 0;
+		const substrate = substrateWith({
+			readEvents: async () => rows,
+			graphIngest: async () => {
+				ingests += 1;
+				return world.records;
+			},
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(world.memo) as never });
+		expect(ingests).toBe(2);
+		expect(verdict.ok).toBe(false);
+		expect(verdict.uncovered.ids).toContain(extra.id);
+		expect(verdict.reason).toContain(extra.id);
+	});
+
 	test("anchors off stays chain-only for evidence", async () => {
 		const world = sessionRows();
 		const substrate = substrateWith({ readEvents: async () => world.rows });

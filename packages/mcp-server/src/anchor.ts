@@ -13,12 +13,15 @@
  * adopt an existing signer-checked memo or send the digest memo through the
  * solana CLI, then write the production 11-column anchors row and emit
  * `anchor.written`. A `--period` re-run consults that hour's row directly, so
- * an hour older than the lookback is never anchored twice. Per-hour digest
- * failures and root mismatches emit `anchor.failed` and continue to the next
- * hour (a mismatch also alarms and exits 1); a lost `anchor.written` note is
- * reported as store-failed without resending the transaction. Systemic
- * failures (wrong cluster, signer mismatch, unfunded key, unreadable RPC,
- * CLI or store failure) stop the run before the next send.
+ * an hour older than the lookback is never anchored twice; a send-path hour
+ * the sweep map calls absent re-checks its row too, so a memo aged out of
+ * the 100-signature listing never anchors an hour twice. Bad hour data
+ * emits `anchor.failed` and continues to the next hour (a root mismatch
+ * also alarms and exits 1); a failed store read, a lost `anchor.failed`
+ * warning, and a lost `anchor.written` note are reported as store-failed
+ * without resending the transaction. Systemic failures (wrong cluster,
+ * signer mismatch, unfunded key, unreadable RPC, CLI or store failure)
+ * stop the run before the next send.
  *
  * The memo carries period_start, root and count only — never event content —
  * and the keypair is only ever a path on an argv the CLI reads.
@@ -41,7 +44,8 @@ import {
 	type TransactionMemo,
 } from "@substrate/ledger";
 import { isAbsolute as isAbsPath } from "node:path";
-import { INGEST_LAG_MS, type GreptimeClient, type NewAnchor } from "./greptime.ts";
+import { InvalidEventError } from "./event.ts";
+import { GreptimeError, INGEST_LAG_MS, type GreptimeClient, type NewAnchor } from "./greptime.ts";
 import { redact } from "./redact.ts";
 import type { HourDigest, Substrate } from "./service.ts";
 
@@ -175,18 +179,33 @@ async function emitWritten(
 	});
 }
 
+/**
+ * Whether a failed `hourDigest` is bad hour data (report and continue to
+ * the next hour) rather than a store failure (report as store-failed and
+ * stop the run before the next send). Production data errors are the `hour
+ * member …` GreptimeErrors from the membership read — a member with no
+ * row, two hashes, or a non-numeric time — plus refused arguments, which
+ * the sweep never passes. Anything else is the store: an unreachable
+ * ledger, an unconfirmed table mode, or a refused write.
+ */
+function isHourDataError(cause: unknown): boolean {
+	if (cause instanceof InvalidEventError) return true;
+	return cause instanceof GreptimeError && cause.message.startsWith("hour member ");
+}
+
 async function emitFailed(
 	substrate: Pick<Substrate, "hourDigest" | "emit">,
 	periodStartIso: string,
 	reason: AnchorFailReason,
-): Promise<void> {
-	await substrate.emit({
+): Promise<boolean> {
+	const note = await substrate.emit({
 		surface: "substrate",
 		kind: "warning",
 		summary: `anchor failed for hour ${periodStartIso.slice(0, 13)}: ${reason}`,
 		session_id: anchorSession(periodStartIso),
 		payload: { action: "anchor", runtime: "anchor", period_start: periodStartIso, reason },
 	});
+	return note?.stored === true;
 }
 
 /**
@@ -321,10 +340,18 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 	const { greptime, substrate, runner, rpc, env } = deps;
 	const result: AnchorResult = { code: 0, anchored: 0, adopted: 0, failed: 0 };
 
-	const failHour = async (periodStartIso: string, reason: AnchorFailReason): Promise<void> => {
+	const failHour = async (periodStartIso: string, reason: AnchorFailReason): Promise<boolean> => {
+		// Reports one hour as failed, and whether its `anchor.failed` warning
+		// reached the store. A lost warning is itself a store failure: a
+		// caller that would continue to the next hour must stop instead,
+		// before the next send.
 		result.failed += 1;
 		result.code = 1;
-		await emitFailed(substrate, periodStartIso, reason).catch(() => {});
+		try {
+			return await emitFailed(substrate, periodStartIso, reason);
+		} catch {
+			return false;
+		}
 	};
 
 	let coverageMs: number | null;
@@ -420,8 +447,22 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 			try {
 				digest = await substrate.hourDigest(hour, now);
 			} catch (cause) {
-				await failHour(periodIso, "digest-failed");
+				// A failed store read must not look like a bad hour: later
+				// hours may already hold cached digests, so continuing would
+				// send again while the store is unavailable and lose another
+				// row. Only bad hour data reports digest-failed and continues —
+				// and only when its warning reached the store.
+				if (!isHourDataError(cause)) {
+					await failHour(periodIso, "store-failed");
+					process.stderr.write(`[anchor] ${periodIso} store-failed: ${redact(String(cause).slice(0, 200))}\n`);
+					return result;
+				}
+				const warned = await failHour(periodIso, "digest-failed");
 				process.stderr.write(`[anchor] ${periodIso} digest failed: ${redact(String(cause).slice(0, 200))}\n`);
+				if (!warned) {
+					process.stderr.write(`[anchor] ${periodIso} store-failed: the anchor.failed warning was not stored\n`);
+					return result;
+				}
 				continue;
 			}
 		}
@@ -448,9 +489,16 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 					return result;
 				}
 			}
-			await failHour(periodIso, "root-mismatch");
-			process.stderr.write(`[anchor] ALARM ${periodIso}: chain root ${verdict.root} != recomputed ${digest.root}\n`);
-			continue;
+		const warned = await failHour(periodIso, "root-mismatch");
+		process.stderr.write(`[anchor] ALARM ${periodIso}: chain root ${verdict.root} != recomputed ${digest.root}\n`);
+		// The alarm is reported, but a later hour still anchors — unless the
+		// warning itself was not stored, which stops the run like the
+		// adopted-note path below.
+		if (!warned) {
+			process.stderr.write(`[anchor] ${periodIso} store-failed: the anchor.failed warning was not stored\n`);
+			return result;
+		}
+		continue;
 		}
 
 		if (verdict.kind === "adopt") {
@@ -482,6 +530,25 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 		if (anchored[periodIso] === true) {
 			process.stdout.write(`[anchor] ${periodIso} already anchored\n`);
 			continue;
+		}
+		// The sweep's anchors window can miss a row that landed after its
+		// read, and a send whose row write was lost leaves no row at all:
+		// either way the map says absent, and a memo aged out of the
+		// 100-signature listing reads as `none`, which would send a second
+		// anchor for the same hour. Re-read the durable row before treating
+		// the hour as absent — a lost listing never overrides a stored row —
+		// and stop fail-closed when the store cannot answer, before any send.
+		try {
+			const existing = await greptime.anchorForPeriod(hour);
+			if (existing) {
+				anchored[periodIso] = true;
+				process.stdout.write(`[anchor] ${periodIso} already anchored\n`);
+				continue;
+			}
+		} catch (cause) {
+			await failHour(periodIso, "store-failed");
+			process.stderr.write(`[anchor] ${periodIso} store-failed: ${redact(String(cause).slice(0, 200))}\n`);
+			return result;
 		}
 
 		if (!preconditionsOk) {
