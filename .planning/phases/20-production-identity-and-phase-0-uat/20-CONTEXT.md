@@ -170,6 +170,8 @@ One PR on agent-substrate plus one PR on `swcstudiospace/claude-ultrathink` (FOU
 
 ## Open for the operator (user-visible)
 
+**Answered 2026-10-08: the operator accepted items 1-6 as recommended, and approved item 7.** The claude-ultrathink PR follows the same rules as v1.3 phase PRs: Greptile 5/5 with no open threads, then auto-merge, then a plugin refresh in the live window. The items below are the record.
+
 1. **List-form tokens (D20-02, D20-03).** Allow `SUBSTRATE_TOKEN_<SURFACE>` to hold several comma-separated values so the operator, the gateway and the connector each get their own value. Why: with one value per surface, the operator token must be some surface's shared token, which gives `force` to every client of that surface, and the gateway and connector cannot be revoked separately. Recommendation: yes; the change is backward compatible.
 2. **herdr's tokens (D20-05).** herdr posts each event with that surface's token from `/etc/substrate/tokens/<surface>`, so tokens are provisioned for all nine non-swarm agent surfaces it maps. Why: Phase 17 binds the `substrate` token to its own surface, so a single host-job token cannot post herdr's per-agent events. Recommendation: yes; the alternative is relaxing Phase 17's binding for `/events`.
 3. **Client token files in `/etc/substrate/tokens/<surface>` (D20-04).** Why: the Cursor hooks, git hooks and Grok/Hermes hosts run with environments the operator does not control, and a file avoids putting a value in `hooks.json` or settings. Recommendation: yes, root-owned 0700 directory, 0600 files.
