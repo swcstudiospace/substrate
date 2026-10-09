@@ -6,6 +6,7 @@
  * get MCP. Same code underneath.
  */
 import { decideClaim, type ClaimDecision } from "@substrate/audit";
+import { formatMemo, hourEnd, hourIso, hourStart, isClosed, merkleRootHex } from "@substrate/ledger";
 import { composeBrief, type BriefRequest } from "./brief.ts";
 import { isReviewToken, type SubstrateConfig } from "./config.ts";
 import {
@@ -19,7 +20,14 @@ import {
 } from "./drift.ts";
 import { InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, verifyChain } from "./event.ts";
 import { checkoutKnowsCommit, readGitTip } from "./git.ts";
-import { GreptimeClient, queryLimit, type EventQuery, type QueryableColumn } from "./greptime.ts";
+import {
+	GreptimeClient,
+	INGEST_LAG_MS,
+	IngestNotRecorded,
+	queryLimit,
+	type EventQuery,
+	type QueryableColumn,
+} from "./greptime.ts";
 import { IndexStore, leaseSnapshot, type GraphBindResult } from "./index-store.ts";
 import {
 	buildHandoff,
@@ -233,8 +241,32 @@ export interface EmitResult {
 	stored: boolean;
 	/** Why it was not stored. Redacted, because a connection error can quote a URL. */
 	error?: string;
-	/** Set when the append landed in a ledger that is not configured append-only. */
+	/**
+	 * Set when the event is stored but something about it is not as promised: the ledger is
+	 * not configured append-only, or the event's ingest record could not be written so it
+	 * will not be anchored. The event is not re-emitted in either case.
+	 */
 	warning?: string;
+}
+
+/**
+ * One closed UTC hour of the ledger, digested in ingest order for the hourly anchor.
+ *
+ * `root` and `memo` are null for an hour that no event was ingested in: an anchor with
+ * nothing to commit to is a skip, not a transaction (D27-15).
+ */
+export interface HourDigest {
+	/** ISO start of the hour, inclusive. */
+	period_start: string;
+	/** ISO end of the hour, exclusive. */
+	period_end: string;
+	event_count: number;
+	/** The RFC 6962 root over the members' event hashes, 64 lowercase hex; null when the hour is empty. */
+	root: string | null;
+	/** The `substrate:v1` memo for the hour; carries the period, the root and the count, never event content. */
+	memo: string | null;
+	/** The members' event ids in position order, the order the root is computed over. */
+	event_ids: string[];
 }
 
 /**
@@ -263,6 +295,17 @@ const APPEND_MODE_UNKNOWN =
 const DEDUP_WARNING =
 	"agent_events is not in append_mode and SUBSTRATE_ALLOW_DEDUPLICATING_LEDGER is set: this event may be " +
 	"silently dropped if another shares its surface, repo, graph, kind and millisecond.";
+
+/**
+ * Told to a caller whose event is stored but whose ingest write could not be confirmed (D27-09).
+ *
+ * The event is durable, so the caller must not re-emit it: a retry would store a
+ * second event with a new id. A failed attempt is not proof the record is absent,
+ * so the warning says coverage may be missing.
+ */
+const INGEST_NOT_RECORDED =
+	"the event is stored, but its ingest write could not be confirmed, so hourly coverage may be missing. " +
+	"Do not re-emit it: a retry would store a second event.";
 
 /**
  * Where the service reports what it measured.
@@ -587,6 +630,16 @@ export class Substrate {
 			return { event, stored: true, ...(appendOnly !== true ? { warning: DEDUP_WARNING } : {}) };
 		} catch (cause) {
 			const error = redact(String(cause));
+			if (cause instanceof IngestNotRecorded) {
+				// Branch first: this error means the event row is already stored. Reporting
+				// it as `stored: false` would invite a retry that mints a second event.
+				process.stderr.write(`[substrate] event ${event.id} stored but ingest unconfirmed — ${error}\n`);
+				return {
+					event,
+					stored: true,
+					warning: appendOnly !== true ? `${INGEST_NOT_RECORDED} ${DEDUP_WARNING}` : INGEST_NOT_RECORDED,
+				};
+			}
 			process.stderr.write(`[substrate] event ${event.id} not stored — ${error}\n`);
 			return { event, stored: false, error };
 		}
@@ -1416,6 +1469,46 @@ export class Substrate {
 			events_truncated: eventsTruncated,
 			sources: { git: git.sha !== null, ledger: ledgerOk, index: indexOk },
 		});
+	}
+
+	/**
+	 * Digest one closed UTC hour of the ledger in ingest order, for the hourly anchor.
+	 *
+	 * The hour is named by its start in epoch milliseconds, which must be a whole UTC
+	 * hour, and it must have been closed for the ingest lag: asking earlier would hash a
+	 * set of events that can still grow, and the root would differ when recomputed. Both
+	 * refusals throw, as on the write path, because they are a caller's bug and must not
+	 * read as an empty hour. `now` is injectable so a test can pick the clock.
+	 *
+	 * Membership and order come from the ingest records (see `GreptimeClient.hourLeaves`);
+	 * the root and the memo come from the pure functions in `@substrate/ledger`, so the
+	 * same stored events always give the same digest, whatever order the server returned
+	 * rows in. A member that cannot be hashed throws naming the event rather than
+	 * returning a partial root. An hour with no members digests to a null root and memo.
+	 */
+	async hourDigest(periodStartMs: number, now: number = Date.now()): Promise<HourDigest> {
+		if (
+			!Number.isSafeInteger(periodStartMs) ||
+			Number.isNaN(new Date(periodStartMs).getTime()) ||
+			periodStartMs !== hourStart(periodStartMs)
+		) {
+			throw new InvalidEventError("period_start must be a whole UTC hour in epoch milliseconds");
+		}
+		if (!isClosed(periodStartMs, now, INGEST_LAG_MS)) {
+			throw new InvalidEventError(`hour ${hourIso(periodStartMs)} is not closed yet`);
+		}
+		if (!this.greptime) throw new Error("GREPTIME_URL is not set");
+
+		const leaves = await this.greptime.hourLeaves(periodStartMs);
+		const digest = {
+			period_start: hourIso(periodStartMs),
+			period_end: hourIso(hourEnd(periodStartMs)),
+			event_count: leaves.length,
+			event_ids: leaves.map((leaf) => leaf.event_id),
+		};
+		if (leaves.length === 0) return { ...digest, root: null, memo: null };
+		const root = merkleRootHex(leaves.map((leaf) => leaf.hash));
+		return { ...digest, root, memo: formatMemo({ periodStartMs, rootHex: root, count: leaves.length }) };
 	}
 
 	/**

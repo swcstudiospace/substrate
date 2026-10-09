@@ -13,6 +13,7 @@
  */
 import type { GreptimeConfig } from "./config.ts";
 import type { SubstrateEvent } from "./types.ts";
+import { hourEnd, hourStart, isClosed } from "@substrate/ledger";
 
 const DEFAULT_TIMEOUT_MS = 5000;
 
@@ -20,6 +21,36 @@ export class GreptimeError extends Error {}
 
 /** A statement the ledger client refuses to send. See `assertAppendOnly`. */
 export class AppendOnlyViolation extends GreptimeError {}
+/**
+ * The event row is stored but its ingest record is not, so the event will not
+ * be anchored. `Substrate.append` maps this to `stored: true` with a warning
+ * rather than un-storing the event — retrying the emit would mint a second
+ * event with a new id. See D27-09.
+ */
+export class IngestNotRecorded extends GreptimeError {
+	constructor(readonly eventId: string, cause: unknown) {
+		super(`event ${eventId} stored, but its ingest write could not be confirmed: ${String(cause)}`);
+	}
+}
+
+/**
+ * How long after an hour ends before it counts as closed. Far above the 5 s
+ * write timeout, so a record stamped inside an hour is visible before the hour
+ * counts as closed. Phase 28 schedules its anchor timer around this constant.
+ */
+export const INGEST_LAG_MS = 300_000;
+
+/**
+ * How long both ingest attempts may take together, after the event row is stored.
+ *
+ * `substrate emit` aborts at 1.5 s and the Grok collector and git hook at 3 s.
+ * Each statement otherwise waits up to {@link DEFAULT_TIMEOUT_MS}, so two ingest
+ * attempts could add 10 s after a row that already landed — the caller gives up
+ * and reports the server unreachable even though the event is stored. One second
+ * fits inside the shorter deadline when that write was quick. A second attempt
+ * runs only with whatever of the second is left.
+ */
+export const INGEST_BUDGET_MS = 1_000;
 
 /** Columns of `agent_events`, in the order every statement uses them. */
 export const EVENT_COLUMNS = [
@@ -86,6 +117,30 @@ export interface EventQuery {
 	/** `desc` (the default) reads the newest events first. */
 	order?: "asc" | "desc";
 	includePayload?: boolean;
+}
+
+/** One member of a closed ingest hour, in position order. */
+export interface HourLeaf {
+	/** The event id, as stored in `event_ingest` and `agent_events`. */
+	event_id: string;
+	/** Epoch milliseconds of the member's first ingest record. */
+	ingested_at: number;
+	/** The 64 lowercase hex hash from the member's event row. */
+	hash: string;
+}
+
+/**
+ * Upper bound on the ids one batched hour-read statement carries.
+ *
+ * The hour read walks its members in batches so the id list stays small
+ * enough for the HTTP SQL API: 500 ids are about 20 KB of statement text,
+ * which the scratch server answered in tens of milliseconds.
+ */
+const IN_BATCH = 500;
+
+/** A TIMESTAMP cell as epoch milliseconds; NaN for null, empty or non-numeric, which `Number()` would turn into 0. */
+function epochMs(value: unknown): number {
+	return value === null || value === undefined || value === "" ? Number.NaN : Number(value);
 }
 
 /** Clamp to a whole number of rows inside the cap; anything unusable falls back to the default. */
@@ -243,9 +298,19 @@ export class GreptimeClient {
 	appendMode: boolean | null = null;
 	private appendModeCheckedAt = 0;
 
+	/**
+	 * Whether `event_ingest` is in append_mode, as last observed. Separate from
+	 * {@link appendMode}: `CREATE TABLE IF NOT EXISTS` leaves an existing table
+	 * alone, and a deduplicating ingest table can drop a same-millisecond record
+	 * the hourly root would then omit without a warning.
+	 */
+	ingestAppendMode: boolean | null = null;
+	private ingestAppendModeCheckedAt = 0;
+
 	constructor(
 		private readonly config: GreptimeConfig,
 		private readonly timeoutMs = DEFAULT_TIMEOUT_MS,
+		private readonly clock: () => number = Date.now,
 	) {}
 
 	private headers(): Record<string, string> {
@@ -281,7 +346,7 @@ export class GreptimeClient {
 	 * the ledger, so it is the right place to make append-only structural rather
 	 * than a convention each caller has to remember.
 	 */
-	async sql(statement: string): Promise<Array<Record<string, unknown>>> {
+	async sql(statement: string, timeoutMs = this.timeoutMs): Promise<Array<Record<string, unknown>>> {
 		assertAppendOnly(statement);
 		const url = `${this.config.url}/v1/sql?db=${encodeURIComponent(this.config.db)}`;
 		let response: Response;
@@ -290,7 +355,7 @@ export class GreptimeClient {
 				method: "POST",
 				headers: this.headers(),
 				body: new URLSearchParams({ sql: statement }),
-				signal: AbortSignal.timeout(this.timeoutMs),
+				signal: AbortSignal.timeout(timeoutMs),
 			});
 		} catch (cause) {
 			throw new GreptimeError(`greptime unreachable: ${String(cause)}`);
@@ -387,16 +452,54 @@ export class GreptimeClient {
 			warnings.push(`agent_events created without append_mode: ${String(cause)}`);
 		}
 
+		try {
+			await this.sql(
+				`CREATE TABLE IF NOT EXISTS "event_ingest" ("ingested_at" TIMESTAMP TIME INDEX, "event_id" STRING, "event_ts" TIMESTAMP, "graph_id" STRING) WITH ('append_mode' = 'true')`,
+			);
+		} catch (cause) {
+			// Unlike agent_events above, there is no plain-CREATE fallback here: a
+			// table without append_mode and without a primary key deduplicates on
+			// the time index alone, so two events ingested in the same millisecond
+			// would silently lose a record. A warning is cheaper than that loss.
+			warnings.push(`event_ingest not created in append_mode: ${String(cause)}`);
+		}
+
 		await this.sql(`
 			CREATE TABLE IF NOT EXISTS "anchors" (
 				"period_start" TIMESTAMP TIME INDEX,
 				"period_end"   TIMESTAMP,
 				"root"         STRING,
-				"tx_sig"       STRING,
 				"event_count"  BIGINT,
-				PRIMARY KEY ("root")
+				"memo"         STRING,
+				"tx_sig"       STRING,
+				"signer"       STRING,
+				"cluster"      STRING,
+				"slot"         BIGINT,
+				"anchored_at"  TIMESTAMP,
+				"stale_hashes" BIGINT
 			)
 		`);
+
+		// Production's period-keyed anchors, as information_schema spells the types
+		// (verified against live on 2026-10-08, D27-17). `CREATE TABLE IF NOT
+		// EXISTS` is a no-op against a table the old 5-column DDL built, so the
+		// live shape is asked directly — and only a definite mismatch warns. An
+		// empty or failed read stays silent: a fresh store has no anchors yet,
+		// and boot must not cry wolf. This never ALTERs, DROPs or recreates.
+		const liveAnchors = await this.sql(
+			`SELECT "column_name", "data_type", "semantic_type" FROM "information_schema"."columns" ` +
+				`WHERE "table_schema" = ${this.q(this.config.db)} AND "table_name" = ${this.q("anchors")} ORDER BY "ordinal_position"`,
+		).catch(() => []);
+		const liveShape = liveAnchors
+			.map((row) => `${String(row.column_name)} ${String(row.data_type).toLowerCase()} ${String(row.semantic_type).toLowerCase()}`)
+			.join(", ");
+		const canonicalShape =
+			"period_start timestamp(3) timestamp, period_end timestamp(3) field, root string field, " +
+			"event_count bigint field, memo string field, tx_sig string field, signer string field, " +
+			"cluster string field, slot bigint field, anchored_at timestamp(3) field, stale_hashes bigint field";
+		if (liveAnchors.length > 0 && liveShape !== canonicalShape) {
+			warnings.push(`anchors does not match production's period-keyed shape (live: ${liveShape}); see docs/greptime-ledger.md.`);
+		}
 
 		await this.probeDialect();
 		if (!this.dialectProbed) {
@@ -413,6 +516,16 @@ export class GreptimeClient {
 			);
 		} else if (appendOnly === null) {
 			warnings.push("could not confirm agent_events is in append_mode");
+		}
+
+		const ingestOnly = await this.ensureIngestAppendMode();
+		if (ingestOnly === false) {
+			warnings.push(
+				"event_ingest is not in append_mode — same-millisecond ingest records can replace each other, so an " +
+					"hourly root would omit durable events. Recreate the table with WITH ('append_mode' = 'true'); see docs/greptime-ledger.md.",
+			);
+		} else if (ingestOnly === null) {
+			warnings.push("could not confirm event_ingest is in append_mode");
 		}
 
 		return { warnings };
@@ -453,15 +566,44 @@ export class GreptimeClient {
 	 * directly. `null` means the question could not be answered.
 	 */
 	async appendModeEnabled(): Promise<boolean | null> {
-		const rows = await this.sql(`SHOW CREATE TABLE "agent_events"`).catch(() => null);
+		const answer = await this.liveAppendMode("agent_events");
+		if (answer !== null) this.appendMode = answer;
+		return answer;
+	}
+
+	/**
+	 * Whether live `event_ingest` is in append_mode, re-asked when the answer is stale.
+	 *
+	 * Same cache rule as {@link ensureAppendMode}. A failed check leaves the previous
+	 * answer in place. `timeoutMs` bounds the probe when it runs on the ingest path,
+	 * which has already stored the event and cannot spend another full write timeout.
+	 */
+	async ensureIngestAppendMode(now = Date.now(), timeoutMs = this.timeoutMs): Promise<boolean | null> {
+		if (this.ingestAppendMode !== null && now - this.ingestAppendModeCheckedAt < APPEND_MODE_TTL_MS) {
+			return this.ingestAppendMode;
+		}
+		const answer = await this.liveAppendMode("event_ingest", timeoutMs);
+		if (answer !== null) {
+			this.ingestAppendMode = answer;
+			this.ingestAppendModeCheckedAt = now;
+		}
+		return answer ?? this.ingestAppendMode;
+	}
+
+	/**
+	 * Whether a live table's DDL carries `append_mode`.
+	 *
+	 * `null` means the question could not be answered. Greptime prints the option
+	 * unquoted (`append_mode = 'true'`); the DDL we send quotes the key. Tolerate
+	 * both rather than reporting a false mismatch.
+	 */
+	private async liveAppendMode(table: "agent_events" | "event_ingest", timeoutMs = this.timeoutMs): Promise<boolean | null> {
+		const rows = await this.sql(`SHOW CREATE TABLE "${table}"`, timeoutMs).catch(() => null);
 		if (!rows || rows.length === 0) return null;
 		const ddl = Object.values(rows[0] ?? {})
 			.map((value) => String(value))
 			.join(" ");
-		// Greptime prints the option unquoted (`append_mode = 'true'`); the DDL we
-		// send quotes the key. Tolerate both rather than reporting a false mismatch.
-		this.appendMode = /append_mode'?\s*=\s*'?true/i.test(ddl);
-		return this.appendMode;
+		return /append_mode'?\s*=\s*'?true/i.test(ddl);
 	}
 
 	async insertEvent(event: SubstrateEvent): Promise<void> {
@@ -485,6 +627,60 @@ export class GreptimeClient {
 		};
 		const values = EVENT_COLUMNS.map(cell).join(", ");
 		await this.sql(`INSERT INTO "agent_events" (${EVENT_COLUMN_LIST}) VALUES (${values})`);
+
+		// The ingest record goes second: it must never name an event that does not
+		// exist. Each attempt takes a fresh stamp immediately before its INSERT; a
+		// duplicate can only appear when the retry follows an ambiguous timeout
+		// that had in fact landed, and the hour read collapses it (D27-10).
+		// `quote(null)` renders a null graph_id as NULL with no branch (D27-07).
+		// Both attempts, and the live append_mode probe, share INGEST_BUDGET_MS so
+		// a caller that already has the event row is not held for two full timeouts.
+		const budgetStarted = Date.now();
+		const remaining = (): number => INGEST_BUDGET_MS - (Date.now() - budgetStarted);
+		const probeBudget = remaining();
+		if (probeBudget < 50) {
+			throw new IngestNotRecorded(event.id, new GreptimeError(`ingest budget of ${INGEST_BUDGET_MS}ms exhausted`));
+		}
+		const ingestAppend = await this.ensureIngestAppendMode(Date.now(), probeBudget);
+		if (ingestAppend === false) {
+			// Do not insert. A deduplicating time index can replace another event's
+			// record that shares the millisecond, which is a worse loss than skipping ours.
+			throw new IngestNotRecorded(
+				event.id,
+				new GreptimeError("event_ingest is not in append_mode, so a same-millisecond ingest record may replace another"),
+			);
+		}
+		let failure: unknown;
+		for (let attempt = 0; attempt < 2; attempt++) {
+			const budget = remaining();
+			if (budget < 50) {
+				failure ??= new GreptimeError(`ingest budget of ${INGEST_BUDGET_MS}ms exhausted`);
+				break;
+			}
+			const ingestedAt = this.clock();
+			try {
+				await this.sql(
+					`INSERT INTO "event_ingest" ("ingested_at", "event_id", "event_ts", "graph_id") VALUES (` +
+						`${this.q(new Date(ingestedAt).toISOString())}, ${this.q(event.id)}, ${this.q(event.ts)}, ${this.q(event.graph_id)})`,
+					budget,
+				);
+			} catch (cause) {
+				failure = cause;
+				continue;
+			}
+			const hour = hourStart(ingestedAt);
+			if (isClosed(hour, this.clock(), INGEST_LAG_MS)) {
+				// The record landed after its hour already closed: a root computed
+				// before now would differ when recomputed, and this line is how
+				// that is diagnosed. It names the event and the hour only (D27-16).
+				process.stderr.write(
+					`[substrate] event ${event.id} ingest record landed after hour ${new Date(hour).toISOString()} closed; ` +
+						"a root computed before it landed would differ\n",
+				);
+			}
+			return;
+		}
+		throw new IngestNotRecorded(event.id, failure);
 	}
 
 	/**
@@ -576,6 +772,80 @@ export class GreptimeClient {
 	async hasEvent(eventId: string): Promise<boolean> {
 		const rows = await this.sql(`SELECT "id" FROM "agent_events" WHERE "id" = ${this.q(eventId)} LIMIT 1`);
 		return rows.length > 0;
+	}
+
+	/**
+	 * One closed hour's members in position order, with their hashes.
+	 *
+	 * An event belongs to the hour holding its first ingest record, and its
+	 * position is its rank by (`ingested_at`, `event_id`) ascending: the
+	 * server only filters, and TypeScript decides membership and order, so an
+	 * arbitrary server row order or a write interleaving cannot move the root.
+	 * Collector `ts` plays no part — a backdated event lands in the hour it
+	 * was ingested. Leaves always come from the event rows, so altering a
+	 * stored event changes the recomputed root. A member with no event row,
+	 * a hash that is not 64 lowercase hex, or two stored hashes for one id
+	 * throws naming the event: the digest never returns a partial root.
+	 */
+	async hourLeaves(startMs: number): Promise<HourLeaf[]> {
+		const ingestAppend = await this.ensureIngestAppendMode();
+		if (ingestAppend !== true) {
+			throw new GreptimeError(
+				ingestAppend === false
+					? "event_ingest is not in append_mode, so an hourly root would omit events that shared a millisecond"
+					: "could not confirm event_ingest is in append_mode, so hourly membership was not read",
+			);
+		}
+		const at = (ms: number): string => this.q(new Date(ms).toISOString());
+		const rows = await this.sql(
+			`SELECT "event_id", "ingested_at", "event_ts" FROM "event_ingest" ` +
+				`WHERE "ingested_at" >= ${at(startMs)} AND "ingested_at" < ${at(hourEnd(startMs))}`,
+		);
+		const first = new Map<string, { at: number; ts: number }>();
+		for (const row of rows) {
+			const id = String(row.event_id);
+			const ingested = epochMs(row.ingested_at);
+			const ts = epochMs(row.event_ts);
+			// A time that is not a number would sort unpredictably or make the hash
+			// read's bounds throw a bare RangeError; name the event instead.
+			if (!Number.isFinite(ingested) || !Number.isFinite(ts)) {
+				throw new GreptimeError(`hour member ${id} has an ingest record with a time that is not a number`);
+			}
+			const seen = first.get(id);
+			if (!seen || ingested < seen.at) first.set(id, { at: ingested, ts });
+		}
+		const ids = [...first.keys()];
+		for (let i = 0; i < ids.length; i += IN_BATCH) {
+			const batch = ids.slice(i, i + IN_BATCH).map((id) => this.q(id)).join(", ");
+			const earlier = await this.sql(
+				`SELECT DISTINCT "event_id" FROM "event_ingest" WHERE "ingested_at" < ${at(startMs)} AND "event_id" IN (${batch})`,
+			);
+			for (const row of earlier) first.delete(String(row.event_id));
+		}
+		const members = [...first]
+			.map(([event_id, v]) => ({ event_id, ...v }))
+			.sort((a, b) => a.at - b.at || (a.event_id < b.event_id ? -1 : a.event_id > b.event_id ? 1 : 0));
+		const hashes = new Map<string, string>();
+		for (let i = 0; i < members.length; i += IN_BATCH) {
+			const batch = members.slice(i, i + IN_BATCH);
+			const found = await this.sql(
+				`SELECT "id", "hash" FROM "agent_events" WHERE "ts" >= ${at(Math.min(...batch.map((m) => m.ts)))} ` +
+					`AND "ts" <= ${at(Math.max(...batch.map((m) => m.ts)))} AND "id" IN (${batch.map((m) => this.q(m.event_id)).join(", ")})`,
+			);
+			for (const row of found) {
+				const id = String(row.id);
+				const hash = String(row.hash);
+				const prior = hashes.get(id);
+				if (prior !== undefined && prior !== hash) throw new GreptimeError(`hour member ${id} has two stored hashes`);
+				hashes.set(id, hash);
+			}
+		}
+		return members.map(({ event_id, at: ingested_at }) => {
+			const hash = hashes.get(event_id);
+			if (hash === undefined) throw new GreptimeError(`hour member ${event_id} has no event row`);
+			if (!/^[0-9a-f]{64}$/.test(hash)) throw new GreptimeError(`hour member ${event_id} has a hash that is not 64 lowercase hex`);
+			return { event_id, ingested_at, hash };
+		});
 	}
 
 	/**

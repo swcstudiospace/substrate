@@ -16,6 +16,9 @@ import {
 	EVENT_COLUMNS,
 	GreptimeClient,
 	GreptimeError,
+	INGEST_LAG_MS,
+	INGEST_BUDGET_MS,
+	IngestNotRecorded,
 	MAX_QUERY_LIMIT,
 	queryLimit,
 	quote,
@@ -47,7 +50,13 @@ const affected = { output: [{ affectedrows: 1 }] };
  * answer the probe makes it refuse any event carrying a backslash.
  */
 function defaultReply(statement: string): unknown {
-	return statement.includes("LENGTH") ? records(["n"], [[3]]) : affected;
+	if (statement.includes("LENGTH")) return records(["n"], [[3]]);
+	// insertEvent and hourLeaves ask the live table before they record or read.
+	// A stub that cannot answer would look like "not confirmed" and refuse the hour.
+	if (statement.includes('SHOW CREATE TABLE "event_ingest"')) {
+		return records(["Table", "Create Table"], [["event_ingest", "... WITH( append_mode = 'true' )"]]);
+	}
+	return affected;
 }
 
 /** The INSERT among the recorded statements — the probe may precede it. */
@@ -290,7 +299,7 @@ describe("probeDialect", () => {
 		const client = new GreptimeClient(config);
 		await client.probeDialect();
 		await client.insertEvent(normalizeEvent({ ...input, summary: "C:\\new" }, null));
-		expect(sql.at(-1)).toContain("'C:\\new'");
+		expect(insertStatement(sql)).toContain("'C:\\new'");
 	});
 });
 
@@ -333,8 +342,9 @@ describe("migrate", () => {
 		});
 
 		const { warnings } = await new GreptimeClient(config).migrate();
-		expect(warnings).toHaveLength(1);
-		expect(warnings[0]).toContain("append_mode");
+		expect(warnings).toHaveLength(2);
+		expect(warnings.some((warning) => warning.includes("agent_events"))).toBe(true);
+		expect(warnings.some((warning) => warning.includes("event_ingest"))).toBe(true);
 	});
 
 	test("warns rather than throwing when append_mode cannot be confirmed", async () => {
@@ -342,7 +352,10 @@ describe("migrate", () => {
 			statement.includes("SHOW CREATE TABLE") ? new Response("nope", { status: 500 }) : defaultReply(statement),
 		);
 		const { warnings } = await new GreptimeClient(config).migrate();
-		expect(warnings).toEqual(["could not confirm agent_events is in append_mode"]);
+		expect(warnings).toEqual([
+			"could not confirm agent_events is in append_mode",
+			"could not confirm event_ingest is in append_mode",
+		]);
 	});
 
 	test("warns at boot when the quoting dialect could not be determined", async () => {
@@ -691,5 +704,447 @@ describe("queryEvents", () => {
 		expect(await new GreptimeClient(config).queryEvents({ match: { branch: "feat\\x" } })).toEqual([
 			{ id: "evt_1" },
 		]);
+	});
+});
+
+describe("migrate event_ingest and anchors", () => {
+	test("creates event_ingest in append_mode with no primary key after agent_events", async () => {
+		const { sql } = stubFetch((statement) => {
+			if (statement.includes("SHOW CREATE TABLE")) {
+				return records(["Table", "Create Table"], [["agent_events", "... WITH( append_mode = 'true' )"]]);
+			}
+			if (statement.includes("LENGTH")) return records(["n"], [[3]]);
+			return affected;
+		});
+		const { warnings } = await new GreptimeClient(config).migrate();
+		expect(warnings).toEqual([]);
+		const agentIdx = sql.findIndex((s) => s.includes('CREATE TABLE IF NOT EXISTS "agent_events"'));
+		const ingestIdx = sql.findIndex((s) => s.includes('CREATE TABLE IF NOT EXISTS "event_ingest"'));
+		expect(agentIdx).toBeGreaterThanOrEqual(0);
+		expect(ingestIdx).toBeGreaterThan(agentIdx);
+		const ingest = sql[ingestIdx] ?? "";
+		expect(ingest).toContain("append_mode");
+		expect(ingest).not.toContain("PRIMARY KEY");
+		expect(ingest).toContain('"ingested_at" TIMESTAMP TIME INDEX');
+		expect(ingest).toContain('"event_id" STRING');
+		expect(ingest).toContain('"event_ts" TIMESTAMP');
+		expect(ingest).toContain('"graph_id" STRING');
+	});
+
+	test("warns without a plain-CREATE fallback when every append_mode CREATE fails", async () => {
+		const { sql } = stubFetch((statement) => {
+			if (statement.includes("append_mode") && statement.includes("CREATE")) {
+				return { error: "unrecognized table option" };
+			}
+			if (statement.includes("SHOW CREATE TABLE")) return records(["Create Table"], [["CREATE TABLE ..."]]);
+			return affected;
+		});
+		const { warnings } = await new GreptimeClient(config).migrate();
+		expect(warnings.some((warning) => warning.includes("event_ingest"))).toBe(true);
+		// Every event_ingest statement still asks for append_mode: nothing fell back
+		// to the deduplicating form.
+		expect(
+			sql
+				.filter((s) => s.includes('CREATE TABLE IF NOT EXISTS "event_ingest"'))
+				.every((s) => s.includes("append_mode")),
+		).toBe(true);
+	});
+
+	test("emits the canonical 11-column period-keyed anchors DDL", async () => {
+		const { sql } = stubFetch((statement) => {
+			if (statement.includes("SHOW CREATE TABLE")) {
+				return records(["Table", "Create Table"], [["agent_events", "... WITH( append_mode = 'true' )"]]);
+			}
+			if (statement.includes("LENGTH")) return records(["n"], [[3]]);
+			return affected;
+		});
+		await new GreptimeClient(config).migrate();
+		const anchors = sql.find((s) => s.includes('CREATE TABLE IF NOT EXISTS "anchors"')) ?? "";
+		for (const column of [
+			"period_start",
+			"period_end",
+			"root",
+			"event_count",
+			"memo",
+			"tx_sig",
+			"signer",
+			"cluster",
+			"slot",
+			"anchored_at",
+			"stale_hashes",
+		]) {
+			expect(anchors).toContain(`"${column}"`);
+		}
+		expect(anchors).toContain("TIME INDEX");
+		expect(anchors).not.toContain("PRIMARY KEY");
+		expect(anchors).not.toContain("append_mode");
+	});
+
+	test("warns on the old 5-column root-keyed anchors shape", async () => {
+		const { sql } = stubFetch((statement) => {
+			if (statement.includes("information_schema")) {
+				return records(
+					["column_name", "data_type", "semantic_type"],
+					[
+						["period_start", "timestamp(3)", "TIMESTAMP"],
+						["period_end", "timestamp(3)", "FIELD"],
+						["root", "string", "TAG"],
+						["tx_sig", "string", "FIELD"],
+						["event_count", "bigint", "FIELD"],
+					],
+				);
+			}
+			if (statement.includes("SHOW CREATE TABLE")) {
+				return records(["Table", "Create Table"], [["agent_events", "... WITH( append_mode = 'true' )"]]);
+			}
+			if (statement.includes("LENGTH")) return records(["n"], [[3]]);
+			return affected;
+		});
+		const { warnings } = await new GreptimeClient(config).migrate();
+		expect(sql.some((s) => s.includes("information_schema"))).toBe(true);
+		expect(warnings.some((warning) => warning.includes("anchors"))).toBe(true);
+	});
+
+	test("stays silent when anchors already matches the canonical shape", async () => {
+		stubFetch((statement) => {
+			if (statement.includes("information_schema")) {
+				return records(
+					["column_name", "data_type", "semantic_type"],
+					[
+						["period_start", "timestamp(3)", "TIMESTAMP"],
+						["period_end", "timestamp(3)", "FIELD"],
+						["root", "string", "FIELD"],
+						["event_count", "bigint", "FIELD"],
+						["memo", "string", "FIELD"],
+						["tx_sig", "string", "FIELD"],
+						["signer", "string", "FIELD"],
+						["cluster", "string", "FIELD"],
+						["slot", "bigint", "FIELD"],
+						["anchored_at", "timestamp(3)", "FIELD"],
+						["stale_hashes", "bigint", "FIELD"],
+					],
+				);
+			}
+			if (statement.includes("SHOW CREATE TABLE")) {
+				return records(["Table", "Create Table"], [["agent_events", "... WITH( append_mode = 'true' )"]]);
+			}
+			if (statement.includes("LENGTH")) return records(["n"], [[3]]);
+			return affected;
+		});
+		const { warnings } = await new GreptimeClient(config).migrate();
+		expect(warnings).toEqual([]);
+	});
+
+	test("stays silent when the anchors shape is unreadable", async () => {
+		for (const shapeReply of [
+			records(["column_name", "data_type", "semantic_type"], []),
+			new Response("nope", { status: 500 }),
+		]) {
+			stubFetch((statement) => {
+				if (statement.includes("information_schema")) return shapeReply;
+				if (statement.includes("SHOW CREATE TABLE")) {
+					return records(["Table", "Create Table"], [["agent_events", "... WITH( append_mode = 'true' )"]]);
+				}
+				if (statement.includes("LENGTH")) return records(["n"], [[3]]);
+				return affected;
+			});
+			const { warnings } = await new GreptimeClient(config).migrate();
+			expect(warnings).toEqual([]);
+		}
+	});
+});
+
+describe("insertEvent ingest record", () => {
+	test("the lag is five minutes, far above the five-second write timeout", () => {
+		expect(INGEST_LAG_MS).toBe(300_000);
+	});
+
+	test("sends the event row before the ingest record with quoted values and NULL graph_id", async () => {
+		const { sql } = stubFetch();
+		const event = normalizeEvent({ ...input, graph_id: undefined }, null);
+		expect(event.graph_id).toBeNull();
+		await new GreptimeClient(config).insertEvent(event);
+
+		const inserts = sql.filter((s) => s.startsWith("INSERT INTO"));
+		expect(inserts.map((s) => s.slice(0, 26))).toEqual(['INSERT INTO "agent_events"', 'INSERT INTO "event_ingest"']);
+		const ingest = inserts[1] ?? "";
+		expect(ingest).toContain(`'${event.id}'`);
+		expect(ingest).toContain(`'${event.ts}'`);
+		expect(ingest).toContain("NULL");
+		expect(ingest).not.toContain("undefined");
+	});
+
+	test("retries the ingest record once and resolves when it lands", async () => {
+		let ingestAttempts = 0;
+		const { sql } = stubFetch((statement) => {
+			if (statement.includes('INSERT INTO "event_ingest"')) {
+				ingestAttempts += 1;
+				if (ingestAttempts === 1) return new Response("nope", { status: 500 });
+			}
+			return defaultReply(statement);
+		});
+		await new GreptimeClient(config).insertEvent(normalizeEvent(input, null));
+
+		expect(sql.filter((s) => s.startsWith('INSERT INTO "agent_events"'))).toHaveLength(1);
+		expect(sql.filter((s) => s.startsWith('INSERT INTO "event_ingest"'))).toHaveLength(2);
+	});
+
+	test("throws IngestNotRecorded after two failed attempts with the event sent exactly once", async () => {
+		const { sql } = stubFetch((statement) =>
+			statement.includes('INSERT INTO "event_ingest"')
+				? new Response("nope", { status: 500 })
+				: defaultReply(statement),
+		);
+		const event = normalizeEvent(input, null);
+		const seen = await new GreptimeClient(config)
+			.insertEvent(event)
+			.then((): null => null, (cause: unknown) => cause);
+		expect(seen).toBeInstanceOf(IngestNotRecorded);
+		expect((seen as IngestNotRecorded).eventId).toBe(event.id);
+		expect(sql.filter((s) => s.startsWith('INSERT INTO "agent_events"'))).toHaveLength(1);
+		expect(sql.filter((s) => s.startsWith('INSERT INTO "event_ingest"'))).toHaveLength(2);
+	});
+
+	test("does not insert an ingest record when the live table is not append-only", async () => {
+		const { sql } = stubFetch((statement) => {
+			if (statement.includes('SHOW CREATE TABLE "event_ingest"')) {
+				return records(["Create Table"], [['CREATE TABLE "event_ingest" (...) ENGINE=mito']]);
+			}
+			return defaultReply(statement);
+		});
+		const event = normalizeEvent(input, null);
+		const seen = await new GreptimeClient(config)
+			.insertEvent(event)
+			.then((): null => null, (cause: unknown) => cause);
+		expect(seen).toBeInstanceOf(IngestNotRecorded);
+		expect(String(seen)).toContain("not in append_mode");
+		expect(sql.filter((s) => s.startsWith('INSERT INTO "agent_events"'))).toHaveLength(1);
+		expect(sql.filter((s) => s.startsWith('INSERT INTO "event_ingest"'))).toHaveLength(0);
+	});
+
+	test("a stalled first ingest attempt spends the budget, so there is no second full wait", async () => {
+		expect(INGEST_BUDGET_MS).toBeLessThanOrEqual(1_000);
+		let now = 10_000;
+		const realNow = Date.now;
+		Date.now = () => now;
+		let ingestInserts = 0;
+		try {
+			stubFetch((statement) => {
+				if (statement.includes('INSERT INTO "event_ingest"')) {
+					ingestInserts += 1;
+					now += INGEST_BUDGET_MS;
+					return new Response("nope", { status: 500 });
+				}
+				return defaultReply(statement);
+			});
+			const event = normalizeEvent(input, null);
+			const seen = await new GreptimeClient(config)
+				.insertEvent(event)
+				.then((): null => null, (cause: unknown) => cause);
+			expect(seen).toBeInstanceOf(IngestNotRecorded);
+			expect(ingestInserts).toBe(1);
+		} finally {
+			Date.now = realNow;
+		}
+	});
+
+	test("the late-record stderr line names the event id", async () => {
+		stubFetch();
+		const event = normalizeEvent(input, null);
+		const stamp = Date.UTC(2026, 9, 8, 10, 5);
+		let calls = 0;
+		const clock = (): number => {
+			calls += 1;
+			return calls <= 1 ? stamp : stamp + 2 * 60 * 60 * 1000;
+		};
+		const written: string[] = [];
+		const original = process.stderr.write.bind(process.stderr);
+		process.stderr.write = ((chunk: string | Uint8Array) => {
+			written.push(String(chunk));
+			return true;
+		}) as typeof process.stderr.write;
+		try {
+			await new GreptimeClient(config, undefined, clock).insertEvent(event);
+		} finally {
+			process.stderr.write = original;
+		}
+		expect(written.join("")).toContain(event.id);
+	});
+});
+
+describe("hourLeaves", () => {
+	const H10 = Date.UTC(2026, 8, 26, 10);
+	const H11 = H10 + 3_600_000;
+	const E1 = "evt_e1";
+	const E2 = "evt_e2";
+	const E3 = "evt_e3";
+	const E4 = "evt_e4";
+	const E5 = "evt_e5";
+	const TIE = H10 + 5 * 60_000 + 10;
+	const E1TS = H10 + 5 * 60_000;
+	const E2TS = H10 + 5 * 60_000 + 5;
+	const E3TS = Date.UTC(2026, 8, 1, 3);
+	const E3ING = H10 + 10 * 60_000;
+	const E4TS = H10 - 500;
+	const E4LATE = H10 + 200;
+	const E5TS = H10 + 29 * 60_000;
+	const E5A = H10 + 30 * 60_000;
+	const E5B = E5A + 5_000;
+	const HA = "a".repeat(64);
+	const HB = "b".repeat(64);
+	const HC = "c".repeat(64);
+	const HE = "e".repeat(64);
+
+	function stubHour(overrides: { hashRows?: unknown[][]; earlierRows?: unknown[][] } = {}): { sql: string[] } {
+		return stubFetch((statement) => {
+			if (statement.includes("SELECT DISTINCT")) {
+				return records(["event_id"], overrides.earlierRows ?? [[E4]]);
+			}
+			if (statement.includes('FROM "agent_events"')) {
+				return records(
+					["id", "hash"],
+					overrides.hashRows ?? [
+						[E1, HA],
+						[E3, HC],
+						[E5, HE],
+						[E2, HB],
+					],
+				);
+			}
+			if (statement.includes('FROM "event_ingest"')) {
+				// Deliberately shuffled, with duplicates of E1 and E5, a
+				// backdated E3, and an E4 whose earlier record the lookback
+				// must catch. The order comes from TypeScript, never from here.
+				return records(
+					["event_id", "ingested_at", "event_ts"],
+					[
+						[E5, E5B, E5TS],
+						[E3, E3ING, E3TS],
+						[E1, TIE, E1TS],
+						[E2, TIE, E2TS],
+						[E5, E5A, E5TS],
+						[E1, TIE, E1TS],
+						[E4, E4LATE, E4TS],
+					],
+				);
+			}
+			return defaultReply(statement);
+		});
+	}
+
+	test("returns members in position order with duplicates collapsed and earlier-hour ids excluded", async () => {
+		stubHour();
+		const leaves = await new GreptimeClient(config).hourLeaves(H10);
+		expect(leaves.map((leaf) => leaf.event_id)).toEqual([E1, E2, E3, E5]);
+		expect(leaves[0]).toEqual({ event_id: E1, ingested_at: TIE, hash: HA });
+		expect(leaves[1]).toEqual({ event_id: E2, ingested_at: TIE, hash: HB });
+		expect(leaves[2]).toEqual({ event_id: E3, ingested_at: E3ING, hash: HC });
+		expect(leaves[3]).toEqual({ event_id: E5, ingested_at: E5A, hash: HE });
+	});
+
+	test("reads through three flat shapes that all pass assertAppendOnly", async () => {
+		const { sql } = stubHour();
+		await new GreptimeClient(config).hourLeaves(H10);
+		const member =
+			sql.find((s) => s.includes('FROM "event_ingest"') && !s.includes("DISTINCT")) ?? "";
+		expect(member).toContain(`"ingested_at" >= '${new Date(H10).toISOString()}'`);
+		expect(member).toContain(`"ingested_at" < '${new Date(H11).toISOString()}'`);
+		const lookback = sql.find((s) => s.includes("SELECT DISTINCT")) ?? "";
+		expect(lookback).toContain(`"ingested_at" < '${new Date(H10).toISOString()}'`);
+		expect(lookback).toContain("IN (");
+		const hashes = sql.find((s) => s.includes('FROM "agent_events"')) ?? "";
+		expect(hashes).toContain('"ts" >=');
+		expect(hashes).toContain('"ts" <=');
+		expect(hashes).toContain('"id" IN (');
+		for (const statement of sql) assertAppendOnly(statement);
+	});
+
+	test("throws naming the event when a member has no event row", async () => {
+		stubHour({ hashRows: [[E1, HA], [E2, HB], [E5, HE]] });
+		await expect(new GreptimeClient(config).hourLeaves(H10)).rejects.toThrow(E3);
+	});
+
+	test("throws naming the event on a hash that is not 64 lowercase hex", async () => {
+		stubHour({ hashRows: [[E1, HA], [E2, "zz"], [E3, HC], [E5, HE]] });
+		await expect(new GreptimeClient(config).hourLeaves(H10)).rejects.toThrow(E2);
+	});
+
+	test("throws naming the event on two stored hashes for one id", async () => {
+		stubHour({ hashRows: [[E1, HA], [E1, HB], [E2, HB], [E3, HC], [E5, HE]] });
+		await expect(new GreptimeClient(config).hourLeaves(H10)).rejects.toThrow(E1);
+	});
+
+	test.each([
+		["ingested_at is text", "not-a-time", E1TS],
+		["event_ts is text", TIE, "not-a-time"],
+		["ingested_at is null", null, E1TS],
+		["event_ts is empty", TIE, ""],
+	] as const)("throws naming the event when an ingest record's time is not a number (%s)", async (_case, ingested, ts) => {
+		stubFetch((statement) =>
+			statement.includes('FROM "event_ingest"')
+				? records(["event_id", "ingested_at", "event_ts"], [[E1, ingested, ts]])
+				: defaultReply(statement),
+		);
+		await expect(new GreptimeClient(config).hourLeaves(H10)).rejects.toThrow(E1);
+	});
+
+	test("an empty hour reads nothing further and returns no leaves", async () => {
+		const { sql } = stubFetch((statement) =>
+			statement.includes('FROM "event_ingest"')
+				? records(["event_id", "ingested_at", "event_ts"], [])
+				: defaultReply(statement),
+		);
+		const leaves = await new GreptimeClient(config).hourLeaves(H10);
+		expect(leaves).toEqual([]);
+		expect(sql.filter((s) => s.includes("SHOW CREATE TABLE"))).toHaveLength(1);
+		expect(sql.filter((s) => s.includes('FROM "event_ingest"'))).toHaveLength(1);
+		expect(sql.filter((s) => s.includes("SELECT DISTINCT"))).toHaveLength(0);
+	});
+
+	test("refuses to read membership when event_ingest is not append-only", async () => {
+		const { sql } = stubFetch((statement) => {
+			if (statement.includes('SHOW CREATE TABLE "event_ingest"')) {
+				return records(["Create Table"], [["CREATE TABLE event_ingest ENGINE=mito"]]);
+			}
+			return defaultReply(statement);
+		});
+		await expect(new GreptimeClient(config).hourLeaves(H10)).rejects.toThrow(/not in append_mode/);
+		expect(sql.some((s) => s.includes('FROM "event_ingest"'))).toBe(false);
+	});
+
+	test("refuses to read membership when append_mode cannot be confirmed", async () => {
+		stubFetch((statement) =>
+			statement.includes('SHOW CREATE TABLE "event_ingest"')
+				? new Response("nope", { status: 500 })
+				: defaultReply(statement),
+		);
+		await expect(new GreptimeClient(config).hourLeaves(H10)).rejects.toThrow(/could not confirm event_ingest/);
+	});
+
+	test("batches the lookback and the hash lookup at 500 ids", async () => {
+		const ids = Array.from({ length: 501 }, (_, i) => `evt_batch_${String(i).padStart(4, "0")}`);
+		const { sql } = stubFetch((statement) => {
+			if (statement.includes("SELECT DISTINCT")) return records(["event_id"], []);
+			if (statement.includes('FROM "agent_events"')) {
+				const wanted = ids.filter((id) => statement.includes(`'${id}'`));
+				return records(
+					["id", "hash"],
+					wanted.map((id) => [id, ids.indexOf(id).toString(16).padStart(64, "0")]),
+				);
+			}
+			if (statement.includes('FROM "event_ingest"')) {
+				return records(
+					["event_id", "ingested_at", "event_ts"],
+					ids.map((id, i) => [id, H10 + i, H10 + i]),
+				);
+			}
+			return defaultReply(statement);
+		});
+		const leaves = await new GreptimeClient(config).hourLeaves(H10);
+		expect(leaves).toHaveLength(501);
+		expect(leaves[0]?.event_id).toBe(ids[0]);
+		expect(leaves[500]?.event_id).toBe(ids[500]);
+		expect(sql.filter((s) => s.includes("SELECT DISTINCT"))).toHaveLength(2);
+		expect(sql.filter((s) => s.includes('FROM "agent_events"'))).toHaveLength(2);
 	});
 });
