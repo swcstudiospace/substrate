@@ -44,7 +44,7 @@ const TEST_TIMEOUT_MS = 120_000;
  * text. Returns the kinds in order, or null when the block is absent.
  */
 export function parseEventKinds(text: string): string[] | null {
-	const block = text.match(/EVENT_KINDS\s*=\s*\[(.*?)\]/s);
+	const block = text.match(/(?<![A-Z_])EVENT_KINDS\s*=\s*\[(.*?)\]/s);
 	if (!block) return null;
 	const body = block[1] ?? "";
 	const kinds: string[] = [];
@@ -67,8 +67,8 @@ export function parseSurfaces(text: string): string[] | null {
 		for (const match of swarm[1].matchAll(/"([^"]+)"/g)) swarmSurfaces.push(match[1] as string);
 	}
 	const surfaces: string[] = [];
-	for (const match of body.matchAll(/\.\.\.SWARM_SURFACES|"([^"]+)"/g)) {
-		if (match[0] === "...SWARM_SURFACES") surfaces.push(...swarmSurfaces);
+	for (const match of body.matchAll(/\.\.\.\s*SWARM_SURFACES|"([^"]+)"/g)) {
+		if (match[0].startsWith("...")) surfaces.push(...swarmSurfaces);
 		else if (match[1] !== undefined) surfaces.push(match[1]);
 	}
 	return surfaces;

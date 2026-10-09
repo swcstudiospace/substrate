@@ -53,6 +53,10 @@ describe("parseEventKinds", () => {
 	test("returns null when the block is absent", () => {
 		expect(parseEventKinds("export const X = 1;\n")).toBeNull();
 	});
+
+	test("does not match a longer identifier ending in EVENT_KINDS", () => {
+		expect(parseEventKinds("export const SWARM_EVENT_KINDS = [\n\t\"note\",\n] as const;\n")).toBeNull();
+	});
 });
 
 describe("parseSurfaces", () => {
@@ -62,6 +66,11 @@ describe("parseSurfaces", () => {
 
 	test("returns null when the block is absent", () => {
 		expect(parseSurfaces("export const X = 1;\n")).toBeNull();
+	});
+
+	test("expands a spread with whitespace after the dots", () => {
+		const fixture = FIXTURE.replace("...SWARM_SURFACES", "... SWARM_SURFACES");
+		expect(parseSurfaces(fixture)).toEqual(["claude-code", "cursor", "swarm-a01-orch", "swarm-a15-doc", "substrate"]);
 	});
 });
 
