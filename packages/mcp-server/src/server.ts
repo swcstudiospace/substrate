@@ -52,7 +52,7 @@ import {
 } from "./observe.ts";
 import type { Substrate } from "./service.ts";
 import { proposalBodyProblem, proposalFailure, toProposalRequest } from "./skills/request.ts";
-import { SURFACES, type Surface } from "./types.ts";
+import { EVENT_KINDS, SURFACES, type Surface } from "./types.ts";
 
 /** One hour. Anonymous callers are logged once per window, not once per request. */
 const ANONYMOUS_LOG_INTERVAL_MS = 60 * 60 * 1000;
@@ -98,6 +98,21 @@ function findClaim(body: unknown): string | null {
 	return boundClaim((args as { surface: unknown }).surface);
 }
 
+/**
+ * What a refused event looked like, bounded so the log line carries no payload: a known
+ * surface or kind verbatim, an unknown one as `unrecognised:<name>` only when the name is a
+ * short slug (so the sender can be found), and `invalid` otherwise.
+ */
+export function refusalShape(body: unknown): { surface: string; kind: string } {
+	const record = body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : {};
+	const bound = (value: unknown, known: readonly string[]): string => {
+		if (typeof value !== "string" || value.length === 0) return "none";
+		if (known.includes(value)) return value;
+		return /^[a-z0-9][a-z0-9._-]{0,39}$/.test(value) ? `unrecognised:${value}` : "unrecognised:invalid";
+	};
+	return { surface: bound(record.surface, SURFACES), kind: bound(record.kind, EVENT_KINDS) };
+}
+
 function rememberClaim(claim: { surface: string }, body: unknown): void {
 	const found = findClaim(body);
 	if (found !== null) claim.surface = found;
@@ -115,9 +130,11 @@ export class AnonymousCallerLog {
 	private readonly intervalMs: number;
 	private readonly now: () => number;
 	private readonly write: (line: string) => void;
+	private readonly label: string;
 	private timer: ReturnType<typeof setInterval> | null = null;
 
-	constructor(intervalMs?: number, now?: () => number, write?: (line: string) => void) {
+	constructor(intervalMs?: number, now?: () => number, write?: (line: string) => void, label = "anonymous callers") {
+		this.label = label;
 		this.intervalMs = intervalMs ?? ANONYMOUS_LOG_INTERVAL_MS;
 		this.now = now ?? Date.now;
 		this.write = write ?? ((line) => process.stderr.write(line));
@@ -143,7 +160,18 @@ export class AnonymousCallerLog {
 	}
 
 	record(route: string, claimedSurface: string): void {
-		const key = `${route} claimed=${claimedSurface}`;
+		this.recordKey(`${route} claimed=${claimedSurface}`);
+	}
+
+	/** Write the window if it is over. Called on every request so a quiet route still flushes. */
+	tick(): void {
+		if (this.counts.size > 0 && this.now() - this.windowStart >= this.intervalMs) this.flush();
+	}
+
+	/** Count one occurrence of an already-bounded key. */
+	recordKey(key: string): void {
+		// A flood of distinct keys must not grow the map without limit.
+		if (!this.counts.has(key) && this.counts.size >= MAX_LOG_KEYS) key = "other";
 		this.counts.set(key, (this.counts.get(key) ?? 0) + 1);
 		if (this.now() - this.windowStart >= this.intervalMs) this.flush();
 	}
@@ -154,7 +182,7 @@ export class AnonymousCallerLog {
 				.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
 				.map(([key, count]) => `${key} ${count}`)
 				.join(", ");
-			this.write(`[substrate] anonymous callers: ${parts}\n`);
+			this.write(`[substrate] ${this.label}: ${parts}\n`);
 		}
 		this.counts.clear();
 		this.windowStart = this.now();
@@ -165,7 +193,12 @@ export interface HttpServerOptions {
 	now?: () => number;
 	anonymousLog?: (line: string) => void;
 	anonymousIntervalMs?: number;
+	/** Where the hourly refused-event line goes. Defaults to stderr. */
+	refusalLog?: (line: string) => void;
 }
+
+/** Distinct keys one hourly line may hold before the rest are counted as `other`. */
+const MAX_LOG_KEYS = 50;
 
 const MAX_BODY_BYTES = 1_000_000;
 
@@ -359,6 +392,10 @@ export function createHttpServer(
 ) {
 	const anonymousLog = new AnonymousCallerLog(options.anonymousIntervalMs, options.now, options.anonymousLog);
 	anonymousLog.start();
+	// Same hourly window. `/metrics` counts refusals by reason; this line says which
+	// sender to fix (claimed surface, kind, tokened or not) without carrying a payload.
+	const refusalLog = new AnonymousCallerLog(options.anonymousIntervalMs, options.now, options.refusalLog, "refused events");
+	refusalLog.start();
 	const server = createServer(async (req, res) => {
 		const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
 		const authorization = req.headers.authorization ?? null;
@@ -381,6 +418,7 @@ export function createHttpServer(
 		const span = startRequestSpan(observability, req, route, surface);
 		// Set before the response is finished. `finish` reads both.
 		let eventRefusal: EventRefusalReason | null = null;
+		let eventShape: { surface: string; kind: string } = { surface: "none", kind: "none" };
 		const claim = { surface: "none" };
 		res.on("finish", () => {
 			span.setAttribute("http.response.status_code", res.statusCode);
@@ -392,9 +430,13 @@ export function createHttpServer(
 				status: res.statusCode,
 				durationMs: performance.now() - started,
 			});
+			refusalLog.tick();
 			// POST only. A GET or a probe of the path is not a refused event post.
 			if (req.method === "POST" && route === "/events" && eventRefusal) {
 				observability.instruments.recordEventRefusal({ reason: eventRefusal });
+				refusalLog.recordKey(
+					`reason=${eventRefusal} status=${res.statusCode} caller=${surface ?? (authorization ? "unmapped-bearer" : "untokened")} surface=${eventShape.surface} kind=${eventShape.kind}`,
+				);
 			}
 			// Accepted untokened callers only. A 401 was refused, not served anonymously.
 			if (config.allowAnonymous && surface === null && res.statusCode !== 401) {
@@ -508,6 +550,7 @@ export function createHttpServer(
 					return;
 				}
 				const body = parsed as Record<string, unknown>;
+				eventShape = refusalShape(body);
 				rememberClaim(claim, body);
 				// A non-string graph id used to fall through to redaction and come back as a
 				// 500 that echoed the throw. It is the caller's mistake, and it is its own
@@ -751,6 +794,7 @@ export function createHttpServer(
 	const close = server.close.bind(server);
 	server.close = ((callback?: (err?: Error) => void) => {
 		anonymousLog.stop();
+		refusalLog.stop();
 		return close(callback);
 	}) as typeof server.close;
 	return server;
