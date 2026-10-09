@@ -26,6 +26,7 @@
     "smoke:chaos": "bun scripts/chaos-smoke.ts",
     "smoke:vocabulary": "bun scripts/vocabulary-smoke.ts",
     "smoke:skills-propose": "bun scripts/skills-propose-smoke.ts",
+    "smoke:skills-plane": "bun scripts/skills-plane-smoke.ts",
     "smoke:desktop": "bun scripts/desktop-smoke.ts",
     "smoke:mirror": "bun scripts/mirror-smoke.ts",
     "check:phase-close": "bun scripts/phase-close-check.ts",
