@@ -565,6 +565,7 @@ describe("detector self-tests", () => {
 			const detector = DETECTOR[rule];
 			expect(detector, rule).not.toBeNull();
 			expect({ rule, caught: detector!.test(body) }).toEqual({ rule, caught: true });
+			expect({ rule, extracted: patternCandidates(file, body).some((candidate) => detector!.test(candidate)) }).toEqual({ rule, extracted: true });
 			expect({ rule, pipeline: rule4Offenders(file, body).length > 0 }).toEqual({ rule, pipeline: true });
 		}
 	});
