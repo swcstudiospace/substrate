@@ -5,33 +5,33 @@ titles: json
 findings:
   - id: WR-01
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "Substrate token is eligible for operator authority; swarm tokens are not"
   - id: WR-02
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "Successful skills-sync (and mirror) path is unmapped — no row, no silent entry"
   - id: WR-03
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "Lock tests do not pin surface-rule-vs-sample consistency or all source prefixes"
   - id: IN-01
     severity: info
-    disposition: open
+    disposition: fixed
     title: "`.env.example` test pins swarm tokens but not the new substrate line"
   - id: IN-02
     severity: info
-    disposition: open
+    disposition: fixed
     title: "No boot warning for a missing substrate token"
   - id: IN-03
     severity: info
-    disposition: open
+    disposition: fixed
     title: "Reviewed doc ships an explicitly `[UNVERIFIED]` herdr mapping"
   - id: IN-04
     severity: info
-    disposition: open
+    disposition: fixed
     title: "`parseEventKinds` lacks the mis-match guard `parseSurfaces` has"
-open: 7
+open: 0
 total: 7
 recorded: 2026-10-08T23:59:08.211Z
 ---
@@ -40,13 +40,13 @@ recorded: 2026-10-08T23:59:08.211Z
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| WR-01 | warning | open | - |
-| WR-02 | warning | open | - |
-| WR-03 | warning | open | - |
-| IN-01 | info | open | - |
-| IN-02 | info | open | - |
-| IN-03 | info | open | - |
-| IN-04 | info | open | - |
+| WR-01 | warning | fixed | 8cd476d |
+| WR-02 | warning | fixed | 6e323dd |
+| WR-03 | warning | fixed | 254a328 |
+| IN-01 | info | fixed | fe88ecf |
+| IN-02 | info | fixed | 82383c7 |
+| IN-03 | info | fixed | f4aa6a5 |
+| IN-04 | info | fixed | c25ad88 |
 
 Dispositions: `open` (recorded, not yet triaged), `fixed`, `skipped`, `deferred`.
 Set `deferred` by hand and put the reason in the Source cell; both are preserved. A `|` in the reason is kept as prose and escaped on the next run.
