@@ -203,8 +203,9 @@ const MAX_LOG_KEYS = 50;
 const MAX_BODY_BYTES = 1_000_000;
 
 /**
- * A body over `MAX_BODY_BYTES`. Final for that body, so `/skills/propose` answers it 413. Every
- * other route still answers it with the generic 500 it always has.
+ * A body over `MAX_BODY_BYTES`. Final for that body, so `/skills/propose` and
+ * `/docs/ingest` answer it 413. Every other route still answers it with the
+ * generic 500 it always has.
  */
 export class BodyTooLargeError extends Error {
 	constructor() {
@@ -761,6 +762,55 @@ export function createHttpServer(
 				return;
 			}
 
+			// Docs search (D25-01..D25-06): always 200 — errors and refusals ride in
+			// `reason`, never in the status (D25-03). Anonymous callers are answered
+			// `unauthenticated` by the service with no RAGFlow call (D25-06).
+			if (req.method === "POST" && url.pathname === "/docs/search") {
+				const raw = await readBody(req);
+				const parsed: unknown = raw ? JSON.parse(raw) : {};
+				const body =
+					parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+						? (parsed as Record<string, unknown>)
+						: {};
+				rememberClaim(claim, body);
+				// Audited under the tool's own name, fail-open like the read it is.
+				if (!(await auditedRest(res, observability, surface, "docs_search", body))) return;
+				sendJson(
+					res,
+					200,
+					await substrate.docsSearch(parsed, {
+						surface,
+						session_id: typeof body.session_id === "string" ? body.session_id : undefined,
+					}),
+				);
+				return;
+			}
+
+			// Docs ingest (D25-07..D25-13): the writer rule closes the door before the
+			// body is read — an anonymous caller is 401 even on a run that otherwise
+			// allows untokened callers, as with /skills/propose.
+			if (req.method === "POST" && url.pathname === "/docs/ingest") {
+				if (surface === null) {
+					sendJson(res, 401, { error: "docs_ingest needs an authenticated surface; nothing was ingested" });
+					return;
+				}
+				const body = JSON.parse(await readBody(req)) as unknown;
+				const fields =
+					body !== null && typeof body === "object" && !Array.isArray(body)
+						? (body as Record<string, unknown>)
+						: null;
+				// Audited under the tool's own name, fail-closed: an unrecorded write to
+				// a dataset every agent reads is refused with 503, like the audit outage.
+				if (fields && !(await auditedRest(res, observability, surface, "docs_ingest", fields))) return;
+				const result = await substrate.docsIngest(body, {
+					surface,
+					isOperator: caller.isOperator,
+					session_id: fields !== null && typeof fields.session_id === "string" ? fields.session_id : undefined,
+				});
+				sendJson(res, result.status, result.body);
+				return;
+			}
+
 			if (url.pathname === "/mcp") {
 				await handleMcp(req, res, substrate, caller, observability, claim);
 				return;
@@ -768,7 +818,10 @@ export function createHttpServer(
 
 			sendJson(res, 404, { error: `no route for ${req.method} ${url.pathname}` });
 		} catch (cause) {
-			if (cause instanceof BodyTooLargeError && url.pathname === "/skills/propose") {
+			if (
+				cause instanceof BodyTooLargeError &&
+				(url.pathname === "/skills/propose" || url.pathname === "/docs/ingest")
+			) {
 				sendJson(res, 413, { error: cause.message });
 				return;
 			}

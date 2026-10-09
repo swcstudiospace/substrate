@@ -5,7 +5,7 @@
  * surfaces cannot drift. Hooks need REST (they cannot call MCP tools); agents
  * get MCP. Same code underneath.
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { decideClaim, type ClaimDecision } from "@substrate/audit";
 import { formatMemo, hourEnd, hourIso, hourStart, isClosed, merkleRootHex } from "@substrate/ledger";
 import { composeBrief, type BriefRequest } from "./brief.ts";
@@ -69,6 +69,12 @@ import {
 	type SkillProposer,
 	type TreeMode,
 } from "./skills/propose.ts";
+import type { DocsRagflow } from "./docs/manifest.ts";
+import { loadRegistry } from "./docs/registry.ts";
+import { ingestPage } from "./docs/ingest.ts";
+import { RagflowClient, type RagflowDatasetSummary } from "./docs/ragflow.ts";
+import { runSearch, validateSearchInput, type SearchRagflow, type SearchReply } from "./docs/search.ts";
+import { finalize } from "./docs/versions.ts";
 import {
 	ACTORS,
 	EVENT_KINDS,
@@ -598,6 +604,32 @@ export function parseMemorySearch(request: MemorySearchRequest): MemorySearch {
 	return search;
 }
 
+/**
+ * The injected RAGFlow door every docs method calls (Phase boundary 3).
+ * `RagflowClient` satisfies this; tests and the harness pass a fake with zero
+ * network calls.
+ */
+export type DocsClient = DocsRagflow & SearchRagflow;
+
+/** A caller-supplied session, or a fresh docs-run chain key (as skills-propose does). */
+function docsSessionId(sessionId: unknown, prefix: string): string {
+	return typeof sessionId === "string" && sessionId.length > 0 ? sessionId : `${prefix}:${randomUUID()}`;
+}
+
+/** At most the query's SHA-256 and byte length — never its text (D25-05). */
+function docsQueryIdentity(input: unknown): { query_sha256: string; query_len: number } | Record<string, never> {
+	if (input !== null && typeof input === "object" && !Array.isArray(input)) {
+		const query = (input as Record<string, unknown>).query;
+		if (typeof query === "string") {
+			return {
+				query_sha256: createHash("sha256").update(query, "utf8").digest("hex"),
+				query_len: Buffer.byteLength(query, "utf8"),
+			};
+		}
+	}
+	return {};
+}
+
 export class Substrate {
 	readonly index: IndexStore | null;
 	readonly greptime: GreptimeClient | null;
@@ -607,6 +639,8 @@ export class Substrate {
 	readonly skills: SkillProposer;
 	/** The desktop driver. Production wiring lives only in index.ts, so tests never reach docker by accident. */
 	readonly desktop: DesktopDriver | null;
+	/** The one RAGFlow seam the docs doors share; null answers `not-configured`. */
+	readonly ragflow: DocsClient | null;
 	private readonly observer: SubstrateObserver;
 	private readonly cache: ReadThroughCache;
 	/** Connector-gate overrides for tests (connector fetch, URL, timeout); production reads config. */
@@ -625,6 +659,7 @@ export class Substrate {
 			dodGate?: { fetchImpl?: typeof fetch; hermesLinearUrl?: string; timeoutMs?: number };
 			cache?: ReadThroughCache;
 			desktop?: DesktopDriver | null;
+			ragflow?: DocsClient | null;
 		},
 		observer: SubstrateObserver = {},
 	) {
@@ -647,6 +682,12 @@ export class Substrate {
 			});
 		this.desktop = stores?.desktop ?? null;
 		this.dodGateTest = stores?.dodGate ?? {};
+		this.ragflow =
+			stores?.ragflow !== undefined
+				? stores.ragflow
+				: config.ragflow && config.ragflow.problem === null && config.ragflow.apiKey
+					? new RagflowClient(config.ragflow)
+					: null;
 		this.observer = observer;
 		this.cache =
 			stores?.cache ??
@@ -1278,6 +1319,263 @@ export class Substrate {
 			}
 			throw cause;
 		}
+	}
+
+	// ── docs (Phase 25) ────────────────────────────────────────────────────────
+
+	/**
+	 * The active dataset registry, honouring the harness override. `loadRegistry`
+	 * never throws: a missing or bad file falls back to the builtin registry.
+	 */
+	private docsRegistry() {
+		const file = this.config.docs.datasetsFile;
+		return loadRegistry(file ? { ...process.env, SUBSTRATE_DOCS_DATASETS: file } : undefined);
+	}
+
+	private docsListDatasets(client: DocsClient | null) {
+		return (): Promise<readonly RagflowDatasetSummary[]> => (client ? client.listDatasets() : Promise.resolve([]));
+	}
+
+	/**
+	 * Docs search through the injected RAGFlow client (D25-01..D25-06).
+	 *
+	 * Anonymous callers get `unauthenticated` with no RAGFlow call. Every
+	 * authenticated search emits exactly one event — a note on success carrying
+	 * dataset_ids, deduped urls and count, a warning carrying the reason
+	 * otherwise — and the emit is fail-open: it never changes the reply. The
+	 * query text never reaches the event; at most its SHA-256 and byte length do.
+	 */
+	async docsSearch(input: unknown, caller: { surface: Surface | null; session_id?: unknown }): Promise<SearchReply> {
+		const surface = caller.surface;
+		const registry = this.docsRegistry();
+		const client = this.ragflow;
+		const reply = await runSearch(input, {
+			registry,
+			listDatasets: this.docsListDatasets(client),
+			client,
+			authenticated: surface !== null,
+		});
+		// Unattributable without a surface: no event, and runSearch already
+		// short-circuited before any RAGFlow call (D25-06).
+		if (surface === null) return reply;
+		const where = { session_id: docsSessionId(caller.session_id, "docs-search") };
+		const query = docsQueryIdentity(input);
+		if (reply.reason === undefined) {
+			let datasetIds: string[] = [];
+			try {
+				const validated = await validateSearchInput(input, {
+					registry,
+					listDatasets: this.docsListDatasets(client),
+				});
+				if (validated.ok) datasetIds = validated.datasetIds;
+			} catch {
+				datasetIds = [];
+			}
+			const urls = [...new Set(reply.results.map((result) => result.source_url))];
+			await this.emit({
+				surface,
+				kind: "note",
+				summary: `docs search returned ${reply.results.length} results`,
+				...where,
+				payload: {
+					action: "docs.search",
+					dataset_ids: datasetIds,
+					urls,
+					count: reply.results.length,
+					...query,
+				},
+			}).catch(() => undefined);
+		} else {
+			await this.emit({
+				surface,
+				kind: "warning",
+				summary: `docs search failed: ${reply.reason}`,
+				...where,
+				payload: { action: "docs.search", reason: reply.reason, ...query },
+			}).catch(() => undefined);
+		}
+		return reply;
+	}
+
+	/**
+	 * Docs ingest through the injected RAGFlow client (D25-07..D25-17).
+	 *
+	 * The writer rule is enforced on the token's surface only, never on a body
+	 * field: anonymous is 401, any authenticated non-substrate/non-operator
+	 * surface is 403. A `finalize: true` body cuts a version instead of uploading
+	 * a page. `dry_run` reports without writing and emits no event; every other
+	 * attributable outcome emits exactly one event, fail-open. Status mapping is
+	 * D25-13: 200 uploaded/unchanged/dry_run/version-cut, 400 malformed or
+	 * refusal, 401 anonymous, 403 writer refusal, 502 RAGFlow failure with a
+	 * redacted 200-char message, 503 not-configured.
+	 */
+	async docsIngest(
+		input: unknown,
+		caller: { surface: Surface | null; isOperator: boolean; session_id?: unknown },
+	): Promise<{ status: number; body: Record<string, unknown> }> {
+		const surface = caller.surface;
+		if (surface === null) {
+			return { status: 401, body: { error: "docs_ingest needs an authenticated surface; nothing was ingested" } };
+		}
+		const where = { session_id: docsSessionId(caller.session_id, "docs-ingest") };
+		if (surface !== "substrate" && !caller.isOperator) {
+			await this.emit({
+				surface,
+				kind: "warning",
+				summary: "docs ingest refused: forbidden",
+				...where,
+				payload: { action: "docs.ingest", status: "refused", reason: "forbidden" },
+			}).catch(() => undefined);
+			return {
+				status: 403,
+				body: { error: "docs_ingest is limited to the substrate host job and the operator; nothing was ingested" },
+			};
+		}
+		if (input === null || typeof input !== "object" || Array.isArray(input)) {
+			return { status: 400, body: { error: "docs_ingest needs an object body; nothing was ingested" } };
+		}
+		const fields = input as Record<string, unknown>;
+		const client = this.ragflow;
+		if (!client || client.configured === false) {
+			return {
+				status: 503,
+				body: { status: "failed", reason: "not-configured", message: "RAGFlow is not configured; nothing was ingested" },
+			};
+		}
+		const deps = {
+			registry: this.docsRegistry(),
+			client,
+			stateDir: this.config.docs.stateDir,
+			embeddingModel: this.config.docs.embeddingModel,
+		};
+		if (fields.finalize === true) {
+			const dataset = fields.dataset;
+			const commit = fields.commit;
+			const pathsPresent = fields.paths_present;
+			if (
+				typeof dataset !== "string" ||
+				typeof commit !== "string" ||
+				!Array.isArray(pathsPresent) ||
+				!pathsPresent.every((path): path is string => typeof path === "string")
+			) {
+				return {
+					status: 400,
+					body: {
+						error: "docs_ingest finalize needs string `dataset`, `commit` and `paths_present`; nothing was ingested",
+					},
+				};
+			}
+			const result = await finalize(
+				{ dataset, commit, pathsPresent, surface, isSubstrateOrOperator: true },
+				deps,
+			);
+			if (result.status === "version-cut") {
+				await this.emit({
+					surface,
+					kind: "note",
+					summary: `docs ingest cut version ${commit.slice(0, 12)} for ${dataset}`,
+					...where,
+					payload: { action: "docs.ingest", dataset_id: result.datasetId, commit, status: "version-cut" },
+				}).catch(() => undefined);
+				return { status: 200, body: result as unknown as Record<string, unknown> };
+			}
+			if (result.status === "refused") {
+				await this.emit({
+					surface,
+					kind: "warning",
+					summary: `docs ingest refused: ${result.reason}`,
+					...where,
+					payload: { action: "docs.ingest", status: "refused", reason: result.reason },
+				}).catch(() => undefined);
+				return {
+					status: result.reason === "forbidden" ? 403 : 400,
+					body: result as unknown as Record<string, unknown>,
+				};
+			}
+			await this.emit({
+				surface,
+				kind: "warning",
+				summary: `docs ingest failed: ${result.reason}`,
+				...where,
+				payload: { action: "docs.ingest", reason: result.reason },
+			}).catch(() => undefined);
+			return { status: 502, body: { ...result, message: redact(String(result.message)).slice(0, 200) } };
+		}
+		const dataset = fields.dataset;
+		const sourceUrl = fields.source_url === undefined ? "" : fields.source_url;
+		const commit = fields.commit === undefined ? "" : fields.commit;
+		const content = fields.content;
+		const title = fields.title;
+		const dryRun = fields.dry_run;
+		if (
+			typeof dataset !== "string" ||
+			typeof sourceUrl !== "string" ||
+			typeof commit !== "string" ||
+			typeof content !== "string" ||
+			(title !== undefined && typeof title !== "string") ||
+			(dryRun !== undefined && typeof dryRun !== "boolean")
+		) {
+			return {
+				status: 400,
+				body: {
+					error: "docs_ingest needs string `dataset`, `source_url`, `commit` and `content`; nothing was ingested",
+				},
+			};
+		}
+		const result = await ingestPage(
+			{
+				dataset,
+				sourceUrl,
+				commit,
+				content,
+				...(title === undefined ? {} : { title }),
+				...(dryRun === undefined ? {} : { dryRun }),
+				surface,
+				isSubstrateOrOperator: true,
+			},
+			deps,
+		);
+		if (result.status === "uploaded" || result.status === "unchanged" || result.status === "dry_run") {
+			if (result.status !== "dry_run") {
+				await this.emit({
+					surface,
+					kind: "note",
+					summary: `docs ingest ${result.status} ${dataset}`,
+					...where,
+					payload: {
+						action: "docs.ingest",
+						dataset_id: result.datasetId,
+						source_url: sourceUrl,
+						content_sha256: result.contentSha256,
+						status: result.status,
+					},
+				}).catch(() => undefined);
+			}
+			return { status: 200, body: result as unknown as Record<string, unknown> };
+		}
+		if (result.status === "refused") {
+			const rules =
+				result.reason === "secret" ? [...new Set((result.findings ?? []).map((finding) => finding.rule))] : undefined;
+			await this.emit({
+				surface,
+				kind: "warning",
+				summary: `docs ingest refused: ${result.reason}`,
+				...where,
+				payload: { action: "docs.ingest", status: "refused", reason: result.reason, ...(rules ? { rules } : {}) },
+			}).catch(() => undefined);
+			return {
+				status: result.reason === "forbidden" ? 403 : 400,
+				body: result as unknown as Record<string, unknown>,
+			};
+		}
+		await this.emit({
+			surface,
+			kind: "warning",
+			summary: `docs ingest failed: ${result.reason}`,
+			...where,
+			payload: { action: "docs.ingest", reason: result.reason },
+		}).catch(() => undefined);
+		return { status: 502, body: { ...result, message: redact(String(result.message)).slice(0, 200) } };
 	}
 
 	/** Where a node's events belong: the graph's repo, not whatever the caller said. */

@@ -6,6 +6,19 @@ import { createObservability } from "./observe.ts";
 import { createHttpServer, healthStatus, memoryWriteStatus, memoryWriter } from "./server.ts";
 import { Substrate } from "./service.ts";
 import type { SubstrateEvent } from "./types.ts";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { clearDatasetCache } from "./docs/registry.ts";
+import {
+	RagflowError,
+	type RagflowDatasetSummary,
+	type RagflowDocument,
+	type RetrievalHit,
+	type UploadFile,
+	type UploadedDocument,
+} from "./docs/ragflow.ts";
 
 /** Shorthand for a health report; every field defaults to the unhealthy value. */
 function health(over: Partial<Parameters<typeof healthStatus>[0]> = {}) {
@@ -45,7 +58,6 @@ describe("healthStatus", () => {
  * the wrong body field or answering the wrong status fails here. The ledger is a
  * stub — this is about the wiring.
  */
-describe("routes", () => {
 	/** A ledger stub that records appends and replies to reads with fixed rows. */
 	function ledger(rows: Array<Record<string, unknown>> = []) {
 		const written: SubstrateEvent[] = [];
@@ -78,14 +90,18 @@ describe("routes", () => {
 	 * store through the substrate, and only `/healthz` asks the config whether a ledger
 	 * was configured at all.
 	 */
-	async function serve(greptime: unknown, env: Record<string, string | undefined> = {}) {
+	async function serve(greptime: unknown, env: Record<string, string | undefined> = {}, ragflow: unknown = null) {
 		const config = loadConfig(env);
 		// No SUBSTRATE_AUDIT_PATH in the env, so the audit chain stays in memory and the
 		// exporter is off: these routes are audited, and a test that skipped the plane
 		// entirely would not be running the code the server actually runs.
 		const observability = createObservability(config, env);
 		await observability.start();
-		const substrate = new Substrate(config, { index: null, greptime: greptime as never }, observability.observer);
+		const substrate = new Substrate(
+			config,
+			{ index: null, greptime: greptime as never, ragflow: ragflow as never },
+			observability.observer,
+		);
 		const server = createHttpServer(substrate, config, observability);
 		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 		const address = server.address();
@@ -105,6 +121,7 @@ describe("routes", () => {
 		};
 	}
 
+describe("routes", () => {
 	test("POST /events appends and answers 202", async () => {
 		const { written, greptime } = ledger();
 		const { post, stop } = await serve(greptime);
@@ -282,5 +299,339 @@ describe("memoryToolWriter", () => {
 		// `unknown`, never the surface the caller asked to be.
 		expect(memoryToolWriter(null, "hermes")).toBe("unknown");
 		expect(memoryToolWriter(null, undefined)).toBe("unknown");
+	});
+});
+
+// ── docs routes (Phase 25) ───────────────────────────────────────────────────
+// POST /docs/search + POST /docs/ingest behind auditedRest under their own
+// names, against a fake RAGFlow. Fixtures are runtime-assembled; nothing here
+// touches a live RAGFlow.
+
+const DOCS_COMMIT = "a".repeat(40);
+// Runtime-assembled fixture host, never a live URL.
+const DOCS_BASE = "https://" + "github.com/example/guide/blob/" + DOCS_COMMIT + "/docs/";
+
+class FakeDocs {
+	calls = {
+		retrieval: 0,
+		listDatasets: 0,
+		listDocuments: 0,
+		uploadDocuments: 0,
+		parseDocuments: 0,
+		updateDocument: 0,
+		deleteDocuments: 0,
+		ensureDataset: 0,
+	};
+	configured = true;
+	hits: RetrievalHit[] = [];
+	retrievalFailure: unknown;
+	docs: RagflowDocument[] = [];
+	uploadFailure: unknown;
+	seq = 0;
+
+	totalCalls(): number {
+		return Object.values(this.calls).reduce((a, b) => a + b, 0);
+	}
+
+	async retrieval(options: { question: string; datasetIds: string[]; pageSize: number }): Promise<RetrievalHit[]> {
+		this.calls.retrieval += 1;
+		if (this.retrievalFailure !== undefined) throw this.retrievalFailure;
+		return this.hits;
+	}
+
+	async listDatasets(): Promise<RagflowDatasetSummary[]> {
+		this.calls.listDatasets += 1;
+		return [];
+	}
+
+	async listDocuments(): Promise<RagflowDocument[]> {
+		this.calls.listDocuments += 1;
+		return this.docs;
+	}
+
+	async uploadDocuments(_datasetId: string, files: UploadFile[]): Promise<UploadedDocument[]> {
+		this.calls.uploadDocuments += 1;
+		if (this.uploadFailure !== undefined) throw this.uploadFailure;
+		return files.map((file) => ({ documentId: `doc-${(this.seq += 1)}`, name: file.filename }));
+	}
+
+	async parseDocuments(): Promise<void> {
+		this.calls.parseDocuments += 1;
+	}
+
+	async updateDocument(): Promise<void> {
+		this.calls.updateDocument += 1;
+	}
+
+	async deleteDocuments(): Promise<void> {
+		this.calls.deleteDocuments += 1;
+	}
+
+	async ensureDataset(name: string): Promise<string> {
+		this.calls.ensureDataset += 1;
+		return `ds-${name}`;
+	}
+}
+
+function docsPage(over: Record<string, unknown> = {}): Record<string, unknown> {
+	return {
+		dataset: "guide",
+		source_url: DOCS_BASE + "intro.md",
+		commit: DOCS_COMMIT,
+		content: "# Intro\n\nHello.\n",
+		...over,
+	};
+}
+
+/** A path whose parent is a regular file: impossible to create, whoever is running. */
+function unwritableAuditPath(): string {
+	const directory = mkdtempSync(join(tmpdir(), "substrate-docs-server-"));
+	writeFileSync(join(directory, "not-a-directory"), "");
+	return join(directory, "not-a-directory", "rest-audit.jsonl");
+}
+
+describe("docs routes", () => {
+	/** Boot the real server with a fake RAGFlow and a fixture registry. */
+	async function docsServe(
+		fake: FakeDocs,
+		env: Record<string, string | undefined> = {},
+		greptime?: unknown,
+	) {
+		clearDatasetCache();
+		const dir = await mkdtemp(join(tmpdir(), "substrate-docs-server-"));
+		const registryFile = join(dir, "datasets.json");
+		await writeFile(
+			registryFile,
+			JSON.stringify([
+				{
+					name: "guide",
+					slug: "example/guide",
+					include: ["docs/**"],
+					exclude: [],
+					trigger: "merge-to-main",
+					datasetId: "ds-guide",
+				},
+			]),
+		);
+		const store = greptime ?? ledger().greptime;
+		const served = await serve(
+			store,
+			{
+				SUBSTRATE_DOCS_STATE: join(dir, "state"),
+				SUBSTRATE_DOCS_DATASETS: registryFile,
+				...env,
+			},
+			fake,
+		);
+		return { ...served, fake };
+	}
+
+	const SUBSTRATE_TOKEN = { SUBSTRATE_TOKEN_SUBSTRATE: "tok-substrate" };
+	const agentEnv = { SUBSTRATE_TOKEN_OMP: "tok-omp" };
+	const bearer = (token: string) => ({ authorization: `Bearer ${token}` });
+
+	test("POST /docs/search answers 200 with results for a tokened caller", async () => {
+		const fake = new FakeDocs();
+		fake.hits = [
+			{
+				chunkId: "chunk-1",
+				documentId: "doc-1",
+				datasetId: "ds-guide",
+				content: "how to run the sync",
+				score: 0.9,
+				documentName: "intro.md",
+				raw: {},
+			},
+		];
+		fake.docs = [
+			{
+				id: "doc-1",
+				name: "intro.md",
+				run: "DONE",
+				metaFields: {
+					source_url: DOCS_BASE + "intro.md",
+					title: "Intro",
+					heading_path: ["Intro"],
+					commit: DOCS_COMMIT,
+				},
+				raw: {},
+			},
+		];
+		const { post, stop } = await docsServe(fake, agentEnv);
+		try {
+			const response = await post("/docs/search", { query: "how?" }, bearer("tok-omp"));
+			const body = (await response.json()) as Record<string, unknown>;
+			expect(response.status).toBe(200);
+			expect(body.untrusted).toBe(true);
+			expect((body.results as unknown[])).toHaveLength(1);
+			expect(fake.calls.retrieval).toBe(1);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("POST /docs/search answers unauthenticated for anonymous with no RAGFlow call", async () => {
+		const fake = new FakeDocs();
+		fake.hits = [
+			{
+				chunkId: "chunk-1",
+				documentId: "doc-1",
+				datasetId: "ds-guide",
+				content: "how to run the sync",
+				score: 0.9,
+				documentName: "intro.md",
+				raw: {},
+			},
+		];
+		const { post, stop } = await docsServe(fake, { SUBSTRATE_ALLOW_ANONYMOUS: "1" });
+		try {
+			const response = await post("/docs/search", { query: "how?" });
+			const body = (await response.json()) as Record<string, unknown>;
+			expect(response.status).toBe(200);
+			expect(body.results).toEqual([]);
+			expect(body.reason).toBe("unauthenticated");
+			expect(fake.totalCalls()).toBe(0);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("POST /docs/ingest refuses anonymous 401 before the body is read", async () => {
+		const fake = new FakeDocs();
+		const { post, stop } = await docsServe(fake, SUBSTRATE_TOKEN);
+		try {
+			const response = await post("/docs/ingest", docsPage());
+			expect(response.status).toBe(401);
+			expect(fake.totalCalls()).toBe(0);
+			// Even an oversize body is 401 first: the door closes before the read.
+			const big = await post("/docs/ingest", docsPage({ content: "x".repeat(1_100_000) }));
+			expect(big.status).toBe(401);
+			expect(fake.totalCalls()).toBe(0);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("POST /docs/ingest 403s an agent surface with no RAGFlow call", async () => {
+		const fake = new FakeDocs();
+		const { post, stop } = await docsServe(fake, { ...SUBSTRATE_TOKEN, ...agentEnv });
+		try {
+			const response = await post("/docs/ingest", docsPage(), bearer("tok-omp"));
+			const body = (await response.json()) as Record<string, unknown>;
+			expect(response.status).toBe(403);
+			expect(String(body.error)).toContain("limited to the substrate host job and the operator");
+			expect(fake.totalCalls()).toBe(0);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("POST /docs/ingest uploads 200 for the substrate writer", async () => {
+		const fake = new FakeDocs();
+		const { post, stop } = await docsServe(fake, { ...SUBSTRATE_TOKEN, ...agentEnv });
+		try {
+			const response = await post("/docs/ingest", docsPage(), bearer("tok-substrate"));
+			const body = (await response.json()) as Record<string, unknown>;
+			expect(response.status).toBe(200);
+			expect(body.status).toBe("uploaded");
+			expect(fake.calls.uploadDocuments).toBe(1);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("POST /docs/ingest 413s an oversize body with the typed shape", async () => {
+		const fake = new FakeDocs();
+		const { post, stop } = await docsServe(fake, SUBSTRATE_TOKEN);
+		try {
+			const response = await post("/docs/ingest", docsPage({ content: "x".repeat(1_100_000) }), bearer("tok-substrate"));
+			const body = (await response.json()) as Record<string, unknown>;
+			expect(response.status).toBe(413);
+			expect(typeof body.error).toBe("string");
+			expect(fake.totalCalls()).toBe(0);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("POST /docs/ingest 400s refusals and malformed bodies", async () => {
+		const fake = new FakeDocs();
+		const { post, stop } = await docsServe(fake, SUBSTRATE_TOKEN);
+		try {
+			const auth = bearer("tok-substrate");
+			const unknown = await post("/docs/ingest", docsPage({ dataset: "nope" }), auth);
+			expect(unknown.status).toBe(400);
+			expect(((await unknown.json()) as Record<string, unknown>).reason).toBe("unknown-dataset");
+
+			const outside = await post(
+				"/docs/ingest",
+				docsPage({ source_url: "https://" + "github.com/example/other/blob/" + DOCS_COMMIT + "/docs/x.md" }),
+				auth,
+			);
+			expect(outside.status).toBe(400);
+			expect(((await outside.json()) as Record<string, unknown>).reason).toBe("outside-roots");
+			expect(fake.totalCalls()).toBe(0);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("POST /docs/ingest 502s a RAGFlow failure with a capped message", async () => {
+		const fake = new FakeDocs();
+		fake.uploadFailure = new RagflowError("ragflow error 101: " + "x".repeat(500));
+		const { post, stop } = await docsServe(fake, SUBSTRATE_TOKEN);
+		try {
+			const response = await post("/docs/ingest", docsPage(), bearer("tok-substrate"));
+			const body = (await response.json()) as Record<string, unknown>;
+			expect(response.status).toBe(502);
+			expect(String(body.message).length).toBeLessThanOrEqual(200);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("POST /docs/ingest 503s when RAGFlow is not configured", async () => {
+		clearDatasetCache();
+		const dir = await mkdtemp(join(tmpdir(), "substrate-docs-server-"));
+		const registryFile = join(dir, "datasets.json");
+		await writeFile(registryFile, JSON.stringify([]));
+		const { greptime } = ledger();
+		// No fake and no RAGFLOW_URL: the client is null.
+		const { post, stop } = await serve(
+			greptime,
+			{
+				SUBSTRATE_DOCS_STATE: join(dir, "state"),
+				SUBSTRATE_DOCS_DATASETS: registryFile,
+				...SUBSTRATE_TOKEN,
+			},
+			null,
+		);
+		try {
+			const response = await post("/docs/ingest", docsPage(), bearer("tok-substrate"));
+			const body = (await response.json()) as Record<string, unknown>;
+			expect(response.status).toBe(503);
+			expect(body.reason).toBe("not-configured");
+		} finally {
+			await stop();
+		}
+	});
+
+	test("an unwritable audit chain 503s the ingest while the search stays fail-open", async () => {
+		const fake = new FakeDocs();
+		const { post, stop } = await docsServe(fake, {
+			...SUBSTRATE_TOKEN,
+			SUBSTRATE_AUDIT_PATH: unwritableAuditPath(),
+		});
+		try {
+			const auth = bearer("tok-substrate");
+			const refused = await post("/docs/ingest", docsPage(), auth);
+			expect(refused.status).toBe(503);
+			expect(fake.totalCalls()).toBe(0);
+
+			const search = await post("/docs/search", { query: "how?" }, auth);
+			expect(search.status).toBe(200);
+		} finally {
+			await stop();
+		}
 	});
 });

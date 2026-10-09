@@ -60,6 +60,8 @@ const KNOWN_ROUTES = [
 	"/slo",
 	"/evidence",
 	"/skills/propose",
+	"/docs/search",
+	"/docs/ingest",
 ] as const;
 
 export function normalizeRoute(pathname: string): string {
@@ -344,6 +346,8 @@ const KNOWN_TOOLS: ReadonlySet<string> = new Set([
 	"coord_reap_leases",
 	"skills_propose",
 	"desktop_run",
+	"docs_search",
+	"docs_ingest",
 	// REST routes, as `server.ts` audits them. A route audited under a tool's own name
 	// (`/memory` as `memory_write`) is covered by that name above and not repeated.
 	"brief",
