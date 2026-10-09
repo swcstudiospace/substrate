@@ -5,7 +5,7 @@
  * production refusal and the run tagging verify without a harness.
  */
 import { describe, expect, test } from "bun:test";
-import { parseConsumerEnv, refuseTarget, runSession, runTag } from "./vocabulary-smoke.ts";
+import { isRefused, parseConsumerEnv, refuseTarget, runSession, runTag } from "./vocabulary-smoke.ts";
 
 describe("parseConsumerEnv", () => {
 	test("parses single-quoted export lines", () => {
@@ -60,5 +60,22 @@ describe("runTag and runSession", () => {
 
 	test("session ids stay under 512 chars", () => {
 		expect(runSession("rh-vocab-1", "x".repeat(600)).length).toBeLessThan(512);
+	});
+});
+
+describe("isRefused", () => {
+	test("only a stored 202 passes", () => {
+		expect(isRefused(202, true)).toBe(false);
+	});
+
+	test("every other outcome counts as a refusal", () => {
+		// 400 rejected input, 401/403 denied attribution, 503 failed
+		// storage, an unstored 202 and an unreachable twin all refused.
+		expect(isRefused(400, false)).toBe(true);
+		expect(isRefused(401, false)).toBe(true);
+		expect(isRefused(403, false)).toBe(true);
+		expect(isRefused(503, false)).toBe(true);
+		expect(isRefused(202, false)).toBe(true);
+		expect(isRefused(null, false)).toBe(true);
 	});
 });

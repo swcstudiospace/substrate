@@ -93,10 +93,21 @@ interface PostResult {
 	status: number | null;
 	stored: boolean;
 	refused: boolean;
+	postedId: string | null;
 	error?: string;
 }
 
-async function postEvent(base: string, bearer: string, body: Record<string, unknown>): Promise<{ status: number | null; stored: boolean; refused: boolean; error?: string }> {
+/**
+ * A post counts as refused when it is anything but a stored 202: a 400
+ * rejected input, a 401/403 denied attribution, a 503 failed storage, an
+ * unreachable twin, or a 202 the ledger did not store. Counting only 403s
+ * let every other rejection report zero refusals.
+ */
+export function isRefused(status: number | null, stored: boolean): boolean {
+	return !(status === 202 && stored);
+}
+
+async function postEvent(base: string, bearer: string, body: Record<string, unknown>): Promise<{ status: number | null; stored: boolean; refused: boolean; postedId: string | null; error?: string }> {
 	try {
 		const res = await fetch(`${base}/events`, {
 			method: "POST",
@@ -109,15 +120,17 @@ async function postEvent(base: string, bearer: string, body: Record<string, unkn
 			signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
 		});
 		let stored = false;
+		let postedId: string | null = null;
 		try {
-			const parsed = (await res.json()) as { stored?: boolean };
+			const parsed = (await res.json()) as { stored?: boolean; id?: unknown };
 			stored = parsed.stored === true;
+			postedId = typeof parsed.id === "string" ? parsed.id : null;
 		} catch {
 			stored = false;
 		}
-		return { status: res.status, stored, refused: res.status === 403 };
+		return { status: res.status, stored, refused: isRefused(res.status, stored), postedId };
 	} catch (cause) {
-		return { status: null, stored: false, refused: false, error: String(cause) };
+		return { status: null, stored: false, refused: true, postedId: null, error: String(cause) };
 	}
 }
 
