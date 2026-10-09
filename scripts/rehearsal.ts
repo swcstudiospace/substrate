@@ -215,15 +215,15 @@ function refuseDockerLocality(): string | null {
 }
 
 /**
- * The surface whose token the smoke drives: the operator when set (never a
- * swarm surface — parseOperator enforces that), else the first non-swarm
- * surface. A swarm-first `--surfaces` list must not hand the smoke a swarm
- * token: a swarm token needs a `<AGENT>@<replica>:<graph_id>` session,
- * while the smoke claims with a plain run-tag session.
+ * The bearer the smoke drives: the operator token when the twin recorded
+ * one, else the first surface's token. The surface choice already happened at
+ * `up` time and is recorded in `consumer.env`; older files predate the
+ * operator key, so the fallback keeps them working.
  */
-export function pickSmokeSurface(surfaces: readonly Surface[], operator: Surface | null): Surface | undefined {
-	if (operator !== null) return operator;
-	return surfaces.find((s) => !isSwarmSurface(s)) ?? surfaces[0];
+export function pickSmokeToken(record: Record<string, string>): string {
+	const operator = record["SUBSTRATE_REHEARSAL_OPERATOR_TOKEN"] ?? "";
+	if (operator !== "") return operator;
+	return record["SUBSTRATE_TOKEN"] ?? "";
 }
 
 /** A checkout the twin may run from: never the production unit's checkout. */
@@ -1064,10 +1064,13 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 	};
 	const disarm = installUpCleanup(interruptCleanup);
 	try {
-		const firstSurface = surfaces[0];
+		// SUBSTRATE_TOKEN is the first non-swarm surface's token (the
+		// documented contract); the operator token rides separately for the
+		// smoke, so an `--operator` twin no longer hands proofs the
+		// operator's token as the client's credential.
+		const firstSurface = surfaces.find((s) => !isSwarmSurface(s)) ?? surfaces[0];
 		const firstToken = firstSurface !== undefined ? secrets.surfaceTokens[firstSurface] : undefined;
-		const smokeSurface = pickSmokeSurface(surfaces, opts.operator);
-		const smokeToken = smokeSurface !== undefined ? secrets.surfaceTokens[smokeSurface] : undefined;
+		const operatorToken = opts.operator !== null ? secrets.surfaceTokens[opts.operator] : undefined;
 		const health = await waitForHealth(`http://127.0.0.1:${mcpPort}`, firstToken ?? null, READY_TIMEOUT_MS);
 		if (!isTwinHealthy(health)) {
 			killVerifiedSpawn(server.pid, checkout, facts.startSeconds);
@@ -1093,7 +1096,8 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 		const testPgUrl = `postgresql://postgres:${secrets.pgPassword}@127.0.0.1:${pgHost.port}/postgres`;
 		writeMode(join(runDir, "consumer.env"), toShellExports(consumerEnvRecord({
 			mcpPort,
-			firstToken: smokeToken ?? "",
+			firstToken: firstToken ?? "",
+			operatorToken: operatorToken ?? "",
 			runDir,
 			name: opts.name,
 			testPgUrl,
@@ -1373,7 +1377,7 @@ async function runSmokeInner(name: string, runDir: string): Promise<number> {
 	if (text === null) throw new RehearsalRefused(`no consumer.env for instance ${name}: run rehearsal up first`);
 	const record = parseShellExports(text);
 	const base = (record["SUBSTRATE_URL"] ?? "").replace(/\/+$/, "");
-	const tok = record["SUBSTRATE_TOKEN"] ?? "";
+	const tok = pickSmokeToken(record);
 	if (!base) throw new RehearsalRefused(`consumer.env for ${name} has no twin url`);
 	const refused = refuseSmokeUrl(base);
 	if (refused !== null) throw new RehearsalRefused(refused);

@@ -233,24 +233,48 @@ describe("stores and consumer records", () => {
 		expect(loadConfig(stores).greptime?.url).toBe("http://127.0.0.1:15400");
 	});
 
-	test("consumer record holds the five contract keys and no ledger key", () => {
+	test("consumer record holds the six contract keys and no ledger key", () => {
 		const server = buildRehearsalEnv(scratchInput());
 		const token = server[tokenEnvName(UNDER_TEST[0] ?? "claude-code")] ?? "";
+		const opToken = server[tokenEnvName("hermes")] ?? "";
 		const runDir = tempDir();
 		const out = consumerEnvRecord({
 			mcpPort: 17410,
 			firstToken: token,
+			operatorToken: opToken,
 			runDir,
 			name: "default",
 			testPgUrl: server.SUBSTRATE_PG_URL ?? "",
 		});
 		expect(out.SUBSTRATE_URL).toBe("http://127.0.0.1:17410");
 		expect(out.SUBSTRATE_TOKEN).toBe(token);
+		expect(out.SUBSTRATE_REHEARSAL_OPERATOR_TOKEN).toBe(opToken);
 		expect(out.SUBSTRATE_REHEARSAL_TOKENS_DIR).toBe(join(runDir, "tokens"));
 		expect(out.SUBSTRATE_REHEARSAL_NAME).toBe("default");
 		expect(out.SUBSTRATE_TEST_PG_URL).toBe(server.SUBSTRATE_PG_URL);
-		expect(Object.keys(out)).toHaveLength(5);
+		expect(Object.keys(out)).toHaveLength(6);
 		for (const key of Object.values(LEDGER_KEYS)) expect(out).not.toHaveProperty(key);
+	});
+
+	test("SUBSTRATE_TOKEN stays the first surface when the operator differs", () => {
+		// An `--operator hermes` twin must not promote the operator token to
+		// the client credential: proofs source SUBSTRATE_TOKEN, and only the
+		// smoke reads the operator key.
+		const server = buildRehearsalEnv(scratchInput());
+		const first = server[tokenEnvName("claude-code")] ?? "";
+		const op = server[tokenEnvName("hermes")] ?? "";
+		expect(op.length).toBeGreaterThan(0);
+		expect(op).not.toBe(first);
+		const out = consumerEnvRecord({
+			mcpPort: 17410,
+			firstToken: first,
+			operatorToken: op,
+			runDir: tempDir(),
+			name: "op-twin",
+			testPgUrl: server.SUBSTRATE_PG_URL ?? "",
+		});
+		expect(out.SUBSTRATE_TOKEN).toBe(first);
+		expect(out.SUBSTRATE_REHEARSAL_OPERATOR_TOKEN).toBe(op);
 	});
 
 	test("toShellExports renders sorted single-quoted lines", () => {

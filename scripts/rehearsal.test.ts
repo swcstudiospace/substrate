@@ -31,7 +31,7 @@ import {
 	parseShellExports,
 	parseSurfaces,
 	pickFreePort,
-	pickSmokeSurface,
+	pickSmokeToken,
 	refuseCheckoutDir,
 	refuseDockerEndpoint,
 	refuseDockerEnv,
@@ -607,12 +607,12 @@ describe("clearDirectory", () => {
 	});
 });
 
-describe("pickSmokeSurface", () => {
-	test("a swarm-first list smokes with a non-swarm token", () => {
-		expect(pickSmokeSurface(["swarm-a01-orch", "cursor"], null)).toBe("cursor");
-		expect(pickSmokeSurface(["cursor", "hermes"], null)).toBe("cursor");
-		expect(pickSmokeSurface(["cursor", "hermes"], "hermes")).toBe("hermes");
-		expect(pickSmokeSurface([], null)).toBeUndefined();
+describe("pickSmokeToken", () => {
+	test("the smoke drives the operator token and falls back to the first surface", () => {
+		expect(pickSmokeToken({ SUBSTRATE_TOKEN: "first", SUBSTRATE_REHEARSAL_OPERATOR_TOKEN: "op" })).toBe("op");
+		expect(pickSmokeToken({ SUBSTRATE_TOKEN: "first", SUBSTRATE_REHEARSAL_OPERATOR_TOKEN: "" })).toBe("first");
+		expect(pickSmokeToken({ SUBSTRATE_TOKEN: "first" })).toBe("first");
+		expect(pickSmokeToken({})).toBe("");
 	});
 });
 

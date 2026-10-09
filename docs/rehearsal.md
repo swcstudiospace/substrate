@@ -25,7 +25,7 @@ The twin is isolated by construction, not by discipline:
   `${XDG_RUNTIME_DIR:-/tmp}/substrate-rehearsal/<name>/`, mode 0700:
   - `state.json` — container names, server pid, ports, checkout path and commit;
   - `server.log` — the twin's stdout and stderr;
-  - `consumer.env` — the five-key contract every proof sources (below);
+  - `consumer.env` — the six-key contract every proof sources (below);
   - `stores.env` — the scratch store connection values, for store clients only;
   - `tokens/` — one 0600 file per surface, the v1.2 workspace-install pattern.
 
@@ -90,8 +90,11 @@ Each `up` generates a random Postgres password, a random ledger user and
 password (which exercises production's Basic-auth path), one random bearer
 token per surface and a random handoff key. The operator authenticates with
 its own surface's bearer token; there is no separately generated operator
-token. All of them go only into 0600 files in the run directory. Nothing is
-printed, and nothing is committed.
+token. `consumer.env` still exports that operator token separately (as
+`SUBSTRATE_REHEARSAL_OPERATOR_TOKEN`, for the smoke to drive) so
+`SUBSTRATE_TOKEN` stays the first non-swarm surface's token. All of them go
+only into 0600 files in the run directory. Nothing is printed, and nothing is
+committed.
 
 The default instance runs with tokens, an audit path inside the run directory
 and a random handoff key — the shape production reaches after Phase 20.
@@ -117,7 +120,8 @@ Every later proof sources `consumer.env` and hardcodes nothing:
 | Key | Value |
 | --- | --- |
 | `SUBSTRATE_URL` | The twin's loopback URL |
-| `SUBSTRATE_TOKEN` | The first surface's bearer token (empty under `--anonymous`) |
+| `SUBSTRATE_TOKEN` | The first non-swarm surface's bearer token (empty under `--anonymous`) |
+| `SUBSTRATE_REHEARSAL_OPERATOR_TOKEN` | The operator surface's bearer token, which the smoke drives (empty under `--anonymous`) |
 | `SUBSTRATE_REHEARSAL_TOKENS_DIR` | One 0600 file per surface |
 | `SUBSTRATE_REHEARSAL_NAME` | The instance name |
 | `SUBSTRATE_TEST_PG_URL` | The scratch Postgres URL, so the existing live index tests run against scratch |

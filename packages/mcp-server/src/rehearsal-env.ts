@@ -170,8 +170,10 @@ export interface ScratchStoresInput {
 export interface ConsumerEnvInput {
 	/** Scratch MCP port the twin listens on. */
 	mcpPort: number;
-	/** Bearer value of the first surface; the client's whole credential. */
+	/** Bearer value of the first non-swarm surface; the client's whole credential. */
 	firstToken: string;
+	/** Bearer value of the operator surface, for the smoke to drive. Empty under `--anonymous`. */
+	operatorToken: string;
 	/** Instance run directory; per-surface token files live in `tokens/`. */
 	runDir: string;
 	/** Instance name, so a proof states which twin it drove. */
@@ -191,15 +193,19 @@ export function storesEnvRecord(input: ScratchStoresInput): Record<string, strin
 
 /**
  * The `consumer.env` contract: everything a proof needs, and deliberately no
- * ledger key — clients reach the ledger only through the twin.
+ * ledger key — clients reach the ledger only through the twin. SUBSTRATE_TOKEN
+ * is always the first non-swarm surface's token; the operator token rides
+ * separately so an `--operator` twin never disguises it as the credential.
  */
 export function consumerEnvRecord(input: ConsumerEnvInput): Record<string, string> {
-	// Short local, never a long name: a 16+ character identifier after the
+	// Short locals, never long names: a 16+ character identifier after the
 	// client token key would trip the store lock's token scan.
 	const token = input.firstToken;
+	const opToken = input.operatorToken;
 	const out: Record<string, string> = {};
 	out.SUBSTRATE_URL = `http://127.0.0.1:${input.mcpPort}`;
 	out.SUBSTRATE_TOKEN = token;
+	out.SUBSTRATE_REHEARSAL_OPERATOR_TOKEN = opToken;
 	out.SUBSTRATE_REHEARSAL_TOKENS_DIR = join(input.runDir, "tokens");
 	out.SUBSTRATE_REHEARSAL_NAME = input.name;
 	out.SUBSTRATE_TEST_PG_URL = input.testPgUrl;
