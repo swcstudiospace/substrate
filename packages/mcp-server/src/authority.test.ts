@@ -326,11 +326,21 @@ describe("swarmTokenWarnings", () => {
 
 	test("a deployment with tokens names every swarm surface that has none", () => {
 		const warnings = swarmTokenWarnings(loadConfig({ SUBSTRATE_TOKEN_HERMES: "tok-hermes" }));
-		expect(warnings).toHaveLength(1);
+		expect(warnings).toHaveLength(2);
 		for (const surface of SWARM_SURFACES) expect(warnings[0]).toContain(tokenEnvName(surface));
 		expect(warnings[0]).toContain("15 swarm surfaces");
 		// Never a token value.
 		expect(warnings[0]).not.toContain("tok-hermes");
+		// And the host-job surface is named beside the swarm seats.
+		expect(warnings[1]).toContain("SUBSTRATE_TOKEN_SUBSTRATE");
+		expect(warnings[1]).not.toContain("tok-hermes");
+	});
+
+	test("a missing substrate token warns on its own once the swarm seats are filled", () => {
+		const env = Object.fromEntries(SWARM_SURFACES.map((surface) => [tokenEnvName(surface), `tok-${surface}`]));
+		const warnings = swarmTokenWarnings(loadConfig(env));
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain("SUBSTRATE_TOKEN_SUBSTRATE");
 	});
 
 	test("lists only the ones still missing, and is silent when none are", () => {
@@ -343,7 +353,9 @@ describe("swarmTokenWarnings", () => {
 		expect(warnings[0]).not.toContain("SUBSTRATE_TOKEN_SWARM_A05_BE");
 		expect(warnings[0]).toContain("SUBSTRATE_TOKEN_SWARM_A09_REV");
 
-		const all = Object.fromEntries(SWARM_SURFACES.map((surface) => [tokenEnvName(surface), `tok-${surface}`]));
+		const all = Object.fromEntries(
+			[...SWARM_SURFACES, "substrate" as const].map((surface) => [tokenEnvName(surface), `tok-${surface}`]),
+		);
 		expect(swarmTokenWarnings(loadConfig(all))).toEqual([]);
 	});
 });
