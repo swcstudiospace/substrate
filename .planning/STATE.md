@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.3
 milestone_name: Build plan completion
-current_phase: 16
-current_phase_name: Production parity and rehearsal harness
+current_phase: 17
+current_phase_name: Event vocabulary and audit policy
 status: planning
-stopped_at: "v1.3 roadmap approved 2026-10-08 (phases 16-33, 68/68 requirements); PR #21 ships the milestone-definition docs; Phase 16 discuss done on gsd/v1.3-p16-production-parity."
-last_updated: "2026-10-08T19:25:55.535Z"
+stopped_at: Phase 16 complete, ready to plan Phase 17
+last_updated: "2026-10-08T22:05:13.855Z"
 last_activity: 2026-10-08
-last_activity_desc: v1.3 roadmap created (Phases 16–33, 68/68 requirements mapped)
-state_head: 3e04ee1e502f4aae872a53494607d1d995351a71
+last_activity_desc: Phase 16 complete, transitioned to Phase 17
+state_head: 0d63ec04db815495d66ea9278c256b4f7a42108d
 progress:
   total_phases: 18
-  completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
-  percent: 0
+  completed_phases: 1
+  total_plans: 5
+  completed_plans: 5
+  percent: 6
 ---
 
 # State
@@ -154,10 +154,10 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Current Position
 
-Phase: 16 of 33 (Production parity and rehearsal harness)
-Plan: Not started (Plans: TBD)
+Phase: 17 — Event vocabulary and audit policy
+Plan: Not started
 Status: Ready to plan
-Last activity: 2026-10-08 — v1.3 roadmap created (Phases 16–33, 68/68 requirements mapped)
+Last activity: 2026-10-08 — Phase 16 complete, transitioned to Phase 17
 
 ## Deferred Items
 
@@ -173,6 +173,25 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-08T19:25:55.520Z
-Stopped at: v1.3 roadmap approved 2026-10-08 (phases 16-33, 68/68 requirements); PR #21 ships the milestone-definition docs; Phase 16 discuss done on gsd/v1.3-p16-production-parity.
-Resume file: None; current progress is recorded in the phase summaries and ultrathink ship state.
+Last session: 2026-10-08T21:29:12Z
+Stopped at: Phase 16 complete, ready to plan Phase 17
+Resume file: None
+
+## Performance Metrics
+
+| Plan | Duration | Tasks | Files |
+|------|----------|-------|-------|
+| Phase 16 P16-01 | 15min | 2 tasks | 2 files |
+| Phase 16 P16-02 | 9min | 3 tasks | 4 files |
+| Phase 16 P16-03 | 14min | 3 tasks | 3 files |
+| Phase 16 P16-04 | 5min | 3 tasks | 4 files |
+
+## Decisions
+
+- [Phase 16]: 16-01: rehearsal-env builder is pure with caller-supplied secrets; operator checks precede token materialization
+- [Phase 16]: 16-02: parity startEpoch from ExecMainStartTimestamp (@unix); /proc start is a disagree-warning only
+- [Phase 16]: 16-02: originShaKnown null fails closed with its own reason, distinct from sha-absent
+- [Phase 16]: 16-03: ledger image override key composed at runtime so the store-lock substring scan stays green
+- [Phase 16]: 16-03: smoke reads only consumer.env and refuses :7410/non-loopback before any request; claim needs claimed true plus granted
+- [Phase 16]: 16-03: requirements-completed left empty, FOUND-01 stays open until the 16-05 live proof
+- [Phase 16]: 16-04: docs carry key names only, no connection-string shapes; production-mutating steps framed operator-only

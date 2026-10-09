@@ -23,9 +23,18 @@
  * Only `/healthz`, `/metrics` and `/slo` are exempt, and no agent action is behind them.
  */
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { auditMode } from "@substrate/audit";
-import { isOperator, surfaceForToken, type SubstrateConfig } from "./config.ts";
+import { classifyEventRefusal, type EventRefusalReason } from "@substrate/observability";
+import {
+	anonymousBridge,
+	isOperator,
+	surfaceForToken,
+	tokenedSurfaces,
+	unmappedBearer,
+	type SubstrateConfig,
+} from "./config.ts";
 import { formatDrift } from "./drift.ts";
 import { InvalidEventError } from "./event.ts";
 import { InvalidHandoffError } from "./handoff.ts";
@@ -41,7 +50,120 @@ import {
 	type Observability,
 } from "./observe.ts";
 import type { Substrate } from "./service.ts";
-import type { Surface } from "./types.ts";
+import { SURFACES, type Surface } from "./types.ts";
+
+/** One hour. Anonymous callers are logged once per window, not once per request. */
+const ANONYMOUS_LOG_INTERVAL_MS = 60 * 60 * 1000;
+
+/**
+ * Routes an anonymous caller can hit. Anything else folds through `normalizeRoute`,
+ * so a scanner cannot mint a series per path on this counter either.
+ */
+const ANONYMOUS_ROUTES = new Set([
+	"/brief",
+	"/events",
+	"/events/query",
+	"/memory",
+	"/handoff",
+	"/drift",
+	"/verify",
+	"/healthz",
+	"/mcp",
+	"/metrics",
+	"/slo",
+	"/evidence",
+]);
+
+function anonymousRoute(pathname: string): string {
+	return ANONYMOUS_ROUTES.has(pathname) ? pathname : normalizeRoute(pathname);
+}
+
+/** A claimed surface, bounded: a known surface, `none`, or `unrecognised`. */
+function boundClaim(value: unknown): string {
+	if (typeof value !== "string" || value.length === 0) return "none";
+	return (SURFACES as readonly string[]).includes(value) ? value : "unrecognised";
+}
+
+/** The surface a body tried to name, including an MCP tool argument. Null when it named none. */
+function findClaim(body: unknown): string | null {
+	if (!body || typeof body !== "object") return null;
+	const record = body as Record<string, unknown>;
+	if ("surface" in record) return boundClaim(record.surface);
+	const params = record.params;
+	if (!params || typeof params !== "object") return null;
+	const args = (params as { arguments?: unknown }).arguments;
+	if (!args || typeof args !== "object" || !("surface" in args)) return null;
+	return boundClaim((args as { surface: unknown }).surface);
+}
+
+function rememberClaim(claim: { surface: string }, body: unknown): void {
+	const found = findClaim(body);
+	if (found !== null) claim.surface = found;
+}
+
+/**
+ * One stderr line per hour naming which routes and surfaces still arrive without a token.
+ *
+ * The counts themselves are in `/metrics` immediately. The line is the thing an
+ * operator grepping the unit log sees without scraping, and it carries no payload.
+ */
+export class AnonymousCallerLog {
+	private readonly counts = new Map<string, number>();
+	private windowStart: number;
+	private readonly intervalMs: number;
+	private readonly now: () => number;
+	private readonly write: (line: string) => void;
+	private timer: ReturnType<typeof setInterval> | null = null;
+
+	constructor(intervalMs?: number, now?: () => number, write?: (line: string) => void) {
+		this.intervalMs = intervalMs ?? ANONYMOUS_LOG_INTERVAL_MS;
+		this.now = now ?? Date.now;
+		this.write = write ?? ((line) => process.stderr.write(line));
+		this.windowStart = this.now();
+	}
+
+	/** Flush on the hour even when no later request arrives to notice it. */
+	start(): void {
+		if (this.timer) return;
+		this.timer = setInterval(() => {
+			if (this.counts.size > 0 && this.now() - this.windowStart >= this.intervalMs) this.flush();
+		}, this.intervalMs);
+		this.timer.unref?.();
+	}
+
+	/** Drop the timer and write whatever this window still holds. */
+	stop(): void {
+		if (this.timer) {
+			clearInterval(this.timer);
+			this.timer = null;
+		}
+		this.flush();
+	}
+
+	record(route: string, claimedSurface: string): void {
+		const key = `${route} claimed=${claimedSurface}`;
+		this.counts.set(key, (this.counts.get(key) ?? 0) + 1);
+		if (this.now() - this.windowStart >= this.intervalMs) this.flush();
+	}
+
+	flush(): void {
+		if (this.counts.size > 0) {
+			const parts = [...this.counts.entries()]
+				.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+				.map(([key, count]) => `${key} ${count}`)
+				.join(", ");
+			this.write(`[substrate] anonymous callers: ${parts}\n`);
+		}
+		this.counts.clear();
+		this.windowStart = this.now();
+	}
+}
+
+export interface HttpServerOptions {
+	now?: () => number;
+	anonymousLog?: (line: string) => void;
+	anonymousIntervalMs?: number;
+}
 
 const MAX_BODY_BYTES = 1_000_000;
 
@@ -213,15 +335,27 @@ async function auditedRest(
 	return false;
 }
 
-export function createHttpServer(substrate: Substrate, config: SubstrateConfig, observability: Observability) {
-	return createServer(async (req, res) => {
+export function createHttpServer(
+	substrate: Substrate,
+	config: SubstrateConfig,
+	observability: Observability,
+	options: HttpServerOptions = {},
+) {
+	const anonymousLog = new AnonymousCallerLog(options.anonymousIntervalMs, options.now, options.anonymousLog);
+	anonymousLog.start();
+	const server = createServer(async (req, res) => {
 		const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
 		const authorization = req.headers.authorization ?? null;
 		const surface: Surface | null = surfaceForToken(config, authorization);
 		// What the transport establishes about the caller, before any request body is
 		// read. A signed handoff's sender and a forced release's authority are decided
 		// from this and never from an argument.
-		const caller: McpCaller = { surface, isOperator: isOperator(config, authorization) };
+		const caller: McpCaller = {
+			surface,
+			isOperator: isOperator(config, authorization),
+			// Only while the bridge is on. A bare local run keeps the MCP defaults.
+			...(anonymousBridge(config) ? { tokenedSurfaces: tokenedSurfaces(config) } : {}),
+		};
 		const route = normalizeRoute(url.pathname);
 
 		// Measured from `finish` rather than at each `send` call site: that way every
@@ -229,6 +363,9 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig, 
 		// response — lands in the histogram with the status the client actually saw.
 		const started = performance.now();
 		const span = startRequestSpan(observability, req, route, surface);
+		// Set before the response is finished. `finish` reads both.
+		let eventRefusal: EventRefusalReason | null = null;
+		const claim = { surface: "none" };
 		res.on("finish", () => {
 			span.setAttribute("http.response.status_code", res.statusCode);
 			if (res.statusCode >= 500) span.fail(`HTTP ${res.statusCode}`);
@@ -239,10 +376,22 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig, 
 				status: res.statusCode,
 				durationMs: performance.now() - started,
 			});
+			// POST only. A GET or a probe of the path is not a refused event post.
+			if (req.method === "POST" && route === "/events" && eventRefusal) {
+				observability.instruments.recordEventRefusal({ reason: eventRefusal });
+			}
+			// Accepted untokened callers only. A 401 was refused, not served anonymously.
+			if (config.allowAnonymous && surface === null && res.statusCode !== 401) {
+				const anonRoute = anonymousRoute(url.pathname);
+				observability.instruments.recordAnonymous({ route: anonRoute, claimedSurface: claim.surface });
+				anonymousLog.record(anonRoute, claim.surface);
+			}
 		});
 
-		// A configured deployment requires a token that names a surface; a bare local
-		// run does not, otherwise the operator is locked out of their own machine.
+		// A configured deployment requires a token that names a surface, unless
+		// `SUBSTRATE_ALLOW_ANONYMOUS=1` is keeping untokened callers during migration.
+		// Unset, a bare local run (no tokens) does not require one, otherwise the
+		// operator is locked out of their own machine. `0` requires a bearer even then.
 		//
 		// Every authenticated caller therefore has a surface. That is deliberate and
 		// load-bearing: a caller with none would reach the authoring routes with no
@@ -251,7 +400,10 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig, 
 		// token is a *surface* token that is also listed in
 		// SUBSTRATE_OPERATOR_TOKENS, so its extra authority never comes at the cost
 		// of knowing who used it.
-		if (!config.allowAnonymous && surface === null) {
+		// A bearer that names no surface is not an untokened caller. The bridge
+		// accepts the absence of a token; this used to be 401 and still is.
+		if (unmappedBearer(config, authorization) || (!config.allowAnonymous && surface === null)) {
+			if (req.method === "POST" && url.pathname === "/events") eventRefusal = "auth";
 			sendJson(res, 401, { error: "unknown or missing bearer token" });
 			return;
 		}
@@ -299,6 +451,7 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig, 
 			if (req.method === "POST" && url.pathname === "/evidence") {
 				const raw = await readBody(req);
 				const body = raw ? (JSON.parse(raw) as { graph_id?: unknown; format?: unknown }) : {};
+				rememberClaim(claim, body);
 				if (typeof body.graph_id !== "string" || body.graph_id.length === 0) {
 					sendJson(res, 400, { error: "graph_id is required" });
 					return;
@@ -316,6 +469,7 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig, 
 			if (req.method === "POST" && url.pathname === "/brief") {
 				const raw = await readBody(req);
 				const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+				rememberClaim(claim, body);
 				if (!(await auditedRest(res, observability, surface, "brief", body))) return;
 				const brief = await substrate.brief({
 					repo: typeof body.repo === "string" ? body.repo : undefined,
@@ -329,14 +483,40 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig, 
 
 			if (req.method === "POST" && url.pathname === "/events") {
 				const raw = await readBody(req);
-				const body = JSON.parse(raw) as Record<string, unknown>;
+				const parsed: unknown = JSON.parse(raw);
+				// `"graph_id" in 42` throws, and that throw used to become a 500.
+				// A scalar or an array is the caller's mistake.
+				if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+					eventRefusal = "validation";
+					sendJson(res, 400, { error: "event must be an object" });
+					return;
+				}
+				const body = parsed as Record<string, unknown>;
+				rememberClaim(claim, body);
+				// A non-string graph id used to fall through to redaction and come back as a
+				// 500 that echoed the throw. It is the caller's mistake, and it is its own
+				// refusal reason so a bad id is not hidden inside validation.
+				if ("graph_id" in body && body.graph_id != null && typeof body.graph_id !== "string") {
+					eventRefusal = "graph_id";
+					sendJson(res, 400, { error: "graph_id must be a string" });
+					return;
+				}
 				if (!(await auditedRest(res, observability, surface, "events", body))) return;
 				// A swarm token is its surface: naming another one is refused, not re-attributed.
 				// Every other caller keeps the body-first attribution collectors rely on — see
-				// `attributedSurface`.
-				const attribution = attributedSurface(surface, typeof body.surface === "string" ? body.surface : null);
+				// `attributedSurface`. An untokened caller on the bridge may not use that to
+				// name a surface that has a token, including the claude-code default when that
+				// surface itself has one.
+				const supplied = typeof body.surface === "string" ? body.surface : null;
+				const attribution = attributedSurface(surface, supplied);
 				if ("refused" in attribution) {
+					eventRefusal = "attribution";
 					sendJson(res, 403, { error: attribution.refused });
+					return;
+				}
+				if (surface === null && anonymousBridge(config) && tokenedSurfaces(config).has(attribution.surface)) {
+					eventRefusal = "attribution";
+					sendJson(res, 403, { error: "an untokened caller cannot emit as a surface that has a token" });
 					return;
 				}
 				const result = await substrate.emit({
@@ -362,6 +542,7 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig, 
 			if (req.method === "POST" && url.pathname === "/events/query") {
 				const raw = await readBody(req);
 				const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+				rememberClaim(claim, body);
 				// A read, so fail-open — but recorded. `/events/query` was the one REST door
 				// to a store that left no trace of who read it.
 				if (!(await auditedRest(res, observability, surface, "events_query", body))) return;
@@ -374,6 +555,7 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig, 
 			if (req.method === "POST" && url.pathname === "/memory") {
 				const raw = await readBody(req);
 				const body = JSON.parse(raw) as Record<string, unknown>;
+				rememberClaim(claim, body);
 				// Audited as `memory_write`, the name the MCP tool is audited under, so one
 				// action does not appear in the trail twice under two names. That tool is
 				// fail-closed and this route is the same action: auditing the tool and not the
@@ -392,6 +574,7 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig, 
 			// the brief: a hook process has no MCP client. Same service code beneath.
 			if (req.method === "POST" && url.pathname === "/handoff") {
 				const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+				rememberClaim(claim, body);
 				// `coord_handoff`, as MCP audits it, and fail-closed for the same reason: a
 				// handoff transfers work and a lease to another agent, and one nobody recorded
 				// is a transfer that cannot be reconstructed afterwards.
@@ -404,12 +587,30 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig, 
 				// The sender is the token's surface, never the body's. A packet naming
 				// another agent would verify under a false identity — a forgery with a
 				// valid seal on it. The body is consulted only when *nothing* is
-				// authenticated (a bare local run), and never merely because this
-				// particular token named no surface.
-				const sender = surface ?? (config.allowAnonymous ? bodySurface(body) : null);
+				// authenticated, and never merely because this particular token named
+				// no surface.
+				//
+				// On the bridge that "nothing" is an untokened caller beside real tokens.
+				// They may name a surface that has no token of its own. They may not name
+				// one that does, and a missing name is not filled in with claude-code —
+				// that default would be a privileged surface the moment claude-code has a
+				// token, and it is the wrong sender even before then.
+				const claimed = bodySurface(body);
+				let sender: Surface | null = surface;
+				if (sender === null && config.allowAnonymous) {
+					if (anonymousBridge(config) && claimed !== null && tokenedSurfaces(config).has(claimed)) {
+						sendJson(res, 403, {
+							error: "an untokened caller cannot hand off as a surface that has a token",
+						});
+						return;
+					}
+					sender = claimed;
+				}
 				if (!sender) {
 					sendJson(res, 403, {
-						error: "this token names no surface, so it cannot be a handoff sender",
+						error: anonymousBridge(config)
+							? "an untokened handoff must name its surface and cannot default to claude-code"
+							: "this token names no surface, so it cannot be a handoff sender",
 					});
 					return;
 				}
@@ -439,6 +640,7 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig, 
 			if (req.method === "POST" && url.pathname === "/drift") {
 				const raw = await readBody(req);
 				const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+				rememberClaim(claim, body);
 				if (typeof body.repo !== "string") {
 					sendJson(res, 400, { error: "drift needs `repo`" });
 					return;
@@ -463,6 +665,7 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig, 
 			if (req.method === "POST" && url.pathname === "/verify") {
 				const raw = await readBody(req);
 				const body = JSON.parse(raw) as { graph_id?: unknown };
+				rememberClaim(claim, body);
 				if (typeof body.graph_id !== "string") {
 					sendJson(res, 400, { error: "graph_id is required" });
 					return;
@@ -473,24 +676,37 @@ export function createHttpServer(substrate: Substrate, config: SubstrateConfig, 
 			}
 
 			if (url.pathname === "/mcp") {
-				await handleMcp(req, res, substrate, caller, observability);
+				await handleMcp(req, res, substrate, caller, observability, claim);
 				return;
 			}
 
 			sendJson(res, 404, { error: `no route for ${req.method} ${url.pathname}` });
 		} catch (cause) {
 			if (cause instanceof InvalidEventError || cause instanceof InvalidHandoffError) {
+				if (req.method === "POST" && url.pathname === "/events" && cause instanceof InvalidEventError) {
+					eventRefusal = classifyEventRefusal(400, cause.message) ?? "validation";
+				}
 				sendJson(res, 400, { error: cause.message });
 				return;
 			}
 			if (cause instanceof SyntaxError) {
+				if (req.method === "POST" && url.pathname === "/events") eventRefusal = "validation";
 				sendJson(res, 400, { error: "request body is not valid JSON" });
 				return;
 			}
-			process.stderr.write(`[substrate] ${req.method} ${url.pathname}: ${String(cause)}\n`);
-			if (!res.headersSent) sendJson(res, 500, { error: String(cause) });
+			const correlationId = randomUUID();
+			process.stderr.write(
+				`[substrate] ${req.method} ${url.pathname} correlation=${correlationId}: ${String(cause)}\n`,
+			);
+			if (!res.headersSent) sendJson(res, 500, { error: "internal error", correlation_id: correlationId });
 		}
 	});
+	const close = server.close.bind(server);
+	server.close = ((callback?: (err?: Error) => void) => {
+		anonymousLog.stop();
+		return close(callback);
+	}) as typeof server.close;
+	return server;
 }
 
 /**
@@ -510,6 +726,7 @@ async function handleMcp(
 	substrate: Substrate,
 	caller: McpCaller,
 	observability: Observability,
+	claim: { surface: string },
 ): Promise<void> {
 	if (req.method !== "POST") {
 		// Stateless mode has no server-initiated stream to attach to.
@@ -518,6 +735,7 @@ async function handleMcp(
 	}
 	const raw = await readBody(req);
 	const body: unknown = raw ? JSON.parse(raw) : undefined;
+	rememberClaim(claim, body);
 
 	const { denials } = await auditToolCalls(observability, caller.surface, toolCallsIn(body));
 	if (denials.size > 0) {

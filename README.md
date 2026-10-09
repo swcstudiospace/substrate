@@ -97,6 +97,12 @@ credential:
 set -a; . /etc/substrate/substrate.env; set +a && bun run smoke:greptime
 ```
 
+`bun run rehearsal up|smoke|down` stands up a scratch twin of the server on loopback —
+scratch Postgres and ledger in local containers, nothing production — and drives the
+brief/emit/register/claim wire proof over it. Details in [`docs/rehearsal.md`](docs/rehearsal.md).
+`bun run parity:check` is the read-only production check that the unit owns `127.0.0.1:7410`
+and serves `main`; the procedure around it lives in [`docs/runbooks/production-parity.md`](docs/runbooks/production-parity.md).
+
 `substrate-mcp` exposes MCP over streamable HTTP at `/mcp`, and — because agent hooks cannot
 call MCP tools — the same briefing, event and memory paths as plain `POST /brief`,
 `POST /events`, `POST /events/query`, `POST /memory` and `POST /verify`.

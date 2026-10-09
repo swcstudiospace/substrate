@@ -166,13 +166,35 @@ function refusal(message: string) {
 export interface McpCaller {
 	surface: Surface | null;
 	isOperator: boolean;
+	/**
+	 * Set only while the anonymous bridge is on. An untokened caller may not
+	 * emit or claim as one of these surfaces, and `coord_handoff` is refused
+	 * rather than signed as `claude-code`.
+	 */
+	tokenedSurfaces?: ReadonlySet<Surface>;
 }
 
 export function createMcpServer(substrate: Substrate, caller: McpCaller | Surface | null): McpServer {
 	// A bare surface is still accepted so existing callers and tests keep working;
 	// it means "authenticated as this surface, not an operator".
-	const { surface: callerSurface, isOperator } =
-		caller === null || typeof caller === "string" ? { surface: caller, isOperator: false } : caller;
+	const { surface: callerSurface, isOperator, tokenedSurfaces: bridgeSurfaces } =
+		caller === null || typeof caller === "string"
+			? { surface: caller, isOperator: false, tokenedSurfaces: undefined }
+			: caller;
+
+	/** Bridge restrictions. Absent on a bare local run, which keeps today's defaults. */
+	function bridgeBlock(kind: "emit" | "claim" | "handoff", named: Surface | null): string | null {
+		if (callerSurface !== null || bridgeSurfaces === undefined) return null;
+		if (kind === "handoff") {
+			return "an untokened handoff must name its surface and cannot default to claude-code";
+		}
+		if (named !== null && bridgeSurfaces.has(named)) {
+			return kind === "claim"
+				? "an untokened caller cannot claim as a surface that has a token"
+				: "an untokened caller cannot emit as a surface that has a token";
+		}
+		return null;
+	}
 	const server = new McpServer({ name: "substrate", version: "0.1.0" });
 
 	server.registerTool(
@@ -354,6 +376,8 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 		async (args) => {
 			const attribution = attributedSurface(callerSurface, args.surface);
 			if ("refused" in attribution) return refusal(attribution.refused);
+			const blocked = bridgeBlock("emit", attribution.surface);
+			if (blocked) return refusal(blocked);
 			const { event, stored, error, warning } = await substrate.emit({
 				...args,
 				surface: attribution.surface,
@@ -562,6 +586,12 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 		async ({ graph_id, node_id, session_id, ttl_seconds, surface }) => {
 			const attribution = claimAttribution(callerSurface, surface);
 			if ("refused" in attribution) return refusal(attribution.refused);
+			// A null caller skips the holder's check inside the lease, which is right
+			// on a bare local run and wrong on the bridge: the holder's surface and
+			// session are public, so naming them would renew a tokened lease and
+			// return its id. Refuse before that null caller is passed in.
+			const blocked = bridgeBlock("claim", attribution.surface);
+			if (blocked) return refusal(blocked);
 			if (isSwarmSurface(attribution.surface)) {
 				const refused = swarmSessionRefusal(attribution.surface, session_id, graph_id);
 				if (refused) return refusal(refused);
@@ -703,8 +733,13 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 					),
 			},
 		},
-		async ({ to, to_session_id, session_id, lease_id, release_lease, ...rest }) =>
-			json(
+		async ({ to, to_session_id, session_id, lease_id, release_lease, ...rest }) => {
+			// This tool has no sender argument. On the bridge an untokened caller
+			// would otherwise be signed as claude-code. REST /handoff can still name
+			// a surface that has no token; this path cannot, so it refuses.
+			const blocked = bridgeBlock("handoff", null);
+			if (blocked) return refusal(blocked);
+			return json(
 				await substrate.handoff({
 					...rest,
 					// The sender is the authenticated caller. There is no argument for it:
@@ -715,7 +750,8 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 					handover_lease_id: lease_id ?? null,
 					...(release_lease === undefined ? {} : { release_lease }),
 				}),
-			),
+			);
+		},
 	);
 
 	server.registerTool(

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { METRIC, SubstrateInstruments, extractUsage } from "./instruments.ts";
+import { METRIC, SubstrateInstruments, classifyEventRefusal, extractUsage } from "./instruments.ts";
 import { findCounter, findHistogram, mergeHistogram, sumCounter } from "./metrics.ts";
 
 describe("extractUsage", () => {
@@ -130,6 +130,40 @@ describe("recordClaim", () => {
 		instruments.recordClaim({ surface: "omp", outcome: "granted" });
 
 		expect(findCounter(instruments.snapshot(), METRIC.leaseSteals)?.points).toEqual([]);
+	});
+});
+
+describe("refused events and anonymous callers", () => {
+	test("classifies a 4xx by reason and ignores anything else", () => {
+		expect(classifyEventRefusal(401, "unknown or missing bearer token")).toBe("auth");
+		expect(classifyEventRefusal(403, "cannot act as grok-bot")).toBe("attribution");
+		expect(classifyEventRefusal(400, "unknown kind: nope")).toBe("validation");
+		expect(classifyEventRefusal(400, "unknown kind: graph_id")).toBe("validation");
+		expect(classifyEventRefusal(400, "graph_id must be a string")).toBe("graph_id");
+		expect(classifyEventRefusal(503, "ledger down")).toBeNull();
+		expect(classifyEventRefusal(202, undefined)).toBeNull();
+	});
+
+	test("counts each refusal reason on its own series", () => {
+		const instruments = new SubstrateInstruments();
+		instruments.recordEventRefusal({ reason: "auth" });
+		instruments.recordEventRefusal({ reason: "auth" });
+		instruments.recordEventRefusal({ reason: "graph_id" });
+
+		const counter = findCounter(instruments.snapshot(), METRIC.eventsRefused)!;
+		expect(sumCounter(counter, { reason: "auth" })).toBe(2);
+		expect(sumCounter(counter, { reason: "graph_id" })).toBe(1);
+		expect(sumCounter(counter, { reason: "validation" })).toBe(0);
+	});
+
+	test("counts an anonymous caller by route and the surface it claimed", () => {
+		const instruments = new SubstrateInstruments();
+		instruments.recordAnonymous({ route: "/events", claimedSurface: "hermes" });
+		instruments.recordAnonymous({ route: "/handoff", claimedSurface: "none" });
+
+		const counter = findCounter(instruments.snapshot(), METRIC.anonymousRequests)!;
+		expect(sumCounter(counter, { route: "/events", claimed_surface: "hermes" })).toBe(1);
+		expect(sumCounter(counter, { route: "/handoff", claimed_surface: "none" })).toBe(1);
 	});
 });
 

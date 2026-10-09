@@ -25,7 +25,14 @@ export interface SubstrateConfig {
 	notionTaskGraphDataSource: string;
 	/** bearer token → surface. Lets every event be attributed to a caller. */
 	tokens: Map<string, Surface>;
-	/** When true, an unauthenticated caller is accepted and attributed by its payload. */
+	/**
+	 * When true, an unauthenticated caller is accepted.
+	 *
+	 * Unset `SUBSTRATE_ALLOW_ANONYMOUS` keeps today's rule: true only when no
+	 * surface token is configured. `1` is the migration bridge — configured tokens
+	 * are still recognised, and untokened callers stay accepted. `0` requires a
+	 * bearer even when no token is configured.
+	 */
 	allowAnonymous: boolean;
 	/**
 	 * Surface tokens that may also take a node off its holder.
@@ -150,9 +157,32 @@ function readHandoffKeys(env: Record<string, string | undefined>): {
 	return { handoffKeys: keys, handoffKeyId: active ? activeId : null };
 }
 
+/**
+ * `SUBSTRATE_ALLOW_ANONYMOUS`: unset keeps today's rule, `1` keeps untokened
+ * callers alongside tokens, `0` forces a bearer. Anything else is unset — a typo
+ * must not open a deployment that already has tokens.
+ */
+function allowAnonymousFrom(env: Record<string, string | undefined>, tokenCount: number): boolean {
+	const value = env.SUBSTRATE_ALLOW_ANONYMOUS?.trim() ?? "";
+	if (/^(1|true|yes)$/i.test(value)) return true;
+	if (/^(0|false|no)$/i.test(value)) return false;
+	return tokenCount === 0;
+}
+
+/** True while the migration bridge is on: tokens exist and untokened callers are still accepted. */
+export function anonymousBridge(config: SubstrateConfig): boolean {
+	return config.allowAnonymous && config.tokens.size > 0;
+}
+
+/** Surfaces that have a configured token. An untokened caller may not claim one of these. */
+export function tokenedSurfaces(config: SubstrateConfig): ReadonlySet<Surface> {
+	return new Set(config.tokens.values());
+}
+
 export function loadConfig(env: Record<string, string | undefined> = process.env): SubstrateConfig {
 	const greptimeUrl = env.GREPTIME_URL?.trim();
 	const leaseTtl = Number(env.SUBSTRATE_LEASE_TTL_SECONDS);
+	const tokens = readTokens(env);
 	return {
 		...readHandoffKeys(env),
 		leaseTtlSeconds: normalizeTtlSeconds(Number.isFinite(leaseTtl) ? leaseTtl : undefined),
@@ -170,10 +200,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		linearApiKey: env.LINEAR_API_KEY?.trim() || undefined,
 		notionApiKey: env.NOTION_API_KEY?.trim() || undefined,
 		notionTaskGraphDataSource: env.NOTION_TASK_GRAPH_DS?.trim() || "be3418f0-d2d8-411b-8677-fa8a95ee63be",
-		tokens: readTokens(env),
-		// No tokens configured at all means a local dev run; requiring auth then
-		// would just lock the operator out of their own machine.
-		allowAnonymous: readTokens(env).size === 0,
+		tokens,
+		allowAnonymous: allowAnonymousFrom(env, tokens.size),
 		operatorTokens: new Set(
 			(env.SUBSTRATE_OPERATOR_TOKENS ?? "")
 				.split(",")
@@ -226,11 +254,12 @@ export function surfaceForToken(config: SubstrateConfig, authorization: string |
 /**
  * Whether this request may take a node off its holder.
  *
- * On a bare local run — no surface tokens at all, so `allowAnonymous` — the
- * caller is the machine's owner and the answer is yes; there is nobody else to
- * protect the lease from. Once tokens exist, an ordinary surface token is not
- * enough: the token must also be listed as an operator's, because a forced
- * release is exactly the thing one agent must not be able to do to another.
+ * On a bare local run — no surface tokens at all — the caller is the machine's
+ * owner and the answer is yes; there is nobody else to protect the lease from.
+ * Once tokens exist, including while the anonymous bridge is on, an ordinary
+ * surface token is not enough: the token must also be listed as an operator's,
+ * because a forced release is exactly the thing one agent must not be able to
+ * do to another. An untokened caller on the bridge is not an operator either.
  *
  * A swarm surface's token is never an operator, listed or not. The swarm runs
  * agents unattended against each other's nodes, so a listed swarm token would be
@@ -239,10 +268,32 @@ export function surfaceForToken(config: SubstrateConfig, authorization: string |
  * that `configWarnings` reports at boot.
  */
 export function isOperator(config: SubstrateConfig, authorization: string | null): boolean {
-	if (config.allowAnonymous && config.operatorTokens.size === 0) return true;
+	// A bare local run — no surface tokens at all — is its own operator. The bridge
+	// is not that run: tokens exist, so an untokened caller must not become one
+	// merely because untokened callers are still accepted.
+	if (config.tokens.size === 0 && config.allowAnonymous && config.operatorTokens.size === 0) return true;
 	const token = bearer(authorization);
 	if (token === null || !config.operatorTokens.has(token)) return false;
-	return !isSwarmSurface(config.tokens.get(token));
+	const named = config.tokens.get(token);
+	// Once any surface token exists, operator authority is an attribute of one of
+	// them. A bearer listed only in SUBSTRATE_OPERATOR_TOKENS used to be 401; the
+	// bridge must not turn that 401 into `force` with no named surface.
+	// `isSwarmSurface(undefined)` is false, which is how that bearer used to pass.
+	if (named === undefined) return config.tokens.size === 0;
+	return !isSwarmSurface(named);
+}
+
+/**
+ * A presented bearer that names no surface, once any surface token exists.
+ *
+ * The bridge accepts a *missing* token. It does not accept a token that is not
+ * configured: that request used to be 401, and admitting it would make an
+ * operator-only bearer look like an anonymous caller.
+ */
+export function unmappedBearer(config: SubstrateConfig, authorization: string | null): boolean {
+	if (config.tokens.size === 0) return false;
+	const token = bearer(authorization);
+	return token !== null && !config.tokens.has(token);
 }
 
 /**
@@ -279,7 +330,7 @@ export function configWarnings(config: SubstrateConfig): string[] {
 	const warnings: string[] = [];
 	if (config.operatorTokens.size === 0) return warnings;
 
-	if (config.allowAnonymous) {
+	if (config.allowAnonymous && config.tokens.size === 0) {
 		warnings.push(
 			"operator tokens are set but no SUBSTRATE_TOKEN_* surface token is, so every caller is accepted " +
 				"unauthenticated and attributed by its own payload. The operator tokens do work — they gate a forced " +
