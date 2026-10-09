@@ -9,7 +9,18 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { GATE_STEPS, main, parseArgs, parseTestCounts, runStep, selectSteps, skipNote, tailLines } from "./verify.ts";
+import {
+	GATE_STEPS,
+	main,
+	parseArgs,
+	parseTestCounts,
+	runStep,
+	selectSteps,
+	skipNote,
+	tailLines,
+	type GateStep,
+	type StepResult,
+} from "./verify.ts";
 
 const ROOT = join(import.meta.dir, "..");
 const BUN = process.execPath;
@@ -78,6 +89,8 @@ describe("parseTestCounts and skipNote", () => {
 		const counts = { pass: 10, skip: 56, fail: 0 };
 		expect(skipNote(counts, {})).toContain("56 tests skipped");
 		expect(skipNote(counts, { SUBSTRATE_TEST_PG_URL: "" })).toContain("SUBSTRATE_TEST_PG_URL is unset");
+		// The live suites trim the value before they skip, so blank counts as unset here too.
+		expect(skipNote(counts, { SUBSTRATE_TEST_PG_URL: "   " })).toContain("SUBSTRATE_TEST_PG_URL is unset");
 		expect(skipNote(counts, { SUBSTRATE_TEST_PG_URL: "postgres://scratch" })).toBeNull();
 		expect(skipNote({ pass: 10, skip: 0, fail: 0 }, {})).toBeNull();
 		expect(skipNote(null, {})).toBeNull();
@@ -142,6 +155,17 @@ async function quietly<T>(body: () => Promise<T>): Promise<{ result: T; written:
 	}
 }
 
+/** A fake `run` for `main`: records which steps were attempted and answers from a table keyed by step id. */
+function fakeRun(outcomes: Partial<Record<GateStep["id"], Partial<StepResult>>> = {}) {
+	const ran: string[] = [];
+	const run = async (step: GateStep): Promise<StepResult> => {
+		ran.push(step.id);
+		const output = step.id === "tests" ? "\n 12 pass\n 3 skip\n 0 fail\n" : `output of ${step.id}\n`;
+		return { label: step.label, ok: true, code: 0, ms: 5, output, ...outcomes[step.id] };
+	};
+	return { ran, run };
+}
+
 describe("main", () => {
 	test("--help and --list exit 0; bad usage exits 2 with the reason and the usage text", async () => {
 		const help = await quietly(() => main(["--help"]));
@@ -156,6 +180,70 @@ describe("main", () => {
 		const empty = await quietly(() => main(["--only", "audit", "--skip", "audit"]));
 		expect(empty.result).toBe(2);
 		expect(empty.written).toContain("no steps selected");
+	});
+
+	test("an all-pass run runs the four gate steps in order, reports the suite counts and exits 0", async () => {
+		const { ran, run } = fakeRun();
+		const { result, written } = await quietly(() => main([], { run, env: { SUBSTRATE_TEST_PG_URL: "postgres://scratch" } }));
+
+		expect(result).toBe(0);
+		expect(ran).toEqual(["install", "types", "tests", "locks"]);
+		expect(written).toContain("ok   Test suite (0.0s): 12 pass, 3 skip, 0 fail");
+		expect(written).toContain("[verify] pass: install, types, tests, locks");
+		expect(written).not.toContain("FAIL");
+		expect(written).not.toContain("note");
+	});
+
+	test("the first failing step stops the run, shows its output tail and exits 1", async () => {
+		const { ran, run } = fakeRun({ types: { ok: false, code: 2, output: "src/a.ts(1,1): error TS2322\n" } });
+		const { result, written } = await quietly(() => main([], { run }));
+
+		expect(result).toBe(1);
+		expect(ran).toEqual(["install", "types"]);
+		expect(written).toContain("FAIL Typecheck");
+		expect(written).toContain("exit 2");
+		expect(written).toContain("error TS2322");
+		expect(written).toContain("[verify] FAIL: Typecheck");
+		expect(written).not.toContain("[verify] pass:");
+	});
+
+	test("--keep-going runs every selected step after a failure and still exits 1", async () => {
+		const { ran, run } = fakeRun({ types: { ok: false, code: 2 }, locks: { ok: false, code: 1 } });
+		const { result, written } = await quietly(() => main(["--keep-going"], { run }));
+
+		expect(result).toBe(1);
+		expect(ran).toEqual(["install", "types", "tests", "locks"]);
+		expect(written).toContain("[verify] FAIL: Typecheck, Repo locks");
+	});
+
+	test("a killed step is reported as killed, not as an exit code", async () => {
+		const { run } = fakeRun({ install: { ok: false, code: null, output: "" } });
+		const { result, written } = await quietly(() => main([], { run }));
+
+		expect(result).toBe(1);
+		expect(written).toContain("killed (timeout or could not start)");
+	});
+
+	test("--audit adds the audit step and --skip leaves one out", async () => {
+		const audited = fakeRun();
+		await quietly(() => main(["--audit"], { run: audited.run }));
+		expect(audited.ran).toEqual(["install", "types", "tests", "locks", "audit"]);
+
+		const skipped = fakeRun();
+		await quietly(() => main(["--skip", "install,tests"], { run: skipped.run }));
+		expect(skipped.ran).toEqual(["types", "locks"]);
+	});
+
+	test("skipped live tests are noted unless a scratch database is configured (blank counts as unset)", async () => {
+		for (const [env, noted] of [
+			[{}, true],
+			[{ SUBSTRATE_TEST_PG_URL: "   " }, true],
+			[{ SUBSTRATE_TEST_PG_URL: "postgres://scratch" }, false],
+		] as const) {
+			const { run } = fakeRun();
+			const { written } = await quietly(() => main(["--only", "tests"], { run, env }));
+			expect(written.includes("3 tests skipped because SUBSTRATE_TEST_PG_URL is unset")).toBe(noted);
+		}
 	});
 });
 

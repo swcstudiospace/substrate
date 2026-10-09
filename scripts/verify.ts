@@ -136,7 +136,8 @@ export function parseTestCounts(output: string): TestCounts | null {
 /** A reminder when tests were skipped because no scratch database was configured; null otherwise. */
 export function skipNote(counts: TestCounts | null, env: Readonly<Record<string, string | undefined>>): string | null {
 	if (counts === null || counts.skip === 0) return null;
-	if (env.SUBSTRATE_TEST_PG_URL) return null;
+	// The live suites trim the variable before they decide to skip, so a blank value counts as unset.
+	if (env.SUBSTRATE_TEST_PG_URL?.trim()) return null;
 	return `${counts.skip} tests skipped because SUBSTRATE_TEST_PG_URL is unset; CI runs them against a scratch Postgres (see docs/ci.md).`;
 }
 
@@ -179,7 +180,13 @@ export async function runStep(
 
 const seconds = (ms: number): string => `${(ms / 1000).toFixed(1)}s`;
 
-export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<number> {
+/** Seams for the tests: how a step is run and which environment the skip note reads. */
+export interface VerifyDeps {
+	run?: (step: GateStep, cwd: string) => Promise<StepResult>;
+	env?: Readonly<Record<string, string | undefined>>;
+}
+
+export async function main(argv: readonly string[] = process.argv.slice(2), deps: VerifyDeps = {}): Promise<number> {
 	const parsed = parseArgs(argv);
 	if ("error" in parsed) {
 		process.stderr.write(`[verify] ${parsed.error}\n${USAGE}`);
@@ -202,12 +209,12 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
 	}
 	const failed: string[] = [];
 	for (const step of steps) {
-		const result = await runStep(step, ROOT);
+		const result = await (deps.run ?? runStep)(step, ROOT);
 		const counts = step.id === "tests" ? parseTestCounts(result.output) : null;
 		const detail = counts ? `: ${counts.pass} pass, ${counts.skip} skip, ${counts.fail} fail` : "";
 		if (result.ok) {
 			process.stdout.write(`[verify] ok   ${step.label} (${seconds(result.ms)})${detail}\n`);
-			const note = skipNote(counts, process.env);
+			const note = skipNote(counts, deps.env ?? process.env);
 			if (note) process.stdout.write(`[verify] note ${note}\n`);
 			continue;
 		}
