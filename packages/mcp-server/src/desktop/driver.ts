@@ -177,6 +177,17 @@ function readDesktopIdentity(port: number): Promise<string | null> {
 type DesktopPortClaim = { release: () => void } | { other: string | null } | { unavailable: true };
 
 /**
+ * Answer one identity probe with this run's id. Best-effort: any local
+ * process can connect and reset mid-write, and accepted-socket errors bypass
+ * the server error handler — without the sink an ECONNRESET would crash the
+ * MCP process. Exported as the unit under test.
+ */
+export function serveIdentity(socket: Socket, runId: string): void {
+	socket.on("error", () => {});
+	socket.end(`${process.pid} ${runId}`, "utf8");
+}
+
+/**
  * Take the host mutex for `runId`. The holder serves its run id to refused
  * callers over the same port. Anything that keeps the port unbindable refuses
  * the run fail-closed.
@@ -187,7 +198,7 @@ function claimDesktopPort(port: number, runId: string): Promise<DesktopPortClaim
 	const server = createServer((socket) => {
 		sockets.add(socket);
 		socket.once("close", () => sockets.delete(socket));
-		socket.end(`${process.pid} ${runId}`, "utf8");
+		serveIdentity(socket, runId);
 	});
 	server.on("error", (error) => {
 		// A bound server only sees accept-time failures; the bind outcome

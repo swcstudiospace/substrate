@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
-import { createServer, type AddressInfo } from "node:net";
+import { createConnection, createServer, type AddressInfo, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { EventInput } from "../types.ts";
@@ -15,7 +15,9 @@ import {
 	createDesktopDriver,
 	DesktopBusy,
 	keyFields,
+	serveIdentity,
 	TYPE_MS_PER_CHAR,
+
 } from "./driver.ts";
 
 const dirs: string[] = [];
@@ -510,6 +512,37 @@ describe("createDesktopDriver", () => {
 			const probe = createServer();
 			await new Promise<void>((resolve) => probe.listen(port, "127.0.0.1", () => resolve()));
 			await new Promise<void>((resolve) => probe.close(() => resolve()));
+		});
+
+		test("answering a reset probe fails silently, never crashing", async () => {
+			const port = await freePort();
+			const server = createServer();
+			await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", () => resolve()));
+			try {
+				const accepted = new Promise<Socket>((resolve) => server.once("connection", resolve));
+				const probe = createConnection(port, "127.0.0.1");
+				probe.on("error", () => {});
+				const acceptedSocket = await accepted;
+				// Abortive reset: the RST lands before answering, so the write
+				// must fail — and fail silently instead of crashing.
+				probe.resetAndDestroy();
+				await new Promise<void>((resolve) => probe.once("close", () => resolve()));
+				for (let n = 0; n < 20; n++) await new Promise((resolve) => setImmediate(resolve));
+				let crashed: unknown = null;
+				const watcher = (cause: unknown): void => {
+					crashed = cause;
+				};
+				process.once("uncaughtException", watcher);
+				try {
+					serveIdentity(acceptedSocket, "dr-20260901T000000Z-abcdef");
+					for (let n = 0; n < 20; n++) await new Promise((resolve) => setImmediate(resolve));
+				} finally {
+					process.removeListener("uncaughtException", watcher);
+				}
+				expect(crashed).toBeNull();
+			} finally {
+				await new Promise<void>((resolve) => server.close(() => resolve()));
+			}
 		});
 	});
 
