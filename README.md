@@ -68,7 +68,7 @@ packages/mcp-server/     substrate-mcp on 127.0.0.1:7410      (TS)
 packages/cli/            substrate brief|emit|run|verify|evidence|lessons (TS)
 packages/host/           rivet-agentos host, openTask         (TS)
 packages/dispatcher/     Linear label → session               (Py)
-packages/collectors/     Orca tee, grok/muse tails, git hook  (TS)
+packages/collectors/     grok, herdr and muse collectors, cursor stop hook, git hook  (TS)
 packages/projector/      substrate.yaml → per-agent config    (TS)
 packages/ledger/         pure Merkle root, memo and Solana    (TS)
 packages/observability/  OTLP metrics and traces, the SLOs    (TS)
@@ -77,6 +77,9 @@ packages/evidence/       per-graph evidence bundle, JSON/HTML (TS)
 packages/connector-ext/  grok-hermes-connector v0.4 tools     (Py)
 packages/miner/          Hermes cron, skill → PR watcher      (Py)
 ```
+
+What each collector emits, which variables it reads, and where it keeps state:
+Details in [`docs/collectors.md`](docs/collectors.md).
 
 ## Running
 

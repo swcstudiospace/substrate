@@ -107,13 +107,16 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 		kind: "session.end",
 		surface: "herdr-agent",
 		runtime: "herdr",
-		carriesRepo: false,
+		// Phase 19 (D19-11): the exit is found by events_query(repo=R). The
+		// brief excludes session.start and session.end, so this does not crowd it.
+		carriesRepo: true,
 		periodic: false,
 		sample: () => ({
 			surface: "claude-code",
 			kind: "session.end",
 			summary: "herdr pane-7 exited",
 			session_id: "sess-p17-herdr-exited",
+			repo: "swcstudiospace/agent-substrate",
 			payload: { runtime: "herdr", herdr_type: "pane.exited", pane_id: "pane-7" },
 		}),
 	},
