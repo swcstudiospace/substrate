@@ -88,9 +88,12 @@ which the execution ticket explicitly forbids collecting (recorded above, not
 fixed elsewhere). No `skills-env.ts` split file was needed; seams live in the
 two modules. No auth gates, no stubs, no new event sources.
 
-## Verification owed (not run here)
+## Verification
 
-`bun test packages/projector/src/skills.test.ts packages/projector/src/skills-sync.test.ts`,
-`bunx tsc --noEmit`, `bun run check:phase-close`; confirm no pre-existing
-failure is newly hidden. Rollback: delete the four new files; nothing else
-references them.
+Recorded after `76d0780` on this branch, with `bun install --frozen-lockfile`:
+
+- `bun test packages/projector/src/skills.test.ts packages/projector/src/skills-sync.test.ts` — 58 pass, 0 fail
+- `bunx tsc --noEmit` — clean
+- `bun run check:phase-close` — pass (112 pass / 0 fail across the four lock files)
+
+One port bug was fixed before that run: a projector warning the substrate refused was still recorded, so the next run did not retry it. `apply` now keeps September's `if (!accepted) continue`. Full-repo `bun test` and pytest were not part of this plan's verify command.
