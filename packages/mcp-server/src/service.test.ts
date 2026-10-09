@@ -3708,15 +3708,17 @@ describe("verifyGraph hour report", () => {
 	test("an ingest record landing between the reads clears the uncovered id", async () => {
 		// Mirror race: the event row is stored before its ingest record, so
 		// the first ingest read misses it and the row reads uncovered. The
-		// bounded re-fetch finds the landed record, moves the id into its
-		// hour bucket, and the healthy graph verifies.
+		// bounded re-fetch finds the landed record. A normal append lands in
+		// the still-open hour, which stays pending: the anchored hour's
+		// leaves do not include it, and digesting that hour would mismatch.
 		const world = sessionRows();
 		const extra = normalizeEvent(
 			{ surface: "omp", kind: "note", summary: "settling", session_id: "sess-new", graph_id: "ut-1", actor: "agent" },
 			null,
 		);
 		const extraRow = { ...extra, ts: Date.parse(extra.ts), payload: JSON.stringify(extra.payload) };
-		const extraRecord = { event_id: extra.id, event_ts: Date.parse(extra.ts), ingested_at: H + 2000 };
+		const openAt = H + 5 * HOUR + 1000;
+		const extraRecord = { event_id: extra.id, event_ts: Date.parse(extra.ts), ingested_at: openAt };
 		let ingests = 0;
 		const substrate = substrateWith({
 			readEvents: async () => [...world.rows, extraRow],
@@ -3725,11 +3727,19 @@ describe("verifyGraph hour report", () => {
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
-		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(world.memo) as never });
+		const verdict = await substrate.verifyGraph("ut-1", { now: openAt + 60_000, rpc: rpcReturning(world.memo) as never });
 		expect(ingests).toBe(2);
 		expect(verdict.uncovered).toEqual({ count: 0, ids: [] });
 		expect(verdict.ok).toBe(true);
 		expect(verdict.reason).toBeUndefined();
+		expect(verdict.hours).toHaveLength(2);
+		expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "anchored" });
+		expect(verdict.hours[1]).toMatchObject({
+			period_start: new Date(H + 5 * HOUR).toISOString(),
+			status: "pending",
+			event_count: 1,
+			root: null,
+		});
 	});
 
 	test("an event with no record at any read still fails naming the id", async () => {
