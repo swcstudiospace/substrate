@@ -220,3 +220,41 @@ describe("SUBSTRATE_SKILLS_*", () => {
 		expect(configWarnings(config)).toEqual([]);
 	});
 });
+
+describe("mirror and DoD-gate config (D23-25)", () => {
+	test("hermesLinearUrl defaults to the connector loopback and trims a trailing slash", () => {
+		expect(loadConfig({}).hermesLinearUrl).toBe("http://127.0.0.1:8792");
+		expect(loadConfig({ HERMES_LINEAR_URL: "http://10.0.0.9:8792/" }).hermesLinearUrl).toBe(
+			"http://10.0.0.9:8792",
+		);
+	});
+
+	test("dodGateTimeoutMs defaults to 35000 and rejects non-positive input", () => {
+		expect(loadConfig({}).dodGateTimeoutMs).toBe(35000);
+		expect(loadConfig({ SUBSTRATE_DOD_GATE_TIMEOUT_MS: "10000" }).dodGateTimeoutMs).toBe(10000);
+		expect(loadConfig({ SUBSTRATE_DOD_GATE_TIMEOUT_MS: "0" }).dodGateTimeoutMs).toBe(35000);
+		expect(loadConfig({ SUBSTRATE_DOD_GATE_TIMEOUT_MS: "soon" }).dodGateTimeoutMs).toBe(35000);
+	});
+
+	test("LINEAR_API_URL and NOTION_API_URL default to the production endpoints", () => {
+		const config = loadConfig({});
+		expect(config.linearApiUrl).toBe("https://api.linear.app/graphql");
+		expect(config.notionApiUrl).toBe("https://api.notion.com/v1");
+	});
+
+	test("endpoint overrides parse and trim trailing slashes", () => {
+		const config = loadConfig({
+			LINEAR_API_URL: "http://127.0.0.1:8801/graphql/",
+			NOTION_API_URL: "http://127.0.0.1:8802/",
+		});
+		expect(config.linearApiUrl).toBe("http://127.0.0.1:8801/graphql");
+		expect(config.notionApiUrl).toBe("http://127.0.0.1:8802");
+	});
+
+	test("existing tracker-key parsing is unchanged", () => {
+		const config = loadConfig({ LINEAR_API_KEY: " lin-x ", NOTION_TASK_GRAPH_DS: "ds-1" });
+		expect(config.linearApiKey).toBe("lin-x");
+		expect(config.notionTaskGraphDataSource).toBe("ds-1");
+		expect(config.notionApiKey).toBeUndefined();
+	});
+});

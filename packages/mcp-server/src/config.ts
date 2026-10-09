@@ -5,8 +5,21 @@
  * EnvironmentFile. Nothing here ever reads a secret from the repo.
  */
 import { normalizeTtlSeconds } from "./lease.ts";
+import { LINEAR_API_URL } from "./linear.ts";
 import { parseGrants, type MemoryGrant } from "./memory-policy.ts";
+import { NOTION_API_URL } from "./notion.ts";
 import { SURFACES, SWARM_SURFACES, isSwarmSurface, type Surface } from "./types.ts";
+
+/** Default hermes-linear-connector base URL (D23-25). */
+export const DEFAULT_HERMES_LINEAR_URL = "http://127.0.0.1:8792";
+/** Default DoD gate wait: above the connector's own 30 s Linear call (D23-15.4). */
+export const DEFAULT_DOD_GATE_TIMEOUT_MS = 35000;
+
+/** Positive finite milliseconds, floored; anything else is the default. */
+function parseDodGateTimeoutMs(raw: string | undefined): number {
+	const ms = Number(raw?.trim());
+	return Number.isFinite(ms) && ms > 0 ? Math.floor(ms) : DEFAULT_DOD_GATE_TIMEOUT_MS;
+}
 
 export interface GreptimeConfig {
 	url: string;
@@ -30,6 +43,24 @@ export interface SubstrateConfig {
 	linearApiKey: string | undefined;
 	notionApiKey: string | undefined;
 	notionTaskGraphDataSource: string;
+	/**
+	 * Base URL of the hermes-linear-connector DoD gate. Trailing slashes are
+	 * trimmed at load. Unset in production substrate.env today, so the default
+	 * (the connector's loopback address) applies.
+	 */
+	hermesLinearUrl: string;
+	/** How long the DoD gate waits for the connector before settling via Linear state. */
+	dodGateTimeoutMs: number;
+	/**
+	 * Linear GraphQL endpoint. Defaults to the real API; the harness rehearsal
+	 * points it at a loopback fake. Production never sets this.
+	 */
+	linearApiUrl: string;
+	/**
+	 * Notion API base. Defaults to the real API; the harness rehearsal points
+	 * it at a loopback fake. Production never sets this.
+	 */
+	notionApiUrl: string;
 	/** bearer token → surface. Lets every event be attributed to a caller. */
 	tokens: Map<string, Surface>;
 	/**
@@ -294,6 +325,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		linearApiKey: env.LINEAR_API_KEY?.trim() || undefined,
 		notionApiKey: env.NOTION_API_KEY?.trim() || undefined,
 		notionTaskGraphDataSource: env.NOTION_TASK_GRAPH_DS?.trim() || "be3418f0-d2d8-411b-8677-fa8a95ee63be",
+		hermesLinearUrl: (env.HERMES_LINEAR_URL?.trim() || DEFAULT_HERMES_LINEAR_URL).replace(/\/+$/, ""),
+		dodGateTimeoutMs: parseDodGateTimeoutMs(env.SUBSTRATE_DOD_GATE_TIMEOUT_MS),
+		linearApiUrl: (env.LINEAR_API_URL?.trim() || LINEAR_API_URL).replace(/\/+$/, ""),
+		notionApiUrl: (env.NOTION_API_URL?.trim() || NOTION_API_URL).replace(/\/+$/, ""),
 		tokens,
 		allowAnonymous: allowAnonymousFrom(env, tokens.size),
 		operatorTokens: new Set(
