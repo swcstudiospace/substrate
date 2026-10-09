@@ -7,14 +7,31 @@
  * same applies to the observability plane — a missing collector or a non-durable
  * audit chain is reported at boot and again on `/healthz`, and never a reason to
  * refuse to start.
+ *
+ * The one exception is a self-contradictory identity config: a token value
+ * listed under two surfaces, or a `SUBSTRATE_TOKEN_*` variable naming no
+ * surface, refuses boot with one names-only line on stderr and exit 78
+ * (EX_CONFIG) rather than silently re-attributing a token.
  */
-import { configWarnings, desktopConfigWarnings, loadConfig, swarmTokenWarnings } from "./config.ts";
+import { ConfigError, configWarnings, desktopConfigWarnings, loadConfig, swarmTokenWarnings } from "./config.ts";
 import { bufferRunner, createDesktopDriver } from "./desktop/driver.ts";
 import { createObservability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
 
-const config = loadConfig();
+let config;
+try {
+	config = loadConfig();
+} catch (error) {
+	// A contradictory identity config refuses boot: exit 78 (EX_CONFIG) so the
+	// unit stops instead of crash-looping. The message names variables only —
+	// a refused credential in a log is still a credential in a log.
+	if (error instanceof ConfigError) {
+		process.stderr.write(`[substrate] refused — ${error.message}\n`);
+		process.exit(78);
+	}
+	throw error;
+}
 const observability = createObservability(config);
 const substrate = new Substrate(
 	config,

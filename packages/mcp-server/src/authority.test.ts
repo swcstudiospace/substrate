@@ -17,7 +17,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
-import { configWarnings, isOperator, loadConfig, surfaceForToken, swarmTokenWarnings, tokenEnvName } from "./config.ts";
+import { ConfigError, configWarnings, isOperator, loadConfig, surfaceForToken, swarmTokenWarnings, tokenConfig, tokenEnvName } from "./config.ts";
 import { attributedSurface, claimAttribution, swarmSessionRefusal } from "./mcp.ts";
 import { createObservability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
@@ -247,7 +247,7 @@ describe("the swarm surfaces", () => {
 
 	test(".env.example lists a blank SUBSTRATE_TOKEN_* line for every one", () => {
 		const example = readFileSync(join(import.meta.dir, "..", "..", "..", ".env.example"), "utf8").split("\n");
-		for (const surface of [...SWARM_SURFACES, "substrate" as const]) {
+		for (const surface of SURFACES) {
 			expect(example).toContain(`${tokenEnvName(surface)}=`);
 		}
 	});
@@ -439,5 +439,70 @@ describe("swarmSessionRefusal", () => {
 		for (const session of ["sess-1", "A05", "A05@r1", `A05:${GRAPH}`, ""]) {
 			expect(swarmSessionRefusal("swarm-a05-be", session, GRAPH), session).toContain(`A05@<replica>:${GRAPH}`);
 		}
+	});
+});
+
+describe("a surface token variable holds a list", () => {
+	test("each entry resolves to the variable's surface", () => {
+		const config = loadConfig({ SUBSTRATE_TOKEN_HERMES: "tok-h1,tok-h2" });
+		expect(surfaceForToken(config, "Bearer tok-h1")).toBe("hermes");
+		expect(surfaceForToken(config, "Bearer tok-h2")).toBe("hermes");
+		expect(surfaceForToken(config, "Bearer tok-h1,tok-h2")).toBeNull();
+	});
+
+	test("entries split on commas, spaces and newlines, trimmed with empties dropped", () => {
+		const tokens = tokenConfig({ SUBSTRATE_TOKEN_CURSOR: "tok-c1, tok-c2\ntok-c3  ,, \ntok-c4" });
+		expect([...tokens.keys()].sort()).toEqual(["tok-c1", "tok-c2", "tok-c3", "tok-c4"]);
+		for (const token of tokens.keys()) expect(tokens.get(token)).toBe("cursor");
+	});
+
+	test("a repeat under one variable is silently one entry", () => {
+		const tokens = tokenConfig({ SUBSTRATE_TOKEN_CURSOR: "tok-c1, tok-c1" });
+		expect(tokens.size).toBe(1);
+		expect(tokens.get("tok-c1")).toBe("cursor");
+	});
+
+	test("one value under two surfaces throws naming both variables, never the value", () => {
+		const env = { SUBSTRATE_TOKEN_HERMES: "tok-h1, tok-both", SUBSTRATE_TOKEN_CURSOR: "tok-c1, tok-both" };
+		let thrown: unknown;
+		try {
+			tokenConfig(env);
+		} catch (error) {
+			thrown = error;
+		}
+		expect(thrown).toBeInstanceOf(ConfigError);
+		const message = (thrown as ConfigError).message;
+		expect(message).toContain("SUBSTRATE_TOKEN_HERMES");
+		expect(message).toContain("SUBSTRATE_TOKEN_CURSOR");
+		expect(message).not.toContain("tok-both");
+		expect(() => loadConfig(env)).toThrow(ConfigError);
+	});
+
+	test("a variable naming no surface throws naming it", () => {
+		let thrown: unknown;
+		try {
+			tokenConfig({ SUBSTRATE_TOKEN_DESK_GATEWAY: "tok-gw" });
+		} catch (error) {
+			thrown = error;
+		}
+		expect(thrown).toBeInstanceOf(ConfigError);
+		expect((thrown as ConfigError).message).toContain("SUBSTRATE_TOKEN_DESK_GATEWAY");
+		expect((thrown as ConfigError).message).not.toContain("tok-gw");
+	});
+
+	test("a single value is unchanged", () => {
+		const config = loadConfig({ SUBSTRATE_TOKEN_HERMES: "tok-hermes" });
+		expect(surfaceForToken(config, "Bearer tok-hermes")).toBe("hermes");
+		expect(config.tokens.size).toBe(1);
+	});
+
+	test("a list entry also named as operator is an operator", () => {
+		const config = loadConfig({
+			SUBSTRATE_TOKEN_CURSOR: "tok-c1, tok-op",
+			SUBSTRATE_OPERATOR_TOKENS: "tok-op",
+		});
+		expect(surfaceForToken(config, "Bearer tok-op")).toBe("cursor");
+		expect(isOperator(config, "Bearer tok-op")).toBe(true);
+		expect(isOperator(config, "Bearer tok-c1")).toBe(false);
 	});
 });

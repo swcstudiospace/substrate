@@ -87,6 +87,8 @@ with 401. The `/brief` and `events.emit` paths fail open, so such an agent looks
 untraced. That is why the swarm installer refuses to finish without every agent's token, and why PROOF-03 asserts a
 granted claim and a non-empty brief rather than a clean exit.
 
+Swarm variables stay single-valued: one agent, one token, one entry. Only the non-swarm surfaces that host several clients at different trust — `claude-code` for the operator versus the hooks, `grok-bot` for the gateway versus the connector — hold lists.
+
 The swarm installer reads `SUBSTRATE_TOKEN_<SURFACE>` from its own environment at install time (the operator exports the
 values the server holds) and never reads `/etc/substrate/substrate.env`. An agent never reads it either.
 

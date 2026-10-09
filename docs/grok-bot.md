@@ -8,6 +8,8 @@ This note cites [`swcstudiospace/programming-desk`](https://github.com/swcstudio
 
 `grok-bot` is a substrate surface. `SURFACES` in `packages/mcp-server/src/types.ts` lists it beside `cursor` and `grok-build`. `.env.example` names the matching token variable `SUBSTRATE_TOKEN_GROK_BOT`. The value stays in `/etc/substrate/substrate.env` on the VPS. The gateway's substrate client sends `surface: grok-bot` on the brief and on events (`Substrate.brief` and `Substrate.emit` in programming-desk `services/desk-gateway/src/desk_gateway/upstreams.py`).
 
+The desk gateway's existing bearer value is reused as one entry of that list, and grok-hermes-connector holds another: both call over loopback as `grok-bot`, and there is no gateway surface.
+
 ## Loopback only
 
 `loadConfig` in `packages/mcp-server/src/config.ts` defaults the listen address to `127.0.0.1` and the port to `7410` (`SUBSTRATE_HOST`, `SUBSTRATE_PORT`). The README states the same bound: substrate-mcp on `127.0.0.1:7410`, MCP at `/mcp`, with `POST /brief`, `POST /events`, `POST /events/query`, `POST /memory`, and `POST /verify`. That address is loopback. A session that is not on the VPS cannot open it.
