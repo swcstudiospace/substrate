@@ -1,10 +1,10 @@
 ---
 phase: 27-ledger-primitives-and-ingest-order
-verified: 2026-10-09T09:58:16Z
+verified: 2026-10-09T10:37:48Z
 status: passed
 score: 18/18 must-haves verified
 covered_files: [".planning/phases/27-ledger-primitives-and-ingest-order/27-01-PLAN.md", ".planning/phases/27-ledger-primitives-and-ingest-order/27-01-SUMMARY.md", ".planning/phases/27-ledger-primitives-and-ingest-order/27-02-PLAN.md", ".planning/phases/27-ledger-primitives-and-ingest-order/27-02-SUMMARY.md", ".planning/phases/27-ledger-primitives-and-ingest-order/27-03-PLAN.md", ".planning/phases/27-ledger-primitives-and-ingest-order/27-03-SUMMARY.md", ".planning/phases/27-ledger-primitives-and-ingest-order/27-04-PLAN.md", ".planning/phases/27-ledger-primitives-and-ingest-order/27-04-SUMMARY.md", "README.md", "bun.lock", "docs/greptime-ledger.md", "packages/ledger/src/index.ts", "packages/ledger/src/memo.ts", "packages/ledger/src/merkle.ts", "packages/ledger/src/period.ts", "packages/ledger/src/rpc.ts", "packages/ledger/src/solana.ts", "packages/mcp-server/package.json", "packages/mcp-server/src/greptime.test.ts", "packages/mcp-server/src/greptime.ts", "packages/mcp-server/src/service.test.ts", "packages/mcp-server/src/service.ts", "scripts/greptime-smoke.ts"]
-covered_digest: "v3:sha256:20c450f3c5a882259b874db494581663e0b9b5c40c516000053dda563a6ec2ab"
+covered_digest: "v3:sha256:fdd3330f7557877c965f6970da4da8de3ea52b452c75a751e114b77aeb832f4b"
 behavior_unverified: 1
 overrides_applied: 0
 re_verification:
@@ -88,3 +88,8 @@ No p95 regression above the 15% bar. Worst case worth knowing: if the ledger sta
 1. **Deploy** the merged build; `migrate()` creates `event_ingest` on first boot. Check the boot log for migrate warnings.
 2. Phase 28's first devnet transaction checks the memo program-id claim carried over from September (unverified here).
 3. Phase 28 decides the first anchored hour (no backfill) and adopts `anchors` rows with a read-before-write.
+
+## Re-verification after restacking (2026-10-09)
+
+Phase 18's review round 2 changed the redactor this phase builds on, and `main` gained the verification-gate PR, so the branch was restacked onto Phase 18's new tip. Nothing in this phase changed. Gate on the restacked head: bun run verify: install, types, tests, locks all ok; 1785 pass / 57 skip / 0 fail. The report's fingerprint was refreshed (the base now carries the verification-gate PR and Phase 18's review fixes).
+
