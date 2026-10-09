@@ -338,8 +338,9 @@ async function main(): Promise<number> {
 		);
 		const kept = await tick(false);
 		check(kept.result !== null, "the quiet tick runs", kept.result === null ? kept.raw : undefined);
+		const freshKept = existsSync(freshRecord) && existsSync(freshQueue);
 		check(
-			existsSync(freshRecord) && existsSync(freshQueue),
+			freshKept,
 			"records younger than the quiet window are kept",
 			kept.result === null ? undefined : `waiting=${kept.result.tick.waiting} queue_kept=${kept.result.omp.kept}`,
 		);
@@ -352,40 +353,48 @@ async function main(): Promise<number> {
 		rmSync(freshQueue, { force: true });
 
 		// ── (c) the owner's merge flows through the sync into links ─────────
-		const branchSha = gitOrigin("rev-parse", hermesBranch).trim();
-		gitOrigin("update-ref", "refs/heads/main", branchSha);
-		check(gitOrigin("rev-parse", "main").trim() === branchSha, "the fixture main is fast-forwarded to the hermes branch");
 		const libDir = join(scratch, "lib");
 		execFileSync("git", ["clone", "-q", origin, libDir], { encoding: "utf8", env: gitEnv });
 		check(git(libDir, "rev-parse", "--abbrev-ref", "HEAD").trim() === "main", "the scratch library is cloned on main");
+		// The projector only links into roots that exist (only one root creates its own), so the
+		// scratch home starts with the agent skill directories present, as on a real host.
 		const homeDir = join(scratch, "home");
 		const syncStateDir = join(scratch, "sync-state");
-		mkdirSync(homeDir, { recursive: true });
-		mkdirSync(syncStateDir, { recursive: true });
-		const syncLines: string[] = [];
-		const warnings: unknown[] = [];
-		const syncEnv = { SUBSTRATE_SKILLS_LIBRARY: libDir, SUBSTRATE_SKILLS_STATE: syncStateDir };
-		const sync = await runSync({
-			runner: execFileRunner,
-			libraryDir: libDir,
-			warnStateFile: join(syncStateDir, "skills-sync-warned.json"),
-			log: (line: string) => syncLines.push(line),
-			emitWarning: async (event: unknown) => {
-				warnings.push(event);
-				return true;
-			},
-			project: () =>
-				project({
-					...defaultOptions({ ...syncEnv, SUBSTRATE_SKILLS_HOME: homeDir, SUBSTRATE_SKILLS_BACKUP: join(scratch, "backups") }),
-					stdout: (line: string) => syncLines.push(line),
-					emitWarning: async (event: unknown) => {
-						warnings.push(event);
-						return true;
-					},
-				}),
-		});
-		check(sync.code === 0 && sync.decision === "ff", "the sync fast-forwards and projects", `${sync.decision} ${syncLines.at(-1) ?? ""}`);
 		const expectedRoots = [join(homeDir, ".claude/skills"), join(homeDir, ".grok/skills"), join(homeDir, ".agents/skills"), join(homeDir, ".config/muse/skills")];
+		for (const root of expectedRoots.slice(0, 3)) mkdirSync(root, { recursive: true });
+		mkdirSync(syncStateDir, { recursive: true });
+		const syncEnv = { SUBSTRATE_SKILLS_LIBRARY: libDir, SUBSTRATE_SKILLS_STATE: syncStateDir };
+		const runTick = async (): Promise<{ decision: string; code: number; lines: string[]; warnings: unknown[] }> => {
+			const lines: string[] = [];
+			const warnings: unknown[] = [];
+			const sync = await runSync({
+				runner: execFileRunner,
+				libraryDir: libDir,
+				warnStateFile: join(syncStateDir, "skills-sync-warned.json"),
+				log: (line: string) => lines.push(line),
+				emitWarning: async (event: unknown) => {
+					warnings.push(event);
+					return true;
+				},
+				project: () =>
+					project({
+						...defaultOptions({ ...syncEnv, SUBSTRATE_SKILLS_HOME: homeDir, SUBSTRATE_SKILLS_BACKUP: join(scratch, "backups") }),
+						stdout: (line: string) => lines.push(line),
+						emitWarning: async (event: unknown) => {
+							warnings.push(event);
+							return true;
+						},
+					}),
+			});
+			return { decision: sync.decision, code: sync.code, lines, warnings };
+		};
+		const settled = await runTick();
+		check(settled.code === 0 && settled.decision === "current", "the scratch library starts current", settled.decision);
+		const branchSha = gitOrigin("rev-parse", hermesBranch).trim();
+		gitOrigin("update-ref", "refs/heads/main", branchSha);
+		check(gitOrigin("rev-parse", "main").trim() === branchSha, "the fixture main is fast-forwarded to the hermes branch");
+		const merged = await runTick();
+		check(merged.code === 0 && merged.decision === "ff", "the sync fast-forwards and projects", `${merged.decision} ${merged.lines.at(-1) ?? ""}`);
 		const links = expectedRoots.map((root) => join(root, hermesName));
 		check(
 			links.every((link) => existsSync(join(link, "SKILL.md"))),
@@ -394,7 +403,7 @@ async function main(): Promise<number> {
 		);
 		const linkedMd = readFileSync(join(links[0] as string, "SKILL.md"), "utf8");
 		check(linkedMd === skillMd(hermesName), "the projected link reads back the merged skill");
-		check(warnings.length === 0, "a successful sync is silent: no warning leaves the tick");
+		check(merged.warnings.length === 0, "a successful sync is silent: no warning leaves the tick");
 
 		// ── events read-back ────────────────────────────────────────────────
 		if (!operatorToken) {
@@ -414,7 +423,7 @@ async function main(): Promise<number> {
 			check(syncWarnings.length === 0, "the trail holds no skills.sync refusal: the scratch sync never warned");
 
 			process.stdout.write(
-				`\n evidence  hermes=${hermesBranch} omp=${ompBranch} grok=${grokBranch}\n evidence  fresh-kept=${existsSync(freshRecord) === false && existsSync(freshQueue) === false ? "removed-after-verdict" : "kept-then-cleaned"}\n evidence  links=${links.map((link) => link.slice(homeDir.length + 1)).join(",")}\n evidence  proposal-events=${proposals.length} opened=${opened.length} sync-warnings=${syncWarnings.length}\n`,
+				`\n evidence  hermes=${hermesBranch} omp=${ompBranch} grok=${grokBranch}\n evidence  fresh-kept=${freshKept ? "yes" : "NO"}\n evidence  links=${links.map((link) => link.slice(homeDir.length + 1)).join(",")}\n evidence  proposal-events=${proposals.length} opened=${opened.length} sync-warnings=${syncWarnings.length}\n`,
 			);
 		}
 	} finally {
