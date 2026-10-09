@@ -2637,18 +2637,21 @@ export class Substrate {
 	// its whole fresh session re-chains — a restored row with edited
 	// content keeps its old hash and fails there instead, and a burst whose
 	// earlier link landed in the re-read but not the ingest read still
-	// links. The re-read shares the whole-verify budget: past the
-	// allowance the gap stays missing, fail-closed, and the report still
-	// reaches the CLI.
+	// links. Retained ids are finally compared against the checked re-read,
+	// not the first: an id present at first but deleted before the re-read
+	// was never in the gap, and only the fresh comparison catches it. The
+	// re-read shares the whole-verify budget: past the allowance the gap
+	// stays missing, fail-closed, and the report still reaches the CLI.
 	const rowIds = new Set(rows.map((row) => String(row.id)));
 	const gap = ingest.map((record) => record.event_id).filter((id) => !rowIds.has(id));
 	// A fifth of the budget, capped: short budgets still run their quick
 	// checks instead of losing every hour to a fixed margin.
 	const margin = Math.min(VERIFY_RESPONSE_MARGIN_MS, Math.ceil(budgetMs / 5));
 	const cleared = new Set<string>();
+	let fresh: Array<Record<string, unknown>> | null = null;
 	if (gap.length > 0 && budgetMs - (Date.now() - startedAt) > margin) {
 		const allowance = budgetMs - (Date.now() - startedAt) - margin;
-		const fresh = await new Promise<Array<Record<string, unknown>> | null>((resolve) => {
+		fresh = await new Promise<Array<Record<string, unknown>> | null>((resolve) => {
 			const timer = setTimeout(() => resolve(null), Math.max(0, allowance));
 			timer.unref?.();
 			greptime.readEvents("graph_id", storedGraphId).then(
@@ -2688,7 +2691,13 @@ export class Substrate {
 			}
 		}
 	}
-	const missing = gap.filter((id) => !cleared.has(id)).sort();
+	// An id retained in ingest but gone from the checked re-read was
+	// deleted or moved between the reads: never in the gap, so only the
+	// fresh comparison catches it. Past the re-read allowance there is no
+	// fresh read, and the first read stands in, fail-closed.
+	const referenceIds = fresh ? new Set(fresh.map((row) => String(row.id))) : rowIds;
+	const absent = ingest.map((record) => record.event_id).filter((id) => !referenceIds.has(id));
+	const missing = [...new Set([...absent, ...gap])].filter((id) => !cleared.has(id)).sort();
 
 	const pubkey = this.config.solana.pubkey;
 	let rpc: Rpc | null = injectedRpc ?? null;

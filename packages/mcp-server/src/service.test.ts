@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { formatMemo, hourEnd, merkleRootHex, parseMemo } from "@substrate/ledger";
 import { isReviewToken, loadConfig, type GreptimeConfig } from "./config.ts";
-import { InvalidEventError, normalizeEvent } from "./event.ts";
+import { eventHash, InvalidEventError, normalizeEvent } from "./event.ts";
 import { GreptimeClient, INGEST_LAG_MS, IngestNotRecorded, MAX_QUERY_LIMIT, type EventQuery } from "./greptime.ts";
 import { REDACTED, redact } from "./redact.ts";
 import { leaseSnapshot } from "./index-store.ts";
@@ -3921,6 +3921,33 @@ describe("verifyGraph hour report", () => {
 		const deleted = world.events[1]?.id ?? "evt_deleted";
 		const substrate = substrateWith({
 			readEvents: async () => world.rows.slice(0, 1),
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 30 * 60_000, rpc: rpcReturning(world.memo) as never });
+		expect(verdict.hours[0]).toMatchObject({ status: "pending" });
+		expect(verdict.missing).toEqual({ count: 1, ids: [deleted] });
+		expect(verdict.reason).toContain(deleted);
+		expect(verdict.ok).toBe(false);
+	});
+
+	test("an event deleted between the reads fails even as its mate clears", async () => {
+		// Open-hour rewrite: the first read holds A but not B; before the
+		// re-read the writer deletes A and restores B as a recomputed
+		// genesis. The fresh session re-chains, so B clears — but A was
+		// never in the gap, and the fresh comparison still names it.
+		const world = sessionRows();
+		const deleted = world.events[0]?.id ?? "evt_deleted";
+		const restored = world.events[1] as SubstrateEvent;
+		const { hash: _dropped, ...content } = restored;
+		const forged = { ...content, summary: "rewritten after the move", prev: null };
+		const reforged = { ...forged, hash: eventHash(forged) };
+		const forgedRow = { ...reforged, ts: Date.parse(reforged.ts), payload: JSON.stringify(reforged.payload) };
+		let reads = 0;
+		const substrate = substrateWith({
+			readEvents: async () => (++reads === 1 ? world.rows.slice(0, 1) : [forgedRow]),
 			graphIngest: async () => world.records,
 			firstIngestMs: async () => H,
 			hourLeaves: async () => world.leaves,
