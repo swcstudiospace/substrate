@@ -103,8 +103,13 @@ Image overrides, for the day the operator loads a newer ledger image locally:
 
 | Variable | Default | |
 | --- | --- | --- |
-| `SUBSTRATE_REHEARSAL_PG_IMAGE` | `postgres:16-alpine` | |
+| `SUBSTRATE_REHEARSAL_PG_IMAGE` | `postgres:16` | |
 | `SUBSTRATE_REHEARSAL_GREPTIME_IMAGE` | `greptime/greptimedb:v0.14.4` | Standalone mode |
+
+The host's daily `docker-image-prune` job removes images no container references.
+`postgres:16` and this ledger tag stay because the v1.2 scratch containers
+(`substrate-smoke-pg`, `substrate-smoke-greptime`) still reference them. Keep those
+containers, or give the prune a label filter, before removing them.
 
 Local ledger v0.14.4 against production v1.1.4 is accepted: pulling v1.1.4 is
 ruled out by the disk gate and the no-pull rule, v0.14.4 is what the v1.1 and

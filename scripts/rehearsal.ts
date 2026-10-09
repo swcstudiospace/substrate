@@ -85,8 +85,12 @@ export function freeBytes(path: string): number | null {
 /** The production unit's checkout: a twin never runs from here. */
 export const UNIT_WORKING_DIRECTORY = "/root/src/repos/agent-substrate";
 
-/** Default images; overridable without a code change. */
-export const DEFAULT_PG_IMAGE = "postgres:16-alpine";
+/**
+ * Default images; overridable without a code change. `postgres:16` rather than
+ * `-alpine`: the host's daily image prune keeps only images some container
+ * references, and the v1.2 scratch containers pin `postgres:16` and this ledger tag.
+ */
+export const DEFAULT_PG_IMAGE = "postgres:16";
 export const DEFAULT_LEDGER_IMAGE = "greptime/greptimedb:v0.14.4";
 
 /**
