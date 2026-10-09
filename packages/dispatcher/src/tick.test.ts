@@ -155,7 +155,7 @@ function tickDeps(overrides: {
 		substrate: overrides.substrate.client,
 		givenUpDir,
 		worktree: overrides.worktree ?? (async () => ({ ok: true as const, path: worktreeDir, reused: false })),
-		readHermesConfig: () => overrides.config ?? SUBSTRATE_CONFIG,
+		readHermesConfig: () => (overrides.config === undefined ? SUBSTRATE_CONFIG : overrides.config),
 		spawn: (argv, options) => {
 			spawns.push({ argv, options });
 			return { pid: 4242 };
