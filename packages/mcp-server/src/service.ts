@@ -617,7 +617,6 @@ export class Substrate {
 			greptime?: GreptimeClient | null;
 			skills?: SkillProposer;
 			mirror?: Mirror | null;
-			mirror?: Mirror | null;
 			dodGate?: { fetchImpl?: typeof fetch; hermesLinearUrl?: string; timeoutMs?: number };
 			cache?: ReadThroughCache;
 			desktop?: DesktopDriver | null;
