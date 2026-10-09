@@ -139,6 +139,8 @@ Execution starts from a base that holds all three (rebase onto `main` after they
 
 ## Open for the operator (user-visible; the plan uses the recommendation)
 
+**Answered 2026-10-08: the operator accepted every recommendation below.** That includes the runbook step to copy September's desktop evidence PNGs aside before the first production run prunes them. The items below are the record.
+
 1. **Initial production allowlist.** Code default is empty (nobody). Recommendation: leave production empty until the operator names surfaces after merge; the proof uses the harness only. Alternative: ship with `omp` (the operator's interactive agent) listed in the runbook as the suggested first entry.
 2. **"Headless session" for DESK-05.** Recommendation: a scripted MCP client session (no model, no quota, isolated). Alternative: additionally a `claude -p` session with the allowlisted token, which spends model quota and so waits for operator approval.
 3. **What "pixels show the typed marker" means.** Recommendation: the typed command paints a nonce-coloured band whose exact RGB is counted in the returned PNG (deterministic, no OCR on this host). Alternative: glyph-level OCR of the nonce text, which needs a new tool (`tesseract`) installed on the host or in the container.
