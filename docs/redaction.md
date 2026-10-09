@@ -61,6 +61,34 @@ matched tail, on both passes. A digit-bearing key is still redacted; the two
 pinned word-only slugs survive `redact()`, the skill scan, and `classify()`.
 This is the only D-04 pattern that is not byte-identical to September.
 
+### The `api-key-lower` value runs to the end of the token
+
+September's rule redacted only the characters of its value class (`[A-Za-z0-9_\-/.+]{16,}`), so
+`api_key: abcdefghijklmnopqrstuvwxyz!2024` came back `api_key: [REDACTED]!2024` and, on the skill
+pass, the 18-character prefix `yoursecretpassword` of `yoursecretpassword!2024` looked like a
+placeholder and the whole value was kept. The value now continues to the end of the token
+(`[^\s"'`,;)]*` after the class), on both passes, so a value carrying punctuation is redacted whole
+and a placeholder is judged on everything that was assigned. Trailing quotes and closers are not
+part of the value.
+
+### Linear-time scanning
+
+The event pass runs on bodies up to 1 MB before they are capped, so a rule that rescans the rest of
+the text from every opening is a way for one writer to hold the event loop. Four rules are applied
+by a function instead of their pattern, each making one pass: `private-tag` and `pem` (a missing
+closing delimiter ends the scan, since no later opening can have one), `pk-rk` (the run is matched
+once and tested for its digit, rather than looked ahead at from every `pk-`) and `url-password`
+(text with no `://` is skipped; the pattern needs one). The pattern in the table stays the
+definition, the fixtures and the lock read it, and `redact-adversarial.test.ts` pins each function
+to its pattern on ordinary text and on 600 random strings. The skill pass finds `<private>` blocks
+and PEMs with the same scan and checks each match against the ranges already claimed by binary
+search, so a file of tens of thousands of matches scans in time proportional to its size.
+
+Known limit: `url-password` is still quadratic on text that repeats `://` with a long colon-led run
+and no `@` (for example `a://b:` repeated), because the password run is rescanned from every
+`://`. It predates this phase and is tracked as a follow-up; it needs a hand-written scan rather
+than a prefilter.
+
 ### Verbatim-port gaps, kept on purpose
 
 The D-04 entries port September's text as-is, gaps included — tuning them
@@ -93,12 +121,16 @@ agent has to read — `Authorization: Bearer $PARALLEL_API_KEY` is a working
 line, not a leak:
 
 - **Kept:** env references, angle-bracket placeholders, placeholder words and
-  already-redacted markers come back as written, with nothing reported.
+  already-redacted markers come back as written, with nothing reported. A
+  placeholder is judged on the whole assigned value, never on a prefix of it.
 - **Redactions:** contextual rules with a real value are rewritten and
   reported with file, line and rule.
 - **Findings:** a high-confidence shape is never rewritten silently — it is
   reported for the caller to refuse on, unless it is an allowed documentation
-  example (`pem`, `jwt`, opt-in only).
+  example (`pem`, `jwt`, opt-in only). That holds however the shape sits against a
+  `<private>` block: inside it, the block's own redaction removes it; across one of
+  its edges, the two are replaced together as one span and the shape is still
+  reported.
 
 Results name the file, the line and the rule, never the value. A memory body
 holding a D-04 shape or a `<private>` block classifies as `secret` through
@@ -146,7 +178,10 @@ injected `(text: string) => string` parameter defaulting to identity, and
 have the single construction site pass the shared one. Name the seam in the
 lock's allowlist with the cycle reason. For caller-known values — a
 provisioned token, a URL component — scrub with `redactKnown` first
-(longest value first, empties ignored), then run the result through
+(every occurrence of every value is found, overlapping ones included, and the
+union of the spans is replaced; empties are ignored; only the module's own
+`[REDACTED]`, `[REDACTED_PEM]` and `[REDACTED_TSKEY]` are left alone, so a
+marker-shaped lookalike never shields a value), then run the result through
 `redact()` for shapes the list cannot name.
 
 ## How to add a rule
