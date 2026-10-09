@@ -5,13 +5,18 @@ After=substrate-mcp.service
 Wants=substrate-mcp.service
 # substrate-mcp may be briefly unreachable; that is not a reason to give up.
 StartLimitIntervalSec=0
+# The entry point is in the pinned release, not the checkout. A missing file
+# skips the start instead of crash-looping. The path follows the current symlink.
+ConditionPathExists=/opt/agent-substrate/current/packages/collectors/src/herdr.ts
 
 [Service]
 Type=simple
-EnvironmentFile=/etc/substrate/substrate.env
-EnvironmentFile=-/etc/substrate/substrate-collector-herdr.env
-WorkingDirectory=/root/src/repos/agent-substrate
-# Machine-specific: `command -v bun`.
+# This collector must not load /etc/substrate/substrate.env. Its drop-in
+# substrate-collector-herdr.service.d/10-environment.conf points at
+# /etc/substrate/collector-herdr.env (SUBSTRATE_URL, SUBSTRATE_TOKEN and optionally HERDR_SOCKET_PATH or HERDR_SESSION: names only in infra/vps/README.md).
+WorkingDirectory=/opt/agent-substrate/current
+# Machine-specific: `command -v bun`. The binary is under /root/.local and
+# herdr's socket defaults to /root/.config/herdr/herdr.sock, so the unit still runs as root (no User=).
 ExecStart=/root/.local/share/reflex/bun/bin/bun packages/collectors/src/herdr.ts --watch
 Restart=always
 RestartSec=5

@@ -103,7 +103,7 @@ acquire_lock() {
 }
 
 load_units() {
-	local raw="${SUBSTRATE_RELEASE_UNITS:-substrate-mcp.service substrate-collector-grok.service}"
+	local raw="${SUBSTRATE_RELEASE_UNITS:-substrate-mcp.service substrate-collector-grok.service substrate-collector-herdr.service substrate-collector-muse.service}"
 	local unit
 	units=()
 	# Intentional word split: the operator passes a space-separated unit list.

@@ -165,6 +165,8 @@ function stage(env: NodeJS.ProcessEnv, tag: string, sha: string, onMain: boolean
 	writeFileSync(join(tree, "bun.lock"), "{}\n");
 	writeFileSync(join(tree, "packages/mcp-server/src/index.ts"), "");
 	writeFileSync(join(tree, "packages/collectors/src/grok.ts"), "");
+	writeFileSync(join(tree, "packages/collectors/src/herdr.ts"), "");
+	writeFileSync(join(tree, "packages/collectors/src/muse.ts"), "");
 	if (onMain) writeFileSync(join(state, "main"), `${readFileSync(join(state, "main"), "utf8")}${sha}\n`);
 }
 
@@ -199,8 +201,8 @@ describe("deploy-release.sh", () => {
 		expect(restarted).toContain("is-active --quiet substrate-mcp.service");
 		expect(restarted).toContain("restart substrate-mcp.service");
 		expect(restarted).toContain("restart substrate-collector-grok.service");
-		expect(restarted).not.toContain("herdr");
-		expect(restarted).not.toContain("muse");
+		expect(restarted).toContain("restart substrate-collector-herdr.service");
+		expect(restarted).toContain("restart substrate-collector-muse.service");
 		expect(restarted).not.toContain("dispatcher");
 		expect(restarted).not.toContain("skills");
 	});

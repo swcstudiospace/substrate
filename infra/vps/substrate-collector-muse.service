@@ -5,13 +5,18 @@ After=substrate-mcp.service
 Wants=substrate-mcp.service
 # substrate-mcp may be briefly unreachable; that is not a reason to give up.
 StartLimitIntervalSec=0
+# The entry point is in the pinned release, not the checkout. A missing file
+# skips the start instead of crash-looping. The path follows the current symlink.
+ConditionPathExists=/opt/agent-substrate/current/packages/collectors/src/muse.ts
 
 [Service]
 Type=simple
-EnvironmentFile=/etc/substrate/substrate.env
-EnvironmentFile=-/etc/substrate/substrate-collector-muse.env
-WorkingDirectory=/root/src/repos/agent-substrate
-# Machine-specific: `command -v bun`.
+# This collector must not load /etc/substrate/substrate.env. Its drop-in
+# substrate-collector-muse.service.d/10-environment.conf points at
+# /etc/substrate/collector-muse.env (SUBSTRATE_URL, SUBSTRATE_TOKEN and SUBSTRATE_MUSE_REPOS: names only in infra/vps/README.md).
+WorkingDirectory=/opt/agent-substrate/current
+# Machine-specific: `command -v bun`. The binary is under /root/.local and
+# the repos it briefs live under /root, so the unit still runs as root (no User=).
 ExecStart=/root/.local/share/reflex/bun/bin/bun packages/collectors/src/muse.ts --watch
 Restart=always
 RestartSec=5

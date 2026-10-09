@@ -7,48 +7,42 @@
 | Scope | `substrate-collector-herdr.service` and `substrate-collector-muse.service` owning the herdr and brief lanes |
 | Untouched | `substrate-collector-grok.service`, `substrate-mcp.service`, `/root/.cursor/hooks.json`, user-scope Muse plugins (until step 5 below) |
 
-## Warning: the units run code that is missing from disk
+## Status
 
-The installed herdr and muse collector units point at entry files
-(`packages/collectors/src/herdr.ts`, `packages/collectors/src/muse.ts`)
-that reach `main` only through this phase. Restarting either unit before
-the merge fails closed on a missing module. Do not restart them, do not
-reinstall them, and do not project the Muse plugin into user scope until
-the cutover window below. The isolated proof (`bun run proof:laneb`)
-covers the same code against the harness twin without touching these units.
+Cut over on 2026-10-10 (operator-approved): both collectors run `main`'s code from the pinned release
+(`WorkingDirectory=/opt/agent-substrate/current`) with collector-only env files, and a release deploy
+restarts them with the other release units (infra/vps/README.md). The steps below are that procedure.
 
-## Operator cutover (six steps, one approved window, after merge)
+## Operator cutover (one approved window, one collector at a time)
 
 Run from a session on the host. Names only below — no file in git holds an
 environment value.
 
 ```sh
-# 1. Back up the checkout and the installed units first — the rollback below
-#    restores from this tarball. Then pull main, so both entry files exist.
-tar -czf "/root/substrate-cutover-backup-$(date +%Y%m%dT%H%M%S).tgz" --exclude=.git -C /root/src/repos/agent-substrate . || exit 1
-cp /etc/systemd/system/substrate-collector-herdr.service /etc/systemd/system/substrate-collector-muse.service /root/ 2>/dev/null || true
-git -C /root/src/repos/agent-substrate pull --ff-only origin main
+# 1. Back up the installed units and collector state (timestamped).
+B=/root/backups/lane-b-cutover-$(date -u +%Y%m%dT%H%M%SZ); mkdir -p "$B"
+cp -a /etc/systemd/system/substrate-collector-herdr.service /etc/systemd/system/substrate-collector-muse.service "$B"/
+cp -a /var/lib/substrate/herdr-offsets.json /var/lib/substrate/muse-offsets.json "$B"/ 2>/dev/null || true
 
-# 2. Create the per-collector env files only when absent (root-owned, mode
-#    0600). Each holds only the names its process reads: SUBSTRATE_URL and
-#    SUBSTRATE_TOKEN. SUBSTRATE_COLLECTOR_STATE and SUBSTRATE_STATE_DIR
-#    already ride on the units. A rerun must never truncate files the
-#    operator already provisioned — create, then stop and provision the
-#    tokens and URL before touching the running services.
-for unit in herdr muse; do
-  file="/etc/substrate/substrate-collector-${unit}.env"
-  if [ ! -e "$file" ]; then install -m 0600 /dev/null "$file"; fi
+# 2. Create each collector's env file (root-owned, 0600) with only the names
+#    its process reads: herdr SUBSTRATE_URL, SUBSTRATE_TOKEN (and optionally
+#    HERDR_SOCKET_PATH / HERDR_SESSION); muse SUBSTRATE_URL, SUBSTRATE_TOKEN,
+#    SUBSTRATE_MUSE_REPOS. Never point a collector at /etc/substrate/substrate.env.
+#    Files: /etc/substrate/collector-herdr.env, /etc/substrate/collector-muse.env
+
+# 3. Install a unit and its drop-in from the release tree, then reload.
+cd /opt/agent-substrate/current
+for c in herdr muse; do
+  install -m 0644 infra/vps/substrate-collector-$c.service /etc/systemd/system/
+  install -D -m 0644 infra/vps/substrate-collector-$c.service.d/10-environment.conf \
+    /etc/systemd/system/substrate-collector-$c.service.d/10-environment.conf
 done
-# Provision SUBSTRATE_URL and SUBSTRATE_TOKEN in both files now. Step 4
-# restarts the services, so a missing token there fails closed on restart.
-
-# 3. Install both units from the merged tree and reload.
-cp infra/vps/substrate-collector-herdr.service /etc/systemd/system/substrate-collector-herdr.service
-cp infra/vps/substrate-collector-muse.service /etc/systemd/system/substrate-collector-muse.service
 systemctl daemon-reload
 
-# 4. Restart the two collectors.
-systemctl restart substrate-collector-herdr substrate-collector-muse
+# 4. Restart one collector, confirm active/running with NRestarts=0, restart it
+#    once more to prove it survives, then do the other.
+systemctl restart substrate-collector-herdr && systemctl show substrate-collector-herdr -p ActiveState -p SubState -p NRestarts
+systemctl restart substrate-collector-muse && systemctl show substrate-collector-muse -p ActiveState -p SubState -p NRestarts
 
 # 5. Project the Muse plugin in user scope, then confirm the Cursor hook.
 bun packages/projector/src/muse.ts
@@ -67,20 +61,14 @@ a refused line names its collector, source, kind, surface and status in
 
 ## Rollback
 
-Operator only. The first cutover has no collector-bearing commit to check
-out: this phase is what introduces `packages/collectors/src/herdr.ts`,
-`packages/collectors/src/muse.ts`, both unit files and
-`collectors:status`, so checking out the pre-PR commit removes the very
-modules the restarted units would exec. Instead, stop the new services and
-restore the code and units from the pre-cutover backup the operator took in
-step 1 (a tarball of the checkout plus `/etc/systemd/system`). If there was
-no previous collector generation to restore, leave the pair stopped and
-report the cutover as not in effect — never restart the installed units
-against a tree that no longer contains their entry files.
+Operator only. To a previous release: `deploy-release.sh rollback` (it restarts the collectors with
+the other release units). To the pre-cutover units: restore them from the step 1 backup and remove the
+drop-ins. Never restart a unit whose `WorkingDirectory` has no entry file for it.
 
 ```sh
 systemctl stop substrate-collector-herdr substrate-collector-muse
-# Restore the pre-cutover backup taken before step 1, then:
+cp -a "$B"/substrate-collector-*.service /etc/systemd/system/
+rm -rf /etc/systemd/system/substrate-collector-{herdr,muse}.service.d
 systemctl daemon-reload
 # Restart only what the restored tree actually contains; if the restored
 # tree has no herdr/muse collector entry files, leave the pair stopped.
