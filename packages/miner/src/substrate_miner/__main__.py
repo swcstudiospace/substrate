@@ -49,9 +49,9 @@ def _bridge(*, dry_run: bool) -> int:
 
 
 def _monitor() -> int:
-    from .monitor import TRANSCRIPTS, monitor_output
+    from .monitor import monitor_output, transcripts_dir
 
-    sys.stdout.write(monitor_output(TRANSCRIPTS, datetime.now(timezone.utc).strftime("%Y-%m-%d")))
+    sys.stdout.write(monitor_output(transcripts_dir(), datetime.now(timezone.utc).strftime("%Y-%m-%d")))
     return 0
 
 
