@@ -634,7 +634,7 @@ describe("proposeSkill ledger idempotence", () => {
 		});
 		const error = await proposeSkill(input(), options(f.run)).catch((e: unknown) => e);
 		expect(error).toBeInstanceOf(ProposeFailed);
-		expect((error as Error).message).toMatch(/pushed skill\/claude-code\/demo-skill-.* but could not record it.*gh pr create --head skill\//);
+		expect((error as Error).message).toMatch(/pushed skill\/claude-code\/demo-skill-.* but could not record it.*gh pr create --repo swcstudiospace\/agent-skills --head skill\/.* --base main/);
 		expect(f.steps()).toContain("push");
 		expect(f.steps()).not.toContain("gh pr create");
 	});
