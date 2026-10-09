@@ -46,11 +46,11 @@ A configured Hindsight or RAGFlow call stays on that plane. The substrate call i
 
 The gateway's document fallback calls a substrate tool named `docs_search`. This repository does not register that tool. `docs/data-planes.md` also names `substrate docs ingest` and `POST /docs/ingest`. None of those exist under `packages/`.
 
-## `docs/data-planes.md` is stale on this route
+## `docs/data-planes.md` records this route
 
-[`docs/data-planes.md`](data-planes.md) still describes a substrate-only memory path: the writer is `substrate-mcp`, `memory_write` maps to Hindsight `retain`, `memory_search` maps to `recall`, and the desk gateway calls the substrate rather than Hindsight. This repository does not implement that mapping. `writeMemory` and `searchMemory` use the Postgres `IndexStore` (`packages/mcp-server/src/service.ts`, `packages/mcp-server/src/index-store.ts`), and `loadConfig` ignores `HINDSIGHT_*`. The gateway calls Hindsight directly when `HINDSIGHT_URL` and `HINDSIGHT_API_KEY` are set. The gateway code at programming-desk `61c7900` is the route above. This pull request does not edit `docs/data-planes.md`.
+[`docs/data-planes.md`](data-planes.md) keeps a current-wiring table and a target table. The current row is this route: the desk gateway calls Hindsight and RAGFlow with its own keys, and `substrate-mcp` does not. `writeMemory` and `searchMemory` use the Postgres `IndexStore` (`packages/mcp-server/src/service.ts`, `packages/mcp-server/src/index-store.ts`), and `loadConfig` ignores `HINDSIGHT_*` and `RAGFLOW_*`. The gateway code at programming-desk `61c7900` is the route above.
 
-The network half of that document still holds: Programming Desk seats use HTTPS to the desk gateway, and substrate-mcp stays on loopback.
+Programming Desk seats use HTTPS to the desk gateway, and substrate-mcp stays on loopback. `substrate-mcp` does read `DRAGONFLY_URL` for the read-through cache described in that document.
 
 ## Hooks the cloud agent does not load
 

@@ -191,6 +191,9 @@ export function createObservability(config: SubstrateConfig, env: Record<string,
 		emitted(sample) {
 			instruments.recordEmit(sample);
 		},
+		cached(sample) {
+			instruments.recordCache(sample);
+		},
 		claimed(sample) {
 			instruments.recordClaim({
 				surface: sample.surface,

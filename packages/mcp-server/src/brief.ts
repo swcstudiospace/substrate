@@ -6,6 +6,7 @@
  * fewer sections is still useful, and a missing store must degrade rather than
  * throw, because this text sits on the critical path of every prompt.
  */
+import { earliestRefreshAt } from "./cache.ts";
 import { normalizeIdentifier } from "./event.ts";
 import type { GreptimeClient } from "./greptime.ts";
 import { quote } from "./greptime.ts";
@@ -112,10 +113,31 @@ function swallow<T>(what: string, fallback: T): (cause: unknown) => T {
 	};
 }
 
-/** Build the Markdown brief. Never throws — a partial brief beats a blocked prompt. */
-export async function composeBrief(request: BriefRequest, sources: BriefSources): Promise<string> {
+/**
+ * Build the Markdown brief. Never throws — a partial brief beats a blocked prompt.
+ *
+ * `noteRefreshAt` receives the soonest lease expiry or reverify time the text
+ * depends on, so a cache can drop the brief when that moment arrives.
+ * `noteReadFailed` runs once when any source read threw. The text is still
+ * returned — a partial brief beats a blocked prompt — but a cache must not
+ * store it, or the outage would outlive the store.
+ */
+export async function composeBrief(
+	request: BriefRequest,
+	sources: BriefSources,
+	noteRefreshAt?: (at: number | null) => void,
+	noteReadFailed?: () => void,
+): Promise<string> {
 	const { repo = null, branch = null, graph_id: graphId = null, surface } = request;
 	const lines: string[] = [];
+	const deadlines: Array<string | null | undefined> = [];
+	let readFailed = false;
+	const failOpen = <T>(what: string, fallback: T): ((cause: unknown) => T) => {
+		return (cause) => {
+			readFailed = true;
+			return swallow(what, fallback)(cause);
+		};
+	};
 
 	const heading = [repo ?? "unknown repo", branch ? `@ ${branch}` : null, graphId ? `— ${graphId}` : null]
 		.filter(Boolean)
@@ -124,7 +146,7 @@ export async function composeBrief(request: BriefRequest, sources: BriefSources)
 
 	let graph: GraphView | null = null;
 	if (sources.index && graphId) {
-		graph = await sources.index.getGraph(graphId).catch(swallow("graph", null));
+		graph = await sources.index.getGraph(graphId).catch(failOpen("graph", null));
 	}
 
 	if (graph) {
@@ -140,6 +162,7 @@ export async function composeBrief(request: BriefRequest, sources: BriefSources)
 			// Not `map(describeNode)`: map would pass the array index as the `now`
 			// argument, and every lease would read as live against a clock at epoch 0.
 			lines.push(`Nodes: ${graph.nodes.map((node) => describeNode(node)).join(" · ")}`);
+			for (const node of graph.nodes) deadlines.push(node.lease_expires_at);
 		}
 	} else if (graphId) {
 		lines.push("This graph is not in the index yet.");
@@ -154,7 +177,7 @@ export async function composeBrief(request: BriefRequest, sources: BriefSources)
 				 WHERE "repo" = ${quote(normalizeIdentifier(repo) ?? repo)} AND "kind" NOT IN ('session.start','session.end')
 				 ORDER BY "ts" DESC LIMIT ${RECENT_ACTION_LIMIT}`,
 			)
-			.catch(swallow("recent actions", [] as Array<Record<string, unknown>>));
+			.catch(failOpen("recent actions", [] as Array<Record<string, unknown>>));
 		if (rows.length > 0) {
 			lines.push("", `Last ${rows.length} agent action${rows.length === 1 ? "" : "s"} in this repo`);
 			for (const row of rows) {
@@ -166,7 +189,7 @@ export async function composeBrief(request: BriefRequest, sources: BriefSources)
 
 	// Other graphs open in this repo.
 	if (sources.index && repo) {
-		const others = await sources.index.openGraphs(repo, graphId ?? undefined).catch(swallow("open graphs", [] as GraphView[]));
+		const others = await sources.index.openGraphs(repo, graphId ?? undefined).catch(failOpen("open graphs", [] as GraphView[]));
 		if (others.length > 0) {
 			const described = others
 				.slice(0, 4)
@@ -180,6 +203,7 @@ export async function composeBrief(request: BriefRequest, sources: BriefSources)
 						other.status,
 						started > 0 ? `${started} node${started === 1 ? "" : "s"} held` : null,
 					].filter(Boolean);
+					for (const node of other.nodes) deadlines.push(node.lease_expires_at);
 					return `${other.graph_id} (${parts.join(", ")})`;
 				})
 				.join(" · ");
@@ -190,7 +214,7 @@ export async function composeBrief(request: BriefRequest, sources: BriefSources)
 	// Warnings and decisions worth carrying into this session.
 	let memory: MemoryEntry[] = [];
 	if (sources.index) {
-		memory = await sources.index.memoryForBrief(repo, graphId).catch(swallow("memory", [] as MemoryEntry[]));
+		memory = await sources.index.memoryForBrief(repo, graphId).catch(failOpen("memory", [] as MemoryEntry[]));
 	}
 	const warnings = memory.filter((entry) => entry.kind === "warning");
 	const decisions = memory.filter((entry) => entry.kind === "decision");
@@ -208,9 +232,15 @@ export async function composeBrief(request: BriefRequest, sources: BriefSources)
 		}
 	}
 
+	for (const entry of memory) {
+		if (!entry.needs_reverification) deadlines.push(entry.reverify_after);
+	}
+
 	if (lines.length === 1) {
 		lines.push(`No substrate history for this repo yet. You are the first ${surface} session here.`);
 	}
 
+	if (readFailed) noteReadFailed?.();
+	noteRefreshAt?.(earliestRefreshAt(deadlines));
 	return lines.join("\n");
 }

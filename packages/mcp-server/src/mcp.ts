@@ -322,12 +322,20 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 		},
 		async (request) => {
 			try {
-				if (isPagedSearch(request)) return json(await substrate.searchMemoryPage(request));
+				if (isPagedSearch(request)) return json(await substrate.searchMemoryPage(request, callerSurface ?? "unattributed"));
 				// The reply a caller got before paging existed, to the byte.
 				if (request.query === undefined) {
 					return refusal("memory_search needs `query`, or `subject_prefix` to list a subject family");
 				}
-				return json(await substrate.searchMemory(request.query, request.scope, request.limit, request.include_superseded));
+				return json(
+					await substrate.searchMemory(
+						request.query,
+						request.scope,
+						request.limit,
+						request.include_superseded,
+						callerSurface ?? "unattributed",
+					),
+				);
 			} catch (cause) {
 				if (cause instanceof InvalidSearchError) return refusal(cause.message);
 				throw cause;
@@ -455,7 +463,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			annotations: { readOnlyHint: true },
 		},
 		async ({ graph_id }) => {
-			const graph = await substrate.getGraph(graph_id);
+			const graph = await substrate.getGraph(graph_id, callerSurface ?? "unattributed");
 			return graph ? json(graph) : text(`No graph ${graph_id} in the index.`);
 		},
 	);

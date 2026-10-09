@@ -27,6 +27,7 @@ export const METRIC = {
 	spansDropped: "substrate.trace.spans_dropped",
 	eventsRefused: "substrate.events.refused",
 	anonymousRequests: "substrate.anonymous.requests",
+	cacheOperations: "substrate.cache.operations",
 } as const;
 
 /** Why a `POST /events` was refused with 4xx. One series each, so the reason stays bounded. */
@@ -137,6 +138,7 @@ export class SubstrateInstruments {
 	readonly spansDropped: Counter;
 	readonly eventsRefused: Counter;
 	readonly anonymousRequests: Counter;
+	readonly cacheOperations: Counter;
 
 	constructor(registry: MetricRegistry = new MetricRegistry()) {
 		this.registry = registry;
@@ -202,6 +204,10 @@ export class SubstrateInstruments {
 		this.anonymousRequests = registry.counter(METRIC.anonymousRequests, {
 			description: "Untokened requests accepted while anonymous mode is on, by route and claimed surface.",
 			unit: "{request}",
+		});
+		this.cacheOperations = registry.counter(METRIC.cacheOperations, {
+			description: "Read-through cache results (hit|miss|bypass|error) and the mode they were counted in.",
+			unit: "{operation}",
 		});
 	}
 
@@ -287,6 +293,10 @@ export class SubstrateInstruments {
 	/** One refused `POST /events`. The reason is the closed set in `EVENT_REFUSAL_REASONS`. */
 	recordEventRefusal(sample: { reason: EventRefusalReason }): void {
 		this.eventsRefused.add(1, { reason: sample.reason });
+	}
+
+	recordCache(sample: { result: "hit" | "miss" | "bypass" | "error"; mode: "off" | "on" | "degraded" }): void {
+		this.cacheOperations.add(1, { result: sample.result, mode: sample.mode });
 	}
 
 	/**
