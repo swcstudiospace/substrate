@@ -185,6 +185,36 @@ export function refuseDockerEnv(env: { DOCKER_HOST?: string; DOCKER_CONTEXT?: st
 }
 
 /**
+ * Refuse a live docker endpoint that is not a local unix socket. Only
+ * `unix://` is local: `tcp://`, `ssh://` and named-pipe endpoints all name
+ * someone else's engine. An empty endpoint proves nothing, so it refuses too.
+ * Returns the reason, or null when the endpoint is a local socket.
+ */
+export function refuseDockerEndpoint(endpoint: string): string | null {
+	const host = endpoint.trim().split("\n")[0] ?? "";
+	if (host === "") return "could not read the docker endpoint; refusing without locality proof";
+	if (!host.startsWith("unix://")) return `refusing non-local docker endpoint ${host}`;
+	return null;
+}
+
+/**
+ * Refuse a non-local daemon before any docker call path (`up`, `down`,
+ * `status`): the env allowlist first, then the live endpoint of the
+ * effective context (`docker context inspect` honors both DOCKER_HOST and
+ * DOCKER_CONTEXT, and it reads local client metadata, so it proves locality
+ * without needing a live daemon). An inspect failure does not refuse: the
+ * client is broken or absent, in which case every later docker call fails
+ * with its own truthful error and nothing remote can happen.
+ */
+function refuseDockerLocality(): string | null {
+	const envRefused = refuseDockerEnv({ DOCKER_HOST: process.env.DOCKER_HOST, DOCKER_CONTEXT: process.env.DOCKER_CONTEXT });
+	if (envRefused !== null) return envRefused;
+	const inspected = docker(["context", "inspect", "--format", "{{.Endpoints.docker.Host}}"]);
+	if (!inspected.ok) return null;
+	return refuseDockerEndpoint(inspected.out);
+}
+
+/**
  * The surface whose token the smoke drives: the operator when set (never a
  * swarm surface — parseOperator enforces that), else the first non-swarm
  * surface. A swarm-first `--surfaces` list must not hand the smoke a swarm
@@ -330,22 +360,32 @@ function docker(args: string[], extraEnv?: Record<string, string>): DockerResult
 	const env: Record<string, string> = {};
 	if (process.env.PATH !== undefined) env.PATH = process.env.PATH;
 	if (process.env.HOME !== undefined) env.HOME = process.env.HOME;
-	for (const key of ["DOCKER_HOST", "DOCKER_CONFIG"] as const) {
+	// The child resolves the daemon exactly the way the locality gate vetted
+	// it: DOCKER_HOST overrides the context endpoint, and DOCKER_CONTEXT
+	// selects the context. Dropping DOCKER_CONTEXT here while gating on it
+	// above would vet one endpoint and mutate another.
+	for (const key of ["DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_CONTEXT"] as const) {
 		const value = process.env[key];
 		if (value !== undefined) env[key] = value;
 	}
 	if (extraEnv) for (const [key, value] of Object.entries(extraEnv)) env[key] = value;
-	const run = Bun.spawnSync(["docker", ...args], {
-		stdout: "pipe",
-		stderr: "pipe",
-		timeout: DOCKER_TIMEOUT_MS,
-		env,
-	});
-	return {
-		ok: run.exitCode === 0,
-		out: run.stdout.toString(),
-		err: run.stderr.toString(),
-	};
+	try {
+		const run = Bun.spawnSync(["docker", ...args], {
+			stdout: "pipe",
+			stderr: "pipe",
+			timeout: DOCKER_TIMEOUT_MS,
+			env,
+		});
+		return {
+			ok: run.exitCode === 0,
+			out: run.stdout.toString(),
+			err: run.stderr.toString(),
+		};
+	} catch (cause) {
+		// No docker CLI at all: a failed listing, never a crash. Callers keep
+		// their truthful errors (`docker is unreachable`, `could not list`).
+		return { ok: false, out: "", err: cause instanceof Error ? cause.message : String(cause) };
+	}
 }
 
 function readText(path: string): string | null {
@@ -764,7 +804,7 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 
 	const checkoutRefused = refuseCheckoutDir(checkout);
 	if (checkoutRefused !== null) throw new RehearsalRefused(checkoutRefused);
-	const dockerRefused = refuseDockerEnv({ DOCKER_HOST: process.env.DOCKER_HOST, DOCKER_CONTEXT: process.env.DOCKER_CONTEXT });
+	const dockerRefused = refuseDockerLocality();
 	if (dockerRefused !== null) throw new RehearsalRefused(dockerRefused);
 	if (!existsSync(join(checkout, "node_modules"))) {
 		throw new RehearsalRefused(`no node_modules in ${checkout}: run bun install --frozen-lockfile first`);
@@ -1100,7 +1140,7 @@ async function runDown(name: string): Promise<number> {
 }
 
 async function runDownInner(name: string, runDir: string): Promise<number> {
-	const dockerRefused = refuseDockerEnv({ DOCKER_HOST: process.env.DOCKER_HOST, DOCKER_CONTEXT: process.env.DOCKER_CONTEXT });
+	const dockerRefused = refuseDockerLocality();
 	if (dockerRefused !== null) throw new RehearsalRefused(dockerRefused);
 	const state = readState(join(runDir, "state.json"));
 	if (state === null) {
@@ -1162,6 +1202,8 @@ async function runStatus(name: string): Promise<number> {
  * `down` removes it. Every state read in this file runs under the lock.
  */
 async function runStatusInner(name: string, runDir: string): Promise<number> {
+	const dockerRefused = refuseDockerLocality();
+	if (dockerRefused !== null) throw new RehearsalRefused(dockerRefused);
 	const state = readState(join(runDir, "state.json"));
 	if (state === null) {
 		process.stdout.write(`[rehearsal] status ${name}: no instance.\n`);

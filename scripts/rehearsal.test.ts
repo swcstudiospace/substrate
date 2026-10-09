@@ -33,6 +33,7 @@ import {
 	pickFreePort,
 	pickSmokeSurface,
 	refuseCheckoutDir,
+	refuseDockerEndpoint,
 	refuseDockerEnv,
 	refuseExtraArgs,
 	refusePort,
@@ -66,6 +67,41 @@ function runCli(...args: string[]): { code: number; out: string; err: string } {
 		env: { ...process.env, SUBSTRATE_TOKEN: SENTINEL },
 	});
 	return { code: child.exitCode ?? -1, out: child.stdout.toString(), err: child.stderr.toString() };
+}
+
+/**
+ * A fake `docker` on PATH: it answers `context` calls with the given endpoint
+ * and every listing with an empty store, and records each argv line in the
+ * log. Tests that must reach Docker without a live daemon prepend `bin` to
+ * PATH and isolate `XDG_RUNTIME_DIR`; an empty log proves Docker was never
+ * touched.
+ */
+function fakeDocker(endpoint = "unix:///var/run/docker.sock"): { dir: string; bin: string; log: string } {
+	const dir = mkdtempSync(join(tmpdir(), "rh-fakedocker-"));
+	const bin = join(dir, "bin");
+	mkdirSync(bin, { recursive: true });
+	const log = join(dir, "calls.log");
+	writeFileSync(
+		join(bin, "docker"),
+		`#!/bin/sh\necho "$*" >> "${log}"\nif [ "$1" = "context" ]; then echo "${endpoint}"; fi\nexit 0\n`,
+	);
+	chmodSync(join(bin, "docker"), 0o755);
+	return { dir, bin, log };
+}
+
+function runIsolated(args: string[], extraEnv: Record<string, string>): { code: number; out: string; err: string } {
+	const child = Bun.spawnSync([process.execPath, CLI, ...args], {
+		env: { ...process.env, SUBSTRATE_TOKEN: SENTINEL, ...extraEnv },
+	});
+	return { code: child.exitCode ?? -1, out: child.stdout.toString(), err: child.stderr.toString() };
+}
+
+function dockerCalls(log: string): string {
+	try {
+		return readFileSync(log, "utf8");
+	} catch {
+		return "";
+	}
 }
 
 describe("mayStop", () => {
@@ -416,6 +452,42 @@ describe("refuseDockerEnv", () => {
 	});
 });
 
+describe("refuseDockerEndpoint", () => {
+	test("only local unix sockets pass", () => {
+		expect(refuseDockerEndpoint("unix:///var/run/docker.sock")).toBeNull();
+		expect(refuseDockerEndpoint("  unix:///run/user/1000/docker.sock\n")).toBeNull();
+		expect(refuseDockerEndpoint("tcp://192.0.2.10:2375")).toContain("non-local docker endpoint");
+		expect(refuseDockerEndpoint("ssh://root@db.example.com")).toContain("non-local docker endpoint");
+		expect(refuseDockerEndpoint("npipe:////./pipe/docker_engine")).toContain("non-local docker endpoint");
+		expect(refuseDockerEndpoint("  \n")).toContain("could not read the docker endpoint");
+	});
+
+	for (const sub of ["down", "status"]) {
+		test(`${sub} against a remote context endpoint refuses before listing containers`, () => {
+			const base = mkdtempSync(join(tmpdir(), "rh-remote-ctx-"));
+			const fake = fakeDocker("tcp://192.0.2.10:2375");
+			try {
+				const run = runIsolated([sub, "--name", "rh-remote-ctx"], {
+					XDG_RUNTIME_DIR: base,
+					PATH: `${fake.bin}:${process.env.PATH ?? ""}`,
+					DOCKER_HOST: "",
+					DOCKER_CONTEXT: "",
+				});
+				expect(run.code).toBe(2);
+				expect(run.err).toContain("non-local docker endpoint");
+				// The gate ran `context inspect` and stopped: exactly one docker
+				// call, and it is the locality probe, not `ps` or `rm`.
+				const lines = dockerCalls(fake.log).split("\n").filter((l) => l.length > 0);
+				expect(lines).toHaveLength(1);
+				expect(lines[0]).toContain("context inspect");
+			} finally {
+				rmSync(base, { recursive: true, force: true });
+				rmSync(fake.dir, { recursive: true, force: true });
+			}
+		});
+	}
+});
+
 describe("refuseExtraArgs", () => {
 	test("accepts known flags and rejects typos and strays", () => {
 		expect(refuseExtraArgs(["down", "--name", "x"])).toBeNull();
@@ -527,38 +599,10 @@ describe("acquireNameLock", () => {
 /**
  * The lock precedes every store touch: with the lock held elsewhere, each
  * subcommand must refuse before reading state or invoking Docker. The fake
- * `docker` below answers locality and listing calls with an empty store and
- * records every invocation, so an empty log proves the refusal came first.
+ * `docker` answers locality and listing calls with an empty store and records
+ * every invocation, so an empty log proves the refusal came first.
  */
 describe("per-name lock precedes every store touch", () => {
-	function fakeDocker(): { dir: string; bin: string; log: string } {
-		const dir = mkdtempSync(join(tmpdir(), "rh-fakedocker-"));
-		const bin = join(dir, "bin");
-		mkdirSync(bin, { recursive: true });
-		const log = join(dir, "calls.log");
-		writeFileSync(
-			join(bin, "docker"),
-			`#!/bin/sh\necho "$*" >> "${log}"\nif [ "$1" = "context" ]; then echo "unix:///var/run/docker.sock"; fi\nexit 0\n`,
-		);
-		chmodSync(join(bin, "docker"), 0o755);
-		return { dir, bin, log };
-	}
-
-	function runIsolated(args: string[], extraEnv: Record<string, string>): { code: number; out: string; err: string } {
-		const child = Bun.spawnSync([process.execPath, CLI, ...args], {
-			env: { ...process.env, SUBSTRATE_TOKEN: SENTINEL, ...extraEnv },
-		});
-		return { code: child.exitCode ?? -1, out: child.stdout.toString(), err: child.stderr.toString() };
-	}
-
-	function dockerCalls(log: string): string {
-		try {
-			return readFileSync(log, "utf8");
-		} catch {
-			return "";
-		}
-	}
-
 	for (const args of [
 		["down", "--name", "rh-locked"],
 		["up", "--name", "rh-locked", "--port", "0"],
