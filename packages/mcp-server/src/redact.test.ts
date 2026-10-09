@@ -533,6 +533,20 @@ describe("skill api-key-lower keeps placeholders and redacts real values (D18-08
 		expect(out.findings).toEqual([]);
 		expect(JSON.stringify(out)).not.toContain(SKILL_JWT_LAST);
 	});
+	test("real values beginning with a placeholder word still redact (WR-02)", () => {
+		const cases: Array<[string, SkillRedactionRule]> = [
+			["password: YourDogRex2024!", "password"],
+			["DB_PASSWORD=examplecorp-Pr0d-7731", "password"],
+			[`apiKey: xxx${rnd(ALNUM, 18)}`, "api-key-lower"],
+			[`SERVICE_TOKEN=redacted${rnd(ALNUM, 16)}`, "assignment"],
+		];
+		for (const [line, rule] of cases) {
+			const out = redactSkillContent(line);
+			expect(out.redactions).toEqual([{ line: 1, rule }]);
+			expect(out.findings).toEqual([]);
+			expect(out.text).toContain(REDACTED);
+		}
+	});
 });
 describe("skill pk-rk needs a digit in the tail (D18-21)", () => {
 	test("word-only pk-/rk- slugs produce no skill hit", () => {

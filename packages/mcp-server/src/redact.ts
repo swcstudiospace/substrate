@@ -270,8 +270,12 @@ export const SKILL_EXCLUSIONS: Partial<Record<RedactionRuleName, string>> = {
 };
 /** Read-only view of the skill entry names for the parity test and docs. */
 export const SKILL_RULE_NAMES: ReadonlyArray<RedactionRuleName> = SKILL_RULES.map((entry) => entry.name);
-const PLACEHOLDER_PREFIXES = ["your", "xxx", "...", "***", "example", "changeme", "placeholder", "redacted"];
-// Env references, `<…>` and the placeholder words; `[REDACTED…]` so a second
+// A whole-value placeholder shape, never a prefix test: a placeholder word with
+// only `-key`/`-here`-style segments after it, or a run of x/*/. — so
+// `your-api-key-goes-here` is kept while `YourDogRex2024!` still redacts (WR-02).
+const PLACEHOLDER_VALUE =
+	/^(?:your|example|changeme|placeholder|redacted)(?:[-_ ]?(?:api|access|secret)?[-_ ]?(?:key|token|password|value|here|goes|secret))*$|^(?:x{3,}|\*{3,}|\.{3,})$/i;
+// Env references, `<…>` and the placeholder shapes; `[REDACTED…]` so a second
 // pass is a no-op. Scraped Markdown escapes underscores, so `$OPENAI\_API\_KEY`
 // is an env reference too.
 function isPlaceholder(captured: string): boolean {
@@ -279,8 +283,7 @@ function isPlaceholder(captured: string): boolean {
 	if (/^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(value.replaceAll("\\_", "_"))) return true;
 	if (/^<[^>]*>$/.test(value)) return true;
 	if (/^\[REDACTED[A-Z_]*\]$/.test(value)) return true;
-	const lower = value.toLowerCase();
-	return PLACEHOLDER_PREFIXES.some((prefix) => lower.startsWith(prefix));
+	return PLACEHOLDER_VALUE.test(value);
 }
 interface Claim {
 	start: number;
