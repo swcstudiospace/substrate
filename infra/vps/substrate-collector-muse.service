@@ -13,7 +13,7 @@ ConditionPathExists=/opt/agent-substrate/current/packages/collectors/src/muse.ts
 Type=simple
 # This collector must not load /etc/substrate/substrate.env. Its drop-in
 # substrate-collector-muse.service.d/10-environment.conf points at
-# /etc/substrate/collector-muse.env (SUBSTRATE_URL, SUBSTRATE_TOKEN and SUBSTRATE_MUSE_REPOS: names only in infra/vps/README.md).
+# /etc/substrate/substrate-collector-muse.env (SUBSTRATE_URL, SUBSTRATE_TOKEN and SUBSTRATE_MUSE_REPOS: names only in infra/vps/README.md).
 WorkingDirectory=/opt/agent-substrate/current
 # Machine-specific: `command -v bun`. The binary is under /root/.local and
 # the repos it briefs live under /root, so the unit still runs as root (no User=).

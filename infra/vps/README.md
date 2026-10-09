@@ -34,12 +34,14 @@ All four units in this directory use `WorkingDirectory=/opt/agent-substrate/curr
 | --- | --- | --- |
 | `substrate-mcp.service` | `substrate-mcp.service.d/10-environment.conf` | `/etc/substrate/substrate.env` |
 | `substrate-collector-grok.service` | `substrate-collector-grok.service.d/10-environment.conf` | `/etc/substrate/collector-grok.env` |
-| `substrate-collector-herdr.service` | `substrate-collector-herdr.service.d/10-environment.conf` | `/etc/substrate/collector-herdr.env` |
-| `substrate-collector-muse.service` | `substrate-collector-muse.service.d/10-environment.conf` | `/etc/substrate/collector-muse.env` |
+| `substrate-collector-herdr.service` | `substrate-collector-herdr.service.d/10-environment.conf` | `/etc/substrate/substrate-collector-herdr.env` |
+| `substrate-collector-muse.service` | `substrate-collector-muse.service.d/10-environment.conf` | `/etc/substrate/substrate-collector-muse.env` |
 
 The MCP server is the process that needs the shared env file. The Grok collector must not load it. Create `collector-grok.env` (root-owned, mode 0600) with only the names this process reads: `SUBSTRATE_URL`, `SUBSTRATE_TOKEN`, and optionally `GROK_SESSIONS_DIR`. `SUBSTRATE_COLLECTOR_STATE` is already set on the unit. Do not put database URLs, plane keys, handoff keys, or review tokens in that file. No values belong in git.
 
-The same rule holds for the other two collectors. `collector-herdr.env` holds `SUBSTRATE_URL`, `SUBSTRATE_TOKEN`, and optionally `HERDR_SOCKET_PATH` or `HERDR_SESSION` (the socket defaults to `/root/.config/herdr/herdr.sock`). `collector-muse.env` holds `SUBSTRATE_URL`, `SUBSTRATE_TOKEN`, and `SUBSTRATE_MUSE_REPOS`. `SUBSTRATE_COLLECTOR_STATE` and `SUBSTRATE_STATE_DIR` are set on the units.
+The same rule holds for the other two collectors. `substrate-collector-herdr.env` holds `SUBSTRATE_URL`, `SUBSTRATE_TOKEN`, and optionally `HERDR_SOCKET_PATH` or `HERDR_SESSION` (the socket defaults to `/root/.config/herdr/herdr.sock`). `substrate-collector-muse.env` holds `SUBSTRATE_URL`, `SUBSTRATE_TOKEN`, and `SUBSTRATE_MUSE_REPOS`. `SUBSTRATE_COLLECTOR_STATE` and `SUBSTRATE_STATE_DIR` are set on the units.
+
+The herdr and muse file names carry the `substrate-` prefix and the Grok one does not. Those are the paths `infra/identity/clients.json` delivers each token to (and the Muse hook's default `tokenFile`), so `bun run identity:check` reads the same file the unit loads. `scripts/doctor-units.test.ts` pins the two together.
 
 ### Root and ProtectHome=false
 
@@ -82,11 +84,11 @@ Each step is its own approved window. After each one, run the doctor read-only (
 1. **Pause the failing timers until Phase 22.** Stop and disable `substrate-skills-sync.timer` and `substrate-skills-bridge.timer`. Their `ExecStart` targets are not on `main`, and the timers fire every five minutes.
 2. **Stop the dispatcher restart loop.** The installed dispatcher uses `Restart=always` and idles on `SUBSTRATE_DISPATCH_DISABLED=1`, so a clean exit is started again every few seconds. Stop and disable `substrate-dispatcher.service`. Leave `SUBSTRATE_DISPATCH_DISABLED=1` set. Do not start it again in this window.
 3. **Give the audit chain a durable path.** Set `SUBSTRATE_AUDIT_PATH` in `/etc/substrate/substrate.env`. The name is already in `.env.example`; the unit's `StateDirectory=substrate` is `/var/lib/substrate`. Restart `substrate-mcp` only, then confirm `/healthz` reports the chain as durable.
-4. **Move herdr and muse onto the release** (after Phase 19). This needs a published release: `/opt/agent-substrate/current` must already exist, so on a first installation the collectors are moved by step 5 (5b creates their env files and 5c installs their units), and this step is only for a host whose release already exists. Create `collector-herdr.env` and `collector-muse.env` (root-owned, mode 0600, the names above), install both units and their drop-ins, `systemctl daemon-reload`, then restart one collector at a time and confirm `ActiveState=active`, `NRestarts=0`, and a second restart that comes back the same way.
+4. **Move herdr and muse onto the release** (after Phase 19). This needs a published release: `/opt/agent-substrate/current` must already exist, so on a first installation the collectors are moved by step 5 (5b creates their env files and 5c installs their units), and this step is only for a host whose release already exists. Create `substrate-collector-herdr.env` and `substrate-collector-muse.env` (root-owned, mode 0600, the names above), install both units and their drop-ins, `systemctl daemon-reload`, then restart one collector at a time and confirm `ActiveState=active`, `NRestarts=0`, and a second restart that comes back the same way.
 5. **Install the first pinned release** (after this PR is merged, still its own window). The units loaded today still use the checkout as `WorkingDirectory`. A deploy that restarts them before the new unit files are loaded health-checks the old code, and a reload that happens only after the script returns starts the new code outside that check.
 
    a. Build the first tree without restarting production: `SUBSTRATE_RELEASE_RESTART=0 deploy-release.sh <tag>`. This creates `/opt/agent-substrate/current` and leaves every older directory on disk. It does not restart units.
-   b. Create `/etc/substrate/collector-grok.env`, `/etc/substrate/collector-herdr.env` and `/etc/substrate/collector-muse.env` (root-owned, mode 0600) with only the names each collector reads (above). 5d restarts all three, and a missing `EnvironmentFile` keeps that unit from starting.
+   b. Create `/etc/substrate/collector-grok.env`, `/etc/substrate/substrate-collector-herdr.env` and `/etc/substrate/substrate-collector-muse.env` (root-owned, mode 0600) with only the names each collector reads (above). 5d restarts all three, and a missing `EnvironmentFile` keeps that unit from starting.
    c. Install the unit files and drop-ins from this directory.
    d. Run `deploy-release.sh <tag>` again on the same tag. The tree is already built. The script runs `systemctl daemon-reload`, restarts the units in the list above, requires each unit to be active, and polls `/healthz` until it answers. Do not reload again after the script returns. Run the doctor read-only. Confirm `readlink /opt/agent-substrate/current` is `releases/<sha>` for that tag.
 

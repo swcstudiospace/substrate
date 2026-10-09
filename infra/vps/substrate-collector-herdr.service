@@ -13,7 +13,7 @@ ConditionPathExists=/opt/agent-substrate/current/packages/collectors/src/herdr.t
 Type=simple
 # This collector must not load /etc/substrate/substrate.env. Its drop-in
 # substrate-collector-herdr.service.d/10-environment.conf points at
-# /etc/substrate/collector-herdr.env (SUBSTRATE_URL, SUBSTRATE_TOKEN and optionally HERDR_SOCKET_PATH or HERDR_SESSION: names only in infra/vps/README.md).
+# /etc/substrate/substrate-collector-herdr.env (SUBSTRATE_URL, SUBSTRATE_TOKEN and optionally HERDR_SOCKET_PATH or HERDR_SESSION: names only in infra/vps/README.md).
 WorkingDirectory=/opt/agent-substrate/current
 # Machine-specific: `command -v bun`. The binary is under /root/.local and
 # herdr's socket defaults to /root/.config/herdr/herdr.sock, so the unit still runs as root (no User=).
