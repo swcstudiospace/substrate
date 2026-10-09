@@ -247,7 +247,7 @@ describe("the swarm surfaces", () => {
 
 	test(".env.example lists a blank SUBSTRATE_TOKEN_* line for every one", () => {
 		const example = readFileSync(join(import.meta.dir, "..", "..", "..", ".env.example"), "utf8").split("\n");
-		for (const surface of SWARM_SURFACES) {
+		for (const surface of [...SWARM_SURFACES, "substrate" as const]) {
 			expect(example).toContain(`${tokenEnvName(surface)}=`);
 		}
 	});
