@@ -270,7 +270,7 @@ EnvironmentFile=${SHARED_ENV_FILE}
 });
 
 describe("repo units", () => {
-	test("infra/vps substrate units match the known pre-cutover shape at HEAD", () => {
+	test("infra/vps substrate units all run from the release with their own env files at HEAD", () => {
 		const units = loadUnits(join(repoRoot, "infra/vps"));
 		expect(units.map((unit) => unit.name).sort()).toEqual([
 			"substrate-collector-grok.service",
@@ -278,48 +278,29 @@ describe("repo units", () => {
 			"substrate-collector-muse.service",
 			"substrate-mcp.service",
 		]);
-		const released = units.filter(
-			(unit) => unit.name === "substrate-collector-grok.service" || unit.name === "substrate-mcp.service",
-		);
-		for (const unit of released) {
+		for (const unit of units) {
 			expect(unit.workingDirectory).toBe(RELEASE_CURRENT);
 		}
-		const collector = units.find((unit) => unit.name === "substrate-collector-grok.service");
-		expect(collector?.environmentFiles).toEqual(["/etc/substrate/collector-grok.env"]);
-		expect(collector?.environmentFiles).not.toContain(SHARED_ENV_FILE);
 		const mcp = units.find((unit) => unit.name === "substrate-mcp.service");
 		expect(mcp?.environmentFiles).toEqual([SHARED_ENV_FILE]);
-		// The lane-B units ship pre-cutover on purpose (D19-23): they match the
-		// installed checkout copies until the runbook cutover moves them onto
-		// the release tree. The gate pins that exact gap — four findings, no more.
-		const devCheckout = "/root/src/repos/agent-substrate";
-		for (const [name, envFile] of [
-			["substrate-collector-herdr.service", "/etc/substrate/substrate-collector-herdr.env"],
-			["substrate-collector-muse.service", "/etc/substrate/substrate-collector-muse.env"],
-		] as const) {
-			const unit = units.find((candidate) => candidate.name === name);
-			expect(unit?.workingDirectory).toBe(devCheckout);
-			expect(unit?.environmentFiles).toEqual([SHARED_ENV_FILE, envFile]);
+		// The lane-B cutover (infra/vps/README.md operator step 4) moved herdr and
+		// muse onto the release tree with collector-only env files, like grok.
+		for (const name of ["grok", "herdr", "muse"] as const) {
+			const unit = units.find((candidate) => candidate.name === `substrate-collector-${name}.service`);
+			expect(unit?.environmentFiles).toEqual([`/etc/substrate/collector-${name}.env`]);
+			expect(unit?.environmentFiles).not.toContain(SHARED_ENV_FILE);
 		}
-		const findings = diagnose(units, listGitTree(repoRoot, "HEAD"));
-		expect(findings).toEqual([
-			{ code: "dev-checkout", unit: "substrate-collector-herdr.service", detail: `WorkingDirectory=${devCheckout}` },
-			{ code: "shared-env", unit: "substrate-collector-herdr.service", detail: `EnvironmentFile=${SHARED_ENV_FILE}` },
-			{ code: "dev-checkout", unit: "substrate-collector-muse.service", detail: `WorkingDirectory=${devCheckout}` },
-			{ code: "shared-env", unit: "substrate-collector-muse.service", detail: `EnvironmentFile=${SHARED_ENV_FILE}` },
-		]);
+		expect(diagnose(units, listGitTree(repoRoot, "HEAD"))).toEqual([]);
 	});
 
-	test("the dry-run command reports the known gap and does not claim it wrote anything", () => {
+	test("the dry-run command reports no findings and does not claim it wrote anything", () => {
 		const result = spawnSync("bun", ["scripts/doctor-units.ts", "--dry-run"], {
 			cwd: repoRoot,
 			encoding: "utf8",
 		});
-		expect(result.status).toBe(1);
-		expect(result.stdout).toContain("unit doctor: 4 findings");
+		expect(result.status).toBe(0);
+		expect(result.stdout).toContain("unit doctor: no findings");
 		expect(result.stderr).toContain("unit doctor: dry-run");
-		expect(result.stdout).toContain("dev-checkout\tsubstrate-collector-herdr.service");
-		expect(result.stdout).toContain("shared-env\tsubstrate-collector-muse.service");
 		expect(result.stdout).not.toContain("wrote");
 	});
 });
