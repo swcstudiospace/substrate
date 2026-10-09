@@ -144,6 +144,20 @@ describe("the tracked manifest", () => {
 			}
 		}
 	});
+	test("collector-grok points at the unit's EnvironmentFile", () => {
+		const manifest = loadManifest(MANIFEST_PATH);
+		expect(manifest.clients.find((c) => c.id === "collector-grok")?.delivery).toEqual({
+			kind: "env-file",
+			path: "/etc/substrate/collector-grok.env",
+			variable: "SUBSTRATE_TOKEN",
+		});
+	});
+
+	test("herdr env files are production paths", () => {
+		const manifest = loadManifest(MANIFEST_PATH);
+		expect(manifest.herdr_env_files).toEqual(["/etc/substrate/substrate-collector-herdr.env"]);
+		for (const path of manifest.herdr_env_files ?? []) expect(path.startsWith("/etc/substrate/")).toBe(true);
+	});
 
 	test("herdr covers every mapped non-swarm surface from a tokens-dir file", () => {
 		const manifest = loadManifest(MANIFEST_PATH);
@@ -200,6 +214,23 @@ describe("loadManifest refusals", () => {
 			}),
 		);
 		expect(() => loadManifest(kind)).toThrow("unknown delivery kind");
+	});
+
+	test("herdr_env_files must be an array of non-empty strings when present", () => {
+		const dir = makeTmp();
+		const base = { version: 1, server_env: join(dir, "srv.env"), required_server_names: [], clients: [] };
+		const bare = join(dir, "bare.json");
+		writeFileSync(bare, JSON.stringify(base));
+		expect(loadManifest(bare).herdr_env_files).toBeUndefined();
+		const notArray = join(dir, "not-array.json");
+		writeFileSync(notArray, JSON.stringify({ ...base, herdr_env_files: "/etc/substrate/x.env" }));
+		expect(() => loadManifest(notArray)).toThrow("herdr_env_files");
+		const emptyEntry = join(dir, "empty-entry.json");
+		writeFileSync(emptyEntry, JSON.stringify({ ...base, herdr_env_files: [""] }));
+		expect(() => loadManifest(emptyEntry)).toThrow("herdr_env_files");
+		const ok = join(dir, "ok.json");
+		writeFileSync(ok, JSON.stringify({ ...base, herdr_env_files: ["/etc/substrate/substrate-collector-herdr.env"] }));
+		expect(loadManifest(ok).herdr_env_files).toEqual(["/etc/substrate/substrate-collector-herdr.env"]);
 	});
 });
 
@@ -317,6 +348,121 @@ describe("checkNames", () => {
 		expect(report.warnings.some((w) => w.includes("SUBSTRATE_TOKEN"))).toBe(true);
 		expect(formatReport({ ...report, manifestPath: "m" }, false)).not.toContain(V1);
 	});
+
+	test("an unknown server suffix fails with a server-not-ready line", () => {
+		const dir = makeTmp();
+		const manifest = fixtureManifest(dir);
+		const td = join(dir, "td");
+		mkdirSync(td);
+		const srv = join(dir, "srv.env");
+		const report = checkNames(
+			manifest,
+			fixtureReads(
+				{
+					[srv]: `SUBSTRATE_TOKEN_CLAUDE_CODE=${V1}\nSUBSTRATE_TOKEN_CURSOR=${V3}\nSUBSTRATE_TOKEN_SUBSTRATE=${V4}\nSUBSTRATE_TOKEN_HERMES=${V1}\nSUBSTRATE_OPERATOR_TOKENS=${V2}\nSUBSTRATE_TOKEN_QQ=${OTHER}\n`,
+					[join(dir, "cli.env")]: `SUBSTRATE_TOKEN=${V1}\n`,
+				},
+				{ [join(td, "cursor")]: GOOD_STAT },
+			),
+			srv,
+			td,
+		);
+		expect(report.pass).toBe(false);
+		expect(report.strandedLive).toEqual([]);
+		expect(report.errors.some((e) => e.includes("SUBSTRATE_TOKEN_QQ"))).toBe(true);
+		const out = formatReport({ ...report, manifestPath: "m" }, false);
+		expect(out).toContain("FAIL");
+		expect(out).toContain("server not ready");
+		expect(out).toContain("SUBSTRATE_TOKEN_QQ");
+		for (const value of [V1, V2, V3, V4, OTHER]) expect(out).not.toContain(value);
+	});
+
+	test("a missing required name fails with a missing reason", () => {
+		const dir = makeTmp();
+		const manifest = fixtureManifest(dir);
+		const td = join(dir, "td");
+		mkdirSync(td);
+		const srv = join(dir, "srv.env");
+		const report = checkNames(
+			manifest,
+			fixtureReads(
+				{
+					[srv]: `SUBSTRATE_TOKEN_CLAUDE_CODE=${V1}\nSUBSTRATE_TOKEN_CURSOR=${V3}\nSUBSTRATE_TOKEN_SUBSTRATE=${V4}\nSUBSTRATE_TOKEN_HERMES=${V1}\n`,
+					[join(dir, "cli.env")]: `SUBSTRATE_TOKEN=${V1}\n`,
+				},
+				{ [join(td, "cursor")]: GOOD_STAT },
+			),
+			srv,
+			td,
+		);
+		expect(report.pass).toBe(false);
+		expect(report.strandedLive).toEqual([]);
+		const out = formatReport({ ...report, manifestPath: "m" }, false);
+		expect(out).toContain("FAIL");
+		expect(out).toContain("server not ready");
+		expect(out).toContain("missing SUBSTRATE_OPERATOR_TOKENS");
+	});
+
+	test("a shared bare bearer in a herdr file fails with a server-not-ready line", () => {
+		const dir = makeTmp();
+		const manifest = fixtureManifest(dir);
+		const td = join(dir, "td");
+		mkdirSync(td);
+		const srv = join(dir, "srv.env");
+		const herdrPath = "/etc/substrate/substrate-collector-herdr.env";
+		const report = checkNames(
+			manifest,
+			fixtureReads(
+				{
+					[srv]: `SUBSTRATE_TOKEN_CLAUDE_CODE=${V1}\nSUBSTRATE_TOKEN_CURSOR=${V3}\nSUBSTRATE_TOKEN_SUBSTRATE=${V4}\nSUBSTRATE_TOKEN_HERMES=${V1}\nSUBSTRATE_OPERATOR_TOKENS=${V2}\n`,
+					[join(dir, "cli.env")]: `SUBSTRATE_TOKEN=${V1}\n`,
+				},
+				{ [join(td, "cursor")]: GOOD_STAT },
+			),
+			srv,
+			td,
+			[{ path: herdrPath, text: `SUBSTRATE_TOKEN=${V1}\n` }],
+		);
+		expect(report.pass).toBe(false);
+		expect(report.strandedLive).toEqual([]);
+		expect(report.errors).toContain(`shared bearer SUBSTRATE_TOKEN in ${herdrPath}; herdr resolves per surface, remove it`);
+		const text = formatReport({ ...report, manifestPath: "m" }, false);
+		const json = formatReport({ ...report, manifestPath: "m" }, true);
+		expect(text).toContain("FAIL");
+		expect(text).toContain("server not ready");
+		expect(text).toContain(`shared bearer SUBSTRATE_TOKEN in ${herdrPath}`);
+		for (const value of [V1, V2, V3, V4]) {
+			expect(text).not.toContain(value);
+			expect(json).not.toContain(value);
+		}
+	});
+
+	test("herdr files without the bare bearer pass and leak no values", () => {
+		const dir = makeTmp();
+		const manifest = fixtureManifest(dir);
+		const td = join(dir, "td");
+		mkdirSync(td);
+		const srv = join(dir, "srv.env");
+		const reads = fixtureReads(
+			{
+				[srv]: `SUBSTRATE_TOKEN_CLAUDE_CODE=${V1}\nSUBSTRATE_TOKEN_CURSOR=${V3}\nSUBSTRATE_TOKEN_SUBSTRATE=${V4}\nSUBSTRATE_TOKEN_HERMES=${V1}\nSUBSTRATE_OPERATOR_TOKENS=${V2}\n`,
+				[join(dir, "cli.env")]: `SUBSTRATE_TOKEN=${V1}\n`,
+			},
+			{ [join(td, "cursor")]: GOOD_STAT },
+		);
+		const herdrCases: Array<Array<{ path: string; text: string | null }>> = [
+			[{ path: "/etc/substrate/substrate-collector-herdr.env", text: null }],
+			[{ path: "/etc/substrate/substrate-collector-herdr.env", text: `SUBSTRATE_TOKEN_CLAUDE_CODE=${V1}\n` }],
+		];
+		for (const herdrEnv of herdrCases) {
+			const report = checkNames(manifest, reads, srv, td, herdrEnv);
+			expect(report.pass).toBe(true);
+			const out = formatReport({ ...report, manifestPath: "m" }, false) + formatReport({ ...report, manifestPath: "m" }, true);
+			expect(out).toContain("PASS");
+			expect(out).not.toContain("server not ready");
+			for (const value of [V1, V2, V3, V4]) expect(out).not.toContain(value);
+		}
+	});
 });
 
 describe("checkValues", () => {
@@ -370,6 +516,98 @@ describe("checkValues", () => {
 		expect(errors).toContain("SUBSTRATE_TOKEN_CURSOR");
 		expect(errors).not.toContain(V1);
 		expect(errors).not.toContain(V2);
+		expect(report.pass).toBe(false);
+		expect(formatReport({ ...report, manifestPath: "m" }, false)).toContain("server not ready");
+	});
+
+	test("a missing required name fails values mode with a missing reason", () => {
+		const dir = makeTmp();
+		const manifest = fixtureManifest(dir);
+		const report = checkValues(
+			manifest,
+			new Map([
+				["SUBSTRATE_TOKEN_CLAUDE_CODE", V1],
+				["SUBSTRATE_TOKEN_CURSOR", V3],
+				["SUBSTRATE_TOKEN_SUBSTRATE", V4],
+				["SUBSTRATE_TOKEN_HERMES", OTHER],
+			]),
+			new Map([
+				["cli", V1],
+				["cur", V3],
+				["dor", V4],
+			]),
+			join(dir, "srv.env"),
+			join(dir, "td"),
+		);
+		expect(report.strandedLive).toEqual([]);
+		expect(report.pass).toBe(false);
+		const out = formatReport({ ...report, manifestPath: "m" }, false);
+		expect(out).toContain("FAIL");
+		expect(out).toContain("server not ready");
+		expect(out).toContain("missing SUBSTRATE_OPERATOR_TOKENS");
+	});
+
+	test("a shared bare bearer in a herdr file fails values mode", () => {
+		const dir = makeTmp();
+		const manifest = fixtureManifest(dir);
+		const herdrPath = "/etc/substrate/substrate-collector-herdr.env";
+		const report = checkValues(
+			manifest,
+			new Map([
+				["SUBSTRATE_TOKEN_CLAUDE_CODE", V1],
+				["SUBSTRATE_TOKEN_CURSOR", V3],
+				["SUBSTRATE_TOKEN_SUBSTRATE", V4],
+				["SUBSTRATE_TOKEN_HERMES", OTHER],
+				["SUBSTRATE_OPERATOR_TOKENS", V2],
+			]),
+			new Map([
+				["cli", V1],
+				["cur", V3],
+				["dor", V4],
+			]),
+			join(dir, "srv.env"),
+			join(dir, "td"),
+			[{ path: herdrPath, text: `SUBSTRATE_TOKEN=${V1}\n` }],
+		);
+		expect(report.strandedLive).toEqual([]);
+		expect(report.pass).toBe(false);
+		expect(report.errors).toContain(`shared bearer SUBSTRATE_TOKEN in ${herdrPath}; herdr resolves per surface, remove it`);
+		const text = formatReport({ ...report, manifestPath: "m" }, false);
+		const json = formatReport({ ...report, manifestPath: "m" }, true);
+		expect(text).toContain("server not ready");
+		for (const value of [V1, V2, V3, V4, OTHER]) {
+			expect(text).not.toContain(value);
+			expect(json).not.toContain(value);
+		}
+	});
+
+	test("herdr files without the bare bearer pass values mode and leak no values", () => {
+		const dir = makeTmp();
+		const manifest = fixtureManifest(dir);
+		const serverValues = new Map([
+			["SUBSTRATE_TOKEN_CLAUDE_CODE", V1],
+			["SUBSTRATE_TOKEN_CURSOR", V3],
+			["SUBSTRATE_TOKEN_SUBSTRATE", V4],
+			["SUBSTRATE_TOKEN_HERMES", OTHER],
+			["SUBSTRATE_OPERATOR_TOKENS", V2],
+		]);
+		const clientValues = new Map([
+			["cli", V1],
+			["cur", V3],
+			["dor", V4],
+		]);
+		const herdrCases: Array<Array<{ path: string; text: string | null }>> = [
+			[{ path: "/etc/substrate/substrate-collector-herdr.env", text: null }],
+			[{ path: "/etc/substrate/substrate-collector-herdr.env", text: `SUBSTRATE_TOKEN_CLAUDE_CODE=${V1}\n` }],
+		];
+		for (const herdrEnv of herdrCases) {
+			const report = checkValues(manifest, serverValues, clientValues, join(dir, "srv.env"), join(dir, "td"), herdrEnv);
+			expect(report.pass).toBe(true);
+			const out = formatReport({ ...report, manifestPath: "m" }, false) + formatReport({ ...report, manifestPath: "m" }, true);
+			expect(out).toContain("PASS");
+			expect(out).not.toContain("server not ready");
+			for (const value of [V1, V2, V3, V4, OTHER]) expect(out).not.toContain(value);
+		}
 	});
 });
 

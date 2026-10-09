@@ -66,7 +66,7 @@ two cannot drift.
 | `hermes-engine` | `hermes` | external note: claude-ultrathink engine resolution in its own repo | `live` | metrics 2xx points under surface hermes |
 | `connector` | `grok-bot` | connector env file, bare client variable | `live` | metrics 2xx points under surface grok-bot |
 | `gateway` | `grok-bot` | gateway env file, bare client variable | `live` | metrics 2xx points under surface grok-bot |
-| `collector-grok` | `grok-build` | per-collector grok env file, bare client variable | `live` | metrics 2xx points under surface grok-build |
+| `collector-grok` | `grok-build` | collector env file /etc/substrate/collector-grok.env, bare client variable | `live` | metrics 2xx points under surface grok-build |
 | `operator` | `claude-code` | operator token file in the operator config dir | `live` | parity check passes with the operator token |
 | `chaos-smoke` | `grok-bot` | external note: manual script run by the operator with the caller env bearer | `live` | manual run only |
 | `parity-check` | `claude-code` | external note: manual script whose bearer comes from the client resolver for surface claude-code | `live` | manual run only |
@@ -129,7 +129,9 @@ instead; the file itself stays root-owned at 0600:
 
 ```sh
 umask 077
-printf 'BARE_VAR=%s\n' "$(openssl rand -hex 32)" >> "$ENV_FILE"
+: "${BARE_VAR:?set BARE_VAR to the variable that env file carries}"
+: "${ENV_FILE:?set ENV_FILE to the target env file}"
+printf '%s=%s\n' "$BARE_VAR" "$(openssl rand -hex 32)" >> "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 ```
 
@@ -147,26 +149,45 @@ never run the restarts, and never read a value; the names-only check is
 the agent-safe step, the values check is operator only.
 
 1. Phase 19's collector cutover has happened (its runbook,
-   `lane-b-collectors.md`).
+   `lane-b-collectors.md`) and is verified here: `bun run collectors:status`
+   shows zero refused AND both collector units active. This verification is
+   the procedural cutover gate for this window. The manifest
+   `after-phase-19` states stay unchanged per D20-11; they are enforced by
+   this gate, not by the checker.
 2. The client-side token files and env entries are written, per the table
-   above and the generation section.
-3. `bun run identity:check` passes names-only (agent), then with the
-   values flag (operator).
-4. The server variables are added to the server env file and
+   above and the generation section, plus the herdr cleanup: remove the bare
+   SUBSTRATE_TOKEN line from /etc/substrate/substrate-collector-herdr.env
+   provisioned by the lane-b cutover (leave SUBSTRATE_URL), since per-event
+   resolution replaces it. The checker flags that line when present.
+3. `bun run identity:check` passes names-only (agent) against the live
+   server file as today, then the values check (operator) runs against a
+   STAGED server file, not the live one:
+   a. Write the proposed token lists into a staged copy of the server env
+      file, leaving the live file unchanged.
+   b. Run `bun run identity:check --values --server-env <staged-path>`
+      until it passes.
+   c. Keep the live server file untouched until the approved restart in
+      step 5; the staged file is what step 5 promotes.
+4. Client-readiness gate: the claude-ultrathink registration change is
+   merged AND the installed plugin refreshed from it, the MCP entry writer
+   check run, the git post-commit hook installed in the listed repos, and
+   the Cursor hooks checked. Pre-refresh clients cannot send file-based
+   bearers and would 401 from the restart until refreshed, so the
+   values-mode PASS in step 3 plus this gate is what the soak depends on.
+5. The staged server variables are promoted to the server env file and
    `substrate-mcp` restarts once, optionally with the repo unit installed
    per `production-parity.md`.
-5. Post-switch evidence below, then a 30-minute soak covering one Muse
+6. Post-switch evidence below, then a 30-minute soak covering one Muse
    writer tick and at least one real prompt per live client.
-6. The claude-ultrathink registration change is merged and the installed
-   plugin refreshed.
-7. The git post-commit hook is installed in the listed repos and the
-   Cursor hooks are checked.
-8. The production UAT run: read-only scenarios first, then the approved
+7. The production UAT run: read-only scenarios first, then the approved
    live scenarios.
 
-Because the anonymous server ignores unknown bearers, step 2 has no
-effect on production: every live client can hold its token before the
-server starts demanding it. The server restart is the only state change.
+The ordering above is deliberately client-first (D20-09): every live client
+holds and can send its token before the server starts demanding one. It
+supersedes the draft D20-20 numbering, which placed enforcement before
+client readiness. Because the anonymous server ignores unknown bearers,
+step 2 has no effect on production. The server restart is the only state
+change.
 
 ## Bridge variant (optional)
 
@@ -185,30 +206,39 @@ The dormant rows (`dispatcher`, `substrate-host`, `skills-sync`,
 code cannot send a bearer yet or is broken until its restoring phase, so
 their attempts at switch-on answer 401. That is expected and harmless:
 dispatch is disabled, the host is inactive, and sync, bridge and miner
-already fail. The runbook records the count instead of hiding it: read
-the unattributed 4xx points once right after the restart and again after
+already fail. The runbook records the count instead of hiding it: sum the
+unattributed 4xx point values once right after the restart and again after
 the 30-minute soak, and attribute any delta to the dormant roster above
 or to a stranded client. A delta that names a live client is the failure
 case, not dormancy.
 
-The 401 read is `GET /metrics` with the operator token: count the points
-of the request-total counter with surface unattributed and status 4xx,
-and confirm the response's start time is the restart under test:
+The 401 read is `GET /metrics` with the operator token: sum the `value`
+fields of the request-total counter points with surface unattributed and
+status 4xx (each point is one series, so counting points misses requests;
+only the summed values count requests), and confirm the response's start
+time is the restart under test:
 
 ```sh
-curl -s -H "Authorization: Bearer $(head -n 1 $OPERATOR_TOKEN_FILE)" "$SUBSTRATE_URL/metrics" | jq '[.metrics[] | select(.name == "substrate.request.total") | .points[] | select(.attributes.surface == "unattributed" and .attributes.status == "4xx")] | length'
+curl -s -H "Authorization: Bearer $(head -n 1 $OPERATOR_TOKEN_FILE)" "$SUBSTRATE_URL/metrics" | jq '[.metrics[] | select(.name == "substrate.request.total") | .points[] | select(.attributes.surface == "unattributed" and .attributes.status == "4xx") | .value] | add // 0'
 ```
 
 `OPERATOR_TOKEN_FILE` is the operator token file and `SUBSTRATE_URL` the
 production base URL, both already on the operator shell. The same
-counter's 2xx points per surface show each live client's token resolving,
-brief callers included. Record both readings beside the window row in the
+counter's 2xx point values summed per surface show each live client's
+token resolving, brief callers included:
+
+```sh
+curl -s -H "Authorization: Bearer $(head -n 1 $OPERATOR_TOKEN_FILE)" "$SUBSTRATE_URL/metrics" | jq '[.metrics[] | select(.name == "substrate.request.total") | .points[] | select(.attributes.status == "2xx") | {surface: .attributes.surface, value: .value}] | group_by(.surface) | map({surface: .[0].surface, requests: (map(.value) | add)})'
+```
+
+Record both summed readings beside the window row in the
 evidence table.
 
 ## Identity evidence
 
 Dated readings, newest last. The `--json` fields fill one row per run;
-the metrics readings fill the 401 columns.
+the summed metrics readings fill the 401 columns. Both 4xx columns hold
+summed request counts (sum of point `value` fields), not point counts.
 
 | Date (UTC) | identity:check | stranded live clients | unattributed 4xx at restart | unattributed 4xx after soak |
 | --- | --- | --- | --- | --- |

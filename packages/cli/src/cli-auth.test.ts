@@ -40,10 +40,12 @@ afterAll(() => {
  * The stub listens in *this* process, and `spawnSync` blocks this event
  * loop — so the CLI's request would never be served and the command would
  * report the substrate unreachable. The env is an allowlist, never
- * `...process.env`, so an operator token cannot leak into the child.
+ * `...process.env`, so an operator token cannot leak into the child. Bun
+ * would still load the checkout `.env` file, so `--no-env-file` keeps the
+ * run independent of local credentials, like the boot-refusal tests.
  */
 async function runCli(args: string[], env: Record<string, string>) {
-	const child = Bun.spawn(["bun", CLI, ...args], {
+	const child = Bun.spawn(["bun", "--no-env-file", CLI, ...args], {
 		cwd: ROOT,
 		env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", ...env },
 		stdout: "pipe",

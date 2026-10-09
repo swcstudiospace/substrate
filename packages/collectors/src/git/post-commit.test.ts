@@ -33,12 +33,14 @@ async function repoWithCommit(subject: string): Promise<string> {
 	return repo;
 }
 
-function listen(status: number, error: string): Promise<{ url: string; bodies: string[]; close: () => void }> {
+function listen(status: number, error: string): Promise<{ url: string; bodies: string[]; auths: Array<string | null>; close: () => void }> {
 	const bodies: string[] = [];
+	const auths: Array<string | null> = [];
 	const server = createServer(async (req, res) => {
 		const chunks: Buffer[] = [];
 		for await (const chunk of req) chunks.push(chunk as Buffer);
 		bodies.push(Buffer.concat(chunks).toString("utf8"));
+		auths.push(req.headers.authorization ?? null);
 		res.writeHead(status, { "content-type": "application/json" });
 		res.end(JSON.stringify({ error }));
 	});
@@ -48,6 +50,7 @@ function listen(status: number, error: string): Promise<{ url: string; bodies: s
 			resolve({
 				url: `http://127.0.0.1:${port}`,
 				bodies,
+				auths,
 				close: () => server.close(),
 			});
 		});
@@ -262,6 +265,90 @@ describe("post-commit", () => {
 			expect(Date.now() - started).toBeLessThan(1500);
 		} finally {
 			release();
+			server.close();
+		}
+	});
+
+	test("resolves the bearer from the per-surface tokens-dir file", async () => {
+		const repo = await repoWithCommit("tokens-dir bearer");
+		const dir = mkdtempSync(join(tmpdir(), "hook-tokens-"));
+		writeFileSync(join(dir, "cursor"), "hook-cursor-file\n");
+		const server = await listen(202, "");
+		try {
+			const result = await runHook(repo, {
+				SUBSTRATE_URL: server.url,
+				SUBSTRATE_TIMEOUT_MS: "1000",
+				SUBSTRATE_TOKEN: "",
+				SUBSTRATE_TOKENS_DIR: dir,
+				SUBSTRATE_SURFACE: "cursor",
+			});
+			expect(result.exitCode).toBe(0);
+			expect(server.auths).toEqual(["Bearer hook-cursor-file"]);
+			expect(result.stderr).not.toContain("hook-cursor-file");
+		} finally {
+			server.close();
+		}
+	});
+
+	test("the environment value wins over the tokens-dir file", async () => {
+		const repo = await repoWithCommit("env wins");
+		const dir = mkdtempSync(join(tmpdir(), "hook-tokens-"));
+		writeFileSync(join(dir, "cursor"), "hook-cursor-file\n");
+		const server = await listen(202, "");
+		try {
+			const result = await runHook(repo, {
+				SUBSTRATE_URL: server.url,
+				SUBSTRATE_TIMEOUT_MS: "1000",
+				SUBSTRATE_TOKEN: "hook-env-value",
+				SUBSTRATE_TOKENS_DIR: dir,
+				SUBSTRATE_SURFACE: "cursor",
+			});
+			expect(result.exitCode).toBe(0);
+			expect(server.auths).toEqual(["Bearer hook-env-value"]);
+		} finally {
+			server.close();
+		}
+	});
+
+	test("the token-file variable sits between env and tokens dir", async () => {
+		const repo = await repoWithCommit("token file bearer");
+		const dir = mkdtempSync(join(tmpdir(), "hook-tokens-"));
+		writeFileSync(join(dir, "cursor"), "hook-cursor-file\n");
+		const file = join(dir, "agent.token");
+		writeFileSync(file, "hook-file-value\n");
+		const server = await listen(202, "");
+		try {
+			const result = await runHook(repo, {
+				SUBSTRATE_URL: server.url,
+				SUBSTRATE_TIMEOUT_MS: "1000",
+				SUBSTRATE_TOKEN: "",
+				SUBSTRATE_TOKEN_FILE: file,
+				SUBSTRATE_TOKENS_DIR: dir,
+				SUBSTRATE_SURFACE: "cursor",
+			});
+			expect(result.exitCode).toBe(0);
+			expect(server.auths).toEqual(["Bearer hook-file-value"]);
+		} finally {
+			server.close();
+		}
+	});
+
+	test("an unsafe surface never reaches the tokens dir", async () => {
+		const repo = await repoWithCommit("unsafe surface");
+		const dir = mkdtempSync(join(tmpdir(), "hook-tokens-"));
+		writeFileSync(join(dir, "cursor"), "hook-cursor-file\n");
+		const server = await listen(202, "");
+		try {
+			const result = await runHook(repo, {
+				SUBSTRATE_URL: server.url,
+				SUBSTRATE_TIMEOUT_MS: "1000",
+				SUBSTRATE_TOKEN: "",
+				SUBSTRATE_TOKENS_DIR: dir,
+				SUBSTRATE_SURFACE: "../cursor",
+			});
+			expect(result.exitCode).toBe(0);
+			expect(server.auths).toEqual([null]);
+		} finally {
 			server.close();
 		}
 	});

@@ -8,20 +8,28 @@
 import { describe, expect, test } from "bun:test";
 import {
 	classifyTarget,
+	countConversation,
+	expectBackfillCounts,
 	expectCrossSurface,
+	expectGraphHasNodes,
+	expectGraphIdentifiers,
 	expectHealthz,
+	expectMemorySearch,
 	expectOutageBounds,
 	expectToolsList,
 	flag,
+	namesSubstrateToken,
 	parseOptions,
 	parseScenarios,
 	parseUatBody,
 	refuseWriteScenarios,
 	renderReport,
 	resolvePlugin,
+	runChild,
 	runRepo,
 	runTag,
 	sanitizeHost,
+	scratchGitEnv,
 	UAT_PRODUCTION_PORTS,
 	validateTag,
 	V1_TOOLS,
@@ -189,8 +197,131 @@ describe("fixture", () => {
 });
 
 describe("plugin resolution", () => {
-	test("the installed plugin resolves with version and commit", () => {
-		const plugin = resolvePlugin();
-		expect(plugin.dir).not.toBeNull();
+	test("a fabricated registry resolves with dir, version and commit", async () => {
+		const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+		const { tmpdir } = await import("node:os");
+		const { join } = await import("node:path");
+		const home = mkdtempSync(join(tmpdir(), "uat-home-"));
+		const installPath = mkdtempSync(join(tmpdir(), "uat-plugin-"));
+		mkdirSync(join(home, ".claude", "plugins"), { recursive: true });
+		writeFileSync(
+			join(home, ".claude", "plugins", "installed_plugins.json"),
+			JSON.stringify({ plugins: { "ultrathink@ultrathink": [{ installPath, version: "9.9.9", gitCommitSha: "cafef00d" }] } }),
+		);
+		const saved = process.env.HOME;
+		process.env.HOME = home;
+		try {
+			const plugin = resolvePlugin();
+			expect(plugin.dir).toBe(installPath);
+			expect(plugin.version).toBe("9.9.9");
+			expect(plugin.commit).toBe("cafef00d");
+		} finally {
+			if (saved === undefined) delete process.env.HOME;
+			else process.env.HOME = saved;
+		}
+	});
+	test("an empty home with no fallback documents clean-checkout behavior", async () => {
+		const { mkdtempSync } = await import("node:fs");
+		const { tmpdir } = await import("node:os");
+		const { join } = await import("node:path");
+		const home = mkdtempSync(join(tmpdir(), "uat-empty-home-"));
+		const saved = process.env.HOME;
+		process.env.HOME = home;
+		try {
+			const plugin = resolvePlugin(home, join(home, "no-fallback"));
+			expect(plugin.dir).toBeNull();
+			expect(plugin.version).toBeNull();
+			expect(plugin.commit).toBeNull();
+		} finally {
+			if (saved === undefined) delete process.env.HOME;
+			else process.env.HOME = saved;
+		}
+	});
+});
+
+describe("memory search shape", () => {
+	test("a top-level array with rows passes", () => {
+		expect(expectMemorySearch([{ id: "mem_1" }, { id: "mem_2" }])).toEqual([]);
+	});
+	test("an empty array fails", () => {
+		expect(expectMemorySearch([])).toEqual(["memory_search returned 0 rows"]);
+	});
+	test("a non-array body fails", () => {
+		expect(expectMemorySearch({ entries: [{ id: "mem_1" }] })).toEqual(["memory_search returned -1 rows"]);
+		expect(expectMemorySearch(null)).toEqual(["memory_search returned -1 rows"]);
+	});
+});
+
+describe("graph read strictness", () => {
+	test("graph_get needs a non-empty nodes array", () => {
+		expect(expectGraphHasNodes({ nodes: [{ node_id: "n1" }] })).toEqual([]);
+		expect(expectGraphHasNodes({ nodes: [] })).toHaveLength(1);
+		expect(expectGraphHasNodes(null)).toHaveLength(1);
+		expect(expectGraphHasNodes({})).toHaveLength(1);
+	});
+	test("kickoff graphs need a string Linear identifier", () => {
+		expect(expectGraphIdentifiers({ nodes: [{ node_id: "n1", linear_identifier: "SPE-1" }] })).toEqual([]);
+		expect(expectGraphIdentifiers({ nodes: [{ node_id: "n1" }] })).toHaveLength(1);
+		expect(expectGraphIdentifiers({ nodes: [] })).toHaveLength(1);
+	});
+	test("backfill read-back needs nodes and identifiers", () => {
+		expect(expectBackfillCounts(3, 2)).toEqual([]);
+		expect(expectBackfillCounts(0, 2)).toHaveLength(1);
+		expect(expectBackfillCounts(3, 0)).toHaveLength(1);
+		expect(expectBackfillCounts(0, 0)).toHaveLength(2);
+	});
+});
+
+describe("substrate token header", () => {
+	test("both supported Authorization forms name the variable", () => {
+		expect(namesSubstrateToken("Bearer ${SUBSTRATE_TOKEN}")).toBe(true);
+		expect(namesSubstrateToken("Bearer ${SUBSTRATE_TOKEN:-}")).toBe(true);
+	});
+	test("a wrong variable or empty header is rejected", () => {
+		expect(namesSubstrateToken("Bearer ${OTHER_TOKEN}")).toBe(false);
+		expect(namesSubstrateToken("Bearer ")).toBe(false);
+		expect(namesSubstrateToken("")).toBe(false);
+		expect(namesSubstrateToken(undefined)).toBe(false);
+	});
+});
+
+describe("scratch git isolation", () => {
+	test("the env builder pins hooksPath off shared config", () => {
+		const env = scratchGitEnv("/tmp/uat6-hooks");
+		expect(env).toMatchObject({
+			GIT_CONFIG_NOSYSTEM: "1",
+			GIT_CONFIG_COUNT: "1",
+			GIT_CONFIG_KEY_0: "core.hooksPath",
+			GIT_CONFIG_VALUE_0: "/tmp/uat6-hooks",
+		});
+	});
+});
+
+describe("hook event read-back", () => {
+	test("conversation matching filters on payload.conversation_id", () => {
+		const events = [
+			{ payload: { conversation_id: "uat-x-s6-conv" } },
+			{ payload: { conversation_id: "other" } },
+			{ payload: {} },
+		];
+		expect(countConversation(events, "uat-x-s6-conv")).toBe(1);
+		expect(countConversation(events, "missing")).toBe(0);
+		expect(countConversation(null, "uat-x-s6-conv")).toBe(0);
+	});
+});
+
+describe("child deadline", () => {
+	test("a failing exit propagates its status", async () => {
+		const done = await runChild(["sh", "-c", "exit 3"], {});
+		expect(done.status).toBe(3);
+	});
+	test("a sleep past a tiny timeout reports timed-out", async () => {
+		const hung = await runChild(["sleep", "5"], {}, undefined, undefined, 200);
+		expect(hung.status).toBe(-1);
+		expect(hung.error).toBe("timed-out");
+	});
+	test("outage bounds hold canned elapsed values", () => {
+		expect(expectOutageBounds(120)).toEqual([]);
+		expect(expectOutageBounds(1751)).toHaveLength(1);
 	});
 });

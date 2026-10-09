@@ -264,6 +264,56 @@ export function expectCrossSurface(brief: string, repo: string, holder: string):
 	return problems;
 }
 
+/** Scenario 2's plain memory_search reply: a top-level array of newest matches. */
+export function expectMemorySearch(searched: unknown): string[] {
+	const entryCount = Array.isArray(searched) ? searched.length : -1;
+	return entryCount <= 0 ? [`memory_search returned ${entryCount} rows`] : [];
+}
+
+/** A graph_get read carries a non-empty nodes array. */
+export function expectGraphHasNodes(body: unknown): string[] {
+	const nodes = (body as { nodes?: unknown } | null)?.nodes;
+	return Array.isArray(nodes) && nodes.length > 0 ? [] : ["graph_get returned no nodes"];
+}
+
+/** A graph's nodes carry at least one string Linear identifier. */
+export function expectGraphIdentifiers(body: unknown): string[] {
+	const nodes = (body as { nodes?: Array<{ linear_identifier?: unknown }> } | null)?.nodes;
+	if (!Array.isArray(nodes)) return ["graph_get returned no nodes"];
+	return nodes.some((node) => typeof node.linear_identifier === "string")
+		? []
+		: ["graph_get returned no Linear identifiers"];
+}
+
+/** Scenario 3's backfill read-back: the fixture guarantees nodes and identifiers. */
+export function expectBackfillCounts(nodes: number, identifiers: number): string[] {
+	const problems: string[] = [];
+	if (nodes <= 0) problems.push(`backfill read back ${nodes} nodes`);
+	if (identifiers <= 0) problems.push(`backfill read back ${identifiers} Linear identifiers`);
+	return problems;
+}
+
+/** The substrate MCP entry's Authorization header names the token variable. */
+export function namesSubstrateToken(authorization: unknown): boolean {
+	return typeof authorization === "string" && /Bearer \$\{SUBSTRATE_TOKEN(?::-[^}]*)?\}/.test(authorization);
+}
+
+/** Count read-back events whose payload.conversation_id equals the run-tagged id. */
+export function countConversation(events: unknown, conversationId: string): number {
+	if (!Array.isArray(events)) return 0;
+	return events.filter((event) => (event as { payload?: { conversation_id?: unknown } } | null)?.payload?.conversation_id === conversationId).length;
+}
+
+/** Scratch git isolation: every git child ignores operator-shared config. */
+export function scratchGitEnv(hooksDir: string): Record<string, string> {
+	return {
+		GIT_CONFIG_NOSYSTEM: "1",
+		GIT_CONFIG_COUNT: "1",
+		GIT_CONFIG_KEY_0: "core.hooksPath",
+		GIT_CONFIG_VALUE_0: hooksDir,
+	};
+}
+
 export interface RunContext {
 	base: string;
 	bearer: string | null;
@@ -354,9 +404,8 @@ async function scenario2(ctx: RunContext): Promise<ScenarioVerdict> {
 		else evidence.push("graph_get: graph with nodes returned");
 
 		const searched = await mcpTool(ctx.base, ctx.bearer, "memory_search", { query: "the", limit: 5 });
-		const entries = (searched as { entries?: unknown } | null)?.entries;
-		const entryCount = Array.isArray(entries) ? entries.length : -1;
-		if (entryCount < 0) problems.push("memory_search answered nothing usable");
+		const entryCount = Array.isArray(searched) ? searched.length : -1;
+		if (entryCount <= 0) problems.push(`memory_search returned ${entryCount} rows`);
 		evidence.push(`memory_search: ${entryCount} rows`);
 
 		evidence.push("anchors shape and raw row counts: operator-approved read-only SQL step, recorded separately");
@@ -387,8 +436,11 @@ async function scenario3(ctx: RunContext): Promise<ScenarioVerdict> {
 			if (!graph) return ["production backfill is a graph_get of an operator-exported graph id: pass --graph <gid>"];
 			const read = await mcpTool(ctx.base, ctx.bearer, "graph_get", { graph_id: graph });
 			if (read === null) return ["graph_get answered nothing usable"];
-			evidence.push(`graph_get: operator-exported graph returned`);
-			return [];
+			const graphProblems = [...expectGraphHasNodes(read), ...expectGraphIdentifiers(read)];
+			if (graphProblems.length > 0) return graphProblems;
+			const nodesValue = typeof read === "object" && read !== null && "nodes" in read ? read.nodes : undefined;
+			const nodeCount = Array.isArray(nodesValue) ? nodesValue.length : 0;
+			evidence.push(`graph_get: operator-exported graph returned with ${nodeCount} nodes`);
 		}
 		const fixturePath = new URL("./uat/fixtures/notion-rows.json", import.meta.url);
 		const raw: unknown = JSON.parse(readFileSync(fixturePath, "utf8"));
@@ -420,6 +472,8 @@ async function scenario3(ctx: RunContext): Promise<ScenarioVerdict> {
 			nodes += graphNodes.length;
 			identifiers += graphNodes.filter((node) => typeof node.linear_identifier === "string").length;
 		}
+		const countProblems = expectBackfillCounts(nodes, identifiers);
+		if (countProblems.length > 0) return countProblems;
 		evidence.push(`${plans.length} graphs backfilled from exported rows, ${nodes} nodes, ${identifiers} Linear identifiers`);
 		return [];
 	});
@@ -432,9 +486,9 @@ export interface PluginInfo {
 }
 
 /** The installed claude-ultrathink plugin: version and commit recorded, never bodies. */
-export function resolvePlugin(): PluginInfo {
+export function resolvePlugin(home = process.env.HOME ?? "/root", fallback = "/root/src/repos/claude-ultrathink"): PluginInfo {
 	try {
-		const installed = JSON.parse(readFileSync(join(process.env.HOME ?? "/root", ".claude/plugins/installed_plugins.json"), "utf8")) as {
+		const installed = JSON.parse(readFileSync(join(home, ".claude/plugins/installed_plugins.json"), "utf8")) as {
 			plugins?: Record<string, Array<{ installPath?: string; version?: string; gitCommitSha?: string }>>;
 		};
 		const entry = installed.plugins?.["ultrathink@ultrathink"]?.[0];
@@ -444,7 +498,6 @@ export function resolvePlugin(): PluginInfo {
 	} catch {
 		// Fall through to the checkout fallback.
 	}
-	const fallback = "/root/src/repos/claude-ultrathink";
 	if (existsSync(join(fallback, "src/substrate/brief.ts"))) return { dir: fallback, version: null, commit: null };
 	return { dir: null, version: null, commit: null };
 }
@@ -499,15 +552,20 @@ async function scenario5(ctx: RunContext): Promise<ScenarioVerdict> {
 		} | null;
 		if (!substrate) problems.push("no MCP server named substrate in the Claude Code config");
 		else {
-			const headerValues = Object.values(substrate.headers ?? {}).join(" ");
-			const namesToken = headerValues.includes("${SUBSTRATE_TOKEN}");
+			const headers = substrate.headers ?? {};
+			const authorization = headers.Authorization ?? headers.authorization ?? "";
+			const namesToken = namesSubstrateToken(authorization);
 			if (!namesToken) problems.push("substrate entry names no token variable in its Authorization header");
 			evidence.push(`substrate MCP entry present, Authorization names token variable: ${namesToken}`);
 		}
 		if (ctx.graph) {
 			const read = await mcpTool(ctx.base, ctx.bearer, "graph_get", { graph_id: ctx.graph });
 			if (read === null) problems.push("graph_get answered nothing usable for the kickoff graph");
-			else evidence.push("kickoff graph returned with nodes and identifiers");
+			else {
+				const kickoffProblems = [...expectGraphHasNodes(read), ...expectGraphIdentifiers(read)];
+				if (kickoffProblems.length > 0) problems.push(...kickoffProblems.map((problem) => `kickoff graph: ${problem}`));
+				else evidence.push("kickoff graph returned with nodes and Linear identifiers");
+			}
 		} else {
 			evidence.push("live kickoff graph not given (--graph): config check only");
 		}
@@ -523,11 +581,12 @@ function checkoutArgv(rel: string, ...args: string[]): string[] {
 	return [process.execPath, `${CHECKOUT_ROOT}/${rel}`, ...args];
 }
 
-async function runChild(
+export async function runChild(
 	argv: string[],
 	env: Record<string, string | undefined>,
 	stdin?: string,
 	cwd?: string,
+	timeoutMs = 30000,
 ): Promise<{ status: number; stdout: string; elapsedMs: number; error?: string }> {
 	const started = performance.now();
 	try {
@@ -537,9 +596,23 @@ async function runChild(
 			writer.write(stdin);
 			writer.end();
 		}
-		const [stdout] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-		const status = await proc.exited;
-		return { status, stdout, elapsedMs: performance.now() - started };
+		const output = Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+		let timedOut = false;
+		const timer = setTimeout(() => {
+			timedOut = true;
+			try {
+				proc.kill();
+			} catch {
+				// Already exited; the race below resolves first.
+			}
+		}, timeoutMs);
+		try {
+			const [[stdout], status] = await Promise.all([output, proc.exited]);
+			if (timedOut) return { status: -1, stdout: "", elapsedMs: performance.now() - started, error: "timed-out" };
+			return { status, stdout, elapsedMs: performance.now() - started };
+		} finally {
+			clearTimeout(timer);
+		}
 	} catch (cause) {
 		return { status: -1, stdout: "", elapsedMs: performance.now() - started, error: String(cause) };
 	}
@@ -565,18 +638,26 @@ async function scenario6(ctx: RunContext): Promise<ScenarioVerdict> {
 
 		if (target === "production") {
 			const check = await runChild(checkoutArgv("packages/projector/src/cursor.ts", "--check"), {});
-			evidence.push(`cursor --check exit ${check.status} on the host`);
-			if (ctx.live) evidence.push("real Cursor session and commit: operator path, recorded separately");
+			if (check.status !== 0) problems.push(`cursor --check exited ${check.status} on the host`);
+			else evidence.push(`cursor --check exit ${check.status} on the host`);
+			const checkoutHookCheck = await runChild(checkoutArgv("packages/collectors/src/install-git-hook.ts", "--check", CHECKOUT_ROOT), {});
+			if (checkoutHookCheck.status !== 0) problems.push(`post-commit hook --check exited ${checkoutHookCheck.status} on the checkout root`);
+			else evidence.push("post-commit hook: present on the checkout root");
+			evidence.push("real Cursor session and commit: operator path, recorded separately (the script cannot itself perform a real user session)");
 			return problems;
 		}
 
 		const scratch = mkdtempSync(join(tmpdir(), "uat6-"));
 		const repoEnv = { SUBSTRATE_URL: ctx.base, SUBSTRATE_TOKEN: ctx.bearer ?? "" };
-		const init = await runChild(["git", "init", "-q", scratch], {});
+		const { mkdirSync, writeFileSync } = await import("node:fs");
+		const hooksDir = join(scratch, "hooks");
+		mkdirSync(hooksDir, { recursive: true });
+		const gitEnv = scratchGitEnv(hooksDir);
+		const init = await runChild(["git", "init", "-q", "--template=", scratch], gitEnv);
 		if (init.status !== 0) return [`git init failed in scratch dir`];
-		await runChild(["git", "-C", scratch, "config", "user.email", "uat@example.com"], {});
-		await runChild(["git", "-C", scratch, "config", "user.name", "uat"], {});
-		await runChild(["git", "-C", scratch, "commit", "-q", "--allow-empty", "-m", "seed"], {});
+		await runChild(["git", "-C", scratch, "config", "user.email", "uat@example.com"], gitEnv);
+		await runChild(["git", "-C", scratch, "config", "user.name", "uat"], gitEnv);
+		await runChild(["git", "-C", scratch, "commit", "-q", "--allow-empty", "-m", "seed"], gitEnv);
 
 		const before = (await mcpTool(ctx.base, ctx.bearer, "events_query", { surface: "cursor", kind: "tool.call", repo: ctx.repo, limit: 100 })) as {
 			events?: unknown[];
@@ -594,6 +675,8 @@ async function scenario6(ctx: RunContext): Promise<ScenarioVerdict> {
 		else evidence.push("sessionStart: no event emitted");
 
 		const session = `${runTag(ctx.tag)}-s6`;
+		const conversationId = `${runTag(ctx.tag)}-s6-conv`;
+		const since = new Date().toISOString();
 		const emitRun = await runChild(
 			[...cliArgv(), "emit", "--kind", "tool.call", "--summary", "uat6 synthetic tool call", "--surface", "cursor", "--actor", "human", "--repo", ctx.repo, "--session", session],
 			repoEnv,
@@ -602,31 +685,30 @@ async function scenario6(ctx: RunContext): Promise<ScenarioVerdict> {
 
 		const cursorRoot = join(scratch, "cursor-root");
 		const transcripts = join(scratch, "transcripts");
-		const { mkdirSync, writeFileSync } = await import("node:fs");
 		mkdirSync(cursorRoot, { recursive: true });
 		const transcript = join(cursorRoot, "transcript.md");
 		writeFileSync(transcript, "synthetic transcript\n");
 		const stopRun = await runChild(
 			checkoutArgv("packages/collectors/src/cursor-stop.ts"),
 			{ ...repoEnv, SUBSTRATE_CURSOR_ROOT: cursorRoot, SUBSTRATE_TRANSCRIPTS_DIR: transcripts },
-			JSON.stringify({ conversation_id: "uat6conv-1234", transcript_path: transcript, status: "done" }),
+			JSON.stringify({ conversation_id: conversationId, transcript_path: transcript, status: "done" }),
 		);
 		if (stopRun.status !== 0) problems.push(`stop hook exited ${stopRun.status}`);
 		if (stopRun.stdout !== "") problems.push("stop hook printed on stdout");
 		else evidence.push("stop: exit 0, stdout empty");
 
-		const hook = await runChild(checkoutArgv("packages/collectors/src/install-git-hook.ts", scratch), repoEnv);
+		const hook = await runChild(checkoutArgv("packages/collectors/src/install-git-hook.ts", scratch), { ...repoEnv, ...gitEnv });
 		if (hook.status !== 0) return [...problems, `git hook install exited ${hook.status}`];
-		const hookCheck = await runChild(checkoutArgv("packages/collectors/src/install-git-hook.ts", "--check", scratch), repoEnv);
+		const hookCheck = await runChild(checkoutArgv("packages/collectors/src/install-git-hook.ts", "--check", scratch), { ...repoEnv, ...gitEnv });
 		if (hookCheck.status !== 0) problems.push("post-commit hook not present after install");
 		else evidence.push("post-commit hook: present after install");
 
 		// The hook derives the repo from the origin, so the scratch repo gets
 		// one whose slug is the run repo; the synchronous mode posts inline.
-		await runChild(["git", "-C", scratch, "remote", "add", "origin", `https://example.com/${ctx.repo}`], {});
-		const since = new Date().toISOString();
+		await runChild(["git", "-C", scratch, "remote", "add", "origin", `https://example.com/${ctx.repo}`], gitEnv);
 		await runChild(["git", "-C", scratch, "commit", "-q", "--allow-empty", "-m", "uat6 probe"], {
 			...repoEnv,
+			...gitEnv,
 			SUBSTRATE_SURFACE: "cursor",
 			SUBSTRATE_HOOK_WAIT: "1",
 		});
@@ -647,7 +729,19 @@ async function scenario6(ctx: RunContext): Promise<ScenarioVerdict> {
 			repo: ctx.repo,
 			limit: 10,
 		})) as { events?: unknown[] } | null;
-		evidence.push(`tool.call read-back: ${(toolCalls?.events ?? []).length} row(s)`);
+		const toolCallCount = (toolCalls?.events ?? []).length;
+		if (toolCallCount < 1) problems.push("tool.call event not stored for the synthetic emit");
+		else evidence.push(`tool.call read-back: ${toolCallCount} row(s), synthetic emit stored`);
+		const stops = (await mcpTool(ctx.base, ctx.bearer, "events_query", {
+			surface: "cursor",
+			kind: "session.end",
+			since,
+			limit: 10,
+			include_payload: true,
+		})) as { events?: unknown[] } | null;
+		const stopMatched = countConversation(stops?.events, conversationId);
+		if (stopMatched < 1) problems.push("session.end event not stored for the run-tagged conversation");
+		else evidence.push(`session.end read-back: ${stopMatched} event(s) for the run-tagged conversation`);
 		return problems;
 	});
 }
@@ -693,7 +787,9 @@ async function scenario7(ctx: RunContext): Promise<ScenarioVerdict> {
 			const hookRun = await runChild([...cliArgv(), "brief", "--surface", "cursor"], { SUBSTRATE_URL: hangBase, SUBSTRATE_TOKEN: "" });
 			if (hookRun.status !== 0) problems.push(`hook brief exited ${hookRun.status} against a hanging listener`);
 			if (hookRun.stdout.trim() !== "") problems.push("hook brief printed against a hanging listener");
-			else evidence.push(`hook brief: exit 0, stdout empty in ${Math.round(hookRun.elapsedMs)} ms`);
+			problems.push(...expectOutageBounds(Math.max(0, hookRun.elapsedMs - startupMs)).map((problem) => `hook brief: ${problem}`));
+			if (hookRun.error === "timed-out") problems.push("hook brief timed out");
+			else if (hookRun.stdout.trim() === "") evidence.push(`hook brief: exit 0, stdout empty in ${Math.round(hookRun.elapsedMs)} ms (startup ${Math.round(startupMs)} ms)`);
 		} finally {
 			hang.stop(true);
 		}

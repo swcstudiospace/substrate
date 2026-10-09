@@ -58,6 +58,8 @@ export interface Manifest {
 	server_env: string;
 	required_server_names: string[];
 	clients: ManifestClient[];
+	/** Herdr collector env files checked for a shared bare bearer; absent means none. */
+	herdr_env_files?: string[];
 }
 
 /** True for a client that runs today and must hold a token at switch-on. */
@@ -99,6 +101,7 @@ interface RawManifest {
 	server_env: unknown;
 	required_server_names: unknown;
 	clients: unknown;
+	herdr_env_files: unknown;
 }
 
 /**
@@ -193,11 +196,18 @@ export function loadManifest(path: string): Manifest {
 		}
 	});
 	const requiredNames = raw.required_server_names as string[];
+	const herdrEnvFiles = raw.herdr_env_files;
+	if (herdrEnvFiles !== undefined) {
+		if (!Array.isArray(herdrEnvFiles) || !herdrEnvFiles.every((entry: unknown) => typeof entry === "string" && entry !== "")) {
+			throw new ManifestError(`manifest ${path} needs herdr_env_files as an array of non-empty strings`);
+		}
+	}
 	return {
 		version: 1,
 		server_env: raw.server_env,
 		required_server_names: requiredNames,
 		clients,
+		...(herdrEnvFiles === undefined ? {} : { herdr_env_files: herdrEnvFiles as string[] }),
 	};
 }
 
@@ -405,18 +415,51 @@ function serverSection(manifest: Manifest, names: Map<string, NameEntry>, server
 	}
 	return { serverNames, unexpected, warnings };
 }
+/**
+ * Names-only boot check: a server variable no surface owns refuses boot, so
+ * it fails names mode the same way tokenConfig fails values mode. Names only,
+ * never values.
+ */
+function unknownSurfaceErrors(names: Map<string, NameEntry>): string[] {
+	const out: string[] = [];
+	for (const name of [...names.keys()].sort()) {
+		if (name.startsWith(TOKEN_PREFIX) && surfaceOfVariable(name) === null) {
+			out.push(
+				`${name} names no known surface; remove it or rename it to the SUBSTRATE_TOKEN_<SURFACE> of the surface its value authenticates as`,
+			);
+		}
+	}
+	return out;
+}
+/**
+ * Herdr's effective env files must not carry the shared bare bearer: per the
+ * collector runbook that value would override every per-surface file. Names
+ * only — the value half is dropped at parse time and never reaches output.
+ */
+function herdrErrors(herdrEnv: Array<{ path: string; text: string | null }>): string[] {
+	const out: string[] = [];
+	for (const entry of herdrEnv) {
+		if (entry.text === null) continue;
+		if (parseEnvNames(entry.text).has(BARE_TOKEN)) {
+			out.push(`shared bearer ${BARE_TOKEN} in ${entry.path}; herdr resolves per surface, remove it`);
+		}
+	}
+	return out;
+}
 
 /**
  * Names-only check over injected reads. Token files are stated, never read;
  * env files keep names only. External deliveries report their note and pass:
  * they live in another repo or the operator's procedure, so this script can
- * name them but cannot strand on them.
+ * name them but cannot strand on them. Unknown server suffixes, a shared
+ * bare bearer in a herdr file, or a missing expected name still fail the pass.
  */
 export function checkNames(
 	manifest: Manifest,
 	reads: HostReads,
 	serverEnv: string,
 	tokensDir: string,
+	herdrEnv: Array<{ path: string; text: string | null }> = [],
 ): IdentityReport {
 	const serverText = reads.readText(serverEnv);
 	const names = serverText === null ? new Map<string, NameEntry>() : parseEnvNames(serverText);
@@ -483,6 +526,7 @@ export function checkNames(
 		}
 	});
 	const strandedLive = clients.filter((c) => isLive(c.state) && c.status !== "ok" && c.status !== "external").map((c) => c.id);
+	const errors = [...unknownSurfaceErrors(names), ...herdrErrors(herdrEnv)];
 	return {
 		manifestPath: "",
 		serverEnv,
@@ -492,9 +536,9 @@ export function checkNames(
 		serverNames: section.serverNames,
 		unexpected: section.unexpected,
 		warnings,
-		errors: [],
+		errors,
 		strandedLive,
-		pass: strandedLive.length === 0,
+		pass: strandedLive.length === 0 && errors.length === 0 && section.serverNames.every((entry) => entry.present && !entry.empty),
 	};
 }
 
@@ -524,7 +568,8 @@ function splitList(raw: string): string[] {
  * mismatch when present under another surface or none, missing when absent.
  * External deliveries report unchecked and never fail. The report still
  * carries the names section plus boot's own validator errors, so a
- * duplicated value or an unknown suffix is caught before the restart.
+ * duplicated value or an unknown suffix fails before the restart. A shared
+ * bare bearer in a herdr file or a missing expected name fails the same way.
  */
 export function checkValues(
 	manifest: Manifest,
@@ -532,6 +577,7 @@ export function checkValues(
 	clientValues: Map<string, string | null>,
 	serverEnv: string,
 	tokensDir: string,
+	herdrEnv: Array<{ path: string; text: string | null }> = [],
 ): IdentityReport {
 	const record: Record<string, string> = Object.fromEntries(serverValues);
 	let errors: string[] = [];
@@ -574,6 +620,7 @@ export function checkValues(
 	const strandedLive = clients
 		.filter((c) => isLive(c.state) && (c.status === "missing" || c.status === "mismatch"))
 		.map((c) => c.id);
+	const allErrors = [...errors, ...herdrErrors(herdrEnv)];
 	return {
 		manifestPath: "",
 		serverEnv,
@@ -583,9 +630,9 @@ export function checkValues(
 		serverNames: section.serverNames,
 		unexpected: section.unexpected,
 		warnings: section.warnings,
-		errors,
+		errors: allErrors,
 		strandedLive,
-		pass: strandedLive.length === 0,
+		pass: strandedLive.length === 0 && allErrors.length === 0 && section.serverNames.every((entry) => entry.present && !entry.empty),
 	};
 }
 
@@ -621,10 +668,17 @@ export function formatReport(report: IdentityReport, json: boolean): string {
 	for (const client of report.clients) {
 		lines.push(`${IDENTITY_PREFIX} ${client.id} ${client.surface} ${client.state} ${client.status} — ${client.detail}`);
 	}
+	const missing = report.serverNames.filter((n) => !n.present || n.empty).map((n) => n.name);
+	if (report.errors.length > 0 || missing.length > 0) {
+		const reasons = [...report.errors, ...missing.map((name) => `missing ${name}`)];
+		lines.push(`${IDENTITY_PREFIX} server not ready: ${reasons.join("; ")}`);
+	}
 	lines.push(
 		report.pass
 			? `${IDENTITY_PREFIX} PASS`
-			: `${IDENTITY_PREFIX} FAIL — ${report.strandedLive.length} live client(s) stranded: ${report.strandedLive.join(", ")}`,
+			: report.strandedLive.length > 0
+				? `${IDENTITY_PREFIX} FAIL — ${report.strandedLive.length} live client(s) stranded: ${report.strandedLive.join(", ")}`
+				: `${IDENTITY_PREFIX} FAIL`,
 	);
 	return lines.join("\n") + "\n";
 }
@@ -694,9 +748,10 @@ export function main(argv: string[]): number {
 	const serverEnv = serverEnvOverride ?? manifest.server_env;
 	const tokensDir = tokensDirOverride ?? DEFAULT_TOKENS_DIR;
 	const reads: HostReads = { readText: readTextOrNull, statFile: statOrNull };
+	const herdrEnv = (manifest.herdr_env_files ?? []).map((path) => ({ path, text: readTextOrNull(path) }));
 	let report: IdentityReport;
 	if (!values) {
-		report = checkNames(manifest, reads, serverEnv, tokensDir);
+		report = checkNames(manifest, reads, serverEnv, tokensDir, herdrEnv);
 	} else {
 		const serverText = readTextOrNull(serverEnv);
 		const serverValues = serverText === null ? new Map<string, string>() : parseEnvValues(serverText);
@@ -713,7 +768,7 @@ export function main(argv: string[]): number {
 				clientValues.set(client.id, firstLine(expandHome(delivery.path)));
 			}
 		}
-		report = checkValues(manifest, serverValues, clientValues, serverEnv, tokensDir);
+		report = checkValues(manifest, serverValues, clientValues, serverEnv, tokensDir, herdrEnv);
 	}
 	report.manifestPath = manifestPath;
 	process.stdout.write(formatReport(report, json));
