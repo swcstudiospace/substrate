@@ -224,7 +224,7 @@ The chain tip advances **only on a successful write**, for the same reason.
 | | Tools | Why |
 | --- | --- | --- |
 | **fail-open** | every read — `memory_brief`, `memory_search`, `memory_pending`, `events_query`, `events_verify`, `graph_get`, `coord_handoff_verify`, `coord_handoff_list`, `coord_drift_scan` — plus `events_emit`, and the `/brief`, `/events`, `/events/query`, `/verify`, `/drift`, `/evidence` routes | These sit inside a prompt's hook budget. The substrate is not allowed to fail an agent's turn, and an unwritable audit file is not a reason to start. The call still produces a record; it is just not a gate. |
-| **fail-closed** | `graph_claim`, `graph_release`, `graph_complete`, `graph_register`, `graph_heartbeat`, `graph_bind`, `memory_write`, `coord_handoff`, `coord_reap_leases` | Everything that grants or transfers exclusive ownership of a node, or writes shared state another agent will act on. A claim nobody recorded is how two agents end up holding one node, and the whole point of `graph_claim` is that they cannot. |
+| **fail-closed** | `graph_claim`, `graph_release`, `graph_complete`, `graph_register`, `graph_heartbeat`, `graph_bind`, `memory_write`, `coord_handoff`, `coord_reap_leases`, `desktop_run` | Everything that grants or transfers exclusive ownership of a node, or writes shared state another agent will act on. A claim nobody recorded is how two agents end up holding one node, and the whole point of `graph_claim` is that they cannot. |
 
 ### Planned in v1.3
 
@@ -238,7 +238,7 @@ lives in [event-vocabulary.md](event-vocabulary.md).
 | --- | --- | --- |
 | `skills_propose` (21, **landed**) | fail-closed | Opens a PR other agents will receive after merge; a proposal nobody recorded is an unaudited publication. Served as the MCP tool and as `POST /skills/propose`, which is audited under the same name before any git work and answers `503` when the chain cannot take the record. |
 | `docs_ingest` (25) | fail-closed | Writes a shared dataset every agent reads; it is also a publication path. |
-| `desktop_run` (30) | fail-closed | Acts on a desktop (DESK-03 fixes this). |
+| `desktop_run` (30) | fail-closed | Acts on a desktop — landed in Phase 30 (DESK-03 covered by unit and HTTP tests; live desktop smoke NOT-RUN). |
 | `docs_search` (25) | fail-open | A read inside an agent's turn. |
 | `issue_get` (23) | fail-open | A read of untrusted tracker text. |
 | `graph_find` (23) | fail-open | A read of the index. |

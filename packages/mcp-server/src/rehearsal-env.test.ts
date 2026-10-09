@@ -14,12 +14,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	configWarnings,
+	desktopConfigWarnings,
 	isOperator,
 	loadConfig,
 	surfaceForToken,
 	tokenEnvName,
 } from "./config.ts";
 import {
+	assertDesktopSurfacesAllowed,
 	assertLoopback,
 	assertOperatorAllowed,
 	buildRehearsalEnv,
@@ -66,6 +68,7 @@ function scratchInput(over: Partial<BuildRehearsalEnvInput> = {}): BuildRehearsa
 		secrets: freshSecrets(),
 		surfaces: [...UNDER_TEST],
 		operator: OPERATOR,
+		desktopSurfaces: [],
 		runDir: tempDir(),
 		parentEnv: { PATH: "/usr/bin:/bin", HOME: "/root" },
 		...over,
@@ -82,6 +85,7 @@ describe("buildRehearsalEnv round-trip", () => {
 		expect(config.tokens.size).toBe(UNDER_TEST.length);
 		expect(config.allowAnonymous).toBe(false);
 		expect(configWarnings(config)).toEqual([]);
+		expect(desktopConfigWarnings(config)).toEqual([]);
 		expect(config.greptime?.url).toBe("http://127.0.0.1:15400");
 		expect(config.greptime?.db).toBe("public");
 		expect(config.postgresUrl).toContain("127.0.0.1:15432");
@@ -111,6 +115,22 @@ describe("buildRehearsalEnv round-trip", () => {
 		expect(config.audit.path).toBe(join(input.runDir, "mcp-audit.jsonl"));
 	});
 
+	test("desktop dir is the runDir desktop join, and the allowlist round-trips", () => {
+		const input = scratchInput({ desktopSurfaces: ["omp", "cursor"] });
+		const env = buildRehearsalEnv(input);
+		expect(env.SUBSTRATE_DESKTOP_SURFACES).toBe("omp,cursor");
+		const config = loadConfig(env);
+		expect(config.desktopDir).toBe(join(input.runDir, "desktop"));
+		expect([...config.desktopSurfaces].sort()).toEqual(["cursor", "omp"]);
+		expect(desktopConfigWarnings(config)).toEqual([]);
+	});
+
+	test("an empty allowlist writes no surfaces key and warns nothing", () => {
+		const env = buildRehearsalEnv(scratchInput());
+		expect("SUBSTRATE_DESKTOP_SURFACES" in env).toBe(false);
+		expect(desktopConfigWarnings(loadConfig(env))).toEqual([]);
+	});
+
 	test("anonymous variant allows anonymous with zero operator tokens", () => {
 		const env = buildRehearsalEnv(scratchInput({ surfaces: [], operator: null }));
 		const config = loadConfig(env);
@@ -118,6 +138,7 @@ describe("buildRehearsalEnv round-trip", () => {
 		expect(config.tokens.size).toBe(0);
 		expect(config.operatorTokens.size).toBe(0);
 		expect(configWarnings(config)).toEqual([]);
+		expect(desktopConfigWarnings(config)).toEqual([]);
 		expect("SUBSTRATE_OPERATOR_TOKENS" in env).toBe(false);
 	});
 });
@@ -170,6 +191,20 @@ describe("refusals", () => {
 			RehearsalEnvError,
 		);
 	});
+
+	test("a desktop surface outside the surface tokens is refused, naming the surface", () => {
+		let caught: unknown = null;
+		try {
+			buildRehearsalEnv(scratchInput({ surfaces: ["omp"], operator: null, desktopSurfaces: ["cursor"] }));
+		} catch (cause) {
+			caught = cause;
+		}
+		expect(caught).toBeInstanceOf(RehearsalEnvError);
+		expect(String(caught)).toContain("cursor");
+		expect(() => assertDesktopSurfacesAllowed(["omp"], ["omp"])).not.toThrow();
+		expect(() => assertDesktopSurfacesAllowed(["omp"], [])).not.toThrow();
+		expect(() => assertDesktopSurfacesAllowed(["omp"], ["cursor"])).toThrow(RehearsalEnvError);
+	});
 });
 
 /** What a production value would be: if the builder ever forwarded the parent env, this string would leak. */
@@ -187,6 +222,7 @@ describe("allowlist", () => {
 			SUBSTRATE_PG_URL: SENTINEL,
 			SUBSTRATE_OPERATOR_TOKENS: SENTINEL,
 			SUBSTRATE_TOKEN_HERMES: SENTINEL,
+			SUBSTRATE_DESKTOP_SURFACES: SENTINEL,
 			[LEDGER_KEYS.url]: SENTINEL,
 			[LEDGER_KEYS.user]: SENTINEL,
 		};
@@ -214,6 +250,7 @@ describe("allowlist", () => {
 			...UNDER_TEST.map(tokenEnvName),
 			"SUBSTRATE_OPERATOR_TOKENS",
 			"SUBSTRATE_AUDIT_PATH",
+			"SUBSTRATE_DESKTOP_DIR",
 			"SUBSTRATE_HANDOFF_KEY",
 			"SUBSTRATE_SKILLS_STATE",
 		]);
@@ -230,6 +267,36 @@ describe("allowlist", () => {
 			expect(env).not.toHaveProperty(key);
 		}
 		expect(loadConfig(env).skills.stateDir).toBe(join(runDir, "skills"));
+	});
+
+	test("a non-empty desktop allowlist adds exactly the surfaces key", () => {
+		const input = scratchInput({
+			parentEnv: { PATH: "/usr/bin:/bin", HOME: "/root" },
+			desktopSurfaces: ["omp"],
+		});
+		const env = buildRehearsalEnv(input);
+		expect(env.SUBSTRATE_DESKTOP_SURFACES).toBe("omp");
+		expect(env.SUBSTRATE_DESKTOP_DIR).toBe(join(input.runDir, "desktop"));
+		expect(new Set(Object.keys(env))).toEqual(
+			new Set([
+				"PATH",
+				"HOME",
+				"SUBSTRATE_HOST",
+				"SUBSTRATE_PORT",
+				LEDGER_KEYS.url,
+				LEDGER_KEYS.user,
+				LEDGER_KEYS.password,
+				LEDGER_KEYS.db,
+				"SUBSTRATE_PG_URL",
+				...UNDER_TEST.map(tokenEnvName),
+				"SUBSTRATE_OPERATOR_TOKENS",
+				"SUBSTRATE_AUDIT_PATH",
+				"SUBSTRATE_DESKTOP_DIR",
+				"SUBSTRATE_DESKTOP_SURFACES",
+				"SUBSTRATE_SKILLS_STATE",
+				"SUBSTRATE_HANDOFF_KEY",
+			]),
+		);
 	});
 });
 

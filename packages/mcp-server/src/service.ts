@@ -20,6 +20,7 @@ import {
 	type ReadThroughCache,
 } from "./cache.ts";
 import { isReviewToken, type SubstrateConfig } from "./config.ts";
+import { DesktopBusy, type DesktopDriver, type DesktopLogEntry, type DesktopRunResult } from "./desktop/driver.ts";
 import {
 	DEFAULT_IDLE_SECONDS,
 	analyzeDrift,
@@ -563,6 +564,8 @@ export class Substrate {
 	readonly greptime: GreptimeClient | null;
 	/** The one git path proposals take; inert until plan 02's `proposeSkill` calls it. */
 	readonly skills: SkillProposer;
+	/** The desktop driver. Production wiring lives only in index.ts, so tests never reach docker by accident. */
+	readonly desktop: DesktopDriver | null;
 	private readonly observer: SubstrateObserver;
 	private readonly cache: ReadThroughCache;
 
@@ -574,6 +577,7 @@ export class Substrate {
 			greptime?: GreptimeClient | null;
 			skills?: SkillProposer;
 			cache?: ReadThroughCache;
+			desktop?: DesktopDriver | null;
 		},
 		observer: SubstrateObserver = {},
 	) {
@@ -588,12 +592,56 @@ export class Substrate {
 				library: { repo: config.skills.repo, remoteUrl: config.skills.remoteUrl },
 				stateDir: config.skills.stateDir,
 			});
+		this.desktop = stores?.desktop ?? null;
 		this.observer = observer;
 		this.cache =
 			stores?.cache ??
 			createReadThroughCache(config, (sample) => {
 				this.observer.cached?.(sample);
 			});
+	}
+
+	/**
+	 * desktop_run (DESK-01..03): drive the substrate-desktop container.
+	 *
+	 * The operator allowlist is the only gate: `isOperator` grants nothing here.
+	 * Every refusal runs no action, so there is no action event; the audit record
+	 * the gate wrote before dispatch is their trail. A run that started but lost
+	 * its ledger comes back as `failed` with no image blocks (D30-12); anything
+	 * the driver throws before or without a run id propagates to the tool, which
+	 * maps it to a redacted refusal.
+	 */
+	async runDesktop(
+		input: unknown,
+		callerSurface: Surface | null,
+	): Promise<
+		| { refused: string }
+		| { failed: { run_id: string; log: DesktopLogEntry[]; error: string } }
+		| { result: DesktopRunResult }
+	> {
+		if (callerSurface === null) {
+			return { refused: "desktop_run needs an authenticated, operator-listed surface; nothing was run" };
+		}
+		if (!this.config.desktopSurfaces.has(callerSurface)) {
+			return { refused: `desktop_run is not enabled for surface ${callerSurface}; nothing was run` };
+		}
+		if (this.desktop === null) {
+			return { refused: "desktop_run is not available on this server; nothing was run" };
+		}
+		if (this.greptime === null) {
+			return { refused: "desktop_run needs the event ledger; nothing was run" };
+		}
+		let result: DesktopRunResult;
+		try {
+			result = await this.desktop.run(input, { surface: callerSurface, emit: (event) => this.emit(event) });
+		} catch (cause) {
+			if (cause instanceof DesktopBusy) return { refused: cause.message };
+			throw cause;
+		}
+		if (result.error !== undefined) {
+			return { failed: { run_id: result.run_id, log: result.log, error: result.error } };
+		}
+		return { result };
 	}
 
 	/**

@@ -6,7 +6,7 @@
  */
 import { normalizeTtlSeconds } from "./lease.ts";
 import { parseGrants, type MemoryGrant } from "./memory-policy.ts";
-import { SWARM_SURFACES, isSwarmSurface, type Surface } from "./types.ts";
+import { SURFACES, SWARM_SURFACES, isSwarmSurface, type Surface } from "./types.ts";
 
 export interface GreptimeConfig {
 	url: string;
@@ -123,6 +123,40 @@ export interface SubstrateConfig {
 	 */
 	skills: { repo: string; remoteUrl: string; stateDir: string; gh: string; problem: string | null };
 	/**
+	 * Surfaces allowed to call `desktop_run`, from `SUBSTRATE_DESKTOP_SURFACES`.
+	 *
+	 * The operator allowlist is the only gate (D30-01): unset or empty means
+	 * nobody may call `desktop_run`. A name that is not in `SURFACES` is dropped
+	 * — it never widens the list — and reported at boot by
+	 * `desktopConfigWarnings`. An operator token grants nothing here:
+	 * `isOperator` is never consulted by the gate.
+	 */
+	desktopSurfaces: ReadonlySet<Surface>;
+	/**
+	 * Directory screenshots are stored under, from `SUBSTRATE_DESKTOP_DIR`.
+	 *
+	 * Only an absolute path overrides the default `/var/lib/substrate/desktop`
+	 * (D30-09). A relative value keeps the default and is reported at boot by
+	 * `desktopConfigWarnings`, so screenshots can never land in the repo by
+	 * typo — and `loadConfig` never throws over it.
+	 */
+	desktopDir: string;
+	/**
+	 * Allowlist names that named no known surface, dropped at parse time.
+	 *
+	 * Names only, never token values: the boot warning logs them. Empty when
+	 * the allowlist itself is empty — an empty allowlist is the fail-closed
+	 * default, not a misconfiguration, and warns nothing.
+	 */
+	desktopIgnored: readonly string[];
+	/**
+	 * The rejected `SUBSTRATE_DESKTOP_DIR` value, when it was set but relative.
+	 *
+	 * A path, not a credential, so the boot warning may quote it. `null` when
+	 * the variable was unset, empty or absolute.
+	 */
+	desktopDirRejected: string | null;
+	/**
 	 * Withdraw a claim whose event did not reach the ledger.
 	 *
 	 * `null` means "decide from the deployment": on when a ledger is configured, off
@@ -226,10 +260,22 @@ export function tokenedSurfaces(config: SubstrateConfig): ReadonlySet<Surface> {
 	return new Set(config.tokens.values());
 }
 
+/** Where screenshots land unless `SUBSTRATE_DESKTOP_DIR` says otherwise (D30-09). */
+export const DEFAULT_DESKTOP_DIR = "/var/lib/substrate/desktop";
+
+function isKnownDesktopSurface(value: string): value is Surface {
+	return (SURFACES as readonly string[]).includes(value);
+}
+
 export function loadConfig(env: Record<string, string | undefined> = process.env): SubstrateConfig {
 	const greptimeUrl = env.GREPTIME_URL?.trim();
 	const leaseTtl = Number(env.SUBSTRATE_LEASE_TTL_SECONDS);
 	const tokens = readTokens(env);
+	const desktopNames = (env.SUBSTRATE_DESKTOP_SURFACES ?? "")
+		.split(",")
+		.map((name) => name.trim())
+		.filter((name) => name.length > 0);
+	const desktopDirRaw = env.SUBSTRATE_DESKTOP_DIR?.trim() || "";
 	return {
 		...readHandoffKeys(env),
 		leaseTtlSeconds: normalizeTtlSeconds(Number.isFinite(leaseTtl) ? leaseTtl : undefined),
@@ -264,6 +310,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		audit: { path: env.SUBSTRATE_AUDIT_PATH?.trim() || null },
 		skills: readSkills(env),
 		requireRecordedClaims: booleanOrNull(env.SUBSTRATE_CLAIM_REQUIRE_LEDGER),
+		desktopSurfaces: new Set(desktopNames.filter(isKnownDesktopSurface)),
+		desktopDir: desktopDirRaw.startsWith("/") ? desktopDirRaw : DEFAULT_DESKTOP_DIR,
+		desktopIgnored: desktopNames.filter((name) => !isKnownDesktopSurface(name)),
+		desktopDirRejected: desktopDirRaw !== "" && !desktopDirRaw.startsWith("/") ? desktopDirRaw : null,
 	};
 }
 
@@ -466,6 +516,36 @@ export function swarmTokenWarnings(config: SubstrateConfig): string[] {
 		warnings.push(
 			`no token for the substrate surface (${tokenEnvName("substrate")}); a host job without its own token ` +
 				"is refused with 401, not accepted anonymously",
+		);
+	}
+	return warnings;
+}
+
+/**
+ * Desktop allowlist and directory problems, reported at boot.
+ *
+ * A sibling of `configWarnings`, not part of it: `configWarnings` returns
+ * early without operator tokens, and an empty allowlist is the fail-closed
+ * default (nobody may call `desktop_run`), not a misconfiguration — so an
+ * empty or fully valid allowlist warns nothing. A dropped allowlist name or a
+ * relative directory is an operator typo that silently narrows or misplaces
+ * the gate, and the operator should hear about it at boot.
+ *
+ * Named by surface, never by token: the warning goes to a log.
+ */
+export function desktopConfigWarnings(config: SubstrateConfig): string[] {
+	const warnings: string[] = [];
+	if (config.desktopIgnored.length > 0) {
+		warnings.push(
+			`SUBSTRATE_DESKTOP_SURFACES names unknown surface${config.desktopIgnored.length === 1 ? "" : "s"} ` +
+				`(${config.desktopIgnored.join(", ")}); ${config.desktopIgnored.length === 1 ? "it was" : "they were"} dropped, ` +
+				"so nobody on those names may call desktop_run",
+		);
+	}
+	if (config.desktopDirRejected !== null) {
+		warnings.push(
+			`SUBSTRATE_DESKTOP_DIR (${config.desktopDirRejected}) is not absolute; ` +
+				`using the default ${DEFAULT_DESKTOP_DIR}`,
 		);
 	}
 	return warnings;

@@ -73,6 +73,8 @@ export interface BuildRehearsalEnvInput {
 	surfaces: Surface[];
 	/** Surface whose token is also listed as an operator's; null for anonymous. */
 	operator: Surface | null;
+	/** Surfaces allowed to call desktop_run; must be a subset of surfaces. */
+	desktopSurfaces: readonly Surface[];
 	/** Instance run directory; the audit file lives directly inside it. */
 	runDir: string;
 	/** Parent environment, read only through the allowlist. */
@@ -147,6 +149,18 @@ export function assertOperatorAllowed(surfaces: readonly Surface[], operator: Su
 	}
 }
 
+/**
+ * Desktop surfaces are a subset of the surface tokens: a tokenless run would
+ * only be refused by the tool. Throws naming the surface only.
+ */
+export function assertDesktopSurfacesAllowed(surfaces: readonly Surface[], desktopSurfaces: readonly Surface[]): void {
+	for (const surface of desktopSurfaces) {
+		if (!surfaces.includes(surface)) {
+			throw new RehearsalEnvError(`rehearsal env refused: desktop surface ${surface} has no surface token`);
+		}
+	}
+}
+
 function assertKnownSurfaces(surfaces: readonly Surface[]): void {
 	for (const surface of surfaces) {
 		if (!(SURFACES as readonly string[]).includes(surface)) {
@@ -181,6 +195,7 @@ function scratchStoreRecords(ports: ScratchPorts, secrets: ScratchSecrets): Reco
 export function buildRehearsalEnv(input: BuildRehearsalEnvInput): Record<string, string> {
 	assertKnownSurfaces(input.surfaces);
 	assertOperatorAllowed(input.surfaces, input.operator);
+	assertDesktopSurfacesAllowed(input.surfaces, input.desktopSurfaces);
 	const env: Record<string, string> = {};
 	if (input.parentEnv.PATH !== undefined) env.PATH = input.parentEnv.PATH;
 	if (input.parentEnv.HOME !== undefined) env.HOME = input.parentEnv.HOME;
@@ -205,6 +220,8 @@ export function buildRehearsalEnv(input: BuildRehearsalEnvInput): Record<string,
 		env.SUBSTRATE_OPERATOR_TOKENS = token;
 	}
 	env.SUBSTRATE_AUDIT_PATH = join(input.runDir, "mcp-audit.jsonl");
+	env.SUBSTRATE_DESKTOP_DIR = join(input.runDir, "desktop");
+	if (input.desktopSurfaces.length > 0) env.SUBSTRATE_DESKTOP_SURFACES = input.desktopSurfaces.join(",");
 	env.SUBSTRATE_HANDOFF_KEY = input.secrets.handoffKey;
 	// Always inside the run directory, so a twin can never write the host's skills state; without a
 	// fixture there is no mirror there, and a proposal fails before any git or gh call.

@@ -159,6 +159,17 @@ blackholed for 60 s; `packages/audit/src/chaos.test.ts` proves the same decision
 Details in [`docs/observability.md`](docs/observability.md) and
 [`docs/mcp-audit.md`](docs/mcp-audit.md).
 
+## Desktop
+
+`desktop_run` drives the dedicated `substrate-desktop` webtop with a closed
+vocabulary — click, type, key, screenshot — and answers each screenshot as an
+MCP image block. Only surfaces on the operator allowlist
+(`SUBSTRATE_DESKTOP_SURFACES`) may call it; everyone else is refused before
+anything runs. Each executed action leaves one `tool.call` event carrying
+hashes and lengths only — never typed text or image bytes — and the audit
+chain records the call fail-closed the same way. Details in
+[`docs/runbooks/desktop.md`](docs/runbooks/desktop.md).
+
 ## Agent Swarm will run on this — planned, not yet wired
 
 [`swcstudiospace/agent-swarm`](https://github.com/swcstudiospace/agent-swarm) is a 15-agent

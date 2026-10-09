@@ -8,20 +8,25 @@
  * audit chain is reported at boot and again on `/healthz`, and never a reason to
  * refuse to start.
  */
-import { configWarnings, loadConfig, swarmTokenWarnings } from "./config.ts";
+import { configWarnings, desktopConfigWarnings, loadConfig, swarmTokenWarnings } from "./config.ts";
+import { bufferRunner, createDesktopDriver } from "./desktop/driver.ts";
 import { createObservability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
 
 const config = loadConfig();
 const observability = createObservability(config);
-const substrate = new Substrate(config, undefined, observability.observer);
+const substrate = new Substrate(
+	config,
+	{ desktop: createDesktopDriver({ run: bufferRunner, dir: config.desktopDir }) },
+	observability.observer,
+);
 
 for (const problem of await observability.start()) {
 	process.stderr.write(`[substrate] degraded — ${problem}\n`);
 }
 
-for (const warning of [...configWarnings(config), ...swarmTokenWarnings(config)]) {
+for (const warning of [...configWarnings(config), ...swarmTokenWarnings(config), ...desktopConfigWarnings(config)]) {
 	process.stderr.write(`[substrate] misconfigured — ${warning}\n`);
 }
 
