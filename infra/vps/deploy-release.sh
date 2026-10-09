@@ -102,8 +102,11 @@ acquire_lock() {
 	lockdir="$candidate"
 }
 
+	# Timers (substrate-docs-refresh.timer) are not restart units: they have no
+	# ExecStart entry to check, and a deploy's daemon-reload already picks up
+	# their file changes. Enabling a timer on the host is a live step.
 load_units() {
-	local raw="${SUBSTRATE_RELEASE_UNITS:-substrate-mcp.service substrate-collector-grok.service substrate-collector-herdr.service substrate-collector-muse.service}"
+	local raw="${SUBSTRATE_RELEASE_UNITS:-substrate-mcp.service substrate-collector-grok.service substrate-collector-herdr.service substrate-collector-muse.service substrate-docs-refresh.service}"
 	local unit
 	units=()
 	# Intentional word split: the operator passes a space-separated unit list.

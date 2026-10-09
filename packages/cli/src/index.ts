@@ -11,6 +11,8 @@
  *   substrate evidence --graph G             the evidence bundle, as JSON or HTML
  *   substrate lessons add|recall|digest|outcome   the lessons bank (docs/lessons-bank.md)
  *   substrate skills propose --dir PATH ...  propose a skill as a PR on the skills library
+ *   substrate docs ingest --dataset N --file P --source-url U --commit S   ingest one page (DOCS-02)
+ *   substrate docs refresh --dataset N --commit S [--repo P] [--slug O/R]  refresh a dataset at a commit (DOCS-03)
  *
  * Exit status is always 0 for `brief`, `emit` and `handoff`. These run inside
  * git hooks and editor hooks, where a non-zero exit can abort the user's commit
@@ -26,12 +28,15 @@
  * the tokens dir. Commands without a surface send as `claude-code`.
  * `skills propose` reports failure like `verify` and `drift`: it is not a hook command, and
  * a proposal that was refused or never reached the server must not look like one that landed.
+ * `docs ingest` and `docs refresh` report failure the same way: they are not hook
+ * commands, and a page that was refused or never reached the server must not look like one that landed.
  */
 import { chainStateOf, renderEvidenceHtml, type EvidenceBundle } from "@substrate/evidence";
 import { list, parseArgs, str } from "./args.ts";
 import { resolveBearer } from "./token.ts";
 import { httpMemory, lessonsTimeout, runLessons } from "./lessons.ts";
 import { runSkills, skillsTimeout } from "./skills.ts";
+import { docsTimeout, runDocs } from "./docs-refresh.ts";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -440,6 +445,17 @@ switch (command) {
 				err: (text) => process.stderr.write(text),
 			}),
 		);
+	case "docs":
+		process.exit(
+			await runDocs(rest, {
+				url: base(),
+				token: process.env.SUBSTRATE_TOKEN?.trim() || undefined,
+				timeoutMs: docsTimeout(process.env.SUBSTRATE_DOCS_TIMEOUT_MS),
+				cwd: process.cwd(),
+				out: (text) => process.stdout.write(text),
+				err: (text) => process.stderr.write(text),
+			}),
+		);
 	default:
 		process.stdout.write(
 			"substrate brief [--repo R] [--branch B] [--graph G] [--surface S] [--write]\n" +
@@ -452,7 +468,9 @@ switch (command) {
 				"substrate evidence --graph <graph_id> [--format json|html] [--out PATH]\n" +
 				"substrate lessons add|recall|digest|outcome ...   (substrate lessons help)\n" +
 				"substrate skills propose --dir PATH [--name N] [--rationale R] [--remove a,b] [--session I] [--graph G]\n" +
-				"                         [--dry-run] [--replace] [--reopen] [--allow-doc-examples pem,jwt]\n",
+				"                         [--dry-run] [--replace] [--reopen] [--allow-doc-examples pem,jwt]\n" +
+				"substrate docs ingest --dataset N --file P --source-url U --commit S [--title T] [--dry-run]\n" +
+				"substrate docs refresh --dataset N --commit S [--repo P] [--slug O/R]\n",
 		);
 		process.exit(command ? 2 : 0);
 }

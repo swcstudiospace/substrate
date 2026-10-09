@@ -1,0 +1,14 @@
+[Unit]
+Description=Agent Substrate docs refresh every 10 minutes
+Documentation=https://github.com/swcstudiospace/agent-substrate
+
+[Timer]
+# Merges land in RAGFlow within one tick: each run fetches every watched
+# repo's main and refreshes the datasets whose commit drifted (D25-18).
+OnCalendar=*:0/10
+# A host that was down refreshes on boot instead of skipping a tick.
+Persistent=true
+Unit=substrate-docs-refresh.service
+
+[Install]
+WantedBy=timers.target

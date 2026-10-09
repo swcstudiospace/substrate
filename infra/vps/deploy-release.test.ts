@@ -161,12 +161,14 @@ function stage(env: NodeJS.ProcessEnv, tag: string, sha: string, onMain: boolean
 	const tree = join(state, "trees", sha);
 	mkdirSync(join(tree, "packages/mcp-server/src"), { recursive: true });
 	mkdirSync(join(tree, "packages/collectors/src"), { recursive: true });
+	mkdirSync(join(tree, "packages/cli/src"), { recursive: true });
 	writeFileSync(join(tree, "package.json"), "{}\n");
 	writeFileSync(join(tree, "bun.lock"), "{}\n");
 	writeFileSync(join(tree, "packages/mcp-server/src/index.ts"), "");
 	writeFileSync(join(tree, "packages/collectors/src/grok.ts"), "");
 	writeFileSync(join(tree, "packages/collectors/src/herdr.ts"), "");
 	writeFileSync(join(tree, "packages/collectors/src/muse.ts"), "");
+	writeFileSync(join(tree, "packages/cli/src/docs-refresh.ts"), "");
 	if (onMain) writeFileSync(join(state, "main"), `${readFileSync(join(state, "main"), "utf8")}${sha}\n`);
 }
 
@@ -203,6 +205,7 @@ describe("deploy-release.sh", () => {
 		expect(restarted).toContain("restart substrate-collector-grok.service");
 		expect(restarted).toContain("restart substrate-collector-herdr.service");
 		expect(restarted).toContain("restart substrate-collector-muse.service");
+		expect(restarted).toContain("restart substrate-docs-refresh.service");
 		expect(restarted).not.toContain("dispatcher");
 		expect(restarted).not.toContain("skills");
 	});
@@ -314,6 +317,18 @@ describe("deploy-release.sh", () => {
 		expect(refused.stderr).toContain("refusing health url");
 		expect(readFileSync(join(h.log, "curl"), "utf8")).not.toContain("secret");
 		expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA1}`);
+	});
+
+	test("a release missing the docs refresh entry is not published", () => {
+		const h = harness();
+		stage(h.env, "v1", SHA1, true);
+		const tree = join(h.env.STUB_STATE ?? "", "trees", SHA1);
+		rmSync(join(tree, "packages/cli/src/docs-refresh.ts"));
+		const failed = deploy(h, ["v1"]);
+		expect(failed.status).not.toBe(0);
+		expect(failed.stderr).toContain("missing packages/cli/src/docs-refresh.ts");
+		expect(existsSync(join(h.root, "current"))).toBe(false);
+		expect(existsSync(join(h.log, "systemctl"))).toBe(false);
 	});
 
 	test("a release missing a unit entry is not published", () => {
