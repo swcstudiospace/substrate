@@ -108,6 +108,38 @@ describe("fakeGh", () => {
 		expect(existsSync(lock)).toBe(false);
 		expect(readState(statePath).next).toBe(2);
 	});
+	test("concurrent children recovering one ownerless lock serialize, each with its own PR", async () => {
+		const run = tempRun();
+		const statePath = join(run, "gh-state.json");
+		writeState(statePath, { next: 1, prs: [], calls: [] });
+		const lock = `${statePath}.lock`;
+		mkdirSync(lock);
+		const old = new Date(Date.now() - 10_000);
+		utimesSync(lock, old, old);
+		const modulePath = join(import.meta.dir, "rehearsal-fake-gh.ts");
+		const driver = join(run, "driver.ts");
+		writeFileSync(
+			driver,
+			`import { runFakeGh } from ${JSON.stringify(modulePath)};\n` +
+				`process.exit(runFakeGh(["pr", "create", "--repo", ${JSON.stringify(FIXTURE_REPO)}, "--head", process.argv[2] ?? "", "--base", "main", "--title", "skill(x): proposal", "--body", "b"], ${JSON.stringify(statePath)}));\n`,
+		);
+		const count = 8;
+		const procs = Array.from({ length: count }, (_, i) =>
+			Bun.spawn(["bun", driver, `skill/omp/c-${i}-abcd`], {
+				env: { PATH: process.env.PATH ?? "", HOME: run },
+				stdout: "ignore",
+				stderr: "pipe",
+			}),
+		);
+		const codes = await Promise.all(procs.map((proc) => proc.exited));
+		const errors = (await Promise.all(procs.map((proc) => new Response(proc.stderr).text()))).filter((text) => text.length > 0);
+		expect(`${codes}:${errors}`).toBe(`${Array(count).fill(0)}:`);
+		const final = readState(statePath);
+		expect(final.next).toBe(count + 1);
+		expect(final.prs).toHaveLength(count);
+		expect(new Set(final.prs.map((pr) => pr.number)).size).toBe(count);
+		expect(existsSync(lock)).toBe(false);
+	});
 
 	test("pr create and pr list refuse missing arguments instead of guessing", () => {
 		expect(fakeGh(["pr", "create", "--repo", FIXTURE_REPO], freshState()).code).toBe(2);

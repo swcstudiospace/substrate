@@ -267,6 +267,21 @@ export function validateProposal(
 		content_sha256: hash.digest("hex"),
 	};
 }
+/**
+ * The content hash before `file`/`delete` tags separated files from removals
+ * (`<mode>\0`, sorted `path\0content\0`, sorted `remove\0path\0`). Read-only
+ * compatibility for ledger lines from that era: `fromLedger` consults it only when
+ * the tagged hash matches nothing, and new ledger writes keep the tagged hash, so
+ * the file-named-`remove` collision stays fixed.
+ */
+export function legacyContentSha256(mode: TreeMode, files: Record<string, string>, remove: readonly string[]): string {
+	const hash = createHash("sha256");
+	hash.update(`${mode}\0`);
+	for (const path of Object.keys(files).sort()) hash.update(`${path}\0${files[path]}\0`);
+	for (const path of [...new Set(remove)].sort()) hash.update(`remove\0${path}\0`);
+	return hash.digest("hex");
+}
+
 
 // ── tree ────────────────────────────────────────────────────────────────────
 
@@ -647,7 +662,17 @@ async function fromLedger(
 	ledger: string,
 ): Promise<ProposeResult | null> {
 	const library = opts.library ?? DEFAULT_LIBRARY;
-	const knownLines = ledgerMatches(ledger, v.content_sha256);
+	let knownLines = ledgerMatches(ledger, v.content_sha256);
+	if (knownLines.length === 0) {
+		// A line written before `file`/`delete` tags hashes the same content
+		// differently. Fall back to that hash so September's proposals are still
+		// found — gated on name and surface so the old scheme's file/remove
+		// collision cannot decide a different proposal.
+		const legacy = legacyContentSha256(v.mode, v.files, v.remove);
+		if (legacy !== v.content_sha256) {
+			knownLines = ledgerMatches(ledger, legacy).filter((line) => line.name === v.name && line.surface === v.surface);
+		}
+	}
 	if (knownLines.length === 0) return null;
 	// A line written before `repo` was recorded still names its library when the saved PR URL
 	// does. A line that names neither must not decide this library, and a later identified

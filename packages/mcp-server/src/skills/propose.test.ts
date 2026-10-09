@@ -24,6 +24,7 @@ import {
 	DEFAULT_LIBRARY,
 	diffQuietArgv,
 	fetchArgv,
+	legacyContentSha256,
 	LIBRARY_REPO,
 	LIBRARY_URL,
 	MIRROR,
@@ -193,6 +194,9 @@ describe("parseFrontmatter", () => {
 		expect(parseFrontmatter("# title\n---\nname: a\n---\n")).toBeNull();
 		expect(parseFrontmatter("---\nname: [unclosed\ndescription: b\n---\nbody")).toBeNull();
 	});
+	test("accepts the byte-order mark the CLI preserves on upload", () => {
+		expect(parseFrontmatter("\ufeff---\nname: a\ndescription: b\n---\nbody")).toEqual({ name: "a", description: "b" });
+	});
 });
 
 describe("validateProposal refusals (before any Runner call)", () => {
@@ -299,6 +303,15 @@ describe("validateProposal acceptance, redaction and hashing", () => {
 		expect(sha(a)).toBe(sha(b));
 		expect(sha(a)).not.toBe(sha(a, "replace"));
 		expect(sha(a)).not.toBe(sha(input({ ...a, remove: ["x.md"] })));
+	});
+	test("accepts a SKILL.md with the preserved byte-order mark, bytes unchanged", () => {
+		const v = validateProposal(input({ files: { "SKILL.md": `\ufeff${skillMd()}` } }), { maxBytes: ROUTE_MAX_BYTES, mode: "overlay" });
+		expect(v.files["SKILL.md"]?.startsWith("\ufeff---\n")).toBe(true);
+	});
+
+	test("the pre-tag hash differs, so old ledger lines need the compatibility lookup", () => {
+		const v = validateProposal(input(), { maxBytes: ROUTE_MAX_BYTES, mode: "overlay" });
+		expect(legacyContentSha256(v.mode, v.files, v.remove)).not.toBe(v.content_sha256);
 	});
 
 	test("a ghp_ token shape is refused with a github finding and the refusal never carries it", () => {
@@ -446,6 +459,23 @@ describe("proposeSkill ledger idempotence", () => {
 		const result = await proposeSkill(input(), options(f.run));
 		expect(result).toMatchObject({ status: "existing", pr_url: PR_URL, pr_number: 7, content_sha256: sha() });
 		expect(f.steps()).toEqual(["gh pr view"]);
+	});
+	test("a line hashed before the file/delete tags still decides the retry", async () => {
+		const v = validateProposal(input(), { maxBytes: ROUTE_MAX_BYTES, mode: "overlay" });
+		writeLedger({ ts: "t", content_sha256: legacyContentSha256(v.mode, v.files, v.remove), name: NAME, surface: "claude-code", branch: "b1", state: "opened", pr_url: PR_URL, pr_number: 7 });
+		const f = fake();
+		const result = await proposeSkill(input(), options(f.run));
+		expect(result).toMatchObject({ status: "existing", pr_url: PR_URL, pr_number: 7, content_sha256: sha() });
+		expect(f.steps()).toEqual(["gh pr view"]);
+	});
+
+	test("a pre-tag line for another name does not decide this proposal", async () => {
+		const v = validateProposal(input(), { maxBytes: ROUTE_MAX_BYTES, mode: "overlay" });
+		writeLedger({ ts: "t", content_sha256: legacyContentSha256(v.mode, v.files, v.remove), name: "other-skill", surface: "claude-code", branch: "b1", state: "opened", pr_url: PR_URL, pr_number: 7 });
+		const f = fake();
+		const result = await proposeSkill(input(), options(f.run));
+		expect(result.status).toBe("opened");
+		expect(f.steps()).toContain("gh pr create");
 	});
 
 	test("a recorded PR the owner CLOSED is declined and remembered, with no clone, push or create", async () => {

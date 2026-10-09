@@ -328,6 +328,9 @@ describe("readSkillDir, the timeout and the cap", () => {
 		expect(DirRefused.prototype).toBeInstanceOf(Error);
 		writeFileSync(join(dir, "notes.md"), Buffer.from([0xef, 0xbb, 0xbf, 0x6e, 0x6f, 0x74, 0x65, 0x73, 0x0a]));
 		expect(readSkillDir(dir)["notes.md"]).toBe("\ufeffnotes\n");
+		// A marked SKILL.md keeps its bytes too; the server's frontmatter accepts the mark.
+		writeFileSync(join(dir, "SKILL.md"), Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(SKILL_MD)]));
+		expect(readSkillDir(dir)["SKILL.md"]).toBe(`\ufeff${SKILL_MD}`);
 	});
 
 	test("a directory over the cap is refused from the file sizes, before any file is read", () => {

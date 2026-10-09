@@ -13,7 +13,7 @@
  * hands its children an allowlisted environment, so the state path is baked into the script
  * rather than passed through one.
  */
-import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export interface FakePr {
@@ -153,6 +153,69 @@ function pidAlive(pid: number): boolean {
 	}
 }
 
+const pause = new Int32Array(new SharedArrayBuffer(4));
+let takeoverSeq = 0;
+
+/**
+ * Whether the lock instance at `lock` is free to take: a dead owner's, or an
+ * ownerless one older than the bound. A pid file that is present but unparsable is
+ * owned as far as anyone can tell, never stale.
+ */
+function lockIsStale(lock: string): boolean {
+	let pid = Number.NaN;
+	let pidMissing = false;
+	try {
+		pid = Number(readFileSync(join(lock, "pid"), "utf8").trim());
+	} catch {
+		pidMissing = true;
+	}
+	if (Number.isInteger(pid) && pid > 0) return !pidAlive(pid);
+	if (!pidMissing) return false;
+	let age = 0;
+	try {
+		age = Date.now() - statSync(lock).mtimeMs;
+	} catch {
+		return false;
+	}
+	return age > 250;
+}
+
+/**
+ * Remove the stale lock without ever deleting a fresh one: rename it aside (atomic,
+ * so concurrent recoverers of the same ownerless lock elect exactly one winner),
+ * re-check the renamed copy, and restore that exact instance untouched when its
+ * owner showed up mid-takeover. Returns true when the stale instance is gone.
+ */
+function takeStaleLock(lock: string): boolean {
+	const stale = `${lock}.stale.${process.pid}.${takeoverSeq++}`;
+	try {
+		renameSync(lock, stale);
+	} catch {
+		return false;
+	}
+	if (!lockIsStale(stale)) {
+		// Its owner arrived mid-takeover: put that exact instance back. A fresh lock
+		// may occupy the path for a moment; wait for it to drain rather than strand
+		// or delete a live lock.
+		const deadline = Date.now() + 2_000;
+		for (;;) {
+			try {
+				renameSync(stale, lock);
+				return false;
+			} catch {
+				if (Date.now() >= deadline) return false;
+				Atomics.wait(pause, 0, 0, 5);
+			}
+		}
+	}
+	try {
+		rmSync(stale, { recursive: true, force: true });
+	} catch {
+		// A uniquely named leftover never blocks acquisition.
+	}
+	return true;
+}
+
 /**
  * One lock around the whole read, change and write. An atomic rename of the state file
  * does not stop two children from reading the same `next` and returning the same PR number.
@@ -160,43 +223,41 @@ function pidAlive(pid: number): boolean {
 function acquireStateLock(statePath: string): () => void {
 	const lock = `${statePath}.lock`;
 	const started = Date.now();
-	const pause = new Int32Array(new SharedArrayBuffer(4));
 	for (;;) {
 		try {
 			mkdirSync(lock, { mode: 0o700 });
 			try {
 				writeFileSync(join(lock, "pid"), String(process.pid));
 			} catch (writeCause) {
-				rmSync(lock, { recursive: true, force: true });
+				// Our mkdir won but the pid never landed: drop exactly that half-made
+				// instance. `rmdirSync` only removes an empty directory, so a fresh lock
+				// another child has claimed since is never deleted wholesale.
+				try {
+					rmdirSync(lock);
+				} catch {
+					// Taken over or claimed meanwhile; age-based recovery covers leftovers.
+				}
 				throw writeCause;
 			}
-			return () => rmSync(lock, { recursive: true, force: true });
+			const owner = process.pid;
+			return () => {
+				// Release only the lock still owned by this process, never a successor's.
+				try {
+					if (readFileSync(join(lock, "pid"), "utf8").trim() !== String(owner)) return;
+				} catch {
+					return;
+				}
+				rmSync(lock, { recursive: true, force: true });
+			};
 		} catch (cause) {
 			if ((cause as NodeJS.ErrnoException).code !== "EEXIST") throw cause;
 		}
-		let pid = Number.NaN;
-		let pidMissing = false;
+		// The path is held by someone: reclaim it only when it is identifiably stale,
+		// through an atomic takeover that a single recoverer wins.
 		try {
-			pid = Number(readFileSync(join(lock, "pid"), "utf8").trim());
+			if (lockIsStale(lock)) takeStaleLock(lock);
 		} catch {
-			pidMissing = true;
-		}
-		if (Number.isInteger(pid) && pid > 0 && !pidAlive(pid)) {
-			rmSync(lock, { recursive: true, force: true });
-			continue;
-		}
-		// A crash between mkdir and the pid write leaves a lock no process owns.
-		if (pidMissing) {
-			let age = 0;
-			try {
-				age = Date.now() - statSync(lock).mtimeMs;
-			} catch {
-				age = 0;
-			}
-			if (age > 250) {
-				rmSync(lock, { recursive: true, force: true });
-				continue;
-			}
+			// A lock that cannot even be stat'ed is gone already; retry the acquire.
 		}
 		if (Date.now() - started > 5_000) throw new Error("fake gh state lock busy");
 		Atomics.wait(pause, 0, 0, 5);
