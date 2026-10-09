@@ -49,8 +49,8 @@ reported skill family, which groups shapes that mean the same credential.
 | `jwt` | `jwt` | A JWT |
 | `keypair-array` | — (excluded) | A pasted private keypair array; byte arrays are ordinary code in docs |
 
-The last ten rows before `jwt` are the September D-04 classes: shapes the
-September `/remember` path did not filter, now stored as `[REDACTED]`.
+The D-04 classes are `private-tag`, `api-key-lower` and the eight rows from
+`aws` to `pk-rk`: shapes the September `/remember` path did not filter, now stored as `[REDACTED]`.
 
 ### The `pk-rk` deviation (D18-21, operator 2026-10-08)
 
