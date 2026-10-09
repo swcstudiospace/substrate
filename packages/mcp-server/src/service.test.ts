@@ -1974,6 +1974,9 @@ describe("hourDigest over a real ledger client", () => {
 
 	test("an event with a malformed hash fails the digest by name", async () => {
 		await expect(digestOf(client(INGEST, { ...HASH, evt_3: "not-a-hash" }))).rejects.toThrow("evt_3");
+	});
+});
+
 describe("proposeSkill", () => {
 	const HASH = "ab".repeat(32);
 	const request: SkillProposalRequest = {
