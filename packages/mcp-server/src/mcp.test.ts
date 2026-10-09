@@ -13,6 +13,7 @@ import { loadConfig } from "./config.ts";
 import type { EventQuery } from "./greptime.ts";
 import { createMcpServer } from "./mcp.ts";
 import { Substrate } from "./service.ts";
+import { ProposeFailed, ProposeRefused, type ProposeOptions, type ProposeResult, type SkillProposer } from "./skills/propose.ts";
 import type { SubstrateEvent, Surface } from "./types.ts";
 
 /** A ledger stub recording what was appended and what was asked of it. */
@@ -575,3 +576,137 @@ describe("memory_search", () => {
 		expect(stub.paged).toEqual([]);
 	});
 });
+
+describe("skills_propose", () => {
+	const files = { "SKILL.md": "---\nname: demo-skill\ndescription: a demo\n---\nbody\n" };
+	const args = { name: "demo-skill", files, rationale: "worth keeping" };
+	const opened: ProposeResult = {
+		status: "opened",
+		pr_url: "https://github.com/swcstudiospace/agent-skills/pull/12",
+		pr_number: 12,
+		branch: "skill/omp/demo-skill-1-abcd",
+		content_sha256: "ab".repeat(32),
+		redactions: [],
+	};
+
+	/** A client of a server for this caller, with a proposer stub in place of git and gh. */
+	async function proposing(
+		answer: ProposeResult | Error,
+		caller: { surface: Surface | null; isOperator: boolean } = { surface: "omp", isOperator: false },
+	) {
+		const calls: Array<{ input: Parameters<SkillProposer["propose"]>[0]; opts: Omit<ProposeOptions, "run"> }> = [];
+		const skills: SkillProposer = {
+			propose: async (input, opts) => {
+				calls.push({ input, opts });
+				if (answer instanceof Error) throw answer;
+				return answer;
+			},
+		};
+		const { written, greptime } = ledger();
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: greptime as never, skills });
+		const server = createMcpServer(substrate, caller);
+		const client = new Client({ name: "substrate-test", version: "0.0.0" });
+		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+		await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+		return { client, calls, written };
+	}
+
+	test("is registered, writes nothing destructive, and reaches out to GitHub", async () => {
+		const { client } = await proposing(opened);
+		const tool = (await client.listTools()).tools.find((candidate) => candidate.name === "skills_propose");
+
+		expect(tool).toBeDefined();
+		expect(tool?.annotations).toMatchObject({ destructiveHint: false, openWorldHint: true });
+		const properties = Object.keys((tool?.inputSchema as { properties?: Record<string, unknown> }).properties ?? {});
+		expect(properties.sort()).toEqual(
+			["allow_doc_examples", "dry_run", "files", "graph_id", "mode", "name", "rationale", "remove", "reopen", "session_id", "surface"].sort(),
+		);
+	});
+
+	test("returns the proposal's result as JSON, attributed to the calling surface", async () => {
+		const { client, calls, written } = await proposing(opened);
+		const reply = await call(client, "skills_propose", args);
+
+		expect(reply.isError).toBe(false);
+		expect(reply.json()).toEqual(opened as never);
+		expect(calls[0]?.input.surface).toBe("omp");
+		// The outcome is on the trail, from the caller, without the skill's content.
+		expect(written[0]).toMatchObject({ surface: "omp", kind: "note" });
+		expect(JSON.stringify(written[0])).not.toContain("worth keeping");
+	});
+
+	test("an anonymous caller is refused as an error and nothing is proposed", async () => {
+		const { client, calls, written } = await proposing(opened, { surface: null, isOperator: false });
+		const reply = await call(client, "skills_propose", args);
+
+		expect(reply.isError).toBe(true);
+		expect(reply.json().error).toContain("authenticated surface");
+		expect(calls).toEqual([]);
+		expect(written).toEqual([]);
+	});
+
+	test("a different surface than the caller's is refused, never re-attributed", async () => {
+		const { client, calls } = await proposing(opened);
+		const reply = await call(client, "skills_propose", { ...args, surface: "cursor" });
+
+		expect(reply.isError).toBe(true);
+		expect(String(reply.json().error)).toContain("omp");
+		expect(calls).toEqual([]);
+
+		const same = await call(client, "skills_propose", { ...args, surface: "omp" });
+		expect(same.isError).toBe(false);
+	});
+
+	test("replace, reopen and doc examples are refused for a surface and allowed for an operator", async () => {
+		const agent = await proposing(opened);
+		for (const privileged of [{ mode: "replace" }, { reopen: true }, { allow_doc_examples: ["jwt"] }]) {
+			const reply = await call(agent.client, "skills_propose", { ...args, ...privileged });
+			expect(reply.isError).toBe(true);
+			expect(String(reply.json().error)).toContain("operator token");
+		}
+		expect(agent.calls).toEqual([]);
+
+		const operator = await proposing(opened, { surface: "omp", isOperator: true });
+		const reply = await call(operator.client, "skills_propose", { ...args, mode: "replace", reopen: true, allow_doc_examples: ["pem"] });
+		expect(reply.isError).toBe(false);
+		expect(operator.calls[0]?.opts).toMatchObject({ mode: "replace", reopen: true });
+	});
+
+	test("a refusal is an error carrying findings as file, line and rule", async () => {
+		const refusal = new ProposeRefused("secret-like content in 1 place(s)", [{ file: "SKILL.md", line: 4, rule: "github" }]);
+		const { client } = await proposing(refusal);
+		const reply = await call(client, "skills_propose", args);
+
+		expect(reply.isError).toBe(true);
+		expect(reply.json()).toEqual({ error: refusal.message, findings: [{ file: "SKILL.md", line: 4, rule: "github" }] });
+	});
+
+	test("a failed git or gh step is an error with the redacted, capped reason", async () => {
+		// Assembled at run time so no token-shaped literal sits in the repository.
+		const token = `ghp_${"E".repeat(36)}`;
+		const { client } = await proposing(new ProposeFailed(`git push exited 1: GITHUB_TOKEN=${token} ${"y".repeat(900)}`));
+		const reply = await call(client, "skills_propose", args);
+
+		expect(reply.isError).toBe(true);
+		expect(reply.text).not.toContain(token);
+		expect(String(reply.json().error).length).toBeLessThanOrEqual(400);
+	});
+
+	test("a dry run returns the diff counts and emits nothing", async () => {
+		const dry: ProposeResult = { ...opened, status: "dry_run", pr_url: undefined, diff_added: 1, diff_changed: 0, diff_deleted: 0 };
+		const { client, calls, written } = await proposing(dry);
+		const reply = await call(client, "skills_propose", { ...args, dry_run: true });
+
+		expect(reply.json()).toMatchObject({ status: "dry_run", diff_added: 1 });
+		expect(calls[0]?.opts.dryRun).toBe(true);
+		expect(written).toEqual([]);
+	});
+
+	test("a body that does not match the schema is refused by the protocol, before the service", async () => {
+		const { client, calls } = await proposing(opened);
+		const reply = await call(client, "skills_propose", { ...args, files: ["SKILL.md"] });
+		expect(reply.isError).toBe(true);
+		expect(calls).toEqual([]);
+	});
+});
+

@@ -6,6 +6,7 @@
  *   POST /events        append an event, for hooks
  *   POST /events/query  read a window of the ledger
  *   POST /memory        write a memory entry through the governance gate
+ *   POST /skills/propose propose a skill as a reviewable PR on the skills library
  *   POST /verify        recompute a graph's hash chain
  *   POST /evidence      the per-graph evidence bundle, as JSON or HTML
  *   GET  /healthz       store reachability, and whether events can actually be written
@@ -50,6 +51,7 @@ import {
 	type Observability,
 } from "./observe.ts";
 import type { Substrate } from "./service.ts";
+import { proposalBodyProblem, proposalFailure, toProposalRequest } from "./skills/request.ts";
 import { SURFACES, type Surface } from "./types.ts";
 
 /** One hour. Anonymous callers are logged once per window, not once per request. */
@@ -168,6 +170,20 @@ export interface HttpServerOptions {
 const MAX_BODY_BYTES = 1_000_000;
 
 /**
+ * A body over `MAX_BODY_BYTES`. Final for that body, so `/skills/propose` answers it 413. Every
+ * other route still answers it with the generic 500 it always has.
+ */
+export class BodyTooLargeError extends Error {
+	constructor() {
+		super("request body too large");
+		this.name = "BodyTooLargeError";
+	}
+}
+
+/** Why an anonymous proposal is refused, even on a run that allows anonymous callers. */
+const PROPOSAL_NEEDS_SURFACE = "skills_propose needs an authenticated surface; nothing was proposed";
+
+/**
  * The status `/healthz` answers with.
  *
  * A deployment that configured a ledger and cannot write to it is **not** healthy,
@@ -241,7 +257,7 @@ async function readBody(req: IncomingMessage): Promise<string> {
 	let size = 0;
 	for await (const chunk of req) {
 		size += (chunk as Buffer).length;
-		if (size > MAX_BODY_BYTES) throw new Error("request body too large");
+		if (size > MAX_BODY_BYTES) throw new BodyTooLargeError();
 		chunks.push(chunk as Buffer);
 	}
 	return Buffer.concat(chunks).toString("utf8");
@@ -675,6 +691,32 @@ export function createHttpServer(
 				return;
 			}
 
+			// A proposal spends the owner's GitHub credential, so an anonymous caller is refused
+			// before the body is read, even on a run that otherwise allows untokened callers.
+			if (req.method === "POST" && url.pathname === "/skills/propose") {
+				if (surface === null) {
+					sendJson(res, 401, { error: PROPOSAL_NEEDS_SURFACE });
+					return;
+				}
+				const body = JSON.parse(await readBody(req)) as unknown;
+				const problem = proposalBodyProblem(body);
+				if (problem) {
+					sendJson(res, 400, { error: problem });
+					return;
+				}
+				const fields = body as Record<string, unknown>;
+				// Audited under the tool's own name, fail-closed, before any git work.
+				if (!(await auditedRest(res, observability, surface, "skills_propose", fields))) return;
+				try {
+					sendJson(res, 200, await substrate.proposeSkill(toProposalRequest(fields), { surface, isOperator: caller.isOperator }));
+				} catch (cause) {
+					const failure = proposalFailure(cause);
+					if (failure === null) throw cause;
+					sendJson(res, failure.status, failure.body);
+				}
+				return;
+			}
+
 			if (url.pathname === "/mcp") {
 				await handleMcp(req, res, substrate, caller, observability, claim);
 				return;
@@ -682,6 +724,10 @@ export function createHttpServer(
 
 			sendJson(res, 404, { error: `no route for ${req.method} ${url.pathname}` });
 		} catch (cause) {
+			if (cause instanceof BodyTooLargeError && url.pathname === "/skills/propose") {
+				sendJson(res, 413, { error: cause.message });
+				return;
+			}
 			if (cause instanceof InvalidEventError || cause instanceof InvalidHandoffError) {
 				if (req.method === "POST" && url.pathname === "/events" && cause instanceof InvalidEventError) {
 					eventRefusal = classifyEventRefusal(400, cause.message) ?? "validation";
