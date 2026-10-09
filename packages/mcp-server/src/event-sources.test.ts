@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { normalizeEvent } from "./event.ts";
 import { EVENT_SOURCES, SILENT_SOURCES } from "./event-sources.ts";
+import { SURFACES } from "./types.ts";
 /**
  * Proof for the v1.3 event-source table.
  *
@@ -37,10 +38,16 @@ describe("every roadmap source has at least one row", () => {
 		"muse.",
 		"cursor.stop",
 		"skills.propose",
+		"skills.sync",
 		"docs.ingest",
 		"desktop.",
 		"anchor.",
 		"teachable.",
+		"dispatch.",
+		"lanea.",
+		"mirror.",
+		"dod.",
+		"lease.",
 	]) {
 		test(`prefix ${prefix} has a row`, () => {
 			const ids = EVENT_SOURCES.filter((row) => row.id.startsWith(prefix)).map((row) => row.id);
@@ -48,6 +55,31 @@ describe("every roadmap source has at least one row", () => {
 			expect(ids.length).toBeGreaterThan(0);
 		});
 	}
+});
+
+describe("the surface rule", () => {
+	test("each row's sample surface satisfies its declared rule", () => {
+		// A row declaring `{ fixed: "substrate" }` while sampling `cursor`,
+		// or declaring `"caller"` while sampling `substrate`, passes every
+		// other assertion — so the rule admits the sample here, explicitly.
+		for (const row of EVENT_SOURCES) {
+			const surface = row.sample().surface;
+			if (typeof row.surface === "string") {
+				if (row.surface === "herdr-agent") {
+					// Phase 19's fixed table maps the detected agent onto
+					// SURFACES: a sample naming a raw herdr id, or the rule
+					// name itself, is a bug.
+					expect([...SURFACES]).toContain(surface);
+					expect(surface).not.toBe("herdr-agent");
+				} else {
+					// caller, memory-writer, lease-holder: the concrete sample surface.
+					expect(["claude-code", "hermes"]).toContain(surface);
+				}
+			} else {
+				expect({ id: row.id, surface }).toEqual({ id: row.id, surface: row.surface.fixed });
+			}
+		}
+	});
 });
 
 describe("the repo rule", () => {
@@ -115,23 +147,25 @@ describe("docs/event-vocabulary.md equals the table", () => {
 		expect({ docIds }).toEqual({ docIds: tableIds });
 	});
 
-	test("each doc row carries its row's kind and actions", () => {
+	test("each doc row carries its row's kind, surface and actions", () => {
 		const docRows = parseMarkedTable(readFileSync(DOC, "utf8"));
 		const byId = new Map(docRows.map((row) => [row["id"], row]));
 		for (const row of EVENT_SOURCES) {
 			const doc = byId.get(row.id);
-			expect({ id: row.id, kind: doc?.["kind"], actions: doc?.["action"] }).toEqual({
+			expect({ id: row.id, kind: doc?.["kind"], surface: doc?.["surface"], actions: doc?.["action"] }).toEqual({
 				id: row.id,
 				kind: row.kind,
+				surface: typeof row.surface === "string" ? row.surface : row.surface.fixed,
 				actions: row.actions ? [...row.actions].join(", ") : "—",
 			});
 		}
 		// Silent sources deliberately emit nothing: the doc holds an em dash.
 		for (const row of SILENT_SOURCES) {
 			const doc = byId.get(row.id);
-			expect({ id: row.id, kind: doc?.["kind"], actions: doc?.["action"] }).toEqual({
+			expect({ id: row.id, kind: doc?.["kind"], surface: doc?.["surface"], actions: doc?.["action"] }).toEqual({
 				id: row.id,
 				kind: "—",
+				surface: "—",
 				actions: "—",
 			});
 		}
