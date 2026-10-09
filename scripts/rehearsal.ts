@@ -425,7 +425,7 @@ function readListeningPorts(pid: number): number[] | null {
 		// A missing `ss` is an unverifiable pid, not a reason to signal it.
 		return null;
 	}
-	if (run.exitCode !== 0) return null;
+	if (run.exitCode !== 0 || run.stdout === undefined) return null;
 	const ports: number[] = [];
 	for (const line of run.stdout.toString().split("\n")) {
 		if (!line.includes(`pid=${pid},`) && !line.includes(`pid=${pid})`)) continue;
