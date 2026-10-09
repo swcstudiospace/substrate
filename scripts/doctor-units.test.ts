@@ -326,4 +326,15 @@ describe("release tree", () => {
 		expect(linked.has(MCP_ENTRY)).toBe(true);
 		expect([...linked].some((path) => path.includes("secret.ts"))).toBe(false);
 	});
+
+	test("listReleaseTree records files reached through an in-tree directory link", () => {
+		const dir = mkdtempSync(join(tmpdir(), "doctor-alias-"));
+		mkdirSync(join(dir, "packages/mcp-server/src"), { recursive: true });
+		writeFileSync(join(dir, MCP_ENTRY), "");
+		symlinkSync("packages/mcp-server", join(dir, "alias"));
+		symlinkSync(".", join(dir, "loop"));
+		const tree = listReleaseTree(dir);
+		expect(tree.has("alias/src/index.ts")).toBe(true);
+		expect(tree.has(MCP_ENTRY)).toBe(true);
+	});
 });

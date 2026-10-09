@@ -254,51 +254,56 @@ export function listReleaseTree(release: string): Set<string> {
 		throw new DoctorError(`release directory does not exist: ${release}`);
 	}
 	const tree = new Set<string>();
-	const seen = new Set<string>();
 	function inside(resolved: string): boolean {
 		return resolved === root || resolved.startsWith(`${root}${sep}`);
 	}
-	function walk(dir: string): void {
+	// `stack` is the realpath chain for this walk. A directory link is walked
+	// at the link path so `alias/src/index.ts` is recorded as well as the real
+	// path. A link back to a realpath already on this chain stops, so `loop -> .`
+	// cannot recurse.
+	function walk(dir: string, stack: string[]): void {
 		let realDir: string;
 		try {
 			realDir = realpathSync(dir);
 		} catch {
 			return;
 		}
-		if (!inside(realDir) || seen.has(realDir)) return;
-		seen.add(realDir);
-		for (const entry of readdirSync(dir, { withFileTypes: true })) {
-			if (entry.name === "node_modules" || entry.name === ".git") continue;
-			const full = join(dir, entry.name);
-			if (entry.isSymbolicLink()) {
-				let resolved: string;
-				try {
-					resolved = realpathSync(full);
-				} catch {
+		if (!inside(realDir) || stack.includes(realDir)) return;
+		stack.push(realDir);
+		try {
+			for (const entry of readdirSync(dir, { withFileTypes: true })) {
+				if (entry.name === "node_modules" || entry.name === ".git") continue;
+				const full = join(dir, entry.name);
+				if (entry.isSymbolicLink()) {
+					let resolved: string;
+					try {
+						resolved = realpathSync(full);
+					} catch {
+						continue;
+					}
+					if (!inside(resolved)) continue;
+					let st;
+					try {
+						st = statSync(resolved);
+					} catch {
+						continue;
+					}
+					if (st.isDirectory()) {
+						walk(full, stack);
+						continue;
+					}
+					const linkPath = relative(root, full).split(sep).join("/");
+					if (linkPath !== "") tree.add(linkPath);
 					continue;
 				}
-				if (!inside(resolved)) continue;
-				let st;
-				try {
-					st = statSync(resolved);
-				} catch {
-					continue;
-				}
-				// Record the link path for a file. Walk a directory target once;
-				// a link back to a directory already seen stops, so a loop cannot recurse.
-				if (st.isDirectory()) {
-					walk(resolved);
-					continue;
-				}
-				const linkPath = relative(root, full).split(sep).join("/");
-				if (linkPath !== "") tree.add(linkPath);
-				continue;
+				if (entry.isDirectory()) walk(full, stack);
+				else tree.add(relative(root, full).split(sep).join("/"));
 			}
-			if (entry.isDirectory()) walk(full);
-			else tree.add(relative(root, full).split(sep).join("/"));
+		} finally {
+			stack.pop();
 		}
 	}
-	walk(root);
+	walk(root, []);
 	return tree;
 }
 

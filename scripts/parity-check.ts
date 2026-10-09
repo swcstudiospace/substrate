@@ -318,6 +318,41 @@ function gitWork(dir: string, args: string[]): SpawnResult | null {
 	return spawn(["git", "--no-optional-locks", "-C", dir, ...args]);
 }
 
+export interface RemoteMainAncestry {
+	originSha: string | null;
+	originShaKnown: boolean | null;
+	releaseOnMain: boolean | null;
+}
+
+/**
+ * Whether `releaseSha` is an ancestor of origin's `main`, asked with
+ * read-only `git ls-remote`. The cached `origin/main` ref is not the target:
+ * a stale tracking ref would fail a release that the remote already has.
+ * Does not fetch. The ls-remote commit must already be in the local object store.
+ */
+export function releaseAncestryOnRemoteMain(repo: string, releaseSha: string): RemoteMainAncestry {
+	const remote = gitWork(repo, ["ls-remote", "origin", "refs/heads/main"]);
+	let originSha: string | null = null;
+	if (remote !== null && remote.code === 0) {
+		const sha = remote.out.trim().split(/\s+/)[0] ?? "";
+		if (/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(sha)) originSha = sha;
+	}
+	if (originSha === null) {
+		return { originSha: null, originShaKnown: null, releaseOnMain: null };
+	}
+	const known = gitWork(repo, ["cat-file", "-e", `${originSha}^{commit}`]);
+	const originShaKnown = known === null ? null : known.code === 0;
+	if (originShaKnown !== true) {
+		return { originSha, originShaKnown, releaseOnMain: null };
+	}
+	const ancestor = gitWork(repo, ["merge-base", "--is-ancestor", releaseSha, originSha]);
+	return {
+		originSha,
+		originShaKnown,
+		releaseOnMain: ancestor === null ? null : ancestor.code === 0,
+	};
+}
+
 function readText(path: string): string | null {
 	try {
 		return readFileSync(path, "utf8");
@@ -473,14 +508,11 @@ export async function main(argv: string[]): Promise<number> {
 		if (resolved !== linked) return dead("release directory resolves outside releases/<sha>.");
 		releaseDir = resolved;
 		headSha = releaseSha;
-		const repo = operatorRepo();
-		const known = gitWork(repo, ["cat-file", "-e", "origin/main^{commit}"]);
-		originShaKnown = known === null ? null : known.code === 0;
-		const tip = gitWork(repo, ["rev-parse", "--verify", "origin/main^{commit}"]);
-		if (tip !== null && tip.code === 0) originSha = tip.out.trim();
-		if (releaseSha !== null && originShaKnown === true) {
-			const ancestor = gitWork(repo, ["merge-base", "--is-ancestor", releaseSha, "origin/main"]);
-			releaseOnMain = ancestor === null ? null : ancestor.code === 0;
+		if (releaseSha !== null) {
+			const ancestry = releaseAncestryOnRemoteMain(operatorRepo(), releaseSha);
+			originSha = ancestry.originSha;
+			originShaKnown = ancestry.originShaKnown;
+			releaseOnMain = ancestry.releaseOnMain;
 		}
 	} else if (workdir !== null) {
 		const log = gitWork(workdir, ["log", "-g", "-n", "1", "--format=%H %gd %gs", "--date=unix", "HEAD"]);

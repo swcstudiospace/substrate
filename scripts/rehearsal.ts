@@ -860,7 +860,15 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 	const prev = readState(statePath);
 	if (prev !== null && pidAlive(prev.pid)) {
 		const facts = readProcFacts(prev.pid);
-		if (facts !== null && mayStop(facts, prev) === null) {
+		// A missing `ss` (or any other unreadable /proc fact) used to fall
+		// through to removeLabelledContainers and delete a live twin's stores.
+		// Refuse before any container removal when the live pid cannot be checked.
+		if (facts === null) {
+			throw new RehearsalRefused(
+				`instance ${opts.name} has live pid ${prev.pid} that could not be verified; refusing to remove its stores`,
+			);
+		}
+		if (mayStop(facts, prev) === null) {
 			process.stderr.write(`[rehearsal] refused: instance ${opts.name} is already running (pid ${prev.pid}).\n`);
 			return 2;
 		}

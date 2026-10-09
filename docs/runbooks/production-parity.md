@@ -43,10 +43,12 @@ It checks, read-only:
    has no reflog and no dirty worktree. The check reads the symlink, requires
    `/proc/<pid>/cwd` to be that release directory, and asks the operator repo
    (`SUBSTRATE_REPO`, or `/root/src/repos/agent-substrate`) whether `<sha>` is
-   an ancestor of `origin/main`. Dirt and later commits in the operator
-   checkout do not fail this mode: production is not running from that
-   checkout. `ConditionPathExists` on the unit is the entry under `current`,
-   which follows the symlink.
+   an ancestor of the commit `git ls-remote origin refs/heads/main` returns.
+   That lookup does not fetch and does not use the cached `origin/main` ref.
+   The returned commit must already be in the local object store. Dirt and
+   later commits in the operator checkout do not fail this mode: production
+   is not running from that checkout. `ConditionPathExists` on the unit is
+   the entry under `current`, which follows the symlink.
 
    When `WorkingDirectory` is still the operator checkout, the older rule
    holds: `/proc/<pid>/cwd` equals that directory; the process started after
@@ -157,20 +159,37 @@ recorded here — never values.
 
 ## Operator step: installing the repo unit
 
-`infra/vps/substrate-mcp.service` on `main` is ahead of the installed unit:
-it carries the `StateDirectory=substrate` block that Phase 20's audit path
-relies on, and the approved `ConditionPathExists` guard on the server entry
-point. The repo file has no effect until the operator installs it. Operator
-only, at the next approved restart:
+`infra/vps/substrate-mcp.service` on `main` runs from the pinned release.
+`WorkingDirectory` and `ConditionPathExists` both use
+`/opt/agent-substrate/current`, and the server settings live in the drop-in
+`infra/vps/substrate-mcp.service.d/10-environment.conf`
+(`EnvironmentFile=/etc/substrate/substrate.env`), not in the unit file.
+Copying only the service file and restarting it does not build `current`
+and does not install the drop-in. Follow the staged cutover in
+`infra/vps/README.md`. Operator only, in its own window:
 
 ```sh
-# back the installed unit up outside the repo, then install the repo file
+# 1. Build the first tree. This creates current and does not restart units.
+SUBSTRATE_RELEASE_RESTART=0 infra/vps/deploy-release.sh <tag>
+
+# 2. Install the unit and the drop-in. Back up anything already installed.
 cp /etc/systemd/system/substrate-mcp.service /root/substrate-mcp.service.bak-<date>
+install -d -m 0755 /etc/systemd/system/substrate-mcp.service.d
 cp infra/vps/substrate-mcp.service /etc/systemd/system/substrate-mcp.service
-systemctl daemon-reload
-systemctl restart substrate-mcp
+cp infra/vps/substrate-mcp.service.d/10-environment.conf \
+  /etc/systemd/system/substrate-mcp.service.d/10-environment.conf
+
+# 3. Health-checked deploy of the same tag. The script daemon-reloads,
+#    restarts, and polls /healthz. Do not restart again after it returns.
+infra/vps/deploy-release.sh <tag>
 bun run parity:check --json
 ```
+
+If `substrate-collector-grok` is in the same window, install its unit, its
+drop-in, and `/etc/substrate/collector-grok.env` in step 2, before the
+health-checked deploy, as the README states. Do not `systemctl restart`
+between installing the units and that deploy: a restart outside the script
+starts the new code without the health check.
 
 The new row goes in the evidence table above.
 
@@ -178,23 +197,46 @@ The new row goes in the evidence table above.
 
 Two rollbacks, both operator only:
 
-1. **`main` misbehaves in production.** Check out the last known-good commit
-   recorded in the header table in the operator checkout and run
-   `systemctl restart substrate-mcp`. That commit predates
-   `scripts/parity-check.ts`, so re-run the check from a retained newer
-   worktree or preserved copy that still has it (the check reads the unit's
-   `WorkingDirectory` wherever the script itself runs from):
+1. **The pinned release misbehaves.** Checking out a commit and restarting
+   `substrate-mcp` does not change the code the service runs: the unit's
+   `WorkingDirectory` is `/opt/agent-substrate/current`. Roll the symlink
+   back instead.
+
+   When `previous` exists:
+
+```sh
+infra/vps/deploy-release.sh rollback
+bun run parity:check --json
+```
+
+   The first successful publish has no `previous` symlink, so `rollback`
+   exits with `no previous release to roll back to`. Restore the unit files
+   from the commit before this change
+   (`WorkingDirectory=/root/src/repos/agent-substrate`, and
+   `EnvironmentFile=/etc/substrate/substrate.env` on the units this window
+   installed), run `systemctl daemon-reload`, and restart those units. They
+   run the checkout again. Leave the release directory in place; the restored
+   units do not use it.
+
+   That older commit predates `scripts/parity-check.ts`, so re-run the check
+   from a retained newer worktree or preserved copy that still has it (the
+   check reads the unit's `WorkingDirectory` wherever the script itself runs
+   from):
 
 ```sh
 cd <newer-worktree> && bun run parity:check --json
 ```
 
    Rollback never starts the server from a user session, because that
-   recreates the stray process. After a real rollback a FAIL naming only
-   server-path drift from `origin/main` is expected: HEAD no longer matches
-   the remote by design.
+   recreates the stray process. After `deploy-release.sh rollback`, the
+   process cwd is the previous release and that sha is an ancestor of the
+   `ls-remote` tip of `main`. After a first-cutover restore of the checkout
+   unit, a FAIL naming only server-path drift from `origin/main` is expected:
+   HEAD no longer matches the remote by design.
 2. **The installed unit file goes wrong.** Restore the backup taken at
-   install time, `daemon-reload`, restart, re-run the check:
+   install time, `daemon-reload`, restart, re-run the check. If the restored
+   unit still uses `current`, also run `deploy-release.sh rollback` so the
+   restart does not load the broken release:
 
 ```sh
 cp /root/substrate-mcp.service.bak-<date> /etc/systemd/system/substrate-mcp.service
