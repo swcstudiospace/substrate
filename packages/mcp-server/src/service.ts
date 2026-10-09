@@ -7,7 +7,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { decideClaim, type ClaimDecision } from "@substrate/audit";
-import { formatMemo, hourEnd, hourIso, hourStart, isClosed, merkleRootHex } from "@substrate/ledger";
+import { createRpc, formatMemo, hourEnd, hourIso, hourStart, isClosed, merkleRootHex, parseMemo, HOUR_MS, type Rpc, type TransactionMemo } from "@substrate/ledger";
 import { composeBrief, type BriefRequest } from "./brief.ts";
 import {
 	GRAPHS_GENERATION_KEY,
@@ -331,6 +331,58 @@ export interface HourDigest {
 	/** The members' event ids in position order, the order the root is computed over. */
 	event_ids: string[];
 }
+/**
+ * One hour's anchor verdict inside {@link VerifyVerdict} (D28-15).
+ *
+ * `anchored` needs the full triple-check: the row's `tx_sig` reads back from
+ * devnet, the memo comes from a memo-program instruction signed by
+ * `SOLANA_ANCHOR_PUBKEY` with `err === null`, it parses as v1, its period is
+ * this hour, and its root and count equal the recomputed digest — which also
+ * equals the row. `pending` is no row inside the 3 h window (or the hour not
+ * closed yet); `unanchored`, `mismatch` and `unverified` all fail the verify.
+ */
+export type HourStatus = "anchored" | "pending" | "unanchored" | "mismatch" | "unverified";
+export interface HourReport {
+	period_start: string;
+	period_end: string;
+	status: HourStatus;
+	event_count: number;
+	root: string | null;
+	tx_sig?: string;
+	slot?: number;
+	reason?: string;
+}
+/** The additive verify verdict: the chain fields keep their meaning (D28-14). */
+export interface VerifyVerdict {
+	ok: boolean;
+	events: number;
+	brokenAt?: string;
+	reason?: string;
+	chain: { ok: boolean; brokenAt?: string; reason?: string };
+	hours: HourReport[];
+	uncovered: { count: number; ids: string[] };
+	legacy: { count: number; ids: string[] };
+}
+/** Options for {@link Substrate.verifyGraph}: evidence passes `anchors: false`. */
+export interface VerifyOptions {
+	/** Skip the hour report and return the chain verdict only (default true). */
+	anchors?: boolean;
+	/** Clock for pending-window and closed-hour checks; tests pin it. */
+	now?: number;
+	/** Injected devnet reader; production builds one from the solana config. */
+	rpc?: Rpc;
+}
+/**
+ * How long after an hour closes it may still anchor before verify fails it.
+ *
+ * D28-15: `pending` while `now < period_end + PENDING_MS`; the anchor job lands
+ * an hour at the second tick after it ends (~2 h), inside this 3 h window.
+ */
+export const VERIFY_PENDING_MS = 3 * HOUR_MS;
+/** Per-call devnet read budget inside verify; the whole-verify budget lives in config. */
+export const VERIFY_RPC_TIMEOUT_MS = 5_000;
+export const VERIFY_RPC_ATTEMPTS = 2;
+export const VERIFY_RPC_BACKOFF_MS = 200;
 
 /**
  * Why a ledger that is not provably append-only refuses the write.
@@ -2438,19 +2490,30 @@ export class Substrate {
 	}
 
 	/**
-	 * Recompute the hash chain for one graph.
+	 * Recompute the hash chain for one graph, plus the per-hour anchor report.
 	 *
 	 * Events are grouped by session before verification: `prev` chains within a
 	 * session, so interleaving two sessions' events into one sequence would
-	 * report a break that is not there.
+	 * report a break that is not there. That per-session check is returned as
+	 * `chain`, and the top-level `ok`/`events`/`brokenAt`/`reason` keep their
+	 * meaning on top of it (D28-14).
+	 *
+	 * With anchors on (the default), every distinct hour holding one of the
+	 * graph's events — the hour of each event's first ingest record (D28-16,
+	 * D27-10) — is digested whole and checked once against its anchors row and
+	 * the devnet read-back (D28-15). `ok` is true only when the chain verifies,
+	 * every hour is `anchored` or `pending`, and no post-coverage event is
+	 * uncovered (D28-17). Pass `anchors: false` for the chain-only evidence
+	 * call: anchors in the bundle are out of scope (FEATURES E-D1).
 	 */
-	async verifyGraph(
-		graphId: string,
-	): Promise<{ ok: boolean; events: number; brokenAt?: string; reason?: string }> {
-		if (!this.greptime) return { ok: false, events: 0, reason: "greptime not configured" };
+	async verifyGraph(graphId: string, opts: VerifyOptions = {}): Promise<VerifyVerdict> {
+		const withAnchors = opts.anchors !== false;
+		const now = opts.now ?? Date.now();
+		if (!this.greptime) return { ok: false, events: 0, reason: "greptime not configured", chain: { ok: false, reason: "greptime not configured" }, hours: [], uncovered: { count: 0, ids: [] }, legacy: { count: 0, ids: [] } };
 		// Read by the graph id in its stored form, for the same reason `emit` looks
 		// the session up by its normalised one.
-		const rows = await this.greptime.readEvents("graph_id", normalizeIdentifier(graphId) ?? graphId);
+		const stored = normalizeIdentifier(graphId) ?? graphId;
+		const rows = await this.greptime.readEvents("graph_id", stored);
 
 		const bySession = new Map<string, SubstrateEvent[]>();
 		for (const row of rows) {
@@ -2461,12 +2524,195 @@ export class Substrate {
 			else bySession.set(key, [event]);
 		}
 
+		const chain: VerifyVerdict["chain"] = { ok: true };
 		for (const events of bySession.values()) {
 			const result = verifyChain(inChainOrder(events));
-			if (!result.ok) return { ok: false, events: rows.length, brokenAt: result.brokenAt, reason: result.reason };
+			if (!result.ok) {
+				chain.ok = false;
+				chain.brokenAt = result.brokenAt;
+				chain.reason = result.reason;
+				break;
+			}
 		}
-		return { ok: true, events: rows.length };
+
+		const emptyHours: VerifyVerdict = {
+			ok: chain.ok,
+			events: rows.length,
+			...(chain.brokenAt ? { brokenAt: chain.brokenAt } : {}),
+			...(chain.reason ? { reason: chain.reason } : {}),
+			chain,
+			hours: [],
+			uncovered: { count: 0, ids: [] },
+			legacy: { count: 0, ids: [] },
+		};
+		if (!withAnchors) return emptyHours;
+		return this.hourReport(stored, rows, chain, now, opts.rpc);
 	}
+
+	/**
+	 * The D28-15 hour report behind {@link verifyGraph}.
+	 *
+	 * Reads the graph's ingest records by stored graph id, maps each event to
+	 * its first record's hour, splits pre-coverage record-less events to legacy
+	 * (counted, never failing) and post-coverage ones to uncovered (fail, naming
+	 * ids), then digests each distinct hour whole and checks it once. Devnet
+	 * reads run sequentially — the concurrency cap is one — under the
+	 * whole-verify budget; an hour never reached in budget reads `unverified`.
+	 */
+	private async hourReport(
+		storedGraphId: string,
+		rows: Array<Record<string, unknown>>,
+		chain: VerifyVerdict["chain"],
+		now: number,
+		injectedRpc?: Rpc,
+	): Promise<VerifyVerdict> {
+		const greptime = this.greptime;
+		if (!greptime) throw new Error("GREPTIME_URL is not set");
+		const startedAt = Date.now();
+		const budgetMs = this.config.verifyTimeoutMs;
+		const ingest = await greptime.graphIngest(storedGraphId);
+		const byEvent = new Map(ingest.map((record) => [record.event_id, record]));
+		const firstMs = await greptime.firstIngestMs();
+		const coverageStartMs = firstMs === null ? null : hourStart(firstMs);
+
+		const byHour = new Map<number, string[]>();
+		const uncovered: string[] = [];
+		const legacy: string[] = [];
+		for (const row of rows) {
+			const eventId = String(row.id);
+			const record = byEvent.get(eventId);
+			if (!record) {
+				const ts = Number(row.ts);
+				if (coverageStartMs !== null && Number.isFinite(ts) && ts < coverageStartMs) legacy.push(eventId);
+				else uncovered.push(eventId);
+				continue;
+			}
+			const hour = hourStart(record.ingested_at);
+			const bucket = byHour.get(hour);
+			if (bucket) bucket.push(eventId);
+			else byHour.set(hour, [eventId]);
+		}
+
+		const pubkey = this.config.solana.pubkey;
+		let rpc: Rpc | null = injectedRpc ?? null;
+		const readRpc = (): Rpc => {
+			if (!rpc) {
+				rpc = createRpc({
+					url: this.config.solana.rpcUrl,
+					timeoutMs: VERIFY_RPC_TIMEOUT_MS,
+					attempts: VERIFY_RPC_ATTEMPTS,
+					backoffMs: VERIFY_RPC_BACKOFF_MS,
+				});
+			}
+			return rpc;
+		};
+
+		const hours: HourReport[] = [];
+		for (const hour of [...byHour.keys()].sort((a, b) => a - b)) {
+			if (Date.now() - startedAt > budgetMs) {
+				hours.push({
+					period_start: hourIso(hour),
+					period_end: hourIso(hourEnd(hour)),
+					status: "unverified",
+					event_count: byHour.get(hour)?.length ?? 0,
+					root: null,
+					reason: "verify timed out before this hour was checked",
+				});
+				continue;
+			}
+			hours.push(await this.checkHour(hour, now, readRpc, pubkey));
+		}
+
+		const failing = hours.find((hour) => hour.status !== "anchored" && hour.status !== "pending");
+		const ok = chain.ok && !failing && uncovered.length === 0;
+		const reason = !chain.ok
+			? chain.reason
+			: uncovered.length > 0
+				? `${uncovered.length} uncovered event${uncovered.length === 1 ? "" : "s"} with no ingest record: ${uncovered.join(", ")}`
+				: failing
+					? `hour ${failing.period_start} ${failing.status}${failing.reason ? `: ${failing.reason}` : ""}`
+					: undefined;
+		return {
+			ok,
+			events: rows.length,
+			...(chain.brokenAt ? { brokenAt: chain.brokenAt } : {}),
+			...(reason ? { reason } : {}),
+			chain,
+			hours,
+			uncovered: { count: uncovered.length, ids: [...uncovered].sort() },
+			legacy: { count: legacy.length, ids: [...legacy].sort() },
+		};
+	}
+
+	/**
+	 * Check one distinct hour: digest whole, then resolve to its D28-15 status.
+	 *
+	 * The memo bytes cross from devnet untrusted: every field is re-checked,
+	 * never trusted. Anything devnet-shaped but wrong — signer, period, root,
+	 * count, row disagreement — is `mismatch`; anything unreadable is
+	 * `unverified`, fail-closed, never `anchored`.
+	 */
+	private async checkHour(
+		hour: number,
+		now: number,
+		readRpc: () => Rpc,
+		pubkey: string | null,
+	): Promise<HourReport> {
+		const period_start = hourIso(hour);
+		const period_end = hourIso(hourEnd(hour));
+		let digest: HourDigest;
+		try {
+			digest = await this.hourDigest(hour, now);
+		} catch (cause) {
+			return { period_start, period_end, status: "mismatch", event_count: 0, root: null, reason: redact(String(cause)) };
+		}
+		if (digest.root === null) {
+			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: null, reason: "hour holds graph events but digests empty" };
+		}
+		const greptime = this.greptime;
+		if (!greptime) throw new Error("GREPTIME_URL is not set");
+		const row = await greptime.anchorForPeriod(hour);
+		if (!row) {
+			if (!isClosed(hour, now, INGEST_LAG_MS) || now < hourEnd(hour) + VERIFY_PENDING_MS) {
+				return { period_start, period_end, status: "pending", event_count: digest.event_count, root: digest.root };
+			}
+			return { period_start, period_end, status: "unanchored", event_count: digest.event_count, root: digest.root, reason: "no anchors row 3 h after the hour closed" };
+		}
+		if (!pubkey) {
+			return { period_start, period_end, status: "unverified", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "SOLANA_ANCHOR_PUBKEY is not set" };
+		}
+		let memo: TransactionMemo | null;
+		try {
+			memo = await readRpc().transactionMemo(row.tx_sig, "confirmed");
+		} catch (cause) {
+			return { period_start, period_end, status: "unverified", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: redact(String(cause)) };
+		}
+		if (!memo) {
+			return { period_start, period_end, status: "unverified", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "transaction not found on devnet" };
+		}
+		if (!memo.memo) {
+			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "transaction carries no memo-program instruction" };
+		}
+		if (memo.payer !== pubkey || !memo.payerSigned) {
+			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "memo is not signed by SOLANA_ANCHOR_PUBKEY" };
+		}
+		if (memo.err !== null && memo.err !== undefined) {
+			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "anchor transaction failed" };
+		}
+		const parsed = parseMemo(memo.memo);
+		if (!parsed) {
+			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "memo is not a v1 anchor memo" };
+		}
+		if (parsed.periodStartMs !== hour) {
+			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: `memo names ${hourIso(parsed.periodStartMs)}, not ${period_start}` };
+		}
+		if (parsed.rootHex !== digest.root || parsed.count !== digest.event_count) {
+			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: `chain root ${parsed.rootHex}/${parsed.count} != recomputed ${digest.root}/${digest.event_count}` };
+		}
+		if (row.root !== digest.root || row.event_count !== digest.event_count || row.memo !== memo.memo) {
+			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "anchors row disagrees with the memo" };
+		}
+		return { period_start, period_end, status: "anchored", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, ...(memo.slot !== null ? { slot: memo.slot } : {}) };
 
 	/**
 	 * `greptime` is reachability; `eventsWritable` is whether **every** event would

@@ -206,6 +206,14 @@ export interface SubstrateConfig {
 	 * logged here. `pubkey` is non-secret.
 	 */
 	solana: { rpcUrl: string; keypairPath: string | null; pubkey: string | null; cli: string };
+	/**
+	 * Whole-verify devnet budget in milliseconds (D28-18).
+	 *
+	 * Per-hour reads already carry their own per-call timeout with bounded
+	 * attempts; this caps the hour loop as a whole, so one slow hour cannot
+	 * hold a `/verify` request open. Hours never reached read `unverified`.
+	 */
+	verifyTimeoutMs: number;
 }
 
 /** Production defaults: September's library, so the host ledger keeps deduplicating. */
@@ -415,6 +423,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 			pubkey: env.SOLANA_ANCHOR_PUBKEY?.trim() || null,
 			cli: env.SOLANA_CLI?.trim() || SOLANA_CLI_DEFAULT,
 		},
+		verifyTimeoutMs: Number.isFinite(Number(env.SUBSTRATE_VERIFY_TIMEOUT_MS)) && Number(env.SUBSTRATE_VERIFY_TIMEOUT_MS) > 0
+			? Number(env.SUBSTRATE_VERIFY_TIMEOUT_MS)
+			: 30_000,
 	};
 }
 

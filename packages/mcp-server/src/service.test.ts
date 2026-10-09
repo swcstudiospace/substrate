@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { formatMemo, hourEnd, merkleRootHex, parseMemo } from "@substrate/ledger";
 import { isReviewToken, loadConfig, type GreptimeConfig } from "./config.ts";
-import { InvalidEventError } from "./event.ts";
+import { InvalidEventError, normalizeEvent } from "./event.ts";
 import { GreptimeClient, INGEST_LAG_MS, IngestNotRecorded, MAX_QUERY_LIMIT, type EventQuery } from "./greptime.ts";
 import { REDACTED, redact } from "./redact.ts";
 import { leaseSnapshot } from "./index-store.ts";
@@ -3417,3 +3417,283 @@ describe("graph_find and issue_get (D23-22..24)", () => {
 	});
 });
 
+describe("verifyGraph hour report", () => {
+	const H = Date.UTC(2026, 9, 1, 10);
+	const HOUR = 3_600_000;
+	const START_ISO = "2026-10-01T10:00:00.000Z";
+	const END_ISO = "2026-10-01T11:00:00.000Z";
+	const PUBKEY = "TestPubkey1111111111111111111111111111111";
+
+	/** Two chained events in one session, stored as Greptime returns them. */
+	function sessionRows(session = "sess-1", graph = "ut-1") {
+		let prev: string | null = null;
+		const events = [0, 1].map((i) => {
+			const event = normalizeEvent(
+				{ surface: "omp", kind: "note", summary: `e${i}`, session_id: session, graph_id: graph, actor: "agent" },
+				prev,
+			);
+			prev = event.hash;
+			return event;
+		});
+		const rows = events.map((event) => ({ ...event, ts: Date.parse(event.ts), payload: JSON.stringify(event.payload) }));
+		const leaves = events.map((event, i) => ({ event_id: event.id, ingested_at: H + 1000 * (i + 1), hash: event.hash }));
+		const records = events.map((event, i) => ({
+			event_id: event.id,
+			event_ts: Date.parse(event.ts),
+			ingested_at: H + 1000 * (i + 1),
+		}));
+		const root = merkleRootHex(events.map((event) => event.hash));
+		const memo = formatMemo({ periodStartMs: H, rootHex: root, count: events.length });
+		return { events, rows, leaves, records, root, memo };
+	}
+
+	function anchorRow(world: ReturnType<typeof sessionRows>, over: Record<string, unknown> = {}) {
+		return {
+			period_start: START_ISO,
+			period_end: END_ISO,
+			root: world.root,
+			event_count: 2,
+			memo: world.memo,
+			tx_sig: "sig1",
+			signer: PUBKEY,
+			cluster: "devnet",
+			slot: 42,
+			anchored_at: new Date(H + 5 * HOUR).toISOString(),
+			...over,
+		};
+	}
+
+	function rpcReturning(memo: string | null, over: Record<string, unknown> = {}) {
+		return {
+			transactionMemo: async () => ({ memo, payer: PUBKEY, payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: null, ...over }),
+		};
+	}
+
+	function substrateWith(stub: Record<string, unknown>, env: Record<string, string | undefined> = {}) {
+		return new Substrate(loadConfig({ SOLANA_ANCHOR_PUBKEY: PUBKEY, ...env }), { index: null, greptime: stub as never });
+	}
+
+	test("anchored happy path: chain ok, hour anchored, ok true", async () => {
+		const world = sessionRows();
+		const substrate = substrateWith({
+			readEvents: async () => world.rows,
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(world.memo) as never });
+		expect(verdict.ok).toBe(true);
+		expect(verdict.chain).toEqual({ ok: true });
+		expect(verdict.hours).toHaveLength(1);
+		expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "anchored", event_count: 2, root: world.root, tx_sig: "sig1", slot: 42 });
+		expect(verdict.reason).toBeUndefined();
+		expect(verdict.uncovered).toEqual({ count: 0, ids: [] });
+	});
+
+	test("pending inside 3 h: no row, ok true", async () => {
+		const world = sessionRows();
+		const substrate = substrateWith({
+			readEvents: async () => world.rows,
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => null,
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 2 * HOUR });
+		expect(verdict.ok).toBe(true);
+		expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "pending" });
+	});
+
+	test("unanchored past 3 h: no row, fails naming the hour", async () => {
+		const world = sessionRows();
+		const substrate = substrateWith({
+			readEvents: async () => world.rows,
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => null,
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR });
+		expect(verdict.ok).toBe(false);
+		expect(verdict.hours[0]?.status).toBe("unanchored");
+		expect(verdict.reason).toContain(START_ISO);
+	});
+
+	test("mismatch: memo root differs from recompute, fails naming the hour", async () => {
+		const world = sessionRows();
+		const other = formatMemo({ periodStartMs: H, rootHex: "0".repeat(64), count: 2 });
+		const substrate = substrateWith({
+			readEvents: async () => world.rows,
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(other) as never });
+		expect(verdict.ok).toBe(false);
+		expect(verdict.hours[0]?.status).toBe("mismatch");
+		expect(verdict.reason).toContain(START_ISO);
+	});
+
+	test("mismatch: memo signed by another key", async () => {
+		const world = sessionRows();
+		const substrate = substrateWith({
+			readEvents: async () => world.rows,
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const rpc = { transactionMemo: async () => ({ memo: world.memo, payer: "SomeoneElse11111111111111111111111111111", payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: null }) };
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpc as never });
+		expect(verdict.hours[0]?.status).toBe("mismatch");
+		expect(verdict.ok).toBe(false);
+	});
+
+	test("mismatch: memo names another period", async () => {
+		const world = sessionRows();
+		const other = formatMemo({ periodStartMs: H + HOUR, rootHex: world.root, count: 2 });
+		const substrate = substrateWith({
+			readEvents: async () => world.rows,
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(other) as never });
+		expect(verdict.hours[0]?.status).toBe("mismatch");
+		expect(verdict.ok).toBe(false);
+	});
+
+	test("mismatch: row disagrees with the memo", async () => {
+		const world = sessionRows();
+		const substrate = substrateWith({
+			readEvents: async () => world.rows,
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world, { root: "1".repeat(64) }),
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(world.memo) as never });
+		expect(verdict.hours[0]?.status).toBe("mismatch");
+		expect(verdict.ok).toBe(false);
+	});
+
+	test("mismatch: digest throw names the event, hour fails", async () => {
+		const world = sessionRows();
+		const substrate = substrateWith({
+			readEvents: async () => world.rows,
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => {
+				throw new Error("hour member evt_1 has no event row");
+			},
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(world.memo) as never });
+		expect(verdict.hours[0]?.status).toBe("mismatch");
+		expect(verdict.hours[0]?.reason).toContain("evt_1");
+		expect(verdict.ok).toBe(false);
+	});
+
+	test("unverified: devnet unreadable fails closed", async () => {
+		const world = sessionRows();
+		const substrate = substrateWith({
+			readEvents: async () => world.rows,
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const rpc = { transactionMemo: async () => { throw new Error("fetch failed"); } };
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpc as never });
+		expect(verdict.hours[0]?.status).toBe("unverified");
+		expect(verdict.ok).toBe(false);
+	});
+
+	test("unverified: transaction not found fails closed", async () => {
+		const world = sessionRows();
+		const substrate = substrateWith({
+			readEvents: async () => world.rows,
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const rpc = { transactionMemo: async () => null };
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpc as never });
+		expect(verdict.hours[0]?.status).toBe("unverified");
+		expect(verdict.ok).toBe(false);
+	});
+
+	test("unverified: pubkey unset fails closed", async () => {
+		const world = sessionRows();
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: {
+			readEvents: async () => world.rows,
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		} as never });
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(world.memo) as never });
+		expect(verdict.hours[0]?.status).toBe("unverified");
+		expect(verdict.ok).toBe(false);
+	});
+
+	test("legacy pre-coverage events are counted, never failing", async () => {
+		const world = sessionRows();
+		const legacy = normalizeEvent(
+			{ surface: "omp", kind: "note", summary: "old", session_id: "sess-old", graph_id: "ut-1", actor: "agent", ts: new Date(H - HOUR).toISOString() },
+			null,
+		);
+		const rows = [...world.rows, { ...legacy, ts: Date.parse(legacy.ts), payload: JSON.stringify(legacy.payload) }];
+		const substrate = substrateWith({
+			readEvents: async () => rows,
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(world.memo) as never });
+		expect(verdict.ok).toBe(true);
+		expect(verdict.legacy.count).toBe(1);
+		expect(verdict.uncovered.count).toBe(0);
+	});
+
+	test("uncovered post-coverage events fail naming the ids", async () => {
+		const world = sessionRows();
+		const extra = normalizeEvent(
+			{ surface: "omp", kind: "note", summary: "new", session_id: "sess-new", graph_id: "ut-1", actor: "agent" },
+			null,
+		);
+		const rows = [...world.rows, { ...extra, ts: Date.parse(extra.ts), payload: JSON.stringify(extra.payload) }];
+		const substrate = substrateWith({
+			readEvents: async () => rows,
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(world.memo) as never });
+		expect(verdict.ok).toBe(false);
+		expect(verdict.uncovered.ids).toContain(extra.id);
+		expect(verdict.reason).toContain(extra.id);
+	});
+
+	test("anchors off stays chain-only for evidence", async () => {
+		const world = sessionRows();
+		const substrate = substrateWith({ readEvents: async () => world.rows });
+		const verdict = await substrate.verifyGraph("ut-1", { anchors: false });
+		expect(verdict.ok).toBe(true);
+		expect(verdict.chain).toEqual({ ok: true });
+		expect(verdict.hours).toEqual([]);
+	});
+
+	test("empty graph verifies with no hours", async () => {
+		const substrate = substrateWith({ readEvents: async () => [], graphIngest: async () => [], firstIngestMs: async () => null });
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR });
+		expect(verdict.ok).toBe(true);
+		expect(verdict.hours).toEqual([]);
+	});
+});
