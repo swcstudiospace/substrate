@@ -22,13 +22,13 @@
  * is written once, after every RAGFlow call succeeds. `finalize` is
  * attributed as `docs_ingest` under the same writer rule as ingestPage.
  */
-import { findDataset, loadRegistry } from "./registry.ts";
+import { dropDatasetId, findDataset, loadRegistry } from "./registry.ts";
 import type { DatasetEntry } from "./registry.ts";
 import { RagflowError } from "./ragflow.ts";
 import type { RagflowDocument } from "./ragflow.ts";
 import { loadManifest, saveManifest, withDatasetLock } from "./manifest.ts";
 import type { DocsManifest, DocsRagflow } from "./manifest.ts";
-import { resolveIngestDatasetId } from "./ingest.ts";
+import { isStaleDatasetId, resolveIngestDatasetId } from "./ingest.ts";
 
 /** Only the last five versions survive (D25-17). */
 export const KEEP_VERSIONS = 5;
@@ -124,8 +124,7 @@ export async function finalize(input: FinalizeInput, deps: FinalizeDeps): Promis
 	const registry = deps.registry ?? loadRegistry();
 	if (!findDataset(registry, input.dataset)) return { status: "refused", reason: "unknown-dataset" };
 
-	try {
-		return await withDatasetLock(input.dataset, async () => {
+	const locked = async (): Promise<FinalizeResult> => {
 			const datasetId = await resolveIngestDatasetId(registry, deps.client, input.dataset, deps.embeddingModel);
 			const manifest = await loadManifest(input.dataset, {
 				stateDir: deps.stateDir,
@@ -204,8 +203,18 @@ export async function finalize(input: FinalizeInput, deps: FinalizeDeps): Promis
 				versions: versions.length,
 				deletedDocumentIds: stale,
 			};
-		});
+	};
+	try {
+		return await withDatasetLock(input.dataset, locked);
 	} catch (error) {
-		return failedFrom(error);
+		// Same stale-id recovery as ingestPage: drop the cached id and
+		// resolve again (listing misses, so ensureDataset recreates) once.
+		if (!isStaleDatasetId(error)) return failedFrom(error);
+		dropDatasetId(input.dataset);
+		try {
+			return await withDatasetLock(input.dataset, locked);
+		} catch (retryError) {
+			return failedFrom(retryError);
+		}
 	}
 }

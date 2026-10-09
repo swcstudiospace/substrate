@@ -835,6 +835,48 @@ describe("pipeline success", () => {
 		expect(replaced.status).toBe("uploaded");
 		expect(fake.calls.uploadDocuments).toBe(3);
 	});
+	test("a cached id rejected by RAGFlow is dropped and resolved again via ensureDataset", async () => {
+		clearDatasetCache();
+		const registry: DatasetEntry[] = [
+			{
+				name: "cache-docs",
+				slug: "ExampleOrg/test-docs",
+				include: ["docs/**/*.md"],
+				exclude: [],
+				trigger: "merge-to-main",
+			},
+		];
+		// Strict like production: unknown ids are rejected instead of created.
+		class StrictRagflow extends FakeRagflow {
+			override async uploadDocuments(datasetId: string, files: UploadFile[]): Promise<UploadedDocument[]> {
+				if (!this.datasets.has(datasetId)) throw new RagflowError("ragflow 404: no such dataset");
+				return super.uploadDocuments(datasetId, files);
+			}
+			override async listDocuments(datasetId: string, page = 1, pageSize = 100): Promise<RagflowDocument[]> {
+				if (!this.datasets.has(datasetId)) throw new RagflowError("ragflow 404: no such dataset");
+				return super.listDocuments(datasetId, page, pageSize);
+			}
+		}
+		const strict = new StrictRagflow();
+		strict.datasets.set("ds-stale", { id: "ds-stale", name: "cache-docs", docs: new Map() });
+		const page = (content: string) => ({
+			dataset: "cache-docs",
+			sourceUrl: url(COMMIT_A, "docs/guide.md"),
+			commit: COMMIT_A,
+			content,
+			surface: "substrate",
+			isSubstrateOrOperator: true,
+		});
+		const first = await ingestPage(page("# Guide\n\nHello.\n"), { registry, client: strict, stateDir });
+		expect(first.status).toBe("uploaded");
+		// Deleted out of band: RAGFlow rejects the cached id from here on.
+		strict.datasets.delete("ds-stale");
+		const second = await ingestPage(page("# Guide\n\nHello again.\n"), { registry, client: strict, stateDir });
+		expect(second.status).toBe("uploaded");
+		if (second.status !== "uploaded") throw new Error("unreachable");
+		expect(second.datasetId).not.toBe("ds-stale");
+		expect(strict.calls.ensureDataset).toBeGreaterThan(0);
+	});
 
 	test("the real client satisfies the DocsRagflow seam", () => {
 		const wired: DocsRagflow = new RagflowClient({

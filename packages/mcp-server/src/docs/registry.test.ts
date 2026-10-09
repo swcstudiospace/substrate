@@ -7,6 +7,7 @@ import { describe, expect, test } from "bun:test";
 import {
 	BUILTIN_REGISTRY,
 	clearDatasetCache,
+	dropDatasetId,
 	findDataset,
 	loadRegistry,
 	resolveDatasetId,
@@ -201,5 +202,23 @@ describe("resolveDatasetId", () => {
 			{ id: "ds-1", name: "agent-substrate" },
 		]);
 		expect(out).toEqual({ ok: false, reason: "unknown-dataset" });
+	});
+	test("a dropped id is listed again instead of served stale", async () => {
+		clearDatasetCache();
+		let listed = 0;
+		const list = async () => {
+			listed += 1;
+			return [{ id: "ds-1", name: "agent-substrate" }];
+		};
+		expect(await resolveDatasetId(BUILTIN_REGISTRY, "agent-substrate", list)).toEqual({
+			ok: true,
+			datasetId: "ds-1",
+		});
+		dropDatasetId("agent-substrate");
+		expect(await resolveDatasetId(BUILTIN_REGISTRY, "agent-substrate", list)).toEqual({
+			ok: true,
+			datasetId: "ds-1",
+		});
+		expect(listed).toBe(2);
 	});
 });

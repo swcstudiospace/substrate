@@ -147,6 +147,15 @@ const idCache = new Map<string, string>();
 export function clearDatasetCache(): void {
 	idCache.clear();
 }
+/**
+ * Drop one cached name → id row, so the next resolution lists again. Call
+ * it when RAGFlow rejects a cached id (the dataset was deleted out of
+ * band): the next `resolveDatasetId` re-lists, and ingest falls through to
+ * `ensureDataset` when the name is gone.
+ */
+export function dropDatasetId(name: string): void {
+	idCache.delete(name);
+}
 
 /**
  * Resolve a registry *name* to its RAGFlow id. A static `datasetId` on the

@@ -18,7 +18,7 @@ import { basename } from "node:path";
 import { redactSkillContent } from "../redact.ts";
 import type { SkillRedactionHit } from "../redact.ts";
 import { RagflowError } from "./ragflow.ts";
-import { findDataset, loadRegistry, resolveDatasetId } from "./registry.ts";
+import { dropDatasetId, findDataset, loadRegistry, resolveDatasetId } from "./registry.ts";
 import type { DatasetEntry } from "./registry.ts";
 import {
 	loadManifest,
@@ -536,6 +536,15 @@ export async function resolveIngestDatasetId(
 	if (resolved.ok) return resolved.datasetId;
 	return client.ensureDataset(name, embeddingModel ? { embeddingModel } : {});
 }
+/**
+ * Whether RAGFlow rejected the dataset id itself (deleted out of band),
+ * as opposed to a document or parse failure. Only this shape drops the
+ * cached id and retries: anything else fails the run without touching it.
+ */
+export function isStaleDatasetId(error: unknown): boolean {
+	if (!(error instanceof RagflowError)) return false;
+	return /ragflow 404|no such dataset|dataset (not found|unknown|missing)|unknown dataset/i.test(error.message);
+}
 
 // --- Step 5: the pipeline -----------------------------------------------------
 
@@ -686,8 +695,7 @@ export async function ingestPage(input: IngestPageInput, deps: IngestDeps): Prom
 		return { ...base, status: "dry_run", wouldUpload: true };
 	}
 
-	try {
-		return await withDatasetLock(input.dataset, async () => {
+	const locked = async (): Promise<IngestResult> => {
 			const datasetId = await resolveIngestDatasetId(registry, deps.client, input.dataset, deps.embeddingModel);
 			const manifest = await loadManifest(input.dataset, {
 				stateDir: deps.stateDir,
@@ -755,8 +763,19 @@ export async function ingestPage(input: IngestPageInput, deps: IngestDeps): Prom
 			};
 			await saveManifest(input.dataset, next, { stateDir: deps.stateDir, env: deps.env });
 			return { ...base, datasetId, status: "uploaded", documentIds };
-		});
+	};
+	try {
+		return await withDatasetLock(input.dataset, locked);
 	} catch (error) {
-		return failedFrom(error);
+		// A cached id for a dataset deleted out of band is rejected by
+		// RAGFlow: drop it and resolve again (the list misses, so
+		// ensureDataset recreates) exactly once. Anything else fails now.
+		if (!isStaleDatasetId(error)) return failedFrom(error);
+		dropDatasetId(input.dataset);
+		try {
+			return await withDatasetLock(input.dataset, locked);
+		} catch (retryError) {
+			return failedFrom(retryError);
+		}
 	}
 }
