@@ -58,7 +58,7 @@ Phase details: [milestones/v1.2-ROADMAP.md](milestones/v1.2-ROADMAP.md) · requi
 Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 → 23 → 24 → 31 → 32 → 33. Side chains: 18 → 21 → 22 → 25 → 26 (skills, then docs and memory); 18 → 27 → 28 → 29 (ledger, then Agent Cards, which also need 21); 17 and 18 → 30 (`desktop_run`, floating).
 
 - [x] **Phase 16: Production parity and rehearsal harness** - Production `substrate-mcp` serves `main`, and an isolated twin exists for every later proof (completed 2026-10-08)
-- [ ] **Phase 17: Event vocabulary and audit policy** - Every v1.3 event source is mapped onto the existing kinds and surfaces before any of them ships
+- [x] **Phase 17: Event vocabulary and audit policy** - Every v1.3 event source is mapped onto the existing kinds and surfaces before any of them ships (completed 2026-10-09)
 - [ ] **Phase 18: Guard rails and shared redactor** - One redactor, carrying the September rules and main's counter exemption, guards every publication path
 - [ ] **Phase 19: Lane B collectors** - herdr, Muse and the Cursor `stop` hook emit from `main` under main's vocabulary, and each Muse repo carries a fresh brief
 - [ ] **Phase 20: Production identity and Phase 0 UAT** - Every production client holds its own token, and the eight Phase 0 scenarios pass against `main`
@@ -107,13 +107,16 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 **Requirements**: [FOUND-02]
 **Success Criteria** (what must be TRUE):
 
-  1. A mapping document names, for each new v1.3 event source (herdr, Muse, Cursor `stop`, skills propose, docs ingest, desktop actions, anchoring, teachables), the existing kind and surface it uses.
-  2. `EVENT_KINDS` is identical to its v1.2 value, and against the Phase 16 harness one sample event per mapped source is stored with zero refusals.
+  1. A mapping document names, for each new v1.3 event source (herdr, Muse, Cursor `stop`, skills propose, docs ingest, desktop actions, anchoring, teachables), the existing kind and the surface it uses; host jobs (anchor, skills sync, dispatcher) use the one added system surface `substrate`.
+  2. `EVENT_KINDS` is identical to its v1.2 value, `SURFACES` equals the v1.2 list plus `substrate` only, and against the Phase 16 harness one sample event per mapped source is stored with zero refusals.
   3. A phase-close check runs `packages/mcp-server/src/store-lock.test.ts` and diffs `EVENT_KINDS` against v1.2, and it passes on this phase and is part of every later phase's verification.
   4. `packages/audit/src/policy.ts` records fail-open or fail-closed for every MCP tool v1.3 plans to add (`skills_propose`, `docs_search`, `docs_ingest`, `graph_find`, `issue_get`, `desktop_run` and any recall tool), and a policy test fails when a planned tool has no entry or has the opposite decision.
 
 **Proof**: Isolated, against the Phase 16 harness: the sample emits and the phase-close check. No live system.
 **Plans**: TBD
+- [x] 17-01-PLAN.md
+- [x] 17-02-PLAN.md
+- [x] 17-03-PLAN.md
 
 ### Phase 18: Guard rails and shared redactor
 
@@ -372,7 +375,7 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
 | 16. Production parity and rehearsal harness | v1.3 | 5/5 | Complete    | 2026-10-08 |
-| 17. Event vocabulary and audit policy | v1.3 | 0/? | Not started | - |
+| 17. Event vocabulary and audit policy | v1.3 | 3/3 | Complete    | 2026-10-09 |
 | 18. Guard rails and shared redactor | v1.3 | 0/? | Not started | - |
 | 19. Lane B collectors | v1.3 | 0/? | Not started | - |
 | 20. Production identity and Phase 0 UAT | v1.3 | 0/? | Not started | - |

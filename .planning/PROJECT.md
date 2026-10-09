@@ -150,6 +150,8 @@ Revised 2026-09-30 — policy in `docs/data-planes.md`, network in `docs/railway
 - ✓ Lessons bank: governed lesson facts with recall citations, read-time scores and non-destructive digests — v1.2
 - ✓ Rehearsal harness: `bun run rehearsal up|smoke|down` runs main's `substrate-mcp` against scratch Postgres and GreptimeDB with per-surface tokens; production stores saw no harness row — v1.3 Phase 16
 - ✓ Production parity: `substrate-mcp.service` owns `127.0.0.1:7410` and serves `main`; `bun run parity:check` and `docs/runbooks/production-parity.md` record the check and the rollback — v1.3 Phase 16
+- ✓ Event vocabulary: every v1.3 event source maps onto the unchanged `EVENT_KINDS`; host jobs emit as the one added system surface `substrate`, whose token is never an operator; `bun run check:phase-close` pins both — v1.3 Phase 17
+- ✓ Audit policy: every MCP tool v1.3 adds has a fail-open or fail-closed entry before it ships, with a test that catches a missing or contrary entry — v1.3 Phase 17
 
 ## Key Decisions
 
@@ -159,6 +161,7 @@ Revised 2026-09-30 — policy in `docs/data-planes.md`, network in `docs/railway
 | `graph_bind` is MCP-only; no new event kinds, no `POST /graph` door | ADR 0001 forbids a single agent-swarm surface, new event kinds and a `POST /graph` door | ✓ Good |
 | Versioned conflicts report `current_version` instead of adding a subject search filter | `memory_search` matches bodies only and returns the newest 100 per scope; the re-read stays only as the older-server fallback | ✓ Good |
 | Production parity is the operator's action; agents only read (`parity:check`) and run approved read-only probes | Killing or restarting production processes from an agent session is unrecoverable if wrong; the unit gains `ConditionPathExists` instead of crash-looping | ✓ Good (v1.3 Phase 16) |
+| Host jobs get one system surface, `substrate`, instead of borrowing an agent surface | The surface is what briefs and `events_query` show as the actor; borrowing claude-code would misattribute anchors and dispatches (operator, 2026-10-08) | ✓ Good (v1.3 Phase 17) |
 
 ## Evolution
 
@@ -178,4 +181,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-10-08 after Phase 16*
+*Last updated: 2026-10-09 after Phase 17*

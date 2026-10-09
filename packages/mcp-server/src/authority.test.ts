@@ -15,9 +15,12 @@
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { configWarnings, isOperator, loadConfig, surfaceForToken, swarmTokenWarnings, tokenEnvName } from "./config.ts";
 import { attributedSurface, claimAttribution, swarmSessionRefusal } from "./mcp.ts";
+import { createObservability } from "./observe.ts";
+import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
 import { SURFACES, SWARM_SURFACES, type SubstrateEvent } from "./types.ts";
 
@@ -218,10 +221,11 @@ describe("the signed sender is the authenticated caller", () => {
 });
 
 describe("the swarm surfaces", () => {
-	test("are the 15 agents, in A01..A15 order, after the original 11", () => {
+	test("are the 15 agents, in A01..A15 order, after the original 11, with substrate last", () => {
 		expect(SWARM_SURFACES).toHaveLength(15);
-		expect(SURFACES).toHaveLength(26);
-		expect(SURFACES.slice(11)).toEqual([...SWARM_SURFACES]);
+		expect(SURFACES).toHaveLength(27);
+		expect(SURFACES.slice(11, 26)).toEqual([...SWARM_SURFACES]);
+		expect(SURFACES[26]).toBe("substrate");
 		expect(SWARM_SURFACES[0]).toBe("swarm-a01-orch");
 		expect(SWARM_SURFACES[4]).toBe("swarm-a05-be");
 		expect(SWARM_SURFACES[14]).toBe("swarm-a15-doc");
@@ -235,10 +239,82 @@ describe("the swarm surfaces", () => {
 		expect(tokenEnvName("swarm-a05-be")).toBe("SUBSTRATE_TOKEN_SWARM_A05_BE");
 	});
 
+	test("the substrate surface resolves its token env name back to itself", () => {
+		expect(tokenEnvName("substrate")).toBe("SUBSTRATE_TOKEN_SUBSTRATE");
+		const config = loadConfig({ SUBSTRATE_TOKEN_SUBSTRATE: "tok-substrate" });
+		expect(surfaceForToken(config, "Bearer tok-substrate")).toBe("substrate");
+	});
+
 	test(".env.example lists a blank SUBSTRATE_TOKEN_* line for every one", () => {
 		const example = readFileSync(join(import.meta.dir, "..", "..", "..", ".env.example"), "utf8").split("\n");
-		for (const surface of SWARM_SURFACES) {
+		for (const surface of [...SWARM_SURFACES, "substrate" as const]) {
 			expect(example).toContain(`${tokenEnvName(surface)}=`);
+		}
+	});
+});
+
+describe("a substrate token is its surface", () => {
+	test("attributedSurface binds it exactly like a swarm token", () => {
+		// Own surface or nothing resolves to itself; naming another surface is
+		// refused, never silently re-attributed — a job emitting as another
+		// surface would corrupt attribution the same way a swarm agent would.
+		expect(attributedSurface("substrate", "substrate")).toEqual({ surface: "substrate" });
+		expect(attributedSurface("substrate", null)).toEqual({ surface: "substrate" });
+		expect(attributedSurface("substrate", undefined)).toEqual({ surface: "substrate" });
+		const refused = attributedSurface("substrate", "claude-code");
+		expect("refused" in refused ? refused.refused : "").toContain("cannot act as claude-code");
+	});
+
+	test("every other non-swarm caller keeps body-first attribution", () => {
+		// The collectors rely on this: one token legitimately emits for the
+		// surfaces it observes, including the host-job surface.
+		expect(attributedSurface("hermes", "substrate")).toEqual({ surface: "substrate" });
+		expect(attributedSurface("hermes", "grok-bot")).toEqual({ surface: "grok-bot" });
+		expect(attributedSurface(null, "substrate")).toEqual({ surface: "substrate" });
+	});
+
+	test("POST /events: the substrate token stores as itself, is refused as another surface", async () => {
+		const written: SubstrateEvent[] = [];
+		const greptime = {
+			ensureAppendMode: async () => true,
+			lastHash: async () => "tip-hash",
+			insertEvent: async (event: SubstrateEvent) => {
+				written.push(event);
+			},
+		};
+		const env = { SUBSTRATE_TOKEN_SUBSTRATE: "tok-substrate", SUBSTRATE_TOKEN_HERMES: "tok-hermes" };
+		const config = loadConfig(env);
+		const observability = createObservability(config, env);
+		await observability.start();
+		const substrate = new Substrate(config, { index: null, greptime: greptime as never }, observability.observer);
+		const server = createHttpServer(substrate, config, observability);
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+		try {
+			const postEvent = (token: string, body: Record<string, unknown>) =>
+				fetch(`${base}/events`, {
+					method: "POST",
+					headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+					body: JSON.stringify({ kind: "note", summary: "anchor check", ...body }),
+				});
+
+			const own = await postEvent("tok-substrate", { surface: "substrate" });
+			expect(own.status).toBe(202);
+
+			const cross = await postEvent("tok-substrate", { surface: "claude-code" });
+			const crossBody = (await cross.json()) as { error: string };
+			expect(cross.status).toBe(403);
+			expect(crossBody.error).toContain("cannot act as claude-code");
+
+			// A non-swarm, non-substrate token keeps body-first attribution and
+			// can still post a host-job row — which is what the smoke relies on.
+			const borrowed = await postEvent("tok-hermes", { surface: "substrate" });
+			expect(borrowed.status).toBe(202);
+
+			expect(written.map((event) => event.surface)).toEqual(["substrate", "substrate"]);
+		} finally {
+			server.close();
+			observability.stop();
 		}
 	});
 });
@@ -250,11 +326,21 @@ describe("swarmTokenWarnings", () => {
 
 	test("a deployment with tokens names every swarm surface that has none", () => {
 		const warnings = swarmTokenWarnings(loadConfig({ SUBSTRATE_TOKEN_HERMES: "tok-hermes" }));
-		expect(warnings).toHaveLength(1);
+		expect(warnings).toHaveLength(2);
 		for (const surface of SWARM_SURFACES) expect(warnings[0]).toContain(tokenEnvName(surface));
 		expect(warnings[0]).toContain("15 swarm surfaces");
 		// Never a token value.
 		expect(warnings[0]).not.toContain("tok-hermes");
+		// And the host-job surface is named beside the swarm seats.
+		expect(warnings[1]).toContain("SUBSTRATE_TOKEN_SUBSTRATE");
+		expect(warnings[1]).not.toContain("tok-hermes");
+	});
+
+	test("a missing substrate token warns on its own once the swarm seats are filled", () => {
+		const env = Object.fromEntries(SWARM_SURFACES.map((surface) => [tokenEnvName(surface), `tok-${surface}`]));
+		const warnings = swarmTokenWarnings(loadConfig(env));
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain("SUBSTRATE_TOKEN_SUBSTRATE");
 	});
 
 	test("lists only the ones still missing, and is silent when none are", () => {
@@ -267,7 +353,9 @@ describe("swarmTokenWarnings", () => {
 		expect(warnings[0]).not.toContain("SUBSTRATE_TOKEN_SWARM_A05_BE");
 		expect(warnings[0]).toContain("SUBSTRATE_TOKEN_SWARM_A09_REV");
 
-		const all = Object.fromEntries(SWARM_SURFACES.map((surface) => [tokenEnvName(surface), `tok-${surface}`]));
+		const all = Object.fromEntries(
+			[...SWARM_SURFACES, "substrate" as const].map((surface) => [tokenEnvName(surface), `tok-${surface}`]),
+		);
 		expect(swarmTokenWarnings(loadConfig(all))).toEqual([]);
 	});
 });

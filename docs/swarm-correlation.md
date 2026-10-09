@@ -166,6 +166,7 @@ dead swarm replica is a human operator's call, or the TTL's.
 `EVENT_KINDS` stays the closed set of 12. A swarm event type maps onto one of those kinds
 and carries the specific type in `payload.swarm_type`; the enum is not widened. The
 mapping table lives with the swarm's tee, not here. The lease rules above add no kind.
+The one v1.3 table mapping every planned source onto these kinds is [event-vocabulary.md](event-vocabulary.md).
 
 ## Not here
 

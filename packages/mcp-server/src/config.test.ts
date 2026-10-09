@@ -1,9 +1,17 @@
 /**
- * SUBSTRATE_ALLOW_ANONYMOUS, the migration bridge.
+ * Identity rules in config.ts.
  *
- * Unset keeps today's rule: anonymous only when no surface token is configured.
- * `1` accepts untokened callers alongside tokens. `0` requires a bearer even
- * when no token is configured. A recognised token still names its surface.
+ * SUBSTRATE_ALLOW_ANONYMOUS, the migration bridge. Unset keeps today's rule:
+ * anonymous only when no surface token is configured. `1` accepts untokened
+ * callers alongside tokens. `0` requires a bearer even when no token is
+ * configured. A recognised token still names its surface.
+ *
+ * WR-01: the `substrate` host-job surface is never an operator. Host jobs
+ * (anchor, skills-sync, dispatcher) run unattended under the same threat model
+ * as the swarm: a listed substrate token able to `force`-release any lease
+ * reintroduces the advisory lease. `isOperator` refuses it the way it refuses
+ * every swarm surface, and `configWarnings` names the surface — never the
+ * token — at boot.
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -81,5 +89,49 @@ describe("SUBSTRATE_ALLOW_ANONYMOUS", () => {
 		const example = readFileSync(join(import.meta.dir, "..", "..", "..", ".env.example"), "utf8");
 
 		expect(example.split("\n")).toContain("SUBSTRATE_ALLOW_ANONYMOUS=");
+	});
+});
+
+describe("a substrate token is never an operator", () => {
+	test("a listed substrate token is refused force, while an ordinary surface token keeps it", () => {
+		const config = loadConfig({
+			SUBSTRATE_TOKEN_CURSOR: "tok-operator",
+			SUBSTRATE_TOKEN_SUBSTRATE: "tok-substrate",
+			SUBSTRATE_OPERATOR_TOKENS: "tok-operator,tok-substrate",
+		});
+
+		expect(surfaceForToken(config, "Bearer tok-substrate")).toBe("substrate");
+		expect(isOperator(config, "Bearer tok-substrate")).toBe(false);
+		expect(isOperator(config, "Bearer tok-operator")).toBe(true);
+	});
+
+	test("boot names the substrate surface, without printing its token", () => {
+		const config = loadConfig({
+			SUBSTRATE_TOKEN_CURSOR: "tok-operator",
+			SUBSTRATE_TOKEN_SUBSTRATE: "tok-substrate",
+			SUBSTRATE_OPERATOR_TOKENS: "tok-operator,tok-substrate",
+		});
+		const warnings = configWarnings(config);
+
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain("substrate");
+		expect(warnings[0]).not.toContain("tok-substrate");
+	});
+
+	test("a listed swarm token and a listed substrate token warn side by side", () => {
+		const config = loadConfig({
+			SUBSTRATE_TOKEN_CURSOR: "tok-operator",
+			SUBSTRATE_TOKEN_SWARM_A05_BE: "tok-a05",
+			SUBSTRATE_TOKEN_SUBSTRATE: "tok-substrate",
+			SUBSTRATE_OPERATOR_TOKENS: "tok-operator,tok-a05,tok-substrate",
+		});
+
+		expect(isOperator(config, "Bearer tok-a05")).toBe(false);
+		expect(isOperator(config, "Bearer tok-substrate")).toBe(false);
+		const warnings = configWarnings(config);
+		expect(warnings).toHaveLength(2);
+		expect(warnings.join("\n")).toContain("swarm-a05-be");
+		expect(warnings.join("\n")).toContain("substrate");
+		expect(warnings.join("\n")).not.toContain("tok-substrate");
 	});
 });

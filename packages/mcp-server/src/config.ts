@@ -263,9 +263,11 @@ export function surfaceForToken(config: SubstrateConfig, authorization: string |
  *
  * A swarm surface's token is never an operator, listed or not. The swarm runs
  * agents unattended against each other's nodes, so a listed swarm token would be
- * one agent able to evict any other, which is the advisory lease again. Refusing
- * it here, rather than trusting the list, fails closed on a misconfiguration
- * that `configWarnings` reports at boot.
+ * one agent able to evict any other, which is the advisory lease again. The
+ * `substrate` host-job surface is held by unattended host jobs (anchor,
+ * skills-sync, dispatcher) under the same threat model, so its token is never
+ * an operator either. Refusing both here, rather than trusting the list, fails
+ * closed on a misconfiguration that `configWarnings` reports at boot.
  */
 export function isOperator(config: SubstrateConfig, authorization: string | null): boolean {
 	// A bare local run — no surface tokens at all — is its own operator. The bridge
@@ -280,7 +282,7 @@ export function isOperator(config: SubstrateConfig, authorization: string | null
 	// bridge must not turn that 401 into `force` with no named surface.
 	// `isSwarmSurface(undefined)` is false, which is how that bearer used to pass.
 	if (named === undefined) return config.tokens.size === 0;
-	return !isSwarmSurface(named);
+	return !isSwarmSurface(named) && named !== "substrate";
 }
 
 /**
@@ -354,11 +356,18 @@ export function configWarnings(config: SubstrateConfig): string[] {
 				"operator, so it is refused `force` like any other agent. Remove it from the list.",
 		);
 	}
+	// Named by surface, never by token: the warning goes to a log.
+	if ([...config.operatorTokens].some((token) => config.tokens.get(token) === "substrate")) {
+		warnings.push(
+			"SUBSTRATE_OPERATOR_TOKENS lists the token of substrate; the host-job surface is never an " +
+				"operator, so it is refused `force` like any other agent. Remove it from the list.",
+		);
+	}
 	return warnings;
 }
 
 /**
- * Swarm surfaces that have no token, reported at boot.
+ * Swarm surfaces — and the `substrate` host-job surface — that have no token, reported at boot.
  *
  * Only a deployment that has authentication is told: a bare local run (no
  * `SUBSTRATE_TOKEN_*` at all) accepts every caller anonymously, and a warning there
@@ -366,19 +375,30 @@ export function configWarnings(config: SubstrateConfig): string[] {
  * agent without its own cannot authenticate — the server answers it 401 rather than
  * accepting it anonymously — so a missing one is a swarm seat that will be locked out
  * and the operator should hear about it at boot, not from the first failed run.
+ * The same holds for `substrate`: without `SUBSTRATE_TOKEN_SUBSTRATE` no host job
+ * (anchor, skills-sync, dispatcher) can authenticate.
  *
  * Separate from `configWarnings` because it describes an absence the operator may have
  * chosen (a deployment that does not run the swarm), not a configuration that
- * contradicts itself. One message, naming every variable, so the list is one grep.
+ * contradicts itself. One message per gap, naming every variable, so the list is one grep.
  */
 export function swarmTokenWarnings(config: SubstrateConfig): string[] {
 	if (config.allowAnonymous) return [];
 	const held = new Set(config.tokens.values());
+	const warnings: string[] = [];
 	const missing = SWARM_SURFACES.filter((surface) => !held.has(surface));
-	if (missing.length === 0) return [];
-	return [
-		`no token for ${missing.length} swarm surface${missing.length === 1 ? "" : "s"} ` +
-			`(${missing.map(tokenEnvName).join(", ")}); a swarm agent without its own token is refused with 401, ` +
-			"not accepted anonymously",
-	];
+	if (missing.length > 0) {
+		warnings.push(
+			`no token for ${missing.length} swarm surface${missing.length === 1 ? "" : "s"} ` +
+				`(${missing.map(tokenEnvName).join(", ")}); a swarm agent without its own token is refused with 401, ` +
+				"not accepted anonymously",
+		);
+	}
+	if (!held.has("substrate")) {
+		warnings.push(
+			`no token for the substrate surface (${tokenEnvName("substrate")}); a host job without its own token ` +
+				"is refused with 401, not accepted anonymously",
+		);
+	}
+	return warnings;
 }
