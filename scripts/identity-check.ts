@@ -30,6 +30,9 @@ const TOKEN_PREFIX = "SUBSTRATE_TOKEN_";
 /** The bare client variable: legitimate in a client env, never on the server. */
 const BARE_TOKEN = "SUBSTRATE_TOKEN";
 
+/** The server variable holding the operator bearers `isOperator` demands. */
+const OPERATOR_LIST = "SUBSTRATE_OPERATOR_TOKENS";
+
 /** The list separator boot accepts inside one server variable. */
 const LIST_SPLIT = /[\s,]+/;
 
@@ -481,6 +484,22 @@ function herdrErrors(herdrEnv: Array<{ path: string; text: string | null }>): st
 }
 
 /**
+ * Wrapped assignments the line parsers cannot see whole: a trailing
+ * backslash leaves a partial value in the map while the loader may see
+ * another, so comparing would approve or refuse the wrong set. Fail loudly
+ * instead; the runbook only ever writes one line per variable.
+ */
+function wrappedAssignmentErrors(text: string, path: string): string[] {
+	const out: string[] = [];
+	text.split("\n").forEach((raw, index) => {
+		if (raw.trim().endsWith("\\")) {
+			out.push(`wrapped assignment at ${path} line ${index + 1}; unwrap it to one line before the restart`);
+		}
+	});
+	return out;
+}
+
+/**
  * Names-only check over injected reads. Token files are stated, never read;
  * env files keep names only. External deliveries report their note and pass:
  * they live in another repo or the operator's procedure, so this script can
@@ -559,7 +578,11 @@ export function checkNames(
 		}
 	});
 	const strandedLive = clients.filter((c) => isLive(c.state) && c.status !== "ok" && c.status !== "external").map((c) => c.id);
-	const errors = [...unknownSurfaceErrors(names), ...herdrErrors(herdrEnv)];
+	const errors = [
+		...unknownSurfaceErrors(names),
+		...herdrErrors(herdrEnv),
+		...(serverText === null ? [] : wrappedAssignmentErrors(serverText, serverEnv)),
+	];
 	const missing = missingRolloutNames(manifest, section);
 	return {
 		manifestPath: "",
@@ -601,10 +624,14 @@ function splitList(raw: string): string[] {
  * Operator-only values comparison over injected maps. Each client value is
  * hashed and tested for membership in its surface set: match when present,
  * mismatch when present under another surface or none, missing when absent.
- * External deliveries report unchecked and never fail. The report still
- * carries the names section plus boot's own validator errors, so a
- * duplicated value or an unknown suffix fails before the restart. A shared
- * bare bearer in a herdr file or a missing rollout name fails the same way.
+ * An `operator-file` delivery additionally needs the operator list: like
+ * `isOperator`, a bearer outside it cannot force, so surface membership
+ * alone is a mismatch. External deliveries report unchecked and never fail.
+ * The report still carries the names section plus boot's own validator
+ * errors, so a duplicated value or an unknown suffix fails before the
+ * restart. A shared bare bearer in a herdr file, a wrapped assignment, or
+ * a missing rollout name fails the same way. `serverText` is the raw file
+ * the values were read from; without it wrapped lines go undetected.
  */
 export function checkValues(
 	manifest: Manifest,
@@ -613,6 +640,7 @@ export function checkValues(
 	serverEnv: string,
 	tokensDir: string,
 	herdrEnv: Array<{ path: string; text: string | null }> = [],
+	serverText: string | null = null,
 ): IdentityReport {
 	const record: Record<string, string> = Object.fromEntries(serverValues);
 	let errors: string[] = [];
@@ -635,6 +663,11 @@ export function checkValues(
 		}
 		for (const entry of splitList(value)) set.add(sha256Hex(entry));
 	}
+	const operatorHashes = new Set<string>();
+	const operatorRaw = serverValues.get(OPERATOR_LIST);
+	if (operatorRaw !== undefined) {
+		for (const entry of splitList(operatorRaw)) operatorHashes.add(sha256Hex(entry));
+	}
 	const clients: ClientVerdict[] = manifest.clients.map((client) => {
 		if (client.delivery.kind === "external") {
 			return { id: client.id, surface: client.surface, state: client.state, status: "unchecked", detail: client.delivery.note };
@@ -646,8 +679,15 @@ export function checkValues(
 		if (value === null || value === undefined || value === "") {
 			return { id: client.id, surface: client.surface, state: client.state, status: "missing", detail: "no value delivered" };
 		}
+		const digest = sha256Hex(value);
+		if (client.delivery.kind === "operator-file") {
+			const held = serverHashes.get(client.surface)?.has(digest) === true && operatorHashes.has(digest);
+			return held
+				? { id: client.id, surface: client.surface, state: client.state, status: "match", detail: "value is in the surface and operator lists" }
+				: { id: client.id, surface: client.surface, state: client.state, status: "mismatch", detail: "value is not in the surface and operator lists" };
+		}
 		const set = serverHashes.get(client.surface);
-		if (set !== undefined && set.has(sha256Hex(value))) {
+		if (set !== undefined && set.has(digest)) {
 			return { id: client.id, surface: client.surface, state: client.state, status: "match", detail: "value is in the surface list" };
 		}
 		return { id: client.id, surface: client.surface, state: client.state, status: "mismatch", detail: "value is not in the surface list" };
@@ -655,7 +695,11 @@ export function checkValues(
 	const strandedLive = clients
 		.filter((c) => isLive(c.state) && (c.status === "missing" || c.status === "mismatch"))
 		.map((c) => c.id);
-	const allErrors = [...errors, ...herdrErrors(herdrEnv)];
+	const allErrors = [
+		...errors,
+		...herdrErrors(herdrEnv),
+		...(serverText === null ? [] : wrappedAssignmentErrors(serverText, serverEnv)),
+	];
 	const missing = missingRolloutNames(manifest, section);
 	return {
 		manifestPath: "",
@@ -806,7 +850,7 @@ export function main(argv: string[]): number {
 				clientValues.set(client.id, firstLine(expandHome(delivery.path)));
 			}
 		}
-		report = checkValues(manifest, serverValues, clientValues, serverEnv, tokensDir, herdrEnv);
+		report = checkValues(manifest, serverValues, clientValues, serverEnv, tokensDir, herdrEnv, serverText);
 	}
 	report.manifestPath = manifestPath;
 	process.stdout.write(formatReport(report, json));

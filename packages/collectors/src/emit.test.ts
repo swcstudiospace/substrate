@@ -63,7 +63,10 @@ beforeEach(() => {
 	delete process.env.SUBSTRATE_URL;
 	delete process.env.SUBSTRATE_TOKEN;
 	delete process.env.SUBSTRATE_TOKEN_FILE;
-	delete process.env.SUBSTRATE_TOKENS_DIR;
+	// An empty tokens dir, never the host's: without it the resolver falls
+	// back to the real /etc/substrate/tokens and provisioned host files
+	// leak into bearer assertions. File-resolution cases override per test.
+	process.env.SUBSTRATE_TOKENS_DIR = mkdtempSync(join(tmpdir(), "emit-tokens-empty-"));
 	stderr = captureStderr();
 });
 

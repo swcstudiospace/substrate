@@ -143,7 +143,9 @@ variable for collector and external-client env files, the host-job token
 variable for dormant per-unit env files), and `ENV_FILE` names the env
 file. Server-side surface lists hold comma-separated values, so a second
 client of the same surface is a second entry on the same variable, added
-before the old one is ever removed.
+before the old one is ever removed. Write one line per variable and never
+wrap a list across lines: `identity:check` refuses wrapped assignments
+rather than guessing which half the loader sees.
 
 ## The ordered window
 

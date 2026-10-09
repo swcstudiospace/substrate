@@ -539,6 +539,34 @@ describe("checkNames", () => {
 		expect(out).toContain("server not ready");
 		expect(out).toContain("missing SUBSTRATE_TOKEN_CURSOR");
 	});
+
+	test("a wrapped assignment fails names mode instead of trusting partial names", () => {
+		const dir = makeTmp();
+		const manifest = fixtureManifest(dir);
+		const td = join(dir, "td");
+		mkdirSync(td);
+		const srv = join(dir, "srv.env");
+		const report = checkNames(
+			manifest,
+			fixtureReads(
+				{
+					[srv]: `SUBSTRATE_TOKEN_CLAUDE_CODE=${V1}\nSUBSTRATE_TOKEN_CURSOR=${V3}\nSUBSTRATE_TOKEN_SUBSTRATE=${V4}\\\n${V3}\nSUBSTRATE_TOKEN_HERMES=${V1}\nSUBSTRATE_OPERATOR_TOKENS=${V2}\n`,
+					[join(dir, "cli.env")]: `SUBSTRATE_TOKEN=${V1}\n`,
+				},
+				{ [join(td, "cursor")]: GOOD_STAT },
+			),
+			srv,
+			td,
+		);
+		expect(report.strandedLive).toEqual([]);
+		expect(report.missing).toEqual([]);
+		expect(report.pass).toBe(false);
+		expect(report.errors.some((e) => e.includes("wrapped assignment"))).toBe(true);
+		const out = formatReport({ ...report, manifestPath: "m" }, false) + formatReport({ ...report, manifestPath: "m" }, true);
+		expect(out).toContain("FAIL");
+		expect(out).toContain("unwrap it to one line");
+		for (const value of [V1, V2, V3, V4]) expect(out).not.toContain(value);
+	});
 });
 
 describe("checkValues", () => {
@@ -715,6 +743,79 @@ describe("checkValues", () => {
 		expect(out).toContain("PASS");
 		expect(out).not.toContain("server not ready");
 		for (const value of [V1, V2, V3, OTHER]) expect(out).not.toContain(value);
+	});
+
+	test("an operator file needs the surface and operator lists", () => {
+		const dir = makeTmp();
+		const manifest: Manifest = {
+			version: 1,
+			server_env: join(dir, "srv.env"),
+			required_server_names: ["SUBSTRATE_OPERATOR_TOKENS"],
+			clients: [
+				{ id: "op", surface: "claude-code", delivery: { kind: "operator-file", path: join(dir, "op.token") }, state: "live", evidence: "unit" },
+			],
+		};
+		const srv = join(dir, "srv.env");
+		const inSurfaceOnly = checkValues(
+			manifest,
+			new Map([
+				["SUBSTRATE_TOKEN_CLAUDE_CODE", V1],
+				["SUBSTRATE_OPERATOR_TOKENS", V2],
+			]),
+			new Map([["op", V1]]),
+			srv,
+			join(dir, "td"),
+		);
+		expect(inSurfaceOnly.clients.find((c) => c.id === "op")?.status).toBe("mismatch");
+		expect(inSurfaceOnly.strandedLive).toEqual(["op"]);
+		expect(inSurfaceOnly.pass).toBe(false);
+		const inBoth = checkValues(
+			manifest,
+			new Map([
+				["SUBSTRATE_TOKEN_CLAUDE_CODE", V1],
+				["SUBSTRATE_OPERATOR_TOKENS", V1],
+			]),
+			new Map([["op", V1]]),
+			srv,
+			join(dir, "td"),
+		);
+		expect(inBoth.clients.find((c) => c.id === "op")?.status).toBe("match");
+		expect(inBoth.strandedLive).toEqual([]);
+		expect(inBoth.pass).toBe(true);
+		const out = formatReport({ ...inBoth, manifestPath: "m" }, false) + formatReport({ ...inSurfaceOnly, manifestPath: "m" }, true);
+		for (const value of [V1, V2]) expect(out).not.toContain(value);
+	});
+
+	test("a wrapped assignment fails values mode instead of comparing partial values", () => {
+		const dir = makeTmp();
+		const manifest = fixtureManifest(dir);
+		const report = checkValues(
+			manifest,
+			new Map([
+				["SUBSTRATE_TOKEN_CLAUDE_CODE", V1],
+				["SUBSTRATE_TOKEN_CURSOR", V3],
+				["SUBSTRATE_TOKEN_SUBSTRATE", V4],
+				["SUBSTRATE_TOKEN_HERMES", OTHER],
+				["SUBSTRATE_OPERATOR_TOKENS", V2],
+			]),
+			new Map([
+				["cli", V1],
+				["cur", V3],
+				["dor", V4],
+			]),
+			join(dir, "srv.env"),
+			join(dir, "td"),
+			[],
+			`SUBSTRATE_TOKEN_CLAUDE_CODE=${V1}\nSUBSTRATE_TOKEN_SUBSTRATE=${V4}\\\n${V3}\nSUBSTRATE_TOKEN_HERMES=${OTHER}\nSUBSTRATE_OPERATOR_TOKENS=${V2}\n`,
+		);
+		expect(report.strandedLive).toEqual([]);
+		expect(report.missing).toEqual([]);
+		expect(report.pass).toBe(false);
+		expect(report.errors.some((e) => e.includes("wrapped assignment"))).toBe(true);
+		const out = formatReport({ ...report, manifestPath: "m" }, false) + formatReport({ ...report, manifestPath: "m" }, true);
+		expect(out).toContain("wrapped assignment");
+		expect(out).toContain("unwrap it to one line");
+		for (const value of [V1, V2, V3, V4, OTHER]) expect(out).not.toContain(value);
 	});
 });
 
