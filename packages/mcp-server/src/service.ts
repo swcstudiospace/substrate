@@ -2525,6 +2525,10 @@ export class Substrate {
 	async verifyGraph(graphId: string, opts: VerifyOptions = {}): Promise<VerifyVerdict> {
 		const withAnchors = opts.anchors !== false;
 		const now = opts.now ?? Date.now();
+		// The CLI times the whole request, so the whole-verify budget starts
+		// before the event read — not when the hour loop starts — and every
+		// hour's allowance below is what's left of it.
+		const verifyStartedAt = Date.now();
 		if (!this.greptime) return { ok: false, events: 0, reason: "greptime not configured", chain: { ok: false, reason: "greptime not configured" }, hours: [], uncovered: { count: 0, ids: [] }, legacy: { count: 0, ids: [] }, missing: { count: 0, ids: [] } };
 		// Read by the graph id in its stored form, for the same reason `emit` looks
 		// the session up by its normalised one.
@@ -2563,7 +2567,7 @@ export class Substrate {
 			missing: { count: 0, ids: [] },
 		};
 		if (!withAnchors) return emptyHours;
-		return this.hourReport(stored, rows, chain, now, opts.rpc);
+		return this.hourReport(stored, rows, chain, now, opts.rpc, verifyStartedAt);
 	}
 
 	/**
@@ -2584,10 +2588,10 @@ export class Substrate {
 		chain: VerifyVerdict["chain"],
 		now: number,
 		injectedRpc?: Rpc,
+		startedAt: number = Date.now(),
 	): Promise<VerifyVerdict> {
 		const greptime = this.greptime;
 		if (!greptime) throw new Error("GREPTIME_URL is not set");
-		const startedAt = Date.now();
 		const budgetMs = this.config.verifyTimeoutMs;
 		const ingest = await greptime.graphIngest(storedGraphId);
 		const byEvent = new Map(ingest.map((record) => [record.event_id, record]));

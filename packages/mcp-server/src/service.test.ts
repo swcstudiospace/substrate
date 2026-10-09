@@ -3780,7 +3780,7 @@ describe("verifyGraph hour report", () => {
 			},
 			{ SUBSTRATE_VERIFY_TIMEOUT_MS: String(VERIFY_RESPONSE_MARGIN_MS + 150) },
 		);
-		const rpc = { transactionMemo: () => new Promise<never>(() => {}) };
+		const rpc = { transactionMemo: (): Promise<never> => Promise.withResolvers<never>().promise };
 		const started = Date.now();
 		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpc as never });
 		expect(Date.now() - started).toBeLessThan(2000);
@@ -3848,6 +3848,35 @@ describe("verifyGraph hour report", () => {
 		expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "anchored" });
 		expect(verdict.missing).toEqual({ count: 1, ids: [moved] });
 		expect(verdict.reason).toContain(moved);
+		expect(verdict.ok).toBe(false);
+	});
+
+	test("a slow event read spends the budget before the first hour", async () => {
+		// The CLI times the whole request, so the deadline starts before the
+		// event read: a read slower than the budget leaves no allowance, and
+		// the hour reads unverified instead of anchoring past the CLI abort.
+		// Real delay on purpose: the budget enforces against the platform
+		// clock, so only genuinely consumed time moves it (120 ms of work
+		// against a 100 ms budget is 20 ms clear of scheduling jitter).
+		const world = sessionRows();
+		const substrate = substrateWith(
+			{
+				readEvents: async () => {
+					const { promise, resolve } = Promise.withResolvers<void>();
+					setTimeout(resolve, 120);
+					await promise;
+					return world.rows;
+				},
+				graphIngest: async () => world.records,
+				firstIngestMs: async () => H,
+				hourLeaves: async () => world.leaves,
+				anchorForPeriod: async () => anchorRow(world),
+			},
+			{ SUBSTRATE_VERIFY_TIMEOUT_MS: "100" },
+		);
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(world.memo) as never });
+		expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "unverified" });
+		expect(verdict.hours[0]?.reason).toContain("timed out before this hour was checked");
 		expect(verdict.ok).toBe(false);
 	});
 });
