@@ -3858,8 +3858,12 @@ describe("verifyGraph hour report", () => {
 		// open, pending by definition, and the healthy graph verifies.
 		const world = sessionRows();
 		const liveAt = H + 5 * HOUR + 1000;
-		const liveRecord = { event_id: "evt_live", event_ts: liveAt, ingested_at: liveAt };
-		const liveRow = { id: "evt_live", ts: liveAt, payload: "{}" };
+		const live = normalizeEvent(
+			{ surface: "omp", kind: "note", summary: "live", session_id: "sess-1", graph_id: "ut-1", actor: "agent" },
+			world.events[1]?.hash ?? null,
+		);
+		const liveRow = { ...live, ts: Date.parse(live.ts), payload: JSON.stringify(live.payload) };
+		const liveRecord = { event_id: live.id, event_ts: Date.parse(live.ts), ingested_at: liveAt };
 		let reads = 0;
 		const substrate = substrateWith({
 			readEvents: async () => (++reads === 1 ? world.rows : [...world.rows, liveRow]),
@@ -3894,6 +3898,64 @@ describe("verifyGraph hour report", () => {
 		expect(verdict.hours[0]).toMatchObject({ status: "pending" });
 		expect(verdict.missing).toEqual({ count: 1, ids: [deleted] });
 		expect(verdict.reason).toContain(deleted);
+		expect(verdict.ok).toBe(false);
+	});
+
+	test("a restored row with edited content does not clear the gap", async () => {
+		// Ledger-level restore attack: the event reads under this graph in
+		// neither the first read (moved out) nor with intact contents in
+		// the re-read (summary edited, original hash kept). The re-chain
+		// rejects it, so the gap stays missing and the verify fails.
+		const world = sessionRows();
+		const moved = world.events[1]?.id ?? "evt_moved";
+		const original = world.rows[1] as Record<string, unknown>;
+		const restored = { ...original, summary: "rewritten after the move" };
+		let reads = 0;
+		const substrate = substrateWith({
+			readEvents: async () => (++reads === 1 ? world.rows.slice(0, 1) : [world.rows[0], restored]),
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(world.memo) as never });
+		expect(verdict.missing).toEqual({ count: 1, ids: [moved] });
+		expect(verdict.reason).toContain(moved);
+		expect(verdict.ok).toBe(false);
+	});
+
+	test("a re-read past the budget fails closed naming the gap", async () => {
+		// The gap re-read shares the whole-verify budget: when it cannot
+		// finish in the allowance, the gap stays missing and the CLI still
+		// gets a failed report instead of `unreachable`.
+		// Real delay on purpose: the budget enforces against the platform
+		// clock, so only genuinely consumed time moves it (120 ms of work
+		// against a ~75 ms allowance is clear of scheduling jitter).
+		const world = sessionRows();
+		const liveAt = H + 5 * HOUR + 1000;
+		const liveRecord = { event_id: "evt_live", event_ts: liveAt, ingested_at: liveAt };
+		const substrate = substrateWith(
+			{
+				readEvents: (() => {
+					let reads = 0;
+					return async () => {
+						if (++reads === 1) return world.rows;
+						const { promise, resolve } = Promise.withResolvers<void>();
+						setTimeout(resolve, 120);
+						await promise;
+						return world.rows;
+					};
+				})(),
+				graphIngest: async () => [...world.records, liveRecord],
+				firstIngestMs: async () => H,
+				hourLeaves: async () => world.leaves,
+				anchorForPeriod: async () => anchorRow(world),
+			},
+			{ SUBSTRATE_VERIFY_TIMEOUT_MS: "100" },
+		);
+		const verdict = await substrate.verifyGraph("ut-1", { now: liveAt + 60_000, rpc: rpcReturning(world.memo) as never });
+		expect(verdict.missing).toEqual({ count: 1, ids: ["evt_live"] });
+		expect(verdict.reason).toContain("evt_live");
 		expect(verdict.ok).toBe(false);
 	});
 

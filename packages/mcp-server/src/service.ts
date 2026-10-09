@@ -2633,80 +2633,124 @@ export class Substrate {
 	// a live graph between the event read above and the ingest read. The
 	// event row is stored before its ingest record, so an observed record
 	// implies its row is already readable: re-read, and only ids still
-	// absent fail the verdict naming them. A live append lands in the
-	// re-read and settles; a deletion or move stays absent at any hour.
+	// absent fail the verdict naming them. A re-read hit clears only after
+	// its contents re-chain with its session mates — a restored row with
+	// edited content keeps its old hash and fails there instead. The
+	// re-read shares the whole-verify budget: past the allowance the gap
+	// stays missing, fail-closed, and the report still reaches the CLI.
 	const rowIds = new Set(rows.map((row) => String(row.id)));
 	const gap = ingest.map((record) => record.event_id).filter((id) => !rowIds.has(id));
-	let missing: string[] = [];
-	if (gap.length > 0) {
-		const fresh = await greptime.readEvents("graph_id", storedGraphId);
-		const freshIds = new Set(fresh.map((row) => String(row.id)));
-		missing = gap.filter((id) => !freshIds.has(id)).sort();
+	// A fifth of the budget, capped: short budgets still run their quick
+	// checks instead of losing every hour to a fixed margin.
+	const margin = Math.min(VERIFY_RESPONSE_MARGIN_MS, Math.ceil(budgetMs / 5));
+	const cleared = new Set<string>();
+	if (gap.length > 0 && budgetMs - (Date.now() - startedAt) > margin) {
+		const allowance = budgetMs - (Date.now() - startedAt) - margin;
+		const fresh = await new Promise<Array<Record<string, unknown>> | null>((resolve) => {
+			const timer = setTimeout(() => resolve(null), Math.max(0, allowance));
+			timer.unref?.();
+			greptime.readEvents("graph_id", storedGraphId).then(
+				(read) => {
+					clearTimeout(timer);
+					resolve(read);
+				},
+				() => {
+					clearTimeout(timer);
+					resolve(null);
+				},
+			);
+		});
+		if (fresh) {
+			const freshById = new Map(fresh.map((row) => [String(row.id), row]));
+			const hits = gap
+				.map((id) => freshById.get(id))
+				.filter((row) => row !== undefined)
+				.map((row) => rowToEvent(row));
+			const matesBySession = new Map<string, SubstrateEvent[]>();
+			for (const row of rows) {
+				const event = rowToEvent(row);
+				const key = event.session_id ?? "";
+				const bucket = matesBySession.get(key);
+				if (bucket) bucket.push(event);
+				else matesBySession.set(key, [event]);
+			}
+			const hitsBySession = new Map<string, SubstrateEvent[]>();
+			for (const event of hits) {
+				const key = event.session_id ?? "";
+				const bucket = hitsBySession.get(key);
+				if (bucket) bucket.push(event);
+				else hitsBySession.set(key, [event]);
+			}
+			for (const [key, freshOnes] of hitsBySession) {
+				const combined = [...(matesBySession.get(key) ?? []), ...freshOnes];
+				if (verifyChain(inChainOrder(combined)).ok) {
+					for (const event of freshOnes) cleared.add(event.id);
+				}
+			}
+		}
+	}
+	const missing = gap.filter((id) => !cleared.has(id)).sort();
+
+	const pubkey = this.config.solana.pubkey;
+	let rpc: Rpc | null = injectedRpc ?? null;
+	const readRpc = (): Rpc => {
+		if (!rpc) {
+			rpc = createRpc({
+				url: this.config.solana.rpcUrl,
+				timeoutMs: VERIFY_RPC_TIMEOUT_MS,
+				attempts: VERIFY_RPC_ATTEMPTS,
+				backoffMs: VERIFY_RPC_BACKOFF_MS,
+			});
+		}
+		return rpc;
+	};
+
+	const hours: HourReport[] = [];
+	for (const hour of [...byHour.keys()].sort((a, b) => a - b)) {
+		const memberCount = byHour.get(hour)?.length ?? 0;
+		// An hour that is still open needs no devnet read and no digest —
+		// it is pending by definition — so it never spends the budget.
+		if (!isClosed(hour, now, INGEST_LAG_MS)) {
+			hours.push({ period_start: hourIso(hour), period_end: hourIso(hourEnd(hour)), status: "pending", event_count: memberCount, root: null });
+			continue;
+		}
+		const remaining = budgetMs - (Date.now() - startedAt);
+		if (remaining <= margin) {
+			hours.push({
+				period_start: hourIso(hour),
+				period_end: hourIso(hourEnd(hour)),
+				status: "unverified",
+				event_count: memberCount,
+				root: null,
+				reason: "verify timed out before this hour was checked",
+			});
+			continue;
+		}
+		hours.push(await this.checkHourWithBudget(hour, now, readRpc, pubkey, memberCount, remaining - margin));
 	}
 
-		const pubkey = this.config.solana.pubkey;
-		let rpc: Rpc | null = injectedRpc ?? null;
-		const readRpc = (): Rpc => {
-			if (!rpc) {
-				rpc = createRpc({
-					url: this.config.solana.rpcUrl,
-					timeoutMs: VERIFY_RPC_TIMEOUT_MS,
-					attempts: VERIFY_RPC_ATTEMPTS,
-					backoffMs: VERIFY_RPC_BACKOFF_MS,
-				});
-			}
-			return rpc;
-		};
-
-		const hours: HourReport[] = [];
-		// A fifth of the budget, capped: short budgets still run their quick
-		// checks instead of losing every hour to a fixed margin.
-		const margin = Math.min(VERIFY_RESPONSE_MARGIN_MS, Math.ceil(budgetMs / 5));
-		for (const hour of [...byHour.keys()].sort((a, b) => a - b)) {
-			const memberCount = byHour.get(hour)?.length ?? 0;
-			// An hour that is still open needs no devnet read and no digest —
-			// it is pending by definition — so it never spends the budget.
-			if (!isClosed(hour, now, INGEST_LAG_MS)) {
-				hours.push({ period_start: hourIso(hour), period_end: hourIso(hourEnd(hour)), status: "pending", event_count: memberCount, root: null });
-				continue;
-			}
-			const remaining = budgetMs - (Date.now() - startedAt);
-			if (remaining <= margin) {
-				hours.push({
-					period_start: hourIso(hour),
-					period_end: hourIso(hourEnd(hour)),
-					status: "unverified",
-					event_count: memberCount,
-					root: null,
-					reason: "verify timed out before this hour was checked",
-				});
-				continue;
-			}
-			hours.push(await this.checkHourWithBudget(hour, now, readRpc, pubkey, memberCount, remaining - margin));
-		}
-
-		const failing = hours.find((hour) => hour.status !== "anchored" && hour.status !== "pending");
-		const ok = chain.ok && !failing && uncovered.length === 0 && missing.length === 0;
-		const reason = !chain.ok
-			? chain.reason
-			: uncovered.length > 0
-				? `${uncovered.length} uncovered event${uncovered.length === 1 ? "" : "s"} with no ingest record: ${uncovered.join(", ")}`
-				: missing.length > 0
-					? `${missing.length} event${missing.length === 1 ? "" : "s"} with an ingest record but no event row: ${missing.join(", ")}`
-					: failing
-						? `hour ${failing.period_start} ${failing.status}${failing.reason ? `: ${failing.reason}` : ""}`
-						: undefined;
-		return {
-			ok,
-			events: rows.length,
-			...(chain.brokenAt ? { brokenAt: chain.brokenAt } : {}),
-			...(reason ? { reason } : {}),
-			chain,
-			hours,
-			uncovered: { count: uncovered.length, ids: [...uncovered].sort() },
-			legacy: { count: legacy.length, ids: [...legacy].sort() },
-			missing: { count: missing.length, ids: [...missing] },
-		};
+	const failing = hours.find((hour) => hour.status !== "anchored" && hour.status !== "pending");
+	const ok = chain.ok && !failing && uncovered.length === 0 && missing.length === 0;
+	const reason = !chain.ok
+		? chain.reason
+		: uncovered.length > 0
+			? `${uncovered.length} uncovered event${uncovered.length === 1 ? "" : "s"} with no ingest record: ${uncovered.join(", ")}`
+			: missing.length > 0
+				? `${missing.length} event${missing.length === 1 ? "" : "s"} with an ingest record but no event row: ${missing.join(", ")}`
+				: failing
+					? `hour ${failing.period_start} ${failing.status}${failing.reason ? `: ${failing.reason}` : ""}`
+					: undefined;
+	return {
+		ok,
+		events: rows.length,
+		...(chain.brokenAt ? { brokenAt: chain.brokenAt } : {}),
+		...(reason ? { reason } : {}),
+		chain,
+		hours,
+		uncovered: { count: uncovered.length, ids: [...uncovered].sort() },
+		legacy: { count: legacy.length, ids: [...legacy].sort() },
+		missing: { count: missing.length, ids: [...missing] },
+	};
 	}
 
 	/**
