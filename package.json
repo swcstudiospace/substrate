@@ -24,6 +24,7 @@
     "smoke:chaos": "bun scripts/chaos-smoke.ts",
     "smoke:vocabulary": "bun scripts/vocabulary-smoke.ts",
     "smoke:skills-propose": "bun scripts/skills-propose-smoke.ts",
+    "smoke:desktop": "bun scripts/desktop-smoke.ts",
     "check:phase-close": "bun scripts/phase-close-check.ts",
     "verify": "bun scripts/verify.ts",
     "parity:check": "bun scripts/parity-check.ts",
