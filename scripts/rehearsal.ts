@@ -414,11 +414,17 @@ function readStartSeconds(pid: number): number | null {
 
 /** Local ports a pid listens on, from `ss`; null when ss cannot be read. */
 function readListeningPorts(pid: number): number[] | null {
-	const run = Bun.spawnSync(["ss", "-ltnpH"], {
-		stdout: "pipe",
-		stderr: "pipe",
-		timeout: DOCKER_TIMEOUT_MS,
-	});
+	let run: ReturnType<typeof Bun.spawnSync>;
+	try {
+		run = Bun.spawnSync(["ss", "-ltnpH"], {
+			stdout: "pipe",
+			stderr: "pipe",
+			timeout: DOCKER_TIMEOUT_MS,
+		});
+	} catch {
+		// A missing `ss` is an unverifiable pid, not a reason to signal it.
+		return null;
+	}
 	if (run.exitCode !== 0) return null;
 	const ports: number[] = [];
 	for (const line of run.stdout.toString().split("\n")) {

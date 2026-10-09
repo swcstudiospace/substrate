@@ -28,7 +28,7 @@ The script restarts only `substrate-mcp.service` and `substrate-collector-grok.s
 
 ## Units
 
-Both units in this directory use `WorkingDirectory=/opt/agent-substrate/current`. Install the matching drop-in with the unit:
+Both units in this directory use `WorkingDirectory=/opt/agent-substrate/current`. `substrate-mcp.service` also sets `ConditionPathExists` on `packages/mcp-server/src/index.ts` under that symlink, so a missing entry skips the start instead of crash-looping. Install the matching drop-in with the unit:
 
 | Unit | Drop-in | EnvironmentFile |
 | --- | --- | --- |

@@ -3,6 +3,7 @@ import {
 	diffStability,
 	parityVerdict,
 	parseCgroup,
+	releaseDirFromLink,
 	parseReflogTime,
 	parseSsListeners,
 	parseSystemctlShow,
@@ -23,6 +24,10 @@ function facts(over: Partial<ParityFacts> = {}): ParityFacts {
 		cgroup: "0::/system.slice/substrate-mcp.service",
 		procCwd: "/root/src/repos/agent-substrate",
 		workingDirectory: "/root/src/repos/agent-substrate",
+		pinned: false,
+		releaseSha: null,
+		releaseDir: null,
+		releaseOnMain: null,
 		headMoveEpoch: 1791469658,
 		dirtyPaths: [],
 		originDiffPaths: [],
@@ -194,10 +199,69 @@ describe("parityVerdict", () => {
 		expect(parityVerdict(facts(), { expectRestarts: 0, expectStart: 1791479652 }).pass).toBe(true);
 	});
 
+	test("a pinned release serves main even when the operator checkout is dirty", () => {
+		const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+		const verdict = parityVerdict(
+			facts({
+				pinned: true,
+				workingDirectory: "/opt/agent-substrate/current",
+				procCwd: `/opt/agent-substrate/releases/${sha}`,
+				releaseDir: `/opt/agent-substrate/releases/${sha}`,
+				releaseSha: sha,
+				releaseOnMain: true,
+				headMoveEpoch: null,
+				dirtyPaths: ["packages/mcp-server/src/server.ts"],
+				originDiffPaths: ["packages/mcp-server/src/index.ts"],
+			}),
+		);
+		expect(verdict.pass).toBe(true);
+	});
+
+	test("a pinned release fails when the process is still in the checkout", () => {
+		const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+		const verdict = parityVerdict(
+			facts({
+				pinned: true,
+				workingDirectory: "/opt/agent-substrate/current",
+				procCwd: "/root/src/repos/agent-substrate",
+				releaseDir: `/opt/agent-substrate/releases/${sha}`,
+				releaseSha: sha,
+				releaseOnMain: true,
+			}),
+		);
+		expect(verdict.pass).toBe(false);
+		expect(verdict.failures.join("\n")).toContain("pinned release");
+	});
+
+	test("a pinned release fails when its commit is not on origin/main", () => {
+		const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+		const verdict = parityVerdict(
+			facts({
+				pinned: true,
+				workingDirectory: "/opt/agent-substrate/current",
+				procCwd: `/opt/agent-substrate/releases/${sha}`,
+				releaseDir: `/opt/agent-substrate/releases/${sha}`,
+				releaseSha: sha,
+				releaseOnMain: false,
+			}),
+		);
+		expect(verdict.pass).toBe(false);
+		expect(verdict.failures.join("\n")).toContain("not on origin/main");
+	});
+
 	test("collects every failing criterion at once", () => {
 		// The verdict reports the full list, not just the first failure.
 		const verdict = parityVerdict(facts({ activeState: "failed", healthzStatus: 503, dirtyPaths: ["bun.lock"] }));
 		expect(verdict.failures).toHaveLength(3);
+	});
+});
+
+describe("releaseDirFromLink", () => {
+	test("accepts a relative releases target and refuses one that escapes", () => {
+		const sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+		expect(releaseDirFromLink(`releases/${sha}`)).toEqual({ dir: `/opt/agent-substrate/releases/${sha}`, sha });
+		expect(releaseDirFromLink("../etc")).toBeNull();
+		expect(releaseDirFromLink("/root/src/repos/agent-substrate")).toBeNull();
 	});
 });
 

@@ -35,13 +35,26 @@ It checks, read-only:
 2. `ss -ltnp`: the pid that owns `127.0.0.1:7410` equals `MainPID`, and
    `/proc/<pid>/cgroup` is `system.slice/substrate-mcp.service`.
 3. `GET http://127.0.0.1:7410/healthz` returns 200.
-4. "From `main`" holds when all of these are true: `/proc/<pid>/cwd` is the
-   unit's `WorkingDirectory`; the process started after that checkout's last
-   HEAD move, read from the reflog; the checkout has no local modification
-   under the server's code paths (`packages/**`, `package.json`, `bun.lock`);
-   no commit between the checkout's HEAD and `origin/main` changes those
-   paths. Every git call runs with `--no-optional-locks` and never fetches,
-   pulls or checks out in the operator checkout.
+4. "From `main`" depends on `WorkingDirectory`.
+
+   When it is `/opt/agent-substrate/current` (the pinned release), the process
+   cwd is the resolved `releases/<sha>` directory, not the symlink and not
+   `/root/src/repos/agent-substrate`. The release tree is a git archive, so it
+   has no reflog and no dirty worktree. The check reads the symlink, requires
+   `/proc/<pid>/cwd` to be that release directory, and asks the operator repo
+   (`SUBSTRATE_REPO`, or `/root/src/repos/agent-substrate`) whether `<sha>` is
+   an ancestor of `origin/main`. Dirt and later commits in the operator
+   checkout do not fail this mode: production is not running from that
+   checkout. `ConditionPathExists` on the unit is the entry under `current`,
+   which follows the symlink.
+
+   When `WorkingDirectory` is still the operator checkout, the older rule
+   holds: `/proc/<pid>/cwd` equals that directory; the process started after
+   the checkout's last HEAD move; `packages/**`, `package.json` and `bun.lock`
+   are clean; no commit between HEAD and `origin/main` changes those paths.
+
+   Every git call runs with `--no-optional-locks` and never fetches, pulls or
+   checks out.
 5. Warnings, never failures: a diff between the installed unit file and
    `infra/vps/substrate-mcp.service`, and an inventory of every other
    `substrate-*` unit.
@@ -53,9 +66,9 @@ differ in three places:
 
 - **Port.** A twin never owns `7410`, `7411` or `6420` — `up` refuses them.
   Whatever owns `127.0.0.1:7410` is production or a stray, never a twin.
-- **Checkout.** A twin runs from the checkout its `state.json` records, which
-  is never the unit's `WorkingDirectory`. Production's cwd is the unit's
-  `WorkingDirectory`.
+- **Checkout.** A twin runs from the checkout its `state.json` records.
+  Production's `WorkingDirectory` is `/opt/agent-substrate/current`, and the
+  process cwd is the resolved `releases/<sha>` directory. A twin is neither.
 - **`state.json`.** A twin has one, in its run directory, naming its pid,
   ports and commit. A stray has none.
 

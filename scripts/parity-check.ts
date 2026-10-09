@@ -11,10 +11,38 @@
  * lock-taking git call (every git argv starts with --no-optional-locks), and
  * it prints pids, states and commits only — never an environment value.
  */
-import { readFileSync, readlinkSync } from "node:fs";
+import { readFileSync, readlinkSync, realpathSync } from "node:fs";
 
 /** Production ports the check watches in `ss` output. */
 export const WATCHED_PORTS = [7410, 7411, 6420] as const;
+
+/** The symlink production units use as WorkingDirectory. */
+export const RELEASE_CURRENT = "/opt/agent-substrate/current";
+
+const RELEASE_DIR = /^\/opt\/agent-substrate\/releases\/([0-9a-f]{40}(?:[0-9a-f]{24})?)$/;
+
+/** True when the unit runs from the pinned release rather than a git checkout. */
+export function isPinnedWorkingDirectory(workingDirectory: string | null): boolean {
+	if (workingDirectory === null) return false;
+	const dir = workingDirectory.replace(/\/+$/, "");
+	return dir === RELEASE_CURRENT || RELEASE_DIR.test(dir);
+}
+
+/**
+ * A `current` symlink target. Relative `releases/<sha>` and the absolute
+ * release path are accepted. A target that leaves `/opt/agent-substrate/releases` is not.
+ */
+export function releaseDirFromLink(target: string): { dir: string; sha: string } | null {
+	const trimmed = target.trim();
+	if (trimmed === "" || trimmed.includes("..") || trimmed.includes("\0")) return null;
+	const absolute = trimmed.startsWith("/")
+		? trimmed.replace(/\/+$/, "")
+		: `/opt/agent-substrate/${trimmed.replace(/^\.\//, "").replace(/\/+$/, "")}`;
+	const match = RELEASE_DIR.exec(absolute);
+	const sha = match?.[1];
+	if (!sha) return null;
+	return { dir: absolute, sha };
+}
 
 /** `systemctl show` key=value lines into a map, independent of property order. */
 export function parseSystemctlShow(text: string): Map<string, string> {
@@ -96,7 +124,15 @@ export interface ParityFacts {
 	/** readlink /proc/<pid>/cwd. */
 	procCwd: string | null;
 	workingDirectory: string | null;
-	/** Last HEAD move epoch of the operator tree. */
+	/** True when WorkingDirectory is the pinned release, not the operator checkout. */
+	pinned: boolean;
+	/** Commit recorded by the release directory name. */
+	releaseSha: string | null;
+	/** Resolved `/opt/agent-substrate/releases/<sha>` the process must be in. */
+	releaseDir: string | null;
+	/** The release commit is an ancestor of origin/main. Null when not asked. */
+	releaseOnMain: boolean | null;
+	/** Last HEAD move epoch of the operator tree. Ignored for a pinned release. */
 	headMoveEpoch: number | null;
 	/** Server-path dirt from `status --porcelain`. Empty is clean. */
 	dirtyPaths: string[];
@@ -144,21 +180,40 @@ export function parityVerdict(facts: ParityFacts, opts: VerdictOptions = {}): Pa
 	} else if (facts.healthzStatus !== 200) {
 		failures.push(`healthz answered ${facts.healthzStatus}, want 200`);
 	}
-	if (facts.procCwd === null || facts.workingDirectory === null || facts.procCwd !== facts.workingDirectory) {
-		failures.push(
-			`process cwd ${facts.procCwd ?? "(unknown)"} is not the unit WorkingDirectory ${facts.workingDirectory ?? "(unknown)"}`,
-		);
-	}
-	if (facts.startEpoch === null || facts.headMoveEpoch === null || !(facts.startEpoch > facts.headMoveEpoch)) {
-		failures.push(
-			`process start ${facts.startEpoch ?? "(unknown)"} is not after the last HEAD move ${facts.headMoveEpoch ?? "(unknown)"}`,
-		);
-	}
-	if (facts.dirtyPaths.length > 0) {
-		failures.push(`server paths modified under the operator tree: ${facts.dirtyPaths.join(", ")}`);
-	}
-	if (facts.originDiffPaths.length > 0) {
-		failures.push(`server-path commits between HEAD and origin/main: ${facts.originDiffPaths.join(", ")}`);
+	if (facts.pinned) {
+		// /proc cwd is the resolved release directory. WorkingDirectory stays the symlink.
+		if (facts.procCwd === null || facts.releaseDir === null || facts.procCwd !== facts.releaseDir) {
+			failures.push(
+				`process cwd ${facts.procCwd ?? "(unknown)"} is not the pinned release ${facts.releaseDir ?? "(unknown)"}`,
+			);
+		}
+		if (!facts.releaseSha || !facts.releaseDir?.endsWith(`/${facts.releaseSha}`)) {
+			failures.push(`pinned release has no commit sha (${facts.releaseSha ?? "unknown"})`);
+		}
+		if (facts.releaseOnMain !== true) {
+			failures.push(
+				facts.releaseOnMain === false
+					? `release ${facts.releaseSha ?? "?"} is not on origin/main`
+					: "could not ask whether the release commit is on origin/main",
+			);
+		}
+	} else {
+		if (facts.procCwd === null || facts.workingDirectory === null || facts.procCwd !== facts.workingDirectory) {
+			failures.push(
+				`process cwd ${facts.procCwd ?? "(unknown)"} is not the unit WorkingDirectory ${facts.workingDirectory ?? "(unknown)"}`,
+			);
+		}
+		if (facts.startEpoch === null || facts.headMoveEpoch === null || !(facts.startEpoch > facts.headMoveEpoch)) {
+			failures.push(
+				`process start ${facts.startEpoch ?? "(unknown)"} is not after the last HEAD move ${facts.headMoveEpoch ?? "(unknown)"}`,
+			);
+		}
+		if (facts.dirtyPaths.length > 0) {
+			failures.push(`server paths modified under the operator tree: ${facts.dirtyPaths.join(", ")}`);
+		}
+		if (facts.originDiffPaths.length > 0) {
+			failures.push(`server-path commits between HEAD and origin/main: ${facts.originDiffPaths.join(", ")}`);
+		}
 	}
 	if (facts.originShaKnown !== true) {
 		failures.push(
@@ -249,6 +304,13 @@ function spawn(argv: string[]): SpawnResult | null {
 	} catch {
 		return null;
 	}
+}
+
+/** The git repo used to ask whether a release sha is on origin/main. Not the process cwd. */
+function operatorRepo(): string {
+	const requested = process.env.SUBSTRATE_REPO;
+	if (requested && requested.startsWith("/") && !requested.includes("\0") && !requested.includes("\n")) return requested;
+	return "/root/src/repos/agent-substrate";
 }
 
 /** Every git argv leads with --no-optional-locks: the operator .git is shared with every worktree. */
@@ -375,7 +437,52 @@ export async function main(argv: string[]): Promise<number> {
 	let originShaKnown: boolean | null = null;
 	let headSha: string | null = null;
 	let originSha: string | null = null;
-	if (workdir !== null) {
+	let pinned = false;
+	let releaseSha: string | null = null;
+	let releaseDir: string | null = null;
+	let releaseOnMain: boolean | null = null;
+	if (workdir !== null && isPinnedWorkingDirectory(workdir)) {
+		// The release tree is a git archive: it has no reflog and no dirt to read.
+		// "On main" is asked in the operator repo, which is not the process cwd.
+		pinned = true;
+		const dir = workdir.replace(/\/+$/, "");
+		let linked = dir;
+		if (dir === RELEASE_CURRENT) {
+			let target: string;
+			try {
+				target = readlinkSync(dir);
+			} catch {
+				return dead("could not read /opt/agent-substrate/current.");
+			}
+			const parsed = releaseDirFromLink(target);
+			if (parsed === null) return dead("current is not a releases/<sha> symlink.");
+			linked = parsed.dir;
+			releaseSha = parsed.sha;
+		} else {
+			const parsed = releaseDirFromLink(dir);
+			if (parsed === null) return dead("refusing release path.");
+			linked = parsed.dir;
+			releaseSha = parsed.sha;
+		}
+		let resolved: string;
+		try {
+			resolved = realpathSync(linked);
+		} catch {
+			return dead(`release directory is missing: ${linked}.`);
+		}
+		if (resolved !== linked) return dead("release directory resolves outside releases/<sha>.");
+		releaseDir = resolved;
+		headSha = releaseSha;
+		const repo = operatorRepo();
+		const known = gitWork(repo, ["cat-file", "-e", "origin/main^{commit}"]);
+		originShaKnown = known === null ? null : known.code === 0;
+		const tip = gitWork(repo, ["rev-parse", "--verify", "origin/main^{commit}"]);
+		if (tip !== null && tip.code === 0) originSha = tip.out.trim();
+		if (releaseSha !== null && originShaKnown === true) {
+			const ancestor = gitWork(repo, ["merge-base", "--is-ancestor", releaseSha, "origin/main"]);
+			releaseOnMain = ancestor === null ? null : ancestor.code === 0;
+		}
+	} else if (workdir !== null) {
 		const log = gitWork(workdir, ["log", "-g", "-n", "1", "--format=%H %gd %gs", "--date=unix", "HEAD"]);
 		if (log === null || log.code !== 0) return dead(`could not read the reflog of ${workdir}.`);
 		const line = log.out.trim();
@@ -414,7 +521,8 @@ export async function main(argv: string[]): Promise<number> {
 	}
 	const fragment = props.get("FragmentPath") ?? INSTALLED_UNIT_FALLBACK;
 	const installed = readText(fragment);
-	const repoUnit = workdir === null ? null : readText(`${workdir}/infra/vps/substrate-mcp.service`);
+	const unitRoot = releaseDir ?? workdir;
+	const repoUnit = unitRoot === null ? null : readText(`${unitRoot}/infra/vps/substrate-mcp.service`);
 	if (installed === null) warnings.push(`installed unit is unreadable at ${fragment}`);
 	else if (repoUnit === null) warnings.push("repo unit is unreadable; unit-file diff skipped");
 	else if (installed !== repoUnit) warnings.push("installed unit differs from the repo unit");
@@ -456,6 +564,10 @@ export async function main(argv: string[]): Promise<number> {
 			cgroup,
 			procCwd,
 			workingDirectory: workdir,
+			pinned,
+			releaseSha,
+			releaseDir,
+			releaseOnMain,
 			headMoveEpoch,
 			dirtyPaths,
 			originDiffPaths,
@@ -477,7 +589,7 @@ export async function main(argv: string[]): Promise<number> {
 	for (const warning of verdict.warnings) process.stdout.write(`  --   ${warning}\n`);
 	if (json) {
 		process.stdout.write(
-			`${JSON.stringify({ pass, failures, warnings: verdict.warnings, mainPid: finalPid, nRestarts: finalRestarts, startEpoch: finalStart, headSha, originSha, healthzStatus }, null, 2)}\n`,
+			`${JSON.stringify({ pass, failures, warnings: verdict.warnings, mainPid: finalPid, nRestarts: finalRestarts, startEpoch: finalStart, headSha, originSha, releaseSha, healthzStatus }, null, 2)}\n`,
 		);
 	}
 	process.stdout.write(pass ? "[parity:check] PASS\n" : `[parity:check] FAIL — ${failures.length} criterion(s) failed\n`);

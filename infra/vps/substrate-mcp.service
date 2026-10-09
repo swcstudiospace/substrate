@@ -8,8 +8,9 @@ Wants=network-online.target
 # systemd ignores it under [Service].
 StartLimitIntervalSec=0
 # A missing entry point skips the start silently instead of crash-looping into
-# six-figure NRestarts. Machine-specific absolute path, like the bun path below.
-ConditionPathExists=/root/src/repos/agent-substrate/packages/mcp-server/src/index.ts
+# six-figure NRestarts. The path is the pinned release, not the checkout:
+# ConditionPathExists follows the current symlink.
+ConditionPathExists=/opt/agent-substrate/current/packages/mcp-server/src/index.ts
 
 [Service]
 Type=simple
