@@ -19,6 +19,7 @@
  */
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { resolveBearer } from "../../cli/src/token.ts";
 import { redact } from "../../mcp-server/src/redact.ts";
 import type { EventInput } from "../../mcp-server/src/types.ts";
 
@@ -136,10 +137,12 @@ export async function postEvent(event: EventInput, opts: PostEventOptions = {}):
 	const source = opts.source ?? collector;
 	try {
 		// Env is read here, on every call, so a rotated URL or token applies
-		// without restarting a long-running collector (D19-04).
+		// without restarting a long-running collector (D19-04). The default
+		// bearer is the explicit option or the resolver for the event surface
+		// (D20-05), so herdr posts each event under its own surface token.
 		const rawBase = opts.url ?? process.env.SUBSTRATE_URL?.trim() ?? "";
 		const base = (rawBase || DEFAULT_URL).replace(/\/+$/, "");
-		const token = opts.token !== undefined ? opts.token.trim() : (process.env.SUBSTRATE_TOKEN?.trim() ?? "");
+		const token = opts.token !== undefined ? opts.token.trim() : (resolveBearer(event.surface, process.env) ?? "");
 		const response = await fetch(`${base}/events`, {
 			method: "POST",
 			headers: {

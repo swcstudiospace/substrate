@@ -3,7 +3,7 @@
  * convention, call-time env, and the refused line's exact shape.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { postEvent } from "./emit.ts";
@@ -62,6 +62,8 @@ beforeEach(() => {
 	process.env.SUBSTRATE_STATE_DIR = stateDir;
 	delete process.env.SUBSTRATE_URL;
 	delete process.env.SUBSTRATE_TOKEN;
+	delete process.env.SUBSTRATE_TOKEN_FILE;
+	delete process.env.SUBSTRATE_TOKENS_DIR;
 	stderr = captureStderr();
 });
 
@@ -70,7 +72,7 @@ afterEach(() => {
 	servers = [];
 	stderr?.restore();
 	stderr = null;
-	for (const key of ["SUBSTRATE_URL", "SUBSTRATE_TOKEN", "SUBSTRATE_STATE_DIR"] as const) {
+	for (const key of ["SUBSTRATE_URL", "SUBSTRATE_TOKEN", "SUBSTRATE_TOKEN_FILE", "SUBSTRATE_TOKENS_DIR", "SUBSTRATE_STATE_DIR"] as const) {
 		if (saved[key] === undefined) delete process.env[key];
 		else process.env[key] = saved[key];
 	}
@@ -177,6 +179,55 @@ describe("bearer convention and call-time env", () => {
 
 		expect(first.seen).toHaveLength(1);
 		expect(second.seen).toHaveLength(1);
+	});
+});
+
+describe("event-surface bearer resolution (D20-05)", () => {
+	function tokensDirWith(surface: string, value: string): string {
+		const dir = mkdtempSync(join(tmpdir(), "emit-tokens-"));
+		writeFileSync(join(dir, surface), `${value}\n`);
+		return dir;
+	}
+
+	test("no explicit token sends the event surface file value as Bearer", async () => {
+		const dir = tokensDirWith("cursor", "cursor-file-value");
+		process.env.SUBSTRATE_TOKENS_DIR = dir;
+		const stub = track(stubServer(() => Response.json({ stored: true }, { status: 202 })));
+
+		await postEvent({ ...event, surface: "cursor" }, { collector: "t", source: "t", url: stub.url });
+
+		expect(stub.seen.map((entry) => entry.auth)).toEqual(["Bearer cursor-file-value"]);
+	});
+
+	test("an explicit token wins over the surface file", async () => {
+		const dir = tokensDirWith("cursor", "cursor-file-value");
+		process.env.SUBSTRATE_TOKENS_DIR = dir;
+		const stub = track(stubServer(() => Response.json({ stored: true }, { status: 202 })));
+
+		await postEvent({ ...event, surface: "cursor" }, { collector: "t", source: "t", url: stub.url, token: "explicit-value" });
+
+		expect(stub.seen.map((entry) => entry.auth)).toEqual(["Bearer explicit-value"]);
+	});
+
+	test("env SUBSTRATE_TOKEN wins over the surface file", async () => {
+		const dir = tokensDirWith("cursor", "cursor-file-value");
+		process.env.SUBSTRATE_TOKENS_DIR = dir;
+		process.env.SUBSTRATE_TOKEN = "env-value";
+		const stub = track(stubServer(() => Response.json({ stored: true }, { status: 202 })));
+
+		await postEvent({ ...event, surface: "cursor" }, { collector: "t", source: "t", url: stub.url });
+
+		expect(stub.seen.map((entry) => entry.auth)).toEqual(["Bearer env-value"]);
+	});
+
+	test("absent everywhere sends no Authorization header", async () => {
+		process.env.SUBSTRATE_TOKENS_DIR = mkdtempSync(join(tmpdir(), "emit-tokens-empty-"));
+		const stub = track(stubServer(() => Response.json({ stored: true }, { status: 202 })));
+
+		await postEvent({ ...event, surface: "cursor" }, { collector: "t", source: "t", url: stub.url });
+
+		expect(stub.seen.map((entry) => entry.auth)).toEqual([null]);
+		expect(stderr?.lines.join("")).not.toContain("cursor-file-value");
 	});
 });
 

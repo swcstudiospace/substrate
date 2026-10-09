@@ -99,11 +99,15 @@ describe("parityVerdict", () => {
 		expect(verdict.failures.join("\n")).toContain("503");
 	});
 
-	test("reports 401 as auth-configured, not as silence", () => {
+	test("reports 401 as auth-on-token-missing, not as silence", () => {
 		// After tokens exist the probe needs a bearer; 401 names the fix.
 		const verdict = parityVerdict(facts({ healthzStatus: 401 }));
 		expect(verdict.pass).toBe(false);
-		expect(verdict.failures.join("\n")).toContain("SUBSTRATE_TOKEN");
+		const text = verdict.failures.join("\n");
+		expect(text).toContain("auth on, token missing");
+		expect(text).toContain("SUBSTRATE_TOKEN");
+		expect(text).toContain("SUBSTRATE_TOKEN_FILE");
+		expect(text).toContain("SUBSTRATE_TOKENS_DIR");
 	});
 
 	test("fails when the process predates the last HEAD move", () => {
