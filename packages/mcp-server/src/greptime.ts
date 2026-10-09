@@ -107,6 +107,25 @@ export interface EventQuery {
 	includePayload?: boolean;
 }
 
+/** One member of a closed ingest hour, in position order. */
+export interface HourLeaf {
+	/** The event id, as stored in `event_ingest` and `agent_events`. */
+	event_id: string;
+	/** Epoch milliseconds of the member's first ingest record. */
+	ingested_at: number;
+	/** The 64 lowercase hex hash from the member's event row. */
+	hash: string;
+}
+
+/**
+ * Upper bound on the ids one batched hour-read statement carries.
+ *
+ * The hour read walks its members in batches so the id list stays small
+ * enough for the HTTP SQL API: 500 ids are about 20 KB of statement text,
+ * which the scratch server answered in tens of milliseconds.
+ */
+const IN_BATCH = 500;
+
 /** Clamp to a whole number of rows inside the cap; anything unusable falls back to the default. */
 export function queryLimit(limit: number | undefined): number {
 	if (limit === undefined || !Number.isFinite(limit)) return DEFAULT_QUERY_LIMIT;
@@ -665,6 +684,66 @@ export class GreptimeClient {
 	async hasEvent(eventId: string): Promise<boolean> {
 		const rows = await this.sql(`SELECT "id" FROM "agent_events" WHERE "id" = ${this.q(eventId)} LIMIT 1`);
 		return rows.length > 0;
+	}
+
+	/**
+	 * One closed hour's members in position order, with their hashes.
+	 *
+	 * An event belongs to the hour holding its first ingest record, and its
+	 * position is its rank by (`ingested_at`, `event_id`) ascending: the
+	 * server only filters, and TypeScript decides membership and order, so an
+	 * arbitrary server row order or a write interleaving cannot move the root.
+	 * Collector `ts` plays no part — a backdated event lands in the hour it
+	 * was ingested. Leaves always come from the event rows, so altering a
+	 * stored event changes the recomputed root. A member with no event row,
+	 * a hash that is not 64 lowercase hex, or two stored hashes for one id
+	 * throws naming the event: the digest never returns a partial root.
+	 */
+	async hourLeaves(startMs: number): Promise<HourLeaf[]> {
+		const at = (ms: number): string => this.q(new Date(ms).toISOString());
+		const rows = await this.sql(
+			`SELECT "event_id", "ingested_at", "event_ts" FROM "event_ingest" ` +
+				`WHERE "ingested_at" >= ${at(startMs)} AND "ingested_at" < ${at(hourEnd(startMs))}`,
+		);
+		const first = new Map<string, { at: number; ts: number }>();
+		for (const row of rows) {
+			const id = String(row.event_id);
+			const ingested = Number(row.ingested_at);
+			const seen = first.get(id);
+			if (!seen || ingested < seen.at) first.set(id, { at: ingested, ts: Number(row.event_ts) });
+		}
+		const ids = [...first.keys()];
+		for (let i = 0; i < ids.length; i += IN_BATCH) {
+			const batch = ids.slice(i, i + IN_BATCH).map((id) => this.q(id)).join(", ");
+			const earlier = await this.sql(
+				`SELECT DISTINCT "event_id" FROM "event_ingest" WHERE "ingested_at" < ${at(startMs)} AND "event_id" IN (${batch})`,
+			);
+			for (const row of earlier) first.delete(String(row.event_id));
+		}
+		const members = [...first]
+			.map(([event_id, v]) => ({ event_id, ...v }))
+			.sort((a, b) => a.at - b.at || (a.event_id < b.event_id ? -1 : a.event_id > b.event_id ? 1 : 0));
+		const hashes = new Map<string, string>();
+		for (let i = 0; i < members.length; i += IN_BATCH) {
+			const batch = members.slice(i, i + IN_BATCH);
+			const found = await this.sql(
+				`SELECT "id", "hash" FROM "agent_events" WHERE "ts" >= ${at(Math.min(...batch.map((m) => m.ts)))} ` +
+					`AND "ts" <= ${at(Math.max(...batch.map((m) => m.ts)))} AND "id" IN (${batch.map((m) => this.q(m.event_id)).join(", ")})`,
+			);
+			for (const row of found) {
+				const id = String(row.id);
+				const hash = String(row.hash);
+				const prior = hashes.get(id);
+				if (prior !== undefined && prior !== hash) throw new GreptimeError(`hour member ${id} has two stored hashes`);
+				hashes.set(id, hash);
+			}
+		}
+		return members.map(({ event_id, at: ingested_at }) => {
+			const hash = hashes.get(event_id);
+			if (hash === undefined) throw new GreptimeError(`hour member ${event_id} has no event row`);
+			if (!/^[0-9a-f]{64}$/.test(hash)) throw new GreptimeError(`hour member ${event_id} has a hash that is not 64 lowercase hex`);
+			return { event_id, ingested_at, hash };
+		});
 	}
 
 	/**

@@ -913,3 +913,144 @@ describe("insertEvent ingest record", () => {
 		expect(written.join("")).toContain(event.id);
 	});
 });
+
+describe("hourLeaves", () => {
+	const H10 = Date.UTC(2026, 8, 26, 10);
+	const H11 = H10 + 3_600_000;
+	const E1 = "evt_e1";
+	const E2 = "evt_e2";
+	const E3 = "evt_e3";
+	const E4 = "evt_e4";
+	const E5 = "evt_e5";
+	const TIE = H10 + 5 * 60_000 + 10;
+	const E1TS = H10 + 5 * 60_000;
+	const E2TS = H10 + 5 * 60_000 + 5;
+	const E3TS = Date.UTC(2026, 8, 1, 3);
+	const E3ING = H10 + 10 * 60_000;
+	const E4TS = H10 - 500;
+	const E4LATE = H10 + 200;
+	const E5TS = H10 + 29 * 60_000;
+	const E5A = H10 + 30 * 60_000;
+	const E5B = E5A + 5_000;
+	const HA = "a".repeat(64);
+	const HB = "b".repeat(64);
+	const HC = "c".repeat(64);
+	const HE = "e".repeat(64);
+
+	function stubHour(overrides: { hashRows?: unknown[][]; earlierRows?: unknown[][] } = {}): { sql: string[] } {
+		return stubFetch((statement) => {
+			if (statement.includes("SELECT DISTINCT")) {
+				return records(["event_id"], overrides.earlierRows ?? [[E4]]);
+			}
+			if (statement.includes('FROM "agent_events"')) {
+				return records(
+					["id", "hash"],
+					overrides.hashRows ?? [
+						[E1, HA],
+						[E3, HC],
+						[E5, HE],
+						[E2, HB],
+					],
+				);
+			}
+			if (statement.includes('FROM "event_ingest"')) {
+				// Deliberately shuffled, with duplicates of E1 and E5, a
+				// backdated E3, and an E4 whose earlier record the lookback
+				// must catch. The order comes from TypeScript, never from here.
+				return records(
+					["event_id", "ingested_at", "event_ts"],
+					[
+						[E5, E5B, E5TS],
+						[E3, E3ING, E3TS],
+						[E1, TIE, E1TS],
+						[E2, TIE, E2TS],
+						[E5, E5A, E5TS],
+						[E1, TIE, E1TS],
+						[E4, E4LATE, E4TS],
+					],
+				);
+			}
+			return defaultReply(statement);
+		});
+	}
+
+	test("returns members in position order with duplicates collapsed and earlier-hour ids excluded", async () => {
+		stubHour();
+		const leaves = await new GreptimeClient(config).hourLeaves(H10);
+		expect(leaves.map((leaf) => leaf.event_id)).toEqual([E1, E2, E3, E5]);
+		expect(leaves[0]).toEqual({ event_id: E1, ingested_at: TIE, hash: HA });
+		expect(leaves[1]).toEqual({ event_id: E2, ingested_at: TIE, hash: HB });
+		expect(leaves[2]).toEqual({ event_id: E3, ingested_at: E3ING, hash: HC });
+		expect(leaves[3]).toEqual({ event_id: E5, ingested_at: E5A, hash: HE });
+	});
+
+	test("reads through three flat shapes that all pass assertAppendOnly", async () => {
+		const { sql } = stubHour();
+		await new GreptimeClient(config).hourLeaves(H10);
+		const member =
+			sql.find((s) => s.includes('FROM "event_ingest"') && !s.includes("DISTINCT")) ?? "";
+		expect(member).toContain(`"ingested_at" >= '${new Date(H10).toISOString()}'`);
+		expect(member).toContain(`"ingested_at" < '${new Date(H11).toISOString()}'`);
+		const lookback = sql.find((s) => s.includes("SELECT DISTINCT")) ?? "";
+		expect(lookback).toContain(`"ingested_at" < '${new Date(H10).toISOString()}'`);
+		expect(lookback).toContain("IN (");
+		const hashes = sql.find((s) => s.includes('FROM "agent_events"')) ?? "";
+		expect(hashes).toContain('"ts" >=');
+		expect(hashes).toContain('"ts" <=');
+		expect(hashes).toContain('"id" IN (');
+		for (const statement of sql) assertAppendOnly(statement);
+	});
+
+	test("throws naming the event when a member has no event row", async () => {
+		stubHour({ hashRows: [[E1, HA], [E2, HB], [E5, HE]] });
+		await expect(new GreptimeClient(config).hourLeaves(H10)).rejects.toThrow(E3);
+	});
+
+	test("throws naming the event on a hash that is not 64 lowercase hex", async () => {
+		stubHour({ hashRows: [[E1, HA], [E2, "zz"], [E3, HC], [E5, HE]] });
+		await expect(new GreptimeClient(config).hourLeaves(H10)).rejects.toThrow(E2);
+	});
+
+	test("throws naming the event on two stored hashes for one id", async () => {
+		stubHour({ hashRows: [[E1, HA], [E1, HB], [E2, HB], [E3, HC], [E5, HE]] });
+		await expect(new GreptimeClient(config).hourLeaves(H10)).rejects.toThrow(E1);
+	});
+
+	test("an empty hour reads nothing further and returns no leaves", async () => {
+		const { sql } = stubFetch((statement) =>
+			statement.includes('FROM "event_ingest"')
+				? records(["event_id", "ingested_at", "event_ts"], [])
+				: defaultReply(statement),
+		);
+		const leaves = await new GreptimeClient(config).hourLeaves(H10);
+		expect(leaves).toEqual([]);
+		expect(sql).toHaveLength(1);
+	});
+
+	test("batches the lookback and the hash lookup at 500 ids", async () => {
+		const ids = Array.from({ length: 501 }, (_, i) => `evt_batch_${String(i).padStart(4, "0")}`);
+		const { sql } = stubFetch((statement) => {
+			if (statement.includes("SELECT DISTINCT")) return records(["event_id"], []);
+			if (statement.includes('FROM "agent_events"')) {
+				const wanted = ids.filter((id) => statement.includes(`'${id}'`));
+				return records(
+					["id", "hash"],
+					wanted.map((id) => [id, ids.indexOf(id).toString(16).padStart(64, "0")]),
+				);
+			}
+			if (statement.includes('FROM "event_ingest"')) {
+				return records(
+					["event_id", "ingested_at", "event_ts"],
+					ids.map((id, i) => [id, H10 + i, H10 + i]),
+				);
+			}
+			return defaultReply(statement);
+		});
+		const leaves = await new GreptimeClient(config).hourLeaves(H10);
+		expect(leaves).toHaveLength(501);
+		expect(leaves[0]?.event_id).toBe(ids[0]);
+		expect(leaves[500]?.event_id).toBe(ids[500]);
+		expect(sql.filter((s) => s.includes("SELECT DISTINCT"))).toHaveLength(2);
+		expect(sql.filter((s) => s.includes('FROM "agent_events"'))).toHaveLength(2);
+	});
+});
