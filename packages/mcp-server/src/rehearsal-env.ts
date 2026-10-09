@@ -12,6 +12,7 @@
  * added. The parent environment is never spread, the deployment env file is
  * never read, and every store URL must be loopback before it is emitted.
  */
+import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -81,6 +82,38 @@ export interface BuildRehearsalEnvInput {
 	parentEnv: Record<string, string | undefined>;
 	/** The skills fixture's server settings, when the instance was started with `--skills-fixture`. */
 	skillsFixture?: Record<string, string> | null;
+	/**
+	 * Opt-in tracker fakes for the claim-mirror rehearsal (Phase 23): every
+	 * URL must be loopback, and the keys are random scratch, never the host's
+	 * `LINEAR_API_KEY`/`NOTION_API_KEY` (the allowlist above never forwards
+	 * those). Absent by default; existing rehearsals behave unchanged.
+	 */
+	trackers?: TrackerBlockInput | null;
+}
+
+/** Loopback tracker endpoints plus scratch keys, for one mirror rehearsal. */
+export interface TrackerBlockInput {
+	hermesLinearUrl: string;
+	linearApiUrl: string;
+	notionApiUrl: string;
+}
+
+/**
+ * The opt-in tracker block: loopback-guarded fake endpoints plus random
+ * scratch keys. The host's tracker keys never reach the output — the builder
+ * never reads them, and the values here are generated per call.
+ */
+function trackerBlock(trackers: TrackerBlockInput): Record<string, string> {
+	assertLoopback(trackers.hermesLinearUrl, "HERMES_LINEAR_URL");
+	assertLoopback(trackers.linearApiUrl, "LINEAR_API_URL");
+	assertLoopback(trackers.notionApiUrl, "NOTION_API_URL");
+	return {
+		HERMES_LINEAR_URL: trackers.hermesLinearUrl,
+		LINEAR_API_URL: trackers.linearApiUrl,
+		NOTION_API_URL: trackers.notionApiUrl,
+		LINEAR_API_KEY: `rh-linear-${randomBytes(16).toString("hex")}`,
+		NOTION_API_KEY: `rh-notion-${randomBytes(16).toString("hex")}`,
+	};
 }
 
 /** A fixture path value must be absolute and inside the run directory. */
@@ -243,6 +276,7 @@ export function buildRehearsalEnv(input: BuildRehearsalEnvInput): Record<string,
 		mkdirSync(home, { recursive: true, mode: 0o700 });
 		env.HOME = home;
 	}
+	if (input.trackers) Object.assign(env, trackerBlock(input.trackers));
 	return env;
 }
 

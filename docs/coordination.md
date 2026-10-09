@@ -318,11 +318,43 @@ should not be able to block an agent that knows better, and the index is a cache
 — refusing a claim on a stale edge would be the worst of both. `drift_scan`
 reports a held node whose dependency is not complete, and the agent decides.
 
-**Not done:** mirroring these edges *into* Linear. There is no Linear client in
-this repo yet — `LINEAR_API_KEY` is read by config and used by nothing — so it
-is neither cheap nor already patterned, which is what the work order made it
-conditional on. The index side is here and the write-back is a separate piece of
-work.
+## Tracker mirror
+
+Linear and Notion show who holds each node as its lease changes, and only
+hermes-linear-connector's Definition-of-Done gate can mark an issue Done.
+The mirror is told each final lease decision — it never decides ownership —
+runs awaited inside the tool call, serializes per node, never throws, and a
+failure becomes one `mirror.failed` warning per failed target without
+rolling the lease back. It never sees a lease id. A successful mirror emits
+nothing; the Linear comment is its trail.
+
+Claims move the issue to the team's first `started` state, set
+`agent:<surface>`, remove every `dispatch:*` and every other `agent:*`, and
+post one exact-text `Claimed by` comment per session; a steal moves the
+label to the new holder. Releases, expiries and forces set the first
+`unstarted` state and remove every `agent:*` with no comment — Linear's own
+history shows the change. Heartbeats never reach a tracker. Notion sets
+`Agent` and mirrors `Linear State` only when the Linear step succeeded.
+
+`graph_complete` on a Linear-linked node needs `dod` evidence (`summary`,
+`tests_pass`): without it the node parks at `started_review` with the lease
+held (`dod-required`), and the connector is never called. With it the node
+is fenced to `started_review`, mirrored to In Review, and `POSTed` to the
+connector's `/v1/complete-issue`; only its explicit `completed: true`
+approves, and the release note carries `payload.dod` (`tests_pass`,
+`review_pass`, `summary_chars` — never the summary text). Only the
+connector ever moves an issue to Done: `force` and other-state completions
+clear the mirror (`close`) and leave Linear's state alone. A swarm holder's
+completion is not gated and leaves only the `Completed by` comment — and a
+swarm surface taking over a lapsed non-swarm lease posts only its comment,
+so the evicted holder's label stays (pinned by test).
+
+`graph_find` resolves a Linear issue to its one registered node (ambiguity
+reported, never guessed) with the lease id nulled; `issue_get` returns the
+redacted, capped issue text framed as untrusted. Both are read-only, silent
+MCP tools. Rehearse every transition with `bun run smoke:mirror` against
+loopback fakes; the operator-gated live proof is
+`docs/runbooks/mirror-proof.md`.
 
 ## Running the proofs
 

@@ -457,3 +457,54 @@ describe("stores and consumer records", () => {
 		expect(run.stdout.toString()).toBe("http://127.0.0.1:17410|it's quoted");
 	});
 });
+
+describe("the opt-in tracker block", () => {
+	const TRACKERS = {
+		hermesLinearUrl: "http://127.0.0.1:18792",
+		linearApiUrl: "http://127.0.0.1:18793/graphql",
+		notionApiUrl: "http://127.0.0.1:18794",
+	};
+
+	test("off by default: no tracker keys without the block", () => {
+		const env = buildRehearsalEnv(scratchInput());
+		expect(env.LINEAR_API_KEY).toBeUndefined();
+		expect(env.NOTION_API_KEY).toBeUndefined();
+		expect(env.HERMES_LINEAR_URL).toBeUndefined();
+		expect(env.LINEAR_API_URL).toBeUndefined();
+		expect(env.NOTION_API_URL).toBeUndefined();
+	});
+
+	test("loopback endpoints are emitted and load through the real loadConfig", () => {
+		const env = buildRehearsalEnv(scratchInput({ trackers: TRACKERS }));
+		const config = loadConfig(env);
+		expect(config.hermesLinearUrl).toBe("http://127.0.0.1:18792");
+		expect(config.linearApiUrl).toBe("http://127.0.0.1:18793/graphql");
+		expect(config.notionApiUrl).toBe("http://127.0.0.1:18794");
+		expect(config.linearApiKey).toMatch(/^rh-linear-/);
+		expect(config.notionApiKey).toMatch(/^rh-notion-/);
+	});
+
+	test("a non-loopback tracker URL is refused before any server starts", () => {
+		for (const key of ["hermesLinearUrl", "linearApiUrl", "notionApiUrl"] as const) {
+			expect(() =>
+				buildRehearsalEnv(scratchInput({ trackers: { ...TRACKERS, [key]: "https://api.linear.app/graphql" } })),
+			).toThrow(RehearsalEnvError);
+		}
+	});
+
+	test("scratch keys are random per build and never the host's", () => {
+		const hostLinear = `host-linear-${randomBytes(8).toString("hex")}`;
+		const hostNotion = `host-notion-${randomBytes(8).toString("hex")}`;
+		const parentEnv = { PATH: "/usr/bin:/bin", HOME: "/root", LINEAR_API_KEY: hostLinear, NOTION_API_KEY: hostNotion };
+		const first = buildRehearsalEnv(scratchInput({ parentEnv, trackers: TRACKERS }));
+		const second = buildRehearsalEnv(scratchInput({ parentEnv, trackers: TRACKERS }));
+		for (const env of [first, second]) {
+			expect(env.LINEAR_API_KEY).toMatch(/^rh-linear-/);
+			expect(env.NOTION_API_KEY).toMatch(/^rh-notion-/);
+			expect(env.LINEAR_API_KEY).not.toBe(hostLinear);
+			expect(env.NOTION_API_KEY).not.toBe(hostNotion);
+		}
+		expect(first.LINEAR_API_KEY).not.toBe(second.LINEAR_API_KEY);
+		expect(first.NOTION_API_KEY).not.toBe(second.NOTION_API_KEY);
+	});
+});

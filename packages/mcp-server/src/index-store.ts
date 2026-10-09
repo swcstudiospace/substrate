@@ -737,6 +737,7 @@ export class IndexStore implements MemoryStore {
 			with expiring as (
 			select graph_id, node_id, linear_issue_id, linear_identifier, notion_page,
 			       claimed_by, claim_session, lease_id, lease_epoch,
+			       lease_expires_at, lease_heartbeat_at
 				from graph_nodes
 				where claimed_by is not null
 				  and coalesce(lease_expires_at, claimed_at + make_interval(secs => ${DEFAULT_LEASE_TTL_SECONDS})) <= now()
