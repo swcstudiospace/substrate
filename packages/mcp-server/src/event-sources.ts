@@ -305,12 +305,12 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 		sample: () => ({
 			surface: "claude-code",
 			kind: "tool.call",
-			summary: "desktop_run screenshot ok (120ms)",
-			session_id: "sess-p17-desktop",
+			summary: "desktop screenshot ok",
+			session_id: "desktop:dr-20261008T000000Z-abc123",
 			payload: {
 				tool: "desktop_run",
 				action: "screenshot",
-				run_id: "run-p17-1",
+				run_id: "dr-20261008T000000Z-abc123",
 				i: 0,
 				ok: true,
 				ms: 120,

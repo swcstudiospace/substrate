@@ -42,6 +42,12 @@ These apply to every source:
   desktop text (length plus sha256), screenshots (sha256 plus dimensions,
   never bytes), teachables and skills (`content_sha256`), docs pages
   (`content_sha256`, source URL).
+- **Desktop action payloads (`desktop.action`)** name hashes, never values:
+  `type` carries `text_len` plus `text_sha256`; `screenshot` carries `sha256`
+  plus `width` and `height`; `click` carries `x`, `y`, `button`, `double`;
+  `key` carries `keys` verbatim only for modifier chords and fixed
+  non-printing keys, otherwise `keys_len` plus `keys_sha256`. The run id and
+  the active-window title travel in the tool reply, never in the event.
 - **`repo` is set only where the event is work in that repo.** The brief
   lists recent actions per repo, so any periodic event carrying `repo` would
   crowd a repo's brief. No periodic row carries `repo`.
