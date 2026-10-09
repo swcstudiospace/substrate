@@ -516,14 +516,22 @@ describe("skill api-key-lower keeps placeholders and redacts real values (D18-08
 			findings: [],
 		});
 	});
-	test("a private-tag block holding a GitHub token reports the github finding", () => {
+	test("a private-tag block holding a GitHub token goes as one block and still reports the github finding", () => {
 		const token = "ghp_" + rnd(ALNUM, 36);
 		const block = "<" + "private>deploy with " + token + " inside</" + "private>";
 		const out = redactSkillContent(block);
+		expect(out.text).toBe(REDACTED);
+		expect(out.redactions).toEqual([{ line: 1, rule: "private-tag" }]);
 		expect(out.findings).toEqual([{ line: 1, rule: "github" }]);
-		expect(out.redactions).toEqual([]);
-		expect(out.text).toBe("<" + "private>deploy with " + REDACTED + " inside</" + "private>");
 		expect(JSON.stringify(out)).not.toContain(token);
+	});
+	test("a private-tag block holding an allowed jwt goes as one block with no inner hit", () => {
+		const block = "<" + "private>the db root pass is hunter2 and " + SKILL_JWT + " too</" + "private>";
+		const out = redactSkillContent(block, { allowDocExamples: new Set(["jwt"] as const) });
+		expect(out.text).toBe(REDACTED);
+		expect(out.redactions).toEqual([{ line: 1, rule: "private-tag" }]);
+		expect(out.findings).toEqual([]);
+		expect(JSON.stringify(out)).not.toContain(SKILL_JWT_LAST);
 	});
 });
 describe("skill pk-rk needs a digit in the tail (D18-21)", () => {

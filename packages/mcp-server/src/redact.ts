@@ -286,7 +286,7 @@ interface Claim {
 	start: number;
 	end: number;
 	rule: SkillRedactionRule;
-	/** Absent when the value is a placeholder: the span is claimed but left as written. */
+	/** Absent for kept placeholders and for finding-only hits inside a private block. */
 	replace?: { start: number; end: number; with: string };
 	kind: "redaction" | "finding" | "kept";
 }
@@ -296,7 +296,20 @@ export function redactSkillContent(
 	opts: SkillRedactionOptions = {},
 ): { text: string; redactions: SkillRedactionHit[]; findings: SkillRedactionHit[] } {
 	const claims: Claim[] = [];
+	// `<private>` blocks own their whole span: claim them before any inner
+	// shape can, so block prose never survives beside an inner hit (WR-01).
+	const privateEntry = SKILL_RULES.find((entry) => entry.rule === "private-tag")!;
+	const privateSpans: Array<{ start: number; end: number }> = [];
+	for (const match of text.matchAll(privateEntry.pattern)) {
+		const whole = match.indices?.[0];
+		if (!whole) continue;
+		const [start, end] = whole;
+		if (privateSpans.some((span) => start < span.end && span.start < end)) continue;
+		privateSpans.push({ start, end });
+		claims.push({ start, end, rule: "private-tag", replace: { start, end, with: privateEntry.replacement }, kind: "redaction" });
+	}
 	for (const { rule, pattern, value, replacement } of SKILL_RULES) {
+		if (rule === "private-tag") continue;
 		const highConfidence = SKILL_HIGH_CONFIDENCE_RULES.includes(rule);
 		for (const match of text.matchAll(pattern)) {
 			const whole = match.indices?.[0];
@@ -304,7 +317,17 @@ export function redactSkillContent(
 			const captured = match[value];
 			if (!whole || !span || captured === undefined) continue;
 			const [start, end] = whole;
-			if (claims.some((claim) => start < claim.end && claim.start < end)) continue;
+			if (claims.some((claim) => start < claim.end && claim.start < end)) {
+				// A high-confidence shape fully inside a private block is still
+				// reported, as a finding with no replacement of its own: the
+				// block redaction already removes it (WR-01). An allowed doc
+				// example needs no extra hit; the block covers it.
+				if (highConfidence && privateSpans.some((span) => span.start <= start && end <= span.end)) {
+					const allowed = (rule === "pem" || rule === "jwt") && opts.allowDocExamples?.has(rule) === true;
+					if (!allowed) claims.push({ start, end, rule, kind: "finding" });
+				}
+				continue;
+			}
 			if (!highConfidence && isPlaceholder(captured)) {
 				claims.push({ start, end, rule, kind: "kept" });
 				continue;
@@ -327,10 +350,11 @@ export function redactSkillContent(
 	let line = 1;
 	let counted = 0;
 	for (const claim of claims) {
-		if (claim.kind === "kept" || !claim.replace) continue;
+		if (claim.kind === "kept") continue;
 		for (let i = text.indexOf("\n", counted); i !== -1 && i < claim.start; i = text.indexOf("\n", i + 1)) line++;
 		counted = claim.start;
 		(claim.kind === "finding" ? findings : redactions).push({ line, rule: claim.rule });
+		if (!claim.replace) continue;
 		out += text.slice(copied, claim.replace.start) + claim.replace.with;
 		copied = claim.replace.end;
 	}

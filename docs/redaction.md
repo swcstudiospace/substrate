@@ -18,7 +18,7 @@ reported skill family, which groups shapes that mean the same credential.
 
 | Event rule | Skill family | Shape |
 |------------|--------------|-------|
-| `private-tag` | `private-tag` | A `<private>…</private>` block, first so a key inside it goes as one block |
+| `private-tag` | `private-tag` | A `<private>…</private>` block, claimed first so a key inside it goes as one block; an inner high-confidence shape is still reported as a finding |
 | `pem` | `pem` | A PEM block |
 | `tailscale` | `tailscale` | A `tskey-` key |
 | `password` | `password` | A `password:` assignment |
