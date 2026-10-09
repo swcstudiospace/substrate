@@ -414,11 +414,17 @@ function readStartSeconds(pid: number): number | null {
 
 /** Local ports a pid listens on, from `ss`; null when ss cannot be read. */
 function readListeningPorts(pid: number): number[] | null {
-	const run = Bun.spawnSync(["ss", "-ltnpH"], {
-		stdout: "pipe",
-		stderr: "pipe",
-		timeout: DOCKER_TIMEOUT_MS,
-	});
+	let run: ReturnType<typeof Bun.spawnSync>;
+	try {
+		run = Bun.spawnSync(["ss", "-ltnpH"], {
+			stdout: "pipe",
+			stderr: "pipe",
+			timeout: DOCKER_TIMEOUT_MS,
+		});
+	} catch {
+		// A missing `ss` is an unverifiable pid, not a reason to signal it.
+		return null;
+	}
 	if (run.exitCode !== 0) return null;
 	const ports: number[] = [];
 	for (const line of run.stdout.toString().split("\n")) {
@@ -854,7 +860,15 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 	const prev = readState(statePath);
 	if (prev !== null && pidAlive(prev.pid)) {
 		const facts = readProcFacts(prev.pid);
-		if (facts !== null && mayStop(facts, prev) === null) {
+		// A missing `ss` (or any other unreadable /proc fact) used to fall
+		// through to removeLabelledContainers and delete a live twin's stores.
+		// Refuse before any container removal when the live pid cannot be checked.
+		if (facts === null) {
+			throw new RehearsalRefused(
+				`instance ${opts.name} has live pid ${prev.pid} that could not be verified; refusing to remove its stores`,
+			);
+		}
+		if (mayStop(facts, prev) === null) {
 			process.stderr.write(`[rehearsal] refused: instance ${opts.name} is already running (pid ${prev.pid}).\n`);
 			return 2;
 		}

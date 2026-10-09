@@ -368,6 +368,39 @@ describe("CLI refusals", () => {
 		expect(`${run.out}${run.err}`).not.toContain(SENTINEL);
 	});
 
+	test("up refuses a live pid it cannot verify before removing containers", () => {
+		const base = mkdtempSync(join(tmpdir(), "rh-live-unverified-"));
+		const fake = fakeDocker();
+		writeFileSync(
+			join(fake.bin, "ss"),
+			"#!/bin/sh\nexit 1\n",
+		);
+		chmodSync(join(fake.bin, "ss"), 0o755);
+		const name = "rh-live-unverified";
+		const runDir = join(base, "substrate-rehearsal", name);
+		mkdirSync(runDir, { recursive: true, mode: 0o700 });
+		writeFileSync(
+			join(runDir, "state.json"),
+			JSON.stringify({ pid: process.pid, checkout: "/tmp/wt-checkout", startSeconds: 1 }),
+		);
+		try {
+			const run = runIsolated(["up", "--name", name, "--port", "0", "--anonymous"], {
+				XDG_RUNTIME_DIR: base,
+				PATH: fake.bin,
+				DOCKER_HOST: "unix:///nonexistent.sock",
+				DOCKER_CONTEXT: "",
+			});
+			expect(run.code).toBe(2);
+			expect(run.err).toContain("could not be verified");
+			expect(run.err).toContain(String(process.pid));
+			expect(dockerCalls(fake.log)).toBe("");
+			expect(`${run.out}${run.err}`).not.toContain(SENTINEL);
+		} finally {
+			rmSync(base, { recursive: true, force: true });
+			rmSync(fake.dir, { recursive: true, force: true });
+		}
+	});
+
 	test("a swarm --operator exits 2 without touching Docker", () => {
 		const run = runCli("up", "--name", "rh-refuse-op", "--operator", "swarm-a05-be");
 		expect(run.code).toBe(2);

@@ -1,8 +1,14 @@
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	diffStability,
 	parityVerdict,
 	parseCgroup,
+	releaseAncestryOnRemoteMain,
+	releaseDirFromLink,
 	parseReflogTime,
 	parseSsListeners,
 	parseSystemctlShow,
@@ -23,6 +29,10 @@ function facts(over: Partial<ParityFacts> = {}): ParityFacts {
 		cgroup: "0::/system.slice/substrate-mcp.service",
 		procCwd: "/root/src/repos/agent-substrate",
 		workingDirectory: "/root/src/repos/agent-substrate",
+		pinned: false,
+		releaseSha: null,
+		releaseDir: null,
+		releaseOnMain: null,
 		headMoveEpoch: 1791469658,
 		dirtyPaths: [],
 		originDiffPaths: [],
@@ -194,10 +204,133 @@ describe("parityVerdict", () => {
 		expect(parityVerdict(facts(), { expectRestarts: 0, expectStart: 1791479652 }).pass).toBe(true);
 	});
 
+	test("a pinned release serves main even when the operator checkout is dirty", () => {
+		const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+		const verdict = parityVerdict(
+			facts({
+				pinned: true,
+				workingDirectory: "/opt/agent-substrate/current",
+				procCwd: `/opt/agent-substrate/releases/${sha}`,
+				releaseDir: `/opt/agent-substrate/releases/${sha}`,
+				releaseSha: sha,
+				releaseOnMain: true,
+				headMoveEpoch: null,
+				dirtyPaths: ["packages/mcp-server/src/server.ts"],
+				originDiffPaths: ["packages/mcp-server/src/index.ts"],
+			}),
+		);
+		expect(verdict.pass).toBe(true);
+	});
+
+	test("a pinned release fails when the process is still in the checkout", () => {
+		const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+		const verdict = parityVerdict(
+			facts({
+				pinned: true,
+				workingDirectory: "/opt/agent-substrate/current",
+				procCwd: "/root/src/repos/agent-substrate",
+				releaseDir: `/opt/agent-substrate/releases/${sha}`,
+				releaseSha: sha,
+				releaseOnMain: true,
+			}),
+		);
+		expect(verdict.pass).toBe(false);
+		expect(verdict.failures.join("\n")).toContain("pinned release");
+	});
+
+	test("a pinned release fails when its commit is not on origin/main", () => {
+		const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+		const verdict = parityVerdict(
+			facts({
+				pinned: true,
+				workingDirectory: "/opt/agent-substrate/current",
+				procCwd: `/opt/agent-substrate/releases/${sha}`,
+				releaseDir: `/opt/agent-substrate/releases/${sha}`,
+				releaseSha: sha,
+				releaseOnMain: false,
+			}),
+		);
+		expect(verdict.pass).toBe(false);
+		expect(verdict.failures.join("\n")).toContain("not on origin/main");
+	});
+
 	test("collects every failing criterion at once", () => {
 		// The verdict reports the full list, not just the first failure.
 		const verdict = parityVerdict(facts({ activeState: "failed", healthzStatus: 503, dirtyPaths: ["bun.lock"] }));
 		expect(verdict.failures).toHaveLength(3);
+	});
+});
+
+describe("releaseAncestryOnRemoteMain", () => {
+	function git(cwd: string, args: string[]): string {
+		const result = spawnSync("git", ["-c", "commit.gpgsign=false", "-c", "core.fsmonitor=false", ...args], {
+			cwd,
+			encoding: "utf8",
+			env: {
+				...process.env,
+				GIT_AUTHOR_NAME: "parity-test",
+				GIT_AUTHOR_EMAIL: "parity-test@example.com",
+				GIT_COMMITTER_NAME: "parity-test",
+				GIT_COMMITTER_EMAIL: "parity-test@example.com",
+			},
+		});
+		if (result.status !== 0) {
+			throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
+		}
+		return (result.stdout ?? "").trim();
+	}
+
+	test("uses the ls-remote tip when the cached origin/main ref is older", () => {
+		const root = mkdtempSync(join(tmpdir(), "parity-ancestry-"));
+		try {
+			const remote = join(root, "remote.git");
+			const repo = join(root, "repo");
+			git(root, ["init", "--bare", "-b", "main", remote]);
+			git(root, ["init", "-b", "main", repo]);
+			writeFileSync(join(repo, "f"), "1\n");
+			git(repo, ["add", "f"]);
+			git(repo, ["commit", "-m", "c1"]);
+			const c1 = git(repo, ["rev-parse", "HEAD"]);
+			writeFileSync(join(repo, "f"), "2\n");
+			git(repo, ["commit", "-am", "c2"]);
+			const c2 = git(repo, ["rev-parse", "HEAD"]);
+			git(repo, ["remote", "add", "origin", remote]);
+			git(repo, ["push", "origin", "HEAD:refs/heads/main"]);
+			git(repo, ["update-ref", "refs/remotes/origin/main", c1]);
+			const side = git(repo, ["commit-tree", `${c1}^{tree}`, "-m", "side"]);
+
+			const onRemote = releaseAncestryOnRemoteMain(repo, c2);
+			expect(onRemote.originSha).toBe(c2);
+			expect(onRemote.originShaKnown).toBe(true);
+			expect(onRemote.releaseOnMain).toBe(true);
+			expect(git(repo, ["rev-parse", "refs/remotes/origin/main"])).toBe(c1);
+
+			const offRemote = releaseAncestryOnRemoteMain(repo, side);
+			expect(offRemote.releaseOnMain).toBe(false);
+
+			const other = join(root, "other");
+			git(root, ["clone", remote, other]);
+			writeFileSync(join(other, "f"), "3\n");
+			git(other, ["commit", "-am", "c3"]);
+			git(other, ["push", "origin", "HEAD:refs/heads/main"]);
+			const c3 = git(other, ["rev-parse", "HEAD"]);
+			const missing = releaseAncestryOnRemoteMain(repo, c2);
+			expect(missing.originSha).toBe(c3);
+			expect(missing.originShaKnown).toBe(false);
+			expect(missing.releaseOnMain).toBeNull();
+			expect(git(repo, ["rev-parse", "refs/remotes/origin/main"])).toBe(c1);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("releaseDirFromLink", () => {
+	test("accepts a relative releases target and refuses one that escapes", () => {
+		const sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+		expect(releaseDirFromLink(`releases/${sha}`)).toEqual({ dir: `/opt/agent-substrate/releases/${sha}`, sha });
+		expect(releaseDirFromLink("../etc")).toBeNull();
+		expect(releaseDirFromLink("/root/src/repos/agent-substrate")).toBeNull();
 	});
 });
 

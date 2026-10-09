@@ -35,13 +35,28 @@ It checks, read-only:
 2. `ss -ltnp`: the pid that owns `127.0.0.1:7410` equals `MainPID`, and
    `/proc/<pid>/cgroup` is `system.slice/substrate-mcp.service`.
 3. `GET http://127.0.0.1:7410/healthz` returns 200.
-4. "From `main`" holds when all of these are true: `/proc/<pid>/cwd` is the
-   unit's `WorkingDirectory`; the process started after that checkout's last
-   HEAD move, read from the reflog; the checkout has no local modification
-   under the server's code paths (`packages/**`, `package.json`, `bun.lock`);
-   no commit between the checkout's HEAD and `origin/main` changes those
-   paths. Every git call runs with `--no-optional-locks` and never fetches,
-   pulls or checks out in the operator checkout.
+4. "From `main`" depends on `WorkingDirectory`.
+
+   When it is `/opt/agent-substrate/current` (the pinned release), the process
+   cwd is the resolved `releases/<sha>` directory, not the symlink and not
+   `/root/src/repos/agent-substrate`. The release tree is a git archive, so it
+   has no reflog and no dirty worktree. The check reads the symlink, requires
+   `/proc/<pid>/cwd` to be that release directory, and asks the operator repo
+   (`SUBSTRATE_REPO`, or `/root/src/repos/agent-substrate`) whether `<sha>` is
+   an ancestor of the commit `git ls-remote origin refs/heads/main` returns.
+   That lookup does not fetch and does not use the cached `origin/main` ref.
+   The returned commit must already be in the local object store. Dirt and
+   later commits in the operator checkout do not fail this mode: production
+   is not running from that checkout. `ConditionPathExists` on the unit is
+   the entry under `current`, which follows the symlink.
+
+   When `WorkingDirectory` is still the operator checkout, the older rule
+   holds: `/proc/<pid>/cwd` equals that directory; the process started after
+   the checkout's last HEAD move; `packages/**`, `package.json` and `bun.lock`
+   are clean; no commit between HEAD and `origin/main` changes those paths.
+
+   Every git call runs with `--no-optional-locks` and never fetches, pulls or
+   checks out.
 5. Warnings, never failures: a diff between the installed unit file and
    `infra/vps/substrate-mcp.service`, and an inventory of every other
    `substrate-*` unit.
@@ -53,9 +68,9 @@ differ in three places:
 
 - **Port.** A twin never owns `7410`, `7411` or `6420` — `up` refuses them.
   Whatever owns `127.0.0.1:7410` is production or a stray, never a twin.
-- **Checkout.** A twin runs from the checkout its `state.json` records, which
-  is never the unit's `WorkingDirectory`. Production's cwd is the unit's
-  `WorkingDirectory`.
+- **Checkout.** A twin runs from the checkout its `state.json` records.
+  Production's `WorkingDirectory` is `/opt/agent-substrate/current`, and the
+  process cwd is the resolved `releases/<sha>` directory. A twin is neither.
 - **`state.json`.** A twin has one, in its run directory, naming its pid,
   ports and commit. A stray has none.
 
@@ -144,20 +159,50 @@ recorded here — never values.
 
 ## Operator step: installing the repo unit
 
-`infra/vps/substrate-mcp.service` on `main` is ahead of the installed unit:
-it carries the `StateDirectory=substrate` block that Phase 20's audit path
-relies on, and the approved `ConditionPathExists` guard on the server entry
-point. The repo file has no effect until the operator installs it. Operator
-only, at the next approved restart:
+`infra/vps/substrate-mcp.service` on `main` runs from the pinned release.
+`WorkingDirectory` and `ConditionPathExists` both use
+`/opt/agent-substrate/current`, and the server settings live in the drop-in
+`infra/vps/substrate-mcp.service.d/10-environment.conf`
+(`EnvironmentFile=/etc/substrate/substrate.env`), not in the unit file.
+Copying only the service file and restarting it does not build `current`
+and does not install the drop-in. Follow the staged cutover in
+`infra/vps/README.md`. Operator only, in its own window:
 
 ```sh
-# back the installed unit up outside the repo, then install the repo file
+# 1. Build the first tree. This creates current and does not restart units.
+SUBSTRATE_RELEASE_RESTART=0 infra/vps/deploy-release.sh <tag>
+
+# 2. Install both units the default deploy restarts, and their drop-ins.
+#    Back up anything already installed. collector-grok.env must exist
+#    before step 3 or that unit will not start. Names only: see
+#    infra/vps/README.md. Root-owned, mode 0600.
 cp /etc/systemd/system/substrate-mcp.service /root/substrate-mcp.service.bak-<date>
+cp /etc/systemd/system/substrate-collector-grok.service /root/substrate-collector-grok.service.bak-<date>
+install -d -m 0755 /etc/systemd/system/substrate-mcp.service.d
+install -d -m 0755 /etc/systemd/system/substrate-collector-grok.service.d
 cp infra/vps/substrate-mcp.service /etc/systemd/system/substrate-mcp.service
-systemctl daemon-reload
-systemctl restart substrate-mcp
+cp infra/vps/substrate-mcp.service.d/10-environment.conf \
+  /etc/systemd/system/substrate-mcp.service.d/10-environment.conf
+cp infra/vps/substrate-collector-grok.service /etc/systemd/system/substrate-collector-grok.service
+cp infra/vps/substrate-collector-grok.service.d/10-environment.conf \
+  /etc/systemd/system/substrate-collector-grok.service.d/10-environment.conf
+
+# 3. The collector env file must already exist (root-owned, mode 0600).
+#    Names only, listed in infra/vps/README.md. Then the health-checked
+#    deploy of the same tag. With SUBSTRATE_RELEASE_UNITS unset, the script
+#    daemon-reloads and restarts substrate-mcp and substrate-collector-grok,
+#    then polls /healthz. Do not restart again after it returns.
+test -f /etc/substrate/collector-grok.env
+infra/vps/deploy-release.sh <tag>
 bun run parity:check --json
 ```
+
+Step 3 is not MCP-only. The default unit list is both services, so installing
+only the MCP unit and then running `deploy-release.sh` restarts Grok on its
+old checkout unit, or starts it if it was stopped. Install both units and
+the collector env file first. Do not `systemctl restart` between step 2 and
+that deploy: a restart outside the script starts the new code without the
+health check.
 
 The new row goes in the evidence table above.
 
@@ -165,28 +210,55 @@ The new row goes in the evidence table above.
 
 Two rollbacks, both operator only:
 
-1. **`main` misbehaves in production.** Check out the last known-good commit
-   recorded in the header table in the operator checkout and run
-   `systemctl restart substrate-mcp`. That commit predates
-   `scripts/parity-check.ts`, so re-run the check from a retained newer
-   worktree or preserved copy that still has it (the check reads the unit's
-   `WorkingDirectory` wherever the script itself runs from):
+1. **The pinned release misbehaves.** Checking out a commit and restarting
+   `substrate-mcp` does not change the code the service runs: the unit's
+   `WorkingDirectory` is `/opt/agent-substrate/current`. Roll the symlink
+   back instead.
+
+   When `previous` exists, roll back both units the deploy restarted.
+   `SUBSTRATE_RELEASE_UNITS` stays unset, so this is the same pair:
+
+```sh
+infra/vps/deploy-release.sh rollback
+bun run parity:check --json
+```
+
+   The first successful publish has no `previous` symlink, so `rollback`
+   exits with `no previous release to roll back to`. Restore both unit files
+   from the commit before this change
+   (`WorkingDirectory=/root/src/repos/agent-substrate`, and
+   `EnvironmentFile=/etc/substrate/substrate.env` on both units), run
+   `systemctl daemon-reload`, and restart `substrate-mcp` and
+   `substrate-collector-grok`. They run the checkout again. Leave the release
+   directory in place; the restored units do not use it.
+
+   That older commit predates `scripts/parity-check.ts`, so re-run the check
+   from a retained newer worktree or preserved copy that still has it (the
+   check reads the unit's `WorkingDirectory` wherever the script itself runs
+   from):
 
 ```sh
 cd <newer-worktree> && bun run parity:check --json
 ```
 
    Rollback never starts the server from a user session, because that
-   recreates the stray process. After a real rollback a FAIL naming only
-   server-path drift from `origin/main` is expected: HEAD no longer matches
-   the remote by design.
-2. **The installed unit file goes wrong.** Restore the backup taken at
-   install time, `daemon-reload`, restart, re-run the check:
+   recreates the stray process. After `deploy-release.sh rollback`, the
+   process cwd is the previous release and that sha is an ancestor of the
+   `ls-remote` tip of `main`. After a first-cutover restore of the checkout
+   unit, a FAIL naming only server-path drift from `origin/main` is expected:
+   HEAD no longer matches the remote by design.
+2. **The installed unit file goes wrong.** Restore both backups taken at
+   install time and `daemon-reload`. If those restored units still use
+   `current`, run `deploy-release.sh rollback` (it restarts both default
+   units) instead of restarting MCP alone. If they are the pre-change
+   checkout units, restart `substrate-mcp` and `substrate-collector-grok`,
+   then re-run the check:
 
 ```sh
 cp /root/substrate-mcp.service.bak-<date> /etc/systemd/system/substrate-mcp.service
+cp /root/substrate-collector-grok.service.bak-<date> /etc/systemd/system/substrate-collector-grok.service
 systemctl daemon-reload
-systemctl restart substrate-mcp
+systemctl restart substrate-mcp substrate-collector-grok
 bun run parity:check --json
 ```
 

@@ -8,9 +8,14 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-EnvironmentFile=/etc/substrate/substrate.env
-WorkingDirectory=/root/src/repos/agent-substrate
-# Machine-specific: `command -v bun`.
+# This collector must not load /etc/substrate/substrate.env. Its drop-in
+# substrate-collector-grok.service.d/10-environment.conf points at
+# /etc/substrate/collector-grok.env (URL, bearer, sessions dir — names only
+# in infra/vps/README.md).
+WorkingDirectory=/opt/agent-substrate/current
+# Machine-specific: `command -v bun`. The binary is under /root/.local and
+# the default session logs are under /root/.grok, so the unit still runs as
+# root (no User=). See infra/vps/README.md.
 ExecStart=/root/.local/share/reflex/bun/bin/bun packages/collectors/src/grok.ts --watch
 Restart=always
 RestartSec=5
@@ -23,6 +28,9 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=substrate-collector-grok
 
+# ProtectHome=false remains because bun is under /root/.local and the Grok
+# session logs default to /root/.grok/sessions. WorkingDirectory is the
+# release tree, not the mutable checkout.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full

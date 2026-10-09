@@ -8,15 +8,19 @@ Wants=network-online.target
 # systemd ignores it under [Service].
 StartLimitIntervalSec=0
 # A missing entry point skips the start silently instead of crash-looping into
-# six-figure NRestarts. Machine-specific absolute path, like the bun path below.
-ConditionPathExists=/root/src/repos/agent-substrate/packages/mcp-server/src/index.ts
+# six-figure NRestarts. The path is the pinned release, not the checkout:
+# ConditionPathExists follows the current symlink.
+ConditionPathExists=/opt/agent-substrate/current/packages/mcp-server/src/index.ts
 
 [Service]
 Type=simple
-# Credentials only; nothing secret lives in the repo.
-EnvironmentFile=/etc/substrate/substrate.env
-WorkingDirectory=/root/src/repos/agent-substrate
-# Machine-specific: `command -v bun`. Adjust when deploying elsewhere.
+# Credentials only; nothing secret lives in the repo. The drop-in
+# substrate-mcp.service.d/10-environment.conf is the EnvironmentFile, so a
+# collector unit cannot inherit this server's file. See infra/vps/README.md.
+WorkingDirectory=/opt/agent-substrate/current
+# Machine-specific: `command -v bun`. The binary on this host is under
+# /root/.local, which is why the unit still runs as root (no User=) and why
+# ProtectHome=false stays. The code itself is the release at WorkingDirectory.
 ExecStart=/root/.local/share/reflex/bun/bin/bun packages/mcp-server/src/index.ts
 Restart=always
 RestartSec=3
@@ -34,6 +38,9 @@ StandardError=journal
 SyslogIdentifier=substrate-mcp
 
 # It listens on loopback and talks to Postgres and Greptime. Nothing else.
+# ProtectHome=false is the remaining exception: ExecStart's bun lives under
+# /root/.local, so ProtectHome=true would hide the interpreter. The mutable
+# checkout under /root/src/repos is not a reason for it anymore.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
