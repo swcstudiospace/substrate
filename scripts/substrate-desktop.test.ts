@@ -5,8 +5,8 @@
  * `openssl`, so this suite points PATH at a stub dir holding executable bash
  * stubs for exactly those three programs. Each stub appends its argv to
  * `$STUB_LOG` and answers from env knobs (`STUB_DF_AVAIL`, `STUB_IMAGE`,
- * `STUB_CONTAINER`), plus `1280 800` geometry for the getdisplaygeometry call.
- *
+ * `STUB_CONTAINER`, `STUB_ENDPOINT` for the `context inspect` locality probe),
+ * plus `1280 800` geometry for the getdisplaygeometry call.
  * Every spawn uses an explicit env (stub PATH, stub knobs,
  * `SUBSTRATE_DESKTOP_ENV_FILE` pointed into a temp dir) and never spreads
  * `process.env`, so no token reaches the script and a root run never writes
@@ -23,9 +23,18 @@ const GATE_BYTES = 10737418240;
 
 const DOCKER_STUB = String.raw`#!/usr/bin/env bash
 echo "docker $*" >>"$STUB_LOG"
-if [ -z "$STUB_IMAGE" ]; then STUB_IMAGE=present; fi
-if [ -z "$STUB_CONTAINER" ]; then STUB_CONTAINER=absent; fi
-case "$1 $2" in
+	if [ -z "$STUB_IMAGE" ]; then STUB_IMAGE=present; fi
+	if [ -z "$STUB_ENDPOINT" ]; then STUB_ENDPOINT=local; fi
+	if [ -z "$STUB_CONTAINER" ]; then STUB_CONTAINER=absent; fi
+	case "$1 $2" in
+	"context inspect")
+		case "$STUB_ENDPOINT" in
+		remote) echo "tcp://other-host:2375" ;;
+		broken) exit 1 ;;
+		empty) : ;;
+		*) echo "unix:///var/run/docker.sock" ;;
+		esac
+		;;
 "image inspect")
 	[ "$STUB_IMAGE" = "present" ]
 	;;
@@ -100,6 +109,7 @@ type Knobs = {
 	dfAvail?: string;
 	image?: "present" | "absent";
 	container?: ContainerKnob;
+	endpoint?: "local" | "remote" | "broken" | "empty";
 };
 
 interface Rig {
@@ -130,14 +140,15 @@ function baseEnv(rig: Rig, knobs: Knobs): Record<string, string> {
 		STUB_DF_AVAIL: knobs.dfAvail ?? "20000000000",
 		STUB_IMAGE: knobs.image ?? "present",
 		STUB_CONTAINER: knobs.container ?? "absent",
+		STUB_ENDPOINT: knobs.endpoint ?? "local",
 		SUBSTRATE_DESKTOP_ENV_FILE: rig.envFile,
 	};
 }
 
-function runScript(sub: string, knobs: Knobs = {}): RunResult {
+function runScript(sub: string, knobs: Knobs = {}, extraEnv: Record<string, string> = {}): RunResult {
 	const rig = makeRig(knobs);
 	const child = Bun.spawnSync(["bash", SCRIPT, sub], {
-		env: baseEnv(rig, knobs),
+		env: { ...baseEnv(rig, knobs), ...extraEnv },
 		stdout: "pipe",
 		stderr: "pipe",
 	});
@@ -233,6 +244,47 @@ describe("substrate-desktop.sh up", () => {
 	itRoot("accepts exactly 10 GiB free", () => {
 		const r = runScript("up", { dfAvail: String(GATE_BYTES) });
 		expect(r.code).toBe(0);
+		assertCleanArgv(r.log);
+	});
+
+	itRoot("refuses a remote context endpoint before run or start", () => {
+		const r = runScript("up", { endpoint: "remote" });
+		expect(r.code).not.toBe(0);
+		expect(r.err).toContain("refusing non-local docker endpoint");
+		expect(dockerLines(r.log).some((line) => line.startsWith("docker run "))).toBe(false);
+		expect(dockerLines(r.log).some((line) => line.startsWith("docker start "))).toBe(false);
+		assertCleanArgv(r.log);
+	});
+
+	itRoot("refuses a non-local DOCKER_HOST before run or start", () => {
+		const r = runScript("up", {}, { DOCKER_HOST: "tcp://other-host:2375" });
+		expect(r.code).not.toBe(0);
+		expect(r.err).toContain("refusing non-local DOCKER_HOST");
+		expect(dockerLines(r.log).some((line) => line.startsWith("docker run "))).toBe(false);
+		expect(dockerLines(r.log).some((line) => line.startsWith("docker start "))).toBe(false);
+		assertCleanArgv(r.log);
+	});
+
+	itRoot("refuses a non-local docker context before run or start", () => {
+		const r = runScript("up", {}, { DOCKER_CONTEXT: "remote-engine" });
+		expect(r.code).not.toBe(0);
+		expect(r.err).toContain("refusing non-local docker context");
+		expect(dockerLines(r.log).some((line) => line.startsWith("docker run "))).toBe(false);
+		expect(dockerLines(r.log).some((line) => line.startsWith("docker start "))).toBe(false);
+		assertCleanArgv(r.log);
+	});
+
+	itRoot("a failed endpoint probe proceeds; later calls fail truthfully", () => {
+		const r = runScript("up", { endpoint: "broken" });
+		expect(r.code).toBe(0);
+		assertCleanArgv(r.log);
+	});
+
+	itRoot("refuses an unreadable endpoint without locality proof", () => {
+		const r = runScript("up", { endpoint: "empty" });
+		expect(r.code).not.toBe(0);
+		expect(r.err).toContain("without locality proof");
+		expect(dockerLines(r.log).some((line) => line.startsWith("docker run "))).toBe(false);
 		assertCleanArgv(r.log);
 	});
 

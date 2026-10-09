@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # D-12/D-18 substrate-desktop: a dedicated linuxserver/webtop:ubuntu-xfce container that
 # substrate-mcp's desktop_run drives with `docker exec -e DISPLAY=:1 substrate-desktop xdotool|xwd`.
-# Nothing is pulled: the image must already be local (`--pull never`), and `up` runs the disk gate
-# (df --output=avail -B1 / >= 10737418240) first.
+# Nothing is pulled: the image must already be local (`--pull never`), `up` runs the disk gate
+# (df --output=avail -B1 / >= 10737418240) first, then refuses a non-local docker endpoint
+# (DOCKER_HOST, saved context or effective endpoint) before the first docker call.
 #
 #   sudo infra/desktop/substrate-desktop.sh up      # idempotent: create, start if stopped, wait for 1280x800
 #   sudo infra/desktop/substrate-desktop.sh status  # key=value lines
@@ -66,11 +67,38 @@ ensure_env_file() {
 	mv "$tmp" "$ENV_FILE"
 }
 
+# Locality gate: a DOCKER_HOST or saved context selecting a remote engine would
+# create or start substrate-desktop on the wrong host while the disk gate checks
+# this machine. Refuse before the first docker call, mirroring the rehearsal
+# harness's refuseDockerEnv/refuseDockerEndpoint rules. An inspect failure
+# proves nothing and proceeds: the client is broken, so every later docker call
+# fails with its own truthful error and nothing remote can happen.
+require_local_docker() {
+	local host="${DOCKER_HOST:-}" context="${DOCKER_CONTEXT:-}" endpoint
+	case "$host" in
+		""|unix://*) ;;
+		*) die "refusing non-local DOCKER_HOST $host" ;;
+	esac
+	case "$context" in
+		""|default|desktop-linux) ;;
+		*) die "refusing non-local docker context $context" ;;
+	esac
+	if endpoint=$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null); then
+		endpoint=${endpoint%%$'\n'*}
+		case "$endpoint" in
+			unix://*) ;;
+			"") die "could not read the docker endpoint; refusing without locality proof" ;;
+			*) die "refusing non-local docker endpoint $endpoint" ;;
+		esac
+	fi
+}
+
 cmd_up() {
 	require_root
 	local avail
 	avail=$(df --output=avail -B1 / | tail -n 1 | tr -d ' ')
 	[ "$avail" -ge "$MIN_FREE_BYTES" ] || die "only $avail bytes free on /; need $MIN_FREE_BYTES"
+	require_local_docker
 	docker image inspect "$IMAGE" >/dev/null 2>&1 || die "image not local; refusing to pull $IMAGE"
 	ensure_env_file
 
