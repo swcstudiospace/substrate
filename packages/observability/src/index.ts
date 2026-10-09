@@ -73,10 +73,13 @@ export {
 
 export {
 	type ClaimOutcome,
+	type EventRefusalReason,
 	type Usage,
 	CLAIM_OUTCOMES,
+	EVENT_REFUSAL_REASONS,
 	METRIC,
 	SubstrateInstruments,
+	classifyEventRefusal,
 	extractUsage,
 } from "./instruments.ts";
 

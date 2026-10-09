@@ -25,7 +25,35 @@ export const METRIC = {
 	quarantines: "substrate.quarantine.total",
 	auditAppends: "substrate.audit.appends",
 	spansDropped: "substrate.trace.spans_dropped",
+	eventsRefused: "substrate.events.refused",
+	anonymousRequests: "substrate.anonymous.requests",
 } as const;
+
+/** Why a `POST /events` was refused with 4xx. One series each, so the reason stays bounded. */
+export const EVENT_REFUSAL_REASONS = ["auth", "validation", "attribution", "graph_id"] as const;
+export type EventRefusalReason = (typeof EVENT_REFUSAL_REASONS)[number];
+
+/**
+ * The only 400 whose reason is `graph_id`. Matched whole, because the message
+ * of every other 400 can quote a caller-supplied value — `unknown kind: graph_id`
+ * is a bad kind, not a bad graph id.
+ */
+const GRAPH_ID_REFUSAL = "graph_id must be a string";
+
+/**
+ * Which refusal bucket a `POST /events` 4xx belongs in.
+ *
+ * `graph_id` is its own bucket rather than validation: a bad graph id is the
+ * checklist Phase 19 reads, and folding it into validation would hide it.
+ * Anything that is not a 4xx refusal of the post — a 503 from the ledger, a
+ * 200 — is not a refusal and returns null.
+ */
+export function classifyEventRefusal(status: number, error: string | undefined): EventRefusalReason | null {
+	if (status === 401) return "auth";
+	if (status === 403) return "attribution";
+	if (status !== 400) return null;
+	return error === GRAPH_ID_REFUSAL ? "graph_id" : "validation";
+}
 
 /** Why a claim ended the way it did. Drives both the lease-steal and quarantine SLOs. */
 export const CLAIM_OUTCOMES = ["granted", "contended", "stolen", "revoked"] as const;
@@ -107,6 +135,8 @@ export class SubstrateInstruments {
 	readonly quarantines: Counter;
 	readonly auditAppends: Counter;
 	readonly spansDropped: Counter;
+	readonly eventsRefused: Counter;
+	readonly anonymousRequests: Counter;
 
 	constructor(registry: MetricRegistry = new MetricRegistry()) {
 		this.registry = registry;
@@ -164,6 +194,14 @@ export class SubstrateInstruments {
 		this.spansDropped = registry.counter(METRIC.spansDropped, {
 			description: "Spans discarded because the export buffer was full.",
 			unit: "{span}",
+		});
+		this.eventsRefused = registry.counter(METRIC.eventsRefused, {
+			description: "POST /events refusals by reason (auth|validation|attribution|graph_id).",
+			unit: "{event}",
+		});
+		this.anonymousRequests = registry.counter(METRIC.anonymousRequests, {
+			description: "Untokened requests accepted while anonymous mode is on, by route and claimed surface.",
+			unit: "{request}",
 		});
 	}
 
@@ -244,5 +282,24 @@ export class SubstrateInstruments {
 
 	recordDroppedSpans(count: number): void {
 		if (count > 0) this.spansDropped.add(count);
+	}
+
+	/** One refused `POST /events`. The reason is the closed set in `EVENT_REFUSAL_REASONS`. */
+	recordEventRefusal(sample: { reason: EventRefusalReason }): void {
+		this.eventsRefused.add(1, { reason: sample.reason });
+	}
+
+	/**
+	 * One untokened caller that was accepted.
+	 *
+	 * `claimedSurface` is what the body named, or `none` when it named nobody —
+	 * not the surface the server may later default — so the hourly checklist shows
+	 * who still needs a token.
+	 */
+	recordAnonymous(sample: { route: string; claimedSurface: string }): void {
+		this.anonymousRequests.add(
+			1,
+			cleanAttributes({ route: sample.route, claimed_surface: sample.claimedSurface }),
+		);
 	}
 }

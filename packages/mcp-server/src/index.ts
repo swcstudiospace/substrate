@@ -36,9 +36,14 @@ server.listen(config.port, config.host, () => {
 	const stores = [migration.index ? "index" : null, migration.greptime ? "greptime" : null]
 		.filter(Boolean)
 		.join(" + ");
+	const identity = config.allowAnonymous
+		? config.tokens.size > 0
+			? `anonymous bridge, ${config.tokens.size} tokens`
+			: "anonymous"
+		: `${config.tokens.size} tokens`;
 	process.stdout.write(
 		`[substrate] listening on http://${config.host}:${config.port} ` +
-			`(${stores || "no stores"}, ${config.allowAnonymous ? "anonymous" : `${config.tokens.size} tokens`}, ` +
+			`(${stores || "no stores"}, ${identity}, ` +
 			`audit ${observability.audit.durable ? observability.audit.path : "in memory"}, ` +
 			`claims ${substrate.requireRecordedClaims ? "fail-closed" : "fail-open"})\n`,
 	);
