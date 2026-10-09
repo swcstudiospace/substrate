@@ -6,7 +6,9 @@
  * rehearsal harness (`bun run rehearsal up --name <instance>`). It posts one
  * sample per `EVENT_SOURCES` row to `POST /events` and requires `202` with
  * `stored: true` for each with zero refusals, then reads them back through
- * `POST /events/query` to confirm one stored row per source.
+ * `POST /events/query` and matches each row to its post by wire id,
+ * comparing session, kind, surface, `payload.action` and `payload.runtime`
+ * with the sent sample — a count alone would pass the wrong events.
  *
  * The twin's URL and bearer come only from the named instance's
  * `consumer.env` (`${XDG_RUNTIME_DIR:-/tmp}/substrate-rehearsal/<name>/`);
@@ -134,7 +136,83 @@ async function postEvent(base: string, bearer: string, body: Record<string, unkn
 	}
 }
 
-async function readBack(base: string, bearer: string, tag: string): Promise<number | null> {
+/** What the smoke posted for one source: the wire id plus the sent fields. */
+export interface ReadBackExpectation {
+	id: string;
+	postedId: string | null;
+	session: string;
+	kind: string;
+	surface: string;
+	action: unknown;
+	runtime: unknown;
+}
+
+/**
+ * The sent fields for one sample: kind, surface and the payload's action
+ * and runtime discriminators, with the run's session and the wire id from
+ * `POST /events` so the read-back row can be matched by id.
+ */
+export function expectationFor(
+	id: string,
+	sample: { kind: string; surface: string; payload?: Record<string, unknown> },
+	session: string,
+	postedId: string | null,
+): ReadBackExpectation {
+	const payload = sample.payload ?? {};
+	return {
+		id,
+		postedId,
+		session,
+		kind: sample.kind,
+		surface: sample.surface,
+		action: payload["action"] ?? null,
+		runtime: payload["runtime"] ?? null,
+	};
+}
+
+/** A read-back row: only the fields the smoke compares. */
+export interface ReadBackRow {
+	id: unknown;
+	session_id: unknown;
+	kind: unknown;
+	surface: unknown;
+	payload?: unknown;
+}
+
+/**
+ * Match each posted event to its read-back row by wire id and compare the
+ * row's session, kind, surface, `payload.action` and `payload.runtime`
+ * with the sent sample. A count alone would pass the wrong events, so every
+ * deviation is a mismatch line.
+ */
+export function verifyReadBack(expected: readonly ReadBackExpectation[], rows: readonly ReadBackRow[]): string[] {
+	const mismatches: string[] = [];
+	for (const want of expected) {
+		if (want.postedId === null) {
+			mismatches.push(`${want.id}: no wire id from POST /events`);
+			continue;
+		}
+		const got = rows.find((row) => row.id === want.postedId);
+		if (!got) {
+			mismatches.push(`${want.id}: wire id ${want.postedId} missing from read-back`);
+			continue;
+		}
+		const payload = (got.payload ?? {}) as Record<string, unknown>;
+		const checks: Array<[field: string, actual: unknown, sent: unknown]> = [
+			["session", got.session_id, want.session],
+			["kind", got.kind, want.kind],
+			["surface", got.surface, want.surface],
+			["payload.action", payload["action"] ?? null, want.action],
+			["payload.runtime", payload["runtime"] ?? null, want.runtime],
+		];
+		for (const [field, actual, sent] of checks) {
+			if (actual !== sent) mismatches.push(`${want.id}: read-back ${field} ${JSON.stringify(actual)} != sent ${JSON.stringify(sent)}`);
+		}
+	}
+	return mismatches;
+}
+
+async function readBack(base: string, bearer: string, tag: string): Promise<ReadBackRow[] | null> {
 	for (let attempt = 0; attempt < READBACK_RETRIES; attempt++) {
 		try {
 			const res = await fetch(`${base}/events/query`, {
@@ -148,9 +226,8 @@ async function readBack(base: string, bearer: string, tag: string): Promise<numb
 				signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
 			});
 			if (res.status !== 200) return null;
-			const parsed = (await res.json()) as { events?: unknown[]; count?: number };
-			const count = Array.isArray(parsed.events) ? parsed.events.length : (parsed.count ?? null);
-			if (count === EVENT_SOURCES.length) return count;
+			const parsed = (await res.json()) as { events?: ReadBackRow[] };
+			if (Array.isArray(parsed.events) && parsed.events.length === EVENT_SOURCES.length) return parsed.events;
 		} catch {
 			// Retry below.
 		}
@@ -185,14 +262,17 @@ export async function main(argv: string[]): Promise<number> {
 	process.stdout.write(`\nVocabulary smoke — ${name}, graph ${tag}, ${EVENT_SOURCES.length} sources\n\n`);
 
 	const results: PostResult[] = [];
+	const expected: ReadBackExpectation[] = [];
 	for (const entry of EVENT_SOURCES) {
 		const sample = entry.sample();
+		const session = runSession(tag, entry.id);
 		const outcome = await postEvent(target, bearer, {
 			...sample,
-			session_id: runSession(tag, entry.id),
+			session_id: session,
 			graph_id: tag,
 		});
 		results.push({ id: entry.id, ...outcome });
+		expected.push(expectationFor(entry.id, sample, session, outcome.postedId));
 		const ok = outcome.status === 202 && outcome.stored;
 		process.stdout.write(`${ok ? "  ok  " : " FAIL "} ${entry.id} — status ${outcome.status ?? "unreachable"}${outcome.error ? ` (${outcome.error})` : ""}\n`);
 	}
@@ -202,9 +282,11 @@ export async function main(argv: string[]): Promise<number> {
 	process.stdout.write(`\nstored ${stored}/${results.length}, refusals ${refusals}\n`);
 
 	const failed = results.filter((result) => !(result.status === 202 && result.stored));
-	const readback = await readBack(target, bearer, tag);
-	const readbackOk = readback === EVENT_SOURCES.length;
-	process.stdout.write(`read back ${readback ?? 0}/${EVENT_SOURCES.length}\n`);
+	const rows = await readBack(target, bearer, tag);
+	const mismatches = rows === null ? ["no read-back: expected one stored row per source"] : verifyReadBack(expected, rows);
+	const readbackOk = mismatches.length === 0;
+	process.stdout.write(`read back ${rows?.length ?? 0}/${EVENT_SOURCES.length}\n`);
+	for (const mismatch of mismatches) process.stdout.write(` MISMATCH ${mismatch}\n`);
 	process.stdout.write(`\n${results.length - failed.length + (readbackOk ? 1 : 0)}/${results.length + 1} checks passed\n`);
 
 	if (failed.length > 0 || refusals > 0 || !readbackOk) {

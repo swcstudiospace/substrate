@@ -5,7 +5,7 @@
  * production refusal and the run tagging verify without a harness.
  */
 import { describe, expect, test } from "bun:test";
-import { isRefused, parseConsumerEnv, refuseTarget, runSession, runTag } from "./vocabulary-smoke.ts";
+import { expectationFor, isRefused, parseConsumerEnv, refuseTarget, runSession, runTag, verifyReadBack } from "./vocabulary-smoke.ts";
 
 describe("parseConsumerEnv", () => {
 	test("parses single-quoted export lines", () => {
@@ -77,5 +77,29 @@ describe("isRefused", () => {
 		expect(isRefused(503, false)).toBe(true);
 		expect(isRefused(202, false)).toBe(true);
 		expect(isRefused(null, false)).toBe(true);
+	});
+});
+
+describe("verifyReadBack", () => {
+	const sample = { kind: "note", surface: "claude-code", payload: { action: "approval", runtime: "agentos" } };
+	const row = { id: "evt-1", session_id: "sess-1", kind: "note", surface: "claude-code", payload: { action: "approval", runtime: "agentos" } };
+
+	test("matching rows verify clean", () => {
+		expect(verifyReadBack([expectationFor("lanea.approval", sample, "sess-1", "evt-1")], [row])).toEqual([]);
+	});
+
+	test("a wrong event with the right count still fails", () => {
+		// Same row count, but the row carries another source's fields.
+		const wrong = { ...row, kind: "warning", surface: "substrate", payload: { action: "anchor", runtime: "anchor" } };
+		const mismatches = verifyReadBack([expectationFor("lanea.approval", sample, "sess-1", "evt-1")], [wrong]);
+		expect(mismatches.length).toBeGreaterThan(0);
+		expect(mismatches.join("\n")).toContain("kind");
+		expect(mismatches.join("\n")).toContain("payload.action");
+		expect(mismatches.join("\n")).toContain("payload.runtime");
+	});
+
+	test("a missing wire id fails", () => {
+		expect(verifyReadBack([expectationFor("lanea.approval", sample, "sess-1", "evt-9")], [row]).length).toBeGreaterThan(0);
+		expect(verifyReadBack([expectationFor("lanea.approval", sample, "sess-1", null)], [row]).length).toBeGreaterThan(0);
 	});
 });
