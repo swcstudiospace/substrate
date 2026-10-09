@@ -59,7 +59,7 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 
 - [x] **Phase 16: Production parity and rehearsal harness** - Production `substrate-mcp` serves `main`, and an isolated twin exists for every later proof (completed 2026-10-08)
 - [x] **Phase 17: Event vocabulary and audit policy** - Every v1.3 event source is mapped onto the existing kinds and surfaces before any of them ships (completed 2026-10-09)
-- [ ] **Phase 18: Guard rails and shared redactor** - One redactor, carrying the September rules and main's counter exemption, guards every publication path
+- [x] **Phase 18: Guard rails and shared redactor** - One redactor, carrying the September rules and main's counter exemption, guards every publication path (completed 2026-10-09)
 - [ ] **Phase 19: Lane B collectors** - herdr, Muse and the Cursor `stop` hook emit from `main` under main's vocabulary, and each Muse repo carries a fresh brief
 - [ ] **Phase 20: Production identity and Phase 0 UAT** - Every production client holds its own token, and the eight Phase 0 scenarios pass against `main`
 - [ ] **Phase 21: skills_propose** - An authenticated surface can propose a skill as a PR on agent-skills, with secrets and duplicates refused
@@ -376,7 +376,7 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 |-------|-----------|----------------|--------|-----------|
 | 16. Production parity and rehearsal harness | v1.3 | 5/5 | Complete    | 2026-10-08 |
 | 17. Event vocabulary and audit policy | v1.3 | 3/3 | Complete    | 2026-10-09 |
-| 18. Guard rails and shared redactor | v1.3 | 0/? | Not started | - |
+| 18. Guard rails and shared redactor | v1.3 | 4/4 | Complete    | 2026-10-09 |
 | 19. Lane B collectors | v1.3 | 0/? | Not started | - |
 | 20. Production identity and Phase 0 UAT | v1.3 | 0/? | Not started | - |
 | 21. skills_propose | v1.3 | 0/? | Not started | - |
