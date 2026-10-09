@@ -2152,6 +2152,15 @@ describe("proposeSkill", () => {
 		expect(a.events[0]?.session_id).not.toBe(b.events[0]?.session_id);
 	});
 
+	test("an empty session is not shared across proposals", async () => {
+		const a = world(opened);
+		const b = world(opened);
+		await a.substrate.proposeSkill({ ...request, session_id: "" }, asAgent);
+		await b.substrate.proposeSkill({ ...request, session_id: "" }, asAgent);
+		expect(a.events[0]?.session_id).toMatch(/^skills-propose:/);
+		expect(a.events[0]?.session_id).not.toBe(b.events[0]?.session_id);
+	});
+
 	test("a dry run reaches the proposer with dryRun set and emits nothing, whatever it returns", async () => {
 		const dry: ProposeResult = { ...opened, status: "dry_run", pr_url: undefined, diff_added: 2 };
 		const ok = world(dry);

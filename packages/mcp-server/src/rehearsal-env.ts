@@ -12,8 +12,9 @@
  * added. The parent environment is never spread, the deployment env file is
  * never read, and every store URL must be loopback before it is emitted.
  */
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { tokenEnvName } from "./config.ts";
 import { SURFACES, isSwarmSurface, type Surface } from "./types.ts";
 
@@ -99,8 +100,13 @@ function fixtureEnv(fixture: Record<string, string>, runDir: string): Record<str
 		}
 		if (key === "SUBSTRATE_SKILLS_STATE" || key === "SUBSTRATE_SKILLS_GH") assertInsideRun(key, value, runDir);
 		if (key === "SUBSTRATE_SKILLS_REMOTE_URL") {
-			if (!value.startsWith("file://")) throw new RehearsalEnvError("rehearsal env refused: the skills fixture remote is not a file:// URL");
-			assertInsideRun(key, value.slice("file://".length), runDir);
+			let path: string;
+			try {
+				path = fileURLToPath(value);
+			} catch {
+				throw new RehearsalEnvError("rehearsal env refused: the skills fixture remote is not a file:// URL");
+			}
+			assertInsideRun(key, path, runDir);
 		}
 	}
 	return fixture;
@@ -203,6 +209,13 @@ export function buildRehearsalEnv(input: BuildRehearsalEnvInput): Record<string,
 	// Always inside the run directory, so a twin can never write the host's skills state; without a
 	// fixture there is no mirror there, and a proposal fails before any git or gh call.
 	env.SUBSTRATE_SKILLS_STATE = join(input.runDir, "skills");
+	// A crashed `--skills-fixture` leaves a mirror in this run dir. Starting again without the
+	// flag would keep that mirror and point its origin at the production library.
+	if (!input.skillsFixture && existsSync(join(input.runDir, "skills", "mirror.git", "HEAD"))) {
+		throw new RehearsalEnvError(
+			"rehearsal env refused: this run dir still has a skills fixture mirror; pass --skills-fixture or choose a new name",
+		);
+	}
 	if (input.skillsFixture) {
 		Object.assign(env, fixtureEnv(input.skillsFixture, input.runDir));
 		// The proposer's git and gh children inherit HOME. An empty directory inside the run

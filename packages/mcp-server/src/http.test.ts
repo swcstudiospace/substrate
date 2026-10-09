@@ -1151,6 +1151,13 @@ describe("POST /skills/propose", () => {
 		expect(calls).toEqual([]);
 	});
 
+	test("a parsed object with a bad mode is audited and then refused", async () => {
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory(), ...TOKENS }, { skills: proposer().seam });
+		const reply = await propose(harness, "tok-agent", { ...body, mode: "merge" });
+		expect(reply.status).toBe(400);
+		expect(harness.observability.audit.recent()[0]).toMatchObject({ tool: "skills_propose", decision: "allowed" });
+	});
+
 	test("a refusal is 400 with findings as file, line and rule only", async () => {
 		const refusal = new ProposeRefused("secret-like content in 1 place(s); remove it or use an env reference", [
 			{ file: "SKILL.md", line: 4, rule: "github" },

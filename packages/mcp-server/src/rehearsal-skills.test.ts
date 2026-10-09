@@ -6,10 +6,10 @@
  * the engine spawns `gh`: with an allowlisted environment and nothing else.
  */
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EMPTY_STATE, fakeGh, fakeGhScript, readState, type FakeGhState } from "./rehearsal-fake-gh.ts";
+import { EMPTY_STATE, fakeGh, fakeGhScript, readState, runFakeGh, writeState, type FakeGhState } from "./rehearsal-fake-gh.ts";
 import { FIXTURE_REPO, SEED_SKILL, buildSkillsFixture, removeSkillsFixture, skillsPaths } from "./rehearsal-skills.ts";
 
 const made: string[] = [];
@@ -65,7 +65,7 @@ describe("fakeGh", () => {
 		fakeGh(createArgv("skill/omp/a-1-abcd", "someone/else"), state);
 
 		const listed = fakeGh(["pr", "list", "--repo", FIXTURE_REPO, "--head", "skill/omp/a-1-abcd", "--state", "open", "--json", "url,number"], state);
-		expect(JSON.parse(listed.stdout)).toEqual([{ url: `https://github.com/${FIXTURE_REPO}/pull/2`, number: 2 }]);
+		expect(JSON.parse(listed.stdout)).toEqual([{ url: `https://github.com/${FIXTURE_REPO}/pull/2`, number: 2, state: "OPEN" }]);
 		expect(JSON.parse(fakeGh(["pr", "list", "--repo", FIXTURE_REPO, "--head", "nope"], state).stdout)).toEqual([]);
 	});
 
@@ -94,6 +94,19 @@ describe("fakeGh", () => {
 			expect(result.stdout).toBe("");
 			expect(result.stderr).toContain("fake gh");
 		}
+	});
+
+	test("an ownerless lock older than the bound is reclaimed", () => {
+		const run = tempRun();
+		const statePath = join(run, "gh-state.json");
+		writeState(statePath, { next: 1, prs: [], calls: [] });
+		const lock = `${statePath}.lock`;
+		mkdirSync(lock);
+		const old = new Date(Date.now() - 10_000);
+		utimesSync(lock, old, old);
+		expect(runFakeGh(createArgv("skill/omp/a-1-abcd"), statePath)).toBe(0);
+		expect(existsSync(lock)).toBe(false);
+		expect(readState(statePath).next).toBe(2);
 	});
 
 	test("pr create and pr list refuse missing arguments instead of guessing", () => {

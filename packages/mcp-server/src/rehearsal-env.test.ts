@@ -9,7 +9,7 @@
  */
 import { describe, expect, test, afterAll } from "bun:test";
 import { randomBytes } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -242,6 +242,13 @@ describe("the skills fixture's settings", () => {
 			SUBSTRATE_SKILLS_GH: join(runDir, "skills-fixture", "gh"),
 		};
 	}
+
+	test("a leftover fixture mirror is refused when this run is not a fixture", () => {
+		const runDir = tempDir();
+		mkdirSync(join(runDir, "skills", "mirror.git"), { recursive: true });
+		writeFileSync(join(runDir, "skills", "mirror.git", "HEAD"), "ref: refs/heads/main\n");
+		expect(() => buildRehearsalEnv(scratchInput({ runDir }))).toThrow("skills fixture mirror");
+	});
 
 	test("are added to the server env and load as a valid non-default library", () => {
 		const runDir = tempDir();

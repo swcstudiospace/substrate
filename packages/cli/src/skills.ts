@@ -55,7 +55,7 @@ export class DirRefused extends Error {}
 export function readSkillDir(dir: string): Record<string, string> {
 	// No prototype: assigning a file named `__proto__` must keep the file, not set the prototype.
 	const files: Record<string, string> = Object.create(null);
-	const decoder = new TextDecoder("utf-8", { fatal: true });
+	const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 	let bytes = 0;
 	const walk = (absolute: string, relative: string) => {
 		for (const entry of readdirSync(absolute).sort()) {

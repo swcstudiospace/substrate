@@ -188,7 +188,8 @@ function refuseSecretText(label: string, value: string): void {
  * Every content guard in one place, before any git or gh call: name, surface, paths, SKILL.md and
  * its frontmatter, text only, the byte cap, the removals, then the skill redactor's findings.
  * Returns the redacted files and the content hash: sha256 over `<mode>\0`, the sorted
- * `path\0content\0` of the redacted files, then the sorted `remove\0path\0` entries.
+ * `file\0path\0content\0` entries, then the sorted `delete\0path\0` entries. The tags
+ * differ so a file named `remove` is not the same proposal as a deletion.
  */
 export function validateProposal(
 	input: ProposeInput,
@@ -254,8 +255,8 @@ export function validateProposal(
 	const sortedRemove = [...new Set(remove)].sort();
 	const hash = createHash("sha256");
 	hash.update(`${opts.mode}\0`);
-	for (const path of Object.keys(scan.files).sort()) hash.update(`${path}\0${scan.files[path]}\0`);
-	for (const path of sortedRemove) hash.update(`remove\0${path}\0`);
+	for (const path of Object.keys(scan.files).sort()) hash.update(`file\0${path}\0${scan.files[path]}\0`);
+	for (const path of sortedRemove) hash.update(`delete\0${path}\0`);
 	return {
 		name,
 		surface,
@@ -347,7 +348,7 @@ export function addArgv(dir: string, name: string): string[] {
 
 /** What `git add` actually staged. An ignored path is absent, which the engine refuses. */
 export function stagedArgv(dir: string, name: string): string[] {
-	return ["git", "-C", dir, "ls-files", "--full-name", "--", name];
+	return ["git", "-C", dir, "ls-files", "-z", "--full-name", "--", name];
 }
 
 export function diffQuietArgv(dir: string): string[] {
@@ -376,7 +377,7 @@ export function prViewArgv(url: string): string[] {
 }
 
 export function prListHeadArgv(branch: string, repo: string): string[] {
-	return ["gh", "pr", "list", "--repo", repo, "--head", branch, "--state", "open", "--json", "url,number"];
+	return ["gh", "pr", "list", "--repo", repo, "--head", branch, "--state", "all", "--json", "url,number,state"];
 }
 
 export function prCreateArgv(branch: string, title: string, body: string, repo: string): string[] {
@@ -466,6 +467,13 @@ export function childEnv(home?: string): Record<string, string> {
 		HOME: home ?? process.env.HOME ?? "/root",
 		GIT_CONFIG_GLOBAL: "/dev/null",
 		GIT_CONFIG_SYSTEM: "/dev/null",
+		// The host gitconfig stays unread, so `url.*.insteadOf` cannot redirect a push.
+		// GitHub HTTPS still authenticates through gh, which is what `/root/.gitconfig` sets.
+		GIT_CONFIG_COUNT: "2",
+		GIT_CONFIG_KEY_0: "credential.helper",
+		GIT_CONFIG_VALUE_0: "",
+		GIT_CONFIG_KEY_1: "credential.https://github.com.helper",
+		GIT_CONFIG_VALUE_1: "!/usr/bin/gh auth git-credential",
 		GIT_TERMINAL_PROMPT: "0",
 		GH_PROMPT_DISABLED: "1",
 	};
@@ -641,13 +649,17 @@ async function fromLedger(
 	const library = opts.library ?? DEFAULT_LIBRARY;
 	const knownLines = ledgerMatches(ledger, v.content_sha256);
 	if (knownLines.length === 0) return null;
-	// A line with no library was written before the slug was recorded. It must not decide a
-	// proposal for whichever library this process now targets.
-	if (knownLines.some((line) => typeof line.repo !== "string" || line.repo.length === 0)) {
-		throw new ProposeFailed(`proposal ledger has no library identity; use a separate state directory before proposing to ${library.repo}`);
+	// A line written before `repo` was recorded still names its library when the saved PR URL
+	// does. A line that names neither must not decide this library, and a later identified
+	// line is allowed to.
+	const identified = knownLines.map((line) => ({ line, repo: ledgerRepo(line) }));
+	const known = [...identified].reverse().find((item) => item.repo === library.repo)?.line;
+	if (!known) {
+		if (identified.some((item) => item.repo === null)) {
+			throw new ProposeFailed(`proposal ledger has no library identity; use a separate state directory before proposing to ${library.repo}`);
+		}
+		return null;
 	}
-	const known = [...knownLines].reverse().find((line) => line.repo === library.repo);
-	if (!known) return null;
 	const base = { content_sha256: v.content_sha256, redactions: v.redactions, branch: known.branch };
 	if (known.pr_url) {
 		const view = await must(run, "gh pr view", prViewArgv(known.pr_url));
@@ -671,13 +683,18 @@ async function fromLedger(
 	}
 	if (known.state !== "pushed") return null;
 	const listed = await must(run, "gh pr list", prListHeadArgv(known.branch, library.repo));
-	let prs: Array<{ url?: unknown; number?: unknown }>;
+	let prs: Array<{ url?: unknown; number?: unknown; state?: unknown }>;
 	try {
-		prs = JSON.parse(listed.stdout) as Array<{ url?: unknown; number?: unknown }>;
+		prs = JSON.parse(listed.stdout) as Array<{ url?: unknown; number?: unknown; state?: unknown }>;
 	} catch {
 		throw new ProposeFailed("gh pr list printed no JSON");
 	}
-	const open = prs.map((p) => (typeof p.url === "string" ? prUrlOf(p.url, library.repo) : null)).find((p) => p !== null);
+	const rows = prs.flatMap((p) => {
+		if (typeof p.url !== "string" || typeof p.state !== "string") return [];
+		const located = prUrlOf(p.url, library.repo);
+		return located ? [{ ...located, state: p.state }] : [];
+	});
+	const open = rows.find((row) => row.state === "OPEN");
 	if (open) {
 		ledgerAppend(ledger, {
 			content_sha256: v.content_sha256,
@@ -691,7 +708,30 @@ async function fromLedger(
 		});
 		return { status: "existing", ...base, pr_url: open.url, pr_number: open.number };
 	}
+	const closed = rows.find((row) => row.state === "CLOSED");
+	if (closed && !opts.reopen) {
+		ledgerAppend(ledger, {
+			content_sha256: v.content_sha256,
+			name: v.name,
+			surface: v.surface,
+			branch: known.branch,
+			state: "closed",
+			repo: library.repo,
+			pr_url: closed.url,
+			pr_number: closed.number,
+		});
+		return { status: "declined", ...base, pr_url: closed.url, pr_number: closed.number };
+	}
+	// Merged, or a closed PR the operator asked to reopen: the git path, not a second PR on the old branch.
+	if (rows.length > 0) return null;
 	return openPr(run, v, input, known.branch, ledger, library);
+}
+
+/** The library a ledger line was written for: the recorded slug, or the one in its PR URL. */
+function ledgerRepo(line: LedgerLine): string | null {
+	if (typeof line.repo === "string" && line.repo.length > 0) return line.repo;
+	const match = typeof line.pr_url === "string" ? PR_URL_RE.exec(line.pr_url.trim()) : null;
+	return match?.[1] ?? null;
 }
 
 function countNameStatus(stdout: string): { diff_added: number; diff_changed: number; diff_deleted: number } {
@@ -751,7 +791,7 @@ export async function proposeSkill(input: ProposeInput, opts: ProposeOptions): P
 		writeTree(clone, v.name, v.files, v.remove, v.mode);
 		await must(run, "git add", addArgv(clone, v.name));
 		const staged = await must(run, "git ls-files", stagedArgv(clone, v.name));
-		const stagedSet = new Set(staged.stdout.split("\n").filter((line) => line.length > 0));
+		const stagedSet = new Set(staged.stdout.split("\0").filter((line) => line.length > 0));
 		for (const rel of Object.keys(v.files)) {
 			if (!stagedSet.has(`${v.name}/${rel}`)) {
 				throw new ProposeFailed(`refusing to propose ${JSON.stringify(rel)}: git did not stage it`);

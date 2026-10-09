@@ -699,16 +699,17 @@ export function createHttpServer(
 					return;
 				}
 				const body = JSON.parse(await readBody(req)) as unknown;
+				const fields = body !== null && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : null;
+				// Audited under the tool's own name, fail-closed, before the field check and before any git work.
+				// A parsed object that will be rejected (`mode: "merge"`) is still a proposal attempt.
+				if (fields && !(await auditedRest(res, observability, surface, "skills_propose", fields))) return;
 				const problem = proposalBodyProblem(body);
 				if (problem) {
 					sendJson(res, 400, { error: problem });
 					return;
 				}
-				const fields = body as Record<string, unknown>;
-				// Audited under the tool's own name, fail-closed, before any git work.
-				if (!(await auditedRest(res, observability, surface, "skills_propose", fields))) return;
 				try {
-					sendJson(res, 200, await substrate.proposeSkill(toProposalRequest(fields), { surface, isOperator: caller.isOperator }));
+					sendJson(res, 200, await substrate.proposeSkill(toProposalRequest(fields ?? {}), { surface, isOperator: caller.isOperator }));
 				} catch (cause) {
 					const failure = proposalFailure(cause);
 					if (failure === null) throw cause;

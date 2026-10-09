@@ -326,6 +326,8 @@ describe("readSkillDir, the timeout and the cap", () => {
 		expect(withProto["__proto__"]).toBe("kept\n");
 		expect(() => readSkillDir(join(dir, "missing"))).toThrow();
 		expect(DirRefused.prototype).toBeInstanceOf(Error);
+		writeFileSync(join(dir, "notes.md"), Buffer.from([0xef, 0xbb, 0xbf, 0x6e, 0x6f, 0x74, 0x65, 0x73, 0x0a]));
+		expect(readSkillDir(dir)["notes.md"]).toBe("\ufeffnotes\n");
 	});
 
 	test("a directory over the cap is refused from the file sizes, before any file is read", () => {

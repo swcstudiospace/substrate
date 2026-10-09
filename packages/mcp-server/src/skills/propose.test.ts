@@ -158,7 +158,7 @@ function trackedNames(dir: string): string {
 		}
 	};
 	walk(dir, "");
-	return out.length > 0 ? `${out.sort().join("\n")}\n` : "";
+	return out.length > 0 ? `${out.sort().join("\0")}\0` : "";
 }
 
 function sha(inp: ProposeInput = input(), mode: "overlay" | "replace" = "overlay"): string {
@@ -288,8 +288,8 @@ describe("validateProposal acceptance, redaction and hashing", () => {
 		expect(v.redactions).toEqual([]);
 		const h = createHash("sha256");
 		h.update("overlay\0");
-		for (const path of ["SKILL.md", "references/api.md", "scripts/run.py"]) h.update(`${path}\0${files[path as keyof typeof files]}\0`);
-		h.update("remove\0old.md\0");
+		for (const path of ["SKILL.md", "references/api.md", "scripts/run.py"]) h.update(`file\0${path}\0${files[path as keyof typeof files]}\0`);
+		h.update("delete\0old.md\0");
 		expect(v.content_sha256).toBe(h.digest("hex"));
 	});
 
@@ -410,7 +410,7 @@ describe("branch and argv builders", () => {
 		expect(addArgv(dir, "x")).toEqual(["git", "-C", dir, "add", "--", "x"]);
 		expect(pushArgv(dir, br)).toEqual(["git", "-C", dir, "push", "origin", br]);
 		expect(prViewArgv(PR_URL)).toEqual(["gh", "pr", "view", PR_URL, "--json", "state,url,number"]);
-		expect(prListHeadArgv(br, LIBRARY_REPO)).toEqual(["gh", "pr", "list", "--repo", "swcstudiospace/agent-skills", "--head", br, "--state", "open", "--json", "url,number"]);
+		expect(prListHeadArgv(br, LIBRARY_REPO)).toEqual(["gh", "pr", "list", "--repo", "swcstudiospace/agent-skills", "--head", br, "--state", "all", "--json", "url,number,state"]);
 		expect(prCreateArgv(br, "t", "b", LIBRARY_REPO)).toEqual(["gh", "pr", "create", "--repo", "swcstudiospace/agent-skills", "--head", br, "--base", "main", "--title", "t", "--body", "b"]);
 	});
 
@@ -484,7 +484,7 @@ describe("proposeSkill ledger idempotence", () => {
 
 	test("a pushed branch with no recorded PR is re-found with gh pr list --head", async () => {
 		writeLedger({ ts: "t", content_sha256: sha(), name: NAME, surface: "claude-code", branch: "skill/claude-code/b1", state: "pushed" });
-		const f = fake({ replies: { "gh pr list": { stdout: JSON.stringify([{ url: PR_URL, number: 7 }]) } } });
+		const f = fake({ replies: { "gh pr list": { stdout: JSON.stringify([{ url: PR_URL, number: 7, state: "OPEN" }]) } } });
 		const result = await proposeSkill(input(), options(f.run));
 		expect(result).toMatchObject({ status: "existing", pr_url: PR_URL, pr_number: 7, branch: "skill/claude-code/b1" });
 		expect(f.calls).toEqual([prListHeadArgv("skill/claude-code/b1", LIBRARY_REPO)]);
@@ -738,16 +738,47 @@ describe("non-default library", () => {
 			name: NAME,
 			surface: "claude-code",
 			branch: "b1",
-			state: "opened",
+			state: "pushed",
 			repo: null,
-			pr_url: PR_URL,
-			pr_number: 7,
 		});
 		const f = fake();
 		const error = await proposeSkill(input(), options(f.run)).catch((e: unknown) => e);
 		expect(error).toBeInstanceOf(ProposeFailed);
 		expect((error as Error).message).toContain("no library identity");
 		expect(f.calls).toEqual([]);
+	});
+
+	test("a record without a slug is this library when its pull request URL says so", async () => {
+		writeLedger({
+			ts: "t",
+			content_sha256: sha(),
+			name: NAME,
+			surface: "claude-code",
+			branch: "b1",
+			state: "opened",
+			repo: null,
+			pr_url: PR_URL,
+			pr_number: 7,
+		});
+		const f = fake({ replies: { "gh pr view": { stdout: JSON.stringify({ state: "OPEN", url: PR_URL, number: 7 }) } } });
+		const result = await proposeSkill(input(), options(f.run));
+		expect(result).toMatchObject({ status: "existing", pr_url: PR_URL, pr_number: 7 });
+		expect(f.steps()).toEqual(["gh pr view"]);
+	});
+
+	test("a file named remove is not the same proposal as deleting that path", () => {
+		const skill = input().files["SKILL.md"] ?? "";
+		const written = sha({ ...input(), files: { "SKILL.md": skill, remove: "old.txt" } });
+		const deleted = sha({ ...input(), files: { "SKILL.md": skill }, remove: ["old.txt"] });
+		expect(written).not.toBe(deleted);
+	});
+
+	test("a pushed branch whose pull request was closed is declined and not created again", async () => {
+		writeLedger({ ts: "t", content_sha256: sha(), name: NAME, surface: "claude-code", branch: "skill/claude-code/b1", state: "pushed" });
+		const f = fake({ replies: { "gh pr list": { stdout: JSON.stringify([{ url: PR_URL, number: 7, state: "CLOSED" }]) } } });
+		const result = await proposeSkill(input(), options(f.run));
+		expect(result).toMatchObject({ status: "declined", pr_url: PR_URL, pr_number: 7 });
+		expect(f.steps()).toEqual(["gh pr list"]);
 	});
 
 	test("the default library is September's slug and remote", () => {
@@ -762,13 +793,23 @@ describe("child environment", () => {
 			HOME: "/home/svc",
 			GIT_CONFIG_GLOBAL: "/dev/null",
 			GIT_CONFIG_SYSTEM: "/dev/null",
+			GIT_CONFIG_COUNT: "2",
+			GIT_CONFIG_KEY_0: "credential.helper",
+			GIT_CONFIG_VALUE_0: "",
+			GIT_CONFIG_KEY_1: "credential.https://github.com.helper",
+			GIT_CONFIG_VALUE_1: "!/usr/bin/gh auth git-credential",
 			GIT_TERMINAL_PROMPT: "0",
 			GH_PROMPT_DISABLED: "1",
 		});
 		expect(Object.keys(childEnv("/home/svc")).sort()).toEqual([
 			"GH_PROMPT_DISABLED",
+			"GIT_CONFIG_COUNT",
 			"GIT_CONFIG_GLOBAL",
+			"GIT_CONFIG_KEY_0",
+			"GIT_CONFIG_KEY_1",
 			"GIT_CONFIG_SYSTEM",
+			"GIT_CONFIG_VALUE_0",
+			"GIT_CONFIG_VALUE_1",
 			"GIT_TERMINAL_PROMPT",
 			"HOME",
 			"PATH",

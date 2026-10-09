@@ -18,6 +18,7 @@
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { FIXTURE_ENV_KEYS } from "./rehearsal-env.ts";
 import { EMPTY_STATE, fakeGhScript, writeState } from "./rehearsal-fake-gh.ts";
 
@@ -104,7 +105,8 @@ export function buildSkillsFixture(runDir: string): SkillsFixture {
 
 	// The proposer's mirror, as production keeps it: a bare clone that fetches `main` and nothing else.
 	const mirror = join(state, "mirror.git");
-	git(runDir, ["clone", "-q", "--bare", `file://${origin}`, mirror]);
+	const originUrl = pathToFileURL(origin).href;
+	git(runDir, ["clone", "-q", "--bare", originUrl, mirror]);
 	git(runDir, ["config", "remote.origin.fetch", "+refs/heads/main:refs/heads/main"], mirror);
 
 	const gh = join(fixture, "gh");
@@ -117,7 +119,7 @@ export function buildSkillsFixture(runDir: string): SkillsFixture {
 		env: {
 			SUBSTRATE_SKILLS_STATE: state,
 			SUBSTRATE_SKILLS_REPO: FIXTURE_REPO,
-			SUBSTRATE_SKILLS_REMOTE_URL: `file://${origin}`,
+			SUBSTRATE_SKILLS_REMOTE_URL: originUrl,
 			SUBSTRATE_SKILLS_GH: gh,
 		},
 		state,

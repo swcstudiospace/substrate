@@ -1004,19 +1004,21 @@ export class Substrate {
 			throw new ProposeFailed(`skill proposals are refused until the skills library is fixed: ${this.config.skills.problem}`);
 		}
 
+		const sessionId = normalizeIdentifier(request.session_id);
+		const graphId = normalizeIdentifier(request.graph_id);
 		const input: ProposeInput = {
 			name: request.name,
 			files: request.files,
 			rationale: request.rationale,
 			surface,
 			...(request.remove !== undefined ? { remove: request.remove } : {}),
-			...(request.session_id !== undefined ? { session_id: request.session_id } : {}),
-			...(request.graph_id !== undefined ? { graph_id: request.graph_id } : {}),
+			...(sessionId !== null ? { session_id: sessionId } : {}),
+			...(graphId !== null ? { graph_id: graphId } : {}),
 		};
 		const dryRun = request.dry_run === true;
 		const where = {
-			session_id: request.session_id ?? `skills-propose:${randomUUID()}`,
-			...(request.graph_id !== undefined ? { graph_id: request.graph_id } : {}),
+			session_id: sessionId ?? `skills-propose:${randomUUID()}`,
+			...(graphId !== null ? { graph_id: graphId } : {}),
 		};
 		const name = typeof request.name === "string" && SKILL_NAME_RE.test(request.name) ? request.name : undefined;
 		try {

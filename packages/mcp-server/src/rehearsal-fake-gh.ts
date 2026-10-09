@@ -13,7 +13,7 @@
  * hands its children an allowlisted environment, so the state path is baked into the script
  * rather than passed through one.
  */
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export interface FakePr {
@@ -90,10 +90,12 @@ export function fakeGh(argv: readonly string[], state: FakeGhState): FakeGhResul
 		const repo = flag(argv, "--repo");
 		const head = flag(argv, "--head");
 		if (!repo || !head) return fail(2, "fake gh: pr list needs --repo and --head");
-		const open = state.prs
-			.filter((pr) => pr.head === head && pr.state === "OPEN" && pr.url.startsWith(`https://github.com/${repo}/pull/`))
-			.map((pr) => ({ url: pr.url, number: pr.number }));
-		return { code: 0, stdout: `${JSON.stringify(open)}\n`, stderr: "" };
+		const wanted = (flag(argv, "--state") ?? "open").toUpperCase();
+		const rows = state.prs
+			.filter((pr) => pr.head === head && pr.url.startsWith(`https://github.com/${repo}/pull/`))
+			.filter((pr) => wanted === "ALL" || pr.state === wanted)
+			.map((pr) => ({ url: pr.url, number: pr.number, state: pr.state }));
+		return { code: 0, stdout: `${JSON.stringify(rows)}\n`, stderr: "" };
 	}
 
 	return fail(2, `fake gh: unsupported command pr ${String(verb)}`);
@@ -162,20 +164,39 @@ function acquireStateLock(statePath: string): () => void {
 	for (;;) {
 		try {
 			mkdirSync(lock, { mode: 0o700 });
-			writeFileSync(join(lock, "pid"), String(process.pid));
+			try {
+				writeFileSync(join(lock, "pid"), String(process.pid));
+			} catch (writeCause) {
+				rmSync(lock, { recursive: true, force: true });
+				throw writeCause;
+			}
 			return () => rmSync(lock, { recursive: true, force: true });
 		} catch (cause) {
 			if ((cause as NodeJS.ErrnoException).code !== "EEXIST") throw cause;
 		}
 		let pid = Number.NaN;
+		let pidMissing = false;
 		try {
 			pid = Number(readFileSync(join(lock, "pid"), "utf8").trim());
 		} catch {
-			// the owner is between mkdir and the pid write
+			pidMissing = true;
 		}
 		if (Number.isInteger(pid) && pid > 0 && !pidAlive(pid)) {
 			rmSync(lock, { recursive: true, force: true });
 			continue;
+		}
+		// A crash between mkdir and the pid write leaves a lock no process owns.
+		if (pidMissing) {
+			let age = 0;
+			try {
+				age = Date.now() - statSync(lock).mtimeMs;
+			} catch {
+				age = 0;
+			}
+			if (age > 250) {
+				rmSync(lock, { recursive: true, force: true });
+				continue;
+			}
 		}
 		if (Date.now() - started > 5_000) throw new Error("fake gh state lock busy");
 		Atomics.wait(pause, 0, 0, 5);

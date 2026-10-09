@@ -126,6 +126,21 @@ describe("proposeSkill against real git", () => {
 		expect(existsSync(join(fx.stateDir, "proposals.jsonl"))).toBe(true);
 	});
 
+	test("a non-ascii filename is staged and the proposal opens", async () => {
+		const fx = fixture();
+		const fake: FakeGh = { prs: [], next: 1, calls: [] };
+		const result = await proposeSkill(
+			{
+				name: "new-skill",
+				files: { "SKILL.md": skillMd("new-skill"), "references/café.md": "notes\n" },
+				rationale: "because",
+				surface: "claude-code",
+			},
+			{ maxBytes: ROUTE_MAX_BYTES, mode: "overlay", run: fakeGhRunner(fx, fake), stateDir: fx.stateDir, library: { repo: fx.repo, remoteUrl: fx.remoteUrl } },
+		);
+		expect(result.status).toBe("opened");
+	});
+
 	test("a file the skill tree ignores is refused and not pushed", async () => {
 		const fx = fixture();
 		const work = mkdtempSync(join(tmpdir(), "propose-ignore-"));
