@@ -214,7 +214,8 @@ describe("host-job event shape (D22-03)", () => {
 		const h = harness({ porcelain: " M x\n" });
 		await runSync(h.ctx);
 		expect(h.warnings.length).toBe(1);
-		const [event] = h.warnings;
+		const event = h.warnings[0];
+		if (!event) throw new Error("expected one warning");
 		expect(event.kind).toBe("warning");
 		expect(event.surface).toBe("substrate");
 		expect(event.actor).toBe("agent");

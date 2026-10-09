@@ -374,6 +374,8 @@ export async function apply(actions: readonly Action[], ctx: ApplyContext): Prom
 					},
 				),
 			);
+			// A refused post is not recorded, so the next run retries it.
+			if (!accepted) continue;
 			warned[key] = new Date().toISOString();
 			emitted++;
 			ctx.log(`[projector] ${action.root.id} skip-warn ${action.name} (${action.reason})`);

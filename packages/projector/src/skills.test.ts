@@ -263,7 +263,8 @@ describe("host-job warning shape (D22-03, D22-05)", () => {
 		const warnings: WarningEvent[] = [];
 		await apply(plan([inventory(GROK)], libraryNames(LIB), dirs()), ctx(warnings));
 		expect(warnings.length).toBe(1);
-		const [event] = warnings;
+		const event = warnings[0];
+		if (!event) throw new Error("expected one warning");
 		expect(event.kind).toBe("warning");
 		expect(event.surface).toBe("substrate");
 		expect(event.actor).toBe("agent");
