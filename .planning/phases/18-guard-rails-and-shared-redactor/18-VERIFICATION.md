@@ -1,10 +1,10 @@
 ---
 phase: 18-guard-rails-and-shared-redactor
-verified: 2026-10-09T05:29:09Z
+verified: 2026-10-09T09:30:01Z
 status: passed
 score: 21/21 must-haves verified
-covered_files: [".planning/phases/18-guard-rails-and-shared-redactor/18-01-PLAN.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-01-SUMMARY.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-02-PLAN.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-02-SUMMARY.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-03-PLAN.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-03-SUMMARY.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-04-PLAN.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-04-SUMMARY.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-REVIEW.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-REVIEW-DISPOSITION.md", "docs/greptime-ledger.md", "docs/memory-governance.md", "docs/observability.md", "docs/redaction.md", "packages/cli/src/lessons.ts", "packages/mcp-server/src/memory-classify.test.ts", "packages/mcp-server/src/redact-contract.test.ts", "packages/mcp-server/src/redact-lock.test.ts", "packages/mcp-server/src/redact.test.ts", "packages/mcp-server/src/redact.ts", "packages/mcp-server/src/store-lock.test.ts"]
-covered_digest: "v1:sha256:b5f1cf1535a41a6740e3d5334bce316c1d63b774b66028c866ba90693af157be"
+covered_files: [".planning/phases/18-guard-rails-and-shared-redactor/18-01-PLAN.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-01-SUMMARY.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-02-PLAN.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-02-SUMMARY.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-03-PLAN.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-03-SUMMARY.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-04-PLAN.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-04-SUMMARY.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-REVIEW-DISPOSITION.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-REVIEW.md", "docs/greptime-ledger.md", "docs/memory-governance.md", "docs/observability.md", "docs/redaction.md", "packages/cli/src/lessons.ts", "packages/mcp-server/src/memory-classify.test.ts", "packages/mcp-server/src/redact-contract.test.ts", "packages/mcp-server/src/redact-lock.test.ts", "packages/mcp-server/src/redact.test.ts", "packages/mcp-server/src/redact.ts", "packages/mcp-server/src/store-lock.test.ts"]
+covered_digest: "v3:sha256:ad29aaafdd626d1193faeae4360919a9c7b2c667974f35dded53e78651496d37"
 behavior_unverified: 0
 overrides_applied: 0
 re_verification:
@@ -127,3 +127,21 @@ No gaps. All 21 must-haves verified against current HEAD with behavioral evidenc
 
 _Verified: 2026-10-09T05:29:09Z_
 _Verifier: Claude (gsd-verifier)_
+
+## Re-verification after the second rebase (2026-10-09)
+
+Phase 18 was rebased again, onto `main` at `28b5b99` (Phases 16 and 17 merged). No file covered by this report changed content across that rebase (`git diff bak/p18-pre-rebase HEAD` over the covered files is empty), so the 21/21 truths above stand. Fresh evidence on the rebased tree:
+
+| Check | Result |
+|-------|--------|
+| `bun install --frozen-lockfile` | no changes |
+| `bunx tsc --noEmit` | exit 0 |
+| `bun test` (full suite) | 1638 pass / 57 skip / 0 fail across 54 files |
+| `bun run check:phase-close` | pass (4 lock files, EVENT_KINDS 12 unchanged, SURFACES = v1.2 + `substrate`) |
+| Phase 18 files x3 (`redact`, `redact-lock`, `redact-contract`, `memory-classify`, `store-lock`) | 239 pass / 1 skip / 0 fail, three consecutive runs |
+| Flake probe (`--rerun-each 3`) | 663 pass / 3 skip / 0 fail |
+| Coverage of `packages/mcp-server/src/redact.ts` | 94.44 % lines, 100 % functions |
+| Gated harness round trip (own instance `p18-ship`, torn down, no containers left) | 177 pass / 0 fail |
+
+Fingerprint refreshed with `verification.fingerprint` (v3), which covers the declared files plus the phase artifacts.
+
