@@ -205,21 +205,25 @@ export async function rebuildManifest(
 	const now = new Date().toISOString();
 	for (const [path, rows] of [...byPath.entries()].sort(([a], [b]) => (a < b ? -1 : 1))) {
 		// Recency is not recoverable from RAGFlow metadata, so the live entry
-		// is a heuristic: the largest same-commit group (the current version
-		// usually holds every page), ties broken by commit for determinism.
-		// A wrong pick costs at most one extra upload: the next refresh
-		// re-ingests, and its finalize restores the exact state.
+		// is a heuristic: the largest same-commit-and-content group (the current
+		// version usually holds every page), ties broken by commit then hash
+		// for determinism. A title-only re-upload at the same commit leaves two
+		// hashes behind; commit-only grouping would merge them into one entry
+		// holding one hash and both uploads' document IDs. A wrong pick costs
+		// at most one extra upload: the next refresh re-ingests, and its
+		// finalize restores the exact state.
 		const groups = new Map<string, Array<{ id: string; meta: SectionDocMeta }>>();
 		for (const row of rows) {
-			let group = groups.get(row.meta.commit);
+			const key = `${row.meta.commit} ${row.meta.contentSha256}`;
+			let group = groups.get(key);
 			if (!group) {
 				group = [];
-				groups.set(row.meta.commit, group);
+				groups.set(key, group);
 			}
 			group.push(row);
 		}
 		const live = [...groups.values()].sort(
-			(a, b) => b.length - a.length || (a[0]!.meta.commit < b[0]!.meta.commit ? -1 : 1),
+			(a, b) => b.length - a.length || (a[0]!.meta.commit < b[0]!.meta.commit ? -1 : a[0]!.meta.commit > b[0]!.meta.commit ? 1 : a[0]!.meta.contentSha256 < b[0]!.meta.contentSha256 ? -1 : a[0]!.meta.contentSha256 > b[0]!.meta.contentSha256 ? 1 : 0),
 		)[0]!;
 		live.sort((a, b) => a.meta.sectionIndex - b.meta.sectionIndex);
 		manifest.paths[path] = {

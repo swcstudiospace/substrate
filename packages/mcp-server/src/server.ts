@@ -288,7 +288,7 @@ export function memoryWriteStatus(result: { outcome: string; reason: string; ver
 	}
 }
 
-async function readBody(req: IncomingMessage): Promise<string> {
+async function readBodyBytes(req: IncomingMessage): Promise<Buffer> {
 	const chunks: Buffer[] = [];
 	let size = 0;
 	for await (const chunk of req) {
@@ -296,7 +296,21 @@ async function readBody(req: IncomingMessage): Promise<string> {
 		if (size > MAX_BODY_BYTES) throw new BodyTooLargeError();
 		chunks.push(chunk as Buffer);
 	}
-	return Buffer.concat(chunks).toString("utf8");
+	return Buffer.concat(chunks);
+}
+
+async function readBody(req: IncomingMessage): Promise<string> {
+	return (await readBodyBytes(req)).toString("utf8");
+}
+
+/**
+ * Fatal UTF-8 decode for POST /docs/ingest only. `Buffer.toString("utf8")`
+ * silently replaces invalid bytes with U+FFFD before JSON parsing, so the
+ * `not-text` check downstream cannot see the original bad byte and a damaged
+ * page could upload. Every other route keeps the lossy `readBody`.
+ */
+async function readBodyStrict(req: IncomingMessage): Promise<string> {
+	return new TextDecoder("utf-8", { fatal: true }).decode(await readBodyBytes(req));
 }
 
 function send(res: ServerResponse, status: number, body: string, contentType = "text/plain; charset=utf-8"): void {
@@ -810,7 +824,21 @@ export function createHttpServer(
 					sendJson(res, 401, { error: "docs_ingest needs an authenticated surface; nothing was ingested" });
 					return;
 				}
-				const body = JSON.parse(await readBody(req)) as unknown;
+				let raw: string;
+				try {
+					raw = await readBodyStrict(req);
+				} catch (cause) {
+					// Only a fatal UTF-8 decode failure (a TypeError from the
+					// TextDecoder) refuses as not-text. Anything else — an
+					// oversize body, a stream error — propagates to its own
+					// handler below.
+					if (!(cause instanceof TypeError)) throw cause;
+					// Invalid UTF-8 bytes are not text: refuse before the audit
+					// chain and before RAGFlow, with the service refusal shape.
+					sendJson(res, 400, { status: "refused", reason: "not-text" });
+					return;
+				}
+				const body = JSON.parse(raw) as unknown;
 				const fields =
 					body !== null && typeof body === "object" && !Array.isArray(body)
 						? (body as Record<string, unknown>)

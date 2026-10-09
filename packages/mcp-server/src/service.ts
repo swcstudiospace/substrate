@@ -1511,6 +1511,19 @@ export class Substrate {
 			embeddingModel: this.config.docs.embeddingModel,
 		};
 		if (fields.finalize === true) {
+			const dryRun = fields.dry_run;
+			if (dryRun === true) {
+				return {
+					status: 400,
+					body: { error: "docs_ingest finalize cannot run with dry_run; nothing was ingested" },
+				};
+			}
+			if (dryRun !== undefined && typeof dryRun !== "boolean") {
+				return {
+					status: 400,
+					body: { error: "docs_ingest finalize needs boolean `dry_run`; nothing was ingested" },
+				};
+			}
 			const dataset = fields.dataset;
 			const commit = fields.commit;
 			const pathsPresent = fields.paths_present;

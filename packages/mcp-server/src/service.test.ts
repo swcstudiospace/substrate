@@ -3894,4 +3894,25 @@ describe("docsIngest (Substrate door)", () => {
 		expect(agent.status).toBe(403);
 		expect(emitted.filter((event) => event.kind === "note")).toHaveLength(2);
 	});
+
+	test("finalize with dry_run writes nothing and answers 400", async () => {
+		const { substrate, fake, emitted } = await docsWorld();
+		const refused = await substrate.docsIngest(
+			{ dataset: "guide", commit: DOCS_COMMIT_B, paths_present: ["docs/intro.md"], finalize: true, dry_run: true },
+			{ surface: "substrate", isOperator: false },
+		);
+		expect(refused.status).toBe(400);
+		expect(String((refused.body as Record<string, unknown>).error)).toContain("nothing was ingested");
+		expect(fake.totalCalls()).toBe(0);
+		expect(emitted).toEqual([]);
+
+		const malformed = await substrate.docsIngest(
+			{ dataset: "guide", commit: DOCS_COMMIT_B, paths_present: ["docs/intro.md"], finalize: true, dry_run: "yes" },
+			{ surface: "substrate", isOperator: false },
+		);
+		expect(malformed.status).toBe(400);
+		expect(String((malformed.body as Record<string, unknown>).error)).toContain("nothing was ingested");
+		expect(fake.totalCalls()).toBe(0);
+		expect(emitted).toEqual([]);
+	});
 });

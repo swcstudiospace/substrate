@@ -111,17 +111,30 @@ function altOf(tag: string): string {
  * the alt text and balanced parens in the destination, so alts like
  * `outer [inner]` and destinations like `images/plot_(wide).png` strip as
  * one image. A newline before the brackets or parens close is not an image.
+ *
+ * Single forward pass: every character is scanned at most once. When a
+ * candidate fails, its scanned extent is emitted literally and the scan
+ * continues after it instead of rescanning from inside it, so a long line
+ * of unclosed `![` cannot go quadratic. As a consequence, an `![` nested
+ * inside a failed candidate on the same line is treated as literal text
+ * rather than as a fresh candidate (a nested candidate after a newline
+ * still strips, since the scan continues past the newline).
  */
 function stripInlineImages(text: string): { text: string; imagesStripped: number } {
 	let out = "";
 	let stripped = 0;
 	let cursor = 0;
-	while (cursor < text.length) {
-		const start = text.indexOf("![", cursor);
-		if (start === -1) break;
+	let i = 0;
+	while (i < text.length) {
+		if (text[i] !== "!" || text[i + 1] !== "[") {
+			i += 1;
+			continue;
+		}
+		const start = i;
 		let depth = 1;
 		let j = start + 2;
-		while (j < text.length && depth > 0) {
+		while (depth > 0) {
+			if (j >= text.length) break;
 			const ch = text[j]!;
 			if (ch === "\n") break;
 			if (ch === "\\") {
@@ -132,16 +145,27 @@ function stripInlineImages(text: string): { text: string; imagesStripped: number
 			else if (ch === "]") depth -= 1;
 			j += 1;
 		}
-		if (depth !== 0 || text[j] !== "(") {
-			const resume = depth !== 0 ? start + 2 : j;
-			out += text.slice(cursor, resume);
-			cursor = resume;
+		if (depth !== 0) {
+			// Unclosed alt (newline or end of input): literal through the
+			// end of the scan; never rescan the inside for nested `![`.
+			const end = Math.min(j, text.length);
+			out += text.slice(cursor, end);
+			cursor = end;
+			i = end;
+			continue;
+		}
+		if (text[j] !== "(") {
+			// Balanced `![alt]` with no destination: literal through `]`.
+			out += text.slice(cursor, j);
+			cursor = j;
+			i = j;
 			continue;
 		}
 		const alt = text.slice(start + 2, j - 1);
 		let parens = 1;
 		let k = j + 1;
-		while (k < text.length && parens > 0) {
+		while (parens > 0) {
+			if (k >= text.length) break;
 			const ch = text[k]!;
 			if (ch === "\n") break;
 			if (ch === "\\") {
@@ -153,13 +177,17 @@ function stripInlineImages(text: string): { text: string; imagesStripped: number
 			k += 1;
 		}
 		if (parens !== 0) {
-			out += text.slice(cursor, j + 1);
-			cursor = j + 1;
+			// Unclosed destination: literal through the end of the scan.
+			const end = Math.min(k, text.length);
+			out += text.slice(cursor, end);
+			cursor = end;
+			i = end;
 			continue;
 		}
 		stripped += 1;
 		out += text.slice(cursor, start) + placeholderFor(alt);
 		cursor = k;
+		i = k;
 	}
 	return { text: out + text.slice(cursor), imagesStripped: stripped };
 }
@@ -378,15 +406,36 @@ function matchesAny(patterns: readonly string[], path: string): boolean {
 	return patterns.some((pattern) => globToRegExp(pattern).test(path));
 }
 
-/** Normalise a repo-relative path; `..`, `.`, empty segments, backslashes and
- * percent-encoded slashes are refused (D25-08). */
+/** C0 controls and DEL never appear in a decoded repo path. */
+function hasControlChar(piece: string): boolean {
+	for (const ch of piece) {
+		const code = ch.codePointAt(0) ?? 0;
+		if (code <= 31 || code === 127) return true;
+	}
+	return false;
+}
+
+/** Normalise a repo-relative path; `..`, `.`, empty segments, backslashes,
+ * percent-encoded slashes, malformed encodings, and decoded `/`, `\`,
+ * control characters, or empty/`.`/`..` segments are refused (D25-08).
+ * Matching runs against the decoded path; callers rebuild the canonical
+ * URL with per-segment `encodeURIComponent`. */
 export function normalisePath(raw: string): { ok: true; path: string } | { ok: false } {
 	if (!raw || raw.includes("\\") || /%2f|%5c/i.test(raw)) return { ok: false };
-	const segments = raw.split("/");
-	if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) {
-		return { ok: false };
+	const decoded: string[] = [];
+	for (const segment of raw.split("/")) {
+		let piece: string;
+		try {
+			piece = decodeURIComponent(segment);
+		} catch {
+			return { ok: false };
+		}
+		// Decode-then-compare so `%2e%2e` counts as `..`.
+		if (piece === "" || piece === "." || piece === "..") return { ok: false };
+		if (piece.includes("/") || piece.includes("\\") || hasControlChar(piece)) return { ok: false };
+		decoded.push(piece);
 	}
-	return { ok: true, path: segments.join("/") };
+	return { ok: true, path: decoded.join("/") };
 }
 
 function extensionOf(path: string): string {
@@ -441,7 +490,12 @@ function checkShape(input: IngestPageInput, entry: DatasetEntry): CheckedPage | 
 	return {
 		path: normalised.path,
 		title: input.title?.trim() || "",
-		sourceUrl: `https://github.com/${entry.slug}/blob/${input.commit}/${normalised.path}`,
+		// Re-encode per segment so a decoded `#`, `?`, or space cannot
+		// break the stored URL back into a fragment, query, or bare space.
+		sourceUrl: `https://github.com/${entry.slug}/blob/${input.commit}/${normalised.path
+			.split("/")
+			.map((segment) => encodeURIComponent(segment))
+			.join("/")}`,
 	};
 }
 
@@ -543,6 +597,17 @@ export async function ingestPage(input: IngestPageInput, deps: IngestDeps): Prom
 	if (!entry) return { status: "refused", reason: "unknown-dataset" };
 	const checked = checkShape(input, entry);
 	if (typeof checked === "string") return { status: "refused", reason: checked };
+	// The normalised path reaches upload names, source_url, and the
+	// basename-title fallback below, so a secret in the file name refuses
+	// here before any of them (same line+rule findings shape as content).
+	const pathRedacted = redactSkillContent(checked.path);
+	if (pathRedacted.findings.length > 0) {
+		const findings: SkillRedactionHit[] = pathRedacted.findings.map((hit) => ({
+			line: hit.line,
+			rule: hit.rule,
+		}));
+		return { status: "refused", reason: "secret", findings };
+	}
 
 	const stripped = stripImages(input.content);
 	if (Buffer.byteLength(stripped.text, "utf8") > MAX_CONTENT_BYTES) {

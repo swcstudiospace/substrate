@@ -234,7 +234,9 @@ describe("deploy-release.sh", () => {
 		expect(restarted).toContain("restart substrate-collector-grok.service");
 		expect(restarted).toContain("restart substrate-collector-herdr.service");
 		expect(restarted).toContain("restart substrate-collector-muse.service");
-		expect(restarted).toContain("restart substrate-docs-refresh.service");
+		// The optional docs timer job is out of the default gate: the default
+		// deploy never restarts it (opt in via SUBSTRATE_RELEASE_UNITS).
+		expect(restarted).not.toContain("substrate-docs-refresh.service");
 		expect(restarted).not.toContain("dispatcher");
 		expect(restarted).not.toContain("skills");
 	});
@@ -348,16 +350,31 @@ describe("deploy-release.sh", () => {
 		expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA1}`);
 	});
 
-	test("a release missing the docs refresh entry is not published", () => {
+	test("a release missing the docs refresh entry publishes by default but not when opted in", () => {
+		// The entry gate follows the unit list: docs-refresh is out of the
+		// default gate, so its entry is only required when the operator
+		// lists the unit via SUBSTRATE_RELEASE_UNITS.
 		const h = harness();
 		stage(h.env, "v1", SHA1, true);
 		const tree = join(h.env.STUB_STATE ?? "", "trees", SHA1);
 		rmSync(join(tree, "packages/cli/src/docs-refresh.ts"));
-		const failed = deploy(h, ["v1"]);
+		const result = deploy(h, ["v1"]);
+		expect(result.status).toBe(0);
+		expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA1}`);
+
+		const opted = harness();
+		stage(opted.env, "v1", SHA1, true);
+		const optedTree = join(opted.env.STUB_STATE ?? "", "trees", SHA1);
+		rmSync(join(optedTree, "packages/cli/src/docs-refresh.ts"));
+		const env = {
+			...opted.env,
+			SUBSTRATE_RELEASE_UNITS: "substrate-mcp.service substrate-collector-grok.service substrate-docs-refresh.service",
+		};
+		const failed = deploy(opted, ["v1"], env);
 		expect(failed.status).not.toBe(0);
 		expect(failed.stderr).toContain("missing packages/cli/src/docs-refresh.ts");
-		expect(existsSync(join(h.root, "current"))).toBe(false);
-		expect(existsSync(join(h.log, "systemctl"))).toBe(false);
+		expect(existsSync(join(opted.root, "current"))).toBe(false);
+		expect(existsSync(join(opted.log, "systemctl"))).toBe(false);
 	});
 
 	test("a release missing a unit entry is not published", () => {
@@ -406,21 +423,43 @@ describe("deploy-release.sh", () => {
 		// The stub reports substrate-docs-refresh.service inactive (a
 		// Type=oneshot tick is never active after it runs) with
 		// Result=success and not failed: the deploy must succeed instead of
-		// rolling back on "is not active".
+		// rolling back on "is not active". The docs job is operator-opted-in
+		// here because it is out of the default gate.
 		const h = harness();
 		stage(h.env, "v1", SHA1, true);
-		const result = deploy(h, ["v1"]);
+		const env = {
+			...h.env,
+			SUBSTRATE_RELEASE_UNITS: "substrate-mcp.service substrate-collector-grok.service substrate-docs-refresh.service",
+		};
+		const result = deploy(h, ["v1"], env);
 		expect(result.status).toBe(0);
 		expect(result.stderr).not.toContain("is not active");
 		expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA1}`);
 	});
 
+	test("a failed docs refresh does not block the default deploy", () => {
+		// The optional timer job is out of the default gate: even when its
+		// last run failed, a default deploy succeeds and never restarts it.
+		const h = harness();
+		stage(h.env, "v1", SHA1, true);
+		const result = deploy(h, ["v1"], { ...h.env, FAIL_ONESHOT: "1" });
+		expect(result.status).toBe(0);
+		expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA1}`);
+		expect(readFileSync(join(h.log, "systemctl"), "utf8")).not.toContain("substrate-docs-refresh.service");
+	});
+
 	test("a failed oneshot docs refresh rolls current back", () => {
+		// Operator-opted-in oneshots keep the completion gate: a failed
+		// docs tick still rolls back when the operator lists it.
 		const h = harness();
 		stage(h.env, "v1", SHA1, true);
 		stage(h.env, "v2", SHA2, true);
-		expect(deploy(h, ["v1"]).status).toBe(0);
-		const failed = deploy(h, ["v2"], { ...h.env, FAIL_ONESHOT: "1" });
+		const env = {
+			...h.env,
+			SUBSTRATE_RELEASE_UNITS: "substrate-mcp.service substrate-collector-grok.service substrate-docs-refresh.service",
+		};
+		expect(deploy(h, ["v1"], env).status).toBe(0);
+		const failed = deploy(h, ["v2"], { ...env, FAIL_ONESHOT: "1" });
 		expect(failed.status).not.toBe(0);
 		expect(failed.stderr).toContain("substrate-docs-refresh.service");
 		expect(failed.stderr).toContain("is failed");

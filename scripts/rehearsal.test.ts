@@ -128,6 +128,7 @@ function pidGone(pid: number): boolean {
  * real fake, so init reaps it and no zombie lingers for the stop poll. The
  * poll below needs real delays: it waits on a live child reaching exec
  * (observed via /proc), which fake timers cannot drive.
+ */
 async function spawnStubFake(runDir: string): Promise<{ pid: number; dir: string }> {
 	const dir = mkdtempSync(join(tmpdir(), "rh-stubfake-"));
 	writeFileSync(join(dir, "rehearsal-fake-ragflow.ts"), "await Promise.withResolvers().promise;\n");
@@ -724,7 +725,9 @@ describe("stopRagflowFake", () => {
 			rmSync(runDir, { recursive: true, force: true });
 			rmSync(stub.dir, { recursive: true, force: true });
 		}
-	});
+		// Spawns a live stub; real child death observed via the signal probe,
+		// which fake timers cannot drive.
+	}, 30000);
 
 	test("the saved start time lets the real fake stop", async () => {
 		const runDir = mkdtempSync(join(tmpdir(), "rh-fakerun-"));
@@ -747,7 +750,9 @@ describe("stopRagflowFake", () => {
 			rmSync(runDir, { recursive: true, force: true });
 			rmSync(stub.dir, { recursive: true, force: true });
 		}
-	});
+		// Spawns a live stub; real child death observed via the signal probe,
+		// which fake timers cannot drive.
+	}, 30000);
 
 	test("down with a provisional fake-only state stops the fake without signalling pid 0", async () => {
 		// A `down` that finds pid 0 (up killed during the fake readiness
@@ -771,6 +776,8 @@ describe("stopRagflowFake", () => {
 			});
 			expect(run.code).toBe(0);
 			expect(run.out).toContain("twin never started");
+			// Real child death observed via the signal probe, which fake timers cannot drive.
+			for (let i = 0; i < 50 && !pidGone(stub.pid); i++) await Bun.sleep(100);
 			expect(pidGone(stub.pid)).toBe(true);
 			expect(`${run.out}${run.err}`).not.toContain(SENTINEL);
 		} finally {
@@ -785,7 +792,57 @@ describe("stopRagflowFake", () => {
 			rmSync(fake.dir, { recursive: true, force: true });
 			rmSync(stub.dir, { recursive: true, force: true });
 		}
-	});
+		// Spawns a live stub plus a full CLI run; real child death observed
+		// via the signal probe, which fake timers cannot drive.
+	}, 30000);
+
+	test("up after a twin crash stops the recorded fake before rebuilding", async () => {
+		// A crashed `up` leaves a dead twin pid plus a live fake; the next
+		// `up` rebuilds and must stop the recorded fake first
+		// (identity-checked) or the rebuild overwrites the saved pid and
+		// `down` can never stop the orphan.
+		const base = mkdtempSync(join(tmpdir(), "rh-up-crashed-"));
+		const fake = fakeDocker();
+		const name = "rh-crashed-fake";
+		const runDir = join(base, "substrate-rehearsal", name);
+		mkdirSync(runDir, { recursive: true, mode: 0o700 });
+		const stub = await spawnStubFake(runDir);
+		writeFileSync(
+			join(runDir, "state.json"),
+			JSON.stringify({ name, pid: 2 ** 30, startSeconds: 1, checkout: "/tmp/wt-checkout", ragflowFixture: true, ragflowPid: stub.pid }),
+		);
+		try {
+			const run = runIsolated(["up", "--name", name, "--port", "0", "--anonymous"], {
+				XDG_RUNTIME_DIR: base,
+				PATH: `${fake.bin}:${process.env.PATH ?? ""}`,
+				DOCKER_HOST: "unix:///nonexistent.sock",
+				DOCKER_CONTEXT: "",
+			});
+			// The rebuild refuses later: the fake `docker` never answers
+			// `info`, so the data-root floor proof fails — after the stop
+			// block under test has run. The recorded fake must already be
+			// stopped by then.
+			expect(run.code).toBe(2);
+			expect(run.err).toContain("could not read Docker's data root");
+			// Real child death observed via the signal probe, which fake timers cannot drive.
+			for (let i = 0; i < 50 && !pidGone(stub.pid); i++) await Bun.sleep(100);
+			expect(pidGone(stub.pid)).toBe(true);
+			expect(`${run.out}${run.err}`).not.toContain(SENTINEL);
+		} finally {
+			if (!pidGone(stub.pid) && isRagflowFixturePid(stub.pid, runDir)) {
+				try {
+					process.kill(stub.pid, "SIGKILL");
+				} catch {
+					// Gone between the check and the signal.
+				}
+			}
+			rmSync(base, { recursive: true, force: true });
+			rmSync(fake.dir, { recursive: true, force: true });
+			rmSync(stub.dir, { recursive: true, force: true });
+		}
+		// Spawns a live stub plus a full CLI run; real child death observed
+		// via the signal probe, which fake timers cannot drive.
+	}, 30000);
 });
 
 describe("resolveContainerRemoval", () => {

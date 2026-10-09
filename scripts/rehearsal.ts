@@ -379,6 +379,24 @@ function verifyRagflowFake(pid: number, runDir: string, startSeconds?: number): 
 }
 
 /**
+ * Whether pid is a zombie: dead but not yet reaped, so signal probing still
+ * reports it alive (`process.kill(pid, 0)` succeeds) while
+ * `/proc/<pid>/cmdline` is already empty. A zombie pid slot is still
+ * allocated, so it cannot have been recycled by a stranger — there is
+ * nothing left to stop. Read from `/proc/<pid>/stat` directly: unlike
+ * reaping, it works while the caller is blocked (a caller parked in
+ * `Bun.sleepSync`, like the wait below, or in a `spawnSync`'d CLI never
+ * reaps its own dead children, so `pidAlive` stays true for them).
+ */
+function isZombiePid(pid: number): boolean {
+	const stat = readText(`/proc/${pid}/stat`);
+	if (stat === null) return false;
+	const close = stat.lastIndexOf(")");
+	if (close < 0) return false;
+	return stat.slice(close + 1).trim().split(/\s+/)[0] === "Z";
+}
+
+/**
  * Stop the fake RAGFlow, verifying identity first; a reused or foreign pid
  * is never signalled. The saved start time (when the caller recorded one)
  * is compared before either signal, mirroring the twin's stop path.
@@ -392,16 +410,18 @@ export function stopRagflowFake(pid: number, runDir: string, startSeconds?: numb
 		return;
 	}
 	const deadline = Date.now() + 5000;
-	while (pidAlive(pid) && Date.now() < deadline) Bun.sleepSync(250);
-	if (pidAlive(pid)) {
-		// Re-verify before the stronger signal: the pid could have been
-		// recycled between the TERM and the KILL.
-		verifyRagflowFake(pid, runDir, startSeconds);
-		try {
-			process.kill(pid, "SIGKILL");
-		} catch {
-			// Gone between the check and the signal.
-		}
+	// A zombie is already dead: its slot cannot have been recycled, so stop
+	// waiting and skip the stronger signal instead of burning the deadline
+	// and then refusing on its emptied cmdline below.
+	while (pidAlive(pid) && !isZombiePid(pid) && Date.now() < deadline) Bun.sleepSync(250);
+	if (!pidAlive(pid) || isZombiePid(pid)) return;
+	// Re-verify before the stronger signal: the pid could have been
+	// recycled between the TERM and the KILL.
+	verifyRagflowFake(pid, runDir, startSeconds);
+	try {
+		process.kill(pid, "SIGKILL");
+	} catch {
+		// Gone between the check and the signal.
 	}
 }
 
@@ -1025,9 +1045,15 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 	const prev = readState(statePath);
 	// Pid 0 is a provisional fake-only state: `up` was interrupted or killed
 	// before the twin spawned, so it is never a live twin — fall through and
-	// rebuild. Stop the recorded fake first (identity-checked; a reused pid
-	// is never signalled) so the rebuild below does not leak it.
-	if (prev !== null && prev.pid === 0 && prev.ragflowPid !== undefined) {
+	// rebuild. A dead twin (pid !== 0 but no longer alive: crashed `up`)
+	// likewise proceeds to rebuild below, and its recorded fake would
+	// otherwise leak: the rebuild overwrites the saved fake pid and `down`
+	// can never stop the orphan. Stop the recorded fake first
+	// (identity-checked; a reused pid is never signalled) so the rebuild
+	// below does not leak it. A live twin never reaches this block —
+	// `!pidAlive(prev.pid)` is false for it — so the refuse/return paths
+	// below stop nothing.
+	if (prev !== null && prev.ragflowPid !== undefined && (prev.pid === 0 || !pidAlive(prev.pid))) {
 		try {
 			stopRagflowFake(prev.ragflowPid, runDir, prev.ragflowStartSeconds);
 		} catch {

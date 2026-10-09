@@ -258,6 +258,37 @@ describe("stripImages", () => {
 		expect(text).not.toContain("![Pic");
 		expect(text).not.toContain("[Pic0]:");
 	});
+
+	test("an image nested inside a failed candidate stays literal", () => {
+		// Single-pass scan: the outer candidate fails at end of input, so
+		// its whole extent (including the nested `![inner](x.png)`) is
+		// emitted literally instead of rescanning the inside.
+		const content = "See ![outer ![inner](x.png) now.";
+		const { text, imagesStripped } = stripImages(content);
+		expect(imagesStripped).toBe(0);
+		expect(text).toBe(content);
+	});
+
+	test("a nested candidate after a newline still strips", () => {
+		const { text, imagesStripped } = stripImages("See ![unclosed\n![real](x.png) end.");
+		expect(imagesStripped).toBe(1);
+		expect(text).toBe("See ![unclosed\n[image: real] end.");
+	});
+
+	test("a long single line of unclosed images completes quickly", () => {
+		// Unclosed destinations with no newline: the old scanner rescanned
+		// to end of line per candidate (quadratic); the single pass emits
+		// each failed extent literally once. Bare `![` repeats are avoided
+		// here because they also scan the intentionally-untouched
+		// reference regexes below, not the rewritten scanner.
+		const big = "![a](x".repeat(34_000);
+		const started = Date.now();
+		const { text, imagesStripped } = stripImages(big);
+		const elapsed = Date.now() - started;
+		expect(text).toBe(big);
+		expect(imagesStripped).toBe(0);
+		expect(elapsed).toBeLessThan(5000);
+	});
 });
 
 describe("splitSections", () => {
@@ -380,6 +411,29 @@ describe("pipeline refusals never reach RAGFlow", () => {
 		await expectPristine();
 	});
 
+	test("percent-encoded paths match exclusions after decoding", async () => {
+		// `%72` is `r`: the still-encoded path matches `docs/**/*.md` but
+		// only the decoded `docs/receipts/r.md` hits the exclusion.
+		// (`%52` decodes to `R`, a genuinely different path under
+		// case-sensitive roots, so it is not refused here.)
+		const bad = [
+			`https://github.com/ExampleOrg/test-docs/blob/${COMMIT_A}/docs/%72eceipts/r.md`,
+			`https://github.com/ExampleOrg/test-docs/blob/${COMMIT_A}/docs/receipts/%72.md`,
+			`https://github.com/ExampleOrg/test-docs/blob/${COMMIT_A}/docs/%zz.md`,
+			`https://github.com/ExampleOrg/test-docs/blob/${COMMIT_A}/docs/%/guide.md`,
+			`https://github.com/ExampleOrg/test-docs/blob/${COMMIT_A}/docs/%2e%2e/guide.md`,
+		];
+		for (const sourceUrl of bad) {
+			const result = await ingestPage(input({ sourceUrl }), {
+				registry: REGISTRY,
+				client: fake,
+				stateDir,
+			});
+			expect(result).toEqual({ status: "refused", reason: "outside-roots" });
+		}
+		await expectPristine();
+	});
+
 	test("non-text content refuses: extension, NUL, lone surrogate", async () => {
 		const byExt = await ingestPage(input({ sourceUrl: url(COMMIT_A, "docs/logo.png") }), {
 			registry: [{ ...REGISTRY[0]!, include: ["docs/**"], exclude: [] }],
@@ -459,6 +513,22 @@ describe("pipeline refusals never reach RAGFlow", () => {
 			client: fake,
 			stateDir,
 		});
+		expect(result.status).toBe("refused");
+		if (result.status !== "refused") throw new Error("unreachable");
+		expect(result.reason).toBe("secret");
+		expect(result.findings).toEqual([{ line: 1, rule: "github" }]);
+		expect(JSON.stringify(result)).not.toContain(SECRET);
+		expect(JSON.stringify(result)).not.toContain("c".repeat(36));
+		await expectPristine();
+	});
+	test("a secret in the file name refuses before upload names or titles", async () => {
+		// Harmless content with no H1: without the path check the basename
+		// fallback would publish the token as the title, upload name, and
+		// source_url.
+		const result = await ingestPage(
+			input({ sourceUrl: url(COMMIT_A, `docs/${SECRET}.md`), content: "Just some docs.\n" }),
+			{ registry: REGISTRY, client: fake, stateDir },
+		);
 		expect(result.status).toBe("refused");
 		if (result.status !== "refused") throw new Error("unreachable");
 		expect(result.reason).toBe("secret");
@@ -674,6 +744,21 @@ describe("pipeline success", () => {
 		if (result.status !== "uploaded") throw new Error("unreachable");
 		const docs = await fake.listDocuments("ds-test");
 		expect(docs[0]!.metaFields.source_url).toBe(url(COMMIT_A, "docs/guide.md"));
+	});
+
+	test("decoded spaces re-encode in stored source URLs", async () => {
+		const encoded = `https://github.com/ExampleOrg/test-docs/blob/${COMMIT_A}/docs/my%20file.md`;
+		const result = await ingestPage(input({ sourceUrl: encoded, content: "# Guide\n\nHello.\n" }), {
+			registry: REGISTRY,
+			client: fake,
+			stateDir,
+		});
+		expect(result.status).toBe("uploaded");
+		if (result.status !== "uploaded") throw new Error("unreachable");
+		expect(result.path).toBe("docs/my file.md");
+		const docs = await fake.listDocuments("ds-test");
+		expect(docs[0]!.metaFields.source_url).toBe(encoded);
+		expect(docs[0]!.metaFields.path).toBe("docs/my file.md");
 	});
 
 	test("an H1-derived title at exactly the cap uploads", async () => {

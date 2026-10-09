@@ -119,6 +119,12 @@ describe("healthStatus", () => {
 					headers: { "content-type": "application/json", ...headers },
 					body: rawBody,
 				}),
+			postBytes: (path: string, rawBody: Buffer, headers: Record<string, string> = {}) =>
+				fetch(`http://127.0.0.1:${port}${path}`, {
+					method: "POST",
+					headers: { "content-type": "application/json", ...headers },
+					body: rawBody,
+				}),
 			stop: () =>
 				new Promise<void>((resolve) => {
 					observability.stop();
@@ -599,6 +605,32 @@ describe("docs routes", () => {
 			expect(outside.status).toBe(400);
 			expect(((await outside.json()) as Record<string, unknown>).reason).toBe("outside-roots");
 			expect(fake.totalCalls()).toBe(0);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("POST /docs/ingest refuses invalid UTF-8 bytes as not-text", async () => {
+		const fake = new FakeDocs();
+		const store = ledger();
+		const { post, postBytes, stop } = await docsServe(fake, SUBSTRATE_TOKEN, store.greptime);
+		try {
+			const auth = bearer("tok-substrate");
+			const raw = Buffer.from(JSON.stringify(docsPage()), "utf8");
+			const at = raw.indexOf(Buffer.from("Hello", "utf8"));
+			expect(at).toBeGreaterThan(-1);
+			raw[at] = 0xff;
+			const refused = await postBytes("/docs/ingest", raw, auth);
+			const refusedBody = (await refused.json()) as Record<string, unknown>;
+			expect(refused.status).toBe(400);
+			expect(refusedBody.status).toBe("refused");
+			expect(refusedBody.reason).toBe("not-text");
+			expect(fake.totalCalls()).toBe(0);
+			expect(store.written).toEqual([]);
+
+			const valid = await post("/docs/ingest", docsPage(), auth);
+			expect(valid.status).toBe(200);
+			expect(((await valid.json()) as Record<string, unknown>).status).toBe("uploaded");
 		} finally {
 			await stop();
 		}

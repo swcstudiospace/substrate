@@ -102,11 +102,16 @@ acquire_lock() {
 	lockdir="$candidate"
 }
 
-	# substrate-docs-refresh.service is Type=oneshot (driven by its timer), so
-	# it is restarted with the rest but gated on completion, not activeness,
-	# in units_settled. Enabling a timer on the host is a live step.
+	# The optional substrate-docs-refresh.service is Type=oneshot (driven by
+	# its timer) and is deliberately NOT in the default unit list: restarting
+	# it here would gate every deploy on its completion, so an unset
+	# SUBSTRATE_DOCS_WATCH (exit 1) or a Git/RAGFlow blip would roll back an
+	# otherwise healthy release. An operator can still opt it in via
+	# SUBSTRATE_RELEASE_UNITS; operator-listed oneshots keep the
+	# completion (not activeness) gate in units_settled. Enabling a timer on
+	# the host is a live step.
 load_units() {
-	local raw="${SUBSTRATE_RELEASE_UNITS:-substrate-mcp.service substrate-collector-grok.service substrate-collector-herdr.service substrate-collector-muse.service substrate-docs-refresh.service}"
+	local raw="${SUBSTRATE_RELEASE_UNITS:-substrate-mcp.service substrate-collector-grok.service substrate-collector-herdr.service substrate-collector-muse.service}"
 	local unit
 	units=()
 	# Intentional word split: the operator passes a space-separated unit list.

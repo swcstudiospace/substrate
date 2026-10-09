@@ -265,6 +265,24 @@ describe("rebuild from RAGFlow", () => {
 		expect(rebuilt.versions[0]!.paths).toEqual(["docs/a.md", "docs/b.md"]);
 	});
 
+	test("same-commit different-hash uploads for one path rebuild to a single upload", async () => {
+		const hashA = "a".repeat(64);
+		const hashB = "b".repeat(64);
+		const idsA = await fake.seed("docs/a.md", COMMIT_A, hashA, 1);
+		const idsB = await fake.seed("docs/a.md", COMMIT_A, hashB, 1);
+		const rebuilt = await rebuildManifest("test-docs", fake, "ds-test");
+		const entry = rebuilt.paths["docs/a.md"]!;
+		expect(entry.documentIds).toHaveLength(1);
+		const single = entry.documentIds[0] === idsA[0] ? { hash: hashA, ids: idsA } : { hash: hashB, ids: idsB };
+		expect(entry.documentIds).toEqual(single.ids);
+		expect(entry.hash).toBe(single.hash);
+		expect(entry.meta).toHaveLength(1);
+		expect(entry.meta[0]!.contentSha256).toBe(single.hash);
+		// The versions section stays commit-grouped: both uploads are listed.
+		expect(rebuilt.versions.map((row) => row.commit)).toEqual([COMMIT_A]);
+		expect([...rebuilt.versions[0]!.documentIds].sort()).toEqual([...idsA, ...idsB].sort());
+	});
+
 	test("a corrupt file rebuilds through loadManifest", async () => {
 		const hashA = "a".repeat(64);
 		const idsA = await fake.seed("docs/a.md", COMMIT_A, hashA, 1);
