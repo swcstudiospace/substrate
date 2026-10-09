@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	acquireNameLock,
+	withNameLock,
 	buildServerSpawnArgv,
 	confirmSpawnedTwin,
 	clearDirectory,
@@ -617,23 +618,32 @@ describe("pickSmokeToken", () => {
 });
 
 describe("acquireNameLock", () => {
-	test("serializes one instance name and steals stale locks", () => {
+	test("one name is exclusive, another name is not, and a throw releases", async () => {
 		const base = mkdtempSync(join(tmpdir(), "rh-lock-"));
 		try {
-			const runDir = join(base, "substrate-rehearsal", "x");
-			const first = acquireNameLock(runDir, "x");
-			expect(() => acquireNameLock(runDir, "x")).toThrow("locked by another operation");
+			const runA = join(base, "substrate-rehearsal", "a");
+			const runB = join(base, "substrate-rehearsal", "b");
+			const first = acquireNameLock(runA, "a");
+			expect(() => acquireNameLock(runA, "a")).toThrow("locked by another operation");
+			// A second name takes its own lock while the first is held.
+			const other = acquireNameLock(runB, "b");
+			other.release();
+			other.release();
 			first.release();
-			acquireNameLock(runDir, "x").release();
-			// A lock whose holder is gone is stolen.
-			const lockDir = `${runDir}.lock`;
-			mkdirSync(lockDir);
+			acquireNameLock(runA, "a").release();
+
+			// A leftover directory and a dead pid are not a lock: the kernel
+			// already dropped the flock when the holder exited.
+			const lockDir = `${runA}.lock`;
+			mkdirSync(lockDir, { recursive: true });
 			writeFileSync(join(lockDir, "owner"), "2147483647\n");
-			acquireNameLock(runDir, "x").release();
-			// A fresh lock with no readable owner is left alone.
-			mkdirSync(lockDir);
-			expect(() => acquireNameLock(runDir, "x")).toThrow("locked by another operation");
-			rmSync(lockDir, { recursive: true, force: true });
+			acquireNameLock(runA, "a").release();
+
+			await expect(withNameLock(runA, "a", async () => {
+				expect(() => acquireNameLock(runA, "a")).toThrow("locked by another operation");
+				throw new Error("boom");
+			})).rejects.toThrow("boom");
+			acquireNameLock(runA, "a").release();
 		} finally {
 			rmSync(base, { recursive: true, force: true });
 		}
@@ -672,6 +682,34 @@ describe("per-name lock precedes every store touch", () => {
 			}
 		});
 	}
+
+	test("a different name is not blocked and still reaches docker", () => {
+		const base = mkdtempSync(join(tmpdir(), "rh-lock-other-"));
+		const fake = fakeDocker();
+		const held = acquireNameLock(join(base, "substrate-rehearsal", "rh-locked"), "rh-locked");
+		try {
+			const other = runIsolated(["down", "--name", "rh-other"], {
+				XDG_RUNTIME_DIR: base,
+				PATH: `${fake.bin}:${process.env.PATH ?? ""}`,
+			});
+			expect(other.code).toBe(0);
+			expect(other.out).toContain("nothing to remove");
+			expect(other.err).not.toContain("locked");
+			const calls = dockerCalls(fake.log);
+			expect(calls).not.toBe("");
+			const same = runIsolated(["down", "--name", "rh-locked"], {
+				XDG_RUNTIME_DIR: base,
+				PATH: `${fake.bin}:${process.env.PATH ?? ""}`,
+			});
+			expect(same.code).toBe(2);
+			expect(same.err).toContain("locked by another operation");
+			expect(dockerCalls(fake.log)).toBe(calls);
+		} finally {
+			held.release();
+			rmSync(base, { recursive: true, force: true });
+			rmSync(fake.dir, { recursive: true, force: true });
+		}
+	});
 });
 
 describe("confirmSpawnedTwin", () => {

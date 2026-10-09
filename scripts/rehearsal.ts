@@ -24,12 +24,12 @@ import {
 	readFileSync,
 	readlinkSync,
 	rmSync,
-	statSync,
 	statfsSync,
 	writeFileSync,
 } from "node:fs";
 import { createServer } from "node:net";
 import { dirname, join } from "node:path";
+import { dlopen, FFIType, read } from "bun:ffi";
 import {
 	buildRehearsalEnv,
 	consumerEnvRecord,
@@ -659,17 +659,54 @@ export function killVerifiedSpawn(pid: number, checkout: string, startSeconds: n
 /**
  * An exclusive per-instance lock, held across startup and teardown: a
  * concurrent `up`/`down` on one name must not read state or remove
- * containers under each other. The lock is a directory (mkdir is atomic)
- * beside the run dir; the owner file names the holder pid. A lock whose
- * holder is gone is stolen; a fresh lock with an unreadable owner is left
- * alone (its holder may be mid-write) — remove it by hand if it is stale.
+ * containers under each other. The lock is `flock(2)` on a private
+ * directory beside the run dir — one directory per name, so two names never
+ * contend. A directory create is not the lock: two processes can both
+ * decide a leftover directory is stale, delete it, and both proceed to
+ * remove containers. The kernel drops the flock when this descriptor
+ * closes, including when the holder is killed. `release` runs from a
+ * `finally`, so a thrown refusal unlocks too.
  */
 export interface NameLock {
 	release(): void;
 }
 
-/** A lock with no readable owner is stolen only after this age. */
-export const LOCK_STALE_MS = 60_000;
+/** Linux `flock(2)` operations. `LOCK_EX | LOCK_NB` fails instead of waiting. */
+const LOCK_EX = 2;
+const LOCK_NB = 4;
+const LOCK_UN = 8;
+/** Linux `EAGAIN`: the non-blocking lock is already held. */
+const EAGAIN = 11;
+
+interface FlockLib {
+	flock(fd: number, operation: number): number;
+	errno(): number;
+}
+
+let flockLib: FlockLib | null = null;
+
+function rehearsalFlock(): FlockLib {
+	if (flockLib !== null) return flockLib;
+	try {
+		const lib = dlopen("libc.so.6", {
+			flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
+			__errno_location: { args: [], returns: FFIType.ptr },
+		});
+		const opened: FlockLib = {
+			flock: (fd, operation) => lib.symbols.flock(fd, operation),
+			errno: () => {
+				const loc = lib.symbols.__errno_location();
+				return loc === null ? 0 : read.i32(loc, 0);
+			},
+		};
+		flockLib = opened;
+		return opened;
+	} catch (cause) {
+		if (cause instanceof RehearsalRefused) throw cause;
+		const detail = cause instanceof Error ? cause.message : "unknown";
+		throw new RehearsalRefused(`could not load the instance lock (${detail})`);
+	}
+}
 
 function readLockOwner(lockDir: string): number | null {
 	try {
@@ -680,46 +717,72 @@ function readLockOwner(lockDir: string): number | null {
 	}
 }
 
-function lockOwnerAlive(pid: number): boolean {
+function dropFlock(lib: FlockLib, fd: number): void {
 	try {
-		process.kill(pid, 0);
-		return true;
-	} catch {
-		return false;
+		lib.flock(fd, LOCK_UN);
+	} finally {
+		try {
+			closeSync(fd);
+		} catch {
+			// Closing is what frees the lock if the unlock call failed.
+		}
 	}
 }
 
 export function acquireNameLock(runDir: string, name: string): NameLock {
-	// The base must exist before the atomic mkdir below; runDir itself may
-	// not exist yet on a fresh `up`, so harden the parent instead.
+	// runDir itself may not exist yet on a fresh `up`; the lock lives beside
+	// it, so only the parent has to exist before the directory is created.
 	ensurePrivateDir(dirname(runDir));
 	const lockDir = `${runDir}.lock`;
-	for (;;) {
+	ensurePrivateDir(lockDir);
+	const lib = rehearsalFlock();
+	const fd = openSync(lockDir, "r");
+	if (lib.flock(fd, LOCK_EX | LOCK_NB) !== 0) {
+		const err = lib.errno();
 		try {
-			mkdirSync(lockDir);
-		} catch (cause) {
-			if ((cause as NodeJS.ErrnoException)?.code !== "EEXIST") throw cause;
-			const owner = readLockOwner(lockDir);
-			if (owner !== null && lockOwnerAlive(owner)) {
-				throw new RehearsalRefused(`instance ${name} is locked by another operation (pid ${owner})`);
-			}
-			if (owner === null) {
-				let age: number | null = null;
-				try {
-					age = Date.now() - statSync(lockDir).mtimeMs;
-				} catch {
-					continue; // Raced a release; retry the mkdir.
-				}
-				if (age < LOCK_STALE_MS) {
-					throw new RehearsalRefused(`instance ${name} is locked by another operation; remove ${lockDir} if it is stale`);
-				}
-			}
-			// Stale lock: the holder is gone (or never finished writing).
-			rmSync(lockDir, { recursive: true, force: true });
-			continue;
+			closeSync(fd);
+		} catch {
+			// The lock was not taken; a close failure changes nothing.
 		}
-		writeFileSync(join(lockDir, "owner"), `${process.pid}\n`);
-		return { release: () => { rmSync(lockDir, { recursive: true, force: true }); } };
+		if (err === EAGAIN) {
+			const owner = readLockOwner(lockDir);
+			const who = owner !== null ? ` (pid ${owner})` : "";
+			throw new RehearsalRefused(`instance ${name} is locked by another operation${who}`);
+		}
+		throw new RehearsalRefused(`could not lock instance ${name} (errno ${err})`);
+	}
+	try {
+		writeMode(join(lockDir, "owner"), `${process.pid}\n`);
+	} catch (cause) {
+		dropFlock(lib, fd);
+		throw cause;
+	}
+	let released = false;
+	return {
+		release() {
+			if (released) return;
+			released = true;
+			try {
+				// Drop the pid file while we still hold the flock, so a waiter
+				// never reports a pid that already released.
+				rmSync(join(lockDir, "owner"), { force: true });
+			} finally {
+				dropFlock(lib, fd);
+			}
+		},
+	};
+}
+
+/**
+ * Hold the per-name lock around `body`. `release` runs when `body` returns
+ * and when it throws, so a refusal mid-startup cannot leave the name locked.
+ */
+export async function withNameLock<T>(runDir: string, name: string, body: () => Promise<T>): Promise<T> {
+	const lock = acquireNameLock(runDir, name);
+	try {
+		return await body();
+	} finally {
+		lock.release();
 	}
 }
 
@@ -782,12 +845,7 @@ export function installUpCleanup(cleanup: () => void): () => void {
 
 async function runUp(opts: UpOptions, checkout: string): Promise<number> {
 	const runDir = runDirFor(opts.name);
-	const lock = acquireNameLock(runDir, opts.name);
-	try {
-		return await runUpInner(opts, checkout, runDir);
-	} finally {
-		lock.release();
-	}
+	return await withNameLock(runDir, opts.name, () => runUpInner(opts, checkout, runDir));
 }
 
 async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Promise<number> {
@@ -1135,12 +1193,7 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 
 async function runDown(name: string): Promise<number> {
 	const runDir = runDirFor(name);
-	const lock = acquireNameLock(runDir, name);
-	try {
-		return await runDownInner(name, runDir);
-	} finally {
-		lock.release();
-	}
+	return await withNameLock(runDir, name, () => runDownInner(name, runDir));
 }
 
 async function runDownInner(name: string, runDir: string): Promise<number> {
@@ -1192,12 +1245,7 @@ async function runDownInner(name: string, runDir: string): Promise<number> {
 
 async function runStatus(name: string): Promise<number> {
 	const runDir = runDirFor(name);
-	const lock = acquireNameLock(runDir, name);
-	try {
-		return await runStatusInner(name, runDir);
-	} finally {
-		lock.release();
-	}
+	return await withNameLock(runDir, name, () => runStatusInner(name, runDir));
 }
 
 /**
@@ -1360,12 +1408,7 @@ export function smokeToolResult(attempt: SmokeAttempt): Record<string, unknown> 
  */
 async function runSmoke(name: string): Promise<number> {
 	const runDir = runDirFor(name);
-	const lock = acquireNameLock(runDir, name);
-	try {
-		return await runSmokeInner(name, runDir);
-	} finally {
-		lock.release();
-	}
+	return await withNameLock(runDir, name, () => runSmokeInner(name, runDir));
 }
 
 /**
