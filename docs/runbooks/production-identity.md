@@ -252,14 +252,19 @@ summed request counts (sum of point `value` fields), not point counts.
 ## Rollback
 
 Operator only. Rollback restores the pre-switch backup, taken before
-switch-on, so the anonymous-access setting comes back with the tokens:
+switch-on, so the anonymous-access setting comes back with the tokens —
+but keeps the window's handoff key and IDs for verification:
 
 ```sh
+handoff="$(grep -E '^[[:space:]]*SUBSTRATE_HANDOFF_KEY(_ID|_PREV|_PREV_ID)?=' "$SERVER_ENV" || true)"
 cp "$SERVER_ENV.bak-pre-switch" "$SERVER_ENV"
+printf '%s\n' "$handoff" >> "$SERVER_ENV"
 systemctl restart substrate-mcp
 bun run parity:check
 ```
 
+The pre-switch backup predates the provisioned key: a whole-file restore
+alone leaves handoffs created during the window at `no-keys-configured`.
 Take that backup before switch-on:
 
 ```sh
@@ -269,8 +274,8 @@ cp "$SERVER_ENV" "$SERVER_ENV.bak-pre-switch"
 Commenting only the token lines is not a rollback: with
 `SUBSTRATE_ALLOW_ANONYMOUS=0` still set, the server requires a
 recognized bearer while none exists, and every route — including
-`healthz` and the parity check — answers 401. Always restore the whole
-file. `SERVER_ENV` is the server env file.
+`healthz` and the parity check — answers 401. `SERVER_ENV` is the
+server env file. The commands above name variables only, never values.
 
 ## Rotation
 
