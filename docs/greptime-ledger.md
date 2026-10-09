@@ -66,6 +66,69 @@ CREATE TABLE IF NOT EXISTS "agent_events" (
 Every identifier is quoted: Greptime's parser reserves `id`, among others, and
 rejects it as a bare column name.
 
+### `event_ingest`: the order the hourly anchor reads
+
+`migrate()` also creates the ingest table, idempotent on every boot:
+
+```sql
+CREATE TABLE IF NOT EXISTS "event_ingest" (
+  "ingested_at" TIMESTAMP TIME INDEX,
+  "event_id"    STRING,
+  "event_ts"    TIMESTAMP,
+  "graph_id"    STRING
+) WITH ('append_mode' = 'true')
+```
+
+`agent_events.ts` is the **collector's** clock, so a collector that replays an old
+event, or whose clock is wrong, would drop it into an hour whose root was already
+anchored. `ingested_at` is the substrate's own clock, taken immediately before the
+`INSERT`, so which hour an event belongs to can no longer change once that hour has
+closed. `event_ts` and `graph_id` are copies for the reader's benefit; neither takes
+part in ordering. The table keeps `append_mode` for the same reason `agent_events`
+does, and unlike `agent_events` it has **no** plain-`CREATE` fallback: without
+`append_mode` two events ingested in the same millisecond would collapse into one
+record, so a server that rejects the option gets a boot warning instead.
+
+### `anchors`: one row per anchored hour
+
+```sql
+CREATE TABLE IF NOT EXISTS "anchors" (
+  "period_start" TIMESTAMP TIME INDEX,
+  "period_end"   TIMESTAMP,
+  "root"         STRING,
+  "event_count"  BIGINT,
+  "memo"         STRING,
+  "tx_sig"       STRING,
+  "signer"       STRING,
+  "cluster"      STRING,
+  "slot"         BIGINT,
+  "anchored_at"  TIMESTAMP,
+  "stale_hashes" BIGINT
+)
+```
+
+This is the shape production already has (11 columns, in this order, `ENGINE=mito`,
+no tag, no rows; read-only check on 2026-10-09). Nothing reads or writes this table
+yet: the hourly anchor job (Phase 28) does. Two things it inherits:
+
+- The table has no primary key beyond the time index, so rows that share a
+  `period_start` **collapse, last write wins**. Re-anchoring an hour replaces its row
+  instead of adding a second, which is why the job must read the existing row before
+  it writes one.
+- `stale_hashes` exists only to match production. Leave it `NULL` until something
+  gives it a meaning.
+
+`migrate()` never alters this table. `CREATE TABLE IF NOT EXISTS` is a no-op against
+a table that exists, so boot asks `information_schema` for the live column list and
+adds a warning only when it **definitely** differs from the shape above; an empty or
+failed read stays silent, since a fresh store has no table yet. An earlier,
+five-column `anchors` keyed by `root` is not the production table and would not
+have matched.
+
+`agent_events` also has an `ingested_at` column in production, left by an earlier
+cutover. This code neither reads nor writes it: ingest order lives in `event_ingest`,
+and `agent_events` rows, hashes and columns are never altered.
+
 ### Why `append_mode` is not optional
 
 Without it, Greptime treats primary key plus time index as the row's identity
@@ -236,6 +299,27 @@ regardless, because failing open is the *client's* job and this surface owes its
 caller the truth. Reported errors are redacted, since a connection failure can
 quote a URL.
 
+**Ingest order.** Every stored event gets one record in `event_ingest`, written
+*after* its row so a record never names an event that does not exist. An event
+belongs to the UTC hour of its **first** record, and its position in that hour is
+its rank by `ingested_at`, then by `event_id` in code-unit order. The server only
+filters: TypeScript collapses duplicate records (a retry after an ambiguous timeout
+can leave two), drops an event that has an earlier record, and sorts, so neither the
+order rows come back in nor how writes interleaved can move a root. Collector `ts`
+plays no part: a backdated event sits in the hour it was ingested in. The leaves of
+the hour's Merkle root are the events' `agent_events` hashes, read by id; a member
+with no row, a hash that is not 64 lowercase hex, or two stored hashes for one id
+throws naming the event, so a digest is never a partial root.
+
+An hour counts as closed 300 000 ms after it ends (`INGEST_LAG_MS`), far above the
+write timeout. If a record lands after its hour already closed, the substrate writes
+one journal line naming the event and the hour, since a root computed earlier would
+differ when recomputed. If the record cannot be written at all, the event is still
+stored: `emit` answers `stored: true` with a warning that no hourly anchor will cover
+it, and the caller must not re-emit it, because a retry would store a second event.
+There is **no backfill**: events stored before this table first existed belong to no
+hour, and the first anchored hour is Phase 28's decision.
+
 ## Reading the ledger
 
 `events_query` is the read counterpart of `events_emit`, and the reason a desk seat
@@ -358,11 +442,18 @@ It prints the host and database only — no credential — and checks:
    the check that says the quoting dialect is right, and so that the chain is
    verifiable at all
 6. the chain over those events verifies
-7. `Substrate.queryEvents` reads those events back: the hash each was stored
+7. nine more events from three sessions, one backdated to September, each leave
+   exactly one `event_ingest` record; `Substrate.hourDigest` over every hour they
+   touched returns the same root and memo twice, holds the burst in ingest order
+   (recomputed from the raw rows), puts the backdated event in the hour it was
+   ingested in and leaves the September hour empty, and the chain and every stored
+   hash are unchanged afterwards. The burst is checked as a subset of each hour,
+   never against an exact count, because the ledger already holds the earlier events
+8. `Substrate.queryEvents` reads those events back: the hash each was stored
    under, the `ts` round-tripping from Greptime's integer to the ISO string the
    chain hashed, `payload` in and out, `truncated`, and an ISO time window
    bounding a live `TIMESTAMP` column — the statement parsing no mock can prove
-8. the client refuses `UPDATE` and `DELETE`
+9. the client refuses `UPDATE` and `DELETE`
 
 The rows it writes **stay in the ledger** — it is append-only, so there is
 nothing to clean up. They are tagged with a `smoke-` `graph_id` and `session_id`
@@ -384,6 +475,23 @@ INFRA's to run. So the deployed GreptimeDB does accept
 `WITH ('append_mode' = 'true')`, the recreate has happened, and the default
 fail-closed write path is writable there. That run was not made from this session
 and is recorded here as reported, not as something this repo verified.
+
+**Ingest order (Phase 27):** proved on **scratch** GreptimeDB v0.14.4 only, 28/28:
+
+```sh
+bun run rehearsal up --name p27
+set -a; . "${XDG_RUNTIME_DIR:-/tmp}/substrate-rehearsal/p27/stores.env"; set +a
+bun run smoke:greptime
+bun run rehearsal down --name p27
+```
+
+Production runs v1.1.4, so how a v1.1.4 server parses the new statements is **not**
+yet proved, and `event_ingest` does not exist there until the merged code first
+boots (`migrate()` creates it), which is a deploy and the operator's step. The
+read-only check of production's `anchors` (11 columns, no rows) is recorded above.
+The memo program-id comment in `packages/ledger` (`Memo v4 … written by solana-cli
+4.2.2`) is carried over unverified; the first devnet transaction in Phase 28 is the
+first chance to check it.
 
 If the table is ever recreated again while `substrate-mcp` keeps running, no
 restart is needed: `ensureAppendMode` re-checks within its TTL and both the write
