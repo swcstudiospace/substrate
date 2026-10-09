@@ -276,28 +276,30 @@ interface Candidate {
  *
  * Whitespace is not enough: `a / b` is division, and treating it as a regex
  * would swallow a `//` comment later on the line. `}` and `)` are excluded for
- * the same reason (`{ a: 1 } / 2`). A newline is a fresh statement, so a `/`
- * there can open a literal.
+ * the same reason (`{ a: 1 } / 2`). A newline keeps the previous token, so
+ * `done\n / total` stays division. A property named like a keyword
+ * (`stats.return`) is not that keyword.
  */
 const REGEX_OPENER = new Set(["=", "(", ",", ":", ";", "!", "&", "|", "?", "{", "[", "~", "^", "<", ">", "*", "%"]);
 const REGEX_KEYWORD = new Set(["return", "throw", "case", "else", "typeof", "void", "delete", "yield", "await", "do", "of", "in", "instanceof"]);
 const REGEX_FLAG = new Set(["d", "g", "i", "m", "s", "u", "y", "v"]);
 
-function previousNonSpace(chars: string[], from: number): number {
+/** Index of the previous token, skipping spaces and line breaks. */
+function previousToken(chars: string[], from: number): number {
 	let j = from;
-	while (j >= 0 && (chars[j] === " " || chars[j] === "\t" || chars[j] === "\r")) j--;
+	while (j >= 0 && (chars[j] === " " || chars[j] === "\t" || chars[j] === "\r" || chars[j] === "\n")) j--;
 	return j;
 }
 
 /** Whether `/` at `slash` can open a regex, from the token before it. */
 function regexOpener(chars: string[], slash: number): boolean {
-	const j = previousNonSpace(chars, slash - 1);
-	if (j < 0 || chars[j] === "\n") return true;
+	const j = previousToken(chars, slash - 1);
+	if (j < 0) return true;
 	const c = chars[j] ?? "";
 	if (c === ">" && chars[j - 1] === "=") return true;
 	if (c === "+" || c === "-") {
 		if (chars[j - 1] !== c) return true;
-		const k = previousNonSpace(chars, j - 2);
+		const k = previousToken(chars, j - 2);
 		const prev = k >= 0 ? chars[k] : "";
 		// Postfix `++`/`--` ends an expression, so the slash is division.
 		return !(prev !== undefined && (/[A-Za-z0-9_$)\]]/.test(prev) || prev === "}"));
@@ -306,7 +308,10 @@ function regexOpener(chars: string[], slash: number): boolean {
 	if (/[A-Za-z0-9_$]/.test(c)) {
 		let k = j;
 		while (k >= 0 && /[A-Za-z0-9_$]/.test(chars[k] ?? "")) k--;
-		return REGEX_KEYWORD.has(chars.slice(k + 1, j + 1).join(""));
+		const word = chars.slice(k + 1, j + 1).join("");
+		// `stats.return` is a property access, not the keyword.
+		if (!REGEX_KEYWORD.has(word) || chars[k] === ".") return false;
+		return true;
 	}
 	return false;
 }
@@ -839,5 +844,14 @@ describe("detector self-tests", () => {
 		expect(rule4Offenders("shape.ts", `const punctuation = /[/*]/g; // ${shape}\nconst ok = 1;`)).toEqual([]);
 		expect(rule4Offenders("shape.ts", `const ratio = a / b; // ${shape}`)).toEqual([]);
 		expect(rule4Offenders("shape.ts", `const ratio = done / total > 0.5 ? 1 : 0; // ${shape}`)).toEqual([]);
+		// Division continued on the next line, and division after a property
+		// named like a keyword, must not eat the comment.
+		expect(rule4Offenders("shape.ts", `const ratio = done\n / total; // Example: ${shape}`)).toEqual([]);
+		expect(rule4Offenders("shape.ts", `const ratio = stats.return / total; // Example: ${shape}`)).toEqual([]);
+		// A keyword still opens a literal, including across a line break.
+		expect(rule4Offenders("shape.ts", `return\n${shape};`)).toEqual(["shape.ts:2 rule-4-detector"]);
+		expect(rule4Offenders("shape.ts", `const ratio = stats.return / total;\nconst found = ${shape};`)).toEqual([
+			"shape.ts:2 rule-4-detector",
+		]);
 	});
 });
