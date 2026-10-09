@@ -52,6 +52,7 @@ import {
 	type HandoffVerdict,
 } from "./handoff.ts";
 import { leaseView, normalizeTtlSeconds, type LeaseView } from "./lease.ts";
+import { createMirror, type Mirror, type MirrorContext, type MirrorFailure, type MirrorOp } from "./mirror.ts";
 import { normalizeSubject } from "./memory-policy.ts";
 import { governMemoryWrite } from "./memory-write.ts";
 import { redact, type SkillDocExampleRule } from "./redact.ts";
@@ -562,6 +563,8 @@ export function parseMemorySearch(request: MemorySearchRequest): MemorySearch {
 export class Substrate {
 	readonly index: IndexStore | null;
 	readonly greptime: GreptimeClient | null;
+	/** The claim mirror; null when neither tracker key is configured. Tests inject a fake through the seam. */
+	readonly mirror: Mirror | null;
 	/** The one git path proposals take; inert until plan 02's `proposeSkill` calls it. */
 	readonly skills: SkillProposer;
 	/** The desktop driver. Production wiring lives only in index.ts, so tests never reach docker by accident. */
@@ -576,6 +579,7 @@ export class Substrate {
 			index?: IndexStore | null;
 			greptime?: GreptimeClient | null;
 			skills?: SkillProposer;
+			mirror?: Mirror | null;
 			cache?: ReadThroughCache;
 			desktop?: DesktopDriver | null;
 		},
@@ -585,6 +589,12 @@ export class Substrate {
 			stores?.index !== undefined ? stores.index : config.postgresUrl ? new IndexStore(config.postgresUrl) : null;
 		this.greptime =
 			stores?.greptime !== undefined ? stores.greptime : config.greptime ? new GreptimeClient(config.greptime) : null;
+		this.mirror =
+			stores?.mirror !== undefined
+				? stores.mirror
+				: config.linearApiKey || config.notionApiKey
+					? createMirror(config)
+					: null;
 		this.skills =
 			stores?.skills ??
 			createSkillProposer({
@@ -1235,6 +1245,36 @@ export class Substrate {
 	}
 
 	/**
+	 * Mirror one final lease decision out to the trackers, awaited inside the
+	 * tool call. The decision already stands: a mirror failure becomes one
+	 * `mirror.failed` warning per failed target and never rolls anything back.
+	 * A mirror that throws despite its never-throws contract is one warning,
+	 * not a failed tool call.
+	 */
+	private async runMirror(ctx: MirrorContext, op: MirrorOp): Promise<void> {
+		if (!this.mirror) return;
+		let failures: MirrorFailure[];
+		try {
+			failures = await this.mirror[op](ctx);
+		} catch (cause) {
+			failures = [
+				{ target: "linear", op, reason: (cause instanceof Error ? cause.message : String(cause)).slice(0, 300) },
+			];
+		}
+		for (const failure of failures) {
+			await this.emit({
+				surface: ctx.holder,
+				kind: "warning",
+				summary: `claim mirror failed: ${failure.target} ${failure.op}`,
+				graph_id: ctx.graphId,
+				node_id: ctx.nodeId,
+				session_id: ctx.sessionId,
+				payload: { action: "mirror", target: failure.target, op: failure.op, reason: failure.reason },
+			}).catch(() => undefined);
+		}
+	}
+
+	/**
 	 * Take or extend the lease on a node, and stand by the hold only if it was recorded.
 	 *
 	 * The index decides — one statement, compare-and-swapped on the lease epoch,
@@ -1366,6 +1406,29 @@ export class Substrate {
 
 		const granted = verdict.decision === "granted";
 		if (result.claimed) await this.bumpGraph(graphId);
+
+		// Mirror only a hold that stands: granted, reclaimed or stolen. A renewed
+		// claim, a denial and a ledger-revoked claim write nothing — a losing
+		// claimant writes nothing. Awaited inside the tool call, after the
+		// decision is final; a mirror failure cannot change the outcome below.
+		if (
+			granted &&
+			(decision.action === "granted" || decision.action === "reclaimed" || decision.action === "stolen")
+		) {
+			await this.runMirror(
+				{
+					graphId,
+					nodeId,
+					holder: surface,
+					sessionId,
+					...(decision.action === "stolen" && decision.evicted ? { evictedHolder: decision.evicted.surface } : {}),
+					epoch: result.lease.epoch,
+					linearRef: result.node.linear_issue_id ?? result.node.linear_identifier ?? null,
+					notionPage: result.node.notion_page ?? null,
+				},
+				decision.action === "stolen" ? "steal" : "claim",
+			);
+		}
 		return {
 			claimed: granted,
 			node: { ...result.node, lease_id: null },
@@ -1447,6 +1510,35 @@ export class Substrate {
 		if (result.released && decision.ok && decision.action !== "noop") {
 			await this.bumpGraph(graphId);
 		}
+
+
+		// Mirror released and forced only, reading the holder off the decision —
+		// the row is already cleared. Noop and every refusal write nothing. A
+		// release carrying alsoSetState is completeNode's fenced completion, not
+		// a release: plan 23-04 owns its mirror (close/done), so it is skipped
+		// here rather than mirrored as a release.
+		if (
+			result.released &&
+			decision.ok &&
+			alsoSetState === undefined &&
+			(decision.action === "released" || decision.action === "forced")
+		) {
+			const departing = decision.holder ?? decision.evicted;
+			if (departing) {
+				await this.runMirror(
+					{
+						graphId,
+						nodeId,
+						holder: departing.surface,
+						sessionId: departing.session_id,
+						epoch: decision.observed_epoch,
+						linearRef: result.node.linear_issue_id ?? result.node.linear_identifier ?? null,
+						notionPage: result.node.notion_page ?? null,
+					},
+					decision.action === "forced" ? "force" : "release",
+				);
+			}
+		}
 		return {
 			released: result.released,
 			action: decision.ok ? decision.action : null,
@@ -1516,6 +1608,24 @@ export class Substrate {
 				payload: { action: "expired", lease_epoch: lease.lease_epoch, expired_at: lease.expired_at, ...(lease.holder ? { evicted: lease.holder } : {}) },
 				...(await this.placeOf(lease.graph_id)),
 			}).catch(() => undefined);
+
+			// Mirror each reaped lease as expired, using the tracker refs the
+			// reaper CTE already carried — no second read. A reaped row always
+			// had a holder; without one there is nobody to attribute, so skip.
+			if (lease.holder) {
+				await this.runMirror(
+					{
+						graphId: lease.graph_id,
+						nodeId: lease.node_id,
+						holder: lease.holder.surface,
+						sessionId: lease.holder.session_id,
+						epoch: lease.lease_epoch,
+						linearRef: lease.linear_issue_id ?? lease.linear_identifier ?? null,
+						notionPage: lease.notion_page ?? null,
+					},
+					"expire",
+				);
+			}
 		}
 		return reaped;
 	}

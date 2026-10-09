@@ -2285,3 +2285,362 @@ describe("proposeSkill", () => {
 	});
 });
 
+describe("claim mirror hooks (D23-01, D23-08, D23-17)", () => {
+	interface MirrorCall {
+		op: string;
+		ctx: {
+			graphId: string;
+			nodeId: string;
+			holder: string;
+			sessionId: string;
+			evictedHolder?: string;
+			epoch: number;
+			linearRef: string | null;
+			notionPage: string | null;
+		};
+	}
+
+	interface MirrorFailureStub {
+		target: "linear" | "notion";
+		op: string;
+		reason: string;
+	}
+
+	interface FakeMirror {
+		calls: MirrorCall[];
+		fail: (next: MirrorFailureStub[]) => void;
+		explode: (error: Error) => void;
+		mirror: Record<
+			"claim" | "steal" | "release" | "expire" | "force" | "review" | "done" | "close",
+			(ctx: MirrorCall["ctx"]) => Promise<MirrorFailureStub[]>
+		>;
+	}
+
+	/** A Mirror stand-in recording every op call and answering with queued failures. */
+	function fakeMirror(): FakeMirror {
+		const calls: MirrorCall[] = [];
+		let failures: MirrorFailureStub[] = [];
+		let boom: Error | null = null;
+		const record =
+			(op: string) =>
+			async (ctx: MirrorCall["ctx"]): Promise<MirrorFailureStub[]> => {
+				if (boom) throw boom;
+				calls.push({ op, ctx });
+				return failures.map((f) => ({ ...f, op }));
+			};
+		return {
+			calls,
+		fail: (next: MirrorFailureStub[]) => {
+				failures = next;
+			},
+			explode: (error: Error) => {
+				boom = error;
+			},
+			mirror: {
+				claim: record("claim"),
+				steal: record("steal"),
+				release: record("release"),
+				expire: record("expire"),
+				force: record("force"),
+				review: record("review"),
+				done: record("done"),
+				close: record("close"),
+			},
+		};
+	}
+
+	function claimedSubstrate(
+		claim: { action?: ClaimAction; claimed?: boolean; evicted?: { surface: string; session_id: string } },
+		mirror: FakeMirror,
+		env: Record<string, string> = {},
+	) {
+		const stores = stubStores({ repo: "swcstudiospace/x", branch: "main" }, claim);
+		const substrate = new Substrate(loadConfig(env), {
+			index: stores.index as never,
+			greptime: stores.greptime as never,
+			mirror: mirror.mirror as never,
+		});
+		return { stores, substrate };
+	}
+
+	const mirrorWarnings = (emitted: SubstrateEvent[]) =>
+		emitted.filter((e) => e.payload["action"] === "mirror");
+
+	test("a granted claim mirrors once with holder, session, epoch and refs", async () => {
+		const mirror = fakeMirror();
+		const { substrate } = claimedSubstrate({ action: "granted" }, mirror);
+
+		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
+
+		expect(result.claimed).toBe(true);
+		expect(mirror.calls).toHaveLength(1);
+		expect(mirror.calls[0]).toEqual({
+			op: "claim",
+			ctx: {
+				graphId: "ut-1",
+				nodeId: "n4",
+				holder: "omp",
+				sessionId: "sess-1",
+				epoch: 1,
+				linearRef: "SPE-123",
+				notionPage: null,
+			},
+		});
+	});
+
+	test("a stolen claim mirrors as steal with the evicted holder", async () => {
+		const mirror = fakeMirror();
+		const { substrate } = claimedSubstrate(
+			{ action: "stolen", evicted: { surface: "cursor", session_id: "sess-9" } },
+			mirror,
+		);
+
+		await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
+
+		expect(mirror.calls).toHaveLength(1);
+		expect(mirror.calls[0]?.op).toBe("steal");
+		expect(mirror.calls[0]?.ctx.evictedHolder).toBe("cursor");
+	});
+
+	test("denied, renewed and ledger-revoked claims make zero mirror calls", async () => {
+		for (const action of ["denied", "renewed"] as const) {
+			const mirror = fakeMirror();
+			const { substrate } = claimedSubstrate({ action, claimed: action !== "denied" }, mirror);
+			await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
+			expect(mirror.calls).toEqual([]);
+		}
+		// Ledger-revoked: the hold was granted by the index but withdrawn when
+		// its event missed the ledger, so the mirror must not have run for it.
+		const revoked = fakeMirror();
+		const revokedIndex = {
+			claimNode: async (graph_id: string, node_id: string) => ({
+				claimed: true,
+				node: { graph_id, node_id, linear_identifier: "SPE-123" },
+				lease: { lease_id: "lse_new", epoch: 4, expires_at: null },
+				decision: {
+					action: "granted" as ClaimAction,
+					granted: true,
+					lease_id: "lse_new",
+					epoch: 4,
+					observed_epoch: 3,
+					ttl_seconds: 900,
+					evicted: null,
+					holder: { surface: "omp" as Surface, session_id: "sess-1" },
+					observed_expiry: null,
+				},
+			}),
+			getGraph: async () => ({ repo: "swcstudiospace/x", branch: "main" }),
+			releaseNode: async (graph_id: string, node_id: string) => ({
+				released: true,
+				node: { graph_id, node_id },
+				decision: {
+					ok: true as const,
+					action: "released" as const,
+					lease_id: "lse_new",
+					evicted: null,
+					holder: { surface: "omp" as Surface, session_id: "sess-1" },
+					observed_epoch: 4,
+				},
+			}),
+		};
+		const revokedSubstrate = new Substrate(loadConfig({}), {
+			index: revokedIndex as never,
+			greptime: {
+				ensureAppendMode: async () => true,
+				lastHash: async () => null,
+				insertEvent: async () => {
+					throw new Error("greptime unreachable: connect ETIMEDOUT");
+				},
+			} as never,
+			mirror: revoked.mirror as never,
+		});
+		const outcome = await revokedSubstrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
+		expect(outcome.decision).toBe("revoked");
+		expect(revoked.calls).toEqual([]);
+	});
+
+	/** An index stub with one live lease, judged by the real decideRelease. */
+	function leasedSubstrate(leaseId: string | null, mirror: FakeMirror) {
+		const node = {
+			graph_id: "ut-1",
+			node_id: "n2",
+			linear_issue_id: "uuid-issue-2",
+			linear_identifier: "SPE-123",
+			notion_page: "https://notion.so/row-2",
+			claimed_by: "hermes",
+			claim_session: "sess-a",
+			claimed_at: new Date().toISOString(),
+			lease_id: leaseId,
+			lease_expires_at: new Date(Date.now() + 600_000).toISOString(),
+			lease_heartbeat_at: new Date().toISOString(),
+			lease_epoch: 3,
+		};
+		const index = {
+			getGraph: async () => ({ repo: "swcstudiospace/x", branch: "main" }),
+			releaseNode: async (
+				_g: string,
+				_n: string,
+				request: { lease_id?: string | null; force?: boolean },
+				caller: Surface | null,
+				alsoSetState?: string,
+			) => {
+				const decision = decideRelease(leaseSnapshot(node as never), { ...request, caller }, Date.now());
+				if (!decision.ok || decision.action === "noop") return { released: decision.ok, node, decision };
+				return { released: true, node, decision };
+			},
+		};
+		const greptime = {
+			ensureAppendMode: async () => true,
+			lastHash: async () => null,
+			insertEvent: async (event: SubstrateEvent) => event,
+		};
+		const substrate = new Substrate(loadConfig({}), {
+			index: index as never,
+			greptime: greptime as never,
+			mirror: mirror.mirror as never,
+		});
+		return { substrate };
+	}
+
+	test("a released lease mirrors once; noop and refusals write nothing", async () => {
+		const mirror = fakeMirror();
+		const { substrate } = leasedSubstrate("lse_live", mirror);
+
+		const result = await substrate.releaseNode("ut-1", "n2", { lease_id: "lse_live" }, "hermes");
+
+		expect(result.released).toBe(true);
+		expect(mirror.calls).toHaveLength(1);
+		expect(mirror.calls[0]?.op).toBe("release");
+		expect(mirror.calls[0]?.ctx).toMatchObject({
+			graphId: "ut-1",
+			nodeId: "n2",
+			holder: "hermes",
+			sessionId: "sess-a",
+			epoch: 3,
+			linearRef: "uuid-issue-2",
+			notionPage: "https://notion.so/row-2",
+		});
+
+		// Noop: nothing held the node.
+		const noopMirror = fakeMirror();
+		const noop = leasedSubstrate(null, noopMirror);
+		await noop.substrate.releaseNode("ut-1", "n2", { lease_id: "lse_missing" }, "hermes");
+		expect(noopMirror.calls).toEqual([]);
+
+		// Refusal: a stale lease id writes nothing.
+		const refusedMirror = fakeMirror();
+		const refused = leasedSubstrate("lse_live", refusedMirror);
+		await refused.substrate.releaseNode("ut-1", "n2", { lease_id: "lse_stale" }, "hermes");
+		expect(refusedMirror.calls).toEqual([]);
+	});
+
+	test("a forced release mirrors as force with the departing holder", async () => {
+		const mirror = fakeMirror();
+		const { substrate } = leasedSubstrate("lse_live", mirror);
+
+		const result = await substrate.releaseNode("ut-1", "n2", { force: true }, "omp");
+
+		expect(result.action).toBe("forced");
+		expect(mirror.calls).toHaveLength(1);
+		expect(mirror.calls[0]?.op).toBe("force");
+		expect(mirror.calls[0]?.ctx.holder).toBe("hermes");
+	});
+
+	test("a completion-path release makes no mirror call; plan 23-04 owns it", async () => {
+		const mirror = fakeMirror();
+		const { substrate } = leasedSubstrate("lse_live", mirror);
+
+		await substrate.releaseNode("ut-1", "n2", { lease_id: "lse_live" }, "hermes", "completed");
+
+		expect(mirror.calls).toEqual([]);
+	});
+
+	test("a throwing mirror leaves the lease standing and emits one mirror.failed warning", async () => {
+		const mirror = fakeMirror();
+		mirror.explode(new Error("tracker exploded"));
+		const { stores, substrate } = claimedSubstrate({ action: "granted" }, mirror);
+
+		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
+
+		expect(result.claimed).toBe(true);
+		const warnings = mirrorWarnings(stores.emitted);
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]?.surface).toBe("omp");
+		expect(warnings[0]?.session_id).toBe("sess-1");
+		expect(warnings[0]?.payload).toEqual({
+			action: "mirror",
+			target: "linear",
+			op: "claim",
+			reason: "tracker exploded",
+		});
+		expect(warnings[0]?.repo).toBeNull();
+	});
+
+	test("a failing target becomes one warning per target and the claim still stands", async () => {
+		const mirror = fakeMirror();
+		mirror.fail([{ target: "notion", op: "claim", reason: "notion 502: upstream" }]);
+		const { stores, substrate } = claimedSubstrate({ action: "granted" }, mirror);
+
+		const result = await substrate.claimNode("ut-1", "n4", "omp", "sess-1", null);
+
+		expect(result.claimed).toBe(true);
+		const warnings = mirrorWarnings(stores.emitted);
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]?.payload).toEqual({
+			action: "mirror",
+			target: "notion",
+			op: "claim",
+			reason: "notion 502: upstream",
+		});
+	});
+
+	test("a reaped lease mirrors as expired with the CTE's tracker refs", async () => {
+		const mirror = fakeMirror();
+		const reaped = [
+			{
+				graph_id: "ut-1",
+				node_id: "n9",
+				linear_issue_id: "uuid-issue-9",
+				linear_identifier: "SPE-9",
+				notion_page: "https://notion.so/row-9",
+				holder: { surface: "hermes", session_id: "sess-a" },
+				lease_epoch: 4,
+				expired_at: null,
+			},
+		];
+		const emitted: SubstrateEvent[] = [];
+		const index = {
+			getGraph: async () => ({ repo: "swcstudiospace/x", branch: "main" }),
+			reapExpiredLeases: async () => reaped,
+		};
+		const greptime = {
+			ensureAppendMode: async () => true,
+			lastHash: async () => null,
+			insertEvent: async (event: SubstrateEvent) => {
+				emitted.push(event);
+			},
+		};
+		const substrate = new Substrate(loadConfig({}), {
+			index: index as never,
+			greptime: greptime as never,
+			mirror: mirror.mirror as never,
+		});
+
+		await substrate.reapExpiredLeases("swcstudiospace/x");
+
+		expect(mirror.calls).toHaveLength(1);
+		expect(mirror.calls[0]).toEqual({
+			op: "expire",
+			ctx: {
+				graphId: "ut-1",
+				nodeId: "n9",
+				holder: "hermes",
+				sessionId: "sess-a",
+				epoch: 4,
+				linearRef: "uuid-issue-9",
+				notionPage: "https://notion.so/row-9",
+			},
+		});
+	});
+});
+

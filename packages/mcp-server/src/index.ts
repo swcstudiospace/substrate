@@ -35,6 +35,9 @@ for (const problem of migration.errors) {
 	process.stderr.write(`[substrate] degraded — ${problem}\n`);
 }
 
+// Mirror target availability, once: a target is on when its key is configured.
+process.stdout.write(`[substrate] mirror: ${substrate.mirror?.describe() ?? "linear off, notion off"}\n`);
+
 const server = createHttpServer(substrate, config, observability);
 
 server.listen(config.port, config.host, () => {

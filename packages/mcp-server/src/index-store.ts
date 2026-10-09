@@ -638,7 +638,7 @@ export class IndexStore implements MemoryStore {
 	 */
 	async reapExpiredLeases(
 		repo?: string | null,
-	): Promise<Array<{ graph_id: string; node_id: string; linear_identifier: string | null; holder: LeaseHolder | null; lease_epoch: number; expired_at: string | null }>> {
+	): Promise<Array<{ graph_id: string; node_id: string; linear_issue_id: string | null; linear_identifier: string | null; notion_page: string | null; holder: LeaseHolder | null; lease_epoch: number; expired_at: string | null }>> {
 		// The holders are read in a CTE rather than out of `returning`: an UPDATE's
 		// RETURNING gives the *new* row, where `claimed_by` is already NULL, so the
 		// reaper would clear the leases and then report that nobody held any of them.
@@ -654,8 +654,8 @@ export class IndexStore implements MemoryStore {
 		// way.
 		const rows = (await this.sql`
 			with expiring as (
-				select graph_id, node_id, linear_identifier, claimed_by, claim_session, lease_id, lease_epoch,
-				       lease_expires_at, lease_heartbeat_at
+			select graph_id, node_id, linear_issue_id, linear_identifier, notion_page,
+			       claimed_by, claim_session, lease_id, lease_epoch,
 				from graph_nodes
 				where claimed_by is not null
 				  and coalesce(lease_expires_at, claimed_at + make_interval(secs => ${DEFAULT_LEASE_TTL_SECONDS})) <= now()
@@ -679,7 +679,9 @@ export class IndexStore implements MemoryStore {
 		return rows.map((row) => ({
 			graph_id: String(row.graph_id),
 			node_id: String(row.node_id),
+			linear_issue_id: row.linear_issue_id === null ? null : String(row.linear_issue_id),
 			linear_identifier: row.linear_identifier === null ? null : String(row.linear_identifier),
+			notion_page: row.notion_page === null ? null : String(row.notion_page),
 			holder: row.claimed_by ? { surface: row.claimed_by as Surface, session_id: String(row.claim_session ?? "") } : null,
 			lease_epoch: Number(row.lease_epoch ?? 0),
 			expired_at: isoOrNull(row.lease_expires_at),
