@@ -3882,6 +3882,38 @@ describe("verifyGraph hour report", () => {
 		expect(verdict.hours[1]).toMatchObject({ status: "pending", event_count: 0 });
 	});
 
+	test("a burst whose first link missed the ingest read still clears", async () => {
+		// Two linked appends land between the reads; the first event's row
+		// is saved but its ingest record is still in flight, so only the
+		// second enters the gap. The re-read holds both rows, and the whole
+		// fresh session re-chains — the earlier link is not dropped.
+		const world = sessionRows();
+		const liveAt = H + 5 * HOUR + 1000;
+		const first = normalizeEvent(
+			{ surface: "omp", kind: "note", summary: "burst-1", session_id: "sess-1", graph_id: "ut-1", actor: "agent" },
+			world.events[1]?.hash ?? null,
+		);
+		const second = normalizeEvent(
+			{ surface: "omp", kind: "note", summary: "burst-2", session_id: "sess-1", graph_id: "ut-1", actor: "agent" },
+			first.hash,
+		);
+		const toRow = (event: typeof first) => ({ ...event, ts: Date.parse(event.ts), payload: JSON.stringify(event.payload) });
+		const secondRecord = { event_id: second.id, event_ts: Date.parse(second.ts), ingested_at: liveAt };
+		let reads = 0;
+		const substrate = substrateWith({
+			readEvents: async () => (++reads === 1 ? world.rows : [...world.rows, toRow(first), toRow(second)]),
+			graphIngest: async () => [...world.records, secondRecord],
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: liveAt + 60_000, rpc: rpcReturning(world.memo) as never });
+		expect(reads).toBe(2);
+		expect(verdict.ok).toBe(true);
+		expect(verdict.missing).toEqual({ count: 0, ids: [] });
+		expect(verdict.reason).toBeUndefined();
+	});
+
 	test("a deletion in the still-open hour still fails naming the event", async () => {
 		// The re-read — not the hour — tells a live append from a deletion:
 		// a row gone at every read fails even while its hour is pending.

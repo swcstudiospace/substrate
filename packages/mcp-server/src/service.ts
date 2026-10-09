@@ -2634,10 +2634,12 @@ export class Substrate {
 	// event row is stored before its ingest record, so an observed record
 	// implies its row is already readable: re-read, and only ids still
 	// absent fail the verdict naming them. A re-read hit clears only after
-	// its contents re-chain with its session mates — a restored row with
-	// edited content keeps its old hash and fails there instead. The
-	// re-read shares the whole-verify budget: past the allowance the gap
-	// stays missing, fail-closed, and the report still reaches the CLI.
+	// its whole fresh session re-chains — a restored row with edited
+	// content keeps its old hash and fails there instead, and a burst whose
+	// earlier link landed in the re-read but not the ingest read still
+	// links. The re-read shares the whole-verify budget: past the
+	// allowance the gap stays missing, fail-closed, and the report still
+	// reaches the CLI.
 	const rowIds = new Set(rows.map((row) => String(row.id)));
 	const gap = ingest.map((record) => record.event_id).filter((id) => !rowIds.has(id));
 	// A fifth of the budget, capped: short budgets still run their quick
@@ -2661,30 +2663,27 @@ export class Substrate {
 			);
 		});
 		if (fresh) {
-			const freshById = new Map(fresh.map((row) => [String(row.id), row]));
-			const hits = gap
-				.map((id) => freshById.get(id))
-				.filter((row) => row !== undefined)
-				.map((row) => rowToEvent(row));
-			const matesBySession = new Map<string, SubstrateEvent[]>();
-			for (const row of rows) {
+			const gapSet = new Set(gap);
+			const freshBySession = new Map<string, SubstrateEvent[]>();
+			for (const row of fresh) {
 				const event = rowToEvent(row);
 				const key = event.session_id ?? "";
-				const bucket = matesBySession.get(key);
+				const bucket = freshBySession.get(key);
 				if (bucket) bucket.push(event);
-				else matesBySession.set(key, [event]);
+				else freshBySession.set(key, [event]);
 			}
-			const hitsBySession = new Map<string, SubstrateEvent[]>();
-			for (const event of hits) {
-				const key = event.session_id ?? "";
-				const bucket = hitsBySession.get(key);
-				if (bucket) bucket.push(event);
-				else hitsBySession.set(key, [event]);
+			const touched = new Set<string>();
+			for (const members of freshBySession.values()) {
+				for (const member of members) {
+					if (gapSet.has(member.id)) touched.add(member.session_id ?? "");
+				}
 			}
-			for (const [key, freshOnes] of hitsBySession) {
-				const combined = [...(matesBySession.get(key) ?? []), ...freshOnes];
-				if (verifyChain(inChainOrder(combined)).ok) {
-					for (const event of freshOnes) cleared.add(event.id);
+			for (const key of touched) {
+				const members = freshBySession.get(key) ?? [];
+				if (verifyChain(inChainOrder(members)).ok) {
+					for (const member of members) {
+						if (gapSet.has(member.id)) cleared.add(member.id);
+					}
 				}
 			}
 		}
