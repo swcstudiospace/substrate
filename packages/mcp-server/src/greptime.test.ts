@@ -290,7 +290,7 @@ describe("probeDialect", () => {
 		const client = new GreptimeClient(config);
 		await client.probeDialect();
 		await client.insertEvent(normalizeEvent({ ...input, summary: "C:\\new" }, null));
-		expect(sql.at(-1)).toContain("'C:\\new'");
+		expect(insertStatement(sql)).toContain("'C:\\new'");
 	});
 });
 
