@@ -99,6 +99,12 @@ describe("redactKnown", () => {
 		expect(once).toBe(`${REDACTED} and ${REDACTED}`);
 		expect(redactKnown(once, ["canary", "canary-query"])).toBe(once);
 	});
+	test("a needle inside the marker text does not splice markers into markers", () => {
+		expect(redactKnown("token XYZTOKENVALUE and RED", ["XYZTOKENVALUE", "RED"])).toBe(`token ${REDACTED} and ${REDACTED}`);
+		const once = redactKnown("a XYZ b", ["XYZ", "DAC"]);
+		expect(once).toBe(`a ${REDACTED} b`);
+		expect(redactKnown(once, ["XYZ", "DAC"])).toBe(once);
+	});
 });
 
 describe("token counts are counts, not credentials", () => {

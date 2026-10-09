@@ -146,9 +146,17 @@ export function redactValue<T>(value: T): T {
  */
 export function redactKnown(text: string, values: Iterable<string>): string {
 	const needles = [...new Set(values)].filter((value) => value.length > 0).sort((a, b) => b.length - a.length);
-	let out = text;
-	for (const needle of needles) out = out.replaceAll(needle, REDACTED);
-	return out;
+	if (needles.length === 0) return text;
+	// One pass per segment, skipping spans that are already markers, so a
+	// needle inside the marker text (RED, DAC, E) neither splices markers
+	// into markers nor breaks idempotence (IN-01). Longest first so the
+	// alternation prefers the longer needle at the same start.
+	const alternation = needles.map((needle) => needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+	const scrub = new RegExp(alternation, "g");
+	return text
+		.split(/(\[REDACTED[A-Z_]*\])/)
+		.map((segment, index) => (index % 2 === 0 ? segment.replace(scrub, REDACTED) : segment))
+		.join("");
 }
 // ── skill content (D-18) ────────────────────────────────────────────────────
 // Skill files are instructions: `Authorization: Bearer $PARALLEL_API_KEY` is a
