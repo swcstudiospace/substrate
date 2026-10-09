@@ -4,10 +4,13 @@ name: CI
 # (docs/ci.md) and scripts/verify.test.ts fails if the two drift apart. CI adds the
 # Postgres-backed tests that skip on a machine without a database.
 #
-# Both jobs are switched by the repository variable CI_ENABLED. While it is unset they are
-# skipped, which GitHub reports as a skipped (not failed) check and which uses no runner
-# minutes. `gh variable set CI_ENABLED --body true` turns the gate on once Actions can run
-# for the organisation; `gh variable delete CI_ENABLED` is the kill switch.
+# Pull requests run on the organisation's VPS runner, the same way programming-desk's
+# gates do. CI_ENABLED is still the switch: while the repository variable is unset both
+# jobs are skipped, which GitHub reports as a skipped (not failed) check.
+# `gh variable set CI_ENABLED --body true` turns the gate on; `gh variable delete CI_ENABLED`
+# is the kill switch.
+#
+# The scratch Postgres is published on host port 54321. Port 5432 on that runner is already taken.
 on:
   pull_request:
   push:
@@ -27,7 +30,7 @@ jobs:
   verify:
     name: Typecheck, tests and repo locks
     if: vars.CI_ENABLED == 'true' && github.event_name != 'schedule'
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 20
     services:
       postgres:
@@ -37,7 +40,7 @@ jobs:
           POSTGRES_PASSWORD: ci-scratch-only
           POSTGRES_DB: substrate_test
         ports:
-          - 5432:5432
+          - 54321:5432
         options: >-
           --health-cmd "pg_isready -U postgres -d substrate_test"
           --health-interval 5s
@@ -46,7 +49,7 @@ jobs:
     env:
       # A throwaway database that lives for this job. It un-skips the live index tests
       # (leases, memory, search, graph bindings).
-      SUBSTRATE_TEST_PG_URL: postgres://postgres:ci-scratch-only@127.0.0.1:5432/substrate_test
+      SUBSTRATE_TEST_PG_URL: postgres://postgres:ci-scratch-only@127.0.0.1:54321/substrate_test
     steps:
       - name: Check out the repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -86,7 +89,7 @@ jobs:
     # Advisories appear without any change here, so this never gates a pull request. It runs
     # on main, on demand and weekly; a red run is the signal to upgrade.
     if: vars.CI_ENABLED == 'true' && github.event_name != 'pull_request'
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 10
     steps:
       - name: Check out the repository
