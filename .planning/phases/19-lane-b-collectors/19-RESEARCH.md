@@ -672,7 +672,7 @@ A read-only module (recommend `packages/collectors/src/status.ts` with pure `sum
 **How to avoid:** name helpers `sanitizeError`/`recordRefusal`. In scripts, assert "decoy absent" or import `REDACTED` from the shared module (rule 1 allows that import). **Verified:** Phase 18's planned rule-1/2/3 regexes run over the September template with the specifier changed to `"./redact.ts"` give imports `node:fs, node:child_process, node:path` only, dynamic `[]`, defs `[]`, markers `0`. The template line `\t'import { redact, redactValue } from "./redact.ts";',` is not matched, so **no exemption is needed** [VERIFIED: /tmp probe with 18-RESEARCH Pattern 5 regexes]. Executors still run `redact-lock.test.ts`, because Phase 18's final regex may differ.
 
 ### Pitfall 8: store-lock `TOKEN_LITERAL` and `GREPTIME_` scans hit new scripts
-**What goes wrong:** `SUBSTRATE_TOKEN: harnessTokenValue` (any identifier of 16+ chars after `SUBSTRATE_TOKEN…[:=]`) trips `TOKEN_LITERAL`. Any `GREPTIME_` text in a `.ts` file outside `packages/mcp-server/src` and `scripts/greptime-smoke.ts` fails "nothing else reads GREPTIME_" [VERIFIED: store-lock.test.ts:95,124-130].
+**What goes wrong:** assigning a long identifier (16+ chars, e.g. a `harness…Value` local) to the `SUBSTRATE_TOKEN` key with `:` or `=` trips `TOKEN_LITERAL`. Any `GREPTIME_` text in a `.ts` file outside `packages/mcp-server/src` and `scripts/greptime-smoke.ts` fails "nothing else reads GREPTIME_" [VERIFIED: store-lock.test.ts:95,124-130].
 **How to avoid:** short locals (`tok`), `{ ...env, SUBSTRATE_TOKEN: tok }`, and never write the word `GREPTIME_` in collectors or the proof. Lowercase `greptime` (the `/healthz` key) is fine.
 
 ### Pitfall 9: `.git/info/exclude` in worktrees
