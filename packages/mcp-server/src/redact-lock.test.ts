@@ -351,6 +351,23 @@ describe("redaction lock", () => {
 		}
 	});
 
+	test("lock scope holds the shebang hook and never the shared module or a test file", async () => {
+		const scope = await scopeFiles();
+
+		expect(scope).toContain("packages/collectors/src/git/post-commit");
+		expect(scope).toContain(OBSERVE);
+		expect(scope).not.toContain(SHARED_REDACT);
+		expect(scope.filter((path) => path.endsWith(".test.ts"))).toEqual([]);
+	});
+
+	test("the injected-seam allowlist is exactly the three cycle-bound files", () => {
+		expect(Object.keys(INJECTED_SEAMS).sort()).toEqual([
+			"packages/audit/src/log.ts",
+			"packages/audit/src/record.ts",
+			"packages/observability/src/otlp.ts",
+		]);
+	});
+
 	test("injected seams still accept the shared redactor", () => {
 		for (const [file, reason] of Object.entries(INJECTED_SEAMS)) {
 			expect(reason.length > 0, file).toBe(true);
