@@ -43,6 +43,7 @@ import { leaseView, normalizeTtlSeconds, type LeaseView } from "./lease.ts";
 import { normalizeSubject } from "./memory-policy.ts";
 import { governMemoryWrite } from "./memory-write.ts";
 import { redact } from "./redact.ts";
+import { createExecFileRunner, createSkillProposer, type SkillProposer } from "./skills/propose.ts";
 import {
 	ACTORS,
 	EVENT_KINDS,
@@ -502,18 +503,27 @@ export function parseMemorySearch(request: MemorySearchRequest): MemorySearch {
 export class Substrate {
 	readonly index: IndexStore | null;
 	readonly greptime: GreptimeClient | null;
+	/** The one git path proposals take; inert until plan 02's `proposeSkill` calls it. */
+	readonly skills: SkillProposer;
 	private readonly observer: SubstrateObserver;
 
 	/** `stores` is a test seam; production always builds them from config. */
 	constructor(
 		readonly config: SubstrateConfig,
-		stores?: { index?: IndexStore | null; greptime?: GreptimeClient | null },
+		stores?: { index?: IndexStore | null; greptime?: GreptimeClient | null; skills?: SkillProposer },
 		observer: SubstrateObserver = {},
 	) {
 		this.index =
 			stores?.index !== undefined ? stores.index : config.postgresUrl ? new IndexStore(config.postgresUrl) : null;
 		this.greptime =
 			stores?.greptime !== undefined ? stores.greptime : config.greptime ? new GreptimeClient(config.greptime) : null;
+		this.skills =
+			stores?.skills ??
+			createSkillProposer({
+				run: createExecFileRunner({ gh: config.skills.gh }),
+				library: { repo: config.skills.repo, remoteUrl: config.skills.remoteUrl },
+				stateDir: config.skills.stateDir,
+			});
 		this.observer = observer;
 	}
 
