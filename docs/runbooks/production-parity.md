@@ -172,24 +172,37 @@ and does not install the drop-in. Follow the staged cutover in
 # 1. Build the first tree. This creates current and does not restart units.
 SUBSTRATE_RELEASE_RESTART=0 infra/vps/deploy-release.sh <tag>
 
-# 2. Install the unit and the drop-in. Back up anything already installed.
+# 2. Install both units the default deploy restarts, and their drop-ins.
+#    Back up anything already installed. collector-grok.env must exist
+#    before step 3 or that unit will not start. Names only: see
+#    infra/vps/README.md. Root-owned, mode 0600.
 cp /etc/systemd/system/substrate-mcp.service /root/substrate-mcp.service.bak-<date>
+cp /etc/systemd/system/substrate-collector-grok.service /root/substrate-collector-grok.service.bak-<date>
 install -d -m 0755 /etc/systemd/system/substrate-mcp.service.d
+install -d -m 0755 /etc/systemd/system/substrate-collector-grok.service.d
 cp infra/vps/substrate-mcp.service /etc/systemd/system/substrate-mcp.service
 cp infra/vps/substrate-mcp.service.d/10-environment.conf \
   /etc/systemd/system/substrate-mcp.service.d/10-environment.conf
+cp infra/vps/substrate-collector-grok.service /etc/systemd/system/substrate-collector-grok.service
+cp infra/vps/substrate-collector-grok.service.d/10-environment.conf \
+  /etc/systemd/system/substrate-collector-grok.service.d/10-environment.conf
 
-# 3. Health-checked deploy of the same tag. The script daemon-reloads,
-#    restarts, and polls /healthz. Do not restart again after it returns.
+# 3. The collector env file must already exist (root-owned, mode 0600).
+#    Names only, listed in infra/vps/README.md. Then the health-checked
+#    deploy of the same tag. With SUBSTRATE_RELEASE_UNITS unset, the script
+#    daemon-reloads and restarts substrate-mcp and substrate-collector-grok,
+#    then polls /healthz. Do not restart again after it returns.
+test -f /etc/substrate/collector-grok.env
 infra/vps/deploy-release.sh <tag>
 bun run parity:check --json
 ```
 
-If `substrate-collector-grok` is in the same window, install its unit, its
-drop-in, and `/etc/substrate/collector-grok.env` in step 2, before the
-health-checked deploy, as the README states. Do not `systemctl restart`
-between installing the units and that deploy: a restart outside the script
-starts the new code without the health check.
+Step 3 is not MCP-only. The default unit list is both services, so installing
+only the MCP unit and then running `deploy-release.sh` restarts Grok on its
+old checkout unit, or starts it if it was stopped. Install both units and
+the collector env file first. Do not `systemctl restart` between step 2 and
+that deploy: a restart outside the script starts the new code without the
+health check.
 
 The new row goes in the evidence table above.
 
@@ -202,7 +215,8 @@ Two rollbacks, both operator only:
    `WorkingDirectory` is `/opt/agent-substrate/current`. Roll the symlink
    back instead.
 
-   When `previous` exists:
+   When `previous` exists, roll back both units the deploy restarted.
+   `SUBSTRATE_RELEASE_UNITS` stays unset, so this is the same pair:
 
 ```sh
 infra/vps/deploy-release.sh rollback
@@ -210,13 +224,13 @@ bun run parity:check --json
 ```
 
    The first successful publish has no `previous` symlink, so `rollback`
-   exits with `no previous release to roll back to`. Restore the unit files
+   exits with `no previous release to roll back to`. Restore both unit files
    from the commit before this change
    (`WorkingDirectory=/root/src/repos/agent-substrate`, and
-   `EnvironmentFile=/etc/substrate/substrate.env` on the units this window
-   installed), run `systemctl daemon-reload`, and restart those units. They
-   run the checkout again. Leave the release directory in place; the restored
-   units do not use it.
+   `EnvironmentFile=/etc/substrate/substrate.env` on both units), run
+   `systemctl daemon-reload`, and restart `substrate-mcp` and
+   `substrate-collector-grok`. They run the checkout again. Leave the release
+   directory in place; the restored units do not use it.
 
    That older commit predates `scripts/parity-check.ts`, so re-run the check
    from a retained newer worktree or preserved copy that still has it (the
@@ -233,15 +247,18 @@ cd <newer-worktree> && bun run parity:check --json
    `ls-remote` tip of `main`. After a first-cutover restore of the checkout
    unit, a FAIL naming only server-path drift from `origin/main` is expected:
    HEAD no longer matches the remote by design.
-2. **The installed unit file goes wrong.** Restore the backup taken at
-   install time, `daemon-reload`, restart, re-run the check. If the restored
-   unit still uses `current`, also run `deploy-release.sh rollback` so the
-   restart does not load the broken release:
+2. **The installed unit file goes wrong.** Restore both backups taken at
+   install time and `daemon-reload`. If those restored units still use
+   `current`, run `deploy-release.sh rollback` (it restarts both default
+   units) instead of restarting MCP alone. If they are the pre-change
+   checkout units, restart `substrate-mcp` and `substrate-collector-grok`,
+   then re-run the check:
 
 ```sh
 cp /root/substrate-mcp.service.bak-<date> /etc/systemd/system/substrate-mcp.service
+cp /root/substrate-collector-grok.service.bak-<date> /etc/systemd/system/substrate-collector-grok.service
 systemctl daemon-reload
-systemctl restart substrate-mcp
+systemctl restart substrate-mcp substrate-collector-grok
 bun run parity:check --json
 ```
 
