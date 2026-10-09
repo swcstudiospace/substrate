@@ -276,6 +276,7 @@ describe("repo units", () => {
 			"substrate-collector-grok.service",
 			"substrate-collector-herdr.service",
 			"substrate-collector-muse.service",
+			"substrate-docs-refresh.service",
 			"substrate-mcp.service",
 		]);
 		for (const unit of units) {
@@ -283,6 +284,11 @@ describe("repo units", () => {
 		}
 		const mcp = units.find((unit) => unit.name === "substrate-mcp.service");
 		expect(mcp?.environmentFiles).toEqual([SHARED_ENV_FILE]);
+		// The docs refresh tick (D25-18) ships on the release tree from the
+		// start: pinned WorkingDirectory, shared env file, no findings.
+		const refresh = units.find((unit) => unit.name === "substrate-docs-refresh.service");
+		expect(refresh?.workingDirectory).toBe(RELEASE_CURRENT);
+		expect(refresh?.environmentFiles).toEqual([SHARED_ENV_FILE]);
 		// The lane-B cutover (infra/vps/README.md operator step 4) moved herdr and
 		// muse onto the release tree with collector-only env files, like grok. Each
 		// unit loads exactly the file the identity manifest delivers its token to, so

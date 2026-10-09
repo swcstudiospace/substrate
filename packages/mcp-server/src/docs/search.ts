@@ -82,10 +82,10 @@ export interface SearchReply {
 }
 
 /**
- * Source metadata for one document. This mirrors the lookup plan 25-02 owns
- * in `docs/manifest.ts`: the local manifest is tried first and a RAGFlow
- * document lookup is the fallback. Until that module lands, callers inject
- * it through `lookupSource`; `search.ts` never imports `manifest.ts`.
+ * Source metadata for one document. The local manifest is tried first and a
+ * RAGFlow document lookup is the fallback: `Substrate.docsSearch` injects
+ * the manifest side through `lookupSource`; `search.ts` never imports
+ * `manifest.ts` so unit tests can inject fakes.
  */
 export interface SourceMeta {
 	sourceUrl: string;
@@ -113,7 +113,7 @@ export interface RunSearchDeps {
 	client: SearchRagflow | null;
 	/** False answers `unauthenticated` without any RAGFlow call (D25-06). */
 	authenticated: boolean;
-	/** Local manifest lookup (plan 25-02); absent until that plan lands. */
+	/** Local manifest lookup, injected by `Substrate.docsSearch` (D25-16). */
 	lookupSource?: (documentId: string, datasetId: string) => SourceMeta | undefined;
 	/**
 	 * RAGFlow document-lookup fallback seam; defaults to

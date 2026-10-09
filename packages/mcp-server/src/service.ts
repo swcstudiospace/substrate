@@ -69,11 +69,17 @@ import {
 	type SkillProposer,
 	type TreeMode,
 } from "./skills/propose.ts";
-import type { DocsRagflow } from "./docs/manifest.ts";
+import { loadManifest, lookupDocumentMeta, type DocsManifest, type DocsRagflow } from "./docs/manifest.ts";
 import { loadRegistry } from "./docs/registry.ts";
 import { ingestPage } from "./docs/ingest.ts";
 import { RagflowClient, type RagflowDatasetSummary } from "./docs/ragflow.ts";
-import { runSearch, validateSearchInput, type SearchRagflow, type SearchReply } from "./docs/search.ts";
+import {
+	runSearch,
+	validateSearchInput,
+	type SearchRagflow,
+	type SearchReply,
+	type SourceMeta,
+} from "./docs/search.ts";
 import { finalize } from "./docs/versions.ts";
 import {
 	ACTORS,
@@ -1337,6 +1343,45 @@ export class Substrate {
 	}
 
 	/**
+	 * Manifest-first source lookup for search (D25-16): preload the local
+	 * manifests for every registry dataset and resolve document ids against
+	 * the manifest of the hit's own dataset. Never throws — any failure
+	 * yields a lookup that answers undefined and the RAGFlow document
+	 * fallback in `runSearch` covers the hit.
+	 */
+	private async docsLookupSource(
+		registry: readonly { name: string }[],
+		client: DocsClient | null,
+		stateDir: string,
+	): Promise<(documentId: string, datasetId: string) => SourceMeta | undefined> {
+		try {
+			const summaries = client ? await client.listDatasets() : [];
+			const idToName: Record<string, string> = {};
+			for (const summary of summaries) idToName[summary.id] = summary.name;
+			const manifests: Record<string, DocsManifest> = {};
+			await Promise.all(
+				registry.map(async (entry) => {
+					try {
+						manifests[entry.name] = await loadManifest(entry.name, { stateDir });
+					} catch {
+						// Fail-soft: the RAGFlow fallback covers this dataset.
+					}
+				}),
+			);
+			return (documentId: string, datasetId: string): SourceMeta | undefined => {
+				const name = idToName[datasetId];
+				const manifest = name ? manifests[name] : undefined;
+				const meta = manifest ? lookupDocumentMeta(manifest, documentId) : undefined;
+				return meta
+					? { sourceUrl: meta.sourceUrl, title: meta.title, headingPath: meta.headingPath, commit: meta.commit }
+					: undefined;
+			};
+		} catch {
+			return () => undefined;
+		}
+	}
+
+	/**
 	 * Docs search through the injected RAGFlow client (D25-01..D25-06).
 	 *
 	 * Anonymous callers get `unauthenticated` with no RAGFlow call. Every
@@ -1349,11 +1394,15 @@ export class Substrate {
 		const surface = caller.surface;
 		const registry = this.docsRegistry();
 		const client = this.ragflow;
+		// Anonymous short-circuits inside runSearch with no RAGFlow call
+		// (D25-06): skip the manifest preload's dataset list on that path.
+		const lookupSource = surface === null ? undefined : await this.docsLookupSource(registry, client, this.config.docs.stateDir);
 		const reply = await runSearch(input, {
 			registry,
 			listDatasets: this.docsListDatasets(client),
 			client,
 			authenticated: surface !== null,
+			lookupSource,
 		});
 		// Unattributable without a surface: no event, and runSearch already
 		// short-circuited before any RAGFlow call (D25-06).

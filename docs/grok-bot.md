@@ -20,7 +20,7 @@ The gateway process on the VPS can. `Settings` in programming-desk `services/des
 
 [`docs/railway-tailscale.md`](railway-tailscale.md) places Grok Bot computers off the tailnet. They reach the desk gateway over HTTPS. The gateway, on the VPS, is what can reach Hindsight, RAGFlow, and loopback `substrate-mcp`. Grok Bots do not receive the Hindsight or RAGFlow keys. Those keys are gateway settings: `HINDSIGHT_URL`, `HINDSIGHT_API_KEY`, `RAGFLOW_URL`, and `RAGFLOW_API_KEY` in programming-desk `config.py`.
 
-Ming's Q2 decision is this route. Memory and documents run through the gateway calling Hindsight and RAGFlow directly. `substrate-mcp` has no adapters for either plane; the gateway is the client.
+Ming's Q2 decision is this route. Memory and documents run through the gateway calling Hindsight and RAGFlow directly. `substrate-mcp` has no Hindsight adapter; the gateway is the client for that plane. For documents, v1.3 phase 25 added a substrate RAGFlow adapter (`docs_search`, `docs_ingest` in `packages/mcp-server/src/docs/`), which is the fallback the next paragraph describes — the gateway-direct call stays primary when configured.
 
 Tool names below are the core roster in programming-desk `contracts/tool-rosters/_core.yaml` at the same commit. The functions are in `services/desk-gateway/src/desk_gateway/tools/core.py`.
 
@@ -42,11 +42,11 @@ A configured Hindsight or RAGFlow call stays on that plane. The substrate call i
 
 ## What substrate-mcp implements
 
-`packages/mcp-server/src/config.ts` does not read `HINDSIGHT_*` or `RAGFLOW_*`. No file under `packages/` imports a Hindsight or RAGFlow client. Hindsight and RAGFlow adapters are not implemented in substrate-mcp. `.env.example` lists `HINDSIGHT_URL`, `HINDSIGHT_API_KEY`, `HINDSIGHT_BANK_PREFIX`, `RAGFLOW_URL`, `RAGFLOW_API_KEY`, and `RAGFLOW_DATASET_ID`; `loadConfig` ignores them.
+`packages/mcp-server/src/config.ts` reads `RAGFLOW_*` (v1.3 phase 25) but not `HINDSIGHT_*`. No file under `packages/` imports a Hindsight client; the Hindsight adapter is not implemented in substrate-mcp. The RAGFlow adapter lives in `packages/mcp-server/src/docs/` (`ragflow.ts` client, `registry.ts`, `ingest.ts`, `search.ts`, `manifest.ts`, `versions.ts`). `.env.example` lists `HINDSIGHT_URL`, `HINDSIGHT_API_KEY`, `HINDSIGHT_BANK_PREFIX`, `RAGFLOW_URL`, `RAGFLOW_API_KEY` and the docs state vars; `loadConfig` ignores only the `HINDSIGHT_*` ones.
 
 `memory_write` and `memory_search` are registered in `packages/mcp-server/src/mcp.ts`. The README and [`docs/memory-governance.md`](memory-governance.md) describe that gate over the Postgres index: default-deny RBAC, quarantine, an idempotency key, and a conflict strategy. They are the substrate fallback and the second retain write. They are not a Hindsight client.
 
-The gateway's document fallback calls a substrate tool named `docs_search`. This repository does not register that tool. `docs/data-planes.md` also names `substrate docs ingest` and `POST /docs/ingest`. None of those exist under `packages/`.
+The gateway's document fallback calls a substrate tool named `docs_search`. Since v1.3 phase 25 this repository registers `docs_search` and `docs_ingest` (MCP tools plus `POST /docs/search` and `POST /docs/ingest` under `packages/`); see [`docs/docs-plane.md`](docs-plane.md) for the contract.
 
 ## `docs/data-planes.md` records this route
 

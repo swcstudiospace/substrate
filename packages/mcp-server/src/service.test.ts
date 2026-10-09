@@ -15,6 +15,7 @@ import { mkdtemp, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { clearDatasetCache } from "./docs/registry.ts";
+import { saveManifest } from "./docs/manifest.ts";
 import {
 	RagflowError,
 	type RagflowDatasetSummary,
@@ -3453,6 +3454,7 @@ class FakeDocsClient {
 		ensureDataset: 0,
 	};
 	configured = true;
+	summaries: RagflowDatasetSummary[] = [];
 	hits: RetrievalHit[] = [];
 	retrievalFailure: unknown;
 	docs: RagflowDocument[] = [];
@@ -3476,7 +3478,7 @@ class FakeDocsClient {
 
 	async listDatasets(): Promise<RagflowDatasetSummary[]> {
 		this.calls.listDatasets += 1;
-		return [];
+		return this.summaries;
 	}
 
 	async listDocuments(): Promise<RagflowDocument[]> {
@@ -3684,6 +3686,54 @@ describe("docsSearch (Substrate door)", () => {
 		expect(fake.totalCalls()).toBe(0);
 		expect(emitted).toHaveLength(1);
 		expect(emitted[0]?.kind).toBe("warning");
+	});
+
+	test("a hit unknown to RAGFlow still resolves through the local manifest (D25-16)", async () => {
+		const { substrate, fake, dir } = await docsWorld();
+		fake.summaries = [
+			{ id: "ds-guide", name: "guide", embeddingModel: undefined },
+			{ id: "ds-api", name: "api", embeddingModel: undefined },
+		];
+		await saveManifest(
+			"guide",
+			{
+				version: 1,
+				dataset: "guide",
+				current: DOCS_COMMIT,
+				versions: [{ commit: DOCS_COMMIT, paths: ["docs/intro.md"], documentIds: ["doc-1"], cutAt: "2026-10-09T00:00:00.000Z" }],
+				paths: {
+					"docs/intro.md": {
+						hash: "0".repeat(64),
+						documentIds: ["doc-1"],
+						meta: [
+							{
+								sourceUrl: DOCS_SOURCE_BASE + "intro.md",
+								headingPath: ["Manifest Intro"],
+								commit: DOCS_COMMIT,
+								title: "Manifest Title",
+								path: "docs/intro.md",
+								contentSha256: "0".repeat(64),
+								sectionIndex: 0,
+							},
+						],
+						updatedCommit: DOCS_COMMIT,
+					},
+				},
+			},
+			{ stateDir: join(dir, "state") },
+		);
+		// The RAGFlow document fallback knows nothing: only the manifest
+		// can source this hit.
+		fake.hits = [docsHit()];
+		fake.docs = [];
+
+		const reply = await substrate.docsSearch({ query: "manifest sourced?" }, { surface: "claude-code" });
+
+		expect(reply.reason).toBeUndefined();
+		expect(reply.results).toHaveLength(1);
+		expect(reply.results[0]?.source_url).toBe(DOCS_SOURCE_BASE + "intro.md");
+		expect(reply.results[0]?.title).toBe("Manifest Title");
+		expect(reply.results[0]?.heading_path).toEqual(["Manifest Intro"]);
 	});
 });
 
