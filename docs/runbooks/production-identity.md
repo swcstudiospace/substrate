@@ -258,7 +258,9 @@ but keeps the window's handoff key and IDs for verification:
 ```sh
 handoff="$(grep -E '^[[:space:]]*SUBSTRATE_HANDOFF_KEY(_ID|_PREV|_PREV_ID)?=' "$SERVER_ENV" || true)"
 cp "$SERVER_ENV.bak-pre-switch" "$SERVER_ENV"
-printf '%s\n' "$handoff" >> "$SERVER_ENV"
+# Leading newline: a backup without a final newline must not join its last
+# setting to the first restored key line.
+printf '\n%s\n' "$handoff" >> "$SERVER_ENV"
 systemctl restart substrate-mcp
 bun run parity:check
 ```
