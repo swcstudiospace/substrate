@@ -352,6 +352,17 @@ function parseAnchorRow(row: Record<string, unknown>): AnchorRow {
 	};
 }
 
+/**
+ * One event's first ingest record, for verify's hour report.
+ *
+ * Epoch milliseconds, parsed the same way as every other TIMESTAMP cell.
+ */
+export interface GraphIngestRecord {
+	event_id: string;
+	event_ts: number;
+	ingested_at: number;
+}
+
 export class GreptimeClient {
 	/** Whether the server reads `\` in a literal as an escape. Assumed until probed. */
 	private backslashEscapes = true;
@@ -978,7 +989,32 @@ export class GreptimeClient {
 		return Number.isFinite(at) ? at : null;
 	}
 
+	/**
+	 * One event's first ingest record, for verify's hour report.
+	 *
+	 * Read by the stored (normalised) graph id; an event's hour is its first
+	 * record's. Duplicate records for one event collapse to the earliest
+	 * `ingested_at` here (D27-10 first-record rule), so a retried record can
+	 * never move an event into a later hour.
+	 */
 
+	async graphIngest(storedGraphId: string): Promise<GraphIngestRecord[]> {
+		const rows = await this.sql(
+			`SELECT "event_id", "event_ts", "ingested_at" FROM "event_ingest" WHERE "graph_id" = ${this.q(storedGraphId)}`,
+		);
+		const first = new Map<string, GraphIngestRecord>();
+		for (const row of rows) {
+			const event_id = String(row.event_id);
+			const event_ts = epochMs(row.event_ts);
+			const ingested_at = epochMs(row.ingested_at);
+			if (!Number.isFinite(event_ts) || !Number.isFinite(ingested_at)) {
+				throw new GreptimeError(`ingest record for ${event_id} has a time that is not a number`);
+			}
+			const seen = first.get(event_id);
+			if (!seen || ingested_at < seen.ingested_at) first.set(event_id, { event_id, event_ts, ingested_at });
+		}
+		return [...first.values()];
+	}
 
 	/**
 	 * A repo's newest events, newest first, for `coord.drift_scan`.

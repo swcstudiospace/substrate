@@ -1250,3 +1250,40 @@ describe("anchors", () => {
 		expect(await new GreptimeClient(config).firstIngestMs()).toBeNull();
 	});
 });
+
+describe("graphIngest", () => {
+	const G = "ut-mz3k1q-8a1f2c3d";
+	const H10 = Date.UTC(2026, 8, 26, 10);
+
+	test("reads by the stored graph id and collapses duplicates to the earliest record", async () => {
+		const { sql } = stubFetch((statement) =>
+			statement.includes('FROM "event_ingest"')
+				? records(
+						["event_id", "event_ts", "ingested_at"],
+						[
+							["evt_1", H10 + 1_000, H10 + 5_000],
+							["evt_1", H10 + 1_000, H10 + 2_000],
+							["evt_2", H10 + 3_000, H10 + 4_000],
+						],
+					)
+				: defaultReply(statement),
+		);
+		const rows = await new GreptimeClient(config).graphIngest(G);
+		expect(rows).toEqual([
+			{ event_id: "evt_1", event_ts: H10 + 1_000, ingested_at: H10 + 2_000 },
+			{ event_id: "evt_2", event_ts: H10 + 3_000, ingested_at: H10 + 4_000 },
+		]);
+		const read = sql.find((s) => s.includes('FROM "event_ingest"')) ?? "";
+		expect(read).toContain(`'${G}'`);
+		expect(() => assertAppendOnly(read)).not.toThrow();
+	});
+
+	test("a record with a time that is not a number names the event", async () => {
+		stubFetch((statement) =>
+			statement.includes('FROM "event_ingest"')
+				? records(["event_id", "event_ts", "ingested_at"], [["evt_9", H10, "soon"]])
+				: defaultReply(statement),
+		);
+		await expect(new GreptimeClient(config).graphIngest(G)).rejects.toThrow("evt_9");
+	});
+});
