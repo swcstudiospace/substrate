@@ -66,7 +66,11 @@ function deps(overrides: Partial<AnchorDeps> & { digests?: Map<number, HourDiges
 	const inserts: Array<Record<string, unknown>> = [];
 	const invocations: string[][] = [];
 	const { digests, ...rest } = overrides;
-	let lastDigestHour = H10;
+	// What the stub CLI was last asked to send: the read-back answers with
+	// that memo, the way a real RPC answers with what the signature carries.
+	// This keeps the stub independent of digest call order (the job peeks
+	// digests ahead of the sends).
+	let lastSentMemo = "";
 	const full: AnchorDeps = {
 		greptime: {
 			firstIngestMs: async () => H10,
@@ -78,7 +82,6 @@ function deps(overrides: Partial<AnchorDeps> & { digests?: Map<number, HourDiges
 		} as unknown as AnchorDeps["greptime"],
 		substrate: {
 			hourDigest: async (hour: number) => {
-				lastDigestHour = hour;
 				const stubbed = digests?.get(hour);
 				if (stubbed instanceof Error) throw stubbed;
 				return stubbed ?? digest(hour);
@@ -91,11 +94,13 @@ function deps(overrides: Partial<AnchorDeps> & { digests?: Map<number, HourDiges
 		runner: async (argv: readonly string[]) => {
 			invocations.push([...argv]);
 			if (argv[1] === "pubkey") return { code: 0, stdout: `${PUBKEY}\n`, stderr: "" };
+			const flag = argv.indexOf("--with-memo");
+			lastSentMemo = flag >= 0 ? String(argv[flag + 1] ?? "") : "";
 			return { code: 0, stdout: `{"signature":"${SIG}"}`, stderr: "" };
 		},
 		rpc: {
 			transactionMemo: async () => ({
-				memo: formatMemo({ periodStartMs: lastDigestHour, rootHex: ROOT, count: 3 }),
+				memo: lastSentMemo || formatMemo({ periodStartMs: H10, rootHex: ROOT, count: 3 }),
 				payer: PUBKEY,
 				payerSigned: true,
 				err: null,
@@ -195,7 +200,7 @@ describe("runAnchorJob candidates and exits", () => {
 	test("at most 24 hours anchor per run, ascending", async () => {
 		const early = H10 - 30 * HOUR;
 		const seen: number[] = [];
-		let current = early;
+		let lastSentMemo = "";
 		const { deps: d } = deps({
 			clock: () => NOW,
 			greptime: {
@@ -207,14 +212,19 @@ describe("runAnchorJob candidates and exits", () => {
 			substrate: {
 				hourDigest: async (hour: number) => {
 					seen.push(hour);
-					current = hour;
 					return digest(hour);
 				},
-				emit: async () => ({}) as never,
+				emit: async () => ({ stored: true }) as never,
 			} as unknown as AnchorDeps["substrate"],
+			runner: async (argv: readonly string[]) => {
+				if (argv[1] === "pubkey") return { code: 0, stdout: `${PUBKEY}\n`, stderr: "" };
+				const flag = argv.indexOf("--with-memo");
+				lastSentMemo = flag >= 0 ? String(argv[flag + 1] ?? "") : "";
+				return { code: 0, stdout: `{"signature":"${SIG}"}`, stderr: "" };
+			},
 			rpc: {
 				transactionMemo: async () => ({
-					memo: formatMemo({ periodStartMs: current, rootHex: ROOT, count: 3 }),
+					memo: lastSentMemo,
 					payer: PUBKEY,
 					payerSigned: true,
 					err: null,
@@ -244,6 +254,22 @@ describe("runAnchorJob candidates and exits", () => {
 		const result = await runAnchorJob(d);
 		expect(result.code).toBe(1);
 		expect(invocations).toEqual([]);
+	});
+
+	test("a long empty gap does not starve later non-empty hours", async () => {
+		// 24 empty hours then one holding events: the empties never take a
+		// row, so the budget must still reach the hour after the gap.
+		const late = H10 + 24 * HOUR;
+		const empties = new Map<number, HourDigest | Error>();
+		for (let h = H10; h < late; h += HOUR) empties.set(h, digest(h, null, 0));
+		const { deps: d, inserts } = deps({
+			clock: () => late + HOUR + INGEST_LAG_MS + 60_000,
+			digests: empties,
+		});
+		const result = await runAnchorJob(d);
+		expect(result).toEqual({ code: 0, anchored: 1, adopted: 0, failed: 0 });
+		expect(inserts).toHaveLength(1);
+		expect(inserts[0]?.period_start).toBe(new Date(late).toISOString());
 	});
 });
 
@@ -378,6 +404,45 @@ describe("runAnchorJob adopt and alarm", () => {
 		}
 	});
 
+	test("a root mismatch alarms but later hours still anchor", async () => {
+		const later = H10 + HOUR;
+		const badSig = "6".repeat(87);
+		const goodSig = "7".repeat(87);
+		const badMemo = formatMemo({ periodStartMs: H10, rootHex: OTHER_ROOT, count: 3 });
+		const goodMemo = formatMemo({ periodStartMs: later, rootHex: ROOT, count: 3 });
+		const confirmed = (memo: string, slot: number) => ({
+			memo,
+			payer: PUBKEY,
+			payerSigned: true,
+			err: null,
+			fee: 5000,
+			slot,
+			blockTime: 1,
+		});
+		const { deps: d, emitted, inserts, invocations } = deps({
+			clock: () => later + HOUR + INGEST_LAG_MS + 60_000,
+			rpc: {
+				transactionMemo: async (signature: string) =>
+					signature === badSig ? confirmed(badMemo, 77) : signature === goodSig ? confirmed(goodMemo, 78) : null,
+				addressMemos: async () => [
+					{ signature: badSig, memo: badMemo, err: null, slot: 77 },
+					{ signature: goodSig, memo: goodMemo, err: null, slot: 78 },
+				],
+				balance: async () => 1_000_000,
+				getGenesisHash: async () => DEVNET_GENESIS_HASH,
+			},
+		});
+		const result = await runAnchorJob(d);
+		expect(result.code).toBe(1);
+		expect(result.failed).toBe(1);
+		expect(result.adopted).toBe(1);
+		expect(invocations).toEqual([]);
+		expect(inserts).toHaveLength(2);
+		expect(inserts[0]).toMatchObject({ period_start: new Date(H10).toISOString(), tx_sig: badSig });
+		expect(inserts[1]).toMatchObject({ period_start: new Date(later).toISOString(), tx_sig: goodSig });
+		expect(failed(emitted)[0]?.payload).toMatchObject({ reason: "root-mismatch" });
+	});
+
 	test("an unconfirmed hint sends", async () => {
 		const memo = formatMemo({ periodStartMs: H10, rootHex: ROOT, count: 3 });
 		const hintSig = "6".repeat(87);
@@ -504,6 +569,62 @@ describe("runAnchorJob failures", () => {
 		expect(result.code).toBe(1);
 		expect(failed(emitted)[0]?.payload).toMatchObject({ reason: "store-failed" });
 	});
+
+	test("a send whose anchor note is not stored fails without resending", async () => {
+		const { deps: d, emitted, inserts, invocations } = deps({
+			substrate: {
+				hourDigest: async (hour: number) => digest(hour),
+				emit: async (input: EventInput) => {
+					emitted.push(input as never);
+					return { stored: false, event: input } as unknown as EmitResult;
+				},
+			} as unknown as AnchorDeps["substrate"],
+		});
+		const result = await runAnchorJob(d);
+		expect(result.code).toBe(1);
+		expect(result.anchored).toBe(0);
+		expect(result.failed).toBe(1);
+		// The row is written but the transaction goes out once: one pubkey
+		// check plus one transfer, then the run stops on the lost note.
+		expect(invocations).toHaveLength(2);
+		expect(invocations.filter((argv) => argv.includes("--with-memo"))).toHaveLength(1);
+		expect(inserts).toHaveLength(1);
+		expect(failed(emitted)[0]?.payload).toMatchObject({ reason: "store-failed" });
+	});
+
+	test("an adoption whose anchor note is not stored is reported", async () => {
+		const memo = formatMemo({ periodStartMs: H10, rootHex: ROOT, count: 3 });
+		const { deps: d, emitted, inserts, invocations } = deps({
+			substrate: {
+				hourDigest: async (hour: number) => digest(hour),
+				emit: async (input: EventInput) => {
+					emitted.push(input as never);
+					return { stored: false, event: input } as unknown as EmitResult;
+				},
+			} as unknown as AnchorDeps["substrate"],
+			rpc: {
+				transactionMemo: async () => ({
+					memo,
+					payer: PUBKEY,
+					payerSigned: true,
+					err: null,
+					fee: 5000,
+					slot: 77,
+					blockTime: 1,
+				}),
+				addressMemos: async () => [{ signature: SIG, memo, err: null, slot: 77 }],
+				balance: async () => 1_000_000,
+				getGenesisHash: async () => DEVNET_GENESIS_HASH,
+			},
+		});
+		const result = await runAnchorJob(d);
+		expect(result.code).toBe(1);
+		expect(result.adopted).toBe(0);
+		expect(result.failed).toBe(1);
+		expect(invocations).toEqual([]);
+		expect(inserts).toHaveLength(1);
+		expect(failed(emitted)[0]?.payload).toMatchObject({ reason: "store-failed" });
+	});
 });
 
 describe("runAnchorJob constants", () => {
@@ -583,5 +704,48 @@ describe("parseAnchorArgs", () => {
 		expect(invocations).toEqual([]);
 		expect(inserts).toEqual([]);
 		expect(written(emitted)[0]?.payload).toMatchObject({ adopted: true, tx_sig: SIG });
+	});
+
+	test("a --period re-run older than the lookback never anchors twice", async () => {
+		// The sweep window only reaches back seven days, and the memo has
+		// fallen out of the 100 recent signatures: without consulting that
+		// hour's row directly, the job would send a second anchor over it.
+		const old = H10 - 30 * 24 * HOUR;
+		const memo = formatMemo({ periodStartMs: old, rootHex: ROOT, count: 3 });
+		const anchored = {
+			period_start: new Date(old).toISOString(),
+			period_end: new Date(old + HOUR).toISOString(),
+			root: ROOT,
+			event_count: 3,
+			memo,
+			tx_sig: SIG,
+			signer: PUBKEY,
+			cluster: "devnet",
+			slot: 77,
+			anchored_at: new Date(old).toISOString(),
+			stale_hashes: null,
+		};
+		const { deps: d, emitted, inserts, invocations } = deps({
+			options: { onlyPeriodMs: old },
+			greptime: {
+				firstIngestMs: async () => old,
+				anchorsBetween: async () => [],
+				anchorForPeriod: async () => anchored,
+				insertAnchor: async (row: NewAnchor) => {
+					inserts.push({ ...row });
+				},
+			} as unknown as AnchorDeps["greptime"],
+			rpc: {
+				transactionMemo: async () => null,
+				addressMemos: async () => [],
+				balance: async () => 1_000_000,
+				getGenesisHash: async () => DEVNET_GENESIS_HASH,
+			},
+		});
+		const result = await runAnchorJob(d);
+		expect(result).toEqual({ code: 0, anchored: 0, adopted: 0, failed: 0 });
+		expect(invocations).toEqual([]);
+		expect(inserts).toEqual([]);
+		expect(emitted).toEqual([]);
 	});
 });

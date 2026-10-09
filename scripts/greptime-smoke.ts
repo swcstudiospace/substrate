@@ -35,6 +35,11 @@
  * session id and `kind: "note"` so they are easy to tell apart, and the brief
  * ignores them because they carry no repo.
  *
+ * Section 8 (the fake-chain anchor proof) is stricter: it writes fake-chain
+ * signatures into `anchors`, which the real job skips but verification can
+ * never find on devnet, so it runs only against a scratch (loopback) ledger
+ * and is skipped elsewhere — re-run on the rehearsal stores for that half.
+ *
  * Prove it on scratch stores, never on production: the rehearsal harness starts a
  * throwaway Greptime and Postgres, and `stores.env` carries their credentials.
  *
@@ -54,6 +59,7 @@ import { AppendOnlyViolation, INGEST_LAG_MS, quote } from "../packages/mcp-serve
 import { Substrate } from "../packages/mcp-server/src/service.ts";
 import { REDACTED } from "../packages/mcp-server/src/redact.ts";
 import type { EventInput } from "../packages/mcp-server/src/types.ts";
+import { refuseLedgerUrl } from "./rehearsal.ts";
 
 /** A token-shaped string, assembled at runtime so no token pattern sits in git. */
 const DECOY = `ghp_${"A".repeat(36)}`;
@@ -368,6 +374,11 @@ for (const statement of [
 // after anchoring moves the root. Anchor `note`/`warning` events are recorded
 // by a fake emit, never written: a real one would land in the anchored hour
 // itself (the scratch clock is real) and move the very root being proven.
+// Scratch-only: the beats below write fake-chain signatures into `anchors`,
+// which the real job skips but verification can never find on devnet. On any
+// non-loopback ledger the proof is skipped instead of polluting the table —
+// re-run on the rehearsal stores for the anchor half.
+if (refuseLedgerUrl(config.greptime.url) === null) {
 const FAKE_PUBKEY = "F".repeat(44);
 const fakeState = mkdtempSync(join(tmpdir(), "p28-fakechain-"));
 mkdirSync(join(fakeState, "bin"));
@@ -567,6 +578,10 @@ check(
 );
 check(sendCount() === 1, "the tamper caused no send", `${sendCount()} sends`);
 rpcServer.stop();
+} else {
+	process.stdout.write("  skip  fake-chain anchor proof: not a scratch ledger — no fake anchors written\n");
+	process.stdout.write("        re-run on the rehearsal stores for the anchor half (see the header)\n");
+}
 
 // ── report ───────────────────────────────────────────────────────────────────
 const failed = results.filter((result) => !result.ok);

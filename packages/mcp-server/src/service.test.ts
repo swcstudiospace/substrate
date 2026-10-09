@@ -7,7 +7,7 @@ import { REDACTED, redact } from "./redact.ts";
 import { leaseSnapshot } from "./index-store.ts";
 import { decideRelease, type ClaimAction } from "./lease.ts";
 import { EVENT_SOURCES } from "./event-sources.ts";
-import { Substrate, SkillProposalDenied, type SkillProposalRequest } from "./service.ts";
+import { Substrate, SkillProposalDenied, VERIFY_RESPONSE_MARGIN_MS, type SkillProposalRequest } from "./service.ts";
 import { ProposeFailed, ProposeRefused, type ProposeOptions, type ProposeResult, type SkillProposer } from "./skills/propose.ts";
 import type { EventInput, SubstrateEvent, Surface } from "./types.ts";
 import { GRAPHS_GENERATION_KEY, graphGenerationKey } from "./cache.ts";
@@ -3719,5 +3719,73 @@ describe("verifyGraph hour report", () => {
 		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR });
 		expect(verdict.ok).toBe(true);
 		expect(verdict.hours).toEqual([]);
+	});
+
+	test("an hour whose event rows were deleted fails instead of passing unseen", async () => {
+		// Every agent_events row gone, ingest records retained: the hour must
+		// still be checked, and its whole-hour digest names the missing member.
+		const world = sessionRows();
+		const missing = world.events[0]?.id ?? "evt_deleted";
+		const substrate = substrateWith({
+			readEvents: async () => [],
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => {
+				throw new Error(`hour member ${missing} has no event row`);
+			},
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(world.memo) as never });
+		expect(verdict.hours).toHaveLength(1);
+		expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "mismatch" });
+		expect(verdict.hours[0]?.reason).toContain(missing);
+		expect(verdict.ok).toBe(false);
+	});
+
+	test("hours past the whole-verify budget read unverified without a devnet call", async () => {
+		const world = sessionRows();
+		let rpcCalls = 0;
+		const substrate = substrateWith(
+			{
+				readEvents: async () => world.rows,
+				graphIngest: async () => world.records,
+				firstIngestMs: async () => H,
+				hourLeaves: async () => world.leaves,
+				anchorForPeriod: async () => anchorRow(world),
+			},
+			{ SUBSTRATE_VERIFY_TIMEOUT_MS: "1" },
+		);
+		const rpc = {
+			transactionMemo: async () => {
+				rpcCalls += 1;
+				return { memo: world.memo, payer: PUBKEY, payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: null };
+			},
+		};
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpc as never });
+		expect(rpcCalls).toBe(0);
+		expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "unverified" });
+		expect(verdict.hours[0]?.reason).toContain("timed out before this hour was checked");
+		expect(verdict.ok).toBe(false);
+	});
+
+	test("a slow devnet read is cut off inside the budget", async () => {
+		const world = sessionRows();
+		const substrate = substrateWith(
+			{
+				readEvents: async () => world.rows,
+				graphIngest: async () => world.records,
+				firstIngestMs: async () => H,
+				hourLeaves: async () => world.leaves,
+				anchorForPeriod: async () => anchorRow(world),
+			},
+			{ SUBSTRATE_VERIFY_TIMEOUT_MS: String(VERIFY_RESPONSE_MARGIN_MS + 150) },
+		);
+		const rpc = { transactionMemo: () => new Promise<never>(() => {}) };
+		const started = Date.now();
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpc as never });
+		expect(Date.now() - started).toBeLessThan(2000);
+		expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "unverified" });
+		expect(verdict.hours[0]?.reason).toContain("timed out checking this hour");
+		expect(verdict.ok).toBe(false);
 	});
 });

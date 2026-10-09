@@ -8,13 +8,17 @@
  *
  * Per run: read the coverage start (hour of the earliest ingest record) and
  * the anchors window, take the closed, non-empty, unanchored hours ascending
- * (at most 24, 7-day lookback), and for each one adopt an existing
- * signer-checked memo or send the digest memo through the solana CLI, then
- * write the production 11-column anchors row and emit `anchor.written`.
- * Per-hour digest failures and root mismatches emit `anchor.failed` and
- * continue; a mismatch also alarms and exits 1. Systemic failures (wrong
- * cluster, signer mismatch, unfunded key, unreadable RPC, CLI or store
- * failure) stop the run before the next send.
+ * (at most 24 non-empty hours per run under a 7-day lookback; empty hours
+ * never receive a row, so they never consume the budget), and for each one
+ * adopt an existing signer-checked memo or send the digest memo through the
+ * solana CLI, then write the production 11-column anchors row and emit
+ * `anchor.written`. A `--period` re-run consults that hour's row directly, so
+ * an hour older than the lookback is never anchored twice. Per-hour digest
+ * failures and root mismatches emit `anchor.failed` and continue to the next
+ * hour (a mismatch also alarms and exits 1); a lost `anchor.written` note is
+ * reported as store-failed without resending the transaction. Systemic
+ * failures (wrong cluster, signer mismatch, unfunded key, unreadable RPC,
+ * CLI or store failure) stop the run before the next send.
  *
  * The memo carries period_start, root and count only — never event content —
  * and the keypair is only ever a path on an argv the CLI reads.
@@ -43,7 +47,7 @@ import type { HourDigest, Substrate } from "./service.ts";
 
 export const DEVNET_GENESIS_HASH = "EtWTRABZaYq6iMfeYKouRu166VU2xqaEyCydFLPYGEC";
 
-/** At most this many hours anchor per run; older unanchored hours wait for the next tick. */
+/** At most this many non-empty hours anchor per run; empty hours are free, older unanchored hours wait for the next tick. */
 export const MAX_HOURS_PER_RUN = 24;
 
 /** How far back a run looks for unanchored hours; older ones are verify's `unanchored`. */
@@ -151,8 +155,8 @@ async function emitWritten(
 	digest: HourDigest,
 	txSig: string,
 	adopted: boolean,
-): Promise<void> {
-	await substrate.emit({
+): Promise<{ stored: boolean }> {
+	return substrate.emit({
 		surface: "substrate",
 		kind: "note",
 		summary: `anchored hour ${digest.period_start.slice(0, 13)}: ${digest.event_count} events`,
@@ -343,16 +347,39 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 
 	const only = deps.options?.onlyPeriodMs;
 	const dryRun = deps.options?.dryRun === true;
+	if (only !== undefined) {
+		// The sweep window only reaches back seven days: an older `--period`
+		// re-run must still see its row, or a memo outside the 100 recent
+		// signatures would anchor the hour twice, replacing the original row.
+		try {
+			const existing = await greptime.anchorForPeriod(only);
+			if (existing) anchored[hourIso(only)] = true;
+		} catch {
+			// A store failure surfaces as store-failed on the write path below.
+		}
+	}
 	const candidates: number[] = [];
+	const peeked = new Map<number, HourDigest>();
 	if (only !== undefined) {
 		// A re-run for one hour: the dedup skip is bypassed so an anchored
 		// hour takes the adopt path below (emitting adopted:true, writing
 		// nothing); an unanchored hour anchors normally.
 		candidates.push(only);
 	} else {
+		// Empty hours never receive an anchors row, so they must not consume
+		// the per-run budget: peek the digest and only count non-empty hours,
+		// or a long empty gap replays every run and starves later hours.
+		// A digest failure stays a candidate so the main loop reports it.
 		for (let h = coverageHour; isClosed(h, now, INGEST_LAG_MS); h += HOUR_MS) {
 			if (h < windowStart) continue;
 			if (anchored[hourIso(h)] === true) continue;
+			try {
+				const preview = await substrate.hourDigest(h, now);
+				if (preview.root === null || preview.event_count === 0 || preview.memo === null) continue;
+				peeked.set(h, preview);
+			} catch {
+				// Fall through: the main loop digests again and reports it.
+			}
 			candidates.push(h);
 			if (candidates.length >= MAX_HOURS_PER_RUN) break;
 		}
@@ -365,7 +392,7 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 		for (const hour of candidates) {
 			const periodIso = hourIso(hour);
 			try {
-				const preview = await substrate.hourDigest(hour, now);
+				const preview = peeked.get(hour) ?? (await substrate.hourDigest(hour, now));
 				if (preview.root === null || preview.event_count === 0) {
 					process.stdout.write(`[anchor] would skip ${periodIso} (empty)\n`);
 				} else {
@@ -381,13 +408,15 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 	let preconditionsOk = false;
 	for (const hour of candidates) {
 		const periodIso = hourIso(hour);
-		let digest: HourDigest;
-		try {
-			digest = await substrate.hourDigest(hour, now);
-		} catch (cause) {
-			await failHour(periodIso, "digest-failed");
-			process.stderr.write(`[anchor] ${periodIso} digest failed: ${redact(String(cause).slice(0, 200))}\n`);
-			continue;
+		let digest = peeked.get(hour);
+		if (!digest) {
+			try {
+				digest = await substrate.hourDigest(hour, now);
+			} catch (cause) {
+				await failHour(periodIso, "digest-failed");
+				process.stderr.write(`[anchor] ${periodIso} digest failed: ${redact(String(cause).slice(0, 200))}\n`);
+				continue;
+			}
 		}
 		if (digest.root === null || digest.event_count === 0 || digest.memo === null) continue;
 
@@ -402,15 +431,19 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 		}
 
 		if (verdict.kind === "alarm") {
-			try {
-				await greptime.insertAnchor(anchorRow(digest, verdict.signature, env.pubkey, verdict.slot, verdict.memo, verdict.root, verdict.count, now));
-			} catch {
-				await failHour(periodIso, "store-failed");
-				return result;
+			// A `--period` re-run over an anchored hour keeps its row: the
+			// alarm is reported, never rewritten over the original.
+			if (anchored[periodIso] !== true) {
+				try {
+					await greptime.insertAnchor(anchorRow(digest, verdict.signature, env.pubkey, verdict.slot, verdict.memo, verdict.root, verdict.count, now));
+				} catch {
+					await failHour(periodIso, "store-failed");
+					return result;
+				}
 			}
 			await failHour(periodIso, "root-mismatch");
 			process.stderr.write(`[anchor] ALARM ${periodIso}: chain root ${verdict.root} != recomputed ${digest.root}\n`);
-			return result;
+			continue;
 		}
 
 		if (verdict.kind === "adopt") {
@@ -424,9 +457,14 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 					return result;
 				}
 			}
-			await emitWritten(substrate, digest, verdict.signature, true).catch(() => {});
-			result.adopted += 1;
-			process.stdout.write(`[anchor] ${periodIso} adopted ${verdict.signature}\n`);
+			const note = await emitWritten(substrate, digest, verdict.signature, true).catch(() => null);
+			if (!note || note.stored !== true) {
+				await failHour(periodIso, "store-failed");
+				process.stderr.write(`[anchor] ${periodIso} adopted but the anchor note was not stored\n`);
+			} else {
+				result.adopted += 1;
+				process.stdout.write(`[anchor] ${periodIso} adopted ${verdict.signature}\n`);
+			}
 			continue;
 		}
 
@@ -518,7 +556,15 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 			await failHour(periodIso, "store-failed");
 			return result;
 		}
-		await emitWritten(substrate, digest, signature, false).catch(() => {});
+		// The row is written, so the transaction is never resent: a lost note
+		// is reported as store-failed instead, and the next sweep still skips
+		// this hour by its row.
+		const note = await emitWritten(substrate, digest, signature, false).catch(() => null);
+		if (!note || note.stored !== true) {
+			await failHour(periodIso, "store-failed");
+			process.stderr.write(`[anchor] ${periodIso} anchored but the anchor note was not stored\n`);
+			return result;
+		}
 		result.anchored += 1;
 		process.stdout.write(`[anchor] ${periodIso} anchored ${signature}\n`);
 	}

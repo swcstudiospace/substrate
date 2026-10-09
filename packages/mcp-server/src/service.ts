@@ -383,6 +383,13 @@ export const VERIFY_PENDING_MS = 3 * HOUR_MS;
 export const VERIFY_RPC_TIMEOUT_MS = 5_000;
 export const VERIFY_RPC_ATTEMPTS = 2;
 export const VERIFY_RPC_BACKOFF_MS = 200;
+/**
+ * Time reserved for the `/verify` response after the last hour check (D28-18).
+ * The CLI waits out the whole-verify budget, so every hour check must finish
+ * inside it with room to spare: the caller gets the hour report, not
+ * `unreachable` from its own timeout.
+ */
+export const VERIFY_RESPONSE_MARGIN_MS = 2_000;
 
 /**
  * Why a ledger that is not provably append-only refuses the write.
@@ -2595,6 +2602,13 @@ export class Substrate {
 			if (bucket) bucket.push(eventId);
 			else byHour.set(hour, [eventId]);
 		}
+		// Hours whose every event row was deleted still hold retained ingest
+		// records: visit them with an empty bucket so the whole-hour digest
+		// throws naming the missing member instead of passing unseen.
+		for (const record of ingest) {
+			const hour = hourStart(record.ingested_at);
+			if (!byHour.has(hour)) byHour.set(hour, []);
+		}
 
 		const pubkey = this.config.solana.pubkey;
 		let rpc: Rpc | null = injectedRpc ?? null;
@@ -2612,18 +2626,20 @@ export class Substrate {
 
 		const hours: HourReport[] = [];
 		for (const hour of [...byHour.keys()].sort((a, b) => a - b)) {
-			if (Date.now() - startedAt > budgetMs) {
+			const memberCount = byHour.get(hour)?.length ?? 0;
+			const remaining = budgetMs - (Date.now() - startedAt);
+			if (remaining <= VERIFY_RESPONSE_MARGIN_MS) {
 				hours.push({
 					period_start: hourIso(hour),
 					period_end: hourIso(hourEnd(hour)),
 					status: "unverified",
-					event_count: byHour.get(hour)?.length ?? 0,
+					event_count: memberCount,
 					root: null,
 					reason: "verify timed out before this hour was checked",
 				});
 				continue;
 			}
-			hours.push(await this.checkHour(hour, now, readRpc, pubkey, byHour.get(hour)?.length ?? 0));
+			hours.push(await this.checkHourWithBudget(hour, now, readRpc, pubkey, memberCount, remaining - VERIFY_RESPONSE_MARGIN_MS));
 		}
 
 		const failing = hours.find((hour) => hour.status !== "anchored" && hour.status !== "pending");
@@ -2645,6 +2661,52 @@ export class Substrate {
 			uncovered: { count: uncovered.length, ids: [...uncovered].sort() },
 			legacy: { count: legacy.length, ids: [...legacy].sort() },
 		};
+	}
+
+	/**
+	 * Bound one hour check to its share of the whole-verify budget (D28-18).
+	 *
+	 * A devnet read retries inside its own per-call timeout regardless of the
+	 * time left, so an unreadable endpoint could otherwise hold the loop past
+	 * the CLI's wait and turn a reportable hour into `unreachable`. Past the
+	 * allowance the hour reads `unverified`, fail-closed, and the loop keeps
+	 * its margin for the response.
+	 */
+	private async checkHourWithBudget(
+		hour: number,
+		now: number,
+		readRpc: () => Rpc,
+		pubkey: string | null,
+		memberCount: number,
+		allowanceMs: number,
+	): Promise<HourReport> {
+		const period_start = hourIso(hour);
+		const period_end = hourIso(hourEnd(hour));
+		return new Promise<HourReport>((resolve, reject) => {
+			const timer = setTimeout(
+				() =>
+					resolve({
+						period_start,
+						period_end,
+						status: "unverified",
+						event_count: memberCount,
+						root: null,
+						reason: `verify timed out checking this hour (${Math.max(0, Math.floor(allowanceMs))} ms budget)`,
+					}),
+				Math.max(0, allowanceMs),
+			);
+			timer.unref?.();
+			this.checkHour(hour, now, readRpc, pubkey, memberCount).then(
+				(report) => {
+					clearTimeout(timer);
+					resolve(report);
+				},
+				(cause) => {
+					clearTimeout(timer);
+					reject(cause);
+				},
+			);
+		});
 	}
 
 	/**

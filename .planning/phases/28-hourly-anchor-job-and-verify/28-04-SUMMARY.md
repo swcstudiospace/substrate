@@ -98,7 +98,7 @@ status: complete
 
 **Status: all steps DEFERRED — nothing below was executed. No devnet packet left this session, no production row was written, no host or systemd step was taken. Each step needs separate operator approval in an operator-approved window; the executor stops at each gate.**
 
-- **L1 — env and key identity (read-only).** `grep -c '^SOLANA_*=' /etc/substrate/substrate.env` (names only), `stat` owner/mode of the keypair path (never contents), `solana --version`, `solana-keygen pubkey <path>` equality with `SOLANA_ANCHOR_PUBKEY`. Gate: all names present, key root-owned mode 0600, versions sane. Outcome: **DEFERRED**.
+- **L1 — env and key identity (read-only).** `grep -c '^SOLANA_RPC_URL='`, `grep -c '^SOLANA_ANCHOR_KEYPAIR='`, `grep -c '^SOLANA_ANCHOR_PUBKEY=' /etc/substrate/substrate.env` (one exact name per check — `'^SOLANA_*='` only repeats the underscore — names only), `stat` owner/mode of the keypair path (never contents), `solana --version`, `solana-keygen pubkey <path>` equality with `SOLANA_ANCHOR_PUBKEY`. Gate: all names present, key root-owned mode 0600, versions sane. Outcome: **DEFERRED**.
 - **L2 — devnet balance (read-only).** `getBalance` on the key. Gate: decide funding need. Outcome: **DEFERRED**.
 - **L3 — fund the key (operator, write/devnet).** ~1 devnet SOL (covers years at 24 sends/day; key held 0 SOL). Gate: explicit funding approval. Outcome: **DEFERRED**.
 - **L4 — missing SOLANA_* lines (write/host config).** Add any missing line to `substrate.env`. Gate: per-line approval. Outcome: **DEFERRED**.
