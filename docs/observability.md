@@ -309,6 +309,7 @@ for a proof. **Every check that only holds during the outage is one of them**, "
 was granted" included: a healthy deployment grants claims, and that is the behaviour, so
 a rehearsal that failed on it was failing on the deployment being healthy — which is the
 one thing a rehearsal assumes. `CHAOS_WINDOW_MS` and `CHAOS_TICK_MS` shorten the window.
+This rehearsal mode is not the scratch rehearsal harness — that twin lives in [`rehearsal.md`](rehearsal.md).
 
 It appends `note` events under a `ut-chaos-…` graph. The ledger is append-only so
 they stay; they carry no repo, so no brief shows them.

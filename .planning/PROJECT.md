@@ -148,6 +148,8 @@ Revised 2026-09-30 — policy in `docs/data-planes.md`, network in `docs/railway
 - ✓ Signed handoffs: one `coord_handoff` packet per accountable-agent boundary; context rebuilt from `coord_handoff_list` and `events_query` alone — v1.2
 - ✓ Workspace install: per-runtime `substrate-mcp` entries, 0600 per-agent token files, one token per child — v1.2
 - ✓ Lessons bank: governed lesson facts with recall citations, read-time scores and non-destructive digests — v1.2
+- ✓ Rehearsal harness: `bun run rehearsal up|smoke|down` runs main's `substrate-mcp` against scratch Postgres and GreptimeDB with per-surface tokens; production stores saw no harness row — v1.3 Phase 16
+- ✓ Production parity: `substrate-mcp.service` owns `127.0.0.1:7410` and serves `main`; `bun run parity:check` and `docs/runbooks/production-parity.md` record the check and the rollback — v1.3 Phase 16
 
 ## Key Decisions
 
@@ -156,6 +158,7 @@ Revised 2026-09-30 — policy in `docs/data-planes.md`, network in `docs/railway
 | A swarm token emitting or claiming as another swarm surface is refused, never re-attributed | Token names the caller; silent re-attribution would corrupt attribution | ✓ Good |
 | `graph_bind` is MCP-only; no new event kinds, no `POST /graph` door | ADR 0001 forbids a single agent-swarm surface, new event kinds and a `POST /graph` door | ✓ Good |
 | Versioned conflicts report `current_version` instead of adding a subject search filter | `memory_search` matches bodies only and returns the newest 100 per scope; the re-read stays only as the older-server fallback | ✓ Good |
+| Production parity is the operator's action; agents only read (`parity:check`) and run approved read-only probes | Killing or restarting production processes from an agent session is unrecoverable if wrong; the unit gains `ConditionPathExists` instead of crash-looping | ✓ Good (v1.3 Phase 16) |
 
 ## Evolution
 
@@ -175,4 +178,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-10-08 at the start of milestone v1.3*
+*Last updated: 2026-10-08 after Phase 16*
