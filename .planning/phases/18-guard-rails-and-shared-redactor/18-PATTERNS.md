@@ -355,7 +355,7 @@ Offenders are reported as `file:line rule`, never the matched value (CONTEXT §s
 **Detector self-test idiom (store-lock lines 280-296, 335-361).** Positive and negative bodies are run through the same detector function, with the body echoed in the assertion:
 ```ts
 		for (const body of [
-			"SUBSTRATE_TOKEN=3f9a1c0e7b2d4a6f8e1c3b5d7a9f0e2c",
+			"SUBSTRATE_TOKEN=<32 hex chars, planted at runtime>",
 			…
 		]) {
 			expect({ body, caught: TOKEN_LITERAL.test(body) }).toEqual({ body, caught: true });
