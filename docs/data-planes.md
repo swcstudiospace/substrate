@@ -7,15 +7,15 @@ Notion and Linear stay the source of truth for intent. GitHub is the source of t
 
 ## The five services and where they live
 
-| Railway project | Service | Plane | Reached from the VPS as |
+| Railway project | Service | Plane | Placeholder reach |
 |---|---|---|---|
-| **Ultrathink** | GreptimeDB | ledger / events | `http://ultrathink-production-tailscale-forwarder:4000` (HTTP SQL) |
-| **Ultrathink** | TimescaleDB | index / coordination | `postgresql://…@ultrathink-production-tailscale-forwarder:5432/railway` |
-| **Ultrathink** | DragonflyDB | hot cache | `redis://…@ultrathink-production-tailscale-forwarder:6379` |
-| **Agent Substrate** | Hindsight (`hindsight-api`, `hindsight-ui`, own pg17+pgvector) | memory / recall | `http://agent-substrate-production-tailscale-forwarder:8888` (REST + MCP at `/mcp/<bank>/`) |
-| **Agent Substrate** | RAGFlow | documents | `http://agent-substrate-production-tailscale-forwarder:9380` (API) |
+| **Ultrathink** | GreptimeDB | ledger / events | `http://<ultrathink-forwarder>:4000` (HTTP SQL) |
+| **Ultrathink** | TimescaleDB | index / coordination | `postgresql://…@<ultrathink-forwarder>:5432/<db>` |
+| **Ultrathink** | DragonflyDB | hot cache | `redis://…@<ultrathink-forwarder>:6379` |
+| **Agent Substrate** | Hindsight | memory / recall | `http://<agent-substrate-forwarder>:8888` |
+| **Agent Substrate** | RAGFlow | documents | `http://<agent-substrate-forwarder>:9380` |
 
-Names are the Tailscale Forwarder machine names Railway derives (`<project>-<environment>-<service>`); the exact Railway service names and ports are confirmed in `docs/railway-tailscale.md` when the forwarders are deployed. No service keeps a public TCP proxy or public database domain after the cutover.
+The reach column is a placeholder, not a machine name. `docs/railway-tailscale.md` is the cutover note. No service keeps a public TCP proxy or public database domain after the cutover.
 
 ## What goes where
 
@@ -23,9 +23,9 @@ Names are the Tailscale Forwarder machine names Railway derives (`<project>-<env
 |---|---|---|---|---|
 | **Events**: `agent_events` — every brief, emit, claim, tool call from the Programming Desk gateway, receipt written, dispatch, intake, heartbeat. Append-only with the `hash`/`prev` chain; `packages/ledger` anchors the hourly Merkle root to Solana devnet | GreptimeDB | `substrate-mcp` (`events_emit`, `POST /events`), collectors, desk gateway | 180 days hot, then export | Credentials (redactor first, always), transcripts, file contents |
 | **Index**: `graph_index`, `graph_nodes`, `graph_steps`, memory entries index; desk tables `desk_intake` (queue; drained with `FOR UPDATE SKIP LOCKED`), `desk_claims` (Graph-ID claim rows with expiry and heartbeat), `desk_idempotency` (30-day processed keys), `desk_receipts`, `seat_roster`, `tool_pack_state`; hypertables `seat_heartbeat`, `tool_calls_1m` with continuous aggregates | TimescaleDB | `substrate-mcp`, desk gateway, `substrate-dispatcher` | Open Graph IDs + 90 days; aggregates 1 year | Treating a row as proof that work shipped; secrets |
-| **Cache**: the brief, `docs_search` and `recall` results, per-surface and per-seat rate counters, a 24-hour mirror of idempotency keys for fast rejects | DragonflyDB | `substrate-mcp`, desk gateway | Brief 5 min; search and recall 10 min; counters 1 h; mirror 24 h | Queues, locks, sessions, pub/sub, anything that must survive a restart. A Dragonfly outage returns the same answers, uncached (`GET /healthz` reports hit/miss/bypass) |
-| **Memory**: decisions with receipt paths, environment facts, verified commands, gotchas, working preferences; weekly `reflect` into mental models | Hindsight | `substrate-mcp` only (`memory_write` → `retain`, `memory_search` → `recall`); the desk gateway calls the substrate, not Hindsight directly | Retain indefinitely; mental models replace stale detail | Unverified claims (a retain needs a `receipt_path` or a `source` URL), secrets (D-04 redaction), another surface's or seat's bank |
-| **Documents**: repo docs, skills, contracts, ADRs; product docs for KanbanOS, Desk Lanes, ClippyOS, Auctioning | RAGFlow | `substrate docs ingest` on merge to `main` (GitHub Action → `POST /docs/ingest`) | Re-ingest on merge; keep the last five dataset versions | Secrets, receipts, transcripts |
+| **Cache**: the brief, memory search and a graph view. Rate counters and an idempotency mirror stay a target, not a current key | DragonflyDB | `substrate-mcp` | Brief 300 s; memory search 600 s; graph view 60 s | Queues, locks, sessions, pub/sub, anything that must survive a restart. A Dragonfly outage returns the same answers, uncached |
+| **Memory**: decisions with receipt paths, environment facts, verified commands, gotchas, working preferences | Postgres index inside Timescale, and Hindsight for the desk | `substrate-mcp` writes the index (`memory_write` / `memory_search`). The desk gateway writes and reads Hindsight with its own keys when those are set | Index rows follow the governance gate; Hindsight banks are retained until replaced | Unverified claims, secrets (D-04 redaction), another surface's or seat's bank |
+| **Documents**: repo docs, skills, contracts, ADRs; product docs | RAGFlow | The desk gateway, with its own keys. `substrate-mcp` does not call RAGFlow | Re-ingest on merge is the target; it is not implemented here | Secrets, receipts, transcripts |
 
 ## Hindsight banks
 
@@ -36,7 +36,7 @@ Names are the Tailscale Forwarder machine names Railway derives (`<project>-<env
 | `pd-<seat>` (`pd-lead`, `pd-systems`, `pd-web`, `pd-android`, `pd-ios`, `pd-infra`, `pd-quality`) | that seat | that seat, LEAD | Seat working memory |
 | `pd-lead-reports` | LEAD | LEAD, Ove | Consolidated reports to the operator |
 
-Rules: one tenant key, held by the substrate in `/etc/substrate/substrate.env`; the gateway on the VPS calls `memory_write` / `memory_search` over loopback. `reflect` runs weekly per bank from a systemd timer. Hindsight's own Postgres is its private store and is not read by anything else. The local Claude Code `hindsight` stdio server (`/root/.hindsight/coding-agents`) and Hermes `memory.provider: supermemory` are retired once `sub-*` banks answer the brief (backup and restore route recorded first, as Phase 7 D-09 / D-10 already require).
+Rules: the desk gateway holds the Hindsight key and calls Hindsight directly when that key is set. `substrate-mcp` does not read `HINDSIGHT_*`. Its `memory_write` and `memory_search` are the Postgres index. The gateway still calls substrate `memory_search` when its Hindsight client is unset, and it calls substrate `memory_write` alongside a Hindsight retain. Hindsight's own Postgres is its private store and is not read by anything else.
 
 ## RAGFlow datasets
 
@@ -53,20 +53,43 @@ Embedding: TEI `bge-small` as already decided at 05-02; no chat model is registe
 
 ```
 Claude Code · Hermes · Omp · Muse · Grok Build · Cursor      Programming Desk seats (Grok Bots)
-        │ MCP / hooks (loopback)                                     │ HTTPS + OAuth
+        │ MCP / hooks (loopback)                                     │ HTTPS
         ▼                                                            ▼
-  substrate-mcp 127.0.0.1:7410  ◀── loopback ───  desk-gateway 127.0.0.1:8791 (desk.swcstudio.space)
-        │ tailnet (MagicDNS)
-        ▼
-  Ultrathink forwarder ── Greptime · Timescale · Dragonfly
-  Agent Substrate forwarder ── Hindsight · RAGFlow
+  substrate-mcp 127.0.0.1:7410  ◀── loopback ───  desk gateway
+        │ private forwarders                                         │ its own Hindsight and RAGFlow keys
+        ▼                                                            ▼
+  <ultrathink-forwarder> ── Greptime · Timescale · Dragonfly     Hindsight · RAGFlow
 ```
 
-Only the VPS and the operator's admin machines hold tailnet access to the forwarders (`docs/railway-tailscale.md`). Agents never receive database credentials; Grok Bots never receive the Hindsight or RAGFlow keys.
+Only the VPS and the operator's admin machines hold access to the forwarders (`docs/railway-tailscale.md`). Agents never receive database credentials. Grok Bots never receive the Hindsight or RAGFlow keys.
+
+## Current wiring
+
+What `substrate-mcp` reads today. Hindsight and RAGFlow are the desk gateway's clients.
+
+| Store | Reader | Env var | Status |
+|---|---|---|---|
+| GreptimeDB | `substrate-mcp` | `GREPTIME_URL`, `GREPTIME_USER`, `GREPTIME_PASSWORD`, `GREPTIME_DB` | read |
+| TimescaleDB | `substrate-mcp` | `SUBSTRATE_PG_URL` | read |
+| DragonflyDB | `substrate-mcp` read-through cache | `DRAGONFLY_URL`; `SUBSTRATE_CACHE=0` disables | read when set; fail-open when unset, refused or `0` |
+| Hindsight | desk gateway | gateway `HINDSIGHT_URL`, `HINDSIGHT_API_KEY` | not read by `substrate-mcp` (`HINDSIGHT_*` in `.env.example` is unused here) |
+| RAGFlow | desk gateway | gateway `RAGFLOW_URL`, `RAGFLOW_API_KEY` | not read by `substrate-mcp` (`RAGFLOW_*` in `.env.example` is unused here) |
+
+The cache covers `POST /brief`, `memory_brief`, `memory_search` and `graph_get`. It does not cover writes, `events_*` or leases. Keys are `substrate:v1` plus a hash of the normalized arguments, the caller surface and a generation. An accepted memory write bumps the memory generation. A graph write bumps that graph's generation. `GET /healthz` adds `{enabled, connected, mode, hits, misses, bypasses, errors}` with `mode` of `off`, `on` or `degraded`. The status code does not depend on the cache. The same counters are the `substrate.cache.operations` metric.
+
+## Target after the private-forwarder cutover
+
+| Store | Reader | Env var | Reach |
+|---|---|---|---|
+| GreptimeDB | `substrate-mcp` | `GREPTIME_URL` | `http://<ultrathink-forwarder>:4000` |
+| TimescaleDB | `substrate-mcp` | `SUBSTRATE_PG_URL` | `postgresql://…@<ultrathink-forwarder>:5432/<db>` |
+| DragonflyDB | `substrate-mcp` | `DRAGONFLY_URL` | `redis://…@<ultrathink-forwarder>:6379` |
+| Hindsight | desk gateway | gateway `HINDSIGHT_URL` | `http://<agent-substrate-forwarder>:8888` |
+| RAGFlow | desk gateway | gateway `RAGFLOW_URL` | `http://<agent-substrate-forwarder>:9380` |
 
 ## Environment keys
 
-See `.env.example`. Renamed or added: `HINDSIGHT_URL`, `HINDSIGHT_API_KEY`, `HINDSIGHT_BANK_PREFIX`, `DRAGONFLY_URL`; `AGENTMEMORY_URL` and `AGENTMEMORY_SECRET` are removed; `GREPTIME_URL`, `SUBSTRATE_PG_URL` and `RAGFLOW_URL` point at forwarder names.
+See `.env.example`. `substrate-mcp` reads `GREPTIME_*`, `SUBSTRATE_PG_URL`, `DRAGONFLY_URL` and `SUBSTRATE_CACHE`. `HINDSIGHT_*` and `RAGFLOW_*` in that file are unused by this process; the gateway holds its own. `AGENTMEMORY_URL` and `AGENTMEMORY_SECRET` are removed.
 
 ## Fail-open budget (unchanged)
 

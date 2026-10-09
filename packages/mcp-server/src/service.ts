@@ -8,6 +8,14 @@
 import { decideClaim, type ClaimDecision } from "@substrate/audit";
 import { formatMemo, hourEnd, hourIso, hourStart, isClosed, merkleRootHex } from "@substrate/ledger";
 import { composeBrief, type BriefRequest } from "./brief.ts";
+import {
+	MEMORY_GENERATION_KEY,
+	createReadThroughCache,
+	graphGenerationKey,
+	type CacheHealth,
+	type CacheSample,
+	type ReadThroughCache,
+} from "./cache.ts";
 import { isReviewToken, type SubstrateConfig } from "./config.ts";
 import {
 	DEFAULT_IDLE_SECONDS,
@@ -326,6 +334,7 @@ export interface SubstrateObserver {
 		durationMs: number;
 		payload: Record<string, unknown>;
 	}): void;
+	cached?(sample: CacheSample): void;
 	claimed?(sample: {
 		surface: Surface;
 		graph_id: string;
@@ -503,11 +512,12 @@ export class Substrate {
 	readonly index: IndexStore | null;
 	readonly greptime: GreptimeClient | null;
 	private readonly observer: SubstrateObserver;
+	private readonly cache: ReadThroughCache;
 
 	/** `stores` is a test seam; production always builds them from config. */
 	constructor(
 		readonly config: SubstrateConfig,
-		stores?: { index?: IndexStore | null; greptime?: GreptimeClient | null },
+		stores?: { index?: IndexStore | null; greptime?: GreptimeClient | null; cache?: ReadThroughCache },
 		observer: SubstrateObserver = {},
 	) {
 		this.index =
@@ -515,6 +525,11 @@ export class Substrate {
 		this.greptime =
 			stores?.greptime !== undefined ? stores.greptime : config.greptime ? new GreptimeClient(config.greptime) : null;
 		this.observer = observer;
+		this.cache =
+			stores?.cache ??
+			createReadThroughCache(config, (sample) => {
+				this.observer.cached?.(sample);
+			});
 	}
 
 	/**
@@ -563,7 +578,19 @@ export class Substrate {
 		const started = performance.now();
 		let ok = false;
 		try {
-			const brief = await composeBrief(request, { index: this.index, greptime: this.greptime });
+			const brief = await this.cache.getOrLoad({
+				klass: "brief",
+				surface: request.surface,
+				args: {
+					repo: request.repo ?? null,
+					branch: request.branch ?? null,
+					graph_id: request.graph_id ?? null,
+				},
+				generations: request.graph_id
+					? [MEMORY_GENERATION_KEY, graphGenerationKey(request.graph_id)]
+					: [MEMORY_GENERATION_KEY],
+				load: () => composeBrief(request, { index: this.index, greptime: this.greptime }),
+			});
 			ok = true;
 			return brief;
 		} finally {
@@ -755,6 +782,7 @@ export class Substrate {
 		}
 
 		await this.auditMemoryWrite(request, result);
+		if (result.outcome === "accepted" && result.verified_persisted) await this.cache.bump(MEMORY_GENERATION_KEY);
 		return result;
 	}
 
@@ -801,9 +829,23 @@ export class Substrate {
 		}).catch(() => undefined);
 	}
 
-	async searchMemory(query: string, scope?: string, limit?: number, includeSuperseded?: boolean): Promise<MemoryEntry[]> {
-		if (!this.index) return [];
-		return this.index.searchMemory(query, scope, limit, includeSuperseded);
+	async searchMemory(
+		query: string,
+		scope?: string,
+		limit?: number,
+		includeSuperseded?: boolean,
+		surface = "unattributed",
+	): Promise<MemoryEntry[]> {
+		return this.cache.getOrLoad({
+			klass: "memory-search",
+			surface,
+			args: { query, scope: scope ?? null, limit: limit ?? null, includeSuperseded: includeSuperseded ?? false },
+			generations: [MEMORY_GENERATION_KEY],
+			load: async () => {
+				if (!this.index) return [];
+				return this.index.searchMemory(query, scope, limit, includeSuperseded);
+			},
+		});
 	}
 
 	/**
@@ -812,10 +854,18 @@ export class Substrate {
 	 * further back — so nothing quarantined, parked or retired is reachable here
 	 * that was not before.
 	 */
-	async searchMemoryPage(request: MemorySearchRequest): Promise<MemorySearchPage> {
+	async searchMemoryPage(request: MemorySearchRequest, surface = "unattributed"): Promise<MemorySearchPage> {
 		const search = parseMemorySearch(request);
-		if (!this.index) return { entries: [], next: null };
-		return this.index.searchMemoryPage(search);
+		return this.cache.getOrLoad({
+			klass: "memory-search",
+			surface,
+			args: search,
+			generations: [MEMORY_GENERATION_KEY],
+			load: async () => {
+				if (!this.index) return { entries: [], next: null };
+				return this.index.searchMemoryPage(search);
+			},
+		});
 	}
 
 	/**
@@ -843,17 +893,27 @@ export class Substrate {
 		};
 	}
 
-	async getGraph(graphId: string) {
-		if (!this.index) return null;
-		const graph = await this.index.getGraph(graphId);
-		return graph && withoutLeaseIds(graph);
+	async getGraph(graphId: string, surface = "unattributed") {
+		return this.cache.getOrLoad({
+			klass: "graph-view",
+			surface,
+			args: { graph_id: graphId },
+			generations: [graphGenerationKey(graphId)],
+			load: async () => {
+				if (!this.index) return null;
+				const graph = await this.index.getGraph(graphId);
+				return graph && withoutLeaseIds(graph);
+			},
+		});
 	}
 
 	async registerGraph(plan: Parameters<IndexStore["registerGraph"]>[0]) {
 		if (!this.index) throw new Error("graph_register requires SUBSTRATE_PG_URL");
 		// Re-registering a graph whose nodes are held echoes them back, so this reply
 		// is a reader's view as much as `graph_get` is.
-		return withoutLeaseIds(await this.index.registerGraph(plan));
+		const graph = withoutLeaseIds(await this.index.registerGraph(plan));
+		await this.cache.bump(graphGenerationKey(plan.graph_id));
+		return graph;
 	}
 
 	/**
@@ -874,6 +934,7 @@ export class Substrate {
 		if (correlationId !== undefined && graphId !== undefined) {
 			const result = await this.index.bindCorrelation(correlationId, graphId, boundBy);
 			if (result.status === "created") {
+				await this.cache.bump(graphGenerationKey(result.graph_id));
 				await this.emit({
 					surface: boundBy ?? "claude-code",
 					kind: "note",
@@ -1040,6 +1101,7 @@ export class Substrate {
 		});
 
 		const granted = verdict.decision === "granted";
+		if (result.claimed) await this.cache.bump(graphGenerationKey(graphId));
 		return {
 			claimed: granted,
 			node: { ...result.node, lease_id: null },
@@ -1067,6 +1129,7 @@ export class Substrate {
 		if (!this.index) throw new Error("graph_heartbeat requires SUBSTRATE_PG_URL");
 		const ttl = normalizeTtlSeconds(ttlSeconds, this.config.leaseTtlSeconds);
 		const result = await this.index.heartbeatNode(graphId, nodeId, leaseId, caller, ttl);
+		if (result.ok) await this.cache.bump(graphGenerationKey(graphId));
 		return {
 			ok: result.ok,
 			lease: result.lease,
@@ -1116,6 +1179,9 @@ export class Substrate {
 				},
 				...(await this.placeOf(graphId)),
 			}).catch(() => undefined);
+		}
+		if (result.released && decision.ok && decision.action !== "noop") {
+			await this.cache.bump(graphGenerationKey(graphId));
 		}
 		return {
 			released: result.released,
@@ -1171,6 +1237,9 @@ export class Substrate {
 	async reapExpiredLeases(repo?: string | null) {
 		if (!this.index) return [];
 		const reaped = await this.index.reapExpiredLeases(repo ?? null);
+		for (const graphId of new Set(reaped.map((lease) => lease.graph_id))) {
+			await this.cache.bump(graphGenerationKey(graphId));
+		}
 		for (const lease of reaped) {
 			await this.emit({
 				surface: lease.holder?.surface ?? "claude-code",
@@ -1563,6 +1632,7 @@ export class Substrate {
 		appendOnly: boolean | null;
 		quotingDialectKnown: boolean;
 		eventsWritable: boolean;
+		cache: CacheHealth;
 	}> {
 		const greptime = this.greptime ? await this.greptime.ping() : false;
 		const appendOnly = greptime ? (await this.greptime?.ensureAppendMode().catch(() => null)) ?? null : null;
@@ -1576,6 +1646,9 @@ export class Substrate {
 			quotingDialectKnown,
 			eventsWritable:
 				greptime && quotingDialectKnown && (appendOnly === true || this.config.allowDeduplicatingLedger),
+			// In-memory counters only. Health does not ping Dragonfly and does not
+			// change its status code when the cache is down.
+			cache: this.cache.health(),
 		};
 	}
 }

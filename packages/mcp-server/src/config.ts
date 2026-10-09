@@ -20,6 +20,13 @@ export interface SubstrateConfig {
 	port: number;
 	greptime: GreptimeConfig | null;
 	postgresUrl: string | undefined;
+	/**
+	 * Dragonfly URL. Cache only. Unset leaves the read-through cache off.
+	 * `SUBSTRATE_CACHE=0` turns it off even when this is set.
+	 */
+	dragonflyUrl: string | undefined;
+	/** True only when `dragonflyUrl` is set and `SUBSTRATE_CACHE` is not `0`. */
+	cacheEnabled: boolean;
 	linearApiKey: string | undefined;
 	notionApiKey: string | undefined;
 	notionTaskGraphDataSource: string;
@@ -197,6 +204,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 				}
 			: null,
 		postgresUrl: env.SUBSTRATE_PG_URL?.trim() || undefined,
+		...cacheSettings(env),
 		linearApiKey: env.LINEAR_API_KEY?.trim() || undefined,
 		notionApiKey: env.NOTION_API_KEY?.trim() || undefined,
 		notionTaskGraphDataSource: env.NOTION_TASK_GRAPH_DS?.trim() || "be3418f0-d2d8-411b-8677-fa8a95ee63be",
@@ -216,6 +224,20 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		audit: { path: env.SUBSTRATE_AUDIT_PATH?.trim() || null },
 		requireRecordedClaims: booleanOrNull(env.SUBSTRATE_CLAIM_REQUIRE_LEDGER),
 	};
+}
+
+/**
+ * `SUBSTRATE_CACHE=0` (also `false` / `no`) disables the cache. Any other value,
+ * including unset, leaves it on when `DRAGONFLY_URL` is set. A typo must not
+ * silently disable a cache the operator configured.
+ */
+function cacheSettings(env: Record<string, string | undefined>): {
+	dragonflyUrl: string | undefined;
+	cacheEnabled: boolean;
+} {
+	const dragonflyUrl = env.DRAGONFLY_URL?.trim() || undefined;
+	const off = /^(0|false|no)$/i.test(env.SUBSTRATE_CACHE?.trim() ?? "");
+	return { dragonflyUrl, cacheEnabled: dragonflyUrl !== undefined && !off };
 }
 
 /** Comma- or whitespace-separated, so an operator can wrap the line in the env file. */

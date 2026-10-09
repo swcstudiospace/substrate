@@ -782,6 +782,7 @@ describe("append-mode enforcement", () => {
 			appendOnly: false,
 			quotingDialectKnown: true,
 			eventsWritable: false,
+			cache: { enabled: false, connected: false, mode: "off", hits: 0, misses: 0, bypasses: 0, errors: 0 },
 		});
 	});
 
