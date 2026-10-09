@@ -2644,3 +2644,349 @@ describe("claim mirror hooks (D23-01, D23-08, D23-17)", () => {
 	});
 });
 
+describe("completeNode DoD gate (D23-14, D23-15)", () => {
+	interface GateKnobs {
+		linearIssueId?: string | null;
+		linearIdentifier?: string | null;
+		notionPage?: string | null;
+		holder?: string;
+		reviewOk?: boolean;
+		reviewReason?: "not-holder" | "lost" | "expired" | "unheld";
+		linearState?: { name: string; type: string } | null;
+		connector?: { status: number; body: unknown } | { fail: "unreachable" | "timeout" };
+		reviewFailures?: Array<{ target: "linear" | "notion"; op: "review"; reason: string }>;
+		releaseFails?: boolean;
+	}
+
+	/** A Linear-linked node plus fakes for the index, the mirror and the connector. */
+	function gateWorld(knobs: GateKnobs = {}) {
+		const emitted: SubstrateEvent[] = [];
+		const mirrorCalls: Array<{ op: string; ctx: Record<string, unknown> }> = [];
+		const connectorCalls: Array<{ url: string; body: unknown }> = [];
+		let state = "started";
+		let reviewWrites = 0;
+		const node = {
+			graph_id: "ut-1",
+			node_id: "n2",
+			linear_issue_id: knobs.linearIssueId === undefined ? "uuid-SWC-467" : knobs.linearIssueId,
+			linear_identifier: knobs.linearIdentifier === undefined ? "SWC-467" : knobs.linearIdentifier,
+			notion_page: knobs.notionPage === undefined ? "https://notion.so/row-467" : knobs.notionPage,
+			claimed_by: knobs.holder ?? "hermes",
+			claim_session: "sess-a",
+			claimed_at: new Date().toISOString(),
+			lease_id: "lse_live",
+			lease_expires_at: new Date(Date.now() + 600_000).toISOString(),
+			lease_heartbeat_at: new Date().toISOString(),
+			lease_epoch: 3,
+			state: "started",
+		};
+		const holderOfRow = () => ({ surface: node.claimed_by, session_id: node.claim_session });
+		const index = {
+			getGraph: async () => ({ repo: "swcstudiospace/x", branch: "main" }),
+			getNode: async () => ({ ...node, state }),
+			reviewNode: async (_g: string, _n: string, leaseId: string, caller: Surface | null) => {
+				const decision = decideRelease(leaseSnapshot(node as never), { lease_id: leaseId, caller }, Date.now());
+				if (knobs.reviewOk === false || !decision.ok) {
+					const reason = knobs.reviewReason ?? (!decision.ok ? "stale-lease" : "not-holder");
+					return {
+						ok: false,
+						node: { ...node, state },
+						lease: { lease_id: null, holder: holderOfRow(), epoch: 3 },
+						decision: { ok: false, reason, holder: holderOfRow(), observed_expiry: null },
+					};
+				}
+				reviewWrites += 1;
+				state = "started_review";
+				return {
+					ok: true,
+					node: { ...node, state },
+					lease: { lease_id: leaseId, holder: holderOfRow(), epoch: 3 },
+					decision: { ok: true, lease_id: leaseId, ttl_seconds: 900, observed_epoch: 3 },
+				};
+			},
+			releaseNode: async (
+				_g: string,
+				_n: string,
+				request: { lease_id?: string | null; force?: boolean },
+				caller: Surface | null,
+				alsoSetState?: string,
+			) => {
+				if (knobs.releaseFails) {
+					return {
+						released: false,
+						node: { ...node, state },
+						decision: { ok: false, reason: "stale-lease", holder: holderOfRow(), observed_epoch: 3 },
+					};
+				}
+				const decision = decideRelease(leaseSnapshot({ ...node, state } as never), { ...request, caller }, Date.now());
+				if (!decision.ok || decision.action === "noop") return { released: decision.ok, node: { ...node, state }, decision };
+				if (alsoSetState !== undefined) state = alsoSetState;
+				return { released: true, node: { ...node, state }, decision };
+			},
+		};
+		const mirror = {
+			review: async (ctx: Record<string, unknown>) => {
+				mirrorCalls.push({ op: "review", ctx });
+				return knobs.reviewFailures ?? [];
+			},
+			linearState: async () => knobs.linearState ?? null,
+			done: async (ctx: Record<string, unknown>) => {
+				mirrorCalls.push({ op: "done", ctx });
+				return [];
+			},
+			close: async (ctx: Record<string, unknown>) => {
+				mirrorCalls.push({ op: "close", ctx });
+				return [];
+			},
+		};
+		const fetchImpl = (async (url: string, init: { body?: string }) => {
+			const body = init.body ? (JSON.parse(init.body) as unknown) : null;
+			connectorCalls.push({ url, body });
+			const connector = knobs.connector ?? { status: 200, body: { completed: true } };
+			if ("fail" in connector) {
+				if (connector.fail === "timeout") {
+					const timeout = new Error("The operation timed out");
+					timeout.name = "TimeoutError";
+					throw timeout;
+				}
+				throw new Error("connection refused");
+			}
+			return new Response(JSON.stringify(connector.body), { status: connector.status });
+		}) as unknown as typeof fetch;
+		const greptime = {
+			ensureAppendMode: async () => true,
+			lastHash: async () => null,
+			insertEvent: async (event: SubstrateEvent) => {
+				emitted.push(event);
+			},
+		};
+		const substrate = new Substrate(loadConfig({}), {
+			index: index as never,
+			greptime: greptime as never,
+			mirror: mirror as never,
+			dodGate: { fetchImpl },
+		});
+		return { emitted, mirrorCalls, connectorCalls, substrate, stateAfter: () => state, reviewWrites: () => reviewWrites };
+	}
+
+	const dodWarnings = (emitted: SubstrateEvent[]) => emitted.filter((e) => e.payload["action"] === "dod");
+
+	test("a node with no Linear reference completes on main's path with zero mirror calls", async () => {
+		const world = gateWorld({ linearIssueId: null, linearIdentifier: null, notionPage: null });
+
+		const result = await world.substrate.completeNode("ut-1", "n2", { lease_id: "lse_live" }, "hermes");
+
+		expect(result.completed).toBe(true);
+		expect(world.mirrorCalls).toEqual([]);
+		expect(world.connectorCalls).toEqual([]);
+		expect(world.stateAfter()).toBe("completed");
+	});
+
+	test("a forced completion skips the gate and mirrors close", async () => {
+		const world = gateWorld();
+
+		const result = await world.substrate.completeNode("ut-1", "n2", { lease_id: "lse_live", force: true }, "hermes");
+
+		expect(result.completed).toBe(true);
+		expect(world.reviewWrites()).toBe(0);
+		expect(world.connectorCalls).toEqual([]);
+		expect(world.mirrorCalls.map((c) => c.op)).toEqual(["close"]);
+	});
+
+	test("an other-state completion skips the gate and mirrors close", async () => {
+		const world = gateWorld();
+
+		const result = await world.substrate.completeNode("ut-1", "n2", { lease_id: "lse_live", state: "canceled" }, "hermes");
+
+		expect(result.completed).toBe(true);
+		expect(world.reviewWrites()).toBe(0);
+		expect(world.connectorCalls).toEqual([]);
+		expect(world.mirrorCalls.map((c) => c.op)).toEqual(["close"]);
+		expect(world.stateAfter()).toBe("canceled");
+	});
+
+	test("a swarm holder completes on main's path with only the done op", async () => {
+		const world = gateWorld({ holder: "swarm-a01-orch" });
+
+		const result = await world.substrate.completeNode("ut-1", "n2", { lease_id: "lse_live" }, "swarm-a01-orch");
+
+		expect(result.completed).toBe(true);
+		expect(world.reviewWrites()).toBe(0);
+		expect(world.connectorCalls).toEqual([]);
+		expect(world.mirrorCalls.map((c) => c.op)).toEqual(["done"]);
+	});
+
+	test("without dod the node parks at started_review and the connector is never called", async () => {
+		const world = gateWorld();
+
+		const result = await world.substrate.completeNode("ut-1", "n2", { lease_id: "lse_live" }, "hermes");
+
+		expect(result).toMatchObject({ completed: false, reason: "dod-required" });
+		expect(world.connectorCalls).toEqual([]);
+		expect(world.stateAfter()).toBe("started_review");
+		expect(world.mirrorCalls.map((c) => c.op)).toEqual(["review"]);
+		const warnings = dodWarnings(world.emitted);
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]?.payload).toEqual({ action: "dod", reason: "dod-required" });
+	});
+
+	test("an approval carries summary_chars and never the summary text", async () => {
+		const world = gateWorld();
+		const summary = "all checks green on the rehearsal graph";
+
+		const result = await world.substrate.completeNode(
+			"ut-1",
+			"n2",
+			{ lease_id: "lse_live", dod: { summary, tests_pass: true, review_pass: true } },
+			"hermes",
+		);
+
+		expect(result.completed).toBe(true);
+		expect(world.connectorCalls).toHaveLength(1);
+		expect(world.connectorCalls[0]?.url).toBe("http://127.0.0.1:8792/v1/complete-issue");
+		expect(world.connectorCalls[0]?.body).toEqual({
+			linear_issue_id: "uuid-SWC-467",
+			summary,
+			tests_pass: true,
+			review_pass: true,
+		});
+		expect(world.mirrorCalls.map((c) => c.op)).toEqual(["review", "done"]);
+		const releaseNote = world.emitted.find((e) => e.kind === "note");
+		expect(releaseNote?.payload["dod"]).toEqual({ tests_pass: true, review_pass: true, summary_chars: summary.length });
+		expect(JSON.stringify(world.emitted)).not.toContain(summary);
+	});
+
+	test("an issue already Done in Linear skips review and the connector", async () => {
+		const world = gateWorld({ linearState: { name: "Done", type: "completed" } });
+
+		const result = await world.substrate.completeNode(
+			"ut-1",
+			"n2",
+			{ lease_id: "lse_live", dod: { summary: "s", tests_pass: true } },
+			"hermes",
+		);
+
+		expect(result.completed).toBe(true);
+		expect(world.mirrorCalls.map((c) => c.op)).toEqual(["done"]);
+		expect(world.connectorCalls).toEqual([]);
+	});
+
+	test("a connector refusal keeps the lease and warns once", async () => {
+		const world = gateWorld({ connector: { status: 200, body: { completed: false, reason: "checks-unmet" } } });
+
+		const result = await world.substrate.completeNode(
+			"ut-1",
+			"n2",
+			{ lease_id: "lse_live", dod: { summary: "s", tests_pass: false } },
+			"hermes",
+		);
+
+		expect(result).toMatchObject({ completed: false, reason: "dod-refused", detail: "checks-unmet" });
+		expect(world.stateAfter()).toBe("started_review");
+		const warnings = dodWarnings(world.emitted);
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]?.payload).toEqual({ action: "dod", reason: "dod-refused" });
+	});
+
+	test("a connector 502 is dod-unavailable with the capped status detail", async () => {
+		const world = gateWorld({ connector: { status: 502, body: { error: "engine blew up" } } });
+
+		const result = await world.substrate.completeNode(
+			"ut-1",
+			"n2",
+			{ lease_id: "lse_live", dod: { summary: "s", tests_pass: true } },
+			"hermes",
+		);
+
+		expect(result).toMatchObject({ completed: false, reason: "dod-unavailable" });
+		expect("detail" in result && typeof result.detail === "string" && result.detail).toContain("502");
+		expect(world.stateAfter()).toBe("started_review");
+	});
+
+	test("a timeout settles by reading Linear state, both ways", async () => {
+		const moved = gateWorld({ connector: { fail: "timeout" }, linearState: { name: "Done", type: "completed" } });
+		const approved = await moved.substrate.completeNode(
+			"ut-1",
+			"n2",
+			{ lease_id: "lse_live", dod: { summary: "s", tests_pass: true } },
+			"hermes",
+		);
+		expect(approved.completed).toBe(true);
+
+		const stuck = gateWorld({ connector: { fail: "timeout" }, linearState: { name: "In Progress", type: "started" } });
+		const refused = await stuck.substrate.completeNode(
+			"ut-1",
+			"n2",
+			{ lease_id: "lse_live", dod: { summary: "s", tests_pass: true } },
+			"hermes",
+		);
+		expect(refused).toMatchObject({ completed: false, reason: "dod-unavailable" });
+		expect(stuck.stateAfter()).toBe("started_review");
+	});
+
+	test("a post-approval fence failure still records Notion Done and warns", async () => {
+		const world = gateWorld({ releaseFails: true });
+
+		const result = await world.substrate.completeNode(
+			"ut-1",
+			"n2",
+			{ lease_id: "lse_live", dod: { summary: "s", tests_pass: true } },
+			"hermes",
+		);
+
+		expect(result.completed).toBe(false);
+		expect(result).toMatchObject({ reason: "stale-lease" });
+		// Linear is Done, so the Notion row must say so even though the fence lost.
+		expect(world.mirrorCalls.map((c) => c.op)).toEqual(["review", "done"]);
+		const warnings = dodWarnings(world.emitted);
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]?.payload).toEqual({ action: "dod", reason: "stale-lease" });
+	});
+
+	test("a review-write refusal returns main's shape and writes no tracker", async () => {
+		const world = gateWorld({ reviewOk: false, reviewReason: "not-holder" });
+
+		const result = await world.substrate.completeNode("ut-1", "n2", { lease_id: "lse_live" }, "omp");
+
+		expect(result).toMatchObject({ completed: false, reason: "not-holder" });
+		expect(world.reviewWrites()).toBe(0);
+		expect(world.mirrorCalls).toEqual([]);
+		expect(world.connectorCalls).toEqual([]);
+		expect(world.emitted).toEqual([]);
+	});
+
+	test("malformed dod is refused before the review write", async () => {
+		const world = gateWorld();
+
+		const result = await world.substrate.completeNode(
+			"ut-1",
+			"n2",
+			{ lease_id: "lse_live", dod: { summary: "", tests_pass: true } },
+			"hermes",
+		);
+
+		expect(result).toMatchObject({ completed: false, reason: "dod-invalid" });
+		expect(world.reviewWrites()).toBe(0);
+		expect(world.mirrorCalls).toEqual([]);
+		expect(world.connectorCalls).toEqual([]);
+	});
+
+	test("the gate is lease-hygienic: the id reaches no request, event or reply, and the summary only the connector", async () => {
+		const world = gateWorld();
+		const summary = " planted summary words for the leak check ";
+
+		const result = (await world.substrate.completeNode(
+			"ut-1",
+			"n2",
+			{ lease_id: "lse_live", dod: { summary, tests_pass: true } },
+			"hermes",
+		)) as unknown as Record<string, unknown>;
+
+		for (const call of world.connectorCalls) expect(JSON.stringify(call)).not.toContain("lse_live");
+		expect(JSON.stringify(world.emitted)).not.toContain("lse_live");
+		expect(JSON.stringify(result)).not.toContain("lse_live");
+		expect(JSON.stringify(world.emitted)).not.toContain(summary.trim());
+		expect(JSON.stringify(result)).not.toContain(summary.trim());
+	});
+});
+

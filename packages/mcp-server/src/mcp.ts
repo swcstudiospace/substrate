@@ -690,18 +690,30 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				"`lease_id` you were granted, with the token whose surface holds it (`not-holder` otherwise). A node " +
 				"nobody holds cannot be completed — claim it first — and a lease that has lapsed cannot close a node " +
 				"a second agent has since claimed. `force` is an operator action, as in graph_release. " +
-				"`completed: false` means nothing changed, and says why.",
+				"A non-forced completion to `completed` of a node with a Linear reference needs `dod` evidence " +
+				"(`summary`, `tests_pass`): without it the node parks at `started_review` with the lease held and the " +
+				"result is `dod-required`, and only the hermes-linear-connector gate's explicit approval moves the " +
+				"issue to Done. A swarm surface's completion is not gated: it completes and leaves only a " +
+				"`Completed by` comment. `completed: false` means nothing changed, and says why.",
 			inputSchema: {
 				graph_id: z.string(),
 				node_id: z.string(),
 				lease_id: z.string().optional(),
 				force: z.boolean().optional().describe("Operators only."),
 				state: z.enum(NODE_STATES).optional().describe("Defaults to completed."),
+				dod: z
+					.object({
+						summary: z.string().min(1).max(2000),
+						tests_pass: z.boolean(),
+						review_pass: z.boolean().optional(),
+					})
+					.optional()
+					.describe("Definition-of-Done evidence for a Linear-linked node. Required there; ignored elsewhere."),
 			},
 		},
-		async ({ graph_id, node_id, lease_id, force, state }) => {
+		async ({ graph_id, node_id, lease_id, force, state, dod }) => {
 			if (force && !isOperator) return json(FORCE_REFUSED);
-			return json(await substrate.completeNode(graph_id, node_id, { lease_id, force, state }, callerSurface));
+			return json(await substrate.completeNode(graph_id, node_id, { lease_id, force, state, dod }, callerSurface));
 		},
 	);
 
