@@ -3467,6 +3467,7 @@ describe("verifyGraph hour report", () => {
 
 	function rpcReturning(memo: string | null, over: Record<string, unknown> = {}) {
 		return {
+			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqaEyCydFLPYGEC",
 			transactionMemo: async () => ({ memo, payer: PUBKEY, payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: null, ...over }),
 		};
 	}
@@ -3569,7 +3570,10 @@ describe("verifyGraph hour report", () => {
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
-		const rpc = { transactionMemo: async () => ({ memo: world.memo, payer: "SomeoneElse11111111111111111111111111111", payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: null }) };
+		const rpc = {
+			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqaEyCydFLPYGEC",
+			transactionMemo: async () => ({ memo: world.memo, payer: "SomeoneElse11111111111111111111111111111", payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: null }),
+		};
 		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpc as never });
 		expect(verdict.hours[0]?.status).toBe("mismatch");
 		expect(verdict.ok).toBe(false);
@@ -3630,7 +3634,12 @@ describe("verifyGraph hour report", () => {
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
-		const rpc = { transactionMemo: async () => { throw new Error("fetch failed"); } };
+		const rpc = {
+			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqaEyCydFLPYGEC",
+			transactionMemo: async () => {
+				throw new Error("fetch failed");
+			},
+		};
 		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpc as never });
 		expect(verdict.hours[0]?.status).toBe("unverified");
 		expect(verdict.ok).toBe(false);
@@ -3645,7 +3654,10 @@ describe("verifyGraph hour report", () => {
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
-		const rpc = { transactionMemo: async () => null };
+		const rpc = {
+			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqaEyCydFLPYGEC",
+			transactionMemo: async () => null,
+		};
 		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpc as never });
 		expect(verdict.hours[0]?.status).toBe("unverified");
 		expect(verdict.ok).toBe(false);
@@ -3844,7 +3856,10 @@ describe("verifyGraph hour report", () => {
 			},
 			{ SUBSTRATE_VERIFY_TIMEOUT_MS: String(VERIFY_RESPONSE_MARGIN_MS + 150) },
 		);
-		const rpc = { transactionMemo: (): Promise<never> => Promise.withResolvers<never>().promise };
+		const rpc = {
+			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqaEyCydFLPYGEC",
+			transactionMemo: (): Promise<never> => Promise.withResolvers<never>().promise,
+		};
 		const started = Date.now();
 		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpc as never });
 		expect(Date.now() - started).toBeLessThan(2000);
@@ -4025,6 +4040,50 @@ describe("verifyGraph hour report", () => {
 		expect(verdict.reason).toContain(first.id);
 	});
 
+	test("a fresh session accepted during the gap refresh is chain-checked", async () => {
+		const world = sessionRows();
+		const liveAt = H + 5 * HOUR + 1000;
+		const foreign = normalizeEvent(
+			{ surface: "omp", kind: "note", summary: "other-session", session_id: "sess-other", graph_id: "ut-1", actor: "agent" },
+			null,
+		);
+		const tampered = { ...foreign, summary: "edited summary" };
+		const toRow = (event: typeof foreign) => ({ ...event, ts: Date.parse(event.ts), payload: JSON.stringify(event.payload) });
+		const foreignRecord = { event_id: foreign.id, event_ts: Date.parse(foreign.ts), ingested_at: liveAt };
+		let reads = 0;
+		const substrate = substrateWith({
+			readEvents: async () => (++reads === 1 ? world.rows : [...world.rows, toRow(tampered)]),
+			graphIngest: async () => [...world.records, foreignRecord],
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: liveAt + 60_000, rpc: rpcReturning(world.memo) as never });
+		expect(reads).toBe(2);
+		expect(verdict.ok).toBe(false);
+		expect(verdict.chain.ok).toBe(false);
+		expect(verdict.reason).toContain("hash does not match");
+	});
+
+	test("verification rejects an anchor read from another cluster", async () => {
+		const world = sessionRows();
+		const substrate = substrateWith({
+			readEvents: async () => world.rows,
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const rpc = {
+			...rpcReturning(world.memo),
+			getGenesisHash: async () => "5eykt4UsFv8P8NJdTREpYbfX66U2GJkSnp6vn33VqDv",
+		};
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpc as never });
+		expect(verdict.ok).toBe(false);
+		expect(verdict.hours[0]?.status).toBe("unverified");
+		expect(verdict.hours[0]?.reason).toContain("not devnet");
+	});
+
 	test("a deletion in the still-open hour still fails naming the event", async () => {
 		// The re-read — not the hour — tells a live append from a deletion:
 		// a row gone at every read fails even while its hour is pending.
@@ -4090,7 +4149,8 @@ describe("verifyGraph hour report", () => {
 		});
 		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(world.memo) as never });
 		expect(verdict.missing).toEqual({ count: 1, ids: [moved] });
-		expect(verdict.reason).toContain(moved);
+		expect(verdict.chain.ok).toBe(false);
+		expect(verdict.brokenAt).toBe(moved);
 		expect(verdict.ok).toBe(false);
 	});
 

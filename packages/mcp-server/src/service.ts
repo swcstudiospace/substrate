@@ -8,6 +8,7 @@
 import { randomUUID } from "node:crypto";
 import { decideClaim, type ClaimDecision } from "@substrate/audit";
 import { createRpc, formatMemo, hourEnd, hourIso, hourStart, isClosed, merkleRootHex, parseMemo, HOUR_MS, type Rpc, type TransactionMemo } from "@substrate/ledger";
+import { DEVNET_GENESIS_HASH } from "./anchor.ts";
 import { composeBrief, type BriefRequest } from "./brief.ts";
 import {
 	GRAPHS_GENERATION_KEY,
@@ -2797,6 +2798,19 @@ export class Substrate {
 			for (const id of freshRecordLess) {
 				if (!uncovered.includes(id)) uncovered.push(id);
 			}
+			// Every fresh session that contributes a covered row is part of the
+			// verdict, not only the session that held the gap. A new session
+			// whose hash no longer matches its summary must fail even when
+			// its hour is still open and skips the digest.
+			for (const [key, members] of freshBySession) {
+				if (!members.some((member) => byEvent.has(member.id))) continue;
+				const result = verifyChain(inChainOrder(members));
+				if (!result.ok) {
+					chain.ok = false;
+					chain.brokenAt ??= result.brokenAt;
+					chain.reason ??= result.reason;
+				}
+			}
 			for (const key of touched) {
 				const members = freshBySession.get(key) ?? [];
 				if (!verifyChain(inChainOrder(members)).ok) continue;
@@ -2969,6 +2983,15 @@ export class Substrate {
 		}
 		if (!pubkey) {
 			return { period_start, period_end, status: "unverified", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "SOLANA_ANCHOR_PUBKEY is not set" };
+		}
+		let genesis: string;
+		try {
+			genesis = await readRpc().getGenesisHash();
+		} catch (cause) {
+			return { period_start, period_end, status: "unverified", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: redact(String(cause)) };
+		}
+		if (genesis !== DEVNET_GENESIS_HASH) {
+			return { period_start, period_end, status: "unverified", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "RPC genesis hash is not devnet's" };
 		}
 		let memo: TransactionMemo | null;
 		try {

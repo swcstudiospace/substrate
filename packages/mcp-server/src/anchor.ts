@@ -271,6 +271,18 @@ type AdoptVerdict =
  * v1 parse, this period). Same root+count adopts, a different root+count
  * alarms, no memo sends.
  */
+async function assertDevnetCluster(rpc: Rpc): Promise<void> {
+	let genesis: string;
+	try {
+		genesis = await rpc.getGenesisHash();
+	} catch (cause) {
+		throw new SystemicError("rpc-unreadable", `getGenesisHash failed: ${redact(String(cause).slice(0, 200))}`);
+	}
+	if (genesis !== DEVNET_GENESIS_HASH) {
+		throw new SystemicError("wrong-cluster", "RPC genesis hash is not devnet's");
+	}
+}
+
 async function checkAdopt(deps: AnchorDeps, periodStartMs: number, digest: HourDigest): Promise<AdoptVerdict> {
 	const { rpc, env } = deps;
 	let listing: AddressMemo[];
@@ -282,6 +294,10 @@ async function checkAdopt(deps: AnchorDeps, periodStartMs: number, digest: HourD
 	for (const hint of listing) {
 		const parsed = hint.memo === null ? null : parseMemo(hint.memo);
 		if (parsed === null || parsed.periodStartMs !== periodStartMs) continue;
+		// Adoption labels the row `devnet`. A matching memo on another cluster
+		// must not count: the genesis check on the send path never runs when
+		// this hint is adopted.
+		await assertDevnetCluster(rpc);
 		let confirmed: TransactionMemo | null;
 		try {
 			confirmed = await rpc.transactionMemo(hint.signature, "confirmed");
@@ -390,8 +406,10 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 		try {
 			const existing = await greptime.anchorForPeriod(only);
 			if (existing) anchored[hourIso(only)] = true;
-		} catch {
-			// A store failure surfaces as store-failed on the write path below.
+		} catch (cause) {
+			await failHour(hourIso(only), "store-failed");
+			process.stderr.write(`[anchor] ${hourIso(only)} store-failed: ${redact(String(cause).slice(0, 200))}\n`);
+			return result;
 		}
 	}
 	const candidates: number[] = [];
@@ -423,6 +441,12 @@ export async function runAnchorJob(deps: AnchorDeps): Promise<AnchorResult> {
 				// readable, and continuing would anchor them while the store
 				// is unavailable.
 				if (!isHourDataError(cause)) {
+					if (dryRun) {
+						process.stdout.write(`[anchor] would fail ${periodIso} (store-failed)\n`);
+						result.code = 1;
+						result.failed += 1;
+						return result;
+					}
 					await failHour(periodIso, "store-failed");
 					process.stderr.write(`[anchor] ${periodIso} store-failed: ${redact(String(cause).slice(0, 200))}\n`);
 					return result;

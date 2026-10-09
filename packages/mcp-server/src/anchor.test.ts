@@ -953,4 +953,65 @@ describe("parseAnchorArgs", () => {
 		expect(inserts).toEqual([]);
 		expect(emitted).toEqual([]);
 	});
+
+	test("a failed --period row read stops before any adopt or send", async () => {
+		const { deps: d, emitted, inserts, invocations } = deps({
+			options: { onlyPeriodMs: H10 },
+			greptime: {
+				firstIngestMs: async () => H10,
+				anchorsBetween: async () => [],
+				anchorForPeriod: async () => {
+					throw new Error("unreachable");
+				},
+				insertAnchor: async (row: NewAnchor) => {
+					inserts.push({ ...row });
+				},
+			} as unknown as AnchorDeps["greptime"],
+		});
+		const result = await runAnchorJob(d);
+		expect(result.code).toBe(1);
+		expect(result.failed).toBe(1);
+		expect(invocations).toEqual([]);
+		expect(inserts).toEqual([]);
+		expect(failed(emitted)[0]?.payload).toMatchObject({ reason: "store-failed" });
+	});
+
+	test("a matching memo on another cluster is not adopted", async () => {
+		const memo = formatMemo({ periodStartMs: H10, rootHex: ROOT, count: 3 });
+		const { deps: d, emitted, inserts, invocations } = deps({
+			rpc: {
+				transactionMemo: async () => ({
+					memo,
+					payer: PUBKEY,
+					payerSigned: true,
+					err: null,
+					fee: 5000,
+					slot: 77,
+					blockTime: 1,
+				}),
+				addressMemos: async () => [{ signature: SIG, memo, err: null, slot: 77 }],
+				balance: async () => 1_000_000,
+				getGenesisHash: async () => "5eykt4UsFv8P8NJdTREpYbfX66U2GJkSnp6vn33VqDv",
+			},
+		});
+		const result = await runAnchorJob(d);
+		expect(result.code).toBe(1);
+		expect(result.adopted).toBe(0);
+		expect(inserts).toEqual([]);
+		expect(invocations).toEqual([]);
+		expect(failed(emitted)[0]?.payload).toMatchObject({ reason: "wrong-cluster" });
+	});
+
+	test("a dry-run store failure writes no warning", async () => {
+		const { deps: d, emitted, inserts, invocations } = deps({
+			options: { dryRun: true },
+			digests: new Map<number, HourDigest | Error>([[H10, new Error("store down")]]),
+		});
+		const result = await runAnchorJob(d);
+		expect(result.code).toBe(1);
+		expect(result.failed).toBe(1);
+		expect(emitted).toEqual([]);
+		expect(inserts).toEqual([]);
+		expect(invocations).toEqual([]);
+	});
 });
