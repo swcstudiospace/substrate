@@ -23,14 +23,24 @@ Run from a session on the host. Names only below — no file in git holds an
 environment value.
 
 ```sh
-# 1. Pull main in the operator checkout, so both entry files exist on disk.
+# 1. Back up the checkout and the installed units first — the rollback below
+#    restores from this tarball. Then pull main, so both entry files exist.
+tar -czf "/root/substrate-cutover-backup-$(date +%Y%m%dT%H%M%S).tgz" -C /root/src/repos/agent-substrate . --exclude=.git
+cp /etc/systemd/system/substrate-collector-herdr.service /etc/systemd/system/substrate-collector-muse.service /root/ 2>/dev/null || true
 git -C /root/src/repos/agent-substrate pull --ff-only origin main
 
-# 2. Create the per-collector env files (root-owned, mode 0600). Each holds
-#    only the names its process reads: SUBSTRATE_URL and SUBSTRATE_TOKEN.
-#    SUBSTRATE_COLLECTOR_STATE and SUBSTRATE_STATE_DIR already ride on the units.
-install -m 0600 /dev/null /etc/substrate/substrate-collector-herdr.env
-install -m 0600 /dev/null /etc/substrate/substrate-collector-muse.env
+# 2. Create the per-collector env files only when absent (root-owned, mode
+#    0600). Each holds only the names its process reads: SUBSTRATE_URL and
+#    SUBSTRATE_TOKEN. SUBSTRATE_COLLECTOR_STATE and SUBSTRATE_STATE_DIR
+#    already ride on the units. A rerun must never truncate files the
+#    operator already provisioned — create, then stop and provision the
+#    tokens and URL before touching the running services.
+for unit in herdr muse; do
+  file="/etc/substrate/substrate-collector-${unit}.env"
+  if [ ! -e "$file" ]; then install -m 0600 /dev/null "$file"; fi
+done
+# Provision SUBSTRATE_URL and SUBSTRATE_TOKEN in both files now. Step 4
+# restarts the services, so a missing token there fails closed on restart.
 
 # 3. Install both units from the merged tree and reload.
 cp infra/vps/substrate-collector-herdr.service /etc/systemd/system/substrate-collector-herdr.service
@@ -57,17 +67,25 @@ a refused line names its collector, source, kind, surface and status in
 
 ## Rollback
 
-Operator only. Check out the previous commit in the operator checkout,
-reinstall both unit files from it, reload, and restart the pair. The
-collectors run the checkout again; the Muse plugin stays at its projected
-bundle until step 5 is re-run, which the next cutover covers.
+Operator only. The first cutover has no collector-bearing commit to check
+out: this phase is what introduces `packages/collectors/src/herdr.ts`,
+`packages/collectors/src/muse.ts`, both unit files and
+`collectors:status`, so checking out the pre-PR commit removes the very
+modules the restarted units would exec. Instead, stop the new services and
+restore the code and units from the pre-cutover backup the operator took in
+step 1 (a tarball of the checkout plus `/etc/systemd/system`). If there was
+no previous collector generation to restore, leave the pair stopped and
+report the cutover as not in effect — never restart the installed units
+against a tree that no longer contains their entry files.
 
 ```sh
-git -C /root/src/repos/agent-substrate checkout <previous-commit>
-cp infra/vps/substrate-collector-herdr.service /etc/systemd/system/substrate-collector-herdr.service
-cp infra/vps/substrate-collector-muse.service /etc/systemd/system/substrate-collector-muse.service
+systemctl stop substrate-collector-herdr substrate-collector-muse
+# Restore the pre-cutover backup taken before step 1, then:
 systemctl daemon-reload
-systemctl restart substrate-collector-herdr substrate-collector-muse
+# Restart only what the restored tree actually contains; if the restored
+# tree has no herdr/muse collector entry files, leave the pair stopped.
+test -f packages/collectors/src/herdr.ts && systemctl restart substrate-collector-herdr || true
+test -f packages/collectors/src/muse.ts && systemctl restart substrate-collector-muse || true
 bun run collectors:status
 ```
 

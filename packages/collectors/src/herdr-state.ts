@@ -306,8 +306,8 @@ export function reconcile(state: HerdrStateFile, panes: readonly HerdrPane[], op
 		if (prev.status !== raw) {
 			const next: HerdrPaneRecord = { ...prev, status: raw, raw_status: raw, surface };
 			const attr = attribute(pane, options);
-			if (attr.repo) next.repo = attr.repo;
-			if (attr.branch) next.branch = attr.branch;
+			next.repo = attr.repo;
+			next.branch = attr.branch;
 			transitions.push(planned(identity, {
 				rowId: "herdr.status_changed",
 				surface,

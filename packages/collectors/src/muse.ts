@@ -19,7 +19,7 @@
  * recorded in `docs/collectors.md`.
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { redact } from "../../mcp-server/src/redact.ts";
 import { branchFor, repoSlug } from "./git-context.ts";
@@ -242,8 +242,9 @@ export function ensurePointer(repo: string, counters: MuseCounters): "written" |
 	if (existsSync(agentsPath)) {
 		try {
 			existing = readFileSync(agentsPath, "utf8");
-		} catch {
-			existing = "";
+		} catch (cause) {
+			journal(`cannot read ${agentsPath}: ${String(cause)}; left untouched`);
+			return "unchanged";
 		}
 	}
 	const spans = markerSpans(existing);
@@ -319,6 +320,31 @@ function noteFailure(state: MuseState, repo: string, reason: string, now: string
 }
 
 /**
+ * The `BRIEF.md` path when `<repo>/.substrate` is a real directory inside the
+ * repo. Null when the component is a symlink or resolves outside the repo —
+ * the writer follows neither, so a linked `.substrate` can never redirect the
+ * brief into another directory.
+ */
+export function briefPathFor(repo: string): string | null {
+	const dir = join(repo, ".substrate");
+	try {
+		if (lstatSync(dir).isSymbolicLink()) return null;
+	} catch {
+		// Absent: resolved below after creation. Anything else is refused.
+		if (existsSync(dir)) return null;
+	}
+	let realDir: string;
+	try {
+		realDir = realpathSync(dir);
+	} catch {
+		realDir = dir;
+	}
+	const root = repo.replace(/\/+$/, "");
+	if (realDir !== root && !realDir.startsWith(`${root}/`)) return null;
+	return join(dir, "BRIEF.md");
+}
+
+/**
  * One pass over the named roots. Never calls `/events`.
  *
  * A ledger that is down counts `fetch_failed` (`ledger_unavailable`) for every
@@ -346,8 +372,14 @@ export async function pass(repos: string[], state: MuseState, now: string = new 
 			ensureExclude(repo);
 			continue;
 		}
+		const briefPath = briefPathFor(repo);
+		if (!briefPath) {
+			noteFailure(state, repo, "brief_dir_outside_repo", now);
+			ensurePointer(repo, state.counters);
+			continue;
+		}
 		try {
-			writeIfChanged(join(repo, ".substrate", "BRIEF.md"), redact(fetched.text));
+			writeIfChanged(briefPath, redact(fetched.text));
 		} catch (cause) {
 			noteFailure(state, repo, "write", now);
 			journal(`cannot write brief for ${repo}: ${String(cause)}`);

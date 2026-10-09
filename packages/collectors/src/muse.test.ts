@@ -5,11 +5,12 @@
  * A decoy token is assembled at runtime so no credential shape sits in git.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { redact } from "../../mcp-server/src/redact.ts";
 import {
+	briefPathFor,
 	emptyState,
 	ensurePointer,
 	fetchBrief,
@@ -304,6 +305,41 @@ describe("muse writer", () => {
 		expect(ensurePointer(repo, counters)).toBe("written");
 		expect(ensurePointer(repo, counters)).toBe("unchanged");
 		expect(readFileSync(join(repo, "AGENTS.md"), "utf8").split(MARKER_START).length - 1).toBe(1);
+	});
+	test("an unreadable AGENTS.md is left untouched instead of replaced", () => {
+		const repo = tempGit({ origin: "https://github.com/acme/widgets.git" });
+		const { logs } = arm(repo);
+		mkdirSync(join(repo, "AGENTS.md"));
+		const counters = emptyState().counters;
+		expect(ensurePointer(repo, counters)).toBe("unchanged");
+		expect(statSync(join(repo, "AGENTS.md")).isDirectory()).toBe(true);
+		expect(counters.orphan_pointer).toBe(0);
+		expect(logs.some((line) => line.includes("left untouched"))).toBe(true);
+	});
+
+	test("a linked .substrate refuses the brief and keeps the target untouched", async () => {
+		const repo = tempGit({ origin: "https://github.com/acme/widgets.git" });
+		const { state, logs } = arm(repo);
+		stubFetch({ brief: "fresh brief" });
+		const target = mkdtempSync(join(tmpdir(), "muse-brief-target-"));
+		made.push(target);
+		writeFileSync(join(target, "BRIEF.md"), "TARGET");
+		symlinkSync(target, join(repo, ".substrate"));
+		await pass([repo], state, "2026-10-09T12:00:00.000Z");
+		expect(readFileSync(join(target, "BRIEF.md"), "utf8")).toBe("TARGET");
+		expect(state.counters.fetch_failed).toBe(1);
+		expect(logs.some((line) => line.includes("brief_dir_outside_repo"))).toBe(true);
+	});
+
+	test("briefPathFor accepts a real dir and rejects links", () => {
+		const repo = tempGit({ origin: "https://github.com/acme/widgets.git" });
+		mkdirSync(join(repo, ".substrate"));
+		expect(briefPathFor(repo)).toBe(join(repo, ".substrate", "BRIEF.md"));
+		rmSync(join(repo, ".substrate"), { recursive: true, force: true });
+		const target = mkdtempSync(join(tmpdir(), "muse-brief-target-"));
+		made.push(target);
+		symlinkSync(target, join(repo, ".substrate"));
+		expect(briefPathFor(repo)).toBeNull();
 	});
 
 	test("fetchBrief reports an empty body as a failure", async () => {

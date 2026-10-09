@@ -47,9 +47,25 @@ function countersFrom(state: unknown): CollectorCounters {
 	const raw = (state as Record<string, unknown>)[COUNTERS_KEY];
 	if (typeof raw !== "object" || raw === null) return counters;
 	for (const [key, value] of Object.entries(raw)) {
+		if (key === "stored" || key === "refused" || key === "failed") {
+			if (typeof value !== "number" || !Number.isFinite(value)) continue;
+			counters[key] = value;
+			continue;
+		}
+		if (key === "unmapped") {
+			if (typeof value === "number" && Number.isFinite(value)) {
+				counters.extras[key] = value;
+			} else if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+				let total = 0;
+				for (const count of Object.values(value)) {
+					if (typeof count === "number" && Number.isFinite(count)) total += count;
+				}
+				counters.extras[key] = total;
+			}
+			continue;
+		}
 		if (typeof value !== "number" || !Number.isFinite(value)) continue;
-		if (key === "stored" || key === "refused" || key === "failed") counters[key] = value;
-		else counters.extras[key] = value;
+		counters.extras[key] = value;
 	}
 	return counters;
 }
@@ -65,6 +81,11 @@ export function summarize(
 ): StatusSummary {
 	const collectors: Record<string, CollectorCounters> = {};
 	for (const [name, state] of Object.entries(states)) collectors[name] = countersFrom(state);
+	let cutoff = Number.NaN;
+	if (since !== undefined) {
+		cutoff = Date.parse(since);
+		if (Number.isNaN(cutoff)) throw new Error(`invalid --since timestamp: ${since}`);
+	}
 	const refused: RefusedLine[] = [];
 	let skipped = 0;
 	for (const line of refusedLines) {
@@ -81,7 +102,10 @@ export function summarize(
 			continue;
 		}
 		const entry = parsed as RefusedLine;
-		if (since !== undefined && entry.ts < since) continue;
+		if (since !== undefined) {
+			const at = Date.parse(entry.ts);
+			if (Number.isNaN(at) || at < cutoff) continue;
+		}
 		refused.push(entry);
 	}
 	return { collectors, refused, skipped };
@@ -128,6 +152,11 @@ function main(): void {
 			usage();
 			return;
 		}
+	}
+	if (since !== undefined && Number.isNaN(Date.parse(since))) {
+		process.stderr.write(`[collectors:status] invalid --since timestamp: ${since}\n`);
+		usage();
+		return;
 	}
 
 	const states: Record<string, unknown> = {

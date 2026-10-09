@@ -50,7 +50,9 @@ function shellGit(dir: string, args: string[]): void {
 
 /** A child environment that cannot reach a live session: explicit keys only. */
 function childEnv(extra: Record<string, string>): Record<string, string> {
-	const env: Record<string, string> = { PATH: process.env.PATH ?? "/usr/bin:/bin" };
+	// The launcher can update the live installation independently of HOME,
+	// so every child — including the projector's muse calls — opts out.
+	const env: Record<string, string> = { PATH: process.env.PATH ?? "/usr/bin:/bin", MUSE_NO_AUTO_UPDATE: "1" };
 	for (const [key, value] of Object.entries(extra)) env[key] = value;
 	for (const key of Object.keys(env)) {
 		if (key.startsWith("HERDR_")) throw new Error(`child env carries ${key}`);
@@ -95,7 +97,11 @@ async function pollFor(base: string, tok: string, body: Record<string, unknown>,
 }
 
 async function museCachePaths(): Promise<string[]> {
-	const run = spawnSync("/root/.local/bin/muse", ["plugins", "list", "--json"], { encoding: "utf8" });
+	// Reads the live installation: never let the launcher update it mid-proof.
+	const run = spawnSync("/root/.local/bin/muse", ["plugins", "list", "--json"], {
+		encoding: "utf8",
+		env: { ...process.env, MUSE_NO_AUTO_UPDATE: "1" },
+	});
 	if (run.status !== 0) throw new Error(`muse list failed: ${String(run.stderr).slice(0, 200)}`);
 	const raw: unknown = JSON.parse(String(run.stdout));
 	if (raw && typeof raw === "object" && "plugins" in raw && Array.isArray(raw.plugins)) {

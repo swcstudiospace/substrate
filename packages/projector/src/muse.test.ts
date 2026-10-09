@@ -213,6 +213,17 @@ describe("muse projector bundle", () => {
 		expect(untrusted.code).toBe(1);
 		expect(untrusted.out).toContain("trust");
 	});
+
+	test("--check notices a manifest-only drift", () => {
+		const dir = temp();
+		expect(run(dir, ["--bundle-only"]).code).toBe(0);
+		const bundle = join(dir, "bundle");
+		expect(run(dir, ["--check"], { cache: bundle }).code).toBe(0);
+		writeFileSync(join(bundle, ".muse-plugin", "plugin.json"), "drift\n");
+		const drifted = run(dir, ["--check"], { cache: bundle });
+		expect(drifted.code).toBe(1);
+		expect(drifted.out).toContain(".muse-plugin/plugin.json");
+	});
 });
 
 describe("generated muse hook", () => {
@@ -264,6 +275,38 @@ describe("generated muse hook", () => {
 			branch: "main",
 			payload: { tool: "Read", outcome: "success", duration_ms: 42, tool_use_id: "call-1" },
 		});
+	});
+
+	test("single- and double-quoted tokens authorize as the bare value", async () => {
+		for (const quoted of ["'tok'", '"tok"']) {
+			const dir = temp();
+			const seen: Array<string | null> = [];
+			const server = Bun.serve({
+				port: 0,
+				hostname: "127.0.0.1",
+				async fetch(req) {
+					seen.push(req.headers.get("authorization"));
+					return new Response("{}", { status: 202, headers: { "content-type": "application/json" } });
+				},
+			});
+			const tokenFile = join(dir, "token.env");
+			writeFileSync(tokenFile, `SUBSTRATE_TOKEN=${quoted}\n`);
+			const url = `http://127.0.0.1:${server.port}`;
+			expect(run(dir, ["--bundle-only"], { url, tokenFile }).code).toBe(0);
+			const repo = tempGit();
+			const proc = Bun.spawn(["bun", join(dir, "bundle", "hooks", "post-tool-use.ts")], {
+				cwd: repo,
+				env: { PATH: process.env.PATH ?? "", HOME: dir },
+				stdin: new Blob([JSON.stringify({ tool_name: "Read" })]),
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+			server.stop(true);
+			expect(code).toBe(0);
+			expect(stdout).toBe("");
+			expect(seen).toEqual(["Bearer tok"]);
+		}
 	});
 
 	test("a dead url exits 0 with empty stdout, and a 400 appends a refused line", async () => {

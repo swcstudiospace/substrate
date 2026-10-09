@@ -181,7 +181,8 @@ export class HerdrCollector {
 
 	startWatch(): void {
 		this.stopped = false;
-		void this.runPass();
+		this.dirty = true;
+		void this.pump();
 		this.poll = setInterval(() => this.markDirty(), this.pollMs);
 	}
 
@@ -226,15 +227,16 @@ export class HerdrCollector {
 				} catch {
 					outcome = { kind: "failed", error: "post threw" };
 				}
-				outcomes.push(outcome.kind);
-				if (outcome.kind === "failed") {
-					failed += 1;
-					blocked.add(transition.identity);
-				} else {
-					emitted += 1;
-				}
+			outcomes.push(outcome.kind);
+			if (outcome.kind === "failed") {
+				failed += 1;
+				blocked.add(transition.identity);
+			} else {
+				emitted += 1;
 			}
-			next = commitReconcile(loaded.state, result, outcomes);
+		}
+		if (failed > 0) this.journal(`emit failed (failed=${failed} emitted=${emitted})`);
+		next = commitReconcile(loaded.state, result, outcomes);
 		}
 		if (!saveHerdrState(this.statePath, next)) this.journal("cannot persist state");
 		this.syncSockets(panes);

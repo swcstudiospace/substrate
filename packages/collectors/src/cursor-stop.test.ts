@@ -97,6 +97,15 @@ describe("transcriptSource", () => {
 		symlinkSync(foreign, link);
 		expect(transcriptSource(link, root)).toBeNull();
 	});
+
+	test("a fifo under root is refused without blocking", () => {
+		const fifo = join(root, "projects", "p", "agent-transcripts", ID, `${ID}.jsonl`);
+		const made = Bun.spawnSync(["mkfifo", fifo], { stdout: "pipe", stderr: "pipe" });
+		expect(made.exitCode).toBe(0);
+		const started = Date.now();
+		expect(transcriptSource(fifo, root)).toBeNull();
+		expect(Date.now() - started).toBeLessThan(5000);
+	});
 });
 
 describe("copyTranscript", () => {

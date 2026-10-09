@@ -157,7 +157,6 @@ describe("transport", () => {
 		panes = [{ pane_id: "w1:p1", terminal_id: "term_a", agent: "omp", agent_status: "working", cwd: "/tmp/repo" }];
 		const push = `${JSON.stringify({ event: "pane_agent_detected", data: { agent: "omp", pane_id: "w1:p1", type: "pane_agent_detected" } })}\n`;
 		global?.socket.write(push);
-		global?.socket.write(push);
 		await wait(120);
 		expect(posted).toHaveLength(1);
 		expect(posted[0]?.kind).toBe("session.start");
@@ -165,5 +164,79 @@ describe("transport", () => {
 		expect(posted[0]?.repo).toBe("swcstudiospace/agent-substrate");
 		expect(posted[0]?.payload).toMatchObject({ runtime: "herdr", herdr_type: "pane.agent_detected" });
 		expect(snapshots - before).toBe(1);
+	});
+
+	test("startWatch runs the first pass through the single-flight pump", async () => {
+		const socketPath = await listen();
+		const dir = mkdtempSync(join(tmpdir(), "herdr-state-"));
+		let active = 0;
+		let maxActive = 0;
+		let entered = 0;
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const posted: EventInput[] = [];
+		collector = new HerdrCollector({
+			socketPath,
+			statePath: join(dir, "herdr-offsets.json"),
+			debounceMs: 10,
+			post: async (event) => {
+				active += 1;
+				maxActive = Math.max(maxActive, active);
+				entered += 1;
+				try {
+					if (entered === 1) await gate;
+					posted.push(event);
+				} finally {
+					active -= 1;
+				}
+				return { kind: "stored" };
+			},
+			attribute: () => ({ repo: "swcstudiospace/agent-substrate", branch: "main" }),
+			now: () => "2026-10-09T00:00:00.000Z",
+		});
+		panes = [{ pane_id: "w1:p1", terminal_id: "term_a", agent: "omp", agent_status: "working", cwd: "/tmp/repo" }];
+		await collector.runPass();
+		expect(entered).toBe(0);
+		panes = [{ pane_id: "w1:p1", terminal_id: "term_a", agent: "omp", agent_status: "idle", cwd: "/tmp/repo" }];
+		collector.startWatch();
+		await wait(60);
+		panes = [{ pane_id: "w1:p1", terminal_id: "term_a", agent: "omp", agent_status: "working", cwd: "/tmp/repo" }];
+		collector.markDirty();
+		await wait(40);
+		release();
+		await collector.flush();
+		expect(entered).toBe(2);
+		expect(maxActive).toBe(1);
+		expect(posted.map((event) => event.kind)).toEqual(["note", "note"]);
+	});
+
+	test("failed posts are journalled with a counter summary", async () => {
+		const socketPath = await listen();
+		const dir = mkdtempSync(join(tmpdir(), "herdr-state-"));
+		const lines: string[] = [];
+		const original = process.stderr.write.bind(process.stderr);
+		process.stderr.write = ((chunk: string | Uint8Array) => {
+			lines.push(String(chunk));
+			return true;
+		}) as typeof process.stderr.write;
+		try {
+			collector = new HerdrCollector({
+				socketPath,
+				statePath: join(dir, "herdr-offsets.json"),
+				post: async () => ({ kind: "failed", error: "boom" }),
+				attribute: () => ({ repo: "swcstudiospace/agent-substrate", branch: "main" }),
+				now: () => "2026-10-09T00:00:00.000Z",
+			});
+			panes = [{ pane_id: "w1:p1", terminal_id: "term_a", agent: "omp", agent_status: "working", cwd: "/tmp/repo" }];
+			await collector.runPass();
+			panes = [{ pane_id: "w1:p1", terminal_id: "term_a", agent: "omp", agent_status: "idle", cwd: "/tmp/repo" }];
+			const result = await collector.runPass();
+			expect(result.failed).toBe(1);
+			expect(lines.some((line) => line.includes("emit failed"))).toBe(true);
+		} finally {
+			process.stderr.write = original;
+		}
 	});
 });

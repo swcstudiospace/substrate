@@ -46,6 +46,13 @@ describe("repoSlug", () => {
 		expect(repoSlug(tempRepo())).toBeUndefined();
 	});
 
+	test("an origin added after a miss is seen on the next lookup", () => {
+		const dir = tempRepo();
+		expect(repoSlug(dir)).toBeUndefined();
+		run(dir, ["remote", "add", "origin", "https://github.com/acme/widgets.git"]);
+		expect(repoSlug(dir)).toBe("acme/widgets");
+	});
+
 	test("not a repo gives undefined", () => {
 		const dir = mkdtempSync(join(tmpdir(), "substrate-git-context-plain-"));
 		made.push(dir);

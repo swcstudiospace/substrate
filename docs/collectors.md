@@ -29,8 +29,8 @@ a Muse bundle.
 | --- | --- |
 | `SUBSTRATE_URL` | Substrate base URL. Unset means the local substrate. |
 | `SUBSTRATE_TOKEN` | Bearer token for collectors that read the environment. |
-| `SUBSTRATE_STATE_DIR` | Directory for `refused-emits.jsonl` and the default state files. |
-| `SUBSTRATE_COLLECTOR_STATE` | One collector's state file, when a unit overrides the default path. |
+| `SUBSTRATE_STATE_DIR` | Directory for `refused-emits.jsonl` and the muse default state file. herdr and grok ignore it (next row). |
+| `SUBSTRATE_COLLECTOR_STATE` | One collector's state file, when a unit overrides the default path. The only way to relocate or isolate herdr and grok state. |
 | `SUBSTRATE_MUSE_REPOS` | Colon-separated absolute repo roots for the brief writer. Required. |
 | `SUBSTRATE_MUSE_TOKEN_FILE` | File the Muse hook reads for a `SUBSTRATE_TOKEN` line. |
 | `MUSE_PLUGIN_DIR` | Where the Muse projector writes the bundle. |
@@ -42,14 +42,17 @@ a Muse bundle.
 
 ## State files
 
-Under the state directory, unless a variable above names another path:
+The muse state file lives under the state directory unless
+`SUBSTRATE_COLLECTOR_STATE` names another path. herdr and grok always use
+their own default files and only `SUBSTRATE_COLLECTOR_STATE` moves them —
+setting `SUBSTRATE_STATE_DIR` alone leaves those two where they are.
 
 | File | Collector |
 | --- | --- |
-| `herdr-offsets.json` | herdr pane map and counters |
-| `muse-offsets.json` | brief writer, per-repo last success and last failure |
-| `grok-offsets.json` | grok tail offsets and counters |
-| `refused-emits.jsonl` | every collector and hook that was refused |
+| `herdr-offsets.json` (`/var/lib/substrate` unless overridden) | herdr pane map and counters |
+| `muse-offsets.json` (under the state directory unless overridden) | brief writer, per-repo last success and last failure |
+| `grok-offsets.json` (`/var/lib/substrate` unless overridden) | grok tail offsets and counters |
+| `refused-emits.jsonl` (always under the state directory) | every collector and hook that was refused |
 
 ## herdr
 

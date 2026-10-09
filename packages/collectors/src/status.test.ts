@@ -35,6 +35,13 @@ describe("summarize counters", () => {
 		expect(summary.refused).toEqual([]);
 		expect(summary.skipped).toBe(0);
 	});
+	test("an object-shaped herdr unmapped total is reported, not hidden", () => {
+		const summary = summarize(
+			{ herdr: { version: 2, panes: {}, counters: { stored: 1, refused: 0, failed: 0, unmapped: { copilot: 2, "not-a-real-agent": 3 } } } },
+			[],
+		);
+		expect(summary.collectors["herdr"]).toEqual({ stored: 1, refused: 0, failed: 0, extras: { unmapped: 5 } });
+	});
 
 	test("missing files and non-number counters read as zeros", () => {
 		const summary = summarize({ herdr: undefined, muse: "garbage", grok: { counters: { stored: "3" } } }, []);
@@ -66,6 +73,16 @@ describe("refused lines", () => {
 
 		expect(summary.refused.map((entry) => entry.ts)).toEqual(["2026-10-09T10:00:00.000Z"]);
 		expect(summary.skipped).toBe(0);
+	});
+
+	test("since compares instants across offsets and rejects garbage", () => {
+		const summary = summarize(
+			{},
+			[line("2026-10-09T09:30:00.000Z"), line("2026-10-09T10:30:00.000Z")],
+			"2026-10-09T12:00:00+02:00",
+		);
+		expect(summary.refused.map((entry) => entry.ts)).toEqual(["2026-10-09T10:30:00.000Z"]);
+		expect(() => summarize({}, [], "not-a-time")).toThrow("invalid --since");
 	});
 
 	test("garbled lines are skipped, never fatal, blanks ignored", () => {

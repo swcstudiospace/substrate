@@ -79,7 +79,7 @@ export function safeConversationId(id: unknown): id is string {
 function openRegularFile(real: string): { fd: number; size: number } | { reason: string } {
 	let fd: number | undefined;
 	try {
-		fd = openSync(real, constants.O_RDONLY | constants.O_NOFOLLOW);
+		fd = openSync(real, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
 		const stat = fstatSync(fd);
 		if (!stat.isFile()) {
 			closeSync(fd);

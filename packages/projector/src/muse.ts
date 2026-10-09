@@ -130,7 +130,9 @@ const HOOK_LINES = [
 	'\t\tfor (const line of readFileSync(file, "utf8").split("\\n")) {',
 	"\t\t\tconst trimmed = line.trim();",
 	'\t\t\tif (!trimmed.startsWith("SUBSTRATE_TOKEN=")) continue;',
-	'\t\t\treturn trimmed.slice("SUBSTRATE_TOKEN=".length).trim();',
+	'\t\t\tconst raw = trimmed.slice("SUBSTRATE_TOKEN=".length).trim();',
+	'\t\t\tif (raw.length >= 2 && ((raw.startsWith("\'") && raw.endsWith("\'")) || (raw.startsWith(\'"\') && raw.endsWith(\'"\')))) return raw.slice(1, -1);',
+	'\t\t\treturn raw;',
 	"\t\t}",
 	"\t} catch {",
 	'\t\treturn "";',
@@ -374,6 +376,7 @@ function checkInstalled(projected: BundleFiles): string[] {
 		return ["inspect"];
 	}
 	const expected: Record<string, string> = {
+		".muse-plugin/plugin.json": sha256Hex(projected.manifest),
 		"hooks/post-tool-use.ts": sha256Hex(projected.hook),
 		"hooks/redact.ts": sha256Hex(projected.redact),
 		"hooks/substrate.json": sha256Hex(projected.config),

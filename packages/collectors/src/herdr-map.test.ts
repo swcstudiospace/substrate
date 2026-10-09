@@ -7,6 +7,7 @@ import {
 	isRelease,
 	mapHerdrEvent,
 	normalizeWireName,
+	surfaceForHerdrAgent,
 	transitionToEvent,
 	type HerdrPane,
 	type HerdrTransition,
@@ -68,6 +69,15 @@ describe("pinned agent table", () => {
 		expect(HERDR_AGENT_SURFACES.muse).toBe("muse");
 		expect(HERDR_AGENT_SURFACES.claude).toBe("claude-code");
 		expect(HERDR_AGENT_SURFACES.grok).toBe("grok-build");
+	});
+
+	test("inherited property names are not mapped", () => {
+		for (const weird of ["constructor", "toString", "hasOwnProperty", "__proto__", "valueOf"]) {
+			expect(surfaceForHerdrAgent(weird)).toBeNull();
+		}
+		expect(surfaceForHerdrAgent(null)).toBeNull();
+		expect(surfaceForHerdrAgent(undefined)).toBeNull();
+		expect(surfaceForHerdrAgent("")).toBeNull();
 	});
 });
 

@@ -16,7 +16,8 @@ export function repoSlug(cwd: string): string | undefined {
 	const result = spawnSync("git", ["-C", cwd, "remote", "get-url", "origin"], { encoding: "utf8" });
 	const slug =
 		result.status === 0 ? result.stdout.trim().match(/[:/]([^/:]+\/[^/]+?)(?:\.git)?$/)?.[1] : undefined;
-	slugCache.set(cwd, slug);
+	// A missing origin is never cached: adding one later must recover delivery.
+	if (slug !== undefined) slugCache.set(cwd, slug);
 	return slug;
 }
 

@@ -138,6 +138,20 @@ describe("reconcile", () => {
 		expect(result.transitions[0]?.event.repo).toBeUndefined();
 		expect(result.transitions[0]?.event.kind).toBe("session.start");
 	});
+
+	test("a status change drops repo and branch the lookup no longer returns", () => {
+		const state = seeded([pane()]);
+		const noted = reconcile(state, [pane({ agent_status: "idle" })], { now: LATER, attribute: () => ({}) });
+		expect(noted.transitions).toHaveLength(1);
+		expect(noted.transitions[0]?.event.repo).toBeUndefined();
+		expect(noted.transitions[0]?.event.branch).toBeUndefined();
+		const held = commitReconcile(state, noted, ["stored"]);
+		expect(held.panes[paneIdentity("w1:p1", "term_a")]?.repo).toBeUndefined();
+		expect(held.panes[paneIdentity("w1:p1", "term_a")]?.branch).toBeUndefined();
+		const ended = reconcile(held, [], { now: LATER, attribute: () => ({}) });
+		expect(ended.transitions[0]?.event.repo).toBeUndefined();
+		expect(ended.transitions[0]?.event.branch).toBeUndefined();
+	});
 });
 
 describe("commit", () => {
