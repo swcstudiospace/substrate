@@ -237,7 +237,7 @@ Change these:
 - **L235-253, the deadline test.** Also assert there is no event for i=1.
 - **L290-309, the "throwing emit changes nothing" test.** Invert it. `emit` returning `{ stored: false }` stops after action 0 with the D30-12 error and no images. A throwing emit does the same.
 - **L311-325, the "never interleave" test.** Start run A on a deferred runner. Run B must be refused at once, naming A's run id. After resolving A in `finally`, the runner saw A's argv only (RESEARCH Pitfall 5).
-- **New: `childEnv`.** A poisoned parent `{ PATH, HOME, SUBSTRATE_TOKEN_OMP: "x", GREPTIME_PASSWORD: "y" }` must yield exactly `{ PATH, HOME }`. Spell the ledger key through a computed name or `LEDGER_KEYS` if the test lives outside the MCP package. Inside `packages/mcp-server/src/` it is allowed, but keep values short (store-lock `TOKEN_LITERAL`).
+- **New: `childEnv`.** A poisoned parent `{ PATH, HOME, SUBSTRATE_TOKEN_OMP: "x", <ledger password key>: "y" }` must yield exactly `{ PATH, HOME }`. Spell the ledger key through a computed name or `LEDGER_KEYS` if the test lives outside the MCP package. Inside `packages/mcp-server/src/` it is allowed, but keep values short (store-lock `TOKEN_LITERAL`), and never write the literal key name followed by `:`/`=` and a value in any tracked file (store-lock `CREDENTIAL` scan).
 
 ---
 
