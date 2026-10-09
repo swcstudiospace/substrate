@@ -42,6 +42,22 @@ export const FIXTURE_ENV_KEYS = [
 	"SUBSTRATE_SKILLS_GH",
 ] as const;
 
+/**
+ * The six docs settings the ragflow fixture adds (`--ragflow-fixture`). The
+ * builder accepts exactly these and refuses a path that leaves the run
+ * directory or a URL that is not loopback, so a fixture can point the docs
+ * plane at the instance's own fake RAGFlow and nowhere else.
+ */
+export const RAGFLOW_FIXTURE_ENV_KEYS = [
+	"RAGFLOW_URL",
+	"RAGFLOW_API_KEY",
+	"SUBSTRATE_DOCS_STATE",
+	"SUBSTRATE_DOCS_DATASETS",
+	"SUBSTRATE_DOCS_EMBEDDING_MODEL",
+	"SUBSTRATE_RAGFLOW_TIMEOUT_MS",
+] as const;
+
+
 /** The builder refused an input; the message names surfaces and hosts, never values. */
 export class RehearsalEnvError extends Error {}
 
@@ -89,6 +105,8 @@ export interface BuildRehearsalEnvInput {
 	 * those). Absent by default; existing rehearsals behave unchanged.
 	 */
 	trackers?: TrackerBlockInput | null;
+	/** The ragflow fixture's docs settings, when the instance was started with `--ragflow-fixture`. */
+	ragflowFixture?: Record<string, string> | null;
 }
 
 /** Loopback tracker endpoints plus scratch keys, for one mirror rehearsal. */
@@ -142,6 +160,25 @@ function fixtureEnv(fixture: Record<string, string>, runDir: string): Record<str
 				throw new RehearsalEnvError("rehearsal env refused: the skills fixture remote is not a file:// URL");
 			}
 			assertInsideRun(key, path, runDir);
+		}
+	}
+	return fixture;
+}
+/**
+ * The fixture's docs settings, checked. Only the six known keys; the state
+ * directory and the registry file must lie inside the run directory, the
+ * RAGFlow URL must be loopback, and the key must be non-empty so the client
+ * counts itself configured against the fake.
+ */
+function ragflowFixtureEnv(fixture: Record<string, string>, runDir: string): Record<string, string> {
+	for (const [key, value] of Object.entries(fixture)) {
+		if (!(RAGFLOW_FIXTURE_ENV_KEYS as readonly string[]).includes(key)) {
+			throw new RehearsalEnvError(`rehearsal env refused: ${key} is not a ragflow fixture setting`);
+		}
+		if (key === "SUBSTRATE_DOCS_STATE" || key === "SUBSTRATE_DOCS_DATASETS") assertInsideRun(key, value, runDir);
+		if (key === "RAGFLOW_URL") assertLoopback(value, "the ragflow fixture");
+		if (key === "RAGFLOW_API_KEY" && value.length === 0) {
+			throw new RehearsalEnvError("rehearsal env refused: the ragflow fixture needs a key");
 		}
 	}
 	return fixture;
@@ -277,6 +314,20 @@ export function buildRehearsalEnv(input: BuildRehearsalEnvInput): Record<string,
 		env.HOME = home;
 	}
 	if (input.trackers) Object.assign(env, trackerBlock(input.trackers));
+	// Always inside the run directory (D25-24): a rehearsal never points at
+	// the production manifest path, with or without the ragflow fixture.
+	env.SUBSTRATE_DOCS_STATE = join(input.runDir, "docs");
+	// A crashed `--ragflow-fixture` leaves a mode file in this run dir.
+	// Starting again without the flag would keep a registry the twin cannot
+	// reach (the fake is gone) and a stale manifest beside it.
+	if (!input.ragflowFixture && existsSync(join(input.runDir, "ragflow-fixture", "mode.json"))) {
+		throw new RehearsalEnvError(
+			"rehearsal env refused: this run dir still has a ragflow fixture; pass --ragflow-fixture or choose a new name",
+		);
+	}
+	if (input.ragflowFixture) {
+		Object.assign(env, ragflowFixtureEnv(input.ragflowFixture, input.runDir));
+	}
 	return env;
 }
 
@@ -300,6 +351,8 @@ export interface ConsumerEnvInput {
 	testPgUrl: string;
 	/** The skills fixture's paths, for the proof that drives it; absent without `--skills-fixture`. */
 	skills?: { state: string; origin: string; ghState: string; repo: string } | null;
+	/** The ragflow fixture's paths, for the proof that drives it; absent without `--ragflow-fixture`. */
+	ragflow?: { url: string; registry: string; state: string; modeFile: string } | null;
 }
 
 /**
@@ -335,6 +388,12 @@ export function consumerEnvRecord(input: ConsumerEnvInput): Record<string, strin
 		out.SUBSTRATE_REHEARSAL_SKILLS_ORIGIN = input.skills.origin;
 		out.SUBSTRATE_REHEARSAL_SKILLS_GH_STATE = input.skills.ghState;
 		out.SUBSTRATE_REHEARSAL_SKILLS_REPO = input.skills.repo;
+	}
+	if (input.ragflow) {
+		out.SUBSTRATE_REHEARSAL_RAGFLOW_URL = input.ragflow.url;
+		out.SUBSTRATE_REHEARSAL_RAGFLOW_REGISTRY = input.ragflow.registry;
+		out.SUBSTRATE_REHEARSAL_RAGFLOW_STATE = input.ragflow.state;
+		out.SUBSTRATE_REHEARSAL_RAGFLOW_MODE_FILE = input.ragflow.modeFile;
 	}
 	return out;
 }

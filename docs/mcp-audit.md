@@ -237,9 +237,9 @@ lives in [event-vocabulary.md](event-vocabulary.md).
 | Tool (phase) | Mode | Why |
 | --- | --- | --- |
 | `skills_propose` (21, **landed**) | fail-closed | Opens a PR other agents will receive after merge; a proposal nobody recorded is an unaudited publication. Served as the MCP tool and as `POST /skills/propose`, which is audited under the same name before any git work and answers `503` when the chain cannot take the record. |
-| `docs_ingest` (25) | fail-closed | Writes a shared dataset every agent reads; it is also a publication path. |
+| `docs_ingest` (25, **landed**) | fail-closed | Writes a shared dataset every agent reads; it is also a publication path. Served as the MCP tool and as `POST /docs/ingest`, which is audited under the same name before any upload and answers `503` when the chain cannot take the record. |
 | `desktop_run` (30) | fail-closed | Acts on a desktop — landed in Phase 30 (DESK-03 covered by unit and HTTP tests; live desktop smoke NOT-RUN). |
-| `docs_search` (25) | fail-open | A read inside an agent's turn. |
+| `docs_search` (25, **landed**) | fail-open | A read inside an agent's turn. Served as the MCP tool and as `POST /docs/search`, which is audited under the same name and always answers 200. |
 | `issue_get` (23) | fail-open | A read of untrusted tracker text. |
 | `graph_find` (23) | fail-open | A read of the index. |
 | `memory_recall` (26) | fail-open | A read like `memory_search`. |

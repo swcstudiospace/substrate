@@ -12,6 +12,7 @@ import { join } from "node:path";
 import {
 	acquireNameLock,
 	withNameLock,
+	buildRagflowSpawnArgv,
 	buildServerSpawnArgv,
 	confirmSpawnedTwin,
 	clearDirectory,
@@ -21,6 +22,7 @@ import {
 	gitOutput,
 	installUpCleanup,
 	isPortFree,
+	isRagflowFixturePid,
 	isTwinHealthy,
 	killVerifiedSpawn,
 	mayStop,
@@ -601,6 +603,9 @@ describe("refuseExtraArgs", () => {
 		expect(refuseExtraArgs(["up", "--name", "x", "--skills-fixtures"])).toBe("unknown option --skills-fixtures");
 		expect(refuseExtraArgs(["up", "--skills-fixture", "extra"])).toBe("unexpected argument extra");
 		expect(refuseExtraArgs(["up", "--desktop-surfaces", "omp"])).toBeNull();
+		// The ragflow fixture rides the same bare-flag shape.
+		expect(refuseExtraArgs(["up", "--name", "x", "--ragflow-fixture"])).toBeNull();
+		expect(refuseExtraArgs(["up", "--name", "x", "--ragflow-fixtures"])).toBe("unknown option --ragflow-fixtures");
 		expect(refuseExtraArgs(["down", "--nmae", "other"])).toContain("--nmae");
 		expect(refuseExtraArgs(["down", "--name", "x", "extra"])).toContain("extra");
 		expect(refuseExtraArgs(["smoke", "--verbose"])).toContain("--verbose");
@@ -610,6 +615,24 @@ describe("refuseExtraArgs", () => {
 		const run = runCli("down", "--nmae", "other");
 		expect(run.code).toBe(2);
 		expect(run.err).toContain("--nmae");
+	});
+});
+
+describe("ragflow fixture helpers", () => {
+	test("the fake spawn argv names the fixture script, the run dir and the port", () => {
+		const argv = buildRagflowSpawnArgv("/tmp/wt-checkout", "/tmp/run/p25", 19380);
+		expect(argv[0]).toBe(process.execPath);
+		expect(argv).toContain("--no-env-file");
+		expect(argv).toContain(join("/tmp/wt-checkout", "packages/mcp-server/src/rehearsal-fake-ragflow.ts"));
+		expect(argv).toContain("--serve");
+		expect(argv).toContain("/tmp/run/p25");
+		expect(argv).toContain("19380");
+		expect(argv).not.toContain("7410");
+	});
+
+	test("isRagflowFixturePid refuses a foreign or missing pid", () => {
+		expect(isRagflowFixturePid(1, "/tmp/run/p25")).toBe(false);
+		expect(isRagflowFixturePid(999999999, "/tmp/run/p25")).toBe(false);
 	});
 });
 

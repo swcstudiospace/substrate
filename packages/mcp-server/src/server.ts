@@ -7,6 +7,8 @@
  *   POST /events/query  read a window of the ledger
  *   POST /memory        write a memory entry through the governance gate
  *   POST /skills/propose propose a skill as a reviewable PR on the skills library
+ *   POST /docs/search search the docs datasets through RAGFlow (always 200)
+ *   POST /docs/ingest ingest one page, or cut a version with finalize:true
  *   POST /verify        recompute a graph's hash chain
  *   POST /evidence      the per-graph evidence bundle, as JSON or HTML
  *   GET  /healthz       store reachability, and whether events can actually be written

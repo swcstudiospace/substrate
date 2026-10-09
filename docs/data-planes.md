@@ -25,7 +25,7 @@ The reach column is a placeholder, not a machine name. `docs/railway-tailscale.m
 | **Index**: `graph_index`, `graph_nodes`, `graph_steps`, memory entries index; desk tables `desk_intake` (queue; drained with `FOR UPDATE SKIP LOCKED`), `desk_claims` (Graph-ID claim rows with expiry and heartbeat), `desk_idempotency` (30-day processed keys), `desk_receipts`, `seat_roster`, `tool_pack_state`; hypertables `seat_heartbeat`, `tool_calls_1m` with continuous aggregates | TimescaleDB | `substrate-mcp`, desk gateway, `substrate-dispatcher` | Open Graph IDs + 90 days; aggregates 1 year | Treating a row as proof that work shipped; secrets |
 | **Cache**: the brief, memory search and a graph view. Rate counters and an idempotency mirror stay a target, not a current key | DragonflyDB | `substrate-mcp` | Brief 300 s; memory search 600 s; graph view 60 s | Queues, locks, sessions, pub/sub, anything that must survive a restart. A Dragonfly outage returns the same answers, uncached |
 | **Memory**: decisions with receipt paths, environment facts, verified commands, gotchas, working preferences | Postgres index inside Timescale, and Hindsight for the desk | `substrate-mcp` writes the index (`memory_write` / `memory_search`). The desk gateway writes and reads Hindsight with its own keys when those are set | Index rows follow the governance gate; Hindsight banks are retained until replaced | Unverified claims, secrets (D-04 redaction), another surface's or seat's bank |
-| **Documents**: repo docs, skills, contracts, ADRs; product docs | RAGFlow | The desk gateway, with its own keys. `substrate-mcp` does not call RAGFlow | Re-ingest on merge is the target; it is not implemented here | Secrets, receipts, transcripts |
+| **Documents**: repo docs, skills, contracts, ADRs; product docs for KanbanOS, Desk Lanes, ClippyOS, Auctioning | RAGFlow | `substrate docs ingest` through `POST /docs/ingest`, driven by the `substrate-docs-refresh` host timer and the skills-sync fast-forward hook — never a GitHub Action, which cannot reach the loopback substrate (docs/docs-plane.md) | Re-ingest on merge; keep the last five dataset versions | Secrets, receipts, transcripts |
 
 ## Hindsight banks
 
@@ -42,12 +42,14 @@ Rules: the desk gateway holds the Hindsight key and calls Hindsight directly whe
 
 | Dataset | Source | Ingest trigger |
 |---|---|---|
-| `programming-desk` | `docs/`, `skills/`, `contracts/`, `ARCHITECTURE.md`, `prompts-assembled/` of `swcstudiospace/programming-desk` | merge to `main` |
-| `agent-substrate` | `README.md`, `docs/`, `.planning/PROJECT.md` of this repo | merge to `main` |
-| `agent-skills` | every `SKILL.md` and `references/` in `swcstudiospace/agent-skills` | `substrate-skills-sync` after a fast-forward |
-| `<product>` (`kanbanos`, `desklanes`, `clippyos`, `auctioning`) | that repo's docs | merge to `main` |
+| `programming-desk` | `docs/`, `skills/`, `contracts/`, `ARCHITECTURE.md`, `prompts-assembled/` of `swcstudiospace/programming-desk` | `substrate-docs-refresh` timer on merge to `main` |
+| `agent-substrate` | `README.md`, `docs/`, `.planning/PROJECT.md` of this repo | `substrate-docs-refresh` timer on merge to `main` |
+| `agent-skills` | every `SKILL.md` and `references/` in `swcstudiospace/agent-skills` | `substrate-skills-sync` after a fast-forward (the refresh timer catches up) |
+| `<product>` (`kanbanos`, `desklanes`, `clippyos`, `auctioning`) | that repo's docs (slugs and roots provisional until the operator confirms) | `substrate-docs-refresh` timer on merge to `main` |
 
-Embedding: TEI `bge-small` as already decided at 05-02; no chat model is registered; retrieval only. `docs_search` returns chunk, heading path, source URL and commit; callers cite the source, not the chunk.
+Embedding: TEI `bge-small` as already decided at 05-02; no chat model is registered; retrieval only. `docs_search` returns title, source URL, heading path, commit, snippet, score and ids; callers cite the source, not the chunk.
+
+RAGFlow is reached at the HTTPS URL in `RAGFLOW_URL` with `RAGFLOW_API_KEY`, both held only in `/etc/substrate/substrate.env` (see `.env.example`). The substrate calls RAGFlow's HTTP API; `RAGFLOW_MCP_URL` is not used by the substrate (#16369) and is never given to an agent. No endpoint URL, hostname or key is written into the repo.
 
 ## Access path
 

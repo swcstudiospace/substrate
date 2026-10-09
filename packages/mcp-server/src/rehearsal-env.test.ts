@@ -253,6 +253,7 @@ describe("allowlist", () => {
 			"SUBSTRATE_DESKTOP_DIR",
 			"SUBSTRATE_HANDOFF_KEY",
 			"SUBSTRATE_SKILLS_STATE",
+			"SUBSTRATE_DOCS_STATE",
 		]);
 		expect(new Set(Object.keys(env))).toEqual(expected);
 	});
@@ -506,5 +507,96 @@ describe("the opt-in tracker block", () => {
 		}
 		expect(first.LINEAR_API_KEY).not.toBe(second.LINEAR_API_KEY);
 		expect(first.NOTION_API_KEY).not.toBe(second.NOTION_API_KEY);
+describe("the ragflow fixture's settings", () => {
+	const ragflowEnv = (runDir: string): Record<string, string> => ({
+		RAGFLOW_URL: "http://127.0.0.1:19380",
+		RAGFLOW_API_KEY: "fixture-key",
+		SUBSTRATE_DOCS_STATE: join(runDir, "docs"),
+		SUBSTRATE_DOCS_DATASETS: join(runDir, "ragflow-fixture", "registry.json"),
+		SUBSTRATE_DOCS_EMBEDDING_MODEL: "fixture-embedding-model",
+		SUBSTRATE_RAGFLOW_TIMEOUT_MS: "3000",
+	});
+
+	test("the docs state always lives inside the run directory, never at the production path", () => {
+		for (const over of [{}, { ragflowFixture: null }]) {
+			const input = scratchInput(over);
+			const env = buildRehearsalEnv(input);
+			expect(env.SUBSTRATE_DOCS_STATE).toBe(join(input.runDir, "docs"));
+			expect(env.SUBSTRATE_DOCS_STATE).not.toBe("/var/lib/substrate/docs");
+			expect(loadConfig(env).docs.stateDir).toBe(join(input.runDir, "docs"));
+		}
+	});
+
+	test("the fixture wires the fake URL, the registry and the run-dir state", () => {
+		const runDir = tempDir();
+		const env = buildRehearsalEnv(scratchInput({ runDir, ragflowFixture: ragflowEnv(runDir) }));
+		expect(env.RAGFLOW_URL).toBe("http://127.0.0.1:19380");
+		expect(env.SUBSTRATE_DOCS_STATE).toBe(join(runDir, "docs"));
+		expect(env.SUBSTRATE_DOCS_DATASETS).toBe(join(runDir, "ragflow-fixture", "registry.json"));
+		const config = loadConfig(env);
+		expect(config.ragflow?.problem).toBeNull();
+		expect(config.ragflow?.url).toBe("http://127.0.0.1:19380");
+		expect(config.docs.stateDir).toBe(join(runDir, "docs"));
+		expect(configWarnings(config)).toEqual([]);
+	});
+
+	test("a non-loopback fake URL is refused without naming a value", () => {
+		const runDir = tempDir();
+		const fixture = { ...ragflowEnv(runDir), RAGFLOW_URL: "https://ragflow.example.com:9380" };
+		expect(() => buildRehearsalEnv(scratchInput({ runDir, ragflowFixture: fixture }))).toThrow(
+			"rehearsal env refused: the ragflow fixture",
+		);
+	});
+
+	test("a state path outside the run directory is refused", () => {
+		const runDir = tempDir();
+		const fixture = { ...ragflowEnv(runDir), SUBSTRATE_DOCS_STATE: "/var/lib/substrate/docs" };
+		expect(() => buildRehearsalEnv(scratchInput({ runDir, ragflowFixture: fixture }))).toThrow(
+			"is not inside the run directory",
+		);
+	});
+
+	test("an unknown fixture key and an empty api key are refused", () => {
+		const runDir = tempDir();
+		expect(() =>
+			buildRehearsalEnv(scratchInput({ runDir, ragflowFixture: { ...ragflowEnv(runDir), RAGFLOW_MCP_URL: "x" } })),
+		).toThrow("is not a ragflow fixture setting");
+		expect(() =>
+			buildRehearsalEnv(scratchInput({ runDir, ragflowFixture: { ...ragflowEnv(runDir), RAGFLOW_API_KEY: "" } })),
+		).toThrow("needs a key");
+	});
+
+	test("a stale fixture without the flag refuses instead of pointing at a dead fake", () => {
+		const runDir = tempDir();
+		mkdirSync(join(runDir, "ragflow-fixture"), { recursive: true });
+		writeFileSync(join(runDir, "ragflow-fixture", "mode.json"), '{"mode":"normal"}\n');
+		expect(() => buildRehearsalEnv(scratchInput({ runDir }))).toThrow("pass --ragflow-fixture or choose a new name");
+		const env = buildRehearsalEnv(scratchInput({ runDir, ragflowFixture: ragflowEnv(runDir) }));
+		expect(env.SUBSTRATE_DOCS_DATASETS).toBe(join(runDir, "ragflow-fixture", "registry.json"));
+	});
+
+	test("the consumer record names the fixture's paths only when there is a fixture", () => {
+		const server = buildRehearsalEnv(scratchInput());
+		const base = {
+			mcpPort: 17410,
+			firstToken: server[tokenEnvName("claude-code")] ?? "",
+			operatorToken: server[tokenEnvName("hermes")] ?? "",
+			runDir: tempDir(),
+			name: "ragflow-twin",
+			testPgUrl: server.SUBSTRATE_PG_URL ?? "",
+		};
+		const ragflow = {
+			url: "http://127.0.0.1:19380",
+			registry: "/run/x/ragflow-fixture/registry.json",
+			state: "/run/x/ragflow-fixture/state.json",
+			modeFile: "/run/x/ragflow-fixture/mode.json",
+		};
+		const out = consumerEnvRecord({ ...base, ragflow });
+		expect(out.SUBSTRATE_REHEARSAL_RAGFLOW_URL).toBe(ragflow.url);
+		expect(out.SUBSTRATE_REHEARSAL_RAGFLOW_REGISTRY).toBe(ragflow.registry);
+		expect(out.SUBSTRATE_REHEARSAL_RAGFLOW_STATE).toBe(ragflow.state);
+		expect(out.SUBSTRATE_REHEARSAL_RAGFLOW_MODE_FILE).toBe(ragflow.modeFile);
+		expect(Object.keys(out)).toHaveLength(10);
+		expect(Object.keys(consumerEnvRecord({ ...base, ragflow: null }))).toHaveLength(6);
 	});
 });

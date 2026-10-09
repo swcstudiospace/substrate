@@ -38,6 +38,7 @@ import {
 	toShellExports,
 } from "../packages/mcp-server/src/rehearsal-env.ts";
 import { buildSkillsFixture, type SkillsFixture } from "../packages/mcp-server/src/rehearsal-skills.ts";
+import { buildRagflowFixture, type RagflowFixture } from "../packages/mcp-server/src/rehearsal-ragflow.ts";
 import { isSwarmSurface, SURFACES, type Surface } from "../packages/mcp-server/src/types.ts";
 
 /** The harness refused an input or a state; the message names hosts and ports, never values. */
@@ -314,6 +315,77 @@ export function parseDockerPortLine(line: string): { host: string; port: number 
 	return { host: m[1] as string, port };
 }
 
+/** The fake RAGFlow's spawn argv: Bun without env-file autoload, the fixture entry point. */
+export function buildRagflowSpawnArgv(checkout: string, runDir: string, port: number): string[] {
+	return [
+		process.execPath,
+		"--no-env-file",
+		join(checkout, "packages/mcp-server/src/rehearsal-fake-ragflow.ts"),
+		"--serve",
+		"--run-dir",
+		runDir,
+		"--port",
+		String(port),
+	];
+}
+
+/**
+ * Whether pid is the fake RAGFlow spawned for this run: its command line
+ * names the fixture script and the run directory. Anything else is never
+ * signalled, against pid reuse and against a foreign process.
+ */
+export function isRagflowFixturePid(pid: number, runDir: string): boolean {
+	let cmd: string;
+	try {
+		cmd = readFileSync(`/proc/${pid}/cmdline`, "utf8");
+	} catch {
+		return false;
+	}
+	return cmd.includes("rehearsal-fake-ragflow") && cmd.includes(runDir);
+}
+
+/** Stop the fake RAGFlow, verifying identity first; a reused or foreign pid is never signalled. */
+export function stopRagflowFake(pid: number, runDir: string): void {
+	if (!pidAlive(pid)) return;
+	if (!isRagflowFixturePid(pid, runDir)) {
+		throw new RehearsalRefused(`refusing to stop pid ${pid}: not the ragflow fixture for this run`);
+	}
+	try {
+		process.kill(pid, "SIGTERM");
+	} catch {
+		return;
+	}
+	const deadline = Date.now() + 5000;
+	while (pidAlive(pid) && Date.now() < deadline) Bun.sleepSync(250);
+	if (pidAlive(pid)) {
+		try {
+			process.kill(pid, "SIGKILL");
+		} catch {
+			// Gone between the check and the signal.
+		}
+	}
+}
+
+/** Wait for the fake's dataset list to answer `{code: 0}`; false when it never did. */
+async function waitForFakeRagflow(url: string, timeoutMs: number): Promise<boolean> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		try {
+			const res = await fetch(`${url}/api/v1/datasets?page=1&page_size=1`, {
+				signal: AbortSignal.timeout(5000),
+			});
+			if (res.status === 200) {
+				const body = (await res.json()) as { code?: unknown };
+				if (body.code === 0) return true;
+			}
+		} catch {
+			// Not up yet.
+		}
+		await Bun.sleep(250);
+	}
+	return false;
+}
+
 /** Instance run directory, outside every checkout. */
 export function runDirFor(name: string): string {
 	return `${process.env.XDG_RUNTIME_DIR ?? "/tmp"}/substrate-rehearsal/${name}`;
@@ -526,6 +598,14 @@ export interface TwinState {
 	anonymous: boolean;
 	/** Started with `--skills-fixture`. Absent in a state file an older `up` wrote. */
 	skillsFixture?: boolean;
+	/** Started with `--ragflow-fixture`. Absent in a state file an older `up` wrote. */
+	ragflowFixture?: boolean;
+	/** The fake RAGFlow's pid, when the instance started one. */
+	ragflowPid?: number;
+	/** The fake RAGFlow's loopback port, when the instance started one. */
+	ragflowPort?: number;
+	/** The fake RAGFlow's start epoch, against pid reuse. */
+	ragflowStartSeconds?: number;
 }
 
 function readState(path: string): TwinState | null {
@@ -624,6 +704,8 @@ interface UpOptions {
 	anonymous: boolean;
 	/** Build the skills library fixture (`--skills-fixture`): a throwaway bare repository, a mirror and a recording `gh`. */
 	skillsFixture: boolean;
+	/** Build the RAGFlow fixture (`--ragflow-fixture`): a loopback fake RAGFlow, a registry and a run-dir manifest. */
+	ragflowFixture: boolean;
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<boolean> {
@@ -1092,6 +1174,72 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 	}
 	let serverEnv: Record<string, string>;
 	let skills: SkillsFixture | null = null;
+	let ragflow: RagflowFixture | null = null;
+	let ragflowPid = 0;
+	let ragflowPort = 0;
+	let ragflowStartSeconds = 0;
+	// Best-effort stop of the fake the failing path below may have started;
+	// a verification refusal inside never masks the original failure.
+	const stopFake = (): void => {
+		if (ragflowPid === 0) return;
+		try {
+			stopRagflowFake(ragflowPid, runDir);
+		} catch {
+			// The up failure being handled already explains the outcome.
+		}
+		ragflowPid = 0;
+	};
+	if (opts.ragflowFixture) {
+		try {
+			ragflowPort = await pickFreePort();
+			const fakeRefused = refusePort(ragflowPort, []);
+			if (fakeRefused !== null) throw new RehearsalRefused(`fake RAGFlow ${fakeRefused}`);
+			if (!(await isPortFree(ragflowPort))) throw new RehearsalRefused(`fake RAGFlow port ${ragflowPort} is already listening`);
+			// Deleted and rebuilt inside the run dir, so a crashed `up` cannot
+			// make a later proof answer `unchanged` from a stale manifest.
+			ragflow = buildRagflowFixture(runDir, {
+				url: `http://127.0.0.1:${ragflowPort}`,
+				apiKey: hex(32),
+			});
+			const ragflowLog = join(runDir, "ragflow.log");
+			const ragflowFd = openSync(ragflowLog, "a", 0o600);
+			const fake = Bun.spawn(buildRagflowSpawnArgv(checkout, runDir, ragflowPort), {
+				env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" },
+				detached: true,
+				stdin: "ignore",
+				stdout: ragflowFd,
+				stderr: ragflowFd,
+			});
+			fake.unref();
+			try {
+				closeSync(ragflowFd);
+			} catch {
+				// The child holds its own descriptor; a close failure changes nothing.
+			}
+			ragflowPid = fake.pid;
+			const fakeStart = readStartSeconds(ragflowPid);
+			if (fakeStart === null || !isRagflowFixturePid(ragflowPid, runDir)) {
+				ragflowPid = 0;
+				removeLabelledContainers(opts.name);
+				throw new RehearsalRefused(
+					`could not verify the fake RAGFlow (pid ${fake.pid}); refusing to signal an unverified process`,
+				);
+			}
+			ragflowStartSeconds = fakeStart;
+			if (!(await waitForFakeRagflow(`http://127.0.0.1:${ragflowPort}`, 20_000))) {
+				stopFake();
+				removeLabelledContainers(opts.name);
+				throw new RehearsalRefused(
+					`fake RAGFlow never answered on 127.0.0.1:${ragflowPort}; log kept at ${ragflowLog}`,
+				);
+			}
+		} catch (cause) {
+			stopFake();
+			removeLabelledContainers(opts.name);
+			if (cause instanceof RehearsalRefused) throw cause;
+			throw new RehearsalRefused(`the ragflow fixture could not be built: ${String((cause as Error).message ?? cause).split("\n")[0]}`);
+		}
+	}
 	try {
 		// Deleted and rebuilt inside the run dir, so a crashed `up` cannot make a later proof answer `existing`.
 		skills = opts.skillsFixture ? buildSkillsFixture(runDir) : null;
@@ -1104,10 +1252,12 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 			runDir,
 			parentEnv,
 			skillsFixture: skills?.env ?? null,
+			ragflowFixture: ragflow?.env ?? null,
 		});
 	} catch (cause) {
 		// The scratch containers are already healthy here; a builder throw must
 		// not leak them, and must exit 2 instead of a stack trace.
+		stopFake();
 		removeLabelledContainers(opts.name);
 		if (cause instanceof RehearsalEnvError) throw new RehearsalRefused(cause.message);
 		if (opts.skillsFixture) throw new RehearsalRefused(`the skills fixture could not be built: ${String((cause as Error).message ?? cause).split("\n")[0]}`);
@@ -1136,6 +1286,7 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 		// Unverifiable means unsignallable: a blind killOwn could hit a reused
 		// pid. Containers are still removed; the twin (if it is ours) is orphaned
 		// rather than risking someone else's process.
+		stopFake();
 		removeLabelledContainers(opts.name);
 		throw new RehearsalRefused(`could not verify the spawned twin (pid ${server.pid}); refusing to signal an unverified process`);
 	}
@@ -1147,6 +1298,7 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 		// refusal `up` succeeds and every later `down` refuses, e.g. from a
 		// system.slice context the twin inherits.
 		killVerifiedSpawn(server.pid, checkout, facts.startSeconds);
+		stopFake();
 		removeLabelledContainers(opts.name);
 		throw new RehearsalRefused(`twin would not be stoppable: ${stopReason}`);
 	}
@@ -1174,10 +1326,15 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 		desktopSurfaces: opts.desktopSurfaces,
 		anonymous: opts.anonymous,
 		skillsFixture: opts.skillsFixture,
+		ragflowFixture: opts.ragflowFixture,
+		...(ragflowPid === 0
+			? {}
+			: { ragflowPid, ragflowPort, ragflowStartSeconds }),
 	};
 	writeMode(statePath, `${JSON.stringify(state, null, 2)}\n`);
 	const interruptCleanup = (): void => {
 		killVerifiedSpawn(server.pid, checkout, facts.startSeconds);
+		stopFake();
 		try {
 			removeLabelledContainers(opts.name);
 		} catch {
@@ -1199,6 +1356,7 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 		const health = await waitForHealth(`http://127.0.0.1:${mcpPort}`, firstToken ?? null, READY_TIMEOUT_MS);
 		if (!isTwinHealthy(health)) {
 			killVerifiedSpawn(server.pid, checkout, facts.startSeconds);
+			stopFake();
 			removeLabelledContainers(opts.name);
 			rmSync(statePath, { force: true });
 			process.stderr.write(`[rehearsal] twin never reached healthy /healthz (index=${health?.index} ledger=${health?.ledger} writable=${health?.writable}); log kept at ${logPath}.\n`);
@@ -1209,6 +1367,7 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 		const confirmReason = confirmSpawnedTwin(server.pid, mcpPort, facts.startSeconds);
 		if (confirmReason !== null) {
 			killVerifiedSpawn(server.pid, checkout, facts.startSeconds);
+			stopFake();
 			removeLabelledContainers(opts.name);
 			rmSync(statePath, { force: true });
 			throw new RehearsalRefused(confirmReason);
@@ -1227,6 +1386,9 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 			name: opts.name,
 			testPgUrl,
 			skills: skills ? { state: skills.state, origin: skills.origin, ghState: skills.ghState, repo: skills.repo } : null,
+			ragflow: ragflow
+				? { url: `http://127.0.0.1:${ragflowPort}`, registry: ragflow.registryFile, state: ragflow.stateFile, modeFile: ragflow.modeFile }
+				: null,
 		})));
 		writeMode(join(runDir, "stores.env"), toShellExports(storesEnvRecord({
 			ports: { mcp: mcpPort, ledger: ledgerHost.port, postgres: pgHost.port },
@@ -1239,6 +1401,7 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 		process.stdout.write(`[rehearsal] commit ${state.commit} dirty=${dirtyOut === null ? "unknown" : String(dirtyOut.length > 0)}\n`);
 		process.stdout.write(`[rehearsal] images pg=${pgImage} ledger=${ledgerImage}\n`);
 		if (skills) process.stdout.write(`[rehearsal] skills fixture: library ${skills.repo} (a throwaway bare repository, a recording gh)\n`);
+		if (ragflow) process.stdout.write(`[rehearsal] ragflow fixture: fake RAGFlow on 127.0.0.1:${ragflowPort} (registry ${ragflow.registryFile})\n`);
 		return 0;
 	} catch (cause) {
 		// An unexpected throw after the spawn must not leak the twin: stop
@@ -1248,6 +1411,7 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 		// best-effort here so the original error survives; the provisional
 		// state stays so a later `down` can retry it.
 		killVerifiedSpawn(server.pid, checkout, facts.startSeconds);
+		stopFake();
 		try {
 			removeLabelledContainers(opts.name);
 		} catch {
@@ -1275,6 +1439,7 @@ async function runDownInner(name: string, runDir: string): Promise<number> {
 		process.stdout.write(`[rehearsal] down ${name}: nothing to remove.\n`);
 		return 0;
 	}
+	if (state.ragflowPid !== undefined) stopRagflowFake(state.ragflowPid, runDir);
 	if (!pidAlive(state.pid)) {
 		const removed = removeLabelledContainers(name);
 		rmSync(runDir, { recursive: true, force: true });
@@ -1352,6 +1517,12 @@ async function runStatusInner(name: string, runDir: string): Promise<number> {
 	process.stdout.write(`[rehearsal] commit ${state.commit} checkout ${state.checkout}\n`);
 	process.stdout.write(`[rehearsal] images pg=${state.pgImage} ledger=${state.ledgerImage}\n`);
 	process.stdout.write(`[rehearsal] skills fixture ${state.skillsFixture === true ? "on" : "off"}\n`);
+	if (state.ragflowFixture === true) {
+		const fakeAlive = state.ragflowPid !== undefined && pidAlive(state.ragflowPid);
+		process.stdout.write(`[rehearsal] ragflow fixture on: fake pid ${state.ragflowPid ?? "unknown"} alive=${fakeAlive} port ${state.ragflowPort ?? "unknown"}\n`);
+	} else {
+		process.stdout.write(`[rehearsal] ragflow fixture off\n`);
+	}
 	return health === "200" ? 0 : 1;
 }
 
@@ -1557,7 +1728,7 @@ async function runSmokeInner(name: string, runDir: string): Promise<number> {
  */
 export function refuseExtraArgs(argv: string[]): string | null {
 	const valued: Record<string, true> = { "--name": true, "--port": true, "--surfaces": true, "--operator": true, "--desktop-surfaces": true };
-	const bare: Record<string, true> = { "--anonymous": true, "--skills-fixture": true };
+	const bare: Record<string, true> = { "--anonymous": true, "--skills-fixture": true, "--ragflow-fixture": true };
 	for (let i = 1; i < argv.length; i++) {
 		const token = argv[i] ?? "";
 		if (valued[token] === true) {
@@ -1580,7 +1751,7 @@ export function flag(argv: string[], name: string): string | undefined | null {
 
 function usage(message: string): never {
 	process.stderr.write(
-		`[rehearsal] ${message}\nusage: rehearsal up|down|status|smoke [--name <n>] [--port <N>] [--surfaces a,b] [--operator <s>] [--desktop-surfaces a,b] [--anonymous] [--skills-fixture]\n`,
+		`[rehearsal] ${message}\nusage: rehearsal up|down|status|smoke [--name <n>] [--port <N>] [--surfaces a,b] [--operator <s>] [--desktop-surfaces a,b] [--anonymous] [--skills-fixture] [--ragflow-fixture]\n`,
 	);
 	process.exit(2);
 }
@@ -1608,6 +1779,7 @@ async function main(argv: string[]): Promise<number> {
 	if (extra !== null) usage(extra);
 	const anonymous = argv.includes("--anonymous");
 	const skillsFixture = argv.includes("--skills-fixture");
+	const ragflowFixture = argv.includes("--ragflow-fixture");
 	try {
 		const name = parseName(nameRaw ?? undefined);
 		if (sub === "down") return await runDown(name);
@@ -1618,7 +1790,7 @@ async function main(argv: string[]): Promise<number> {
 		const surfaces = parseSurfaces(surfacesRaw ?? undefined);
 		const operator = parseOperator(operatorRaw ?? undefined, surfaces, anonymous);
 		const desktopSurfaces = parseDesktopSurfaces(desktopSurfacesRaw ?? undefined, surfaces, anonymous);
-		return await runUp({ name, port, surfaces, operator, desktopSurfaces, anonymous, skillsFixture }, process.cwd());
+		return await runUp({ name, port, surfaces, operator, desktopSurfaces, anonymous, skillsFixture, ragflowFixture }, process.cwd());
 	} catch (cause) {
 		if (cause instanceof RehearsalRefused) {
 			process.stderr.write(`[rehearsal] refused: ${cause.message}.\n`);
