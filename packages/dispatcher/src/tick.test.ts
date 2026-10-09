@@ -17,6 +17,7 @@ import type { DispatchEventInput, FindNodeResult, GraphSnapshot } from "./substr
 import { isGivenUp, markGivenUp } from "./watch.ts";
 import { dispatchIssue, runTick, type TickDeps, type TickSubstrate } from "./tick.ts";
 import type { HermesSpawnOptions } from "./launch-hermes.ts";
+import { InvalidGraphIdError, type EnsureWorktreeResult } from "./worktree.ts";
 
 const CANARY = "CANARY-meridian-thistle-582";
 
@@ -345,6 +346,24 @@ describe("hermes dispatch", () => {
 		expectVocabularyClosed(substrate.events);
 	});
 
+	test("an invalid graph id is marked and does not escape the tick", async () => {
+		const linear = linearFake([HERMES_ISSUE]);
+		const substrate = substrateFake(foundNode(), [FREE_GRAPH]);
+		const { deps, spawns } = tickDeps({
+			linear,
+			substrate,
+			worktree: async () => {
+				throw new InvalidGraphIdError("graph_id is not a dispatch id");
+			},
+		});
+
+		const result = await dispatchIssue(HERMES_ISSUE, "hermes", deps);
+
+		expect(result).toEqual({ status: "marked", outcome: "not-dispatchable" });
+		expect(spawns).toEqual([]);
+		expect(linear.comments).toEqual([{ issueId: HERMES_ISSUE.id, body: "substrate-dispatch: not-dispatchable" }]);
+	});
+
 	test("a worktree refusal comments its outcome and never spawns", async () => {
 		const linear = linearFake([HERMES_ISSUE]);
 		const substrate = substrateFake(foundNode(), [FREE_GRAPH]);
@@ -391,6 +410,34 @@ describe("tick boundaries", () => {
 		expect(linear.comments).toEqual([]);
 		expect(linear.updates).toEqual([]);
 		expect(substrate.events).toEqual([]);
+	});
+
+	test("a disabled kill switch sleeps the pass with no comments", async () => {
+		const linear = linearFake([HERMES_ISSUE]);
+		const substrate = substrateFake(foundNode(), [FREE_GRAPH]);
+		const { deps, spawns } = tickDeps({ linear, substrate });
+		deps.dispatchDisabled = () => true;
+
+		const summary = await runTick(deps);
+
+		expect(summary).toEqual([]);
+		expect(spawns).toEqual([]);
+		expect(linear.comments).toEqual([]);
+		expect(substrate.events).toEqual([]);
+	});
+
+	test("a missing hermes binary skips like a missing MCP entry", async () => {
+		const linear = linearFake([HERMES_ISSUE]);
+		const substrate = substrateFake(foundNode(), [FREE_GRAPH]);
+		const { deps, spawns } = tickDeps({ linear, substrate });
+		deps.hermesPresent = () => false;
+
+		const result = await dispatchIssue(HERMES_ISSUE, "hermes", deps);
+
+		expect(result).toEqual({ status: "preflight-skip", reason: "mcp-unconfigured" });
+		expect(spawns).toEqual([]);
+		expect(linear.comments).toEqual([]);
+		expect(isGivenUp(deps.givenUpDir, HERMES_ISSUE.id)).toBe(false);
 	});
 
 	test("runTick marks the non-dispatchable and dispatches hermes", async () => {

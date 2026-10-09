@@ -90,7 +90,8 @@ export function buildChildEnv(
 		if (source[key] !== undefined) env[key] = source[key] as string;
 	}
 	env.SUBSTRATE_URL = extra.substrateUrl;
-	env.SUBSTRATE_TOKEN_HERMES = extra.hermesToken;
+	const hermesToken = extra.hermesToken;
+	env.SUBSTRATE_TOKEN_HERMES = hermesToken;
 	return env;
 }
 

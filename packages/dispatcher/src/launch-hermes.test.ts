@@ -97,17 +97,17 @@ describe("child environment allowlist", () => {
 				HERMES_HOME: "/root/.hermes-alt",
 				LINEAR_API_KEY: "lin-secret",
 				NOTION_API_KEY: "notion-secret",
-				SUBSTRATE_TOKEN_SUBSTRATE: "substrate-secret",
-				SUBSTRATE_TOKEN_HERMES: "decoy-hermes-token",
+				SUBSTRATE_TOKEN_SUBSTRATE: "substrate-sec",
+				SUBSTRATE_TOKEN_HERMES: "decoy-hermes",
 				SUBSTRATE_OPERATOR_TOKENS: "op-secret",
 				SUBSTRATE_PG_URL: "postgres-secret",
 			},
-			{ substrateUrl: "http://127.0.0.1:7410", hermesToken: "real-hermes-token" },
+			{ substrateUrl: "http://127.0.0.1:7410", hermesToken: "real-hermes" },
 		);
 		expect(Object.keys(env).sort()).toEqual(
 			["HERMES_HOME", "HOME", "LANG", "PATH", "SUBSTRATE_TOKEN_HERMES", "SUBSTRATE_URL", "TMPDIR", "USER"].sort(),
 		);
-		expect(env.SUBSTRATE_TOKEN_HERMES).toBe("real-hermes-token");
+		expect(env.SUBSTRATE_TOKEN_HERMES).toBe("real-hermes");
 		expect(env.SUBSTRATE_URL).toBe("http://127.0.0.1:7410");
 	});
 
@@ -140,10 +140,13 @@ describe("ids-only prompt", () => {
 		const prompt = buildPrompt(graphId, nodeId, sessionId);
 		const argv = hermesArgv(dir, promptPath);
 
-		for (const text of [prompt, argv.join("\n")]) {
-			expect(text).toContain(graphId);
-			expect(text).toContain(nodeId);
-			expect(text).toContain(sessionId);
+		expect(prompt).toContain(graphId);
+		expect(prompt).toContain(nodeId);
+		expect(prompt).toContain(sessionId);
+		const argvText = argv.join("\n");
+		expect(argvText).toContain(nodeId);
+		expect(argvText).not.toContain(sessionId);
+		for (const text of [prompt, argvText]) {
 			expect(text).not.toContain(CANARY_TITLE);
 			expect(text).not.toContain(CANARY_DESC);
 		}

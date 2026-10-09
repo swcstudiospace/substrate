@@ -67,7 +67,7 @@ describe("substrate-client request shape", () => {
 
 	test("the first SSE data line parses when the server streams", async () => {
 		const { requests, fetchFn } = fakeFetch(
-			() => `: keep-alive\n${okEnvelope({ graph_id: "ut-x-12345678", nodes: [] })}\n`,
+			() => `: keep-alive\ndata: ${okEnvelope({ graph_id: "ut-x-12345678", nodes: [] })}\n`,
 		);
 		const client = makeClient(fetchFn);
 		const graph = await client.getGraph("ut-x-12345678");

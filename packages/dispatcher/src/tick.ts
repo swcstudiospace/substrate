@@ -31,7 +31,7 @@ import {
 	type SpawnFn,
 } from "./launch-hermes.ts";
 import { isGivenUp, isLiveLease, watchClaim, type GivenUpOutcome, type WatchedNode } from "./watch.ts";
-import type { EnsureWorktreeResult } from "./worktree.ts";
+import { InvalidGraphIdError, InvalidRepoError, type EnsureWorktreeResult } from "./worktree.ts";
 
 /** The substrate surface tick talks to. `SubstrateClient` satisfies it. */
 export interface TickSubstrate {
@@ -85,6 +85,17 @@ export interface TickDeps {
 	worktree: (input: { graphId: string; repo: string | null }) => Promise<EnsureWorktreeResult>;
 	/** Raw `~/.hermes/config.yaml` text, or null when unreadable. */
 	readHermesConfig: () => string | null | Promise<string | null>;
+	/**
+	 * Kill switch. Absent means this tick runs; production passes the
+	 * env-file read. Disabled sleeps the pass: no comments, no events.
+	 */
+	dispatchDisabled?: () => boolean | Promise<boolean>;
+	/**
+	 * Hermes binary presence. Absent means present. A missing binary uses
+	 * the same skip as a config with no substrate MCP entry, and this
+	 * function must not launch Hermes to find out.
+	 */
+	hermesPresent?: () => boolean | Promise<boolean>;
 	/** Injected spawner: the real `hermes` binary is never executed here. */
 	spawn: SpawnFn;
 	/** Dispatcher process env source for the child allowlist. */
@@ -141,16 +152,25 @@ export async function dispatchIssue(
 		return { status: "marked", outcome: "already-claimed" };
 	}
 
-	if (checkSubstrateMcp(await deps.readHermesConfig()) !== "ok") {
-		await deps.substrate.emitEvent(failedEvent(graphId, "mcp-unconfigured", nodeId));
-		return { status: "preflight-skip", reason: "mcp-unconfigured" };
+	let worktree: EnsureWorktreeResult;
+	try {
+		worktree = await deps.worktree({ graphId, repo });
+	} catch (error) {
+		if (!(error instanceof InvalidGraphIdError || error instanceof InvalidRepoError)) throw error;
+		await ensureMarkerComment(deps.linear, issue.id, "not-dispatchable");
+		await deps.substrate.emitEvent(failedEvent(graphId, "not-dispatchable", nodeId));
+		return { status: "marked", outcome: "not-dispatchable" };
 	}
-
-	const worktree = await deps.worktree({ graphId, repo });
 	if (!worktree.ok) {
 		await ensureMarkerComment(deps.linear, issue.id, worktree.outcome);
 		await deps.substrate.emitEvent(failedEvent(graphId, worktree.outcome, nodeId));
 		return { status: "marked", outcome: worktree.outcome };
+	}
+
+	const hermesPresent = deps.hermesPresent ? await deps.hermesPresent() : true;
+	if (checkSubstrateMcp(await deps.readHermesConfig()) !== "ok" || !hermesPresent) {
+		await deps.substrate.emitEvent(failedEvent(graphId, "mcp-unconfigured", nodeId));
+		return { status: "preflight-skip", reason: "mcp-unconfigured" };
 	}
 
 	const promptPath = writePromptFile(worktree.path, { graphId, nodeId, sessionId });
@@ -197,6 +217,7 @@ export interface TickIssueSummary {
 
 /** One full pass: poll, mark the non-dispatchable, dispatch the Hermes set. */
 export async function runTick(deps: TickDeps): Promise<TickIssueSummary[]> {
+	if (deps.dispatchDisabled && (await deps.dispatchDisabled())) return [];
 	const { dispatchable, notDispatchable } = await collectCandidates(deps.linear);
 	const summary: TickIssueSummary[] = [];
 	for (const issue of notDispatchable) {
