@@ -335,6 +335,8 @@ const KNOWN_TOOLS: ReadonlySet<string> = new Set([
 	"graph_heartbeat",
 	"graph_release",
 	"graph_complete",
+	"graph_find",
+	"issue_get",
 	"coord_handoff",
 	"coord_handoff_verify",
 	"coord_handoff_list",

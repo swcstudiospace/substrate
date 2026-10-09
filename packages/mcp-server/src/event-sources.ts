@@ -391,10 +391,10 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 		sample: () => ({
 			surface: "claude-code",
 			kind: "warning",
-			summary: "claim mirror failed: linear comment timed out",
+			summary: "claim mirror failed: linear claim",
 			session_id: "sess-p17-mirror",
 			graph_id: "ut-p17-mirror",
-			payload: { action: "mirror", target: "linear", op: "comment", reason: "timeout" },
+			payload: { action: "mirror", target: "linear", op: "claim", reason: "timeout" },
 		}),
 	},
 	{
@@ -413,7 +413,7 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 			graph_id: "ut-p17-dod",
 			node_id: "n2",
 			repo: "swcstudiospace/agent-substrate",
-			payload: { action: "released", lease_epoch: 3, dod: { checks: ["unit-tests-pass"] } },
+			payload: { action: "released", lease_epoch: 3, dod: { tests_pass: true, review_pass: true, summary_chars: 42 } },
 		}),
 	},
 	{

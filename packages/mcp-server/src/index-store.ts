@@ -97,6 +97,9 @@ export interface GraphBindResult {
 	conflict: boolean;
 }
 
+/** A node row joined to its graph's repo, branch and status, for `graph_find`. */
+export type LinearNodeMatch = GraphNode & { repo: string | null; branch: string | null; graph_status: string | null };
+
 export class IndexStore implements MemoryStore {
 	private readonly sql: SQL;
 
@@ -418,12 +421,24 @@ export class IndexStore implements MemoryStore {
 
 	// ── leases ─────────────────────────────────────────────────────────────────
 
-	private async node(graphId: string, nodeId: string): Promise<GraphNode> {
+	/**
+	 * One node as stored, or null when it is unknown. Unlike `getNode` this
+	 * throws on a database failure, so completion gating can tell "no such
+	 * node" (fall through to the fenced path, which refuses in its own words)
+	 * from "the read failed" (refuse: an unread node must never complete
+	 * without the gate that a Linear reference would require).
+	 */
+	async readNode(graphId: string, nodeId: string): Promise<GraphNode | null> {
 		const rows = (await this.sql`
 			select * from graph_nodes where graph_id = ${graphId} and node_id = ${nodeId}`) as GraphNode[];
-		const node = rows[0];
-		if (!node) throw new Error(`unknown node ${graphId}/${nodeId}`);
-		return toNode(node);
+		const row = rows[0];
+		return row ? toNode(row) : null;
+	}
+
+	private async node(graphId: string, nodeId: string): Promise<GraphNode> {
+		const found = await this.readNode(graphId, nodeId);
+		if (!found) throw new Error(`unknown node ${graphId}/${nodeId}`);
+		return found;
 	}
 
 	/**
@@ -578,6 +593,86 @@ export class IndexStore implements MemoryStore {
 	}
 
 	/**
+	 * One node as stored, or null when it is unknown. A read for completion
+	 * gating (does the node link Linear, who holds it); never a write.
+	 */
+	async getNode(graphId: string, nodeId: string): Promise<GraphNode | null> {
+		return this.node(graphId, nodeId).catch(() => null);
+	}
+
+	/**
+	 * The registered nodes behind a Linear reference, for `graph_find`. The
+	 * id is matched first, then the identifier; each query stops at 2 rows,
+	 * which is all an ambiguity report needs. Never a write.
+	 */
+	async findNodesByLinear(ref: { linearIssueId?: string; linearIdentifier?: string }): Promise<LinearNodeMatch[]> {
+		if (ref.linearIssueId) {
+			const rows = (await this.sql`
+				select n.*, g.repo, g.branch, g.status as graph_status
+				from graph_nodes n join graph_index g on g.graph_id = n.graph_id
+				where n.linear_issue_id = ${ref.linearIssueId}
+				limit 2`) as LinearNodeMatch[];
+			if (rows.length > 0) return rows.map(toLinearNodeMatch);
+		}
+		if (!ref.linearIdentifier) return [];
+		return (
+			(await this.sql`
+			select n.*, g.repo, g.branch, g.status as graph_status
+			from graph_nodes n join graph_index g on g.graph_id = n.graph_id
+			where n.linear_identifier = ${ref.linearIdentifier}
+			limit 2`) as LinearNodeMatch[]
+		).map(toLinearNodeMatch);
+	}
+
+	/**
+	 * Mark a node under review for the DoD gate, in one fenced statement.
+	 *
+	 * The only new state write of the claim-mirror phase: it sets
+	 * `started_review` under the caller's lease — fenced on `lease_id`,
+	 * unexpired, with the holder check `decideHeartbeat` makes — and extends
+	 * the lease by the TTL, because the gate may take up to 35 s. A refusal
+	 * (`not-holder`, `lost`, `expired`, `unheld`) returns the heartbeat refusal
+	 * shape and writes nothing, including no tracker.
+	 */
+	async reviewNode(
+		graphId: string,
+		nodeId: string,
+		leaseId: string,
+		caller: Surface | null,
+		ttlSeconds: number = DEFAULT_LEASE_TTL_SECONDS,
+	): Promise<{ ok: boolean; node: GraphNode; lease: LeaseView; decision: HeartbeatDecision }> {
+		const ttl = normalizeTtlSeconds(ttlSeconds);
+		const request = { lease_id: leaseId, ttl_seconds: ttl, caller };
+		const observed = await this.node(graphId, nodeId);
+		const decision = decideHeartbeat(leaseSnapshot(observed), request, Date.now());
+		if (!decision.ok) return { ok: false, node: observed, lease: leaseView(leaseSnapshot(observed)), decision };
+
+		const rows = (await this.sql`
+			update graph_nodes set
+				state = 'started_review',
+				lease_heartbeat_at = now(),
+				lease_expires_at   = now() + make_interval(secs => ${ttl})
+			where graph_id = ${graphId} and node_id = ${nodeId}
+			  and lease_id = ${leaseId}
+			  and coalesce(lease_expires_at, claimed_at + make_interval(secs => ${DEFAULT_LEASE_TTL_SECONDS})) > now()
+			returning *`) as GraphNode[];
+
+		const updated = rows[0];
+		if (updated) return { ok: true, node: toNode(updated), lease: holderLeaseView(leaseSnapshot(updated)), decision };
+
+		// The statement matched nothing, so the lease went between the read and
+		// the write. Report what is true now rather than the decision that is
+		// no longer.
+		const fresh = await this.node(graphId, nodeId);
+		return {
+			ok: false,
+			node: fresh,
+			lease: leaseView(leaseSnapshot(fresh)),
+			decision: decideHeartbeat(leaseSnapshot(fresh), request, Date.now()),
+		};
+	}
+
+	/**
 	 * Drop the lease on a node.
 	 *
 	 * `lease_id` fences it: a stale holder cannot release — or, through
@@ -638,7 +733,7 @@ export class IndexStore implements MemoryStore {
 	 */
 	async reapExpiredLeases(
 		repo?: string | null,
-	): Promise<Array<{ graph_id: string; node_id: string; linear_identifier: string | null; holder: LeaseHolder | null; lease_epoch: number; expired_at: string | null }>> {
+	): Promise<Array<{ graph_id: string; node_id: string; linear_issue_id: string | null; linear_identifier: string | null; notion_page: string | null; holder: LeaseHolder | null; lease_epoch: number; expired_at: string | null }>> {
 		// The holders are read in a CTE rather than out of `returning`: an UPDATE's
 		// RETURNING gives the *new* row, where `claimed_by` is already NULL, so the
 		// reaper would clear the leases and then report that nobody held any of them.
@@ -654,8 +749,9 @@ export class IndexStore implements MemoryStore {
 		// way.
 		const rows = (await this.sql`
 			with expiring as (
-				select graph_id, node_id, linear_identifier, claimed_by, claim_session, lease_id, lease_epoch,
-				       lease_expires_at, lease_heartbeat_at
+			select graph_id, node_id, linear_issue_id, linear_identifier, notion_page,
+			       claimed_by, claim_session, lease_id, lease_epoch,
+			       lease_expires_at, lease_heartbeat_at
 				from graph_nodes
 				where claimed_by is not null
 				  and coalesce(lease_expires_at, claimed_at + make_interval(secs => ${DEFAULT_LEASE_TTL_SECONDS})) <= now()
@@ -679,7 +775,9 @@ export class IndexStore implements MemoryStore {
 		return rows.map((row) => ({
 			graph_id: String(row.graph_id),
 			node_id: String(row.node_id),
+			linear_issue_id: row.linear_issue_id === null ? null : String(row.linear_issue_id),
 			linear_identifier: row.linear_identifier === null ? null : String(row.linear_identifier),
+			notion_page: row.notion_page === null ? null : String(row.notion_page),
 			holder: row.claimed_by ? { surface: row.claimed_by as Surface, session_id: String(row.claim_session ?? "") } : null,
 			lease_epoch: Number(row.lease_epoch ?? 0),
 			expired_at: isoOrNull(row.lease_expires_at),
@@ -1321,6 +1419,18 @@ function toNode(row: GraphNode): GraphNode {
 		lease_epoch: Number(row.lease_epoch ?? 0),
 	};
 }
+/**
+ * A `findNodesByLinear` row as `graph_find` types it: the node columns
+ * through `toNode` (Postgres hands `lease_epoch` back as a string, which
+ * would otherwise serialise beside the numeric `lease.epoch` as a second
+ * value for the same thing), with the joined graph columns carried across.
+ * Exported for the mapping test: the SQL itself needs a live Postgres.
+ */
+export function toLinearNodeMatch(row: LinearNodeMatch): LinearNodeMatch {
+	const { repo, branch, graph_status } = row;
+	return { ...toNode(row), repo, branch, graph_status };
+}
+
 
 /** The lease columns of a node row, in the shape `lease.ts` reasons about. */
 export function leaseSnapshot(node: GraphNode): LeaseSnapshot {

@@ -210,6 +210,30 @@ describeLive("exclusive hold against a live index", () => {
 		expect(after.find((node) => node.graph_id === GRAPH && node.node_id === "n12")?.claimed_by).toBeNull();
 	});
 
+	test("a reaped row already carries the tracker refs, so the mirror needs no second read", async () => {
+		await a.registerGraph({
+			graph_id: GRAPH,
+			repo: "swcstudiospace/agent-substrate",
+			nodes: [
+				{
+					node_id: "n13",
+					linear_issue_id: "11111111-2222-3333-4444-555555555555",
+					linear_identifier: "SPE-4792",
+					notion_page: "https://www.notion.so/Item-3e4bc1a0c7ae81baafffd1ebd773123d",
+				},
+			],
+		});
+		await a.claimNode(GRAPH, "n13", "hermes", "sess-a", "hermes", 30);
+		await a.expireLease(GRAPH, "n13");
+
+		const reaped = await a.reapExpiredLeases("swcstudiospace/agent-substrate");
+
+		const ours = reaped.find((lease) => lease.graph_id === GRAPH && lease.node_id === "n13");
+		expect(ours?.linear_issue_id).toBe("11111111-2222-3333-4444-555555555555");
+		expect(ours?.linear_identifier).toBe("SPE-4792");
+		expect(ours?.notion_page).toBe("https://www.notion.so/Item-3e4bc1a0c7ae81baafffd1ebd773123d");
+	});
+
 	test("a renewal decided before expiry cannot revive the lease after it", async () => {
 		// The renewal branch used to check only the lease id. A holder that decided
 		// "renewed" a moment before its expiry could land the UPDATE after it,

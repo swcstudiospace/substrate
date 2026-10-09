@@ -32,10 +32,13 @@ const released: Array<{ lease_id?: string | null; force?: boolean }> = [];
 const written: SubstrateEvent[] = [];
 
 /** A node held by hermes, judged by the real lease rules, so a forced release has something to take. */
+// No Linear reference: a linked node without a mirror now stops at the DoD
+// gate (dod-unavailable) before main's fence, and this file pins the fence's
+// own not-holder shape through both transports.
 const heldNode = {
 	graph_id: "ut-1",
 	node_id: "n2",
-	linear_identifier: "SPE-4792",
+	linear_identifier: null,
 	claimed_by: "hermes",
 	claim_session: "sess-hermes",
 	claimed_at: new Date().toISOString(),
@@ -52,6 +55,9 @@ const claimCallers: Array<Surface | null> = [];
 
 const index = {
 	getGraph: async () => ({ repo: "swcstudiospace/agent-substrate", branch: "main" }),
+	// The throwing read `completeNode` gates on: unknown rows come back null
+	// (the fenced path refuses in its own words).
+	readNode: async () => ({ ...heldNode }),
 	claimNode: async (graph_id: string, node_id: string, surface: string, _session: string, caller: Surface | null) => {
 		claimedAs.push(surface);
 		claimCallers.push(caller);
