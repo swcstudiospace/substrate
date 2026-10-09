@@ -1,0 +1,158 @@
+/**
+ * Docs version cutter (D25-17).
+ *
+ * `finalize(dataset, commit, pathsPresent)` cuts one refresh run into a
+ * version: the commit's pages become current, absent pages stop being
+ * searchable, the version list keeps the last five, and documents belonging
+ * to none of the last five are deleted from RAGFlow.
+ *
+ * Searchability uses the 25-01-researched mechanism, preference 3:
+ * post-filter against the manifest (no enable/disable flag and no retrieval
+ * `document_ids` filter appear in the observed 0.27.1 sources). Absent pages
+ * simply join no version, so {@link currentDocumentIds} — the set search.ts
+ * intersects hits with — excludes them.
+ *
+ * A version is cut only after every page's parse finished: finalize verifies
+ * each present page's documents report `run: DONE` and refuses the cut
+ * otherwise. Any failure leaves the previous version current — the manifest
+ * is written once, after every RAGFlow call succeeds. `finalize` is
+ * attributed as `docs_ingest` under the same writer rule as ingestPage.
+ */
+
+import { findDataset, loadRegistry } from "./registry.ts";
+import type { DatasetEntry } from "./registry.ts";
+import { RagflowError } from "./ragflow.ts";
+import type { RagflowDocument } from "./ragflow.ts";
+import { loadManifest, saveManifest, withDatasetLock } from "./manifest.ts";
+import type { DocsManifest, DocsRagflow } from "./manifest.ts";
+import { resolveIngestDatasetId } from "./ingest.ts";
+
+/** Only the last five versions survive (D25-17). */
+export const KEEP_VERSIONS = 5;
+
+export interface FinalizeInput {
+	dataset: string;
+	commit: string;
+	/** Repo-relative paths present at this commit (refused pages simply absent). */
+	pathsPresent: string[];
+	surface: string;
+	isSubstrateOrOperator: boolean;
+}
+
+export interface FinalizeDeps {
+	registry?: readonly DatasetEntry[];
+	client: DocsRagflow;
+	stateDir?: string;
+	env?: Record<string, string | undefined>;
+	embeddingModel?: string;
+}
+
+export type FinalizeResult =
+	| {
+			status: "version-cut";
+			dataset: string;
+			datasetId: string;
+			commit: string;
+			paths: string[];
+			versions: number;
+			deletedDocumentIds: string[];
+	  }
+	| { status: "refused"; reason: "forbidden" | "unknown-dataset" | "outside-roots" }
+	| {
+			status: "failed";
+			reason: "ragflow-error" | "ragflow-timeout" | "ragflow-unreachable" | "ragflow-bad-response";
+			message: string;
+	  };
+
+const COMMIT_PATTERN = /^[0-9a-f]{40}$/i;
+
+function failedFrom(error: unknown): FinalizeResult {
+	if (error instanceof RagflowError) {
+		const message = error.message;
+		if (message.startsWith("ragflow timeout")) return { status: "failed", reason: "ragflow-timeout", message };
+		if (message.startsWith("ragflow unreachable")) {
+			return { status: "failed", reason: "ragflow-unreachable", message };
+		}
+		if (/non-JSON|no chunks|no datasets|no documents|cross-origin|redirected/.test(message)) {
+			return { status: "failed", reason: "ragflow-bad-response", message };
+		}
+		return { status: "failed", reason: "ragflow-error", message };
+	}
+	if (error instanceof FinalizeHalt) return { status: "failed", reason: "ragflow-error", message: error.message };
+	throw error;
+}
+
+/** A cut precondition failed after RAGFlow calls already succeeded: no throw
+ * past the lock, just a `failed` result with the manifest untouched. */
+class FinalizeHalt extends Error {}
+
+async function listAllDocuments(client: DocsRagflow, datasetId: string): Promise<RagflowDocument[]> {
+	const all: RagflowDocument[] = [];
+	let page = 1;
+	for (;;) {
+		const docs = await client.listDocuments(datasetId, page, 100);
+		all.push(...docs);
+		if (docs.length < 100) return all;
+		page += 1;
+	}
+}
+
+export async function finalize(input: FinalizeInput, deps: FinalizeDeps): Promise<FinalizeResult> {
+	if (!input.isSubstrateOrOperator) return { status: "refused", reason: "forbidden" };
+	if (!COMMIT_PATTERN.test(input.commit)) return { status: "refused", reason: "outside-roots" };
+	const registry = deps.registry ?? loadRegistry();
+	if (!findDataset(registry, input.dataset)) return { status: "refused", reason: "unknown-dataset" };
+
+	try {
+		return await withDatasetLock(input.dataset, async () => {
+			const datasetId = await resolveIngestDatasetId(registry, deps.client, input.dataset, deps.embeddingModel);
+			const manifest = await loadManifest(input.dataset, {
+				stateDir: deps.stateDir,
+				env: deps.env,
+				client: deps.client,
+				datasetId,
+			});
+			const listed = await listAllDocuments(deps.client, datasetId);
+			const runById = new Map(listed.map((doc) => [doc.id, doc.run]));
+			// The cut needs every present page parsed: any document still
+			// queued, failed, or missing blocks the version (D25-20).
+			const paths = input.pathsPresent.filter((path) => manifest.paths[path] !== undefined);
+			for (const path of paths) {
+				for (const id of manifest.paths[path]!.documentIds) {
+					const run = runById.get(id);
+					if (run !== "DONE") {
+						throw new FinalizeHalt(
+							`refusing to cut ${input.commit}: document ${id} for ${path} reports run ${run ?? "missing"}`,
+						);
+					}
+				}
+			}
+			const documentIds = [...new Set(paths.flatMap((path) => manifest.paths[path]!.documentIds))];
+			const versions = [
+				...manifest.versions,
+				{
+					commit: input.commit,
+					paths,
+					documentIds,
+					cutAt: new Date().toISOString(),
+				},
+			].slice(-KEEP_VERSIONS);
+			const live = new Set(versions.flatMap((version) => version.documentIds));
+			const stale = listed.map((doc) => doc.id).filter((id) => !live.has(id));
+			if (stale.length > 0) await deps.client.deleteDocuments(datasetId, stale);
+			const next: DocsManifest = { ...manifest, current: input.commit, versions };
+			await saveManifest(input.dataset, next, { stateDir: deps.stateDir, env: deps.env });
+			return {
+				status: "version-cut",
+				dataset: input.dataset,
+				datasetId,
+				commit: input.commit,
+				paths,
+				versions: versions.length,
+				deletedDocumentIds: stale,
+			};
+		});
+	} catch (error) {
+		return failedFrom(error);
+	}
+}
