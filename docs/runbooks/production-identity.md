@@ -251,20 +251,26 @@ summed request counts (sum of point `value` fields), not point counts.
 
 ## Rollback
 
-Operator only. Commenting the server token lines and restarting returns
-to today's anonymous mode; the handoff key and audit path may stay. Back
-up the env file first:
+Operator only. Rollback restores the pre-switch backup, taken before
+switch-on, so the anonymous-access setting comes back with the tokens:
 
 ```sh
-cp "$SERVER_ENV" "$SERVER_ENV.bak-<date>"
-sed -i 's/^[[:space:]]*SUBSTRATE_\(TOKEN_\|OPERATOR_TOKENS\)/## &/' "$SERVER_ENV"
+cp "$SERVER_ENV.bak-pre-switch" "$SERVER_ENV"
 systemctl restart substrate-mcp
 bun run parity:check
 ```
 
-`SERVER_ENV` is the server env file. The commented lines name variables
-only, never values. Re-applying is the reverse: uncomment, restart,
-re-run both checks.
+Take that backup before switch-on:
+
+```sh
+cp "$SERVER_ENV" "$SERVER_ENV.bak-pre-switch"
+```
+
+Commenting only the token lines is not a rollback: with
+`SUBSTRATE_ALLOW_ANONYMOUS=0` still set, the server requires a
+recognized bearer while none exists, and every route — including
+`healthz` and the parity check — answers 401. Always restore the whole
+file. `SERVER_ENV` is the server env file.
 
 ## Rotation
 
@@ -278,7 +284,10 @@ When rotating the handoff key, move the old key to
 `SUBSTRATE_HANDOFF_KEY_PREV` and its active ID to
 `SUBSTRATE_HANDOFF_KEY_PREV_ID`. Put the fresh key in
 `SUBSTRATE_HANDOFF_KEY` and give `SUBSTRATE_HANDOFF_KEY_ID` a new ID.
-Drop the previous key after the soak. The audit path is not a secret and
+Drop the previous key only once no remaining handoff still verifies
+under the old ID — `coord_handoff_list` verifies each packet against
+the currently loaded keys, and handoffs carry no expiry, so a soak
+alone does not make retirement safe. The audit path is not a secret and
 rotates by mere replacement.
 
 ## External clients

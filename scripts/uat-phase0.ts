@@ -338,7 +338,9 @@ export function expectMcpTarget(entry: unknown): string[] {
 	}
 	if (protocol !== "http:" && protocol !== "https:") problems.push("substrate entry url is not an http(s) URL");
 	else if (path !== "/mcp" && !path?.endsWith("/mcp")) {
-		problems.push(`substrate entry url ${JSON.stringify(record.url)} does not point at /mcp`);
+		// Path only, never the full URL: the message reaches stdout and both
+		// saved reports, and the configured host stays out of UAT output.
+		problems.push(`substrate entry url path ${JSON.stringify(path)} does not point at /mcp`);
 	}
 	return problems;
 }
@@ -349,13 +351,21 @@ export function countConversation(events: unknown, conversationId: string): numb
 	return events.filter((event) => (event as { payload?: { conversation_id?: unknown } } | null)?.payload?.conversation_id === conversationId).length;
 }
 
-/** Scratch git isolation: every git child ignores operator-shared config. */
-export function scratchGitEnv(hooksDir: string): Record<string, string> {
+/**
+ * Scratch git isolation: every git child ignores operator-shared config and
+ * cannot be steered at the real repository. `undefined` clears the
+ * repository-location variables `runChild` would otherwise inherit — a UAT
+ * run from inside a Git wrapper or hook must not commit into real history.
+ */
+export function scratchGitEnv(hooksDir: string): Record<string, string | undefined> {
 	return {
 		GIT_CONFIG_NOSYSTEM: "1",
 		GIT_CONFIG_COUNT: "1",
 		GIT_CONFIG_KEY_0: "core.hooksPath",
 		GIT_CONFIG_VALUE_0: hooksDir,
+		GIT_DIR: undefined,
+		GIT_WORK_TREE: undefined,
+		GIT_INDEX_FILE: undefined,
 	};
 }
 
@@ -643,8 +653,14 @@ export async function runChild(
 	timeoutMs = 30000,
 ): Promise<{ status: number; stdout: string; elapsedMs: number; error?: string }> {
 	const started = performance.now();
+	// An `undefined` entry clears an inherited variable (see scratchGitEnv):
+	// drop it rather than passing it to the spawn, which takes strings only.
+	const childEnv: Record<string, string> = {};
+	for (const [key, value] of Object.entries({ ...process.env, ...env })) {
+		if (value !== undefined) childEnv[key] = value;
+	}
 	try {
-		const proc = Bun.spawn(argv, { env: { ...process.env, ...env }, stdin: stdin === undefined ? "ignore" : "pipe", stdout: "pipe", stderr: "pipe", cwd });
+		const proc = Bun.spawn(argv, { env: childEnv, stdin: stdin === undefined ? "ignore" : "pipe", stdout: "pipe", stderr: "pipe", cwd });
 		if (stdin !== undefined && proc.stdin) {
 			const writer = proc.stdin as unknown as { write(s: string): void; end(): void };
 			writer.write(stdin);
@@ -718,7 +734,9 @@ async function scenario6(ctx: RunContext): Promise<ScenarioVerdict> {
 		} | null;
 		const beforeCount = before?.events?.length ?? 0;
 
-		const briefRun = await runChild([...cliArgv(), "brief", "--surface", "cursor", "--write"], repoEnv, undefined, scratch);
+		// The brief runs with the scratch cwd: it gets the same git isolation
+		// so an inherited GIT_DIR cannot steer anything it shells out to.
+		const briefRun = await runChild([...cliArgv(), "brief", "--surface", "cursor", "--write"], { ...repoEnv, ...gitEnv }, undefined, scratch);
 		if (briefRun.status !== 0) problems.push(`sessionStart brief exited ${briefRun.status}`);
 		if (!existsSync(join(scratch, ".substrate", "BRIEF.md"))) problems.push("sessionStart wrote no .substrate/BRIEF.md");
 		else evidence.push("sessionStart: BRIEF.md written");
@@ -956,7 +974,10 @@ export function parseOptions(argv: string[]): UatOptions {
 	const tag = validateTag(flag(argv, "--tag"));
 	const scenarios = parseScenarios(flag(argv, "--scenarios"));
 	const live = flag(argv, "--live");
-	if (live !== undefined && live.trim() === "") throw new UatRefused("--live takes an approval reference");
+	// A missing value leaves `undefined` (writes stay refused); an empty or
+	// option-like value (`--live --graph <gid>` reads "--graph" as the ref)
+	// must fail loudly rather than permit production writes.
+	if (live !== undefined && (live.trim() === "" || live.startsWith("--"))) throw new UatRefused("--live takes an approval reference");
 	return { scenarios: scenarios ?? [], report: flag(argv, "--report"), tag, live, graph: flag(argv, "--graph") };
 }
 

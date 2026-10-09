@@ -96,6 +96,11 @@ describe("scenario parsing", () => {
 		expect(opts).toMatchObject({ tag: "p20", scenarios: [1, 3], report: "/tmp/x.md", live: "op-1" });
 		expect(() => parseOptions([])).toThrow();
 	});
+	test("an option-like or empty live value refuses instead of permitting writes", () => {
+		expect(() => parseOptions(["--tag", "p20", "--live", "--graph", "gid"])).toThrow("--live takes an approval reference");
+		expect(() => parseOptions(["--tag", "p20", "--live", ""])).toThrow("--live takes an approval reference");
+		expect(() => parseOptions(["--tag", "p20", "--live", "--tag"])).toThrow("--live takes an approval reference");
+	});
 	test("flag reads the following argv entry", () => {
 		expect(flag(["--tag", "abc"], "--tag")).toBe("abc");
 		expect(flag(["--tag"], "--tag")).toBeUndefined();
@@ -298,6 +303,24 @@ describe("scratch git isolation", () => {
 			GIT_CONFIG_VALUE_0: "/tmp/uat6-hooks",
 		});
 	});
+	test("the env builder clears repository-location variables", () => {
+		const env = scratchGitEnv("/tmp/uat6-hooks");
+		expect(env.GIT_DIR).toBeUndefined();
+		expect(env.GIT_WORK_TREE).toBeUndefined();
+		expect(env.GIT_INDEX_FILE).toBeUndefined();
+		expect("GIT_DIR" in env && "GIT_WORK_TREE" in env && "GIT_INDEX_FILE" in env).toBe(true);
+	});
+	test("an undefined entry clears an inherited variable in the child", async () => {
+		process.env.UAT_PROBE_CLEAR_ME = "inherited";
+		try {
+			const kept = await runChild(["sh", "-c", "echo ${UAT_PROBE_CLEAR_ME:-cleared}"], {});
+			expect(kept.stdout.trim()).toBe("inherited");
+			const cleared = await runChild(["sh", "-c", "echo ${UAT_PROBE_CLEAR_ME:-cleared}"], { UAT_PROBE_CLEAR_ME: undefined });
+			expect(cleared.stdout.trim()).toBe("cleared");
+		} finally {
+			delete process.env.UAT_PROBE_CLEAR_ME;
+		}
+	});
 });
 
 describe("hook event read-back", () => {
@@ -351,6 +374,11 @@ describe("mcp entry target", () => {
 		expect(expectMcpTarget({ type: "sse", url: "http://127.0.0.1:7410/mcp" }).length).toBeGreaterThan(0);
 		expect(expectMcpTarget({ command: "substrate-mcp" }).length).toBeGreaterThan(0);
 		expect(expectMcpTarget(null).length).toBeGreaterThan(0);
+	});
+	test("a bad path reports no host: reports omit non-loopback addresses", () => {
+		const problems = expectMcpTarget({ type: "http", url: "http://10.9.9.9:7410/healthz" });
+		expect(problems.length).toBeGreaterThan(0);
+		expect(JSON.stringify(problems)).not.toContain("10.9.9.9");
 	});
 });
 
