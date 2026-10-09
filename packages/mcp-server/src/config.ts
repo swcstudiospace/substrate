@@ -122,6 +122,7 @@ export interface SubstrateConfig {
 	 * refused until it is fixed, without crashing the server.
 	 */
 	skills: { repo: string; remoteUrl: string; stateDir: string; gh: string; problem: string | null };
+	/**
 	 * Surfaces allowed to call `desktop_run`, from `SUBSTRATE_DESKTOP_SURFACES`.
 	 *
 	 * The operator allowlist is the only gate (D30-01): unset or empty means
