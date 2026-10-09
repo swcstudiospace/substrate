@@ -805,9 +805,8 @@ export function httpMemory(connection: Connection): MemoryApi {
 	}
 	// Structured diagnostics escape string values before they reach the scrubber.
 	for (const value of [...secrets]) secrets.add(JSON.stringify(value).slice(1, -1));
-	const secretValues = [...secrets].filter(Boolean).sort((a, b) => b.length - a.length);
 	function diagnostic(value: string): string {
-		const cleaned = redactKnown(value.replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi, diagnosticUrl), secretValues);
+		const cleaned = redactKnown(value.replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi, diagnosticUrl), secrets);
 		// Match the storage boundary: redact before capping, so a truncated token
 		// cannot survive as a fragment that the credential patterns no longer match.
 		return redact(cleaned).slice(0, 200);
