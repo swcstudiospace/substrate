@@ -95,9 +95,16 @@ export function assertValidGraphId(graphId: string): void {
 	}
 }
 
+/** `.` and `..` are charset-legal and still walk out of the checkout root. */
+function isSafeRepo(repo: string): boolean {
+	if (!REPO_SLUG_PATTERN.test(repo)) return false;
+	const [owner, name] = repo.split("/");
+	return owner !== "." && owner !== ".." && name !== "." && name !== "..";
+}
+
 /** Throw unless `repo` is `owner/name` in the restricted charset. */
 export function assertValidRepo(repo: string): string {
-	if (!REPO_SLUG_PATTERN.test(repo)) {
+	if (!isSafeRepo(repo)) {
 		throw new InvalidRepoError("`repo` must be owner/name of [A-Za-z0-9_.-]+");
 	}
 	return repo;
@@ -114,14 +121,14 @@ export function parseGitHubSlug(originUrl: string): string | null {
 	let path: string | null = null;
 	const https = /^https:\/\/github\.com\/(.+?)\/?$/.exec(trimmed);
 	if (https) {
-		path = https[1];
+		path = https[1] ?? null;
 	} else {
 		const ssh = /^git@github\.com:(.+?)\/?$/.exec(trimmed);
-		if (ssh) path = ssh[1];
+		if (ssh) path = ssh[1] ?? null;
 	}
 	if (path === null || path.length === 0) return null;
 	if (path.toLowerCase().endsWith(".git")) path = path.slice(0, -".git".length);
-	if (!REPO_SLUG_PATTERN.test(path)) return null;
+	if (!isSafeRepo(path)) return null;
 	return path.toLowerCase();
 }
 
@@ -149,6 +156,9 @@ export async function ensureWorktree(input: EnsureWorktreeInput, deps: WorktreeD
 
 	const worktreePath = joinContained(deps.worktreeRoot, input.graphId);
 	const [owner, name] = repo.split("/");
+	if (owner === undefined || name === undefined) {
+		throw new InvalidRepoError("`repo` must be owner/name of [A-Za-z0-9_.-]+");
+	}
 	const checkoutPath = joinContained(deps.checkoutsRoot, owner, name);
 
 	const stat = deps.statfs(deps.worktreeRoot);
