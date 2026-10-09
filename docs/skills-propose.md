@@ -103,3 +103,11 @@ bun run rehearsal down --name p21
 ```
 
 Nothing in it can reach GitHub or `/var/lib/substrate/skills`. The first real PR on `agent-skills` is Phase 22's live proof.
+
+## Clients
+
+The route's steady clients all end in the same method; only the surface and the path there differ. See [skills-plane.md](skills-plane.md) for the full plane.
+
+- **Bridge surfaces.** The Hermes bridge proposes staged Hermes records as `hermes`, drained Omp queue files as `omp` and drained Grok queue files as `grok-build`, each under its own surface token from the tokens dir. The surface names the branch (`skill/<surface>/…`), so one bridge serves three branches without re-attribution.
+- **Omp extension.** Omp's `manage_skill` create/update and `learn` skill payloads are proposed as `omp` through the extension's resolver order for that surface. On a missing token, a timeout, a transport error, a 401, a 403 or a 5xx it queues the exact body for the bridge; 400 and 413 are final and queue nothing.
+- **skill-autonomy staging.** skill-autonomy still sends only the retired key header, so the route answers 401 and it stages the exact body in the Grok queue; the bridge proposes it as `grok-build` within about one tick.
