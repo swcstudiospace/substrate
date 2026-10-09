@@ -158,6 +158,10 @@ describe("Substrate.bindGraph", () => {
 			lastHash: async (sessionId: string) => written.filter((e) => e.session_id === sessionId).at(-1)?.hash ?? null,
 			readEvents: async () =>
 				written.map((event) => ({ ...event, ts: Date.parse(event.ts), payload: JSON.stringify(event.payload) })),
+			// No ingest table concept here: with no coverage start every event
+			// is pre-coverage legacy, so the hour report stays empty.
+			graphIngest: async () => [],
+			firstIngestMs: async () => null,
 		};
 		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: stored as never });
 
@@ -165,7 +169,13 @@ describe("Substrate.bindGraph", () => {
 		await substrate.bindGraph({ correlation_id: "run-2", graph_id: GRAPH_A }, "swarm-a01-orch");
 
 		expect(written.map((event) => event.session_id)).toEqual([`bind:${GRAPH_A}:run-1`, `bind:${GRAPH_A}:run-2`]);
-		expect(await substrate.verifyGraph(GRAPH_A)).toEqual({ ok: true, events: 2 });
+		const verdict = await substrate.verifyGraph(GRAPH_A);
+		expect(verdict.ok).toBe(true);
+		expect(verdict.events).toBe(2);
+		expect(verdict.chain).toEqual({ ok: true });
+		expect(verdict.hours).toEqual([]);
+		expect(verdict.uncovered).toEqual({ count: 0, ids: [] });
+		expect(verdict.legacy.count).toBe(2);
 	});
 
 	test("both ids, same pair again: existing, no conflict, and not announced twice", async () => {

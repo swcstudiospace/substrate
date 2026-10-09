@@ -2582,8 +2582,11 @@ export class Substrate {
 			const eventId = String(row.id);
 			const record = byEvent.get(eventId);
 			if (!record) {
+				// No coverage start means the ingest table is empty: every event
+				// predates coverage (pre-Phase-28 rows, or a stub with no ingest
+				// table concept) and is legacy, counted and never failing.
 				const ts = Number(row.ts);
-				if (coverageStartMs !== null && Number.isFinite(ts) && ts < coverageStartMs) legacy.push(eventId);
+				if (coverageStartMs === null || (Number.isFinite(ts) && ts < coverageStartMs)) legacy.push(eventId);
 				else uncovered.push(eventId);
 				continue;
 			}
@@ -2620,7 +2623,7 @@ export class Substrate {
 				});
 				continue;
 			}
-			hours.push(await this.checkHour(hour, now, readRpc, pubkey));
+			hours.push(await this.checkHour(hour, now, readRpc, pubkey, byHour.get(hour)?.length ?? 0));
 		}
 
 		const failing = hours.find((hour) => hour.status !== "anchored" && hour.status !== "pending");
@@ -2657,9 +2660,16 @@ export class Substrate {
 		now: number,
 		readRpc: () => Rpc,
 		pubkey: string | null,
+		memberCount: number,
 	): Promise<HourReport> {
 		const period_start = hourIso(hour);
 		const period_end = hourIso(hourEnd(hour));
+		// An hour that is still open (or inside the ingest lag) cannot digest
+		// yet — asking would hash a set that can still grow. It is pending by
+		// definition (D28-15), with no root to report.
+		if (!isClosed(hour, now, INGEST_LAG_MS)) {
+			return { period_start, period_end, status: "pending", event_count: memberCount, root: null };
+		}
 		let digest: HourDigest;
 		try {
 			digest = await this.hourDigest(hour, now);
@@ -2713,6 +2723,7 @@ export class Substrate {
 			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "anchors row disagrees with the memo" };
 		}
 		return { period_start, period_end, status: "anchored", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, ...(memo.slot !== null ? { slot: memo.slot } : {}) };
+	}
 
 	/**
 	 * `greptime` is reachability; `eventsWritable` is whether **every** event would

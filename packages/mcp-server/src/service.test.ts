@@ -1383,6 +1383,8 @@ describe("identifier lookups", () => {
 				asked.push([column, value]);
 				return [];
 			},
+			graphIngest: async () => [],
+			firstIngestMs: async () => null,
 		};
 		const substrate = new Substrate(loadConfig({}), { index: null, greptime: greptime as never });
 
@@ -3503,6 +3505,28 @@ describe("verifyGraph hour report", () => {
 		const verdict = await substrate.verifyGraph("ut-1", { now: H + 2 * HOUR });
 		expect(verdict.ok).toBe(true);
 		expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "pending" });
+	});
+
+	test("an hour that is still open is pending, never a digest failure", async () => {
+		// Regression from the first scratch proof: the open current hour
+		// digested to "not closed yet" and failed the whole verify. D28-15
+		// names the open hour pending.
+		const world = sessionRows();
+		let digested = false;
+		const substrate = substrateWith({
+			readEvents: async () => world.rows,
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => {
+				digested = true;
+				return world.leaves;
+			},
+			anchorForPeriod: async () => null,
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 30 * 60_000 });
+		expect(digested).toBe(false);
+		expect(verdict.ok).toBe(true);
+		expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "pending", root: null });
 	});
 
 	test("unanchored past 3 h: no row, fails naming the hour", async () => {
