@@ -8,9 +8,11 @@
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { DesktopRunInput } from "./desktop/actions.ts";
 import { DEFAULT_IDLE_SECONDS, formatDrift } from "./drift.ts";
 import { DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT } from "./greptime.ts";
 import { MAX_LEASE_TTL_SECONDS, MIN_LEASE_TTL_SECONDS } from "./lease.ts";
+import { redact } from "./redact.ts";
 import {
 	CORRELATION_ID_PATTERN,
 	GRAPH_ID_PATTERN,
@@ -877,6 +879,37 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			inputSchema: { repo: z.string().optional().describe("Narrow to one repo. Omitted means every graph in the index.") },
 		},
 		async ({ repo }) => json(await substrate.reapExpiredLeases(repo)),
+	);
+
+	server.registerTool(
+		"desktop_run",
+		{
+			title: "Drive the substrate desktop",
+			description:
+				"Drive the dedicated substrate-desktop webtop with click, type, key and screenshot actions, " +
+				"and get the screenshots back as image blocks. Only surfaces the operator listed in " +
+				"SUBSTRATE_DESKTOP_SURFACES may call it; everyone else is refused and nothing runs. " +
+				"Each executed action is recorded as one tool.call event carrying hashes and lengths only, " +
+				"never typed text or image bytes.",
+			inputSchema: DesktopRunInput,
+			annotations: { destructiveHint: false, openWorldHint: true },
+		},
+		async (input) => {
+			try {
+				const outcome = await substrate.runDesktop(input, callerSurface);
+				if ("refused" in outcome) return refusal(outcome.refused);
+				if ("failed" in outcome) return { ...json(outcome.failed), isError: true };
+				const { images, ...result } = outcome.result;
+				return {
+					content: [
+						{ type: "text" as const, text: JSON.stringify(result, null, 2) },
+						...images.map((data) => ({ type: "image" as const, data, mimeType: "image/png" as const })),
+					],
+				};
+			} catch (cause) {
+				return refusal(redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 400));
+			}
+		},
 	);
 
 	return server;

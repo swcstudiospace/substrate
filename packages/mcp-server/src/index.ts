@@ -9,13 +9,18 @@
  * refuse to start.
  */
 import { configWarnings, desktopConfigWarnings, loadConfig, swarmTokenWarnings } from "./config.ts";
+import { bufferRunner, createDesktopDriver } from "./desktop/driver.ts";
 import { createObservability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
 
 const config = loadConfig();
 const observability = createObservability(config);
-const substrate = new Substrate(config, undefined, observability.observer);
+const substrate = new Substrate(
+	config,
+	{ desktop: createDesktopDriver({ run: bufferRunner, dir: config.desktopDir }) },
+	observability.observer,
+);
 
 for (const problem of await observability.start()) {
 	process.stderr.write(`[substrate] degraded — ${problem}\n`);
