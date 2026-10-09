@@ -142,14 +142,21 @@ export function resolveOmpToken(
 ): string | null {
 	const direct = env.SUBSTRATE_TOKEN?.trim();
 	if (direct) return direct;
+	const readLine = (path: string): string | null => {
+		try {
+			return read(path);
+		} catch {
+			return null;
+		}
+	};
 	const file = env.SUBSTRATE_TOKEN_FILE?.trim();
 	if (file) {
-		const viaFile = read(file);
+		const viaFile = readLine(file);
 		if (viaFile) return viaFile;
 	}
 	if (!SURFACE_NAME.test(OMP_SURFACE)) return null;
 	const dir = env.SUBSTRATE_TOKENS_DIR?.trim() || DEFAULT_TOKENS_DIR;
-	return read(join(dir, OMP_SURFACE));
+	return readLine(join(dir, OMP_SURFACE));
 }
 
 function str(value: unknown): string {
