@@ -101,7 +101,7 @@ export async function hasMarkerComment(
 	const marker = markerBody(outcome);
 	let after: string | null = null;
 	for (;;) {
-		const data = await client.graphql<CommentPage>(
+		const data: CommentPage = await client.graphql<CommentPage>(
 			`query DispatchMarkerComments($id: String!, $after: String) {
 				issue(id: $id) {
 					comments(first: 50, after: $after) { nodes { body } pageInfo { hasNextPage endCursor } }
@@ -112,7 +112,7 @@ export async function hasMarkerComment(
 		const comments = data.issue?.comments;
 		if (!comments) return false;
 		for (const node of comments.nodes) {
-			if (node.body.split("\n").some((line) => line.trim() === marker)) return true;
+			if (node.body.split("\n").some((line: string) => line.trim() === marker)) return true;
 		}
 		if (!comments.pageInfo.hasNextPage || comments.pageInfo.endCursor === null) return false;
 		after = comments.pageInfo.endCursor;

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { LinearClient } from "../../../mcp-server/src/linear.ts";
+import { LinearClient } from "../../mcp-server/src/linear.ts";
 import {
 	classifyIssue,
 	collectCandidates,
