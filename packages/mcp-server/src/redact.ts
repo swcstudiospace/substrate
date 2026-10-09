@@ -59,6 +59,49 @@ const PRIVATE_CLOSE = /<\/private>/gi;
 const PEM_OPEN = /-----BEGIN[ A-Z]*PRIVATE KEY-----/g;
 const PEM_CLOSE = /-----END[ A-Z]*PRIVATE KEY-----/g;
 
+interface StructuralMark {
+	start: number;
+	end: number;
+	with: string;
+}
+
+/**
+ * Replace private blocks and PEM blocks together, measured on the original text.
+ *
+ * Applying them in sequence drops a delimiter the other rule still needs: a PEM
+ * whose only BEGIN or END line sits inside `<private>` keeps its key body. The
+ * skill pass already keeps the earlier marker and extends the copy through the
+ * union; the event pass does the same.
+ */
+function redactStructural(text: string): string {
+	const marks: StructuralMark[] = [
+		...delimitedSpans(text, PRIVATE_OPEN, PRIVATE_CLOSE).map(([start, end]) => ({
+			start,
+			end,
+			with: REDACTED,
+		})),
+		...delimitedSpans(text, PEM_OPEN, PEM_CLOSE).map(([start, end]) => ({
+			start,
+			end,
+			with: REDACTED_PEM,
+		})),
+	];
+	if (marks.length === 0) return text;
+	marks.sort((a, b) => a.start - b.start || b.end - a.end);
+	let out = "";
+	let copied = 0;
+	for (const mark of marks) {
+		if (mark.end <= copied) continue;
+		if (mark.start < copied) {
+			copied = mark.end;
+			continue;
+		}
+		out += text.slice(copied, mark.start) + mark.with;
+		copied = mark.end;
+	}
+	return out + text.slice(copied);
+}
+
 /** `pk-` or `rk-` and the whole run after it; the caller decides whether the run holds a digit. */
 const PK_RK_RUN = /\b(?:pk|rk)-[A-Za-z0-9][A-Za-z0-9_-]{19,}/g;
 
@@ -167,14 +210,21 @@ export const REDACTION_RULES: ReadonlyArray<{ readonly name: RedactionRuleName; 
 
 /** Redact a single string. Returns it unchanged when nothing matches. */
 export function redact(text: string): string {
-	let out = text;
+	let out = redactStructural(text);
 	for (const rule of RULES) {
+		// private-tag and pem already ran together on the original text.
+		if (rule.name === "private-tag" || rule.name === "pem") continue;
 		out = "apply" in rule ? rule.apply(out) : out.replace(rule.pattern, rule.replacement);
 	}
 	return out;
 }
 
-/** Each rule's own `apply`, or the plain pattern replace: what `redact()` runs for it. For the parity tests. */
+/**
+ * Each rule's own `apply`, or the plain pattern replace.
+ *
+ * Parity tests compare this with the pattern on ordinary text. `redact()` runs
+ * `private-tag` and `pem` together on the original text instead of through this.
+ */
 export function applyRule(name: RedactionRuleName, text: string): string {
 	const rule = RULES.find((entry) => entry.name === name);
 	if (!rule) throw new Error(`no redaction rule ${name}`);
@@ -372,6 +422,11 @@ interface SkillRule {
 	 * the same spans the lazy pattern would match.
 	 */
 	scan?: (text: string) => Array<[number, number]>;
+	/**
+	 * Skip the rule when this is false. `url-password` only matches a URL, so a
+	 * file with no `://` must not pay for the capture scan.
+	 */
+	gate?: (text: string) => boolean;
 }
 // The patterns of `RULES`, labelled, plus the D-04 skill entries (D18-08).
 // High-confidence shapes come first so a contextual rule can never claim, and
@@ -432,7 +487,14 @@ const SKILL_RULES: readonly SkillRule[] = [
 	// Before `authorization`, so a literal after "Authorization: Bearer" is reported as bearer.
 	{ name: "bearer", rule: "bearer", pattern: /\b(Bearer[ \t]+)([A-Za-z0-9._~+/-]{12,}=*)/dg, value: 2, replacement: REDACTED },
 	{ name: "authorization", rule: "authorization", pattern: /\b(authorization[ \t]*[:=][ \t]*)(?:bearer[ \t]+)?(\S+)/dgi, value: 2, replacement: REDACTED },
-	{ name: "url-password", rule: "url-password", pattern: /\b([a-z][a-z0-9+.-]*:\/\/[^\s:/@]+):([^\s@]+)@/dgi, value: 2, replacement: REDACTED },
+	{
+		name: "url-password",
+		rule: "url-password",
+		pattern: /\b([a-z][a-z0-9+.-]*:\/\/[^\s:/@]+):([^\s@]+)@/dgi,
+		value: 2,
+		replacement: REDACTED,
+		gate: (text) => text.includes("://"),
+	},
 ];
 /** Event rules with no skill counterpart, and why. */
 export const SKILL_EXCLUSIONS: Partial<Record<RedactionRuleName, string>> = {
@@ -535,6 +597,7 @@ export function redactSkillContent(
 	for (const entry of SKILL_RULES) {
 		const { rule, pattern, value, replacement } = entry;
 		if (rule === "private-tag") continue;
+		if (entry.gate && !entry.gate(text)) continue;
 		const highConfidence = SKILL_HIGH_CONFIDENCE_RULES.includes(rule);
 		const allowed = (rule === "pem" || rule === "jwt") && opts.allowDocExamples?.has(rule) === true;
 		const found: Array<{ whole: [number, number]; span: [number, number]; captured: string }> = [];
@@ -599,11 +662,13 @@ export function redactSkillContent(
 	let out = "";
 	let copied = 0;
 	let line = 1;
-	let counted = 0;
+	let newlineAt = text.indexOf("\n");
 	for (const claim of claims) {
 		if (claim.kind === "kept") continue;
-		for (let i = text.indexOf("\n", counted); i !== -1 && i < claim.start; i = text.indexOf("\n", i + 1)) line++;
-		counted = claim.start;
+		while (newlineAt !== -1 && newlineAt < claim.start) {
+			line++;
+			newlineAt = text.indexOf("\n", newlineAt + 1);
+		}
 		(claim.kind === "finding" ? findings : redactions).push({ line, rule: claim.rule });
 		if (!claim.replace) continue;
 		if (claim.replace.start < copied) {

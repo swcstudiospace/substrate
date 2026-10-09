@@ -78,11 +78,15 @@ the text from every opening is a way for one writer to hold the event loop. Four
 by a function instead of their pattern, each making one pass: `private-tag` and `pem` (a missing
 closing delimiter ends the scan, since no later opening can have one), `pk-rk` (the run is matched
 once and tested for its digit, rather than looked ahead at from every `pk-`) and `url-password`
-(text with no `://` is skipped; the pattern needs one). The pattern in the table stays the
-definition, the fixtures and the lock read it, and `redact-adversarial.test.ts` pins each function
-to its pattern on ordinary text and on 600 random strings. The skill pass finds `<private>` blocks
-and PEMs with the same scan and checks each match against the ranges already claimed by binary
-search, so a file of tens of thousands of matches scans in time proportional to its size.
+(text with no `://` is skipped; the pattern needs one). `redact()` measures `private-tag` and `pem`
+on the original text and replaces their union: the earlier marker stands, and the copy runs to the
+end of the overlap, so a PEM whose only BEGIN or END line sits inside `<private>` does not keep its
+key body. The pattern in the table stays the definition, the fixtures and the lock read it, and
+`redact-adversarial.test.ts` pins each function to its pattern on ordinary text and on 600 random
+strings. The skill pass finds `<private>` blocks and PEMs with the same scan, skips `url-password`
+when the file has no `://`, and checks each match against the ranges already claimed by binary
+search. Line numbers walk forward from the last newline, so a file of tens of thousands of matches
+scans in time proportional to its size.
 
 Known limit: `url-password` is still quadratic on text that repeats `://` with a long colon-led run
 and no `@` (for example `a://b:` repeated), because the password run is rescanned from every

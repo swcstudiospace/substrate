@@ -213,7 +213,8 @@ function rule3Offenders(file: string, body: string): Offender[] {
 /**
  * Regex-literal bodies, pulled only where a `/` can open one (the preceding
  * character class keeps `a / b` division out: the identifier before the slash
- * never qualifies). `//` and `/*` comments are excluded by the lookahead.
+ * never qualifies). A `//` or `/*` that *opens* a literal is excluded by the
+ * lookahead; a literal later in a comment is removed by `maskComments` first.
  */
 const REGEX_LITERAL = /(?:^|[=(,:;!&|?{}[\s])\/(?![*/])((?:\\.|\[(?:\\.|[^\]\\\n])*\]|[^/\\\n[])+)\/[dgimsuyv]*/g;
 const REGEXP_NEW = /new\s+RegExp\(\s*(?:"((?:\\.|[^"\\\n])*)"|'((?:\\.|[^'\\\n])*)'|(\/[^/\n]+\/[dgimsuyv]*))/g;
@@ -227,7 +228,9 @@ const SHELL_TOOL_LINE = /^.*\b(?:grep|sed|awk|perl)\b.*$/gm;
  * without flagging half the tree). The `Record` type makes `tsc` fail when a
  * later phase adds a rule without deciding. `openai` needs its negative
  * lookahead spelled out because the rule source holds it literally while a
- * bare `sk-` also sits inside words like `task-graph`.
+ * bare `sk-` also sits inside words like `task-graph`. A `\b` in a detector is
+ * a word boundary, so source that spells the boundary as `\bghp_`, `\bsk-` or
+ * `\bpk-` is matched by the escaped form (the character before the prefix is `b`).
  */
 const DETECTOR: Record<RedactionRuleName, RegExp | null> = {
 	"private-tag": /<private>/,
@@ -245,11 +248,11 @@ const DETECTOR: Record<RedactionRuleName, RegExp | null> = {
 	"linear-api": /lin_api_/,
 	"linear-oauth": /lin_oauth_/,
 	notion: /ntn_|secret_/,
-	github: /gh\[pousr\]_|\bgh[pousr]_/,
+	github: /gh\[pousr\]_|\\bgh[pousr]_|\bgh[pousr]_/,
 	"github-pat": /github_pat_/,
 	xai: /xai-/,
 	anthropic: /sk-ant-/,
-	openai: /sk-\(\?!ant-\)|(?<![A-Za-z0-9])sk-/,
+	openai: /sk-\(\?!ant-\)|\\bsk-|(?<![A-Za-z0-9])sk-/,
 	aws: /AKIA/,
 	google: /AIza/,
 	slack: /xoxb-/,
@@ -257,7 +260,7 @@ const DETECTOR: Record<RedactionRuleName, RegExp | null> = {
 	gitlab: /glpat-/,
 	digitalocean: /dop_v1_/,
 	"openai-proj": /sk-proj-/,
-	"pk-rk": /\(\?:pk\|rk\)-|(?<![A-Za-z0-9])[pr]k-/,
+	"pk-rk": /\(\?:pk\|rk\)-|\\b[pr]k-|(?<![A-Za-z0-9])[pr]k-/,
 	jwt: /eyJ/,
 	"keypair-array": null,
 };
@@ -269,19 +272,82 @@ interface Candidate {
 }
 
 /**
+ * Blank line and block comments so a regex example written in one is not a detector.
+ *
+ * Strings keep their text: a `//` inside quotes is not a comment. Length and
+ * newlines stay, so a match index is still a position in the original file.
+ */
+function maskComments(body: string): string {
+	const chars = body.split("");
+	let state: "code" | "line" | "block" | "sq" | "dq" | "tmpl" = "code";
+	let i = 0;
+	while (i < chars.length) {
+		const c = chars[i] ?? "";
+		const n = chars[i + 1];
+		if (state === "code") {
+			if (c === "/" && n === "/") {
+				chars[i] = " ";
+				chars[i + 1] = " ";
+				state = "line";
+				i += 2;
+				continue;
+			}
+			if (c === "/" && n === "*") {
+				chars[i] = " ";
+				chars[i + 1] = " ";
+				state = "block";
+				i += 2;
+				continue;
+			}
+			if (c === "'") state = "sq";
+			else if (c === '"') state = "dq";
+			else if (c === "`") state = "tmpl";
+			i++;
+			continue;
+		}
+		if (state === "line") {
+			if (c === "\n") state = "code";
+			else chars[i] = " ";
+			i++;
+			continue;
+		}
+		if (state === "block") {
+			if (c === "*" && n === "/") {
+				chars[i] = " ";
+				chars[i + 1] = " ";
+				state = "code";
+				i += 2;
+				continue;
+			}
+			if (c !== "\n") chars[i] = " ";
+			i++;
+			continue;
+		}
+		if (c === "\\" && i + 1 < chars.length) {
+			i += 2;
+			continue;
+		}
+		if ((state === "sq" && c === "'") || (state === "dq" && c === '"') || (state === "tmpl" && c === "`")) state = "code";
+		i++;
+	}
+	return chars.join("");
+}
+
+/**
  * Pulled from the whole file, not line by line: a formatted `new RegExp(` call puts its pattern on
  * the next line, and a split file would lose the connection between the call and its argument.
  */
 function patternCandidates(file: string, body: string): Candidate[] {
+	const scanned = maskComments(body);
 	const candidates: Candidate[] = [];
 	// The opening slash, not the character before it, which can be the newline of the previous line.
-	for (const match of body.matchAll(REGEX_LITERAL)) {
+	for (const match of scanned.matchAll(REGEX_LITERAL)) {
 		candidates.push({ text: match[1] ?? "", index: (match.index ?? 0) + match[0].indexOf("/") });
 	}
-	for (const match of body.matchAll(REGEXP_NEW)) candidates.push({ text: match[1] ?? match[2] ?? match[3] ?? "", index: match.index ?? 0 });
-	for (const match of body.matchAll(PY_PATTERN_ARG)) candidates.push({ text: match[1] ?? match[2] ?? "", index: match.index ?? 0 });
+	for (const match of scanned.matchAll(REGEXP_NEW)) candidates.push({ text: match[1] ?? match[2] ?? match[3] ?? "", index: match.index ?? 0 });
+	for (const match of scanned.matchAll(PY_PATTERN_ARG)) candidates.push({ text: match[1] ?? match[2] ?? "", index: match.index ?? 0 });
 	if (file.endsWith(".sh") || !/\.[A-Za-z0-9]+$/.test(file)) {
-		for (const match of body.matchAll(SHELL_TOOL_LINE)) candidates.push({ text: match[0] ?? "", index: match.index ?? 0 });
+		for (const match of scanned.matchAll(SHELL_TOOL_LINE)) candidates.push({ text: match[0] ?? "", index: match.index ?? 0 });
 	}
 	return candidates;
 }
@@ -549,10 +615,13 @@ describe("detector self-tests", () => {
 		// The older Notion shape the shared rule also names.
 		{ rule: "notion", file: "shape.ts", body: `const legacyShape = /\\b${"sec" + "ret_"}[A-Za-z0-9]{30,}/g;` },
 		{ rule: "github", file: "shape.ts", body: `const found = /${GH}[A-Za-z0-9]{36}/g.test(value);` },
+		// `\b` in the source is the letter b, not a word boundary, so the escaped spelling has to count.
+		{ rule: "github", file: "shape.ts", body: `const found = /\\b${GH}[A-Za-z0-9]{36}/g;` },
 		{ rule: "github-pat", file: "shape.ts", body: `if (/${GITHUB_PAT}[A-Za-z0-9_]{20,}/.test(id)) {` },
 		{ rule: "xai", file: "shape.ts", body: `if (/${"xa" + "i-"}[A-Za-z0-9]{20,}/.test(id)) {` },
 		{ rule: "anthropic", file: "shape.ts", body: `if (/${SK_ANT}[A-Za-z0-9_-]{20,}/.test(id)) {` },
 		{ rule: "openai", file: "shape.ts", body: `if (/${"sk" + "-"}[A-Za-z0-9]{20,}/.test(id)) {` },
+		{ rule: "openai", file: "shape.ts", body: `const found = /\\b${"sk" + "-"}[A-Za-z0-9]{20,}/;` },
 		{ rule: "aws", file: "mine.py", body: `m = re.compile(r"${"AK" + "IA"}[0-9A-Z]{16}")` },
 		{ rule: "google", file: "shape.ts", body: `if (/${"AI" + "za"}[0-9A-Za-z_-]{35}/.test(id)) {` },
 		{ rule: "slack", file: "shape.ts", body: `new RegExp("${"xox" + "b-"}[0-9]+")` },
@@ -561,6 +630,7 @@ describe("detector self-tests", () => {
 		{ rule: "digitalocean", file: "shape.ts", body: `if (/${"dop" + "_v1_"}[a-f0-9]{64}/.test(id)) {` },
 		{ rule: "openai-proj", file: "shape.ts", body: `if (/${"sk-pr" + "oj-"}[A-Za-z0-9_-]{20,}/.test(id)) {` },
 		{ rule: "pk-rk", file: "shape.ts", body: `if (/(?:${"pk" + "|rk"})-[A-Za-z0-9_-]{20,}/.test(key)) {` },
+		{ rule: "pk-rk", file: "shape.ts", body: `const found = /\\b${"pk" + "-"}[A-Za-z0-9_-]{20,}/;` },
 		{ rule: "jwt", file: "shape.ts", body: `if (/${"e" + "yJ"}[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}/.test(id)) {` },
 	];
 
@@ -570,8 +640,10 @@ describe("detector self-tests", () => {
 		// Division is not a regex literal.
 		"const ratio = a / b / c;",
 		"if (done / total > 0.5) {",
-		// A comment naming a shape detects nothing.
+		// A comment naming a shape detects nothing, including a regex literal written inside it.
 		"// tokens shaped like " + GH + "… are redacted on write",
+		"// Example: /" + GH + "[A-Za-z0-9]{36}/g",
+		"/* Example: /" + GH + "[A-Za-z0-9]{36}/g */",
 	];
 
 	test("rule 1 catches planted offenders and passes the shared-module imports", () => {
@@ -659,5 +731,10 @@ describe("detector self-tests", () => {
 		}
 		expect(RULE4_NON_OFFENDERS[0]).toContain('${"A".repeat(36)}');
 		expect(RULE4_NON_OFFENDERS[3]).toContain(GH);
+		const shape = `/${GH}[A-Za-z0-9]{36}/g`;
+		// A real detector before a comment, after a comment, or after a URL string is still caught.
+		expect(rule4Offenders("shape.ts", `const found = ${shape}; // Example: ${shape}`)).toEqual(["shape.ts:1 rule-4-detector"]);
+		expect(rule4Offenders("shape.ts", `// Example: ${shape}\nconst found = ${shape};`)).toEqual(["shape.ts:2 rule-4-detector"]);
+		expect(rule4Offenders("shape.ts", `const url = "https://example.test", found = ${shape};`)).toEqual(["shape.ts:1 rule-4-detector"]);
 	});
 });

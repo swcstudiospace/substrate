@@ -12,6 +12,7 @@
  * those without flaking on a busy machine.
  */
 import { describe, expect, test } from "bun:test";
+import { normalizeEvent } from "./event.ts";
 import {
 	REDACTED,
 	REDACTED_PEM,
@@ -287,6 +288,32 @@ describe("a match that crosses a private block's edge is still a finding", () =>
 	});
 });
 
+describe("the event path unions a PEM with a private block that shares its edge", () => {
+	const body = "MIIabcdefghij";
+
+	test("a closing line inside the block, and an opening line inside the block, both drop the key body", () => {
+		const closingInside = `before\n${BEGIN}\n${body}\n<private>${END}</private>\nafter\n`;
+		const openingInside = `<private>head\n${BEGIN}\n${body}\n</private>${END}\n`;
+		expect(redact(closingInside)).toBe(`before\n${REDACTED_PEM}\nafter\n`);
+		expect(redact(openingInside)).toBe(`${REDACTED}\n`);
+		expect(redact(`<private>\n${BEGIN}\n${body}\n${END}\n</private>`)).toBe(REDACTED);
+
+		const stored = normalizeEvent(
+			{
+				surface: "claude-code",
+				kind: "note",
+				summary: closingInside,
+				payload: { note: closingInside, nested: { key: openingInside } },
+			},
+			null,
+		);
+		expect(stored.summary).toBe(`before\n${REDACTED_PEM}\nafter\n`);
+		expect(stored.summary).not.toContain(body);
+		expect(JSON.stringify(stored.payload)).not.toContain(body);
+		expect(JSON.stringify(stored.payload)).not.toContain(BEGIN);
+	});
+});
+
 describe("the skill scan is not quadratic in the number of matches", () => {
 	test("tens of thousands of safe placeholders", () => {
 		const text = "TOKEN=$DEMO_KEY\n".repeat(64_000);
@@ -308,6 +335,26 @@ describe("the skill scan is not quadratic in the number of matches", () => {
 		const result = redactSkillContent(text);
 		expect(result.redactions).toHaveLength(20_000);
 		expect(result.redactions[19_999]).toEqual({ line: 20_000, rule: "password" });
+	});
+
+	test("a long digitless pk- run with no URL does not rescan", () => {
+		const text = "pk-".repeat(40_000);
+		expect(text.includes("://")).toBe(false);
+		expect(took(() => redactSkillContent(text))).toBeLessThan(200);
+		const url = redactSkillContent("postgres://user:hunter2@localhost/db");
+		expect(url.text).toBe(`postgres://user:${REDACTED}@localhost/db`);
+		expect(url.redactions).toEqual([{ line: 1, rule: "url-password" }]);
+	});
+
+	test("many matches on one line are counted without rereading the line", () => {
+		const text = "PASSWORD=value ".repeat(128_000);
+		expect(text.includes("\n")).toBe(false);
+		let result: ReturnType<typeof redactSkillContent> | undefined;
+		expect(took(() => (result = redactSkillContent(text)))).toBeLessThan(1000);
+		expect(result?.redactions).toHaveLength(128_000);
+		expect(result?.redactions[0]).toEqual({ line: 1, rule: "password" });
+		expect(result?.redactions[127_999]).toEqual({ line: 1, rule: "password" });
+		expect(result?.text).not.toContain("=value");
 	});
 });
 
