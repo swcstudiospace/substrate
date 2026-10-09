@@ -349,6 +349,12 @@ describe("auditToolCalls", () => {
 		expect(observed.audit.recent()[0]?.tool).toBe("wharrgarbl");
 	});
 
+	test("the skills proposal door is a known tool and a known route", () => {
+		expect(toolLabel("skills_propose")).toBe("skills_propose");
+		expect(normalizeRoute("/skills/propose")).toBe("/skills/propose");
+		expect(normalizeRoute("/skills/propose/../../etc")).toBe("other");
+	});
+
 	test("toolLabel keeps the tools that exist", () => {
 		expect(toolLabel("graph_claim")).toBe("graph_claim");
 		expect(toolLabel("events")).toBe("events");

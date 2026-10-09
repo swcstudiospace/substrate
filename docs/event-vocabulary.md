@@ -60,6 +60,7 @@ These apply to every source:
 | `cursor.stop` | 19 | `session.end` | `cursor` | — | — | — | no |
 | `skills.propose` | 21 | `note` | `caller` | `skill.propose` | — | `swcstudiospace/agent-skills` | no |
 | `skills.propose.refused` | 21 | `warning` | `caller` | `skill.propose` | — | — | no |
+| `skills.propose.failed` | 21 | `warning` | `caller` | `skill.propose` | — | — | no |
 | `skills.sync.refused` | 22 | `warning` | `substrate` | `skills.sync` | `skills-sync` | — | yes |
 | `docs.search` | 25 | `note` | `caller` | `docs.search` | — | — | no |
 | `docs.search.failed` | 25 | `warning` | `caller` | `docs.search` | — | — | no |
@@ -95,6 +96,12 @@ Surface rule names: `herdr-agent` is the agent herdr detected, mapped onto
 `SURFACES` by Phase 19's fixed table; `caller` is the authenticated caller,
 never body-supplied; `memory-writer` is the memory's writer; `lease-holder`
 is the lease holder. A fixed name is always that surface.
+
+The three `skills.propose` rows share `payload.action: "skill.propose"` and are told
+apart by kind and `payload.status`: a `note` for an outcome, a `warning` with status
+`refused` for a guard's refusal, a `warning` with status `failed` for a git or `gh`
+step that failed. Their payloads carry hashes, names and rule names, never skill
+content; the detail is in [skills-propose.md](skills-propose.md).
 
 ## Silent sources
 

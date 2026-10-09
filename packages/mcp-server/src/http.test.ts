@@ -16,6 +16,14 @@ import { loadConfig, type SubstrateConfig } from "./config.ts";
 import { createObservability, type Observability } from "./observe.ts";
 import { createHttpServer, type HttpServerOptions } from "./server.ts";
 import { Substrate } from "./service.ts";
+import {
+	ProposeFailed,
+	ProposeRefused,
+	type ProposeOptions,
+	type ProposeResult,
+	type SkillProposer,
+} from "./skills/propose.ts";
+import { REDACTED } from "./redact.ts";
 
 const ROOT = join(import.meta.dir, "..", "..", "..");
 const CLI = join(ROOT, "packages", "cli", "src", "index.ts");
@@ -30,7 +38,7 @@ const running: Harness[] = [];
 
 async function start(
 	env: Record<string, string | undefined> = {},
-	stores: Partial<{ index: unknown; greptime: unknown }> = {},
+	stores: Partial<{ index: unknown; greptime: unknown; skills: SkillProposer }> = {},
 	options?: HttpServerOptions,
 ): Promise<Harness> {
 	const config: SubstrateConfig = loadConfig(env);
@@ -1012,3 +1020,216 @@ describe("a 500 does not echo the cause", () => {
 		}
 	});
 });
+
+describe("POST /skills/propose", () => {
+	const TOKENS = {
+		SUBSTRATE_TOKEN_CLAUDE_CODE: "tok-agent",
+		SUBSTRATE_TOKEN_CURSOR: "tok-cursor",
+		SUBSTRATE_TOKEN_OMP: "tok-operator",
+		SUBSTRATE_OPERATOR_TOKENS: "tok-operator",
+	};
+	const body = {
+		name: "demo-skill",
+		files: { "SKILL.md": "---\nname: demo-skill\ndescription: a demo\n---\nbody\n" },
+		rationale: "worth keeping",
+	};
+	const opened: ProposeResult = {
+		status: "opened",
+		pr_url: "https://github.com/swcstudiospace/agent-skills/pull/12",
+		pr_number: 12,
+		branch: "skill/claude-code/demo-skill-1-abcd",
+		content_sha256: "ab".repeat(32),
+		redactions: [],
+	};
+
+	/** A proposer that records its calls and answers (or throws) what the test says. */
+	function proposer(answer: ProposeResult | Error = opened) {
+		const calls: Array<{ input: Parameters<SkillProposer["propose"]>[0]; opts: Omit<ProposeOptions, "run"> }> = [];
+		const seam: SkillProposer = {
+			propose: async (input, opts) => {
+				calls.push({ input, opts });
+				if (answer instanceof Error) throw answer;
+				return answer;
+			},
+		};
+		return { calls, seam };
+	}
+
+	async function propose(harness: Harness, token: string | null, payload: unknown = body) {
+		const response = await fetch(`${harness.base}/skills/propose`, {
+			method: "POST",
+			headers: token === null ? {} : { authorization: `Bearer ${token}` },
+			body: typeof payload === "string" ? payload : JSON.stringify(payload),
+		});
+		return { status: response.status, json: (await response.json()) as Record<string, unknown> };
+	}
+
+	test("an anonymous caller is refused 401 before the body is read, with nothing proposed", async () => {
+		const { calls, seam } = proposer();
+		const bare = await start({}, { skills: seam });
+		// Over the cap on purpose: a refusal that read the body first would answer 413 or 500.
+		const oversize = await propose(bare, null, "x".repeat(1_000_001));
+		expect(oversize.status).toBe(401);
+		expect(String(oversize.json.error)).toContain("authenticated surface");
+
+		const bridge = await start({ SUBSTRATE_ALLOW_ANONYMOUS: "1", ...TOKENS }, { skills: seam });
+		expect((await propose(bridge, null)).status).toBe(401);
+		expect(calls).toEqual([]);
+	});
+
+	test("an unknown bearer is refused 401 too", async () => {
+		const { calls, seam } = proposer();
+		const harness = await start(TOKENS, { skills: seam });
+		expect((await propose(harness, "tok-nobody")).status).toBe(401);
+		expect(calls).toEqual([]);
+	});
+
+	test("a token surface proposes as itself: 200 with the result, and the proposer sees that surface", async () => {
+		const { calls, seam } = proposer();
+		const harness = await start(TOKENS, { skills: seam });
+		const reply = await propose(harness, "tok-agent");
+
+		expect(reply.status).toBe(200);
+		expect(reply.json).toEqual(opened as never);
+		expect(calls[0]?.input).toMatchObject({ name: "demo-skill", surface: "claude-code", rationale: "worth keeping" });
+		expect(calls[0]?.opts).toMatchObject({ maxBytes: 1_000_000, mode: "overlay", dryRun: false, reopen: false });
+	});
+
+	test.each(["existing", "unchanged", "declined", "dry_run"] as const)("a %s result is a 200 with the same body", async (status) => {
+		const result: ProposeResult = { ...opened, status, pr_url: undefined };
+		const harness = await start(TOKENS, { skills: proposer(result).seam });
+		const reply = await propose(harness, "tok-agent");
+		expect(reply.status).toBe(200);
+		expect(reply.json.status).toBe(status);
+	});
+
+	test("a body surface equal to the token's is accepted; a different one is 403 and never re-attributed", async () => {
+		const { calls, seam } = proposer();
+		const harness = await start(TOKENS, { skills: seam });
+
+		expect((await propose(harness, "tok-agent", { ...body, surface: "claude-code" })).status).toBe(200);
+		const mismatch = await propose(harness, "tok-agent", { ...body, surface: "cursor" });
+		expect(mismatch.status).toBe(403);
+		expect(String(mismatch.json.error)).toContain("claude-code");
+		expect(calls).toHaveLength(1);
+	});
+
+	test("replace, reopen and doc examples are 403 for a surface token and pass for an operator token", async () => {
+		const { calls, seam } = proposer();
+		const harness = await start(TOKENS, { skills: seam });
+		for (const privileged of [{ mode: "replace" }, { reopen: true }, { allow_doc_examples: ["pem"] }]) {
+			const refused = await propose(harness, "tok-agent", { ...body, ...privileged });
+			expect(refused.status).toBe(403);
+			expect(String(refused.json.error)).toContain("operator token");
+		}
+		expect(calls).toEqual([]);
+
+		const allowed = await propose(harness, "tok-operator", { ...body, mode: "replace", reopen: true, allow_doc_examples: ["pem", "jwt"] });
+		expect(allowed.status).toBe(200);
+		expect(calls[0]?.opts).toMatchObject({ mode: "replace", reopen: true });
+		expect([...(calls[0]?.opts.allowDocExamples ?? [])]).toEqual(["pem", "jwt"]);
+	});
+
+	test("a body that is not JSON, or not the right shape, is 400 before the proposer", async () => {
+		const { calls, seam } = proposer();
+		const harness = await start(TOKENS, { skills: seam });
+
+		const notJson = await propose(harness, "tok-agent", "{nope");
+		expect(notJson.status).toBe(400);
+		expect(notJson.json.error).toBe("request body is not valid JSON");
+
+		for (const [payload, message] of [
+			[{ ...body, name: 7 }, "name must be a string"],
+			[{ ...body, files: { "SKILL.md": 1 } }, "every file must be a string"],
+			[{ ...body, mode: "merge" }, "mode must be overlay or replace"],
+			[[body], "body must be a JSON object"],
+		] as const) {
+			const reply = await propose(harness, "tok-agent", payload);
+			expect(reply.status).toBe(400);
+			expect(String(reply.json.error)).toContain(message);
+		}
+		expect(calls).toEqual([]);
+	});
+
+	test("a parsed object with a bad mode is audited and then refused", async () => {
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory(), ...TOKENS }, { skills: proposer().seam });
+		const reply = await propose(harness, "tok-agent", { ...body, mode: "merge" });
+		expect(reply.status).toBe(400);
+		expect(harness.observability.audit.recent()[0]).toMatchObject({ tool: "skills_propose", decision: "allowed" });
+	});
+
+	test("a refusal is 400 with findings as file, line and rule only", async () => {
+		const refusal = new ProposeRefused("secret-like content in 1 place(s); remove it or use an env reference", [
+			{ file: "SKILL.md", line: 4, rule: "github" },
+		]);
+		const harness = await start(TOKENS, { skills: proposer(refusal).seam });
+		const reply = await propose(harness, "tok-agent");
+
+		expect(reply.status).toBe(400);
+		expect(reply.json).toEqual({ error: refusal.message, findings: [{ file: "SKILL.md", line: 4, rule: "github" }] });
+	});
+
+	test("a failed git or gh step is 502, redacted and at most 400 characters", async () => {
+		// Assembled at run time so no token-shaped literal sits in the repository.
+		const token = `ghp_${"D".repeat(36)}`;
+		const harness = await start(TOKENS, { skills: proposer(new ProposeFailed(`git push exited 1: GITHUB_TOKEN=${token} ${"x".repeat(900)}`)).seam });
+		const reply = await propose(harness, "tok-agent");
+
+		expect(reply.status).toBe(502);
+		const message = String(reply.json.error);
+		expect(message.length).toBeLessThanOrEqual(400);
+		expect(message).not.toContain(token);
+		expect(message).toContain(REDACTED);
+	});
+
+	test("an error that is not the proposal's is a generic 500 that does not echo the cause", async () => {
+		const harness = await start(TOKENS, { skills: proposer(new Error("disk full at /var/lib/substrate")).seam });
+		const reply = await propose(harness, "tok-agent");
+		expect(reply.status).toBe(500);
+		expect(JSON.stringify(reply.json)).not.toContain("disk full");
+	});
+
+	test("an oversize body is 413 on this route", async () => {
+		const { calls, seam } = proposer();
+		const harness = await start(TOKENS, { skills: seam });
+		const reply = await propose(harness, "tok-agent", "x".repeat(1_000_001));
+		expect(reply.status).toBe(413);
+		expect(reply.json.error).toBe("request body too large");
+		expect(calls).toEqual([]);
+	});
+
+	test("it is audited as skills_propose on the REST transport, the body digested not stored", async () => {
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory(), ...TOKENS }, { skills: proposer().seam });
+		await propose(harness, "tok-agent");
+
+		const [record] = harness.observability.audit.recent();
+		expect(record).toMatchObject({ tool: "skills_propose", transport: "rest", decision: "allowed", surface: "claude-code" });
+		expect(JSON.stringify(record)).not.toContain("worth keeping");
+		expect(JSON.stringify(record)).not.toContain("SKILL.md");
+	});
+
+	test("a dry run is audited like any proposal", async () => {
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory(), ...TOKENS }, { skills: proposer({ ...opened, status: "dry_run" }).seam });
+		await propose(harness, "tok-agent", { ...body, dry_run: true });
+		expect(harness.observability.audit.recent()[0]).toMatchObject({ tool: "skills_propose" });
+	});
+
+	test("when the audit chain cannot take the record it is 503 and nothing is proposed", async () => {
+		const { calls, seam } = proposer();
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: unwritablePath(), ...TOKENS }, { skills: seam });
+		const reply = await propose(harness, "tok-agent");
+
+		expect(reply.status).toBe(503);
+		expect(calls).toEqual([]);
+	});
+
+	test("the route is a bounded metric label", async () => {
+		const harness = await start(TOKENS, { skills: proposer().seam });
+		await propose(harness, "tok-agent");
+		const snapshot = (await (await fetch(`${harness.base}/metrics`, { headers: { authorization: "Bearer tok-agent" } })).json()) as {
+			metrics?: unknown;
+		};
+		expect(JSON.stringify(snapshot)).toContain("/skills/propose");
+	});
+});
+

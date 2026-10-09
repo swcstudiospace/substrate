@@ -20,6 +20,7 @@ import {
 	isPagedSearch,
 	type Substrate,
 } from "./service.ts";
+import { proposalFailure } from "./skills/request.ts";
 import {
 	ACTORS,
 	EDGE_KINDS,
@@ -814,6 +815,46 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 		async ({ format, ...request }) => {
 			const report = await substrate.driftScan(request);
 			return format === "text" ? text(formatDrift(report)) : json(report);
+		},
+	);
+
+	server.registerTool(
+		"skills_propose",
+		{
+			title: "Propose a skill",
+			description:
+				"Propose a skill (or a change to one) as a reviewable pull request on the shared skills library. " +
+				"Needs an authenticated surface: the proposal is made as the calling surface, and naming a different " +
+				"one is refused. The files are validated, redacted and scanned for secrets before anything is pushed; " +
+				"identical content already proposed answers `existing`, `declined` or `unchanged` rather than opening " +
+				"a second PR. `dry_run` validates and counts the diff and changes nothing. `mode` replace, `reopen` " +
+				"and `allow_doc_examples` need an operator token.",
+			inputSchema: {
+				name: z.string().describe("The skill's name: lowercase letters, digits and hyphens."),
+				files: z.record(z.string(), z.string()).describe("Relative path to UTF-8 text. Must include SKILL.md."),
+				rationale: z.string().describe("Why this skill, or this change, is worth having. Goes in the PR body."),
+				remove: z.array(z.string()).optional().describe("Relative paths to delete from the skill."),
+				surface: surfaceSchema.optional().describe("Optional. Must equal the calling surface if given."),
+				session_id: z.string().optional(),
+				graph_id: z.string().optional(),
+				dry_run: z.boolean().optional().describe("Validate, redact, clone and count the diff; push nothing."),
+				mode: z.enum(["overlay", "replace"]).optional().describe("Operator only. `replace` makes the proposal the whole tree."),
+				reopen: z.boolean().optional().describe("Operator only. Propose content whose identical PR the owner closed."),
+				allow_doc_examples: z
+					.array(z.enum(["pem", "jwt"]))
+					.optional()
+					.describe("Operator only. Documentation examples of these shapes are redacted instead of refused."),
+			},
+			annotations: { destructiveHint: false, openWorldHint: true },
+		},
+		async (request) => {
+			try {
+				return json(await substrate.proposeSkill(request, { surface: callerSurface, isOperator }));
+			} catch (cause) {
+				const failure = proposalFailure(cause);
+				if (failure === null) throw cause;
+				return { ...json(failure.body), isError: true };
+			}
 		},
 	);
 

@@ -105,6 +105,17 @@ export interface SubstrateConfig {
 	 */
 	audit: { path: string | null };
 	/**
+	 * Which skill library proposals target, and where their state lives.
+	 *
+	 * Production defaults are September's library. A non-default repo or remote
+	 * is accepted only for a local `file://` remote with an absolute non-default
+	 * `gh`, so a typo can never send the real `gh` and the owner's credential at
+	 * another repository. Any other combination sets `problem` — the
+	 * invalid-combination reason, naming the bad key — and every proposal is
+	 * refused until it is fixed, without crashing the server.
+	 */
+	skills: { repo: string; remoteUrl: string; stateDir: string; gh: string; problem: string | null };
+	/**
 	 * Withdraw a claim whose event did not reach the ledger.
 	 *
 	 * `null` means "decide from the deployment": on when a ledger is configured, off
@@ -114,7 +125,36 @@ export interface SubstrateConfig {
 	requireRecordedClaims: boolean | null;
 }
 
+/** Production defaults: September's library, so the host ledger keeps deduplicating. */
+export const DEFAULT_SKILLS_REPO = "swcstudiospace/agent-skills";
+export const DEFAULT_SKILLS_REMOTE_URL = "https://github.com/swcstudiospace/agent-skills.git";
+export const DEFAULT_SKILLS_STATE = "/var/lib/substrate/skills";
+export const DEFAULT_SKILLS_GH = "gh";
+
+/**
+ * The skills library block, in the `loadConfig` trim-or-default style.
+ *
+ * Never throws: an invalid combination sets `problem` (naming the bad key) and
+ * `configWarnings` reports it at boot, because a throw here would crash-loop
+ * every deployment under `Restart=always`.
+ */
+function readSkills(env: Record<string, string | undefined>): SubstrateConfig["skills"] {
+	const repo = env.SUBSTRATE_SKILLS_REPO?.trim() || DEFAULT_SKILLS_REPO;
+	const remoteUrl = env.SUBSTRATE_SKILLS_REMOTE_URL?.trim() || DEFAULT_SKILLS_REMOTE_URL;
+	const stateDir = env.SUBSTRATE_SKILLS_STATE?.trim() || DEFAULT_SKILLS_STATE;
+	const gh = env.SUBSTRATE_SKILLS_GH?.trim() || DEFAULT_SKILLS_GH;
+	let problem: string | null = null;
+	if (repo !== DEFAULT_SKILLS_REPO || remoteUrl !== DEFAULT_SKILLS_REMOTE_URL) {
+		if (!remoteUrl.startsWith("file://")) {
+			problem = "SUBSTRATE_SKILLS_REMOTE_URL must be a file:// path to propose to a non-default library";
+		} else if (gh === DEFAULT_SKILLS_GH || !gh.startsWith("/")) {
+			problem = "SUBSTRATE_SKILLS_GH must be an absolute path to a non-default gh to propose to a non-default library";
+		}
+	}
+	return { repo, remoteUrl, stateDir, gh, problem };
+}
 /** "swarm-a05-be" → "SUBSTRATE_TOKEN_SWARM_A05_BE": the inverse of `envSuffixToSurface`. */
+
 export function tokenEnvName(surface: Surface): string {
 	return `SUBSTRATE_TOKEN_${surface.toUpperCase().replace(/-/g, "_")}`;
 }
@@ -214,6 +254,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 			process.stderr.write(`[substrate] ${message}\n`),
 		),
 		audit: { path: env.SUBSTRATE_AUDIT_PATH?.trim() || null },
+		skills: readSkills(env),
 		requireRecordedClaims: booleanOrNull(env.SUBSTRATE_CLAIM_REQUIRE_LEDGER),
 	};
 }
@@ -330,6 +371,11 @@ export function isReviewToken(config: SubstrateConfig, token: string | undefined
  */
 export function configWarnings(config: SubstrateConfig): string[] {
 	const warnings: string[] = [];
+	// Before the operator-tokens early return: an invalid library must be heard on every deployment.
+	// Named by key, never by value: the warning goes to a log.
+	if (config.skills.problem) {
+		warnings.push(`skill proposals are refused until the skills library is fixed: ${config.skills.problem}`);
+	}
 	if (config.operatorTokens.size === 0) return warnings;
 
 	if (config.allowAnonymous && config.tokens.size === 0) {

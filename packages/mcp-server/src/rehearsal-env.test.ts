@@ -9,7 +9,7 @@
  */
 import { describe, expect, test, afterAll } from "bun:test";
 import { randomBytes } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -215,8 +215,82 @@ describe("allowlist", () => {
 			"SUBSTRATE_OPERATOR_TOKENS",
 			"SUBSTRATE_AUDIT_PATH",
 			"SUBSTRATE_HANDOFF_KEY",
+			"SUBSTRATE_SKILLS_STATE",
 		]);
 		expect(new Set(Object.keys(env))).toEqual(expected);
+	});
+
+	test("the skills state is always inside the run directory, so a twin cannot write the host's", () => {
+		const runDir = tempDir();
+		const env = buildRehearsalEnv(scratchInput({ runDir }));
+		expect(env.SUBSTRATE_SKILLS_STATE).toBe(join(runDir, "skills"));
+		// Nothing else about the library is set without a fixture: the defaults stand, and with no
+		// mirror in that directory a proposal fails before any git or gh call.
+		for (const key of ["SUBSTRATE_SKILLS_REPO", "SUBSTRATE_SKILLS_REMOTE_URL", "SUBSTRATE_SKILLS_GH"]) {
+			expect(env).not.toHaveProperty(key);
+		}
+		expect(loadConfig(env).skills.stateDir).toBe(join(runDir, "skills"));
+	});
+});
+
+describe("the skills fixture's settings", () => {
+	function fixtureIn(runDir: string): Record<string, string> {
+		return {
+			SUBSTRATE_SKILLS_STATE: join(runDir, "skills"),
+			SUBSTRATE_SKILLS_REPO: "rehearsal/agent-skills",
+			SUBSTRATE_SKILLS_REMOTE_URL: `file://${join(runDir, "skills-fixture", "origin.git")}`,
+			SUBSTRATE_SKILLS_GH: join(runDir, "skills-fixture", "gh"),
+		};
+	}
+
+	test("a leftover fixture mirror is refused when this run is not a fixture", () => {
+		const runDir = tempDir();
+		mkdirSync(join(runDir, "skills", "mirror.git"), { recursive: true });
+		writeFileSync(join(runDir, "skills", "mirror.git", "HEAD"), "ref: refs/heads/main\n");
+		expect(() => buildRehearsalEnv(scratchInput({ runDir }))).toThrow("skills fixture mirror");
+	});
+
+	test("are added to the server env and load as a valid non-default library", () => {
+		const runDir = tempDir();
+		const env = buildRehearsalEnv(scratchInput({ runDir, skillsFixture: fixtureIn(runDir) }));
+		const config = loadConfig(env);
+
+		expect(config.skills.repo).toBe("rehearsal/agent-skills");
+		expect(config.skills.remoteUrl.startsWith("file://")).toBe(true);
+		expect(config.skills.gh).toBe(join(runDir, "skills-fixture", "gh"));
+		expect(configWarnings(config)).toEqual([]);
+		expect(env.HOME).toBe(join(runDir, "home"));
+	});
+
+	test("refuse a key the harness does not add", () => {
+		const runDir = tempDir();
+		expect(() => buildRehearsalEnv(scratchInput({ runDir, skillsFixture: { ...fixtureIn(runDir), GH_TOKEN: "x" } }))).toThrow(
+			"GH_TOKEN is not a skills fixture setting",
+		);
+	});
+
+	test("refuse a state directory, a gh script or a remote outside the run directory", () => {
+		const runDir = tempDir();
+		const outside = tempDir();
+		for (const key of ["SUBSTRATE_SKILLS_STATE", "SUBSTRATE_SKILLS_GH"]) {
+			expect(() => buildRehearsalEnv(scratchInput({ runDir, skillsFixture: { ...fixtureIn(runDir), [key]: join(outside, "x") } }))).toThrow(
+				`${key} is not inside the run directory`,
+			);
+		}
+		expect(() =>
+			buildRehearsalEnv(scratchInput({ runDir, skillsFixture: { ...fixtureIn(runDir), SUBSTRATE_SKILLS_REMOTE_URL: `file://${join(outside, "o.git")}` } })),
+		).toThrow("SUBSTRATE_SKILLS_REMOTE_URL is not inside the run directory");
+		expect(() =>
+			buildRehearsalEnv(scratchInput({ runDir, skillsFixture: { ...fixtureIn(runDir), SUBSTRATE_SKILLS_REMOTE_URL: "https://github.com/swcstudiospace/agent-skills.git" } })),
+		).toThrow("not a file:// URL");
+		expect(() => buildRehearsalEnv(scratchInput({ runDir, skillsFixture: { ...fixtureIn(runDir), SUBSTRATE_SKILLS_GH: "gh" } }))).toThrow("not inside the run directory");
+	});
+
+	test("a path that climbs out with .. is outside too", () => {
+		const runDir = tempDir();
+		expect(() =>
+			buildRehearsalEnv(scratchInput({ runDir, skillsFixture: { ...fixtureIn(runDir), SUBSTRATE_SKILLS_STATE: `${runDir}/../elsewhere` } })),
+		).toThrow("not inside the run directory");
 	});
 });
 
@@ -254,6 +328,27 @@ describe("stores and consumer records", () => {
 		expect(out.SUBSTRATE_TEST_PG_URL).toBe(server.SUBSTRATE_PG_URL);
 		expect(Object.keys(out)).toHaveLength(6);
 		for (const key of Object.values(LEDGER_KEYS)) expect(out).not.toHaveProperty(key);
+	});
+
+	test("the consumer record names the fixture's paths only when there is a fixture", () => {
+		const server = buildRehearsalEnv(scratchInput());
+		const base = {
+			mcpPort: 17410,
+			firstToken: server[tokenEnvName("claude-code")] ?? "",
+			operatorToken: server[tokenEnvName("hermes")] ?? "",
+			runDir: tempDir(),
+			name: "fixture",
+			testPgUrl: server.SUBSTRATE_PG_URL ?? "",
+		};
+		const skills = { state: "/run/x/skills", origin: "/run/x/skills-fixture/o.git", ghState: "/run/x/skills-fixture/gh-state.json", repo: "rehearsal/agent-skills" };
+		const out = consumerEnvRecord({ ...base, skills });
+
+		expect(out.SUBSTRATE_REHEARSAL_SKILLS_STATE).toBe(skills.state);
+		expect(out.SUBSTRATE_REHEARSAL_SKILLS_ORIGIN).toBe(skills.origin);
+		expect(out.SUBSTRATE_REHEARSAL_SKILLS_GH_STATE).toBe(skills.ghState);
+		expect(out.SUBSTRATE_REHEARSAL_SKILLS_REPO).toBe(skills.repo);
+		expect(Object.keys(out)).toHaveLength(10);
+		expect(Object.keys(consumerEnvRecord({ ...base, skills: null }))).toHaveLength(6);
 	});
 
 	test("SUBSTRATE_TOKEN stays the first surface when the operator differs", () => {

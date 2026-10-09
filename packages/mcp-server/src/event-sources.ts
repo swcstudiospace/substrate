@@ -173,6 +173,22 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 		}),
 	},
 	{
+		id: "skills.propose.failed",
+		phase: 21,
+		kind: "warning",
+		surface: "caller",
+		actions: ["skill.propose"],
+		carriesRepo: false,
+		periodic: false,
+		sample: () => ({
+			surface: "claude-code",
+			kind: "warning",
+			summary: "skill proposal p17-demo failed: git push exited 1",
+			session_id: "sess-p17-skills-propose",
+			payload: { action: "skill.propose", status: "failed", name: "p17-demo", reason: "git push exited 1" },
+		}),
+	},
+	{
 		id: "skills.sync.refused",
 		phase: 22,
 		kind: "warning",

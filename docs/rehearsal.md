@@ -38,7 +38,7 @@ default; clients reach the ledger only through `SUBSTRATE_URL`.
 All four run through the `rehearsal` package script:
 
 ```sh
-bun run rehearsal up [--name <n>] [--port <N>] [--surfaces a,b] [--operator <s>] [--anonymous]
+bun run rehearsal up [--name <n>] [--port <N>] [--surfaces a,b] [--operator <s>] [--anonymous] [--skills-fixture]
 bun run rehearsal smoke [--name <n>]
 bun run rehearsal status [--name <n>]
 bun run rehearsal down [--name <n>]
@@ -58,6 +58,17 @@ Flags, as built:
   It must be one of `--surfaces` and never a swarm surface.
 - `--anonymous` — no tokens at all, for proofs that need today's anonymous
   production shape. Forces empty surfaces and a null operator.
+- `--skills-fixture` — also build the skills library fixture for
+  `skills_propose` ([skills-propose.md](skills-propose.md)): inside the run
+  directory, a throwaway bare repository `skills-fixture/rehearsal/agent-skills.git`
+  seeded with one skill on `main` (refusing non-fast-forwards and deletions, logging
+  every ref update), the proposer's one-branch `skills/mirror.git`, and a recording
+  `gh` that answers only `pr create`, `pr view` and `pr list --head` from a JSON
+  state file, with PR URLs under `https://github.com/rehearsal/agent-skills/`. `git`
+  runs for real; `consumer.env` gains the four `SUBSTRATE_REHEARSAL_SKILLS_*` paths.
+  `bun run smoke:skills-propose` is the proof that drives it. Every instance, with
+  or without the flag, sets `SUBSTRATE_SKILLS_STATE` inside its run directory, so a
+  twin can never write the host's skills state.
 
 `up` refuses unless Docker is reachable, both images are present locally, free
 disk is above the ~2 GiB floor (it never prunes), and the port is free. It

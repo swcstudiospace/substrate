@@ -236,7 +236,7 @@ lives in [event-vocabulary.md](event-vocabulary.md).
 
 | Tool (phase) | Mode | Why |
 | --- | --- | --- |
-| `skills_propose` (21) | fail-closed | Opens a PR other agents will receive after merge; a proposal nobody recorded is an unaudited publication. |
+| `skills_propose` (21, **landed**) | fail-closed | Opens a PR other agents will receive after merge; a proposal nobody recorded is an unaudited publication. Served as the MCP tool and as `POST /skills/propose`, which is audited under the same name before any git work and answers `503` when the chain cannot take the record. |
 | `docs_ingest` (25) | fail-closed | Writes a shared dataset every agent reads; it is also a publication path. |
 | `desktop_run` (30) | fail-closed | Acts on a desktop (DESK-03 fixes this). |
 | `docs_search` (25) | fail-open | A read inside an agent's turn. |
@@ -265,7 +265,8 @@ MCP tool's own name where there is one: `POST /memory` is audited as `memory_wri
 under two names. Only `/healthz`, `/metrics` and `/slo` are exempt; no agent action is
 behind them and a trail dominated by a Prometheus scrape is one nobody reads.
 
-REST twins of planned v1.3 tools (`POST /skills/propose`, `/docs/search`,
+REST twins of planned v1.3 tools (`POST /skills/propose` has landed, see
+[skills-propose.md](skills-propose.md); `/docs/search`,
 `/docs/ingest`, `/issue`) are audited under their tool's own name when they land,
 and inherit that tool's mode.
 

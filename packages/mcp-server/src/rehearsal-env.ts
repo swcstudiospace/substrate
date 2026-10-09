@@ -12,7 +12,9 @@
  * added. The parent environment is never spread, the deployment env file is
  * never read, and every store URL must be loopback before it is emitted.
  */
-import { join } from "node:path";
+import { existsSync, mkdirSync } from "node:fs";
+import { isAbsolute, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { tokenEnvName } from "./config.ts";
 import { SURFACES, isSwarmSurface, type Surface } from "./types.ts";
 
@@ -26,6 +28,18 @@ export const LEDGER_KEYS = {
 	password: "GREPTIME_PASSWORD",
 	db: "GREPTIME_DB",
 } as const;
+
+/**
+ * The four server settings the skills fixture adds (`--skills-fixture`). The builder accepts
+ * exactly these and refuses a value that leaves the run directory, so a fixture can point the
+ * proposer at the instance's own throwaway repository and nowhere else.
+ */
+export const FIXTURE_ENV_KEYS = [
+	"SUBSTRATE_SKILLS_STATE",
+	"SUBSTRATE_SKILLS_REPO",
+	"SUBSTRATE_SKILLS_REMOTE_URL",
+	"SUBSTRATE_SKILLS_GH",
+] as const;
 
 /** The builder refused an input; the message names surfaces and hosts, never values. */
 export class RehearsalEnvError extends Error {}
@@ -63,6 +77,39 @@ export interface BuildRehearsalEnvInput {
 	runDir: string;
 	/** Parent environment, read only through the allowlist. */
 	parentEnv: Record<string, string | undefined>;
+	/** The skills fixture's server settings, when the instance was started with `--skills-fixture`. */
+	skillsFixture?: Record<string, string> | null;
+}
+
+/** A fixture path value must be absolute and inside the run directory. */
+function assertInsideRun(key: string, value: string, runDir: string): void {
+	const inside = relative(resolve(runDir), resolve(value));
+	if (!isAbsolute(value) || inside.startsWith("..") || isAbsolute(inside)) {
+		throw new RehearsalEnvError(`rehearsal env refused: skills fixture ${key} is not inside the run directory`);
+	}
+}
+
+/**
+ * The fixture's settings, checked. Only the four known keys; the state directory, the `gh`
+ * script and the remote's path must lie inside the run directory; the remote is a `file://` URL.
+ */
+function fixtureEnv(fixture: Record<string, string>, runDir: string): Record<string, string> {
+	for (const [key, value] of Object.entries(fixture)) {
+		if (!(FIXTURE_ENV_KEYS as readonly string[]).includes(key)) {
+			throw new RehearsalEnvError(`rehearsal env refused: ${key} is not a skills fixture setting`);
+		}
+		if (key === "SUBSTRATE_SKILLS_STATE" || key === "SUBSTRATE_SKILLS_GH") assertInsideRun(key, value, runDir);
+		if (key === "SUBSTRATE_SKILLS_REMOTE_URL") {
+			let path: string;
+			try {
+				path = fileURLToPath(value);
+			} catch {
+				throw new RehearsalEnvError("rehearsal env refused: the skills fixture remote is not a file:// URL");
+			}
+			assertInsideRun(key, path, runDir);
+		}
+	}
+	return fixture;
 }
 
 const LOOPBACK_HOSTS: Record<string, true> = { "127.0.0.1": true, "::1": true, localhost: true };
@@ -159,6 +206,26 @@ export function buildRehearsalEnv(input: BuildRehearsalEnvInput): Record<string,
 	}
 	env.SUBSTRATE_AUDIT_PATH = join(input.runDir, "mcp-audit.jsonl");
 	env.SUBSTRATE_HANDOFF_KEY = input.secrets.handoffKey;
+	// Always inside the run directory, so a twin can never write the host's skills state; without a
+	// fixture there is no mirror there, and a proposal fails before any git or gh call.
+	env.SUBSTRATE_SKILLS_STATE = join(input.runDir, "skills");
+	// A crashed `--skills-fixture` leaves a mirror in this run dir. Starting again without the
+	// flag would keep that mirror and point its origin at the production library.
+	if (!input.skillsFixture && existsSync(join(input.runDir, "skills", "mirror.git", "HEAD"))) {
+		throw new RehearsalEnvError(
+			"rehearsal env refused: this run dir still has a skills fixture mirror; pass --skills-fixture or choose a new name",
+		);
+	}
+	if (input.skillsFixture) {
+		Object.assign(env, fixtureEnv(input.skillsFixture, input.runDir));
+		// The proposer's git and gh children inherit HOME. An empty directory inside the run
+		// keeps a host `url.*.insteadOf` (and the operator's gh credentials) out of a fixture
+		// proof. A rehearsal without a fixture keeps the operator home so production gh still
+		// finds its credentials.
+		const home = join(input.runDir, "home");
+		mkdirSync(home, { recursive: true, mode: 0o700 });
+		env.HOME = home;
+	}
 	return env;
 }
 
@@ -180,6 +247,8 @@ export interface ConsumerEnvInput {
 	name: string;
 	/** Scratch Postgres URL the live index tests run against. */
 	testPgUrl: string;
+	/** The skills fixture's paths, for the proof that drives it; absent without `--skills-fixture`. */
+	skills?: { state: string; origin: string; ghState: string; repo: string } | null;
 }
 
 /**
@@ -193,7 +262,8 @@ export function storesEnvRecord(input: ScratchStoresInput): Record<string, strin
 
 /**
  * The `consumer.env` contract: everything a proof needs, and deliberately no
- * ledger key — clients reach the ledger only through the twin. SUBSTRATE_TOKEN
+ * ledger key — clients reach the ledger only through the twin. With the skills fixture it also
+ * names the fixture's paths. SUBSTRATE_TOKEN
  * is always the first non-swarm surface's token; the operator token rides
  * separately so an `--operator` twin never disguises it as the credential.
  */
@@ -209,6 +279,12 @@ export function consumerEnvRecord(input: ConsumerEnvInput): Record<string, strin
 	out.SUBSTRATE_REHEARSAL_TOKENS_DIR = join(input.runDir, "tokens");
 	out.SUBSTRATE_REHEARSAL_NAME = input.name;
 	out.SUBSTRATE_TEST_PG_URL = input.testPgUrl;
+	if (input.skills) {
+		out.SUBSTRATE_REHEARSAL_SKILLS_STATE = input.skills.state;
+		out.SUBSTRATE_REHEARSAL_SKILLS_ORIGIN = input.skills.origin;
+		out.SUBSTRATE_REHEARSAL_SKILLS_GH_STATE = input.skills.ghState;
+		out.SUBSTRATE_REHEARSAL_SKILLS_REPO = input.skills.repo;
+	}
 	return out;
 }
 

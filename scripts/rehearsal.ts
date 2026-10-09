@@ -37,6 +37,7 @@ import {
 	storesEnvRecord,
 	toShellExports,
 } from "../packages/mcp-server/src/rehearsal-env.ts";
+import { buildSkillsFixture, type SkillsFixture } from "../packages/mcp-server/src/rehearsal-skills.ts";
 import { isSwarmSurface, SURFACES, type Surface } from "../packages/mcp-server/src/types.ts";
 
 /** The harness refused an input or a state; the message names hosts and ports, never values. */
@@ -489,6 +490,8 @@ export interface TwinState {
 	surfaces: Surface[];
 	operator: Surface | null;
 	anonymous: boolean;
+	/** Started with `--skills-fixture`. Absent in a state file an older `up` wrote. */
+	skillsFixture?: boolean;
 }
 
 function readState(path: string): TwinState | null {
@@ -584,6 +587,8 @@ interface UpOptions {
 	surfaces: Surface[];
 	operator: Surface | null;
 	anonymous: boolean;
+	/** Build the skills library fixture (`--skills-fixture`): a throwaway bare repository, a mirror and a recording `gh`. */
+	skillsFixture: boolean;
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<boolean> {
@@ -1051,7 +1056,10 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 		if (key.startsWith("BUN_")) parentEnv[key] = value;
 	}
 	let serverEnv: Record<string, string>;
+	let skills: SkillsFixture | null = null;
 	try {
+		// Deleted and rebuilt inside the run dir, so a crashed `up` cannot make a later proof answer `existing`.
+		skills = opts.skillsFixture ? buildSkillsFixture(runDir) : null;
 		serverEnv = buildRehearsalEnv({
 			ports: { mcp: mcpPort, ledger: ledgerHost.port, postgres: pgHost.port },
 			secrets,
@@ -1059,12 +1067,15 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 			operator: opts.operator,
 			runDir,
 			parentEnv,
+			skillsFixture: skills?.env ?? null,
 		});
 	} catch (cause) {
 		// The scratch containers are already healthy here; a builder throw must
 		// not leak them, and must exit 2 instead of a stack trace.
 		removeLabelledContainers(opts.name);
-		throw cause instanceof RehearsalEnvError ? new RehearsalRefused(cause.message) : cause;
+		if (cause instanceof RehearsalEnvError) throw new RehearsalRefused(cause.message);
+		if (opts.skillsFixture) throw new RehearsalRefused(`the skills fixture could not be built: ${String((cause as Error).message ?? cause).split("\n")[0]}`);
+		throw cause;
 	}
 
 	const logPath = join(runDir, "server.log");
@@ -1125,6 +1136,7 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 		surfaces,
 		operator: opts.operator,
 		anonymous: opts.anonymous,
+		skillsFixture: opts.skillsFixture,
 	};
 	writeMode(statePath, `${JSON.stringify(state, null, 2)}\n`);
 	const interruptCleanup = (): void => {
@@ -1177,6 +1189,7 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 			runDir,
 			name: opts.name,
 			testPgUrl,
+			skills: skills ? { state: skills.state, origin: skills.origin, ghState: skills.ghState, repo: skills.repo } : null,
 		})));
 		writeMode(join(runDir, "stores.env"), toShellExports(storesEnvRecord({
 			ports: { mcp: mcpPort, ledger: ledgerHost.port, postgres: pgHost.port },
@@ -1188,6 +1201,7 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 		process.stdout.write(`[rehearsal] consumer.env: ${join(runDir, "consumer.env")}\n`);
 		process.stdout.write(`[rehearsal] commit ${state.commit} dirty=${dirtyOut === null ? "unknown" : String(dirtyOut.length > 0)}\n`);
 		process.stdout.write(`[rehearsal] images pg=${pgImage} ledger=${ledgerImage}\n`);
+		if (skills) process.stdout.write(`[rehearsal] skills fixture: library ${skills.repo} (a throwaway bare repository, a recording gh)\n`);
 		return 0;
 	} catch (cause) {
 		// An unexpected throw after the spawn must not leak the twin: stop
@@ -1300,6 +1314,7 @@ async function runStatusInner(name: string, runDir: string): Promise<number> {
 	process.stdout.write(`[rehearsal] url http://127.0.0.1:${state.mcpPort} pg=127.0.0.1:${state.pgHostPort} ledger=127.0.0.1:${state.ledgerHostPort}\n`);
 	process.stdout.write(`[rehearsal] commit ${state.commit} checkout ${state.checkout}\n`);
 	process.stdout.write(`[rehearsal] images pg=${state.pgImage} ledger=${state.ledgerImage}\n`);
+	process.stdout.write(`[rehearsal] skills fixture ${state.skillsFixture === true ? "on" : "off"}\n`);
 	return health === "200" ? 0 : 1;
 }
 
@@ -1505,7 +1520,7 @@ async function runSmokeInner(name: string, runDir: string): Promise<number> {
  */
 export function refuseExtraArgs(argv: string[]): string | null {
 	const valued: Record<string, true> = { "--name": true, "--port": true, "--surfaces": true, "--operator": true };
-	const bare: Record<string, true> = { "--anonymous": true };
+	const bare: Record<string, true> = { "--anonymous": true, "--skills-fixture": true };
 	for (let i = 1; i < argv.length; i++) {
 		const token = argv[i] ?? "";
 		if (valued[token] === true) {
@@ -1528,7 +1543,7 @@ export function flag(argv: string[], name: string): string | undefined | null {
 
 function usage(message: string): never {
 	process.stderr.write(
-		`[rehearsal] ${message}\nusage: rehearsal up|down|status|smoke [--name <n>] [--port <N>] [--surfaces a,b] [--operator <s>] [--anonymous]\n`,
+		`[rehearsal] ${message}\nusage: rehearsal up|down|status|smoke [--name <n>] [--port <N>] [--surfaces a,b] [--operator <s>] [--anonymous] [--skills-fixture]\n`,
 	);
 	process.exit(2);
 }
@@ -1553,6 +1568,7 @@ async function main(argv: string[]): Promise<number> {
 	const extra = refuseExtraArgs(argv);
 	if (extra !== null) usage(extra);
 	const anonymous = argv.includes("--anonymous");
+	const skillsFixture = argv.includes("--skills-fixture");
 	try {
 		const name = parseName(nameRaw ?? undefined);
 		if (sub === "down") return await runDown(name);
@@ -1562,7 +1578,7 @@ async function main(argv: string[]): Promise<number> {
 		if (!Number.isInteger(port) || port < 0 || port > 65535) usage(`bad --port ${portRaw ?? ""}`);
 		const surfaces = parseSurfaces(surfacesRaw ?? undefined);
 		const operator = parseOperator(operatorRaw ?? undefined, surfaces, anonymous);
-		return await runUp({ name, port, surfaces, operator, anonymous }, process.cwd());
+		return await runUp({ name, port, surfaces, operator, anonymous, skillsFixture }, process.cwd());
 	} catch (cause) {
 		if (cause instanceof RehearsalRefused) {
 			process.stderr.write(`[rehearsal] refused: ${cause.message}.\n`);

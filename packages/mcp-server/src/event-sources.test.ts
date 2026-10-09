@@ -192,3 +192,24 @@ describe("docs/event-vocabulary.md equals the table", () => {
 		}
 	});
 });
+
+describe("the skills.propose rows", () => {
+	const row = (id: string) => {
+		const found = EVENT_SOURCES.find((candidate) => candidate.id === id);
+		if (!found) throw new Error(`no EVENT_SOURCES row ${id}`);
+		return found;
+	};
+
+	test("an outcome is a note and a refusal or a failed git or gh step is a warning, all from the caller", () => {
+		expect(row("skills.propose")).toMatchObject({ kind: "note", surface: "caller", actions: ["skill.propose"], carriesRepo: true });
+		for (const id of ["skills.propose.refused", "skills.propose.failed"]) {
+			expect(row(id)).toMatchObject({ kind: "warning", surface: "caller", actions: ["skill.propose"], carriesRepo: false, periodic: false });
+		}
+	});
+
+	test("the failed row's sample names its status and carries a reason, never content", () => {
+		const payload = row("skills.propose.failed").sample().payload ?? {};
+		expect(payload).toMatchObject({ action: "skill.propose", status: "failed" });
+		expect(Object.keys(payload).sort()).toEqual(["action", "name", "reason", "status"]);
+	});
+});

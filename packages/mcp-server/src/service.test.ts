@@ -6,7 +6,9 @@ import { GreptimeClient, INGEST_LAG_MS, IngestNotRecorded, MAX_QUERY_LIMIT, type
 import { REDACTED } from "./redact.ts";
 import { leaseSnapshot } from "./index-store.ts";
 import { decideRelease, type ClaimAction } from "./lease.ts";
-import { Substrate } from "./service.ts";
+import { EVENT_SOURCES } from "./event-sources.ts";
+import { Substrate, SkillProposalDenied, type SkillProposalRequest } from "./service.ts";
+import { ProposeFailed, ProposeRefused, type ProposeOptions, type ProposeResult, type SkillProposer } from "./skills/propose.ts";
 import type { EventInput, SubstrateEvent, Surface } from "./types.ts";
 
 /** Records what reached the event log, and stands in for the index. */
@@ -1972,6 +1974,313 @@ describe("hourDigest over a real ledger client", () => {
 
 	test("an event with a malformed hash fails the digest by name", async () => {
 		await expect(digestOf(client(INGEST, { ...HASH, evt_3: "not-a-hash" }))).rejects.toThrow("evt_3");
+	});
+});
+
+describe("proposeSkill", () => {
+	const HASH = "ab".repeat(32);
+	const request: SkillProposalRequest = {
+		name: "demo-skill",
+		files: { "SKILL.md": "---\nname: demo-skill\ndescription: a demo\n---\nbody\n" },
+		rationale: "worth keeping",
+	};
+	const opened: ProposeResult = {
+		status: "opened",
+		pr_url: "https://github.com/swcstudiospace/agent-skills/pull/12",
+		pr_number: 12,
+		branch: "skill/claude-code/demo-skill-1-abcd",
+		content_sha256: HASH,
+		redactions: [{ file: "SKILL.md", line: 2, rule: "bearer" }],
+	};
+
+	/** A proposer stub that answers or throws, and a ledger stub that keeps (or refuses) the events. */
+	function world(answer: ProposeResult | Error, options: { ledgerFails?: boolean } = {}) {
+		const calls: Array<{ input: Parameters<SkillProposer["propose"]>[0]; opts: Omit<ProposeOptions, "run"> }> = [];
+		const events: SubstrateEvent[] = [];
+		const proposer: SkillProposer = {
+			propose: async (input, opts) => {
+				calls.push({ input, opts });
+				if (answer instanceof Error) throw answer;
+				return answer;
+			},
+		};
+		const greptime = {
+			ensureAppendMode: async () => true,
+			lastHash: async () => null,
+			insertEvent: async (event: SubstrateEvent) => {
+				if (options.ledgerFails) throw new Error("greptime unreachable");
+				events.push(event);
+			},
+		};
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: greptime as never, skills: proposer });
+		return { substrate, calls, events };
+	}
+
+	const asOperator = { surface: "claude-code" as Surface, isOperator: true };
+	const asAgent = { surface: "claude-code" as Surface, isOperator: false };
+	const row = (id: string) => {
+		const found = EVENT_SOURCES.find((candidate) => candidate.id === id);
+		if (!found) throw new Error(`no EVENT_SOURCES row ${id}`);
+		return found;
+	};
+	const denied = async (promise: Promise<unknown>) => {
+		const error = await promise.then(
+			() => null,
+			(cause: unknown) => cause,
+		);
+		expect(error).toBeInstanceOf(SkillProposalDenied);
+		return error as SkillProposalDenied;
+	};
+
+	test("an invalid skills library is refused before the proposer runs", async () => {
+		const calls: unknown[] = [];
+		const proposer: SkillProposer = {
+			propose: async () => {
+				calls.push("ran");
+				return opened;
+			},
+		};
+		const config = loadConfig({});
+		config.skills.problem = "SUBSTRATE_SKILLS_REMOTE_URL must be a file:// path to propose to a non-default library";
+		const substrate = new Substrate(config, {
+			index: null,
+			greptime: { ensureAppendMode: async () => true, lastHash: async () => null, insertEvent: async () => undefined } as never,
+			skills: proposer,
+		});
+		const error = await substrate.proposeSkill(request, asAgent).catch((cause: unknown) => cause);
+		expect(error).toBeInstanceOf(ProposeFailed);
+		expect((error as Error).message).toContain("SUBSTRATE_SKILLS_REMOTE_URL");
+		expect(calls).toEqual([]);
+	});
+
+	test("an anonymous caller is refused 401 before the proposer runs, and nothing is emitted", async () => {
+		const { substrate, calls, events } = world(opened);
+		const error = await denied(substrate.proposeSkill(request, { surface: null, isOperator: false }));
+		expect(error.status).toBe(401);
+		expect(error.message).toContain("authenticated surface");
+		expect(calls).toEqual([]);
+		expect(events).toEqual([]);
+	});
+
+	test("even an operator flag does not authenticate an anonymous caller", async () => {
+		const { substrate, calls } = world(opened);
+		expect((await denied(substrate.proposeSkill(request, { surface: null, isOperator: true }))).status).toBe(401);
+		expect(calls).toEqual([]);
+	});
+
+	test("a body surface that differs from the token's is refused 403, never re-attributed", async () => {
+		const { substrate, calls, events } = world(opened);
+		const error = await denied(substrate.proposeSkill({ ...request, surface: "cursor" }, asAgent));
+		expect(error.status).toBe(403);
+		expect(error.message).toContain("claude-code");
+		expect(calls).toEqual([]);
+		expect(events).toEqual([]);
+	});
+
+	test("an equal or absent body surface is accepted, and the proposal carries the token's surface", async () => {
+		for (const body of [{ ...request, surface: "claude-code" }, request]) {
+			const { substrate, calls } = world(opened);
+			await substrate.proposeSkill(body, asAgent);
+			expect(calls[0]?.input.surface).toBe("claude-code");
+		}
+	});
+
+	test("any authenticated surface may propose: swarm and host-job surfaces included", async () => {
+		for (const surface of ["swarm-a01-orch", "substrate", "hermes"] as Surface[]) {
+			const { substrate, calls } = world(opened);
+			await substrate.proposeSkill(request, { surface, isOperator: false });
+			expect(calls[0]?.input.surface).toBe(surface);
+		}
+	});
+
+	test("replace, reopen and doc examples need an operator token, each on its own", async () => {
+		for (const privileged of [{ mode: "replace" as const }, { reopen: true }, { allow_doc_examples: ["pem" as const] }]) {
+			const { substrate, calls, events } = world(opened);
+			const error = await denied(substrate.proposeSkill({ ...request, ...privileged }, asAgent));
+			expect(error.status).toBe(403);
+			expect(error.message).toContain("operator token");
+			expect(calls).toEqual([]);
+			expect(events).toEqual([]);
+		}
+	});
+
+	test("the defaults stay overlay, no reopen and no doc examples; an operator may name all three", async () => {
+		const plain = world(opened);
+		await plain.substrate.proposeSkill(request, asAgent);
+		expect(plain.calls[0]?.opts).toMatchObject({ mode: "overlay", dryRun: false, reopen: false });
+		expect([...(plain.calls[0]?.opts.allowDocExamples ?? [])]).toEqual([]);
+
+		const privileged = world(opened);
+		await privileged.substrate.proposeSkill(
+			{ ...request, mode: "replace", reopen: true, allow_doc_examples: ["pem", "jwt"] },
+			asOperator,
+		);
+		expect(privileged.calls[0]?.opts).toMatchObject({ mode: "replace", reopen: true });
+		expect([...(privileged.calls[0]?.opts.allowDocExamples ?? [])]).toEqual(["pem", "jwt"]);
+	});
+
+	test("an outcome emits a note from the caller with the configured repo and hashes, never content", async () => {
+		const { substrate, events } = world(opened);
+		await substrate.proposeSkill({ ...request, session_id: "sess-9", graph_id: "ut-1" }, asAgent);
+
+		expect(events).toHaveLength(1);
+		const event = events[0] as SubstrateEvent;
+		expect(event).toMatchObject({ surface: "claude-code", kind: "note", repo: "swcstudiospace/agent-skills", session_id: "sess-9", graph_id: "ut-1" });
+		expect(event.payload).toEqual({
+			action: "skill.propose",
+			name: "demo-skill",
+			status: "opened",
+			pr_url: opened.pr_url,
+			content_sha256: HASH,
+			redactions: 1,
+		});
+		expect(JSON.stringify(event)).not.toContain("worth keeping");
+		expect(JSON.stringify(event)).not.toContain("body");
+		// The written event is what the Phase 17 table says it is.
+		expect({ kind: event.kind, action: event.payload.action }).toEqual({ kind: row("skills.propose").kind, action: row("skills.propose").actions?.[0] });
+	});
+
+	test("every success status is recorded, and a proposal without a session gets its own", async () => {
+		for (const status of ["existing", "unchanged", "declined"] as const) {
+			const { substrate, events } = world({ ...opened, status, pr_url: undefined });
+			await substrate.proposeSkill(request, asAgent);
+			expect(events[0]?.payload).toMatchObject({ action: "skill.propose", status });
+			expect(events[0]?.payload).not.toHaveProperty("pr_url");
+			expect(events[0]?.session_id).toMatch(/^skills-propose:/);
+		}
+		const a = world(opened);
+		const b = world(opened);
+		await a.substrate.proposeSkill(request, asAgent);
+		await b.substrate.proposeSkill(request, asAgent);
+		expect(a.events[0]?.session_id).not.toBe(b.events[0]?.session_id);
+	});
+
+	test("an empty session is not shared across proposals", async () => {
+		const a = world(opened);
+		const b = world(opened);
+		await a.substrate.proposeSkill({ ...request, session_id: "" }, asAgent);
+		await b.substrate.proposeSkill({ ...request, session_id: "" }, asAgent);
+		expect(a.events[0]?.session_id).toMatch(/^skills-propose:/);
+		expect(a.events[0]?.session_id).not.toBe(b.events[0]?.session_id);
+	});
+
+	test("a dry run reaches the proposer with dryRun set and emits nothing, whatever it returns", async () => {
+		const dry: ProposeResult = { ...opened, status: "dry_run", pr_url: undefined, diff_added: 2 };
+		const ok = world(dry);
+		const result = await ok.substrate.proposeSkill({ ...request, dry_run: true }, asAgent);
+		expect(result.status).toBe("dry_run");
+		expect(ok.calls[0]?.opts.dryRun).toBe(true);
+		expect(ok.events).toEqual([]);
+
+		const refused = world(new ProposeRefused("secret-like content in 1 place(s)", [{ file: "SKILL.md", line: 3, rule: "github" }]));
+		await expect(refused.substrate.proposeSkill({ ...request, dry_run: true }, asAgent)).rejects.toBeInstanceOf(ProposeRefused);
+		expect(refused.events).toEqual([]);
+
+		const failed = world(new ProposeFailed("git fetch exited 128"));
+		await expect(failed.substrate.proposeSkill({ ...request, dry_run: true }, asAgent)).rejects.toBeInstanceOf(ProposeFailed);
+		expect(failed.events).toEqual([]);
+	});
+
+	test("a refusal emits a warning with rule names only and rethrows the same error", async () => {
+		const refusal = new ProposeRefused("secret-like content in 2 place(s); remove it or use an env reference", [
+			{ file: "SKILL.md", line: 3, rule: "github" },
+			{ file: "scripts/run.sh", line: 9, rule: "github" },
+			{ file: "scripts/run.sh", line: 12, rule: "aws" },
+		]);
+		const { substrate, events } = world(refusal);
+		await expect(substrate.proposeSkill(request, asAgent)).rejects.toBe(refusal);
+
+		expect(events).toHaveLength(1);
+		const event = events[0] as SubstrateEvent;
+		expect(event).toMatchObject({ surface: "claude-code", kind: "warning" });
+		expect(event.repo).toBeNull();
+		expect(event.payload).toEqual({
+			action: "skill.propose",
+			status: "refused",
+			name: "demo-skill",
+			reason: "secret-like content in 2 place(s); remove it or use an env reference",
+			rules: ["github", "aws"],
+		});
+		// File names and lines belong to the caller's refusal, not to the append-only ledger.
+		expect(JSON.stringify(event.payload)).not.toContain("run.sh");
+		expect({ kind: event.kind, action: event.payload.action }).toEqual({ kind: row("skills.propose.refused").kind, action: row("skills.propose.refused").actions?.[0] });
+	});
+
+	test("a refusal for a name that is not valid leaves the name out of the event", async () => {
+		const { substrate, events } = world(new ProposeRefused("invalid skill name"));
+		await expect(substrate.proposeSkill({ ...request, name: "Not Valid!" }, asAgent)).rejects.toBeInstanceOf(ProposeRefused);
+		expect(events[0]?.payload).not.toHaveProperty("name");
+		expect(events[0]?.summary).toContain("(invalid name)");
+	});
+
+	test("a failed git or gh step emits a warning with the redacted reason and rethrows", async () => {
+		// Assembled at run time so no token-shaped literal sits in the repository.
+		const leaked = `ghp_${"B".repeat(36)}`;
+		const failure = new ProposeFailed(`git push exited 1: remote said GITHUB_TOKEN=${leaked}`);
+		const { substrate, events } = world(failure);
+		await expect(substrate.proposeSkill(request, asAgent)).rejects.toBe(failure);
+
+		const event = events[0] as SubstrateEvent;
+		expect(event).toMatchObject({ kind: "warning" });
+		expect(event.payload).toMatchObject({ action: "skill.propose", status: "failed", name: "demo-skill" });
+		expect(JSON.stringify(event)).not.toContain(leaked);
+		expect(JSON.stringify(event.payload)).toContain(REDACTED);
+		expect({ kind: event.kind, action: event.payload.action }).toEqual({ kind: row("skills.propose.failed").kind, action: row("skills.propose.failed").actions?.[0] });
+	});
+
+	test("an event that cannot be stored never changes the answer", async () => {
+		const answered = world(opened, { ledgerFails: true });
+		expect(await answered.substrate.proposeSkill(request, asAgent)).toEqual(opened);
+
+		const refusal = new ProposeRefused("policy");
+		const refused = world(refusal, { ledgerFails: true });
+		await expect(refused.substrate.proposeSkill(request, asAgent)).rejects.toBe(refusal);
+
+		const failure = new ProposeFailed("git push exited 1");
+		const failed = world(failure, { ledgerFails: true });
+		await expect(failed.substrate.proposeSkill(request, asAgent)).rejects.toBe(failure);
+	});
+
+	test("an emit that throws outright cannot change the answer either", async () => {
+		// `emit` fails open on a ledger error, but it still rejects input it cannot normalise;
+		// the proposal's own result or error must reach the caller untouched.
+		const explode = { emit: async () => Promise.reject(new Error("emit exploded")) };
+
+		const answered = world(opened);
+		Object.assign(answered.substrate, explode);
+		expect(await answered.substrate.proposeSkill(request, asAgent)).toEqual(opened);
+
+		const refusal = new ProposeRefused("policy");
+		const refused = world(refusal);
+		Object.assign(refused.substrate, explode);
+		await expect(refused.substrate.proposeSkill(request, asAgent)).rejects.toBe(refusal);
+
+		const failure = new ProposeFailed("git push exited 1");
+		const failed = world(failure);
+		Object.assign(failed.substrate, explode);
+		await expect(failed.substrate.proposeSkill(request, asAgent)).rejects.toBe(failure);
+	});
+
+	test("an error that is not the engine's is rethrown and recorded nowhere", async () => {
+		const boom = new Error("disk full");
+		const { substrate, events } = world(boom);
+		await expect(substrate.proposeSkill(request, asAgent)).rejects.toBe(boom);
+		expect(events).toEqual([]);
+	});
+
+	test("the proposal body the engine sees has the request's files, removals and ids", async () => {
+		const { substrate, calls } = world(opened);
+		await substrate.proposeSkill({ ...request, remove: ["old.md"], session_id: "sess-9", graph_id: "ut-1" }, asAgent);
+		expect(calls[0]?.input).toEqual({
+			name: "demo-skill",
+			files: request.files,
+			rationale: "worth keeping",
+			surface: "claude-code",
+			remove: ["old.md"],
+			session_id: "sess-9",
+			graph_id: "ut-1",
+		});
+		expect(calls[0]?.opts.maxBytes).toBe(1_000_000);
 	});
 });
 

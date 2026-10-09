@@ -16,7 +16,16 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { configWarnings, isOperator, loadConfig, surfaceForToken } from "./config.ts";
+import {
+	DEFAULT_SKILLS_GH,
+	DEFAULT_SKILLS_REMOTE_URL,
+	DEFAULT_SKILLS_REPO,
+	DEFAULT_SKILLS_STATE,
+	configWarnings,
+	isOperator,
+	loadConfig,
+	surfaceForToken,
+} from "./config.ts";
 
 describe("SUBSTRATE_ALLOW_ANONYMOUS", () => {
 	test("unset with a token keeps today's rule: untokened callers are refused", () => {
@@ -133,5 +142,81 @@ describe("a substrate token is never an operator", () => {
 		expect(warnings.join("\n")).toContain("swarm-a05-be");
 		expect(warnings.join("\n")).toContain("substrate");
 		expect(warnings.join("\n")).not.toContain("tok-substrate");
+	});
+});
+
+describe("SUBSTRATE_SKILLS_*", () => {
+	test("an empty env returns September defaults without throwing", () => {
+		const config = loadConfig({});
+
+		expect(config.skills).toEqual({
+			repo: DEFAULT_SKILLS_REPO,
+			remoteUrl: DEFAULT_SKILLS_REMOTE_URL,
+			stateDir: DEFAULT_SKILLS_STATE,
+			gh: DEFAULT_SKILLS_GH,
+			problem: null,
+		});
+		expect(DEFAULT_SKILLS_REPO).toBe("swcstudiospace/agent-skills");
+		expect(DEFAULT_SKILLS_REMOTE_URL).toBe("https://github.com/swcstudiospace/agent-skills.git");
+		expect(DEFAULT_SKILLS_STATE).toBe("/var/lib/substrate/skills");
+		expect(DEFAULT_SKILLS_GH).toBe("gh");
+	});
+
+	test("a non-default repo is accepted with a file:// remote and an absolute non-default gh", () => {
+		const config = loadConfig({
+			SUBSTRATE_SKILLS_REPO: "rehearsal/agent-skills",
+			SUBSTRATE_SKILLS_REMOTE_URL: "file:///tmp/rehearsal/agent-skills.git",
+			SUBSTRATE_SKILLS_GH: "/run/fake-gh",
+		});
+
+		expect(config.skills.problem).toBeNull();
+		expect(config.skills.repo).toBe("rehearsal/agent-skills");
+		expect(config.skills.remoteUrl).toBe("file:///tmp/rehearsal/agent-skills.git");
+		expect(config.skills.gh).toBe("/run/fake-gh");
+	});
+
+	test("a non-default repo with the https remote is refused, naming the remote key", () => {
+		const config = loadConfig({ SUBSTRATE_SKILLS_REPO: "someone/else" });
+
+		expect(config.skills.problem).toContain("SUBSTRATE_SKILLS_REMOTE_URL");
+	});
+
+	test("a file:// remote with the default gh is refused, naming the gh key", () => {
+		const config = loadConfig({
+			SUBSTRATE_SKILLS_REPO: "rehearsal/agent-skills",
+			SUBSTRATE_SKILLS_REMOTE_URL: "file:///tmp/rehearsal/agent-skills.git",
+		});
+
+		expect(config.skills.problem).toContain("SUBSTRATE_SKILLS_GH");
+	});
+
+	test("a file:// remote with a relative gh is refused, naming the gh key", () => {
+		const config = loadConfig({
+			SUBSTRATE_SKILLS_REMOTE_URL: "file:///tmp/rehearsal/agent-skills.git",
+			SUBSTRATE_SKILLS_GH: "my-gh",
+		});
+
+		expect(config.skills.problem).toContain("SUBSTRATE_SKILLS_GH");
+	});
+
+	test("an invalid combination warns at boot before the operator-tokens early return", () => {
+		const config = loadConfig({
+			SUBSTRATE_TOKEN_CURSOR: "tok-operator",
+			SUBSTRATE_OPERATOR_TOKENS: "tok-operator",
+			SUBSTRATE_SKILLS_REPO: "someone/else",
+		});
+		const warnings = configWarnings(config);
+
+		expect(warnings.join("\n")).toContain("SUBSTRATE_SKILLS_REMOTE_URL");
+		expect(warnings.join("\n")).not.toContain("someone/else");
+	});
+
+	test("a valid library warns nothing on its own", () => {
+		const config = loadConfig({
+			SUBSTRATE_TOKEN_CURSOR: "tok-operator",
+			SUBSTRATE_OPERATOR_TOKENS: "tok-operator",
+		});
+
+		expect(configWarnings(config)).toEqual([]);
 	});
 });
