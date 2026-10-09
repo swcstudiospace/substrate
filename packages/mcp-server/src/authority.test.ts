@@ -490,6 +490,20 @@ describe("a surface token variable holds a list", () => {
 		expect((thrown as ConfigError).message).not.toContain("tok-gw");
 	});
 
+	test("the shipped example boots: every name it declares is a surface", () => {
+		const root = join(import.meta.dir, "..", "..", "..");
+		const env: Record<string, string> = {};
+		for (const raw of readFileSync(join(root, ".env.example"), "utf8").split("\n")) {
+			const line = raw.trim();
+			if (line === "" || line.startsWith("#")) continue;
+			const at = line.indexOf("=");
+			expect(at).toBeGreaterThan(0);
+			env[line.slice(0, at).trim()] = line.slice(at + 1).trim();
+		}
+		expect(Object.keys(env).length).toBeGreaterThan(0);
+		expect(() => tokenConfig(env)).not.toThrow();
+	});
+
 	test("a single value is unchanged", () => {
 		const config = loadConfig({ SUBSTRATE_TOKEN_HERMES: "tok-hermes" });
 		expect(surfaceForToken(config, "Bearer tok-hermes")).toBe("hermes");
