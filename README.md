@@ -102,6 +102,8 @@ scratch Postgres and ledger in local containers, nothing production — and driv
 brief/emit/register/claim wire proof over it. Details in [`docs/rehearsal.md`](docs/rehearsal.md).
 `bun run parity:check` is the read-only production check that the unit owns `127.0.0.1:7410`
 and serves `main`; the procedure around it lives in [`docs/runbooks/production-parity.md`](docs/runbooks/production-parity.md).
+`bun run verify` runs the whole verification gate (frozen install, `tsc`, the full suite, the repo locks); the CI workflow
+runs the same commands once the organisation can run Actions. See [`docs/ci.md`](docs/ci.md).
 
 `substrate-mcp` exposes MCP over streamable HTTP at `/mcp`, and — because agent hooks cannot
 call MCP tools — the same briefing, event and memory paths as plain `POST /brief`,

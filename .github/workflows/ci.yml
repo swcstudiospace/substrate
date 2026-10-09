@@ -1,0 +1,106 @@
+name: CI
+
+# The repository's verification gate. `bun run verify` runs the same commands locally
+# (docs/ci.md) and scripts/verify.test.ts fails if the two drift apart. CI adds the
+# Postgres-backed tests that skip on a machine without a database.
+#
+# Both jobs are switched by the repository variable CI_ENABLED. While it is unset they are
+# skipped, which GitHub reports as a skipped (not failed) check and which uses no runner
+# minutes. `gh variable set CI_ENABLED --body true` turns the gate on once Actions can run
+# for the organisation; `gh variable delete CI_ENABLED` is the kill switch.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Typecheck, tests and repo locks
+    if: vars.CI_ENABLED == 'true' && github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci-scratch-only
+          POSTGRES_DB: substrate_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d substrate_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      # A throwaway database that lives for this job. It un-skips the live index tests
+      # (leases, memory, search, graph bindings).
+      SUBSTRATE_TEST_PG_URL: postgres://postgres:ci-scratch-only@127.0.0.1:5432/substrate_test
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # `bun run check:phase-close` diffs the vocabulary against a baseline commit, so
+          # it needs history, not a one-commit clone.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.0.2
+        with:
+          bun-version: "1.4.0"
+
+      - name: Cache Bun's package cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
+
+      - name: Install dependencies (lockfile must be current)
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bunx tsc --noEmit
+
+      - name: Tests
+        run: bun test
+
+      - name: Repo locks (event vocabulary, store lock, audit policy)
+        run: bun run check:phase-close
+
+  dependency-audit:
+    name: Known-vulnerability audit
+    # Advisories appear without any change here, so this never gates a pull request. It runs
+    # on main, on demand and weekly; a red run is the signal to upgrade.
+    if: vars.CI_ENABLED == 'true' && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.0.2
+        with:
+          bun-version: "1.4.0"
+
+      - name: Install dependencies (lockfile must be current)
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Audit installed packages (fail on high or critical)
+        run: bun audit --audit-level=high

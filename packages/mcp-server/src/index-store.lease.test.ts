@@ -536,6 +536,8 @@ if (!PG_URL) {
 	test("the live lease tests are skipped without SUBSTRATE_TEST_PG_URL", () => {
 		// Stated rather than silent: a suite that skips its only real concurrency
 		// proof should say so in its own output.
-		expect(PG_URL).toBeUndefined();
+		// An empty value (an unset CI variable expands to "") skips too, so compare the
+		// falsy-or-undefined case rather than failing on the empty string.
+		expect(PG_URL || undefined).toBeUndefined();
 	});
 }

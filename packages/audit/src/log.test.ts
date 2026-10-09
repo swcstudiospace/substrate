@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { AuditLog, AuditUnavailableError } from "./log.ts";
 import type { AuditRecordInput } from "./record.ts";
 import {
+	buildRecord,
 	MAX_ARG_KEY,
 	MAX_ARG_KEYS,
 	MAX_RECORD_BYTES,
@@ -819,34 +820,98 @@ describe("the evidence window is a ring, not a shifting array", () => {
 		expect((await log.verifiedView("ut-1", 4)).records.map((record) => record.seq)).toEqual([1, 2, 3, 4]);
 	});
 
+	test("a full window is kept by overwriting in place, so the scan never shifts or splices", async () => {
+		// The deterministic form of the guard below. The quadratic cost came from dropping
+		// the first entry of a full window with `shift`/`splice` once per matching record.
+		// Nothing else on the scan path uses either (the probe that justified this test
+		// counted zero calls at 1000, 4000 and 8000 records), so a single call here is that
+		// regression, on any host, with no clock involved.
+		const path = join(temporaryDirectory(), "mcp-audit.jsonl");
+		const when = new Date("2026-10-09T00:00:00.000Z");
+		const lines: string[] = [];
+		let prev: string | null = null;
+		for (let seq = 1; seq <= 600; seq++) {
+			const record = buildRecord({ ...allowed, graph_id: "ut-1" }, { seq, prev }, when);
+			lines.push(JSON.stringify(record));
+			prev = record.hash;
+		}
+		writeFileSync(path, `${lines.join("\n")}\n`);
+		const log = new AuditLog({ path, checkpointPath: false });
+		await log.open();
+
+		const { shift, splice } = Array.prototype;
+		let shifts = 0;
+		let splices = 0;
+		Array.prototype.shift = function (this: unknown[]) {
+			shifts++;
+			return shift.call(this);
+		} as typeof Array.prototype.shift;
+		Array.prototype.splice = function (this: unknown[], ...args: unknown[]) {
+			splices++;
+			return (splice as (...rest: unknown[]) => unknown[]).apply(this, args);
+		} as typeof Array.prototype.splice;
+		let view: Awaited<ReturnType<AuditLog["verifiedView"]>>;
+		try {
+			view = await log.verifiedView("ut-1", 50);
+		} finally {
+			Array.prototype.shift = shift;
+			Array.prototype.splice = splice;
+		}
+
+		expect(view.matched).toBe(600);
+		expect(view.records.map((record) => record.seq)).toEqual(Array.from({ length: 50 }, (_unused, index) => 551 + index));
+		expect({ shifts, splices }).toEqual({ shifts: 0, splices: 0 });
+	});
+
 	test("the scan does not go quadratic once the window is full", async () => {
 		// Push-and-splice shifted the whole window per matching record, so a graph past the
 		// cap paid O(n·window) on the request this single-pass rework exists to make cheap.
 		// Measured rather than asserted: doubling the records past a small cap must not
 		// anywhere near quadruple the work.
+		//
+		// Two things keep that measurement about the scan and not about the host:
+		//   - The chain file is seeded in one write. Appending 8000 records one durable
+		//     write at a time (plus a checkpoint rewrite each) cost tens of seconds on a
+		//     loaded machine and timed the disk, not the scan. `open` still adopts and the
+		//     scan still verifies the whole chain, so what is measured is unchanged.
+		//   - Each size is the best of three passes, so one slow pass on a shared runner
+		//     cannot decide the result either way.
 		const path = join(temporaryDirectory(), "mcp-audit.jsonl");
-		const log = new AuditLog({ path });
-		await log.open();
-		for (let i = 0; i < 4000; i++) await log.append({ ...allowed, graph_id: "ut-1" });
+		const seed = (count: number): void => {
+			const when = new Date("2026-10-09T00:00:00.000Z");
+			const lines: string[] = [];
+			let prev: string | null = null;
+			for (let seq = 1; seq <= count; seq++) {
+				const record = buildRecord({ ...allowed, graph_id: "ut-1" }, { seq, prev }, when);
+				lines.push(JSON.stringify(record));
+				prev = record.hash;
+			}
+			writeFileSync(path, `${lines.join("\n")}\n`);
+		};
+		const bestOfThree = async (count: number): Promise<{ best: number; matched: number; seqs: number[] }> => {
+			seed(count);
+			const log = new AuditLog({ path, checkpointPath: false });
+			await log.open();
+			let best = Number.POSITIVE_INFINITY;
+			let view = await log.verifiedView("ut-1", 50);
+			for (let pass = 0; pass < 3; pass++) {
+				const started = performance.now();
+				view = await log.verifiedView("ut-1", 50);
+				best = Math.min(best, performance.now() - started);
+			}
+			return { best, matched: view.matched, seqs: view.records.map((record) => record.seq) };
+		};
 
-		const once = performance.now();
-		await log.verifiedView("ut-1", 50);
-		const half = performance.now() - once;
+		const half = await bestOfThree(4000);
+		const full = await bestOfThree(8000);
 
-		for (let i = 0; i < 4000; i++) await log.append({ ...allowed, graph_id: "ut-1" });
-		const twice = performance.now();
-		const view = await log.verifiedView("ut-1", 50);
-		const full = performance.now() - twice;
-
-		expect(view.matched).toBe(8000);
-		expect(view.records).toHaveLength(50);
-		expect(view.records.map((record) => record.seq)).toEqual(
-			Array.from({ length: 50 }, (_unused, index) => 7951 + index),
-		);
+		expect(half.matched).toBe(4000);
+		expect(full.matched).toBe(8000);
+		expect(full.seqs).toEqual(Array.from({ length: 50 }, (_unused, index) => 7951 + index));
 		// Linear would be ~2x. Allow generous slack for a shared runner; quadratic in the
 		// window would have been far worse than this before the ring.
-		expect(full).toBeLessThan(Math.max(half * 6, 250));
-	});
+		expect(full.best).toBeLessThan(Math.max(half.best * 6, 250));
+	}, 60_000);
 });
 
 describe("a tally's breakdown is bounded", () => {
