@@ -1,10 +1,10 @@
 ---
 phase: 21-skills-propose
-verified: 2026-10-09T10:24:00Z
+verified: 2026-10-09T10:37:43Z
 status: passed
 score: 24/24 must-haves verified
 covered_files: [".env.example", ".planning/phases/21-skills-propose/21-01-PLAN.md", ".planning/phases/21-skills-propose/21-01-SUMMARY.md", ".planning/phases/21-skills-propose/21-02-PLAN.md", ".planning/phases/21-skills-propose/21-02-SUMMARY.md", ".planning/phases/21-skills-propose/21-03-PLAN.md", ".planning/phases/21-skills-propose/21-03-SUMMARY.md", ".planning/phases/21-skills-propose/21-04-PLAN.md", ".planning/phases/21-skills-propose/21-04-SUMMARY.md", ".planning/phases/21-skills-propose/21-05-PLAN.md", ".planning/phases/21-skills-propose/21-05-SUMMARY.md", ".planning/phases/21-skills-propose/21-06-PLAN.md", ".planning/phases/21-skills-propose/21-06-SUMMARY.md", "docs/event-vocabulary.md", "docs/mcp-audit.md", "docs/rehearsal.md", "docs/skills-propose.md", "package.json", "packages/audit/src/policy.test.ts", "packages/cli/src/index.ts", "packages/cli/src/skills.test.ts", "packages/cli/src/skills.ts", "packages/mcp-server/src/event-sources.test.ts", "packages/mcp-server/src/event-sources.ts", "packages/mcp-server/src/http.test.ts", "packages/mcp-server/src/mcp.test.ts", "packages/mcp-server/src/mcp.ts", "packages/mcp-server/src/observe.test.ts", "packages/mcp-server/src/observe.ts", "packages/mcp-server/src/rehearsal-env.test.ts", "packages/mcp-server/src/rehearsal-env.ts", "packages/mcp-server/src/rehearsal-fake-gh.ts", "packages/mcp-server/src/rehearsal-skills.test.ts", "packages/mcp-server/src/rehearsal-skills.ts", "packages/mcp-server/src/server.ts", "packages/mcp-server/src/service.test.ts", "packages/mcp-server/src/service.ts", "packages/mcp-server/src/skills/frontmatter.ts", "packages/mcp-server/src/skills/propose.ts", "packages/mcp-server/src/skills/request.test.ts", "packages/mcp-server/src/skills/request.ts", "scripts/rehearsal.test.ts", "scripts/rehearsal.ts", "scripts/skills-propose-smoke.test.ts", "scripts/skills-propose-smoke.ts"]
-covered_digest: "v3:sha256:372620efc34ded3ef3dd5b49290c0b70d26ba8e3dde0d8b3acd0d12be47ded18"
+covered_digest: "v3:sha256:486fc4601f18ae0dec9170f50cb37145b27112db558f9ecc3c9039d8164ed1f5"
 behavior_unverified: 1
 overrides_applied: 0
 re_verification:
@@ -84,3 +84,8 @@ Not a hot-path phase: it adds no work to `POST /events` or `POST /brief`, so the
 
 1. Phase 20 provisions the production tokens; until then production refuses every proposal.
 2. Phase 22's live proof opens the first real PR on `agent-skills` (needs the operator's approval), and removes the unused key file `/var/lib/substrate/skills/propose.key` at its cutover.
+
+## Re-verification after restacking (2026-10-09)
+
+Phase 18's review round 2 changed the redactor this phase builds on, and `main` gained the verification-gate PR, so the branch was restacked onto Phase 18's new tip. Nothing in this phase changed. Gate on the restacked head: bun run verify: install, types, tests, locks all ok; 1914 pass / 57 skip / 0 fail. The report's fingerprint was refreshed (the base now carries the verification-gate PR and Phase 18's review fixes).
+
