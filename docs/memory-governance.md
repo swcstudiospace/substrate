@@ -101,7 +101,7 @@ decided on the writer's name, so a caller-supplied name is a caller-supplied
 permission.
 
 A local run that wants memory writable without tokens says so explicitly, with
-either a surface token — `SUBSTRATE_TOKEN_CLAUDE_CODE=…`, one variable per surface — or
+either a surface token — `SUBSTRATE_TOKEN_CLAUDE_CODE=…`, one list-valued variable per surface — or
 a grant naming `unknown` in `SUBSTRATE_MEMORY_GRANTS`:
 
 ```json

@@ -37,6 +37,39 @@ branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
 # is the human's, not an agent's.
 surface="${SUBSTRATE_SURFACE:-cursor}"
 actor="${SUBSTRATE_ACTOR:-human}"
+#
+# Bearer for the event surface in D20-04 order: the environment value, else
+# the first line of the file named by the token-file variable, else the first
+# line of the per-surface file in the tokens dir. Anything unreadable means
+# no bearer (fail-open), exactly as before; the value is never printed.
+first_line() {
+	[ -f "$1" ] && [ -r "$1" ] || return 0
+	if [ "$(wc -c < "$1" 2>/dev/null || echo 999999)" -gt 4096 ]; then return 0; fi
+	# `read` fails at EOF without a final newline yet still fills the
+	# variable, so keep the partial line instead of dropping the bearer.
+	line=""
+	IFS= read -r line < "$1" 2>/dev/null || [ -n "$line" ] || return 0
+	printf '%s' "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' 2>/dev/null
+}
+# Joined to a path below, so anything but lower-alnum-dash never reads.
+case "$surface" in
+	[a-z0-9]*)
+		case "$surface" in *[!a-z0-9-]* ) safe_surface="";; *) safe_surface="$surface";; esac
+		;;
+	*) safe_surface="";;
+esac
+# A whitespace-only direct value trims to absent, exactly like resolveBearer:
+# otherwise it skips both file fallbacks and the emit carries no bearer.
+bearer="$(printf '%s' "${SUBSTRATE_TOKEN:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' 2>/dev/null)"
+if [ -z "$bearer" ] && [ -n "${SUBSTRATE_TOKEN_FILE:-}" ]; then
+	bearer="$(first_line "$SUBSTRATE_TOKEN_FILE")"
+fi
+if [ -z "$bearer" ] && [ -n "$safe_surface" ]; then
+	tokens_dir="${SUBSTRATE_TOKENS_DIR:-}"
+	[ -n "$tokens_dir" ] || tokens_dir="/etc/substrate/tokens"
+	bearer="$(first_line "$tokens_dir/$safe_surface")"
+fi
+export SUBSTRATE_TOKEN="$bearer"
 
 post_emit() {
 (

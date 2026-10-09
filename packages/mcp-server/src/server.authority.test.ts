@@ -16,7 +16,9 @@ import { Substrate } from "./service.ts";
 import type { Surface, SubstrateEvent } from "./types.ts";
 
 const ENV = {
-	SUBSTRATE_TOKEN_HERMES: "tok-hermes",
+	// One surface variable holds a two-value list: the gateway and the connector
+	// each hold their own value for the same surface.
+	SUBSTRATE_TOKEN_HERMES: "tok-hermes, tok-hermes-b",
 	// The operator credential is a surface token that is also listed as an
 	// operator's, so its extra authority never costs us knowing who used it.
 	SUBSTRATE_TOKEN_CURSOR: "tok-operator",
@@ -465,5 +467,33 @@ describe("a swarm token names the caller over the wire", () => {
 		expect(otherAgent.error).toContain("must name agent A05");
 		expect(otherGraph.error).toContain("must end in this claim's graph_id ut-1");
 		expect(claimedAs).toEqual([]);
+	});
+});
+
+describe("a list entry authenticates over the wire", () => {
+	async function postEvent(token: string, body: Record<string, unknown>): Promise<Response> {
+		return fetch(`${base}/events`, {
+			method: "POST",
+			headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+			body: JSON.stringify({ kind: "note", summary: "x", ...body }),
+		});
+	}
+
+	test("REST /events: the second value of the list is accepted as the variable's surface", async () => {
+		written.length = 0;
+
+		const response = await postEvent("tok-hermes-b", {});
+
+		expect(response.status).toBe(202);
+		expect(written.map((event) => event.surface)).toEqual(["hermes"]);
+	});
+
+	test("REST /events: the whole comma-joined string as one bearer is unknown, so 401", async () => {
+		written.length = 0;
+
+		const response = await postEvent("tok-hermes, tok-hermes-b", {});
+
+		expect(response.status).toBe(401);
+		expect(written).toEqual([]);
 	});
 });

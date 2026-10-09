@@ -87,6 +87,13 @@ The agent table is `HERDR_AGENT_SURFACES` in
 
 Any other agent id is counted as unmapped and not emitted.
 
+herdr's unit env and its per-collector env file must not define the bare
+client bearer variable: herdr resolves each event's bearer per surface from
+the tokens dir at emit time, so one shared value would send every event
+under a single surface. `bun run identity:check` flags the variable when it
+is present; `docs/runbooks/production-identity.md` lists the per-surface
+token files the operator provisions instead.
+
 ## Muse brief writer
 
 `packages/collectors/src/muse.ts` emits nothing. `muse.brief_writer` is a

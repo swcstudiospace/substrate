@@ -24,6 +24,12 @@ WorkingDirectory=/opt/agent-substrate/current
 ExecStart=/root/.local/share/reflex/bun/bin/bun packages/mcp-server/src/index.ts
 Restart=always
 RestartSec=3
+# A contradictory identity config refuses boot with exit 78 (EX_CONFIG): a token
+# value listed under two surfaces, or a SUBSTRATE_TOKEN_* variable naming no
+# surface. That refusal is an operator edit away from fixed, not a crash to
+# retry, so the unit stops instead of restart-looping every 3 s. Fix the env
+# file and start again. See packages/mcp-server/src/config.ts.
+RestartPreventExitStatus=78
 
 # /var/lib/substrate, created by systemd and writable under ProtectSystem=full.
 # This is where SUBSTRATE_AUDIT_PATH points: the MCP audit chain is a local

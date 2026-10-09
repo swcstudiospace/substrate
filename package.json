@@ -30,6 +30,8 @@
     "verify": "bun scripts/verify.ts",
     "parity:check": "bun scripts/parity-check.ts",
     "rehearsal": "bun scripts/rehearsal.ts",
+    "identity:check": "bun scripts/identity-check.ts",
+    "uat:phase0": "bun scripts/uat-phase0.ts",
     "collectors:status": "bun packages/collectors/src/status.ts",
     "proof:laneb": "bun scripts/laneb-proof.ts"
   },

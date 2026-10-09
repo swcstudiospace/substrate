@@ -134,9 +134,12 @@ authenticated while naming no surface would reach the authoring routes with no
 identity, and each of those falls back to the request body — so an operator
 credential could have signed a handoff as any agent it cared to name. Operator
 authority is an attribute of a surface token, so a forced release is always
-attributable to whoever used it. An operator token that is not also a surface
+attributable to whoever used it. Each `SUBSTRATE_TOKEN_*` variable holds a
+comma-separated list, so the operator value is one entry among a surface's
+others. An operator token that is not also a surface
 token can never authenticate, and is reported at boot rather than left to look
-configured.
+configured. A value listed under two surfaces, or a variable naming no surface,
+refuses boot with exit 78 rather than silently re-attributing a token.
 
 **No swarm surface is an operator.** A `swarm-*` token listed in
 `SUBSTRATE_OPERATOR_TOKENS` is still refused `force` (fail closed), and boot

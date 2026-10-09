@@ -57,7 +57,7 @@ and approves its `post-tool-use` hook. It is the only step that writes
 outside `/etc/systemd/system` and `/etc/substrate`. Step 6 is read-only:
 each collector's `stored` counter should climb while `refused` stays 0 —
 a refused line names its collector, source, kind, surface and status in
-`/var/lib/substrate/refused-emits.jsonl`.
+`/var/lib/substrate/refused-emits.jsonl`. The bare SUBSTRATE_TOKEN this cutover provisions in the herdr env file is removed again at the Phase 20 window, where per-event resolution replaces it; see the ordered window in `production-identity.md`.
 
 ## Rollback
 

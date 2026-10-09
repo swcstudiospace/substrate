@@ -12,6 +12,7 @@
  * it prints pids, states and commits only — never an environment value.
  */
 import { readFileSync, readlinkSync, realpathSync } from "node:fs";
+import { resolveBearer } from "../packages/cli/src/token.ts";
 
 /** Production ports the check watches in `ss` output. */
 export const WATCHED_PORTS = [7410, 7411, 6420] as const;
@@ -176,7 +177,9 @@ export function parityVerdict(facts: ParityFacts, opts: VerdictOptions = {}): Pa
 	if (facts.healthzStatus === null) {
 		failures.push("healthz is not answering on 127.0.0.1:7410");
 	} else if (facts.healthzStatus === 401) {
-		failures.push("healthz answered 401 (auth is configured — set SUBSTRATE_TOKEN)");
+		failures.push(
+			"healthz answered 401 (auth on, token missing — set SUBSTRATE_TOKEN, SUBSTRATE_TOKEN_FILE or SUBSTRATE_TOKENS_DIR)",
+		);
 	} else if (facts.healthzStatus !== 200) {
 		failures.push(`healthz answered ${facts.healthzStatus}, want 200`);
 	}
@@ -377,9 +380,9 @@ function systemdTimestampToEpoch(value: string | undefined): number | null {
 	return Number.isFinite(ms) ? Math.floor(ms / 1000) : null;
 }
 
-/** One GET to /healthz with the caller's bearer when set; the token is never printed. */
+/** One GET to /healthz with the resolver bearer for claude-code (D20-08); the token is never printed. */
 async function probeHealthz(): Promise<number | null> {
-	const token = process.env.SUBSTRATE_TOKEN?.trim();
+	const token = resolveBearer("claude-code");
 	try {
 		const res = await fetch(HEALTHZ_URL, {
 			headers: token ? { authorization: `Bearer ${token}` } : {},
