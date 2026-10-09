@@ -97,6 +97,9 @@ export interface GraphBindResult {
 	conflict: boolean;
 }
 
+/** A node row joined to its graph's repo, branch and status, for `graph_find`. */
+export type LinearNodeMatch = GraphNode & { repo: string | null; branch: string | null; graph_status: string | null };
+
 export class IndexStore implements MemoryStore {
 	private readonly sql: SQL;
 
@@ -583,6 +586,28 @@ export class IndexStore implements MemoryStore {
 	 */
 	async getNode(graphId: string, nodeId: string): Promise<GraphNode | null> {
 		return this.node(graphId, nodeId).catch(() => null);
+	}
+
+	/**
+	 * The registered nodes behind a Linear reference, for `graph_find`. The
+	 * id is matched first, then the identifier; each query stops at 2 rows,
+	 * which is all an ambiguity report needs. Never a write.
+	 */
+	async findNodesByLinear(ref: { linearIssueId?: string; linearIdentifier?: string }): Promise<LinearNodeMatch[]> {
+		if (ref.linearIssueId) {
+			const rows = (await this.sql`
+				select n.*, g.repo, g.branch, g.status as graph_status
+				from graph_nodes n join graph_index g on g.graph_id = n.graph_id
+				where n.linear_issue_id = ${ref.linearIssueId}
+				limit 2`) as LinearNodeMatch[];
+			if (rows.length > 0) return rows;
+		}
+		if (!ref.linearIdentifier) return [];
+		return (await this.sql`
+			select n.*, g.repo, g.branch, g.status as graph_status
+			from graph_nodes n join graph_index g on g.graph_id = n.graph_id
+			where n.linear_identifier = ${ref.linearIdentifier}
+			limit 2`) as LinearNodeMatch[];
 	}
 
 	/**

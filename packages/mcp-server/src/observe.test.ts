@@ -358,6 +358,8 @@ describe("auditToolCalls", () => {
 	test("toolLabel keeps the tools that exist", () => {
 		expect(toolLabel("graph_claim")).toBe("graph_claim");
 		expect(toolLabel("desktop_run")).toBe("desktop_run");
+		expect(toolLabel("graph_find")).toBe("graph_find");
+		expect(toolLabel("issue_get")).toBe("issue_get");
 		expect(toolLabel("events")).toBe("events");
 		expect(toolLabel("../../etc/passwd")).toBe("unrecognized");
 	});

@@ -710,3 +710,76 @@ describe("skills_propose", () => {
 	});
 });
 
+describe("graph_find and issue_get wiring", () => {
+	/** A connected client over a substrate with stub index and mirror, recording ledger writes. */
+	async function readClient() {
+		const written: SubstrateEvent[] = [];
+		const node = {
+			graph_id: "ut-1",
+			node_id: "n2",
+			linear_issue_id: "uuid-SWC-467",
+			linear_identifier: "SWC-467",
+			notion_page: null,
+			claimed_by: "hermes",
+			claim_session: "sess-a",
+			claimed_at: new Date().toISOString(),
+			lease_id: "lse_9",
+			lease_expires_at: new Date(Date.now() + 600_000).toISOString(),
+			lease_heartbeat_at: new Date().toISOString(),
+			lease_epoch: 3,
+			state: "started",
+		};
+		const index = {
+			getGraph: async () => ({ repo: "swcstudiospace/x", branch: "main" }),
+			getNode: async () => node,
+			findNodesByLinear: async () => [{ ...node, repo: "swcstudiospace/x", branch: "main", graph_status: "open" }],
+		};
+		const mirror = {
+			issueText: async () => ({ ok: true, identifier: "SWC-467", title: "Do the thing", description: null }),
+		};
+		const greptime = {
+			ensureAppendMode: async () => true,
+			lastHash: async (): Promise<string | null> => null,
+			insertEvent: async (event: SubstrateEvent) => {
+				written.push(event);
+			},
+		};
+		const substrate = new Substrate(loadConfig({}), {
+			index: index as never,
+			greptime: greptime as never,
+			mirror: mirror as never,
+		});
+		const server = createMcpServer(substrate, "omp");
+		const client = new Client({ name: "substrate-test", version: "0.0.0" });
+		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+		await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+		return { client, written };
+	}
+
+	test("both read tools are listed", async () => {
+		const { client } = await readClient();
+		const tools = (await client.listTools()).tools;
+		const byName = new Map(tools.map((tool) => [tool.name, tool]));
+
+		expect(byName.has("graph_find")).toBe(true);
+		expect(byName.has("issue_get")).toBe(true);
+	});
+
+	test("graph_find without either ref is refused, and issue_get resolves through the service", async () => {
+		const { client, written } = await readClient();
+
+		const refused = await call(client, "graph_find", {});
+		expect(refused.json()).toEqual({ found: false, reason: "provide linear_issue_id or linear_identifier" });
+
+		const found = await call(client, "graph_find", { linear_issue_id: "uuid-SWC-467" });
+		expect(found.json()).toMatchObject({ found: true, graph_id: "ut-1", node_id: "n2" });
+		expect(JSON.stringify(found.json())).not.toContain("lse_9");
+
+		const issue = await call(client, "issue_get", { graph_id: "ut-1", node_id: "n2" });
+		expect(issue.json()).toMatchObject({ found: true, identifier: "SWC-467", title: "Do the thing" });
+
+		// Neither read tool emits.
+		expect(written).toEqual([]);
+	});
+});
+
