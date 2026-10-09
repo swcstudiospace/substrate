@@ -295,6 +295,7 @@ describe("allowlist", () => {
 				"SUBSTRATE_DESKTOP_DIR",
 				"SUBSTRATE_DESKTOP_SURFACES",
 				"SUBSTRATE_SKILLS_STATE",
+				"SUBSTRATE_DOCS_STATE",
 				"SUBSTRATE_HANDOFF_KEY",
 			]),
 		);

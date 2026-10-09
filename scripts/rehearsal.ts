@@ -1304,6 +1304,7 @@ const stopFake = (): void => {
 						surfaces,
 						operator: opts.operator,
 						anonymous: opts.anonymous,
+						desktopSurfaces: opts.desktopSurfaces,
 						skillsFixture: opts.skillsFixture,
 						ragflowFixture: true,
 						ragflowPid,
