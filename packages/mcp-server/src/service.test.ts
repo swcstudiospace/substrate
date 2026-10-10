@@ -1,13 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { formatMemo, hourEnd, merkleRootHex, parseMemo } from "@substrate/ledger";
 import { isReviewToken, loadConfig, type GreptimeConfig } from "./config.ts";
-import { InvalidEventError } from "./event.ts";
+import { eventHash, InvalidEventError, normalizeEvent } from "./event.ts";
 import { GreptimeClient, INGEST_LAG_MS, IngestNotRecorded, MAX_QUERY_LIMIT, type EventQuery } from "./greptime.ts";
 import { REDACTED, redact } from "./redact.ts";
 import { leaseSnapshot } from "./index-store.ts";
 import { decideRelease, type ClaimAction } from "./lease.ts";
 import { EVENT_SOURCES } from "./event-sources.ts";
-import { Substrate, SkillProposalDenied, type SkillProposalRequest } from "./service.ts";
+import { Substrate, SkillProposalDenied, VERIFY_RESPONSE_MARGIN_MS, type SkillProposalRequest } from "./service.ts";
 import { ProposeFailed, ProposeRefused, type ProposeOptions, type ProposeResult, type SkillProposer } from "./skills/propose.ts";
 import type { EventInput, SubstrateEvent, Surface } from "./types.ts";
 import { GRAPHS_GENERATION_KEY, graphGenerationKey } from "./cache.ts";
@@ -1383,6 +1383,8 @@ describe("identifier lookups", () => {
 				asked.push([column, value]);
 				return [];
 			},
+			graphIngest: async () => [],
+			firstIngestMs: async () => null,
 		};
 		const substrate = new Substrate(loadConfig({}), { index: null, greptime: greptime as never });
 
@@ -3417,3 +3419,821 @@ describe("graph_find and issue_get (D23-22..24)", () => {
 	});
 });
 
+describe("verifyGraph hour report", () => {
+	const H = Date.UTC(2026, 9, 1, 10);
+	const HOUR = 3_600_000;
+	const START_ISO = "2026-10-01T10:00:00.000Z";
+	const END_ISO = "2026-10-01T11:00:00.000Z";
+	const PUBKEY = "TestPubkey1111111111111111111111111111111";
+
+	/** Two chained events in one session, stored as Greptime returns them. */
+	function sessionRows(session = "sess-1", graph = "ut-1") {
+		let prev: string | null = null;
+		const events = [0, 1].map((i) => {
+			const event = normalizeEvent(
+				{ surface: "omp", kind: "note", summary: `e${i}`, session_id: session, graph_id: graph, actor: "agent" },
+				prev,
+			);
+			prev = event.hash;
+			return event;
+		});
+		const rows = events.map((event) => ({ ...event, ts: Date.parse(event.ts), payload: JSON.stringify(event.payload) }));
+		const leaves = events.map((event, i) => ({ event_id: event.id, ingested_at: H + 1000 * (i + 1), hash: event.hash }));
+		const records = events.map((event, i) => ({
+			event_id: event.id,
+			event_ts: Date.parse(event.ts),
+			ingested_at: H + 1000 * (i + 1),
+		}));
+		const root = merkleRootHex(events.map((event) => event.hash));
+		const memo = formatMemo({ periodStartMs: H, rootHex: root, count: events.length });
+		return { events, rows, leaves, records, root, memo };
+	}
+
+	function anchorRow(world: ReturnType<typeof sessionRows>, over: Record<string, unknown> = {}) {
+		return {
+			period_start: START_ISO,
+			period_end: END_ISO,
+			root: world.root,
+			event_count: 2,
+			memo: world.memo,
+			tx_sig: "sig1",
+			signer: PUBKEY,
+			cluster: "devnet",
+			slot: 42,
+			anchored_at: new Date(H + 5 * HOUR).toISOString(),
+			...over,
+		};
+	}
+
+	function rpcReturning(memo: string | null, over: Record<string, unknown> = {}) {
+		return {
+			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqaEyCydFLPYGEC",
+			transactionMemo: async () => ({ memo, payer: PUBKEY, payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: null, ...over }),
+		};
+	}
+
+	function substrateWith(stub: Record<string, unknown>, env: Record<string, string | undefined> = {}) {
+		return new Substrate(loadConfig({ SOLANA_ANCHOR_PUBKEY: PUBKEY, ...env }), { index: null, greptime: stub as never });
+	}
+
+	test("anchored happy path: chain ok, hour anchored, ok true", async () => {
+		const world = sessionRows();
+		const substrate = substrateWith({
+			readEvents: async () => world.rows,
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(world.memo) as never });
+		expect(verdict.ok).toBe(true);
+		expect(verdict.chain).toEqual({ ok: true });
+		expect(verdict.hours).toHaveLength(1);
+		expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "anchored", event_count: 2, root: world.root, tx_sig: "sig1", slot: 42 });
+		expect(verdict.reason).toBeUndefined();
+		expect(verdict.uncovered).toEqual({ count: 0, ids: [] });
+	});
+
+	test("pending inside 3 h: no row, ok true", async () => {
+		const world = sessionRows();
+		const substrate = substrateWith({
+			readEvents: async () => world.rows,
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => null,
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 2 * HOUR });
+		expect(verdict.ok).toBe(true);
+		expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "pending" });
+	});
+
+	test("an hour that is still open is pending, never a digest failure", async () => {
+		// Regression from the first scratch proof: the open current hour
+		// digested to "not closed yet" and failed the whole verify. D28-15
+		// names the open hour pending.
+		const world = sessionRows();
+		let digested = false;
+		const substrate = substrateWith({
+			readEvents: async () => world.rows,
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => {
+				digested = true;
+				return world.leaves;
+			},
+			anchorForPeriod: async () => null,
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 30 * 60_000 });
+		expect(digested).toBe(false);
+		expect(verdict.ok).toBe(true);
+		expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "pending", root: null });
+	});
+
+	test("unanchored past 3 h: no row, fails naming the hour", async () => {
+		const world = sessionRows();
+		const substrate = substrateWith({
+			readEvents: async () => world.rows,
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => null,
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR });
+		expect(verdict.ok).toBe(false);
+		expect(verdict.hours[0]?.status).toBe("unanchored");
+		expect(verdict.reason).toContain(START_ISO);
+	});
+
+	test("mismatch: memo root differs from recompute, fails naming the hour", async () => {
+		const world = sessionRows();
+		const other = formatMemo({ periodStartMs: H, rootHex: "0".repeat(64), count: 2 });
+		const substrate = substrateWith({
+			readEvents: async () => world.rows,
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(other) as never });
+		expect(verdict.ok).toBe(false);
+		expect(verdict.hours[0]?.status).toBe("mismatch");
+		expect(verdict.reason).toContain(START_ISO);
+	});
+
+	test("mismatch: memo signed by another key", async () => {
+		const world = sessionRows();
+		const substrate = substrateWith({
+			readEvents: async () => world.rows,
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const rpc = {
+			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqaEyCydFLPYGEC",
+			transactionMemo: async () => ({ memo: world.memo, payer: "SomeoneElse11111111111111111111111111111", payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: null }),
+		};
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpc as never });
+		expect(verdict.hours[0]?.status).toBe("mismatch");
+		expect(verdict.ok).toBe(false);
+	});
+
+	test("mismatch: memo names another period", async () => {
+		const world = sessionRows();
+		const other = formatMemo({ periodStartMs: H + HOUR, rootHex: world.root, count: 2 });
+		const substrate = substrateWith({
+			readEvents: async () => world.rows,
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(other) as never });
+		expect(verdict.hours[0]?.status).toBe("mismatch");
+		expect(verdict.ok).toBe(false);
+	});
+
+	test("mismatch: row disagrees with the memo", async () => {
+		const world = sessionRows();
+		const substrate = substrateWith({
+			readEvents: async () => world.rows,
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world, { root: "1".repeat(64) }),
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(world.memo) as never });
+		expect(verdict.hours[0]?.status).toBe("mismatch");
+		expect(verdict.ok).toBe(false);
+	});
+
+	test("mismatch: digest throw names the event, hour fails", async () => {
+		const world = sessionRows();
+		const substrate = substrateWith({
+			readEvents: async () => world.rows,
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => {
+				throw new Error("hour member evt_1 has no event row");
+			},
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(world.memo) as never });
+		expect(verdict.hours[0]?.status).toBe("mismatch");
+		expect(verdict.hours[0]?.reason).toContain("evt_1");
+		expect(verdict.ok).toBe(false);
+	});
+
+	test("unverified: devnet unreadable fails closed", async () => {
+		const world = sessionRows();
+		const substrate = substrateWith({
+			readEvents: async () => world.rows,
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const rpc = {
+			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqaEyCydFLPYGEC",
+			transactionMemo: async () => {
+				throw new Error("fetch failed");
+			},
+		};
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpc as never });
+		expect(verdict.hours[0]?.status).toBe("unverified");
+		expect(verdict.ok).toBe(false);
+	});
+
+	test("unverified: transaction not found fails closed", async () => {
+		const world = sessionRows();
+		const substrate = substrateWith({
+			readEvents: async () => world.rows,
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const rpc = {
+			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqaEyCydFLPYGEC",
+			transactionMemo: async () => null,
+		};
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpc as never });
+		expect(verdict.hours[0]?.status).toBe("unverified");
+		expect(verdict.ok).toBe(false);
+	});
+
+	test("unverified: pubkey unset fails closed", async () => {
+		const world = sessionRows();
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: {
+			readEvents: async () => world.rows,
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		} as never });
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(world.memo) as never });
+		expect(verdict.hours[0]?.status).toBe("unverified");
+		expect(verdict.ok).toBe(false);
+	});
+
+	test("legacy pre-coverage events are counted, never failing", async () => {
+		const world = sessionRows();
+		const legacy = normalizeEvent(
+			{ surface: "omp", kind: "note", summary: "old", session_id: "sess-old", graph_id: "ut-1", actor: "agent", ts: new Date(H - HOUR).toISOString() },
+			null,
+		);
+		const rows = [...world.rows, { ...legacy, ts: Date.parse(legacy.ts), payload: JSON.stringify(legacy.payload) }];
+		const substrate = substrateWith({
+			readEvents: async () => rows,
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(world.memo) as never });
+		expect(verdict.ok).toBe(true);
+		expect(verdict.legacy.count).toBe(1);
+		expect(verdict.uncovered.count).toBe(0);
+	});
+
+	test("uncovered post-coverage events fail naming the ids", async () => {
+		const world = sessionRows();
+		const extra = normalizeEvent(
+			{ surface: "omp", kind: "note", summary: "new", session_id: "sess-new", graph_id: "ut-1", actor: "agent" },
+			null,
+		);
+		const rows = [...world.rows, { ...extra, ts: Date.parse(extra.ts), payload: JSON.stringify(extra.payload) }];
+		const substrate = substrateWith({
+			readEvents: async () => rows,
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(world.memo) as never });
+		expect(verdict.ok).toBe(false);
+		expect(verdict.uncovered.ids).toContain(extra.id);
+		expect(verdict.reason).toContain(extra.id);
+	});
+
+	test("an ingest record landing between the reads clears the uncovered id", async () => {
+		// Mirror race: the event row is stored before its ingest record, so
+		// the first ingest read misses it and the row reads uncovered. The
+		// bounded re-fetch finds the landed record. A normal append lands in
+		// the still-open hour, which stays pending: the anchored hour's
+		// leaves do not include it, and digesting that hour would mismatch.
+		const world = sessionRows();
+		const extra = normalizeEvent(
+			{ surface: "omp", kind: "note", summary: "settling", session_id: "sess-new", graph_id: "ut-1", actor: "agent" },
+			null,
+		);
+		const extraRow = { ...extra, ts: Date.parse(extra.ts), payload: JSON.stringify(extra.payload) };
+		const openAt = H + 5 * HOUR + 1000;
+		const extraRecord = { event_id: extra.id, event_ts: Date.parse(extra.ts), ingested_at: openAt };
+		let ingests = 0;
+		const substrate = substrateWith({
+			readEvents: async () => [...world.rows, extraRow],
+			graphIngest: async () => (++ingests === 1 ? world.records : [...world.records, extraRecord]),
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: openAt + 60_000, rpc: rpcReturning(world.memo) as never });
+		expect(ingests).toBe(2);
+		expect(verdict.uncovered).toEqual({ count: 0, ids: [] });
+		expect(verdict.ok).toBe(true);
+		expect(verdict.reason).toBeUndefined();
+		expect(verdict.hours).toHaveLength(2);
+		expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "anchored" });
+		expect(verdict.hours[1]).toMatchObject({
+			period_start: new Date(H + 5 * HOUR).toISOString(),
+			status: "pending",
+			event_count: 1,
+			root: null,
+		});
+	});
+
+	test("an event with no record at any read still fails naming the id", async () => {
+		// Genuinely record-less, not racing: the re-fetch runs and finds
+		// nothing new, so only the remainder fails.
+		const world = sessionRows();
+		const extra = normalizeEvent(
+			{ surface: "omp", kind: "note", summary: "new", session_id: "sess-new", graph_id: "ut-1", actor: "agent" },
+			null,
+		);
+		const rows = [...world.rows, { ...extra, ts: Date.parse(extra.ts), payload: JSON.stringify(extra.payload) }];
+		let ingests = 0;
+		const substrate = substrateWith({
+			readEvents: async () => rows,
+			graphIngest: async () => {
+				ingests += 1;
+				return world.records;
+			},
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(world.memo) as never });
+		expect(ingests).toBe(2);
+		expect(verdict.ok).toBe(false);
+		expect(verdict.uncovered.ids).toContain(extra.id);
+		expect(verdict.reason).toContain(extra.id);
+	});
+
+	test("anchors off stays chain-only for evidence", async () => {
+		const world = sessionRows();
+		const substrate = substrateWith({ readEvents: async () => world.rows });
+		const verdict = await substrate.verifyGraph("ut-1", { anchors: false });
+		expect(verdict.ok).toBe(true);
+		expect(verdict.chain).toEqual({ ok: true });
+		expect(verdict.hours).toEqual([]);
+	});
+
+	test("empty graph verifies with no hours", async () => {
+		const substrate = substrateWith({ readEvents: async () => [], graphIngest: async () => [], firstIngestMs: async () => null });
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR });
+		expect(verdict.ok).toBe(true);
+		expect(verdict.hours).toEqual([]);
+	});
+
+	test("an hour whose event rows were deleted fails instead of passing unseen", async () => {
+		// Every agent_events row gone, ingest records retained: the hour must
+		// still be checked, and its whole-hour digest names the missing member.
+		const world = sessionRows();
+		const missing = world.events[0]?.id ?? "evt_deleted";
+		const substrate = substrateWith({
+			readEvents: async () => [],
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => {
+				throw new Error(`hour member ${missing} has no event row`);
+			},
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(world.memo) as never });
+		expect(verdict.hours).toHaveLength(1);
+		expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "mismatch" });
+		expect(verdict.hours[0]?.reason).toContain(missing);
+		expect(verdict.ok).toBe(false);
+	});
+
+	test("hours past the whole-verify budget read unverified without a devnet call", async () => {
+		const world = sessionRows();
+		let rpcCalls = 0;
+		const substrate = substrateWith(
+			{
+				readEvents: async () => world.rows,
+				graphIngest: async () => world.records,
+				firstIngestMs: async () => H,
+				hourLeaves: async () => world.leaves,
+				anchorForPeriod: async () => anchorRow(world),
+			},
+			{ SUBSTRATE_VERIFY_TIMEOUT_MS: "1" },
+		);
+		const rpc = {
+			transactionMemo: async () => {
+				rpcCalls += 1;
+				return { memo: world.memo, payer: PUBKEY, payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: null };
+			},
+		};
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpc as never });
+		expect(rpcCalls).toBe(0);
+		expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "unverified" });
+		expect(verdict.hours[0]?.reason).toContain("timed out before this hour was checked");
+		expect(verdict.ok).toBe(false);
+	});
+
+	test("a slow devnet read is cut off inside the budget", async () => {
+		const world = sessionRows();
+		const substrate = substrateWith(
+			{
+				readEvents: async () => world.rows,
+				graphIngest: async () => world.records,
+				firstIngestMs: async () => H,
+				hourLeaves: async () => world.leaves,
+				anchorForPeriod: async () => anchorRow(world),
+			},
+			{ SUBSTRATE_VERIFY_TIMEOUT_MS: String(VERIFY_RESPONSE_MARGIN_MS + 150) },
+		);
+		const rpc = {
+			getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqaEyCydFLPYGEC",
+			transactionMemo: (): Promise<never> => Promise.withResolvers<never>().promise,
+		};
+		const started = Date.now();
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpc as never });
+		expect(Date.now() - started).toBeLessThan(2000);
+		expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "unverified" });
+		expect(verdict.hours[0]?.reason).toContain("timed out checking this hour");
+		expect(verdict.ok).toBe(false);
+	});
+
+	test("an open hour stays pending even on an exhausted budget", async () => {
+		// Pending needs no devnet read and no digest, so it never spends the
+		// budget: a 1 ms whole-verify budget must not turn it unverified.
+		const world = sessionRows();
+		const substrate = substrateWith(
+			{
+				readEvents: async () => world.rows,
+				graphIngest: async () => world.records,
+				firstIngestMs: async () => H,
+				hourLeaves: async () => {
+					throw new Error("an open hour must never be digested");
+				},
+				anchorForPeriod: async () => {
+					throw new Error("an open hour must never read its row");
+				},
+			},
+			{ SUBSTRATE_VERIFY_TIMEOUT_MS: "1" },
+		);
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 30 * 60_000 });
+		expect(verdict.hours).toHaveLength(1);
+		expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "pending", root: null });
+		expect(verdict.ok).toBe(true);
+	});
+
+	test("a short budget still runs quick checks under a scaled margin", async () => {
+		const world = sessionRows();
+		const substrate = substrateWith(
+			{
+				readEvents: async () => world.rows,
+				graphIngest: async () => world.records,
+				firstIngestMs: async () => H,
+				hourLeaves: async () => world.leaves,
+				anchorForPeriod: async () => anchorRow(world),
+			},
+			{ SUBSTRATE_VERIFY_TIMEOUT_MS: "1000" },
+		);
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(world.memo) as never });
+		expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "anchored" });
+		expect(verdict.ok).toBe(true);
+	});
+
+	test("an event moved to another graph fails naming the event", async () => {
+		// The tip event now reads under a different graph_id: the chain over
+		// what remains is intact, and the hour still digests to its anchored
+		// root (the stored hash is found by event id), so only the retained
+		// ingest record with no row in this graph's read can catch it.
+		const world = sessionRows();
+		const moved = world.events[1]?.id ?? "evt_moved";
+		const substrate = substrateWith({
+			readEvents: async () => world.rows.slice(0, 1),
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(world.memo) as never });
+		expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "anchored" });
+		expect(verdict.missing).toEqual({ count: 1, ids: [moved] });
+		expect(verdict.reason).toContain(moved);
+		expect(verdict.ok).toBe(false);
+	});
+
+	test("an event appended between the reads is pending, not missing", async () => {
+		// Live-graph race: the event row read ran first, then the append
+		// landed its row and ingest record before the ingest read. The
+		// re-read finds the row, so the record settles: its hour is still
+		// open, pending by definition, and the healthy graph verifies.
+		const world = sessionRows();
+		const liveAt = H + 5 * HOUR + 1000;
+		const live = normalizeEvent(
+			{ surface: "omp", kind: "note", summary: "live", session_id: "sess-1", graph_id: "ut-1", actor: "agent" },
+			world.events[1]?.hash ?? null,
+		);
+		const liveRow = { ...live, ts: Date.parse(live.ts), payload: JSON.stringify(live.payload) };
+		const liveRecord = { event_id: live.id, event_ts: Date.parse(live.ts), ingested_at: liveAt };
+		let reads = 0;
+		const substrate = substrateWith({
+			readEvents: async () => (++reads === 1 ? world.rows : [...world.rows, liveRow]),
+			graphIngest: async () => [...world.records, liveRecord],
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: liveAt + 60_000, rpc: rpcReturning(world.memo) as never });
+		expect(reads).toBe(2);
+		expect(verdict.ok).toBe(true);
+		expect(verdict.missing).toEqual({ count: 0, ids: [] });
+		expect(verdict.reason).toBeUndefined();
+		expect(verdict.hours).toHaveLength(2);
+		expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "anchored" });
+		expect(verdict.hours[1]).toMatchObject({ status: "pending", event_count: 0 });
+	});
+
+	test("a burst whose first link missed the ingest read still clears", async () => {
+		// Two linked appends land between the reads; the first event's row
+		// is saved but its ingest record is still in flight, so only the
+		// second enters the gap. The re-read holds both rows. The bounded
+		// ingest refresh then finds the earlier record, so the sibling is
+		// no longer record-less, and the whole fresh session re-chains —
+		// the earlier link is not dropped and the gap clears.
+		const world = sessionRows();
+		const liveAt = H + 5 * HOUR + 1000;
+		const first = normalizeEvent(
+			{ surface: "omp", kind: "note", summary: "burst-1", session_id: "sess-1", graph_id: "ut-1", actor: "agent" },
+			world.events[1]?.hash ?? null,
+		);
+		const second = normalizeEvent(
+			{ surface: "omp", kind: "note", summary: "burst-2", session_id: "sess-1", graph_id: "ut-1", actor: "agent" },
+			first.hash,
+		);
+		const toRow = (event: typeof first) => ({ ...event, ts: Date.parse(event.ts), payload: JSON.stringify(event.payload) });
+		const firstRecord = { event_id: first.id, event_ts: Date.parse(first.ts), ingested_at: liveAt };
+		const secondRecord = { event_id: second.id, event_ts: Date.parse(second.ts), ingested_at: liveAt };
+		let reads = 0;
+		let ingests = 0;
+		const substrate = substrateWith({
+			readEvents: async () => (++reads === 1 ? world.rows : [...world.rows, toRow(first), toRow(second)]),
+			graphIngest: async () => {
+				ingests += 1;
+				return ingests === 1 ? [...world.records, secondRecord] : [...world.records, firstRecord, secondRecord];
+			},
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: liveAt + 60_000, rpc: rpcReturning(world.memo) as never });
+		expect(reads).toBe(2);
+		expect(ingests).toBe(2);
+		expect(verdict.ok).toBe(true);
+		expect(verdict.uncovered).toEqual({ count: 0, ids: [] });
+		expect(verdict.missing).toEqual({ count: 0, ids: [] });
+		expect(verdict.reason).toBeUndefined();
+	});
+
+	test("two fresh rows where only the later one has an ingest record do not verify ok", async () => {
+		// The earlier append is in the re-read and its ingest record never
+		// lands, including on the bounded refresh. The later row has a
+		// record and is the gap. That record-less sibling keeps the gap
+		// from clearing, and the earlier id stays uncovered.
+		const world = sessionRows();
+		const liveAt = H + 5 * HOUR + 1000;
+		const first = normalizeEvent(
+			{ surface: "omp", kind: "note", summary: "burst-1", session_id: "sess-1", graph_id: "ut-1", actor: "agent" },
+			world.events[1]?.hash ?? null,
+		);
+		const second = normalizeEvent(
+			{ surface: "omp", kind: "note", summary: "burst-2", session_id: "sess-1", graph_id: "ut-1", actor: "agent" },
+			first.hash,
+		);
+		const toRow = (event: typeof first) => ({ ...event, ts: Date.parse(event.ts), payload: JSON.stringify(event.payload) });
+		const secondRecord = { event_id: second.id, event_ts: Date.parse(second.ts), ingested_at: liveAt };
+		let reads = 0;
+		let ingests = 0;
+		const substrate = substrateWith({
+			readEvents: async () => (++reads === 1 ? world.rows : [...world.rows, toRow(first), toRow(second)]),
+			graphIngest: async () => {
+				ingests += 1;
+				return [...world.records, secondRecord];
+			},
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: liveAt + 60_000, rpc: rpcReturning(world.memo) as never });
+		expect(reads).toBe(2);
+		expect(ingests).toBe(2);
+		expect(verdict.ok).toBe(false);
+		expect(verdict.uncovered.ids).toContain(first.id);
+		expect(verdict.missing.ids).toContain(second.id);
+		expect(verdict.reason).toContain(first.id);
+	});
+
+	test("a fresh session whose record arrives only on the gap refresh is chain-checked", async () => {
+		// Session A is the gap: its new row is missing from the first event
+		// read and present on the re-read, with an ingest record from the
+		// start, so the re-read runs and the gap can clear. Session B is not
+		// in that first ingest and not in the gap. Its record lands only on
+		// the refresh that covers fresh rows, and the row that lands has an
+		// edited summary under the original hash. Checking only the gap's
+		// session would accept the graph; B has to be chain-checked too.
+		const world = sessionRows();
+		const liveAt = H + 5 * HOUR + 1000;
+		const gapEvent = normalizeEvent(
+			{ surface: "omp", kind: "note", summary: "gap-clears", session_id: "sess-1", graph_id: "ut-1", actor: "agent" },
+			world.events[1]?.hash ?? null,
+		);
+		const foreign = normalizeEvent(
+			{ surface: "omp", kind: "note", summary: "other-session", session_id: "sess-other", graph_id: "ut-1", actor: "agent" },
+			null,
+		);
+		const tampered = { ...foreign, summary: "edited summary" };
+		const toRow = (event: typeof gapEvent) => ({ ...event, ts: Date.parse(event.ts), payload: JSON.stringify(event.payload) });
+		const gapRecord = { event_id: gapEvent.id, event_ts: Date.parse(gapEvent.ts), ingested_at: liveAt };
+		const foreignRecord = { event_id: foreign.id, event_ts: Date.parse(foreign.ts), ingested_at: liveAt };
+		let reads = 0;
+		let ingests = 0;
+		const substrate = substrateWith({
+			readEvents: async () => (++reads === 1 ? world.rows : [...world.rows, toRow(gapEvent), toRow(tampered)]),
+			graphIngest: async () => {
+				ingests += 1;
+				return ingests === 1 ? [...world.records, gapRecord] : [...world.records, gapRecord, foreignRecord];
+			},
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: liveAt + 60_000, rpc: rpcReturning(world.memo) as never });
+		expect(reads).toBe(2);
+		expect(ingests).toBe(2);
+		expect(verdict.missing.ids).not.toContain(gapEvent.id);
+		expect(verdict.ok).toBe(false);
+		expect(verdict.chain.ok).toBe(false);
+		expect(verdict.chain.brokenAt).toBe(foreign.id);
+		expect(verdict.reason).toContain("hash does not match");
+	});
+
+	test("verification rejects an anchor read from another cluster", async () => {
+		const world = sessionRows();
+		const substrate = substrateWith({
+			readEvents: async () => world.rows,
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const rpc = {
+			...rpcReturning(world.memo),
+			getGenesisHash: async () => "5eykt4UsFv8P8NJdTREpYbfX66U2GJkSnp6vn33VqDv",
+		};
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpc as never });
+		expect(verdict.ok).toBe(false);
+		expect(verdict.hours[0]?.status).toBe("unverified");
+		expect(verdict.hours[0]?.reason).toContain("not devnet");
+	});
+
+	test("a deletion in the still-open hour still fails naming the event", async () => {
+		// The re-read — not the hour — tells a live append from a deletion:
+		// a row gone at every read fails even while its hour is pending.
+		const world = sessionRows();
+		const deleted = world.events[1]?.id ?? "evt_deleted";
+		const substrate = substrateWith({
+			readEvents: async () => world.rows.slice(0, 1),
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 30 * 60_000, rpc: rpcReturning(world.memo) as never });
+		expect(verdict.hours[0]).toMatchObject({ status: "pending" });
+		expect(verdict.missing).toEqual({ count: 1, ids: [deleted] });
+		expect(verdict.reason).toContain(deleted);
+		expect(verdict.ok).toBe(false);
+	});
+
+	test("an event deleted between the reads fails even as its mate clears", async () => {
+		// Open-hour rewrite: the first read holds A but not B; before the
+		// re-read the writer deletes A and restores B as a recomputed
+		// genesis. The fresh session re-chains, so B clears — but A was
+		// never in the gap, and the fresh comparison still names it.
+		const world = sessionRows();
+		const deleted = world.events[0]?.id ?? "evt_deleted";
+		const restored = world.events[1] as SubstrateEvent;
+		const { hash: _dropped, ...content } = restored;
+		const forged = { ...content, summary: "rewritten after the move", prev: null };
+		const reforged = { ...forged, hash: eventHash(forged) };
+		const forgedRow = { ...reforged, ts: Date.parse(reforged.ts), payload: JSON.stringify(reforged.payload) };
+		let reads = 0;
+		const substrate = substrateWith({
+			readEvents: async () => (++reads === 1 ? world.rows.slice(0, 1) : [forgedRow]),
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 30 * 60_000, rpc: rpcReturning(world.memo) as never });
+		expect(verdict.hours[0]).toMatchObject({ status: "pending" });
+		expect(verdict.missing).toEqual({ count: 1, ids: [deleted] });
+		expect(verdict.reason).toContain(deleted);
+		expect(verdict.ok).toBe(false);
+	});
+
+	test("a restored row with edited content does not clear the gap", async () => {
+		// Ledger-level restore attack: the event reads under this graph in
+		// neither the first read (moved out) nor with intact contents in
+		// the re-read (summary edited, original hash kept). The re-chain
+		// rejects it, so the gap stays missing and the verify fails.
+		const world = sessionRows();
+		const moved = world.events[1]?.id ?? "evt_moved";
+		const original = world.rows[1] as Record<string, unknown>;
+		const restored = { ...original, summary: "rewritten after the move" };
+		let reads = 0;
+		const substrate = substrateWith({
+			readEvents: async () => (++reads === 1 ? world.rows.slice(0, 1) : [world.rows[0], restored]),
+			graphIngest: async () => world.records,
+			firstIngestMs: async () => H,
+			hourLeaves: async () => world.leaves,
+			anchorForPeriod: async () => anchorRow(world),
+		});
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(world.memo) as never });
+		expect(verdict.missing).toEqual({ count: 1, ids: [moved] });
+		expect(verdict.chain.ok).toBe(false);
+		expect(verdict.brokenAt).toBe(moved);
+		expect(verdict.ok).toBe(false);
+	});
+
+	test("a re-read past the budget fails closed naming the gap", async () => {
+		// The gap re-read shares the whole-verify budget: when it cannot
+		// finish in the allowance, the gap stays missing and the CLI still
+		// gets a failed report instead of `unreachable`.
+		// Real delay on purpose: the budget enforces against the platform
+		// clock, so only genuinely consumed time moves it (120 ms of work
+		// against a ~75 ms allowance is clear of scheduling jitter).
+		const world = sessionRows();
+		const liveAt = H + 5 * HOUR + 1000;
+		const liveRecord = { event_id: "evt_live", event_ts: liveAt, ingested_at: liveAt };
+		const substrate = substrateWith(
+			{
+				readEvents: (() => {
+					let reads = 0;
+					return async () => {
+						if (++reads === 1) return world.rows;
+						const { promise, resolve } = Promise.withResolvers<void>();
+						setTimeout(resolve, 120);
+						await promise;
+						return world.rows;
+					};
+				})(),
+				graphIngest: async () => [...world.records, liveRecord],
+				firstIngestMs: async () => H,
+				hourLeaves: async () => world.leaves,
+				anchorForPeriod: async () => anchorRow(world),
+			},
+			{ SUBSTRATE_VERIFY_TIMEOUT_MS: "100" },
+		);
+		const verdict = await substrate.verifyGraph("ut-1", { now: liveAt + 60_000, rpc: rpcReturning(world.memo) as never });
+		expect(verdict.missing).toEqual({ count: 1, ids: ["evt_live"] });
+		expect(verdict.reason).toContain("evt_live");
+		expect(verdict.ok).toBe(false);
+	});
+
+	test("a slow event read spends the budget before the first hour", async () => {
+		// The CLI times the whole request, so the deadline starts before the
+		// event read: a read slower than the budget leaves no allowance, and
+		// the hour reads unverified instead of anchoring past the CLI abort.
+		// Real delay on purpose: the budget enforces against the platform
+		// clock, so only genuinely consumed time moves it (120 ms of work
+		// against a 100 ms budget is 20 ms clear of scheduling jitter).
+		const world = sessionRows();
+		const substrate = substrateWith(
+			{
+				readEvents: async () => {
+					const { promise, resolve } = Promise.withResolvers<void>();
+					setTimeout(resolve, 120);
+					await promise;
+					return world.rows;
+				},
+				graphIngest: async () => world.records,
+				firstIngestMs: async () => H,
+				hourLeaves: async () => world.leaves,
+				anchorForPeriod: async () => anchorRow(world),
+			},
+			{ SUBSTRATE_VERIFY_TIMEOUT_MS: "100" },
+		);
+		const verdict = await substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(world.memo) as never });
+		expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "unverified" });
+		expect(verdict.hours[0]?.reason).toContain("timed out before this hour was checked");
+		expect(verdict.ok).toBe(false);
+	});
+});

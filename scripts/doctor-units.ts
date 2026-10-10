@@ -410,10 +410,12 @@ function restartLoopDetail(unit: Unit, enabled: ReadonlyMap<string, string>): st
 
 function sharedEnvDetail(unit: Unit): string | null {
 	if (unit.environmentFiles.length === 0) return "EnvironmentFile is unset";
-	// substrate-mcp is the process that needs the shared server env file. Every
-	// other substrate unit (collectors, the skills sync and bridge ticks) runs
-	// with its own env file through its drop-in.
-	if (unit.name !== "substrate-mcp.service" && unit.environmentFiles.includes(SHARED_ENV_FILE)) {
+	// substrate-mcp is the process that needs the shared server env file, and
+	// the hourly anchor job reads its SOLANA_* names from that same file
+	// (Phase 28). Every other substrate unit (collectors, the skills sync and
+	// bridge ticks) runs with its own env file through its drop-in.
+	const sharedEnvAllowed = unit.name === "substrate-mcp.service" || unit.name === "substrate-anchor.service";
+	if (!sharedEnvAllowed && unit.environmentFiles.includes(SHARED_ENV_FILE)) {
 		return `EnvironmentFile=${SHARED_ENV_FILE}`;
 	}
 	return null;

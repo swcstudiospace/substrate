@@ -38,6 +38,7 @@ import {
 	refuseDockerEndpoint,
 	refuseDockerEnv,
 	refuseExtraArgs,
+	refuseLedgerUrl,
 	refusePort,
 	refuseSmokeUrl,
 	resolveContainerRemoval,
@@ -297,6 +298,22 @@ describe("refuseSmokeUrl", () => {
 		expect(refuseSmokeUrl("http://127.0.0.1:7411")).toContain("production");
 		expect(refuseSmokeUrl("http://127.0.0.1:6420")).toContain("production");
 		expect(refuseSmokeUrl("http://[::1]:17410")).toBeNull();
+	});
+});
+
+describe("refuseLedgerUrl", () => {
+	test("refuses non-loopback ledgers on any port", () => {
+		// The fake-chain proof writes fake signatures into `anchors`: a live
+		// ledger must never see them.
+		expect(refuseLedgerUrl("https://greptime.example.com:4000")).toContain("non-loopback");
+		expect(refuseLedgerUrl("http://10.0.0.5:4000")).toContain("non-loopback");
+	});
+
+	test("accepts scratch loopback ledgers and rejects garbage", () => {
+		expect(refuseLedgerUrl("http://127.0.0.1:49832")).toBeNull();
+		expect(refuseLedgerUrl("http://localhost:4000")).toBeNull();
+		expect(refuseLedgerUrl("http://[::1]:4000")).toBeNull();
+		expect(refuseLedgerUrl("not a url")).toContain("unparseable");
 	});
 });
 

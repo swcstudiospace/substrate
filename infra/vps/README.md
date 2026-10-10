@@ -28,7 +28,7 @@ The script restarts `substrate-mcp.service`, `substrate-collector-grok.service`,
 
 ## Units
 
-All six units in this directory use `WorkingDirectory=/opt/agent-substrate/current`. The MCP, herdr, muse and skills units also set `ConditionPathExists` on their entry file under that symlink, so a missing entry skips the start instead of crash-looping. The Grok unit has no such guard. Install the matching drop-in with each unit:
+All the units in this directory use `WorkingDirectory=/opt/agent-substrate/current`. The MCP, herdr, muse, skills and anchor units also set `ConditionPathExists` on their entry file under that symlink, so a missing entry skips the start instead of crash-looping. The Grok unit has no such guard. Install the matching drop-in with each unit:
 
 | Unit | Drop-in | EnvironmentFile |
 | --- | --- | --- |
@@ -38,6 +38,7 @@ All six units in this directory use `WorkingDirectory=/opt/agent-substrate/curre
 | `substrate-collector-muse.service` | `substrate-collector-muse.service.d/10-environment.conf` | `/etc/substrate/substrate-collector-muse.env` |
 | `substrate-skills-sync.service` | `substrate-skills-sync.service.d/10-environment.conf` | `/etc/substrate/substrate-skills-sync.env` |
 | `substrate-skills-bridge.service` | `substrate-skills-bridge.service.d/10-environment.conf` | `/etc/substrate/substrate-bridge.env` |
+| `substrate-anchor.service` (+ `substrate-anchor.timer`) | `substrate-anchor.service.d/10-environment.conf` | `/etc/substrate/substrate.env` |
 
 The MCP server is the process that needs the shared env file. The Grok collector must not load it. Create `collector-grok.env` (root-owned, mode 0600) with only the names this process reads: `SUBSTRATE_URL`, `SUBSTRATE_TOKEN`, and optionally `GROK_SESSIONS_DIR`. `SUBSTRATE_COLLECTOR_STATE` is already set on the unit. Do not put database URLs, plane keys, handoff keys, or review tokens in that file. No values belong in git.
 
@@ -48,6 +49,14 @@ The herdr and muse file names carry the `substrate-` prefix and the Grok one doe
 The skills ticks follow the same rule with their own files. `substrate-skills-sync.env` holds `SUBSTRATE_URL`, the `substrate` bearer (`SUBSTRATE_TOKEN`, which is the name `identity:check` requires in that file; a token file named by `SUBSTRATE_TOKEN_FILE` or the tokens dir also resolves), and optionally `SUBSTRATE_SKILLS_LIBRARY` or `SUBSTRATE_SKILLS_STATE`. `substrate-bridge.env` holds `SUBSTRATE_URL` (the name `identity:check` requires there) and optionally `SUBSTRATE_TOKENS_DIR`; it must never define `SUBSTRATE_TOKEN` or `SUBSTRATE_TOKEN_FILE`, because the bridge refuses to run while one is set and serves `hermes`, `omp` and `grok-build` from the tokens dir instead. Both files are root-owned, mode 0600, names only here and values only on the host.
 
 The two skills timers (`substrate-skills-sync.timer`, `substrate-skills-bridge.timer`) tick every 5 minutes with a 30 s accuracy and their boot delays. Both services are oneshot, so they pick up the release on their next tick: a deploy never restarts the timers, and a rollback (`deploy-release.sh rollback`) takes effect at the next fire with no restart either. `SUBSTRATE_RELEASE_UNITS` can still name them for an explicit restart, but the default list leaves them alone.
+
+### Hourly anchor job
+
+`substrate-anchor.timer` fires `substrate-anchor.service` hourly (`OnCalendar=hourly`, `Persistent=true`). The service is `Type=oneshot` with no `Restart=`: a failing run already shows failed, and the next tick retries. It runs `bun packages/mcp-server/src/anchor-run.ts` from the pinned release, so a deploy needs no change — a oneshot reads `current` on every tick — and `deploy-release.sh` does not restart this oneshot.
+
+Trigger it only through `systemctl start substrate-anchor.service`: systemd never runs a second instance of an active oneshot, and the job re-checks the chain for the period immediately before every send, so two triggers cannot double-anchor an hour. Timing: the 5-minute ingest lag lives in the job, so an hour anchors at the second tick after it ends — pending for about 2 h, inside verify's 3 h window.
+
+The production key is used by the production unit only. A memo for some hour signed by that key from any other ledger would make production alarm on that hour, so the rehearsal harness never carries `SOLANA_*` names — check `env`, not values, if a scratch run looks anchored. The doctor covers the anchor unit like the server: `bun scripts/doctor-units.ts --dry-run` must stay green.
 
 ### Root and ProtectHome=false
 
