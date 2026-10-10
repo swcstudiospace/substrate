@@ -990,6 +990,31 @@ export class Substrate {
 	 * including an outage, because "memory.write raised" is not something an agent
 	 * mid-turn can act on and `denied: store.unavailable` is.
 	 */
+	/**
+	 * True only when the ledger was read and it holds no teachable note for
+	 * this memory. A missing client, a throw, or no session to narrow by
+	 * answers false: the caller then does not emit on a replay.
+	 */
+	private async teachableNoteMissing(memoryId: string, sessionId: string | undefined): Promise<boolean> {
+		if (!sessionId || !this.greptime) return false;
+		try {
+			const rows = await this.greptime.queryEvents({
+				match: { session_id: sessionId },
+				includePayload: true,
+				limit: 500,
+				order: "desc",
+			});
+			return !rows.some((row) => {
+				const payload = row["payload"];
+				if (typeof payload !== "object" || payload === null) return false;
+				const record = payload as Record<string, unknown>;
+				return record["action"] === "teachable" && record["memory_id"] === memoryId;
+			});
+		} catch {
+			return false;
+		}
+	}
+
 	async writeMemory(request: MemoryWriteRequest): Promise<MemoryWriteResult> {
 		// Reported on every reply, including the ones the gate never sees, so a caller
 		// always learns which surface its write was attributed to.
@@ -1045,14 +1070,21 @@ export class Substrate {
 		// `teachable.accepted` sample so the hourly anchor covers it with zero
 		// anchor-code changes. Fire-and-forget like the audit trail above — a
 		// failed trail write never fails the memory write.
+		// A replay of an already-noted memory must not emit again. A replay
+		// that is the first verified read of a memory — the earlier attempt
+		// was accepted but not verified, so it emitted nothing — still owes
+		// the one note. When the ledger cannot be asked, skip the replay:
+		// a duplicate note is worse than a missing one we cannot prove.
+		const replayNeedsNote =
+			result.deduplicated === true &&
+			result.entry !== undefined &&
+			(await this.teachableNoteMissing(result.entry.id, request.session_id));
 		if (
 			result.outcome === "accepted" &&
 			result.verified_persisted &&
 			result.entry &&
 			isTeachable(request.kind, request.subject ?? result.entry.subject) &&
-			// A replay returns the stored row and does not write it again.
-			// Emitting here would add a second acceptance note for one memory.
-			result.deduplicated !== true
+			(result.deduplicated !== true || replayNeedsNote)
 		) {
 			if ((SURFACES as readonly string[]).includes(writer)) {
 				await this.emit(teachableEvent(writer as Surface, request, result)).catch(() => undefined);

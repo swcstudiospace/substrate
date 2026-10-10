@@ -380,6 +380,38 @@ describe("writeMemory emits the teachable trail", () => {
 		expect(teachableEvents(emitted)).toHaveLength(1);
 	});
 
+	test("a retry after an unverified accept emits the one acceptance note", async () => {
+		const store = new TeachableStore();
+		store.hideFromReadBack = true;
+		const emitted: SubstrateEvent[] = [];
+		const greptime = {
+			ensureAppendMode: async () => true,
+			lastHash: async () => null,
+			insertEvent: async (event: SubstrateEvent) => {
+				emitted.push(event);
+			},
+			queryEvents: async () => emitted.map((event) => ({ ...event })),
+		};
+		const substrate = new Substrate(loadConfig({}), { index: store as never, greptime: greptime as never });
+
+		const first = await substrate.writeMemory({ ...TEACHABLE, idempotency_key: "k-late" });
+		expect(first.outcome).toBe("accepted");
+		expect(first.verified_persisted).toBe(false);
+		expect(teachableEvents(emitted)).toEqual([]);
+
+		store.hideFromReadBack = false;
+		const retry = await substrate.writeMemory({ ...TEACHABLE, idempotency_key: "k-late" });
+		expect(retry.outcome).toBe("accepted");
+		expect(retry.deduplicated).toBe(true);
+		expect(retry.verified_persisted).toBe(true);
+		expect(teachableEvents(emitted)).toHaveLength(1);
+		expect(teachableEvents(emitted)[0]?.payload["memory_id"]).toBe(retry.entry?.id);
+
+		const again = await substrate.writeMemory({ ...TEACHABLE, idempotency_key: "k-late" });
+		expect(again.deduplicated).toBe(true);
+		expect(teachableEvents(emitted)).toHaveLength(1);
+	});
+
 	test("a same-key retry does not emit a second acceptance note", async () => {
 		const { substrate, emitted } = teachableWorld(new TeachableStore());
 
