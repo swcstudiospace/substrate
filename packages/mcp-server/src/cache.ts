@@ -61,6 +61,8 @@ export interface CacheHealth {
 	misses: number;
 	bypasses: number;
 	errors: number;
+	/** Why the cache is off despite a URL being set — a DOCS-06 refusal. Absent otherwise. */
+	reason?: string;
 }
 
 export interface CacheSample {
@@ -82,6 +84,8 @@ export interface ReadThroughOptions {
 	log?: (line: string) => void;
 	commandTimeoutMs?: number;
 	record?: (sample: CacheSample) => void;
+	/** The DOCS-06 refusal to report in health, if the cache was refused. */
+	refusedReason?: string;
 }
 
 /**
@@ -191,6 +195,10 @@ export function createReadThroughCache(
 	config: SubstrateConfig,
 	record?: (sample: CacheSample) => void,
 ): ReadThroughCache {
+	if (config.dragonflyRefused) {
+		process.stderr.write(`[substrate] cache off: ${config.dragonflyRefused}\n`);
+		return new ReadThroughCache({ redis: null, enabled: false, record, refusedReason: config.dragonflyRefused });
+	}
 	if (!config.cacheEnabled || !config.dragonflyUrl) {
 		return new ReadThroughCache({ redis: null, enabled: false, record });
 	}
@@ -208,6 +216,7 @@ export class ReadThroughCache {
 	private readonly log: (line: string) => void;
 	private readonly commandTimeoutMs: number;
 	private readonly recordSample: ((sample: CacheSample) => void) | undefined;
+	private readonly refusedReason: string | undefined;
 	private hits = 0;
 	private misses = 0;
 	private bypasses = 0;
@@ -224,6 +233,7 @@ export class ReadThroughCache {
 		this.log = options.log ?? ((line) => process.stderr.write(line));
 		this.commandTimeoutMs = options.commandTimeoutMs ?? COMMAND_TIMEOUT_MS;
 		this.recordSample = options.record;
+		this.refusedReason = options.refusedReason;
 	}
 
 	health(): CacheHealth {
@@ -235,6 +245,7 @@ export class ReadThroughCache {
 			misses: this.misses,
 			bypasses: this.bypasses,
 			errors: this.errors,
+			...(this.refusedReason !== undefined ? { reason: this.refusedReason } : {}),
 		};
 	}
 
@@ -431,7 +442,10 @@ function shapeOk(klass: CacheClass, value: unknown): boolean {
 	if (klass === "brief") return typeof value === "string";
 	if (klass === "memory-search") {
 		if (Array.isArray(value)) return true;
-		return !!value && typeof value === "object" && Array.isArray((value as { entries?: unknown }).entries);
+		if (!value || typeof value !== "object") return false;
+		if ("entries" in value && Array.isArray(value.entries)) return true;
+		// Recall replies cache under the same class semantics (D26-06a).
+		return "results" in value && Array.isArray(value.results);
 	}
 	if (value === null) return true;
 	if (!value || typeof value !== "object") return false;

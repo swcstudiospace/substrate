@@ -58,7 +58,11 @@ import { holderOf, leaseView, normalizeTtlSeconds, type LeaseView } from "./leas
 import { createMirror, type Mirror, type MirrorContext, type MirrorFailure, type MirrorOp } from "./mirror.ts";
 import { runDodGate, type DodEvidence } from "./dod-gate.ts";
 import { normalizeSubject } from "./memory-policy.ts";
+import { recallMemories, UNTRUSTED_MEMORY_NOTICE, type RecallReply } from "./memory-recall.ts";
+import { forwardRetain, retainDocumentId } from "./memory-retain.ts";
+import { mergeDerivedHits, type MergedMemoryResults } from "./memory-search.ts";
 import { governMemoryWrite } from "./memory-write.ts";
+import { bankForSurface, hindsightBanksFromEnv, hindsightFromEnv } from "./planes/hindsight.ts";
 import type { FetchLike } from "./planes/ragflow.ts";
 import { redact, type SkillDocExampleRule } from "./redact.ts";
 import {
@@ -686,6 +690,13 @@ export class Substrate {
 	private readonly dodGateTest: { fetchImpl?: typeof fetch; hermesLinearUrl?: string; timeoutMs?: number };
 	/** RAGFlow fetch override for tests; production uses the global fetch. */
 	private readonly ragflowFetch: FetchLike;
+	/** Hindsight fetch override for tests; production uses the global fetch. */
+	private readonly hindsightFetch: FetchLike;
+	/** Background retains in flight, drained (bounded) on shutdown. */
+	private pendingRetains = 0;
+	private retainWaiters: Array<() => void> = [];
+	/** Latest background forward per plane document, so versions land in order. */
+	private readonly retainChains = new Map<string, Promise<void>>();
 	/** Source-URL ingest records for hash idempotency, held for the process lifetime. */
 	private docsIngestSeen = new Map<string, IngestRecord>();
 	/** In-flight page uploads by record key, tagged with the uploading sha. */
@@ -708,6 +719,7 @@ export class Substrate {
 			dodGate?: { fetchImpl?: typeof fetch; hermesLinearUrl?: string; timeoutMs?: number };
 			cache?: ReadThroughCache;
 			ragflowFetch?: FetchLike;
+			hindsightFetch?: FetchLike;
 			desktop?: DesktopDriver | null;
 		},
 		observer: SubstrateObserver = {},
@@ -732,6 +744,7 @@ export class Substrate {
 		this.desktop = stores?.desktop ?? null;
 		this.dodGateTest = stores?.dodGate ?? {};
 		this.ragflowFetch = stores?.ragflowFetch ?? fetch;
+		this.hindsightFetch = stores?.hindsightFetch ?? fetch;
 		this.observer = observer;
 		this.cache =
 			stores?.cache ??
@@ -1055,6 +1068,47 @@ export class Substrate {
 
 		await this.auditMemoryWrite(request, result);
 		if (result.outcome === "accepted" || commitUncertain) await this.cache.bump(MEMORY_GENERATION_KEY);
+		// The Hindsight forward runs after the accepted reply is decided and never
+		// blocks it: Postgres stays the governed store (D26-04). A refusal or plane
+		// failure warns without re-opening the write. A successful retain bumps the
+		// generation again: a recall cached in the gap between the index bump and
+		// the retain landing must not hide the fresh memory for a whole TTL.
+		// Forwards to one document run in acceptance order: a stalled older
+		// version must not land after (and replace) its accepted replacement.
+		if (result.outcome === "accepted" && result.verified_persisted && result.entry) {
+			const entry = result.entry;
+			const hindsight = hindsightFromEnv();
+			const run = (): Promise<void> => {
+				return forwardRetain(
+					{
+						config: hindsight,
+						fetchImpl: this.hindsightFetch,
+						vmGuest: this.config.vmGuest,
+						emit: (event) => this.emit(event),
+					},
+					request,
+					result,
+				)
+					.then((outcome) => {
+						if (outcome.forwarded) return this.cache.bump(MEMORY_GENERATION_KEY);
+					})
+					.then(() => undefined)
+					.catch(() => undefined);
+			};
+			if (!hindsight) {
+				this.trackRetain(run());
+				return result;
+			}
+			const chainKey = `${hindsight.url} ${bankForSurface(hindsight, result.writer)} ${retainDocumentId(entry, result.idempotency_key)}`;
+			const previous = this.retainChains.get(chainKey);
+			const flight = (previous ?? Promise.resolve()).then(run, run);
+			this.retainChains.set(chainKey, flight);
+			this.trackRetain(
+				flight.finally(() => {
+					if (this.retainChains.get(chainKey) === flight) this.retainChains.delete(chainKey);
+				}),
+			);
+		}
 		return result;
 	}
 
@@ -1101,22 +1155,35 @@ export class Substrate {
 		}).catch(() => undefined);
 	}
 
+	/**
+	 * The list search: governed index entries first, Hindsight hits appended
+	 * after them marked derived (D26-05). A plane outage yields index-only
+	 * results with `{degraded: true, reason}` — never a refusal.
+	 */
 	async searchMemory(
 		query: string,
 		scope?: string,
 		limit?: number,
 		includeSuperseded?: boolean,
 		surface = "unattributed",
-	): Promise<MemoryEntry[]> {
+	): Promise<MergedMemoryResults> {
 		return this.cache.getOrLoad({
 			klass: "memory-search",
 			surface,
-			args: { query, scope: scope ?? null, limit: limit ?? null, includeSuperseded: includeSuperseded ?? false },
+			// The shape marker keeps pre-upgrade bare-list entries under their
+			// old key: a hit must return the merged shape, never a stale array.
+			args: { query, scope: scope ?? null, limit: limit ?? null, includeSuperseded: includeSuperseded ?? false, shape: "merged-v1" },
 			generations: [MEMORY_GENERATION_KEY],
-			refreshAt: (entries) => earliestRefreshAt(entries.map((entry) => entry.reverify_after)),
+			refreshAt: (merged) => earliestRefreshAt(merged.entries.map((entry) => entry.reverify_after)),
+			// A degraded answer (outage, partial) is still the answer, but it
+			// must not sit in the cache: the next search re-probes the plane.
+			store: (merged) => !merged.degraded,
 			load: async () => {
-				if (!this.index) return [];
-				return this.index.searchMemory(query, scope, limit, includeSuperseded);
+				const [entries, recall] = await Promise.all([
+					this.index ? this.index.searchMemory(query, scope, limit, includeSuperseded) : Promise.resolve([]),
+					this.recallMemories({ query }, surface),
+				]);
+				return mergeDerivedHits(entries, recall, scope);
 			},
 		});
 	}
@@ -1140,6 +1207,63 @@ export class Substrate {
 				return this.index.searchMemoryPage(search);
 			},
 		});
+	}
+
+	/**
+	 * `memory_recall`: Hindsight recall as an explicit tool (D26-03, D26-05).
+	 *
+	 * Read-only and fail-open: an unconfigured plane or an unreachable bank
+	 * answers empty with a reason, never a throw. Reads emit nothing. Never
+	 * called from the brief's synchronous compose path. A guest instance
+	 * refuses before the cache lookup, so neither the tool nor the recall
+	 * inside `memory_search` leaks shared memories out of the guest.
+	 */
+	async recallMemories(input: { query?: unknown }, callerSurface: string | null): Promise<RecallReply> {
+		if (this.config.vmGuest) {
+			return { results: [], degraded: true, notice: UNTRUSTED_MEMORY_NOTICE, reason: "vm-guest" };
+		}
+		const query = typeof input.query === "string" ? input.query : "";
+		const surface = callerSurface ?? "unattributed";
+		const config = hindsightFromEnv();
+		const banks = hindsightBanksFromEnv();
+		return this.cache.getOrLoad({
+			klass: "memory-search",
+			surface,
+			args: { recall: true, query, banks: banks ?? null },
+			// An accepted memory write bumps this generation, so a fresh
+			// retain is never hidden behind a stale recall (D26-06a).
+			generations: [MEMORY_GENERATION_KEY],
+			// A degraded answer (outage, partial) is still the answer, but it
+			// must not sit in the cache: the next call re-probes the plane.
+			store: (reply) => !reply.degraded,
+			load: () => recallMemories({ config, banks, vmGuest: this.config.vmGuest, fetchImpl: this.hindsightFetch }, query, callerSurface),
+		});
+	}
+
+	/**
+	 * Track one background retain so shutdown can drain it. The write reply
+	 * never waits: this only counts the flight for `drainPendingRetains`.
+	 */
+	private trackRetain(task: Promise<unknown>): void {
+		this.pendingRetains += 1;
+		void task.finally(() => {
+			this.pendingRetains -= 1;
+			if (this.pendingRetains === 0) {
+				for (const wake of this.retainWaiters.splice(0)) wake();
+			}
+		});
+	}
+
+	/**
+	 * Wait for in-flight background retains, within a bound. A hanging plane
+	 * must not delay a stop into a SIGKILL; a finished one must not be lost
+	 * silently. Resolves either way.
+	 */
+	async drainPendingRetains(timeoutMs = 10_000): Promise<void> {
+		if (this.pendingRetains === 0) return;
+		const { promise, resolve } = Promise.withResolvers<void>();
+		this.retainWaiters.push(resolve);
+		await Promise.race([promise, Bun.sleep(timeoutMs)]);
 	}
 
 	/**

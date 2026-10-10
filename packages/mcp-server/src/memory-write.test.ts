@@ -24,7 +24,7 @@ const START = Date.parse("2026-09-30T00:00:00.000Z");
  * behaviours the SQL is responsible for and the gate relies on: `claimWrite`'s
  * hand-over rules, and `insertEntry` retiring a predecessor atomically.
  */
-class FakeStore implements MemoryStore {
+export class FakeStore implements MemoryStore {
 	clock = START;
 	readonly rows = new Map<string, { entry: MemoryEntry; conflict_key: string | null }>();
 	readonly writes = new Map<string, WriteRecord & { holder: string; claimed: number }>();
@@ -82,6 +82,20 @@ class FakeStore implements MemoryStore {
 
 	standing(): MemoryEntry[] {
 		return this.entries().filter((entry) => !entry.superseded_by);
+	}
+
+	/** What a brief would carry: every standing entry, whatever its scope. */
+	async memoryForBrief(): Promise<MemoryEntry[]> {
+		return this.standing();
+	}
+
+	/** The brief's graph reads, empty for a store that holds only memories. */
+	async getGraph(): Promise<null> {
+		return null;
+	}
+
+	async openGraphs(): Promise<never[]> {
+		return [];
 	}
 
 	async claimWrite(input: {

@@ -76,11 +76,17 @@ server.listen(config.port, config.host, () => {
 
 /** How long the final OTLP export may take before shutdown stops waiting for it. */
 const SHUTDOWN_FLUSH_MS = 2000;
+/** How long in-flight background retains may take before shutdown stops waiting for them. */
+const SHUTDOWN_RETAIN_MS = 10_000;
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
 	process.on(signal, () => {
 		observability.stop();
 		server.close(async () => {
+			// In-flight background retains finish first (bounded): an accepted
+			// write answered before its forward landed must not lose that
+			// forward silently on restart.
+			await substrate.drainPendingRetains(SHUTDOWN_RETAIN_MS);
 			// The last export before shutdown, so the counters a restart resets are not
 			// simply lost — and *awaited*, within a bound. Firing it and exiting
 			// immediately lost it on an idle server, where the close callback runs at once

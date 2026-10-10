@@ -456,3 +456,108 @@ describe("no RAGFlow credentials in the repo", () => {
 		}
 	});
 });
+
+/**
+ * The substrate-only door (D26-01): Hindsight is reached ONLY through
+ * `substrate-mcp` (`planes/hindsight.ts`). No Hindsight MCP server appears in
+ * any agent config, and no package outside `mcp-server` imports the client.
+ */
+describe("Hindsight is reachable only through substrate-mcp", () => {
+	test("no agent config registers a Hindsight MCP server", async () => {
+		// Config files only: prose in the README and in docs/ has to be free
+		// to say that this wiring is forbidden.
+		const configs = [
+			...(await filesMatching("**/*.json")),
+			...(await filesMatching("**/*.{yaml,yml}")),
+			...(await filesMatching("**/*.toml")),
+			// The projector's sources, not its tests: a test asserting that no
+			// generated file names Hindsight has to name it, and is the
+			// enforcement of this rule where the configs land.
+			...(await filesMatching("packages/projector/**/*.ts")).filter((path) => !path.endsWith(".test.ts")),
+		];
+
+		const offenders = configs.filter((path) => {
+			const body = read(path);
+			const registersServers = /mcpServers|mcp_servers|AddMcpServer|addMcpServer/.test(body);
+			return registersServers && /hindsight/i.test(body);
+		});
+
+		expect(offenders).toEqual([]);
+	});
+
+	test("no package outside the MCP server imports the Hindsight client", async () => {
+		// Mirrors the ledger-client test above. The CLI proves its cap against
+		// the engine by reading the file as text rather than importing it for
+		// exactly this reason — a string naming the file is not an import.
+		const offenders = (await filesMatching("**/*.ts"))
+			.filter((path) => !path.startsWith(LEDGER_PACKAGE))
+			.filter((path) =>
+				/(from\s+["'][^"']*|import\s*\(\s*["']|require\s*\(\s*["'])[^"']*(planes\/hindsight|memory-recall|memory-retain|hindsight-fake)/.test(
+					read(path),
+				),
+			);
+
+		expect(offenders).toEqual([]);
+	});
+});
+
+/**
+ * `HINDSIGHT_*` is read only in `mcp-server` (D26-02: credentials live only
+ * in the server env file, read by `planes/hindsight.ts`). The bank prefix
+ * and bank list are routing config, not credentials, so they carry values in
+ * `.env.example` like `GREPTIME_DB=public` does.
+ */
+describe("no Hindsight reads or credentials outside the MCP server", () => {
+	test("nothing outside the MCP server names HINDSIGHT_", async () => {
+		const offenders = (await filesMatching("**/*.ts"))
+			.filter((path) => !path.startsWith(LEDGER_PACKAGE))
+			.filter((path) => /HINDSIGHT_/.test(read(path)));
+
+		expect(offenders).toEqual([]);
+	});
+});
+
+const HINDSIGHT_CREDENTIAL = /HINDSIGHT_(?:URL|API_KEY)["']?\s*[:=]\s*["']?[^\s"']/;
+
+function carriesHindsightCredential(body: string): boolean {
+	return body
+		.split("\n")
+		.filter((line) => !/^\s*(?:#|\/\/|\*|<!--)/.test(line))
+		.some((line) => HINDSIGHT_CREDENTIAL.test(line));
+}
+
+describe("no Hindsight credentials in the repo", () => {
+	test("no committed non-test file carries a Hindsight endpoint or credential", () => {
+		const offenders = trackedFiles()
+			.filter((path) => !path.endsWith(".test.ts"))
+			.filter((path) => path !== relative(ROOT, import.meta.path))
+			.filter((path) => carriesHindsightCredential(read(path)));
+
+		expect(offenders).toEqual([]);
+	});
+
+	test("the scan catches an endpoint or key with a value", () => {
+		for (const body of [
+			"HINDSIGHT_URL=http://agent-substrate-forwarder:8888",
+			"HINDSIGHT_API_KEY=hs-0123456789abcdef",
+			'  "HINDSIGHT_URL": "http://x:8888"',
+			"HINDSIGHT_API_KEY: hs-0123456789abcdef",
+		]) {
+			expect({ body, caught: carriesHindsightCredential(body) }).toEqual({ body, caught: true });
+		}
+	});
+
+	test("the scan does not fire on a blank, a routing value, a bare name or a code read", () => {
+		for (const body of [
+			"HINDSIGHT_URL=",
+			"HINDSIGHT_API_KEY=",
+			"HINDSIGHT_BANK_PREFIX=sub-",
+			"HINDSIGHT_BANKS=",
+			"Reads `HINDSIGHT_URL` / `HINDSIGHT_API_KEY` only.",
+			"const url = env.HINDSIGHT_URL?.trim();",
+			"# HINDSIGHT_API_KEY lives in the server env file",
+		]) {
+			expect({ body, caught: carriesHindsightCredential(body) }).toEqual({ body, caught: false });
+		}
+	});
+});

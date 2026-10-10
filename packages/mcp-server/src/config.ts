@@ -43,6 +43,14 @@ export interface SubstrateConfig {
 	dragonflyUrl: string | undefined;
 	/** True only when `dragonflyUrl` is set and `SUBSTRATE_CACHE` is not `0`. */
 	cacheEnabled: boolean;
+	/**
+	 * Why the cache is off despite `DRAGONFLY_URL` being set (DOCS-06).
+	 *
+	 * A plaintext non-loopback `redis://` URL is refused fail-open: the cache
+	 * stays off, answers come back uncached, and the reason is logged at boot.
+	 * Null when the cache was not refused.
+	 */
+	dragonflyRefused: string | null;
 	linearApiKey: string | undefined;
 	notionApiKey: string | undefined;
 	notionTaskGraphDataSource: string;
@@ -473,6 +481,45 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 }
 
 /**
+ * Whether a Redis URL may enable the cache (DOCS-06).
+ *
+ * A plaintext `redis://` URL whose host is not loopback is refused: a
+ * credential crossing any other network in the clear is the failure this
+ * exists to prevent. Loopback and `rediss://` stay allowed; anything else —
+ * including an unparseable URL, which the client reports at connect time —
+ * passes through to the existing fail-open runtime.
+ */
+export function parseRedisUrl(raw: string | undefined): { kind: "unset" } | { kind: "ok"; url: string } | { kind: "refused"; reason: string } {
+	const trimmed = raw?.trim();
+	if (!trimmed) return { kind: "unset" };
+	let scheme = "";
+	let host = "";
+	try {
+		const parsed = new URL(trimmed);
+		scheme = parsed.protocol.toLowerCase();
+		// The URL parser keeps IPv6 brackets on the hostname; strip them so the
+		// loopback check sees the address.
+		host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.+$/, "");
+	} catch {
+		return { kind: "ok", url: trimmed };
+	}
+	if (scheme === "redis:") {
+		// An actual loopback address, not a DNS name that starts with one:
+		// `127.cache.example.com` must not pass as `127.0.0.1` does.
+		const octets = host.split(".");
+		const loopbackV4 =
+			octets.length === 4 &&
+			octets[0] === "127" &&
+			octets.slice(1).every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255);
+		const loopback = host === "localhost" || host === "::1" || host === "0.0.0.0" || loopbackV4;
+		if (!loopback) {
+			return { kind: "refused", reason: `refusing plaintext redis:// to non-loopback host ${host || "(empty)"}` };
+		}
+	}
+	return { kind: "ok", url: trimmed };
+}
+
+/**
  * `SUBSTRATE_CACHE=0` (also `false` / `no`) disables the cache. Any other value,
  * including unset, leaves it on when `DRAGONFLY_URL` is set. A typo must not
  * silently disable a cache the operator configured.
@@ -480,10 +527,13 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 function cacheSettings(env: Record<string, string | undefined>): {
 	dragonflyUrl: string | undefined;
 	cacheEnabled: boolean;
+	dragonflyRefused: string | null;
 } {
-	const dragonflyUrl = env.DRAGONFLY_URL?.trim() || undefined;
+	const parsed = parseRedisUrl(env.DRAGONFLY_URL);
 	const off = /^(0|false|no)$/i.test(env.SUBSTRATE_CACHE?.trim() ?? "");
-	return { dragonflyUrl, cacheEnabled: dragonflyUrl !== undefined && !off };
+	if (parsed.kind === "refused") return { dragonflyUrl: undefined, cacheEnabled: false, dragonflyRefused: parsed.reason };
+	const dragonflyUrl = parsed.kind === "ok" ? parsed.url : undefined;
+	return { dragonflyUrl, cacheEnabled: dragonflyUrl !== undefined && !off, dragonflyRefused: null };
 }
 
 /** Comma- or whitespace-separated, so an operator can wrap the line in the env file. */
