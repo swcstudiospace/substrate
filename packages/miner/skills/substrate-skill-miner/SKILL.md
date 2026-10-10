@@ -1,6 +1,6 @@
 ---
 name: substrate-skill-miner
-description: Mine captured agent sessions for reusable procedures and propose them as skills to the shared library. Use when the substrate-skill-miner cron job fires, when the monitor prints `transcript <conversation_id>` or `day <YYYY-MM-DD>` lines, or when asked to mine Cursor transcripts, substrate events or other agents' sessions for new skills, learnings or repeatable workflows.
+description: Mine captured agent sessions for reusable procedures and propose them as skills to the shared library. Use when the substrate-skill-miner cron job fires, when the monitor prints `transcript <conversation_id> <content-hash>` or `day <YYYY-MM-DD>` lines, or when asked to mine Cursor transcripts, substrate events or other agents' sessions for new skills, learnings or repeatable workflows.
 metadata:
   source: agent-substrate:packages/miner/skills/substrate-skill-miner
   library: swcstudiospace/agent-skills
@@ -18,15 +18,16 @@ reviews and merges it.
 
 The monitor script runs before you and prints only what is new since the last run:
 
-- `transcript <conversation_id>` — a captured Cursor conversation, already redacted, at
-  `/var/lib/substrate/transcripts/cursor/<conversation_id>.jsonl`.
+- `transcript <conversation_id> <content-hash>` — a captured Cursor conversation, already redacted,
+  at `/var/lib/substrate/transcripts/cursor/<conversation_id>.jsonl`. The hash changes only when
+  the capture gains new content, so a repeated id with a new hash is new work to mine.
 - `day <YYYY-MM-DD>` — the daily pass: also look at other surfaces' sessions.
 
 If the monitor printed nothing new, there is nothing to do: say so and stop.
 
 ## Steps
 
-1. For each `transcript <conversation_id>` line, read
+1. For each `transcript <conversation_id> <content-hash>` line, read
    `/var/lib/substrate/transcripts/cursor/<conversation_id>.jsonl`. Read only that path; never
    look for transcripts anywhere else.
 2. On a `day <date>` line, also read the substrate brief (`substrate brief --surface hermes`) and
