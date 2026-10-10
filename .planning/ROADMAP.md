@@ -240,7 +240,13 @@ Plans:
   5. In a bounded window, `dispatch:hermes` launches within 30 s, the claim lands under the Hermes token, Linear shows `agent:hermes` and Notion Agent hermes, a Claude Code brief names the claim within 60 s of labelling, the run ends in a gated Done or a release, and the kill switch is back on afterwards.
 
 **Proof** (DISP-08): A `--once --dry-run` rehearsal runs isolated; the proof needs the live system in an operator-approved, bounded kill-switch-off window: Linear, Notion and Hermes model quota.
-**Plans**: TBD
+**Plans**: 4 plans
+
+Plans:
+- [ ] 24-01-PLAN.md — Port the Linear poll, substrate-mcp client and worktree modules with substrate-bearer identity
+- [ ] 24-02-PLAN.md — Port launch, watch, route and tick modules with give-up persistence and outcome events
+- [ ] 24-03-PLAN.md — Port the supervised loop, package the module and stage the unit file
+- [ ] 24-04-PLAN.md — Rehearsal smoke for the label-to-session loop plus the gated DISP-08 live tail
 
 ### Phase 25: Docs search and ingest (RAGFlow)
 

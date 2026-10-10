@@ -2,14 +2,14 @@
 gsd_state_version: "1.0"
 milestone: v1.3
 milestone_name: Build plan completion
-current_phase: 23
-current_phase_name: claim-mirror-and-dod-gate
-status: verified
-stopped_at: Phase 23 verified — 23-VERIFICATION.md passed 30/30 at bfde32f, smoke 38/38 green on isolated twin, live MIRROR-08 proof operator-gated
-last_updated: "2026-10-10T17:35:00Z"
+current_phase: 24
+current_phase_name: substrate-dispatcher
+status: planned
+stopped_at: Phase 24 planned — 24-CONTEXT.md, 24-RESEARCH.md and 4 PLANs (24-01..24-04) committed, SUMMARYs absent, ready to execute
+last_updated: "2026-10-10T18:30:00Z"
 last_activity: 2026-10-10
-last_activity_desc: Phase 23 verified (claim mirror + DoD gate; full suite 2706/58/1 F-01 recorded; smoke:mirror 38/38; live proof gated)
-state_head: bfde32f
+last_activity_desc: Phase 24 planning (autonomous discuss-equivalent + research + 4 plans, rehearsal-first with operator-gated DISP-08 tail)
+state_head: 60bd0c1
 progress:
   total_phases: 18
   completed_phases: 3
