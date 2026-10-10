@@ -37,9 +37,9 @@ actuals:
 status: complete
 ---
 
-# Phase 25 Plan 03: Dataset lifecycle plus gated live inventory Summary
-
-DOCS-03 dataset lifecycle with the skills-sync degradation, the plane
+| 1 | Build dataset resolve plus refresh plus degradation hook | 446d50d | docs-datasets.ts, docs-datasets.test.ts, planes/ragflow.ts (createDataset), ragflow-fake.ts (create), docs-search.ts (pin age) |
+| 2 | Document the plane and update the data-planes wiring row | 1274c30 | docs-search-ingest.md, data-planes.md, .env.example |
+| 3 | Map the G1-G4 gated live steps and stop (checkpoint) | 79dc28c | docs-proof.md, 25-VALIDATION.md |
 documentation, and the G1-G4 gated inventory — rehearsal proven, live
 steps untouched.
 
