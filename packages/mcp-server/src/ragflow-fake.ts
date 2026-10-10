@@ -68,6 +68,12 @@ export class RagflowFake {
 		{ id: HAMM_ID, name: "programming-desk", embedding_model: "tei-bge-small" },
 		{ id: LEIPZIG_ID, name: "agent-skills", embedding_model: "tei-bge-small" },
 	];
+	/** Every uploaded document, in order. */
+	readonly uploads: Array<{ dataset_id: string; content: string; metadata: Record<string, string> }> = [];
+	/** `done` parses after two polls; `never` stays parsing so timeout logic is provable. */
+	parseBehavior: "done" | "never" = "done";
+	private parsePolls: Record<string, number> = {};
+	private nextDoc = 1;
 	/** A dataset's served chunks, by dataset id. Tests replace entries for redaction proofs. */
 	readonly chunks: Record<string, FakeChunk[]> = {
 		[BERLIN_ID]: seedChunks(BERLIN_ID, "https://example.com/agent-substrate/data-planes"),
@@ -90,6 +96,12 @@ export class RagflowFake {
 		this.requests.push({ method, path: url.pathname, body });
 		if (method === "POST" && url.pathname === "/api/v1/retrieval") return this.retrieval(body);
 		if (method === "GET" && url.pathname === "/api/v1/datasets") return this.datasetList();
+		if (method === "POST" && url.pathname.startsWith("/api/v1/datasets/") && url.pathname.endsWith("/documents")) {
+			return this.upload(url.pathname.split("/")[4] ?? "", body);
+		}
+		if (method === "GET" && url.pathname.startsWith("/api/v1/documents/") && url.pathname.endsWith("/parse")) {
+			return this.parse(url.pathname.split("/")[4] ?? "");
+		}
 		return Response.json({ error: `fake has no route for ${method} ${url.pathname}` }, { status: 404 });
 	};
 
@@ -124,5 +136,32 @@ export class RagflowFake {
 		return Response.json({
 			data: this.datasets.map((dataset) => ({ id: dataset.id, name: dataset.name })),
 		});
+	}
+
+	private upload(datasetId: string, body: unknown): Response {
+		if (!this.datasets.some((dataset) => dataset.id === datasetId)) {
+			return Response.json({ error: "unknown dataset" }, { status: 404 });
+		}
+		if (body === null || typeof body !== "object" || !("content" in body) || typeof body.content !== "string") {
+			return Response.json({ error: "content required" }, { status: 400 });
+		}
+		const metadata: Record<string, string> = {};
+		if ("metadata" in body && body.metadata !== null && typeof body.metadata === "object") {
+			for (const [key, value] of Object.entries(body.metadata)) {
+				if (typeof value === "string") metadata[key] = value;
+			}
+		}
+		this.uploads.push({ dataset_id: datasetId, content: body.content, metadata });
+		const documentId = `doc-upload-${this.nextDoc}`;
+		this.nextDoc += 1;
+		this.parsePolls[documentId] = 0;
+		return Response.json({ data: { document_id: documentId, status: "parsing" } });
+	}
+
+	private parse(documentId: string): Response {
+		if (!(documentId in this.parsePolls)) return Response.json({ error: "unknown document" }, { status: 404 });
+		this.parsePolls[documentId] = (this.parsePolls[documentId] ?? 0) + 1;
+		const status = this.parseBehavior === "done" && (this.parsePolls[documentId] ?? 0) >= 2 ? "done" : "parsing";
+		return Response.json({ data: { document_id: documentId, status } });
 	}
 }

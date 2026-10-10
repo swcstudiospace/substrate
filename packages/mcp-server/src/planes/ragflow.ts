@@ -62,7 +62,8 @@ export type RetrievalOutcome =
 /** The most results one retrieval may ask for (D25-03). */
 export const MAX_RETRIEVAL_PAGE_SIZE = 10;
 
-type FetchImpl = typeof fetch;
+/** The fetch surface the plane client needs: injectable for rehearsal fakes. */
+export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
 /**
  * Retrieve chunks for a question over explicit dataset ids.
@@ -74,7 +75,7 @@ type FetchImpl = typeof fetch;
 export async function retrieveChunks(
 	config: RagflowConfig,
 	request: RetrievalRequest,
-	fetchImpl: FetchImpl = fetch,
+	fetchImpl: FetchLike = fetch,
 	timeoutMs = 4000,
 ): Promise<RetrievalOutcome> {
 	if (request.dataset_ids.length === 0) {
@@ -151,7 +152,7 @@ export type DatasetListOutcome =
  */
 export async function listDatasets(
 	config: RagflowConfig,
-	fetchImpl: FetchImpl = fetch,
+	fetchImpl: FetchLike = fetch,
 	timeoutMs = 4000,
 ): Promise<DatasetListOutcome> {
 	let response: Response;
@@ -187,4 +188,105 @@ export async function listDatasets(
 		if (typeof entry.id === "string" && typeof entry.name === "string") datasets.push({ id: entry.id, name: entry.name });
 	}
 	return { ok: true, datasets };
+}
+
+/** The ingest metadata every upload sends, so retrieval can echo it (U-03). */
+export interface UploadMetadata {
+	source_url: string;
+	commit: string;
+	heading_path: string;
+}
+
+export interface UploadRequest {
+	dataset_id: string;
+	content: string;
+	metadata: UploadMetadata;
+}
+
+export type UploadOutcome =
+	| { ok: true; document_id: string }
+	| { ok: false; reason: string };
+
+/**
+ * Upload one redacted page. The exact parse paths are the rehearsal shape
+ * (U-02): G1/G3 confirm them against the deployment.
+ */
+export async function uploadDocument(
+	config: RagflowConfig,
+	request: UploadRequest,
+	fetchImpl: FetchLike = fetch,
+	timeoutMs = 8000,
+): Promise<UploadOutcome> {
+	let response: Response;
+	try {
+		response = await fetchImpl(`${config.url}/api/v1/datasets/${encodeURIComponent(request.dataset_id)}/documents`, {
+			method: "POST",
+			headers: { authorization: `Bearer ${config.apiKey}`, "content-type": "application/json" },
+			body: JSON.stringify({ content: request.content, metadata: request.metadata }),
+			signal: AbortSignal.timeout(timeoutMs),
+		});
+	} catch (cause) {
+		return { ok: false, reason: `ragflow unreachable: ${String(cause instanceof Error ? cause.message : cause).slice(0, 200)}` };
+	}
+	if (!response.ok) return { ok: false, reason: `ragflow ${response.status}` };
+	let body: unknown;
+	try {
+		body = await response.json();
+	} catch {
+		return { ok: false, reason: "ragflow: upload answer was not JSON" };
+	}
+	if (body === null || typeof body !== "object" || !("data" in body)) {
+		return { ok: false, reason: "ragflow: unexpected upload shape" };
+	}
+	const data = body.data;
+	if (data === null || typeof data !== "object" || !("document_id" in data) || typeof data.document_id !== "string") {
+		return { ok: false, reason: "ragflow: unexpected upload shape" };
+	}
+	return { ok: true, document_id: data.document_id };
+}
+
+export interface PollOptions {
+	maxPolls?: number;
+	intervalMs?: number;
+	timeoutMs?: number;
+}
+
+/**
+ * Poll a document's parse status until done. A parse that never finishes is
+ * a timeout reason — never a hang, never a throw.
+ */
+export async function pollParseStatus(
+	config: RagflowConfig,
+	documentId: string,
+	fetchImpl: FetchLike = fetch,
+	opts: PollOptions = {},
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+	const maxPolls = opts.maxPolls ?? 10;
+	const intervalMs = opts.intervalMs ?? 100;
+	const timeoutMs = opts.timeoutMs ?? 4000;
+	for (let poll = 0; poll < maxPolls; poll += 1) {
+		let response: Response;
+		try {
+			response = await fetchImpl(`${config.url}/api/v1/documents/${encodeURIComponent(documentId)}/parse`, {
+				method: "GET",
+				headers: { authorization: `Bearer ${config.apiKey}` },
+				signal: AbortSignal.timeout(timeoutMs),
+			});
+		} catch (cause) {
+			return { ok: false, reason: `ragflow unreachable: ${String(cause instanceof Error ? cause.message : cause).slice(0, 200)}` };
+		}
+		if (!response.ok) return { ok: false, reason: `ragflow ${response.status}` };
+		const body: unknown = await response.json().catch((): unknown => null);
+		const status =
+			body !== null && typeof body === "object" && "data" in body && body.data !== null && typeof body.data === "object" && "status" in body.data
+				? body.data.status
+				: null;
+		if (status === "done") return { ok: true };
+		if (poll < maxPolls - 1 && intervalMs > 0) {
+			const { promise, resolve } = Promise.withResolvers<void>();
+			setTimeout(resolve, intervalMs);
+			await promise;
+		}
+	}
+	return { ok: false, reason: "parse-timeout" };
 }
