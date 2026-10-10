@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import { validateAgentCard } from "./agent-card.ts";
 import { loadConfig } from "./config.ts";
 import type { EventQuery } from "./greptime.ts";
 import { memoryToolWriter } from "./mcp.ts";
 import { createObservability } from "./observe.ts";
 import { createHttpServer, healthStatus, memoryWriteStatus, memoryWriter } from "./server.ts";
 import { Substrate } from "./service.ts";
-import type { SubstrateEvent } from "./types.ts";
+import type { MemoryEntry, SubstrateEvent } from "./types.ts";
 
 /** Shorthand for a health report; every field defaults to the unhealthy value. */
 function health(over: Partial<Parameters<typeof healthStatus>[0]> = {}) {
@@ -214,6 +215,113 @@ describe("routes", () => {
 		try {
 			expect((await post("/events/query", {})).status).toBe(401);
 			expect((await post("/events/query", {}, { authorization: "Bearer tok-omp" })).status).toBe(200);
+		} finally {
+			await stop();
+		}
+	});
+});
+
+describe("agent card route", () => {
+	/** One live teachable fact, as the index would hand it to the reader. */
+	function teachable(id: string, writer: string, subject = "teachable:retry-budget"): MemoryEntry {
+		return {
+			id,
+			scope: "graph:ut-1",
+			kind: "fact",
+			text: "retry with a capped budget and backoff",
+			writer,
+			subject,
+			actor: "agent",
+			trust: "agent-claimed",
+			ttl: "graph",
+			created: "2026-10-10T00:00:00.000Z",
+			version: 1,
+			entry_hash: "ef".repeat(32),
+			needs_reverification: false,
+		};
+	}
+
+	/**
+	 * The real server with a stub index behind the card reader — the filtering
+	 * is pinned in agent-card.test.ts, so this is about the wiring: status,
+	 * shape and who may ask.
+	 */
+	async function serveCard(rows: MemoryEntry[], env: Record<string, string | undefined> = {}) {
+		const config = loadConfig(env);
+		const observability = createObservability(config, env);
+		await observability.start();
+		const index = {
+			searchMemoryPage: async () => ({ entries: rows, next: null }),
+		};
+		const substrate = new Substrate(config, { index: index as never, greptime: null }, observability.observer);
+		const server = createHttpServer(substrate, config, observability);
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		const address = server.address();
+		const port = typeof address === "object" && address ? address.port : 0;
+		return {
+			get: (path: string, headers: Record<string, string> = {}) =>
+				fetch(`http://127.0.0.1:${port}${path}`, { headers }),
+			stop: () =>
+				new Promise<void>((resolve) => {
+					observability.stop();
+					server.close(() => resolve());
+				}),
+		};
+	}
+
+	test("a known surface gets a 200 validator-clean card listing its teachable", async () => {
+		const { get, stop } = await serveCard([teachable("mem_7", "hermes")]);
+		try {
+			const response = await get("/.well-known/agent-card.json?surface=hermes");
+			const card = (await response.json()) as Record<string, unknown>;
+
+			expect(response.status).toBe(200);
+			expect(validateAgentCard(card)).toEqual([]);
+			const skills = card.skills as Array<Record<string, unknown>>;
+			expect(skills).toHaveLength(1);
+			expect(skills[0]?.id).toBe("mem_7");
+			expect(skills[0]?.name).toBe("retry-budget");
+			expect(String(card.url)).toContain("/.well-known/agent-card.json?surface=hermes");
+		} finally {
+			await stop();
+		}
+	});
+
+	test("a missing surface is a 400 naming the parameter", async () => {
+		const { get, stop } = await serveCard([]);
+		try {
+			const response = await get("/.well-known/agent-card.json");
+			const body = (await response.json()) as Record<string, unknown>;
+
+			expect(response.status).toBe(400);
+			expect(String(body.error)).toContain("surface");
+		} finally {
+			await stop();
+		}
+	});
+
+	test("an unknown surface is a 400, never a default card", async () => {
+		const { get, stop } = await serveCard([teachable("mem_7", "hermes")]);
+		try {
+			const response = await get("/.well-known/agent-card.json?surface=nope");
+
+			expect(response.status).toBe(400);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("an anonymous caller still gets a 200 where anonymous callers are accepted", async () => {
+		const { get, stop } = await serveCard([teachable("mem_7", "hermes")], {
+			SUBSTRATE_ALLOW_ANONYMOUS: "1",
+			SUBSTRATE_TOKEN_HERMES: "tok-hermes",
+		});
+		try {
+			// No bearer: A2A discovery is read-only, the /healthz exemption class.
+			const response = await get("/.well-known/agent-card.json?surface=hermes");
+
+			expect(response.status).toBe(200);
+			expect(validateAgentCard((await response.json()) as Record<string, unknown>)).toEqual([]);
 		} finally {
 			await stop();
 		}

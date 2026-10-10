@@ -21,7 +21,7 @@
  * for both transports: every route that reaches the service goes through `auditedRest`
  * under the same tool name and the same audit mode its MCP equivalent has, and a
  * fail-closed route whose record the chain refuses is answered 503 rather than served.
- * Only `/healthz`, `/metrics` and `/slo` are exempt, and no agent action is behind them.
+ * Only `/healthz`, `/metrics`, `/slo` and `/.well-known/agent-card.json` are exempt, and no agent action is behind them.
  */
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { randomUUID } from "node:crypto";
@@ -36,6 +36,7 @@ import {
 	unmappedBearer,
 	type SubstrateConfig,
 } from "./config.ts";
+import { buildAgentCard } from "./agent-card.ts";
 import { formatDrift } from "./drift.ts";
 import { InvalidEventError } from "./event.ts";
 import { InvalidHandoffError } from "./handoff.ts";
@@ -503,6 +504,28 @@ export function createHttpServer(
 					results,
 					breached: results.filter((result) => result.status === "breached").map((result) => result.id),
 				});
+				return;
+			}
+
+			if (req.method === "GET" && url.pathname === "/.well-known/agent-card.json") {
+				// A2A discovery: read-only, no agent action behind it, no audit record —
+				// the same exemption class as /healthz above. A card is per surface by
+				// CARD-01, so a missing or unknown surface is a 400, never a default.
+				const cardSurface = url.searchParams.get("surface");
+				if (!cardSurface) {
+					sendJson(res, 400, { error: "surface query parameter is required" });
+					return;
+				}
+				if (!(SURFACES as readonly string[]).includes(cardSurface)) {
+					sendJson(res, 400, { error: `unknown surface ${JSON.stringify(cardSurface.slice(0, 80))}` });
+					return;
+				}
+				const card = buildAgentCard(
+					cardSurface as Surface,
+					`http://${config.host}:${config.port}`,
+					await substrate.teachablesForSurface(cardSurface),
+				);
+				sendJson(res, 200, card);
 				return;
 			}
 

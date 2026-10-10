@@ -60,6 +60,7 @@ const KNOWN_ROUTES = [
 	"/slo",
 	"/evidence",
 	"/skills/propose",
+	"/.well-known/agent-card.json",
 ] as const;
 
 export function normalizeRoute(pathname: string): string {
