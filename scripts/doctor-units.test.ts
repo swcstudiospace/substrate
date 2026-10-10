@@ -278,6 +278,8 @@ describe("repo units", () => {
 			"substrate-collector-herdr.service",
 			"substrate-collector-muse.service",
 			"substrate-mcp.service",
+			"substrate-skills-bridge.service",
+			"substrate-skills-sync.service",
 		]);
 		for (const unit of units) {
 			expect(unit.workingDirectory).toBe(RELEASE_CURRENT);
@@ -314,6 +316,21 @@ describe("repo units", () => {
 			const unit = units.find((candidate) => candidate.name === `substrate-collector-${name}.service`);
 			expect(unit?.environmentFiles).toEqual([expected[name]]);
 			expect(unit?.environmentFiles).not.toContain(SHARED_ENV_FILE);
+		}
+		// Phase 22 skills units (SKILL-02/SKILL-03): shared env plus the per-unit
+		// file the identity manifest delivers the bearer to, by name — the value
+		// lives only on the host, never in this repo (D22-10, D20-07).
+		const skillsExpected = {
+			"substrate-skills-sync.service": deliveredTo("skills-sync"),
+			"substrate-skills-bridge.service": deliveredTo("bridge"),
+		} as const;
+		expect(skillsExpected).toEqual({
+			"substrate-skills-sync.service": "/etc/substrate/substrate-skills-sync.env",
+			"substrate-skills-bridge.service": "/etc/substrate/substrate-bridge.env",
+		});
+		for (const [unitName, perUnit] of Object.entries(skillsExpected)) {
+			const unit = units.find((candidate) => candidate.name === unitName);
+			expect(unit?.environmentFiles).toEqual([SHARED_ENV_FILE, perUnit]);
 		}
 		expect(diagnose(units, listGitTree(repoRoot, "HEAD"))).toEqual([]);
 	});

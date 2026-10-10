@@ -1,0 +1,41 @@
+[Unit]
+Description=Agent Substrate — Hermes pending-skill bridge (staged skill_manage → library PR) and queue drain
+Documentation=https://github.com/swcstudiospace/agent-substrate
+After=network-online.target substrate-mcp.service
+Wants=substrate-mcp.service
+# A missing code path skips the start instead of crash-looping (Phase 16 guard
+# convention). Paths are machine-specific; adjust when deploying elsewhere.
+ConditionPathExists=/usr/bin/python3
+ConditionPathExists=/opt/agent-substrate/current/packages/miner/src/substrate_miner/bridge.py
+[Service]
+# One tick, started by substrate-skills-bridge.timer (D-10): group ~/.hermes/pending/skills by
+# skill name, propose library skills and new foreground-created skills through
+# POST 127.0.0.1:7410/skills/propose with the hermes surface bearer (read per request
+# following the token.ts order), hold everything else for the owner, then drain the Omp
+# and Grok queued-proposal dirs. Never reads ~/.hermes/pending/memory. Log and held state:
+# /var/lib/substrate/miner/bridge-log.jsonl and bridge-held.json.
+Type=oneshot
+EnvironmentFile=/etc/substrate/substrate.env
+# Per-unit bearer carriage (Phase 20 D20-07; clients.json bridge row):
+# names SUBSTRATE_TOKEN_SUBSTRATE by name. The value lives only on the host,
+# never in this repo.
+EnvironmentFile=/etc/substrate/substrate-bridge.env
+Environment=HOME=/root
+Environment=PYTHONPATH=/opt/agent-substrate/current/packages/miner/src
+WorkingDirectory=/opt/agent-substrate/current
+# System python3: httpx is already installed; no venv.
+ExecStart=/usr/bin/python3 -m substrate_miner bridge --once
+
+StateDirectory=substrate
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=substrate-skills-bridge
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX

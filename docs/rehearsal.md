@@ -68,7 +68,10 @@ Flags, as built:
   runs for real; `consumer.env` gains the four `SUBSTRATE_REHEARSAL_SKILLS_*` paths.
   `bun run smoke:skills-propose` is the proof that drives it. Every instance, with
   or without the flag, sets `SUBSTRATE_SKILLS_STATE` inside its run directory, so a
-  twin can never write the host's skills state.
+  twin can never write the host's skills state. `bun run smoke:skills-sync`
+  ([skills-sync-bridge-miners.md](skills-sync-bridge-miners.md)) replays the
+  mined-to-projected loop on the same fixture: bridge propose, queue drains,
+  sync refusals, a simulated owner merge plus ff tick, and projector links.
 
 `up` refuses unless Docker is reachable, both images are present locally, free
 disk is above the ~2 GiB floor (it never prunes), and the port is free. It
