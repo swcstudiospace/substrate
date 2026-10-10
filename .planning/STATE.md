@@ -4,12 +4,12 @@ milestone: v1.3
 milestone_name: Build plan completion
 current_phase: 24
 current_phase_name: substrate-dispatcher
-status: planned
-stopped_at: Phase 24 planned — 24-CONTEXT.md, 24-RESEARCH.md and 4 PLANs (24-01..24-04) committed, SUMMARYs absent, ready to execute
-last_updated: "2026-10-10T18:30:00Z"
+status: verified
+stopped_at: Phase 24 verified — 24-VERIFICATION.md rehearsal scope green at 974557d, PR #47 merged, smoke 20/20 + driver exit 0, live DISP-08 tail operator-gated
+last_updated: "2026-10-10T17:52:00Z"
 last_activity: 2026-10-10
-last_activity_desc: Phase 24 planning (autonomous discuss-equivalent + research + 4 plans, rehearsal-first with operator-gated DISP-08 tail)
-state_head: 60bd0c1
+last_activity_desc: Phase 24 verified (dispatcher port, lease-model prompt, outcome events, staged unit; pytest 230, bun 2706/58/1 env-fail, Greptile 14 threads triaged; live tail gated)
+state_head: 974557d
 progress:
   total_phases: 18
   completed_phases: 3

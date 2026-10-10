@@ -65,7 +65,7 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 - [x] **Phase 21: skills_propose** - An authenticated surface can propose a skill as a PR on agent-skills, with secrets and duplicates refused (completed 2026-10-09; re-verified 2026-10-10 at e2ad4dc, 24/24, live PR deferred to Phase 22)
 - [ ] **Phase 22: Skills sync, bridge and miners** - Mined skills reach every agent through propose, owner merge and sync, all from code on `main`
 - [x] **Phase 23: Claim mirror and DoD gate** - Linear and Notion follow every lease transition, and only the Definition-of-Done gate can mark an issue Done (completed 2026-10-09 via PR #36; verified 2026-10-10 at bfde32f, 30/30, live MIRROR-08 proof operator-gated)
-- [ ] **Phase 24: substrate-dispatcher** - A `dispatch:hermes` label starts a lease-correct Hermes session on the issue's Graph ID in its own worktree
+- [x] **Phase 24: substrate-dispatcher** - A `dispatch:hermes` label starts a lease-correct Hermes session on the issue's Graph ID in its own worktree (completed 2026-10-10 via PR #47; verified at 974557d, rehearsal scope green, live DISP-08 tail operator-gated)
 - [ ] **Phase 25: Docs search and ingest (RAGFlow)** - Agents get cited docs answers through the substrate, and ingest refuses secrets and unsourced pages
 - [ ] **Phase 26: Hindsight recall and Dragonfly cache** - Accepted memories are recalled across surfaces and repeated reads are cached, without slowing or staling the brief
 - [ ] **Phase 27: Ledger primitives and ingest order** - Every closed hour has one deterministic Merkle root over its events in server ingest order
