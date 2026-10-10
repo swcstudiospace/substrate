@@ -11,13 +11,8 @@
  * values (D26-07, Phase 21 precedent). A refusal is never cleaned-and-
  * published: any redactor finding stops the forward outright.
  */
-import {
-	bankForSurface,
-	ensureBank,
-	retainMemories,
-	type FetchLike,
-	type HindsightConfig,
-} from "./planes/hindsight.ts";
+import { bankForSurface, ensureBank, retainMemories, type FetchLike, type HindsightConfig } from "./planes/hindsight.ts";
+import { canonicalJson, sha256Hex } from "./event.ts";
 import { applyRule, redact, REDACTION_RULES } from "./redact.ts";
 import { SURFACES, type EventInput, type MemoryWriteRequest, type MemoryWriteResult } from "./types.ts";
 
@@ -94,7 +89,15 @@ export async function forwardRetain(
 	}
 	const config = deps.config;
 	const bank = bankForSurface(config, result.writer);
-	const documentId = result.idempotency_key;
+	// A subject-addressed write supersedes by replacing: the plane document is
+	// keyed by the claim identity (scope, kind, subject), so a newer version
+	// replaces the retired copy instead of joining it. Subject-less appends
+	// keep history in both stores, so they keep the idempotency key.
+	const subject = typeof entry.subject === "string" && entry.subject.length > 0 ? entry.subject : undefined;
+	const documentId =
+		subject === undefined
+			? result.idempotency_key
+			: `subj_${sha256Hex(canonicalJson({ scope: entry.scope, kind: entry.kind, subject })).slice(0, 32)}`;
 	const sessionId = typeof request.session_id === "string" && request.session_id.length > 0 ? request.session_id : undefined;
 	if (deps.vmGuest === true) {
 		const reason = "vm-guest";

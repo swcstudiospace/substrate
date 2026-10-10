@@ -186,3 +186,30 @@ describe("forwardRetain", () => {
 		expect(emitted).toEqual([]);
 	});
 });
+
+describe("supersede", () => {
+	test("a newer version of a subject-addressed memory replaces the retired copy", async () => {
+		const { fake, emitted, deps } = setup();
+		const request = { ...sourced(), scope: "repo:acme/app", kind: "fact" as const, text: "x", writer: "cursor" };
+		const first = await forwardRetain(deps, request, accepted({ idempotency_key: "mwd_old", entry: entry({ subject: "lease", text: "old rule" }) }));
+		const second = await forwardRetain(deps, request, accepted({ idempotency_key: "mwd_new", entry: entry({ subject: "lease", text: "new rule" }) }));
+		expect(first.forwarded).toBe(true);
+		expect(second.forwarded).toBe(true);
+		expect(second.document_id).toBe(first.document_id);
+		expect(second.document_id).not.toBe("mwd_new");
+		const memories = fake.banks.get("sub-cursor")?.memories ?? [];
+		expect(memories.length).toBe(1);
+		expect(memories.at(0)?.document_id).toBe(first.document_id);
+		expect(emitted).toEqual([]);
+	});
+
+	test("subject-less appends keep the idempotency key", async () => {
+		const { deps } = setup();
+		const outcome = await forwardRetain(
+			deps,
+			{ ...sourced(), scope: "repo:acme/app", kind: "fact", text: "x", writer: "cursor" },
+			accepted({ idempotency_key: "mwd_key9", entry: entry({ subject: undefined }) }),
+		);
+		expect(outcome).toMatchObject({ forwarded: true, document_id: "mwd_key9" });
+	});
+});

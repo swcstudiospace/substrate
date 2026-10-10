@@ -36,6 +36,8 @@ export interface DerivedMemoryHit {
 	derived: true;
 	document_id?: string;
 	type?: string;
+	/** The scope the memory was retained for — a locator the merge filters on. */
+	scope?: string;
 	tags: string[];
 	score?: number;
 }
@@ -60,7 +62,9 @@ export interface RecallDeps {
  * The banks one recall reads: the caller's bank first (when the caller is a
  * known surface), then the configured explicit `sub-*` set, deduplicated. A
  * caller with no bank of its own and no configured set is refused — there is
- * no shared fallback bank to read instead (T-26-01).
+ * no shared fallback bank to read instead (T-26-01). Configured names outside
+ * the bank prefix (notably the desk's `pd-*` banks) are refused here too, so
+ * even a direct caller cannot fan out past the substrate namespace.
  */
 export function resolveRecallBanks(
 	callerSurface: string | null,
@@ -71,6 +75,7 @@ export function resolveRecallBanks(
 	const banks: string[] = [];
 	if (known && callerSurface !== null) banks.push(`${prefix}${callerSurface}`);
 	for (const bank of configured ?? []) {
+		if (!bank.startsWith(prefix)) continue;
 		if (!banks.includes(bank)) banks.push(bank);
 	}
 	if (banks.length === 0) {
@@ -81,6 +86,7 @@ export function resolveRecallBanks(
 
 function derive(bank: string, hit: RecallHit): DerivedMemoryHit {
 	const tags = [...hit.tags];
+	const scope = typeof hit.metadata.scope === "string" ? hit.metadata.scope : undefined;
 	return {
 		bank,
 		id: hit.id,
@@ -88,6 +94,7 @@ function derive(bank: string, hit: RecallHit): DerivedMemoryHit {
 		derived: true,
 		...(hit.document_id !== undefined ? { document_id: hit.document_id } : {}),
 		...(hit.type !== undefined ? { type: hit.type } : {}),
+		...(scope !== undefined ? { scope } : {}),
 		tags,
 		...(hit.score !== undefined ? { score: hit.score } : {}),
 	};

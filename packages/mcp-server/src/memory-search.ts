@@ -28,11 +28,16 @@ export interface MergedMemoryResults {
  * Append plane hits after index results without touching their order.
  * Attribution and the derived flag survive the merge; an outage surfaces as
  * index-only with the recall reason.
+ *
+ * A requested scope filters the plane leg the way the index filters its own:
+ * only hits retained for that scope survive (the forward stores it in
+ * metadata and each derived hit carries it as a locator). Without a scope
+ * every hit survives, exactly as before.
  */
-export function mergeDerivedHits(entries: MemoryEntry[], recall: RecallReply): MergedMemoryResults {
+export function mergeDerivedHits(entries: MemoryEntry[], recall: RecallReply, scope?: string): MergedMemoryResults {
 	return {
 		entries,
-		derived: recall.results,
+		derived: scope === undefined ? recall.results : recall.results.filter((hit) => hit.scope === scope),
 		degraded: recall.degraded,
 		notice: UNTRUSTED_MEMORY_NOTICE,
 		...(recall.reason !== undefined ? { reason: recall.reason } : {}),

@@ -61,6 +61,8 @@ export interface CacheHealth {
 	misses: number;
 	bypasses: number;
 	errors: number;
+	/** Why the cache is off despite a URL being set — a DOCS-06 refusal. Absent otherwise. */
+	reason?: string;
 }
 
 export interface CacheSample {
@@ -82,6 +84,8 @@ export interface ReadThroughOptions {
 	log?: (line: string) => void;
 	commandTimeoutMs?: number;
 	record?: (sample: CacheSample) => void;
+	/** The DOCS-06 refusal to report in health, if the cache was refused. */
+	refusedReason?: string;
 }
 
 /**
@@ -193,7 +197,7 @@ export function createReadThroughCache(
 ): ReadThroughCache {
 	if (config.dragonflyRefused) {
 		process.stderr.write(`[substrate] cache off: ${config.dragonflyRefused}\n`);
-		return new ReadThroughCache({ redis: null, enabled: false, record });
+		return new ReadThroughCache({ redis: null, enabled: false, record, refusedReason: config.dragonflyRefused });
 	}
 	if (!config.cacheEnabled || !config.dragonflyUrl) {
 		return new ReadThroughCache({ redis: null, enabled: false, record });
@@ -212,6 +216,7 @@ export class ReadThroughCache {
 	private readonly log: (line: string) => void;
 	private readonly commandTimeoutMs: number;
 	private readonly recordSample: ((sample: CacheSample) => void) | undefined;
+	private readonly refusedReason: string | undefined;
 	private hits = 0;
 	private misses = 0;
 	private bypasses = 0;
@@ -228,6 +233,7 @@ export class ReadThroughCache {
 		this.log = options.log ?? ((line) => process.stderr.write(line));
 		this.commandTimeoutMs = options.commandTimeoutMs ?? COMMAND_TIMEOUT_MS;
 		this.recordSample = options.record;
+		this.refusedReason = options.refusedReason;
 	}
 
 	health(): CacheHealth {
@@ -239,6 +245,7 @@ export class ReadThroughCache {
 			misses: this.misses,
 			bypasses: this.bypasses,
 			errors: this.errors,
+			...(this.refusedReason !== undefined ? { reason: this.refusedReason } : {}),
 		};
 	}
 

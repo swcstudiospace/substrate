@@ -50,6 +50,13 @@ describe("resolveRecallBanks", () => {
 	test("an unknown caller reads an explicit configured set", () => {
 		expect(resolveRecallBanks(null, ["sub-hermes"], "sub-")).toEqual({ banks: ["sub-hermes"] });
 	});
+
+	test("configured desk banks never enter the fan-out set", () => {
+		expect(resolveRecallBanks("cursor", ["sub-hermes", "pd-desk"], "sub-")).toEqual({ banks: ["sub-cursor", "sub-hermes"] });
+		expect(resolveRecallBanks(null, ["pd-desk"], "sub-")).toEqual({
+			refused: "no recall bank for surface unattributed: configure HINDSIGHT_BANKS",
+		});
+	});
 });
 
 describe("recallMemories", () => {
@@ -179,5 +186,23 @@ describe("derived merge into memory_search", () => {
 		expect(merged.derived).toEqual([]);
 		expect(merged.degraded).toBe(true);
 		expect(typeof merged.reason).toBe("string");
+	});
+});
+
+describe("scoped merge", () => {
+	test("a requested scope filters the plane leg to retained scopes", async () => {
+		const fake = new HindsightFake();
+		fake.seed("sub-cursor", [
+			{ id: "c1", text: "fence the lease", document_id: "mwd_c1", tags: ["cursor"], metadata: { scope: "repo:acme/app" }, score: 0.5 },
+		]);
+		fake.seed("sub-hermes", [
+			{ id: "h1", text: "another repo rule", document_id: "mwd_h1", tags: ["hermes"], metadata: { scope: "repo:other" }, score: 0.9 },
+		]);
+		const reply = await recallMemories(deps(fake), "rule", "cursor");
+		expect(reply.results.map((hit) => hit.bank)).toEqual(["sub-hermes", "sub-cursor"]);
+		const scoped = mergeDerivedHits([], reply, "repo:acme/app");
+		expect(scoped.derived.map((hit) => `${hit.bank}:${hit.scope}`)).toEqual(["sub-cursor:repo:acme/app"]);
+		const unscoped = mergeDerivedHits([], reply);
+		expect(unscoped.derived.length).toBe(2);
 	});
 });

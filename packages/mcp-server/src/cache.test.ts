@@ -23,9 +23,29 @@ import {
 } from "./cache.ts";
 import { loadConfig } from "./config.ts";
 import { HindsightFake } from "./hindsight-fake.ts";
+import { FakeStore } from "./memory-write.test.ts";
 import { createObservability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
+import { clearEnsuredBanks } from "./planes/hindsight.ts";
+
+/**
+ * Point the Hindsight env reads at the fake for one test. Restores every
+ * touched variable: the plane config is per-test state, not suite state.
+ */
+function hindsightEnv(): () => void {
+	const names = ["HINDSIGHT_URL", "HINDSIGHT_API_KEY", "HINDSIGHT_BANKS"];
+	const saved = new Map(names.map((name) => [name, process.env[name]]));
+	process.env.HINDSIGHT_URL = "http://fake";
+	process.env.HINDSIGHT_API_KEY = "test-bearer";
+	process.env.HINDSIGHT_BANKS = "sub-cursor";
+	return () => {
+		for (const [name, value] of saved) {
+			if (value === undefined) delete process.env[name];
+			else process.env[name] = value;
+		}
+	};
+}
 
 class FakeRedis implements CacheRedis {
 	readonly values = new Map<string, string>();
@@ -861,6 +881,7 @@ describe("the same answer with the cache off, on and broken", () => {
 		expect(refused.dragonflyRefused).toContain("cache.example.com");
 		const cache = createReadThroughCache(refused);
 		expect(cache.health().enabled).toBe(false);
+		expect(cache.health().reason).toContain("cache.example.com");
 		const entries = [{ id: "mem-1", text: "the lease is fenced" }];
 		const index = { searchMemory: async () => entries };
 		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null, cache });
@@ -869,6 +890,143 @@ describe("the same answer with the cache off, on and broken", () => {
 		expect(answer.derived).toEqual([]);
 		// Two bypasses: the merged search and the recall inside it.
 		expect(cache.health().bypasses).toBe(2);
+	});
+
+	test("pre-upgrade bare-list entries never satisfy the merged shape", async () => {
+		// The merged list reply caches under a shape-marked key, so an entry
+		// stored before the upgrade is simply never read back as a hit.
+		const entries = [{ id: "mem-1", text: "the lease is fenced" }];
+		const index = { searchMemory: async () => entries };
+		const redis = new FakeRedis();
+		const cache = cacheOf(redis);
+		const staleKey = cacheKey("memory-search", "cursor", "0", { query: "lease", scope: null, limit: null, includeSuperseded: false });
+		await redis.set(staleKey, JSON.stringify({ v: entries }), 600);
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null, cache });
+		const answer = await substrate.searchMemory("lease", undefined, undefined, undefined, "cursor");
+		expect(Array.isArray(answer)).toBe(false);
+		expect(entries).toEqual(answer.entries);
+		expect(answer.derived).toEqual([]);
+	});
+
+	test("an outage is served but never stored", async () => {
+		const restore = hindsightEnv();
+		try {
+			const fake = new HindsightFake();
+			fake.failRecallWith = 500;
+			let loads = 0;
+			const entries = [{ id: "mem-1", text: "the lease is fenced" }];
+			const index = {
+				searchMemory: async () => {
+					loads += 1;
+					return entries;
+				},
+			};
+			const redis = new FakeRedis();
+			const cache = cacheOf(redis);
+			const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null, cache, hindsightFetch: fake.fetch });
+			const first = await substrate.searchMemory("lease", undefined, undefined, undefined, "cursor");
+			expect(first.degraded).toBe(true);
+			expect(entries).toEqual(first.entries);
+			expect(first.derived).toEqual([]);
+			expect(typeof first.reason).toBe("string");
+			expect(redis.sets).toBe(0);
+			await substrate.searchMemory("lease", undefined, undefined, undefined, "cursor");
+			expect(loads).toBe(2);
+		} finally {
+			restore();
+		}
+	});
+
+	test("a guest instance refuses recall before any network call", async () => {
+		const restore = hindsightEnv();
+		try {
+			const fake = new HindsightFake();
+			fake.seed("sub-cursor", [{ id: "c1", text: "fence the lease", document_id: "mwd_c1", tags: ["cursor"], metadata: {}, score: 0.5 }]);
+			const config = loadConfig({ SUBSTRATE_VM_GUEST: "1" });
+			const substrate = new Substrate(config, { index: null, greptime: null, hindsightFetch: fake.fetch });
+			const reply = await substrate.recallMemories({ query: "lease" }, "cursor");
+			expect(reply).toMatchObject({ results: [], degraded: true, reason: "vm-guest" });
+			expect(fake.requests.length).toBe(0);
+			const entries = [{ id: "mem-1", text: "the lease is fenced" }];
+			const index = { searchMemory: async () => entries };
+			const redis = new FakeRedis();
+			const cache = cacheOf(redis);
+			const searching = new Substrate(config, { index: index as never, greptime: null, cache, hindsightFetch: fake.fetch });
+			const merged = await searching.searchMemory("lease", undefined, undefined, undefined, "cursor");
+			expect(entries).toEqual(merged.entries);
+			expect(merged.derived).toEqual([]);
+			expect(merged.degraded).toBe(true);
+			expect(fake.requests.length).toBe(0);
+		} finally {
+			restore();
+		}
+	});
+
+	test("an accepted write reaches the brief, the plane and the next recall through the write path", async () => {
+		// End to end across the Greptile round: no manual cache bump anywhere.
+		// The write bumps the generation (brief goes fresh), the successful
+		// retain bumps it again (no stale recall window), and awaiting the
+		// drain proves the background forward lands without blocking the reply.
+		const restore = hindsightEnv();
+		try {
+			const fake = new HindsightFake();
+			clearEnsuredBanks();
+			const store = new FakeStore();
+			const redis = new FakeRedis();
+			const cache = cacheOf(redis);
+			const config = loadConfig({ SUBSTRATE_MEMORY_GRANTS: `[{"surfaces":["cursor"],"scopes":["graph"],"kinds":["fact","decision"]}]` });
+			const substrate = new Substrate(config, { index: store as never, greptime: null, cache, hindsightFetch: fake.fetch });
+			const request = { surface: "cursor" as const, repo: "acme/app" };
+			const before = await substrate.brief(request);
+			expect(before).not.toContain("fence every handoff");
+			const written = await substrate.writeMemory({
+				scope: "graph:ut-1",
+				kind: "decision",
+				subject: "handoff-rule",
+				text: "fence every handoff",
+				writer: "cursor",
+				source_event: "evt_e2e",
+			});
+			expect(written.outcome).toBe("accepted");
+			expect(written.verified_persisted).toBe(true);
+			const briefed = await substrate.brief(request);
+			expect(briefed).toContain("fence every handoff");
+			await substrate.drainPendingRetains(5000);
+			expect(fake.retains.length).toBe(1);
+			expect(redis.values.get(MEMORY_GENERATION_KEY)).toBe("2");
+			const recalled = await substrate.recallMemories({ query: "handoff" }, "cursor");
+			expect(recalled.degraded).toBe(false);
+			expect(recalled.results.map((hit) => hit.text)).toContain("fence every handoff");
+		} finally {
+			restore();
+		}
+	});
+
+	test("shutdown drains an in-flight retain without blocking the reply", async () => {
+		// Real latency, deliberately: the drain must wait out a slow plane,
+		// which no clock control can simulate — the delay lives in the fake.
+		const restore = hindsightEnv();
+		try {
+			const fake = new HindsightFake();
+			fake.retainDelayMs = 500;
+			clearEnsuredBanks();
+			const store = new FakeStore();
+			const config = loadConfig({ SUBSTRATE_MEMORY_GRANTS: `[{"surfaces":["cursor"],"scopes":["graph"],"kinds":["fact"]}]` });
+			const substrate = new Substrate(config, { index: store as never, greptime: null, hindsightFetch: fake.fetch });
+			const written = await substrate.writeMemory({
+				scope: "graph:ut-1",
+				kind: "fact",
+				text: "drain me",
+				writer: "cursor",
+				source_event: "evt_drain",
+			});
+			expect(written.outcome).toBe("accepted");
+			expect(fake.retains.length).toBe(0);
+			await substrate.drainPendingRetains(5000);
+			expect(fake.retains.length).toBe(1);
+		} finally {
+			restore();
+		}
 	});
 });
 
