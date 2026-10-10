@@ -280,7 +280,10 @@ Plans:
   4. A headless session holding only the substrate MCP answers a docs question with a source URL `docs_search` returned and readable back from its event; a memory retained by one surface is recalled by another with its source; a second identical brief is a cache hit, and with Dragonfly down it returns uncached.
 
 **Proof** (DOCS-07): Live, operator-approved: RAGFlow, Hindsight and Dragonfly (once its private hop exists) with a headless session.
-**Plans**: TBD
+**Plans**: 3 plans
+- [ ] 26-01-PLAN.md — Substrate-side Hindsight recall with fake banks server plus memory_recall tool (DOCS-04 read half)
+- [ ] 26-02-PLAN.md — Gate-accepted retain forward plus derived-marked memory_search merge plus credential perimeter (DOCS-04 write half)
+- [ ] 26-03-PLAN.md — Recall cache coverage plus claims-freshness pin plus redis refusal plus G1-G4 gated live map (DOCS-05, DOCS-06, DOCS-07)
 
 ### Phase 27: Ledger primitives and ingest order
 
