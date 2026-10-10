@@ -3459,6 +3459,10 @@ class FakeDocsClient {
 	summaries: RagflowDatasetSummary[] = [];
 	hits: RetrievalHit[] = [];
 	retrievalFailure: unknown;
+	/** Shifted on each list, so a stale-id retry can see a recreated dataset. */
+	listBatches: RagflowDatasetSummary[][] = [];
+	rejectDatasetIds = new Set<string>();
+	seenRetrievalIds: string[][] = [];
 	docs: RagflowDocument[] = [];
 	uploadFailure: unknown;
 	seq = 0;
@@ -3474,13 +3478,18 @@ class FakeDocsClient {
 		similarityThreshold?: number;
 	}): Promise<RetrievalHit[]> {
 		this.calls.retrieval += 1;
+		this.seenRetrievalIds.push([...options.datasetIds]);
+		if (options.datasetIds.some((id) => this.rejectDatasetIds.has(id))) {
+			throw new RagflowError("ragflow 404: no such dataset");
+		}
 		if (this.retrievalFailure !== undefined) throw this.retrievalFailure;
 		return this.hits;
 	}
 
 	async listDatasets(): Promise<RagflowDatasetSummary[]> {
 		this.calls.listDatasets += 1;
-		return this.summaries;
+		const next = this.listBatches.shift();
+		return next ?? this.summaries;
 	}
 
 	async listDocuments(): Promise<RagflowDocument[]> {
@@ -3556,6 +3565,7 @@ async function docsWorld(
 		fake?: FakeDocsClient;
 		noClient?: boolean;
 		greptime?: unknown;
+		omitStaticDatasetIds?: boolean;
 	} = {},
 ) {
 	clearDatasetCache();
@@ -3567,7 +3577,7 @@ async function docsWorld(
 			include: ["docs/**"],
 			exclude: [],
 			trigger: "merge-to-main",
-			datasetId: "ds-guide",
+			...(over.omitStaticDatasetIds ? {} : { datasetId: "ds-guide" }),
 		},
 		{
 			name: "api",
@@ -3575,7 +3585,7 @@ async function docsWorld(
 			include: ["docs/**"],
 			exclude: [],
 			trigger: "merge-to-main",
-			datasetId: "ds-api",
+			...(over.omitStaticDatasetIds ? {} : { datasetId: "ds-api" }),
 		},
 	];
 	const registryFile = join(dir, "datasets.json");
@@ -3630,6 +3640,24 @@ describe("docsSearch (Substrate door)", () => {
 		expect(payload.query_len).toBe(Buffer.byteLength(query, "utf8"));
 		// The query text reaches neither the event nor its serialisation.
 		expect(JSON.stringify(emitted[0])).not.toContain(query);
+	});
+
+	test("a recreated dataset is recorded by its new id, even with no hits", async () => {
+		const fake = new FakeDocsClient();
+		fake.listBatches = [
+			[{ id: "ds-stale", name: "guide", embeddingModel: undefined }],
+			[{ id: "ds-new", name: "guide", embeddingModel: undefined }],
+		];
+		fake.rejectDatasetIds.add("ds-stale");
+		const { substrate, emitted } = await docsWorld({ fake, omitStaticDatasetIds: true });
+
+		const reply = await substrate.docsSearch({ query: "how?", datasets: ["guide"] }, { surface: "claude-code" });
+
+		expect(reply.reason).toBeUndefined();
+		expect(reply.results).toEqual([]);
+		expect(fake.seenRetrievalIds).toEqual([["ds-stale"], ["ds-new"]]);
+		expect(emitted).toHaveLength(1);
+		expect(payloadOf(emitted[0]!).dataset_ids).toEqual(["ds-new"]);
 	});
 
 	test("an invalid request answers without any RAGFlow call", async () => {

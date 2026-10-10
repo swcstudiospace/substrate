@@ -1468,12 +1468,15 @@ export class Substrate {
 		const client = this.ragflow;
 		// One RAGFlow dataset list per search, shared by validation, the
 		// manifest preload, and runSearch. The promise itself is cached, so
-		// a rejection is shared too and never retried within the search.
+		// a rejection is shared too. A stale dataset id clears that cache:
+		// the retry has to list again, or it would resolve the deleted id
+		// from the snapshot taken before the search.
 		const listDatasetsBase = this.docsListDatasets(client);
 		let shared: Promise<readonly RagflowDatasetSummary[]> | undefined;
 		const listDatasets = (): Promise<readonly RagflowDatasetSummary[]> => (shared ??= listDatasetsBase());
 		let lookupSource: ((documentId: string, datasetId: string) => SourceMeta | undefined) | undefined;
 		let datasetIds: string[] = [];
+		let searchedIds: string[] = [];
 		if (surface !== null) {
 			// Validate before the manifest preload: an invalid request (empty
 			// query, unknown dataset) answers without any RAGFlow call instead
@@ -1496,6 +1499,12 @@ export class Substrate {
 			client,
 			authenticated: surface !== null,
 			lookupSource,
+			refreshDatasets: () => {
+				shared = undefined;
+			},
+			recordDatasetIds: (ids) => {
+				searchedIds = [...ids];
+			},
 		});
 		// Unattributable without a surface: no event, and runSearch already
 		// short-circuited before any RAGFlow call (D25-06).
@@ -1511,7 +1520,7 @@ export class Substrate {
 				...where,
 				payload: {
 					action: "docs.search",
-					dataset_ids: datasetIds,
+					dataset_ids: searchedIds.length > 0 ? searchedIds : datasetIds,
 					urls,
 					count: reply.results.length,
 					...query,

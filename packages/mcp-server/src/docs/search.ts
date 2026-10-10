@@ -122,6 +122,14 @@ export interface RunSearchDeps {
 	 * failure drops the chunk rather than failing the search.
 	 */
 	lookupDocument?: (datasetId: string, documentId: string) => Promise<SourceMeta | undefined>;
+	/**
+	 * Called once a cached id is rejected, before the names are resolved
+	 * again. Callers that memoize `listDatasets` drop that memo here so the
+	 * retry sees a recreated dataset instead of the list from the first pass.
+	 */
+	refreshDatasets?: () => void;
+	/** The ids the successful retrieval used, including a stale-id retry. */
+	recordDatasetIds?: (datasetIds: readonly string[]) => void;
 }
 
 export type ValidatedSearch =
@@ -317,6 +325,7 @@ export async function runSearch(input: unknown, deps: RunSearchDeps): Promise<Se
 			return emptyReply(mapped.reason, mapped.detail);
 		}
 		for (const name of validated.names) dropDatasetId(name);
+		deps.refreshDatasets?.();
 		try {
 			validated = await validateSearchInput(input, {
 				registry: deps.registry,
@@ -334,6 +343,7 @@ export async function runSearch(input: unknown, deps: RunSearchDeps): Promise<Se
 			return emptyReply(mapped.reason, mapped.detail);
 		}
 	}
+	if (validated.ok) deps.recordDatasetIds?.(validated.datasetIds);
 
 	const docListCache = new Map<string, Promise<RagflowDocument[]>>();
 	const lookupDocument =
