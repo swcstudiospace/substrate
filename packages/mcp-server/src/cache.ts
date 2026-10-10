@@ -7,7 +7,7 @@
  * drops every key, and generation counters make a write visible without a scan.
  *
  * The client is Bun's `RedisClient` (Bun 1.4). It is constructed on the first
- * command, with a 150 ms connect timeout and the same budget on every command,
+ * command, with an 800 ms connect timeout and the same budget on every command,
  * no offline queue and no reconnect retries, so one request never waits on a
  * second attempt.
  */
