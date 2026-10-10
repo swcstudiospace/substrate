@@ -199,7 +199,7 @@ describe("apply writes", () => {
 		expect(lstatSync(BACKUP).mode & 0o777).toBe(0o700);
 		const restore = readFileSync(join(BACKUP, "RESTORE.md"), "utf8");
 		expect(restore).toContain(`ln -sfn '${join(EXP, "exp")}' '${join(GROK.dir, "exp")}'`);
-		expect(restore).toContain(`rm '${join(GROK.dir, "fresh")}'`);
+		expect(restore).toContain(`rm -f '${join(GROK.dir, "fresh")}'`);
 		expect(log).toEqual(["[projector] grok repoint exp", "[projector] grok link-new fresh"]);
 	});
 
@@ -457,6 +457,11 @@ describe("sameTree", () => {
 		writeFileSync(join(b, "s", "scripts", "client.py"), "print(2)\n");
 		expect(sameTree(join(a, "s"), join(b, "s"))).toBe(false);
 		writeFileSync(join(b, "s", "scripts", "client.py"), "print(1)\n");
+		chmodSync(join(b, "s", "scripts", "client.py"), 0o755);
+		expect(sameTree(join(a, "s"), join(b, "s"))).toBe(false);
+		chmodSync(join(a, "s", "scripts", "client.py"), 0o755);
+		expect(sameTree(join(a, "s"), join(b, "s"))).toBe(true);
+		chmodSync(join(a, "s", "scripts", "client.py"), 0o644);
 		writeFileSync(join(b, "s", "extra.md"), "x");
 		expect(sameTree(join(a, "s"), join(b, "s"))).toBe(false);
 		rmSync(join(b, "s", "extra.md"));
@@ -474,6 +479,7 @@ describe("backup-then-link (D-06)", () => {
 		skill(LIB, "same");
 		mkdirSync(join(LIB, "same", "scripts"));
 		writeFileSync(join(LIB, "same", "scripts", "run.sh"), "#!/bin/sh\necho hi\n");
+		chmodSync(join(LIB, "same", "scripts", "run.sh"), 0o755);
 		skill(GROK.dir, "same");
 		mkdirSync(join(GROK.dir, "same", "scripts", "__pycache__"), { recursive: true });
 		writeFileSync(join(GROK.dir, "same", "scripts", "run.sh"), "#!/bin/sh\necho hi\n");
@@ -499,7 +505,7 @@ describe("backup-then-link (D-06)", () => {
 			).sort(),
 		);
 		const restore = readFileSync(join(BACKUP, "RESTORE.md"), "utf8");
-		const line = `rm '${path}' && cp -a '${backup}' '${path}'`;
+		const line = `rm -f '${path}' && cp -a '${backup}' '${path}'`;
 		expect(restore).toContain(line);
 		expect(log).toEqual(["[projector] grok backup-then-link same"]);
 
@@ -520,6 +526,20 @@ describe("backup-then-link (D-06)", () => {
 		expect(lstatSync(join(GROK.dir, "same")).isDirectory()).toBe(true);
 		expect(existsSync(BACKUP)).toBe(false);
 		expect(log).toEqual(["[projector] grok changed-underfoot same"]);
+	});
+
+	test("a pre-existing .substrate-old directory is left in place", async () => {
+		skill(LIB, "same");
+		skill(CLAUDE.dir, "same");
+		const path = join(CLAUDE.dir, "same");
+		const kept = `${path}.substrate-old`;
+		mkdirSync(kept);
+		writeFileSync(join(kept, "keep.txt"), "operator\n");
+		const actions = plan([inventory(CLAUDE)], libraryNames(LIB), dirs());
+		expect(actions.map((action) => action.kind)).toEqual(["backup-then-link"]);
+		expect(await apply(actions, ctx())).toEqual({ actions: 1, warnings: 0 });
+		expect(readFileSync(join(kept, "keep.txt"), "utf8")).toBe("operator\n");
+		expect(readlinkSync(path)).toBe(join(LIB, "same"));
 	});
 });
 
@@ -573,6 +593,16 @@ describe("agents root (Cursor) and the D-20 disable flag", () => {
 			["link-new", "c"],
 		]);
 	});
+
+	test("a name the library dropped removes the owned link and leaves a foreign one", () => {
+		skill(LIB, "a");
+		symlinkSync(join(LIB, "a"), join(AGENTS.dir, "a"));
+		symlinkSync(join(LIB, "gone"), join(AGENTS.dir, "gone"));
+		symlinkSync("/elsewhere/x", join(AGENTS.dir, "x"));
+		expect(plan([inventory(AGENTS)], libraryNames(LIB), dirs()).map((action) => [action.kind, action.name])).toEqual([
+			["remove-own-link", "gone"],
+		]);
+	});
 });
 
 describe("muse root (create)", () => {
@@ -589,7 +619,7 @@ describe("muse root (create)", () => {
 		expect(lstatSync(MUSE.dir).mode & 0o777).toBe(0o755);
 		for (const n of ["a", "b"]) expect(readlinkSync(join(MUSE.dir, n))).toBe(join(LIB, n));
 		const restore = readFileSync(join(BACKUP, "RESTORE.md"), "utf8").trim().split("\n");
-		expect(restore.slice(-3)).toEqual([`rmdir '${MUSE.dir}'`, `rm '${join(MUSE.dir, "a")}'`, `rm '${join(MUSE.dir, "b")}'`]);
+		expect(restore.slice(-3)).toEqual([`rmdir '${MUSE.dir}'`, `rm -f '${join(MUSE.dir, "a")}'`, `rm -f '${join(MUSE.dir, "b")}'`]);
 		expect(log).toEqual([`[projector] muse created ${MUSE.dir}`, "[projector] muse link-new a", "[projector] muse link-new b"]);
 	});
 

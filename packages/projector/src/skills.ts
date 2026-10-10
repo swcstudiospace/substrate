@@ -11,8 +11,9 @@
  *   - backup-then-link  — a real directory byte-identical to the library copy (ignoring __pycache__/
  *                         and *.pyc): copy it to `<backupDir>/<root-id>/<name>/` with a MANIFEST line
  *                         per file and a RESTORE line, then replace it by the link;
- *   - remove-own-link   — the root's disableFlag exists: remove the links this projector owns there
- *                         (`<root>/<name>` → `<LIBRARY_DIR>/<name>`) and do nothing else in that root;
+ *   - remove-own-link   — remove a link this projector owns (`<root>/<name>` → library):
+ *                         the root is disabled, or the library no longer has that name.
+ *                         Foreign links stay;
  *   - skip-warn         — a differing real directory (real-dir-differs), a link elsewhere
  *                         (foreign-link), or in a root with `knownReal` (Grok) a real directory that is
  *                         neither a library name nor known (stray-real-dir, Pitfall 12): never touched,
@@ -64,6 +65,7 @@ import {
 	readlinkSync,
 	renameSync,
 	rmSync,
+	statSync,
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
@@ -202,6 +204,8 @@ export function inventory(root: Root): Inventory {
 	const entries = new Map<string, Entry>();
 	if (!existsSync(root.dir)) return { root, exists: false, entries };
 	for (const d of readdirSync(root.dir, { withFileTypes: true })) {
+		// The projector's own swap files are transient, not skills: neither warned about nor pruned.
+		if (d.name.endsWith(TMP_SUFFIX) || d.name.includes(OLD_SUFFIX)) continue;
 		const path = join(root.dir, d.name);
 		if (d.isSymbolicLink()) entries.set(d.name, { type: "link", target: readlinkSync(path) });
 		else entries.set(d.name, d.isDirectory() ? { type: "dir" } : { type: "other" });
@@ -218,6 +222,11 @@ function isIgnored(name: string): boolean {
 	return name === "__pycache__" || name.endsWith(".pyc");
 }
 
+/** Whether the owner-executable bit is set: direct execution fails when a link swaps it away. */
+function isExecutable(path: string): boolean {
+	return (statSync(path).mode & 0o111) !== 0;
+}
+
 /** Relative path → kind and content key of every entry below dir, skipping __pycache__ and *.pyc. */
 function treeOf(dir: string, rel = "", out = new Map<string, string>()): Map<string, string> {
 	for (const d of readdirSync(join(dir, rel), { withFileTypes: true })) {
@@ -227,7 +236,7 @@ function treeOf(dir: string, rel = "", out = new Map<string, string>()): Map<str
 		else if (d.isDirectory()) {
 			out.set(r, "dir");
 			treeOf(dir, r, out);
-		} else out.set(r, "file");
+		} else out.set(r, `file:${isExecutable(join(dir, r)) ? "exec" : "noexec"}`);
 	}
 	return out;
 }
@@ -239,7 +248,9 @@ export function sameTree(a: string, b: string): boolean {
 	if (ta.size !== tb.size) return false;
 	for (const [rel, kind] of ta) {
 		if (tb.get(rel) !== kind) return false;
-		if (kind === "file" && !readFileSync(join(a, rel)).equals(readFileSync(join(b, rel)))) return false;
+		// `file:exec` / `file:noexec` already disagree when the executable bit
+		// differs. Bytes still have to match, or a same-mode edit looks identical.
+		if (kind.startsWith("file:") && !readFileSync(join(a, rel)).equals(readFileSync(join(b, rel)))) return false;
 	}
 	return true;
 }
@@ -274,6 +285,15 @@ export function plan(
 				if (resolved === target) continue;
 				if (resolved === join(dirs.exportsDir, name)) actions.push({ kind: "repoint", root, name, target, from: entry.target });
 				else actions.push({ kind: "skip-warn", root, name, reason: "foreign-link", from: entry.target });
+			}
+		}
+		// The owner removed or renamed a library skill: drop our link when it still points at
+		// the matching library path. Foreign links and real dirs are left alone.
+		const live = new Set(names);
+		for (const [name, entry] of [...entries].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+			if (entry.type !== "link" || live.has(name)) continue;
+			if (resolve(root.dir, entry.target) === join(dirs.libraryDir, name)) {
+				actions.push({ kind: "remove-own-link", root, name, from: entry.target });
 			}
 		}
 		if (root.knownReal !== undefined) {
@@ -346,6 +366,20 @@ function backUp(path: string, rootId: string, name: string, backupDir: string): 
 	return dest;
 }
 
+/**
+ * The swap path for the backup-then-link rename: the fixed `.substrate-old` name while it is
+ * free, otherwise a per-process suffixed name. A pre-existing directory at the fixed name is
+ * never deleted — it may hold an interrupted run's real dir or something unrelated.
+ */
+function stagingOld(path: string): string {
+	const base = `${path}${OLD_SUFFIX}`;
+	if (!existsSync(base)) return base;
+	for (let n = 1; ; n++) {
+		const candidate = `${base}-${process.pid}-${n}`;
+		if (!existsSync(candidate)) return candidate;
+	}
+}
+
 export async function apply(actions: readonly Action[], ctx: ApplyContext): Promise<ApplyResult> {
 	const restore = join(ctx.backupDir, "RESTORE.md");
 	const ensureBackupDir = (): void => {
@@ -404,10 +438,9 @@ export async function apply(actions: readonly Action[], ctx: ApplyContext): Prom
 					ctx.log(`[projector] ${action.root.id} backup-failed ${action.name}`);
 					continue;
 				}
-				appendFileSync(restore, `rm '${path}' && cp -a '${backup}' '${path}'\n`);
-				const old = `${path}${OLD_SUFFIX}`;
+				appendFileSync(restore, `rm -f '${path}' && cp -a '${backup}' '${path}'\n`);
+				const old = stagingOld(path);
 				rmSync(tmp, { force: true });
-				rmSync(old, { recursive: true, force: true });
 				symlinkSync(action.target, tmp);
 				renameSync(path, old);
 				renameSync(tmp, path);
@@ -415,7 +448,7 @@ export async function apply(actions: readonly Action[], ctx: ApplyContext): Prom
 				break;
 			}
 			default:
-				appendFileSync(restore, action.kind === "repoint" ? `ln -sfn '${action.from}' '${path}'\n` : `rm '${path}'\n`);
+				appendFileSync(restore, action.kind === "repoint" ? `ln -sfn '${action.from}' '${path}'\n` : `rm -f '${path}'\n`);
 				rmSync(tmp, { force: true });
 				symlinkSync(action.target, tmp);
 				renameSync(tmp, path);
