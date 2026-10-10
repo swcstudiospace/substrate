@@ -253,6 +253,28 @@ describe("hermes dispatch", () => {
 		]);
 	});
 
+	test("a live lease on another node of the same graph serializes as already-claimed", async () => {
+		const linear = linearFake([HERMES_ISSUE]);
+		const busyGraph: GraphSnapshot = {
+			graph_id: GRAPH_ID,
+			nodes: [
+				{ graph_id: GRAPH_ID, node_id: NODE_ID, claimed_by: null, claim_session: null, lease_id: null, lease_expires_at: null },
+				{ graph_id: GRAPH_ID, node_id: "n9", claimed_by: "hermes", claim_session: "hermes:other:0", lease_id: null, lease_expires_at: LIVE },
+			],
+		};
+		const substrate = substrateFake(foundNode(), [busyGraph]);
+		const { deps, spawns } = tickDeps({ linear, substrate });
+
+		const result = await dispatchIssue(HERMES_ISSUE, "hermes", deps);
+
+		expect(result).toEqual({ status: "marked", outcome: "already-claimed" });
+		expect(spawns).toEqual([]);
+		expect(linear.comments).toEqual([{ issueId: HERMES_ISSUE.id, body: "substrate-dispatch: already-claimed" }]);
+		expect(linear.updates).toEqual([]);
+		expect(isGivenUp(deps.givenUpDir, HERMES_ISSUE.id)).toBe(false);
+		expectVocabularyClosed(substrate.events);
+	});
+
 	test("a foreign live lease is already-claimed before launch", async () => {
 		const linear = linearFake([HERMES_ISSUE]);
 		const substrate = substrateFake(foundNode(), [graphWith("cursor", "cursor:sess-9", LIVE)]);
@@ -447,7 +469,14 @@ describe("tick boundaries", () => {
 	});
 
 	test("runTick marks the non-dispatchable and dispatches hermes", async () => {
-		const other: PollIssue = { id: "iss-other", identifier: "ENG-102", labels: [] };
+		const other: PollIssue = {
+			id: "iss-other",
+			identifier: "ENG-102",
+			labels: [
+				{ id: "lbl-a", name: "dispatch:hermes" },
+				{ id: "lbl-b", name: "dispatch:claude-code" },
+			],
+		};
 		const linear = linearFake([HERMES_ISSUE, other], { [HERMES_ISSUE.id]: [`noise ${CANARY}`] });
 		const substrate = substrateFake(foundNode(), [FREE_GRAPH, graphWith("hermes", SESSION_ID, LIVE)]);
 		const { deps } = tickDeps({ linear, substrate });
@@ -465,6 +494,20 @@ describe("tick boundaries", () => {
 		for (const comment of linear.comments) {
 			expect(comment.body).not.toContain(CANARY);
 		}
+	});
+
+	test("runTick ignores issues without a dispatch label: no comment, no event, no summary", async () => {
+		const plain: PollIssue = { id: "iss-plain", identifier: "ENG-103", labels: [] };
+		const linear = linearFake([HERMES_ISSUE, plain], { [HERMES_ISSUE.id]: [`noise ${CANARY}`] });
+		const substrate = substrateFake(foundNode(), [FREE_GRAPH, graphWith("hermes", SESSION_ID, LIVE)]);
+		const { deps } = tickDeps({ linear, substrate });
+
+		const summary = await runTick(deps);
+
+		expect(summary).toHaveLength(1);
+		expect(summary[0]?.issue.identifier).toBe(HERMES_ISSUE.identifier);
+		expect(linear.comments).toEqual([]);
+		expect(linear.updates).toEqual([]);
 	});
 });
 
