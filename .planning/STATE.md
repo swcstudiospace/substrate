@@ -2,14 +2,14 @@
 gsd_state_version: "1.0"
 milestone: v1.3
 milestone_name: Build plan completion
-current_phase: 28
-current_phase_name: hourly-anchor-job-and-verify
-status: verified
-stopped_at: Phase 28 verified — 28-VERIFICATION.md passed at 35c8f5b (20/20 must-haves; bun 2845/58/1 F-01 recorded, tsc clean, pytest 230, anchor/verify proofs green; live L1-L10 tail operator-gated)
-last_updated: "2026-10-10T22:30:00Z"
+current_phase: 29
+current_phase_name: agent-cards-and-teachable-moments
+status: planned
+stopped_at: Phase 29 planned — 29-CONTEXT.md, 29-RESEARCH.md, 3 PLANs rehearsal-first with G1/G2/G3 gated; ready to execute
+last_updated: "2026-10-10T23:00:00Z"
 last_activity: 2026-10-10
-last_activity_desc: Phase 28 verified (Path A verify-resume, PR #35 code on main; post-merge drift in service.ts/cli-index.ts is phases-25/26 additive, zero verify/anchor lines touched; scratch not re-run — harness refuses from production checkout; live devnet + timer gated)
-state_head: 35c8f5b
+last_activity_desc: Phase 29 planned (teachable write path + fixture corpus, per-surface A2A cards + fake spec validator + loopback route, scratch anchor-coverage proof + docs; G1 spec validation, G2 card publication, G3 live anchor proof gated)
+state_head: e295746
 progress:
   total_phases: 18
   completed_phases: 3
