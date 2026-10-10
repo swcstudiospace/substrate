@@ -2,14 +2,14 @@
 gsd_state_version: "1.0"
 milestone: v1.3
 milestone_name: Build plan completion
-current_phase: 20
-current_phase_name: Production identity and Phase 0 UAT
+current_phase: 21
+current_phase_name: skills_propose
 status: verified
-stopped_at: Phase 20 rehearsal-first verified at HEAD 6a701f1 (22/22 must-haves hold, F-02 fixed via PR #45, F-01 recorded, live window operator-gated)
-last_updated: "2026-10-10T14:35:00Z"
+stopped_at: Phase 21 re-verified at HEAD e2ad4dc (24/24 must-haves hold, F-01 recorded, live PR deferred to Phase 22)
+last_updated: "2026-10-10T14:30:00Z"
 last_activity: 2026-10-10
-last_activity_desc: Phase 20 close-out (P20-06 rehearsal-first + F-02 fix + verification) on origin/main 6a701f1; status passed, phase_complete true
-state_head: 6a701f1
+last_activity_desc: Phase 21 re-verification (gates only, no code delta) on origin/main e2ad4dc; status passed, phase_complete true
+state_head: e2ad4dc
 progress:
   total_phases: 18
   completed_phases: 3
@@ -154,10 +154,10 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Current Position
 
-Phase: 20 — Production identity and Phase 0 UAT
+Phase: 21 — skills_propose
 Plan: All 6 complete (6/6 SUMMARYs)
-Status: Verified rehearsal-first, live window operator-gated
-Last activity: 2026-10-10 — Phase 20 complete, transitioning to Phase 21
+Status: Verified (re-verified 2026-10-10 at e2ad4dc; 24/24 must-haves, F-01 recorded, live PR operator-gated in Phase 22)
+Last activity: 2026-10-10 — Phase 21 re-verified, Phase 22 unblocked
 
 ## Deferred Items
 
