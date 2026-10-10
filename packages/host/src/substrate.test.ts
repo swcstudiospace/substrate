@@ -50,7 +50,7 @@ describe("resolveHostBearer", () => {
 		).toBe("direct-bearer");
 		expect(
 			resolveHostBearer(
-				{ SUBSTRATE_TOKEN_FILE: "/tmp/does-not-matter" } as NodeJS.ProcessEnv,
+				{ SUBSTRATE_TOKEN_FILE: "/tmp/x" } as NodeJS.ProcessEnv,
 				() => "file-bearer",
 			),
 		).toBe("file-bearer");

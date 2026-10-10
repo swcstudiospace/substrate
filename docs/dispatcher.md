@@ -67,6 +67,16 @@ survive a restart: a new process never relaunches a given-up issue.
 registry contract; with no host on the loopback port every candidate gets
 `host-unreachable`. Live claude-code dispatch is deferred to Phase 33.
 
+### host-unreachable → live transition (Phase 31, no dispatcher code change)
+
+`host-unreachable` is the correct pre-Phase-31 behavior: nothing listens on
+`127.0.0.1:7411`, so the `HostClient` refuses and the tick emits nothing. The
+transition needs no dispatcher change — after the OPERATOR-GATED G4 restart
+(`docs/runbooks/lane-a-host.md`), the same `POST /tasks` starts returning
+202s and the `host-unreachable` row goes quiet on its own. If it does not,
+suspect the unit (not the dispatcher): `systemctl status substrate-host`,
+then `curl -s http://127.0.0.1:7411/healthz`.
+
 ## Landed-claim rule
 
 Evidence is any of: the node's `claimed_by` is the session's surface with a

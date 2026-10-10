@@ -7,6 +7,7 @@
 // which SandboxAgent.start calls when no explicit token option is passed — so callers must not
 // pass `token` to sandboxAgentProvider.
 
+import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import type { SandboxProvider } from "sandbox-agent";
@@ -45,6 +46,9 @@ export type DockerClient = {
 	getContainer(id: string): DockerContainer;
 	getNetwork(name: string): { inspect(): Promise<NetworkInspect> };
 	createNetwork(body: Record<string, unknown>): Promise<unknown>;
+	getImage(name: string): { inspect(): Promise<unknown> };
+	pull(name: string): Promise<unknown>;
+	modem: { followProgress(stream: unknown, onFinished: (error: Error | null, output: unknown) => void): void };
 };
 
 export type SubstrateDockerOptions = {
@@ -55,11 +59,81 @@ export type SubstrateDockerOptions = {
 	image?: string;
 	/** Injected for tests; defaults to dockerode on /var/run/docker.sock. */
 	docker?: DockerClient;
+	/**
+	 * Injected `df` runner for tests. Defaults to `df --output=avail -B1 /`
+	 * (the substrate-desktop.sh 10 GiB floor pattern). Must return the raw
+	 * stdout, or null when df is unreadable (fail-closed: refusal).
+	 */
+	runDf?: () => string | null;
 };
+
+/** LANEA-05: image builds and pulls are refused below 10 GiB free (D31-07). */
+export const DISK_FLOOR_BYTES = 10_737_418_240;
+
+export type DiskGate = { ok: true; availBytes: number } | { ok: false; availBytes: number | null };
+
+function parseDfAvail(dfStdout: string): number | null {
+	const lines = dfStdout.trim().split("\n");
+	const last = (lines[lines.length - 1] ?? "").trim();
+	const value = Number(last);
+	return Number.isFinite(value) ? value : null;
+}
+
+/**
+ * The disk gate: `df --output=avail -B1 / >= 10737418240` before any docker
+ * call. Refuses below the floor and when df is unreadable (fail-closed,
+ * Phase 16 guard pattern). The refusal names the free bytes and the floor.
+ */
+export function checkDiskFloor(runDf?: () => string | null): DiskGate {
+	let stdout: string | null = null;
+	if (runDf) {
+		stdout = runDf();
+	} else {
+		try {
+			stdout = execFileSync("df", ["--output=avail", "-B1", "/"], { encoding: "utf8", timeout: 10_000 });
+		} catch {
+			stdout = null;
+		}
+	}
+	const availBytes = stdout === null ? null : parseDfAvail(stdout);
+	if (availBytes === null || availBytes < DISK_FLOOR_BYTES) return { ok: false, availBytes };
+	return { ok: true, availBytes };
+}
 
 export type SubstrateSandboxProvider = SandboxProvider & {
 	getToken(sandboxId: string): Promise<string>;
 };
+/**
+ * The single build/pull entry: no caller reaches a docker image without
+ * passing the disk gate first. Present images skip the pull; missing images
+ * are pulled only above the floor. Refusals name the free bytes and the floor.
+ */
+export async function ensureImagePulled(
+	docker: DockerClient,
+	image: string,
+	runDf?: () => string | null,
+): Promise<"present" | "pulled"> {
+	const gate = checkDiskFloor(runDf);
+	if (!gate.ok) {
+		throw new Error(
+			`refusing image ${image}: ${gate.availBytes === null ? "unreadable" : `${gate.availBytes} bytes free`}, floor ${DISK_FLOOR_BYTES} bytes`,
+		);
+	}
+	try {
+		await docker.getImage(image).inspect();
+		return "present";
+	} catch (error) {
+		if (!isNotFound(error)) throw error;
+	}
+	const { promise, resolve, reject } = Promise.withResolvers<void>();
+	const stream = await docker.pull(image);
+	docker.modem.followProgress(stream, (error) => {
+		if (error) reject(error);
+		else resolve();
+	});
+	await promise;
+	return "pulled";
+}
 
 // dockerode ships no types and only the slice above is used, so it is loaded untyped.
 function defaultDocker(): DockerClient {
@@ -111,6 +185,8 @@ export function substrateDocker(opts: SubstrateDockerOptions): SubstrateSandboxP
 		defaultCwd: "/work",
 
 		async create() {
+			// The disk gate runs before any docker call: a missing image would pull here.
+			await ensureImagePulled(docker(), image, opts.runDf);
 			if (network === "internal") await ensureInternalNetwork(docker());
 			const token = randomBytes(32).toString("base64url");
 			const container = await docker().createContainer(

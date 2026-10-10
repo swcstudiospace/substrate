@@ -278,6 +278,7 @@ describe("repo units", () => {
 			"substrate-collector-herdr.service",
 			"substrate-collector-muse.service",
 			"substrate-dispatcher.service",
+			"substrate-host.service",
 			"substrate-mcp.service",
 			"substrate-skills-bridge.service",
 			"substrate-skills-sync.service",
@@ -340,7 +341,14 @@ describe("repo units", () => {
 		expect(dispatcher?.workingDirectory).toBe(RELEASE_CURRENT);
 		expect(dispatcher?.environmentFiles).toEqual([deliveredTo("dispatcher")]);
 		expect(deliveredTo("dispatcher")).toBe("/etc/substrate/substrate-dispatcher.env");
-		expect(diagnose(units, listGitTree(repoRoot, "HEAD"))).toEqual([]);
+		// Phase 31 host (LANEA-01): node runs the .ts sources from the pinned
+		// release like every other unit, with only its per-unit file — the
+		// manifest delivers SUBSTRATE_TOKEN_SUBSTRATE there, by name. Staged
+		// only: install/restart is OPERATOR-GATED G4.
+		const host = units.find((unit) => unit.name === "substrate-host.service");
+		expect(host?.workingDirectory).toBe(RELEASE_CURRENT);
+		expect(host?.environmentFiles).toEqual([deliveredTo("substrate-host")]);
+		expect(deliveredTo("substrate-host")).toBe("/etc/substrate/substrate-host.env");
 	});
 
 	test("the dry-run command reports no findings and does not claim it wrote anything", () => {
