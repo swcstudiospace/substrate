@@ -5,27 +5,29 @@
  * Against the Phase-16 harness twin only: reads the `consumer.env` that
  * `rehearsal up --surfaces claude-code,cursor,hermes,omp,muse --name p19`
  * wrote, refuses a production port or a non-loopback host before the first
- * request, then drives a working-to-idle-to-close pane through the real
- * herdr collector, one Muse tool call through the projected hook, one brief
- * through the real writer, and one synthetic Cursor stop — asserting every
- * event over a repo-filtered read within ten seconds with zero refused
- * emits. Every side effect lands in temp dirs; the twin stays up for the
- * operator's `rehearsal down`.
+ * request, then drives a working-to-idle-to-close pane through a real
+ * proof-named herdr server (`herdr --session substrate-proof-<tag> server`)
+ * watched by a real collector child with persisted state, one Muse tool call
+ * through the installed hook (`muse plugins hook test --fixture` after
+ * validate, install-or-update, approve and an `inspect` trusted_enabled
+ * check), one brief through the real writer, and one synthetic Cursor stop —
+ * asserting every event within ten seconds of its own action with zero
+ * refused emits. Every side effect lands in temp dirs plus the proof-named
+ * session, which is stopped and deleted in `finally`; the twin stays up for
+ * the operator's `rehearsal down`.
  *
  * Exit codes mirror the harness: 0 pass, 1 failed, 2 usage-or-refused.
- * The pane source is a loopback socket stub speaking the snapshot RPC, so
- * no live herdr session is ever connected; child environments are built
- * explicitly and never inherit HERDR entries. No model runs anywhere: the
- * pane states are reported by the proof and the hook runs against a
- * fixture.
+ * No live default herdr session is ever connected and no model runs
+ * anywhere: pane states are reported by the proof and the hook runs through
+ * the installed hook-test runner with a fixture. Child environments are
+ * built explicitly and never inherit HERDR or XDG entries.
  */
+import type { Subprocess } from "bun";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { createServer, type Server } from "node:net";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
+import { createConnection, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { HerdrCollector } from "../packages/collectors/src/herdr.ts";
-import type { HerdrPane } from "../packages/collectors/src/herdr-map.ts";
 import { runStop } from "../packages/collectors/src/cursor-stop.ts";
 import { postEvent } from "../packages/collectors/src/emit.ts";
 import { branchFor, repoSlug } from "../packages/collectors/src/git-context.ts";
@@ -33,9 +35,17 @@ import { loadState, MARKER_START, pass } from "../packages/collectors/src/muse.t
 import { parseShellExports, refuseSmokeUrl, runDirFor } from "./rehearsal.ts";
 
 const PROOF_NAME = "p19";
+const PROOF_SOURCE = "substrate-proof";
+const SESSION_PREFIX = "substrate-proof-";
 const QUERY_BUDGET_MS = 10_000;
 const HOOK_BUDGET_MS = 8000;
 const DEAD_URL = "http://127.0.0.1:1";
+const HERDR_STARTUP_MS = 20_000;
+const RPC_TIMEOUT_MS = 5000;
+const STATE_WAIT_MS = 15_000;
+const CHILD_TIMEOUT_MS = 60_000;
+const COLLECTOR_STOP_MS = 5000;
+const MUSE_BIN = "/root/.local/bin/muse";
 
 const results: boolean[] = [];
 function check(ok: boolean, what: string, detail?: string): void {
@@ -48,14 +58,21 @@ function shellGit(dir: string, args: string[]): void {
 	if (run.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${String(run.stderr).slice(0, 200)}`);
 }
 
-/** A child environment that cannot reach a live session: explicit keys only. */
-function childEnv(extra: Record<string, string>): Record<string, string> {
+/**
+ * A child environment that cannot reach a live session or leak desktop
+ * state: explicit keys only, never HERDR_* or XDG_*, with auto-update off.
+ */
+export function childEnv(extra: Record<string, string>): Record<string, string> {
 	// The launcher can update the live installation independently of HOME,
 	// so every child — including the projector's muse calls — opts out.
+	// XDG_* are dropped by construction: only PATH, MUSE_NO_AUTO_UPDATE and
+	// the explicit extras below ever reach the child (scratch-HOME isolation
+	// per the verified 19-RESEARCH Muse facts).
 	const env: Record<string, string> = { PATH: process.env.PATH ?? "/usr/bin:/bin", MUSE_NO_AUTO_UPDATE: "1" };
 	for (const [key, value] of Object.entries(extra)) env[key] = value;
 	for (const key of Object.keys(env)) {
 		if (key.startsWith("HERDR_")) throw new Error(`child env carries ${key}`);
+		if (key.startsWith("XDG_")) throw new Error(`child env carries ${key}`);
 	}
 	return env;
 }
@@ -70,12 +87,12 @@ interface QueryEvent {
 	payload?: Record<string, unknown>;
 }
 
-async function queryEvents(base: string, tok: string, body: Record<string, unknown>): Promise<QueryEvent[]> {
+async function queryEvents(base: string, tok: string, body: Record<string, unknown>, timeoutMs = QUERY_BUDGET_MS): Promise<QueryEvent[]> {
 	const res = await fetch(`${base}/events/query`, {
 		method: "POST",
 		headers: { "content-type": "application/json", authorization: `Bearer ${tok}` },
 		body: JSON.stringify(body),
-		signal: AbortSignal.timeout(10_000),
+		signal: AbortSignal.timeout(timeoutMs),
 	});
 	if (res.status !== 200) throw new Error(`query answered ${res.status}`);
 	const raw: unknown = await res.json();
@@ -85,15 +102,194 @@ async function queryEvents(base: string, tok: string, body: Record<string, unkno
 	return [];
 }
 
-async function pollFor(base: string, tok: string, body: Record<string, unknown>, want: (events: QueryEvent[]) => boolean): Promise<QueryEvent[]> {
-	const deadline = Date.now() + QUERY_BUDGET_MS;
+/**
+ * Poll until `want` holds, measuring the ten-second budget from the action
+ * timestamp `sinceMs` (recorded BEFORE the driver). Each request is bounded
+ * by the time that remains, so a slow query cannot overrun the deadline.
+ */
+async function pollFor(base: string, tok: string, body: Record<string, unknown>, want: (events: QueryEvent[]) => boolean, sinceMs = Date.now()): Promise<QueryEvent[]> {
+	const deadline = sinceMs + QUERY_BUDGET_MS;
 	let seen: QueryEvent[] = [];
 	while (Date.now() < deadline) {
-		seen = await queryEvents(base, tok, body);
+		const remaining = remainingMs(sinceMs, Date.now());
+		if (remaining <= 0) break;
+		seen = await queryEvents(base, tok, body, remaining);
 		if (want(seen)) return seen;
 		await Bun.sleep(250);
 	}
 	return seen;
+}
+
+/** Only proof-named sessions may be stopped or deleted by this script. */
+export function isProofSession(name: string): boolean {
+	return name.startsWith(SESSION_PREFIX) && name.length > SESSION_PREFIX.length && /^[A-Za-z0-9-]+$/.test(name);
+}
+
+/** Milliseconds left in the ten-second action-to-event budget; never negative. */
+export function remainingMs(startedAt: number, now: number, budgetMs = QUERY_BUDGET_MS): number {
+	return Math.max(0, startedAt + budgetMs - now);
+}
+
+/**
+ * Pre-execution guard for any hook run: the installed config URL must equal
+ * the already-guarded twin URL, and must itself pass the smoke refusal.
+ * Returns the refusal reason, or null when the target is safe to run.
+ */
+export function assertHookTarget(hookUrl: string, twinUrl: string): string | null {
+	if (!hookUrl) return "installed hook has no url; refusing to run the hook";
+	if (hookUrl !== twinUrl) return "installed hook url differs from the guarded twin; refusing to run the hook";
+	return refuseSmokeUrl(hookUrl);
+}
+
+interface HerdrRpcError {
+	code?: string;
+	message?: string;
+}
+
+/** One bounded ND-JSON call against the proof-named herdr socket. */
+function herdrRpc(socketPath: string, method: string, params: unknown, timeoutMs = RPC_TIMEOUT_MS): Promise<{ result?: unknown; error?: HerdrRpcError }> {
+	const { promise, resolve } = Promise.withResolvers<{ result?: unknown; error?: HerdrRpcError }>();
+	let settled = false;
+	const finish = (out: { result?: unknown; error?: HerdrRpcError }): void => {
+		if (settled) return;
+		settled = true;
+		resolve(out);
+	};
+	let sock: Socket;
+	try {
+		sock = createConnection(socketPath);
+	} catch (cause) {
+		finish({ error: { code: "socket_error", message: String(cause) } });
+		return promise;
+	}
+	const id = `laneb-proof-${Date.now().toString(36)}`;
+	const timer = setTimeout(() => {
+		try {
+			sock.destroy();
+		} catch {
+			// Already gone.
+		}
+		finish({ error: { code: "timeout", message: `${method} timed out` } });
+	}, timeoutMs);
+	let buf = "";
+	sock.on("data", (chunk) => {
+		buf += chunk.toString("utf8");
+		let idx = buf.indexOf("\n");
+		while (idx >= 0) {
+			const line = buf.slice(0, idx).trim();
+			buf = buf.slice(idx + 1);
+			idx = buf.indexOf("\n");
+			if (!line) continue;
+			let msg: unknown = null;
+			try {
+				msg = JSON.parse(line);
+			} catch {
+				continue;
+			}
+			if (!msg || typeof msg !== "object") continue;
+			if (!("id" in msg) || msg.id !== id) continue;
+			clearTimeout(timer);
+			try {
+				sock.end();
+			} catch {
+				// Already gone.
+			}
+			let result: unknown;
+			if ("result" in msg) result = msg.result;
+			let error: HerdrRpcError | undefined;
+			if ("error" in msg && msg.error && typeof msg.error === "object") {
+				const err = msg.error;
+				const code = "code" in err && typeof err.code === "string" ? err.code : undefined;
+				const message = "message" in err && typeof err.message === "string" ? err.message : undefined;
+				error = { code, message };
+			}
+			finish({ result, error });
+			return;
+		}
+	});
+	sock.on("error", (cause) => {
+		clearTimeout(timer);
+		finish({ error: { code: "socket_error", message: String(cause) } });
+	});
+	sock.on("connect", () => {
+		sock.write(`${JSON.stringify({ id, method, params })}\n`);
+	});
+	return promise;
+}
+
+/** Bounded wait for a file (herdr socket) to exist. */
+async function waitForPath(path: string, timeoutMs: number): Promise<boolean> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		if (existsSync(path)) return true;
+		await Bun.sleep(100);
+	}
+	return existsSync(path);
+}
+
+/** Bounded wait for the collector child to seed v2 state (first-run done). */
+async function waitForSeededState(statePath: string, timeoutMs: number): Promise<boolean> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		try {
+			const raw: unknown = JSON.parse(readFileSync(statePath, "utf8"));
+			if (raw && typeof raw === "object" && "version" in raw && raw.version === 2) return true;
+		} catch {
+			// Not seeded yet.
+		}
+		await Bun.sleep(200);
+	}
+	return false;
+}
+
+/**
+ * Run the real Muse CLI under the scratch HOME: no XDG_* keys by
+ * construction (fresh env), no auto-update, bounded wall time.
+ */
+function museScratch(args: string[], scratchHome: string, cwd: string, timeoutMs = CHILD_TIMEOUT_MS): { status: number; stdout: string; stderr: string } {
+	const run = spawnSync(MUSE_BIN, args, {
+		cwd,
+		encoding: "utf8",
+		timeout: timeoutMs,
+		env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: scratchHome, MUSE_NO_AUTO_UPDATE: "1" },
+	});
+	return { status: run.status ?? 1, stdout: String(run.stdout ?? ""), stderr: String(run.stderr ?? "") };
+}
+
+type SpawnedChild = Subprocess;
+
+/** SIGTERM a child owned by this proof, then SIGKILL past a bound. */
+async function stopOwnedChild(proc: SpawnedChild, timeoutMs = COLLECTOR_STOP_MS): Promise<void> {
+	try {
+		proc.kill("SIGTERM");
+	} catch {
+		// Already gone.
+	}
+	await Promise.race([proc.exited.then(() => undefined).catch(() => undefined), Bun.sleep(timeoutMs)]);
+	try {
+		proc.kill("SIGKILL");
+	} catch {
+		// Already gone.
+	}
+}
+
+/** Session ids the collector state file currently tracks. */
+function trackedSessionIds(statePath: string): string[] {
+	try {
+		const raw: unknown = JSON.parse(readFileSync(statePath, "utf8"));
+		if (!raw || typeof raw !== "object" || !("panes" in raw)) return [];
+		const panes: unknown = raw.panes;
+		if (!panes || typeof panes !== "object") return [];
+		const ids: string[] = [];
+		for (const entry of Object.values(panes)) {
+			if (entry && typeof entry === "object" && "session_id" in entry && typeof entry.session_id === "string") {
+				ids.push(entry.session_id);
+			}
+		}
+		return ids;
+	} catch {
+		return [];
+	}
 }
 
 async function museCachePaths(): Promise<string[]> {
@@ -181,8 +377,11 @@ async function main(argv: string[]): Promise<number> {
 	process.env.SUBSTRATE_STATE_DIR = stateDir;
 	process.env.SUBSTRATE_COLLECTOR_STATE = museState;
 
-	let collector: HerdrCollector | undefined;
-	let server: Server | undefined;
+	let collectorProc: SpawnedChild | undefined;
+	let herdrServer: SpawnedChild | undefined;
+	let proofSession: string | undefined;
+	let proofSock = "";
+	let proofHome = "";
 	try {
 		// Scratch repo R: a run-tagged rehearsal slug with a resolvable branch.
 		const repo = join(tmp, "repo");
@@ -199,108 +398,229 @@ async function main(argv: string[]): Promise<number> {
 		check(branch === "p19-tag", "scratch repo branch resolves", branch);
 		if (slug !== runSlug || branch !== "p19-tag") return 1;
 
-		// Pane source: a loopback stub for the snapshot RPC. Panes are the
-		// proof's own fixtures; the collector under test is real.
-		let panes: HerdrPane[] = [];
-		server = createServer((socket) => {
-			let buf = "";
-			socket.on("data", (chunk) => {
-				buf += chunk.toString("utf8");
-				let idx = buf.indexOf("\n");
-				while (idx >= 0) {
-					const line = buf.slice(0, idx).trim();
-					buf = buf.slice(idx + 1);
-					idx = buf.indexOf("\n");
-					if (!line) continue;
-					let raw: unknown = null;
-					try {
-						raw = JSON.parse(line);
-					} catch {
-						continue;
-					}
-					if (!raw || typeof raw !== "object") continue;
-					const id = "id" in raw ? raw.id : undefined;
-					const method = "method" in raw && typeof raw.method === "string" ? raw.method : "";
-					if (method === "session.snapshot") {
-						socket.write(`${JSON.stringify({ id, result: { snapshot: { panes } } })}\n`);
-						socket.end();
-					}
-				}
+		// Real proof-named herdr server plus a watching collector child with
+		// persisted state (D19-27). Nothing here touches the live default
+		// session: every socket call targets proofSock, and teardown stops
+		// and deletes only this proof-named session. No model runs: pane
+		// states are reported by the proof itself.
+		const session = `${SESSION_PREFIX}${tag}`;
+		if (!isProofSession(session)) {
+			process.stderr.write(`[laneb-proof] refused: session name is not proof-owned.\n`);
+			return 2;
+		}
+		proofSession = session;
+		proofHome = process.env.HOME && process.env.HOME.length > 0 ? process.env.HOME : "/root";
+		proofSock = join(proofHome, ".config", "herdr", "sessions", session, "herdr.sock");
+		try {
+			herdrServer = Bun.spawn(["herdr", "--session", session, "server"], {
+				cwd: process.cwd(),
+				env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: proofHome },
+				stdout: "ignore",
+				stderr: "ignore",
 			});
+		} catch (cause) {
+			check(false, "proof herdr server starts", String(cause).slice(0, 160));
+			return 1;
+		}
+		check(await waitForPath(proofSock, HERDR_STARTUP_MS), "proof herdr server owns its socket", proofSock);
+		if (!existsSync(proofSock)) return 1;
+
+		// The watching collector child starts with scratch state BEFORE the
+		// first pane is driven, so first-run seeding cannot swallow events.
+		const collectorEnv = childEnv({ HOME: proofHome, SUBSTRATE_URL: base, SUBSTRATE_TOKEN: tok, SUBSTRATE_STATE_DIR: stateDir, SUBSTRATE_COLLECTOR_STATE: herdrState });
+		collectorProc = Bun.spawn(["bun", "packages/collectors/src/herdr.ts", "--watch", "--session", session], {
+			cwd: process.cwd(),
+			env: collectorEnv,
+			stdout: "ignore",
+			stderr: "ignore",
 		});
-		const sockPath = join(tmp, "herdr.sock");
-		await new Promise<void>((resolve, reject) => {
-			server?.listen(sockPath, () => resolve());
-			server?.once("error", reject);
+		const seeded = await waitForSeededState(herdrState, STATE_WAIT_MS);
+		check(seeded, "proof collector seeds v2 state before the first pane");
+		if (!seeded) return 1;
+
+		// Scratch workspace whose root pane lives in R, then working.
+		const created = await herdrRpc(proofSock, "workspace.create", { cwd: repo, label: `${PROOF_SOURCE}-${tag}`, focus: false });
+		let paneId = "";
+		if (created.result && typeof created.result === "object" && "root_pane" in created.result) {
+			const rootPane: unknown = created.result.root_pane;
+			if (rootPane && typeof rootPane === "object" && "pane_id" in rootPane && typeof rootPane.pane_id === "string") {
+				paneId = rootPane.pane_id;
+			}
+		}
+		check(paneId.length > 0, "proof workspace opens a scratch pane in R", paneId || (created.error ? `${created.error.code ?? "error"}` : "no pane").slice(0, 120));
+		if (!paneId) return 1;
+
+		const tWorking = Date.now();
+		const reportedWorking = await herdrRpc(proofSock, "pane.report_agent", { pane_id: paneId, source: PROOF_SOURCE, agent: "omp", state: "working" });
+		check(!reportedWorking.error, "scratch pane reports working", reportedWorking.error ? `${reportedWorking.error.code ?? "error"}`.slice(0, 120) : paneId);
+		const seenStart = await pollFor(base, tok, { repo: slug, limit: 100, include_payload: true }, (events) =>
+			events.some((event) => event.kind === "session.start" && event.surface === "omp"),
+			tWorking,
+		);
+		const starts = seenStart.filter((event) => event.kind === "session.start" && event.surface === "omp");
+		check(starts.length >= 1, "working pane emits session.start within 10s of the report", `${starts.length}`);
+		const firstStart = starts[0];
+		const startSessionId = typeof firstStart?.session_id === "string" ? firstStart.session_id : "";
+		check(firstStart?.repo === slug, "session.start carries the rehearsal slug", String(firstStart?.repo ?? "missing"));
+		check(firstStart?.branch === "p19-tag", "session.start carries the branch", String(firstStart?.branch ?? "missing"));
+
+		// Saved-offset recovery: the state file holds the working pane, then
+		// the collector child is killed and restarted before idle arrives.
+		const savedBefore = trackedSessionIds(herdrState);
+		check(startSessionId === "" ? savedBefore.length >= 1 : savedBefore.includes(startSessionId), "collector state saves the working pane offset", `${savedBefore.length} tracked`);
+		if (collectorProc) {
+			await stopOwnedChild(collectorProc);
+			collectorProc = undefined;
+		}
+		collectorProc = Bun.spawn(["bun", "packages/collectors/src/herdr.ts", "--watch", "--session", session], {
+			cwd: process.cwd(),
+			env: collectorEnv,
+			stdout: "ignore",
+			stderr: "ignore",
 		});
-		const pane = (status: string): HerdrPane => ({ pane_id: "w9:p1", terminal_id: "t-laneb-1", agent: "omp", agent_status: status, cwd: repo });
+		await Bun.sleep(2500);
+		const savedAfter = trackedSessionIds(herdrState);
+		check(savedAfter.length >= 1 && savedBefore.every((id) => savedAfter.includes(id)), "restarted collector reloads the saved offsets", `${savedAfter.length} tracked`);
 
-		// Seed the v2 file on an empty snapshot so seeding swallows nothing.
-		collector = new HerdrCollector({ socketPath: sockPath, statePath: herdrState });
-		panes = [];
-		const seed = await collector.runPass();
-		const seededRaw: unknown = JSON.parse(readFileSync(herdrState, "utf8"));
-		const seededVersion = seededRaw && typeof seededRaw === "object" && "version" in seededRaw ? seededRaw.version : 0;
-		check(seed.emitted === 0 && seededVersion === 2, "empty snapshot seeds v2 state silently");
+		const tIdle = Date.now();
+		const reportedIdle = await herdrRpc(proofSock, "pane.report_agent", { pane_id: paneId, source: PROOF_SOURCE, agent: "omp", state: "idle" });
+		check(!reportedIdle.error, "scratch pane reports idle after the restart", reportedIdle.error ? `${reportedIdle.error.code ?? "error"}`.slice(0, 120) : paneId);
+		const seenIdle = await pollFor(base, tok, { repo: slug, limit: 100, include_payload: true }, (events) =>
+			events.some((event) => event.kind === "note" && event.surface === "omp" && event.payload?.["status"] === "idle"),
+			tIdle,
+		);
+		const idleNotes = seenIdle.filter((event) => event.kind === "note" && event.surface === "omp");
+		check(idleNotes.length >= 1, "idle transition emits a note after restart within 10s of the report", `${idleNotes.length}`);
+		check(idleNotes[0]?.payload?.["runtime"] === "herdr" && idleNotes[0]?.payload?.["status"] === "idle", "idle note carries runtime herdr", JSON.stringify(idleNotes[0]?.payload ?? null).slice(0, 120));
 
-		// Working, then a kill-and-restart, then idle: one start, one note.
-		panes = [pane("working")];
-		const started = await collector.runPass();
-		collector.stop();
-		collector = new HerdrCollector({ socketPath: sockPath, statePath: herdrState });
-		panes = [pane("idle")];
-		const idled = await collector.runPass();
-		check(started.emitted >= 1, "working pane emits session.start");
-		check(idled.emitted >= 1, "idle transition emits a note after restart");
+		// Pane close, then stop the collector child.
+		const tClose = Date.now();
+		const closedPane = await herdrRpc(proofSock, "pane.close", { pane_id: paneId });
+		check(!closedPane.error, "scratch pane closes", closedPane.error ? `${closedPane.error.code ?? "error"}`.slice(0, 120) : paneId);
+		const seenEnd = await pollFor(base, tok, { repo: slug, limit: 100, include_payload: true }, (events) =>
+			events.some((event) => event.kind === "session.end" && event.surface === "omp"),
+			tClose,
+		);
+		const ends = seenEnd.filter((event) => event.kind === "session.end" && event.surface === "omp");
+		check(ends.length >= 1, "closed pane emits session.end within 10s of the close", `${ends.length}`);
+		check(ends[0]?.repo === slug, "herdr session.end carries the repo", String(ends[0]?.repo ?? "missing"));
+		if (collectorProc) {
+			await stopOwnedChild(collectorProc);
+			collectorProc = undefined;
+		}
+		const allStarts = await queryEvents(base, tok, { repo: slug, limit: 100 }, QUERY_BUDGET_MS);
+		const startCount = allStarts.filter((event) => event.kind === "session.start" && event.surface === "omp" && (startSessionId === "" || event.session_id === startSessionId)).length;
+		check(startCount === 1, "exactly one session.start across the restart", `${startCount}`);
 
-		// Pane close, then stop the collector.
-		panes = [];
-		const closed = await collector.runPass();
-		collector.stop();
-		collector = undefined;
-		check(closed.emitted >= 1, "closed pane emits session.end");
-
-		// Muse bundle into an isolated scope: validated, never installed.
+		// Real scratch-scope Muse install: validate, install-or-update,
+		// approve, inspect — never into the operator scope. XDG_* are unset
+		// by construction in every scratch child env below. No model runs:
+		// the tool call travels through the installed hook-test runner.
 		const cachesBefore = await museCachePaths();
 		const tokenFile = join(tmp, "token.env");
 		writeFileSync(tokenFile, `SUBSTRATE_TOKEN=${tok}\n`, { mode: 0o600 });
 		chmodSync(tokenFile, 0o600);
 		const bundleDir = join(tmp, "bundle");
-		const projected = spawnSync(process.execPath, ["packages/projector/src/muse.ts", "--bundle-only"], {
+		const projected = spawnSync(process.execPath, ["packages/projector/src/muse.ts"], {
 			cwd: process.cwd(),
 			env: childEnv({ HOME: scratchHome, MUSE_PLUGIN_DIR: bundleDir, SUBSTRATE_URL: base, SUBSTRATE_MUSE_TOKEN_FILE: tokenFile, SUBSTRATE_STATE_DIR: stateDir }),
 			encoding: "utf8",
+			timeout: CHILD_TIMEOUT_MS,
 		});
-		check(projected.status === 0, "muse bundle projects into the isolated scope", String(projected.stderr).slice(0, 160));
-		const hookPath = join(bundleDir, "hooks", "post-tool-use.ts");
-		let hookUrl = "";
+		check(projected.status === 0, "muse bundle installs into the scratch scope", String(projected.stderr).slice(0, 160));
+		const inspected = museScratch(["plugins", "inspect", "substrate", "--json"], scratchHome, process.cwd());
+		let trusted = false;
 		try {
-			const hookConfig: unknown = JSON.parse(readFileSync(join(bundleDir, "hooks", "substrate.json"), "utf8"));
-			if (hookConfig && typeof hookConfig === "object" && "url" in hookConfig && typeof hookConfig.url === "string") {
-				hookUrl = hookConfig.url;
+			const parsed: unknown = JSON.parse(inspected.stdout);
+			if (parsed && typeof parsed === "object" && "runtime_capabilities" in parsed && Array.isArray(parsed.runtime_capabilities)) {
+				const caps: unknown[] = parsed.runtime_capabilities;
+				trusted = caps.length > 0 && caps.every((cap) => !!cap && typeof cap === "object" && "status" in cap && cap.status === "trusted_enabled");
 			}
 		} catch {
-			hookUrl = "";
+			trusted = false;
 		}
+		check(trusted, "scratch install is approved (trusted_enabled)");
+		const listed = museScratch(["plugins", "list", "--json"], scratchHome, process.cwd());
+		let installedCache = "";
+		try {
+			const parsed: unknown = JSON.parse(listed.stdout);
+			if (parsed && typeof parsed === "object" && "plugins" in parsed && Array.isArray(parsed.plugins)) {
+				for (const entry of parsed.plugins) {
+					if (!entry || typeof entry !== "object") continue;
+					if (!("plugin" in entry) || !entry.plugin || typeof entry.plugin !== "object") continue;
+					if (!("id" in entry.plugin) || entry.plugin.id !== "substrate") continue;
+					if (!("record" in entry) || !entry.record || typeof entry.record !== "object") continue;
+					if ("cache_path" in entry.record && typeof entry.record.cache_path === "string") installedCache = entry.record.cache_path;
+				}
+			}
+		} catch {
+			installedCache = "";
+		}
+		check(installedCache.length > 0, "scratch install reports a cache path", installedCache.slice(0, 80));
+		// Pre-execution guard (T-19-14): the installed config URL must equal
+		// the guarded twin URL before ANY hook runs.
+		let installedUrl = "";
+		try {
+			const installedConfig: unknown = JSON.parse(readFileSync(join(installedCache, "hooks", "substrate.json"), "utf8"));
+			if (installedConfig && typeof installedConfig === "object" && "url" in installedConfig && typeof installedConfig.url === "string") {
+				installedUrl = installedConfig.url;
+			}
+		} catch {
+			installedUrl = "";
+		}
+		const hookGuard = assertHookTarget(installedUrl, base);
+		check(hookGuard === null, "installed hook config targets the guarded twin", installedUrl || "missing");
+		if (hookGuard !== null) {
+			process.stderr.write(`[laneb-proof] refused: ${hookGuard}.\n`);
+			return 2;
+		}
+		let installedRedact = "";
+		try {
+			installedRedact = readFileSync(join(installedCache, "hooks", "redact.ts"), "utf8");
+		} catch {
+			installedRedact = "";
+		}
+		const bundleRedact = readFileSync(join(bundleDir, "hooks", "redact.ts"), "utf8");
+		check(installedRedact.length > 0 && installedRedact === bundleRedact, "installed redactor matches the projected bundle", `${installedRedact.length} bytes`);
 		const hookSession = `muse-hook-${Date.now().toString(36)}`;
-		const hooked = await runHook(hookPath, repo, scratchHome, { tool_name: "Edit", session_id: hookSession, tool_use_id: "call-7", outcome: "success", duration_ms: 35 });
-		check(hooked.code === 0 && hooked.stdout === "", "muse hook emits with empty stdout", `exit ${hooked.code}`);
+		const fixturePath = join(tmp, "hook-fixture.json");
+		writeFileSync(fixturePath, JSON.stringify({ event: "PostToolUse", stdin: { hook_event_name: "PostToolUse", session_id: hookSession, tool_name: "Edit", tool_use_id: "call-7", outcome: "success", duration_ms: 35 } }));
+		const tHook = Date.now();
+		const hookTest = museScratch(["plugins", "hook", "test", "substrate:post-tool-use", "--fixture", fixturePath, "--json"], scratchHome, repo);
+		let hookOk = false;
+		let hookDetail = "unparsed";
+		try {
+			const parsed: unknown = JSON.parse(hookTest.stdout);
+			if (parsed && typeof parsed === "object" && "terminals" in parsed && Array.isArray(parsed.terminals)) {
+				for (const terminal of parsed.terminals) {
+					if (!terminal || typeof terminal !== "object") continue;
+					if (!("hook_key" in terminal) || terminal.hook_key !== "plugin:substrate:post-tool-use") continue;
+					const exitCode: unknown = "exit_code" in terminal ? terminal.exit_code : undefined;
+					const stdout: unknown = "stdout" in terminal ? terminal.stdout : undefined;
+					hookDetail = `exit ${typeof exitCode === "number" ? exitCode : "?"}`;
+					if (exitCode === 0 && stdout === "") {
+						hookOk = true;
+						hookDetail = "exit 0";
+					}
+				}
+			}
+		} catch {
+			hookOk = false;
+		}
+		check(hookOk, "installed hook test completes with empty stdout", hookDetail.slice(0, 120));
+		const seenTool = await pollFor(base, tok, { repo: slug, limit: 100, include_payload: true }, (events) =>
+			events.some((event) => event.kind === "tool.call" && event.surface === "muse"),
+			tHook,
+		);
+		const toolCalls = seenTool.filter((event) => event.kind === "tool.call" && event.surface === "muse");
+		check(toolCalls.length >= 1, "installed hook emits tool.call within 10s of the hook test", `${toolCalls.length}`);
+		check(toolCalls[0]?.branch === "p19-tag", "muse tool.call carries the branch", String(toolCalls[0]?.branch ?? "missing"));
 		const cachesAfter = await museCachePaths();
 		check(JSON.stringify(cachesAfter) === JSON.stringify(cachesBefore), "operator muse cache paths identical before and after");
 
-		// Every herdr and muse event lands under the repo filter in budget.
-		const seen = await pollFor(base, tok, { repo: slug, limit: 100, include_payload: true }, (events) => {
-			const has = (kind: string, surface: string): boolean => events.some((event) => event.kind === kind && event.surface === surface);
-			return has("session.start", "omp") && has("note", "omp") && has("tool.call", "muse") && has("session.end", "omp");
-		});
-		const one = (kind: string, surface: string): QueryEvent[] => seen.filter((event) => event.kind === kind && event.surface === surface);
-		check(one("session.start", "omp").length === 1, "exactly one session.start across the restart", `${one("session.start", "omp").length}`);
-		const note = one("note", "omp")[0];
-		check(note?.payload?.["status"] === "idle" && note?.payload?.["runtime"] === "herdr", "idle note carries runtime herdr");
-		const tool = one("tool.call", "muse")[0];
-		check(tool?.branch === "p19-tag", "muse tool.call carries the branch", String(tool?.branch ?? "missing"));
-		const end = one("session.end", "omp")[0];
-		check(end?.repo === slug, "herdr session.end carries the repo", String(end?.repo ?? "missing"));
+		// The per-action polls above already asserted the start, the idle
+		// note, the tool call and the end within ten seconds of their own
+		// actions; the brief writer reads the same repo scope next.
 
 		// The writer lists both mid-kind events, keeps one pointer, and a
 		// closed-port run leaves the brief byte-identical.
@@ -385,8 +705,26 @@ async function main(argv: string[]): Promise<number> {
 		const statusOut = String(status.stdout ?? "");
 		check(status.status === 0 && statusOut.includes("): 0 ("), "collectors:status reports zero refused", statusOut.trim().split("\n").at(-1) ?? "");
 	} finally {
-		collector?.stop();
-		server?.close();
+		if (collectorProc) await stopOwnedChild(collectorProc);
+		collectorProc = undefined;
+		// Stop and delete ONLY the proof-named session; the live default
+		// session is never named here.
+		if (proofSession && isProofSession(proofSession)) {
+			const scrubbedEnv = { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: proofHome || "/root" };
+			spawnSync("herdr", ["--session", proofSession, "server", "stop"], { timeout: 10_000, encoding: "utf8", env: scrubbedEnv });
+			spawnSync("herdr", ["session", "delete", proofSession], { timeout: 10_000, encoding: "utf8", env: scrubbedEnv });
+			try {
+				rmdirSync(join(scrubbedEnv.HOME, ".config", "herdr", "sessions"));
+			} catch {
+				// Non-empty or already gone.
+			}
+		}
+		try {
+			herdrServer?.kill("SIGTERM");
+		} catch {
+			// Already gone.
+		}
+		herdrServer = undefined;
 		for (const [key, value] of Object.entries(savedEnv)) {
 			if (value === undefined) delete process.env[key];
 			else process.env[key] = value;

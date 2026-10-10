@@ -9,9 +9,14 @@
 
 ## Status
 
-Cut over on 2026-10-10 (operator-approved): both collectors run `main`'s code from the pinned release
-(`WorkingDirectory=/opt/agent-substrate/current`) with collector-only env files, and a release deploy
-restarts them with the other release units (infra/vps/README.md). The steps below are that procedure.
+> Historical receipt (recorded 2026-10-10, preserved as-is): cut over on
+> 2026-10-10 (operator-approved) — both collectors run `main`'s code from
+> the pinned release (`WorkingDirectory=/opt/agent-substrate/current`)
+> with collector-only env files, and a release deploy restarts them with
+> the other release units (infra/vps/README.md). This record does not claim
+> the current editing session installed or restarted anything; all installs
+> and restarts remain operator hands in an approved window. The steps below
+> are that procedure.
 
 ## Operator cutover (one approved window, one collector at a time)
 
@@ -31,6 +36,16 @@ cp -a /var/lib/substrate/herdr-offsets.json /var/lib/substrate/muse-offsets.json
 #    Files: /etc/substrate/substrate-collector-herdr.env, /etc/substrate/substrate-collector-muse.env
 
 # 3. Install a unit and its drop-in from the release tree, then reload.
+#    Current lineage (must match before install): WorkingDirectory
+#    /opt/agent-substrate/current; ExecStart
+#    /root/.local/share/reflex/bun/bin/bun
+#    packages/collectors/src/{herdr,muse}.ts --watch; drop-in
+#    10-environment.conf carrying only
+#    EnvironmentFile=/etc/substrate/substrate-collector-<name>.env; state
+#    via StateDirectory=substrate plus SUBSTRATE_COLLECTOR_STATE and
+#    SUBSTRATE_STATE_DIR under /var/lib/substrate. Static lint before any
+#    install: systemd-analyze verify on both unit files (parent observed
+#    exit 0 on 2026-10-10).
 cd /opt/agent-substrate/current
 for c in herdr muse; do
   install -m 0644 infra/vps/substrate-collector-$c.service /etc/systemd/system/
@@ -92,21 +107,35 @@ bun run collectors:status
   are operator hands only; the proof asserts the operator cache paths are
   identical before and after for exactly this reason.
 - The optional real Muse model turn (a live tool call through the
-  projected hook with operator approval) is manual-only. The proof drives
-  the same hook file with a fixture and no model.
+  projected hook with operator approval) is manual-only. The real-runtime
+  proof drives the installed hook via `muse plugins hook test` under a
+  scratch HOME with a fixture and no model.
+- Global Cursor credential rotation is operator-only; the root credential
+  disclosure is contained in the test fixture and rotation is not marked
+  done here.
 
 ## Isolated proof evidence (SC-2 style)
 
-Proven from the worktree against the `p19` harness twin
-(`rehearsal up --surfaces claude-code,cursor,hermes,omp,muse --name p19`);
-only hosts, ports, key names and booleans are recorded here.
+Full record: `.planning/phases/19-lane-b-collectors/19-PROOF.md`
+(parent-observed 2026-10-10, tag `p19-mv2i83ok`). Only hosts, ports, key
+names and booleans are recorded here; no secret values.
 
-- `bun run proof:laneb` 27/27: scratch repo under a run-tagged rehearsal
-  slug; working → idle → close through the real herdr collector with a
-  kill-and-restart between working and idle emitting exactly one
-  `session.start`; idle `note` with runtime herdr; Muse `tool.call` with
-  the branch via the projected hook; `session.end` with the repo — all
-  inside one repo-filtered read within budget.
+### Real-runtime proof (current, supersedes the fixture run)
+
+- `bun run proof:laneb` **41/41, exit 0**, under owned HOME/XDG/TMPDIR
+  (fresh proof-owned twin name — never the pre-existing global `p19`):
+  real named herdr (`herdr 0.9.1`, proof-owned `substrate-proof-*` session
+  only); `workspace.create`, `pane.report_agent` working, own
+  watching-collector stop/restart with saved state, `pane.report_agent`
+  idle, `pane.close`; scratch-HOME Muse install (`validate` /
+  `install-or-update` / `approve` / `inspect`, `trusted_enabled`) with
+  installed redactor/config readback and the real installed hook-test CLI;
+  installed-config URL-equality guard before hook execution.
+- Boundary observations: URL refusal checked before execution;
+  start/note/end/tool.call each within ten seconds of its own action;
+  zero refused emits; operator Muse cache paths unchanged; proof-owned
+  session stopped/deleted and temp dirs removed in `finally`
+  (`up` exit 0 / `down` exit 0).
 - Brief writer: `BRIEF.md` lists the note and the tool call, one pointer
   block across five reruns, closed-port run byte-identical.
 - Cursor stop: synthetic envelope with a runtime-assembled shape; 0600
@@ -114,7 +143,16 @@ only hosts, ports, key names and booleans are recorded here.
   with empty stdout inside the bound.
 - `collectors:status` reports zero refused. Guard checks refuse port 7410
   and non-loopback hosts with exit 2 before any request.
-- Production touch: none. The proof never connects to a live herdr
-  session (loopback stub source, child envs carry no HERDR entries), never
-  installs a user-scope plugin, and leaves the twin up for the
-  operator's `rehearsal down --name p19`.
+- Production touch: none. The proof never connects to the live default
+  session (child envs carry no HERDR entries), never installs a user-scope
+  plugin, performs no production restart/cutover, runs no model turns, and
+  performs no credential rotation.
+
+### Original fixture run (historical, 2026-10-09 — superseded, preserved)
+
+`bun run proof:laneb` 27/27 against the `p19` harness twin with two
+fixture-scoped substitutions: a loopback snapshot stub in place of a real
+herdr server, and the hook file executed directly instead of the
+installed `muse plugins hook test` path. Details remain in
+`19-05-SUMMARY.md`; the `Known Stubs: None` assertion for that run is
+withdrawn there.

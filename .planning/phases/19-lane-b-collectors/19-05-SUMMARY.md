@@ -98,9 +98,33 @@ status: complete
 
 # Phase 19 Plan 05: Isolated proof, cutover runbook Summary
 
-**LANEB-07 is sealed isolated: working-to-idle, a Muse tool call and a
-fresh brief all land under main's vocabulary with zero refused emits and
-no production touch.**
+> **WR-01 / G19-07 correction (2026-10-10, parent-observed).** The original
+> executor run below (2026-10-09, 27/27, suite 1781/57/0) was
+> **fixture-scoped**: a loopback snapshot stub in place of a real herdr
+> server, and the hook file executed directly with `bun` instead of the
+> installed/approved `muse plugins hook test` path. Those two substitutions
+> are preserved below as historical evidence but are **superseded** by the
+> parent's real-runtime proof — real named herdr (`herdr 0.9.1`,
+> proof-owned `substrate-proof-*` session only), saved-state collector
+> stop/restart, scratch installed/approved Muse hook-test path —
+> **41/41, tag `p19-mv2i83ok`**, recorded in `19-PROOF.md` from
+> `local://v13-phase19-real-runtime-evidence.json` (parent-observed, not
+> re-run here). Original task commits and historical metrics/adaptations
+> are preserved unchanged; the contradictory `Known Stubs: None` /
+> "sealed" assertions for the fixture-only run are withdrawn. No new
+> commits are fabricated here and no final full-suite green is claimed —
+> one generated coverage test is being corrected by its original parked
+> agent (deleting an incidental HTTP attempt-count assertion; no
+> implementation failure observed) and final green awaits parent
+> re-verification.
+
+
+
+**Original fixture-scoped result (2026-10-09, historical): working-to-idle,
+a Muse tool call and a fresh brief all landed under main's vocabulary with
+zero refused emits and no production touch — against the loopback snapshot
+stub, not a live herdr session. Real-runtime proof is recorded separately
+in `19-PROOF.md` (parent-observed 41/41, tag `p19-mv2i83ok`).**
 
 ## Performance
 
@@ -110,7 +134,7 @@ no production touch.**
 
 ## Accomplishments
 
-- **Proof (`scripts/laneb-proof.ts` + `proof:laneb`).** 27/27 against the
+- **Proof (`scripts/laneb-proof.ts` + `proof:laneb`) — HISTORICAL fixture-scoped run (superseded by `19-PROOF.md` real-runtime 41/41, tag `p19-mv2i83ok`).** 27/27 against the
   `p19` harness twin: run-tagged rehearsal slug and `p19-tag` branch
   resolve; empty snapshot seeds v2 silently; working emits `session.start`;
   kill-and-restart then idle emits one note with zero duplicate starts;
@@ -139,6 +163,8 @@ no production touch.**
 
 ## Verification
 
+### Historical executor run (2026-10-09, fixture-scoped — superseded, not deleted)
+
 - `bun run proof:laneb` — 27/27 (twin `p19` on `127.0.0.1:17410`, surfaces `claude-code,cursor,hermes,omp,muse`)
 - `bun test` — 1781 pass / 57 skip / 0 fail
 - `bunx tsc --noEmit` — clean
@@ -147,6 +173,15 @@ no production touch.**
 - `bun test ./packages/mcp-server/src/store-lock.test.ts` — 18 pass
 - `systemd-analyze verify` on both unit files — exit 0 (rerun this session)
 - `bun test scripts/doctor-units.test.ts` — 18 pass
+
+### Parent real-runtime proof (2026-10-10, observed — see `19-PROOF.md`, not re-run here)
+
+- `bun run proof:laneb` under owned HOME/XDG/TMPDIR — **41/41, exit 0** (tag `p19-mv2i83ok`): real named herdr (`herdr 0.9.1`, proof-owned `substrate-proof-*` session only, pane `w1:p1`); actions `workspace.create`, `pane.report_agent` working, own watching-collector stop/restart with saved state, `pane.report_agent` idle, `pane.close`; actual scratch-HOME Muse `validate` / `install-or-update` / `approve` / `inspect` (`trusted_enabled`), installed redactor/config readback, real installed hook-test CLI; installed-config URL-equality guard before hook execution.
+- Twin lifecycle `up` exit 0 / `down` exit 0 with own cleanup completed; pre-existing global `p19` twin left untouched (no collision).
+- Boundary observations: URL refusal checked **before** execution; start/note/end/tool.call each observed **within ten seconds measured from its own action**; **zero refused emits**; operator Muse cache paths **unchanged**; proof-owned session stopped/deleted and temp dirs removed in `finally`.
+- `systemd-analyze verify` on both current unit files — exit 0 (parent, 2026-10-10).
+- `bunx tsc --noEmit`-class types check — exit 0 (parent, 2026-10-10).
+- Targeted suite before the last test correction: 84 pass / 1 fail across 6 files — the single failure is an incidental exact `/healthz` request count in scheduled health-disconnect (Bun retries the idempotent disconnected GET); the corrective slice deletes the attempt-count assertions only, no implementation change and no weakening of BRIEF/pointer/counter/timeouts. **No final full-suite green is claimed until the parent re-verifies after that correction.**
 
 ## Deviations from Plan
 
@@ -166,7 +201,7 @@ no production touch.**
 
 ### Plan adaptations (same guarantee, safer path)
 
-**3. Loopback snapshot stub instead of a real scratch herdr server.**
+**3. [FIXTURE-SCOPED, SUPERSEDED by parent real-runtime 41/41 — see `19-PROOF.md`.] Loopback snapshot stub instead of a real scratch herdr server.**
 D19-27 names `herdr --session substrate-proof-tag server`. The proof
 drives a loopback stub speaking the same snapshot RPC and runs the real
 `HerdrCollector` (seed, start, kill-and-restart, note, end) against it.
@@ -175,7 +210,7 @@ construction — a real server launch in a shared session risks the default
 session the plan most wants untouched. HERDR stripping and temp-only side
 effects are kept; the no-duplicate-start assertion is unchanged.
 
-**4. Hook file executed directly instead of `muse plugins hook test`.**
+**4. [FIXTURE-SCOPED, SUPERSEDED by parent real-runtime 41/41 — see `19-PROOF.md`.] Hook file executed directly instead of `muse plugins hook test`.**
 Installing for `hook test` writes user scope, which D19-24 forbids
 autonomously. The proof projects with `--bundle-only` (validated by the
 real binary), runs the identical hook file with the fixture shape, and
@@ -197,8 +232,14 @@ proof calls `pass()` directly, which is exactly one writer run.
 
 ## Known Stubs
 
-None. All scenario drivers are wired; the only stubs are the pane source
-and the dead-url servers, which are the isolation mechanism, not gaps.
+> WR-01 correction: the original `None` assertion below is withdrawn for
+> the fixture-only run. The fixture run carried two fixture-scoped
+> substitutions (loopback snapshot stub for the herdr server; hook file
+> executed directly instead of the installed `muse plugins hook test`
+> path), now superseded by the parent real-runtime proof 41/41 in
+> `19-PROOF.md`. Historical text preserved verbatim for the record:
+> "None. All scenario drivers are wired; the only stubs are the pane source
+> and the dead-url servers, which are the isolation mechanism, not gaps."
 
 ## Threat Flags
 
@@ -218,8 +259,9 @@ and the dead-url servers, which are the isolation mechanism, not gaps.
 - `bun run rehearsal down --name p19` — the twin is still up; the operator downs it when done.
 - The optional real Muse model turn through the projected hook.
 
-## Self-Check: PASSED
+## Self-Check: PASSED (historical, 2026-10-09 fixture run — real-runtime proof recorded separately in `19-PROOF.md`)
 
 - Files: `scripts/laneb-proof.ts`, `docs/runbooks/lane-b-collectors.md`, `package.json` entry, `muse.ts` fix + tests, doctor gate update present
 - Verification rerun at summary time: proof 27/27, suite 1781/0, tsc clean, phase-close pass, both locks 18 pass, unit verify exit 0
 - No PR opened (ship wave owns it); no production unit restarted
+- WR-01 note: no final full-suite green is claimed here; one generated coverage test is being corrected by its original parked agent and final green awaits parent re-verification.
