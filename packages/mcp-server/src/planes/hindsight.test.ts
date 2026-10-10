@@ -52,6 +52,11 @@ describe("hindsightFromEnv", () => {
 		expect(hindsightBanksFromEnv({})).toBeNull();
 	});
 
+	test("desk banks never enter the fan-out set", () => {
+		expect(hindsightBanksFromEnv({ HINDSIGHT_BANKS: "sub-cursor, pd-desk, pd-lead" })).toEqual(["sub-cursor"]);
+		expect(hindsightBanksFromEnv({ HINDSIGHT_BANKS: "pd-desk, pd-lead" })).toBeNull();
+	});
+
 	test("is null without a URL and key", () => {
 		expect(hindsightFromEnv({})).toBeNull();
 		expect(hindsightFromEnv({ HINDSIGHT_URL: "http://plane:8888" })).toBeNull();
@@ -104,6 +109,19 @@ describe("ensureBank", () => {
 		]);
 		expect(fake.requests.at(-1)?.body).toEqual({ updates: { retain_extraction_mode: "chunks" } });
 		expect(fake.banks.get("sub-hermes")?.mode).toBe("chunks");
+	});
+
+	test("pinning the mode of an existing bank is not creating it", async () => {
+		const fake = setup();
+		await fake.fetch("http://fake/v1/default/banks/sub-legacy", {
+			method: "PUT",
+			headers: { authorization: "Bearer test-bearer", "content-type": "application/json" },
+			body: JSON.stringify({}),
+		});
+		expect(fake.banks.get("sub-legacy")?.mode).toBe("server-default");
+		const ensured = await ensureBank(CONFIG, "sub-legacy", fake.fetch);
+		expect(ensured).toEqual({ ok: true, value: { created: false } });
+		expect(fake.banks.get("sub-legacy")?.mode).toBe("chunks");
 	});
 
 	test("a success stays ensured; a failure retries next call", async () => {
@@ -274,5 +292,25 @@ describe("documents", () => {
 		const deleted = await deleteBank(CONFIG, "sub-throwaway", fake.fetch);
 		expect(deleted).toEqual({ ok: true, value: undefined });
 		expect(fake.banks.has("sub-throwaway")).toBe(false);
+	});
+});
+
+describe("bodyless deletes", () => {
+	test("an empty 204 is a success that clears the ensured-bank entry", async () => {
+		const fake = setup();
+		fake.emptyDelete = true;
+		const deletedDoc = await deleteDocument(CONFIG, "sub-cursor", "mwd_1", fake.fetch);
+		expect(deletedDoc).toEqual({ ok: true, value: true });
+		const missing = await getDocument(CONFIG, "sub-cursor", "mwd_1", fake.fetch);
+		expect(missing).toEqual({ ok: true, value: null });
+
+		await ensureBank(CONFIG, "sub-throwaway", fake.fetch);
+		const requestsBefore = fake.requests.length;
+		const deletedBank = await deleteBank(CONFIG, "sub-throwaway", fake.fetch);
+		expect(deletedBank).toEqual({ ok: true, value: undefined });
+		expect(fake.banks.has("sub-throwaway")).toBe(false);
+		// The ensured entry was cleared: re-ensuring probes the plane again.
+		await ensureBank(CONFIG, "sub-throwaway", fake.fetch);
+		expect(fake.requests.length).toBeGreaterThan(requestsBefore + 1);
 	});
 });

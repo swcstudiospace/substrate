@@ -504,7 +504,14 @@ export function parseRedisUrl(raw: string | undefined): { kind: "unset" } | { ki
 		return { kind: "ok", url: trimmed };
 	}
 	if (scheme === "redis:") {
-		const loopback = host === "localhost" || host === "::1" || host === "0.0.0.0" || host.startsWith("127.");
+		// An actual loopback address, not a DNS name that starts with one:
+		// `127.cache.example.com` must not pass as `127.0.0.1` does.
+		const octets = host.split(".");
+		const loopbackV4 =
+			octets.length === 4 &&
+			octets[0] === "127" &&
+			octets.slice(1).every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255);
+		const loopback = host === "localhost" || host === "::1" || host === "0.0.0.0" || loopbackV4;
 		if (!loopback) {
 			return { kind: "refused", reason: `refusing plaintext redis:// to non-loopback host ${host || "(empty)"}` };
 		}

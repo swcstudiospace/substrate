@@ -43,15 +43,18 @@ export function hindsightFromEnv(env: Record<string, string | undefined> = proce
  * The explicit recall fan-out set (D26-03): the `sub-*` banks recall queries
  * beyond the caller's own. Comma- or whitespace-separated, so an operator can
  * wrap the line in the env file. Null when unset — recall then reads the
- * caller's bank only. The desk's `pd-*` banks are never named here.
+ * caller's bank only. Names outside the bank prefix (notably the desk's
+ * `pd-*` banks) are dropped: the substrate never names them, so a list
+ * copied from the desk configuration cannot leak across the boundary.
  */
 export function hindsightBanksFromEnv(env: Record<string, string | undefined> = process.env): string[] | null {
 	const raw = env.HINDSIGHT_BANKS?.trim();
 	if (!raw) return null;
+	const prefix = env.HINDSIGHT_BANK_PREFIX?.trim() || "sub-";
 	const banks = raw
 		.split(/[\s,]+/)
 		.map((bank) => bank.trim())
-		.filter((bank) => bank.length > 0);
+		.filter((bank) => bank.length > 0 && bank.startsWith(prefix));
 	return banks.length > 0 ? banks : null;
 }
 
@@ -182,6 +185,9 @@ async function send(
 	} catch (cause) {
 		return { ok: false, error: transportError(`${method} ${path}`, cause) };
 	}
+	// A bodyless success (DELETE answers 204 with no body) is not a shape
+	// failure: there is nothing to parse, and the status already says it all.
+	if (response.status === 204) return { ok: true, value: { status: response.status, body: {} } };
 	const parsed = await readJson(response);
 	if (!parsed.ok) return fail("invalid-response", `hindsight ${method} ${path}: response was not JSON`, response.status);
 	return { ok: true, value: { status: response.status, body: parsed.body } };
@@ -319,7 +325,9 @@ export async function ensureBank(
 		);
 	}
 	ensuredBanks.add(`${config.url} ${bank}`);
-	return { ok: true, value: { created: true } };
+	// The bank pre-existed (it answered the config GET): pinning its mode is
+	// not creating it, and the G2 rollback must only delete probe-created banks.
+	return { ok: true, value: { created: false } };
 }
 
 export interface RetainItem {

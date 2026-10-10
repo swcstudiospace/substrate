@@ -292,6 +292,7 @@ describe("parseRedisUrl refuses plaintext non-loopback redis (DOCS-06)", () => {
 	test("loopback redis and rediss stay allowed", () => {
 		for (const url of [
 			"redis://127.0.0.1:6379/0",
+			"redis://127.0.0.2:6379/0",
 			"redis://localhost:6379",
 			"redis://[::1]:6379",
 			"redis://:secret@127.0.0.1:6379/0",
@@ -300,6 +301,9 @@ describe("parseRedisUrl refuses plaintext non-loopback redis (DOCS-06)", () => {
 			expect(parseRedisUrl(url)).toEqual({ kind: "ok", url });
 		}
 		expect(parseRedisUrl(undefined)).toEqual({ kind: "unset" });
+		// A DNS name that starts with 127. is not a loopback address.
+		expect(parseRedisUrl("redis://127.cache.example.com:6379").kind).toBe("refused");
+		expect(parseRedisUrl("redis://127.1:6379").kind).toBe("refused");
 	});
 
 	test("plaintext redis to a non-loopback host is refused fail-open", () => {

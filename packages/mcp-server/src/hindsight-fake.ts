@@ -74,8 +74,12 @@ export class HindsightFake {
 	failRecallWith: number | null = null;
 	/** When set, the next retain answers with this status instead. */
 	failRetainWith: number | null = null;
+	/** When true, deletes answer with an empty 204 like the deployment does. */
+	emptyDelete = false;
 	/** Per-bank recall latency, for the shared-budget slow-bank proof. */
 	recallDelayMs: Record<string, number> = {};
+	/** Retain latency, for the shutdown-drain proof. */
+	retainDelayMs = 0;
 	/** Every retained item, in order, with its bank. */
 	readonly retains: Array<{ bank: string; item: Record<string, unknown> }> = [];
 
@@ -156,8 +160,9 @@ export class HindsightFake {
 		return json({ config: { retain_extraction_mode: found.mode } });
 	}
 
-	private retain(bank: string, body: unknown): Response {
+	private async retain(bank: string, body: unknown): Promise<Response> {
 		if (this.failRetainWith !== null) return json({ error: "injected failure" }, this.failRetainWith);
+		if (this.retainDelayMs > 0) await sleep(this.retainDelayMs, null);
 		const name = decodeURIComponent(bank);
 		if (!this.banks.has(name)) return json({ detail: "bank not found" }, 404);
 		if (body === null || typeof body !== "object" || !("items" in body) || !Array.isArray(body.items) || body.items.length === 0) {
@@ -173,7 +178,13 @@ export class HindsightFake {
 			const at = memories.findIndex((memory) => memory.document_id === item.document_id);
 			const content = "content" in item && typeof item.content === "string" ? item.content : "";
 			const tags = "tags" in item && Array.isArray(item.tags) ? item.tags.filter((tag): tag is string => typeof tag === "string") : [];
-			const stored: RecallHit = { id: item.document_id, text: content, document_id: item.document_id, tags, metadata: {} };
+			const metadata: Record<string, unknown> = {};
+			if ("metadata" in item && item.metadata !== null && typeof item.metadata === "object") {
+				for (const [key, value] of Object.entries(item.metadata)) {
+					if (typeof value === "string") metadata[key] = value;
+				}
+			}
+			const stored: RecallHit = { id: item.document_id, text: content, document_id: item.document_id, tags, metadata };
 			if (at === -1) memories.push(stored);
 			else memories[at] = stored;
 		}
@@ -206,6 +217,7 @@ export class HindsightFake {
 		const at = memories.findIndex((memory) => memory.document_id === decodeURIComponent(id));
 		if (at === -1) return json({ detail: "document not found" }, 404);
 		memories.splice(at, 1);
+		if (this.emptyDelete) return new Response(null, { status: 204 });
 		return json({ success: true });
 	}
 
@@ -220,6 +232,7 @@ export class HindsightFake {
 
 	private deleteBank(bank: string): Response {
 		if (!this.banks.delete(decodeURIComponent(bank))) return json({ detail: "bank not found" }, 404);
+		if (this.emptyDelete) return new Response(null, { status: 204 });
 		return json({ success: true });
 	}
 }
