@@ -156,7 +156,12 @@ describe("the tracked manifest", () => {
 
 	test("the bridge is three live tokens-dir rows, one per queue surface", () => {
 		const manifest = loadManifest(MANIFEST_PATH);
-		for (const [id, surface] of [["bridge-hermes", "hermes"], ["bridge-omp", "omp"], ["bridge-grok-build", "grok-build"]]) {
+		const rows: Array<[string, string]> = [
+			["bridge-hermes", "hermes"],
+			["bridge-omp", "omp"],
+			["bridge-grok-build", "grok-build"],
+		];
+		for (const [id, surface] of rows) {
 			expect(manifest.clients.find((c) => c.id === id)).toEqual({
 				id,
 				surface,

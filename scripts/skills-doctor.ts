@@ -25,6 +25,7 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync, readlinkSync } from "node:fs";
 import { join } from "node:path";
+import { effectivePorcelain } from "../packages/projector/src/skills-sync.ts";
 
 export type FindingCode =
 	| "library-dirty"
@@ -86,7 +87,7 @@ export function defaultPaths(env: NodeJS.ProcessEnv, repoRoot: string): DoctorPa
 export function realDeps(): DoctorDeps {
 	return {
 		git: (dir, args) => {
-			const result = spawnSync("git", ["-C", dir, ...args], { encoding: "utf8" });
+			const result = spawnSync("git", gitArgv(dir, args), { encoding: "utf8" });
 			return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 		},
 		projectorCheck: () => {
@@ -116,15 +117,24 @@ export function realDeps(): DoctorDeps {
  * skill scripts run through the projected links write caches into the
  * checkout). Anything else — including a tracked `.pyc` — is dirty.
  */
+/** The argv `realDeps` gives git: no optional index lock, then `-C dir`, then the caller's args. */
+export function gitArgv(dir: string, args: readonly string[]): string[] {
+	return ["--no-optional-locks", "-C", dir, ...args];
+}
+
+/**
+ * Paths the sync would refuse. The ignore rule is the sync's own parser
+ * (`effectivePorcelain`): a `__pycache__` path segment or a `.pyc` suffix,
+ * not the substring, so `__pycache__-notes.md` stays dirty.
+ */
 export function dirtyPaths(porcelain: string): string[] {
+	const cleaned = effectivePorcelain(porcelain);
+	if (cleaned === "") return [];
 	const bad: string[] = [];
-	for (const line of porcelain.split("\n")) {
+	for (const line of cleaned.split("\n")) {
 		if (line === "") continue;
-		const status = line.slice(0, 2);
 		const path = line.slice(3).trim();
-		if (path === "") continue;
-		if (status === "??" && (path.includes("__pycache__") || path.endsWith(".pyc"))) continue;
-		bad.push(path);
+		if (path !== "") bad.push(path);
 	}
 	return bad;
 }
@@ -191,6 +201,10 @@ export function ompLinkFindings(paths: DoctorPaths, deps: DoctorDeps): Finding[]
 	}
 	if (target !== OMP_LINK_TARGET) {
 		return [{ code: "omp-link", detail: `the Omp extension link points at ${target}, not the release copy` }];
+	}
+	// readlink succeeds for a dangling symlink. The release file has to be there.
+	if (deps.readFile(target) === null) {
+		return [{ code: "omp-link", detail: "the Omp extension link names the release copy, but that file is not readable" }];
 	}
 	return [];
 }

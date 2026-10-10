@@ -35,7 +35,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { refuseSmokeUrl } from "./rehearsal.ts";
 import { branchPattern, skillMd } from "./skills-propose-smoke.ts";
-import { defaultOptions, project } from "../packages/projector/src/skills.ts";
+import { defaultOptions, postWarning, project } from "../packages/projector/src/skills.ts";
 import { execFileRunner, runSync } from "../packages/projector/src/skills-sync.ts";
 
 /** Surfaces the bridge drains, one token each; the rehearsal run must mint all four. */
@@ -405,6 +405,25 @@ async function main(): Promise<number> {
 		check(linkedMd === skillMd(hermesName), "the projected link reads back the merged skill");
 		check(merged.warnings.length === 0, "a successful sync is silent: no warning leaves the tick");
 
+		// A dirty checkout posts one real warning (bearer from the token dir) and
+		// the next tick the same day does not post again. A refused bearer is
+		// retried: the first tick uses a token the twin will reject.
+		writeFileSync(join(libDir, "DIRTY.md"), "smoke dirty checkout\n");
+		const dirtyStarted = new Date().toISOString();
+		const dirtyTick = async (tokenEnv: Record<string, string | undefined>) =>
+			runSync({
+				runner: execFileRunner,
+				libraryDir: libDir,
+				warnStateFile: join(syncStateDir, "skills-sync-warned.json"),
+				log: () => undefined,
+				emitWarning: (event) => postWarning(event, { SUBSTRATE_URL: base, ...tokenEnv }),
+				project: async () => undefined,
+			});
+		const refused = await dirtyTick({ SUBSTRATE_TOKEN: "not-a-token" });
+		const posted = await dirtyTick({ SUBSTRATE_TOKENS_DIR: tokensDir });
+		const repeated = await dirtyTick({ SUBSTRATE_TOKENS_DIR: tokensDir });
+		check(refused.decision === "refuse-dirty" && posted.decision === "refuse-dirty" && repeated.decision === "refuse-dirty", "a dirty checkout refuses, including after a rejected bearer", `${refused.decision}/${posted.decision}/${repeated.decision}`);
+
 		// ── events read-back ────────────────────────────────────────────────
 		if (!operatorToken) {
 			check(false, "the twin names an operator token for the events read-back");
@@ -415,15 +434,30 @@ async function main(): Promise<number> {
 				body: JSON.stringify({ limit: 200, include_payload: true }),
 				signal: AbortSignal.timeout(120_000),
 			});
-			const body = (await queried.json()) as { events?: Array<{ kind: string; payload?: Record<string, unknown> }> };
-			const proposals = (body.events ?? []).filter((event) => event.payload?.action === "skill.propose");
+			const body = (await queried.json()) as {
+				events?: Array<{ kind: string; ts?: string; surface?: string; payload?: Record<string, unknown> }>;
+			};
+			const wanted = new Set([hermesName, ompName, grokName]);
+			const proposals = (body.events ?? []).filter((event) => {
+				const name = event.payload?.name;
+				return event.payload?.action === "skill.propose" && typeof name === "string" && wanted.has(name);
+			});
 			const opened = proposals.filter((event) => event.kind === "note" && event.payload?.status === "opened");
-			check(opened.length >= 3, "the trail holds the three opened proposals", `${opened.length} opened of ${proposals.length} proposal events`);
-			const syncWarnings = (body.events ?? []).filter((event) => event.payload?.action === "skills.sync");
-			check(syncWarnings.length === 0, "the trail holds no skills.sync refusal: the scratch sync never warned");
+			check(opened.length === 3, "the trail holds this run's three opened proposals", `${opened.length} opened of ${proposals.length} matching proposal events`);
+			for (const name of wanted) {
+				check(opened.filter((event) => event.payload?.name === name).length === 1, `one opened proposal for ${name}`);
+			}
+			const dirtyWarnings = (body.events ?? []).filter(
+				(event) =>
+					event.payload?.action === "skills.sync" &&
+					event.payload?.reason === "dirty" &&
+					typeof event.ts === "string" &&
+					event.ts >= dirtyStarted,
+			);
+			check(dirtyWarnings.length === 1, "two dirty ticks after a refused post leave one warning", `${dirtyWarnings.length}`);
 
 			process.stdout.write(
-				`\n evidence  hermes=${hermesBranch} omp=${ompBranch} grok=${grokBranch}\n evidence  fresh-kept=${freshKept ? "yes" : "NO"}\n evidence  links=${links.map((link) => link.slice(homeDir.length + 1)).join(",")}\n evidence  proposal-events=${proposals.length} opened=${opened.length} sync-warnings=${syncWarnings.length}\n`,
+				`\n evidence  hermes=${hermesBranch} omp=${ompBranch} grok=${grokBranch}\n evidence  fresh-kept=${freshKept ? "yes" : "NO"}\n evidence  links=${links.map((link) => link.slice(homeDir.length + 1)).join(",")}\n evidence  proposal-events=${proposals.length} opened=${opened.length} dirty-warnings=${dirtyWarnings.length}\n`,
 			);
 		}
 	} finally {

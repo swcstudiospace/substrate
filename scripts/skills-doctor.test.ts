@@ -8,6 +8,7 @@ import {
 	defaultPaths,
 	dirtyPaths,
 	doctor,
+	gitArgv,
 	hermesApprovalFindings,
 	libraryFindings,
 	monitorScriptFindings,
@@ -59,8 +60,19 @@ describe("dirtyPaths", () => {
 	test("untracked pycache and pyc noise is ignored but tracked changes refuse", () => {
 		expect(dirtyPaths("?? parallel-common/scripts/__pycache__/x.pyc\n?? notes/__pycache__/\n")).toEqual([]);
 		expect(dirtyPaths("?? notes/todo.md\n")).toEqual(["notes/todo.md"]);
+		expect(dirtyPaths("?? __pycache__-notes.md\n")).toEqual(["__pycache__-notes.md"]);
 		expect(dirtyPaths(" M tracked.pyc\n")).toEqual(["tracked.pyc"]);
 		expect(dirtyPaths("")).toEqual([]);
+	});
+
+	test("git argv disables optional locks", () => {
+		expect(gitArgv("/src", ["status", "--porcelain"])).toEqual([
+			"--no-optional-locks",
+			"-C",
+			"/src",
+			"status",
+			"--porcelain",
+		]);
 	});
 });
 
@@ -160,11 +172,28 @@ describe("ompLinkFindings", () => {
 	test("the release target is clean, anything else is a finding", () => {
 		const home = fixtureHome();
 		const base = realDeps();
+		// The fixture link names the release path. This sandbox has no
+		// /opt/agent-substrate tree, so readability is stubbed for the clean case.
+		const deps: DoctorDeps = {
+			...base,
+			readFile: (path) => (path === OMP_LINK_TARGET ? "extension\n" : base.readFile(path)),
+		};
 		const paths = defaultPaths({ HOME: home } as NodeJS.ProcessEnv, repoRoot);
-		expect(ompLinkFindings(paths, base)).toEqual([]);
+		expect(ompLinkFindings(paths, deps)).toEqual([]);
 		expect(ompLinkFindings(defaultPaths({ HOME: join(home, "missing") } as NodeJS.ProcessEnv, repoRoot), base).map(
 			(finding) => finding.code,
 		)).toEqual(["omp-link"]);
+	});
+
+	test("a link that names the release copy but cannot be read is a finding", () => {
+		const deps: DoctorDeps = {
+			...realDeps(),
+			readLink: () => OMP_LINK_TARGET,
+			readFile: () => null,
+		};
+		const findings = ompLinkFindings(defaultPaths({} as NodeJS.ProcessEnv, repoRoot), deps);
+		expect(findings.map((finding) => finding.code)).toEqual(["omp-link"]);
+		expect(findings[0]?.detail).toContain("not readable");
 	});
 });
 
@@ -216,6 +245,7 @@ describe("run", () => {
 		const green: DoctorDeps = {
 			...base,
 			projectorCheck: () => ({ status: 0, stdout: "", stderr: "" }),
+			readFile: (path) => (path === OMP_LINK_TARGET ? "extension\n" : base.readFile(path)),
 		};
 		const paths = defaultPaths(env, repoRoot);
 		expect(doctor(paths, green)).toEqual([]);
