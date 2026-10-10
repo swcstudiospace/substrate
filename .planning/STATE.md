@@ -2,14 +2,14 @@
 gsd_state_version: "1.0"
 milestone: v1.3
 milestone_name: Build plan completion
-current_phase: 29
-current_phase_name: agent-cards-and-teachable-moments
-status: executed
-stopped_at: Phase 30 verified at main tip 1dd3d1f (30-VERIFICATION.md, 12/12 must-haves, digest v3:6a3afd; live pixel chain + N1 ladder operator-gated) — phase-30 branch fully superseded by PR #31 squash, no follow-up PR; gates bun 2891/58/1 (F-01 known), pytest 230, tsc clean, phase-close pass
-last_updated: "2026-10-10T22:48:00Z"
+current_phase: 31
+current_phase_name: lane-a-runtime
+status: planned
+stopped_at: Phase 31 planned — 31-CONTEXT.md (D31-01..D31-11), 31-RESEARCH.md (KVM/Bun-lock/openSession bounded with local evidence), 3 PLANs rehearsal-first with G1-G4 gated; ready to execute
+last_updated: "2026-10-11T00:00:00Z"
 last_activity: 2026-10-10
-last_activity_desc: Phase 30 closeout (30-07 already complete per SUMMARY, not re-run; 30-VERIFICATION.md + digest written, verification status passed, ROADMAP checkbox set)
-state_head: 1dd3d1f
+last_activity_desc: Phase 31 planned (spike runner + verdict tables, host package port with bearer/lease rewrite, main/disk-gate/unit/two-VM fake proof + runbook; G1 npm ci, G2 engine session, G3 VM boot, G4 unit install/restart gated)
+state_head: f8af263
 progress:
   total_phases: 18
   completed_phases: 3

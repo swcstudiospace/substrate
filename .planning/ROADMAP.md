@@ -363,8 +363,11 @@ Plans:
   2. Tasks for two Graph IDs run in two separate rivet-agentos VMs, each with a Docker sandbox for native tools.
   3. With less than 10 GiB free, any image build or pull is refused in code before it starts.
 
-**Proof**: Read-only host checks first; installing the host and pulling or building the sandbox image on this host needs the owner's approval and an operator-approved window.
-**Plans**: TBD
+**Proof**: Read-only host checks first (done in 31-RESEARCH.md: /dev/kvm absent, no vmx/svm, 6420 held by gcs-rivet engine, 7411 free, 120 GiB free, sandbox image absent); installing the host and pulling or building the sandbox image on this host needs the owner's approval and an operator-approved window.
+**Plans**: 3 plans
+- [ ] 31-01-PLAN.md — Gated no-KVM/engine-share spike runner plus read-only asserts plus 31-SPIKE.md verdict tables (LANEA-01 spike half; G1 npm ci, G2 engine session, G3 VM boot gated)
+- [ ] 31-02-PLAN.md — Host package port (14 modules + tests), substrate.ts bearer/lease rewrite, package.json + lock with declared claude-code dep, sandbox Dockerfile (LANEA-01 packaging half; install-free)
+- [ ] 31-03-PLAN.md — main.ts checkout fix, 10 GiB in-code disk gate, staged unit file, two-VM fake rehearsal proof, runbook + gated G1-G4 live map (LANEA-01, LANEA-05)
 
 ### Phase 32: Lane A host core
 
