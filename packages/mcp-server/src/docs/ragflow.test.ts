@@ -273,4 +273,29 @@ describe("documents, parse and versions", () => {
 		expect(puts.length).toBe(1);
 		expect(puts[0]?.body).toEqual({ embedding_model: "bge-small" });
 	});
+
+	test("listDatasets pages past the first page", async () => {
+		const first = Array.from({ length: 100 }, (_, index) => ({ id: `ds-${index}`, name: `dataset-${index}` }));
+		const client = new RagflowClient(config(), async (url) => {
+			const page = new URL(url).searchParams.get("page") ?? "1";
+			if (page === "1") return json({ code: 0, data: { datasets: first } });
+			return json({ code: 0, data: { datasets: [{ id: "ds-last", name: "dataset-last" }] } });
+		});
+		const out = await client.listDatasets();
+		expect(out.length).toBe(101);
+		expect(out[100]).toMatchObject({ id: "ds-last", name: "dataset-last" });
+	});
+
+	test("listDatasets hits the page cap instead of looping forever, without echoing secrets", async () => {
+		const full = Array.from({ length: 100 }, (_, index) => ({
+			id: `ds-${index}`,
+			name: index === 0 ? PLANTED : `dataset-${index}`,
+		}));
+		const client = new RagflowClient(config(), async () => json({ code: 0, data: { datasets: full } }));
+		const message = await fails(client.listDatasets());
+		expect(message).toBe("ragflow returned too many datasets");
+		expect(message).not.toContain(PLANTED);
+		expect(message).not.toContain(KEY);
+		expect(message).not.toContain(ORIGIN);
+	});
 });

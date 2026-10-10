@@ -66,6 +66,8 @@ export type RagflowFetch = (url: string, init: RequestInit) => Promise<Response>
 
 /** Follows only same-origin redirects, and at most this many. */
 const MAX_REDIRECTS = 3;
+/** Dataset-list pages followed before giving up instead of looping forever. */
+const MAX_DATASET_PAGES = 100;
 /** RAGFlow error text is redacted, then cut to this many characters (D25-03). */
 const MAX_ERROR_TEXT = 200;
 
@@ -272,22 +274,25 @@ export class RagflowClient {
 		return hits;
 	}
 
-	/** First page of the dataset list (page_size 100): enough for the registry. */
+	/** Every dataset page (page_size 100): a registered name past page one must still resolve. */
 	async listDatasets(): Promise<RagflowDatasetSummary[]> {
-		const data = await this.request("/api/v1/datasets?page=1&page_size=100", { method: "GET" });
-		const holder = asRecord(data);
-		const rows = Array.isArray(data) ? data : (holder ? holder.datasets : undefined);
-		if (!Array.isArray(rows)) throw new RagflowError("ragflow returned no datasets");
 		const out: RagflowDatasetSummary[] = [];
-		for (const row of rows) {
-			const record = asRecord(row);
-			if (!record) throw new RagflowError("ragflow returned no datasets");
-			const id = stringField(record, ["id"]);
-			const name = stringField(record, ["name"]);
-			if (!id || !name) continue;
-			out.push({ id, name, embeddingModel: stringField(record, ["embedding_model"]) || undefined });
+		for (let page = 1; page <= MAX_DATASET_PAGES; page += 1) {
+			const data = await this.request(`/api/v1/datasets?page=${page}&page_size=100`, { method: "GET" });
+			const holder = asRecord(data);
+			const rows = Array.isArray(data) ? data : (holder ? holder.datasets : undefined);
+			if (!Array.isArray(rows)) throw new RagflowError("ragflow returned no datasets");
+			for (const row of rows) {
+				const record = asRecord(row);
+				if (!record) throw new RagflowError("ragflow returned no datasets");
+				const id = stringField(record, ["id"]);
+				const name = stringField(record, ["name"]);
+				if (!id || !name) continue;
+				out.push({ id, name, embeddingModel: stringField(record, ["embedding_model"]) || undefined });
+			}
+			if (rows.length < 100) return out;
 		}
-		return out;
+		throw new RagflowError("ragflow returned too many datasets");
 	}
 
 	/** First page of a dataset's documents with their parse-run state. */
