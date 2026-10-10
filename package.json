@@ -17,7 +17,7 @@
   ],
   "scripts": {
     "test": "bun test",
-    "test:py": "python3 -m pytest packages/miner/tests",
+    "test:py": "python3 -m pytest packages/miner/tests packages/dispatcher/tests",
     "mcp": "bun packages/mcp-server/src/index.ts",
     "substrate": "bun packages/cli/src/index.ts",
     "smoke:greptime": "bun scripts/greptime-smoke.ts",
@@ -26,6 +26,7 @@
     "smoke:skills-sync": "bun scripts/skills-sync-smoke.ts",
     "smoke:desktop": "bun scripts/desktop-smoke.ts",
     "smoke:mirror": "bun scripts/mirror-smoke.ts",
+    "smoke:dispatcher": "bun scripts/dispatcher-smoke.ts",
     "check:phase-close": "bun scripts/phase-close-check.ts",
     "verify": "bun scripts/verify.ts",
     "parity:check": "bun scripts/parity-check.ts",

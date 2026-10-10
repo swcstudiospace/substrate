@@ -342,3 +342,22 @@ The operator, in an approved window: generates every value with the
 command above; writes the client files and env entries; runs the values
 check; adds the server variables and restarts once; reads the metrics
 evidence; rotates and rolls back as above.
+
+## Phase 24 live tail (OPERATOR-GATED — staged, not applied)
+
+> OPERATOR-GATED: the phase PR stages the dispatcher unit and its docs;
+> every step below waits for explicit operator approval in its own window,
+> after the DISP-08 proof in `docs/runbooks/dispatch-proof.md` completes.
+
+1. Provision `/etc/substrate/substrate-dispatcher.env`
+   (`SUBSTRATE_TOKEN_SUBSTRATE`, `LINEAR_API_KEY`,
+   `SUBSTRATE_DISPATCH_DISABLED=1`).
+2. Deploy this phase's code; restart `substrate-mcp` only if the release
+   script requires it.
+3. Run `docs/runbooks/dispatch-proof.md` verbatim in a bounded
+   kill-switch-off window, ending with the switch back to `1`.
+4. Restart `substrate-dispatcher.service`, then retire the `dormant:24`
+   expected-401 count on the `dispatcher` row above and flip the manifest
+   row `dormant:24` → `live`. The count delta is staged here, applied only
+   after the gated restart — the row above still reads `dormant:24` until
+   then.
