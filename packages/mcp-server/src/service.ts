@@ -62,7 +62,7 @@ import { recallMemories, UNTRUSTED_MEMORY_NOTICE, type RecallReply } from "./mem
 import { forwardRetain, retainDocumentId } from "./memory-retain.ts";
 import { mergeDerivedHits, type MergedMemoryResults } from "./memory-search.ts";
 import { governMemoryWrite } from "./memory-write.ts";
-import { isTeachable, teachableEvent } from "./teachable.ts";
+import { TEACHABLE_SUBJECT_PREFIX, isTeachable, teachableEvent } from "./teachable.ts";
 import { bankForSurface, hindsightBanksFromEnv, hindsightFromEnv } from "./planes/hindsight.ts";
 import type { FetchLike } from "./planes/ragflow.ts";
 import { redact, type SkillDocExampleRule } from "./redact.ts";
@@ -1223,6 +1223,37 @@ export class Substrate {
 				return this.index.searchMemoryPage(search);
 			},
 		});
+	}
+
+	/**
+	 * The surface's live teachables, newest first (D29-07): kind `fact` rows
+	 * whose subject carries the `teachable:` prefix, written by this surface,
+	 * excluding superseded rows — the same "not briefed" rule briefs use.
+	 *
+	 * Read-only: no emit, no gate, no cache-bump. An unknown surface reads as
+	 * an empty list; the card route, not the reader, owns the 400.
+	 */
+	async teachablesForSurface(surface: string): Promise<MemoryEntry[]> {
+		if (!this.index) return [];
+		const teachables: MemoryEntry[] = [];
+		let before: string | undefined;
+		let beforeId: string | undefined;
+		for (let pages = 0; pages < 100; pages++) {
+			const page = await this.index.searchMemoryPage({
+				query: "",
+				subjectPrefix: TEACHABLE_SUBJECT_PREFIX,
+				limit: 100,
+				includeSuperseded: false,
+				...(before === undefined ? {} : { before, beforeId }),
+			});
+			for (const entry of page.entries) {
+				if (entry.kind === "fact" && entry.writer === surface && !entry.superseded_by) teachables.push(entry);
+			}
+			if (!page.next) return teachables;
+			before = page.next.before;
+			beforeId = page.next.before_id;
+		}
+		return teachables;
 	}
 
 	/**
