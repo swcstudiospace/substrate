@@ -44,10 +44,10 @@ Rules: the desk gateway holds the Hindsight key and calls Hindsight directly whe
 |---|---|---|
 | `programming-desk` | `docs/`, `skills/`, `contracts/`, `ARCHITECTURE.md`, `prompts-assembled/` of `swcstudiospace/programming-desk` | merge to `main` |
 | `agent-substrate` | `README.md`, `docs/`, `.planning/PROJECT.md` of this repo | merge to `main` |
-| `agent-skills` | every `SKILL.md` and `references/` in `swcstudiospace/agent-skills` | `substrate-skills-sync` after a fast-forward |
-| `<product>` (`kanbanos`, `desklanes`, `clippyos`, `auctioning`) | that repo's docs | merge to `main` |
+| `agent-skills` | every `SKILL.md` and `references/` in `swcstudiospace/agent-skills` | `substrate-skills-sync` after a fast-forward (degrades with pin-aged serve while the sync unit is not live) |
+| `<product>` (`kanbanos`, `desklanes`, `clippyos`, `auctioning`) | that repo's docs | merge to `main` (refresh via `docs_ingest`; last five versions kept) |
 
-Embedding: TEI `bge-small` as already decided at 05-02; no chat model is registered; retrieval only. `docs_search` returns chunk, heading path, source URL and commit; callers cite the source, not the chunk.
+Embedding: TEI `bge-small` as already decided at 05-02; no chat model is registered; retrieval only. `docs_search` returns chunk, heading path, source URL and commit; callers cite the source, not the chunk. Refresh records `{dataset, version, commit, content_sha256, ingested_at}` per dataset; see `docs/docs-search-ingest.md`.
 
 ## Access path
 
@@ -65,7 +65,7 @@ Only the VPS and the operator's admin machines hold access to the forwarders (`d
 
 ## Current wiring
 
-What `substrate-mcp` reads today. Hindsight and RAGFlow are the desk gateway's clients.
+What `substrate-mcp` reads today. Hindsight is the desk gateway's client; RAGFlow is read by `substrate-mcp` since Phase 25 (the gateway keeps its own keys for its own paths).
 
 | Store | Reader | Env var | Status |
 |---|---|---|---|
@@ -73,7 +73,7 @@ What `substrate-mcp` reads today. Hindsight and RAGFlow are the desk gateway's c
 | TimescaleDB | `substrate-mcp` | `SUBSTRATE_PG_URL` | read |
 | DragonflyDB | `substrate-mcp` read-through cache | `DRAGONFLY_URL`; `SUBSTRATE_CACHE=0` disables | read when set; fail-open when unset, refused or `0` |
 | Hindsight | desk gateway | gateway `HINDSIGHT_URL`, `HINDSIGHT_API_KEY` | not read by `substrate-mcp` (`HINDSIGHT_*` in `.env.example` is unused here) |
-| RAGFlow | desk gateway | gateway `RAGFLOW_URL`, `RAGFLOW_API_KEY` | not read by `substrate-mcp` (`RAGFLOW_*` in `.env.example` is unused here) |
+| RAGFlow | `substrate-mcp` `planes/ragflow.ts` (gateway keeps its own keys for its own paths) | server env `RAGFLOW_URL`, `RAGFLOW_API_KEY` | read by `substrate-mcp` since Phase 25; `RAGFLOW_MCP_URL` is never read |
 
 The cache covers `POST /brief`, `memory_brief`, `memory_search` and `graph_get`. It does not cover writes, `events_*` or leases. Keys are `substrate:v1` plus a hash of the normalized arguments, the caller surface and a generation. An accepted memory write, and a write whose commit is uncertain, bumps the memory generation. A graph write bumps that graph's generation and a shared graphs generation, so a brief that lists other graphs refreshes too. A stored answer expires at its class TTL or at the next lease or reverify deadline, whichever is sooner. `GET /healthz` adds `{enabled, connected, mode, hits, misses, bypasses, errors}` with `mode` of `off`, `on` or `degraded`. The status code does not depend on the cache. The same counters are the `substrate.cache.operations` metric.
 
@@ -89,7 +89,7 @@ The cache covers `POST /brief`, `memory_brief`, `memory_search` and `graph_get`.
 
 ## Environment keys
 
-See `.env.example`. `substrate-mcp` reads `GREPTIME_*`, `SUBSTRATE_PG_URL`, `DRAGONFLY_URL` and `SUBSTRATE_CACHE`. `HINDSIGHT_*` and `RAGFLOW_*` in that file are unused by this process; the gateway holds its own. `AGENTMEMORY_URL` and `AGENTMEMORY_SECRET` are removed.
+See `.env.example`. `substrate-mcp` reads `GREPTIME_*`, `SUBSTRATE_PG_URL`, `DRAGONFLY_URL`, `SUBSTRATE_CACHE` and `RAGFLOW_URL`/`RAGFLOW_API_KEY`. `HINDSIGHT_*` in that file is unused by this process; the gateway holds its own. `AGENTMEMORY_URL` and `AGENTMEMORY_SECRET` are removed.
 
 ## Fail-open budget (unchanged)
 
