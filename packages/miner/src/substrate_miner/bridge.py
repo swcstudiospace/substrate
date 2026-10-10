@@ -585,6 +585,13 @@ def run_once(
         _log(log_path, entry)
 
     groups = sorted(group_by_name(records).items())
+    # One fetch per tick. Repeating it for every library group blocks the
+    # rest of the queue for up to 30 s each when GitHub is slow.
+    if any(
+        ready(group, now) and classify(group, lib, local)[0] == "library"
+        for _, group in groups
+    ):
+        refresh_origin_main(library)
     for index, (name, group) in enumerate(groups):
         ids = [r.id for r in group]
         if not ready(group, now):
@@ -599,10 +606,6 @@ def run_once(
             else:
                 hold(name, group, reason or "held")
             continue
-        if kind == "library":
-            # The server fetches current origin/main. Refresh the remote-tracking ref first so
-            # "behind" means behind that revision, not behind whatever the last sync saw.
-            refresh_origin_main(library)
         if kind == "library" and library_behind(library) is True:
             # The local copy is older than what the server checks out (origin/main): replaying
             # onto it would resend a stale SKILL.md over the owner's merged copy. Wait for the sync.

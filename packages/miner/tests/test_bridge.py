@@ -383,6 +383,31 @@ def test_run_once_dry_run_reports_hold_while_behind(env, monkeypatch, capsys):
     assert "hold:library-behind" in capsys.readouterr().out
 
 
+def test_run_once_fetches_origin_main_once_for_every_library_group(env, monkeypatch):
+    (env["library"] / "other-skill").mkdir()
+    (env["library"] / "other-skill" / "SKILL.md").write_text(SKILL.format(name="other-skill"))
+    lib_patch(env)
+    stage(env["pending"], "bbbb0002", {"action": "patch", "name": "other-skill", "old_string": "Step one.",
+                                        "new_string": "Step one, then two.", "replace_all": False})
+    fetches = []
+    monkeypatch.setattr(bridge, "refresh_origin_main", lambda library: fetches.append(str(library)) or True)
+    monkeypatch.setattr(bridge, "library_behind", lambda library: False)
+    client, _seen = mock_client(env, reply(200, OPENED))
+    result = run(env, client)
+    assert result.proposed == 2
+    assert len(fetches) == 1
+
+
+def test_run_once_skips_the_fetch_when_no_group_is_a_library_skill(env, monkeypatch):
+    stage(env["pending"], "cccc0001", {"action": "create", "name": "mined-skill",
+                                        "content": SKILL.format(name="mined-skill")})
+    fetches = []
+    monkeypatch.setattr(bridge, "refresh_origin_main", lambda library: fetches.append(library) or True)
+    client, _seen = mock_client(env, reply(200, OPENED))
+    assert run(env, client).proposed == 1
+    assert fetches == []
+
+
 def test_run_once_proposes_once_the_library_is_current(env, monkeypatch):
     lib_patch(env)
     monkeypatch.setattr(bridge, "library_behind", lambda library: False)
