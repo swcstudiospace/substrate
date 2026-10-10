@@ -392,7 +392,7 @@ def test_run_once_fetches_origin_main_once_for_every_library_group(env, monkeypa
     fetches = []
     monkeypatch.setattr(bridge, "refresh_origin_main", lambda library: fetches.append(str(library)) or True)
     monkeypatch.setattr(bridge, "library_behind", lambda library: False)
-    client, _seen = mock_client(env, reply(200, OPENED))
+    client, _ = mock_client(env, reply(200, OPENED))
     result = run(env, client)
     assert result.proposed == 2
     assert len(fetches) == 1
@@ -403,7 +403,7 @@ def test_run_once_skips_the_fetch_when_no_group_is_a_library_skill(env, monkeypa
                                         "content": SKILL.format(name="mined-skill")})
     fetches = []
     monkeypatch.setattr(bridge, "refresh_origin_main", lambda library: fetches.append(library) or True)
-    client, _seen = mock_client(env, reply(200, OPENED))
+    client, _ = mock_client(env, reply(200, OPENED))
     assert run(env, client).proposed == 1
     assert fetches == []
 
