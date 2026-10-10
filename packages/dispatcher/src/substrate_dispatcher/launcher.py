@@ -24,7 +24,9 @@ IDENTIFIER_RE = re.compile(r"^[A-Z][A-Z0-9]*-[0-9]+$")
 NODE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 
 HERMES_BIN = os.environ.get("SUBSTRATE_HERMES_BIN", "/usr/local/bin/hermes")
-STATE_DIR = Path("/var/lib/substrate/dispatcher")
+# Rehearsal seam: the smoke points this at a tmp dir so no rehearsal run ever
+# touches the production state (prompts, sessions, lock, given_up.json).
+STATE_DIR = Path(os.environ.get("SUBSTRATE_STATE_DIR") or "/var/lib/substrate/dispatcher")
 DEFAULT_MAX_TURNS = int(os.environ.get("SUBSTRATE_DISPATCH_MAX_TURNS") or 60)
 DEFAULT_RUN_BUDGET = int(os.environ.get("SUBSTRATE_DISPATCH_RUN_BUDGET") or 3600)
 # 02-09 live run: Hermes v0.21.4 warned "Unknown toolsets" for the Linear MCP toolset
@@ -190,6 +192,7 @@ def launch(
     state_dir: Path = STATE_DIR,
     environ: Mapping[str, str] = os.environ,
     clock: Callable[[], float] = time.time,
+    hermes_bin: str | None = None,
 ) -> Launched:
     """Write the prompt (0600) and start Hermes in the worktree, logging to <state_dir>/sessions."""
     prompt = render_prompt(
@@ -211,7 +214,7 @@ def launch(
     os.chmod(prompt_path, 0o600)
 
     log_path = sessions / f"{name}.log"
-    argv = build_argv(prompt_path)
+    argv = build_argv(prompt_path, hermes_bin=hermes_bin or HERMES_BIN)
     with open(log_path, "ab") as log:
         # The child keeps its own copy of the log descriptor; ours closes when this block exits,
         # including when the spawn fails (missing binary, permission denied), which propagates.

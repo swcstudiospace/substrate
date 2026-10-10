@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-LINEAR_API_BASE = "https://api.linear.app"
+LINEAR_API_BASE = os.environ.get("SUBSTRATE_LINEAR_URL") or "https://api.linear.app"
 LINEAR_GQL_PATH = "/graphql"
 DISPATCH_PREFIX = "dispatch:"
 

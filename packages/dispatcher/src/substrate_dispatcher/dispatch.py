@@ -329,6 +329,8 @@ def make_launch_fn(
     ensure: Callable[..., Path] = worktree.ensure_worktree,
     launch: Callable[..., Launched] = launcher.launch,
     open_task: Callable[..., Launched] | None = None,
+    state_dir: Path | None = None,
+    hermes_bin: str | None = None,
 ) -> LaunchFn:
     """Compose D-12 (per-Graph-ID worktree) with D-13 (direct hermes chat) or D-06 (a VM task on
     substrate-host, ``open_task`` = HostClient.launch) for one candidate, by its surface.
@@ -357,7 +359,12 @@ def make_launch_fn(
                 f"node {found['node_id']} task {found['graph_id']}/{found['node_id']} worktree {path}"
             )
             return launched
-        launched = launch(**ids)
+        extra: dict[str, Any] = {}
+        if state_dir is not None:
+            extra["state_dir"] = state_dir
+        if hermes_bin is not None:
+            extra["hermes_bin"] = hermes_bin
+        launched = launch(**ids, **extra)
         log(
             f"launched hermes for {candidate.identifier} graph {found['graph_id']} "
             f"node {found['node_id']} pid {launched.pid} worktree {path} log {launched.log_path}"
