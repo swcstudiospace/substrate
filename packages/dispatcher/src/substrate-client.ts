@@ -15,6 +15,11 @@
 export type AllowedToolName = "graph_find" | "graph_get" | "events_emit";
 
 const ALLOWED_TOOLS: Record<string, true> = { graph_find: true, graph_get: true, events_emit: true };
+/**
+ * MCP round-trip deadline. A hung read must die on its own: without this
+ * the fetch outlives the 900 s watch that is supposed to bound the tick.
+ */
+export const SUBSTRATE_FETCH_TIMEOUT_MS = 10_000;
 
 export class SubstrateError extends Error {
 	readonly status?: number;
@@ -94,20 +99,32 @@ export class SubstrateClient {
 		if (ALLOWED_TOOLS[name] !== true) {
 			throw new SubstrateError(`tool not allowed for surface substrate: ${name}`);
 		}
-		const response = await this.fetchFn(`${this.baseUrl}/mcp`, {
-			method: "POST",
-			headers: {
-				"content-type": "application/json",
-				accept: "application/json, text/event-stream",
-				authorization: `Bearer ${this.token}`,
-			},
-			body: JSON.stringify({
-				jsonrpc: "2.0",
-				id: 1,
-				method: "tools/call",
-				params: { name, arguments: args },
-			}),
-		});
+		const signal = AbortSignal.timeout(SUBSTRATE_FETCH_TIMEOUT_MS);
+		let response: Response;
+		try {
+			response = await this.fetchFn(`${this.baseUrl}/mcp`, {
+				method: "POST",
+				headers: {
+					"content-type": "application/json",
+					accept: "application/json, text/event-stream",
+					authorization: `Bearer ${this.token}`,
+				},
+				body: JSON.stringify({
+					jsonrpc: "2.0",
+					id: 1,
+					method: "tools/call",
+					params: { name, arguments: args },
+				}),
+				signal,
+			});
+		} catch (error) {
+			const timedOut =
+				signal.aborted || (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError"));
+			if (timedOut) {
+				throw new SubstrateError(`substrate-mcp ${name} timed out after ${SUBSTRATE_FETCH_TIMEOUT_MS} ms`);
+			}
+			throw error;
+		}
 		const raw = await response.text();
 		if (!response.ok) {
 			throw new SubstrateError(`substrate-mcp ${name} failed with HTTP ${response.status}`, response.status);
@@ -126,15 +143,26 @@ export class SubstrateClient {
 			throw new SubstrateError(`substrate-mcp ${name} error: ${envelope.error.message ?? "unknown"}`);
 		}
 		const text = envelope.result?.content?.[0]?.text ?? "null";
-		return JSON.parse(text) as T;
+		try {
+			return JSON.parse(text) as T;
+		} catch {
+			// Plain-text replies (a missing-graph notice) are not JSON: hand
+			// the raw string back and let each caller decide. `getGraph`
+			// maps it to null; callers needing objects fail loudly.
+			return text as unknown as T;
+		}
 	}
 
 	/** Resolve a Linear issue to its registered node. Read-only and silent. */
 	async findNode(ref: { linear_issue_id: string; linear_identifier: string }): Promise<FindNodeResult> {
-		return this.callTool<FindNodeResult>("graph_find", {
+		const result = await this.callTool<FindNodeResult | string>("graph_find", {
 			linear_issue_id: ref.linear_issue_id,
 			linear_identifier: ref.linear_identifier,
 		});
+		if (typeof result === "string") {
+			throw new SubstrateError("substrate-mcp graph_find returned a non-JSON reply");
+		}
+		return result;
 	}
 
 	/** Read a graph with every node's lease id nulled, as public reads do. */
@@ -147,9 +175,17 @@ export class SubstrateClient {
 	/**
 	 * Emit a closed-vocabulary dispatcher event. The surface is always
 	 * `substrate`: this token cannot act as another surface, and the
-	 * dispatcher never names one.
+	 * dispatcher never names one. A `stored: false` reply is fail-open —
+	 * one stderr line naming kind and session, no throw — so a dropped
+	 * telemetry write can never fail a dispatch.
 	 */
 	async emitEvent(event: DispatchEventInput): Promise<void> {
-		await this.callTool<unknown>("events_emit", { surface: "substrate", ...event });
+		const reply = await this.callTool<{ stored?: boolean } | string>("events_emit", {
+			surface: "substrate",
+			...event,
+		});
+		if (typeof reply !== "string" && reply?.stored === false) {
+			console.error(`substrate event not stored: kind=${event.kind} session=${event.session_id}`);
+		}
 	}
 }

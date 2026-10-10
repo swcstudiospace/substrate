@@ -145,4 +145,86 @@ describe("substrate-client request shape", () => {
 		});
 		await expect(badRpc.getGraph("g")).rejects.toBeInstanceOf(SubstrateError);
 	});
+
+	test("the real fetch path carries a 10 s abort signal", async () => {
+		const { requests, fetchFn } = fakeFetch(() => okEnvelope({ found: false, reason: "x" }));
+		const client = makeClient(fetchFn);
+		await client.findNode({ linear_issue_id: "a", linear_identifier: "b" });
+		const signal = requests[0]?.init.signal;
+		expect(signal).toBeInstanceOf(AbortSignal);
+		expect((signal as AbortSignal).aborted).toBe(false);
+	});
+
+	test("an aborted read surfaces as a SubstrateError naming the timeout", async () => {
+		const timedOut = new SubstrateClient({
+			baseUrl: "http://127.0.0.1:7410",
+			token: "t",
+			fetchFn: (async () => {
+				throw new DOMException("The operation timed out", "TimeoutError");
+			}) as unknown as typeof fetch,
+		});
+		const error = await timedOut.getGraph("g").catch((cause: unknown) => cause);
+		expect(error).toBeInstanceOf(SubstrateError);
+		expect((error as SubstrateError).message).toContain("timed out");
+	});
+
+	test("a plain-text graph_get reply reads as a missing graph", async () => {
+		const { fetchFn } = fakeFetch(
+			() => JSON.stringify({ jsonrpc: "2.0", id: 1, result: { content: [{ text: "no such graph" }] } }),
+		);
+		const client = makeClient(fetchFn);
+		await expect(client.getGraph("ut-missing-12345678")).resolves.toBeNull();
+	});
+
+	test("a plain-text graph_find reply fails loudly", async () => {
+		const { fetchFn } = fakeFetch(
+			() => JSON.stringify({ jsonrpc: "2.0", id: 1, result: { content: [{ text: "no such graph" }] } }),
+		);
+		const client = makeClient(fetchFn);
+		await expect(client.findNode({ linear_issue_id: "a", linear_identifier: "b" })).rejects.toBeInstanceOf(
+			SubstrateError,
+		);
+	});
+
+	test("a stored:false reply writes one stderr line and still resolves", async () => {
+		const { fetchFn } = fakeFetch(() => okEnvelope({ stored: false }));
+		const client = makeClient(fetchFn);
+		const errors: string[] = [];
+		const original = console.error;
+		console.error = (...args: unknown[]) => void errors.push(args.map(String).join(" "));
+		try {
+			await client.emitEvent({
+				kind: "warning",
+				summary: "dispatch failed for g: no-node",
+				session_id: "dispatch:g:0",
+				graph_id: "g",
+				payload: { action: "dispatch", runtime: "dispatcher", outcome: "failed", reason: "no-node" },
+			});
+		} finally {
+			console.error = original;
+		}
+		expect(errors).toHaveLength(1);
+		expect(errors[0]).toContain("warning");
+		expect(errors[0]).toContain("dispatch:g:0");
+	});
+
+	test("a stored:true reply stays silent", async () => {
+		const { fetchFn } = fakeFetch(() => okEnvelope({ stored: true }));
+		const client = makeClient(fetchFn);
+		const errors: string[] = [];
+		const original = console.error;
+		console.error = (...args: unknown[]) => void errors.push(args.map(String).join(" "));
+		try {
+			await client.emitEvent({
+				kind: "note",
+				summary: "dispatched g: launched",
+				session_id: "dispatch:g:0",
+				graph_id: "g",
+				payload: { action: "dispatch", runtime: "dispatcher" },
+			});
+		} finally {
+			console.error = original;
+		}
+		expect(errors).toEqual([]);
+	});
 });
