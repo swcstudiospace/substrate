@@ -256,6 +256,54 @@ describe("routes", () => {
 			await stop();
 		}
 	});
+
+	test("POST /docs/ingest stores a page against the fake", async () => {
+		const { greptime } = ledger();
+		const fake = new RagflowFake();
+		const { post, stop } = await serve(
+			greptime,
+			{ SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
+			{ ragflowFetch: fake.fetch },
+		);
+		try {
+			const response = await post(
+				"/docs/ingest",
+				{
+					dataset: "agent-substrate",
+					pages: [{ path: "docs/data-planes.md", source_url: "https://example.com/planes", body: "The substrate is the only door." }],
+				},
+				{ authorization: "Bearer tok-omp" },
+			);
+			const body: unknown = await response.json();
+			const results = body !== null && typeof body === "object" && "results" in body ? body.results : null;
+			expect(response.status).toBe(200);
+			expect(Array.isArray(results) && results.length === 1).toBe(true);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("POST /docs/ingest refuses an anonymous caller before reading the body", async () => {
+		const { greptime } = ledger();
+		const { post, stop } = await serve(greptime, { SUBSTRATE_TOKEN_OMP: "tok-omp" });
+		try {
+			const response = await post("/docs/ingest", { dataset: "agent-substrate", pages: [] });
+			expect(response.status).toBe(401);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("POST /docs/ingest refuses a body without pages", async () => {
+		const { greptime } = ledger();
+		const { post, stop } = await serve(greptime, { SUBSTRATE_TOKEN_OMP: "tok-omp" });
+		try {
+			const response = await post("/docs/ingest", { dataset: "agent-substrate" }, { authorization: "Bearer tok-omp" });
+			expect(response.status).toBe(400);
+		} finally {
+			await stop();
+		}
+	});
 });
 
 describe("memoryWriteStatus", () => {

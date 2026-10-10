@@ -4,6 +4,9 @@
  * unchanged hashes skip, changed hashes replace; images strip and count.
  */
 import { describe, expect, test } from "bun:test";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { loadConfig } from "./config.ts";
 import {
 	ingestDocs,
 	stripRemoteImages,
@@ -12,7 +15,9 @@ import {
 	type IngestOutcome,
 	type IngestRecord,
 } from "./docs-ingest.ts";
+import { createMcpServer } from "./mcp.ts";
 import { RagflowFake } from "./ragflow-fake.ts";
+import { Substrate } from "./service.ts";
 import type { EventInput } from "./types.ts";
 
 const CONFIG = { url: "http://ragflow.test", apiKey: "test-key" };
@@ -184,5 +189,58 @@ describe("stripRemoteImages", () => {
 		const stripped = stripRemoteImages('A <img src="http://x/y.png"> B ![c](https://x/z.png) D ![e](./f.png)');
 		expect(stripped.stripped).toBe(2);
 		expect(stripped.body).toContain("./f.png");
+	});
+});
+
+describe("docs_ingest wiring", () => {
+	test("Substrate.ingestDocs ingests and refuses anonymous callers", async () => {
+		const fake = new RagflowFake();
+		const live = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), {
+			index: null,
+			greptime: null,
+			ragflowFetch: fake.fetch,
+		});
+		const reply = await live.ingestDocs({ dataset: "agent-substrate", pages: [PAGE] }, "omp");
+		if (!reply.ok) throw new Error(`expected ingest: ${reply.reason}`);
+		expect(reply.results[0]?.status).toBe("ingested");
+
+		const denied = await live.ingestDocs({ dataset: "agent-substrate", pages: [PAGE] }, null);
+		if (denied.ok) throw new Error("expected a refusal");
+		expect(denied.reason).toBe("unauthenticated");
+	});
+
+	test("docs_ingest is callable over MCP and refusals are errors", async () => {
+		const fake = new RagflowFake();
+		const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), {
+			index: null,
+			greptime: null,
+			ragflowFetch: fake.fetch,
+		});
+		const server = createMcpServer(substrate, "omp");
+		const client = new Client({ name: "substrate-test", version: "0.0.0" });
+		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+		await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+		try {
+			const tools = (await client.listTools()).tools;
+			expect(tools.some((tool) => tool.name === "docs_ingest")).toBe(true);
+			const result = await client.callTool({ name: "docs_ingest", arguments: { dataset: "agent-substrate", pages: [PAGE] } });
+			const content = result.content as Array<{ type: string; text?: string }>;
+			const reply: unknown = JSON.parse(content[0]?.text ?? "null");
+			const first =
+				reply !== null && typeof reply === "object" && "results" in reply && Array.isArray(reply.results)
+					? reply.results[0]
+					: null;
+			const state = first !== null && typeof first === "object" && "status" in first ? first.status : null;
+			expect(state).toBe("ingested");
+
+			const refused = await client.callTool({
+				name: "docs_ingest",
+				arguments: { dataset: "agent-substrate", pages: [{ path: PAGE.path, body: PAGE.body }] },
+			});
+			expect(refused.isError).toBe(true);
+		} finally {
+			await client.close();
+			await server.close();
+		}
 	});
 });
