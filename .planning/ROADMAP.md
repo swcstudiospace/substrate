@@ -67,7 +67,7 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 - [x] **Phase 23: Claim mirror and DoD gate** - Linear and Notion follow every lease transition, and only the Definition-of-Done gate can mark an issue Done (completed 2026-10-09 via PR #36; verified 2026-10-10 at bfde32f, 30/30, live MIRROR-08 proof operator-gated)
 - [x] **Phase 24: substrate-dispatcher** - A `dispatch:hermes` label starts a lease-correct Hermes session on the issue's Graph ID in its own worktree (completed 2026-10-10 via PR #47; verified at 974557d, rehearsal scope green, live DISP-08 tail operator-gated)
 - [x] **Phase 25: Docs search and ingest (RAGFlow)** - Agents get cited docs answers through the substrate, and ingest refuses secrets and unsourced pages (completed 2026-10-10 via PR #48; verified at 41cb616, rehearsal scope green, live G1-G4 tail operator-gated)
-- [ ] **Phase 26: Hindsight recall and Dragonfly cache** - Accepted memories are recalled across surfaces and repeated reads are cached, without slowing or staling the brief
+- [x] **Phase 26: Hindsight recall and Dragonfly cache** - Accepted memories are recalled across surfaces and repeated reads are cached, without slowing or staling the brief (completed 2026-10-10 via PR #49; verified at 059939e, rehearsal scope green, live G1-G4 tail operator-gated)
 - [ ] **Phase 27: Ledger primitives and ingest order** - Every closed hour has one deterministic Merkle root over its events in server ingest order
 - [ ] **Phase 28: Hourly anchor job and verify** - Each closed hour is anchored once on Solana devnet, and `verify` checks a graph against those anchors
 - [ ] **Phase 29: Agent Cards and teachable moments** - Each surface publishes a valid A2A Agent Card listing its accepted teachables, which sit inside anchored hours
@@ -281,9 +281,9 @@ Plans:
 
 **Proof** (DOCS-07): Live, operator-approved: RAGFlow, Hindsight and Dragonfly (once its private hop exists) with a headless session.
 **Plans**: 3 plans
-- [ ] 26-01-PLAN.md — Substrate-side Hindsight recall with fake banks server plus memory_recall tool (DOCS-04 read half)
-- [ ] 26-02-PLAN.md — Gate-accepted retain forward plus derived-marked memory_search merge plus credential perimeter (DOCS-04 write half)
-- [ ] 26-03-PLAN.md — Recall cache coverage plus claims-freshness pin plus redis refusal plus G1-G4 gated live map (DOCS-05, DOCS-06, DOCS-07)
+- [x] 26-01-PLAN.md — Substrate-side Hindsight recall with fake banks server plus memory_recall tool (DOCS-04 read half)
+- [x] 26-02-PLAN.md — Gate-accepted retain forward plus derived-marked memory_search merge plus credential perimeter (DOCS-04 write half)
+- [x] 26-03-PLAN.md — Recall cache coverage plus claims-freshness pin plus redis refusal plus G1-G4 gated live map (DOCS-05, DOCS-06, DOCS-07)
 
 ### Phase 27: Ledger primitives and ingest order
 
