@@ -3,9 +3,9 @@
  *
  * A teachable is a governed `fact` whose subject carries the tag as the prefix
  * `teachable:` (e.g. `teachable:retry-budget`). `MemoryEntryInput` has no tags
- * field and none is added: the subject is the identity `lww`/`versioned`
- * resolve on (`conflictKey`), so teachables collide sanely per topic, and the
- * card builder reads a surface's teachables with a `subjectPrefix` search — no
+ * field and none is added. Facts append, so a second write of the same
+ * subject stores another memory rather than replacing the lesson. The card
+ * builder finds a surface's teachables with a `subjectPrefix` search — no
  * new index, no migration, no new memory kind.
  *
  * The gate path is unchanged: a teachable passes `governMemoryWrite` like any

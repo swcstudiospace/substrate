@@ -21,11 +21,24 @@ import type { MemoryEntry, Surface } from "./types.ts";
 /** Card version: the contract version, not the package version. */
 export const AGENT_CARD_VERSION = "1.0";
 
-/** The protocol the card speaks: A2A discovery over loopback HTTP. */
-export const AGENT_CARD_INTERFACES = ["a2a"] as const;
+/** The binding this deployment's card speaks: JSON over loopback HTTP. */
+export const AGENT_CARD_PROTOCOL_BINDING = "HTTP+JSON";
+
+/** `http://host:port`, with an IPv6 host in brackets so the result is a URL. */
+export function agentCardOrigin(host: string, port: number): string {
+	const literal = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+	return `http://${literal}:${port}`;
+}
 
 /** Skill description cap: the DOCS-01 snippet precedent, in characters. */
 export const TEACHABLE_SKILL_DESCRIPTION_CHARS = 1200;
+
+/** One A2A interface: where this card is served, and which binding it speaks. */
+export interface AgentCardInterface {
+	url: string;
+	protocolBinding: string;
+	protocolVersion: string;
+}
 
 /** One `skills[]` entry: a single lesson this surface was taught. */
 export interface AgentCardSkill {
@@ -42,7 +55,7 @@ export interface AgentCard {
 	description: string;
 	url: string;
 	version: string;
-	supportedInterfaces: string[];
+	supportedInterfaces: AgentCardInterface[];
 	capabilities: { streaming: boolean; pushNotifications: boolean };
 	defaultInputModes: string[];
 	defaultOutputModes: string[];
@@ -77,8 +90,12 @@ export function skillNameForTeachable(slug: string, memoryId: string): string {
  */
 export function skillDescriptionForTeachable(entry: MemoryEntry, slug: string): string {
 	const capped = redact(entry.text).slice(0, TEACHABLE_SKILL_DESCRIPTION_CHARS).trim();
-	if (capped) return capped;
-	return `Teachable moment ${slug} recorded by ${entry.writer}.`;
+	const body = capped || `Teachable moment ${slug} recorded by ${entry.writer}.`;
+	// A fact past its reverify window is not a lesson to act on yet. Briefs say
+	// so; the card says so in the description rather than presenting it as fresh.
+	if (!entry.needs_reverification) return body;
+	const warned = `Needs reverification before use. ${body}`;
+	return warned.slice(0, TEACHABLE_SKILL_DESCRIPTION_CHARS);
 }
 
 function skillForTeachable(entry: MemoryEntry): AgentCardSkill {
@@ -96,15 +113,24 @@ function skillForTeachable(entry: MemoryEntry): AgentCardSkill {
  * `retry-budget` are the same rule-name); the later entry takes `-2`, `-3`,
  * …, still inside the 64-character skill-name rule.
  */
+function fitSkillName(base: string, suffix: string): string | null {
+	if (suffix.length >= 64) return null;
+	const trimmed = base.slice(0, 64 - suffix.length).replace(/-+$/g, "");
+	const candidate = `${trimmed}${suffix}`;
+	return SKILL_NAME_RE.test(candidate) ? candidate : null;
+}
+
+/**
+ * A name not already on this card. Folded slugs collide; later entries take
+ * `-2`, `-3`, … and keep going past 999 rather than reusing the base name.
+ */
 function uniqueSkillName(base: string, used: Set<string>): string {
 	if (!used.has(base)) return base;
-	for (let n = 2; n < 1000; n++) {
-		const suffix = `-${n}`;
-		const trimmed = base.slice(0, 64 - suffix.length).replace(/-+$/g, "");
-		const candidate = `${trimmed}${suffix}`;
-		if (SKILL_NAME_RE.test(candidate) && !used.has(candidate)) return candidate;
+	for (let n = 2; n < 1_000_000; n++) {
+		const candidate = fitSkillName(base, `-${n}`);
+		if (candidate && !used.has(candidate)) return candidate;
 	}
-	return base;
+	throw new Error("could not allocate a unique skill name");
 }
 
 function skillsForTeachables(teachables: MemoryEntry[]): AgentCardSkill[] {
@@ -134,7 +160,13 @@ export function buildAgentCard(surface: Surface, baseUrl: string, teachables: Me
 			`${teachables.length === 1 ? "moment" : "moments"} this surface has been taught.`,
 		url: `${base}/.well-known/agent-card.json?surface=${encodeURIComponent(surface)}`,
 		version: AGENT_CARD_VERSION,
-		supportedInterfaces: [...AGENT_CARD_INTERFACES],
+		supportedInterfaces: [
+			{
+				url: `${base}/.well-known/agent-card.json?surface=${encodeURIComponent(surface)}`,
+				protocolBinding: AGENT_CARD_PROTOCOL_BINDING,
+				protocolVersion: AGENT_CARD_VERSION,
+			},
+		],
 		capabilities: { streaming: false, pushNotifications: false },
 		defaultInputModes: ["text"],
 		defaultOutputModes: ["text"],
@@ -155,6 +187,18 @@ export function validateAgentCard(card: unknown): string[] {
 	if (!nonEmpty(record.version)) violations.push("version must be a non-empty string");
 	if (!Array.isArray(record.supportedInterfaces) || record.supportedInterfaces.length === 0) {
 		violations.push("supportedInterfaces must be a non-empty array");
+	} else {
+		record.supportedInterfaces.forEach((item: unknown, index: number) => {
+			const prefix = `supportedInterfaces[${index}]`;
+			if (!item || typeof item !== "object" || Array.isArray(item)) {
+				violations.push(`${prefix} must be an object`);
+				return;
+			}
+			const iface = item as Record<string, unknown>;
+			if (!nonEmpty(iface.url)) violations.push(`${prefix}.url must be a non-empty string`);
+			if (!nonEmpty(iface.protocolBinding)) violations.push(`${prefix}.protocolBinding must be a non-empty string`);
+			if (!nonEmpty(iface.protocolVersion)) violations.push(`${prefix}.protocolVersion must be a non-empty string`);
+		});
 	}
 	if (!record.capabilities || typeof record.capabilities !== "object" || Array.isArray(record.capabilities)) {
 		violations.push("capabilities must be an object");

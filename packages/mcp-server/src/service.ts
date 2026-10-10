@@ -1049,7 +1049,10 @@ export class Substrate {
 			result.outcome === "accepted" &&
 			result.verified_persisted &&
 			result.entry &&
-			isTeachable(request.kind, request.subject ?? result.entry.subject)
+			isTeachable(request.kind, request.subject ?? result.entry.subject) &&
+			// A replay returns the stored row and does not write it again.
+			// Emitting here would add a second acceptance note for one memory.
+			result.deduplicated !== true
 		) {
 			if ((SURFACES as readonly string[]).includes(writer)) {
 				await this.emit(teachableEvent(writer as Surface, request, result)).catch(() => undefined);
@@ -1160,6 +1163,8 @@ export class Substrate {
 		for (;;) {
 			const page: MemorySearchPage = await this.index.searchMemoryPage({
 				subjectPrefix: TEACHABLE_SUBJECT_PREFIX,
+				writer: surface,
+				kind: "fact",
 				includeSuperseded: false,
 				limit: 100,
 				...(cursor ? { before: cursor.before, beforeId: cursor.before_id } : {}),

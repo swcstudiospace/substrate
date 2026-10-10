@@ -203,6 +203,10 @@ export interface MemorySearch {
 	includeSuperseded?: boolean;
 	/** Only entries whose stored subject starts with this, literally. */
 	subjectPrefix?: string;
+	/** Only entries written by this surface. */
+	writer?: string;
+	/** Only entries of this memory kind. */
+	kind?: string;
 	/** Only entries created before this ISO timestamp — or, with `beforeId`, at it with a smaller id. */
 	before?: string;
 	beforeId?: string;

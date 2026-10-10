@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
+	AGENT_CARD_PROTOCOL_BINDING,
 	AGENT_CARD_VERSION,
+	agentCardOrigin,
 	buildAgentCard,
 	skillDescriptionForTeachable,
 	skillNameForTeachable,
@@ -82,6 +84,13 @@ describe("skillDescriptionForTeachable", () => {
 		expect(TEACHABLE_SKILL_DESCRIPTION_CHARS).toBe(1200);
 	});
 
+	test("a stale teachable says it needs reverification", () => {
+		const entry = teachableEntry({ id: "mem_1", needs_reverification: true });
+		const description = skillDescriptionForTeachable(entry, "retry-budget");
+		expect(description.startsWith("Needs reverification before use.")).toBe(true);
+		expect(description).toContain(entry.text);
+	});
+
 	test("redaction that leaves nothing still yields a non-empty description", () => {
 		const entry = teachableEntry({ id: "mem_1", text: `ghp_${"D".repeat(36)}` });
 		const description = skillDescriptionForTeachable(entry, "rotation");
@@ -105,6 +114,22 @@ describe("buildAgentCard", () => {
 		expect(card.skills[0]).toMatchObject({ id: "mem_2", name: "retry-budget", tags: ["teachable"] });
 		expect(card.skills[0]?.description.length).toBeGreaterThan(0);
 		expect(card.skills[1]).toMatchObject({ id: "mem_1", name: "backoff" });
+	});
+
+	test("folded names stay unique past the first 999 suffixes", () => {
+		const teachables = Array.from({ length: 1001 }, (_, index) =>
+			teachableEntry({ id: `mem_${index}`, subject: "teachable:retry-budget" }),
+		);
+		const names = buildAgentCard("hermes", BASE, teachables).skills.map((skill) => skill.name);
+		expect(new Set(names).size).toBe(names.length);
+		expect(names[0]).toBe("retry-budget");
+		expect(names[1000]).toBe("retry-budget-1001");
+		expect(names.every((name) => SKILL_NAME_RE.test(name))).toBe(true);
+	});
+
+	test("an IPv6 listen host is bracketed in the card origin", () => {
+		expect(agentCardOrigin("::1", 7410)).toBe("http://[::1]:7410");
+		expect(agentCardOrigin("127.0.0.1", 7410)).toBe("http://127.0.0.1:7410");
 	});
 
 	test("folded names that collide take a numeric suffix", () => {
@@ -136,7 +161,13 @@ describe("buildAgentCard", () => {
 
 		expect(card.id).toBe("substrate:omp");
 		expect(card.version).toBe(AGENT_CARD_VERSION);
-		expect(card.supportedInterfaces.length).toBeGreaterThan(0);
+		expect(card.supportedInterfaces).toEqual([
+			{
+				url: `${BASE}/.well-known/agent-card.json?surface=omp`,
+				protocolBinding: AGENT_CARD_PROTOCOL_BINDING,
+				protocolVersion: AGENT_CARD_VERSION,
+			},
+		]);
 		expect(card.capabilities).toEqual({ streaming: false, pushNotifications: false });
 		expect(card.defaultInputModes).toEqual(["text"]);
 		expect(card.defaultOutputModes).toEqual(["text"]);
@@ -175,6 +206,7 @@ describe("validateAgentCard", () => {
 			["null capabilities", { ...valid(), capabilities: null }],
 			["array capabilities", { ...valid(), capabilities: [] }],
 			["empty interfaces", { ...valid(), supportedInterfaces: [] }],
+			["string interfaces", { ...valid(), supportedInterfaces: ["a2a"] }],
 			["non-array skills", { ...valid(), skills: {} }],
 		];
 		for (const [name, card] of cases) {
@@ -209,15 +241,18 @@ describe("teachablesForSurface", () => {
 	 * `subjectPrefix`, the superseded exclusion and newest-first keyset pages —
 	 * so the reader test proves the filtering, not the SQL.
 	 */
-	function reader(rows: MemoryEntry[], surface: Surface | string = "hermes") {
+	function reader(rows: MemoryEntry[], surface: Surface | string = "hermes", seen?: MemorySearch[]) {
 		const ordered = [...rows].sort((a, b) => b.created.localeCompare(a.created) || b.id.localeCompare(a.id));
 		const index = {
 			searchMemoryPage: async (search: MemorySearch) => {
+				seen?.push(search);
 				let out = search.includeSuperseded ? [...ordered] : ordered.filter((entry) => !entry.superseded_by);
 				if (search.subjectPrefix) {
 					const prefix = search.subjectPrefix;
 					out = out.filter((entry) => (entry.subject ?? "").startsWith(prefix));
 				}
+				if (search.writer) out = out.filter((entry) => entry.writer === search.writer);
+				if (search.kind) out = out.filter((entry) => entry.kind === search.kind);
 				if (search.before) {
 					const at = search.before;
 					const tie = search.beforeId ?? "";
@@ -246,9 +281,11 @@ describe("teachablesForSurface", () => {
 			teachableEntry({ id: "mem_dead", subject: "teachable:retired", writer: "hermes", superseded_by: "mem_newer", created: "2026-10-10T00:02:00.000Z" }),
 		];
 
-		const found = await reader(rows);
+		const seen: MemorySearch[] = [];
+		const found = await reader(rows, "hermes", seen);
 
 		expect(found.map((entry) => entry.id)).toEqual(["mem_new", "mem_old"]);
+		expect(seen[0]).toMatchObject({ writer: "hermes", kind: "fact", subjectPrefix: "teachable:" });
 	});
 
 	test("an unknown surface reads as empty — the route owns the 400", async () => {

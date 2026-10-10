@@ -261,6 +261,8 @@ describe("agent card route", () => {
 		return {
 			get: (path: string, headers: Record<string, string> = {}) =>
 				fetch(`http://127.0.0.1:${port}${path}`, { headers }),
+			post: (path: string, headers: Record<string, string> = {}) =>
+				fetch(`http://127.0.0.1:${port}${path}`, { method: "POST", headers, body: "{}" }),
 			stop: () =>
 				new Promise<void>((resolve) => {
 					observability.stop();
@@ -306,6 +308,20 @@ describe("agent card route", () => {
 			const response = await get("/.well-known/agent-card.json?surface=nope");
 
 			expect(response.status).toBe(400);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("tokens configured still serves the card and still closes authoring", async () => {
+		const { get, post, stop } = await serveCard([teachable("mem_7", "hermes")], {
+			SUBSTRATE_TOKEN_HERMES: "tok-hermes",
+		});
+		try {
+			const card = await get("/.well-known/agent-card.json?surface=hermes");
+			expect(card.status).toBe(200);
+			expect(validateAgentCard((await card.json()) as Record<string, unknown>)).toEqual([]);
+			expect((await post("/events/query")).status).toBe(401);
 		} finally {
 			await stop();
 		}

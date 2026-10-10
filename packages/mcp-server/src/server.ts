@@ -36,7 +36,7 @@ import {
 	unmappedBearer,
 	type SubstrateConfig,
 } from "./config.ts";
-import { buildAgentCard } from "./agent-card.ts";
+import { agentCardOrigin, buildAgentCard } from "./agent-card.ts";
 import { formatDrift } from "./drift.ts";
 import { InvalidEventError } from "./event.ts";
 import { InvalidHandoffError } from "./handoff.ts";
@@ -461,7 +461,11 @@ export function createHttpServer(
 		// of knowing who used it.
 		// A bearer that names no surface is not an untokened caller. The bridge
 		// accepts the absence of a token; this used to be 401 and still is.
-		if (unmappedBearer(config, authorization) || (!config.allowAnonymous && surface === null)) {
+		// A2A discovery is a GET of one card. It stays open when tokens are
+		// configured, the way a monitor reads /healthz, and it does not open
+		// any authoring route.
+		const agentCardDiscovery = req.method === "GET" && url.pathname === "/.well-known/agent-card.json";
+		if (!agentCardDiscovery && (unmappedBearer(config, authorization) || (!config.allowAnonymous && surface === null))) {
 			if (req.method === "POST" && url.pathname === "/events") eventRefusal = "auth";
 			sendJson(res, 401, { error: "unknown or missing bearer token" });
 			return;
@@ -522,7 +526,7 @@ export function createHttpServer(
 				}
 				const card = buildAgentCard(
 					cardSurface as Surface,
-					`http://${config.host}:${config.port}`,
+					agentCardOrigin(config.host, config.port),
 					await substrate.teachablesForSurface(cardSurface),
 				);
 				sendJson(res, 200, card);

@@ -380,6 +380,22 @@ describe("writeMemory emits the teachable trail", () => {
 		expect(teachableEvents(emitted)).toHaveLength(1);
 	});
 
+	test("a same-key retry does not emit a second acceptance note", async () => {
+		const { substrate, emitted } = teachableWorld(new TeachableStore());
+
+		const first = await substrate.writeMemory({ ...TEACHABLE, idempotency_key: "k-once" });
+		expect(first.outcome).toBe("accepted");
+		expect(first.verified_persisted).toBe(true);
+		expect(first.deduplicated).toBeUndefined();
+
+		const retry = await substrate.writeMemory({ ...TEACHABLE, idempotency_key: "k-once" });
+		expect(retry.outcome).toBe("accepted");
+		expect(retry.deduplicated).toBe(true);
+		expect(retry.verified_persisted).toBe(true);
+		expect(teachableEvents(emitted)).toHaveLength(1);
+		expect(teachableEvents(emitted)[0]?.payload["memory_id"]).toBe(first.entry?.id);
+	});
+
 	test("a failed trail write never fails the memory write", async () => {
 		const store = new TeachableStore();
 		const substrate = new Substrate(loadConfig({}), {
