@@ -3,5 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "main": "src/index.ts"
+  "main": "src/main.ts",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@agentos-software/claude-code": "0.2.7",
+    "@rivet-dev/agentos": "0.2.21",
+    "@rivet-dev/agentos-sandbox": "0.2.21",
+    "dockerode": "4.0.12",
+    "sandbox-agent": "0.4.2",
+    "zod": "4.6.5"
+  }
 }
