@@ -8,7 +8,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseDryRunLine, preflight } from "./skills-plane-smoke.ts";
+import { countDirtyWarnings, countOpenedByName, parseDryRunLine, preflight, type TrailEvent } from "./skills-plane-smoke.ts";
 
 describe("preflight", () => {
 	const fixture = {
@@ -70,6 +70,30 @@ describe("parseDryRunLine", () => {
 		expect(parseDryRunLine("")).toBeNull();
 		expect(parseDryRunLine("[skills-bridge] proposed=1 rejected=0")).toBeNull();
 		expect(parseDryRunLine("[skills-bridge:dry-run] name=demo surface=hermes")).toBeNull();
+	});
+});
+
+describe("trail read-back", () => {
+	test("only this run's opened proposals count, one per surface", () => {
+		const names = new Set(["run-a", "run-b"]);
+		const events: TrailEvent[] = [
+			{ kind: "note", payload: { action: "skill.propose", status: "opened", name: "run-a" } },
+			{ kind: "note", payload: { action: "skill.propose", status: "opened", name: "stale-run" } },
+			{ kind: "note", payload: { action: "skill.propose", status: "existing", name: "run-a" } },
+			{ kind: "note", payload: { action: "skill.propose", status: "opened", name: "run-b" } },
+			{ kind: "event", payload: { action: "skill.propose", status: "opened", name: "run-b" } },
+		];
+		expect(countOpenedByName(events, names)).toEqual({ "run-a": 1, "run-b": 1 });
+	});
+
+	test("dirty warnings count only at or after the run start", () => {
+		const events: TrailEvent[] = [
+			{ kind: "warning", ts: "2026-09-26T09:00:00.000Z", payload: { action: "skills.sync", reason: "dirty" } },
+			{ kind: "warning", ts: "2026-09-26T10:00:00.000Z", payload: { action: "skills.sync", reason: "dirty" } },
+			{ kind: "warning", ts: "2026-09-26T10:05:00.000Z", payload: { action: "skills.sync", reason: "branch" } },
+		];
+		expect(countDirtyWarnings(events, "2026-09-26T10:00:00.000Z")).toBe(1);
+		expect(countDirtyWarnings(events, "2026-09-26T11:00:00.000Z")).toBe(0);
 	});
 });
 

@@ -98,6 +98,42 @@ export function parseDryRunLine(line: string): DryRunLine | null {
 	};
 }
 
+/** One trail event as the smoke reads it back: kind, ISO ts and the action payload. */
+export interface TrailEvent {
+	kind: string;
+	ts?: string;
+	payload?: Record<string, unknown>;
+}
+
+/**
+ * Opened skill.propose notes of this run, counted per skill name. Earlier runs' notes never
+ * match: only names in `names` count, so a rerun cannot pass on a previous run's trail.
+ */
+export function countOpenedByName(events: readonly TrailEvent[], names: ReadonlySet<string>): Record<string, number> {
+	const counts: Record<string, number> = {};
+	for (const event of events) {
+		if (event.kind !== "note" || event.payload?.action !== "skill.propose" || event.payload?.status !== "opened") continue;
+		const name = event.payload?.name;
+		if (typeof name !== "string" || !names.has(name)) continue;
+		counts[name] = (counts[name] ?? 0) + 1;
+	}
+	return counts;
+}
+
+/**
+ * skills.sync dirty warnings at or after `since` (ISO): the refused-then-posted-then-deduped
+ * proof leaves exactly one, and earlier runs' warnings stay below the bound.
+ */
+export function countDirtyWarnings(events: readonly TrailEvent[], since: string): number {
+	return events.filter(
+		(event) =>
+			event.payload?.action === "skills.sync" &&
+			event.payload?.reason === "dirty" &&
+			typeof event.ts === "string" &&
+			event.ts >= since,
+	).length;
+}
+
 // ── the Python driver (written to scratch at run time; every path arrives in its args) ───────
 
 const DRIVER_PY = `"""Drive one bridge tick with scratch seams: the same run_once/drain_queue the CLI calls."""
@@ -434,30 +470,19 @@ async function main(): Promise<number> {
 				body: JSON.stringify({ limit: 200, include_payload: true }),
 				signal: AbortSignal.timeout(120_000),
 			});
-			const body = (await queried.json()) as {
-				events?: Array<{ kind: string; ts?: string; surface?: string; payload?: Record<string, unknown> }>;
-			};
+			const body = (await queried.json()) as { events?: TrailEvent[] };
 			const wanted = new Set([hermesName, ompName, grokName]);
-			const proposals = (body.events ?? []).filter((event) => {
-				const name = event.payload?.name;
-				return event.payload?.action === "skill.propose" && typeof name === "string" && wanted.has(name);
-			});
-			const opened = proposals.filter((event) => event.kind === "note" && event.payload?.status === "opened");
-			check(opened.length === 3, "the trail holds this run's three opened proposals", `${opened.length} opened of ${proposals.length} matching proposal events`);
+			const opened = countOpenedByName(body.events ?? [], wanted);
+			const openedTotal = Object.values(opened).reduce((sum, n) => sum + n, 0);
+			check(openedTotal === 3, "the trail holds this run's three opened proposals", `${openedTotal} opened`);
 			for (const name of wanted) {
-				check(opened.filter((event) => event.payload?.name === name).length === 1, `one opened proposal for ${name}`);
+				check((opened[name] ?? 0) === 1, `one opened proposal for ${name}`);
 			}
-			const dirtyWarnings = (body.events ?? []).filter(
-				(event) =>
-					event.payload?.action === "skills.sync" &&
-					event.payload?.reason === "dirty" &&
-					typeof event.ts === "string" &&
-					event.ts >= dirtyStarted,
-			);
-			check(dirtyWarnings.length === 1, "two dirty ticks after a refused post leave one warning", `${dirtyWarnings.length}`);
+			const dirtyCount = countDirtyWarnings(body.events ?? [], dirtyStarted);
+			check(dirtyCount === 1, "two dirty ticks after a refused post leave one warning", `${dirtyCount}`);
 
 			process.stdout.write(
-				`\n evidence  hermes=${hermesBranch} omp=${ompBranch} grok=${grokBranch}\n evidence  fresh-kept=${freshKept ? "yes" : "NO"}\n evidence  links=${links.map((link) => link.slice(homeDir.length + 1)).join(",")}\n evidence  proposal-events=${proposals.length} opened=${opened.length} dirty-warnings=${dirtyWarnings.length}\n`,
+				`\n evidence  hermes=${hermesBranch} omp=${ompBranch} grok=${grokBranch}\n evidence  fresh-kept=${freshKept ? "yes" : "NO"}\n evidence  links=${links.map((link) => link.slice(homeDir.length + 1)).join(",")}\n evidence  proposal-events=${openedTotal} opened=${openedTotal} dirty-warnings=${dirtyCount}\n`,
 			);
 		}
 	} finally {
