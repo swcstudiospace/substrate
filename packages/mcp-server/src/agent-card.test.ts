@@ -9,10 +9,10 @@ import {
 	type AgentCard,
 } from "./agent-card.ts";
 import { loadConfig } from "./config.ts";
+import type { ClaimResult, MemoryStore, NewMemoryEntry } from "./memory-write.ts";
 import { Substrate } from "./service.ts";
 import { SKILL_NAME_RE } from "./skills/propose.ts";
-import type { MemoryEntry, MemorySearch, Surface } from "./types.ts";
-
+import type { MemoryEntry, MemorySearch, SubstrateEvent, Surface } from "./types.ts";
 const BASE = "http://127.0.0.1:7410";
 
 function teachableEntry(over: Partial<MemoryEntry> & { id: string }): MemoryEntry {
@@ -269,5 +269,132 @@ describe("teachablesForSurface", () => {
 		expect(found).toHaveLength(105);
 		expect(unique).toHaveLength(105);
 		expect(found[0]?.subject).toBe("teachable:lesson-104");
+	});
+});
+
+describe("session to card", () => {
+	/**
+	 * A scratch index the whole CARD-04 isolated leg runs against: governed
+	 * writes land through the gate's store seam, and the card reader lists
+	 * them back through the search seam. The session → anchored-hour leg lives
+	 * in teachable-anchor.test.ts; same run, both green.
+	 */
+	class ScratchIndex implements MemoryStore {
+		private readonly rows = new Map<string, MemoryEntry>();
+		private readonly claims = new Map<string, string>();
+		private holders = 0;
+
+		async claimWrite(input: { key: string; explicit: boolean; entryHash: string; requestHash: string; entryId: string }): Promise<ClaimResult> {
+			const holder = `hold_${++this.holders}`;
+			this.claims.set(input.key, holder);
+			return { claimed: true, holder, tookOverFrom: null };
+		}
+
+		async finishWrite(): Promise<void> {}
+		async releaseWrite(): Promise<void> {}
+		async restoreWrite(): Promise<void> {}
+		async standingEntry(): Promise<MemoryEntry | null> {
+			return null;
+		}
+
+		async insertEntry(
+			row: NewMemoryEntry,
+			claim: { key: string; holder: string },
+		): Promise<{ ok: true; entry: MemoryEntry } | { ok: false; reason: "standing-moved" | "claim-lost" | "standing-exists" }> {
+			if (this.claims.get(claim.key) !== claim.holder) return { ok: false, reason: "claim-lost" };
+			const entry: MemoryEntry = {
+				id: row.id,
+				scope: row.scope,
+				kind: row.kind,
+				text: row.text,
+				writer: row.writer,
+				actor: row.actor,
+				trust: row.trust,
+				ttl: row.ttl,
+				created: new Date().toISOString(),
+				version: row.version,
+				entry_hash: row.entry_hash,
+				needs_reverification: false,
+				...(row.subject ? { subject: row.subject } : {}),
+				...(row.session_id ? { session_id: row.session_id } : {}),
+				...(row.graph_id ? { graph_id: row.graph_id } : {}),
+				...(row.idempotency_key ? { idempotency_key: row.idempotency_key } : {}),
+			};
+			this.rows.set(row.id, entry);
+			return { ok: true, entry };
+		}
+
+		async readEntry(id: string): Promise<MemoryEntry | null> {
+			return this.rows.get(id) ?? null;
+		}
+
+		async quarantineEntry(): Promise<string> {
+			return "memq_1";
+		}
+
+		async enqueueReview(): Promise<string> {
+			return "rev_1";
+		}
+
+		async releaseReviews(): Promise<number> {
+			return 0;
+		}
+
+		async searchMemoryPage(search: MemorySearch) {
+			let out = search.includeSuperseded ? [...this.rows.values()] : [...this.rows.values()].filter((entry) => !entry.superseded_by);
+			if (search.subjectPrefix) {
+				const prefix = search.subjectPrefix;
+				out = out.filter((entry) => (entry.subject ?? "").startsWith(prefix));
+			}
+			out.sort((a, b) => b.created.localeCompare(a.created) || b.id.localeCompare(a.id));
+			if (search.before) {
+				const at = search.before;
+				const tie = search.beforeId ?? "";
+				out = out.filter((entry) => entry.created < at || (entry.created === at && entry.id < tie));
+			}
+			const limit = search.limit ?? 20;
+			const entries = out.slice(0, limit);
+			const last = entries[entries.length - 1];
+			return {
+				entries,
+				next: entries.length === limit && out.length > limit && last ? { before: last.created, before_id: last.id } : null,
+			};
+		}
+	}
+
+	test("a session teachable appears in its surface's card only, validator-clean", async () => {
+		const captured: SubstrateEvent[] = [];
+		const substrate = new Substrate(loadConfig({}), {
+			index: new ScratchIndex() as never,
+			greptime: {
+				ensureAppendMode: async () => true,
+				lastHash: async () => null,
+				insertEvent: async (event: SubstrateEvent) => {
+					captured.push(event);
+				},
+			} as never,
+		});
+
+		const written = await substrate.writeMemory({
+			scope: "graph:ut-card",
+			kind: "fact",
+			text: "retry with a capped budget and backoff",
+			writer: "hermes",
+			subject: "teachable:retry-budget",
+			session_id: "sess-card-1",
+			graph_id: "ut-card",
+		});
+		expect(written.outcome).toBe("accepted");
+		expect(written.verified_persisted).toBe(true);
+		expect(captured.filter((event) => event.payload["action"] === "teachable")).toHaveLength(1);
+
+		const card = buildAgentCard("hermes", BASE, await substrate.teachablesForSurface("hermes"));
+		expect(validateAgentCard(card)).toEqual([]);
+		expect(card.skills).toHaveLength(1);
+		expect(card.skills[0]).toMatchObject({ id: written.entry?.id, name: "retry-budget" });
+
+		const other = buildAgentCard("omp", BASE, await substrate.teachablesForSurface("omp"));
+		expect(validateAgentCard(other)).toEqual([]);
+		expect(other.skills).toEqual([]);
 	});
 });
