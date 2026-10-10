@@ -303,7 +303,13 @@ describe("hermes dispatch", () => {
 			givenUpDir: "/proc/self/dispatcher-given-up",
 		});
 
-		await expect(dispatchIssue(HERMES_ISSUE, "hermes", deps)).rejects.toThrow();
+		let caught: unknown;
+		try {
+			await dispatchIssue(HERMES_ISSUE, "hermes", deps);
+		} catch (error) {
+			caught = error;
+		}
+		expect(caught).toBeInstanceOf(Error);
 		expect(spawns).toHaveLength(1);
 		expect(signals).toEqual(["SIGKILL"]);
 	});
