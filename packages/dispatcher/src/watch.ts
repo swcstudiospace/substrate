@@ -37,6 +37,10 @@ export interface WatchedNode {
 	/** Ignored by the watch: public reads always null it. */
 	lease_id: string | null;
 	lease_expires_at: string | null;
+	/** Monotonic holder generation. A bump during the watch means a claim happened. */
+	lease_epoch?: number;
+	/** Workflow state. A terminal state means the session finished the node. */
+	state?: string | null;
 }
 
 /**
@@ -117,6 +121,11 @@ export interface WatchInput {
 	sessionId: string;
 	/** Linear issue id, the given-up set key. */
 	issueId: string;
+	/**
+	 * `lease_epoch` from the pre-launch graph read. A higher epoch at exit
+	 * means this window claimed (and may already have released) the node.
+	 */
+	leaseEpochAtLaunch?: number;
 	/** Injected root: tmp in tests, never `/var/lib/substrate` here. */
 	givenUpDir: string;
 }
@@ -141,13 +150,28 @@ export interface WatchDeps {
 
 export type WatchResult = { status: "landed" } | { status: GivenUpOutcome };
 
+const TERMINAL_NODE_STATES = new Set(["completed", "canceled", "duplicate"]);
+
+/**
+ * A no-claim reading is not a give-up when this session already held the
+ * node or finished it between polls. Release clears `claimed_by` and
+ * `claim_session`, so the epoch bump and a terminal state are what remain.
+ */
+function sessionAlreadySettled(node: WatchedNode | null, sessionId: string, epochAtLaunch: number | undefined): boolean {
+	if (node === null) return false;
+	if (node.claim_session === sessionId) return true;
+	if (node.state != null && TERMINAL_NODE_STATES.has(node.state)) return true;
+	return epochAtLaunch !== undefined && typeof node.lease_epoch === "number" && node.lease_epoch > epochAtLaunch;
+}
+
 
 /**
  * Poll until landed, process exit, or the 900 s budget. A landed claim
  * wins over a simultaneous exit: the session claimed, then stopped.
- * Signal delivery to an already-dead child is a no-op, and a child that
- * exits during the SIGTERM grace is reported as `exited-unclaimed` — both
- * paths still complete the give-up write before reporting.
+ * Signal delivery to an already-dead child is a no-op. The grace always
+ * SIGKILLs the process group before the give-up write, so a tool child
+ * does not outlive the parent. A session that already claimed or finished
+ * is landed instead of `exited-unclaimed`.
  */
 export async function watchClaim(input: WatchInput, deps: WatchDeps): Promise<WatchResult> {
 	const now = deps.now ?? Date.now;
@@ -162,15 +186,21 @@ export async function watchClaim(input: WatchInput, deps: WatchDeps): Promise<Wa
 				// Already dead: the post-grace check below reports the exit.
 			}
 			await deps.sleep(SIGTERM_GRACE_MS);
+			try {
+				// The parent can exit during the grace while a tool child
+				// is still in the group. Stop the group before deciding.
+				deps.signal(input.childPid, "SIGKILL");
+			} catch {
+				// The group is already gone.
+			}
+			const settled = await deps.getNode();
+			if (isLanded(settled, input.sessionId, now()) || sessionAlreadySettled(settled, input.sessionId, input.leaseEpochAtLaunch)) {
+				return { status: "landed" };
+			}
 			if (!deps.isAlive()) {
 				markGivenUp(input.givenUpDir, input.issueId, "exited-unclaimed");
 				await deps.onUnclaimed?.("exited-unclaimed");
 				return { status: "exited-unclaimed" };
-			}
-			try {
-				deps.signal(input.childPid, "SIGKILL");
-			} catch {
-				// Raced the exit after the aliveness check; the claim still timed out.
 			}
 			markGivenUp(input.givenUpDir, input.issueId, "claim-timeout");
 			await deps.onUnclaimed?.("claim-timeout");
@@ -179,6 +209,7 @@ export async function watchClaim(input: WatchInput, deps: WatchDeps): Promise<Wa
 		const node = await deps.getNode();
 		if (isLanded(node, input.sessionId, at)) return { status: "landed" };
 		if (!deps.isAlive()) {
+			if (sessionAlreadySettled(node, input.sessionId, input.leaseEpochAtLaunch)) return { status: "landed" };
 			markGivenUp(input.givenUpDir, input.issueId, "exited-unclaimed");
 			await deps.onUnclaimed?.("exited-unclaimed");
 			return { status: "exited-unclaimed" };

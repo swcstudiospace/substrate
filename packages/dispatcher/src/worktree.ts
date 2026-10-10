@@ -195,12 +195,27 @@ export async function ensureWorktree(input: EnsureWorktreeInput, deps: WorktreeD
 		return { ok: false, outcome: "path-conflict" };
 	}
 
-	let added: GitResult;
+	// `-B` would reset an existing branch to origin/main and drop commits
+	// when the directory is gone but the branch remains. Reuse the branch
+	// when it exists; create it with `-b` only when it does not.
+	const branch = worktreeBranch(input.graphId);
+	let branchRef: GitResult;
 	try {
-		added = await deps.runGit(
-			["worktree", "add", "-B", worktreeBranch(input.graphId), worktreePath, "origin/main"],
+		branchRef = await deps.runGit(
+			["show-ref", "--verify", "--quiet", `refs/heads/${branch}`],
 			{ cwd: checkoutPath },
 		);
+	} catch {
+		return { ok: false, outcome: "git-failed" };
+	}
+	if (branchRef.status !== 0 && branchRef.status !== 1) return { ok: false, outcome: "git-failed" };
+	const addArgs =
+		branchRef.status === 0
+			? ["worktree", "add", worktreePath, branch]
+			: ["worktree", "add", "-b", branch, worktreePath, "origin/main"];
+	let added: GitResult;
+	try {
+		added = await deps.runGit(addArgs, { cwd: checkoutPath });
 	} catch {
 		return { ok: false, outcome: "git-failed" };
 	}

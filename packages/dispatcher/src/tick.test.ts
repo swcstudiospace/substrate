@@ -9,7 +9,7 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { PollIssue, PollingClient } from "./linear-poll.ts";
@@ -426,18 +426,21 @@ describe("tick boundaries", () => {
 		expect(substrate.graphCalls).toBe(0);
 	});
 
-	test("non-hermes, non-claude-code surfaces defer without side effects", async () => {
+	test("a known non-launcher surface is marked not-dispatchable once and never spawned", async () => {
 		const linear = linearFake([HERMES_ISSUE]);
 		const substrate = substrateFake(foundNode(), [FREE_GRAPH]);
 		const { deps, spawns } = tickDeps({ linear, substrate });
 
-		const result = await dispatchIssue(HERMES_ISSUE, "substrate", deps);
+		const first = await dispatchIssue(HERMES_ISSUE, "cursor", deps);
+		const second = await dispatchIssue(HERMES_ISSUE, "cursor", deps);
 
-		expect(result).toEqual({ status: "deferred", surface: "substrate" });
+		expect(first).toEqual({ status: "marked", outcome: "not-dispatchable" });
+		expect(second).toEqual({ status: "marked", outcome: "not-dispatchable" });
 		expect(spawns).toEqual([]);
-		expect(linear.comments).toEqual([]);
+		expect(linear.comments).toEqual([{ issueId: HERMES_ISSUE.id, body: "substrate-dispatch: not-dispatchable" }]);
 		expect(linear.updates).toEqual([]);
-		expect(substrate.events).toEqual([]);
+		expect(substrate.events).toHaveLength(2);
+		expect(substrate.graphCalls).toBe(0);
 	});
 
 	test("a disabled kill switch sleeps the pass with no comments", async () => {
@@ -466,6 +469,56 @@ describe("tick boundaries", () => {
 		expect(spawns).toEqual([]);
 		expect(linear.comments).toEqual([]);
 		expect(isGivenUp(deps.givenUpDir, HERMES_ISSUE.id)).toBe(false);
+	});
+
+	test("a rejected node id marks that issue and the queue continues", async () => {
+		const bad: PollIssue = {
+			id: "iss-bad-node",
+			identifier: "ENG-100",
+			labels: [{ id: "lbl-bad", name: "dispatch:hermes" }],
+		};
+		const linear = linearFake([bad, HERMES_ISSUE]);
+		const substrate = substrateFake(foundNode(), [FREE_GRAPH, graphWith("hermes", SESSION_ID, LIVE)]);
+		let finds = 0;
+		substrate.client.findNode = async () => {
+			finds += 1;
+			if (finds === 1) return { ...foundNode(), node_id: "n:1" } as FindNodeResult;
+			return foundNode();
+		};
+		const { deps, spawns } = tickDeps({ linear, substrate });
+
+		const summary = await runTick(deps);
+
+		expect(summary).toHaveLength(2);
+		expect(summary[0]?.result).toEqual({ status: "marked", outcome: "not-dispatchable" });
+		expect(summary[1]?.result).toEqual({ status: "landed" });
+		expect(spawns).toHaveLength(1);
+		expect(linear.comments).toContainEqual({ issueId: bad.id, body: "substrate-dispatch: not-dispatchable" });
+	});
+
+	test("a prompt symlink marks that issue and the queue continues", async () => {
+		const bad: PollIssue = {
+			id: "iss-symlink",
+			identifier: "ENG-099",
+			labels: [{ id: "lbl-link", name: "dispatch:hermes" }],
+		};
+		const linear = linearFake([bad, HERMES_ISSUE]);
+		const substrate = substrateFake(foundNode(), [FREE_GRAPH, FREE_GRAPH, graphWith("hermes", SESSION_ID, LIVE)]);
+		const { deps, base, spawns } = tickDeps({ linear, substrate });
+		const badDir = join(base, "bad-wt");
+		const goodDir = join(base, "good-wt");
+		mkdirSync(badDir, { recursive: true });
+		mkdirSync(goodDir, { recursive: true });
+		symlinkSync("/tmp", join(badDir, `substrate-dispatch-${NODE_ID}.md`));
+		let trees = 0;
+		deps.worktree = async () => ({ ok: true, path: trees++ === 0 ? badDir : goodDir, reused: false });
+
+		const summary = await runTick(deps);
+
+		expect(summary[0]?.result).toEqual({ status: "marked", outcome: "not-dispatchable" });
+		expect(summary[1]?.result).toEqual({ status: "landed" });
+		expect(spawns).toHaveLength(1);
+		expect(linear.comments).toContainEqual({ issueId: bad.id, body: "substrate-dispatch: not-dispatchable" });
 	});
 
 	test("runTick marks the non-dispatchable and dispatches hermes", async () => {

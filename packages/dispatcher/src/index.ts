@@ -110,7 +110,13 @@ export function buildProductionDeps(envFile: string = DEFAULT_DISPATCHER_ENV_FIL
 				return null;
 			}
 		},
-		hermesPresent: () => Bun.which("hermes") !== null,
+		hermesPresent: () => {
+			// The child receives the env file's PATH, which overrides this
+			// process. A binary that exists only there is still a real Hermes.
+			const path = childEnvSource["PATH"];
+			if (path === undefined) return Bun.which("hermes") !== null;
+			return Bun.which("hermes", { PATH: path }) !== null;
+		},
 		dispatchDisabled: () => isDispatchDisabled(envFile),
 		spawn: (argv, options) => {
 			const [command, ...args] = argv;

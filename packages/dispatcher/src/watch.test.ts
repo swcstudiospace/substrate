@@ -247,6 +247,64 @@ describe("watchClaim", () => {
 		expect(order).toEqual(["file-first", "exited-unclaimed"]);
 	});
 
+	test("SIGKILL still reaches the group when the parent exits during the grace", async () => {
+		const dir = makeTmp();
+		let now = NOW;
+		let alive = true;
+		const signals: string[] = [];
+		const result = await watchClaim(
+			{ childPid: 333, sessionId: SESSION, issueId: "iss-group", givenUpDir: dir },
+			{
+				getNode: () => node(),
+				isAlive: () => alive,
+				signal: (_pid, signal) => {
+					signals.push(signal);
+					if (signal === "SIGTERM") alive = false;
+				},
+				sleep: async (ms) => void (now += ms),
+				now: () => now,
+				pollIntervalMs: WATCH_BUDGET_MS,
+			},
+		);
+		expect(result).toEqual({ status: "exited-unclaimed" });
+		expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
+		expect(isGivenUp(dir, "iss-group")).toBe(true);
+	});
+
+	test("a claim that released between polls is not saved as a give-up", async () => {
+		const dir = makeTmp();
+		const result = await watchClaim(
+			{ childPid: 111, sessionId: SESSION, issueId: "iss-fast", givenUpDir: dir, leaseEpochAtLaunch: 2 },
+			{
+				getNode: () => node({ lease_epoch: 3 }),
+				isAlive: () => false,
+				signal: () => {},
+				sleep: async () => {},
+				now: () => NOW,
+				pollIntervalMs: 1,
+			},
+		);
+		expect(result).toEqual({ status: "landed" });
+		expect(isGivenUp(dir, "iss-fast")).toBe(false);
+	});
+
+	test("a finished node is not saved as a give-up", async () => {
+		const dir = makeTmp();
+		const result = await watchClaim(
+			{ childPid: 111, sessionId: SESSION, issueId: "iss-done", givenUpDir: dir, leaseEpochAtLaunch: 4 },
+			{
+				getNode: () => node({ lease_epoch: 4, state: "completed" }),
+				isAlive: () => false,
+				signal: () => {},
+				sleep: async () => {},
+				now: () => NOW,
+				pollIntervalMs: 1,
+			},
+		);
+		expect(result).toEqual({ status: "landed" });
+		expect(isGivenUp(dir, "iss-done")).toBe(false);
+	});
+
 	test("signal delivery to an already-dead child still completes the give-up path", async () => {
 		const dir = makeTmp();
 		let now = NOW + WATCH_BUDGET_MS + 1;

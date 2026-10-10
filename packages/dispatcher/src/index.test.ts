@@ -439,6 +439,27 @@ describe("runDispatcher", () => {
 			}
 		});
 
+		test("hermes presence follows the child PATH", () => {
+			const dir = mkdtempSync(join(tmpdir(), "dispatcher-which-child-"));
+			try {
+				const bin = join(dir, "bin");
+				mkdirSync(bin, { recursive: true });
+				writeFileSync(join(bin, "hermes"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+				const envFile = join(dir, "dispatcher.env");
+				writeFileSync(envFile, `PATH=${bin}\n`);
+				const deps = buildProductionDeps(envFile);
+				expect(deps.hermesPresent?.()).toBe(true);
+
+				const empty = join(dir, "empty");
+				mkdirSync(empty, { recursive: true });
+				writeFileSync(envFile, `PATH=${empty}\n`);
+				const missing = buildProductionDeps(envFile);
+				expect(missing.hermesPresent?.()).toBe(false);
+			} finally {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		});
+
 		test("hermes presence is wired to the binary lookup", () => {
 			const dir = mkdtempSync(join(tmpdir(), "dispatcher-which-"));
 			try {

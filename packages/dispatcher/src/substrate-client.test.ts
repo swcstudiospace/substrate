@@ -208,6 +208,33 @@ describe("substrate-client request shape", () => {
 		expect(errors[0]).toContain("dispatch:g:0");
 	});
 
+	test("a timeout while emitting is logged and does not reject", async () => {
+		const client = new SubstrateClient({
+			baseUrl: "http://127.0.0.1:7410",
+			token: "t",
+			fetchFn: (async () => {
+				throw new DOMException("The operation timed out", "TimeoutError");
+			}) as unknown as typeof fetch,
+		});
+		const errors: string[] = [];
+		const original = console.error;
+		console.error = (...args: unknown[]) => void errors.push(args.map(String).join(" "));
+		try {
+			await client.emitEvent({
+				kind: "note",
+				summary: "dispatched g: launched",
+				session_id: "dispatch:g:0",
+				graph_id: "g",
+				payload: { action: "dispatch", runtime: "dispatcher" },
+			});
+		} finally {
+			console.error = original;
+		}
+		expect(errors).toHaveLength(1);
+		expect(errors[0]).toContain("timed out");
+		expect(errors[0]).toContain("dispatch:g:0");
+	});
+
 	test("a stored:true reply stays silent", async () => {
 		const { fetchFn } = fakeFetch(() => okEnvelope({ stored: true }));
 		const client = makeClient(fetchFn);

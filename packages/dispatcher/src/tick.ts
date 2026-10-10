@@ -16,11 +16,11 @@
  * design. One dispatcher owns one session at a time this phase; concurrent
  * dispatch arrives with phase 33.
  *
- * Non-hermes dispatchable surfaces defer silently, except
- * `dispatch:claude-code`, which dials the Lane A loopback host without
- * sending anything: refused or timeout marks `host-unreachable`, an
- * answered dial marks `host-refused`, and neither gives the issue up.
- * Nothing here may claim, worktree, or spawn on its behalf.
+ * `dispatch:claude-code` dials the Lane A loopback host without sending
+ * anything: refused or timeout marks `host-unreachable`, an answered dial
+ * marks `host-refused`, and neither gives the issue up. Other known
+ * surfaces are not launchers. They get one `not-dispatchable` marker and
+ * a failed event, and nothing here claims, worktrees, or spawns for them.
  * The Mirror swaps `dispatch:*` for `agent:hermes` when the Hermes token's
  * claim stands. Unclaimed endings (exit, 900 s) persist given-up first via
  * the watch, then comment and remove only the dispatch label.
@@ -37,7 +37,9 @@ import {
 	buildChildEnv,
 	buildSessionId,
 	checkSubstrateMcp,
+	InvalidNodeIdError,
 	launchHermes,
+	PromptSymlinkError,
 	writePromptFile,
 	type SpawnFn,
 } from "./launch-hermes.ts";
@@ -134,6 +136,18 @@ export type DispatchIssueResult =
 	| { status: "landed" }
 	| { status: "unclaimed"; outcome: GivenUpOutcome };
 
+/** One `not-dispatchable` marker. A bad id or a refused prompt must not kill the queue. */
+async function markNotDispatchable(
+	issue: PollIssue,
+	deps: TickDeps,
+	key: string,
+	nodeId?: string,
+): Promise<DispatchIssueResult> {
+	await ensureMarkerComment(deps.linear, issue.id, "not-dispatchable");
+	await deps.substrate.emitEvent(failedEvent(key, "not-dispatchable", nodeId));
+	return { status: "marked", outcome: "not-dispatchable" };
+}
+
 /**
  * Dispatch one dispatchable issue. Reports unclaimed endings through the
  * watch's `onUnclaimed`, which runs only after the given-up file write.
@@ -145,7 +159,11 @@ export async function dispatchIssue(
 ): Promise<DispatchIssueResult> {
 	if (isGivenUp(deps.givenUpDir, issue.id)) return { status: "skipped", reason: "given-up" };
 	if (surface === "claude-code") return dispatchClaudeCode(issue, deps);
-	if (surface !== "hermes") return { status: "deferred", surface };
+	if (surface !== "hermes") {
+		await ensureMarkerComment(deps.linear, issue.id, "not-dispatchable");
+		await deps.substrate.emitEvent(failedEvent(issue.identifier, "not-dispatchable"));
+		return { status: "marked", outcome: "not-dispatchable" };
+	}
 	const resolved = await deps.substrate.findNode({
 		linear_issue_id: issue.id,
 		linear_identifier: issue.identifier,
@@ -156,10 +174,17 @@ export async function dispatchIssue(
 		return { status: "marked", outcome: "no-node" };
 	}
 	const { graph_id: graphId, node_id: nodeId, repo } = resolved;
-	const sessionId = buildSessionId(graphId, nodeId);
+	let sessionId: string;
+	try {
+		sessionId = buildSessionId(graphId, nodeId);
+	} catch (error) {
+		if (!(error instanceof InvalidNodeIdError)) throw error;
+		return markNotDispatchable(issue, deps, graphId, nodeId);
+	}
 	const nowMs = (deps.now ?? Date.now)();
 
 	const preGraph = await deps.substrate.getGraph(graphId);
+	const preNode = preGraph?.nodes.find((node) => node.node_id === nodeId);
 	const graphLive = preGraph?.nodes.some((node) => isLiveLease(node, nowMs)) ?? false;
 	if (graphLive) {
 		await ensureMarkerComment(deps.linear, issue.id, "already-claimed");
@@ -188,7 +213,13 @@ export async function dispatchIssue(
 		return { status: "preflight-skip", reason: "mcp-unconfigured" };
 	}
 
-	const promptPath = writePromptFile(worktree.path, { graphId, nodeId, sessionId });
+	let promptPath: string;
+	try {
+		promptPath = writePromptFile(worktree.path, { graphId, nodeId, sessionId });
+	} catch (error) {
+		if (!(error instanceof PromptSymlinkError || error instanceof InvalidNodeIdError)) throw error;
+		return markNotDispatchable(issue, deps, graphId, nodeId);
+	}
 	const child = await launchHermes(
 		{
 			worktreePath: worktree.path,
@@ -199,7 +230,13 @@ export async function dispatchIssue(
 	);
 
 	const watched = await watchClaim(
-		{ childPid: child.pid, sessionId, issueId: issue.id, givenUpDir: deps.givenUpDir },
+		{
+			childPid: child.pid,
+			sessionId,
+			issueId: issue.id,
+			givenUpDir: deps.givenUpDir,
+			leaseEpochAtLaunch: preNode?.lease_epoch ?? 0,
+		},
 		{
 			getNode: async () => {
 				const graph = await deps.substrate.getGraph(graphId);

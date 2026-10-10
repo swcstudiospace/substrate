@@ -47,6 +47,9 @@ export interface PublicNode {
 	/** Always null on public reads; only the holder ever sees an id. */
 	lease_id: string | null;
 	lease_expires_at: string | null;
+	/** Present on `graph_get`. The watch uses it to see a claim that already released. */
+	lease_epoch?: number;
+	state?: string | null;
 }
 
 export interface GraphSnapshot {
@@ -180,12 +183,19 @@ export class SubstrateClient {
 	 * telemetry write can never fail a dispatch.
 	 */
 	async emitEvent(event: DispatchEventInput): Promise<void> {
-		const reply = await this.callTool<{ stored?: boolean } | string>("events_emit", {
-			surface: "substrate",
-			...event,
-		});
-		if (typeof reply !== "string" && reply?.stored === false) {
-			console.error(`substrate event not stored: kind=${event.kind} session=${event.session_id}`);
+		try {
+			const reply = await this.callTool<{ stored?: boolean } | string>("events_emit", {
+				surface: "substrate",
+				...event,
+			});
+			if (typeof reply !== "string" && reply?.stored === false) {
+				console.error(`substrate event not stored: kind=${event.kind} session=${event.session_id}`);
+			}
+		} catch (error) {
+			// Telemetry runs after a valid claim. A timeout or a refused
+			// connection must not end the resident loop or stop the child.
+			const detail = error instanceof Error ? error.message : "unknown";
+			console.error(`substrate event not stored: kind=${event.kind} session=${event.session_id} (${detail})`);
 		}
 	}
 }
