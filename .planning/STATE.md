@@ -2,14 +2,14 @@
 gsd_state_version: "1.0"
 milestone: v1.3
 milestone_name: Build plan completion
-current_phase: 22
-current_phase_name: skills-sync-bridge-and-miners
-status: executed
-stopped_at: Phase 22 executed — 22-01..22-04 committed, PR #46 merged, smoke 18/18 green on fixture twin, summaries + validation + verification written, live tail gated
-last_updated: "2026-10-10T16:10:00Z"
+current_phase: 23
+current_phase_name: claim-mirror-and-dod-gate
+status: verified
+stopped_at: Phase 23 verified — 23-VERIFICATION.md passed 30/30 at bfde32f, smoke 38/38 green on isolated twin, live MIRROR-08 proof operator-gated
+last_updated: "2026-10-10T17:35:00Z"
 last_activity: 2026-10-10
-last_activity_desc: Phase 22 executed (sync+projector, bridge+monitor, Omp extension+prompt, rehearsal smoke 18/18, PR #46 merged; 6 live steps operator-gated)
-state_head: bd2a8d3
+last_activity_desc: Phase 23 verified (claim mirror + DoD gate; full suite 2706/58/1 F-01 recorded; smoke:mirror 38/38; live proof gated)
+state_head: bfde32f
 progress:
   total_phases: 18
   completed_phases: 3
@@ -154,10 +154,10 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Current Position
 
-Phase: 21 — skills_propose
+Phase: 23 — claim-mirror-and-dod-gate
 Plan: All 6 complete (6/6 SUMMARYs)
-Status: Verified (re-verified 2026-10-10 at e2ad4dc; 24/24 must-haves, F-01 recorded, live PR operator-gated in Phase 22)
-Last activity: 2026-10-10 — Phase 21 re-verified, Phase 22 unblocked
+Status: Verified 2026-10-10 at bfde32f (30/30 must-haves; full suite 2706 pass / 58 skip / 1 fail F-01 recorded; smoke:mirror 38/38 on isolated twin; live MIRROR-08 proof operator-gated)
+Last activity: 2026-10-10 — Phase 23 verified, live proof deferred to operator-approved window
 
 ## Deferred Items
 
