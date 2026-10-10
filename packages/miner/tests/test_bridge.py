@@ -345,6 +345,26 @@ def test_library_behind_reads_local_refs_without_fetching(tmp_path):
     assert bridge.library_behind(tmp_path) is True
 
 
+def test_refresh_origin_main_sees_a_merge_the_last_sync_missed(tmp_path):
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-b", "main", "-q")
+    (origin / "SKILL.md").write_text("v1\n")
+    _git(origin, "add", "SKILL.md")
+    _git(origin, "commit", "-qm", "one")
+    clone = tmp_path / "clone"
+    subprocess.run(["git", "clone", "-q", str(origin), str(clone)], check=True)
+    assert bridge.library_behind(clone) is False
+    (origin / "SKILL.md").write_text("v2\n")
+    _git(origin, "add", "SKILL.md")
+    _git(origin, "commit", "-qm", "two")
+    # The clone's remote-tracking ref is still v1, which is what a bridge that
+    # does not fetch would treat as current.
+    assert bridge.library_behind(clone) is False
+    assert bridge.refresh_origin_main(clone) is True
+    assert bridge.library_behind(clone) is True
+
+
 def test_run_once_holds_a_library_group_while_behind(env, monkeypatch, capsys):
     lib_patch(env)
     monkeypatch.setattr(bridge, "library_behind", lambda library: True)

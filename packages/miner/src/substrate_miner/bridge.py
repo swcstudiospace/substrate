@@ -318,6 +318,26 @@ def base_tree(library: Path | str, name: str) -> dict[str, str]:
     return tree
 
 
+def refresh_origin_main(library: Path | str) -> bool:
+    """Update ``refs/remotes/origin/main`` without touching the worktree.
+
+    The server checks out whatever ``origin/main`` is on GitHub at propose time. A local
+    remote-tracking ref from the last sync can be older than that, and replaying the local
+    ``SKILL.md`` onto it reverts the owner's merge. Fetch first. Failure leaves the ref
+    alone; the caller then holds rather than proposing from an unknown position only when
+    the ref we do have is already behind. A missing remote fails this call and proposes
+    only if ``library_behind`` is not True.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(library), "fetch", "--no-tags", "origin", "main"],
+            capture_output=True, text=True, timeout=30, check=False,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
 def library_behind(library: Path | str) -> bool | None:
     """True when the local library checkout is behind origin/main, False when it is not, None when unknown.
 
@@ -344,6 +364,9 @@ def proposal_for(base: dict[str, str], replayed: dict[str, str]) -> tuple[dict[s
     if "SKILL.md" not in replayed:
         raise Skip("no SKILL.md")
     files = {path: text for path, text in sorted(replayed.items()) if base.get(path) != text}
+    # The propose route rejects a body with no SKILL.md, so an unchanged instruction
+    # file is still sent. Callers hold the group first when the checkout is behind
+    # the fetched origin/main; otherwise this copy would revert the owner's merge.
     files["SKILL.md"] = replayed["SKILL.md"]
     remove = sorted(path for path in base if path not in replayed)
     return files, remove
@@ -576,6 +599,10 @@ def run_once(
             else:
                 hold(name, group, reason or "held")
             continue
+        if kind == "library":
+            # The server fetches current origin/main. Refresh the remote-tracking ref first so
+            # "behind" means behind that revision, not behind whatever the last sync saw.
+            refresh_origin_main(library)
         if kind == "library" and library_behind(library) is True:
             # The local copy is older than what the server checks out (origin/main): replaying
             # onto it would resend a stale SKILL.md over the owner's merged copy. Wait for the sync.
