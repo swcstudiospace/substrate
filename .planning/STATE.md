@@ -4,12 +4,12 @@ milestone: v1.3
 milestone_name: Build plan completion
 current_phase: 25
 current_phase_name: docs-search-and-ingest-ragflow
-status: planned
-stopped_at: Phase 25 planned — 25-CONTEXT.md, 25-RESEARCH.md and 3 PLANs (25-01..25-03) committed, SUMMARYs absent, ready to execute
-last_updated: "2026-10-10T17:52:00Z"
+status: verified
+stopped_at: Phase 25 verified — 25-VERIFICATION.md rehearsal scope green at 41cb616, PR #48 merged, live G1-G4 tail operator-gated
+last_updated: "2026-10-10T19:30:00Z"
 last_activity: 2026-10-10
-last_activity_desc: Phase 25 planning (autonomous discuss-equivalent + research + 3 plans, rehearsal-first with G1-G4 operator-gated live steps)
-state_head: 96a5c87
+last_activity_desc: Phase 25 verified (retrieval path, fail-closed ingest, dataset lifecycle; bun 2775/58/1 F-01, tsc clean, pytest 230, Greptile 12 threads triaged; live tail gated)
+state_head: 41cb616
 progress:
   total_phases: 18
   completed_phases: 3

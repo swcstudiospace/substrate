@@ -66,7 +66,7 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 - [ ] **Phase 22: Skills sync, bridge and miners** - Mined skills reach every agent through propose, owner merge and sync, all from code on `main`
 - [x] **Phase 23: Claim mirror and DoD gate** - Linear and Notion follow every lease transition, and only the Definition-of-Done gate can mark an issue Done (completed 2026-10-09 via PR #36; verified 2026-10-10 at bfde32f, 30/30, live MIRROR-08 proof operator-gated)
 - [x] **Phase 24: substrate-dispatcher** - A `dispatch:hermes` label starts a lease-correct Hermes session on the issue's Graph ID in its own worktree (completed 2026-10-10 via PR #47; verified at 974557d, rehearsal scope green, live DISP-08 tail operator-gated)
-- [ ] **Phase 25: Docs search and ingest (RAGFlow)** - Agents get cited docs answers through the substrate, and ingest refuses secrets and unsourced pages
+- [x] **Phase 25: Docs search and ingest (RAGFlow)** - Agents get cited docs answers through the substrate, and ingest refuses secrets and unsourced pages (completed 2026-10-10 via PR #48; verified at 41cb616, rehearsal scope green, live G1-G4 tail operator-gated)
 - [ ] **Phase 26: Hindsight recall and Dragonfly cache** - Accepted memories are recalled across surfaces and repeated reads are cached, without slowing or staling the brief
 - [ ] **Phase 27: Ledger primitives and ingest order** - Every closed hour has one deterministic Merkle root over its events in server ingest order
 - [ ] **Phase 28: Hourly anchor job and verify** - Each closed hour is anchored once on Solana devnet, and `verify` checks a graph against those anchors
@@ -262,9 +262,9 @@ Plans:
 
 **Proof**: The refusal and error-path tests run isolated against a fake; search and ingest against the deployed RAGFlow need the live system in an operator-approved window.
 **Plans**: 3 plans
-- [ ] 25-01-PLAN.md — Substrate-only RAGFlow retrieval with citation-shaped docs_search (DOCS-01)
-- [ ] 25-02-PLAN.md — Fail-closed docs_ingest with six refusals plus store-lock extension (DOCS-02)
-- [ ] 25-03-PLAN.md — Dataset lifecycle plus degradation hook plus G1-G4 gated live map (DOCS-03)
+- [x] 25-01-PLAN.md — Substrate-only RAGFlow retrieval with citation-shaped docs_search (DOCS-01)
+- [x] 25-02-PLAN.md — Fail-closed docs_ingest with six refusals plus store-lock extension (DOCS-02)
+- [x] 25-03-PLAN.md — Dataset lifecycle plus degradation hook plus G1-G4 gated live map (DOCS-03)
 
 ### Phase 26: Hindsight recall and Dragonfly cache
 
