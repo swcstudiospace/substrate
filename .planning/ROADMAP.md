@@ -261,7 +261,10 @@ Plans:
   3. The datasets `docs/data-planes.md` lists exist and refresh as it says (`agent-substrate` on merge, `agent-skills` after each skills-sync fast-forward, `programming-desk`, one per product), keeping the last five versions.
 
 **Proof**: The refusal and error-path tests run isolated against a fake; search and ingest against the deployed RAGFlow need the live system in an operator-approved window.
-**Plans**: TBD
+**Plans**: 3 plans
+- [ ] 25-01-PLAN.md — Substrate-only RAGFlow retrieval with citation-shaped docs_search (DOCS-01)
+- [ ] 25-02-PLAN.md — Fail-closed docs_ingest with six refusals plus store-lock extension (DOCS-02)
+- [ ] 25-03-PLAN.md — Dataset lifecycle plus degradation hook plus G1-G4 gated live map (DOCS-03)
 
 ### Phase 26: Hindsight recall and Dragonfly cache
 

@@ -2,14 +2,14 @@
 gsd_state_version: "1.0"
 milestone: v1.3
 milestone_name: Build plan completion
-current_phase: 24
-current_phase_name: substrate-dispatcher
-status: verified
-stopped_at: Phase 24 verified — 24-VERIFICATION.md rehearsal scope green at 974557d, PR #47 merged, smoke 20/20 + driver exit 0, live DISP-08 tail operator-gated
+current_phase: 25
+current_phase_name: docs-search-and-ingest-ragflow
+status: planned
+stopped_at: Phase 25 planned — 25-CONTEXT.md, 25-RESEARCH.md and 3 PLANs (25-01..25-03) committed, SUMMARYs absent, ready to execute
 last_updated: "2026-10-10T17:52:00Z"
 last_activity: 2026-10-10
-last_activity_desc: Phase 24 verified (dispatcher port, lease-model prompt, outcome events, staged unit; pytest 230, bun 2706/58/1 env-fail, Greptile 14 threads triaged; live tail gated)
-state_head: 974557d
+last_activity_desc: Phase 25 planning (autonomous discuss-equivalent + research + 3 plans, rehearsal-first with G1-G4 operator-gated live steps)
+state_head: 96a5c87
 progress:
   total_phases: 18
   completed_phases: 3
