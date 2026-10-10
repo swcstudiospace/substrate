@@ -330,9 +330,9 @@ Plans:
 
 **Proof** (CARD-04): Card validation and teachable mapping run isolated; the anchored hour needs a devnet anchor, so the proof runs in an operator-approved window.
 **Plans**: 3 plans
-- [ ] 29-01-PLAN.md — Teachable write path plus accepted-teachable event plus shared fixture corpus (CARD-02 gate half, CARD-03 emit half)
-- [ ] 29-02-PLAN.md — Per-surface A2A card builder plus fake spec validator plus loopback route (CARD-01, CARD-02 card half)
-- [ ] 29-03-PLAN.md — Scratch-ledger anchor-coverage proof plus card e2e plus docs plus G1/G2/G3 gated live map (CARD-03, CARD-04)
+- [x] 29-01-PLAN.md — Teachable write path plus accepted-teachable event plus shared fixture corpus (CARD-02 gate half, CARD-03 emit half)
+- [x] 29-02-PLAN.md — Per-surface A2A card builder plus fake spec validator plus loopback route (CARD-01, CARD-02 card half)
+- [x] 29-03-PLAN.md — Scratch-ledger anchor-coverage proof plus card e2e plus docs plus G1/G2/G3 gated live map (CARD-03, CARD-04)
 
 ### Phase 30: desktop_run
 

@@ -4,12 +4,12 @@ milestone: v1.3
 milestone_name: Build plan completion
 current_phase: 29
 current_phase_name: agent-cards-and-teachable-moments
-status: planned
-stopped_at: Phase 29 planned — 29-CONTEXT.md, 29-RESEARCH.md, 3 PLANs rehearsal-first with G1/G2/G3 gated; ready to execute
+status: executed
+stopped_at: Phase 29 executed and merged (PR #50 as bc8f839) — 29-01/02/03 + Greptile r1 fixes green; G1/G2/G3 live windows gated, see 29-VERIFICATION.md
 last_updated: "2026-10-10T23:00:00Z"
 last_activity: 2026-10-10
 last_activity_desc: Phase 29 planned (teachable write path + fixture corpus, per-surface A2A cards + fake spec validator + loopback route, scratch anchor-coverage proof + docs; G1 spec validation, G2 card publication, G3 live anchor proof gated)
-state_head: e295746
+state_head: bc8f839
 progress:
   total_phases: 18
   completed_phases: 3
