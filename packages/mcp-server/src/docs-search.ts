@@ -33,6 +33,7 @@ export interface SearchCitation {
 	score: number;
 	document_id: string;
 	chunk_id: string;
+	pin_age_ms?: number;
 }
 
 export interface SearchReply {
@@ -48,6 +49,7 @@ export interface DatasetPin {
 	dataset_id: string;
 	version: string;
 	commit: string;
+	ingested_at?: string;
 }
 
 export interface SearchDeps {
@@ -58,6 +60,10 @@ export interface SearchDeps {
 	surface?: Surface | null;
 	sessionId?: string;
 	fetchImpl?: FetchLike;
+	/** Datasets serving from a stale pin: their citations carry pin_age_ms (D25-07). */
+	degradedDatasets?: readonly string[];
+	/** Clock for pin ages; the real clock when omitted. */
+	nowMs?: number;
 }
 
 function failed(deps: SearchDeps, sessionId: string, reason: string): Promise<SearchReply> {
@@ -75,7 +81,20 @@ function failed(deps: SearchDeps, sessionId: string, reason: string): Promise<Se
 		);
 }
 
-function cite(chunk: RagflowChunk, datasetName: string, pin: DatasetPin | undefined): SearchCitation {
+function pinAgeMs(pin: DatasetPin | undefined, nowMs: number): number | undefined {
+	if (pin?.ingested_at === undefined) return undefined;
+	const age = nowMs - Date.parse(pin.ingested_at);
+	return Number.isFinite(age) ? Math.max(0, age) : undefined;
+}
+
+function cite(
+	chunk: RagflowChunk,
+	datasetName: string,
+	pin: DatasetPin | undefined,
+	markPinAge: boolean,
+	nowMs: number,
+): SearchCitation {
+	const age = markPinAge ? pinAgeMs(pin, nowMs) : undefined;
 	return {
 		title: chunk.document_name,
 		source_url: chunk.source_url ?? `dataset:${datasetName}`,
@@ -85,6 +104,7 @@ function cite(chunk: RagflowChunk, datasetName: string, pin: DatasetPin | undefi
 		score: chunk.score ?? 0,
 		document_id: chunk.document_id ?? "",
 		chunk_id: chunk.chunk_id ?? "",
+		...(age !== undefined ? { pin_age_ms: age } : {}),
 	};
 }
 
@@ -110,7 +130,10 @@ export async function searchDocs(deps: SearchDeps, question: string): Promise<Se
 		);
 		if (!outcome.ok) return failed(deps, sessionId, outcome.reason);
 		ids.push(dataset.id);
-		for (const chunk of outcome.chunks) citations.push(cite(chunk, dataset.name, deps.pins?.[dataset.id]));
+		for (const chunk of outcome.chunks) {
+			const degraded = deps.degradedDatasets?.includes(dataset.name) ?? false;
+			citations.push(cite(chunk, dataset.name, deps.pins?.[dataset.id], degraded, deps.nowMs ?? Date.now()));
+		}
 	}
 	citations.sort((left, right) => right.score - left.score);
 	const chunks = citations.slice(0, 10);

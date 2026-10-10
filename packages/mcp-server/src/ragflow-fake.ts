@@ -96,6 +96,7 @@ export class RagflowFake {
 		this.requests.push({ method, path: url.pathname, body });
 		if (method === "POST" && url.pathname === "/api/v1/retrieval") return this.retrieval(body);
 		if (method === "GET" && url.pathname === "/api/v1/datasets") return this.datasetList();
+		if (method === "POST" && url.pathname === "/api/v1/datasets") return this.createDataset(body);
 		if (method === "POST" && url.pathname.startsWith("/api/v1/datasets/") && url.pathname.endsWith("/documents")) {
 			return this.upload(url.pathname.split("/")[4] ?? "", body);
 		}
@@ -136,6 +137,17 @@ export class RagflowFake {
 		return Response.json({
 			data: this.datasets.map((dataset) => ({ id: dataset.id, name: dataset.name })),
 		});
+	}
+
+	private createDataset(body: unknown): Response {
+		const name = body !== null && typeof body === "object" && "name" in body && typeof body.name === "string" ? body.name : "";
+		if (!name) return Response.json({ error: "name required" }, { status: 400 });
+		const existing = this.datasets.find((dataset) => dataset.name === name);
+		if (existing) return Response.json({ data: { id: existing.id, name: existing.name } });
+		const created: FakeDataset = { id: `ds-created-${this.datasets.length + 1}-${name}`, name, embedding_model: "tei-bge-small" };
+		this.datasets.push(created);
+		this.chunks[created.id] = [];
+		return Response.json({ data: { id: created.id, name: created.name } });
 	}
 
 	private upload(datasetId: string, body: unknown): Response {

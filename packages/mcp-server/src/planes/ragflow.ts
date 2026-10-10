@@ -61,6 +61,11 @@ export type RetrievalOutcome =
 
 /** The most results one retrieval may ask for (D25-03). */
 export const MAX_RETRIEVAL_PAGE_SIZE = 10;
+/**
+ * The pinned embedding model for every dataset this phase creates (D25-06,
+ * decided at 05-02). No chat model is registered; retrieval only.
+ */
+export const DATASET_EMBEDDING_MODEL = "tei-bge-small";
 
 /** The fetch surface the plane client needs: injectable for rehearsal fakes. */
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
@@ -289,4 +294,41 @@ export async function pollParseStatus(
 		}
 	}
 	return { ok: false, reason: "parse-timeout" };
+}
+
+export type CreateDatasetOutcome =
+	| { ok: true; id: string }
+	| { ok: false; reason: string };
+
+/**
+ * Create a dataset with the pinned embedding model (D25-06).
+ *
+ * Called only on a discovery name-miss: reuse first, create never as a
+ * duplicate. Real product-dataset creation is a gated live step (G2).
+ */
+export async function createDataset(
+	config: RagflowConfig,
+	name: string,
+	fetchImpl: FetchLike = fetch,
+	timeoutMs = 8000,
+): Promise<CreateDatasetOutcome> {
+	let response: Response;
+	try {
+		response = await fetchImpl(`${config.url}/api/v1/datasets`, {
+			method: "POST",
+			headers: { authorization: `Bearer ${config.apiKey}`, "content-type": "application/json" },
+			body: JSON.stringify({ name, embedding_model: DATASET_EMBEDDING_MODEL }),
+			signal: AbortSignal.timeout(timeoutMs),
+		});
+	} catch (cause) {
+		return { ok: false, reason: `ragflow unreachable: ${String(cause instanceof Error ? cause.message : cause).slice(0, 200)}` };
+	}
+	if (!response.ok) return { ok: false, reason: `ragflow ${response.status}` };
+	const body: unknown = await response.json().catch((): unknown => null);
+	const id =
+		body !== null && typeof body === "object" && "data" in body && body.data !== null && typeof body.data === "object" && "id" in body.data
+			? body.data.id
+			: null;
+	if (typeof id !== "string") return { ok: false, reason: "ragflow: unexpected dataset shape" };
+	return { ok: true, id };
 }
