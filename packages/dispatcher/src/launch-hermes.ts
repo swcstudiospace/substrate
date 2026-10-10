@@ -15,8 +15,21 @@
  * so tests never execute the real `hermes` binary.
  */
 
-import { writeFileSync } from "node:fs";
+import { lstatSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+
+/** Node ids name prompt files: a strict segment, never a path. */
+export const NODE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+
+export class InvalidNodeIdError extends Error {}
+export class PromptSymlinkError extends Error {}
+
+/** Throw unless `nodeId` is a safe filename segment. Runs before any join. */
+export function assertValidNodeId(nodeId: string): void {
+	if (!NODE_ID_PATTERN.test(nodeId)) {
+		throw new InvalidNodeIdError("`node_id` must match /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/");
+	}
+}
 
 /** Fixed Hermes argv prefix; the worktree and prompt paths are appended. */
 export const HERMES_ARGV_PREFIX: readonly string[] = [
@@ -37,6 +50,7 @@ export function hermesArgv(worktreePath: string, promptPath: string): string[] {
 
 /** The watch key for one launch. Not a swarm session; the watch compares it verbatim. */
 export function buildSessionId(graphId: string, nodeId: string): string {
+	assertValidNodeId(nodeId);
 	return `hermes:${graphId}:${nodeId}`;
 }
 
@@ -58,12 +72,34 @@ export function buildPrompt(graphId: string, nodeId: string, sessionId: string):
 
 /**
  * Write the prompt file mode 0600 into `dir` and return its path.
- * The filename carries the node id only, never issue text.
+ * The filename carries the node id only, never issue text. A pre-existing
+ * symlink at the target throws instead of being followed and truncated.
  */
 export function writePromptFile(dir: string, input: { graphId: string; nodeId: string; sessionId: string }): string {
+	assertValidNodeId(input.nodeId);
 	const path = join(dir, `substrate-dispatch-${input.nodeId}.md`);
+	const existing = lstatOptional(path);
+	if (existing?.isSymbolicLink()) {
+		throw new PromptSymlinkError(`refusing to follow symlink at ${path}`);
+	}
 	writeFileSync(path, buildPrompt(input.graphId, input.nodeId, input.sessionId), { mode: 0o600 });
 	return path;
+}
+
+/** `lstatSync` that returns undefined for a missing path and throws otherwise. */
+function lstatOptional(path: string): { isSymbolicLink(): boolean } | undefined {
+	try {
+		return lstatSync(path);
+	} catch (error) {
+		if (isEnoent(error)) return undefined;
+		throw error;
+	}
+}
+
+function isEnoent(error: unknown): boolean {
+	if (typeof error !== "object" || error === null || !("code" in error)) return false;
+	const candidate: unknown = error.code;
+	return candidate === "ENOENT";
 }
 
 export interface ChildEnvExtra {
@@ -102,10 +138,32 @@ export type McpPreflight = "ok" | "mcp-unconfigured";
  * Null or missing text is `mcp-unconfigured`: the dispatcher must skip the
  * spawn (no marker comment, label kept) rather than burn model quota on a
  * session that can never claim. This is assumption A1's fail-closed side.
+ *
+ * The `substrate` match is a YAML key line, never a substring: comment
+ * lines and prose mentioning substrate do not pass. The key's block must
+ * contain `enabled: true` or a `url:` line; `enabled: false` alone fails.
  */
 export function checkSubstrateMcp(configText: string | null | undefined): McpPreflight {
 	if (!configText) return "mcp-unconfigured";
-	return configText.includes("substrate") ? "ok" : "mcp-unconfigured";
+	const lines = configText.split("\n");
+	for (let index = 0; index < lines.length; index += 1) {
+		const line = lines[index] ?? "";
+		if (/^\s*(#|$)/.test(line)) continue;
+		const key = line.match(/^(\s*)substrate\s*:(.*)$/);
+		if (key === null) continue;
+		const indent = key[1] ?? "";
+		const rest = key[2] ?? "";
+		if (/enabled\s*:\s*true\b/.test(rest) || /(^|[{,]\s*)url\s*:/.test(rest)) return "ok";
+		for (let sub = index + 1; sub < lines.length; sub += 1) {
+			const body = lines[sub] ?? "";
+			if (/^\s*(#|$)/.test(body)) continue;
+			const subIndent = body.match(/^\s*/)?.[0] ?? "";
+			if (subIndent.length <= indent.length) break;
+			if (/^\s*enabled\s*:\s*true\b/.test(body)) return "ok";
+			if (/^\s*url\s*:/.test(body)) return "ok";
+		}
+	}
+	return "mcp-unconfigured";
 }
 
 export interface HermesSpawnOptions {

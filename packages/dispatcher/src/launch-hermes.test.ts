@@ -7,7 +7,7 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -16,7 +16,9 @@ import {
 	buildSessionId,
 	checkSubstrateMcp,
 	hermesArgv,
+	InvalidNodeIdError,
 	launchHermes,
+	PromptSymlinkError,
 	writePromptFile,
 	type HermesSpawnOptions,
 } from "./launch-hermes.ts";
@@ -178,5 +180,50 @@ describe("substrate MCP preflight", () => {
 				"mcp_servers:\n  substrate:\n    url: http://127.0.0.1:7410/mcp\n    enabled: true\n",
 			),
 		).toBe("ok");
+	});
+});
+
+describe("prompt file path safety", () => {
+	test("a pre-existing symlink at the target throws instead of truncating", () => {
+		const dir = makeTmp();
+		const outside = join(dir, "host-secret.md");
+		writeFileSync(outside, "do-not-touch");
+		const link = join(dir, "substrate-dispatch-n3.md");
+		symlinkSync(outside, link);
+		expect(() =>
+			writePromptFile(dir, { graphId: "ut-mkts36-abcdef01", nodeId: "n3", sessionId: "hermes:ut-mkts36-abcdef01:n3" }),
+		).toThrow(PromptSymlinkError);
+		expect(readFileSync(outside, "utf8")).toBe("do-not-touch");
+	});
+
+	test("node ids outside the strict segment throw in both entry points", () => {
+		const dir = makeTmp();
+		for (const nodeId of ["../../etc/passwd", "../escape", "/absolute", "", "has space", "semi;colon", `${"n".repeat(65)}`]) {
+			expect(() => buildSessionId("ut-mkts36-abcdef01", nodeId)).toThrow(InvalidNodeIdError);
+			expect(() =>
+				writePromptFile(dir, { graphId: "ut-mkts36-abcdef01", nodeId, sessionId: "hermes:x" }),
+			).toThrow(InvalidNodeIdError);
+		}
+		expect(buildSessionId("ut-mkts36-abcdef01", "n3")).toBe("hermes:ut-mkts36-abcdef01:n3");
+	});
+});
+
+describe("substrate MCP key-line preflight", () => {
+	test("comments and prose mentioning substrate do not pass", () => {
+		expect(checkSubstrateMcp("# substrate:\n#   enabled: true\n")).toBe("mcp-unconfigured");
+		expect(checkSubstrateMcp("notes: uses the substrate client for reads\n")).toBe("mcp-unconfigured");
+		expect(checkSubstrateMcp("description: substrate-enabled session\n")).toBe("mcp-unconfigured");
+	});
+
+	test("a substrate key whose block disables the server does not pass", () => {
+		expect(checkSubstrateMcp("mcp_servers:\n  substrate:\n    enabled: false\n")).toBe("mcp-unconfigured");
+	});
+
+	test("a substrate key with a url line passes even without an enabled line", () => {
+		expect(checkSubstrateMcp("mcp_servers:\n  substrate:\n    url: http://127.0.0.1:7410/mcp\n")).toBe("ok");
+	});
+
+	test("a nested substrate key with enabled true passes", () => {
+		expect(checkSubstrateMcp("top:\n  mcp_servers:\n    substrate:\n      enabled: true\n")).toBe("ok");
 	});
 });
