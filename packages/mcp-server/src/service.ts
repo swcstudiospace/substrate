@@ -977,20 +977,6 @@ export class Substrate {
 	}
 
 	/**
-	 * Write a memory entry through the governance gate.
-	 *
-	 * **This is the fail-closed path.** `emit` hands a caller its event back even
-	 * when the ledger is unreachable, because a lost event costs the trail and
-	 * nothing else. Memory is different: it is what the next four sessions act on, so
-	 * a write the gate cannot authorise, decide and verify comes back as `denied` and
-	 * never as something another agent will read. A store that is missing or refusing
-	 * is a refusal, not a silent success — there is no `accepted` without a row.
-	 *
-	 * It does not throw. A caller gets an outcome and a remedy for every path,
-	 * including an outage, because "memory.write raised" is not something an agent
-	 * mid-turn can act on and `denied: store.unavailable` is.
-	 */
-	/**
 	 * True only when the ledger was read and it holds no teachable note for
 	 * this memory. A missing client, a throw, or no session to narrow by
 	 * answers false: the caller then does not emit on a replay.
@@ -1015,6 +1001,20 @@ export class Substrate {
 		}
 	}
 
+	/**
+	 * Write a memory entry through the governance gate.
+	 *
+	 * **This is the fail-closed path.** `emit` hands a caller its event back even
+	 * when the ledger is unreachable, because a lost event costs the trail and
+	 * nothing else. Memory is different: it is what the next four sessions act on, so
+	 * a write the gate cannot authorise, decide and verify comes back as `denied` and
+	 * never as something another agent will read. A store that is missing or refusing
+	 * is a refusal, not a silent success — there is no `accepted` without a row.
+	 *
+	 * It does not throw. A caller gets an outcome and a remedy for every path,
+	 * including an outage, because "memory.write raised" is not something an agent
+	 * mid-turn can act on and `denied: store.unavailable` is.
+	 */
 	async writeMemory(request: MemoryWriteRequest): Promise<MemoryWriteResult> {
 		// Reported on every reply, including the ones the gate never sees, so a caller
 		// always learns which surface its write was attributed to.
@@ -1073,21 +1073,23 @@ export class Substrate {
 		// A replay of an already-noted memory must not emit again. A replay
 		// that is the first verified read of a memory — the earlier attempt
 		// was accepted but not verified, so it emitted nothing — still owes
-		// the one note. When the ledger cannot be asked, skip the replay:
-		// a duplicate note is worse than a missing one we cannot prove.
-		const replayNeedsNote =
-			result.deduplicated === true &&
-			result.entry !== undefined &&
-			(await this.teachableNoteMissing(result.entry.id, request.session_id));
+		// the one note. The ledger is asked only for that replay: an ordinary
+		// memory retry, and a first accept, do not scan it. When the ledger
+		// cannot be asked, skip the replay: a duplicate note is worse than a
+		// missing one we cannot prove.
 		if (
 			result.outcome === "accepted" &&
 			result.verified_persisted &&
 			result.entry &&
-			isTeachable(request.kind, request.subject ?? result.entry.subject) &&
-			(result.deduplicated !== true || replayNeedsNote)
+			isTeachable(request.kind, request.subject ?? result.entry.subject)
 		) {
-			if ((SURFACES as readonly string[]).includes(writer)) {
-				await this.emit(teachableEvent(writer as Surface, request, result)).catch(() => undefined);
+			const replayNeedsNote =
+				result.deduplicated === true &&
+				(await this.teachableNoteMissing(result.entry.id, request.session_id));
+			if (result.deduplicated !== true || replayNeedsNote) {
+				if ((SURFACES as readonly string[]).includes(writer)) {
+					await this.emit(teachableEvent(writer as Surface, request, result)).catch(() => undefined);
+				}
 			}
 		}
 		if (result.outcome === "accepted" || commitUncertain) await this.cache.bump(MEMORY_GENERATION_KEY);

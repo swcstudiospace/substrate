@@ -327,6 +327,29 @@ describe("writeMemory emits the teachable trail", () => {
 		expect(emitted).toEqual([]);
 	});
 
+	test("an ordinary fact retry does not ask the ledger", async () => {
+		const store = new TeachableStore();
+		let queries = 0;
+		const substrate = new Substrate(loadConfig({}), {
+			index: store as never,
+			greptime: {
+				ensureAppendMode: async () => true,
+				lastHash: async () => null,
+				insertEvent: async () => {},
+				queryEvents: async () => {
+					queries += 1;
+					return [];
+				},
+			} as never,
+		});
+
+		await substrate.writeMemory({ ...TEACHABLE, subject: "retry-budget", idempotency_key: "k-plain" });
+		const retry = await substrate.writeMemory({ ...TEACHABLE, subject: "retry-budget", idempotency_key: "k-plain" });
+
+		expect(retry.deduplicated).toBe(true);
+		expect(queries).toBe(0);
+	});
+
 	test("an unverified accept emits no trail — durability is the precondition", async () => {
 		const store = new TeachableStore();
 		store.hideFromReadBack = true;
