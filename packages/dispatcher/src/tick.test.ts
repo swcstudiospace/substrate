@@ -276,6 +276,38 @@ describe("hermes dispatch", () => {
 		expectVocabularyClosed(substrate.events);
 	});
 
+	test("a released claim is read on the substrate client", async () => {
+		const linear = linearFake([HERMES_ISSUE]);
+		const substrate = substrateFake(foundNode(), [FREE_GRAPH]);
+		const seen: string[] = [];
+		substrate.client.claimStood = function (this: TickSubstrate, sessionId: string, since: string) {
+			expect(this).toBe(substrate.client);
+			seen.push(`${sessionId} ${since}`);
+			return Promise.resolve(true);
+		};
+		const { deps } = tickDeps({ linear, substrate, alive: false });
+
+		const result = await dispatchIssue(HERMES_ISSUE, "hermes", deps);
+
+		expect(result).toEqual({ status: "landed" });
+		expect(seen).toEqual([`${SESSION_ID} ${new Date(NOW).toISOString()}`]);
+		expect(isGivenUp(deps.givenUpDir, HERMES_ISSUE.id)).toBe(false);
+	});
+
+	test("a child record that cannot be saved stops the process group", async () => {
+		const linear = linearFake([HERMES_ISSUE]);
+		const substrate = substrateFake(foundNode(), [FREE_GRAPH]);
+		const { deps, spawns, signals } = tickDeps({
+			linear,
+			substrate,
+			givenUpDir: "/proc/self/dispatcher-given-up",
+		});
+
+		await expect(dispatchIssue(HERMES_ISSUE, "hermes", deps)).rejects.toThrow();
+		expect(spawns).toHaveLength(1);
+		expect(signals).toEqual(["SIGKILL"]);
+	});
+
 	test("a still-running child keeps the checkout until it exits", async () => {
 		const linear = linearFake([HERMES_ISSUE]);
 		const substrate = substrateFake(foundNode(), [FREE_GRAPH, graphWith("hermes", SESSION_ID, LIVE)]);

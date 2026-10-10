@@ -10,11 +10,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	GIVEN_UP_FILENAME,
+	graphChildRunning,
 	isGivenUp,
 	isLanded,
 	isLiveLease,
 	markGivenUp,
 	readGivenUp,
+	rememberActiveChild,
 	SIGTERM_GRACE_MS,
 	WATCH_BUDGET_MS,
 	watchClaim,
@@ -305,6 +307,24 @@ describe("watchClaim", () => {
 		expect(isGivenUp(dir, "iss-done")).toBe(true);
 	});
 
+	test("an expired claim with this session id is not a landing", async () => {
+		const dir = makeTmp();
+		const result = await watchClaim(
+			{ childPid: 111, sessionId: SESSION, issueId: "iss-old", givenUpDir: dir },
+			{
+				getNode: () => node({ claimed_by: "hermes", claim_session: SESSION, lease_expires_at: PAST }),
+				isAlive: () => false,
+				signal: () => {},
+				sleep: async () => {},
+				now: () => NOW,
+				pollIntervalMs: 1,
+				claimStood: () => false,
+			},
+		);
+		expect(result).toEqual({ status: "exited-unclaimed" });
+		expect(isGivenUp(dir, "iss-old")).toBe(true);
+	});
+
 	test("a stored claim event counts as landed after the node was cleared", async () => {
 		const dir = makeTmp();
 		const result = await watchClaim(
@@ -341,6 +361,34 @@ describe("watchClaim", () => {
 		);
 		expect(result).toEqual({ status: "claim-timeout" });
 		expect(isGivenUp(dir, "iss-read")).toBe(true);
+	});
+
+	test("a reused pid does not keep the checkout", () => {
+		const dir = makeTmp();
+		const graphId = "ut-mkts36-abcdef01";
+		rememberActiveChild(dir, graphId, 4242, { startTicks: 10, bootId: "boot-a" });
+		expect(
+			graphChildRunning(dir, graphId, () => true, () => ({ startTicks: 99, bootId: "boot-a" })),
+		).toBe(false);
+		expect(graphChildRunning(dir, graphId, () => true, () => ({ startTicks: 99, bootId: "boot-a" }))).toBe(false);
+	});
+
+	test("the same start time and boot id keeps the checkout", () => {
+		const dir = makeTmp();
+		const graphId = "ut-mkts36-abcdef01";
+		rememberActiveChild(dir, graphId, 4242, { startTicks: 10, bootId: "boot-a" });
+		expect(
+			graphChildRunning(dir, graphId, () => true, () => ({ startTicks: 10, bootId: "boot-a" })),
+		).toBe(true);
+	});
+
+	test("a different boot id does not keep the checkout", () => {
+		const dir = makeTmp();
+		const graphId = "ut-mkts36-abcdef01";
+		rememberActiveChild(dir, graphId, 4242, { startTicks: 10, bootId: "boot-a" });
+		expect(
+			graphChildRunning(dir, graphId, () => true, () => ({ startTicks: 10, bootId: "boot-b" })),
+		).toBe(false);
 	});
 
 	test("a parent that survives the grace is claim-timeout even if SIGKILL reaps it", async () => {

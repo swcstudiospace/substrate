@@ -210,14 +210,23 @@ export class SubstrateClient {
 	 */
 	async claimStood(sessionId: string, since: string): Promise<boolean> {
 		try {
-			const reply = await this.callTool<{ events?: Array<{ payload?: { action?: unknown } }> } | string>("events_query", {
-				session_id: sessionId,
-				since,
-				include_payload: true,
-				limit: 50,
-			});
+			const sinceMs = Date.parse(since);
+			if (Number.isNaN(sinceMs)) return false;
+			const reply = await this.callTool<{ events?: Array<{ ts?: unknown; payload?: { action?: unknown } }> } | string>(
+				"events_query",
+				{
+					session_id: sessionId,
+					since,
+					include_payload: true,
+					limit: 50,
+				},
+			);
 			if (typeof reply === "string" || !Array.isArray(reply.events)) return false;
 			return reply.events.some((event) => {
+				// The session id is reused by later launches. An event with
+				// no timestamp, or one from before this launch, is not this watch.
+				const ts = typeof event.ts === "string" ? Date.parse(event.ts) : Number.NaN;
+				if (Number.isNaN(ts) || ts < sinceMs) return false;
 				const action = event.payload?.action;
 				return typeof action === "string" && STOOD_CLAIM_ACTIONS[action] === true;
 			});

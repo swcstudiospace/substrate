@@ -235,6 +235,32 @@ describe("substrate-client request shape", () => {
 		expect(errors[0]).toContain("dispatch:g:0");
 	});
 
+	test("a claim event from before this launch does not count", async () => {
+		const since = "2026-10-09T12:00:00.000Z";
+		const { fetchFn, requests } = fakeFetch(() =>
+			okEnvelope({
+				events: [
+					{ ts: "2026-10-09T11:00:00.000Z", payload: { action: "granted" } },
+					{ payload: { action: "reclaimed" } },
+					{ ts: since, payload: { action: "stolen" } },
+				],
+			}),
+		);
+		const client = makeClient(fetchFn);
+		expect(await client.claimStood("hermes:g:n", since)).toBe(true);
+		const body = JSON.parse(requests[0]?.init.body as string) as { params: { name: string; arguments: { since: string } } };
+		expect(body.params.name).toBe("events_query");
+		expect(body.params.arguments.since).toBe(since);
+	});
+
+	test("only a pre-launch claim is not evidence", async () => {
+		const { fetchFn } = fakeFetch(() =>
+			okEnvelope({ events: [{ ts: "2026-10-09T11:00:00.000Z", payload: { action: "granted" } }] }),
+		);
+		const client = makeClient(fetchFn);
+		expect(await client.claimStood("hermes:g:n", "2026-10-09T12:00:00.000Z")).toBe(false);
+	});
+
 	test("a stored:true reply stays silent", async () => {
 		const { fetchFn } = fakeFetch(() => okEnvelope({ stored: true }));
 		const client = makeClient(fetchFn);

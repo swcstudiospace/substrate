@@ -52,6 +52,7 @@ import {
 	graphChildRunning,
 	isGivenUp,
 	isLiveLease,
+	readProcIdentity,
 	rememberActiveChild,
 	watchClaim,
 	type GivenUpOutcome,
@@ -251,8 +252,18 @@ export async function dispatchIssue(
 		},
 		{ spawn: deps.spawn },
 	);
-	rememberActiveChild(deps.givenUpDir, graphId, child.pid);
-	const claimStood = deps.substrate.claimStood;
+	try {
+		rememberActiveChild(deps.givenUpDir, graphId, child.pid, readProcIdentity(child.pid));
+	} catch (error) {
+		// The child is already detached. A record-write failure must not
+		// leave it running past the watch that would have stopped it.
+		try {
+			deps.signalProcess(child.pid, "SIGKILL");
+		} catch {
+			// The group is already gone.
+		}
+		throw error;
+	}
 
 	const watched = await watchClaim(
 		{
@@ -272,8 +283,8 @@ export async function dispatchIssue(
 			sleep: deps.sleep,
 			now: deps.now,
 			pollIntervalMs: deps.pollIntervalMs,
-			...(claimStood
-				? { claimStood: () => claimStood(sessionId, new Date(nowMs).toISOString()) }
+			...(deps.substrate.claimStood
+				? { claimStood: () => deps.substrate.claimStood!(sessionId, new Date(nowMs).toISOString()) }
 				: {}),
 			onUnclaimed: async (outcome) => {
 				await ensureMarkerComment(deps.linear, issue.id, outcome);

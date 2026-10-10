@@ -20,9 +20,11 @@
  * A raised `lease_epoch` or a terminal `state` is not proof this session's
  * claim stood. `claimNode` bumps the epoch before the ledger accepts the
  * claim, and a withdrawn claim does not lower it; another session's claim
- * bumps it too. Release clears `claim_session`. The only node evidence is
- * this session still being named, plus an optional `claimStood` read of a
- * stored claim event from this watch.
+ * bumps it too. An expired holder field is not proof either: `graph_get`
+ * keeps it, and the session id is reused by the next launch. The node
+ * evidence is a live lease held by this session. A claim that already
+ * released is a stored granted, reclaimed, or stolen event at or after
+ * this launch.
  */
 
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -38,8 +40,22 @@ export type GivenUpOutcome = "exited-unclaimed" | "claim-timeout";
 
 export const GIVEN_UP_FILENAME = "given-up.json";
 
-/** graph id → pid of a Hermes child that has not exited. One child per graph. */
+/** graph id → the Hermes child still using that graph's checkout. */
 export const ACTIVE_CHILDREN_FILENAME = "active-children.json";
+
+/** Start time of one child, so a reused pid is not treated as that child. */
+export interface ChildIdentity {
+	/** `starttime` from `/proc/<pid>/stat`, clock ticks since boot. */
+	startTicks: number;
+	/** `/proc/sys/kernel/random/boot_id` at the moment the child was recorded. */
+	bootId: string;
+}
+
+interface ActiveChild {
+	pid: number;
+	startTicks: number | null;
+	bootId: string | null;
+}
 
 /** Public lease fields of one node, as `graph_get` reports them. */
 export interface WatchedNode {
@@ -126,7 +142,22 @@ export function markGivenUp(dir: string, issueId: string, outcome: GivenUpOutcom
 	chmodSync(path, 0o600);
 }
 
-function readActiveChildren(dir: string): Record<string, number> {
+function asActiveChild(value: unknown): ActiveChild | null {
+	if (typeof value === "number" && Number.isInteger(value) && value > 0) {
+		return { pid: value, startTicks: null, bootId: null };
+	}
+	if (typeof value !== "object" || value === null) return null;
+	const record = value as { pid?: unknown; startTicks?: unknown; bootId?: unknown };
+	if (typeof record.pid !== "number" || !Number.isInteger(record.pid) || record.pid <= 0) return null;
+	const startTicks =
+		typeof record.startTicks === "number" && Number.isInteger(record.startTicks) && record.startTicks >= 0
+			? record.startTicks
+			: null;
+	const bootId = typeof record.bootId === "string" && record.bootId.length > 0 ? record.bootId : null;
+	return { pid: record.pid, startTicks, bootId };
+}
+
+function readActiveChildren(dir: string): Record<string, ActiveChild> {
 	let raw: string;
 	try {
 		raw = readFileSync(join(dir, ACTIVE_CHILDREN_FILENAME), "utf8");
@@ -136,14 +167,15 @@ function readActiveChildren(dir: string): Record<string, number> {
 	}
 	const parsed: unknown = JSON.parse(raw);
 	if (typeof parsed !== "object" || parsed === null) return {};
-	const active: Record<string, number> = {};
-	for (const [graphId, pid] of Object.entries(parsed)) {
-		if (typeof pid === "number" && Number.isInteger(pid) && pid > 0) active[graphId] = pid;
+	const active: Record<string, ActiveChild> = {};
+	for (const [graphId, value] of Object.entries(parsed)) {
+		const child = asActiveChild(value);
+		if (child) active[graphId] = child;
 	}
 	return active;
 }
 
-function writeActiveChildren(dir: string, active: Record<string, number>): void {
+function writeActiveChildren(dir: string, active: Record<string, ActiveChild>): void {
 	mkdirSync(dir, { recursive: true });
 	const path = join(dir, ACTIVE_CHILDREN_FILENAME);
 	const tmp = `${path}.tmp.${process.pid}`;
@@ -152,10 +184,34 @@ function writeActiveChildren(dir: string, active: Record<string, number>): void 
 	chmodSync(path, 0o600);
 }
 
+/**
+ * Process start and boot id for `pid`. Null when `/proc` cannot be read:
+ * the caller then records a pid only, and a later check cannot tell a
+ * reused pid from this child.
+ */
+export function readProcIdentity(pid: number): ChildIdentity | null {
+	try {
+		const bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+		const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+		const end = stat.lastIndexOf(")");
+		if (end < 0 || bootId.length === 0) return null;
+		// Fields after `comm`: state is 3, starttime is 22, so index 19.
+		const startTicks = Number(stat.slice(end + 2).trim().split(/\s+/)[19]);
+		if (!Number.isInteger(startTicks) || startTicks < 0) return null;
+		return { startTicks, bootId };
+	} catch {
+		return null;
+	}
+}
+
 /** Remember a spawned child so a later issue on this graph waits for it to exit. */
-export function rememberActiveChild(dir: string, graphId: string, pid: number): void {
+export function rememberActiveChild(dir: string, graphId: string, pid: number, identity: ChildIdentity | null = null): void {
 	const active = readActiveChildren(dir);
-	active[graphId] = pid;
+	active[graphId] = {
+		pid,
+		startTicks: identity?.startTicks ?? null,
+		bootId: identity?.bootId ?? null,
+	};
 	writeActiveChildren(dir, active);
 }
 
@@ -167,16 +223,28 @@ export function forgetActiveChild(dir: string, graphId: string): void {
 	writeActiveChildren(dir, active);
 }
 
+function sameChild(record: ActiveChild, identityOf: (pid: number) => ChildIdentity | null): boolean {
+	if (record.startTicks === null || record.bootId === null) return true;
+	const now = identityOf(record.pid);
+	return now !== null && now.startTicks === record.startTicks && now.bootId === record.bootId;
+}
+
 /**
- * True when this graph still has a recorded child and that pid is alive.
- * Dead pids are pruned, including other graphs, so a reused record cannot
- * block a checkout forever.
+ * True when this graph's recorded child is still that process.
+ * Dead pids and reused pids (a different start time or boot id) are
+ * pruned, including other graphs, so a stale record cannot block a
+ * checkout. A record with no start time falls back to the pid check.
  */
-export function graphChildRunning(dir: string, graphId: string, isAlive: (pid: number) => boolean): boolean {
+export function graphChildRunning(
+	dir: string,
+	graphId: string,
+	isAlive: (pid: number) => boolean,
+	identityOf: (pid: number) => ChildIdentity | null = readProcIdentity,
+): boolean {
 	const active = readActiveChildren(dir);
 	let changed = false;
-	for (const [graph, pid] of Object.entries(active)) {
-		if (!isAlive(pid)) {
+	for (const [graph, child] of Object.entries(active)) {
+		if (!isAlive(child.pid) || !sameChild(child, identityOf)) {
 			delete active[graph];
 			changed = true;
 		}
@@ -227,16 +295,6 @@ export interface WatchDeps {
 
 export type WatchResult = { status: "landed" } | { status: GivenUpOutcome };
 
-/**
- * This session is still the named holder. A released or withdrawn claim
- * clears the session, so this does not fire for those; a bare epoch bump
- * or another session's terminal state must not either.
- */
-function sessionStillNamed(node: WatchedNode | null, sessionId: string): boolean {
-	if (node === null) return false;
-	return node.claimed_by === "hermes" && node.claim_session === sessionId;
-}
-
 async function storedClaimStood(deps: WatchDeps): Promise<boolean> {
 	if (!deps.claimStood) return false;
 	try {
@@ -266,11 +324,7 @@ async function finishUnclaimed(
 	} catch {
 		settled = null;
 	}
-	if (
-		isLanded(settled, input.sessionId, nowMs) ||
-		sessionStillNamed(settled, input.sessionId) ||
-		(await storedClaimStood(deps))
-	) {
+	if (isLanded(settled, input.sessionId, nowMs) || (await storedClaimStood(deps))) {
 		return { status: "landed" };
 	}
 	const outcome: GivenUpOutcome = aliveBeforeStop ? "claim-timeout" : "exited-unclaimed";
@@ -321,7 +375,7 @@ export async function watchClaim(input: WatchInput, deps: WatchDeps): Promise<Wa
 			await deps.sleep(pollInterval);
 			continue;
 		}
-		if (isLanded(node, input.sessionId, at) || sessionStillNamed(node, input.sessionId)) return { status: "landed" };
+		if (isLanded(node, input.sessionId, at)) return { status: "landed" };
 		if (!deps.isAlive()) return finishUnclaimed(input, deps, false, at);
 		await deps.sleep(pollInterval);
 	}
