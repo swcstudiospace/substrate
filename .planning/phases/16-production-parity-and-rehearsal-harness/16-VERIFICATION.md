@@ -1,10 +1,10 @@
 ---
 phase: 16-production-parity-and-rehearsal-harness
-verified: 2026-10-08T22:04:03Z
+verified: 2026-10-10T12:41:00Z
 status: passed
 score: 23/23 must-haves verified
 covered_files: [".planning/REQUIREMENTS.md", ".planning/phases/16-production-parity-and-rehearsal-harness/16-01-PLAN.md", ".planning/phases/16-production-parity-and-rehearsal-harness/16-01-SUMMARY.md", ".planning/phases/16-production-parity-and-rehearsal-harness/16-02-PLAN.md", ".planning/phases/16-production-parity-and-rehearsal-harness/16-02-SUMMARY.md", ".planning/phases/16-production-parity-and-rehearsal-harness/16-03-PLAN.md", ".planning/phases/16-production-parity-and-rehearsal-harness/16-03-SUMMARY.md", ".planning/phases/16-production-parity-and-rehearsal-harness/16-04-PLAN.md", ".planning/phases/16-production-parity-and-rehearsal-harness/16-04-SUMMARY.md", ".planning/phases/16-production-parity-and-rehearsal-harness/16-05-PLAN.md", ".planning/phases/16-production-parity-and-rehearsal-harness/16-05-SUMMARY.md", "README.md", "docs/observability.md", "docs/rehearsal.md", "docs/runbooks/production-parity.md", "infra/vps/substrate-mcp.service", "package.json", "packages/mcp-server/src/rehearsal-env.test.ts", "packages/mcp-server/src/rehearsal-env.ts", "scripts/parity-check.test.ts", "scripts/parity-check.ts", "scripts/rehearsal.test.ts", "scripts/rehearsal.ts"]
-covered_digest: "v3:sha256:4d2678e587681dca5d6cf964e4a6dd77df6667197030666deb550239d10c9b4a"
+covered_digest: "v3:sha256:15b50a2d5573117188fdad6dfd0c1677ecc6556bea5138ba297df0d83fc4436a"
 behavior_unverified: 0
 overrides_applied: 0
 re_verification:
@@ -18,9 +18,9 @@ re_verification:
 # Phase 16: Production Parity and Rehearsal Harness Verification Report
 
 **Phase Goal:** Production `substrate-mcp` serves the code on `main`, and every later proof has an isolated twin of it to rehearse against before anything live runs.
-**Verified:** 2026-10-08T22:04:03Z
+**Verified:** 2026-10-10T12:41:00Z
 **Status:** passed
-**Re-verification:** Yes — prior report (2026-10-08T21:50:00Z, 23/23 passed) went stale after 14 review-fix commits (`c576adf`..`50625c9`, WR-01..08 + IN-03/07/08/09). This report re-verifies all 23 must-haves against HEAD `50625c9`.
+**Re-verification:** Yes — prior report (2026-10-08T22:04:03Z, 23/23 passed, HEAD `50625c9`) went stale after the pull to `589a27c` (phases 17–28, pinned-release cutover, `fix(16)` hardening). This report re-verifies all 23 must-haves against HEAD `589a27c`. No code changes were made for this re-verification; `bun install --force` was run once to link the phase-27 `@substrate/ledger` workspace (environment-only, tree clean).
 
 ## Goal Achievement
 
@@ -30,29 +30,29 @@ Must-haves merged from all five PLAN frontmatters (23 truths) plus the 4 ROADMAP
 
 | # | Truth | Status | Evidence |
 |---|-------|--------|----------|
-| 1 | 16-01 SC-1 scratch-env contract: buildRehearsalEnv output boots main's server entry point on scratch loopback port with per-surface tokens | ✓ VERIFIED | `rehearsal-env.ts` unchanged since prior pass; round-trip test through real `loadConfig` with zero warnings passes (113 targeted tests green). Fresh live proof: `p16-verify` twin booted the checkout entry on 127.0.0.1:17410 |
-| 2 | 16-01 SC-2 isolation by construction: loopback scratch hosts only, no inherited keys, never reads /etc/substrate/substrate.env | ✓ VERIFIED | Builder untouched by review fixes; sentinel leak + exact-key-set tests pass; no `substrate.env`/`LINEAR_API_KEY`/`NOTION_API_KEY` reference in builder (grep clean) |
-| 3 | 16-01 Anonymous shape: --anonymous variant builds zero-token env, loadConfig reports allowAnonymous true | ✓ VERIFIED | Builder anonymous path + test pass; harness side hardened by IN-07 fix (`parseOperator` now throws on `--anonymous` + `--operator` conflict instead of silently ignoring) |
-| 4 | 16-01 Operator ⊆ tokens: operator surface token is a surface token value, never swarm-* | ✓ VERIFIED | `assertOperatorAllowed` + swarm-refusal test pass; WR-02 fix closes the default-operator hole (default first surface now refused when swarm) and converts builder throws to exit-2 refusal with container cleanup |
-| 5 | 16-02 SC-3 machine check: parity:check exits 0 only on active unit, stable MainPID owning 127.0.0.1:7410, healthz 200, main-verdict | ✓ VERIFIED | 23 fixture tests + new WR-07 dedup test pass; observed live during this re-verify: `ss` shows pid 1525582 (MainPID) on 127.0.0.1:7410 alongside the scratch twin — production untouched |
-| 6 | 16-02 SC-4 reproducibility: --json mode + --expect-restarts/--expect-start flags | ✓ VERIFIED | Flags present in `parity-check.ts` (unchanged); JSON reading recorded in runbook proof row (MainPID 1525582, NRestarts 0, start epoch 1791479652), not re-run per constraints |
-| 7 | 16-02 Warnings never fail: unit-file diff and substrate-* inventory are notes | ✓ VERIFIED | `warnings-never-fail` test passes; IN-09 fix documents the expected post-rollback FAIL (server-path drift by design) in the runbook |
+| 1 | 16-01 SC-1 scratch-env contract: buildRehearsalEnv output boots main's server entry point on scratch loopback port with per-surface tokens | ✓ VERIFIED | Builder semantics intact; round-trip test through real `loadConfig` passes (90 targeted tests green across rehearsal-env + store-lock + parity-check) |
+| 2 | 16-01 SC-2 isolation by construction: loopback scratch hosts only, no inherited keys, never reads /etc/substrate/substrate.env | ✓ VERIFIED | Allowlist (PATH/HOME/BUN_* only) + assertLoopback + sentinel leak test pass; no `substrate.env`/`LINEAR_API_KEY`/`NOTION_API_KEY` reference in builder (grep clean) |
+| 3 | 16-01 Anonymous shape: --anonymous variant builds zero-token env, loadConfig reports allowAnonymous true | ✓ VERIFIED | Anonymous-path test passes, incl. `--anonymous` + `--operator` conflict refusal |
+| 4 | 16-01 Operator ⊆ tokens: operator surface token is a surface token value, never swarm-* | ✓ VERIFIED | `SUBSTRATE_OPERATOR_TOKENS` still sourced from `surfaceTokens[operator]` with `assertOperatorAllowed` swarm refusal (rehearsal-env.ts:250-254); `b7655d8` only adds a separate consumer-side export (`SUBSTRATE_REHEARSAL_OPERATOR_TOKEN`, tested + documented in docs/rehearsal.md:105,140) — the subset invariant is unchanged |
+| 5 | 16-02 SC-3 machine check: parity:check exits 0 only on active unit, stable MainPID owning 127.0.0.1:7410, healthz 200, main-verdict | ✓ VERIFIED | Fixture suite passes (in the 90-test targeted run); criteria evolved by the pinned-release cutover (production runs from `/opt/agent-substrate/current`, release sha replaces checkout reflog/dirty checks — `e5e7f7d`, `ad4dad8`, `fa9a9fd`); NOT re-run live per no-production-touch constraint — operator-approved PASS reading intact in runbook |
+| 6 | 16-02 SC-4 reproducibility: --json mode + --expect-restarts/--expect-start flags | ✓ VERIFIED | Flags present (parity-check.ts:405-426); readings recorded in runbook, not re-run per constraints |
+| 7 | 16-02 Warnings never fail: unit-file diff and substrate-* inventory are notes | ✓ VERIFIED | `warnings-never-fail` test passes; runbook carries the expected post-rollback FAIL note |
 | 8 | 16-02 Flagged assumption: no further edge predicate beyond five criteria; operator window recorded as baseline | ✓ VERIFIED | Runbook header still records operator, ~17:14 UTC 2026-10-08, stray pid 3149064, source CONTEXT Operator answers |
-| 9 | 16-03 SC-1 one-command twin: `rehearsal up` / `down` manage scratch twin | ✓ VERIFIED | Fresh live proof this run: `up --name p16-verify` → http://127.0.0.1:17410 → `down` stopped pid 2432082, removed 2 containers, run dir gone. WR-01 fix gates `up` on fully healthy twin (`isTwinHealthy`: index+ledger+writable, tested) |
-| 10 | 16-03 Adjacency edge: different --name fully isolated; same-name second up refuses | ✓ VERIFIED | Label `substrate.rehearsal=<name>` scoping + run-dir/port isolation intact; `parseName` + label-filter teardown tests pass; fresh run used label `substrate.rehearsal=p16-verify` |
-| 11 | 16-03 Empty edge: bare invocation exits 2; down with no prior up exits 0 | ✓ VERIFIED | Guard tests pass; WR-03 fix strengthens this: missing flag values (`down --name` with no value) now refuse instead of falling back to `default` (`flag()` returns null on missing/flag-like value, tested) |
-| 12 | 16-03 Ordering edge: smoke runs brief→emit→register→claim in fixed order, one line per step | ✓ VERIFIED | Smoke order in `runSmoke` intact; fresh proof recorded 4/4 ok in order (`brief, emit, register, claim — claimed true decision granted`) |
-| 13 | 16-03 Idempotency edge: down idempotent; second same-name up refuses while running | ✓ VERIFIED | `mayStop` + state.json pid checks intact; WR-06 fix adds the stoppability pre-check: `up` now refuses when the twin would not be stoppable (e.g. system.slice inheritance), killing only the verified spawn |
-| 14 | 16-03 Concurrency edge: parallel named instances isolate; crashed up kills only own pid | ✓ VERIFIED | Label-scoped `removeLabelledContainers`, verified-pid stop; `c576adf` + WR-06 work replaced blind `killOwn` in up failure paths with `killVerifiedSpawn` (re-checks pid/start/argv/cwd, tested with non-matching pid returning false) |
-| 15 | 16-03 SC-2 wire proof shape: smoke drives brief/emit/register/claim with rh- ids, refuses 7410/non-loopback, prints scalars only | ✓ VERIFIED | Fresh smoke used run-tagged id `rh-p16-verify-mv031ow0`; IN-03 fix extends the guard to bracketed IPv6 loopback (`[::1]`) and all production ports (`PRODUCTION_PORTS`, tested); WR-08 fix fails smoke on `isError: true` tool results (`smokeToolResult` now exported + tested) |
-| 16 | 16-04 SC-1 documented: docs/rehearsal.md states commands, consumer.env contract, isolation | ✓ VERIFIED | IN-08 fix realigned docs with code: state.json holds container *names*, operator has no separately generated token (own surface bearer token), exit-2 vs exit-1 refusal split documented. Five-key consumer.env table intact |
-| 17 | 16-04 SC-4 documented: runbook records check, readings table, window, install, rollbacks, rh- probes, boundary | ✓ VERIFIED | Runbook (226 lines) intact: header, twin-vs-stray, dated readings (17:14 discuss read + 20:40 proof run), operator install, both rollbacks + IN-09 expected-FAIL note, rh- probes, who-does-what |
-| 18 | 16-04 README points at both docs with relative links in Running voice | ✓ VERIFIED | `README.md:102,104` relative links intact (untouched by review fixes) |
-| 19 | 16-04 Two meanings of rehearsal stated apart | ✓ VERIFIED | Harness-vs-CHAOS_REHEARSAL paragraph + `docs/observability.md:306` cross-reference intact (untouched) |
-| 20 | 16-05 SC-2 isolated proof: up→smoke→loopback ss→down, no residue | ✓ VERIFIED | Fresh re-proof this run supersedes the recorded one: tag `rh-p16-verify-mv031ow0`, 4/4 smoke, loopback-only listeners (127.0.0.1:17410 + production 127.0.0.1:7410), label-filtered listing empty after down, run dir gone, port 17410 silent |
-| 21 | 16-05 Concurrency live half: proof coexists with production 7410; scratch index tests pass | ✓ VERIFIED | Fresh run coexisted with production 7410 (MainPID 1525582 still owner, untouched); recorded scratch-index live tests stand (not re-run; same builder code) |
-| 22 | 16-05 SC-3 live evidence: parity:check output recorded as criterion 3/4 evidence | ✓ VERIFIED | Operator-approved evidence intact in runbook (2026-10-08 ~20:40 UTC): exit 0 PASS, MainPID 1525582 owns :7410, healthz 200 — recorded values-free, not re-run per constraints |
-| 23 | 16-05 SC-2 zero-write evidence: rh- counts 0 in production Greptime and Postgres | ✓ VERIFIED | Operator-approved evidence intact: Greptime agent_events rh-% = 0, Postgres graph_index/nodes/steps rh-% = 0 — recorded, not re-run per constraints |
+| 9 | 16-03 SC-1 one-command twin: `rehearsal up` / `down` manage scratch twin | ✓ VERIFIED | Lifecycle code intact plus `fix(16)` hardening (per-name flock, verified-pid stop, docker-locality gate, disk floors); live guard proof this run: `down` of an absent instance exits 0 with "nothing to remove" |
+| 10 | 16-03 Adjacency edge: different --name fully isolated; same-name second up refuses | ✓ VERIFIED | Label `substrate.rehearsal=<name>` scoping + run-dir/port isolation + name-lock intact |
+| 11 | 16-03 Empty edge: bare invocation exits 2; down with no prior up exits 0 | ✓ VERIFIED | Fresh live proof this run: bare → exit 2 usage; `down --name p16-reverify-absent` → exit 0 "nothing to remove" |
+| 12 | 16-03 Ordering edge: smoke runs brief→emit→register→claim in fixed order, one line per step | ✓ VERIFIED | `runSmoke` order intact in code; recorded 4/4 proof stands |
+| 13 | 16-03 Idempotency edge: down idempotent; second same-name up refuses while running | ✓ VERIFIED | `mayStop` + state.json pid checks + name-lock intact |
+| 14 | 16-03 Concurrency edge: parallel named instances isolate; crashed up kills only own pid | ✓ VERIFIED | `killVerifiedSpawn` (pid/start/argv/cwd re-check) + label-scoped teardown intact |
+| 15 | 16-03 SC-2 wire proof shape: smoke drives brief/emit/register/claim with rh- ids, refuses 7410/non-loopback, prints scalars only | ✓ VERIFIED | Fresh live proof this run: `smoke` against crafted non-loopback consumer.env → exit 2 "refusing non-loopback smoke host 192.0.2.1" before any request; guard order (refuseSmokeUrl precedes first fetch) confirmed in code |
+| 16 | 16-04 SC-1 documented: docs/rehearsal.md states commands, consumer.env contract, isolation | ✓ VERIFIED | Five-key consumer.env table (docs/rehearsal.md:138-143) plus the `SUBSTRATE_REHEARSAL_OPERATOR_TOKEN` row from `b7655d8`; exit-2 vs exit-1 split, naming distinction intact |
+| 17 | 16-04 SC-4 documented: runbook records check, readings table, window, install, rollbacks, rh- probes, boundary | ✓ VERIFIED | Runbook intact incl. pinned-release install/rollback updates and copyable rh-count SQL (`39072ac`, `bb7ca3e`); dated readings + MainPID 1525582 row present |
+| 18 | 16-04 README points at both docs with relative links in Running voice | ✓ VERIFIED | README.md:105 (`docs/rehearsal.md`), README.md:107 (`docs/runbooks/production-parity.md`) |
+| 19 | 16-04 Two meanings of rehearsal stated apart | ✓ VERIFIED | Harness-vs-CHAOS paragraph in docs/rehearsal.md + docs/observability.md:313 cross-reference intact |
+| 20 | 16-05 SC-2 isolated proof: up→smoke→loopback ss→down, no residue | ✓ VERIFIED | Recorded `p16-proof` evidence stands; guard-level live re-proof this run (bare exit 2, non-loopback smoke exit 2, absent down exit 0, no residue: temp run dirs removed). Full twin boot not re-run (needs Docker stores; covered by passing guard + unit suites) |
+| 21 | 16-05 Concurrency live half: proof coexists with production 7410; scratch index tests pass | ✓ VERIFIED | No production contact this run per constraints; recorded coexistence evidence stands; builder code unchanged in the relevant paths |
+| 22 | 16-05 SC-3 live evidence: parity:check output recorded as criterion 3/4 evidence | ✓ VERIFIED | Operator-approved evidence intact in runbook (exit 0 PASS, MainPID 1525582 owns :7410, healthz 200) — recorded values-free, not re-run per constraints |
+| 23 | 16-05 SC-2 zero-write evidence: rh- counts 0 in production Greptime and Postgres | ✓ VERIFIED | Operator-approved evidence intact (Greptime agent_events rh-% = 0, Postgres graph rh-% = 0) — recorded, not re-run per constraints |
 
 **Score:** 23/23 truths verified (0 present-but-behavior-unverified)
 
@@ -69,31 +69,31 @@ Must-haves merged from all five PLAN frontmatters (23 truths) plus the 4 ROADMAP
 
 | Artifact | Expected | Status | Details |
 |----------|----------|--------|---------|
-| `packages/mcp-server/src/rehearsal-env.ts` | env constructor (220 lines) | ✓ VERIFIED | untouched by review fixes; exports intact |
-| `packages/mcp-server/src/rehearsal-env.test.ts` | 14 tests | ✓ VERIFIED | pass within 113-test targeted run |
-| `scripts/parity-check.ts` | parsers + verdict + CLI (425 lines) | ✓ VERIFIED | WR-07 one-line dedup (`new Set`); 23+1 fixture tests pass |
-| `scripts/parity-check.test.ts` | 24 fixture tests (was 23) | ✓ VERIFIED | new dedup test (one owner, two fds + IPv6 loopback) passes |
-| `scripts/rehearsal.ts` | up/down/status/smoke CLI (was 1016, now 1098 lines) | ✓ VERIFIED | 8 warning + 3 info fixes; imports 16-01 builder; --no-env-file spawn; label-scoped teardown; no GREPTIME_ substring outside established LEDGER_KEYS pattern (which lives in rehearsal-env.ts, not here) |
-| `scripts/rehearsal.test.ts` | 47 guard tests (was 32) | ✓ VERIFIED | new suites: killVerifiedSpawn, isTwinHealthy, ensurePrivateDir, flag-missing-value, smokeToolResult-isError, IPv6/prod-ports — all pass |
-| `package.json` | rehearsal + parity:check entries | ✓ VERIFIED | both entries present, no dependency change |
-| `infra/vps/substrate-mcp.service` | ConditionPathExists guard | ✓ VERIFIED | guard line present; StartLimitIntervalSec=0 + StateDirectory unchanged |
-| `docs/rehearsal.md` | harness topic doc (157 lines) | ✓ VERIFIED | IN-08 realignment applied; contract table, flags, exits, naming distinction |
-| `docs/runbooks/production-parity.md` | parity runbook + filled evidence (226 lines) | ✓ VERIFIED | IN-09 expected-FAIL note added; readings, window, install, rollbacks, rh- probes, SC-2 proof, both 0 counts |
+| `packages/mcp-server/src/rehearsal-env.ts` | env constructor | ✓ VERIFIED | operator-token export addition (`b7655d8`); round-trip + leak + anonymous + operator tests pass |
+| `packages/mcp-server/src/rehearsal-env.test.ts` | builder tests | ✓ VERIFIED | pass within 90-test targeted run |
+| `scripts/parity-check.ts` | parsers + verdict + CLI | ✓ VERIFIED | pinned-release semantics (`ad4dad8`); `--json/--expect-*` flags; no state-changing verbs |
+| `scripts/parity-check.test.ts` | fixture tests | ✓ VERIFIED | pass within 90-test targeted run |
+| `scripts/rehearsal.ts` | up/down/status/smoke CLI | ✓ VERIFIED | `fix(16)` hardening (flock, verified spawn, docker locality, disk floors, fake-docker-tested down); guard order unchanged since verify-time HEAD |
+| `scripts/rehearsal.test.ts` | guard tests | ✓ VERIFIED | 79/80 pass (1 host-path-dependent assertion, Finding F-01; refused behavior itself intact) |
+| `package.json` | rehearsal + parity:check entries | ✓ VERIFIED | both entries present (package.json:31-32) |
+| `infra/vps/substrate-mcp.service` | ConditionPathExists guard | ✓ VERIFIED | guard now follows `/opt/agent-substrate/current` (pinned release); StartLimitIntervalSec=0 + StateDirectory intact; `systemd-analyze verify` exit 0 |
+| `docs/rehearsal.md` | harness topic doc | ✓ VERIFIED | five-key table + operator-token row; contract realigned with code |
+| `docs/runbooks/production-parity.md` | parity runbook + filled evidence | ✓ VERIFIED | readings, window, install, rollbacks, rh- probes, SC-2 proof, both 0 counts |
 | `README.md` | Running paragraph links | ✓ VERIFIED | 2 relative links |
-| `docs/observability.md` | 1 disambiguating sentence | ✓ VERIFIED | +1 line, nothing else |
+| `docs/observability.md` | 1 disambiguating sentence | ✓ VERIFIED | line 313 cross-reference |
 
 ### Key Link Verification
 
 | From | To | Via | Status | Details |
 |------|----|-----|--------|---------|
-| rehearsal-env.ts | config.ts loadConfig | every emitted key is a key loadConfig reads; tokenEnvName import | ✓ WIRED | round-trip test passes; fresh twin booted the real entry point |
-| rehearsal-env.test.ts | store-lock.test.ts | computed keys + short identifiers keep scans green | ✓ WIRED | store-lock tests pass with both files present (in 113-test run) |
-| parity-check.ts | systemctl/ss/procfs/git | order-independent parsing, --no-optional-locks git | ✓ WIRED | 24 fixture tests prove parsers; no new state-changing verbs added (WR-07 touched only Set dedup) |
+| rehearsal-env.ts | config.ts loadConfig | every emitted key is a key loadConfig reads; tokenEnvName import | ✓ WIRED | round-trip test passes |
+| rehearsal-env.test.ts | store-lock.test.ts | computed keys + short identifiers keep scans green | ✓ WIRED | store-lock green in targeted run |
+| parity-check.ts | systemctl/ss/procfs/git | order-independent parsing, --no-optional-locks git | ✓ WIRED | fixture tests prove parsers; no state-changing verb added |
 | parity-check.ts | production-parity.md | --json readings feed runbook | ✓ WIRED | proof row holds MainPID/NRestarts/start/healthz from the approved run |
-| rehearsal.ts | rehearsal-env.ts | imports buildRehearsalEnv + record builders (+RehearsalEnvError for WR-02) | ✓ WIRED | builder throw now caught → labelled containers removed → exit-2 refusal |
-| rehearsal.ts | index.ts entry | detached --no-env-file spawn | ✓ WIRED | spawn argv builder unchanged; fresh twin booted and answered healthy /healthz |
-| rehearsal.ts | consumer.env | later proofs source it, hardcode nothing | ✓ WIRED | five-key contract fixed in code + doc; fresh smoke read only consumer.env |
-| docs/rehearsal.md | consumer.env keys | exact five-key list | ✓ WIRED | all five keys in table; stores.env discipline stated |
+| rehearsal.ts | rehearsal-env.ts | imports buildRehearsalEnv + record builders + RehearsalEnvError | ✓ WIRED | builder throw → labelled containers removed → exit-2 refusal |
+| rehearsal.ts | index.ts entry | detached --no-env-file spawn | ✓ WIRED | spawn argv intact; production-checkout refusal precedes spawn |
+| rehearsal.ts | consumer.env | proofs source it, hardcode nothing | ✓ WIRED | contract fixed in code + doc; live smoke guard read only consumer.env |
+| docs/rehearsal.md | consumer.env keys | exact key list + operator token row | ✓ WIRED | all keys in table; stores.env discipline stated |
 | README.md | both docs | relative links | ✓ WIRED | both links resolve to existing files |
 
 ### Data-Flow Trace (Level 4)
@@ -101,19 +101,24 @@ Must-haves merged from all five PLAN frontmatters (23 truths) plus the 4 ROADMAP
 | Artifact | Data Variable | Source | Produces Real Data | Status |
 |----------|---------------|--------|--------------------|--------|
 | rehearsal-env.ts | store URLs, tokens | caller-supplied scratch inputs (Docker-assigned ports, generated secrets) | ✓ | ✓ FLOWING — asserts loopback, never inherits production |
-| parity-check.ts | MainPID, healthz, shas | live systemctl/ss/procfs/GET/git reads | ✓ | ✓ FLOWING — pure verdict over gathered facts; WR-07 dedup keeps the exactly-MainPID comparison correct on dual-fd/IPv6 hosts |
-| rehearsal.ts smoke | brief/emit/register/claim results | wire responses from scratch twin | ✓ | ✓ FLOWING — fresh 4/4 with claimed/decision scalars; WR-08 closes the isError hole; WR-01 requires full index+ledger+writable health |
+| parity-check.ts | MainPID, healthz, shas | live systemctl/ss/procfs/GET/git reads | ✓ | ✓ FLOWING — pure verdict over gathered facts; release-sha path replaces reflog checks under pinned releases |
+| rehearsal.ts smoke | brief/emit/register/claim results | wire responses from scratch twin | ✓ | ✓ FLOWING — guard order intact; live non-loopback refusal proven this run before any fetch |
 | runbook evidence | readings, counts | operator-approved live runs | ✓ | ✓ FLOWING — values-free PIDs/epochs/counts recorded with actor + date |
 
 ### Behavioral Spot-Checks
 
 | Behavior | Command | Result | Status |
 |----------|---------|--------|--------|
-| Phase unit tests (4 files) | `bun test rehearsal-env + store-lock + rehearsal + parity-check tests` | 113 pass / 0 fail (was 99; +15 new review-fix tests, incl. 47-file rehearsal suite) | ✓ PASS |
-| Full suite | `bun test` | 1224 pass / 56 skip / 0 fail across 43 files | ✓ PASS |
-| Typecheck | `bunx tsc --noEmit` | clean, exit 0 | ✓ PASS |
-| Fresh harness proof | `bun run rehearsal up --name p16-verify` → `smoke` → `down` | up 127.0.0.1:17410; smoke 4/4 (`rh-p16-verify-mv031ow0`, claimed true, decision granted); loopback-only ss; 0 labelled containers + no run dir + port silent after down; production 7410 untouched (MainPID 1525582) | ✓ PASS |
-| Live parity:check / rh- counts | — | NOT re-run: operator-approved evidence recorded 2026-10-08 ~20:40 UTC; constraints forbid port-7410/production-store contact | ? SKIP (operator evidence accepted, intact in runbook) |
+| Phase unit tests (3 files) | `bun test rehearsal-env + store-lock + parity-check tests` | 90 pass / 0 fail | ✓ PASS |
+| Rehearsal guard suite | `bun test scripts/rehearsal.test.ts` | 79 pass / 1 fail (F-01, host-path-dependent assertion; refused behavior intact) | ✓ PASS with finding |
+| Full suite | `bun test` | 2645 pass / 58 skip / 2 fail across 95 files (F-01 + F-02, both pre-existing at HEAD, neither a truth regression) | ✓ PASS with findings |
+| Typecheck | `bunx tsc --noEmit` | clean, exit 0 (after workspace link install; was 9 errors on missing `@substrate/ledger` link pre-install) | ✓ PASS |
+| Bare CLI | `bun scripts/rehearsal.ts` | exit 2 usage | ✓ PASS |
+| Port refusal | `up --name p16-reverify --port 7410` | exit 2 refusal, no Docker touched | ✓ PASS |
+| Non-loopback smoke refusal | `smoke` with crafted `consumer.env` → 192.0.2.1 | exit 2 "refusing non-loopback smoke host", before any request; temp dir removed | ✓ PASS |
+| Idempotent down | `down --name p16-reverify-absent` | exit 0 "nothing to remove" | ✓ PASS |
+| Unit lint | `systemd-analyze verify infra/vps/substrate-mcp.service` | exit 0 | ✓ PASS |
+| Live parity:check / rh- counts / full twin boot | — | NOT re-run: operator-approved evidence recorded 2026-10-08 ~20:40 UTC; no-production-touch + no-PR constraints apply | ? SKIP (operator evidence accepted, intact in runbook) |
 
 ### Probe Execution
 
@@ -123,8 +128,8 @@ No phase-declared probe scripts (`scripts/*/tests/probe-*.sh`); not a migration/
 
 | Requirement | Source Plans | Description | Status | Evidence |
 |-------------|--------------|-------------|--------|----------|
-| FOUND-01 | 16-01, 16-03, 16-04, 16-05 | Isolated rehearsal harness on scratch port/stores with surface tokens + teardown | ✓ SATISFIED | builder + hardened CLI + docs + fresh isolated proof with clean teardown |
-| FOUND-03 | 16-02, 16-04, 16-05 | Production parity with operator approval: stray retired, runbook + rollback | ✓ SATISFIED | read-only check (dedup fix) + runbook (+expected-FAIL note) + approved PASS reading + window record |
+| FOUND-01 | 16-01, 16-03, 16-04, 16-05 | Isolated rehearsal harness on scratch port/stores with surface tokens + teardown | ✓ SATISFIED | builder + hardened CLI + docs + live guard proofs with clean teardown |
+| FOUND-03 | 16-02, 16-04, 16-05 | Production parity with operator approval: stray retired, runbook + rollback | ✓ SATISFIED | read-only check (pinned-release semantics) + runbook + approved PASS reading + window record |
 
 Orphan check: REQUIREMENTS.md maps exactly FOUND-01 and FOUND-03 to Phase 16; both appear in plan frontmatter. No orphaned requirements.
 
@@ -132,25 +137,30 @@ Orphan check: REQUIREMENTS.md maps exactly FOUND-01 and FOUND-03 to Phase 16; bo
 
 | File | Line | Pattern | Severity | Impact |
 |------|------|---------|----------|--------|
-| — | — | None: no TODO/FIXME/XXX/TBD/PLACEHOLDER/"Not implemented"/empty-return/console.log-only in the three implementation files | — | — |
-| `scripts/greptime-smoke.ts` | — | GREPTIME_ substring matches | ℹ️ Info | Pre-existing file, out of phase scope; the 16-02 prohibition covers plan .ts files only (parsers/CLI), which are clean — no GREPTIME_ in parity-check.ts/rehearsal.ts, no agent_events SQL in any plan .ts |
-| `packages/mcp-server/src/rehearsal-env.ts:24-27` | — | GREPTIME_ key names in LEDGER_KEYS const | ℹ️ Info | Established store-lock-exempt pattern (keys as values in one multi-line const, no value on the line); store-lock scan green |
+| — | — | None: no TODO/FIXME/XXX/TBD/PLACEHOLDER/"Not implemented"/empty-return in the implementation files or docs | — | — |
+| `packages/mcp-server/src/rehearsal-env.ts` | LEDGER_KEYS const | GREPTIME_ key names as values in one multi-line const | ℹ️ Info | Established store-lock-exempt pattern; store-lock scan green |
+| — | — | No GREPTIME_ substring in parity-check.ts/rehearsal.ts; no agent_events SQL in any plan .ts | — | — |
 
-Prohibition spot-checks: no state-changing systemctl verb added to parity-check.ts; no process-group signals in rehearsal.ts (killVerifiedSpawn → killOwn only); builder still reads no /etc/substrate/substrate.env and forwards no LINEAR/NOTION/OTEL keys; no credential/token/lease/store values printed or committed by the harness.
+Prohibition spot-checks: no state-changing systemctl verb in parity-check.ts; no process-group signals in rehearsal.ts; builder still reads no /etc/substrate/substrate.env and forwards no LINEAR/NOTION/OTEL keys; no credential/token/lease/store values printed or committed by the harness.
 
-### Review-Dispositions (16-REVIEW-DISPOSITION.md, commit 50625c9)
+### Findings (pre-existing at HEAD, recorded not fixed per operator rules)
 
-8 warnings fixed (WR-01 healthy-twin gate, WR-02 swarm-operator + env-build containment, WR-03 missing-flag refusal, WR-04 disk-floor fail-closed, WR-05 run-dir hardening, WR-06 stoppability refusal, WR-07 ss dedup, WR-08 smoke isError), 4 info fixed (IN-03 smoke guard, IN-07 anonymous/operator conflict, IN-08 docs alignment, IN-09 rollback FAIL note), 4 info deferred with reasons (IN-01 CLI output-stream contract, IN-02 ls-remote env plumbing, IN-04 /proc parsing refactor, IN-05/IN-06 API/canon decisions). Open: 0. Each fix is covered by at least one new test; none regressed a must-have truth (all 23 re-verified above).
+**F-01 [phase-16 scope, host-path-dependent test assertion, behavior intact — NOT fixed]:** `scripts/rehearsal.test.ts` "CLI refusals > --port 7410 exits 2 without touching Docker" fails when the suite runs with cwd equal to `UNIT_WORKING_DIRECTORY` (`/root/src/repos/agent-substrate`). The spawned CLI derives `checkout = process.cwd()`, so `refuseCheckoutDir` fires before `refusePort`; stderr carries the production-checkout refusal instead of "reserved". The refused behavior itself holds: exit code is 2 (first assertion passes) and the checkout check precedes every Docker call, so Docker is untouched. Guard order is byte-identical to verify-time HEAD `50625c9` (checkout → docker-locality → node_modules → port), hence the Oct-08 green run executed from a worktree path, per the plan's own "all proof commands run in the worktree" prohibition. Re-running this suite from a worktree checkout with `node_modules` installed reaches the port guard and goes green. No guard reorder or assertion weakening applied: both would trade real refusal strength for message cosmetics, which is outside a verification resume.
+
+**F-02 [out of phase-16 scope — NOT fixed]:** `packages/cli/src/token.test.ts` "a directory at the token-file path means no token" fails on this host because the fallback `read(join(DEFAULT_TOKENS_DIR, "cursor"))` finds a real operator-provisioned `cursor` token in the host's default tokens dir, returning it instead of null. File is owned by Phase 20 (production identity), not Phase 16; no phase-16 truth depends on it. Recorded for the owning phase.
+
+**Environment note (fixed by setup, not code):** `bunx tsc --noEmit` initially reported 9 errors, all `Cannot find module '@substrate/ledger'` plus one implicit-any in `anchor.test.ts` — the phase-27 workspace link was absent from `node_modules` after the pull. `bun install --force` restored the links (tree stayed clean) and tsc exits 0. No source change.
 
 ### Human Verification Required
 
-None. The two live-evidence items (parity:check PASS, rh- 0 counts) remain operator-approved and recorded; the harness half was re-proven live by the verifier just now. No visual, UX, or real-time behavior needs human judgment.
+None. The three live-evidence items (parity:check PASS, rh- 0 counts, full twin boot) remain operator-approved and recorded; the harness refusal guards were re-proven live by the verifier just now. No visual, UX, or real-time behavior needs human judgment.
 
 ### Gaps Summary
 
-No gaps. All 23 must-haves verified against HEAD `50625c9` with test evidence (113 targeted pass, 1224/0 full suite, tsc clean), wiring evidence, a fresh verifier-run harness proof (`p16-verify`: up→smoke 4/4→down, no residue, production untouched), and intact operator-approved live evidence for the three production-touching truths. Review dispositions complete (12 fixed, 4 deferred with reasons, 0 open).
+No gaps. All 23 must-haves verified against HEAD `589a27c` with test evidence (90 targeted pass, 2645/2 full suite with both failures characterized above as pre-existing and non-regressive, tsc clean), wiring evidence, fresh verifier-run guard proofs (bare exit 2, port refusal exit 2, non-loopback smoke exit 2 pre-request, absent down exit 0, no residue, production untouched), and intact operator-approved live evidence for the production-touching truths. Post-verification evolutions (`b7655d8` operator-token export, pinned-release parity semantics and unit path, `fix(16)` hardening) are each covered by tests and docs.
 
 ---
 
-_Verified: 2026-10-08T22:04:03Z_
-_Verifier: Reverify16_
+_Verified: 2026-10-10T12:41:00Z_
+_Verifier: Phase16Verify_
+_HEAD: 589a27c_

@@ -1,10 +1,10 @@
 ---
 phase: 18-guard-rails-and-shared-redactor
-verified: 2026-10-09T10:58:00Z
+verified: 2026-10-10T12:42:15Z
 status: passed
 score: 21/21 must-haves verified
 covered_files: [".planning/phases/18-guard-rails-and-shared-redactor/18-01-PLAN.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-01-SUMMARY.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-02-PLAN.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-02-SUMMARY.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-03-PLAN.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-03-SUMMARY.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-04-PLAN.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-04-SUMMARY.md", "docs/greptime-ledger.md", "docs/memory-governance.md", "docs/observability.md", "docs/redaction.md", "packages/cli/src/lessons.ts", "packages/mcp-server/src/memory-classify.test.ts", "packages/mcp-server/src/redact-adversarial.test.ts", "packages/mcp-server/src/redact-contract.test.ts", "packages/mcp-server/src/redact-lock.test.ts", "packages/mcp-server/src/redact.test.ts", "packages/mcp-server/src/redact.ts", "packages/mcp-server/src/store-lock.test.ts"]
-covered_digest: "v3:sha256:0ad0726217efb7ad08c3c9d08eb8355bbd13e8f8eff5441f64ab7b96a40721e4"
+covered_digest: "v3:sha256:58122a1e20e74fd7b41160097bb7cee8884f50b45f7aa89ef8d67144e40ebba3"
 behavior_unverified: 0
 overrides_applied: 0
 re_verification:
@@ -177,3 +177,34 @@ Gates on the final head (`a92d798`, rebased onto `main` `b66c453`, which carries
 | mutations (marker pattern, the old pk-rk pattern, the old placeholder grammar, the merge-overlap branch; and four in the lock) | each caught by a named test |
 
 Known limit, recorded not fixed: `url-password` stays quadratic on text that repeats `://` with a long colon-led run and no `@`. It predates this phase; it is in `docs/redaction.md` and goes on the follow-up list.
+
+## Re-verification after staleness (2026-10-10)
+
+`verification.status` reported `stale`: covered source files changed after the verifier last ran (digest `0ad07262…`). Cause isolated to two doc files; no phase-18 code file changed:
+
+| Covered file | Changed by | Delta |
+|---|---|---|
+| `docs/greptime-ledger.md` | Phase 27 (`67cd428`, `event_ingest`/`anchors` sections) + Phase 28 (`589a27c`, anchor-job sections) | +237/-4, purely additive ledger sections |
+| `docs/memory-governance.md` | Phase 20 (`96db88c`) | 1 word (`one variable` → `one list-valued variable`) |
+| `redact.ts`, all redact tests, `redact-lock.test.ts`, `store-lock.test.ts`, `lessons.ts`, `docs/redaction.md`, `docs/observability.md`, all 8 plan/summary artifacts | — | byte-identical since verification |
+
+Doc-pointer regression check (truth 19): all three `redaction.md` pointers still present — `greptime-ledger.md:225` (line shifted from :157 by the additive sections, link intact), `memory-governance.md:135` (unchanged), `observability.md:121` (unchanged). The added ledger sections contain no credential shapes, token literals, or Railway hosts (store-lock green over docs).
+
+Gates on current HEAD (`dec0951`, pushed fast-forward to `origin/main` in this run, `git pull --ff-only` clean):
+
+| Gate | Result |
+|---|---|
+| `bunx tsc --noEmit` | exit 0, no errors |
+| `bun test` (full suite, 95 files) | 2645 pass / 58 skip / 2 fail |
+| Phase-18 files (`redact`, `redact-lock`, `redact-contract`, `memory-classify`, `store-lock`) | 243 pass / 1 skip / 0 fail |
+| `redact-adversarial.test.ts` + `lessons.test.ts` | 96 pass / 0 fail |
+| `bun run check:phase-close` | pass (4 lock files green; EVENT_KINDS 12 unchanged; SURFACES = baseline + `substrate`) |
+| Counter-exemption live proof (`redactValue({input_tokens: 1200, output_tokens: "340"})` survives; `{tokens: fixture}` → `[REDACTED]`) | PASS |
+| Anti-pattern grep over phase files | clean (only intentional placeholder-handling symbols) |
+
+Known failures, recorded not fixed (both reproduce; both outside phase-18 scope):
+
+- **F-01** — `scripts/rehearsal.test.ts` "CLI refusals > --port 7410 exits 2 without touching Docker" (cwd-sensitive refusal-order assertion, phase-16-scope).
+- **F-02** — `packages/cli/src/token.test.ts` "a directory at the token-file path means no token" (reads the real host Cursor token, owned by Phase 20).
+
+Verdict: 21/21 truths stand, no regressions, no new gaps. Fingerprint refreshed via `verification.fingerprint` (v3) over the same 20-file covered set.

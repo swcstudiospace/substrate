@@ -7,7 +7,7 @@
  * drops every key, and generation counters make a write visible without a scan.
  *
  * The client is Bun's `RedisClient` (Bun 1.4). It is constructed on the first
- * command, with a 150 ms connect timeout and the same budget on every command,
+ * command, with an 800 ms connect timeout and the same budget on every command,
  * no offline queue and no reconnect retries, so one request never waits on a
  * second attempt.
  */
@@ -84,9 +84,14 @@ export interface ReadThroughOptions {
 	record?: (sample: CacheSample) => void;
 }
 
-/** A request waits at most this long for one command, connect included. */
-export const COMMAND_TIMEOUT_MS = 150;
-export const CONNECT_TIMEOUT_MS = 150;
+/**
+ * A request waits at most this long for one command, connect included. The
+ * budget clears the tailnet hop to the Railway Dragonfly (measured 180-310 ms
+ * RTT) while keeping a single command well inside the 1.5 s brief budget the
+ * caller aborts at.
+ */
+export const COMMAND_TIMEOUT_MS = 800;
+export const CONNECT_TIMEOUT_MS = 800;
 const LOG_INTERVAL_MS = 60_000;
 
 /**
