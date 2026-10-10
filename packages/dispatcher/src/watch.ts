@@ -16,7 +16,7 @@
  * group: SIGTERM, a 5 s grace (assumption A4), then SIGKILL.
  */
 
-import { mkdirSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 /** Watch budget: both the poll window and the lease TTL (DISP-06). */
@@ -70,13 +70,20 @@ export interface GivenUpEntry {
 	at: string;
 }
 
-/** The whole set, keyed by Linear issue id. A missing file is an empty set. */
+/**
+ * The whole set, keyed by Linear issue id. A missing file is an empty set;
+ * any other read failure (corrupt JSON, permissions, I/O) throws, so a
+ * set that cannot be read fails loudly instead of silently relaunching.
+ */
 export function readGivenUp(dir: string): Record<string, GivenUpEntry> {
 	let raw: string;
 	try {
 		raw = readFileSync(givenUpPath(dir), "utf8");
-	} catch {
-		return {};
+	} catch (error) {
+		if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") {
+			return {};
+		}
+		throw error;
 	}
 	return JSON.parse(raw) as Record<string, GivenUpEntry>;
 }
@@ -87,13 +94,19 @@ export function isGivenUp(dir: string, issueId: string): boolean {
 	return readGivenUp(dir)[issueId] !== undefined;
 }
 
-/** Persist one give-up, mode 0600. Called before any comment or label edit. */
+/**
+ * Persist one give-up, mode 0600. Called before any comment or label edit.
+ * The write lands on a tmp file and renames over the set, so a crash
+ * mid-write never leaves a truncated `given-up.json` behind.
+ */
 export function markGivenUp(dir: string, issueId: string, outcome: GivenUpOutcome, at?: string): void {
 	mkdirSync(dir, { recursive: true });
 	const current = readGivenUp(dir);
 	current[issueId] = { outcome, at: at ?? new Date().toISOString() };
 	const path = givenUpPath(dir);
-	writeFileSync(path, `${JSON.stringify(current, null, 2)}\n`, { mode: 0o600 });
+	const tmp = `${path}.tmp.${process.pid}`;
+	writeFileSync(tmp, `${JSON.stringify(current, null, 2)}\n`, { mode: 0o600 });
+	renameSync(tmp, path);
 	chmodSync(path, 0o600);
 }
 
@@ -128,9 +141,13 @@ export interface WatchDeps {
 
 export type WatchResult = { status: "landed" } | { status: GivenUpOutcome };
 
+
 /**
  * Poll until landed, process exit, or the 900 s budget. A landed claim
  * wins over a simultaneous exit: the session claimed, then stopped.
+ * Signal delivery to an already-dead child is a no-op, and a child that
+ * exits during the SIGTERM grace is reported as `exited-unclaimed` — both
+ * paths still complete the give-up write before reporting.
  */
 export async function watchClaim(input: WatchInput, deps: WatchDeps): Promise<WatchResult> {
 	const now = deps.now ?? Date.now;
@@ -139,9 +156,22 @@ export async function watchClaim(input: WatchInput, deps: WatchDeps): Promise<Wa
 	for (;;) {
 		const at = now();
 		if (at >= deadline) {
-			deps.signal(input.childPid, "SIGTERM");
+			try {
+				deps.signal(input.childPid, "SIGTERM");
+			} catch {
+				// Already dead: the post-grace check below reports the exit.
+			}
 			await deps.sleep(SIGTERM_GRACE_MS);
-			deps.signal(input.childPid, "SIGKILL");
+			if (!deps.isAlive()) {
+				markGivenUp(input.givenUpDir, input.issueId, "exited-unclaimed");
+				await deps.onUnclaimed?.("exited-unclaimed");
+				return { status: "exited-unclaimed" };
+			}
+			try {
+				deps.signal(input.childPid, "SIGKILL");
+			} catch {
+				// Raced the exit after the aliveness check; the claim still timed out.
+			}
 			markGivenUp(input.givenUpDir, input.issueId, "claim-timeout");
 			await deps.onUnclaimed?.("claim-timeout");
 			return { status: "claim-timeout" };

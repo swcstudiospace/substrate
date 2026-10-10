@@ -5,7 +5,7 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -101,6 +101,20 @@ describe("given-up store", () => {
 		const dir = makeTmp();
 		writeFileSync(join(dir, GIVEN_UP_FILENAME), "{nope");
 		expect(() => isGivenUp(dir, "iss-1")).toThrow();
+	});
+
+	test("a non-ENOENT read failure throws instead of reading as empty", () => {
+		const dir = makeTmp();
+		mkdirSync(join(dir, GIVEN_UP_FILENAME));
+		expect(() => readGivenUp(dir)).toThrow();
+	});
+
+	test("writes land atomically: no tmp file survives beside the set", () => {
+		const dir = makeTmp();
+		markGivenUp(dir, "iss-1", "exited-unclaimed", new Date(NOW).toISOString());
+		markGivenUp(dir, "iss-2", "claim-timeout", new Date(NOW).toISOString());
+		expect(readdirSync(dir)).toEqual([GIVEN_UP_FILENAME]);
+		expect(readGivenUp(dir)["iss-2"]?.outcome).toBe("claim-timeout");
 	});
 });
 
@@ -208,6 +222,52 @@ describe("watchClaim", () => {
 		);
 		expect(result).toEqual({ status: "landed" });
 		expect(isGivenUp(dir, "iss-1")).toBe(false);
+	});
+
+	test("a child that exits during the SIGTERM grace is exited-unclaimed, file first", async () => {
+		const dir = makeTmp();
+		let now = NOW + WATCH_BUDGET_MS + 1;
+		const order: string[] = [];
+		const result = await watchClaim(
+			{ childPid: 333, sessionId: SESSION, issueId: "iss-grace", givenUpDir: dir },
+			{
+				getNode: () => node(),
+				isAlive: () => false,
+				signal: () => {},
+				sleep: async (ms) => void (now += ms),
+				now: () => now,
+				pollIntervalMs: 1,
+				onUnclaimed: (outcome) => {
+					order.push(isGivenUp(dir, "iss-grace") ? "file-first" : "comment-first");
+					order.push(outcome);
+				},
+			},
+		);
+		expect(result).toEqual({ status: "exited-unclaimed" });
+		expect(order).toEqual(["file-first", "exited-unclaimed"]);
+	});
+
+	test("signal delivery to an already-dead child still completes the give-up path", async () => {
+		const dir = makeTmp();
+		let now = NOW + WATCH_BUDGET_MS + 1;
+		const attempts: string[] = [];
+		const result = await watchClaim(
+			{ childPid: 444, sessionId: SESSION, issueId: "iss-dead", givenUpDir: dir },
+			{
+				getNode: () => node(),
+				isAlive: () => true,
+				signal: (_pid, signal) => {
+					attempts.push(signal);
+					throw new Error("kill ESRCH");
+				},
+				sleep: async (ms) => void (now += ms),
+				now: () => now,
+				pollIntervalMs: 1,
+			},
+		);
+		expect(result).toEqual({ status: "claim-timeout" });
+		expect(attempts).toEqual(["SIGTERM", "SIGKILL"]);
+		expect(isGivenUp(dir, "iss-dead")).toBe(true);
 	});
 
 	test("the budget constant matches the lease TTL it supervises", () => {
