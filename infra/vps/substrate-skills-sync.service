@@ -6,7 +6,7 @@ Wants=network-online.target
 # A missing code path skips the start instead of crash-looping (Phase 16 guard
 # convention). Paths are machine-specific; adjust when deploying elsewhere.
 ConditionPathExists=/root/.local/share/reflex/bun/bin/bun
-ConditionPathExists=/root/src/repos/agent-substrate/packages/projector/src/skills-sync.ts
+ConditionPathExists=/opt/agent-substrate/current/packages/projector/src/skills-sync.ts
 [Service]
 # One tick, started by substrate-skills-sync.timer (D-04): refuse a dirty tree, a branch other
 # than main or a diverged history with a warning event; otherwise fetch + merge --ff-only
@@ -19,7 +19,7 @@ EnvironmentFile=/etc/substrate/substrate.env
 # never in this repo.
 EnvironmentFile=/etc/substrate/substrate-skills-sync.env
 Environment=HOME=/root
-WorkingDirectory=/root/src/repos/agent-substrate
+WorkingDirectory=/opt/agent-substrate/current
 # Machine-specific: `command -v bun`. Adjust when deploying elsewhere.
 ExecStart=/root/.local/share/reflex/bun/bin/bun packages/projector/src/skills-sync.ts
 

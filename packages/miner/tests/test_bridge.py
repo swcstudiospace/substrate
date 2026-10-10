@@ -415,6 +415,20 @@ def test_resolve_bearer_follows_the_token_resolver_order(tmp_path, monkeypatch):
     assert resolve_bearer("no such surface!", env={"SUBSTRATE_TOKENS_DIR": str(tokens)}) is None
 
 
+def test_drain_client_resolves_the_queue_surface_bearer(env, tmp_path, monkeypatch):
+    (env["tokens"] / "omp").write_text("omp-bearer\n")
+    monkeypatch.delenv("SUBSTRATE_TOKEN", raising=False)
+    monkeypatch.delenv("SUBSTRATE_TOKEN_FILE", raising=False)
+    client = ProposeClient("http://substrate.test", surface="omp", tokens_dir=env["tokens"],
+                           transport=httpx.MockTransport(reply(200, OPENED)))
+    assert client.bearer() == "omp-bearer"
+    queue = tmp_path / "omp-queue"
+    queue.mkdir()
+    (queue / "s.json").write_text(json.dumps({"name": "s", "files": {"SKILL.md": "x"}, "rationale": "r", "surface": "omp"}))
+    result = drain_queue(queue, "omp", client, log_path=env["log"])
+    assert result.proposed == 1
+
+
 def test_run_once_waits_for_the_quiet_period(env):
     path = lib_patch(env, created_at=NOW - 30)
     client, seen = mock_client(env, reply(200, OPENED))

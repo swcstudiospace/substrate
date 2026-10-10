@@ -58,3 +58,61 @@ ported `packages/projector/omp/substrate-skills.ts`. Proof read: one Omp session
 proposes through the route (or queues a 0600 body that the bridge drains unchanged)
 with `learn` still landing its memory lesson. Rollback: restore the previous link
 target. NOT executed by the phase executor.
+
+## Library hygiene: the one-time dirty-tree cleanup
+
+The production checkout `/root/agent-skills` refuses every sync tick while it is dirty
+(research PITFALLS 12: untracked `__pycache__`). The sync never ignores dirt to go green —
+that would hide a real divergence — so the host is cleaned once, by the operator, and the
+ignore rule lands through the normal owner-reviewed agent-skills PR path, never a direct push.
+
+### OPERATOR-GATED: untracked-cache cleanup plus ignore rule
+
+1. Re-derive the removal list live with `git status --porcelain` in `/root/agent-skills`
+   (never a hardcoded list that could delete real work) and remove the untracked cache
+   files it names.
+2. Propose `__pycache__/` plus `*.pyc` in the library `.gitignore` through an
+   owner-reviewed agent-skills PR, so the refusal cannot recur.
+3. Proof read: one production sync tick prints `current` or `ff` with zero `refused`.
+   Rollback: restore the removed files from backup; revert the `.gitignore` PR before merge.
+   NOT executed by the phase executor.
+
+Phase 25 hook point: after each sync fast-forward, the RAGFlow `agent-skills` dataset
+refresh trigger runs (docs plane). This phase only documents the hook; Phase 25 owns it.
+
+## SKILL-07 live tail: the gated cutover sequence
+
+The rehearsal smoke (`bun run smoke:skills-sync`, 18 checks green in a detached worktree)
+proves the loop against the fixture library. The live tail replays exactly the rehearsed
+order against production. Every step below is OPERATOR-GATED: the executor stops, the
+operator approves and runs it, and the proof read lands in the phase report before the
+next step. No production restart, merge, PR or host write happens without that approval.
+
+### OPERATOR-GATED: real mined skill proposed as a production PR
+
+A real Cursor session mines a skill and stages it (or the Omp-route fallback when no
+Cursor session is available, September 04-12 shape). The production bridge proposes the
+real agent-skills PR. Proof read: the PR number and URL, branch `skill/<surface>/…`.
+Rollback: close the PR unmerged.
+
+### OPERATOR-GATED: owner merge plus first production tick
+
+The owner merges the PR. Within one sync tick (≤ 5 min) the skill appears as links in
+Claude Code and Grok Build with neither agent config changed. Proof read: one production
+sync tick prints `ff` and the two links resolve into `/root/agent-skills`. Rollback:
+revert the merge.
+
+### OPERATOR-GATED: production restarts and cron rebind
+
+Restart `substrate-skills-sync` and `substrate-skills-bridge` onto main's code, rebind
+the Hermes `substrate-skill-miner` cron entry, and retire the dormant:22 expected-401
+counts in the identity runbook. Proof read: timers tick `current`/`ff` with zero
+`refused`, hourly miner runs the new monitor with both write_approval flags true.
+Rollback: restart the previous release units; point the cron entry back.
+
+### OPERATOR-GATED: propose-key file deletion
+
+Delete `/var/lib/substrate/skills/propose.key` only after the cutover proof above.
+No code references it (verified: no `propose.key` string in `packages/miner/src`,
+`packages/projector`, or the miner prompt). Proof read: the file is gone and one
+bridge tick still proposes. Rollback: none needed — the file is unread by everything.

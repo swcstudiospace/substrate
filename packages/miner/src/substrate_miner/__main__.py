@@ -15,10 +15,14 @@ from datetime import datetime, timezone
 def _bridge() -> int:
     from . import bridge
 
-    with bridge.ProposeClient() as client:
-        tick = bridge.run_once(client)
-        omp = bridge.drain_queue(bridge.OMP_QUEUE, "omp", client)
-        grok = bridge.drain_queue(bridge.GROK_QUEUE, "grok-build", client)
+    with bridge.ProposeClient() as hermes_client:
+        tick = bridge.run_once(hermes_client)
+    # Drains post queued bodies unchanged, so each drain authenticates as the
+    # body's surface: the route refuses a mismatched body surface with 403.
+    with bridge.ProposeClient(surface="omp") as omp_client:
+        omp = bridge.drain_queue(bridge.OMP_QUEUE, "omp", omp_client)
+    with bridge.ProposeClient(surface="grok-build") as grok_client:
+        grok = bridge.drain_queue(bridge.GROK_QUEUE, "grok-build", grok_client)
     ok = tick.ok and omp.ok and grok.ok
     print(
         f"[skills-bridge] proposed={tick.proposed} rejected={tick.rejected} held={tick.held} "

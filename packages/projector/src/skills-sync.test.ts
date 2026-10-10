@@ -145,14 +145,16 @@ describe("runSync executor", () => {
 
 describe("childEnv allowlist", () => {
 	test("a git child receives exactly the four allowlisted entries", () => {
+		// Store and token names stay out of this fixture: the store-lock and
+		// no-secrets suites forbid them in tracked .ts files, and the plan's
+		// grep gate pins their absence in skills-sync.ts itself.
 		const env = childEnv({
 			PATH: "/usr/bin:/bin",
 			HOME: "/home/op",
 			SUBSTRATE_TOKEN: "secret",
 			SUBSTRATE_URL: "http://store:7410",
-			GREPTIME_URL: "http://store:8428",
-			HINDSIGHT_URL: "http://store:8080",
-			RAGFLOW_API_KEY: "secret",
+			UNRELATED_STORE_URL: "http://store:8428",
+			ANOTHER_SECRET: "secret",
 		});
 		expect(Object.keys(env).sort()).toEqual(["GH_PROMPT_DISABLED", "GIT_TERMINAL_PROMPT", "HOME", "PATH"]);
 		expect(env).toEqual({ PATH: "/usr/bin:/bin", HOME: "/home/op", GIT_TERMINAL_PROMPT: "0", GH_PROMPT_DISABLED: "1" });
