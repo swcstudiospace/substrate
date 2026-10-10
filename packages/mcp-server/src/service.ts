@@ -62,6 +62,7 @@ import { recallMemories, UNTRUSTED_MEMORY_NOTICE, type RecallReply } from "./mem
 import { forwardRetain, retainDocumentId } from "./memory-retain.ts";
 import { mergeDerivedHits, type MergedMemoryResults } from "./memory-search.ts";
 import { governMemoryWrite } from "./memory-write.ts";
+import { isTeachable, teachableEvent } from "./teachable.ts";
 import { bankForSurface, hindsightBanksFromEnv, hindsightFromEnv } from "./planes/hindsight.ts";
 import type { FetchLike } from "./planes/ragflow.ts";
 import { redact, type SkillDocExampleRule } from "./redact.ts";
@@ -1067,6 +1068,21 @@ export class Substrate {
 		}
 
 		await this.auditMemoryWrite(request, result);
+		// The teachable trail (D29-02): an accepted + verified teachable fact emits
+		// one `note` shaped like the mapped `teachable.accepted` sample, so the
+		// hourly anchor covers it with zero anchor-code changes. Awaited with a
+		// caught failure, the `auditMemoryWrite` precedent: a failed trail write
+		// never fails the memory write. Refused, quarantined, and conflicting
+		// writes emit no teachable event — only the existing audit trail.
+		if (
+			result.outcome === "accepted" &&
+			result.verified_persisted &&
+			result.entry &&
+			isTeachable(result.entry.kind, result.entry.subject) &&
+			(SURFACES as readonly string[]).includes(result.writer)
+		) {
+			await this.emit(teachableEvent(result.writer as Surface, request, result)).catch(() => undefined);
+		}
 		if (result.outcome === "accepted" || commitUncertain) await this.cache.bump(MEMORY_GENERATION_KEY);
 		// The Hindsight forward runs after the accepted reply is decided and never
 		// blocks it: Postgres stays the governed store (D26-04). A refusal or plane
