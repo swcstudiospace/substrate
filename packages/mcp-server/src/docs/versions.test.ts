@@ -468,4 +468,33 @@ describe("finalize", () => {
 		const manifest = await loadManifest("test-docs", { stateDir });
 		expect([...currentDocumentIds(manifest)].sort()).toEqual([...restored.documentIds].sort());
 	});
+
+	test("an in-flight page from another run survives a cut that does not cover it", async () => {
+		await ingest("docs/first.md", 1, "# First\n\nOne.\n");
+		const second = await ingest("docs/second.md", 1, "# Second\n\nTwo.\n");
+		for (const id of second.documentIds) fake.setRun(id, "UNSTART");
+		const cut = await finalize(
+			{ dataset: "test-docs", commit: commit(1), pathsPresent: ["docs/first.md"], ...writer() },
+			{ registry: REGISTRY, client: fake, stateDir },
+		);
+		expect(cut.status).toBe("version-cut");
+		if (cut.status !== "version-cut") throw new Error("unreachable");
+		expect(cut.paths).toEqual(["docs/first.md"]);
+		expect(cut.deletedDocumentIds).toEqual([]);
+		for (const id of second.documentIds) expect(fake.docs.has(id)).toBe(true);
+		const manifest = await loadManifest("test-docs", { stateDir });
+		expect(manifest.paths["docs/second.md"]?.documentIds.sort()).toEqual([...second.documentIds].sort());
+
+		// Once the parse lands, a cut that still omits the page prunes it.
+		for (const id of second.documentIds) fake.setRun(id, "DONE");
+		const pruned = await finalize(
+			{ dataset: "test-docs", commit: commit(2), pathsPresent: ["docs/first.md"], ...writer() },
+			{ registry: REGISTRY, client: fake, stateDir },
+		);
+		expect(pruned.status).toBe("version-cut");
+		if (pruned.status !== "version-cut") throw new Error("unreachable");
+		expect(pruned.deletedDocumentIds.sort()).toEqual([...second.documentIds].sort());
+		const after = await loadManifest("test-docs", { stateDir });
+		expect(after.paths["docs/second.md"]).toBeUndefined();
+	});
 });

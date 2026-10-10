@@ -17,8 +17,10 @@
  * otherwise. `pages` carries the run's own ingest snapshot, so an overlapping
  * run cannot cross-record commits; paths without a snapshot read the latest
  * manifest entry (unchanged-page reuse). Pruning also drops path entries no
- * live version references, so a restored page re-uploads instead of reusing
- * deleted ids. Any failure leaves the previous version current — the manifest
+ * live version references — except entries with documents still parsing from
+ * another run, whose in-flight work survives the cut — so a restored page
+ * re-uploads instead of reusing deleted ids. Any failure leaves the previous
+ * version current — the manifest
  * is written once, after every RAGFlow call succeeds. `finalize` is
  * attributed as `docs_ingest` under the same writer rule as ingestPage.
  */
@@ -166,9 +168,28 @@ export async function finalize(input: FinalizeInput, deps: FinalizeDeps): Promis
 					cutAt: new Date().toISOString(),
 				},
 			].slice(-KEEP_VERSIONS);
-			const live = new Set(versions.flatMap((version) => version.documentIds));
-			const stale = listed.map((doc) => doc.id).filter((id) => !live.has(id));
-			if (stale.length > 0) await deps.client.deleteDocuments(datasetId, stale);
+		const live = new Set(versions.flatMap((version) => version.documentIds));
+		// In-flight protection: the dataset lock covers one ingestPage or one
+		// finalize, not a whole refresh, so another run may have uploaded a
+		// page (manifest.paths updated, documents still parsing) that this
+		// cut does not cover. A manifest path entry this finalize does not
+		// itself replace via an input.pages snapshot, whose documents are not
+		// all DONE, keeps its path entry and its document ids survive the
+		// prune below. Snapshot-replaced documents, and DONE documents that
+		// no retained version and no surviving path entry reference, still
+		// prune as before — absent DONE pages still leave the cut.
+		const protectedIds = new Set<string>();
+		const protectedPaths = new Set<string>();
+		for (const [path, entry] of Object.entries(manifest.paths)) {
+			if (snapshots[path] !== undefined) continue;
+			if (entry.documentIds.length === 0) continue;
+			const allDone = entry.documentIds.every((id) => runById.get(id) === "DONE");
+			if (allDone) continue;
+			protectedPaths.add(path);
+			for (const id of entry.documentIds) protectedIds.add(id);
+		}
+		const stale = listed.map((doc) => doc.id).filter((id) => !live.has(id) && !protectedIds.has(id));
+		if (stale.length > 0) await deps.client.deleteDocuments(datasetId, stale);
 			// This run's own snapshot wins for paths it covers: the just-cut
 			// version resolves through `manifest.paths`, so the entry must hold
 			// this run's documents — not an overlapping run's newer entry, which
@@ -190,7 +211,7 @@ export async function finalize(input: FinalizeInput, deps: FinalizeDeps): Promis
 			// than reuse deleted ids (which would fail the cut above forever).
 			const livePaths = new Set(versions.flatMap((version) => version.paths));
 			for (const path of Object.keys(nextPaths)) {
-				if (!livePaths.has(path)) delete nextPaths[path];
+				if (!livePaths.has(path) && !protectedPaths.has(path)) delete nextPaths[path];
 			}
 			const next: DocsManifest = { ...manifest, current: input.commit, versions, paths: nextPaths };
 			await saveManifest(input.dataset, next, { stateDir: deps.stateDir, env: deps.env });
