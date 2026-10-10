@@ -776,6 +776,39 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 	);
 
 	server.registerTool(
+		"docs_ingest",
+		{
+			title: "Ingest pages into a docs dataset",
+			description:
+				"Publish pages into a substrate docs dataset (agent-substrate, programming-desk, agent-skills) " +
+				"through RAGFlow. Fail-closed: a redactor finding, a missing source URL, an out-of-roots path, " +
+				"an over-cap page, an unauthenticated caller or a VM guest is refused and nothing is uploaded. " +
+				"Needs an authenticated surface. Unchanged content hashes answer `unchanged`, changed ones are " +
+				"replaced. `dataset` names a configured dataset; raw ids are never accepted.",
+			inputSchema: {
+				dataset: z.string().describe("Dataset name to ingest into."),
+				commit: z.string().optional(),
+				pages: z
+					.array(
+						z.object({
+							path: z.string(),
+							source_url: z.string().optional(),
+							body: z.string(),
+							heading_path: z.string().optional(),
+						}),
+					)
+					.describe("Pages to ingest, each with a repo-rooted path and body."),
+				session_id: z.string().optional(),
+			},
+			annotations: { destructiveHint: false, openWorldHint: true },
+		},
+		async ({ dataset, commit, pages, session_id }) => {
+			const outcome = await substrate.ingestDocs({ dataset, commit, pages, session_id }, callerSurface);
+			return outcome.ok ? json(outcome) : { ...json(outcome), isError: true };
+		},
+	);
+
+	server.registerTool(
 		"coord_handoff",
 		{
 			title: "Hand work to another agent",

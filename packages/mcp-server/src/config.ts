@@ -5,6 +5,7 @@
  * EnvironmentFile. Nothing here ever reads a secret from the repo.
  */
 import { SOLANA_CLI_DEFAULT } from "@substrate/ledger";
+import { DEFAULT_INGEST_ROOTS } from "./docs-ingest.ts";
 import { normalizeTtlSeconds } from "./lease.ts";
 import { LINEAR_API_URL } from "./linear.ts";
 import { parseGrants, type MemoryGrant } from "./memory-policy.ts";
@@ -71,6 +72,22 @@ export interface SubstrateConfig {
 	 * docs_search degraded rather than broken.
 	 */
 	ragflow: RagflowConfig | null;
+	/**
+	 * Path prefixes a docs_ingest page may come from (D25-05).
+	 *
+	 * From `SUBSTRATE_DOCS_INGEST_ROOTS` (comma-separated) or the dataset
+	 * sources in `docs/data-planes.md` when unset. A page outside these
+	 * roots is refused before anything is read from RAGFlow.
+	 */
+	docsIngestRoots: readonly string[];
+	/**
+	 * True when this instance runs inside a VM guest (D25-05).
+	 *
+	 * From `SUBSTRATE_VM_GUEST=1`. A guest instance refuses every
+	 * docs_ingest before any network call, so guest bytes can never be
+	 * published to a shared dataset.
+	 */
+	vmGuest: boolean;
 	/** bearer token → surface. Lets every event be attributed to a caller. */
 	tokens: Map<string, Surface>;
 	/**
@@ -384,6 +401,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		.map((name) => name.trim())
 		.filter((name) => name.length > 0);
 	const desktopDirRaw = env.SUBSTRATE_DESKTOP_DIR?.trim() || "";
+	const ingestRoots = (env.SUBSTRATE_DOCS_INGEST_ROOTS ?? "")
+		.split(",")
+		.map((root) => root.trim())
+		.filter((root) => root.length > 0);
 	return {
 		...readHandoffKeys(env),
 		leaseTtlSeconds: normalizeTtlSeconds(Number.isFinite(leaseTtl) ? leaseTtl : undefined),
@@ -407,6 +428,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		linearApiUrl: (env.LINEAR_API_URL?.trim() || LINEAR_API_URL).replace(/\/+$/, ""),
 		notionApiUrl: (env.NOTION_API_URL?.trim() || NOTION_API_URL).replace(/\/+$/, ""),
 		ragflow: ragflowFromEnv(env),
+		docsIngestRoots: ingestRoots.length > 0 ? ingestRoots : [...DEFAULT_INGEST_ROOTS],
+		vmGuest: (env.SUBSTRATE_VM_GUEST?.trim() ?? "") === "1",
 		tokens,
 		allowAnonymous: allowAnonymousFrom(env, tokens.size),
 		operatorTokens: new Set(

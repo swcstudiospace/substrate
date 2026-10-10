@@ -360,6 +360,8 @@ describe("auditToolCalls", () => {
 		expect(toolLabel("desktop_run")).toBe("desktop_run");
 		expect(toolLabel("graph_find")).toBe("graph_find");
 		expect(toolLabel("issue_get")).toBe("issue_get");
+		expect(toolLabel("docs_search")).toBe("docs_search");
+		expect(toolLabel("docs_ingest")).toBe("docs_ingest");
 		expect(toolLabel("events")).toBe("events");
 		expect(toolLabel("../../etc/passwd")).toBe("unrecognized");
 	});

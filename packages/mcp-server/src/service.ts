@@ -22,6 +22,7 @@ import {
 } from "./cache.ts";
 import { isReviewToken, type SubstrateConfig } from "./config.ts";
 import { DesktopBusy, type DesktopDriver, type DesktopLogEntry, type DesktopRunResult } from "./desktop/driver.ts";
+import { ingestDocs, type IngestOutcome, type IngestRecord } from "./docs-ingest.ts";
 import { DEFAULT_SEARCH_DATASET_NAMES, searchDocs, type SearchReply } from "./docs-search.ts";
 import {
 	DEFAULT_IDLE_SECONDS,
@@ -685,6 +686,8 @@ export class Substrate {
 	private readonly dodGateTest: { fetchImpl?: typeof fetch; hermesLinearUrl?: string; timeoutMs?: number };
 	/** RAGFlow fetch override for tests; production uses the global fetch. */
 	private readonly ragflowFetch: FetchLike;
+	/** Source-URL ingest records for hash idempotency, held for the process lifetime. */
+	private docsIngestSeen = new Map<string, IngestRecord>();
 	/** `graphId/nodeId` → tail of that node's gated-completion chain. */
 	private readonly completionChains = new Map<string, Promise<void>>();
 
@@ -2169,6 +2172,48 @@ export class Substrate {
 				fetchImpl: this.ragflowFetch,
 			},
 			question,
+		);
+	}
+
+	/**
+	 * DOCS-02: ingest pages into a docs dataset through the substrate (D25-05).
+	 *
+	 * Fail-closed: an unauthenticated or guest caller, an unconfigured plane,
+	 * a redactor finding, a missing source URL, an out-of-roots path or an
+	 * over-cap page is refused with a locator-only warning event — nothing is
+	 * uploaded. `dataset` names a configured dataset; raw ids are never
+	 * accepted.
+	 */
+	async ingestDocs(
+		input: { dataset?: unknown; commit?: unknown; pages?: unknown; session_id?: unknown },
+		callerSurface: Surface | null,
+	): Promise<IngestOutcome> {
+		const sessionId = typeof input.session_id === "string" && input.session_id.length > 0 ? input.session_id : undefined;
+		const pages = Array.isArray(input.pages) ? input.pages : [];
+		return ingestDocs(
+			{
+				config: this.config.ragflow,
+				roots: this.config.docsIngestRoots,
+				vmGuest: this.config.vmGuest,
+				seen: this.docsIngestSeen,
+				emit: (event) => this.emit(event),
+				surface: callerSurface,
+				...(sessionId !== undefined ? { sessionId } : {}),
+				fetchImpl: this.ragflowFetch,
+			},
+			{
+				dataset: typeof input.dataset === "string" ? input.dataset : "",
+				...(typeof input.commit === "string" ? { commit: input.commit } : {}),
+				pages: pages
+					.filter((page): page is Record<string, unknown> => page !== null && typeof page === "object" && !Array.isArray(page))
+					.map((page) => ({
+						path: typeof page.path === "string" ? page.path : "",
+						...("source_url" in page && typeof page.source_url === "string" ? { source_url: page.source_url } : {}),
+						body: typeof page.body === "string" ? page.body : "",
+						...("heading_path" in page && typeof page.heading_path === "string" ? { heading_path: page.heading_path } : {}),
+					})),
+				...(sessionId !== undefined ? { session_id: sessionId } : {}),
+			},
 		);
 	}
 

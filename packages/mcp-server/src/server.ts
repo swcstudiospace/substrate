@@ -215,6 +215,8 @@ export class BodyTooLargeError extends Error {
 
 /** Why an anonymous proposal is refused, even on a run that allows anonymous callers. */
 const PROPOSAL_NEEDS_SURFACE = "skills_propose needs an authenticated surface; nothing was proposed";
+/** Why an anonymous ingest is refused, even on a run that allows anonymous callers. */
+const INGEST_NEEDS_SURFACE = "docs_ingest needs an authenticated surface; nothing was ingested";
 
 /**
  * The status `/healthz` answers with.
@@ -763,6 +765,60 @@ export function createHttpServer(
 				};
 				if (!(await auditedRest(res, observability, surface, "docs_search", fields))) return;
 				sendJson(res, 200, await substrate.searchDocs(fields, surface));
+				return;
+			}
+
+			// A publication path other agents read from, so an anonymous caller is
+			// refused before the body is read, even on a run that otherwise allows
+			// untokened callers. Audited fail-closed under the tool's own name.
+			if (req.method === "POST" && url.pathname === "/docs/ingest") {
+				if (surface === null) {
+					sendJson(res, 401, { error: INGEST_NEEDS_SURFACE });
+					return;
+				}
+				const parsed: unknown = JSON.parse(await readBody(req));
+				if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+					sendJson(res, 400, { error: "request body must be a JSON object" });
+					return;
+				}
+				if (!("dataset" in parsed) || typeof parsed.dataset !== "string") {
+					sendJson(res, 400, { error: "dataset is required" });
+					return;
+				}
+				const commit = "commit" in parsed ? parsed.commit : undefined;
+				const pages = "pages" in parsed ? parsed.pages : undefined;
+				const ingestSession = "session_id" in parsed ? parsed.session_id : undefined;
+				const pagesValid =
+					Array.isArray(pages) &&
+					pages.every(
+						(page) =>
+							page !== null &&
+							typeof page === "object" &&
+							!Array.isArray(page) &&
+							"path" in page &&
+							typeof page.path === "string" &&
+							"body" in page &&
+							typeof page.body === "string" &&
+							(!("source_url" in page) || typeof page.source_url === "string") &&
+							(!("heading_path" in page) || typeof page.heading_path === "string"),
+					);
+				if (!pagesValid || (commit !== undefined && typeof commit !== "string") || (ingestSession !== undefined && typeof ingestSession !== "string")) {
+					sendJson(res, 400, { error: "pages must carry string path and body; commit and session_id must be strings" });
+					return;
+				}
+				const ingestFields: Record<string, unknown> = {
+					dataset: parsed.dataset,
+					pages,
+					...(commit !== undefined ? { commit } : {}),
+					...(ingestSession !== undefined ? { session_id: ingestSession } : {}),
+				};
+				if (!(await auditedRest(res, observability, surface, "docs_ingest", ingestFields))) return;
+				const outcome = await substrate.ingestDocs(ingestFields, surface);
+				if (!outcome.ok) {
+					sendJson(res, outcome.reason === "vm-guest" ? 403 : 400, outcome);
+					return;
+				}
+				sendJson(res, 200, outcome);
 				return;
 			}
 
