@@ -217,9 +217,9 @@ describe("ReadThroughCache", () => {
 		expect(cache.health()).toMatchObject({ connected: true, mode: "on" });
 	});
 
-	test("a command that does not return is a bypass, and the budgets stay within 150 ms", async () => {
-		expect(COMMAND_TIMEOUT_MS).toBeLessThanOrEqual(150);
-		expect(CONNECT_TIMEOUT_MS).toBeLessThanOrEqual(150);
+	test("a command that does not return is a bypass, and the budgets stay within 800 ms", async () => {
+		expect(COMMAND_TIMEOUT_MS).toBeLessThanOrEqual(800);
+		expect(CONNECT_TIMEOUT_MS).toBeLessThanOrEqual(800);
 
 		const redis = new FakeRedis();
 		redis.hang = true;

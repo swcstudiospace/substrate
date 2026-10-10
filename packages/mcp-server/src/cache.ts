@@ -84,9 +84,14 @@ export interface ReadThroughOptions {
 	record?: (sample: CacheSample) => void;
 }
 
-/** A request waits at most this long for one command, connect included. */
-export const COMMAND_TIMEOUT_MS = 150;
-export const CONNECT_TIMEOUT_MS = 150;
+/**
+ * A request waits at most this long for one command, connect included. The
+ * budget clears the tailnet hop to the Railway Dragonfly (measured 180-310 ms
+ * RTT) while keeping a single command well inside the 1.5 s brief budget the
+ * caller aborts at.
+ */
+export const COMMAND_TIMEOUT_MS = 800;
+export const CONNECT_TIMEOUT_MS = 800;
 const LOG_INTERVAL_MS = 60_000;
 
 /**
