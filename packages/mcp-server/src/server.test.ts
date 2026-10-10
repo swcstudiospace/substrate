@@ -3,6 +3,8 @@ import { loadConfig } from "./config.ts";
 import type { EventQuery } from "./greptime.ts";
 import { memoryToolWriter } from "./mcp.ts";
 import { createObservability } from "./observe.ts";
+import type { FetchLike } from "./planes/ragflow.ts";
+import { RagflowFake } from "./ragflow-fake.ts";
 import { createHttpServer, healthStatus, memoryWriteStatus, memoryWriter } from "./server.ts";
 import { Substrate } from "./service.ts";
 import type { SubstrateEvent } from "./types.ts";
@@ -78,14 +80,18 @@ describe("routes", () => {
 	 * store through the substrate, and only `/healthz` asks the config whether a ledger
 	 * was configured at all.
 	 */
-	async function serve(greptime: unknown, env: Record<string, string | undefined> = {}) {
+	async function serve(
+		greptime: unknown,
+		env: Record<string, string | undefined> = {},
+		stores: { ragflowFetch?: FetchLike } = {},
+	) {
 		const config = loadConfig(env);
 		// No SUBSTRATE_AUDIT_PATH in the env, so the audit chain stays in memory and the
 		// exporter is off: these routes are audited, and a test that skipped the plane
 		// entirely would not be running the code the server actually runs.
 		const observability = createObservability(config, env);
 		await observability.start();
-		const substrate = new Substrate(config, { index: null, greptime: greptime as never }, observability.observer);
+		const substrate = new Substrate(config, { index: null, greptime: greptime as never, ...stores }, observability.observer);
 		const server = createHttpServer(substrate, config, observability);
 		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 		const address = server.address();
@@ -214,6 +220,125 @@ describe("routes", () => {
 		try {
 			expect((await post("/events/query", {})).status).toBe(401);
 			expect((await post("/events/query", {}, { authorization: "Bearer tok-omp" })).status).toBe(200);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("POST /docs/search answers cited results against the fake", async () => {
+		const { greptime } = ledger();
+		const fake = new RagflowFake();
+		const { post, stop } = await serve(
+			greptime,
+			{ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
+			{ ragflowFetch: fake.fetch },
+		);
+		try {
+			const response = await post("/docs/search", { question: "who reads RAGFlow?" });
+			const body: unknown = await response.json();
+			const chunks = body !== null && typeof body === "object" && "chunks" in body ? body.chunks : null;
+			const untrusted = body !== null && typeof body === "object" && "untrusted" in body ? body.untrusted : null;
+			expect(response.status).toBe(200);
+			expect(Array.isArray(chunks) && chunks.length > 0).toBe(true);
+			expect(typeof untrusted).toBe("string");
+		} finally {
+			await stop();
+		}
+	});
+
+	test("POST /docs/search refuses a body without a question", async () => {
+		const { greptime } = ledger();
+		const { post, stop } = await serve(greptime);
+		try {
+			const response = await post("/docs/search", { datasets: ["agent-substrate"] });
+			expect(response.status).toBe(400);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("POST /docs/ingest stores a page against the fake", async () => {
+		const { greptime } = ledger();
+		const fake = new RagflowFake();
+		const { post, stop } = await serve(
+			greptime,
+			{ SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
+			{ ragflowFetch: fake.fetch },
+		);
+		try {
+			const response = await post(
+				"/docs/ingest",
+				{
+					dataset: "agent-substrate",
+					pages: [{ path: "docs/data-planes.md", source_url: "https://example.com/planes", body: "The substrate is the only door." }],
+				},
+				{ authorization: "Bearer tok-omp" },
+			);
+			const body: unknown = await response.json();
+			const results = body !== null && typeof body === "object" && "results" in body ? body.results : null;
+			expect(response.status).toBe(200);
+			expect(Array.isArray(results) && results.length === 1).toBe(true);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("POST /docs/ingest refuses an anonymous caller before reading the body", async () => {
+		const { greptime } = ledger();
+		const { post, stop } = await serve(greptime, { SUBSTRATE_TOKEN_OMP: "tok-omp" });
+		try {
+			const response = await post("/docs/ingest", { dataset: "agent-substrate", pages: [] });
+			expect(response.status).toBe(401);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("POST /docs/ingest refuses a body without pages", async () => {
+		const { greptime } = ledger();
+		const { post, stop } = await serve(greptime, { SUBSTRATE_TOKEN_OMP: "tok-omp" });
+		try {
+			const response = await post("/docs/ingest", { dataset: "agent-substrate" }, { authorization: "Bearer tok-omp" });
+			expect(response.status).toBe(400);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("POST /docs/ingest refuses an out-of-roots real path", async () => {
+		const { greptime } = ledger();
+		const fake = new RagflowFake();
+		const { post, stop } = await serve(
+			greptime,
+			{ SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
+			{ ragflowFetch: fake.fetch },
+		);
+		try {
+			const response = await post(
+				"/docs/ingest",
+				{
+					dataset: "agent-substrate",
+					pages: [{ path: "docs/planes.md", real_path: "../vault.md", source_url: "https://example.com/x", body: "Hi." }],
+				},
+				{ authorization: "Bearer tok-omp" },
+			);
+			expect(response.status).toBe(400);
+			expect(fake.uploads).toHaveLength(0);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("POST /docs/ingest answers 413 past the route body cap", async () => {
+		const { greptime } = ledger();
+		const { post, stop } = await serve(greptime, { SUBSTRATE_TOKEN_OMP: "tok-omp" });
+		try {
+			const response = await post(
+				"/docs/ingest",
+				{ dataset: "agent-substrate", pages: [{ path: "docs/big.md", body: `x${"y".repeat(6_500_000)}` }] },
+				{ authorization: "Bearer tok-omp" },
+			);
+			expect(response.status).toBe(413);
 		} finally {
 			await stop();
 		}

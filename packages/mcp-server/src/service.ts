@@ -22,6 +22,8 @@ import {
 } from "./cache.ts";
 import { isReviewToken, type SubstrateConfig } from "./config.ts";
 import { DesktopBusy, type DesktopDriver, type DesktopLogEntry, type DesktopRunResult } from "./desktop/driver.ts";
+import { ingestDocs, loadIngestRecords, saveIngestRecords, type IngestOutcome, type IngestRecord, type PageSettlement } from "./docs-ingest.ts";
+import { DEFAULT_SEARCH_DATASET_NAMES, searchDocs, type SearchReply } from "./docs-search.ts";
 import {
 	DEFAULT_IDLE_SECONDS,
 	analyzeDrift,
@@ -57,6 +59,7 @@ import { createMirror, type Mirror, type MirrorContext, type MirrorFailure, type
 import { runDodGate, type DodEvidence } from "./dod-gate.ts";
 import { normalizeSubject } from "./memory-policy.ts";
 import { governMemoryWrite } from "./memory-write.ts";
+import type { FetchLike } from "./planes/ragflow.ts";
 import { redact, type SkillDocExampleRule } from "./redact.ts";
 import {
 	createExecFileRunner,
@@ -681,6 +684,16 @@ export class Substrate {
 	private readonly cache: ReadThroughCache;
 	/** Connector-gate overrides for tests (connector fetch, URL, timeout); production reads config. */
 	private readonly dodGateTest: { fetchImpl?: typeof fetch; hermesLinearUrl?: string; timeoutMs?: number };
+	/** RAGFlow fetch override for tests; production uses the global fetch. */
+	private readonly ragflowFetch: FetchLike;
+	/** Source-URL ingest records for hash idempotency, held for the process lifetime. */
+	private docsIngestSeen = new Map<string, IngestRecord>();
+	/** In-flight page uploads by record key, tagged with the uploading sha. */
+	private docsIngestFlight = new Map<string, { task: Promise<PageSettlement>; sha: string }>();
+	/** Ingest-record hydration from the state file; awaited once per process. */
+	private docsSeenReady: Promise<void> | null = null;
+	/** Serialized state-file saves, so overlapping ingests cannot interleave snapshots. */
+	private docsSaveChain: Promise<void> = Promise.resolve();
 	/** `graphId/nodeId` → tail of that node's gated-completion chain. */
 	private readonly completionChains = new Map<string, Promise<void>>();
 
@@ -694,6 +707,7 @@ export class Substrate {
 			mirror?: Mirror | null;
 			dodGate?: { fetchImpl?: typeof fetch; hermesLinearUrl?: string; timeoutMs?: number };
 			cache?: ReadThroughCache;
+			ragflowFetch?: FetchLike;
 			desktop?: DesktopDriver | null;
 		},
 		observer: SubstrateObserver = {},
@@ -717,6 +731,7 @@ export class Substrate {
 			});
 		this.desktop = stores?.desktop ?? null;
 		this.dodGateTest = stores?.dodGate ?? {};
+		this.ragflowFetch = stores?.ragflowFetch ?? fetch;
 		this.observer = observer;
 		this.cache =
 			stores?.cache ??
@@ -2133,6 +2148,125 @@ export class Substrate {
 			node: { ...node, lease_id: null },
 			lease: leaseView(leaseSnapshot(match)),
 		};
+	}
+
+	/**
+	 * DOCS-01: search the docs datasets through the substrate (D25-01).
+	 *
+	 * Read-only and fail-open: an unconfigured plane, an unreachable RAGFlow
+	 * or an unknown dataset scope yields `{chunks: [], degraded: true, reason}`
+	 * with a warning event, never a throw. `datasets` names configured
+	 * datasets; unknown names are ignored and raw ids are never accepted.
+	 */
+	async searchDocs(
+		input: { question?: unknown; datasets?: unknown; session_id?: unknown },
+		callerSurface: Surface | null,
+	): Promise<SearchReply> {
+		const surface = callerSurface ?? "claude-code";
+		const sessionId = typeof input.session_id === "string" && input.session_id.length > 0 ? input.session_id : undefined;
+		const question = typeof input.question === "string" ? input.question : "";
+		const names = Array.isArray(input.datasets)
+			? input.datasets.filter((name): name is string => typeof name === "string").filter((name) => DEFAULT_SEARCH_DATASET_NAMES.includes(name))
+			: [...DEFAULT_SEARCH_DATASET_NAMES];
+		return searchDocs(
+			{
+				config: this.config.ragflow,
+				datasetNames: names,
+				emit: (event) => this.emit(event),
+				surface,
+				...(sessionId !== undefined ? { sessionId } : {}),
+				fetchImpl: this.ragflowFetch,
+			},
+			question,
+		);
+	}
+
+	/**
+	 * Hydrate ingest records from the state file, once per process.
+	 *
+	 * A missing file simply means an empty map; a corrupt one is reported
+	 * on stderr and likewise starts empty. Either way ingest proceeds —
+	 * losing dedup degrades to a duplicate upload, never to a refusal.
+	 */
+	private hydrateDocsSeen(): Promise<void> {
+		if (!this.docsSeenReady) {
+			this.docsSeenReady = (async () => {
+				const file = this.config.docsStateFile;
+				if (!file) return;
+				const { records, problem } = await loadIngestRecords(file);
+				for (const [key, record] of records) this.docsIngestSeen.set(key, record);
+				if (problem) process.stderr.write(`[substrate] ${problem}\n`);
+			})();
+		}
+		return this.docsSeenReady;
+	}
+
+	/**
+	 * Persist ingest records best-effort, one save at a time. A failing disk
+	 * never fails the ingest it just completed; the reason lands on stderr
+	 * either way. Saves chain so overlapping ingests write whole snapshots
+	 * in order instead of interleaving them.
+	 */
+	private persistDocsSeen(): Promise<void> {
+		const file = this.config.docsStateFile;
+		if (!file) return Promise.resolve();
+		this.docsSaveChain = this.docsSaveChain.then(() =>
+			saveIngestRecords(file, this.docsIngestSeen).catch((cause: unknown) => {
+				process.stderr.write(`[substrate] docs ingest records not saved — ${String(cause)}\n`);
+			}),
+		);
+		return this.docsSaveChain;
+	}
+
+
+	/**
+	 * DOCS-02: ingest pages into a docs dataset through the substrate (D25-05).
+	 *
+	 * Fail-closed: an unauthenticated or guest caller, an unconfigured plane,
+	 * a redactor finding, a missing source URL, an out-of-roots path or an
+	 * over-cap page is refused with a locator-only warning event — nothing is
+	 * uploaded. `dataset` names a configured dataset; raw ids are never
+	 * accepted.
+	 */
+	async ingestDocs(
+		input: { dataset?: unknown; commit?: unknown; pages?: unknown; session_id?: unknown },
+		callerSurface: Surface | null,
+	): Promise<IngestOutcome> {
+		const sessionId = typeof input.session_id === "string" && input.session_id.length > 0 ? input.session_id : undefined;
+		const pages = Array.isArray(input.pages) ? input.pages : [];
+		await this.hydrateDocsSeen();
+		const outcome = await ingestDocs(
+			{
+				config: this.config.ragflow,
+				roots: this.config.docsIngestRoots,
+				vmGuest: this.config.vmGuest,
+				seen: this.docsIngestSeen,
+				locks: this.docsIngestFlight,
+				// A real parse takes seconds: thirty polls two seconds apart.
+				// The zero-delay rehearsal shape stays in the module tests.
+				poll: { maxPolls: 30, intervalMs: 2000 },
+				emit: (event) => this.emit(event),
+				surface: callerSurface,
+				...(sessionId !== undefined ? { sessionId } : {}),
+				fetchImpl: this.ragflowFetch,
+			},
+			{
+				dataset: typeof input.dataset === "string" ? input.dataset : "",
+				...(typeof input.commit === "string" ? { commit: input.commit } : {}),
+				pages: pages
+					.filter((page): page is Record<string, unknown> => page !== null && typeof page === "object" && !Array.isArray(page))
+					.map((page) => ({
+						path: typeof page.path === "string" ? page.path : "",
+						...("real_path" in page && typeof page.real_path === "string" ? { real_path: page.real_path } : {}),
+						...("source_url" in page && typeof page.source_url === "string" ? { source_url: page.source_url } : {}),
+						body: typeof page.body === "string" ? page.body : "",
+						...("heading_path" in page && typeof page.heading_path === "string" ? { heading_path: page.heading_path } : {}),
+					})),
+				...(sessionId !== undefined ? { session_id: sessionId } : {}),
+			},
+		);
+		if (outcome.ok) await this.persistDocsSeen();
+		return outcome;
 	}
 
 	/**
