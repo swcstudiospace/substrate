@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import httpx
@@ -309,6 +310,65 @@ def test_base_tree_reads_text_files_and_is_empty_for_unknown_names(env):
     tree = base_tree(env["library"], "lib-skill")
     assert tree == {"SKILL.md": SKILL.format(name="lib-skill"), "references/a.md": "alpha\n"}
     assert base_tree(env["library"], "missing") == {}
+
+
+def _git(cwd, *args):
+    subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True,
+                   env={**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null",
+                         "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                         "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+
+
+def test_library_behind_is_none_outside_a_checkout(tmp_path):
+    assert bridge.library_behind(tmp_path) is None
+
+
+def test_library_behind_reads_local_refs_without_fetching(tmp_path):
+    _git(tmp_path, "init", "-b", "main", "-q")
+    (tmp_path / "SKILL.md").write_text("s")
+    _git(tmp_path, "add", "SKILL.md")
+    _git(tmp_path, "commit", "-qm", "one")
+    _git(tmp_path, "update-ref", "refs/remotes/origin/main", "HEAD")
+    assert bridge.library_behind(tmp_path) is False
+    (tmp_path / "other.md").write_text("o")
+    _git(tmp_path, "add", "other.md")
+    _git(tmp_path, "commit", "-qm", "two")
+    assert bridge.library_behind(tmp_path) is False
+    _git(tmp_path, "checkout", "-qb", "side", "HEAD~1")
+    (tmp_path / "side.md").write_text("s")
+    _git(tmp_path, "add", "side.md")
+    _git(tmp_path, "commit", "-qm", "three")
+    side = subprocess.run(["git", "-C", str(tmp_path), "rev-parse", "HEAD"], check=True,
+                           capture_output=True, text=True).stdout.strip()
+    _git(tmp_path, "checkout", "-q", "main")
+    _git(tmp_path, "update-ref", "refs/remotes/origin/main", side)
+    assert bridge.library_behind(tmp_path) is True
+
+
+def test_run_once_holds_a_library_group_while_behind(env, monkeypatch, capsys):
+    lib_patch(env)
+    monkeypatch.setattr(bridge, "library_behind", lambda library: True)
+    client, seen = mock_client(env, reply(200, OPENED))
+    result = run(env, client)
+    assert result.held == 1 and result.proposed == 0 and seen == []
+    assert json.loads(env["held"].read_text()) == {"aaaa0001": "library-behind"}
+
+
+def test_run_once_dry_run_reports_hold_while_behind(env, monkeypatch, capsys):
+    lib_patch(env)
+    monkeypatch.setattr(bridge, "library_behind", lambda library: True)
+    client, _ = mock_client(env, reply(200, OPENED))
+    result = run(env, client, dry_run=True)
+    assert result.held == 0 and result.kept == 0
+    assert "hold:library-behind" in capsys.readouterr().out
+
+
+def test_run_once_proposes_once_the_library_is_current(env, monkeypatch):
+    lib_patch(env)
+    monkeypatch.setattr(bridge, "library_behind", lambda library: False)
+    client, seen = mock_client(env, reply(200, OPENED))
+    result = run(env, client)
+    assert result.proposed == 1 and seen != []
 
 
 # --- token resolver (D22-09) ------------------------------------------------------------------

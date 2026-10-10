@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -317,6 +318,27 @@ def base_tree(library: Path | str, name: str) -> dict[str, str]:
     return tree
 
 
+def library_behind(library: Path | str) -> bool | None:
+    """True when the local library checkout is behind origin/main, False when it is not, None when unknown.
+
+    Local refs only: ``git rev-list --count --left-right`` never touches the network. Any failure
+    (not a checkout, no origin/main ref, unreadable output) means None: the caller proposes as before
+    and the doctor reports the position separately.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(library), "rev-list", "--count", "--left-right", "origin/main...HEAD"],
+            capture_output=True, text=True, timeout=30, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    match = re.fullmatch(r"(\d+)\s+(\d+)\s*", proc.stdout)
+    if not match:
+        return None
+    return int(match.group(1)) > 0
+
+
 def proposal_for(base: dict[str, str], replayed: dict[str, str]) -> tuple[dict[str, str], list[str]]:
     """(files that differ from the library copy plus SKILL.md, sorted base paths the replay removed)."""
     if "SKILL.md" not in replayed:
@@ -553,6 +575,14 @@ def run_once(
                 print(_dry_run_line(name, surface, f"hold:{reason or 'held'}", ids, "-"), flush=True)
             else:
                 hold(name, group, reason or "held")
+            continue
+        if kind == "library" and library_behind(library) is True:
+            # The local copy is older than what the server checks out (origin/main): replaying
+            # onto it would resend a stale SKILL.md over the owner's merged copy. Wait for the sync.
+            if dry_run:
+                print(_dry_run_line(name, surface, "hold:library-behind", ids, "-"), flush=True)
+            else:
+                hold(name, group, "library-behind")
             continue
         base = base_tree(library, name) if kind == "library" else {}
         try:
