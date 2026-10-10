@@ -8,8 +8,10 @@ Wants=substrate-mcp.service
 StartLimitIntervalSec=0
 # A missing entry point skips the start silently instead of crash-looping into
 # six-figure NRestarts (September reached NRestarts=114888 on an empty code
-# path). ConditionPathExists fails safe instead of crash-looping.
-ConditionPathExists=/root/src/repos/agent-substrate/packages/dispatcher/src/substrate_dispatcher/__main__.py
+# path). The path is the pinned release, not the checkout: ConditionPathExists
+# follows the current symlink. The release is a full git archive, so the
+# dispatcher sources ship with it.
+ConditionPathExists=/opt/agent-substrate/current/packages/dispatcher/src/substrate_dispatcher/__main__.py
 
 [Service]
 Type=simple
@@ -19,9 +21,9 @@ Type=simple
 # SUBSTRATE_DISPATCH_DISABLED — values live with the operator, never in the repo.
 EnvironmentFile=/etc/substrate/substrate-dispatcher.env
 Environment=HOME=/root
-Environment=PYTHONPATH=/root/src/repos/agent-substrate/packages/dispatcher/src
+Environment=PYTHONPATH=/opt/agent-substrate/current/packages/dispatcher/src
 Environment=SUBSTRATE_ENV_FILE=/etc/substrate/substrate-dispatcher.env
-WorkingDirectory=/root/src/repos/agent-substrate
+WorkingDirectory=/opt/agent-substrate/current
 # System python3: httpx and pytest are already installed; no venv.
 ExecStart=/usr/bin/python3 -m substrate_dispatcher
 Restart=always

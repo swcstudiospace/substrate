@@ -277,6 +277,7 @@ describe("repo units", () => {
 			"substrate-collector-grok.service",
 			"substrate-collector-herdr.service",
 			"substrate-collector-muse.service",
+			"substrate-dispatcher.service",
 			"substrate-mcp.service",
 			"substrate-skills-bridge.service",
 			"substrate-skills-sync.service",
@@ -332,6 +333,13 @@ describe("repo units", () => {
 			const unit = units.find((candidate) => candidate.name === unitName);
 			expect(unit?.environmentFiles).toEqual([SHARED_ENV_FILE, perUnit]);
 		}
+		// Phase 24 dispatcher (DISP-01/DISP-08): the Python loop runs from the
+		// pinned release like every other unit, with only its per-unit file —
+		// the manifest delivers SUBSTRATE_TOKEN_SUBSTRATE there, by name.
+		const dispatcher = units.find((unit) => unit.name === "substrate-dispatcher.service");
+		expect(dispatcher?.workingDirectory).toBe(RELEASE_CURRENT);
+		expect(dispatcher?.environmentFiles).toEqual([deliveredTo("dispatcher")]);
+		expect(deliveredTo("dispatcher")).toBe("/etc/substrate/substrate-dispatcher.env");
 		expect(diagnose(units, listGitTree(repoRoot, "HEAD"))).toEqual([]);
 	});
 
