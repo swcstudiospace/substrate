@@ -500,3 +500,64 @@ describe("Hindsight is reachable only through substrate-mcp", () => {
 		expect(offenders).toEqual([]);
 	});
 });
+
+/**
+ * `HINDSIGHT_*` is read only in `mcp-server` (D26-02: credentials live only
+ * in the server env file, read by `planes/hindsight.ts`). The bank prefix
+ * and bank list are routing config, not credentials, so they carry values in
+ * `.env.example` like `GREPTIME_DB=public` does.
+ */
+describe("no Hindsight reads or credentials outside the MCP server", () => {
+	test("nothing outside the MCP server names HINDSIGHT_", async () => {
+		const offenders = (await filesMatching("**/*.ts"))
+			.filter((path) => !path.startsWith(LEDGER_PACKAGE))
+			.filter((path) => /HINDSIGHT_/.test(read(path)));
+
+		expect(offenders).toEqual([]);
+	});
+});
+
+const HINDSIGHT_CREDENTIAL = /HINDSIGHT_(?:URL|API_KEY)["']?\s*[:=]\s*["']?[^\s"']/;
+
+function carriesHindsightCredential(body: string): boolean {
+	return body
+		.split("\n")
+		.filter((line) => !/^\s*(?:#|\/\/|\*|<!--)/.test(line))
+		.some((line) => HINDSIGHT_CREDENTIAL.test(line));
+}
+
+describe("no Hindsight credentials in the repo", () => {
+	test("no committed non-test file carries a Hindsight endpoint or credential", () => {
+		const offenders = trackedFiles()
+			.filter((path) => !path.endsWith(".test.ts"))
+			.filter((path) => path !== relative(ROOT, import.meta.path))
+			.filter((path) => carriesHindsightCredential(read(path)));
+
+		expect(offenders).toEqual([]);
+	});
+
+	test("the scan catches an endpoint or key with a value", () => {
+		for (const body of [
+			"HINDSIGHT_URL=http://agent-substrate-forwarder:8888",
+			"HINDSIGHT_API_KEY=hs-0123456789abcdef",
+			'  "HINDSIGHT_URL": "http://x:8888"',
+			"HINDSIGHT_API_KEY: hs-0123456789abcdef",
+		]) {
+			expect({ body, caught: carriesHindsightCredential(body) }).toEqual({ body, caught: true });
+		}
+	});
+
+	test("the scan does not fire on a blank, a routing value, a bare name or a code read", () => {
+		for (const body of [
+			"HINDSIGHT_URL=",
+			"HINDSIGHT_API_KEY=",
+			"HINDSIGHT_BANK_PREFIX=sub-",
+			"HINDSIGHT_BANKS=",
+			"Reads `HINDSIGHT_URL` / `HINDSIGHT_API_KEY` only.",
+			"const url = env.HINDSIGHT_URL?.trim();",
+			"# HINDSIGHT_API_KEY lives in the server env file",
+		]) {
+			expect({ body, caught: carriesHindsightCredential(body) }).toEqual({ body, caught: false });
+		}
+	});
+});

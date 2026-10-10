@@ -10,8 +10,10 @@ import { describe, expect, test } from "bun:test";
 import { auditMode } from "../../audit/src/policy.ts";
 import { HindsightFake } from "./hindsight-fake.ts";
 import { recallMemories, resolveRecallBanks, UNTRUSTED_MEMORY_NOTICE, type RecallDeps } from "./memory-recall.ts";
+import { mergeDerivedHits } from "./memory-search.ts";
 import { normalizeRoute, toolLabel } from "./observe.ts";
 import type { HindsightConfig } from "./planes/hindsight.ts";
+import type { MemoryEntry } from "./types.ts";
 
 const CONFIG: HindsightConfig = { url: "http://fake", apiKey: "test-bearer", bankPrefix: "sub-" };
 
@@ -130,5 +132,52 @@ describe("anti-pattern gates", () => {
 		const body = await Bun.file(new URL("./brief.ts", import.meta.url)).text();
 		const offenders = body.split("\n").filter((line) => /planes\/hindsight/.test(line));
 		expect({ offenders }).toEqual({ offenders: [] });
+	});
+});
+
+describe("derived merge into memory_search", () => {
+	const indexed: MemoryEntry[] = [
+		{
+			id: "mem_idx",
+			scope: "repo:acme/app",
+			kind: "fact",
+			text: "the index is the governed store",
+			writer: "cursor",
+			actor: "agent",
+			trust: "agent-claimed",
+			ttl: "30d",
+			created: "2026-10-10T00:00:00.000Z",
+			version: 1,
+			entry_hash: "hash_idx",
+			needs_reverification: false,
+		},
+	];
+
+	test("attribution survives the merge with index results first and unmarked", async () => {
+		const fake = new HindsightFake();
+		seedTwo(fake);
+		const merged = mergeDerivedHits(indexed, await recallMemories(deps(fake), "lease", "cursor"));
+		expect(merged.entries).toEqual(indexed);
+		const first = merged.entries.at(0);
+		expect(first).toEqual(indexed.at(0));
+		expect(first !== undefined && "derived" in first).toBe(false);
+		expect(merged.derived.map((hit) => `${hit.bank}:${hit.document_id}`)).toEqual([
+			"sub-hermes:mwd_h1",
+			"sub-cursor:mwd_c1",
+			"sub-hermes:mwd_h2",
+		]);
+		for (const hit of merged.derived) expect(hit.derived).toBe(true);
+		expect(merged.degraded).toBe(false);
+	});
+
+	test("an outage degrades to index-only with a reason", async () => {
+		const fake = new HindsightFake();
+		seedTwo(fake);
+		fake.failRecallWith = 500;
+		const merged = mergeDerivedHits(indexed, await recallMemories(deps(fake), "lease", "cursor"));
+		expect(merged.entries).toEqual(indexed);
+		expect(merged.derived).toEqual([]);
+		expect(merged.degraded).toBe(true);
+		expect(typeof merged.reason).toBe("string");
 	});
 });
