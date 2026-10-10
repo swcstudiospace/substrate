@@ -36,6 +36,7 @@ import {
 	unmappedBearer,
 	type SubstrateConfig,
 } from "./config.ts";
+import { buildAgentCard, isKnownCardSurface } from "./agent-card.ts";
 import { formatDrift } from "./drift.ts";
 import { InvalidEventError } from "./event.ts";
 import { InvalidHandoffError } from "./handoff.ts";
@@ -62,6 +63,7 @@ const ANONYMOUS_LOG_INTERVAL_MS = 60 * 60 * 1000;
  * so a scanner cannot mint a series per path on this counter either.
  */
 const ANONYMOUS_ROUTES = new Set([
+	"/.well-known/agent-card.json",
 	"/brief",
 	"/events",
 	"/events/query",
@@ -515,6 +517,25 @@ export function createHttpServer(
 					results,
 					breached: results.filter((result) => result.status === "breached").map((result) => result.id),
 				});
+				return;
+			}
+
+			// Per-surface A2A Agent Card (Phase 29, CARD-01). Unauthenticated
+			// discovery, same exemption class as /healthz: no agent action sits
+			// behind it, no audit record, emits nothing. One route serves all 27
+			// surfaces; the ?surface= parameter demultiplexes, and its absence
+			// is a 400, never a silent default.
+			if (req.method === "GET" && url.pathname === "/.well-known/agent-card.json") {
+				const surface = url.searchParams.get("surface");
+				if (!surface) {
+					sendJson(res, 400, { error: "surface query parameter is required" });
+					return;
+				}
+				if (!isKnownCardSurface(surface)) {
+					sendJson(res, 400, { error: `unknown surface ${JSON.stringify(surface.slice(0, 80))}` });
+					return;
+				}
+				sendJson(res, 200, buildAgentCard(surface, await substrate.teachablesForSurface(surface)));
 				return;
 			}
 

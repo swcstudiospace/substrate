@@ -62,6 +62,7 @@ import { recallMemories, UNTRUSTED_MEMORY_NOTICE, type RecallReply } from "./mem
 import { forwardRetain, retainDocumentId } from "./memory-retain.ts";
 import { mergeDerivedHits, type MergedMemoryResults } from "./memory-search.ts";
 import { governMemoryWrite } from "./memory-write.ts";
+import { TEACHABLE_SUBJECT_PREFIX, isTeachable, teachableEvent } from "./teachable.ts";
 import { bankForSurface, hindsightBanksFromEnv, hindsightFromEnv } from "./planes/hindsight.ts";
 import type { FetchLike } from "./planes/ragflow.ts";
 import { redact, type SkillDocExampleRule } from "./redact.ts";
@@ -1067,6 +1068,25 @@ export class Substrate {
 		}
 
 		await this.auditMemoryWrite(request, result);
+		// The teachable trail (D29-02): an accepted + verified teachable fact emits
+		// one `note` shaped like the mapped `teachable.accepted` sample, so the
+		// hourly anchor covers it with zero anchor-code changes. Awaited with a
+		// caught failure, the `auditMemoryWrite` precedent: a failed trail write
+		// never fails the memory write. Refused, quarantined, and conflicting
+		// writes emit no teachable event — only the existing audit trail. An
+		// idempotent replay (`deduplicated`) emits nothing: the first write
+		// already trailed this entry, and a retry must not mint a second
+		// acceptance note for the same `memory_id`.
+		if (
+			result.outcome === "accepted" &&
+			result.verified_persisted &&
+			result.entry &&
+			!result.deduplicated &&
+			isTeachable(result.entry.kind, result.entry.subject) &&
+			(SURFACES as readonly string[]).includes(result.writer)
+		) {
+			await this.emit(teachableEvent(result.writer as Surface, request, result)).catch(() => undefined);
+		}
 		if (result.outcome === "accepted" || commitUncertain) await this.cache.bump(MEMORY_GENERATION_KEY);
 		// The Hindsight forward runs after the accepted reply is decided and never
 		// blocks it: Postgres stays the governed store (D26-04). A refusal or plane
@@ -1207,6 +1227,43 @@ export class Substrate {
 				return this.index.searchMemoryPage(search);
 			},
 		});
+	}
+
+	/**
+	 * The surface's live teachables, newest first (D29-07): kind `fact` rows
+	 * whose subject carries the `teachable:` prefix, written by this surface,
+	 * excluding superseded rows — the same "not briefed" rule briefs use.
+	 *
+	 * Writer and kind filter before paging, so other surfaces' rows can never
+	 * push this surface's teachables out of the window; `isTeachable` still
+	 * decides each row, so an empty slug (`teachable:` with nothing after)
+	 * never becomes a skill. Read-only: no emit, no gate, no cache-bump. An
+	 * unknown surface reads as an empty list; the card route, not the reader,
+	 * owns the 400.
+	 */
+	async teachablesForSurface(surface: string): Promise<MemoryEntry[]> {
+		if (!this.index) return [];
+		const teachables: MemoryEntry[] = [];
+		let before: string | undefined;
+		let beforeId: string | undefined;
+		for (let pages = 0; pages < 100; pages++) {
+			const page = await this.index.searchMemoryPage({
+				query: "",
+				subjectPrefix: TEACHABLE_SUBJECT_PREFIX,
+				writer: surface,
+				kind: "fact",
+				limit: 100,
+				includeSuperseded: false,
+				...(before === undefined ? {} : { before, beforeId }),
+			});
+			for (const entry of page.entries) {
+				if (isTeachable(entry.kind, entry.subject) && entry.writer === surface && !entry.superseded_by) teachables.push(entry);
+			}
+			if (!page.next) return teachables;
+			before = page.next.before;
+			beforeId = page.next.before_id;
+		}
+		return teachables;
 	}
 
 	/**
