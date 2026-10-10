@@ -157,7 +157,7 @@ class LinearClient:
             raise LinearApiError(f"commentCreate failed for {issue_id}")
 
     def remove_label(self, issue_id: str, label_id: str) -> None:
-        """Remove one label additively (removedLabelIds); never replaces the set via labelIds."""
+        """Remove one label additively (removedLabelIds); never replaces the whole set."""
         data = self.graphql(
             REMOVE_LABEL_MUTATION, {"id": issue_id, "input": {"removedLabelIds": [label_id]}}
         )
