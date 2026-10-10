@@ -25,7 +25,8 @@
  */
 import { redact } from "../redact.ts";
 import type { DatasetEntry, DatasetSummary } from "./registry.ts";
-import { findDataset, resolveDatasetId } from "./registry.ts";
+import { dropDatasetId, findDataset, resolveDatasetId } from "./registry.ts";
+import { isStaleDatasetId } from "./ingest.ts";
 import { RagflowError } from "./ragflow.ts";
 import type { RagflowDocument, RetrievalHit } from "./ragflow.ts";
 
@@ -128,6 +129,8 @@ export type ValidatedSearch =
 			ok: true;
 			query: string;
 			datasetIds: string[];
+			/** Registry names that resolved to `datasetIds`, in the same order. */
+			names: string[];
 			limit: number;
 			similarityThreshold?: number;
 	  }
@@ -206,7 +209,7 @@ export async function validateSearchInput(
 	// `dataset_ids` there is nothing scoped to search.
 	if (datasetIds.length === 0) return { ok: false, reason: "unknown-dataset" };
 
-	return { ok: true, query, datasetIds, limit: capped, similarityThreshold };
+	return { ok: true, query, datasetIds, names, limit: capped, similarityThreshold };
 }
 
 /** Redact, strip any URL, then cut: the reason path keeps no secret or URL. */
@@ -292,19 +295,44 @@ export async function runSearch(input: unknown, deps: RunSearchDeps): Promise<Se
 	}
 	if (!validated.ok) return emptyReply(validated.reason);
 
+	const retrieve = (current: Extract<ValidatedSearch, { ok: true }>) =>
+		client.retrieval({
+			question: current.query,
+			datasetIds: current.datasetIds,
+			pageSize: current.limit,
+			...(current.similarityThreshold === undefined
+				? {}
+				: { similarityThreshold: current.similarityThreshold }),
+		});
+
 	let hits: RetrievalHit[];
 	try {
-		hits = await client.retrieval({
-			question: validated.query,
-			datasetIds: validated.datasetIds,
-			pageSize: validated.limit,
-			...(validated.similarityThreshold === undefined
-				? {}
-				: { similarityThreshold: validated.similarityThreshold }),
-		});
+		hits = await retrieve(validated);
 	} catch (error) {
-		const mapped = classifyFailure(error);
-		return emptyReply(mapped.reason, mapped.detail);
+		// A deleted dataset leaves its old id in the name cache. Drop those
+		// names and resolve once more so the recreated dataset is searchable
+		// without a process restart. A second rejection is the caller's answer.
+		if (!isStaleDatasetId(error)) {
+			const mapped = classifyFailure(error);
+			return emptyReply(mapped.reason, mapped.detail);
+		}
+		for (const name of validated.names) dropDatasetId(name);
+		try {
+			validated = await validateSearchInput(input, {
+				registry: deps.registry,
+				listDatasets: deps.listDatasets,
+			});
+		} catch (retryError) {
+			const mapped = classifyFailure(retryError);
+			return emptyReply(mapped.reason === "invalid-request" ? "ragflow-error" : mapped.reason, mapped.detail);
+		}
+		if (!validated.ok) return emptyReply(validated.reason);
+		try {
+			hits = await retrieve(validated);
+		} catch (retryError) {
+			const mapped = classifyFailure(retryError);
+			return emptyReply(mapped.reason, mapped.detail);
+		}
 	}
 
 	const docListCache = new Map<string, Promise<RagflowDocument[]>>();

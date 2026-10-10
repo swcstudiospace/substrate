@@ -147,6 +147,7 @@ describe("validateSearchInput (D25-01)", () => {
 			ok: true,
 			query: "how?",
 			datasetIds: ["ds-guide", "ds-api"],
+			names: ["guide", "api"],
 			limit: 1,
 			similarityThreshold: undefined,
 		});
@@ -212,6 +213,7 @@ describe("validateSearchInput (D25-01)", () => {
 			ok: true,
 			query: "q",
 			datasetIds: ["ds-guide", "ds-api"],
+			names: ["guide", "api"],
 			limit: 5,
 			similarityThreshold: undefined,
 		});
@@ -458,5 +460,44 @@ describe("runSearch never throws (D25-03)", () => {
 			},
 		);
 		expect(reply).toMatchObject({ results: [], reason: "ragflow-timeout" });
+	});
+
+	test("a stale cached dataset id is dropped and the recreated dataset is searched", async () => {
+		clearDatasetCache();
+		const registry: DatasetEntry[] = [
+			{ name: "guide", slug: "example/guide", include: ["docs/**"], exclude: [], trigger: "merge-to-main" },
+		];
+		const state = fakeState();
+		let lists = 0;
+		const retrievals: string[][] = [];
+		const client: SearchRagflow = {
+			configured: true,
+			async retrieval(options) {
+				retrievals.push(options.datasetIds);
+				state.retrievalCalls.push({ ...options });
+				if (options.datasetIds.includes("ds-stale")) throw new RagflowError("ragflow 404: no such dataset");
+				return [hit({ datasetId: "ds-new", documentId: "doc-new" })];
+			},
+			async listDocuments() {
+				return [];
+			},
+		};
+		const reply = await runSearch(
+			{ query: "q", datasets: ["guide"] },
+			{
+				registry,
+				listDatasets: async () => {
+					lists += 1;
+					return [{ id: lists === 1 ? "ds-stale" : "ds-new", name: "guide" }];
+				},
+				client,
+				authenticated: true,
+				lookupSource: () => ({ sourceUrl: `${SOURCE_BASE}a.md`, title: "A" }),
+			},
+		);
+		expect(reply.results).toHaveLength(1);
+		expect(retrievals).toEqual([["ds-stale"], ["ds-new"]]);
+		expect(lists).toBe(2);
+		expect(reply.reason).toBeUndefined();
 	});
 });
