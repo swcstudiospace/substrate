@@ -7,10 +7,14 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { DEFAULT_DISPATCHER_ENV_FILE } from "./kill-switch.ts";
 import { DEFAULT_DISPATCHER_LOCK_FILE } from "./lock.ts";
 import {
 	DISPATCHER_INTERVAL_MS,
+	buildProductionDeps,
 	emptyDryRunWrites,
 	runDispatcher,
 	runDispatcherOnce,
@@ -195,13 +199,7 @@ describe("runDispatcher", () => {
 		});
 
 		expect(code).toBe(0);
-		expect(lines).toEqual([
-			"SPE-1 not-dispatchable",
-			"SPE-3 not-dispatchable",
-			"SPE-5 not-dispatchable",
-			"SPE-2 dispatch:hermes",
-			"SPE-4 dispatch:claude-code",
-		]);
+		expect(lines).toEqual(["SPE-3 not-dispatchable", "SPE-5 not-dispatchable", "SPE-2 dispatch:hermes", "SPE-4 dispatch:claude-code"]);
 		expect(lines.join("\n")).not.toContain(canary);
 		expect(writes).toEqual(emptyDryRunWrites());
 		expect(locks).toBe(0);
@@ -317,9 +315,141 @@ describe("runDispatcher", () => {
 		expect(bare).toBe(1);
 		expect(doubled).toBe(1);
 		expect(errors).toEqual([
-			"usage: substrate-dispatcher [--once [--dry-run]]",
-			"usage: substrate-dispatcher [--once [--dry-run]]",
-			"usage: substrate-dispatcher [--once [--dry-run]]",
+			"usage: substrate-dispatcher [--once [--dry-run [--queue <file>]]]",
+			"usage: substrate-dispatcher [--once [--dry-run [--queue <file>]]]",
+			"usage: substrate-dispatcher [--once [--dry-run [--queue <file>]]]",
 		]);
+	});
+
+	describe("--queue", () => {
+		const USAGE = "usage: substrate-dispatcher [--once [--dry-run [--queue <file>]]]";
+
+		function writeQueue(name: string, body: string): string {
+			const dir = mkdtempSync(join(tmpdir(), "dispatcher-queue-"));
+			const file = join(dir, name);
+			writeFileSync(file, body);
+			return file;
+		}
+
+		test("a mixed queue file prints dispatchable and not-dispatchable lines, ignoring the rest", async () => {
+			const file = writeQueue(
+				"queue.json",
+				JSON.stringify([
+					{ id: "i1", identifier: "SPE-1", labels: [] },
+					{ id: "i2", identifier: "SPE-2", labels: [{ id: "l", name: "dispatch:hermes" }] },
+					{
+						id: "i3",
+						identifier: "SPE-3",
+						labels: [
+							{ id: "a", name: "dispatch:hermes" },
+							{ id: "b", name: "dispatch:claude-code" },
+						],
+					},
+					{ id: "i4", identifier: "SPE-4", labels: [{ id: "c", name: "dispatch:claude-code" }] },
+				]),
+			);
+			const lines: string[] = [];
+			const errors: string[] = [];
+			try {
+				const code = await runDispatcher(["--once", "--dry-run", "--queue", file], {
+					stdout: (line) => lines.push(line),
+					stderr: (line) => errors.push(line),
+				});
+				expect(code).toBe(0);
+				expect(lines).toEqual(["SPE-3 not-dispatchable", "SPE-2 dispatch:hermes", "SPE-4 dispatch:claude-code"]);
+				expect(errors).toEqual([]);
+			} finally {
+				rmSync(join(file, ".."), { recursive: true, force: true });
+			}
+		});
+
+		test("malformed JSON exits 1 with usage", async () => {
+			const file = writeQueue("bad.json", "{nope");
+			const errors: string[] = [];
+			try {
+				const code = await runDispatcher(["--once", "--dry-run", "--queue", file], {
+					stderr: (line) => errors.push(line),
+				});
+				expect(code).toBe(1);
+				expect(errors).toEqual([USAGE]);
+			} finally {
+				rmSync(join(file, ".."), { recursive: true, force: true });
+			}
+		});
+
+		test("a non-array body and a missing file exit 1 with usage", async () => {
+			const file = writeQueue("shape.json", JSON.stringify({ id: "i1" }));
+			const errors: string[] = [];
+			try {
+				expect(await runDispatcher(["--once", "--dry-run", "--queue", file], { stderr: (line) => errors.push(line) })).toBe(1);
+				expect(
+					await runDispatcher(["--once", "--dry-run", "--queue", join(file, "..", "absent.json")], {
+						stderr: (line) => errors.push(line),
+					}),
+				).toBe(1);
+				expect(errors).toEqual([USAGE, USAGE]);
+			} finally {
+				rmSync(join(file, ".."), { recursive: true, force: true });
+			}
+		});
+
+		test("--queue without --once --dry-run is a usage error", async () => {
+			const errors: string[] = [];
+			const stderr = (line: string) => errors.push(line);
+			expect(await runDispatcher(["--queue", "queue.json"], { stderr })).toBe(1);
+			expect(await runDispatcher(["--once", "--queue", "queue.json"], { stderr })).toBe(1);
+			expect(await runDispatcher(["--dry-run", "--queue", "queue.json"], { stderr })).toBe(1);
+			expect(errors).toEqual([USAGE, USAGE, USAGE]);
+		});
+	});
+
+	describe("buildProductionDeps", () => {
+		test("HOME/PATH/HERMES_HOME fall back to the process environment; the env file wins", () => {
+			const dir = mkdtempSync(join(tmpdir(), "dispatcher-env-"));
+			try {
+				const bare = join(dir, "bare.env");
+				writeFileSync(bare, "LINEAR_API_KEY=x\nSUBSTRATE_TOKEN_SUBSTRATE=y\nSUBSTRATE_TOKEN_HERMES=z\n");
+				const fallback = buildProductionDeps(bare);
+				expect(fallback.childEnvSource.HOME).toBe(process.env.HOME);
+				expect(fallback.childEnvSource.PATH).toBe(process.env.PATH);
+
+				const override = join(dir, "override.env");
+				writeFileSync(override, "HOME=/from-env-file\nPATH=/from-env-file\n");
+				const winning = buildProductionDeps(override);
+				expect(winning.childEnvSource.HOME).toBe("/from-env-file");
+				expect(winning.childEnvSource.PATH).toBe("/from-env-file");
+			} finally {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		});
+
+		test("HERMES_HOME from the env file selects the config read", () => {
+			const dir = mkdtempSync(join(tmpdir(), "dispatcher-hermes-home-"));
+			try {
+				const hermesHome = join(dir, "hh");
+				const configDir = join(hermesHome, ".hermes");
+				mkdirSync(configDir, { recursive: true });
+				writeFileSync(join(configDir, "config.yaml"), "mcp_servers:\n  substrate:\n    enabled: true\n");
+				const envFile = join(dir, "dispatcher.env");
+				writeFileSync(envFile, `HERMES_HOME=${hermesHome}\n`);
+				const deps = buildProductionDeps(envFile);
+				expect(deps.readHermesConfig()).toContain("substrate");
+			} finally {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		});
+
+		test("hermes presence is wired to the binary lookup", () => {
+			const dir = mkdtempSync(join(tmpdir(), "dispatcher-which-"));
+			try {
+				const envFile = join(dir, "dispatcher.env");
+				writeFileSync(envFile, "LINEAR_API_KEY=x\n");
+				const deps = buildProductionDeps(envFile);
+				expect(typeof deps.hermesPresent).toBe("function");
+				expect(deps.hermesPresent?.()).toBe(Bun.which("hermes") !== null);
+			} finally {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		});
 	});
 });

@@ -17,7 +17,7 @@
 
 import { spawnSync } from "node:child_process";
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, statfsSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statfsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { LinearClient } from "../../mcp-server/src/linear.ts";
@@ -73,6 +73,17 @@ function readDispatcherEnv(envFile: string): Record<string, string> {
 export function buildProductionDeps(envFile: string = DEFAULT_DISPATCHER_ENV_FILE): TickDeps {
 	const env = readDispatcherEnv(envFile);
 	const substrateUrl = env["SUBSTRATE_URL"]?.trim() ? (env["SUBSTRATE_URL"] as string).trim() : DEFAULT_SUBSTRATE_URL;
+	// The documented five-key env file carries neither HOME nor PATH: the
+	// child would spawn with no home and no binary lookup. The env file
+	// wins where set; the dispatcher process environment fills the gaps.
+	const childEnvSource: Record<string, string | undefined> = { ...env };
+	for (const key of ["HOME", "PATH", "HERMES_HOME"] as const) {
+		if (childEnvSource[key] === undefined && process.env[key] !== undefined) {
+			childEnvSource[key] = process.env[key];
+		}
+	}
+	const rawHermesHome = childEnvSource["HERMES_HOME"]?.trim();
+	const hermesHome = rawHermesHome !== undefined && rawHermesHome !== "" ? rawHermesHome : homedir();
 	return {
 		linear: new LinearClient(env["LINEAR_API_KEY"] ?? ""),
 		substrate: new SubstrateClient({ baseUrl: substrateUrl, token: env["SUBSTRATE_TOKEN_SUBSTRATE"] ?? "" }),
@@ -85,6 +96,7 @@ export function buildProductionDeps(envFile: string = DEFAULT_DISPATCHER_ENV_FIL
 					checkoutsRoot: DISPATCHER_CHECKOUTS_ROOT,
 					statfs: (path) => statfsSync(path),
 					exists: (path) => existsSync(path),
+					mkdir: (path) => mkdirSync(path, { recursive: true }),
 					runGit: (args, options) => {
 						const ran = spawnSync("git", args, { cwd: options?.cwd, encoding: "utf8" });
 						return { status: ran.status ?? 1, stdout: ran.stdout ?? "", stderr: ran.stderr ?? "" };
@@ -93,11 +105,12 @@ export function buildProductionDeps(envFile: string = DEFAULT_DISPATCHER_ENV_FIL
 			),
 		readHermesConfig: () => {
 			try {
-				return readFileSync(join(homedir(), ".hermes", "config.yaml"), "utf8");
+				return readFileSync(join(hermesHome, ".hermes", "config.yaml"), "utf8");
 			} catch {
 				return null;
 			}
 		},
+		hermesPresent: () => Bun.which("hermes") !== null,
 		dispatchDisabled: () => isDispatchDisabled(envFile),
 		spawn: (argv, options) => {
 			const [command, ...args] = argv;
@@ -113,7 +126,7 @@ export function buildProductionDeps(envFile: string = DEFAULT_DISPATCHER_ENV_FIL
 			return { pid: child.pid };
 		},
 		dialClaudeCode: () => dialClaudeCodeHost(),
-		childEnvSource: { ...env },
+		childEnvSource,
 		substrateUrl,
 		hermesToken: env["SUBSTRATE_TOKEN_HERMES"] ?? "",
 		isAlive: (pid) => {
@@ -127,8 +140,14 @@ export function buildProductionDeps(envFile: string = DEFAULT_DISPATCHER_ENV_FIL
 		signalProcess: (pid, signal) => {
 			try {
 				process.kill(-pid, signal);
+				return;
 			} catch {
+				// No group leader (or no permission): fall through to the pid.
+			}
+			try {
 				process.kill(pid, signal);
+			} catch {
+				// Dead process: signal delivery is a no-op, never an error.
 			}
 		},
 		sleep: (ms) => Bun.sleep(ms),
@@ -178,18 +197,24 @@ export function emptyDryRunWrites(): DryRunWrites {
 
 export type ParsedDispatcherArgs =
 	| { ok: true; mode: "resident" }
-	| { ok: true; mode: "once"; dryRun: boolean }
+	| { ok: true; mode: "once"; dryRun: boolean; queue?: string }
 	| { ok: false; message: string };
 
 function usageLine(): string {
-	return "usage: substrate-dispatcher [--once [--dry-run]]";
+	return "usage: substrate-dispatcher [--once [--dry-run [--queue <file>]]]";
 }
 
-/** Exact-match flags only. A bare `--dry-run` is a usage error. */
+/**
+ * Exact-match flags only. A bare `--dry-run` is a usage error, and
+ * `--queue` needs both a file argument and `--once --dry-run`: without a
+ * dry run there is no injected queue for the file to become.
+ */
 export function parseDispatcherArgs(argv: readonly string[]): ParsedDispatcherArgs {
 	let once = false;
 	let dryRun = false;
-	for (const arg of argv) {
+	let queue: string | undefined;
+	for (let index = 0; index < argv.length; index += 1) {
+		const arg = argv[index];
 		if (arg === "--once") {
 			if (once) return { ok: false, message: usageLine() };
 			once = true;
@@ -200,10 +225,20 @@ export function parseDispatcherArgs(argv: readonly string[]): ParsedDispatcherAr
 			dryRun = true;
 			continue;
 		}
+		if (arg === "--queue") {
+			if (queue !== undefined) return { ok: false, message: usageLine() };
+			const file = argv[index + 1];
+			if (file === undefined) return { ok: false, message: usageLine() };
+			queue = file;
+			index += 1;
+			continue;
+		}
 		return { ok: false, message: usageLine() };
 	}
+	if (queue !== undefined && !once) return { ok: false, message: usageLine() };
 	if (dryRun && !once) return { ok: false, message: usageLine() };
-	if (once) return { ok: true, mode: "once", dryRun };
+	if (queue !== undefined && !dryRun) return { ok: false, message: usageLine() };
+	if (once) return { ok: true, mode: "once", dryRun, queue };
 	return { ok: true, mode: "resident" };
 }
 
@@ -235,15 +270,61 @@ function dryRunSideEffects(writes: DryRunWrites): boolean {
 }
 
 /**
+ * Parse a `--queue` file: a JSON array of `{id, identifier,
+ * labels: [{id, name}]}`. Anything else is a usage error, so a malformed
+ * queue exits 1 instead of classifying an empty set.
+ */
+export function parseQueueFile(raw: string): PollIssue[] {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw) as unknown;
+	} catch {
+		throw new Error(usageLine());
+	}
+	if (!Array.isArray(parsed)) throw new Error(usageLine());
+	return parsed.map((entry: unknown): PollIssue => {
+		if (typeof entry !== "object" || entry === null) throw new Error(usageLine());
+		const record = entry as Record<string, unknown>;
+		const { id, identifier, labels } = record;
+		if (typeof id !== "string" || typeof identifier !== "string" || !Array.isArray(labels)) {
+			throw new Error(usageLine());
+		}
+		return {
+			id,
+			identifier,
+			labels: labels.map((label: unknown): { id: string; name: string } => {
+				if (typeof label !== "object" || label === null) throw new Error(usageLine());
+				const labelRecord = label as Record<string, unknown>;
+				if (typeof labelRecord["id"] !== "string" || typeof labelRecord["name"] !== "string") {
+					throw new Error(usageLine());
+				}
+				return { id: labelRecord["id"], name: labelRecord["name"] };
+			}),
+		};
+	});
+}
+
+/**
  * Classify the injected queue with the real `collectCandidates` and print
  * one line per issue. The recording fake counts any comment, label
  * change, or graphql call; git, spawn, and socket are never constructed,
- * so any increment or reach fails the run.
+ * so any increment or reach fails the run. Issues with no `dispatch:`
+ * label are ignored: unrelated work prints nothing.
  */
-async function runDryRun(seams: DispatcherCliSeams): Promise<void> {
+async function runDryRun(seams: DispatcherCliSeams, queueFile?: string): Promise<void> {
 	const writes = seams.dryRunWrites ?? emptyDryRunWrites();
 	const stdout = seams.stdout ?? ((line: string) => console.log(line));
-	const issues = seams.dryRunIssues ?? [];
+	let issues = seams.dryRunIssues;
+	if (issues === undefined && queueFile !== undefined) {
+		let raw: string;
+		try {
+			raw = readFileSync(queueFile, "utf8");
+		} catch {
+			throw new Error(usageLine());
+		}
+		issues = parseQueueFile(raw);
+	}
+	issues ??= [];
 	const linear = {
 		listUnstartedIssues: async () => ({
 			nodes: issues,
@@ -269,7 +350,6 @@ async function runDryRun(seams: DispatcherCliSeams): Promise<void> {
 	}
 	if (dryRunSideEffects(writes)) throw new Error("dry-run recorded a side effect");
 }
-
 function errorLine(error: unknown): string {
 	return error instanceof Error ? error.message : "dispatcher tick failed";
 }
@@ -319,7 +399,7 @@ export async function runDispatcher(argv: readonly string[], seams: DispatcherCl
 	}
 	if (parsed.mode === "once" && parsed.dryRun) {
 		try {
-			await runDryRun(seams);
+			await runDryRun(seams, parsed.queue);
 			return 0;
 		} catch (error) {
 			stderr(errorLine(error));
