@@ -68,7 +68,7 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 - [x] **Phase 24: substrate-dispatcher** - A `dispatch:hermes` label starts a lease-correct Hermes session on the issue's Graph ID in its own worktree (completed 2026-10-10 via PR #47; verified at 974557d, rehearsal scope green, live DISP-08 tail operator-gated)
 - [x] **Phase 25: Docs search and ingest (RAGFlow)** - Agents get cited docs answers through the substrate, and ingest refuses secrets and unsourced pages (completed 2026-10-10 via PR #48; verified at 41cb616, rehearsal scope green, live G1-G4 tail operator-gated)
 - [x] **Phase 26: Hindsight recall and Dragonfly cache** - Accepted memories are recalled across surfaces and repeated reads are cached, without slowing or staling the brief (completed 2026-10-10 via PR #49; verified at 059939e, rehearsal scope green, live G1-G4 tail operator-gated)
-- [ ] **Phase 27: Ledger primitives and ingest order** - Every closed hour has one deterministic Merkle root over its events in server ingest order
+- [x] **Phase 27: Ledger primitives and ingest order** - Every closed hour has one deterministic Merkle root over its events in server ingest order (completed 2026-10-10 via PR #29; re-verified at 3754c6e, unit scope green, production v1.1.4 acceptance operator-gated)
 - [ ] **Phase 28: Hourly anchor job and verify** - Each closed hour is anchored once on Solana devnet, and `verify` checks a graph against those anchors
 - [ ] **Phase 29: Agent Cards and teachable moments** - Each surface publishes a valid A2A Agent Card listing its accepted teachables, which sit inside anchored hours
 - [ ] **Phase 30: desktop_run** - Authenticated agents drive the dedicated webtop through a closed, audited vocabulary
@@ -408,7 +408,7 @@ Plans:
 | 24. substrate-dispatcher | v1.3 | 0/? | Not started | - |
 | 25. Docs search and ingest (RAGFlow) | v1.3 | 0/? | Not started | - |
 | 26. Hindsight recall and Dragonfly cache | v1.3 | 0/? | Not started | - |
-| 27. Ledger primitives and ingest order | v1.3 | 0/? | Not started | - |
+| 27. Ledger primitives and ingest order | v1.3 | 4/4 | Complete    | 2026-10-10 |
 | 28. Hourly anchor job and verify | v1.3 | 0/? | Not started | - |
 | 29. Agent Cards and teachable moments | v1.3 | 0/? | Not started | - |
 | 30. desktop_run | v1.3 | 0/? | Not started | - |

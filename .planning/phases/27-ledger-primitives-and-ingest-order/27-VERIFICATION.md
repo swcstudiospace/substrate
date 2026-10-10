@@ -1,26 +1,26 @@
 ---
 phase: 27-ledger-primitives-and-ingest-order
-verified: 2026-10-09T10:37:48Z
+verified: 2026-10-10T21:34:54Z
 status: passed
 score: 18/18 must-haves verified
 covered_files: [".planning/phases/27-ledger-primitives-and-ingest-order/27-01-PLAN.md", ".planning/phases/27-ledger-primitives-and-ingest-order/27-01-SUMMARY.md", ".planning/phases/27-ledger-primitives-and-ingest-order/27-02-PLAN.md", ".planning/phases/27-ledger-primitives-and-ingest-order/27-02-SUMMARY.md", ".planning/phases/27-ledger-primitives-and-ingest-order/27-03-PLAN.md", ".planning/phases/27-ledger-primitives-and-ingest-order/27-03-SUMMARY.md", ".planning/phases/27-ledger-primitives-and-ingest-order/27-04-PLAN.md", ".planning/phases/27-ledger-primitives-and-ingest-order/27-04-SUMMARY.md", "README.md", "bun.lock", "docs/greptime-ledger.md", "packages/ledger/src/index.ts", "packages/ledger/src/memo.ts", "packages/ledger/src/merkle.ts", "packages/ledger/src/period.ts", "packages/ledger/src/rpc.ts", "packages/ledger/src/solana.ts", "packages/mcp-server/package.json", "packages/mcp-server/src/greptime.test.ts", "packages/mcp-server/src/greptime.ts", "packages/mcp-server/src/service.test.ts", "packages/mcp-server/src/service.ts", "scripts/greptime-smoke.ts"]
-covered_digest: "v3:sha256:fdd3330f7557877c965f6970da4da8de3ea52b452c75a751e114b77aeb832f4b"
+covered_digest: "v3:sha256:8964d8beb6d08ea680f614c3f68b5d93a71c3324a2f0e42e251e7d095246f3d5"
 behavior_unverified: 1
 overrides_applied: 0
 re_verification:
-  previous_status: none
-  previous_score: n/a
+  previous_status: stale
+  previous_score: 18/18 must-haves verified
   gaps_closed: []
-  gaps_remaining: []
+  gaps_remaining: ["production GreptimeDB v1.1.4 acceptance of event_ingest DDL and hour reads (operator deploy step)"]
   regressions: []
 ---
 
 # Phase 27: Ledger Primitives and Ingest Order Verification Report
 
 **Phase Goal:** Every closed hour has one deterministic Merkle root over its events in server ingest order, computed without changing `agent_events`.
-**Verified:** 2026-10-09T09:58:16Z (HEAD `03f45d2` plus this report)
+**Verified:** 2026-10-10T21:34:54Z (HEAD `3754c6e`, `main` tip, origin synced)
 **Status:** passed, with one behaviour that cannot be proved before deploy (listed under Behavior Not Verified).
-**Base:** `gsd/v1.3-base-18`, which is Phase 18's rebased tip on top of `main` at `28b5b99`.
+**Base:** `main` at `3754c6e` (phase-27 merge `67cd428` plus phases 22–26 and 28).
 
 ## Goal Achievement
 
@@ -57,14 +57,15 @@ re_verification:
 
 | Gate | Result |
 |---|---|
-| `bun install --frozen-lockfile` | no changes |
+| `bun install --frozen-lockfile` | no changes (111 installs across 107 packages) |
 | `bunx tsc --noEmit` | exit 0 |
-| full `bun test` | 1719 pass / 57 skip / 0 fail (59 files) |
-| flake probe, `--rerun-each 3` on `packages/ledger`, `greptime.test.ts`, `service.test.ts`, `store-lock.test.ts` | 759 pass / 0 fail |
+| full `bun test` | 2845 pass / 58 skip / 1 fail (106 files) — the 1 fail is the known pre-existing environmental `rehearsal.test.ts` `--port 7410` cwd-sensitive assertion (phase-16 scope; exit code 2 correct, stderr carries the production-checkout refusal instead of "reserved") |
+| ledger proofs: `packages/ledger` / `greptime.test.ts` / `service.test.ts` / `store-lock` + `redact-lock` | 50 / 91 / 206 / 48 pass, 0 fail |
+| flake probe, `--rerun-each 3` on `packages/ledger`, `greptime.test.ts`, `store-lock.test.ts` | 510 pass / 0 fail |
 | `bun run check:phase-close` | pass (4 lock files; `EVENT_KINDS` unchanged at 12; `SURFACES` = baseline + `substrate`) |
-| `redact-lock.test.ts` | 15 pass |
-| scratch harness proof (`rehearsal up --name p27`, `stores.env`, `smoke:greptime`, `down`) | 28/28 on GreptimeDB v0.14.4; torn down |
-| mutations (ingest branch off; leaves reversed; lag ignored) | 4, 2 and 1 service tests fail respectively |
+| `pytest` | 230 passed |
+| scratch harness proof (`rehearsal up --name p27`, `stores.env`, `smoke:greptime`, `down`) | 28/28 on GreptimeDB v0.14.4; torn down (original verification 2026-10-09; not re-run — Docker harness, operator-gated per close-out rules) |
+| mutations (ingest branch off; leaves reversed; lag ignored) | 4, 2 and 1 service tests fail respectively (original verification; unit pins re-proven green above) |
 
 ### Perf gate (hot path: `insertEvent` gained a second `INSERT`)
 
@@ -93,3 +94,19 @@ No p95 regression above the 15% bar. Worst case worth knowing: if the ledger sta
 
 Phase 18's review round 2 changed the redactor this phase builds on, and `main` gained the verification-gate PR, so the branch was restacked onto Phase 18's new tip. Nothing in this phase changed. Gate on the restacked head: bun run verify: install, types, tests, locks all ok; 1785 pass / 57 skip / 0 fail. The report's fingerprint was refreshed (the base now carries the verification-gate PR and Phase 18's review fixes).
 
+
+## Re-verification at main tip (2026-10-10)
+
+Prior state: `stale` — covered source files changed after the 2026-10-09 run (phases 22–26 touched shared files; phase 28 landed the anchor job). No plan was re-run (all four SUMMARYs exist). Gates only, per close-out rules.
+
+Covered-file drift since the phase-27 merge (`67cd428..3754c6e`): `service.ts` +1829, `service.test.ts` +2280, `greptime.ts` +168, `greptime.test.ts` +139, `greptime-smoke.ts` +238, `greptime-ledger.md` +120, `README.md` ±16, `rpc.ts` +8 / `rpc.test.ts` +13. Re-proof per drift item:
+
+- `merkle.ts`, `memo.ts`, `period.ts`, `solana.ts` still byte-identical to `acc30a8` (`cmp` clean); their four test files unchanged since phase 27. `index.ts` unchanged since phase 27.
+- `rpc.ts` gained one additive method, `getGenesisHash` (phase 28's devnet gate), with 2 new tests; no existing line altered. D27-01 strict byte-identity no longer holds for this one file; no behavior regressed (ledger suite 50/50).
+- `agent_events` untouched: no `ALTER`, no new column, no DDL-line change in the drift diff.
+- `service.ts` / `greptime.ts` still import the pure functions from `@substrate/ledger` (`formatMemo, hourEnd, hourIso, hourStart, isClosed, merkleRootHex`, plus phase 28's `createRpc, parseMemo`); no local reimplementation.
+- Phase 28 added the anchor job's `anchors` reads/writes (`greptime.ts` `ANCHOR_COLUMNS`, `FROM "anchors"`, `INSERT INTO "anchors"`). D27-20 ("nothing in this phase reads or writes anchors rows") was true at phase-27 time; the anchor writes are phase 28's own planned scope (ANCHOR-03..06, PR #35), not a phase-27 regression.
+- All phase-27 unit pins green at the new tip: ledger 50, greptime 91, service 206 (includes shuffle-determinism, empty-hour null, refusal and failure-naming cases), locks 48, flake probe 510/0, phase-close pass, tsc clean, pytest 230.
+- Full suite: 2845 pass / 58 skip / 1 fail; the single fail is the recorded baseline environmental `rehearsal.test.ts --port 7410` cwd-sensitive assertion (phase-16 scope).
+
+Digest refreshed to `v3:sha256:8964d8beb6d08ea680f614c3f68b5d93a71c3324a2f0e42e251e7d095246f3d5`. Standing gap unchanged: production GreptimeDB v1.1.4 acceptance remains an operator deploy step (`behavior_unverified: 1`).

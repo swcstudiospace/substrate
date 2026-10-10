@@ -2,14 +2,14 @@
 gsd_state_version: "1.0"
 milestone: v1.3
 milestone_name: Build plan completion
-current_phase: 26
-current_phase_name: hindsight-recall-and-dragonfly-cache
+current_phase: 27
+current_phase_name: ledger-primitives-and-ingest-order
 status: verified
-stopped_at: Phase 26 verified — 26-VERIFICATION.md rehearsal scope green at 059939e, PR #49 merged, live G1-G4 tail operator-gated
-last_updated: "2026-10-10T21:30:00Z"
+stopped_at: Phase 27 re-verified — 27-VERIFICATION.md digest refreshed at 3754c6e (18/18 must-haves; bun 2845/58/1 F-01 recorded, tsc clean, pytest 230, ledger proofs green; production v1.1.4 acceptance operator-gated)
+last_updated: "2026-10-10T21:34:54Z"
 last_activity: 2026-10-10
-last_activity_desc: Phase 26 verified (recall path, gate-accepted retain, cache deltas; bun 2843/58/1 F-01, tsc clean, pytest 230, Greptile 3 rounds closed; live tail gated)
-state_head: 059939e
+last_activity_desc: Phase 27 re-verified (covered-file drift since 67cd428 re-proven; merkle/memo/period/solana still acc30a8-identical, rpc.ts additive getGenesisHash only; anchors reads/writes are phase 28 scope; live v1.1.4 tail gated)
+state_head: 3754c6e
 progress:
   total_phases: 18
   completed_phases: 3
