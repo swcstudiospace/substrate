@@ -62,6 +62,7 @@ const KNOWN_ROUTES = [
 	"/skills/propose",
 	"/docs/search",
 	"/docs/ingest",
+	"/memory/recall",
 ] as const;
 
 export function normalizeRoute(pathname: string): string {
@@ -326,6 +327,7 @@ const KNOWN_TOOLS: ReadonlySet<string> = new Set([
 	"memory_brief",
 	"memory_write",
 	"memory_search",
+	"memory_recall",
 	"memory_pending",
 	"events_emit",
 	"events_query",

@@ -58,7 +58,9 @@ import { holderOf, leaseView, normalizeTtlSeconds, type LeaseView } from "./leas
 import { createMirror, type Mirror, type MirrorContext, type MirrorFailure, type MirrorOp } from "./mirror.ts";
 import { runDodGate, type DodEvidence } from "./dod-gate.ts";
 import { normalizeSubject } from "./memory-policy.ts";
+import { recallMemories, type RecallReply } from "./memory-recall.ts";
 import { governMemoryWrite } from "./memory-write.ts";
+import { hindsightBanksFromEnv, hindsightFromEnv } from "./planes/hindsight.ts";
 import type { FetchLike } from "./planes/ragflow.ts";
 import { redact, type SkillDocExampleRule } from "./redact.ts";
 import {
@@ -686,6 +688,8 @@ export class Substrate {
 	private readonly dodGateTest: { fetchImpl?: typeof fetch; hermesLinearUrl?: string; timeoutMs?: number };
 	/** RAGFlow fetch override for tests; production uses the global fetch. */
 	private readonly ragflowFetch: FetchLike;
+	/** Hindsight fetch override for tests; production uses the global fetch. */
+	private readonly hindsightFetch: FetchLike;
 	/** Source-URL ingest records for hash idempotency, held for the process lifetime. */
 	private docsIngestSeen = new Map<string, IngestRecord>();
 	/** In-flight page uploads by record key, tagged with the uploading sha. */
@@ -708,6 +712,7 @@ export class Substrate {
 			dodGate?: { fetchImpl?: typeof fetch; hermesLinearUrl?: string; timeoutMs?: number };
 			cache?: ReadThroughCache;
 			ragflowFetch?: FetchLike;
+			hindsightFetch?: FetchLike;
 			desktop?: DesktopDriver | null;
 		},
 		observer: SubstrateObserver = {},
@@ -732,6 +737,7 @@ export class Substrate {
 		this.desktop = stores?.desktop ?? null;
 		this.dodGateTest = stores?.dodGate ?? {};
 		this.ragflowFetch = stores?.ragflowFetch ?? fetch;
+		this.hindsightFetch = stores?.hindsightFetch ?? fetch;
 		this.observer = observer;
 		this.cache =
 			stores?.cache ??
@@ -1140,6 +1146,26 @@ export class Substrate {
 				return this.index.searchMemoryPage(search);
 			},
 		});
+	}
+
+	/**
+	 * `memory_recall`: Hindsight recall as an explicit tool (D26-03, D26-05).
+	 *
+	 * Read-only and fail-open: an unconfigured plane or an unreachable bank
+	 * answers empty with a reason, never a throw. Reads emit nothing. Never
+	 * called from the brief's synchronous compose path.
+	 */
+	async recallMemories(input: { query?: unknown }, callerSurface: Surface | null): Promise<RecallReply> {
+		const query = typeof input.query === "string" ? input.query : "";
+		return recallMemories(
+			{
+				config: hindsightFromEnv(),
+				banks: hindsightBanksFromEnv(),
+				fetchImpl: this.hindsightFetch,
+			},
+			query,
+			callerSurface,
+		);
 	}
 
 	/**

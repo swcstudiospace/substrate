@@ -641,6 +641,25 @@ export function createHttpServer(
 				return;
 			}
 
+		// A read inside an agent's turn: fail-open, so anonymous callers reach
+		// the audit gate like every other read and an unreachable plane
+		// answers degraded rather than refusing the turn.
+		if (req.method === "POST" && url.pathname === "/memory/recall") {
+			const parsed: unknown = JSON.parse(await readBody(req));
+			if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+				sendJson(res, 400, { error: "request body must be a JSON object" });
+				return;
+			}
+			if (!("query" in parsed) || typeof parsed.query !== "string") {
+				sendJson(res, 400, { error: "query is required" });
+				return;
+			}
+			const fields: Record<string, unknown> = { query: parsed.query };
+			if (!(await auditedRest(res, observability, surface, "memory_recall", fields))) return;
+			sendJson(res, 200, await substrate.recallMemories(fields, surface));
+			return;
+		}
+
 			// Hooks get the coordination paths over REST for the same reason they get
 			// the brief: a hook process has no MCP client. Same service code beneath.
 			if (req.method === "POST" && url.pathname === "/handoff") {

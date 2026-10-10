@@ -456,3 +456,47 @@ describe("no RAGFlow credentials in the repo", () => {
 		}
 	});
 });
+
+/**
+ * The substrate-only door (D26-01): Hindsight is reached ONLY through
+ * `substrate-mcp` (`planes/hindsight.ts`). No Hindsight MCP server appears in
+ * any agent config, and no package outside `mcp-server` imports the client.
+ */
+describe("Hindsight is reachable only through substrate-mcp", () => {
+	test("no agent config registers a Hindsight MCP server", async () => {
+		// Config files only: prose in the README and in docs/ has to be free
+		// to say that this wiring is forbidden.
+		const configs = [
+			...(await filesMatching("**/*.json")),
+			...(await filesMatching("**/*.{yaml,yml}")),
+			...(await filesMatching("**/*.toml")),
+			// The projector's sources, not its tests: a test asserting that no
+			// generated file names Hindsight has to name it, and is the
+			// enforcement of this rule where the configs land.
+			...(await filesMatching("packages/projector/**/*.ts")).filter((path) => !path.endsWith(".test.ts")),
+		];
+
+		const offenders = configs.filter((path) => {
+			const body = read(path);
+			const registersServers = /mcpServers|mcp_servers|AddMcpServer|addMcpServer/.test(body);
+			return registersServers && /hindsight/i.test(body);
+		});
+
+		expect(offenders).toEqual([]);
+	});
+
+	test("no package outside the MCP server imports the Hindsight client", async () => {
+		// Mirrors the ledger-client test above. The CLI proves its cap against
+		// the engine by reading the file as text rather than importing it for
+		// exactly this reason — a string naming the file is not an import.
+		const offenders = (await filesMatching("**/*.ts"))
+			.filter((path) => !path.startsWith(LEDGER_PACKAGE))
+			.filter((path) =>
+				/(from\s+["'][^"']*|import\s*\(\s*["']|require\s*\(\s*["'])[^"']*(planes\/hindsight|memory-recall|memory-retain|hindsight-fake)/.test(
+					read(path),
+				),
+			);
+
+		expect(offenders).toEqual([]);
+	});
+});
