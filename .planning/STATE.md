@@ -9,7 +9,7 @@ stopped_at: Phase 26 planned — CONTEXT, RESEARCH, 3 PLANs rehearsal-first with
 last_updated: "2026-10-10T20:00:00Z"
 last_activity: 2026-10-10
 last_activity_desc: Phase 26 planned (Hindsight recall/retain, Dragonfly cache deltas; 26-01 recall path, 26-02 retain forward, 26-03 cache deltas plus gated live map)
-state_head: 6fea6c5
+state_head: e272d39
 progress:
   total_phases: 18
   completed_phases: 3
