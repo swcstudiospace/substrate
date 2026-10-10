@@ -1073,11 +1073,15 @@ export class Substrate {
 		// hourly anchor covers it with zero anchor-code changes. Awaited with a
 		// caught failure, the `auditMemoryWrite` precedent: a failed trail write
 		// never fails the memory write. Refused, quarantined, and conflicting
-		// writes emit no teachable event — only the existing audit trail.
+		// writes emit no teachable event — only the existing audit trail. An
+		// idempotent replay (`deduplicated`) emits nothing: the first write
+		// already trailed this entry, and a retry must not mint a second
+		// acceptance note for the same `memory_id`.
 		if (
 			result.outcome === "accepted" &&
 			result.verified_persisted &&
 			result.entry &&
+			!result.deduplicated &&
 			isTeachable(result.entry.kind, result.entry.subject) &&
 			(SURFACES as readonly string[]).includes(result.writer)
 		) {
@@ -1230,8 +1234,12 @@ export class Substrate {
 	 * whose subject carries the `teachable:` prefix, written by this surface,
 	 * excluding superseded rows — the same "not briefed" rule briefs use.
 	 *
-	 * Read-only: no emit, no gate, no cache-bump. An unknown surface reads as
-	 * an empty list; the card route, not the reader, owns the 400.
+	 * Writer and kind filter before paging, so other surfaces' rows can never
+	 * push this surface's teachables out of the window; `isTeachable` still
+	 * decides each row, so an empty slug (`teachable:` with nothing after)
+	 * never becomes a skill. Read-only: no emit, no gate, no cache-bump. An
+	 * unknown surface reads as an empty list; the card route, not the reader,
+	 * owns the 400.
 	 */
 	async teachablesForSurface(surface: string): Promise<MemoryEntry[]> {
 		if (!this.index) return [];
@@ -1242,12 +1250,14 @@ export class Substrate {
 			const page = await this.index.searchMemoryPage({
 				query: "",
 				subjectPrefix: TEACHABLE_SUBJECT_PREFIX,
+				writer: surface,
+				kind: "fact",
 				limit: 100,
 				includeSuperseded: false,
 				...(before === undefined ? {} : { before, beforeId }),
 			});
 			for (const entry of page.entries) {
-				if (entry.kind === "fact" && entry.writer === surface && !entry.superseded_by) teachables.push(entry);
+				if (isTeachable(entry.kind, entry.subject) && entry.writer === surface && !entry.superseded_by) teachables.push(entry);
 			}
 			if (!page.next) return teachables;
 			before = page.next.before;

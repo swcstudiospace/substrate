@@ -90,7 +90,13 @@ export function buildAgentCard(surface: Surface, teachables: readonly MemoryEntr
 		return {
 			id: entry.id,
 			name,
-			description: redact(entry.text).slice(0, CARD_SKILL_DESCRIPTION_MAX),
+			// A stale entry stays listed but says so: trust decay marks old
+			// memories `needs_reverification`, and a card that hid the warning
+			// would publish possibly-outdated advice as taught skill.
+			description: `${entry.needs_reverification ? "Check this advice before use. " : ""}${redact(entry.text)}`.slice(
+				0,
+				CARD_SKILL_DESCRIPTION_MAX,
+			),
 			tags: [TEACHABLE_SKILL_TAG],
 		};
 	});

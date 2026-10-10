@@ -43,16 +43,22 @@ function entry(over: Partial<MemoryEntry> & { id: string }): MemoryEntry {
 }
 
 /**
- * An index stub that honours `subjectPrefix` and `includeSuperseded` the way
- * the real store does (literal prefix via `left()`, newest first), so the
- * reader is exercised against store semantics, not a canned answer.
+ * An index stub that honours `subjectPrefix`, `writer`, `kind`, and
+ * `includeSuperseded` the way the real store does, so the reader is
+ * exercised against store semantics, not a canned answer. Records every
+ * search it receives for parameter assertions.
  */
 function prefixIndex(rows: MemoryEntry[]) {
+	const seen: MemorySearch[] = [];
 	return {
+		seen,
 		searchMemoryPage: async (search: MemorySearch): Promise<MemorySearchPage> => {
+			seen.push(search);
 			const prefix = search.subjectPrefix ?? null;
 			const kept = rows
 				.filter((row) => (prefix === null || row.subject?.startsWith(prefix)) ?? false)
+				.filter((row) => search.writer === undefined || row.writer === search.writer)
+				.filter((row) => search.kind === undefined || row.kind === search.kind)
 				.filter((row) => search.includeSuperseded || !row.superseded_by)
 				.sort((a, b) => (b.created === a.created ? (b.id < a.id ? -1 : 1) : b.created < a.created ? -1 : 1));
 			const limit = search.limit ?? 20;
@@ -133,6 +139,16 @@ describe("buildAgentCard", () => {
 		expect(card.skills[0]?.description).not.toContain("s3cr3t");
 		expect(card.skills[0]?.description.length).toBeLessThanOrEqual(1200);
 	});
+
+	test("stale entries keep their re-verification warning", () => {
+		const stale = entry({ id: "mem_stale", subject: "teachable:old-advice", needs_reverification: true });
+		const fresh = entry({ id: "mem_fresh", subject: "teachable:new-advice" });
+		const card = buildAgentCard("hermes", [stale, fresh]);
+
+		expect(validateAgentCard(card)).toEqual([]);
+		expect(card.skills[0]?.description.startsWith("Check this advice before use. ")).toBe(true);
+		expect(card.skills[1]?.description.startsWith("Check this advice")).toBe(false);
+	});
 });
 
 describe("validateAgentCard", () => {
@@ -187,6 +203,20 @@ describe("teachablesForSurface", () => {
 
 	test("returns exactly the surface's live teachable facts, newest first", async () => {
 		const teachables = await substrateFor(prefixIndex(rows)).teachablesForSurface("hermes");
+
+		expect(teachables.map((row) => row.id)).toEqual(["mem_newer", "mem_live"]);
+	});
+
+	test("filters writer and kind before paging, so no surface hides another's skills", async () => {
+		const stub = prefixIndex(rows);
+		await substrateFor(stub).teachablesForSurface("hermes");
+
+		expect(stub.seen[0]).toMatchObject({ writer: "hermes", kind: "fact", subjectPrefix: "teachable:" });
+	});
+
+	test("an empty-slug fact never becomes a skill", async () => {
+		const withEmpty = [...rows, entry({ id: "mem_empty", subject: "teachable:" })];
+		const teachables = await substrateFor(prefixIndex(withEmpty)).teachablesForSurface("hermes");
 
 		expect(teachables.map((row) => row.id)).toEqual(["mem_newer", "mem_live"]);
 	});

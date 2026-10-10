@@ -1343,6 +1343,8 @@ export class IndexStore implements MemoryStore {
 			  ${search.includeSuperseded ? this.sql`` : this.sql`and superseded_by is null`}
 			  ${query === "" ? this.sql`` : this.sql`and to_tsvector('english', body) @@ plainto_tsquery('english', ${query})`}
 			  ${prefix === null ? this.sql`` : this.sql`and left(subject, char_length(${prefix}::text)) = ${prefix}::text`}
+			  ${search.writer == null ? this.sql`` : this.sql`and writer = ${search.writer}`}
+			  ${search.kind == null ? this.sql`` : this.sql`and kind = ${search.kind}`}
 			  ${cursor}
 			order by created desc, id desc
 			limit ${limit}`) as Array<Record<string, unknown>>;

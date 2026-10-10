@@ -4,9 +4,10 @@
  * A teachable is a governed `fact` whose subject carries the tag as the prefix
  * `teachable:` (e.g. `teachable:retry-budget`). No new memory kind, no tags
  * field, no schema change: the subject carries the tag because the conflict key
- * is `scope|kind|subject`, so teachables collide sanely per topic, and the card
+ * is `scope|kind|subject`, so a teachable is addressable per topic, and the card
  * builder reads them back with a `subjectPrefix` search — no new index, no
- * migration (D29-01).
+ * migration (D29-01). `fact` entries are append-only: a revised teachable under
+ * the same subject leaves both facts live, newest first, superseding by recency.
  *
  * This module holds the predicate, the slug helper, and the one new event
  * builder of the phase. The builder returns an EventInput shaped exactly like

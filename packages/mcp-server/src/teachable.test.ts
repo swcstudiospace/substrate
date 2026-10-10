@@ -320,6 +320,19 @@ describe("writeMemory teachable emit", () => {
 		expect(teachableEvents(emitted)).toHaveLength(2);
 	});
 
+	test("an idempotent replay emits no second acceptance note", async () => {
+		const { emitted, substrate } = scratch();
+		const request = { ...ACCEPTED_TEACHABLE.request, idempotency_key: "key-replay-1" };
+
+		const first = await substrate.writeMemory(request);
+		expect(first.outcome).toBe("accepted");
+		const replay = await substrate.writeMemory(request);
+		expect(replay.outcome).toBe("accepted");
+		expect(replay.deduplicated).toBe(true);
+
+		expect(teachableEvents(emitted)).toHaveLength(1);
+	});
+
 	test("an unattributed writer emits no teachable event", async () => {
 		const { emitted, substrate } = scratch();
 

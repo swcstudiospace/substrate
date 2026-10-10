@@ -5,10 +5,13 @@
 A teachable is a governed `fact` whose subject starts with `teachable:`
 (e.g. `teachable:retry-budget`), written through `memory_write`. No new
 memory kind, no tags field, no schema change. The subject carries the tag for
-two load-bearing reasons: the conflict key is `scope|kind|subject`, so
-teachables version sanely per topic, and the index matches `subjectPrefix`
+two load-bearing reasons: the conflict key is `scope|kind|subject`, so a
+teachable is addressable per topic, and the index matches `subjectPrefix`
 with `left()`, so cards read a surface's teachables with a prefix search —
-no new index, no migration. An empty slug after the prefix is not a
+no new index, no migration. `fact` entries are append-only under the
+unchanged gate — writing revised advice under the same `teachable:` subject
+leaves both facts live, newest first in the card — so a revision supersedes
+by recency, never by replacement. An empty slug after the prefix is not a
 teachable. The gate path is unchanged: RBAC, classification, redaction,
 idempotency, conflict, insert, and read-back all apply, so a refused
 teachable is a refused `fact`, nothing more.
