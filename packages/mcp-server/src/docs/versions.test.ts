@@ -497,4 +497,20 @@ describe("finalize", () => {
 		const after = await loadManifest("test-docs", { stateDir });
 		expect(after.paths["docs/second.md"]).toBeUndefined();
 	});
+
+	test("a failed page absent from the cut is pruned", async () => {
+		await ingest("docs/first.md", 1, "# First\n\nOne.\n");
+		const second = await ingest("docs/second.md", 1, "# Second\n\nTwo.\n");
+		for (const id of second.documentIds) fake.setRun(id, "FAIL");
+		const cut = await finalize(
+			{ dataset: "test-docs", commit: commit(1), pathsPresent: ["docs/first.md"], ...writer() },
+			{ registry: REGISTRY, client: fake, stateDir },
+		);
+		expect(cut.status).toBe("version-cut");
+		if (cut.status !== "version-cut") throw new Error("unreachable");
+		expect(cut.deletedDocumentIds.sort()).toEqual([...second.documentIds].sort());
+		const manifest = await loadManifest("test-docs", { stateDir });
+		expect(manifest.paths["docs/second.md"]).toBeUndefined();
+		for (const id of second.documentIds) expect(fake.docs.has(id)).toBe(false);
+	});
 });

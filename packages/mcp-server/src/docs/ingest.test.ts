@@ -701,7 +701,10 @@ describe("pipeline success", () => {
 		expect(again.status).toBe("uploaded");
 		if (again.status !== "uploaded") throw new Error("unreachable");
 		expect(again.sections).toBe(first.sections);
-		expect(fake.calls.deleteDocuments).toBe(1);
+		// Survivors stay until a later cut. A failed replacement must not
+		// delete the sections that were still good.
+		expect(fake.calls.deleteDocuments).toBe(0);
+		expect(fake.datasets.get("ds-test")?.docs.has(first.documentIds[1]!)).toBe(true);
 		const manifest = await loadManifest("test-docs", { stateDir });
 		const entry = manifest.paths["docs/guide.md"];
 		expect(entry?.documentIds.length).toBe(again.sections);

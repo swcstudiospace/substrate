@@ -172,19 +172,19 @@ export async function finalize(input: FinalizeInput, deps: FinalizeDeps): Promis
 			// In-flight protection: the dataset lock covers one ingestPage or one
 			// finalize, not a whole refresh, so another run may have uploaded a
 			// page (manifest.paths updated, documents still parsing) that this
-			// cut does not cover. A manifest path entry this finalize does not
-			// itself replace via an input.pages snapshot, whose documents are not
-			// all DONE, keeps its path entry and its document ids survive the
-			// prune below. Snapshot-replaced documents, and DONE documents that
-			// no retained version and no surviving path entry reference, still
-			// prune as before — absent DONE pages still leave the cut.
+			// cut does not cover. Only a parse that is still running
+			// (UNSTART, RUNNING, or RAGFlow's "0") keeps its path entry and
+			// its document ids. FAIL, CANCEL, and a document the list no
+			// longer has are abandoned, so a removed file does not stay
+			// searchable. Snapshot-replaced documents still prune as before.
 			const protectedIds = new Set<string>();
 			const protectedPaths = new Set<string>();
+			const inFlight = new Set(["UNSTART", "RUNNING", "0"]);
 			for (const [path, entry] of Object.entries(manifest.paths)) {
 				if (snapshots[path] !== undefined) continue;
 				if (entry.documentIds.length === 0) continue;
-				const allDone = entry.documentIds.every((id) => runById.get(id) === "DONE");
-				if (allDone) continue;
+				const parsing = entry.documentIds.some((id) => inFlight.has(runById.get(id) ?? ""));
+				if (!parsing) continue;
 				protectedPaths.add(path);
 				for (const id of entry.documentIds) protectedIds.add(id);
 			}

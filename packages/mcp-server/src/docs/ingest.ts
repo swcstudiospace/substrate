@@ -749,21 +749,17 @@ export async function ingestPage(input: IngestPageInput, deps: IngestDeps): Prom
 				// so a FAIL/CANCEL run (or a document deleted out of band)
 				// would short-circuit forever. Replace stale documents and
 				// fall through to a fresh upload instead.
-				if (!hasCompleteSectionSet(existing, sections)) {
-					// The stored group covers fewer sections than the fresh
-					// split (a section document lost out of band reads back as
-					// a smaller rebuilt group): drop the partial group's
-					// still-listed ids and fall through to a fresh upload.
-					const runs = await wantedRuns(deps.client, datasetId, existing.documentIds);
-					const doomed = existing.documentIds.filter((id) => runs.has(id));
-					if (doomed.length > 0) await deps.client.deleteDocuments(datasetId, doomed);
-				} else {
+				if (hasCompleteSectionSet(existing, sections)) {
 					const stale = await staleDocumentIds(deps.client, datasetId, existing.documentIds);
 					if (stale === null) {
 						return { ...base, datasetId, status: "unchanged", documentIds: [...existing.documentIds] };
 					}
 					if (stale.length > 0) await deps.client.deleteDocuments(datasetId, stale);
 				}
+				// An incomplete rebuilt group falls through to a fresh upload
+				// without deleting the survivors. A failed upload must not take
+				// the remaining good sections with it; a later cut prunes ids
+				// that no retained version names.
 			}
 			const uploaded = await deps.client.uploadDocuments(
 				datasetId,
