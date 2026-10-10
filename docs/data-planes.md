@@ -31,12 +31,12 @@ The reach column is a placeholder, not a machine name. `docs/railway-tailscale.m
 
 | Bank | Who writes | Who reads | Holds |
 |---|---|---|---|
-| `sub-<surface>` (`sub-claude-code`, `sub-hermes`, `sub-omp`, `sub-muse`, `sub-grok-build`, `sub-cursor`) | that surface, through the substrate | that surface; `brief` for any surface reads cross-bank with `agentId: "*"` | Session summaries keyed by Graph ID |
+| `sub-<surface>` (`sub-claude-code`, `sub-hermes`, `sub-omp`, `sub-muse`, `sub-grok-build`, `sub-cursor`) | that surface, through the substrate | that surface; any surface's `memory_recall` / `memory_search` fans out over the configured `sub-*` banks with per-bank queries | Session summaries keyed by Graph ID |
 | `pd-desk` | Programming Desk LEAD and QUALITY | every desk seat | Shared environment facts, desk decisions, gate outcomes |
 | `pd-<seat>` (`pd-lead`, `pd-systems`, `pd-web`, `pd-android`, `pd-ios`, `pd-infra`, `pd-quality`) | that seat | that seat, LEAD | Seat working memory |
 | `pd-lead-reports` | LEAD | LEAD, Ove | Consolidated reports to the operator |
 
-Rules: the desk gateway holds the Hindsight key and calls Hindsight directly when that key is set. `substrate-mcp` does not read `HINDSIGHT_*`. Its `memory_write` and `memory_search` are the Postgres index. The gateway still calls substrate `memory_search` when its Hindsight client is unset, and it calls substrate `memory_write` alongside a Hindsight retain. Hindsight's own Postgres is its private store and is not read by anything else.
+Rules: the desk gateway holds the Hindsight key and calls Hindsight directly when that key is set. `substrate-mcp` reads `HINDSIGHT_URL` / `HINDSIGHT_API_KEY` in `planes/hindsight.ts` since Phase 26 (the gateway keeps its own keys for its own paths). Its `memory_write` accepts into the Postgres index and forwards gate-accepted memories to the writer's bank; `memory_search` merges the index with derived-marked plane hits. The gateway still calls substrate `memory_search` when its Hindsight client is unset, and it calls substrate `memory_write` alongside a Hindsight retain. Hindsight's own Postgres is its private store and is not read by anything else.
 
 ## RAGFlow datasets
 
@@ -65,17 +65,17 @@ Only the VPS and the operator's admin machines hold access to the forwarders (`d
 
 ## Current wiring
 
-What `substrate-mcp` reads today. Hindsight is the desk gateway's client; RAGFlow is read by `substrate-mcp` since Phase 25 (the gateway keeps its own keys for its own paths).
+What `substrate-mcp` reads today. Hindsight is read by `substrate-mcp` `planes/hindsight.ts` since Phase 26 (the desk gateway keeps its own keys for its own paths); RAGFlow is read by `substrate-mcp` since Phase 25 (the gateway keeps its own keys for its own paths).
 
 | Store | Reader | Env var | Status |
 |---|---|---|---|
 | GreptimeDB | `substrate-mcp` | `GREPTIME_URL`, `GREPTIME_USER`, `GREPTIME_PASSWORD`, `GREPTIME_DB` | read |
 | TimescaleDB | `substrate-mcp` | `SUBSTRATE_PG_URL` | read |
-| DragonflyDB | `substrate-mcp` read-through cache | `DRAGONFLY_URL`; `SUBSTRATE_CACHE=0` disables | read when set; fail-open when unset, refused or `0` |
-| Hindsight | desk gateway | gateway `HINDSIGHT_URL`, `HINDSIGHT_API_KEY` | not read by `substrate-mcp` (`HINDSIGHT_*` in `.env.example` is unused here) |
+| DragonflyDB | `substrate-mcp` read-through cache | `DRAGONFLY_URL`; `SUBSTRATE_CACHE=0` disables | read when set; fail-open when unset, refused or `0`. Production points at co-located loopback redis after a measured 180–310 ms tailnet RTT made the Railway hop unusable (Greptile P1 disposition recorded) |
+| Hindsight | `substrate-mcp` `planes/hindsight.ts` (gateway keeps its own keys for its own paths) | server env `HINDSIGHT_URL`, `HINDSIGHT_API_KEY` | read by `substrate-mcp` since Phase 26; the desk's `pd-*` banks are never named here |
 | RAGFlow | `substrate-mcp` `planes/ragflow.ts` (gateway keeps its own keys for its own paths) | server env `RAGFLOW_URL`, `RAGFLOW_API_KEY` | read by `substrate-mcp` since Phase 25; `RAGFLOW_MCP_URL` is never read |
 
-The cache covers `POST /brief`, `memory_brief`, `memory_search` and `graph_get`. It does not cover writes, `events_*` or leases. Keys are `substrate:v1` plus a hash of the normalized arguments, the caller surface and a generation. An accepted memory write, and a write whose commit is uncertain, bumps the memory generation. A graph write bumps that graph's generation and a shared graphs generation, so a brief that lists other graphs refreshes too. A stored answer expires at its class TTL or at the next lease or reverify deadline, whichever is sooner. `GET /healthz` adds `{enabled, connected, mode, hits, misses, bypasses, errors}` with `mode` of `off`, `on` or `degraded`. The status code does not depend on the cache. The same counters are the `substrate.cache.operations` metric.
+The cache covers `POST /brief`, `memory_brief`, `memory_search`, `memory_recall` and `graph_get`. It does not cover writes, `events_*` or leases. Keys are `substrate:v1` plus a hash of the normalized arguments, the caller surface and a generation. An accepted memory write, and a write whose commit is uncertain, bumps the memory generation. A graph write bumps that graph's generation and a shared graphs generation, so a brief that lists other graphs refreshes too. A stored answer expires at its class TTL or at the next lease or reverify deadline, whichever is sooner. `GET /healthz` adds `{enabled, connected, mode, hits, misses, bypasses, errors}` with `mode` of `off`, `on` or `degraded`. The status code does not depend on the cache. The same counters are the `substrate.cache.operations` metric.
 
 ## Target after the private-forwarder cutover
 
@@ -89,7 +89,7 @@ The cache covers `POST /brief`, `memory_brief`, `memory_search` and `graph_get`.
 
 ## Environment keys
 
-See `.env.example`. `substrate-mcp` reads `GREPTIME_*`, `SUBSTRATE_PG_URL`, `DRAGONFLY_URL`, `SUBSTRATE_CACHE` and `RAGFLOW_URL`/`RAGFLOW_API_KEY`. `HINDSIGHT_*` in that file is unused by this process; the gateway holds its own. `AGENTMEMORY_URL` and `AGENTMEMORY_SECRET` are removed.
+See `.env.example`. `substrate-mcp` reads `GREPTIME_*`, `SUBSTRATE_PG_URL`, `DRAGONFLY_URL`, `SUBSTRATE_CACHE`, `HINDSIGHT_URL`/`HINDSIGHT_API_KEY` and `RAGFLOW_URL`/`RAGFLOW_API_KEY`. The desk gateway holds its own plane keys for its own paths. `AGENTMEMORY_URL` and `AGENTMEMORY_SECRET` are removed.
 
 ## Fail-open budget (unchanged)
 

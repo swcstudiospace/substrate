@@ -25,6 +25,7 @@ import {
 	configWarnings,
 	isOperator,
 	loadConfig,
+	parseRedisUrl,
 	surfaceForToken,
 } from "./config.ts";
 
@@ -284,5 +285,33 @@ describe("SOLANA_* anchor config", () => {
 			pubkey: "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T",
 			cli: "/usr/local/bin/solana",
 		});
+	});
+});
+
+describe("parseRedisUrl refuses plaintext non-loopback redis (DOCS-06)", () => {
+	test("loopback redis and rediss stay allowed", () => {
+		for (const url of [
+			"redis://127.0.0.1:6379/0",
+			"redis://localhost:6379",
+			"redis://[::1]:6379",
+			"redis://:secret@127.0.0.1:6379/0",
+			"rediss://cache.example.com:6380/0",
+		]) {
+			expect(parseRedisUrl(url)).toEqual({ kind: "ok", url });
+		}
+		expect(parseRedisUrl(undefined)).toEqual({ kind: "unset" });
+	});
+
+	test("plaintext redis to a non-loopback host is refused fail-open", () => {
+		const refused = parseRedisUrl("redis://user:pass@cache.example.com:6379/0");
+		expect(refused.kind).toBe("refused");
+		const config = loadConfig({ DRAGONFLY_URL: "redis://user:pass@cache.example.com:6379/0" });
+		expect(config.cacheEnabled).toBe(false);
+		expect(config.dragonflyUrl).toBeUndefined();
+		expect(config.dragonflyRefused).toContain("cache.example.com");
+		const loopback = loadConfig({ DRAGONFLY_URL: " redis://127.0.0.1:6379 " });
+		expect(loopback.cacheEnabled).toBe(true);
+		expect(loopback.dragonflyUrl).toBe("redis://127.0.0.1:6379");
+		expect(loopback.dragonflyRefused).toBeNull();
 	});
 });
