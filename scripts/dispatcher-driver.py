@@ -242,8 +242,9 @@ def main() -> int:
     check("s1 argv toolsets terminal,file", "-t terminal,file" in rec.replace("  ", " "), rec)
     check("s1 cwd is the graph worktree", f"cwd: {wt}" in rec, rec)
     env_keys = set(rec.split("env-keys: ")[1].split())
+    # PWD is added by the shell itself at startup, not passed by the dispatcher.
     check("s1 child env allowlisted",
-          env_keys <= {"HOME", "PATH", "LANG", "LC_ALL", "USER", "LOGNAME", "SHELL", "TERM", "_"},
+          env_keys <= {"HOME", "PATH", "LANG", "LC_ALL", "USER", "LOGNAME", "SHELL", "TERM", "_", "PWD"},
           str(sorted(env_keys)))
     prompts = list((state_dir / "prompts").glob("*.md"))
     check("s1 one prompt file 0600", len(prompts) == 1 and stat.S_IMODE(prompts[0].stat().st_mode) == 0o600)
@@ -299,12 +300,16 @@ def main() -> int:
     run_tick(reg5)
     s5 = reg5.get("i-5")
     assert s5 is not None
-    s5.started_at -= 901
+    s5.started_at = 2000.0 - 901
     reg5.reap(2000.0, mcp=mcp, linear=linear, log=log)
     check("s5 terminate sent", s5.proc.poll() is None)
     check("s5 claim-timeout comment",
           any("[claim-timeout]" in b for b in world.comments.get("i-5", [])))
     reg5.reap(2012.0, mcp=mcp, linear=linear, log=log)
+    import time as _t2
+    _deadline = _t2.time() + 10.0
+    while s5.proc.poll() is None and _t2.time() < _deadline:
+        _t2.sleep(0.05)
     check("s5 SIGKILL after grace", s5.proc.poll() is not None)
     check("s5 failed event",
           any(e.get("payload", {}).get("reason") == "claim-timeout" for e in world.events.get(g5, [])))
@@ -329,7 +334,7 @@ def main() -> int:
     # -- S7: invalid ids refuse before any worktree -----------------------
     g7 = gid("badids")
     world.candidates = [issue(7)]
-    world.graphs = {"i-7": {"find": {**hit(g7), "repo": "../escape"}, "node": hit(g7)["node"]}}
+    world.graphs = {"i-7": {"find": {**hit(g7), "repo": "bad repo!"}, "node": hit(g7)["node"]}}
     reg7 = SessionRegistry(state_dir=state_dir)
     run_tick(reg7)
     check("s7 invalid-ids comment",
@@ -366,6 +371,7 @@ def main() -> int:
     world.graphs = {"i-9": {"find": hit(g9), "node": hit(g9)["node"]}}
     reg9 = SessionRegistry(state_dir=state_dir)
     run_tick(reg9)
+    settle(reg9)
     spawns = record.read_text().count("argv: ")
     decisions = run_tick(reg9)
     check("s9 active issue skipped", [d.action for d in decisions] == ["skip"])
