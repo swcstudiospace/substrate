@@ -87,7 +87,9 @@ two cannot drift.
 | `dispatcher` | `substrate` | per-unit dispatcher env file, host-job token variable | `dormant:24` | expected 401s counted in unattributed 4xx points until the restoring phase |
 | `substrate-host` | `substrate` | per-unit host env file, host-job token variable | `dormant:31` | expected 401s counted in unattributed 4xx points until the restoring phase |
 | `skills-sync` | `substrate` | per-unit env file `/etc/substrate/substrate-skills-sync.env`, variable `SUBSTRATE_TOKEN` | `live` | warning events under surface substrate with action skills.sync |
-| `bridge` | `substrate` | per-unit env file `/etc/substrate/substrate-bridge.env`, variable `SUBSTRATE_URL`; no single-token variable | `live` | proposals open as skill/hermes, skill/omp and skill/grok-build branches from the tokens dir; the bridge env file holds no single-token variable |
+| `bridge-hermes` | `hermes` | tokens-dir file for the surface | `live` | hermes queue proposals open as skill/hermes branches from the tokens-dir file |
+| `bridge-omp` | `omp` | tokens-dir file for the surface | `live` | omp queue bodies proposed as omp from the tokens-dir file |
+| `bridge-grok-build` | `grok-build` | tokens-dir file for the surface | `live` | grok queue bodies proposed as grok-build from the tokens-dir file |
 | `omp-extension` | `omp` | tokens-dir file for the surface | `live` | manage_skill creates blocked with a PR reason; queued bodies proposed as omp |
 | `miner` | `substrate` | per-unit miner env file, host-job token variable | `dormant:22` | expected 401s counted in unattributed 4xx points until the restoring phase |
 | `anchor` | `substrate` | per-unit anchor env file, host-job token variable | `dormant:28` | expected 401s counted in unattributed 4xx points until the restoring phase |
