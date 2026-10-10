@@ -311,6 +311,27 @@ describe("rebuild from RAGFlow", () => {
 		expect(rebuilt.paths["docs/guide.md"]!.hash).toBe(before.paths["docs/guide.md"]!.hash);
 		expect(rebuilt.paths["docs/guide.md"]!.documentIds).toEqual(first.documentIds);
 	});
+
+	test("a rebuilt group whose parse never completed is dropped, not restored", async () => {
+		// The parse call 404'd before the manifest was written: the upload
+		// exists with metadata but its run never left UNSTART. Restoring it
+		// would let the unchanged fast-path short-circuit forever, so the
+		// rebuild drops the path and the next ingest re-parses.
+		const hashA = "c".repeat(64);
+		const ids = await fake.seed("docs/stuck.md", COMMIT_A, hashA, 1);
+		fake.docs.get(ids[0]!)!.run = "UNSTART";
+		const hashB = "d".repeat(64);
+		const doneIds = await fake.seed("docs/done.md", COMMIT_A, hashB, 1);
+
+		const rebuilt = await rebuildManifest("test-docs", fake, "ds-test");
+
+		expect(rebuilt.paths["docs/stuck.md"]).toBeUndefined();
+		expect(rebuilt.paths["docs/done.md"]!.documentIds).toEqual(doneIds);
+		// A later group that did finish can still own the path.
+		const laterIds = await fake.seed("docs/stuck.md", "f".repeat(40), hashB, 1);
+		const second = await rebuildManifest("test-docs", fake, "ds-test");
+		expect(second.paths["docs/stuck.md"]!.documentIds).toEqual(laterIds);
+	});
 });
 
 describe("lookups for search", () => {
