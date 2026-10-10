@@ -142,10 +142,11 @@ function tickDeps(overrides: {
 	config?: string | null;
 	alive?: boolean | (() => boolean);
 	nowRef?: { now: number };
+	givenUpDir?: string;
 	dialClaudeCode?: () => Promise<"host-unreachable" | "host-refused">;
 }): { deps: TickDeps; base: string; worktreeDir: string; spawns: Spawned[]; signals: string[] } {
 	const base = makeTmp();
-	const givenUpDir = join(base, "given-up");
+	const givenUpDir = overrides.givenUpDir ?? join(base, "given-up");
 	const worktreeDir = join(base, "wt");
 	mkdirSync(worktreeDir, { recursive: true });
 	const spawns: Spawned[] = [];
@@ -273,6 +274,68 @@ describe("hermes dispatch", () => {
 		expect(linear.updates).toEqual([]);
 		expect(isGivenUp(deps.givenUpDir, HERMES_ISSUE.id)).toBe(false);
 		expectVocabularyClosed(substrate.events);
+	});
+
+	test("a still-running child keeps the checkout until it exits", async () => {
+		const linear = linearFake([HERMES_ISSUE]);
+		const substrate = substrateFake(foundNode(), [FREE_GRAPH, graphWith("hermes", SESSION_ID, LIVE)]);
+		const first = tickDeps({ linear, substrate, alive: true });
+		const landed = await dispatchIssue(HERMES_ISSUE, "hermes", first.deps);
+		expect(landed).toEqual({ status: "landed" });
+		expect(first.spawns).toHaveLength(1);
+
+		const otherGraph = "ut-mkts36-bbbbbbbb";
+		const otherNode = foundNode();
+		if (otherNode.found) {
+			otherNode.graph_id = otherGraph;
+			otherNode.node.node_id = NODE_ID;
+		}
+		const otherSubstrate = substrateFake(otherNode, [
+			{
+				graph_id: otherGraph,
+				nodes: [{ graph_id: otherGraph, node_id: NODE_ID, claimed_by: null, claim_session: null, lease_id: null, lease_expires_at: null }],
+			},
+			{
+				graph_id: otherGraph,
+				nodes: [
+					{
+						graph_id: otherGraph,
+						node_id: NODE_ID,
+						claimed_by: "hermes",
+						claim_session: `hermes:${otherGraph}:${NODE_ID}`,
+						lease_id: null,
+						lease_expires_at: LIVE,
+					},
+				],
+			},
+		]);
+		const other = tickDeps({
+			linear: linearFake([{ ...HERMES_ISSUE, id: "iss-other", identifier: "ENG-102" }]),
+			substrate: otherSubstrate,
+			alive: true,
+			givenUpDir: first.deps.givenUpDir,
+		});
+		const otherResult = await dispatchIssue(
+			{ ...HERMES_ISSUE, id: "iss-other", identifier: "ENG-102" },
+			"hermes",
+			other.deps,
+		);
+		expect(otherResult).toEqual({ status: "landed" });
+		expect(other.spawns).toHaveLength(1);
+
+		const again = tickDeps({
+			linear: linearFake([{ ...HERMES_ISSUE, id: "iss-again", identifier: "ENG-103" }]),
+			substrate: substrateFake(foundNode(), [FREE_GRAPH]),
+			alive: () => true,
+			givenUpDir: first.deps.givenUpDir,
+		});
+		const blocked = await dispatchIssue(
+			{ ...HERMES_ISSUE, id: "iss-again", identifier: "ENG-103" },
+			"hermes",
+			again.deps,
+		);
+		expect(blocked).toEqual({ status: "deferred", surface: "hermes" });
+		expect(again.spawns).toEqual([]);
 	});
 
 	test("a foreign live lease is already-claimed before launch", async () => {

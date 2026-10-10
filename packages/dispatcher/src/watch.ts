@@ -13,7 +13,16 @@
  * persist the given-up entry BEFORE invoking the report callback, so a
  * crash between the file write and the Linear comment cannot relaunch an
  * issue the dispatcher already gave up. The 900 s stop kills the process
- * group: SIGTERM, a 5 s grace (assumption A4), then SIGKILL.
+ * group: SIGTERM, a 5 s grace (assumption A4), then SIGKILL. The outcome
+ * is decided from whether the parent was alive after that grace, not from
+ * a later `isAlive` check: SIGKILL itself makes the parent look exited.
+ *
+ * A raised `lease_epoch` or a terminal `state` is not proof this session's
+ * claim stood. `claimNode` bumps the epoch before the ledger accepts the
+ * claim, and a withdrawn claim does not lower it; another session's claim
+ * bumps it too. Release clears `claim_session`. The only node evidence is
+ * this session still being named, plus an optional `claimStood` read of a
+ * stored claim event from this watch.
  */
 
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -28,6 +37,9 @@ export const SIGTERM_GRACE_MS = 5_000;
 export type GivenUpOutcome = "exited-unclaimed" | "claim-timeout";
 
 export const GIVEN_UP_FILENAME = "given-up.json";
+
+/** graph id → pid of a Hermes child that has not exited. One child per graph. */
+export const ACTIVE_CHILDREN_FILENAME = "active-children.json";
 
 /** Public lease fields of one node, as `graph_get` reports them. */
 export interface WatchedNode {
@@ -114,6 +126,65 @@ export function markGivenUp(dir: string, issueId: string, outcome: GivenUpOutcom
 	chmodSync(path, 0o600);
 }
 
+function readActiveChildren(dir: string): Record<string, number> {
+	let raw: string;
+	try {
+		raw = readFileSync(join(dir, ACTIVE_CHILDREN_FILENAME), "utf8");
+	} catch (error) {
+		if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return {};
+		throw error;
+	}
+	const parsed: unknown = JSON.parse(raw);
+	if (typeof parsed !== "object" || parsed === null) return {};
+	const active: Record<string, number> = {};
+	for (const [graphId, pid] of Object.entries(parsed)) {
+		if (typeof pid === "number" && Number.isInteger(pid) && pid > 0) active[graphId] = pid;
+	}
+	return active;
+}
+
+function writeActiveChildren(dir: string, active: Record<string, number>): void {
+	mkdirSync(dir, { recursive: true });
+	const path = join(dir, ACTIVE_CHILDREN_FILENAME);
+	const tmp = `${path}.tmp.${process.pid}`;
+	writeFileSync(tmp, `${JSON.stringify(active)}\n`, { mode: 0o600 });
+	renameSync(tmp, path);
+	chmodSync(path, 0o600);
+}
+
+/** Remember a spawned child so a later issue on this graph waits for it to exit. */
+export function rememberActiveChild(dir: string, graphId: string, pid: number): void {
+	const active = readActiveChildren(dir);
+	active[graphId] = pid;
+	writeActiveChildren(dir, active);
+}
+
+/** Drop a graph whose child has exited, so the next issue may use the checkout. */
+export function forgetActiveChild(dir: string, graphId: string): void {
+	const active = readActiveChildren(dir);
+	if (active[graphId] === undefined) return;
+	delete active[graphId];
+	writeActiveChildren(dir, active);
+}
+
+/**
+ * True when this graph still has a recorded child and that pid is alive.
+ * Dead pids are pruned, including other graphs, so a reused record cannot
+ * block a checkout forever.
+ */
+export function graphChildRunning(dir: string, graphId: string, isAlive: (pid: number) => boolean): boolean {
+	const active = readActiveChildren(dir);
+	let changed = false;
+	for (const [graph, pid] of Object.entries(active)) {
+		if (!isAlive(pid)) {
+			delete active[graph];
+			changed = true;
+		}
+	}
+	if (changed) writeActiveChildren(dir, active);
+	return active[graphId] !== undefined;
+}
+
 export interface WatchInput {
 	/** Process-group id to signal on timeout (the spawned child's pid). */
 	childPid: number;
@@ -122,8 +193,8 @@ export interface WatchInput {
 	/** Linear issue id, the given-up set key. */
 	issueId: string;
 	/**
-	 * `lease_epoch` from the pre-launch graph read. A higher epoch at exit
-	 * means this window claimed (and may already have released) the node.
+	 * Kept so callers can still pass the pre-launch epoch. It is not
+	 * evidence: a withdrawn claim and another session's claim both raise it.
 	 */
 	leaseEpochAtLaunch?: number;
 	/** Injected root: tmp in tests, never `/var/lib/substrate` here. */
@@ -146,32 +217,74 @@ export interface WatchDeps {
 	 * tick's marker comment plus dispatch-label removal. Never runs landed.
 	 */
 	onUnclaimed?: (outcome: GivenUpOutcome) => void | Promise<void>;
+	/**
+	 * True when a stored claim event shows this session's claim stood
+	 * during the watch, after release has cleared the node. A throw is
+	 * not evidence and must not skip the give-up.
+	 */
+	claimStood?: () => boolean | Promise<boolean>;
 }
 
 export type WatchResult = { status: "landed" } | { status: GivenUpOutcome };
 
-const TERMINAL_NODE_STATES = new Set(["completed", "canceled", "duplicate"]);
-
 /**
- * A no-claim reading is not a give-up when this session already held the
- * node or finished it between polls. Release clears `claimed_by` and
- * `claim_session`, so the epoch bump and a terminal state are what remain.
+ * This session is still the named holder. A released or withdrawn claim
+ * clears the session, so this does not fire for those; a bare epoch bump
+ * or another session's terminal state must not either.
  */
-function sessionAlreadySettled(node: WatchedNode | null, sessionId: string, epochAtLaunch: number | undefined): boolean {
+function sessionStillNamed(node: WatchedNode | null, sessionId: string): boolean {
 	if (node === null) return false;
-	if (node.claim_session === sessionId) return true;
-	if (node.state != null && TERMINAL_NODE_STATES.has(node.state)) return true;
-	return epochAtLaunch !== undefined && typeof node.lease_epoch === "number" && node.lease_epoch > epochAtLaunch;
+	return node.claimed_by === "hermes" && node.claim_session === sessionId;
 }
 
+async function storedClaimStood(deps: WatchDeps): Promise<boolean> {
+	if (!deps.claimStood) return false;
+	try {
+		return await deps.claimStood();
+	} catch {
+		return false;
+	}
+}
+
+
+/**
+ * Finish an unclaimed ending. A failed node read still writes the give-up:
+ * leaving it unwritten lets the restarted service launch the issue again.
+ * `aliveBeforeStop` is the parent's state before SIGKILL, so a parent that
+ * survived the grace is `claim-timeout` even if SIGKILL reaps it before
+ * the node read returns.
+ */
+async function finishUnclaimed(
+	input: WatchInput,
+	deps: WatchDeps,
+	aliveBeforeStop: boolean,
+	nowMs: number,
+): Promise<WatchResult> {
+	let settled: WatchedNode | null = null;
+	try {
+		settled = await deps.getNode();
+	} catch {
+		settled = null;
+	}
+	if (
+		isLanded(settled, input.sessionId, nowMs) ||
+		sessionStillNamed(settled, input.sessionId) ||
+		(await storedClaimStood(deps))
+	) {
+		return { status: "landed" };
+	}
+	const outcome: GivenUpOutcome = aliveBeforeStop ? "claim-timeout" : "exited-unclaimed";
+	markGivenUp(input.givenUpDir, input.issueId, outcome);
+	await deps.onUnclaimed?.(outcome);
+	return { status: outcome };
+}
 
 /**
  * Poll until landed, process exit, or the 900 s budget. A landed claim
  * wins over a simultaneous exit: the session claimed, then stopped.
  * Signal delivery to an already-dead child is a no-op. The grace always
  * SIGKILLs the process group before the give-up write, so a tool child
- * does not outlive the parent. A session that already claimed or finished
- * is landed instead of `exited-unclaimed`.
+ * does not outlive the parent.
  */
 export async function watchClaim(input: WatchInput, deps: WatchDeps): Promise<WatchResult> {
 	const now = deps.now ?? Date.now;
@@ -186,6 +299,9 @@ export async function watchClaim(input: WatchInput, deps: WatchDeps): Promise<Wa
 				// Already dead: the post-grace check below reports the exit.
 			}
 			await deps.sleep(SIGTERM_GRACE_MS);
+			// Snapshot before SIGKILL. The kill itself makes a parent that
+			// survived the grace look exited by the time getNode returns.
+			const survivedGrace = deps.isAlive();
 			try {
 				// The parent can exit during the grace while a tool child
 				// is still in the group. Stop the group before deciding.
@@ -193,27 +309,20 @@ export async function watchClaim(input: WatchInput, deps: WatchDeps): Promise<Wa
 			} catch {
 				// The group is already gone.
 			}
-			const settled = await deps.getNode();
-			if (isLanded(settled, input.sessionId, now()) || sessionAlreadySettled(settled, input.sessionId, input.leaseEpochAtLaunch)) {
-				return { status: "landed" };
-			}
-			if (!deps.isAlive()) {
-				markGivenUp(input.givenUpDir, input.issueId, "exited-unclaimed");
-				await deps.onUnclaimed?.("exited-unclaimed");
-				return { status: "exited-unclaimed" };
-			}
-			markGivenUp(input.givenUpDir, input.issueId, "claim-timeout");
-			await deps.onUnclaimed?.("claim-timeout");
-			return { status: "claim-timeout" };
+			return finishUnclaimed(input, deps, survivedGrace, now());
 		}
-		const node = await deps.getNode();
-		if (isLanded(node, input.sessionId, at)) return { status: "landed" };
-		if (!deps.isAlive()) {
-			if (sessionAlreadySettled(node, input.sessionId, input.leaseEpochAtLaunch)) return { status: "landed" };
-			markGivenUp(input.givenUpDir, input.issueId, "exited-unclaimed");
-			await deps.onUnclaimed?.("exited-unclaimed");
-			return { status: "exited-unclaimed" };
+		let node: WatchedNode | null = null;
+		try {
+			node = await deps.getNode();
+		} catch {
+			// A failed poll must not escape: the child may already be dead,
+			// and an escaped error skips the give-up the restart would honour.
+			if (!deps.isAlive()) return finishUnclaimed(input, deps, false, at);
+			await deps.sleep(pollInterval);
+			continue;
 		}
+		if (isLanded(node, input.sessionId, at) || sessionStillNamed(node, input.sessionId)) return { status: "landed" };
+		if (!deps.isAlive()) return finishUnclaimed(input, deps, false, at);
 		await deps.sleep(pollInterval);
 	}
 }

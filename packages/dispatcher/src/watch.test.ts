@@ -271,7 +271,7 @@ describe("watchClaim", () => {
 		expect(isGivenUp(dir, "iss-group")).toBe(true);
 	});
 
-	test("a claim that released between polls is not saved as a give-up", async () => {
+	test("a raised epoch without this session is a give-up, not a landed claim", async () => {
 		const dir = makeTmp();
 		const result = await watchClaim(
 			{ childPid: 111, sessionId: SESSION, issueId: "iss-fast", givenUpDir: dir, leaseEpochAtLaunch: 2 },
@@ -284,11 +284,11 @@ describe("watchClaim", () => {
 				pollIntervalMs: 1,
 			},
 		);
-		expect(result).toEqual({ status: "landed" });
-		expect(isGivenUp(dir, "iss-fast")).toBe(false);
+		expect(result).toEqual({ status: "exited-unclaimed" });
+		expect(isGivenUp(dir, "iss-fast")).toBe(true);
 	});
 
-	test("a finished node is not saved as a give-up", async () => {
+	test("another session finishing the node is not this child's claim", async () => {
 		const dir = makeTmp();
 		const result = await watchClaim(
 			{ childPid: 111, sessionId: SESSION, issueId: "iss-done", givenUpDir: dir, leaseEpochAtLaunch: 4 },
@@ -301,8 +301,67 @@ describe("watchClaim", () => {
 				pollIntervalMs: 1,
 			},
 		);
+		expect(result).toEqual({ status: "exited-unclaimed" });
+		expect(isGivenUp(dir, "iss-done")).toBe(true);
+	});
+
+	test("a stored claim event counts as landed after the node was cleared", async () => {
+		const dir = makeTmp();
+		const result = await watchClaim(
+			{ childPid: 111, sessionId: SESSION, issueId: "iss-stood", givenUpDir: dir },
+			{
+				getNode: () => node(),
+				isAlive: () => false,
+				signal: () => {},
+				sleep: async () => {},
+				now: () => NOW,
+				pollIntervalMs: 1,
+				claimStood: () => true,
+			},
+		);
 		expect(result).toEqual({ status: "landed" });
-		expect(isGivenUp(dir, "iss-done")).toBe(false);
+		expect(isGivenUp(dir, "iss-stood")).toBe(false);
+	});
+
+	test("a failed final read still writes the give-up", async () => {
+		const dir = makeTmp();
+		let now = NOW + WATCH_BUDGET_MS + 1;
+		const result = await watchClaim(
+			{ childPid: 555, sessionId: SESSION, issueId: "iss-read", givenUpDir: dir },
+			{
+				getNode: () => {
+					throw new Error("substrate-mcp graph_get timed out");
+				},
+				isAlive: () => true,
+				signal: () => {},
+				sleep: async (ms) => void (now += ms),
+				now: () => now,
+				pollIntervalMs: 1,
+			},
+		);
+		expect(result).toEqual({ status: "claim-timeout" });
+		expect(isGivenUp(dir, "iss-read")).toBe(true);
+	});
+
+	test("a parent that survives the grace is claim-timeout even if SIGKILL reaps it", async () => {
+		const dir = makeTmp();
+		let now = NOW;
+		let alive = true;
+		const result = await watchClaim(
+			{ childPid: 666, sessionId: SESSION, issueId: "iss-reaped", givenUpDir: dir },
+			{
+				getNode: () => node(),
+				isAlive: () => alive,
+				signal: (_pid, signal) => {
+					if (signal === "SIGKILL") alive = false;
+				},
+				sleep: async (ms) => void (now += ms),
+				now: () => now,
+				pollIntervalMs: WATCH_BUDGET_MS,
+			},
+		);
+		expect(result).toEqual({ status: "claim-timeout" });
+		expect(readGivenUp(dir)["iss-reaped"]?.outcome).toBe("claim-timeout");
 	});
 
 	test("signal delivery to an already-dead child still completes the give-up path", async () => {

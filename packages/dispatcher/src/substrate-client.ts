@@ -12,9 +12,12 @@
  * first SSE `data:` line, then the text content of the first result part.
  */
 
-export type AllowedToolName = "graph_find" | "graph_get" | "events_emit";
+export type AllowedToolName = "graph_find" | "graph_get" | "events_emit" | "events_query";
 
-const ALLOWED_TOOLS: Record<string, true> = { graph_find: true, graph_get: true, events_emit: true };
+const ALLOWED_TOOLS: Record<string, true> = { graph_find: true, graph_get: true, events_emit: true, events_query: true };
+
+/** Claim actions that mean the ledger accepted the hold. A withdrawn claim stores none of these. */
+const STOOD_CLAIM_ACTIONS: Record<string, true> = { granted: true, reclaimed: true, stolen: true };
 /**
  * MCP round-trip deadline. A hung read must die on its own: without this
  * the fetch outlives the 900 s watch that is supposed to bound the tick.
@@ -196,6 +199,30 @@ export class SubstrateClient {
 			// connection must not end the resident loop or stop the child.
 			const detail = error instanceof Error ? error.message : "unknown";
 			console.error(`substrate event not stored: kind=${event.kind} session=${event.session_id} (${detail})`);
+		}
+	}
+
+	/**
+	 * Whether this session stored a claim that stood at or after `since`.
+	 * Release clears the node, so the watch cannot see the session there;
+	 * the claim event remains. A withdrawn claim never stores one. Any
+	 * read failure is "no evidence", not a landed claim.
+	 */
+	async claimStood(sessionId: string, since: string): Promise<boolean> {
+		try {
+			const reply = await this.callTool<{ events?: Array<{ payload?: { action?: unknown } }> } | string>("events_query", {
+				session_id: sessionId,
+				since,
+				include_payload: true,
+				limit: 50,
+			});
+			if (typeof reply === "string" || !Array.isArray(reply.events)) return false;
+			return reply.events.some((event) => {
+				const action = event.payload?.action;
+				return typeof action === "string" && STOOD_CLAIM_ACTIONS[action] === true;
+			});
+		} catch {
+			return false;
 		}
 	}
 }

@@ -9,7 +9,10 @@
  *
  * The `already-claimed` gate is graph-wide: any live lease on any node of
  * the pre-read graph serializes dispatch per graph, because two issues on
- * the same graph would otherwise share one active checkout.
+ * the same graph would otherwise share one active checkout. A child that
+ * has already claimed keeps the checkout until its process exits, even
+ * after the watch returns and even after it releases the lease. Other
+ * graphs still dispatch in the same tick.
  *
  * One dispatch runs one 900 s watch to completion before the next issue
  * starts: the watch is the tick unit and the queue stalls behind it by
@@ -44,7 +47,16 @@ import {
 	type SpawnFn,
 } from "./launch-hermes.ts";
 import type { ClaudeCodeDialOutcome } from "./launch-claude-code.ts";
-import { isGivenUp, isLiveLease, watchClaim, type GivenUpOutcome, type WatchedNode } from "./watch.ts";
+import {
+	forgetActiveChild,
+	graphChildRunning,
+	isGivenUp,
+	isLiveLease,
+	rememberActiveChild,
+	watchClaim,
+	type GivenUpOutcome,
+	type WatchedNode,
+} from "./watch.ts";
 import { InvalidGraphIdError, InvalidRepoError, type EnsureWorktreeResult } from "./worktree.ts";
 
 /** The substrate surface tick talks to. `SubstrateClient` satisfies it. */
@@ -52,6 +64,11 @@ export interface TickSubstrate {
 	findNode(ref: { linear_issue_id: string; linear_identifier: string }): Promise<FindNodeResult>;
 	getGraph(graph_id: string): Promise<GraphSnapshot | null>;
 	emitEvent(event: DispatchEventInput): Promise<void>;
+	/**
+	 * Stored claim event for this session since `since`. Absent on test
+	 * fakes: the node naming the session is then the only landing evidence.
+	 */
+	claimStood?(sessionId: string, since: string): Promise<boolean>;
 }
 
 type _TickSubstrateContract = SubstrateClient extends TickSubstrate ? true : false;
@@ -174,6 +191,12 @@ export async function dispatchIssue(
 		return { status: "marked", outcome: "no-node" };
 	}
 	const { graph_id: graphId, node_id: nodeId, repo } = resolved;
+	// The previous child on this graph may still be editing the checkout
+	// after its lease ended. Do not open a second one. Other graphs are
+	// not in this record, so they proceed.
+	if (graphChildRunning(deps.givenUpDir, graphId, deps.isAlive)) {
+		return { status: "deferred", surface: "hermes" };
+	}
 	let sessionId: string;
 	try {
 		sessionId = buildSessionId(graphId, nodeId);
@@ -228,6 +251,8 @@ export async function dispatchIssue(
 		},
 		{ spawn: deps.spawn },
 	);
+	rememberActiveChild(deps.givenUpDir, graphId, child.pid);
+	const claimStood = deps.substrate.claimStood;
 
 	const watched = await watchClaim(
 		{
@@ -247,6 +272,9 @@ export async function dispatchIssue(
 			sleep: deps.sleep,
 			now: deps.now,
 			pollIntervalMs: deps.pollIntervalMs,
+			...(claimStood
+				? { claimStood: () => claimStood(sessionId, new Date(nowMs).toISOString()) }
+				: {}),
 			onUnclaimed: async (outcome) => {
 				await ensureMarkerComment(deps.linear, issue.id, outcome);
 				await removeDispatchLabels(deps.linear, issue);
@@ -254,6 +282,7 @@ export async function dispatchIssue(
 			},
 		},
 	);
+	if (!deps.isAlive(child.pid)) forgetActiveChild(deps.givenUpDir, graphId);
 	if (watched.status === "landed") {
 		await deps.substrate.emitEvent(launchedEvent(graphId, nodeId));
 		return { status: "landed" };
@@ -293,7 +322,8 @@ export async function runTick(deps: TickDeps): Promise<TickIssueSummary[]> {
 		summary.push({ issue, surface: null, result: { status: "marked", outcome: "not-dispatchable" } });
 	}
 	for (const { issue, surface } of dispatchable) {
-		summary.push({ issue, surface, result: await dispatchIssue(issue, surface, deps) });
+		const result = await dispatchIssue(issue, surface, deps);
+		summary.push({ issue, surface, result });
 	}
 	return summary;
 }
