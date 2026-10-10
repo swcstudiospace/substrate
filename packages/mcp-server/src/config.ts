@@ -9,6 +9,7 @@ import { normalizeTtlSeconds } from "./lease.ts";
 import { LINEAR_API_URL } from "./linear.ts";
 import { parseGrants, type MemoryGrant } from "./memory-policy.ts";
 import { NOTION_API_URL } from "./notion.ts";
+import { ragflowFromEnv, type RagflowConfig } from "./planes/ragflow.ts";
 import { SURFACES, SWARM_SURFACES, isSwarmSurface, type Surface } from "./types.ts";
 
 /** Default hermes-linear-connector base URL (D23-25). */
@@ -62,6 +63,14 @@ export interface SubstrateConfig {
 	 * it at a loopback fake. Production never sets this.
 	 */
 	notionApiUrl: string;
+	/**
+	 * The RAGFlow reach, or null when the plane is unconfigured (D25-02).
+	 *
+	 * Read from `RAGFLOW_URL` / `RAGFLOW_API_KEY` only; `RAGFLOW_MCP_URL`
+	 * names the unused MCP transport and is never read. Null leaves
+	 * docs_search degraded rather than broken.
+	 */
+	ragflow: RagflowConfig | null;
 	/** bearer token → surface. Lets every event be attributed to a caller. */
 	tokens: Map<string, Surface>;
 	/**
@@ -397,6 +406,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		dodGateTimeoutMs: parseDodGateTimeoutMs(env.SUBSTRATE_DOD_GATE_TIMEOUT_MS),
 		linearApiUrl: (env.LINEAR_API_URL?.trim() || LINEAR_API_URL).replace(/\/+$/, ""),
 		notionApiUrl: (env.NOTION_API_URL?.trim() || NOTION_API_URL).replace(/\/+$/, ""),
+		ragflow: ragflowFromEnv(env),
 		tokens,
 		allowAnonymous: allowAnonymousFrom(env, tokens.size),
 		operatorTokens: new Set(

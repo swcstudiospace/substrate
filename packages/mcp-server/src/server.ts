@@ -734,6 +734,38 @@ export function createHttpServer(
 				return;
 			}
 
+			// A read inside an agent's turn: fail-open, so anonymous callers reach
+			// the audit gate like every other read and an unreachable plane
+			// answers degraded rather than refusing the turn.
+			if (req.method === "POST" && url.pathname === "/docs/search") {
+				const parsed: unknown = JSON.parse(await readBody(req));
+				if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+					sendJson(res, 400, { error: "request body must be a JSON object" });
+					return;
+				}
+				if (!("question" in parsed) || typeof parsed.question !== "string") {
+					sendJson(res, 400, { error: "question is required" });
+					return;
+				}
+				const datasets = "datasets" in parsed ? parsed.datasets : undefined;
+				const sessionId = "session_id" in parsed ? parsed.session_id : undefined;
+				if (
+					(datasets !== undefined && !(Array.isArray(datasets) && datasets.every((name) => typeof name === "string"))) ||
+					(sessionId !== undefined && typeof sessionId !== "string")
+				) {
+					sendJson(res, 400, { error: "datasets must be a string array and session_id a string" });
+					return;
+				}
+				const fields: Record<string, unknown> = {
+					question: parsed.question,
+					...(datasets !== undefined ? { datasets } : {}),
+					...(sessionId !== undefined ? { session_id: sessionId } : {}),
+				};
+				if (!(await auditedRest(res, observability, surface, "docs_search", fields))) return;
+				sendJson(res, 200, await substrate.searchDocs(fields, surface));
+				return;
+			}
+
 			// A proposal spends the owner's GitHub credential, so an anonymous caller is refused
 			// before the body is read, even on a run that otherwise allows untokened callers.
 			if (req.method === "POST" && url.pathname === "/skills/propose") {

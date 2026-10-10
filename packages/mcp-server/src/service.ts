@@ -22,6 +22,7 @@ import {
 } from "./cache.ts";
 import { isReviewToken, type SubstrateConfig } from "./config.ts";
 import { DesktopBusy, type DesktopDriver, type DesktopLogEntry, type DesktopRunResult } from "./desktop/driver.ts";
+import { DEFAULT_SEARCH_DATASET_NAMES, searchDocs, type SearchReply } from "./docs-search.ts";
 import {
 	DEFAULT_IDLE_SECONDS,
 	analyzeDrift,
@@ -57,6 +58,7 @@ import { createMirror, type Mirror, type MirrorContext, type MirrorFailure, type
 import { runDodGate, type DodEvidence } from "./dod-gate.ts";
 import { normalizeSubject } from "./memory-policy.ts";
 import { governMemoryWrite } from "./memory-write.ts";
+import type { FetchLike } from "./planes/ragflow.ts";
 import { redact, type SkillDocExampleRule } from "./redact.ts";
 import {
 	createExecFileRunner,
@@ -681,6 +683,8 @@ export class Substrate {
 	private readonly cache: ReadThroughCache;
 	/** Connector-gate overrides for tests (connector fetch, URL, timeout); production reads config. */
 	private readonly dodGateTest: { fetchImpl?: typeof fetch; hermesLinearUrl?: string; timeoutMs?: number };
+	/** RAGFlow fetch override for tests; production uses the global fetch. */
+	private readonly ragflowFetch: FetchLike;
 	/** `graphId/nodeId` → tail of that node's gated-completion chain. */
 	private readonly completionChains = new Map<string, Promise<void>>();
 
@@ -694,6 +698,7 @@ export class Substrate {
 			mirror?: Mirror | null;
 			dodGate?: { fetchImpl?: typeof fetch; hermesLinearUrl?: string; timeoutMs?: number };
 			cache?: ReadThroughCache;
+			ragflowFetch?: FetchLike;
 			desktop?: DesktopDriver | null;
 		},
 		observer: SubstrateObserver = {},
@@ -717,6 +722,7 @@ export class Substrate {
 			});
 		this.desktop = stores?.desktop ?? null;
 		this.dodGateTest = stores?.dodGate ?? {};
+		this.ragflowFetch = stores?.ragflowFetch ?? fetch;
 		this.observer = observer;
 		this.cache =
 			stores?.cache ??
@@ -2133,6 +2139,37 @@ export class Substrate {
 			node: { ...node, lease_id: null },
 			lease: leaseView(leaseSnapshot(match)),
 		};
+	}
+
+	/**
+	 * DOCS-01: search the docs datasets through the substrate (D25-01).
+	 *
+	 * Read-only and fail-open: an unconfigured plane, an unreachable RAGFlow
+	 * or an unknown dataset scope yields `{chunks: [], degraded: true, reason}`
+	 * with a warning event, never a throw. `datasets` names configured
+	 * datasets; unknown names are ignored and raw ids are never accepted.
+	 */
+	async searchDocs(
+		input: { question?: unknown; datasets?: unknown; session_id?: unknown },
+		callerSurface: Surface | null,
+	): Promise<SearchReply> {
+		const surface = callerSurface ?? "claude-code";
+		const sessionId = typeof input.session_id === "string" && input.session_id.length > 0 ? input.session_id : undefined;
+		const question = typeof input.question === "string" ? input.question : "";
+		const names = Array.isArray(input.datasets)
+			? input.datasets.filter((name): name is string => typeof name === "string").filter((name) => DEFAULT_SEARCH_DATASET_NAMES.includes(name))
+			: [...DEFAULT_SEARCH_DATASET_NAMES];
+		return searchDocs(
+			{
+				config: this.config.ragflow,
+				datasetNames: names,
+				emit: (event) => this.emit(event),
+				surface,
+				...(sessionId !== undefined ? { sessionId } : {}),
+				fetchImpl: this.ragflowFetch,
+			},
+			question,
+		);
 	}
 
 	/**
