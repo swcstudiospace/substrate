@@ -7,6 +7,15 @@
  * config, ensure the verified worktree, spawn headless Hermes over an
  * ids-only prompt, and watch `graph_get` for the triple-condition landing.
  *
+ * The `already-claimed` gate is graph-wide: any live lease on any node of
+ * the pre-read graph serializes dispatch per graph, because two issues on
+ * the same graph would otherwise share one active checkout.
+ *
+ * One dispatch runs one 900 s watch to completion before the next issue
+ * starts: the watch is the tick unit and the queue stalls behind it by
+ * design. One dispatcher owns one session at a time this phase; concurrent
+ * dispatch arrives with phase 33.
+ *
  * Non-hermes dispatchable surfaces defer silently, except
  * `dispatch:claude-code`, which dials the Lane A loopback host without
  * sending anything: refused or timeout marks `host-unreachable`, an
@@ -151,9 +160,8 @@ export async function dispatchIssue(
 	const nowMs = (deps.now ?? Date.now)();
 
 	const preGraph = await deps.substrate.getGraph(graphId);
-	const preNode: WatchedNode | null =
-		preGraph?.nodes.find((node) => node.node_id === nodeId) ?? null;
-	if (preNode !== null && isLiveLease(preNode, nowMs)) {
+	const graphLive = preGraph?.nodes.some((node) => isLiveLease(node, nowMs)) ?? false;
+	if (graphLive) {
 		await ensureMarkerComment(deps.linear, issue.id, "already-claimed");
 		await deps.substrate.emitEvent(failedEvent(graphId, "already-claimed", nodeId));
 		return { status: "marked", outcome: "already-claimed" };

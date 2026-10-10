@@ -111,12 +111,21 @@ describe("dispatcher linear poll (DISP-01 / DISP-02)", () => {
 			hermesIssue(),
 			hermesIssue({ id: "issue-claude", identifier: "SWC-102", labels: [{ id: "lbl-cc", name: "dispatch:claude-code" }] }),
 			hermesIssue({ id: "issue-bare", identifier: "SWC-103", labels: [] }),
+			hermesIssue({
+				id: "issue-double",
+				identifier: "SWC-104",
+				labels: [
+					{ id: "lbl-a", name: "dispatch:hermes" },
+					{ id: "lbl-b", name: "dispatch:claude-code" },
+				],
+			}),
 		];
 		const fake = stubLinear(store);
 		const collected = await collectCandidates(fake.client);
 		expect(collected.dispatchable.map((entry) => entry.issue.identifier)).toEqual(["SWC-101", "SWC-102"]);
 		expect(collected.dispatchable.map((entry) => entry.surface)).toEqual(["hermes", "claude-code"]);
-		expect(collected.notDispatchable.map((issue) => issue.identifier)).toEqual(["SWC-103"]);
+		expect(collected.notDispatchable.map((issue) => issue.identifier)).toEqual(["SWC-104"]);
+		expect(collected.ignored.map((issue) => issue.identifier)).toEqual(["SWC-103"]);
 		expect(fake.queries.length).toBeGreaterThan(1);
 		for (const query of fake.queries) {
 			expect(query.toLowerCase()).not.toContain("title");
@@ -135,12 +144,21 @@ describe("dispatcher linear poll (DISP-01 / DISP-02)", () => {
 			labels: names.map((name, index) => ({ id: `lbl-${index}`, name })),
 		});
 		expect(classifyIssue(labels(["dispatch:hermes"]))).toEqual({ kind: "dispatchable", surface: "hermes" });
-		expect(classifyIssue(labels([])).kind).toBe("not-dispatchable");
-		expect(classifyIssue(labels(["Bug"])).kind).toBe("not-dispatchable");
+		expect(classifyIssue(labels([])).kind).toBe("ignored");
+		expect(classifyIssue(labels(["Bug"])).kind).toBe("ignored");
 		expect(classifyIssue(labels(["dispatch:hermes", "dispatch:claude-code"])).kind).toBe("not-dispatchable");
 		expect(classifyIssue(labels(["dispatch:hermes", "dispatch:hermes"])).kind).toBe("not-dispatchable");
 		expect(classifyIssue(labels(["dispatch:unknown-surface"])).kind).toBe("not-dispatchable");
 		expect(classifyIssue(labels(["dispatch:"])).kind).toBe("not-dispatchable");
+	});
+
+	test("issues without a dispatch label are ignored, never marked", async () => {
+		const store: FakeStoreIssue[] = [hermesIssue({ id: "issue-plain", identifier: "SWC-200", labels: [] })];
+		const fake = stubLinear(store);
+		const collected = await collectCandidates(fake.client);
+		expect(collected.dispatchable).toEqual([]);
+		expect(collected.notDispatchable).toEqual([]);
+		expect(collected.ignored.map((issue) => issue.identifier)).toEqual(["SWC-200"]);
 	});
 
 	test("marker is once-only even when buried past the first comment page", async () => {

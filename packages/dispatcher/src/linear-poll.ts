@@ -42,7 +42,10 @@ export interface PollIssue {
 	labels: PollLabel[];
 }
 
-export type IssueClassification = { kind: "dispatchable"; surface: string } | { kind: "not-dispatchable" };
+export type IssueClassification =
+	| { kind: "dispatchable"; surface: string }
+	| { kind: "not-dispatchable" }
+	| { kind: "ignored" };
 
 /** The Linear surface `LinearClient` exposes to the poll. Satisfied structurally; see `_pollClientContract` below. */
 export interface PollingClient {
@@ -67,10 +70,14 @@ export function markerBody(outcome: DispatchOutcome): string {
 
 /**
  * Exactly one `dispatch:<surface>` label with a known surface dispatches.
- * Zero, two or more, or an unknown suffix is `not-dispatchable` (DISP-04).
+ * One present-but-unknown label, two or more, or a bare `dispatch:` prefix
+ * is `not-dispatchable` (DISP-04). An issue with no `dispatch:`-prefixed
+ * label at all is `ignored`: unrelated work the dispatcher never comments
+ * on, counts, or prints.
  */
 export function classifyIssue(issue: PollIssue): IssueClassification {
 	const dispatchLabels = issue.labels.filter((label) => label.name.startsWith("dispatch:"));
+	if (dispatchLabels.length === 0) return { kind: "ignored" };
 	if (dispatchLabels.length !== 1) return { kind: "not-dispatchable" };
 	const only = dispatchLabels[0];
 	if (!only) return { kind: "not-dispatchable" };
@@ -147,11 +154,13 @@ export async function removeDispatchLabels(
 export interface CollectedCandidates {
 	dispatchable: Array<{ issue: PollIssue; surface: string }>;
 	notDispatchable: PollIssue[];
+	/** Unrelated issues: no `dispatch:` label, never commented or counted. */
+	ignored: PollIssue[];
 }
 
 /** Page the unstarted-issue list to the end and split by classification. */
 export async function collectCandidates(client: PollingClient): Promise<CollectedCandidates> {
-	const collected: CollectedCandidates = { dispatchable: [], notDispatchable: [] };
+	const collected: CollectedCandidates = { dispatchable: [], notDispatchable: [], ignored: [] };
 	let after: string | null = null;
 	for (;;) {
 		const page = await client.listUnstartedIssues(after);
@@ -159,6 +168,8 @@ export async function collectCandidates(client: PollingClient): Promise<Collecte
 			const classification = classifyIssue(node);
 			if (classification.kind === "dispatchable") {
 				collected.dispatchable.push({ issue: node, surface: classification.surface });
+			} else if (classification.kind === "ignored") {
+				collected.ignored.push(node);
 			} else {
 				collected.notDispatchable.push(node);
 			}
