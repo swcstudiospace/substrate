@@ -360,3 +360,99 @@ describe("no secrets in the repo", () => {
 		}
 	});
 });
+
+/**
+ * The substrate-only door (D25-01): RAGFlow is reached ONLY through
+ * `substrate-mcp` (`planes/ragflow.ts`). No RAGFlow MCP server appears in
+ * any agent config, and no package outside `mcp-server` imports the client.
+ */
+describe("RAGFlow is reachable only through substrate-mcp", () => {
+	test("no agent config registers a RAGFlow MCP server", async () => {
+		// Config files only: prose in the README and in docs/ has to be free
+		// to say that this wiring is forbidden.
+		const configs = [
+			...(await filesMatching("**/*.json")),
+			...(await filesMatching("**/*.{yaml,yml}")),
+			...(await filesMatching("**/*.toml")),
+			// The projector's sources, not its tests: a test asserting that no
+			// generated file names RAGFlow has to name it, and is the
+			// enforcement of this rule where the configs land.
+			...(await filesMatching("packages/projector/**/*.ts")).filter((path) => !path.endsWith(".test.ts")),
+		];
+
+		const offenders = configs.filter((path) => {
+			const body = read(path);
+			const registersServers = /mcpServers|mcp_servers|AddMcpServer|addMcpServer/.test(body);
+			return registersServers && /ragflow/i.test(body);
+		});
+
+		expect(offenders).toEqual([]);
+	});
+
+	test("no package outside the MCP server imports the RAGFlow client", async () => {
+		// Mirrors the ledger-client test above. The CLI proves its cap against
+		// the engine by reading the file as text rather than importing it for
+		// exactly this reason — a string naming the file is not an import.
+		const offenders = (await filesMatching("**/*.ts"))
+			.filter((path) => !path.startsWith(LEDGER_PACKAGE))
+			.filter((path) =>
+				/(from\s+["'][^"']*|import\s*\(\s*["']|require\s*\(\s*["'])[^"']*(planes\/ragflow|docs-search|docs-ingest|ragflow-fake)/.test(
+					read(path),
+				),
+			);
+
+		expect(offenders).toEqual([]);
+	});
+});
+
+/**
+ * A RAGFlow endpoint or key assigned a value (D25-02: credentials live only
+ * in the server env file).
+ *
+ * Test fixtures are exempt: `docs-search.test.ts` and `server.test.ts` pass
+ * `RAGFLOW_URL` into `loadConfig`, which is the point under test, and the
+ * values are reserved example hosts. What the scan protects is production
+ * code, env files, docs and configs — proved with inline bodies below.
+ */
+const RAGFLOW_CREDENTIAL = /RAGFLOW_(?:URL|API_KEY|MCP_URL)["']?\s*[:=]\s*["']?[^\s"']/;
+
+function carriesRagflowCredential(body: string): boolean {
+	return body
+		.split("\n")
+		.filter((line) => !/^\s*(?:#|\/\/|\*|<!--)/.test(line))
+		.some((line) => RAGFLOW_CREDENTIAL.test(line));
+}
+
+describe("no RAGFlow credentials in the repo", () => {
+	test("no committed non-test file carries a RAGFlow endpoint or credential", () => {
+		const offenders = trackedFiles()
+			.filter((path) => !path.endsWith(".test.ts"))
+			.filter((path) => path !== relative(ROOT, import.meta.path))
+			.filter((path) => carriesRagflowCredential(read(path)));
+
+		expect(offenders).toEqual([]);
+	});
+
+	test("the scan catches an endpoint or key with a value", () => {
+		for (const body of [
+			"RAGFLOW_URL=http://agent-substrate-forwarder:9380",
+			"RAGFLOW_API_KEY=rf-0123456789abcdef",
+			'  "RAGFLOW_MCP_URL": "http://x/mcp"',
+			"RAGFLOW_URL: http://x:9380",
+		]) {
+			expect({ body, caught: carriesRagflowCredential(body) }).toEqual({ body, caught: true });
+		}
+	});
+
+	test("the scan does not fire on a blank, a bare name or a code read", () => {
+		for (const body of [
+			"RAGFLOW_URL=",
+			"RAGFLOW_API_KEY=",
+			"Reads `RAGFLOW_URL` / `RAGFLOW_API_KEY` only.",
+			"const url = env.RAGFLOW_URL?.trim();",
+			"# RAGFLOW_API_KEY lives in the server env file",
+		]) {
+			expect({ body, caught: carriesRagflowCredential(body) }).toEqual({ body, caught: false });
+		}
+	});
+});
