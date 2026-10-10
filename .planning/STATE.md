@@ -5,11 +5,11 @@ milestone_name: Build plan completion
 current_phase: 29
 current_phase_name: agent-cards-and-teachable-moments
 status: executed
-stopped_at: Phase 29 executed and merged (PR #50 as bc8f839) — 29-01/02/03 + Greptile r1 fixes green; G1/G2/G3 live windows gated, see 29-VERIFICATION.md
-last_updated: "2026-10-10T23:00:00Z"
+stopped_at: Phase 30 verified at main tip 1dd3d1f (30-VERIFICATION.md, 12/12 must-haves, digest v3:6a3afd; live pixel chain + N1 ladder operator-gated) — phase-30 branch fully superseded by PR #31 squash, no follow-up PR; gates bun 2891/58/1 (F-01 known), pytest 230, tsc clean, phase-close pass
+last_updated: "2026-10-10T22:48:00Z"
 last_activity: 2026-10-10
-last_activity_desc: Phase 29 planned (teachable write path + fixture corpus, per-surface A2A cards + fake spec validator + loopback route, scratch anchor-coverage proof + docs; G1 spec validation, G2 card publication, G3 live anchor proof gated)
-state_head: bc8f839
+last_activity_desc: Phase 30 closeout (30-07 already complete per SUMMARY, not re-run; 30-VERIFICATION.md + digest written, verification status passed, ROADMAP checkbox set)
+state_head: 1dd3d1f
 progress:
   total_phases: 18
   completed_phases: 3

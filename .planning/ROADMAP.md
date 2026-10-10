@@ -71,7 +71,7 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 - [x] **Phase 27: Ledger primitives and ingest order** - Every closed hour has one deterministic Merkle root over its events in server ingest order (completed 2026-10-10 via PR #29; re-verified at 3754c6e, unit scope green, production v1.1.4 acceptance operator-gated)
 - [x] **Phase 28: Hourly anchor job and verify** - Each closed hour is anchored once on Solana devnet, and `verify` checks a graph against those anchors (completed 2026-10-09 via PR #35; verified at 35c8f5b, 20/20 must-haves, unit scope green, live L1-L10 tail operator-gated)
 - [ ] **Phase 29: Agent Cards and teachable moments** - Each surface publishes a valid A2A Agent Card listing its accepted teachables, which sit inside anchored hours
-- [ ] **Phase 30: desktop_run** - Authenticated agents drive the dedicated webtop through a closed, audited vocabulary
+- [x] **Phase 30: desktop_run** - Authenticated agents drive the dedicated webtop through a closed, audited vocabulary (completed 2026-10-09 via PR #31; verified at 1dd3d1f, 12/12 must-haves, unit scope green, live pixel chain + N1 ladder operator-gated)
 - [ ] **Phase 31: Lane A runtime: spike, packaging and VM host** - `substrate-host` runs from `main` with one agentos VM per Graph ID, inside the host's disk and port limits
 - [ ] **Phase 32: Lane A host core** - A host task works its node under the `claude-code` lease, survives a restart and keeps credentials on the host
 - [ ] **Phase 33: Lane A dispatch route and approvals** - `dispatch:claude-code` takes an issue to a gated Done through a Lane A VM, with human approval of permissions
@@ -349,7 +349,7 @@ Plans:
   5. A headless session's `desktop_run` returns a screenshot whose pixels show the typed marker.
 
 **Proof** (DESK-05): Isolated, against the Phase 16 harness and the local `substrate-desktop` container; no production service or store is touched.
-**Plans**: TBD
+**Plans**: 30-01 (driver+codec), 30-02 (allowlist+dir), 30-03 (lifecycle script), 30-04 (MCP registration), 30-05 (harness flag), 30-06 (N1 spike, live-gated), 30-07 (smoke+proof+docs)
 
 ### Phase 31: Lane A runtime: spike, packaging and VM host
 
@@ -414,7 +414,7 @@ Plans:
 | 27. Ledger primitives and ingest order | v1.3 | 4/4 | Complete    | 2026-10-10 |
 | 28. Hourly anchor job and verify | v1.3 | 4/4 | Complete    | 2026-10-10 |
 | 29. Agent Cards and teachable moments | v1.3 | 0/? | Not started | - |
-| 30. desktop_run | v1.3 | 0/? | Not started | - |
+| 30. desktop_run | v1.3 | 7/7 | Complete    | 2026-10-10 |
 | 31. Lane A runtime: spike, packaging and VM host | v1.3 | 0/? | Not started | - |
 | 32. Lane A host core | v1.3 | 0/? | Not started | - |
 | 33. Lane A dispatch route and approvals | v1.3 | 0/? | Not started | - |
