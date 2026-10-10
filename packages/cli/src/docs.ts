@@ -31,11 +31,12 @@ export const USAGE =
 export const MAX_PAGE_BYTES = 1_000_000;
 
 /**
- * Longer than the hooks' 1.5 s on purpose: an ingest uploads and polls a
- * parse behind this request, and a client that gave up first would leave the
- * user not knowing whether the page landed.
+ * Past the server's parse budget on purpose: one page may poll for a
+ * minute behind this request, and a client that gave up first would leave
+ * the user not knowing whether the page landed. The CLI ingests a single
+ * page per call, so one budget covers it.
  */
-export const DEFAULT_TIMEOUT_MS = 120_000;
+export const DEFAULT_TIMEOUT_MS = 180_000;
 
 /** Overridable with `SUBSTRATE_DOCS_TIMEOUT_MS`; anything that is not a positive number is the default. */
 export function docsTimeout(raw: string | undefined): number {

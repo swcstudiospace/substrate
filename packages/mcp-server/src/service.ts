@@ -688,10 +688,12 @@ export class Substrate {
 	private readonly ragflowFetch: FetchLike;
 	/** Source-URL ingest records for hash idempotency, held for the process lifetime. */
 	private docsIngestSeen = new Map<string, IngestRecord>();
-	/** In-flight page uploads by record key, so concurrent retries share one upload. */
-	private docsIngestFlight = new Map<string, Promise<PageSettlement>>();
+	/** In-flight page uploads by record key, tagged with the uploading sha. */
+	private docsIngestFlight = new Map<string, { task: Promise<PageSettlement>; sha: string }>();
 	/** Ingest-record hydration from the state file; awaited once per process. */
 	private docsSeenReady: Promise<void> | null = null;
+	/** Serialized state-file saves, so overlapping ingests cannot interleave snapshots. */
+	private docsSaveChain: Promise<void> = Promise.resolve();
 	/** `graphId/nodeId` → tail of that node's gated-completion chain. */
 	private readonly completionChains = new Map<string, Promise<void>>();
 
@@ -2200,15 +2202,20 @@ export class Substrate {
 	}
 
 	/**
-	 * Persist ingest records best-effort. A failing disk never fails the
-	 * ingest it just completed; the reason lands on stderr either way.
+	 * Persist ingest records best-effort, one save at a time. A failing disk
+	 * never fails the ingest it just completed; the reason lands on stderr
+	 * either way. Saves chain so overlapping ingests write whole snapshots
+	 * in order instead of interleaving them.
 	 */
 	private persistDocsSeen(): Promise<void> {
 		const file = this.config.docsStateFile;
 		if (!file) return Promise.resolve();
-		return saveIngestRecords(file, this.docsIngestSeen).catch((cause: unknown) => {
-			process.stderr.write(`[substrate] docs ingest records not saved — ${String(cause)}\n`);
-		});
+		this.docsSaveChain = this.docsSaveChain.then(() =>
+			saveIngestRecords(file, this.docsIngestSeen).catch((cause: unknown) => {
+				process.stderr.write(`[substrate] docs ingest records not saved — ${String(cause)}\n`);
+			}),
+		);
+		return this.docsSaveChain;
 	}
 
 

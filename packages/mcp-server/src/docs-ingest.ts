@@ -20,7 +20,7 @@
  * than calling a guessed endpoint.
  */
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import {
 	listDatasets,
@@ -93,8 +93,8 @@ export interface IngestDeps {
 	vmGuest?: boolean;
 	/** Records keyed `${dataset_id}::${source_url}`; held by the service, optionally persisted. */
 	seen?: Map<string, IngestRecord>;
-	/** In-flight uploads by the same key; held by the service so retries share one upload. */
-	locks?: Map<string, Promise<PageSettlement>>;
+	/** In-flight uploads by record key, tagged with the uploading sha; held by the service so retries serialize. */
+	locks?: Map<string, { task: Promise<PageSettlement>; sha: string }>;
 	/** Parse budget; production passes a real delay, tests pass zero. */
 	poll?: { maxPolls?: number; intervalMs?: number };
 	emit: (event: EventInput) => Promise<unknown>;
@@ -210,7 +210,7 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 	const sessionId = deps.sessionId ?? `docs-ingest:${randomUUID()}`;
 	const roots = deps.roots ?? DEFAULT_INGEST_ROOTS;
 	const seen = deps.seen ?? new Map<string, IngestRecord>();
-	const locks = deps.locks ?? new Map<string, Promise<PageSettlement>>();
+	const locks = deps.locks ?? new Map<string, { task: Promise<PageSettlement>; sha: string }>();
 	const config = deps.config;
 	if (deps.surface === null) return refused(deps, sessionId, "unauthenticated");
 	if (deps.vmGuest === true) return refused(deps, sessionId, "vm-guest");
@@ -246,57 +246,66 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 	const results: IngestPageResult[] = [];
 	for (const { page, sourceUrl, body, sha } of prepared) {
 		const key = recordKey(dataset.id, sourceUrl);
-		const prior = seen.get(key);
-		if (prior && prior.sha === sha) {
-			results.push({ path: page.path, source_url: sourceUrl, status: "unchanged", document_id: prior.document_id, content_sha256: sha });
-			continue;
-		}
-		// Synchronous check-and-set: no await sits between the lookup and
-		// the store, so a concurrent retry for the same key joins this
-		// upload instead of starting a second one.
-		const running = locks.get(key);
-		if (running) {
-			const settled = await running;
+		for (;;) {
+			const prior = seen.get(key);
+			if (prior && prior.sha === sha) {
+				results.push({ path: page.path, source_url: sourceUrl, status: "unchanged", document_id: prior.document_id, content_sha256: sha });
+				break;
+			}
+			// Synchronous check-and-set: no await sits between the lookup
+			// and the store, so concurrent retries serialize here.
+			const running = locks.get(key);
+			if (running && running.sha === sha) {
+				const settled = await running.task;
+				if (!settled.ok) return refused(deps, sessionId, settled.reason, { page: page.path });
+				results.push(settled.result);
+				break;
+			}
+			if (!running) {
+				const replacedPrior = prior;
+				const task: Promise<PageSettlement> = (async (): Promise<PageSettlement> => {
+					const uploaded = await uploadDocument(
+						config,
+						{
+							dataset_id: dataset.id,
+							content: body,
+							metadata: { source_url: sourceUrl, commit, heading_path: page.heading_path ?? "" },
+						},
+						deps.fetchImpl,
+					);
+					if (!uploaded.ok) return { ok: false, reason: uploaded.reason };
+					const parsed = await pollParseStatus(config, uploaded.document_id, deps.fetchImpl, {
+						maxPolls: deps.poll?.maxPolls,
+						intervalMs: deps.poll?.intervalMs,
+					});
+					if (!parsed.ok) return { ok: false, reason: parsed.reason };
+					const result: IngestPageResult = {
+						path: page.path,
+						source_url: sourceUrl,
+						status: replacedPrior ? "replaced" : "ingested",
+						document_id: uploaded.document_id,
+						content_sha256: sha,
+						...(replacedPrior ? { superseded_document_id: replacedPrior.document_id } : {}),
+					};
+					seen.set(key, { sha, dataset_id: dataset.id, source_url: sourceUrl, document_id: uploaded.document_id });
+					return { ok: true, result };
+				})();
+				locks.set(key, { task, sha });
+				let settled: PageSettlement;
+				try {
+					settled = await task;
+				} finally {
+					if (locks.get(key)?.task === task) locks.delete(key);
+				}
+				if (!settled.ok) return refused(deps, sessionId, settled.reason, { page: page.path });
+				results.push(settled.result);
+				break;
+			}
+			// A different body is mid-upload: wait for it, then recheck —
+			// a third writer may have stored ours meanwhile, else upload ours.
+			const settled = await running.task;
 			if (!settled.ok) return refused(deps, sessionId, settled.reason, { page: page.path });
-			results.push(settled.result);
-			continue;
 		}
-		const task: Promise<PageSettlement> = (async (): Promise<PageSettlement> => {
-			const uploaded = await uploadDocument(
-				config,
-				{
-					dataset_id: dataset.id,
-					content: body,
-					metadata: { source_url: sourceUrl, commit, heading_path: page.heading_path ?? "" },
-				},
-				deps.fetchImpl,
-			);
-			if (!uploaded.ok) return { ok: false, reason: uploaded.reason };
-			const parsed = await pollParseStatus(config, uploaded.document_id, deps.fetchImpl, {
-				maxPolls: deps.poll?.maxPolls,
-				intervalMs: deps.poll?.intervalMs,
-			});
-			if (!parsed.ok) return { ok: false, reason: parsed.reason };
-			const result: IngestPageResult = {
-				path: page.path,
-				source_url: sourceUrl,
-				status: prior ? "replaced" : "ingested",
-				document_id: uploaded.document_id,
-				content_sha256: sha,
-				...(prior ? { superseded_document_id: prior.document_id } : {}),
-			};
-			seen.set(key, { sha, dataset_id: dataset.id, source_url: sourceUrl, document_id: uploaded.document_id });
-			return { ok: true, result };
-		})();
-		locks.set(key, task);
-		let settled: PageSettlement;
-		try {
-			settled = await task;
-		} finally {
-			if (locks.get(key) === task) locks.delete(key);
-		}
-		if (!settled.ok) return refused(deps, sessionId, settled.reason, { page: page.path });
-		results.push(settled.result);
 	}
 
 	await deps.emit({
@@ -356,9 +365,15 @@ export async function loadIngestRecords(file: string): Promise<{ records: Map<st
 	return { records };
 }
 
-/** Persist ingest records. Throws on I/O failure; the caller logs and continues. */
+/**
+ * Persist ingest records. Throws on I/O failure; the caller logs and
+ * continues. Written to a sibling temp file and renamed, so a crash
+ * mid-write never leaves half a JSON document behind.
+ */
 export async function saveIngestRecords(file: string, seen: Map<string, IngestRecord>): Promise<void> {
 	await mkdir(dirname(file), { recursive: true });
 	const state: IngestStateFile = { version: 1, records: Object.fromEntries(seen) };
-	await writeFile(file, `${JSON.stringify(state)}\n`, "utf8");
+	const tmp = `${file}.${process.pid}.tmp`;
+	await writeFile(tmp, `${JSON.stringify(state)}\n`, "utf8");
+	await rename(tmp, file);
 }

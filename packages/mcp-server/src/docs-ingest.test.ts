@@ -298,7 +298,7 @@ describe("docs_ingest review hardening", () => {
 
 	test("concurrent retries for one page share a single upload", async () => {
 		const fake = new RagflowFake();
-		const locks = new Map<string, Promise<PageSettlement>>();
+		const locks = new Map<string, { task: Promise<PageSettlement>; sha: string }>();
 		const left = harness(fake, { locks, poll: { intervalMs: 0 } });
 		const right = harness(fake, { locks, seen: left.seen, poll: { intervalMs: 0 } });
 		const [a, b] = await Promise.all([
@@ -308,6 +308,22 @@ describe("docs_ingest review hardening", () => {
 		if (!a.ok || !b.ok) throw new Error("expected both to settle");
 		expect(fake.uploads).toHaveLength(1);
 		expect(a.results[0]?.document_id).toBe(b.results[0]?.document_id);
+	});
+
+	test("a concurrent retry with different content uploads its own page", async () => {
+		const fake = new RagflowFake();
+		const locks = new Map<string, { task: Promise<PageSettlement>; sha: string }>();
+		const left = harness(fake, { locks, poll: { intervalMs: 0 } });
+		const right = harness(fake, { locks, seen: left.seen, poll: { intervalMs: 0 } });
+		const [a, b] = await Promise.all([
+			left.ingest({ dataset: "agent-substrate", pages: [PAGE] }),
+			right.ingest({ dataset: "agent-substrate", pages: [{ ...PAGE, body: `${PAGE.body} Newer.` }] }),
+		]);
+		if (!a.ok || !b.ok) throw new Error("expected both to settle");
+		expect(fake.uploads).toHaveLength(2);
+		expect(a.results[0]?.status).toBe("ingested");
+		expect(b.results[0]?.status).toBe("replaced");
+		expect(b.results[0]?.superseded_document_id).toBe(a.results[0]?.document_id);
 	});
 
 	test("a replacement reports the superseded document id", async () => {
