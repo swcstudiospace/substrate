@@ -74,6 +74,25 @@ def test_changed_content_changes_the_line_while_same_content_stays_identical(tmp
     assert after.split(" ")[2] != before.split(" ")[2]
 
 
+def test_hashes_only_the_newest_100(tmp_path, monkeypatch):
+    for i in range(105):
+        transcript(tmp_path, f"conv-{i:03d}", 1_000 + i)
+    seen: list[str] = []
+    import substrate_miner.monitor as monitor
+
+    real = monitor._fingerprint
+
+    def spy(path: Path) -> str:
+        seen.append(path.name)
+        return real(path)
+
+    monkeypatch.setattr(monitor, "_fingerprint", spy)
+    monitor_output(tmp_path, "2026-09-26")
+    assert len(seen) == 100
+    assert "conv-000.jsonl" not in seen
+    assert "conv-104.jsonl" in seen
+
+
 def test_fingerprint_is_the_sha256_of_the_bytes(tmp_path):
     transcript(tmp_path, "a-conv", 100)
     assert _fingerprint(tmp_path / "a-conv.jsonl") == EMPTY_FP

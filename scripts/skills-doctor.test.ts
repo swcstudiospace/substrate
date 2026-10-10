@@ -115,6 +115,21 @@ describe("bridgeEnvFindings", () => {
 		}
 	});
 
+	test("a file that does not set SUBSTRATE_URL is a finding and does not echo other values", () => {
+		const findings = bridgeEnvFindings(
+			"/etc/substrate/substrate-bridge.env",
+			"NOTES=/tmp/do-not-echo-this-value\n",
+		);
+		expect(findings.map((finding) => finding.code)).toEqual(["bridge-env"]);
+		expect(findings[0]?.detail).toContain("SUBSTRATE_URL");
+		expect(JSON.stringify(findings)).not.toContain("do-not-echo-this-value");
+	});
+
+	test("an empty assignment does not count as the URL", () => {
+		const findings = bridgeEnvFindings("/etc/substrate/substrate-bridge.env", "SUBSTRATE_URL=\n");
+		expect(findings[0]?.detail).toContain("SUBSTRATE_URL");
+	});
+
 	test("a missing env file is a finding", () => {
 		expect(bridgeEnvFindings("/etc/substrate/substrate-bridge.env", null).map((finding) => finding.code)).toEqual([
 			"bridge-env",

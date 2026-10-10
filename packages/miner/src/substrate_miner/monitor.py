@@ -51,16 +51,18 @@ def _fingerprint(path: Path) -> str:
 
 def monitor_output(directory: Path | str | None = None, today: str = "") -> str:
     root = Path(directory) if directory is not None else transcripts_dir()
-    entries: list[tuple[float, str, str]] = []
+    # Cut to the newest 100 by mtime before hashing. Older retained
+    # conversations are not read: their fingerprints would be discarded.
+    candidates: list[tuple[float, str, Path]] = []
     if root.is_dir():
         for path in root.glob("*.jsonl"):
             try:
                 if path.is_file():
-                    entries.append((path.stat().st_mtime, path.stem, _fingerprint(path)))
+                    candidates.append((path.stat().st_mtime, path.stem, path))
             except OSError:
                 continue
-    newest = sorted(entries, key=lambda e: (e[0], e[1]), reverse=True)[:NEWEST]
-    lines = [f"transcript {conversation_id} {digest}" for _, conversation_id, digest in
+    newest = sorted(candidates, key=lambda e: (e[0], e[1]), reverse=True)[:NEWEST]
+    lines = [f"transcript {conversation_id} {_fingerprint(path)}" for _, conversation_id, path in
              sorted(newest, key=lambda e: e[1])]
     lines.append(f"day {today}")
     return "\n".join(lines) + "\n"

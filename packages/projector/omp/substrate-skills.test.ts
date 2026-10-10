@@ -1,9 +1,10 @@
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import register, {
 	createHandler,
+	writeAllSync,
 	type FetchLike,
 	type OmpPi,
 	renderSkillMd,
@@ -155,6 +156,18 @@ describe("createHandler", () => {
 		expect(existing?.reason).toContain(`${PR} (existing)`);
 		const unchanged = await handlerWith(fakeFetch(() => reply(200, { status: "unchanged" })).fetchImpl)(create);
 		expect(unchanged).toEqual({ block: true, reason: "The library already has this exact skill (deploy-notes); nothing was written." });
+	});
+
+	test("a short write is retried until every byte is on disk", () => {
+		const path = join(dir, "partial.json");
+		const fd = openSync(path, "wx", 0o600);
+		const text = `${JSON.stringify({ name: "deploy-notes", surface: "omp" })}\n`;
+		try {
+			writeAllSync(fd, text, (handle, buffer, offset, length) => writeSync(handle, buffer, offset, Math.min(3, length)));
+		} finally {
+			closeSync(fd);
+		}
+		expect(readFileSync(path, "utf8")).toBe(text);
 	});
 
 	test("a missing token queues without a request, and the pending file never holds the token", async () => {

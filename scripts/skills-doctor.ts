@@ -281,6 +281,7 @@ export function bridgeEnvFindings(bridgeEnvFile: string, envText: string | null)
 	if (envText === null) {
 		return [{ code: "bridge-env", detail: "the bridge env file is not installed yet" }];
 	}
+	let sawUrl = false;
 	for (const raw of envText.split("\n")) {
 		const line = raw.trim();
 		if (line === "" || line.startsWith("#")) continue;
@@ -291,6 +292,10 @@ export function bridgeEnvFindings(bridgeEnvFile: string, envText: string | null)
 		if ((SINGLE_TOKEN_VARS as readonly string[]).includes(name)) {
 			return [{ code: "bridge-env", detail: `the bridge env file defines ${name}` }];
 		}
+		if (name === "SUBSTRATE_URL" && body.slice(eq + 1).trim() !== "") sawUrl = true;
+	}
+	if (!sawUrl) {
+		return [{ code: "bridge-env", detail: "the bridge env file does not set SUBSTRATE_URL" }];
 	}
 	return [];
 }

@@ -446,6 +446,10 @@ async function main(): Promise<number> {
 		// retried: the first tick uses a token the twin will reject.
 		writeFileSync(join(libDir, "DIRTY.md"), "smoke dirty checkout\n");
 		const dirtyStarted = new Date().toISOString();
+		// One UTC day for all three ticks. A wall clock that crosses midnight
+		// between the posted warning and the repeat would send the next day's
+		// reminder and the read-back would see two warnings.
+		const dirtyAt = new Date("2026-10-10T12:00:00.000Z");
 		const dirtyTick = async (tokenEnv: Record<string, string | undefined>) =>
 			runSync({
 				runner: execFileRunner,
@@ -454,6 +458,7 @@ async function main(): Promise<number> {
 				log: () => undefined,
 				emitWarning: (event) => postWarning(event, { SUBSTRATE_URL: base, ...tokenEnv }),
 				project: async () => undefined,
+				clock: () => dirtyAt,
 			});
 		const refused = await dirtyTick({ SUBSTRATE_TOKEN: "not-a-token" });
 		const posted = await dirtyTick({ SUBSTRATE_TOKENS_DIR: tokensDir });

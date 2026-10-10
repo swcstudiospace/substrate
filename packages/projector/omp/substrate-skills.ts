@@ -33,7 +33,7 @@
  * copy of the token module's rule, so this file loads standalone.
  */
 import { randomBytes } from "node:crypto";
-import { chmodSync, closeSync, mkdirSync, openSync, readSync, statSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, mkdirSync, openSync, readSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { join } from "node:path";
 
 export interface ToolCallEvent {
@@ -76,6 +76,25 @@ export interface ProposeBody {
 }
 
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
+
+/**
+ * Write every UTF-8 byte. `writeSync` may accept only a prefix; a short
+ * count is retried from the remainder, and a write that makes no progress
+ * fails instead of reporting a truncated file as queued.
+ */
+export function writeAllSync(
+	fd: number,
+	text: string,
+	write: (fd: number, buffer: Buffer, offset: number, length: number) => number = writeSync,
+): void {
+	const bytes = Buffer.from(text, "utf8");
+	let offset = 0;
+	while (offset < bytes.length) {
+		const wrote = write(fd, bytes, offset, bytes.length - offset);
+		if (wrote <= 0) throw new Error("proposal queue write made no progress");
+		offset += wrote;
+	}
+}
 
 export interface HandlerOptions {
 	fetchImpl: FetchLike;
@@ -249,11 +268,19 @@ export function createHandler(opts: HandlerOptions): (event: ToolCallEvent, ctx?
 				if ((cause as NodeJS.ErrnoException)?.code === "EEXIST") continue;
 				throw cause;
 			}
+			const payload = `${JSON.stringify(body)}\n`;
 			try {
-				writeSync(fd, `${JSON.stringify(body)}\n`);
-			} finally {
+				writeAllSync(fd, payload);
+			} catch (cause) {
 				closeSync(fd);
+				try {
+					unlinkSync(path);
+				} catch {
+					// The exclusive file must not stay truncated for the drain.
+				}
+				throw cause;
 			}
+			closeSync(fd);
 			chmodSync(path, 0o600);
 			return { kind: "queued", path };
 		}
