@@ -107,6 +107,17 @@ describe("buildAgentCard", () => {
 		expect(card.skills[1]).toMatchObject({ id: "mem_1", name: "backoff" });
 	});
 
+	test("folded names that collide take a numeric suffix", () => {
+		const card = buildAgentCard("hermes", BASE, [
+			teachableEntry({ id: "mem_2", subject: "teachable:retry-budget" }),
+			teachableEntry({ id: "mem_1", subject: "teachable:Retry Budget" }),
+		]);
+
+		expect(card.skills.map((skill) => skill.name)).toEqual(["retry-budget", "retry-budget-2"]);
+		expect(new Set(card.skills.map((skill) => skill.name)).size).toBe(card.skills.length);
+		expect(validateAgentCard(card)).toEqual([]);
+	});
+
 	test("an empty surface still validates — no teachables is a card with no skills", () => {
 		const card = buildAgentCard("hermes", BASE, []);
 

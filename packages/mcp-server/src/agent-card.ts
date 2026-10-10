@@ -92,6 +92,32 @@ function skillForTeachable(entry: MemoryEntry): AgentCardSkill {
 }
 
 /**
+ * A name not already on this card. Folded slugs collide (`Retry Budget` and
+ * `retry-budget` are the same rule-name); the later entry takes `-2`, `-3`,
+ * …, still inside the 64-character skill-name rule.
+ */
+function uniqueSkillName(base: string, used: Set<string>): string {
+	if (!used.has(base)) return base;
+	for (let n = 2; n < 1000; n++) {
+		const suffix = `-${n}`;
+		const trimmed = base.slice(0, 64 - suffix.length).replace(/-+$/g, "");
+		const candidate = `${trimmed}${suffix}`;
+		if (SKILL_NAME_RE.test(candidate) && !used.has(candidate)) return candidate;
+	}
+	return base;
+}
+
+function skillsForTeachables(teachables: MemoryEntry[]): AgentCardSkill[] {
+	const used = new Set<string>();
+	return teachables.map((entry) => {
+		const skill = skillForTeachable(entry);
+		const name = uniqueSkillName(skill.name, used);
+		used.add(name);
+		return { ...skill, name };
+	});
+}
+
+/**
  * The card for one surface: its loopback URL, the A2A v1.0 fields, and one
  * skill entry per teachable, newest first as the reader returns them.
  *
@@ -112,7 +138,7 @@ export function buildAgentCard(surface: Surface, baseUrl: string, teachables: Me
 		capabilities: { streaming: false, pushNotifications: false },
 		defaultInputModes: ["text"],
 		defaultOutputModes: ["text"],
-		skills: teachables.map(skillForTeachable),
+		skills: skillsForTeachables(teachables),
 	};
 }
 
