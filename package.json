@@ -17,7 +17,7 @@
   ],
   "scripts": {
     "test": "bun test",
-    "check": "bunx tsc --noEmit",
+    "test:py": "python3 -m pytest packages/miner/tests",
     "mcp": "bun packages/mcp-server/src/index.ts",
     "substrate": "bun packages/cli/src/index.ts",
     "smoke:greptime": "bun scripts/greptime-smoke.ts",
