@@ -247,7 +247,9 @@ summed request counts (sum of point `value` fields), not point counts.
 
 | Date (UTC) | identity:check | stranded live clients | unattributed 4xx at restart | unattributed 4xx after soak |
 | --- | --- | --- | --- | --- |
-| | | | | |
+| 2026-10-10 | PASS — names-only live, `--values` on the staged file pre-promote | 0 | 0 | 3 (dormant roster — skills-sync/bridge/miner/anchor attempts; every live surface clean 2xx) |
+
+Window 2026-10-10 14:23–15:00Z: switch-on 14:22Z (staged env promoted, one restart, `parity:check` PASS); 2xx by surface at soak close — claude-code 23, muse 14 (writer ticks), omp 14 (herdr per-event), cursor 1; hermes/grok-build/grok-bot idle in window (no prompts). Cache side: loopback redis, `connected:true`, 0 errors.
 
 ## Rollback
 

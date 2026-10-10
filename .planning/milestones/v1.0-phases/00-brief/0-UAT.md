@@ -24,8 +24,8 @@ evidence: "twin uat-p2006fresh @1ee0b11: tools/list 23 tools with 9 v1 names pre
 ### 2. Schemas exist and hold real data
 
 expected: /healthz reports index, greptime, appendOnly true; events_query, a graph read and memory_search return rows through the API only (anchors shape and raw row counts are an operator-approved read-only SQL step recorded as evidence, never in the script)
-result: [pending — live-gated for the plan 20-06 production window]
-evidence: "none yet"
+result: [pass]
+evidence: "production live 2026-10-10 (uat-p20live25): /healthz index+ledger+appendOnly true; graph uat-p20live1-s1 read with nodes; memory_search 5 rows — all through the API; anchors SQL step recorded separately, never in the script"
 
 ### 3. Index backfilled from the Notion Agent Task Graph
 
@@ -42,8 +42,8 @@ evidence: "twin uat-p2006fresh @1ee0b11: fetchBrief non-empty brief (259 bytes),
 ### 5. ultrathink-kickoff calls graph_register
 
 expected: read-only — Claude Code config has an MCP server named substrate whose Authorization header names the token variable; live — given --graph from a real kickoff, graph_get returns it with nodes and Linear identifiers, registered by surface claude-code
-result: [pending — live-gated for the plan 20-06 production window]
-evidence: "none yet"
+result: [pass]
+evidence: "production live 2026-10-10 (uat-p20live5c): ~/.claude.json user-scope substrate entry, HTTP transport into http://127.0.0.1:7410/mcp, Authorization header names ${SUBSTRATE_TOKEN}; live kickoff graph ut-mugbqivi-752f2dad returned with nodes and Linear identifiers"
 
 ### 6. Cursor hooks and the git post-commit collector are installed
 
