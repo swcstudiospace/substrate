@@ -199,6 +199,12 @@ async function main(argv: string[]): Promise<number> {
 		SUBSTRATE_MCP_URL: `${fakeBase}/mcp`,
 		LINEAR_API_KEY: linearKey,
 		SUBSTRATE_TOKEN: mcpBearer,
+		// Pin the whole bearer chain to scratch: an inherited
+		// SUBSTRATE_TOKEN_SUBSTRATE (now first priority) or token file
+		// must never reach the fakes, and a failed check must never print
+		// a real header (Greptile P1 security).
+		SUBSTRATE_TOKEN_SUBSTRATE: mcpBearer,
+		SUBSTRATE_TOKEN_FILE: "",
 		SUBSTRATE_ENV_FILE: envFile,
 		SUBSTRATE_STATE_DIR: join(runDir, "state"),
 		PYTHONPATH: join(repoRoot, "packages/dispatcher/src"),
@@ -232,9 +238,9 @@ async function main(argv: string[]): Promise<number> {
 	check("c1 dry-run exits 0", c1.code === 0, c1.err.slice(0, 200));
 	check("c1 logs the launch decision", c1log.includes("RHS-101 dispatch:hermes → launch: graph"), c1.out.slice(0, 300));
 	const c1Poll = world.linear.find((r) => r.op === "Poll");
-	check("c1 Linear poll carries the raw key", c1Poll?.auth === linearKey, String(c1Poll?.auth));
+	check("c1 Linear poll carries the raw key", c1Poll?.auth === linearKey, c1Poll ? "wrong key" : "no poll request");
 	const c1Find = world.mcp.find((r) => r.tool === "graph_find");
-	check("c1 graph_find carries the substrate bearer", c1Find?.auth === `Bearer ${mcpBearer}`, String(c1Find?.auth));
+	check("c1 graph_find carries the substrate bearer", c1Find?.auth === `Bearer ${mcpBearer}`, c1Find ? "wrong bearer" : "no graph_find request");
 	check(
 		"c1 dry-run writes nothing",
 		world.linear.every((r) => r.op === "Poll" || r.op === "Comments") && world.mcp.every((r) => r.tool !== "events_emit"),
