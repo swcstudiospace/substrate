@@ -454,13 +454,13 @@ describe("memory_search", () => {
 		return client;
 	}
 
-	test("with neither new parameter, the reply is the bare list it always was", async () => {
+	test("with neither new parameter, the reply carries index entries plus derived plane hits", async () => {
 		const stub = searchIndex();
 		const client = await connectIndex(stub.index);
 		const reply = await call(client, "memory_search", { query: "lease", scope: "repo:acme/widgets", limit: 5 });
 
 		expect(reply.isError).toBe(false);
-		expect(Array.isArray(JSON.parse(reply.text))).toBe(true);
+		expect(reply.json()).toMatchObject({ entries: [{ id: "mem_1" }], derived: [], degraded: false });
 		expect(stub.plain).toEqual([["lease", "repo:acme/widgets", 5, undefined]]);
 		expect(stub.paged).toEqual([]);
 	});

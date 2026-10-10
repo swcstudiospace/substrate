@@ -325,7 +325,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 		async (request) => {
 			try {
 				if (isPagedSearch(request)) return json(await substrate.searchMemoryPage(request, callerSurface ?? "unattributed"));
-				// The reply a caller got before paging existed, to the byte.
+				// Index entries first with derived plane hits appended (D26-05).
 				if (request.query === undefined) {
 					return refusal("memory_search needs `query`, or `subject_prefix` to list a subject family");
 				}
