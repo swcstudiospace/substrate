@@ -32,7 +32,8 @@
  * pi-coding-agent's extensibility/shared-events.ts ToolCallEventResult, and the resolver below is a
  * copy of the token module's rule, so this file loads standalone.
  */
-import { chmodSync, closeSync, mkdirSync, openSync, readSync, statSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { chmodSync, closeSync, mkdirSync, openSync, readSync, statSync, writeSync } from "node:fs";
 import { join } from "node:path";
 
 export interface ToolCallEvent {
@@ -84,6 +85,7 @@ export interface HandlerOptions {
 	env?: Record<string, string | undefined>;
 	readFile?: (path: string) => string | null;
 	now?: () => Date;
+	randomHex?: () => string;
 }
 
 /** Same literal as mcp-server skills/propose.ts SKILL_NAME_RE (copied: this file loads standalone). */
@@ -230,15 +232,32 @@ export function createHandler(opts: HandlerOptions): (event: ToolCallEvent, ctx?
 	const now = opts.now ?? (() => new Date());
 	const env = opts.env ?? process.env;
 	const read = opts.readFile ?? firstLineOfFile;
+	const randomHex = opts.randomHex ?? (() => randomBytes(8).toString("hex"));
 	const endpoint = `${opts.url.replace(/\/+$/, "")}/skills/propose`;
 
 	function queue(body: ProposeBody): Outcome {
 		mkdirSync(opts.pendingDir, { recursive: true, mode: 0o700 });
 		const at = now().toISOString().replace(/\.\d{3}Z$/, "Z").replace(/[-:]/g, ""); // yyyymmddThhmmssZ
-		const path = join(opts.pendingDir, `${body.name}-${at}.json`);
-		writeFileSync(path, `${JSON.stringify(body)}\n`, { mode: 0o600 });
-		chmodSync(path, 0o600);
-		return { kind: "queued", path };
+		// Two proposals for one skill in one second must not share a file: a random suffix plus
+		// exclusive create keeps the first. A collision retries with a fresh suffix.
+		for (let attempt = 0; attempt < 100; attempt++) {
+			const path = join(opts.pendingDir, `${body.name}-${at}-${randomHex()}.json`);
+			let fd: number;
+			try {
+				fd = openSync(path, "wx", 0o600);
+			} catch (cause) {
+				if ((cause as NodeJS.ErrnoException)?.code === "EEXIST") continue;
+				throw cause;
+			}
+			try {
+				writeSync(fd, `${JSON.stringify(body)}\n`);
+			} finally {
+				closeSync(fd);
+			}
+			chmodSync(path, 0o600);
+			return { kind: "queued", path };
+		}
+		throw new Error(`could not queue a proposal for ${body.name}: the pending directory keeps colliding`);
 	}
 
 	async function propose(body: ProposeBody): Promise<Outcome> {
@@ -274,7 +293,9 @@ export function createHandler(opts: HandlerOptions): (event: ToolCallEvent, ctx?
 			if (skill === null) return undefined;
 			if (!SKILL_NAME_RE.test(skill.name)) {
 				const reason = `invalid skill name ${JSON.stringify(skill.name.slice(0, 80))}: must match ${SKILL_NAME_RE.source}; nothing was proposed or written.`;
-				return { block: true, reason };
+				// A failed skill branch must not block the whole learn call: the lesson still
+				// lands, with the skill failure reported beside it.
+				return skill.kind === "learn" ? strip(event, reason) : { block: true, reason };
 			}
 			const sid = sessionIdOf(ctx);
 			const body: ProposeBody = {
@@ -292,7 +313,9 @@ export function createHandler(opts: HandlerOptions): (event: ToolCallEvent, ctx?
 			return skill.kind === "learn" ? strip(event, text) : { block: true, reason: text };
 		} catch (cause) {
 			const message = cause instanceof Error ? cause.message : String(cause);
-			return { block: true, reason: `substrate-skills extension failed (${message.slice(0, 200)}); nothing was written locally.` };
+			const reason = `substrate-skills extension failed (${message.slice(0, 200)}); nothing was written locally.`;
+			const skill = skillFromToolCall(event);
+			return skill?.kind === "learn" ? strip(event, reason) : { block: true, reason };
 		}
 	};
 }

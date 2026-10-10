@@ -67,14 +67,15 @@ const expectedBody = {
 	files: { "SKILL.md": "---\nname: deploy-notes\ndescription: How to deploy\n---\n\n1. Build\n2. Ship\n" },
 	surface: "omp",
 };
-const pendingPath = () => join(pendingDir, "deploy-notes-20260926T101112Z.json");
-const pendingFiles = () => {
+const pendingPrefix = "deploy-notes-20260926T101112Z-";
+const pendingMatch = () => {
 	try {
-		return readdirSync(pendingDir);
+		return readdirSync(pendingDir).filter((f) => f.startsWith(pendingPrefix) && f.endsWith(".json"));
 	} catch {
 		return [];
 	}
 };
+const pendingPath = () => join(pendingDir, pendingMatch()[0] as string);
 
 describe("skillFromToolCall", () => {
 	test("manage_skill create/update are skill writes; delete, learn without skill and other tools are not", () => {
@@ -145,7 +146,7 @@ describe("createHandler", () => {
 		const body = JSON.parse(String(calls[0]?.init.body));
 		expect(body).toMatchObject(expectedBody);
 		expect(body.rationale).toContain("manage_skill");
-		expect(pendingFiles()).toEqual([]);
+		expect(pendingMatch()).toEqual([]);
 	});
 
 	test("existing and unchanged replies block with their own reasons", async () => {
@@ -163,8 +164,9 @@ describe("createHandler", () => {
 		const result = await handlerWith(fetchImpl, 50, { SUBSTRATE_TOKENS_DIR: empty })(create);
 		expect(calls).toHaveLength(0);
 		expect(result?.block).toBe(true);
-		expect(result?.reason).toContain(pendingPath());
+		expect(result?.reason).toContain(pendingPrefix);
 		expect(result?.reason).not.toContain(KEY);
+		expect(pendingMatch()).toHaveLength(1);
 		expect(readFileSync(pendingPath(), "utf8")).not.toContain(KEY);
 	});
 
@@ -172,7 +174,8 @@ describe("createHandler", () => {
 		const { fetchImpl } = fakeFetch(() => reply(401, { error: "unknown surface" }));
 		const result = await handlerWith(fetchImpl)(create);
 		expect(result?.block).toBe(true);
-		expect(result?.reason).toContain(pendingPath());
+		expect(result?.reason).toContain(pendingPrefix);
+		expect(pendingMatch()).toHaveLength(1);
 		const text = readFileSync(pendingPath(), "utf8");
 		expect(text).not.toContain(KEY);
 		expect(JSON.parse(text)).toMatchObject(expectedBody);
@@ -183,7 +186,8 @@ describe("createHandler", () => {
 		const result = await handlerWith(fetchImpl)(create);
 		expect(calls).toHaveLength(1);
 		expect(result?.block).toBe(true);
-		expect(result?.reason).toContain(pendingPath());
+		expect(result?.reason).toContain(pendingPrefix);
+		expect(pendingMatch()).toHaveLength(1);
 		const text = readFileSync(pendingPath(), "utf8");
 		expect(text).not.toContain(KEY);
 		expect(JSON.parse(text)).toMatchObject(expectedBody);
@@ -211,7 +215,8 @@ describe("createHandler", () => {
 		const result = await handlerWith(fetchImpl, 50)(create);
 		expect(performance.now() - started).toBeLessThan(2_000);
 		expect(result?.block).toBe(true);
-		expect(result?.reason).toContain(`queued at ${pendingPath()}`);
+		expect(result?.reason).toContain(`queued at ${pendingDir}/`);
+		expect(result?.reason).toContain(pendingPrefix);
 		const queued = JSON.parse(readFileSync(pendingPath(), "utf8"));
 		expect(Object.keys(queued).sort()).toEqual(["files", "name", "rationale", "surface"]);
 		expect(queued).toMatchObject(expectedBody);
@@ -227,8 +232,8 @@ describe("createHandler", () => {
 			rmSync(pendingDir, { recursive: true, force: true });
 			const result = await handlerWith(fakeFetch(respond).fetchImpl)(create);
 			expect(result?.block).toBe(true);
-			expect(result?.reason).toContain(pendingPath());
-			expect(pendingFiles()).toEqual(["deploy-notes-20260926T101112Z.json"]);
+			expect(result?.reason).toContain(pendingPrefix);
+			expect(pendingMatch()).toHaveLength(1);
 		}
 	});
 
@@ -243,7 +248,7 @@ describe("createHandler", () => {
 		const declined = await handlerWith(fakeFetch(() => reply(200, { status: "declined", pr_url: closed })).fetchImpl)(create);
 		expect(declined?.block).toBe(true);
 		expect(declined?.reason).toContain(`closed an identical proposal (${closed})`);
-		expect(pendingFiles()).toEqual([]);
+		expect(pendingMatch()).toEqual([]);
 	});
 
 	test("an invalid name is blocked without a request; delete and other tools pass through", async () => {
@@ -255,7 +260,7 @@ describe("createHandler", () => {
 		expect(await handler(event("manage_skill", { action: "delete", name: "deploy-notes" }))).toBeUndefined();
 		expect(await handler(event("bash", { command: "ls" }))).toBeUndefined();
 		expect(calls).toHaveLength(0);
-		expect(pendingFiles()).toEqual([]);
+		expect(pendingMatch()).toEqual([]);
 	});
 
 	test("an internal failure becomes a block, never a throw", async () => {
@@ -284,8 +289,56 @@ describe("createHandler", () => {
 	test("a queued proposal keeps the session_id in its pending file", async () => {
 		const { fetchImpl } = fakeFetch(() => Promise.reject(new TypeError("connection refused")));
 		const result = await handlerWith(fetchImpl)(create, { sessionManager: { getSessionId: () => "sess-omp-1" } });
-		expect(result?.reason).toContain(`queued at ${pendingPath()}`);
+		expect(result?.reason).toContain(pendingPrefix);
 		expect(JSON.parse(readFileSync(pendingPath(), "utf8"))).toMatchObject({ ...expectedBody, session_id: "sess-omp-1" });
+	});
+
+	test("two proposals in the same second keep both files", async () => {
+		const { fetchImpl } = fakeFetch(() => reply(401, { error: "unknown surface" }));
+		const handler = handlerWith(fetchImpl);
+		expect((await handler(create))?.block).toBe(true);
+		expect((await handler(create))?.block).toBe(true);
+		const files = pendingMatch();
+		expect(files).toHaveLength(2);
+		expect(new Set(files).size).toBe(2);
+		for (const file of files) expect(JSON.parse(readFileSync(join(pendingDir, file), "utf8"))).toMatchObject(expectedBody);
+	});
+
+	test("a colliding pending name is retried, never overwritten", async () => {
+		mkdirSync(pendingDir, { recursive: true });
+		writeFileSync(join(pendingDir, `${pendingPrefix}aa.json`), "original\n");
+		const hexes = ["aa", "bb"];
+		const { fetchImpl } = fakeFetch(() => reply(401, { error: "unknown surface" }));
+		const handler = createHandler({ fetchImpl, url: "http://127.0.0.1:7410", timeoutMs: 50, pendingDir, env, now: () => AT, randomHex: () => hexes.shift() as string });
+		const result = await handler(create);
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toContain(`${pendingPrefix}bb.json`);
+		expect(readFileSync(join(pendingDir, `${pendingPrefix}aa.json`), "utf8")).toBe("original\n");
+		expect(pendingMatch()).toHaveLength(2);
+	});
+
+	test("learn with an invalid skill name keeps the lesson and reports in additionalContext", async () => {
+		const { fetchImpl, calls } = fakeFetch(() => reply(200, { status: "opened", pr_url: PR }));
+		const result = await handlerWith(fetchImpl)(
+			event("learn", { memory: "lesson", skill: { action: "create", name: "Bad Name", description: "d", body: "b" } }),
+		);
+		expect(result?.block).toBeUndefined();
+		expect(result?.input).toEqual({ memory: "lesson" });
+		expect(result?.additionalContext).toContain("invalid skill name");
+		expect(calls).toHaveLength(0);
+	});
+
+	test("learn survives a queue failure with the lesson intact", async () => {
+		const blocker = join(dir, "blocker");
+		writeFileSync(blocker, "x");
+		const stuck = join(blocker, "under-a-file");
+		const handler = createHandler({ fetchImpl: fakeFetch(() => Promise.reject(new TypeError("down"))).fetchImpl, url: "http://127.0.0.1:7410", timeoutMs: 50, pendingDir: stuck, env, now: () => AT });
+		const result = await handler(
+			event("learn", { memory: "lesson", skill: { action: "create", name: "deploy-notes", description: "d", body: "b" } }),
+		);
+		expect(result?.block).toBeUndefined();
+		expect(result?.input).toEqual({ memory: "lesson" });
+		expect(result?.additionalContext).toContain("extension failed");
 	});
 
 	test("no ctx, a throwing getter or a blank id sends no session_id key and still proposes", async () => {
