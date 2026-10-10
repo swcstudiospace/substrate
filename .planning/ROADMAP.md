@@ -200,7 +200,13 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
   5. A skill mined from a Cursor session is proposed as a PR, merged by the owner, and within one sync tick (≤ 5 min) appears in Claude Code and Grok Build with neither agent's config changed; both timers and the cron run green.
 
 **Proof** (SKILL-07): Live, operator-approved: GitHub, the owner's merge, Hermes model quota, a real Cursor session and the production timers.
-**Plans**: TBD
+**Plans**: 4 plans
+
+Plans:
+- [ ] 22-01-PLAN.md — Port the skills projector and ff-only sync gate with staged sync units
+- [ ] 22-02-PLAN.md — Port the Hermes bridge and monitor with staged bridge units
+- [ ] 22-03-PLAN.md — Make all three miners propose-only with gated host rebinds
+- [ ] 22-04-PLAN.md — Rehearsal smoke for the mined-to-projected loop plus the gated SKILL-07 live tail
 
 ### Phase 23: Claim mirror and DoD gate
 

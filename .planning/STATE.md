@@ -2,14 +2,14 @@
 gsd_state_version: "1.0"
 milestone: v1.3
 milestone_name: Build plan completion
-current_phase: 21
-current_phase_name: skills_propose
-status: verified
-stopped_at: Phase 21 re-verified at HEAD e2ad4dc (24/24 must-haves hold, F-01 recorded, live PR deferred to Phase 22)
-last_updated: "2026-10-10T14:30:00Z"
+current_phase: 22
+current_phase_name: skills-sync-bridge-and-miners
+status: planned
+stopped_at: Phase 22 planned — 22-CONTEXT.md, 22-RESEARCH.md and 4 PLANs (22-01..22-04) committed, SUMMARYs absent, ready to execute
+last_updated: "2026-10-10T15:00:00Z"
 last_activity: 2026-10-10
-last_activity_desc: Phase 21 re-verification (gates only, no code delta) on origin/main e2ad4dc; status passed, phase_complete true
-state_head: e2ad4dc
+last_activity_desc: Phase 22 planning (autonomous discuss-equivalent + research + 4 plans, rehearsal-first with operator-gated live tail)
+state_head: 82d10ab
 progress:
   total_phases: 18
   completed_phases: 3
