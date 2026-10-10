@@ -14,7 +14,7 @@
 import { bankForSurface, ensureBank, retainMemories, type FetchLike, type HindsightConfig } from "./planes/hindsight.ts";
 import { canonicalJson, sha256Hex } from "./event.ts";
 import { applyRule, redact, REDACTION_RULES } from "./redact.ts";
-import { SURFACES, type EventInput, type MemoryWriteRequest, type MemoryWriteResult } from "./types.ts";
+import { SURFACES, type EventInput, type MemoryEntry, type MemoryWriteRequest, type MemoryWriteResult } from "./types.ts";
 
 /** The known surfaces as plain strings, for the emit-surface check. */
 const KNOWN_SURFACES: readonly string[] = SURFACES;
@@ -71,6 +71,18 @@ async function warn(
 }
 
 /**
+ * The plane document one accepted entry forwards to. Subject-addressed
+ * writes supersede by replacing: the id is the claim identity (scope, kind,
+ * subject — kinds stay separate, so a fact never shares a document with a
+ * warning), while subject-less appends keep the idempotency key.
+ */
+export function retainDocumentId(entry: MemoryEntry, idempotencyKey: string): string {
+	const subject = typeof entry.subject === "string" && entry.subject.length > 0 ? entry.subject : undefined;
+	if (subject === undefined) return idempotencyKey;
+	return `subj_${sha256Hex(canonicalJson({ scope: entry.scope, kind: entry.kind, subject })).slice(0, 32)}`;
+}
+
+/**
  * Forward one accepted write. Unaccepted, unverified, or unconfigured writes
  * forward nothing and warn nothing — the gate owns that trail. Everything
  * else that stops the forward is a `memory.retain.failed` warning.
@@ -89,15 +101,7 @@ export async function forwardRetain(
 	}
 	const config = deps.config;
 	const bank = bankForSurface(config, result.writer);
-	// A subject-addressed write supersedes by replacing: the plane document is
-	// keyed by the claim identity (scope, kind, subject), so a newer version
-	// replaces the retired copy instead of joining it. Subject-less appends
-	// keep history in both stores, so they keep the idempotency key.
-	const subject = typeof entry.subject === "string" && entry.subject.length > 0 ? entry.subject : undefined;
-	const documentId =
-		subject === undefined
-			? result.idempotency_key
-			: `subj_${sha256Hex(canonicalJson({ scope: entry.scope, kind: entry.kind, subject })).slice(0, 32)}`;
+	const documentId = retainDocumentId(entry, result.idempotency_key);
 	const sessionId = typeof request.session_id === "string" && request.session_id.length > 0 ? request.session_id : undefined;
 	if (deps.vmGuest === true) {
 		const reason = "vm-guest";

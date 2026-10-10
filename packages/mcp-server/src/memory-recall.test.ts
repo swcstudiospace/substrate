@@ -132,6 +132,14 @@ describe("registration", () => {
 		expect(reply.reason).toContain("nope");
 		expect(fake.requests.length).toBe(0);
 	});
+	test("a guest never sends queries to the plane", async () => {
+		const fake = new HindsightFake();
+		seedTwo(fake);
+		const reply = await recallMemories({ ...deps(fake), vmGuest: true }, "lease", "cursor");
+		expect(reply).toMatchObject({ results: [], degraded: true, reason: "vm-guest" });
+		expect(fake.requests.length).toBe(0);
+	});
+
 });
 
 describe("anti-pattern gates", () => {

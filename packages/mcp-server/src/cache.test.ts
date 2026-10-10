@@ -27,7 +27,7 @@ import { FakeStore } from "./memory-write.test.ts";
 import { createObservability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
-import { clearEnsuredBanks } from "./planes/hindsight.ts";
+import { clearEnsuredBanks, type FetchLike } from "./planes/hindsight.ts";
 
 /**
  * Point the Hindsight env reads at the fake for one test. Restores every
@@ -1028,6 +1028,56 @@ describe("the same answer with the cache off, on and broken", () => {
 			restore();
 		}
 	});
+	test("a stalled older forward cannot overwrite its accepted replacement", async () => {
+		// Forwards to one document run in acceptance order: v1's retain POST
+		// stays gated until v2 has landed, so v2 must still be queued — an
+		// unchained pair would already show v2 retained here.
+		const restore = hindsightEnv();
+		try {
+			const fake = new HindsightFake();
+			clearEnsuredBanks();
+			const gate = Promise.withResolvers<void>();
+			const gatedFetch: FetchLike = async (input, init) => {
+				const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+				const body = typeof init?.body === "string" ? init.body : "";
+				if (url.includes("/memories") && !url.includes("recall") && body.includes("v1 first")) await gate.promise;
+				return fake.fetch(input, init);
+			};
+			const store = new FakeStore();
+			const config = loadConfig({ SUBSTRATE_MEMORY_GRANTS: `[{"surfaces":["cursor"],"scopes":["graph"],"kinds":["decision"]}]` });
+			const substrate = new Substrate(config, { index: store as never, greptime: null, hindsightFetch: gatedFetch });
+			const write = (text: string, key: string, expectedVersion?: number) =>
+				substrate.writeMemory({
+					scope: "graph:ut-1",
+					kind: "decision",
+					subject: "order-rule",
+					text,
+					writer: "cursor",
+					source_event: "evt_order",
+					idempotency_key: key,
+					...(expectedVersion !== undefined ? { expected_version: expectedVersion } : {}),
+				});
+			const first = await write("v1 first", "mwd_v1");
+			expect(first.outcome).toBe("accepted");
+			const second = await write("v2 second", "mwd_v2", 1);
+			expect(second.outcome).toBe("accepted");
+			await substrate.drainPendingRetains(300);
+			expect(fake.retains.length).toBe(0);
+			gate.resolve();
+			await substrate.drainPendingRetains(5000);
+			const contents = fake.retains.map((retained) => {
+				const item = retained.item;
+				return "content" in item && typeof item.content === "string" ? item.content : "";
+			});
+			expect(contents).toEqual(["v1 first", "v2 second"]);
+			const memories = fake.banks.get("sub-cursor")?.memories ?? [];
+			expect(memories.length).toBe(1);
+			expect(memories.at(0)?.text).toBe("v2 second");
+		} finally {
+			restore();
+		}
+	});
+
 });
 
 describe("Bun RedisClient", () => {

@@ -56,6 +56,8 @@ export interface RecallDeps {
 	fetchImpl?: FetchLike;
 	/** The one abort budget the whole fan-out shares. */
 	budgetMs?: number;
+	/** A guest instance never sends queries to the plane. */
+	vmGuest?: boolean;
 }
 
 /**
@@ -106,6 +108,9 @@ export async function recallMemories(
 	callerSurface: string | null,
 ): Promise<RecallReply> {
 	if (!query) return { results: [], degraded: true, notice: UNTRUSTED_MEMORY_NOTICE, reason: "memory_recall needs a query" };
+	if (deps.vmGuest === true) {
+		return { results: [], degraded: true, notice: UNTRUSTED_MEMORY_NOTICE, reason: "vm-guest" };
+	}
 	if (!deps.config) {
 		// No plane, no failure: index-only answers stay complete, so this is
 		// informative rather than degraded. An outage degrades instead.

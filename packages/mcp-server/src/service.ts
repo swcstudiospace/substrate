@@ -59,10 +59,10 @@ import { createMirror, type Mirror, type MirrorContext, type MirrorFailure, type
 import { runDodGate, type DodEvidence } from "./dod-gate.ts";
 import { normalizeSubject } from "./memory-policy.ts";
 import { recallMemories, UNTRUSTED_MEMORY_NOTICE, type RecallReply } from "./memory-recall.ts";
-import { forwardRetain } from "./memory-retain.ts";
+import { forwardRetain, retainDocumentId } from "./memory-retain.ts";
 import { mergeDerivedHits, type MergedMemoryResults } from "./memory-search.ts";
 import { governMemoryWrite } from "./memory-write.ts";
-import { hindsightBanksFromEnv, hindsightFromEnv } from "./planes/hindsight.ts";
+import { bankForSurface, hindsightBanksFromEnv, hindsightFromEnv } from "./planes/hindsight.ts";
 import type { FetchLike } from "./planes/ragflow.ts";
 import { redact, type SkillDocExampleRule } from "./redact.ts";
 import {
@@ -695,6 +695,8 @@ export class Substrate {
 	/** Background retains in flight, drained (bounded) on shutdown. */
 	private pendingRetains = 0;
 	private retainWaiters: Array<() => void> = [];
+	/** Latest background forward per plane document, so versions land in order. */
+	private readonly retainChains = new Map<string, Promise<void>>();
 	/** Source-URL ingest records for hash idempotency, held for the process lifetime. */
 	private docsIngestSeen = new Map<string, IngestRecord>();
 	/** In-flight page uploads by record key, tagged with the uploading sha. */
@@ -1071,11 +1073,15 @@ export class Substrate {
 		// failure warns without re-opening the write. A successful retain bumps the
 		// generation again: a recall cached in the gap between the index bump and
 		// the retain landing must not hide the fresh memory for a whole TTL.
+		// Forwards to one document run in acceptance order: a stalled older
+		// version must not land after (and replace) its accepted replacement.
 		if (result.outcome === "accepted" && result.verified_persisted && result.entry) {
-			this.trackRetain(
-				forwardRetain(
+			const entry = result.entry;
+			const hindsight = hindsightFromEnv();
+			const run = (): Promise<void> => {
+				return forwardRetain(
 					{
-						config: hindsightFromEnv(),
+						config: hindsight,
 						fetchImpl: this.hindsightFetch,
 						vmGuest: this.config.vmGuest,
 						emit: (event) => this.emit(event),
@@ -1086,7 +1092,21 @@ export class Substrate {
 					.then((outcome) => {
 						if (outcome.forwarded) return this.cache.bump(MEMORY_GENERATION_KEY);
 					})
-					.catch(() => undefined),
+					.then(() => undefined)
+					.catch(() => undefined);
+			};
+			if (!hindsight) {
+				this.trackRetain(run());
+				return result;
+			}
+			const chainKey = `${hindsight.url} ${bankForSurface(hindsight, result.writer)} ${retainDocumentId(entry, result.idempotency_key)}`;
+			const previous = this.retainChains.get(chainKey);
+			const flight = (previous ?? Promise.resolve()).then(run, run);
+			this.retainChains.set(chainKey, flight);
+			this.trackRetain(
+				flight.finally(() => {
+					if (this.retainChains.get(chainKey) === flight) this.retainChains.delete(chainKey);
+				}),
 			);
 		}
 		return result;
@@ -1216,7 +1236,7 @@ export class Substrate {
 			// A degraded answer (outage, partial) is still the answer, but it
 			// must not sit in the cache: the next call re-probes the plane.
 			store: (reply) => !reply.degraded,
-			load: () => recallMemories({ config, banks, fetchImpl: this.hindsightFetch }, query, callerSurface),
+			load: () => recallMemories({ config, banks, vmGuest: this.config.vmGuest, fetchImpl: this.hindsightFetch }, query, callerSurface),
 		});
 	}
 
