@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.3
 milestone_name: Build plan completion
-current_phase: 19
-current_phase_name: Lane B collectors
-status: planning
-stopped_at: Phase 18 re-verified at HEAD dec0951 (21/21 must-haves stand, F-01/F-02 recorded, no code changes)
-last_updated: "2026-10-10T12:41:00Z"
+current_phase: 20
+current_phase_name: Production identity and Phase 0 UAT
+status: blocked
+stopped_at: Phase 20-06 awaits operator identity, client installation and production UAT evidence; independent local verification may continue
+last_updated: "2026-10-10T15:30:23.872Z"
 last_activity: 2026-10-10
-last_activity_desc: Phase 18 verification re-run after fast-forward push of dec0951 to origin/main; status passed, phase_complete true
-state_head: dec0951d300b7f5b1c37b968b945e8db48a6cf02
+last_activity_desc: Phase 19 complete, transitioned to Phase 20
+state_head: 6f85adb34b042cffc0cea15babea0dc64603c80b
 progress:
   total_phases: 18
-  completed_phases: 3
-  total_plans: 12
-  completed_plans: 12
-  percent: 17
+  completed_phases: 4
+  total_plans: 50
+  completed_plans: 48
+  percent: 22
 ---
 
 # State
@@ -154,10 +154,10 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Current Position
 
-Phase: 19 — Lane B collectors
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-10-09 — Phase 18 complete, transitioned to Phase 19
+Phase: 20 — Production identity and Phase 0 UAT
+Plan: 5 of 6 implementation summaries present; 20-06 human actions pending
+Status: Blocked on operator-only live identity, client readiness and UAT checkpoints
+Last activity: 2026-10-10 — Phase 19 complete, transitioned to Phase 20
 
 ## Deferred Items
 
@@ -169,13 +169,14 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Operator Next Steps
 
-- Start the next milestone with /gsd-new-milestone
+- Complete the Phase 20-06 operator window and record values-free identity, client installation, soak and production UAT evidence; do not start a new milestone.
+- Rotate/revoke the exposed Cursor surface credential through the documented list-form rotation procedure; test isolation is fixed, credential rotation is not performed.
 
 ## Session Continuity
 
-Last session: 2026-10-08T21:29:12Z
-Stopped at: Phase 18 complete, ready to plan Phase 19
-Resume file: None
+Last session: 2026-10-10
+Stopped at: Phase 19 canonically verified; Phase 20-06 operator checkpoints pending
+Resume file: .planning/phases/20-production-identity-and-phase-0-uat/20-06-PLAN.md
 
 ## Performance Metrics
 
@@ -195,3 +196,25 @@ Resume file: None
 - [Phase 16]: 16-03: smoke reads only consumer.env and refuses :7410/non-loopback before any request; claim needs claimed true plus granted
 - [Phase 16]: 16-03: requirements-completed left empty, FOUND-01 stays open until the 16-05 live proof
 - [Phase 16]: 16-04: docs carry key names only, no connection-string shapes; production-mutating steps framed operator-only
+
+## Project Reference
+
+See: `.planning/PROJECT.md` (updated 2026-10-10 after Phase 19).
+
+**Core value:** Every agent on the host shares one brief, one event log, one governed memory plane, one skills library and one Graph ID.
+**Current focus:** Phase 20 identity/client readiness and production UAT; no live action is self-approved.
+
+## Needs Human
+
+| Phase | Gate | Minimum action |
+| --- | --- | --- |
+| 20 | `20-06` three `checkpoint:human-action` tasks | Operator completes client-first readiness/identity, approved client and plugin installation, soak and actual production UAT with values-free evidence. |
+| 20 | Cursor credential containment | Operator rotates/revokes the Cursor surface credential exposed by the pre-existing unsafe resolver test; no token value is recorded here. |
+
+### Recovery and current evidence
+
+- Phase 19's old fixture-only proof was replaced by actual proof-named herdr and installed Muse CLI behavior: 41/41 checks, zero refusals, owned cleanup; canonical `19-VERIFICATION.md` passes.
+- Final Phase 19 gates: 85 targeted pass/0 fail, typecheck exit 0, 112 lock checks/0 fail, full suite 2670 pass/58 skip/0 fail; skip counts are not proof.
+- The documented Phase 20-05 commits `978ce72` and `9006476` exist in the claude-ultrathink object database. Its missing worktree was restored at `9006476` to `/root/src/worktrees/claude-ultrathink-p20` on `gsd/v1.3-p20-identity-uat`; no stable checkout, installed plugin or live client configuration was changed.
+- Native GSD dispatch does not require the separate AgentSwarm runner's signing keys. The discarded signing-key route is not a milestone blocker.
+- User checkout changes observed concurrently on `phase/22-skills-sync-bridge-miners` are not owned by this run and remain untouched.

@@ -28,13 +28,13 @@ Decisions confirmed when the milestone was opened (2026-10-08):
 
 ### Lane B collectors (build plan §5.4–§5.5, Phase 1)
 
-- [ ] **LANEB-01**: The herdr collector runs from `main` as `substrate-collector-herdr.service`: it bootstraps from `session.snapshot`, holds one `events.subscribe` per connection, reconciles every 5 s with dedupe offsets, and posts fail-open to `POST /events`.
-- [ ] **LANEB-02**: herdr events use main's vocabulary: surface = the agent herdr detected, repo = the origin slug of the pane's working directory, detected → `session.start`, exited → `session.end`, status change → `note` with `payload.status` and `runtime: herdr`.
-- [ ] **LANEB-03**: The Muse brief writer, for each repo in `SUBSTRATE_MUSE_REPOS`, fetches `POST /brief` as surface `muse` keyed by repo slug, writes a redacted `<repo>/.substrate/BRIEF.md` and an idempotent `AGENTS.md` pointer, refreshes every 5 minutes and keeps the last good file when a fetch fails.
-- [ ] **LANEB-04**: The Muse plugin is projected, validated and approved; its PostToolUse hook emits `tool.call` as surface `muse` with repo and branch from git, importing the redactor from a stable installed path rather than the operator checkout.
-- [ ] **LANEB-05**: Collectors never block an agent, keep their offsets across restarts, and count refused emits where the operator can see them (a periodic `warning` or a counter), so a vocabulary mismatch can no longer drop events silently.
+- [x] **LANEB-01**: The herdr collector runs from `main` as `substrate-collector-herdr.service`: it bootstraps from `session.snapshot`, holds one `events.subscribe` per connection, reconciles every 5 s with dedupe offsets, and posts fail-open to `POST /events`.
+- [x] **LANEB-02**: herdr events use main's vocabulary: surface = the agent herdr detected, repo = the origin slug of the pane's working directory, detected → `session.start`, exited → `session.end`, status change → `note` with `payload.status` and `runtime: herdr`.
+- [x] **LANEB-03**: The Muse brief writer, for each repo in `SUBSTRATE_MUSE_REPOS`, fetches `POST /brief` as surface `muse` keyed by repo slug, writes a redacted `<repo>/.substrate/BRIEF.md` and an idempotent `AGENTS.md` pointer, refreshes every 5 minutes and keeps the last good file when a fetch fails.
+- [x] **LANEB-04**: The Muse plugin is projected, validated and approved; its PostToolUse hook emits `tool.call` as surface `muse` with repo and branch from git, importing the redactor from a stable installed path rather than the operator checkout.
+- [x] **LANEB-05**: Collectors never block an agent, keep their offsets across restarts, and count refused emits where the operator can see them (a periodic `warning` or a counter), so a vocabulary mismatch can no longer drop events silently.
 - [x] **LANEB-06**: One shared redactor: main's `redact.ts` gains the September D-04 rules while keeping its `COUNTER_KEY` exemption, and every collector, `docs_ingest`, `skills_propose` and anything anchored uses it.
-- [ ] **LANEB-07**: Proof (isolated): a herdr pane going working → idle in repo R and a Muse tool call in R appear in `events_query(repo=R)` within 10 s under main-valid surfaces and kinds, with zero refused emits, and R's `.substrate/BRIEF.md` lists them on its next refresh.
+- [x] **LANEB-07**: Proof (isolated): a herdr pane going working → idle in repo R and a Muse tool call in R appear in `events_query(repo=R)` within 10 s under main-valid surfaces and kinds, with zero refused emits, and R's `.substrate/BRIEF.md` lists them on its next refresh.
 
 ### Skills plane (build plan §6, Phase 4)
 
@@ -43,7 +43,7 @@ Decisions confirmed when the milestone was opened (2026-10-08):
 - [ ] **SKILL-03**: The Hermes bridge runs from `main` every 5 minutes, drains `~/.hermes/pending/skills` and the Omp and Grok queues into `skills_propose` after 120 s of quiet, and deletes a queued record only on a final reply.
 - [ ] **SKILL-04**: The Hermes hourly miner cron runs main's code: an unchanged hour skips the model run, a run proposes at most 3 skills through `skill_manage`, and `skills.write_approval` and `memory.write_approval` stay true.
 - [ ] **SKILL-05**: All three miners propose instead of publishing: skill-autonomy posts to `/skills/propose` (or stages), the Omp extension intercepts `manage_skill` and `learn`, and Hermes `skill_manage` output goes pending → bridge.
-- [ ] **SKILL-06**: The Cursor `stop` hook runs from `main`: it copies a redacted transcript to `/var/lib/substrate/transcripts/cursor` and emits `session.end`.
+- [x] **SKILL-06**: The Cursor `stop` hook runs from `main`: it copies a redacted transcript to `/var/lib/substrate/transcripts/cursor` and emits `session.end`.
 - [ ] **SKILL-07**: Proof (live, approved): a skill mined from a Cursor session is proposed as a PR, merged by the owner, and within one sync tick (≤ 5 min) appears in Claude Code and Grok Build without either agent's config changing; both timers and the cron run green on main's code.
 
 ### Claim mirror and DoD gate (build plan §3.3, Phase 2)
@@ -156,19 +156,19 @@ Which phases cover which requirements. Filled in by the roadmap.
 | FOUND-02 | Phase 17 | Complete |
 | FOUND-03 | Phase 16 | Complete |
 | FOUND-04 | Phase 20 | Pending |
-| LANEB-01 | Phase 19 | Pending |
-| LANEB-02 | Phase 19 | Pending |
-| LANEB-03 | Phase 19 | Pending |
-| LANEB-04 | Phase 19 | Pending |
-| LANEB-05 | Phase 19 | Pending |
+| LANEB-01 | Phase 19 | Complete |
+| LANEB-02 | Phase 19 | Complete |
+| LANEB-03 | Phase 19 | Complete |
+| LANEB-04 | Phase 19 | Complete |
+| LANEB-05 | Phase 19 | Complete |
 | LANEB-06 | Phase 18 | Complete |
-| LANEB-07 | Phase 19 | Pending |
+| LANEB-07 | Phase 19 | Complete |
 | SKILL-01 | Phase 21 | Pending |
 | SKILL-02 | Phase 22 | Pending |
 | SKILL-03 | Phase 22 | Pending |
 | SKILL-04 | Phase 22 | Pending |
 | SKILL-05 | Phase 22 | Pending |
-| SKILL-06 | Phase 19 | Pending |
+| SKILL-06 | Phase 19 | Complete |
 | SKILL-07 | Phase 22 | Pending |
 | MIRROR-01 | Phase 23 | Pending |
 | MIRROR-02 | Phase 23 | Pending |

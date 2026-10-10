@@ -153,6 +153,7 @@ Revised 2026-09-30 — policy in `docs/data-planes.md`, network in `docs/railway
 - ✓ Event vocabulary: every v1.3 event source maps onto the unchanged `EVENT_KINDS`; host jobs emit as the one added system surface `substrate`, whose token is never an operator; `bun run check:phase-close` pins both — v1.3 Phase 17
 - ✓ Audit policy: every MCP tool v1.3 adds has a fail-open or fail-closed entry before it ships, with a test that catches a missing or contrary entry — v1.3 Phase 17
 - ✓ Shared redactor: one `redact.ts` with the September D-04 shapes, main's `COUNTER_KEY` exemption and a digit-requiring `pk-`/`rk-` rule guards events, memory, lessons and skill content; `redact-lock.test.ts` fails the build when any package redacts another way — v1.3 Phase 18
+- ✓ Lane B collectors: snapshot-reconciled herdr events, redacted Muse briefs, installed-bundle Muse hooks and hardened Cursor stop transcripts; actual isolated named-herdr/installed-Muse proof 41/41 with zero refusals — v1.3 Phase 19, branch verification; production cutover remains operator-owned.
 
 ## Key Decisions
 
@@ -164,12 +165,13 @@ Revised 2026-09-30 — policy in `docs/data-planes.md`, network in `docs/railway
 | Production parity is the operator's action; agents only read (`parity:check`) and run approved read-only probes | Killing or restarting production processes from an agent session is unrecoverable if wrong; the unit gains `ConditionPathExists` instead of crash-looping | ✓ Good (v1.3 Phase 16) |
 | Host jobs get one system surface, `substrate`, instead of borrowing an agent surface | The surface is what briefs and `events_query` show as the actor; borrowing claude-code would misattribute anchors and dispatches (operator, 2026-10-08) | ✓ Good (v1.3 Phase 17) |
 | The `pk-`/`rk-` redaction rule requires a digit in the key | Real keys (Langfuse `pk-lf-...`) contain digits; the verbatim September rule also redacted ordinary hyphenated slugs of 20+ characters and quarantined memory text containing them (operator, 2026-10-08) | ✓ Good (v1.3 Phase 18) |
+| Real runtime proof is not interchangeable with fixture-only collector coverage | Named herdr lifecycle and installed Muse hook-test exercise the actual protocol and approval boundaries without models or production stores | ✓ Verified (v1.3 Phase 19, 41/41 isolated proof) |
 
 ## Evolution
 
 This document evolves at phase transitions and milestone boundaries.
 
-**After each phase transition** (via `/gsd-transition`):
+**After each phase transition** (internal transition workflow):
 1. Requirements invalidated? → Move to Out of Scope with reason
 2. Requirements validated? → Move to Validated with phase reference
 3. New requirements emerged? → Add to Active
@@ -183,4 +185,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-10-09 after Phase 18*
+*Last updated: 2026-10-10 after Phase 19*
