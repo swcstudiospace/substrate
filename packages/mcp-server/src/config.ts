@@ -4,6 +4,7 @@
  * Deployment reads /etc/substrate/substrate.env via the systemd unit's
  * EnvironmentFile. Nothing here ever reads a secret from the repo.
  */
+import { SOLANA_CLI_DEFAULT } from "@substrate/ledger";
 import { normalizeTtlSeconds } from "./lease.ts";
 import { LINEAR_API_URL } from "./linear.ts";
 import { parseGrants, type MemoryGrant } from "./memory-policy.ts";
@@ -208,6 +209,24 @@ export interface SubstrateConfig {
 	 * have every claim withdrawn. `SUBSTRATE_CLAIM_REQUIRE_LEDGER` forces either way.
 	 */
 	requireRecordedClaims: boolean | null;
+	/**
+	 * The hourly anchor job's devnet identity (Phase 28).
+	 *
+	 * `rpcUrl` defaults to the public devnet endpoint and `cli` to the
+	 * installed solana binary; `keypairPath` and `pubkey` are null unless the
+	 * operator sets them, and the job exits 2 with usage until they do. The
+	 * keypair is only ever a path the CLI reads — it is never opened or
+	 * logged here. `pubkey` is non-secret.
+	 */
+	solana: { rpcUrl: string; keypairPath: string | null; pubkey: string | null; cli: string };
+	/**
+	 * Whole-verify devnet budget in milliseconds (D28-18).
+	 *
+	 * Per-hour reads already carry their own per-call timeout with bounded
+	 * attempts; this caps the hour loop as a whole, so one slow hour cannot
+	 * hold a `/verify` request open. Hours never reached read `unverified`.
+	 */
+	verifyTimeoutMs: number;
 }
 
 /** Production defaults: September's library, so the host ledger keeps deduplicating. */
@@ -493,6 +512,15 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		desktopDir: desktopDirRaw.startsWith("/") ? desktopDirRaw : DEFAULT_DESKTOP_DIR,
 		desktopIgnored: desktopNames.filter((name) => !isKnownDesktopSurface(name)),
 		desktopDirRejected: desktopDirRaw !== "" && !desktopDirRaw.startsWith("/") ? desktopDirRaw : null,
+		solana: {
+			rpcUrl: env.SOLANA_RPC_URL?.trim() || "https://api.devnet.solana.com",
+			keypairPath: env.SOLANA_ANCHOR_KEYPAIR?.trim() || null,
+			pubkey: env.SOLANA_ANCHOR_PUBKEY?.trim() || null,
+			cli: env.SOLANA_CLI?.trim() || SOLANA_CLI_DEFAULT,
+		},
+		verifyTimeoutMs: Number.isFinite(Number(env.SUBSTRATE_VERIFY_TIMEOUT_MS)) && Number(env.SUBSTRATE_VERIFY_TIMEOUT_MS) > 0
+			? Number(env.SUBSTRATE_VERIFY_TIMEOUT_MS)
+			: 30_000,
 	};
 }
 

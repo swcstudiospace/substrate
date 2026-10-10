@@ -574,7 +574,9 @@ export async function buildGraphEvidence(
 	maxRecords: number = MAX_EVIDENCE_RECORDS,
 ): Promise<EvidenceBundle> {
 	const appChain = await substrate
-		.verifyGraph(graphId)
+		// Anchors stay out of the bundle (FEATURES E-D1): the evidence chain is
+		// the per-session hash check, whatever devnet says about the hour.
+		.verifyGraph(graphId, { anchors: false })
 		.then((verdict) => ({
 			// `state`, not just `ok`. A null `ok` used to mean both "there is no ledger to
 			// check" and "the ledger would not answer", and those are opposite facts about

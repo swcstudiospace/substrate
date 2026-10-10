@@ -14,6 +14,7 @@
  * token — at boot.
  */
 import { describe, expect, test } from "bun:test";
+import { SOLANA_CLI_DEFAULT } from "@substrate/ledger";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -365,6 +366,34 @@ describe("RAGFLOW_* and SUBSTRATE_DOCS_* (D25-23)", () => {
 			stateDir: "/run/docs",
 			embeddingModel: "bge-small",
 			datasetsFile: "/run/docs.json",
+		});
+	});
+});
+
+
+describe("SOLANA_* anchor config", () => {
+	test("keypair and pubkey are null unless set; rpc and cli carry devnet defaults", () => {
+		const config = loadConfig({});
+		expect(config.solana).toEqual({
+			rpcUrl: "https://api.devnet.solana.com",
+			keypairPath: null,
+			pubkey: null,
+			cli: SOLANA_CLI_DEFAULT,
+		});
+	});
+
+	test("names the four vars and trims them", () => {
+		const config = loadConfig({
+			SOLANA_RPC_URL: " https://rpc.test.invalid ",
+			SOLANA_ANCHOR_KEYPAIR: " /etc/substrate/anchor-keypair.json ",
+			SOLANA_ANCHOR_PUBKEY: " 4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T ",
+			SOLANA_CLI: " /usr/local/bin/solana ",
+		});
+		expect(config.solana).toEqual({
+			rpcUrl: "https://rpc.test.invalid",
+			keypairPath: "/etc/substrate/anchor-keypair.json",
+			pubkey: "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T",
+			cli: "/usr/local/bin/solana",
 		});
 	});
 });

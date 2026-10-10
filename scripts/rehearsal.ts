@@ -1707,6 +1707,26 @@ export function refuseSmokeUrl(raw: string): string | null {
 	return null;
 }
 
+/**
+ * Refuse a Greptime URL for the fake-chain anchor proof before any write:
+ * a non-loopback host. Returns the reason, or null when the target is a
+ * scratch rehearsal ledger. The proof writes fake-chain signatures into the
+ * `anchors` table — the real job skips those rows, while verification can
+ * never find their transactions on devnet — so production must never see
+ * them. The harness maps its throwaway ledger onto 127.0.0.1.
+ */
+export function refuseLedgerUrl(raw: string): string | null {
+	let url: URL;
+	try {
+		url = new URL(raw);
+	} catch {
+		return `unparseable ledger target ${raw}`;
+	}
+	const host = url.hostname.replace(/^\[(.*)\]$/, "$1");
+	if (SMOKE_LOOPBACK_HOSTS[host] !== true) return `refusing non-loopback ledger host ${url.hostname}`;
+	return null;
+}
+
 /** Parse `export KEY='value'` lines, undoing the single-quote escape. */
 export function parseShellExports(text: string): Record<string, string> {
 	const out: Record<string, string> = {};
