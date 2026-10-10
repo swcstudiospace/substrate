@@ -113,6 +113,19 @@ describe("addressMemos and balance", () => {
 	});
 });
 
+describe("getGenesisHash", () => {
+	test("calls getGenesisHash with no params and returns the hash", async () => {
+		const { rpc, requests } = fakeRpc([{ result: "EtWTRABZaYq6iMfeYKouRu166VU2xqaEyCydFLPYGEC" }]);
+		expect(await rpc.getGenesisHash()).toBe("EtWTRABZaYq6iMfeYKouRu166VU2xqaEyCydFLPYGEC");
+		expect(requests[0]).toMatchObject({ method: "getGenesisHash", params: [] });
+	});
+
+	test("refuses a non-string hash", async () => {
+		const { rpc } = fakeRpc([{ result: null }]);
+		await expect(rpc.getGenesisHash()).rejects.toThrow("getGenesisHash returned no hash");
+	});
+});
+
 describe("retries and errors", () => {
 	test("one rejection then an answer succeeds after exactly one backoff sleep", async () => {
 		const { rpc, sleeps } = fakeRpc([new Error("timeout"), { result: { value: 5 } }]);

@@ -112,8 +112,9 @@ CREATE TABLE IF NOT EXISTS "anchors" (
 ```
 
 This is the shape production already has (11 columns, in this order, `ENGINE=mito`,
-no tag, no rows; read-only check on 2026-10-09). Nothing reads or writes this table
-yet: the hourly anchor job (Phase 28) does. Two things it inherits:
+no tag, no rows; read-only check on 2026-10-09). The hourly anchor job (Phase 28)
+writes it, one row per anchored hour, and `verifyGraph` reads it. Two things the
+job inherits:
 
 - The table has no primary key beyond the time index, so rows that share a
   `period_start` **collapse, last write wins**. Re-anchoring an hour replaces its row
@@ -329,6 +330,80 @@ say the hour will be uncovered.
 There is **no backfill**: events stored before this table first existed belong to no
 hour, and the first anchored hour is Phase 28's decision.
 
+## Anchoring (Phase 28)
+
+Every closed, non-empty UTC ingest hour is anchored exactly once on Solana
+devnet — roots only, never event content — and `substrate verify <graph_id>`
+checks a graph's chain and, per hour, its anchor.
+
+**Schedule.** `substrate-anchor.timer` fires `substrate-anchor.service` hourly
+(`OnCalendar=hourly`, `Persistent=true`); the service is `Type=oneshot` with no
+`Restart=`, reading the pinned release on every tick. The 5-minute ingest lag
+lives in the job, so an hour anchors at the second tick after it ends: pending
+for about 2 h, inside verify's 3 h window. Trigger it only through `systemctl
+start substrate-anchor.service` — systemd never runs a second instance of an
+active oneshot, and the job re-checks the chain for the period immediately
+before every send.
+
+**Candidates.** Closed, non-empty hours with no `anchors` row, from the coverage
+start (the hour of the earliest `event_ingest` record — the deploy hour, partial
+but well defined), ascending, at most 24 per run, with a 7-day lookback. Empty
+hours are skipped and never written. A digest error or a root mismatch emits
+`anchor.failed` and the run continues with the next hour; a systemic failure
+(wrong cluster, signer mismatch, unfunded key, unreadable RPC, CLI or Greptime
+failure) stops the run before the next send. Exit 0 only when every candidate
+was anchored or adopted, or there was nothing to do.
+
+**Send, adopt, alarm.** The send is September's argv, unchanged: absolute CLI
+path, self-transfer, `--with-memo`, devnet only, keypair as a path the CLI
+reads. Preconditions, in order, before the first send: `SOLANA_ANCHOR_KEYPAIR`
+absolute, `solana-keygen pubkey` equal to `SOLANA_ANCHOR_PUBKEY`, the RPC's
+genesis hash devnet's, balance covering rent plus fees. Before every send the
+job adopts: a signer-checked memo already on chain for that period (memo-program
+instruction, payer the pubkey and signed, no error, v1 parse, period match,
+same root and count) is written to the row with nothing sent. A different root
+or count is the alarm: the row is written as found, `anchor.failed` carries
+`root-mismatch`, `[anchor] ALARM <period>` goes to stderr, and the run exits 1.
+
+**The row** is the 11-column shape above, `stale_hashes` always `NULL`, the
+table deduplicating by `period_start`. **`anchor.written`** (`note`) and
+**`anchor.failed`** (`warning`) go out on surface `substrate` with
+`session_id: "anchor:<hour>"`, `payload.action: "anchor"`,
+`payload.runtime: "anchor"`, no `repo`; failure reasons are the closed set
+`digest-failed`, `root-mismatch`, `unfunded`, `wrong-cluster`,
+`signer-mismatch`, `rpc-unreadable`, `send-failed`, `store-failed`.
+
+**Verify states.** `verifyGraph` keeps the per-session chain check as `chain`
+and adds `hours[]`, one entry per distinct hour holding the graph's events
+(each event's hour is its first ingest record's), plus `uncovered` (count and
+ids) and `legacy` (count and ids). `ok` is true only when the chain verifies,
+every hour is `anchored` or `pending`, and no post-coverage event is uncovered:
+
+- `anchored` — the row's `tx_sig` reads back, the memo is a signed v1 memo for
+  this hour, and root and count equal the recomputed digest (and the row).
+- `pending` — no row and `now < period_end + 3 h`, or the hour is not closed yet.
+- `unanchored` — no row and the 3 h have passed. Fails.
+- `mismatch` — recompute vs memo vs row vs period vs signer disagree, or the
+  digest throws naming the event. Fails, naming the hour.
+- `unverified` — devnet unreadable, the transaction not found, or
+  `SOLANA_ANCHOR_PUBKEY` unset. Fails closed: a network fault never reads as anchored.
+
+Events with no ingest record and `ts` before the coverage start are `legacy`:
+counted, never failing. Events with no record at or after the coverage start
+are `uncovered` and fail verify naming the event — they are not anchored, and
+passing them would let an injected row through. Devnet reads run sequentially
+under `SUBSTRATE_VERIFY_TIMEOUT_MS`; the CLI's `/verify` request shares that
+budget. `buildGraphEvidence` calls verify with anchors off and stays chain-only.
+
+**The D-era window keeps today's verify behaviour.** The per-session check
+already reports D-era multi-event sessions (2026-09-27 to 10-01) as broken —
+their `prev` is the global predecessor — and there is no `verifyGlobalChain`.
+Those events are pre-coverage and `legacy` in the hour report.
+
+**The production key is used by the production unit only.** A memo for some hour
+signed by that key from any other ledger would make production alarm on that
+hour forever, so the rehearsal harness never carries `SOLANA_*` names.
+
 ## Reading the ledger
 
 `events_query` is the read counterpart of `events_emit`, and the reason a desk seat
@@ -501,6 +576,47 @@ read-only check of production's `anchors` (11 columns, no rows) is recorded abov
 The memo program-id comment in `packages/ledger` (`Memo v4 … written by solana-cli
 4.2.2`) is carried over unverified; the first devnet transaction in Phase 28 is the
 first chance to check it.
+
+**Hourly anchor (Phase 28):** the isolated fake-chain proof recorded 47/47 on
+**scratch** GreptimeDB v0.14.4 (image `greptime/greptimedb:v0.14.4`, same as the
+Phase 27 run):
+
+```sh
+bun run rehearsal up --name p28anchor --port 17441
+set -a; . "${XDG_RUNTIME_DIR:-/tmp}/substrate-rehearsal/p28anchor/stores.env"; set +a
+bun run smoke:greptime
+bun run rehearsal down --name p28anchor
+```
+
+(`--name p28anchor --port 17441`: this session's port 17410 was already held by
+another rehearsal run; the name is a label only.) Section 8 of
+`scripts/greptime-smoke.ts` runs the anchor job with `now` past the lag against
+a local fake chain — a stub CLI at an absolute tmp path plus a loopback
+JSON-RPC stub serving `getTransaction`, `getSignaturesForAddress`,
+`getBalance` and `getGenesisHash` with devnet's hash — and proves all six
+beats: the send path through the real CLI stub, adopt-after-crash (injected
+lost row write: memo on chain, no row; next run adopts with `adopted: true`
+and sends nothing), a silent re-run, untouched-verify with every hour
+`anchored`, and tamper-by-append (chain still verifies; the hour reads
+`mismatch` naming the hour, exit-equivalent `ok: false`). Anchor ledger events
+are recorded by a fake emit, never written — a real one would land in the
+anchored hour itself on the real scratch clock and move the root under proof —
+and the harness carries no production key names. First run on these stores also
+caught and fixed a real bug: the open current hour digested to "not closed yet"
+and failed the whole verify; it now reads `pending` per D28-15, pinned by a
+regression test.
+
+**Live proof: DEFERRED.** L1–L10 need an operator-approved window with a funded
+key and were **not run** from here: no devnet packet left this session (the
+only chain ever touched is the loopback stub above), no production ledger row
+was written, no host config or systemd step was taken. The runbook with the
+per-step gates lives in `28-04-SUMMARY.md`. The 0-lamport question and the memo
+program id (D27-06) stay [UNVERIFIED] until L8.
+
+Rollback for this slice is proof-additive: delete section 8 and the tmp stub
+it writes at runtime; nothing on any ledger needs undoing (production rows
+from a future L7–L8, if approved, are append-only and stay, tagged proof-graph
+ids).
 
 If the table is ever recreated again while `substrate-mcp` keeps running, no
 restart is needed: `ensureAppendMode` re-checks within its TTL and both the write
