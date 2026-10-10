@@ -70,6 +70,7 @@ import {
 	type SkillProposer,
 	type TreeMode,
 } from "./skills/propose.ts";
+import { isTeachable, teachableEvent } from "./teachable.ts";
 import {
 	ACTORS,
 	EVENT_KINDS,
@@ -1039,6 +1040,21 @@ export class Substrate {
 		}
 
 		await this.auditMemoryWrite(request, result);
+		// The teachable trail: an accepted + verified `fact` with the `teachable:`
+		// subject is the one new event this phase adds, shaped like the
+		// `teachable.accepted` sample so the hourly anchor covers it with zero
+		// anchor-code changes. Fire-and-forget like the audit trail above — a
+		// failed trail write never fails the memory write.
+		if (
+			result.outcome === "accepted" &&
+			result.verified_persisted &&
+			result.entry &&
+			isTeachable(request.kind, request.subject ?? result.entry.subject)
+		) {
+			if ((SURFACES as readonly string[]).includes(writer)) {
+				await this.emit(teachableEvent(writer as Surface, request, result)).catch(() => undefined);
+			}
+		}
 		if (result.outcome === "accepted" || commitUncertain) await this.cache.bump(MEMORY_GENERATION_KEY);
 		return result;
 	}
