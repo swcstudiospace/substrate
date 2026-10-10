@@ -127,6 +127,15 @@ describe("buildAgentCard", () => {
 		expect(names.every((name) => SKILL_NAME_RE.test(name))).toBe(true);
 	});
 
+	test("a long run of one folded name still takes the next suffix", () => {
+		const teachables = Array.from({ length: 4000 }, (_, index) =>
+			teachableEntry({ id: `mem_${index}`, subject: "teachable:retry-budget" }),
+		);
+		const names = buildAgentCard("hermes", BASE, teachables).skills.map((skill) => skill.name);
+		expect(new Set(names).size).toBe(names.length);
+		expect(names[3999]).toBe("retry-budget-4000");
+	});
+
 	test("an IPv6 listen host is bracketed in the card origin", () => {
 		expect(agentCardOrigin("::1", 7410)).toBe("http://[::1]:7410");
 		expect(agentCardOrigin("127.0.0.1", 7410)).toBe("http://127.0.0.1:7410");

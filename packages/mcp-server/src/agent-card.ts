@@ -123,21 +123,31 @@ function fitSkillName(base: string, suffix: string): string | null {
 /**
  * A name not already on this card. Folded slugs collide; later entries take
  * `-2`, `-3`, … and keep going past 999 rather than reusing the base name.
+ * `next` remembers the first suffix still worth trying for this base, so a
+ * long run of the same name does not rescan the suffixes it already took.
  */
-function uniqueSkillName(base: string, used: Set<string>): string {
-	if (!used.has(base)) return base;
-	for (let n = 2; n < 1_000_000; n++) {
+function uniqueSkillName(base: string, used: Set<string>, next: Map<string, number>): string {
+	let n = next.get(base) ?? 2;
+	if (!used.has(base) && n === 2) {
+		next.set(base, 2);
+		return base;
+	}
+	for (; n < 1_000_000; n++) {
 		const candidate = fitSkillName(base, `-${n}`);
-		if (candidate && !used.has(candidate)) return candidate;
+		if (candidate && !used.has(candidate)) {
+			next.set(base, n + 1);
+			return candidate;
+		}
 	}
 	throw new Error("could not allocate a unique skill name");
 }
 
 function skillsForTeachables(teachables: MemoryEntry[]): AgentCardSkill[] {
 	const used = new Set<string>();
+	const next = new Map<string, number>();
 	return teachables.map((entry) => {
 		const skill = skillForTeachable(entry);
-		const name = uniqueSkillName(skill.name, used);
+		const name = uniqueSkillName(skill.name, used, next);
 		used.add(name);
 		return { ...skill, name };
 	});
