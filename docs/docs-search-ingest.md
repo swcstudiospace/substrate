@@ -22,11 +22,11 @@ ids are never accepted. `dataset` on ingest names one configured dataset.
 ## Citation shape
 
 Each `docs_search` result carries `{title, source_url, heading_path,
-commit, snippet, score, document_id, chunk_id}` where `snippet` is
-redacted and capped at 1,200 characters, `commit` falls back to the
-dataset version pinned at ingest time (and names the gap when nothing is
-pinned yet), and callers cite `source_url`, never the chunk. The reply
-carries an untrusted-docs notice; one `note` event
+commit, snippet, score, document_id, chunk_id}` where every text field is
+redacted — `snippet` additionally capped at 1,200 characters — `commit`
+falls back to the dataset version pinned at ingest time (and names the gap
+when nothing is pinned yet), and callers cite `source_url`, never the
+chunk. The reply carries an untrusted-docs notice; one `note` event
 (`payload.action: "docs.search"`) lists the returned URLs; any error
 yields `{chunks: [], degraded: true, reason}` — never a throw inside an
 agent's turn. At most 10 results, each retrieved over explicit
@@ -34,18 +34,28 @@ agent's turn. At most 10 results, each retrieved over explicit
 
 ## The six ingest refusals
 
-`docs_ingest` redacts before upload and refuses loudly (fail-closed,
+`docs_ingest` scans the body AND the outgoing metadata (`source_url`,
+`commit`, `heading_path`) before upload and refuses loudly (fail-closed,
 `warning` event `docs.ingest.refused` carrying rule names, reasons and
 hashes only — never values) on: a redactor finding (refuse, never
 clean-and-publish); a page with no source URL; a path outside the
 configured roots (`docs/`, `README.md`, `.planning/PROJECT.md`, or
-`SUBSTRATE_DOCS_INGEST_ROOTS`); a page over 1 MB or a call over 5 MB
-total; an unauthenticated caller; a VM guest (`SUBSTRATE_VM_GUEST=1`).
-
+`SUBSTRATE_DOCS_INGEST_ROOTS`) — both the posted `path` and the
+client-resolved `real_path` must sit under the roots after dot-segment
+normalization, so `docs/../` escapes and symlink escapes are refused; a
+page over 1 MB or a call over 5 MB total (the route reads up to 6 MB and
+answers 413 past that); an unauthenticated caller; a VM guest
+(`SUBSTRATE_VM_GUEST=1`).
 Remote images (`http(s)` img tags and markdown image syntax) are stripped
 before upload and counted in the `note` event. Uploads are idempotent by
-content hash (unchanged skips, changed replaces) and always send
-`{source_url, commit, heading_path}` metadata.
+content hash, keyed by dataset plus source URL (unchanged skips, changed
+replaces), with per-page in-flight locks so concurrent retries share one
+upload, and always send `{source_url, commit, heading_path}` metadata. A
+replacement reports the superseded document id for the G3 retire step; the
+delete path is unverified, so the id is exposed rather than a guessed
+endpoint called. Records persist across restarts in
+`SUBSTRATE_DOCS_STATE_FILE` when set (hashes and ids only); without it
+they stay process-local. Parse budget is thirty polls two seconds apart.
 
 ## Datasets
 

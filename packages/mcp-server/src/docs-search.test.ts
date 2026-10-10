@@ -163,3 +163,26 @@ describe("docs_search wiring", () => {
 		}
 	});
 });
+
+describe("docs_search metadata redaction", () => {
+	test("title, source URL and heading path are redacted like snippets", async () => {
+		const fake = new RagflowFake();
+		fake.chunks["ds-berlin-agent-substrate"] = [
+			{
+				content: "clean body",
+				document_name: "sk-proj-abcdefghij1234567890",
+				document_id: "doc-meta",
+				chunk_id: "chunk-meta",
+				heading_path: "sk-proj-abcdefghij1234567890",
+				source_url: "https://example.com/sk-proj-abcdefghij1234567890",
+				score: 0.99,
+			},
+		];
+		const { search } = harness(fake);
+		const reply = await search("where is the key?");
+		const cited = reply.chunks.find((citation) => citation.document_id === "doc-meta");
+		expect(cited?.title).not.toContain("sk-proj-");
+		expect(cited?.source_url).not.toContain("sk-proj-");
+		expect(cited?.heading_path).not.toContain("sk-proj-");
+	});
+});

@@ -6,14 +6,20 @@
 import { describe, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { loadConfig } from "./config.ts";
 import {
 	ingestDocs,
+	loadIngestRecords,
+	saveIngestRecords,
 	stripRemoteImages,
 	type IngestDeps,
 	type IngestInput,
 	type IngestOutcome,
 	type IngestRecord,
+	type PageSettlement,
 } from "./docs-ingest.ts";
 import { createMcpServer } from "./mcp.ts";
 import { RagflowFake } from "./ragflow-fake.ts";
@@ -24,7 +30,7 @@ const CONFIG = { url: "http://ragflow.test", apiKey: "test-key" };
 
 function harness(
 	fake: RagflowFake,
-	over: Partial<Pick<IngestDeps, "surface" | "vmGuest" | "roots" | "config">> = {},
+	over: Partial<Pick<IngestDeps, "surface" | "vmGuest" | "roots" | "config" | "seen" | "locks" | "poll">> = {},
 ) {
 	const events: EventInput[] = [];
 	const seen = new Map<string, IngestRecord>();
@@ -36,6 +42,7 @@ function harness(
 		},
 		surface: "omp",
 		seen,
+		poll: { intervalMs: 0 },
 		fetchImpl: fake.fetch,
 		...over,
 	};
@@ -241,6 +248,132 @@ describe("docs_ingest wiring", () => {
 		} finally {
 			await client.close();
 			await server.close();
+		}
+	});
+});
+
+describe("docs_ingest review hardening", () => {
+	test("refuses a secret smuggled in the heading metadata", async () => {
+		const fake = new RagflowFake();
+		const { events, ingest } = harness(fake);
+		const outcome = await ingest({
+			dataset: "agent-substrate",
+			pages: [{ ...PAGE, heading_path: "sk-proj-abcdefghij1234567890" }],
+		});
+		if (outcome.ok) throw new Error("expected a refusal");
+		expect(outcome.reason).toBe("secret-findings");
+		expect(outcome.rules).toContain("openai-proj");
+		expect(fake.uploads).toHaveLength(0);
+		expect(JSON.stringify(events)).not.toContain("sk-proj-");
+	});
+
+	test("refuses dot-segment escapes and out-of-roots real paths", async () => {
+		const fake = new RagflowFake();
+		const { ingest } = harness(fake);
+		const escaped = await ingest({ dataset: "agent-substrate", pages: [{ ...PAGE, path: "docs/../private.md" }] });
+		if (escaped.ok) throw new Error("expected a refusal");
+		expect(escaped.reason).toBe("outside-roots");
+		const linked = await ingest({
+			dataset: "agent-substrate",
+			pages: [{ ...PAGE, real_path: "../elsewhere.md" }],
+		});
+		if (linked.ok) throw new Error("expected a refusal");
+		expect(linked.reason).toBe("outside-roots");
+		expect(fake.uploads).toHaveLength(0);
+	});
+
+	test("keys records by dataset so a second dataset ingests and the first still skips", async () => {
+		const fake = new RagflowFake();
+		const { ingest } = harness(fake);
+		const first = await ingest({ dataset: "agent-substrate", pages: [PAGE] });
+		if (!first.ok) throw new Error(`expected ingest: ${first.reason}`);
+		const other = await ingest({ dataset: "programming-desk", pages: [PAGE] });
+		if (!other.ok) throw new Error(`expected ingest: ${other.reason}`);
+		expect(other.results[0]?.status).toBe("ingested");
+		const again = await ingest({ dataset: "agent-substrate", pages: [PAGE] });
+		if (!again.ok) throw new Error(`expected skip: ${again.reason}`);
+		expect(again.results[0]?.status).toBe("unchanged");
+		expect(fake.uploads).toHaveLength(2);
+	});
+
+	test("concurrent retries for one page share a single upload", async () => {
+		const fake = new RagflowFake();
+		const locks = new Map<string, Promise<PageSettlement>>();
+		const left = harness(fake, { locks, poll: { intervalMs: 0 } });
+		const right = harness(fake, { locks, seen: left.seen, poll: { intervalMs: 0 } });
+		const [a, b] = await Promise.all([
+			left.ingest({ dataset: "agent-substrate", pages: [PAGE] }),
+			right.ingest({ dataset: "agent-substrate", pages: [PAGE] }),
+		]);
+		if (!a.ok || !b.ok) throw new Error("expected both to settle");
+		expect(fake.uploads).toHaveLength(1);
+		expect(a.results[0]?.document_id).toBe(b.results[0]?.document_id);
+	});
+
+	test("a replacement reports the superseded document id", async () => {
+		const fake = new RagflowFake();
+		const { events, ingest } = harness(fake);
+		const first = await ingest({ dataset: "agent-substrate", pages: [PAGE] });
+		if (!first.ok) throw new Error(`expected ingest: ${first.reason}`);
+		const changed = await ingest({ dataset: "agent-substrate", pages: [{ ...PAGE, body: `${PAGE.body} More.` }] });
+		if (!changed.ok) throw new Error(`expected replace: ${changed.reason}`);
+		expect(changed.results[0]?.status).toBe("replaced");
+		expect(changed.results[0]?.superseded_document_id).toBe(first.results[0]?.document_id);
+		const notes = events.filter((event) => event.kind === "note");
+		const payload = notes[notes.length - 1]?.payload ?? {};
+		expect(payload.superseded_document_ids).toEqual([first.results[0]?.document_id]);
+	});
+});
+
+describe("ingest record persistence", () => {
+	test("records round-trip through the state file", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "substrate-docs-state-"));
+		try {
+			const file = join(dir, "ingest.json");
+			const seen = new Map<string, IngestRecord>([
+				["ds-1::https://example.com/a", { sha: "s1", dataset_id: "ds-1", source_url: "https://example.com/a", document_id: "doc-1" }],
+			]);
+			await saveIngestRecords(file, seen);
+			const loaded = await loadIngestRecords(file);
+			expect(loaded.problem).toBeUndefined();
+			expect(loaded.records.get("ds-1::https://example.com/a")?.document_id).toBe("doc-1");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a missing or corrupt file means an empty map, never a throw", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "substrate-docs-state-"));
+		try {
+			const missing = await loadIngestRecords(join(dir, "absent.json"));
+			expect(missing.records.size).toBe(0);
+			expect(missing.problem).toBeUndefined();
+			const corrupt = join(dir, "corrupt.json");
+			writeFileSync(corrupt, "not json{{{");
+			const loaded = await loadIngestRecords(corrupt);
+			expect(loaded.records.size).toBe(0);
+			expect(typeof loaded.problem).toBe("string");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a restarted server skips pages its state file already records", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "substrate-docs-state-"));
+		try {
+			const file = join(dir, "ingest.json");
+			const env = { RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", SUBSTRATE_DOCS_STATE_FILE: file };
+			const fake = new RagflowFake();
+			const first = new Substrate(loadConfig(env), { index: null, greptime: null, ragflowFetch: fake.fetch });
+			const ingested = await first.ingestDocs({ dataset: "agent-substrate", pages: [PAGE] }, "omp");
+			if (!ingested.ok) throw new Error(`expected ingest: ${ingested.reason}`);
+			const second = new Substrate(loadConfig(env), { index: null, greptime: null, ragflowFetch: fake.fetch });
+			const skipped = await second.ingestDocs({ dataset: "agent-substrate", pages: [PAGE] }, "omp");
+			if (!skipped.ok) throw new Error(`expected skip: ${skipped.reason}`);
+			expect(skipped.results[0]?.status).toBe("unchanged");
+			expect(fake.uploads).toHaveLength(1);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
 		}
 	});
 });

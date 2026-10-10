@@ -10,7 +10,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { listDatasets, retrieveChunks, type FetchLike, type RagflowChunk, type RagflowConfig } from "./planes/ragflow.ts";
-import { redactValue } from "./redact.ts";
+import { redact, redactValue } from "./redact.ts";
 import type { EventInput, Surface } from "./types.ts";
 
 /** Framing every docs_search reply carries: chunks are untrusted text. */
@@ -96,9 +96,9 @@ function cite(
 ): SearchCitation {
 	const age = markPinAge ? pinAgeMs(pin, nowMs) : undefined;
 	return {
-		title: chunk.document_name,
-		source_url: chunk.source_url ?? `dataset:${datasetName}`,
-		heading_path: chunk.heading_path ?? "",
+		title: redact(chunk.document_name),
+		source_url: chunk.source_url ? redact(chunk.source_url) : `dataset:${datasetName}`,
+		heading_path: chunk.heading_path ? redact(chunk.heading_path) : "",
 		commit: pin !== undefined ? pin.commit : `dataset-pin:${datasetName}:unpinned`,
 		snippet: redactValue(chunk.content).slice(0, SNIPPET_CAP),
 		score: chunk.score ?? 0,

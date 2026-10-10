@@ -22,7 +22,7 @@ import {
 } from "./cache.ts";
 import { isReviewToken, type SubstrateConfig } from "./config.ts";
 import { DesktopBusy, type DesktopDriver, type DesktopLogEntry, type DesktopRunResult } from "./desktop/driver.ts";
-import { ingestDocs, type IngestOutcome, type IngestRecord } from "./docs-ingest.ts";
+import { ingestDocs, loadIngestRecords, saveIngestRecords, type IngestOutcome, type IngestRecord, type PageSettlement } from "./docs-ingest.ts";
 import { DEFAULT_SEARCH_DATASET_NAMES, searchDocs, type SearchReply } from "./docs-search.ts";
 import {
 	DEFAULT_IDLE_SECONDS,
@@ -688,6 +688,10 @@ export class Substrate {
 	private readonly ragflowFetch: FetchLike;
 	/** Source-URL ingest records for hash idempotency, held for the process lifetime. */
 	private docsIngestSeen = new Map<string, IngestRecord>();
+	/** In-flight page uploads by record key, so concurrent retries share one upload. */
+	private docsIngestFlight = new Map<string, Promise<PageSettlement>>();
+	/** Ingest-record hydration from the state file; awaited once per process. */
+	private docsSeenReady: Promise<void> | null = null;
 	/** `graphId/nodeId` → tail of that node's gated-completion chain. */
 	private readonly completionChains = new Map<string, Promise<void>>();
 
@@ -2176,6 +2180,39 @@ export class Substrate {
 	}
 
 	/**
+	 * Hydrate ingest records from the state file, once per process.
+	 *
+	 * A missing file simply means an empty map; a corrupt one is reported
+	 * on stderr and likewise starts empty. Either way ingest proceeds —
+	 * losing dedup degrades to a duplicate upload, never to a refusal.
+	 */
+	private hydrateDocsSeen(): Promise<void> {
+		if (!this.docsSeenReady) {
+			this.docsSeenReady = (async () => {
+				const file = this.config.docsStateFile;
+				if (!file) return;
+				const { records, problem } = await loadIngestRecords(file);
+				for (const [key, record] of records) this.docsIngestSeen.set(key, record);
+				if (problem) process.stderr.write(`[substrate] ${problem}\n`);
+			})();
+		}
+		return this.docsSeenReady;
+	}
+
+	/**
+	 * Persist ingest records best-effort. A failing disk never fails the
+	 * ingest it just completed; the reason lands on stderr either way.
+	 */
+	private persistDocsSeen(): Promise<void> {
+		const file = this.config.docsStateFile;
+		if (!file) return Promise.resolve();
+		return saveIngestRecords(file, this.docsIngestSeen).catch((cause: unknown) => {
+			process.stderr.write(`[substrate] docs ingest records not saved — ${String(cause)}\n`);
+		});
+	}
+
+
+	/**
 	 * DOCS-02: ingest pages into a docs dataset through the substrate (D25-05).
 	 *
 	 * Fail-closed: an unauthenticated or guest caller, an unconfigured plane,
@@ -2190,12 +2227,17 @@ export class Substrate {
 	): Promise<IngestOutcome> {
 		const sessionId = typeof input.session_id === "string" && input.session_id.length > 0 ? input.session_id : undefined;
 		const pages = Array.isArray(input.pages) ? input.pages : [];
-		return ingestDocs(
+		await this.hydrateDocsSeen();
+		const outcome = await ingestDocs(
 			{
 				config: this.config.ragflow,
 				roots: this.config.docsIngestRoots,
 				vmGuest: this.config.vmGuest,
 				seen: this.docsIngestSeen,
+				locks: this.docsIngestFlight,
+				// A real parse takes seconds: thirty polls two seconds apart.
+				// The zero-delay rehearsal shape stays in the module tests.
+				poll: { maxPolls: 30, intervalMs: 2000 },
 				emit: (event) => this.emit(event),
 				surface: callerSurface,
 				...(sessionId !== undefined ? { sessionId } : {}),
@@ -2208,6 +2250,7 @@ export class Substrate {
 					.filter((page): page is Record<string, unknown> => page !== null && typeof page === "object" && !Array.isArray(page))
 					.map((page) => ({
 						path: typeof page.path === "string" ? page.path : "",
+						...("real_path" in page && typeof page.real_path === "string" ? { real_path: page.real_path } : {}),
 						...("source_url" in page && typeof page.source_url === "string" ? { source_url: page.source_url } : {}),
 						body: typeof page.body === "string" ? page.body : "",
 						...("heading_path" in page && typeof page.heading_path === "string" ? { heading_path: page.heading_path } : {}),
@@ -2215,6 +2258,8 @@ export class Substrate {
 				...(sessionId !== undefined ? { session_id: sessionId } : {}),
 			},
 		);
+		if (outcome.ok) await this.persistDocsSeen();
+		return outcome;
 	}
 
 	/**

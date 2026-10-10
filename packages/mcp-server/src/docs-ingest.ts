@@ -3,13 +3,25 @@
  *
  * Every page is stripped of remote images, scanned by the Phase 18 redactor
  * BEFORE upload and refused — never cleaned-and-published — on any finding.
- * Six refusals fail closed with locator-only warning events: a redactor
- * finding, a page with no source URL, a path outside the configured roots,
- * a page or call over the size caps, an unauthenticated caller, a VM guest.
- * Uploads are idempotent by content hash and always carry
- * `{source_url, commit, heading_path}` metadata (U-03).
+ * The scan covers the body AND the outgoing metadata (`source_url`,
+ * `commit`, `heading_path`): a clean body cannot publish a secret through a
+ * heading. Six refusals fail closed with locator-only warning events: a
+ * redactor finding, a page with no source URL, a path outside the
+ * configured roots, a page or call over the size caps, an unauthenticated
+ * caller, a VM guest. Both the posted `path` and the client-resolved
+ * `real_path` (when present) must sit under the roots after dot-segment
+ * normalization, so `docs/../private.md` and symlink escapes are refused.
+ *
+ * Uploads are idempotent by content hash, keyed by dataset plus source URL,
+ * with per-page in-flight locks so concurrent retries share one upload.
+ * Every upload sends `{source_url, commit, heading_path}` metadata (U-03).
+ * A replacement reports the superseded document id for the G3 retire step:
+ * the delete path is unverified (U-02), so this phase exposes the id rather
+ * than calling a guessed endpoint.
  */
 import { createHash, randomUUID } from "node:crypto";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import {
 	listDatasets,
 	pollParseStatus,
@@ -34,6 +46,8 @@ export const DEFAULT_INGEST_ROOTS: readonly string[] = ["docs/", "README.md", ".
 
 export interface IngestPage {
 	path: string;
+	/** The client-resolved filesystem path, when the caller read one. Also gated. */
+	real_path?: string;
 	source_url?: string;
 	body: string;
 	heading_path?: string;
@@ -52,16 +66,24 @@ export interface IngestPageResult {
 	status: "ingested" | "replaced" | "unchanged";
 	document_id: string;
 	content_sha256: string;
+	/** The prior document this upload supersedes; retired by the G3 step. */
+	superseded_document_id?: string;
 }
+
+/** One page's upload, shared with concurrent retries for the same key. */
+export type PageSettlement =
+	| { ok: true; result: IngestPageResult }
+	| { ok: false; reason: string };
 
 export type IngestOutcome =
 	| { ok: true; results: IngestPageResult[]; stripped_images: number }
 	| { ok: false; refused: true; reason: string; rules?: string[]; page?: string };
 
-/** A source URL's last ingest, for hash idempotency. */
+/** A source URL's last ingest in one dataset, for hash idempotency. */
 export interface IngestRecord {
 	sha: string;
 	dataset_id: string;
+	source_url: string;
 	document_id: string;
 }
 
@@ -69,7 +91,12 @@ export interface IngestDeps {
 	config: RagflowConfig | null;
 	roots?: readonly string[];
 	vmGuest?: boolean;
+	/** Records keyed `${dataset_id}::${source_url}`; held by the service, optionally persisted. */
 	seen?: Map<string, IngestRecord>;
+	/** In-flight uploads by the same key; held by the service so retries share one upload. */
+	locks?: Map<string, Promise<PageSettlement>>;
+	/** Parse budget; production passes a real delay, tests pass zero. */
+	poll?: { maxPolls?: number; intervalMs?: number };
 	emit: (event: EventInput) => Promise<unknown>;
 	surface: Surface | null;
 	sessionId?: string;
@@ -117,6 +144,30 @@ function sha256(text: string): string {
 	return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
+/**
+ * A repo-rooted path with dot-segments resolved, or null when it escapes.
+ *
+ * Backslashes become slashes, absolute paths are refused, and `..` that
+ * climbs past the repo root yields null — so `docs/../private.md`
+ * normalizes to `private.md` and fails the roots check instead of passing
+ * it. The CLI carries its own copy (it cannot import this module without
+ * breaking the substrate-only door) pinned by a text test.
+ */
+export function normalizeIngestPath(path: string): string | null {
+	const slashed = path.replace(/\\/g, "/");
+	if (slashed.startsWith("/")) return null;
+	const parts: string[] = [];
+	for (const part of slashed.split("/")) {
+		if (part === "" || part === ".") continue;
+		if (part === "..") {
+			if (parts.length === 0) return null;
+			parts.pop();
+			continue;
+		}
+		parts.push(part);
+	}
+	return parts.join("/");
+}
 function refused(
 	deps: IngestDeps,
 	sessionId: string,
@@ -146,16 +197,24 @@ function refused(
 }
 
 function underRoot(path: string, roots: readonly string[]): boolean {
-	return roots.some((root) => (root.endsWith("/") ? path.startsWith(root) : path === root));
+	const clean = normalizeIngestPath(path);
+	if (clean === null) return false;
+	return roots.some((root) => (root.endsWith("/") ? clean.startsWith(root) : clean === root));
+}
+
+function recordKey(datasetId: string, sourceUrl: string): string {
+	return `${datasetId}::${sourceUrl}`;
 }
 
 export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<IngestOutcome> {
 	const sessionId = deps.sessionId ?? `docs-ingest:${randomUUID()}`;
 	const roots = deps.roots ?? DEFAULT_INGEST_ROOTS;
 	const seen = deps.seen ?? new Map<string, IngestRecord>();
+	const locks = deps.locks ?? new Map<string, Promise<PageSettlement>>();
+	const config = deps.config;
 	if (deps.surface === null) return refused(deps, sessionId, "unauthenticated");
 	if (deps.vmGuest === true) return refused(deps, sessionId, "vm-guest");
-	if (deps.config === null) return refused(deps, sessionId, "ragflow-not-configured");
+	if (config === null) return refused(deps, sessionId, "ragflow-not-configured");
 	if (input.pages.length === 0) return refused(deps, sessionId, "no-pages");
 
 	const prepared: Array<{ page: IngestPage; sourceUrl: string; body: string; sha: string }> = [];
@@ -164,18 +223,21 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 	for (const page of input.pages) {
 		if (!page.source_url) return refused(deps, sessionId, "no-source-url", { page: page.path });
 		if (!underRoot(page.path, roots)) return refused(deps, sessionId, "outside-roots", { page: page.path });
+		if (page.real_path !== undefined && !underRoot(page.real_path, roots)) {
+			return refused(deps, sessionId, "outside-roots", { page: page.path });
+		}
 		const stripped = stripRemoteImages(page.body);
 		strippedImages += stripped.stripped;
 		const size = Buffer.byteLength(stripped.body, "utf8");
 		if (size > INGEST_PAGE_MAX_BYTES) return refused(deps, sessionId, "page-too-large", { page: page.path });
 		total += size;
 		if (total > INGEST_CALL_MAX_BYTES) return refused(deps, sessionId, "call-too-large", { page: page.path });
-		const rules = findingRules(stripped.body);
+		const rules = findingRules(`${stripped.body}\n${page.source_url}\n${input.commit ?? ""}\n${page.heading_path ?? ""}`);
 		if (rules.length > 0) return refused(deps, sessionId, "secret-findings", { rules, page: page.path });
 		prepared.push({ page, sourceUrl: page.source_url, body: stripped.body, sha: sha256(stripped.body) });
 	}
 
-	const listed = await listDatasets(deps.config, deps.fetchImpl);
+	const listed = await listDatasets(config, deps.fetchImpl);
 	if (!listed.ok) return refused(deps, sessionId, listed.reason);
 	const dataset = listed.datasets.find((entry) => entry.name === input.dataset);
 	if (!dataset) return refused(deps, sessionId, "unknown-dataset");
@@ -183,31 +245,58 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 
 	const results: IngestPageResult[] = [];
 	for (const { page, sourceUrl, body, sha } of prepared) {
-		const prior = seen.get(sourceUrl);
-		if (prior && prior.sha === sha && prior.dataset_id === dataset.id) {
+		const key = recordKey(dataset.id, sourceUrl);
+		const prior = seen.get(key);
+		if (prior && prior.sha === sha) {
 			results.push({ path: page.path, source_url: sourceUrl, status: "unchanged", document_id: prior.document_id, content_sha256: sha });
 			continue;
 		}
-		const uploaded = await uploadDocument(
-			deps.config,
-			{
-				dataset_id: dataset.id,
-				content: body,
-				metadata: { source_url: sourceUrl, commit, heading_path: page.heading_path ?? "" },
-			},
-			deps.fetchImpl,
-		);
-		if (!uploaded.ok) return refused(deps, sessionId, uploaded.reason, { page: page.path });
-		const parsed = await pollParseStatus(deps.config, uploaded.document_id, deps.fetchImpl, { intervalMs: 0 });
-		if (!parsed.ok) return refused(deps, sessionId, parsed.reason, { page: page.path });
-		seen.set(sourceUrl, { sha, dataset_id: dataset.id, document_id: uploaded.document_id });
-		results.push({
-			path: page.path,
-			source_url: sourceUrl,
-			status: prior ? "replaced" : "ingested",
-			document_id: uploaded.document_id,
-			content_sha256: sha,
-		});
+		// Synchronous check-and-set: no await sits between the lookup and
+		// the store, so a concurrent retry for the same key joins this
+		// upload instead of starting a second one.
+		const running = locks.get(key);
+		if (running) {
+			const settled = await running;
+			if (!settled.ok) return refused(deps, sessionId, settled.reason, { page: page.path });
+			results.push(settled.result);
+			continue;
+		}
+		const task: Promise<PageSettlement> = (async (): Promise<PageSettlement> => {
+			const uploaded = await uploadDocument(
+				config,
+				{
+					dataset_id: dataset.id,
+					content: body,
+					metadata: { source_url: sourceUrl, commit, heading_path: page.heading_path ?? "" },
+				},
+				deps.fetchImpl,
+			);
+			if (!uploaded.ok) return { ok: false, reason: uploaded.reason };
+			const parsed = await pollParseStatus(config, uploaded.document_id, deps.fetchImpl, {
+				maxPolls: deps.poll?.maxPolls,
+				intervalMs: deps.poll?.intervalMs,
+			});
+			if (!parsed.ok) return { ok: false, reason: parsed.reason };
+			const result: IngestPageResult = {
+				path: page.path,
+				source_url: sourceUrl,
+				status: prior ? "replaced" : "ingested",
+				document_id: uploaded.document_id,
+				content_sha256: sha,
+				...(prior ? { superseded_document_id: prior.document_id } : {}),
+			};
+			seen.set(key, { sha, dataset_id: dataset.id, source_url: sourceUrl, document_id: uploaded.document_id });
+			return { ok: true, result };
+		})();
+		locks.set(key, task);
+		let settled: PageSettlement;
+		try {
+			settled = await task;
+		} finally {
+			if (locks.get(key) === task) locks.delete(key);
+		}
+		if (!settled.ok) return refused(deps, sessionId, settled.reason, { page: page.path });
+		results.push(settled.result);
 	}
 
 	await deps.emit({
@@ -220,8 +309,56 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 			dataset_id: dataset.id,
 			source_urls: results.map((result) => result.source_url),
 			content_sha256: results.map((result) => result.content_sha256),
+			superseded_document_ids: results.flatMap((result) => (result.superseded_document_id ? [result.superseded_document_id] : [])),
 			stripped_images: strippedImages,
 		},
 	});
 	return { ok: true, results, stripped_images: strippedImages };
+}
+
+/**
+ * Ingest records on disk, so a restarted server does not re-upload pages it
+ * already stored (Greptile P1). A missing or corrupt file means an empty
+ * map, never a throw: losing dedup degrades to a duplicate upload, while
+ * refusing ingest over an unreadable file would turn a disk hiccup into an
+ * outage of the publication path. The caller reports the problem string.
+ */
+export interface IngestStateFile {
+	version: 1;
+	records: Record<string, IngestRecord>;
+}
+
+export async function loadIngestRecords(file: string): Promise<{ records: Map<string, IngestRecord>; problem?: string }> {
+	let raw: string;
+	try {
+		raw = await readFile(file, "utf8");
+	} catch {
+		return { records: new Map<string, IngestRecord>() };
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		return { records: new Map<string, IngestRecord>(), problem: `${file} is not valid JSON; starting with empty ingest records` };
+	}
+	if (parsed === null || typeof parsed !== "object" || !("records" in parsed) || parsed.records === null || typeof parsed.records !== "object") {
+		return { records: new Map<string, IngestRecord>(), problem: `${file} has no records table; starting with empty ingest records` };
+	}
+	const records = new Map<string, IngestRecord>();
+	for (const [key, record] of Object.entries(parsed.records)) {
+		if (record === null || typeof record !== "object") continue;
+		if (!("sha" in record) || !("dataset_id" in record) || !("source_url" in record) || !("document_id" in record)) continue;
+		if (typeof record.sha !== "string" || typeof record.dataset_id !== "string" || typeof record.source_url !== "string" || typeof record.document_id !== "string") {
+			continue;
+		}
+		records.set(key, { sha: record.sha, dataset_id: record.dataset_id, source_url: record.source_url, document_id: record.document_id });
+	}
+	return { records };
+}
+
+/** Persist ingest records. Throws on I/O failure; the caller logs and continues. */
+export async function saveIngestRecords(file: string, seen: Map<string, IngestRecord>): Promise<void> {
+	await mkdir(dirname(file), { recursive: true });
+	const state: IngestStateFile = { version: 1, records: Object.fromEntries(seen) };
+	await writeFile(file, `${JSON.stringify(state)}\n`, "utf8");
 }

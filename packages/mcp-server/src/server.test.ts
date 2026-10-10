@@ -304,6 +304,45 @@ describe("routes", () => {
 			await stop();
 		}
 	});
+
+	test("POST /docs/ingest refuses an out-of-roots real path", async () => {
+		const { greptime } = ledger();
+		const fake = new RagflowFake();
+		const { post, stop } = await serve(
+			greptime,
+			{ SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
+			{ ragflowFetch: fake.fetch },
+		);
+		try {
+			const response = await post(
+				"/docs/ingest",
+				{
+					dataset: "agent-substrate",
+					pages: [{ path: "docs/planes.md", real_path: "../vault.md", source_url: "https://example.com/x", body: "Hi." }],
+				},
+				{ authorization: "Bearer tok-omp" },
+			);
+			expect(response.status).toBe(400);
+			expect(fake.uploads).toHaveLength(0);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("POST /docs/ingest answers 413 past the route body cap", async () => {
+		const { greptime } = ledger();
+		const { post, stop } = await serve(greptime, { SUBSTRATE_TOKEN_OMP: "tok-omp" });
+		try {
+			const response = await post(
+				"/docs/ingest",
+				{ dataset: "agent-substrate", pages: [{ path: "docs/big.md", body: `x${"y".repeat(6_500_000)}` }] },
+				{ authorization: "Bearer tok-omp" },
+			);
+			expect(response.status).toBe(413);
+		} finally {
+			await stop();
+		}
+	});
 });
 
 describe("memoryWriteStatus", () => {

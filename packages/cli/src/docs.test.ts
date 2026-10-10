@@ -156,6 +156,43 @@ describe("substrate docs ingest", () => {
 		}
 	});
 
+	test("refuses a dot-segment escape before anything is posted", async () => {
+		stub.seen = [];
+		writePage("outside.md", "Secrets.\n");
+		const run = deps();
+		const code = await runDocs(
+			["ingest", "--dataset", "agent-substrate", "--path", "docs/../../outside.md", "--source-url", "https://example.com/o"],
+			run,
+		);
+		expect(code).toBe(1);
+		expect(stub.seen).toHaveLength(0);
+	});
+
+	test("posts the normalized path with the resolved real path", async () => {
+		stub.seen = [];
+		const name = writePage("real.md", "Hello.\n");
+		const run = deps();
+		const code = await runDocs(
+			["ingest", "--dataset", "agent-substrate", "--path", `docs/../${name}`, "--source-url", "https://example.com/r"],
+			run,
+		);
+		expect(code).toBe(0);
+		const body = stub.seen[0]?.body;
+		if (body === null || typeof body !== "object" || !("pages" in body) || !Array.isArray(body.pages)) {
+			throw new Error("the CLI did not post pages");
+		}
+		expect(body.pages[0]).toMatchObject({ path: name });
+		expect(body.pages[0]).toHaveProperty("real_path");
+	});
+
+	test("the CLI path normalization mirrors the engine gate", async () => {
+		const root = join(import.meta.dir, "..", "..", "..");
+		const cli = await Bun.file(join(root, "packages", "cli", "src", "docs.ts")).text();
+		const engine = await Bun.file(join(root, "packages", "mcp-server", "src", "docs-ingest.ts")).text();
+		expect(cli).toContain("if (parts.length === 0) return null;");
+		expect(engine).toContain("if (parts.length === 0) return null;");
+	});
+
 	test("the CLI page cap equals the engine page cap", async () => {
 		const root = join(import.meta.dir, "..", "..", "..");
 		const cli = await Bun.file(join(root, "packages", "cli", "src", "docs.ts")).text();

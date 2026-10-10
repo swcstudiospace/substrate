@@ -792,6 +792,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 					.array(
 						z.object({
 							path: z.string(),
+							real_path: z.string().optional().describe("Client-resolved filesystem path; also gated when present."),
 							source_url: z.string().optional(),
 							body: z.string(),
 							heading_path: z.string().optional(),

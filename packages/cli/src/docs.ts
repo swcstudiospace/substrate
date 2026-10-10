@@ -16,8 +16,8 @@
  *
  * Output is `key=value` lines on stdout; a human message goes to stderr.
  */
-import { lstatSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import { relative, resolve } from "node:path";
 import { parseArgs, str, type Args } from "./args.ts";
 
 export const USAGE =
@@ -41,6 +41,29 @@ export const DEFAULT_TIMEOUT_MS = 120_000;
 export function docsTimeout(raw: string | undefined): number {
 	const value = Number(raw);
 	return Number.isFinite(value) && value > 0 ? value : DEFAULT_TIMEOUT_MS;
+}
+
+/**
+ * The posted path with dot-segments resolved, or null when it escapes.
+ *
+ * Mirrors `normalizeIngestPath` in `packages/mcp-server/src/docs-ingest.ts`
+ * (duplicated because the CLI cannot import that module without breaking
+ * the substrate-only door); the text test below pins the two together.
+ */
+export function normalizePath(path: string): string | null {
+	const slashed = path.replace(/\\/g, "/");
+	if (slashed.startsWith("/")) return null;
+	const parts: string[] = [];
+	for (const part of slashed.split("/")) {
+		if (part === "" || part === ".") continue;
+		if (part === "..") {
+			if (parts.length === 0) return null;
+			parts.pop();
+			continue;
+		}
+		parts.push(part);
+	}
+	return parts.join("/");
 }
 
 export interface DocsDeps {
@@ -107,7 +130,16 @@ async function ingest(args: Args, deps: DocsDeps): Promise<number> {
 		return refused("this machine is a VM guest; guest bytes are never published, and nothing was posted");
 	}
 
-	const absolute = resolve(deps.cwd, pathArg);
+	// The posted path is normalized exactly like the server gates it, so a
+	// `docs/../` escape is refused here with the file named instead of
+	// passing the server as a different file's bytes. The real path travels
+	// alongside so a symlinked parent that escapes the roots is refused
+	// server-side too. The normalization mirrors
+	// `packages/mcp-server/src/docs-ingest.ts#normalizeIngestPath` (the CLI
+	// cannot import that module without breaking the substrate-only door).
+	const postedPath = normalizePath(pathArg);
+	if (postedPath === null) return refused(`${pathArg} escapes its directory`);
+	const absolute = resolve(deps.cwd, postedPath);
 	let stat: { isSymbolicLink(): boolean; isFile(): boolean; size: number };
 	try {
 		stat = lstatSync(absolute);
@@ -116,6 +148,12 @@ async function ingest(args: Args, deps: DocsDeps): Promise<number> {
 	}
 	if (stat.isSymbolicLink()) return refused(`${pathArg} is a symlink`);
 	if (!stat.isFile()) return refused(`${pathArg} is not a regular file`);
+	let realPath: string | null = null;
+	try {
+		realPath = realpathSync(absolute);
+	} catch {
+		realPath = null;
+	}
 	// Counted before the file is read, so a huge file cannot be pulled into memory just to be refused.
 	if (stat.size > MAX_PAGE_BYTES) return refused(`${pathArg} is over the limit of ${MAX_PAGE_BYTES} bytes`);
 	let body: string;
@@ -138,7 +176,8 @@ async function ingest(args: Args, deps: DocsDeps): Promise<number> {
 				dataset,
 				pages: [
 					{
-						path: pathArg,
+						path: postedPath,
+						...(realPath !== null ? { real_path: relative(deps.cwd, realPath) } : {}),
 						source_url: sourceUrl,
 						body,
 						...(heading !== undefined ? { heading_path: heading } : {}),

@@ -88,6 +88,15 @@ export interface SubstrateConfig {
 	 * published to a shared dataset.
 	 */
 	vmGuest: boolean;
+	/**
+	 * Where docs_ingest records live across restarts (Greptile P1).
+	 *
+	 * From `SUBSTRATE_DOCS_STATE_FILE`; null keeps the records process-local.
+	 * A path, never a credential, so boot warnings may quote it. The file
+	 * holds content hashes and document ids only — the same locators the
+	 * ingest events already carry.
+	 */
+	docsStateFile: string | null;
 	/** bearer token → surface. Lets every event be attributed to a caller. */
 	tokens: Map<string, Surface>;
 	/**
@@ -430,6 +439,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		ragflow: ragflowFromEnv(env),
 		docsIngestRoots: ingestRoots.length > 0 ? ingestRoots : [...DEFAULT_INGEST_ROOTS],
 		vmGuest: (env.SUBSTRATE_VM_GUEST?.trim() ?? "") === "1",
+		docsStateFile: env.SUBSTRATE_DOCS_STATE_FILE?.trim() || null,
 		tokens,
 		allowAnonymous: allowAnonymousFrom(env, tokens.size),
 		operatorTokens: new Set(

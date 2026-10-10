@@ -203,8 +203,18 @@ const MAX_LOG_KEYS = 50;
 const MAX_BODY_BYTES = 1_000_000;
 
 /**
- * A body over `MAX_BODY_BYTES`. Final for that body, so `/skills/propose` answers it 413. Every
- * other route still answers it with the generic 500 it always has.
+ * Room for the documented ingest call cap (5 MB of pages plus JSON
+ * overhead). `/docs/ingest` and `/mcp` read with this; every other route
+ * keeps the 1 MB cap. The MCP door serves loopback callers and the buffer
+ * is transient, so the wider cap buys ingest without opening a new
+ * amplification path.
+ */
+const DOCS_MAX_BODY_BYTES = 6_000_000;
+
+/**
+ * A body over the route's cap. Final for that body: the uploading routes
+ * answer it 413. Every other route still answers it with the generic 500
+ * it always has.
  */
 export class BodyTooLargeError extends Error {
 	constructor() {
@@ -287,12 +297,12 @@ export function memoryWriteStatus(result: { outcome: string; reason: string; ver
 	}
 }
 
-async function readBody(req: IncomingMessage): Promise<string> {
+async function readBody(req: IncomingMessage, maxBytes: number = MAX_BODY_BYTES): Promise<string> {
 	const chunks: Buffer[] = [];
 	let size = 0;
 	for await (const chunk of req) {
 		size += (chunk as Buffer).length;
-		if (size > MAX_BODY_BYTES) throw new BodyTooLargeError();
+		if (size > maxBytes) throw new BodyTooLargeError();
 		chunks.push(chunk as Buffer);
 	}
 	return Buffer.concat(chunks).toString("utf8");
@@ -776,7 +786,7 @@ export function createHttpServer(
 					sendJson(res, 401, { error: INGEST_NEEDS_SURFACE });
 					return;
 				}
-				const parsed: unknown = JSON.parse(await readBody(req));
+				const parsed: unknown = JSON.parse(await readBody(req, DOCS_MAX_BODY_BYTES));
 				if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
 					sendJson(res, 400, { error: "request body must be a JSON object" });
 					return;
@@ -800,6 +810,7 @@ export function createHttpServer(
 							"body" in page &&
 							typeof page.body === "string" &&
 							(!("source_url" in page) || typeof page.source_url === "string") &&
+							(!("real_path" in page) || typeof page.real_path === "string") &&
 							(!("heading_path" in page) || typeof page.heading_path === "string"),
 					);
 				if (!pagesValid || (commit !== undefined && typeof commit !== "string") || (ingestSession !== undefined && typeof ingestSession !== "string")) {
@@ -856,7 +867,7 @@ export function createHttpServer(
 
 			sendJson(res, 404, { error: `no route for ${req.method} ${url.pathname}` });
 		} catch (cause) {
-			if (cause instanceof BodyTooLargeError && url.pathname === "/skills/propose") {
+			if (cause instanceof BodyTooLargeError && (url.pathname === "/skills/propose" || url.pathname === "/docs/ingest" || url.pathname === "/mcp")) {
 				sendJson(res, 413, { error: cause.message });
 				return;
 			}
@@ -918,7 +929,7 @@ async function handleMcp(
 		res.writeHead(405, { allow: "POST" }).end();
 		return;
 	}
-	const raw = await readBody(req);
+	const raw = await readBody(req, DOCS_MAX_BODY_BYTES);
 	const body: unknown = raw ? JSON.parse(raw) : undefined;
 	rememberClaim(claim, body);
 
