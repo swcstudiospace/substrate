@@ -2,14 +2,14 @@
 gsd_state_version: "1.0"
 milestone: v1.3
 milestone_name: Build plan completion
-current_phase: 27
-current_phase_name: ledger-primitives-and-ingest-order
+current_phase: 28
+current_phase_name: hourly-anchor-job-and-verify
 status: verified
-stopped_at: Phase 27 re-verified — 27-VERIFICATION.md digest refreshed at 3754c6e (18/18 must-haves; bun 2845/58/1 F-01 recorded, tsc clean, pytest 230, ledger proofs green; production v1.1.4 acceptance operator-gated)
-last_updated: "2026-10-10T21:34:54Z"
+stopped_at: Phase 28 verified — 28-VERIFICATION.md passed at 35c8f5b (20/20 must-haves; bun 2845/58/1 F-01 recorded, tsc clean, pytest 230, anchor/verify proofs green; live L1-L10 tail operator-gated)
+last_updated: "2026-10-10T22:30:00Z"
 last_activity: 2026-10-10
-last_activity_desc: Phase 27 re-verified (covered-file drift since 67cd428 re-proven; merkle/memo/period/solana still acc30a8-identical, rpc.ts additive getGenesisHash only; anchors reads/writes are phase 28 scope; live v1.1.4 tail gated)
-state_head: 3754c6e
+last_activity_desc: Phase 28 verified (Path A verify-resume, PR #35 code on main; post-merge drift in service.ts/cli-index.ts is phases-25/26 additive, zero verify/anchor lines touched; scratch not re-run — harness refuses from production checkout; live devnet + timer gated)
+state_head: 35c8f5b
 progress:
   total_phases: 18
   completed_phases: 3
