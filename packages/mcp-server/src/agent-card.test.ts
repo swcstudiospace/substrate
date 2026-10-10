@@ -17,6 +17,7 @@ import {
 } from "./agent-card.ts";
 import { AGENT_CARD_FIXTURES, VALID_CARD } from "./agent-card.fixtures.ts";
 import { loadConfig } from "./config.ts";
+import { FakeStore } from "./memory-write.test.ts";
 import { createObservability } from "./observe.ts";
 import { Substrate } from "./service.ts";
 import { createHttpServer } from "./server.ts";
@@ -289,5 +290,52 @@ describe("GET /.well-known/agent-card.json", () => {
 		} finally {
 			await stop();
 		}
+	});
+});
+
+describe("card end-to-end (session → card)", () => {
+	test("a session teachable appears in its surface's card only, validator-clean", async () => {
+		// The CARD-04 isolated half: session write → card lists it (the
+		// session → anchored-hour leg is the teachable-anchor proof; same
+		// scratch shape, both green). No new fixtures beyond the corpus.
+		class Searchable extends FakeStore {
+			async searchMemoryPage(search: MemorySearch): Promise<MemorySearchPage> {
+				const prefix = search.subjectPrefix ?? null;
+				const kept = [...this.rows.values()]
+					.map((row) => row.entry)
+					.filter((row) => prefix === null || row.subject?.startsWith(prefix))
+					.filter((row) => search.includeSuperseded || !row.superseded_by)
+					.sort((a, b) => (b.created === a.created ? (b.id < a.id ? -1 : 1) : b.created < a.created ? -1 : 1));
+				return { entries: kept.slice(0, search.limit ?? 20), next: null };
+			}
+		}
+		const substrate = new Substrate(loadConfig({}), {
+			index: new Searchable() as never,
+			greptime: {
+				ensureAppendMode: async () => true,
+				lastHash: async () => null,
+				insertEvent: async () => {},
+			} as never,
+		});
+
+		const written = await substrate.writeMemory({
+			scope: "graph:ut-card-e2e",
+			kind: "fact",
+			text: "cap retries at three before paging the human",
+			writer: "hermes",
+			subject: "teachable:retry-budget",
+			session_id: "sess-p29-card",
+			graph_id: "ut-card-e2e",
+		});
+		expect(written.outcome).toBe("accepted");
+
+		const card = buildAgentCard("hermes", await substrate.teachablesForSurface("hermes"));
+		expect(validateAgentCard(card)).toEqual([]);
+		expect(card.skills).toHaveLength(1);
+		expect(card.skills[0]).toMatchObject({ id: written.entry?.id, name: "retry-budget" });
+
+		const other = buildAgentCard("omp", await substrate.teachablesForSurface("omp"));
+		expect(validateAgentCard(other)).toEqual([]);
+		expect(other.skills).toEqual([]);
 	});
 });
