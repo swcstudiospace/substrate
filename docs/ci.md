@@ -24,6 +24,12 @@ A passing step prints one line (with the pass/skip/fail counts for the suite). A
 
 `scripts/verify.test.ts` reads `.github/workflows/ci.yml` and fails when the workflow runs different commands from `bun run verify`, or when a job loses its `CI_ENABLED` switch, so the two cannot drift apart silently.
 
+### Host-isolated verification
+
+Tests must name scratch token storage explicitly; an unreadable token-file override can legitimately fall back to the host's default token directory. Never use that fallback in a filesystem test or print its failure values.
+
+Use a private `HOME` and `XDG_RUNTIME_DIR` when verifying on a configured host. Non-root desktop probes also need a traversable test `TMPDIR`; keep the home and runtime subdirectories private rather than weakening the production script's root check.
+
 ### The database-backed tests
 
 About 56 tests (leases, memory, search, graph bindings) skip when `SUBSTRATE_TEST_PG_URL` is unset, and `bun run verify` says so. CI runs them against a scratch Postgres 16. To run them locally, use the rehearsal twin ([`rehearsal.md`](rehearsal.md)), which starts a scratch Postgres and GreptimeDB and writes an env file that exports the variable:

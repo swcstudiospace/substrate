@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_TOKENS_DIR, firstLine, resolveBearer } from "./token.ts";
@@ -71,9 +71,10 @@ describe("resolveBearer", () => {
 		expect(resolveBearer("cursor", envOf({ SUBSTRATE_TOKENS_DIR: dir }))).toBeNull();
 	});
 
-	test("a directory at the token-file path means no token", () => {
+	test("an unreadable token file falls back to its configured directory", () => {
 		const dir = mkdtempSync(join(tmpdir(), "tok-"));
-		expect(resolveBearer("cursor", envOf({ SUBSTRATE_TOKEN_FILE: dir }))).toBeNull();
+		writeFileSync(join(dir, "cursor"), "tok-dir\n");
+		expect(resolveBearer("cursor", envOf({ SUBSTRATE_TOKEN_FILE: dir, SUBSTRATE_TOKENS_DIR: dir }))).toBe("tok-dir");
 	});
 
 	test("an oversize dir file means no token", () => {
