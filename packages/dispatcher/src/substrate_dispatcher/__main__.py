@@ -141,7 +141,7 @@ def main(argv: list[str] | None = None) -> int:
                 linear=linear,
                 mcp=mcp,
                 # D24-05: the registry re-reads given_up.json before the first tick.
-                registry=SessionRegistry(state_dir=STATE_DIR),
+                registry=SessionRegistry(state_dir=STATE_DIR, log=log),
                 launch_fn=make_launch_fn(log=log, open_task=host.launch),
                 env_file=Path(os.environ.get("SUBSTRATE_ENV_FILE") or DEFAULT_ENV_FILE),
                 environ=os.environ,

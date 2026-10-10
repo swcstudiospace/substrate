@@ -52,12 +52,15 @@ def resolve_substrate_bearer(
     environ: dict[str, str] | None = None,
     read: Any = None,
 ) -> str | None:
-    """The surface-``substrate`` bearer via the Phase 20 order (cf. ``packages/cli/src/token.ts``).
+    """The surface-``substrate`` bearer for the dispatcher loop.
 
-    ``SUBSTRATE_TOKEN`` first, else the first line of ``SUBSTRATE_TOKEN_FILE``, else the
-    first line of the per-surface file in ``SUBSTRATE_TOKENS_DIR`` (default
-    ``/etc/substrate/tokens/substrate``). Absent or unreadable means None (fail-open):
-    the server refuses anonymous calls, and the refusal surfaces as an ``McpError``.
+    ``SUBSTRATE_TOKEN_SUBSTRATE`` first — the per-unit env file names it
+    (manifest `dispatcher` row, D20-07) and systemd populates it — else the
+    Phase 20 order (cf. ``packages/cli/src/token.ts``): ``SUBSTRATE_TOKEN``,
+    then ``SUBSTRATE_TOKEN_FILE``, then the per-surface file in
+    ``SUBSTRATE_TOKENS_DIR`` (default ``/etc/substrate/tokens/substrate``).
+    Absent or unreadable means None (fail-open): the server refuses
+    anonymous calls, and the refusal surfaces as an ``McpError``.
     The value is never logged; callers must not log it either.
     """
     env = environ if environ is not None else os.environ
@@ -71,6 +74,9 @@ def resolve_substrate_bearer(
             return None
 
     reader = read or first_line
+    unit_var = (env.get("SUBSTRATE_TOKEN_SUBSTRATE") or "").strip()
+    if unit_var:
+        return unit_var
     direct = (env.get("SUBSTRATE_TOKEN") or "").strip()
     if direct:
         return direct

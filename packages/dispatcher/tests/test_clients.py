@@ -206,11 +206,22 @@ def test_mcp_post_without_bearer_sends_no_authorization_header():
     assert seen["auth"] is None
 
 
-def test_resolve_substrate_bearer_prefers_env_then_file_then_tokens_dir(tmp_path):
+def test_resolve_substrate_bearer_prefers_unit_var_then_env_then_file_then_dir(tmp_path):
     from substrate_dispatcher.mcp import resolve_substrate_bearer
 
     token_file = tmp_path / "token"
     token_file.write_text("file-bearer\n")
+    assert (
+        resolve_substrate_bearer(
+            {
+                "SUBSTRATE_TOKEN_SUBSTRATE": "unit-bearer",
+                "SUBSTRATE_TOKEN": "env-bearer",
+                "SUBSTRATE_TOKEN_FILE": str(token_file),
+            },
+            read=lambda p: None,
+        )
+        == "unit-bearer"
+    )
     assert (
         resolve_substrate_bearer(
             {"SUBSTRATE_TOKEN": "env-bearer", "SUBSTRATE_TOKEN_FILE": str(token_file)}, read=lambda p: None

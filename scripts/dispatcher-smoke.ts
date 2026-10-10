@@ -321,7 +321,7 @@ async function main(argv: string[]): Promise<number> {
 	for (const line of driverOut.split("\n")) {
 		if (line.startsWith("PASS ") || line.startsWith("FAIL ")) process.stdout.write(`${line}\n`);
 	}
-	check("driver exits 0 (30/30 scenarios)", driverCode === 0, driverErr.slice(-500) + driverOut.split("\n").filter((l) => l.startsWith("FAIL")).join("; "));
+	check("driver exits 0 (all scenarios green)", driverCode === 0, driverErr.slice(-500) + driverOut.split("\n").filter((l) => l.startsWith("FAIL")).join("; "));
 
 	server.stop();
 	process.stdout.write(`\n${checks - failures.length}/${checks} checks passed\n`);

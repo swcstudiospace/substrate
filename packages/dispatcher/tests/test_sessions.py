@@ -511,3 +511,53 @@ def test_exited_unclaimed_give_up_emits_dispatch_failed():
     assert registry.given_up == {"i-1"}
     assert len(mcp.events) == 1
     assert mcp.events[0][1]["payload"]["reason"] == "exited-unclaimed"
+
+
+def test_stale_claim_by_same_surface_is_not_landed():
+    from substrate_dispatcher.sessions import landed_claim
+
+    s = session()
+    node = {"node_id": "n1", "state": "unstarted", "claimed_by": "hermes",
+            "lease_expires_at": "2020-01-01T00:00:00Z"}
+    assert landed_claim(s, node, [], now=1_790_000_000.0) is None
+
+
+def test_fresh_claim_by_same_surface_is_landed():
+    from substrate_dispatcher.sessions import landed_claim
+
+    s = session()
+    node = {"node_id": "n1", "state": "unstarted", "claimed_by": "hermes",
+            "claim_session": "sess-1", "lease_expires_at": "2030-01-01T00:00:00Z"}
+    assert landed_claim(s, node, [], now=1_790_000_000.0) == ("claimed_by", "sess-1")
+
+
+def test_missing_expiry_keeps_old_rule():
+    from substrate_dispatcher.sessions import landed_claim
+
+    s = session()
+    node = {"node_id": "n1", "state": "unstarted", "claimed_by": "hermes", "claim_session": None}
+    assert landed_claim(s, node, []) == ("claimed_by", None)
+
+
+def test_corrupt_given_up_json_logs_and_starts_empty(tmp_path):
+    from substrate_dispatcher.sessions import SessionRegistry
+
+    state_dir = tmp_path / "dispatcher"
+    state_dir.mkdir()
+    (state_dir / "given_up.json").write_text("not json{[")
+    lines: list[str] = []
+    registry = SessionRegistry(state_dir=state_dir, log=lines.append)
+    assert registry.given_up == set()
+    assert any("corrupt" in line for line in lines)
+
+
+def test_unwritable_state_dir_logs_save_failure(tmp_path, monkeypatch):
+    from substrate_dispatcher.sessions import SessionRegistry
+
+    state_dir = tmp_path / "dispatcher"
+    lines: list[str] = []
+    registry = SessionRegistry(state_dir=state_dir, log=lines.append)
+    monkeypatch.setattr("os.replace", lambda *a, **k: (_ for _ in ()).throw(OSError("denied")))
+    registry.give_up("i-1")
+    assert registry.given_up == {"i-1"}
+    assert any("save failed" in line for line in lines)

@@ -17,7 +17,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
+import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -80,12 +83,29 @@ def _new_claim_session(session: Session, bodies: Iterable[str]) -> str | None:
     return next((sid for sid in ids if sid not in session.prior_claim_sessions), None)
 
 
+def _claim_is_fresh(node: dict, now: float) -> bool:
+    """True unless the node's ``lease_expires_at`` is present and in the past.
+
+    A stored ``claimed_by`` outlives its lease when no reaper clears it; only
+    a live claim is landed-claim evidence. Missing or unparseable expiry
+    keeps the old rule (fail-open toward landed: the reap still watches).
+    """
+    expires_at = node.get("lease_expires_at")
+    if not isinstance(expires_at, str) or not expires_at:
+        return True
+    try:
+        expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    return expiry.timestamp() >= now
+
+
 def landed_claim(
-    session: Session, node: dict | None, bodies: Iterable[str]
+    session: Session, node: dict | None, bodies: Iterable[str], *, now: float | None = None
 ) -> tuple[str, str | None] | None:
     """The landed-claim rule: (evidence, claim session id or None), or None without evidence."""
     node = node or {}
-    if node.get("claimed_by") == session.surface:
+    if node.get("claimed_by") == session.surface and _claim_is_fresh(node, time.time() if now is None else now):
         return ("claimed_by", node.get("claim_session"))
     new_session = _new_claim_session(session, bodies)
     if node.get("state") in LANDED_STATES and session.launch_state not in LANDED_STATES:
@@ -104,11 +124,12 @@ class SessionRegistry:
     on every give-up, so a new process never relaunches a given-up issue.
     """
 
-    def __init__(self, max_sessions: int = 2, *, state_dir: Any = None) -> None:
+    def __init__(self, max_sessions: int = 2, *, state_dir: Any = None, log: Log | None = None) -> None:
         self.max_sessions = max_sessions
         self._sessions: dict[str, Session] = {}
         self.given_up: set[str] = set()
         self.pending_label_removal: dict[str, str] = {}
+        self._log: Log = log or (lambda line: print(f"[substrate-dispatcher] {line}", file=sys.stderr))
         self._given_up_path = Path(state_dir) / "given_up.json" if state_dir is not None else None
         if self._given_up_path is not None:
             self._load_given_up()
@@ -118,14 +139,20 @@ class SessionRegistry:
         assert self._given_up_path is not None
         try:
             raw = self._given_up_path.read_text(encoding="utf-8")
-        except OSError:
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            self._log(f"given_up.json unreadable ({type(exc).__name__}); restart protection may relaunch")
             return
         try:
             ids = json.loads(raw)
         except ValueError:
+            self._log("given_up.json corrupt; starting with an empty given-up set")
             return
         if isinstance(ids, list):
             self.given_up.update(i for i in ids if isinstance(i, str))
+        else:
+            self._log("given_up.json corrupt; starting with an empty given-up set")
 
     def _save_given_up(self) -> None:
         """Atomically persist the given-up set (0600); a crash between add and fsync may relaunch once."""
@@ -140,7 +167,8 @@ class SessionRegistry:
                 os.fsync(fh.fileno())
             os.chmod(tmp, 0o600)
             os.replace(tmp, self._given_up_path)
-        except OSError:
+        except OSError as exc:
+            self._log(f"given_up.json save failed ({type(exc).__name__}); restart protection may relaunch")
             try:
                 os.unlink(tmp)
             except OSError:
@@ -164,6 +192,10 @@ class SessionRegistry:
 
     def active_issue_ids(self) -> set[str]:
         return set(self._sessions)
+
+    def active_graph_ids(self) -> set[str]:
+        """Graphs with a live session: one worktree, one writer (Greptile P1)."""
+        return {session.graph_id for session in self._sessions.values()}
 
     def capacity_left(self) -> int:
         return self.max_sessions - len(self._sessions)

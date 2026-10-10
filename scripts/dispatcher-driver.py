@@ -157,7 +157,7 @@ def write_fake_hermes(bin_path: Path, record: Path, mode_file: Path) -> None:
         f'mode=$(cat "{mode_file}")\n'
         'case "$mode" in\n'
         "  exit1) exit 1;;\n"
-        "  trap-term) trap '' TERM; sleep 30;;\n"
+        f'  trap-term) trap \'\' TERM; echo ready >> "{record}"; sleep 30;;\n'
         "  sleep2) sleep 2;;\n"
         "  *) exit 0;;\n"
         "esac\n"
@@ -243,14 +243,15 @@ def main() -> int:
     check("s1 cwd is the graph worktree", f"cwd: {wt}" in rec, rec)
     env_keys = set(rec.split("env-keys: ")[1].split())
     # PWD is added by the shell itself at startup, not passed by the dispatcher.
+    # SUBSTRATE_TOKENS_DIR passes through only when set (never a secret).
     check("s1 child env allowlisted",
-          env_keys <= {"HOME", "PATH", "LANG", "LC_ALL", "USER", "LOGNAME", "SHELL", "TERM", "_", "PWD"},
+          env_keys <= {"HOME", "PATH", "LANG", "LC_ALL", "USER", "LOGNAME", "SHELL", "TERM", "_", "PWD", "SUBSTRATE_TOKENS_DIR"},
           str(sorted(env_keys)))
     prompts = list((state_dir / "prompts").glob("*.md"))
     check("s1 one prompt file 0600", len(prompts) == 1 and stat.S_IMODE(prompts[0].stat().st_mode) == 0o600)
     prompt = prompts[0].read_text()
     check("s1 prompt carries bearer path not value",
-          prompt.count("Authorization: Bearer $(cat") == 4
+          prompt.count("Authorization: Bearer $(cat") == 5
           and "/etc/substrate/tokens/hermes" in prompt
           and "rh-smoke-bearer" not in prompt and "rh-smoke-key" not in prompt)
     check("s1 prompt has no issue text", "Rehearsal" not in prompt)
@@ -301,17 +302,23 @@ def main() -> int:
     run_tick(reg5)
     s5 = reg5.get("i-5")
     assert s5 is not None
+    # The trap is installed before the fake signals readiness; only then is
+    # SIGTERM guaranteed to be ignored (and the later kill provably SIGKILL).
+    import time as _t2
+    _deadline = _t2.time() + 15.0
+    while "ready" not in record.read_text().splitlines()[-3:] and _t2.time() < _deadline:
+        _t2.sleep(0.05)
+    check("s5 trap installed before terminate", "ready" in record.read_text())
     s5.started_at = 2000.0 - 901
     reg5.reap(2000.0, mcp=mcp, linear=linear, log=log)
     check("s5 terminate sent", s5.proc.poll() is None)
     check("s5 claim-timeout comment",
           any("[claim-timeout]" in b for b in world.comments.get("i-5", [])))
     reg5.reap(2012.0, mcp=mcp, linear=linear, log=log)
-    import time as _t2
     _deadline = _t2.time() + 10.0
     while s5.proc.poll() is None and _t2.time() < _deadline:
         _t2.sleep(0.05)
-    check("s5 SIGKILL after grace", s5.proc.poll() is not None)
+    check("s5 SIGKILL after grace", s5.proc.poll() is not None and s5.proc.returncode == -9)
     check("s5 failed event",
           any(e.get("payload", {}).get("reason") == "claim-timeout" for e in world.events.get(g5, [])))
     s5.proc.wait()

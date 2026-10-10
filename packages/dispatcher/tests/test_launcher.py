@@ -5,7 +5,6 @@ from __future__ import annotations
 import inspect
 import json
 import os
-import re
 import stat
 import subprocess
 import sys
@@ -95,21 +94,31 @@ def test_render_prompt_carries_ids_and_claim_first():
     assert SURFACE in prompt
     assert prompt.index("graph_claim") < prompt.index("graph_complete")
 
+def test_render_prompt_step5_completes_as_hermes_with_the_claim_session_and_lease():
+    prompt = render_prompt(**IDS)
+    step5 = prompt[prompt.index("(5)"):prompt.index("(6)")]
+    assert "graph_complete" in step5
+    assert SURFACE in step5
+    assert "session id" in step5
+    assert "same session id" in step5
+    assert "lease_id" in step5
+    assert _tool_arguments(step5, "graph_complete")["lease_id"] == "<the lease id from the claim reply>"
 
-def test_render_prompt_step4_completes_as_hermes_with_the_claim_session():
+
+def test_render_prompt_step4_renews_with_heartbeat_and_stops_when_refused():
     prompt = render_prompt(**IDS)
     step4 = prompt[prompt.index("(4)"):prompt.index("(5)")]
-    assert "graph_complete" in step4
-    assert SURFACE in step4
-    assert "session id" in step4
-    assert "same session id" in step4
+    assert "graph_heartbeat" in step4
+    assert _tool_arguments(step4, "graph_heartbeat")["lease_id"] == "<the lease id from the claim reply>"
+    assert "stop work at once" in step4
 
 
 def _tool_arguments(prompt: str, name: str) -> dict:
     """The JSON arguments of the prompt's tools/call for `name`, parsed from the curl line."""
-    match = re.search(r'"name":"%s","arguments":(\{.*?\})\}\}' % re.escape(name), prompt)
-    assert match, f"no tools/call for {name}"
-    return json.loads(match.group(1))
+    marker = f'"name":"{name}","arguments":'
+    args, _ = json.JSONDecoder().raw_decode(prompt[prompt.index(marker) + len(marker):])
+    assert isinstance(args, dict), f"no tools/call arguments for {name}"
+    return args
 
 
 def test_render_prompt_step3_fetches_the_issue_with_issue_get_for_its_own_ids():
@@ -123,17 +132,18 @@ def test_render_prompt_orders_claim_then_issue_get_then_complete():
     assert prompt.index("graph_claim") < prompt.index('"name":"issue_get"') < prompt.index("graph_complete")
 
 
-def test_render_prompt_step5_releases_as_hermes_with_the_claim_session_and_stops():
+def test_render_prompt_step6_releases_as_hermes_with_the_claim_session_lease_and_stops():
     prompt = render_prompt(**IDS)
-    assert prompt.index("(4)") < prompt.index("(5)")
-    step5 = prompt[prompt.index("(5)"):]
-    args = _tool_arguments(step5, "graph_release")
+    assert prompt.index("(5)") < prompt.index("(6)")
+    step6 = prompt[prompt.index("(6)"):]
+    args = _tool_arguments(step6, "graph_release")
     assert args["graph_id"] == IDS["graph_id"]
     assert args["node_id"] == IDS["node_id"]
     assert args["surface"] == "hermes"
     assert "session_id" in args
-    assert "same session id you passed to graph_claim" in step5
-    assert "stop" in step5
+    assert args["lease_id"] == "<the lease id from the claim reply>"
+    assert "same session id you passed to graph_claim" in step6
+    assert "stop" in step6
 
 
 def test_render_prompt_step3_frames_issue_text_as_a_task_description_without_an_own_linear_tool():
@@ -217,10 +227,16 @@ def test_prompt_curls_carry_runtime_bearer_path_and_no_issue_text_or_value():
     from substrate_dispatcher.launcher import HERMES_TOKEN_PATH, MCP_CURL
 
     prompt = render_prompt(**IDS)
-    assert prompt.count("Authorization: Bearer $(cat") == 4
+    assert prompt.count("Authorization: Bearer $(cat") == 5
     assert "$SUBSTRATE_TOKENS_DIR/hermes" in prompt and "/etc/substrate/tokens/hermes" in prompt
     assert HERMES_TOKEN_PATH == "/etc/substrate/tokens/hermes"
     assert "$SUBSTRATE_TOKENS_DIR/hermes" in MCP_CURL and HERMES_TOKEN_PATH in MCP_CURL
     for secret in ("lin_api_secret_value", "substrate-bearer-value", "gg-"):
         assert secret not in prompt
     assert "Secret Feature Title" not in prompt and "UNTRUSTED" in prompt
+
+
+def test_child_env_passes_through_a_custom_tokens_dir():
+    env = child_env({"PATH": "/usr/bin", "SUBSTRATE_TOKENS_DIR": "/custom/tokens"})
+    assert env["SUBSTRATE_TOKENS_DIR"] == "/custom/tokens"
+    assert "SUBSTRATE_TOKEN" not in env and "LINEAR_API_KEY" not in child_env({"LINEAR_API_KEY": "k"})

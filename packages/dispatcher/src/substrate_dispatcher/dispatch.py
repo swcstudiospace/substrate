@@ -98,9 +98,18 @@ def _emit(mcp: Any, arguments: dict[str, Any], log: Log) -> None:
     if call is None:
         return
     try:
-        call("events_emit", arguments)
+        result = call("events_emit", arguments)
     except Exception as exc:  # noqa: BLE001 - emission is observability, not the decision
         log(f"events_emit failed: {type(exc).__name__}: {exc}")
+        return
+    # A refused store is a normal reply, not an exception: log it with its ids.
+    if isinstance(result, dict) and result.get("stored") is False:
+        log(
+            "events_emit not stored: "
+            f"{arguments.get('graph_id') or arguments.get('linear_identifier')}"
+            f"/{arguments.get('node_id') or 'none'} "
+            f"{(arguments.get('payload') or {}).get('reason') or (arguments.get('payload') or {}).get('outcome')}"
+        )
 
 
 def emit_launched(mcp: Any, *, graph_id: str, node_id: str, identifier: str, log: Log) -> None:
@@ -153,6 +162,20 @@ def emit_failed(
     _emit(mcp, arguments, log)
 
 
+def _lease_is_held(found: dict) -> bool:
+    """True when graph_find's public lease view says the node is currently held.
+
+    A stored ``claimed_by`` outlives its lease when no reaper clears it, so a
+    bare holder must not block dispatch forever: ``held`` blocks, ``expired``
+    and ``free`` fall through to launch (the session's own claim is the real
+    gate), and a reply without a lease view keeps the old holder-only rule.
+    """
+    lease = found.get("lease")
+    if not isinstance(lease, dict):
+        return True
+    return lease.get("state", "held") == "held"
+
+
 def decide(
     candidate: Candidate,
     *,
@@ -160,6 +183,7 @@ def decide(
     active_issue_ids: set[str],
     capacity_left: int,
     given_up: set[str] | frozenset[str] = frozenset(),
+    active_graph_ids: set[str] | frozenset[str] = frozenset(),
 ) -> Decision:
     if candidate.surface not in DISPATCHABLE_SURFACES:
         return Decision(
@@ -173,8 +197,12 @@ def decide(
     if not found or not found.get("found"):
         reason = (found or {}).get("reason") or "no registered node"
         return Decision("comment", candidate, f"no node: {reason}", marker="no-node", found=found)
+    if found.get("graph_id") in active_graph_ids:
+        return Decision(
+            "skip", candidate, f"session already running for graph {found.get('graph_id')}", found=found,
+        )
     holder = (found.get("node") or {}).get("claimed_by")
-    if holder:
+    if holder and _lease_is_held(found):
         return Decision(
             "comment", candidate, f"node already claimed by {holder}",
             marker="already-claimed", found=found,
@@ -217,6 +245,7 @@ def tick(
             decision = decide(
                 candidate, found=found, active_issue_ids=active,
                 capacity_left=registry.capacity_left(), given_up=registry.given_up,
+                active_graph_ids=registry.active_graph_ids(),
             )
             decisions.append(decision)
             if dry_run:

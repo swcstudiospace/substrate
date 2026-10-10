@@ -58,12 +58,10 @@ survive a restart: a new process never relaunches a given-up issue.
 4. Prompt rendered to `STATE_DIR/prompts/<graph>.md` (0600): ids only.
    The session claims with its **own** hermes token, read at session
    runtime from the Phase 20 tokens-dir file — the stored prompt carries
-   the path, never a value. Issue text is fetched at runtime via
-   `issue_get` and labelled UNTRUSTED.
-5. `hermes chat --query-file` headless in the worktree, allowlisted env,
-   toolsets `terminal,file` (never `mcp-*`, never `--worktree`).
-6. Watch: landed-claim evidence, exit-without-claim, or 900 s timeout
-   (SIGTERM, then SIGKILL after 10 s — Hermes ignores SIGTERM).
+   the path, never a value. It retains the claim reply's `lease_id` and
+   passes it to every later call, renewing with `graph_heartbeat` at
+   least every 10 minutes (the lease lapses at 15). Issue text is fetched
+   at runtime via `issue_get` and labelled UNTRUSTED.
 
 `dispatch:claude-code` opens a VM task on substrate-host through the same
 registry contract; with no host on the loopback port every candidate gets
@@ -71,9 +69,10 @@ registry contract; with no host on the loopback port every candidate gets
 
 ## Landed-claim rule
 
-Evidence is any of: the node's `claimed_by` is the session's surface; the
-node reached `started_review`/`completed` from a state it did not have at
-launch; or a new `Claimed by <surface> — session <sid> (graph <g>, node
+Evidence is any of: the node's `claimed_by` is the session's surface with a
+live lease (a stored holder whose `lease_expires_at` passed is stale, not
+landed); the node reached `started_review`/`completed` from a state it did
+not have at launch; or a new `Claimed by <surface> — session <sid> (graph
 <n>)` mirror comment. A claim completed-or-released between two reaps
 still counts. `started_review` counts: Phase 23 parks `dod-required`
 completions there with the lease held — a live session doing its job.

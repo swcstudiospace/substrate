@@ -518,15 +518,15 @@ def test_issue_with_running_session_is_skipped_without_graph_find(env_file):
 
 def test_at_capacity_skips_and_decides_again_next_tick(env_file):
     registry = SessionRegistry(max_sessions=2)
-    registry.add(session("a"))
-    registry.add(session("b"))
+    registry.add(session("a", graph_id="g-a"))
+    registry.add(session("b", graph_id="g-b"))
     linear, mcp = FakeLinear([cand("i-3", "SWC-3")]), FakeMcp()
     decisions, _, _, launch_fn = run_tick(linear, mcp, env_file=env_file, registry=registry)
     assert decisions[0].action == "skip" and "capacity" in decisions[0].reason
     assert launch_fn.calls == [] and linear.named("comment") == []
 
     registry = SessionRegistry(max_sessions=2)
-    registry.add(session("a"))
+    registry.add(session("a", graph_id="g-a"))
     decisions, _, _, launch_fn = run_tick(linear, mcp, env_file=env_file, registry=registry)
     assert decisions[0].action == "launch" and len(launch_fn.calls) == 1
     assert mcp.calls == ["i-3", "i-3"]
@@ -633,3 +633,49 @@ def test_planted_lease_id_appears_in_no_comment_event_or_prompt(env_file):
     haystacks += [str(args) for _, args in mcp.events]
     haystacks.append(prompt)
     assert all(lease_id not in h for h in haystacks)
+
+
+def test_expired_lease_holder_does_not_block_dispatch(env_file):
+    stale = {**FOUND, "node": {**FOUND["node"], "claimed_by": "omp"},
+             "lease": {"state": "expired", "holder": "omp"}}
+    decision = decide(cand(), found=stale, active_issue_ids=set(), capacity_left=2)
+    assert decision.action == "launch"
+
+
+def test_held_lease_holder_still_blocks(env_file):
+    held = {**FOUND, "node": {**FOUND["node"], "claimed_by": "omp"},
+            "lease": {"state": "held", "holder": "omp"}}
+    decision = decide(cand(), found=held, active_issue_ids=set(), capacity_left=2)
+    assert decision.action == "comment" and decision.marker == "already-claimed"
+
+
+def test_missing_lease_view_keeps_holder_only_rule(env_file):
+    decision = decide(cand(), found=FOUND, active_issue_ids=set(), capacity_left=2)
+    assert decision.action == "launch"
+    claimed = {**FOUND, "node": {**FOUND["node"], "claimed_by": "omp"}}
+    decision = decide(cand(), found=claimed, active_issue_ids=set(), capacity_left=2)
+    assert decision.action == "comment" and decision.marker == "already-claimed"
+
+
+def test_second_issue_on_a_live_graph_is_skipped(env_file):
+    from substrate_dispatcher.sessions import SessionRegistry
+
+    registry = SessionRegistry()
+    registry.add(session("i-1"))
+    other = {**FOUND, "node": {"node_id": "n2", "state": "unstarted", "claimed_by": None}}
+    mcp = FakeMcp({"i-9": other})
+    linear = FakeLinear([cand("i-9", "SWC-9")])
+    decisions, _, _, launch_fn = run_tick(linear, mcp, env_file=env_file, registry=registry)
+    assert [d.action for d in decisions] == ["skip"]
+    assert "already running for graph" in decisions[0].reason
+    assert launch_fn.calls == [] and linear.named("comment") == []
+
+
+def test_unstored_outcome_is_logged_with_ids(env_file):
+    linear = FakeLinear([cand()])
+    mcp = EventMcp()
+    mcp.events.clear()
+    real_call = mcp.call
+    mcp.call = lambda tool, args: {**real_call(tool, args), "stored": False}
+    _, lines, _, _ = run_tick(linear, mcp, env_file=env_file)
+    assert any("events_emit not stored" in line and GID in line for line in lines)
