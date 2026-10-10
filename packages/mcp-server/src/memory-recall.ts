@@ -100,7 +100,9 @@ export async function recallMemories(
 ): Promise<RecallReply> {
 	if (!query) return { results: [], degraded: true, notice: UNTRUSTED_MEMORY_NOTICE, reason: "memory_recall needs a query" };
 	if (!deps.config) {
-		return { results: [], degraded: true, notice: UNTRUSTED_MEMORY_NOTICE, reason: "hindsight is not configured" };
+		// No plane, no failure: index-only answers stay complete, so this is
+		// informative rather than degraded. An outage degrades instead.
+		return { results: [], degraded: false, notice: UNTRUSTED_MEMORY_NOTICE, reason: "hindsight is not configured" };
 	}
 	const resolved = resolveRecallBanks(callerSurface, deps.banks ?? null, deps.config.bankPrefix);
 	if ("refused" in resolved) {

@@ -59,6 +59,8 @@ import { createMirror, type Mirror, type MirrorContext, type MirrorFailure, type
 import { runDodGate, type DodEvidence } from "./dod-gate.ts";
 import { normalizeSubject } from "./memory-policy.ts";
 import { recallMemories, type RecallReply } from "./memory-recall.ts";
+import { forwardRetain } from "./memory-retain.ts";
+import { mergeDerivedHits, type MergedMemoryResults } from "./memory-search.ts";
 import { governMemoryWrite } from "./memory-write.ts";
 import { hindsightBanksFromEnv, hindsightFromEnv } from "./planes/hindsight.ts";
 import type { FetchLike } from "./planes/ragflow.ts";
@@ -1061,6 +1063,21 @@ export class Substrate {
 
 		await this.auditMemoryWrite(request, result);
 		if (result.outcome === "accepted" || commitUncertain) await this.cache.bump(MEMORY_GENERATION_KEY);
+		// The Hindsight forward runs after the accepted reply is decided and never
+		// blocks it: Postgres stays the governed store (D26-04). A refusal or plane
+		// failure warns without re-opening the write.
+		if (result.outcome === "accepted" && result.verified_persisted && result.entry) {
+			void forwardRetain(
+				{
+					config: hindsightFromEnv(),
+					fetchImpl: this.hindsightFetch,
+					vmGuest: this.config.vmGuest,
+					emit: (event) => this.emit(event),
+				},
+				request,
+				result,
+			).catch(() => undefined);
+		}
 		return result;
 	}
 
@@ -1107,22 +1124,30 @@ export class Substrate {
 		}).catch(() => undefined);
 	}
 
+	/**
+	 * The list search: governed index entries first, Hindsight hits appended
+	 * after them marked derived (D26-05). A plane outage yields index-only
+	 * results with `{degraded: true, reason}` — never a refusal.
+	 */
 	async searchMemory(
 		query: string,
 		scope?: string,
 		limit?: number,
 		includeSuperseded?: boolean,
 		surface = "unattributed",
-	): Promise<MemoryEntry[]> {
+	): Promise<MergedMemoryResults> {
 		return this.cache.getOrLoad({
 			klass: "memory-search",
 			surface,
 			args: { query, scope: scope ?? null, limit: limit ?? null, includeSuperseded: includeSuperseded ?? false },
 			generations: [MEMORY_GENERATION_KEY],
-			refreshAt: (entries) => earliestRefreshAt(entries.map((entry) => entry.reverify_after)),
+			refreshAt: (merged) => earliestRefreshAt(merged.entries.map((entry) => entry.reverify_after)),
 			load: async () => {
-				if (!this.index) return [];
-				return this.index.searchMemory(query, scope, limit, includeSuperseded);
+				const [entries, recall] = await Promise.all([
+					this.index ? this.index.searchMemory(query, scope, limit, includeSuperseded) : Promise.resolve([]),
+					this.recallMemories({ query }, surface),
+				]);
+				return mergeDerivedHits(entries, recall);
 			},
 		});
 	}
@@ -1155,7 +1180,7 @@ export class Substrate {
 	 * answers empty with a reason, never a throw. Reads emit nothing. Never
 	 * called from the brief's synchronous compose path.
 	 */
-	async recallMemories(input: { query?: unknown }, callerSurface: Surface | null): Promise<RecallReply> {
+	async recallMemories(input: { query?: unknown }, callerSurface: string | null): Promise<RecallReply> {
 		const query = typeof input.query === "string" ? input.query : "";
 		return recallMemories(
 			{

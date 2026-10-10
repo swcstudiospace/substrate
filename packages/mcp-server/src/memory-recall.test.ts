@@ -111,7 +111,7 @@ describe("registration", () => {
 		const empty = await recallMemories(deps(fake), "", "cursor");
 		expect(empty).toMatchObject({ results: [], degraded: true });
 		const unconfigured = await recallMemories({ ...deps(fake), config: null }, "lease", "cursor");
-		expect(unconfigured).toMatchObject({ results: [], degraded: true });
+		expect(unconfigured).toMatchObject({ results: [], degraded: false, reason: "hindsight is not configured" });
 		expect(fake.requests.length).toBe(0);
 	});
 
