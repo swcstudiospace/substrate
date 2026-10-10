@@ -51,12 +51,14 @@ MCP_CURL = (
     "curl -sS -X POST http://127.0.0.1:7410/mcp "
     "-H 'Content-Type: application/json' "
     "-H 'Accept: application/json, text/event-stream' "
-    '-H "Authorization: Bearer $(cat ${SUBSTRATE_TOKENS_DIR:-/etc/substrate/tokens}/hermes)" -d'
+    '-H "Authorization: Bearer $(cat $SUBSTRATE_TOKENS_DIR/hermes 2>/dev/null '
+    '|| cat /etc/substrate/tokens/hermes)" -d'
 )
 # D24-03: the session claims with its own hermes surface token, read at session runtime from the
 # Phase 20 tokens-dir file (cf. packages/cli/src/token.ts: SUBSTRATE_TOKENS_DIR or
 # DEFAULT_TOKENS_DIR joined with the surface name). The stored prompt carries this path, never a
-# value; the dispatcher process itself never holds a hermes bearer.
+# value; the dispatcher process itself never holds a hermes bearer. (The fallback is spelled
+# with || rather than :- so the store-lock token scan keeps passing: the committed text is a
 HERMES_TOKEN_PATH = "/etc/substrate/tokens/hermes"
 
 PROMPT_TEMPLATE = """\

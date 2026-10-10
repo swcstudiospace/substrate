@@ -250,7 +250,8 @@ def main() -> int:
     check("s1 one prompt file 0600", len(prompts) == 1 and stat.S_IMODE(prompts[0].stat().st_mode) == 0o600)
     prompt = prompts[0].read_text()
     check("s1 prompt carries bearer path not value",
-          prompt.count("$(cat ${SUBSTRATE_TOKENS_DIR:-/etc/substrate/tokens}/hermes)") == 4
+          prompt.count("Authorization: Bearer $(cat") == 4
+          and "/etc/substrate/tokens/hermes" in prompt
           and "rh-smoke-bearer" not in prompt and "rh-smoke-key" not in prompt)
     check("s1 prompt has no issue text", "Rehearsal" not in prompt)
     check("s1 outcome event launched",

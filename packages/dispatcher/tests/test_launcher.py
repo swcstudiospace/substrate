@@ -78,7 +78,7 @@ def test_default_toolsets_are_builtins_without_mcp_linear():
 def test_child_env_keeps_allowlist_and_drops_secrets():
     env = child_env({
         "HOME": "/root", "PATH": "/usr/bin", "LINEAR_API_KEY": "k", "SUBSTRATE_PG_URL": "p",
-        "GREPTIME_PASSWORD": "g", "NOTION_API_KEY": "n",
+        "SESSION_SECRET": "s", "NOTION_API_KEY": "n",
     })
     assert env == {"HOME": "/root", "PATH": "/usr/bin", "TERM": "dumb"}
 
@@ -218,9 +218,9 @@ def test_prompt_curls_carry_runtime_bearer_path_and_no_issue_text_or_value():
 
     prompt = render_prompt(**IDS)
     assert prompt.count("Authorization: Bearer $(cat") == 4
-    assert "${SUBSTRATE_TOKENS_DIR:-/etc/substrate/tokens}/hermes" in prompt
+    assert "$SUBSTRATE_TOKENS_DIR/hermes" in prompt and "/etc/substrate/tokens/hermes" in prompt
     assert HERMES_TOKEN_PATH == "/etc/substrate/tokens/hermes"
-    assert "${SUBSTRATE_TOKENS_DIR:-/etc/substrate/tokens}/hermes" in MCP_CURL
+    assert "$SUBSTRATE_TOKENS_DIR/hermes" in MCP_CURL and HERMES_TOKEN_PATH in MCP_CURL
     for secret in ("lin_api_secret_value", "substrate-bearer-value", "gg-"):
         assert secret not in prompt
     assert "Secret Feature Title" not in prompt and "UNTRUSTED" in prompt

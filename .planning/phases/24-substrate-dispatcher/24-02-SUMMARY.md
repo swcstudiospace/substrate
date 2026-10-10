@@ -9,8 +9,8 @@ bearer carriage, restart-surviving give-ups, and Phase 17 outcome events.
 ## What was built
 
 - `launcher.py`: the four prompt curls read the hermes token at session
-  runtime (`$(cat ${SUBSTRATE_TOKENS_DIR:-/etc/substrate/tokens}/hermes)`,
-  path asserted against `token.ts`); stored prompt carries the path, never
+  runtime via a `cat` of the tokens-dir file with a default-path fallback
+  (path asserted against `token.ts`); stored prompt carries the path, never
   a value. Plus `hermes_bin`/`state_dir` routability (24-04 rehearsal need,
   additive).
 - `host.py`: `HostClient` sends the substrate bearer on every request.
