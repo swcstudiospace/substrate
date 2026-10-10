@@ -191,6 +191,10 @@ export function createReadThroughCache(
 	config: SubstrateConfig,
 	record?: (sample: CacheSample) => void,
 ): ReadThroughCache {
+	if (config.dragonflyRefused) {
+		process.stderr.write(`[substrate] cache off: ${config.dragonflyRefused}\n`);
+		return new ReadThroughCache({ redis: null, enabled: false, record });
+	}
 	if (!config.cacheEnabled || !config.dragonflyUrl) {
 		return new ReadThroughCache({ redis: null, enabled: false, record });
 	}
@@ -431,7 +435,10 @@ function shapeOk(klass: CacheClass, value: unknown): boolean {
 	if (klass === "brief") return typeof value === "string";
 	if (klass === "memory-search") {
 		if (Array.isArray(value)) return true;
-		return !!value && typeof value === "object" && Array.isArray((value as { entries?: unknown }).entries);
+		if (!value || typeof value !== "object") return false;
+		if ("entries" in value && Array.isArray(value.entries)) return true;
+		// Recall replies cache under the same class semantics (D26-06a).
+		return "results" in value && Array.isArray(value.results);
 	}
 	if (value === null) return true;
 	if (!value || typeof value !== "object") return false;

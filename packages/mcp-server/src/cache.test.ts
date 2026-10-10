@@ -22,6 +22,7 @@ import {
 	type CacheRedis,
 } from "./cache.ts";
 import { loadConfig } from "./config.ts";
+import { HindsightFake } from "./hindsight-fake.ts";
 import { createObservability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
@@ -379,7 +380,8 @@ describe("the same answer with the cache off, on and broken", () => {
 		expect(b).toEqual(a);
 		expect(c).toEqual(a);
 		expect(await live.searchMemory("lease", undefined, undefined, undefined, "cursor")).toEqual(a);
-		expect(on.sets).toBe(1);
+		// Two entries: the merged search and the recall it shares with memory_recall.
+		expect(on.sets).toBe(2);
 	});
 
 	test("brief matches", async () => {
@@ -767,6 +769,106 @@ describe("the same answer with the cache off, on and broken", () => {
 		await substrate.queryEvents({ graph_id: "ut-1" });
 		await substrate.queryEvents({ graph_id: "ut-1" });
 		expect(queries).toBe(2);
+	});
+
+	test("a fresh claim is visible in a brief served right after a cache hit", async () => {
+		// The D26-06b pin: the mechanism is the memory-generation bump the
+		// write path performs on accept, verified here rather than rebuilt.
+		const memory = [
+			{ kind: "decision", text: "keep the prefix", writer: "cursor", trust: "agent-claimed", version: 1, needs_reverification: false },
+		];
+		const index = {
+			getGraph: async () => null,
+			openGraphs: async () => [],
+			memoryForBrief: async () => memory,
+		};
+		const redis = new FakeRedis();
+		const cache = cacheOf(redis);
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null, cache });
+		const request = { surface: "cursor" as const, repo: "acme/app" };
+		const first = await substrate.brief(request);
+		expect(first).toContain("keep the prefix");
+		expect(await substrate.brief(request)).toEqual(first);
+		expect(cache.health().hits).toBe(1);
+		// A claim newer than 60 s lands; the accepted write bumps the generation.
+		memory.push(
+			{ kind: "decision", text: "fence every handoff", writer: "hermes", trust: "agent-claimed", version: 1, needs_reverification: false },
+		);
+		await cache.bump(MEMORY_GENERATION_KEY);
+		const fresh = await substrate.brief(request);
+		expect(fresh).toContain("fence every handoff");
+	});
+
+	test("a second identical recall is a hit", async () => {
+		const saved = { url: process.env.HINDSIGHT_URL, key: process.env.HINDSIGHT_API_KEY, banks: process.env.HINDSIGHT_BANKS };
+		process.env.HINDSIGHT_URL = "http://fake";
+		process.env.HINDSIGHT_API_KEY = "test-bearer";
+		process.env.HINDSIGHT_BANKS = "sub-hermes";
+		try {
+			const fake = new HindsightFake();
+			fake.seed("sub-cursor", [{ id: "c1", text: "fence the lease", document_id: "mwd_c1", tags: ["cursor"], metadata: {}, score: 0.5 }]);
+			fake.seed("sub-hermes", [{ id: "h1", text: "quote versions", document_id: "mwd_h1", tags: ["hermes"], metadata: {}, score: 0.9 }]);
+			const redis = new FakeRedis();
+			const cache = cacheOf(redis);
+			const substrate = new Substrate(loadConfig({}), { index: null, greptime: null, cache, hindsightFetch: fake.fetch });
+			const first = await substrate.recallMemories({ query: "lease" }, "cursor");
+			expect(first.degraded).toBe(false);
+			expect(first.results.length).toBe(2);
+			const second = await substrate.recallMemories({ query: "lease" }, "cursor");
+			expect(second).toEqual(first);
+			expect(cache.health().hits).toBe(1);
+			expect(redis.sets).toBe(1);
+		} finally {
+			if (saved.url === undefined) delete process.env.HINDSIGHT_URL;
+			else process.env.HINDSIGHT_URL = saved.url;
+			if (saved.key === undefined) delete process.env.HINDSIGHT_API_KEY;
+			else process.env.HINDSIGHT_API_KEY = saved.key;
+			if (saved.banks === undefined) delete process.env.HINDSIGHT_BANKS;
+			else process.env.HINDSIGHT_BANKS = saved.banks;
+		}
+	});
+
+	test("with Dragonfly down the same recall comes back uncached", async () => {
+		const saved = { url: process.env.HINDSIGHT_URL, key: process.env.HINDSIGHT_API_KEY, banks: process.env.HINDSIGHT_BANKS };
+		process.env.HINDSIGHT_URL = "http://fake";
+		process.env.HINDSIGHT_API_KEY = "test-bearer";
+		process.env.HINDSIGHT_BANKS = "sub-hermes";
+		try {
+			const fake = new HindsightFake();
+			fake.seed("sub-cursor", [{ id: "c1", text: "fence the lease", document_id: "mwd_c1", tags: ["cursor"], metadata: {}, score: 0.5 }]);
+			fake.seed("sub-hermes", [{ id: "h1", text: "quote versions", document_id: "mwd_h1", tags: ["hermes"], metadata: {}, score: 0.9 }]);
+			const off = new Substrate(loadConfig({}), { index: null, greptime: null, hindsightFetch: fake.fetch });
+			const broken = new FakeRedis();
+			broken.fail = true;
+			const brokenCache = cacheOf(broken);
+			const down = new Substrate(loadConfig({}), { index: null, greptime: null, cache: brokenCache, hindsightFetch: fake.fetch });
+			const plain = await off.recallMemories({ query: "lease" }, "cursor");
+			const uncached = await down.recallMemories({ query: "lease" }, "cursor");
+			expect(uncached).toEqual(plain);
+			expect(brokenCache.health().bypasses).toBe(1);
+		} finally {
+			if (saved.url === undefined) delete process.env.HINDSIGHT_URL;
+			else process.env.HINDSIGHT_URL = saved.url;
+			if (saved.key === undefined) delete process.env.HINDSIGHT_API_KEY;
+			else process.env.HINDSIGHT_API_KEY = saved.key;
+			if (saved.banks === undefined) delete process.env.HINDSIGHT_BANKS;
+			else process.env.HINDSIGHT_BANKS = saved.banks;
+		}
+	});
+
+	test("a refused redis URL leaves the cache off with a reason and answers uncached", async () => {
+		const refused = loadConfig({ DRAGONFLY_URL: "redis://user:pass@cache.example.com:6379/0" });
+		expect(refused.dragonflyRefused).toContain("cache.example.com");
+		const cache = createReadThroughCache(refused);
+		expect(cache.health().enabled).toBe(false);
+		const entries = [{ id: "mem-1", text: "the lease is fenced" }];
+		const index = { searchMemory: async () => entries };
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null, cache });
+		const answer = await substrate.searchMemory("lease", undefined, undefined, undefined, "cursor");
+		expect(entries).toEqual(answer.entries);
+		expect(answer.derived).toEqual([]);
+		// Two bypasses: the merged search and the recall inside it.
+		expect(cache.health().bypasses).toBe(2);
 	});
 });
 

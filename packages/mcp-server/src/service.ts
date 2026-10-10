@@ -1182,15 +1182,21 @@ export class Substrate {
 	 */
 	async recallMemories(input: { query?: unknown }, callerSurface: string | null): Promise<RecallReply> {
 		const query = typeof input.query === "string" ? input.query : "";
-		return recallMemories(
-			{
-				config: hindsightFromEnv(),
-				banks: hindsightBanksFromEnv(),
-				fetchImpl: this.hindsightFetch,
-			},
-			query,
-			callerSurface,
-		);
+		const surface = callerSurface ?? "unattributed";
+		const config = hindsightFromEnv();
+		const banks = hindsightBanksFromEnv();
+		return this.cache.getOrLoad({
+			klass: "memory-search",
+			surface,
+			args: { recall: true, query, banks: banks ?? null },
+			// An accepted memory write bumps this generation, so a fresh
+			// retain is never hidden behind a stale recall (D26-06a).
+			generations: [MEMORY_GENERATION_KEY],
+			// A degraded answer (outage, partial) is still the answer, but it
+			// must not sit in the cache: the next call re-probes the plane.
+			store: (reply) => !reply.degraded,
+			load: () => recallMemories({ config, banks, fetchImpl: this.hindsightFetch }, query, callerSurface),
+		});
 	}
 
 	/**
