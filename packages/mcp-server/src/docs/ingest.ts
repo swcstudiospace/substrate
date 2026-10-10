@@ -558,6 +558,56 @@ const FAILED_RUNS: Record<string, true> = {
 };
 
 /**
+ * Run state of the wanted ids, keyed by id in listing order. Paging stops
+ * at a short page or once every wanted id is seen.
+ */
+async function wantedRuns(
+	client: DocsRagflow,
+	datasetId: string,
+	documentIds: string[],
+): Promise<Map<string, string>> {
+	const wanted = new Set(documentIds);
+	const runs = new Map<string, string>();
+	let page = 1;
+	for (;;) {
+		const rows = await client.listDocuments(datasetId, page, 100);
+		if (rows.length === 0) break;
+		for (const row of rows) {
+			if (!wanted.has(row.id)) continue;
+			if (!runs.has(row.id)) runs.set(row.id, row.run);
+		}
+		if (rows.length < 100 || runs.size === wanted.size) break;
+		page += 1;
+	}
+	return runs;
+}
+
+/**
+ * Whether the stored entry covers exactly the freshly split page: one
+ * document per section, and meta sectionIndex values of exactly 0..n-1
+ * with no gaps or duplicates. A rebuilt entry after losing one section
+ * document reads back smaller, so the unchanged fast-path must not
+ * trust it — the missing section would never re-upload.
+ */
+function hasCompleteSectionSet(
+	existing: { documentIds: string[]; meta: SectionDocMeta[] },
+	sections: readonly PageSection[],
+): boolean {
+	if (existing.documentIds.length !== sections.length) return false;
+	if (existing.meta.length !== sections.length) return false;
+	const seen = new Set<number>();
+	for (const row of existing.meta) {
+		if (!Number.isInteger(row.sectionIndex)) return false;
+		seen.add(row.sectionIndex);
+	}
+	if (seen.size !== sections.length) return false;
+	for (let index = 0; index < sections.length; index += 1) {
+		if (!seen.has(index)) return false;
+	}
+	return true;
+}
+
+/**
  * Ids of a prior upload that must be replaced before the unchanged
  * fast-path may fire, or null when the prior upload is intact. A document
  * is stale when RAGFlow no longer lists it or its parse run failed or was
@@ -568,24 +618,14 @@ async function staleDocumentIds(
 	datasetId: string,
 	documentIds: string[],
 ): Promise<string[] | null> {
-	const wanted = new Set(documentIds);
-	const seen = new Set<string>();
+	const runs = await wantedRuns(client, datasetId, documentIds);
 	const stale: string[] = [];
-	let page = 1;
-	for (;;) {
-		const rows = await client.listDocuments(datasetId, page, 100);
-		if (rows.length === 0) break;
-		for (const row of rows) {
-			if (!wanted.has(row.id)) continue;
-			seen.add(row.id);
-			if (FAILED_RUNS[row.run]) stale.push(row.id);
-		}
-		if (rows.length < 100 || seen.size === wanted.size) break;
-		page += 1;
+	for (const [id, run] of runs) {
+		if (FAILED_RUNS[run]) stale.push(id);
 	}
 	// Only listed documents are deleted; ids RAGFlow no longer knows need
 	// no delete — the fresh upload below replaces them.
-	const missing = [...wanted].some((id) => !seen.has(id));
+	const missing = documentIds.some((id) => !runs.has(id));
 	if (stale.length === 0 && !missing) return null;
 	return stale;
 }
@@ -709,11 +749,21 @@ export async function ingestPage(input: IngestPageInput, deps: IngestDeps): Prom
 				// so a FAIL/CANCEL run (or a document deleted out of band)
 				// would short-circuit forever. Replace stale documents and
 				// fall through to a fresh upload instead.
-				const stale = await staleDocumentIds(deps.client, datasetId, existing.documentIds);
-				if (stale === null) {
-					return { ...base, datasetId, status: "unchanged", documentIds: [...existing.documentIds] };
+				if (!hasCompleteSectionSet(existing, sections)) {
+					// The stored group covers fewer sections than the fresh
+					// split (a section document lost out of band reads back as
+					// a smaller rebuilt group): drop the partial group's
+					// still-listed ids and fall through to a fresh upload.
+					const runs = await wantedRuns(deps.client, datasetId, existing.documentIds);
+					const doomed = existing.documentIds.filter((id) => runs.has(id));
+					if (doomed.length > 0) await deps.client.deleteDocuments(datasetId, doomed);
+				} else {
+					const stale = await staleDocumentIds(deps.client, datasetId, existing.documentIds);
+					if (stale === null) {
+						return { ...base, datasetId, status: "unchanged", documentIds: [...existing.documentIds] };
+					}
+					if (stale.length > 0) await deps.client.deleteDocuments(datasetId, stale);
 				}
-				if (stale.length > 0) await deps.client.deleteDocuments(datasetId, stale);
 			}
 			const uploaded = await deps.client.uploadDocuments(
 				datasetId,

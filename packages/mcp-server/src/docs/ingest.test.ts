@@ -1,5 +1,5 @@
 import { describe, expect, test, beforeEach } from "bun:test";
-import { mkdtemp, readdir, readFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RagflowClient, RagflowError } from "./ragflow.ts";
@@ -18,6 +18,7 @@ import {
 	splitSections,
 	stripImages,
 } from "./ingest.ts";
+import { loadManifest } from "./manifest.ts";
 import type { DocsRagflow } from "./manifest.ts";
 
 const COMMIT_A = "a".repeat(40);
@@ -683,6 +684,30 @@ describe("pipeline success", () => {
 		});
 		expect(changed.status).toBe("uploaded");
 		expect(fake.calls.uploadDocuments).toBe(2);
+	});
+
+	test("a partial section group after manifest loss re-uploads instead of short-circuiting", async () => {
+		const content = "# Alpha\n\nFirst body.\n\n# Beta\n\nSecond body.\n\n# Gamma\n\nThird body.\n";
+		const first = await ingestPage(input({ content }), { registry: REGISTRY, client: fake, stateDir });
+		expect(first.status).toBe("uploaded");
+		if (first.status !== "uploaded") throw new Error("unreachable");
+		expect(first.documentIds.length).toBeGreaterThan(1);
+		// Lose one section document out of band and the manifest file with
+		// it: the rebuild keeps the surviving DONE documents under the
+		// original hash, but the group no longer covers every section.
+		fake.datasets.get("ds-test")?.docs.delete(first.documentIds[0]!);
+		await rm(join(stateDir, "test-docs", "manifest.json"));
+		const again = await ingestPage(input({ content }), { registry: REGISTRY, client: fake, stateDir });
+		expect(again.status).toBe("uploaded");
+		if (again.status !== "uploaded") throw new Error("unreachable");
+		expect(again.sections).toBe(first.sections);
+		expect(fake.calls.deleteDocuments).toBe(1);
+		const manifest = await loadManifest("test-docs", { stateDir });
+		const entry = manifest.paths["docs/guide.md"];
+		expect(entry?.documentIds.length).toBe(again.sections);
+		expect(entry?.meta.map((row) => row.sectionIndex).sort((a, b) => a - b)).toEqual(
+			Array.from({ length: again.sections }, (_, index) => index),
+		);
 	});
 
 	test("concurrent identical ingests produce one upload", async () => {
