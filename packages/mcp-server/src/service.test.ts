@@ -4040,28 +4040,47 @@ describe("verifyGraph hour report", () => {
 		expect(verdict.reason).toContain(first.id);
 	});
 
-	test("a fresh session accepted during the gap refresh is chain-checked", async () => {
+	test("a fresh session whose record arrives only on the gap refresh is chain-checked", async () => {
+		// Session A is the gap: its new row is missing from the first event
+		// read and present on the re-read, with an ingest record from the
+		// start, so the re-read runs and the gap can clear. Session B is not
+		// in that first ingest and not in the gap. Its record lands only on
+		// the refresh that covers fresh rows, and the row that lands has an
+		// edited summary under the original hash. Checking only the gap's
+		// session would accept the graph; B has to be chain-checked too.
 		const world = sessionRows();
 		const liveAt = H + 5 * HOUR + 1000;
+		const gapEvent = normalizeEvent(
+			{ surface: "omp", kind: "note", summary: "gap-clears", session_id: "sess-1", graph_id: "ut-1", actor: "agent" },
+			world.events[1]?.hash ?? null,
+		);
 		const foreign = normalizeEvent(
 			{ surface: "omp", kind: "note", summary: "other-session", session_id: "sess-other", graph_id: "ut-1", actor: "agent" },
 			null,
 		);
 		const tampered = { ...foreign, summary: "edited summary" };
-		const toRow = (event: typeof foreign) => ({ ...event, ts: Date.parse(event.ts), payload: JSON.stringify(event.payload) });
+		const toRow = (event: typeof gapEvent) => ({ ...event, ts: Date.parse(event.ts), payload: JSON.stringify(event.payload) });
+		const gapRecord = { event_id: gapEvent.id, event_ts: Date.parse(gapEvent.ts), ingested_at: liveAt };
 		const foreignRecord = { event_id: foreign.id, event_ts: Date.parse(foreign.ts), ingested_at: liveAt };
 		let reads = 0;
+		let ingests = 0;
 		const substrate = substrateWith({
-			readEvents: async () => (++reads === 1 ? world.rows : [...world.rows, toRow(tampered)]),
-			graphIngest: async () => [...world.records, foreignRecord],
+			readEvents: async () => (++reads === 1 ? world.rows : [...world.rows, toRow(gapEvent), toRow(tampered)]),
+			graphIngest: async () => {
+				ingests += 1;
+				return ingests === 1 ? [...world.records, gapRecord] : [...world.records, gapRecord, foreignRecord];
+			},
 			firstIngestMs: async () => H,
 			hourLeaves: async () => world.leaves,
 			anchorForPeriod: async () => anchorRow(world),
 		});
 		const verdict = await substrate.verifyGraph("ut-1", { now: liveAt + 60_000, rpc: rpcReturning(world.memo) as never });
 		expect(reads).toBe(2);
+		expect(ingests).toBe(2);
+		expect(verdict.missing.ids).not.toContain(gapEvent.id);
 		expect(verdict.ok).toBe(false);
 		expect(verdict.chain.ok).toBe(false);
+		expect(verdict.chain.brokenAt).toBe(foreign.id);
 		expect(verdict.reason).toContain("hash does not match");
 	});
 
