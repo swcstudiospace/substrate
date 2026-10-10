@@ -190,7 +190,7 @@ def _target(file_path: Any) -> str:
     parts = file_path.split("/")
     if file_path.startswith("/") or "\\" in file_path or any(part in ("", ".", "..") for part in parts):
         raise Skip(f"path outside references/ templates/ scripts/ assets/: {file_path[:120]}")
-    if parts[-1] == "SKILL.md" and len(parts) in (1, 2):
+    if file_path == "SKILL.md":
         return "SKILL.md"
     if not file_path.startswith(ALLOWED_PREFIXES) or len(parts) < 2:
         raise Skip(f"path outside references/ templates/ scripts/ assets/: {file_path[:120]}")
@@ -598,6 +598,8 @@ def run_once(
         reply_status = str(reply.get("status", f"http-{status}"))
         if dry_run:
             print(_dry_run_line(name, surface, kind, ids, reply_status), flush=True)
+            if disposition == _KEEP_FAIL:
+                result.ok = False
             result.kept += len(group)
             continue
         if disposition == _DELETE:
@@ -730,6 +732,8 @@ def drain_queue(
         if dry_run:
             print(_dry_run_line(str(base["name"]), expected_surface, "queued", [path.stem], reply_status),
                   flush=True)
+            if disposition == _KEEP_FAIL:
+                result.ok = False
             result.kept += 1
             continue
         if disposition == _DELETE:

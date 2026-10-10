@@ -233,6 +233,23 @@ def test_replay_refuses_paths_outside_the_allowed_dirs(path):
         replay(BASE, [rec("r1", {"action": "write_file", "name": "x", "file_path": path, "file_content": "x"})], "x")
 
 
+def test_replay_write_to_templates_skill_md_does_not_replace_root_skill_md():
+    base = {"SKILL.md": "root instructions\n", "templates/SKILL.md": "template\n"}
+    out = replay(base, [rec("r1", {"action": "write_file", "name": "x", "file_path": "templates/SKILL.md",
+                                   "file_content": "template v2\n"})], "x")
+    assert out["templates/SKILL.md"] == "template v2\n"
+    assert out["SKILL.md"] == "root instructions\n"
+
+
+def test_replay_root_skill_md_only_from_the_bare_path():
+    out = replay(BASE, [rec("r1", {"action": "write_file", "name": "x", "file_path": "SKILL.md",
+                                   "file_content": "root v2"})], "x")
+    assert out["SKILL.md"] == "root v2"
+    with pytest.raises(Skip):
+        replay(BASE, [rec("r1", {"action": "write_file", "name": "x", "file_path": "other/SKILL.md",
+                                 "file_content": "x"})], "x")
+
+
 # --- local names / classify -------------------------------------------------------------------
 
 
@@ -388,6 +405,16 @@ def test_run_once_dry_run_reply_status_keeps(env):
     client, seen = mock_client(env, reply(200, {"status": "dry_run"}))
     result = run(env, client)
     assert seen and result.kept == 1 and path.exists()
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_run_once_dry_run_auth_failure_is_not_ok_but_touches_nothing(env, capsys, status):
+    path = lib_patch(env)
+    client, _ = mock_client(env, reply(status, {"error": "refused"}))
+    result = run(env, client, dry_run=True)
+    assert result.ok is False
+    assert result.kept == 1 and path.exists()
+    assert not env["held"].exists() and not env["log"].exists()
 
 
 def test_run_once_400_unlinks_and_logs_rejected_with_rules(env):
@@ -656,3 +683,13 @@ def test_drain_queue_dry_run_posts_dry_run_and_mutates_nothing(env, capsys):
     assert result.kept == 1 and result.proposed == 0
     out = capsys.readouterr().out
     assert "omp-skill" in out and "surface=omp" in out and "dry_run" in out
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_drain_queue_dry_run_auth_failure_is_not_ok_but_keeps_the_file(env, status):
+    queue = env["tmp"] / "omp-queue"
+    path = queued(queue, "omp-skill", "omp")
+    client, _ = mock_client(env, reply(status, {"error": "refused"}))
+    result = drain(env, queue, "omp", client, dry_run=True)
+    assert result.ok is False
+    assert path.exists() and not (queue / "rejected").exists() and not env["log"].exists()
