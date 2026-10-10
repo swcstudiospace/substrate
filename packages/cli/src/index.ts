@@ -74,13 +74,13 @@ function branch(cwd = process.cwd()): string | undefined {
 	return git(["rev-parse", "--abbrev-ref", "HEAD"], cwd) || undefined;
 }
 
-async function post(path: string, body: unknown, surface = "claude-code"): Promise<Response | null> {
+async function post(path: string, body: unknown, surface = "claude-code", timeoutMs?: number): Promise<Response | null> {
 	try {
 		return await fetch(`${base()}${path}`, {
 			method: "POST",
 			headers: headers(surface),
 			body: JSON.stringify(body),
-			signal: AbortSignal.timeout(timeout()),
+			signal: AbortSignal.timeout(timeoutMs ?? timeout()),
 		});
 	} catch {
 		return null;
@@ -170,18 +170,53 @@ async function cmdVerify(graphId: string | undefined): Promise<number> {
 		process.stderr.write("usage: substrate verify <graph_id>\n");
 		return 2;
 	}
-	const response = await post("/verify", { graph_id: graphId });
+	// The `/verify` request may wait out the hour loop's devnet reads, so it
+	// shares the server's whole-verify budget (D28-18), not the brief timeout.
+	const budgetRaw = Number(process.env.SUBSTRATE_VERIFY_TIMEOUT_MS);
+	const budgetMs = Number.isFinite(budgetRaw) && budgetRaw > 0 ? budgetRaw : 30_000;
+	const response = await post("/verify", { graph_id: graphId }, "claude-code", budgetMs);
 	if (!response) {
 		process.stderr.write("[substrate] unreachable\n");
 		return 1;
 	}
-	const body = (await response.json()) as { ok?: boolean; brokenAt?: string; reason?: string; events?: number };
-	if (body.ok) {
+	const body = (await response.json()) as {
+		ok?: boolean;
+		brokenAt?: string;
+		reason?: string;
+		events?: number;
+		chain?: { ok: boolean; brokenAt?: string; reason?: string };
+		hours?: Array<{ period_start: string; status: string; tx_sig?: string; reason?: string }>;
+		uncovered?: { count: number; ids: string[] };
+		missing?: { count: number; ids: string[] };
+	};
+	// The chain line reports the chain, not the anchors: an anchor failure
+	// still prints `chain intact` here, and the hour lines carry the failure.
+	const chainBroken = body.chain ? !body.chain.ok : !body.ok;
+	if (!chainBroken) {
 		process.stdout.write(`chain intact for ${graphId} (${body.events ?? 0} events)\n`);
-		return 0;
+	} else {
+		process.stderr.write(`chain BROKEN for ${graphId} at ${body.chain?.brokenAt ?? body.brokenAt}: ${body.chain?.reason ?? body.reason}\n`);
 	}
-	process.stderr.write(`chain BROKEN for ${graphId} at ${body.brokenAt}: ${body.reason}\n`);
-	return 1;
+	for (const hour of body.hours ?? []) {
+		if (hour.status === "anchored") {
+			process.stdout.write(`${hour.period_start} anchored ${hour.tx_sig ?? ""}\n`);
+		} else if (hour.status === "pending") {
+			process.stdout.write(`${hour.period_start} pending\n`);
+		} else if (hour.status === "mismatch") {
+			process.stdout.write(`hour ${hour.period_start} does not match its anchor: ${hour.reason ?? "mismatch"}\n`);
+		} else if (hour.status === "unverified") {
+			process.stderr.write(`[substrate] verify could not check devnet for ${hour.period_start}: ${hour.reason ?? "unreadable"}\n`);
+		} else {
+			process.stdout.write(`${hour.period_start} ${hour.status}${hour.reason ? `: ${hour.reason}` : ""}\n`);
+		}
+	}
+	if ((body.uncovered?.count ?? 0) > 0) {
+		process.stderr.write(`uncovered events with no ingest record: ${(body.uncovered?.ids ?? []).join(", ")}\n`);
+	}
+	if ((body.missing?.count ?? 0) > 0) {
+		process.stderr.write(`events with an ingest record but no event row: ${(body.missing?.ids ?? []).join(", ")}\n`);
+	}
+	return body.ok ? 0 : 1;
 }
 
 /**

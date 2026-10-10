@@ -273,6 +273,7 @@ describe("repo units", () => {
 	test("infra/vps substrate units all run from the release with their own env files at HEAD", () => {
 		const units = loadUnits(join(repoRoot, "infra/vps"));
 		expect(units.map((unit) => unit.name).sort()).toEqual([
+			"substrate-anchor.service",
 			"substrate-collector-grok.service",
 			"substrate-collector-herdr.service",
 			"substrate-collector-muse.service",
@@ -283,6 +284,13 @@ describe("repo units", () => {
 		}
 		const mcp = units.find((unit) => unit.name === "substrate-mcp.service");
 		expect(mcp?.environmentFiles).toEqual([SHARED_ENV_FILE]);
+		// The anchor job is a store client in the server's trust domain, not a
+		// collector: it loads the shared env on the pinned release and raises
+		// no finding of its own (D28-02).
+		const anchor = units.find((unit) => unit.name === "substrate-anchor.service");
+		expect(anchor?.workingDirectory).toBe(RELEASE_CURRENT);
+		expect(anchor?.environmentFiles).toEqual([SHARED_ENV_FILE]);
+		expect(anchor?.restart).toBeNull();
 		// The lane-B cutover (infra/vps/README.md operator step 4) moved herdr and
 		// muse onto the release tree with collector-only env files, like grok. Each
 		// unit loads exactly the file the identity manifest delivers its token to, so

@@ -7,7 +7,8 @@
  */
 import { randomUUID } from "node:crypto";
 import { decideClaim, type ClaimDecision } from "@substrate/audit";
-import { formatMemo, hourEnd, hourIso, hourStart, isClosed, merkleRootHex } from "@substrate/ledger";
+import { createRpc, formatMemo, hourEnd, hourIso, hourStart, isClosed, merkleRootHex, parseMemo, HOUR_MS, type Rpc, type TransactionMemo } from "@substrate/ledger";
+import { DEVNET_GENESIS_HASH } from "./anchor.ts";
 import { composeBrief, type BriefRequest } from "./brief.ts";
 import {
 	GRAPHS_GENERATION_KEY,
@@ -331,6 +332,75 @@ export interface HourDigest {
 	/** The members' event ids in position order, the order the root is computed over. */
 	event_ids: string[];
 }
+/**
+ * One hour's anchor verdict inside {@link VerifyVerdict} (D28-15).
+ *
+ * `anchored` needs the full triple-check: the row's `tx_sig` reads back from
+ * devnet, the memo comes from a memo-program instruction signed by
+ * `SOLANA_ANCHOR_PUBKEY` with `err === null`, it parses as v1, its period is
+ * this hour, and its root and count equal the recomputed digest — which also
+ * equals the row. `pending` is no row inside the 3 h window (or the hour not
+ * closed yet); `unanchored`, `mismatch` and `unverified` all fail the verify.
+ */
+export type HourStatus = "anchored" | "pending" | "unanchored" | "mismatch" | "unverified";
+export interface HourReport {
+	period_start: string;
+	period_end: string;
+	status: HourStatus;
+	event_count: number;
+	root: string | null;
+	tx_sig?: string;
+	slot?: number;
+	reason?: string;
+}
+/** The additive verify verdict: the chain fields keep their meaning (D28-14). */
+export interface VerifyVerdict {
+	ok: boolean;
+	events: number;
+	brokenAt?: string;
+	reason?: string;
+	chain: { ok: boolean; brokenAt?: string; reason?: string };
+	hours: HourReport[];
+	uncovered: { count: number; ids: string[] };
+	legacy: { count: number; ids: string[] };
+	/**
+	 * Retained ingest events with no event row in this graph's reads
+	 * (D28-22): deleted outright, or moved to another graph. Either way the
+	 * event escaped its chain check while its hash still anchors the hour,
+	 * so any entry here fails the verify naming the event. A live append
+	 * racing the two reads is not an entry: the re-read finds its row.
+	 */
+	missing: { count: number; ids: string[] };
+}
+/** Options for {@link Substrate.verifyGraph}: evidence passes `anchors: false`. */
+export interface VerifyOptions {
+	/** Skip the hour report and return the chain verdict only (default true). */
+	anchors?: boolean;
+	/** Clock for pending-window and closed-hour checks; tests pin it. */
+	now?: number;
+	/** Injected devnet reader; production builds one from the solana config. */
+	rpc?: Rpc;
+}
+/**
+ * How long after an hour closes it may still anchor before verify fails it.
+ *
+ * D28-15: `pending` while `now < period_end + PENDING_MS`; the anchor job lands
+ * an hour at the second tick after it ends (~2 h), inside this 3 h window.
+ */
+export const VERIFY_PENDING_MS = 3 * HOUR_MS;
+/** Per-call devnet read budget inside verify; the whole-verify budget lives in config. */
+export const VERIFY_RPC_TIMEOUT_MS = 5_000;
+export const VERIFY_RPC_ATTEMPTS = 2;
+export const VERIFY_RPC_BACKOFF_MS = 200;
+/**
+ * Cap on the time reserved for the `/verify` response after the last hour
+ * check (D28-18). The CLI waits out the whole-verify budget, so every hour
+ * check must finish inside it with room to spare: the caller gets the hour
+ * report, not `unreachable` from its own timeout. Short budgets reserve a
+ * fifth instead, so a fixed margin cannot swallow every hour on a small
+ * budget — see the loop below.
+ */
+export const VERIFY_RESPONSE_MARGIN_MS = 2_000;
 
 /**
  * Why a ledger that is not provably append-only refuses the write.
@@ -2438,19 +2508,34 @@ export class Substrate {
 	}
 
 	/**
-	 * Recompute the hash chain for one graph.
+	 * Recompute the hash chain for one graph, plus the per-hour anchor report.
 	 *
 	 * Events are grouped by session before verification: `prev` chains within a
 	 * session, so interleaving two sessions' events into one sequence would
-	 * report a break that is not there.
+	 * report a break that is not there. That per-session check is returned as
+	 * `chain`, and the top-level `ok`/`events`/`brokenAt`/`reason` keep their
+	 * meaning on top of it (D28-14).
+	 *
+	 * With anchors on (the default), every distinct hour holding one of the
+	 * graph's events — the hour of each event's first ingest record (D28-16,
+	 * D27-10) — is digested whole and checked once against its anchors row and
+	 * the devnet read-back (D28-15). `ok` is true only when the chain verifies,
+	 * every hour is `anchored` or `pending`, and no post-coverage event is
+	 * uncovered (D28-17). Pass `anchors: false` for the chain-only evidence
+	 * call: anchors in the bundle are out of scope (FEATURES E-D1).
 	 */
-	async verifyGraph(
-		graphId: string,
-	): Promise<{ ok: boolean; events: number; brokenAt?: string; reason?: string }> {
-		if (!this.greptime) return { ok: false, events: 0, reason: "greptime not configured" };
+	async verifyGraph(graphId: string, opts: VerifyOptions = {}): Promise<VerifyVerdict> {
+		const withAnchors = opts.anchors !== false;
+		const now = opts.now ?? Date.now();
+		// The CLI times the whole request, so the whole-verify budget starts
+		// before the event read — not when the hour loop starts — and every
+		// hour's allowance below is what's left of it.
+		const verifyStartedAt = Date.now();
+		if (!this.greptime) return { ok: false, events: 0, reason: "greptime not configured", chain: { ok: false, reason: "greptime not configured" }, hours: [], uncovered: { count: 0, ids: [] }, legacy: { count: 0, ids: [] }, missing: { count: 0, ids: [] } };
 		// Read by the graph id in its stored form, for the same reason `emit` looks
 		// the session up by its normalised one.
-		const rows = await this.greptime.readEvents("graph_id", normalizeIdentifier(graphId) ?? graphId);
+		const stored = normalizeIdentifier(graphId) ?? graphId;
+		const rows = await this.greptime.readEvents("graph_id", stored);
 
 		const bySession = new Map<string, SubstrateEvent[]>();
 		for (const row of rows) {
@@ -2461,11 +2546,485 @@ export class Substrate {
 			else bySession.set(key, [event]);
 		}
 
+		const chain: VerifyVerdict["chain"] = { ok: true };
 		for (const events of bySession.values()) {
 			const result = verifyChain(inChainOrder(events));
-			if (!result.ok) return { ok: false, events: rows.length, brokenAt: result.brokenAt, reason: result.reason };
+			if (!result.ok) {
+				chain.ok = false;
+				chain.brokenAt = result.brokenAt;
+				chain.reason = result.reason;
+				break;
+			}
 		}
-		return { ok: true, events: rows.length };
+
+		const emptyHours: VerifyVerdict = {
+			ok: chain.ok,
+			events: rows.length,
+			...(chain.brokenAt ? { brokenAt: chain.brokenAt } : {}),
+			...(chain.reason ? { reason: chain.reason } : {}),
+			chain,
+			hours: [],
+			uncovered: { count: 0, ids: [] },
+			legacy: { count: 0, ids: [] },
+			missing: { count: 0, ids: [] },
+		};
+		if (!withAnchors) return emptyHours;
+		return this.hourReport(stored, rows, chain, now, opts.rpc, verifyStartedAt);
+	}
+
+	/**
+	 * The D28-15 hour report behind {@link verifyGraph}.
+	 *
+	 * Reads the graph's ingest records by stored graph id, maps each event to
+	 * its first record's hour, splits pre-coverage record-less events to legacy
+	 * (counted, never failing) and post-coverage ones to uncovered (a record
+	 * racing the reads is re-fetched first, so a normal append settles
+	 * instead of failing; only the remainder fails, naming ids), requires
+	 * every retained ingest event to appear in the graph's rows (D28-22: a
+	 * retained record with no row is deleted or moved, and fails naming ids;
+	 * a record racing the reads is re-read first, so a live append settles
+	 * instead of failing), then digests each distinct hour whole and checks
+	 * it once.
+	 * Devnet reads run sequentially — the concurrency cap is one — under the
+	 * whole-verify budget; an hour never reached in budget reads `unverified`.
+	 */
+	private async hourReport(
+		storedGraphId: string,
+		rows: Array<Record<string, unknown>>,
+		chain: VerifyVerdict["chain"],
+		now: number,
+		injectedRpc?: Rpc,
+		startedAt: number = Date.now(),
+	): Promise<VerifyVerdict> {
+		const greptime = this.greptime;
+		if (!greptime) throw new Error("GREPTIME_URL is not set");
+		const budgetMs = this.config.verifyTimeoutMs;
+		const ingest = await greptime.graphIngest(storedGraphId);
+		const byEvent = new Map(ingest.map((record) => [record.event_id, record]));
+		const firstMs = await greptime.firstIngestMs();
+		const coverageStartMs = firstMs === null ? null : hourStart(firstMs);
+
+		const byHour = new Map<number, string[]>();
+		const uncovered: string[] = [];
+		const legacy: string[] = [];
+		for (const row of rows) {
+			const eventId = String(row.id);
+			const record = byEvent.get(eventId);
+			if (!record) {
+				// No coverage start means the ingest table is empty: every event
+				// predates coverage (pre-Phase-28 rows, or a stub with no ingest
+				// table concept) and is legacy, counted and never failing.
+				const ts = Number(row.ts);
+				if (coverageStartMs === null || (Number.isFinite(ts) && ts < coverageStartMs)) legacy.push(eventId);
+				else uncovered.push(eventId);
+				continue;
+			}
+			const hour = hourStart(record.ingested_at);
+			const bucket = byHour.get(hour);
+			if (bucket) bucket.push(eventId);
+			else byHour.set(hour, [eventId]);
+		}
+	// A fifth of the budget, capped: short budgets still run their quick
+	// checks instead of losing every hour to a fixed margin. Both re-reads
+	// below share it.
+	const margin = Math.min(VERIFY_RESPONSE_MARGIN_MS, Math.ceil(budgetMs / 5));
+	// The mirror race: `insertEvent` stores the event row before its ingest
+	// record, so a row read while the second write is still in flight is
+	// uncovered on the first ingest read. When uncovered is non-empty and
+	// the budget allows, re-fetch ingest under the same margin/timeout
+	// pattern as the event re-read below, merge newly landed records, and
+	// move newly-covered ids into their hour buckets; only the remainder
+	// fails. Past the allowance the first read stands, fail-closed.
+	if (uncovered.length > 0 && budgetMs - (Date.now() - startedAt) > margin) {
+		const allowance = budgetMs - (Date.now() - startedAt) - margin;
+		const refreshed = await new Promise<typeof ingest | null>((resolve) => {
+			const timer = setTimeout(() => resolve(null), Math.max(0, allowance));
+			timer.unref?.();
+			greptime.graphIngest(storedGraphId).then(
+				(read) => {
+					clearTimeout(timer);
+					resolve(read);
+				},
+				() => {
+					clearTimeout(timer);
+					resolve(null);
+				},
+			);
+		});
+		if (refreshed) {
+			for (const record of refreshed) {
+				if (!byEvent.has(record.event_id)) {
+					byEvent.set(record.event_id, record);
+					ingest.push(record);
+				}
+			}
+			const still: string[] = [];
+			for (const id of uncovered) {
+				const record = byEvent.get(id);
+				if (!record) {
+					still.push(id);
+					continue;
+				}
+				const hour = hourStart(record.ingested_at);
+				const bucket = byHour.get(hour);
+				if (bucket) bucket.push(id);
+				else byHour.set(hour, [id]);
+			}
+			uncovered.length = 0;
+			uncovered.push(...still);
+		}
+	}
+		// Hours whose every event row was deleted still hold retained ingest
+		// records: visit them with an empty bucket so the whole-hour digest
+		// throws naming the missing member instead of passing unseen.
+		for (const record of ingest) {
+			const hour = hourStart(record.ingested_at);
+			if (!byHour.has(hour)) byHour.set(hour, []);
+		}
+	// Retained ingest events with no event row in this graph's read
+	// (D28-22): deleted outright, moved to another graph — or appended on
+	// a live graph between the event read above and the ingest read. The
+	// event row is stored before its ingest record, so an observed record
+	// implies its row is already readable: re-read, and only ids still
+	// absent fail the verdict naming them. A re-read hit clears only after
+	// its whole fresh session re-chains — a restored row with edited
+	// content keeps its old hash and fails there instead, and a burst whose
+	// earlier link landed in the re-read stays in that re-chain. A fresh
+	// row that is not legacy and still has no ingest record after the same
+	// bounded ingest refresh is uncovered, and a gap id is not cleared
+	// while a session sibling is still record-less. Retained ids are
+	// finally compared against the checked re-read,
+	// not the first: an id present at first but deleted before the re-read
+	// was never in the gap, and only the fresh comparison catches it. The
+	// re-read shares the whole-verify budget: past the allowance the gap
+	// stays missing, fail-closed, and the report still reaches the CLI.
+	const rowIds = new Set(rows.map((row) => String(row.id)));
+	const gap = ingest.map((record) => record.event_id).filter((id) => !rowIds.has(id));
+	const cleared = new Set<string>();
+	let fresh: Array<Record<string, unknown>> | null = null;
+	if (gap.length > 0 && budgetMs - (Date.now() - startedAt) > margin) {
+		const allowance = budgetMs - (Date.now() - startedAt) - margin;
+		fresh = await new Promise<Array<Record<string, unknown>> | null>((resolve) => {
+			const timer = setTimeout(() => resolve(null), Math.max(0, allowance));
+			timer.unref?.();
+			greptime.readEvents("graph_id", storedGraphId).then(
+				(read) => {
+					clearTimeout(timer);
+					resolve(read);
+				},
+				() => {
+					clearTimeout(timer);
+					resolve(null);
+				},
+			);
+		});
+		if (fresh) {
+			const gapSet = new Set(gap);
+			const freshBySession = new Map<string, SubstrateEvent[]>();
+			for (const row of fresh) {
+				const event = rowToEvent(row);
+				const key = event.session_id ?? "";
+				const bucket = freshBySession.get(key);
+				if (bucket) bucket.push(event);
+				else freshBySession.set(key, [event]);
+			}
+			const touched = new Set<string>();
+			for (const members of freshBySession.values()) {
+				for (const member of members) {
+					if (gapSet.has(member.id)) touched.add(member.session_id ?? "");
+				}
+			}
+			// A row that appeared in this re-read and still has no ingest
+			// record was not in the first uncovered set. Non-legacy ids get
+			// the same bounded ingest refresh before they fail; legacy ids
+			// are counted and never failing. The refresh runs before the
+			// gap clear so a sibling whose record lands is not record-less.
+			const freshRecordLess: string[] = [];
+			const seenFresh = new Set<string>();
+			for (const row of fresh) {
+				const eventId = String(row.id);
+				if (seenFresh.has(eventId)) continue;
+				seenFresh.add(eventId);
+				if (byEvent.has(eventId)) continue;
+				const ts = Number(row.ts);
+				if (coverageStartMs === null || (Number.isFinite(ts) && ts < coverageStartMs)) {
+					if (!legacy.includes(eventId)) legacy.push(eventId);
+					continue;
+				}
+				freshRecordLess.push(eventId);
+			}
+			if (freshRecordLess.length > 0 && budgetMs - (Date.now() - startedAt) > margin) {
+				const allowance = budgetMs - (Date.now() - startedAt) - margin;
+				const refreshed = await new Promise<typeof ingest | null>((resolve) => {
+					const timer = setTimeout(() => resolve(null), Math.max(0, allowance));
+					timer.unref?.();
+					greptime.graphIngest(storedGraphId).then(
+						(read) => {
+							clearTimeout(timer);
+							resolve(read);
+						},
+						() => {
+							clearTimeout(timer);
+							resolve(null);
+						},
+					);
+				});
+				if (refreshed) {
+					for (const record of refreshed) {
+						if (!byEvent.has(record.event_id)) {
+							byEvent.set(record.event_id, record);
+							ingest.push(record);
+						}
+					}
+					const still: string[] = [];
+					for (const id of freshRecordLess) {
+						const record = byEvent.get(id);
+						if (!record) {
+							still.push(id);
+							continue;
+						}
+						const at = uncovered.indexOf(id);
+						if (at >= 0) uncovered.splice(at, 1);
+						const hour = hourStart(record.ingested_at);
+						const bucket = byHour.get(hour);
+						if (bucket) {
+							if (!bucket.includes(id)) bucket.push(id);
+						} else byHour.set(hour, [id]);
+					}
+					freshRecordLess.length = 0;
+					freshRecordLess.push(...still);
+				}
+			}
+			for (const id of freshRecordLess) {
+				if (!uncovered.includes(id)) uncovered.push(id);
+			}
+			// Every fresh session that contributes a covered row is part of the
+			// verdict, not only the session that held the gap. A new session
+			// whose hash no longer matches its summary must fail even when
+			// its hour is still open and skips the digest.
+			for (const [key, members] of freshBySession) {
+				if (!members.some((member) => byEvent.has(member.id))) continue;
+				const result = verifyChain(inChainOrder(members));
+				if (!result.ok) {
+					chain.ok = false;
+					chain.brokenAt ??= result.brokenAt;
+					chain.reason ??= result.reason;
+				}
+			}
+			for (const key of touched) {
+				const members = freshBySession.get(key) ?? [];
+				if (!verifyChain(inChainOrder(members)).ok) continue;
+				// The chain can verify while an earlier sibling still has
+				// no ingest record. That gap id stays missing.
+				const recordLessSibling = members.some((member) => !byEvent.has(member.id) && !legacy.includes(member.id));
+				if (recordLessSibling) continue;
+				for (const member of members) {
+					if (gapSet.has(member.id)) cleared.add(member.id);
+				}
+			}
+		}
+	}
+	// An id retained in ingest but gone from the checked re-read was
+	// deleted or moved between the reads: never in the gap, so only the
+	// fresh comparison catches it. Past the re-read allowance there is no
+	// fresh read, and the first read stands in, fail-closed.
+	const referenceIds = fresh ? new Set(fresh.map((row) => String(row.id))) : rowIds;
+	const absent = ingest.map((record) => record.event_id).filter((id) => !referenceIds.has(id));
+	const missing = [...new Set([...absent, ...gap])].filter((id) => !cleared.has(id)).sort();
+
+	const pubkey = this.config.solana.pubkey;
+	let rpc: Rpc | null = injectedRpc ?? null;
+	const readRpc = (): Rpc => {
+		if (!rpc) {
+			rpc = createRpc({
+				url: this.config.solana.rpcUrl,
+				timeoutMs: VERIFY_RPC_TIMEOUT_MS,
+				attempts: VERIFY_RPC_ATTEMPTS,
+				backoffMs: VERIFY_RPC_BACKOFF_MS,
+			});
+		}
+		return rpc;
+	};
+
+	const hours: HourReport[] = [];
+	for (const hour of [...byHour.keys()].sort((a, b) => a - b)) {
+		const memberCount = byHour.get(hour)?.length ?? 0;
+		// An hour that is still open needs no devnet read and no digest —
+		// it is pending by definition — so it never spends the budget.
+		if (!isClosed(hour, now, INGEST_LAG_MS)) {
+			hours.push({ period_start: hourIso(hour), period_end: hourIso(hourEnd(hour)), status: "pending", event_count: memberCount, root: null });
+			continue;
+		}
+		const remaining = budgetMs - (Date.now() - startedAt);
+		if (remaining <= margin) {
+			hours.push({
+				period_start: hourIso(hour),
+				period_end: hourIso(hourEnd(hour)),
+				status: "unverified",
+				event_count: memberCount,
+				root: null,
+				reason: "verify timed out before this hour was checked",
+			});
+			continue;
+		}
+		hours.push(await this.checkHourWithBudget(hour, now, readRpc, pubkey, memberCount, remaining - margin));
+	}
+
+	const failing = hours.find((hour) => hour.status !== "anchored" && hour.status !== "pending");
+	const ok = chain.ok && !failing && uncovered.length === 0 && missing.length === 0;
+	const reason = !chain.ok
+		? chain.reason
+		: uncovered.length > 0
+			? `${uncovered.length} uncovered event${uncovered.length === 1 ? "" : "s"} with no ingest record: ${uncovered.join(", ")}`
+			: missing.length > 0
+				? `${missing.length} event${missing.length === 1 ? "" : "s"} with an ingest record but no event row: ${missing.join(", ")}`
+				: failing
+					? `hour ${failing.period_start} ${failing.status}${failing.reason ? `: ${failing.reason}` : ""}`
+					: undefined;
+	return {
+		ok,
+		events: rows.length,
+		...(chain.brokenAt ? { brokenAt: chain.brokenAt } : {}),
+		...(reason ? { reason } : {}),
+		chain,
+		hours,
+		uncovered: { count: uncovered.length, ids: [...uncovered].sort() },
+		legacy: { count: legacy.length, ids: [...legacy].sort() },
+		missing: { count: missing.length, ids: [...missing] },
+	};
+	}
+
+	/**
+	 * Bound one hour check to its share of the whole-verify budget (D28-18).
+	 *
+	 * A devnet read retries inside its own per-call timeout regardless of the
+	 * time left, so an unreadable endpoint could otherwise hold the loop past
+	 * the CLI's wait and turn a reportable hour into `unreachable`. Past the
+	 * allowance the hour reads `unverified`, fail-closed, and the loop keeps
+	 * its margin for the response.
+	 */
+	private async checkHourWithBudget(
+		hour: number,
+		now: number,
+		readRpc: () => Rpc,
+		pubkey: string | null,
+		memberCount: number,
+		allowanceMs: number,
+	): Promise<HourReport> {
+		const period_start = hourIso(hour);
+		const period_end = hourIso(hourEnd(hour));
+		return new Promise<HourReport>((resolve, reject) => {
+			const timer = setTimeout(
+				() =>
+					resolve({
+						period_start,
+						period_end,
+						status: "unverified",
+						event_count: memberCount,
+						root: null,
+						reason: `verify timed out checking this hour (${Math.max(0, Math.floor(allowanceMs))} ms budget)`,
+					}),
+				Math.max(0, allowanceMs),
+			);
+			timer.unref?.();
+			this.checkHour(hour, now, readRpc, pubkey, memberCount).then(
+				(report) => {
+					clearTimeout(timer);
+					resolve(report);
+				},
+				(cause) => {
+					clearTimeout(timer);
+					reject(cause);
+				},
+			);
+		});
+	}
+
+	/**
+	 * Check one distinct hour: digest whole, then resolve to its D28-15 status.
+	 *
+	 * The memo bytes cross from devnet untrusted: every field is re-checked,
+	 * never trusted. Anything devnet-shaped but wrong — signer, period, root,
+	 * count, row disagreement — is `mismatch`; anything unreadable is
+	 * `unverified`, fail-closed, never `anchored`.
+	 */
+	private async checkHour(
+		hour: number,
+		now: number,
+		readRpc: () => Rpc,
+		pubkey: string | null,
+		memberCount: number,
+	): Promise<HourReport> {
+		const period_start = hourIso(hour);
+		const period_end = hourIso(hourEnd(hour));
+		// An hour that is still open (or inside the ingest lag) cannot digest
+		// yet — asking would hash a set that can still grow. It is pending by
+		// definition (D28-15), with no root to report.
+		if (!isClosed(hour, now, INGEST_LAG_MS)) {
+			return { period_start, period_end, status: "pending", event_count: memberCount, root: null };
+		}
+		let digest: HourDigest;
+		try {
+			digest = await this.hourDigest(hour, now);
+		} catch (cause) {
+			return { period_start, period_end, status: "mismatch", event_count: 0, root: null, reason: redact(String(cause)) };
+		}
+		if (digest.root === null) {
+			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: null, reason: "hour holds graph events but digests empty" };
+		}
+		const greptime = this.greptime;
+		if (!greptime) throw new Error("GREPTIME_URL is not set");
+		const row = await greptime.anchorForPeriod(hour);
+		if (!row) {
+			if (!isClosed(hour, now, INGEST_LAG_MS) || now < hourEnd(hour) + VERIFY_PENDING_MS) {
+				return { period_start, period_end, status: "pending", event_count: digest.event_count, root: digest.root };
+			}
+			return { period_start, period_end, status: "unanchored", event_count: digest.event_count, root: digest.root, reason: "no anchors row 3 h after the hour closed" };
+		}
+		if (!pubkey) {
+			return { period_start, period_end, status: "unverified", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "SOLANA_ANCHOR_PUBKEY is not set" };
+		}
+		let genesis: string;
+		try {
+			genesis = await readRpc().getGenesisHash();
+		} catch (cause) {
+			return { period_start, period_end, status: "unverified", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: redact(String(cause)) };
+		}
+		if (genesis !== DEVNET_GENESIS_HASH) {
+			return { period_start, period_end, status: "unverified", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "RPC genesis hash is not devnet's" };
+		}
+		let memo: TransactionMemo | null;
+		try {
+			memo = await readRpc().transactionMemo(row.tx_sig, "confirmed");
+		} catch (cause) {
+			return { period_start, period_end, status: "unverified", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: redact(String(cause)) };
+		}
+		if (!memo) {
+			return { period_start, period_end, status: "unverified", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "transaction not found on devnet" };
+		}
+		if (!memo.memo) {
+			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "transaction carries no memo-program instruction" };
+		}
+		if (memo.payer !== pubkey || !memo.payerSigned) {
+			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "memo is not signed by SOLANA_ANCHOR_PUBKEY" };
+		}
+		if (memo.err !== null && memo.err !== undefined) {
+			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "anchor transaction failed" };
+		}
+		const parsed = parseMemo(memo.memo);
+		if (!parsed) {
+			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "memo is not a v1 anchor memo" };
+		}
+		if (parsed.periodStartMs !== hour) {
+			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: `memo names ${hourIso(parsed.periodStartMs)}, not ${period_start}` };
+		}
+		if (parsed.rootHex !== digest.root || parsed.count !== digest.event_count) {
+			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: `chain root ${parsed.rootHex}/${parsed.count} != recomputed ${digest.root}/${digest.event_count}` };
+		}
+		if (row.root !== digest.root || row.event_count !== digest.event_count || row.memo !== memo.memo) {
+			return { period_start, period_end, status: "mismatch", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, reason: "anchors row disagrees with the memo" };
+		}
+		return { period_start, period_end, status: "anchored", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, ...(memo.slot !== null ? { slot: memo.slot } : {}) };
 	}
 
 	/**

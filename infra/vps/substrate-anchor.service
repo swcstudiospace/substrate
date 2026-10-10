@@ -1,0 +1,45 @@
+[Unit]
+Description=Agent Substrate hourly anchor job (anchor closed ingest hours on Solana devnet)
+Documentation=https://github.com/swcstudiospace/agent-substrate
+After=network-online.target substrate-mcp.service
+Wants=network-online.target
+# A missing entry point skips the start silently instead of failing into the
+# timer's persistent backlog. The path is the pinned release, not the checkout:
+# ConditionPathExists follows the current symlink.
+ConditionPathExists=/opt/agent-substrate/current/packages/mcp-server/src/anchor-run.ts
+
+[Service]
+Type=oneshot
+# No Restart=: a oneshot that exits 1 (root mismatch, unfunded key, RPC
+# unreadable) already shows failed, and the timer retries on the next tick.
+# Credentials only; nothing secret lives in the repo. The drop-in
+# substrate-anchor.service.d/10-environment.conf is the EnvironmentFile: the job
+# is a store client in the same trust domain as the server (Greptime
+# credentials plus the SOLANA_* lines). See infra/vps/README.md.
+WorkingDirectory=/opt/agent-substrate/current
+# Machine-specific: `command -v bun`. The binary on this host is under
+# /root/.local, which is why the unit still runs as root (no User=) and why
+# ProtectHome=false stays. The code itself is the release at WorkingDirectory.
+ExecStart=/root/.local/share/reflex/bun/bin/bun packages/mcp-server/src/anchor-run.ts
+
+# /var/lib/substrate, created by systemd and writable under ProtectSystem=full.
+StateDirectory=substrate
+StateDirectoryMode=0700
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=substrate-anchor
+
+# It talks to Greptime and devnet over loopback-safe egress. Nothing else.
+# ProtectHome=false is the remaining exception: ExecStart's bun lives under
+# /root/.local, so ProtectHome=true would hide the interpreter.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

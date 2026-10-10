@@ -446,10 +446,13 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 	server.registerTool(
 		"events_verify",
 		{
-			title: "Verify a graph's hash chain",
+			title: "Verify a graph's hash chain and hour anchors",
 			description:
-				"Recompute the ledger's hash chain for one Graph ID and report the first event that does not verify. " +
-				"Each session's events are chained separately; `ok` false names the event and why.",
+				"Recompute the ledger's hash chain for one Graph ID and report the first event that does not verify, " +
+				"plus the per-hour anchor report: each distinct hour holding one of the graph's events reads anchored, " +
+				"pending (no row, inside 3 h of close), unanchored, mismatch, or unverified — fail-closed when devnet " +
+				"cannot be read. `ok` is true only when the chain verifies, every hour is anchored or pending, and no " +
+				"post-coverage event is uncovered. Each session's events are chained separately; `ok` false names the event and why.",
 			inputSchema: { graph_id: z.string() },
 			annotations: { readOnlyHint: true },
 		},
