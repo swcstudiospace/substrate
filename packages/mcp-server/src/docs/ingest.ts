@@ -704,7 +704,7 @@ export async function ingestPage(input: IngestPageInput, deps: IngestDeps): Prom
 				datasetId,
 			});
 			const existing = manifest.paths[checked.path];
-			if (existing && existing.hash === contentSha256) {
+			if (existing && existing.hash === contentSha256 && !existing.unparsed) {
 				// A manifest entry is saved right after the parse is queued,
 				// so a FAIL/CANCEL run (or a document deleted out of band)
 				// would short-circuit forever. Replace stale documents and

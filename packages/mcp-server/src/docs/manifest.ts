@@ -69,6 +69,9 @@ export interface ManifestPathEntry {
 	documentIds: string[];
 	meta: SectionDocMeta[];
 	updatedCommit: string;
+	/** Rebuilt from documents whose parse never reached DONE: never trusted
+	 * by the unchanged fast-path, kept so finalize still gates the cut on it. */
+	unparsed?: true;
 }
 
 export interface ManifestVersion {
@@ -212,12 +215,13 @@ export async function rebuildManifest(
 		// holding one hash and both uploads' document IDs. A wrong pick costs
 		// at most one extra upload: the next refresh re-ingests, and its
 		// finalize restores the exact state.
-		// A rebuilt entry asserts a completed parse. A document that never
-		// reached DONE — the parse call 404'd before the manifest was
-		// written, the process died between queue and run, or RAGFlow
-		// failed it — must not re-enter here, or the unchanged fast-path
-		// would short-circuit on it forever. Drop the group; the next
-		// ingest re-uploads and re-parses the whole page.
+		// A rebuilt entry may assert a completed parse only when every
+		// document reached DONE — the parse call 404'd before the manifest
+		// was written, the process died between queue and run, or RAGFlow
+		// failed it. Any other group stays in the map marked `unparsed`, so
+		// it is distinguishable from an absent page (finalize still gates
+		// the cut on it and the timer retries) while the unchanged
+		// fast-path never trusts it.
 		const groups = new Map<string, Array<{ id: string; meta: SectionDocMeta; run: string }>>();
 		for (const row of rows) {
 			const key = `${row.meta.commit} ${row.meta.contentSha256}`;
@@ -228,18 +232,19 @@ export async function rebuildManifest(
 			}
 			group.push(row);
 		}
-		const live = [...groups.values()]
-			.filter((rowsInGroup) => rowsInGroup.every((row) => row.run === "DONE"))
-			.sort(
-				(a, b) => b.length - a.length || (a[0]!.meta.commit < b[0]!.meta.commit ? -1 : a[0]!.meta.commit > b[0]!.meta.commit ? 1 : a[0]!.meta.contentSha256 < b[0]!.meta.contentSha256 ? -1 : a[0]!.meta.contentSha256 > b[0]!.meta.contentSha256 ? 1 : 0),
-			)[0];
+		const sorted = [...groups.values()].sort(
+			(a, b) => b.length - a.length || (a[0]!.meta.commit < b[0]!.meta.commit ? -1 : a[0]!.meta.commit > b[0]!.meta.commit ? 1 : a[0]!.meta.contentSha256 < b[0]!.meta.contentSha256 ? -1 : a[0]!.meta.contentSha256 > b[0]!.meta.contentSha256 ? 1 : 0),
+		);
+		const live = sorted.find((rowsInGroup) => rowsInGroup.every((row) => row.run === "DONE")) ?? sorted[0];
 		if (!live) continue;
+		const unparsed = live.some((row) => row.run !== "DONE") || undefined;
 		live.sort((a, b) => a.meta.sectionIndex - b.meta.sectionIndex);
 		manifest.paths[path] = {
 			hash: live[0]!.meta.contentSha256,
 			documentIds: live.map((row) => row.id),
 			meta: live.map((row) => row.meta),
 			updatedCommit: live[0]!.meta.commit,
+			...(unparsed ? { unparsed } : {}),
 		};
 	}
 	for (const commit of [...byCommit.keys()].sort()) {

@@ -4,7 +4,7 @@
  * only — zero network calls, tmp state dirs only.
  */
 import { describe, expect, test, beforeEach } from "bun:test";
-import { mkdtemp, readdir } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RagflowError } from "./ragflow.ts";
@@ -198,6 +198,30 @@ describe("finalize", () => {
 	 const searchable = currentDocumentIds(manifest);
 		for (const id of gone.documentIds) expect(searchable.has(id)).toBe(false);
 		expect(fake.docs.size).toBe(2);
+	});
+
+	test("a cut is refused after manifest loss while a page is still parsing", async () => {
+		const ingested = await ingest("docs/guide.md", 1);
+		// The manifest file is lost while the parse is still in flight: the
+		// rebuild must keep the page (marked unparsed) so finalize gates the
+		// cut on its parse instead of cutting a version without the page.
+		await rm(join(stateDir, "test-docs", "manifest.json"));
+		for (const id of ingested.documentIds) fake.setRun(id, "UNSTART");
+		const refused = await finalize(
+			{ dataset: "test-docs", commit: commit(1), pathsPresent: ["docs/guide.md"], ...writer() },
+			{ registry: REGISTRY, client: fake, stateDir },
+		);
+		expect(refused).toMatchObject({ status: "failed", reason: "ragflow-error" });
+		if (refused.status !== "failed") throw new Error("unreachable");
+		expect(refused.message).toContain("run UNSTART");
+
+		// Once the parse lands, the same cut succeeds with the page included.
+		for (const id of ingested.documentIds) fake.setRun(id, "DONE");
+		const cut = await finalize(
+			{ dataset: "test-docs", commit: commit(1), pathsPresent: ["docs/guide.md"], ...writer() },
+			{ registry: REGISTRY, client: fake, stateDir },
+		);
+		expect(cut).toMatchObject({ status: "version-cut", paths: ["docs/guide.md"] });
 	});
 
 	test("never-ingested paths are simply absent from the cut", async () => {

@@ -5,7 +5,7 @@
  * touches the production `SUBSTRATE_DOCS_STATE`.
  */
 import { describe, expect, test, beforeEach } from "bun:test";
-import { mkdtemp, readdir, readFile, writeFile, mkdir } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { clearDatasetCache } from "./registry.ts";
@@ -312,11 +312,13 @@ describe("rebuild from RAGFlow", () => {
 		expect(rebuilt.paths["docs/guide.md"]!.documentIds).toEqual(first.documentIds);
 	});
 
-	test("a rebuilt group whose parse never completed is dropped, not restored", async () => {
+	test("a rebuilt group whose parse never completed is marked, not restored", async () => {
 		// The parse call 404'd before the manifest was written: the upload
 		// exists with metadata but its run never left UNSTART. Restoring it
-		// would let the unchanged fast-path short-circuit forever, so the
-		// rebuild drops the path and the next ingest re-parses.
+		// would let the unchanged fast-path short-circuit forever, and
+		// dropping it would let finalize cut a version without the page.
+		// The rebuild keeps the path marked `unparsed` so the fast-path
+		// re-parses it while finalize still gates the cut on it.
 		const hashA = "c".repeat(64);
 		const ids = await fake.seed("docs/stuck.md", COMMIT_A, hashA, 1);
 		fake.docs.get(ids[0]!)!.run = "UNSTART";
@@ -325,12 +327,53 @@ describe("rebuild from RAGFlow", () => {
 
 		const rebuilt = await rebuildManifest("test-docs", fake, "ds-test");
 
-		expect(rebuilt.paths["docs/stuck.md"]).toBeUndefined();
-		expect(rebuilt.paths["docs/done.md"]!.documentIds).toEqual(doneIds);
-		// A later group that did finish can still own the path.
+		expect(rebuilt.paths["docs/stuck.md"]).toMatchObject({ unparsed: true, hash: hashA });
+		expect(rebuilt.paths["docs/stuck.md"]!.documentIds).toEqual(ids);
+		expect(rebuilt.paths["docs/done.md"]).toMatchObject({ documentIds: doneIds });
+		expect(rebuilt.paths["docs/done.md"]!.unparsed).toBeUndefined();
+		// A later group that did finish owns the path without the mark.
 		const laterIds = await fake.seed("docs/stuck.md", "f".repeat(40), hashB, 1);
 		const second = await rebuildManifest("test-docs", fake, "ds-test");
 		expect(second.paths["docs/stuck.md"]!.documentIds).toEqual(laterIds);
+		expect(second.paths["docs/stuck.md"]!.unparsed).toBeUndefined();
+	});
+
+	test("an unparsed rebuilt entry is re-uploaded, never short-circuited", async () => {
+		const first = await ingestPage(
+			{
+				dataset: "test-docs",
+				sourceUrl: url(COMMIT_A, "docs/guide.md"),
+				commit: COMMIT_A,
+				content: "# Guide\n\nBody.\n",
+				surface: "substrate",
+				isSubstrateOrOperator: true,
+			},
+			{ registry: REGISTRY, client: fake, stateDir },
+		);
+		expect(first.status).toBe("uploaded");
+		if (first.status !== "uploaded") throw new Error("unreachable");
+		// Manifest lost, parse back in flight: the rebuilt entry carries the
+		// mark, so the same content re-uploads and re-parses.
+		await rm(join(stateDir, "test-docs", "manifest.json"));
+		for (const id of first.documentIds) fake.docs.get(id)!.run = "UNSTART";
+		const before = fake.counts.upload;
+
+		const second = await ingestPage(
+			{
+				dataset: "test-docs",
+				sourceUrl: url(COMMIT_A, "docs/guide.md"),
+				commit: COMMIT_A,
+				content: "# Guide\n\nBody.\n",
+				surface: "substrate",
+				isSubstrateOrOperator: true,
+			},
+			{ registry: REGISTRY, client: fake, stateDir },
+		);
+
+		expect(second.status).toBe("uploaded");
+		expect(fake.counts.upload).toBe(before + 1);
+		const saved = await loadManifest("test-docs", { stateDir });
+		expect(saved.paths["docs/guide.md"]!.unparsed).toBeUndefined();
 	});
 });
 
