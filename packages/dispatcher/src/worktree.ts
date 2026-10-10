@@ -78,6 +78,8 @@ export interface WorktreeDeps {
 	statfs: (path: string) => StatfsView;
 	/** Existence check, so tests can point at tmp directories. */
 	exists: (path: string) => boolean;
+	/** Create a missing worktree root before the statfs probe. */
+	mkdir?: (path: string) => void;
 	/** Injected argv git runner; throwing is treated as `git-failed`. */
 	runGit: GitRunner;
 }
@@ -161,23 +163,23 @@ export async function ensureWorktree(input: EnsureWorktreeInput, deps: WorktreeD
 	}
 	const checkoutPath = joinContained(deps.checkoutsRoot, owner, name);
 
+	if (!deps.exists(deps.worktreeRoot)) {
+		deps.mkdir?.(deps.worktreeRoot);
+	}
 	const stat = deps.statfs(deps.worktreeRoot);
 	if (stat.bavail * stat.bsize < MIN_FREE_BYTES) {
 		return { ok: false, outcome: "low-disk" };
 	}
 
 	if (deps.exists(worktreePath)) {
-		let current: GitResult;
-		try {
-			current = await deps.runGit(["-C", worktreePath, "remote", "get-url", "origin"]);
-		} catch {
-			return { ok: false, outcome: "git-failed" };
+		const origin = await originSlug(worktreePath, deps.runGit);
+		if (origin === "git-failed") return { ok: false, outcome: "git-failed" };
+		if (origin === null || origin !== expectedSlug) {
+			return { ok: false, outcome: "path-conflict" };
 		}
-		if (current.status !== 0) {
-			return { ok: false, outcome: "git-failed" };
-		}
-		const currentSlug = parseGitHubSlug(current.stdout);
-		if (currentSlug === null || currentSlug !== expectedSlug) {
+		const branch = await currentBranch(worktreePath, deps.runGit);
+		if (branch === "git-failed") return { ok: false, outcome: "git-failed" };
+		if (branch !== worktreeBranch(input.graphId)) {
 			return { ok: false, outcome: "path-conflict" };
 		}
 		return { ok: true, path: worktreePath, reused: true };
@@ -185,6 +187,12 @@ export async function ensureWorktree(input: EnsureWorktreeInput, deps: WorktreeD
 
 	if (!deps.exists(checkoutPath)) {
 		return { ok: false, outcome: "no-checkout" };
+	}
+
+	const checkoutOrigin = await originSlug(checkoutPath, deps.runGit);
+	if (checkoutOrigin === "git-failed") return { ok: false, outcome: "git-failed" };
+	if (checkoutOrigin === null || checkoutOrigin !== expectedSlug) {
+		return { ok: false, outcome: "path-conflict" };
 	}
 
 	let added: GitResult;
@@ -200,4 +208,40 @@ export async function ensureWorktree(input: EnsureWorktreeInput, deps: WorktreeD
 		return { ok: false, outcome: "git-failed" };
 	}
 	return { ok: true, path: worktreePath, reused: false };
+}
+
+/**
+ * Lowercase `owner/name` of a worktree's origin, null when the URL does
+ * not parse as GitHub, or `"git-failed"` when git itself fails. A cached
+ * directory whose origin points elsewhere is never trusted.
+ */
+async function originSlug(path: string, runGit: GitRunner): Promise<string | null | "git-failed"> {
+	let current: GitResult;
+	try {
+		current = await runGit(["-C", path, "remote", "get-url", "origin"]);
+	} catch {
+		return "git-failed";
+	}
+	if (current.status !== 0) {
+		return "git-failed";
+	}
+	return parseGitHubSlug(current.stdout);
+}
+
+/**
+ * Current branch of a worktree, or `"git-failed"` when git itself fails.
+ * Reuse requires the branch to be this graph's own `substrate/<graphId>`
+ * branch: checking out anything else in place would destroy state.
+ */
+async function currentBranch(path: string, runGit: GitRunner): Promise<string | "git-failed"> {
+	let current: GitResult;
+	try {
+		current = await runGit(["-C", path, "rev-parse", "--abbrev-ref", "HEAD"]);
+	} catch {
+		return "git-failed";
+	}
+	if (current.status !== 0) {
+		return "git-failed";
+	}
+	return current.stdout.trim();
 }

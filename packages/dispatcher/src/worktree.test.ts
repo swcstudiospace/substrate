@@ -78,6 +78,19 @@ function makeDeps(roots: Roots, overrides: Partial<WorktreeDeps> = {}, git?: Fak
 
 const okGetUrl = (url: string): GitResult => ({ status: 0, stdout: `${url}\n`, stderr: "" });
 
+/**
+ * Reuse-path git stand-in: origin reads answer the checkout URL, branch
+ * reads answer this graph's own branch unless overridden. Anything else
+ * throws, so a test that reaches an unexpected argv fails loudly.
+ */
+function reuseImpl(originUrl: string, branch = `substrate/${GRAPH_ID}`): (args: string[]) => GitResult {
+	return (args) => {
+		if (args.includes("rev-parse")) return { status: 0, stdout: `${branch}\n`, stderr: "" };
+		if (args.includes("get-url")) return okGetUrl(originUrl);
+		throw new Error(`unexpected git argv: ${args.join(" ")}`);
+	};
+}
+
 describe("worktree gate literals", () => {
 	test("GRAPH_ID_PATTERN matches the service literal", () => {
 		expect(GRAPH_ID_PATTERN.source).toBe(/^ut-[a-z0-9]+-[0-9a-f]{8}$/.source);
@@ -190,7 +203,10 @@ describe("disk gate", () => {
 	test("exactly 5 GiB free proceeds", async () => {
 		const roots = makeRoots();
 		mkdirSync(join(roots.checkoutsRoot, "swcstudiospace", "agent-substrate"), { recursive: true });
-		const git = fakeGit(() => ({ status: 0, stdout: "", stderr: "" }));
+		const git = fakeGit((args) => {
+			if (args.includes("get-url")) return okGetUrl("https://github.com/swcstudiospace/agent-substrate.git");
+			return { status: 0, stdout: "", stderr: "" };
+		});
 		const { deps } = makeDeps(
 			roots,
 			{ statfs: () => ({ bavail: MIN_FREE_BYTES / 4096, bsize: 4096 }) },
@@ -198,7 +214,7 @@ describe("disk gate", () => {
 		);
 		const result = await ensureWorktree({ graphId: GRAPH_ID, repo: REPO }, deps);
 		expect(result.ok).toBe(true);
-		expect(git.calls).toHaveLength(1);
+		expect(git.calls).toHaveLength(2);
 	});
 });
 
@@ -208,20 +224,21 @@ describe("existing worktree reuse", () => {
 		const worktreePath = join(roots.worktreeRoot, GRAPH_ID);
 		mkdirSync(worktreePath, { recursive: true });
 		const git = fakeGit((args) => {
+			if (args.includes("rev-parse")) return { status: 0, stdout: `substrate/${GRAPH_ID}\n`, stderr: "" };
 			expect(args).toEqual(["-C", worktreePath, "remote", "get-url", "origin"]);
 			return okGetUrl("https://github.com/swcstudiospace/agent-substrate.git");
 		});
 		const { deps } = makeDeps(roots, {}, git);
 		const result = await ensureWorktree({ graphId: GRAPH_ID, repo: REPO }, deps);
 		expect(result).toEqual({ ok: true, path: worktreePath, reused: true });
-		expect(git.calls).toHaveLength(1);
+		expect(git.calls).toHaveLength(2);
 	});
 
 	test("matching ssh origin is reused (assumption A3, second form)", async () => {
 		const roots = makeRoots();
 		const worktreePath = join(roots.worktreeRoot, GRAPH_ID);
 		mkdirSync(worktreePath, { recursive: true });
-		const git = fakeGit(() => okGetUrl("git@github.com:swcstudiospace/agent-substrate.git"));
+		const git = fakeGit(reuseImpl("git@github.com:swcstudiospace/agent-substrate.git"));
 		const { deps } = makeDeps(roots, {}, git);
 		const result = await ensureWorktree({ graphId: GRAPH_ID, repo: REPO }, deps);
 		expect(result).toEqual({ ok: true, path: worktreePath, reused: true });
@@ -231,7 +248,7 @@ describe("existing worktree reuse", () => {
 		const roots = makeRoots();
 		const worktreePath = join(roots.worktreeRoot, GRAPH_ID);
 		mkdirSync(worktreePath, { recursive: true });
-		const git = fakeGit(() => okGetUrl("https://github.com/SWCStudioSpace/Agent-Substrate"));
+		const git = fakeGit(reuseImpl("https://github.com/SWCStudioSpace/Agent-Substrate"));
 		const { deps } = makeDeps(roots, {}, git);
 		const result = await ensureWorktree({ graphId: GRAPH_ID, repo: REPO }, deps);
 		expect(result).toEqual({ ok: true, path: worktreePath, reused: true });
@@ -241,7 +258,7 @@ describe("existing worktree reuse", () => {
 		const roots = makeRoots();
 		const worktreePath = join(roots.worktreeRoot, GRAPH_ID);
 		mkdirSync(worktreePath, { recursive: true });
-		const git = fakeGit(() => okGetUrl("https://github.com/other-org/other-repo.git"));
+		const git = fakeGit(reuseImpl("https://github.com/other-org/other-repo.git"));
 		const { deps } = makeDeps(roots, {}, git);
 		const result = await ensureWorktree({ graphId: GRAPH_ID, repo: REPO }, deps);
 		expect(result).toEqual({ ok: false, outcome: "path-conflict" });
@@ -251,10 +268,33 @@ describe("existing worktree reuse", () => {
 		const roots = makeRoots();
 		const worktreePath = join(roots.worktreeRoot, GRAPH_ID);
 		mkdirSync(worktreePath, { recursive: true });
-		const git = fakeGit(() => okGetUrl("https://gitlab.com/swcstudiospace/agent-substrate.git"));
+		const git = fakeGit(reuseImpl("https://gitlab.com/swcstudiospace/agent-substrate.git"));
 		const { deps } = makeDeps(roots, {}, git);
 		const result = await ensureWorktree({ graphId: GRAPH_ID, repo: REPO }, deps);
 		expect(result).toEqual({ ok: false, outcome: "path-conflict" });
+	});
+
+	test("a checkout on another branch is path-conflict, never a destructive reuse", async () => {
+		const roots = makeRoots();
+		const worktreePath = join(roots.worktreeRoot, GRAPH_ID);
+		mkdirSync(worktreePath, { recursive: true });
+		const git = fakeGit(reuseImpl("https://github.com/swcstudiospace/agent-substrate.git", "main"));
+		const { deps } = makeDeps(roots, {}, git);
+		const result = await ensureWorktree({ graphId: GRAPH_ID, repo: REPO }, deps);
+		expect(result).toEqual({ ok: false, outcome: "path-conflict" });
+	});
+
+	test("branch read failure is git-failed", async () => {
+		const roots = makeRoots();
+		const worktreePath = join(roots.worktreeRoot, GRAPH_ID);
+		mkdirSync(worktreePath, { recursive: true });
+		const git = fakeGit((args) => {
+			if (args.includes("get-url")) return okGetUrl("https://github.com/swcstudiospace/agent-substrate.git");
+			return { status: 128, stdout: "", stderr: "unknown revision" };
+		});
+		const { deps } = makeDeps(roots, {}, git);
+		const result = await ensureWorktree({ graphId: GRAPH_ID, repo: REPO }, deps);
+		expect(result).toEqual({ ok: false, outcome: "git-failed" });
 	});
 
 	test("get-url failure is git-failed", async () => {
@@ -299,17 +339,34 @@ describe("new worktree creation", () => {
 		expect(git.calls).toHaveLength(0);
 	});
 
+	test("a missing worktree root is created before the statfs probe", async () => {
+		const roots = makeRoots();
+		const created: string[] = [];
+		const git = fakeGit(() => {
+			throw new Error("git must not run on a low disk");
+		});
+		const { deps } = makeDeps(roots, { statfs: () => EMPTY_DISK, mkdir: (path) => void created.push(path) }, git);
+		rmSync(roots.worktreeRoot, { recursive: true, force: true });
+		const result = await ensureWorktree({ graphId: GRAPH_ID, repo: REPO }, deps);
+		expect(result).toEqual({ ok: false, outcome: "low-disk" });
+		expect(created).toEqual([roots.worktreeRoot]);
+		expect(git.calls).toHaveLength(0);
+	});
+
 	test("worktree add runs as argv from the base clone", async () => {
 		const roots = makeRoots();
 		const checkoutPath = join(roots.checkoutsRoot, "swcstudiospace", "agent-substrate");
 		mkdirSync(checkoutPath, { recursive: true });
 		const worktreePath = join(roots.worktreeRoot, GRAPH_ID);
-		const git = fakeGit(() => ({ status: 0, stdout: "Preparing worktree", stderr: "" }));
+		const git = fakeGit((args) => {
+			if (args.includes("get-url")) return okGetUrl("https://github.com/swcstudiospace/agent-substrate.git");
+			return { status: 0, stdout: "Preparing worktree", stderr: "" };
+		});
 		const { deps } = makeDeps(roots, {}, git);
 		const result = await ensureWorktree({ graphId: GRAPH_ID, repo: REPO }, deps);
 		expect(result).toEqual({ ok: true, path: worktreePath, reused: false });
-		expect(git.calls).toHaveLength(1);
-		expect(git.calls[0]?.args).toEqual([
+		expect(git.calls).toHaveLength(2);
+		expect(git.calls[1]?.args).toEqual([
 			"worktree",
 			"add",
 			"-B",
@@ -317,13 +374,29 @@ describe("new worktree creation", () => {
 			worktreePath,
 			"origin/main",
 		]);
-		expect(git.calls[0]?.cwd).toBe(checkoutPath);
+		expect(git.calls[1]?.cwd).toBe(checkoutPath);
+	});
+
+	test("a cached clone pointing at another repo is path-conflict without cloning", async () => {
+		const roots = makeRoots();
+		mkdirSync(join(roots.checkoutsRoot, "swcstudiospace", "agent-substrate"), { recursive: true });
+		const git = fakeGit((args) => {
+			if (args.includes("get-url")) return okGetUrl("https://github.com/other-org/other-repo.git");
+			throw new Error("worktree add must not run on an untrusted clone");
+		});
+		const { deps } = makeDeps(roots, {}, git);
+		const result = await ensureWorktree({ graphId: GRAPH_ID, repo: REPO }, deps);
+		expect(result).toEqual({ ok: false, outcome: "path-conflict" });
+		expect(git.calls).toHaveLength(1);
 	});
 
 	test("worktree add failure is git-failed", async () => {
 		const roots = makeRoots();
 		mkdirSync(join(roots.checkoutsRoot, "swcstudiospace", "agent-substrate"), { recursive: true });
-		const git = fakeGit(() => ({ status: 128, stdout: "", stderr: "fatal: invalid reference" }));
+		const git = fakeGit((args) => {
+			if (args.includes("get-url")) return okGetUrl("https://github.com/swcstudiospace/agent-substrate.git");
+			return { status: 128, stdout: "", stderr: "fatal: invalid reference" };
+		});
 		const { deps } = makeDeps(roots, {}, git);
 		const result = await ensureWorktree({ graphId: GRAPH_ID, repo: REPO }, deps);
 		expect(result).toEqual({ ok: false, outcome: "git-failed" });
@@ -332,7 +405,8 @@ describe("new worktree creation", () => {
 	test("worktree add throw is git-failed", async () => {
 		const roots = makeRoots();
 		mkdirSync(join(roots.checkoutsRoot, "swcstudiospace", "agent-substrate"), { recursive: true });
-		const git = fakeGit(() => {
+		const git = fakeGit((args) => {
+			if (args.includes("get-url")) return okGetUrl("https://github.com/swcstudiospace/agent-substrate.git");
 			throw new Error("spawn failed");
 		});
 		const { deps } = makeDeps(roots, {}, git);
