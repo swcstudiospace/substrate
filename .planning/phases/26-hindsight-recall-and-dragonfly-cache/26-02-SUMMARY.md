@@ -22,26 +22,21 @@ key-files:
     - packages/mcp-server/src/index-store.ts
     - packages/mcp-server/src/store-lock.test.ts
     - .env.example
-decisions:
-  - "Provenance is request.source_event (the run that proved the entry); no receipt_path field exists on MemoryWriteRequest, so a future MCP param can add it — unsourced writes refuse with retain.unsourced plus a warning"
-  - "document_id is the raw index idempotency key (traceable both directions); update_mode replace makes retry an upsert"
-  - "Redaction gate is redact(text) !== text with per-rule naming via applyRule; a diff with no named rule reports structural"
-  - "Unconfigured plane is informative (degraded false with reason), not failed — index-only answers stay complete"
-  - "Paged memory_search stays index-only: plane hits ignore the subject prefix and keyset cursor, so merging would corrupt paging"
-  - "No index-store.ts change needed: result.entry already carries the stored entry, so the forward reads nothing back"
+  intentionally-unchanged:
+    - packages/mcp-server/src/index-store.ts
 metrics:
-  duration: "~2 h"
+  duration: "~3 h"
   completed: "2026-10-10"
 actuals:
-  tokens: 70000
-  tasks: 2
-  commits: 2
-status: partial
+  tokens: 85000
+  tasks: 3
+  commits: 3
+status: complete
 ---
 
 # Phase 26 Plan 02: Gate-accepted retain forward plus derived search merge Summary
 
-STATUS: PARTIAL — Tasks 1 and 2 complete and green (forward module plus 8 tests, merge module plus service wiring, 187 targeted tests pass, tsc clean). Task 3 (credential perimeter plus .env.example) NOT executed — budget stop. No live touches performed.
+Gate-accepted Hindsight retain plus derived-marked search merge with the credential perimeter pinned: only accepted, sourced, redacted memories land once in their writer's bank; search merges plane hits as visibly derived; HINDSIGHT_* is test-pinned to the server module.
 
 ## Tasks Completed
 
@@ -49,20 +44,13 @@ STATUS: PARTIAL — Tasks 1 and 2 complete and green (forward module plus 8 test
 |---|------|--------|-------|
 | 1 | Forward gate-accepted memories to the writer's sub-<surface> bank | 4f38856 | memory-retain.ts, memory-retain.test.ts |
 | 2 | Merge Hindsight hits into memory_search marked derived | eff6b2e | memory-search.ts, service.ts, memory-recall.ts, memory-recall.test.ts |
-| 3 | Pin the credential perimeter and name the new reader | NOT DONE | store-lock.test.ts, .env.example |
+| 3 | Pin the credential perimeter and name the new reader | e622e6c | store-lock.test.ts, .env.example, memory-recall.test.ts |
 
 ## Must-haves
 
 - An accepted (verified_persisted) memory is forwarded redacted with source into the writer's sub-<surface> bank, idempotent by document_id; refusal or failure emits memory.retain.failed and never re-opens the write: TRUE (8 tests: faithful copy, upsert retry, unaccepted-silent, unsourced-refused, unredacted-refused with rule names, plane-failure warns, vm-guest refused, unconfigured silent)
-- memory_search merges Hindsight hits marked derived with source bank named; outage yields index-only with reason: TRUE (merge module; service.searchMemory parallel load under memory-search class; paged path intentionally index-only)
-- No HINDSIGHT_* string outside mcp-server; .env.example names the new reader: NOT DONE (Task 3)
-
-## Remaining work (mechanical, no design open)
-
-1. store-lock.test.ts: add `HINDSIGHT_*` env-read scan (fail on any `HINDSIGHT_` string in `**/*.ts` outside `packages/mcp-server/src`) plus the credential-value scan for `HINDSIGHT_URL`/`HINDSIGHT_API_KEY` mirroring the RAGFLOW block (exempt `HINDSIGHT_BANK_PREFIX`/`HINDSIGHT_BANKS` routing values and `*.test.ts` fixtures). Verify: `bun test store-lock.test.ts`.
-2. .env.example: update the Hindsight note from "Unused by substrate-mcp" to "Read by substrate-mcp planes/hindsight.ts since Phase 26; the desk gateway keeps its own keys for its own paths". Optionally document `HINDSIGHT_BANKS` (comma/whitespace-separated explicit fan-out set; unset reads the caller's bank only).
-3. Recall-test merge extensions (plan asks): attribution-survives-merge, outage-degrades-to-index-only, index-first ordering — via `mergeDerivedHits` in memory-recall.test.ts.
-4. Commit Task 3 separately, then proceed to 26-03.
+- memory_search merges Hindsight hits marked derived with source bank named; outage yields index-only with reason: TRUE (merge module plus merge-shape tests: attribution survives, index first and unmarked, outage degrades to index-only; service.searchMemory parallel load under memory-search class; paged path intentionally index-only)
+- No HINDSIGHT_* string outside mcp-server; .env.example names the new reader: TRUE (env-read scan plus credential-value scan with catch/no-fire bodies; routing values exempt; example names planes/hindsight.ts and documents HINDSIGHT_BANKS)
 
 ## Deviations from Plan
 
