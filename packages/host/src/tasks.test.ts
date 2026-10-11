@@ -5,9 +5,11 @@ import { join } from "node:path";
 import { parseRoute } from "./options.ts";
 import { WORKTREES_ROOT } from "./sandbox-options.ts";
 import {
+	APPROVAL_TIMEOUT_MS,
 	hostCallTarget,
 	interruptedTasks,
 	MemoryTaskStore,
+	parseApprovalTimeoutMs,
 	pollCode,
 	RESUME_TEXT,
 	type TaskRecord,
@@ -65,6 +67,10 @@ function harness(opts: {
 	completeRefused?: boolean;
 	/** When given, log lines accumulate here for value-scan assertions. */
 	logs?: string[];
+	/** Approval deadline override (default 900 s); plant short values, never wall-clock sleeps. */
+	approvalTimeoutMs?: number;
+	/** Override respondPermission (default: accepted); return a deferred promise to stage races. */
+	respondPermission?: (input: { sessionId: string; requestId: string; optionId: string }) => Promise<{ status: string }>;
 } = {}) {
 	const calls: Call[] = [];
 	const record = (name: string, ...args: unknown[]) => calls.push({ name, args });
@@ -114,6 +120,7 @@ function harness(opts: {
 		},
 		respondPermission: async (input) => {
 			record("respondPermission", input);
+			if (opts.respondPermission) return opts.respondPermission(input) as never;
 			return { status: "accepted" };
 		},
 	};
@@ -175,6 +182,7 @@ function harness(opts: {
 		trackers: { notionDataSourceUrl: "https://www.notion.so/x", linearTeam: "SWC" },
 		log: (line) => logs.push(line),
 		now: () => new Date("2026-09-25T12:00:00Z"),
+		...(opts.approvalTimeoutMs !== undefined ? { approvalTimeoutMs: opts.approvalTimeoutMs } : {}),
 	};
 	const service = new TaskService(deps);
 	const named = (name: string) => calls.filter((c) => c.name === name);
@@ -409,7 +417,10 @@ describe("TaskService status, terminate and kill", () => {
 		h.service.recordApproval(GID, NID, "req-1", "Bash");
 		h.service.recordApproval(GID, NID, "req-1", "Bash");
 		let status = await h.service.status(GID, NID);
-		expect(status?.pending_approvals).toEqual([{ request_id: "req-1", tool: "Bash", at: "2026-09-25T12:00:00.000Z" }]);
+		expect(status?.pending_approvals).toEqual([{
+			request_id: "req-1", tool: "Bash", at: "2026-09-25T12:00:00.000Z",
+			deadlineMs: new Date("2026-09-25T12:00:00.000Z").getTime() + 900_000,
+		}]);
 		expect(status?.exit_code).toBeNull();
 		h.service.resolveApproval(GID, NID, "req-1");
 		status = await h.service.status(GID, NID);
@@ -873,5 +884,157 @@ describe("hostCallTarget", () => {
 	test("refuses an actor key that is not a valid graph id", () => {
 		expect(hostCallTarget(["../x"], ["--node", NID], lookup)).toHaveProperty("error");
 		expect(hostCallTarget([], ["--node", NID], lookup)).toHaveProperty("error");
+	});
+});
+
+describe("TaskService approval deadlines (33-02, D33-04/D33-05)", () => {
+	const T0 = new Date("2026-09-25T12:00:00Z").getTime();
+
+	test("parseApprovalTimeoutMs defaults, honors seconds, and falls back logged on garbage", () => {
+		expect(parseApprovalTimeoutMs(undefined)).toBe(APPROVAL_TIMEOUT_MS);
+		expect(parseApprovalTimeoutMs("")).toBe(APPROVAL_TIMEOUT_MS);
+		expect(parseApprovalTimeoutMs("900")).toBe(900_000);
+		expect(parseApprovalTimeoutMs("60")).toBe(60_000);
+		expect(parseApprovalTimeoutMs("1.5")).toBe(1500);
+		expect(APPROVAL_TIMEOUT_MS).toBe(900_000);
+		const logs: string[] = [];
+		for (const raw of ["abc", "0", "-5", "NaN"]) {
+			expect(parseApprovalTimeoutMs(raw, (line) => logs.push(line))).toBe(APPROVAL_TIMEOUT_MS);
+		}
+		expect(logs).toHaveLength(4);
+		expect(logs.every((line) => line.includes("SUBSTRATE_APPROVAL_TIMEOUT_S"))).toBe(true);
+	});
+
+	test("recordApproval stamps recorded_at + injectable timeout; the default is 900 s", async () => {
+		const h = harness({ approvalTimeoutMs: 60_000, sessionState: "waiting" });
+		await h.service.openTask(openBody());
+		h.service.recordApproval(GID, NID, "req-1", "Bash");
+		expect((await h.service.status(GID, NID))?.pending_approvals).toEqual([{
+			request_id: "req-1", tool: "Bash", at: "2026-09-25T12:00:00.000Z", deadlineMs: T0 + 60_000,
+		}]);
+		const d = harness({ sessionState: "waiting" });
+		await d.service.openTask(openBody());
+		d.service.recordApproval(GID, NID, "req-1", "Bash");
+		expect((await d.service.status(GID, NID))?.pending_approvals[0]?.deadlineMs).toBe(T0 + 900_000);
+	});
+
+	test("unexpired approvals survive the sweep with nothing logged", async () => {
+		const h = harness({ sessionState: "waiting" });
+		await h.service.openTask(openBody());
+		h.service.recordApproval(GID, NID, "req-1", "Bash");
+		expect(await h.service.sweepApprovalTimeouts(GID, NID)).toBe(0);
+		expect((await h.service.status(GID, NID))?.pending_approvals).toHaveLength(1);
+		expect(h.named("respondPermission")).toEqual([]);
+		expect(h.logs.some((line) => line.includes("approval timeout"))).toBe(false);
+	});
+
+	test("an expired deadline auto-denies with no prompt settling; the parked turn keeps ticking", async () => {
+		const h = harness({ sessionState: "waiting" });
+		await h.service.openTask(openBody());
+		expect(h.service.heartbeatArmed(GID, NID)).toBe(true);
+		h.service.recordApproval(GID, NID, "req-1", "Bash");
+		h.service.now = () => new Date(T0 + 900_001);
+		const tick = await h.service.heartbeatTick(GID, NID);
+		expect(tick).toBe("ok");
+		expect(h.named("respondPermission")).toEqual([{
+			name: "respondPermission", args: [{ sessionId: NID, requestId: "req-1", optionId: "reject_once" }],
+		}]);
+		const status = await h.service.status(GID, NID);
+		expect(status?.pending_approvals).toEqual([]);
+		expect(status?.approvals_denied).toBe(1);
+		expect(status?.approvals_allowed).toBe(0);
+		expect(status?.turn_in_flight).toBe(true);
+		expect(h.logs).toContain(`[substrate-host] approval timeout ${GID}/${NID} request req-1 (answered)`);
+		expect(h.named("graphRelease")).toEqual([]);
+		expect(h.service.heartbeatArmed(GID, NID)).toBe(true);
+	});
+
+	test("a timeout-denied turn fails closed through the single release path exactly once", async () => {
+		const h = harness({ sessionState: "waiting" });
+		await h.service.openTask(openBody());
+		h.service.recordApproval(GID, NID, "req-1", "Bash");
+		h.service.now = () => new Date(T0 + 900_001);
+		await h.service.heartbeatTick(GID, NID);
+		await h.failPrompt(new Error("permission denied"));
+		expect(h.named("graphRelease")).toHaveLength(1);
+		expect(h.named("graphRelease")[0]?.args).toEqual([GID, NID, "claude-code", NID]);
+		const status = await h.service.status(GID, NID);
+		expect(status?.released).toBe(true);
+		expect(status?.exit_code).toBe(1);
+	});
+
+	test("entries without a deadline never expire — pre-deadline records fail open", async () => {
+		const h = harness({ sessionState: "waiting" });
+		await h.service.openTask(openBody());
+		h.service.update(GID, NID, (r) => {
+			r.pending_approvals.push({ request_id: "req-old", tool: "Read", at: "2026-09-25T12:00:00.000Z" });
+		});
+		h.service.now = () => new Date(T0 + 10_000_000_000);
+		expect(await h.service.sweepApprovalTimeouts(GID, NID)).toBe(0);
+		expect((await h.service.status(GID, NID))?.pending_approvals).toHaveLength(1);
+		expect(h.named("respondPermission")).toEqual([]);
+	});
+
+	test("resume counts stale first: dead-process pending never re-arms or double-counts", async () => {
+		const store = new MemoryTaskStore();
+		store.save(taskRecord({
+			pending_approvals: [{ request_id: "req-1", tool: "Read", at: "2026-09-25T12:00:01.000Z", deadlineMs: T0 - 1 }],
+		}));
+		const h = harness({ store });
+		expect(await h.service.resumeInterrupted()).toBe(1);
+		expect(store.get(GID, NID)?.stale_approvals).toBe(1);
+		expect(store.get(GID, NID)?.pending_approvals).toEqual([]);
+		h.service.now = () => new Date(T0 + 10_000);
+		expect(await h.service.sweepApprovalTimeouts(GID, NID)).toBe(0);
+		expect(h.named("respondPermission")).toEqual([]);
+		expect(h.logs.some((line) => line.includes("approval timeout"))).toBe(false);
+	});
+
+	test("tap-vs-timeout race: the sweep wins once, the late tap reads not_pending", async () => {
+		let release!: (value: { status: string }) => void;
+		const gate = new Promise<{ status: string }>((resolve) => { release = resolve; });
+		const h = harness({ sessionState: "waiting", respondPermission: () => gate });
+		await h.service.openTask(openBody());
+		h.service.recordApproval(GID, NID, "req-1", "Bash");
+		h.service.now = () => new Date(T0 + 900_001);
+		const sweepP = h.service.sweepApprovalTimeouts(GID, NID);
+		expect(await h.service.respondApproval(GID, NID, "req-1", "allow_once")).toBe("not_pending");
+		release({ status: "accepted" });
+		expect(await sweepP).toBe(1);
+		expect(h.named("respondPermission")).toHaveLength(1);
+		expect(h.named("respondPermission")[0]?.args).toEqual([{ sessionId: NID, requestId: "req-1", optionId: "reject_once" }]);
+		const status = await h.service.status(GID, NID);
+		expect(status?.approvals_denied).toBe(1);
+		expect(status?.approvals_allowed).toBe(0);
+	});
+
+	test("two concurrent taps on one request answer exactly once", async () => {
+		let release!: (value: { status: string }) => void;
+		const gate = new Promise<{ status: string }>((resolve) => { release = resolve; });
+		const h = harness({ sessionState: "waiting", respondPermission: () => gate });
+		await h.service.openTask(openBody());
+		h.service.recordApproval(GID, NID, "req-1", "Bash");
+		const both = Promise.all([
+			h.service.respondApproval(GID, NID, "req-1", "allow_once"),
+			h.service.respondApproval(GID, NID, "req-1", "allow_once"),
+		]);
+		release({ status: "accepted" });
+		expect((await both).sort()).toEqual(["answered", "not_pending"]);
+		expect(h.named("respondPermission")).toHaveLength(1);
+		expect((await h.service.status(GID, NID))?.approvals_allowed).toBe(1);
+	});
+
+	test("a refused transport restores the claim so a later tap can answer", async () => {
+		let calls = 0;
+		const h = harness({
+			sessionState: "waiting",
+			respondPermission: async () => (++calls === 1 ? { status: "refused" } : { status: "accepted" }),
+		});
+		await h.service.openTask(openBody());
+		h.service.recordApproval(GID, NID, "req-1", "Bash");
+		expect(await h.service.respondApproval(GID, NID, "req-1", "allow_once")).toBe("not_pending");
+		expect((await h.service.status(GID, NID))?.pending_approvals).toHaveLength(1);
+		expect(await h.service.respondApproval(GID, NID, "req-1", "allow_once")).toBe("answered");
+		expect((await h.service.status(GID, NID))?.approvals_allowed).toBe(1);
 	});
 });

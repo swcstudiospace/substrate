@@ -20,7 +20,7 @@ import { GRAPH_LABEL, type SandboxNetwork } from "./sandbox-options.ts";
 import type { Skill, TrackerLocators } from "./seed.ts";
 import { LeaseStore, SubstrateClient } from "./substrate.ts";
 import { HostSync, LinearLink, NotionSync } from "./sync.ts";
-import { TaskService, TaskStore, type VmHandle } from "./tasks.ts";
+import { TaskService, TaskStore, parseApprovalTimeoutMs, type VmHandle } from "./tasks.ts";
 import { createEnsureModelRoute, createHostVm } from "./vm.ts";
 import { createApprovals, TelegramError } from "./telegram.ts";
 
@@ -57,6 +57,7 @@ const sandboxNet: SandboxNetwork = sandboxNetValue;
 const sandboxCollection = env("SUBSTRATE_SANDBOX_HOSTFN") ?? "sandbox";
 const mcpBase = (env("SUBSTRATE_MCP_URL") ?? "http://127.0.0.1:7410/mcp").replace(/\/mcp\/?$/, "");
 const apiPort = Number(env("SUBSTRATE_HOST_PORT") ?? "7411");
+const approvalTimeoutMs = parseApprovalTimeoutMs(env("SUBSTRATE_APPROVAL_TIMEOUT_S"), log);
 const engineEndpoint = env("SUBSTRATE_ENGINE_ENDPOINT") ?? "http://127.0.0.1:6420";
 const storageDir = env("RIVETKIT_STORAGE_PATH") ?? "/var/lib/substrate/agentos";
 // 31-SPIKE.md is the only source for the engine share-vs-own outcome (D31-04): with no
@@ -171,6 +172,7 @@ const service = new TaskService({
 	trackers,
 	sync: sync ?? undefined,
 	log,
+	approvalTimeoutMs,
 });
 
 const broker = createApprovals(process.env, {

@@ -35,7 +35,23 @@ import {
 	type LeaseStoreLike,
 } from "./substrate.ts";
 
-export type PendingApproval = { request_id: string; tool: string; at: string };
+export type PendingApproval = { request_id: string; tool: string; at: string; deadlineMs?: number };
+/** Default approval deadline (D33-05): 900 s, the same ladder as the lease TTL and the claim timeout. */
+export const APPROVAL_TIMEOUT_MS = 900_000;
+
+/**
+ * SUBSTRATE_APPROVAL_TIMEOUT_S in seconds (D33-05); malformed values fall back to the
+ * default. Pure for tests — main.ts wires process.env through it.
+ */
+export function parseApprovalTimeoutMs(raw: string | undefined, log?: (line: string) => void): number {
+	const seconds = raw === undefined || raw.trim() === "" ? NaN : Number(raw);
+	if (!Number.isFinite(seconds) || seconds <= 0) {
+		if (raw !== undefined && raw.trim() !== "") log?.(`[substrate-host] invalid SUBSTRATE_APPROVAL_TIMEOUT_S ${raw}: using default 900 s`);
+		return APPROVAL_TIMEOUT_MS;
+	}
+	return Math.floor(seconds * 1000);
+}
+
 export type SeededFile = { path: string; sha256: string; bytes: number };
 
 export type TaskRecord = {
@@ -328,6 +344,8 @@ export type TaskServiceDeps = {
 	now?: () => Date;
 	/** Heartbeat tick period in ms; the half-TTL default stands in production, tests inject short values. */
 	heartbeatIntervalMs?: number;
+	/** Approval deadline in ms; the 900 s default stands in production, tests inject short values. */
+	approvalTimeoutMs?: number;
 };
 
 /** The DoD summary cap, matching the `graph_complete` tool schema. */
@@ -476,6 +494,9 @@ export class TaskService {
 		const key = `${graphId}/${nodeId}`;
 		const record = this.deps.store.get(graphId, nodeId);
 		if (!record || !record.turn_in_flight || record.released || record.exit_code !== null) return "idle";
+		// Both are "while the turn runs" duties: an untapped approval auto-denies fail-closed
+		// here even when no heartbeat is due, so a parked waiting turn never waits forever.
+		await this.sweepApprovalTimeouts(graphId, nodeId);
 		const outcome = await this.heartbeatOrReclaim(graphId, nodeId, record.session_id);
 		if (outcome !== "failed") return outcome;
 		this.clearHeartbeat(graphId, nodeId);
@@ -797,11 +818,13 @@ export class TaskService {
 		return record;
 	}
 
-	/** onSessionEvent → permission_request: recorded, logged, never answered (D-13 floor). */
+	/** onSessionEvent → permission_request: recorded with a deadline, logged, never answered (D-13 floor). */
 	recordApproval(graphId: string, sessionId: string, requestId: string, tool: string): void {
+		const at = this.now();
+		const deadlineMs = at.getTime() + (this.deps.approvalTimeoutMs ?? APPROVAL_TIMEOUT_MS);
 		this.update(graphId, sessionId, (r) => {
 			if (!r.pending_approvals.some((p) => p.request_id === requestId)) {
-				r.pending_approvals.push({ request_id: requestId, tool, at: this.now().toISOString() });
+				r.pending_approvals.push({ request_id: requestId, tool, at: at.toISOString(), deadlineMs });
 			}
 		});
 		this.log(`[substrate-host] approval pending ${graphId}/${sessionId} request ${requestId} (telegram approvals off)`);
@@ -817,18 +840,76 @@ export class TaskService {
 	/**
 	 * The only code path that answers a permission request (D-13). Called only after an
 	 * authorised callback. allow_always is refused here as well as at the button layer.
+	 *
+	 * Single-answer semantics: the request is claimed out of pending synchronously, before
+	 * the first await, so a concurrent answer (a tap racing the timeout sweep) finds nothing
+	 * and reads not_pending. A refused transport restores the claim and also reads not_pending.
 	 */
 	async respondApproval(graphId: string, sessionId: string, requestId: string, optionId: string): Promise<"answered" | "not_pending"> {
 		if (optionId !== "allow_once" && optionId !== "reject_once") return "not_pending";
-		const handle = this.deps.vmFor(graphId);
-		const result = await handle.respondPermission({ sessionId, requestId, optionId });
-		if (result.status !== "accepted") return "not_pending";
+		let had = false;
 		this.update(graphId, sessionId, (r) => {
-			r.pending_approvals = r.pending_approvals.filter((p) => p.request_id !== requestId);
+			const index = r.pending_approvals.findIndex((p) => p.request_id === requestId);
+			if (index >= 0) {
+				r.pending_approvals.splice(index, 1);
+				had = true;
+			}
+		});
+		if (!had) return "not_pending";
+		const handle = this.deps.vmFor(graphId);
+		let result: { status: string };
+		try {
+			result = await handle.respondPermission({ sessionId, requestId, optionId });
+		} catch {
+			this.restoreApproval(graphId, sessionId, requestId);
+			return "not_pending";
+		}
+		if (result.status !== "accepted") {
+			this.restoreApproval(graphId, sessionId, requestId);
+			return "not_pending";
+		}
+		this.update(graphId, sessionId, (r) => {
 			if (optionId === "allow_once") r.approvals_allowed += 1;
 			else r.approvals_denied += 1;
 		});
 		return "answered";
+	}
+
+	/** Put back a claimed approval the transport refused, so a later tap or sweep can answer it. */
+	private restoreApproval(graphId: string, sessionId: string, requestId: string): void {
+		this.update(graphId, sessionId, (r) => {
+			if (!r.pending_approvals.some((p) => p.request_id === requestId)) {
+				r.pending_approvals.push({
+					request_id: requestId, tool: "unknown",
+					at: this.now().toISOString(),
+					deadlineMs: this.now().getTime() + (this.deps.approvalTimeoutMs ?? APPROVAL_TIMEOUT_MS),
+				});
+			}
+		});
+	}
+
+	/**
+	 * Auto-deny every approval past its deadline through the respondApproval path (D33-04):
+	 * the same deny call, the same approvals_denied increment, the same pending-clearing,
+	 * plus a timeout log line carrying ids only. Entries without a numeric deadline (records
+	 * written before deadlines existed) never expire — fail open toward the old behavior.
+	 * Returns the number of requests settled by this sweep.
+	 */
+	async sweepApprovalTimeouts(graphId: string, nodeId: string): Promise<number> {
+		const key = `${graphId}/${nodeId}`;
+		const record = this.deps.store.get(graphId, nodeId);
+		if (!record || !record.turn_in_flight || record.released || record.exit_code !== null) return 0;
+		const nowMs = this.now().getTime();
+		const expired = record.pending_approvals
+			.filter((p) => typeof p.deadlineMs === "number" && p.deadlineMs <= nowMs)
+			.map((p) => p.request_id);
+		let settled = 0;
+		for (const requestId of expired) {
+			const outcome = await this.respondApproval(graphId, record.session_id, requestId, "reject_once");
+			settled += 1;
+			this.log(`[substrate-host] approval timeout ${key} request ${requestId} (${outcome})`);
+		}
+		return settled;
 	}
 
 	/** Every stored field plus the live session view; later plans' record fields appear unchanged. */
