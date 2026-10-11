@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseRoute } from "./options.ts";
@@ -18,6 +18,7 @@ import {
 	validateOpenRequest,
 	type VmHandle,
 } from "./tasks.ts";
+import { type LeaseStoreLike, LeaseStore, MemoryLeaseStore } from "./substrate.ts";
 
 const ROUTE = parseRoute("a:loopback,b:prompt_hostfn,c:hostfn_commit,s:hostfn");
 const GID = "ut-a-12345678";
@@ -49,6 +50,19 @@ function harness(opts: {
 	promptRejectsFor?: string;
 	sessionState?: string;
 	store?: TaskStoreLike;
+	leases?: LeaseStoreLike;
+	/** Lease id the fake claim grants (default fixed test value; plant high-entropy for log scans). */
+	leaseId?: string;
+	/** claimAndPersist grants without persisting (the missing-lease path). */
+	dropLeasePersist?: boolean;
+	/** Heartbeat answers in call order; exhausted queue answers ok:true. */
+	heartbeats?: Array<{ ok: boolean; reason?: string }>;
+	/** Re-claims (second and later claims) are refused. */
+	reclaimRefused?: boolean;
+	/** graphComplete answers refused. */
+	completeRefused?: boolean;
+	/** When given, log lines accumulate here for value-scan assertions. */
+	logs?: string[];
 } = {}) {
 	const calls: Call[] = [];
 	const record = (name: string, ...args: unknown[]) => calls.push({ name, args });
@@ -102,6 +116,11 @@ function harness(opts: {
 		},
 	};
 	const node = opts.graphNode === undefined ? { claimed_by: null, claim_session: null } : opts.graphNode;
+	const leases = opts.leases ?? new MemoryLeaseStore();
+	const leaseId = opts.leaseId ?? "lse_test_0123456789abcdef0123456789abcdef";
+	const heartbeatQueue = [...(opts.heartbeats ?? [])];
+	let claimCalls = 0;
+	const logs = opts.logs ?? [];
 	const deps: TaskServiceDeps = {
 		substrate: {
 			graphGet: async (graphId) => {
@@ -111,6 +130,22 @@ function harness(opts: {
 			graphClaim: async (...args) => {
 				record("graphClaim", ...args);
 				return { claimed: opts.claimed ?? true, reason: opts.claimed === false ? "held by hermes session s-9" : undefined };
+			},
+			claimAndPersist: async (store, graphId, nodeId, surface, sessionId) => {
+				record("claimAndPersist", store, graphId, nodeId, surface, sessionId);
+				claimCalls += 1;
+				if (opts.claimed === false) return { claimed: false, reason: "held by hermes session s-9" };
+				if (claimCalls > 1 && opts.reclaimRefused) return { claimed: false, reason: "taken over by hermes session s-9" };
+				if (!opts.dropLeasePersist) store.persist(graphId, nodeId, { lease_id: leaseId, acquiredAtMs: 0, ttlSeconds: 900 });
+				return { claimed: true, lease_id: leaseId };
+			},
+			heartbeat: async (...args) => {
+				record("heartbeat", ...args);
+				return heartbeatQueue.shift() ?? { ok: true };
+			},
+			graphComplete: async (...args) => {
+				record("graphComplete", ...args);
+				return opts.completeRefused ? { completed: false, reason: "stale-lease" } : { completed: true };
 			},
 			graphRelease: async (...args) => {
 				record("graphRelease", ...args);
@@ -123,6 +158,7 @@ function harness(opts: {
 			return handle;
 		},
 		store: opts.store ?? new MemoryTaskStore(),
+		leases,
 		ensureModelRoute: async (_handle, graphId) => {
 			record("ensureModelRoute", graphId);
 			sequence.push(`ensureModelRoute:${graphId}`);
@@ -134,7 +170,7 @@ function harness(opts: {
 		model: "grok-4.6",
 		skills: [{ name: "ultrathink-sync", files: [{ rel: "SKILL.md", content: "# sync" }] }],
 		trackers: { notionDataSourceUrl: "https://www.notion.so/x", linearTeam: "SWC" },
-		log: () => undefined,
+		log: (line) => logs.push(line),
 		now: () => new Date("2026-09-25T12:00:00Z"),
 	};
 	const service = new TaskService(deps);
@@ -154,6 +190,9 @@ function harness(opts: {
 		prompts,
 		sequence,
 		files,
+		logs,
+		leases,
+		leaseId,
 		store: deps.store as MemoryTaskStore,
 		settlePrompt: (stopReason: string) => settle({ stopReason }),
 		failPrompt: (error: unknown) => settle({ error }),
@@ -209,9 +248,10 @@ describe("TaskService.openTask", () => {
 		const h = harness();
 		const result = await h.service.openTask(openBody());
 		expect(result.status).toBe(202);
-		expect(h.named("graphClaim")[0]?.args).toEqual([GID, NID, "claude-code", NID]);
-		const order = h.calls.map((c) => c.name).filter((n) => ["graphGet", "graphClaim", "ensureModelRoute", "sessions.open", "sessions.prompt"].includes(n));
-		expect(order).toEqual(["graphGet", "graphClaim", "ensureModelRoute", "sessions.open", "ensureModelRoute", "sessions.prompt"]);
+		expect(h.named("claimAndPersist")[0]?.args.slice(1)).toEqual([GID, NID, "claude-code", NID]);
+		expect(h.named("claimAndPersist")[0]?.args[0]).toBe(h.leases);
+		const order = h.calls.map((c) => c.name).filter((n) => ["graphGet", "claimAndPersist", "ensureModelRoute", "sessions.open", "sessions.prompt"].includes(n));
+		expect(order).toEqual(["graphGet", "claimAndPersist", "ensureModelRoute", "sessions.open", "ensureModelRoute", "sessions.prompt"]);
 		const open = h.named("sessions.open")[0]?.args[0] as Parameters<VmHandle["sessions"]["open"]>[0];
 		expect(open.permissionPolicy).toBe("ask");
 		expect(open.sessionId).toBe(NID);
@@ -260,7 +300,7 @@ describe("TaskService.openTask", () => {
 		const second = await h.service.openTask(openBody());
 		expect(second.status).toBe(200);
 		expect((second.body as TaskRecord).prompt_count).toBe(1);
-		expect(h.named("graphClaim")).toHaveLength(1);
+		expect(h.named("claimAndPersist")).toHaveLength(1);
 		expect(h.named("sessions.open")).toHaveLength(1);
 		expect(h.named("sessions.prompt")).toHaveLength(1);
 	});
@@ -269,7 +309,7 @@ describe("TaskService.openTask", () => {
 		const h = harness({ graphNode: { claimed_by: "hermes", claim_session: "s-1" } });
 		const result = await h.service.openTask(openBody());
 		expect(result.status).toBe(409);
-		expect(h.named("graphClaim")).toHaveLength(0);
+		expect(h.named("claimAndPersist")).toHaveLength(0);
 		expect(h.named("sessions.open")).toHaveLength(0);
 	});
 
@@ -371,6 +411,189 @@ describe("TaskService status, terminate and kill", () => {
 		h.service.resolveApproval(GID, NID, "req-1");
 		status = await h.service.status(GID, NID);
 		expect(status?.pending_approvals).toEqual([]);
+	});
+});
+
+describe("TaskService lease claim with persist-then-verify (32-01)", () => {
+	test("open persists the granted lease and logs presence only, never the value", async () => {
+		const leaseId = "lse_9f2c4a7e1b5d48f0a3c6e9b2d5f807163";
+		const logs: string[] = [];
+		const h = harness({ leaseId, logs });
+		const result = await h.service.openTask(openBody());
+		expect(result.status).toBe(202);
+		expect(h.leases.load(GID, NID)?.lease_id).toBe(leaseId);
+		expect(logs.some((line) => line.includes("lease persisted") && line.includes("yes"))).toBe(true);
+		expect(logs.some((line) => line.includes(leaseId))).toBe(false);
+		await h.settlePrompt("end_turn");
+		expect(logs.some((line) => line.includes(leaseId))).toBe(false);
+	});
+
+	test("open onto a temp-dir LeaseStore writes a 0600 lease file beside the task records", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "tasks-32-01-"));
+		try {
+			const leases = new LeaseStore(dir);
+			const h = harness({ leases });
+			expect((await h.service.openTask(openBody())).status).toBe(202);
+			const mode = statSync(join(dir, `${GID}__${NID}.lease.json`)).mode & 0o777;
+			expect(mode).toBe(0o600);
+			expect(leases.load(GID, NID)?.lease_id).toBe(h.leaseId);
+			await h.settlePrompt("end_turn");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a grant without a readable lease releases once and answers 502", async () => {
+		const h = harness({ dropLeasePersist: true });
+		const result = await h.service.openTask(openBody());
+		expect(result.status).toBe(502);
+		expect(JSON.stringify(result.body)).toContain("lease persist");
+		expect(h.named("graphRelease")).toHaveLength(1);
+		expect(h.named("graphRelease")[0]?.args).toEqual([GID, NID, "claude-code", NID]);
+		expect(h.named("sessions.prompt")).toHaveLength(0);
+		expect(h.store.get(GID, NID)).toBeNull();
+	});
+});
+
+describe("TaskService heartbeat tick (32-01)", () => {
+	test("a due tick heartbeats fenced on the persisted lease; a fresh lease is not-due with no call", async () => {
+		const h = harness();
+		await h.service.openTask(openBody());
+		expect(h.service.heartbeatArmed(GID, NID)).toBe(true);
+		expect(await h.service.heartbeatTick(GID, NID)).toBe("ok");
+		expect(h.named("heartbeat")[0]?.args).toEqual([GID, NID, h.leaseId, 900]);
+		// A just-persisted lease is not due: re-plant with the service clock and tick again.
+		h.leases.persist(GID, NID, { lease_id: h.leaseId, acquiredAtMs: new Date("2026-09-25T12:00:00Z").getTime(), ttlSeconds: 900 });
+		expect(await h.service.heartbeatTick(GID, NID)).toBe("not-due");
+		expect(h.named("heartbeat")).toHaveLength(1);
+		await h.settlePrompt("end_turn");
+		expect(h.service.heartbeatArmed(GID, NID)).toBe(false);
+	});
+
+	test("a refused heartbeat re-claims exactly once and continues on the new lease", async () => {
+		const h = harness({ heartbeats: [{ ok: false, reason: "expired" }] });
+		await h.service.openTask(openBody());
+		expect(await h.service.heartbeatTick(GID, NID)).toBe("reclaimed");
+		expect(h.named("heartbeat")).toHaveLength(1);
+		expect(h.named("claimAndPersist")).toHaveLength(2);
+		expect(h.store.get(GID, NID)?.turn_in_flight).toBe(true);
+		// The next tick heartbeats on the re-claimed lease with no further claim.
+		expect(await h.service.heartbeatTick(GID, NID)).toBe("ok");
+		expect(h.named("heartbeat")).toHaveLength(2);
+		expect(h.named("claimAndPersist")).toHaveLength(2);
+		await h.settlePrompt("end_turn");
+	});
+
+	test("a refused re-claim fails the turn closed with exactly one release and a dead tick", async () => {
+		const h = harness({ heartbeats: [{ ok: false, reason: "lost" }], reclaimRefused: true });
+		await h.service.openTask(openBody());
+		expect(await h.service.heartbeatTick(GID, NID)).toBe("failed-closed");
+		const stored = h.store.get(GID, NID);
+		expect(stored?.turn_in_flight).toBe(false);
+		expect(stored?.exit_code).toBe(1);
+		expect(stored?.last_error).toBe("lease lost");
+		expect(h.named("claimAndPersist")).toHaveLength(2);
+		expect(h.named("graphRelease")).toHaveLength(1);
+		expect(h.service.heartbeatArmed(GID, NID)).toBe(false);
+		// A later tick is idle: the failed turn never heartbeats again.
+		expect(await h.service.heartbeatTick(GID, NID)).toBe("idle");
+		expect(h.named("heartbeat")).toHaveLength(1);
+		expect(h.named("graphRelease")).toHaveLength(1);
+	});
+
+	test("terminate disarms the tick; the later settle still releases exactly once", async () => {
+		const h = harness();
+		await h.service.openTask(openBody());
+		expect(h.service.heartbeatArmed(GID, NID)).toBe(true);
+		await h.service.terminate(GID, NID);
+		expect(h.service.heartbeatArmed(GID, NID)).toBe(false);
+		expect(await h.service.heartbeatTick(GID, NID)).toBe("idle");
+		expect(h.named("heartbeat")).toHaveLength(0);
+		await h.settlePrompt("cancelled");
+		expect(h.named("graphRelease")).toHaveLength(1);
+	});
+
+	test("kill disarms the tick and a later manual tick sends nothing", async () => {
+		const h = harness();
+		await h.service.openTask(openBody());
+		await h.service.kill(GID, NID);
+		expect(h.service.heartbeatArmed(GID, NID)).toBe(false);
+		expect(await h.service.heartbeatTick(GID, NID)).toBe("idle");
+		expect(h.named("heartbeat")).toHaveLength(0);
+		expect(h.named("graphRelease")).toHaveLength(1);
+	});
+
+	test("beginShutdown disarms every tick", async () => {
+		const h = harness();
+		await h.service.openTask(openBody());
+		expect(h.service.heartbeatArmed(GID, NID)).toBe(true);
+		h.service.beginShutdown();
+		expect(h.service.heartbeatArmed(GID, NID)).toBe(false);
+	});
+});
+
+describe("TaskService single release and completion (32-01)", () => {
+	test("a failed turn releases once; the later kill re-releases nothing", async () => {
+		const h = harness();
+		await h.service.openTask(openBody());
+		await h.failPrompt(new Error("adapter exited"));
+		expect(h.named("graphRelease")).toHaveLength(1);
+		expect(h.store.get(GID, NID)?.released).toBe(true);
+		await h.service.kill(GID, NID);
+		expect(h.named("graphRelease")).toHaveLength(1);
+		expect(h.named("sessions.cancelPrompt")).toHaveLength(1);
+		expect(h.named("sessions.unload")).toHaveLength(1);
+	});
+
+	test("a settled turn releases once; the later kill re-releases nothing", async () => {
+		const h = harness();
+		await h.service.openTask(openBody());
+		await h.settlePrompt("end_turn");
+		expect(h.named("graphRelease")).toHaveLength(1);
+		expect(h.store.get(GID, NID)?.released).toBe(true);
+		await h.service.kill(GID, NID);
+		expect(h.named("graphRelease")).toHaveLength(1);
+	});
+
+	test("complete sends the persisted lease_id with the DoD and releases; repeats and kills re-release nothing", async () => {
+		const h = harness();
+		await h.service.openTask(openBody());
+		const reply = await h.service.complete(GID, NID, { summary: "  did the work  ", tests_pass: true });
+		expect(reply).toEqual({ completed: true });
+		expect(h.named("graphComplete")).toHaveLength(1);
+		expect(h.named("graphComplete")[0]?.args).toEqual([GID, NID, h.leaseId, { summary: "did the work", tests_pass: true }]);
+		expect(h.store.get(GID, NID)?.released).toBe(true);
+		// The in-flight prompt settles after the completion: no second release.
+		await h.settlePrompt("end_turn");
+		expect(h.named("graphRelease")).toHaveLength(0);
+		expect(await h.service.complete(GID, NID, { summary: "again", tests_pass: true })).toEqual({ completed: false, reason: "already released" });
+		expect(h.named("graphComplete")).toHaveLength(1);
+		await h.service.kill(GID, NID);
+		expect(h.named("graphRelease")).toHaveLength(0);
+	});
+
+	test("complete refuses an empty summary, an unknown task and a refused grant without releasing", async () => {
+		const h = harness();
+		await h.service.openTask(openBody());
+		expect(await h.service.complete(GID, NID, { summary: "   ", tests_pass: true })).toEqual({ completed: false, reason: "dod-required" });
+		expect(await h.service.complete(GID, "n9", { summary: "x", tests_pass: true })).toEqual({ completed: false, reason: "unknown task" });
+		expect(h.named("graphComplete")).toHaveLength(0);
+		expect(h.store.get(GID, NID)?.released).toBe(false);
+		const refused = harness({ completeRefused: true });
+		await refused.service.openTask(openBody());
+		expect(await refused.service.complete(GID, NID, { summary: "work", tests_pass: false })).toEqual({ completed: false, reason: "stale-lease" });
+		expect(refused.store.get(GID, NID)?.released).toBe(false);
+		await refused.settlePrompt("end_turn");
+	});
+
+	test("complete caps an overlong summary at the DoD limit", async () => {
+		const h = harness();
+		await h.service.openTask(openBody());
+		expect(await h.service.complete(GID, NID, { summary: "s".repeat(2500), tests_pass: true })).toEqual({ completed: true });
+		const sent: unknown = h.named("graphComplete")[0]?.args[3];
+		if (typeof sent !== "object" || sent === null || !("summary" in sent)) throw new Error("complete did not send a dod");
+		expect(sent.summary).toHaveLength(2000);
+		await h.settlePrompt("end_turn");
 	});
 });
 

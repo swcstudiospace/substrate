@@ -117,12 +117,21 @@ export function heartbeatDue(record: LeaseRecord, nowMs: number = Date.now()): b
 	return nowMs - record.acquiredAtMs >= (record.ttlSeconds * 1000) / 2;
 }
 
+/** Heartbeat tick cadence: half the lease TTL, so renewal lands well inside expiry (D32-02). */
+export const HEARTBEAT_INTERVAL_MS = (DEFAULT_LEASE_TTL_SECONDS * 1000) / 2;
+
+/** The lease persistence seam: `LeaseStore` on disk in production, `MemoryLeaseStore` in tests. */
+export type LeaseStoreLike = {
+	persist(graphId: string, nodeId: string, record: LeaseRecord): void;
+	load(graphId: string, nodeId: string): LeaseRecord | null;
+};
+
 /**
  * `lease_id` persistence beside the task records (0600 file discipline,
  * Phase 24 given_up.json precedent). One file per graph/node; the lease id
  * is a fencing token, so it never appears in logs — only presence is reported.
  */
-export class LeaseStore {
+export class LeaseStore implements LeaseStoreLike {
 	dir: string;
 
 	constructor(dir: string) {
@@ -157,8 +166,25 @@ export class LeaseStore {
 			return null;
 		}
 	}
+
 }
 
+/** In-memory leases for tests (never the production unit). */
+export class MemoryLeaseStore implements LeaseStoreLike {
+	records: Map<string, LeaseRecord>;
+
+	constructor() {
+		this.records = new Map();
+	}
+
+	persist(graphId: string, nodeId: string, record: LeaseRecord): void {
+		this.records.set(`${graphId}--${nodeId}`, record);
+	}
+
+	load(graphId: string, nodeId: string): LeaseRecord | null {
+		return this.records.get(`${graphId}--${nodeId}`) ?? null;
+	}
+}
 /** JSON payloads of every SSE event; multi-line `data:` fields are joined per the SSE spec. */
 export function sseMessages(text: string): unknown[] {
 	const messages: unknown[] = [];
@@ -334,12 +360,16 @@ export class SubstrateClient {
 		})) as ReleaseReply;
 	}
 
-	async graphComplete(graphId: string, nodeId: string, surface: string, sessionId: string, dod: Dod): Promise<CompleteReply> {
+	/**
+	 * Mark the node complete through the DoD gate, fenced on the persisted `lease_id`
+	 * (D32-03): the server ignores any other proof of holding, so the caller loads the
+	 * id from its `LeaseStore` and passes it here — never a surface or session name.
+	 */
+	async graphComplete(graphId: string, nodeId: string, leaseId: string | null, dod: Dod): Promise<CompleteReply> {
 		return (await this.call("graph_complete", {
 			graph_id: graphId,
 			node_id: nodeId,
-			surface,
-			session_id: sessionId,
+			lease_id: leaseId,
 			dod,
 		})) as CompleteReply;
 	}

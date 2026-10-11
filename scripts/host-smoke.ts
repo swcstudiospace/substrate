@@ -20,6 +20,7 @@ import {
 	worktreeFor,
 } from "../packages/host/src/sandbox-options.ts";
 import { DISK_FLOOR_BYTES, ensureImagePulled } from "../packages/host/src/sandbox-provider.ts";
+import { MemoryLeaseStore } from "../packages/host/src/substrate.ts";
 import {
 	MemoryTaskStore,
 	TaskService,
@@ -54,6 +55,14 @@ function fakeSubstrate(): SubstrateLike & { claims: string[] } {
 			claims.push(`${graphId}/${nodeId}`);
 			return { claimed: true };
 		},
+		claimAndPersist: async (store, graphId: string, nodeId: string) => {
+			claims.push(`${graphId}/${nodeId}`);
+			const leaseId = `lse_smoke_${graphId}`;
+			store.persist(graphId, nodeId, { lease_id: leaseId, acquiredAtMs: 0, ttlSeconds: 900 });
+			return { claimed: true, lease_id: leaseId };
+		},
+		heartbeat: async () => ({ ok: true }),
+		graphComplete: async () => ({ completed: true }),
 		graphRelease: async () => ({ released: true }),
 		brief: async () => "smoke brief",
 	};
@@ -113,6 +122,7 @@ export async function runSmoke(): Promise<SmokeResult[]> {
 		substrate,
 		vmFor: fakeVmPool(pool),
 		store: new MemoryTaskStore(),
+		leases: new MemoryLeaseStore(),
 		ensureModelRoute: async () => undefined,
 		route: parseRoute("a:loopback,b:prompt_hostfn,c:hostfn_commit,s:hostfn"),
 		testsRoute: "sandbox",

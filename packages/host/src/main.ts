@@ -18,7 +18,7 @@ import { startTrackerProxy } from "./mcp-proxy.ts";
 import { formatRoute, type MountRoute, parseMountRoute, parseRoute, parseTestsRoute, type Route, type TestsRoute, trackerRoute } from "./options.ts";
 import { GRAPH_LABEL, type SandboxNetwork } from "./sandbox-options.ts";
 import type { Skill, TrackerLocators } from "./seed.ts";
-import { SubstrateClient } from "./substrate.ts";
+import { LeaseStore, SubstrateClient } from "./substrate.ts";
 import { HostSync, LinearLink, NotionSync } from "./sync.ts";
 import { TaskService, TaskStore, type VmHandle } from "./tasks.ts";
 import { createEnsureModelRoute, createHostVm } from "./vm.ts";
@@ -141,6 +141,9 @@ const skills = loadSkills(skillsDir);
 const trackers = loadTrackers(ultrathinkConfig);
 const store = new TaskStore(join(storageDir, "tasks"));
 const substrate = new SubstrateClient({ baseUrl: mcpBase });
+// D32-04: the lease files live beside the task records under the unit's storage dir, so both
+// survive a restart under the unit's StateDirectory=substrate.
+const leases = new LeaseStore(join(storageDir, "tasks"));
 // D-10 host-side sync: keys stay in this process (the unit's EnvironmentFile), never in the VM (D-08).
 const notionSync = NotionSync.fromEnv(process.env);
 const linearLink = LinearLink.fromEnv(process.env);
@@ -157,6 +160,7 @@ const service = new TaskService({
 		return client.vm.getOrCreate([graphId]) as unknown as VmHandle; // the actor handle carries every action; VmHandle names the slice TaskService drives
 	},
 	store,
+	leases,
 	ensureModelRoute: createEnsureModelRoute(route, log),
 	route,
 	testsRoute,
@@ -184,6 +188,7 @@ const { registry } = createHostVm({
 	checkoutNodeModules: join(checkout, "node_modules"),
 	store,
 	substrate,
+	leases,
 	sync,
 	libraryDir,
 	mountRoute,

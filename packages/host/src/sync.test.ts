@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { parseRoute } from "./options.ts";
 import type { GraphNodeView, GraphView } from "./substrate.ts";
+import { MemoryLeaseStore } from "./substrate.ts";
 import { DEFAULT_TASK_GRAPH_DS, HostSync, LinearLink, NotionSync, SYNC_WRITABLE, syncProperty, syncTask } from "./sync.ts";
 import { type HostSyncLike, MemoryTaskStore, type TaskRecord, TaskService, type TaskServiceDeps, type VmHandle } from "./tasks.ts";
 
@@ -302,9 +303,18 @@ function serviceWith(routeValue: string, sync: HostSyncLike, rec: TaskRecord) {
 	} as unknown as VmHandle;
 	const logs: string[] = [];
 	const deps: TaskServiceDeps = {
-		substrate: { graphGet: async () => GRAPH, graphClaim: async () => ({ claimed: true }), graphRelease: async () => ({}), brief: async () => "" },
+		substrate: {
+			graphGet: async () => GRAPH,
+			graphClaim: async () => ({ claimed: true }),
+			claimAndPersist: async () => ({ claimed: true }),
+			heartbeat: async () => ({ ok: true }),
+			graphComplete: async () => ({ completed: true }),
+			graphRelease: async () => ({}),
+			brief: async () => "",
+		},
 		vmFor: () => handle,
 		store,
+		leases: new MemoryLeaseStore(),
 		ensureModelRoute: async () => {},
 		route: parseRoute(routeValue),
 		testsRoute: "sandbox",
