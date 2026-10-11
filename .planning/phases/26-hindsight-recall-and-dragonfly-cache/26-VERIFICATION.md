@@ -1,3 +1,19 @@
+---
+phase: 26-hindsight-recall-and-dragonfly-cache
+verified: 2026-10-11T02:10:00Z
+status: passed
+score: 9/9 must-haves rehearsal-proven (fake-plane recall/retain/merge/cache); live G1-G4 OPERATOR-GATED
+covered_files: [".env.example", ".planning/phases/26-hindsight-recall-and-dragonfly-cache/26-01-PLAN.md", ".planning/phases/26-hindsight-recall-and-dragonfly-cache/26-01-SUMMARY.md", ".planning/phases/26-hindsight-recall-and-dragonfly-cache/26-02-PLAN.md", ".planning/phases/26-hindsight-recall-and-dragonfly-cache/26-02-SUMMARY.md", ".planning/phases/26-hindsight-recall-and-dragonfly-cache/26-03-PLAN.md", ".planning/phases/26-hindsight-recall-and-dragonfly-cache/26-03-SUMMARY.md", "docs/data-planes.md", "docs/runbooks/hindsight-cache-proof.md", "packages/mcp-server/src/cache.test.ts", "packages/mcp-server/src/cache.ts", "packages/mcp-server/src/config.ts", "packages/mcp-server/src/hindsight-fake.ts", "packages/mcp-server/src/index-store.ts", "packages/mcp-server/src/mcp.ts", "packages/mcp-server/src/memory-recall.test.ts", "packages/mcp-server/src/memory-recall.ts", "packages/mcp-server/src/memory-retain.test.ts", "packages/mcp-server/src/memory-retain.ts", "packages/mcp-server/src/memory-search.ts", "packages/mcp-server/src/observe.ts", "packages/mcp-server/src/planes/hindsight.test.ts", "packages/mcp-server/src/planes/hindsight.ts", "packages/mcp-server/src/server.ts", "packages/mcp-server/src/store-lock.test.ts"]
+covered_digest: "v3:sha256:1476e7cbe463b141bbff0fe16c7f4e0db6d0ec08d151d792e1c70cb0247f84ed"
+behavior_unverified: 4
+overrides_applied: 0
+registration:
+  previous_status: missing
+  registered_at_tip: ed696ef
+  digest_check: recall/retain/cache/hindsight sources byte-identical since PR #49 (059939ec); later additive diffs limited to index-store (+2), server (+21: phase-29 card routes), package.json — feature tests re-run green at tip (see confirmation below)
+  gaps_remaining: ["G1 live reachability/version probe", "G2 live bank ensure + first recall", "G3 first live retain", "G4 live cache/topology change + DOCS-07 headless proof"]
+---
+
 # Phase 26 verification (provable-without-gates scope)
 
 **Status:** rehearsal PROVEN. Live scope (G1–G4) explicitly gated out —
@@ -59,3 +75,14 @@ and rollback).
 Verification state for the rehearsal scope is flipped via gsd-tools by the
 executing agent after merge; the live G1–G4 tail remains `OPERATOR-GATED`
 in STATE.md until the operator completes the runbook.
+
+---
+
+## Close-out sweep tip confirmation (2026-10-11, HEAD `ed696ef`, PR #53 merged)
+
+Recall/retain/cache/hindsight sources byte-identical since PR #49 (`059939ec`); later
+additive diffs limited to `index-store.ts` (+2), `server.ts` (+21 card routes),
+`package.json`. Feature tests re-run at tip (`memory-recall + memory-retain + cache +
+planes/hindsight`, inside the 272-test 25/26/29 run): **all green, 0 fail**. Full
+`bun test` 3136 pass / 58 skip / 1 fail (F-01 only), `bunx tsc --noEmit` clean, pytest
+246 passed, `check:phase-close` pass. Live G1–G4 (+DOCS-07) stay OPERATOR-GATED — never run.

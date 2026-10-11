@@ -62,19 +62,19 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 - [x] **Phase 18: Guard rails and shared redactor** - One redactor, carrying the September rules and main's counter exemption, guards every publication path (completed 2026-10-09)
 - [x] **Phase 19: Lane B collectors** - herdr, Muse and the Cursor `stop` hook emit from `main` under main's vocabulary, and each Muse repo carries a fresh brief (completed 2026-10-10)
 - [x] **Phase 20: Production identity and Phase 0 UAT** - Every production client holds its own token, and the eight Phase 0 scenarios pass against `main` (completed 2026-10-10; rehearsal-first verified, live window operator-gated)
-- [x] **Phase 21: skills_propose** - An authenticated surface can propose a skill as a PR on agent-skills, with secrets and duplicates refused (completed 2026-10-09; re-verified 2026-10-10 at e2ad4dc, 24/24, live PR deferred to Phase 22)
-- [ ] **Phase 22: Skills sync, bridge and miners** - Mined skills reach every agent through propose, owner merge and sync, all from code on `main`
-- [x] **Phase 23: Claim mirror and DoD gate** - Linear and Notion follow every lease transition, and only the Definition-of-Done gate can mark an issue Done (completed 2026-10-09 via PR #36; verified 2026-10-10 at bfde32f, 30/30, live MIRROR-08 proof operator-gated)
+- [x] **Phase 21: skills_propose** - An authenticated surface can propose a skill as a PR on agent-skills, with secrets and duplicates refused (completed 2026-10-09; re-verified 2026-10-10 at e2ad4dc, 24/24, live PR deferred to Phase 22; re-verified 2026-10-11 at ed696ef, 24/24 stand)
+- [x] **Phase 22: Skills sync, bridge and miners** - Mined skills reach every agent through propose, owner merge and sync, all from code on `main` (completed 2026-10-11)
+- [x] **Phase 23: Claim mirror and DoD gate** - Linear and Notion follow every lease transition, and only the Definition-of-Done gate can mark an issue Done (completed 2026-10-09 via PR #36; verified 2026-10-10 at 60bd0c1, 30/30, live MIRROR-08 proof operator-gated; re-verified 2026-10-11 at ed696ef, 30/30 stand)
 - [x] **Phase 24: substrate-dispatcher** - A `dispatch:hermes` label starts a lease-correct Hermes session on the issue's Graph ID in its own worktree (completed 2026-10-10 via PR #47; verified at 974557d, rehearsal scope green, live DISP-08 tail operator-gated)
 - [x] **Phase 25: Docs search and ingest (RAGFlow)** - Agents get cited docs answers through the substrate, and ingest refuses secrets and unsourced pages (completed 2026-10-10 via PR #48; verified at 41cb616, rehearsal scope green, live G1-G4 tail operator-gated)
 - [x] **Phase 26: Hindsight recall and Dragonfly cache** - Accepted memories are recalled across surfaces and repeated reads are cached, without slowing or staling the brief (completed 2026-10-10 via PR #49; verified at 059939e, rehearsal scope green, live G1-G4 tail operator-gated)
-- [x] **Phase 27: Ledger primitives and ingest order** - Every closed hour has one deterministic Merkle root over its events in server ingest order (completed 2026-10-10 via PR #29; re-verified at 3754c6e, unit scope green, production v1.1.4 acceptance operator-gated)
-- [x] **Phase 28: Hourly anchor job and verify** - Each closed hour is anchored once on Solana devnet, and `verify` checks a graph against those anchors (completed 2026-10-09 via PR #35; verified at 35c8f5b, 20/20 must-haves, unit scope green, live L1-L10 tail operator-gated)
-- [ ] **Phase 29: Agent Cards and teachable moments** - Each surface publishes a valid A2A Agent Card listing its accepted teachables, which sit inside anchored hours
-- [x] **Phase 30: desktop_run** - Authenticated agents drive the dedicated webtop through a closed, audited vocabulary (completed 2026-10-09 via PR #31; verified at 1dd3d1f, 12/12 must-haves, unit scope green, live pixel chain + N1 ladder operator-gated)
-- [ ] **Phase 31: Lane A runtime: spike, packaging and VM host** - `substrate-host` runs from `main` with one agentos VM per Graph ID, inside the host's disk and port limits
-- [ ] **Phase 32: Lane A host core** - A host task works its node under the `claude-code` lease, survives a restart and keeps credentials on the host
-- [ ] **Phase 33: Lane A dispatch route and approvals** - `dispatch:claude-code` takes an issue to a gated Done through a Lane A VM, with human approval of permissions
+- [x] **Phase 27: Ledger primitives and ingest order** - Every closed hour has one deterministic Merkle root over its events in server ingest order (completed 2026-10-10 via PR #29; re-verified at 3754c6e, unit scope green, production v1.1.4 acceptance operator-gated; re-verified 2026-10-11 at ed696ef, 18/18 stand)
+- [x] **Phase 28: Hourly anchor job and verify** - Each closed hour is anchored once on Solana devnet, and `verify` checks a graph against those anchors (completed 2026-10-09 via PR #35; verified at 35c8f5b, 20/20 must-haves, unit scope green, live L1-L10 tail operator-gated; re-verified 2026-10-11 at ed696ef, 20/20 stand)
+- [x] **Phase 29: Agent Cards and teachable moments** - Each surface publishes a valid A2A Agent Card listing its accepted teachables, which sit inside anchored hours (completed 2026-10-11)
+- [x] **Phase 30: desktop_run** - Authenticated agents drive the dedicated webtop through a closed, audited vocabulary (completed 2026-10-09 via PR #31; verified at f8af263, 12/12 must-haves, unit scope green, live pixel chain + N1 ladder operator-gated; re-verified 2026-10-11 at ed696ef, 12/12 stand, 30-06 reconciled complete-with-gated-remainder for 7/7)
+- [x] **Phase 31: Lane A runtime: spike, packaging and VM host** - `substrate-host` runs from `main` with one agentos VM per Graph ID, inside the host's disk and port limits (completed 2026-10-11)
+- [x] **Phase 32: Lane A host core** - A host task works its node under the `claude-code` lease, survives a restart and keeps credentials on the host (completed 2026-10-11)
+- [x] **Phase 33: Lane A dispatch route and approvals** - `dispatch:claude-code` takes an issue to a gated Done through a Lane A VM, with human approval of permissions (completed 2026-10-11)
 
 ## Phase Details
 
@@ -169,6 +169,12 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 
 **Proof**: Needs the live system in an operator-approved window: token switch-on and scenarios 2, 3, 5 and 6 run against production. Scenarios 1, 4, 7 and 8 run on the Phase 16 harness; scenario 7 (outage) uses a scratch instance and never stops production.
 **Plans**: TBD
+- [x] 20-01-PLAN.md
+- [x] 20-02-PLAN.md
+- [x] 20-03-PLAN.md
+- [x] 20-04-PLAN.md
+- [x] 20-05-PLAN.md
+- [x] 20-06-PLAN.md
 
 ### Phase 21: skills_propose
 
@@ -184,6 +190,12 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
 
 **Proof**: Isolated, against the Phase 16 harness with an injected runner and a throwaway repository. The first real PR on agent-skills is Phase 22's live proof.
 **Plans**: TBD
+- [x] 21-01-PLAN.md
+- [x] 21-02-PLAN.md
+- [x] 21-03-PLAN.md
+- [x] 21-04-PLAN.md
+- [x] 21-05-PLAN.md
+- [x] 21-06-PLAN.md
 
 ### Phase 22: Skills sync, bridge and miners
 
@@ -200,13 +212,13 @@ Each phase ships as one pull request. Critical path: 16 → 18 → 19 → 20 →
   5. A skill mined from a Cursor session is proposed as a PR, merged by the owner, and within one sync tick (≤ 5 min) appears in Claude Code and Grok Build with neither agent's config changed; both timers and the cron run green.
 
 **Proof** (SKILL-07): Live, operator-approved: GitHub, the owner's merge, Hermes model quota, a real Cursor session and the production timers.
-**Plans**: 4 plans
+**Plans**: 4/4 plans complete
 
 Plans:
-- [ ] 22-01-PLAN.md — Port the skills projector and ff-only sync gate with staged sync units
-- [ ] 22-02-PLAN.md — Port the Hermes bridge and monitor with staged bridge units
-- [ ] 22-03-PLAN.md — Make all three miners propose-only with gated host rebinds
-- [ ] 22-04-PLAN.md — Rehearsal smoke for the mined-to-projected loop plus the gated SKILL-07 live tail
+- [x] 22-01-PLAN.md — Port the skills projector and ff-only sync gate with staged sync units
+- [x] 22-02-PLAN.md — Port the Hermes bridge and monitor with staged bridge units
+- [x] 22-03-PLAN.md — Make all three miners propose-only with gated host rebinds
+- [x] 22-04-PLAN.md — Rehearsal smoke for the mined-to-projected loop plus the gated SKILL-07 live tail
 
 ### Phase 23: Claim mirror and DoD gate
 
@@ -224,6 +236,12 @@ Plans:
 
 **Proof** (MIRROR-08): Rehearsed against the Phase 16 harness first; the proof itself needs the live system in an operator-approved window: Linear, Notion, hermes-linear-connector and production surface tokens.
 **Plans**: TBD
+- [x] 23-01-PLAN.md
+- [x] 23-02-PLAN.md
+- [x] 23-03-PLAN.md
+- [x] 23-04-PLAN.md
+- [x] 23-05-PLAN.md
+- [x] 23-06-PLAN.md
 
 ### Phase 24: substrate-dispatcher
 
@@ -240,13 +258,13 @@ Plans:
   5. In a bounded window, `dispatch:hermes` launches within 30 s, the claim lands under the Hermes token, Linear shows `agent:hermes` and Notion Agent hermes, a Claude Code brief names the claim within 60 s of labelling, the run ends in a gated Done or a release, and the kill switch is back on afterwards.
 
 **Proof** (DISP-08): A `--once --dry-run` rehearsal runs isolated; the proof needs the live system in an operator-approved, bounded kill-switch-off window: Linear, Notion and Hermes model quota.
-**Plans**: 4 plans
+**Plans**: 4/4 plans complete
 
 Plans:
-- [ ] 24-01-PLAN.md — Port the Linear poll, substrate-mcp client and worktree modules with substrate-bearer identity
-- [ ] 24-02-PLAN.md — Port launch, watch, route and tick modules with give-up persistence and outcome events
-- [ ] 24-03-PLAN.md — Port the supervised loop, package the module and stage the unit file
-- [ ] 24-04-PLAN.md — Rehearsal smoke for the label-to-session loop plus the gated DISP-08 live tail
+- [x] 24-01-PLAN.md — Port the Linear poll, substrate-mcp client and worktree modules with substrate-bearer identity
+- [x] 24-02-PLAN.md — Port launch, watch, route and tick modules with give-up persistence and outcome events
+- [x] 24-03-PLAN.md — Port the supervised loop, package the module and stage the unit file
+- [x] 24-04-PLAN.md — Rehearsal smoke for the label-to-session loop plus the gated DISP-08 live tail
 
 ### Phase 25: Docs search and ingest (RAGFlow)
 
@@ -261,7 +279,7 @@ Plans:
   3. The datasets `docs/data-planes.md` lists exist and refresh as it says (`agent-substrate` on merge, `agent-skills` after each skills-sync fast-forward, `programming-desk`, one per product), keeping the last five versions.
 
 **Proof**: The refusal and error-path tests run isolated against a fake; search and ingest against the deployed RAGFlow need the live system in an operator-approved window.
-**Plans**: 3 plans
+**Plans**: 3/3 plans complete
 - [x] 25-01-PLAN.md — Substrate-only RAGFlow retrieval with citation-shaped docs_search (DOCS-01)
 - [x] 25-02-PLAN.md — Fail-closed docs_ingest with six refusals plus store-lock extension (DOCS-02)
 - [x] 25-03-PLAN.md — Dataset lifecycle plus degradation hook plus G1-G4 gated live map (DOCS-03)
@@ -280,7 +298,7 @@ Plans:
   4. A headless session holding only the substrate MCP answers a docs question with a source URL `docs_search` returned and readable back from its event; a memory retained by one surface is recalled by another with its source; a second identical brief is a cache hit, and with Dragonfly down it returns uncached.
 
 **Proof** (DOCS-07): Live, operator-approved: RAGFlow, Hindsight and Dragonfly (once its private hop exists) with a headless session.
-**Plans**: 3 plans
+**Plans**: 3/3 plans complete
 - [x] 26-01-PLAN.md — Substrate-side Hindsight recall with fake banks server plus memory_recall tool (DOCS-04 read half)
 - [x] 26-02-PLAN.md — Gate-accepted retain forward plus derived-marked memory_search merge plus credential perimeter (DOCS-04 write half)
 - [x] 26-03-PLAN.md — Recall cache coverage plus claims-freshness pin plus redis refusal plus G1-G4 gated live map (DOCS-05, DOCS-06, DOCS-07)
@@ -329,7 +347,7 @@ Plans:
   4. A teachable recorded from a session appears in that surface's Agent Card, and its event sits inside an anchored hour.
 
 **Proof** (CARD-04): Card validation and teachable mapping run isolated; the anchored hour needs a devnet anchor, so the proof runs in an operator-approved window.
-**Plans**: 3 plans
+**Plans**: 3/3 plans complete
 - [x] 29-01-PLAN.md — Teachable write path plus accepted-teachable event plus shared fixture corpus (CARD-02 gate half, CARD-03 emit half)
 - [x] 29-02-PLAN.md — Per-surface A2A card builder plus fake spec validator plus loopback route (CARD-01, CARD-02 card half)
 - [x] 29-03-PLAN.md — Scratch-ledger anchor-coverage proof plus card e2e plus docs plus G1/G2/G3 gated live map (CARD-03, CARD-04)
@@ -350,6 +368,13 @@ Plans:
 
 **Proof** (DESK-05): Isolated, against the Phase 16 harness and the local `substrate-desktop` container; no production service or store is touched.
 **Plans**: 30-01 (driver+codec), 30-02 (allowlist+dir), 30-03 (lifecycle script), 30-04 (MCP registration), 30-05 (harness flag), 30-06 (N1 spike, live-gated), 30-07 (smoke+proof+docs)
+- [x] 30-01-PLAN.md
+- [x] 30-02-PLAN.md
+- [x] 30-03-PLAN.md
+- [x] 30-04-PLAN.md
+- [x] 30-05-PLAN.md
+- [x] 30-06-PLAN.md
+- [x] 30-07-PLAN.md
 
 ### Phase 31: Lane A runtime: spike, packaging and VM host
 
@@ -364,10 +389,10 @@ Plans:
   3. With less than 10 GiB free, any image build or pull is refused in code before it starts.
 
 **Proof**: Read-only host checks first (done in 31-RESEARCH.md: /dev/kvm absent, no vmx/svm, 6420 held by gcs-rivet engine, 7411 free, 120 GiB free, sandbox image absent); installing the host and pulling or building the sandbox image on this host needs the owner's approval and an operator-approved window.
-**Plans**: 3 plans
-- [ ] 31-01-PLAN.md — Gated no-KVM/engine-share spike runner plus read-only asserts plus 31-SPIKE.md verdict tables (LANEA-01 spike half; G1 npm ci, G2 engine session, G3 VM boot gated)
-- [ ] 31-02-PLAN.md — Host package port (14 modules + tests), substrate.ts bearer/lease rewrite, package.json + lock with declared claude-code dep, sandbox Dockerfile (LANEA-01 packaging half; install-free)
-- [ ] 31-03-PLAN.md — main.ts checkout fix, 10 GiB in-code disk gate, staged unit file, two-VM fake rehearsal proof, runbook + gated G1-G4 live map (LANEA-01, LANEA-05)
+**Plans**: 3/3 plans complete
+- [x] 31-01-PLAN.md — Gated no-KVM/engine-share spike runner plus read-only asserts plus 31-SPIKE.md verdict tables (LANEA-01 spike half; G1 npm ci, G2 engine session, G3 VM boot gated)
+- [x] 31-02-PLAN.md — Host package port (14 modules + tests), substrate.ts bearer/lease rewrite, package.json + lock with declared claude-code dep, sandbox Dockerfile (LANEA-01 packaging half; install-free)
+- [x] 31-03-PLAN.md — main.ts checkout fix, 10 GiB in-code disk gate, staged unit file, two-VM fake rehearsal proof, runbook + gated G1-G4 live map (LANEA-01, LANEA-05)
 
 ### Phase 32: Lane A host core
 
@@ -383,6 +408,9 @@ Plans:
 
 **Proof**: Against the Phase 16 harness on an isolated graph with a throwaway repository; the VM session spends Claude Code model quota and Docker capacity on this host, so it runs in an operator-approved window.
 **Plans**: TBD
+- [x] 32-01-PLAN.md
+- [x] 32-02-PLAN.md
+- [x] 32-03-PLAN.md
 
 ### Phase 33: Lane A dispatch route and approvals
 
@@ -397,10 +425,10 @@ Plans:
   3. `dispatch:claude-code` on a fresh issue opens a VM that claims and heartbeats; restarting `substrate-host` mid-session resumes the same session; a real push and PR land, the PR fields sync, and the issue reaches a gated Done.
 
 **Proof** (LANEA-08): Live, operator-approved: Linear, Notion, GitHub, the model route, the approvals channel and ≥ 10 GiB free disk.
-**Plans**: 3 plans
-- [ ] 33-01-PLAN.md — claude-code route rehearsal: fake-host tick to landed claim plus refusal and give-up paths (LANEA-04)
-- [ ] 33-02-PLAN.md — Approval timeout plus single-use button rehearsal with fake transport (LANEA-06)
-- [ ] 33-03-PLAN.md — Fake label-to-Done chain plus docs plus G1-G5 gated tail (LANEA-08)
+**Plans**: 3/3 plans complete
+- [x] 33-01-PLAN.md — claude-code route rehearsal: fake-host tick to landed claim plus refusal and give-up paths (LANEA-04)
+- [x] 33-02-PLAN.md — Approval timeout plus single-use button rehearsal with fake transport (LANEA-06)
+- [x] 33-03-PLAN.md — Fake label-to-Done chain plus docs plus G1-G5 gated tail (LANEA-08)
 
 ## Progress
 
@@ -410,17 +438,17 @@ Plans:
 | 17. Event vocabulary and audit policy | v1.3 | 3/3 | Complete    | 2026-10-09 |
 | 18. Guard rails and shared redactor | v1.3 | 4/4 | Complete    | 2026-10-09 |
 | 19. Lane B collectors | v1.3 | 5/5 | Complete    | 2026-10-10 |
-| 20. Production identity and Phase 0 UAT | v1.3 | 0/? | Not started | - |
-| 21. skills_propose | v1.3 | 0/? | Not started | - |
-| 22. Skills sync, bridge and miners | v1.3 | 0/? | Not started | - |
-| 23. Claim mirror and DoD gate | v1.3 | 0/? | Not started | - |
-| 24. substrate-dispatcher | v1.3 | 0/? | Not started | - |
-| 25. Docs search and ingest (RAGFlow) | v1.3 | 0/? | Not started | - |
-| 26. Hindsight recall and Dragonfly cache | v1.3 | 0/? | Not started | - |
+| 20. Production identity and Phase 0 UAT | v1.3 | 6/6 | Complete    | 2026-10-11 |
+| 21. skills_propose | v1.3 | 6/6 | Complete    | 2026-10-11 |
+| 22. Skills sync, bridge and miners | v1.3 | 4/4 | Complete    | 2026-10-11 |
+| 23. Claim mirror and DoD gate | v1.3 | 6/6 | Complete    | 2026-10-11 |
+| 24. substrate-dispatcher | v1.3 | 4/4 | Complete    | 2026-10-11 |
+| 25. Docs search and ingest (RAGFlow) | v1.3 | 3/3 | Complete    | 2026-10-11 |
+| 26. Hindsight recall and Dragonfly cache | v1.3 | 3/3 | Complete    | 2026-10-11 |
 | 27. Ledger primitives and ingest order | v1.3 | 4/4 | Complete    | 2026-10-10 |
 | 28. Hourly anchor job and verify | v1.3 | 4/4 | Complete    | 2026-10-10 |
-| 29. Agent Cards and teachable moments | v1.3 | 0/? | Not started | - |
+| 29. Agent Cards and teachable moments | v1.3 | 3/3 | Complete    | 2026-10-11 |
 | 30. desktop_run | v1.3 | 7/7 | Complete    | 2026-10-10 |
-| 31. Lane A runtime: spike, packaging and VM host | v1.3 | 0/? | Not started | - |
-| 32. Lane A host core | v1.3 | 0/? | Not started | - |
-| 33. Lane A dispatch route and approvals | v1.3 | 0/? | Not started | - |
+| 31. Lane A runtime: spike, packaging and VM host | v1.3 | 3/3 | Complete    | 2026-10-11 |
+| 32. Lane A host core | v1.3 | 3/3 | Complete    | 2026-10-11 |
+| 33. Lane A dispatch route and approvals | v1.3 | 3/3 | Complete    | 2026-10-11 |

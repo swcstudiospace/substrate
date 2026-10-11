@@ -1,10 +1,10 @@
 ---
 phase: 21-skills-propose
-verified: 2026-10-10T14:29:51Z
+verified: 2026-10-11T02:10:00Z
 status: passed
 score: 24/24 must-haves verified
 covered_files: [".env.example", ".planning/phases/21-skills-propose/21-01-PLAN.md", ".planning/phases/21-skills-propose/21-01-SUMMARY.md", ".planning/phases/21-skills-propose/21-02-PLAN.md", ".planning/phases/21-skills-propose/21-02-SUMMARY.md", ".planning/phases/21-skills-propose/21-03-PLAN.md", ".planning/phases/21-skills-propose/21-03-SUMMARY.md", ".planning/phases/21-skills-propose/21-04-PLAN.md", ".planning/phases/21-skills-propose/21-04-SUMMARY.md", ".planning/phases/21-skills-propose/21-05-PLAN.md", ".planning/phases/21-skills-propose/21-05-SUMMARY.md", ".planning/phases/21-skills-propose/21-06-PLAN.md", ".planning/phases/21-skills-propose/21-06-SUMMARY.md", "docs/event-vocabulary.md", "docs/mcp-audit.md", "docs/rehearsal.md", "docs/skills-propose.md", "package.json", "packages/audit/src/policy.test.ts", "packages/cli/src/index.ts", "packages/cli/src/skills.test.ts", "packages/cli/src/skills.ts", "packages/mcp-server/src/event-sources.test.ts", "packages/mcp-server/src/event-sources.ts", "packages/mcp-server/src/http.test.ts", "packages/mcp-server/src/mcp.test.ts", "packages/mcp-server/src/mcp.ts", "packages/mcp-server/src/observe.test.ts", "packages/mcp-server/src/observe.ts", "packages/mcp-server/src/rehearsal-env.test.ts", "packages/mcp-server/src/rehearsal-env.ts", "packages/mcp-server/src/rehearsal-fake-gh.ts", "packages/mcp-server/src/rehearsal-skills.test.ts", "packages/mcp-server/src/rehearsal-skills.ts", "packages/mcp-server/src/server.ts", "packages/mcp-server/src/service.test.ts", "packages/mcp-server/src/service.ts", "packages/mcp-server/src/skills/frontmatter.ts", "packages/mcp-server/src/skills/propose.ts", "packages/mcp-server/src/skills/request.test.ts", "packages/mcp-server/src/skills/request.ts", "scripts/rehearsal.test.ts", "scripts/rehearsal.ts", "scripts/skills-propose-smoke.test.ts", "scripts/skills-propose-smoke.ts"]
-covered_digest: "v3:sha256:1b8608616167a8539b8e0fc1d7884999ed9d56fe08c46942faf51b4b0c6a67f5"
+covered_digest: "v3:sha256:1c10d749d7a855fba786d611144becd3eafefb3d7a1311829301a93c4e6d79f6"
 behavior_unverified: 0
 overrides_applied: 0
 deferred:
@@ -12,7 +12,7 @@ deferred:
     addressed_in: "Phase 22"
     evidence: "Phase 22 success criterion: 'A skill mined from a Cursor session is proposed as a PR, merged by the owner, and within one sync tick appears in Claude Code and Grok Build' — the owner merge implies the live cross-repo PR this phase's isolated proof stands in for."
 re_verification:
-  previous_status: passed
+  previous_status: stale
   previous_score: 24/24
   gaps_closed: []
   gaps_remaining: []
@@ -103,3 +103,22 @@ Phases 23, 27, 28 and 30 landed after the 2026-10-09 pass and touched files in t
 Phase 18's review round 2 changed the redactor this phase builds on, and `main` gained the verification-gate PR, so the branch was restacked onto Phase 18's new tip. Nothing in this phase changed. Gate on the restacked head: bun run verify: install, types, tests, locks all ok; 1914 pass / 57 skip / 0 fail. The report's fingerprint was refreshed (the base now carries the verification-gate PR and Phase 18's review fixes).
 
 _Verifier: Phase21Verify (gsd execute-phase re-verification at gates only; no code delta)_
+
+---
+
+## Close-out sweep re-verification (2026-10-11, HEAD `ed696ef`, PR #53 merged)
+
+Covered-file delta since the `acd0c16` verify (11 files): phases 25/26/29 layered additive
+registrations onto the shared model (`mcp.ts`, `observe.ts`, `server.ts`, `service.ts`,
+`packages/cli/src/index.ts`) plus `.env.example`, `docs/rehearsal.md`, `package.json`, and
+the `mcp`/`observe` test extensions. Every phase-21-owned source (`skills/*`,
+`event-sources.ts`, `rehearsal-skills*`, `skills-propose-smoke*`) is byte-identical.
+
+- Skills files `bun test policy + skills + event-sources + http + mcp + observe +
+  rehearsal-skills + service + skills/request + skills-propose-smoke`: **597 pass / 0 fail**.
+- The deferred live-PR truth still routes to Phase 22's owner-merge criterion (unchanged).
+- Shared gates at tip: `bun test` 3136 pass / 58 skip / 1 fail (F-01 only),
+  `bunx tsc --noEmit` clean, pytest 246 passed, `check:phase-close` pass.
+
+Verdict: 24/24 truths stand, no regressions, no new gaps. Digest refreshed to
+`v3:sha256:1c10d749d7a855fba786d611144becd3eafefb3d7a1311829301a93c4e6d79f6`.

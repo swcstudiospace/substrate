@@ -1,14 +1,14 @@
 ---
 phase: 18-guard-rails-and-shared-redactor
-verified: 2026-10-10T12:42:15Z
+verified: 2026-10-11T02:10:00Z
 status: passed
 score: 21/21 must-haves verified
 covered_files: [".planning/phases/18-guard-rails-and-shared-redactor/18-01-PLAN.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-01-SUMMARY.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-02-PLAN.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-02-SUMMARY.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-03-PLAN.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-03-SUMMARY.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-04-PLAN.md", ".planning/phases/18-guard-rails-and-shared-redactor/18-04-SUMMARY.md", "docs/greptime-ledger.md", "docs/memory-governance.md", "docs/observability.md", "docs/redaction.md", "packages/cli/src/lessons.ts", "packages/mcp-server/src/memory-classify.test.ts", "packages/mcp-server/src/redact-adversarial.test.ts", "packages/mcp-server/src/redact-contract.test.ts", "packages/mcp-server/src/redact-lock.test.ts", "packages/mcp-server/src/redact.test.ts", "packages/mcp-server/src/redact.ts", "packages/mcp-server/src/store-lock.test.ts"]
-covered_digest: "v3:sha256:58122a1e20e74fd7b41160097bb7cee8884f50b45f7aa89ef8d67144e40ebba3"
+covered_digest: "v3:sha256:fbfbee6007d49fcb5190f2bb495dbad04535a5cd7393b322d6b34b01b5249ec2"
 behavior_unverified: 0
 overrides_applied: 0
 re_verification:
-  previous_status: passed
+  previous_status: stale
   previous_score: 21/21
   gaps_closed: []
   gaps_remaining: []
@@ -208,3 +208,22 @@ Known failures, recorded not fixed (both reproduce; both outside phase-18 scope)
 - **F-02** — `packages/cli/src/token.test.ts` "a directory at the token-file path means no token" (reads the real host Cursor token, owned by Phase 20).
 
 Verdict: 21/21 truths stand, no regressions, no new gaps. Fingerprint refreshed via `verification.fingerprint` (v3) over the same 20-file covered set.
+
+---
+
+## Close-out sweep re-verification (2026-10-11, HEAD `ed696ef`, PR #53 merged)
+
+Covered-file delta since the `5f495ad` verify: exactly one file —
+`packages/mcp-server/src/store-lock.test.ts` (+201 lines: phase-25 RAGFlow-door pins and
+phase-26 Hindsight-door/credential-perimeter pins). The redactor (`redact.ts`, `lessons.ts`,
+`memory-classify`) and every redactor test are byte-identical.
+
+- Redactor files `bun test memory-classify + redact-adversarial + redact-contract +
+  redact-lock + redact`: **261 pass / 1 skip / 0 fail**.
+- `store-lock.test.ts` green inside the 101-test targeted trio and the 123-test
+  phase-close lock run (both exit 0 at tip).
+- Shared gates at tip: `bun test` 3136 pass / 58 skip / 1 fail (F-01 only),
+  `bunx tsc --noEmit` clean, pytest 246 passed, `check:phase-close` pass.
+
+Verdict: 21/21 truths stand, no regressions, no new gaps. Digest refreshed to
+`v3:sha256:fbfbee6007d49fcb5190f2bb495dbad04535a5cd7393b322d6b34b01b5249ec2`.

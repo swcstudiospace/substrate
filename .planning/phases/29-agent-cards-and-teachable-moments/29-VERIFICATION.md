@@ -1,3 +1,19 @@
+---
+phase: 29-agent-cards-and-teachable-moments
+verified: 2026-10-11T02:10:00Z
+status: passed
+score: 12/12 must-haves rehearsal-proven (CARD-01..04 + teachable corpus); live G1/G2/G3 OPERATOR-GATED
+covered_files: [".planning/phases/29-agent-cards-and-teachable-moments/29-01-PLAN.md", ".planning/phases/29-agent-cards-and-teachable-moments/29-01-SUMMARY.md", ".planning/phases/29-agent-cards-and-teachable-moments/29-02-PLAN.md", ".planning/phases/29-agent-cards-and-teachable-moments/29-02-SUMMARY.md", ".planning/phases/29-agent-cards-and-teachable-moments/29-03-PLAN.md", ".planning/phases/29-agent-cards-and-teachable-moments/29-03-SUMMARY.md", "docs/agent-cards.md", "packages/mcp-server/src/agent-card.fixtures.ts", "packages/mcp-server/src/agent-card.test.ts", "packages/mcp-server/src/agent-card.ts", "packages/mcp-server/src/server.test.ts", "packages/mcp-server/src/server.ts", "packages/mcp-server/src/service.ts", "packages/mcp-server/src/teachable-anchor.test.ts", "packages/mcp-server/src/teachable.fixtures.ts", "packages/mcp-server/src/teachable.test.ts", "packages/mcp-server/src/teachable.ts"]
+covered_digest: "v3:sha256:18d9f62419b3dedc0be2c2f06e380ca1f234ab92cda354e35d9cec480c216632"
+behavior_unverified: 3
+overrides_applied: 0
+registration:
+  previous_status: missing
+  registered_at_tip: ed696ef
+  digest_check: card/teachable sources byte-identical since PR #50 (bc8f839) — no later phase touched them; feature tests re-run green at tip (see confirmation below)
+  gaps_remaining: ["G1 published A2A spec fetch + validator diff (UNVERIFIED pending G1)", "G2 loopback card read per surface + publication decision", "G3 devnet-backed teachable anchor + verify proof hour"]
+---
+
 # Phase 29: Agent Cards and teachable moments — Verification
 
 **Verified:** 2026-10-10 at main tip `bc8f839` (PR #50 squash-merged).
@@ -68,3 +84,13 @@ have NOT been executed. Each needs explicit operator approval:
   `tx_sig`, `substrate verify <proof graph>` shows the teachable hour
   `anchored`. (write: production ledger + devnet + `anchors` row + ledger
   event; rollback: none needed — one proof hour stands as history)
+
+---
+
+## Close-out sweep tip confirmation (2026-10-11, HEAD `ed696ef`, PR #53 merged)
+
+Card/teachable sources byte-identical since PR #50 (`bc8f839`) — no later phase touched
+them. Feature tests re-run at tip (`agent-card + teachable + teachable-anchor`, inside the
+272-test 25/26/29 run): **all green, 0 fail**. Full `bun test` 3136 pass / 58 skip / 1 fail
+(F-01 only), `bunx tsc --noEmit` clean, pytest 246 passed, `check:phase-close` pass.
+Live G1/G2/G3 stay OPERATOR-GATED — never run.

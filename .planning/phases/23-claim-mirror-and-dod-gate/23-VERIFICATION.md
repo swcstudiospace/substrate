@@ -1,16 +1,22 @@
 ---
 phase: 23-claim-mirror-and-dod-gate
-verified: 2026-10-10T17:30:00Z
+verified: 2026-10-11T02:10:00Z
 status: passed
 score: 30/30 must-haves verified
 covered_files: [".planning/phases/23-claim-mirror-and-dod-gate/23-01-PLAN.md", ".planning/phases/23-claim-mirror-and-dod-gate/23-01-SUMMARY.md", ".planning/phases/23-claim-mirror-and-dod-gate/23-02-PLAN.md", ".planning/phases/23-claim-mirror-and-dod-gate/23-02-SUMMARY.md", ".planning/phases/23-claim-mirror-and-dod-gate/23-03-PLAN.md", ".planning/phases/23-claim-mirror-and-dod-gate/23-03-SUMMARY.md", ".planning/phases/23-claim-mirror-and-dod-gate/23-04-PLAN.md", ".planning/phases/23-claim-mirror-and-dod-gate/23-04-SUMMARY.md", ".planning/phases/23-claim-mirror-and-dod-gate/23-05-PLAN.md", ".planning/phases/23-claim-mirror-and-dod-gate/23-05-SUMMARY.md", ".planning/phases/23-claim-mirror-and-dod-gate/23-06-PLAN.md", ".planning/phases/23-claim-mirror-and-dod-gate/23-06-SUMMARY.md", "docs/coordination.md", "docs/event-vocabulary.md", "docs/runbooks/mirror-proof.md", "packages/mcp-server/src/config.ts", "packages/mcp-server/src/dod-gate.test.ts", "packages/mcp-server/src/dod-gate.ts", "packages/mcp-server/src/index-store.ts", "packages/mcp-server/src/index.ts", "packages/mcp-server/src/linear.test.ts", "packages/mcp-server/src/linear.ts", "packages/mcp-server/src/mcp.ts", "packages/mcp-server/src/mirror.test.ts", "packages/mcp-server/src/mirror.ts", "packages/mcp-server/src/notion.test.ts", "packages/mcp-server/src/notion.ts", "packages/mcp-server/src/observe.ts", "packages/mcp-server/src/rehearsal-env.ts", "packages/mcp-server/src/service.ts", "scripts/mirror-smoke.ts"]
-covered_digest: "v3:sha256:9abe19036ba91b8499ac885bab2bf3a40a8437c9ba75688bd20af72c3ec0adc6"
+covered_digest: "v3:sha256:56708720239c8b94984293b1ea75428b0c3a23f407ac03cd6fdf428e4004522e"
 behavior_unverified: 0
 overrides_applied: 0
 deferred:
   - truth: "MIRROR-08 live proof: on a real Linear issue (SWC-467) and its Notion row, claim, refused second claim, release, complete without DoD and complete with DoD each produce the specified tracker state within 60 s."
     addressed_in: "Operator-approved window via docs/runbooks/mirror-proof.md"
     evidence: "Runbook header gates on explicit operator approval; evidence table row is NOT RUN. All five steps rehearsed against loopback fakes instead (smoke:mirror 38/38)."
+re_verification:
+  previous_status: stale
+  previous_score: 30/30
+  gaps_closed: []
+  gaps_remaining: []
+  regressions: []
 ---
 
 # Phase 23: Claim mirror and DoD gate Verification Report
@@ -85,3 +91,21 @@ No hot-path change: the mirror runs awaited inside claim/release/complete tool c
 - **Security review (carried + re-spot-checked):** key/header redaction in tracker errors (status + ≤200 chars); lease-id structurally absent from all tracker/event/reply surfaces; writable-set refusal + data-source gate before every Notion PATCH; evidence-free completions never reach the connector; timeout settles via Linear state with the lease kept; rehearsal tracker URLs loopback-only with scratch keys.
 
 _Verifier: Phase23Verify (verification-gates run at HEAD; no code delta)_
+
+---
+
+## Close-out sweep re-verification (2026-10-11, HEAD `ed696ef`, PR #53 merged)
+
+Covered-file delta since the `60bd0c1` verify (6 files): phases 25/26/29 layered additive
+registrations onto the shared model (`config.ts`, `index-store.ts`, `index.ts`, `mcp.ts`,
+`observe.ts`, `service.ts`). Every phase-23-owned source (`mirror.ts`, `dod-gate.ts`,
+`linear.ts`, `notion.ts`, `mirror-smoke.ts`) is byte-identical.
+
+- Mirror files `bun test dod-gate + linear + mirror + notion`: **79 pass / 0 fail**.
+- The deferred MIRROR-08 live proof still routes to the operator window via
+  `docs/runbooks/mirror-proof.md` (unchanged).
+- Shared gates at tip: `bun test` 3136 pass / 58 skip / 1 fail (F-01 only),
+  `bunx tsc --noEmit` clean, pytest 246 passed, `check:phase-close` pass.
+
+Verdict: 30/30 truths stand, no regressions, no new gaps. Digest refreshed to
+`v3:sha256:56708720239c8b94984293b1ea75428b0c3a23f407ac03cd6fdf428e4004522e`.

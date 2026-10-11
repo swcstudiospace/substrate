@@ -1,12 +1,18 @@
 ---
 phase: 20-production-identity-and-phase-0-uat
-verified: 2026-10-10T14:30:00Z
+verified: 2026-10-11T02:10:00Z
 status: passed
 score: 22/22 must-haves hold (19 fully verified + 3 verified rehearsal-first with live halves operator-gated; zero live execution)
 covered_files: [".planning/phases/20-production-identity-and-phase-0-uat/20-01-PLAN.md", ".planning/phases/20-production-identity-and-phase-0-uat/20-01-SUMMARY.md", ".planning/phases/20-production-identity-and-phase-0-uat/20-02-PLAN.md", ".planning/phases/20-production-identity-and-phase-0-uat/20-02-SUMMARY.md", ".planning/phases/20-production-identity-and-phase-0-uat/20-03-PLAN.md", ".planning/phases/20-production-identity-and-phase-0-uat/20-03-SUMMARY.md", ".planning/phases/20-production-identity-and-phase-0-uat/20-04-PLAN.md", ".planning/phases/20-production-identity-and-phase-0-uat/20-04-SUMMARY.md", ".planning/phases/20-production-identity-and-phase-0-uat/20-05-PLAN.md", ".planning/phases/20-production-identity-and-phase-0-uat/20-05-SUMMARY.md", ".planning/phases/20-production-identity-and-phase-0-uat/20-06-PLAN.md", ".planning/phases/20-production-identity-and-phase-0-uat/20-06-SUMMARY.md", ".planning/phases/20-production-identity-and-phase-0-uat/20-UAT.md", ".planning/milestones/v1.0-phases/00-brief/0-UAT.md", "packages/cli/src/token.ts", "packages/cli/src/token.test.ts", "packages/cli/src/cli-auth.test.ts", "packages/mcp-server/src/config.ts", "packages/mcp-server/src/authority.test.ts", "packages/mcp-server/src/server.authority.test.ts", "packages/mcp-server/src/boot-refusal.test.ts", "packages/collectors/src/emit.ts", "scripts/identity-check.ts", "scripts/identity-check.test.ts", "scripts/parity-check.ts", "scripts/uat-phase0.ts", "scripts/uat-phase0.test.ts", "infra/identity/clients.json", "docs/runbooks/production-identity.md", "docs/uat.md"]
-covered_digest: "v3:sha256:bbedafffa8690eeb6b0930ca471bba939d66bb4c3e02805b47502f6acbd8e4bc"
+covered_digest: "v3:sha256:101d4be67d5b044e6f182e705347f2804a2784d5e2d4ac34845b8e07051cd0d6"
 behavior_unverified: 0
 overrides_applied: 0
+re_verification:
+  previous_status: stale
+  previous_score: 22/22
+  gaps_closed: []
+  gaps_remaining: []
+  regressions: []
 ---
 
 # Phase 20: Production Identity and Phase 0 UAT Verification Report
@@ -150,3 +156,24 @@ No production restart was needed for any proof: a fresh twin served main, every 
 _Verified: 2026-10-10T14:30:00Z_
 _Verifier: Phase20Execute (rehearsal-first execution + gates-only verification)_
 _Head: 6a701f1 (PR #45 merged) · tsc exit 0 · suite 2646 pass / 58 skip / 1 fail (F-01) · phase-20 files 252/252 · uat-p2006fresh 6/6 · identity:check PASS · phase-close pass_
+
+---
+
+## Close-out sweep re-verification (2026-10-11, HEAD `ed696ef`, PR #53 merged)
+
+Covered-file delta since the `e2ad4dc` verify (3 files): `packages/mcp-server/src/config.ts`
+(+97 lines, all additive phase-25/26 optional fields — ragflow/docsIngestRoots/vmGuest/
+docsStateFile/dragonflyRefused — every default preserves prior behavior),
+`docs/runbooks/production-identity.md` (+23) and `0-UAT.md` (doc touch-ups).
+Token/authority/boot/identity/uat sources are byte-identical.
+
+- Identity files `bun test token + cli-auth + authority + server.authority + boot-refusal +
+  identity-check + uat-phase0`: **180 pass / 0 fail**.
+- F-02 resolved: `token.test.ts` 14/14 green at tip (the `6a701f1` tokens-dir isolation
+  holds; the host Cursor token no longer leaks into the assertion).
+- No live execution: the operator-approved switch-on/soak/UAT evidence stands as recorded.
+- Shared gates at tip: `bun test` 3136 pass / 58 skip / 1 fail (F-01 only),
+  `bunx tsc --noEmit` clean, pytest 246 passed, `check:phase-close` pass.
+
+Verdict: 22/22 must-haves hold, no regressions, no new gaps. Digest refreshed to
+`v3:sha256:101d4be67d5b044e6f182e705347f2804a2784d5e2d4ac34845b8e07051cd0d6`.

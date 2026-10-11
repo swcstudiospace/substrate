@@ -1,14 +1,14 @@
 ---
 phase: 16-production-parity-and-rehearsal-harness
-verified: 2026-10-10T12:41:00Z
+verified: 2026-10-11T02:10:00Z
 status: passed
 score: 23/23 must-haves verified
 covered_files: [".planning/REQUIREMENTS.md", ".planning/phases/16-production-parity-and-rehearsal-harness/16-01-PLAN.md", ".planning/phases/16-production-parity-and-rehearsal-harness/16-01-SUMMARY.md", ".planning/phases/16-production-parity-and-rehearsal-harness/16-02-PLAN.md", ".planning/phases/16-production-parity-and-rehearsal-harness/16-02-SUMMARY.md", ".planning/phases/16-production-parity-and-rehearsal-harness/16-03-PLAN.md", ".planning/phases/16-production-parity-and-rehearsal-harness/16-03-SUMMARY.md", ".planning/phases/16-production-parity-and-rehearsal-harness/16-04-PLAN.md", ".planning/phases/16-production-parity-and-rehearsal-harness/16-04-SUMMARY.md", ".planning/phases/16-production-parity-and-rehearsal-harness/16-05-PLAN.md", ".planning/phases/16-production-parity-and-rehearsal-harness/16-05-SUMMARY.md", "README.md", "docs/observability.md", "docs/rehearsal.md", "docs/runbooks/production-parity.md", "infra/vps/substrate-mcp.service", "package.json", "packages/mcp-server/src/rehearsal-env.test.ts", "packages/mcp-server/src/rehearsal-env.ts", "scripts/parity-check.test.ts", "scripts/parity-check.ts", "scripts/rehearsal.test.ts", "scripts/rehearsal.ts"]
-covered_digest: "v3:sha256:15b50a2d5573117188fdad6dfd0c1677ecc6556bea5138ba297df0d83fc4436a"
+covered_digest: "v3:sha256:4b5e320040be9f88dcff390f007c2b74cbfc025bb3de16f64f1297a30bbb9f37"
 behavior_unverified: 0
 overrides_applied: 0
 re_verification:
-  previous_status: passed
+  previous_status: stale
   previous_score: 23/23
   gaps_closed: []
   gaps_remaining: []
@@ -164,3 +164,25 @@ No gaps. All 23 must-haves verified against HEAD `589a27c` with test evidence (9
 _Verified: 2026-10-10T12:41:00Z_
 _Verifier: Phase16Verify_
 _HEAD: 589a27c_
+
+---
+
+## Close-out sweep re-verification (2026-10-11, HEAD `ed696ef`, PR #53 merged)
+
+Covered-file delta since the `dec0951` verify: exactly two files — `docs/rehearsal.md`
+(+4-line `smoke:skills-sync` paragraph, additive, phase-22-owned) and `package.json`
+(new `test:py`/`smoke:skills-sync`/`smoke:dispatcher`/`smoke:host` entries; `rehearsal`
+and `parity:check` entries intact). No harness source line changed.
+
+- Targeted trio `bun test rehearsal-env + store-lock + parity-check`: **101 pass / 0 fail**
+  (was 90; store-lock grew with the phase-25/26 credential-perimeter pins, all green).
+- Fresh guard proofs: bare invocation prints usage; `down --name p16-sweep-absent` exits 0
+  "nothing to remove"; `up --port 7410` refused before Docker (exit 2; from the repo
+  checkout the production-checkout refusal fires first — the known F-01 ordering).
+- Shared gates at tip: `bun test` 3136 pass / 58 skip / 1 fail (F-01 only; F-02 token test
+  now 14/14 green via the `6a701f1` isolation), `bunx tsc --noEmit` clean,
+  `pytest packages/miner+dispatcher` 246 passed, `check:phase-close` pass
+  (123 lock tests, EVENT_KINDS 12, SURFACES 27).
+
+Verdict: 23/23 truths stand, no regressions, no new gaps. Digest refreshed to
+`v3:sha256:4b5e320040be9f88dcff390f007c2b74cbfc025bb3de16f64f1297a30bbb9f37`.

@@ -1,12 +1,18 @@
 ---
 phase: 28-hourly-anchor-job-and-verify
-verified: 2026-10-10T22:30:00Z
+verified: 2026-10-11T02:10:00Z
 status: passed
 score: 20/20 must-haves verified
 covered_files: [".planning/phases/28-hourly-anchor-job-and-verify/28-01-PLAN.md", ".planning/phases/28-hourly-anchor-job-and-verify/28-01-SUMMARY.md", ".planning/phases/28-hourly-anchor-job-and-verify/28-02-PLAN.md", ".planning/phases/28-hourly-anchor-job-and-verify/28-02-SUMMARY.md", ".planning/phases/28-hourly-anchor-job-and-verify/28-03-PLAN.md", ".planning/phases/28-hourly-anchor-job-and-verify/28-03-SUMMARY.md", ".planning/phases/28-hourly-anchor-job-and-verify/28-04-PLAN.md", ".planning/phases/28-hourly-anchor-job-and-verify/28-04-SUMMARY.md", ".env.example", "docs/greptime-ledger.md", "infra/vps/README.md", "infra/vps/substrate-anchor.service", "infra/vps/substrate-anchor.service.d/10-environment.conf", "infra/vps/substrate-anchor.timer", "packages/cli/src/index.ts", "packages/ledger/src/rpc.test.ts", "packages/ledger/src/rpc.ts", "packages/mcp-server/src/anchor-run.ts", "packages/mcp-server/src/anchor.test.ts", "packages/mcp-server/src/anchor.ts", "packages/mcp-server/src/config.test.ts", "packages/mcp-server/src/config.ts", "packages/mcp-server/src/graph-bind.test.ts", "packages/mcp-server/src/greptime.test.ts", "packages/mcp-server/src/greptime.ts", "packages/mcp-server/src/mcp.test.ts", "packages/mcp-server/src/mcp.ts", "packages/mcp-server/src/observe.ts", "packages/mcp-server/src/service.test.ts", "packages/mcp-server/src/service.ts", "scripts/doctor-units.test.ts", "scripts/greptime-smoke.ts", "scripts/rehearsal.test.ts", "scripts/rehearsal.ts"]
-covered_digest: "v3:sha256:6ef2d94b0a1fc5833e22e7070ee5c4e05215b8d37ff51cbd796aa207290988e2"
+covered_digest: "v3:sha256:5a3fc737876e15a152a52ead68401aa63957fb1a214986deed36bd80bedd84a1"
 behavior_unverified: 2
 overrides_applied: 0
+re_verification:
+  previous_status: stale
+  previous_score: 20/20
+  gaps_closed: []
+  gaps_remaining: ["devnet anchor store + verify behaviors (operator live window, L1-L10)"]
+  regressions: []
 ---
 
 # Phase 28: Hourly Anchor Job and Verify Verification Report
@@ -83,3 +89,23 @@ L1–L10 deferred to an operator-approved window with a funded key (see `28-04-S
 ## Verification path (close-out)
 
 Path A (verify-resume): all four PLANs carry SUMMARYs, code merged via PR #35 (`589a27c`, ancestor of HEAD), no prior VERIFICATION.md. Per close-out rules no plan was re-run (#2868): `init verify-work --phase 28` confirms implementation-complete / verification-missing with next action `/gsd-execute-phase 28` resuming at the gates. Gates only, live steps recorded verbatim, never run.
+
+---
+
+## Close-out sweep re-verification (2026-10-11, HEAD `ed696ef`, PR #53 merged)
+
+Covered-file delta since the `e295746` verify (2 files): `packages/mcp-server/src/service.ts`
+(the same phase-29 teachable +57, additive, awaited-caught) and
+`scripts/doctor-units.test.ts` (+9/-1, phase-31 host-wiring accommodation). No anchor,
+verify, RPC, config, graph-bind, or greptime line altered.
+
+- `bun test ledger/rpc + anchor + config + graph-bind + doctor-units`: **118 pass /
+  8 skip / 0 fail**; anchor-adjacent `mcp + greptime + service + rehearsal` files green
+  in the 16/21/27 targeted runs.
+- Standing gaps unchanged: the two devnet behaviors stay operator-gated
+  (`behavior_unverified: 2`); no devnet write attempted.
+- Shared gates at tip: `bun test` 3136 pass / 58 skip / 1 fail (F-01 only),
+  `bunx tsc --noEmit` clean, pytest 246 passed, `check:phase-close` pass.
+
+Verdict: 20/20 truths stand, no regressions, no new gaps. Digest refreshed to
+`v3:sha256:5a3fc737876e15a152a52ead68401aa63957fb1a214986deed36bd80bedd84a1`.

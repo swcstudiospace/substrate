@@ -1,12 +1,18 @@
 ---
 phase: 19-lane-b-collectors
-verified: 2026-10-10T13:51:40Z
+verified: 2026-10-11T02:10:00Z
 status: passed
 score: 28/28 must-haves verified
 covered_files: [".planning/phases/19-lane-b-collectors/19-01-PLAN.md", ".planning/phases/19-lane-b-collectors/19-01-SUMMARY.md", ".planning/phases/19-lane-b-collectors/19-02-PLAN.md", ".planning/phases/19-lane-b-collectors/19-02-SUMMARY.md", ".planning/phases/19-lane-b-collectors/19-03-PLAN.md", ".planning/phases/19-lane-b-collectors/19-03-SUMMARY.md", ".planning/phases/19-lane-b-collectors/19-04-PLAN.md", ".planning/phases/19-lane-b-collectors/19-04-SUMMARY.md", ".planning/phases/19-lane-b-collectors/19-05-PLAN.md", ".planning/phases/19-lane-b-collectors/19-05-SUMMARY.md", "packages/collectors/src/emit.ts", "packages/collectors/src/git-context.ts", "packages/collectors/src/status.ts", "packages/collectors/src/grok.ts", "packages/collectors/src/herdr-map.ts", "packages/collectors/src/herdr-state.ts", "packages/collectors/src/herdr.ts", "packages/collectors/src/muse.ts", "packages/collectors/src/cursor-stop.ts", "packages/projector/src/muse.ts", "packages/projector/src/cursor.ts", "packages/mcp-server/src/event-sources.ts", "docs/event-vocabulary.md", "docs/collectors.md", "docs/runbooks/lane-b-collectors.md", "scripts/laneb-proof.ts", "infra/vps/substrate-collector-herdr.service", "infra/vps/substrate-collector-muse.service", "package.json"]
-covered_digest: "v3:sha256:965646d298290159cb4282cd7095604c493bceae4b5c156b4e506ddfa0b41285"
+covered_digest: "v3:sha256:b55cbcadfc5a250fe5786c65e24838fb02f547e497dc6d63d0e7fd985b5c0b96"
 behavior_unverified: 0
 overrides_applied: 0
+re_verification:
+  previous_status: stale
+  previous_score: 28/28
+  gaps_closed: []
+  gaps_remaining: []
+  regressions: []
 ---
 
 # Phase 19: Lane B Collectors Verification Report
@@ -160,3 +166,20 @@ No production restart was needed for any proof: the `p19` twin was already up an
 _Verified: 2026-10-10T13:51:40Z_
 _Verifier: Phase19Verify (gsd verify-gates-only)_
 _Head: 5f495ad · tsc exit 0 · suite 2645 pass / 58 skip / 2 fail (F-01, F-02) · proof:laneb 27/27 · phase-close pass · units verify exit 0_
+
+---
+
+## Close-out sweep re-verification (2026-10-11, HEAD `ed696ef`, PR #53 merged)
+
+Covered-file delta since the `1ee0b11` verify: exactly one file — `package.json`
+(shared scripts block: new `test:py`/smoke entries). The entire `packages/collectors/`
+tree, the projector lane-B files, `scripts/laneb-proof.ts`, and all collector docs are
+byte-identical (`git diff 1ee0b11 HEAD` empty outside `package.json`).
+
+- No phase-specific proof re-run: the delta touches no phase-19 file, so the recorded
+  `proof:laneb` 27/27 stands.
+- Shared gates at tip: `bun test` 3136 pass / 58 skip / 1 fail (F-01 only),
+  `bunx tsc --noEmit` clean, pytest 246 passed, `check:phase-close` pass.
+
+Verdict: 28/28 truths stand, no regressions, no new gaps. Digest refreshed to
+`v3:sha256:b55cbcadfc5a250fe5786c65e24838fb02f547e497dc6d63d0e7fd985b5c0b96`.

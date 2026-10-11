@@ -1,10 +1,10 @@
 ---
 phase: 27-ledger-primitives-and-ingest-order
-verified: 2026-10-10T21:34:54Z
+verified: 2026-10-11T02:10:00Z
 status: passed
 score: 18/18 must-haves verified
 covered_files: [".planning/phases/27-ledger-primitives-and-ingest-order/27-01-PLAN.md", ".planning/phases/27-ledger-primitives-and-ingest-order/27-01-SUMMARY.md", ".planning/phases/27-ledger-primitives-and-ingest-order/27-02-PLAN.md", ".planning/phases/27-ledger-primitives-and-ingest-order/27-02-SUMMARY.md", ".planning/phases/27-ledger-primitives-and-ingest-order/27-03-PLAN.md", ".planning/phases/27-ledger-primitives-and-ingest-order/27-03-SUMMARY.md", ".planning/phases/27-ledger-primitives-and-ingest-order/27-04-PLAN.md", ".planning/phases/27-ledger-primitives-and-ingest-order/27-04-SUMMARY.md", "README.md", "bun.lock", "docs/greptime-ledger.md", "packages/ledger/src/index.ts", "packages/ledger/src/memo.ts", "packages/ledger/src/merkle.ts", "packages/ledger/src/period.ts", "packages/ledger/src/rpc.ts", "packages/ledger/src/solana.ts", "packages/mcp-server/package.json", "packages/mcp-server/src/greptime.test.ts", "packages/mcp-server/src/greptime.ts", "packages/mcp-server/src/service.test.ts", "packages/mcp-server/src/service.ts", "scripts/greptime-smoke.ts"]
-covered_digest: "v3:sha256:8964d8beb6d08ea680f614c3f68b5d93a71c3324a2f0e42e251e7d095246f3d5"
+covered_digest: "v3:sha256:29f7573ec489eb6c5d1cca9778f0aeb137d5ded9b1e9db89c2a4c746698de46e"
 behavior_unverified: 1
 overrides_applied: 0
 re_verification:
@@ -110,3 +110,22 @@ Covered-file drift since the phase-27 merge (`67cd428..3754c6e`): `service.ts` +
 - Full suite: 2845 pass / 58 skip / 1 fail; the single fail is the recorded baseline environmental `rehearsal.test.ts --port 7410` cwd-sensitive assertion (phase-16 scope).
 
 Digest refreshed to `v3:sha256:8964d8beb6d08ea680f614c3f68b5d93a71c3324a2f0e42e251e7d095246f3d5`. Standing gap unchanged: production GreptimeDB v1.1.4 acceptance remains an operator deploy step (`behavior_unverified: 1`).
+
+---
+
+## Close-out sweep re-verification (2026-10-11, HEAD `ed696ef`, PR #53 merged)
+
+Covered-file delta since the `35c8f5b` verify (2 files): `bun.lock` (phase-31's
+agentos-free regen) and `packages/mcp-server/src/service.ts` (+57 lines, phase-29
+teachable trail: awaited-with-caught-failure emit plus a read-only `teachable:` reader).
+No ledger, greptime, anchor, or ingest-order line altered.
+
+- `bun test packages/ledger/`: **50 pass / 0 fail**; `bun test greptime + service`:
+  **297 pass / 0 fail** (greptime 91 + service 206, pins intact).
+- Standing gap unchanged: production GreptimeDB v1.1.4 acceptance remains an operator
+  deploy step (`behavior_unverified: 1`).
+- Shared gates at tip: `bun test` 3136 pass / 58 skip / 1 fail (F-01 only),
+  `bunx tsc --noEmit` clean, pytest 246 passed, `check:phase-close` pass.
+
+Verdict: 18/18 truths stand, no regressions, no new gaps. Digest refreshed to
+`v3:sha256:29f7573ec489eb6c5d1cca9778f0aeb137d5ded9b1e9db89c2a4c746698de46e`.

@@ -1,3 +1,19 @@
+---
+phase: 32-lane-a-host-core
+verified: 2026-10-11T02:10:00Z
+status: passed
+score: 12/12 must-haves rehearsal-proven (lease lifecycle + 38/38 worked-node smoke); live L1-L4 OPERATOR-GATED
+covered_files: [".planning/phases/32-lane-a-host-core/32-01-PLAN.md", ".planning/phases/32-lane-a-host-core/32-01-SUMMARY.md", ".planning/phases/32-lane-a-host-core/32-02-PLAN.md", ".planning/phases/32-lane-a-host-core/32-02-SUMMARY.md", ".planning/phases/32-lane-a-host-core/32-03-PLAN.md", ".planning/phases/32-lane-a-host-core/32-03-SUMMARY.md", "docs/runbooks/lane-a-host.md", "infra/vps/substrate-host.service", "packages/host/src/hostfns.test.ts", "packages/host/src/seed.test.ts", "packages/host/src/substrate.test.ts", "packages/host/src/substrate.ts", "packages/host/src/sync.test.ts", "packages/host/src/tasks.test.ts", "packages/host/src/tasks.ts", "scripts/host-restart.test.ts", "scripts/host-smoke.test.ts", "scripts/host-smoke.ts"]
+covered_digest: "v3:sha256:166b439fa48b0d46b71fedf4ea1b16b48c49c917e9ab8859904adeb3c288f548"
+behavior_unverified: 4
+overrides_applied: 0
+registration:
+  previous_status: missing
+  registered_at_tip: ed696ef
+  digest_check: "phase 33 extended tasks.ts (+93 approval deadlines/sweep) + tasks.test.ts (+165) and added telegram.ts tests; manifest still dormant:31; lease/restart proofs re-run green at tip (see confirmation below)"
+  gaps_remaining: ["L1 real VM-backed node run (isolated graph + throwaway repo)", "L2 production unit install/restart", "L3 manifest dormant:31 -> live flip", "L4 real claude-code quota spend outside L1"]
+---
+
 # 32-VERIFICATION.md — Phase 32 provable scope
 
 **Branch:** `phase/32-lane-a-host-core` → PR #52. **Merge:** performed 2026-10-11T00:53:55Z (`gh pr ready` n/a — already ready; `gh pr merge --merge --auto` per the v1.3 recorded shipping decision: one PR per phase, Greptile clean, auto-merge).
@@ -30,3 +46,15 @@
 - L3 manifest `dormant:31` → `live` flip.
 - L4 any real `claude-code` quota spend outside L1's window.
 - Runbook defines each gate with preconditions, run, record, and rollback; the executor stops at L1.
+
+---
+
+## Close-out sweep tip confirmation (2026-10-11, HEAD `ed696ef`, PR #53 merged)
+
+Phase 33 extended `tasks.ts` (+93 approval deadlines/sweep) and `tasks.test.ts` (+165) and
+added the `telegram.ts` tests, so the lease proofs were re-run at tip rather than carried:
+`bun test packages/host/`: **225 pass / 0 fail**; `bun run smoke:host`: **38/38**;
+`bun test scripts/host-restart.test.ts scripts/doctor-units.test.ts`: **20/20**. Manifest
+empty (`dormant:31`). Full `bun test` 3136 pass / 58 skip / 1 fail (F-01 only),
+`bunx tsc --noEmit` clean, `check:phase-close` pass. Live L1–L4 stay OPERATOR-GATED —
+never run.

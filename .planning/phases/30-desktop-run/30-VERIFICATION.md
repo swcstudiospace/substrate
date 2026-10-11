@@ -1,12 +1,18 @@
 ---
 phase: 30-desktop-run
-verified: 2026-10-10T22:40:46Z
+verified: 2026-10-11T02:10:00Z
 status: passed
 score: 12/12 must-haves verified
 covered_files: [".planning/phases/30-desktop-run/30-01-PLAN.md", ".planning/phases/30-desktop-run/30-01-SUMMARY.md", ".planning/phases/30-desktop-run/30-02-PLAN.md", ".planning/phases/30-desktop-run/30-02-SUMMARY.md", ".planning/phases/30-desktop-run/30-03-PLAN.md", ".planning/phases/30-desktop-run/30-03-SUMMARY.md", ".planning/phases/30-desktop-run/30-04-PLAN.md", ".planning/phases/30-desktop-run/30-04-SUMMARY.md", ".planning/phases/30-desktop-run/30-05-PLAN.md", ".planning/phases/30-desktop-run/30-05-SUMMARY.md", ".planning/phases/30-desktop-run/30-06-PLAN.md", ".planning/phases/30-desktop-run/30-06-SUMMARY.md", ".planning/phases/30-desktop-run/30-07-PLAN.md", ".planning/phases/30-desktop-run/30-07-SUMMARY.md", ".planning/phases/30-desktop-run/30-CONTEXT.md", ".planning/phases/30-desktop-run/30-N1-SPIKE.md", ".planning/phases/30-desktop-run/30-PATTERNS.md", ".planning/phases/30-desktop-run/30-PROOF.md", ".planning/phases/30-desktop-run/30-RESEARCH.md", ".planning/phases/30-desktop-run/30-VALIDATION.md", ".env.example", "README.md", "docs/event-vocabulary.md", "docs/mcp-audit.md", "docs/runbooks/desktop.md", "infra/desktop/substrate-desktop.sh", "package.json", "packages/mcp-server/src/config.ts", "packages/mcp-server/src/desktop/actions.test.ts", "packages/mcp-server/src/desktop/actions.ts", "packages/mcp-server/src/desktop/config.test.ts", "packages/mcp-server/src/desktop/driver.test.ts", "packages/mcp-server/src/desktop/driver.ts", "packages/mcp-server/src/desktop/png.test.ts", "packages/mcp-server/src/desktop/png.ts", "packages/mcp-server/src/desktop/tool.test.ts", "packages/mcp-server/src/event-sources.ts", "packages/mcp-server/src/http.test.ts", "packages/mcp-server/src/index.ts", "packages/mcp-server/src/mcp.ts", "packages/mcp-server/src/observe.test.ts", "packages/mcp-server/src/observe.ts", "packages/mcp-server/src/rehearsal-env.test.ts", "packages/mcp-server/src/rehearsal-env.ts", "packages/mcp-server/src/service.ts", "scripts/desktop-smoke.test.ts", "scripts/desktop-smoke.ts", "scripts/rehearsal.test.ts", "scripts/rehearsal.ts", "scripts/substrate-desktop.test.ts"]
-covered_digest: "v3:sha256:6a3afd94017115d9d32a15ee26337bfe2c9c1d8e97cf05d66144ff5adfe9770e"
+covered_digest: "v3:sha256:871b2cbb2fd135998300c28e49d7074be4775760a8eb4873737c17ff16e312b0"
 behavior_unverified: 2
 overrides_applied: 0
+re_verification:
+  previous_status: stale
+  previous_score: 12/12
+  gaps_closed: []
+  gaps_remaining: ["live pixel proof chain (operator display window)", "N1 ladder run (OPERATOR-GATED, 30-N1-SPIKE.md NOT-RUN verdicts)"]
+  regressions: []
 ---
 
 # Phase 30: desktop_run Verification Report
@@ -157,3 +163,24 @@ executed. Each needs explicit operator approval:
   unset the variable → every call refused)
 - **Optional `claude -p` session:** a model-driven session with the allowlisted token as an
   extra proof. (spends model quota; rollback: none)
+
+---
+
+## Close-out sweep re-verification (2026-10-11, HEAD `ed696ef`, PR #53 merged)
+
+Covered-file delta since the `f8af263` verify: exactly one file — `package.json`
+(shared scripts block). The entire `packages/mcp-server/src/desktop/` tree, the
+lifecycle script, and all desktop docs are byte-identical. `30-06-SUMMARY.md` was
+reconciled `blocked` → `complete` (plan deliverable was always done; the live ladder run
+stays OPERATOR-GATED) to match the milestone convention; the digest above covers the
+reconciled file.
+
+- Desktop files `bun test desktop/actions + desktop/config + desktop/driver + desktop/png +
+  desktop/tool + desktop-smoke + substrate-desktop`: **101 pass / 0 fail**.
+- Standing gaps unchanged: live pixel chain + N1 ladder stay operator-gated
+  (`behavior_unverified: 2`); no display touched, no quota spent.
+- Shared gates at tip: `bun test` 3136 pass / 58 skip / 1 fail (F-01 only),
+  `bunx tsc --noEmit` clean, pytest 246 passed, `check:phase-close` pass.
+
+Verdict: 12/12 truths stand, no regressions, no new gaps. Digest refreshed to
+`v3:sha256:871b2cbb2fd135998300c28e49d7074be4775760a8eb4873737c17ff16e312b0`.
