@@ -266,3 +266,52 @@ describe("commit executor (c:hostfn_commit)", () => {
 		expect(await commit({ ...nothing.ctx, message: "m" })).toEqual({ error: "git commit exited 1: nothing to commit, working tree clean" });
 	});
 });
+
+describe("host git plumbing carries no credential value (32-03, D32-07)", () => {
+	test("a full commit→push→pr-create sequence records no planted value in any argv or output, with fixed targets", async () => {
+		const planted = "hb_test_4a7e1b5d48f09f2c6e9b2d5f807163c3";
+		const store = new MemoryTaskStore();
+		store.save(record());
+		const calls: string[][] = [];
+		const outputs: string[] = [];
+		const run: Runner = async (argv) => {
+			calls.push([...argv]);
+			const key = argv[0] === "git" && argv[1] === "-C" ? argv.slice(3).join(" ") : argv.join(" ");
+			let reply: RunResult;
+			if (key.startsWith("gh pr create")) {
+				reply = { code: 0, stdout: `https://github.com/${REPO}/pull/99\n`, stderr: "" };
+			} else if (key === "rev-parse --abbrev-ref HEAD") {
+				reply = { code: 0, stdout: `${BRANCH}\n`, stderr: "" };
+			} else if (key === "remote get-url origin") {
+				reply = { code: 0, stdout: `https://github.com/${REPO}.git\n`, stderr: "" };
+			} else if (key === "diff --name-only origin/main...HEAD") {
+				reply = { code: 0, stdout: "packages/host/src/x.ts\n", stderr: "" };
+			} else if (key === "rev-parse HEAD") {
+				reply = { code: 0, stdout: "1234567890abcdef1234567890abcdef12345678\n", stderr: "" };
+			} else if (key.startsWith("push origin ") || key.startsWith("add -A") || key.includes("commit -m")) {
+				reply = { code: 0, stdout: "", stderr: "" };
+			} else {
+				return { code: 1, stdout: "", stderr: `unexpected command: ${key}` };
+			}
+			outputs.push(`${reply.stdout}${reply.stderr}`);
+			return reply;
+		};
+		const base = { graphId: GID, nodeId: NID, store, substrate: { graphGet: async () => GRAPH }, run };
+		expect(await commit({ ...base, message: "worked node" })).toEqual({ committed: true, sha: "1234567890abcdef1234567890abcdef12345678" });
+		const pushed = await gitPush(base);
+		expect(pushed).toEqual({ pushed: BRANCH, output: "" });
+		expect(await prCreate({ ...base, title: "Worked node", body: "proof" })).toEqual({
+			pr_url: `https://github.com/${REPO}/pull/99`,
+			pr_number: 99,
+			existing: false,
+		});
+		// Fixed targets: the worktree, the branch, origin, the graph's repo and base.
+		const flat = calls.map((argv) => argv.join(" "));
+		expect(flat).toContain(`git -C ${WT} push origin ${BRANCH}`);
+		expect(flat.some((cmd) => cmd.includes(`--repo ${REPO}`) && cmd.includes("--base main") && cmd.includes(`--head ${BRANCH}`))).toBe(true);
+		expect(flat.some((cmd) => cmd.includes(":(exclude,glob)**/.substrate-*"))).toBe(true);
+		// No credential value anywhere in the plumbing.
+		expect(calls.flat().some((arg) => arg.includes(planted))).toBe(false);
+		expect(outputs.some((out) => out.includes(planted))).toBe(false);
+	});
+});

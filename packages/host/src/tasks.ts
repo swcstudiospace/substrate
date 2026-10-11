@@ -22,7 +22,18 @@ import {
 	type TrackerLocators,
 	VM_WORK,
 } from "./seed.ts";
-import { type GraphNodeView, type GraphView, HOST_SURFACE } from "./substrate.ts";
+import {
+	type ClaimReply,
+	type CompleteReply,
+	type Dod,
+	type GraphNodeView,
+	type GraphView,
+	HEARTBEAT_INTERVAL_MS,
+	type HeartbeatReply,
+	heartbeatDue,
+	HOST_SURFACE,
+	type LeaseStoreLike,
+} from "./substrate.ts";
 
 export type PendingApproval = { request_id: string; tool: string; at: string };
 export type SeededFile = { path: string; sha256: string; bytes: number };
@@ -263,12 +274,21 @@ export type VmHandle = {
 export type SubstrateLike = {
 	graphGet(graphId: string): Promise<GraphView | null>;
 	graphClaim(graphId: string, nodeId: string, surface: string, sessionId: string): Promise<{ claimed: boolean; reason?: string }>;
+	claimAndPersist(
+		store: LeaseStoreLike,
+		graphId: string,
+		nodeId: string,
+		surface: string,
+		sessionId: string,
+		nowMs?: number,
+	): Promise<ClaimReply>;
+	heartbeat(graphId: string, nodeId: string, leaseId: string, ttlSeconds?: number): Promise<HeartbeatReply>;
+	graphComplete(graphId: string, nodeId: string, leaseId: string | null, dod: Dod): Promise<CompleteReply>;
 	graphRelease(graphId: string, nodeId: string, surface: string, sessionId: string): Promise<unknown>;
 	brief(graphId: string, repo: string): Promise<string>;
 	/** Host-job bearer for the seeded substrate MCP entry; absent on September-era fakes. */
 	readonly bearer?: string | null;
 };
-
 /** The slice of sync.ts's HostSync the turn-settle backstop drives. */
 export type HostSyncLike = {
 	syncPr(input: {
@@ -292,6 +312,8 @@ export type TaskServiceDeps = {
 	/** vm.getOrCreate([graphId]) — one VM per graph (D-06). */
 	vmFor: (graphId: string) => VmHandle;
 	store: TaskStoreLike;
+	/** The lease files beside the task records (D32-04); `main.ts` roots it at the unit's storage dir. */
+	leases: LeaseStoreLike;
 	/** Awaited before sessions.open and before every prompt (T-03-03-09). */
 	ensureModelRoute: (handle: VmHandle, graphId: string) => Promise<void>;
 	route: Route;
@@ -304,7 +326,18 @@ export type TaskServiceDeps = {
 	sync?: HostSyncLike;
 	log?: (line: string) => void;
 	now?: () => Date;
+	/** Heartbeat tick period in ms; the half-TTL default stands in production, tests inject short values. */
+	heartbeatIntervalMs?: number;
 };
+
+/** The DoD summary cap, matching the `graph_complete` tool schema. */
+export const DOD_SUMMARY_MAX = 2000;
+
+/** One heartbeat-or-reclaim tick's outcome (D32-02). */
+export type HeartbeatTick = "ok" | "not-due" | "reclaimed" | "failed-closed" | "idle";
+
+export type CompleteInput = { summary: string; tests_pass: boolean; review_pass?: boolean };
+export type CompleteResult = { completed: boolean; reason?: string };
 
 export type TaskStatus = TaskRecord & {
 	state: string;
@@ -324,6 +357,8 @@ export class TaskService {
 	now: () => Date;
 	/** In-flight turns by `<gid>/<nid>`: the promise settles once the record reflects the prompt's outcome. */
 	turns: Map<string, Promise<void>>;
+	/** Heartbeat tick timers by `<gid>/<nid>`, armed while a turn runs (D32-02); cleared on every settle path. */
+	heartbeats: Map<string, NodeJS.Timeout>;
 	/** resumeInterrupted runs once per host process (D-07). */
 	resumedThisBoot: boolean;
 	/** Set by beginShutdown: prompt rejections after this point are the shutdown's, not the turn's. */
@@ -334,6 +369,7 @@ export class TaskService {
 		this.log = deps.log ?? ((line) => process.stdout.write(`${line}\n`));
 		this.now = deps.now ?? (() => new Date());
 		this.turns = new Map();
+		this.heartbeats = new Map();
 		this.resumedThisBoot = false;
 		this.stopping = false;
 	}
@@ -341,11 +377,155 @@ export class TaskService {
 	/**
 	 * Called from the SIGTERM handler before the registry shuts down: an in-flight prompt that the
 	 * shutdown rejects (sidecar exit, lost websocket) must keep its record in flight, or the next
-	 * boot would never send its continuation (D-07).
+	 * boot would never send its continuation (D-07). Heartbeat ticks stop: the dead process must
+	 * not extend a lease the next boot re-claims (T-32-01a).
 	 */
 	beginShutdown(): void {
 		this.stopping = true;
+		for (const timer of this.heartbeats.values()) clearInterval(timer);
+		this.heartbeats.clear();
 	}
+
+	/**
+	 * The single release path (D32-03): every terminal state funnels here, and the record's
+	 * `released` flag makes a second call a no-op. Never throws — a refused transport is logged.
+	 */
+	async releaseOnce(graphId: string, nodeId: string): Promise<void> {
+		const key = `${graphId}/${nodeId}`;
+		const record = this.deps.store.get(graphId, nodeId);
+		if (record?.released) return;
+		await this.deps.substrate
+			.graphRelease(graphId, nodeId, HOST_SURFACE, record?.session_id ?? nodeId)
+			.catch((cause: unknown) => this.log(`[substrate-host] release ${key} failed: ${String(cause)}`));
+		if (record) {
+			this.update(graphId, nodeId, (r) => {
+				r.released = true;
+			});
+		}
+	}
+
+	/** Arm the heartbeat tick for a running turn; an armed tick is replaced, never doubled. */
+	private startHeartbeat(graphId: string, nodeId: string): void {
+		const key = `${graphId}/${nodeId}`;
+		this.clearHeartbeat(graphId, nodeId);
+		const timer = setInterval(() => {
+			void this.heartbeatTick(graphId, nodeId);
+		}, this.deps.heartbeatIntervalMs ?? HEARTBEAT_INTERVAL_MS);
+		timer.unref?.();
+		this.heartbeats.set(key, timer);
+	}
+
+	/** Clear one task's tick; idempotent, so every settle path calls it unconditionally. */
+	private clearHeartbeat(graphId: string, nodeId: string): void {
+		const key = `${graphId}/${nodeId}`;
+		const timer = this.heartbeats.get(key);
+		if (timer !== undefined) {
+			clearInterval(timer);
+			this.heartbeats.delete(key);
+		}
+	}
+
+	/** Whether a tick is armed for this task (lifecycle introspection for tests and the resume path). */
+	heartbeatArmed(graphId: string, nodeId: string): boolean {
+		return this.heartbeats.has(`${graphId}/${nodeId}`);
+	}
+
+	/**
+	 * Heartbeat-or-reclaim shared by the tick and the resume path (D32-02/D32-06): a due
+	 * heartbeat goes out fenced on the persisted `lease_id`; a refusal — or a missing lease
+	 * file — triggers exactly one `claimAndPersist` re-claim, never an extension, never a loop.
+	 */
+	private async heartbeatOrReclaim(graphId: string, nodeId: string, sessionId: string): Promise<"ok" | "not-due" | "reclaimed" | "failed"> {
+		const key = `${graphId}/${nodeId}`;
+		const nowMs = this.now().getTime();
+		const lease = this.deps.leases.load(graphId, nodeId);
+		if (lease && !heartbeatDue(lease, nowMs)) return "not-due";
+		if (lease) {
+			let beat: { ok: boolean; reason?: string };
+			try {
+				beat = await this.deps.substrate.heartbeat(graphId, nodeId, lease.lease_id, lease.ttlSeconds);
+			} catch (cause) {
+				beat = { ok: false, reason: String(cause) };
+			}
+			if (beat.ok) {
+				this.log(`[substrate-host] heartbeat ok ${key}`);
+				return "ok";
+			}
+			this.log(`[substrate-host] heartbeat refused ${key}: ${beat.reason ?? "refused"} — re-claiming once`);
+		}
+		let reclaim: { claimed: boolean; reason?: string };
+		try {
+			reclaim = await this.deps.substrate.claimAndPersist(this.deps.leases, graphId, nodeId, HOST_SURFACE, sessionId, nowMs);
+		} catch (cause) {
+			this.log(`[substrate-host] re-claim failed ${key}: ${String(cause)}`);
+			return "failed";
+		}
+		if (reclaim.claimed && this.deps.leases.load(graphId, nodeId)) {
+			this.log(`[substrate-host] lease re-claimed for ${key}: yes`);
+			return "reclaimed";
+		}
+		this.log(`[substrate-host] re-claim refused ${key}: ${reclaim.reason ?? "refused"}`);
+		return "failed";
+	}
+
+	/**
+	 * One tick for a running turn: idle when the turn already ended, fail-closed (mark failed
+	 * + single release) when the lease is gone and the one re-claim refused.
+	 */
+	async heartbeatTick(graphId: string, nodeId: string): Promise<HeartbeatTick> {
+		const key = `${graphId}/${nodeId}`;
+		const record = this.deps.store.get(graphId, nodeId);
+		if (!record || !record.turn_in_flight || record.released || record.exit_code !== null) return "idle";
+		const outcome = await this.heartbeatOrReclaim(graphId, nodeId, record.session_id);
+		if (outcome !== "failed") return outcome;
+		this.clearHeartbeat(graphId, nodeId);
+		await this.releaseOnce(graphId, nodeId);
+		this.update(graphId, nodeId, (r) => {
+			r.turn_in_flight = false;
+			r.last_error = "lease lost";
+			r.exit_code = 1;
+		});
+		this.log(`[substrate-host] turn failed ${key}: lease lost`);
+		return "failed-closed";
+	}
+
+	/**
+	 * Complete the node through the DoD gate with the persisted `lease_id` (D32-03): the
+	 * server drops the lease on success, so the record is marked released and no later path
+	 * re-releases it. A released record completes nothing — the guard is the double-release
+	 * protection, not an error.
+	 */
+	async complete(graphId: string, nodeId: string, input: CompleteInput): Promise<CompleteResult> {
+		const key = `${graphId}/${nodeId}`;
+		const record = this.deps.store.get(graphId, nodeId);
+		if (!record) return { completed: false, reason: "unknown task" };
+		if (record.released) return { completed: false, reason: "already released" };
+		const summary = input.summary.trim().slice(0, DOD_SUMMARY_MAX);
+		if (summary === "") return { completed: false, reason: "dod-required" };
+		const dod: Dod = {
+			summary,
+			tests_pass: input.tests_pass,
+			...(input.review_pass !== undefined ? { review_pass: input.review_pass } : {}),
+		};
+		const lease = this.deps.leases.load(graphId, nodeId);
+		let reply: { completed: boolean; reason?: string };
+		try {
+			reply = await this.deps.substrate.graphComplete(graphId, nodeId, lease?.lease_id ?? null, dod);
+		} catch (cause) {
+			return { completed: false, reason: String(cause) };
+		}
+		if (!reply.completed) return { completed: false, reason: reply.reason ?? "refused" };
+		this.clearHeartbeat(graphId, nodeId);
+		this.update(graphId, nodeId, (r) => {
+			r.turn_in_flight = false;
+			r.released = true;
+			if (r.last_stop_reason === null) r.last_stop_reason = "end_turn";
+			r.exit_code = r.last_error ? 1 : 0;
+		});
+		this.log(`[substrate-host] task completed ${key}`);
+		return { completed: true };
+	}
+
 
 	/** Research Pattern 2: validate → existing? → graph_get → graph_claim → brief → seed → open → prompt (not awaited). */
 	async openTask(body: unknown): Promise<OpenResult> {
@@ -365,8 +545,17 @@ export class TaskService {
 			return { status: 409, body: { error: `node is claimed by ${node.claimed_by} session ${node.claim_session}` } };
 		}
 
-		const claim = await this.deps.substrate.graphClaim(gid, nid, HOST_SURFACE, nid);
+		const claim = await this.deps.substrate.claimAndPersist(this.deps.leases, gid, nid, HOST_SURFACE, nid, this.now().getTime());
 		if (!claim.claimed) return { status: 409, body: { error: claim.reason ?? "claim refused" } };
+		// Persist-then-verify (D32-04): a grant without a readable lease file releases the
+		// claim and answers 502 through the same release path as any failed open — a restart
+		// must never face a held claim it cannot fence.
+		if (!this.deps.leases.load(gid, nid)) {
+			await this.releaseOnce(gid, nid);
+			this.log(`[substrate-host] open ${gid}/${nid} failed after claim: lease persist verification failed`);
+			return { status: 502, body: { error: "lease persist verification failed" } };
+		}
+		this.log(`[substrate-host] lease persisted for ${gid}/${nid}: yes`);
 
 		try {
 			const brief = await this.deps.substrate.brief(gid, req.repo);
@@ -453,21 +642,29 @@ export class TaskService {
 		}
 	}
 
-	/** Start a turn without awaiting it; the record is updated when the prompt settles. */
+	/**
+	 * Start a turn without awaiting it; the record is updated when the prompt settles. The
+	 * heartbeat tick arms here and clears on every settle path, and every non-shutdown settle
+	 * releases the claim once (D32-02/D32-03) — a settled turn holds no lease, so a later
+	 * `complete` must precede the settle and a later boot never resumes it.
+	 */
 	startPrompt(handle: VmHandle, record: TaskRecord, text: string, idempotencyKey: string): void {
 		const key = `${record.graph_id}/${record.node_id}`;
+		this.startHeartbeat(record.graph_id, record.node_id);
 		const settled = handle.sessions
 			.prompt({ sessionId: record.session_id, idempotencyKey, content: [{ type: "text", text }] })
 			.then((result) => {
+				this.clearHeartbeat(record.graph_id, record.node_id);
 				this.update(record.graph_id, record.node_id, (r) => {
 					r.turn_in_flight = false;
 					r.last_stop_reason = result.stopReason;
 					r.exit_code = pollCode(r);
 				});
 				this.log(`[substrate-host] turn ended ${key} stop=${result.stopReason}`);
-				return this.backstopSync(record.graph_id, record.node_id);
+				return this.releaseOnce(record.graph_id, record.node_id).then(() => this.backstopSync(record.graph_id, record.node_id));
 			})
 			.catch((cause: unknown) => {
+				this.clearHeartbeat(record.graph_id, record.node_id);
 				if (this.stopping) {
 					// D-07: the host is going down; the turn is interrupted, not failed, so the next boot resumes it.
 					this.log(`[substrate-host] prompt interrupted by shutdown ${key}: ${String(cause)}`);
@@ -479,7 +676,7 @@ export class TaskService {
 					r.exit_code = 1;
 				});
 				this.log(`[substrate-host] prompt failed ${key}: ${String(cause)}`);
-				return this.backstopSync(record.graph_id, record.node_id);
+				return this.releaseOnce(record.graph_id, record.node_id).then(() => this.backstopSync(record.graph_id, record.node_id));
 			})
 			.finally(() => {
 				if (this.turns.get(key) === settled) this.turns.delete(key);
@@ -537,8 +734,9 @@ export class TaskService {
 	 * boot cannot replay it (T-03-06-01). rivet restores the session itself (resume → load →
 	 * bounded-history fallback); the host only sends the next prompt. Approval requests of the dead
 	 * turn can never be answered, so they leave pending_approvals as a stale count (T-03-06-02).
-	 * The model route is re-established first (on a:hostfn_proxy the restart killed the in-VM relay);
-	 * a task whose route or prompt fails is marked failed on its own and the others still resume.
+	 * The model route is re-established first (on a:hostfn_proxy the restart killed the in-VM relay),
+	 * then the persisted lease is heartbeat-or-reclaimed (D32-06); a task whose route, lease or
+	 * prompt fails is marked failed on its own and the others still resume.
 	 * Returns the number of continuation prompts sent.
 	 */
 	async resumeInterrupted(): Promise<number> {
@@ -559,6 +757,20 @@ export class TaskService {
 					r.exit_code = 1;
 				});
 				this.log(`[substrate-host] resume ${key} failed before the prompt: ${String(cause)}`);
+				continue;
+			}
+			// D32-06: the restarted turn is a running turn — heartbeat-or-reclaim the persisted
+			// lease before the continuation. A refused re-claim fails that task alone (no prompt,
+			// no resume bump) and the loop continues over the remaining tasks.
+			const leaseCheck = await this.heartbeatOrReclaim(gid, nid, interrupted.session_id);
+			if (leaseCheck === "failed") {
+				this.update(gid, nid, (r) => {
+					r.turn_in_flight = false;
+					r.last_error = "lease lost";
+					r.exit_code = 1;
+				});
+				await this.releaseOnce(gid, nid);
+				this.log(`[substrate-host] resume ${key} failed on the lease: re-claim refused`);
 				continue;
 			}
 			const record = this.update(gid, nid, (r) => {
@@ -658,14 +870,20 @@ export class TaskService {
 		return out;
 	}
 
-	/** Cancel the running turn; the prompt promise then settles with its stop reason. */
+	/**
+	 * Cancel the running turn; the prompt promise then settles with its stop reason. The tick
+	 * clears here and the claim releases here (D32-03) — the later settle finds the `released`
+	 * flag and re-releases nothing, but still folds the stop reason into the record.
+	 */
 	async terminate(graphId: string, nodeId: string): Promise<boolean> {
 		const record = this.deps.store.get(graphId, nodeId);
 		if (!record) return false;
+		this.clearHeartbeat(graphId, nodeId);
 		await this.deps
 			.vmFor(graphId)
 			.sessions.cancelPrompt({ sessionId: record.session_id })
 			.catch((cause: unknown) => this.log(`[substrate-host] terminate ${graphId}/${nodeId}: ${String(cause)}`));
+		await this.releaseOnce(graphId, nodeId);
 		return true;
 	}
 
@@ -674,17 +892,15 @@ export class TaskService {
 		const record = this.deps.store.get(graphId, nodeId);
 		if (!record) return false;
 		const handle = this.deps.vmFor(graphId);
+		this.clearHeartbeat(graphId, nodeId);
 		await handle.sessions
 			.cancelPrompt({ sessionId: record.session_id })
 			.catch((cause: unknown) => this.log(`[substrate-host] kill cancel ${graphId}/${nodeId}: ${String(cause)}`));
 		await handle.sessions
 			.unload({ sessionId: record.session_id })
 			.catch((cause: unknown) => this.log(`[substrate-host] kill unload ${graphId}/${nodeId}: ${String(cause)}`));
-		await this.deps.substrate
-			.graphRelease(graphId, nodeId, HOST_SURFACE, record.session_id)
-			.catch((cause: unknown) => this.log(`[substrate-host] kill release ${graphId}/${nodeId}: ${String(cause)}`));
+		await this.releaseOnce(graphId, nodeId);
 		this.update(graphId, nodeId, (r) => {
-			r.released = true;
 			r.turn_in_flight = false;
 			if (r.last_stop_reason === null) r.last_stop_reason = "killed";
 			r.exit_code = pollCode(r);

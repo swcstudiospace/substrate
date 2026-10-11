@@ -41,7 +41,7 @@ import type { SandboxNetwork } from "./sandbox-options.ts";
 import { substrateDocker } from "./sandbox-provider.ts";
 import { hostCallTarget, type TaskService, type TaskStoreLike, type VmHandle } from "./tasks.ts";
 import type { ApprovalBroker } from "./telegram.ts";
-import type { Dod, SubstrateClient } from "./substrate.ts";
+import type { Dod, LeaseStoreLike, SubstrateClient } from "./substrate.ts";
 import { HOST_SURFACE } from "./substrate.ts";
 
 export type HostVmConfig = {
@@ -55,6 +55,8 @@ export type HostVmConfig = {
 	checkoutNodeModules: string;
 	store: TaskStoreLike;
 	substrate: SubstrateClient;
+	/** The lease files beside the task records (D32-04): the guest `complete` fences on the persisted id. */
+	leases: LeaseStoreLike;
 	/** D-10 host-side sync (tracker_route host, the model's `agentos-substrate sync`); null when no tracker key is configured. */
 	sync: HostSync | null;
 	/** Late-bound: the service exists before the registry starts, the client only after. */
@@ -131,7 +133,8 @@ function substrateCollection(key: readonly unknown[], config: HostVmConfig) {
 				const t = target(input);
 				if ("error" in t) return { error: t.error };
 				const dod: Dod = { summary: redact(input.summary), tests_pass: input.testsPass };
-				return config.substrate.graphComplete(t.graphId, t.nodeId, HOST_SURFACE, t.sessionId, dod);
+				const lease = config.leases.load(t.graphId, t.nodeId);
+				return config.substrate.graphComplete(t.graphId, t.nodeId, lease?.lease_id ?? null, dod);
 			},
 		},
 	};

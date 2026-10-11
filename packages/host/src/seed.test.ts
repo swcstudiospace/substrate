@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { redact } from "../../mcp-server/src/redact.ts";
-import { parseRoute, type Route, type TestsRoute, trackerRoute } from "./options.ts";
-import { renderPrompt, type RenderPromptInput, type SeedFile, type SeedFilesInput, seedFiles } from "./seed.ts";
+import { parseRoute, type Route, sessionEnv, type TestsRoute, trackerRoute } from "./options.ts";
+import { renderPrompt, type RenderPromptInput, type SeedFile, type SeedFilesInput, seedFiles, substrateProxyLoopback } from "./seed.ts";
 import type { GraphView } from "./substrate.ts";
 
 const A = ["loopback", "hostfn_proxy", "anthropic_key"] as const;
@@ -403,5 +403,48 @@ describe("seed substrate bearer (31-02 lease cutover)", () => {
 		const entry = config.mcpServers["substrate"] ?? {};
 		expect(entry["url"]).toBe("http://127.0.0.1:7410/mcp");
 		expect(entry["headers"]).toEqual({ Authorization: "Bearer test-bearer" });
+	});
+});
+
+describe("credential containment value scan (32-03, D32-07/D32-08)", () => {
+	const BEARER = "hb_test_9f2c4a7e1b5d48f0a3c6e9b2d5f807163";
+	const LEASE = "lse_7e1b5d48f09f2c4a7e3c6e9b2d5f807163";
+
+	function entryOf(files: SeedFile[]): Record<string, unknown> {
+		const config = JSON.parse(fileAt(files, "/home/agentos/.claude.json")) as {
+			mcpServers: Record<string, Record<string, unknown>>;
+		};
+		return config.mcpServers["substrate"] ?? {};
+	}
+
+	test("the planted bearer occurs in exactly the one loopback MCP entry file and nowhere else", () => {
+		const files = seedFiles(seedInput({ substrateBearer: BEARER }));
+		expect(files.filter((f) => f.content.includes(BEARER)).map((f) => f.path)).toEqual(["/home/agentos/.claude.json"]);
+		const entry = entryOf(files);
+		expect(entry["url"]).toBe("http://127.0.0.1:7410/mcp");
+		expect(entry["headers"]).toEqual({ Authorization: `Bearer ${BEARER}` });
+		// The lease id is never seeded into any file.
+		expect(files.some((f) => f.content.includes(LEASE))).toBe(false);
+		// The session env carries route/model/ids only — no bearer, no lease, no fifth key.
+		const env = sessionEnv({ route: HOSTFN_ROUTE, model: "grok-4.6", graphId: GID, nodeId: NID });
+		expect(Object.keys(env).sort()).toEqual(
+			["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL", "SUBSTRATE_GRAPH_ID", "SUBSTRATE_NODE_ID"].sort(),
+		);
+		expect(Object.values(env).some((v) => v.includes(BEARER) || v.includes(LEASE))).toBe(false);
+	});
+
+	test("a non-loopback proxy URL keeps the entry headerless: the value lands in zero files", () => {
+		const files = seedFiles(seedInput({ substrateBearer: BEARER, substrateMcpUrl: "http://192.0.2.10:7410/mcp" }));
+		expect(files.some((f) => f.content.includes(BEARER))).toBe(false);
+		expect(entryOf(files)).toEqual({ type: "http", url: "http://192.0.2.10:7410/mcp" });
+	});
+
+	test("substrateProxyLoopback gates on the hostname only, never a probe", () => {
+		expect(substrateProxyLoopback("http://127.0.0.1:7410/mcp")).toBe(true);
+		expect(substrateProxyLoopback("http://localhost:7410/mcp")).toBe(true);
+		expect(substrateProxyLoopback("http://[::1]:7410/mcp")).toBe(true);
+		expect(substrateProxyLoopback("http://192.0.2.10:7410/mcp")).toBe(false);
+		expect(substrateProxyLoopback("https://mcp.example.com/v1")).toBe(false);
+		expect(substrateProxyLoopback("not a url")).toBe(false);
 	});
 });
