@@ -397,7 +397,10 @@ Plans:
   3. `dispatch:claude-code` on a fresh issue opens a VM that claims and heartbeats; restarting `substrate-host` mid-session resumes the same session; a real push and PR land, the PR fields sync, and the issue reaches a gated Done.
 
 **Proof** (LANEA-08): Live, operator-approved: Linear, Notion, GitHub, the model route, the approvals channel and ≥ 10 GiB free disk.
-**Plans**: TBD
+**Plans**: 3 plans
+- [ ] 33-01-PLAN.md — claude-code route rehearsal: fake-host tick to landed claim plus refusal and give-up paths (LANEA-04)
+- [ ] 33-02-PLAN.md — Approval timeout plus single-use button rehearsal with fake transport (LANEA-06)
+- [ ] 33-03-PLAN.md — Fake label-to-Done chain plus docs plus G1-G5 gated tail (LANEA-08)
 
 ## Progress
 

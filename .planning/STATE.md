@@ -2,14 +2,14 @@
 gsd_state_version: "1.0"
 milestone: v1.3
 milestone_name: Build plan completion
-current_phase: 32
-current_phase_name: lane-a-host-core
-status: complete
-stopped_at: Phase 32 executed and merged (PR #52, a11354e) — 32-01 lease lifecycle, 32-02 restart survival, 32-03 containment + worked-node rehearsal + runbook; L1-L4 OPERATOR-GATED, manifest dormant:31
-last_updated: "2026-10-11T01:00:00Z"
+current_phase: 33
+current_phase_name: lane-a-dispatch-route-and-approvals
+status: planned
+stopped_at: Phase 33 planned — 33-CONTEXT.md (D33-01..D33-08), 33-RESEARCH.md (route mirror, approval timeout, closed-vocabulary events, G1-G5 gated), 3 PLANs rehearsal-first with gated tail; ready to execute
+last_updated: "2026-10-11T02:00:00Z"
 last_activity: 2026-10-11
-last_activity_desc: Phase 32 complete (claimAndPersist + heartbeat tick + single release + fenced completion; kill-and-restart rehearsal 2/2; bearer scoping + value scans; smoke:host 38/38; bun 3122/1-env-fail, pytest 230, tsc clean, phase-close green; PR #52 merged, Greptile clean)
-state_head: a11354e
+last_activity_desc: Phase 33 planned (fake-host route rehearsal, approval deadline + single-use rehearsal, fake label-to-Done chain + docs + G1-G5 tail; pytest 230 + bun baseline untouched, no live systems)
+state_head: b41dcaa
 progress:
   total_phases: 18
   completed_phases: 3
