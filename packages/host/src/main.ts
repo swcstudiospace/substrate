@@ -141,9 +141,10 @@ const skills = loadSkills(skillsDir);
 const trackers = loadTrackers(ultrathinkConfig);
 const store = new TaskStore(join(storageDir, "tasks"));
 const substrate = new SubstrateClient({ baseUrl: mcpBase });
-// D32-04: the lease files live beside the task records under the unit's storage dir, so both
-// survive a restart under the unit's StateDirectory=substrate.
-const leases = new LeaseStore(join(storageDir, "tasks"));
+// D32-04: the lease files live in a sibling dir under the unit's storage dir — beside the
+// task records, never inside their dir (TaskStore.list reads every *.json it finds, and a
+// lease file would parse as a garbage record). Both survive a restart under StateDirectory.
+const leases = new LeaseStore(join(storageDir, "leases"));
 // D-10 host-side sync: keys stay in this process (the unit's EnvironmentFile), never in the VM (D-08).
 const notionSync = NotionSync.fromEnv(process.env);
 const linearLink = LinearLink.fromEnv(process.env);
