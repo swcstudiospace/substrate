@@ -236,3 +236,21 @@ def test_open_task_without_bearer_sends_no_authorization_header():
 
     HostClient(transport=httpx.MockTransport(watching)).open_task(**OPEN)
     assert seen["auth"] is None
+
+
+def test_open_task_non_json_reply_is_host_unreachable():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"not json{")
+
+    with pytest.raises(HostRefused) as err:
+        HostClient(transport=httpx.MockTransport(handler)).open_task(**OPEN)
+    assert err.value.marker == "host-unreachable" and "non-JSON" in err.value.reason
+
+
+def test_open_task_wrong_shape_reply_is_host_unreachable():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(202, json=["a", "list"])
+
+    with pytest.raises(HostRefused) as err:
+        HostClient(transport=httpx.MockTransport(handler)).open_task(**OPEN)
+    assert err.value.marker == "host-unreachable" and "unexpected reply shape" in err.value.reason
