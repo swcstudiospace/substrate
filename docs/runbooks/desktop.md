@@ -23,8 +23,10 @@ password or typed text.
 
 It checks, in order:
 
-1. The twin answers `/healthz`, and `recruitment-desktop` inspects cleanly
-   before anything runs.
+1. The twin answers `/healthz`, and `recruitment-desktop` snapshots
+   cleanly before anything runs: absent (authoritative empty inventory),
+   or present with its metadata fingerprint. Any probe error FAILs here —
+   errors never count as absence.
 2. `substrate-desktop.sh status` answers with its key=value lines.
 3. One marker run — baseline screenshot, `key ctrl+alt+t`, the typed marker,
    a second screenshot, a closing `exit` — is accepted.
@@ -37,7 +39,9 @@ It checks, in order:
    base64 prefix in any payload.
 7. An unlisted surface's valid token is refused with no new event, no token
    is a 401, and the 6081 root without credentials is a 401.
-8. `recruitment-desktop` inspects identical after, and `status` shows the
+8. `recruitment-desktop` snapshots unchanged after (absent+absent, or
+   present with the identical fingerprint — appearance, disappearance,
+   metadata change and any error all FAIL), and `status` shows the
    loopback port, unprivileged, no socket and the desktop label.
 9. The harness audit file holds the `desktop_run` record fail-closed with
    none of the typed text or base64.
@@ -58,7 +62,7 @@ URL from `consumer.env`, the bearers from the tokens dir, and refuses a
 production port or a non-loopback host before any request. `rehearsal down`
 removes the twin, its containers and the whole run dir — screenshots
 included — so the proof numbers (band count and rectangle, the three sha256
-equalities, the event count, the audit verdict, both inspect lines, the
+equalities, the event count, the audit verdict, both snapshot states, the
 status lines) go into `30-PROOF.md` before teardown.
 
 ## Allowlist
@@ -77,12 +81,11 @@ production empty until the operator names surfaces after merge.
 ## Lifecycle
 
 `infra/desktop/substrate-desktop.sh` has two verbs and names one container.
-`up` checks root, 10 GiB free, a local image (never pulls), the basic-auth
+`up` checks root, 10 GiB free, a proven local docker endpoint (a failed,
+timed-out, empty or non-local probe refuses before image, credential-file,
+create or start work), a local image (never pulls), the basic-auth
 file, and the role label on an existing same-named container, then starts or
 creates it on `127.0.0.1:6081` and waits for the `1280 800` geometry.
-`status` prints key=value lines (ports, geometry, image, label role,
-privileged, mounts, socket). The script never stops, removes or pulls
-anything, and never names `recruitment-desktop`.
 
 ```sh
 sudo infra/desktop/substrate-desktop.sh up

@@ -52,7 +52,7 @@ import {
 	type Observability,
 } from "./observe.ts";
 import type { Substrate } from "./service.ts";
-import { proposalBodyProblem, proposalFailure, toProposalRequest } from "./skills/request.ts";
+import { proposalBodyProblem, proposalBodySizeProblem, proposalFailure, toProposalRequest } from "./skills/request.ts";
 import { EVENT_KINDS, SURFACES, type Surface } from "./types.ts";
 
 /** One hour. Anonymous callers are logged once per window, not once per request. */
@@ -883,11 +883,26 @@ export function createHttpServer(
 				const body = JSON.parse(await readBody(req)) as unknown;
 				const fields = body !== null && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : null;
 				// Audited under the tool's own name, fail-closed, before the field check and before any git work.
-				// A parsed object that will be rejected (`mode: "merge"`) is still a proposal attempt.
-				if (fields && !(await auditedRest(res, observability, surface, "skills_propose", fields))) return;
+				// A parsed object that will be rejected (`mode: "merge"`) is still a proposal attempt, and so is
+				// an authenticated non-object body: the descriptor names the shape only, never the body itself.
+				const auditBody: Record<string, unknown> = fields ?? {
+					malformed: true,
+					kind: Array.isArray(body) ? "array" : typeof body,
+					...(typeof body === "string" ? { bytes: body.length } : {}),
+				};
+				if (!(await auditedRest(res, observability, surface, "skills_propose", auditBody))) return;
 				const problem = proposalBodyProblem(body);
 				if (problem) {
 					sendJson(res, 400, { error: problem });
+					return;
+				}
+				// The wire cap above bounds raw bytes; this bounds the caller's proposal body
+				// (canonical JSON, before server-owned attribution, which costs the caller
+				// nothing), so an exact-1M body is accepted and attributed, and an over-cap
+				// one is refused 413 before any git work. Audited above with the shape check.
+				const sizeProblem = proposalBodySizeProblem(fields ?? {});
+				if (sizeProblem) {
+					sendJson(res, 413, { error: sizeProblem });
 					return;
 				}
 				try {
@@ -908,6 +923,9 @@ export function createHttpServer(
 			sendJson(res, 404, { error: `no route for ${req.method} ${url.pathname}` });
 		} catch (cause) {
 			if (cause instanceof BodyTooLargeError && (url.pathname === "/skills/propose" || url.pathname === "/docs/ingest" || url.pathname === "/mcp")) {
+				if (url.pathname === "/skills/propose" && surface !== null) {
+					if (!(await auditedRest(res, observability, surface, "skills_propose", { oversize: true }))) return;
+				}
 				sendJson(res, 413, { error: cause.message });
 				return;
 			}
@@ -919,6 +937,11 @@ export function createHttpServer(
 				return;
 			}
 			if (cause instanceof SyntaxError) {
+				if (req.method === "POST" && url.pathname === "/skills/propose" && surface !== null) {
+					if (!(await auditedRest(res, observability, surface, "skills_propose", { malformed: true, kind: "syntax" }))) return;
+					sendJson(res, 400, { error: "request body is not valid JSON" });
+					return;
+				}
 				if (req.method === "POST" && url.pathname === "/events") eventRefusal = "validation";
 				sendJson(res, 400, { error: "request body is not valid JSON" });
 				return;

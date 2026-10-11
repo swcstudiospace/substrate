@@ -8,15 +8,18 @@
  */
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { formatMemo, merkleRootHex } from "@substrate/ledger";
 import { METRIC, findCounter, sumCounter } from "@substrate/observability";
 import { loadConfig, type SubstrateConfig } from "./config.ts";
 import { createDesktopDriver } from "./desktop/driver.ts";
 import { createObservability, type Observability } from "./observe.ts";
 import { createHttpServer, type HttpServerOptions, refusalShape } from "./server.ts";
 import { Substrate } from "./service.ts";
+import { normalizeEvent } from "./event.ts";
 import {
 	ProposeFailed,
 	ProposeRefused,
@@ -26,6 +29,7 @@ import {
 } from "./skills/propose.ts";
 import { REDACTED } from "./redact.ts";
 import type { SubstrateEvent } from "./types.ts";
+import { canonicalJson, sha256Hex } from "@substrate/audit";
 
 const ROOT = join(import.meta.dir, "..", "..", "..");
 const CLI = join(ROOT, "packages", "cli", "src", "index.ts");
@@ -1237,6 +1241,64 @@ describe("POST /skills/propose", () => {
 		expect(harness.observability.audit.recent()[0]).toMatchObject({ tool: "skills_propose", decision: "allowed" });
 	});
 
+	test("an authenticated non-object body is audited with a non-echoing descriptor, then refused 400", async () => {
+		const { calls, seam } = proposer();
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory(), ...TOKENS }, { skills: seam });
+		const decoy = `decoy-${"q".repeat(32)}`;
+		for (const payload of [[{ name: decoy }], decoy, 7] as const) {
+			const reply = await propose(harness, "tok-agent", payload);
+			expect(reply.status).toBe(400);
+		}
+		expect(calls).toEqual([]);
+		const records = harness.observability.audit.recent().filter((record) => record.tool === "skills_propose");
+		expect(records).toHaveLength(3);
+		for (const record of records) expect(record).toMatchObject({ tool: "skills_propose", decision: "allowed" });
+		expect(JSON.stringify(records)).not.toContain(decoy);
+	});
+
+	test("malformed JSON on the proposal route is audited, then refused 400", async () => {
+		const { calls, seam } = proposer();
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory(), ...TOKENS }, { skills: seam });
+		const reply = await propose(harness, "tok-agent", "{nope");
+		expect(reply.status).toBe(400);
+		expect(calls).toEqual([]);
+		expect(harness.observability.audit.recent()[0]).toMatchObject({ tool: "skills_propose", decision: "allowed" });
+	});
+
+	test("an authenticated oversize body is audited with no body stored, then refused 413", async () => {
+		const { calls, seam } = proposer();
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory(), ...TOKENS }, { skills: seam });
+		const reply = await propose(harness, "tok-agent", "x".repeat(1_000_001));
+		expect(reply.status).toBe(413);
+		expect(calls).toEqual([]);
+		const [record] = harness.observability.audit.recent();
+		expect(record).toMatchObject({ tool: "skills_propose", decision: "allowed" });
+	});
+
+	test("audit denial dominates an otherwise-invalid object: 503 with nothing proposed", async () => {
+		const { calls, seam } = proposer();
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: unwritablePath(), ...TOKENS }, { skills: seam });
+		const reply = await propose(harness, "tok-agent", { ...body, mode: "merge" });
+		expect(reply.status).toBe(503);
+		expect(calls).toEqual([]);
+	});
+
+	test("audit denial dominates a non-object body: 503 with nothing proposed", async () => {
+		const { calls, seam } = proposer();
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: unwritablePath(), ...TOKENS }, { skills: seam });
+		const reply = await propose(harness, "tok-agent", [body]);
+		expect(reply.status).toBe(503);
+		expect(calls).toEqual([]);
+	});
+
+	test("audit denial dominates malformed JSON: 503 with nothing proposed", async () => {
+		const { calls, seam } = proposer();
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: unwritablePath(), ...TOKENS }, { skills: seam });
+		const reply = await propose(harness, "tok-agent", "{nope");
+		expect(reply.status).toBe(503);
+		expect(calls).toEqual([]);
+	});
+
 	test("a refusal is 400 with findings as file, line and rule only", async () => {
 		const refusal = new ProposeRefused("secret-like content in 1 place(s); remove it or use an env reference", [
 			{ file: "SKILL.md", line: 4, rule: "github" },
@@ -1277,6 +1339,59 @@ describe("POST /skills/propose", () => {
 		expect(calls).toEqual([]);
 	});
 
+	test("a serialized proposal body of exactly 1_000_000 UTF-8 bytes is accepted", async () => {
+		// Multibyte content, JSON escaping and metadata overhead all count: the boundary
+		// is on the caller's serialized UTF-8 body, not on file text alone. The fixture
+		// names the token's surface as a client-owned field, so it counts toward the 1M.
+		const rationale = 'café "quoted"\nnewline';
+		const prefix = "---\nname: demo-skill\ndescription: a demo\n---\ncafé \"q\"\n";
+		const fixed = { name: "demo-skill", rationale, surface: "claude-code", session_id: "sess-1", graph_id: "ut-1" };
+		const pad = 1_000_000 - Buffer.byteLength(JSON.stringify({ ...fixed, files: { "SKILL.md": prefix } }), "utf8");
+		const payload = { ...fixed, files: { "SKILL.md": prefix + "x".repeat(pad) } };
+		expect(Buffer.byteLength(JSON.stringify(payload), "utf8")).toBe(1_000_000);
+		const { calls, seam } = proposer();
+		const harness = await start(TOKENS, { skills: seam });
+		const reply = await propose(harness, "tok-agent", payload);
+		expect(reply.status).toBe(200);
+		expect(calls).toHaveLength(1);
+	});
+
+	test("a 1_000_000-byte wire body without a surface is accepted and attributed to the token", async () => {
+		// The caller's 1MB budget is measured before server-owned attribution, which costs
+		// nothing: an exact-1M body with no surface field is served as the token's surface,
+		// never tipped over by injection.
+		const rationale = 'café "quoted"\nnewline';
+		const prefix = "---\nname: demo-skill\ndescription: a demo\n---\ncafé \"q\"\n";
+		const fixed = { name: "demo-skill", rationale, session_id: "sess-1", graph_id: "ut-1" };
+		const pad = 1_000_000 - Buffer.byteLength(JSON.stringify({ ...fixed, files: { "SKILL.md": prefix } }), "utf8");
+		const payload = { ...fixed, files: { "SKILL.md": prefix + "x".repeat(pad) } };
+		expect(Buffer.byteLength(JSON.stringify(payload), "utf8")).toBe(1_000_000);
+		const { calls, seam } = proposer();
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory(), ...TOKENS }, { skills: seam });
+		const reply = await propose(harness, "tok-agent", payload);
+		expect(reply.status).toBe(200);
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.input).toMatchObject({ name: "demo-skill", surface: "claude-code" });
+		expect(harness.observability.audit.recent()[0]).toMatchObject({ tool: "skills_propose", decision: "allowed" });
+	});
+
+	test("a serialized proposal body of 1_000_001 UTF-8 bytes is refused 413 with nothing proposed", async () => {
+		const rationale = 'café "quoted"\nnewline';
+		const prefix = "---\nname: demo-skill\ndescription: a demo\n---\ncafé \"q\"\n";
+		const fixed = { name: "demo-skill", rationale, session_id: "sess-1", graph_id: "ut-1" };
+		const pad = 1_000_001 - Buffer.byteLength(JSON.stringify({ ...fixed, files: { "SKILL.md": prefix } }), "utf8");
+		const payload = { ...fixed, files: { "SKILL.md": prefix + "x".repeat(pad) } };
+		expect(Buffer.byteLength(JSON.stringify(payload), "utf8")).toBe(1_000_001);
+		const { calls, seam } = proposer();
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory(), ...TOKENS }, { skills: seam });
+		const reply = await propose(harness, "tok-agent", payload);
+		expect(reply.status).toBe(413);
+		expect(calls).toEqual([]);
+		const [record] = harness.observability.audit.recent();
+		expect(record).toMatchObject({ tool: "skills_propose", decision: "allowed" });
+		expect(JSON.stringify(record)).not.toContain("café");
+	});
+
 	test("it is audited as skills_propose on the REST transport, the body digested not stored", async () => {
 		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory(), ...TOKENS }, { skills: proposer().seam });
 		await propose(harness, "tok-agent");
@@ -1300,6 +1415,149 @@ describe("POST /skills/propose", () => {
 
 		expect(reply.status).toBe(503);
 		expect(calls).toEqual([]);
+	});
+
+	test("skills_propose over the real /mcp socket denied by the audit chain answers JSON-RPC -32000 with nothing proposed", async () => {
+		const { calls, seam } = proposer();
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: unwritablePath(), ...TOKENS }, { skills: seam });
+		const response = await fetch(`${harness.base}/mcp`, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				accept: "application/json, text/event-stream",
+				authorization: "Bearer tok-agent",
+			},
+			body: JSON.stringify({
+				jsonrpc: "2.0",
+				id: 9,
+				method: "tools/call",
+				params: { name: "skills_propose", arguments: { ...body } },
+			}),
+		});
+		const denied = (await response.json()) as { id: unknown; error: { code: number; message: string } };
+		expect(response.status).toBe(200);
+		expect(denied.id).toBe(9);
+		expect(denied.error.code).toBe(-32000);
+		expect(denied.error.message).toContain("skills_propose");
+		expect(calls).toEqual([]);
+	});
+
+	test("dry_run skills_propose over the real /mcp socket is still audited: denial answers -32000", async () => {
+		const { calls, seam } = proposer();
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: unwritablePath(), ...TOKENS }, { skills: seam });
+		const response = await fetch(`${harness.base}/mcp`, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				accept: "application/json, text/event-stream",
+				authorization: "Bearer tok-agent",
+			},
+			body: JSON.stringify({
+				jsonrpc: "2.0",
+				id: 10,
+				method: "tools/call",
+				params: { name: "skills_propose", arguments: { ...body, dry_run: true } },
+			}),
+		});
+		const denied = (await response.json()) as { id: unknown; error: { code: number; message: string } };
+		expect(response.status).toBe(200);
+		expect(denied.id).toBe(10);
+		expect(denied.error.code).toBe(-32000);
+		expect(denied.error.message).toContain("skills_propose");
+		expect(calls).toEqual([]);
+	});
+
+	test("skills_propose over the real /mcp socket with a caller body of exactly 1_000_000 bytes is served", async () => {
+		// The MCP door enforces the same caller-body cap as REST and the CLI, on the args
+		// as received — never the JSON-RPC envelope, never server-injected attribution.
+		// Multibyte content, JSON escaping and session/graph metadata all count. The named
+		// surface is a client-owned field, so it counts toward the 1M.
+		const rationale = 'café "quoted"\nnewline';
+		const prefix = "---\nname: demo-skill\ndescription: a demo\n---\ncafé \"q\"\n";
+		const fixed = { name: "demo-skill", rationale, surface: "claude-code", session_id: "sess-1", graph_id: "ut-1" };
+		const pad = 1_000_000 - Buffer.byteLength(JSON.stringify({ ...fixed, files: { "SKILL.md": prefix } }), "utf8");
+		const args = { ...fixed, files: { "SKILL.md": prefix + "x".repeat(pad) } };
+		expect(Buffer.byteLength(JSON.stringify(args), "utf8")).toBe(1_000_000);
+		const envelope = JSON.stringify({ jsonrpc: "2.0", id: 11, method: "tools/call", params: { name: "skills_propose", arguments: args } });
+		const { calls, seam } = proposer();
+		const harness = await start(TOKENS, { skills: seam });
+		const response = await fetch(`${harness.base}/mcp`, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				accept: "application/json, text/event-stream",
+				authorization: "Bearer tok-agent",
+			},
+			body: envelope,
+		});
+		expect(response.status).toBe(200);
+		expect(calls).toHaveLength(1);
+		expect(await response.text()).toContain("pull/12");
+	});
+
+	test("skills_propose over the real /mcp socket at 1_000_001 caller bytes is refused with nothing proposed", async () => {
+		const rationale = 'café "quoted"\nnewline';
+		const prefix = "---\nname: demo-skill\ndescription: a demo\n---\ncafé \"q\"\n";
+		const fixed = { name: "demo-skill", rationale, surface: "claude-code", session_id: "sess-1", graph_id: "ut-1" };
+		const pad = 1_000_001 - Buffer.byteLength(JSON.stringify({ ...fixed, files: { "SKILL.md": prefix } }), "utf8");
+		const args = { ...fixed, files: { "SKILL.md": prefix + "x".repeat(pad) } };
+		expect(Buffer.byteLength(JSON.stringify(args), "utf8")).toBe(1_000_001);
+		const { calls, seam } = proposer();
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory(), ...TOKENS }, { skills: seam });
+		const response = await fetch(`${harness.base}/mcp`, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				accept: "application/json, text/event-stream",
+				authorization: "Bearer tok-agent",
+			},
+			body: JSON.stringify({ jsonrpc: "2.0", id: 12, method: "tools/call", params: { name: "skills_propose", arguments: args } }),
+		});
+		expect(response.status).toBe(200);
+		expect(calls).toEqual([]);
+		const text = await response.text();
+		expect(text).toContain("over the limit of 1000000 bytes");
+		expect(text).not.toContain("café");
+		const [record] = harness.observability.audit.recent();
+		expect(record).toMatchObject({ tool: "skills_propose", decision: "allowed", transport: "mcp" });
+	});
+
+	test("a dry_run over the MCP cap is refused all the same, with nothing proposed", async () => {
+		const args = { ...body, dry_run: true, files: { "SKILL.md": "x".repeat(1_000_001) } };
+		const { calls, seam } = proposer();
+		const harness = await start(TOKENS, { skills: seam });
+		const response = await fetch(`${harness.base}/mcp`, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				accept: "application/json, text/event-stream",
+				authorization: "Bearer tok-agent",
+			},
+			body: JSON.stringify({ jsonrpc: "2.0", id: 13, method: "tools/call", params: { name: "skills_propose", arguments: args } }),
+		});
+		expect(response.status).toBe(200);
+		expect(calls).toEqual([]);
+		expect(await response.text()).toContain("over the limit of 1000000 bytes");
+	});
+
+	test("an /mcp wire past the 6M transport intake is boundedly refused before audit or dispatch", async () => {
+		// Transport intake is bounded, not unbounded: the /mcp door reads with the 6M
+		// docs ceiling, so a wire past it never reaches the audit gate or any tool.
+		// It answers the 413 the uploading routes share — never a proposal answer.
+		const { calls, seam } = proposer();
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory(), ...TOKENS }, { skills: seam });
+		const response = await fetch(`${harness.base}/mcp`, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				accept: "application/json, text/event-stream",
+				authorization: "Bearer tok-agent",
+			},
+			body: "x".repeat(6_000_000 + 1),
+		});
+		expect(response.status).toBe(413);
+		expect(calls).toEqual([]);
+		expect(harness.observability.audit.recent()).toEqual([]);
 	});
 
 	test("the route is a bounded metric label", async () => {
@@ -1368,6 +1626,7 @@ describe("desktop_run at the HTTP gate", () => {
 				desktop: createDesktopDriver({
 					run: async (argv: readonly string[]) => {
 						calls.push([...argv]);
+						if (argv[1] === "context") return { code: 0, stdout: Buffer.from("unix:///var/run/docker.sock\n"), stderr: "" };
 						if (argv.includes("getdisplaygeometry")) return { code: 0, stdout: Buffer.from("1280 800\n"), stderr: "" };
 						if (argv.includes("getwindowname")) return { code: 0, stdout: Buffer.from("stub-window\n"), stderr: "" };
 						if (argv.includes("xwd")) return { code: 0, stdout: shot, stderr: "" };
@@ -1444,27 +1703,34 @@ describe("desktop_run at the HTTP gate", () => {
 
 		expect(status).toBe(200);
 		expect(result.isError).toBe(true);
-		expect(result.text).toContain("nothing was run");
 		expect(calls).toEqual([]);
 		expect(written).toEqual([]);
 	});
 
-	test("self-attribution through an argument or a header is rejected, never honoured", async () => {
+	test("a spoofed attribution header cannot widen the token surface allowlist", async () => {
 		const { harness, calls, written } = await startDesktop();
 
-		// September's propose header is gone from the server; sending it must change
-		// nothing, and the strict schema drops the surface argument before dispatch.
+		// A valid body isolates the ignored header from strict-schema refusals.
 		const { status, raw } = await mcpCall(
 			harness.base,
-			"tok-omp",
+			"tok-cursor",
 			"desktop_run",
-			{ actions: [{ type: "screenshot" }], surface: "omp" },
-			{ "x-substrate-propose-key": "whatever" },
+			{ actions: [{ type: "screenshot" }] },
+			{ "x-substrate-surface": "omp", "x-substrate-propose-key": "irrelevant" },
 		);
 		const result = toolResult(raw);
 
 		expect(status).toBe(200);
 		expect(result.isError).toBe(true);
+		expect(calls).toEqual([]);
+		expect(written).toEqual([]);
+	});
+
+	test("an operator-marked unlisted token still cannot run desktop input", async () => {
+		const { harness, calls, written } = await startDesktop({ SUBSTRATE_OPERATOR_TOKENS: "tok-cursor" });
+		const { status, raw } = await mcpCall(harness.base, "tok-cursor", "desktop_run", { actions: [{ type: "screenshot" }] });
+		expect(status).toBe(200);
+		expect(toolResult(raw).isError).toBe(true);
 		expect(calls).toEqual([]);
 		expect(written).toEqual([]);
 	});
@@ -1496,10 +1762,254 @@ describe("desktop_run at the HTTP gate", () => {
 		const records = harness.observability.audit.recent().filter((record) => record.tool === "desktop_run");
 		expect(records).toHaveLength(1);
 		expect(records[0]).toMatchObject({ tool: "desktop_run", mode: "fail-closed" });
-		for (const key of records[0]?.arg_keys ?? []) {
-			expect(["actions", "timeout"]).toContain(key);
-		}
+		expect(records[0]?.arg_keys).toEqual(["actions"]);
+		expect(records[0]?.arg_digest).toBe(sha256Hex(canonicalJson({
+			actions: [{ type: "type", text: sentinel }, { type: "screenshot" }],
+		})));
+		expect(records[0]?.arg_digest).not.toBe(sha256Hex(canonicalJson({})));
 		expect(JSON.stringify(records)).not.toContain(sentinel);
 		expect(JSON.stringify(records)).not.toContain("iVBOR");
+	});
+});
+
+/**
+ * `POST /verify` through the real HTTP server and the real verifier.
+ *
+ * No `verifyGraph` stub: the greptime double holds store rows built through
+ * `normalizeEvent` and the devnet double is a loopback JSON-RPC stub, so the
+ * verdict the route serves is computed by the production hour report. What
+ * is asserted is the caller-observable contract — the shared root, count,
+ * signature, hour and event ids are preserved, failures arrive as a 200
+ * verdict with `ok: false` (not a 500), and the audit gate still records
+ * the read door under the shared tool name.
+ */
+describe("POST /verify shares the hour verdict", () => {
+	const H = Date.UTC(2026, 9, 1, 10);
+	const HOUR = 3_600_000;
+	const PUBKEY = "TestPubkey1111111111111111111111111111111";
+	const GENESIS = "EtWTRABZaYq6iMfeYKouRu166VU2xqaEyCydFLPYGEC";
+	const MEMO_PROGRAM = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
+
+	/** One closed hour of fixture: the store rows, the ingest records, and the digest they imply. */
+	interface VerifyHour {
+		hour: number;
+		iso: string;
+		rows: Array<Record<string, unknown>>;
+		leaves: Array<{ event_id: string; ingested_at: number; hash: string }>;
+		records: Array<{ event_id: string; event_ts: number; ingested_at: number }>;
+		root: string;
+		memo: string;
+	}
+
+	/** Two chained events in one closed hour, built through the real hash path. */
+	function buildHour(hour: number, session: string, graph: string): VerifyHour {
+		let prev: string | null = null;
+		const events = [0, 1].map((i) => {
+			const event = normalizeEvent(
+				{ surface: "omp", kind: "note", summary: `http-${hour}-${i}`, session_id: session, graph_id: graph, actor: "agent" },
+				prev,
+			);
+			prev = event.hash;
+			return event;
+		});
+		const root = merkleRootHex(events.map((event) => event.hash));
+		return {
+			hour,
+			iso: new Date(hour).toISOString(),
+			rows: events.map((event) => ({ ...event, ts: Date.parse(event.ts), payload: JSON.stringify(event.payload) })),
+			leaves: events.map((event, i) => ({ event_id: event.id, ingested_at: hour + 1000 * (i + 1), hash: event.hash })),
+			records: events.map((event, i) => ({
+				event_id: event.id,
+				event_ts: Date.parse(event.ts),
+				ingested_at: hour + 1000 * (i + 1),
+			})),
+			root,
+			memo: formatMemo({ periodStartMs: hour, rootHex: root, count: events.length }),
+		};
+	}
+
+	function anchorRow(hour: number, world: Pick<VerifyHour, "root" | "memo">, txSig: string) {
+		return {
+			period_start: new Date(hour).toISOString(),
+			period_end: new Date(hour + HOUR).toISOString(),
+			root: world.root,
+			event_count: 2,
+			memo: world.memo,
+			tx_sig: txSig,
+			signer: PUBKEY,
+			cluster: "devnet",
+			slot: 42,
+			anchored_at: new Date(hour + 5 * HOUR).toISOString(),
+		};
+	}
+
+	const rpcServers: Array<{ close(): void }> = [];
+	afterAll(() => {
+		for (const server of rpcServers) server.close();
+	});
+
+	/**
+	 * A loopback devnet: `getGenesisHash` answers devnet's hash and
+	 * `getTransaction` answers the memo envelope for known signatures, null
+	 * for anything else (an unknown transaction, unverified fail-closed).
+	 * Only what `verifyGraph` reads; the anchor job's methods are not served.
+	 */
+	async function startRpc(memos: Record<string, string>): Promise<{ url: string; seen: string[] }> {
+		const seen: string[] = [];
+		const server = createServer((req, res) => {
+			let body = "";
+			req.on("data", (chunk: Buffer) => {
+				body += chunk.toString();
+			});
+			req.on("end", () => {
+				const parsed = JSON.parse(body) as { method?: unknown; params?: unknown; id?: unknown };
+				let result: unknown = null;
+				if (parsed.method === "getGenesisHash") {
+					result = GENESIS;
+				} else if (parsed.method === "getTransaction") {
+					const params = Array.isArray(parsed.params) ? parsed.params : [];
+					const sig = params[0];
+					if (typeof sig === "string") seen.push(sig);
+					const memo = typeof sig === "string" ? memos[sig] : undefined;
+					result =
+						memo === undefined
+							? null
+							: {
+									slot: 42,
+									blockTime: null,
+									meta: { err: null, fee: 5000 },
+									transaction: {
+										message: {
+											accountKeys: [{ pubkey: PUBKEY, signer: true }],
+											instructions: [{ programId: MEMO_PROGRAM, parsed: memo }],
+										},
+									},
+								};
+				}
+				res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ jsonrpc: "2.0", id: parsed.id ?? 1, result }));
+			});
+		});
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		const { port } = server.address() as AddressInfo;
+		rpcServers.push(server);
+		return { url: `http://127.0.0.1:${port}`, seen };
+	}
+
+	function greptimeStub(worlds: VerifyHour[], anchors: Record<number, Record<string, unknown>>, extraRows: Array<Record<string, unknown>> = []) {
+		return {
+			readEvents: async () => [...worlds.flatMap((world) => world.rows), ...extraRows],
+			graphIngest: async () => worlds.flatMap((world) => world.records),
+			firstIngestMs: async () => H,
+			hourLeaves: async (startMs: number) => {
+				const found = worlds.find((world) => world.hour === startMs);
+				if (!found) throw new Error(`no fixture hour for ${String(startMs)}`);
+				return found.leaves;
+			},
+			anchorForPeriod: async (startMs: number) => anchors[startMs] ?? null,
+		};
+	}
+
+	interface HourJson {
+		period_start: string;
+		status: string;
+		event_count: number;
+		root: string | null;
+		tx_sig?: string;
+		slot?: number;
+		reason?: string;
+	}
+
+	interface VerifyJson {
+		ok: boolean;
+		events: number;
+		chain: { ok: boolean };
+		hours: HourJson[];
+		uncovered: { count: number; ids: string[] };
+		reason?: string;
+	}
+
+	test("an anchored hour and a mismatched hour keep their root, count, signature and ids", async () => {
+		const graph = "ut-http-verify";
+		const anchored = buildHour(H, "sess-http-a", graph);
+		const altered = buildHour(H + HOUR, "sess-http-b", graph);
+		// The second hour's events are untouched, so its chain verifies; only
+		// the anchor's root disagrees with the recompute.
+		const other = formatMemo({ periodStartMs: H + HOUR, rootHex: "1".repeat(64), count: 2 });
+		const rpc = await startRpc({ "sig-http-a": anchored.memo, "sig-http-b": other });
+		const harness = await start(
+			{ SOLANA_RPC_URL: rpc.url, SOLANA_ANCHOR_PUBKEY: PUBKEY, SUBSTRATE_AUDIT_PATH: auditDirectory() },
+			{
+				greptime: greptimeStub([anchored, altered], {
+					[H]: anchorRow(H, anchored, "sig-http-a"),
+					[H + HOUR]: anchorRow(H + HOUR, altered, "sig-http-b"),
+				}),
+			},
+		);
+
+		const response = await fetch(`${harness.base}/verify`, { method: "POST", body: JSON.stringify({ graph_id: graph }) });
+		expect(response.status).toBe(200);
+		const body = (await response.json()) as VerifyJson;
+
+		expect(body.ok).toBe(false);
+		expect(body.chain).toEqual({ ok: true });
+		expect(body.events).toBe(4);
+		expect(body.hours).toHaveLength(2);
+		expect(body.hours[0]).toMatchObject({
+			period_start: anchored.iso,
+			status: "anchored",
+			event_count: 2,
+			root: anchored.root,
+			tx_sig: "sig-http-a",
+			slot: 42,
+		});
+		expect(body.hours[1]).toMatchObject({
+			period_start: altered.iso,
+			status: "mismatch",
+			event_count: 2,
+			root: altered.root,
+			tx_sig: "sig-http-b",
+		});
+		expect(body.reason).toContain(altered.iso);
+		expect(body.uncovered).toEqual({ count: 0, ids: [] });
+		// The audit gate still records the read door under the shared tool name.
+		const verifyRecord = harness.observability.audit.recent().find((record) => record.tool === "verify");
+		expect(verifyRecord).toMatchObject({ tool: "verify", transport: "rest" });
+	});
+
+	test("an event with no ingest record fails the verdict naming its id", async () => {
+		const graph = "ut-http-uncovered";
+		const anchored = buildHour(H, "sess-http-c", graph);
+		const extra = normalizeEvent(
+			{ surface: "omp", kind: "note", summary: "record-less", session_id: "sess-http-new", graph_id: graph, actor: "agent" },
+			null,
+		);
+		const extraRow = { ...extra, ts: Date.parse(extra.ts), payload: JSON.stringify(extra.payload) };
+		const rpc = await startRpc({ "sig-http-c": anchored.memo });
+		const harness = await start(
+			{ SOLANA_RPC_URL: rpc.url, SOLANA_ANCHOR_PUBKEY: PUBKEY },
+			{ greptime: greptimeStub([anchored], { [H]: anchorRow(H, anchored, "sig-http-c") }, [extraRow]) },
+		);
+
+		const response = await fetch(`${harness.base}/verify`, { method: "POST", body: JSON.stringify({ graph_id: graph }) });
+		// A failed verdict is still a served verdict: 200 with ok false, not a 500.
+		expect(response.status).toBe(200);
+		const body = (await response.json()) as VerifyJson;
+
+		expect(body.ok).toBe(false);
+		expect(body.chain).toEqual({ ok: true });
+		expect(body.hours[0]).toMatchObject({ period_start: anchored.iso, status: "anchored" });
+		expect(body.uncovered).toEqual({ count: 1, ids: [extra.id] });
+		expect(body.reason).toContain(extra.id);
+	});
+
+	test("a missing graph id is a 400, not a verdict", async () => {
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory() });
+
+		const response = await fetch(`${harness.base}/verify`, { method: "POST", body: JSON.stringify({}) });
+
+		expect(response.status).toBe(400);
+		const denied: unknown = await response.json();
+		if (!denied || typeof denied !== "object" || !("error" in denied)) throw new Error("expected a refusal naming graph_id");
+		expect(String(denied.error)).toContain("graph_id");
 	});
 });

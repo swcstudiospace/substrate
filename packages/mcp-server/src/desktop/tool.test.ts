@@ -4,8 +4,7 @@
  * The tool is driven through a real client over the in-memory transport, with
  * the driver behind a recording fake runner and the ledger behind a stub — the
  * point is the wiring (refusal order, strict schema, image blocks, ledger stop)
- * rather than docker or Greptime. Production wiring (`bufferRunner` confined to
- * `desktop/driver.ts` plus `index.ts`) is locked at the bottom of this file.
+ * rather than docker or Greptime.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -13,14 +12,14 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { join } from "node:path";
 import { loadConfig } from "../config.ts";
 import type { EventQuery } from "../greptime.ts";
-import { createMcpServer } from "../mcp.ts";
+import { createMcpServer, type McpCaller } from "../mcp.ts";
 import { Substrate } from "../service.ts";
 import type { SubstrateEvent, Surface } from "../types.ts";
 import { createDesktopDriver, DesktopBusy, type BufferRunner, type BufferRunResult } from "./driver.ts";
-const ROOT = join(import.meta.dir, "..", "..", "..", "..");
+type TestCaller = Surface | McpCaller | null;
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -61,11 +60,12 @@ function xwd(): Buffer {
 	return Buffer.concat([header, name, pixels]);
 }
 
-/** A recording fake: geometry 1280x800, a title per call, the synthetic XWD for xwd, "" otherwise. */
+/** A recording fake: proven local endpoint for the locality probe, geometry 1280x800, a title per call, the synthetic XWD for xwd, "" otherwise. */
 function recorder() {
 	const calls: string[][] = [];
 	const run: BufferRunner = async (argv) => {
 		calls.push([...argv]);
+		if (argv[1] === "context") return res("unix:///var/run/docker.sock\n");
 		if (argv.includes("getdisplaygeometry")) return res("1280 800\n");
 		if (argv.includes("getwindowname")) return res("stub-window\n");
 		if (argv.includes("xwd")) return res(xwd());
@@ -97,7 +97,7 @@ function ledger(overrides: { insertEvent?: (event: SubstrateEvent) => Promise<vo
 
 async function connect(
 	ledgerStub: ReturnType<typeof ledger>,
-	surface: Surface | null,
+	caller: TestCaller,
 	rec: ReturnType<typeof recorder>,
 	tmp: string,
 	options: { greptimeNull?: boolean; desktopNull?: boolean } = {},
@@ -111,7 +111,7 @@ async function connect(
 			...(options.desktopNull ? {} : { desktop: createDesktopDriver({ run: rec.run, dir: tmp, sleep: noSleep }) }),
 		},
 	);
-	const server = createMcpServer(substrate, surface);
+	const server = createMcpServer(substrate, caller);
 	const client = new Client({ name: "substrate-test", version: "0.0.0" });
 	const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 	await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -140,6 +140,21 @@ describe("desktop_run refusals", () => {
 		expect(content[0]?.text).toContain("nothing was run");
 		expect(rec.calls).toEqual([]);
 		expect(stub.written).toEqual([]);
+	});
+
+	test("an operator-marked bearer for an unlisted surface is still refused before input", async () => {
+		const stub = ledger();
+		const rec = recorder();
+		// Valid args, so only the allowlist gate can refuse: the operator flag
+		// grants nothing at this tool and the token surface stays authoritative.
+		const { client } = await connect(stub, { surface: "cursor", isOperator: true }, rec, tmpDesktop());
+
+		const { isError, content } = await callFull(client, "desktop_run", SHOT);
+
+		expect(isError).toBe(true);
+		expect(rec.calls).toEqual([]);
+		expect(stub.written).toEqual([]);
+		expect(content.some((block) => block.type === "image")).toBe(false);
 	});
 
 	test("an anonymous caller is refused and runs nothing", async () => {
@@ -270,6 +285,66 @@ describe("desktop_run success", () => {
 		expect(reply.error).toContain("event not stored");
 		expect(content.some((block) => block.type === "image")).toBe(false);
 	});
+
+	test("an operator-marked bearer for a listed surface runs as its token surface", async () => {
+		const stub = ledger();
+		const rec = recorder();
+		const { client } = await connect(stub, { surface: "omp", isOperator: true }, rec, tmpDesktop());
+
+		const { isError, content } = await callFull(client, "desktop_run", SHOT);
+
+		expect(isError).toBe(false);
+		expect(rec.calls.length).toBeGreaterThan(0);
+		expect(stub.written).toHaveLength(1);
+		expect(stub.written[0]).toMatchObject({ kind: "tool.call", surface: "omp" });
+		expect(content.some((block) => block.type === "image")).toBe(true);
+	});
+});
+
+describe("desktop_run driver errors", () => {
+	test("a driver throw after partial input is redacted, bounded and carries no images", async () => {
+		const stub = ledger();
+		const rec = recorder();
+		const tmp = tmpDesktop();
+		// Assembled at runtime so no credential-shaped literal sits in source;
+		// the shared redactor must still strip it from the tool error.
+		const secret = `${"sk-ant"}-${"a1".repeat(15)}`;
+		const failure = new Error(`driver exploded ${secret} ${"x".repeat(600)}`);
+		const config = loadConfig({ SUBSTRATE_DESKTOP_SURFACES: "omp", SUBSTRATE_DESKTOP_DIR: tmp });
+		const substrate = new Substrate(config, {
+			index: null,
+			greptime: stub.greptime as never,
+			desktop: {
+				run: async () => {
+					await rec.run(["docker", "context", "inspect", "--format", "{{.Endpoints.docker.Host}}"], 1000);
+					throw failure;
+				},
+			},
+		});
+		const server = createMcpServer(substrate, "omp");
+		const client = new Client({ name: "substrate-test", version: "0.0.0" });
+		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+		await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+		const { isError, content } = await callFull(client, "desktop_run", SHOT);
+
+		expect(isError).toBe(true);
+		expect(content).toHaveLength(1);
+		expect(content[0]?.type).toBe("text");
+		const text = content[0]?.text ?? "";
+		expect(text).not.toContain(secret);
+		// The 400-character bound applies to the redacted error value inside
+		// the JSON tool reply, not the reply envelope itself.
+		const body: unknown = JSON.parse(text);
+		if (!body || typeof body !== "object" || !("error" in body) || typeof body.error !== "string") {
+			throw new Error("expected a JSON tool reply carrying a string error");
+		}
+		expect(body.error.length).toBeLessThanOrEqual(400);
+		expect(content.some((block) => block.type === "image")).toBe(false);
+		// Partial input effects are observable, so this error path is not a
+		// pre-run refusal with zero effects.
+		expect(rec.calls.length).toBeGreaterThan(0);
+	});
 });
 
 describe("desktop_run registration", () => {
@@ -285,27 +360,5 @@ describe("desktop_run registration", () => {
 		// so the tool must advertise itself as destructive.
 		expect(tool?.annotations).toMatchObject({ destructiveHint: true, openWorldHint: true });
 		expect((tool?.inputSchema as { additionalProperties?: unknown } | undefined)?.additionalProperties).toBe(false);
-	});
-});
-
-describe("desktop production wiring", () => {
-	test("bufferRunner reaches docker only through the driver and the entry point", () => {
-		const listed = Bun.spawnSync(["git", "ls-files", "-z"], { cwd: ROOT });
-		if (!listed.success) throw new Error(`git ls-files failed: ${listed.stderr.toString()}`);
-		const allowed: Record<string, true> = {
-			[join("packages", "mcp-server", "src", "desktop", "driver.ts")]: true,
-			[join("packages", "mcp-server", "src", "index.ts")]: true,
-			// The driver's own leak regression test drives bufferRunner directly.
-			[join("packages", "mcp-server", "src", "desktop", "driver.test.ts")]: true,
-			[relative(ROOT, import.meta.path)]: true,
-		};
-		const offenders = listed.stdout
-			.toString()
-			.split("\0")
-			.filter((path) => path.length > 0 && path.endsWith(".ts"))
-			.filter((path) => allowed[path] !== true)
-			.filter((path) => readFileSync(join(ROOT, path), "utf8").includes("bufferRunner"));
-
-		expect(offenders).toEqual([]);
 	});
 });

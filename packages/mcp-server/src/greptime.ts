@@ -14,6 +14,7 @@
 import type { GreptimeConfig } from "./config.ts";
 import type { SubstrateEvent } from "./types.ts";
 import { hourEnd, hourStart, isClosed } from "@substrate/ledger";
+import { redact, redactKnown } from "./redact.ts";
 
 const DEFAULT_TIMEOUT_MS = 5000;
 
@@ -385,11 +386,23 @@ export class GreptimeClient {
 	ingestAppendMode: boolean | null = null;
 	private ingestAppendModeCheckedAt = 0;
 
+	/**
+	 * Caller-known secret values scrubbed from every diagnostic. Built once:
+	 * every error path shares this boundary. Only empty values are skipped
+	 * (replacing them would splice markers between every character); short
+	 * values are NOT skipped — an unpatterned short credential must not print.
+	 */
+	private readonly knownSecrets: string[];
+
 	constructor(
 		private readonly config: GreptimeConfig,
 		private readonly timeoutMs = DEFAULT_TIMEOUT_MS,
 		private readonly clock: () => number = Date.now,
-	) {}
+	) {
+		this.knownSecrets = [config.url, config.user ?? "", config.password ?? "", config.db].filter(
+			(value) => value.length > 0,
+		);
+	}
 
 	private headers(): Record<string, string> {
 		const headers: Record<string, string> = { "content-type": "application/x-www-form-urlencoded" };
@@ -418,6 +431,14 @@ export class GreptimeClient {
 	}
 
 	/**
+	 * Scrub caller-known secret values first, then pattern shapes. Idempotent:
+	 * the result still carries truthful status, only without secret text.
+	 */
+	private scrub(text: string): string {
+		return redact(redactKnown(text, this.knownSecrets));
+	}
+
+	/**
 	 * Run SQL and return rows as objects keyed by column name.
 	 *
 	 * Every statement passes `assertAppendOnly` first: this is the only door to
@@ -436,19 +457,19 @@ export class GreptimeClient {
 				signal: AbortSignal.timeout(timeoutMs),
 			});
 		} catch (cause) {
-			throw new GreptimeError(`greptime unreachable: ${String(cause)}`);
+			throw new GreptimeError(this.scrub(`greptime unreachable: ${String(cause)}`));
 		}
 
 		const text = await response.text();
-		if (!response.ok) throw new GreptimeError(`greptime ${response.status}: ${text.slice(0, 500)}`);
+		if (!response.ok) throw new GreptimeError(this.scrub(`greptime ${response.status}: ${text.slice(0, 500)}`));
 
 		let body: GreptimeResponse;
 		try {
 			body = JSON.parse(text) as GreptimeResponse;
 		} catch {
-			throw new GreptimeError(`greptime returned non-JSON: ${text.slice(0, 200)}`);
+			throw new GreptimeError(this.scrub(`greptime returned non-JSON: ${text.slice(0, 200)}`));
 		}
-		if (body.error) throw new GreptimeError(`greptime: ${body.error}`);
+		if (body.error) throw new GreptimeError(this.scrub(`greptime: ${body.error}`));
 
 		const records = body.output?.[0]?.records;
 		if (!records?.rows) return [];
@@ -527,7 +548,7 @@ export class GreptimeClient {
 			// An older Greptime may not know the option. Losing dedup protection is
 			// worse than a warning but far better than having no ledger at all.
 			await this.sql(`CREATE TABLE IF NOT EXISTS "agent_events" (${columns})`);
-			warnings.push(`agent_events created without append_mode: ${String(cause)}`);
+			warnings.push(`agent_events created without append_mode: ${this.scrub(String(cause))}`);
 		}
 
 		try {
@@ -539,7 +560,7 @@ export class GreptimeClient {
 			// table without append_mode and without a primary key deduplicates on
 			// the time index alone, so two events ingested in the same millisecond
 			// would silently lose a record. A warning is cheaper than that loss.
-			warnings.push(`event_ingest not created in append_mode: ${String(cause)}`);
+			warnings.push(`event_ingest not created in append_mode: ${this.scrub(String(cause))}`);
 		}
 
 		await this.sql(`
@@ -743,7 +764,7 @@ export class GreptimeClient {
 					budget,
 				);
 			} catch (cause) {
-				failure = cause;
+				failure = this.scrub(String(cause));
 				continue;
 			}
 			const hour = hourStart(ingestedAt);

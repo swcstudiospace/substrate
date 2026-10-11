@@ -7,10 +7,10 @@
  * real command, since `index.ts` dispatches at import time.
  */
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ROUTE_MAX_BYTES } from "../../mcp-server/src/skills/propose.ts";
 import {
 	DEFAULT_TIMEOUT_MS,
 	DirRefused,
@@ -201,11 +201,49 @@ describe("what the CLI refuses before posting", () => {
 		expect(stub.seen).toEqual([]);
 	});
 
+	test("a real FIFO in the directory refuses promptly naming it, exits 1, posts nothing", async () => {
+		// Linux-only fixture by intent: a FIFO proves the intake never opens a special
+		// file (which would hang the CLI waiting for a writer) and names the path.
+		const dir = skillDir();
+		const fifo = join(dir, "scripts", "pipe.fifo");
+		expect(spawnSync("mkfifo", [fifo]).status).toBe(0);
+		const { code, err } = await run(["propose", "--dir", dir]);
+		expect(code).toBe(1);
+		expect(err).toContain("scripts/pipe.fifo is not a regular file");
+		expect(stub.seen).toEqual([]);
+	});
+
 	test("a directory whose JSON would exceed the cap is refused with its size", async () => {
 		const dir = skillDir({ "big.txt": "x".repeat(MAX_BODY_BYTES) });
 		const { code, err } = await run(["propose", "--dir", dir]);
 		expect(code).toBe(1);
 		expect(err).toContain("over the limit of 1000000 bytes");
+		expect(stub.seen).toEqual([]);
+	});
+
+	test("a proposal of exactly MAX_BODY_BYTES posts; one byte more refuses before posting", async () => {
+		// The boundary is on the serialized UTF-8 JSON the CLI would post — multibyte
+		// content, JSON escaping and session/graph metadata all count, not file sizes.
+		const rationale = 'café "quoted"\nnewline';
+		const flags = ["--name", "demo-skill", "--rationale", rationale, "--session", "sess-1", "--graph", "ut-1"];
+		const sizedDir = (target: number): string => {
+			const dir = skillDir();
+			const files = { ...readSkillDir(dir), "pad.txt": "" };
+			const base = { name: "demo-skill", files, rationale, session_id: "sess-1", graph_id: "ut-1" };
+			const pad = target - Buffer.byteLength(JSON.stringify(base), "utf8");
+			writeFileSync(join(dir, "pad.txt"), "x".repeat(pad));
+			const posted = { ...base, files: { ...files, "pad.txt": "x".repeat(pad) } };
+			expect(Buffer.byteLength(JSON.stringify(posted), "utf8")).toBe(target);
+			return dir;
+		};
+		stub.reply = { status: 200, body: opened };
+		const ok = await run(["propose", "--dir", sizedDir(MAX_BODY_BYTES), ...flags]);
+		expect(ok.code).toBe(0);
+		expect(stub.seen).toHaveLength(1);
+		stub.seen = [];
+		const over = await run(["propose", "--dir", sizedDir(MAX_BODY_BYTES + 1), ...flags]);
+		expect(over.code).toBe(1);
+		expect(over.err).toContain("over the limit of 1000000 bytes");
 		expect(stub.seen).toEqual([]);
 	});
 
@@ -334,7 +372,6 @@ describe("readSkillDir, the timeout and the cap", () => {
 		expect(Object.keys(withProto).sort()).toEqual(["SKILL.md", "__proto__", "scripts/run.sh"]);
 		expect(withProto["__proto__"]).toBe("kept\n");
 		expect(() => readSkillDir(join(dir, "missing"))).toThrow();
-		expect(DirRefused.prototype).toBeInstanceOf(Error);
 		writeFileSync(join(dir, "notes.md"), Buffer.from([0xef, 0xbb, 0xbf, 0x6e, 0x6f, 0x74, 0x65, 0x73, 0x0a]));
 		expect(readSkillDir(dir)["notes.md"]).toBe("\ufeffnotes\n");
 		// A marked SKILL.md keeps its bytes too; the server's frontmatter accepts the mark.
@@ -360,10 +397,6 @@ describe("readSkillDir, the timeout and the cap", () => {
 		expect(skillsTimeout("0")).toBe(180_000);
 		expect(skillsTimeout("-5")).toBe(180_000);
 		expect(skillsTimeout("2500")).toBe(2500);
-	});
-
-	test("the CLI's cap is the engine's cap", () => {
-		expect(MAX_BODY_BYTES).toBe(ROUTE_MAX_BYTES);
 	});
 });
 

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { DesktopRunInput } from "../packages/mcp-server/src/desktop/actions.ts";
 import { decodePng, encodePng } from "../packages/mcp-server/src/desktop/png.ts";
 import { RehearsalRefused, refuseSmokeUrl } from "./rehearsal.ts";
-import { dumpedHoldsTyped, findBand, markerText, nonceRgb, parseRpcBody, parseSmokeArgs, sha256Hex, shouldRetryNonce, type NonceRgb } from "./desktop-smoke.ts";
+import { dumpedHoldsTyped, findBand, markerText, nonceRgb, parseRpcBody, parseSmokeArgs, recruitmentSnapshotsEqual, sha256Hex, shouldRetryNonce, snapshotRecruitment, type NonceRgb, type RecruitmentSnapshot } from "./desktop-smoke.ts";
 
 /** Paint a test frame: background wash plus solid exact-RGB rectangles. */
 function paintImage(width: number, height: number, bg: NonceRgb, rects: Array<{ x: number; y: number; w: number; h: number; color: NonceRgb }>): Buffer {
@@ -213,3 +213,53 @@ describe("dumpedHoldsTyped", () => {
 		expect(dumpedHoldsTyped(dumped, ["exit\n"])).toBe(false);
 	});
 });
+
+describe("recruitment snapshot", () => {
+	test("an empty inventory is absence without needing inspect", () => {
+		expect(snapshotRecruitment({ ok: true, out: "" }, null)).toEqual({ state: "absent" });
+		expect(snapshotRecruitment({ ok: true, out: "  \n " }, null)).toEqual({ state: "absent" });
+	});
+
+	test("a failed inventory is an error, never absence", () => {
+		expect(snapshotRecruitment({ ok: false, out: "" }, null).state).toBe("error");
+		expect(snapshotRecruitment({ ok: false, out: "row\n" }, null).state).toBe("error");
+	});
+
+	test("a listed row needs a successful non-empty inspect", () => {
+		expect(snapshotRecruitment({ ok: true, out: "row\n" }, null).state).toBe("error");
+		expect(snapshotRecruitment({ ok: true, out: "row\n" }, { ok: false, out: "" }).state).toBe("error");
+		expect(snapshotRecruitment({ ok: true, out: "row\n" }, { ok: true, out: "  \n" }).state).toBe("error");
+	});
+
+	test("a listed row with metadata is present", () => {
+		expect(snapshotRecruitment({ ok: true, out: "row\n" }, { ok: true, out: "fingerprint" })).toEqual({
+			state: "present",
+			fingerprint: "fingerprint",
+		});
+	});
+
+	test("absent before and after is unchanged", () => {
+		expect(recruitmentSnapshotsEqual({ state: "absent" }, { state: "absent" })).toBe(true);
+	});
+
+	test("present needs the identical fingerprint", () => {
+		const before: RecruitmentSnapshot = { state: "present", fingerprint: "fp-a" };
+		expect(recruitmentSnapshotsEqual(before, { state: "present", fingerprint: "fp-a" })).toBe(true);
+		expect(recruitmentSnapshotsEqual(before, { state: "present", fingerprint: "fp-b" })).toBe(false);
+	});
+
+	test("appearance and disappearance read changed", () => {
+		const present: RecruitmentSnapshot = { state: "present", fingerprint: "fp-a" };
+		const absent: RecruitmentSnapshot = { state: "absent" };
+		expect(recruitmentSnapshotsEqual(absent, present)).toBe(false);
+		expect(recruitmentSnapshotsEqual(present, absent)).toBe(false);
+	});
+
+	test("any error stays blocking, even against itself", () => {
+		const failed: RecruitmentSnapshot = { state: "error", detail: "probe failed" };
+		expect(recruitmentSnapshotsEqual(failed, failed)).toBe(false);
+		expect(recruitmentSnapshotsEqual(failed, { state: "absent" })).toBe(false);
+		expect(recruitmentSnapshotsEqual({ state: "absent" }, failed)).toBe(false);
+	});
+});
+

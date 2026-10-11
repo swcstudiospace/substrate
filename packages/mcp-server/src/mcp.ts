@@ -22,7 +22,7 @@ import {
 	isPagedSearch,
 	type Substrate,
 } from "./service.ts";
-import { proposalFailure } from "./skills/request.ts";
+import { proposalBodySizeProblem, proposalFailure } from "./skills/request.ts";
 import {
 	ACTORS,
 	EDGE_KINDS,
@@ -982,6 +982,14 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 		},
 		async (request) => {
 			try {
+				// The same caller-body cap as the REST route and the CLI pre-flight, on the
+				// args as received (never the JSON-RPC envelope, never server-injected
+				// attribution): the zod schema below declares optional fields with no
+				// defaults, so nothing is injected before this line. Schema-valid but
+				// over-cap args are refused before the service, the proposer and any
+				// event. The HTTP audit gate already recorded this call before dispatch.
+				const sizeProblem = proposalBodySizeProblem(request as Record<string, unknown>);
+				if (sizeProblem) return { ...json({ error: sizeProblem }), isError: true };
 				return json(await substrate.proposeSkill(request, { surface: callerSurface, isOperator }));
 			} catch (cause) {
 				const failure = proposalFailure(cause);

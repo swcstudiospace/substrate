@@ -14,7 +14,7 @@
  * only as root, and the non-root refusal runs de-privileged via setpriv.
  */
 import { afterAll, describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -279,17 +279,14 @@ describe("substrate-desktop.sh up", () => {
 		assertCleanArgv(r.log);
 	});
 
-	itRoot("a failed endpoint probe proceeds; later calls fail truthfully", () => {
+	itRoot("a failed endpoint probe refuses before image, env file, run or start", () => {
 		const r = runScript("up", { endpoint: "broken" });
-		expect(r.code).toBe(0);
-		assertCleanArgv(r.log);
-	});
-
-	itRoot("refuses an unreadable endpoint without locality proof", () => {
-		const r = runScript("up", { endpoint: "empty" });
 		expect(r.code).not.toBe(0);
 		expect(r.err).toContain("without locality proof");
 		expect(dockerLines(r.log).some((line) => line.startsWith("docker run "))).toBe(false);
+		expect(dockerLines(r.log).some((line) => line.startsWith("docker start "))).toBe(false);
+		expect(dockerLines(r.log).some((line) => line.includes("image inspect"))).toBe(false);
+		expect(existsSync(r.envFile)).toBe(false);
 		assertCleanArgv(r.log);
 	});
 

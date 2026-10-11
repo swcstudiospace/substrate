@@ -303,6 +303,11 @@ its event back must not read that as a durable append. `POST /events` answers
 regardless, because failing open is the *client's* job and this surface owes its
 caller the truth. Reported errors are redacted, since a connection failure can
 quote a URL.
+SQL, migration and ingest-retry diagnostics remove configured opaque values
+with `redactKnown` before shape redaction. Only empty known values are ignored;
+short values are not exempted. The smoke's warning/error/detail sinks apply
+the same boundary and retain truthful failure exits. Neither a redacted warning
+nor client exit 0 is a successful durable-write verdict.
 
 **Ingest order.** Every stored event gets one record in `event_ingest`, written
 *after* its row so a record never names an event that does not exist. An event
@@ -515,7 +520,7 @@ bun run smoke:greptime
 ```
 
 Exits 0 when every check passes, 1 on a failure, 2 when `GREPTIME_URL` is unset.
-It prints the host and database only — no credential — and checks:
+It prints the database only — no hostname or credential — and checks:
 
 1. `migrate` reaches the ledger and is idempotent
 2. `agent_events` is in `append_mode`
@@ -612,6 +617,25 @@ only chain ever touched is the loopback stub above), no production ledger row
 was written, no host config or systemd step was taken. The runbook with the
 per-step gates lives in `28-04-SUMMARY.md`. The 0-lamport question and the memo
 program id (D27-06) stay [UNVERIFIED] until L8.
+
+**Current correction proof (2026-10-12 UTC):** the parent ran the complete
+smoke against the current `ab0dff1` baseline plus the owned corrections:
+**68/68** checks passed on scratch GreptimeDB v0.14.4. The historical 47/47
+run above is retained; the new run adds 21 exact-alteration checks. An
+already-anchored existing event was rewritten in place (same id, timestamp
+and series; hash recomputed), and bounded readback confirmed exactly one
+stored row. Its per-session chain still verified, the recomputed hour root
+differed from the retained anchor, and the real `substrate verify` process
+exited **1**, reported **chain intact**, and named
+`2026-10-11T22:00:00.000Z` as the mismatched hour. The separate `*_p28alter`
+deduplicating fixture leaves normal tables append-only. The actual anchor
+entry, CLI, HTTP, MCP and timeout tests also passed in the current suite
+(3,199 pass / 58 skip / 0 fail); types and the four phase-close locks passed.
+The named rehearsal was stopped and its two owned stores removed. No
+production row, live devnet transaction, systemd step or credential
+rotation was performed. L1–L10 each still require separate approval,
+including the read-only steps; an earlier step's approval never covers a
+later one. Late evidence is in the archived `28-PROOF-ADDENDUM.md`.
 
 Rollback for this slice is proof-additive: delete section 8 and the tmp stub
 it writes at runtime; nothing on any ledger needs undoing (production rows

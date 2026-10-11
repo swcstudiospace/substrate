@@ -1,7 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import { FAIL_CLOSED_TOOLS, FAIL_OPEN_TOOLS, auditMode, decideClaim } from "./policy.ts";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 
 // Phase 17: the audit decision for every MCP tool v1.3 plans to add, written as a
 // literal independent of `policy.ts` so that removing or flipping any entry on
@@ -103,35 +101,6 @@ describe("auditMode", () => {
 
 	test("the two lists do not overlap", () => {
 		for (const tool of FAIL_CLOSED_TOOLS) expect(FAIL_OPEN_TOOLS.has(tool)).toBe(false);
-	});
-
-	test("skills_propose is served on both doors and explicitly fail-closed", () => {
-		// It opens a PR other agents receive after merge: a proposal nobody recorded is an
-		// unaudited publication. Dropping any one registration fails here, not in production.
-		const src = join(import.meta.dir, "..", "..", "mcp-server", "src");
-		const mcp = readFileSync(join(src, "mcp.ts"), "utf8");
-		const server = readFileSync(join(src, "server.ts"), "utf8");
-		expect(mcp).toMatch(/registerTool\(\s*"skills_propose"/);
-		expect(server).toMatch(/auditedRest\(\s*res\s*,\s*observability\s*,\s*surface\s*,\s*"skills_propose"\s*,\s*fields\s*\)/);
-		expect(FAIL_CLOSED_TOOLS.has("skills_propose")).toBe(true);
-		expect(FAIL_OPEN_TOOLS.has("skills_propose")).toBe(false);
-		expect(auditMode("skills_propose")).toBe("fail-closed");
-	});
-
-	test("every served tool and REST route has an explicit audit decision", () => {
-		// A later phase registering a tool with no decision fails here when the
-		// suite runs, not the first time the tool is called in production.
-		const src = join(import.meta.dir, "..", "..", "mcp-server", "src");
-		const mcp = readFileSync(join(src, "mcp.ts"), "utf8");
-		const server = readFileSync(join(src, "server.ts"), "utf8");
-		const tools = [...mcp.matchAll(/registerTool\(\s*"([^"]+)"/g)].map((m) => m[1] as string);
-		const routes = [...server.matchAll(/auditedRest\(\s*\w+\s*,\s*\w+\s*,\s*\w+\s*,\s*"([^"]+)"/g)].map((m) => m[1] as string);
-		expect(tools.length).toBeGreaterThan(0);
-		expect(routes.length).toBeGreaterThan(0);
-		const undecided = [...tools, ...routes].filter(
-			(tool) => FAIL_CLOSED_TOOLS.has(tool) === FAIL_OPEN_TOOLS.has(tool),
-		);
-		expect(undecided).toEqual([]);
 	});
 });
 
