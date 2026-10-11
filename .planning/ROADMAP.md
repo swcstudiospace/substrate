@@ -364,10 +364,10 @@ Plans:
   3. With less than 10 GiB free, any image build or pull is refused in code before it starts.
 
 **Proof**: Read-only host checks first (done in 31-RESEARCH.md: /dev/kvm absent, no vmx/svm, 6420 held by gcs-rivet engine, 7411 free, 120 GiB free, sandbox image absent); installing the host and pulling or building the sandbox image on this host needs the owner's approval and an operator-approved window.
-**Plans**: 3 plans
-- [ ] 31-01-PLAN.md — Gated no-KVM/engine-share spike runner plus read-only asserts plus 31-SPIKE.md verdict tables (LANEA-01 spike half; G1 npm ci, G2 engine session, G3 VM boot gated)
-- [ ] 31-02-PLAN.md — Host package port (14 modules + tests), substrate.ts bearer/lease rewrite, package.json + lock with declared claude-code dep, sandbox Dockerfile (LANEA-01 packaging half; install-free)
-- [ ] 31-03-PLAN.md — main.ts checkout fix, 10 GiB in-code disk gate, staged unit file, two-VM fake rehearsal proof, runbook + gated G1-G4 live map (LANEA-01, LANEA-05)
+**Plans**: 3/3 plans executed
+- [x] 31-01-PLAN.md — Gated no-KVM/engine-share spike runner plus read-only asserts plus 31-SPIKE.md verdict tables (LANEA-01 spike half; G1 npm ci, G2 engine session, G3 VM boot gated)
+- [x] 31-02-PLAN.md — Host package port (14 modules + tests), substrate.ts bearer/lease rewrite, package.json + lock with declared claude-code dep, sandbox Dockerfile (LANEA-01 packaging half; install-free)
+- [x] 31-03-PLAN.md — main.ts checkout fix, 10 GiB in-code disk gate, staged unit file, two-VM fake rehearsal proof, runbook + gated G1-G4 live map (LANEA-01, LANEA-05)
 
 ### Phase 32: Lane A host core
 
@@ -382,7 +382,10 @@ Plans:
   3. The VM holds no tokens; host functions commit and push (never force, never `.substrate-*` files), open the PR and sync PR fields through the substrate's Linear and Notion clients.
 
 **Proof**: Against the Phase 16 harness on an isolated graph with a throwaway repository; the VM session spends Claude Code model quota and Docker capacity on this host, so it runs in an operator-approved window.
-**Plans**: TBD
+**Plans**: 3/3 planned, 0/3 executed
+- [ ] 32-01-PLAN.md — Lease lifecycle wiring: claimAndPersist, heartbeat tick with one re-claim, single release, complete with DoD (LANEA-02 lease half)
+- [ ] 32-02-PLAN.md — Restart survival: heartbeat-or-reclaim in resume path, kill-and-restart rehearsal, staged unit restart gated (LANEA-03)
+- [ ] 32-03-PLAN.md — Containment value-scans, end-to-end fake worked-node rehearsal, runbook lease/restart/containment + L1-L4 gated tail (LANEA-07, LANEA-02)
 
 ### Phase 33: Lane A dispatch route and approvals
 
@@ -418,6 +421,6 @@ Plans:
 | 28. Hourly anchor job and verify | v1.3 | 4/4 | Complete    | 2026-10-10 |
 | 29. Agent Cards and teachable moments | v1.3 | 0/? | Not started | - |
 | 30. desktop_run | v1.3 | 7/7 | Complete    | 2026-10-10 |
-| 31. Lane A runtime: spike, packaging and VM host | v1.3 | 0/? | Not started | - |
+| 31. Lane A runtime: spike, packaging and VM host | v1.3 | 3/3 | In Progress | - |
 | 32. Lane A host core | v1.3 | 0/? | Not started | - |
 | 33. Lane A dispatch route and approvals | v1.3 | 0/? | Not started | - |

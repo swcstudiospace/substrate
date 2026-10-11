@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.3
 milestone_name: Build plan completion
-current_phase: 31
-current_phase_name: lane-a-runtime
+current_phase: 32
+current_phase_name: lane-a-host-core
 status: planned
-stopped_at: Phase 31 planned — 31-CONTEXT.md (D31-01..D31-11), 31-RESEARCH.md (KVM/Bun-lock/openSession bounded with local evidence), 3 PLANs rehearsal-first with G1-G4 gated; ready to execute
-last_updated: "2026-10-11T00:00:00Z"
+stopped_at: Phase 32 planned — 32-CONTEXT.md (D32-01..D32-11), 32-RESEARCH.md (lifecycle map, lease gap, restart design, containment map, L1-L4 gated inventory), 3 PLANs rehearsal-first with L1-L4 gated tail; ready to execute
+last_updated: "2026-10-11T00:01:38.000Z"
 last_activity: 2026-10-10
-last_activity_desc: Phase 31 planned (spike runner + verdict tables, host package port with bearer/lease rewrite, main/disk-gate/unit/two-VM fake proof + runbook; G1 npm ci, G2 engine session, G3 VM boot, G4 unit install/restart gated)
-state_head: f8af263
+last_activity_desc: Phase 32 planned (lease lifecycle wiring, restart-survival proof, containment + worked-node rehearsal + runbook; L1 VM run, L2 unit restart, L3 manifest flip, L4 quota gated)
+state_head: 2f801a1
 progress:
   total_phases: 18
-  completed_phases: 3
-  total_plans: 12
-  completed_plans: 12
-  percent: 17
+  completed_phases: 7
+  total_plans: 70
+  completed_plans: 69
+  percent: 39
 ---
 
 # State
@@ -185,6 +185,7 @@ Resume file: None
 | Phase 16 P16-02 | 9min | 3 tasks | 4 files |
 | Phase 16 P16-03 | 14min | 3 tasks | 3 files |
 | Phase 16 P16-04 | 5min | 3 tasks | 4 files |
+| Phase 31 P01-03 | ~155 min | 9 tasks | 30 files |
 
 ## Decisions
 

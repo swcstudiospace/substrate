@@ -104,11 +104,11 @@ Decisions confirmed when the milestone was opened (2026-10-08):
 
 ### Lane A host (build plan §4.1, Phase 3)
 
-- [ ] **LANEA-01**: `substrate-host.service` runs one rivet-agentos VM per Graph ID with a Docker sandbox for native tools, a loopback `POST /tasks` on port 7411 and the rivet engine on loopback, without colliding with the engine container already bound to port 6420.
+- [x] **LANEA-01**: `substrate-host.service` runs one rivet-agentos VM per Graph ID with a Docker sandbox for native tools, a loopback `POST /tasks` on port 7411 and the rivet engine on loopback, without colliding with the engine container already bound to port 6420.
 - [ ] **LANEA-02**: `openTask(graphId)` reads the node, claims it as `claude-code` with that surface's token, keeps the `lease_id` and heartbeats while turns run, seeds the brief, skills and MCP config with a sha256 read-back, opens the session with permission policy "ask", and releases the claim on any failure.
 - [ ] **LANEA-03**: Sessions are durable: after a host restart, a continuation prompt keyed `<graph_id>:<node_id>:resume:<n>` resumes the work.
 - [ ] **LANEA-04**: The dispatcher routes `dispatch:claude-code` to `POST /tasks`, and a refusal becomes a once-only Linear comment.
-- [ ] **LANEA-05**: A disk gate in code refuses any image build or pull with less than 10 GiB free.
+- [x] **LANEA-05**: A disk gate in code refuses any image build or pull with less than 10 GiB free.
 - [ ] **LANEA-06**: Permission requests reach a human through single-use Approve/Deny buttons on the existing Telegram stop-notify path, and an unanswered request times out rather than waiting forever.
 - [ ] **LANEA-07**: Credentials stay on the host: the VM holds no tokens, and host functions commit and push (never force, never `.substrate-*` files), open the PR and sync PR fields through the substrate's Linear and Notion clients.
 - [ ] **LANEA-08**: Proof (live, approved): `dispatch:claude-code` on a fresh issue opens a VM that claims and heartbeats; restarting `substrate-host` mid-session resumes the same session; a real push and PR land; the PR fields sync; the issue reaches a gated Done.
@@ -208,11 +208,11 @@ Which phases cover which requirements. Filled in by the roadmap.
 | DESK-03 | Phase 30 | Pending |
 | DESK-04 | Phase 30 | Pending |
 | DESK-05 | Phase 30 | Pending |
-| LANEA-01 | Phase 31 | Pending |
+| LANEA-01 | Phase 31 | Complete |
 | LANEA-02 | Phase 32 | Pending |
 | LANEA-03 | Phase 32 | Pending |
 | LANEA-04 | Phase 33 | Pending |
-| LANEA-05 | Phase 31 | Pending |
+| LANEA-05 | Phase 31 | Complete |
 | LANEA-06 | Phase 33 | Pending |
 | LANEA-07 | Phase 32 | Pending |
 | LANEA-08 | Phase 33 | Pending |
