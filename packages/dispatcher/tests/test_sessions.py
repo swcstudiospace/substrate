@@ -472,6 +472,20 @@ def test_give_up_without_state_dir_stays_memory_only():
     assert registry.given_up == {"i-1"}
 
 
+def test_claude_code_remote_task_exit_without_claim_gives_up_once():
+    registry, s, linear, mcp, host, reap, lines = remote_setup()
+    assert CLAIM_TIMEOUT_SECONDS == 900
+    host.exit_code = 1
+    reap(30.0)
+    bodies = posted(linear)
+    assert len(bodies) == 1 and "[exited-unclaimed]" in bodies[0]
+    assert bodies[0].startswith("substrate-dispatcher: ")
+    assert linear.named("remove_label") == [("remove_label", "i-1", "l-claude-code")]
+    assert registry.given_up == {"i-1"} and registry.active_issue_ids() == set()
+    reap(60.0)  # the session is gone: no second comment, no second removal
+    assert posted(linear) == bodies and len(linear.named("remove_label")) == 1
+
+
 class EventGraph(FakeGraph):
     """FakeGraph with an events_emit sink."""
 

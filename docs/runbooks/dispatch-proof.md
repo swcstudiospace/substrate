@@ -48,6 +48,82 @@
    count in `docs/runbooks/production-identity.md`, flip the manifest row
    `dormant:24` → `live` only after the restart.
 
+## LANEA-08 gated sequence (Phase 33 — label to gated Done on Lane A)
+
+Rehearsed end to end by `bun scripts/lane-a-e2e.ts` (29/29 checks with
+fakes: label → tick → `POST /tasks` → claim → heartbeat → fake approval →
+settle → push/PR/sync fakes → complete with DoD → Done, plus mid-chain
+restart replay and refusal replays). The live tail below spends real quota
+and writes real trackers: the executor stops at every gate and never runs it.
+Preconditions chain: G(n) green before G(n+1). Out of scope even for the
+tail: pushes/PRs on non-throwaway repos, Linear/Notion writes outside the
+isolated graph, `RIVET_RUN_ENGINE=1` (refused until the G2 verdict), base
+pulls beyond the G2 window, standing-permission grants.
+
+### G1 — OPERATOR-GATED: label wiring live
+
+- Preconditions: this phase's code on `main`; rehearsal half green
+  (`bun scripts/lane-a-e2e.ts` 29/29, `python3 -m pytest
+  packages/dispatcher/tests` green, `bun test packages/host/` green);
+  operator-approved window.
+- Gate: OPERATOR-GATED — the executor stops here; a human approves the
+  window and runs the step.
+- Run: kill switch `0` for the window only; a real `dispatch:claude-code`
+  label on a fresh unstarted issue is polled within one 30 s tick.
+- Record: tick log + candidate resolution evidence; kill switch back to `1`
+  after — the switch-back is a proof step, not a note.
+- Rollback: kill switch to `1`; remove the label; no claim exists yet.
+
+### G2 — OPERATOR-GATED: real VM dispatch
+
+- Preconditions: G1 green; `bun scripts/host-spike.ts --check` exit 0
+  re-asserted; 10 GiB floor holds.
+- Gate: OPERATOR-GATED — the executor stops here; a human approves the
+  window and runs the step (spends Claude Code quota + Docker capacity).
+- Run: `POST /tasks` 202 → the VM claims as `claude-code` → heartbeats
+  observed on the persisted lease.
+- Record: claim→heartbeat evidence, quota spent.
+- Rollback: kill the task, release the claim, dispose the VM; the manifest
+  stays `dormant:31`.
+
+### G3 — OPERATOR-GATED: real approvals
+
+- Preconditions: G2 green; approval bot token + chat + user ids provisioned
+  (names only in the repo: `SUBSTRATE_APPROVAL_BOT_TOKEN`,
+  `SUBSTRATE_APPROVAL_CHAT_ID`, `SUBSTRATE_APPROVAL_USER_IDS`); `whoami`
+  check shows the bot name in the journal.
+- Gate: OPERATOR-GATED — the executor stops here; a human taps in the live
+  channel and runs the step.
+- Run: permission requests reach the human channel; Approve continues the
+  turn; Deny fails it closed; one request is left untapped to prove the
+  deadline auto-deny (fail-closed, single release).
+- Record: tap evidence + timeout log; no input values recorded anywhere.
+- Rollback: deny any open request; the turn fails closed and releases.
+
+### G4 — OPERATOR-GATED: real push, PR, sync, gated Done
+
+- Preconditions: G2–G3 green; throwaway repo + isolated graph only.
+- Gate: OPERATOR-GATED — the executor stops here; a human approves the
+  window and runs the step.
+- Run: real push + PR land on the throwaway repo; PR fields sync; the issue
+  reaches gated Done via `graph_complete` with DoD + lease (the connector
+  moves it, never the dispatcher or the host).
+- Record: PR URL, sync evidence, Done transition.
+- Rollback: close the PR, delete the throwaway repo, release the claim;
+  restore any tracker field by hand.
+
+### G5 — OPERATOR-GATED: production unit activations + manifest flips
+
+- Preconditions: G1–G4 green (expected 401s clear on both rows);
+  `substrate-host.service` G4 restart done, `substrate-dispatcher.service`
+  restarted.
+- Gate: OPERATOR-GATED — the executor stops here; a human approves the
+  window and runs the step.
+- Run: flip the manifest rows `dormant:24` → `live` and `dormant:31` →
+  `live` only after the restarts.
+- Record: `systemctl` evidence + manifest diff + 2xx evidence.
+- Rollback: flip back to `dormant:24` / `dormant:31`; stop the units.
+
 ## Rollback
 
 Re-run the rehearsal smoke (`bun run smoke:dispatcher`) to confirm the

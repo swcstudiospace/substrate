@@ -64,8 +64,24 @@ survive a restart: a new process never relaunches a given-up issue.
    at runtime via `issue_get` and labelled UNTRUSTED.
 
 `dispatch:claude-code` opens a VM task on substrate-host through the same
-registry contract; with no host on the loopback port every candidate gets
-`host-unreachable`. Live claude-code dispatch is deferred to Phase 33.
+registry contract: the tick routes the candidate through `HostClient`
+(`POST /tasks` on the loopback API) and watches the returned `RemoteTask`
+with the identical reap — landed-claim evidence counts as success, an
+exit-without-claim gives up as `exited-unclaimed`, 900 s without evidence
+times out as `claim-timeout`. The POST body carries graph/node/identifier/
+repo/worktree ids only with the substrate bearer header, never issue text.
+
+### Live claude-code route (Phase 33)
+
+Proven against fakes in `packages/dispatcher/tests/test_claude_code_route.py`
+and `scripts/dispatcher-driver.py` S11–S16, and end to end in
+`scripts/lane-a-e2e.ts`: tick → `POST /tasks` 202 → `RemoteTask` →
+landed-claim (`claimed_by`, state transition, or mirror comment) → success
+with `dispatch.outcome{launched}`; 400/409/502 → `host-refused` once-only
+comment (the host's text stays in the journal, never in the comment) and one
+`dispatch.failed`; unreachable/non-JSON/wrong-shape → `host-unreachable`
+comment with no event, retried on a later tick. The G4 restart flips live
+behavior with no dispatcher code change.
 
 ### host-unreachable → live transition (Phase 31, no dispatcher code change)
 

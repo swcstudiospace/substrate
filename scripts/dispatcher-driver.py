@@ -405,6 +405,167 @@ def main() -> int:
         hay.extend(json.dumps(e) for e in evts)
     check("s10 no lease-shaped value leaks", all(leak not in h for h in hay))
 
+    # -- S11-S16: claude-code matrix over a fake host transport (33-01) ----
+    # The real make_launch_fn claude-code branch drives the real HostClient over
+    # MockTransport (never loopback ports, never /var/lib): POST /tasks 202, then
+    # RemoteTask status reads. Every other seam (tick, registry, Linear/MCP world)
+    # is the same wiring the hermes scenarios above use.
+    print("claude-code matrix (fake host transport)")
+    from substrate_dispatcher.host import HostClient
+
+
+    class FakeHostTransport:
+        def __init__(self, status=202, payload=None, fail=None):
+            self.posts: list[str] = []
+            self.bodies: list[dict] = []
+            self.status = status
+            self.payload = payload
+            self.fail = fail
+            self.exit_code = None
+
+        def handler(self, request: httpx.Request) -> httpx.Response:
+            if self.fail is not None:
+                raise self.fail
+            if request.method == "POST" and request.url.path == "/tasks":
+                self.bodies.append(json.loads(request.content))
+                return httpx.Response(self.status, json=self.payload)
+            if request.method == "GET":
+                return httpx.Response(200, json={
+                    "graph_id": "g", "node_id": "n1", "session_id": "n1", "exit_code": self.exit_code})
+            self.posts.append(request.url.path.rsplit("/", 1)[1])
+            return httpx.Response(202, json={"accepted": True})
+
+        def launch_fn_for(self):
+            client = HostClient(
+                transport=httpx.MockTransport(self.handler), bearer="rh-smoke-bearer")
+            return dispatch.make_launch_fn(
+                log=log,
+                checkout=partial(worktree.repo_checkout, root=repos_root),
+                ensure=partial(worktree.ensure_worktree, root=trees_root),
+                open_task=client.launch,
+            )
+
+    def run_cc_tick(registry, launch_fn, dry_run=False):
+        del lines[:]
+        return tick(
+            linear=linear, mcp=mcp, registry=registry, launch_fn=launch_fn,
+            env_file=env_file, environ={}, dry_run=dry_run, log=log,
+        )
+
+    # S11: launch-to-landed through the real tick branch + real HostClient.
+    g11 = gid("cc-launch")
+    world.candidates = [issue(21, "claude-code")]
+    world.graphs = {"i-21": {"find": hit(g11), "node": hit(g11)["node"]}}
+    host11 = FakeHostTransport(payload={
+        "graph_id": g11, "node_id": "n1", "session_id": "n1", "state": "waiting", "exit_code": None})
+    reg11 = SessionRegistry(state_dir=state_dir)
+    decisions = run_cc_tick(reg11, host11.launch_fn_for())
+    check("s11 decision is launch", [d.action for d in decisions] == ["launch"])
+    check("s11 POST body is ids-only",
+          len(host11.bodies) == 1 and set(host11.bodies[0]) == {
+              "graph_id", "node_id", "identifier", "repo", "worktree"})
+    check("s11 outcome event launched",
+          any(e.get("payload", {}).get("outcome") == "launched" for e in world.events.get(g11, [])))
+    world.graphs["i-21"]["node"] = {"node_id": "n1", "state": "unstarted", "claimed_by": "claude-code"}
+    reg11.reap(4000.0, mcp=mcp, linear=linear, log=log)
+    host11.exit_code = 0
+    reg11.reap(4001.0, mcp=mcp, linear=linear, log=log)
+    check("s11 landed exit is success not give-up",
+          "i-21" not in reg11.given_up and reg11.active_issue_ids() == set()
+          and world.comments.get("i-21", []) == [] and world.label_removals.count(("i-21", "l-claude-code-21")) == 0)
+    check("s11 success logged", any("after its claim" in line for line in lines))
+
+    # S12: host-refused 409 becomes exactly one once-only comment + one failed event.
+    g12 = gid("cc-refused")
+    world.candidates = [issue(22, "claude-code")]
+    world.graphs = {"i-22": {"find": hit(g12), "node": hit(g12)["node"]}}
+    host12 = FakeHostTransport(status=409, payload={"error": "node n1 already claimed by hermes"})
+    reg12 = SessionRegistry(state_dir=state_dir)
+    run_cc_tick(reg12, host12.launch_fn_for())
+    run_cc_tick(reg12, host12.launch_fn_for())
+    bodies12 = world.comments.get("i-22", [])
+    check("s12 host-refused once-only comment",
+          len(bodies12) == 1 and "[host-refused]" in bodies12[0]
+          and bodies12[0].startswith("substrate-dispatcher:"))
+    check("s12 host text stays out of the comment", "already claimed by hermes" not in bodies12[0])
+    check("s12 failed event once",
+          sum(1 for e in world.events.get(g12, []) if e.get("payload", {}).get("reason") == "host-refused") == 1)
+    check("s12 no session no give-up",
+          reg12.active_issue_ids() == set() and "i-22" not in reg12.given_up)
+
+    # S13: host-unreachable (down) retries with a comment but no event.
+    g13 = gid("cc-down")
+    world.candidates = [issue(23, "claude-code")]
+    world.graphs = {"i-23": {"find": hit(g13), "node": hit(g13)["node"]}}
+    host13 = FakeHostTransport(fail=httpx.ConnectError("refused"))
+    reg13 = SessionRegistry(state_dir=state_dir)
+    run_cc_tick(reg13, host13.launch_fn_for())
+    run_cc_tick(reg13, host13.launch_fn_for())
+    bodies13 = world.comments.get("i-23", [])
+    check("s13 host-unreachable once-only comment",
+          len(bodies13) == 1 and "[host-unreachable]" in bodies13[0])
+    check("s13 host-unreachable emits nothing",
+          all(e.get("payload", {}).get("reason") != "host-unreachable"
+              for evts in world.events.values() for e in evts))
+    check("s13 still retried never gave up", "i-23" not in reg13.given_up)
+
+    # S14: VM task exits without a landed claim -> exited-unclaimed + label removal + give-up.
+    g14 = gid("cc-unclaimed")
+    world.candidates = [issue(24, "claude-code")]
+    world.graphs = {"i-24": {"find": hit(g14), "node": hit(g14)["node"]}}
+    host14 = FakeHostTransport(payload={
+        "graph_id": g14, "node_id": "n1", "session_id": "n1", "state": "waiting", "exit_code": None})
+    reg14 = SessionRegistry(state_dir=state_dir)
+    run_cc_tick(reg14, host14.launch_fn_for())
+    host14.exit_code = 1
+    reg14.reap(5000.0, mcp=mcp, linear=linear, log=log)
+    check("s14 exited-unclaimed comment",
+          len(world.comments.get("i-24", [])) == 1 and "[exited-unclaimed]" in world.comments["i-24"][0])
+    check("s14 label removed", ("i-24", "l-claude-code-24") in world.label_removals)
+    check("s14 given up with failed event",
+          "i-24" in reg14.given_up
+          and any(e.get("payload", {}).get("reason") == "exited-unclaimed" for e in world.events.get(g14, [])))
+
+    # S15: 900 s without evidence -> claim-timeout, terminate posted to the fake host.
+    g15 = gid("cc-timeout")
+    world.candidates = [issue(25, "claude-code")]
+    world.graphs = {"i-25": {"find": hit(g15), "node": hit(g15)["node"]}}
+    host15 = FakeHostTransport(payload={
+        "graph_id": g15, "node_id": "n1", "session_id": "n1", "state": "waiting", "exit_code": None})
+    reg15 = SessionRegistry(state_dir=state_dir)
+    run_cc_tick(reg15, host15.launch_fn_for())
+    s15 = reg15.get("i-25")
+    assert s15 is not None
+    start15 = s15.started_at
+    reg15.reap(start15 + 900.0, mcp=mcp, linear=linear, log=log)
+    check("s15 claim-timeout comment",
+          any("[claim-timeout]" in b for b in world.comments.get("i-25", [])))
+    check("s15 terminate posted to the fake host", host15.posts == ["terminate"])
+    check("s15 label removed and given up",
+          ("i-25", "l-claude-code-25") in world.label_removals and "i-25" in reg15.given_up)
+
+    # S16: double-launch guards — active issue skipped (no second POST), restart never relaunches.
+    g16 = gid("cc-double")
+    world.candidates = [issue(26, "claude-code")]
+    world.graphs = {"i-26": {"find": hit(g16), "node": hit(g16)["node"]}}
+    host16 = FakeHostTransport(payload={
+        "graph_id": g16, "node_id": "n1", "session_id": "n1", "state": "waiting", "exit_code": None})
+    reg16 = SessionRegistry(state_dir=state_dir)
+    run_cc_tick(reg16, host16.launch_fn_for())
+    posts16 = len(host16.bodies)
+    decisions = run_cc_tick(reg16, host16.launch_fn_for())
+    check("s16 active issue skipped", [d.action for d in decisions] == ["skip"])
+    check("s16 no second POST", len(host16.bodies) == posts16)
+    host16.exit_code = 1
+    reg16.reap(6000.0, mcp=mcp, linear=linear, log=log)
+    check("s16 give-up persisted", "i-26" in SessionRegistry(state_dir=state_dir).given_up)
+    host16b = FakeHostTransport(payload={
+        "graph_id": g16, "node_id": "n1", "session_id": "n1", "state": "waiting", "exit_code": None})
+    world.candidates = [issue(26, "claude-code")]
+    decisions = run_cc_tick(SessionRegistry(state_dir=state_dir), host16b.launch_fn_for())
+    check("s16 post-restart given-up never relaunches",
+          [d.action for d in decisions] == ["skip"] and host16b.bodies == [])
+
     print(f"\n{len(FAILURES)} failure(s)")
     return 1 if FAILURES else 0
 

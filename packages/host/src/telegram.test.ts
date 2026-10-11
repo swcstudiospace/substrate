@@ -13,6 +13,8 @@ import {
 	TelegramClient,
 	TelegramError,
 } from "./telegram.ts";
+import { MemoryTaskStore, TaskService, type TaskRecord } from "./tasks.ts";
+import { redact } from "../../mcp-server/src/redact.ts";
 
 const KEY = "ABCDEFGHIJKLM";
 const USER = 900001;
@@ -368,5 +370,197 @@ describe("telegram approvals", () => {
 		expect(calls).toEqual([]);
 		expect(logs.length).toBeGreaterThan(0);
 		expect(logs.every((line) => line.includes("telegram approvals off"))).toBe(true);
+	});
+});
+
+describe("single-use approvals through the real service (33-02, D33-06)", () => {
+	const GID = "g-1";
+	const NID = "n-1";
+	const T0 = new Date("2026-09-25T12:00:00Z").getTime();
+
+	function approvalService(opts: {
+		timeoutMs?: number;
+		respond?: (input: { sessionId: string; requestId: string; optionId: string }) => Promise<{ status: string }>;
+	} = {}) {
+		const logs: string[] = [];
+		const responded: Array<{ sessionId: string; requestId: string; optionId: string }> = [];
+		const substrateCalls: Array<{ name: string; args: unknown[] }> = [];
+		const store = new MemoryTaskStore();
+		const service = new TaskService({
+			substrate: {
+				claimAndPersist: async (...args: unknown[]) => {
+					substrateCalls.push({ name: "claimAndPersist", args });
+					return { claimed: false, reason: "taken" };
+				},
+				graphRelease: async (...args: unknown[]) => {
+					substrateCalls.push({ name: "graphRelease", args });
+					return { released: true };
+				},
+			} as never,
+			vmFor: () => ({
+				respondPermission: async (input: { sessionId: string; requestId: string; optionId: string }) => {
+					responded.push(input);
+					if (opts.respond) return opts.respond(input);
+					return { status: "accepted" };
+				},
+			}) as never,
+			store,
+			leases: { load: () => null, persist: () => undefined } as never,
+			ensureModelRoute: async () => {},
+			route: {} as never,
+			testsRoute: "sandbox",
+			model: "test",
+			skills: [],
+			trackers: { notionDataSourceUrl: "https://www.notion.so/x", linearTeam: "T" },
+			log: (line: string) => logs.push(line),
+			now: () => new Date(T0),
+			...(opts.timeoutMs !== undefined ? { approvalTimeoutMs: opts.timeoutMs } : {}),
+		});
+		const record: TaskRecord = {
+			graph_id: GID, node_id: NID, identifier: "TRC-1", repo: "swcstudiospace/agent-substrate",
+			session_id: NID, prompt_count: 1, turn_in_flight: true, last_stop_reason: null,
+			exit_code: null, released: false, pending_approvals: [], opened_at: new Date(T0).toISOString(),
+			last_error: null, seeded: [], resumes: 0, stale_approvals: 0, pr_url: null,
+			pr_number: null, synced_at: null, sync_by: null, approvals_allowed: 0, approvals_denied: 0,
+		};
+		store.save(record);
+		return { service, store, logs, responded, substrateCalls };
+	}
+
+	function postedCallback(calls: FetchCall[], index: number): string {
+		const sent = calls.find((c) => c.method === "sendMessage");
+		const keyboard = sent?.params.reply_markup as { inline_keyboard: Array<Array<{ callback_data: string }>> };
+		const match = keyboard.inline_keyboard[0]?.find((b) => decodeCallback(b.callback_data)?.index === index);
+		const data = match?.callback_data ?? "";
+		expect(data).not.toBe("");
+		return data;
+	}
+
+	test("an authorised Approve answers once through real broker+service; markup cleared; Approved-by edit", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "approvals-"));
+		const svc = approvalService();
+		svc.service.recordApproval(GID, NID, "req-1", "Bash");
+		const brokerLogs: string[] = [];
+		const { fetchImpl, calls } = scriptedFetch((call) => (call.method === "sendMessage" ? { message_id: 42 } : true));
+		const broker = createApprovals(ON_ENV, {
+			fetchImpl, statePath: join(dir, "approvals.json"), log: (line) => brokerLogs.push(line),
+			respond: (g, s, r, o) => svc.service.respondApproval(g, s, r, o),
+		});
+		await broker.post({
+			graphId: GID, nodeId: NID, sessionId: NID, requestId: "req-1", tool: "Bash",
+			input: { cmd: "ls" }, options: OPTIONS,
+		});
+		const data = postedCallback(calls, 0);
+		calls.length = 0;
+		await broker.handleUpdate(update({ data, id: "cb-approve" }));
+		expect(svc.responded).toEqual([{ sessionId: NID, requestId: "req-1", optionId: "allow_once" }]);
+		const stored = svc.store.get(GID, NID);
+		expect(stored?.approvals_allowed).toBe(1);
+		expect(stored?.approvals_denied).toBe(0);
+		expect(stored?.pending_approvals).toEqual([]);
+		const methods = calls.map((c) => c.method);
+		expect(methods).toEqual(["answerCallbackQuery", "editMessageReplyMarkup", "editMessageText"]);
+		const cleared = calls.find((c) => c.method === "editMessageReplyMarkup");
+		expect(cleared?.params.reply_markup).toEqual({ inline_keyboard: [] });
+		const edited = calls.find((c) => c.method === "editMessageText");
+		expect(String(edited?.params.text)).toContain("Approved by Ada");
+		for (const line of [...svc.logs, ...brokerLogs]) {
+			expect(line).not.toContain(String(USER));
+		}
+		calls.length = 0;
+		await broker.handleUpdate(update({ data, id: "cb-approve-again" }));
+		expect(svc.responded).toHaveLength(1);
+		expect(calls.find((c) => c.method === "answerCallbackQuery")?.params.text).toBe("expired");
+	});
+
+	test("an authorised Deny denies through the real service with exactly one answer", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "approvals-"));
+		const svc = approvalService();
+		svc.service.recordApproval(GID, NID, "req-1", "Bash");
+		const { fetchImpl, calls } = scriptedFetch((call) => (call.method === "sendMessage" ? { message_id: 42 } : true));
+		const broker = createApprovals(ON_ENV, {
+			fetchImpl, statePath: join(dir, "approvals.json"), log: () => undefined,
+			respond: (g, s, r, o) => svc.service.respondApproval(g, s, r, o),
+		});
+		await broker.post({
+			graphId: GID, nodeId: NID, sessionId: NID, requestId: "req-1", tool: "Bash",
+			input: {}, options: OPTIONS,
+		});
+		const data = postedCallback(calls, 2);
+		await broker.handleUpdate(update({ data, id: "cb-deny" }));
+		expect(svc.responded).toEqual([{ sessionId: NID, requestId: "req-1", optionId: "reject_once" }]);
+		const stored = svc.store.get(GID, NID);
+		expect(stored?.approvals_denied).toBe(1);
+		expect(stored?.approvals_allowed).toBe(0);
+		const edited = calls.find((c) => c.method === "editMessageText");
+		expect(String(edited?.params.text)).toContain("Denied by Ada");
+	});
+
+	test("tap-vs-timeout through the real broker: the sweep wins once, the live tap reads expired", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "approvals-"));
+		let release!: (value: { status: string }) => void;
+		const gate = new Promise<{ status: string }>((resolve) => { release = resolve; });
+		const svc = approvalService({ timeoutMs: 60_000, respond: () => gate });
+		svc.service.recordApproval(GID, NID, "req-1", "Bash");
+		const { fetchImpl, calls } = scriptedFetch((call) => (call.method === "sendMessage" ? { message_id: 42 } : true));
+		const broker = createApprovals(ON_ENV, {
+			fetchImpl, statePath: join(dir, "approvals.json"), log: () => undefined,
+			respond: (g, s, r, o) => svc.service.respondApproval(g, s, r, o),
+		});
+		await broker.post({
+			graphId: GID, nodeId: NID, sessionId: NID, requestId: "req-1", tool: "Bash",
+			input: {}, options: OPTIONS,
+		});
+		const data = postedCallback(calls, 0);
+		svc.service.now = () => new Date(T0 + 60_001);
+		const sweepP = svc.service.sweepApprovalTimeouts(GID, NID);
+		calls.length = 0;
+		await broker.handleUpdate(update({ data, id: "cb-race" }));
+		expect(calls.find((c) => c.method === "answerCallbackQuery")?.params.text).toBe("expired");
+		expect(calls.some((c) => c.method === "editMessageReplyMarkup")).toBe(false);
+		release({ status: "accepted" });
+		expect(await sweepP).toBe(1);
+		expect(svc.responded).toEqual([{ sessionId: NID, requestId: "req-1", optionId: "reject_once" }]);
+		const stored = svc.store.get(GID, NID);
+		expect(stored?.approvals_denied).toBe(1);
+		expect(stored?.approvals_allowed).toBe(0);
+	});
+
+	test("planted secrets reach no log, fetch param, substrate arg, or record field", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "approvals-"));
+		const lin = `lin_api_${"s".repeat(24)}`;
+		const ghp = `ghp_${"t".repeat(36)}`;
+		const svc = approvalService({ timeoutMs: 60_000 });
+		svc.service.recordApproval(GID, NID, "req-1", redact(`Bash ${lin}`).slice(0, 200));
+		svc.service.recordApproval(GID, NID, "req-2", "Read");
+		const brokerLogs: string[] = [];
+		const { fetchImpl, calls } = scriptedFetch((call) => (call.method === "sendMessage" ? { message_id: 42 } : true));
+		const broker = createApprovals(ON_ENV, {
+			fetchImpl, statePath: join(dir, "approvals.json"), log: (line) => brokerLogs.push(line),
+			respond: (g, s, r, o) => svc.service.respondApproval(g, s, r, o),
+		});
+		await broker.post({
+			graphId: GID, nodeId: NID, sessionId: NID, requestId: "req-1", tool: "Bash",
+			input: { cmd: `deploy ${ghp} ${lin}` }, options: OPTIONS,
+		});
+		const sent = calls.find((c) => c.method === "sendMessage");
+		expect(String((sent?.params as Record<string, unknown>).text)).toContain("[REDACTED]");
+		await broker.handleUpdate(update({ data: postedCallback(calls, 0), id: "cb-ok" }));
+		svc.service.now = () => new Date(T0 + 60_001);
+		expect(await svc.service.sweepApprovalTimeouts(GID, NID)).toBe(1);
+		const haystacks = [
+			...svc.logs,
+			...brokerLogs,
+			...calls.map((c) => JSON.stringify(c.params)),
+			...svc.substrateCalls.map((c) => JSON.stringify(c.args)),
+			JSON.stringify(svc.store.get(GID, NID)),
+		];
+		for (const secret of [lin, ghp]) {
+			expect(haystacks.every((h) => !h.includes(secret))).toBe(true);
+		}
+		const stored = svc.store.get(GID, NID);
+		expect(stored?.approvals_allowed).toBe(1);
+		expect(stored?.approvals_denied).toBe(1);
+		expect(stored?.pending_approvals).toEqual([]);
 	});
 });
