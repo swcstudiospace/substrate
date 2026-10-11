@@ -734,8 +734,9 @@ export class TaskService {
 	 * boot cannot replay it (T-03-06-01). rivet restores the session itself (resume → load →
 	 * bounded-history fallback); the host only sends the next prompt. Approval requests of the dead
 	 * turn can never be answered, so they leave pending_approvals as a stale count (T-03-06-02).
-	 * The model route is re-established first (on a:hostfn_proxy the restart killed the in-VM relay);
-	 * a task whose route or prompt fails is marked failed on its own and the others still resume.
+	 * The model route is re-established first (on a:hostfn_proxy the restart killed the in-VM relay),
+	 * then the persisted lease is heartbeat-or-reclaimed (D32-06); a task whose route, lease or
+	 * prompt fails is marked failed on its own and the others still resume.
 	 * Returns the number of continuation prompts sent.
 	 */
 	async resumeInterrupted(): Promise<number> {
@@ -756,6 +757,20 @@ export class TaskService {
 					r.exit_code = 1;
 				});
 				this.log(`[substrate-host] resume ${key} failed before the prompt: ${String(cause)}`);
+				continue;
+			}
+			// D32-06: the restarted turn is a running turn — heartbeat-or-reclaim the persisted
+			// lease before the continuation. A refused re-claim fails that task alone (no prompt,
+			// no resume bump) and the loop continues over the remaining tasks.
+			const leaseCheck = await this.heartbeatOrReclaim(gid, nid, interrupted.session_id);
+			if (leaseCheck === "failed") {
+				this.update(gid, nid, (r) => {
+					r.turn_in_flight = false;
+					r.last_error = "lease lost";
+					r.exit_code = 1;
+				});
+				await this.releaseOnce(gid, nid);
+				this.log(`[substrate-host] resume ${key} failed on the lease: re-claim refused`);
 				continue;
 			}
 			const record = this.update(gid, nid, (r) => {

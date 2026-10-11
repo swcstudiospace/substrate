@@ -59,6 +59,8 @@ function harness(opts: {
 	heartbeats?: Array<{ ok: boolean; reason?: string }>;
 	/** Re-claims (second and later claims) are refused. */
 	reclaimRefused?: boolean;
+	/** Re-claims refused only when the graph id contains this text (mixed-outcome resumes). */
+	reclaimRefusedFor?: string;
 	/** graphComplete answers refused. */
 	completeRefused?: boolean;
 	/** When given, log lines accumulate here for value-scan assertions. */
@@ -135,7 +137,8 @@ function harness(opts: {
 				record("claimAndPersist", store, graphId, nodeId, surface, sessionId);
 				claimCalls += 1;
 				if (opts.claimed === false) return { claimed: false, reason: "held by hermes session s-9" };
-				if (claimCalls > 1 && opts.reclaimRefused) return { claimed: false, reason: "taken over by hermes session s-9" };
+				const refused = opts.reclaimRefused ? claimCalls > 1 : opts.reclaimRefusedFor !== undefined && graphId.includes(opts.reclaimRefusedFor);
+				if (refused) return { claimed: false, reason: "taken over by hermes session s-9" };
 				if (!opts.dropLeasePersist) store.persist(graphId, nodeId, { lease_id: leaseId, acquiredAtMs: 0, ttlSeconds: 900 });
 				return { claimed: true, lease_id: leaseId };
 			},
@@ -769,6 +772,68 @@ describe("TaskService.resumeInterrupted", () => {
 		await h2.service.openTask(openBody());
 		await h2.failPrompt(new Error("boom"));
 		expect(h2.store.get(GID, NID)?.exit_code).toBe(1);
+	});
+});
+
+describe("TaskService resume heartbeat-or-reclaim (32-02, D32-06)", () => {
+	const NOW_MS = new Date("2026-09-25T12:00:00Z").getTime();
+
+	test("resume with a live lease heartbeats-or-skips and continues with no re-claim", async () => {
+		const store = new MemoryTaskStore();
+		store.save(taskRecord());
+		const h = harness({ store });
+		h.leases.persist(GID, NID, { lease_id: h.leaseId, acquiredAtMs: NOW_MS, ttlSeconds: 900 });
+		expect(await h.service.resumeInterrupted()).toBe(1);
+		expect(h.prompts.map((p) => p.idempotencyKey)).toEqual([`${GID}:${NID}:resume:1`]);
+		expect(h.named("heartbeat")).toHaveLength(0);
+		expect(h.named("claimAndPersist")).toHaveLength(0);
+		expect(h.named("graphRelease")).toHaveLength(0);
+		await h.settlePrompt("end_turn");
+	});
+
+	test("resume with a lapsed lease re-claims once before the continuation", async () => {
+		const store = new MemoryTaskStore();
+		store.save(taskRecord());
+		const h = harness({ store, heartbeats: [{ ok: false, reason: "expired" }] });
+		h.leases.persist(GID, NID, { lease_id: h.leaseId, acquiredAtMs: 0, ttlSeconds: 900 });
+		expect(await h.service.resumeInterrupted()).toBe(1);
+		expect(h.named("heartbeat")).toHaveLength(1);
+		expect(h.named("claimAndPersist")).toHaveLength(1);
+		expect(h.prompts.map((p) => p.idempotencyKey)).toEqual([`${GID}:${NID}:resume:1`]);
+		const order = h.calls.map((c) => c.name);
+		expect(order.indexOf("heartbeat")).toBeLessThan(order.indexOf("claimAndPersist"));
+		expect(order.indexOf("claimAndPersist")).toBeLessThan(order.indexOf("sessions.prompt"));
+		await h.settlePrompt("end_turn");
+	});
+
+	test("resume with a refused re-claim fails that task alone with zero prompts for it", async () => {
+		const store = new MemoryTaskStore();
+		store.save(taskRecord({ graph_id: "ut-aaa-11111111" }));
+		store.save(taskRecord({ graph_id: "ut-bbb-22222222" }));
+		const h = harness({ store, heartbeats: [{ ok: false, reason: "lost" }, { ok: true }], reclaimRefusedFor: "ut-aaa-11111111" });
+		h.leases.persist("ut-aaa-11111111", NID, { lease_id: "lse_aaa", acquiredAtMs: 0, ttlSeconds: 900 });
+		h.leases.persist("ut-bbb-22222222", NID, { lease_id: "lse_bbb", acquiredAtMs: 0, ttlSeconds: 900 });
+		expect(await h.service.resumeInterrupted()).toBe(1);
+		expect(h.prompts.map((p) => p.idempotencyKey)).toEqual(["ut-bbb-22222222:n1:resume:1"]);
+		const failed = store.get("ut-aaa-11111111", NID);
+		expect(failed?.turn_in_flight).toBe(false);
+		expect(failed?.exit_code).toBe(1);
+		expect(failed?.last_error).toBe("lease lost");
+		expect(failed?.resumes).toBe(0);
+		expect(h.named("claimAndPersist")).toHaveLength(1);
+		expect(h.named("graphRelease")).toHaveLength(1);
+		expect(store.get("ut-bbb-22222222", NID)?.resumes).toBe(1);
+	});
+
+	test("one task's lease failure does not stop the other task's resume", async () => {
+		const store = new MemoryTaskStore();
+		store.save(taskRecord({ graph_id: "ut-aaa-11111111" }));
+		store.save(taskRecord({ graph_id: "ut-bbb-22222222" }));
+		const h = harness({ store, heartbeats: [{ ok: true }, { ok: true }] });
+		h.leases.persist("ut-aaa-11111111", NID, { lease_id: "lse_aaa", acquiredAtMs: NOW_MS, ttlSeconds: 900 });
+		h.leases.persist("ut-bbb-22222222", NID, { lease_id: "lse_bbb", acquiredAtMs: NOW_MS, ttlSeconds: 900 });
+		expect(await h.service.resumeInterrupted()).toBe(2);
+		expect(h.prompts.map((p) => p.idempotencyKey).sort()).toEqual(["ut-aaa-11111111:n1:resume:1", "ut-bbb-22222222:n1:resume:1"]);
 	});
 });
 
