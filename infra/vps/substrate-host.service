@@ -57,8 +57,14 @@ Restart=always
 RestartSec=5
 # Stopping the unit disposes every VM (sandbox containers included); 15 s before SIGKILL.
 TimeoutStopSec=15
+# SIGTERM reaches main.ts first (SIGINT/SIGTERM → beginShutdown): in-flight prompts keep
+# their records so the next boot resumes them. Never shorten this below the model-relay
+# drain or set KillMode such that SIGKILL precedes the handler.
 
 # VM storage, task records and (via substrate-dispatcher) the worktrees live under /var/lib/substrate.
+# 32-02 layout: <state>/agentos/tasks holds one 0600 JSON per task, <state>/agentos/leases
+# the sibling 0600 lease files — both persist restarts under StateDirectory=substrate, and the
+# tasks dir never holds lease files (TaskStore.list reads every *.json it finds).
 StateDirectory=substrate
 
 StandardOutput=journal

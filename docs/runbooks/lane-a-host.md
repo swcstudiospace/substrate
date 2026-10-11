@@ -137,6 +137,7 @@ Each gate below is OPERATOR-GATED: preconditions checked, window approved, evide
 - Preconditions: L1 green; the restart sequence above reviewed.
 - Gate: OPERATOR-GATED — the executor stops here; a human approves the window and runs the step.
 - Run: install the staged unit, start, stop (records stay in flight), start again, verify the one resume pass and its continuation.
+- Verify after the restart: `journalctl -u substrate-host` shows `interrupted turns resumed: N` with one `resumed <gid>/<nid> key <gid>:<nid>:resume:<n>` line per interrupted task; a second restart without new work resumes nothing.
 - Record: runbook checkbox + `systemctl` evidence (unit active, `/healthz` reports engine + api).
 - Rollback: `systemctl stop substrate-host` disposes every VM; the manifest row stays `dormant:31` until this gated restart flips it.
 
