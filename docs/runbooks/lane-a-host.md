@@ -109,6 +109,29 @@ Logs report presence only (`lease persisted …: yes`, `heartbeat ok/refused`) �
 4. A task whose route and heartbeat both fail is marked failed on its own; the others still resume. Stale approvals move to `stale_approvals`.
 5. A second boot without new work sends zero new prompts (no replay).
 
+## Approvals (LANEA-06, D33-04..D33-06)
+
+Every session `permission_request` is recorded with a deadline and posted to
+the Telegram approval broker as single-use Approve/Deny buttons; a tap
+answers exactly once through `respondApproval`, a second tap reads `expired`.
+An unanswered request auto-denies fail-closed — nothing waits forever.
+
+| Item | Rule |
+| --- | --- |
+| Deadline | `recorded_at + approvalTimeoutMs`, default 900 s (same ladder as lease TTL and claim timeout), tunable by `SUBSTRATE_APPROVAL_TIMEOUT_S` (seconds; malformed falls back logged) |
+| Sweep | Heartbeat tick evaluates deadlines alongside `heartbeatDue` (no new timer lifetime — the tick is armed exactly while `turn_in_flight`); expiry auto-denies through the `respondApproval` path (same deny call, same `approvals_denied` increment, same pending-clearing, plus a `timeout` log line with ids only) |
+| Deny | Deny-on-timeout, never allow: the turn fails closed through the existing turn-failure → single-release path |
+| Race | Tap and sweep funnel through the same single-answer claim: the loser reads `not_pending`/`expired` |
+| Resume | Stale approvals of the dead process count off to `stale_approvals` first; live deadlines arm on the new boot only |
+| Logs | Presence-only (`approval pending/timeout <gid>/<nid> request <id>`); approval input text, bearer values, and `lease_id`s never printed |
+
+Approvals-channel checklist (names only — values never enter the repo):
+
+1. `SUBSTRATE_APPROVAL_BOT_TOKEN`, `SUBSTRATE_APPROVAL_CHAT_ID`, `SUBSTRATE_APPROVAL_USER_IDS` provisioned in the unit env file.
+2. `whoami` check at boot: the journal shows `telegram approvals on (bot @<name>)`, else `telegram approvals off` and requests park until the deadline.
+3. Poll health: `getUpdates` long-poll with 409 → 30 s backoff, error → 5 s backoff, offset persisted in `<storage>/approvals.json` (0600).
+4. Live expectation: taps inside the 900 s window; a slower human's work auto-denies, fails closed, and is resumable — never half-applied.
+
 ## Credential containment (LANEA-07, D32-07/D32-08)
 
 | Item | Rule |
@@ -123,6 +146,8 @@ Logs report presence only (`lease persisted …: yes`, `heartbeat ok/refused`) �
 ## Operator-gated live tail L1-L4 (32-03 — the executor stops at L1, never runs it)
 
 Each gate below is OPERATOR-GATED: preconditions checked, window approved, evidence recorded, rollback run. Out of scope even for the tail: real pushes/PRs on non-throwaway repos, Linear/Notion writes outside the isolated graph, `RIVET_RUN_ENGINE=1` (refused by `main.ts` until the G2 verdict), base-image pulls beyond the L1 window.
+
+The v1.3 lane-A cutover itself is the LANEA-08 G1–G5 sequence in `docs/runbooks/dispatch-proof.md` (label wiring → real VM → real approvals → real push/PR/sync with gated Done → unit activations with both manifest flips); the L-gates below cover this host's install half only.
 
 ### L1 — OPERATOR-GATED: real VM-backed node run
 
