@@ -169,6 +169,12 @@ export type SeedFilesInput = {
 	 * Phase 32's credentials discipline (LANEA-02/03/07).
 	 */
 	substrateBearer?: string | null;
+	/**
+	 * The substrate MCP URL written into the seeded entry (D32-08 test seam).
+	 * Defaults to the unit's served loopback proxy; a non-loopback URL keeps
+	 * the entry headerless whatever bearer is supplied.
+	 */
+	substrateMcpUrl?: string;
 	/** Clock for tracking.updatedAt; defaults to the wall clock. */
 	now?: () => Date;
 };
@@ -257,6 +263,22 @@ function hookSettings(): Record<string, unknown> {
 	};
 }
 
+/**
+ * D32-08: whether the served substrate proxy URL is loopback-reachable from the VM. A static
+ * hostname check — never a network probe at seed time. The unit serves the proxy on 127.0.0.1;
+ * only loopback names keep the bearer in the seeded entry, everything else stays headerless.
+ */
+export function substrateProxyLoopback(url: string = SUBSTRATE_MCP_URL): boolean {
+	let host = "";
+	try {
+		host = new URL(url).hostname.toLowerCase();
+	} catch {
+		return false;
+	}
+	if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);
+	return host === "127.0.0.1" || host === "::1" || host === "localhost";
+}
+
 /** Every file openTask writes under /home/agentos, in write order. */
 export function seedFiles(input: SeedFilesInput): SeedFile[] {
 	const files: SeedFile[] = [{ path: `${VM_HOME}/SUBSTRATE_BRIEF.md`, content: input.brief }];
@@ -276,11 +298,14 @@ export function seedFiles(input: SeedFilesInput): SeedFile[] {
 	// on tracker_route vm_mcp; elsewhere the entries are inert. The substrate entry carries the
 	// host-job bearer header (main lease model; anonymous access is refused server-side) — the
 	// value is resolved host-side via the Phase 20 tokens-dir order and never logged.
+	const mcpUrl = (input.substrateMcpUrl ?? SUBSTRATE_MCP_URL).trim();
 	const bearer = (input.substrateBearer ?? "").trim();
+	// D32-08: the bearer rides only the loopback proxy the unit serves. A non-loopback URL
+	// keeps September's headerless entry and the model reaches substrate through host functions.
 	const substrateEntry =
-		bearer === ""
-			? { type: "http", url: SUBSTRATE_MCP_URL }
-			: { type: "http", url: SUBSTRATE_MCP_URL, headers: { Authorization: `Bearer ${bearer}` } };
+		bearer !== "" && substrateProxyLoopback(mcpUrl)
+			? { type: "http", url: mcpUrl, headers: { Authorization: `Bearer ${bearer}` } }
+			: { type: "http", url: mcpUrl };
 	files.push({
 		path: `${VM_HOME}/.claude.json`,
 		content: json({
