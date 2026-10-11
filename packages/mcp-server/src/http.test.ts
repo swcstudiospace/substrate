@@ -26,6 +26,7 @@ import {
 } from "./skills/propose.ts";
 import { REDACTED } from "./redact.ts";
 import type { SubstrateEvent } from "./types.ts";
+import { canonicalJson, sha256Hex } from "@substrate/audit";
 
 const ROOT = join(import.meta.dir, "..", "..", "..");
 const CLI = join(ROOT, "packages", "cli", "src", "index.ts");
@@ -1237,6 +1238,64 @@ describe("POST /skills/propose", () => {
 		expect(harness.observability.audit.recent()[0]).toMatchObject({ tool: "skills_propose", decision: "allowed" });
 	});
 
+	test("an authenticated non-object body is audited with a non-echoing descriptor, then refused 400", async () => {
+		const { calls, seam } = proposer();
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory(), ...TOKENS }, { skills: seam });
+		const decoy = `decoy-${"q".repeat(32)}`;
+		for (const payload of [[{ name: decoy }], decoy, 7] as const) {
+			const reply = await propose(harness, "tok-agent", payload);
+			expect(reply.status).toBe(400);
+		}
+		expect(calls).toEqual([]);
+		const records = harness.observability.audit.recent().filter((record) => record.tool === "skills_propose");
+		expect(records).toHaveLength(3);
+		for (const record of records) expect(record).toMatchObject({ tool: "skills_propose", decision: "allowed" });
+		expect(JSON.stringify(records)).not.toContain(decoy);
+	});
+
+	test("malformed JSON on the proposal route is audited, then refused 400", async () => {
+		const { calls, seam } = proposer();
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory(), ...TOKENS }, { skills: seam });
+		const reply = await propose(harness, "tok-agent", "{nope");
+		expect(reply.status).toBe(400);
+		expect(calls).toEqual([]);
+		expect(harness.observability.audit.recent()[0]).toMatchObject({ tool: "skills_propose", decision: "allowed" });
+	});
+
+	test("an authenticated oversize body is audited with no body stored, then refused 413", async () => {
+		const { calls, seam } = proposer();
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory(), ...TOKENS }, { skills: seam });
+		const reply = await propose(harness, "tok-agent", "x".repeat(1_000_001));
+		expect(reply.status).toBe(413);
+		expect(calls).toEqual([]);
+		const [record] = harness.observability.audit.recent();
+		expect(record).toMatchObject({ tool: "skills_propose", decision: "allowed" });
+	});
+
+	test("audit denial dominates an otherwise-invalid object: 503 with nothing proposed", async () => {
+		const { calls, seam } = proposer();
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: unwritablePath(), ...TOKENS }, { skills: seam });
+		const reply = await propose(harness, "tok-agent", { ...body, mode: "merge" });
+		expect(reply.status).toBe(503);
+		expect(calls).toEqual([]);
+	});
+
+	test("audit denial dominates a non-object body: 503 with nothing proposed", async () => {
+		const { calls, seam } = proposer();
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: unwritablePath(), ...TOKENS }, { skills: seam });
+		const reply = await propose(harness, "tok-agent", [body]);
+		expect(reply.status).toBe(503);
+		expect(calls).toEqual([]);
+	});
+
+	test("audit denial dominates malformed JSON: 503 with nothing proposed", async () => {
+		const { calls, seam } = proposer();
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: unwritablePath(), ...TOKENS }, { skills: seam });
+		const reply = await propose(harness, "tok-agent", "{nope");
+		expect(reply.status).toBe(503);
+		expect(calls).toEqual([]);
+	});
+
 	test("a refusal is 400 with findings as file, line and rule only", async () => {
 		const refusal = new ProposeRefused("secret-like content in 1 place(s); remove it or use an env reference", [
 			{ file: "SKILL.md", line: 4, rule: "github" },
@@ -1277,6 +1336,59 @@ describe("POST /skills/propose", () => {
 		expect(calls).toEqual([]);
 	});
 
+	test("a serialized proposal body of exactly 1_000_000 UTF-8 bytes is accepted", async () => {
+		// Multibyte content, JSON escaping and metadata overhead all count: the boundary
+		// is on the caller's serialized UTF-8 body, not on file text alone. The fixture
+		// names the token's surface as a client-owned field, so it counts toward the 1M.
+		const rationale = 'café "quoted"\nnewline';
+		const prefix = "---\nname: demo-skill\ndescription: a demo\n---\ncafé \"q\"\n";
+		const fixed = { name: "demo-skill", rationale, surface: "claude-code", session_id: "sess-1", graph_id: "ut-1" };
+		const pad = 1_000_000 - Buffer.byteLength(JSON.stringify({ ...fixed, files: { "SKILL.md": prefix } }), "utf8");
+		const payload = { ...fixed, files: { "SKILL.md": prefix + "x".repeat(pad) } };
+		expect(Buffer.byteLength(JSON.stringify(payload), "utf8")).toBe(1_000_000);
+		const { calls, seam } = proposer();
+		const harness = await start(TOKENS, { skills: seam });
+		const reply = await propose(harness, "tok-agent", payload);
+		expect(reply.status).toBe(200);
+		expect(calls).toHaveLength(1);
+	});
+
+	test("a 1_000_000-byte wire body without a surface is accepted and attributed to the token", async () => {
+		// The caller's 1MB budget is measured before server-owned attribution, which costs
+		// nothing: an exact-1M body with no surface field is served as the token's surface,
+		// never tipped over by injection.
+		const rationale = 'café "quoted"\nnewline';
+		const prefix = "---\nname: demo-skill\ndescription: a demo\n---\ncafé \"q\"\n";
+		const fixed = { name: "demo-skill", rationale, session_id: "sess-1", graph_id: "ut-1" };
+		const pad = 1_000_000 - Buffer.byteLength(JSON.stringify({ ...fixed, files: { "SKILL.md": prefix } }), "utf8");
+		const payload = { ...fixed, files: { "SKILL.md": prefix + "x".repeat(pad) } };
+		expect(Buffer.byteLength(JSON.stringify(payload), "utf8")).toBe(1_000_000);
+		const { calls, seam } = proposer();
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory(), ...TOKENS }, { skills: seam });
+		const reply = await propose(harness, "tok-agent", payload);
+		expect(reply.status).toBe(200);
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.input).toMatchObject({ name: "demo-skill", surface: "claude-code" });
+		expect(harness.observability.audit.recent()[0]).toMatchObject({ tool: "skills_propose", decision: "allowed" });
+	});
+
+	test("a serialized proposal body of 1_000_001 UTF-8 bytes is refused 413 with nothing proposed", async () => {
+		const rationale = 'café "quoted"\nnewline';
+		const prefix = "---\nname: demo-skill\ndescription: a demo\n---\ncafé \"q\"\n";
+		const fixed = { name: "demo-skill", rationale, session_id: "sess-1", graph_id: "ut-1" };
+		const pad = 1_000_001 - Buffer.byteLength(JSON.stringify({ ...fixed, files: { "SKILL.md": prefix } }), "utf8");
+		const payload = { ...fixed, files: { "SKILL.md": prefix + "x".repeat(pad) } };
+		expect(Buffer.byteLength(JSON.stringify(payload), "utf8")).toBe(1_000_001);
+		const { calls, seam } = proposer();
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory(), ...TOKENS }, { skills: seam });
+		const reply = await propose(harness, "tok-agent", payload);
+		expect(reply.status).toBe(413);
+		expect(calls).toEqual([]);
+		const [record] = harness.observability.audit.recent();
+		expect(record).toMatchObject({ tool: "skills_propose", decision: "allowed" });
+		expect(JSON.stringify(record)).not.toContain("café");
+	});
+
 	test("it is audited as skills_propose on the REST transport, the body digested not stored", async () => {
 		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory(), ...TOKENS }, { skills: proposer().seam });
 		await propose(harness, "tok-agent");
@@ -1300,6 +1412,152 @@ describe("POST /skills/propose", () => {
 
 		expect(reply.status).toBe(503);
 		expect(calls).toEqual([]);
+	});
+
+	test("skills_propose over the real /mcp socket denied by the audit chain answers JSON-RPC -32000 with nothing proposed", async () => {
+		const { calls, seam } = proposer();
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: unwritablePath(), ...TOKENS }, { skills: seam });
+		const response = await fetch(`${harness.base}/mcp`, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				accept: "application/json, text/event-stream",
+				authorization: "Bearer tok-agent",
+			},
+			body: JSON.stringify({
+				jsonrpc: "2.0",
+				id: 9,
+				method: "tools/call",
+				params: { name: "skills_propose", arguments: { ...body } },
+			}),
+		});
+		const denied = (await response.json()) as { id: unknown; error: { code: number; message: string } };
+		expect(response.status).toBe(200);
+		expect(denied.id).toBe(9);
+		expect(denied.error.code).toBe(-32000);
+		expect(denied.error.message).toContain("skills_propose");
+		expect(calls).toEqual([]);
+	});
+
+	test("dry_run skills_propose over the real /mcp socket is still audited: denial answers -32000", async () => {
+		const { calls, seam } = proposer();
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: unwritablePath(), ...TOKENS }, { skills: seam });
+		const response = await fetch(`${harness.base}/mcp`, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				accept: "application/json, text/event-stream",
+				authorization: "Bearer tok-agent",
+			},
+			body: JSON.stringify({
+				jsonrpc: "2.0",
+				id: 10,
+				method: "tools/call",
+				params: { name: "skills_propose", arguments: { ...body, dry_run: true } },
+			}),
+		});
+		const denied = (await response.json()) as { id: unknown; error: { code: number; message: string } };
+		expect(response.status).toBe(200);
+		expect(denied.id).toBe(10);
+		expect(denied.error.code).toBe(-32000);
+		expect(denied.error.message).toContain("skills_propose");
+		expect(calls).toEqual([]);
+	});
+
+	test("skills_propose over the real /mcp socket with a caller body of exactly 1_000_000 bytes is served", async () => {
+		// The MCP door enforces the same caller-body cap as REST and the CLI, on the args
+		// as received — never the JSON-RPC envelope, never server-injected attribution.
+		// Multibyte content, JSON escaping and session/graph metadata all count. The named
+		// surface is a client-owned field, so it counts toward the 1M.
+		const rationale = 'café "quoted"\nnewline';
+		const prefix = "---\nname: demo-skill\ndescription: a demo\n---\ncafé \"q\"\n";
+		const fixed = { name: "demo-skill", rationale, surface: "claude-code", session_id: "sess-1", graph_id: "ut-1" };
+		const pad = 1_000_000 - Buffer.byteLength(JSON.stringify({ ...fixed, files: { "SKILL.md": prefix } }), "utf8");
+		const args = { ...fixed, files: { "SKILL.md": prefix + "x".repeat(pad) } };
+		expect(Buffer.byteLength(JSON.stringify(args), "utf8")).toBe(1_000_000);
+		// The wire carries framing around the args: it must clear the transport intake
+		// (cap + 64KiB headroom) while the args sit exactly on the proposal-body cap.
+		const envelope = JSON.stringify({ jsonrpc: "2.0", id: 11, method: "tools/call", params: { name: "skills_propose", arguments: args } });
+		expect(Buffer.byteLength(envelope, "utf8")).toBeLessThan(1_000_000 + 64 * 1024);
+		const { calls, seam } = proposer();
+		const harness = await start(TOKENS, { skills: seam });
+		const response = await fetch(`${harness.base}/mcp`, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				accept: "application/json, text/event-stream",
+				authorization: "Bearer tok-agent",
+			},
+			body: envelope,
+		});
+		expect(response.status).toBe(200);
+		expect(calls).toHaveLength(1);
+		expect(await response.text()).toContain("pull/12");
+	});
+
+	test("skills_propose over the real /mcp socket at 1_000_001 caller bytes is refused with nothing proposed", async () => {
+		const rationale = 'café "quoted"\nnewline';
+		const prefix = "---\nname: demo-skill\ndescription: a demo\n---\ncafé \"q\"\n";
+		const fixed = { name: "demo-skill", rationale, surface: "claude-code", session_id: "sess-1", graph_id: "ut-1" };
+		const pad = 1_000_001 - Buffer.byteLength(JSON.stringify({ ...fixed, files: { "SKILL.md": prefix } }), "utf8");
+		const args = { ...fixed, files: { "SKILL.md": prefix + "x".repeat(pad) } };
+		expect(Buffer.byteLength(JSON.stringify(args), "utf8")).toBe(1_000_001);
+		const { calls, seam } = proposer();
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory(), ...TOKENS }, { skills: seam });
+		const response = await fetch(`${harness.base}/mcp`, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				accept: "application/json, text/event-stream",
+				authorization: "Bearer tok-agent",
+			},
+			body: JSON.stringify({ jsonrpc: "2.0", id: 12, method: "tools/call", params: { name: "skills_propose", arguments: args } }),
+		});
+		expect(response.status).toBe(200);
+		expect(calls).toEqual([]);
+		const text = await response.text();
+		expect(text).toContain("over the limit of 1000000 bytes");
+		expect(text).not.toContain("café");
+		const [record] = harness.observability.audit.recent();
+		expect(record).toMatchObject({ tool: "skills_propose", decision: "allowed", transport: "mcp" });
+	});
+
+	test("a dry_run over the MCP cap is refused all the same, with nothing proposed", async () => {
+		const args = { ...body, dry_run: true, files: { "SKILL.md": "x".repeat(1_000_001) } };
+		const { calls, seam } = proposer();
+		const harness = await start(TOKENS, { skills: seam });
+		const response = await fetch(`${harness.base}/mcp`, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				accept: "application/json, text/event-stream",
+				authorization: "Bearer tok-agent",
+			},
+			body: JSON.stringify({ jsonrpc: "2.0", id: 13, method: "tools/call", params: { name: "skills_propose", arguments: args } }),
+		});
+		expect(response.status).toBe(200);
+		expect(calls).toEqual([]);
+		expect(await response.text()).toContain("over the limit of 1000000 bytes");
+	});
+
+	test("an /mcp wire past cap plus framing headroom is boundedly refused before audit or dispatch", async () => {
+		// Transport intake is bounded, not unbounded: framing headroom is 64KiB, so a wire
+		// past 1M + 64KiB never reaches the audit gate or any tool. It keeps the generic
+		// 500 /mcp always has for oversize wire — never a proposal answer.
+		const { calls, seam } = proposer();
+		const harness = await start({ SUBSTRATE_AUDIT_PATH: auditDirectory(), ...TOKENS }, { skills: seam });
+		const response = await fetch(`${harness.base}/mcp`, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				accept: "application/json, text/event-stream",
+				authorization: "Bearer tok-agent",
+			},
+			body: "x".repeat(1_000_000 + 64 * 1024 + 1),
+		});
+		expect(response.status).toBe(500);
+		expect(calls).toEqual([]);
+		expect(harness.observability.audit.recent()).toEqual([]);
 	});
 
 	test("the route is a bounded metric label", async () => {
@@ -1368,6 +1626,7 @@ describe("desktop_run at the HTTP gate", () => {
 				desktop: createDesktopDriver({
 					run: async (argv: readonly string[]) => {
 						calls.push([...argv]);
+						if (argv[1] === "context") return { code: 0, stdout: Buffer.from("unix:///var/run/docker.sock\n"), stderr: "" };
 						if (argv.includes("getdisplaygeometry")) return { code: 0, stdout: Buffer.from("1280 800\n"), stderr: "" };
 						if (argv.includes("getwindowname")) return { code: 0, stdout: Buffer.from("stub-window\n"), stderr: "" };
 						if (argv.includes("xwd")) return { code: 0, stdout: shot, stderr: "" };
@@ -1444,27 +1703,34 @@ describe("desktop_run at the HTTP gate", () => {
 
 		expect(status).toBe(200);
 		expect(result.isError).toBe(true);
-		expect(result.text).toContain("nothing was run");
 		expect(calls).toEqual([]);
 		expect(written).toEqual([]);
 	});
 
-	test("self-attribution through an argument or a header is rejected, never honoured", async () => {
+	test("a spoofed attribution header cannot widen the token surface allowlist", async () => {
 		const { harness, calls, written } = await startDesktop();
 
-		// September's propose header is gone from the server; sending it must change
-		// nothing, and the strict schema drops the surface argument before dispatch.
+		// A valid body isolates the ignored header from strict-schema refusals.
 		const { status, raw } = await mcpCall(
 			harness.base,
-			"tok-omp",
+			"tok-cursor",
 			"desktop_run",
-			{ actions: [{ type: "screenshot" }], surface: "omp" },
-			{ "x-substrate-propose-key": "whatever" },
+			{ actions: [{ type: "screenshot" }] },
+			{ "x-substrate-surface": "omp", "x-substrate-propose-key": "irrelevant" },
 		);
 		const result = toolResult(raw);
 
 		expect(status).toBe(200);
 		expect(result.isError).toBe(true);
+		expect(calls).toEqual([]);
+		expect(written).toEqual([]);
+	});
+
+	test("an operator-marked unlisted token still cannot run desktop input", async () => {
+		const { harness, calls, written } = await startDesktop({ SUBSTRATE_OPERATOR_TOKENS: "tok-cursor" });
+		const { status, raw } = await mcpCall(harness.base, "tok-cursor", "desktop_run", { actions: [{ type: "screenshot" }] });
+		expect(status).toBe(200);
+		expect(toolResult(raw).isError).toBe(true);
 		expect(calls).toEqual([]);
 		expect(written).toEqual([]);
 	});
@@ -1496,9 +1762,11 @@ describe("desktop_run at the HTTP gate", () => {
 		const records = harness.observability.audit.recent().filter((record) => record.tool === "desktop_run");
 		expect(records).toHaveLength(1);
 		expect(records[0]).toMatchObject({ tool: "desktop_run", mode: "fail-closed" });
-		for (const key of records[0]?.arg_keys ?? []) {
-			expect(["actions", "timeout"]).toContain(key);
-		}
+		expect(records[0]?.arg_keys).toEqual(["actions"]);
+		expect(records[0]?.arg_digest).toBe(sha256Hex(canonicalJson({
+			actions: [{ type: "type", text: sentinel }, { type: "screenshot" }],
+		})));
+		expect(records[0]?.arg_digest).not.toBe(sha256Hex(canonicalJson({})));
 		expect(JSON.stringify(records)).not.toContain(sentinel);
 		expect(JSON.stringify(records)).not.toContain("iVBOR");
 	});

@@ -303,6 +303,11 @@ its event back must not read that as a durable append. `POST /events` answers
 regardless, because failing open is the *client's* job and this surface owes its
 caller the truth. Reported errors are redacted, since a connection failure can
 quote a URL.
+SQL, migration and ingest-retry diagnostics remove configured opaque values
+with `redactKnown` before shape redaction. Only empty known values are ignored;
+short values are not exempted. The smoke's warning/error/detail sinks apply
+the same boundary and retain truthful failure exits. Neither a redacted warning
+nor client exit 0 is a successful durable-write verdict.
 
 **Ingest order.** Every stored event gets one record in `event_ingest`, written
 *after* its row so a record never names an event that does not exist. An event
@@ -515,7 +520,7 @@ bun run smoke:greptime
 ```
 
 Exits 0 when every check passes, 1 on a failure, 2 when `GREPTIME_URL` is unset.
-It prints the host and database only — no credential — and checks:
+It prints the database only — no hostname or credential — and checks:
 
 1. `migrate` reaches the ledger and is idempotent
 2. `agent_events` is in `append_mode`

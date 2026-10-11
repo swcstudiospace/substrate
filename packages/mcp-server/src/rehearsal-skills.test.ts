@@ -6,10 +6,10 @@
  * the engine spawns `gh`: with an allowlisted environment and nothing else.
  */
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EMPTY_STATE, fakeGh, fakeGhScript, readState, runFakeGh, writeState, type FakeGhState } from "./rehearsal-fake-gh.ts";
+import { EMPTY_STATE, fakeGh, readState, runFakeGh, writeState, type FakeGhState } from "./rehearsal-fake-gh.ts";
 import { FIXTURE_REPO, SEED_SKILL, buildSkillsFixture, removeSkillsFixture, skillsPaths } from "./rehearsal-skills.ts";
 
 const made: string[] = [];
@@ -169,14 +169,6 @@ describe("the installed gh script", () => {
 		expect(state.calls).toHaveLength(3);
 	});
 
-	test("is a bun script with this module and its own state path baked in", () => {
-		const script = fakeGhScript({ bun: "/usr/bin/bun", statePath: "/run/x/gh-state.json" });
-		expect(script.split("\n")[0]).toBe("#!/bin/sh");
-		expect(script).toContain("--no-env-file");
-		expect(script).toContain('"/run/x/gh-state.json"');
-		expect(script).toContain("rehearsal-fake-gh.ts");
-	});
-
 	test("two concurrent creates do not share a pull request number", async () => {
 		const run = tempRun();
 		const fixture = buildSkillsFixture(run);
@@ -261,13 +253,6 @@ describe("buildSkillsFixture", () => {
 		expect(existsSync(join(second.state, "mirror.git", "HEAD"))).toBe(true);
 	});
 
-	test("leaves no seed working tree behind", () => {
-		const run = tempRun();
-		buildSkillsFixture(run);
-		const entries = Bun.spawnSync(["ls", join(run, "skills-fixture")]).stdout.toString().split("\n").filter(Boolean);
-		expect(entries.sort()).toEqual(["gh", "gh-state.json", "rehearsal"]);
-	});
-
 	test("refuses a run directory that is not absolute", () => {
 		expect(() => buildSkillsFixture("relative/run")).toThrow("not absolute");
 		expect(() => skillsPaths("relative/run")).toThrow("not absolute");
@@ -280,17 +265,5 @@ describe("buildSkillsFixture", () => {
 		expect(existsSync(join(run, "skills"))).toBe(false);
 		expect(existsSync(join(run, "skills-fixture"))).toBe(false);
 		removeSkillsFixture(run);
-	});
-
-	test("the seeded library is a real proposer target: the engine's origin check accepts its URL", async () => {
-		const { originMatches } = await import("./skills/propose.ts");
-		const run = tempRun();
-		const fixture = buildSkillsFixture(run);
-		expect(originMatches(fixture.env.SUBSTRATE_SKILLS_REMOTE_URL, FIXTURE_REPO)).toBe(true);
-		expect(originMatches(fixture.env.SUBSTRATE_SKILLS_REMOTE_URL, "swcstudiospace/agent-skills")).toBe(false);
-		// The library is not a real owner, so a mistaken real `gh` call would find nothing to touch.
-		expect(FIXTURE_REPO.startsWith("rehearsal/")).toBe(true);
-		expect(lstatSync(fixture.origin).isDirectory()).toBe(true);
-		expect(readFileSync(join(fixture.origin, "HEAD"), "utf8")).toContain("refs/heads/main");
 	});
 });

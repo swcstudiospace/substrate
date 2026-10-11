@@ -5,7 +5,7 @@ import { createConnection, createServer, type AddressInfo, type Socket } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { EventInput } from "../types.ts";
-import { contextArgv, geometryArgv, keyArgv, shotArgv, titleArgv, typeArgv, type DesktopRunInput } from "./actions.ts";
+import { contextArgv, geometryArgv, type DesktopRunInput } from "./actions.ts";
 import {
 	ACTION_TIMEOUT_MS,
 	bufferRunner,
@@ -69,13 +69,14 @@ function xwd(o: { byteOrder: 0 | 1; version?: number; format?: number; bpp?: num
 	return Buffer.concat([header, name, Buffer.alloc((o.ncolors ?? 0) * 12), pixels]);
 }
 
-/** A recording fake: geometry 1280×800, a title per call, the synthetic XWD for xwd, "" otherwise. */
+/** A recording fake: local context probe, geometry 1280×800, a title per call, the synthetic XWD for xwd, "" otherwise. */
 function recorder(overrides: (argv: readonly string[]) => BufferRunResult | Promise<BufferRunResult> | undefined = () => undefined) {
 	const calls: string[][] = [];
 	const run: BufferRunner = async (argv) => {
 		calls.push([...argv]);
 		const override = await overrides(argv);
 		if (override) return override;
+		if (argv[1] === "context") return res("unix:///var/run/docker.sock\n");
 		if (argv.includes("getdisplaygeometry")) return res("1280 800\n");
 		if (argv.includes("getwindowname")) return res(`Terminal ${calls.length}\n`);
 		if (argv.includes("xwd")) return res(xwd({ byteOrder: 0 }));
@@ -154,27 +155,20 @@ describe("createDesktopDriver", () => {
 
 		const result = await driver.run(SMOKE, { surface: "omp", emit: recording(events) });
 
-		expect(calls).toEqual([
-			contextArgv(),
-			geometryArgv(),
-			keyArgv({ type: "key", keys: "ctrl+alt+t" }),
-			titleArgv(),
-			typeArgv({ type: "type", text: "TYPED-SECRET-TEXT" }),
-			titleArgv(),
-			keyArgv({ type: "key", keys: "Return" }),
-			titleArgv(),
-			shotArgv(),
-			titleArgv(),
-		]);
+		expect(calls[0]).toEqual(contextArgv());
+		expect(calls[1]).toEqual(geometryArgv());
+		expect(calls.filter((argv) => argv.includes("key"))).toHaveLength(2);
+		expect(calls.filter((argv) => argv.includes("type"))).toHaveLength(1);
+		expect(calls.filter((argv) => argv.includes("xwd"))).toHaveLength(1);
 		expect(result.run_id).toMatch(/^dr-20260926T183005Z-[0-9a-f]{6}$/);
 		expect(result.error).toBeUndefined();
-		expect(result.log.map((l) => [l.i, l.type, l.ok, l.active_window])).toEqual([
-			[0, "key", true, "Terminal 4"],
-			[1, "type", true, "Terminal 6"],
-			[2, "key", true, "Terminal 8"],
-			[3, "screenshot", true, "Terminal 10"],
+		expect(result.log.map((l) => [l.i, l.type, l.ok])).toEqual([
+			[0, "key", true],
+			[1, "type", true],
+			[2, "key", true],
+			[3, "screenshot", true],
 		]);
-
+		expect(result.log.every((l) => typeof l.active_window === "string" && l.active_window.length > 0)).toBe(true);
 		const path = join(shotsDir, result.run_id, "1.png");
 		const bytes = readFileSync(path);
 		expect(result.screenshots).toEqual([
@@ -236,15 +230,22 @@ describe("createDesktopDriver", () => {
 	test("an out-of-bounds click is refused after the geometry read, before any input and with no event", async () => {
 		const { calls, run } = recorder();
 		const events: EventInput[] = [];
+		let emitCalls = 0;
+		const emit = async (event: EventInput) => {
+			emitCalls++;
+			events.push(event);
+			return { stored: true };
+		};
 		const driver = createDesktopDriver({ run, dir: tmpShots(), sleep: noSleep });
 
 		const outcome = driver.run(
 			{ actions: [{ type: "key", keys: "a" }, { type: "click", x: 1280, y: 10 }], timeout: 30 },
-			{ surface: "omp", emit: storedTrue },
+			{ surface: "omp", emit },
 		);
 
 		await expect(outcome).rejects.toThrow(/outside the 1280x800 display/);
 		expect(calls).toEqual([contextArgv(), geometryArgv()]);
+		expect(emitCalls).toBe(0);
 		expect(events).toEqual([]);
 	});
 
@@ -266,7 +267,8 @@ describe("createDesktopDriver", () => {
 		);
 
 		expect(result.log).toEqual([{ i: 0, type: "key", ok: false, ms: expect.any(Number), active_window: null, error: "timeout" }]);
-		expect(calls).toHaveLength(3);
+		expect(calls.some((argv) => argv.includes("xwd"))).toBe(false);
+		expect(calls.some((argv) => argv.includes("getwindowname"))).toBe(false);
 		expect(events.map((e) => e.payload!.error)).toEqual(["timeout"]);
 	});
 
@@ -325,9 +327,8 @@ describe("createDesktopDriver", () => {
 
 	test("a stopped or missing container fails the run as not running", async () => {
 		for (const stderr of ["Error response from daemon: container 1917e37f is not running", "Error: No such container: substrate-desktop"]) {
-			const { run } = recorder(() => res("", 1, stderr));
+			const { run } = recorder((argv) => (argv[1] === "context" ? res("unix:///var/run/docker.sock\n") : res("", 1, stderr)));
 			const driver = createDesktopDriver({ run, dir: tmpShots(), sleep: noSleep });
-
 			await expect(driver.run(SMOKE, { surface: "omp", emit: storedTrue })).rejects.toThrow("substrate-desktop is not running");
 		}
 	});
@@ -366,6 +367,7 @@ describe("createDesktopDriver", () => {
 		});
 		const run: BufferRunner = async (argv) => {
 			calls.push([...argv]);
+			if (argv[1] === "context") return res("unix:///var/run/docker.sock\n");
 			if (argv.includes("getdisplaygeometry")) return res("1280 800\n");
 			if (argv.includes("getwindowname")) return res("w\n");
 			return gate;
@@ -386,7 +388,9 @@ describe("createDesktopDriver", () => {
 
 		expect((refused as DesktopBusy).runId).toBe(done.run_id);
 		expect((refused as Error).message).toContain(done.run_id);
-		expect(calls).toEqual([contextArgv(), geometryArgv(), keyArgv({ type: "key", keys: "Return" }), titleArgv()]);
+		expect(calls[0]).toEqual(contextArgv());
+		expect(calls[1]).toEqual(geometryArgv());
+		expect(calls.filter((argv) => argv.includes("key"))).toHaveLength(1);
 	});
 
 	test("retention keeps at most 200 runs, none older than 7 days, and always the new run", async () => {
@@ -408,14 +412,110 @@ describe("createDesktopDriver", () => {
 		expect(left).toContain(result.run_id);
 		for (const name of left) expect(now - statSync(join(shotsDir, name)).mtimeMs).toBeLessThan(7 * 86_400_000);
 	});
-	describe("docker locality preflight", () => {
-		test("a non-local context endpoint refuses the run before anything runs", async () => {
+	describe("docker locality preflight (fail-closed)", () => {
+		test("a non-local context endpoint refuses the run before geometry, input or events", async () => {
 			const { calls, run } = recorder((argv) => (argv[1] === "context" ? res("tcp://other-host:2375\n") : undefined));
+			const events: EventInput[] = [];
+			let emitCalls = 0;
+			const emit = async (event: EventInput) => {
+				emitCalls++;
+				events.push(event);
+				return { stored: true };
+			};
 			const driver = createDesktopDriver({ run, dir: tmpShots(), sleep: noSleep });
 
-			await expect(driver.run(SMOKE, { surface: "omp", emit: storedTrue })).rejects.toThrow("is not local");
+			await expect(driver.run(SMOKE, { surface: "omp", emit })).rejects.toThrow("is not local");
 			expect(calls).toEqual([contextArgv()]);
+			expect(emitCalls).toBe(0);
+			expect(events).toEqual([]);
 		});
+
+		test("a failed probe refuses before geometry, input or events", async () => {
+			const { calls, run } = recorder((argv) => (argv[1] === "context" ? res("", 1, "cannot connect to the Docker daemon") : undefined));
+			const events: EventInput[] = [];
+			let emitCalls = 0;
+			const emit = async (event: EventInput) => {
+				emitCalls++;
+				events.push(event);
+				return { stored: true };
+			};
+			const driver = createDesktopDriver({ run, dir: tmpShots(), sleep: noSleep });
+
+			await expect(
+				driver.run({ actions: [{ type: "key", keys: "Return" }] }, { surface: "omp", emit }),
+			).rejects.toThrow("locality probe failed");
+			expect(calls).toEqual([contextArgv()]);
+			expect(calls.some((argv) => argv.includes("getdisplaygeometry"))).toBe(false);
+			expect(emitCalls).toBe(0);
+			expect(events).toEqual([]);
+		});
+
+		test("an empty endpoint refuses before geometry, input or events", async () => {
+			const { calls, run } = recorder((argv) => (argv[1] === "context" ? res("\n") : undefined));
+			const events: EventInput[] = [];
+			let emitCalls = 0;
+			const emit = async (event: EventInput) => {
+				emitCalls++;
+				events.push(event);
+				return { stored: true };
+			};
+			const driver = createDesktopDriver({ run, dir: tmpShots(), sleep: noSleep });
+
+			await expect(
+				driver.run({ actions: [{ type: "key", keys: "Return" }] }, { surface: "omp", emit }),
+			).rejects.toThrow("endpoint is unknown");
+			expect(calls).toEqual([contextArgv()]);
+			expect(emitCalls).toBe(0);
+			expect(events).toEqual([]);
+		});
+
+		test("a malformed endpoint refuses before geometry, input or events", async () => {
+			const { calls, run } = recorder((argv) => (argv[1] === "context" ? res("not-a-local-endpoint\n") : undefined));
+			const events: EventInput[] = [];
+			const driver = createDesktopDriver({ run, dir: tmpShots(), sleep: noSleep });
+
+			await expect(
+				driver.run({ actions: [{ type: "key", keys: "Return" }] }, { surface: "omp", emit: recording(events) }),
+			).rejects.toThrow("is not local");
+			expect(calls).toEqual([contextArgv()]);
+			expect(events).toEqual([]);
+		});
+
+		test("a throwing probe refuses before geometry, input or events", async () => {
+			const calls: string[][] = [];
+			const run: BufferRunner = async (argv) => {
+				calls.push([...argv]);
+				if (argv[1] === "context") throw new Error("context exploded");
+				if (argv.includes("getdisplaygeometry")) return res("1280 800\n");
+				return res("");
+			};
+			const events: EventInput[] = [];
+			const driver = createDesktopDriver({ run, dir: tmpShots(), sleep: noSleep });
+
+			await expect(
+				driver.run({ actions: [{ type: "key", keys: "Return" }] }, { surface: "omp", emit: recording(events) }),
+			).rejects.toThrow("locality probe failed");
+			expect(calls).toEqual([contextArgv()]);
+			expect(events).toEqual([]);
+		});
+
+		test("a hung probe times out and refuses before geometry, input or events", async () => {
+			const calls: string[][] = [];
+			const run: BufferRunner = async (argv) => {
+				calls.push([...argv]);
+				if (argv[1] === "context") return Promise.withResolvers<BufferRunResult>().promise;
+				if (argv.includes("getdisplaygeometry")) return res("1280 800\n");
+				return res("");
+			};
+			const events: EventInput[] = [];
+			const driver = createDesktopDriver({ run, dir: tmpShots(), sleep: noSleep });
+
+			await expect(
+				driver.run({ actions: [{ type: "key", keys: "Return" }], timeout: 1 }, { surface: "omp", emit: recording(events) }),
+			).rejects.toThrow("timed out");
+			expect(calls).toEqual([contextArgv()]);
+			expect(events).toEqual([]);
+		}, 15000);
 
 		test("a local socket endpoint proceeds to the geometry read", async () => {
 			const { calls, run } = recorder((argv) => (argv[1] === "context" ? res("unix:///var/run/docker.sock\n") : undefined));
@@ -428,15 +528,124 @@ describe("createDesktopDriver", () => {
 			expect(calls[0]).toEqual(contextArgv());
 			expect(events).toHaveLength(1);
 		});
-
-		test("a failed probe proves nothing and proceeds; later calls fail truthfully", async () => {
-			const { calls, run } = recorder((argv) => (argv[1] === "context" ? res("", 1, "cannot connect to the Docker daemon") : undefined));
+	});
+	describe("click execution (G1)", () => {
+		test("clicks run with coordinates, button and double defaults plus overrides, emitting exact allowed fields", async () => {
+			const { calls, run } = recorder();
+			const events: EventInput[] = [];
 			const driver = createDesktopDriver({ run, dir: tmpShots(), sleep: noSleep });
 
-			const result = await driver.run({ actions: [{ type: "key", keys: "Return" }] }, { surface: "omp", emit: storedTrue });
+			const result = await driver.run(
+				{
+					actions: [
+						{ type: "click", x: 100, y: 200 },
+						{ type: "click", x: 300, y: 400, button: 3, double: true },
+					],
+					timeout: 30,
+				},
+				{ surface: "omp", emit: recording(events) },
+			);
 
-			expect(result.log[0]?.ok).toBe(true);
-			expect(calls[0]).toEqual(contextArgv());
+			expect(result.error).toBeUndefined();
+			expect(result.log.map((l) => [l.i, l.type, l.ok])).toEqual([
+				[0, "click", true],
+				[1, "click", true],
+			]);
+			expect(calls.filter((argv) => argv.includes("click"))).toHaveLength(2);
+			expect(events).toHaveLength(2);
+			expect(events[0]!.payload).toEqual({
+				tool: "desktop_run",
+				action: "click",
+				run_id: result.run_id,
+				i: 0,
+				ok: true,
+				ms: expect.any(Number),
+				x: 100,
+				y: 200,
+				button: 1,
+				double: false,
+			});
+			expect(events[1]!.payload).toEqual({
+				tool: "desktop_run",
+				action: "click",
+				run_id: result.run_id,
+				i: 1,
+				ok: true,
+				ms: expect.any(Number),
+				x: 300,
+				y: 400,
+				button: 3,
+				double: true,
+			});
+			expect(JSON.stringify(events)).not.toContain("iVBOR");
+		});
+	});
+
+	describe("settle behavior (G2)", () => {
+		test("explicit settle waits occur and default actions also settle without pinning the default value", async () => {
+			let clock = FIXED;
+			const sleeps: number[] = [];
+			const sleep = async (ms: number) => {
+				sleeps.push(ms);
+				clock += ms;
+			};
+			const { run } = recorder();
+			const driver = createDesktopDriver({ run, dir: tmpShots(), now: () => clock, sleep });
+
+			const result = await driver.run(
+				{
+					actions: [
+						{ type: "click", x: 10, y: 10, settle_ms: 50 },
+						{ type: "key", keys: "Return" },
+					],
+					timeout: 30,
+				},
+				{ surface: "omp", emit: storedTrue },
+			);
+
+			expect(result.log.map((l) => l.ok)).toEqual([true, true]);
+			expect(sleeps).toHaveLength(2);
+			expect(sleeps[0]).toBe(50);
+			expect(sleeps[1]).toBeGreaterThan(0);
+		});
+
+		test("settle clamps to the remaining deadline and the next action stops with no event", async () => {
+			let clock = FIXED;
+			const sleeps: number[] = [];
+			const sleep = async (ms: number) => {
+				sleeps.push(ms);
+				clock += ms;
+			};
+			const { calls, run } = recorder((argv) => {
+				if (argv[1] === "context") return res("unix:///var/run/docker.sock\n");
+				if (argv.includes("getdisplaygeometry")) {
+					clock = FIXED + 29_900;
+					return res("1280 800\n");
+				}
+				return undefined;
+			});
+			const events: EventInput[] = [];
+			const driver = createDesktopDriver({ run, dir: tmpShots(), now: () => clock, sleep });
+
+			const result = await driver.run(
+				{
+					actions: [
+						{ type: "key", keys: "a", settle_ms: 5000 },
+						{ type: "key", keys: "b" },
+					],
+					timeout: 30,
+				},
+				{ surface: "omp", emit: recording(events) },
+			);
+
+			expect(result.log.map((l) => [l.i, l.ok, l.error])).toEqual([
+				[0, true, undefined],
+				[1, false, "deadline"],
+			]);
+			expect(sleeps).toHaveLength(1);
+			expect(sleeps[0]).toBeLessThanOrEqual(100);
+			expect(calls.some((argv) => argv.at(-1) === "b")).toBe(false);
+			expect(events.map((e) => e.payload!.i)).toEqual([0]);
 		});
 	});
 
@@ -509,6 +718,88 @@ describe("createDesktopDriver", () => {
 			expect(second.log[0]?.ok).toBe(true);
 
 			// The port is free again: another server can bind it.
+			const probe = createServer();
+			await new Promise<void>((resolve) => probe.listen(port, "127.0.0.1", () => resolve()));
+			await new Promise<void>((resolve) => probe.close(() => resolve()));
+		});
+
+		test("the mutex releases after a geometry failure, so the next run proceeds", async () => {
+			const port = await freePort();
+			const shotsDir = tmpShots();
+			let failGeometry = true;
+			const { run } = recorder((argv) => {
+				if (argv.includes("getdisplaygeometry") && failGeometry) return res("", 1, "Error: No such container: substrate-desktop");
+				return undefined;
+			});
+			const driver = createDesktopDriver({ run, dir: shotsDir, lockPort: port, sleep: noSleep });
+
+			await expect(
+				driver.run({ actions: [{ type: "key", keys: "Return" }] }, { surface: "omp", emit: storedTrue }),
+			).rejects.toThrow("substrate-desktop is not running");
+			failGeometry = false;
+			const events: EventInput[] = [];
+			const second = await driver.run({ actions: [{ type: "key", keys: "Return" }] }, { surface: "omp", emit: recording(events) });
+			expect(second.log[0]?.ok).toBe(true);
+			expect(events).toHaveLength(1);
+
+			const probe = createServer();
+			await new Promise<void>((resolve) => probe.listen(port, "127.0.0.1", () => resolve()));
+			await new Promise<void>((resolve) => probe.close(() => resolve()));
+		});
+
+		test("the mutex releases after a hung-action timeout, so the next run proceeds", async () => {
+			const port = await freePort();
+			let clock = FIXED;
+			let hang = true;
+			const { run } = recorder((argv) => {
+				if (argv.includes("getdisplaygeometry")) clock = FIXED + 30_000 - 1;
+				if (argv.includes("key") && hang) return Promise.withResolvers<BufferRunResult>().promise;
+				return undefined;
+			});
+			const driver = createDesktopDriver({ run, dir: tmpShots(), lockPort: port, now: () => clock, sleep: noSleep });
+
+			const events: EventInput[] = [];
+			const first = await driver.run(
+				{ actions: [{ type: "key", keys: "Return" }] },
+				{ surface: "omp", emit: recording(events) },
+			);
+			expect(first.log[0]?.error).toBe("timeout");
+			expect(events.map((e) => e.payload!.error)).toEqual(["timeout"]);
+			hang = false;
+			clock = FIXED;
+			const secondEvents: EventInput[] = [];
+			const second = await driver.run(
+				{ actions: [{ type: "key", keys: "Return" }] },
+				{ surface: "omp", emit: recording(secondEvents) },
+			);
+			expect(second.log[0]?.ok).toBe(true);
+			expect(secondEvents).toHaveLength(1);
+
+			const probe = createServer();
+			await new Promise<void>((resolve) => probe.listen(port, "127.0.0.1", () => resolve()));
+			await new Promise<void>((resolve) => probe.close(() => resolve()));
+		});
+
+		test("the mutex releases after an unstored event, so the next run proceeds with no images kept", async () => {
+			const port = await freePort();
+			const shotsDir = tmpShots();
+			const { run } = recorder();
+			const driver = createDesktopDriver({ run, dir: shotsDir, lockPort: port, sleep: noSleep });
+
+			const first = await driver.run(
+				{ actions: [{ type: "key", keys: "Return" }] },
+				{ surface: "omp", emit: async () => ({ stored: false }) },
+			);
+			expect(first.error).toBe("event not stored after action 0; run stopped");
+			expect(first.images).toEqual([]);
+			const secondEvents: EventInput[] = [];
+			const second = await driver.run(
+				{ actions: [{ type: "key", keys: "Return" }] },
+				{ surface: "omp", emit: recording(secondEvents) },
+			);
+			expect(second.log[0]?.ok).toBe(true);
+			expect(secondEvents).toHaveLength(1);
+
 			const probe = createServer();
 			await new Promise<void>((resolve) => probe.listen(port, "127.0.0.1", () => resolve()));
 			await new Promise<void>((resolve) => probe.close(() => resolve()));

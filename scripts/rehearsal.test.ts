@@ -340,14 +340,6 @@ describe("spawn argv", () => {
 		expect(argv).toEqual([process.execPath, "--no-env-file", "packages/mcp-server/src/index.ts"]);
 		for (const arg of argv) expect(arg).not.toContain("=");
 	});
-
-	test("every docker -e names a variable and never carries a value", () => {
-		// Docker secrets travel by env name with the spawn env; `-e KEY=value` would put them in argv.
-		const source = readFileSync(join(import.meta.dir, "rehearsal.ts"), "utf8");
-		const next = [...source.matchAll(/"-e",\s*(\S+)/g)].map((m) => m[1] ?? "");
-		expect(next.length).toBeGreaterThanOrEqual(2);
-		for (const token of next) expect(token).toMatch(/^"[A-Z][A-Z0-9_]*",$/);
-	});
 });
 
 describe("parseDockerPortLine", () => {

@@ -51,7 +51,7 @@ import {
 	type Observability,
 } from "./observe.ts";
 import type { Substrate } from "./service.ts";
-import { proposalBodyProblem, proposalFailure, toProposalRequest } from "./skills/request.ts";
+import { proposalBodyProblem, proposalBodySizeProblem, proposalFailure, toProposalRequest } from "./skills/request.ts";
 import { EVENT_KINDS, SURFACES, type Surface } from "./types.ts";
 
 /** One hour. Anonymous callers are logged once per window, not once per request. */
@@ -203,6 +203,17 @@ const MAX_LOG_KEYS = 50;
 const MAX_BODY_BYTES = 1_000_000;
 
 /**
+ * Transport vs proposal-body distinction (D21-08/09): the 1 MB proposal-body cap bounds the
+ * caller's proposal, while the transport intake bounds raw wire bytes. A caller body at
+ * exactly the proposal cap still needs its JSON-RPC framing around it on `/mcp`, so that
+ * route alone reads up to the proposal cap plus this bounded framing headroom. Anything
+ * over that is still a `BodyTooLargeError` before audit or dispatch, answered with the
+ * generic 500 `/mcp` always has for oversize wire. No other route gets headroom, nothing
+ * reads unboundedly, and the tool-body 1M guard behind it is unchanged.
+ */
+const MCP_FRAMING_HEADROOM_BYTES = 64 * 1024;
+
+/**
  * A body over `MAX_BODY_BYTES`. Final for that body, so `/skills/propose` answers it 413. Every
  * other route still answers it with the generic 500 it always has.
  */
@@ -285,12 +296,12 @@ export function memoryWriteStatus(result: { outcome: string; reason: string; ver
 	}
 }
 
-async function readBody(req: IncomingMessage): Promise<string> {
+async function readBody(req: IncomingMessage, maxBytes: number = MAX_BODY_BYTES): Promise<string> {
 	const chunks: Buffer[] = [];
 	let size = 0;
 	for await (const chunk of req) {
 		size += (chunk as Buffer).length;
-		if (size > MAX_BODY_BYTES) throw new BodyTooLargeError();
+		if (size > maxBytes) throw new BodyTooLargeError();
 		chunks.push(chunk as Buffer);
 	}
 	return Buffer.concat(chunks).toString("utf8");
@@ -744,11 +755,26 @@ export function createHttpServer(
 				const body = JSON.parse(await readBody(req)) as unknown;
 				const fields = body !== null && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : null;
 				// Audited under the tool's own name, fail-closed, before the field check and before any git work.
-				// A parsed object that will be rejected (`mode: "merge"`) is still a proposal attempt.
-				if (fields && !(await auditedRest(res, observability, surface, "skills_propose", fields))) return;
+				// A parsed object that will be rejected (`mode: "merge"`) is still a proposal attempt, and so is
+				// an authenticated non-object body: the descriptor names the shape only, never the body itself.
+				const auditBody: Record<string, unknown> = fields ?? {
+					malformed: true,
+					kind: Array.isArray(body) ? "array" : typeof body,
+					...(typeof body === "string" ? { bytes: body.length } : {}),
+				};
+				if (!(await auditedRest(res, observability, surface, "skills_propose", auditBody))) return;
 				const problem = proposalBodyProblem(body);
 				if (problem) {
 					sendJson(res, 400, { error: problem });
+					return;
+				}
+				// The wire cap above bounds raw bytes; this bounds the caller's proposal body
+				// (canonical JSON, before server-owned attribution, which costs the caller
+				// nothing), so an exact-1M body is accepted and attributed, and an over-cap
+				// one is refused 413 before any git work. Audited above with the shape check.
+				const sizeProblem = proposalBodySizeProblem(fields ?? {});
+				if (sizeProblem) {
+					sendJson(res, 413, { error: sizeProblem });
 					return;
 				}
 				try {
@@ -768,7 +794,13 @@ export function createHttpServer(
 
 			sendJson(res, 404, { error: `no route for ${req.method} ${url.pathname}` });
 		} catch (cause) {
+			// Only the named proposal route is audited here: every other route keeps its exact
+			// prior refusal. The descriptors carry shape only, never the body (re-reading an
+			// oversize body would re-introduce the DoS the cap prevents).
 			if (cause instanceof BodyTooLargeError && url.pathname === "/skills/propose") {
+				if (surface !== null) {
+					if (!(await auditedRest(res, observability, surface, "skills_propose", { oversize: true }))) return;
+				}
 				sendJson(res, 413, { error: cause.message });
 				return;
 			}
@@ -780,6 +812,11 @@ export function createHttpServer(
 				return;
 			}
 			if (cause instanceof SyntaxError) {
+				if (req.method === "POST" && url.pathname === "/skills/propose" && surface !== null) {
+					if (!(await auditedRest(res, observability, surface, "skills_propose", { malformed: true, kind: "syntax" }))) return;
+					sendJson(res, 400, { error: "request body is not valid JSON" });
+					return;
+				}
 				if (req.method === "POST" && url.pathname === "/events") eventRefusal = "validation";
 				sendJson(res, 400, { error: "request body is not valid JSON" });
 				return;
@@ -830,7 +867,10 @@ async function handleMcp(
 		res.writeHead(405, { allow: "POST" }).end();
 		return;
 	}
-	const raw = await readBody(req);
+	// The proposal-body cap bounds caller args; the wire carrying them needs framing room,
+	// so this route alone reads up to cap + headroom. Over that stays a BodyTooLargeError
+	// before audit or dispatch. Auth already ran before this line; nothing about 401 changes.
+	const raw = await readBody(req, MAX_BODY_BYTES + MCP_FRAMING_HEADROOM_BYTES);
 	const body: unknown = raw ? JSON.parse(raw) : undefined;
 	rememberClaim(claim, body);
 

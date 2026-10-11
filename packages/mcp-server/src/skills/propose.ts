@@ -548,11 +548,14 @@ export type RunResult = { code: number | null; stdout: string; stderr: string };
 export type Runner = (argv: readonly string[]) => Promise<RunResult>;
 
 /**
- * The exact environment git and gh children run with (D21-15): PATH, HOME, and the two
- * no-prompt flags. Store URLs, surface tokens and the handoff key never reach a child.
- * HOME is the configured or inherited home, /root when unset, so gh's stored credential
- * answers under systemd. Git's own config is not: a host `url.*.insteadOf` must not
- * redirect the push. That does not change where gh reads credentials.
+ * The exact environment git and gh children run with (D21-15, user-selected 2026-10-11):
+ * the four base keys PATH, HOME, GIT_TERMINAL_PROMPT and GH_PROMPT_DISABLED, plus seven
+ * controlled fixed Git values (GIT_CONFIG_GLOBAL/SYSTEM=/dev/null and a two-entry
+ * GIT_CONFIG_COUNT selecting the gh credential helper). Store URLs, surface tokens and
+ * the handoff key never reach a child. HOME is the configured or inherited home, /root
+ * when unset, so gh's stored credential answers under systemd. Git's own config is not:
+ * a host `url.*.insteadOf` must not redirect the push. That does not change where gh
+ * reads credentials.
  */
 export function childEnv(home?: string): Record<string, string> {
 	return {
@@ -843,12 +846,16 @@ async function fromLedger(
 	const base = { content_sha256: v.content_sha256, redactions: v.redactions, branch: known.branch };
 	if (known.pr_url) {
 		const view = await must(run, "gh pr view", prViewArgv(known.pr_url));
-		let state: unknown;
+		let parsedView: unknown;
 		try {
-			state = (JSON.parse(view.stdout) as { state?: unknown }).state;
+			parsedView = JSON.parse(view.stdout);
 		} catch {
 			throw new ProposeFailed("gh pr view printed no JSON");
 		}
+		// The gh boundary is external: a non-object payload (null, array, string,
+		// number) is a controlled failure, never an uncaught TypeError.
+		if (typeof parsedView !== "object" || parsedView === null) throw new ProposeFailed("gh pr view printed no JSON");
+		const state: unknown = "state" in parsedView ? parsedView.state : undefined;
 		const pr = { pr_url: known.pr_url, ...(known.pr_number !== undefined ? { pr_number: known.pr_number } : {}) };
 		if (state === "OPEN") return { status: "existing", ...base, ...pr };
 		if (state === "CLOSED" && !opts.reopen) {
@@ -863,16 +870,23 @@ async function fromLedger(
 	}
 	if (known.state !== "pushed") return null;
 	const listed = await must(run, "gh pr list", prListHeadArgv(known.branch, library.repo));
-	let prs: Array<{ url?: unknown; number?: unknown; state?: unknown }>;
+	let parsedList: unknown;
 	try {
-		prs = JSON.parse(listed.stdout) as Array<{ url?: unknown; number?: unknown; state?: unknown }>;
+		parsedList = JSON.parse(listed.stdout);
 	} catch {
 		throw new ProposeFailed("gh pr list printed no JSON");
 	}
-	const rows = prs.flatMap((p) => {
-		if (typeof p.url !== "string" || typeof p.state !== "string") return [];
-		const located = prUrlOf(p.url, library.repo);
-		return located ? [{ ...located, state: p.state }] : [];
+	// The gh boundary is external: a non-array payload (object, null, string,
+	// number) is a controlled failure, and a non-object row never throws.
+	if (!Array.isArray(parsedList)) throw new ProposeFailed("gh pr list printed no JSON");
+	const rows = parsedList.flatMap((entry: unknown) => {
+		if (typeof entry !== "object" || entry === null) return [];
+		if (!("url" in entry) || !("state" in entry)) return [];
+		const url: unknown = entry.url;
+		const rowState: unknown = entry.state;
+		if (typeof url !== "string" || typeof rowState !== "string") return [];
+		const located = prUrlOf(url, library.repo);
+		return located ? [{ ...located, state: rowState }] : [];
 	});
 	const open = rows.find((row) => row.state === "OPEN");
 	if (open) {

@@ -712,6 +712,21 @@ describe("skills_propose", () => {
 		expect(reply.isError).toBe(true);
 		expect(calls).toEqual([]);
 	});
+
+	test("a proposal over the serialized-body cap is refused as an error with nothing proposed", async () => {
+		// Multibyte content, JSON escaping and metadata all count toward the same
+		// canonical-body cap the REST route and the CLI enforce — not file text alone.
+		const rationale = 'café "quoted"\nnewline';
+		const prefix = "---\nname: demo-skill\ndescription: a demo\n---\ncafé \"q\"\n";
+		const fixed = { name: "demo-skill", rationale, surface: "omp", session_id: "sess-1", graph_id: "ut-1" };
+		const pad = 1_000_001 - Buffer.byteLength(JSON.stringify({ ...fixed, files: { "SKILL.md": prefix } }), "utf8");
+		const oversized = { ...fixed, files: { "SKILL.md": prefix + "x".repeat(pad) } };
+		const { client, calls } = await proposing(opened);
+		const reply = await call(client, "skills_propose", oversized);
+		expect(reply.isError).toBe(true);
+		expect(String(reply.json().error)).toContain("over the limit of 1000000 bytes");
+		expect(calls).toEqual([]);
+	});
 });
 
 describe("graph_find and issue_get wiring", () => {

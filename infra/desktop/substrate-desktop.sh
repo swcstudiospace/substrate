@@ -70,9 +70,9 @@ ensure_env_file() {
 # Locality gate: a DOCKER_HOST or saved context selecting a remote engine would
 # create or start substrate-desktop on the wrong host while the disk gate checks
 # this machine. Refuse before the first docker call, mirroring the rehearsal
-# harness's refuseDockerEnv/refuseDockerEndpoint rules. An inspect failure
-# proves nothing and proceeds: the client is broken, so every later docker call
-# fails with its own truthful error and nothing remote can happen.
+# harness's refuseDockerEnv/refuseDockerEndpoint rules. Only a proven local
+# unix:// endpoint proceeds: a failed, timed-out, empty or non-local probe
+# dies here, before image, credential-file, create or start work.
 require_local_docker() {
 	local host="${DOCKER_HOST:-}" context="${DOCKER_CONTEXT:-}" endpoint
 	case "$host" in
@@ -83,13 +83,15 @@ require_local_docker() {
 		""|default|desktop-linux) ;;
 		*) die "refusing non-local docker context $context" ;;
 	esac
-	if endpoint=$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null); then
+	if endpoint=$(timeout 10 docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null); then
 		endpoint=${endpoint%%$'\n'*}
 		case "$endpoint" in
 			unix://*) ;;
 			"") die "could not read the docker endpoint; refusing without locality proof" ;;
 			*) die "refusing non-local docker endpoint $endpoint" ;;
 		esac
+	else
+		die "could not prove the local docker endpoint; refusing without locality proof"
 	fi
 }
 

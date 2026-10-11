@@ -7,7 +7,8 @@
  * Reads `GREPTIME_URL`, `GREPTIME_USER`, `GREPTIME_PASSWORD` and `GREPTIME_DB`
  * from the environment — on the VPS that means
  * `set -a; . /etc/substrate/substrate.env; set +a` first. No credential is read
- * from this repo and none is printed: the report names the host and nothing else.
+ * from this repo and none is printed: the report names the database and check
+ * statuses only — never the host, URL, user or password.
  *
  * The unit tests run against a mocked Greptime, so they pin the SQL this code
  * builds but cannot tell us how a real server parses it. That is what this
@@ -57,7 +58,7 @@ import { DEVNET_GENESIS_HASH, runAnchorJob } from "../packages/mcp-server/src/an
 import { loadConfig } from "../packages/mcp-server/src/config.ts";
 import { AppendOnlyViolation, INGEST_LAG_MS, quote } from "../packages/mcp-server/src/greptime.ts";
 import { Substrate } from "../packages/mcp-server/src/service.ts";
-import { REDACTED } from "../packages/mcp-server/src/redact.ts";
+import { REDACTED, redact, redactKnown } from "../packages/mcp-server/src/redact.ts";
 import type { EventInput } from "../packages/mcp-server/src/types.ts";
 import { refuseLedgerUrl } from "./rehearsal.ts";
 
@@ -69,8 +70,9 @@ const AWKWARD = `wrote C:\\new\\table and it's fine -- really; yes`;
 const results: Array<{ ok: boolean; what: string; detail?: string }> = [];
 
 function check(ok: boolean, what: string, detail?: string): void {
-	results.push({ ok, what, detail });
-	process.stdout.write(`${ok ? "  ok  " : " FAIL "} ${what}${detail ? ` — ${detail}` : ""}\n`);
+	const clean = detail === undefined ? undefined : scrub(detail);
+	results.push({ ok, what, detail: clean });
+	process.stdout.write(`${ok ? "  ok  " : " FAIL "} ${what}${clean ? ` — ${clean}` : ""}\n`);
 }
 
 const config = loadConfig();
@@ -91,23 +93,28 @@ if (!greptime) {
 	process.exit(2);
 }
 
-const host = (() => {
-	try {
-		return new URL(config.greptime.url).host;
-	} catch {
-		return "(unparseable GREPTIME_URL)";
-	}
-})();
-process.stdout.write(`\nGreptime events ledger smoke — ${host}, db ${config.greptime.db}\n\n`);
+const KNOWN_SECRETS = [
+	config.greptime.url,
+	config.greptime.user ?? "",
+	config.greptime.password ?? "",
+	config.greptime.db,
+	DECOY,
+].filter((value) => value.length > 0);
+
+function scrub(text: string): string {
+	return redact(redactKnown(text, KNOWN_SECRETS));
+}
+
+process.stdout.write(`\nGreptime events ledger smoke — db ${config.greptime.db}\n\n`);
 
 // ── 1. migrate, twice, and append_mode ───────────────────────────────────────
-const first = await greptime.migrate().catch((cause: unknown) => ({ warnings: [String(cause)], failed: true }));
+const first = await greptime.migrate().catch((cause: unknown) => ({ warnings: [scrub(String(cause))], failed: true }));
 check(!("failed" in first), "migrate reaches the ledger", "failed" in first ? first.warnings[0] : undefined);
 if ("failed" in first) {
 	process.stderr.write("\nthe ledger is unreachable; nothing further can be proven from here\n");
 	process.exit(1);
 }
-for (const warning of first.warnings) process.stdout.write(`  note  ${warning}\n`);
+for (const warning of first.warnings) process.stdout.write(`  note  ${scrub(warning)}\n`);
 
 const second = await greptime.migrate();
 check(second.warnings.length === first.warnings.length, "migrate is idempotent");

@@ -20,7 +20,9 @@
  *   none of either;
  * - an unlisted surface's valid token is refused with no new event, no token
  *   is a 401, and the 6081 root without credentials is a 401;
- * - `recruitment-desktop` inspects identical before and after;
+ * - `recruitment-desktop` snapshots unchanged (present with identical
+ *   metadata, or absent) before and after — any probe error FAILs, never
+ *   counts as absence;
  * - `substrate-desktop.sh status` shows the loopback port, unprivileged,
  *   no socket and the desktop label.
  *
@@ -262,6 +264,21 @@ function runArgv(argv: string[], timeoutMs: number): Spawned {
 	}
 }
 
+/** `recruitment-desktop` is read-only for the whole proof (T-30-12): the two
+ * argv below list and inspect it by exact name. No other container is named,
+ * and no verb here creates, starts, stops, renames or otherwise acts on it.
+ */
+const RECRUITMENT_LIST = [
+	"docker",
+	"container",
+	"ls",
+	"--all",
+	"--filter",
+	"name=^/recruitment-desktop$",
+	"--format",
+	"{{.ID}}",
+];
+
 /** `recruitment-desktop` is inspect-only for the whole proof (T-30-12). */
 const RECRUITMENT_INSPECT = [
 	"docker",
@@ -270,12 +287,70 @@ const RECRUITMENT_INSPECT = [
 	"--format",
 	"{{.Id}} {{.State.Status}} {{.State.StartedAt}} {{.State.FinishedAt}}",
 	"recruitment-desktop",
-] as const;
+];
 
-function inspectRecruitment(): string | null {
-	const run = runArgv([...RECRUITMENT_INSPECT], SPAWN_TIMEOUT_MS);
-	if (!run.ok) return null;
-	return run.out.trim();
+/**
+ * Fail-closed snapshot of the unrelated desktop. `present` carries the
+ * inspect metadata fingerprint; `absent` means the authoritative inventory
+ * listed zero rows; `error` means a probe failed or answered incompletely —
+ * never absence, never inspected content.
+ */
+export type RecruitmentSnapshot =
+	| { state: "present"; fingerprint: string }
+	| { state: "absent" }
+	| { state: "error"; detail: string };
+
+/**
+ * Decide the snapshot from injected probe results (no I/O): the inventory
+ * settles absence on its own exit success, while presence additionally needs
+ * a successful, non-empty inspect. A null inspect leg means the caller
+ * skipped it — only valid when the inventory already shows absence.
+ */
+export function snapshotRecruitment(
+	list: { ok: boolean; out: string },
+	inspect: { ok: boolean; out: string } | null,
+): RecruitmentSnapshot {
+	if (!list.ok) return { state: "error", detail: "inventory probe failed" };
+	if (!list.out.split("\n").some((line) => line.trim() !== "")) return { state: "absent" };
+	if (inspect === null) return { state: "error", detail: "inspect probe missing" };
+	if (!inspect.ok) return { state: "error", detail: "inspect probe failed" };
+	const fingerprint = inspect.out.trim();
+	if (fingerprint === "") return { state: "error", detail: "inspect probe incomplete" };
+	return { state: "present", fingerprint };
+}
+
+/**
+ * True only for absent+absent or present with an identical fingerprint.
+ * Appearance, disappearance, metadata change and any error all read false,
+ * so errors stay blocking and never pass as "unchanged".
+ */
+export function recruitmentSnapshotsEqual(before: RecruitmentSnapshot, after: RecruitmentSnapshot): boolean {
+	if (before.state === "absent" && after.state === "absent") return true;
+	if (before.state === "present" && after.state === "present") return before.fingerprint === after.fingerprint;
+	return false;
+}
+
+/** Live read-only snapshot; inventory failure never becomes absence. */
+function snapshotRecruitmentLive(): RecruitmentSnapshot {
+	const list = runArgv(RECRUITMENT_LIST, SPAWN_TIMEOUT_MS);
+	if (!list.ok) return snapshotRecruitment({ ok: false, out: "" }, null);
+	if (!list.out.split("\n").some((line) => line.trim() !== "")) return snapshotRecruitment({ ok: true, out: list.out }, null);
+	const inspect = runArgv(RECRUITMENT_INSPECT, SPAWN_TIMEOUT_MS);
+	return snapshotRecruitment({ ok: true, out: list.out }, { ok: inspect.ok, out: inspect.out });
+}
+
+/** Check detail naming the snapshot state only — never metadata or errors. */
+function describeSnapshot(snap: RecruitmentSnapshot): string {
+	if (snap.state === "absent") return "absent";
+	if (snap.state === "present") return `present ${snap.fingerprint.length} bytes`;
+	return "probe failed";
+}
+
+/** After-check detail: the transition states only, never metadata or errors. */
+function describeUnchanged(before: RecruitmentSnapshot, after: RecruitmentSnapshot): string {
+	if (before.state === "absent" && after.state === "absent") return "absent before and after";
+	if (recruitmentSnapshotsEqual(before, after)) return "fingerprint identical";
+	return `before ${before.state} after ${after.state}`;
 }
 
 /** `status` key=value lines from the lifecycle script, run from this checkout. */
@@ -613,8 +688,8 @@ export async function main(argv: string[]): Promise<number> {
 	const health = await getStatus(`${base}/healthz`, bearer, REQUEST_TIMEOUT_MS);
 	if (health !== 200) throw new RehearsalRefused(`twin at ${base} is not answering /healthz`);
 
-	const before = inspectRecruitment();
-	check(before !== null, "recruitment-desktop inspect before", before === null ? "inspect failed" : `${before.length} bytes read`);
+	const beforeSnap = snapshotRecruitmentLive();
+	check(beforeSnap.state !== "error", "recruitment-desktop snapshot before", describeSnapshot(beforeSnap));
 
 	const status = desktopStatus();
 	check(status !== null, "substrate-desktop.sh status answers", status === null ? "status failed" : `${Object.keys(status).length} keys`);
@@ -726,8 +801,8 @@ export async function main(argv: string[]): Promise<number> {
 
 	check((await getStatus("http://127.0.0.1:6081/", "", REQUEST_TIMEOUT_MS)) === 401, "6081 root without credentials 401", "no credentials sent");
 
-	const after = inspectRecruitment();
-	check(after !== null && after === before, "recruitment-desktop inspect identical after", after === null ? "inspect failed" : "id status timestamps equal");
+	const afterSnap = snapshotRecruitmentLive();
+	check(recruitmentSnapshotsEqual(beforeSnap, afterSnap), "recruitment-desktop unchanged after", describeUnchanged(beforeSnap, afterSnap));
 
 	check(
 		status !== null && status["ports"] === "127.0.0.1:6081->3000" && status["privileged"] === "false" && status["docker_socket_mounted"] === "false" && status["label_role"] === "desktop",

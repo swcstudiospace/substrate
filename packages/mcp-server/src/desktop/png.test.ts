@@ -12,7 +12,7 @@ const EXPECTED_RGB = Buffer.from(Array.from({ length: W * H }, (_, n) => [...pix
  * A synthetic XWD: big-endian header, window name, ncolors × 12-byte colours, then rows of 4-byte
  * (32 bpp) or packed 3-byte (24 bpp, what this Xvfb's `xwd -root` writes) pixels padded by 4 bytes.
  */
-function xwd(o: { byteOrder: 0 | 1; version?: number; format?: number; bpp?: number; ncolors?: number }): Buffer {
+function xwd(o: { byteOrder: 0 | 1; version?: number; format?: number; bpp?: number; ncolors?: number; visual?: number }): Buffer {
 	const name = Buffer.from("xwdtest\0");
 	const bpp = o.bpp ?? 32;
 	const unit = bpp === 24 ? 3 : 4;
@@ -20,7 +20,7 @@ function xwd(o: { byteOrder: 0 | 1; version?: number; format?: number; bpp?: num
 	const header = Buffer.alloc(100);
 	const fields = [
 		100 + name.length, o.version ?? 7, o.format ?? 2, 24, W, H, 0, o.byteOrder, 32, o.byteOrder, 32, bpp,
-		bytesPerLine, 4, 0xff0000, 0xff00, 0xff, 8, 256, o.ncolors ?? 0, W, H, 0, 0, 0,
+		bytesPerLine, o.visual ?? 4, 0xff0000, 0xff00, 0xff, 8, 256, o.ncolors ?? 0, W, H, 0, 0, 0,
 	];
 	fields.forEach((value, i) => header.writeUInt32BE(value, i * 4));
 	const pixels = Buffer.alloc(bytesPerLine * H);
@@ -65,6 +65,13 @@ describe("decodeXwd", () => {
 		expect(() => decodeXwd(xwd({ byteOrder: 0, bpp: 16 }))).toThrow();
 		expect(() => decodeXwd(xwd({ byteOrder: 0 }).subarray(0, 150))).toThrow();
 		expect(() => decodeXwd(Buffer.alloc(40))).toThrow();
+	});
+
+	test("decodes DirectColor with exact RGB, spot-checking one known pixel", () => {
+		const direct = decodeXwd(xwd({ byteOrder: 0, visual: 5 }));
+		expect(direct).toEqual({ width: W, height: H, rgb: EXPECTED_RGB });
+		// Pixel (3, 2) is RGB (10*3+1, 20*2+2, 7*3+5*2+3) = (31, 42, 34).
+		expect([...direct.rgb.subarray((2 * W + 3) * 3, (2 * W + 3) * 3 + 3)]).toEqual([31, 42, 34]);
 	});
 });
 
@@ -117,5 +124,26 @@ describe("decodePng", () => {
 		png[0] = 0x00;
 
 		expect(() => decodePng(png)).toThrow(/signature/);
+	});
+
+	test("refuses unsupported depth, color type and interlace with valid CRCs", () => {
+		const png = encodePng(W, H, EXPECTED_RGB);
+		const list = chunks(png);
+		// Independent IHDR vectors, re-chunked so CRCs stay valid: rejection
+		// must come from the header semantics, not a checksum failure.
+		const variant = (byte: number, value: number) => {
+			const ihdr = Buffer.from(list[0]!.data);
+			ihdr[byte] = value;
+			return Buffer.concat([
+				PNG_SIGNATURE,
+				pngChunk("IHDR", ihdr),
+				pngChunk("IDAT", list[1]!.data),
+				pngChunk("IEND", Buffer.alloc(0)),
+			]);
+		};
+		expect(() => decodePng(variant(8, 16))).toThrow();
+		expect(() => decodePng(variant(9, 6))).toThrow();
+		expect(() => decodePng(variant(9, 0))).toThrow();
+		expect(() => decodePng(variant(12, 1))).toThrow();
 	});
 });
