@@ -27,7 +27,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { auditMode } from "@substrate/audit";
-import { classifyEventRefusal, type EventRefusalReason } from "@substrate/observability";
+import { classifyEventRefusal, evaluateBurnSlos, loadBurnThresholds, type EventRefusalReason } from "@substrate/observability";
 import {
 	anonymousBridge,
 	isOperator,
@@ -406,6 +406,10 @@ export function createHttpServer(
 ) {
 	const anonymousLog = new AnonymousCallerLog(options.anonymousIntervalMs, options.now, options.anonymousLog);
 	anonymousLog.start();
+	// Read once here so a malformed `SUBSTRATE_BURN_*` ceiling warns at boot, not on
+	// the first scrape; the route re-reads the environment per request and the
+	// reader warns once per variable, so this line never repeats itself.
+	loadBurnThresholds();
 	// Same hourly window. `/metrics` counts refusals by reason; this line says which
 	// sender to fix (claimed surface, kind, tokened or not) without carrying a payload.
 	const refusalLog = new AnonymousCallerLog(options.anonymousIntervalMs, options.now, options.refusalLog, "refused events");
@@ -511,11 +515,17 @@ export function createHttpServer(
 
 			if (req.method === "GET" && url.pathname === "/slo") {
 				const results = observability.evaluate();
+				// The quota-burn objectives ride beside the catalogue, never inside it: the
+				// catalogue is exactly SPE-4793's four. Every read both feeds and reads the
+				// rolling-hour ledger, so scrape frequency is the sample rate — the
+				// dispatcher's storm-breaker polls this same array.
+				const burn = evaluateBurnSlos(observability.snapshot());
 				// 200 either way. A breached objective is information, not a broken service,
 				// and a monitor that read this as an outage would page on a slow hour.
 				sendJson(res, 200, {
 					results,
 					breached: results.filter((result) => result.status === "breached").map((result) => result.id),
+					burn,
 				});
 				return;
 			}

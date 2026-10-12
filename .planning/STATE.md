@@ -203,7 +203,7 @@ Standalone post-close series on branch `ultrathink/uplift-7` — proposal: [UPLI
 | Item | Status | Evidence |
 |------|--------|----------|
 | U5 gate verdicts as events (memory plane) | done | [uplift/01-SUMMARY.md](uplift/01-SUMMARY.md) — mcp-server 0 fail, phase-close pass, tsc clean |
-| U4 quota-burn SLOs + dispatch storm-breaker | pending | — |
+| U4 quota-burn SLOs + dispatch storm-breaker | done | [uplift/02-SUMMARY.md](uplift/02-SUMMARY.md) — test:py 272 pass, obs/mcp 0 fail, tsc clean |
 | U2 host VM re-adoption after restart | pending | — |
 | U1 sandbox egress allowlist | pending | — |
 | U3 signed dispatch handoffs + drift gate | pending | — |

@@ -7,6 +7,9 @@ on substrate-host (host.HostClient) and is watched through the same registry con
 D-14: at most 2 dispatched sessions, one per issue; an issue the registry gave up on is never
 relaunched (sessions.SessionRegistry).
 D-15: ``SUBSTRATE_DISPATCH_DISABLED=1`` in the live env file stops every tick before any call.
+U4 / SPE-10477: before any launch, one ``/slo`` burn read (quota.py) storm-breaks the tick —
+a breaching quota SLO posts the once-only ``[quota-burn]`` marker, emits one
+``dispatch.stormbreak`` warning, and launches nothing while it stays breached.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from . import launcher, sessions, worktree
 from .host import HostRefused
 from .launcher import Launched
 from .linear import Candidate
+from .quota import burn_breaches
 from .worktree import WorktreeRefused
 
 EVENT_RETRYABLE_MARKERS = frozenset({"host-unreachable"})
@@ -29,6 +33,8 @@ EVENT_RETRYABLE_MARKERS = frozenset({"host-unreachable"})
 DISPATCHABLE_SURFACES = frozenset({"hermes", "claude-code"})
 COMMENT_PREFIX = "substrate-dispatcher:"
 DISABLE_KEY = "SUBSTRATE_DISPATCH_DISABLED"
+# U4 proof-window override: same file-scan, read every tick like the D-15 switch.
+STORMBREAK_DISABLE_KEY = "SUBSTRATE_STORMBREAK_DISABLED"
 # Once-only comment texts by marker; every body starts with COMMENT_PREFIX and carries the stable
 # tag "[<marker>]", which tick looks for in the issue's last 50 comments before posting.
 MARKERS: dict[str, str] = {
@@ -45,6 +51,7 @@ MARKERS: dict[str, str] = {
     "host-unreachable": "substrate-host is not reachable; will retry on a later tick",
     "exited-unclaimed": "hermes session exited (code {code}) without claiming the node — removed the dispatch label; not retrying",
     "claim-timeout": "no claim within 15 minutes — removed the dispatch label; not retrying",
+    "quota-burn": "quota burn SLO {slo} breached its rolling hour; dispatch storm-breaker tripped — not dispatching",
 }
 
 LaunchFn = Callable[[Candidate, dict], Launched]
@@ -64,24 +71,40 @@ class Decision:
     found: dict | None = None
 
 
-def dispatch_disabled(env_file: Path, environ: Mapping[str, str]) -> bool:
-    """D-15 kill switch: the last ``SUBSTRATE_DISPATCH_DISABLED=`` line in env_file decides.
+def _env_switch(env_file: Path, environ: Mapping[str, str], key: str) -> bool:
+    """The last ``<key>=`` line in env_file decides; ``=1`` is on, anything else off.
 
-    An appended line flips the switch without rewriting the secrets file. When the file lacks the
-    key or cannot be read, the process environment decides. No other line is ever logged.
+    An appended line flips the switch without rewriting the secrets file. When the
+    file lacks the key or cannot be read, the process environment decides. No other
+    line is ever logged.
     """
     value: str | None = None
     try:
         with open(env_file, encoding="utf-8") as fh:
             for line in fh:
                 stripped = line.strip()
-                if stripped.startswith(DISABLE_KEY + "="):
-                    value = stripped[len(DISABLE_KEY) + 1:]
+                if stripped.startswith(key + "="):
+                    value = stripped[len(key) + 1:]
     except OSError:
         value = None
     if value is None:
-        value = environ.get(DISABLE_KEY, "")
+        value = environ.get(key, "")
     return value.strip().strip("'\"") == "1"
+
+
+def dispatch_disabled(env_file: Path, environ: Mapping[str, str]) -> bool:
+    """D-15 kill switch: the last ``SUBSTRATE_DISPATCH_DISABLED=`` line in env_file decides."""
+    return _env_switch(env_file, environ, DISABLE_KEY)
+
+
+def stormbreak_disabled(env_file: Path, environ: Mapping[str, str]) -> bool:
+    """U4 override: the last ``SUBSTRATE_STORMBREAK_DISABLED=1`` line disables the breaker.
+
+    Read exactly like the D-15 switch — env file first, process environment when the
+    file lacks the key — so a proof window appends one line instead of rewriting the
+    secrets file, and the value is re-decided on every tick.
+    """
+    return _env_switch(env_file, environ, STORMBREAK_DISABLE_KEY)
 
 
 def tag(marker: str) -> str:
@@ -162,6 +185,39 @@ def emit_failed(
     _emit(mcp, arguments, log)
 
 
+def emit_stormbreak(
+    mcp: Any, *, breached: list[str], identifier: str, found: dict | None, log: Log
+) -> None:
+    """The storm-breaker tripped: one warning naming the breached burn SLOs (U4).
+
+    Distinct from ``emit_failed`` on purpose — its payload ``action`` is
+    ``dispatch.stormbreak``, so a reader can tell a quota stop from a per-issue
+    failure, and the issue's own record stays clean of a fault it did not cause.
+    """
+    found = found or {}
+    first = breached[0]
+    arguments: dict[str, Any] = {
+        "kind": "warning",
+        "summary": f"dispatch stormbreak for {identifier}: quota burn SLO {first} breaching",
+        "surface": "substrate",
+        "session_id": f"dispatch:{found.get('graph_id') or identifier}:{found.get('node_id') or 'none'}",
+        "linear_identifier": identifier,
+        "payload": {
+            "action": "dispatch.stormbreak",
+            "runtime": "dispatcher",
+            "slo": first,
+            "breached": list(breached),
+        },
+    }
+    if found.get("graph_id"):
+        arguments["graph_id"] = found["graph_id"]
+        arguments["payload"]["graph_id"] = found["graph_id"]
+    if found.get("node_id"):
+        arguments["node_id"] = found["node_id"]
+        arguments["payload"]["node_id"] = found["node_id"]
+    _emit(mcp, arguments, log)
+
+
 def _lease_is_held(found: dict) -> bool:
     """True when graph_find's public lease view says the node is currently held.
 
@@ -214,6 +270,36 @@ def decide(
     )
 
 
+def stormbreak_breaches(
+    *,
+    env_file: Path,
+    environ: Mapping[str, str],
+    slo: Callable[[], Any] | None,
+    log: Log,
+) -> list[str]:
+    """The once-per-tick burn verdict: breached SLO ids, or ``[]`` when the breaker stands down.
+
+    Fail-open by construction: no fetcher, the override switch, an unreachable
+    snapshot and a malformed snapshot all answer ``[]`` and the launch proceeds —
+    the breaker only ever acts on a substrate verdict it actually read.
+    """
+    if slo is None:
+        return []
+    if stormbreak_disabled(env_file, environ):
+        log(f"storm-breaker disabled ({STORMBREAK_DISABLE_KEY}=1)")
+        return []
+    try:
+        snapshot = slo()
+    except Exception as exc:  # noqa: BLE001 — an unreachable probe never blocks a launch
+        log(f"slo snapshot unreachable; storm-breaker fails open: {type(exc).__name__}: {exc}")
+        return []
+    try:
+        return burn_breaches(snapshot)
+    except Exception as exc:  # noqa: BLE001 — a malformed snapshot never blocks a launch
+        log(f"slo snapshot malformed; storm-breaker fails open: {type(exc).__name__}: {exc}")
+        return []
+
+
 def tick(
     *,
     linear: Any,
@@ -224,14 +310,27 @@ def tick(
     environ: Mapping[str, str],
     dry_run: bool,
     log: Log,
+    slo: Callable[[], Any] | None = None,
 ) -> list[Decision]:
-    """Run one poll → resolve → decide → act pass; per-candidate errors never stop the tick."""
+    """Run one poll → resolve → decide → act pass; per-candidate errors never stop the tick.
+
+    ``slo`` is the U4 burn probe; ``None`` (or a standing-down probe) launches as before.
+    """
     if dispatch_disabled(env_file, environ):
         log(f"dispatch disabled ({DISABLE_KEY}=1)")
         return []
     candidates = linear.dispatch_candidates()
     log(f"tick: {len(candidates)} candidate issue(s)")
     decisions: list[Decision] = []
+    stormbreak: list[str] | None = None
+
+    def breaches_once() -> list[str]:
+        """One snapshot and one verdict per tick, however many launches it gates."""
+        nonlocal stormbreak
+        if stormbreak is None:
+            stormbreak = stormbreak_breaches(env_file=env_file, environ=environ, slo=slo, log=log)
+        return stormbreak
+
     for candidate in candidates:
         try:
             found = None
@@ -256,6 +355,22 @@ def tick(
                 if _comment_once(linear, candidate, decision.marker, holder=str(holder)):
                     _maybe_emit_failed(mcp, candidate, decision.found, decision.marker, log)
             elif decision.action == "launch":
+                breached = breaches_once()
+                if breached:
+                    # U4 storm-break: the once-only marker names the breached SLO, one
+                    # warning event records the trip, and the issue keeps its labels —
+                    # it did nothing wrong, so the next tick may launch it once the
+                    # burn recovers. Until then the marker tag keeps both quiet.
+                    log(
+                        f"{candidate.identifier}: {tag('quota-burn')} quota burn SLO {breached[0]} "
+                        "breaching; not dispatching"
+                    )
+                    if _comment_once(linear, candidate, "quota-burn", slo=breached[0]):
+                        emit_stormbreak(
+                            mcp, breached=breached, identifier=candidate.identifier,
+                            found=decision.found, log=log,
+                        )
+                    continue
                 found = decision.found or {}
                 try:
                     bodies = linear.comment_bodies(candidate.issue_id)

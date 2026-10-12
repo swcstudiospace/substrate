@@ -39,6 +39,9 @@ EXPECTED_MARKERS = frozenset({
     "not-dispatchable", "no-node", "already-claimed", "invalid-graph-id", "invalid-ids",
     "no-checkout", "low-disk", "path-conflict", "git-failed", "host-refused",
     "host-unreachable", "exited-unclaimed", "claim-timeout",
+    # U4 (uplift 02): the storm-breaker's refusal is a new once-only reason the
+    # operator reads on Linear; the D33-02 lock still pins every existing text.
+    "quota-burn",
 })
 
 

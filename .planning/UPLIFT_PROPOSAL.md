@@ -74,7 +74,7 @@
 | Item | Status | Gates | Notes |
 |------|--------|-------|-------|
 | U5 | done | mcp-server 0 fail · phase-close pass · tsc clean | [01-SUMMARY.md](uplift/01-SUMMARY.md) — unified into auditMemoryWrite; accepted verdict was the real gap |
-| U4 | pending | — | — |
+| U4 | done | test:py 272 pass · obs+mcp 0 fail · tsc clean | [02-SUMMARY.md](uplift/02-SUMMARY.md) — burn SLOs at /slo; storm-breaker with new `quota-burn` marker (D33-02 lock deliberately extended) |
 | U2 | pending | — | — |
 | U1 | pending | — | — |
 | U3 | pending | — | — |
