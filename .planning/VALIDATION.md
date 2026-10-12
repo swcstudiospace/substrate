@@ -212,6 +212,25 @@ plus draft PR #54):**
   diagnostic empty comment on sibling SWC-584 (created and deleted). Full
   receipt: session artifact `v13-mirror-live-receipt.json`.
 
+- **DISP-08 PASS on production (2026-10-12, 392s bounded window, zero
+  failures)** on fresh issue SWC-480 (graph `ut-muhk8v3p-47ae5f1a/n1`):
+  dispatcher env provisioned 0600 (three names, values never printed);
+  release `ff71394` deployed to `/opt/agent-substrate/current`
+  (`SUBSTRATE_RELEASE_RESTART=0` — substrate-mcp MainPID unchanged all
+  window); unit installed byte-identical to the worktree, doctor "no
+  findings"; kill switch flipped per-unit only, re-read per tick with no
+  restart; `dispatch:hermes` → Hermes session launched **14.9s** (≤30s);
+  claim landed under the Hermes token **+46.6s** (Linear poll +55.5s, ≤60s)
+  with `agent:hermes`, `dispatch:*` removed, the once-only claim comment;
+  Notion Agent=hermes; a Claude Code brief (HTTP 200) names SWC-480 + hermes
+  (hashes recorded, no full text); the run ended in **gated Done via the
+  connector** with the session exiting 0 and zero
+  `exited-unclaimed`/`claim-timeout` markers; kill switch restored **=1**
+  and the journal confirms disabled ticks after close; dispatcher left
+  active/idle/enabled, substrate-mcp never restarted. Session side effect
+  recorded: the Hermes run pushed its own graph-branch work as draft PR #57.
+  Full receipt: session artifact `v13-dispatch-live-receipt.json`.
+
 **Separately held beyond the historical 43 count:** ~~MIRROR-08~~ —
 **cleared 2026-10-12** (receipt above); its earlier
 `behavior_unverified: 0`-with-NOT-RUN contradiction is resolved by the real
