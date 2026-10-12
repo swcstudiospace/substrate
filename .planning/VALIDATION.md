@@ -192,12 +192,34 @@ plus draft PR #54):**
   SKILL/DISP "runs from main" clauses stay open until merge + deploy +
   parity receipt.
 
-**Separately held beyond the historical 43 count:** MIRROR-08 is explicitly
-NOT RUN despite Phase 23's `behavior_unverified: 0`. Its real
-Linear/Notion/connector transition proof still needs approval and receipts.
-The new Cursor credential disclosure also requires operator rotation;
-the historical rotation decline is not a waiver of this incident. No
-credential value, new approval, restart or private hostname is recorded.
+- **MIRROR-08 PASS on production (2026-10-12, 14:07–14:19Z)** on real Linear
+  SWC-467 + its Notion row, fresh graph `ut-mv5bhfo7-f3da543b`: claim →
+  first started state + `agent:claude-code` + exactly-once comment (3.7s);
+  second-surface refusal wrote nothing anywhere (0.4s); release → Todo,
+  labels cleared, no comment (24.4s, converged well inside 60s); reclaim +
+  heartbeat → one new-session comment, heartbeat silent (4.5s/0.6s);
+  complete-without-DoD → In Review, node `started_review`, lease held,
+  `dod-required` warning, connector received nothing (4.9s); complete-with-DoD
+  → Done moved by the connector only (exactly one `POST /v1/complete-issue`
+  200 in the journal), ledger note carries hashes not summary text (8.3s).
+  Zero `lease_id` leaks in Linear/Notion across every transition. Runbook
+  rollback executed and verified 14:19:37Z (Done→Todo, label removed, Notion
+  cleared, proof comments retained as history). Recorded deviations: the
+  setup attempt hit archived-SWC-467 (commentCreate `Entity not found`;
+  unarchived per rollback before the measured rerun), a stray
+  `agent:hermes` label written by a non-substrate Linear-side actor 16.5s
+  before the refusal observation (removed; never reappeared), and a
+  diagnostic empty comment on sibling SWC-584 (created and deleted). Full
+  receipt: session artifact `v13-mirror-live-receipt.json`.
+
+**Separately held beyond the historical 43 count:** ~~MIRROR-08~~ —
+**cleared 2026-10-12** (receipt above); its earlier
+`behavior_unverified: 0`-with-NOT-RUN contradiction is resolved by the real
+transitions. Still held: the Phase 20 installed-client/per-scenario receipts
+(the 342 unauthenticated `/events` 4xx name the open readiness question) and
+the new Cursor credential disclosure, which requires operator rotation; the
+historical rotation decline is not a waiver of this incident. No credential
+value or private hostname is recorded.
 
 **Proof + rollback pointers:** isolated fake-chain proof and its additive
 rollback live in the Phase 28 archive
