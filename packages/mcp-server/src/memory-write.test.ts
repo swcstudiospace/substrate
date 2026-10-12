@@ -311,6 +311,7 @@ let store: FakeStore;
 let ids: number;
 /** Event ids the stand-in ledger will confirm. Empty, unless a test says otherwise. */
 let knownEvents: Set<string>;
+
 /** Set to make the ledger lookup throw, which must read as "unconfirmed". */
 let ledgerFails: string | null;
 
@@ -1612,3 +1613,4 @@ describe("swarm surfaces — default-deny proven from the outside (ADR 0001 S3)"
 		expect(at("hermes", "repo:acme/widgets", "decision")?.name).toBe("repo-working");
 	});
 });
+

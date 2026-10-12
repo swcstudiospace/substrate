@@ -1133,23 +1133,33 @@ export class Substrate {
 	}
 
 	/**
-	 * Put a refused or unverified memory write in the event log.
+	 * Put every finished memory write in the event log — the one emitter for the
+	 * verdict trail.
 	 *
 	 * Governance that leaves no trace is indistinguishable from no governance: a
 	 * denied write is otherwise visible only to the agent that was denied, which is
-	 * the one party with an interest in not mentioning it.
+	 * the one party with an interest in not mentioning it. An accepted write had the
+	 * opposite hole — no trace at all — so it trails here too, and the ledger shows
+	 * the writes that landed beside the ones that did not.
 	 *
 	 * The event carries the decision, never the body. The body may be exactly the
 	 * secret or the PII that got the write quarantined, and copying it into an
 	 * append-only ledger to record that it was quarantined would be absurd.
 	 */
 	private async auditMemoryWrite(request: MemoryWriteRequest, result: MemoryWriteResult): Promise<void> {
-		if (result.outcome === "accepted" && result.verified_persisted) return;
 		// Redacted, and redacted *here* rather than relying on the event path: `scope`,
 		// `kind` and `writer` are all caller-controlled, a refused write is exactly where
 		// a malformed one arrives, and a credential in the journal is a credential
 		// leaked whether or not the event that would have carried it was ever emitted.
-		const line = redact(`memory.write ${result.outcome}: ${result.reason} (${request.kind} at ${request.scope})`);
+		//
+		// An accepted, verified write needs no reason segment — the reason exists to
+		// say why a write *did not* land, and `verified_persisted` says the rest. An
+		// accepted-but-unverified write keeps the refusal shape: the caveat is the news.
+		const line = redact(
+			result.outcome === "accepted" && result.verified_persisted
+				? `memory.write accepted: ${request.kind} at ${request.scope}`
+				: `memory.write ${result.outcome}: ${result.reason} (${request.kind} at ${request.scope})`,
+		);
 		const writer = String(request.writer);
 		process.stderr.write(`[substrate] ${line} by ${redact(writer)}\n`);
 
@@ -1158,14 +1168,16 @@ export class Substrate {
 		if (!(SURFACES as readonly string[]).includes(writer)) return;
 		await this.emit({
 			surface: writer as Surface,
-			kind: result.outcome === "conflict" ? "note" : "warning",
+			kind: result.outcome === "conflict" || (result.outcome === "accepted" && result.verified_persisted) ? "note" : "warning",
 			summary: line,
 			graph_id: request.graph_id,
 			session_id: request.session_id,
 			repo: request.repo,
 			payload: {
 				outcome: result.outcome,
-				reason: result.reason,
+				// Omitted when absent, never written as `undefined`: the accepted payload
+				// is exactly the refusal payload's keys minus a reason that is not there.
+				...(result.reason ? { reason: result.reason } : {}),
 				scope: request.scope,
 				kind: request.kind,
 				...(result.strategy ? { strategy: result.strategy } : {}),

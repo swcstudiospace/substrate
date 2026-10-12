@@ -73,7 +73,7 @@
 
 | Item | Status | Gates | Notes |
 |------|--------|-------|-------|
-| U5 | pending | — | — |
+| U5 | done | mcp-server 0 fail · phase-close pass · tsc clean | [01-SUMMARY.md](uplift/01-SUMMARY.md) — unified into auditMemoryWrite; accepted verdict was the real gap |
 | U4 | pending | — | — |
 | U2 | pending | — | — |
 | U1 | pending | — | — |

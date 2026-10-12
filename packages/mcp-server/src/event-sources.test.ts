@@ -213,3 +213,73 @@ describe("the skills.propose rows", () => {
 		expect(Object.keys(payload).sort()).toEqual(["action", "name", "reason", "status"]);
 	});
 });
+
+describe("the memory.write verdict rows", () => {
+	const row = (id: string) => {
+		const found = EVENT_SOURCES.find((candidate) => candidate.id === id);
+		if (!found) throw new Error(`no EVENT_SOURCES row ${id}`);
+		return found;
+	};
+
+	test("an accepted or conflicting write is a note, a quarantined or denied one a warning, all from the writer", () => {
+		expect(row("memory.write.accepted")).toMatchObject({
+			kind: "note",
+			surface: "memory-writer",
+			carriesRepo: false,
+			periodic: false,
+		});
+		expect(row("memory.write.conflict")).toMatchObject({
+			kind: "note",
+			surface: "memory-writer",
+			carriesRepo: false,
+			periodic: false,
+		});
+		for (const id of ["memory.write.quarantined", "memory.write.denied"]) {
+			expect(row(id)).toMatchObject({
+				kind: "warning",
+				surface: "memory-writer",
+				carriesRepo: false,
+				periodic: false,
+			});
+		}
+	});
+
+	test("the audit payload carries no action, so no row declares one", () => {
+		// One emitter — the service's audit — and its payload names the outcome, the
+		// reason, the scope and the kind. With no `payload.action` there is no actions
+		// column to fill: the field stays unset, exactly like the herdr rows.
+		for (const id of ["memory.write.accepted", "memory.write.conflict", "memory.write.quarantined", "memory.write.denied"]) {
+			expect({ id, actions: row(id).actions }).toEqual({ id, actions: undefined });
+		}
+	});
+
+	test("each sample carries the outcome, the entry kind and the scope — never content, never a verdict key", () => {
+		// The accepted payload has no `reason`: a plain acceptance carries none, and
+		// the row samples the common case. Every other outcome names its reason.
+		const expected: Record<string, { outcome: string; reason?: string }> = {
+			"memory.write.accepted": { outcome: "accepted" },
+			"memory.write.conflict": { outcome: "conflict", reason: "version.stale" },
+			"memory.write.quarantined": { outcome: "quarantined", reason: "quarantine.secret" },
+			"memory.write.denied": { outcome: "denied", reason: "rbac.no-grant" },
+		};
+		for (const [id, want] of Object.entries(expected)) {
+			const payload = row(id).sample().payload ?? {};
+			expect(payload).toMatchObject(want);
+			const keys = Object.keys(payload).sort();
+			const wantKeys = [
+				"kind",
+				"outcome",
+				...(want.reason === undefined ? [] : ["reason"]),
+				// A quarantined write names the parked row a reviewer would look for.
+				...(id === "memory.write.quarantined" ? ["quarantine_id"] : []),
+				"scope",
+			].sort();
+			expect(keys).toEqual(wantKeys);
+			expect(keys).not.toContain("verdict");
+			expect(keys).not.toContain("action");
+		}
+		// A quarantined write names the parked row a reviewer would look for.
+		const quarantined = row("memory.write.quarantined").sample().payload ?? {};
+		expect(Object.keys(quarantined).sort()).toEqual(["kind", "outcome", "quarantine_id", "reason", "scope"]);
+	});
+});

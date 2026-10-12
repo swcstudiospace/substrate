@@ -195,3 +195,17 @@ Resume file: None
 - [Phase 16]: 16-03: smoke reads only consumer.env and refuses :7410/non-loopback before any request; claim needs claimed true plus granted
 - [Phase 16]: 16-03: requirements-completed left empty, FOUND-01 stays open until the 16-05 live proof
 - [Phase 16]: 16-04: docs carry key names only, no connection-string shapes; production-mutating steps framed operator-only
+
+## Post-milestone uplift (graph ut-mv5r71hp-65f7b012, 2026-10-12)
+
+Standalone post-close series on branch `ultrathink/uplift-7` — proposal: [UPLIFT_PROPOSAL.md](UPLIFT_PROPOSAL.md). Operator pre-authorized autonomous selection (engineering mix); no new milestone.
+
+| Item | Status | Evidence |
+|------|--------|----------|
+| U5 gate verdicts as events (memory plane) | done | [uplift/01-SUMMARY.md](uplift/01-SUMMARY.md) — mcp-server 0 fail, phase-close pass, tsc clean |
+| U4 quota-burn SLOs + dispatch storm-breaker | pending | — |
+| U2 host VM re-adoption after restart | pending | — |
+| U1 sandbox egress allowlist | pending | — |
+| U3 signed dispatch handoffs + drift gate | pending | — |
+| U6 knowledge freshness automation | pending | — |
+| U7 loopback SSE event stream | pending | — |
