@@ -1,11 +1,15 @@
 /**
- * Muse brief writer, against real temporary git repositories and a stubbed fetch.
+ * Muse brief writer, against temporary git repositories, fetch stubs and loopback HTTP.
  *
  * The writer must not call `/events`. Briefs are keyed by the origin slug.
  * A decoy token is assembled at runtime so no credential shape sits in git.
  */
 import { afterEach, describe, expect, test } from "bun:test";
+import { spawn } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { redact } from "../../mcp-server/src/redact.ts";
@@ -121,6 +125,222 @@ function stubFetch(options: { brief?: string | null; status?: number; health?: b
 
 function briefPath(repo: string): string {
 	return join(repo, ".substrate", "BRIEF.md");
+}
+
+type WriterFault = "healthy" | "ledger-down" | "health-http" | "health-disconnect" | "brief-hung-headers" | "brief-hung-body";
+
+function waitUntil(check: () => boolean, label: string, changes: EventEmitter, timeoutMs = 6_500): Promise<void> {
+	// A watchdog bounds broken children; completion is event-driven, never a guessed sleep.
+	const deadline = AbortSignal.timeout(timeoutMs);
+	return new Promise<void>((resolve, reject) => {
+		function cleanup() {
+			changes.off("change", inspect);
+			deadline.removeEventListener("abort", expired);
+		}
+		function expired() {
+			cleanup();
+			reject(new Error(`Timed out waiting for ${label}`));
+		}
+		function inspect() {
+			try {
+				if (!check()) return;
+				cleanup();
+				resolve();
+			} catch (cause) {
+				cleanup();
+				reject(cause);
+			}
+		}
+		changes.on("change", inspect);
+		deadline.addEventListener("abort", expired, { once: true });
+		inspect();
+	});
+}
+
+function sourceBrief(sourcePath: string, branch: string): string {
+	const source = JSON.parse(readFileSync(sourcePath, "utf8")) as { revision: number; summary: string };
+	return `# acme/widgets (${branch})\nRevision ${source.revision}\n${source.summary}\n`;
+}
+
+/** Real sockets, including requests that never finish headers or their body. */
+async function writerServer(sourcePath: string) {
+	let fault: WriterFault = "healthy";
+	const sockets = new Set<Socket>();
+	const paths: string[] = [];
+	const briefs: Array<Record<string, unknown>> = [];
+	const authorizations: Array<string | undefined> = [];
+	const changes = new EventEmitter();
+	const server = createServer((request, response) => {
+		paths.push(request.url ?? "");
+		authorizations.push(request.headers.authorization);
+		if (request.url === "/healthz") {
+			if (fault === "health-disconnect") {
+				request.socket.destroy();
+				return;
+			}
+			response.writeHead(fault === "health-http" ? 503 : 200, { "content-type": "application/json" });
+			response.end(JSON.stringify({ greptime: fault !== "ledger-down" }));
+			return;
+		}
+		if (request.url === "/brief") {
+			let body = "";
+			request.setEncoding("utf8");
+			request.on("data", (chunk: string) => { body += chunk; });
+			request.on("end", () => {
+				const input = JSON.parse(body) as Record<string, unknown>;
+				briefs.push(input);
+				changes.emit("change");
+				if (fault === "brief-hung-headers") return;
+				response.writeHead(200, { "content-type": "text/markdown; charset=utf-8" });
+				if (fault === "brief-hung-body") {
+					// A received 200 and nonempty prefix are NOT a complete good brief.
+					response.write("INCOMPLETE RESPONSE THAT MUST NEVER REPLACE THE GOOD BRIEF\n");
+					return;
+				}
+				response.end(sourceBrief(sourcePath, String(input.branch)));
+			});
+			return;
+		}
+		response.writeHead(request.url === "/events" ? 202 : 404);
+		response.end("{}");
+	});
+	server.on("connection", (socket) => {
+		sockets.add(socket);
+		socket.on("close", () => { sockets.delete(socket); });
+	});
+	await new Promise<void>((resolve, reject) => {
+		server.once("error", reject);
+		server.listen(0, "127.0.0.1", resolve);
+	});
+	const address = server.address();
+	if (address === null || typeof address === "string") throw new Error("Loopback HTTP port missing");
+	return {
+		url: `http://127.0.0.1:${address.port}`,
+		paths,
+		briefs,
+		authorizations,
+		setFault(next: WriterFault) { fault = next; },
+		async briefReceived(count: number) {
+			await waitUntil(() => briefs.length >= count, `HTTP brief request ${count}`, changes);
+		},
+		async close() {
+			const closed = new Promise<void>((resolve) => { server.close(() => resolve()); });
+			for (const socket of sockets) socket.destroy();
+			await closed;
+		},
+	};
+}
+
+interface ScratchWatch {
+	readonly logs: string;
+	waiting(count: number): Promise<void>;
+	advance(ms: number): Promise<void>;
+	close(): Promise<void>;
+}
+
+/** Only the child's sleep clock is virtual; HTTP and abort deadlines stay real. */
+function scratchWatch(repo: string, url: string, statePath: string): ScratchWatch {
+	const home = mkdtempSync(join(tmpdir(), "muse-watch-home-"));
+	made.push(home);
+	const preload = join(home, "clock.ts");
+	writeFileSync(preload, `
+const realSleep = Bun.sleep.bind(Bun);
+let now = 0;
+let pending: { deadline: number; resolve: () => void } | undefined;
+Bun.sleep = ((delay: number | Date) => {
+	if (typeof delay !== "number") return realSleep(delay);
+	if (pending) throw new Error("Overlapping writer sleeps");
+	return new Promise<void>((resolve) => {
+		pending = { deadline: now + delay, resolve };
+		process.stdout.write("muse-test:waiting:" + pending.deadline + "\\n");
+	});
+}) as typeof Bun.sleep;
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk: string) => {
+	input += chunk;
+	let newline: number;
+	while ((newline = input.indexOf("\\n")) !== -1) {
+		const advance = Number(input.slice(0, newline));
+		input = input.slice(newline + 1);
+		if (!Number.isFinite(advance) || advance < 0) throw new Error("Invalid clock advance");
+		now += advance;
+		if (pending && now >= pending.deadline) {
+			const due = pending;
+			pending = undefined;
+			due.resolve();
+		}
+		process.stdout.write("muse-test:advanced:" + now + "\\n");
+	}
+});
+`);
+	const child = spawn(process.execPath, [
+		"--no-env-file", "--preload", preload, new URL("./muse.ts", import.meta.url).pathname, "--watch",
+	], {
+		cwd: repo,
+		env: {
+			PATH: process.env.PATH ?? "",
+			HOME: home,
+			TMPDIR: home,
+			GIT_CONFIG_NOSYSTEM: "1",
+			GIT_CONFIG_GLOBAL: "/dev/null",
+			SUBSTRATE_MUSE_REPOS: repo,
+			SUBSTRATE_URL: url,
+			SUBSTRATE_COLLECTOR_STATE: statePath,
+			SUBSTRATE_STATE_DIR: home,
+			SUBSTRATE_TOKENS_DIR: join(home, "empty-tokens"),
+		},
+		stdio: ["pipe", "pipe", "pipe"],
+	});
+	let stdout = "";
+	let stderr = "";
+	let closed = false;
+	let spawnError: Error | undefined;
+	const changes = new EventEmitter();
+	child.stdout.setEncoding("utf8");
+	child.stderr.setEncoding("utf8");
+	child.stdout.on("data", (chunk: string) => { stdout += chunk; changes.emit("change"); });
+	child.stderr.on("data", (chunk: string) => { stderr += chunk; changes.emit("change"); });
+	child.on("error", (error) => { spawnError = error; changes.emit("change"); });
+	child.on("close", () => { closed = true; changes.emit("change"); });
+	function alive() {
+		if (spawnError) throw spawnError;
+		if (closed) throw new Error(`Writer exited before its checkpoint: ${stderr}`);
+	}
+	let clock = 0;
+	return {
+		get logs() { return stderr; },
+		async waiting(count: number) {
+			await waitUntil(() => {
+				alive();
+				return stdout.split("\n").filter((line) => line.startsWith("muse-test:waiting:")).length >= count;
+			}, `writer scheduled sleep ${count}`, changes);
+		},
+		async advance(ms: number) {
+			alive();
+			clock += ms;
+			child.stdin.write(`${ms}\n`);
+			await waitUntil(() => {
+				alive();
+				return stdout.split("\n").includes(`muse-test:advanced:${clock}`);
+			}, "child clock acknowledgement", changes);
+		},
+		async close() {
+			if (!closed) child.kill("SIGKILL");
+			await waitUntil(() => closed, "scratch writer shutdown", changes, 2_000);
+		},
+	};
+}
+
+function persistedMuseState(path: string): MuseState {
+	return JSON.parse(readFileSync(path, "utf8")) as MuseState;
+}
+
+function expectOnePointer(repo: string): void {
+	const agents = readFileSync(join(repo, "AGENTS.md"), "utf8");
+	expect(agents.split(MARKER_START).length - 1).toBe(1);
+	expect(agents.split(MARKER_END).length - 1).toBe(1);
+	expect(agents).toContain(pointerBlock());
 }
 
 describe("repo list", () => {
@@ -383,4 +603,136 @@ describe("ledger gate", () => {
 		globalThis.fetch = (async (_input: Parameters<typeof fetch>[0]) => new Response(JSON.stringify({ greptime: false }), { status: 200 })) as typeof fetch;
 		expect(await ledgerAvailable()).toBe(false);
 	});
+});
+
+describe("Muse scheduled watch over real loopback HTTP", () => {
+	test("a source change refreshes only at the scheduled deadline and restart retains state and one pointer", async () => {
+		const repo = tempGit({ origin: "https://github.com/acme/widgets.git" });
+		const sourcePath = join(repo, "ledger-source.json");
+		const statePath = join(repo, "writer-state.json");
+		const outside = "# Local instructions\n\nPreserve these bytes.\n";
+		writeFileSync(join(repo, "AGENTS.md"), outside);
+		const secret = `${"ts"}${"key-"}abcDEF123456ghiJKL`;
+		writeFileSync(sourcePath, JSON.stringify({ revision: 1, summary: `First shared source\r\nToken: ${secret}` }));
+		const seed = emptyState();
+		seed.counters.fetch_failed = 7;
+		seed.repos[repo] = { last_failure: "2026-10-08T12:00:00.000Z" };
+		writeFileSync(statePath, JSON.stringify(seed));
+		const server = await writerServer(sourcePath);
+		let watch: ScratchWatch | undefined;
+		try {
+			watch = scratchWatch(repo, server.url, statePath);
+			await watch.waiting(1);
+			const initial = persistedMuseState(statePath);
+			const oldBytes = readFileSync(briefPath(repo));
+			const pointerBytes = readFileSync(join(repo, "AGENTS.md"));
+			expect(oldBytes.toString("utf8")).toBe(redact(sourceBrief(sourcePath, "main")));
+			expect(oldBytes.toString("utf8")).not.toContain(secret);
+			expectOnePointer(repo);
+			expect(pointerBytes.toString("utf8")).toBe(`${outside}\n${pointerBlock()}\n`);
+			expect(initial.counters).toEqual(seed.counters);
+			expect(initial.repos[repo]?.last_failure).toBe(seed.repos[repo]?.last_failure);
+			expect(initial.repos[repo]?.last_success).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+			expect(server.briefs).toEqual([{ repo: "acme/widgets", branch: "main", surface: "muse" }]);
+
+			const beforeDeadlineRequests = [...server.paths];
+			// Change the HTTP source and git context, not the writer or its pass function.
+			writeFileSync(sourcePath, JSON.stringify({ revision: 2, summary: "Another agent finished the build.\r\nFresh shared context." }));
+			git(repo, ["switch", "-q", "-c", "scheduled-side"]);
+			await watch.advance(299_999);
+			expect(server.paths).toEqual(beforeDeadlineRequests);
+			expect(readFileSync(briefPath(repo))).toEqual(oldBytes);
+			expect(persistedMuseState(statePath)).toEqual(initial);
+
+			await watch.advance(1);
+			await watch.waiting(2);
+			const refreshed = persistedMuseState(statePath);
+			const expected = redact(sourceBrief(sourcePath, "scheduled-side"));
+			expect(readFileSync(briefPath(repo), "utf8")).toBe(expected);
+			expect(readFileSync(briefPath(repo))).not.toEqual(oldBytes);
+			expect(refreshed.counters).toEqual(seed.counters);
+			expect(refreshed.repos[repo]?.last_failure).toBe(seed.repos[repo]?.last_failure);
+			expect(refreshed.repos[repo]?.last_success).not.toBe(initial.repos[repo]?.last_success);
+			expect(server.briefs).toEqual([
+				{ repo: "acme/widgets", branch: "main", surface: "muse" },
+				{ repo: "acme/widgets", branch: "scheduled-side", surface: "muse" },
+			]);
+			expect(readFileSync(join(repo, "AGENTS.md"))).toEqual(pointerBytes);
+			expectOnePointer(repo);
+
+			await watch.close();
+			watch = undefined;
+			// A real new CLI process must consume the saved counters/timestamps.
+			writeFileSync(sourcePath, JSON.stringify({ revision: 3, summary: "Source advanced while the writer was stopped." }));
+			watch = scratchWatch(repo, server.url, statePath);
+			await watch.waiting(1);
+			const restarted = persistedMuseState(statePath);
+			expect(readFileSync(briefPath(repo), "utf8")).toBe(redact(sourceBrief(sourcePath, "scheduled-side")));
+			expect(restarted.counters).toEqual(refreshed.counters);
+			expect(restarted.repos[repo]?.last_failure).toBe(refreshed.repos[repo]?.last_failure);
+			expect(restarted.repos[repo]?.last_success).not.toBe(refreshed.repos[repo]?.last_success);
+			expect(readFileSync(join(repo, "AGENTS.md"))).toEqual(pointerBytes);
+			expectOnePointer(repo);
+			expect(server.paths.filter((path) => path !== "/healthz" && path !== "/brief")).toEqual([]);
+			expect(server.authorizations.every((authorization) => authorization === undefined)).toBe(true);
+		} finally {
+			try { await watch?.close(); } finally { await server.close(); }
+		}
+	}, 15_000);
+
+	for (const fault of ["ledger-down", "health-http", "health-disconnect", "brief-hung-headers", "brief-hung-body"] as const) {
+		test(`scheduled ${fault} preserves the exact good brief, pointer and persisted failure accounting without events`, async () => {
+			const repo = tempGit({ origin: "https://github.com/acme/widgets.git" });
+			const sourcePath = join(repo, "ledger-source.json");
+			const statePath = join(repo, "writer-state.json");
+			writeFileSync(sourcePath, JSON.stringify({ revision: 1, summary: "KNOWN GOOD BRIEF\r\nExact UTF-8 bytes: café — ready." }));
+			writeFileSync(join(repo, "AGENTS.md"), "# Instructions outside the pointer must survive.\n");
+			const server = await writerServer(sourcePath);
+			let watch: ScratchWatch | undefined;
+			try {
+				watch = scratchWatch(repo, server.url, statePath);
+				await watch.waiting(1);
+				const good = persistedMuseState(statePath);
+				const oldBytes = readFileSync(briefPath(repo));
+				const pointerBytes = readFileSync(join(repo, "AGENTS.md"));
+				expect(oldBytes.toString("utf8")).toBe(redact(sourceBrief(sourcePath, "main")));
+				expect(good.counters.fetch_failed).toBe(0);
+				expect(good.repos[repo]?.last_success).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+				expectOnePointer(repo);
+
+				writeFileSync(sourcePath, JSON.stringify({ revision: 2, summary: "THIS NEW SOURCE MUST NOT LAND DURING THE OUTAGE." }));
+				server.setFault(fault);
+				const hungBrief = fault === "brief-hung-headers" || fault === "brief-hung-body";
+				const started = performance.now();
+				await watch.advance(300_000);
+				if (hungBrief) {
+					await server.briefReceived(2);
+					expect(readFileSync(briefPath(repo))).toEqual(oldBytes);
+					expect(persistedMuseState(statePath)).toEqual(good);
+				}
+				await watch.waiting(2);
+				const elapsed = performance.now() - started;
+				if (hungBrief) {
+					// Real fetch abort is the behavior under test: virtualizing it would
+					// conceal a broken timeout on headers or a partially received body.
+					expect(elapsed).toBeGreaterThanOrEqual(2_500);
+					expect(elapsed).toBeLessThan(6_500);
+				}
+				const failed = persistedMuseState(statePath);
+				expect(readFileSync(briefPath(repo))).toEqual(oldBytes);
+				expect(readFileSync(join(repo, "AGENTS.md"))).toEqual(pointerBytes);
+				expectOnePointer(repo);
+				expect(failed.counters).toEqual({ ...good.counters, fetch_failed: 1 });
+				expect(failed.repos[repo]?.last_success).toBe(good.repos[repo]?.last_success);
+				expect(failed.repos[repo]?.last_failure).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+				expect(watch.logs).toContain(`fetch failed (${hungBrief ? "network" : "ledger_unavailable"})`);
+				expect(server.briefs).toHaveLength(hungBrief ? 2 : 1);
+				expect(server.briefs.every((body) => body.repo === "acme/widgets" && body.branch === "main" && body.surface === "muse")).toBe(true);
+				expect(server.paths.filter((path) => path !== "/healthz" && path !== "/brief")).toEqual([]);
+				expect(server.authorizations.every((authorization) => authorization === undefined)).toBe(true);
+			} finally {
+				try { await watch?.close(); } finally { await server.close(); }
+			}
+		}, 15_000);
+	}
 });

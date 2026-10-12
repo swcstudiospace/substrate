@@ -40,6 +40,10 @@ function writeStub(dir: string): string {
 			"    console.log(JSON.stringify({ valid: false, diagnostics: [{ message: 'no' }] }));",
 			"    process.exit(0);",
 			"  }",
+			"  if (process.env.MUSE_STUB_DIAG === '1') {",
+			"    console.log(JSON.stringify({ valid: true, diagnostics: [{ message: 'warn' }] }));",
+			"    process.exit(0);",
+			"  }",
 			"  console.log(JSON.stringify({ valid: true, diagnostics: [] }));",
 			"  process.exit(0);",
 			"}",
@@ -85,11 +89,13 @@ function tempGit(): string {
 
 interface RunOpts {
 	url?: string;
+	token?: string;
 	tokenFile?: string;
 	stateDir?: string;
 	cache?: string;
 	status?: string;
 	invalid?: boolean;
+	diag?: boolean;
 }
 
 function run(dir: string, args: string[], opts: RunOpts = {}): { code: number; out: string; err: string; calls: string[][] } {
@@ -107,12 +113,13 @@ function run(dir: string, args: string[], opts: RunOpts = {}): { code: number; o
 			MUSE_STUB_LOG: log,
 			MUSE_PLUGIN_DIR: bundle,
 			SUBSTRATE_URL: opts.url ?? "http://127.0.0.1:7499",
-			SUBSTRATE_TOKEN: SENTINEL,
+			SUBSTRATE_TOKEN: opts.token ?? SENTINEL,
 			SUBSTRATE_MUSE_TOKEN_FILE: opts.tokenFile ?? join(dir, "token.env"),
 			SUBSTRATE_STATE_DIR: opts.stateDir ?? join(dir, "state"),
 			...(opts.cache ? { MUSE_STUB_CACHE: opts.cache } : {}),
 			...(opts.status ? { MUSE_STUB_STATUS: opts.status } : {}),
 			...(opts.invalid ? { MUSE_STUB_INVALID: "1" } : {}),
+			...(opts.diag ? { MUSE_STUB_DIAG: "1" } : {}),
 		},
 	});
 	const calls = statExists(log)
@@ -223,6 +230,44 @@ describe("muse projector bundle", () => {
 		const drifted = run(dir, ["--check"], { cache: bundle });
 		expect(drifted.code).toBe(1);
 		expect(drifted.out).toContain(".muse-plugin/plugin.json");
+	});
+
+	test("valid true with nonempty diagnostics refuses before install or approve", () => {
+		const dir = temp();
+		const result = run(dir, [], { diag: true });
+		expect(result.code).toBe(1);
+		expect(result.calls.map((call) => call[1])).toEqual(["validate"]);
+		expect(result.err).toContain("validate");
+	});
+
+	test("a token value colliding with the config refuses before any bundle write", () => {
+		const dir = temp();
+		const marker = "collision-probe-7f3a9c";
+		const result = run(dir, ["--bundle-only"], { url: `http://127.0.0.1:7499/${marker}`, token: marker });
+		expect(result.code).toBe(2);
+		expect(result.calls).toEqual([]);
+		expect(result.err).toContain("refused");
+		expect(statExists(join(dir, "bundle"))).toBe(false);
+	});
+
+	test("--check flags a redactor-only drift", () => {
+		const dir = temp();
+		expect(run(dir, ["--bundle-only"]).code).toBe(0);
+		const bundle = join(dir, "bundle");
+		expect(run(dir, ["--check"], { cache: bundle }).code).toBe(0);
+		writeFileSync(join(bundle, "hooks", "redact.ts"), "drift\n");
+		const drifted = run(dir, ["--check"], { cache: bundle });
+		expect(drifted.code).toBe(1);
+		expect(drifted.out).toContain("hooks/redact.ts");
+	});
+
+	test("--check refuses an untrusted cache even when every byte matches", () => {
+		const dir = temp();
+		expect(run(dir, ["--bundle-only"]).code).toBe(0);
+		const bundle = join(dir, "bundle");
+		const untrusted = run(dir, ["--check"], { cache: bundle, status: "review_needed" });
+		expect(untrusted.code).toBe(1);
+		expect(untrusted.out).toContain("trust");
 	});
 });
 
@@ -348,5 +393,150 @@ describe("generated muse hook", () => {
 		const line = JSON.parse(readFileSync(join(stateDir, "refused-emits.jsonl"), "utf8").trim()) as Record<string, unknown>;
 		expect(Object.keys(line).sort()).toEqual(["collector", "error", "kind", "source", "status", "surface", "ts"]);
 		expect(line).toMatchObject({ collector: "muse", source: "muse.tool_call", kind: "tool.call", surface: "muse", status: 400 });
+	});
+
+	test("generated hook redacts a planted decoy from the posted payload and refusal diagnostics", async () => {
+		// Assembled at runtime so no token shape sits in git.
+		const decoy = ["gh", "p_", "A".repeat(36)].join("");
+		const bodies: Array<Record<string, unknown>> = [];
+		const server = Bun.serve({
+			port: 0,
+			hostname: "127.0.0.1",
+			async fetch(req) {
+				bodies.push((await req.json()) as Record<string, unknown>);
+				return new Response("{}", { status: 202, headers: { "content-type": "application/json" } });
+			},
+		});
+		const dir = temp();
+		const tokenFile = join(dir, "token.env");
+		writeFileSync(tokenFile, "SUBSTRATE_TOKEN=tok\n");
+		const url = `http://127.0.0.1:${server.port}`;
+		expect(run(dir, ["--bundle-only"], { url, tokenFile }).code).toBe(0);
+		const repo = tempGit();
+		const proc = Bun.spawn(["bun", join(dir, "bundle", "hooks", "post-tool-use.ts")], {
+			cwd: repo,
+			env: { PATH: process.env.PATH ?? "", HOME: dir },
+			stdin: new Blob([JSON.stringify({ tool_name: `Read ${decoy}` })]),
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+		server.stop(true);
+		expect(code).toBe(0);
+		expect(stdout).toBe("");
+		expect(bodies).toHaveLength(1);
+		const wire = JSON.stringify(bodies[0]);
+		expect(wire).not.toContain(decoy);
+		expect(wire).toContain("[REDACTED]");
+
+		const refusal = `denied ${decoy}`;
+		const refusing = Bun.serve({
+			port: 0,
+			hostname: "127.0.0.1",
+			fetch: () => new Response(JSON.stringify({ error: refusal }), { status: 400 }),
+		});
+		const dir2 = temp();
+		const stateDir = join(dir2, "state");
+		mkdirSync(stateDir);
+		const tokenFile2 = join(dir2, "token.env");
+		writeFileSync(tokenFile2, "SUBSTRATE_TOKEN=tok\n");
+		expect(run(dir2, ["--bundle-only"], { url: `http://127.0.0.1:${refusing.port}`, tokenFile: tokenFile2, stateDir }).code).toBe(0);
+		const proc2 = Bun.spawn(["bun", join(dir2, "bundle", "hooks", "post-tool-use.ts")], {
+			cwd: dir2,
+			env: { PATH: process.env.PATH ?? "", HOME: dir2 },
+			stdin: new Blob([JSON.stringify({ tool_name: "Read" })]),
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [out2, err2, code2] = await Promise.all([
+			new Response(proc2.stdout).text(),
+			new Response(proc2.stderr).text(),
+			proc2.exited,
+		]);
+		refusing.stop(true);
+		expect(code2).toBe(0);
+		expect(out2).toBe("");
+		expect(err2).not.toContain(decoy);
+		const refusedRaw = readFileSync(join(stateDir, "refused-emits.jsonl"), "utf8");
+		expect(refusedRaw).not.toContain(decoy);
+		expect(refusedRaw).toContain("[REDACTED]");
+	});
+
+	test("a missing substrate.json exits 0 with empty stdout and exactly one stderr diagnostic without emitting", async () => {
+		const dir = temp();
+		const bodies: Array<unknown> = [];
+		const server = Bun.serve({
+			port: 0,
+			hostname: "127.0.0.1",
+			async fetch(req) {
+				bodies.push(await req.json());
+				return new Response("{}", { status: 202, headers: { "content-type": "application/json" } });
+			},
+		});
+		const tokenMarker = "diag-token-marker-7f3a9c";
+		const tokenFile = join(dir, "token.env");
+		writeFileSync(tokenFile, `SUBSTRATE_TOKEN=${tokenMarker}\n`);
+		const url = `http://127.0.0.1:${server.port}`;
+		expect(run(dir, ["--bundle-only"], { url, tokenFile }).code).toBe(0);
+		rmSync(join(dir, "bundle", "hooks", "substrate.json"));
+		const proc = Bun.spawn(["bun", join(dir, "bundle", "hooks", "post-tool-use.ts")], {
+			cwd: dir,
+			env: { PATH: process.env.PATH ?? "", HOME: dir },
+			stdin: new Blob([JSON.stringify({ tool_name: "Read" })]),
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, code] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+		server.stop(true);
+		expect(code).toBe(0);
+		expect(stdout).toBe("");
+		expect(stderr.trim().split("\n").filter(Boolean)).toHaveLength(1);
+		expect(stderr).not.toContain(tokenMarker);
+		expect(stderr).not.toContain(url);
+		expect(bodies).toHaveLength(0);
+		expect(statExists(join(dir, "state", "refused-emits.jsonl"))).toBe(false);
+	});
+
+	test("an unparseable substrate.json exits 0 with empty stdout and exactly one stderr diagnostic without emitting", async () => {
+		const dir = temp();
+		const bodies: Array<unknown> = [];
+		const server = Bun.serve({
+			port: 0,
+			hostname: "127.0.0.1",
+			async fetch(req) {
+				bodies.push(await req.json());
+				return new Response("{}", { status: 202, headers: { "content-type": "application/json" } });
+			},
+		});
+		const tokenMarker = "diag-token-marker-7f3a9c";
+		const tokenFile = join(dir, "token.env");
+		writeFileSync(tokenFile, `SUBSTRATE_TOKEN=${tokenMarker}\n`);
+		const url = `http://127.0.0.1:${server.port}`;
+		expect(run(dir, ["--bundle-only"], { url, tokenFile }).code).toBe(0);
+		writeFileSync(join(dir, "bundle", "hooks", "substrate.json"), "not json{{{\n");
+		const proc = Bun.spawn(["bun", join(dir, "bundle", "hooks", "post-tool-use.ts")], {
+			cwd: dir,
+			env: { PATH: process.env.PATH ?? "", HOME: dir },
+			stdin: new Blob([JSON.stringify({ tool_name: "Read" })]),
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, code] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+		server.stop(true);
+		expect(code).toBe(0);
+		expect(stdout).toBe("");
+		expect(stderr.trim().split("\n").filter(Boolean)).toHaveLength(1);
+		expect(stderr).not.toContain(tokenMarker);
+		expect(stderr).not.toContain(url);
+		expect(bodies).toHaveLength(0);
+		expect(statExists(join(dir, "state", "refused-emits.jsonl"))).toBe(false);
 	});
 });
