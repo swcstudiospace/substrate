@@ -6,7 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { searchDocs, SNIPPET_CAP, UNTRUSTED_DOCS_NOTICE, type SearchReply } from "./docs-search.ts";
+import { searchDocs, SNIPPET_CAP, UNTRUSTED_DOCS_NOTICE, type DatasetPin, type SearchReply } from "./docs-search.ts";
 import { RagflowFake } from "./ragflow-fake.ts";
 import type { EventInput } from "./types.ts";
 import { loadConfig } from "./config.ts";
@@ -15,14 +15,14 @@ import { Substrate } from "./service.ts";
 
 const CONFIG = { url: "http://ragflow.test", apiKey: "test-key" };
 
-function harness(fake: RagflowFake, pins?: Record<string, { dataset: string; dataset_id: string; version: string; commit: string }>) {
+function harness(fake: RagflowFake, pins?: Record<string, DatasetPin>) {
 	const events: EventInput[] = [];
 	const emit = async (event: EventInput): Promise<unknown> => {
 		events.push(event);
 		return { stored: false };
 	};
-	const search = (question: string): Promise<SearchReply> =>
-		searchDocs({ config: CONFIG, emit, fetchImpl: fake.fetch, ...(pins ? { pins } : {}) }, question);
+	const search = (question: string, datasetNames?: readonly string[]): Promise<SearchReply> =>
+		searchDocs({ config: CONFIG, emit, fetchImpl: fake.fetch, ...(pins ? { pins } : {}), ...(datasetNames ? { datasetNames } : {}) }, question);
 	return { events, search };
 }
 
@@ -48,7 +48,26 @@ describe("docs_search", () => {
 		expect(notes[0]?.repo).toBeFalsy();
 	});
 
-	test("falls back to the dataset pin commit when RAGFlow returns none", async () => {
+	test("cites the pin commit only for chunks from the pinned documents", async () => {
+		const fake = new RagflowFake();
+		const { search } = harness(fake, {
+			"ds-berlin-agent-substrate": {
+				dataset: "agent-substrate",
+				dataset_id: "ds-berlin-agent-substrate",
+				version: "v3",
+				commit: "abc123",
+				documents: [
+					{ source_url: "https://example.com/agent-substrate/data-planes", document_id: "doc-ds-berlin-agent-substrate-1", content_sha256: "s1" },
+					{ source_url: "https://example.com/agent-substrate/data-planes", document_id: "doc-ds-berlin-agent-substrate-2", content_sha256: "s2" },
+				],
+			},
+		});
+		const reply = await search("pin fallback?", ["agent-substrate"]);
+		expect(reply.chunks.length).toBeGreaterThan(0);
+		expect(reply.chunks.every((citation) => citation.commit === "abc123")).toBe(true);
+	});
+
+	test("id-less chunks never cite the pin commit", async () => {
 		const fake = new RagflowFake();
 		fake.chunkShape = "minimal";
 		const { search } = harness(fake, {
@@ -59,9 +78,9 @@ describe("docs_search", () => {
 				commit: "abc123",
 			},
 		});
-		const reply = await search("pin fallback?");
+		const reply = await search("pin fallback?", ["agent-substrate"]);
 		expect(reply.chunks.length).toBeGreaterThan(0);
-		expect(reply.chunks[0]?.commit).toBe("abc123");
+		expect(reply.chunks.every((citation) => citation.commit.includes("agent-substrate") && citation.commit.includes("unpinned"))).toBe(true);
 	});
 
 	test("names the pin gap instead of inventing a commit", async () => {

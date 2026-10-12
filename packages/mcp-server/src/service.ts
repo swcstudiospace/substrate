@@ -5,7 +5,7 @@
  * surfaces cannot drift. Hooks need REST (they cannot call MCP tools); agents
  * get MCP. Same code underneath.
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { decideClaim, type ClaimDecision } from "@substrate/audit";
 import { createRpc, formatMemo, hourEnd, hourIso, hourStart, isClosed, merkleRootHex, parseMemo, HOUR_MS, type Rpc, type TransactionMemo } from "@substrate/ledger";
 import { DEVNET_GENESIS_HASH } from "./anchor.ts";
@@ -22,7 +22,20 @@ import {
 } from "./cache.ts";
 import { isReviewToken, type SubstrateConfig } from "./config.ts";
 import { DesktopBusy, type DesktopDriver, type DesktopLogEntry, type DesktopRunResult } from "./desktop/driver.ts";
-import { ingestDocs, loadIngestRecords, saveIngestRecords, type IngestOutcome, type IngestRecord, type PageSettlement } from "./docs-ingest.ts";
+import { ingestDocs, isRefreshMeta, loadIngestRecords, saveIngestRecords, MAX_STAGED_REFRESHES, type IngestOutcome, type IngestRecord, type PageSettlement, type RefreshMeta, type StagedPage, type StagedRefresh } from "./docs-ingest.ts";
+import {
+	createSkillsSyncTracker,
+	createVersionStore,
+	degradedAgentSkillsServe,
+	isSyncLive,
+	latestVersion,
+	noteSkillsSyncFastForward,
+	pinsFromVersions,
+	recordDatasetVersion,
+	type SkillsSyncTracker,
+	type VersionDocument,
+	type VersionStore,
+} from "./docs-datasets.ts";
 import { DEFAULT_SEARCH_DATASET_NAMES, searchDocs, type SearchReply } from "./docs-search.ts";
 import {
 	DEFAULT_IDLE_SECONDS,
@@ -64,7 +77,7 @@ import { mergeDerivedHits, type MergedMemoryResults } from "./memory-search.ts";
 import { governMemoryWrite } from "./memory-write.ts";
 import { TEACHABLE_SUBJECT_PREFIX, isTeachable, teachableEvent } from "./teachable.ts";
 import { bankForSurface, hindsightBanksFromEnv, hindsightFromEnv } from "./planes/hindsight.ts";
-import type { FetchLike } from "./planes/ragflow.ts";
+import type { FetchLike, RagflowConfig } from "./planes/ragflow.ts";
 import { redact, type SkillDocExampleRule } from "./redact.ts";
 import {
 	createExecFileRunner,
@@ -702,6 +715,12 @@ export class Substrate {
 	private docsIngestSeen = new Map<string, IngestRecord>();
 	/** In-flight page uploads by record key, tagged with the uploading sha. */
 	private docsIngestFlight = new Map<string, { task: Promise<PageSettlement>; sha: string }>();
+	/** Dataset versions for served-search pins, hydrated from the state file. */
+	private docsVersions: VersionStore = createVersionStore();
+	/** Skills-sync liveness for `agent-skills` degraded serve, persisted with the state file. */
+	private docsSync: SkillsSyncTracker = createSkillsSyncTracker();
+	/** Unfinished multi-part refreshes, persisted with the state file. */
+	private docsStaging: Map<string, StagedRefresh> = new Map<string, StagedRefresh>();
 	/** Ingest-record hydration from the state file; awaited once per process. */
 	private docsSeenReady: Promise<void> | null = null;
 	/** Serialized state-file saves, so overlapping ingests cannot interleave snapshots. */
@@ -2349,33 +2368,46 @@ export class Substrate {
 		const names = Array.isArray(input.datasets)
 			? input.datasets.filter((name): name is string => typeof name === "string").filter((name) => DEFAULT_SEARCH_DATASET_NAMES.includes(name))
 			: [...DEFAULT_SEARCH_DATASET_NAMES];
+		await this.hydrateDocsSeen();
+		const live = isSyncLive(this.docsSync);
+		const ragflow = this.config.ragflow;
+		if (names.includes("agent-skills") && !live && ragflow !== null) {
+			await this.warnDocsSyncNotLive(ragflow, surface, sessionId);
+		}
 		return searchDocs(
 			{
 				config: this.config.ragflow,
 				datasetNames: names,
+				pins: pinsFromVersions(this.docsVersions),
+				...(names.includes("agent-skills") && !live ? { degradedDatasets: ["agent-skills"] } : {}),
 				emit: (event) => this.emit(event),
 				surface,
 				...(sessionId !== undefined ? { sessionId } : {}),
 				fetchImpl: this.ragflowFetch,
+				nowMs: Date.now(),
 			},
 			question,
 		);
 	}
 
 	/**
-	 * Hydrate ingest records from the state file, once per process.
+	 * Hydrate ingest records, version pins and the sync tracker from the
+	 * state file, once per process.
 	 *
-	 * A missing file simply means an empty map; a corrupt one is reported
-	 * on stderr and likewise starts empty. Either way ingest proceeds —
-	 * losing dedup degrades to a duplicate upload, never to a refusal.
+	 * A missing file simply means empty tables; a corrupt one is reported
+	 * on stderr and likewise starts empty. Either way ingest proceeds and
+	 * search names the pin gap — losing state degrades, never refuses.
 	 */
 	private hydrateDocsSeen(): Promise<void> {
 		if (!this.docsSeenReady) {
 			this.docsSeenReady = (async () => {
 				const file = this.config.docsStateFile;
 				if (!file) return;
-				const { records, problem } = await loadIngestRecords(file);
+				const { records, versions, sync, staging, problem } = await loadIngestRecords(file);
 				for (const [key, record] of records) this.docsIngestSeen.set(key, record);
+				for (const [dataset, list] of versions) this.docsVersions.set(dataset, list);
+				this.docsSync = sync;
+				for (const [id, row] of staging) this.docsStaging.set(id, row);
 				if (problem) process.stderr.write(`[substrate] ${problem}\n`);
 			})();
 		}
@@ -2383,16 +2415,17 @@ export class Substrate {
 	}
 
 	/**
-	 * Persist ingest records best-effort, one save at a time. A failing disk
-	 * never fails the ingest it just completed; the reason lands on stderr
-	 * either way. Saves chain so overlapping ingests write whole snapshots
-	 * in order instead of interleaving them.
+	 * Persist ingest records, version pins and the sync tracker
+	 * best-effort, one save at a time. A failing disk never fails the
+	 * ingest it just completed; the reason lands on stderr either way.
+	 * Saves chain so overlapping ingests write whole snapshots in order
+	 * instead of interleaving them.
 	 */
 	private persistDocsSeen(): Promise<void> {
 		const file = this.config.docsStateFile;
 		if (!file) return Promise.resolve();
 		this.docsSaveChain = this.docsSaveChain.then(() =>
-			saveIngestRecords(file, this.docsIngestSeen).catch((cause: unknown) => {
+			saveIngestRecords(file, this.docsIngestSeen, { versions: this.docsVersions, sync: this.docsSync, staging: this.docsStaging }).catch((cause: unknown) => {
 				process.stderr.write(`[substrate] docs ingest records not saved — ${String(cause)}\n`);
 			}),
 		);
@@ -2410,12 +2443,34 @@ export class Substrate {
 	 * accepted.
 	 */
 	async ingestDocs(
-		input: { dataset?: unknown; commit?: unknown; pages?: unknown; session_id?: unknown },
+		input: { dataset?: unknown; commit?: unknown; pages?: unknown; session_id?: unknown; refresh?: unknown },
 		callerSurface: Surface | null,
 	): Promise<IngestOutcome> {
 		const sessionId = typeof input.session_id === "string" && input.session_id.length > 0 ? input.session_id : undefined;
+		const datasetName = typeof input.dataset === "string" ? input.dataset : "";
+		const commit = typeof input.commit === "string" && input.commit.length > 0 ? input.commit : undefined;
 		const pages = Array.isArray(input.pages) ? input.pages : [];
 		await this.hydrateDocsSeen();
+		// Refresh metadata is validated before anything uploads, so a
+		// malformed or inconsistent refresh never stores a partial corpus
+		// under a pin.
+		let meta: RefreshMeta | undefined;
+		if (input.refresh !== undefined) {
+			if (!isRefreshMeta(input.refresh)) {
+				return this.refuseDocsRefresh(callerSurface, sessionId, "bad-refresh", { dataset: datasetName });
+			}
+			meta = input.refresh;
+			if (commit === undefined) {
+				return this.refuseDocsRefresh(callerSurface, sessionId, "refresh-needs-commit", { dataset: datasetName });
+			}
+			const staged = this.docsStaging.get(meta.id);
+			if (
+				staged !== undefined &&
+				(staged.dataset !== datasetName || staged.commit !== commit || staged.trigger !== meta.trigger || staged.parts !== meta.parts)
+			) {
+				return this.refuseDocsRefresh(callerSurface, sessionId, "refresh-mismatch", { dataset: datasetName, refresh: meta.id });
+			}
+		}
 		const outcome = await ingestDocs(
 			{
 				config: this.config.ragflow,
@@ -2432,8 +2487,8 @@ export class Substrate {
 				fetchImpl: this.ragflowFetch,
 			},
 			{
-				dataset: typeof input.dataset === "string" ? input.dataset : "",
-				...(typeof input.commit === "string" ? { commit: input.commit } : {}),
+				dataset: datasetName,
+				...(commit !== undefined ? { commit } : {}),
 				pages: pages
 					.filter((page): page is Record<string, unknown> => page !== null && typeof page === "object" && !Array.isArray(page))
 					.map((page) => ({
@@ -2446,8 +2501,282 @@ export class Substrate {
 				...(sessionId !== undefined ? { session_id: sessionId } : {}),
 			},
 		);
-		if (outcome.ok) await this.persistDocsSeen();
+		if (outcome.ok) {
+			if (meta === undefined) {
+				await this.finalizeOrdinaryVersion(outcome, datasetName, commit, callerSurface, sessionId);
+			} else if (commit !== undefined) {
+				const staged = await this.stageRefreshPart(meta, datasetName, commit, outcome, callerSurface, sessionId);
+				if (staged !== undefined) return staged;
+			}
+			await this.persistDocsSeen();
+		}
 		return outcome;
+	}
+
+	/**
+	 * DOCS-03: fail-closed refusal for refresh metadata problems (D25-07).
+	 *
+	 * Refresh metadata is validated before anything uploads, so a malformed
+	 * or inconsistent refresh never stores a partial corpus under a pin.
+	 */
+	private async refuseDocsRefresh(
+		callerSurface: Surface | null,
+		sessionId: string | undefined,
+		reason: string,
+		detail?: { dataset?: string; refresh?: string },
+	): Promise<IngestOutcome> {
+		await this.emit({
+			surface: callerSurface ?? "claude-code",
+			kind: "warning",
+			summary: `docs refresh refused: ${reason}`,
+			session_id: sessionId ?? "docs-refresh:refused",
+			payload: { action: "docs.ingest", reason, ...detail },
+		});
+		return { ok: false, refused: true, reason };
+	}
+
+	/**
+	 * DOCS-03: promote a dataset version for an ordinary single-call ingest.
+	 *
+	 * Single-call semantics: a changed, fully-parsed corpus with a real
+	 * commit promotes exactly one generation carrying this call's
+	 * documents. Identical bytes, an already-pinned commit and
+	 * commit-less ingests promote nothing. Ordinary ingests never flip
+	 * the sync tracker: only a completed `skills-sync` refresh marks it.
+	 */
+	private async finalizeOrdinaryVersion(
+		outcome: Extract<IngestOutcome, { ok: true }>,
+		dataset: string,
+		commit: string | undefined,
+		callerSurface: Surface | null,
+		sessionId: string | undefined,
+	): Promise<void> {
+		if (commit === undefined) return;
+		if (outcome.results.every((result) => result.status === "unchanged")) return;
+		if (latestVersion(this.docsVersions, dataset)?.commit === commit) return;
+		const version = recordDatasetVersion(this.docsVersions, {
+			dataset,
+			dataset_id: outcome.dataset_id,
+			commit,
+			content_sha256: createHash("sha256")
+				.update(outcome.results.map((result) => result.content_sha256).sort().join("\n"), "utf8")
+				.digest("hex"),
+			ingested_at: new Date().toISOString(),
+			documents: outcome.results.map((result) => ({
+				source_url: result.source_url,
+				document_id: result.document_id,
+				content_sha256: result.content_sha256,
+			})),
+		});
+		await this.emitDocsRefreshed({
+			dataset_id: outcome.dataset_id,
+			dataset,
+			version: version.version,
+			commit,
+			content_sha256: version.content_sha256,
+			surface: callerSurface,
+			sessionId,
+		});
+	}
+
+	/**
+	 * DOCS-03: stage one refresh part, promoting only a whole corpus.
+	 *
+	 * Each part uploads and parses on its own, but the pin advances only
+	 * when every staged part is present. Parts stage their resolved page
+	 * identities at receipt, so a later re-upload can never advance
+	 * different bytes into the pin; retrying a part with different bytes,
+	 * or repeating a URL under different bytes in another part, is refused
+	 * loudly. The same commit never mints a second generation, and only a
+	 * completed `skills-sync` refresh from the substrate surface marks the
+	 * sync live.
+	 */
+	private async stageRefreshPart(
+		meta: RefreshMeta,
+		dataset: string,
+		commit: string,
+		outcome: Extract<IngestOutcome, { ok: true }>,
+		callerSurface: Surface | null,
+		sessionId: string | undefined,
+	): Promise<IngestOutcome | undefined> {
+		let row = this.docsStaging.get(meta.id);
+		if (row === undefined) {
+			if (this.docsStaging.size >= MAX_STAGED_REFRESHES) {
+				const oldest = this.docsStaging.keys().next();
+				if (!oldest.done) this.docsStaging.delete(oldest.value);
+			}
+			row = { dataset, commit, trigger: meta.trigger, parts: meta.parts, received: {}, updated_at: new Date().toISOString() };
+			this.docsStaging.set(meta.id, row);
+		}
+		const staged: StagedPage[] = outcome.results.map((result) => ({
+			source_url: result.source_url,
+			document_id: result.document_id,
+			content_sha256: result.content_sha256,
+		}));
+		// A retry carries the same bytes when its url+sha pairs match; the
+		// staged identities refresh to the newest receipts either way, so
+		// the pin always binds what is actually stored now.
+		const sameBytes = (pages: StagedPage[]): string =>
+			pages.map((page) => `${page.source_url}::${page.content_sha256}`).sort().join("\n");
+		const prior = row.received[String(meta.part)];
+		if (prior !== undefined && sameBytes(prior) !== sameBytes(staged)) {
+			await this.emit({
+				surface: callerSurface ?? "claude-code",
+				kind: "warning",
+				summary: `docs refresh ${meta.id} part ${meta.part} changed between receipts`,
+				session_id: sessionId ?? `docs-refresh:${meta.id}`,
+				payload: { action: "docs.ingest", reason: "refresh-part-changed", dataset, refresh: meta.id },
+			});
+			return { ok: false, refused: true, reason: "refresh-part-changed" };
+		}
+		// One URL carries one corpus: a newly staged page repeating a URL
+		// already staged under different bytes refuses loudly, mirroring
+		// the same-part guard. Identical url+sha pairs dedupe stably.
+		const shaByUrl = new Map<string, string>();
+		for (const [index, pages] of Object.entries(row.received)) {
+			if (Number(index) === meta.part) continue;
+			for (const page of pages) {
+				const known = shaByUrl.get(page.source_url);
+				if (known !== undefined && known !== page.content_sha256) {
+					await this.emit({
+						surface: callerSurface ?? "claude-code",
+						kind: "warning",
+						summary: `docs refresh ${meta.id} has conflicting bytes for ${page.source_url}`,
+						session_id: sessionId ?? `docs-refresh:${meta.id}`,
+						payload: { action: "docs.ingest", reason: "refresh-url-changed", dataset, refresh: meta.id },
+					});
+					return { ok: false, refused: true, reason: "refresh-url-changed" };
+				}
+				shaByUrl.set(page.source_url, page.content_sha256);
+			}
+		}
+		for (const page of staged) {
+			const known = shaByUrl.get(page.source_url);
+			if (known !== undefined && known !== page.content_sha256) {
+				await this.emit({
+					surface: callerSurface ?? "claude-code",
+					kind: "warning",
+					summary: `docs refresh ${meta.id} has conflicting bytes for ${page.source_url}`,
+					session_id: sessionId ?? `docs-refresh:${meta.id}`,
+					payload: { action: "docs.ingest", reason: "refresh-url-changed", dataset, refresh: meta.id },
+				});
+				return { ok: false, refused: true, reason: "refresh-url-changed" };
+			}
+			shaByUrl.set(page.source_url, page.content_sha256);
+		}
+		row.received[String(meta.part)] = staged;
+		row.updated_at = new Date().toISOString();
+		for (let part = 1; part <= row.parts; part += 1) {
+			if ((row.received[String(part)] ?? []).length === 0) return undefined;
+		}
+		// One URL carries one corpus across the whole refresh: the union is
+		// keyed by source_url, so a repeated URL with different bytes can
+		// never mint a two-document pin (file-loaded rows get the same
+		// gate the receipt check enforces on the live path).
+		const byUrl = new Map<string, StagedPage>();
+		for (const pages of Object.values(row.received)) {
+			for (const page of pages) {
+				const known = byUrl.get(page.source_url);
+				if (known !== undefined && known.content_sha256 !== page.content_sha256) {
+					await this.emit({
+						surface: callerSurface ?? "claude-code",
+						kind: "warning",
+						summary: `docs refresh ${meta.id} has conflicting bytes for ${page.source_url}`,
+						session_id: sessionId ?? `docs-refresh:${meta.id}`,
+						payload: { action: "docs.ingest", reason: "refresh-url-changed", dataset, refresh: meta.id },
+					});
+					return undefined;
+				}
+				byUrl.set(page.source_url, page);
+			}
+		}
+		const documents: VersionDocument[] = [...byUrl.values()].sort((left, right) =>
+			left.source_url < right.source_url ? -1 : left.source_url > right.source_url ? 1 : 0,
+		);
+		if (documents.length === 0) return undefined;
+		this.docsStaging.delete(meta.id);
+		if (latestVersion(this.docsVersions, dataset)?.commit === commit) return undefined;
+		const content_sha256 = createHash("sha256")
+			.update(documents.map((doc) => `${doc.source_url}::${doc.document_id}::${doc.content_sha256}`).sort().join("\n"), "utf8")
+			.digest("hex");
+		const version = recordDatasetVersion(this.docsVersions, {
+			dataset,
+			dataset_id: outcome.dataset_id,
+			commit,
+			content_sha256,
+			ingested_at: new Date().toISOString(),
+			documents,
+		});
+		if (meta.trigger === "skills-sync" && callerSurface === "substrate") noteSkillsSyncFastForward(this.docsSync);
+		await this.emitDocsRefreshed({
+			dataset_id: outcome.dataset_id,
+			dataset,
+			version: version.version,
+			commit,
+			content_sha256: version.content_sha256,
+			trigger: meta.trigger,
+			surface: callerSurface,
+			sessionId,
+		});
+		return undefined;
+	}
+
+	/** One version note shape for both promotion doors. */
+	private emitDocsRefreshed(input: {
+		dataset_id: string;
+		dataset: string;
+		version: string;
+		commit: string;
+		content_sha256: string;
+		trigger?: string;
+		surface: Surface | null;
+		sessionId: string | undefined;
+	}): Promise<unknown> {
+		return this.emit({
+			surface: input.surface ?? "claude-code",
+			kind: "note",
+			summary: `docs dataset ${input.dataset} refreshed to ${input.version}`,
+			session_id: input.sessionId ?? `docs-refresh:${input.version}`,
+			payload: {
+				action: "docs.ingest",
+				dataset_id: input.dataset_id,
+				version: input.version,
+				commit: input.commit,
+				content_sha256: input.content_sha256,
+				...(input.trigger !== undefined ? { trigger: input.trigger } : {}),
+			},
+		});
+	}
+
+	/**
+	 * DOCS-03: one warning while `agent-skills` serves without sync evidence.
+	 * With a pin the degraded serve emits it; without one the search still
+	 * names the gap, so the service warns here exactly once (persisted)
+	 * instead of staying silently stale.
+	 */
+	private async warnDocsSyncNotLive(config: RagflowConfig, surface: Surface, sessionId: string | undefined): Promise<void> {
+		const served = await degradedAgentSkillsServe(
+			{
+				config,
+				versions: this.docsVersions,
+				emit: (event) => this.emit(event),
+				surface,
+				...(sessionId !== undefined ? { sessionId } : {}),
+				fetchImpl: this.ragflowFetch,
+			},
+			this.docsSync,
+		);
+		if (!served.ok && !this.docsSync.notLiveWarned) {
+			this.docsSync.notLiveWarned = true;
+			await this.emit({
+				surface,
+				kind: "warning",
+				summary: "docs dataset agent-skills has no pinned version: skills-sync is not live",
+				session_id: sessionId ?? "docs-refresh:agent-skills",
+				payload: { action: "docs.ingest", reason: "skills-sync-not-live" },
+			});
+		}
+		await this.persistDocsSeen();
 	}
 
 	/**

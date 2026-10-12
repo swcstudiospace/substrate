@@ -38,7 +38,6 @@ function fakeSubstrate(): SubstrateLike & { claims: string[] } {
 	const claims: string[] = [];
 	return {
 		claims,
-		bearer: "smoke-bearer",
 		graphGet: async (graphId: string) => ({
 			graph_id: graphId,
 			nodes: [
@@ -63,7 +62,7 @@ function fakeSubstrate(): SubstrateLike & { claims: string[] } {
 			claims.push(`${graphId}/${nodeId}`);
 			const leaseId = `lse_smoke_${graphId}`;
 			store.persist(graphId, nodeId, { lease_id: leaseId, acquiredAtMs: 0, ttlSeconds: 900 });
-			return { claimed: true, lease_id: leaseId };
+			return { claimed: true, lease: { lease_id: leaseId } };
 		},
 		heartbeat: async () => ({ ok: true }),
 		graphComplete: async () => ({ completed: true }),
@@ -148,12 +147,11 @@ export function workedSubstrate(calls: WorkedCalls, leaseId: string): SubstrateL
 		],
 	});
 	return {
-		bearer: "smoke-bearer",
 		graphGet: async (graphId: string) => graph(graphId),
 		graphClaim: async () => ({ claimed: true }),
 		claimAndPersist: async (store: LeaseStoreLike, graphId: string, nodeId: string) => {
 			store.persist(graphId, nodeId, { lease_id: leaseId, acquiredAtMs: 0, ttlSeconds: 900 });
-			return { claimed: true, lease_id: leaseId };
+			return { claimed: true, lease: { lease_id: leaseId } };
 		},
 		heartbeat: async (graphId: string, nodeId: string, lid: string) => {
 			calls.heartbeats.push({ graphId, nodeId, leaseId: lid });
@@ -163,8 +161,8 @@ export function workedSubstrate(calls: WorkedCalls, leaseId: string): SubstrateL
 			calls.completes.push({ graphId, nodeId, leaseId: lid, dod });
 			return { completed: true };
 		},
-		graphRelease: async (graphId: string, nodeId: string) => {
-			calls.releases.push(`${graphId}/${nodeId}`);
+		graphRelease: async (graphId: string, nodeId: string, lid: string | null) => {
+			calls.releases.push(`${graphId}/${nodeId}:${lid ?? "null"}`);
 			return { released: true };
 		},
 		brief: async () => "smoke brief",
@@ -290,6 +288,7 @@ export async function runWorkedNode(): Promise<SmokeResult[]> {
 			store,
 			leases,
 			ensureModelRoute: async () => undefined,
+			ensureSubstrateRoute: async () => undefined,
 			route: parseRoute("a:loopback,b:prompt_hostfn,c:hostfn_commit,s:hostfn"),
 			testsRoute: "sandbox",
 			model: "smoke-model",
@@ -315,8 +314,11 @@ export async function runWorkedNode(): Promise<SmokeResult[]> {
 		results.push(
 			check(
 				"worked seed",
-				actor.files.get("/home/agentos/SUBSTRATE_BRIEF.md") === "smoke brief" && claudeJson.includes("Bearer smoke-bearer"),
-				"brief written and read back; substrate MCP entry carries the bearer header",
+				actor.files.get("/home/agentos/SUBSTRATE_BRIEF.md") === "smoke brief" &&
+					claudeJson.includes("http://127.0.0.1:7410/mcp") &&
+					!claudeJson.includes("Bearer") &&
+					!claudeJson.includes("smoke-bearer"),
+				"brief written and read back; s:hostfn substrate entry headerless and inert (host functions carry it)",
 			),
 		);
 		results.push(
@@ -436,6 +438,7 @@ export async function runSmoke(): Promise<SmokeResult[]> {
 		store: new MemoryTaskStore(),
 		leases: new MemoryLeaseStore(),
 		ensureModelRoute: async () => undefined,
+		ensureSubstrateRoute: async () => undefined,
 		route: parseRoute("a:loopback,b:prompt_hostfn,c:hostfn_commit,s:hostfn"),
 		testsRoute: "sandbox",
 		model: "smoke-model",
@@ -473,7 +476,7 @@ export async function runSmoke(): Promise<SmokeResult[]> {
 		results.push(check(`seed ${graphId}`, brief === "smoke brief", "brief file written and read back"));
 		const claudeJson = actor?.files.get("/home/agentos/.claude.json") ?? "";
 		results.push(
-			check(`seed bearer ${graphId}`, claudeJson.includes("Bearer smoke-bearer"), "substrate MCP entry carries the bearer header"),
+			check(`seed credential-free ${graphId}`, !claudeJson.includes("Bearer") && !claudeJson.includes("smoke-bearer"), "substrate MCP entry carries no bearer header"),
 		);
 	}
 

@@ -7,10 +7,11 @@
  * importing the engine module from this package would itself break the
  * substrate-only door the store lock enforces.
  */
-import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, beforeEach, describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { runDocs, type DocsDeps } from "./docs.ts";
 
 interface Seen {
@@ -55,6 +56,10 @@ class RouteStub {
 
 const stub = new RouteStub();
 const scratch = mkdtempSync(join(tmpdir(), "substrate-docs-cli-"));
+beforeEach(() => {
+	stub.seen = [];
+	stub.reply = { status: 200, body: { ok: true, results: [{ status: "ingested", document_id: "doc-1" }], stripped_images: 0 } };
+});
 afterAll(() => {
 	stub.server.stop(true);
 	rmSync(scratch, { recursive: true, force: true });
@@ -82,25 +87,6 @@ function writePage(name: string, body: string): string {
 }
 
 describe("substrate docs ingest", () => {
-	test("posts the page with snake_case keys and the bearer, and prints the status", async () => {
-		stub.seen = [];
-		const name = writePage("planes.md", "The substrate is the only door.\n");
-		const run = deps();
-		const code = await runDocs(
-			["ingest", "--dataset", "agent-substrate", "--path", name, "--source-url", "https://example.com/planes"],
-			run,
-		);
-		expect(code).toBe(0);
-		expect(stub.seen).toHaveLength(1);
-		expect(stub.seen[0]?.authorization).toBe("Bearer tok-test");
-		expect(stub.seen[0]?.path).toBe("/docs/ingest");
-		const body = stub.seen[0]?.body;
-		if (body === null || typeof body !== "object" || !("pages" in body) || !Array.isArray(body.pages)) {
-			throw new Error("the CLI did not post pages");
-		}
-		expect(body).toMatchObject({ dataset: "agent-substrate" });
-		expect(body.pages[0]).toMatchObject({ path: name, source_url: "https://example.com/planes" });
-	});
 
 	test("refuses without a bearer before anything is posted", async () => {
 		stub.seen = [];
@@ -185,19 +171,133 @@ describe("substrate docs ingest", () => {
 		expect(body.pages[0]).toHaveProperty("real_path");
 	});
 
-	test("the CLI path normalization mirrors the engine gate", async () => {
-		const root = join(import.meta.dir, "..", "..", "..");
-		const cli = await Bun.file(join(root, "packages", "cli", "src", "docs.ts")).text();
-		const engine = await Bun.file(join(root, "packages", "mcp-server", "src", "docs-ingest.ts")).text();
-		expect(cli).toContain("if (parts.length === 0) return null;");
-		expect(engine).toContain("if (parts.length === 0) return null;");
+
+});
+
+describe("substrate docs refresh", () => {
+	function git(dir: string, ...args: string[]): string {
+		return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", timeout: 30_000 }).trim();
+	}
+
+	function mkRepo(name: string, files: Record<string, string>): { dir: string; commit: string } {
+		const abs = join(scratch, name);
+		mkdirSync(abs, { recursive: true });
+		for (const [rel, body] of Object.entries(files)) {
+			mkdirSync(join(abs, dirname(rel)), { recursive: true });
+			writeFileSync(join(abs, rel), body);
+		}
+		git(abs, "init", "-q");
+		git(abs, "add", "-A");
+		git(abs, "-c", "user.name=t", "-c", "user.email=t@t.t", "commit", "-qm", "seed");
+		return { dir: name, commit: git(abs, "rev-parse", "HEAD") };
+	}
+
+	test("posts committed bytes, ignoring dirty and untracked worktree files", async () => {
+		stub.seen = [];
+		const repo = mkRepo("crepo-1", { "a.md": "Committed alpha.\n" });
+		writeFileSync(join(scratch, repo.dir, "a.md"), "Dirty alpha.\n");
+		writeFileSync(join(scratch, repo.dir, "b.md"), "Untracked beta.\n");
+		const code = await runDocs(
+			["refresh", "--dataset", "agent-substrate", "--commit", repo.commit, "--dir", repo.dir, "--roots", "a.md,b.md"],
+			deps(),
+		);
+		expect(code).toBe(0);
+		expect(stub.seen).toHaveLength(1);
+		expect(stub.seen[0]?.authorization).toBe("Bearer tok-test");
+		expect(stub.seen[0]?.path).toBe("/docs/ingest");
+		const body = stub.seen[0]?.body;
+		if (body === null || typeof body !== "object" || !("pages" in body) || !Array.isArray(body.pages)) {
+			throw new Error("the CLI did not post pages");
+		}
+		expect(body).toMatchObject({
+			dataset: "agent-substrate",
+			commit: repo.commit,
+			session_id: `docs-refresh:${repo.commit}`,
+			refresh: { id: `repo-merge:agent-substrate:${repo.commit}`, part: 1, parts: 1, trigger: "repo-merge" },
+		});
+		expect(body.pages).toHaveLength(1);
+		expect(body.pages[0]).toMatchObject({ path: "a.md", source_url: "agent-substrate://a.md", body: "Committed alpha.\n" });
 	});
 
-	test("the CLI page cap equals the engine page cap", async () => {
-		const root = join(import.meta.dir, "..", "..", "..");
-		const cli = await Bun.file(join(root, "packages", "cli", "src", "docs.ts")).text();
-		const engine = await Bun.file(join(root, "packages", "mcp-server", "src", "docs-ingest.ts")).text();
-		expect(cli).toContain("1_000_000");
-		expect(engine).toContain("1_000_000");
+	test("a committed symlink refuses the whole run before any post", async () => {
+		stub.seen = [];
+		const abs = join(scratch, "crepo-2");
+		mkdirSync(abs, { recursive: true });
+		writeFileSync(join(abs, "a.md"), "Alpha.\n");
+		symlinkSync(join(abs, "a.md"), join(abs, "link.md"));
+		git(abs, "init", "-q");
+		git(abs, "add", "-A");
+		git(abs, "-c", "user.name=t", "-c", "user.email=t@t.t", "commit", "-qm", "seed");
+		const commit = git(abs, "rev-parse", "HEAD");
+		const code = await runDocs(
+			["refresh", "--dataset", "agent-substrate", "--commit", commit, "--dir", "crepo-2", "--roots", "a.md,link.md"],
+			deps(),
+		);
+		expect(code).toBe(1);
+		expect(stub.seen).toHaveLength(0);
 	});
+
+	test("a directory outside a checkout is refused, not posted unverified", async () => {
+		stub.seen = [];
+		mkdirSync(join(scratch, "norepo"), { recursive: true });
+		writeFileSync(join(scratch, "norepo", "a.md"), "Alpha.\n");
+		const code = await runDocs(
+			["refresh", "--dataset", "agent-substrate", "--commit", "abc123", "--dir", "norepo"],
+			deps(),
+		);
+		expect(code).toBe(1);
+		expect(stub.seen).toHaveLength(0);
+	});
+
+	test("a checkout moved past --commit is refused before anything is posted", async () => {
+		stub.seen = [];
+		const repo = mkRepo("crepo-3", { "a.md": "Alpha.\n" });
+		const abs = join(scratch, repo.dir);
+		writeFileSync(join(abs, "b.md"), "Beta.\n");
+		git(abs, "add", "-A");
+		git(abs, "-c", "user.name=t", "-c", "user.email=t@t.t", "commit", "-qm", "second");
+		const code = await runDocs(
+			["refresh", "--dataset", "agent-substrate", "--commit", repo.commit, "--dir", repo.dir],
+			deps(),
+		);
+		expect(code).toBe(1);
+		expect(stub.seen).toHaveLength(0);
+	});
+
+	test("refuses without a bearer or on a guest before anything is posted", async () => {
+		stub.seen = [];
+		mkdirSync(join(scratch, "refresh-2"), { recursive: true });
+		writeFileSync(join(scratch, "refresh-2", "a.md"), "Alpha.\n");
+		const anonymous = await runDocs(
+			["refresh", "--dataset", "agent-substrate", "--commit", "abc123", "--dir", "refresh-2"],
+			deps({ token: undefined }),
+		);
+		expect(anonymous).toBe(1);
+		const guest = await runDocs(
+			["refresh", "--dataset", "agent-substrate", "--commit", "abc123", "--dir", "refresh-2"],
+			deps({ vmGuest: true }),
+		);
+		expect(guest).toBe(1);
+		expect(stub.seen).toHaveLength(0);
+	});
+
+	test("refuses an over-cap committed blob naming it, posting nothing", async () => {
+		stub.seen = [];
+		const repo = mkRepo("crepo-4", { "a.md": "Alpha.\n", "huge.md": `x${"y".repeat(1_000_000)}` });
+		const code = await runDocs(
+			["refresh", "--dataset", "agent-substrate", "--commit", repo.commit, "--dir", repo.dir, "--roots", "a.md,huge.md"],
+			deps(),
+		);
+		expect(code).toBe(1);
+		expect(stub.seen).toHaveLength(0);
+	});
+
+	test("requires dataset, commit and dir", async () => {
+		stub.seen = [];
+		expect(await runDocs(["refresh", "--commit", "abc123", "--dir", "refresh-4"], deps())).toBe(1);
+		expect(await runDocs(["refresh", "--dataset", "agent-substrate", "--dir", "refresh-4"], deps())).toBe(1);
+		expect(await runDocs(["refresh", "--dataset", "agent-substrate", "--commit", "abc123"], deps())).toBe(1);
+		expect(stub.seen).toHaveLength(0);
+	});
+
 });

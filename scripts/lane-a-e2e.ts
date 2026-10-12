@@ -337,6 +337,7 @@ async function main(argv: string[]): Promise<number> {
 		store,
 		leases,
 		ensureModelRoute: async () => undefined,
+		ensureSubstrateRoute: async () => undefined,
 		route,
 		testsRoute: "sandbox",
 		model: "lane33-model",
@@ -355,10 +356,10 @@ async function main(argv: string[]): Promise<number> {
 	check("openTask 202", open.status === 202, `status ${open.status}`);
 	check("claim persisted with the lease id", leases.load(GID, NID)?.lease_id === leaseId, leases.load(GID, NID)?.lease_id ?? "no lease");
 	check(
-		"seed read back with bearer header",
+		"seed read back credential-free",
 		(actor.files.get("/home/agentos/SUBSTRATE_BRIEF.md") ?? "").length > 0 &&
-			(actor.files.get("/home/agentos/.claude.json") ?? "").includes("Bearer"),
-		"brief or bearer entry missing",
+			!(actor.files.get("/home/agentos/.claude.json") ?? "").includes("Bearer"),
+		"brief or credential-free entry missing",
 	);
 	check("ask-policy open", askPolicy(actor), JSON.stringify(actor.opens[0] ?? "no-open").slice(0, 120));
 
@@ -411,7 +412,7 @@ async function main(argv: string[]): Promise<number> {
 	const actor2 = newActor();
 	const service2 = new TaskService({
 		substrate, vmFor: () => chainVm(actor2), store, leases,
-		ensureModelRoute: async () => undefined, route, testsRoute: "sandbox", model: "lane33-model",
+		ensureModelRoute: async () => undefined, ensureSubstrateRoute: async () => undefined, route, testsRoute: "sandbox", model: "lane33-model",
 		skills: [], trackers: { notionDataSourceUrl: "collection://lane33", linearTeam: "LANE" },
 		log: (line) => logs.push(line), approvalTimeoutMs: 60_000,
 	});

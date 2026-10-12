@@ -22,6 +22,7 @@ import { LeaseStore, SubstrateClient } from "./substrate.ts";
 import { HostSync, LinearLink, NotionSync } from "./sync.ts";
 import { TaskService, TaskStore, parseApprovalTimeoutMs, type VmHandle } from "./tasks.ts";
 import { createEnsureModelRoute, createHostVm } from "./vm.ts";
+import { createEnsureSubstrateRoute } from "./substrate-relay.ts";
 import { createApprovals, TelegramError } from "./telegram.ts";
 
 const log = (line: string) => process.stdout.write(`${line}\n`);
@@ -142,6 +143,10 @@ const skills = loadSkills(skillsDir);
 const trackers = loadTrackers(ultrathinkConfig);
 const store = new TaskStore(join(storageDir, "tasks"));
 const substrate = new SubstrateClient({ baseUrl: mcpBase });
+// Names only — values never enter the journal. Lease (claude-code) drives claim, heartbeat,
+// release and complete; job (substrate) drives graph/issue/brief reads. Either absent fails
+// open: the server refuses the call and the refusal surfaces as an error.
+log(`[substrate-host] substrate auth: lease ${substrate.authenticated ? "on" : "off"}, job ${substrate.jobAuthenticated ? "on" : "off"}`);
 // D32-04: the lease files live in a sibling dir under the unit's storage dir — beside the
 // task records, never inside their dir (TaskStore.list reads every *.json it finds, and a
 // lease file would parse as a garbage record). Both survive a restart under StateDirectory.
@@ -164,6 +169,7 @@ const service = new TaskService({
 	store,
 	leases,
 	ensureModelRoute: createEnsureModelRoute(route, log),
+	ensureSubstrateRoute: createEnsureSubstrateRoute(route, log),
 	route,
 	testsRoute,
 	model,

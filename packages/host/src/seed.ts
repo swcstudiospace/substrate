@@ -5,7 +5,7 @@
 // issue_get, framed as untrusted task text. The id patterns are the dispatcher's own.
 
 import { isValidGraphId } from "./sandbox-options.ts";
-import { type Route, SUBSTRATE_MCP_URL, TRACKER_PROXY_PORT, type TestsRoute, trackerRoute } from "./options.ts";
+import { type Route, SUBSTRATE_MCP_URL, SUBSTRATE_RELAY_URL, TRACKER_PROXY_PORT, type TestsRoute, trackerRoute } from "./options.ts";
 import type { GraphNodeView, GraphView } from "./substrate.ts";
 
 /** launcher.py NODE_ID_RE / IDENTIFIER_RE, worktree.py REPO_SLUG_RE. */
@@ -121,10 +121,10 @@ export function renderPrompt(input: RenderPromptInput): string {
 		? `call the tool mcp__substrate__issue_get with graph_id "${graphId}" and node_id "${nodeId}"`
 		: `run the command \`agentos-substrate issue-get --node ${nodeId}\` (substrate's issue_get, called by the host for this node)`;
 	const complete = mcp
-		? `call mcp__substrate__graph_complete with graph_id "${graphId}", node_id "${nodeId}", surface "claude-code", session_id "${sessionId}" and dod {"summary": <what you did>, "tests_pass": true|false}`
+		? `call mcp__substrate__graph_complete with graph_id "${graphId}", node_id "${nodeId}" and dod {"summary": <what you did>, "tests_pass": true|false} (graph, session and lease bind to your task host-side)`
 		: `run \`agentos-substrate complete --node ${nodeId} --summary "<what you did>" --tests-pass true|false\` (substrate's graph_complete, called by the host with this claim's session id ${sessionId})`;
 	const release = mcp
-		? `call mcp__substrate__graph_release with graph_id "${graphId}", node_id "${nodeId}", surface "claude-code" and the same session_id "${sessionId}"`
+		? `call mcp__substrate__graph_release with graph_id "${graphId}" and node_id "${nodeId}" (the host releases with its persisted lease; a refusal is reported, never faked)`
 		: `run \`agentos-substrate release --node ${nodeId} --reason "<why>"\` (substrate's graph_release, called by the host with the same session id ${sessionId})`;
 	// D-10 on tracker_route vm_mcp only: kickoff runs in the VM against a complete-tracking state file
 	// (it re-registers the graph and sets the Notion Task to Implementing — no rows, no clarifications).
@@ -162,19 +162,6 @@ export type SeedFilesInput = {
 	route: Route;
 	/** The rendered ids-only prompt: the kickoff state's spec. */
 	prompt: string;
-	/**
-	 * Host-job bearer for the seeded substrate MCP entry (Phase 20 tokens-dir
-	 * order, resolved host-side). Null/omitted keeps September's headerless
-	 * entry. The value is carried, never logged; rotation and scoping are
-	 * Phase 32's credentials discipline (LANEA-02/03/07).
-	 */
-	substrateBearer?: string | null;
-	/**
-	 * The substrate MCP URL written into the seeded entry (D32-08 test seam).
-	 * Defaults to the unit's served loopback proxy; a non-loopback URL keeps
-	 * the entry headerless whatever bearer is supplied.
-	 */
-	substrateMcpUrl?: string;
 	/** Clock for tracking.updatedAt; defaults to the wall clock. */
 	now?: () => Date;
 };
@@ -263,22 +250,6 @@ function hookSettings(): Record<string, unknown> {
 	};
 }
 
-/**
- * D32-08: whether the served substrate proxy URL is loopback-reachable from the VM. A static
- * hostname check — never a network probe at seed time. The unit serves the proxy on 127.0.0.1;
- * only loopback names keep the bearer in the seeded entry, everything else stays headerless.
- */
-export function substrateProxyLoopback(url: string = SUBSTRATE_MCP_URL): boolean {
-	let host = "";
-	try {
-		host = new URL(url).hostname.toLowerCase();
-	} catch {
-		return false;
-	}
-	if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);
-	return host === "127.0.0.1" || host === "::1" || host === "localhost";
-}
-
 /** Every file openTask writes under /home/agentos, in write order. */
 export function seedFiles(input: SeedFilesInput): SeedFile[] {
 	const files: SeedFile[] = [{ path: `${VM_HOME}/SUBSTRATE_BRIEF.md`, content: input.brief }];
@@ -293,19 +264,16 @@ export function seedFiles(input: SeedFilesInput): SeedFile[] {
 			files.push({ path: `${VM_HOME}/.claude/skills/${skill.name}/${file.rel}`, content: file.content });
 		}
 	}
-	// D-11 / SC-2: MCP servers named exactly substrate, notion and linear; loopback URLs only.
-	// notion and linear point at the host's tracker proxy, which is served and reachable only
-	// on tracker_route vm_mcp; elsewhere the entries are inert. The substrate entry carries the
-	// host-job bearer header (main lease model; anonymous access is refused server-side) — the
-	// value is resolved host-side via the Phase 20 tokens-dir order and never logged.
-	const mcpUrl = (input.substrateMcpUrl ?? SUBSTRATE_MCP_URL).trim();
-	const bearer = (input.substrateBearer ?? "").trim();
-	// D32-08: the bearer rides only the loopback proxy the unit serves. A non-loopback URL
-	// keeps September's headerless entry and the model reaches substrate through host functions.
+	// D-11 / SC-2: MCP servers named exactly substrate, notion and linear; loopback URLs only,
+	// and no credential anywhere in the seed (I-04). notion and linear point at the host's
+	// tracker proxy, which is served and reachable only on tracker_route vm_mcp; elsewhere
+	// the entries are inert. The substrate entry points at the in-VM relay on s:mcp (the
+	// relay answers with the host's bearer and persisted lease, bound to this task); on
+	// s:hostfn the entry stays headerless and inert — host functions are that route's channel.
 	const substrateEntry =
-		bearer !== "" && substrateProxyLoopback(mcpUrl)
-			? { type: "http", url: mcpUrl, headers: { Authorization: `Bearer ${bearer}` } }
-			: { type: "http", url: mcpUrl };
+		input.route.s === "mcp"
+			? { type: "http", url: SUBSTRATE_RELAY_URL }
+			: { type: "http", url: SUBSTRATE_MCP_URL };
 	files.push({
 		path: `${VM_HOME}/.claude.json`,
 		content: json({

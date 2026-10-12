@@ -2,11 +2,11 @@
 gsd_state_version: "1.0"
 milestone: v1.3
 milestone_name: Build plan completion
-status: Awaiting next milestone
-stopped_at: Milestone v1.3 completed and archived 2026-10-11; 43 gated live-tail proofs recorded in VALIDATION.md and phase runbooks
-last_updated: "2026-10-11T02:42:06.506Z"
-last_activity: 2026-10-11
-last_activity_desc: Milestone v1.3 completed and archived
+status: human_needed
+stopped_at: v1.3 archive preserved; all reachable current source corrections and local proofs complete; real-proof acceptance and credential rotation require operator evidence
+last_updated: "2026-10-12T03:22:30Z"
+last_activity: 2026-10-12
+last_activity_desc: Final current source 3275 pass, types clean, 24 host / 41 collectors / 16 docs proof checks; production acceptance held
 state_head: 1a9f4fd365ede291c4e21be71b6ff236e0e49c67
 progress:
   total_phases: 18
@@ -14,15 +14,15 @@ progress:
   total_plans: 76
   completed_plans: 76
   percent: 100
-current_phase: 33
-current_phase_name: lane-a-dispatch-route-and-approvals
+current_phase: null
+current_phase_name: null
 ---
 
 # State
 
 ## Current
 
-**v1.3 Build plan completion is planned:** 18 phases (16–33), 68 requirements, roadmap approved by the operator on 2026-10-08. Research: `.planning/research/` (SUMMARY.md first). Primary port source: branch `docs/data-planes-tailscale` (`acc30a8`), ported onto `main`'s v1.2 lease model.
+**v1.3 implementation is archived:** 18 phases (16–33), 76 plans and 68 requirements. The archive completed concurrently at `ab0dff1`; do not replay completion, recreate active phase directories or start a new milestone. The user explicitly retains real-proof criteria: source-completion history is not full end-to-end acceptance. Current isolated corrections and remaining gates are recorded in `VALIDATION.md`.
 
 **v1.3 decisions (operator, 2026-10-08):**
 
@@ -154,10 +154,10 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Current Position
 
-Phase: Milestone v1.3 complete
-Plan: —
-Status: Awaiting next milestone
-Last activity: 2026-10-11 — Milestone v1.3 completed and archived
+Phase: None active — v1.3 implementation archived
+Plan: No active implementation phase; existing operator-gated proofs remain
+Status: human_needed for end-to-end acceptance; reachable local corrections verified
+Last activity: 2026-10-12 — 3,275/58/0 Bun tests, 246 Python, types/locks clean; actual host 24/24, collectors 41/41, docs 16/16 and proposal/ledger/desktop/vocabulary proof passed
 
 ## Deferred Items
 
@@ -169,13 +169,17 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Operator Next Steps
 
-- Start the next milestone with /gsd-new-milestone
+- Local source contracts are repaired and exercised on `swarm/v13-current-proof-corrections`; publication and full acceptance are not implied.
+- Reconcile Phase 20's conflicting primary records and separately obtain the live client/scenario and MIRROR-08 receipts; do not infer acceptance from the historical 43-count ledger.
+- Perform the disclosed Cursor credential rotation through the existing operator-only two-restart process; an older historical decline does not cover this incident.
+- Approve and execute the existing live runbooks step by step; record real evidence before declaring end-to-end completion. No values should be pasted into chat.
+- Do not start a next milestone, repeat completion/cleanup, merge PRs or enable auto-merge here.
 
 ## Session Continuity
 
-Last session: 2026-10-08T21:29:12Z
-Stopped at: Phase 18 complete, ready to plan Phase 19
-Resume file: None
+Last session: 2026-10-12T03:22:30Z
+Stopped at: Reachable current-main source corrections complete; archive unchanged; remaining production/client/tracker/plane/VM/devnet proofs and incident rotation require the operator
+Resume file: VALIDATION.md and milestones/v1.3-phases/28-hourly-anchor-job-and-verify/28-PROOF-ADDENDUM.md
 
 ## Performance Metrics
 

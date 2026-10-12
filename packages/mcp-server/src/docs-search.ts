@@ -50,6 +50,18 @@ export interface DatasetPin {
 	version: string;
 	commit: string;
 	ingested_at?: string;
+	/**
+	 * The served corpus (mirrors `VersionDocument` in `docs-datasets.ts`).
+	 * A chunk cites this pin only when its document id is listed here.
+	 */
+	documents?: PinnedDocument[];
+}
+
+/** One served document inside a dataset pin. */
+export interface PinnedDocument {
+	source_url: string;
+	document_id: string;
+	content_sha256: string;
 }
 
 export interface SearchDeps {
@@ -94,12 +106,19 @@ function cite(
 	markPinAge: boolean,
 	nowMs: number,
 ): SearchCitation {
-	const age = markPinAge ? pinAgeMs(pin, nowMs) : undefined;
+	// Only a chunk from a document the pin actually serves may cite the pin
+	// commit. Anything else — a stale chunk, a replaced document, an
+	// id-less minimal shape — names the gap instead of a false current.
+	const pinned =
+		pin !== undefined &&
+		(chunk.document_id ?? "") !== "" &&
+		(pin.documents ?? []).some((doc) => doc.document_id === chunk.document_id);
+	const age = markPinAge && pinned ? pinAgeMs(pin, nowMs) : undefined;
 	return {
 		title: redact(chunk.document_name),
 		source_url: chunk.source_url ? redact(chunk.source_url) : `dataset:${datasetName}`,
 		heading_path: chunk.heading_path ? redact(chunk.heading_path) : "",
-		commit: pin !== undefined ? pin.commit : `dataset-pin:${datasetName}:unpinned`,
+		commit: pinned && pin !== undefined ? pin.commit : `dataset-pin:${datasetName}:unpinned`,
 		snippet: redactValue(chunk.content).slice(0, SNIPPET_CAP),
 		score: chunk.score ?? 0,
 		document_id: chunk.document_id ?? "",

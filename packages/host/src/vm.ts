@@ -39,10 +39,10 @@ import {
 } from "./options.ts";
 import type { SandboxNetwork } from "./sandbox-options.ts";
 import { substrateDocker } from "./sandbox-provider.ts";
-import { hostCallTarget, type TaskService, type TaskStoreLike, type VmHandle } from "./tasks.ts";
+import { hostCallTarget, mutationRefusal, type TaskService, type TaskStoreLike, type VmHandle } from "./tasks.ts";
 import type { ApprovalBroker } from "./telegram.ts";
-import type { Dod, LeaseStoreLike, SubstrateClient } from "./substrate.ts";
-import { HOST_SURFACE } from "./substrate.ts";
+import type { LeaseStoreLike, SubstrateClient } from "./substrate.ts";
+import { substrateMcpRelayCollection } from "./substrate-relay.ts";
 
 export type HostVmConfig = {
 	route: Route;
@@ -118,7 +118,7 @@ function substrateCollection(key: readonly unknown[], config: HostVmConfig) {
 				const t = target(input);
 				if ("error" in t) return { error: t.error };
 				config.log(`[substrate-host] release requested ${t.graphId}/${t.nodeId}: ${redact(input.reason).slice(0, 200)}`);
-				return config.substrate.graphRelease(t.graphId, t.nodeId, HOST_SURFACE, t.sessionId);
+				return config.tasks().guestRelease(t.graphId, t.nodeId);
 			},
 		},
 		complete: {
@@ -132,9 +132,7 @@ function substrateCollection(key: readonly unknown[], config: HostVmConfig) {
 			execute: async (input: { node: string; summary: string; testsPass: boolean }) => {
 				const t = target(input);
 				if ("error" in t) return { error: t.error };
-				const dod: Dod = { summary: redact(input.summary), tests_pass: input.testsPass };
-				const lease = config.leases.load(t.graphId, t.nodeId);
-				return config.substrate.graphComplete(t.graphId, t.nodeId, lease?.lease_id ?? null, dod);
+				return config.tasks().complete(t.graphId, t.nodeId, { summary: redact(input.summary), tests_pass: input.testsPass });
 			},
 		},
 	};
@@ -178,7 +176,6 @@ function modelFetchCollection() {
 		},
 	};
 }
-
 /** run-tests (tests_route oneshot): 600 s wall clock, output tail capped and redacted. */
 const TEST_RUN_TIMEOUT_MS = 600_000;
 const TEST_RUN_TAIL_CHARS = 4_000;
@@ -202,6 +199,9 @@ function runTestsCollection(key: readonly unknown[], config: HostVmConfig) {
 			execute: async (input: { node: string; path: string[] }) => {
 				const t = hostCallTarget(key, ["--node", input.node], lookup);
 				if ("error" in t) return { error: t.error };
+				const refusal = mutationRefusal(config.store.get(t.graphId, t.nodeId));
+				if (refusal === "released") return { error: `task ${t.graphId}/${t.nodeId} already released` };
+				if (refusal === "failed") return { error: `task ${t.graphId}/${t.nodeId} is failed and holds no mutation authority` };
 				let argv: string[];
 				try {
 					argv = testRunArgv({
@@ -425,6 +425,7 @@ export function createHostVm(config: HostVmConfig) {
 			const worktree = worktreeFor(gid);
 			const hostFunctions: HostFunctionCollections = {};
 			if (config.route.s === "hostfn") hostFunctions.substrate = substrateCollection(c.key, config);
+			if (config.route.s === "mcp") hostFunctions.substrate = { ...hostFunctions.substrate, ...substrateMcpRelayCollection(c.key, config) };
 			if (config.route.a === "hostfn_proxy") hostFunctions.substrate = { ...hostFunctions.substrate, ...modelFetchCollection() };
 			if (config.testsRoute === "oneshot") hostFunctions.substrate = { ...hostFunctions.substrate, ...runTestsCollection(c.key, config) };
 			// git-push, pr-create (and commit) live on `agentos-substrate` whatever the s: channel: no MCP path exists for them.

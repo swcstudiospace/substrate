@@ -819,11 +819,20 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 					)
 					.describe("Pages to ingest, each with a repo-rooted path and body."),
 				session_id: z.string().optional(),
+				refresh: z
+					.object({
+						id: z.string().min(1).max(128),
+						part: z.number().int().min(1).max(64),
+						parts: z.number().int().min(1).max(64),
+						trigger: z.enum(["repo-merge", "skills-sync"]),
+					})
+					.optional()
+					.describe("One part of a committed corpus refresh; its pin advances only after all parts parse."),
 			},
 			annotations: { destructiveHint: false, openWorldHint: true },
 		},
-		async ({ dataset, commit, pages, session_id }) => {
-			const outcome = await substrate.ingestDocs({ dataset, commit, pages, session_id }, callerSurface);
+		async ({ dataset, commit, pages, session_id, refresh }) => {
+			const outcome = await substrate.ingestDocs({ dataset, commit, pages, session_id, refresh }, callerSurface);
 			return outcome.ok ? json(outcome) : { ...json(outcome), isError: true };
 		},
 	);

@@ -14,6 +14,7 @@
 import { execFile } from "node:child_process";
 import { redact } from "../../mcp-server/src/redact.ts";
 import { defaultOptions, type EmitWarning, LIBRARY_DIR, postWarning, project } from "./skills.ts";
+import { refreshLibraryCorpus, type RefreshOutcome } from "./corpus-refresh.ts";
 
 const RUN_TIMEOUT_MS = 120_000;
 const OUTPUT_TAIL_CHARS = 200;
@@ -80,6 +81,13 @@ export interface SyncContext {
 	log: (line: string) => void;
 	emitWarning: EmitWarning;
 	project: () => Promise<unknown>;
+	/**
+	 * Post the fast-forward corpus to the substrate. The default collects
+	 * the library checkout and posts `docs_ingest`; tests inject a stub.
+	 * Absent on ticks the harness never fast-forwards — which is every
+	 * refusal and every already-current tick.
+	 */
+	refresh?: (commit: string) => Promise<RefreshOutcome>;
 }
 export interface SyncResult {
 	decision: Decision | "error";
@@ -136,6 +144,25 @@ export async function runSync(ctx: SyncContext): Promise<SyncResult> {
 		ctx.log(`[skills-sync] current ${head}`);
 	}
 	await ctx.project();
+	if (decision === "ff") {
+		// The refresh runs after the projection, so a failed refresh never
+		// blocks or rolls back the links; it only stays visible. Ticks
+		// without a fast-forward post nothing.
+		const refresh = ctx.refresh ?? ((commit: string) => refreshLibraryCorpus({ libraryDir: ctx.libraryDir, commit, runGit: (args) => ctx.runner(["git", "-C", ctx.libraryDir, ...args]) }));
+		const refreshed = await refresh(originMain);
+		if (refreshed.ok) {
+			ctx.log(`[skills-sync] refreshed ${originMain} (${refreshed.stored} page(s))`);
+		} else {
+			ctx.log(`[skills-sync] refresh failed: ${refreshed.reason}`);
+			await ctx.emitWarning({
+				surface: "substrate",
+				kind: "warning",
+				actor: "agent",
+				summary: `skills sync refresh failed: ${refreshed.reason}`,
+				payload: { action: "skills.sync", runtime: "skills-sync", reason: "refresh-failed", detail: refreshed.reason },
+			});
+		}
+	}
 	return { decision, code: 0 };
 }
 

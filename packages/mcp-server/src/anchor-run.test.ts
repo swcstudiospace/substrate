@@ -75,14 +75,25 @@ describe("anchor-run entry process boundary", () => {
 	});
 
 	test("GREPTIME_URL without identity exits 2 naming the key settings", async () => {
-		// Loopback with nothing listening: the entry must exit before any
-		// connection is attempted, so this URL is never dialled.
-		const result = await runEntry([], { GREPTIME_URL: "http://127.0.0.1:9" });
-		expect(result.code).toBe(2);
-		expect(result.stderr).toContain("SOLANA_ANCHOR_KEYPAIR");
-		expect(result.stderr).toContain("SOLANA_ANCHOR_PUBKEY");
-		expect(result.stderr).toContain("usage:");
-		expect(result.cliInvoked).toBe(false);
+		let requests = 0;
+		const trap = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: () => { requests += 1; return new Response("unexpected store call", { status: 500 }); },
+		});
+		try {
+			const env: Record<string, string> = {};
+			env["GREPTIME_URL"] = trap.url.href;
+			const result = await runEntry([], env);
+			expect(result.code).toBe(2);
+			expect(result.stderr).toContain("SOLANA_ANCHOR_KEYPAIR");
+			expect(result.stderr).toContain("SOLANA_ANCHOR_PUBKEY");
+			expect(result.stderr).toContain("usage:");
+			expect(result.cliInvoked).toBe(false);
+			expect(requests).toBe(0);
+		} finally {
+			trap.stop(true);
+		}
 	});
 
 	test("an unknown flag exits 2 with usage", async () => {

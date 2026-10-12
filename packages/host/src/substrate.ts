@@ -46,7 +46,21 @@ export type GraphView = {
 	[key: string]: unknown;
 };
 
-export type ClaimReply = { claimed: boolean; reason?: string; node?: GraphNodeView; lease_id?: string | null };
+export type ClaimReply = { claimed: boolean; reason?: string; node?: GraphNodeView; lease?: { lease_id: string | null } | null; action?: string; decision?: string; ttl_seconds?: number | null };
+
+/**
+ * Idempotent graph re-registration bound to the host's canonical graph (I-04 relay):
+ * graph identity plus the canonical nodes/steps only. No surface/status/pr_url (never
+ * overwrite workflow state from the guest), no edges (replace-semantics), no lease fields.
+ */
+export type RegisterGraphArgs = {
+	graph_id: string;
+	notion_task_page?: string;
+	repo?: string;
+	branch?: string;
+	nodes?: Array<{ node_id: string; linear_issue_id?: string; linear_identifier?: string; notion_page?: string }>;
+	steps?: Array<{ node_id: string; step: number; linear_sub_issue_id?: string; notion_page?: string }>;
+};
 export type ReleaseReply = { released: boolean; reason?: string; node?: GraphNodeView };
 export type CompleteReply = { completed: boolean; reason?: string; node?: GraphNodeView };
 export type IssueReply =
@@ -61,11 +75,13 @@ export type SubstrateClientOptions = {
 	baseUrl?: string;
 	fetchImpl?: typeof fetch;
 	timeoutMs?: number;
-	/** Explicit bearer. When omitted the per-unit host env file order resolves it. */
+	/** Explicit lease bearer (surface `claude-code`). When omitted the lease order resolves it. */
 	bearer?: string;
-	/** Env mapping the bearer order reads (defaults to process.env). Values never logged. */
+	/** Explicit host-job bearer (surface `substrate`). When omitted the job order resolves it. */
+	jobBearer?: string;
+	/** Env mapping both bearer orders read (defaults to process.env). Values never logged. */
 	env?: NodeJS.ProcessEnv;
-	/** File reader for the tokens-dir order (defaults to first-line read). */
+	/** File reader for the tokens-dir orders (defaults to first-line read). */
 	readTokenFile?: (path: string) => string | null;
 };
 
@@ -110,6 +126,35 @@ export function resolveHostBearer(
 	}
 	const tokensDir = (env["SUBSTRATE_TOKENS_DIR"] ?? "").trim() || DEFAULT_TOKENS_DIR;
 	return readTokenFile(join(tokensDir, SUBSTRATE_SURFACE));
+}
+
+/**
+ * The lease bearer for surface `claude-code`, by name only here.
+ *
+ * Order mirrors the host-job order one surface over: `SUBSTRATE_TOKEN_CLAUDE_CODE`
+ * (the per-unit host env file names it beside `SUBSTRATE_TOKEN_SUBSTRATE`) — else the
+ * Phase 20 order (cf. `packages/cli/src/token.ts`): `SUBSTRATE_TOKEN`, then
+ * `SUBSTRATE_TOKEN_FILE`, then the per-surface file in `SUBSTRATE_TOKENS_DIR`
+ * (default `/etc/substrate/tokens/claude-code`). Each role resolves only its own
+ * chain: the lease bearer never falls back to the substrate-surface file and the job
+ * bearer never to the claude-code file. A wrong-surface token fails closed at the
+ * server (`not-holder`/refusal), never silently. The value is never logged.
+ */
+export function resolveLeaseBearer(
+	env: NodeJS.ProcessEnv = process.env,
+	readTokenFile: (path: string) => string | null = firstLine,
+): string | null {
+	const unitVar = (env["SUBSTRATE_TOKEN_CLAUDE_CODE"] ?? "").trim();
+	if (unitVar !== "") return unitVar;
+	const direct = (env["SUBSTRATE_TOKEN"] ?? "").trim();
+	if (direct !== "") return direct;
+	const tokenFile = (env["SUBSTRATE_TOKEN_FILE"] ?? "").trim();
+	if (tokenFile !== "") {
+		const viaFile = readTokenFile(tokenFile);
+		if (viaFile) return viaFile;
+	}
+	const tokensDir = (env["SUBSTRATE_TOKENS_DIR"] ?? "").trim() || DEFAULT_TOKENS_DIR;
+	return readTokenFile(join(tokensDir, HOST_SURFACE));
 }
 
 /** A heartbeat is due once half the TTL has elapsed (renew well inside expiry). */
@@ -215,36 +260,50 @@ export class SubstrateClient {
 	fetchImpl: typeof fetch;
 	timeoutMs: number;
 	nextId: number;
+	/** Lease bearer (surface `claude-code`): claim, heartbeat, release, complete. */
 	bearer: string | null;
+	/** Host-job bearer (surface `substrate`): graph/issue/brief reads. */
+	jobBearer: string | null;
 
 	constructor(opts: SubstrateClientOptions = {}) {
 		this.baseUrl = (opts.baseUrl ?? DEFAULT_SUBSTRATE_BASE).replace(/\/+$/, "");
 		this.fetchImpl = opts.fetchImpl ?? fetch;
 		this.timeoutMs = opts.timeoutMs ?? 15_000;
 		this.nextId = 1;
-		const explicit = (opts.bearer ?? "").trim();
-		this.bearer = explicit !== "" ? explicit : resolveHostBearer(opts.env, opts.readTokenFile);
+		const explicitLease = (opts.bearer ?? "").trim();
+		this.bearer = explicitLease !== "" ? explicitLease : resolveLeaseBearer(opts.env, opts.readTokenFile);
+		const explicitJob = (opts.jobBearer ?? "").trim();
+		this.jobBearer = explicitJob !== "" ? explicitJob : resolveHostBearer(opts.env, opts.readTokenFile);
 	}
 
-	/** Whether requests carry a bearer (name-only report; the value never leaves the header). */
+	/** Whether lease calls carry a bearer (name-only report; the value never leaves the header). */
 	get authenticated(): boolean {
 		return this.bearer !== null;
 	}
 
-	private headers(extra: Record<string, string> = {}): Record<string, string> {
-		if (this.bearer === null) return { ...extra };
-		return { ...extra, authorization: `Bearer ${this.bearer}` };
+	/** Whether job reads carry a bearer (name-only report; the value never leaves the header). */
+	get jobAuthenticated(): boolean {
+		return this.jobBearer !== null;
 	}
 
-	/** One tool call; returns the parsed JSON of content[0].text, or the raw text when it is not JSON. */
+	private headersFor(token: string | null, extra: Record<string, string> = {}): Record<string, string> {
+		if (token === null) return { ...extra };
+		return { ...extra, authorization: `Bearer ${token}` };
+	}
+	/** One lease-authenticated tool call; job reads use `callAs` with the job bearer. */
 	async call(tool: string, args: Record<string, unknown>): Promise<unknown> {
+		return this.callAs(tool, args, this.bearer);
+	}
+
+	/** One tool call under an explicit bearer (lease or job); null sends no Authorization header. */
+	async callAs(tool: string, args: Record<string, unknown>, token: string | null): Promise<unknown> {
 		const rpcId = this.nextId++;
 		const request = { jsonrpc: "2.0", id: rpcId, method: "tools/call", params: { name: tool, arguments: args } };
 		let response: Response;
 		try {
 			response = await this.fetchImpl(`${this.baseUrl}/mcp`, {
 				method: "POST",
-				headers: this.headers({ "content-type": "application/json", accept: ACCEPT }),
+			headers: this.headersFor(token, { "content-type": "application/json", accept: ACCEPT }),
 				body: JSON.stringify(request),
 				signal: AbortSignal.timeout(this.timeoutMs),
 			});
@@ -289,9 +348,9 @@ export class SubstrateClient {
 		}
 	}
 
-	/** The graph view, or null when substrate-mcp has no such graph. */
+	/** The graph view, or null when substrate-mcp has no such graph (host-job bearer). */
 	async graphGet(graphId: string): Promise<GraphView | null> {
-		const result = await this.call("graph_get", { graph_id: graphId });
+		const result = await this.callAs("graph_get", { graph_id: graphId }, this.jobBearer);
 		if (typeof result === "object" && result !== null) return result as GraphView;
 		if (typeof result === "string" && result.startsWith("No graph")) return null;
 		throw new SubstrateError(`graph_get: unexpected reply: ${String(result).slice(0, 200)}`);
@@ -315,12 +374,27 @@ export class SubstrateClient {
 		nowMs: number = Date.now(),
 	): Promise<ClaimReply> {
 		const reply = await this.graphClaim(graphId, nodeId, surface, sessionId);
-		if (reply.claimed && typeof reply.lease_id === "string" && reply.lease_id !== "") {
+		const leaseId = reply.lease?.lease_id;
+		if (!(reply.claimed && typeof leaseId === "string" && leaseId !== "")) return reply;
+		try {
 			store.persist(graphId, nodeId, {
-				lease_id: reply.lease_id,
+				lease_id: leaseId,
 				acquiredAtMs: nowMs,
 				ttlSeconds: DEFAULT_LEASE_TTL_SECONDS,
 			});
+		} catch {
+			// Real disk failure after a grant: the claim is held but unfenceable, so
+			// compensate at once with the captured grant's own lease id (fenced, never
+			// force), then report truthfully with names only — never the fencing id.
+			let compensated = false;
+			try {
+				compensated = (await this.graphRelease(graphId, nodeId, leaseId)).released;
+			} catch {
+				compensated = false;
+			}
+			throw new SubstrateError(
+				`claim ${graphId}/${nodeId}: lease persist failed; grant ${compensated ? "released" : "release refused"}`,
+			);
 		}
 		return reply;
 	}
@@ -351,13 +425,26 @@ export class SubstrateClient {
 		return { ok: false, reason };
 	}
 
-	async graphRelease(graphId: string, nodeId: string, surface: string, sessionId: string): Promise<ReleaseReply> {
+	/**
+	 * Drop the held lease, fenced on the persisted `lease_id` (I-02): the server
+	 * refuses `not-holder`/`stale-lease`/`lease-id-required` rather than releasing
+	 * another holder's node. Never force: force is an operator action.
+	 */
+	async graphRelease(graphId: string, nodeId: string, leaseId: string | null): Promise<ReleaseReply> {
 		return (await this.call("graph_release", {
 			graph_id: graphId,
 			node_id: nodeId,
-			surface,
-			session_id: sessionId,
+			lease_id: leaseId,
 		})) as ReleaseReply;
+	}
+
+	/**
+	 * Re-register the host's own graph (idempotent by graph id, coalesce-merge
+	 * server-side): the caller passes canonical state only — the relay builds it
+	 * from `graphGet`, never from guest fields. Returns the real upsert view.
+	 */
+	async graphRegister(args: RegisterGraphArgs): Promise<unknown> {
+		return await this.call("graph_register", { ...args });
 	}
 
 	/**
@@ -374,13 +461,13 @@ export class SubstrateClient {
 		})) as CompleteReply;
 	}
 
-	/** POST /issue — the node's redacted, untrusted issue text (03-02). */
+	/** POST /issue — the node's redacted, untrusted issue text (host-job bearer). */
 	async issueGet(graphId: string, nodeId: string): Promise<IssueReply> {
 		let response: Response;
 		try {
 			response = await this.fetchImpl(`${this.baseUrl}/issue`, {
 				method: "POST",
-				headers: this.headers({ "content-type": "application/json" }),
+				headers: this.headersFor(this.jobBearer, { "content-type": "application/json" }),
 				body: JSON.stringify({ graph_id: graphId, node_id: nodeId }),
 				signal: AbortSignal.timeout(this.timeoutMs),
 			});
@@ -392,12 +479,12 @@ export class SubstrateClient {
 		return JSON.parse(text) as IssueReply;
 	}
 
-	/** POST /brief as surface claude-code. Fails open: any error yields a one-line placeholder brief. */
+	/** POST /brief as surface claude-code under the host-job bearer. Fails open: any error yields a one-line placeholder brief. */
 	async brief(graphId: string, repo: string): Promise<string> {
 		try {
 			const response = await this.fetchImpl(`${this.baseUrl}/brief`, {
 				method: "POST",
-				headers: this.headers({ "content-type": "application/json" }),
+				headers: this.headersFor(this.jobBearer, { "content-type": "application/json" }),
 				body: JSON.stringify({ repo, graph_id: graphId, surface: HOST_SURFACE }),
 				signal: AbortSignal.timeout(this.timeoutMs),
 			});

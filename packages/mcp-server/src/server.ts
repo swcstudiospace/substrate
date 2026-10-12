@@ -838,6 +838,7 @@ export function createHttpServer(
 				const commit = "commit" in parsed ? parsed.commit : undefined;
 				const pages = "pages" in parsed ? parsed.pages : undefined;
 				const ingestSession = "session_id" in parsed ? parsed.session_id : undefined;
+				const refresh = "refresh" in parsed ? parsed.refresh : undefined;
 				const pagesValid =
 					Array.isArray(pages) &&
 					pages.every(
@@ -862,6 +863,7 @@ export function createHttpServer(
 					pages,
 					...(commit !== undefined ? { commit } : {}),
 					...(ingestSession !== undefined ? { session_id: ingestSession } : {}),
+					...(refresh !== undefined ? { refresh } : {}),
 				};
 				if (!(await auditedRest(res, observability, surface, "docs_ingest", ingestFields))) return;
 				const outcome = await substrate.ingestDocs(ingestFields, surface);

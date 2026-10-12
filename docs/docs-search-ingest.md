@@ -61,27 +61,53 @@ they stay process-local. Parse budget is thirty polls two seconds apart.
 
 | Dataset | Source | Refresh trigger |
 |---|---|---|
-| `agent-substrate` | `README.md`, `docs/`, `.planning/PROJECT.md` of this repo | merge to `main` |
-| `programming-desk` | `docs/`, `skills/`, `contracts/`, `ARCHITECTURE.md`, `prompts-assembled/` of `swcstudiospace/programming-desk` | merge of that repo |
-| `agent-skills` | every `SKILL.md` and `references/` in `swcstudiospace/agent-skills` | `substrate-skills-sync` after a fast-forward |
-| `<product>` (`kanbanos`, `desklanes`, `clippyos`, `auctioning`) | that repo's docs | merge of that repo |
+| `agent-substrate` | `README.md`, `docs/`, `.planning/PROJECT.md` of this repo | merge to `main`, then `substrate docs refresh --dataset agent-substrate --commit SHA --dir <checkout>` |
+| `programming-desk` | `docs/`, `skills/`, `contracts/`, `ARCHITECTURE.md`, `prompts-assembled/` of `swcstudiospace/programming-desk` | merge of that repo, then `docs refresh` against its checkout |
+| `agent-skills` | every `SKILL.md` and `references/` in `swcstudiospace/agent-skills` | `substrate-skills-sync` after a fast-forward: the tick posts the corpus itself |
+| `<product>` (`kanbanos`, `desklanes`, `clippyos`, `auctioning`) | that repo's docs | merge of that repo, then `docs refresh` against its checkout |
 
 Embedding: TEI `bge-small`; no chat model is registered; retrieval only.
-Discovery is by name and creation happens only on a name-miss. Each
-refresh records `{dataset, version, commit, content_sha256, ingested_at}`
-and keeps the last five versions per dataset.
+Discovery is by name and creation happens only on a name-miss.
+
+The refresh travels only through `POST /docs/ingest`, every call carrying
+`refresh: {id, part, parts, trigger}` with trigger `repo-merge` or
+`skills-sync`. Parts upload and parse independently, but the pin advances
+only when every part of the id is staged with its resolved page
+identities (URL, document id, sha frozen at receipt): a failed, missing
+or changed part keeps the prior pin, and the same commit never mints a
+second generation. Each promotion records the whole-corpus manifest —
+every served document id — and keeps the last five versions per dataset.
+`docs_search` cites the pin commit only for chunks from the pinned
+documents; stale, replaced or id-less chunks name the gap instead of a
+false current. (The route and the MCP tool forward the `refresh` object
+through validation; malformed metadata is refused before any plane call,
+with a warning and nothing staged.)
+
+The CLI reads a checkout's committed objects only (markdown under the roots
+from the `--commit` literal; symlinks, over-cap blobs and unreadable objects
+refuse the run before anything posts; calls packed by serialized wire size
+under 5 MB so escaping cannot overshoot the intake; `--dir` must sit on
+`--commit`) and the sync tick reads the library corpus from the merged commit
+itself (`rev-parse` equality, `ls-tree`/`cat-file` on the commit literal,
+never working-tree reads) after the projection. No caller numbers versions
+and no path touches RAGFlow directly. Pins, the sync tracker and unfinished
+`SUBSTRATE_DOCS_STATE_FILE` beside the ingest records (one atomic
+snapshot), so a restart rebuilds truthful pins and resumes staging
+instead of serving from an empty map.
 
 ### Skills-sync degradation
 
-The Phase 22 sync unit is not yet live, so no fast-forward evidence
-exists. Until the first real fast-forward, the `agent-skills` refresh
-emits one `warning` (`payload.action: "docs.ingest"`, reason
-`skills-sync-not-live`) and search serves `agent-skills` from its last
-pinned version with `pin_age_ms` on those citations. No silent staleness:
-the pin age travels in the reply. The hook lives in the sync tick's
-projection step (`noteSkillsSyncFastForward`) — no new timer, no new
-surface. When the operator flips the sync unit live, no code change is
-needed.
+The sync goes live only on a completed `skills-sync` refresh posted from
+the substrate surface; every other ingest — however committed — only
+promotes pins. Until then the `agent-skills` dataset serves its last
+pinned version with `pin_age_ms` on those citations and one `warning`
+(`payload.action: "docs.ingest"`, reason `skills-sync-not-live`). A
+failed refresh stays visible the same way and never marks the sync live
+or advances the pin. No silent staleness: the pin age travels in the
+reply. The tick needs a bearer (`SUBSTRATE_TOKEN_SUBSTRATE`, falling back
+to `SUBSTRATE_TOKEN`) and the server needs `agent-skills/` in
+`SUBSTRATE_DOCS_INGEST_ROOTS`; without either the refresh refuses loudly
+and the dataset keeps serving its pin.
 
 ## Credentials
 

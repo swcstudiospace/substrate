@@ -106,23 +106,44 @@ describe("runSync executor", () => {
 		expect(h.log).toEqual(["[skills-sync] refused diverged"]);
 	});
 
-	test("ff: the exact --ff-only argv, then the projector", async () => {
+	test("ff: the exact --ff-only argv, then the projector, then the refresh", async () => {
 		const h = harness({ head: OLD, origin: NEW });
+		const refreshed: string[] = [];
+		h.ctx.refresh = async (commit) => {
+			refreshed.push(commit);
+			return { ok: true, stored: 2 };
+		};
 		expect(await runSync(h.ctx)).toEqual({ decision: "ff", code: 0 });
 		expect(h.calls).toContainEqual(["git", "-C", L, "merge", "--ff-only", "origin/main"]);
 		expect(h.calls[0]).toEqual(["git", "-C", L, "status", "--porcelain"]);
 		expect(h.calls).toContainEqual(["git", "-C", L, "fetch", "origin", "main"]);
 		expect(h.projected()).toBe(1);
+		expect(refreshed).toEqual([NEW]);
 		expect(h.warnings).toEqual([]);
-		expect(h.log).toEqual([`[skills-sync] ff ${OLD}..${NEW}`]);
+		expect(h.log).toEqual([`[skills-sync] ff ${OLD}..${NEW}`, `[skills-sync] refreshed ${NEW} (2 page(s))`]);
 	});
 
-	test("current: no merge, the projector still runs (self-heal), no warning", async () => {
+	test("ff with a failed refresh warns visibly, keeps exit 0 and keeps the projection", async () => {
+		const h = harness({ head: OLD, origin: NEW });
+		h.ctx.refresh = async () => ({ ok: false, reason: "no-answer" });
+		expect(await runSync(h.ctx)).toEqual({ decision: "ff", code: 0 });
+		expect(h.projected()).toBe(1);
+		expect(h.warnings.map((w) => w.payload.reason)).toEqual(["refresh-failed"]);
+		expect(h.log).toEqual([`[skills-sync] ff ${OLD}..${NEW}`, "[skills-sync] refresh failed: no-answer"]);
+	});
+
+	test("current: no merge, the projector still runs (self-heal), no warning, no refresh", async () => {
 		const h = harness({ head: OLD, origin: OLD });
+		let refreshed = 0;
+		h.ctx.refresh = async () => {
+			refreshed = refreshed + 1;
+			return { ok: true, stored: 0 };
+		};
 		expect(await runSync(h.ctx)).toEqual({ decision: "current", code: 0 });
 		expect(verbs(h.calls)).not.toContain("merge --ff-only origin/main");
 		expect(h.projected()).toBe(1);
 		expect(h.warnings).toEqual([]);
+		expect(refreshed).toBe(0);
 		expect(h.log).toEqual([`[skills-sync] current ${OLD}`]);
 	});
 

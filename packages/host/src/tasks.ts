@@ -9,7 +9,7 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { type Route, sessionEnv, SUBSTRATE_MCP_URL, type TestsRoute, trackerRoute, worktreeFor } from "./options.ts";
+import { type Route, sessionEnv, SUBSTRATE_RELAY_URL, type TestsRoute, trackerRoute, worktreeFor } from "./options.ts";
 import { isValidGraphId } from "./sandbox-options.ts";
 import {
 	ADDITIONAL_INSTRUCTIONS,
@@ -300,10 +300,12 @@ export type SubstrateLike = {
 	): Promise<ClaimReply>;
 	heartbeat(graphId: string, nodeId: string, leaseId: string, ttlSeconds?: number): Promise<HeartbeatReply>;
 	graphComplete(graphId: string, nodeId: string, leaseId: string | null, dod: Dod): Promise<CompleteReply>;
-	graphRelease(graphId: string, nodeId: string, surface: string, sessionId: string): Promise<unknown>;
+	/**
+	 * Fenced release (I-02): the persisted `lease_id` or null. The reply's
+	 * `released` flag is the truth — a refusal never marks the record released.
+	 */
+	graphRelease(graphId: string, nodeId: string, leaseId: string | null): Promise<{ released: boolean; reason?: string }>;
 	brief(graphId: string, repo: string): Promise<string>;
-	/** Host-job bearer for the seeded substrate MCP entry; absent on September-era fakes. */
-	readonly bearer?: string | null;
 };
 /** The slice of sync.ts's HostSync the turn-settle backstop drives. */
 export type HostSyncLike = {
@@ -332,6 +334,8 @@ export type TaskServiceDeps = {
 	leases: LeaseStoreLike;
 	/** Awaited before sessions.open and before every prompt (T-03-03-09). */
 	ensureModelRoute: (handle: VmHandle, graphId: string) => Promise<void>;
+	/** Awaited beside the model route on s:mcp (starts the in-VM substrate relay; no-op elsewhere). */
+	ensureSubstrateRoute: (handle: VmHandle, graphId: string) => Promise<void>;
 	route: Route;
 	testsRoute: TestsRoute;
 	model: string;
@@ -353,6 +357,21 @@ export const DOD_SUMMARY_MAX = 2000;
 
 /** One heartbeat-or-reclaim tick's outcome (D32-02). */
 export type HeartbeatTick = "ok" | "not-due" | "reclaimed" | "failed-closed" | "idle";
+
+/**
+ * Whether a task still holds guest mutation authority (SEC03): host-credentialed
+ * callbacks (commit/push/PR/sync/complete/run-tests) run only for live tasks. A
+ * released task is terminal; a settled-but-unreleased task failed. Terminal release
+ * transitions themselves (release/terminate/kill) are exempt — they end authority,
+ * they do not spend it. Pure so every host-function boundary shares one rule.
+ */
+export function mutationRefusal(record: Pick<TaskRecord, "released" | "exit_code"> | null | undefined): "released" | "failed" | null {
+	if (!record) return null;
+	if (record.released) return "released";
+	if (record.exit_code !== null) return "failed";
+	return null;
+}
+
 
 export type CompleteInput = { summary: string; tests_pass: boolean; review_pass?: boolean };
 export type CompleteResult = { completed: boolean; reason?: string };
@@ -405,16 +424,27 @@ export class TaskService {
 	}
 
 	/**
-	 * The single release path (D32-03): every terminal state funnels here, and the record's
-	 * `released` flag makes a second call a no-op. Never throws — a refused transport is logged.
+	 * The single release path (D32-03, I-02): every terminal state funnels here, and the
+	 * record's `released` flag makes a second call a no-op. Fenced on the persisted
+	 * `lease_id`; the reply's `released` flag is the truth — a refusal or transport
+	 * error never marks the record released. Never throws.
 	 */
 	async releaseOnce(graphId: string, nodeId: string): Promise<void> {
 		const key = `${graphId}/${nodeId}`;
 		const record = this.deps.store.get(graphId, nodeId);
 		if (record?.released) return;
-		await this.deps.substrate
-			.graphRelease(graphId, nodeId, HOST_SURFACE, record?.session_id ?? nodeId)
-			.catch((cause: unknown) => this.log(`[substrate-host] release ${key} failed: ${String(cause)}`));
+		const leaseId = this.deps.leases.load(graphId, nodeId)?.lease_id ?? null;
+		let reply: { released: boolean; reason?: string };
+		try {
+			reply = await this.deps.substrate.graphRelease(graphId, nodeId, leaseId);
+		} catch (cause) {
+			this.log(`[substrate-host] release ${key} failed: ${String(cause)}`);
+			return;
+		}
+		if (!reply.released) {
+			this.log(`[substrate-host] release ${key} refused: ${reply.reason ?? "refused"}`);
+			return;
+		}
 		if (record) {
 			this.update(graphId, nodeId, (r) => {
 				r.released = true;
@@ -500,12 +530,26 @@ export class TaskService {
 		const outcome = await this.heartbeatOrReclaim(graphId, nodeId, record.session_id);
 		if (outcome !== "failed") return outcome;
 		this.clearHeartbeat(graphId, nodeId);
-		await this.releaseOnce(graphId, nodeId);
 		this.update(graphId, nodeId, (r) => {
 			r.turn_in_flight = false;
 			r.last_error = "lease lost";
 			r.exit_code = 1;
 		});
+		await this.releaseOnce(graphId, nodeId);
+		// SEC03: the stale guest must stop now, not on prompt settlement. Authority is
+		// already revoked synchronously above (a failed record refuses every mutation);
+		// cancel + unload stop the actual session best-effort. Either failing leaves the
+		// record failed — cancellation delay/failure never restores authority.
+		const failed = this.deps.store.get(graphId, nodeId);
+		if (failed) {
+			const handle = this.deps.vmFor(graphId);
+			await handle.sessions.cancelPrompt({ sessionId: failed.session_id }).catch((cause: unknown) => {
+				this.log(`[substrate-host] lease-loss cancel ${key} failed: ${String(cause)}`);
+			});
+			await handle.sessions.unload({ sessionId: failed.session_id }).catch((cause: unknown) => {
+				this.log(`[substrate-host] lease-loss unload ${key} failed: ${String(cause)}`);
+			});
+		}
 		this.log(`[substrate-host] turn failed ${key}: lease lost`);
 		return "failed-closed";
 	}
@@ -521,6 +565,7 @@ export class TaskService {
 		const record = this.deps.store.get(graphId, nodeId);
 		if (!record) return { completed: false, reason: "unknown task" };
 		if (record.released) return { completed: false, reason: "already released" };
+		if (record.exit_code !== null) return { completed: false, reason: "task failed" };
 		const summary = input.summary.trim().slice(0, DOD_SUMMARY_MAX);
 		if (summary === "") return { completed: false, reason: "dod-required" };
 		const dod: Dod = {
@@ -547,6 +592,41 @@ export class TaskService {
 		return { completed: true };
 	}
 
+	/**
+	 * The guest-initiated terminal release shared by both guest routes (SEC01): fenced on
+	 * the persisted `lease_id`, and — only on `released:true` — clears the heartbeat and
+	 * marks the record released so no tick re-claims and no resume revives it. The turn
+	 * itself settles naturally afterwards. Refusals and transport errors leave the record
+	 * untouched and report truthfully. Terminal release transitions are exempt from the
+	 * mutation guard: they end authority, they do not spend it.
+	 */
+	async guestRelease(graphId: string, nodeId: string): Promise<{ released: boolean; reason?: string }> {
+		const key = `${graphId}/${nodeId}`;
+		const record = this.deps.store.get(graphId, nodeId);
+		const leaseId = this.deps.leases.load(graphId, nodeId)?.lease_id ?? null;
+		let reply: { released: boolean; reason?: string };
+		try {
+			reply = await this.deps.substrate.graphRelease(graphId, nodeId, leaseId);
+		} catch (cause) {
+			this.log(`[substrate-host] guest release ${key} failed: ${String(cause)}`);
+			return { released: false, reason: String(cause) };
+		}
+		if (!reply.released) {
+			this.log(`[substrate-host] guest release ${key} refused: ${reply.reason ?? "refused"}`);
+			return { released: false, reason: reply.reason ?? "refused" };
+		}
+		this.clearHeartbeat(graphId, nodeId);
+		if (record) {
+			this.update(graphId, nodeId, (r) => {
+				r.released = true;
+				r.turn_in_flight = false;
+				if (r.exit_code === null) r.exit_code = 0;
+			});
+		}
+		this.log(`[substrate-host] guest released ${key}`);
+		return { released: true };
+	}
+
 
 	/** Research Pattern 2: validate → existing? → graph_get → graph_claim → brief → seed → open → prompt (not awaited). */
 	async openTask(body: unknown): Promise<OpenResult> {
@@ -566,13 +646,27 @@ export class TaskService {
 			return { status: 409, body: { error: `node is claimed by ${node.claimed_by} session ${node.claim_session}` } };
 		}
 
-		const claim = await this.deps.substrate.claimAndPersist(this.deps.leases, gid, nid, HOST_SURFACE, nid, this.now().getTime());
+		// A real persist throw compensates inside claimAndPersist (fenced on the captured
+		// grant, never force) and arrives here as a names-only failure: 502 before any VM
+		// work, with no claimed lease left behind.
+		let claim: ClaimReply;
+		try {
+			claim = await this.deps.substrate.claimAndPersist(this.deps.leases, gid, nid, HOST_SURFACE, nid, this.now().getTime());
+		} catch (cause) {
+			this.log(`[substrate-host] open ${gid}/${nid} failed after claim: ${String(cause)}`);
+			return { status: 502, body: { error: "lease persist failed" } };
+		}
 		if (!claim.claimed) return { status: 409, body: { error: claim.reason ?? "claim refused" } };
-		// Persist-then-verify (D32-04): a grant without a readable lease file releases the
-		// claim and answers 502 through the same release path as any failed open — a restart
-		// must never face a held claim it cannot fence.
+		// Persist-then-verify (D32-04, I-02): a grant without a readable lease file must never
+		// leave a held claim the next boot cannot fence. Compensate with the captured grant's
+		// own `lease_id` when the grant carried one — never an unfenced force — then answer 502.
 		if (!this.deps.leases.load(gid, nid)) {
-			await this.releaseOnce(gid, nid);
+			const grantedLease = claim.lease?.lease_id ?? null;
+			if (grantedLease) {
+				await this.deps.substrate.graphRelease(gid, nid, grantedLease).catch((error: unknown) => {
+					this.log(`[substrate-host] release after failed open ${gid}/${nid} failed: ${String(error)}`);
+				});
+			}
 			this.log(`[substrate-host] open ${gid}/${nid} failed after claim: lease persist verification failed`);
 			return { status: 502, body: { error: "lease persist verification failed" } };
 		}
@@ -582,6 +676,7 @@ export class TaskService {
 			const brief = await this.deps.substrate.brief(gid, req.repo);
 			const handle = this.deps.vmFor(gid);
 			await this.deps.ensureModelRoute(handle, gid);
+			await this.deps.ensureSubstrateRoute(handle, gid);
 
 			const prompt = renderPrompt({
 				identifier: req.identifier,
@@ -600,7 +695,6 @@ export class TaskService {
 				nodeId: nid,
 				route: this.deps.route,
 				prompt,
-				substrateBearer: this.deps.substrate.bearer ?? null,
 			});
 			const seeded: SeededFile[] = [];
 			const dirs = new Set(files.map((f) => f.path.slice(0, f.path.lastIndexOf("/"))));
@@ -619,7 +713,7 @@ export class TaskService {
 				cwd: VM_WORK,
 				env: sessionEnv({ route: this.deps.route, model: this.deps.model, graphId: gid, nodeId: nid, directKey: this.deps.directKey }),
 				mcpServers:
-					this.deps.route.s === "mcp" ? [{ type: "http", name: "substrate", url: SUBSTRATE_MCP_URL, headers: [] }] : [],
+					this.deps.route.s === "mcp" ? [{ type: "http", name: "substrate", url: SUBSTRATE_RELAY_URL, headers: [] }] : [],
 				permissionPolicy: "ask",
 				additionalInstructions: ADDITIONAL_INSTRUCTIONS,
 			});
@@ -651,13 +745,13 @@ export class TaskService {
 			this.deps.store.save(record);
 
 			await this.deps.ensureModelRoute(handle, gid);
+			await this.deps.ensureSubstrateRoute(handle, gid);
 			this.startPrompt(handle, record, prompt, `${gid}:${nid}:1`);
 			this.log(`[substrate-host] task opened ${gid}/${nid} (${req.identifier})`);
 			return { status: 202, body: await this.statusOf(record) };
 		} catch (cause) {
-			await this.deps.substrate.graphRelease(gid, nid, HOST_SURFACE, nid).catch((error: unknown) => {
-				this.log(`[substrate-host] release after failed open ${gid}/${nid} failed: ${String(error)}`);
-			});
+			// The claim is persisted, so the fenced single-release path compensates (I-02).
+			await this.releaseOnce(gid, nid);
 			this.log(`[substrate-host] open ${gid}/${nid} failed after claim: ${String(cause)}`);
 			return { status: 502, body: { error: String(cause) } };
 		}
@@ -677,6 +771,9 @@ export class TaskService {
 			.then((result) => {
 				this.clearHeartbeat(record.graph_id, record.node_id);
 				this.update(record.graph_id, record.node_id, (r) => {
+					// A terminal record (lease lost, guest released/completed) keeps its
+					// failure: settlement folds the stop reason only into a live turn.
+					if (r.exit_code !== null) return;
 					r.turn_in_flight = false;
 					r.last_stop_reason = result.stopReason;
 					r.exit_code = pollCode(r);
@@ -692,6 +789,7 @@ export class TaskService {
 					return;
 				}
 				this.update(record.graph_id, record.node_id, (r) => {
+					if (r.exit_code !== null) return;
 					r.turn_in_flight = false;
 					r.last_error = String(cause);
 					r.exit_code = 1;
@@ -771,6 +869,7 @@ export class TaskService {
 			try {
 				handle = this.deps.vmFor(gid);
 				await this.deps.ensureModelRoute(handle, gid);
+				await this.deps.ensureSubstrateRoute(handle, gid);
 			} catch (cause) {
 				this.update(gid, nid, (r) => {
 					r.turn_in_flight = false;
@@ -791,6 +890,9 @@ export class TaskService {
 					r.exit_code = 1;
 				});
 				await this.releaseOnce(gid, nid);
+				await handle.sessions.cancelPrompt({ sessionId: interrupted.session_id }).catch((cause: unknown) => {
+					this.log(`[substrate-host] resume lease-loss cancel ${key} failed: ${String(cause)}`);
+				});
 				this.log(`[substrate-host] resume ${key} failed on the lease: re-claim refused`);
 				continue;
 			}
@@ -933,7 +1035,7 @@ export class TaskService {
 		}
 		return {
 			...record,
-			exit_code: pollCode(record, state),
+			exit_code: record.exit_code ?? pollCode(record, state),
 			state,
 			latest_sequence: latest,
 			history_events: history,

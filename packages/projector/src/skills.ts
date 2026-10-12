@@ -144,6 +144,18 @@ export function libraryNames(dir: string): string[] {
 		.sort();
 }
 
+/**
+ * Whether a repo-relative path belongs to the refresh corpus: a skill's
+ * `SKILL.md` or anything under its `references/`. Pure path check for the
+ * committed read; the working-tree scan stays in `libraryNames`.
+ */
+export function isSkillCorpusPath(path: string): boolean {
+	const [name, head, ...rest] = path.split("/");
+	if (name === undefined || !SKILL_NAME_RE.test(name)) return false;
+	if (head === "SKILL.md" && rest.length === 0) return true;
+	return head === "references" && rest.length > 0;
+}
+
 /** Top-level entries of a root, links with their raw target; a missing root is empty. */
 export function inventory(root: Root): Inventory {
 	const entries = new Map<string, Entry>();

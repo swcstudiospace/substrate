@@ -503,7 +503,8 @@ switch (command) {
 				"substrate lessons add|recall|digest|outcome ...   (substrate lessons help)\n" +
 				"substrate skills propose --dir PATH [--name N] [--rationale R] [--remove a,b] [--session I] [--graph G]\n" +
 				"                         [--dry-run] [--replace] [--reopen] [--allow-doc-examples pem,jwt]\n" +
-				"substrate docs ingest --dataset NAME --path PATH --source-url URL [--commit C] [--heading H] [--session I]\n",
+				"substrate docs ingest --dataset NAME --path PATH --source-url URL [--commit C] [--heading H] [--session I]\n" +
+				"substrate docs refresh --dataset NAME --commit SHA --dir DIR [--path-prefix P] [--roots R,...] [--session I]\n",
 		);
 		process.exit(command ? 2 : 0);
 }

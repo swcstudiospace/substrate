@@ -1,31 +1,21 @@
 /**
- * DOCS-03: dataset resolve-by-name, refresh triggers and the skills-sync
- * degradation (D25-06, D25-07).
+ * DOCS-03: dataset version pins and the skills-sync degradation (D25-06,
+ * D25-07).
  *
- * Existing datasets are reused by name; creation happens only on a
- * name-miss with the pinned embedding model. Refresh records a version per
- * dataset and keeps the last five. The `agent-skills` refresh is driven by
- * skills-sync fast-forward evidence: with the sync unit not yet live there
- * is no evidence, so refresh degrades explicitly — one warning, and serve
- * from the last pinned version with the pin age in the reply.
+ * Refresh records a version per dataset and keeps the last five. The
+ * `agent-skills` refresh is driven by skills-sync fast-forward evidence:
+ * with the sync unit not yet live there is no evidence, so refresh
+ * degrades explicitly — one warning, and serve from the last pinned
+ * version with the pin age in the reply.
  *
- * The hook has no timer and no surface: the sync tick's projection step
- * calls `noteSkillsSyncFastForward`, and search consults `isSyncLive`.
+ * Dataset discovery and creation live behind the operator G2 gate, not in
+ * this module: the runtime ingest path refuses unknown datasets and the
+ * runbook owns creation.
  */
-import { createDataset, listDatasets, type FetchLike, type RagflowConfig } from "./planes/ragflow.ts";
+import type { FetchLike, RagflowConfig } from "./planes/ragflow.ts";
 import type { DatasetPin } from "./docs-search.ts";
 import type { EventInput, Surface } from "./types.ts";
 
-/** Every dataset this phase knows, with its refresh trigger. */
-export const DATASET_TRIGGERS: Readonly<Record<string, string>> = {
-	"agent-substrate": "merge to main of agent-substrate",
-	"programming-desk": "merge to main of programming-desk",
-	"agent-skills": "substrate-skills-sync fast-forward",
-	kanbanos: "merge to main of kanbanos",
-	desklanes: "merge to main of desklanes",
-	clippyos: "merge to main of clippyos",
-	auctioning: "merge to main of auctioning",
-};
 
 /** How many versions each dataset keeps (D25-06). */
 export const DATASET_VERSION_RETENTION = 5;
@@ -37,6 +27,20 @@ export interface DatasetVersion {
 	commit: string;
 	content_sha256: string;
 	ingested_at: string;
+	/**
+	 * The served corpus: every document backing this pin, so search cites
+	 * the pin commit only for chunks from these documents. Pins recorded
+	 * without a manifest (older rows, resolve-first refreshes) cite
+	 * nothing: their chunks read as unpinned rather than falsely current.
+	 */
+	documents?: VersionDocument[];
+}
+
+/** One served document inside a version pin. */
+export interface VersionDocument {
+	source_url: string;
+	document_id: string;
+	content_sha256: string;
 }
 
 /** Per-dataset version lists, newest last. */
@@ -59,57 +63,44 @@ export function latestVersion(store: VersionStore, dataset: string): DatasetVers
 	return versions[versions.length - 1];
 }
 
+/** Fields a version finalize needs; the store supplies the monotonic number. */
+export interface DatasetVersionFields {
+	dataset: string;
+	dataset_id: string;
+	commit: string;
+	content_sha256: string;
+	ingested_at: string;
+	documents?: VersionDocument[];
+}
+
+/**
+ * Record the next version for a dataset with a store-derived monotonic
+ * number, keeping the last five (D25-06). Shared by the resolve-first
+ * refresh and the substrate ingest finalize so the two doors cannot fork
+ * the numbering: only changed, fully-parsed corpora promote, and the
+ * caller decides that — this helper only numbers and retains.
+ */
+export function recordDatasetVersion(store: VersionStore, fields: DatasetVersionFields): DatasetVersion {
+	const prior = store.get(fields.dataset) ?? [];
+	const generation = prior.reduce((top, record) => {
+		const n = Number(/^v(\d+)$/.exec(record.version)?.[1] ?? 0);
+		return Math.max(top, Number.isFinite(n) ? n : 0);
+	}, 0);
+	const version: DatasetVersion = { ...fields, version: `v${generation + 1}` };
+	recordVersion(store, version);
+	return version;
+}
+
 /** The search pins for every dataset with a recorded version. */
 export function pinsFromVersions(store: VersionStore): Record<string, DatasetPin> {
 	const pins: Record<string, DatasetPin> = {};
 	for (const versions of store.values()) {
 		const latest = versions[versions.length - 1];
-		if (latest) pins[latest.dataset_id] = { dataset: latest.dataset, dataset_id: latest.dataset_id, version: latest.version, commit: latest.commit, ingested_at: latest.ingested_at };
+		if (latest) pins[latest.dataset_id] = { dataset: latest.dataset, dataset_id: latest.dataset_id, version: latest.version, commit: latest.commit, ingested_at: latest.ingested_at, ...(latest.documents !== undefined ? { documents: latest.documents } : {}) };
 	}
 	return pins;
 }
 
-export interface ResolvedDataset {
-	name: string;
-	id: string | null;
-	created: boolean;
-}
-
-export interface ResolveDeps {
-	config: RagflowConfig;
-	fetchImpl?: FetchLike;
-	/** Create on a name-miss. False rehearses discovery without creating (G2 owns real creation). */
-	createOnMiss?: boolean;
-}
-
-/**
- * Discover-first resolve: match names against `GET /api/v1/datasets` and
- * create only on a name-miss (D25-06). A transport failure is a reason, not
- * a throw.
- */
-export async function resolveDatasets(
-	deps: ResolveDeps,
-	names: readonly string[],
-): Promise<{ ok: true; datasets: ResolvedDataset[] } | { ok: false; reason: string }> {
-	const listed = await listDatasets(deps.config, deps.fetchImpl);
-	if (!listed.ok) return { ok: false, reason: listed.reason };
-	const datasets: ResolvedDataset[] = [];
-	for (const name of names) {
-		const match = listed.datasets.find((dataset) => dataset.name === name);
-		if (match) {
-			datasets.push({ name, id: match.id, created: false });
-			continue;
-		}
-		if (deps.createOnMiss === false) {
-			datasets.push({ name, id: null, created: false });
-			continue;
-		}
-		const created = await createDataset(deps.config, name, deps.fetchImpl);
-		if (!created.ok) return { ok: false, reason: created.reason };
-		datasets.push({ name, id: created.id, created: true });
-	}
-	return { ok: true, datasets };
-}
 
 export interface RefreshDeps {
 	config: RagflowConfig;
@@ -119,50 +110,6 @@ export interface RefreshDeps {
 	sessionId?: string;
 	fetchImpl?: FetchLike;
 	nowMs?: number;
-}
-
-/**
- * Refresh one dataset: resolve by name (creating on miss), then record the
- * version. Real product-dataset creation is a gated live step (G2), not
- * rehearsed away — the fake proves the convention, the operator approves
- * the deployment write.
- */
-export async function refreshDataset(
-	deps: RefreshDeps,
-	input: { dataset: string; commit: string; content_sha256: string },
-): Promise<{ ok: true; version: DatasetVersion; created: boolean } | { ok: false; reason: string }> {
-	const resolved = await resolveDatasets({ config: deps.config, fetchImpl: deps.fetchImpl }, [input.dataset]);
-	if (!resolved.ok) return { ok: false, reason: resolved.reason };
-	const entry = resolved.datasets[0];
-	if (!entry?.id) return { ok: false, reason: "unknown-dataset" };
-	const prior = deps.versions.get(input.dataset) ?? [];
-	const generation = prior.reduce((top, record) => {
-		const n = Number(/^v(\d+)$/.exec(record.version)?.[1] ?? 0);
-		return Math.max(top, Number.isFinite(n) ? n : 0);
-	}, 0);
-	const version: DatasetVersion = {
-		dataset: input.dataset,
-		dataset_id: entry.id,
-		version: `v${generation + 1}`,
-		commit: input.commit,
-		content_sha256: input.content_sha256,
-		ingested_at: new Date(deps.nowMs ?? Date.now()).toISOString(),
-	};
-	recordVersion(deps.versions, version);
-	await deps.emit({
-		surface: deps.surface ?? "claude-code",
-		kind: "note",
-		summary: `docs dataset ${input.dataset} refreshed to ${version.version}`,
-		session_id: deps.sessionId ?? `docs-refresh:${version.version}`,
-		payload: {
-			action: "docs.ingest",
-			dataset_id: entry.id,
-			version: version.version,
-			commit: input.commit,
-			content_sha256: input.content_sha256,
-		},
-	});
-	return { ok: true, version, created: entry.created };
 }
 
 /**

@@ -57,3 +57,120 @@ Runbooks holding every proof + rollback: `docs/runbooks/production-identity.md` 
 ## Non-goals held
 
 RAGFlow/Hindsight MCP in agent configs (D9/D25-01/D26-01); Hindsight as store of record; new EVENT_KINDS (12 held); Dragonfly as queue/lock; auto-merging skills; agent-side credential handling.
+
+## Late addendum — current-main correction hold (2026-10-12, no archive replay)
+
+This section is additive only. The historical verdict above
+(**PASS with recorded gated remainders**, 18/18 phases, 68 requirements,
+43 `behavior_unverified` items across 11 phases) stands unchanged as the
+archived v1.3 record. Nothing below re-runs, re-seals, re-completes, or
+re-archives the milestone, and no requirement checkbox or roadmap state is altered
+by this addendum.
+
+**Current end-to-end acceptance: HELD — operator-blocked by explicit user
+decision, not waived.** The 43 live-tail behaviors remain historically
+unverified. The user explicitly selected Keep real-proof criteria, so full
+end-to-end milestone completion stays blocked until real proofs are recorded.
+The archived implementation is not full completion, and the original
+convention (PASS with gated remainders) is history, not a silent waiver of
+the current acceptance bar. Source-complete 18/18 stays historical; no
+7-of-18 local checkpoint is presented as current-main status.
+
+**Final parent proof on current `84c8fc1` plus owned corrections (2026-10-12):**
+
+- Full Bun suite: **3,275 pass / 58 skip / 0 fail**, 130 files. Python:
+  **246 passed**. Types exited 0; current shell syntax and shellcheck
+  exited 0. Phase-close: **119 pass / 0 fail** in four lock files;
+  EVENT_KINDS 12, SURFACES 27. These supersede the earlier 3,199 run.
+- Five actual Phase 28 consumer/entry test paths were checked to exist
+  before the targeted **385 pass / 0 fail** run; G1–G4 are covered by
+  actual subprocess/transport/verifier transitions.
+- Final named scratch runtime `v13-seal-8bfdef25`: basic 4/4, proposal
+  47/47, ledger **68/68**, desktop 20/20, vocabulary 29/29
+  (28 stored/read back, no refusals). The exact existing-leaf proof retains
+  its anchor while a valid rehashed chain mismatches the recomputed hour;
+  the real CLI exits 1 and names the hour. Up/down exited 0 and removed
+  two owned stores. Historical 47/47 and the earlier current run stay
+  provenance, not production acceptance.
+- Restored earlier owned Phase 19 source (`6f85adb`, source paths only):
+  **41/41** current real named-herdr/installed-Muse checks passed.
+  Herdr's internal client socket exceeded Unix path capacity under a long
+  scratch HOME; a shorter owned private HOME satisfied the actual
+  prerequisite. No collector or proof gate was weakened.
+- Actual host-client → authenticated scratch MCP/PG/Greptime and actual
+  Node guest relay passed **24/24** checks: correct identity, canonical
+  grant persistence, fencing, real disk-failure compensation, no guest
+  credentials, canonical kickoff registration, terminal public status,
+  idle post-release heartbeat and no restart resumption. The trusted
+  SDK CLI adapter is emulated; a real VM/engine/model remains unproved.
+- Actual Git → CLI → HTTP/audit → pinned docs → restart/readback plus a
+  real local-origin fast-forward and real projector link passed **16/16**.
+  Dirty/untracked bytes remain unpublished, partial/refused refreshes
+  retain the old pin, and successful sync exposes the new committed pin.
+  RAGFlow is a loopback contract fixture, not a live external plane.
+
+**Reachable source integration defects — repaired and exercised:**
+the host's dual identities, canonical nested grant, fenced release and
+guest credential containment now use actual product callers. Both guest
+routes share TaskService terminal transitions; failed/released tasks lose
+mutation authority, lease loss cancels/unloads the session, and guest
+re-registration cannot overwrite canonical step references. The served
+docs path now has committed-byte refresh, multipart promotion barriers,
+immutable document manifests, last-five retention and truthful pin age.
+Conflicting bytes for one URL and corrupt timestamp pins are refused or
+dropped; dead hollow-pin helpers and incidental copy/source tests were
+removed. Focused native source/security re-reviews closed their findings;
+no live proof, risk acceptance or merge-ready verdict is implied.
+
+**Archive continuity:** the old active roadmap was byte-identical to the
+existing archived roadmap. Its duplicate active phase routing has been
+replaced by archive pointers and this acceptance hold. Native discovery
+now returns no active phases and `next_phase: null`, not a false Phase 16
+replay. The archive's historical 18/18 phases, 76 plans, 68 requirements
+and 43-count ledger remain unchanged; 0 active phases is not 0 completed
+archived phases. STATE now carries the separate human-needed acceptance.
+
+**Operator facts — conflict preserved, no acceptance invented:** the
+aggregate above claims a switch/soak and scenarios 2+5 passed live, while
+archived `20-UAT.md` lines 93–106 and `20-06-SUMMARY.md` say the live tasks
+and scenarios were not run. There is also a dated positive window record
+in `docs/runbooks/production-identity.md` lines 248–252: staged values
+PASS, restart/parity, and soak counts for four surfaces, with hermes,
+grok-build and grok-bot idle (no prompts). That later record is preserved,
+not suppressed; it does not establish scenario 2+5 receipts, readiness of
+every installed client, or a real prompt from every live client. The
+evidence owner must reconcile the records. Phase 20 acceptance stays held.
+
+**Separately held beyond the historical 43 count:** MIRROR-08 is explicitly
+NOT RUN despite Phase 23's `behavior_unverified: 0`. Its real
+Linear/Notion/connector transition proof still needs approval and receipts.
+The new Cursor credential disclosure also requires operator rotation;
+the historical rotation decline is not a waiver of this incident. No
+credential value, new approval, restart or private hostname is recorded.
+
+**Proof + rollback pointers:** isolated fake-chain proof and its additive
+rollback live in the Phase 28 archive
+(`.planning/milestones/v1.3-phases/28-hourly-anchor-job-and-verify/`,
+`28-04-SUMMARY.md` runbook + `28-PROOF-ADDENDUM.md` late status);
+per-step live gates in `docs/greptime-ledger.md` (Hourly anchor entry).
+The local scratch prerequisite is proved and cleaned up. All L1–L10 live
+steps still need separate approval, including read-only steps; L9/L10's
+permissive historical wording never overrides the binding plan. Real
+production v1.1.4 cadence, external plane/client/tracker/VM/model proofs
+and incident rotation remain operator-owned.
+
+**Delivery:** corrections are isolated on `swarm/v13-current-proof-corrections`;
+no protected-main merge, auto-merge, force-push or branch deletion was
+performed. `ultrathink-ship assess` returned `done: false` through its
+deterministic uncommitted-change gate, before any model judge request.
+The corrected source will be committed locally; full user-request
+acceptance still requires the operator proofs above, so no PR/review/merge
+command or `--ignore-gsd` bypass follows that assessment.
+
+**Checkout incident:** exact known child-owned test hunks were copied,
+verified and surgically removed from the user checkout; its subsequent
+status was empty. A separate child's earlier whole-file restore of
+`scripts/greptime-smoke.ts` had an unknown pre-existing diff. Empty status
+does not establish no loss for that earlier incident; no such claim is
+made. The disclosed Cursor credential remains a separate containment
+action for the operator.

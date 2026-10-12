@@ -78,8 +78,12 @@ export const SUBSTRATE_MCP_PORT = 7410;
 export const MODEL_RELAY_PORT = 3001;
 /** The host's tracker MCP proxy (notion, linear) — served and reachable only on tracker_route vm_mcp. */
 export const TRACKER_PROXY_PORT = 7412;
+/** The in-VM substrate MCP relay (I-04): VM-local only, never a host loopback exemption. */
+export const SUBSTRATE_RELAY_PORT = 7413;
 export const SUBSTRATE_MCP_URL = `http://127.0.0.1:${SUBSTRATE_MCP_PORT}/mcp`;
-/** Where the session's Anthropic client connects on a:loopback (host shunt) and a:hostfn_proxy (in-VM relay). */
+/** Where the guest's substrate MCP client connects on s:mcp: the in-VM relay (credential-free). */
+export const SUBSTRATE_RELAY_URL = `http://127.0.0.1:${SUBSTRATE_RELAY_PORT}/mcp`;
+/** The session's model endpoint: host shunt or the existing in-VM model relay. */
 export const MODEL_RELAY_URL = `http://127.0.0.1:${MODEL_RELAY_PORT}`;
 export const ANTHROPIC_DIRECT_URL = "https://api.anthropic.com";
 

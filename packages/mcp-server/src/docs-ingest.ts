@@ -31,6 +31,8 @@ import {
 } from "./planes/ragflow.ts";
 import { REDACTION_RULES, redact, redactSkillContent } from "./redact.ts";
 import type { EventInput, Surface } from "./types.ts";
+import { DATASET_VERSION_RETENTION } from "./docs-datasets.ts";
+import type { DatasetVersion, SkillsSyncTracker, VersionStore } from "./docs-datasets.ts";
 
 /** One page may not exceed 1 MB (D25-05, Phase 21 precedent). */
 export const INGEST_PAGE_MAX_BYTES = 1_000_000;
@@ -76,7 +78,7 @@ export type PageSettlement =
 	| { ok: false; reason: string };
 
 export type IngestOutcome =
-	| { ok: true; results: IngestPageResult[]; stripped_images: number }
+	| { ok: true; dataset_id: string; results: IngestPageResult[]; stripped_images: number }
 	| { ok: false; refused: true; reason: string; rules?: string[]; page?: string };
 
 /** A source URL's last ingest in one dataset, for hash idempotency. */
@@ -322,36 +324,170 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 			stripped_images: strippedImages,
 		},
 	});
-	return { ok: true, results, stripped_images: strippedImages };
+	return { ok: true, dataset_id: dataset.id, results, stripped_images: strippedImages };
 }
 
 /**
  * Ingest records on disk, so a restarted server does not re-upload pages it
- * already stored (Greptile P1). A missing or corrupt file means an empty
- * map, never a throw: losing dedup degrades to a duplicate upload, while
- * refusing ingest over an unreadable file would turn a disk hiccup into an
- * outage of the publication path. The caller reports the problem string.
+ * already stored (Greptile P1). The same file carries the dataset version
+ * pins and the skills-sync tracker, so a restart rebuilds truthful pins
+ * instead of serving from an empty in-memory map. A missing or corrupt file
+ * means empty tables, never a throw: losing dedup degrades to a duplicate
+ * upload, losing pins degrades to unpinned naming, while refusing ingest
+ * over an unreadable file would turn a disk hiccup into an outage of the
+ * publication path. The caller reports the problem string.
  */
 export interface IngestStateFile {
 	version: 1;
 	records: Record<string, IngestRecord>;
+	versions?: Record<string, DatasetVersion[]>;
+	sync?: { fastForwardObserved?: boolean; notLiveWarned?: boolean };
+	refreshes?: Record<string, StagedRefresh>;
 }
 
-export async function loadIngestRecords(file: string): Promise<{ records: Map<string, IngestRecord>; problem?: string }> {
+/** Every table a restarted process needs to serve truthful pins. */
+export interface LoadedIngestState {
+	records: Map<string, IngestRecord>;
+	versions: VersionStore;
+	sync: SkillsSyncTracker;
+	staging: Map<string, StagedRefresh>;
+	problem?: string;
+}
+
+/** How many parts one refresh may span; more is refused before anything posts. */
+export const MAX_REFRESH_PARTS = 64;
+/** How many unfinished refreshes the state file keeps; older rows are dropped on load. */
+export const MAX_STAGED_REFRESHES = 16;
+
+/**
+ * One unfinished multi-part refresh: which whole corpus is arriving, and
+ * which parts have stored+parsed so far. The pin advances only when every
+ * part is staged — never on a partial corpus.
+ */
+export interface StagedRefresh {
+	dataset: string;
+	commit: string;
+	trigger: string;
+	parts: number;
+	received: Record<string, StagedPage[]>;
+	updated_at: string;
+}
+
+/** One staged page: the stored record identity, frozen at receipt. */
+export interface StagedPage {
+	source_url: string;
+	document_id: string;
+	content_sha256: string;
+}
+
+function isStagedPage(value: unknown): value is StagedPage {
+	if (value === null || typeof value !== "object") return false;
+	return (
+		"source_url" in value &&
+		"document_id" in value &&
+		"content_sha256" in value &&
+		typeof value.source_url === "string" &&
+		value.source_url.length > 0 &&
+		typeof value.document_id === "string" &&
+		value.document_id.length > 0 &&
+		typeof value.content_sha256 === "string" &&
+		value.content_sha256.length > 0
+	);
+}
+
+function isStagedRefresh(id: string, row: unknown): row is StagedRefresh {
+	if (id.length === 0 || id.length > 128) return false;
+	if (row === null || typeof row !== "object") return false;
+	if (!("dataset" in row) || !("commit" in row) || !("trigger" in row) || !("parts" in row) || !("received" in row)) return false;
+	if (typeof row.dataset !== "string" || row.dataset.length === 0) return false;
+	if (typeof row.commit !== "string" || row.commit.length === 0) return false;
+	if (row.trigger !== "repo-merge" && row.trigger !== "skills-sync") return false;
+	if (typeof row.parts !== "number" || !Number.isInteger(row.parts) || row.parts < 1 || row.parts > MAX_REFRESH_PARTS) return false;
+	if (row.received === null || typeof row.received !== "object") return false;
+	for (const [part, pages] of Object.entries(row.received)) {
+		const index = Number(part);
+		if (!Number.isInteger(index) || index < 1 || index > row.parts) return false;
+		if (!Array.isArray(pages) || pages.length === 0 || !pages.every(isStagedPage)) return false;
+	}
+	return true;
+}
+
+/** Which whole-corpus flow a refresh belongs to. */
+export type RefreshTrigger = "repo-merge" | "skills-sync";
+
+/**
+ * Refresh metadata carried on every part of a multi-part refresh. Parts
+ * upload and parse independently; the pin advances only when every part
+ * of the id is staged. Ordinary ingests carry no metadata and keep
+ * single-call semantics.
+ */
+export interface RefreshMeta {
+	id: string;
+	part: number;
+	parts: number;
+	trigger: RefreshTrigger;
+}
+
+export function isRefreshMeta(value: unknown): value is RefreshMeta {
+	if (value === null || typeof value !== "object") return false;
+	if (!("id" in value) || !("part" in value) || !("parts" in value) || !("trigger" in value)) return false;
+	if (typeof value.id !== "string" || value.id.length === 0 || value.id.length > 128) return false;
+	if (typeof value.part !== "number" || !Number.isInteger(value.part)) return false;
+	if (typeof value.parts !== "number" || !Number.isInteger(value.parts) || value.parts < 1 || value.parts > MAX_REFRESH_PARTS) return false;
+	if (value.part < 1 || value.part > value.parts) return false;
+	if (value.trigger !== "repo-merge" && value.trigger !== "skills-sync") return false;
+	return true;
+}
+
+function emptyState(problem?: string): LoadedIngestState {
+	const state: LoadedIngestState = {
+		records: new Map<string, IngestRecord>(),
+		versions: new Map<string, DatasetVersion[]>(),
+		sync: { fastForwardObserved: false, notLiveWarned: false },
+		staging: new Map<string, StagedRefresh>(),
+	};
+	if (problem !== undefined) state.problem = problem;
+	return state;
+}
+
+function isVersionRow(row: unknown): row is DatasetVersion {
+	if (row === null || typeof row !== "object") return false;
+	// ingested_at must parse to a finite time: a hand-edited state file
+	// with a bad timestamp loads as no row at all, so degraded serve can
+	// never answer a NaN pin age. Documents stay unvalidated here —
+	// unknown documents fail closed to unpinned at cite time.
+	return (
+		"dataset" in row &&
+		"dataset_id" in row &&
+		"version" in row &&
+		"commit" in row &&
+		"content_sha256" in row &&
+		"ingested_at" in row &&
+		typeof row.dataset === "string" &&
+		typeof row.dataset_id === "string" &&
+		typeof row.version === "string" &&
+		typeof row.commit === "string" &&
+		typeof row.content_sha256 === "string" &&
+		typeof row.ingested_at === "string" &&
+		Number.isFinite(Date.parse(row.ingested_at))
+	);
+}
+
+export async function loadIngestRecords(file: string): Promise<LoadedIngestState> {
 	let raw: string;
 	try {
 		raw = await readFile(file, "utf8");
 	} catch {
-		return { records: new Map<string, IngestRecord>() };
+		return emptyState();
 	}
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(raw);
 	} catch {
-		return { records: new Map<string, IngestRecord>(), problem: `${file} is not valid JSON; starting with empty ingest records` };
+		return emptyState(`${file} is not valid JSON; starting with empty ingest records`);
 	}
 	if (parsed === null || typeof parsed !== "object" || !("records" in parsed) || parsed.records === null || typeof parsed.records !== "object") {
-		return { records: new Map<string, IngestRecord>(), problem: `${file} has no records table; starting with empty ingest records` };
+		return emptyState(`${file} has no records table; starting with empty ingest records`);
 	}
 	const records = new Map<string, IngestRecord>();
 	for (const [key, record] of Object.entries(parsed.records)) {
@@ -362,17 +498,48 @@ export async function loadIngestRecords(file: string): Promise<{ records: Map<st
 		}
 		records.set(key, { sha: record.sha, dataset_id: record.dataset_id, source_url: record.source_url, document_id: record.document_id });
 	}
-	return { records };
+	const versions = new Map<string, DatasetVersion[]>();
+	if ("versions" in parsed && parsed.versions !== null && typeof parsed.versions === "object") {
+		for (const [dataset, list] of Object.entries(parsed.versions)) {
+			if (!Array.isArray(list)) continue;
+			const rows = list.filter(isVersionRow);
+			if (rows.length > 0) versions.set(dataset, rows.slice(-DATASET_VERSION_RETENTION));
+		}
+	}
+	const sync: SkillsSyncTracker = { fastForwardObserved: false, notLiveWarned: false };
+	if ("sync" in parsed && parsed.sync !== null && typeof parsed.sync === "object") {
+		if ("fastForwardObserved" in parsed.sync && parsed.sync.fastForwardObserved === true) sync.fastForwardObserved = true;
+		if ("notLiveWarned" in parsed.sync && parsed.sync.notLiveWarned === true) sync.notLiveWarned = true;
+	}
+	const staging = new Map<string, StagedRefresh>();
+	if ("refreshes" in parsed && parsed.refreshes !== null && typeof parsed.refreshes === "object") {
+		for (const [id, row] of Object.entries(parsed.refreshes)) {
+			if (isStagedRefresh(id, row)) staging.set(id, row);
+			if (staging.size >= MAX_STAGED_REFRESHES) break;
+		}
+	}
+	return { records, versions, sync, staging };
 }
 
 /**
- * Persist ingest records. Throws on I/O failure; the caller logs and
- * continues. Written to a sibling temp file and renamed, so a crash
- * mid-write never leaves half a JSON document behind.
+ * Persist ingest records with the version pins, the sync tracker and the
+ * unfinished refresh staging in one atomic snapshot. Throws on I/O
+ * failure; the caller logs and continues. Written to a sibling temp file
+ * and renamed, so a crash mid-write never leaves half a JSON document
+ * behind.
  */
-export async function saveIngestRecords(file: string, seen: Map<string, IngestRecord>): Promise<void> {
+export async function saveIngestRecords(
+	file: string,
+	seen: Map<string, IngestRecord>,
+	extra?: { versions?: VersionStore; sync?: SkillsSyncTracker; staging?: Map<string, StagedRefresh> },
+): Promise<void> {
 	await mkdir(dirname(file), { recursive: true });
 	const state: IngestStateFile = { version: 1, records: Object.fromEntries(seen) };
+	if (extra?.versions !== undefined) state.versions = Object.fromEntries(extra.versions);
+	if (extra?.sync !== undefined) {
+		state.sync = { fastForwardObserved: extra.sync.fastForwardObserved, notLiveWarned: extra.sync.notLiveWarned };
+	}
+	if (extra?.staging !== undefined) state.refreshes = Object.fromEntries(extra.staging);
 	const tmp = `${file}.${process.pid}.tmp`;
 	await writeFile(tmp, `${JSON.stringify(state)}\n`, "utf8");
 	await rename(tmp, file);

@@ -110,6 +110,7 @@ two cannot drift.
 | `hermes-prompt-uplift` | `hermes` | external note: not installed and out of scope for this phase | `not-installed` | not installed |
 | `hermes-eng-board` | `hermes` | external note: not wired and its own surface name is fixed in its own repo | `not-installed` | not wired |
 | `skill-autonomy` | `grok-build` | external note: not wired and out of scope for this phase | `not-installed` | not wired |
+| `substrate-host-lease` | `claude-code` | env-file `/etc/substrate/substrate-host.env`, variable `SUBSTRATE_TOKEN_CLAUDE_CODE` | `dormant:31` | Host-only fencing identity; provisioning, values matching and installed readiness still operator-gated |
 
 <!-- identity-clients:end -->
 

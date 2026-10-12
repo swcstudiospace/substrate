@@ -407,6 +407,7 @@ describe("single-use approvals through the real service (33-02, D33-06)", () => 
 			store,
 			leases: { load: () => null, persist: () => undefined } as never,
 			ensureModelRoute: async () => {},
+			ensureSubstrateRoute: async () => {},
 			route: {} as never,
 			testsRoute: "sandbox",
 			model: "test",

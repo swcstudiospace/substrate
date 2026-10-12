@@ -63,13 +63,19 @@ export class RagflowFake {
 	chunkShape: FakeChunkShape = "full";
 	/** When set, the next retrieval answers with this status instead. */
 	failRetrievalWith: number | null = null;
+	/**
+	 * Serve retrieval from the uploaded documents instead of the seed
+	 * skeleton, so a pin over real uploads matches served chunks. Off by
+	 * default; the seed corpus keeps every existing redaction proof.
+	 */
+	serveUploadsAsChunks = false;
 	readonly datasets: FakeDataset[] = [
 		{ id: BERLIN_ID, name: "agent-substrate", embedding_model: "tei-bge-small" },
 		{ id: HAMM_ID, name: "programming-desk", embedding_model: "tei-bge-small" },
 		{ id: LEIPZIG_ID, name: "agent-skills", embedding_model: "tei-bge-small" },
 	];
-	/** Every uploaded document, in order. */
-	readonly uploads: Array<{ dataset_id: string; content: string; metadata: Record<string, string> }> = [];
+	/** Every uploaded document, in order, with the id the plane assigned. */
+	readonly uploads: Array<{ dataset_id: string; document_id: string; content: string; metadata: Record<string, string> }> = [];
 	/** `done` parses after two polls; `never` stays parsing so timeout logic is provable. */
 	parseBehavior: "done" | "never" = "done";
 	private parsePolls: Record<string, number> = {};
@@ -122,6 +128,25 @@ export class RagflowFake {
 		const out: Record<string, unknown>[] = [];
 		for (const id of body.dataset_ids) {
 			if (typeof id !== "string") continue;
+			if (this.serveUploadsAsChunks) {
+				for (const upload of this.uploads.filter((entry) => entry.dataset_id === id)) {
+					const name = upload.metadata["source_url"]?.split("/").pop() || "uploaded.md";
+					if (this.chunkShape === "minimal") {
+						out.push({ content: upload.content, document_name: name });
+					} else {
+						out.push({
+							content: upload.content,
+							document_name: name,
+							document_id: upload.document_id,
+							chunk_id: `${upload.document_id}-c1`,
+							heading_path: upload.metadata["heading_path"] ?? "",
+							source_url: upload.metadata["source_url"] ?? "",
+							score: 0.9,
+						});
+					}
+				}
+				continue;
+			}
 			for (const chunk of this.chunks[id] ?? []) {
 				if (this.chunkShape === "minimal") {
 					out.push({ content: chunk.content, document_name: chunk.document_name });
@@ -163,9 +188,9 @@ export class RagflowFake {
 				if (typeof value === "string") metadata[key] = value;
 			}
 		}
-		this.uploads.push({ dataset_id: datasetId, content: body.content, metadata });
 		const documentId = `doc-upload-${this.nextDoc}`;
 		this.nextDoc += 1;
+		this.uploads.push({ dataset_id: datasetId, document_id: documentId, content: body.content, metadata });
 		this.parsePolls[documentId] = 0;
 		return Response.json({ data: { document_id: documentId, status: "parsing" } });
 	}

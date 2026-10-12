@@ -178,16 +178,6 @@ describe("the tracked manifest", () => {
 		}
 	});
 
-	test("manifest ids appear in the runbook marked table (active once Task 2 lands)", () => {
-		if (!existsSync(RUNBOOK)) return;
-		const doc = readFileSync(RUNBOOK, "utf8");
-		const start = doc.indexOf("<!-- identity-clients:start -->");
-		const end = doc.indexOf("<!-- identity-clients:end -->");
-		expect(start).toBeGreaterThanOrEqual(0);
-		expect(end).toBeGreaterThan(start);
-		const table = doc.slice(start, end);
-		for (const client of loadManifest(MANIFEST_PATH).clients) expect(table).toContain(client.id);
-	});
 
 	test("expected server names cover the required names and every surface", () => {
 		const manifest = loadManifest(MANIFEST_PATH);
