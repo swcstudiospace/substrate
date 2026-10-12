@@ -231,14 +231,44 @@ plus draft PR #54):**
   recorded: the Hermes run pushed its own graph-branch work as draft PR #57.
   Full receipt: session artifact `v13-dispatch-live-receipt.json`.
 
+- **LANEA live window (2026-10-12, 31m, rollback verified)**: port topology
+  proven (7410 mcp untouched, 7411 free→served, 6420 engine container healthy
+  and untouched); host unit installed with the D31-04 fallback-engine drop-in
+  (shared 6420 engine refused host actors 401 — token belongs to the other
+  project; second loopback engine on 6422 from the local engine-cli binary,
+  no pull, no network); real VM boot PASS without KVM demand
+  (create 742ms/configure 2924ms, 149 mounts, agentos 0.2.21); `/tasks` door
+  live on 7411 and validated a real body against substrate-mcp (400
+  not-registered before any VM work); restart→resume boot honest
+  (`interrupted turns resumed: 0`, zero replay, task records persisted 0600);
+  `sync: notion on, linear on`; boot log truthfully prints `telegram
+  approvals off`. Rollback: unit disabled (dormant, files retained per
+  runbook), 6422 released, scratch removed, disk restored (~91 GB free).
+  **Named blockers for the full LANEA-01/02/03-turn/06/08 chain**:
+  (1) sandbox image `substrate-sandbox:0.1` absent locally — building/pulling
+  it (~2 GB+, image floor holds) needs operator approval;
+  (2) the host model shunt 127.0.0.1:3001 answers 502 "Grok CLI 0.2.93
+  outdated (requires ≥1.0.13)" — no model-settled turn is possible until the
+  operator updates it;
+  (3) no Telegram approvals binding is configured (fail-closed auto-deny is
+  the current truthful behavior);
+  (4) a real mid-session resume needs an in-flight turn, i.e. blockers 1+2.
+  Full receipt: session artifact `v13-lanea-live-receipt.json`.
+
 **Separately held beyond the historical 43 count:** ~~MIRROR-08~~ —
 **cleared 2026-10-12** (receipt above); its earlier
 `behavior_unverified: 0`-with-NOT-RUN contradiction is resolved by the real
-transitions. Still held: the Phase 20 installed-client/per-scenario receipts
-(the 342 unauthenticated `/events` 4xx name the open readiness question) and
-the new Cursor credential disclosure, which requires operator rotation; the
-historical rotation decline is not a waiver of this incident. No credential
-value or private hostname is recorded.
+transitions. ~~DISP-08~~ — **cleared 2026-10-12** (receipt above). Still
+held: the Phase 20 installed-client/per-scenario receipts (the 342
+unauthenticated `/events` 4xx name the open readiness question) and the
+Cursor credential rotation (operator-only; the historical decline is not a
+waiver); the LANEA chain on its four named prerequisites above; the
+SKILL-02/03/04/07 live tail on Hermes miner/bridge/sync rebinds plus an
+owner-merged PR; devnet funded steps L4/L5/L8 and 29-G3 on the 0-lamport
+keypair; and the deployment-gated docs/hindsight tails (substrate-mcp still
+runs the 2026-10-10 process — one parity restart after the correction PR
+merges serves `main`'s code and unblocks them). No credential value or
+private hostname is recorded.
 
 **Proof + rollback pointers:** isolated fake-chain proof and its additive
 rollback live in the Phase 28 archive
