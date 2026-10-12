@@ -24,7 +24,7 @@ current_phase_name: null
 
 **v1.3 implementation is archived:** 18 phases (16–33), 76 plans and 68 requirements. The archive completed concurrently at `ab0dff1`; do not replay completion, recreate active phase directories or start a new milestone. The user explicitly retains real-proof criteria: source-completion history is not full end-to-end acceptance. Current isolated corrections and remaining gates are recorded in `VALIDATION.md`.
 
-**Residual reconciliation:** all 36 older plan mappings and 98 task rows are individually recorded without archive replay. Of the 53 previously pending requirement rows, 32 isolated criteria are locally evidenced and 21 compound live criteria remain held; this is not a new score for all 68 approved requirements. The two missing named deliverables, `--ragflow-fixture` and `scripts/docs-smoke.ts`, are now implemented and actually verified: docs82/82 through MCP/REST/CLI/Git/ledger, skills18/18 with the required scratch surfaces, types0, Bun3355/58/0, Python246 and locks119/0. Earlier compiler failures and56/62 then72/82 runtime failures remain provenance; their causes were repaired without lowering assertions. Every named process was stopped and its two owned stores removed. These source proofs do not satisfy the remaining real-plane/client/tracker/VM/devnet or incident-rotation gates.
+**Residual reconciliation:** all 36 older plan mappings and 98 task rows are individually recorded without archive replay. Of the 53 previously pending requirement rows, 32 isolated criteria are locally evidenced and 21 compound live criteria remain held; this is not a new score for all 68 approved requirements. The two missing named deliverables, `--ragflow-fixture` and `scripts/docs-smoke.ts`, are implemented and verified (docs82/82, skills18/18). **Live windows executed 2026-10-12 under the operator's all-scripted-runbooks approval:** identity values PASS recorded; MIRROR-08 PASS on SWC-467; DISP-08 PASS on SWC-480 (kill switch restored); UAT live scenarios 1/3/4/7/8 PASS; docs G1/G2 PASS on the real RAGFlow plane (v0.27.1, `auctioning` created); Hindsight governance + Dragonfly hit/outage arms PASS; Lane A doors/boot/rollback proven. Held with named prerequisites: installed-client UAT tail (2/5/6) + Cursor rotation; SKILL live tail (rebinds + owner merge); devnet funded steps (0-lamport keypair); LANEA turn chain (sandbox image, Grok CLI ≥1.0.13 shunt, Telegram binding); deployment-gated docs/hindsight tails (one parity restart after PR #54 merges serves main's code). PR #54: Greptile SUCCESS, typecheck/locks SUCCESS, vulnerability audit SKIPPED (reported blocker); merge is the owner's click.
 
 **Docs contract decision (user, this conversation):** keep the consolidated actual docs API, persisted local manifests and last-five version manifests. The older source clauses for `dry_run`, rebuilding the manifest from RAGFlow and physical deletion of retired versions are explicitly superseded, not implemented or proved. All real live proof gates remain required. The existing D25-07 no-new-timer hook decision is unchanged.
 
@@ -159,9 +159,9 @@ which is why Greptime worked immediately and Postgres did not.
 ## Current Position
 
 Phase: None active — v1.3 implementation archived
-Plan: No active implementation phase; existing operator-gated proofs remain
-Status: human_needed for end-to-end acceptance; reachable local corrections verified
-Last activity: 2026-10-12 — 3,355/58/0 Bun tests across132files,246 Python,types/locks clean; actual named docs82/82,skills18/18 and default basic4/4; earlier host24/24,collectors41/41,docs-lifecycle16/16 and proposal/ledger/desktop/vocabulary proofs retained
+Plan: No active implementation phase; live windows executed under the 2026-10-12 operator approval; remaining holds carry named prerequisites
+Status: human_needed for end-to-end acceptance; MIRROR-08 and DISP-08 cleared live, UAT 1/3/4/7/8 live-pass, docs G1/G2 live-pass, Hindsight/Dragonfly arms live-pass, Lane A doors/boot/rollback proven
+Last activity: 2026-10-12T15:22:40Z — final certification Bun3355/58/0, Python246, types0, locks119/0; production release ff71394 deployed (substrate-mcp process unchanged since 2026-10-10); PR #54 open (Greptile SUCCESS, typecheck/locks SUCCESS, vulnerability audit SKIPPED = reported blocker)
 
 ## Deferred Items
 
@@ -173,16 +173,18 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Operator Next Steps
 
-- Local source contracts are repaired and exercised on `swarm/v13-current-proof-corrections`; publication and full acceptance are not implied.
-- Reconcile Phase 20's conflicting primary records and separately obtain the live client/scenario and MIRROR-08 receipts; do not infer acceptance from the historical 43-count ledger.
-- Perform the disclosed Cursor credential rotation through the existing operator-only two-restart process; an older historical decline does not cover this incident.
-- Approve and execute the existing live runbooks step by step; record real evidence before declaring end-to-end completion. No values should be pasted into chat.
-- Do not start a next milestone, repeat completion/cleanup, merge PRs or enable auto-merge here.
+- **Merge PR #54** (draft → ready is yours; Greptile SUCCESS, typecheck/locks SUCCESS; the vulnerability audit shows SKIPPED and is a reported blocker, not a pass). After merge: one parity restart serves `main`'s code (production `current` already runs `ff71394`), which unblocks the deployment-gated docs G3/G4, hindsight plane recall, and FOUND-03's "serves main".
+- **Rotate the Cursor credential** through the operator-only two-restart process (still open; gates UAT-04/scenario 6).
+- **Fund the devnet anchor keypair** (`SOLANA_ANCHOR_PUBKEY`, 0 lamports) to open ANCHOR L4/L5/L8 and 29-G3; read-only checks already approved.
+- **Lane A turn chain**: approve/produce `substrate-sandbox:0.1` locally, update the host Grok CLI shunt to ≥1.0.13 (currently 502), and configure the Telegram approvals binding.
+- **SKILL-02/03/04/07 tail**: Hermes miner/bridge/sync rebinds plus an owner-merged mined-skill PR.
+- **Installed-client tail (UAT 2/5/6)**: reconcile the 342 unauthenticated `/events` 4xx writers and obtain per-scenario receipts.
+- Do not start a next milestone, repeat completion/cleanup, force-push, or enable auto-merge here.
 
 ## Session Continuity
 
-Last session: 2026-10-12T12:41:42Z
-Stopped at: Reachable source corrections and named proof artifacts verified; archive unchanged; remaining production/client/tracker/plane/VM/devnet proofs and incident rotation require the operator
+Last session: 2026-10-12T15:22:40Z
+Stopped at: MIRROR-08/DISP-08/UAT-tail/docs-G1G2/Hindsight-Dragonfly/LaneA-doors cleared live under operator approval; archive unchanged; remaining holds carry named prerequisites (merge+parity restart, rotation, funding, sandbox image, Grok CLI shunt, Telegram binding, rebinds)
 Resume file: VALIDATION.md and milestones/v1.3-phases/28-hourly-anchor-job-and-verify/28-PROOF-ADDENDUM.md
 
 ## Performance Metrics

@@ -70,7 +70,11 @@ See [VALIDATION.md](VALIDATION.md) for current proof and operator gates. Do not
 repeat milestone completion/cleanup, recreate active plans, or start a next
 milestone to hide the remaining acceptance work.
 
-The two older missing docs proof artifacts are now shipped in the isolated
+Live acceptance progress 2026-10-12 (operator-approved windows): MIRROR-08 and
+DISP-08 cleared on production; UAT scenarios 1/3/4/7/8 live-pass; docs G1/G2
+live-pass on RAGFlow v0.27.1; Hindsight governance, Dragonfly hit and outage
+arms live-pass; Lane A doors/boot/rollback proven with four named turn-chain
+prerequisites. The two older missing docs proof artifacts are shipped in the isolated
 correction tree: `--ragflow-fixture` and `scripts/docs-smoke.ts`, with actual
 named docs82/82 and skills18/18 proof. Final local checks are Bun3355/58/0,
 Python246,types0 and phase-close119/0. The user explicitly retained the
