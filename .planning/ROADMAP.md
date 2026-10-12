@@ -64,8 +64,8 @@ was moved by the existing archive. Historical totals remain 18 phases,
 **Current acceptance: human needed, not waived.** The user retains real-proof
 criteria. The historical 43 live remainders, separately held Phase 20 evidence
 and MIRROR-08, and the disclosed credential rotation remain open. Reachable
-current source integration repairs are being completed on the isolated
-correction branch; green local checks are not production acceptance.
+current source integration repairs are verified and locally committed on the
+isolated correction branch; green local checks are not production acceptance.
 See [VALIDATION.md](VALIDATION.md) for current proof and operator gates. Do not
 repeat milestone completion/cleanup, recreate active plans, or start a next
 milestone to hide the remaining acceptance work.

@@ -65,8 +65,9 @@ at them and records what moved since.
 | G5 existing-leaf alteration + CLI exit 1 | Real scratch dedup namespace, retained anchor, intact chain, named mismatch | 68/68 complete smoke |
 
 The five explicit test files passed **385/385** after each was checked to
-exist; the final complete current suite passed **3,199 / 58 skip / 0 fail**
-across 126 files. Python passed 246; types, shell syntax and shellcheck
+exist. The first current run passed **3,199 / 58 skip / 0 fail** across
+126 files; the final combined source passed **3,275 / 58 skip / 0 fail**
+across 130 files. Python passed 246; types, shell syntax and shellcheck
 exited 0; phase-close passed all 119 tests in the four lock files
 (EVENT_KINDS 12, SURFACES 27). Real current proposal, desktop and vocabulary
 smokes passed 47/47, 20/20 and 29/29 respectively. These replace old-base

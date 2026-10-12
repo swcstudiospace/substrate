@@ -163,7 +163,8 @@ and incident rotation remain operator-owned.
 no protected-main merge, auto-merge, force-push or branch deletion was
 performed. `ultrathink-ship assess` returned `done: false` through its
 deterministic uncommitted-change gate, before any model judge request.
-The corrected source will be committed locally; full user-request
+The corrected source is committed locally at `ce1b6d5` (preceded by
+`84c8fc1` and `148a50c`); full user-request
 acceptance still requires the operator proofs above, so no PR/review/merge
 command or `--ignore-gsd` bypass follows that assessment.
 

@@ -630,7 +630,7 @@ exited **1**, reported **chain intact**, and named
 `2026-10-11T22:00:00.000Z` as the mismatched hour. The separate `*_p28alter`
 deduplicating fixture leaves normal tables append-only. The actual anchor
 entry, CLI, HTTP, MCP and timeout tests also passed in the current suite
-(3,199 pass / 58 skip / 0 fail); types and the four phase-close locks passed.
+(3,275 pass / 58 skip / 0 fail); types and the four phase-close locks passed.
 The named rehearsal was stopped and its two owned stores removed. No
 production row, live devnet transaction, systemd step or credential
 rotation was performed. L1–L10 each still require separate approval,
