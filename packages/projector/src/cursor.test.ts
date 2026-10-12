@@ -8,8 +8,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const SCRIPT = join(import.meta.dir, "cursor.ts");
-const CLI = "/root/src/repos/agent-substrate/packages/cli/src/index.ts";
-const STOP = "bun /root/src/repos/agent-substrate/packages/collectors/src/cursor-stop.ts >/dev/null 2>&1 || true";
+const CLI = join(import.meta.dir, "..", "..", "cli", "src", "index.ts");
+const STOP_SCRIPT = join(import.meta.dir, "..", "..", "collectors", "src", "cursor-stop.ts");
+const STOP = `bun ${STOP_SCRIPT} >/dev/null 2>&1 || true`;
 
 const made: string[] = [];
 afterEach(() => {
@@ -62,5 +63,28 @@ describe("cursor projector", () => {
 		const drifted = run(["--check", "--path", path]);
 		expect(drifted.code).toBe(1);
 		expect(drifted.stdout).toContain("~ stop");
+	});
+
+	test("SUBSTRATE_CLI and SUBSTRATE_CURSOR_STOP override the checkout paths", () => {
+		const result = run(["--print-desired"], {
+			SUBSTRATE_CLI: "/opt/substrate/cli.ts",
+			SUBSTRATE_CURSOR_STOP: "/opt/substrate/cursor-stop.ts",
+		});
+		expect(result.code).toBe(0);
+		const desired = JSON.parse(result.stdout) as Record<string, { command: string }>;
+		expect(desired.sessionStart?.command).toBe(
+			"bun /opt/substrate/cli.ts brief --surface cursor --write >/dev/null 2>&1 || true",
+		);
+		expect(desired.stop?.command).toBe("bun /opt/substrate/cursor-stop.ts >/dev/null 2>&1 || true");
+		expect(result.stdout).not.toContain(CLI);
+	});
+
+	test("with no --path the hooks file is ~/.cursor/hooks.json", () => {
+		const home = mkdtempSync(join(tmpdir(), "cursor-home-"));
+		made.push(home);
+		const result = run([], { HOME: home });
+		expect(result.code).toBe(1);
+		expect(result.stderr).toContain(join(home, ".cursor", "hooks.json"));
+		expect(result.stderr).not.toContain("/root/.cursor/hooks.json");
 	});
 });
