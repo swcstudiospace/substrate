@@ -141,6 +141,19 @@ not suppressed; it does not establish scenario 2+5 receipts, readiness of
 every installed client, or a real prompt from every live client. The
 evidence owner must reconcile the records. Phase 20 acceptance stays held.
 
+**Receipt 2026-10-12 (operator-run):** `identity:check --values --server-env
+/etc/substrate/substrate.env --json` → `pass:true`, 0 stranded live clients,
+0 missing, 29/29 server names present, 0 unexpected/warnings/errors. This is
+the first values-mode PASS against the promoted file (the 10-10 row covered
+the staged copy) and closes audit resume step 1's identity half. Steady-state
+readings at the same date: server up since the switch-on restart
+(2026-10-10T14:23:11.703Z), unattributed 4xx sum 342 — all `POST /events`
+with no valid bearer (installed-client readiness question, still held) —
+grok-bot 20 attributed 4xx beside 152 2xx, mirror `linear on, notion on` from
+the startup journal, devnet anchor keypair balance 0 lamports. FOUND-04's
+literal clauses are evidenced by this receipt; the Cursor credential rotation
+and installed-client/per-scenario receipts remain separately held.
+
 **Separately held beyond the historical 43 count:** MIRROR-08 is explicitly
 NOT RUN despite Phase 23's `behavior_unverified: 0`. Its real
 Linear/Notion/connector transition proof still needs approval and receipts.

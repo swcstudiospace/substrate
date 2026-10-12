@@ -249,8 +249,11 @@ summed request counts (sum of point `value` fields), not point counts.
 | Date (UTC) | identity:check | stranded live clients | unattributed 4xx at restart | unattributed 4xx after soak |
 | --- | --- | --- | --- | --- |
 | 2026-10-10 | PASS — names-only live, `--values` on the staged file pre-promote | 0 | 0 | 3 (dormant roster — skills-sync/bridge/miner/anchor attempts; every live surface clean 2xx) |
+| 2026-10-12 | PASS — operator-run `--values` against the promoted `/etc/substrate/substrate.env` (0 stranded, 0 missing, 29/29 server names present, 0 unexpected/warnings/errors) | 0 | — (no restart) | 342 steady-state since the 10-10 restart (reading below) |
 
 Window 2026-10-10 14:23–15:00Z: switch-on 14:22Z (staged env promoted, one restart, `parity:check` PASS); 2xx by surface at soak close — claude-code 23, muse 14 (writer ticks), omp 14 (herdr per-event), cursor 1; hermes/grok-build/grok-bot idle in window (no prompts). Cache side: loopback redis, `connected:true`, 0 errors.
+
+Reading 2026-10-12 (operator-run, server `startedAt` 2026-10-10T14:23:11.703Z — the switch-on restart; no restart since): unattributed 4xx sum **342**, and every one of those points is `POST /events` with no valid bearer — the +339 delta over the 10-10 soak-close reading of 3 is therefore unauthenticated `/events` writers, not a provisioned client's bearer failing. Named-surface 4xx: grok-bot 20 (beside 152 2xx of its own). 2xx by surface at reading time: muse 1118, cursor 114 (live since the window's 1), grok-bot 152, omp 99, hermes 56, claude-code 24, unattributed 19; grok-build recorded 0 2xx points (idle). Mirror confirmed live from the journal at startup 14:23:18: `mirror: linear on, notion on`. Which unprovisioned client writes `/events` without a bearer is exactly the installed-client readiness question UAT-01/04 hold; this reading records it and does not clear it. Devnet anchor keypair (`SOLANA_ANCHOR_PUBKEY`) balance read 0 lamports on the real devnet cluster the same day: the funded send steps stay blocked on funding.
 
 ## Rollback
 
