@@ -78,10 +78,10 @@ the current acceptance bar. Source-complete 18/18 stays historical; no
 
 **Final parent proof on current `84c8fc1` plus owned corrections (2026-10-12):**
 
-- Full Bun suite: **3,275 pass / 58 skip / 0 fail**, 130 files. Python:
-  **246 passed**. Types exited 0; current shell syntax and shellcheck
-  exited 0. Phase-close: **119 pass / 0 fail** in four lock files;
-  EVENT_KINDS 12, SURFACES 27. These supersede the earlier 3,199 run.
+- Full Bun suite: **3,355 pass / 58 skip / 0 fail**,132files. Python:
+  **246 passed**. Types exited0; shell syntax/shellcheck remained green.
+  Phase-close: **119 pass / 0 fail** in four unchanged lock files;
+  EVENT_KINDS12,SURFACES27. These supersede earlier3,199 and3,275 runs.
 - Five actual Phase 28 consumer/entry test paths were checked to exist
   before the targeted **385 pass / 0 fail** run; G1–G4 are covered by
   actual subprocess/transport/verifier transitions.
@@ -175,3 +175,36 @@ status was empty. A separate child's earlier whole-file restore of
 does not establish no loss for that earlier incident; no such claim is
 made. The disclosed Cursor credential remains a separate containment
 action for the operator.
+
+### Residual source-artifact check
+
+The older residual register has now been mapped row by row: 36 plan mappings,
+98 source/checkpoint tasks and53 previously pending requirement rows. Recorded
+reconciliation is not live acceptance. The 53-row subset has 32 isolated
+locally evidenced criteria and 21 held compound live criteria; the original
+68-requirement score and historical 43-count ledger are not re-sealed.
+
+The user explicitly keeps the consolidated docs contract and supersedes the
+older `dry_run`, RAGFlow-backed manifest rebuilding and physical-deletion
+source clauses. The implemented API, persisted local manifests and last-five
+version manifests remain; all real proof gates remain required.
+
+The named `--ragflow-fixture` and `scripts/docs-smoke.ts` are now implemented
+and actually exercised: docs **82/82**, skills **18/18** on explicit required
+scratch surfaces, and default basic **4/4**. Up/status/down exited0; every
+twin/stand-in stopped and two owned stores were removed per named runtime.
+Docs proof covers actual MCP/REST/CLI/Git/ledger, upstream snippet redaction,
+exact MCP401, source-bound committed pins, partial/failed/conflicting parts,
+exact last-five manifests and skills-not-live pin age/warn-once.
+
+Earlier compiler/175 and194 focused runs, startup refusal,56/62 and72/82
+actual failures remain historical evidence. Bounded same-birth entry
+qualification and immediate truthful recovery records replaced accidental
+startup timing; correct dataset IDs, transport classification, document
+selection and real Git staging fixed false proof. No assertion was weakened.
+The unchanged tracked-file secret guard now includes all new source files:
+a reserved example fixture replaced a production-host-shaped test value.
+The existing non-root desktop test passed after only the owned TMPDIR was
+made traversable; HOME/XDG/token directories stayed private and host
+credentials remained filesystem-masked. No production/model/remote proof,
+new approval, archive replay or full milestone acceptance is implied.

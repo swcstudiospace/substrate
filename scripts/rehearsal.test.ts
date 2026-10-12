@@ -22,6 +22,7 @@ import {
 	installUpCleanup,
 	isPortFree,
 	isTwinHealthy,
+	killVerifiedFixtureSpawn,
 	killVerifiedSpawn,
 	mayStop,
 	parseDockerIds,
@@ -34,6 +35,7 @@ import {
 	parseSurfaces,
 	pickFreePort,
 	pickSmokeToken,
+	qualifySpawnedEntry,
 	refuseCheckoutDir,
 	refuseDockerEndpoint,
 	refuseDockerEnv,
@@ -820,3 +822,84 @@ describe("installUpCleanup", () => {
 		disarm(); // Double disarm is safe.
 	});
 });
+
+describe("the --ragflow-fixture flag", () => {
+	test("is a known bare flag; a typo is refused, never ignored", () => {
+		expect(refuseExtraArgs(["up", "--name", "x", "--ragflow-fixture"])).toBeNull();
+		expect(refuseExtraArgs(["up", "--name", "x", "--ragflow-fixtures"])).toBe("unknown option --ragflow-fixtures");
+		expect(refuseExtraArgs(["up", "--ragflow-fixture", "extra"])).toBe("unexpected argument extra");
+	});
+
+	test("up with the flag still refuses a production port before touching Docker", () => {
+		const run = runCli("up", "--name", "rh-refuse-fixture-port", "--port", "7410", "--ragflow-fixture");
+		expect(run.code).toBe(2);
+		expect(run.err).toContain("reserved");
+		expect(`${run.out}${run.err}`).not.toContain(SENTINEL);
+	});
+});
+
+
+describe("killVerifiedFixtureSpawn", () => {
+	test("never signals an unverifiable pid", () => {
+		expect(killVerifiedFixtureSpawn(2 ** 30, "/tmp/wt-checkout", 0)).toBe(false);
+	});
+
+	test("never signals a live pid that fails the ownership check", () => {
+		expect(killVerifiedFixtureSpawn(process.pid, "/tmp/wt-checkout", 0)).toBe(false);
+	});
+});
+
+
+
+describe("qualifySpawnedEntry", () => {
+	const entry = (argv: string[]): boolean => argv.at(-1) === "owned-entry.ts";
+	const facts = (argv: string[], startSeconds = 1791479652.17): ProcFacts => ({
+		pid: 424242,
+		argv,
+		cwd: "/tmp/wt-checkout",
+		cgroup: "0::/user.slice/user-0.slice/session-1.scope",
+		startSeconds,
+		listensOn: [],
+	});
+	const deps = (reads: Array<ProcFacts | null>, alive = true, start: number | null = 1791479652.17) => {
+		let at = 0;
+		return {
+			factsOf: (_pid: number): ProcFacts | null => reads[Math.min(at++, reads.length - 1)] ?? null,
+			alive: (_pid: number): boolean => alive,
+			startOf: (_pid: number): number | null => start,
+			sleepMs: (_ms: number): Promise<void> => Promise.resolve(),
+		};
+	};
+
+	test("a verifiable expected entry is ready without waiting", async () => {
+		const out = await qualifySpawnedEntry(424242, 1791479652.17, entry, 1000, deps([facts(["bun", "owned-entry.ts"])]));
+		expect(out.kind).toBe("ready");
+	});
+
+	test("transient empty argv becomes ready when the entry execs", async () => {
+		const out = await qualifySpawnedEntry(
+			424242,
+			1791479652.17,
+			entry,
+			1000,
+			deps([facts([]), facts([]), facts(["bun", "owned-entry.ts"])]),
+		);
+		expect(out.kind).toBe("ready");
+	});
+
+	test("a dead pid is dead, never foreign", async () => {
+		const out = await qualifySpawnedEntry(424242, 1791479652.17, entry, 1000, deps([null], false, null));
+		expect(out.kind).toBe("dead");
+	});
+
+	test("a non-empty wrong entry is foreign without waiting out the bound", async () => {
+		const out = await qualifySpawnedEntry(424242, 1791479652.17, entry, 60_000, deps([facts(["bun", "other-entry.ts"])]));
+		expect(out.kind).toBe("foreign");
+	});
+
+	test("a reused pid is foreign even when the entry matches", async () => {
+		const out = await qualifySpawnedEntry(424242, 1791479652.17, entry, 1000, deps([facts(["bun", "owned-entry.ts"], 1791479000)]));
+		expect(out.kind).toBe("foreign");
+	});
+});
+

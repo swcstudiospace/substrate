@@ -69,3 +69,12 @@ isolated correction branch; green local checks are not production acceptance.
 See [VALIDATION.md](VALIDATION.md) for current proof and operator gates. Do not
 repeat milestone completion/cleanup, recreate active plans, or start a next
 milestone to hide the remaining acceptance work.
+
+The two older missing docs proof artifacts are now shipped in the isolated
+correction tree: `--ragflow-fixture` and `scripts/docs-smoke.ts`, with actual
+named docs82/82 and skills18/18 proof. Final local checks are Bun3355/58/0,
+Python246,types0 and phase-close119/0. The user explicitly retained the
+consolidated docs API/local manifests/last-five manifests and superseded only
+the older dry_run/RAGFlow-rebuild/physical-deletion source clauses; real live
+gates remain required. Native discovery still has0 active phases and no next
+phase; this is not0 archived phases and does not authorise re-completion.

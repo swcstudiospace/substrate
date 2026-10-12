@@ -27,6 +27,8 @@ import {
 	buildRehearsalEnv,
 	consumerEnvRecord,
 	LEDGER_KEYS,
+	REHEARSAL_DOCS_STATE_FILENAME,
+	REHEARSAL_DOCS_STATE_KEY,
 	RehearsalEnvError,
 	storesEnvRecord,
 	toShellExports,
@@ -506,5 +508,112 @@ describe("the opt-in tracker block", () => {
 		}
 		expect(first.LINEAR_API_KEY).not.toBe(second.LINEAR_API_KEY);
 		expect(first.NOTION_API_KEY).not.toBe(second.NOTION_API_KEY);
+	});
+});
+
+describe("the opt-in RAGFlow fixture", () => {
+	const FIXTURE_URL = "http://127.0.0.1:18410";
+
+	function fixtureKey(): string {
+		return `rh-fixture-${randomBytes(16).toString("hex")}`;
+	}
+
+	test("off by default: no RAGFlow reach without the fixture", () => {
+		const env = buildRehearsalEnv(scratchInput());
+		expect(env.RAGFLOW_URL).toBeUndefined();
+		expect(env.RAGFLOW_API_KEY).toBeUndefined();
+		expect(loadConfig(env).ragflow).toBeNull();
+		expect(env.SUBSTRATE_DOCS_STATE_FILE).toBeUndefined();
+	});
+
+	test("loopback fixture reach is emitted and loads through the real loadConfig", () => {
+		const key = fixtureKey();
+		const input = scratchInput({ ragflowFixture: { url: FIXTURE_URL, apiKey: key } });
+		const env = buildRehearsalEnv(input);
+		expect(env.RAGFLOW_URL).toBe(FIXTURE_URL);
+		expect(env.RAGFLOW_API_KEY).toBe(key);
+		expect(loadConfig(env).ragflow).toEqual({ url: FIXTURE_URL, apiKey: key });
+		expect(env.SUBSTRATE_DOCS_STATE_FILE).toBe(join(input.runDir, REHEARSAL_DOCS_STATE_FILENAME));
+		expect(loadConfig(env).docsStateFile).toBe(join(input.runDir, REHEARSAL_DOCS_STATE_FILENAME));
+	});
+
+	test("a non-loopback fixture URL is refused before any server starts", () => {
+		expect(() =>
+			buildRehearsalEnv(scratchInput({ ragflowFixture: { url: "http://agent-substrate-forwarder:9380", apiKey: fixtureKey() } })),
+		).toThrow(RehearsalEnvError);
+	});
+
+	test("an empty fixture key is refused before any server starts", () => {
+		expect(() => buildRehearsalEnv(scratchInput({ ragflowFixture: { url: FIXTURE_URL, apiKey: "" } }))).toThrow(RehearsalEnvError);
+	});
+
+	test("the consumer record names the locator by name and never the plane key", () => {
+		const server = buildRehearsalEnv(scratchInput());
+		const base = {
+			mcpPort: 17410,
+			firstToken: server[tokenEnvName("claude-code")] ?? "",
+			operatorToken: server[tokenEnvName("hermes")] ?? "",
+			runDir: tempDir(),
+			name: "ragflow",
+			testPgUrl: server.SUBSTRATE_PG_URL ?? "",
+		};
+		const out = consumerEnvRecord({ ...base, ragflowFixture: { url: FIXTURE_URL, pid: 424243 } });
+		expect(out.SUBSTRATE_RAGFLOW_FIXTURE_URL).toBe(FIXTURE_URL);
+		expect(out.SUBSTRATE_RAGFLOW_FIXTURE_READY).toBe("1");
+		expect(out.SUBSTRATE_RAGFLOW_FIXTURE_PID).toBe("424243");
+		expect(Object.keys(out)).toHaveLength(9);
+		expect(out).not.toHaveProperty("RAGFLOW_API_KEY");
+		expect(out).not.toHaveProperty("RAGFLOW_URL");
+		expect(Object.keys(consumerEnvRecord({ ...base, ragflowFixture: null }))).toHaveLength(6);
+	});
+
+	test("the consumer record combines both fixtures without changing either shape", () => {
+		const server = buildRehearsalEnv(scratchInput());
+		const base = {
+			mcpPort: 17410,
+			firstToken: server[tokenEnvName("claude-code")] ?? "",
+			operatorToken: server[tokenEnvName("hermes")] ?? "",
+			runDir: tempDir(),
+			name: "both",
+			testPgUrl: server.SUBSTRATE_PG_URL ?? "",
+		};
+		const skills = { state: "/run/x/skills", origin: "/run/x/skills-fixture/o.git", ghState: "/run/x/skills-fixture/gh-state.json", repo: "rehearsal/agent-skills" };
+		const out = consumerEnvRecord({ ...base, skills, ragflowFixture: { url: FIXTURE_URL, pid: 424243 } });
+		expect(Object.keys(out)).toHaveLength(13);
+		expect(out.SUBSTRATE_REHEARSAL_SKILLS_REPO).toBe(skills.repo);
+		expect(out.SUBSTRATE_RAGFLOW_FIXTURE_URL).toBe(FIXTURE_URL);
+	});
+
+	test("the consumer docs manifest names the own path only, absent by default", () => {
+		const server = buildRehearsalEnv(scratchInput());
+		const runDir = tempDir();
+		const base = {
+			mcpPort: 17410,
+			firstToken: server[tokenEnvName("claude-code")] ?? "",
+			operatorToken: server[tokenEnvName("hermes")] ?? "",
+			runDir,
+			name: "docsmanifest",
+			testPgUrl: server.SUBSTRATE_PG_URL ?? "",
+		};
+		expect(consumerEnvRecord(base)).not.toHaveProperty(REHEARSAL_DOCS_STATE_KEY);
+		const out = consumerEnvRecord({ ...base, docsStateFile: join(runDir, REHEARSAL_DOCS_STATE_FILENAME) });
+		expect(out[REHEARSAL_DOCS_STATE_KEY]).toBe(join(runDir, REHEARSAL_DOCS_STATE_FILENAME));
+		expect(Object.keys(out)).toHaveLength(7);
+	});
+
+	test("a docs manifest outside the run directory is refused", () => {
+		const server = buildRehearsalEnv(scratchInput());
+		const runDir = tempDir();
+		const base = {
+			mcpPort: 17410,
+			firstToken: server[tokenEnvName("claude-code")] ?? "",
+			operatorToken: server[tokenEnvName("hermes")] ?? "",
+			runDir,
+			name: "docsmanifest",
+			testPgUrl: server.SUBSTRATE_PG_URL ?? "",
+		};
+		expect(() => consumerEnvRecord({ ...base, docsStateFile: join(tmpdir(), "elsewhere.json") })).toThrow(
+			"is not inside the run directory",
+		);
 	});
 });

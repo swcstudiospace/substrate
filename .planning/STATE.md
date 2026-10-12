@@ -3,10 +3,10 @@ gsd_state_version: "1.0"
 milestone: v1.3
 milestone_name: Build plan completion
 status: human_needed
-stopped_at: v1.3 archive preserved; all reachable current source corrections and local proofs complete; real-proof acceptance and credential rotation require operator evidence
-last_updated: "2026-10-12T03:22:30Z"
+stopped_at: v1.3 archive preserved; reachable source and named docs proof artifacts verified; real-proof acceptance and credential rotation require operator evidence
+last_updated: "2026-10-12T12:41:42Z"
 last_activity: 2026-10-12
-last_activity_desc: Final current source 3275 pass, types clean, 24 host / 41 collectors / 16 docs proof checks; production acceptance held
+last_activity_desc: Residual rows reconciled; Bun3355/58/0,Python246,types0,locks119/0; actual named docs82/82 and skills18/18; full live acceptance held
 state_head: 1a9f4fd365ede291c4e21be71b6ff236e0e49c67
 progress:
   total_phases: 18
@@ -23,6 +23,10 @@ current_phase_name: null
 ## Current
 
 **v1.3 implementation is archived:** 18 phases (16–33), 76 plans and 68 requirements. The archive completed concurrently at `ab0dff1`; do not replay completion, recreate active phase directories or start a new milestone. The user explicitly retains real-proof criteria: source-completion history is not full end-to-end acceptance. Current isolated corrections and remaining gates are recorded in `VALIDATION.md`.
+
+**Residual reconciliation:** all 36 older plan mappings and 98 task rows are individually recorded without archive replay. Of the 53 previously pending requirement rows, 32 isolated criteria are locally evidenced and 21 compound live criteria remain held; this is not a new score for all 68 approved requirements. The two missing named deliverables, `--ragflow-fixture` and `scripts/docs-smoke.ts`, are now implemented and actually verified: docs82/82 through MCP/REST/CLI/Git/ledger, skills18/18 with the required scratch surfaces, types0, Bun3355/58/0, Python246 and locks119/0. Earlier compiler failures and56/62 then72/82 runtime failures remain provenance; their causes were repaired without lowering assertions. Every named process was stopped and its two owned stores removed. These source proofs do not satisfy the remaining real-plane/client/tracker/VM/devnet or incident-rotation gates.
+
+**Docs contract decision (user, this conversation):** keep the consolidated actual docs API, persisted local manifests and last-five version manifests. The older source clauses for `dry_run`, rebuilding the manifest from RAGFlow and physical deletion of retired versions are explicitly superseded, not implemented or proved. All real live proof gates remain required. The existing D25-07 no-new-timer hook decision is unchanged.
 
 **v1.3 decisions (operator, 2026-10-08):**
 
@@ -157,7 +161,7 @@ which is why Greptime worked immediately and Postgres did not.
 Phase: None active — v1.3 implementation archived
 Plan: No active implementation phase; existing operator-gated proofs remain
 Status: human_needed for end-to-end acceptance; reachable local corrections verified
-Last activity: 2026-10-12 — 3,275/58/0 Bun tests, 246 Python, types/locks clean; actual host 24/24, collectors 41/41, docs 16/16 and proposal/ledger/desktop/vocabulary proof passed
+Last activity: 2026-10-12 — 3,355/58/0 Bun tests across132files,246 Python,types/locks clean; actual named docs82/82,skills18/18 and default basic4/4; earlier host24/24,collectors41/41,docs-lifecycle16/16 and proposal/ledger/desktop/vocabulary proofs retained
 
 ## Deferred Items
 
@@ -177,8 +181,8 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-12T03:22:30Z
-Stopped at: Reachable current-main source corrections complete; archive unchanged; remaining production/client/tracker/plane/VM/devnet proofs and incident rotation require the operator
+Last session: 2026-10-12T12:41:42Z
+Stopped at: Reachable source corrections and named proof artifacts verified; archive unchanged; remaining production/client/tracker/plane/VM/devnet proofs and incident rotation require the operator
 Resume file: VALIDATION.md and milestones/v1.3-phases/28-hourly-anchor-job-and-verify/28-PROOF-ADDENDUM.md
 
 ## Performance Metrics

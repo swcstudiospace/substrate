@@ -25,7 +25,7 @@ The twin is isolated by construction, not by discipline:
   `${XDG_RUNTIME_DIR:-/tmp}/substrate-rehearsal/<name>/`, mode 0700:
   - `state.json` — container names, server pid, ports, checkout path and commit;
   - `server.log` — the twin's stdout and stderr;
-  - `consumer.env` — the six-key contract every proof sources (below);
+  - `consumer.env` — the contract every proof sources (below);
   - `stores.env` — the scratch store connection values, for store clients only;
   - `tokens/` — one 0600 file per surface, the v1.2 workspace-install pattern.
 
@@ -38,7 +38,7 @@ default; clients reach the ledger only through `SUBSTRATE_URL`.
 All four run through the `rehearsal` package script:
 
 ```sh
-bun run rehearsal up [--name <n>] [--port <N>] [--surfaces a,b] [--operator <s>] [--anonymous] [--skills-fixture]
+bun run rehearsal up [--name <n>] [--port <N>] [--surfaces a,b] [--operator <s>] [--anonymous] [--skills-fixture] [--ragflow-fixture]
 bun run rehearsal smoke [--name <n>]
 bun run rehearsal status [--name <n>]
 bun run rehearsal down [--name <n>]
@@ -72,24 +72,35 @@ Flags, as built:
   ([skills-sync-bridge-miners.md](skills-sync-bridge-miners.md)) replays the
   mined-to-projected loop on the same fixture: bridge propose, queue drains,
   sync refusals, a simulated owner merge plus ff tick, and projector links.
+- `--ragflow-fixture` — also start the owned RAGFlow stand-in for the
+  docs-ingest/search proofs (below): a loopback HTTP process over the
+  recording fake with uploads served as chunks, pointed at by the twin's
+  random scratch key. `consumer.env` gains the three
+  `SUBSTRATE_RAGFLOW_FIXTURE_*` locator names (never the plane key).
+  `bun run smoke:docs` is the proof that drives it.
 
 `up` refuses unless Docker is reachable, both images are present locally, free
 disk is above the ~2 GiB floor (it never prunes), and the port is free. It
-then starts the two labelled containers, spawns the checkout's own
+then starts the two labelled containers, spawns the owned RAGFlow stand-in
+first when `--ragflow-fixture` is set (verifying its pid, entry point,
+checkout and start time before anything else runs), spawns the checkout's own
 `packages/mcp-server/src/index.ts` detached with env-file autoload disabled,
-waits for `GET /healthz` to report a writable index and ledger, and prints the
-`consumer.env` path, the URL, the checkout commit, a dirty flag and the image
-tags. Never a credential.
+waits for the fixture's own health gate and then for `GET /healthz` to report
+a writable index and ledger, and prints the `consumer.env` path, the URL, the
+checkout commit, a dirty flag and the image tags. Never a credential.
 
-`down` is idempotent. It signals only the pid recorded in its own `state.json`,
-and only after checking that pid's command line is the server entry point,
-that its cwd is the recorded checkout, and that it is neither a system unit
-nor holding a production port — then it removes every container carrying the
-instance label (which also catches orphans from a crashed `up`) and deletes
-the run directory.
+`down` is idempotent. It signals only the pids recorded in its own `state.json`
+(the twin, then the fixture when one was recorded), and only after checking
+each pid's command line is the expected entry point, that its cwd is the
+recorded checkout, and that it is neither a system unit nor holding a
+production port — then it removes every container carrying the instance label
+(which also catches orphans from a crashed `up`) and deletes the run
+directory. A foreign or reused pid refuses and keeps the run directory for
+repair; an occupied listener is never stopped.
 
 `status` is read-only: pid, ports, health, commit and image tags for the
-instance.
+instance, plus the fixture endpoint, pid and readiness when one is recorded
+(off otherwise).
 
 `smoke` drives the fixed-order wire proof over the twin — `POST /brief`, an
 emit through `POST /events`, then MCP `graph_register` followed by
@@ -144,9 +155,86 @@ Every later proof sources `consumer.env` and hardcodes nothing:
 | `SUBSTRATE_REHEARSAL_TOKENS_DIR` | One 0600 file per surface |
 | `SUBSTRATE_REHEARSAL_NAME` | The instance name |
 | `SUBSTRATE_TEST_PG_URL` | The scratch Postgres URL, so the existing live index tests run against scratch |
-
+| `SUBSTRATE_RAGFLOW_FIXTURE_URL` | The owned stand-in's loopback URL (`--ragflow-fixture` only) |
+| `SUBSTRATE_RAGFLOW_FIXTURE_READY` | `1` when the fixture answered its health gate (`--ragflow-fixture` only) |
+| `SUBSTRATE_RAGFLOW_FIXTURE_PID` | The stand-in's pid, for locator lines (`--ragflow-fixture` only) |
+| `SUBSTRATE_REHEARSAL_DOCS_STATE_FILE` | The fixture's own docs manifest path (`docs-state.json` in the run dir; `--ragflow-fixture` only; the path only, never a key) |
 It does not export the ledger keys: clients talk to the ledger only through
 `SUBSTRATE_URL`.
+
+It never exports the plane key: the RAGFlow scratch key lives in the twin's
+server env only, and proofs reach the stand-in's control routes by the
+locator names above.
+
+## The RAGFlow stand-in
+
+`--ragflow-fixture` starts an owned RAGFlow stand-in next to the twin for the
+docs-ingest/search proofs. It is a loopback-only Bun process
+(`packages/mcp-server/src/rehearsal-ragflow-server.ts`) over the recording
+`ragflow-fake.ts` with uploads served as chunks — the same fake the unit
+proofs drive — so a pin over real uploads matches served chunks. No new real
+RAGFlow door opens: agents still reach RAGFlow only through `substrate-mcp`,
+and the twin reads the stand-in through its ordinary `RAGFLOW_URL` /
+`RAGFLOW_API_KEY` server settings, pointed at scratch.
+
+Ownership follows the existing scratch model, not discipline:
+
+- The stand-in binds `127.0.0.1` on a picked free port; the harness refuses a
+  production port or an already-listening port before spawning. The scratch
+  key is random per run and travels by child env only — never a CLI arg, a
+  log line or a consumer export — and the child inherits no store, token or
+  home variables. It never reads a real env file or a production credential.
+- `up` refuses when a previous state still owns a live fixture, even when the
+  twin itself is gone: the fixture is checked independently (pid, start time,
+  entry point, checkout) before any container removal or state overwrite, so
+  a dead twin never orphans its live stand-in. An unverifiable live fixture
+  also refuses and keeps its stores.
+ - `state.json` is saved before the first spawn. Each actual child PID and
+   captured birth time is recorded as soon as it is born, before qualification;
+   no PID is invented. A slot is null while that child has not spawned.
+   Entry qualification is bounded by the existing readiness deadline and
+   must retain the same PID/birth identity before listener or network checks.
+   `down` and every failure/interrupt cleanup signal only verified own
+   identities. A captured live child with an unverified birth is preserved,
+   never signalled or forgotten. Only proven-gone children and removed
+   containers permit deleting recovery state; foreign or reused PIDs refuse.
+   `status` reports pending/unverified children without contacting replacements.
+   A state file an older `up` wrote simply has no fixture entry.
+ - Readiness is the stand-in's own health gate over HTTP (`GET
+   /__fixture/health` answering `{ ok: true }`) with redirects rejected
+   (`redirect: error`), not merely an open port, and the listener is
+   re-verified as ours before the state is finalised. Fixture control URLs
+   must be plain `http` loopback with an explicit scratch port and no
+   credentials, query, fragment, or unexpected path.
+ - Control routes live only on the owned stand-in: `GET /__fixture/counts`
+   answers `{ requests, retrievals, uploads, documents }` (numbers only, never
+   keys or bodies), `POST /__fixture/reset` clears recorded requests, uploads,
+   seeds, and injected failures, `POST /__fixture/fail-retrieval` takes only
+   `{ status: 500 | 502 | 503 | null }`, `POST /__fixture/parse` takes only
+   `{ behavior: "done" | "never" }`, and `POST /__fixture/seed-chunks` takes
+   only `{ dataset, chunks: [{ content, document_id, source_url?,
+   heading_path?, score?, dataset? }] }` with at most 20 bounded synthetic
+   chunks, served after uploads under serveUploadsAsChunks and never counted
+   as uploads or documents. Dataset names resolve to the fake's actual
+   dataset ids (per-chunk override included) before any seed is stored: an
+   unknown name is a 400 with nothing stored, and the count names only
+   actually accepted seeds. Control bodies are streamed with a 64 KiB UTF-8
+   byte cap enforced before buffering (413 names the status only); the cap
+   applies per control reader only, so authenticated `/api/*` uploads keep
+   their page/call allowance and the docs transport. The `/api/*` doors need
+   the scratch bearer; anything else is a 401 that names the status only.
+ - `status` names the fixture endpoint, pid and readiness (or `off`) only
+   after verifying the recorded twin and fixture still own their ports;
+   a mismatched, gone, or unverifiable child reports not ready without
+   contacting a replacement listener.
+   `consumer.env` names the endpoint, the readiness marker and the pid by
+   name. Proofs refuse before any effect unless the recorded fixture is
+   enabled, the marker reads `1`, the twin answers `/healthz`, and — for the
+   docs smoke — its own consumer guard re-verifies both pids against reuse,
+   entry point, checkout, and listeners before any network, subprocess, or
+   control effect. The twin's docs manifest lives at `docs-state.json` in
+   the run dir (the server's `SUBSTRATE_DOCS_STATE_FILE`); proofs read their
+   own pins through `SUBSTRATE_REHEARSAL_DOCS_STATE_FILE` with no RAG keys.
 
 ```sh
 set -a; . <run-dir>/consumer.env; set +a

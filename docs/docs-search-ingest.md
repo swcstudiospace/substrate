@@ -119,12 +119,58 @@ prints a credential value.
 
 ## Rehearsal
 
-Every behavior above is proven against the recording fake
-(`packages/mcp-server/src/ragflow-fake.ts`): explicit-`dataset_ids`,
-`<= 10` results, citation shape, redacted snippets, untrusted framing,
-URL-listing event, empty-plus-reason errors, all six refusals, image
-stripping, hash idempotency, resolve-by-name, create-on-miss with the
-pinned model, and both degradation arms. The fake fails any retrieval
-missing `dataset_ids`. Live proof (first probe, discovery/creation, real
-ingest, real served search) is operator-gated — see
-`docs/runbooks/docs-proof.md`.
+The recording fake (`packages/mcp-server/src/ragflow-fake.ts`) exercises
+explicit dataset IDs, the result cap, citations, redacted snippets, untrusted
+framing, URL-event readback, degraded errors, ingest refusals, stripping,
+idempotency, name resolution, retained manifests and skills-sync degradation.
+It rejects retrieval without explicit dataset IDs. Discovery/creation on
+the deployed plane is the operator's G2 step, not implicit creation by the
+agent-facing ingest tool; see `docs/runbooks/docs-proof.md`.
+
+## Repeatable proof
+
+Use a fresh named harness for each proof cycle; `down` removes that cycle's
+stores, processes and manifest. The shipped command exercises the rehearsal
+paths listed below through the actual twin (`scripts/docs-smoke.ts`).
+
+```sh
+bun run rehearsal up --name <owned> --port 0 --ragflow-fixture
+bun run smoke:docs -- --name <owned>
+bun run rehearsal down --name <owned>
+```
+
+The smoke reads the named run directory's `state.json` and `consumer.env`
+only — never the inherited environment and never the plane key — and
+refuses (exit 2) with zero effects unless the run has the stand-in
+enabled and ready, holds an operator bearer, serves loopback off the
+production ports, matches the recorded twin and stand-in identity (ports,
+endpoint, checkout, and both pids re-verified against reuse), and runs
+from the recorded checkout. It then exercises explicit-`dataset_ids`
+search over REST and MCP with `<= 10` truthful citations (exactly 10
+served from a pool over ten, redacted snippets `<= 1200`, source URLs,
+pin-or-gap commits with the pin bound to the promoted commit — selected
+by source URL plus the new generation's own prose, never by commit match
+— and stale chunks naming the gap, untrusted framing, URL-event readback,
+dataset scoping), degraded empty-plus-reason on an injected retrieval
+failure, the six ingest refusals with exact reasons and locator-only
+warnings (redactor with both rule names, no-source-URL, outside-roots,
+over-cap page and call, anonymous 401 on REST and at the MCP transport,
+VM guest via the CLI preflight) plus resolve-by-name refusal of unknown
+and raw-id datasets, remote-image stripping, hash idempotency, the 1 MB /
+5 MB / 6 MB payload limits on each caller, version-pin promotion across
+generations through the real server and CLI producer (committed-bytes-only
+refresh, newly committed bytes served, untracked/dirty exclusion,
+same-commit-no-second-generation, superseded chunks naming the gap,
+last-five manifest retention proven exact against the bound own-state file
+on a second dataset), multipart retention (a missing, failed, or
+conflicting part keeps the old pin), skills-sync-not-live (pinned serve
+with pin age plus exactly one warning), and the stand-in parse arms — on
+its own tagged scratch session, clearing injected fixture controls in a
+`finally` and cleaning its scratch checkout in a `finally`. Exit 0 means
+every check passed, 1 a check failed. Output carries names, booleans,
+counters and hashes only. Explicitly unproven here: server-side VM-guest
+over REST (a whole-process config door limit, not a request marker; the
+client side is proved via the CLI preflight), and live G1-G4
+(operator-gated to a human MODEL on the real plane, see
+`docs/runbooks/docs-proof.md`). No `dry_run`, RAG-manifest rebuilding, or
+physical-deletion surface exists or is assumed.

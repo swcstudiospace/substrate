@@ -27,6 +27,7 @@
     "smoke:desktop": "bun scripts/desktop-smoke.ts",
     "smoke:mirror": "bun scripts/mirror-smoke.ts",
     "smoke:dispatcher": "bun scripts/dispatcher-smoke.ts",
+    "smoke:docs": "bun scripts/docs-smoke.ts",
     "smoke:host": "bun scripts/host-smoke.ts",
     "check:phase-close": "bun scripts/phase-close-check.ts",
     "verify": "bun scripts/verify.ts",

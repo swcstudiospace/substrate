@@ -76,6 +76,12 @@ export class RagflowFake {
 	];
 	/** Every uploaded document, in order, with the id the plane assigned. */
 	readonly uploads: Array<{ dataset_id: string; document_id: string; content: string; metadata: Record<string, string> }> = [];
+	/**
+	 * Proof-control seeded chunks, in call order. Served after uploads when
+	 * `serveUploadsAsChunks` is on; never counted as uploads or documents.
+	 * Cleared by the fixture reset alongside uploads.
+	 */
+	readonly seeds: Array<{ dataset_id: string; document_id: string; content: string; source_url: string; heading_path: string; score: number }> = [];
 	/** `done` parses after two polls; `never` stays parsing so timeout logic is provable. */
 	parseBehavior: "done" | "never" = "done";
 	private parsePolls: Record<string, number> = {};
@@ -142,6 +148,22 @@ export class RagflowFake {
 							heading_path: upload.metadata["heading_path"] ?? "",
 							source_url: upload.metadata["source_url"] ?? "",
 							score: 0.9,
+						});
+					}
+				}
+				for (const seed of this.seeds.filter((entry) => entry.dataset_id === id)) {
+					const name = seed.source_url.split("/").pop() || "seeded.md";
+					if (this.chunkShape === "minimal") {
+						out.push({ content: seed.content, document_name: name });
+					} else {
+						out.push({
+							content: seed.content,
+							document_name: name,
+							document_id: seed.document_id,
+							chunk_id: `${seed.document_id}-seed`,
+							heading_path: seed.heading_path,
+							source_url: seed.source_url,
+							score: seed.score,
 						});
 					}
 				}
