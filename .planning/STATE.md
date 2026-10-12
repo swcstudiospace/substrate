@@ -178,7 +178,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 - **Fund the devnet anchor keypair** (`SOLANA_ANCHOR_PUBKEY`, 0 lamports) to open ANCHOR L4/L5/L8 and 29-G3; read-only checks already approved.
 - **Lane A turn chain**: approve/produce `substrate-sandbox:0.1` locally, update the host Grok CLI shunt to ≥1.0.13 (currently 502), and configure the Telegram approvals binding.
 - **SKILL-02/03/04/07 tail**: Hermes miner/bridge/sync rebinds plus an owner-merged mined-skill PR.
-- **Installed-client tail (UAT 2/5/6)**: reconcile the 342 unauthenticated `/events` 4xx writers and obtain per-scenario receipts.
+- **Installed-client tail (UAT 2/5/6)**: the 342→426 unauthenticated `/events` 4xx root cause is closed — the `grok-bot` tokens-dir file was missing and is now materialized (identity:check PASS, 0 unexpected); observe the next grok-bot pane emission land attributed. Scenarios 2/5/6 still need installed-client reconciliation and receipts.
 - Do not start a next milestone, repeat completion/cleanup, force-push, or enable auto-merge here.
 
 ## Session Continuity

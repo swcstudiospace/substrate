@@ -255,6 +255,24 @@ plus draft PR #54):**
   (4) a real mid-session resume needs an in-flight turn, i.e. blockers 1+2.
   Full receipt: session artifact `v13-lanea-live-receipt.json`.
 
+- **Unattributed-4xx forensic closed (2026-10-12 evening)**: the `/events`
+  4xx accumulation is **grok-bot pane emissions with no token file** — the
+  surface's token was provisioned in `substrate.env` but never materialized
+  into the tokens dir, so every herdr pane transition attributed to
+  `grok-bot` posted unauthenticated (baseline ≈1/4 min while grok panes were
+  active; a 1/27s burst during the 20:09 collector-restart reconcile; frozen
+  at 426 once panes went idle). Proof trail: refusal ledger silent (the
+  corrected collectors were not the writer — omp 2xx climbed +48 after their
+  restart onto `ff71394`), continuous 0.5s TCP sampling showed only
+  gateway/muse/dispatcher, gateway's own emitter is bearer-gated, and the
+  tokens dir lacked exactly `grok-bot`. **Fix applied**: materialized
+  `/etc/substrate/tokens/grok-bot` (0600, by variable indirection, value
+  never printed); the resolver reads at call time, so the running collector
+  needs no restart. `identity:check` names-mode: **PASS, 0 unexpected** with
+  the new file. Remaining on this item: observe the next grok-bot pane
+  transition land as `grok-bot` 2xx (passive), and the operator still owns
+  the Cursor rotation that gates UAT-04/scenario 6.
+
 **Separately held beyond the historical 43 count:** ~~MIRROR-08~~ —
 **cleared 2026-10-12** (receipt above); its earlier
 `behavior_unverified: 0`-with-NOT-RUN contradiction is resolved by the real
