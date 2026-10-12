@@ -154,6 +154,44 @@ the startup journal, devnet anchor keypair balance 0 lamports. FOUND-04's
 literal clauses are evidenced by this receipt; the Cursor credential rotation
 and installed-client/per-scenario receipts remain separately held.
 
+**Live-window receipts 2026-10-12 (operator-approved: all scripted runbooks
+plus draft PR #54):**
+
+- **UAT live scenarios 1, 3, 4, 7, 8 PASS** against production
+  (`uat-phase0 --live operator-approval-2026-10-12-…`): both surfaces served
+  (23 tools, 9 v1 names), the Notion-backfilled index serves a real tracked
+  graph (`ut-muhk8v3p-47ae5f1a` via graph_get), brief reaches a Claude Code
+  session (189 bytes, header present), outage never blocks an agent (empty
+  in 0 ms; hanging brief bounded at 1502 ms), cross-surface brief with claim
+  + emit. Scenarios 2, 5, 6 stay held: installed-client readiness,
+  ultrathink-kickoff production registration, and real Cursor hooks (the
+  latter still behind the credential rotation).
+- **Docs G1/G2 pass on the real plane; G3/G4 blocked on deployment**: RAGFlow
+  v0.27.1 reachable (1.34s), 21 datasets after creating the one
+  canonical-missing `auctioning` with the deployment's TEI bge-small model id
+  (recorded deviation: v0.27.1 rejects the literal model string). The
+  production release `5f495ad5` predates the docs phase — `/docs/ingest` 404,
+  no docs tools served — so real ingest and the headless docs arm wait for
+  the correction PR to merge and parity to deploy it. No fabricated
+  substitute.
+- **Hindsight/cache receipts**: real Hindsight 0.9.1 healthy; governed
+  cross-surface retain accepted+verified_persisted and recalled with source
+  through the index (plane forward/`memory_recall` not in the deployed
+  release — blocked on deployment); second identical brief a real cache hit
+  (misses+1 then hits+1, byte-identical bodies); Dragonfly-down arm observed
+  end-to-end (uncached identical brief; `/healthz`
+  `connected:false/mode:"degraded"/bypasses:1/errors:1`; lazy reconnect to
+  `connected:true` on the next cache op).
+- **Devnet**: genesis hash confirms the real devnet cluster;
+  `SOLANA_ANCHOR_PUBKEY` balance **0 lamports** — funded send steps L4/L5/L8
+  stay blocked on funding; read-only checks approved and in use.
+- **PR #54 gates**: Greptile Review SUCCESS; Typecheck/tests/locks SUCCESS;
+  Known-vulnerability audit **SKIPPED** — reported as a blocker per desk
+  policy, never counted as a pass. Merge remains the owner's click; the
+  service still runs `5f495ad5`, so FOUND-03's "serves main" and the
+  SKILL/DISP "runs from main" clauses stay open until merge + deploy +
+  parity receipt.
+
 **Separately held beyond the historical 43 count:** MIRROR-08 is explicitly
 NOT RUN despite Phase 23's `behavior_unverified: 0`. Its real
 Linear/Notion/connector transition proof still needs approval and receipts.

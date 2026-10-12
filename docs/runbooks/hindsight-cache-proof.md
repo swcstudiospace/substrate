@@ -97,3 +97,34 @@ degradation to a partial result, derived marking with source attribution,
 redacted hits, recall-hit caching with generation invalidation, the
 claims-freshness pin, and the plaintext non-loopback refusal with
 off-with-reason health. See `26-VALIDATION.md` for the test inventory.
+
+## Live receipt 2026-10-12 (operator-approved window)
+
+Production context: `substrate-mcp` up since the 2026-10-10 switch-on runs
+release `5f495ad5` — it contains the Dragonfly cache but not the D26
+Hindsight forward/`memory_recall` wiring (runtime-verified: `POST
+/memory/recall` → 404; served tool list has no `memory_recall`).
+
+- **Hindsight reachability pass** (0.45s): real Hindsight `0.9.1` healthy —
+  `GET /health` 200 `{"status":"healthy","database":"connected",...}`;
+  `GET /version` matches the researched OpenAPI.
+- **Cross-surface memory, governed half pass** (2.13s): source event emitted
+  (`evt_969bfd9…`), `POST /memory` as omp → `outcome:accepted,
+  verified_persisted:true` with entry id/hash and idempotency key;
+  `memory_search` as hermes returned omp's entry with `writer=omp` and its
+  `source_event` — recall with its source through the governed index.
+  **Plane half blocked on deployment**: no sub-bank ensure/retain/read-back
+  exists in the running release; the source-bank-attributed plane reply
+  needs the corrected release deployed.
+- **Cache hit pass** (0.18s warm, 0.0044s repeat): two identical briefs —
+  counters moved misses+1 then hits+1; bodies byte-identical
+  (`f450a0cb…713948`).
+- **Dragonfly-down arm pass** (operator-executed, `redis-server.service`
+  stopped with one established peer — the substrate itself): brief answered
+  200 uncached in 0.182s with byte-identical body; `/healthz` reported
+  `{"connected":false,"mode":"degraded","bypasses":1,"errors":1}` during the
+  outage (the code-cited inference, now observed). Restore: service started;
+  the client reconnects lazily — first post-restore cache op shows
+  `{"connected":true,"mode":"on","hits":5}`.
+- **DOCS-07 headless docs arm**: blocked with docs G3/G4 on deployment (no
+  `docs_search` served yet).
