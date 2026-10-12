@@ -1,17 +1,22 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseRoute } from "./options.ts";
-import { WORKTREES_ROOT } from "./sandbox-options.ts";
+import { parseRoute, TEST_RUN_LABEL } from "./options.ts";
+import { GRAPH_LABEL, WORKTREES_ROOT } from "./sandbox-options.ts";
 import {
 	APPROVAL_TIMEOUT_MS,
 	hostCallTarget,
 	interruptedTasks,
+	isHostSandboxLabel,
 	MemoryTaskStore,
 	parseApprovalTimeoutMs,
 	pollCode,
+	reconcileSandboxes,
 	RESUME_TEXT,
+	type SandboxListing,
+	type SandboxStateEntry,
+	SandboxStateStore,
 	type TaskRecord,
 	TaskService,
 	type TaskServiceDeps,
@@ -845,6 +850,236 @@ describe("TaskService resume heartbeat-or-reclaim (32-02, D32-06)", () => {
 		h.leases.persist("ut-bbb-22222222", NID, { lease_id: "lse_bbb", acquiredAtMs: NOW_MS, ttlSeconds: 900 });
 		expect(await h.service.resumeInterrupted()).toBe(2);
 		expect(h.prompts.map((p) => p.idempotencyKey).sort()).toEqual(["ut-aaa-11111111:n1:resume:1", "ut-bbb-22222222:n1:resume:1"]);
+	});
+});
+
+describe("SandboxStateStore (U2)", () => {
+	test("record, list and forget round-trip through one 0600 file a fresh instance re-reads", () => {
+		const dir = mkdtempSync(join(tmpdir(), "tasks-u2-state-"));
+		try {
+			const path = join(dir, "sandboxes.json");
+			const state = new SandboxStateStore(path, (line) => {
+				throw new Error(line);
+			});
+			const first: SandboxStateEntry = { graph_id: GID, node_id: NID, task: "TRC-1", opened_at: "2026-10-12T00:00:00.000Z" };
+			const second: SandboxStateEntry = { graph_id: "ut-b-11111111", node_id: null, task: null, opened_at: "2026-10-12T00:00:01.000Z" };
+			state.record("box-a", first);
+			state.record("box-b", second);
+			expect(statSync(path).mode & 0o777).toBe(0o600);
+			expect(state.list()).toEqual([
+				{ sandbox_id: "box-a", ...first },
+				{ sandbox_id: "box-b", ...second },
+			]);
+			state.forget("box-a");
+			state.forget("box-a"); // absent id: no-op, no rewrite complaint
+			expect(state.list()).toEqual([{ sandbox_id: "box-b", ...second }]);
+			expect(new SandboxStateStore(path).list()).toEqual([{ sandbox_id: "box-b", ...second }]);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a failed write is one stderr warning, never a throw, and the map reads as empty", () => {
+		const dir = mkdtempSync(join(tmpdir(), "tasks-u2-state-"));
+		try {
+			const path = join(dir, "sandboxes.json");
+			mkdirSync(path, { recursive: true }); // a directory where the file should be: every write fails
+			const warnings: string[] = [];
+			const state = new SandboxStateStore(path, (line) => warnings.push(line));
+			expect(() => state.record("box-a", { graph_id: GID, node_id: null, task: null, opened_at: "t" })).not.toThrow();
+			expect(warnings.some((line) => line.includes("write failed"))).toBe(true);
+			expect(state.list()).toEqual([]);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a malformed file reads as empty with one warning; a missing file is silent", () => {
+		const dir = mkdtempSync(join(tmpdir(), "tasks-u2-state-"));
+		try {
+			const path = join(dir, "sandboxes.json");
+			writeFileSync(path, "not json");
+			const warnings: string[] = [];
+			const state = new SandboxStateStore(path, (line) => warnings.push(line));
+			expect(state.list()).toEqual([]);
+			expect(warnings).toHaveLength(1);
+			expect(warnings[0]).toContain("unreadable");
+			expect(new SandboxStateStore(join(dir, "absent.json"), (line) => warnings.push(line)).list()).toEqual([]);
+			expect(warnings).toHaveLength(1); // ENOENT stays silent
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("isHostSandboxLabel names exactly the labels this host stamps", () => {
+		expect(isHostSandboxLabel({ [GRAPH_LABEL]: GID })).toBe(true);
+		expect(isHostSandboxLabel({ [TEST_RUN_LABEL]: GID })).toBe(true);
+		expect(isHostSandboxLabel({ "com.example.other": "x" })).toBe(false);
+		expect(isHostSandboxLabel({})).toBe(false);
+		expect(isHostSandboxLabel(undefined)).toBe(false);
+	});
+});
+
+describe("reconcileSandboxes (U2)", () => {
+	const OPENED_AT = "2026-10-12T00:00:00.000Z";
+	const entry = (sandboxId: string, graphId: string): SandboxStateEntry & { sandbox_id: string } => ({
+		sandbox_id: sandboxId,
+		graph_id: graphId,
+		node_id: NID,
+		task: "TRC-1",
+		opened_at: OPENED_AT,
+	});
+	const box = (sandboxId: string, labels: Record<string, string>, state = "running"): SandboxListing => ({
+		sandbox_id: sandboxId,
+		labels,
+		state,
+	});
+
+	async function reconcileHarness(opts: {
+		live?: SandboxListing[];
+		entries?: Array<SandboxStateEntry & { sandbox_id: string }>;
+		/** Task records by graph id (default: GID live and claimed, everything else unknown). */
+		tasks?: Record<string, Pick<TaskRecord, "graph_id" | "released">>;
+		enumerateThrows?: string;
+		terminateThrows?: string;
+	} = {}) {
+		const forgotten: string[] = [];
+		const removed: string[] = [];
+		const warnings: Array<{ action: string; sandbox_id: string }> = [];
+		const logs: string[] = [];
+		const notes: string[] = [];
+		const result = await reconcileSandboxes({
+			enumerate: async () => {
+				if (opts.enumerateThrows) throw new Error(opts.enumerateThrows);
+				return opts.live ?? [];
+			},
+			state: {
+				list: () => opts.entries ?? [],
+				forget: (sandboxId: string) => forgotten.push(sandboxId),
+			},
+			taskFor: (graphId) => (opts.tasks ? (opts.tasks[graphId] ?? null) : graphId === GID ? { graph_id: GID, released: false } : null),
+			terminate: async (sandboxId: string) => {
+				if (opts.terminateThrows) throw new Error(opts.terminateThrows);
+				removed.push(sandboxId);
+			},
+			warn: (payload) => warnings.push(payload),
+			log: (line) => logs.push(line),
+			stderr: (line) => notes.push(line),
+		});
+		return { result, forgotten, removed, warnings, logs, notes };
+	}
+
+	test("a labeled, running sandbox of a still-claimed task is re-attached: kept, no warning", async () => {
+		const { result, removed, warnings, forgotten, logs } = await reconcileHarness({
+			live: [box("box-a", { [GRAPH_LABEL]: GID })],
+			entries: [entry("box-a", GID)],
+		});
+		expect(result).toEqual({ ok: true, reattached: ["box-a"], terminated: [], foreign: [] });
+		expect(removed).toEqual([]);
+		expect(warnings).toEqual([]);
+		expect(forgotten).toEqual([]);
+		expect(logs.join("\n")).toContain("re-attached box-a");
+	});
+
+	test("the re-attached task's record stays in flight, so the boot's continuation pass resumes it", async () => {
+		const store = new MemoryTaskStore();
+		store.save(taskRecord());
+		const result = await reconcileSandboxes({
+			enumerate: async () => [box("box-a", { [GRAPH_LABEL]: GID })],
+			state: { list: () => [entry("box-a", GID)], forget: () => undefined },
+			taskFor: (graphId) => store.list().find((record) => record.graph_id === graphId) ?? null,
+			terminate: async () => undefined,
+		});
+		expect(result.reattached).toEqual(["box-a"]);
+		const h = harness({ store }); // the next boot step: resumeInterrupted (D-07)
+		expect(await h.service.resumeInterrupted()).toBe(1);
+		expect(h.prompts.map((p) => p.idempotencyKey)).toEqual([`${GID}:${NID}:resume:1`]);
+	});
+
+	test("a labeled sandbox unknown to task state is terminated with one host.orphan warning", async () => {
+		const orphan = box("box-b", { [GRAPH_LABEL]: "ut-x-11111111" });
+		const testRun = box("box-c", { [TEST_RUN_LABEL]: GID });
+		const { result, removed, warnings, forgotten } = await reconcileHarness({ live: [orphan, testRun] });
+		expect(result.terminated).toEqual(["box-b", "box-c"]);
+		expect(removed).toEqual(["box-b", "box-c"]);
+		expect(warnings).toEqual([
+			{ action: "host.orphan", sandbox_id: "box-b" },
+			{ action: "host.orphan", sandbox_id: "box-c" },
+		]);
+		expect(forgotten).toEqual([]); // no entries existed to drop
+	});
+
+	test("a labeled sandbox of a released task is an orphan and its stale state entry is dropped", async () => {
+		const { result, removed, warnings, forgotten } = await reconcileHarness({
+			live: [box("box-a", { [GRAPH_LABEL]: GID })],
+			entries: [entry("box-a", GID)],
+			tasks: { [GID]: { graph_id: GID, released: true } },
+		});
+		expect(result.terminated).toEqual(["box-a"]);
+		expect(removed).toEqual(["box-a"]);
+		expect(warnings).toEqual([{ action: "host.orphan", sandbox_id: "box-a" }]);
+		expect(forgotten).toEqual(["box-a"]);
+	});
+
+	test("a known sandbox that is no longer running is dead weight, not a re-attach", async () => {
+		const { result, removed, warnings, forgotten } = await reconcileHarness({
+			live: [box("box-a", { [GRAPH_LABEL]: GID }, "exited")],
+			entries: [entry("box-a", GID)],
+		});
+		expect(result.reattached).toEqual([]);
+		expect(result.terminated).toEqual(["box-a"]);
+		expect(forgotten).toEqual(["box-a"]);
+		expect(warnings).toEqual([{ action: "host.orphan", sandbox_id: "box-a" }]);
+	});
+
+	test("a foreign, unlabeled container is only reported: never terminated, never warned", async () => {
+		const foreign = box("box-d", { "com.other.project": "1" });
+		const { result, removed, warnings, notes } = await reconcileHarness({ live: [foreign] });
+		expect(result.foreign).toEqual(["box-d"]);
+		expect(removed).toEqual([]);
+		expect(warnings).toEqual([]);
+		expect(notes).toHaveLength(1);
+		expect(notes[0]).toContain("foreign container box-d");
+	});
+
+	test("enumeration failure is one stderr warning and a fail-open boot: nothing is touched", async () => {
+		const { result, removed, warnings, notes } = await reconcileHarness({ enumerateThrows: "daemon unreachable" });
+		expect(result.ok).toBe(false);
+		expect(result.reattached).toEqual([]);
+		expect(removed).toEqual([]);
+		expect(warnings).toEqual([]);
+		expect(notes).toHaveLength(1);
+		expect(notes[0]).toContain("enumeration failed");
+		expect(notes[0]).toContain("serving anyway");
+	});
+
+	test("an entry whose sandbox is gone is forgotten, so no later boot re-adopts a phantom", async () => {
+		const { result, forgotten } = await reconcileHarness({
+			live: [box("box-a", { [GRAPH_LABEL]: GID })],
+			entries: [entry("box-a", GID), entry("box-gone", GID)],
+		});
+		expect(result.reattached).toEqual(["box-a"]);
+		expect(forgotten).toEqual(["box-gone"]);
+	});
+
+	test("a failed terminate is a stderr note and no warning; other containers still reconcile", async () => {
+		const { result, removed, warnings, notes } = await reconcileHarness({
+			live: [box("box-b", { [GRAPH_LABEL]: "ut-x-11111111" }), box("box-e", { [GRAPH_LABEL]: "ut-y-22222222" })],
+			terminateThrows: "daemon refused",
+		});
+		expect(result.terminated).toEqual([]);
+		expect(removed).toEqual([]);
+		expect(warnings).toEqual([]);
+		expect(notes).toHaveLength(2);
+		expect(notes[0]).toContain("remove failed");
+	});
+
+	test("no live containers and no entries reconcile to a clean ok boot", async () => {
+		const { result, removed, warnings, notes } = await reconcileHarness({ live: [], entries: [] });
+		expect(result).toEqual({ ok: true, reattached: [], terminated: [], foreign: [] });
+		expect(removed).toEqual([]);
+		expect(warnings).toEqual([]);
+		expect(notes).toEqual([]);
 	});
 });
 

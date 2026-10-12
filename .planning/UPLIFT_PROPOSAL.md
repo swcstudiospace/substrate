@@ -75,7 +75,7 @@
 |------|--------|-------|-------|
 | U5 | done | mcp-server 0 fail · phase-close pass · tsc clean | [01-SUMMARY.md](uplift/01-SUMMARY.md) — unified into auditMemoryWrite; accepted verdict was the real gap |
 | U4 | done | test:py 272 pass · obs+mcp 0 fail · tsc clean | [02-SUMMARY.md](uplift/02-SUMMARY.md) — burn SLOs at /slo; storm-breaker with new `quota-burn` marker (D33-02 lock deliberately extended) |
-| U2 | pending | — | — |
+| U2 | done | host 244 pass · tsc clean · full suite 1 recorded fail | [03-SUMMARY.md](uplift/03-SUMMARY.md) — provider-enumeration reconciliation replaces the D-04 blanket sweep |
 | U1 | pending | — | — |
 | U3 | pending | — | — |
 | U6 | pending | — | — |

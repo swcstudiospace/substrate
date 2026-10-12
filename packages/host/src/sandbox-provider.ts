@@ -10,6 +10,7 @@
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
+import { join } from "node:path";
 import type { SandboxProvider } from "sandbox-agent";
 import {
 	buildContainerSpec,
@@ -19,6 +20,7 @@ import {
 	SANDBOX_PORT,
 	type SandboxNetwork,
 } from "./sandbox-options.ts";
+import { type SandboxListing, SandboxStateStore } from "./tasks.ts";
 
 type PortBinding = { HostIp?: string; HostPort?: string };
 
@@ -40,6 +42,9 @@ type DockerContainer = {
 
 type NetworkInspect = { Internal?: boolean };
 
+/** One entry of docker's container list, the slice reconciliation classifies on (U2). */
+type ContainerSummary = { Id: string; Names?: string[]; Labels?: Record<string, string> | null; State?: string };
+
 /** The slice of dockerode this provider uses. */
 export type DockerClient = {
 	createContainer(body: Record<string, unknown>): Promise<DockerContainer>;
@@ -48,6 +53,7 @@ export type DockerClient = {
 	createNetwork(body: Record<string, unknown>): Promise<unknown>;
 	getImage(name: string): { inspect(): Promise<unknown> };
 	pull(name: string): Promise<unknown>;
+	listContainers(opts: { all: boolean }): Promise<ContainerSummary[]>;
 	modem: { followProgress(stream: unknown, onFinished: (error: Error | null, output: unknown) => void): void };
 };
 
@@ -59,6 +65,11 @@ export type SubstrateDockerOptions = {
 	image?: string;
 	/** Injected for tests; defaults to dockerode on /var/run/docker.sock. */
 	docker?: DockerClient;
+	/**
+	 * U2: the durable sandbox→task map this provider writes on create and drops on destroy.
+	 * Defaults to the shared store at `defaultSandboxStatePath()`; tests inject a tmp-path store.
+	 */
+	sandboxState?: SandboxStateStore;
 	/**
 	 * Injected `df` runner for tests. Defaults to `df --output=avail -B1 /`
 	 * (the substrate-desktop.sh 10 GiB floor pattern). Must return the raw
@@ -141,6 +152,55 @@ function defaultDocker(): DockerClient {
 	return new Docker({ socketPath: "/var/run/docker.sock" });
 }
 
+/**
+ * U2: where the sandbox reconciliation state file lives — `SUBSTRATE_SANDBOX_STATE` overrides,
+ * else `<storage root>/sandboxes.json` (RIVETKIT_STORAGE_PATH, the unit's storage-dir idiom,
+ * same root main.ts derives). The provider and main.ts derive the path independently because
+ * the provider is constructed inside the rivet VM factory, which takes no host wiring.
+ */
+export function defaultSandboxStatePath(env: NodeJS.ProcessEnv = process.env): string {
+	const override = (env["SUBSTRATE_SANDBOX_STATE"] ?? "").trim();
+	if (override !== "") return override;
+	const storage = (env["RIVETKIT_STORAGE_PATH"] ?? "").trim() || "/var/lib/substrate/agentos";
+	return join(storage, "sandboxes.json");
+}
+
+/** One shared default state store and docker client behind the module-level reconcile entry points. */
+let sharedState: SandboxStateStore | undefined;
+let sharedDocker: DockerClient | undefined;
+function sharedSandboxState(): SandboxStateStore {
+	return (sharedState ??= new SandboxStateStore(defaultSandboxStatePath()));
+}
+function anyDocker(): DockerClient {
+	return (sharedDocker ??= defaultDocker());
+}
+
+/** U2: every container on the daemon, running or exited, with the labels reconciliation classifies on. */
+export async function listSandboxes(docker: DockerClient = anyDocker()): Promise<SandboxListing[]> {
+	const containers = await docker.listContainers({ all: true });
+	return containers.map((container) => ({
+		sandbox_id: container.Id,
+		labels: container.Labels ?? {},
+		state: container.State ?? "unknown",
+	}));
+}
+
+/**
+ * U2: remove one container by id — stop, then force-remove, an already-gone container is
+ * success. Only ever called with host-labeled ids: reconcileSandboxes classifies before it
+ * terminates, and the classification is the guard.
+ */
+export async function destroySandbox(sandboxId: string, docker: DockerClient = anyDocker()): Promise<void> {
+	const container = docker.getContainer(sandboxId);
+	await container.stop({ t: 5 }).catch(() => undefined);
+	await container.remove({ force: true }).catch((error: unknown) => {
+		if (isNotFound(error)) return; // already gone
+		const status = typeof error === "object" && error !== null && "statusCode" in error ? error.statusCode : undefined;
+		// 409: AutoRemove started removing it when stop() returned.
+		if (status !== 409) throw error;
+	});
+}
+
 function isNotFound(error: unknown): boolean {
 	return typeof error === "object" && error !== null && (error as { statusCode?: unknown }).statusCode === 404;
 }
@@ -170,6 +230,8 @@ export function substrateDocker(opts: SubstrateDockerOptions): SubstrateSandboxP
 	buildContainerSpec({ graphId, worktree, token: "validate", image, network, readOnlyBinds });
 	let client: DockerClient | undefined = opts.docker;
 	const docker = (): DockerClient => (client ??= defaultDocker());
+	// U2: durable sandbox→task records; the provider learns only the graph, so node/task stay null.
+	const sandboxState = opts.sandboxState ?? sharedSandboxState();
 
 	/** Inspect a container and refuse any that this graph's provider did not create. */
 	async function inspectOwned(sandboxId: string): Promise<ContainerInspect> {
@@ -198,6 +260,15 @@ export function substrateDocker(opts: SubstrateDockerOptions): SubstrateSandboxP
 				await container.remove({ force: true }).catch(() => undefined);
 				throw error;
 			}
+			// U2: written only after a successful start, so a restarted host re-adopts exactly the
+			// sandboxes that came up. Best-effort: a failed record is a stderr warning, never an
+			// open failure (the sandbox works; only re-adoption loses its memory).
+			sandboxState.record(container.id, {
+				graph_id: graphId,
+				node_id: null,
+				task: null,
+				opened_at: new Date().toISOString(),
+			});
 			return container.id;
 		},
 
@@ -205,7 +276,10 @@ export function substrateDocker(opts: SubstrateDockerOptions): SubstrateSandboxP
 			try {
 				await inspectOwned(sandboxId);
 			} catch (error) {
-				if (isNotFound(error)) return; // AutoRemove already took it
+				if (isNotFound(error)) {
+					sandboxState.forget(sandboxId); // AutoRemove already took it; the entry dies with it
+					return;
+				}
 				throw error;
 			}
 			const container = docker().getContainer(sandboxId);
@@ -215,6 +289,8 @@ export function substrateDocker(opts: SubstrateDockerOptions): SubstrateSandboxP
 				const status = (error as { statusCode?: unknown }).statusCode;
 				if (status !== 404 && status !== 409) throw error;
 			});
+			// U2: normal teardown — the next boot must not re-adopt this sandbox.
+			sandboxState.forget(sandboxId);
 		},
 
 		async getUrl(sandboxId) {

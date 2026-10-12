@@ -8,7 +8,6 @@
  * SUBSTRATE_VM_ANTHROPIC_API_KEY as the session's model auth (D-08).
  */
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { createRequire } from "node:module";
 import type { Server } from "node:http";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,15 +15,18 @@ import { type Client, createClient } from "@rivet-dev/agentos/client";
 import { createApiServer } from "./api.ts";
 import { startTrackerProxy } from "./mcp-proxy.ts";
 import { formatRoute, type MountRoute, parseMountRoute, parseRoute, parseTestsRoute, type Route, type TestsRoute, trackerRoute } from "./options.ts";
-import { GRAPH_LABEL, type SandboxNetwork } from "./sandbox-options.ts";
+import { defaultSandboxStatePath, destroySandbox, listSandboxes } from "./sandbox-provider.ts";
+import { type SandboxNetwork } from "./sandbox-options.ts";
 import type { Skill, TrackerLocators } from "./seed.ts";
 import { LeaseStore, SubstrateClient } from "./substrate.ts";
 import { HostSync, LinearLink, NotionSync } from "./sync.ts";
-import { TaskService, TaskStore, parseApprovalTimeoutMs, type VmHandle } from "./tasks.ts";
+import { TaskService, TaskStore, parseApprovalTimeoutMs, reconcileSandboxes, SandboxStateStore, type VmHandle } from "./tasks.ts";
 import { createEnsureModelRoute, createHostVm } from "./vm.ts";
 import { createApprovals, TelegramError } from "./telegram.ts";
 
 const log = (line: string) => process.stdout.write(`${line}\n`);
+/** Boot warnings go to stderr (U2): reconciliation and state notes never read as normal chatter. */
+const warn = (line: string) => process.stderr.write(`[substrate-host] ${line}\n`);
 
 function env(name: string): string | undefined {
 	return process.env[name]?.trim() || undefined;
@@ -121,23 +123,6 @@ function loadTrackers(path: string): TrackerLocators {
 	return { notionDataSourceUrl, linearTeam };
 }
 
-/** D-04: at boot remove only containers this host labelled; nothing else is listed or touched. */
-async function sweepOrphanSandboxes(): Promise<number> {
-	type Container = { Id: string; Names?: string[] };
-	type Docker = {
-		listContainers(opts: { all: boolean; filters: string }): Promise<Container[]>;
-		getContainer(id: string): { remove(opts: { force: boolean }): Promise<unknown> };
-	};
-	const DockerCtor = createRequire(import.meta.url)("dockerode") as new () => Docker;
-	const docker = new DockerCtor();
-	const orphans = await docker.listContainers({ all: true, filters: JSON.stringify({ label: [GRAPH_LABEL] }) });
-	for (const container of orphans) {
-		await docker.getContainer(container.Id).remove({ force: true });
-		log(`[substrate-host] removed orphan sandbox ${container.Id.slice(0, 12)} ${container.Names?.join(",") ?? ""}`);
-	}
-	return orphans.length;
-}
-
 const skills = loadSkills(skillsDir);
 const trackers = loadTrackers(ultrathinkConfig);
 const store = new TaskStore(join(storageDir, "tasks"));
@@ -201,11 +186,35 @@ const { registry } = createHostVm({
 	log,
 });
 
-const swept = await sweepOrphanSandboxes().catch((cause: unknown) => {
-	log(`[substrate-host] orphan sweep failed: ${String(cause)}`);
-	return 0;
+// U2 (03-PLAN.md): boot reconciliation replaces the D-04 blanket sweep. A container this host
+// labeled survives only when the state file maps it to a still-claimed task — its record stays
+// in flight and the resumeInterrupted pass below (D-07) sends the continuation and rearms the
+// heartbeat. Every other host-labeled container is an orphan: removed, one warning event each.
+// Unlabeled containers are foreign and never touched. Fail-open: enumeration trouble is one
+// stderr warning and the host still serves.
+const sandboxState = new SandboxStateStore(defaultSandboxStatePath(), warn);
+const reconciled = await reconcileSandboxes({
+	enumerate: () => listSandboxes(),
+	state: sandboxState,
+	taskFor: (graphId) => store.list().find((record) => record.graph_id === graphId) ?? null,
+	terminate: (sandboxId) => destroySandbox(sandboxId),
+	warn: (payload) => {
+		void substrate
+			.call("events_emit", {
+				kind: "warning",
+				summary: `host orphan sandbox removed: ${payload.sandbox_id.slice(0, 12)}`,
+				session_id: "host:reconcile",
+				payload,
+			})
+			.catch((cause: unknown) => log(`[substrate-host] orphan event emit failed: ${String(cause)}`));
+	},
+	log,
+	stderr: warn,
+}).catch((cause: unknown) => {
+	warn(`sandbox reconcile failed: ${String(cause)} (serving anyway)`);
+	return { ok: false, reattached: [], terminated: [], foreign: [] as string[] };
 });
-log(`[substrate-host] orphan sandboxes removed: ${swept}`);
+log(`[substrate-host] sandboxes re-attached ${reconciled.reattached.length}, orphans removed ${reconciled.terminated.length}, foreign untouched ${reconciled.foreign.length}`);
 
 await registry.startAndWait();
 engineReady = true;
