@@ -212,3 +212,4 @@ delete of the swarm Task Store) and the per-phase acceptance criteria. Decisions
 - Secrets live in `/etc/substrate/substrate.env`, never in this repo.
 
 Architecture: see [`.planning/PROJECT.md`](.planning/PROJECT.md) and the Notion build plan.
+Lane A proof: written by a dispatched Claude Code session in an agentOS VM (graph ut-muhk8v3p-47ae5f1a).
