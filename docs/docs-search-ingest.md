@@ -80,10 +80,46 @@ the version store travels separately as `dataset_commit` on every
 citation once one is recorded; it is the dataset's version, not
 necessarily that document's.
 The reply carries an untrusted-docs notice; one `note` event
-(`payload.action: "docs.search"`) lists the returned URLs; any error
-yields `{chunks: [], degraded: true, reason}` — never a throw inside an
-agent's turn. At most 10 results, each retrieved over explicit
-`dataset_ids` with `page_size <= 10`.
+(`payload.action: "docs.search"`) lists the returned URLs; a search that
+served nothing yields `{chunks: [], degraded: true, reason}` — never a
+throw inside an agent's turn. At most 10 results, each retrieved over
+explicit `dataset_ids` with `page_size <= 10`.
+
+### Fan-out under one budget (uplift-3 N5)
+
+The datasets are retrieved **concurrently** — one retrieval per resolved
+dataset, at most the configured three — under one shared deadline,
+`SUBSTRATE_DOCS_SEARCH_BUDGET_MS` (default 4000; `0` keeps only the
+plane client's own 4 s per-call timeout, which is the pre-N5 behaviour
+and the rollback). A search therefore costs its slowest dataset, not the
+sum, and a stalled dataset costs the budget. Failure is isolated per
+dataset: a dataset that fails or outlives the deadline is listed in the
+reply as `degraded_datasets: [{dataset, reason}]` — `reason` is the plane
+client's bounded reason (`ragflow 503`, `ragflow circuit open`,
+`deadline (4000 ms docs budget)`), redacted and capped at 200 characters
+— while the other datasets' citations are returned, still score-sorted
+and capped at 10. The reply is `degraded: true` only when **no** dataset
+answered; then `reason` is the first failure and `degraded_datasets`
+names them all. The single `note` event is unchanged apart from carrying
+`degraded_datasets` when it is non-empty, so a partial answer is visible
+in the ledger. A partially served reply is **never cached** (R6's rule
+"a degraded reply is never stored", extended): the next caller retries
+the missing dataset instead of inheriting a hole for a TTL.
+
+### Metrics (uplift-3 N5)
+
+Every search is measured end to end around the answer cache, as the
+caller waited for it: `substrate.docs.duration{surface, cached}`
+(histogram, its own edges so 2,000 and 4,000 ms are exact),
+`substrate.docs.search{surface, outcome=hit|empty|degraded, cached}`
+(`hit`: at least one citation; `empty`: a real answer with none;
+`degraded`: `degraded: true`) and
+`substrate.docs.citations{provenance=recorded|unrecorded|unpinned}`, one
+per returned citation, so `unrecorded / total` reads directly as the
+share of answers the ingest records cannot vouch for. `GET /slo` carries
+the `docs` row `docs.search.p95` (≤ 2,000 ms, `insufficient-data` below
+20 searches; `SUBSTRATE_SLO_DOCS_SEARCH_P95_MS`) beside the catalogue —
+see `docs/observability.md`.
 
 ### Caches (uplift-2 R6)
 
@@ -100,7 +136,8 @@ outcome's `changed`) and every recorded version bumps — a refresh
 invalidates every cached answer at once. The same condition persists the
 ingest records, so a page pruned before a later page failed is never
 named by the state file after a restart (Greptile round 2). A
-degraded reply is never stored; a cache hit makes no plane call and emits
+degraded reply is never stored, nor (uplift-3 N5) a partially served one
+with `degraded_datasets`; a cache hit makes no plane call and emits
 no `note`.
 
 ## The six ingest refusals
@@ -214,3 +251,38 @@ fails any retrieval missing `dataset_ids`, a JSON upload body and the
 pre-R6 poll route. Live proof (first probe, discovery/creation, real
 ingest, real served search) is operator-gated — see
 `docs/runbooks/docs-proof.md`.
+
+Since uplift-3 N5 the fake also serves a question-aware answer per dataset
+(`answer`) and records how many retrievals overlapped (`maxInFlight`),
+which is how the fan-out, the budget and the per-dataset isolation are
+proven (`docs-search.test.ts`).
+
+## Golden questions (uplift-3 N5)
+
+`scripts/docs-golden.ts` scores a docs search against
+`fixtures/docs-golden/*.json` — per question: the datasets, the expected
+source URLs (and commits), graded relevance, and the thresholds the
+fixture must meet. Scores: precision@k, recall of the expected URLs, NDCG
+from the grades over the distinct cited URLs, citation provenance
+coverage (share of citations whose commit is a recorded one), commit
+match, and a redaction check (no citation field changes under the
+redactor; no `forbidden` string appears). Two tiers share the scorer:
+
+- **Offline** (`bun run docs:golden`, and `scripts/docs-golden.test.ts` in
+  CI): the real `searchDocs` over a `RagflowFake` that retrieves by
+  lexical overlap from the sanitized corpus in
+  `fixtures/docs-golden/corpus/` (`packages/mcp-server/src/docs-golden.ts`,
+  inside the package because the store lock lets nothing outside import
+  the fake). It proves scope isolation, provenance, ordering, the cap,
+  redaction of a planted placeholder and the scorer — not relevance;
+  every committed fixture must pass its thresholds.
+- **Live** (`SUBSTRATE_URL=… SUBSTRATE_TOKEN=… bun run docs:golden -- --live`,
+  opt-in): `POST /docs/search` only; scores are printed, never asserted.
+  It refuses (exit 3) when a fixture's `corpus_manifest.sha256` is not the
+  corpus on disk (`--manifest` prints it), when a fixture carries no
+  operator-attested `corpus_manifest.dataset_commit`, or when a live
+  citation's `dataset_commit` is not that pin — so a score is only ever
+  read against the corpus it was written for. Without the two variables
+  it exits 2 with a usage line and opens no socket.
+
+See `fixtures/docs-golden/README.md` for the fixture shape.

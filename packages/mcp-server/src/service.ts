@@ -13,6 +13,7 @@ import {
 	PlaneRegistry,
 	gatedFetch,
 	type BreakerSnapshot,
+	type DocsSearchSample,
 	type PlaneName,
 	type PlaneSample,
 } from "@substrate/observability";
@@ -55,7 +56,7 @@ import {
 	type IngestRecord,
 	type PageSettlement,
 } from "./docs-ingest.ts";
-import { DEFAULT_SEARCH_DATASET_NAMES, searchDocs, type SearchReply } from "./docs-search.ts";
+import { DEFAULT_SEARCH_DATASET_NAMES, citationProvenanceCounts, searchDocs, searchReplyStorable, type SearchReply } from "./docs-search.ts";
 import {
 	DEFAULT_IDLE_SECONDS,
 	analyzeDrift,
@@ -533,6 +534,8 @@ export interface SubstrateObserver {
 	cached?(sample: CacheSample): void;
 	/** One outbound call to a data plane, as its gate observed it (uplift-2 R2). */
 	plane?(sample: PlaneSample): void;
+	/** One finished docs search, end to end, cached or loaded (uplift-3 N5). */
+	docsSearch?(sample: DocsSearchSample): void;
 	claimed?(sample: {
 		surface: Surface;
 		graph_id: string;
@@ -2748,12 +2751,44 @@ export class Substrate {
 	 * `agent-skills` is marked pin-aged until this process has seen
 	 * skills-sync fast-forward evidence (D25-07). The dataset list comes
 	 * from the 60 s cache, so a search costs N retrievals, not 1 + N calls.
+	 *
+	 * uplift-3 N5: the datasets are retrieved concurrently under one shared
+	 * budget (`docsSearchBudgetMs`); a partially served reply names its
+	 * missing datasets in `degraded_datasets` and, like a degraded one, is
+	 * never stored. Every search is measured end to end — cache hit or
+	 * loaded, as the caller waited for it — through `observer.docsSearch`.
 	 */
 	async searchDocs(
 		input: { question?: unknown; datasets?: unknown; session_id?: unknown },
 		callerSurface: Surface | null,
 	): Promise<SearchReply> {
 		const surface = callerSurface ?? "claude-code";
+		const started = performance.now();
+		let loaded = false;
+		let reply: SearchReply | null = null;
+		try {
+			reply = await this.searchDocsUnmeasured(input, surface, () => {
+				loaded = true;
+			});
+			return reply;
+		} finally {
+			// Timed in `finally` so a search that threw is still in the histogram:
+			// the SLO is about what the caller waited for.
+			this.observer.docsSearch?.({
+				surface,
+				outcome: reply === null || reply.degraded === true ? "degraded" : reply.chunks.length === 0 ? "empty" : "hit",
+				cached: !loaded,
+				durationMs: performance.now() - started,
+				citations: citationProvenanceCounts(reply?.chunks ?? []),
+			});
+		}
+	}
+
+	private async searchDocsUnmeasured(
+		input: { question?: unknown; datasets?: unknown; session_id?: unknown },
+		surface: Surface,
+		noteLoaded: () => void,
+	): Promise<SearchReply> {
 		const sessionId = typeof input.session_id === "string" && input.session_id.length > 0 ? input.session_id : undefined;
 		const question = typeof input.question === "string" ? input.question : "";
 		const names = Array.isArray(input.datasets)
@@ -2762,8 +2797,9 @@ export class Substrate {
 		await this.hydrateDocsSeen();
 		const pins = pinsFromVersions(this.docsVersions);
 		const degradedDatasets = isSyncLive(this.docsSkillsSync) ? [] : ["agent-skills"];
-		const load = (): Promise<SearchReply> =>
-			searchDocs(
+		const load = (): Promise<SearchReply> => {
+			noteLoaded();
+			return searchDocs(
 				{
 					config: this.config.ragflow,
 					datasetNames: names,
@@ -2776,9 +2812,11 @@ export class Substrate {
 					datasets: this.docsDatasetList,
 					retrieval: this.config.docsRetrieval,
 					provenanceOf: (documentId) => documentProvenance(this.docsIngestSeen, documentId),
+					budgetMs: this.config.docsSearchBudgetMs,
 				},
 				question,
 			);
+		};
 		// An empty question and an unconfigured plane are answered (degraded)
 		// without touching the cache: there is nothing to key on.
 		if (question.trim().length === 0 || this.config.ragflow === null) return load();
@@ -2788,7 +2826,7 @@ export class Substrate {
 			args: { question: question.trim().replace(/\s+/g, " ").toLowerCase(), datasets: [...names].sort(), pins, degraded: degradedDatasets },
 			generations: [DOCS_GENERATION_KEY],
 			load,
-			store: (reply) => reply.degraded !== true,
+			store: searchReplyStorable,
 		});
 	}
 

@@ -324,6 +324,14 @@ export interface SubstrateConfig {
 	 * The defaults are RAGFlow's own; junk or out-of-range values fall back.
 	 */
 	docsRetrieval: RetrievalKnobs;
+	/**
+	 * One shared deadline for every dataset's retrieval in one `docs_search`,
+	 * ms (`SUBSTRATE_DOCS_SEARCH_BUDGET_MS`, default 4000; 0 = no shared
+	 * deadline, each retrieval bounded only by its own 4 s call timeout —
+	 * uplift-3 N5). A dataset that misses it is degraded alone; the others
+	 * still answer.
+	 */
+	docsSearchBudgetMs: number;
 }
 
 /** Production defaults: September's library, so the host ledger keeps deduplicating. */
@@ -578,6 +586,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 			vectorSimilarityWeight: unitIntervalOr(env.SUBSTRATE_DOCS_VECTOR_WEIGHT, DEFAULT_RETRIEVAL_KNOBS.vectorSimilarityWeight),
 			topK: positiveOr(env.SUBSTRATE_DOCS_TOP_K, DEFAULT_RETRIEVAL_KNOBS.topK),
 		},
+		// uplift-3 N5
+		docsSearchBudgetMs: nonNegativeOr(env.SUBSTRATE_DOCS_SEARCH_BUDGET_MS, 4000),
 	};
 }
 

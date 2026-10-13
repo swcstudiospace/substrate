@@ -9,6 +9,7 @@
  * slowest source rather than the sum, and a stalled store costs the budget.
  */
 import { earliestRefreshAt } from "./cache.ts";
+import { sharedDeadline } from "./deadline.ts";
 import { normalizeIdentifier } from "./event.ts";
 import type { GreptimeClient } from "./greptime.ts";
 import { quote } from "./greptime.ts";
@@ -130,42 +131,6 @@ function swallow<T>(what: string, fallback: T): (cause: unknown) => T {
 	};
 }
 
-/** A read that outlived the budget. Its message is what the stderr line shows. */
-class BriefDeadline extends Error {
-	constructor(budgetMs: number) {
-		super(`deadline (${budgetMs} ms brief budget)`);
-		this.name = "BriefDeadline";
-	}
-}
-
-interface SharedDeadline {
-	race: <T>(read: Promise<T>) => Promise<T>;
-	clear: () => void;
-}
-
-/**
- * One shared deadline for every read. `race` settles a read against it; a
- * read that misses rejects with `BriefDeadline`, which the caller treats like
- * any other failed read. The underlying promise is not cancelled — a Postgres
- * query has no abort handle — but nobody waits for it any more, and the
- * Greptime read carries the same bound as its own fetch timeout.
- */
-function sharedDeadline(budgetMs: number): SharedDeadline {
-	if (budgetMs <= 0) return { race: (read) => read, clear: () => {} };
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	const expired = new Promise<never>((_, reject) => {
-		timer = setTimeout(() => reject(new BriefDeadline(budgetMs)), budgetMs);
-		timer.unref?.();
-	});
-	// A brief with nothing to read never races it; without this the timer's
-	// rejection would be unhandled.
-	expired.catch(() => {});
-	return {
-		race: (read) => Promise.race([read, expired]),
-		clear: () => clearTimeout(timer),
-	};
-}
-
 /**
  * Build the Markdown brief. Never throws — a partial brief beats a blocked prompt.
  *
@@ -202,7 +167,12 @@ export async function composeBrief(
 			return swallow(what, fallback)(cause);
 		};
 	};
-	const deadline = sharedDeadline(budgetMs);
+	// One shared deadline (`deadline.ts`) for every read; a read that misses it
+	// is a failed read, no different from a store that threw. The underlying
+	// promise is not cancelled — a Postgres query has no abort handle — but
+	// nobody waits for it any more, and the Greptime read carries the same
+	// bound as its own fetch timeout.
+	const deadline = sharedDeadline(budgetMs, "brief budget");
 	// Start a read now, under the deadline, already failed open. A source whose
 	// call throws synchronously (a fake, a client refusing before the socket) is
 	// a failed read too, not an exception out of the brief.

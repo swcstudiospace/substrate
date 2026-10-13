@@ -1,6 +1,18 @@
 import { describe, expect, test } from "bun:test";
 import { METRIC, SubstrateInstruments } from "./instruments.ts";
-import { DEFAULT_THRESHOLDS, PLANE_BUCKET_MS, PLANE_WINDOW_MS, PlaneWindow, breaches, evaluatePlaneSlos, evaluateSlos, sloCatalogue, type PlaneSloResult } from "./slo.ts";
+import {
+	DEFAULT_THRESHOLDS,
+	PLANE_BUCKET_MS,
+	PLANE_WINDOW_MS,
+	PlaneWindow,
+	breaches,
+	docsSearchObjective,
+	evaluateDocsSlos,
+	evaluatePlaneSlos,
+	evaluateSlos,
+	sloCatalogue,
+	type PlaneSloResult,
+} from "./slo.ts";
 import { BURN_MIN_SPAN_MS, BURN_WINDOW_MS, type BurnResult, BurnLedger, evaluateBurnSlos, loadBurnThresholds } from "./burn.ts";
 
 function slo(results: ReturnType<typeof evaluateSlos>, id: string) {
@@ -235,11 +247,55 @@ describe("naming", () => {
 		// A catalogue that referred to a metric nothing records would report
 		// `insufficient-data` forever and look like a quiet system.
 		const registered = new Set(new SubstrateInstruments().snapshot().map((metric) => metric.name));
-		for (const target of sloCatalogue()) {
+		for (const target of [...sloCatalogue(), docsSearchObjective()]) {
 			const names = target.kind === "latency-quantile" ? [target.metric] : [target.numerator.metric, target.denominator.metric];
 			for (const name of names) expect(registered).toContain(name);
 		}
 		expect(registered).toContain(METRIC.briefDuration);
+	});
+});
+
+describe("docs.search.p95 (uplift-3 N5)", () => {
+	function searches(latencies: number[]): SubstrateInstruments {
+		const instruments = new SubstrateInstruments();
+		for (const durationMs of latencies) {
+			instruments.recordDocsSearch({ surface: "grok-bot", outcome: "hit", cached: false, durationMs, citations: {} });
+		}
+		return instruments;
+	}
+
+	test("is one row beside the catalogue, never in it, with the 2,000 ms default stated inclusively", () => {
+		expect(sloCatalogue().map((target) => target.id)).not.toContain("docs.search.p95");
+		const [row] = evaluateDocsSlos(new SubstrateInstruments().snapshot());
+		expect(row?.id).toBe("docs.search.p95");
+		expect(row?.statement).toBe(`p95 of ${METRIC.docsDuration} <= 2000 ms`);
+		expect(DEFAULT_THRESHOLDS.docsSearchP95Ms).toBe(2000);
+	});
+
+	test("too few searches is `insufficient-data`, never `ok`", () => {
+		expect(slo(evaluateDocsSlos(new SubstrateInstruments().snapshot()), "docs.search.p95").status).toBe("insufficient-data");
+		const result = slo(evaluateDocsSlos(searches(Array.from({ length: 19 }, () => 100)).snapshot()), "docs.search.p95");
+		expect(result.status).toBe("insufficient-data");
+		expect(result.detail).toContain("19 of 20");
+	});
+
+	test("judged exactly at the histogram's own 2,000 ms edge: 95 % at or below is ok, less is breached", () => {
+		const ok = evaluateDocsSlos(searches([...Array.from({ length: 95 }, () => 1500), ...Array.from({ length: 5 }, () => 3000)]).snapshot());
+		expect(slo(ok, "docs.search.p95").status).toBe("ok");
+		const breached = evaluateDocsSlos(searches([...Array.from({ length: 94 }, () => 1500), ...Array.from({ length: 6 }, () => 3000)]).snapshot());
+		expect(slo(breached, "docs.search.p95").status).toBe("breached");
+		// A search that cost the whole default budget sits above the edge.
+		const budgeted = evaluateDocsSlos(searches(Array.from({ length: 30 }, () => 4000)).snapshot());
+		expect(slo(budgeted, "docs.search.p95").status).toBe("breached");
+	});
+
+	test("an operator's threshold reaches the statement, but only one of the histogram's edges is decidable", () => {
+		const tuned = slo(evaluateDocsSlos(searches(Array.from({ length: 30 }, () => 500)).snapshot(), { docsSearchP95Ms: 1000 }), "docs.search.p95");
+		expect(tuned.statement).toContain("1000 ms");
+		expect(tuned.status).toBe("ok");
+		expect(slo(evaluateDocsSlos(searches(Array.from({ length: 30 }, () => 500)).snapshot(), { docsSearchP95Ms: 1500 }), "docs.search.p95").status).toBe(
+			"unmeasurable",
+		);
 	});
 });
 

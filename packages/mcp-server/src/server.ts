@@ -665,6 +665,10 @@ export function createHttpServer(
 				// the deployment does not have, and never folded into `breached`, which
 				// stays the catalogue's own list.
 				const planes = observability.evaluatePlanes(substrate.planesConfigured());
+				// The docs-search latency objective (uplift-3 N5) rides beside it too:
+				// one row, `docs.search.p95`, in the catalogue's entry shape, never
+				// folded into `breached`.
+				const docs = observability.evaluateDocs();
 				// 200 either way. A breached objective is information, not a broken service,
 				// and a monitor that read this as an outage would page on a slow hour.
 				sendJson(res, 200, {
@@ -672,6 +676,7 @@ export function createHttpServer(
 					breached: results.filter((result) => result.status === "breached").map((result) => result.id),
 					burn,
 					planes,
+					docs,
 				});
 				return;
 			}

@@ -79,6 +79,8 @@ export interface SloThresholds {
 	minSamples?: number;
 	/** Per-plane `ok / all` floor over the rolling hour; `SUBSTRATE_SLO_PLANE_AVAILABILITY`. */
 	planeAvailability?: number;
+	/** End-to-end docs search p95 ceiling, ms; `SUBSTRATE_SLO_DOCS_SEARCH_P95_MS` (uplift-3 N5). */
+	docsSearchP95Ms?: number;
 }
 
 export const DEFAULT_THRESHOLDS: Required<SloThresholds> = {
@@ -91,6 +93,9 @@ export const DEFAULT_THRESHOLDS: Required<SloThresholds> = {
 	quarantineRatio: 0.01,
 	minSamples: 20,
 	planeAvailability: 0.99,
+	// uplift-3 N5: half the default shared budget, so a search that costs the
+	// whole budget is a breach, not the norm.
+	docsSearchP95Ms: 2000,
 };
 
 export function sloCatalogue(overrides: SloThresholds = {}): SloTarget[] {
@@ -323,6 +328,37 @@ export function evaluateSlos(snapshot: MetricSnapshot[], catalogue: SloTarget[] 
 /** Every objective that is failing. Empty means nothing is breached — not that everything is judged. */
 export function breaches(results: SloResult[]): SloResult[] {
 	return results.filter((result) => result.status === "breached");
+}
+
+// ── docs search latency (uplift-3 N5) ────────────────────────────────────────
+
+/**
+ * The docs-search latency objective: p95 of the end-to-end
+ * `substrate.docs.duration` histogram <= `docsSearchP95Ms` (2,000 ms by
+ * default; `SUBSTRATE_SLO_DOCS_SEARCH_P95_MS`), judged exactly like
+ * `brief.p95` — same evaluator, same `minSamples` floor, same inclusive
+ * bucket-edge statement. It lives beside the catalogue, like the burn and
+ * plane objectives, because the catalogue is pinned to SPE-4793's four and
+ * its consumers assert that list; it surfaces as the sibling `docs` array on
+ * `GET /slo` and is never folded into `breached`.
+ */
+export function docsSearchObjective(overrides: SloThresholds = {}): SloTarget {
+	const t = { ...DEFAULT_THRESHOLDS, ...stripUndefined(overrides) };
+	return {
+		kind: "latency-quantile",
+		id: "docs.search.p95",
+		title: "Docs search latency",
+		statement: `p95 of ${METRIC.docsDuration} <= ${t.docsSearchP95Ms} ms`,
+		metric: METRIC.docsDuration,
+		quantile: 0.95,
+		thresholdMs: t.docsSearchP95Ms,
+		minSamples: t.minSamples,
+	};
+}
+
+/** The `docs` array `GET /slo` serves: one row, `docs.search.p95`, in the catalogue's entry shape. */
+export function evaluateDocsSlos(snapshot: MetricSnapshot[], overrides: SloThresholds = {}): SloResult[] {
+	return evaluateSlos(snapshot, [docsSearchObjective(overrides)]);
 }
 
 // ── per-plane availability, over a rolling hour ──────────────────────────────

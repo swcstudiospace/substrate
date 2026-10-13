@@ -100,6 +100,7 @@ export function loadObservabilityConfig(
 			quarantineRatio: optionalNumber(env.SUBSTRATE_SLO_QUARANTINE),
 			minSamples: optionalNumber(env.SUBSTRATE_SLO_MIN_SAMPLES),
 			planeAvailability: optionalNumber(env.SUBSTRATE_SLO_PLANE_AVAILABILITY),
+			docsSearchP95Ms: optionalNumber(env.SUBSTRATE_SLO_DOCS_SEARCH_P95_MS),
 		},
 	};
 }

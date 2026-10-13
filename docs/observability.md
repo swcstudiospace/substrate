@@ -53,6 +53,9 @@ substrate is keyed by. `surface` says which of the eight agents on the host;
 | `substrate.trace.spans_dropped` | counter | — |
 | `substrate.plane.duration` | histogram, ms | `plane`, `op`, `outcome` = `ok` \| `error` \| `timeout` \| `open` |
 | `substrate.plane.errors` | counter | `plane`, `reason` = `timeout` \| `network` \| `server` \| `open` \| `other` |
+| `substrate.docs.search` | counter | `surface`, `outcome` = `hit` \| `empty` \| `degraded`, `cached` = `true` \| `false` |
+| `substrate.docs.citations` | counter | `provenance` = `recorded` \| `unrecorded` \| `unpinned` |
+| `substrate.docs.duration` | histogram, ms (own edges, incl. 2000 and 4000) | `surface`, `cached` |
 
 `status` is a class (`2xx`, `5xx`), not a code, and `route` is one of the known
 paths or `other` — an unauthenticated caller walking random URLs must not be able
@@ -265,6 +268,21 @@ One reading alone judges nothing. A plane the deployment does not configure
 reports `unconfigured`, never `breached`, and plane breaches are **not** folded
 into `breached`, which stays the catalogue's own list.
 
+### Docs search latency (uplift-3 N5)
+
+`GET /slo` also carries a `docs` array with one row, in the catalogue's entry shape:
+
+| Objective | Statement |
+| --- | --- |
+| `docs.search.p95` | p95 of `substrate.docs.duration` ≤ **2,000 ms** (`SUBSTRATE_SLO_DOCS_SEARCH_P95_MS`), `insufficient-data` below `SUBSTRATE_SLO_MIN_SAMPLES` (20) searches |
+
+The histogram is end to end — what the caller of `docs_search` / `POST /docs/search`
+waited for, cache hit or loaded — and carries its own bucket edges
+(`25 … 1000, 2000, 4000, 8000` ms) so the 2,000 ms objective and the 4,000 ms
+default budget are both exact edges. Judged as a process-lifetime count like the
+catalogue, never folded into `breached`. See `docs/docs-search-ingest.md` for the
+counters beside it.
+
 ### Two things the evaluator does on purpose
 
 **The p95 objective is checked as a count, not an interpolation.** 800 is one of the
@@ -437,7 +455,7 @@ they stay; they carry no repo, so no brief shows them.
 | | |
 | --- | --- |
 | `GET /metrics` | the snapshot this process holds, in the shape `otlp.ts` encodes |
-| `GET /slo` | the verdicts computed from it, the breached ids, `burn`, and the per-plane `planes` |
+| `GET /slo` | the verdicts computed from it, the breached ids, `burn`, the per-plane `planes`, and the `docs` row |
 | `POST /evidence` | `{ "graph_id": "ut-…", "format": "json" \| "html" }` |
 | `GET /healthz` | now also `auditDurable`, `auditRecords`, `planes`, `capacity`, `cachedAt` and `stale` |
 

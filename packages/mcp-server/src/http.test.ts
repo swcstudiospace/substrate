@@ -143,6 +143,7 @@ describe("GET /slo lists the per-plane objectives", () => {
 			results: Array<{ id: string }>;
 			breached: string[];
 			planes: Array<{ id: string; plane: string; status: string; target: number }>;
+			docs: Array<{ id: string; status: string; statement: string }>;
 		};
 		expect(body.planes.map((entry) => entry.id)).toEqual([
 			"plane.greptime.availability",
@@ -157,6 +158,14 @@ describe("GET /slo lists the per-plane objectives", () => {
 		// The catalogue is still exactly SPE-4793's four, and `breached` is still theirs alone.
 		expect(body.results.map((entry) => entry.id)).toEqual(["brief.p95", "emit.success", "lease.steal_rate", "quarantine.rate"]);
 		expect(body.breached).toEqual([]);
+		// The docs-search objective (uplift-3 N5) rides beside them the same way: one
+		// row, insufficient-data until twenty searches, never folded into `breached`.
+		expect(body.docs.map((entry) => entry.id)).toEqual(["docs.search.p95"]);
+		expect(body.docs[0]?.status).toBe("insufficient-data");
+		expect(body.docs[0]?.statement).toContain("<= 2000 ms");
+		const docsTuned = await start({ SUBSTRATE_SLO_DOCS_SEARCH_P95_MS: "1000" });
+		const docsTunedBody = (await (await fetch(`${docsTuned.base}/slo`)).json()) as { docs: Array<{ statement: string }> };
+		expect(docsTunedBody.docs[0]?.statement).toContain("<= 1000 ms");
 
 		const tuned = await start({ SUBSTRATE_SLO_PLANE_AVAILABILITY: "0.95" });
 		const tunedBody = (await (await fetch(`${tuned.base}/slo`)).json()) as { planes: Array<{ target: number }> };
