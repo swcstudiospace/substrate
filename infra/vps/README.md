@@ -39,6 +39,7 @@ Every service in this directory uses `WorkingDirectory=/opt/agent-substrate/curr
 | `substrate-collector-herdr.service` | `substrate-collector-herdr.service.d/10-environment.conf` | `/etc/substrate/substrate-collector-herdr.env` |
 | `substrate-collector-muse.service` | `substrate-collector-muse.service.d/10-environment.conf` | `/etc/substrate/substrate-collector-muse.env` |
 | `substrate-anchor.service` (+ `substrate-anchor.timer`) | `substrate-anchor.service.d/10-environment.conf` | `/etc/substrate/substrate.env` |
+| `substrate-index-sweep.service` (+ `substrate-index-sweep.timer`, staged: install and enable are operator steps after the dry-run report has been read for a few days) | `substrate-index-sweep.service.d/10-environment.conf` (also carries `Environment=SUBSTRATE_INDEX_SWEEP=dry-run`) | `/etc/substrate/substrate.env` |
 
 The MCP server is the process that needs the shared env file. The Grok collector must not load it. Create `collector-grok.env` (root-owned, mode 0600) with only the names this process reads: `SUBSTRATE_URL`, `SUBSTRATE_TOKEN`, and optionally `GROK_SESSIONS_DIR`. `SUBSTRATE_COLLECTOR_STATE` is already set on the unit. Do not put database URLs, plane keys, handoff keys, or review tokens in that file. No values belong in git.
 
@@ -55,7 +56,7 @@ Every `substrate-*` unit carries `Slice=substrate.slice` and its own memory and 
 | `substrate-mcp.service` | 1G | 2G | 512 | 200% |
 | `substrate-collector-{grok,herdr,muse}.service` | — | 512M | 256 | — |
 | `substrate-dispatcher.service`, `substrate-host.service` | — | 4G | 1024 | — |
-| `substrate-anchor.service`, `substrate-skills-{sync,bridge}.service` (oneshots) | — | 1G | — | — |
+| `substrate-anchor.service`, `substrate-index-sweep.service`, `substrate-skills-{sync,bridge}.service` (oneshots) | — | 1G | — | — |
 
 `MemoryHigh` throttles; `MemoryMax` is where the kernel ends the process and `Restart=always` (or the timer's next tick, for a oneshot) brings it back. The dispatcher's and host's cgroups hold the sessions and VM lifecycle they launch, which is why theirs are the large ones. Read the live numbers with `systemctl status substrate.slice` and `systemd-cgtop -1 -k /substrate.slice`. Rollback: reinstall the previous unit files (no `Slice=` line) and `daemon-reload`; the slice file is inert without members.
 

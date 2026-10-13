@@ -10,6 +10,9 @@ ConditionPathExists=/opt/agent-substrate/current/packages/mcp-server/src/index-s
 
 [Service]
 Type=oneshot
+# Same slice and oneshot ceiling as the anchor job (README "Resource ceilings").
+Slice=substrate.slice
+MemoryMax=1G
 # No Restart=: a oneshot that exits 1 (index unreachable, statement timed out)
 # already shows failed, and the timer retries on the next tick.
 # Credentials only; nothing secret lives in the repo. The drop-in
