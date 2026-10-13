@@ -519,9 +519,19 @@ export class AuditLog {
 	 * next append, under a new `lastSeq`. A name that already exists is never
 	 * overwritten; it means the range was closed once already, and that too is
 	 * retried rather than clobbered.
+	 *
+	 * **A file holding no committed record is never rolled.** After the closed-segment
+	 * recovery in `open`, the active file can be a terminated fragment and nothing
+	 * else: `activeFirstSeq` is then the `seq` the next record *will* have, one past
+	 * `chainSeq`. Rolling that file would name it by a reversed range (`4-3`), which
+	 * `parseSegmentName` rejects — so the verifier would never read the fragment and
+	 * a damaged write would verify clean (Greptile round 3). The record goes into
+	 * that file instead; the roll waits for the one that follows, and the fragment
+	 * then closes inside a readable `first-last` segment as the unparseable line it
+	 * already is. The file's size overshoots the limit by one record, once.
 	 */
 	private rollover(path: string): void {
-		if (this.activeFirstSeq === null) return;
+		if (this.activeFirstSeq === null || this.activeFirstSeq > this.chainSeq) return;
 		const closed = segmentPath(path, this.activeFirstSeq, this.chainSeq);
 		if (existsSync(closed)) return;
 		try {

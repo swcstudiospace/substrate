@@ -1154,6 +1154,58 @@ describe("rollover by size", () => {
 		expect(readdirSync(join(path, "..")).sort()).toContain("mcp-audit.jsonl.4-4.jsonl");
 	});
 
+	test("a fragment-only active file is never rolled under a reversed range the verifier would skip", async () => {
+		// Greptile round 3: after the recovery above, `activeFirstSeq` is the seq the
+		// next record will have, one past `chainSeq`. If the fragment plus that record
+		// exceeded the limit, the roll renamed the fragment to `4-3` — a name
+		// `parseSegmentName` rejects, so the verifier never read it and the damaged
+		// write verified clean. The record goes into the file instead; the roll waits
+		// for the record after it, and the fragment closes inside `4-4` where it is read.
+		const { size } = await recordBytes();
+		const dir = temporaryDirectory();
+		const path = join(dir, "mcp-audit.jsonl");
+		const first = new AuditLog({ path, now: clock, rolloverBytes: size * 2 });
+		await first.open();
+		for (let i = 0; i < 3; i++) await first.append(allowed);
+		const tip = first.tip;
+		renameSync(path, segmentPath(path, 3, 3));
+		// Longer than one record, so fragment + the next record is over the limit.
+		const fragment = `{"seq":4,"partial":"${"x".repeat(size)}`;
+		writeFileSync(path, fragment);
+
+		const second = new AuditLog({ path, now: clock, rolloverBytes: size * 2 });
+		expect(await second.open()).toMatchObject({ records: 3, tip, durable: true });
+		const fourth = await second.append(allowed);
+		expect(fourth).toMatchObject({ written: true, record: { seq: 4, prev: tip } });
+
+		const wellFormed = (names: string[]): void => {
+			for (const name of names) {
+				if (name === "mcp-audit.jsonl" || name === "mcp-audit.jsonl.checkpoint") continue;
+				const match = /^mcp-audit\.jsonl\.(\d+)-(\d+)\.jsonl$/.exec(name);
+				expect(match).not.toBeNull();
+				expect(Number(match?.[1])).toBeLessThanOrEqual(Number(match?.[2]));
+			}
+		};
+		// No roll: the file held nothing committed. The record landed after the fragment.
+		wellFormed(readdirSync(dir));
+		expect(readdirSync(dir).sort()).toEqual(["mcp-audit.jsonl", "mcp-audit.jsonl.1-2.jsonl", "mcp-audit.jsonl.3-3.jsonl", "mcp-audit.jsonl.checkpoint"]);
+		expect(readFileSync(path, "utf8")).toBe(`${fragment}\n${JSON.stringify(fourth.record)}\n`);
+		const report = await second.report();
+		expect(report).toMatchObject({ segments: 2, records: 4, firstSeq: 1, lastSeq: 4, ok: false, unparseable: 1 });
+		expect(report.reason).toContain("could not be parsed");
+
+		// The record after it rolls: the file now holds seq 4, so it closes as `4-4`
+		// (equal is in, one byte more is the next segment) with the fragment inside.
+		const fifth = await second.append(allowed);
+		expect(fifth.record.seq).toBe(5);
+		wellFormed(readdirSync(dir));
+		expect(readdirSync(dir)).toContain("mcp-audit.jsonl.4-4.jsonl");
+		expect(readFileSync(segmentPath(path, 4, 4), "utf8")).toBe(`${fragment}\n${JSON.stringify(fourth.record)}\n`);
+		expect(readFileSync(path, "utf8")).toBe(`${JSON.stringify(fifth.record)}\n`);
+		expect(await second.report()).toMatchObject({ segments: 3, records: 5, firstSeq: 1, lastSeq: 5, ok: false, unparseable: 1 });
+		expect(await new AuditLog({ path }).report()).toMatchObject({ segments: 3, records: 5, lastSeq: 5, ok: false, unparseable: 1 });
+	});
+
 	test("off by default, and off for anything that is not a positive integer", async () => {
 		const { size } = await recordBytes();
 		const dir = temporaryDirectory();
