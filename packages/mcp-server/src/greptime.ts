@@ -130,6 +130,16 @@ export interface HourLeaf {
 }
 
 /**
+ * One event's place in the ledger's ingest order: its id and the time of its
+ * first ingest record (D27-10). This is the order a replay follows — not `ts`,
+ * which a collector supplies and a backdated event can set in the past.
+ */
+export interface CursorPosition {
+	id: string;
+	ingestedAt: number;
+}
+
+/**
  * Upper bound on the ids one batched hour-read statement carries.
  *
  * The hour read walks its members in batches so the id list stays small
@@ -823,6 +833,102 @@ export class GreptimeClient {
 				`${where.length > 0 ? ` WHERE ${where.join(" AND ")}` : ""}` +
 				` ORDER BY "ts" ${direction}, "id" ${direction} LIMIT ${queryLimit(query.limit)}`,
 		);
+	}
+
+	/**
+	 * The ingest-order position of one event, from a stream cursor's event id: its
+	 * first ingest record (D27-10). Null when the id names no event — a cursor
+	 * from before a ledger rebuild looks unknown too, and a caller that gets null
+	 * starts live instead of replaying.
+	 */
+	async cursorPosition(eventId: string): Promise<CursorPosition | null> {
+		const rows = await this.sql(
+			`SELECT "event_id", "ingested_at" FROM "event_ingest" WHERE "event_id" = ${this.q(eventId)}
+			 ORDER BY "ingested_at" ASC LIMIT 1`,
+		);
+		const row = rows[0];
+		if (!row) return null;
+		const id = String(row.event_id);
+		const ingestedAt = epochMs(row.ingested_at);
+		if (!Number.isFinite(ingestedAt)) throw new GreptimeError(`ingest record for ${id} has a time that is not a number`);
+		return { id, ingestedAt };
+	}
+
+	/** The newest position — where a stream that sent no cursor starts: live, nothing replayed. */
+	async latestPosition(): Promise<CursorPosition | null> {
+		const rows = await this.sql(
+			`SELECT "event_id", "ingested_at" FROM "event_ingest" ORDER BY "ingested_at" DESC, "event_id" DESC LIMIT 1`,
+		);
+		const row = rows[0];
+		if (!row) return null;
+		const id = String(row.event_id);
+		const ingestedAt = epochMs(row.ingested_at);
+		if (!Number.isFinite(ingestedAt)) throw new GreptimeError(`ingest record for ${id} has a time that is not a number`);
+		return { id, ingestedAt };
+	}
+
+	/**
+	 * Positions strictly after `cursor`, in (ingested_at, event_id) order, capped.
+	 *
+	 * One statement does the whole ordering job, and every part of it stays
+	 * inside the window the cursor names: the rows considered are the ingest
+	 * records at or after the cursor's millisecond, and a row's event survives
+	 * only when NO record of that event sits at or before the full
+	 * (ingested_at, event_id) cursor — so a retry record for an older event is
+	 * still excluded, because its original exists at or before the cursor, and
+	 * the boundary check rides along in the same probe. That keeps round 1's
+	 * earliest-record semantics (D27-10): a surviving row's event has all its
+	 * records strictly after the cursor, so its earliest row is its first
+	 * record, and TypeScript keeps one position per event when a first record
+	 * and its retry both survive in one window. The window bound is what keeps
+	 * a poll bounded — round 1 ran a GROUP BY over all of `event_ingest`
+	 * before the cursor filter, rescanning the entire ledger history every
+	 * poll, while the anti-join here is a per-window-row index probe. Order
+	 * still precedes the limit, so paging before cutting cannot freeze or
+	 * replay a stream. Bounded by `limit` positions.
+	 */
+	async eventIdsAfter(cursor: CursorPosition, limit: number): Promise<CursorPosition[]> {
+		const at = this.q(new Date(cursor.ingestedAt).toISOString());
+		const rows = await this.sql(
+			`SELECT i."event_id", i."ingested_at" FROM "event_ingest" i
+			 WHERE i."ingested_at" >= ${at}
+			   AND NOT EXISTS (
+			     SELECT 1 FROM "event_ingest" p
+			      WHERE p."event_id" = i."event_id"
+			        AND (p."ingested_at" < ${at} OR (p."ingested_at" = ${at} AND p."event_id" <= ${this.q(cursor.id)}))
+			   )
+			 ORDER BY i."ingested_at" ASC, i."event_id" ASC
+			 LIMIT ${queryLimit(limit)}`,
+		);
+		const positions: CursorPosition[] = [];
+		// A first record and a retry can both survive one window; keep one
+		// position per event, and the earliest — the statement's order puts the
+		// first record before any later retry of the same event.
+		const seen = new Set<string>();
+		for (const row of rows) {
+			const id = String(row.event_id);
+			const ingestedAt = epochMs(row.ingested_at);
+			if (!Number.isFinite(ingestedAt)) throw new GreptimeError(`ingest record for ${id} has a time that is not a number`);
+			if (seen.has(id)) continue;
+			seen.add(id);
+			positions.push({ id, ingestedAt });
+			if (positions.length >= limit) break;
+		}
+		return positions;
+	}
+
+	/**
+	 * The event rows for ids taken from {@link eventIdsAfter}: every column but
+	 * `payload` unless asked — the same selection `queryEvents` makes — so a
+	 * stream frame and a query row cannot disagree about what an event is.
+	 */
+	async eventsByIds(ids: string[], includePayload = false): Promise<Array<Record<string, unknown>>> {
+		if (ids.length === 0) return [];
+		const columns = (includePayload ? EVENT_COLUMNS : EVENT_COLUMNS.filter((column) => column !== "payload"))
+			.map((column) => `"${column}"`)
+			.join(", ");
+		const list = ids.map((id) => this.q(id)).join(", ");
+		return this.sql(`SELECT ${columns} FROM "agent_events" WHERE "id" IN (${list})`);
 	}
 
 	/**

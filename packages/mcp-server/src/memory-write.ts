@@ -312,7 +312,11 @@ export async function governMemoryWrite(
 	// surface, so the writer a caller asked to be and the writer it got can differ —
 	// and a parameter that is silently ignored is a footgun. RBAC was decided on this
 	// name, so this name is what the caller has to be told.
-	return { ...result, writer: typeof request.writer === "string" ? request.writer.trim() : "" };
+	const answered: MemoryWriteResult = {
+		...result,
+		writer: typeof request.writer === "string" ? request.writer.trim() : "",
+	};
+	return answered;
 }
 
 /** Everything but the attribution, which `governMemoryWrite` stamps on every reply. */

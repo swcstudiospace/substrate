@@ -833,6 +833,20 @@ describe("memory.write is fail-closed", () => {
 		};
 	}
 
+	/** A minimal index that takes the insert and reads it back, so a write can reach `accepted`. */
+	function acceptingIndex() {
+		let row: Record<string, unknown> | null = null;
+		return {
+			claimWrite: async () => ({ claimed: true, holder: "service-test" }),
+			finishWrite: async () => undefined,
+			insertEntry: async (candidate: Record<string, unknown>) => {
+				row = candidate;
+				return { ok: true, entry: candidate };
+			},
+			readEntry: async () => row,
+		};
+	}
+
 	test("no index is a denial, not an exception and never a silent success", async () => {
 		// `emit` hands a caller its event back when the ledger is gone, because a lost
 		// event costs the trail. Memory is what the next four sessions act on, so the
@@ -917,6 +931,78 @@ describe("memory.write is fail-closed", () => {
 		const substrate = new Substrate(loadConfig({}), { index: {} as never, greptime: greptime as never });
 
 		expect((await substrate.writeMemory({ ...entry, scope: "person:ove" })).outcome).toBe("denied");
+	});
+
+	test("an accepted write is audited too — one note, outcome only, never the body", async () => {
+		// The S5 delta: refusals already trailed here; an accepted write was the one
+		// verdict with no ledger trace. Same emitter, so the hour's anchor sees the
+		// writes that landed beside the ones that did not.
+		const { emitted, greptime } = auditing();
+		const substrate = new Substrate(loadConfig({}), { index: acceptingIndex() as never, greptime: greptime as never });
+
+		const result = await substrate.writeMemory(entry);
+
+		expect(result.outcome).toBe("accepted");
+		expect(result.verified_persisted).toBe(true);
+		expect(emitted).toHaveLength(1);
+		expect(emitted[0]?.kind).toBe("note");
+		expect(emitted[0]?.summary).toContain("memory.write accepted:");
+		expect(emitted[0]?.payload).toMatchObject({ outcome: "accepted" });
+		expect(JSON.stringify(emitted)).not.toContain("hermes finished n2");
+	});
+
+	test("an accepted write from an unknown surface stays off the ledger — stderr is its trail", async () => {
+		// An operator grant may *name* a writer `emit` could never attribute (`*` only
+		// matches known surfaces, but a named writer is written policy). The write
+		// lands; the audit cannot name an event surface for it, so the stderr line —
+		// the same trail every refusal by such a writer takes — is all there is.
+		const { emitted, greptime } = auditing();
+		const config = loadConfig({
+			SUBSTRATE_MEMORY_GRANTS: JSON.stringify([{ name: "operator", surfaces: ["mystery-bot"], scopes: ["graph"], kinds: ["fact"] }]),
+		});
+		const substrate = new Substrate(config, { index: acceptingIndex() as never, greptime: greptime as never });
+
+		const result = await substrate.writeMemory({ ...entry, writer: "mystery-bot" });
+
+		expect(result.outcome).toBe("accepted");
+		expect(emitted).toEqual([]);
+	});
+
+	test("a conflicting write is audited as a note naming the reason", async () => {
+		const { emitted, greptime } = auditing();
+		const index = {
+			claimWrite: async () => ({ claimed: true, holder: "service-test" }),
+			enqueueReview: async () => "memr_1",
+			finishWrite: async () => undefined,
+		};
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+
+		const result = await substrate.writeMemory({ ...entry, scope: "global" });
+
+		expect(result.outcome).toBe("conflict");
+		expect(result.reason).toBe("review.required");
+		expect(emitted).toHaveLength(1);
+		expect(emitted[0]?.kind).toBe("note");
+		expect(emitted[0]?.payload).toMatchObject({ outcome: "conflict", reason: "review.required" });
+	});
+
+	test("a quarantined write is audited as a warning carrying the quarantine id", async () => {
+		const { emitted, greptime } = auditing();
+		const substrate = new Substrate(loadConfig({}), {
+			index: { quarantineEntry: async () => "memq_1" } as never,
+			greptime: greptime as never,
+		});
+
+		const result = await substrate.writeMemory({
+			...entry,
+			text: "poller needs GITHUB_TOKEN=ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		});
+
+		expect(result.outcome).toBe("quarantined");
+		expect(emitted).toHaveLength(1);
+		expect(emitted[0]?.kind).toBe("warning");
+		expect(emitted[0]?.payload).toMatchObject({ outcome: "quarantined", quarantine_id: "memq_1" });
+		expect(JSON.stringify(emitted)).not.toContain("ghp_");
 	});
 });
 

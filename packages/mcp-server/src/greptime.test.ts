@@ -590,6 +590,125 @@ describe("chainTip", () => {
 	});
 });
 
+describe("eventIdsAfter", () => {
+	/** Any fixed epoch; every fixture record lands in or after this millisecond. */
+	const T0 = Date.UTC(2026, 9, 1);
+
+	/** One `event_ingest` record: the event id and the time a record for it landed. */
+	interface FixtureRecord {
+		id: string;
+		at: number;
+	}
+
+	/**
+	 * Answer `eventIdsAfter` from `table` by evaluating exactly the query the
+	 * statement must carry: rows inside the cursor's window, an event only when
+	 * no record of it sits at or before the full (ingested_at, event_id)
+	 * cursor, ordered, then limited. A statement that rescans history before
+	 * the cursor filter, pages before cutting, or drops the anti-join fails
+	 * the test instead of quietly handing back wrong positions.
+	 */
+	function stubIngestStore(table: FixtureRecord[]): { sql: string[] } {
+		return stubFetch((statement) => {
+			const window = /i\."ingested_at" >= '([^']+)'/.exec(statement);
+			const before = /p\."ingested_at" < '([^']+)'/.exec(statement);
+			const boundary = /p\."ingested_at" = '([^']+)' AND p\."event_id" <= '([^']*)'/.exec(statement);
+			const capped = /LIMIT (\d+)\s*$/.exec(statement);
+			if (!window || !before || !boundary || !capped || window[1] !== before[1] || window[1] !== boundary[1]) {
+				throw new Error(`statement is not the earliest-records-after-cursor query: ${statement}`);
+			}
+			if (!statement.includes("NOT EXISTS")) {
+				throw new Error(`statement lacks the per-event pre-cursor anti-join: ${statement}`);
+			}
+			if (statement.indexOf("LIMIT") < statement.indexOf("WHERE")) {
+				throw new Error(`statement applies its limit before the cursor boundary: ${statement}`);
+			}
+			const windowMs = Date.parse(window[1]!);
+			if (!Number.isFinite(windowMs)) throw new Error(`cursor bound is not a timestamp: ${window[1]}`);
+			// An event with any record at or before the full cursor is already
+			// delivered — its window rows (including retries) are all excluded,
+			// which is what keeps a retry from re-delivering its event.
+			const excluded = new Set<string>();
+			for (const record of table) {
+				if (record.at < windowMs || (record.at === windowMs && record.id <= (boundary[2] ?? ""))) excluded.add(record.id);
+			}
+			const positions = table
+				.filter((record) => record.at >= windowMs && !excluded.has(record.id))
+				.sort((a, b) => a.at - b.at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+				.slice(0, Number(capped[1]));
+			return records(
+				["event_id", "ingested_at"],
+				positions.map((record) => [record.id, record.at]),
+			);
+		});
+	}
+
+	test("a retried ingest record never re-delivers its event across polls", async () => {
+		const client = new GreptimeClient(config);
+		stubIngestStore([
+			{ id: "evt_1", at: T0 },
+			{ id: "evt_1", at: T0 + 5000 }, // the retry, stamped later than the first record
+			{ id: "evt_2", at: T0 + 10 },
+		]);
+
+		const first = await client.eventIdsAfter({ id: "", ingestedAt: 0 }, 50);
+		expect(first).toEqual([
+			{ id: "evt_1", ingestedAt: T0 },
+			{ id: "evt_2", ingestedAt: T0 + 10 },
+		]);
+
+		// The second poll's cursor is past the first record, so a window that
+		// merely sat at `>= cursor` would hold only the retry for evt_1 and hand
+		// the stream the same event twice. Only the earliest record counts.
+		const second = await client.eventIdsAfter({ id: "evt_1", ingestedAt: T0 }, 50);
+		expect(second).toEqual([{ id: "evt_2", ingestedAt: T0 + 10 }]);
+	});
+
+	test("more same-millisecond records than a page still advance the stream", async () => {
+		const client = new GreptimeClient(config);
+		stubIngestStore(Array.from({ length: 501 }, (_, i) => ({ id: `evt_${String(i).padStart(3, "0")}`, at: T0 })));
+
+		// A limit applied before this boundary would re-read the same first rows
+		// on every poll and freeze at evt_350 forever; the statement cuts first,
+		// so the next page is exactly the hundred records after the cursor.
+		const page = await client.eventIdsAfter({ id: "evt_350", ingestedAt: T0 }, 100);
+		expect(page.map((position) => position.id)).toEqual(Array.from({ length: 100 }, (_, i) => `evt_${String(351 + i).padStart(3, "0")}`));
+	});
+
+	test("the statement stays inside the cursor window, carries the full cursor in its anti-join, and limits last", async () => {
+		const { sql } = stubIngestStore([]);
+		await new GreptimeClient(config).eventIdsAfter({ id: "evt_9", ingestedAt: T0 }, 7);
+
+		const statement = sql[0] ?? "";
+		const at = new Date(T0).toISOString();
+		// The window: only records at or after the cursor's millisecond are
+		// considered — no poll rescans the whole history.
+		expect(statement).toContain(`SELECT i."event_id", i."ingested_at" FROM "event_ingest" i`);
+		expect(statement).toContain(`i."ingested_at" >= '${at}'`);
+		// The anti-join carries the full (ingested_at, event_id) cursor, so a
+		// retry record for an event whose first record the cursor already passed
+		// is excluded with its original.
+		expect(statement).toContain("NOT EXISTS");
+		expect(statement).toContain(`p."ingested_at" < '${at}' OR (p."ingested_at" = '${at}' AND p."event_id" <= 'evt_9')`);
+		expect(statement).toContain('ORDER BY i."ingested_at" ASC, i."event_id" ASC');
+		expect(statement.indexOf("LIMIT")).toBeGreaterThan(statement.indexOf("WHERE"));
+		expect(statement.trim().endsWith("LIMIT 7")).toBe(true);
+	});
+
+	test("a record whose time is not a number is named, not skipped", async () => {
+		globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+			const statement = new URLSearchParams(String(init?.body)).get("sql") ?? "";
+			const window = /i\."ingested_at" >= '([^']+)'/.exec(statement);
+			const before = /p\."ingested_at" < '([^']+)'/.exec(statement);
+			const boundary = /p\."ingested_at" = '([^']+)' AND p\."event_id" <= '([^']*)'/.exec(statement);
+			const capped = /LIMIT (\d+)\s*$/.exec(statement);
+			const rows = window && before && boundary && capped ? [["evt_bad", null]] : [];
+			return new Response(JSON.stringify(records(["event_id", "ingested_at"], rows)), { status: 200 });
+		}) as unknown as typeof fetch;
+		await expect(new GreptimeClient(config).eventIdsAfter({ id: "", ingestedAt: 0 }, 5)).rejects.toThrow("evt_bad");
+	});
+});
+
 describe("queryEvents", () => {
 	/** The read among the recorded statements — the dialect probe precedes it. */
 	function selectStatement(sql: string[]): string {

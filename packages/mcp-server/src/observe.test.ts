@@ -36,6 +36,7 @@ describe("normalizeRoute", () => {
 	test("keeps the routes that exist", () => {
 		expect(normalizeRoute("/brief")).toBe("/brief");
 		expect(normalizeRoute("/mcp")).toBe("/mcp");
+		expect(normalizeRoute("/events/stream")).toBe("/events/stream");
 	});
 
 	test("folds everything else into one bucket", () => {

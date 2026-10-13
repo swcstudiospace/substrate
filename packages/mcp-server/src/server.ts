@@ -5,6 +5,7 @@
  *   POST /brief         the same briefing as plain text, for hooks
  *   POST /events        append an event, for hooks
  *   POST /events/query  read a window of the ledger
+ *   GET  /events/stream replay the ledger as Server-Sent Events, loopback only
  *   POST /memory        write a memory entry through the governance gate
  *   POST /skills/propose propose a skill as a reviewable PR on the skills library
  *   POST /verify        recompute a graph's hash chain
@@ -27,7 +28,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { auditMode } from "@substrate/audit";
-import { classifyEventRefusal, type EventRefusalReason } from "@substrate/observability";
+import { classifyEventRefusal, evaluateBurnSlos, loadBurnThresholds, type EventRefusalReason } from "@substrate/observability";
 import {
 	anonymousBridge,
 	isOperator,
@@ -37,8 +38,11 @@ import {
 	type SubstrateConfig,
 } from "./config.ts";
 import { buildAgentCard, isKnownCardSurface } from "./agent-card.ts";
+import { DATASET_TRIGGERS, createVersionStore, latestVersion, refreshDataset, resolveDatasets } from "./docs-datasets.ts";
+import { scanIngestPages } from "./docs-ingest.ts";
 import { formatDrift } from "./drift.ts";
 import { InvalidEventError } from "./event.ts";
+import { type CursorPosition, type GreptimeClient } from "./greptime.ts";
 import { InvalidHandoffError } from "./handoff.ts";
 import { attributedSurface, createMcpServer, type McpCaller } from "./mcp.ts";
 import {
@@ -51,6 +55,7 @@ import {
 	toolCallsIn,
 	type Observability,
 } from "./observe.ts";
+import { redact } from "./redact.ts";
 import type { Substrate } from "./service.ts";
 import { proposalBodyProblem, proposalFailure, toProposalRequest } from "./skills/request.ts";
 import { EVENT_KINDS, SURFACES, type Surface } from "./types.ts";
@@ -197,6 +202,14 @@ export interface HttpServerOptions {
 	anonymousIntervalMs?: number;
 	/** Where the hourly refused-event line goes. Defaults to stderr. */
 	refusalLog?: (line: string) => void;
+	/** `/events/stream` poll interval; production uses `STREAM_POLL_MS`. */
+	streamPollMs?: number;
+	/** `/events/stream` idle close; production uses `STREAM_IDLE_MS`. */
+	streamIdleMs?: number;
+	/** `/events/stream` slow-consumer cap; production uses `STREAM_MAX_BACKLOG_BYTES`. */
+	streamMaxBacklogBytes?: number;
+	/** Directory the merge-trigger's local docs ingest scans; production runs from the repo root. */
+	docsIngestBaseDir?: string;
 }
 
 /** Distinct keys one hourly line may hold before the rest are counted as `other`. */
@@ -229,6 +242,73 @@ export class BodyTooLargeError extends Error {
 const PROPOSAL_NEEDS_SURFACE = "skills_propose needs an authenticated surface; nothing was proposed";
 /** Why an anonymous ingest is refused, even on a run that allows anonymous callers. */
 const INGEST_NEEDS_SURFACE = "docs_ingest needs an authenticated surface; nothing was ingested";
+/** Why an anonymous merge-trigger is refused, even on a run that allows anonymous callers. */
+const MERGE_TRIGGER_NEEDS_SURFACE = "docs merge-trigger needs an authenticated surface; nothing was refreshed";
+/** The dataset a post-merge hook triggers when the body names none (DOCS-03's own repo row). */
+const MERGE_TRIGGER_DATASET = "agent-substrate";
+
+/**
+ * The dataset this deployment refreshes from its own checkout: the trigger
+ * table's row whose sources (`config.docsIngestRoots`) live in the directory
+ * the server runs from. The other rows name checkouts this server does not
+ * hold, so their refresh is a truthful noop — a recorded version over
+ * documents that were never ingested would only lie to search.
+ */
+const LOCALLY_INGESTED_DATASET = MERGE_TRIGGER_DATASET;
+
+/** Why an anonymous stream is refused, even on a run that allows anonymous callers. */
+const STREAM_NEEDS_SURFACE = "events stream needs an authenticated surface; nothing was streamed";
+
+/*
+ * The bounds of one `/events/stream` connection. Deliberately constants, not
+ * configuration: a poll interval a config file can crank down is a ledger load it
+ * can silently multiply, and the bounds exist so a stream never costs more than
+ * the polling it replaces. Tests inject smaller values through `HttpServerOptions`.
+ */
+
+/** How often one connection polls the ledger for rows after its cursor. */
+export const STREAM_POLL_MS = 500;
+/** Close a connection that has delivered nothing for this long; the client reconnects with Last-Event-ID and resumes. */
+export const STREAM_IDLE_MS = 5 * 60_000;
+/** Rows one poll may deliver: the ledger is the buffer, so no connection reads past this per tick. */
+export const STREAM_BATCH = 200;
+/** Unflushed bytes past which a slow consumer is cut off instead of buffered without limit. */
+export const STREAM_MAX_BACKLOG_BYTES = 1_000_000;
+
+/**
+ * The refusals a `/events/stream` connection is answered with before anything
+ * opens, in the order they are checked. The 401 is the same door decision
+ * `/docs/merge-trigger` makes: an unauthenticated caller is refused even on a run
+ * that allows anonymous callers, because a stream is a standing read of the whole
+ * trail and no bridge run should hand that to whoever can reach the port. Only
+ * then the loopback check, for the same reason the merge-trigger is loopback-only.
+ * Null when the connection may proceed.
+ */
+export function streamRefusal(
+	surface: Surface | null,
+	remoteAddress: string | undefined,
+): { status: number; error: string } | null {
+	if (surface === null) return { status: 401, error: STREAM_NEEDS_SURFACE };
+	if (!isLoopbackRemote(remoteAddress)) {
+		return { status: 403, error: "events stream is a loopback route; the caller is not loopback" };
+	}
+	return null;
+}
+
+/**
+ * Whether the request arrived over the loopback interface.
+ *
+ * The whole 127/8 in every notation (`::ffff:`-mapped IPv6 included) plus
+ * `::1` — the same loopback set `parseRedisUrl` refuses plaintext redis
+ * outside of. Node writes IPv4 remotes as a dotted quad and IPv6 remotes
+ * either bare or v4-mapped; a DNS name never appears in `remoteAddress`.
+ */
+export function isLoopbackRemote(remoteAddress: string | undefined): boolean {
+	const address = (remoteAddress ?? "").toLowerCase().replace(/^::ffff:/, "");
+	if (address === "::1") return true;
+	const octets = address.split(".");
+	return octets.length === 4 && octets[0] === "127" && octets.slice(1).every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255);
+}
 
 /**
  * The status `/healthz` answers with.
@@ -406,10 +486,18 @@ export function createHttpServer(
 ) {
 	const anonymousLog = new AnonymousCallerLog(options.anonymousIntervalMs, options.now, options.anonymousLog);
 	anonymousLog.start();
+	// Read once here so a malformed `SUBSTRATE_BURN_*` ceiling warns at boot, not on
+	// the first scrape; the route re-reads the environment per request and the
+	// reader warns once per variable, so this line never repeats itself.
+	loadBurnThresholds();
 	// Same hourly window. `/metrics` counts refusals by reason; this line says which
 	// sender to fix (claimed surface, kind, tokened or not) without carrying a payload.
 	const refusalLog = new AnonymousCallerLog(options.anonymousIntervalMs, options.now, options.refusalLog, "refused events");
 	refusalLog.start();
+	// Dataset versions recorded by the docs routes, for the process lifetime — the same
+	// lifetime-and-state-file split `docsIngestSeen` uses on the service side. The
+	// merge-trigger dedupes against the newest recorded version by content hash.
+	const docsVersions = createVersionStore();
 	const server = createServer(async (req, res) => {
 		const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
 		const authorization = req.headers.authorization ?? null;
@@ -425,16 +513,19 @@ export function createHttpServer(
 		};
 		const route = normalizeRoute(url.pathname);
 
-		// Measured from `finish` rather than at each `send` call site: that way every
+		// Measured from `close` rather than at each `send` call site: that way every
 		// exit — a 401 below, a thrown handler, the MCP transport writing its own
-		// response — lands in the histogram with the status the client actually saw.
+		// response, a stream cut off mid-flight for backpressure — lands in the
+		// histogram with the status the client actually saw. `finish` would miss the
+		// last one: a response destroyed before it drained never finishes, and the
+		// exit still happened. `close` always fires, after `end` and after a destroy.
 		const started = performance.now();
 		const span = startRequestSpan(observability, req, route, surface);
-		// Set before the response is finished. `finish` reads both.
+		// Set before the response is finished. `close` reads both.
 		let eventRefusal: EventRefusalReason | null = null;
 		let eventShape: { surface: string; kind: string } = { surface: "none", kind: "none" };
 		const claim = { surface: "none" };
-		res.on("finish", () => {
+		res.on("close", () => {
 			span.setAttribute("http.response.status_code", res.statusCode);
 			if (res.statusCode >= 500) span.fail(`HTTP ${res.statusCode}`);
 			span.end();
@@ -511,11 +602,17 @@ export function createHttpServer(
 
 			if (req.method === "GET" && url.pathname === "/slo") {
 				const results = observability.evaluate();
+				// The quota-burn objectives ride beside the catalogue, never inside it: the
+				// catalogue is exactly SPE-4793's four. Every read both feeds and reads the
+				// rolling-hour ledger, so scrape frequency is the sample rate — the
+				// dispatcher's storm-breaker polls this same array.
+				const burn = evaluateBurnSlos(observability.snapshot());
 				// 200 either way. A breached objective is information, not a broken service,
 				// and a monitor that read this as an outage would page on a slow hour.
 				sendJson(res, 200, {
 					results,
 					breached: results.filter((result) => result.status === "breached").map((result) => result.id),
+					burn,
 				});
 				return;
 			}
@@ -641,6 +738,51 @@ export function createHttpServer(
 				const result = await substrate.queryEvents(body as Parameters<Substrate["queryEvents"]>[0]);
 				// An empty window is a real answer, so 200; 503 is the ledger not answering.
 				sendJson(res, result.error ? 503 : 200, result);
+				return;
+			}
+
+			// U7: the push seam. Every consumer polled the ledger before this — collectors
+			// reconciled on timers — and the stream changes only the transport: the ledger
+			// stays the buffer, each connection keeps its own cursor and one poll timer,
+			// and no emit path ever touches subscriber state, so a broken or vanished
+			// subscriber costs the server a bounded backlog and nothing else.
+			if (req.method === "GET" && url.pathname === "/events/stream") {
+				const refusal = streamRefusal(surface, req.socket.remoteAddress);
+				if (refusal) {
+					sendJson(res, refusal.status, { error: refusal.error });
+					return;
+				}
+				// Last-Event-ID is what an EventSource sends back on reconnect;
+				// `?cursor=` is the same name for a consumer that cannot set headers.
+				const headerId = req.headers["last-event-id"];
+				const requested = (Array.isArray(headerId) ? headerId[0] : headerId) ?? url.searchParams.get("cursor") ?? "";
+				const cursorId = requested.trim().slice(0, 128);
+				// Audited once per connection, under the name `/events/query` is audited
+				// under — the same read, so the trail never grows a second name for one
+				// action. Never per frame.
+				if (!(await auditedRest(res, observability, surface, "events_query", { cursor: cursorId === "" ? null : cursorId }))) {
+					return;
+				}
+				const greptime = substrate.greptime;
+				if (!greptime) {
+					sendJson(res, 503, { error: "GREPTIME_URL is not set; there is no ledger to stream" });
+					return;
+				}
+				try {
+					await openEventStream(res, greptime, cursorId, {
+						pollMs: options.streamPollMs ?? STREAM_POLL_MS,
+						idleMs: options.streamIdleMs ?? STREAM_IDLE_MS,
+						batch: STREAM_BATCH,
+						maxBacklogBytes: options.streamMaxBacklogBytes ?? STREAM_MAX_BACKLOG_BYTES,
+					});
+				} catch (cause) {
+					// Setup failed before the stream opened, so an ordinary error response
+					// is still available — fail-open here means the caller learns the
+					// stream did not open, and a 503 names the ledger, not the caller,
+					// as the thing that failed.
+					if (res.headersSent) throw cause;
+					sendJson(res, 503, { error: redact(String(cause)) });
+				}
 				return;
 			}
 
@@ -873,6 +1015,131 @@ export function createHttpServer(
 				return;
 			}
 
+			// U6 (DOCS-03): the documented refresh triggers, wired. A post-merge hook asks
+			// for the `agent-substrate` dataset (the default); the skills-sync tick names
+			// `agent-skills`. A refresh first moves documents through the guarded ingest
+			// `docs_ingest` serves — the same redaction, refusals and content-hash
+			// idempotency, so the conventions cannot drift apart — and only then records
+			// the version: a trigger that answered ok while search still held the old
+			// files would be recording a refresh that never happened. This deployment
+			// ingests the dataset whose checkout it holds; a dataset with no configured
+			// ingest root here is a truthful noop, not a fake refresh. Three doors are
+			// deliberate: an unauthenticated caller is refused before the body is read,
+			// a remote caller is refused even with a valid token (the trigger drives
+			// host-local automation and is loopback-only by design), and a repeat
+			// carrying the newest version's own commit and content hash re-answers it
+			// without ingesting or recording a second version — a webhook retry is
+			// cheap by hash.
+			if (req.method === "POST" && url.pathname === "/docs/merge-trigger") {
+				if (surface === null) {
+					sendJson(res, 401, { error: MERGE_TRIGGER_NEEDS_SURFACE });
+					return;
+				}
+				if (!isLoopbackRemote(req.socket.remoteAddress)) {
+					sendJson(res, 403, { error: "docs merge-trigger is a loopback route; the caller is not loopback" });
+					return;
+				}
+				// DOCS-02: ingestion accepts only authenticated callers that are not VM
+				// guests — a guest that could drive ingest could also create a missing
+				// shared dataset through the ensure step below. Same door as
+				// memory-retain's guest refusal.
+				if (config.vmGuest) {
+					sendJson(res, 403, { error: "docs merge-trigger refuses VM guests: guests do not drive ingest" });
+					return;
+				}
+				const parsed: unknown = JSON.parse(await readBody(req));
+				if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+					sendJson(res, 400, { error: "request body must be a JSON object" });
+					return;
+				}
+				const body = parsed as Record<string, unknown>;
+				const dataset = typeof body.dataset === "string" ? body.dataset : MERGE_TRIGGER_DATASET;
+				// hasOwn, not `in`: `in` also accepts the names every object inherits —
+				// "constructor", "toString", "__proto__" — and those would pass the
+				// known-dataset check and reach the refresh with a dataset the store
+				// never held. Only the trigger table's own rows are known.
+				if (!Object.hasOwn(DATASET_TRIGGERS, dataset)) {
+					sendJson(res, 400, {
+						error: `unknown dataset ${JSON.stringify(dataset.slice(0, 80))}; known: ${Object.keys(DATASET_TRIGGERS).join(", ")}`,
+					});
+					return;
+				}
+				if (typeof body.commit !== "string" || body.commit.length === 0 || typeof body.content_sha256 !== "string" || body.content_sha256.length === 0) {
+					sendJson(res, 400, { error: "commit and content_sha256 are required" });
+					return;
+				}
+				const fields = { dataset, commit: body.commit, content_sha256: body.content_sha256 };
+				// Audited under `docs_ingest`, the fail-closed name the write it performs
+				// is decided under — a merge-trigger nobody recorded is an unrecorded
+				// publication, same as an ingest nobody recorded.
+				if (!(await auditedRest(res, observability, surface, "docs_ingest", fields))) return;
+				if (config.ragflow === null) {
+					// The null-block idiom: no docs plane is configured, so the trigger
+					// asks for nothing that exists — answered quietly, no plane call made.
+					sendJson(res, 200, { ok: true, dataset, noop: true, reason: "docs-plane-unconfigured" });
+					return;
+				}
+				const newest = latestVersion(docsVersions, dataset);
+				if (newest && newest.commit === fields.commit && newest.content_sha256 === fields.content_sha256) {
+					sendJson(res, 200, { ok: true, version: newest, created: false, idempotent: true });
+					return;
+				}
+				if (dataset !== LOCALLY_INGESTED_DATASET) {
+					// This server holds no checkout of that dataset, so there is nothing it
+					// can truthfully ingest: a noop that says so, and no version recorded.
+					sendJson(res, 200, { ok: true, dataset, noop: true, reason: "no-configured-ingest-root" });
+					return;
+				}
+				// The guarded ingest reads the plane's dataset by name and refuses
+				// `unknown-dataset`, so on a configured plane without the dataset it
+				// must exist before that ingest runs. Creation is the resolve-by-name
+				// path the refresh already owns — discover first, create only on a
+				// name-miss — run here for the first trigger, whose ingest could not
+				// otherwise ever succeed. Order stays honest: ensure, ingest, and only
+				// then record the version, so a refused ingest still records nothing.
+				const ensured = await resolveDatasets({ config: config.ragflow }, [dataset]);
+				if (!ensured.ok) {
+					// A plane refusal is an outage of the docs plane, not a permission
+					// decision about the caller: 503 with the reason, and the caller
+					// decides on a retry.
+					sendJson(res, 503, { ok: false, reason: ensured.reason });
+					return;
+				}
+				const ensuredDataset = ensured.datasets[0];
+				// The guarded server-side ingest of this checkout's configured roots.
+				const ingested = await substrate.ingestDocs(
+					{
+						dataset,
+						commit: fields.commit,
+						pages: await scanIngestPages(options.docsIngestBaseDir ?? process.cwd(), config.docsIngestRoots),
+					},
+					surface,
+				);
+				if (!ingested.ok) {
+					// A refusal (unreadable plane, a redactor finding, a skipped sweep) is
+					// an outage of the docs plane for a trigger whose whole job is that
+					// plane: 503 with the reason, and the caller decides on a retry. No
+					// version is recorded over documents that were never ingested.
+					sendJson(res, 503, { ok: false, reason: ingested.reason });
+					return;
+				}
+				const refreshed = await refreshDataset(
+					{ config: config.ragflow, versions: docsVersions, emit: (event) => substrate.emit(event), surface },
+					fields,
+				);
+				if (refreshed.ok && ensuredDataset?.created === true) {
+					// The resolve step created the dataset this trigger first needed, so
+					// the reply says so even though the refresh's own resolve found it
+					// sitting there.
+					sendJson(res, 200, { ...refreshed, created: true });
+					return;
+				}
+				// A plane refusal is an outage of the docs plane, not a permission decision
+				// about the caller: 503 with the reason, and the caller decides on a retry.
+				sendJson(res, refreshed.ok ? 200 : 503, refreshed);
+				return;
+			}
+
 			// A proposal spends the owner's GitHub credential, so an anonymous caller is refused
 			// before the body is read, even on a run that otherwise allows untokened callers.
 			if (req.method === "POST" && url.pathname === "/skills/propose") {
@@ -943,6 +1210,190 @@ export function createHttpServer(
 		});
 	}) as typeof server.close;
 	return server;
+}
+
+/**
+ * The body of one stream frame: the same event shape `/events/query` returns for
+ * a read without payload. Mirrors `rowToEvent` in `service.ts` — Greptime hands
+ * back loosely typed rows and epoch millis — and adds no redaction of its own,
+ * because these rows were redacted on the write path, exactly as for every other
+ * read of them. `payload` is not selected, the read path's default.
+ */
+function ledgerEventFrame(row: Record<string, unknown>): string {
+	const text = (value: unknown): string | null => (value === null || value === undefined ? null : String(value));
+	return JSON.stringify({
+		id: String(row.id),
+		ts: new Date(Number(row.ts)).toISOString(),
+		surface: String(row.surface),
+		session_id: text(row.session_id),
+		graph_id: text(row.graph_id),
+		node_id: text(row.node_id),
+		linear_identifier: text(row.linear_identifier),
+		step: row.step === null || row.step === undefined ? null : Number(row.step),
+		repo: text(row.repo),
+		branch: text(row.branch),
+		actor: String(row.actor),
+		kind: String(row.kind),
+		summary: String(row.summary),
+		hash: String(row.hash),
+		prev: text(row.prev),
+	});
+}
+
+/**
+ * Open one Server-Sent Events response: resolve the cursor, then hand the
+ * response to a poll loop that writes one `id:`/`data:` frame per ledger event,
+ * in (ingested_at, id) order, until the client goes away or the stream idles out.
+ *
+ * Everything before the response headers is setup: a failure there throws, and
+ * the route answers an ordinary error — fail-open means the caller learns the
+ * stream did not open, not that it silently got nothing. Once the headers are
+ * written the failure rule inverts: a ledger that will not answer skips its tick
+ * and the connection stays open, because tearing down every consumer on one
+ * blip would make the stream less reliable than the polling it replaces.
+ *
+ * The ledger is the buffer. No fan-out list, no queue beyond the socket's own,
+ * and no shared state an emit path could touch: each connection's whole
+ * footprint is its cursor, one unref'd interval, and whatever it has not yet
+ * flushed.
+ */
+/**
+ * The position an empty ledger starts a cursorless stream at: before every
+ * record the ledger can ever hold, so the first later event is strictly after
+ * it and is delivered. A null with no boundary would mean "read the tip at the
+ * first tick" — and the tip would then name the very event that arrived first.
+ */
+const LEDGER_START: CursorPosition = { id: "", ingestedAt: 0 };
+
+async function openEventStream(
+	res: ServerResponse,
+	greptime: GreptimeClient,
+	cursorId: string,
+	bounds: { pollMs: number; idleMs: number; batch: number; maxBacklogBytes: number },
+): Promise<void> {
+	// The connection-life listeners go on before any await, because the setup
+	// reads below are the first async steps and a cursorless client can vanish
+	// while `latestPosition()` is still pending — before the headers, and
+	// before anything else would notice. Ending the socket during setup has to
+	// leave no timer behind.
+	let timer: ReturnType<typeof setInterval> | null = null;
+	let closed = false;
+
+	const cleanup = (): void => {
+		if (closed) return;
+		closed = true;
+		if (timer !== null) {
+			clearInterval(timer);
+			timer = null;
+		}
+	};
+	// Both ends of the connection's life — a normal end, a client that vanished,
+	// a socket error — land here, and the timer never outlives any of them.
+	res.on("close", cleanup);
+	res.on("error", cleanup);
+
+	// Setup. An id the ledger does not know replays nothing: the stream starts
+	// live from the tip, which is also the honest answer for a cursor older than
+	// the ledger's memory — there is nothing behind it left to replay.
+	let resolved: CursorPosition | null = null;
+	if (cursorId !== "") {
+		try {
+			resolved = await greptime.cursorPosition(cursorId);
+		} catch (cause) {
+			throw new Error(`the ledger would not resolve the stream cursor: ${redact(String(cause))}`);
+		}
+	}
+	// The live start is captured before the response opens, not on the first
+	// tick: a tip read after the first poll would adopt the events that arrived
+	// between connect and that tick as the starting cursor — sent to no one —
+	// and an empty ledger read late would swallow its first event. "Live" means
+	// everything after the position the ledger already had when the caller
+	// connected, or from the very first event when it was empty.
+	let cursor: CursorPosition;
+	if (resolved !== null) {
+		cursor = resolved;
+	} else {
+		try {
+			cursor = (await greptime.latestPosition()) ?? LEDGER_START;
+		} catch (cause) {
+			throw new Error(`the ledger would not resolve the stream start: ${redact(String(cause))}`);
+		}
+	}
+	// The socket died during those reads: the response has nobody left to open
+	// for, and a setup that went on to write headers and start the interval
+	// would create a timer whose cleanup had already fired. Returning here is
+	// the whole point of the listeners sitting above the setup.
+	if (closed || res.destroyed) return;
+
+	res.writeHead(200, {
+		"content-type": "text/event-stream; charset=utf-8",
+		"cache-control": "no-cache, no-transform",
+		// The stream *is* the response; when it ends the connection has no further
+		// use, and closing it lets a server shutdown wait on no idle socket.
+		connection: "close",
+	});
+	// A reconnect hint an EventSource honours; custom consumers ignore it.
+	res.write("retry: 5000\n\n");
+
+	let polling = false;
+	let lastActivity = Date.now();
+
+	const tick = (): void => {
+		if (closed || polling) return;
+		polling = true;
+		void (async () => {
+			try {
+				// Checked after the read on purpose, not before it: a client that
+				// vanished mid-poll still made its last read, which is what keeps a
+				// leaked timer observable — the disconnect test counts ledger reads,
+				// and a timer nobody cleared would keep counting after the socket
+				// closed.
+				if (res.destroyed || res.writableEnded) return;
+				if (Date.now() - lastActivity >= bounds.idleMs) {
+					// Idle close. The client reconnects with Last-Event-ID and resumes
+					// exactly where this cursor stopped; the ledger held the gap, not
+					// this process.
+					res.end();
+					cleanup();
+					return;
+				}
+				const positions = await greptime.eventIdsAfter(cursor, bounds.batch);
+				if (positions.length === 0) return;
+				const rows = await greptime.eventsByIds(positions.map((position) => position.id));
+				const byId = new Map(rows.map((row) => [String(row.id), row]));
+				for (const position of positions) {
+					const row = byId.get(position.id);
+					// The event row is written before its ingest record, so a position
+					// without a row is not a state storage reaches; if it ever lies,
+					// stop on it and retry the same cursor rather than skip a frame in
+					// silence.
+					if (!row || !Number.isFinite(Number(row.ts))) return;
+					res.write(`id: ${position.id}\ndata: ${ledgerEventFrame(row)}\n\n`);
+					cursor = position;
+					lastActivity = Date.now();
+					// Slow consumer: the unflushed backlog is the memory this one
+					// connection costs the server, and past the cap the connection is
+					// worth less than the memory. Destroying it fires `close`, clears
+					// the timer, and the client replays from its Last-Event-ID.
+					if (res.writableLength > bounds.maxBacklogBytes) {
+						res.destroy();
+						cleanup();
+						return;
+					}
+				}
+			} catch {
+				// A ledger that will not answer is a skipped tick, not a torn-down
+				// stream: the cursor stays put, and the next poll retries it.
+			} finally {
+				polling = false;
+			}
+		})();
+	};
+
+	// Unref'd, like every other timer this server holds: an open stream must not
+	// be the thing keeping a closing process alive.
+	timer = setInterval(tick, bounds.pollMs);
+	timer.unref?.();
 }
 
 /**

@@ -7,7 +7,9 @@ registry). The real (non-dry) mode holds an exclusive flock on LOCK_PATH, so onl
 can launch sessions; a second one
 exits 3 without polling. Launches go through dispatch.make_launch_fn (D-12 worktree, then D-13
 hermes chat for dispatch:hermes or a substrate-host VM task for dispatch:claude-code, D-06). Every
-line goes to stderr with the ``[substrate-dispatcher]`` prefix (journal).
+line goes to stderr with the ``[substrate-dispatcher]`` prefix (journal). Each tick first reads the
+substrate ``/slo`` burn snapshot (quota.py) and storm-breaks every launch while either quota SLO
+is breaching, unless ``SUBSTRATE_STORMBREAK_DISABLED=1``.
 """
 
 from __future__ import annotations
@@ -23,10 +25,12 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, TextIO
 
 from .dispatch import LaunchFn, Log, make_launch_fn, tick
+from .handoff import make_prelaunch
 from .host import HostClient
 from .launcher import STATE_DIR
 from .linear import LinearClient
 from .mcp import McpClient
+from .quota import make_slo_fetcher
 from .sessions import SessionRegistry
 
 POLL_INTERVAL_SECONDS = 30  # D-10
@@ -67,11 +71,13 @@ def run_loop(
     iterations: int | None = None,
     dry_run: bool = False,
     log: Log,
+    slo: Callable[[], Any] | None = None,
 ) -> int:
     """reap → tick → sleep until ``iterations`` ran or SIGTERM/SIGINT; returns iterations run.
 
     A signal sets the stop flag: the current iteration finishes and the loop returns. The
     default sleep waits on that flag, so a stop never waits out the poll interval.
+    ``slo`` is the U4 burn probe handed to every tick.
     """
     stop = threading.Event()
     sleep = sleep or stop.wait
@@ -89,7 +95,7 @@ def run_loop(
             try:
                 tick(
                     linear=linear, mcp=mcp, registry=registry, launch_fn=launch_fn,
-                    env_file=env_file, environ=environ, dry_run=dry_run, log=log,
+                    env_file=env_file, environ=environ, dry_run=dry_run, log=log, slo=slo,
                 )
             except Exception as exc:  # noqa: BLE001
                 log(f"tick failed: {type(exc).__name__}: {exc}")
@@ -136,18 +142,23 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         mcp = McpClient.from_env()
         host = HostClient.from_env()
+        # U4: the burn probe rides the same base URL and bearer as the MCP client.
+        slo = make_slo_fetcher()
         try:
             run_loop(
                 linear=linear,
                 mcp=mcp,
                 # D24-05: the registry re-reads given_up.json before the first tick.
                 registry=SessionRegistry(state_dir=STATE_DIR, log=log),
-                launch_fn=make_launch_fn(log=log, open_task=host.launch),
+                # U3: the launch path writes the signed handoff packet and runs the
+                # pre-launch drift scan over the worktree, both fail-open.
+                launch_fn=make_launch_fn(log=log, open_task=host.launch, prelaunch=make_prelaunch(mcp)),
                 env_file=Path(os.environ.get("SUBSTRATE_ENV_FILE") or DEFAULT_ENV_FILE),
                 environ=os.environ,
                 iterations=1 if args.once else None,
                 dry_run=args.dry_run,
                 log=log,
+                slo=slo,
             )
         finally:
             host.close()

@@ -73,6 +73,10 @@ These apply to every source:
 | `docs.ingest` | 25 | `note` | `caller` | `docs.ingest` | — | — | no |
 | `docs.ingest.refused` | 25 | `warning` | `caller` | `docs.ingest` | — | — | no |
 | `memory.retain.failed` | 26 | `warning` | `memory-writer` | `memory.retain` | — | — | no |
+| `memory.write.accepted` | 26 | `note` | `memory-writer` | — | — | — | no |
+| `memory.write.conflict` | 26 | `note` | `memory-writer` | — | — | — | no |
+| `memory.write.quarantined` | 26 | `warning` | `memory-writer` | — | — | — | no |
+| `memory.write.denied` | 26 | `warning` | `memory-writer` | — | — | — | no |
 | `desktop.action` | 30 | `tool.call` | `caller` | `click`, `type`, `key`, `screenshot` | — | — | no |
 | `anchor.written` | 28 | `note` | `substrate` | `anchor` | `anchor` | — | yes |
 | `anchor.failed` | 28 | `warning` | `substrate` | `anchor` | `anchor` | — | yes |

@@ -53,6 +53,7 @@ export const SUBSTRATE_VERSION = "0.1.0";
 const KNOWN_ROUTES = [
 	"/brief",
 	"/events",
+	"/events/stream",
 	"/verify",
 	"/healthz",
 	"/mcp",
@@ -62,6 +63,7 @@ const KNOWN_ROUTES = [
 	"/skills/propose",
 	"/docs/search",
 	"/docs/ingest",
+	"/docs/merge-trigger",
 	"/memory/recall",
 ] as const;
 

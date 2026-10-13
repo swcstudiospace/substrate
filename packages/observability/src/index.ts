@@ -95,4 +95,25 @@ export {
 	sloCatalogue,
 } from "./slo.ts";
 
+export {
+	type BurnEvalOptions,
+	type BurnReading,
+	type BurnResult,
+	type BurnStatus,
+	type BurnSample,
+	BurnLedger,
+	type BurnTarget,
+	type BurnThresholds,
+	BURN_COST_ID,
+	BURN_MIN_SPAN_MS,
+	BURN_TOKENS_ID,
+	BURN_WINDOW_MS,
+	COST_BURN_ENV,
+	TOKENS_BURN_ENV,
+	burnTargets,
+	evaluateBurnSlos,
+	loadBurnThresholds,
+	sharedBurnLedger,
+} from "./burn.ts";
+
 export { type ObservabilityConfig, loadObservabilityConfig, parseKeyValueList } from "./config.ts";

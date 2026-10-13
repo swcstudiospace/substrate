@@ -20,8 +20,10 @@
  * than calling a guessed endpoint.
  */
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import type { Dirent, Stats } from "node:fs";
+import { lstat, mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
 	listDatasets,
 	pollParseStatus,
@@ -43,6 +45,92 @@ export const INGEST_CALL_MAX_BYTES = 5_000_000;
  * (`README.md`, `docs/`, `.planning/PROJECT.md`).
  */
 export const DEFAULT_INGEST_ROOTS: readonly string[] = ["docs/", "README.md", ".planning/PROJECT.md"];
+
+/**
+ * The file-system calls the sweep makes, injectable so a test can prove the
+ * scanner enforces the size cap before any read. Defaults to node's fs.
+ */
+export interface ScanIo {
+	lstat: (path: string) => Promise<Stats>;
+	stat: (path: string) => Promise<Stats>;
+	readdir: (path: string, options: { withFileTypes: true }) => Promise<Dirent[]>;
+	readFile: (path: string, options: "utf8" | { encoding: "utf8" }) => Promise<string>;
+}
+
+export const nodeIo: ScanIo = { lstat, stat, readdir, readFile };
+
+/**
+ * The pages the configured roots hold under `baseDir`, for a refresh that runs
+ * on the machine holding the checkout (the `/docs/merge-trigger` route).
+ *
+ * Roots are repo-relative, exactly as `roots` describes them for posted pages:
+ * a trailing `/` sweeps a directory tree, a bare name reads one file. Each
+ * root is lstat-checked before it is followed, so a link used AS a root is
+ * skipped exactly like links found INSIDE the sweep — a link can point outside
+ * the checkout, and the guards below have no real path to check against the
+ * roots. Each file is stat-checked before it is read, so a page over
+ * {@link INGEST_PAGE_MAX_BYTES} is refused the read instead of being pulled
+ * into memory only for the ingest to refuse it. An entry that cannot be
+ * stat'ed, read or opened is skipped, never fatal: a root this checkout does
+ * not have is not an outage of the docs plane. A sweep that finds nothing
+ * comes back empty, and the guarded ingest refuses `no-pages` on it. Every
+ * page carries a `file://` source URL derived from its resolved path, so the
+ * content-hash idempotency keys stay stable across restarts of the server. The
+ * result is sorted by path, so a refresh ingests in a stable order.
+ */
+export async function scanIngestPages(baseDir: string, roots: readonly string[], io: ScanIo = nodeIo): Promise<IngestPage[]> {
+	const pages: IngestPage[] = [];
+	for (const root of roots) {
+		const absolute = resolve(baseDir, root);
+		let info: Stats;
+		try {
+			info = await io.lstat(absolute);
+		} catch {
+			continue; // absent or unreadable root: skipped, not fatal
+		}
+		if (info.isSymbolicLink()) continue; // a root that is itself a link is never followed
+		if (root.endsWith("/")) await collectDirectory(absolute, root, pages, io);
+		else if (info.isFile()) await addFilePage(absolute, root, pages, io);
+	}
+	pages.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+	return pages;
+}
+
+async function collectDirectory(dir: string, prefix: string, pages: IngestPage[], io: ScanIo): Promise<void> {
+	let entries: Dirent[];
+	try {
+		entries = await io.readdir(dir, { withFileTypes: true });
+	} catch {
+		return; // missing or unreadable: skipped, not fatal
+	}
+	for (const entry of entries) {
+		if (entry.isSymbolicLink()) continue;
+		const relative = `${prefix}${entry.name}`;
+		if (entry.isDirectory()) await collectDirectory(join(dir, entry.name), `${relative}/`, pages, io);
+		else if (entry.isFile()) await addFilePage(join(dir, entry.name), relative, pages, io);
+	}
+}
+
+async function addFilePage(absolute: string, path: string, pages: IngestPage[], io: ScanIo): Promise<void> {
+	// The size cap applies to the stat, before anything is read: a file the
+	// ingest would refuse as page-too-large is never loaded just to be thrown
+	// away. It is skipped like every other page the sweep cannot take —
+	// quietly, and counted only by its absence from the result.
+	let size: number;
+	try {
+		size = (await io.stat(absolute)).size;
+	} catch {
+		return; // missing or unreadable: skipped, not fatal
+	}
+	if (size > INGEST_PAGE_MAX_BYTES) return;
+	let body: string;
+	try {
+		body = await io.readFile(absolute, "utf8");
+	} catch {
+		return;
+	}
+	pages.push({ path, source_url: pathToFileURL(absolute).href, body });
+}
 
 export interface IngestPage {
 	path: string;

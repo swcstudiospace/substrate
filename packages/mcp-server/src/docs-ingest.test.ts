@@ -6,20 +6,24 @@
 import { describe, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "./config.ts";
 import {
+	INGEST_PAGE_MAX_BYTES,
 	ingestDocs,
 	loadIngestRecords,
+	nodeIo,
 	saveIngestRecords,
+	scanIngestPages,
 	stripRemoteImages,
 	type IngestDeps,
 	type IngestInput,
 	type IngestOutcome,
 	type IngestRecord,
 	type PageSettlement,
+	type ScanIo,
 } from "./docs-ingest.ts";
 import { createMcpServer } from "./mcp.ts";
 import { RagflowFake } from "./ragflow-fake.ts";
@@ -390,6 +394,57 @@ describe("ingest record persistence", () => {
 			expect(fake.uploads).toHaveLength(1);
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("scanIngestPages", () => {
+	test("an oversize page is stat-checked, never read, and counted only by its absence", async () => {
+		const root = mkdtempSync(join(tmpdir(), "substrate-scan-size-"));
+		try {
+			mkdirSync(join(root, "docs"), { recursive: true });
+			writeFileSync(join(root, "docs", "huge.md"), "x".repeat(INGEST_PAGE_MAX_BYTES + 1));
+			writeFileSync(join(root, "docs", "small.md"), "small enough");
+			// The fs stub records every read the sweep makes, so the proof that
+			// the cap applies before any read is that the oversize file's path
+			// never appears in it.
+			const reads: string[] = [];
+			const io: ScanIo = {
+				...nodeIo,
+				readFile: (path, options) => {
+					reads.push(String(path));
+					return nodeIo.readFile(path, options);
+				},
+			};
+			const pages = await scanIngestPages(root, ["docs/"], io);
+			expect(pages.map((page) => page.path)).toEqual(["docs/small.md"]);
+			expect(reads.some((path) => path.endsWith("huge.md"))).toBe(false);
+			// A sweep of only oversize files comes back empty, which the guarded
+			// ingest refuses as no-pages.
+			expect(await scanIngestPages(root, ["docs/huge.md"], io)).toEqual([]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test("a root that is itself a link is skipped, never followed", async () => {
+		const root = mkdtempSync(join(tmpdir(), "substrate-scan-root-"));
+		const outside = mkdtempSync(join(tmpdir(), "substrate-scan-out-"));
+		try {
+			writeFileSync(join(outside, "secret.md"), "outside the checkout");
+			mkdirSync(join(root, "docs"), { recursive: true });
+			writeFileSync(join(root, "docs", "real.md"), "inside");
+			// Links used AS roots — a file link, a directory link bare, and the
+			// same directory link in sweep form — are skipped exactly like links
+			// found inside the sweep: a link can point outside the checkout, and
+			// the roots guards have no real path to check it against.
+			symlinkSync(join(outside, "secret.md"), join(root, "linked.md"));
+			symlinkSync(join(root, "docs"), join(root, "linked-dir"));
+			const pages = await scanIngestPages(root, ["linked.md", "linked-dir", "linked-dir/", "docs/"]);
+			expect(pages.map((page) => page.path)).toEqual(["docs/real.md"]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+			rmSync(outside, { recursive: true, force: true });
 		}
 	});
 });

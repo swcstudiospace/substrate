@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { METRIC, SubstrateInstruments } from "./instruments.ts";
 import { DEFAULT_THRESHOLDS, breaches, evaluateSlos, sloCatalogue } from "./slo.ts";
+import { BURN_MIN_SPAN_MS, BURN_WINDOW_MS, type BurnResult, BurnLedger, evaluateBurnSlos, loadBurnThresholds } from "./burn.ts";
 
 function slo(results: ReturnType<typeof evaluateSlos>, id: string) {
 	const found = results.find((result) => result.id === id);
@@ -239,5 +240,193 @@ describe("naming", () => {
 			for (const name of names) expect(registered).toContain(name);
 		}
 		expect(registered).toContain(METRIC.briefDuration);
+	});
+});
+
+describe("the quota-burn objectives (SPE-10477)", () => {
+	const HOUR = BURN_WINDOW_MS;
+	// The ceilings every judged reading in this block runs under; a fresh registry is
+	// handed to each evaluation, so successive snapshots carry growing *cumulative*
+	// totals and the ledger takes the rate from their delta.
+	const CEILINGS = { SUBSTRATE_BURN_TOKENS_PER_HOUR: "1000000", SUBSTRATE_BURN_COST_USD_PER_HOUR: "40" };
+
+	/** One usage burst: the instruments after recording `count` tokens (or `usd` spend). */
+	function usageAfter(count: number, usd = 0): SubstrateInstruments {
+		const instruments = new SubstrateInstruments();
+		const payload: Record<string, number> = {};
+		if (count > 0) payload.input_tokens = count;
+		if (usd > 0) payload.cost_usd = usd;
+		instruments.recordUsage({ surface: "omp", payload });
+		return instruments;
+	}
+
+	function burn(results: BurnResult[], id: string) {
+		const found = results.find((result) => result.id === id);
+		if (!found) throw new Error(`no burn objective ${id}`);
+		return found;
+	}
+
+	function fedLedger(first: SubstrateInstruments, atMs: number): BurnLedger {
+		// The first evaluation feeds the ledger its base sample — which only happens
+		// when the objective is judged, so the ceilings must be set here. Its own
+		// verdict is always `insufficient-data`, exactly what a single reading deserves.
+		const ledger = new BurnLedger(HOUR, 0);
+		evaluateBurnSlos(first.snapshot(), { env: CEILINGS, ledger, now: atMs });
+		return ledger;
+	}
+
+	test("over the ceiling breaches: a half-hour rate extrapolated to the hour", () => {
+		const env = { SUBSTRATE_BURN_TOKENS_PER_HOUR: "1000000" };
+		const ledger = fedLedger(usageAfter(0), 0);
+		const result = burn(evaluateBurnSlos(usageAfter(600_000).snapshot(), { env, ledger, now: HOUR / 2 }), "burn.tokens");
+
+		// 600k tokens in 30 minutes is 1.2M per hour: caught in half the window.
+		expect(result.status).toBe("breached");
+		expect(result.observed).toBe(1_200_000);
+		expect(result.samples).toBe(2);
+		expect(result.detail).toContain("1200000 tokens/h");
+		expect(result.detail).toContain("over the 1000000 tokens/h ceiling");
+	});
+
+	test("under the ceiling is met, and exactly at it is met too", () => {
+		const env = { SUBSTRATE_BURN_TOKENS_PER_HOUR: "1000000" };
+		const ledger = fedLedger(usageAfter(0), 0);
+		const under = burn(evaluateBurnSlos(usageAfter(400_000).snapshot(), { env, ledger, now: HOUR / 2 }), "burn.tokens");
+		expect(under.status).toBe("ok");
+		expect(under.detail).toContain("800000 tokens/h");
+
+		// 500k in the half hour lands exactly on the ceiling: a ceiling is met at it,
+		// the same inclusive reading the ratio-ceiling catalogue entries take.
+		const fresh = fedLedger(usageAfter(0), 0);
+		const at = burn(evaluateBurnSlos(usageAfter(500_000).snapshot(), { env, ledger: fresh, now: HOUR / 2 }), "burn.tokens");
+		expect(at.status).toBe("ok");
+	});
+
+	test("the cost objective runs the same math in dollars", () => {
+		const env = { SUBSTRATE_BURN_COST_USD_PER_HOUR: "40" };
+		const ledger = fedLedger(usageAfter(0, 25), 0);
+		// The cumulative total moved from 25 to 50: 25 dollars over the half hour.
+		const result = burn(evaluateBurnSlos(usageAfter(0, 50).snapshot(), { env, ledger, now: HOUR / 2 }), "burn.cost_usd");
+
+		expect(result.status).toBe("breached");
+		expect(result.observed).toBeCloseTo(50, 6);
+		expect(result.detail).toContain("50.00 USD/h");
+		expect(result.statement).toContain("<= 40.00 USD");
+	});
+
+	test("an unset threshold is reported as unconfigured and never breaches", () => {
+		const results = evaluateBurnSlos(usageAfter(10_000_000).snapshot(), { env: {}, ledger: new BurnLedger(HOUR, 0), now: 0 });
+
+		expect(results.map((result) => result.id)).toEqual(["burn.tokens", "burn.cost_usd"]);
+		for (const result of results) {
+			expect(result.status).toBe("unconfigured");
+			expect(result.observed).toBe(null);
+			expect(result.target).toBe(null);
+		}
+		// The objective still says what it would check, and who owns the number.
+		expect(results[0]?.statement).toContain("SUBSTRATE_BURN_TOKENS_PER_HOUR (unset)");
+	});
+
+	test("a malformed threshold warns once and is treated as unset", () => {
+		const env = { SUBSTRATE_BURN_TOKENS_PER_HOUR: "soon-ish", SUBSTRATE_BURN_COST_USD_PER_HOUR: "-5" };
+		const warnings: string[] = [];
+		const ledger = new BurnLedger(HOUR, 0);
+
+		const first = evaluateBurnSlos(usageAfter(0).snapshot(), { env, ledger, now: 0, warn: (m) => warnings.push(m) });
+		expect(warnings).toHaveLength(2);
+		expect(warnings[0]).toContain("SUBSTRATE_BURN_TOKENS_PER_HOUR");
+		expect(warnings[0]).toContain("treated as unset");
+		expect(warnings[1]).toContain("SUBSTRATE_BURN_COST_USD_PER_HOUR");
+		expect(burn(first, "burn.tokens").status).toBe("unconfigured");
+	});
+
+	test("the default writer reports a malformed ceiling once per variable, ever", () => {
+		const env = { SUBSTRATE_BURN_TOKENS_PER_HOUR: "soon-ish" };
+		const lines: string[] = [];
+		const original = process.stderr.write;
+		process.stderr.write = ((chunk: unknown) => {
+			lines.push(String(chunk));
+			return true;
+		}) as typeof process.stderr.write;
+		try {
+			loadBurnThresholds(env);
+			loadBurnThresholds(env);
+		} finally {
+			process.stderr.write = original;
+		}
+		expect(lines).toHaveLength(1);
+		expect(lines[0]).toContain("SUBSTRATE_BURN_TOKENS_PER_HOUR");
+	});
+
+	test("a rate is not invented from a single reading, or from a too-short span", () => {
+		const ledger = new BurnLedger(HOUR, BURN_MIN_SPAN_MS);
+		const env = { SUBSTRATE_BURN_TOKENS_PER_HOUR: "1000000" };
+
+		// One sample says nothing. Nor do two samples a minute apart, when the honest
+		// per-hour answer needs five minutes of span to be more than noise.
+		evaluateBurnSlos(usageAfter(0).snapshot(), { env, ledger, now: 0 });
+		const oneMinute = burn(evaluateBurnSlos(usageAfter(50_000).snapshot(), { env, ledger, now: 60_000 }), "burn.tokens");
+		expect(oneMinute.status).toBe("insufficient-data");
+
+		// At five minutes of span the first verdict lands: 100k tokens over five
+		// minutes is 1.2M per hour, over the ceiling.
+		const fiveMinutes = burn(evaluateBurnSlos(usageAfter(100_000).snapshot(), { env, ledger, now: BURN_MIN_SPAN_MS }), "burn.tokens");
+		expect(fiveMinutes.status).toBe("breached");
+		expect(fiveMinutes.observed).toBe(1_200_000);
+	});
+
+	test("a sample older than the window is dropped, not divided across", () => {
+		const ledger = fedLedger(usageAfter(0), 0);
+		const env = { SUBSTRATE_BURN_TOKENS_PER_HOUR: "1000000" };
+
+		// Two hours of silence: the base sample has fallen out of the window, so the
+		// honest verdict is insufficient-data, not a rate divided across the gap.
+		const result = burn(evaluateBurnSlos(usageAfter(50_000).snapshot(), { env, ledger, now: 2 * HOUR }), "burn.tokens");
+		expect(result.status).toBe("insufficient-data");
+	});
+
+	test("a counter reset drops the history rather than subtracting across it", () => {
+		// A restart hands the process a fresh registry; subtracting its total from the
+		// old one would read the restart itself as negative spend.
+		const ledger = new BurnLedger(HOUR, 0);
+		expect(ledger.observe("substrate.tokens", 100, 0).perHour).toBe(null);
+		expect(ledger.observe("substrate.tokens", 90, 60_000).perHour).toBe(null);
+		const reading = ledger.observe("substrate.tokens", 90 + 100, 2 * 60_000);
+		// 100 tokens across the one minute after the reset: 6000 per hour.
+		expect(reading.perHour).toBe(6000);
+		expect(reading.samples).toBe(2);
+	});
+
+	test("a reset whose first new read lands in the same second still starts fresh", () => {
+		// The coalesced same-second sample is the reset's own first reading, not a
+		// base to subtract the restart across.
+		const ledger = new BurnLedger(HOUR, 0);
+		expect(ledger.observe("substrate.tokens", 100, 0).samples).toBe(1);
+		const reading = ledger.observe("substrate.tokens", 90, 400);
+		expect(reading.samples).toBe(1);
+		expect(reading.perHour).toBe(null);
+		// 100 tokens across the one second after the reset: 360000 per hour.
+		expect(ledger.observe("substrate.tokens", 190, 1_400).perHour).toBe(360_000);
+	});
+
+	test("a fast /slo poller still leaves a five-minute span: same-second reads coalesce", () => {
+		// The ring used to bound samples by count alone, so a host reading /slo
+		// twice a second filled it in four minutes — under the five-minute minimum
+		// span — and both burn checks answered `insufficient-data` forever no
+		// matter what was spent. Same-second reads are one sample: the cap bounds
+		// seconds of history, not reads, while a genuinely idle hour (samples
+		// older than the window) is still dropped, not divided across.
+		const ledger = new BurnLedger(HOUR, BURN_MIN_SPAN_MS);
+		let reading = ledger.observe("substrate.tokens", 0, 0);
+		reading = ledger.observe("substrate.tokens", 5, 500);
+		expect(reading.samples).toBe(1); // half a second later is still one second of history
+
+		while (reading.samples < 480) {
+			const second = Math.ceil(reading.spanMs / 1000) + 1;
+			reading = ledger.observe("substrate.tokens", 10 * second, second * 1000 + 250);
+		}
+		expect(reading.samples).toBe(480); // the cap: 480 distinct seconds
+		expect(reading.spanMs).toBeGreaterThanOrEqual(BURN_MIN_SPAN_MS);
+		expect(reading.perHour).not.toBe(null);
 	});
 });

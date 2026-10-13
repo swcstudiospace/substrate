@@ -521,6 +521,7 @@ export async function runSmoke(): Promise<SmokeResult[]> {
 			getNetwork: () => {
 				throw new Error("unreachable");
 			},
+			listContainers: async () => [],
 			createNetwork: async () => undefined,
 		},
 		"substrate-sandbox:0.1",
