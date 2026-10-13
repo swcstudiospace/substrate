@@ -406,24 +406,6 @@ function send(
 	res.end(body);
 }
 
-/**
- * Whether an `If-None-Match` header lists `etag`, by the weak comparison RFC 9110
- * §8.8.3.2 prescribes for it: `W/` prefixes are ignored on both sides and `*`
- * matches any current representation. The brief's tag is weak on purpose — it
- * validates the text, not the bytes a proxy may re-encode.
- */
-export function etagMatches(ifNoneMatch: string | string[] | undefined, etag: string): boolean {
-	if (ifNoneMatch === undefined) return false;
-	const header = Array.isArray(ifNoneMatch) ? ifNoneMatch.join(",") : ifNoneMatch;
-	const opaque = etag.replace(/^W\//, "");
-	for (const raw of header.split(",")) {
-		const candidate = raw.trim();
-		if (candidate === "*") return true;
-		if (candidate.replace(/^W\//, "") === opaque) return true;
-	}
-	return false;
-}
-
 /** `GET /healthz` as last computed, for pollers (uplift-2 R1). */
 interface HealthMemo {
 	status: number;
@@ -705,6 +687,10 @@ export function createHttpServer(
 				// one row, `docs.search.p95`, in the catalogue's entry shape, never
 				// folded into `breached`.
 				const docs = observability.evaluateDocs();
+				// `brief.p95` per surface (uplift-3 N7): one row per surface with enough
+				// samples, same shape plus `surface`; empty until a surface qualifies and
+				// never folded into `breached` — the global row is still the catalogue's.
+				const surfaces = observability.evaluateBriefSurfaces();
 				// 200 either way. A breached objective is information, not a broken service,
 				// and a monitor that read this as an outage would page on a slow hour.
 				sendJson(res, 200, {
@@ -714,6 +700,7 @@ export function createHttpServer(
 					planes,
 					admission: admissionSlo,
 					docs,
+					surfaces,
 				});
 				return;
 			}
@@ -760,12 +747,15 @@ export function createHttpServer(
 				const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
 				rememberClaim(claim, body);
 				if (!(await auditedRest(res, observability, surface, "brief", body))) return;
-				const brief = await substrate.briefDetailed({
-					repo: typeof body.repo === "string" ? body.repo : undefined,
-					branch: typeof body.branch === "string" ? body.branch : undefined,
-					graph_id: typeof body.graph_id === "string" ? body.graph_id : undefined,
-					surface: (typeof body.surface === "string" ? (body.surface as Surface) : null) ?? surface ?? "claude-code",
-				});
+				const { detail: brief, notModified } = await substrate.briefConditional(
+					{
+						repo: typeof body.repo === "string" ? body.repo : undefined,
+						branch: typeof body.branch === "string" ? body.branch : undefined,
+						graph_id: typeof body.graph_id === "string" ? body.graph_id : undefined,
+						surface: (typeof body.surface === "string" ? (body.surface as Surface) : null) ?? surface ?? "claude-code",
+					},
+					req.headers["if-none-match"],
+				);
 				// uplift-2 R1: the caller can tell a degraded or snapshot brief from a
 				// complete one and skip one it already holds. A degraded answer is still
 				// 200 — the fail-open contract is unchanged; only the headers say so.
@@ -776,7 +766,7 @@ export function createHttpServer(
 					"x-substrate-brief": brief.state,
 					...(brief.failed.length > 0 ? { "x-substrate-brief-failed": brief.failed.join(",") } : {}),
 				};
-				if (etagMatches(req.headers["if-none-match"], brief.etag)) {
+				if (notModified) {
 					res.writeHead(304, headers);
 					res.end();
 					return;

@@ -61,6 +61,41 @@ Before uplift-2 R3 the forward was one attempt: a timeout, a 5xx, a 429 or an op
 
 `POST /brief` answers with `ETag` and `X-Substrate-Brief` headers (uplift-2 R1); a gateway that sends `If-None-Match` on the next brief gets `304` and keeps the copy it has, which is the session-open `memory_brief • etag` the Build Plan's Grok Bot loop (A-4) names. The brief itself still never recalls from Hindsight synchronously; `recall` on that reply is the tool name to call next.
 
+### The brief contract over MCP (uplift-3 N7)
+
+MCP `memory_brief` carries the same facts as the REST headers, so a connector that calls the tool rather than the route is no longer blind to them. The text block is byte-for-byte what the tool has always returned; beside it, `structuredContent` holds:
+
+| Field | Meaning |
+| --- | --- |
+| `etag` | weak validator of the text, `W/"<32 hex>"` — identical to the `ETag` header `POST /brief` sends for the same request |
+| `state` | `complete` \| `degraded` \| `snapshot`, identical to `X-Substrate-Brief`; a degraded or snapshot brief is an answer, never `isError` |
+| `surface` | the surface the brief was composed for: the `surface` argument when given, else the bearer's own — the bearer is the identity, and this is how a connector sees which surface its token resolved to |
+| `failed_sources` | the sources that failed or missed the budget (`graph`, `recent actions`, `open graphs`, `memory`), empty when complete |
+| `snapshot_at` | ISO time the served snapshot was composed; `null` unless `state` is `snapshot` |
+
+The tool also takes `if_none_match`: the `etag` from an earlier reply, in `If-None-Match` grammar (weak or strong, a comma-separated list, or `*`). When it lists the current tag the reply is one short text line (`brief unchanged (etag W/"…")`) and `structuredContent { not_modified: true, etag, state, surface }` — no brief text, so the 20 KB transfer is saved exactly as a `304` saves it. The matcher is the REST route's own (`etagMatches` in `packages/mcp-server/src/service.ts`), so one stored ETag means the same thing at both doors. The brief is still composed to know its tag; the saving is the transfer, not the compose, and `substrate.brief.duration` times every answer as before. Every answer at either door counts once in `substrate.brief.result{surface,state,result=fresh|not_modified}`, and `GET /slo` carries a `surfaces` array with `grok-bot`'s own `brief.p95` row once it has 20 briefs ([`docs/observability.md`](observability.md) § Brief latency per surface).
+
+### Connector smoke (uplift-3 N7, Build Plan A-7 #5)
+
+`bun run smoke:grok` (`scripts/grok-connector-smoke.ts`) proves the contract above over the wire, as the `grok-bot` bearer, against a running `substrate-mcp` (`SUBSTRATE_URL`, default `http://127.0.0.1:7410`). It is opt-in and read-only — two MCP calls, two REST briefs, one health read; no event, no retain, no write — and it never prints the bearer. Four checks, each `ok`, `degraded` or `failed`, one line each with its timing (`--json` for one JSON report):
+
+1. `mcp.brief` — `memory_brief { repo }` with no `surface` argument answers within 1,500 ms with non-empty text, an explicit `state`, and `surface: grok-bot`; another surface fails the check with a hint naming the variables.
+2. `mcp.brief.not_modified` — `memory_brief { repo, if_none_match: <etag> }` answers `not_modified: true` within 500 ms.
+3. `rest.brief.304` — `POST /brief`, then the same with `If-None-Match`, answers `304` with an empty body.
+4. `healthz.planes` — every configured plane reachable with a closed breaker; otherwise `degraded`, not `failed`.
+
+Exit `0` only when every check is `ok`; `1` when the worst is `degraded` (the contract held, a plane did not); `2` when a check failed, the service is unreachable, the bearer is refused (the hint names `SUBSTRATE_TOKEN_GROK_BOT`, the tokens dir and `SUBSTRATE_TOKEN`, never a value) or the arguments are wrong. The bearer is resolved for `grok-bot` only, in this order: the first entry of `SUBSTRATE_TOKEN_GROK_BOT`, else the `grok-bot` file in the tokens dir named by `SUBSTRATE_TOKENS_DIR` (or the client default), else `SUBSTRATE_TOKEN`. `SUBSTRATE_SMOKE_REPO` picks the repo the brief is read for (default `swcstudiospace/agent-substrate`).
+
+### Gateway adoption (external dependency: programming-desk)
+
+The server side of the contract is complete; what the bot sees still depends on the sibling gateway checkout, which at `61c7900` POSTs briefs without conditional headers and drops the response headers, so state and ETag are lost at that boundary. The steps are the gateway's, recorded here as the dependency N7 leaves open (Build Plan A-4; the docs cutover is K5'):
+
+1. **Conditional brief with a stored ETag per request context.** `Substrate.brief` in `services/desk-gateway/src/desk_gateway/upstreams.py` keeps the last `ETag` per (seat, repo, branch, graph) and sends it as `If-None-Match` on the next `POST /brief`; a `304` means keep the copy held. The key is the request context, not the seat alone: one seat briefing two repos holds two tags.
+2. **Propagate `X-Substrate-Brief`** (and `X-Substrate-Brief-Failed` when present) onto the `desk_brief` reply, so a seat can tell a `degraded` or `snapshot` brief from a `complete` one and say so instead of acting on thin text as if it were whole. Over MCP the same facts are `structuredContent.state` / `failed_sources`.
+3. **Docs via substrate `docs_search`** (K5'): route `desk_docs_search` through `substrate-mcp`'s `docs_search` / `POST /docs/search` instead of the gateway's own RAGFlow call, so the fan-out, budget, provenance and `docs.search.p95` verdict of uplift-3 N5 cover the bot's reads too. Until then the gateway's direct RAGFlow path is unmeasured by the substrate.
+
+Until step 1 lands, `substrate.brief.result{surface=grok-bot,result=not_modified}` stays at zero and the smoke is the only conditional caller; its `rest.brief.304` check is what the gateway's change should make true in production traffic.
+
 ### Admission budgets (uplift-3 N3)
 
 Every loopback call the gateway makes as `grok-bot` — `POST /brief`, `POST /events`, `POST /memory`, the MCP tools — passes a per-surface budget after the bearer is resolved and before the handler runs (`packages/mcp-server/src/admission.ts`). The bucket is the token's surface, so a body naming another surface spends `grok-bot`'s budget, not that surface's; the gateway's second bearer entry and grok-hermes-connector's share it, because both are `grok-bot`. Three classes have their own buckets: `read` (`/brief`, `/memory/recall`, `/docs/search`, `/events/query`, `memory_search`, …), `write` (`/events`, `/memory`, `/docs/ingest`, `memory_write`, `events_emit`, …) and `coordination` (`graph_claim`, `graph_heartbeat`, `graph_release`, `graph_complete`), so a burst of briefs never delays a heartbeat. An MCP batch costs one token per `tools/call` member.

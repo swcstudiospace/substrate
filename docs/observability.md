@@ -58,6 +58,7 @@ substrate is keyed by. `surface` says which of the eight agents on the host;
 | `substrate.docs.citations` | counter | `provenance` = `recorded` \| `unrecorded` \| `unpinned` |
 | `substrate.docs.duration` | histogram, ms (own edges, incl. 2000 and 4000) | `surface`, `cached` |
 | `substrate.memory.expired` | counter | `surface`, `kind` (memory kind), `mode` = `served` \| `hidden` — entries past their `ttl` met by an index read (uplift-3 N4; `docs/memory-governance.md` § Lifetime) |
+| `substrate.brief.result` | counter | `surface` (a known surface or `unknown`), `state` = `complete` \| `degraded` \| `snapshot`, `result` = `fresh` \| `not_modified` — one per brief answered at either door; `not_modified` is a REST 304 or an MCP `not_modified: true` (uplift-3 N7) |
 
 `status` is a class (`2xx`, `5xx`), not a code, and `route` is one of the known
 paths or `other` — an unauthenticated caller walking random URLs must not be able
@@ -202,7 +203,11 @@ snapshot's text starts with the line `_(substrate brief snapshot from <ISO time>
 sources degraded: <sources>)_`; snapshots are written only for complete briefs, kept
 for `SUBSTRATE_BRIEF_SNAPSHOT_TTL_S` (3600 s; `0` disables both the write and the
 read) and never written while any source is down. MCP `memory_brief` returns the same
-text with no headers.
+text; since uplift-3 N7 its `structuredContent` carries the same facts (`etag`,
+`state`, `surface`, `failed_sources`, `snapshot_at`) and an `if_none_match` argument
+answers `not_modified: true` with no text by the same matcher — see
+`docs/grok-bot.md` § The brief contract over MCP. Every answer at either door counts
+once in `substrate.brief.result`.
 
 `GET /healthz` is memoised for `SUBSTRATE_HEALTHZ_CACHE_MS` (5000 ms; `0` recomputes
 on every call): the body gains `cachedAt` (ISO time it was computed) and `stale`
@@ -303,6 +308,19 @@ waited for, cache hit or loaded — and carries its own bucket edges
 default budget are both exact edges. Judged as a process-lifetime count like the
 catalogue, never folded into `breached`. See `docs/docs-search-ingest.md` for the
 counters beside it.
+
+### Brief latency per surface (uplift-3 N7)
+
+`GET /slo` also carries a `surfaces` array: one `brief.p95` row per surface, in the
+catalogue's entry shape plus `surface`, for every surface whose slice of
+`substrate.brief.duration` holds at least `SUBSTRATE_SLO_MIN_SAMPLES` (20)
+observations. Same target as the global row (`SUBSTRATE_SLO_BRIEF_P95_MS`, 800 ms),
+same evaluator, same inclusive edge. A surface below the floor has no row — the array
+is empty until a surface qualifies, and never longer than the surfaces that call — and
+a breached row is never folded into `breached`, which stays the catalogue's own list.
+The global `brief.p95` blends every caller, so a fast CLI can hide a slow bot; the
+bot's own row is the verdict its operator wants, and `bun run smoke:grok` is the
+contract check beside it.
 
 ### Two things the evaluator does on purpose
 
@@ -471,13 +489,24 @@ This rehearsal mode is not the scratch rehearsal harness — that twin lives in 
 It appends `note` events under a `ut-chaos-…` graph. The ledger is append-only so
 they stay; they carry no repo, so no brief shows them.
 
+### The Grok connector smoke (uplift-3 N7)
+
+`bun run smoke:grok` is the chaos smoke's read-only sibling for the `grok-bot`
+contract: as the grok-bot bearer it checks that MCP `memory_brief` answers within
+1,500 ms with an explicit `state` and `surface`, that `if_none_match` answers
+`not_modified` within 500 ms, that `POST /brief` then the conditional `POST /brief`
+answers `304` with an empty body, and that `/healthz` shows every configured plane up.
+Exit `0` / `1` (`degraded`: a degraded brief or an open breaker) / `2` (`failed`,
+unreachable, 401 — the hint names the variables, never a value); `--json` for one
+report. It writes nothing. [`docs/grok-bot.md`](grok-bot.md) § Connector smoke has the
+checks and the bearer order.
+
 ## Routes
 
 | | |
 | --- | --- |
 | `GET /metrics` | the snapshot this process holds, in the shape `otlp.ts` encodes |
-| `GET /slo` | the verdicts computed from it, the breached ids, `burn`, the per-plane `planes`, and the `admission` refusal rate |
-| `GET /slo` | the verdicts computed from it, the breached ids, `burn`, the per-plane `planes`, and the `docs` row |
+| `GET /slo` | the verdicts computed from it, the breached ids, `burn`, the per-plane `planes`, the `admission` refusal rate, the `docs` row and the per-surface `surfaces` rows |
 | `POST /evidence` | `{ "graph_id": "ut-…", "format": "json" \| "html" }` |
 | `GET /healthz` | now also `auditDurable`, `auditRecords`, `planes`, `capacity`, `cachedAt` and `stale` |
 

@@ -7,6 +7,7 @@ import {
 	PLANE_WINDOW_MS,
 	PlaneWindow,
 	breaches,
+	briefBySurfaceObjectives,
 	evaluateAdmissionSlo,
 	docsSearchObjective,
 	evaluateDocsSlos,
@@ -336,6 +337,59 @@ describe("docs.search.p95 (uplift-3 N5)", () => {
 		expect(slo(evaluateDocsSlos(searches(Array.from({ length: 30 }, () => 500)).snapshot(), { docsSearchP95Ms: 1500 }), "docs.search.p95").status).toBe(
 			"unmeasurable",
 		);
+	});
+});
+
+describe("brief.p95 per surface (uplift-3 N7)", () => {
+	/** Briefs per surface, each list one latency per brief; graph ids vary so the per-surface merge spans series. */
+	function perSurface(bySurface: Record<string, number[]>): SubstrateInstruments {
+		const instruments = new SubstrateInstruments();
+		for (const [surface, latencies] of Object.entries(bySurface)) {
+			latencies.forEach((durationMs, index) => {
+				instruments.recordBrief({ surface, graph_id: index % 2 === 0 ? "ut-a" : "ut-b", ok: true, durationMs });
+			});
+		}
+		return instruments;
+	}
+	const fast = (n: number) => Array.from({ length: n }, () => 100);
+
+	test("is empty with no histogram and empty while no surface reaches minSamples; a surface at 19 is absent", () => {
+		expect(briefBySurfaceObjectives([])).toEqual([]);
+		expect(briefBySurfaceObjectives(new SubstrateInstruments().snapshot())).toEqual([]);
+		const rows = briefBySurfaceObjectives(perSurface({ "grok-bot": fast(19), omp: fast(5) }).snapshot());
+		expect(rows).toEqual([]);
+	});
+
+	test("one brief.p95 row per surface at or above 20 samples, in the catalogue's shape plus the surface, sorted", () => {
+		const rows = briefBySurfaceObjectives(perSurface({ omp: fast(20), "grok-bot": fast(25), cursor: fast(19) }).snapshot());
+		expect(rows.map((row) => [row.surface, row.id, row.samples, row.status])).toEqual([
+			["grok-bot", "brief.p95", 25, "ok"],
+			["omp", "brief.p95", 20, "ok"],
+		]);
+		expect(rows[0]?.statement).toBe(`p95 of ${METRIC.briefDuration}{surface=grok-bot} <= 800 ms`);
+		expect(rows[0]?.target).toBe(800);
+		expect(rows[0]?.unit).toBe("ms");
+		// The global objective is unchanged: it still blends every surface.
+		expect(slo(evaluateSlos(perSurface({ omp: fast(20), "grok-bot": fast(25) }).snapshot()), "brief.p95").samples).toBe(45);
+		expect(sloCatalogue().map((target) => target.id)).toEqual(["brief.p95", "emit.success", "lease.steal_rate", "quarantine.rate"]);
+	});
+
+	test("a slow surface is breached on its own row while a fast one stays ok, and the blend can hide it", () => {
+		const instruments = perSurface({ "grok-bot": Array.from({ length: 20 }, () => 1500), omp: fast(400) });
+		const rows = briefBySurfaceObjectives(instruments.snapshot());
+		expect(rows.find((row) => row.surface === "grok-bot")?.status).toBe("breached");
+		expect(rows.find((row) => row.surface === "omp")?.status).toBe("ok");
+		// 20 slow of 420: 95.2 % at or below 800 ms, so the global row reads ok.
+		expect(slo(evaluateSlos(instruments.snapshot()), "brief.p95").status).toBe("ok");
+	});
+
+	test("takes the operator's briefP95Ms and minSamples like the global objective", () => {
+		const snapshot = perSurface({ "grok-bot": Array.from({ length: 10 }, () => 300) }).snapshot();
+		expect(briefBySurfaceObjectives(snapshot)).toEqual([]);
+		const [row] = briefBySurfaceObjectives(snapshot, { minSamples: 10, briefP95Ms: 400 });
+		expect(row?.statement).toContain("400 ms");
+		expect(row?.status).toBe("ok");
+		expect(briefBySurfaceObjectives(snapshot, { minSamples: 10, briefP95Ms: 200 })[0]?.status).toBe("breached");
 	});
 });
 

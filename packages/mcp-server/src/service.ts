@@ -15,6 +15,8 @@ import {
 	type AdmissionClass,
 	type AdmissionDecision,
 	type BreakerSnapshot,
+	type BriefResult,
+	type BriefState,
 	type DocsSearchSample,
 	type PlaneName,
 	type PlaneSample,
@@ -353,13 +355,23 @@ export interface EventQueryResult {
 export interface BriefDetail {
 	text: string;
 	/** `complete`: every source answered. `degraded`: some did not, thin live text. `snapshot`: some did not, last-good text served instead. */
-	state: "complete" | "degraded" | "snapshot";
+	state: BriefState;
 	/** The sources that failed or missed the budget, in section order; empty when complete. */
 	failed: BriefSource[];
 	/** Weak validator of `text`: `W/"<first 32 hex of sha256>"`. */
 	etag: string;
 	/** When the served snapshot was composed; null unless `state` is `snapshot`. */
 	snapshotAt: string | null;
+}
+
+/**
+ * A brief as it was answered to one caller (uplift-3 N7): the detail, and
+ * whether the caller's validator matched so no text was sent.
+ */
+export interface BriefAnswer {
+	detail: BriefDetail;
+	/** True when `ifNoneMatch` listed the current ETag: REST answers 304, MCP `not_modified`. */
+	notModified: boolean;
 }
 
 /** What the `brief-snapshot` cache class holds. */
@@ -371,6 +383,28 @@ interface BriefSnapshot {
 /** Weak, so a proxy that re-encodes the body still matches; 32 hex is plenty against collision for a brief. */
 export function briefEtag(text: string): string {
 	return `W/"${createHash("sha256").update(text).digest("hex").slice(0, 32)}"`;
+}
+
+/**
+ * Whether an `If-None-Match` validator lists `etag`, by the weak comparison RFC 9110
+ * §8.8.3.2 prescribes for it: `W/` prefixes are ignored on both sides and `*`
+ * matches any current representation. The brief's tag is weak on purpose — it
+ * validates the text, not the bytes a proxy may re-encode.
+ *
+ * One matcher for both doors: `POST /brief` reads the header and MCP
+ * `memory_brief` its `if_none_match` argument, and the two must agree on what
+ * "unchanged" means or a gateway that holds one ETag would get two answers.
+ */
+export function etagMatches(ifNoneMatch: string | string[] | undefined, etag: string): boolean {
+	if (ifNoneMatch === undefined) return false;
+	const header = Array.isArray(ifNoneMatch) ? ifNoneMatch.join(",") : ifNoneMatch;
+	const opaque = etag.replace(/^W\//, "");
+	for (const raw of header.split(",")) {
+		const candidate = raw.trim();
+		if (candidate === "*") return true;
+		if (candidate.replace(/^W\//, "") === opaque) return true;
+	}
+	return false;
 }
 
 /**
@@ -532,6 +566,12 @@ const INGEST_NOT_RECORDED =
  */
 export interface SubstrateObserver {
 	briefed?(sample: { surface: Surface; graph_id: string | null; ok: boolean; durationMs: number }): void;
+	/**
+	 * One brief answered to a caller (uplift-3 N7): `fresh` carried the text,
+	 * `not_modified` only the validator. `surface` is bounded to the surface list
+	 * (`unknown` otherwise) because `POST /brief` takes the body's surface unchecked.
+	 */
+	briefResult?(sample: { surface: string; state: BriefState; result: BriefResult }): void;
 	emitted?(sample: {
 		surface: Surface;
 		graph_id: string | null;
@@ -1047,9 +1087,33 @@ export class Substrate {
 		return { index: indexOk, greptime: greptimeOk, errors };
 	}
 
-	/** The brief as text — what MCP `memory_brief` and every non-HTTP caller want. */
+	/** The brief as text — what every caller without a validator to offer wants. */
 	async brief(request: BriefRequest): Promise<string> {
 		return (await this.briefDetailed(request)).text;
+	}
+
+	/**
+	 * The brief as answered to a caller that may already hold it (uplift-3 N7).
+	 *
+	 * `ifNoneMatch` is the validator the caller offered — the `If-None-Match`
+	 * header on `POST /brief`, the `if_none_match` argument of MCP
+	 * `memory_brief` — in the header's own grammar (weak or strong, a list, or
+	 * `*`). When it lists the brief's current ETag the answer is `notModified`
+	 * and the route sends no text. The brief is still composed in full (it has
+	 * to be, to know the tag), so the saving is the transfer, not the compose;
+	 * `briefed` still times it. The result counter is recorded here, once, so
+	 * both doors count alike; `surface` is bounded to the surface list first
+	 * because the REST body's surface is not validated.
+	 */
+	async briefConditional(request: BriefRequest, ifNoneMatch: string | string[] | undefined): Promise<BriefAnswer> {
+		const detail = await this.briefDetailed(request);
+		const notModified = etagMatches(ifNoneMatch, detail.etag);
+		this.observer.briefResult?.({
+			surface: (SURFACES as readonly string[]).includes(request.surface) ? request.surface : "unknown",
+			state: detail.state,
+			result: notModified ? "not_modified" : "fresh",
+		});
+		return { detail, notModified };
 	}
 
 	/**
