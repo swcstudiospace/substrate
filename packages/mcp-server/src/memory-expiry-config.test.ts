@@ -38,6 +38,6 @@ describe("SUBSTRATE_MEMORY_EXPIRY", () => {
 	test("the entry point reports it from its one boot-warning loop", () => {
 		const source = readFileSync(join(import.meta.dir, "index.ts"), "utf8");
 		expect(source.match(/memoryExpiryConfigWarnings\(config\)/g)?.length).toBe(1);
-		expect(source).toMatch(/\[\.\.\.configWarnings\(config\)[^\]]*memoryExpiryConfigWarnings\(config\)[^\]]*\]/);
+		expect(source).toMatch(/\[\s*\.\.\.configWarnings\(config\)[^\]]*memoryExpiryConfigWarnings\(config\)[^\]]*\]/);
 	});
 });

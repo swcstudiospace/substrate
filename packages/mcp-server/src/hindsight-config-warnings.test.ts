@@ -42,6 +42,6 @@ describe("hindsightConfigWarnings", () => {
 	test("the entry point reports them from its one boot-warning loop", () => {
 		const source = readFileSync(join(import.meta.dir, "index.ts"), "utf8");
 		expect(source.match(/hindsightConfigWarnings\(config\)/g)?.length).toBe(1);
-		expect(source).toMatch(/\[\.\.\.configWarnings\(config\)[^\]]*hindsightConfigWarnings\(config\)\]/);
+		expect(source).toMatch(/\[\s*\.\.\.configWarnings\(config\)[^\]]*hindsightConfigWarnings\(config\)[^\]]*\]/);
 	});
 });
