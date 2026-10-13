@@ -448,6 +448,36 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 		}),
 	},
 	{
+		// uplift-3 N1: the runtime doctor (scripts/doctor-runtime.ts --emit) posts
+		// one warning per drift CLASS (units, slice, redis, timers, disk, swap,
+		// env) when its drift set changed since the last run. The phase column
+		// is the v1.3 numbering; this row lands after phase 33.
+		id: "doctor.drift",
+		phase: 33,
+		kind: "warning",
+		surface: { fixed: "substrate" },
+		actions: ["doctor"],
+		runtime: "doctor",
+		carriesRepo: false,
+		periodic: true,
+		sample: () => ({
+			surface: "substrate",
+			kind: "warning",
+			summary: "runtime drift (redis): redis maxmemory, redis maxmemory-policy, redis save",
+			session_id: "doctor:2026-10-13T12:00:00.000Z",
+			payload: {
+				action: "doctor",
+				runtime: "doctor",
+				class: "redis",
+				checks: [
+					{ check: "redis maxmemory", expected: "256M", actual: "0" },
+					{ check: "redis maxmemory-policy", expected: "volatile-lru", actual: "noeviction" },
+					{ check: "redis save", expected: '"" (no RDB snapshots)', actual: "3600 1 300 100 60 10000" },
+				],
+			},
+		}),
+	},
+	{
 		id: "teachable.accepted",
 		phase: 29,
 		kind: "note",

@@ -374,8 +374,8 @@ function readBtime(): number | null {
 	return m?.[1] ? Number(m[1]) : null;
 }
 
-/** ExecMainStartTimestamp in --timestamp=unix form (@epoch); human form as fallback. */
-function systemdTimestampToEpoch(value: string | undefined): number | null {
+/** A `systemctl show` timestamp in --timestamp=unix form (@epoch); human form as fallback. Shared with the runtime doctor. */
+export function systemdTimestampToEpoch(value: string | undefined): number | null {
 	if (!value) return null;
 	const at = /^@(\d+)$/.exec(value.trim());
 	if (at?.[1]) return Number(at[1]);
