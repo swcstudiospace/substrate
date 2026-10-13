@@ -879,6 +879,28 @@ describe("SandboxStateStore (U2)", () => {
 		}
 	});
 
+	test("takeEgressCleanup pops the recorded delete argvs and clears the field on the same atomic write", () => {
+		const dir = mkdtempSync(join(tmpdir(), "tasks-u2-state-"));
+		try {
+			const state = new SandboxStateStore(join(dir, "sandboxes.json"), (line) => {
+				throw new Error(line);
+			});
+			const drop = ["iptables", "-D", "DOCKER-USER", "-s", "172.17.0.2", "-j", "DROP"];
+			state.record("box-a", { graph_id: GID, node_id: null, task: null, opened_at: "t", egress_cleanup: [drop] });
+			expect(state.takeEgressCleanup("box-a")).toEqual([drop]);
+			expect(state.list()).toEqual([
+				{ sandbox_id: "box-a", graph_id: GID, node_id: null, task: null, opened_at: "t", egress_cleanup: null },
+			]);
+			expect(state.takeEgressCleanup("box-a")).toEqual([]); // cleared: the second take is empty
+			expect(state.takeEgressCleanup("box-absent")).toEqual([]); // absent id: no-op
+			// entries written before the field existed read as none
+			state.record("box-b", { graph_id: GID, node_id: null, task: null, opened_at: "t" });
+			expect(state.takeEgressCleanup("box-b")).toEqual([]);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	test("a failed write is one stderr warning, never a throw, and the map reads as empty", () => {
 		const dir = mkdtempSync(join(tmpdir(), "tasks-u2-state-"));
 		try {

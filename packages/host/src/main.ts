@@ -15,7 +15,7 @@ import { type Client, createClient } from "@rivet-dev/agentos/client";
 import { createApiServer } from "./api.ts";
 import { startTrackerProxy } from "./mcp-proxy.ts";
 import { formatRoute, type MountRoute, parseMountRoute, parseRoute, parseTestsRoute, type Route, type TestsRoute, trackerRoute } from "./options.ts";
-import { defaultSandboxStatePath, destroySandbox, listSandboxes } from "./sandbox-provider.ts";
+import { defaultSandboxStatePath, destroySandbox, listSandboxes, setEgressWarnSink } from "./sandbox-provider.ts";
 import { type SandboxNetwork } from "./sandbox-options.ts";
 import type { Skill, TrackerLocators } from "./seed.ts";
 import { LeaseStore, SubstrateClient } from "./substrate.ts";
@@ -184,6 +184,21 @@ const { registry } = createHostVm({
 	tasks: () => service,
 	broker,
 	log,
+});
+
+// U1: the sandbox provider is built inside the rivet VM factory (no host wiring), so its
+// egress refusals reach the event log through this module sink — the same best-effort
+// warning-event idiom as the reconcile warnings below; an emit failure is one log line,
+// never a refusal path.
+setEgressWarnSink((payload) => {
+	void substrate
+		.call("events_emit", {
+			kind: "warning",
+			summary: `sandbox egress refused: ${payload.reason}`,
+			session_id: "host:sandbox",
+			payload,
+		})
+		.catch((cause: unknown) => log(`[substrate-host] egress event emit failed: ${String(cause)}`));
 });
 
 // U2 (03-PLAN.md): boot reconciliation replaces the D-04 blanket sweep. A container this host

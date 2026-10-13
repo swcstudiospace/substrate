@@ -265,6 +265,14 @@ export type SandboxStateEntry = {
 	task: string | null;
 	/** When the sandbox was recorded (ISO 8601). */
 	opened_at: string;
+	/**
+	 * U1×U2: the exact iptables delete argv lists for the sandbox's standing DOCKER-USER rules,
+	 * recorded when the provider applies them so a crash's orphans stay removable after a restart
+	 * (the provider's in-process rule memory dies with the process). `[]` when no rules were
+	 * composed (the internal bridge is deny-all by docker); null once the deletes ran. Absent in
+	 * entries written before this field existed and read as none.
+	 */
+	egress_cleanup?: string[][] | null;
 };
 
 /**
@@ -323,6 +331,23 @@ export class SandboxStateStore {
 		if (!(sandboxId in entries)) return;
 		delete entries[sandboxId];
 		this.write(entries);
+	}
+
+	/**
+	 * U1×U2: pop the egress delete argvs recorded for one sandbox, clearing the field on the
+	 * same atomic write; the caller executes them best-effort (runEgressCleanup,
+	 * sandbox-provider.ts). A delete can only ever remove a standing deny rule, so clearing
+	 * unconditionally — a failed delete is not retried — leaves access narrower, never wider.
+	 * [] when none were recorded.
+	 */
+	takeEgressCleanup(sandboxId: string): string[][] {
+		const entries = this.read();
+		const entry = entries[sandboxId];
+		const cleanup = entry?.egress_cleanup;
+		if (entry === undefined || !cleanup || cleanup.length === 0) return [];
+		entry.egress_cleanup = null;
+		this.write(entries);
+		return cleanup;
 	}
 
 	list(): Array<SandboxStateEntry & { sandbox_id: string }> {
