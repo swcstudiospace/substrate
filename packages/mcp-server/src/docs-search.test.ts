@@ -254,8 +254,9 @@ describe("docs_search fan-out under one budget (uplift-3 N5)", () => {
 		expect(reply.degraded_datasets).toEqual([{ dataset: "programming-desk", reason: `deadline (${BUDGET_MS} ms docs budget)` }]);
 		// Both other datasets answered: their four seeded chunks, still score-sorted.
 		expect(reply.chunks).toHaveLength(4);
-		expect(new Set(reply.chunks.map((citation) => citation.source_url))).toEqual(
-			new Set(["https://example.com/agent-substrate/data-planes", "https://example.com/agent-skills/review"]),
+		// The fake serves no URL metadata (none is documented), so the proof is the document ids.
+		expect(reply.chunks.map((citation) => citation.document_id).sort()).toEqual(
+			["doc-ds-berlin-agent-substrate-1", "doc-ds-berlin-agent-substrate-2", "doc-ds-leipzig-agent-skills-1", "doc-ds-leipzig-agent-skills-2"],
 		);
 		expect(reply.chunks.map((citation) => citation.score)).toEqual([0.91, 0.91, 0.83, 0.83]);
 		// Not stored by the answer cache: the next caller retries the missing dataset.

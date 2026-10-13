@@ -144,8 +144,9 @@ describe("the scorer", () => {
 		if (fixture === undefined) throw new Error("unanswerable fixture missing");
 		expect(scoreReply(fixture, { chunks: [] })).toMatchObject({ precision_at_k: 1, recall: 1, ndcg: 1, failures: [] });
 		const cited = scoreReply(fixture, { chunks: [{ title: "t", source_url: "u", heading_path: "", commit: "c", snippet: "s", score: 1 }] });
+		// NDCG is undefined with nothing graded: reported as 1, never a failure; the cap is the verdict.
 		expect(cited.failures).toEqual(["max_citations"]);
-		expect(cited.ndcg).toBe(0);
+		expect(cited.ndcg).toBe(1);
 	});
 });
 
