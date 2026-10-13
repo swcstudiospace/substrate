@@ -5,9 +5,18 @@ import { memoryToolWriter } from "./mcp.ts";
 import { createObservability } from "./observe.ts";
 import type { FetchLike } from "./planes/ragflow.ts";
 import { RagflowFake } from "./ragflow-fake.ts";
-import { createHttpServer, healthStatus, isLoopbackRemote, memoryWriteStatus, memoryWriter } from "./server.ts";
+import {
+	STREAM_BATCH,
+	createHttpServer,
+	healthStatus,
+	isLoopbackRemote,
+	memoryWriteStatus,
+	memoryWriter,
+	streamRefusal,
+	type HttpServerOptions,
+} from "./server.ts";
 import { Substrate } from "./service.ts";
-import type { SubstrateEvent } from "./types.ts";
+import type { SubstrateEvent, Surface } from "./types.ts";
 
 /** Shorthand for a health report; every field defaults to the unhealthy value. */
 function health(over: Partial<Parameters<typeof healthStatus>[0]> = {}) {
@@ -40,6 +49,51 @@ describe("healthStatus", () => {
 });
 
 /**
+ * Boot the real server on an ephemeral port; `stop` closes it.
+ *
+ * The ledger is injected rather than built from the environment, so nothing here
+ * needs a Greptime endpoint in its config — `/events` and `/events/query` reach the
+ * store through the substrate, and only `/healthz` asks the config whether a ledger
+ * was configured at all.
+ */
+async function serve(
+	greptime: unknown,
+	env: Record<string, string | undefined> = {},
+	stores: { ragflowFetch?: FetchLike } = {},
+	options: HttpServerOptions = {},
+) {
+	const config = loadConfig(env);
+	// No SUBSTRATE_AUDIT_PATH in the env, so the audit chain stays in memory and the
+	// exporter is off: these routes are audited, and a test that skipped the plane
+	// entirely would not be running the code the server actually runs.
+	const observability = createObservability(config, env);
+	await observability.start();
+	const substrate = new Substrate(config, { index: null, greptime: greptime as never, ...stores }, observability.observer);
+	const server = createHttpServer(substrate, config, observability, options);
+	const listening = Promise.withResolvers<void>();
+	server.listen(0, "127.0.0.1", listening.resolve);
+	await listening.promise;
+	const address = server.address();
+	const port = typeof address === "object" && address ? address.port : 0;
+	return {
+		post: (path: string, body: unknown, headers: Record<string, string> = {}) =>
+			fetch(`http://127.0.0.1:${port}${path}`, {
+				method: "POST",
+				headers: { "content-type": "application/json", ...headers },
+				body: JSON.stringify(body),
+			}),
+		get: (path: string, headers: Record<string, string> = {}, signal?: AbortSignal) =>
+			fetch(`http://127.0.0.1:${port}${path}`, { headers, signal }),
+		stop: () => {
+			const closed = Promise.withResolvers<void>();
+			observability.stop();
+			server.close(() => closed.resolve());
+			return closed.promise;
+		},
+	};
+}
+
+/**
  * The HTTP surface, against a real listener.
  *
  * Hooks and the CLI reach the substrate this way, so the routes are driven over a
@@ -69,45 +123,6 @@ describe("routes", () => {
 					return rows;
 				},
 			},
-		};
-	}
-
-	/**
-	 * Boot the real server on an ephemeral port; `stop` closes it.
-	 *
-	 * The ledger is injected rather than built from the environment, so nothing here
-	 * needs a Greptime endpoint in its config — `/events` and `/events/query` reach the
-	 * store through the substrate, and only `/healthz` asks the config whether a ledger
-	 * was configured at all.
-	 */
-	async function serve(
-		greptime: unknown,
-		env: Record<string, string | undefined> = {},
-		stores: { ragflowFetch?: FetchLike } = {},
-	) {
-		const config = loadConfig(env);
-		// No SUBSTRATE_AUDIT_PATH in the env, so the audit chain stays in memory and the
-		// exporter is off: these routes are audited, and a test that skipped the plane
-		// entirely would not be running the code the server actually runs.
-		const observability = createObservability(config, env);
-		await observability.start();
-		const substrate = new Substrate(config, { index: null, greptime: greptime as never, ...stores }, observability.observer);
-		const server = createHttpServer(substrate, config, observability);
-		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-		const address = server.address();
-		const port = typeof address === "object" && address ? address.port : 0;
-		return {
-			post: (path: string, body: unknown, headers: Record<string, string> = {}) =>
-				fetch(`http://127.0.0.1:${port}${path}`, {
-					method: "POST",
-					headers: { "content-type": "application/json", ...headers },
-					body: JSON.stringify(body),
-				}),
-			stop: () =>
-				new Promise<void>((resolve) => {
-					observability.stop();
-					server.close(() => resolve());
-				}),
 		};
 	}
 
@@ -516,6 +531,346 @@ describe("routes", () => {
 			expect(hashless.status).toBe(400);
 			const scalar = await post("/docs/merge-trigger", 42, { authorization: "Bearer tok-omp" });
 			expect(scalar.status).toBe(400);
+		} finally {
+			await stop();
+		}
+	});
+});
+
+/**
+ * The push seam: `GET /events/stream` over a socket, against a ledger stub that
+ * answers exactly the cursor reads the route makes, with `append` so a test can
+ * land rows after the connection is open. The bounds are injected small — the
+ * production constants are deliberately not configurable.
+ */
+describe("GET /events/stream", () => {
+	/** Any fixed epoch; stub positions sit 10 ms apart from here. */
+	const BASE = Date.UTC(2026, 9, 1);
+
+	interface StubEvent {
+		id: string;
+		ts: number;
+		summary: string;
+	}
+
+	/** One stub row, in the shape Greptime's loosely typed rows actually arrive in. */
+	function row(event: StubEvent): Record<string, unknown> {
+		return {
+			ts: event.ts,
+			id: event.id,
+			surface: "omp",
+			session_id: null,
+			graph_id: null,
+			node_id: null,
+			linear_identifier: null,
+			step: null,
+			repo: null,
+			branch: null,
+			actor: "agent",
+			kind: "note",
+			summary: event.summary,
+			hash: `h-${event.id}`,
+			prev: null,
+		};
+	}
+
+	/** A ledger stub answering the stream route's reads, counting every poll. */
+	function streamLedger(events: StubEvent[]) {
+		const positions = events.map((event, i) => ({ id: event.id, ingestedAt: BASE + i * 10 }));
+		let nextIngestedAt = BASE + events.length * 10;
+		const reads: Array<{ cursor: { id: string; ingestedAt: number }; limit: number }> = [];
+		return {
+			ping: async () => true,
+			ensureAppendMode: async () => true,
+			probeDialect: async () => true,
+			quotingDialectKnown: true,
+			lastHash: async () => null,
+			insertEvent: async () => {},
+			queryEvents: async () => [] as Array<Record<string, unknown>>,
+			cursorPosition: async (eventId: string) => positions.find((position) => position.id === eventId) ?? null,
+			latestPosition: async () => (positions.length > 0 ? positions[positions.length - 1]! : null),
+			eventIdsAfter: async (cursor: { id: string; ingestedAt: number }, limit: number) => {
+				reads.push({ cursor, limit });
+				const seen = new Set<string>();
+				const out: Array<{ id: string; ingestedAt: number }> = [];
+				for (const position of positions) {
+					if (seen.has(position.id)) continue;
+					seen.add(position.id);
+					const after =
+						position.ingestedAt > cursor.ingestedAt ||
+						(position.ingestedAt === cursor.ingestedAt && position.id > cursor.id);
+					if (!after) continue;
+					out.push(position);
+					if (out.length >= limit) break;
+				}
+				return out;
+			},
+			eventsByIds: async (ids: string[]) => events.filter((event) => ids.includes(event.id)).map(row),
+			append: (event: StubEvent) => {
+				positions.push({ id: event.id, ingestedAt: nextIngestedAt });
+				nextIngestedAt += 10;
+				events.push(event);
+			},
+			reads,
+		};
+	}
+
+	/** Complete `id:`/`data:` frames in SSE text collected so far. */
+	function frames(text: string): Array<{ id: string; data: string }> {
+		return [...text.matchAll(/id: (.+)\ndata: (.+)\n\n/g)].map((match) => ({ id: match[1]!, data: match[2]! }));
+	}
+
+	/**
+	 * Read a stream's text until `want` frames arrived, the server closed it, or the
+	 * deadline passed; aborts the request either way, so `stop()` never waits on a
+	 * socket the test abandoned.
+	 */
+	async function streamText(response: Response, controller: AbortController, want = Number.POSITIVE_INFINITY, deadlineMs = 5_000): Promise<string> {
+		const reader = response.body?.getReader();
+		const decoder = new TextDecoder();
+		let text = "";
+		const deadline = Date.now() + deadlineMs;
+		while (reader && Date.now() < deadline && frames(text).length < want) {
+			// A server-side cutoff destroys the socket mid-read: the read throws
+			// (ECONNRESET) rather than returning done. That is the expected end for
+			// this helper — return the frames received before the cut.
+			try {
+				const { done, value } = await reader.read();
+				if (done) break;
+				text += decoder.decode(value, { stream: true });
+			} catch {
+				break;
+			}
+		}
+		controller.abort();
+		return text;
+	}
+
+	/** The one real-clock sleep the suite needs: absence of events is only observable by letting time pass. */
+	function delay(ms: number): Promise<void> {
+		const { promise, resolve } = Promise.withResolvers<void>();
+		setTimeout(resolve, ms);
+		return promise;
+	}
+
+	/** Await a real condition instead of guessing its duration; the stream runs on a real interval and a live socket. */
+	async function until(condition: () => boolean, deadlineMs = 2_000): Promise<void> {
+		const deadline = Date.now() + deadlineMs;
+		while (!condition()) {
+			if (Date.now() > deadline) throw new Error("the awaited condition never held");
+			await delay(5);
+		}
+	}
+
+	test("streamRefusal checks the surface before the interface", () => {
+		// The 401 is the merge-trigger door decision: an unauthenticated caller is
+		// refused before the loopback check is even reached, anonymous-allowed or not.
+		expect(streamRefusal(null, "10.1.2.3")?.status).toBe(401);
+		expect(streamRefusal(null, "127.0.0.1")?.status).toBe(401);
+		expect(streamRefusal("omp" as Surface, "10.1.2.3")?.status).toBe(403);
+		expect(String(streamRefusal("omp" as Surface, "10.1.2.3")?.error)).toContain("loopback");
+		expect(streamRefusal("omp" as Surface, "127.9.240.1")).toBeNull();
+		expect(streamRefusal("omp" as Surface, "::1")).toBeNull();
+	});
+
+	test("an untokened caller is refused, even on a run that allows anonymous callers", async () => {
+		const stub = streamLedger([]);
+		const { get, stop } = await serve(stub, { SUBSTRATE_TOKEN_OMP: "tok-omp" });
+		try {
+			// The global gate answers this one before the route is reached.
+			expect((await get("/events/stream")).status).toBe(401);
+		} finally {
+			await stop();
+		}
+
+		// The bridge gate passes an untokened caller here; the route's own refusal
+		// is the 401, and it names the decision.
+		const bridge = streamLedger([]);
+		const { get: getAnon, stop: stopAnon } = await serve(bridge, { SUBSTRATE_ALLOW_ANONYMOUS: "1" });
+		try {
+			const refused = await getAnon("/events/stream");
+			expect(refused.status).toBe(401);
+			expect(String(((await refused.json()) as Record<string, unknown>).error)).toContain("authenticated surface");
+		} finally {
+			await stopAnon();
+		}
+	});
+
+	test("replays after Last-Event-ID in ingest order and keeps streaming new rows", async () => {
+		const stub = streamLedger([
+			{ id: "e1", ts: BASE, summary: "first" },
+			{ id: "e2", ts: BASE + 1, summary: "second" },
+			{ id: "e3", ts: BASE + 2, summary: "third" },
+		]);
+		const { get, stop } = await serve(
+			stub,
+			{ SUBSTRATE_TOKEN_OMP: "tok-omp" },
+			{},
+			{ streamPollMs: 10, streamIdleMs: 60_000 },
+		);
+		try {
+			const controller = new AbortController();
+			const response = await get("/events/stream", { authorization: "Bearer tok-omp", "last-event-id": "e1" }, controller.signal);
+			expect(response.status).toBe(200);
+			expect(response.headers.get("content-type") ?? "").toContain("text/event-stream");
+			// Land a row while the connection is open: replay and live are one path.
+			stub.append({ id: "e4", ts: BASE + 3, summary: "landed after connect" });
+			const got = frames(await streamText(response, controller, 3));
+			expect(got.map((frame) => frame.id)).toEqual(["e2", "e3", "e4"]);
+			// The frame body is the ledger event shape the query read returns.
+			const event = JSON.parse(got[0]!.data) as Record<string, unknown>;
+			expect(event).toMatchObject({ id: "e2", surface: "omp", kind: "note", summary: "second", hash: "h-e2" });
+			// Greptime's epoch millis rebuilt as the ISO string the chain hashed.
+			expect(event.ts).toBe(new Date(BASE + 1).toISOString());
+		} finally {
+			await stop();
+		}
+	});
+
+	test("?cursor= replays the same window, and the idle timeout closes the stream", async () => {
+		const stub = streamLedger([
+			{ id: "e1", ts: BASE, summary: "first" },
+			{ id: "e2", ts: BASE + 1, summary: "second" },
+			{ id: "e3", ts: BASE + 2, summary: "third" },
+		]);
+		const { get, stop } = await serve(stub, { SUBSTRATE_TOKEN_OMP: "tok-omp" }, {}, { streamPollMs: 10, streamIdleMs: 100 });
+		try {
+			const controller = new AbortController();
+			const response = await get("/events/stream?cursor=e1", { authorization: "Bearer tok-omp" }, controller.signal);
+			expect(response.status).toBe(200);
+			// The replay drains (e2, e3), then 100 ms of silence closes the stream
+			// from the server side — the client reconnects with Last-Event-ID and
+			// resumes, the ledger having held the gap.
+			const got = frames(await streamText(response, controller));
+			expect(got.map((frame) => frame.id)).toEqual(["e2", "e3"]);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("a disconnected client stops the poll timer", async () => {
+		const stub = streamLedger([{ id: "e1", ts: BASE, summary: "first" }]);
+		const { get, stop } = await serve(
+			stub,
+			{ SUBSTRATE_TOKEN_OMP: "tok-omp" },
+			{},
+			{ streamPollMs: 20, streamIdleMs: 60_000 },
+		);
+		try {
+			const controller = new AbortController();
+			const response = await get("/events/stream", { authorization: "Bearer tok-omp", "last-event-id": "e1" }, controller.signal);
+			expect(response.status).toBe(200);
+			// Polls run until the read count proves the interval is live. The tick
+			// reads the ledger *before* checking the socket, so a timer nobody
+			// cleared would keep counting reads here.
+			await until(() => stub.reads.length >= 3);
+			controller.abort();
+			// Let any poll already in flight land, then hold the line: a quiet
+			// period is the only way to observe that nothing more arrives.
+			await delay(60);
+			const after = stub.reads.length;
+			await delay(120);
+			expect(stub.reads.length).toBe(after);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("a slow consumer is cut off once its backlog passes the cap", async () => {
+		const big = "x".repeat(64 * 1024);
+		const stub = streamLedger([
+			{ id: "e1", ts: BASE, summary: "first" },
+			{ id: "e2", ts: BASE + 1, summary: big },
+			{ id: "e3", ts: BASE + 2, summary: big },
+		]);
+		const { get, stop } = await serve(
+			stub,
+			{ SUBSTRATE_TOKEN_OMP: "tok-omp" },
+			{},
+			{ streamPollMs: 10, streamIdleMs: 60_000, streamMaxBacklogBytes: 1024 },
+		);
+		try {
+			const controller = new AbortController();
+			const response = await get("/events/stream", { authorization: "Bearer tok-omp", "last-event-id": "e1" }, controller.signal);
+			expect(response.status).toBe(200);
+			// The first frame already exceeds the cap, so the connection is cut
+			// rather than buffered: the stream ends long before the idle timeout,
+			// and a reconnect would replay from Last-Event-ID. A stream that kept
+			// polling would run hundreds of reads inside the deadline instead.
+			const got = frames(await streamText(response, controller, Number.POSITIVE_INFINITY, 2_000));
+			expect(got.length).toBeGreaterThanOrEqual(1);
+			expect(stub.reads.length).toBeLessThanOrEqual(3);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("a replay wider than one batch continues across polls in order", async () => {
+		const events = Array.from({ length: 250 }, (_, i) => ({ id: `e${i}`, ts: BASE + i, summary: `row ${i}` }));
+		const stub = streamLedger(events);
+		const { get, stop } = await serve(stub, { SUBSTRATE_TOKEN_OMP: "tok-omp" }, {}, { streamPollMs: 10, streamIdleMs: 150 });
+		try {
+			const controller = new AbortController();
+			const response = await get("/events/stream?cursor=e0", { authorization: "Bearer tok-omp" }, controller.signal);
+			expect(response.status).toBe(200);
+			const got = frames(await streamText(response, controller, Number.POSITIVE_INFINITY, 3_000)).map((frame) => frame.id);
+			expect(got.length).toBe(249);
+			expect(got[0]).toBe("e1");
+			expect(got[248]).toBe("e249");
+			// No poll ever asked past the batch bound — the ledger is the buffer,
+			// and a connection reads at most a batch per tick from its own cursor.
+			expect(Math.max(...stub.reads.map((read) => read.limit))).toBe(STREAM_BATCH);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("a ledger that cannot resolve the cursor answers an ordinary error", async () => {
+		const stub = streamLedger([]);
+		stub.cursorPosition = async () => {
+			throw new Error("greptime unreachable: connect ETIMEDOUT");
+		};
+		const { get, stop } = await serve(stub, { SUBSTRATE_TOKEN_OMP: "tok-omp" });
+		try {
+			const response = await get("/events/stream", { authorization: "Bearer tok-omp", "last-event-id": "e1" });
+			expect(response.status).toBe(503);
+			expect(response.headers.get("content-type") ?? "").toContain("application/json");
+			expect(String(((await response.json()) as Record<string, unknown>).error)).toContain("cursor");
+		} finally {
+			await stop();
+		}
+	});
+
+	test("a run with no ledger refuses the stream", async () => {
+		const { get, stop } = await serve(null, { SUBSTRATE_TOKEN_OMP: "tok-omp" });
+		try {
+			const response = await get("/events/stream", { authorization: "Bearer tok-omp" });
+			expect(response.status).toBe(503);
+			expect(String(((await response.json()) as Record<string, unknown>).error)).toContain("GREPTIME_URL");
+		} finally {
+			await stop();
+		}
+	});
+
+	test("an open stream leaves every other route working", async () => {
+		const stub = streamLedger([{ id: "e1", ts: BASE, summary: "first" }]);
+		const { get, post, stop } = await serve(
+			stub,
+			{ SUBSTRATE_TOKEN_OMP: "tok-omp" },
+			{},
+			{ streamPollMs: 20, streamIdleMs: 60_000 },
+		);
+		try {
+			const controller = new AbortController();
+			const open = await get("/events/stream", { authorization: "Bearer tok-omp", "last-event-id": "e1" }, controller.signal);
+			expect(open.status).toBe(200);
+			// Reads and writes on the same server while the stream is open — the
+			// emit path never touches subscriber state.
+			const query = await post("/events/query", { repo: "r" }, { authorization: "Bearer tok-omp" });
+			expect(query.status).toBe(200);
+			const emit = await post("/events", { kind: "note", summary: "still working", session_id: "s" }, { authorization: "Bearer tok-omp" });
+			expect(emit.status).toBe(202);
+			controller.abort();
 		} finally {
 			await stop();
 		}

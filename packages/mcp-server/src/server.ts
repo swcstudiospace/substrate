@@ -5,6 +5,7 @@
  *   POST /brief         the same briefing as plain text, for hooks
  *   POST /events        append an event, for hooks
  *   POST /events/query  read a window of the ledger
+ *   GET  /events/stream replay the ledger as Server-Sent Events, loopback only
  *   POST /memory        write a memory entry through the governance gate
  *   POST /skills/propose propose a skill as a reviewable PR on the skills library
  *   POST /verify        recompute a graph's hash chain
@@ -40,6 +41,7 @@ import { buildAgentCard, isKnownCardSurface } from "./agent-card.ts";
 import { DATASET_TRIGGERS, createVersionStore, latestVersion, refreshDataset } from "./docs-datasets.ts";
 import { formatDrift } from "./drift.ts";
 import { InvalidEventError } from "./event.ts";
+import { type CursorPosition, type GreptimeClient } from "./greptime.ts";
 import { InvalidHandoffError } from "./handoff.ts";
 import { attributedSurface, createMcpServer, type McpCaller } from "./mcp.ts";
 import {
@@ -52,6 +54,7 @@ import {
 	toolCallsIn,
 	type Observability,
 } from "./observe.ts";
+import { redact } from "./redact.ts";
 import type { Substrate } from "./service.ts";
 import { proposalBodyProblem, proposalFailure, toProposalRequest } from "./skills/request.ts";
 import { EVENT_KINDS, SURFACES, type Surface } from "./types.ts";
@@ -198,6 +201,12 @@ export interface HttpServerOptions {
 	anonymousIntervalMs?: number;
 	/** Where the hourly refused-event line goes. Defaults to stderr. */
 	refusalLog?: (line: string) => void;
+	/** `/events/stream` poll interval; production uses `STREAM_POLL_MS`. */
+	streamPollMs?: number;
+	/** `/events/stream` idle close; production uses `STREAM_IDLE_MS`. */
+	streamIdleMs?: number;
+	/** `/events/stream` slow-consumer cap; production uses `STREAM_MAX_BACKLOG_BYTES`. */
+	streamMaxBacklogBytes?: number;
 }
 
 /** Distinct keys one hourly line may hold before the rest are counted as `other`. */
@@ -234,6 +243,45 @@ const INGEST_NEEDS_SURFACE = "docs_ingest needs an authenticated surface; nothin
 const MERGE_TRIGGER_NEEDS_SURFACE = "docs merge-trigger needs an authenticated surface; nothing was refreshed";
 /** The dataset a post-merge hook triggers when the body names none (DOCS-03's own repo row). */
 const MERGE_TRIGGER_DATASET = "agent-substrate";
+
+/** Why an anonymous stream is refused, even on a run that allows anonymous callers. */
+const STREAM_NEEDS_SURFACE = "events stream needs an authenticated surface; nothing was streamed";
+
+/*
+ * The bounds of one `/events/stream` connection. Deliberately constants, not
+ * configuration: a poll interval a config file can crank down is a ledger load it
+ * can silently multiply, and the bounds exist so a stream never costs more than
+ * the polling it replaces. Tests inject smaller values through `HttpServerOptions`.
+ */
+
+/** How often one connection polls the ledger for rows after its cursor. */
+export const STREAM_POLL_MS = 500;
+/** Close a connection that has delivered nothing for this long; the client reconnects with Last-Event-ID and resumes. */
+export const STREAM_IDLE_MS = 5 * 60_000;
+/** Rows one poll may deliver: the ledger is the buffer, so no connection reads past this per tick. */
+export const STREAM_BATCH = 200;
+/** Unflushed bytes past which a slow consumer is cut off instead of buffered without limit. */
+export const STREAM_MAX_BACKLOG_BYTES = 1_000_000;
+
+/**
+ * The refusals a `/events/stream` connection is answered with before anything
+ * opens, in the order they are checked. The 401 is the same door decision
+ * `/docs/merge-trigger` makes: an unauthenticated caller is refused even on a run
+ * that allows anonymous callers, because a stream is a standing read of the whole
+ * trail and no bridge run should hand that to whoever can reach the port. Only
+ * then the loopback check, for the same reason the merge-trigger is loopback-only.
+ * Null when the connection may proceed.
+ */
+export function streamRefusal(
+	surface: Surface | null,
+	remoteAddress: string | undefined,
+): { status: number; error: string } | null {
+	if (surface === null) return { status: 401, error: STREAM_NEEDS_SURFACE };
+	if (!isLoopbackRemote(remoteAddress)) {
+		return { status: 403, error: "events stream is a loopback route; the caller is not loopback" };
+	}
+	return null;
+}
 
 /**
  * Whether the request arrived over the loopback interface.
@@ -453,16 +501,19 @@ export function createHttpServer(
 		};
 		const route = normalizeRoute(url.pathname);
 
-		// Measured from `finish` rather than at each `send` call site: that way every
+		// Measured from `close` rather than at each `send` call site: that way every
 		// exit — a 401 below, a thrown handler, the MCP transport writing its own
-		// response — lands in the histogram with the status the client actually saw.
+		// response, a stream cut off mid-flight for backpressure — lands in the
+		// histogram with the status the client actually saw. `finish` would miss the
+		// last one: a response destroyed before it drained never finishes, and the
+		// exit still happened. `close` always fires, after `end` and after a destroy.
 		const started = performance.now();
 		const span = startRequestSpan(observability, req, route, surface);
-		// Set before the response is finished. `finish` reads both.
+		// Set before the response is finished. `close` reads both.
 		let eventRefusal: EventRefusalReason | null = null;
 		let eventShape: { surface: string; kind: string } = { surface: "none", kind: "none" };
 		const claim = { surface: "none" };
-		res.on("finish", () => {
+		res.on("close", () => {
 			span.setAttribute("http.response.status_code", res.statusCode);
 			if (res.statusCode >= 500) span.fail(`HTTP ${res.statusCode}`);
 			span.end();
@@ -675,6 +726,51 @@ export function createHttpServer(
 				const result = await substrate.queryEvents(body as Parameters<Substrate["queryEvents"]>[0]);
 				// An empty window is a real answer, so 200; 503 is the ledger not answering.
 				sendJson(res, result.error ? 503 : 200, result);
+				return;
+			}
+
+			// U7: the push seam. Every consumer polled the ledger before this — collectors
+			// reconciled on timers — and the stream changes only the transport: the ledger
+			// stays the buffer, each connection keeps its own cursor and one poll timer,
+			// and no emit path ever touches subscriber state, so a broken or vanished
+			// subscriber costs the server a bounded backlog and nothing else.
+			if (req.method === "GET" && url.pathname === "/events/stream") {
+				const refusal = streamRefusal(surface, req.socket.remoteAddress);
+				if (refusal) {
+					sendJson(res, refusal.status, { error: refusal.error });
+					return;
+				}
+				// Last-Event-ID is what an EventSource sends back on reconnect;
+				// `?cursor=` is the same name for a consumer that cannot set headers.
+				const headerId = req.headers["last-event-id"];
+				const requested = (Array.isArray(headerId) ? headerId[0] : headerId) ?? url.searchParams.get("cursor") ?? "";
+				const cursorId = requested.trim().slice(0, 128);
+				// Audited once per connection, under the name `/events/query` is audited
+				// under — the same read, so the trail never grows a second name for one
+				// action. Never per frame.
+				if (!(await auditedRest(res, observability, surface, "events_query", { cursor: cursorId === "" ? null : cursorId }))) {
+					return;
+				}
+				const greptime = substrate.greptime;
+				if (!greptime) {
+					sendJson(res, 503, { error: "GREPTIME_URL is not set; there is no ledger to stream" });
+					return;
+				}
+				try {
+					await openEventStream(res, greptime, cursorId, {
+						pollMs: options.streamPollMs ?? STREAM_POLL_MS,
+						idleMs: options.streamIdleMs ?? STREAM_IDLE_MS,
+						batch: STREAM_BATCH,
+						maxBacklogBytes: options.streamMaxBacklogBytes ?? STREAM_MAX_BACKLOG_BYTES,
+					});
+				} catch (cause) {
+					// Setup failed before the stream opened, so an ordinary error response
+					// is still available — fail-open here means the caller learns the
+					// stream did not open, and a 503 names the ledger, not the caller,
+					// as the thing that failed.
+					if (res.headersSent) throw cause;
+					sendJson(res, 503, { error: redact(String(cause)) });
+				}
 				return;
 			}
 
@@ -1038,6 +1134,161 @@ export function createHttpServer(
 		});
 	}) as typeof server.close;
 	return server;
+}
+
+/**
+ * The body of one stream frame: the same event shape `/events/query` returns for
+ * a read without payload. Mirrors `rowToEvent` in `service.ts` — Greptime hands
+ * back loosely typed rows and epoch millis — and adds no redaction of its own,
+ * because these rows were redacted on the write path, exactly as for every other
+ * read of them. `payload` is not selected, the read path's default.
+ */
+function ledgerEventFrame(row: Record<string, unknown>): string {
+	const text = (value: unknown): string | null => (value === null || value === undefined ? null : String(value));
+	return JSON.stringify({
+		id: String(row.id),
+		ts: new Date(Number(row.ts)).toISOString(),
+		surface: String(row.surface),
+		session_id: text(row.session_id),
+		graph_id: text(row.graph_id),
+		node_id: text(row.node_id),
+		linear_identifier: text(row.linear_identifier),
+		step: row.step === null || row.step === undefined ? null : Number(row.step),
+		repo: text(row.repo),
+		branch: text(row.branch),
+		actor: String(row.actor),
+		kind: String(row.kind),
+		summary: String(row.summary),
+		hash: String(row.hash),
+		prev: text(row.prev),
+	});
+}
+
+/**
+ * Open one Server-Sent Events response: resolve the cursor, then hand the
+ * response to a poll loop that writes one `id:`/`data:` frame per ledger event,
+ * in (ingested_at, id) order, until the client goes away or the stream idles out.
+ *
+ * Everything before the response headers is setup: a failure there throws, and
+ * the route answers an ordinary error — fail-open means the caller learns the
+ * stream did not open, not that it silently got nothing. Once the headers are
+ * written the failure rule inverts: a ledger that will not answer skips its tick
+ * and the connection stays open, because tearing down every consumer on one
+ * blip would make the stream less reliable than the polling it replaces.
+ *
+ * The ledger is the buffer. No fan-out list, no queue beyond the socket's own,
+ * and no shared state an emit path could touch: each connection's whole
+ * footprint is its cursor, one unref'd interval, and whatever it has not yet
+ * flushed.
+ */
+async function openEventStream(
+	res: ServerResponse,
+	greptime: GreptimeClient,
+	cursorId: string,
+	bounds: { pollMs: number; idleMs: number; batch: number; maxBacklogBytes: number },
+): Promise<void> {
+	// Setup. An id the ledger does not know replays nothing: the stream starts
+	// live from the tip, which is also the honest answer for a cursor older than
+	// the ledger's memory — there is nothing behind it left to replay.
+	let cursor: CursorPosition | null = null;
+	if (cursorId !== "") {
+		let resolved: CursorPosition | null;
+		try {
+			resolved = await greptime.cursorPosition(cursorId);
+		} catch (cause) {
+			throw new Error(`the ledger would not resolve the stream cursor: ${redact(String(cause))}`);
+		}
+		cursor = resolved;
+	}
+
+	res.writeHead(200, {
+		"content-type": "text/event-stream; charset=utf-8",
+		"cache-control": "no-cache, no-transform",
+		// The stream *is* the response; when it ends the connection has no further
+		// use, and closing it lets a server shutdown wait on no idle socket.
+		connection: "close",
+	});
+	// A reconnect hint an EventSource honours; custom consumers ignore it.
+	res.write("retry: 5000\n\n");
+
+	let timer: ReturnType<typeof setInterval> | null = null;
+	let closed = false;
+	let polling = false;
+	let lastActivity = Date.now();
+
+	const cleanup = (): void => {
+		if (closed) return;
+		closed = true;
+		if (timer !== null) {
+			clearInterval(timer);
+			timer = null;
+		}
+	};
+	// Both ends of the connection's life — a normal end, a client that vanished,
+	// a socket error — land here, and the timer never outlives any of them.
+	res.on("close", cleanup);
+	res.on("error", cleanup);
+
+	const tick = (): void => {
+		if (closed || polling) return;
+		polling = true;
+		void (async () => {
+			try {
+				// Checked after the read on purpose, not before it: a client that
+				// vanished mid-poll still made its last read, which is what keeps a
+				// leaked timer observable — the disconnect test counts ledger reads,
+				// and a timer nobody cleared would keep counting after the socket
+				// closed.
+				if (res.destroyed || res.writableEnded) return;
+				if (Date.now() - lastActivity >= bounds.idleMs) {
+					// Idle close. The client reconnects with Last-Event-ID and resumes
+					// exactly where this cursor stopped; the ledger held the gap, not
+					// this process.
+					res.end();
+					cleanup();
+					return;
+				}
+				if (cursor === null) {
+					cursor = await greptime.latestPosition();
+					return;
+				}
+				const positions = await greptime.eventIdsAfter(cursor, bounds.batch);
+				if (positions.length === 0) return;
+				const rows = await greptime.eventsByIds(positions.map((position) => position.id));
+				const byId = new Map(rows.map((row) => [String(row.id), row]));
+				for (const position of positions) {
+					const row = byId.get(position.id);
+					// The event row is written before its ingest record, so a position
+					// without a row is not a state storage reaches; if it ever lies,
+					// stop on it and retry the same cursor rather than skip a frame in
+					// silence.
+					if (!row || !Number.isFinite(Number(row.ts))) return;
+					res.write(`id: ${position.id}\ndata: ${ledgerEventFrame(row)}\n\n`);
+					cursor = position;
+					lastActivity = Date.now();
+					// Slow consumer: the unflushed backlog is the memory this one
+					// connection costs the server, and past the cap the connection is
+					// worth less than the memory. Destroying it fires `close`, clears
+					// the timer, and the client replays from its Last-Event-ID.
+					if (res.writableLength > bounds.maxBacklogBytes) {
+						res.destroy();
+						cleanup();
+						return;
+					}
+				}
+			} catch {
+				// A ledger that will not answer is a skipped tick, not a torn-down
+				// stream: the cursor stays put, and the next poll retries it.
+			} finally {
+				polling = false;
+			}
+		})();
+	};
+
+	// Unref'd, like every other timer this server holds: an open stream must not
+	// be the thing keeping a closing process alive.
+	timer = setInterval(tick, bounds.pollMs);
+	timer.unref?.();
 }
 
 /**

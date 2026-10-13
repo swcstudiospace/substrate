@@ -207,5 +207,5 @@ Standalone post-close series on branch `ultrathink/uplift-7` — proposal: [UPLI
 | U2 host VM re-adoption after restart | done | [uplift/03-SUMMARY.md](uplift/03-SUMMARY.md) — host 244 pass, tsc clean, full suite green mod F-01 |
 | U1 sandbox egress allowlist | done | [uplift/04-SUMMARY.md](uplift/04-SUMMARY.md) — host 281 pass, tsc clean, full suite green mod F-01 |
 | U3 signed dispatch handoffs + drift gate | done | [uplift/05-SUMMARY.md](uplift/05-SUMMARY.md) — test:py 293 pass, tsc clean |
-| U6 knowledge freshness automation | pending | — |
-| U7 loopback SSE event stream | pending | — |
+| U6 knowledge freshness automation | done | [uplift/06-SUMMARY.md](uplift/06-SUMMARY.md) — projector+mcp 0 fail, phase-close pass, tsc clean |
+| U7 loopback SSE event stream | done | [uplift/07-SUMMARY.md](uplift/07-SUMMARY.md) — mcp 0 fail, phase-close pass, tsc clean, full suite green mod F-01 |

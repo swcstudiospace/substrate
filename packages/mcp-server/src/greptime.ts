@@ -130,6 +130,16 @@ export interface HourLeaf {
 }
 
 /**
+ * One event's place in the ledger's ingest order: its id and the time of its
+ * first ingest record (D27-10). This is the order a replay follows — not `ts`,
+ * which a collector supplies and a backdated event can set in the past.
+ */
+export interface CursorPosition {
+	id: string;
+	ingestedAt: number;
+}
+
+/**
  * Upper bound on the ids one batched hour-read statement carries.
  *
  * The hour read walks its members in batches so the id list stays small
@@ -823,6 +833,83 @@ export class GreptimeClient {
 				`${where.length > 0 ? ` WHERE ${where.join(" AND ")}` : ""}` +
 				` ORDER BY "ts" ${direction}, "id" ${direction} LIMIT ${queryLimit(query.limit)}`,
 		);
+	}
+
+	/**
+	 * The ingest-order position of one event, from a stream cursor's event id: its
+	 * first ingest record (D27-10). Null when the id names no event — a cursor
+	 * from before a ledger rebuild looks unknown too, and a caller that gets null
+	 * starts live instead of replaying.
+	 */
+	async cursorPosition(eventId: string): Promise<CursorPosition | null> {
+		const rows = await this.sql(
+			`SELECT "event_id", "ingested_at" FROM "event_ingest" WHERE "event_id" = ${this.q(eventId)}
+			 ORDER BY "ingested_at" ASC LIMIT 1`,
+		);
+		const row = rows[0];
+		if (!row) return null;
+		const id = String(row.event_id);
+		const ingestedAt = epochMs(row.ingested_at);
+		if (!Number.isFinite(ingestedAt)) throw new GreptimeError(`ingest record for ${id} has a time that is not a number`);
+		return { id, ingestedAt };
+	}
+
+	/** The newest position — where a stream that sent no cursor starts: live, nothing replayed. */
+	async latestPosition(): Promise<CursorPosition | null> {
+		const rows = await this.sql(
+			`SELECT "event_id", "ingested_at" FROM "event_ingest" ORDER BY "ingested_at" DESC, "event_id" DESC LIMIT 1`,
+		);
+		const row = rows[0];
+		if (!row) return null;
+		const id = String(row.event_id);
+		const ingestedAt = epochMs(row.ingested_at);
+		if (!Number.isFinite(ingestedAt)) throw new GreptimeError(`ingest record for ${id} has a time that is not a number`);
+		return { id, ingestedAt };
+	}
+
+	/**
+	 * Positions strictly after `cursor`, in (ingested_at, event_id) order, capped.
+	 *
+	 * The read window opens at the cursor's own millisecond rather than strictly
+	 * after it, so a duplicate ingest record sitting beside its first record
+	 * collapses against it TypeScript-side — the same first-record rule the hour
+	 * read applies (D27-10), for the same reason: a retried record must not hand a
+	 * stream the same event twice. Bounded from both ends: `limit` positions out,
+	 * and the statement's own LIMIT bounds what one poll scans.
+	 */
+	async eventIdsAfter(cursor: CursorPosition, limit: number): Promise<CursorPosition[]> {
+		const at = this.q(new Date(cursor.ingestedAt).toISOString());
+		const rows = await this.sql(
+			`SELECT "event_id", "ingested_at" FROM "event_ingest" WHERE "ingested_at" >= ${at}
+			 ORDER BY "ingested_at" ASC, "event_id" ASC LIMIT ${queryLimit(limit * 4)}`,
+		);
+		const seen = new Set<string>();
+		const positions: CursorPosition[] = [];
+		for (const row of rows) {
+			const id = String(row.event_id);
+			const ingestedAt = epochMs(row.ingested_at);
+			if (!Number.isFinite(ingestedAt)) throw new GreptimeError(`ingest record for ${id} has a time that is not a number`);
+			if (seen.has(id)) continue;
+			seen.add(id);
+			if (ingestedAt < cursor.ingestedAt || (ingestedAt === cursor.ingestedAt && id <= cursor.id)) continue;
+			positions.push({ id, ingestedAt });
+			if (positions.length >= limit) break;
+		}
+		return positions;
+	}
+
+	/**
+	 * The event rows for ids taken from {@link eventIdsAfter}: every column but
+	 * `payload` unless asked — the same selection `queryEvents` makes — so a
+	 * stream frame and a query row cannot disagree about what an event is.
+	 */
+	async eventsByIds(ids: string[], includePayload = false): Promise<Array<Record<string, unknown>>> {
+		if (ids.length === 0) return [];
+		const columns = (includePayload ? EVENT_COLUMNS : EVENT_COLUMNS.filter((column) => column !== "payload"))
+			.map((column) => `"${column}"`)
+			.join(", ");
+		const list = ids.map((id) => this.q(id)).join(", ");
+		return this.sql(`SELECT ${columns} FROM "agent_events" WHERE "id" IN (${list})`);
 	}
 
 	/**

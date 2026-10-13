@@ -78,5 +78,5 @@
 | U2 | done | host 244 pass · tsc clean · full suite 1 recorded fail | [03-SUMMARY.md](uplift/03-SUMMARY.md) — provider-enumeration reconciliation replaces the D-04 blanket sweep |
 | U1 | done | host 281 pass · tsc clean · full suite 1 recorded fail | [04-SUMMARY.md](uplift/04-SUMMARY.md) — DOCKER-USER allowlist, deny-all default, crash-orphan rule GC; limits recorded |
 | U3 | done | test:py 293 pass · tsc clean | [05-SUMMARY.md](uplift/05-SUMMARY.md) — coord_handoff packets + drift gate; reply shape corrected to ground truth |
-| U6 | pending | — | — |
-| U7 | pending | — | — |
+| U6 | done | projector+mcp 0 fail · phase-close pass · tsc clean · full suite 1 recorded fail | [06-SUMMARY.md](uplift/06-SUMMARY.md) — ff-trigger + loopback merge-trigger route; 22-01 grep gate superseded (recorded); KNOWN_ROUTES registration added |
+| U7 | done | mcp 0 fail · phase-close pass · tsc clean · full suite 1 recorded fail | [07-SUMMARY.md](uplift/07-SUMMARY.md) — SSE at /events/stream; ingest-order cursor, bounded backlog, disconnect-clean timers |
