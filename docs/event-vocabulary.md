@@ -26,12 +26,15 @@ These apply to every source:
   event, `"released"` / `"stolen"` on lease events). New concepts become
   `payload.action` values, never kinds: `skill.propose`, `docs.ingest`,
   `docs.search`, `teachable`, `anchor`, `mirror`, `dispatch`, `approval`,
-  `skills.sync`, `dod`, `doctor`.
+  `skills.sync`, `dod`, `doctor`, `slo.transition`.
 - **`payload.runtime` names a non-agent producer** acting for an agent or for
   the host (`herdr`, `agentos`, `anchor`, `dispatcher`, `skills-sync`,
   `doctor` — the runtime doctor, uplift-3 N1, one `warning` per drift class
   with `payload.class` and `payload.checks[{check, expected, actual}]`; never
-  a value from an env file).
+  a value from an env file; `slo` — the SLO notifier, uplift-3 N2, one
+  `warning` per sustained breach or open breaker and one `note` per sustained
+  recovery, with `payload.objective`, `state`, `observed`, `target`, deduped
+  through the SLO checkpoint so a restart never repeats a transition).
 - **The original type always travels.** Where a source has its own event type
   (herdr's `pane.*`), the exact type is kept in a payload field
   (`payload.herdr_type`), the v1.1 swarm precedent (`payload.swarm_type`). An
@@ -84,6 +87,8 @@ These apply to every source:
 | `anchor.written` | 28 | `note` | `substrate` | `anchor` | `anchor` | — | yes |
 | `anchor.failed` | 28 | `warning` | `substrate` | `anchor` | `anchor` | — | yes |
 | `doctor.drift` | 33 | `warning` | `substrate` | `doctor` | `doctor` | — | yes |
+| `slo.transition` | 33 | `warning` | `substrate` | `slo.transition` | `slo` | — | yes |
+| `slo.recovered` | 33 | `note` | `substrate` | `slo.transition` | `slo` | — | yes |
 | `teachable.accepted` | 29 | `note` | `memory-writer` | `teachable` | — | — | no |
 | `mirror.failed` | 23 | `warning` | `lease-holder` | `mirror` | — | — | no |
 | `lease.release.dod` | 23 | `note` | `lease-holder` | `released` | — | graph repo via placeOf | no |

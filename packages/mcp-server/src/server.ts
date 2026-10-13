@@ -32,7 +32,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { auditMode } from "@substrate/audit";
-import { classifyEventRefusal, evaluateAdmissionSlo, evaluateBurnSlos, loadBurnThresholds, type EventRefusalReason } from "@substrate/observability";
+import { classifyEventRefusal, evaluateAdmissionSlo, loadBurnThresholds, type EventRefusalReason } from "@substrate/observability";
 import {
 	anonymousBridge,
 	isOperator,
@@ -673,12 +673,12 @@ export function createHttpServer(
 				// The quota-burn objectives ride beside the catalogue, never inside it: the
 				// catalogue is exactly SPE-4793's four. Every read both feeds and reads the
 				// rolling-hour ledger, so scrape frequency is the sample rate — the
-				// dispatcher's storm-breaker polls this same array.
-				const burn = evaluateBurnSlos(observability.snapshot());
+				// dispatcher's storm-breaker polls this same array. The ledger is the
+				// observability's own since uplift-3 N2, so a restart restores it.
+				const burn = observability.evaluateBurn();
 				// The per-plane availability objectives ride beside it the same way
 				// (uplift-2 R2): judged over the rolling hour, `unconfigured` for a plane
-				// the deployment does not have, and never folded into `breached`, which
-				// stays the catalogue's own list.
+				// the deployment does not have.
 				const planes = observability.evaluatePlanes(substrate.planesConfigured());
 				// The admission refusal rate (uplift-3 N3) rides beside the catalogue
 				// the same way: one objective, `insufficient-data` under 100 decisions.
@@ -691,16 +691,29 @@ export function createHttpServer(
 				// samples, same shape plus `surface`; empty until a surface qualifies and
 				// never folded into `breached` — the global row is still the catalogue's.
 				const surfaces = observability.evaluateBriefSurfaces();
+				// The capacity runway (uplift-3 N2): one row over the `/healthz` size ring.
+				const capacity = observability.evaluateCapacity();
 				// 200 either way. A breached objective is information, not a broken service,
 				// and a monitor that read this as an outage would page on a slow hour.
+				//
+				// `breached` lists the catalogue's breaches first, then (uplift-3 N2) the
+				// plane and burn ones: the storm-breaker and the runbook read this one
+				// list, and a plane that was unavailable for an hour is as much a breach
+				// as a slow brief. The per-array detail is unchanged beside it.
 				sendJson(res, 200, {
 					results,
-					breached: results.filter((result) => result.status === "breached").map((result) => result.id),
+					breached: [
+						...results.filter((result) => result.status === "breached").map((result) => result.id),
+						...planes.filter((result) => result.status === "breached").map((result) => result.id),
+						...burn.filter((result) => result.status === "breached").map((result) => result.id),
+					],
 					burn,
 					planes,
 					admission: admissionSlo,
 					docs,
 					surfaces,
+					capacity,
+					history: observability.history(),
 				});
 				return;
 			}

@@ -2,13 +2,17 @@ import { describe, expect, test } from "bun:test";
 import { METRIC, SubstrateInstruments } from "./instruments.ts";
 import {
 	ADMISSION_SLO,
+	CAPACITY_RING_MAX,
+	CapacityRing,
 	DEFAULT_THRESHOLDS,
+	INDEX_VOLUME_ENV,
 	PLANE_BUCKET_MS,
 	PLANE_WINDOW_MS,
 	PlaneWindow,
 	breaches,
 	briefBySurfaceObjectives,
 	evaluateAdmissionSlo,
+	evaluateCapacitySlos,
 	docsSearchObjective,
 	evaluateDocsSlos,
 	evaluatePlaneSlos,
@@ -743,5 +747,103 @@ describe("the per-plane availability objectives (uplift-2 R2)", () => {
 		expect(last.samples).toBe(61);
 		expect(last.spanMs).toBe(PLANE_WINDOW_MS);
 		expect(last.total).toBe(3600);
+	});
+});
+
+describe("the capacity runway objective (uplift-3 N2)", () => {
+	const GB = 1_073_741_824;
+	const MB = 1_048_576;
+	const DAY = 24 * 60 * 60 * 1000;
+	const T0 = Date.parse("2026-10-13T00:00:00Z");
+
+	/** `hours` of samples, one every 10 minutes, growing `perDay` bytes a day from `start`. */
+	function ring(hours: number, perDay: number, start = 2 * GB): CapacityRing {
+		const out = new CapacityRing();
+		for (let minute = 0; minute <= hours * 60; minute += 10) {
+			out.record(T0 + minute * 60_000, Math.round(start + (perDay * minute) / (24 * 60)));
+		}
+		return out;
+	}
+
+	test("48 h growing 100 MB/day against a 10 GB volume is (10 GB - current) / 100 MB days", () => {
+		const samples = ring(48, 100 * MB);
+		const [result] = evaluateCapacitySlos(samples, { volumeBytes: 10 * GB });
+		const current = samples.samples().at(-1)!.databaseBytes;
+		expect(result!.id).toBe("capacity.index.runway_days");
+		expect(result!.status).toBe("ok");
+		expect(result!.bytesPerDay).toBeCloseTo(100 * MB, -3);
+		expect(result!.observed).toBeCloseTo((10 * GB - current) / (100 * MB), 1);
+		expect(result!.unit).toBe("days");
+		expect(result!.target).toBe(14);
+		expect(result!.samples).toBe(samples.size);
+		expect(result!.volumeBytes).toBe(10 * GB);
+		expect(result!.currentBytes).toBe(current);
+		expect(result!.detail).toContain("days of runway");
+	});
+
+	test("under 24 h of samples is insufficient-data, whatever the growth", () => {
+		const [result] = evaluateCapacitySlos(ring(23, 100 * GB), { volumeBytes: 10 * GB });
+		expect(result!.status).toBe("insufficient-data");
+		expect(result!.observed).toBeNull();
+		expect(result!.detail).toContain("23.0 h");
+		expect(result!.detail).toContain("24 h apart");
+	});
+
+	test("an unset volume is insufficient-data and names the variable", () => {
+		const [result] = evaluateCapacitySlos(ring(48, 100 * MB), { volumeBytes: null });
+		expect(result!.status).toBe("insufficient-data");
+		expect(result!.detail).toContain(INDEX_VOLUME_ENV);
+		expect(result!.statement).toContain("unset");
+		expect(result!.volumeBytes).toBeNull();
+	});
+
+	test("less runway than the floor is breached; a full volume has none", () => {
+		const [tight] = evaluateCapacitySlos(ring(48, 1 * GB, 2 * GB), { volumeBytes: 10 * GB });
+		expect(tight!.status).toBe("breached");
+		expect(tight!.observed).toBeCloseTo(6, 0);
+		const [full] = evaluateCapacitySlos(ring(48, 1 * MB, 10 * GB), { volumeBytes: 10 * GB });
+		expect(full!.status).toBe("breached");
+		expect(full!.observed).toBe(0);
+		expect(full!.detail).toContain("no runway remains");
+	});
+
+	test("an index that is not growing has an unbounded runway and is ok", () => {
+		const [result] = evaluateCapacitySlos(ring(48, -50 * MB, 5 * GB), { volumeBytes: 10 * GB });
+		expect(result!.status).toBe("ok");
+		expect(result!.observed).toBeNull();
+		expect(result!.bytesPerDay).toBeLessThan(0);
+		expect(result!.detail).toContain("not growing");
+	});
+
+	test("the floor is a threshold", () => {
+		const [result] = evaluateCapacitySlos(ring(48, 100 * MB), { volumeBytes: 10 * GB, targetDays: 1000 });
+		expect(result!.status).toBe("breached");
+		expect(result!.target).toBe(1000);
+	});
+
+	test("one bulk ingest at the end does not set the rate alone", () => {
+		const samples = ring(48, 0, 2 * GB);
+		samples.record(T0 + 48 * 60 * 60_000 + 60_000 * 15, 2 * GB + 500 * MB);
+		const [result] = evaluateCapacitySlos(samples, { volumeBytes: 10 * GB });
+		// First-to-last would say 250 MB/day; the fit over 289 flat samples says far less.
+		expect(result!.bytesPerDay).toBeLessThan(30 * MB);
+	});
+
+	test("the ring dedupes inside a minute, ignores junk and a clock behind it, and is bounded", () => {
+		const samples = new CapacityRing();
+		samples.record(T0, 100);
+		samples.record(T0 + 30_000, 110);
+		expect(samples.samples()).toEqual([{ at: T0 + 30_000, databaseBytes: 110 }]);
+		samples.record(T0 + 90_000, 120);
+		expect(samples.size).toBe(2);
+		samples.record(T0 + 80_000, 999);
+		samples.record(T0 + 200_000, Number.NaN);
+		samples.record(T0 + 200_000, -1);
+		expect(samples.size).toBe(2);
+		for (let i = 0; i < CAPACITY_RING_MAX + 10; i++) samples.record(T0 + 1_000_000 + i * 60_000, i);
+		expect(samples.size).toBe(CAPACITY_RING_MAX);
+		expect(samples.samples()[0]?.databaseBytes).toBe(10);
+		const restored = new CapacityRing(samples.samples());
+		expect(restored.samples()).toEqual(samples.samples());
 	});
 });

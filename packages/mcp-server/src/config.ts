@@ -354,6 +354,52 @@ export interface SubstrateConfig {
 	memoryExpiry: MemoryExpiryMode;
 	/** The unrecognised `SUBSTRATE_MEMORY_EXPIRY` value, for the boot warning; null when the key parsed or was unset. */
 	memoryExpiryRejected: string | null;
+	// uplift-3 N2 — restart-durable SLO history and notifications
+	/**
+	 * Where the SLO checkpoint is written and restored from
+	 * (`SUBSTRATE_SLO_CHECKPOINT`): an absolute path, or `null` when disabled.
+	 * Unset, it is `DEFAULT_SLO_CHECKPOINT_PATH` only when that file's directory
+	 * exists on this host — asked of the `directoryExists` probe `loadConfig` is
+	 * given, which the entry point supplies and tests do not, so a bare
+	 * `loadConfig({})` never reads or writes under `/var/lib`. `off`, `0`, `none`
+	 * or a relative value disable it; the relative one is named at boot by
+	 * `sloConfigWarnings`, since a typo must not land a checkpoint in the repo.
+	 */
+	sloCheckpointPath: string | null;
+	/** The rejected relative `SUBSTRATE_SLO_CHECKPOINT`, for the boot warning; null otherwise. */
+	sloCheckpointRejected: string | null;
+	/** Seconds between checkpoint writes (`SUBSTRATE_SLO_CHECKPOINT_S`, default 60); `0` writes only at shutdown. */
+	sloCheckpointS: number;
+	/**
+	 * The transition notifier (`SUBSTRATE_SLO_NOTIFY=1`, default off): every
+	 * `intervalS` it judges the catalogue, planes, burn, capacity and breakers,
+	 * and a condition held for `sustainS` becomes one `warning` event on the
+	 * ledger (and one POST to `webhookUrl` when set). See `slo-notify.ts`.
+	 */
+	sloNotify: SloNotifySettings;
+}
+
+/** The knobs behind `SUBSTRATE_SLO_NOTIFY*` and `SUBSTRATE_SLO_WEBHOOK_URL` (uplift-3 N2). */
+export interface SloNotifySettings {
+	enabled: boolean;
+	/** Seconds between evaluations (`SUBSTRATE_SLO_NOTIFY_S`, default 60, floor 5). */
+	intervalS: number;
+	/** Seconds a breach or an open breaker must hold before it is announced (`SUBSTRATE_SLO_NOTIFY_SUSTAIN_S`, default 300; 0 announces at once). */
+	sustainS: number;
+	/** `SUBSTRATE_SLO_WEBHOOK_URL`, an `http(s)` URL given the same payload, or `null`. A URL, never a credential, but never printed either. */
+	webhookUrl: string | null;
+}
+
+/** Where the SLO checkpoint lives when `SUBSTRATE_SLO_CHECKPOINT` is unset and the state directory exists. */
+export const DEFAULT_SLO_CHECKPOINT_PATH = "/var/lib/substrate/slo-checkpoint.json";
+
+/**
+ * What `loadConfig` may ask the host. Only the entry point supplies a probe;
+ * everything else gets the fail-safe answer, so no test harness discovers a
+ * state directory on the machine it runs on.
+ */
+export interface ConfigProbes {
+	directoryExists?: (path: string) => boolean;
 }
 
 /** Production defaults: September's library, so the host ledger keeps deduplicating. */
@@ -506,7 +552,7 @@ function isKnownDesktopSurface(value: string): value is Surface {
 	return (SURFACES as readonly string[]).includes(value);
 }
 
-export function loadConfig(env: Record<string, string | undefined> = process.env): SubstrateConfig {
+export function loadConfig(env: Record<string, string | undefined> = process.env, probes: ConfigProbes = {}): SubstrateConfig {
 	const greptimeUrl = env.GREPTIME_URL?.trim();
 	const leaseTtl = Number(env.SUBSTRATE_LEASE_TTL_SECONDS);
 	const tokens = tokenConfig(env);
@@ -614,7 +660,46 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		docsSearchBudgetMs: nonNegativeOr(env.SUBSTRATE_DOCS_SEARCH_BUDGET_MS, 4000),
 		// uplift-3 N4
 		...memoryExpiryFromEnv(env.SUBSTRATE_MEMORY_EXPIRY),
+		// uplift-3 N2
+		...sloCheckpointFromEnv(env.SUBSTRATE_SLO_CHECKPOINT, probes),
+		sloCheckpointS: boundedInt(env.SUBSTRATE_SLO_CHECKPOINT_S, 60, 0, 86_400),
+		sloNotify: {
+			enabled: (env.SUBSTRATE_SLO_NOTIFY?.trim() ?? "") === "1",
+			intervalS: boundedInt(env.SUBSTRATE_SLO_NOTIFY_S, 60, 5, 86_400),
+			sustainS: boundedInt(env.SUBSTRATE_SLO_NOTIFY_SUSTAIN_S, 300, 0, 86_400),
+			webhookUrl: /^https?:\/\//i.test(env.SUBSTRATE_SLO_WEBHOOK_URL?.trim() ?? "") ? env.SUBSTRATE_SLO_WEBHOOK_URL!.trim() : null,
+		},
 	};
+}
+
+/**
+ * uplift-3 N2: the checkpoint path. Unset asks the probe whether the default's
+ * directory exists and uses it only then; an explicit `off`/`0`/`none` disables;
+ * a relative path disables and is carried back for the boot warning, like
+ * `SUBSTRATE_DESKTOP_DIR` — the file must never land in the repo by typo.
+ */
+function sloCheckpointFromEnv(raw: string | undefined, probes: ConfigProbes): Pick<SubstrateConfig, "sloCheckpointPath" | "sloCheckpointRejected"> {
+	const trimmed = raw?.trim() ?? "";
+	if (raw === undefined) {
+		const directory = DEFAULT_SLO_CHECKPOINT_PATH.slice(0, DEFAULT_SLO_CHECKPOINT_PATH.lastIndexOf("/"));
+		return { sloCheckpointPath: probes.directoryExists?.(directory) === true ? DEFAULT_SLO_CHECKPOINT_PATH : null, sloCheckpointRejected: null };
+	}
+	if (trimmed === "" || /^(off|0|none|false|no)$/i.test(trimmed)) return { sloCheckpointPath: null, sloCheckpointRejected: null };
+	if (!trimmed.startsWith("/")) return { sloCheckpointPath: null, sloCheckpointRejected: trimmed };
+	return { sloCheckpointPath: trimmed, sloCheckpointRejected: null };
+}
+
+/**
+ * A relative `SUBSTRATE_SLO_CHECKPOINT`, reported at boot (uplift-3 N2). A
+ * sibling of `memoryExpiryConfigWarnings`; the value is a path, never a
+ * credential, so the warning may quote it.
+ */
+export function sloConfigWarnings(config: SubstrateConfig): string[] {
+	if (config.sloCheckpointRejected === null) return [];
+	return [
+		`SUBSTRATE_SLO_CHECKPOINT=${JSON.stringify(config.sloCheckpointRejected)} is not an absolute path; ` +
+			"the SLO checkpoint is disabled, so every restart starts the SLO history fresh",
+	];
 }
 
 /**
