@@ -145,9 +145,11 @@ function tmpState(): SandboxStateStore {
 /**
  * A full fake daemon for provider-level tests: containers live in a map, every call is
  * recorded, and docker's ordering is modeled truthfully — a created container carries no
- * address until start, the stage-network address appears at start, and the egress address
+ * address until start, the stage-network address appears at start, the egress address
  * (which real docker pairs with the external route and the port publish) appears only at the
- * network connect. No test can pass by reading an address docker would not have assigned yet.
+ * network connect, and the stage-network endpoint disappears at the stage disconnect — a
+ * published sandbox ends connected to EGRESS_NETWORK alone. No test can pass by reading an
+ * address docker would not have assigned yet.
  */
 function daemonDocker(): {
 	docker: DockerClient;
@@ -158,7 +160,7 @@ function daemonDocker(): {
 	const calls: string[] = [];
 	const containers = new Map<
 		string,
-		{ labels: Record<string, string>; running: boolean; stageIp: string; egressIp: string | null }
+		{ labels: Record<string, string>; running: boolean; stageIp: string | null; egressIp: string | null }
 	>();
 	const handle = (id: string) => ({
 		id,
@@ -181,14 +183,14 @@ function daemonDocker(): {
 			const container = containers.get(id);
 			if (!container) throw Object.assign(new Error("No such container"), { statusCode: 404 });
 			// Real docker: the first endpoint's address sits at the top level and the
-			// per-network addresses under Networks; a created-but-unstarted container has none.
-			const networks: Record<string, { IPAddress: string }> = {
-				[SANDBOX_NETWORK]: { IPAddress: container.stageIp },
-			};
+			// per-network addresses under Networks; a created-but-unstarted container has
+			// none, and a disconnected network leaves no Networks entry at all.
+			const networks: Record<string, { IPAddress: string }> = {};
+			if (container.stageIp !== null) networks[SANDBOX_NETWORK] = { IPAddress: container.stageIp };
 			if (container.egressIp !== null) networks[EGRESS_NETWORK] = { IPAddress: container.egressIp };
 			return {
 				Config: { Labels: container.labels },
-				NetworkSettings: { IPAddress: container.egressIp ?? container.stageIp, Networks: networks },
+				NetworkSettings: { IPAddress: container.egressIp ?? container.stageIp ?? "", Networks: networks },
 			};
 		},
 	});
@@ -212,6 +214,19 @@ function daemonDocker(): {
 				calls.push(`connect:${name}:${String(body.Container)}`);
 				const container = containers.get(String(body.Container));
 				if (container) container.egressIp = address; // docker: route and port publish come alive here
+			},
+			// Real docker refuses to disconnect a network the container has no endpoint on,
+			// and the call is recorded only when an endpoint actually goes away.
+			disconnect: async (body: Record<string, unknown>) => {
+				const container = containers.get(String(body.Container));
+				if (!container || (name === SANDBOX_NETWORK ? container.stageIp === null : container.egressIp === null)) {
+					throw Object.assign(new Error(`${String(body.Container)} is not connected to ${name}`), {
+						statusCode: 403,
+					});
+				}
+				calls.push(`disconnect:${name}:${String(body.Container)}`);
+				if (name === SANDBOX_NETWORK) container.stageIp = null; // the stage endpoint is torn off
+				else container.egressIp = null; // the egress endpoint is torn off
 			},
 		}),
 		createNetwork: async () => undefined,
@@ -265,14 +280,16 @@ describe("substrateDocker sandbox state (U2)", () => {
 		const { docker, calls } = daemonDocker();
 		const state = tmpState();
 		const sandboxId = await u2Provider(docker, state).create();
-		// Start-closed: start on the stage network, then the egress connect that opens the route
-		// and binds the port. The rule argv itself is stubbed out here (pinned in U1's suite).
+		// Start-closed: start on the stage network, then the egress connect that opens the
+		// route and binds the port, then the stage disconnect that leaves the egress bridge
+		// as the only route. The rule argv itself is stubbed out here (pinned in U1's suite).
 		expect(calls).toEqual([
 			"getImage:substrate-sandbox:0.1",
 			`create:${sandboxId}`,
 			`start:${sandboxId}`,
 			"list",
 			`connect:${EGRESS_NETWORK}:${sandboxId}`,
+			`disconnect:${SANDBOX_NETWORK}:${sandboxId}`,
 		]);
 		expect(state.list()).toEqual([
 			{
@@ -583,7 +600,8 @@ describe("substrateDocker egress policy (U1)", () => {
 		const sandboxId = await provider.create();
 		// Start-closed, pinned end to end: the container starts on the stage network (no route,
 		// no reachable port), the address is reserved from the daemon, the drop lands for it,
-		// and only the connect opens the outside.
+		// and only the connect opens the outside — whose next act is the stage disconnect, so
+		// the rule-governed egress bridge is the sandbox's only route.
 		expect(calls).toEqual([
 			"getImage:substrate-sandbox:0.1",
 			`create:${sandboxId}`,
@@ -591,15 +609,20 @@ describe("substrateDocker egress policy (U1)", () => {
 			"list",
 			`iptables -I DOCKER-USER 1 -s ${IP} -j DROP`,
 			`connect:${EGRESS_NETWORK}:${sandboxId}`,
+			`disconnect:${SANDBOX_NETWORK}:${sandboxId}`,
 		]);
 		await provider.destroy(sandboxId);
 		expect(calls).toContain(`iptables -D DOCKER-USER -s ${IP} -j DROP`);
 	});
 
 	test("the internal bridge needs no argv: deny-all is docker-native there", async () => {
-		const { provider, calls } = egressRig({ network: "internal" });
+		const { provider, docker, calls } = egressRig({ network: "internal" });
 		const sandboxId = await provider.create();
 		expect(calls).toEqual(["getImage:substrate-sandbox:0.1", `create:${sandboxId}`, `start:${sandboxId}`]);
+		// Deny-all stays as today: no egress attach and no stage disconnect — the stage
+		// network is the sandbox's whole world, closed by docker-native means.
+		const info = await docker.getContainer(sandboxId).inspect();
+		expect(Object.keys(info.NetworkSettings?.Networks ?? {})).toEqual([SANDBOX_NETWORK]);
 		await provider.destroy(sandboxId);
 		expect(calls.some((call) => call.includes("DOCKER-USER"))).toBe(false);
 	});
@@ -626,6 +649,7 @@ describe("substrateDocker egress policy (U1)", () => {
 			`iptables -I DOCKER-USER 3 -s ${IP} -d 104.16.1.1 -p tcp --dport 443 -j ACCEPT`,
 			`iptables -I DOCKER-USER 4 -s ${IP} -j DROP`,
 			`connect:${EGRESS_NETWORK}:${sandboxId}`,
+			`disconnect:${SANDBOX_NETWORK}:${sandboxId}`,
 		]);
 	});
 
@@ -651,6 +675,7 @@ describe("substrateDocker egress policy (U1)", () => {
 			`iptables -I DOCKER-USER 4 -s ${IP} -d 93.184.216.34 -p tcp --dport 443 -j ACCEPT`,
 			`iptables -I DOCKER-USER 5 -s ${IP} -j DROP`,
 			`connect:${EGRESS_NETWORK}:${sandboxId}`,
+			`disconnect:${SANDBOX_NETWORK}:${sandboxId}`,
 		]);
 	});
 
@@ -713,6 +738,64 @@ describe("substrateDocker egress policy (U1)", () => {
 		]);
 		expect(egressAttached()).toBe(false);
 		expect(warnings).toEqual([{ action: "sandbox.egress", reason: expect.stringContaining("cannot attach endpoint") }]);
+	});
+
+	test("a published sandbox leaves the stage network: EGRESS_NETWORK is its only route", async () => {
+		const { provider, docker, calls } = egressRig();
+		const sandboxId = await provider.create();
+		// The attach opens the route; the disconnect closes the stage backdoor. Afterwards the
+		// container answers on the egress bridge alone — the network whose forwarded traffic
+		// the DOCKER-USER rules filter by address — so no peer can reach it around the policy.
+		const connectAt = calls.indexOf(`connect:${EGRESS_NETWORK}:${sandboxId}`);
+		const disconnectAt = calls.indexOf(`disconnect:${SANDBOX_NETWORK}:${sandboxId}`);
+		expect(connectAt).toBeGreaterThan(0);
+		expect(disconnectAt).toBe(connectAt + 1);
+		const info = await docker.getContainer(sandboxId).inspect();
+		expect(Object.keys(info.NetworkSettings?.Networks ?? {})).toEqual([EGRESS_NETWORK]);
+		expect(info.NetworkSettings?.IPAddress).toBe(IP); // the only endpoint left
+	});
+
+	test("a failed stage disconnect refuses the sandbox: rules rolled back, egress detached, container removed, one warning", async () => {
+		const { docker, calls, egressAttached } = daemonDocker();
+		const warnings: WarnEvent[] = [];
+		const failing = {
+			...docker,
+			getNetwork: (name: string) => {
+				const network = docker.getNetwork(name);
+				if (name !== SANDBOX_NETWORK) return network;
+				return {
+					...network,
+					disconnect: async () => {
+						throw new Error("cannot remove endpoint");
+					},
+				};
+			},
+		} satisfies DockerClient;
+		const provider = substrateDocker({
+			graphId: EGRESS_GID,
+			worktree: worktreeFor(EGRESS_GID),
+			network: "published_loopback",
+			docker: failing,
+			runDf: dfAboveFloor,
+			runIptables: (argv) => calls.push(argv.join(" ")),
+			warn: (payload) => warnings.push(payload),
+		});
+		await expect(provider.create()).rejects.toThrow(/cannot remove endpoint/);
+		// Never dual-homed: the standing drop dies, the egress endpoint is torn off before
+		// the container goes, and the refusal is warned exactly once.
+		expect(calls).toEqual([
+			"getImage:substrate-sandbox:0.1",
+			"create:c1",
+			"start:c1",
+			"list",
+			`iptables -I DOCKER-USER 1 -s ${IP} -j DROP`,
+			`connect:${EGRESS_NETWORK}:c1`,
+			`iptables -D DOCKER-USER -s ${IP} -j DROP`,
+			`disconnect:${EGRESS_NETWORK}:c1`,
+			"remove:c1",
+		]);
+		expect(egressAttached()).toBe(false);
+		expect(warnings).toEqual([{ action: "sandbox.egress", reason: expect.stringContaining("cannot remove endpoint") }]);
 	});
 
 	test("an unresolvable allowlist entry refuses before anything is created", async () => {

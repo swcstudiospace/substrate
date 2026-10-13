@@ -476,6 +476,46 @@ describe("routes", () => {
 		}
 	});
 
+	test("POST /docs/merge-trigger creates the missing dataset before the first ingest", async () => {
+		const { greptime, written } = ledger();
+		const fake = new RagflowFake();
+		// A configured plane that does not yet hold the dataset this checkout
+		// ingests into: the ingest reads by name and refuses unknown-dataset, so
+		// the trigger must create it before the first ingest can ever succeed.
+		const kept = fake.datasets.filter((dataset) => dataset.name !== "agent-substrate");
+		fake.datasets.splice(0, fake.datasets.length, ...kept);
+		const restore = patchFetch(fake.fetch);
+		const docs = docsFixture({ "README.md": "The substrate is the only door.", "docs/data-planes.md": "Planes and their readers." });
+		const { post, stop } = await serve(
+			greptime,
+			{ SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
+			{},
+			{ docsIngestBaseDir: docs },
+		);
+		try {
+			const response = await post("/docs/merge-trigger", { commit: "c-merge", content_sha256: "sha-merge" }, { authorization: "Bearer tok-omp" });
+			const body = (await response.json()) as { ok: boolean; version?: { version: string; dataset_id: string }; created?: boolean };
+			expect(response.status).toBe(200);
+			expect(body.ok).toBe(true);
+			expect(body.version?.version).toBe("v1");
+			// The resolve step created the dataset, so the reply says created even
+			// though the refresh's own resolve found it already sitting there.
+			expect(body.created).toBe(true);
+			const created = fake.datasets.find((dataset) => dataset.name === "agent-substrate");
+			expect(created).toBeDefined();
+			expect(body.version?.dataset_id).toBe(created?.id);
+			// The pages moved into the freshly created dataset, and both the
+			// ingest and the refresh recorded their ledger events under its id.
+			expect(uploadsFor(fake, created?.id ?? "")).toHaveLength(2);
+			expect(ingestEvents(written).filter((payload) => "source_urls" in payload)).toHaveLength(1);
+			expect(refreshEvents(written)).toHaveLength(1);
+		} finally {
+			restore();
+			await stop();
+			rmSync(docs, { recursive: true, force: true });
+		}
+	});
+
 	test("POST /docs/merge-trigger answers a dataset it holds no checkout of with a truthful noop", async () => {
 		const { greptime, written } = ledger();
 		const fake = new RagflowFake();
@@ -949,6 +989,41 @@ describe("GET /events/stream", () => {
 			const after = stub.reads.length;
 			await delay(120);
 			expect(stub.reads.length).toBe(after);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("a client that leaves during the start read leaves no timer behind", async () => {
+		const stub = streamLedger([{ id: "e1", ts: BASE, summary: "first" }]);
+		const { get, stop } = await serve(stub, { SUBSTRATE_TOKEN_OMP: "tok-omp" }, {}, { streamPollMs: 10, streamIdleMs: 60_000 });
+		try {
+			// The start read hangs until the test releases it, so the socket can
+			// be torn down while the route is still awaiting the ledger — before
+			// the response ever opens.
+			const { promise: gated, resolve: release } = Promise.withResolvers<void>();
+			let startReads = 0;
+			const ungated = stub.latestPosition;
+			stub.latestPosition = async () => {
+				startReads += 1;
+				await gated;
+				return ungated();
+			};
+			const controller = new AbortController();
+			// No response can open while the start read hangs, so the request can
+			// only end in the abort below; the rejection is expected.
+			const pending = get("/events/stream", { authorization: "Bearer tok-omp" }, controller.signal).catch(() => null);
+			await until(() => startReads >= 1);
+			controller.abort();
+			// Let the disconnect land server-side before setup can resume.
+			await delay(20);
+			release();
+			await pending;
+			// The cleanup listeners sit before the setup reads, so the vanished
+			// socket reaches them and setup returns without starting the poll
+			// interval — no read ever happens, on this tick or any other.
+			await delay(60);
+			expect(stub.reads.length).toBe(0);
 		} finally {
 			await stop();
 		}

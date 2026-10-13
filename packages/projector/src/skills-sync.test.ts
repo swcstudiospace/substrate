@@ -311,6 +311,24 @@ describe("runSync refresh trigger (U6)", () => {
 		}
 	});
 
+	test("an unwritable pending slot is one stderr line and the sync stays green", async () => {
+		const h = harness({ head: OLD, origin: OLD, refresh: "ok", pending: PENDING });
+		// The pending slot is the retry's memory, not the sync's verdict: a
+		// state file the tick cannot write must not fail a sync whose git work
+		// and projection already succeeded.
+		h.ctx.savePendingRefresh = () => {
+			throw new Error("EACCES: permission denied, open '/var/lib/substrate/skills/refresh-pending.json'");
+		};
+		const stderr = captureStderr();
+		try {
+			expect(await runSync(h.ctx)).toEqual({ decision: "current", code: 0 });
+			expect(h.projected()).toBe(1);
+		} finally {
+			stderr.restore();
+		}
+		expect(stderr.lines.join("")).toContain("[skills-sync] refresh-pending write failed");
+	});
+
 	test("a fast-forward supersedes a pending refresh", async () => {
 		const h = harness({ head: OLD, origin: NEW, tree: "tree-new", refresh: "ok", pending: PENDING });
 		expect(await runSync(h.ctx)).toEqual({ decision: "ff", code: 0 });

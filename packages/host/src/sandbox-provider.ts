@@ -6,7 +6,10 @@
 // published_loopback sandbox starts CLOSED: it first runs on the internal bridge only (no
 // external route, no reachable published port), the DOCKER-USER rules go on for its reserved
 // egress address, and only then the egress attach opens the route — traffic never flows a
-// millisecond outside the policy. The token reaches sandboxAgentProvider through getToken(),
+// millisecond outside the policy. The attach is followed at once by the stage disconnect:
+// the internal bridge exists only as the closed start boundary, and a sandbox left attached
+// to both bridges would hand its peers a route around the rules, which filter forwarded
+// traffic by the egress address alone. The token reaches sandboxAgentProvider through getToken(),
 // which SandboxAgent.start calls when no explicit token option is passed — so callers must not
 // pass `token` to sandboxAgentProvider.
 
@@ -63,7 +66,11 @@ type ContainerSummary = { Id: string; Names?: string[]; Labels?: Record<string, 
 export type DockerClient = {
 	createContainer(body: Record<string, unknown>): Promise<DockerContainer>;
 	getContainer(id: string): DockerContainer;
-	getNetwork(name: string): { inspect(): Promise<NetworkInspect>; connect(body: Record<string, unknown>): Promise<unknown> };
+	getNetwork(name: string): {
+		inspect(): Promise<NetworkInspect>;
+		connect(body: Record<string, unknown>): Promise<unknown>;
+		disconnect(body: Record<string, unknown>): Promise<unknown>;
+	};
 	createNetwork(body: Record<string, unknown>): Promise<unknown>;
 	getImage(name: string): { inspect(): Promise<unknown> };
 	pull(name: string): Promise<unknown>;
@@ -512,7 +519,8 @@ export function substrateDocker(opts: SubstrateDockerOptions): SubstrateSandboxP
 			const applied: string[][] = [];
 			if (resolved === null) {
 				// The internal bridge denies everything docker-native (no external route): no
-				// rules compose, no address is needed, no argv runs.
+				// rules compose, no address is needed, no argv runs — and the stage network
+				// stays the sandbox's only one for its whole life, closed by docker itself.
 				try {
 					await container.start();
 				} catch (error) {
@@ -540,10 +548,17 @@ export function substrateDocker(opts: SubstrateDockerOptions): SubstrateSandboxP
 						Container: container.id,
 						EndpointConfig: { IPAMConfig: { IPv4Address: egressIp } },
 					});
+					// The stage network was only the closed start boundary; its job ends with the
+					// attach. Left on both bridges the sandbox is dual-homed: another sandbox
+					// reaches it over the stage network — forwarded traffic the DOCKER-USER rules
+					// never see, since they filter by the egress address. Dropping the stage
+					// endpoint leaves EGRESS_NETWORK as the only route, the one the rules govern.
+					await docker().getNetwork(SANDBOX_NETWORK).disconnect({ Container: container.id });
 				} catch (cause) {
-					// Any failure — start, reservation, a refused rule, the attach — is a refused
-					// sandbox: the rules applied so far are removed, the container (still
-					// routeless on the stage network) is torn down, one warning event is emitted
+					// Any failure — start, reservation, a refused rule, the attach, the stage
+					// disconnect — is a refused sandbox: the rules applied so far are removed,
+					// the egress attach is torn off (best-effort; never leave a dual-homed
+					// sandbox behind), the container is torn down, one warning event is emitted
 					// and the error propagates (fail-closed).
 					for (const argv of applied.splice(0)) {
 						try {
@@ -552,6 +567,10 @@ export function substrateDocker(opts: SubstrateDockerOptions): SubstrateSandboxP
 							// Rollback is best-effort; the refusal below is what fails the start.
 						}
 					}
+					await docker()
+						.getNetwork(EGRESS_NETWORK)
+						.disconnect({ Container: container.id })
+						.catch(() => undefined);
 					await container.remove({ force: true }).catch(() => undefined);
 					refuse(String(cause));
 				}

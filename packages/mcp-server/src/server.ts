@@ -38,7 +38,7 @@ import {
 	type SubstrateConfig,
 } from "./config.ts";
 import { buildAgentCard, isKnownCardSurface } from "./agent-card.ts";
-import { DATASET_TRIGGERS, createVersionStore, latestVersion, refreshDataset } from "./docs-datasets.ts";
+import { DATASET_TRIGGERS, createVersionStore, latestVersion, refreshDataset, resolveDatasets } from "./docs-datasets.ts";
 import { scanIngestPages } from "./docs-ingest.ts";
 import { formatDrift } from "./drift.ts";
 import { InvalidEventError } from "./event.ts";
@@ -1082,6 +1082,22 @@ export function createHttpServer(
 					sendJson(res, 200, { ok: true, dataset, noop: true, reason: "no-configured-ingest-root" });
 					return;
 				}
+				// The guarded ingest reads the plane's dataset by name and refuses
+				// `unknown-dataset`, so on a configured plane without the dataset it
+				// must exist before that ingest runs. Creation is the resolve-by-name
+				// path the refresh already owns — discover first, create only on a
+				// name-miss — run here for the first trigger, whose ingest could not
+				// otherwise ever succeed. Order stays honest: ensure, ingest, and only
+				// then record the version, so a refused ingest still records nothing.
+				const ensured = await resolveDatasets({ config: config.ragflow }, [dataset]);
+				if (!ensured.ok) {
+					// A plane refusal is an outage of the docs plane, not a permission
+					// decision about the caller: 503 with the reason, and the caller
+					// decides on a retry.
+					sendJson(res, 503, { ok: false, reason: ensured.reason });
+					return;
+				}
+				const ensuredDataset = ensured.datasets[0];
 				// The guarded server-side ingest of this checkout's configured roots.
 				const ingested = await substrate.ingestDocs(
 					{
@@ -1103,6 +1119,13 @@ export function createHttpServer(
 					{ config: config.ragflow, versions: docsVersions, emit: (event) => substrate.emit(event), surface },
 					fields,
 				);
+				if (refreshed.ok && ensuredDataset?.created === true) {
+					// The resolve step created the dataset this trigger first needed, so
+					// the reply says so even though the refresh's own resolve found it
+					// sitting there.
+					sendJson(res, 200, { ...refreshed, created: true });
+					return;
+				}
 				// A plane refusal is an outage of the docs plane, not a permission decision
 				// about the caller: 503 with the reason, and the caller decides on a retry.
 				sendJson(res, refreshed.ok ? 200 : 503, refreshed);
@@ -1240,6 +1263,27 @@ async function openEventStream(
 	cursorId: string,
 	bounds: { pollMs: number; idleMs: number; batch: number; maxBacklogBytes: number },
 ): Promise<void> {
+	// The connection-life listeners go on before any await, because the setup
+	// reads below are the first async steps and a cursorless client can vanish
+	// while `latestPosition()` is still pending — before the headers, and
+	// before anything else would notice. Ending the socket during setup has to
+	// leave no timer behind.
+	let timer: ReturnType<typeof setInterval> | null = null;
+	let closed = false;
+
+	const cleanup = (): void => {
+		if (closed) return;
+		closed = true;
+		if (timer !== null) {
+			clearInterval(timer);
+			timer = null;
+		}
+	};
+	// Both ends of the connection's life — a normal end, a client that vanished,
+	// a socket error — land here, and the timer never outlives any of them.
+	res.on("close", cleanup);
+	res.on("error", cleanup);
+
 	// Setup. An id the ledger does not know replays nothing: the stream starts
 	// live from the tip, which is also the honest answer for a cursor older than
 	// the ledger's memory — there is nothing behind it left to replay.
@@ -1267,6 +1311,11 @@ async function openEventStream(
 			throw new Error(`the ledger would not resolve the stream start: ${redact(String(cause))}`);
 		}
 	}
+	// The socket died during those reads: the response has nobody left to open
+	// for, and a setup that went on to write headers and start the interval
+	// would create a timer whose cleanup had already fired. Returning here is
+	// the whole point of the listeners sitting above the setup.
+	if (closed || res.destroyed) return;
 
 	res.writeHead(200, {
 		"content-type": "text/event-stream; charset=utf-8",
@@ -1278,23 +1327,8 @@ async function openEventStream(
 	// A reconnect hint an EventSource honours; custom consumers ignore it.
 	res.write("retry: 5000\n\n");
 
-	let timer: ReturnType<typeof setInterval> | null = null;
-	let closed = false;
 	let polling = false;
 	let lastActivity = Date.now();
-
-	const cleanup = (): void => {
-		if (closed) return;
-		closed = true;
-		if (timer !== null) {
-			clearInterval(timer);
-			timer = null;
-		}
-	};
-	// Both ends of the connection's life — a normal end, a client that vanished,
-	// a socket error — land here, and the timer never outlives any of them.
-	res.on("close", cleanup);
-	res.on("error", cleanup);
 
 	const tick = (): void => {
 		if (closed || polling) return;

@@ -870,32 +870,40 @@ export class GreptimeClient {
 	/**
 	 * Positions strictly after `cursor`, in (ingested_at, event_id) order, capped.
 	 *
-	 * One statement does the whole ordering job, all of it before the LIMIT:
-	 * each event collapses to its earliest ingest record (D27-10, the same
-	 * first-record rule the hour read applies), the collapsed times are cut
-	 * strictly after the cursor's (ingested_at, event_id) boundary, and only
-	 * then is the page capped. Doing any of this TypeScript-side over a
-	 * pre-limited window would freeze or replay a stream: a boundary checked
-	 * after the limit re-reads the same first rows whenever one millisecond
-	 * holds more records than a page, and a `seen` set over the returned
-	 * window alone cannot see that a retry record for an older event hides the
-	 * record the cursor already passed — the retry would re-deliver the event.
-	 * The statement keeps the window open at the cursor's own millisecond for
-	 * that boundary, so a duplicate sitting beside its first record collapses
-	 * against it before the cut, not after. Bounded by `limit` positions.
+	 * One statement does the whole ordering job, and every part of it stays
+	 * inside the window the cursor names: the rows considered are the ingest
+	 * records at or after the cursor's millisecond, and a row's event survives
+	 * only when NO record of that event sits at or before the full
+	 * (ingested_at, event_id) cursor — so a retry record for an older event is
+	 * still excluded, because its original exists at or before the cursor, and
+	 * the boundary check rides along in the same probe. That keeps round 1's
+	 * earliest-record semantics (D27-10): a surviving row's event has all its
+	 * records strictly after the cursor, so its earliest row is its first
+	 * record, and TypeScript keeps one position per event when a first record
+	 * and its retry both survive in one window. The window bound is what keeps
+	 * a poll bounded — round 1 ran a GROUP BY over all of `event_ingest`
+	 * before the cursor filter, rescanning the entire ledger history every
+	 * poll, while the anti-join here is a per-window-row index probe. Order
+	 * still precedes the limit, so paging before cutting cannot freeze or
+	 * replay a stream. Bounded by `limit` positions.
 	 */
 	async eventIdsAfter(cursor: CursorPosition, limit: number): Promise<CursorPosition[]> {
 		const at = this.q(new Date(cursor.ingestedAt).toISOString());
 		const rows = await this.sql(
-			`SELECT f."event_id", f."first_ingested_at" AS "ingested_at" FROM
-				(SELECT "event_id", MIN("ingested_at") AS "first_ingested_at" FROM "event_ingest" GROUP BY "event_id") f
-			 WHERE (f."first_ingested_at" > ${at}) OR (f."first_ingested_at" = ${at} AND f."event_id" > ${this.q(cursor.id)})
-			 ORDER BY f."first_ingested_at" ASC, f."event_id" ASC
+			`SELECT i."event_id", i."ingested_at" FROM "event_ingest" i
+			 WHERE i."ingested_at" >= ${at}
+			   AND NOT EXISTS (
+			     SELECT 1 FROM "event_ingest" p
+			      WHERE p."event_id" = i."event_id"
+			        AND (p."ingested_at" < ${at} OR (p."ingested_at" = ${at} AND p."event_id" <= ${this.q(cursor.id)}))
+			   )
+			 ORDER BY i."ingested_at" ASC, i."event_id" ASC
 			 LIMIT ${queryLimit(limit)}`,
 		);
 		const positions: CursorPosition[] = [];
-		// Two records for one event inside the same millisecond produce two equal
-		// first rows; keep one position per event regardless.
+		// A first record and a retry can both survive one window; keep one
+		// position per event, and the earliest — the statement's order puts the
+		// first record before any later retry of the same event.
 		const seen = new Set<string>();
 		for (const row of rows) {
 			const id = String(row.event_id);

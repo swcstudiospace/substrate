@@ -602,36 +602,43 @@ describe("eventIdsAfter", () => {
 
 	/**
 	 * Answer `eventIdsAfter` from `table` by evaluating exactly the query the
-	 * statement must carry: earliest ingest record per event, strictly after the
-	 * full (ingested_at, event_id) cursor, ordered, then limited. A statement
-	 * that pages before collapsing or before the cursor cut fails the test
-	 * instead of quietly handing back wrong positions.
+	 * statement must carry: rows inside the cursor's window, an event only when
+	 * no record of it sits at or before the full (ingested_at, event_id)
+	 * cursor, ordered, then limited. A statement that rescans history before
+	 * the cursor filter, pages before cutting, or drops the anti-join fails
+	 * the test instead of quietly handing back wrong positions.
 	 */
 	function stubIngestStore(table: FixtureRecord[]): { sql: string[] } {
 		return stubFetch((statement) => {
-			const after = /f\."first_ingested_at" > '([^']+)'/.exec(statement);
-			const boundary = /f\."first_ingested_at" = '([^']+)' AND f\."event_id" > '([^']*)'/.exec(statement);
+			const window = /i\."ingested_at" >= '([^']+)'/.exec(statement);
+			const before = /p\."ingested_at" < '([^']+)'/.exec(statement);
+			const boundary = /p\."ingested_at" = '([^']+)' AND p\."event_id" <= '([^']*)'/.exec(statement);
 			const capped = /LIMIT (\d+)\s*$/.exec(statement);
-			if (!after || !boundary || !capped || after[1] !== boundary[1]) {
+			if (!window || !before || !boundary || !capped || window[1] !== before[1] || window[1] !== boundary[1]) {
 				throw new Error(`statement is not the earliest-records-after-cursor query: ${statement}`);
+			}
+			if (!statement.includes("NOT EXISTS")) {
+				throw new Error(`statement lacks the per-event pre-cursor anti-join: ${statement}`);
 			}
 			if (statement.indexOf("LIMIT") < statement.indexOf("WHERE")) {
 				throw new Error(`statement applies its limit before the cursor boundary: ${statement}`);
 			}
-			const afterMs = Date.parse(after[1]!);
-			if (!Number.isFinite(afterMs)) throw new Error(`cursor bound is not a timestamp: ${after[1]}`);
-			const first = new Map<string, number>();
+			const windowMs = Date.parse(window[1]!);
+			if (!Number.isFinite(windowMs)) throw new Error(`cursor bound is not a timestamp: ${window[1]}`);
+			// An event with any record at or before the full cursor is already
+			// delivered — its window rows (including retries) are all excluded,
+			// which is what keeps a retry from re-delivering its event.
+			const excluded = new Set<string>();
 			for (const record of table) {
-				const held = first.get(record.id);
-				if (held === undefined || record.at < held) first.set(record.id, record.at);
+				if (record.at < windowMs || (record.at === windowMs && record.id <= (boundary[2] ?? ""))) excluded.add(record.id);
 			}
-			const positions = [...first]
-				.filter(([id, at]) => at > afterMs || (at === afterMs && id > (boundary[2] ?? "")))
-				.sort((a, b) => a[1] - b[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+			const positions = table
+				.filter((record) => record.at >= windowMs && !excluded.has(record.id))
+				.sort((a, b) => a.at - b.at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
 				.slice(0, Number(capped[1]));
 			return records(
 				["event_id", "ingested_at"],
-				positions.map(([id, at]) => [id, at]),
+				positions.map((record) => [record.id, record.at]),
 			);
 		});
 	}
@@ -668,15 +675,22 @@ describe("eventIdsAfter", () => {
 		expect(page.map((position) => position.id)).toEqual(Array.from({ length: 100 }, (_, i) => `evt_${String(351 + i).padStart(3, "0")}`));
 	});
 
-	test("the statement collapses earliest records and carries the full cursor before its limit", async () => {
+	test("the statement stays inside the cursor window, carries the full cursor in its anti-join, and limits last", async () => {
 		const { sql } = stubIngestStore([]);
 		await new GreptimeClient(config).eventIdsAfter({ id: "evt_9", ingestedAt: T0 }, 7);
 
 		const statement = sql[0] ?? "";
-		expect(statement).toContain('(SELECT "event_id", MIN("ingested_at") AS "first_ingested_at" FROM "event_ingest" GROUP BY "event_id")');
 		const at = new Date(T0).toISOString();
-		expect(statement).toContain(`(f."first_ingested_at" > '${at}') OR (f."first_ingested_at" = '${at}' AND f."event_id" > 'evt_9')`);
-		expect(statement).toContain('ORDER BY f."first_ingested_at" ASC, f."event_id" ASC');
+		// The window: only records at or after the cursor's millisecond are
+		// considered — no poll rescans the whole history.
+		expect(statement).toContain(`SELECT i."event_id", i."ingested_at" FROM "event_ingest" i`);
+		expect(statement).toContain(`i."ingested_at" >= '${at}'`);
+		// The anti-join carries the full (ingested_at, event_id) cursor, so a
+		// retry record for an event whose first record the cursor already passed
+		// is excluded with its original.
+		expect(statement).toContain("NOT EXISTS");
+		expect(statement).toContain(`p."ingested_at" < '${at}' OR (p."ingested_at" = '${at}' AND p."event_id" <= 'evt_9')`);
+		expect(statement).toContain('ORDER BY i."ingested_at" ASC, i."event_id" ASC');
 		expect(statement.indexOf("LIMIT")).toBeGreaterThan(statement.indexOf("WHERE"));
 		expect(statement.trim().endsWith("LIMIT 7")).toBe(true);
 	});
@@ -684,10 +698,11 @@ describe("eventIdsAfter", () => {
 	test("a record whose time is not a number is named, not skipped", async () => {
 		globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
 			const statement = new URLSearchParams(String(init?.body)).get("sql") ?? "";
-			const after = /f\."first_ingested_at" > '([^']+)'/.exec(statement);
-			const boundary = /f\."first_ingested_at" = '([^']+)' AND f\."event_id" > '([^']*)'/.exec(statement);
+			const window = /i\."ingested_at" >= '([^']+)'/.exec(statement);
+			const before = /p\."ingested_at" < '([^']+)'/.exec(statement);
+			const boundary = /p\."ingested_at" = '([^']+)' AND p\."event_id" <= '([^']*)'/.exec(statement);
 			const capped = /LIMIT (\d+)\s*$/.exec(statement);
-			const rows = after && boundary && capped ? [["evt_bad", null]] : [];
+			const rows = window && before && boundary && capped ? [["evt_bad", null]] : [];
 			return new Response(JSON.stringify(records(["event_id", "ingested_at"], rows)), { status: 200 });
 		}) as unknown as typeof fetch;
 		await expect(new GreptimeClient(config).eventIdsAfter({ id: "", ingestedAt: 0 }, 5)).rejects.toThrow("evt_bad");

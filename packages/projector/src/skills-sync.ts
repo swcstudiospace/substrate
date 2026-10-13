@@ -297,7 +297,17 @@ export async function runSync(ctx: SyncContext): Promise<SyncResult> {
 		const posted = await ctx
 			.notifyRefresh(attempt)
 			.catch((cause: unknown): RefreshPostOutcome => ({ ok: false, reason: String(cause instanceof Error ? cause.message : cause) }));
-		ctx.savePendingRefresh?.(posted.ok ? null : attempt);
+		// The pending slot is the retry's memory, not the sync's verdict: a state
+		// file this tick cannot write is one stderr line, and the tick stays green
+		// over the git sync and projection that did happen. The next tick simply
+		// retries whatever this one could not remember.
+		try {
+			ctx.savePendingRefresh?.(posted.ok ? null : attempt);
+		} catch (cause) {
+			process.stderr.write(
+				`[skills-sync] refresh-pending write failed: ${redact(String(cause instanceof Error ? cause.message : cause)).slice(-OUTPUT_TAIL_CHARS)}\n`,
+			);
+		}
 		// Fire-and-forget: the refresh is the substrate's to lose. One stderr line;
 		// the tick's exit code still says what the sync itself did.
 		if (!posted.ok) {
