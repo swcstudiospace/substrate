@@ -8,6 +8,7 @@ import { SOLANA_CLI_DEFAULT } from "@substrate/ledger";
 import { loadBreakerSettings, type BreakerSettings } from "@substrate/observability";
 import { DEFAULT_INGEST_ROOTS } from "./docs-ingest.ts";
 import { normalizeTtlSeconds } from "./lease.ts";
+import { LEGACY_ENV_KEYS } from "./legacy-env.ts";
 import { LINEAR_API_URL } from "./linear.ts";
 import { parseGrants, type MemoryGrant } from "./memory-policy.ts";
 import { DEFAULT_RECALL_BUDGET_MS } from "./memory-recall.ts";
@@ -973,7 +974,8 @@ function positiveIntOr(raw: string | undefined, fallback: number): number {
 export function hindsightConfigWarnings(config: SubstrateConfig): string[] {
 	const warnings: string[] = [];
 	if (config.hindsightEnv.legacyBankSet) {
-		warnings.push("HINDSIGHT_BANK is set but legacy and unread; recall fans out over HINDSIGHT_BANKS (sub-* names), so set that instead");
+		// The sentence lives in legacy-env.ts so the runtime doctor prints the same one.
+		for (const key of LEGACY_ENV_KEYS) if (key.name === "HINDSIGHT_BANK") warnings.push(key.hint);
 	}
 	if (config.hindsightEnv.urlSet && !config.hindsightEnv.banksSet) {
 		warnings.push("HINDSIGHT_URL is set but HINDSIGHT_BANKS is empty, so recall reads the caller's own bank only; list the sub-* banks to fan out");

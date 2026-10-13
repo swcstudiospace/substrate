@@ -26,9 +26,12 @@ These apply to every source:
   event, `"released"` / `"stolen"` on lease events). New concepts become
   `payload.action` values, never kinds: `skill.propose`, `docs.ingest`,
   `docs.search`, `teachable`, `anchor`, `mirror`, `dispatch`, `approval`,
-  `skills.sync`, `dod`.
+  `skills.sync`, `dod`, `doctor`.
 - **`payload.runtime` names a non-agent producer** acting for an agent or for
-  the host (`herdr`, `agentos`, `anchor`, `dispatcher`, `skills-sync`).
+  the host (`herdr`, `agentos`, `anchor`, `dispatcher`, `skills-sync`,
+  `doctor` — the runtime doctor, uplift-3 N1, one `warning` per drift class
+  with `payload.class` and `payload.checks[{check, expected, actual}]`; never
+  a value from an env file).
 - **The original type always travels.** Where a source has its own event type
   (herdr's `pane.*`), the exact type is kept in a payload field
   (`payload.herdr_type`), the v1.1 swarm precedent (`payload.swarm_type`). An
@@ -80,6 +83,7 @@ These apply to every source:
 | `desktop.action` | 30 | `tool.call` | `caller` | `click`, `type`, `key`, `screenshot` | — | — | no |
 | `anchor.written` | 28 | `note` | `substrate` | `anchor` | `anchor` | — | yes |
 | `anchor.failed` | 28 | `warning` | `substrate` | `anchor` | `anchor` | — | yes |
+| `doctor.drift` | 33 | `warning` | `substrate` | `doctor` | `doctor` | — | yes |
 | `teachable.accepted` | 29 | `note` | `memory-writer` | `teachable` | — | — | no |
 | `mirror.failed` | 23 | `warning` | `lease-holder` | `mirror` | — | — | no |
 | `lease.release.dod` | 23 | `note` | `lease-holder` | `released` | — | graph repo via placeOf | no |

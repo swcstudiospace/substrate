@@ -112,6 +112,38 @@ Only `substrate-*.service` units are checked. `--all` lifts that. `--enabled-sta
 
 On a built release that has no `.git` directory, pass `--release /opt/agent-substrate/current` instead of a commit.
 
+### Runtime doctor
+
+`scripts/doctor-runtime.ts` (`bun run doctor:runtime`) is the other half: it asks the host what is in force and compares that with what this directory declares (uplift-3 N1). It is read-only, calls every command with a fixed argv (no shell), never opens an env file — legacy keys are checked by name through `grep -q '^NAME=.'` exactly as `deploy-release.sh` does — and compares `Environment=` names, never values.
+
+```sh
+bun scripts/doctor-runtime.ts          # table
+bun scripts/doctor-runtime.ts --json   # the same rows as JSON
+```
+
+One row per check, status `ok`, `warn`, `drift` or `unknown`. Exit 0 when nothing drifts, 2 on any drift (`warn` and `unknown` do not fail the run), 1 on a usage error. The checks:
+
+- `units` — for every `substrate-*.service` here that is installed on the host: `Slice`, `MemoryMax`, `TasksMax` from `systemctl show` against the unit file plus its drop-ins, and the `Environment=` names the repo unit declares but the installed unit lacks. A staged unit that is not installed is `unknown`; one of the four release units not installed, or installed but not active, is `drift`.
+- `slice` — `substrate.slice` installed, active and at the declared `MemoryLow`.
+- `redis` — `redis-cli -h 127.0.0.1 config get` for `maxmemory`, `maxmemory-policy`, `save`, `appendonly` against `redis-substrate.conf`, and `redis-server.service`'s `MemoryMax` against `redis-server.service.d/10-substrate-limits.conf`. An unreachable redis is `unknown`, not drift.
+- `timers` — `substrate-anchor.timer`, `substrate-index-sweep.timer`, `substrate-doctor.timer`: installed, enabled, active, last fired within two periods. The anchor timer missing is `drift` (BP-7's hourly root is not scheduled); the two opt-in timers missing are `unknown` and the hint says so.
+- `disk` — `df -Pk /opt/agent-substrate` against `SUBSTRATE_DEPLOY_MIN_FREE_GB` (default 5): below the floor `drift`, below twice the floor `warn`.
+- `swap` — pages swapped in or out between two reads of `/proc/vmstat` one second apart; any paging is `drift` (`SUBSTRATE_DOCTOR_SWAP_PAGES_PER_S` raises the threshold). Occupancy from `/proc/meminfo` is in the hint and is never alone a drift.
+- `env` — `HINDSIGHT_BANK` present in `/etc/substrate/substrate.env` is `drift` with the `HINDSIGHT_BANKS` hint from `config.ts`; the value stays in grep.
+
+**Timer (operator step, disabled by default).** `substrate-doctor.timer` runs `substrate-doctor.service` every six hours (`*-*-* 00/6:23:00 UTC`, `Persistent=true`), a oneshot from the pinned release in `substrate.slice` with `MemoryMax=256M`, loading `/etc/substrate/substrate.env` through `substrate-doctor.service.d/10-environment.conf` like the anchor job. `SuccessExitStatus=2` keeps a drift report from showing as a failed unit. The service runs with `--emit`, which posts one `warning` event per drift class (`units`, `slice`, `redis`, `timers`, `disk`, `swap`, `env`) to `SUBSTRATE_URL/events` as the `substrate` surface with `payload.runtime=doctor` — but only when `SUBSTRATE_DOCTOR_EMIT=1` is set (uncomment the line in the drop-in); otherwise `--emit` prints a hint and posts nothing. The bearer is `SUBSTRATE_TOKEN`, else the shared env's `SUBSTRATE_TOKEN_SUBSTRATE`, else the client resolver's token file or tokens dir for `substrate`; it is never printed. An unchanged drift set is not re-emitted: the last emitted set per class is kept in `SUBSTRATE_DOCTOR_STATE` (`/var/lib/substrate/doctor-last.json`), and a class that clears is forgotten so its next drift is reported again. The brief surfaces `warning` events, which is how a drift reaches the operator.
+
+```sh
+cp infra/vps/substrate-doctor.service infra/vps/substrate-doctor.timer /etc/systemd/system/
+install -d -m 0755 /etc/systemd/system/substrate-doctor.service.d
+install -m 0600 infra/vps/substrate-doctor.service.d/10-environment.conf /etc/systemd/system/substrate-doctor.service.d/10-environment.conf
+systemctl daemon-reload
+systemctl start substrate-doctor.service && journalctl -u substrate-doctor -n 40   # one run, no timer yet
+systemctl enable --now substrate-doctor.timer
+```
+
+Rollback: `systemctl disable --now substrate-doctor.timer`, remove the three files, `daemon-reload`. Nothing else changes; the doctor never writes outside its state file.
+
 ## Code that reaches main through v1.3, not this PR
 
 herdr and muse are on `main` since Phase 19 (LANEB-01 to LANEB-04) and run from the release like the Grok collector. `skills-sync.ts` and `substrate_miner` are still not on `main`.
