@@ -60,4 +60,6 @@ Env only: `SUBSTRATE_LEDGER_CHAIN_CACHE=0` and `SUBSTRATE_LEDGER_WRITE_PROBE_S=0
 
 ## Gates
 
-(filled by orchestrator)
+Final head of `ultrathink/uplift-2` (all seven items merged): `bunx tsc --noEmit` clean · `bun test` **3525 pass / 65 skip / 1 fail** — the 1 fail is the recorded F-01 environment-sensitive guard (`scripts/rehearsal.test.ts` `--port 7410`), failing identically on `main`, recorded not fixed · `bun run check:phase-close` pass (4 lock files green; EVENT_KINDS 12; SURFACES 27) · `bun run test:py` 298 passed. Live smoke on the scratch rehearsal twin (`bun run rehearsal up --name uplift2`, scratch Postgres 16 + GreptimeDB v0.14.4 on loopback, commit `1fe624a`): `bun run rehearsal smoke` 4/4 (brief, emit, register, claim). 
+
+R5 on the twin: `/healthz.ledger` = `{ writable: true, lastProbeOk: true }` with the `substrate_health` probe row visible under `capacity.ledger.tables` (region statistics parsed from the v0.14.4 twin); ledger paused → `eventsWritable: false`, emit refused fast once the breaker opened; after recovery `lastProbeOk: true` again. TTL not set on the twin (`SUBSTRATE_LEDGER_TTL` unset → no ALTER, as designed). Steady-state emit call count: covered by `ledger-chain.test.ts`; production verification pending deploy.

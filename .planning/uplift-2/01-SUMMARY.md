@@ -64,4 +64,6 @@ Modified: `packages/mcp-server/src/brief.ts`, `cache.ts`, `config.ts`, `server.t
 
 ## Gates
 
-(filled by orchestrator)
+Final head of `ultrathink/uplift-2` (all seven items merged): `bunx tsc --noEmit` clean · `bun test` **3525 pass / 65 skip / 1 fail** — the 1 fail is the recorded F-01 environment-sensitive guard (`scripts/rehearsal.test.ts` `--port 7410`), failing identically on `main`, recorded not fixed · `bun run check:phase-close` pass (4 lock files green; EVENT_KINDS 12; SURFACES 27) · `bun run test:py` 298 passed. Live smoke on the scratch rehearsal twin (`bun run rehearsal up --name uplift2`, scratch Postgres 16 + GreptimeDB v0.14.4 on loopback, commit `1fe624a`): `bun run rehearsal smoke` 4/4 (brief, emit, register, claim). 
+
+R1 on the twin: `POST /brief` → `ETag: W/"…"`, `X-Substrate-Brief: complete`, `Cache-Control: no-cache`; the same request with `If-None-Match` → **304, 0 bytes, 8 ms**. With the ledger container paused: `POST /brief` → 200 in **1.206 s** (budget 1200 ms) with `X-Substrate-Brief: degraded` and `X-Substrate-Brief-Failed: recent actions`; after the breaker opened the next briefs answered in **4 ms**. `/healthz` second call within 5 s served the memo (`cachedAt` set, `stale: true`). Snapshot path not exercisable on the twin (its cache is off by design) — covered by `brief-fast-path.test.ts`. Production `brief.p95` / cache hit ratio: post-deploy measurement pending (BASELINES.md rows).

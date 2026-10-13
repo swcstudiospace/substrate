@@ -125,12 +125,14 @@ C8 per-surface rate limiting; C9 `tenant=swc`; C10 tiered memory promotion with 
 
 ## Progress log
 
+Accepted by the operator on 2026-10-13 ("Accept all 7 and implement"). Gates at the final head: tsc clean · `bun test` 3525 pass / 65 skip / 1 fail (recorded F-01) · `check:phase-close` pass · `test:py` 298 pass · rehearsal twin smoke 4/4 + chaos (ledger paused) proving deadline, degraded header, breaker, honest health. Per-item evidence in each `0N-SUMMARY.md` §Gates.
+
 | Item | Status | Gates | Notes |
 |---|---|---|---|
-| R1 | proposed | — | |
-| R2 | proposed | — | |
-| R3 | proposed | — | |
-| R4 | proposed | — | |
-| R5 | proposed | — | |
-| R6 | proposed | — | |
-| R7 | proposed | — | |
+| R1 | done | tsc · suite green mod F-01 · twin: ETag/304 in 8 ms, degraded brief in 1.21 s under a hung ledger | [01-SUMMARY.md](01-SUMMARY.md) — snapshot path unit-tested (twin cache off); production p95 pending deploy |
+| R2 | done | tsc · suite green mod F-01 · twin: breaker open after 5 timeouts, emit 503 in 5 ms, healthz 503, `plane.greptime.availability` breached 63 % | [02-SUMMARY.md](02-SUMMARY.md) — gate threaded via `gatedFetch`, not per-function params |
+| R3 | done | tsc · suite green mod F-01 (outbox/budget/warning tests) | [03-SUMMARY.md](03-SUMMARY.md) — backoff span ≈ 3 h; outbox stats via `retainOutboxStats()` |
+| R4 | done | tsc · suite green mod F-01 · twin: capacity.index live, sweep dry-run deletes nothing | [04-SUMMARY.md](04-SUMMARY.md) — ttl-class entries report-only (reads do not filter on ttl) |
+| R5 | done | tsc · suite green mod F-01 · twin: write probe + capacity.ledger live, eventsWritable flips under outage | [05-SUMMARY.md](05-SUMMARY.md) — TTL rollback is `UNSET 'ttl'`; SSE call site passes positions |
+| R6 | done | tsc · suite green mod F-01 (documented-shape fake) | [06-SUMMARY.md](06-SUMMARY.md) — live RAGFlow shapes still operator-gated; prune off by default |
+| R7 | done | tsc · suite green mod F-01 · twin: `audit:verify` ok | [07-SUMMARY.md](07-SUMMARY.md) — ceilings in unit files; `bun run audit:verify` instead of a CLI subcommand |
