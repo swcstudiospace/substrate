@@ -71,6 +71,16 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=substrate-host
 
+# Resource ceilings (uplift-2 R7). The host's cgroup covers the Node process
+# and the VM/sandbox lifecycle it drives (containers run under docker's own
+# cgroup); 4G is the budget for a few concurrent prompts on a 31 GiB host.
+# substrate-mcp itself peaks at 88 MB RSS (measured 2026-10-13). Lives in
+# substrate.slice (MemoryLow=2G) so reclaim hits co-tenants first.
+# Restart=always above recovers an OOM kill.
+Slice=substrate.slice
+MemoryMax=4G
+TasksMax=1024
+
 # It listens on loopback, talks to substrate-mcp, the engine and the Docker socket (AF_UNIX). Nothing else.
 NoNewPrivileges=true
 PrivateTmp=true

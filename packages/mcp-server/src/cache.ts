@@ -7,22 +7,36 @@
  * drops every key, and generation counters make a write visible without a scan.
  *
  * The client is Bun's `RedisClient` (Bun 1.4). It is constructed on the first
- * command, with an 800 ms connect timeout and the same budget on every command,
- * no offline queue and no reconnect retries, so one request never waits on a
- * second attempt.
+ * command, with a short connect timeout and the same budget on every command
+ * (`SUBSTRATE_CACHE_CONNECT_TIMEOUT_MS` / `SUBSTRATE_CACHE_COMMAND_TIMEOUT_MS`,
+ * 250 ms each for the loopback redis production runs), no offline queue and no
+ * reconnect retries, so one request never waits on a second attempt. A failed
+ * connect also starts a `CACHE_CONNECT_COOLDOWN_MS` cooldown during which every
+ * command is refused before any socket is touched. Each command goes through the
+ * cache's plane gate (uplift-2 R2) *together with the connect it needed*, so the
+ * breaker sees exactly one outcome per request and a dead Dragonfly costs one
+ * timeout, not one per request.
+ *
+ * One class is generation-free: `brief-snapshot` holds the last *complete*
+ * brief per surface and arguments (uplift-2 R1), read only when the live
+ * compose came back degraded. It is still a cache — a restart drops it and the
+ * brief composes as before.
  */
 import { createHash } from "node:crypto";
 import { RedisClient } from "bun";
+import { callPlane, type PlaneGate } from "@substrate/observability";
 import type { SubstrateConfig } from "./config.ts";
 import { REDACTED, redact } from "./redact.ts";
 
 export const CACHE_PREFIX = "substrate:v1";
 
-/** Seconds. Brief 5 min, memory search 10 min, graph view 1 min. */
+/** Seconds. Brief 5 min, memory search 10 min, graph view 1 min, last-good brief 1 h, docs search 5 min. */
 export const CACHE_TTL = {
 	brief: 300,
 	"memory-search": 600,
 	"graph-view": 60,
+	"brief-snapshot": 3600,
+	"docs-search": 300,
 } as const;
 
 export type CacheClass = keyof typeof CACHE_TTL;
@@ -37,6 +51,13 @@ export const GRAPHS_GENERATION_KEY = `${CACHE_PREFIX}:gen:graphs`;
 export function graphGenerationKey(graphId: string): string {
 	return `${CACHE_PREFIX}:gen:graph:${graphId}`;
 }
+
+/**
+ * Bumped by every successful docs ingest and every recorded dataset version
+ * (uplift-2 R6), so a refresh invalidates every cached `docs_search` answer
+ * at once; the pins are also part of the key.
+ */
+export const DOCS_GENERATION_KEY = `${CACHE_PREFIX}:gen:docs`;
 
 /**
  * Soonest future timestamp, in epoch ms. A cached answer must not outlive the
@@ -61,6 +82,8 @@ export interface CacheHealth {
 	misses: number;
 	bypasses: number;
 	errors: number;
+	/** Epoch ms until which a failed connect is not retried; null when not cooling down. */
+	cooldownUntil: number | null;
 	/** Why the cache is off despite a URL being set — a DOCS-06 refusal. Absent otherwise. */
 	reason?: string;
 }
@@ -70,11 +93,15 @@ export interface CacheSample {
 	mode: CacheMode;
 }
 
-/** The three commands the cache uses. Tests pass a fake; production uses Bun. */
+/** The commands the cache uses. Tests pass a fake; production uses Bun. */
 export interface CacheRedis {
 	get(key: string): Promise<string | null>;
 	set(key: string, value: string, ttlSeconds: number): Promise<void>;
 	incr(key: string): Promise<number>;
+	/** One round trip for several keys. A fake without it is read with concurrent GETs. */
+	mget?(keys: readonly string[]): Promise<Array<string | null>>;
+	/** When the client is refusing to reconnect, epoch ms; absent or null otherwise. */
+	cooldownUntil?(): number | null;
 }
 
 export interface ReadThroughOptions {
@@ -89,13 +116,22 @@ export interface ReadThroughOptions {
 }
 
 /**
- * A request waits at most this long for one command, connect included. The
- * budget clears the tailnet hop to the Railway Dragonfly (measured 180-310 ms
- * RTT) while keeping a single command well inside the 1.5 s brief budget the
- * caller aborts at.
+ * A request waits at most this long for one command, connect included.
+ * Production's cache is a loopback redis (sub-millisecond), so 250 ms is
+ * generous: it only ever matters when the server is wedged, and then a brief
+ * must not spend its budget waiting on a cache it can do without. The old
+ * 800 ms was sized for a tailnet hop to the Railway Dragonfly that production
+ * no longer uses. Both are overridable (`ReadThroughOptions.commandTimeoutMs`,
+ * `BunRedisOptions.connectTimeoutMs`; env in `config.ts`).
  */
-export const COMMAND_TIMEOUT_MS = 800;
-export const CONNECT_TIMEOUT_MS = 800;
+export const COMMAND_TIMEOUT_MS = 250;
+export const CONNECT_TIMEOUT_MS = 250;
+/**
+ * After a failed connect, how long `open()` refuses before trying the socket
+ * again. Without it every request during an outage paid the full connect
+ * timeout; with it only the first does, and the rest bypass in microseconds.
+ */
+export const CACHE_CONNECT_COOLDOWN_MS = 5_000;
 const LOG_INTERVAL_MS = 60_000;
 
 /**
@@ -130,10 +166,50 @@ export function cacheKey(klass: CacheClass, surface: string, generation: string,
 	return `${CACHE_PREFIX}:${klass}:${hash}`;
 }
 
-function bunRedis(url: string): CacheRedis {
+/**
+ * The generation-free key a snapshot lives under: `substrate:v1:<class>:<sha256(surface, args)>`.
+ * No generation on purpose — a snapshot is the last good answer for these
+ * arguments whatever has been written since, and it is read only when the
+ * live answer is degraded.
+ */
+export function snapshotKey(klass: CacheClass, surface: string, args: unknown): string {
+	const hash = createHash("sha256").update(canonical({ surface, args })).digest("hex");
+	return `${CACHE_PREFIX}:${klass}:${hash}`;
+}
+
+export interface BunRedisOptions {
+	gate?: PlaneGate | null;
+	now?: () => number;
+	cooldownMs?: number;
+	connectTimeoutMs?: number;
+	/** The deadline every command races inside the plane gate; `COMMAND_TIMEOUT_MS` by default. */
+	commandTimeoutMs?: number;
+}
+
+/**
+ * `run`'s answer, or an error named `TimeoutError` once `ms` has passed. Named
+ * so `callPlane` observes it as a timeout, not as a generic error.
+ */
+function deadline<T>(run: Promise<T>, ms: number, what: string): Promise<T> {
+	const { promise, resolve, reject } = Promise.withResolvers<T>();
+	const timer = setTimeout(() => {
+		const error = new Error(`cache ${what} timed out after ${ms} ms`);
+		error.name = "TimeoutError";
+		reject(error);
+	}, ms);
+	timer.unref?.();
+	run.then(resolve, reject).finally(() => clearTimeout(timer));
+	return promise;
+}
+
+/** Bun's client behind the three commands; exported for the socket-level tests only. */
+export function bunRedis(url: string, options: BunRedisOptions = {}): CacheRedis {
+	const gate = options.gate ?? null;
+	const now = options.now ?? Date.now;
+	const cooldownMs = options.cooldownMs ?? CACHE_CONNECT_COOLDOWN_MS;
 	let client: RedisClient | null = null;
 	let opening: Promise<RedisClient> | null = null;
-
+	let cooldownUntil: number | null = null;
 	const discard = (redis: RedisClient): void => {
 		if (client !== redis) return;
 		client = null;
@@ -148,12 +224,13 @@ function bunRedis(url: string): CacheRedis {
 	const open = (): Promise<RedisClient> => {
 		if (client?.connected) return Promise.resolve(client);
 		if (opening) return opening;
+		cooldownUntil = null;
 		// Built on the first command. `enableOfflineQueue: false` rejects a
 		// command sent before connect, so connect finishes first. A failure
-		// drops this client; the next request opens a new one. That is not a
-		// retry of the request that just failed.
+		// drops this client and starts the cooldown; the next request after
+		// it opens a new one. That is not a retry of the request that just failed.
 		const next = new RedisClient(url, {
-			connectionTimeout: CONNECT_TIMEOUT_MS,
+			connectionTimeout: options.connectTimeoutMs ?? CONNECT_TIMEOUT_MS,
 			idleTimeout: 0,
 			autoReconnect: false,
 			maxRetries: 0,
@@ -164,6 +241,7 @@ function bunRedis(url: string): CacheRedis {
 			() => next,
 			(cause: unknown) => {
 				discard(next);
+				cooldownUntil = now() + cooldownMs;
 				throw cause;
 			},
 		);
@@ -174,27 +252,57 @@ function bunRedis(url: string): CacheRedis {
 		return settled;
 	};
 
-	const run = async <T>(op: (redis: RedisClient) => Promise<T>): Promise<T> => {
-		const redis = await open();
-		try {
-			return await op(redis);
-		} catch (cause) {
-			discard(redis);
-			throw cause;
+	const commandTimeoutMs = options.commandTimeoutMs ?? COMMAND_TIMEOUT_MS;
+	// The deadline lives inside the gated operation (Greptile round 1): a
+	// connected server that stops replying used to leave the command pending
+	// past the outer `attempt()` budget, so the breaker saw nothing and the
+	// wedged connection was kept for the next request to time out on again. Now
+	// the gate records the timeout and the connection is discarded, so the next
+	// call reconnects — subject to the connect cooldown.
+	//
+	// The connect is part of the same gated operation (Greptile round 2). When
+	// it was gated on its own, a server that accepted connections but never
+	// answered commands never opened the breaker: each timeout discarded the
+	// connection, and the next request's successful reconnect was a breaker
+	// success that reset the count before its command timed out. Now a request
+	// is one outcome — a failed connect still charges the breaker, a successful
+	// one on its own never clears it — and an open breaker refuses before any
+	// socket is opened, so no cooldown starts from a refusal.
+	const run = <T>(op: "get" | "mget" | "set" | "incr", command: (redis: RedisClient) => Promise<T>): Promise<T> => {
+		// The cooldown is checked outside the gate: a refusal is not a plane outcome.
+		if (cooldownUntil !== null && now() < cooldownUntil) {
+			return Promise.reject(new Error(`cache connect cooling down for ${Math.ceil((cooldownUntil - now()) / 1000)} s`));
 		}
+		return callPlane(gate, op, async () => {
+			const redis = await open();
+			try {
+				return await deadline(command(redis), commandTimeoutMs, op);
+			} catch (cause) {
+				discard(redis);
+				throw cause;
+			}
+		});
 	};
 
 	return {
-		get: (key) => run((redis) => redis.get(key)),
-		set: (key, value, ttlSeconds) => run((redis) => redis.set(key, value, "EX", ttlSeconds).then(() => undefined)),
-		incr: (key) => run((redis) => redis.incr(key)),
+		get: (key) => run("get", (redis) => redis.get(key)),
+		mget: (keys) => run("mget", (redis) => redis.mget(...keys)),
+		set: (key, value, ttlSeconds) => run("set", (redis) => redis.set(key, value, "EX", ttlSeconds).then(() => undefined)),
+		incr: (key) => run("incr", (redis) => redis.incr(key)),
+		cooldownUntil: () => (cooldownUntil !== null && now() < cooldownUntil ? cooldownUntil : null),
 	};
 }
 
-export function createReadThroughCache(
-	config: SubstrateConfig,
-	record?: (sample: CacheSample) => void,
-): ReadThroughCache {
+export interface CreateCacheOptions {
+	record?: (sample: CacheSample) => void;
+	/** The cache's plane gate (uplift-2 R2); null runs every command unwrapped. */
+	gate?: PlaneGate | null;
+	/** Clock for the connect cooldown; tests move it. */
+	now?: () => number;
+}
+
+export function createReadThroughCache(config: SubstrateConfig, options: CreateCacheOptions = {}): ReadThroughCache {
+	const { record } = options;
 	if (config.dragonflyRefused) {
 		process.stderr.write(`[substrate] cache off: ${config.dragonflyRefused}\n`);
 		return new ReadThroughCache({ redis: null, enabled: false, record, refusedReason: config.dragonflyRefused });
@@ -202,7 +310,18 @@ export function createReadThroughCache(
 	if (!config.cacheEnabled || !config.dragonflyUrl) {
 		return new ReadThroughCache({ redis: null, enabled: false, record });
 	}
-	return new ReadThroughCache({ redis: bunRedis(config.dragonflyUrl), enabled: true, record });
+	return new ReadThroughCache({
+		redis: bunRedis(config.dragonflyUrl, {
+			gate: options.gate,
+			now: options.now,
+			connectTimeoutMs: config.cacheConnectTimeoutMs,
+			commandTimeoutMs: config.cacheCommandTimeoutMs,
+		}),
+		enabled: true,
+		record,
+		now: options.now,
+		commandTimeoutMs: config.cacheCommandTimeoutMs,
+	});
 }
 
 /**
@@ -245,6 +364,7 @@ export class ReadThroughCache {
 			misses: this.misses,
 			bypasses: this.bypasses,
 			errors: this.errors,
+			cooldownUntil: this.redis?.cooldownUntil?.() ?? null,
 			...(this.refusedReason !== undefined ? { reason: this.refusedReason } : {}),
 		};
 	}
@@ -279,12 +399,8 @@ export class ReadThroughCache {
 		const redis = this.redis;
 		let generation: string;
 		try {
-			const parts: string[] = [];
-			for (const key of request.generations) {
-				const value = await this.attempt(() => redis.get(key));
-				parts.push(value ?? "0");
-			}
-			generation = parts.join(":");
+			const values = await this.attempt(() => readAll(redis, request.generations));
+			generation = values.map((value) => value ?? "0").join(":");
 		} catch (cause) {
 			this.fail(cause, true);
 			return request.load();
@@ -362,6 +478,61 @@ export class ReadThroughCache {
 		}
 	}
 
+	/**
+	 * Read a generation-free entry (uplift-2 R1 snapshots). Null when the cache
+	 * is off, the key is absent, the value fails the class shape or the command
+	 * errors; the caller treats every null the same way.
+	 */
+	async peek<T>(klass: CacheClass, surface: string, args: unknown): Promise<T | null> {
+		// Not a counted bypass: the brief this read belongs to already counted one.
+		if (!this.enabled || !this.redis) return null;
+		const redis = this.redis;
+		try {
+			const raw = await this.attempt(() => redis.get(snapshotKey(klass, surface, args)));
+			this.noteConnected();
+			if (raw === null) {
+				this.count("miss");
+				return null;
+			}
+			const parsed = parseEnvelope<T>(raw, klass);
+			if (!parsed.ok) {
+				this.count("error");
+				this.note("malformed cache value");
+				return null;
+			}
+			this.count("hit");
+			return parsed.value;
+		} catch (cause) {
+			this.fail(cause, true);
+			return null;
+		}
+	}
+
+	/**
+	 * Write a generation-free entry with its own TTL. `ttlSeconds` ≤ 0 writes
+	 * nothing — that is how `SUBSTRATE_BRIEF_SNAPSHOT_TTL_S=0` switches the
+	 * feature off. Never throws; the caller already has its answer.
+	 */
+	async put(klass: CacheClass, surface: string, args: unknown, value: unknown, ttlSeconds: number): Promise<boolean> {
+		if (!this.enabled || !this.redis || ttlSeconds <= 0 || !shapeOk(klass, value)) return false;
+		const redis = this.redis;
+		let encoded: string;
+		try {
+			encoded = JSON.stringify({ v: value });
+		} catch {
+			this.count("error");
+			return false;
+		}
+		try {
+			await this.attempt(() => redis.set(snapshotKey(klass, surface, args), encoded, Math.floor(ttlSeconds)));
+			this.noteConnected();
+			return true;
+		} catch (cause) {
+			this.fail(cause, false);
+			return false;
+		}
+	}
+
 	private mode(): CacheMode {
 		if (!this.enabled) return "off";
 		return this.degraded || this.staleGenerations.size > 0 ? "degraded" : "on";
@@ -424,6 +595,17 @@ export class ReadThroughCache {
 	}
 }
 
+/**
+ * Every generation key in one round trip. Bun's client has `MGET`; a fake or
+ * an older client without it is read with concurrent GETs, which is the same
+ * wall time on loopback and still one `attempt()` budget.
+ */
+function readAll(redis: CacheRedis, keys: readonly string[]): Promise<Array<string | null>> {
+	if (keys.length === 0) return Promise.resolve([]);
+	if (redis.mget) return redis.mget(keys);
+	return Promise.all(keys.map((key) => redis.get(key)));
+}
+
 /** Drop any Redis URL before redaction. `redis://:password@host` has no user, so the password rule does not match it. */
 function stripRedisUrl(text: string): string {
 	return text.replace(/\b(?:redis|rediss):\/\/\S+/gi, `redis://${REDACTED}`);
@@ -440,6 +622,16 @@ function cacheTtl(klass: CacheClass, refreshAt: number | null, now: number): num
 
 function shapeOk(klass: CacheClass, value: unknown): boolean {
 	if (klass === "brief") return typeof value === "string";
+	if (klass === "brief-snapshot") {
+		if (!value || typeof value !== "object") return false;
+		const snapshot = value as { text?: unknown; at?: unknown };
+		return typeof snapshot.text === "string" && typeof snapshot.at === "string";
+	}
+	if (klass === "docs-search") {
+		if (!value || typeof value !== "object") return false;
+		const reply = value as { chunks?: unknown; untrusted?: unknown };
+		return Array.isArray(reply.chunks) && typeof reply.untrusted === "string";
+	}
 	if (klass === "memory-search") {
 		if (Array.isArray(value)) return true;
 		if (!value || typeof value !== "object") return false;

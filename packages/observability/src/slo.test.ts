@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { METRIC, SubstrateInstruments } from "./instruments.ts";
-import { DEFAULT_THRESHOLDS, breaches, evaluateSlos, sloCatalogue } from "./slo.ts";
+import { DEFAULT_THRESHOLDS, PLANE_BUCKET_MS, PLANE_WINDOW_MS, PlaneWindow, breaches, evaluatePlaneSlos, evaluateSlos, sloCatalogue, type PlaneSloResult } from "./slo.ts";
 import { BURN_MIN_SPAN_MS, BURN_WINDOW_MS, type BurnResult, BurnLedger, evaluateBurnSlos, loadBurnThresholds } from "./burn.ts";
 
 function slo(results: ReturnType<typeof evaluateSlos>, id: string) {
@@ -428,5 +428,170 @@ describe("the quota-burn objectives (SPE-10477)", () => {
 		expect(reading.samples).toBe(480); // the cap: 480 distinct seconds
 		expect(reading.spanMs).toBeGreaterThanOrEqual(BURN_MIN_SPAN_MS);
 		expect(reading.perHour).not.toBe(null);
+	});
+});
+
+describe("the per-plane availability objectives (uplift-2 R2)", () => {
+	const ALL = { greptime: true, index: true, cache: true, hindsight: true, ragflow: true };
+
+	/** `n` plane calls on `plane`, `bad` of them failed. */
+	function calls(instruments: SubstrateInstruments, plane: "greptime" | "index" | "cache" | "hindsight" | "ragflow", n: number, bad = 0) {
+		for (let i = 0; i < n; i++) {
+			const outcome = i < bad ? (i % 3 === 0 ? "timeout" : i % 3 === 1 ? "error" : "open") : "ok";
+			instruments.recordPlane({ plane, op: "op", outcome, durationMs: 10, ...(outcome === "ok" ? {} : { reason: "x" }) });
+		}
+	}
+
+	function plane(results: PlaneSloResult[], id: string): PlaneSloResult {
+		const found = results.find((result) => result.id === id);
+		if (!found) throw new Error(`no plane objective ${id}`);
+		return found;
+	}
+
+	test("names one objective per plane, in the catalogue's shape, and never breaches an unconfigured plane", () => {
+		const results = evaluatePlaneSlos([], { configured: { greptime: true }, window: new PlaneWindow(), now: 0 });
+		expect(results.map((result) => result.id)).toEqual([
+			"plane.greptime.availability",
+			"plane.index.availability",
+			"plane.cache.availability",
+			"plane.hindsight.availability",
+			"plane.ragflow.availability",
+		]);
+		expect(plane(results, "plane.index.availability")).toMatchObject({ status: "unconfigured", observed: null, samples: 0, unit: "ratio", target: 0.99 });
+		expect(plane(results, "plane.index.availability").detail).toContain("not configured");
+		expect(plane(results, "plane.greptime.availability").status).toBe("insufficient-data");
+		expect(plane(results, "plane.greptime.availability").statement).toContain("substrate.plane.duration{plane=greptime} >= 99.00 %");
+	});
+
+	test("one reading judges nothing; two readings judge the calls between them", () => {
+		const instruments = new SubstrateInstruments();
+		const window = new PlaneWindow();
+		calls(instruments, "greptime", 50);
+		const first = plane(evaluatePlaneSlos(instruments.snapshot(), { configured: ALL, window, now: 0 }), "plane.greptime.availability");
+		expect(first.status).toBe("insufficient-data");
+		expect(first.samples).toBe(0);
+		calls(instruments, "greptime", 40);
+		const second = plane(evaluatePlaneSlos(instruments.snapshot(), { configured: ALL, window, now: 30_000 }), "plane.greptime.availability");
+		expect(second).toMatchObject({ status: "ok", observed: 1, samples: 40 });
+		expect(second.detail).toContain("40 of 40 calls ok");
+	});
+
+	test("breached when more than 1 % of the window's calls did not get an answer, counting open-breaker refusals", () => {
+		const instruments = new SubstrateInstruments();
+		const window = new PlaneWindow();
+		evaluatePlaneSlos(instruments.snapshot(), { configured: ALL, window, now: 0 });
+		calls(instruments, "hindsight", 100, 3);
+		const result = plane(evaluatePlaneSlos(instruments.snapshot(), { configured: ALL, window, now: 60_000 }), "plane.hindsight.availability");
+		expect(result).toMatchObject({ status: "breached", observed: 0.97, samples: 100 });
+		expect(result.detail).toContain("97 of 100 calls ok");
+		// The ragflow plane is untouched: enough readings, no calls.
+		expect(plane(evaluatePlaneSlos(instruments.snapshot(), { configured: ALL, window, now: 61_000 }), "plane.ragflow.availability").status).toBe(
+			"insufficient-data",
+		);
+	});
+
+	test("an operator's threshold and minimum sample count apply", () => {
+		const instruments = new SubstrateInstruments();
+		const window = new PlaneWindow();
+		evaluatePlaneSlos(instruments.snapshot(), { configured: ALL, window, now: 0 });
+		calls(instruments, "index", 10, 1);
+		const strict = plane(
+			evaluatePlaneSlos(instruments.snapshot(), { configured: ALL, window, now: 1000, target: 0.95, minSamples: 5 }),
+			"plane.index.availability",
+		);
+		expect(strict).toMatchObject({ status: "breached", target: 0.95, samples: 10 });
+		const lax = plane(
+			evaluatePlaneSlos(instruments.snapshot(), { configured: ALL, window, now: 2000, target: 0.9, minSamples: 5 }),
+			"plane.index.availability",
+		);
+		expect(lax.status).toBe("ok");
+		expect(DEFAULT_THRESHOLDS.planeAvailability).toBe(0.99);
+	});
+
+	test("the window rolls: calls older than an hour drop out, and a restart starts the history over", () => {
+		const instruments = new SubstrateInstruments();
+		const window = new PlaneWindow();
+		evaluatePlaneSlos(instruments.snapshot(), { configured: ALL, window, now: 0 });
+		calls(instruments, "cache", 100, 50);
+		evaluatePlaneSlos(instruments.snapshot(), { configured: ALL, window, now: 60_000 });
+		calls(instruments, "cache", 100);
+		// Two readings inside the hour still see the bad minute.
+		expect(plane(evaluatePlaneSlos(instruments.snapshot(), { configured: ALL, window, now: 120_000 }), "plane.cache.availability").status).toBe("breached");
+		// An hour past the first reading, the base moves to the second and the bad minute is gone.
+		calls(instruments, "cache", 100);
+		const later = plane(
+			evaluatePlaneSlos(instruments.snapshot(), { configured: ALL, window, now: PLANE_WINDOW_MS + 1 }),
+			"plane.cache.availability",
+		);
+		expect(later.status).toBe("ok");
+		expect(later.samples).toBe(200);
+		// A fresh registry (restart) reads lower than the last sample: history dropped, nothing judged.
+		const fresh = new SubstrateInstruments();
+		calls(fresh, "cache", 5);
+		expect(plane(evaluatePlaneSlos(fresh.snapshot(), { configured: ALL, window, now: PLANE_WINDOW_MS + 2000 }), "plane.cache.availability").status).toBe(
+			"insufficient-data",
+		);
+	});
+
+	test("same-bucket readings coalesce, so a fast poller does not fill the ring", () => {
+		// A bucket keeps its first reading as the baseline and its newest as the
+		// head; the answer is head − baseline of the oldest kept bucket. With 1 s
+		// buckets here: the 500 ms reading joins the 0 ms bucket (baseline stays
+		// 1/1), the 1600 ms reading replaces the 1500 ms head: ok 3−1, total 4−1.
+		const window = new PlaneWindow(PLANE_WINDOW_MS, 1000);
+		expect(window.observe("greptime", 1, 1, 0)).toEqual({ ok: 0, total: 0, spanMs: 0, samples: 1 });
+		expect(window.observe("greptime", 2, 2, 500)).toEqual({ ok: 1, total: 1, spanMs: 500, samples: 1 });
+		expect(window.observe("greptime", 3, 3, 1500)).toEqual({ ok: 2, total: 2, spanMs: 1500, samples: 2 });
+		expect(window.observe("greptime", 3, 4, 1600)).toEqual({ ok: 2, total: 3, spanMs: 1600, samples: 2 });
+		// A bucket leaves once its newest reading is older than the window; the
+		// next bucket's first reading becomes the baseline.
+		expect(window.observe("greptime", 10, 10, 1600 + PLANE_WINDOW_MS)).toEqual({ ok: 7, total: 7, spanMs: PLANE_WINDOW_MS + 100, samples: 2 });
+		expect(window.observe("greptime", 11, 12, 2601 + PLANE_WINDOW_MS)).toEqual({ ok: 1, total: 2, spanMs: 1001, samples: 2 });
+	});
+
+	test("two readings inside one bucket still judge: a fresh process read twice within 10 s", () => {
+		// Greptile round 1 regression: with the newest reading as the bucket's
+		// baseline, the second reading collapsed to zero calls and `insufficient-data`.
+		const window = new PlaneWindow();
+		expect(window.observe("index", 0, 0, 0).spanMs).toBe(0);
+		expect(window.observe("index", 9, 10, 1000)).toEqual({ ok: 9, total: 10, spanMs: 1000, samples: 1 });
+	});
+
+	test("the window covers the hour whatever the scrape rate (Greptile round 1)", () => {
+		// Default buckets are 10 s, so an hour is 360 of them. A 1 Hz poller for 61
+		// minutes used to keep eight minutes of history under a count cap; now a
+		// failure burst in the first 30 s is still judged 59 minutes later and gone
+		// only once it is older than the hour.
+		expect(PLANE_BUCKET_MS).toBe(10_000);
+		const window = new PlaneWindow();
+		let ok = 0;
+		let total = 0;
+		let reading = window.observe("hindsight", ok, total, 0);
+		for (let second = 1; second <= 61 * 60; second++) {
+			// One call a second, failing for the first 30 s only.
+			total += 1;
+			if (second > 30) ok += 1;
+			reading = window.observe("hindsight", ok, total, second * 1000);
+			if (second === 59 * 60) {
+				// Baseline: bucket 0's first reading (second 0); 355 buckets kept.
+				expect(reading.samples).toBe(355);
+				expect(reading.spanMs).toBe(59 * 60 * 1000);
+				expect(reading.total - reading.ok).toBe(30);
+			}
+		}
+		// 61 minutes in: bucket 5 (newest reading at 59 s) has rolled off; the
+		// baseline is bucket 6's first reading (second 60, after the burst).
+		expect(reading.samples).toBe(361);
+		expect(reading.spanMs).toBe(PLANE_WINDOW_MS);
+		expect(reading.total - reading.ok).toBe(0);
+		expect(reading.total).toBe(3600);
+
+		// A slow poller covers the same hour with fewer readings.
+		const slow = new PlaneWindow();
+		let last = slow.observe("ragflow", 0, 0, 0);
+		for (let minute = 1; minute <= 61; minute++) last = slow.observe("ragflow", minute * 60, minute * 60, minute * 60_000);
+		expect(last.samples).toBe(61);
+		expect(last.spanMs).toBe(PLANE_WINDOW_MS);
+		expect(last.total).toBe(3600);
 	});
 });

@@ -38,10 +38,30 @@ RestartPreventExitStatus=78
 # every fail-closed tool. See docs/mcp-audit.md.
 StateDirectory=substrate
 StateDirectoryMode=0700
+# The Hindsight retain outbox (uplift-2 R3): transient retain failures park
+# here as 0600 JSONL locators and replay with backoff across restarts. Never
+# the cache: anything that must survive a restart lives under StateDirectory.
+Environment=SUBSTRATE_RETAIN_OUTBOX_PATH=/var/lib/substrate/retain-outbox.jsonl
+# The docs state file (uplift-2 R6): docs_ingest records (content hashes and
+# document ids) plus the per-dataset version pins, so a restart keeps citations
+# pinned and a repeated merge-trigger stays idempotent. Unset, both were
+# process-local. Never the cache, for the same reason as the outbox above.
+Environment=SUBSTRATE_DOCS_STATE_FILE=/var/lib/substrate/docs-ingest.json
 
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=substrate-mcp
+
+# Resource ceilings (uplift-2 R7). Measured 2026-10-13: 53 MB RSS, 88 MB peak,
+# 0 restarts, on a host at 95 % disk with 12 of 15 GiB swap in use. MemoryHigh
+# throttles at ~12x the peak before MemoryMax (~23x) lets the OOM killer end the
+# process; Restart=always above brings it back. The slice (substrate.slice,
+# MemoryLow=2G) makes reclaim hit co-tenants before any substrate unit.
+Slice=substrate.slice
+MemoryHigh=1G
+MemoryMax=2G
+TasksMax=512
+CPUQuota=200%
 
 # It listens on loopback and talks to Postgres and Greptime. Nothing else.
 # ProtectHome=false is the remaining exception: ExecStart's bun lives under

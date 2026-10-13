@@ -8,6 +8,7 @@
  * `MetricRegistry` collapses it to `_overflow` past the series cap — see
  * `VOLATILE_ATTRIBUTES`.
  */
+import type { PlaneSample } from "./breaker.ts";
 import type { AttributeValue, Counter, Histogram, MetricSnapshot } from "./metrics.ts";
 import { LATENCY_BUCKETS_MS, MetricRegistry, cleanAttributes } from "./metrics.ts";
 
@@ -28,7 +29,33 @@ export const METRIC = {
 	eventsRefused: "substrate.events.refused",
 	anonymousRequests: "substrate.anonymous.requests",
 	cacheOperations: "substrate.cache.operations",
+	planeDuration: "substrate.plane.duration",
+	planeErrors: "substrate.plane.errors",
 } as const;
+
+/** Why a plane call failed. One series each, so the reason stays bounded. */
+export const PLANE_ERROR_REASONS = ["timeout", "network", "server", "open", "other"] as const;
+export type PlaneErrorReason = (typeof PLANE_ERROR_REASONS)[number];
+
+/**
+ * The bounded reason for one failed plane sample.
+ *
+ * `timeout` and `open` are outcomes the gate already classified. An `error`
+ * outcome carries the client's message: a `server <status>` from `gatedFetch`
+ * or a `greptime 5xx` is the plane answering broken; a socket-level message is
+ * the plane not answering at all; anything else is `other`. The message itself
+ * is never an attribute.
+ */
+export function classifyPlaneReason(sample: PlaneSample): PlaneErrorReason | null {
+	if (sample.outcome === "ok") return null;
+	if (sample.outcome === "timeout" || sample.outcome === "open") return sample.outcome;
+	const reason = sample.reason ?? "";
+	if (/\b5\d\d\b/.test(reason)) return "server";
+	if (/ECONN|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|EPIPE|EHOSTUNREACH|ENETUNREACH|unreachable|fetch failed|socket|Unable to connect|connection/i.test(reason)) {
+		return "network";
+	}
+	return "other";
+}
 
 /** Why a `POST /events` was refused with 4xx. One series each, so the reason stays bounded. */
 export const EVENT_REFUSAL_REASONS = ["auth", "validation", "attribution", "graph_id"] as const;
@@ -139,6 +166,8 @@ export class SubstrateInstruments {
 	readonly eventsRefused: Counter;
 	readonly anonymousRequests: Counter;
 	readonly cacheOperations: Counter;
+	readonly planeDuration: Histogram;
+	readonly planeErrors: Counter;
 
 	constructor(registry: MetricRegistry = new MetricRegistry()) {
 		this.registry = registry;
@@ -208,6 +237,14 @@ export class SubstrateInstruments {
 		this.cacheOperations = registry.counter(METRIC.cacheOperations, {
 			description: "Read-through cache results (hit|miss|bypass|error) and the mode they were counted in.",
 			unit: "{operation}",
+		});
+		this.planeDuration = registry.histogram(METRIC.planeDuration, {
+			...ms,
+			description: "Time per outbound call to a data plane, by plane, bounded op and outcome (ok|error|timeout|open).",
+		});
+		this.planeErrors = registry.counter(METRIC.planeErrors, {
+			description: "Failed plane calls by plane and reason (timeout|network|server|open|other).",
+			unit: "{call}",
 		});
 	}
 
@@ -297,6 +334,16 @@ export class SubstrateInstruments {
 
 	recordCache(sample: { result: "hit" | "miss" | "bypass" | "error"; mode: "off" | "on" | "degraded" }): void {
 		this.cacheOperations.add(1, { result: sample.result, mode: sample.mode });
+	}
+
+	/**
+	 * One outbound plane call, as `callPlane` observed it. `op` is a label the
+	 * client fixed — a route-table entry or a SQL verb — never a statement.
+	 */
+	recordPlane(sample: PlaneSample): void {
+		this.planeDuration.record(sample.durationMs, { plane: sample.plane, op: sample.op, outcome: sample.outcome });
+		const reason = classifyPlaneReason(sample);
+		if (reason !== null) this.planeErrors.add(1, { plane: sample.plane, reason });
 	}
 
 	/**

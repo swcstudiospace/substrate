@@ -30,6 +30,7 @@
     "smoke:host": "bun scripts/host-smoke.ts",
     "check:phase-close": "bun scripts/phase-close-check.ts",
     "verify": "bun scripts/verify.ts",
+    "audit:verify": "bun scripts/audit-verify.ts",
     "parity:check": "bun scripts/parity-check.ts",
     "rehearsal": "bun scripts/rehearsal.ts",
     "identity:check": "bun scripts/identity-check.ts",

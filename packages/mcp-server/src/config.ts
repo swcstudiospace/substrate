@@ -5,12 +5,15 @@
  * EnvironmentFile. Nothing here ever reads a secret from the repo.
  */
 import { SOLANA_CLI_DEFAULT } from "@substrate/ledger";
+import { loadBreakerSettings, type BreakerSettings } from "@substrate/observability";
 import { DEFAULT_INGEST_ROOTS } from "./docs-ingest.ts";
 import { normalizeTtlSeconds } from "./lease.ts";
 import { LINEAR_API_URL } from "./linear.ts";
 import { parseGrants, type MemoryGrant } from "./memory-policy.ts";
+import { DEFAULT_RECALL_BUDGET_MS } from "./memory-recall.ts";
 import { NOTION_API_URL } from "./notion.ts";
-import { ragflowFromEnv, type RagflowConfig } from "./planes/ragflow.ts";
+import { DEFAULT_RETRIEVAL_KNOBS, ragflowFromEnv, type RagflowConfig, type RetrievalKnobs } from "./planes/ragflow.ts";
+import { DEFAULT_RETAIN_DRAIN_MS, DEFAULT_RETAIN_MAX_ATTEMPTS, DEFAULT_RETAIN_OUTBOX_MAX } from "./retain-outbox.ts";
 import { SURFACES, SWARM_SURFACES, isSwarmSurface, type Surface } from "./types.ts";
 
 /** Default hermes-linear-connector base URL (D23-25). */
@@ -141,7 +144,7 @@ export interface SubstrateConfig {
 	 * of two rows sharing a primary key and a millisecond, and a ledger that loses
 	 * rows while answering `stored: true` is worse than one that says it cannot
 	 * take the write. Recreating the table is the fix and is out of band — the
-	 * client refuses `ALTER` and `RENAME` by design.
+	 * client refuses `RENAME` and every `ALTER` but the guarded TTL one by design.
 	 *
 	 * This exists so an operator can knowingly accept that loss while the recreate
 	 * is pending, rather than having no lever at all. It is never the quiet path:
@@ -257,6 +260,70 @@ export interface SubstrateConfig {
 	 * hold a `/verify` request open. Hours never reached read `unverified`.
 	 */
 	verifyTimeoutMs: number;
+	/**
+	 * Per-plane circuit breaker settings (uplift-2 R2), from `SUBSTRATE_BREAKER`,
+	 * `SUBSTRATE_BREAKER_FAILURES` and `SUBSTRATE_BREAKER_OPEN_MS`.
+	 *
+	 * `SUBSTRATE_BREAKER=0` is the kill switch: every plane call runs unwrapped,
+	 * exactly as before the breakers existed, and is still measured.
+	 */
+	breaker: BreakerSettings;
+	// uplift-2 R1 — brief fast path and cache effectiveness. Every knob is
+	// default-on and `0` switches it off; none needs a redeploy of code.
+	/** Shared deadline for the four brief source reads, ms (`SUBSTRATE_BRIEF_BUDGET_MS`, default 1200; 0 = none). */
+	briefBudgetMs: number;
+	/** How far back the recent-actions query looks, days (`SUBSTRATE_BRIEF_RECENT_WINDOW_DAYS`, default 30). */
+	briefRecentWindowDays: number;
+	/** TTL of the last-good brief snapshot, s (`SUBSTRATE_BRIEF_SNAPSHOT_TTL_S`, default 3600; 0 = no snapshots). */
+	briefSnapshotTtlS: number;
+	/** Per-command cache timeout, ms (`SUBSTRATE_CACHE_COMMAND_TIMEOUT_MS`, default 250). */
+	cacheCommandTimeoutMs: number;
+	/** Cache connect timeout, ms (`SUBSTRATE_CACHE_CONNECT_TIMEOUT_MS`, default 250). */
+	cacheConnectTimeoutMs: number;
+	/** How long a computed `/healthz` body is served to pollers, ms (`SUBSTRATE_HEALTHZ_CACHE_MS`, default 5000; 0 = recompute per call). */
+	healthzCacheMs: number;
+	// uplift-2 R5
+	/**
+	 * Ledger chain cache, chain-tip lookback, write-probe cadence and opt-in TTL,
+	 * from `SUBSTRATE_LEDGER_*`. See `docs/greptime-ledger.md`.
+	 */
+	ledger: LedgerSettings;
+	// uplift-2 R3
+	/**
+	 * Hindsight time bounds (uplift-2 R3): the `memory_recall` fan-out budget
+	 * (`HINDSIGHT_RECALL_BUDGET_MS`), the shorter recall leg inside
+	 * `memory_search` (`HINDSIGHT_SEARCH_RECALL_BUDGET_MS`) and the retain POST
+	 * bound (`HINDSIGHT_RETAIN_TIMEOUT_MS`). Milliseconds; non-positive or
+	 * unparsable values fall back to the defaults. The URL and key are still
+	 * read by `planes/hindsight.ts` alone (D26-02).
+	 */
+	hindsightBudgets: { recallBudgetMs: number; searchRecallBudgetMs: number; retainTimeoutMs: number };
+	/**
+	 * The retain outbox (uplift-2 R3): `path` from `SUBSTRATE_RETAIN_OUTBOX_PATH`
+	 * (null = memory-only queue), `max` entries, the attempt ceiling and the
+	 * drain interval. A path, never a credential, so boot output may quote it.
+	 */
+	retainOutbox: { path: string | null; max: number; maxAttempts: number; drainMs: number };
+	/**
+	 * Which Hindsight routing keys were present, for the boot warnings only:
+	 * the legacy single-bank key is unread, and a URL without a bank list means
+	 * recall reads the caller's own bank only. Presence, never a value.
+	 */
+	hindsightEnv: { legacyBankSet: boolean; urlSet: boolean; banksSet: boolean };
+	// uplift-2 R6 — RAGFlow docs plane
+	/**
+	 * Delete a superseded document after its replacement parsed
+	 * (`SUBSTRATE_DOCS_PRUNE_SUPERSEDED=1`). Off by default: nothing on the
+	 * plane is deleted unless the operator turns this on.
+	 */
+	docsPruneSuperseded: boolean;
+	/**
+	 * The three documented retrieval knobs sent on every `docs_search`
+	 * retrieval, from `SUBSTRATE_DOCS_SIMILARITY_THRESHOLD` (0.2),
+	 * `SUBSTRATE_DOCS_VECTOR_WEIGHT` (0.3) and `SUBSTRATE_DOCS_TOP_K` (1024).
+	 * The defaults are RAGFlow's own; junk or out-of-range values fall back.
+	 */
+	docsRetrieval: RetrievalKnobs;
 }
 
 /** Production defaults: September's library, so the host ledger keeps deduplicating. */
@@ -477,7 +544,59 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		verifyTimeoutMs: Number.isFinite(Number(env.SUBSTRATE_VERIFY_TIMEOUT_MS)) && Number(env.SUBSTRATE_VERIFY_TIMEOUT_MS) > 0
 			? Number(env.SUBSTRATE_VERIFY_TIMEOUT_MS)
 			: 30_000,
+		breaker: loadBreakerSettings(env),
+		// uplift-2 R1
+		briefBudgetMs: nonNegativeOr(env.SUBSTRATE_BRIEF_BUDGET_MS, 1200),
+		briefRecentWindowDays: positiveOr(env.SUBSTRATE_BRIEF_RECENT_WINDOW_DAYS, 30),
+		briefSnapshotTtlS: nonNegativeOr(env.SUBSTRATE_BRIEF_SNAPSHOT_TTL_S, 3600),
+		cacheCommandTimeoutMs: positiveOr(env.SUBSTRATE_CACHE_COMMAND_TIMEOUT_MS, 250),
+		cacheConnectTimeoutMs: positiveOr(env.SUBSTRATE_CACHE_CONNECT_TIMEOUT_MS, 250),
+		healthzCacheMs: nonNegativeOr(env.SUBSTRATE_HEALTHZ_CACHE_MS, 5000),
+		// uplift-2 R5
+		ledger: loadLedgerSettings(env),
+		// uplift-2 R3
+		hindsightBudgets: {
+			recallBudgetMs: positiveIntOr(env.HINDSIGHT_RECALL_BUDGET_MS, DEFAULT_RECALL_BUDGET_MS),
+			searchRecallBudgetMs: positiveIntOr(env.HINDSIGHT_SEARCH_RECALL_BUDGET_MS, DEFAULT_SEARCH_RECALL_BUDGET_MS),
+			retainTimeoutMs: positiveIntOr(env.HINDSIGHT_RETAIN_TIMEOUT_MS, DEFAULT_RETAIN_TIMEOUT_MS),
+		},
+		retainOutbox: {
+			path: env.SUBSTRATE_RETAIN_OUTBOX_PATH?.trim() || null,
+			max: positiveIntOr(env.SUBSTRATE_RETAIN_OUTBOX_MAX, DEFAULT_RETAIN_OUTBOX_MAX),
+			maxAttempts: positiveIntOr(env.SUBSTRATE_RETAIN_MAX_ATTEMPTS, DEFAULT_RETAIN_MAX_ATTEMPTS),
+			drainMs: positiveIntOr(env.SUBSTRATE_RETAIN_DRAIN_MS, DEFAULT_RETAIN_DRAIN_MS),
+		},
+		hindsightEnv: {
+			legacyBankSet: (env.HINDSIGHT_BANK?.trim() ?? "") !== "",
+			urlSet: (env.HINDSIGHT_URL?.trim() ?? "") !== "",
+			banksSet: (env.HINDSIGHT_BANKS?.trim() ?? "") !== "",
+		},
+		// uplift-2 R6
+		docsPruneSuperseded: (env.SUBSTRATE_DOCS_PRUNE_SUPERSEDED?.trim() ?? "") === "1",
+		docsRetrieval: {
+			similarityThreshold: unitIntervalOr(env.SUBSTRATE_DOCS_SIMILARITY_THRESHOLD, DEFAULT_RETRIEVAL_KNOBS.similarityThreshold),
+			vectorSimilarityWeight: unitIntervalOr(env.SUBSTRATE_DOCS_VECTOR_WEIGHT, DEFAULT_RETRIEVAL_KNOBS.vectorSimilarityWeight),
+			topK: positiveOr(env.SUBSTRATE_DOCS_TOP_K, DEFAULT_RETRIEVAL_KNOBS.topK),
+		},
 	};
+}
+
+/** uplift-2 R1: a finite number ≥ 0, floored (0 is "off"); anything else is the default. */
+function nonNegativeOr(raw: string | undefined, fallback: number): number {
+	const value = Number(raw?.trim());
+	return raw !== undefined && raw.trim() !== "" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : fallback;
+}
+
+/** uplift-2 R1: a finite number > 0, floored; anything else (0 included) is the default. */
+function positiveOr(raw: string | undefined, fallback: number): number {
+	const value = Number(raw?.trim());
+	return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+}
+
+/** uplift-2 R6: a finite number in [0, 1]; anything else is the default. */
+function unitIntervalOr(raw: string | undefined, fallback: number): number {
+	const value = Number(raw?.trim());
+	return raw !== undefined && raw.trim() !== "" && Number.isFinite(value) && value >= 0 && value <= 1 ? value : fallback;
 }
 
 /**
@@ -752,6 +871,112 @@ export function desktopConfigWarnings(config: SubstrateConfig): string[] {
 			`SUBSTRATE_DESKTOP_DIR (${config.desktopDirRejected}) is not absolute; ` +
 				`using the default ${DEFAULT_DESKTOP_DIR}`,
 		);
+	}
+	return warnings;
+}
+
+// uplift-2 R5 — GreptimeDB ledger settings
+
+/** The knobs behind `SUBSTRATE_LEDGER_*` (uplift-2 R5). */
+export interface LedgerSettings {
+	/** Remember each session's chain tip after one read; `SUBSTRATE_LEDGER_CHAIN_CACHE=0` restores one read per emit. */
+	chainCache: boolean;
+	/** Sessions whose tip is remembered at once; the least recently used is dropped past this. */
+	chainCacheMax: number;
+	/** How far back in `ts` the one chain-tip read looks before it falls back to the whole session. */
+	chainLookbackDays: number;
+	/** Seconds between `/healthz` write probes; 0 never probes, and writability is metadata only. */
+	writeProbeS: number;
+	/** Retention to apply to `agent_events` and `event_ingest` at boot; `null` alters nothing. */
+	ttl: string | null;
+}
+
+export const DEFAULT_LEDGER_SETTINGS: LedgerSettings = {
+	chainCache: true,
+	chainCacheMax: 10_000,
+	chainLookbackDays: 30,
+	writeProbeS: 60,
+	ttl: null,
+};
+
+/**
+ * Whether a string is a GreptimeDB time duration (reference, "Time Durations"):
+ * one or more `<integer><unit>` spans, units case-insensitive, singular or plural,
+ * spaces between spans allowed — `180d`, `4320h`, `1h 30m`. Decimals, signs and
+ * hex are not. `forever` and `instant` are legal TTLs too but are not retention
+ * policies, so they are refused here: unset means "leave the table alone".
+ */
+export function isGreptimeDuration(value: string): boolean {
+	// Suffixes are case-insensitive per the reference, so `M` (months) is also
+	// reached through the `m` alternative; the alternation lists long forms first
+	// so `ms` is not read as `m` + a stray `s`.
+	return /^(?:\d+(?:nsec|ns|usec|us|msec|ms|seconds|second|sec|s|minutes|minute|min|m|hours|hour|hr|h|days|day|d|weeks|week|w|months|month|years|year|y)\s*)+$/i.test(
+		value,
+	);
+}
+
+/** A whole number inside `[min, max]`, or `fallback` for anything else. */
+function boundedInt(raw: string | undefined, fallback: number, min: number, max: number): number {
+	const n = Number(raw?.trim());
+	if (raw === undefined || raw.trim() === "" || !Number.isFinite(n)) return fallback;
+	return Math.min(max, Math.max(min, Math.trunc(n)));
+}
+
+/**
+ * `SUBSTRATE_LEDGER_*` as the client reads them. Out-of-range numbers clamp,
+ * unparseable ones fall back — like the breaker settings — except the TTL: a
+ * retention that is set but is not a Greptime duration would never be applied
+ * and the operator would believe it was, so it refuses to boot with the reason.
+ */
+export function loadLedgerSettings(env: Record<string, string | undefined> = process.env): LedgerSettings {
+	const ttlRaw = env.SUBSTRATE_LEDGER_TTL?.trim() ?? "";
+	if (ttlRaw !== "" && !isGreptimeDuration(ttlRaw)) {
+		throw new ConfigError(
+			`SUBSTRATE_LEDGER_TTL=${JSON.stringify(ttlRaw)} is not a GreptimeDB time duration; use spans like 180d, 4320h or 1h30m ` +
+				"(integer + unit, no decimals), or unset it to leave the tables' retention unchanged",
+		);
+	}
+	return {
+		chainCache: !/^(0|false|no)$/i.test(env.SUBSTRATE_LEDGER_CHAIN_CACHE?.trim() ?? ""),
+		chainCacheMax: boundedInt(env.SUBSTRATE_LEDGER_CHAIN_CACHE_MAX, DEFAULT_LEDGER_SETTINGS.chainCacheMax, 1, 1_000_000),
+		chainLookbackDays: boundedInt(env.SUBSTRATE_LEDGER_CHAIN_LOOKBACK_DAYS, DEFAULT_LEDGER_SETTINGS.chainLookbackDays, 1, 3650),
+		writeProbeS: boundedInt(env.SUBSTRATE_LEDGER_WRITE_PROBE_S, DEFAULT_LEDGER_SETTINGS.writeProbeS, 0, 86_400),
+		ttl: ttlRaw === "" ? null : ttlRaw,
+	};
+}
+
+// uplift-2 R3
+/** `memory_search`'s recall leg: shorter than the tool's own budget, so a slow plane never holds a search past it. */
+export const DEFAULT_SEARCH_RECALL_BUDGET_MS = 1500;
+/** The retain POST bound, the plane client's own default made a config field. */
+export const DEFAULT_RETAIN_TIMEOUT_MS = 8000;
+
+/** A positive decimal integer, or the fallback: a typo must never crash-loop the service or zero a budget. */
+function positiveIntOr(raw: string | undefined, fallback: number): number {
+	const trimmed = raw?.trim() ?? "";
+	if (!/^\d+$/.test(trimmed)) return fallback;
+	const value = Number(trimmed);
+	return value > 0 ? value : fallback;
+}
+
+/**
+ * Hindsight routing keys that do not do what their presence suggests,
+ * reported at boot (uplift-2 R3). A sibling of `desktopConfigWarnings`, not
+ * part of `configWarnings` (which returns early without operator tokens).
+ *
+ * `HINDSIGHT_BANK` is the single-bank shape of the acc30a8 stub: nothing reads
+ * it, so an operator who set it believes recall is configured when it is
+ * not. A URL with no `HINDSIGHT_BANKS` is valid — recall reads the caller's
+ * own bank only — but it is usually not what was meant for a fan-out.
+ * Named by key, never by value: the warnings go to a log.
+ */
+export function hindsightConfigWarnings(config: SubstrateConfig): string[] {
+	const warnings: string[] = [];
+	if (config.hindsightEnv.legacyBankSet) {
+		warnings.push("HINDSIGHT_BANK is set but legacy and unread; recall fans out over HINDSIGHT_BANKS (sub-* names), so set that instead");
+	}
+	if (config.hindsightEnv.urlSet && !config.hindsightEnv.banksSet) {
+		warnings.push("HINDSIGHT_URL is set but HINDSIGHT_BANKS is empty, so recall reads the caller's own bank only; list the sub-* banks to fan out");
 	}
 	return warnings;
 }

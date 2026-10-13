@@ -7,7 +7,9 @@ import { REDACTED, redact } from "./redact.ts";
 import { leaseSnapshot } from "./index-store.ts";
 import { decideRelease, type ClaimAction } from "./lease.ts";
 import { EVENT_SOURCES } from "./event-sources.ts";
-import { Substrate, SkillProposalDenied, VERIFY_RESPONSE_MARGIN_MS, type SkillProposalRequest } from "./service.ts";
+import { HEALTH_PROBE_MS, Substrate, SkillProposalDenied, VERIFY_RESPONSE_MARGIN_MS, type SkillProposalRequest } from "./service.ts";
+import { HindsightFake } from "./hindsight-fake.ts";
+import { RagflowFake } from "./ragflow-fake.ts";
 import { ProposeFailed, ProposeRefused, type ProposeOptions, type ProposeResult, type SkillProposer } from "./skills/propose.ts";
 import type { EventInput, SubstrateEvent, Surface } from "./types.ts";
 import { GRAPHS_GENERATION_KEY, graphGenerationKey } from "./cache.ts";
@@ -788,14 +790,148 @@ describe("append-mode enforcement", () => {
 	test("healthz separates reachability from writability", async () => {
 		// The state a monitor has to see: `ping` succeeds while every append is refused.
 		const { greptime } = ledger(false);
+		const closed = (plane: "greptime" | "index" | "cache" | "hindsight" | "ragflow") =>
+			({ plane, state: "closed" as const, failures: 0, openedAt: null, lastErrorAt: null, lastError: null });
 		expect(await substrateWith(greptime).health()).toEqual({
 			index: false,
 			greptime: true,
 			appendOnly: false,
 			quotingDialectKnown: true,
 			eventsWritable: false,
-			cache: { enabled: false, connected: false, mode: "off", hits: 0, misses: 0, bypasses: 0, errors: 0 },
+			ledger: { writable: false, lastProbeAt: null, lastProbeOk: null, lastProbeError: null },
+			cache: { enabled: false, connected: false, mode: "off", hits: 0, misses: 0, bypasses: 0, errors: 0, cooldownUntil: null },
+			planes: {
+				greptime: { ok: true, breaker: closed("greptime"), lastErrorAt: null },
+				index: { ok: null, breaker: closed("index"), lastErrorAt: null },
+				cache: { ok: null, breaker: closed("cache"), lastErrorAt: null },
+				hindsight: { ok: null, breaker: closed("hindsight"), lastErrorAt: null },
+				ragflow: { ok: null, breaker: closed("ragflow"), lastErrorAt: null },
+			},
+			capacity: { index: null, ledger: null },
 		});
+	});
+
+	test("healthz reports the index's capacity, and null when it does not answer in time", async () => {
+		const { greptime } = ledger(true);
+		const capacity = { databaseBytes: 11_000_000, tables: [{ name: "memory_entries", totalBytes: 400_000, liveRows: 64, deadRows: 0 }] };
+		const quick = { ping: async () => true, capacity: async () => capacity };
+		const answered = await new Substrate(loadConfig({}), { index: quick as never, greptime: greptime as never }).health();
+		expect(answered.index).toBe(true);
+		expect(answered.capacity).toEqual({ index: capacity, ledger: null });
+		expect(answered.planes.index).toMatchObject({ ok: true });
+
+		const slow = { ping: async () => true, capacity: () => Promise.withResolvers<never>().promise };
+		const started = Date.now();
+		const timedOut = await new Substrate(loadConfig({}), { index: slow as never, greptime: greptime as never }).health();
+		expect(Date.now() - started).toBeLessThan(HEALTH_PROBE_MS + 500);
+		expect(timedOut.capacity).toEqual({ index: null, ledger: null });
+		expect(timedOut.index).toBe(true);
+
+		// An index without the method at all (an older fake) is null too, never a throw.
+		const bare = await new Substrate(loadConfig({}), { index: { ping: async () => true } as never, greptime: greptime as never }).health();
+		expect(bare.capacity).toEqual({ index: null, ledger: null });
+	});
+
+	test("healthz probes a configured Hindsight and RAGFlow once each, bounded, and reports the breaker", async () => {
+		const { greptime } = ledger(true);
+		const saved = { HINDSIGHT_URL: process.env.HINDSIGHT_URL, HINDSIGHT_API_KEY: process.env.HINDSIGHT_API_KEY };
+		process.env.HINDSIGHT_URL = "http://fake";
+		process.env.HINDSIGHT_API_KEY = "test-bearer";
+		try {
+			const hindsight = new HindsightFake();
+			const ragflow = new RagflowFake();
+			const config = loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", SUBSTRATE_BREAKER_FAILURES: "1" });
+			const substrate = new Substrate(config, { index: null, greptime: greptime as never, hindsightFetch: hindsight.fetch, ragflowFetch: ragflow.fetch });
+			const up = await substrate.health();
+			expect(up.planes.hindsight).toMatchObject({ ok: true, lastErrorAt: null });
+			expect(up.planes.ragflow).toMatchObject({ ok: true, breaker: { state: "closed" } });
+			expect(hindsight.requests.filter((request) => request.path === "/health")).toHaveLength(1);
+			expect(ragflow.requests.filter((request) => request.path === "/api/v1/datasets")).toHaveLength(1);
+
+			// RAGFlow goes away: the probe fails, the breaker opens on the first failure, and both are reported.
+			const down = new Substrate(config, {
+				index: null,
+				greptime: greptime as never,
+				hindsightFetch: hindsight.fetch,
+				ragflowFetch: async () => {
+					throw new Error("connect ECONNREFUSED");
+				},
+			});
+			const failed = await down.health();
+			expect(failed.planes.ragflow.ok).toBe(false);
+			expect(failed.planes.ragflow.breaker).toMatchObject({ state: "open", failures: 1 });
+			expect(failed.planes.ragflow.lastErrorAt).toBe(failed.planes.ragflow.breaker?.lastErrorAt ?? -1);
+			expect(typeof failed.planes.ragflow.lastErrorAt).toBe("number");
+			// Still 200-eligible: the status rule reads ledger and index only.
+			expect(failed.eventsWritable).toBe(true);
+			expect(down.planesConfigured()).toEqual({ greptime: true, index: false, cache: false, hindsight: true, ragflow: true });
+		} finally {
+			for (const [name, value] of Object.entries(saved)) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+		}
+	});
+
+	test("SUBSTRATE_BREAKER=0 leaves every breaker null and every call reaching the plane", async () => {
+		let calls = 0;
+		const substrate = new Substrate(loadConfig({ SUBSTRATE_BREAKER: "0", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), {
+			index: null,
+			greptime: null,
+			ragflowFetch: async () => {
+				calls += 1;
+				throw new Error("connect ECONNREFUSED");
+			},
+		});
+		for (let i = 0; i < 7; i++) {
+			const reply = await substrate.searchDocs({ question: "who reads RAGFlow?" }, "omp");
+			expect(reply).toMatchObject({ chunks: [], degraded: true });
+			expect(reply.reason).toContain("ragflow unreachable");
+		}
+		expect(calls).toBe(7);
+		const health = await substrate.health();
+		expect(health.planes.ragflow).toEqual({ ok: false, breaker: null, lastErrorAt: null });
+	});
+
+	test("docs search and memory recall degrade with `circuit open` once a plane's breaker is open", async () => {
+		const saved = { HINDSIGHT_URL: process.env.HINDSIGHT_URL, HINDSIGHT_API_KEY: process.env.HINDSIGHT_API_KEY, HINDSIGHT_BANKS: process.env.HINDSIGHT_BANKS };
+		process.env.HINDSIGHT_URL = "http://fake";
+		process.env.HINDSIGHT_API_KEY = "test-bearer";
+		process.env.HINDSIGHT_BANKS = "sub-cursor";
+		try {
+			let ragflowCalls = 0;
+			let hindsightCalls = 0;
+			const substrate = new Substrate(
+				loadConfig({ SUBSTRATE_BREAKER_FAILURES: "2", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }),
+				{
+					index: null,
+					greptime: null,
+					ragflowFetch: async () => {
+						ragflowCalls += 1;
+						throw new Error("connect ECONNREFUSED");
+					},
+					hindsightFetch: async () => {
+						hindsightCalls += 1;
+						throw new Error("connect ECONNREFUSED");
+					},
+				},
+			);
+			for (let i = 0; i < 2; i++) await substrate.searchDocs({ question: "q" }, "omp");
+			const search = await substrate.searchDocs({ question: "q" }, "omp");
+			expect(search).toMatchObject({ chunks: [], degraded: true, reason: "ragflow circuit open" });
+			expect(ragflowCalls).toBe(2);
+
+			for (let i = 0; i < 2; i++) await substrate.recallMemories({ query: "lease" }, "cursor");
+			const recall = await substrate.recallMemories({ query: "lease" }, "cursor");
+			expect(recall.degraded).toBe(true);
+			expect(recall.reason).toContain("circuit open");
+			expect(hindsightCalls).toBe(2);
+		} finally {
+			for (const [name, value] of Object.entries(saved)) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+		}
 	});
 
 	test("healthz reports writable once the table is append-only", async () => {

@@ -14,10 +14,18 @@
  *
  * Uploads are idempotent by content hash, keyed by dataset plus source URL,
  * with per-page in-flight locks so concurrent retries share one upload.
- * Every upload sends `{source_url, commit, heading_path}` metadata (U-03).
- * A replacement reports the superseded document id for the G3 retire step:
- * the delete path is unverified (U-02), so this phase exposes the id rather
- * than calling a guessed endpoint.
+ * Every upload carries `{source_url, commit, heading_path}` metadata (U-03).
+ * A replacement reports the superseded document id; with
+ * `SUBSTRATE_DOCS_PRUNE_SUPERSEDED=1` (uplift-2 R6) the superseded document
+ * is deleted through the documented delete call once the replacement has
+ * parsed, and the result says so (`pruned_document_id`) — or records why
+ * the prune failed (`prune: "failed: …"`), non-fatally. Off, the corpus
+ * keeps every superseded document, exactly as before.
+ *
+ * The state file (`SUBSTRATE_DOCS_STATE_FILE`) is at version 2: the ingest
+ * records plus the per-dataset version lists, so pins and the
+ * merge-trigger's idempotency survive a restart. A version-1 file (records
+ * only) loads as before and is rewritten at version 2 on the next save.
  */
 import { createHash, randomUUID } from "node:crypto";
 import type { Dirent, Stats } from "node:fs";
@@ -25,7 +33,19 @@ import { lstat, mkdir, readFile, readdir, rename, stat, writeFile } from "node:f
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
-	listDatasets,
+	createVersionStore,
+	DATASET_VERSION_RETENTION,
+	DIRECT_DATASET_LIST,
+	versionsFromJson,
+	versionsToJson,
+	type DatasetListSource,
+	type DatasetVersion,
+	type VersionStore,
+} from "./docs-datasets.ts";
+import {
+	deleteDocuments,
+	documentName,
+	parseDocuments,
 	pollParseStatus,
 	uploadDocument,
 	type FetchLike,
@@ -154,8 +174,12 @@ export interface IngestPageResult {
 	status: "ingested" | "replaced" | "unchanged";
 	document_id: string;
 	content_sha256: string;
-	/** The prior document this upload supersedes; retired by the G3 step. */
+	/** The prior document this upload supersedes; deleted when the prune is on, else left for the operator. */
 	superseded_document_id?: string;
+	/** The superseded document the prune deleted (uplift-2 R6). */
+	pruned_document_id?: string;
+	/** Why the prune did not delete the superseded document: `failed: <reason>` (uplift-2 R6). */
+	prune?: string;
 }
 
 /** One page's upload, shared with concurrent retries for the same key. */
@@ -163,16 +187,62 @@ export type PageSettlement =
 	| { ok: true; result: IngestPageResult }
 	| { ok: false; reason: string };
 
+/**
+ * `changed` says whether this call mutated state — uploaded, replaced or
+ * pruned a document and re-recorded its source URL — on BOTH shapes
+ * (Greptile round 2): with the prune on, page A can land and delete its
+ * predecessor before page B fails, and the failure must still make the
+ * service persist the records and invalidate cached searches. A refusal
+ * that touched nothing (a gate, an unknown dataset, a first page that never
+ * uploaded) says `changed: false`.
+ */
 export type IngestOutcome =
-	| { ok: true; results: IngestPageResult[]; stripped_images: number }
-	| { ok: false; refused: true; reason: string; rules?: string[]; page?: string };
+	| { ok: true; results: IngestPageResult[]; stripped_images: number; changed: boolean }
+	| { ok: false; refused: true; reason: string; rules?: string[]; page?: string; changed: boolean };
 
-/** A source URL's last ingest in one dataset, for hash idempotency. */
+/** A document this record's source URL once published, still on the plane unless pruned. */
+export interface SupersededDocument {
+	document_id: string;
+	/** The commit that upload carried, when the caller named one. */
+	commit?: string;
+}
+
+/**
+ * A source URL's last ingest in one dataset, for hash idempotency — and,
+ * per document, the commit that upload carried (uplift-2 R6, Greptile
+ * round 1): a citation names its own document's commit, never the
+ * dataset's newest pin. `superseded` lists earlier documents of the same
+ * source URL that were replaced but not pruned (the last five), so a
+ * chunk retrieval still returns from an older document cites that older
+ * commit.
+ */
 export interface IngestRecord {
 	sha: string;
 	dataset_id: string;
 	source_url: string;
 	document_id: string;
+	commit?: string;
+	superseded?: SupersededDocument[];
+}
+
+/** What a citation needs to know about a document id: its source URL and the commit it was uploaded under, if any. */
+export interface DocumentProvenance {
+	source_url: string;
+	commit?: string;
+}
+
+/**
+ * The provenance of a document id across the ingest records: the current
+ * document of a source URL, or one of its superseded, unpruned
+ * predecessors. Undefined for a document these records never uploaded.
+ */
+export function documentProvenance(seen: ReadonlyMap<string, IngestRecord>, documentId: string): DocumentProvenance | undefined {
+	for (const record of seen.values()) {
+		if (record.document_id === documentId) return { source_url: record.source_url, ...(record.commit !== undefined ? { commit: record.commit } : {}) };
+		const earlier = record.superseded?.find((entry) => entry.document_id === documentId);
+		if (earlier) return { source_url: record.source_url, ...(earlier.commit !== undefined ? { commit: earlier.commit } : {}) };
+	}
+	return undefined;
 }
 
 export interface IngestDeps {
@@ -189,6 +259,12 @@ export interface IngestDeps {
 	surface: Surface | null;
 	sessionId?: string;
 	fetchImpl?: FetchLike;
+	/** The dataset list reader; the plane directly when omitted (uplift-2 R6). */
+	datasets?: DatasetListSource;
+	/** Delete the superseded document after a replacement parses (`SUBSTRATE_DOCS_PRUNE_SUPERSEDED`); off keeps it. */
+	prune?: boolean;
+	/** Where a failed prune is reported; stderr when omitted. */
+	log?: (line: string) => void;
 }
 
 const REMOTE_IMG_TAG = /<img\b[^>]*\bsrc\s*=\s*["']https?:[^>]*>/gi;
@@ -260,9 +336,10 @@ function refused(
 	deps: IngestDeps,
 	sessionId: string,
 	reason: string,
-	extra?: { rules?: string[]; page?: string },
+	extra?: { rules?: string[]; page?: string; changed?: boolean },
 ): Promise<IngestOutcome> {
-	const outcome: IngestOutcome = { ok: false, refused: true, reason, ...extra };
+	const { changed = false, ...locator } = extra ?? {};
+	const outcome: IngestOutcome = { ok: false, refused: true, reason, ...locator, changed };
 	if (deps.surface === null) return Promise.resolve(outcome);
 	return deps
 		.emit({
@@ -325,13 +402,15 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 		prepared.push({ page, sourceUrl: page.source_url, body: stripped.body, sha: sha256(stripped.body) });
 	}
 
-	const listed = await listDatasets(config, deps.fetchImpl);
+	const listed = await (deps.datasets ?? DIRECT_DATASET_LIST).list(config, deps.fetchImpl);
 	if (!listed.ok) return refused(deps, sessionId, listed.reason);
 	const dataset = listed.datasets.find((entry) => entry.name === input.dataset);
 	if (!dataset) return refused(deps, sessionId, "unknown-dataset");
 	const commit = input.commit ?? "unpinned";
 
 	const results: IngestPageResult[] = [];
+	// True once any page of this call stored a document (and so a record).
+	const changed = (): boolean => results.some((result) => result.status !== "unchanged");
 	for (const { page, sourceUrl, body, sha } of prepared) {
 		const key = recordKey(dataset.id, sourceUrl);
 		for (;;) {
@@ -345,7 +424,7 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 			const running = locks.get(key);
 			if (running && running.sha === sha) {
 				const settled = await running.task;
-				if (!settled.ok) return refused(deps, sessionId, settled.reason, { page: page.path });
+				if (!settled.ok) return refused(deps, sessionId, settled.reason, { page: page.path, changed: changed() });
 				results.push(settled.result);
 				break;
 			}
@@ -356,17 +435,34 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 						config,
 						{
 							dataset_id: dataset.id,
+							name: documentName(page.path),
 							content: body,
 							metadata: { source_url: sourceUrl, commit, heading_path: page.heading_path ?? "" },
 						},
 						deps.fetchImpl,
 					);
 					if (!uploaded.ok) return { ok: false, reason: uploaded.reason };
-					const parsed = await pollParseStatus(config, uploaded.document_id, deps.fetchImpl, {
+					const started = await parseDocuments(config, dataset.id, [uploaded.document_id], deps.fetchImpl);
+					if (!started.ok) return { ok: false, reason: started.reason };
+					const parsed = await pollParseStatus(config, { dataset_id: dataset.id, document_id: uploaded.document_id }, deps.fetchImpl, {
 						maxPolls: deps.poll?.maxPolls,
 						intervalMs: deps.poll?.intervalMs,
 					});
 					if (!parsed.ok) return { ok: false, reason: parsed.reason };
+					// The replacement is retrievable; only now may the superseded
+					// document go. A failed delete leaves both documents and is
+					// reported, never a refusal of the page that already landed.
+					let prune: { pruned_document_id: string } | { prune: string } | null = null;
+					if (replacedPrior && deps.prune === true && replacedPrior.document_id !== uploaded.document_id) {
+						const deleted = await deleteDocuments(config, dataset.id, [replacedPrior.document_id], deps.fetchImpl);
+						if (deleted.ok) prune = { pruned_document_id: replacedPrior.document_id };
+						else {
+							prune = { prune: `failed: ${deleted.reason}` };
+							(deps.log ?? ((line: string) => process.stderr.write(line)))(
+								`[substrate] docs ingest: superseded document ${replacedPrior.document_id} in ${dataset.name} not pruned — ${redact(deleted.reason)}\n`,
+							);
+						}
+					}
 					const result: IngestPageResult = {
 						path: page.path,
 						source_url: sourceUrl,
@@ -374,8 +470,27 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 						document_id: uploaded.document_id,
 						content_sha256: sha,
 						...(replacedPrior ? { superseded_document_id: replacedPrior.document_id } : {}),
+						...(prune ?? {}),
 					};
-					seen.set(key, { sha, dataset_id: dataset.id, source_url: sourceUrl, document_id: uploaded.document_id });
+					// The record keeps this upload's commit (only a named one — "unpinned"
+					// on the wire is not a commit) and, unless the prune just deleted it,
+					// the replaced document with its own commit, bounded to the last five.
+					const lineage: SupersededDocument[] = [
+						...(replacedPrior?.superseded ?? []),
+						...(replacedPrior && prune !== null && "pruned_document_id" in prune
+							? []
+							: replacedPrior
+								? [{ document_id: replacedPrior.document_id, ...(replacedPrior.commit !== undefined ? { commit: replacedPrior.commit } : {}) }]
+								: []),
+					].slice(-DATASET_VERSION_RETENTION);
+					seen.set(key, {
+						sha,
+						dataset_id: dataset.id,
+						source_url: sourceUrl,
+						document_id: uploaded.document_id,
+						...(input.commit !== undefined ? { commit: input.commit } : {}),
+						...(lineage.length > 0 ? { superseded: lineage } : {}),
+					});
 					return { ok: true, result };
 				})();
 				locks.set(key, { task, sha });
@@ -385,14 +500,14 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 				} finally {
 					if (locks.get(key)?.task === task) locks.delete(key);
 				}
-				if (!settled.ok) return refused(deps, sessionId, settled.reason, { page: page.path });
+				if (!settled.ok) return refused(deps, sessionId, settled.reason, { page: page.path, changed: changed() });
 				results.push(settled.result);
 				break;
 			}
 			// A different body is mid-upload: wait for it, then recheck —
 			// a third writer may have stored ours meanwhile, else upload ours.
 			const settled = await running.task;
-			if (!settled.ok) return refused(deps, sessionId, settled.reason, { page: page.path });
+			if (!settled.ok) return refused(deps, sessionId, settled.reason, { page: page.path, changed: changed() });
 		}
 	}
 
@@ -405,41 +520,52 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 			action: "docs.ingest",
 			dataset_id: dataset.id,
 			source_urls: results.map((result) => result.source_url),
-			content_sha256: results.map((result) => result.content_sha256),
 			superseded_document_ids: results.flatMap((result) => (result.superseded_document_id ? [result.superseded_document_id] : [])),
+			pruned_document_ids: results.flatMap((result) => (result.pruned_document_id ? [result.pruned_document_id] : [])),
 			stripped_images: strippedImages,
 		},
 	});
-	return { ok: true, results, stripped_images: strippedImages };
+	return { ok: true, results, stripped_images: strippedImages, changed: changed() };
 }
-
 /**
  * Ingest records on disk, so a restarted server does not re-upload pages it
- * already stored (Greptile P1). A missing or corrupt file means an empty
- * map, never a throw: losing dedup degrades to a duplicate upload, while
- * refusing ingest over an unreadable file would turn a disk hiccup into an
- * outage of the publication path. The caller reports the problem string.
+ * already stored (Greptile P1), and — since version 2 (uplift-2 R6) — the
+ * per-dataset version lists, so pins and the merge-trigger's idempotency
+ * survive the same restart. A missing or corrupt file means empty tables,
+ * never a throw: losing dedup degrades to a duplicate upload, losing pins
+ * to `unpinned` citations, while refusing ingest over an unreadable file
+ * would turn a disk hiccup into an outage of the publication path. The
+ * caller reports the problem string. A version-1 file has no `versions`
+ * member and loads with an empty version store; the next save writes
+ * version 2 (one-way).
  */
 export interface IngestStateFile {
-	version: 1;
+	version: 2;
 	records: Record<string, IngestRecord>;
+	versions: Record<string, DatasetVersion[]>;
 }
 
-export async function loadIngestRecords(file: string): Promise<{ records: Map<string, IngestRecord>; problem?: string }> {
+export async function loadIngestRecords(
+	file: string,
+): Promise<{ records: Map<string, IngestRecord>; versions: VersionStore; problem?: string }> {
 	let raw: string;
 	try {
 		raw = await readFile(file, "utf8");
 	} catch {
-		return { records: new Map<string, IngestRecord>() };
+		return { records: new Map<string, IngestRecord>(), versions: createVersionStore() };
 	}
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(raw);
 	} catch {
-		return { records: new Map<string, IngestRecord>(), problem: `${file} is not valid JSON; starting with empty ingest records` };
+		return { records: new Map<string, IngestRecord>(), versions: createVersionStore(), problem: `${file} is not valid JSON; starting with empty ingest records` };
 	}
 	if (parsed === null || typeof parsed !== "object" || !("records" in parsed) || parsed.records === null || typeof parsed.records !== "object") {
-		return { records: new Map<string, IngestRecord>(), problem: `${file} has no records table; starting with empty ingest records` };
+		return {
+			records: new Map<string, IngestRecord>(),
+			versions: createVersionStore(),
+			problem: `${file} has no records table; starting with empty ingest records`,
+		};
 	}
 	const records = new Map<string, IngestRecord>();
 	for (const [key, record] of Object.entries(parsed.records)) {
@@ -448,19 +574,35 @@ export async function loadIngestRecords(file: string): Promise<{ records: Map<st
 		if (typeof record.sha !== "string" || typeof record.dataset_id !== "string" || typeof record.source_url !== "string" || typeof record.document_id !== "string") {
 			continue;
 		}
-		records.set(key, { sha: record.sha, dataset_id: record.dataset_id, source_url: record.source_url, document_id: record.document_id });
+		const superseded: SupersededDocument[] = [];
+		if ("superseded" in record && Array.isArray(record.superseded)) {
+			for (const entry of record.superseded) {
+				if (entry === null || typeof entry !== "object" || !("document_id" in entry) || typeof entry.document_id !== "string") continue;
+				const commit = "commit" in entry && typeof entry.commit === "string" ? entry.commit : undefined;
+				superseded.push({ document_id: entry.document_id, ...(commit !== undefined ? { commit } : {}) });
+			}
+		}
+		records.set(key, {
+			sha: record.sha,
+			dataset_id: record.dataset_id,
+			source_url: record.source_url,
+			document_id: record.document_id,
+			...("commit" in record && typeof record.commit === "string" ? { commit: record.commit } : {}),
+			...(superseded.length > 0 ? { superseded } : {}),
+		});
 	}
-	return { records };
+	const versions = "versions" in parsed ? versionsFromJson(parsed.versions) : createVersionStore();
+	return { records, versions };
 }
 
 /**
- * Persist ingest records. Throws on I/O failure; the caller logs and
- * continues. Written to a sibling temp file and renamed, so a crash
- * mid-write never leaves half a JSON document behind.
+ * Persist ingest records and version lists. Throws on I/O failure; the
+ * caller logs and continues. Written to a sibling temp file and renamed,
+ * so a crash mid-write never leaves half a JSON document behind.
  */
-export async function saveIngestRecords(file: string, seen: Map<string, IngestRecord>): Promise<void> {
+export async function saveIngestRecords(file: string, seen: Map<string, IngestRecord>, versions: VersionStore = createVersionStore()): Promise<void> {
 	await mkdir(dirname(file), { recursive: true });
-	const state: IngestStateFile = { version: 1, records: Object.fromEntries(seen) };
+	const state: IngestStateFile = { version: 2, records: Object.fromEntries(seen), versions: versionsToJson(versions) };
 	const tmp = `${file}.${process.pid}.tmp`;
 	await writeFile(tmp, `${JSON.stringify(state)}\n`, "utf8");
 	await rename(tmp, file);

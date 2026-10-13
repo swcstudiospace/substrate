@@ -15,12 +15,35 @@
  * document GET/DELETE/PATCH, `Result` returns that never reject, and
  * FastAPI array-`detail` never shown. The RESP client, the single-bank shape
  * and recall inside the brief are deliberately not ported.
+ *
+ * Every call goes out through the `fetchImpl` the caller injects; production
+ * hands in a `gatedFetch` over the plane's circuit breaker (uplift-2 R2), and
+ * `hindsightOp` is the bounded label that fetch records per route. An open
+ * breaker surfaces here as a `network` error whose message says `circuit open`,
+ * so every fail-open caller degrades exactly as it does for an unreachable plane.
  */
 export interface HindsightConfig {
 	url: string;
 	apiKey: string;
 	/** Bank name prefix; `sub-` names the substrate surfaces' banks (D26-03). */
 	bankPrefix: string;
+}
+
+/**
+ * The bounded operation label for one Hindsight request, from its method and
+ * path. A fixed table, never the path itself: bank and document ids would
+ * otherwise become metric series.
+ */
+export function hindsightOp(method: string, url: string): string {
+	const path = url.replace(/^[a-z]+:\/\/[^/]+/i, "").replace(/\?.*$/, "");
+	if (path === "/health") return "health";
+	if (path === "/version") return "version";
+	if (/\/memories\/recall$/.test(path)) return "recall";
+	if (/\/memories$/.test(path)) return "retain";
+	if (/\/documents\/[^/]+$/.test(path)) return "document";
+	if (/\/banks\/[^/]+\/config$/.test(path)) return "bank-config";
+	if (/\/banks\/[^/]+$/.test(path)) return method === "DELETE" ? "bank-delete" : "bank-create";
+	return "other";
 }
 
 /**
@@ -140,6 +163,11 @@ async function readJson(response: Response): Promise<{ ok: true; body: unknown }
 function transportError(action: string, cause: unknown): HindsightError {
 	if (cause instanceof Error && (cause.name === "AbortError" || cause.name === "TimeoutError")) {
 		return { kind: "timeout", message: `hindsight ${action}: timed out` };
+	}
+	// The plane's breaker refused before anything went out: unreachable by
+	// decision rather than by socket, and worded so a degraded reply says why.
+	if (cause instanceof Error && cause.name === "BreakerOpenError") {
+		return { kind: "network", message: `hindsight ${action}: circuit open` };
 	}
 	const message = cause instanceof Error ? cause.message : String(cause);
 	return { kind: "network", message: `hindsight ${action}: unreachable (${message.slice(0, 120)})` };
@@ -262,6 +290,15 @@ const ensuredBanks = new Set<string>();
 /** Test seam: forget every ensured bank. */
 export function clearEnsuredBanks(): void {
 	ensuredBanks.clear();
+}
+
+/**
+ * Forget one ensured bank, so the next retain re-runs `ensureBank`. Called
+ * when a retain answers 404 (uplift-2 R3): the bank this process pinned was
+ * deleted or renamed out of band, and a cached "ensured" would 404 forever.
+ */
+export function forgetEnsuredBank(config: HindsightConfig, bank: string): void {
+	ensuredBanks.delete(`${config.url} ${bank}`);
 }
 
 function extractionMode(body: unknown): string | null {

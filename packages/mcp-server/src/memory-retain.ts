@@ -10,14 +10,36 @@
  * existing `memory.retain.failed` warning with locators plus hashes, never
  * values (D26-07, Phase 21 precedent). A refusal is never cleaned-and-
  * published: any redactor finding stops the forward outright.
+ *
+ * Transient plane failures (uplift-2 R3) no longer end the trail: when the
+ * caller hands in an outbox sink, a timeout, transport error, open breaker,
+ * 5xx or 429 parks the forward there instead of warning, and the outbox's
+ * replay comes back through `replayRetain` with the entry re-read from the
+ * index. The warning is deferred to the outbox's last attempt, not removed.
+ * Refusals (unsourced, unredacted, guest, 4xx other than 429) are not
+ * transient and warn at once, exactly as before.
  */
-import { bankForSurface, ensureBank, retainMemories, type FetchLike, type HindsightConfig } from "./planes/hindsight.ts";
+import {
+	bankForSurface,
+	ensureBank,
+	forgetEnsuredBank,
+	retainMemories,
+	type FetchLike,
+	type HindsightConfig,
+	type HindsightResult,
+} from "./planes/hindsight.ts";
 import { canonicalJson, sha256Hex } from "./event.ts";
 import { applyRule, redact, REDACTION_RULES } from "./redact.ts";
+import { isTransientRetainReason, type RetainOutboxCandidate } from "./retain-outbox.ts";
 import { SURFACES, type EventInput, type MemoryEntry, type MemoryWriteRequest, type MemoryWriteResult } from "./types.ts";
 
 /** The known surfaces as plain strings, for the emit-surface check. */
 const KNOWN_SURFACES: readonly string[] = SURFACES;
+
+/** Where a transient failure parks instead of warning; `false` means "not taken, warn now". */
+export interface RetainOutboxSink {
+	enqueue(candidate: RetainOutboxCandidate): boolean;
+}
 
 export interface RetainDeps {
 	config: HindsightConfig | null;
@@ -25,6 +47,10 @@ export interface RetainDeps {
 	/** A guest instance never forwards bytes to the plane (D25-05 posture). */
 	vmGuest?: boolean;
 	emit: (event: EventInput) => Promise<unknown>;
+	/** Absent: every failure warns at once (the pre-outbox behaviour). */
+	outbox?: RetainOutboxSink;
+	/** The retain POST bound (`HINDSIGHT_RETAIN_TIMEOUT_MS`); the plane default otherwise. */
+	retainTimeoutMs?: number;
 }
 
 export interface ForwardOutcome {
@@ -33,6 +59,8 @@ export interface ForwardOutcome {
 	document_id: string;
 	reason?: string;
 	rules?: string[];
+	/** True when a transient failure was parked in the outbox instead of warned. */
+	queued?: boolean;
 }
 
 /** Which redaction rules fire on the text, for the locator-only warning. */
@@ -45,8 +73,13 @@ function findingRules(text: string): string[] {
 	return found;
 }
 
-async function warn(
-	deps: RetainDeps,
+/**
+ * The one `memory.retain.failed` warning shape, shared by the live forward
+ * and the outbox's last attempt so the trail reads the same either way. An
+ * unknown writer surface cannot emit (the vocabulary is closed) and logs.
+ */
+export async function emitRetainWarning(
+	emit: RetainDeps["emit"],
 	writer: string,
 	sessionId: string | undefined,
 	summary: string,
@@ -57,17 +90,15 @@ async function warn(
 		process.stderr.write(`[substrate] ${line} by ${redact(writer)}\n`);
 		return;
 	}
-	await deps
-		.emit({
-			surface: writer as EventInput["surface"],
-			kind: "warning",
-			summary: line,
-			...(sessionId !== undefined ? { session_id: sessionId } : {}),
-			payload: { action: "memory.retain", ...payload },
-		})
-		.catch((cause: unknown) => {
-			process.stderr.write(`[substrate] ${line} (emit failed: ${redact(String(cause))})\n`);
-		});
+	await emit({
+		surface: writer as EventInput["surface"],
+		kind: "warning",
+		summary: line,
+		...(sessionId !== undefined ? { session_id: sessionId } : {}),
+		payload: { action: "memory.retain", ...payload },
+	}).catch((cause: unknown) => {
+		process.stderr.write(`[substrate] ${line} (emit failed: ${redact(String(cause))})\n`);
+	});
 }
 
 /**
@@ -82,10 +113,22 @@ export function retainDocumentId(entry: MemoryEntry, idempotencyKey: string): st
 	return `subj_${sha256Hex(canonicalJson({ scope: entry.scope, kind: entry.kind, subject })).slice(0, 32)}`;
 }
 
+/** What the live forward and the outbox replay both hand to `forwardEntry`. */
+export interface RetainTarget {
+	entry: MemoryEntry;
+	writer: string;
+	bank: string;
+	documentId: string;
+	sessionId?: string;
+	/** The source event the forward carries; the gate requires one. */
+	source?: string;
+}
+
 /**
  * Forward one accepted write. Unaccepted, unverified, or unconfigured writes
  * forward nothing and warn nothing — the gate owns that trail. Everything
- * else that stops the forward is a `memory.retain.failed` warning.
+ * else that stops the forward is a `memory.retain.failed` warning, or a
+ * parked outbox entry when the failure is transient and a sink was given.
  */
 export async function forwardRetain(
 	deps: RetainDeps,
@@ -99,34 +142,54 @@ export async function forwardRetain(
 	if (!deps.config) {
 		return { forwarded: false, bank: "", document_id: "", reason: "hindsight is not configured" };
 	}
-	const config = deps.config;
-	const bank = bankForSurface(config, result.writer);
-	const documentId = retainDocumentId(entry, result.idempotency_key);
 	const sessionId = typeof request.session_id === "string" && request.session_id.length > 0 ? request.session_id : undefined;
-	if (deps.vmGuest === true) {
-		const reason = "vm-guest";
-		await warn(deps, result.writer, sessionId, `hindsight retain refused: ${reason} (${bank}/${documentId})`, {
-			reason,
-			bank,
-			document_id: documentId,
-			entry_hash: entry.entry_hash,
-		});
-		return { forwarded: false, bank, document_id: documentId, reason };
-	}
 	const source = typeof request.source_event === "string" && request.source_event.length > 0 ? request.source_event : undefined;
-	if (!source) {
-		const reason = "retain.unsourced";
-		await warn(deps, result.writer, sessionId, `hindsight retain refused: ${reason} (${bank}/${documentId})`, {
+	return forwardEntry(deps, deps.config, {
+		entry,
+		writer: result.writer,
+		bank: bankForSurface(deps.config, result.writer),
+		documentId: retainDocumentId(entry, result.idempotency_key),
+		...(sessionId !== undefined ? { sessionId } : {}),
+		...(source !== undefined ? { source } : {}),
+	});
+}
+
+/**
+ * The outbox's replay of one parked forward. The caller re-read `entry` from
+ * the index by id (so the body sent is the body in force), and the bank and
+ * document id are the ones the live forward used — same key, `update_mode:
+ * replace`, so a replay after a success that was lost in flight stores once.
+ * The source is the entry's own `source_event`; the request that carried it
+ * is gone with the process that took it.
+ */
+export async function replayRetain(
+	deps: RetainDeps,
+	target: Omit<RetainTarget, "source">,
+): Promise<ForwardOutcome> {
+	if (!deps.config) {
+		return { forwarded: false, bank: target.bank, document_id: target.documentId, reason: "hindsight is not configured" };
+	}
+	const source = typeof target.entry.source_event === "string" && target.entry.source_event.length > 0 ? target.entry.source_event : undefined;
+	return forwardEntry(deps, deps.config, { ...target, ...(source !== undefined ? { source } : {}) });
+}
+
+async function forwardEntry(deps: RetainDeps, config: HindsightConfig, target: RetainTarget): Promise<ForwardOutcome> {
+	const { entry, writer, bank, documentId, sessionId, source } = target;
+	const refuse = async (reason: string, extra: Record<string, unknown> = {}): Promise<ForwardOutcome> => {
+		await emitRetainWarning(deps.emit, writer, sessionId, `hindsight retain refused: ${reason} (${bank}/${documentId})`, {
 			reason,
 			bank,
 			document_id: documentId,
+			...extra,
 			entry_hash: entry.entry_hash,
 		});
 		return { forwarded: false, bank, document_id: documentId, reason };
-	}
+	};
+	if (deps.vmGuest === true) return refuse("vm-guest");
+	if (!source) return refuse("retain.unsourced");
 	const context = `memory ${entry.kind} at ${entry.scope}`;
 	const metadata: Record<string, string> = {
-		surface: result.writer,
+		surface: writer,
 		scope: entry.scope,
 		kind: entry.kind,
 		source,
@@ -137,43 +200,52 @@ export async function forwardRetain(
 	const texts = [entry.text, context, ...Object.values(metadata)];
 	const rules = [...new Set(texts.flatMap((text) => findingRules(text)))];
 	if (rules.length > 0) {
-		const reason = "retain.unredacted";
-		await warn(deps, result.writer, sessionId, `hindsight retain refused: ${reason} (${bank}/${documentId})`, {
+		const refused = await refuse("retain.unredacted", { rule: rules.join(",") });
+		return { ...refused, rules };
+	}
+	// A failure past the refusals: transient ones park in the outbox when the
+	// caller gave one (the warning is the outbox's to emit, later); the rest
+	// warn now. The reason string is the plane's error kind under a fixed
+	// prefix, which is what the transient set is keyed on.
+	const fail = async (reason: string): Promise<ForwardOutcome> => {
+		if (isTransientRetainReason(reason) && deps.outbox !== undefined) {
+			const taken = deps.outbox.enqueue({
+				bank,
+				document_id: documentId,
+				entry_id: entry.id,
+				surface: writer,
+				entry_hash: entry.entry_hash,
+				...(sessionId !== undefined ? { session_id: sessionId } : {}),
+				reason,
+			});
+			if (taken) return { forwarded: false, bank, document_id: documentId, reason, queued: true };
+		}
+		await emitRetainWarning(deps.emit, writer, sessionId, `hindsight retain failed: ${reason} (${bank}/${documentId})`, {
 			reason,
 			bank,
 			document_id: documentId,
-			rule: rules.join(","),
 			entry_hash: entry.entry_hash,
 		});
-		return { forwarded: false, bank, document_id: documentId, reason, rules };
-	}
+		return { forwarded: false, bank, document_id: documentId, reason };
+	};
 	const fetchImpl = deps.fetchImpl ?? fetch;
+	const items = [{ content: entry.text, context, tags: [writer, entry.kind], metadata, document_id: documentId }];
+	const retain = (): Promise<HindsightResult<{ items_count: number }>> =>
+		deps.retainTimeoutMs !== undefined
+			? retainMemories(config, bank, items, fetchImpl, deps.retainTimeoutMs)
+			: retainMemories(config, bank, items, fetchImpl);
 	const ensured = await ensureBank(config, bank, fetchImpl);
-	if (!ensured.ok) {
-		const reason = `ensure-bank-${ensured.error.kind}`;
-		await warn(deps, result.writer, sessionId, `hindsight retain failed: ${reason} (${bank}/${documentId})`, {
-			reason,
-			bank,
-			document_id: documentId,
-			entry_hash: entry.entry_hash,
-		});
-		return { forwarded: false, bank, document_id: documentId, reason };
+	if (!ensured.ok) return fail(`ensure-bank-${ensured.error.kind}`);
+	let retained = await retain();
+	if (!retained.ok && retained.error.kind === "not-found") {
+		// The bank this process remembers as ensured answered 404: it was
+		// removed out of band. Forget it, ensure once more, retry once — a
+		// second 404 is reported as such, never looped on.
+		forgetEnsuredBank(config, bank);
+		const reEnsured = await ensureBank(config, bank, fetchImpl);
+		if (!reEnsured.ok) return fail(`ensure-bank-${reEnsured.error.kind}`);
+		retained = await retain();
 	}
-	const retained = await retainMemories(
-		config,
-		bank,
-		[{ content: entry.text, context, tags: [result.writer, entry.kind], metadata, document_id: documentId }],
-		fetchImpl,
-	);
-	if (!retained.ok) {
-		const reason = `retain-${retained.error.kind}`;
-		await warn(deps, result.writer, sessionId, `hindsight retain failed: ${reason} (${bank}/${documentId})`, {
-			reason,
-			bank,
-			document_id: documentId,
-			entry_hash: entry.entry_hash,
-		});
-		return { forwarded: false, bank, document_id: documentId, reason };
-	}
+	if (!retained.ok) return fail(`retain-${retained.error.kind}`);
 	return { forwarded: true, bank, document_id: documentId };
 }

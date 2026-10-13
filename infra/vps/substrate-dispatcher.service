@@ -42,6 +42,16 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=substrate-dispatcher
 
+# Resource ceilings (uplift-2 R7). The dispatcher's cgroup holds every Hermes
+# session it launches (KillMode=control-group above), so the ceiling covers
+# the sessions, not just the loop; 4G is the budget for a few concurrent
+# sessions on a 31 GiB host. substrate-mcp itself peaks at 88 MB RSS
+# (measured 2026-10-13). Lives in substrate.slice (MemoryLow=2G) so reclaim
+# hits co-tenants first. Restart=always above recovers an OOM kill.
+Slice=substrate.slice
+MemoryMax=4G
+TasksMax=1024
+
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full

@@ -27,6 +27,13 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=substrate-skills-sync
 
+# Resource ceilings (uplift-2 R7): a oneshot git ff-merge plus the projector;
+# substrate-mcp itself peaks at 88 MB RSS (measured 2026-10-13), so 1G is
+# headroom. Lives in substrate.slice (MemoryLow=2G) so reclaim hits co-tenants
+# first; the timer retries a killed run next tick.
+Slice=substrate.slice
+MemoryMax=1G
+
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full

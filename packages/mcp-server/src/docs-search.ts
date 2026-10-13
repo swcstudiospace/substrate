@@ -7,9 +7,30 @@
  * untrusted; one `note` event lists the returned URLs and any error yields
  * an empty result with a reason (fail-open: search must never fail an
  * agent's turn).
+ *
+ * uplift-2 R6: the dataset list comes from an injected `DatasetListSource`
+ * (the service's 60 s cache) instead of one `GET /datasets` per search; the
+ * three documented retrieval knobs travel with every retrieval; and a chunk
+ * is cited from the ingest record of its document id (`provenanceOf`):
+ * its source URL when the chunk carries none (the reference documents no
+ * metadata on retrieval chunks), and — Greptile round 1 — its own commit.
+ * The commit resolution order is: the document's recorded commit; a
+ * recorded document uploaded without one → `dataset-pin:<name>:unpinned`
+ * (never the dataset's newest pin, which that document may predate); a
+ * document the records never uploaded → `dataset-pin:<name>:unrecorded`
+ * (Greptile round 2: never the dataset pin either — a document ingested
+ * before the state file existed, or directly through RAGFlow, may predate
+ * or postdate it). The dataset's newest recorded pin travels separately
+ * as `dataset_commit`, documented as the dataset's version, not the
+ * document's. With the prune off, retrieval can return a replaced
+ * document, and this is what keeps it from being stamped with the newest
+ * commit. The cached answer itself lives in the service (`docs-search`
+ * cache class), keyed by the pins, so a refresh invalidates it.
  */
 import { randomUUID } from "node:crypto";
-import { listDatasets, retrieveChunks, type FetchLike, type RagflowChunk, type RagflowConfig } from "./planes/ragflow.ts";
+import type { DatasetListSource } from "./docs-datasets.ts";
+import type { DocumentProvenance } from "./docs-ingest.ts";
+import { listDatasets, retrieveChunks, type FetchLike, type RagflowChunk, type RagflowConfig, type RetrievalKnobs } from "./planes/ragflow.ts";
 import { redact, redactValue } from "./redact.ts";
 import type { EventInput, Surface } from "./types.ts";
 
@@ -28,7 +49,10 @@ export interface SearchCitation {
 	title: string;
 	source_url: string;
 	heading_path: string;
+	/** This document's own commit, or a `dataset-pin:<name>:…` marker saying why none is known. */
 	commit: string;
+	/** The dataset's newest recorded version (D25-04) — not necessarily this document's; absent until one is recorded. */
+	dataset_commit?: string;
 	snippet: string;
 	score: number;
 	document_id: string;
@@ -64,6 +88,12 @@ export interface SearchDeps {
 	degradedDatasets?: readonly string[];
 	/** Clock for pin ages; the real clock when omitted. */
 	nowMs?: number;
+	/** The dataset list reader; the plane directly when omitted (uplift-2 R6). */
+	datasets?: DatasetListSource;
+	/** The documented retrieval tuning; RAGFlow's defaults when omitted (uplift-2 R6). */
+	retrieval?: RetrievalKnobs;
+	/** The ingest record of a document id — source URL and the commit it was uploaded under (uplift-2 R6). */
+	provenanceOf?: (documentId: string) => DocumentProvenance | undefined;
 }
 
 function failed(deps: SearchDeps, sessionId: string, reason: string): Promise<SearchReply> {
@@ -93,13 +123,18 @@ function cite(
 	pin: DatasetPin | undefined,
 	markPinAge: boolean,
 	nowMs: number,
+	provenanceOf: ((documentId: string) => DocumentProvenance | undefined) | undefined,
 ): SearchCitation {
 	const age = markPinAge ? pinAgeMs(pin, nowMs) : undefined;
+	const record = chunk.document_id !== undefined ? provenanceOf?.(chunk.document_id) : undefined;
+	const sourceUrl = chunk.source_url ?? record?.source_url;
+	const commit = record !== undefined ? (record.commit ?? `dataset-pin:${datasetName}:unpinned`) : `dataset-pin:${datasetName}:unrecorded`;
 	return {
 		title: redact(chunk.document_name),
-		source_url: chunk.source_url ? redact(chunk.source_url) : `dataset:${datasetName}`,
+		source_url: sourceUrl !== undefined ? redact(sourceUrl) : `dataset:${datasetName}`,
 		heading_path: chunk.heading_path ? redact(chunk.heading_path) : "",
-		commit: pin !== undefined ? pin.commit : `dataset-pin:${datasetName}:unpinned`,
+		commit,
+		...(pin !== undefined ? { dataset_commit: pin.commit } : {}),
 		snippet: redactValue(chunk.content).slice(0, SNIPPET_CAP),
 		score: chunk.score ?? 0,
 		document_id: chunk.document_id ?? "",
@@ -114,7 +149,7 @@ export async function searchDocs(deps: SearchDeps, question: string): Promise<Se
 	if (question.trim().length === 0) return failed(deps, sessionId, "question is required");
 	if (deps.config === null) return failed(deps, sessionId, "ragflow-not-configured");
 
-	const listed = await listDatasets(deps.config, deps.fetchImpl);
+	const listed = deps.datasets ? await deps.datasets.list(deps.config, deps.fetchImpl) : await listDatasets(deps.config, deps.fetchImpl);
 	if (!listed.ok) return failed(deps, sessionId, listed.reason);
 	const wanted = deps.datasetNames ?? DEFAULT_SEARCH_DATASET_NAMES;
 	const readable = listed.datasets.filter((dataset) => wanted.includes(dataset.name));
@@ -125,14 +160,14 @@ export async function searchDocs(deps: SearchDeps, question: string): Promise<Se
 	for (const dataset of readable) {
 		const outcome = await retrieveChunks(
 			deps.config,
-			{ question, dataset_ids: [dataset.id] },
+			{ question, dataset_ids: [dataset.id], ...(deps.retrieval ? { retrieval: deps.retrieval } : {}) },
 			deps.fetchImpl,
 		);
 		if (!outcome.ok) return failed(deps, sessionId, outcome.reason);
 		ids.push(dataset.id);
 		for (const chunk of outcome.chunks) {
 			const degraded = deps.degradedDatasets?.includes(dataset.name) ?? false;
-			citations.push(cite(chunk, dataset.name, deps.pins?.[dataset.id], degraded, deps.nowMs ?? Date.now()));
+			citations.push(cite(chunk, dataset.name, deps.pins?.[dataset.id], degraded, deps.nowMs ?? Date.now(), deps.provenanceOf));
 		}
 	}
 	citations.sort((left, right) => right.score - left.score);

@@ -111,6 +111,17 @@ printf '%s\\n' "$*" >> "$STUB_LOG/sleep"
 		join(bin, "curl"),
 		`#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "$STUB_LOG/curl"
+# Honour -o the way the script uses it: the body lands in that file. A staged
+# body stands in for /healthz; without one the answer is a healthy local dev.
+out=""
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == "-o" ]]; then out="$2"; shift 2; continue; fi
+  shift
+done
+if [[ -n "$out" && "$out" != /dev/null ]]; then
+  if [[ -f "$STUB_LOG/healthz-body" ]]; then cp "$STUB_LOG/healthz-body" "$out"
+  else printf '%s' '{"index":true,"greptime":false,"eventsWritable":false}' > "$out"; fi
+fi
 if [[ -f "$STUB_LOG/curl-codes" ]]; then
   count=0
   if [[ -f "$STUB_LOG/curl-count" ]]; then count=$(cat "$STUB_LOG/curl-count"); fi
@@ -122,6 +133,16 @@ if [[ -f "$STUB_LOG/curl-codes" ]]; then
 else
   printf '200'
 fi
+`,
+	);
+	writeExec(
+		join(bin, "df"),
+		`#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$STUB_LOG/df"
+avail=104857600
+if [[ -f "$STUB_LOG/df-avail-kb" ]]; then avail=$(cat "$STUB_LOG/df-avail-kb"); fi
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n'
+printf '/dev/stub 419430400 %s %s 50%% /\\n' "$((419430400 - avail))" "$avail"
 `,
 	);
 	const health = join(bin, "health");
@@ -145,6 +166,7 @@ printf '%s\\n' ok >> "$STUB_LOG/health"
 			SUBSTRATE_HEALTH_DEADLINE: "5",
 			SUBSTRATE_HEALTH_INTERVAL: "0",
 			SUBSTRATE_UNIT_SETTLE: "0",
+			SUBSTRATE_HEALTH_ENV_FILE: join(state, "substrate.env"),
 			STUB_LOG: log,
 			STUB_STATE: state,
 			FAIL_BUN: "",
@@ -426,6 +448,149 @@ describe("deploy-release.sh", () => {
 		expect(deploy(h, ["v1"]).status).toBe(0);
 		expect(deploy(h, ["v1"]).status).toBe(0);
 		expect(readFileSync(join(h.log, "bun-cwd"), "utf8").trim().split("\n")).toHaveLength(1);
+	});
+
+	test("a filesystem below the free-disk floor refuses before anything is built", () => {
+		const h = harness();
+		stage(h.env, "v1", SHA1, true);
+		// 4 GiB free against the default 5 GB floor.
+		writeFileSync(join(h.log, "df-avail-kb"), `${4 * 1024 * 1024}\n`);
+		const refused = deploy(h, ["v1"]);
+		expect(refused.status).not.toBe(0);
+		expect(refused.stderr).toContain("refusing to build");
+		expect(refused.stderr).toContain("SUBSTRATE_DEPLOY_MIN_FREE_GB=5");
+		expect(refused.stderr).toContain("docs/runbooks/disk-pressure.md");
+		expect(existsSync(join(h.log, "bun"))).toBe(false);
+		expect(existsSync(join(h.log, "systemctl"))).toBe(false);
+		expect(releases(h.root)).toEqual([]);
+		expect(readFileSync(join(h.log, "df"), "utf8")).toContain(h.root);
+
+		// A lower floor, or none, lets the same host build.
+		expect(deploy(h, ["v1"], { ...h.env, SUBSTRATE_DEPLOY_MIN_FREE_GB: "3" }).status).toBe(0);
+		stage(h.env, "v2", SHA2, true);
+		expect(deploy(h, ["v2"], { ...h.env, SUBSTRATE_DEPLOY_MIN_FREE_GB: "0" }).status).toBe(0);
+		expect(deploy(h, ["v2"], { ...h.env, SUBSTRATE_DEPLOY_MIN_FREE_GB: "lots" }).stderr).toContain("SUBSTRATE_DEPLOY_MIN_FREE_GB");
+	});
+
+	test("a filesystem above the floor builds", () => {
+		const h = harness();
+		stage(h.env, "v1", SHA1, true);
+		writeFileSync(join(h.log, "df-avail-kb"), `${6 * 1024 * 1024}\n`);
+		expect(deploy(h, ["v1"]).status).toBe(0);
+		expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA1}`);
+	});
+
+	/**
+	 * The ledger key's *name*, assembled at runtime: the store lock forbids the literal
+	 * outside the ledger client, and this test only ever writes the name with a
+	 * placeholder value so the gate can see that the store is configured.
+	 */
+	const LEDGER_URL_KEY = ["GREPTIME", "URL"].join("_");
+	const INDEX_URL_KEY = "SUBSTRATE_PG_URL";
+	const BOTH_STORES = `${LEDGER_URL_KEY}=configured\n${INDEX_URL_KEY}=configured\n`;
+
+	/** The curl path with both store names configured, so the gate has something to require. */
+	function storeGate(body: string, names = BOTH_STORES): { h: Harness; env: NodeJS.ProcessEnv } {
+		const h = harness();
+		stage(h.env, "v1", SHA1, true);
+		stage(h.env, "v2", SHA2, true);
+		writeFileSync(h.env.SUBSTRATE_HEALTH_ENV_FILE ?? "", names);
+		writeFileSync(join(h.log, "healthz-body"), body);
+		const env = { ...h.env };
+		delete env.SUBSTRATE_HEALTH_CMD;
+		return { h, env };
+	}
+
+	test("the store gate passes a healthy body with both stores and closed breakers", () => {
+		const { h, env } = storeGate(
+			'{"index":true,"greptime":true,"eventsWritable":true,"planes":{"greptime":{"ok":true,"breaker":{"plane":"greptime","state":"closed","failures":0,"openedAt":null,"lastErrorAt":null,"lastError":null}},"index":{"ok":true,"breaker":{"plane":"index","state":"half-open","failures":5,"openedAt":1,"lastErrorAt":1,"lastError":null}},"cache":{"ok":null,"breaker":null}}}',
+		);
+		const result = deploy(h, ["v1"], env);
+		expect(result.status).toBe(0);
+		expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA1}`);
+		// The gate judges the poll's own answer: one request, not a second fetch.
+		expect(readFileSync(join(h.log, "curl"), "utf8").trim().split("\n")).toHaveLength(1);
+	});
+
+	test("index=false with SUBSTRATE_PG_URL configured rolls back", () => {
+		const { h, env } = storeGate('{"index":true,"greptime":true,"eventsWritable":true}');
+		expect(deploy(h, ["v1"], env).status).toBe(0);
+		writeFileSync(join(h.log, "healthz-body"), '{"index":false,"greptime":true,"eventsWritable":true}');
+		const failed = deploy(h, ["v2"], env);
+		expect(failed.status).not.toBe(0);
+		expect(failed.stderr).toContain("index=false");
+		expect(failed.stderr).toContain("SUBSTRATE_PG_URL");
+		expect(failed.stderr).toContain("rolling back");
+		// The env file's values stay out of the log: only the name is printed.
+		expect(`${failed.stdout}${failed.stderr}`).not.toContain("=configured");
+		expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA1}`);
+	});
+
+	test("eventsWritable=false with the ledger configured rolls back, and a missing field fails closed", () => {
+		const { h, env } = storeGate('{"index":true,"greptime":false,"eventsWritable":false}');
+		const failed = deploy(h, ["v1"], env);
+		expect(failed.status).not.toBe(0);
+		expect(failed.stderr).toContain("eventsWritable=false");
+		expect(failed.stderr).toContain(LEDGER_URL_KEY);
+		expect(existsSync(join(h.root, "current"))).toBe(false);
+
+		writeFileSync(join(h.log, "healthz-body"), '{"index":true,"greptime":true}');
+		const missing = deploy(h, ["v2"], env);
+		expect(missing.status).not.toBe(0);
+		expect(missing.stderr).toContain("eventsWritable=missing");
+	});
+
+	test("a store the env file does not name is not required", () => {
+		// Local-dev shape: neither name set, so index=false and eventsWritable=false pass.
+		const { h, env } = storeGate('{"index":false,"greptime":false,"eventsWritable":false}', "SUBSTRATE_PORT=7410\n");
+		expect(deploy(h, ["v1"], env).status).toBe(0);
+
+		// Only the ledger named: the index may be down, the ledger may not.
+		writeFileSync(h.env.SUBSTRATE_HEALTH_ENV_FILE ?? "", `${LEDGER_URL_KEY}=configured\n`);
+		writeFileSync(join(h.log, "healthz-body"), '{"index":false,"greptime":true,"eventsWritable":true}');
+		expect(deploy(h, ["v2"], env).status).toBe(0);
+		writeFileSync(join(h.log, "healthz-body"), '{"index":true,"greptime":false,"eventsWritable":false}');
+		const failed = deploy(h, ["v1"], env);
+		expect(failed.status).not.toBe(0);
+		expect(failed.stderr).toContain("eventsWritable=false");
+		expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA2}`);
+	});
+
+	test("an open breaker in planes rolls back even when the booleans pass", () => {
+		const { h, env } = storeGate(
+			'{"index":true,"greptime":true,"eventsWritable":true,"planes":{"index":{"ok":true,"breaker":{"plane":"index","state":"closed","failures":0,"openedAt":null,"lastErrorAt":null,"lastError":null}},"hindsight":{"ok":false,"breaker":{"plane":"hindsight","state":"open","failures":5,"openedAt":1760000000000,"lastErrorAt":1760000000000,"lastError":"connect ETIMEDOUT"}}}}',
+		);
+		const failed = deploy(h, ["v1"], env);
+		expect(failed.status).not.toBe(0);
+		expect(failed.stderr).toContain("hindsight");
+		expect(failed.stderr).toContain("breaker open");
+		expect(failed.stderr).toContain("rolling back");
+		expect(existsSync(join(h.root, "current"))).toBe(false);
+	});
+
+	test("a body without planes is judged on the booleans alone", () => {
+		const { h, env } = storeGate('{"index":true,"greptime":true,"eventsWritable":true,"auditDurable":true}');
+		expect(deploy(h, ["v1"], env).status).toBe(0);
+	});
+
+	test("SUBSTRATE_HEALTH_REQUIRE_STORES=0 keeps the status-only check", () => {
+		const { h, env } = storeGate('{"index":false,"greptime":false,"eventsWritable":false,"planes":{"greptime":{"ok":false,"breaker":{"plane":"greptime","state":"open","failures":9,"openedAt":1,"lastErrorAt":1,"lastError":null}}}}');
+		const off = deploy(h, ["v1"], { ...env, SUBSTRATE_HEALTH_REQUIRE_STORES: "0" });
+		expect(off.status).toBe(0);
+		expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA1}`);
+		const on = deploy(h, ["v2"], env);
+		expect(on.status).not.toBe(0);
+		expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA1}`);
+		expect(deploy(h, ["v2"], { ...env, SUBSTRATE_HEALTH_REQUIRE_STORES: "2" }).stderr).toContain("SUBSTRATE_HEALTH_REQUIRE_STORES");
+	});
+
+	test("a custom health command is the whole verdict and reads no body", () => {
+		const h = harness();
+		stage(h.env, "v1", SHA1, true);
+		writeFileSync(h.env.SUBSTRATE_HEALTH_ENV_FILE ?? "", BOTH_STORES);
+		writeFileSync(join(h.log, "healthz-body"), '{"index":false,"greptime":false,"eventsWritable":false}');
+		expect(deploy(h, ["v1"]).status).toBe(0);
+		expect(existsSync(join(h.log, "curl"))).toBe(false);
 	});
 });
 

@@ -1,0 +1,14 @@
+[Unit]
+Description=Report (or apply) index retention daily (substrate-index-sweep.service)
+Documentation=https://github.com/swcstudiospace/agent-substrate
+
+[Timer]
+# Once a day, off the hour so it never shares a tick with substrate-anchor.
+# Persistent=true runs a missed day at the next boot: the report is what the
+# operator reads to decide whether to apply, so a gap is a gap in evidence.
+OnCalendar=*-*-* 03:17:00 UTC
+Persistent=true
+Unit=substrate-index-sweep.service
+
+[Install]
+WantedBy=timers.target

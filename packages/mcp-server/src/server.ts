@@ -10,9 +10,9 @@
  *   POST /skills/propose propose a skill as a reviewable PR on the skills library
  *   POST /verify        recompute a graph's hash chain
  *   POST /evidence      the per-graph evidence bundle, as JSON or HTML
- *   GET  /healthz       store reachability, and whether events can actually be written
+ *   GET  /healthz       store reachability, whether events can actually be written, and each plane's breaker
  *   GET  /metrics       the OTLP metric snapshot this process holds
- *   GET  /slo           the SLO verdicts computed from it
+ *   GET  /slo           the SLO verdicts computed from it, plus burn and per-plane availability
  *
  * Hooks get REST because a hook process cannot call an MCP tool — it has no
  * client. Both paths run the same service code.
@@ -38,7 +38,7 @@ import {
 	type SubstrateConfig,
 } from "./config.ts";
 import { buildAgentCard, isKnownCardSurface } from "./agent-card.ts";
-import { DATASET_TRIGGERS, createVersionStore, latestVersion, refreshDataset, resolveDatasets } from "./docs-datasets.ts";
+import { DATASET_TRIGGERS } from "./docs-datasets.ts";
 import { scanIngestPages } from "./docs-ingest.ts";
 import { formatDrift } from "./drift.ts";
 import { InvalidEventError } from "./event.ts";
@@ -390,9 +390,41 @@ async function readBody(req: IncomingMessage, maxBytes: number = MAX_BODY_BYTES)
 	return Buffer.concat(chunks).toString("utf8");
 }
 
-function send(res: ServerResponse, status: number, body: string, contentType = "text/plain; charset=utf-8"): void {
-	res.writeHead(status, { "content-type": contentType });
+function send(
+	res: ServerResponse,
+	status: number,
+	body: string,
+	contentType = "text/plain; charset=utf-8",
+	headers: Record<string, string> = {},
+): void {
+	res.writeHead(status, { "content-type": contentType, ...headers });
 	res.end(body);
+}
+
+/**
+ * Whether an `If-None-Match` header lists `etag`, by the weak comparison RFC 9110
+ * §8.8.3.2 prescribes for it: `W/` prefixes are ignored on both sides and `*`
+ * matches any current representation. The brief's tag is weak on purpose — it
+ * validates the text, not the bytes a proxy may re-encode.
+ */
+export function etagMatches(ifNoneMatch: string | string[] | undefined, etag: string): boolean {
+	if (ifNoneMatch === undefined) return false;
+	const header = Array.isArray(ifNoneMatch) ? ifNoneMatch.join(",") : ifNoneMatch;
+	const opaque = etag.replace(/^W\//, "");
+	for (const raw of header.split(",")) {
+		const candidate = raw.trim();
+		if (candidate === "*") return true;
+		if (candidate.replace(/^W\//, "") === opaque) return true;
+	}
+	return false;
+}
+
+/** `GET /healthz` as last computed, for pollers (uplift-2 R1). */
+interface HealthMemo {
+	status: number;
+	body: Record<string, unknown>;
+	/** Epoch ms when the body was computed. */
+	at: number;
 }
 
 function sendJson(res: ServerResponse, status: number, value: unknown): void {
@@ -494,10 +526,12 @@ export function createHttpServer(
 	// sender to fix (claimed surface, kind, tokened or not) without carrying a payload.
 	const refusalLog = new AnonymousCallerLog(options.anonymousIntervalMs, options.now, options.refusalLog, "refused events");
 	refusalLog.start();
-	// Dataset versions recorded by the docs routes, for the process lifetime — the same
-	// lifetime-and-state-file split `docsIngestSeen` uses on the service side. The
-	// merge-trigger dedupes against the newest recorded version by content hash.
-	const docsVersions = createVersionStore();
+	// Dataset versions live in the service since uplift-2 R6, hydrated from and
+	// saved to the docs state file with the ingest records; the merge-trigger
+	// asks the service for the newest one and dedupes by content hash.
+	// The last `/healthz` body, served again for `config.healthzCacheMs` (uplift-2 R1).
+	const now = options.now ?? Date.now;
+	let healthMemo: HealthMemo | null = null;
 	const server = createServer(async (req, res) => {
 		const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
 		const authorization = req.headers.authorization ?? null;
@@ -573,22 +607,41 @@ export function createHttpServer(
 
 		try {
 			if (req.method === "GET" && url.pathname === "/healthz") {
-				const health = await substrate.health();
-				sendJson(res, healthStatus(health, config.greptime !== null), {
-					...health,
-					// A deployment whose audit chain is in memory is one restart from having no
-					// trail. That is a fact about the deployment, so it is reported — but it is
-					// not a 503: the substrate is serving, and refusing would be worse.
-					auditDurable: observability.audit.durable,
-					auditRecords: observability.audit.seq,
-					// Reported here as well as in every verification verdict, because a monitor is
-					// what notices it: the audit file was deleted or truncated after records were
-					// written to it, and nobody is going to ask `/evidence` about a graph until they
-					// already have a reason to.
-					...(observability.audit.missingHistory
-						? { auditMissingHistory: observability.audit.missingHistory }
-						: {}),
-				});
+				// Memoised for `healthzCacheMs` (uplift-2 R1): every collector polls this
+				// route, and each computation costs one round trip per configured plane.
+				// The status code is derived from the cached body by the same rule, so a
+				// poller sees the same verdict a fresh computation gave at `cachedAt`.
+				// `/metrics` and `/slo` are not memoised.
+				const ttl = config.healthzCacheMs;
+				const nowMs = now();
+				const stale = ttl > 0 && healthMemo !== null && nowMs - healthMemo.at < ttl;
+				let memo: HealthMemo;
+				if (stale && healthMemo !== null) {
+					memo = healthMemo;
+				} else {
+					const health = await substrate.health();
+					memo = {
+						status: healthStatus(health, config.greptime !== null),
+						at: nowMs,
+						body: {
+							...health,
+							// A deployment whose audit chain is in memory is one restart from having no
+							// trail. That is a fact about the deployment, so it is reported — but it is
+							// not a 503: the substrate is serving, and refusing would be worse.
+							auditDurable: observability.audit.durable,
+							auditRecords: observability.audit.seq,
+							// Reported here as well as in every verification verdict, because a monitor is
+							// what notices it: the audit file was deleted or truncated after records were
+							// written to it, and nobody is going to ask `/evidence` about a graph until they
+							// already have a reason to.
+							...(observability.audit.missingHistory
+								? { auditMissingHistory: observability.audit.missingHistory }
+								: {}),
+						},
+					};
+					healthMemo = memo;
+				}
+				sendJson(res, memo.status, { ...memo.body, cachedAt: new Date(memo.at).toISOString(), stale });
 				return;
 			}
 
@@ -607,12 +660,18 @@ export function createHttpServer(
 				// rolling-hour ledger, so scrape frequency is the sample rate — the
 				// dispatcher's storm-breaker polls this same array.
 				const burn = evaluateBurnSlos(observability.snapshot());
+				// The per-plane availability objectives ride beside it the same way
+				// (uplift-2 R2): judged over the rolling hour, `unconfigured` for a plane
+				// the deployment does not have, and never folded into `breached`, which
+				// stays the catalogue's own list.
+				const planes = observability.evaluatePlanes(substrate.planesConfigured());
 				// 200 either way. A breached objective is information, not a broken service,
 				// and a monitor that read this as an outage would page on a slow hour.
 				sendJson(res, 200, {
 					results,
 					breached: results.filter((result) => result.status === "breached").map((result) => result.id),
 					burn,
+					planes,
 				});
 				return;
 			}
@@ -659,13 +718,28 @@ export function createHttpServer(
 				const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
 				rememberClaim(claim, body);
 				if (!(await auditedRest(res, observability, surface, "brief", body))) return;
-				const brief = await substrate.brief({
+				const brief = await substrate.briefDetailed({
 					repo: typeof body.repo === "string" ? body.repo : undefined,
 					branch: typeof body.branch === "string" ? body.branch : undefined,
 					graph_id: typeof body.graph_id === "string" ? body.graph_id : undefined,
 					surface: (typeof body.surface === "string" ? (body.surface as Surface) : null) ?? surface ?? "claude-code",
 				});
-				send(res, 200, brief, "text/markdown; charset=utf-8");
+				// uplift-2 R1: the caller can tell a degraded or snapshot brief from a
+				// complete one and skip one it already holds. A degraded answer is still
+				// 200 — the fail-open contract is unchanged; only the headers say so.
+				// `no-cache` means revalidate, not "do not store": the ETag is the validator.
+				const headers: Record<string, string> = {
+					etag: brief.etag,
+					"cache-control": "no-cache",
+					"x-substrate-brief": brief.state,
+					...(brief.failed.length > 0 ? { "x-substrate-brief-failed": brief.failed.join(",") } : {}),
+				};
+				if (etagMatches(req.headers["if-none-match"], brief.etag)) {
+					res.writeHead(304, headers);
+					res.end();
+					return;
+				}
+				send(res, 200, brief.text, "text/markdown; charset=utf-8", headers);
 				return;
 			}
 
@@ -1029,7 +1103,10 @@ export function createHttpServer(
 			// host-local automation and is loopback-only by design), and a repeat
 			// carrying the newest version's own commit and content hash re-answers it
 			// without ingesting or recording a second version — a webhook retry is
-			// cheap by hash.
+			// cheap by hash. Since uplift-2 R6 the ingest runs in the background: the
+			// route answers 202 with a job id at once (its caller, the skills-sync
+			// tick, gives up after 3 s while a real parse takes up to a minute per
+			// page), and `?wait=1` keeps the synchronous answer for operators.
 			if (req.method === "POST" && url.pathname === "/docs/merge-trigger") {
 				if (surface === null) {
 					sendJson(res, 401, { error: MERGE_TRIGGER_NEEDS_SURFACE });
@@ -1079,7 +1156,7 @@ export function createHttpServer(
 					sendJson(res, 200, { ok: true, dataset, noop: true, reason: "docs-plane-unconfigured" });
 					return;
 				}
-				const newest = latestVersion(docsVersions, dataset);
+				const newest = await substrate.latestDocsVersion(dataset);
 				if (newest && newest.commit === fields.commit && newest.content_sha256 === fields.content_sha256) {
 					sendJson(res, 200, { ok: true, version: newest, created: false, idempotent: true });
 					return;
@@ -1087,56 +1164,24 @@ export function createHttpServer(
 				if (dataset !== LOCALLY_INGESTED_DATASET) {
 					// This server holds no checkout of that dataset, so there is nothing it
 					// can truthfully ingest: a noop that says so, and no version recorded.
+					// The trigger itself is still evidence (skills-sync fast-forwarded).
+					substrate.noteDocsTrigger(dataset);
 					sendJson(res, 200, { ok: true, dataset, noop: true, reason: "no-configured-ingest-root" });
 					return;
 				}
-				// The guarded ingest reads the plane's dataset by name and refuses
-				// `unknown-dataset`, so on a configured plane without the dataset it
-				// must exist before that ingest runs. Creation is the resolve-by-name
-				// path the refresh already owns — discover first, create only on a
-				// name-miss — run here for the first trigger, whose ingest could not
-				// otherwise ever succeed. Order stays honest: ensure, ingest, and only
-				// then record the version, so a refused ingest still records nothing.
-				const ensured = await resolveDatasets({ config: config.ragflow }, [dataset]);
-				if (!ensured.ok) {
-					// A plane refusal is an outage of the docs plane, not a permission
-					// decision about the caller: 503 with the reason, and the caller
-					// decides on a retry.
-					sendJson(res, 503, { ok: false, reason: ensured.reason });
-					return;
-				}
-				const ensuredDataset = ensured.datasets[0];
-				// The guarded server-side ingest of this checkout's configured roots.
-				const ingested = await substrate.ingestDocs(
-					{
-						dataset,
-						commit: fields.commit,
-						pages: await scanIngestPages(options.docsIngestBaseDir ?? process.cwd(), config.docsIngestRoots),
-					},
+				substrate.noteDocsTrigger(dataset);
+				const baseDir = options.docsIngestBaseDir ?? process.cwd();
+				// The service ensures the dataset, runs the guarded ingest of this
+				// checkout's roots and records the version, in that order, in the
+				// background; the 202 is audited above like the 200 was. A plane
+				// refusal under `?wait=1` is an outage of the docs plane, not a
+				// permission decision about the caller: 503 with the reason.
+				const accepted = await substrate.startDocsRefresh(
+					{ ...fields, pages: () => scanIngestPages(baseDir, config.docsIngestRoots) },
 					surface,
+					{ wait: url.searchParams.get("wait") === "1" },
 				);
-				if (!ingested.ok) {
-					// A refusal (unreadable plane, a redactor finding, a skipped sweep) is
-					// an outage of the docs plane for a trigger whose whole job is that
-					// plane: 503 with the reason, and the caller decides on a retry. No
-					// version is recorded over documents that were never ingested.
-					sendJson(res, 503, { ok: false, reason: ingested.reason });
-					return;
-				}
-				const refreshed = await refreshDataset(
-					{ config: config.ragflow, versions: docsVersions, emit: (event) => substrate.emit(event), surface },
-					fields,
-				);
-				if (refreshed.ok && ensuredDataset?.created === true) {
-					// The resolve step created the dataset this trigger first needed, so
-					// the reply says so even though the refresh's own resolve found it
-					// sitting there.
-					sendJson(res, 200, { ...refreshed, created: true });
-					return;
-				}
-				// A plane refusal is an outage of the docs plane, not a permission decision
-				// about the caller: 503 with the reason, and the caller decides on a retry.
-				sendJson(res, refreshed.ok ? 200 : 503, refreshed);
+				sendJson(res, accepted.status, accepted.body);
 				return;
 			}
 
@@ -1359,7 +1404,8 @@ async function openEventStream(
 				}
 				const positions = await greptime.eventIdsAfter(cursor, bounds.batch);
 				if (positions.length === 0) return;
-				const rows = await greptime.eventsByIds(positions.map((position) => position.id));
+				// Positions, not ids: each carries `eventTs`, which bounds the row read in time (uplift-2 R5).
+				const rows = await greptime.eventsByIds(positions);
 				const byId = new Map(rows.map((row) => [String(row.id), row]));
 				for (const position of positions) {
 					const row = byId.get(position.id);

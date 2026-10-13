@@ -68,6 +68,7 @@ describe("docs_ingest gates", () => {
 		if (!outcome.ok) throw new Error(`expected ingest: ${outcome.reason}`);
 		expect(outcome.results).toHaveLength(1);
 		expect(outcome.results[0]?.status).toBe("ingested");
+		expect(outcome.changed).toBe(true);
 		expect(fake.uploads).toHaveLength(1);
 		expect(fake.uploads[0]?.metadata).toMatchObject({
 			source_url: PAGE.source_url,
@@ -87,6 +88,8 @@ describe("docs_ingest gates", () => {
 		});
 		if (outcome.ok) throw new Error("expected a refusal");
 		expect(outcome.reason).toBe("secret-findings");
+		// A refusal that touched nothing is not a state change (Greptile round 2).
+		expect(outcome.changed).toBe(false);
 		expect(outcome.rules).toContain("openai-proj");
 		expect(fake.uploads).toHaveLength(0);
 		const warnings = events.filter((event) => event.kind === "warning");
@@ -159,6 +162,7 @@ describe("docs_ingest idempotency and images", () => {
 		const again = await ingest({ dataset: "agent-substrate", pages: [PAGE] });
 		if (!again.ok) throw new Error(`expected skip: ${again.reason}`);
 		expect(again.results[0]?.status).toBe("unchanged");
+		expect(again.changed).toBe(false);
 		expect(fake.uploads).toHaveLength(1);
 
 		const changed = await ingest({ dataset: "agent-substrate", pages: [{ ...PAGE, body: `${PAGE.body} More.` }] });

@@ -8,14 +8,16 @@
  */
 import { afterAll, describe, expect, test } from "bun:test";
 import net, { type AddressInfo } from "node:net";
-import { findCounter, sumCounter, type MetricSnapshot } from "@substrate/observability";
+import { BreakerOpenError, CircuitBreaker, findCounter, sumCounter, type MetricSnapshot, type PlaneSample } from "@substrate/observability";
 import {
+	CACHE_CONNECT_COOLDOWN_MS,
 	CACHE_TTL,
 	COMMAND_TIMEOUT_MS,
 	CONNECT_TIMEOUT_MS,
 	GRAPHS_GENERATION_KEY,
 	MEMORY_GENERATION_KEY,
 	ReadThroughCache,
+	bunRedis,
 	cacheKey,
 	createReadThroughCache,
 	graphGenerationKey,
@@ -238,9 +240,10 @@ describe("ReadThroughCache", () => {
 		expect(cache.health()).toMatchObject({ connected: true, mode: "on" });
 	});
 
-	test("a command that does not return is a bypass, and the budgets are pinned to 800 ms", async () => {
-		expect(COMMAND_TIMEOUT_MS).toBe(800);
-		expect(CONNECT_TIMEOUT_MS).toBe(800);
+	test("a command that does not return is a bypass, and the budgets are pinned to 250 ms", async () => {
+		// Sized for the loopback redis production runs (uplift-2 R1); env-overridable in config.
+		expect(COMMAND_TIMEOUT_MS).toBe(250);
+		expect(CONNECT_TIMEOUT_MS).toBe(250);
 
 		const redis = new FakeRedis();
 		redis.hang = true;
@@ -436,7 +439,8 @@ describe("the same answer with the cache off, on and broken", () => {
 		expect(b).toEqual(a);
 		expect(c).toEqual(a);
 		expect(await live.brief(request)).toEqual(a);
-		expect(on.sets).toBe(1);
+		// The brief entry and its last-good snapshot (uplift-2 R1); the hit wrote nothing.
+		expect(on.sets).toBe(2);
 		expect(a).toContain("keep the prefix");
 	});
 
@@ -482,7 +486,8 @@ describe("the same answer with the cache off, on and broken", () => {
 		expect(recovered).toContain("active");
 		expect(recovered).not.toContain("not in the index yet");
 		expect(loads).toBe(2);
-		expect(redis.sets).toBe(1);
+		// The recovered brief and, now that it is complete, its snapshot.
+		expect(redis.sets).toBe(2);
 	});
 
 	test("graph_get matches", async () => {
@@ -747,10 +752,12 @@ describe("the same answer with the cache off, on and broken", () => {
 			cache: new ReadThroughCache({ redis, enabled: true, log: () => {}, now: Date.now }),
 		});
 		await substrate.brief({ surface: "cursor", graph_id: "ut-1" });
-		expect(redis.ttls).toHaveLength(1);
+		// The brief's own TTL stops at the lease; the snapshot written beside it keeps its class TTL.
+		expect(redis.ttls).toHaveLength(2);
 		expect(redis.ttls[0]).toBeLessThanOrEqual(25);
 		expect(redis.ttls[0]).toBeGreaterThanOrEqual(1);
 		expect(redis.ttls[0]).toBeLessThan(CACHE_TTL.brief);
+		expect(redis.ttls[1]).toBe(CACHE_TTL["brief-snapshot"]);
 	});
 
 	test("a brief is cached until its generation moves, and events are not", async () => {
@@ -1145,10 +1152,13 @@ describe("Bun RedisClient", () => {
 			if (!complete) break;
 			i = cursor;
 			const [command, key, value] = args;
+			const bulk = (stored: string | undefined): string => (stored === undefined ? "$-1\r\n" : `$${Buffer.byteLength(stored)}\r\n${stored}\r\n`);
 			if (command === "HELLO") out.push(hello);
-			else if (command === "GET") {
-				const stored = key ? store.get(key) : undefined;
-				out.push(stored === undefined ? "$-1\r\n" : `$${Buffer.byteLength(stored)}\r\n${stored}\r\n`);
+			else if (command === "GET") out.push(bulk(key ? store.get(key) : undefined));
+			else if (command === "MGET") {
+				// Generation keys arrive in one round trip since uplift-2 R1.
+				const keys = args.slice(1);
+				out.push(`*${keys.length}\r\n${keys.map((name) => bulk(store.get(name))).join("")}`);
 			} else if (command === "SET" && key !== undefined && value !== undefined) {
 				store.set(key, value);
 				out.push("+OK\r\n");
@@ -1193,17 +1203,165 @@ describe("Bun RedisClient", () => {
 		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 		const port = (server.address() as AddressInfo).port;
 		try {
-			const cache = createReadThroughCache(loadConfig({ DRAGONFLY_URL: `redis://127.0.0.1:${port}` }), () => {});
+			let now = 1_000_000;
+			const cache = createReadThroughCache(loadConfig({ DRAGONFLY_URL: `redis://127.0.0.1:${port}` }), { record: () => {}, now: () => now });
 			const request = { ...read, klass: "brief" as const, args: {}, load: async () => "source" };
 			const started = Date.now();
 			expect(await cache.getOrLoad(request)).toBe("source");
 			expect(Date.now() - started).toBeLessThan(1_000);
-			expect(cache.health()).toMatchObject({ bypasses: 1, errors: 1, hits: 0, mode: "degraded" });
+			expect(cache.health()).toMatchObject({ bypasses: 1, errors: 1, hits: 0, mode: "degraded", cooldownUntil: now + CACHE_CONNECT_COOLDOWN_MS });
 
+			// Inside the cooldown nothing touches the socket: a bypass in microseconds.
 			drop = false;
+			const cooled = Date.now();
+			expect(await cache.getOrLoad(request)).toBe("source");
+			expect(Date.now() - cooled).toBeLessThan(50);
+			expect(cache.health()).toMatchObject({ bypasses: 2, errors: 2, hits: 0, misses: 0 });
+
+			now += CACHE_CONNECT_COOLDOWN_MS;
 			expect(await cache.getOrLoad(request)).toBe("source");
 			expect(await cache.getOrLoad(request)).toBe("source");
-			expect(cache.health()).toMatchObject({ hits: 1, misses: 1, mode: "on", connected: true });
+			expect(cache.health()).toMatchObject({ hits: 1, misses: 1, mode: "on", connected: true, cooldownUntil: null });
+		} finally {
+			server.close();
+		}
+	});
+
+	test("the connect cooldown is reported and expires; a breaker refusal does not start one", async () => {
+		expect(CACHE_CONNECT_COOLDOWN_MS).toBe(5_000);
+		let now = 50_000;
+		// Nothing listens here: the connect fails at once.
+		const server = net.createServer();
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		const port = (server.address() as AddressInfo).port;
+		await new Promise<void>((resolve) => server.close(() => resolve()));
+
+		const redis = bunRedis(`redis://127.0.0.1:${port}`, { now: () => now, cooldownMs: 100 });
+		await expect(redis.get("k")).rejects.toThrow();
+		expect(redis.cooldownUntil?.()).toBe(now + 100);
+		await expect(redis.get("k")).rejects.toThrow(/cooling down/);
+		now += 100;
+		expect(redis.cooldownUntil?.()).toBeNull();
+		// The cooldown has expired: the socket is tried again (and fails again).
+		await expect(redis.get("k")).rejects.not.toThrow(/cooling down/);
+
+		const gated = bunRedis(`redis://127.0.0.1:${port}`, { now: () => now, cooldownMs: 100, gate: { plane: "cache", breaker: new CircuitBreaker("cache", { failureThreshold: 1 }, () => now), observe: null } });
+		await expect(gated.get("k")).rejects.toThrow();
+		now += 100;
+		await expect(gated.get("k")).rejects.toBeInstanceOf(BreakerOpenError);
+		// The breaker refused before any socket was opened, so no new cooldown started.
+		expect(gated.cooldownUntil?.()).toBeNull();
+	});
+
+	test("a connected server that stops replying is a gate timeout, and the connection is dropped", async () => {
+		// Greptile round 1: the command deadline used to sit outside `callPlane`, so a
+		// wedged server left the command pending — the breaker saw nothing and the
+		// same dead connection was reused, costing every later request a timeout.
+		const store = new Map<string, string>();
+		let stall = false;
+		let connections = 0;
+		const server = net.createServer((socket) => {
+			connections += 1;
+			let pending = "";
+			socket.on("data", (buf) => {
+				pending += buf.toString("utf8");
+				const taken = takeCommands(store, pending);
+				pending = taken.rest;
+				// HELLO is always answered so the connect completes; later commands stall.
+				if (taken.answer.length > 0 && (!stall || taken.answer === hello)) socket.write(taken.answer);
+			});
+			socket.on("error", () => {});
+		});
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		const port = (server.address() as AddressInfo).port;
+		try {
+			const samples: PlaneSample[] = [];
+			const breaker = new CircuitBreaker("cache", { failureThreshold: 2 }, () => 0);
+			const redis = bunRedis(`redis://127.0.0.1:${port}`, {
+				gate: { plane: "cache", breaker, observe: (sample) => samples.push(sample) },
+				commandTimeoutMs: 30,
+				cooldownMs: 0,
+			});
+			expect(await redis.get("k")).toBeNull();
+			expect(connections).toBe(1);
+
+			stall = true;
+			const started = Date.now();
+			await expect(redis.get("k")).rejects.toThrow(/timed out/);
+			expect(Date.now() - started).toBeLessThan(500);
+			// Connect and command are one gated operation (Greptile round 2): no separate `connect` sample.
+			expect(samples.map((sample) => `${sample.op}:${sample.outcome}`)).toEqual(["get:ok", "get:timeout"]);
+			expect(breaker.snapshot().failures).toBe(1);
+
+			// The wedged connection was discarded: the next call opens a fresh socket.
+			stall = false;
+			expect(await redis.get("k")).toBeNull();
+			expect(connections).toBe(2);
+			expect(breaker.state()).toBe("closed");
+		} finally {
+			server.close();
+		}
+	});
+
+	test("a server that accepts connections but never answers opens the breaker; reconnects do not reset it", async () => {
+		// Greptile round 2: the connect used to be its own gated call, so every
+		// reconnect after a command timeout was a breaker success that cleared the
+		// count. The threshold was never reached and each request paid the timeout.
+		const store = new Map<string, string>();
+		let stall = true;
+		let connections = 0;
+		const server = net.createServer((socket) => {
+			connections += 1;
+			let pending = "";
+			socket.on("data", (buf) => {
+				pending += buf.toString("utf8");
+				const taken = takeCommands(store, pending);
+				pending = taken.rest;
+				// The handshake is always answered, so every connect succeeds; commands stall.
+				if (taken.answer.length > 0 && (!stall || taken.answer === hello)) socket.write(taken.answer);
+			});
+			socket.on("error", () => {});
+		});
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		const port = (server.address() as AddressInfo).port;
+		try {
+			let now = 10_000;
+			const samples: PlaneSample[] = [];
+			const breaker = new CircuitBreaker("cache", { failureThreshold: 2, openMs: 1_000 }, () => now);
+			const redis = bunRedis(`redis://127.0.0.1:${port}`, {
+				gate: { plane: "cache", breaker, observe: (sample) => samples.push(sample) },
+				now: () => now,
+				commandTimeoutMs: 30,
+				cooldownMs: 0,
+			});
+
+			await expect(redis.get("k")).rejects.toThrow(/timed out/);
+			expect(connections).toBe(1);
+			expect(breaker.snapshot().failures).toBe(1);
+			// The wedged connection was dropped; this request reconnects (the
+			// handshake succeeds) and still counts as the second failure.
+			await expect(redis.get("k")).rejects.toThrow(/timed out/);
+			expect(connections).toBe(2);
+			expect(breaker.state()).toBe("open");
+			expect(breaker.snapshot().failures).toBe(2);
+
+			// Open: refused before any socket is opened, without paying the command timeout.
+			const started = Date.now();
+			await expect(redis.get("k")).rejects.toBeInstanceOf(BreakerOpenError);
+			expect(Date.now() - started).toBeLessThan(20);
+			expect(connections).toBe(2);
+			expect(redis.cooldownUntil?.()).toBeNull();
+			expect(samples.map((sample) => `${sample.op}:${sample.outcome}`)).toEqual(["get:timeout", "get:timeout", "get:open"]);
+
+			// Half-open probe against a server that answers again: connect + command
+			// succeed as one outcome and close the breaker.
+			now += 1_000;
+			stall = false;
+			expect(breaker.state()).toBe("half-open");
+			expect(await redis.get("k")).toBeNull();
+			expect(connections).toBe(3);
+			expect(breaker.state()).toBe("closed");
+			expect(breaker.snapshot().failures).toBe(0);
 		} finally {
 			server.close();
 		}

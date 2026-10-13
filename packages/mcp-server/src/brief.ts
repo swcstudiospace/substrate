@@ -4,7 +4,9 @@
  * Composed from the index (graphs, nodes, claims), Greptime (recent actions)
  * and memory (warnings, decisions). Every source is optional: a brief with
  * fewer sections is still useful, and a missing store must degrade rather than
- * throw, because this text sits on the critical path of every prompt.
+ * throw, because this text sits on the critical path of every prompt. The
+ * reads run together under one deadline (uplift-2 R1), so the brief costs its
+ * slowest source rather than the sum, and a stalled store costs the budget.
  */
 import { earliestRefreshAt } from "./cache.ts";
 import { normalizeIdentifier } from "./event.ts";
@@ -26,7 +28,22 @@ export interface BriefSources {
 	greptime: GreptimeClient | null;
 }
 
+/** The four reads a brief is composed from, in the order their sections appear. */
+export const BRIEF_SOURCES = ["graph", "recent actions", "open graphs", "memory"] as const;
+export type BriefSource = (typeof BRIEF_SOURCES)[number];
+
+/** uplift-2 R1: one deadline for every read, and a time bound on the ledger scan. */
+export interface BriefOptions {
+	/** Shared budget for all four reads, ms. `0` (or unset) means no deadline. */
+	budgetMs?: number;
+	/** How far back the recent-actions query may look. Default `DEFAULT_RECENT_WINDOW_DAYS`. */
+	recentWindowDays?: number;
+	now?: () => number;
+}
+
 const RECENT_ACTION_LIMIT = 5;
+export const DEFAULT_RECENT_WINDOW_DAYS = 30;
+const DAY_MS = 86_400_000;
 
 /**
  * Greptime returns a TIMESTAMP column as an integer, not an ISO string, at
@@ -113,41 +130,120 @@ function swallow<T>(what: string, fallback: T): (cause: unknown) => T {
 	};
 }
 
+/** A read that outlived the budget. Its message is what the stderr line shows. */
+class BriefDeadline extends Error {
+	constructor(budgetMs: number) {
+		super(`deadline (${budgetMs} ms brief budget)`);
+		this.name = "BriefDeadline";
+	}
+}
+
+interface SharedDeadline {
+	race: <T>(read: Promise<T>) => Promise<T>;
+	clear: () => void;
+}
+
+/**
+ * One shared deadline for every read. `race` settles a read against it; a
+ * read that misses rejects with `BriefDeadline`, which the caller treats like
+ * any other failed read. The underlying promise is not cancelled — a Postgres
+ * query has no abort handle — but nobody waits for it any more, and the
+ * Greptime read carries the same bound as its own fetch timeout.
+ */
+function sharedDeadline(budgetMs: number): SharedDeadline {
+	if (budgetMs <= 0) return { race: (read) => read, clear: () => {} };
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const expired = new Promise<never>((_, reject) => {
+		timer = setTimeout(() => reject(new BriefDeadline(budgetMs)), budgetMs);
+		timer.unref?.();
+	});
+	// A brief with nothing to read never races it; without this the timer's
+	// rejection would be unhandled.
+	expired.catch(() => {});
+	return {
+		race: (read) => Promise.race([read, expired]),
+		clear: () => clearTimeout(timer),
+	};
+}
+
 /**
  * Build the Markdown brief. Never throws — a partial brief beats a blocked prompt.
  *
+ * The four reads (graph, recent actions, open graphs, memory) are independent,
+ * so they start together and are awaited in section order: an uncached brief
+ * costs the slowest source, not the sum. Every read races one shared deadline
+ * (`options.budgetMs`); a read that misses it is a failed read, no different
+ * from a store that threw.
+ *
  * `noteRefreshAt` receives the soonest lease expiry or reverify time the text
  * depends on, so a cache can drop the brief when that moment arrives.
- * `noteReadFailed` runs once when any source read threw. The text is still
- * returned — a partial brief beats a blocked prompt — but a cache must not
- * store it, or the outage would outlive the store.
+ * `noteReadFailed` runs once per source whose read threw or timed out, in
+ * section order, after every read has settled. The text is still returned —
+ * a partial brief beats a blocked prompt — but a cache must not store it, or
+ * the outage would outlive the store.
  */
 export async function composeBrief(
 	request: BriefRequest,
 	sources: BriefSources,
 	noteRefreshAt?: (at: number | null) => void,
-	noteReadFailed?: () => void,
+	noteReadFailed?: (source: BriefSource) => void,
+	options: BriefOptions = {},
 ): Promise<string> {
 	const { repo = null, branch = null, graph_id: graphId = null, surface } = request;
+	const now = options.now ?? Date.now;
+	const budgetMs = options.budgetMs ?? 0;
+	const windowDays = options.recentWindowDays ?? DEFAULT_RECENT_WINDOW_DAYS;
 	const lines: string[] = [];
 	const deadlines: Array<string | null | undefined> = [];
-	let readFailed = false;
-	const failOpen = <T>(what: string, fallback: T): ((cause: unknown) => T) => {
+	const failed = new Set<BriefSource>();
+	const failOpen = <T>(what: BriefSource, fallback: T): ((cause: unknown) => T) => {
 		return (cause) => {
-			readFailed = true;
+			failed.add(what);
 			return swallow(what, fallback)(cause);
 		};
 	};
+	const deadline = sharedDeadline(budgetMs);
+	// Start a read now, under the deadline, already failed open. A source whose
+	// call throws synchronously (a fake, a client refusing before the socket) is
+	// a failed read too, not an exception out of the brief.
+	const start = <T>(what: BriefSource, read: () => Promise<T>, fallback: T): Promise<T> => {
+		let flight: Promise<T>;
+		try {
+			flight = read();
+		} catch (cause) {
+			flight = Promise.reject(cause);
+		}
+		return deadline.race(flight).catch(failOpen(what, fallback));
+	};
+
+	// All four reads leave now; the sections below await them in order.
+	const { index, greptime } = sources;
+	const graphRead = index && graphId ? start("graph", () => index.getGraph(graphId), null as GraphView | null) : null;
+	// Recent actions in this repo, from any surface. The repo is matched in the form
+	// the write path stores it, not as the caller spelled it — see normalizeIdentifier.
+	// Bounded in time so an uncached brief never scans the repo's whole history,
+	// and in wall time by the same budget the deadline enforces, so a stalled
+	// ledger is released by the client itself rather than left running. With no
+	// budget the client's own default timeout applies.
+	const actionsRead =
+		greptime && repo
+			? start(
+					"recent actions",
+					() => greptime.sql(recentActionsSql(repo, now() - windowDays * DAY_MS), budgetMs > 0 ? budgetMs : undefined),
+					[] as Array<Record<string, unknown>>,
+				)
+			: null;
+	// Other graphs open in this repo.
+	const othersRead = index && repo ? start("open graphs", () => index.openGraphs(repo, graphId ?? undefined), [] as GraphView[]) : null;
+	// Warnings and decisions worth carrying into this session.
+	const memoryRead = index ? start("memory", () => index.memoryForBrief(repo, graphId), [] as MemoryEntry[]) : null;
 
 	const heading = [repo ?? "unknown repo", branch ? `@ ${branch}` : null, graphId ? `— ${graphId}` : null]
 		.filter(Boolean)
 		.join(" ");
 	lines.push(`## Substrate brief: ${heading}`);
 
-	let graph: GraphView | null = null;
-	if (sources.index && graphId) {
-		graph = await sources.index.getGraph(graphId).catch(failOpen("graph", null));
-	}
+	const graph: GraphView | null = graphRead ? await graphRead : null;
 
 	if (graph) {
 		const summary = [
@@ -168,16 +264,8 @@ export async function composeBrief(
 		lines.push("This graph is not in the index yet.");
 	}
 
-	// Recent actions in this repo, from any surface. The repo is matched in the form
-	// the write path stores it, not as the caller spelled it — see normalizeIdentifier.
-	if (sources.greptime && repo) {
-		const rows = await sources.greptime
-			.sql(
-				`SELECT "ts", "surface", "summary", "node_id", "step" FROM "agent_events"
-				 WHERE "repo" = ${quote(normalizeIdentifier(repo) ?? repo)} AND "kind" NOT IN ('session.start','session.end')
-				 ORDER BY "ts" DESC LIMIT ${RECENT_ACTION_LIMIT}`,
-			)
-			.catch(failOpen("recent actions", [] as Array<Record<string, unknown>>));
+	if (actionsRead) {
+		const rows = await actionsRead;
 		if (rows.length > 0) {
 			lines.push("", `Last ${rows.length} agent action${rows.length === 1 ? "" : "s"} in this repo`);
 			for (const row of rows) {
@@ -187,9 +275,8 @@ export async function composeBrief(
 		}
 	}
 
-	// Other graphs open in this repo.
-	if (sources.index && repo) {
-		const others = await sources.index.openGraphs(repo, graphId ?? undefined).catch(failOpen("open graphs", [] as GraphView[]));
+	if (othersRead) {
+		const others = await othersRead;
 		if (others.length > 0) {
 			const described = others
 				.slice(0, 4)
@@ -211,11 +298,7 @@ export async function composeBrief(
 		}
 	}
 
-	// Warnings and decisions worth carrying into this session.
-	let memory: MemoryEntry[] = [];
-	if (sources.index) {
-		memory = await sources.index.memoryForBrief(repo, graphId).catch(failOpen("memory", [] as MemoryEntry[]));
-	}
+	const memory: MemoryEntry[] = memoryRead ? await memoryRead : [];
 	const warnings = memory.filter((entry) => entry.kind === "warning");
 	const decisions = memory.filter((entry) => entry.kind === "decision");
 	if (decisions.length > 0) {
@@ -240,7 +323,22 @@ export async function composeBrief(
 		lines.push(`No substrate history for this repo yet. You are the first ${surface} session here.`);
 	}
 
-	if (readFailed) noteReadFailed?.();
+	deadline.clear();
+	for (const source of BRIEF_SOURCES) {
+		if (failed.has(source)) noteReadFailed?.(source);
+	}
 	noteRefreshAt?.(earliestRefreshAt(deadlines));
 	return lines.join("\n");
+}
+
+/**
+ * The recent-actions statement. Exported so a test can read the bound without
+ * a ledger; the SQL itself stays in this file (store lock). `since` is the
+ * ISO form `queryEvents` already compares `ts` against on the live store.
+ */
+export function recentActionsSql(repo: string, sinceMs: number): string {
+	return `SELECT "ts", "surface", "summary", "node_id", "step" FROM "agent_events"
+				 WHERE "repo" = ${quote(normalizeIdentifier(repo) ?? repo)} AND "kind" NOT IN ('session.start','session.end')
+				 AND "ts" >= ${quote(new Date(sinceMs).toISOString())}
+				 ORDER BY "ts" DESC LIMIT ${RECENT_ACTION_LIMIT}`;
 }

@@ -32,6 +32,14 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=substrate-skills-bridge
 
+# Resource ceilings (uplift-2 R7): a oneshot that groups pending skills and
+# posts proposals over loopback; substrate-mcp itself peaks at 88 MB RSS
+# (measured 2026-10-13), so 1G is headroom. Lives in substrate.slice
+# (MemoryLow=2G) so reclaim hits co-tenants first; the timer retries a killed
+# run next tick.
+Slice=substrate.slice
+MemoryMax=1G
+
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full

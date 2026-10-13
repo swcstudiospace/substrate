@@ -472,7 +472,8 @@ describe("routes", () => {
 			{ docsIngestBaseDir: docs },
 		);
 		try {
-			const response = await post("/docs/merge-trigger", { commit: "c-merge", content_sha256: "sha-merge" }, { authorization: "Bearer tok-omp" });
+			// `?wait=1` keeps the synchronous answer (uplift-2 R6); the default 202 is proven in docs-plane-hardening.test.ts.
+			const response = await post("/docs/merge-trigger?wait=1", { commit: "c-merge", content_sha256: "sha-merge" }, { authorization: "Bearer tok-omp" });
 			const body = (await response.json()) as { ok: boolean; version?: { dataset: string; dataset_id: string; version: string; commit: string }; created?: boolean };
 			expect(response.status).toBe(200);
 			expect(body.ok).toBe(true);
@@ -512,7 +513,7 @@ describe("routes", () => {
 			{ docsIngestBaseDir: docs },
 		);
 		try {
-			const response = await post("/docs/merge-trigger", { commit: "c-merge", content_sha256: "sha-merge" }, { authorization: "Bearer tok-omp" });
+			const response = await post("/docs/merge-trigger?wait=1", { commit: "c-merge", content_sha256: "sha-merge" }, { authorization: "Bearer tok-omp" });
 			const body = (await response.json()) as { ok: boolean; version?: { version: string; dataset_id: string }; created?: boolean };
 			expect(response.status).toBe(200);
 			expect(body.ok).toBe(true);
@@ -578,7 +579,7 @@ describe("routes", () => {
 			{ docsIngestBaseDir: docs },
 		);
 		try {
-			const first = await post("/docs/merge-trigger", { commit: "c-merge", content_sha256: "sha-merge" }, { authorization: "Bearer tok-omp" });
+			const first = await post("/docs/merge-trigger?wait=1", { commit: "c-merge", content_sha256: "sha-merge" }, { authorization: "Bearer tok-omp" });
 			const firstBody = (await first.json()) as { ok: boolean; version?: { version: string }; idempotent?: boolean };
 			expect(first.status).toBe(200);
 			expect(firstBody.version?.version).toBe("v1");
@@ -588,7 +589,7 @@ describe("routes", () => {
 			// The same commit and hash again: the newest version's own identity, so
 			// nothing is ingested or recorded and the reply says it answered from
 			// the record.
-			const repeat = await post("/docs/merge-trigger", { commit: "c-merge", content_sha256: "sha-merge" }, { authorization: "Bearer tok-omp" });
+			const repeat = await post("/docs/merge-trigger?wait=1", { commit: "c-merge", content_sha256: "sha-merge" }, { authorization: "Bearer tok-omp" });
 			const repeatBody = (await repeat.json()) as { ok: boolean; version?: { version: string }; idempotent?: boolean };
 			expect(repeat.status).toBe(200);
 			expect(repeatBody.idempotent).toBe(true);
@@ -598,7 +599,7 @@ describe("routes", () => {
 
 			// New content: a real second version. The pages' bytes are unchanged, so
 			// the ingest itself is unchanged by hash — only the version row moves.
-			const next = await post("/docs/merge-trigger", { commit: "c-merge-2", content_sha256: "sha-merge-2" }, { authorization: "Bearer tok-omp" });
+			const next = await post("/docs/merge-trigger?wait=1", { commit: "c-merge-2", content_sha256: "sha-merge-2" }, { authorization: "Bearer tok-omp" });
 			const nextBody = (await next.json()) as { ok: boolean; version?: { version: string } };
 			expect(next.status).toBe(200);
 			expect(nextBody.version?.version).toBe("v2");
@@ -642,7 +643,7 @@ describe("routes", () => {
 			{ docsIngestBaseDir: docs },
 		);
 		try {
-			const response = await post("/docs/merge-trigger", { commit: "c-merge", content_sha256: "sha-merge" }, { authorization: "Bearer tok-omp" });
+			const response = await post("/docs/merge-trigger?wait=1", { commit: "c-merge", content_sha256: "sha-merge" }, { authorization: "Bearer tok-omp" });
 			const body = (await response.json()) as { ok: boolean; reason?: string };
 			expect(response.status).toBe(503);
 			expect(body.ok).toBe(false);
@@ -697,7 +698,7 @@ describe("routes", () => {
 		try {
 			// The redactor refuses the whole call — never clean-and-publish — so the
 			// trigger answers 503 with the refusal reason and records nothing.
-			const refused = await post("/docs/merge-trigger", { commit: "c-leak", content_sha256: "sha-leak" }, { authorization: "Bearer tok-omp" });
+			const refused = await post("/docs/merge-trigger?wait=1", { commit: "c-leak", content_sha256: "sha-leak" }, { authorization: "Bearer tok-omp" });
 			const body = (await refused.json()) as { ok: boolean; reason?: string };
 			expect(refused.status).toBe(503);
 			expect(body.ok).toBe(false);
@@ -708,7 +709,7 @@ describe("routes", () => {
 			// The leak fixed: the next trigger is the first version — the refused
 			// one never became v1.
 			writeFileSync(join(docs, "docs/leak.md"), "passwords are long and random");
-			const again = await post("/docs/merge-trigger", { commit: "c-clean", content_sha256: "sha-clean" }, { authorization: "Bearer tok-omp" });
+			const again = await post("/docs/merge-trigger?wait=1", { commit: "c-clean", content_sha256: "sha-clean" }, { authorization: "Bearer tok-omp" });
 			const againBody = (await again.json()) as { ok: boolean; version?: { version: string } };
 			expect(again.status).toBe(200);
 			expect(againBody.version?.version).toBe("v1");
@@ -788,7 +789,11 @@ describe("GET /events/stream", () => {
 				}
 				return out;
 			},
-			eventsByIds: async (ids: string[]) => events.filter((event) => ids.includes(event.id)).map(row),
+			// The route passes positions (uplift-2 R5) so the real client can bound the read in time; bare ids stay accepted.
+			eventsByIds: async (positions: ReadonlyArray<string | { id: string }>) => {
+				const wanted = new Set(positions.map((position) => (typeof position === "string" ? position : position.id)));
+				return events.filter((event) => wanted.has(event.id)).map(row);
+			},
 			append: (event: StubEvent) => {
 				positions.push({ id: event.id, ingestedAt: nextIngestedAt });
 				nextIngestedAt += 10;

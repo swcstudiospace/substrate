@@ -8,7 +8,17 @@
  */
 import { SQL } from "bun";
 import { randomUUID } from "node:crypto";
+import { callPlane, type PlaneGate } from "@substrate/observability";
 import { normalizeIdentifier } from "./event.ts";
+import {
+	TERMINAL_GRAPH_STATUSES,
+	executeSweep,
+	planSweep,
+	sweepPolicyFromEnv,
+	type SweepPolicy,
+	type SweepReport,
+	type SweepStatement,
+} from "./index-sweep.ts";
 import { needsReverification } from "./memory-policy.ts";
 import {
 	DERIVED_KEY_WINDOW_MS,
@@ -55,10 +65,161 @@ import { redact } from "./redact.ts";
 
 /**
  * Statuses that mean a graph is finished, so it is no longer "open" in a brief.
- * These are exactly Notion's `complete` status group on the Agent Task Graph —
- * a shorter list leaves Closed and Resolved graphs showing up as live work.
+ * Shared with the sweeper, which retires graphs in exactly these statuses — a
+ * shorter list here would leave Closed and Resolved graphs showing up as live
+ * work, and a different list there would retire graphs a brief still shows.
  */
-const TERMINAL_STATUSES = ["Merged", "Resolved", "Done", "Won't Fix", "Closed", "Failed", "Canceled"];
+const TERMINAL_STATUSES: string[] = [...TERMINAL_GRAPH_STATUSES];
+
+/**
+ * Thrown by {@link IndexStore.node} for a node that is not in the index. Its own
+ * class so the plane gate can tell it from a database failure: an unknown node is
+ * an answer, not an outage, and must not count against the breaker.
+ */
+class UnknownNode extends Error {
+	constructor(graphId: string, nodeId: string) {
+		super(`unknown node ${graphId}/${nodeId}`);
+		this.name = "UnknownNode";
+	}
+}
+
+/** A store error for the breaker is anything that is not the index answering "no such node". */
+const isStoreFailure = (error: unknown): boolean => !(error instanceof UnknownNode);
+
+/** `application_name` on every connection, so `pg_stat_activity` names this client. */
+export const INDEX_APPLICATION_NAME = "substrate-mcp";
+
+/**
+ * Connections are recycled after this long whatever their state. A proxy in front
+ * of the database (Railway's TCP proxy is one) drops long-lived idle sockets
+ * silently; a bounded lifetime turns that into a planned reconnect.
+ */
+export const INDEX_MAX_LIFETIME_S = 3600;
+
+/** How long `ping` waits for `select 1` before calling the index unhealthy. */
+export const INDEX_PING_TIMEOUT_MS = 1000;
+
+/**
+ * The pool and the per-connection timeouts. Before these existed the client was
+ * `new SQL(url)`: Bun's default pool of 10 per process, no connect timeout, no
+ * `statement_timeout`, no name — and production showed 19 idle connections with
+ * an empty `application_name` and a server-side `statement_timeout` of 0.
+ */
+export interface IndexPoolSettings {
+	/** Pool size per process. */
+	max: number;
+	/** How long one connect may take. */
+	connectTimeoutMs: number;
+	/** `statement_timeout` and `idle_in_transaction_session_timeout` per connection; 0 leaves the server default. */
+	statementTimeoutMs: number;
+	/** Idle connections are closed after this long; 0 keeps them forever. */
+	idleTimeoutS: number;
+	/** Always {@link INDEX_APPLICATION_NAME}; carried here so the composed options are one object. */
+	applicationName: string;
+}
+
+export const DEFAULT_INDEX_POOL_SETTINGS: IndexPoolSettings = {
+	max: 8,
+	connectTimeoutMs: 2000,
+	statementTimeoutMs: 5000,
+	idleTimeoutS: 300,
+	applicationName: INDEX_APPLICATION_NAME,
+};
+
+/** An integer within bounds, or the fallback. Bad values never throw: the server must still boot. */
+function boundedInt(raw: string | undefined, fallback: number, min: number, max: number): number {
+	const text = raw?.trim();
+	if (!text || !/^\d+$/.test(text)) return fallback;
+	const value = Number(text);
+	if (!Number.isSafeInteger(value)) return fallback;
+	return Math.min(max, Math.max(min, value));
+}
+
+/**
+ * `SUBSTRATE_PG_POOL_MAX` (1..50), `SUBSTRATE_PG_CONNECT_TIMEOUT_MS` (200..60000),
+ * `SUBSTRATE_PG_STATEMENT_TIMEOUT_MS` (0 = unset, ≤ 600000) and
+ * `SUBSTRATE_PG_IDLE_TIMEOUT_S` (0 = never, ≤ 86400). Out-of-range values clamp
+ * and unparseable ones fall back to the defaults.
+ */
+export function indexPoolSettingsFromEnv(env: Record<string, string | undefined> = process.env): IndexPoolSettings {
+	return {
+		max: boundedInt(env.SUBSTRATE_PG_POOL_MAX, DEFAULT_INDEX_POOL_SETTINGS.max, 1, 50),
+		connectTimeoutMs: boundedInt(env.SUBSTRATE_PG_CONNECT_TIMEOUT_MS, DEFAULT_INDEX_POOL_SETTINGS.connectTimeoutMs, 200, 60_000),
+		statementTimeoutMs: boundedInt(env.SUBSTRATE_PG_STATEMENT_TIMEOUT_MS, DEFAULT_INDEX_POOL_SETTINGS.statementTimeoutMs, 0, 600_000),
+		idleTimeoutS: boundedInt(env.SUBSTRATE_PG_IDLE_TIMEOUT_S, DEFAULT_INDEX_POOL_SETTINGS.idleTimeoutS, 0, 86_400),
+		applicationName: INDEX_APPLICATION_NAME,
+	};
+}
+
+/** The options object handed to Bun's `SQL`, as the constructor composes it. */
+export interface IndexSqlOptions {
+	max: number;
+	/** Seconds: Bun's unit for every pool timeout. */
+	connectionTimeout: number;
+	idleTimeout: number;
+	maxLifetime: number;
+	/** Startup parameters, sent with every connection so no `set` round-trip is needed. */
+	connection: Record<string, string>;
+}
+
+/**
+ * Pure, so a test can assert the composed options without opening a connection.
+ * `statement_timeout` and `idle_in_transaction_session_timeout` travel as startup
+ * parameters (Bun's `connection` option), which Postgres applies before the
+ * first statement — a `set` after connect would leave the first query unbounded.
+ * The idle-in-transaction bound is the same value: a transaction left open by a
+ * crashed caller holds row locks the sweeper and the lease CAS would wait on.
+ */
+export function indexSqlOptions(settings: Partial<IndexPoolSettings> = {}): IndexSqlOptions {
+	const merged = { ...DEFAULT_INDEX_POOL_SETTINGS, ...settings, applicationName: INDEX_APPLICATION_NAME };
+	const connection: Record<string, string> = { application_name: merged.applicationName };
+	if (merged.statementTimeoutMs > 0) {
+		connection.statement_timeout = String(merged.statementTimeoutMs);
+		connection.idle_in_transaction_session_timeout = String(merged.statementTimeoutMs);
+	}
+	return {
+		max: merged.max,
+		connectionTimeout: merged.connectTimeoutMs / 1000,
+		idleTimeout: merged.idleTimeoutS,
+		maxLifetime: INDEX_MAX_LIFETIME_S,
+		connection,
+	};
+}
+
+export interface IndexStoreOptions {
+	/** Overrides on top of `indexPoolSettingsFromEnv(process.env)`. */
+	pool?: Partial<IndexPoolSettings>;
+	/** The index plane's breaker and observer. Absent means every call runs unwrapped, as before. */
+	gate?: PlaneGate | null;
+}
+
+/** What `/healthz` reports about the database's size, from `capacity()`. */
+export interface IndexCapacity {
+	databaseBytes: number;
+	/** The ten largest relations outside Timescale's own schemas. */
+	tables: Array<{ name: string; totalBytes: number; liveRows: number; deadRows: number }>;
+}
+
+/** Rejects with an error named `TimeoutError`, which the plane gate samples as a timeout. */
+function withTimeout<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
+	return new Promise<T>((resolve, reject) => {
+		const timer = setTimeout(() => {
+			const error = new Error(`${what} timed out after ${ms} ms`);
+			error.name = "TimeoutError";
+			reject(error);
+		}, ms);
+		work.then(
+			(value) => {
+				clearTimeout(timer);
+				resolve(value);
+			},
+			(cause) => {
+				clearTimeout(timer);
+				reject(cause);
+			},
+		);
+	});
+}
 
 /**
  * How many times a claim re-reads and retries after losing the compare-and-swap.
@@ -102,9 +263,18 @@ export type LinearNodeMatch = GraphNode & { repo: string | null; branch: string 
 
 export class IndexStore implements MemoryStore {
 	private readonly sql: SQL;
+	private readonly gate: PlaneGate | null;
+	readonly poolSettings: IndexPoolSettings;
 
-	constructor(connectionString: string) {
-		this.sql = new SQL(connectionString);
+	constructor(connectionString: string, options: IndexStoreOptions = {}) {
+		this.poolSettings = { ...indexPoolSettingsFromEnv(), ...options.pool, applicationName: INDEX_APPLICATION_NAME };
+		this.sql = new SQL(connectionString, indexSqlOptions(this.poolSettings));
+		this.gate = options.gate ?? null;
+	}
+
+	/** One index call under the plane gate. Without a gate it is just `fn()`. */
+	private plane<T>(op: string, fn: () => Promise<T>): Promise<T> {
+		return callPlane(this.gate, op, fn, { isFailure: isStoreFailure });
 	}
 
 	/** Idempotent DDL, run on boot. */
@@ -389,34 +559,38 @@ export class IndexStore implements MemoryStore {
 	}
 
 	async getGraph(graphId: string): Promise<GraphView | null> {
-		const rows = (await this.sql`select * from graph_index where graph_id = ${graphId}`) as GraphIndexRow[];
-		const row = rows[0];
-		if (!row) return null;
-		const nodes = ((await this.sql`
-			select * from graph_nodes where graph_id = ${graphId} order by node_id`) as GraphNode[]).map(toNode);
-		const steps = (await this.sql`
-			select * from graph_steps where graph_id = ${graphId} order by node_id, step`) as GraphStep[];
-		const edges = (await this.sql`
-			select * from graph_edges where graph_id = ${graphId} order by from_node, to_node, kind`) as GraphEdge[];
-		return { ...row, nodes, steps, edges };
+		return this.plane("graph.get", async () => {
+			const rows = (await this.sql`select * from graph_index where graph_id = ${graphId}`) as GraphIndexRow[];
+			const row = rows[0];
+			if (!row) return null;
+			const nodes = ((await this.sql`
+				select * from graph_nodes where graph_id = ${graphId} order by node_id`) as GraphNode[]).map(toNode);
+			const steps = (await this.sql`
+				select * from graph_steps where graph_id = ${graphId} order by node_id, step`) as GraphStep[];
+			const edges = (await this.sql`
+				select * from graph_edges where graph_id = ${graphId} order by from_node, to_node, kind`) as GraphEdge[];
+			return { ...row, nodes, steps, edges };
+		});
 	}
 
 	/** Graphs in a repo that are not finished — what "who else is working here" means. */
 	async openGraphs(repo: string, excludeGraphId?: string): Promise<GraphView[]> {
-		const rows = (await this.sql`
-			select * from graph_index
-			where repo = ${repo}
-			  and (status is null or status not in ${this.sql(TERMINAL_STATUSES)})
-			  and (${excludeGraphId ?? null}::text is null or graph_id <> ${excludeGraphId ?? null})
-			order by updated desc
-			limit 10`) as GraphIndexRow[];
-		const out: GraphView[] = [];
-		for (const row of rows) {
-			const nodes = ((await this.sql`
-				select * from graph_nodes where graph_id = ${row.graph_id} order by node_id`) as GraphNode[]).map(toNode);
-			out.push({ ...row, nodes, steps: [], edges: [] });
-		}
-		return out;
+		return this.plane("graph.open", async () => {
+			const rows = (await this.sql`
+				select * from graph_index
+				where repo = ${repo}
+				  and (status is null or status not in ${this.sql(TERMINAL_STATUSES)})
+				  and (${excludeGraphId ?? null}::text is null or graph_id <> ${excludeGraphId ?? null})
+				order by updated desc
+				limit 10`) as GraphIndexRow[];
+			const out: GraphView[] = [];
+			for (const row of rows) {
+				const nodes = ((await this.sql`
+					select * from graph_nodes where graph_id = ${row.graph_id} order by node_id`) as GraphNode[]).map(toNode);
+				out.push({ ...row, nodes, steps: [], edges: [] });
+			}
+			return out;
+		});
 	}
 
 	// ── leases ─────────────────────────────────────────────────────────────────
@@ -437,7 +611,7 @@ export class IndexStore implements MemoryStore {
 
 	private async node(graphId: string, nodeId: string): Promise<GraphNode> {
 		const found = await this.readNode(graphId, nodeId);
-		if (!found) throw new Error(`unknown node ${graphId}/${nodeId}`);
+		if (!found) throw new UnknownNode(graphId, nodeId);
 		return found;
 	}
 
@@ -469,6 +643,17 @@ export class IndexStore implements MemoryStore {
 		sessionId: string,
 		caller: Surface | null,
 		ttlSeconds: number = DEFAULT_LEASE_TTL_SECONDS,
+	): Promise<{ claimed: boolean; node: GraphNode; lease: LeaseView; decision: ClaimDecision }> {
+		return this.plane("lease.claim", () => this.claimNodeUnguarded(graphId, nodeId, surface, sessionId, caller, ttlSeconds));
+	}
+
+	private async claimNodeUnguarded(
+		graphId: string,
+		nodeId: string,
+		surface: Surface,
+		sessionId: string,
+		caller: Surface | null,
+		ttlSeconds: number,
 	): Promise<{ claimed: boolean; node: GraphNode; lease: LeaseView; decision: ClaimDecision }> {
 		const ttl = normalizeTtlSeconds(ttlSeconds);
 		const request = { surface, session_id: sessionId, ttl_seconds: ttl, caller };
@@ -563,6 +748,16 @@ export class IndexStore implements MemoryStore {
 		caller: Surface | null,
 		ttlSeconds: number = DEFAULT_LEASE_TTL_SECONDS,
 	): Promise<{ ok: boolean; node: GraphNode; lease: LeaseView; decision: HeartbeatDecision }> {
+		return this.plane("lease.heartbeat", () => this.heartbeatNodeUnguarded(graphId, nodeId, leaseId, caller, ttlSeconds));
+	}
+
+	private async heartbeatNodeUnguarded(
+		graphId: string,
+		nodeId: string,
+		leaseId: string,
+		caller: Surface | null,
+		ttlSeconds: number,
+	): Promise<{ ok: boolean; node: GraphNode; lease: LeaseView; decision: HeartbeatDecision }> {
 		const ttl = normalizeTtlSeconds(ttlSeconds);
 		const request = { lease_id: leaseId, ttl_seconds: ttl, caller };
 		const observed = await this.node(graphId, nodeId);
@@ -641,6 +836,16 @@ export class IndexStore implements MemoryStore {
 		caller: Surface | null,
 		ttlSeconds: number = DEFAULT_LEASE_TTL_SECONDS,
 	): Promise<{ ok: boolean; node: GraphNode; lease: LeaseView; decision: HeartbeatDecision }> {
+		return this.plane("lease.review", () => this.reviewNodeUnguarded(graphId, nodeId, leaseId, caller, ttlSeconds));
+	}
+
+	private async reviewNodeUnguarded(
+		graphId: string,
+		nodeId: string,
+		leaseId: string,
+		caller: Surface | null,
+		ttlSeconds: number,
+	): Promise<{ ok: boolean; node: GraphNode; lease: LeaseView; decision: HeartbeatDecision }> {
 		const ttl = normalizeTtlSeconds(ttlSeconds);
 		const request = { lease_id: leaseId, ttl_seconds: ttl, caller };
 		const observed = await this.node(graphId, nodeId);
@@ -689,6 +894,16 @@ export class IndexStore implements MemoryStore {
 		/** Written in the same statement as the release, for `completeNode`. */
 		alsoSetState?: NodeState,
 	): Promise<{ released: boolean; node: GraphNode; decision: ReleaseDecision }> {
+		return this.plane("lease.release", () => this.releaseNodeUnguarded(graphId, nodeId, request, caller, alsoSetState));
+	}
+
+	private async releaseNodeUnguarded(
+		graphId: string,
+		nodeId: string,
+		request: { lease_id?: string | null; force?: boolean },
+		caller: Surface | null,
+		alsoSetState?: NodeState,
+	): Promise<{ released: boolean; node: GraphNode; decision: ReleaseDecision }> {
 		const observed = await this.node(graphId, nodeId);
 		const decision = decideRelease(leaseSnapshot(observed), { ...request, caller }, Date.now());
 		if (!decision.ok) return { released: false, node: observed, decision };
@@ -732,6 +947,12 @@ export class IndexStore implements MemoryStore {
 	 * it goes to whoever asked and into the ledger, and neither is the holder.
 	 */
 	async reapExpiredLeases(
+		repo?: string | null,
+	): Promise<Array<{ graph_id: string; node_id: string; linear_issue_id: string | null; linear_identifier: string | null; notion_page: string | null; holder: LeaseHolder | null; lease_epoch: number; expired_at: string | null }>> {
+		return this.plane("lease.reap", () => this.reapExpiredLeasesUnguarded(repo));
+	}
+
+	private async reapExpiredLeasesUnguarded(
 		repo?: string | null,
 	): Promise<Array<{ graph_id: string; node_id: string; linear_issue_id: string | null; linear_identifier: string | null; notion_page: string | null; holder: LeaseHolder | null; lease_epoch: number; expired_at: string | null }>> {
 		// The holders are read in a CTE rather than out of `returning`: an UPDATE's
@@ -1335,7 +1556,7 @@ export class IndexStore implements MemoryStore {
 			: beforeId === null
 				? this.sql`and created < ${before}::timestamptz`
 				: this.sql`and (created, id) < (${before}::timestamptz, ${beforeId}::text)`;
-		const rows = (await this.sql`
+		const rows = await this.plane("memory.search", async () => (await this.sql`
 			select *, to_char(created at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as cursor_created
 			from memory_entries
 			where true
@@ -1347,7 +1568,7 @@ export class IndexStore implements MemoryStore {
 			  ${search.kind == null ? this.sql`` : this.sql`and kind = ${search.kind}`}
 			  ${cursor}
 			order by created desc, id desc
-			limit ${limit}`) as Array<Record<string, unknown>>;
+			limit ${limit}`) as Array<Record<string, unknown>>);
 		const last = rows.length === limit ? rows[rows.length - 1] : undefined;
 		return {
 			entries: rows.map((row) => toMemoryEntry(row)),
@@ -1372,27 +1593,83 @@ export class IndexStore implements MemoryStore {
 		];
 		// `in ${sql(array)}` is the form Bun's SQL expands to a value list. Passing
 		// the array straight to `any()` stringifies it into a malformed array literal.
-		const rows = (await this.sql`
+		const rows = await this.plane("memory.brief", async () => (await this.sql`
 			select *
 			from memory_entries
 			where scope in ${this.sql(scopes)}
 			  and superseded_by is null
 			order by created desc
-			limit ${limit}`) as Array<Record<string, unknown>>;
+			limit ${limit}`) as Array<Record<string, unknown>>);
 		return rows.map(toMemoryEntry);
 	}
 
-	async ping(): Promise<boolean> {
+	/**
+	 * Whether the index answers `select 1` inside `timeoutMs`. Bounded, because
+	 * `/healthz` used to wait on this for as long as a cold connect took (a second
+	 * over the proxy, unbounded when the host was gone) and the whole probe hung
+	 * on it. A timeout is `false`, and under a gate it is sampled as one.
+	 */
+	async ping(timeoutMs = INDEX_PING_TIMEOUT_MS): Promise<boolean> {
 		try {
-			await this.sql`select 1`;
+			await this.plane("ping", () => withTimeout(this.sql`select 1`.then(() => undefined), timeoutMs, "index ping"));
 			return true;
 		} catch {
 			return false;
 		}
 	}
 
-	async close(): Promise<void> {
-		await this.sql.end();
+	/**
+	 * Database size and the ten largest relations, for `/healthz`. Timescale's own
+	 * schemas are excluded so the list names this repo's tables, not chunk
+	 * bookkeeping; `pg_total_relation_size` includes indexes and TOAST, which is
+	 * what the volume actually fills with.
+	 */
+	async capacity(): Promise<IndexCapacity> {
+		return this.plane("capacity", async () => {
+			const size = (await this.sql`
+				select pg_database_size(current_database())::text as bytes`) as Array<Record<string, unknown>>;
+			const tables = (await this.sql`
+				select relname as name,
+				       pg_total_relation_size(relid)::text as total_bytes,
+				       n_live_tup::text as live_rows,
+				       n_dead_tup::text as dead_rows
+				from pg_stat_user_tables
+				where left(schemaname, 13) <> '_timescaledb_'
+				order by pg_total_relation_size(relid) desc
+				limit 10`) as Array<Record<string, unknown>>;
+			return {
+				databaseBytes: Number(size[0]?.bytes ?? 0),
+				tables: tables.map((row) => ({
+					name: String(row.name),
+					totalBytes: Number(row.total_bytes ?? 0),
+					liveRows: Number(row.live_rows ?? 0),
+					deadRows: Number(row.dead_rows ?? 0),
+				})),
+			};
+		});
+	}
+
+	/**
+	 * Apply (or only report) the documented retention — `index-sweep.ts` holds the
+	 * classes, the thresholds and the SQL. A dry-run runs the COUNT statements on
+	 * the pool. An apply runs everything inside one transaction: the counts, then
+	 * the batched deletes, so a failure half way commits nothing.
+	 */
+	async sweep(options: { apply?: boolean; now?: number; policy?: SweepPolicy } = {}): Promise<SweepReport> {
+		const policy = options.policy ?? sweepPolicyFromEnv();
+		const now = options.now ?? Date.now();
+		const steps = planSweep(policy, now);
+		const run = (sql: SQL) => async (statement: SweepStatement) =>
+			(await sql.unsafe(statement.text, statement.params as unknown[])) as Array<Record<string, unknown>>;
+		if (!options.apply) return executeSweep(run(this.sql), steps, { apply: false, batch: policy.batch, now });
+		return (await this.sql.begin((tx: SQL) =>
+			executeSweep(run(tx), steps, { apply: true, batch: policy.batch, now }),
+		)) as SweepReport;
+	}
+
+	/** `timeout` in seconds, as Bun's `end` takes it; 0 drops in-flight statements instead of waiting on them. */
+	async close(options?: { timeout?: number }): Promise<void> {
+		await this.sql.end(options);
 	}
 }
 

@@ -13,7 +13,7 @@
  * surface, refuses boot with one names-only line on stderr and exit 78
  * (EX_CONFIG) rather than silently re-attributing a token.
  */
-import { ConfigError, configWarnings, desktopConfigWarnings, loadConfig, swarmTokenWarnings } from "./config.ts";
+import { ConfigError, configWarnings, desktopConfigWarnings, hindsightConfigWarnings, loadConfig, swarmTokenWarnings } from "./config.ts";
 import { bufferRunner, createDesktopDriver } from "./desktop/driver.ts";
 import { createObservability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
@@ -43,7 +43,7 @@ for (const problem of await observability.start()) {
 	process.stderr.write(`[substrate] degraded — ${problem}\n`);
 }
 
-for (const warning of [...configWarnings(config), ...swarmTokenWarnings(config), ...desktopConfigWarnings(config)]) {
+for (const warning of [...configWarnings(config), ...swarmTokenWarnings(config), ...desktopConfigWarnings(config), ...hindsightConfigWarnings(config)]) {
 	process.stderr.write(`[substrate] misconfigured — ${warning}\n`);
 }
 
@@ -83,10 +83,11 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 	process.on(signal, () => {
 		observability.stop();
 		server.close(async () => {
-			// In-flight background retains finish first (bounded): an accepted
-			// write answered before its forward landed must not lose that
-			// forward silently on restart.
-			await substrate.drainPendingRetains(SHUTDOWN_RETAIN_MS);
+			// In-flight background retains finish first (bounded), then the retain
+			// outbox gets one due pass inside the same bound: an accepted write
+			// answered before its forward landed must not lose that forward
+			// silently on restart (the durable outbox keeps the rest).
+			await substrate.drainPendingRetains(SHUTDOWN_RETAIN_MS, { abandon: true });
 			// The last export before shutdown, so the counters a restart resets are not
 			// simply lost — and *awaited*, within a bound. Firing it and exiting
 			// immediately lost it on an idle server, where the close callback runs at once

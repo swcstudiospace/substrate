@@ -5,12 +5,21 @@
  * surfaces cannot drift. Hooks need REST (they cannot call MCP tools); agents
  * get MCP. Same code underneath.
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { decideClaim, type ClaimDecision } from "@substrate/audit";
 import { createRpc, formatMemo, hourEnd, hourIso, hourStart, isClosed, merkleRootHex, parseMemo, HOUR_MS, type Rpc, type TransactionMemo } from "@substrate/ledger";
-import { DEVNET_GENESIS_HASH } from "./anchor.ts";
-import { composeBrief, type BriefRequest } from "./brief.ts";
 import {
+	PLANES,
+	PlaneRegistry,
+	gatedFetch,
+	type BreakerSnapshot,
+	type PlaneName,
+	type PlaneSample,
+} from "@substrate/observability";
+import { DEVNET_GENESIS_HASH } from "./anchor.ts";
+import { composeBrief, type BriefRequest, type BriefSource } from "./brief.ts";
+import {
+	DOCS_GENERATION_KEY,
 	GRAPHS_GENERATION_KEY,
 	MEMORY_GENERATION_KEY,
 	createReadThroughCache,
@@ -22,7 +31,30 @@ import {
 } from "./cache.ts";
 import { isReviewToken, type SubstrateConfig } from "./config.ts";
 import { DesktopBusy, type DesktopDriver, type DesktopLogEntry, type DesktopRunResult } from "./desktop/driver.ts";
-import { ingestDocs, loadIngestRecords, saveIngestRecords, type IngestOutcome, type IngestRecord, type PageSettlement } from "./docs-ingest.ts";
+import {
+	DatasetListCache,
+	createSkillsSyncTracker,
+	createVersionStore,
+	isSyncLive,
+	latestVersion,
+	noteSkillsSyncFastForward,
+	pinsFromVersions,
+	refreshDataset,
+	resolveDatasets,
+	type DatasetVersion,
+	type SkillsSyncTracker,
+	type VersionStore,
+} from "./docs-datasets.ts";
+import {
+	documentProvenance,
+	ingestDocs,
+	loadIngestRecords,
+	saveIngestRecords,
+	type IngestOutcome,
+	type IngestPage,
+	type IngestRecord,
+	type PageSettlement,
+} from "./docs-ingest.ts";
 import { DEFAULT_SEARCH_DATASET_NAMES, searchDocs, type SearchReply } from "./docs-search.ts";
 import {
 	DEFAULT_IDLE_SECONDS,
@@ -41,9 +73,11 @@ import {
 	IngestNotRecorded,
 	queryLimit,
 	type EventQuery,
+	type LedgerCapacity,
+	type LedgerProbe,
 	type QueryableColumn,
 } from "./greptime.ts";
-import { IndexStore, leaseSnapshot, type GraphBindResult } from "./index-store.ts";
+import { IndexStore, leaseSnapshot, type GraphBindResult, type IndexCapacity } from "./index-store.ts";
 import {
 	buildHandoff,
 	handoffGaps,
@@ -59,13 +93,14 @@ import { createMirror, type Mirror, type MirrorContext, type MirrorFailure, type
 import { runDodGate, type DodEvidence } from "./dod-gate.ts";
 import { normalizeSubject } from "./memory-policy.ts";
 import { recallMemories, UNTRUSTED_MEMORY_NOTICE, type RecallReply } from "./memory-recall.ts";
-import { forwardRetain, retainDocumentId } from "./memory-retain.ts";
+import { emitRetainWarning, forwardRetain, replayRetain, retainDocumentId, type RetainDeps, type RetainOutboxSink } from "./memory-retain.ts";
 import { mergeDerivedHits, type MergedMemoryResults } from "./memory-search.ts";
 import { governMemoryWrite } from "./memory-write.ts";
 import { TEACHABLE_SUBJECT_PREFIX, isTeachable, teachableEvent } from "./teachable.ts";
-import { bankForSurface, hindsightBanksFromEnv, hindsightFromEnv } from "./planes/hindsight.ts";
-import type { FetchLike } from "./planes/ragflow.ts";
+import { bankForSurface, hindsightBanksFromEnv, hindsightFromEnv, hindsightOp, probeHealth, type HindsightConfig } from "./planes/hindsight.ts";
+import { listDatasets, ragflowOp, type FetchLike } from "./planes/ragflow.ts";
 import { redact, type SkillDocExampleRule } from "./redact.ts";
+import { RetainOutbox, type RetainDeliveryOutcome, type RetainOutboxEntry, type RetainOutboxStats } from "./retain-outbox.ts";
 import {
 	createExecFileRunner,
 	createSkillProposer,
@@ -301,6 +336,34 @@ export interface EventQueryResult {
 }
 
 /**
+ * The brief as `POST /brief` answers it (uplift-2 R1). `text` is what every
+ * caller gets; the rest lets an HTTP caller tell a complete brief from a
+ * degraded one, skip an unchanged one, and know how old a snapshot is.
+ */
+export interface BriefDetail {
+	text: string;
+	/** `complete`: every source answered. `degraded`: some did not, thin live text. `snapshot`: some did not, last-good text served instead. */
+	state: "complete" | "degraded" | "snapshot";
+	/** The sources that failed or missed the budget, in section order; empty when complete. */
+	failed: BriefSource[];
+	/** Weak validator of `text`: `W/"<first 32 hex of sha256>"`. */
+	etag: string;
+	/** When the served snapshot was composed; null unless `state` is `snapshot`. */
+	snapshotAt: string | null;
+}
+
+/** What the `brief-snapshot` cache class holds. */
+interface BriefSnapshot {
+	text: string;
+	at: string;
+}
+
+/** Weak, so a proxy that re-encodes the body still matches; 32 hex is plenty against collision for a brief. */
+export function briefEtag(text: string): string {
+	return `W/"${createHash("sha256").update(text).digest("hex").slice(0, 32)}"`;
+}
+
+/**
  * The outcome of an append.
  *
  * `stored` is reported rather than assumed: the substrate fails open, so a
@@ -468,6 +531,8 @@ export interface SubstrateObserver {
 		payload: Record<string, unknown>;
 	}): void;
 	cached?(sample: CacheSample): void;
+	/** One outbound call to a data plane, as its gate observed it (uplift-2 R2). */
+	plane?(sample: PlaneSample): void;
 	claimed?(sample: {
 		surface: Surface;
 		graph_id: string;
@@ -676,6 +741,36 @@ export function parseMemorySearch(request: MemorySearchRequest): MemorySearch {
 	return search;
 }
 
+// uplift-2 R6 — the asynchronous docs merge-trigger
+
+/** What one merge-trigger asks for: the dataset, its commit identity, and how to read the pages. */
+export interface DocsRefreshRequest {
+	dataset: string;
+	commit: string;
+	content_sha256: string;
+	/** The pages of the checkout, read when the job runs — not when it is accepted. */
+	pages: () => Promise<IngestPage[]>;
+}
+
+/** How one merge-trigger job ended, as `?wait=1` and the stderr line report it. */
+export type DocsRefreshOutcome =
+	| { ok: true; version: DatasetVersion; created: boolean; job: string }
+	| { ok: false; reason: string; job: string };
+
+interface DocsRefreshJob {
+	id: string;
+	dataset: string;
+	commit: string;
+	content_sha256: string;
+	done: Promise<DocsRefreshOutcome>;
+}
+
+/** The merge-trigger's answer: accepted into the background, or answered at once. */
+export type DocsRefreshAccepted =
+	| { status: 202; body: { accepted: true; job: string; dataset: string; commit: string; queued?: true } }
+	| { status: 200; body: DocsRefreshOutcome & { ok: true } }
+	| { status: 503; body: DocsRefreshOutcome & { ok: false } };
+
 export class Substrate {
 	readonly index: IndexStore | null;
 	readonly greptime: GreptimeClient | null;
@@ -687,17 +782,31 @@ export class Substrate {
 	readonly desktop: DesktopDriver | null;
 	private readonly observer: SubstrateObserver;
 	private readonly cache: ReadThroughCache;
+	/**
+	 * One circuit breaker per data plane (uplift-2 R2). Every outbound call —
+	 * ledger SQL, index query, cache command, Hindsight and RAGFlow request —
+	 * goes through its gate, which is what lets an outage cost microseconds
+	 * instead of a timeout per caller and lets `/healthz` name the plane.
+	 */
+	readonly planes: PlaneRegistry;
 	/** Connector-gate overrides for tests (connector fetch, URL, timeout); production reads config. */
 	private readonly dodGateTest: { fetchImpl?: typeof fetch; hermesLinearUrl?: string; timeoutMs?: number };
-	/** RAGFlow fetch override for tests; production uses the global fetch. */
+	/** RAGFlow fetch, gated. Tests inject the fake underneath; production uses the global fetch. */
 	private readonly ragflowFetch: FetchLike;
-	/** Hindsight fetch override for tests; production uses the global fetch. */
+	/** Hindsight fetch, gated. Tests inject the fake underneath; production uses the global fetch. */
 	private readonly hindsightFetch: FetchLike;
 	/** Background retains in flight, drained (bounded) on shutdown. */
 	private pendingRetains = 0;
 	private retainWaiters: Array<() => void> = [];
 	/** Latest background forward per plane document, so versions land in order. */
 	private readonly retainChains = new Map<string, Promise<void>>();
+	// uplift-2 R3 — the Hindsight retain outbox
+	/** Parked transient retain failures, replayed with backoff; durable when `SUBSTRATE_RETAIN_OUTBOX_PATH` is set. */
+	private readonly retainOutbox: RetainOutbox;
+	/** The interval drain, started on the first parked entry and left unref'd so it never holds the process. */
+	private retainDrainTimer: ReturnType<typeof setInterval> | null = null;
+	/** Set while entries were parked under a non-closed breaker; the next live success replays the backlog early. */
+	private retainRecoverPending = false;
 	/** Source-URL ingest records for hash idempotency, held for the process lifetime. */
 	private docsIngestSeen = new Map<string, IngestRecord>();
 	/** In-flight page uploads by record key, tagged with the uploading sha. */
@@ -706,8 +815,34 @@ export class Substrate {
 	private docsSeenReady: Promise<void> | null = null;
 	/** Serialized state-file saves, so overlapping ingests cannot interleave snapshots. */
 	private docsSaveChain: Promise<void> = Promise.resolve();
+	// uplift-2 R6 — RAGFlow docs plane
+	/**
+	 * Per-dataset version lists (the pins), hydrated with the ingest records
+	 * from the same state file and saved with them. Lived in the HTTP server
+	 * before, so a restart lost every pin and the merge-trigger's idempotency.
+	 */
+	private readonly docsVersions: VersionStore = createVersionStore();
+	/** The 60 s dataset-list cache every docs reader goes through; invalidated by a create or a failed list. */
+	private readonly docsDatasetList = new DatasetListCache();
+	/** Skills-sync fast-forward evidence: flipped by the first `agent-skills` merge-trigger this process sees (D25-07). */
+	private readonly docsSkillsSync: SkillsSyncTracker = createSkillsSyncTracker();
+	/** The merge-trigger jobs: one chain per dataset (a trigger queues behind the running one), plus every job still pending by id. */
+	private readonly docsRefreshChains = new Map<string, Promise<void>>();
+	private readonly docsRefreshPending = new Map<string, DocsRefreshJob>();
+	private docsRefreshSeq = 0;
 	/** `graphId/nodeId` → tail of that node's gated-completion chain. */
 	private readonly completionChains = new Map<string, Promise<void>>();
+	// uplift-2 R1 — brief fast path. The options `composeBrief` runs under, read
+	// once from config so a brief does not re-derive them per call.
+	private readonly briefOptions: { budgetMs: number; recentWindowDays: number };
+	// uplift-2 R5 — ledger emit serialisation
+	/**
+	 * `session_id` → tail of that session's append chain. Two concurrent emits
+	 * for one session used to read the same `prev` and fork the chain; here the
+	 * second waits for the first, so it reads the hash the first stored. Entries
+	 * leave when their chain settles; different sessions never wait on each other.
+	 */
+	private readonly emitChains = new Map<string, Promise<void>>();
 
 	/** `stores` is a test seam; production always builds them from config. */
 	constructor(
@@ -725,10 +860,25 @@ export class Substrate {
 		},
 		observer: SubstrateObserver = {},
 	) {
+		this.observer = observer;
+		// Built first: the stores below take their gates from it. The breaker
+		// settings come from config so a test can inject them; the observer feeds
+		// the per-plane series.
+		this.planes = new PlaneRegistry(config.breaker, (sample) => {
+			this.observer.plane?.(sample);
+		});
 		this.index =
-			stores?.index !== undefined ? stores.index : config.postgresUrl ? new IndexStore(config.postgresUrl) : null;
+			stores?.index !== undefined
+				? stores.index
+				: config.postgresUrl
+					? new IndexStore(config.postgresUrl, { gate: this.planes.gate("index") })
+					: null;
 		this.greptime =
-			stores?.greptime !== undefined ? stores.greptime : config.greptime ? new GreptimeClient(config.greptime) : null;
+			stores?.greptime !== undefined
+				? stores.greptime
+				: config.greptime
+					? new GreptimeClient(config.greptime, { gate: this.planes.gate("greptime"), ledger: config.ledger })
+					: null;
 		this.mirror =
 			stores?.mirror !== undefined
 				? stores.mirror
@@ -744,14 +894,45 @@ export class Substrate {
 			});
 		this.desktop = stores?.desktop ?? null;
 		this.dodGateTest = stores?.dodGate ?? {};
-		this.ragflowFetch = stores?.ragflowFetch ?? fetch;
-		this.hindsightFetch = stores?.hindsightFetch ?? fetch;
-		this.observer = observer;
+		this.ragflowFetch = gatedFetch(this.planes.gate("ragflow"), stores?.ragflowFetch ?? fetch, ragflowOp);
+		this.hindsightFetch = gatedFetch(this.planes.gate("hindsight"), stores?.hindsightFetch ?? fetch, hindsightOp);
 		this.cache =
 			stores?.cache ??
-			createReadThroughCache(config, (sample) => {
-				this.observer.cached?.(sample);
+			createReadThroughCache(config, {
+				record: (sample) => {
+					this.observer.cached?.(sample);
+				},
+				gate: this.planes.gate("cache"),
 			});
+		// uplift-2 R1
+		this.briefOptions = { budgetMs: config.briefBudgetMs, recentWindowDays: config.briefRecentWindowDays };
+		// uplift-2 R3: the outbox hydrates its file (if any) now, so entries parked
+		// before a restart are due again from the first drain tick. Every drop —
+		// bound, exhausted attempts, a memory-only queue at shutdown — ends with
+		// the warning the live forward would have emitted, in the same shape; a
+		// save that fails warns once too, because the queue is then no longer
+		// durable and shutdown abandons it like a memory-only one.
+		const warnRetain = (entry: RetainOutboxEntry, reason: string): void => {
+			// Tracked like a forward: the shutdown drain waits for it (bounded).
+			this.trackRetain(
+				emitRetainWarning(
+					(event) => this.emit(event),
+					entry.surface,
+					entry.session_id,
+					`hindsight retain failed: ${reason} (${entry.bank}/${entry.document_id})`,
+					{ reason, bank: entry.bank, document_id: entry.document_id, entry_hash: entry.entry_hash },
+				),
+			);
+		};
+		this.retainOutbox = new RetainOutbox({
+			path: config.retainOutbox.path,
+			max: config.retainOutbox.max,
+			maxAttempts: config.retainOutbox.maxAttempts,
+			allow: () => this.planes.gate("hindsight").breaker?.state() !== "open",
+			onDrop: (entry, cause) => warnRetain(entry, cause === "outbox-full" ? "outbox-full" : entry.last_reason),
+			onUnsaved: (entry) => warnRetain(entry, "outbox-unsaved"),
+		});
+		if (this.retainOutbox.size() > 0) this.ensureRetainDrainTimer();
 	}
 
 	/**
@@ -839,20 +1020,39 @@ export class Substrate {
 		return { index: indexOk, greptime: greptimeOk, errors };
 	}
 
+	/** The brief as text — what MCP `memory_brief` and every non-HTTP caller want. */
 	async brief(request: BriefRequest): Promise<string> {
+		return (await this.briefDetailed(request)).text;
+	}
+
+	/**
+	 * The brief with the facts the REST route puts on the wire (uplift-2 R1):
+	 * whether every source answered, which did not, a weak ETag of the text, and
+	 * — when a source failed and a last-good snapshot exists — that snapshot
+	 * instead of the thin live text.
+	 *
+	 * A snapshot is written only for a brief that was composed complete *and*
+	 * loaded live (a cache hit was written when it was loaded); it is read only
+	 * when the live compose was degraded. Degraded text is never stored
+	 * anywhere, so an outage cannot outlive the store. Every cache step is
+	 * fail-open: the brief is the answer whatever the cache did.
+	 */
+	async briefDetailed(request: BriefRequest): Promise<BriefDetail> {
 		const started = performance.now();
 		let ok = false;
 		try {
 			const noted: Array<number | null> = [];
-			let complete = true;
-			const brief = await this.cache.getOrLoad({
+			const failed: BriefSource[] = [];
+			let loaded = false;
+			const args = {
+				repo: request.repo ?? null,
+				branch: request.branch ?? null,
+				graph_id: request.graph_id ?? null,
+			};
+			const live = await this.cache.getOrLoad({
 				klass: "brief",
 				surface: request.surface,
-				args: {
-					repo: request.repo ?? null,
-					branch: request.branch ?? null,
-					graph_id: request.graph_id ?? null,
-				},
+				args,
 				// The shared graphs generation covers repo briefs and the other
 				// graphs a single-graph brief lists. The graph's own key still
 				// moves when that graph is written.
@@ -860,21 +1060,36 @@ export class Substrate {
 					? [MEMORY_GENERATION_KEY, GRAPHS_GENERATION_KEY, graphGenerationKey(request.graph_id)]
 					: [MEMORY_GENERATION_KEY, GRAPHS_GENERATION_KEY],
 				refreshAt: () => noted.at(-1) ?? null,
-				store: () => complete,
-				load: () =>
-					composeBrief(
+				store: () => failed.length === 0,
+				load: () => {
+					loaded = true;
+					return composeBrief(
 						request,
 						{ index: this.index, greptime: this.greptime },
 						(at) => {
 							noted.push(at);
 						},
-						() => {
-							complete = false;
+						(source) => {
+							failed.push(source);
 						},
-					),
+						this.briefOptions,
+					);
+				},
 			});
 			ok = true;
-			return brief;
+			if (failed.length === 0) {
+				if (loaded) {
+					await this.cache.put("brief-snapshot", request.surface, args, { text: live, at: new Date().toISOString() }, this.config.briefSnapshotTtlS);
+				}
+				return { text: live, state: "complete", failed, etag: briefEtag(live), snapshotAt: null };
+			}
+			const snapshot =
+				this.config.briefSnapshotTtlS > 0 ? await this.cache.peek<BriefSnapshot>("brief-snapshot", request.surface, args) : null;
+			if (snapshot === null) {
+				return { text: live, state: "degraded", failed, etag: briefEtag(live), snapshotAt: null };
+			}
+			const text = `_(substrate brief snapshot from ${snapshot.at}; live sources degraded: ${failed.join(", ")})_\n${snapshot.text}`;
+			return { text, state: "snapshot", failed, etag: briefEtag(text), snapshotAt: snapshot.at };
 		} finally {
 			// Timed in `finally` so a brief that threw is still in the histogram. The SLO
 			// is about what the caller waited for, and a failure is a wait too.
@@ -913,12 +1128,35 @@ export class Substrate {
 		return result;
 	}
 
+	/**
+	 * Appends for one session run one at a time (uplift-2 R5). `prev` is a
+	 * read-then-write with no sequence column, so two emits of one session in
+	 * flight together used to read the same tip and fork the chain — detected by
+	 * `verify`, never prevented. The second now waits for the first to settle
+	 * and reads the hash it stored. Other sessions, and sessionless events, are
+	 * untouched; the pattern is `completionChains`'.
+	 */
 	private async append(input: EventInput): Promise<EmitResult> {
-		let prev: string | null = null;
 		// The session id is looked up in its stored form, not as it arrived: the
 		// write path normalises it, and querying the raw value would match nothing
 		// and restart the chain on every append.
 		const sessionId = normalizeIdentifier(input.session_id);
+		if (!this.greptime || !sessionId) return this.appendChained(input, sessionId);
+		const previous = this.emitChains.get(sessionId) ?? Promise.resolve();
+		const { promise: gate, resolve: done } = Promise.withResolvers<void>();
+		const tail = previous.then(() => gate);
+		this.emitChains.set(sessionId, tail);
+		await previous;
+		try {
+			return await this.appendChained(input, sessionId);
+		} finally {
+			done();
+			if (this.emitChains.get(sessionId) === tail) this.emitChains.delete(sessionId);
+		}
+	}
+
+	private async appendChained(input: EventInput, sessionId: string | null): Promise<EmitResult> {
+		let prev: string | null = null;
 		if (this.greptime && sessionId) {
 			prev = await this.greptime.lastHash(sessionId).catch(() => null);
 		}
@@ -1089,28 +1327,25 @@ export class Substrate {
 		}
 		if (result.outcome === "accepted" || commitUncertain) await this.cache.bump(MEMORY_GENERATION_KEY);
 		// The Hindsight forward runs after the accepted reply is decided and never
-		// blocks it: Postgres stays the governed store (D26-04). A refusal or plane
-		// failure warns without re-opening the write. A successful retain bumps the
-		// generation again: a recall cached in the gap between the index bump and
-		// the retain landing must not hide the fresh memory for a whole TTL.
+		// blocks it: Postgres stays the governed store (D26-04). A refusal warns
+		// without re-opening the write; a transient plane failure parks in the
+		// retain outbox and is replayed with backoff (uplift-2 R3), the warning
+		// deferred to its last attempt. A successful retain bumps the generation
+		// again: a recall cached in the gap between the index bump and the retain
+		// landing must not hide the fresh memory for a whole TTL — and drops any
+		// parked copy of the same document, which the success just made stale.
 		// Forwards to one document run in acceptance order: a stalled older
 		// version must not land after (and replace) its accepted replacement.
 		if (result.outcome === "accepted" && result.verified_persisted && result.entry) {
 			const entry = result.entry;
 			const hindsight = hindsightFromEnv();
 			const run = (): Promise<void> => {
-				return forwardRetain(
-					{
-						config: hindsight,
-						fetchImpl: this.hindsightFetch,
-						vmGuest: this.config.vmGuest,
-						emit: (event) => this.emit(event),
-					},
-					request,
-					result,
-				)
+				return forwardRetain(this.retainDeps(hindsight), request, result)
 					.then((outcome) => {
-						if (outcome.forwarded) return this.cache.bump(MEMORY_GENERATION_KEY);
+						if (!outcome.forwarded) return;
+						this.retainOutbox.forget(outcome.bank, outcome.document_id);
+						this.afterLiveRetain();
+						return this.cache.bump(MEMORY_GENERATION_KEY);
 					})
 					.then(() => undefined)
 					.catch(() => undefined);
@@ -1120,14 +1355,7 @@ export class Substrate {
 				return result;
 			}
 			const chainKey = `${hindsight.url} ${bankForSurface(hindsight, result.writer)} ${retainDocumentId(entry, result.idempotency_key)}`;
-			const previous = this.retainChains.get(chainKey);
-			const flight = (previous ?? Promise.resolve()).then(run, run);
-			this.retainChains.set(chainKey, flight);
-			this.trackRetain(
-				flight.finally(() => {
-					if (this.retainChains.get(chainKey) === flight) this.retainChains.delete(chainKey);
-				}),
-			);
+			this.trackRetain(this.chainRetain(chainKey, run));
 		}
 		return result;
 	}
@@ -1190,7 +1418,10 @@ export class Substrate {
 	/**
 	 * The list search: governed index entries first, Hindsight hits appended
 	 * after them marked derived (D26-05). A plane outage yields index-only
-	 * results with `{degraded: true, reason}` — never a refusal.
+	 * results with `{degraded: true, reason}` — never a refusal. The recall
+	 * leg runs under its own shorter budget (`HINDSIGHT_SEARCH_RECALL_BUDGET_MS`,
+	 * uplift-2 R3): a slow plane costs a search at most that long, and the
+	 * reply says `recall-timeout` so the caller can tell slow from down.
 	 */
 	async searchMemory(
 		query: string,
@@ -1213,7 +1444,7 @@ export class Substrate {
 			load: async () => {
 				const [entries, recall] = await Promise.all([
 					this.index ? this.index.searchMemory(query, scope, limit, includeSuperseded) : Promise.resolve([]),
-					this.recallMemories({ query }, surface),
+					this.recallMemories({ query }, surface, this.config.hindsightBudgets.searchRecallBudgetMs),
 				]);
 				return mergeDerivedHits(entries, recall, scope);
 			},
@@ -1285,9 +1516,12 @@ export class Substrate {
 	 * answers empty with a reason, never a throw. Reads emit nothing. Never
 	 * called from the brief's synchronous compose path. A guest instance
 	 * refuses before the cache lookup, so neither the tool nor the recall
-	 * inside `memory_search` leaks shared memories out of the guest.
+	 * inside `memory_search` leaks shared memories out of the guest. The
+	 * fan-out budget is `HINDSIGHT_RECALL_BUDGET_MS` unless the caller names a
+	 * shorter one (the search leg does); a non-degraded reply is budget-
+	 * independent, so the cache key ignores it.
 	 */
-	async recallMemories(input: { query?: unknown }, callerSurface: string | null): Promise<RecallReply> {
+	async recallMemories(input: { query?: unknown }, callerSurface: string | null, budgetMs?: number): Promise<RecallReply> {
 		if (this.config.vmGuest) {
 			return { results: [], degraded: true, notice: UNTRUSTED_MEMORY_NOTICE, reason: "vm-guest" };
 		}
@@ -1305,7 +1539,18 @@ export class Substrate {
 			// A degraded answer (outage, partial) is still the answer, but it
 			// must not sit in the cache: the next call re-probes the plane.
 			store: (reply) => !reply.degraded,
-			load: () => recallMemories({ config, banks, vmGuest: this.config.vmGuest, fetchImpl: this.hindsightFetch }, query, callerSurface),
+			load: () =>
+				recallMemories(
+					{
+						config,
+						banks,
+						vmGuest: this.config.vmGuest,
+						fetchImpl: this.hindsightFetch,
+						budgetMs: budgetMs ?? this.config.hindsightBudgets.recallBudgetMs,
+					},
+					query,
+					callerSurface,
+				),
 		});
 	}
 
@@ -1324,15 +1569,151 @@ export class Substrate {
 	}
 
 	/**
-	 * Wait for in-flight background retains, within a bound. A hanging plane
-	 * must not delay a stop into a SIGKILL; a finished one must not be lost
-	 * silently. Resolves either way.
+	 * Wait for in-flight background retains, within a bound, then give the
+	 * retain outbox one pass at its due entries inside what is left of it. A
+	 * hanging plane must not delay a stop into a SIGKILL; a finished one must
+	 * not be lost silently. Resolves either way. With `abandon` (shutdown) a
+	 * memory-only outbox gives up what is left with the warning each entry
+	 * would eventually have had — the process is about to forget them; a
+	 * durable outbox keeps them for the next boot. The outbox's drop warnings
+	 * are tracked like forwards, so they settle inside the same bound.
 	 */
-	async drainPendingRetains(timeoutMs = 10_000): Promise<void> {
+	async drainPendingRetains(timeoutMs = 10_000, options: { abandon?: boolean } = {}): Promise<void> {
+		const deadline = Date.now() + timeoutMs;
+		await this.awaitTrackedRetains(timeoutMs);
+		const left = deadline - Date.now();
+		if (left > 0 && this.retainOutbox.size() > 0) {
+			await Promise.race([this.drainRetainOutbox(), Bun.sleep(left)]);
+		}
+		if (options.abandon === true && !this.retainOutbox.durable) this.retainOutbox.abandonAll();
+		await this.awaitTrackedRetains(Math.max(0, deadline - Date.now()));
+	}
+
+	private async awaitTrackedRetains(timeoutMs: number): Promise<void> {
 		if (this.pendingRetains === 0) return;
 		const { promise, resolve } = Promise.withResolvers<void>();
 		this.retainWaiters.push(resolve);
 		await Promise.race([promise, Bun.sleep(timeoutMs)]);
+	}
+
+	// uplift-2 R3 — the retain outbox's wiring
+
+	/** The outbox's observable state, for operators; `/healthz` has no hook for plane extras, so it lives here. */
+	retainOutboxStats(): RetainOutboxStats {
+		return this.retainOutbox.stats();
+	}
+
+	/**
+	 * The forward's dependencies. The live forward parks transient failures in
+	 * the outbox; a replay hands in a sink that only says "deferred", because
+	 * the outbox entry being replayed reschedules itself. Either way the sink
+	 * taking the failure is what stops the immediate warning.
+	 */
+	private retainDeps(hindsight: HindsightConfig | null, mode: "live" | "replay" = "live"): RetainDeps {
+		const sink: RetainOutboxSink =
+			mode === "replay"
+				? { enqueue: () => true }
+				: {
+						enqueue: (candidate) => {
+							this.retainOutbox.enqueue(candidate);
+							this.ensureRetainDrainTimer();
+							// Parked while the breaker is not closed: the first live
+							// success after it closes replays everything early.
+							if (this.planes.gate("hindsight").breaker?.state() !== "closed") this.retainRecoverPending = true;
+							return true;
+						},
+					};
+		return {
+			config: hindsight,
+			fetchImpl: this.hindsightFetch,
+			vmGuest: this.config.vmGuest,
+			emit: (event: EventInput) => this.emit(event),
+			outbox: sink,
+			retainTimeoutMs: this.config.hindsightBudgets.retainTimeoutMs,
+		};
+	}
+
+	/** A live retain landed: if the plane had been refusing, replay the whole backlog now rather than on its schedule. */
+	private afterLiveRetain(): void {
+		if (!this.retainRecoverPending && !this.retainOutbox.held()) return;
+		this.retainRecoverPending = false;
+		if (this.retainOutbox.size() > 0) void this.drainRetainOutbox({ all: true });
+	}
+
+	private ensureRetainDrainTimer(): void {
+		if (this.retainDrainTimer !== null) return;
+		this.retainDrainTimer = setInterval(() => {
+			void this.drainRetainOutbox();
+		}, this.config.retainOutbox.drainMs);
+		this.retainDrainTimer.unref();
+	}
+
+	/**
+	 * One outbox pass: serial, one plane call per entry, skipped by the outbox
+	 * while the breaker is open. `all` ignores the backoff schedule — the
+	 * recovery path and tests use it; the timer and shutdown replay due entries.
+	 */
+	drainRetainOutbox(options: { all?: boolean } = {}): Promise<void> {
+		return this.retainOutbox.drain((entry) => this.deliverParkedRetain(entry), options);
+	}
+
+	/**
+	 * Run one forward (live or replay) at the tail of its document's chain, so
+	 * forwards to one plane document land in the order they were decided: a
+	 * stalled older body — a retry included — can never replace a newer one
+	 * with `update_mode: replace`. The returned promise is the caller's own
+	 * flight; the chain itself only remembers that it settled.
+	 */
+	private chainRetain<T>(chainKey: string, run: () => Promise<T>): Promise<T> {
+		const previous = this.retainChains.get(chainKey) ?? Promise.resolve();
+		const flight = previous.then(run, run);
+		const tail = flight.then(
+			() => undefined,
+			() => undefined,
+		);
+		this.retainChains.set(chainKey, tail);
+		void tail.finally(() => {
+			if (this.retainChains.get(chainKey) === tail) this.retainChains.delete(chainKey);
+		});
+		return flight;
+	}
+
+	/**
+	 * Replay one parked forward, at the tail of its document's chain so a live
+	 * forward decided earlier always lands first. Once its turn comes the
+	 * replay re-checks that it is still parked (a live success meanwhile
+	 * forgot it) and re-reads the entry by id so the body sent is the body in
+	 * force: gone or superseded means the parked copy is stale and is dropped
+	 * without a word (its replacement had its own forward). An index read
+	 * failure is transient — it costs an attempt, never the entry.
+	 */
+	private deliverParkedRetain(parked: RetainOutboxEntry): Promise<RetainDeliveryOutcome> {
+		const hindsight = hindsightFromEnv();
+		if (!hindsight || !this.index) return Promise.resolve("gone");
+		const index = this.index;
+		return this.chainRetain(`${hindsight.url} ${parked.bank} ${parked.document_id}`, async () => {
+			if (!this.retainOutbox.holds(parked)) return "gone";
+			let current: MemoryEntry | null;
+			try {
+				current = await index.readEntry(parked.entry_id);
+			} catch {
+				return { transient: "index-unreachable" };
+			}
+			if (!current || current.superseded_by !== undefined) return "gone";
+			const outcome = await replayRetain(this.retainDeps(hindsight, "replay"), {
+				entry: current,
+				writer: parked.surface,
+				bank: parked.bank,
+				documentId: parked.document_id,
+				...(parked.session_id !== undefined ? { sessionId: parked.session_id } : {}),
+			});
+			if (outcome.forwarded) {
+				await this.cache.bump(MEMORY_GENERATION_KEY).catch(() => undefined);
+				return "delivered";
+			}
+			if (outcome.queued === true) return { transient: outcome.reason ?? "retain-network" };
+			return "permanent";
+		});
 	}
 
 	/**
@@ -1826,7 +2207,14 @@ export class Substrate {
 		if (!this.index) throw new Error("graph_heartbeat requires SUBSTRATE_PG_URL");
 		const ttl = normalizeTtlSeconds(ttlSeconds, this.config.leaseTtlSeconds);
 		const result = await this.index.heartbeatNode(graphId, nodeId, leaseId, caller, ttl);
-		if (result.ok) await this.bumpGraph(graphId);
+		// Only this graph's generation, not the shared `gen:graphs` (uplift-2 R1).
+		// A renewed lease changes no text a repo brief shows before its
+		// `refreshAt`: the brief lists other graphs as held or free, and a
+		// heartbeat keeps a held lease held. Bumping the shared key here
+		// invalidated every brief on the host once per heartbeat, which is why the
+		// cache hit ratio measured 1 %. Claims, releases, completions and
+		// registrations still bump both, because those do change that text.
+		if (result.ok) await this.cache.bump(graphGenerationKey(graphId));
 		return {
 			ok: result.ok,
 			lease: result.lease,
@@ -2350,6 +2738,16 @@ export class Substrate {
 	 * or an unknown dataset scope yields `{chunks: [], degraded: true, reason}`
 	 * with a warning event, never a throw. `datasets` names configured
 	 * datasets; unknown names are ignored and raw ids are never accepted.
+	 *
+	 * uplift-2 R6: the answer is cached under the `docs-search` class, keyed
+	 * by the normalised question, the dataset names and the current pins,
+	 * and invalidated by `gen:docs` (bumped by every ingest and every
+	 * recorded version); a degraded reply is never stored. Citations carry
+	 * their own document's commit; the dataset's newest recorded version
+	 * travels separately as `dataset_commit` (Greptile round 2), and
+	 * `agent-skills` is marked pin-aged until this process has seen
+	 * skills-sync fast-forward evidence (D25-07). The dataset list comes
+	 * from the 60 s cache, so a search costs N retrievals, not 1 + N calls.
 	 */
 	async searchDocs(
 		input: { question?: unknown; datasets?: unknown; session_id?: unknown },
@@ -2361,33 +2759,56 @@ export class Substrate {
 		const names = Array.isArray(input.datasets)
 			? input.datasets.filter((name): name is string => typeof name === "string").filter((name) => DEFAULT_SEARCH_DATASET_NAMES.includes(name))
 			: [...DEFAULT_SEARCH_DATASET_NAMES];
-		return searchDocs(
-			{
-				config: this.config.ragflow,
-				datasetNames: names,
-				emit: (event) => this.emit(event),
-				surface,
-				...(sessionId !== undefined ? { sessionId } : {}),
-				fetchImpl: this.ragflowFetch,
-			},
-			question,
-		);
+		await this.hydrateDocsSeen();
+		const pins = pinsFromVersions(this.docsVersions);
+		const degradedDatasets = isSyncLive(this.docsSkillsSync) ? [] : ["agent-skills"];
+		const load = (): Promise<SearchReply> =>
+			searchDocs(
+				{
+					config: this.config.ragflow,
+					datasetNames: names,
+					pins,
+					degradedDatasets,
+					emit: (event) => this.emit(event),
+					surface,
+					...(sessionId !== undefined ? { sessionId } : {}),
+					fetchImpl: this.ragflowFetch,
+					datasets: this.docsDatasetList,
+					retrieval: this.config.docsRetrieval,
+					provenanceOf: (documentId) => documentProvenance(this.docsIngestSeen, documentId),
+				},
+				question,
+			);
+		// An empty question and an unconfigured plane are answered (degraded)
+		// without touching the cache: there is nothing to key on.
+		if (question.trim().length === 0 || this.config.ragflow === null) return load();
+		return this.cache.getOrLoad<SearchReply>({
+			klass: "docs-search",
+			surface,
+			args: { question: question.trim().replace(/\s+/g, " ").toLowerCase(), datasets: [...names].sort(), pins, degraded: degradedDatasets },
+			generations: [DOCS_GENERATION_KEY],
+			load,
+			store: (reply) => reply.degraded !== true,
+		});
 	}
 
 	/**
-	 * Hydrate ingest records from the state file, once per process.
+	 * Hydrate ingest records and dataset versions from the state file, once
+	 * per process.
 	 *
-	 * A missing file simply means an empty map; a corrupt one is reported
+	 * A missing file simply means empty tables; a corrupt one is reported
 	 * on stderr and likewise starts empty. Either way ingest proceeds —
-	 * losing dedup degrades to a duplicate upload, never to a refusal.
+	 * losing dedup degrades to a duplicate upload, losing pins to
+	 * `unpinned` citations, never to a refusal.
 	 */
 	private hydrateDocsSeen(): Promise<void> {
 		if (!this.docsSeenReady) {
 			this.docsSeenReady = (async () => {
 				const file = this.config.docsStateFile;
 				if (!file) return;
-				const { records, problem } = await loadIngestRecords(file);
+				const { records, versions, problem } = await loadIngestRecords(file);
 				for (const [key, record] of records) this.docsIngestSeen.set(key, record);
+				for (const [dataset, list] of versions) if (!this.docsVersions.has(dataset)) this.docsVersions.set(dataset, list);
 				if (problem) process.stderr.write(`[substrate] ${problem}\n`);
 			})();
 		}
@@ -2395,22 +2816,21 @@ export class Substrate {
 	}
 
 	/**
-	 * Persist ingest records best-effort, one save at a time. A failing disk
-	 * never fails the ingest it just completed; the reason lands on stderr
-	 * either way. Saves chain so overlapping ingests write whole snapshots
-	 * in order instead of interleaving them.
+	 * Persist ingest records and versions best-effort, one save at a time.
+	 * A failing disk never fails the ingest it just completed; the reason
+	 * lands on stderr either way. Saves chain so overlapping ingests write
+	 * whole snapshots in order instead of interleaving them.
 	 */
 	private persistDocsSeen(): Promise<void> {
 		const file = this.config.docsStateFile;
 		if (!file) return Promise.resolve();
 		this.docsSaveChain = this.docsSaveChain.then(() =>
-			saveIngestRecords(file, this.docsIngestSeen).catch((cause: unknown) => {
+			saveIngestRecords(file, this.docsIngestSeen, this.docsVersions).catch((cause: unknown) => {
 				process.stderr.write(`[substrate] docs ingest records not saved — ${String(cause)}\n`);
 			}),
 		);
 		return this.docsSaveChain;
 	}
-
 
 	/**
 	 * DOCS-02: ingest pages into a docs dataset through the substrate (D25-05).
@@ -2419,7 +2839,11 @@ export class Substrate {
 	 * a redactor finding, a missing source URL, an out-of-roots path or an
 	 * over-cap page is refused with a locator-only warning event — nothing is
 	 * uploaded. `dataset` names a configured dataset; raw ids are never
-	 * accepted.
+	 * accepted. An ingest that stored anything — a successful one, or one
+	 * that failed after an earlier page landed (and, with the prune on,
+	 * deleted its predecessor) — persists the records and bumps the docs
+	 * generation, so every cached `docs_search` answer is invalidated and a
+	 * restart never names a pruned document (Greptile round 2).
 	 */
 	async ingestDocs(
 		input: { dataset?: unknown; commit?: unknown; pages?: unknown; session_id?: unknown },
@@ -2442,6 +2866,8 @@ export class Substrate {
 				surface: callerSurface,
 				...(sessionId !== undefined ? { sessionId } : {}),
 				fetchImpl: this.ragflowFetch,
+				datasets: this.docsDatasetList,
+				prune: this.config.docsPruneSuperseded,
 			},
 			{
 				dataset: typeof input.dataset === "string" ? input.dataset : "",
@@ -2458,8 +2884,136 @@ export class Substrate {
 				...(sessionId !== undefined ? { session_id: sessionId } : {}),
 			},
 		);
-		if (outcome.ok) await this.persistDocsSeen();
+		if (outcome.ok || outcome.changed) {
+			await this.persistDocsSeen();
+			await this.cache.bump(DOCS_GENERATION_KEY);
+		}
 		return outcome;
+	}
+
+	// uplift-2 R6 — dataset versions and the merge-trigger, moved here from
+	// the HTTP server so they share the state file and the gated fetch.
+
+	/** The newest recorded version of a dataset, after hydration; the merge-trigger's idempotency key. */
+	async latestDocsVersion(dataset: string): Promise<DatasetVersion | undefined> {
+		await this.hydrateDocsSeen();
+		return latestVersion(this.docsVersions, dataset);
+	}
+
+	/**
+	 * A merge-trigger arrived for `dataset`. For `agent-skills` that is the
+	 * skills-sync fast-forward evidence D25-07 waits for: from here on its
+	 * citations stop carrying `pin_age_ms`. Other datasets record nothing.
+	 */
+	noteDocsTrigger(dataset: string): void {
+		if (dataset === "agent-skills") noteSkillsSyncFastForward(this.docsSkillsSync);
+	}
+
+	/**
+	 * Record a dataset version (resolve by name, create on miss), persist it
+	 * and bump the docs generation. The version store is the service's, so
+	 * the pin reaches the next search and the next trigger's idempotency
+	 * check, restart or not.
+	 */
+	async recordDocsVersion(
+		fields: { dataset: string; commit: string; content_sha256: string },
+		surface: Surface,
+	): Promise<{ ok: true; version: DatasetVersion; created: boolean } | { ok: false; reason: string }> {
+		if (this.config.ragflow === null) return { ok: false, reason: "ragflow-not-configured" };
+		await this.hydrateDocsSeen();
+		const refreshed = await refreshDataset(
+			{
+				config: this.config.ragflow,
+				versions: this.docsVersions,
+				emit: (event) => this.emit(event),
+				surface,
+				fetchImpl: this.ragflowFetch,
+				datasets: this.docsDatasetList,
+			},
+			fields,
+		);
+		if (refreshed.ok) {
+			await this.persistDocsSeen();
+			await this.cache.bump(DOCS_GENERATION_KEY);
+		}
+		return refreshed;
+	}
+
+	/**
+	 * Accept a merge-trigger into the background (uplift-2 R6).
+	 *
+	 * The route has already made its door decisions (auth, loopback, guest,
+	 * body, audit, idempotency, local checkout). Here one job per dataset
+	 * runs at a time; a trigger for a dataset whose job is still running or
+	 * queued with the same commit and hash is answered with that job's id
+	 * and `queued: true`; a different identity is queued behind it. The job
+	 * ensures the dataset exists (resolve by name, create on miss), runs the
+	 * guarded ingest of the checkout's roots, then records the version — so
+	 * a refused ingest records nothing, exactly as the inline route did.
+	 * Every outcome lands on stderr; a success lands in the version store
+	 * and the ingest records. `wait` keeps the synchronous answer for
+	 * operators and tests: 200 with the version, 503 with the reason.
+	 */
+	async startDocsRefresh(request: DocsRefreshRequest, surface: Surface, options: { wait?: boolean } = {}): Promise<DocsRefreshAccepted> {
+		const sameIdentity = (job: DocsRefreshJob): boolean =>
+			job.dataset === request.dataset && job.commit === request.commit && job.content_sha256 === request.content_sha256;
+		let job = [...this.docsRefreshPending.values()].find(sameIdentity);
+		const queued = job !== undefined || this.docsRefreshChains.has(request.dataset);
+		if (job === undefined) {
+			this.docsRefreshSeq += 1;
+			const id = `docs-refresh-${Date.now().toString(36)}-${this.docsRefreshSeq}`;
+			const ahead = this.docsRefreshChains.get(request.dataset) ?? Promise.resolve();
+			const done = ahead.then(() => this.runDocsRefresh(id, request, surface));
+			const settled = done.then(
+				() => undefined,
+				() => undefined,
+			);
+			job = { id, dataset: request.dataset, commit: request.commit, content_sha256: request.content_sha256, done };
+			this.docsRefreshPending.set(id, job);
+			this.docsRefreshChains.set(request.dataset, settled);
+			void settled.then(() => {
+				this.docsRefreshPending.delete(id);
+				if (this.docsRefreshChains.get(request.dataset) === settled) this.docsRefreshChains.delete(request.dataset);
+			});
+		}
+		if (options.wait === true) {
+			const outcome = await job.done;
+			return outcome.ok ? { status: 200, body: outcome } : { status: 503, body: outcome };
+		}
+		return {
+			status: 202,
+			body: { accepted: true, job: job.id, dataset: request.dataset, commit: request.commit, ...(queued ? { queued: true } : {}) },
+		};
+	}
+
+	/** One merge-trigger job: ensure, ingest, record; never throws. */
+	private async runDocsRefresh(job: string, request: DocsRefreshRequest, surface: Surface): Promise<DocsRefreshOutcome> {
+		const finish = (outcome: DocsRefreshOutcome): DocsRefreshOutcome => {
+			process.stderr.write(
+				`[substrate] docs merge-trigger ${job} ${request.dataset} ${request.commit.slice(0, 12)}: ${
+					outcome.ok ? `${outcome.version.version} recorded${outcome.created ? " (dataset created)" : ""}` : `failed — ${redact(outcome.reason)}`
+				}\n`,
+			);
+			return outcome;
+		};
+		try {
+			if (this.config.ragflow === null) return finish({ ok: false, reason: "ragflow-not-configured", job });
+			// The guarded ingest reads the plane's dataset by name and refuses
+			// `unknown-dataset`, so on a configured plane without the dataset it
+			// must exist before that ingest runs: discover first, create only on
+			// a name-miss. Order stays honest — ensure, ingest, and only then
+			// record the version.
+			const ensured = await resolveDatasets({ config: this.config.ragflow, fetchImpl: this.ragflowFetch, datasets: this.docsDatasetList }, [request.dataset]);
+			if (!ensured.ok) return finish({ ok: false, reason: ensured.reason, job });
+			const created = ensured.datasets[0]?.created === true;
+			const ingested = await this.ingestDocs({ dataset: request.dataset, commit: request.commit, pages: await request.pages() }, surface);
+			if (!ingested.ok) return finish({ ok: false, reason: ingested.reason, job });
+			const refreshed = await this.recordDocsVersion(request, surface);
+			if (!refreshed.ok) return finish({ ok: false, reason: refreshed.reason, job });
+			return finish({ ok: true, version: refreshed.version, created: created || refreshed.created, job });
+		} catch (cause) {
+			return finish({ ok: false, reason: redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200), job });
+		}
 	}
 
 	/**
@@ -3354,6 +3908,17 @@ export class Substrate {
 		return { period_start, period_end, status: "anchored", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, ...(memo.slot !== null ? { slot: memo.slot } : {}) };
 	}
 
+	/** Which planes have configuration, so `/slo` can tell "unconfigured" from "silent". */
+	planesConfigured(): Record<PlaneName, boolean> {
+		return {
+			greptime: this.greptime !== null,
+			index: this.index !== null,
+			cache: this.cache.health().enabled,
+			hindsight: hindsightFromEnv() !== null,
+			ragflow: this.config.ragflow !== null,
+		};
+	}
+
 	/**
 	 * `greptime` is reachability; `eventsWritable` is whether **every** event would
 	 * be accepted. They differ on a reachable ledger that is refusing, which is
@@ -3368,30 +3933,133 @@ export class Substrate {
 	 * Probing here is deliberate: a monitor's own request retries both checks, so a
 	 * ledger that recovers — or a table recreated out of band — is picked up without
 	 * waiting for a restart.
+	 *
+	 * `planes` (uplift-2 R2) is report-only: one row per data plane with its
+	 * reachability (`null` when the plane is not configured), its breaker and
+	 * when it last failed. Hindsight and RAGFlow get one `HEALTH_PROBE_MS`-bounded
+	 * probe each, only when configured, so `/healthz` costs at most one round
+	 * trip per configured plane; the cache is never pinged. `capacity.index`
+	 * is the index's own size report, raced against the same bound and `null`
+	 * when it does not answer in time. The status code still comes from the
+	 * ledger and the index alone — see `healthStatus`.
+	 *
+	 * `ledger` (uplift-2 R5) is what makes `eventsWritable` honest: metadata says
+	 * the table *would* take a row, a one-row write into `substrate_health` says
+	 * it *did*. The probe runs at most once per `SUBSTRATE_LEDGER_WRITE_PROBE_S`
+	 * (0 turns it off, and writability is metadata-only again), through the
+	 * breaker, and never throws out of here; its last verdict folds into
+	 * `eventsWritable`, so a store that stopped taking writes turns `/healthz`
+	 * 503 within one interval by the existing status rule. `capacity.ledger` is
+	 * the ledger's size report, raced against the same bound as the index's.
 	 */
-	async health(): Promise<{
-		index: boolean;
-		greptime: boolean;
-		appendOnly: boolean | null;
-		quotingDialectKnown: boolean;
-		eventsWritable: boolean;
-		cache: CacheHealth;
-	}> {
+	async health(): Promise<SubstrateHealth> {
 		const greptime = this.greptime ? await this.greptime.ping() : false;
 		const appendOnly = greptime ? (await this.greptime?.ensureAppendMode().catch(() => null)) ?? null : null;
 		const quotingDialectKnown = greptime
 			? await this.greptime?.probeDialect().then(() => this.greptime?.quotingDialectKnown === true).catch(() => false) ?? false
 			: false;
+		const hindsight = hindsightFromEnv();
+		const [index, capacity, hindsightOk, ragflowOk, probe, ledgerCapacity] = await Promise.all([
+			this.index ? this.index.ping(HEALTH_PROBE_MS).catch(() => false) : Promise.resolve(false),
+			this.index ? bounded(() => this.index!.capacity(), HEALTH_PROBE_MS) : Promise.resolve(null),
+			hindsight
+				? probeHealth(hindsight, this.hindsightFetch, HEALTH_PROBE_MS).then((probed) => probed.ok, () => false)
+				: Promise.resolve(null),
+			this.config.ragflow
+				? listDatasets(this.config.ragflow, this.ragflowFetch, HEALTH_PROBE_MS).then((listed) => listed.ok, () => false)
+				: Promise.resolve(null),
+			// Only a reachable ledger is probed: an unreachable one is already not
+			// writable, and a write that cannot connect would only charge the
+			// breaker twice. Keeps the client's own write timeout rather than
+			// HEALTH_PROBE_MS so a slow day does not read as a full disk. The
+			// `.then` wrapper is for a test fake without the method: `null`, never a throw.
+			greptime
+				? Promise.resolve()
+						.then(() => this.greptime!.probeWritable(this.config.ledger.writeProbeS * 1000))
+						.catch(() => null)
+				: Promise.resolve(null),
+			greptime ? bounded(() => this.greptime!.capacity(HEALTH_PROBE_MS), HEALTH_PROBE_MS) : Promise.resolve(null),
+		]);
+		const cache = this.cache.health();
+		const breakers = this.planes.snapshots();
+		const ok: Record<PlaneName, boolean | null> = {
+			greptime: this.greptime ? greptime : null,
+			index: this.index ? index : null,
+			// Never pinged: the last command's fate is what the cache knows. `null`
+			// while no command has run yet, so a fresh process is not reported down.
+			cache: !cache.enabled ? null : cache.connected ? true : cache.mode === "degraded" || cache.cooldownUntil !== null ? false : null,
+			hindsight: hindsightOk,
+			ragflow: ragflowOk,
+		};
+		const planes = {} as SubstrateHealth["planes"];
+		for (const plane of PLANES) {
+			planes[plane] = { ok: ok[plane], breaker: breakers[plane], lastErrorAt: breakers[plane]?.lastErrorAt ?? null };
+		}
+		const metadataWritable = greptime && quotingDialectKnown && (appendOnly === true || this.config.allowDeduplicatingLedger);
+		// A probe that has not run yet (or is off) neither proves nor disproves;
+		// only a failed one overrides the metadata.
+		const eventsWritable = metadataWritable && probe?.lastProbeOk !== false;
 		return {
-			index: this.index ? await this.index.ping() : false,
+			index,
 			greptime,
 			appendOnly,
 			quotingDialectKnown,
-			eventsWritable:
-				greptime && quotingDialectKnown && (appendOnly === true || this.config.allowDeduplicatingLedger),
+			eventsWritable,
+			ledger: {
+				writable: eventsWritable,
+				lastProbeAt: probe?.lastProbeAt ?? null,
+				lastProbeOk: probe?.lastProbeOk ?? null,
+				lastProbeError: probe?.lastProbeError ?? null,
+			},
 			// In-memory counters only. Health does not ping Dragonfly and does not
 			// change its status code when the cache is down.
-			cache: this.cache.health(),
+			cache,
+			planes,
+			capacity: { index: capacity, ledger: ledgerCapacity },
 		};
 	}
+}
+
+/** The bound on every per-plane probe `/healthz` makes. */
+export const HEALTH_PROBE_MS = 1000;
+
+export interface PlaneHealth {
+	/** Reachable as of this request; `null` when the plane is not configured (or, for the cache, not yet used). */
+	ok: boolean | null;
+	/** `null` when breakers are off (`SUBSTRATE_BREAKER=0`). */
+	breaker: BreakerSnapshot | null;
+	lastErrorAt: number | null;
+}
+
+export interface SubstrateHealth {
+	index: boolean;
+	greptime: boolean;
+	appendOnly: boolean | null;
+	quotingDialectKnown: boolean;
+	eventsWritable: boolean;
+	/** The write probe behind `eventsWritable` (uplift-2 R5); probe fields `null` until one has run. */
+	ledger: { writable: boolean } & LedgerProbe;
+	cache: CacheHealth;
+	planes: Record<PlaneName, PlaneHealth>;
+	capacity: { index: IndexCapacity | null; ledger: LedgerCapacity | null };
+}
+
+/** `fn`'s answer, or `null` when it throws or outlasts `ms`. */
+function bounded<T>(fn: () => Promise<T>, ms: number): Promise<T | null> {
+	const { promise, resolve } = Promise.withResolvers<T | null>();
+	const timer = setTimeout(() => resolve(null), ms);
+	timer.unref?.();
+	Promise.resolve()
+		.then(fn)
+		.then(
+			(value) => {
+				clearTimeout(timer);
+				resolve(value);
+			},
+			() => {
+				clearTimeout(timer);
+				resolve(null);
+			},
+		);
+	return promise;
 }

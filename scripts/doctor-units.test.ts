@@ -279,6 +279,7 @@ describe("repo units", () => {
 			"substrate-collector-muse.service",
 			"substrate-dispatcher.service",
 			"substrate-host.service",
+			"substrate-index-sweep.service",
 			"substrate-mcp.service",
 			"substrate-skills-bridge.service",
 			"substrate-skills-sync.service",
@@ -295,6 +296,14 @@ describe("repo units", () => {
 		expect(anchor?.workingDirectory).toBe(RELEASE_CURRENT);
 		expect(anchor?.environmentFiles).toEqual([SHARED_ENV_FILE]);
 		expect(anchor?.restart).toBeNull();
+		// The index sweep is the same kind of unit as the anchor (D28-02 shape):
+		// shared env on the pinned release, oneshot, dry-run pinned on the unit
+		// rather than in substrate.env, so the server never carries a delete switch.
+		const sweep = units.find((unit) => unit.name === "substrate-index-sweep.service");
+		expect(sweep?.workingDirectory).toBe(RELEASE_CURRENT);
+		expect(sweep?.environmentFiles).toEqual([SHARED_ENV_FILE]);
+		expect(sweep?.restart).toBeNull();
+		expect(sweep?.environment.get("SUBSTRATE_INDEX_SWEEP")).toBe("dry-run");
 		// The lane-B cutover (infra/vps/README.md operator step 4) moved herdr and
 		// muse onto the release tree with collector-only env files, like grok. Each
 		// unit loads exactly the file the identity manifest delivers its token to, so

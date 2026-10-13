@@ -11,8 +11,15 @@
  *
  * The hook has no timer and no surface: the sync tick's projection step
  * calls `noteSkillsSyncFastForward`, and search consults `isSyncLive`.
+ *
+ * uplift-2 R6: the version store is still a Map, but it now round-trips
+ * through the docs state file (`versionsToJson` / `versionsFromJson`) so
+ * pins and the merge-trigger's idempotency survive a restart, and every
+ * reader of `GET /api/v1/datasets` goes through a `DatasetListSource` — in
+ * production the 60 s `DatasetListCache`, invalidated by a create or a
+ * failed list — instead of fetching the tenant's list per call.
  */
-import { createDataset, listDatasets, type FetchLike, type RagflowConfig } from "./planes/ragflow.ts";
+import { createDataset, listDatasets, type DatasetListOutcome, type FetchLike, type RagflowConfig } from "./planes/ragflow.ts";
 import type { DatasetPin } from "./docs-search.ts";
 import type { EventInput, Surface } from "./types.ts";
 
@@ -69,6 +76,107 @@ export function pinsFromVersions(store: VersionStore): Record<string, DatasetPin
 	return pins;
 }
 
+/**
+ * The version lists as the docs state file stores them (`versions` member
+ * of the v2 file): one JSON object keyed by dataset name.
+ */
+export function versionsToJson(store: VersionStore): Record<string, DatasetVersion[]> {
+	return Object.fromEntries(store);
+}
+
+/** The version store a state file's `versions` member describes; malformed rows are skipped. */
+export function versionsFromJson(value: unknown): VersionStore {
+	const store = createVersionStore();
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return store;
+	for (const [dataset, rows] of Object.entries(value)) {
+		if (!Array.isArray(rows)) continue;
+		const kept: DatasetVersion[] = [];
+		for (const row of rows) {
+			if (row === null || typeof row !== "object") continue;
+			const candidate = row as Record<string, unknown>;
+			if (
+				typeof candidate.dataset !== "string" ||
+				typeof candidate.dataset_id !== "string" ||
+				typeof candidate.version !== "string" ||
+				typeof candidate.commit !== "string" ||
+				typeof candidate.content_sha256 !== "string" ||
+				typeof candidate.ingested_at !== "string"
+			) {
+				continue;
+			}
+			kept.push({
+				dataset: candidate.dataset,
+				dataset_id: candidate.dataset_id,
+				version: candidate.version,
+				commit: candidate.commit,
+				content_sha256: candidate.content_sha256,
+				ingested_at: candidate.ingested_at,
+			});
+		}
+		if (kept.length > 0) store.set(dataset, kept.slice(-DATASET_VERSION_RETENTION));
+	}
+	return store;
+}
+
+/**
+ * Where a dataset list comes from. Production hands every reader the
+ * `DatasetListCache`; the module tests and the default use the plane
+ * directly, with nothing to invalidate.
+ */
+export interface DatasetListSource {
+	list(config: RagflowConfig, fetchImpl: FetchLike | undefined): Promise<DatasetListOutcome>;
+	/** Forget the held list: after a create, or after a failed list. */
+	invalidate(): void;
+}
+
+export const DIRECT_DATASET_LIST: DatasetListSource = {
+	list: (config, fetchImpl) => listDatasets(config, fetchImpl),
+	invalidate: () => {},
+};
+
+/** How long one dataset list serves search, ingest and refresh before it is fetched again. */
+export const DATASET_LIST_TTL_MS = 60_000;
+
+/**
+ * The in-process dataset list, held for `DATASET_LIST_TTL_MS` after a
+ * successful fetch (uplift-2 R6). A failed list is never held and drops
+ * whatever was held, so a plane that just answered an error is asked again
+ * on the next call rather than served from before the error; a create
+ * drops it too, so the new dataset is discoverable at once. Concurrent
+ * callers during a fetch share the one in-flight request.
+ */
+export class DatasetListCache implements DatasetListSource {
+	private held: { datasets: readonly { id: string; name: string }[]; expiresAt: number } | null = null;
+	private inflight: Promise<DatasetListOutcome> | null = null;
+
+	constructor(
+		private readonly ttlMs: number = DATASET_LIST_TTL_MS,
+		private readonly now: () => number = Date.now,
+	) {}
+
+	async list(config: RagflowConfig, fetchImpl: FetchLike | undefined): Promise<DatasetListOutcome> {
+		const held = this.held;
+		if (held && held.expiresAt > this.now()) return { ok: true, datasets: held.datasets.map((dataset) => ({ ...dataset })) };
+		if (!this.inflight) {
+			this.inflight = listDatasets(config, fetchImpl)
+				.then((outcome) => {
+					if (outcome.ok) this.held = { datasets: outcome.datasets.map((dataset) => ({ ...dataset })), expiresAt: this.now() + this.ttlMs };
+					else this.held = null;
+					return outcome;
+				})
+				.finally(() => {
+					this.inflight = null;
+				});
+		}
+		const outcome = await this.inflight;
+		return outcome.ok ? { ok: true, datasets: outcome.datasets.map((dataset) => ({ ...dataset })) } : outcome;
+	}
+
+	invalidate(): void {
+		this.held = null;
+	}
+}
+
 export interface ResolvedDataset {
 	name: string;
 	id: string | null;
@@ -80,18 +188,22 @@ export interface ResolveDeps {
 	fetchImpl?: FetchLike;
 	/** Create on a name-miss. False rehearses discovery without creating (G2 owns real creation). */
 	createOnMiss?: boolean;
+	/** The dataset list reader; the plane directly when omitted. */
+	datasets?: DatasetListSource;
 }
 
 /**
  * Discover-first resolve: match names against `GET /api/v1/datasets` and
  * create only on a name-miss (D25-06). A transport failure is a reason, not
- * a throw.
+ * a throw. A create invalidates the list source, so the next reader sees
+ * the new dataset without waiting out the TTL.
  */
 export async function resolveDatasets(
 	deps: ResolveDeps,
 	names: readonly string[],
 ): Promise<{ ok: true; datasets: ResolvedDataset[] } | { ok: false; reason: string }> {
-	const listed = await listDatasets(deps.config, deps.fetchImpl);
+	const source = deps.datasets ?? DIRECT_DATASET_LIST;
+	const listed = await source.list(deps.config, deps.fetchImpl);
 	if (!listed.ok) return { ok: false, reason: listed.reason };
 	const datasets: ResolvedDataset[] = [];
 	for (const name of names) {
@@ -105,6 +217,7 @@ export async function resolveDatasets(
 			continue;
 		}
 		const created = await createDataset(deps.config, name, deps.fetchImpl);
+		source.invalidate();
 		if (!created.ok) return { ok: false, reason: created.reason };
 		datasets.push({ name, id: created.id, created: true });
 	}
@@ -119,6 +232,8 @@ export interface RefreshDeps {
 	sessionId?: string;
 	fetchImpl?: FetchLike;
 	nowMs?: number;
+	/** The dataset list reader; the plane directly when omitted. */
+	datasets?: DatasetListSource;
 }
 
 /**
@@ -131,7 +246,7 @@ export async function refreshDataset(
 	deps: RefreshDeps,
 	input: { dataset: string; commit: string; content_sha256: string },
 ): Promise<{ ok: true; version: DatasetVersion; created: boolean } | { ok: false; reason: string }> {
-	const resolved = await resolveDatasets({ config: deps.config, fetchImpl: deps.fetchImpl }, [input.dataset]);
+	const resolved = await resolveDatasets({ config: deps.config, fetchImpl: deps.fetchImpl, ...(deps.datasets ? { datasets: deps.datasets } : {}) }, [input.dataset]);
 	if (!resolved.ok) return { ok: false, reason: resolved.reason };
 	const entry = resolved.datasets[0];
 	if (!entry?.id) return { ok: false, reason: "unknown-dataset" };

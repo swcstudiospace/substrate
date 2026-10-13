@@ -99,6 +99,7 @@ export function loadObservabilityConfig(
 			leaseStealRatio: optionalNumber(env.SUBSTRATE_SLO_LEASE_STEAL),
 			quarantineRatio: optionalNumber(env.SUBSTRATE_SLO_QUARANTINE),
 			minSamples: optionalNumber(env.SUBSTRATE_SLO_MIN_SAMPLES),
+			planeAvailability: optionalNumber(env.SUBSTRATE_SLO_PLANE_AVAILABILITY),
 		},
 	};
 }
