@@ -34,8 +34,9 @@
  *   - **A graph with a live lease is never swept.** Claims and heartbeats write
  *     `graph_nodes` only and do not refuse a finished graph, so an old terminal
  *     graph can be in use. Both the count and the pick exclude any graph holding a
- *     live lease, and the node delete re-checks the lease per row at execution
- *     time, so a claim landing between pick and delete keeps its graph.
+ *     live lease, and the delete locks every node of a picked graph and re-reads
+ *     its lease before deciding, per graph, so a claim landing between pick and
+ *     delete keeps its graph whole — every node, edge, step and binding.
  */
 import { DEFAULT_LEASE_TTL_SECONDS } from "./lease.ts";
 
@@ -169,18 +170,24 @@ export interface SweepStatement {
 /**
  * One round of deletion. `pick` either deletes outright and returns
  * `{ deleted, …children }` (the simple classes), or — when `then` is present —
- * only selects and locks the keys to remove, returning one row per key, and
- * `then(rows)` builds the statements that do the removing. Each of those returns
- * one row whose columns are merged into the round's result.
+ * only selects and locks the keys to remove, returning one row per key;
+ * `lock(picked)`, when present, then locks and re-reads the rows the decision
+ * depends on, and `then(picked, locked)` builds the statements that do the
+ * removing from both. Each of those returns one row whose columns are merged
+ * into the round's result.
  *
- * Two statements rather than one WITH: the sub-statements of a data-modifying
- * CTE all run against the same snapshot and cannot see each other's effects, so
- * "delete the graph only once no node row is left" cannot be said in one. The
- * apply runs inside one transaction, so the locks `pick` takes hold across them.
+ * Separate statements rather than one WITH: the sub-statements of a data-modifying
+ * CTE all run against the same snapshot and cannot see each other's effects, and
+ * a locking read cannot be aggregated (`bool_or … for update` is refused), so
+ * "lock every node, then delete the graph only if none is live" cannot be said
+ * in one. The apply runs inside one transaction, so the locks `pick` and `lock`
+ * take hold across every statement of the round.
  */
 export interface SweepBatch {
 	pick: SweepStatement;
-	then?: (picked: Array<Record<string, unknown>>) => SweepStatement[];
+	/** With `then`: locks the rows `then` decides on; its rows are `then`'s second argument. */
+	lock?: (picked: Array<Record<string, unknown>>) => SweepStatement;
+	then?: (picked: Array<Record<string, unknown>>, locked: Array<Record<string, unknown>>) => SweepStatement[];
 	/** With `then`: the key under which picked-but-not-deleted rows are reported. */
 	skippedAs?: string;
 }
@@ -320,21 +327,30 @@ export const SWEEP_CLASSES: readonly SweepClass[] = [
 			text: `select count(*)::int as candidates from graph_index g where ${GRAPH_TERMINAL_OLD}`,
 			params: [cutoff, TERMINAL],
 		}),
-		// Three statements, in the apply transaction, because a claim can land between
+		// Four statements, in the apply transaction, because a claim can land between
 		// the pick and the delete and no single statement can both lock the graph row
-		// and re-read its nodes after that:
+		// and re-read its nodes after that. The decision is per graph and made once,
+		// in TypeScript, from locked rows — never per node row, so a graph is either
+		// removed whole or left whole:
 		//
 		//   1. pick: lock up to `limit` candidate graph rows (`for update skip locked`),
 		//      judged with the same no-live-lease predicate the count used.
-		//   2. nodes: delete the picked graphs' node rows **where the lease is not
-		//      live**, re-evaluated per row at execution. A concurrent `claimNode` is
-		//      a row-level UPDATE on the same node; the two serialise, and under READ
-		//      COMMITTED a DELETE that finds its row changed re-checks the predicate
-		//      against the new version and skips a node that has just been claimed.
-		//   3. graphs: delete `graph_index` only where no node row remains, then edges,
-		//      steps and bindings only for the graphs whose index row went. A graph
-		//      with a surviving node keeps everything, is unlocked at commit, and is
-		//      reported as skipped for a live lease.
+		//   2. lock: `for update` every node row of the picked graphs and read each
+		//      one's lease state. A concurrent `claimNode` is a row-level UPDATE on a
+		//      node; the two serialise, and under READ COMMITTED a locking read that
+		//      finds its row changed waits for that writer and returns the new
+		//      version — so a claim committed before the lock is seen as live, and a
+		//      claim after it blocks until this transaction commits, then finds its
+		//      node gone (the CAS UPDATE matches zero rows).
+		//   3. nodes: delete every node row of the graphs no locked row reported
+		//      live. A graph with any live node gets no statement at all — none of
+		//      its nodes, edges, steps, bindings or index row is touched — is unlocked
+		//      at commit, and is reported as skipped for a live lease. A graph with
+		//      no node rows has no live node and is removed.
+		//   4. graphs: delete `graph_index` for those graphs where no node row
+		//      remains (none should, after 3; a node row that appeared after the lock
+		//      keeps its graph), then edges, steps and bindings only for the graphs
+		//      whose index row went.
 		//
 		// The picked ids travel back as a JSON text parameter: the driver cannot take
 		// an array, and the ids are the sweeper's own output, never caller text.
@@ -344,12 +360,21 @@ export const SWEEP_CLASSES: readonly SweepClass[] = [
 				params: [cutoff, TERMINAL, limit],
 			},
 			skippedAs: "skipped_live_lease",
-			then: (picked) => {
-				const ids = JSON.stringify(picked.map((row) => String(row.graph_id)));
+			lock: (picked) => ({
+				text:
+					`select n.graph_id, (${LIVE_LEASE("n")}) as live from graph_nodes n ` +
+					`where n.graph_id ${IDS_IN("$1")} for update`,
+				params: [JSON.stringify(picked.map((row) => String(row.graph_id)))],
+			}),
+			then: (picked, locked) => {
+				const live = new Set(locked.filter((row) => row.live === true).map((row) => String(row.graph_id)));
+				const doomed = picked.map((row) => String(row.graph_id)).filter((graphId) => !live.has(graphId));
+				if (doomed.length === 0) return [];
+				const ids = JSON.stringify(doomed);
 				return [
 					{
 						text:
-							`with d as (delete from graph_nodes n where n.graph_id ${IDS_IN("$1")} and not (${LIVE_LEASE("n")}) returning 1) ` +
+							`with d as (delete from graph_nodes n where n.graph_id ${IDS_IN("$1")} returning 1) ` +
 							"select count(*)::int as nodes from d",
 						params: [ids],
 					},
@@ -440,16 +465,18 @@ function int(value: unknown): number {
 }
 
 /**
- * One round of a class's delete: run `pick`; with `then`, feed what it picked to
- * the follow-up statements and merge their one-row results. Returns how many
- * rows the round *picked* (what bounds the loop) and the merged columns.
+ * One round of a class's delete: run `pick`; with `then`, run `lock` on what it
+ * picked (when the class has one), feed the picked and locked rows to the
+ * follow-up statements and merge their one-row results. Returns how many rows
+ * the round *picked* (what bounds the loop) and the merged columns.
  */
 async function runBatch(run: SweepRunner, batch: SweepBatch): Promise<{ picked: number; row: Record<string, unknown> }> {
 	const picked = await run(batch.pick);
 	if (!batch.then) return { picked: int(picked[0]?.deleted), row: picked[0] ?? {} };
 	if (picked.length === 0) return { picked: 0, row: {} };
+	const locked = batch.lock ? await run(batch.lock(picked)) : [];
 	const row: Record<string, unknown> = {};
-	for (const statement of batch.then(picked)) Object.assign(row, (await run(statement))[0] ?? {});
+	for (const statement of batch.then(picked, locked)) Object.assign(row, (await run(statement))[0] ?? {});
 	if (batch.skippedAs) row[batch.skippedAs] = picked.length - int(row.deleted);
 	return { picked: picked.length, row };
 }
@@ -463,8 +490,8 @@ async function runBatch(run: SweepRunner, batch: SweepBatch): Promise<{ picked: 
  * The batch loop is bounded by the count it just took: a class that keeps
  * finding rows past that (a writer racing the sweep) stops rather than chasing it.
  * A two-phase class whose pick came back full but whose delete fell short (a
- * graph claimed between the two) stops too: something is moving under the sweep,
- * and the next tick will judge it fresh.
+ * graph claimed between the pick and the node lock) stops too: something is
+ * moving under the sweep, and the next tick will judge it fresh.
  */
 export async function executeSweep(
 	run: SweepRunner,

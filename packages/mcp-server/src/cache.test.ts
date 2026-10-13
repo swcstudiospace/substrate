@@ -1289,7 +1289,8 @@ describe("Bun RedisClient", () => {
 			const started = Date.now();
 			await expect(redis.get("k")).rejects.toThrow(/timed out/);
 			expect(Date.now() - started).toBeLessThan(500);
-			expect(samples.map((sample) => `${sample.op}:${sample.outcome}`)).toEqual(["connect:ok", "get:ok", "get:timeout"]);
+			// Connect and command are one gated operation (Greptile round 2): no separate `connect` sample.
+			expect(samples.map((sample) => `${sample.op}:${sample.outcome}`)).toEqual(["get:ok", "get:timeout"]);
 			expect(breaker.snapshot().failures).toBe(1);
 
 			// The wedged connection was discarded: the next call opens a fresh socket.
@@ -1297,6 +1298,70 @@ describe("Bun RedisClient", () => {
 			expect(await redis.get("k")).toBeNull();
 			expect(connections).toBe(2);
 			expect(breaker.state()).toBe("closed");
+		} finally {
+			server.close();
+		}
+	});
+
+	test("a server that accepts connections but never answers opens the breaker; reconnects do not reset it", async () => {
+		// Greptile round 2: the connect used to be its own gated call, so every
+		// reconnect after a command timeout was a breaker success that cleared the
+		// count. The threshold was never reached and each request paid the timeout.
+		const store = new Map<string, string>();
+		let stall = true;
+		let connections = 0;
+		const server = net.createServer((socket) => {
+			connections += 1;
+			let pending = "";
+			socket.on("data", (buf) => {
+				pending += buf.toString("utf8");
+				const taken = takeCommands(store, pending);
+				pending = taken.rest;
+				// The handshake is always answered, so every connect succeeds; commands stall.
+				if (taken.answer.length > 0 && (!stall || taken.answer === hello)) socket.write(taken.answer);
+			});
+			socket.on("error", () => {});
+		});
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		const port = (server.address() as AddressInfo).port;
+		try {
+			let now = 10_000;
+			const samples: PlaneSample[] = [];
+			const breaker = new CircuitBreaker("cache", { failureThreshold: 2, openMs: 1_000 }, () => now);
+			const redis = bunRedis(`redis://127.0.0.1:${port}`, {
+				gate: { plane: "cache", breaker, observe: (sample) => samples.push(sample) },
+				now: () => now,
+				commandTimeoutMs: 30,
+				cooldownMs: 0,
+			});
+
+			await expect(redis.get("k")).rejects.toThrow(/timed out/);
+			expect(connections).toBe(1);
+			expect(breaker.snapshot().failures).toBe(1);
+			// The wedged connection was dropped; this request reconnects (the
+			// handshake succeeds) and still counts as the second failure.
+			await expect(redis.get("k")).rejects.toThrow(/timed out/);
+			expect(connections).toBe(2);
+			expect(breaker.state()).toBe("open");
+			expect(breaker.snapshot().failures).toBe(2);
+
+			// Open: refused before any socket is opened, without paying the command timeout.
+			const started = Date.now();
+			await expect(redis.get("k")).rejects.toBeInstanceOf(BreakerOpenError);
+			expect(Date.now() - started).toBeLessThan(20);
+			expect(connections).toBe(2);
+			expect(redis.cooldownUntil?.()).toBeNull();
+			expect(samples.map((sample) => `${sample.op}:${sample.outcome}`)).toEqual(["get:timeout", "get:timeout", "get:open"]);
+
+			// Half-open probe against a server that answers again: connect + command
+			// succeed as one outcome and close the breaker.
+			now += 1_000;
+			stall = false;
+			expect(breaker.state()).toBe("half-open");
+			expect(await redis.get("k")).toBeNull();
+			expect(connections).toBe(3);
+			expect(breaker.state()).toBe("closed");
+			expect(breaker.snapshot().failures).toBe(0);
 		} finally {
 			server.close();
 		}

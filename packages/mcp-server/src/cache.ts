@@ -11,10 +11,11 @@
  * (`SUBSTRATE_CACHE_CONNECT_TIMEOUT_MS` / `SUBSTRATE_CACHE_COMMAND_TIMEOUT_MS`,
  * 250 ms each for the loopback redis production runs), no offline queue and no
  * reconnect retries, so one request never waits on a second attempt. A failed
- * connect also starts a `CACHE_CONNECT_COOLDOWN_MS` cooldown during which
- * `open()` refuses without touching the socket, and every connect and command
- * goes through the cache's plane gate (uplift-2 R2), so a dead Dragonfly costs
- * one timeout, not one per request.
+ * connect also starts a `CACHE_CONNECT_COOLDOWN_MS` cooldown during which every
+ * command is refused before any socket is touched. Each command goes through the
+ * cache's plane gate (uplift-2 R2) *together with the connect it needed*, so the
+ * breaker sees exactly one outcome per request and a dead Dragonfly costs one
+ * timeout, not one per request.
  *
  * One class is generation-free: `brief-snapshot` holds the last *complete*
  * brief per surface and arguments (uplift-2 R1), read only when the live
@@ -23,7 +24,7 @@
  */
 import { createHash } from "node:crypto";
 import { RedisClient } from "bun";
-import { BreakerOpenError, callPlane, type PlaneGate } from "@substrate/observability";
+import { callPlane, type PlaneGate } from "@substrate/observability";
 import type { SubstrateConfig } from "./config.ts";
 import { REDACTED, redact } from "./redact.ts";
 
@@ -223,9 +224,6 @@ export function bunRedis(url: string, options: BunRedisOptions = {}): CacheRedis
 	const open = (): Promise<RedisClient> => {
 		if (client?.connected) return Promise.resolve(client);
 		if (opening) return opening;
-		if (cooldownUntil !== null && now() < cooldownUntil) {
-			return Promise.reject(new Error(`cache connect cooling down for ${Math.ceil((cooldownUntil - now()) / 1000)} s`));
-		}
 		cooldownUntil = null;
 		// Built on the first command. `enableOfflineQueue: false` rejects a
 		// command sent before connect, so connect finishes first. A failure
@@ -239,13 +237,11 @@ export function bunRedis(url: string, options: BunRedisOptions = {}): CacheRedis
 			enableOfflineQueue: false,
 		});
 		client = next;
-		const flight = callPlane(gate, "connect", () => next.connect()).then(
+		const flight = next.connect().then(
 			() => next,
 			(cause: unknown) => {
 				discard(next);
-				// An open breaker is already refusing; the cooldown is for the
-				// case where the socket itself failed.
-				if (!(cause instanceof BreakerOpenError)) cooldownUntil = now() + cooldownMs;
+				cooldownUntil = now() + cooldownMs;
 				throw cause;
 			},
 		);
@@ -263,14 +259,29 @@ export function bunRedis(url: string, options: BunRedisOptions = {}): CacheRedis
 	// wedged connection was kept for the next request to time out on again. Now
 	// the gate records the timeout and the connection is discarded, so the next
 	// call reconnects — subject to the connect cooldown.
-	const run = async <T>(op: "get" | "mget" | "set" | "incr", command: (redis: RedisClient) => Promise<T>): Promise<T> => {
-		const redis = await open();
-		try {
-			return await callPlane(gate, op, () => deadline(command(redis), commandTimeoutMs, op));
-		} catch (cause) {
-			discard(redis);
-			throw cause;
+	//
+	// The connect is part of the same gated operation (Greptile round 2). When
+	// it was gated on its own, a server that accepted connections but never
+	// answered commands never opened the breaker: each timeout discarded the
+	// connection, and the next request's successful reconnect was a breaker
+	// success that reset the count before its command timed out. Now a request
+	// is one outcome — a failed connect still charges the breaker, a successful
+	// one on its own never clears it — and an open breaker refuses before any
+	// socket is opened, so no cooldown starts from a refusal.
+	const run = <T>(op: "get" | "mget" | "set" | "incr", command: (redis: RedisClient) => Promise<T>): Promise<T> => {
+		// The cooldown is checked outside the gate: a refusal is not a plane outcome.
+		if (cooldownUntil !== null && now() < cooldownUntil) {
+			return Promise.reject(new Error(`cache connect cooling down for ${Math.ceil((cooldownUntil - now()) / 1000)} s`));
 		}
+		return callPlane(gate, op, async () => {
+			const redis = await open();
+			try {
+				return await deadline(command(redis), commandTimeoutMs, op);
+			} catch (cause) {
+				discard(redis);
+				throw cause;
+			}
+		});
 	};
 
 	return {

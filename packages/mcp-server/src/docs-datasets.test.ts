@@ -80,7 +80,7 @@ describe("refreshDataset", () => {
 		expect(latestVersion(deps.versions, "agent-substrate")?.commit).toBe("c7");
 	});
 
-	test("pins feed the search commit fallback", async () => {
+	test("pins travel as dataset_commit; an unrecorded document is never cited with the pin as its commit", async () => {
 		const fake = new RagflowFake();
 		const { emit } = eventsHarness();
 		const versions = createVersionStore();
@@ -94,7 +94,8 @@ describe("refreshDataset", () => {
 			"who reads RAGFlow?",
 		);
 		expect(reply.chunks.length).toBeGreaterThan(0);
-		expect(reply.chunks.every((citation) => citation.commit === "pinned-commit")).toBe(true);
+		expect(reply.chunks.every((citation) => citation.dataset_commit === "pinned-commit")).toBe(true);
+		expect(reply.chunks.every((citation) => citation.commit === "dataset-pin:agent-substrate:unrecorded")).toBe(true);
 	});
 });
 

@@ -48,7 +48,7 @@ describe("docs_search", () => {
 		expect(notes[0]?.repo).toBeFalsy();
 	});
 
-	test("falls back to the dataset pin commit when RAGFlow returns none", async () => {
+	test("Greptile round 2: an unrecorded document never borrows the dataset pin as its commit; the pin travels as dataset_commit", async () => {
 		const fake = new RagflowFake();
 		fake.chunkShape = "minimal";
 		const { search } = harness(fake, {
@@ -61,7 +61,10 @@ describe("docs_search", () => {
 		});
 		const reply = await search("pin fallback?");
 		expect(reply.chunks.length).toBeGreaterThan(0);
-		expect(reply.chunks[0]?.commit).toBe("abc123");
+		// No ingest record for this document: it may predate or postdate v3.
+		expect(reply.chunks[0]?.commit).toBe("dataset-pin:agent-substrate:unrecorded");
+		expect(reply.chunks[0]?.commit).not.toBe("abc123");
+		expect(reply.chunks[0]?.dataset_commit).toBe("abc123");
 	});
 
 	test("names the pin gap instead of inventing a commit", async () => {
@@ -69,7 +72,9 @@ describe("docs_search", () => {
 		const { search } = harness(fake);
 		const reply = await search("no pins yet?");
 		expect(reply.chunks.length).toBeGreaterThan(0);
-		expect(reply.chunks[0]?.commit).toContain("agent-substrate");
+		expect(reply.chunks[0]?.commit).toBe("dataset-pin:agent-substrate:unrecorded");
+		// No recorded version: nothing to present as the dataset's commit either.
+		expect(reply.chunks[0]?.dataset_commit).toBeUndefined();
 	});
 
 	test("redacts snippets before reply", async () => {

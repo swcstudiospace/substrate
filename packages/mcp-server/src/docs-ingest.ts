@@ -187,9 +187,18 @@ export type PageSettlement =
 	| { ok: true; result: IngestPageResult }
 	| { ok: false; reason: string };
 
+/**
+ * `changed` says whether this call mutated state — uploaded, replaced or
+ * pruned a document and re-recorded its source URL — on BOTH shapes
+ * (Greptile round 2): with the prune on, page A can land and delete its
+ * predecessor before page B fails, and the failure must still make the
+ * service persist the records and invalidate cached searches. A refusal
+ * that touched nothing (a gate, an unknown dataset, a first page that never
+ * uploaded) says `changed: false`.
+ */
 export type IngestOutcome =
-	| { ok: true; results: IngestPageResult[]; stripped_images: number }
-	| { ok: false; refused: true; reason: string; rules?: string[]; page?: string };
+	| { ok: true; results: IngestPageResult[]; stripped_images: number; changed: boolean }
+	| { ok: false; refused: true; reason: string; rules?: string[]; page?: string; changed: boolean };
 
 /** A document this record's source URL once published, still on the plane unless pruned. */
 export interface SupersededDocument {
@@ -327,9 +336,10 @@ function refused(
 	deps: IngestDeps,
 	sessionId: string,
 	reason: string,
-	extra?: { rules?: string[]; page?: string },
+	extra?: { rules?: string[]; page?: string; changed?: boolean },
 ): Promise<IngestOutcome> {
-	const outcome: IngestOutcome = { ok: false, refused: true, reason, ...extra };
+	const { changed = false, ...locator } = extra ?? {};
+	const outcome: IngestOutcome = { ok: false, refused: true, reason, ...locator, changed };
 	if (deps.surface === null) return Promise.resolve(outcome);
 	return deps
 		.emit({
@@ -399,6 +409,8 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 	const commit = input.commit ?? "unpinned";
 
 	const results: IngestPageResult[] = [];
+	// True once any page of this call stored a document (and so a record).
+	const changed = (): boolean => results.some((result) => result.status !== "unchanged");
 	for (const { page, sourceUrl, body, sha } of prepared) {
 		const key = recordKey(dataset.id, sourceUrl);
 		for (;;) {
@@ -412,7 +424,7 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 			const running = locks.get(key);
 			if (running && running.sha === sha) {
 				const settled = await running.task;
-				if (!settled.ok) return refused(deps, sessionId, settled.reason, { page: page.path });
+				if (!settled.ok) return refused(deps, sessionId, settled.reason, { page: page.path, changed: changed() });
 				results.push(settled.result);
 				break;
 			}
@@ -488,14 +500,14 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 				} finally {
 					if (locks.get(key)?.task === task) locks.delete(key);
 				}
-				if (!settled.ok) return refused(deps, sessionId, settled.reason, { page: page.path });
+				if (!settled.ok) return refused(deps, sessionId, settled.reason, { page: page.path, changed: changed() });
 				results.push(settled.result);
 				break;
 			}
 			// A different body is mid-upload: wait for it, then recheck —
 			// a third writer may have stored ours meanwhile, else upload ours.
 			const settled = await running.task;
-			if (!settled.ok) return refused(deps, sessionId, settled.reason, { page: page.path });
+			if (!settled.ok) return refused(deps, sessionId, settled.reason, { page: page.path, changed: changed() });
 		}
 	}
 
@@ -513,7 +525,7 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 			stripped_images: strippedImages,
 		},
 	});
-	return { ok: true, results, stripped_images: strippedImages };
+	return { ok: true, results, stripped_images: strippedImages, changed: changed() };
 }
 /**
  * Ingest records on disk, so a restarted server does not re-upload pages it

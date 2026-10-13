@@ -323,12 +323,19 @@ export class AuditLog {
 				: { record: null, size: 0, exhausted: true };
 			const segments = listAuditSegments(path);
 			const newest = segments[segments.length - 1];
-			if (!recovered.record && recovered.size === 0 && newest) {
-				// No active file, or an empty one, beside a closed segment: the process died
-				// between closing a segment and writing the first record of the next one.
-				// The chain's tip is the segment's, and the next record continues it. The
-				// size stays the active file's, since that is what the checks below are about.
-				recovered = { ...this.readLastRecord(newest.path), size: 0 };
+			if (!recovered.record && recovered.exhausted && newest) {
+				// No active file, an empty one, or one holding nothing readable, beside a
+				// closed segment: the process died between closing a segment and writing the
+				// first record of the next one — before, or partway through, that write. The
+				// chain's tip is the segment's, and the next record continues it. Nothing in
+				// the active file is readable, so nothing in it can outrank the segment; a
+				// partial first line is not a lost record, and reporting it as one made a
+				// mid-write crash read as a deleted file (Greptile round 2). The size stays
+				// the active file's: that is what the checks below are about, and a fragment
+				// is terminated below exactly as it would be in any other file. `exhausted`
+				// is the guard — a file too large to have been scanned to its head may still
+				// hold records past the window, and those outrank any segment.
+				recovered = { ...this.readLastRecord(newest.path), size: recovered.size };
 			}
 			if (recovered.record) {
 				this.chainSeq = recovered.record.seq;

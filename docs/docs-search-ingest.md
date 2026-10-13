@@ -60,21 +60,25 @@ deployment echoes it.
 ## Citation shape
 
 Each `docs_search` result carries `{title, source_url, heading_path,
-commit, snippet, score, document_id, chunk_id}` where every text field is
-redacted — `snippet` additionally capped at 1,200 characters —
-`source_url` is the chunk's own when it carries one, else the ingest
-record's for that document id, else `dataset:<name>`, and callers cite
-`source_url`, never the chunk. `commit` is resolved **per document**, in
-this order: (1) the commit the ingest record holds for that document id
-— the current document of a source URL, or one of its replaced-but-
-unpruned predecessors (the record keeps the last five with their own
-commits, so with the prune off a retrieval that returns an older
-document cites that older commit, never the dataset's newest pin);
+commit, dataset_commit?, snippet, score, document_id, chunk_id}` where
+every text field is redacted — `snippet` additionally capped at 1,200
+characters — `source_url` is the chunk's own when it carries one, else
+the ingest record's for that document id, else `dataset:<name>`, and
+callers cite `source_url`, never the chunk. `commit` is resolved **per
+document**, in this order: (1) the commit the ingest record holds for
+that document id — the current document of a source URL, or one of its
+replaced-but-unpruned predecessors (the record keeps the last five with
+their own commits, so with the prune off a retrieval that returns an
+older document cites that older commit, never the dataset's newest pin);
 (2) a recorded document that was uploaded by a direct `docs_ingest`
 without a `commit` → `dataset-pin:<name>:unpinned` (it does not borrow
 the dataset pin, which it may predate or postdate); (3) a document the
-records never uploaded (another writer, or records lost) → the dataset's
-newest pin from the version store; (4) neither → `dataset-pin:<name>:unpinned`.
+records never uploaded (another writer, or records lost) →
+`dataset-pin:<name>:unrecorded` — never the dataset pin either (Greptile
+round 2), for the same reason. The dataset's newest recorded version from
+the version store travels separately as `dataset_commit` on every
+citation once one is recorded; it is the dataset's version, not
+necessarily that document's.
 The reply carries an untrusted-docs notice; one `note` event
 (`payload.action: "docs.search"`) lists the returned URLs; any error
 yields `{chunks: [], degraded: true, reason}` — never a throw inside an
@@ -90,8 +94,12 @@ share the same list. The answer itself is cached in Dragonfly under the
 `docs-search` class (TTL 300 s): key = caller surface + normalised
 question (trimmed, whitespace collapsed, lower-cased) + sorted dataset
 names + the current pins + the degraded set, under the generation
-`substrate:v1:gen:docs`, which every successful ingest and every recorded
-version bumps — a refresh invalidates every cached answer at once. A
+`substrate:v1:gen:docs`, which every ingest that stored anything (a
+successful one, or one that failed after an earlier page landed — the
+outcome's `changed`) and every recorded version bumps — a refresh
+invalidates every cached answer at once. The same condition persists the
+ingest records, so a page pruned before a later page failed is never
+named by the state file after a restart (Greptile round 2). A
 degraded reply is never stored; a cache hit makes no plane call and emits
 no `note`.
 

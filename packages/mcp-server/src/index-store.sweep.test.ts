@@ -136,6 +136,8 @@ describeLive("index sweep against a live index", () => {
 			["g-terminal-lease-expired", "Merged", 400],
 			// Finished long ago and free; claimed on a second connection mid-sweep by the race test.
 			["g-terminal-race", "Done", 400],
+			// Its batch-mate in the race test: picked and locked alongside, and removed whole while the raced one stays whole.
+			["g-terminal-race-free", "Done", 400],
 		];
 		for (const [name, status, days] of graphs) {
 			const graphId = id(name);
@@ -160,13 +162,19 @@ describeLive("index sweep against a live index", () => {
 			where graph_id = ${id("g-terminal-lease-expired")} and node_id = 'n1'`;
 	}
 
-	/** `graph_nodes` only: the sweep would have to see this claim land between its pick and its node delete. */
-	async function claimLive(name: string): Promise<void> {
-		await raw`
+	/**
+	 * `graph_nodes` only, the way `claimNode` writes: the sweep has to see this
+	 * claim land between its pick and its node lock. Returns how many rows it
+	 * wrote — zero once the node is gone, exactly as the CAS in `claimNode` sees it.
+	 */
+	async function claimLive(name: string): Promise<number> {
+		const rows = (await raw`
 			update graph_nodes set claimed_by = 'hermes', claim_session = ${`${RUN}-race`}, claimed_at = now(),
 				lease_id = ${`lse_${RUN}_race`}, lease_epoch = lease_epoch + 1, lease_heartbeat_at = now(),
 				lease_expires_at = now() + interval '1 hour'
-			where graph_id = ${id(name)} and node_id = 'n2'`;
+			where graph_id = ${id(name)} and node_id = 'n2'
+			returning node_id`) as Array<Record<string, unknown>>;
+		return rows.length;
 	}
 
 	async function count(table: string, column: string, name: string): Promise<number> {
@@ -206,40 +214,61 @@ describeLive("index sweep against a live index", () => {
 		expect(await count("memory_entries", "id", "e-v1-old")).toBe(1);
 	});
 
-	test("a claim that lands between the pick and the node delete keeps its graph, with no orphans", async () => {
+	test("a claim that lands between the pick and the node lock keeps its graph whole — every node, edge, step, binding and the index row — while its batch-mate goes", async () => {
 		// The sweep's own statements, driven by hand inside one transaction with the
 		// pick's lock held, and the claim arriving on a second connection in between —
 		// the window `IndexStore.sweep` cannot be paused in.
 		const graphs = SWEEP_CLASSES.find((cls) => cls.id === "graphs-terminal")!;
 		const cutoff = new Date(NOW - 90 * DAY_MS).toISOString();
 		const raced = id("g-terminal-race");
+		const free = id("g-terminal-race-free");
+		let lateClaim: Promise<number> | undefined;
 		const outcome = await raw.begin(async (tx) => {
 			const batch = graphs.deleteBatch!(cutoff, 5_000);
-			const picked = (await tx.unsafe(batch.pick.text, batch.pick.params as unknown[])) as Array<Record<string, unknown>>;
-			expect(picked.map((row) => String(row.graph_id))).toContain(raced);
-			// Only the raced graph goes on to the delete here; the rest stay for the apply test.
-			const statements = batch.then!([{ graph_id: raced }]);
-			await claimLive("g-terminal-race");
+			const all = (await tx.unsafe(batch.pick.text, batch.pick.params as unknown[])) as Array<Record<string, unknown>>;
+			expect(all.map((row) => String(row.graph_id))).toEqual(expect.arrayContaining([raced, free]));
+			// Only these two go on here; the rest stay for the apply test.
+			const picked = [{ graph_id: raced }, { graph_id: free }];
+			// The claim commits on its own connection after the pick and before the
+			// lock: the lock must wait for nothing, yet read the claimed row version.
+			expect(await claimLive("g-terminal-race")).toBe(1);
+			const locked = (await tx.unsafe(batch.lock!(picked).text, batch.lock!(picked).params as unknown[])) as Array<
+				Record<string, unknown>
+			>;
+			const liveOf = (graphId: string): unknown[] => locked.filter((row) => String(row.graph_id) === graphId).map((row) => row.live);
+			expect(liveOf(free)).toEqual([false, false]);
+			expect(liveOf(raced).sort()).toEqual([false, true]);
+			// A claim arriving after the lock queues behind it (or behind the delete —
+			// either way it resolves against this transaction's committed outcome).
+			lateClaim = claimLive("g-terminal-race-free");
 			const row: Record<string, unknown> = {};
-			for (const statement of statements) {
+			for (const statement of batch.then!(picked, locked)) {
 				Object.assign(row, ((await tx.unsafe(statement.text, statement.params as unknown[])) as Array<Record<string, unknown>>)[0]);
 			}
 			return row;
 		});
-		// n1 (no lease) went; n2 (just claimed) survived; so the index row and its
-		// edge, step and binding all stayed.
-		expect(Number(outcome.nodes)).toBe(1);
-		expect(Number(outcome.deleted)).toBe(0);
-		expect(await count("graph_index", "graph_id", "g-terminal-race")).toBe(1);
-		expect(await count("graph_nodes", "graph_id", "g-terminal-race")).toBe(1);
-		expect(await count("graph_edges", "graph_id", "g-terminal-race")).toBe(1);
-		expect(await count("graph_steps", "graph_id", "g-terminal-race")).toBe(1);
-		expect(await count("graph_bindings", "graph_id", "g-terminal-race")).toBe(1);
-		// And it is no longer a candidate at all while the lease is live: the next
-		// pick — the count's predicate — does not name it, so no later round retries it.
+		// The free graph went whole (two nodes, one edge, one step, one binding, its
+		// row); the raced graph lost nothing — not even n1, which holds no lease.
+		expect(Number(outcome.nodes)).toBe(2);
+		expect(Number(outcome.deleted)).toBe(1);
+		expect(Number(outcome.edges)).toBe(1);
+		expect(Number(outcome.steps)).toBe(1);
+		expect(Number(outcome.bindings)).toBe(1);
+		for (const table of ["graph_index", "graph_nodes", "graph_edges", "graph_steps", "graph_bindings"]) {
+			expect(await count(table, "graph_id", "g-terminal-race-free")).toBe(0);
+			expect(await count(table, "graph_id", "g-terminal-race")).toBe(table === "graph_nodes" ? 2 : 1);
+		}
+		const unleased = (await raw`
+			select node_id from graph_nodes where graph_id = ${raced} and claimed_by is null order by node_id`) as Array<Record<string, unknown>>;
+		expect(unleased.map((row) => row.node_id)).toEqual(["n1"]);
+		// The late claimant found its node gone: the CAS matched zero rows, as `claimNode` would report.
+		expect(await lateClaim!).toBe(0);
+		// And the raced graph is no longer a candidate at all while the lease is live:
+		// the next pick — the count's predicate — does not name it, so no later round retries it.
 		const batch = graphs.deleteBatch!(cutoff, 5_000);
 		const next = (await raw.unsafe(batch.pick.text, batch.pick.params as unknown[])) as Array<Record<string, unknown>>;
 		expect(next.map((row) => String(row.graph_id))).not.toContain(raced);
+		expect(next.map((row) => String(row.graph_id))).not.toContain(free);
 		expect(next.map((row) => String(row.graph_id))).toContain(id("g-terminal-old"));
 	});
 

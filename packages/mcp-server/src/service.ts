@@ -2743,7 +2743,8 @@ export class Substrate {
 	 * by the normalised question, the dataset names and the current pins,
 	 * and invalidated by `gen:docs` (bumped by every ingest and every
 	 * recorded version); a degraded reply is never stored. Citations carry
-	 * the real commit pin once the dataset has a recorded version, and
+	 * their own document's commit; the dataset's newest recorded version
+	 * travels separately as `dataset_commit` (Greptile round 2), and
 	 * `agent-skills` is marked pin-aged until this process has seen
 	 * skills-sync fast-forward evidence (D25-07). The dataset list comes
 	 * from the 60 s cache, so a search costs N retrievals, not 1 + N calls.
@@ -2838,8 +2839,11 @@ export class Substrate {
 	 * a redactor finding, a missing source URL, an out-of-roots path or an
 	 * over-cap page is refused with a locator-only warning event — nothing is
 	 * uploaded. `dataset` names a configured dataset; raw ids are never
-	 * accepted. A successful ingest persists the records and bumps the docs
-	 * generation, so every cached `docs_search` answer is invalidated.
+	 * accepted. An ingest that stored anything — a successful one, or one
+	 * that failed after an earlier page landed (and, with the prune on,
+	 * deleted its predecessor) — persists the records and bumps the docs
+	 * generation, so every cached `docs_search` answer is invalidated and a
+	 * restart never names a pruned document (Greptile round 2).
 	 */
 	async ingestDocs(
 		input: { dataset?: unknown; commit?: unknown; pages?: unknown; session_id?: unknown },
@@ -2880,7 +2884,7 @@ export class Substrate {
 				...(sessionId !== undefined ? { session_id: sessionId } : {}),
 			},
 		);
-		if (outcome.ok) {
+		if (outcome.ok || outcome.changed) {
 			await this.persistDocsSeen();
 			await this.cache.bump(DOCS_GENERATION_KEY);
 		}

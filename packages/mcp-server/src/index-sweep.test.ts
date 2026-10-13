@@ -197,7 +197,7 @@ describe("the classes", () => {
 		expect(by["quarantine-unresolved"]!.count(cutoff).text).toContain(`created < $1::timestamptz and not ${landed}`);
 	});
 
-	test("terminal graphs: the status list is the brief's, no graph with a live lease is a candidate, and the cascade is lease-checked", () => {
+	test("terminal graphs: the status list is the brief's, no graph with a live lease is a candidate, and the cascade locks every node then decides per graph", () => {
 		const graphs = by["graphs-terminal"]!;
 		const liveLease =
 			"n.claimed_by is not null and coalesce(n.lease_expires_at, n.claimed_at + make_interval(secs => 900)) > now()";
@@ -215,11 +215,32 @@ describe("the classes", () => {
 		expect(batch.pick.params).toEqual([cutoff, TERMINAL_GRAPH_STATUSES.join("|"), 100]);
 		expect(batch.skippedAs).toBe("skipped_live_lease");
 
-		const [nodes, graphsThenRest, ...more] = batch.then!([{ graph_id: "ut-a" }, { graph_id: "ut-b" }]);
+		const picked = [{ graph_id: "ut-a" }, { graph_id: "ut-b" }, { graph_id: "ut-c" }];
+		// The lock takes every node row of the picked graphs — plain `for update`, so
+		// it waits for a claim in flight and reads the row version that claim wrote —
+		// and reports each row's lease state; the ids travel as JSON text.
+		const lock = batch.lock!(picked);
+		expect(lock.text).toBe(
+			`select n.graph_id, (${liveLease}) as live from graph_nodes n ` +
+				"where n.graph_id in (select jsonb_array_elements_text($1::text::jsonb)) for update",
+		);
+		expect(lock.text).not.toContain("skip locked");
+		expect(lock.params).toEqual([JSON.stringify(["ut-a", "ut-b", "ut-c"])]);
+
+		// ut-a: two free nodes; ut-b: one free, one live; ut-c: no node rows at all.
+		const locked = [
+			{ graph_id: "ut-a", live: false },
+			{ graph_id: "ut-a", live: false },
+			{ graph_id: "ut-b", live: false },
+			{ graph_id: "ut-b", live: true },
+		];
+		const [nodes, graphsThenRest, ...more] = batch.then!(picked, locked);
 		expect(more).toEqual([]);
-		const ids = JSON.stringify(["ut-a", "ut-b"]);
-		// Nodes go first, each row re-checked for a live lease at execution time.
-		expect(nodes!.text).toContain(`delete from graph_nodes n where n.graph_id in (select jsonb_array_elements_text($1::text::jsonb)) and not (${liveLease})`);
+		// Only the graphs with no live node are named — ut-b in neither statement, so
+		// none of its rows (its free node included) is touched; ut-c, nodeless, goes.
+		const ids = JSON.stringify(["ut-a", "ut-c"]);
+		expect(nodes!.text).toContain("delete from graph_nodes n where n.graph_id in (select jsonb_array_elements_text($1::text::jsonb)) returning 1");
+		expect(nodes!.text).not.toContain("claimed_by");
 		expect(nodes!.params).toEqual([ids]);
 		// Then the index row only where no node survived, and the FK-less tables only for graphs whose row went.
 		expect(graphsThenRest!.text).toContain(
@@ -231,6 +252,10 @@ describe("the classes", () => {
 		}
 		expect(graphsThenRest!.text).toMatch(/as deleted, .*as edges, .*as steps, .*as bindings$/);
 		expect(graphsThenRest!.params).toEqual([ids]);
+		for (const statement of [nodes!, graphsThenRest!]) expect(JSON.stringify(statement)).not.toContain("ut-b");
+
+		// Every picked graph live: nothing is issued at all.
+		expect(batch.then!([{ graph_id: "ut-b" }], [{ graph_id: "ut-b", live: true }])).toEqual([]);
 	});
 
 	test("memory entries: superseded versions are deletable; ttl classes only count rows the reads still return", () => {
@@ -265,6 +290,14 @@ describe("executeSweep", () => {
 				remaining -= picked;
 				return Array.from({ length: picked }, (_, i) => ({ graph_id: `g${i}` }));
 			}
+			// The lock: every picked graph has two nodes, neither held.
+			if (statement.text.startsWith("select n.graph_id")) {
+				const ids = JSON.parse(String(statement.params[0])) as string[];
+				return ids.flatMap((graph_id) => [
+					{ graph_id, live: false },
+					{ graph_id, live: false },
+				]);
+			}
 			if (statement.text.includes("delete from graph_nodes")) return [{ nodes: picked * 2 }];
 			if (statement.text.includes("delete from graph_index")) return [{ deleted: picked, edges: 0, steps: 0, bindings: 0 }];
 			const limit = Number(statement.params.at(-1));
@@ -292,11 +325,11 @@ describe("executeSweep", () => {
 		const { run, statements } = fakeRunner(1_200);
 		const steps = planSweep(DEFAULT_SWEEP_POLICY, NOW).filter((step) => step.cls.id === "graphs-terminal");
 		const report = await executeSweep(run, steps, { apply: true, batch: 500, now: NOW });
-		// Count once; then per round: pick, node delete, graph+cascade delete. 500,
-		// 500, 200 — the short third pick ends it.
+		// Count once; then per round: pick, node lock, node delete, graph+cascade
+		// delete. 500, 500, 200 — the short third pick ends it.
 		expect(statements.map((statement) => statement.text.slice(0, 11))).toEqual([
 			"select coun",
-			...Array(3).fill(["select g.gr", "with d as (", "with g as ("]).flat(),
+			...Array(3).fill(["select g.gr", "select n.gr", "with d as (", "with g as ("]).flat(),
 		]);
 		expect(report.classes[0]).toMatchObject({
 			id: "graphs-terminal",
@@ -346,14 +379,22 @@ describe("executeSweep", () => {
 		expect(report.classes[0]?.deleted).toBe(20);
 	});
 
-	test("a terminal graph claimed between pick and delete is kept, reported as skipped, and stops the loop", async () => {
+	test("a terminal graph claimed between pick and lock is kept whole, reported as skipped, and stops the loop", async () => {
 		const statements: SweepStatement[] = [];
 		const run = async (statement: SweepStatement) => {
 			statements.push(statement);
 			if (statement.text.startsWith("select count")) return [{ candidates: 4 }];
-			// The pick finds two per round; one of them grows a live lease before the
-			// node delete runs, so its nodes survive and its index row stays.
+			// The pick finds two per round; one of them grows a live lease on one node
+			// before the lock runs, so the lock reports that node live.
 			if (statement.text.startsWith("select g.graph_id")) return [{ graph_id: "g-free" }, { graph_id: "g-claimed" }];
+			if (statement.text.startsWith("select n.graph_id")) {
+				return [
+					{ graph_id: "g-free", live: false },
+					{ graph_id: "g-free", live: false },
+					{ graph_id: "g-claimed", live: false },
+					{ graph_id: "g-claimed", live: true },
+				];
+			}
 			if (statement.text.includes("delete from graph_nodes")) return [{ nodes: 2 }];
 			return [{ deleted: 1, edges: 1, steps: 1, bindings: 1 }];
 		};
@@ -367,10 +408,33 @@ describe("executeSweep", () => {
 		// One round only: the pick was full but the delete fell short, so the sweep
 		// stops rather than chasing a graph that is in use.
 		expect(statements.filter((statement) => statement.text.startsWith("select g.graph_id"))).toHaveLength(1);
-		// The node delete carries the picked ids and re-checks the lease per row.
-		const nodes = statements.find((statement) => statement.text.includes("delete from graph_nodes"))!;
-		expect(nodes.params).toEqual([JSON.stringify(["g-free", "g-claimed"])]);
-		expect(nodes.text).toContain("and not (n.claimed_by is not null and coalesce(n.lease_expires_at");
+		// The lock carries both picked ids; every delete carries only the free graph —
+		// the claimed graph's unleased sibling node is never named by any statement.
+		const lock = statements.find((statement) => statement.text.startsWith("select n.graph_id"))!;
+		expect(lock.params).toEqual([JSON.stringify(["g-free", "g-claimed"])]);
+		const deletes = statements.filter((statement) => statement.text.includes("delete from"));
+		expect(deletes).toHaveLength(2);
+		for (const statement of deletes) expect(statement.params).toEqual([JSON.stringify(["g-free"])]);
+	});
+
+	test("a round whose every picked graph is live issues no delete, reports them all skipped, and stops", async () => {
+		const statements: SweepStatement[] = [];
+		const run = async (statement: SweepStatement) => {
+			statements.push(statement);
+			if (statement.text.startsWith("select count")) return [{ candidates: 2 }];
+			if (statement.text.startsWith("select g.graph_id")) return [{ graph_id: "g-x" }, { graph_id: "g-y" }];
+			if (statement.text.startsWith("select n.graph_id")) {
+				return [
+					{ graph_id: "g-x", live: true },
+					{ graph_id: "g-y", live: true },
+				];
+			}
+			throw new Error(`unexpected statement: ${statement.text}`);
+		};
+		const steps = planSweep(DEFAULT_SWEEP_POLICY, NOW).filter((step) => step.cls.id === "graphs-terminal");
+		const report = await executeSweep(run, steps, { apply: true, batch: 2, now: NOW });
+		expect(report.classes[0]).toMatchObject({ candidates: 2, deleted: 0, children: { skipped_live_lease: 2 } });
+		expect(statements.map((statement) => statement.text.slice(0, 11))).toEqual(["select coun", "select g.gr", "select n.gr"]);
 	});
 
 	test("an empty pick issues no follow-up statements", async () => {
@@ -391,6 +455,7 @@ describe("report rendering", () => {
 		const run = async (statement: SweepStatement) => {
 			if (statement.text.startsWith("select count")) return [{ candidates: 3 }];
 			if (statement.text.startsWith("select g.graph_id")) return [{ graph_id: "a" }, { graph_id: "b" }, { graph_id: "c" }];
+			if (statement.text.startsWith("select n.graph_id")) return [{ graph_id: "a", live: false }];
 			if (statement.text.includes("delete from graph_nodes")) return [{ nodes: 1 }];
 			return [{ deleted: 3, edges: 2, steps: 0, bindings: 0 }];
 		};

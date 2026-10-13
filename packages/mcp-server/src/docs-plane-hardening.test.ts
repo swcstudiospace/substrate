@@ -249,7 +249,7 @@ describe("durable versions and real pins", () => {
 		}
 	});
 
-	test("citations carry the real commit pin after one recorded version, and the pin survives a restart", async () => {
+	test("citations carry the real commit pin as dataset_commit after one recorded version, and the pin survives a restart", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "substrate-docs-state-"));
 		try {
 			const env = { RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", SUBSTRATE_DOCS_STATE_FILE: join(dir, "docs-ingest.json") };
@@ -258,19 +258,30 @@ describe("durable versions and real pins", () => {
 			fake.parseDonePolls = 1;
 			const first = new Substrate(loadConfig(env), { index: null, greptime: null, ragflowFetch: fake.fetch });
 			const before = await first.searchDocs({ question: "who reads RAGFlow?", datasets: ["agent-substrate"] }, "omp");
-			expect(before.chunks[0]?.commit).toBe("dataset-pin:agent-substrate:unpinned");
+			expect(before.chunks[0]?.commit).toBe("dataset-pin:agent-substrate:unrecorded");
+			expect(before.chunks[0]?.dataset_commit).toBeUndefined();
 			const ingested = await first.ingestDocs({ dataset: "agent-substrate", commit: "c-real", pages: [PAGE] }, "omp");
 			if (!ingested.ok) throw new Error(ingested.reason);
+			const ownId = ingested.results[0]?.document_id ?? "";
 			const recorded = await first.recordDocsVersion({ dataset: "agent-substrate", commit: "c-real", content_sha256: "sha-real" }, "omp");
 			if (!recorded.ok) throw new Error(recorded.reason);
+			// The plane serves the document this process uploaded and one it never recorded.
+			const seeded = fake.chunks["ds-berlin-agent-substrate"]?.[0];
+			if (!seeded) throw new Error("expected a seeded chunk");
+			fake.chunks["ds-berlin-agent-substrate"] = [{ ...seeded, document_id: ownId, chunk_id: "chunk-own" }, seeded];
 			const after = await first.searchDocs({ question: "who reads RAGFlow?", datasets: ["agent-substrate"] }, "omp");
-			expect(after.chunks.length).toBeGreaterThan(0);
-			expect(after.chunks.every((citation) => citation.commit === "c-real")).toBe(true);
+			expect(after.chunks.length).toBe(2);
+			// Every citation names the dataset's recorded version separately …
+			expect(after.chunks.every((citation) => citation.dataset_commit === "c-real")).toBe(true);
+			// … while `commit` is the document's own, or an honest marker (Greptile round 2).
+			const byDocument = Object.fromEntries(after.chunks.map((citation) => [citation.document_id, citation.commit]));
+			expect(byDocument[ownId]).toBe("c-real");
+			expect(byDocument[seeded.document_id ?? ""]).toBe("dataset-pin:agent-substrate:unrecorded");
 
 			// A new process: pins hydrate from the file, idempotency holds.
 			const second = new Substrate(loadConfig(env), { index: null, greptime: null, ragflowFetch: fake.fetch });
 			const restarted = await second.searchDocs({ question: "who reads RAGFlow?", datasets: ["agent-substrate"] }, "omp");
-			expect(restarted.chunks.every((citation) => citation.commit === "c-real")).toBe(true);
+			expect(restarted.chunks.map((citation) => [citation.document_id, citation.commit, citation.dataset_commit])).toEqual(after.chunks.map((citation) => [citation.document_id, citation.commit, citation.dataset_commit]));
 			const newest = await second.latestDocsVersion("agent-substrate");
 			expect(newest).toMatchObject({ version: "v1", commit: "c-real", content_sha256: "sha-real" });
 		} finally {
@@ -327,8 +338,11 @@ describe("durable versions and real pins", () => {
 		expect(byId[oldId]).toBe("c-old");
 		// The new document cites the new commit.
 		expect(byId[newId]).toBe("c-new");
-		// A document the records never uploaded falls back to the dataset pin.
-		expect(byId["doc-unknown"]).toBe("c-new");
+		// A document the records never uploaded is not stamped with the pin
+		// either (Greptile round 2): it may predate or postdate it.
+		expect(byId["doc-unknown"]).toBe("dataset-pin:agent-substrate:unrecorded");
+		// The dataset's newest recorded version travels on every citation, as its own field.
+		expect(reply.chunks.every((citation) => citation.dataset_commit === "c-new")).toBe(true);
 		// Both recorded documents carry the ingest record's source URL.
 		expect(reply.chunks.filter((citation) => citation.document_id !== "doc-unknown").every((citation) => citation.source_url === PAGE.source_url)).toBe(true);
 
@@ -340,6 +354,7 @@ describe("durable versions and real pins", () => {
 		fake.chunks["ds-berlin-agent-substrate"] = [chunkFor(bareId)];
 		const bareReply = await substrate.searchDocs({ question: "which commit?", datasets: ["agent-substrate"] }, "omp");
 		expect(bareReply.chunks[0]?.commit).toBe("dataset-pin:agent-substrate:unpinned");
+		expect(bareReply.chunks[0]?.dataset_commit).toBe("c-new");
 	});
 
 	test("the lineage of replaced documents round-trips the state file, and a prune drops the pruned one", async () => {
@@ -528,6 +543,89 @@ describe("bounded growth: SUBSTRATE_DOCS_PRUNE_SUPERSEDED", () => {
 		expect(lines[0]).toContain("not pruned");
 		expect(events.some((event) => event.kind === "warning")).toBe(false);
 		expect(Object.keys(fake.documents)).toHaveLength(2);
+	});
+
+	// Greptile round 2: page A lands and prunes its predecessor, then page B
+	// fails at upload. The fake has no per-document failure knob, so the
+	// wrapper refuses the one multipart upload whose file carries B's name.
+	const PAGE_B = { path: "docs/b.md", source_url: "https://example.com/agent-substrate/b", body: "page b" };
+	const failingUploadOf = (fake: RagflowFake, fileName: string): FetchLike => async (input, init) => {
+		if (init?.body instanceof FormData && init.body.getAll("file").some((part) => part instanceof File && part.name === fileName)) {
+			return Response.json({ code: 100, message: "injected upload failure" }, { status: 500 });
+		}
+		return fake.fetch(input, init);
+	};
+
+	test("Greptile round 2: a page failing after an earlier page pruned its predecessor reports changed: true; a refusal that touched nothing reports false", async () => {
+		const fake = new RagflowFake();
+		const { seen, ingest } = ingestHarness(fake, { prune: true, fetchImpl: failingUploadOf(fake, documentName(PAGE_B.path)) });
+		const first = await ingest([PAGE]);
+		if (!first.ok) throw new Error(first.reason);
+		expect(first.changed).toBe(true);
+		const oldId = first.results[0]?.document_id ?? "";
+		const partial = await ingest([{ ...PAGE, body: `${PAGE.body} More.` }, PAGE_B]);
+		if (partial.ok) throw new Error("expected page B to fail");
+		expect(partial.page).toBe(PAGE_B.path);
+		expect(partial.changed).toBe(true);
+		// Page A landed, its predecessor is gone from the plane, and the record names the surviving document.
+		expect(fake.deleted).toEqual([oldId]);
+		const record = seen.get(`ds-berlin-agent-substrate::${PAGE.source_url}`);
+		expect(record?.document_id).not.toBe(oldId);
+		expect(fake.documents[record?.document_id ?? ""]).toBeDefined();
+		// Nothing stored: an unchanged hash, and a gate refusal before any upload.
+		const skipped = await ingest([{ ...PAGE, body: `${PAGE.body} More.` }]);
+		if (!skipped.ok) throw new Error(skipped.reason);
+		expect(skipped.changed).toBe(false);
+		const gated = await ingest([{ ...PAGE_B, path: "private/b.md" }]);
+		if (gated.ok) throw new Error("expected a refusal");
+		expect(gated).toMatchObject({ reason: "outside-roots", changed: false });
+		// B failing as the first page of a call stored nothing either.
+		const nothing = await ingest([PAGE_B]);
+		if (nothing.ok) throw new Error("expected page B to fail");
+		expect(nothing.changed).toBe(false);
+	});
+
+	test("Greptile round 2: the service persists the records and bumps gen:docs after a partial failure, so a restart never names the pruned document", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "substrate-docs-state-"));
+		try {
+			const file = join(dir, "docs-ingest.json");
+			const env = { RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", SUBSTRATE_DOCS_STATE_FILE: file, SUBSTRATE_DOCS_PRUNE_SUPERSEDED: "1" };
+			const fake = new RagflowFake();
+			fake.parseDonePolls = 1;
+			const redis = new FakeRedis();
+			const cache = new ReadThroughCache({ redis, enabled: true, log: () => {} });
+			const bumps = () => redis.commands.filter((command) => command === `INCR ${DOCS_GENERATION_KEY}`).length;
+			const first = new Substrate(loadConfig(env), { index: null, greptime: null, ragflowFetch: failingUploadOf(fake, documentName(PAGE_B.path)), cache });
+			const v1 = await first.ingestDocs({ dataset: "agent-substrate", commit: "c1", pages: [PAGE] }, "omp");
+			if (!v1.ok) throw new Error(v1.reason);
+			const oldId = v1.results[0]?.document_id ?? "";
+			expect(bumps()).toBe(1);
+			const partial = await first.ingestDocs({ dataset: "agent-substrate", commit: "c2", pages: [{ ...PAGE, body: "two" }, PAGE_B] }, "omp");
+			if (partial.ok) throw new Error("expected page B to fail");
+			expect(partial.changed).toBe(true);
+			// The failure still invalidated cached searches and saved page A's new record.
+			expect(bumps()).toBe(2);
+			expect(fake.deleted).toEqual([oldId]);
+			const saved = (await loadIngestRecords(file)).records.get(`ds-berlin-agent-substrate::${PAGE.source_url}`);
+			expect(saved?.commit).toBe("c2");
+			expect(saved?.document_id).not.toBe(oldId);
+			expect(fake.documents[saved?.document_id ?? ""]).toBeDefined();
+			// A restart re-submitting page A's old content replaces the recorded
+			// document rather than answering `unchanged` for the deleted one.
+			const second = new Substrate(loadConfig(env), { index: null, greptime: null, ragflowFetch: fake.fetch, cache });
+			const resubmitted = await second.ingestDocs({ dataset: "agent-substrate", commit: "c1", pages: [PAGE] }, "omp");
+			if (!resubmitted.ok) throw new Error(resubmitted.reason);
+			expect(resubmitted.results[0]).toMatchObject({ status: "replaced", superseded_document_id: saved?.document_id });
+			expect(resubmitted.results[0]?.document_id).not.toBe(oldId);
+			expect(bumps()).toBe(3);
+			// A refusal that touched nothing neither persists nor bumps.
+			const gated = await second.ingestDocs({ dataset: "agent-substrate", pages: [{ ...PAGE_B, path: "private/b.md" }] }, "omp");
+			if (gated.ok) throw new Error("expected a refusal");
+			expect(gated.changed).toBe(false);
+			expect(bumps()).toBe(3);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });
 

@@ -1114,6 +1114,46 @@ describe("rollover by size", () => {
 		expect(await third.report()).toMatchObject({ segments: 3, records: 6, firstSeq: 1, lastSeq: 6, ok: true });
 	});
 
+	test("a write cut in half right after a roll recovers from the closed segment, not as missing history", async () => {
+		// Greptile round 2: the process died partway through the *first* append after
+		// a roll. The active file then holds bytes but no complete record, and the old
+		// fallback only consulted the closed segment for an empty file — so every
+		// checkpointed record was reported missing when all of them sat in that
+		// segment. The segment is the tip; the fragment stays, terminated and counted.
+		const { size } = await recordBytes();
+		const path = join(temporaryDirectory(), "mcp-audit.jsonl");
+		const first = new AuditLog({ path, now: clock, rolloverBytes: size * 2 });
+		await first.open();
+		for (let i = 0; i < 3; i++) await first.append(allowed);
+		const tip = first.tip;
+		renameSync(path, segmentPath(path, 3, 3));
+		const fragment = '{"seq":4,"ts":"2026-01-01T00:00:00.000Z","partial';
+		writeFileSync(path, fragment);
+
+		const second = new AuditLog({ path, now: clock, rolloverBytes: size * 2 });
+		const opened = await second.open();
+		expect(opened).toMatchObject({ records: 3, tip, durable: true });
+		expect(opened.missingHistory).toBeUndefined();
+		expect(opened.error).toBeUndefined();
+		// The fragment is still there, terminated so the next record cannot be swallowed by it.
+		expect(readFileSync(path, "utf8")).toBe(`${fragment}\n`);
+
+		const fourth = await second.append(allowed);
+		expect(fourth.written).toBe(true);
+		expect(fourth.record.seq).toBe(4);
+		expect(fourth.record.prev).toBe(tip);
+		// Four records across three files, one line that is not a record, and the verdict
+		// names the fragment — not missing history — as the reason it cannot say ok.
+		const report = await second.report();
+		expect(report).toMatchObject({ segments: 2, records: 4, firstSeq: 1, lastSeq: 4, ok: false, unparseable: 1 });
+		expect(report.reason).toContain("could not be parsed");
+		expect(report.reason).not.toContain("missing history");
+		expect(await new AuditLog({ path }).report()).toMatchObject({ segments: 2, records: 4, lastSeq: 4, unparseable: 1 });
+		// The next roll names the file by the record that follows the segment, not the fragment.
+		await second.append(allowed);
+		expect(readdirSync(join(path, "..")).sort()).toContain("mcp-audit.jsonl.4-4.jsonl");
+	});
+
 	test("off by default, and off for anything that is not a positive integer", async () => {
 		const { size } = await recordBytes();
 		const dir = temporaryDirectory();

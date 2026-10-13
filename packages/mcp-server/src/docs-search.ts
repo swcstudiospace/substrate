@@ -17,12 +17,15 @@
  * The commit resolution order is: the document's recorded commit; a
  * recorded document uploaded without one → `dataset-pin:<name>:unpinned`
  * (never the dataset's newest pin, which that document may predate); a
- * document the records never uploaded → the dataset pin; neither →
- * `dataset-pin:<name>:unpinned`. With the prune off, retrieval can return a
- * replaced document, and this is what keeps it from being stamped with the
- * newest commit. The cached answer itself lives in the service
- * (`docs-search` cache class), keyed by the pins, so a refresh invalidates
- * it.
+ * document the records never uploaded → `dataset-pin:<name>:unrecorded`
+ * (Greptile round 2: never the dataset pin either — a document ingested
+ * before the state file existed, or directly through RAGFlow, may predate
+ * or postdate it). The dataset's newest recorded pin travels separately
+ * as `dataset_commit`, documented as the dataset's version, not the
+ * document's. With the prune off, retrieval can return a replaced
+ * document, and this is what keeps it from being stamped with the newest
+ * commit. The cached answer itself lives in the service (`docs-search`
+ * cache class), keyed by the pins, so a refresh invalidates it.
  */
 import { randomUUID } from "node:crypto";
 import type { DatasetListSource } from "./docs-datasets.ts";
@@ -46,7 +49,10 @@ export interface SearchCitation {
 	title: string;
 	source_url: string;
 	heading_path: string;
+	/** This document's own commit, or a `dataset-pin:<name>:…` marker saying why none is known. */
 	commit: string;
+	/** The dataset's newest recorded version (D25-04) — not necessarily this document's; absent until one is recorded. */
+	dataset_commit?: string;
 	snippet: string;
 	score: number;
 	document_id: string;
@@ -122,13 +128,13 @@ function cite(
 	const age = markPinAge ? pinAgeMs(pin, nowMs) : undefined;
 	const record = chunk.document_id !== undefined ? provenanceOf?.(chunk.document_id) : undefined;
 	const sourceUrl = chunk.source_url ?? record?.source_url;
-	const unpinned = `dataset-pin:${datasetName}:unpinned`;
-	const commit = record !== undefined ? (record.commit ?? unpinned) : pin !== undefined ? pin.commit : unpinned;
+	const commit = record !== undefined ? (record.commit ?? `dataset-pin:${datasetName}:unpinned`) : `dataset-pin:${datasetName}:unrecorded`;
 	return {
 		title: redact(chunk.document_name),
 		source_url: sourceUrl !== undefined ? redact(sourceUrl) : `dataset:${datasetName}`,
 		heading_path: chunk.heading_path ? redact(chunk.heading_path) : "",
 		commit,
+		...(pin !== undefined ? { dataset_commit: pin.commit } : {}),
 		snippet: redactValue(chunk.content).slice(0, SNIPPET_CAP),
 		score: chunk.score ?? 0,
 		document_id: chunk.document_id ?? "",

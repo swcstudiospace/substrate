@@ -60,6 +60,14 @@ breaker state machine (threshold, reset, half-open boundary, single probe, re-op
 
 Files changed in the round: `packages/observability/src/breaker.ts`, `breaker.test.ts`, `slo.ts`, `slo.test.ts`; `packages/mcp-server/src/cache.ts`, `cache.test.ts`; `docs/observability.md` (bucket wording); this file.
 
+## Greptile round 2 (PR #59)
+
+| Finding | Root cause | Fix | Regression test |
+| --- | --- | --- | --- |
+| P2 reconnects hid repeated cache failures (`cache.ts:242`) | the connect was its own `callPlane("connect")`; a server that accepts connections but stalls on commands timed out each command (one failure, connection discarded), and the next request's successful reconnect was a breaker *success* that reset the count — the threshold was never reached and every request paid the command timeout | the connect runs inside the same gated operation as the command it was opened for (`run` → `callPlane(gate, op, open + deadline(command))`), so the breaker sees exactly one outcome per request: a failed connect still charges it, a successful one on its own never clears it; the `connect` sample label is gone (a connect failure surfaces under the command's `op` with its own reason); the cooldown refusal is checked before the gate, as before, so it is neither a sample nor a breaker outcome; an open breaker refuses before any socket is opened, so `BreakerOpenError` no longer needs a cooldown exemption. One consequence by design: N requests awaiting one in-flight connect that fails are N failures | `cache.test.ts` "a server that accepts connections but never answers opens the breaker; reconnects do not reset it" (fake RESP server answers `HELLO` only; threshold 2 reached across two reconnects, third call refused in < 20 ms with no new socket and no cooldown, samples `get:timeout, get:timeout, get:open`; half-open probe against the healed server closes it); the round-1 test now expects `["get:ok", "get:timeout"]` |
+
+Files changed in the round: `packages/mcp-server/src/cache.ts`, `cache.test.ts`; this file.
+
 ## Gates
 
 Final head of `ultrathink/uplift-2` (all seven items merged): `bunx tsc --noEmit` clean · `bun test` **3525 pass / 65 skip / 1 fail** — the 1 fail is the recorded F-01 environment-sensitive guard (`scripts/rehearsal.test.ts` `--port 7410`), failing identically on `main`, recorded not fixed · `bun run check:phase-close` pass (4 lock files green; EVENT_KINDS 12; SURFACES 27) · `bun run test:py` 298 passed. Live smoke on the scratch rehearsal twin (`bun run rehearsal up --name uplift2`, scratch Postgres 16 + GreptimeDB v0.14.4 on loopback, commit `1fe624a`): `bun run rehearsal smoke` 4/4 (brief, emit, register, claim). 
