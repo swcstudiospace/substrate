@@ -432,6 +432,25 @@ describe("routes", () => {
 		}
 	});
 
+	test("POST /docs/merge-trigger refuses a VM guest before any ingest or dataset creation", async () => {
+		// DOCS-02: ingestion accepts only authenticated callers that are not VM
+		// guests. A guest that could drive ingest could also create a missing
+		// shared dataset through the ensure step, so the door closes before the
+		// body is even read.
+		const { greptime } = ledger();
+		const { post, stop } = await serve(
+			greptime,
+			{ SUBSTRATE_TOKEN_OMP: "tok-omp", SUBSTRATE_VM_GUEST: "1", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
+		);
+		try {
+			const response = await post("/docs/merge-trigger", { commit: "c-merge", content_sha256: "sha-merge" }, { authorization: "Bearer tok-omp" });
+			expect(response.status).toBe(403);
+			expect((await response.json() as { error: string }).error).toContain("VM guests");
+		} finally {
+			await stop();
+		}
+	});
+
 	test("isLoopbackRemote takes the whole 127/8 and ::1, refuses everything else", () => {
 		for (const good of ["127.0.0.1", "127.9.240.1", "::1", "::ffff:127.0.0.1"]) {
 			expect(isLoopbackRemote(good)).toBe(true);

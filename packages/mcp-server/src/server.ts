@@ -1039,6 +1039,14 @@ export function createHttpServer(
 					sendJson(res, 403, { error: "docs merge-trigger is a loopback route; the caller is not loopback" });
 					return;
 				}
+				// DOCS-02: ingestion accepts only authenticated callers that are not VM
+				// guests — a guest that could drive ingest could also create a missing
+				// shared dataset through the ensure step below. Same door as
+				// memory-retain's guest refusal.
+				if (config.vmGuest) {
+					sendJson(res, 403, { error: "docs merge-trigger refuses VM guests: guests do not drive ingest" });
+					return;
+				}
 				const parsed: unknown = JSON.parse(await readBody(req));
 				if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
 					sendJson(res, 400, { error: "request body must be a JSON object" });
