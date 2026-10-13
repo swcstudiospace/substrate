@@ -60,3 +60,18 @@ Implication: an uncached brief costs 3 sequential Postgres reads (≈520 ms warm
 ## How "after" is measured
 
 Each item's SUMMARY repeats the row(s) it claims to move. `brief.p95`, cache hit ratio, `/healthz` duration and per-plane series are read from `/slo`, `/metrics` and `/healthz` after the operator deploys the release (`infra/vps/deploy-release.sh`); until then the SUMMARY states "post-deploy measurement pending" and records the unit/rehearsal evidence instead.
+
+## After: release 91487e7 deployed 2026-10-13T21:02Z (readings at T+5 min)
+
+Deployed with `infra/vps/deploy-release.sh release-20261013-91487e7` (free-disk gate 26 GB ≥ 5, store gate `index=true`/`eventsWritable=true`, no open breaker); `current → 91487e7`, `previous → ff71394`; all four units active, 0 restarts, in `substrate.slice`. Pre-deploy `/slo` at the same minute: `brief.p95` 3,115 ms over 1,007 briefs (breached). The rolling windows reset with the process, so the rows below are the first minutes, not the day the operator rows need.
+
+| Measure | Value | Source |
+|---|---|---|
+| `/healthz` duration | first probe 704 ms (Greptime write probe + index ping + capacity); the next three 1.0–1.3 ms from the 5 s memo | curl |
+| `/healthz` shape | `planes` greptime/index/cache/hindsight/ragflow all `closed`; `capacity.index` 11.9 MB; `ledger.writable: true`; `auditDurable: true` | `/healthz` |
+| plane availability | greptime 100 % (n 7), index 100 % (n 13), cache 100 % (n 21); hindsight/ragflow no samples yet | `/slo.planes` |
+| `POST /brief` (repo `swcstudiospace/agent-substrate`) | 6 calls 1.20–1.22 s, every one `X-Substrate-Brief: degraded`; ETag stable, `If-None-Match` → 304 in 1.20 s; `brief.p95` 1,560 ms (n 7) | curl, `/slo` |
+| cache | enabled, connected; hits 0 · misses 14 — a degraded brief is never stored, so nothing was cached | `/healthz.cache` |
+| boot warnings | `HINDSIGHT_BANK is set but legacy and unread; recall fans out over HINDSIGHT_BANKS` (operator env step 4) | journal |
+
+**Finding.** The journal names the degraded source on every brief: `brief: open graphs unavailable — BriefDeadline: deadline (1200 ms brief budget)`. `IndexStore.openGraphs` was N+1 — one `graph_index` select and one sequential `graph_nodes` select per open graph — and this repo has four open graphs, so over the Railway public proxy (≈170 ms a round trip, 1 s cold) the read costs 0.9–1.9 s and misses the shared budget every time; the rehearsal twin's loopback Postgres never showed it. Follow-up on `ultrathink/uplift-2-deploy`: two round trips regardless of graph count. `parity:check` also had to learn the production cgroup is `/substrate.slice/substrate-mcp.service` since R7 (it demanded `system.slice`).

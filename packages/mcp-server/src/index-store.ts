@@ -573,7 +573,16 @@ export class IndexStore implements MemoryStore {
 		});
 	}
 
-	/** Graphs in a repo that are not finished — what "who else is working here" means. */
+	/**
+	 * Graphs in a repo that are not finished — what "who else is working here" means.
+	 *
+	 * Two round trips, however many graphs are open: one `graph_index` select for
+	 * the (at most ten) open rows, then one `graph_nodes` select for all of them,
+	 * grouped per graph here. The brief runs this under a shared budget, and in
+	 * production every round trip crosses a public proxy — a query per open graph
+	 * spent the whole budget on nodes alone. Zero open graphs means one trip. Per
+	 * graph the nodes keep `node_id` order; a graph with no nodes has `nodes: []`.
+	 */
 	async openGraphs(repo: string, excludeGraphId?: string): Promise<GraphView[]> {
 		return this.plane("graph.open", async () => {
 			const rows = (await this.sql`
@@ -583,13 +592,19 @@ export class IndexStore implements MemoryStore {
 				  and (${excludeGraphId ?? null}::text is null or graph_id <> ${excludeGraphId ?? null})
 				order by updated desc
 				limit 10`) as GraphIndexRow[];
-			const out: GraphView[] = [];
-			for (const row of rows) {
-				const nodes = ((await this.sql`
-					select * from graph_nodes where graph_id = ${row.graph_id} order by node_id`) as GraphNode[]).map(toNode);
-				out.push({ ...row, nodes, steps: [], edges: [] });
+			if (rows.length === 0) return [];
+			const ids = rows.map((row) => row.graph_id);
+			// The list helper, as above for the statuses: handing the driver a bare
+			// array stringifies it into a literal Postgres rejects.
+			const nodeRows = (await this.sql`
+				select * from graph_nodes where graph_id in ${this.sql(ids)} order by graph_id, node_id`) as GraphNode[];
+			const nodesByGraph = new Map<string, GraphNode[]>();
+			for (const node of nodeRows) {
+				const list = nodesByGraph.get(node.graph_id);
+				if (list) list.push(toNode(node));
+				else nodesByGraph.set(node.graph_id, [toNode(node)]);
 			}
-			return out;
+			return rows.map((row) => ({ ...row, nodes: nodesByGraph.get(row.graph_id) ?? [], steps: [], edges: [] }));
 		});
 	}
 
