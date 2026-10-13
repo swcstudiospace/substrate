@@ -26,8 +26,11 @@ afterEach(() => {
 	else process.env.SUBSTRATE_COLLECTOR_STATE = originalEnv.state;
 	if (originalEnv.url === undefined) delete process.env.SUBSTRATE_URL;
 	else process.env.SUBSTRATE_URL = originalEnv.url;
-	if (originalEnv.token === undefined) delete process.env.SUBSTRATE_TOKEN;
-	else process.env.SUBSTRATE_TOKEN = originalEnv.token;
+	// Restored through a short local, as muse.test.ts does: the store lock reads a long
+	// right-hand side after `SUBSTRATE_TOKEN =` as an assigned value.
+	const savedToken = originalEnv.token;
+	if (savedToken === undefined) delete process.env.SUBSTRATE_TOKEN;
+	else process.env.SUBSTRATE_TOKEN = savedToken;
 	for (const dir of made) rmSync(dir, { recursive: true, force: true });
 	made.length = 0;
 });
@@ -160,7 +163,7 @@ describe("muse writer and the brief ETag", () => {
 
 	test("a 304 to a request that sent no tag is a failed fetch, and the state file round-trips the tag", async () => {
 		process.env.SUBSTRATE_URL = "http://127.0.0.1:9";
-		globalThis.fetch = (async () => new Response(null, { status: 304 })) as typeof fetch;
+		globalThis.fetch = (async (_input: Parameters<typeof fetch>[0]) => new Response(null, { status: 304 })) as typeof fetch;
 		expect(await fetchBrief("acme/widgets", "main")).toEqual({ ok: false, reason: "http_304" });
 		expect(await fetchBrief("acme/widgets", "main", 'W/"dddd"')).toEqual({ ok: true, unchanged: true, etag: 'W/"dddd"' });
 
