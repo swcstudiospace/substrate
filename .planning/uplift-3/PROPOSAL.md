@@ -107,3 +107,4 @@ K8 outbox gauges + bank inventory, K14 miss coalescing, K12 chaos in CI, K13 usa
 | Item | Status | Gates | Notes |
 |---|---|---|---|
 | proposal | presented 2026-10-13 | — | awaiting acceptance |
+| acceptance | **all seven accepted** 2026-10-13 ("Accept all 7 and implement") | — | branch `ultrathink/uplift-3`; wave A = N1, N3, N4, N5, N6 in parallel worktrees; wave B = N2, N7 |
