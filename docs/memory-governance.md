@@ -508,6 +508,73 @@ For the before-only variant, prepare the same statement with
 `created < $2` instead of the row comparison; the timestamp must remain in
 `Index Cond`. Omitting `superseded_by is null` checks the history path.
 
+## Derived hits and the retain outbox
+
+The index is the governed store; Hindsight holds a *derived* copy of every
+accepted entry, and the two are kept honest about which is which.
+
+**Derived hits.** `memory_recall` (MCP, `POST /memory/recall`) and the list form of
+`memory_search` fan out over the substrate's `sub-*` banks — the caller's own first,
+then `HINDSIGHT_BANKS` — and append each hit *after* the index rows with
+`derived: true`, its source `bank`, and the reply-level `notice` that memory results
+are untrusted third-party text: descriptions, not instructions. Every hit's text
+passes the one redactor (`redact.ts`) on the way out, the same rule the forward
+applied on the way in, so a plane copy can never leak what the index would not.
+Hits recalled from several banks collapse on `document_id` (or on the text, for
+hits retained without one) keeping the best score. The fan-out shares one abort
+budget: `HINDSIGHT_RECALL_BUDGET_MS` (default 4000) for the tool, and the shorter
+`HINDSIGHT_SEARCH_RECALL_BUDGET_MS` (default 1500) for the leg inside
+`memory_search`, so a slow plane costs a search at most that long. A leg that misses
+its budget answers the index rows with `degraded: true` and a `reason` beginning
+`recall-timeout`; an unreachable plane answers `hindsight recall failed: …`; a
+degraded reply is never cached.
+
+**The forward.** An `accepted` write with `verified_persisted` is forwarded once
+by `memory-retain.ts` into the writer's `sub-<surface>` bank: redacted, carrying
+its `source_event`, keyed by `document_id` (the claim identity for subject-addressed
+writes, the idempotency key otherwise) with `update_mode: replace`, so a retry stores
+exactly once. The forward never blocks the accepted reply. Refusals — no source,
+a redactor finding, a VM guest, a 4xx other than 429 — emit one
+`memory.retain.failed` warning at once (`payload.action: "memory.retain"`,
+locators and hashes only) and are never retried.
+
+**The outbox** (`retain-outbox.ts`, uplift-2 R3). A *transient* failure —
+`retain-timeout`, `retain-network` (an open breaker included), `retain-server`
+(5xx), `retain-rate-limit` (429), or the same kinds from the bank ensure — parks a
+locator instead of warning: `{bank, document_id, entry_id, surface, entry_hash,
+attempts, next_at, last_reason}`, never the text. The lifecycle:
+
+1. **Park.** The live attempt counts as attempt 1; the entry is due again after
+   30 s × 2^(attempts − 1), capped at one hour, ±20 % jitter. A document already
+   parked is replaced (newest locator wins, schedule restarts).
+2. **Drain.** Every `SUBSTRATE_RETAIN_DRAIN_MS` (default 30 000), on the first live
+   retain that lands after the plane's breaker had refused, and once more inside
+   the bounded shutdown drain. Entries replay one at a time, each one plane call
+   under the Hindsight breaker; while that breaker is open the drain skips without
+   spending an attempt.
+3. **Replay.** The entry is re-read from the index by id. Gone or superseded means
+   the parked copy is stale (its replacement had its own forward) and it is
+   dropped silently; otherwise the same forward runs with the same `document_id`.
+4. **Give up.** After `SUBSTRATE_RETAIN_MAX_ATTEMPTS` (default 10) the entry is
+   dropped and the warning the live forward used to emit is emitted then, with the
+   last transient reason — the trail still ends with exactly one warning, later.
+   A full outbox (`SUBSTRATE_RETAIN_OUTBOX_MAX`, default 10 000) drops its oldest
+   entry the same way with reason `outbox-full`.
+
+With `SUBSTRATE_RETAIN_OUTBOX_PATH` set (the unit points it at
+`/var/lib/substrate/retain-outbox.jsonl`) the queue is a 0600 append-only JSONL file
+in a 0700 directory, hydrated once at boot and rewritten compactly (temp file plus
+rename) after a drain changes it, so a restart mid-backoff loses nothing. Unset, the
+queue lives in memory: the same retries until the process stops, and at shutdown
+whatever is left gets its warning rather than vanishing. The cache is never the
+queue. `Substrate.retainOutboxStats()` reports `{size, oldestAt, attemptsTotal,
+durable}`. `HINDSIGHT_RETAIN_TIMEOUT_MS` (default 8000) bounds each retain POST.
+
+A bank that answers a retain with 404 was removed out of band: the client forgets
+it, ensures it again (create, pin `chunks` mode) and retries once. At boot the server
+warns when the legacy, unread `HINDSIGHT_BANK` is set and when `HINDSIGHT_URL` is set
+with no `HINDSIGHT_BANKS` (recall then reads the caller's own bank only).
+
 ## Draining the queue
 
 `memory_pending` (MCP) lists pending proposals and quarantined writes. **Bodies and

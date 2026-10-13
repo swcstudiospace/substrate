@@ -102,6 +102,26 @@ function derive(bank: string, hit: RecallHit): DerivedMemoryHit {
 	};
 }
 
+/** The fan-out's shared abort budget when the caller names none (`HINDSIGHT_RECALL_BUDGET_MS`). */
+export const DEFAULT_RECALL_BUDGET_MS = 4000;
+
+/**
+ * Collapse the same memory recalled from several banks (uplift-2 R3). The
+ * identity is the retain's `document_id` — the forward keys every bank's
+ * copy on it — and, for hits retained without one, the text itself. The
+ * best-scoring copy survives, with its own bank attribution; ties keep the
+ * earlier bank, which is the caller's own when it is listed.
+ */
+export function dedupeHits<T extends { bank: string; hit: RecallHit }>(scored: T[]): T[] {
+	const best = new Map<string, T>();
+	for (const candidate of scored) {
+		const key = candidate.hit.document_id !== undefined ? `doc:${candidate.hit.document_id}` : `text:${candidate.hit.text}`;
+		const current = best.get(key);
+		if (current === undefined || (candidate.hit.score ?? 0) > (current.hit.score ?? 0)) best.set(key, candidate);
+	}
+	return [...best.values()];
+}
+
 export async function recallMemories(
 	deps: RecallDeps,
 	query: string,
@@ -123,13 +143,19 @@ export async function recallMemories(
 	const config = deps.config;
 	const fetchImpl = deps.fetchImpl ?? fetch;
 	const controller = new AbortController();
-	const budget = setTimeout(() => controller.abort(), deps.budgetMs ?? 4000);
-	let settled: PromiseSettledResult<{ bank: string; hits: RecallHit[]; reason?: string }>[];
+	const budget = setTimeout(() => controller.abort(), deps.budgetMs ?? DEFAULT_RECALL_BUDGET_MS);
+	let settled: PromiseSettledResult<{ bank: string; hits: RecallHit[]; reason?: string; timedOut?: boolean }>[];
 	try {
 		settled = await Promise.allSettled(
 			resolved.banks.map(async (bank) => {
 				const recalled = await recallBank(config, bank, { query, signal: controller.signal }, fetchImpl);
-				if (!recalled.ok) return { bank, hits: [], reason: recalled.error.message };
+				if (!recalled.ok) {
+					// The shared budget is the only abort source on this leg, so a
+					// timeout here is the budget firing (uplift-2 R3): named as such,
+					// so `memory_search` can tell "Hindsight was slow" from "down".
+					if (recalled.error.kind === "timeout") return { bank, hits: [], reason: "budget exceeded", timedOut: true };
+					return { bank, hits: [], reason: recalled.error.message };
+				}
 				return { bank, hits: recalled.value };
 			}),
 		);
@@ -137,6 +163,7 @@ export async function recallMemories(
 		clearTimeout(budget);
 	}
 	const failures: string[] = [];
+	let timedOut = false;
 	const scored: Array<{ bank: string; hit: RecallHit }> = [];
 	for (const [index, bank] of resolved.banks.entries()) {
 		const outcome = settled[index];
@@ -146,22 +173,19 @@ export async function recallMemories(
 		}
 		if (outcome.value.reason !== undefined) {
 			failures.push(`${bank}: ${outcome.value.reason}`);
+			if (outcome.value.timedOut === true) timedOut = true;
 			continue;
 		}
 		for (const hit of outcome.value.hits.slice(0, MAX_RECALL_PER_BANK)) scored.push({ bank, hit });
 	}
-	scored.sort((left, right) => (right.hit.score ?? 0) - (left.hit.score ?? 0));
-	const results = scored.map(({ bank, hit }) => derive(bank, hit));
-	if (results.length === 0 && failures.length > 0) {
-		return { results, degraded: true, notice: UNTRUSTED_MEMORY_NOTICE, reason: `hindsight recall failed: ${failures.join("; ").slice(0, 300)}` };
-	}
+	const results = dedupeHits(scored)
+		.sort((left, right) => (right.hit.score ?? 0) - (left.hit.score ?? 0))
+		.map(({ bank, hit }) => derive(bank, hit));
 	if (failures.length > 0) {
-		return {
-			results,
-			degraded: true,
-			notice: UNTRUSTED_MEMORY_NOTICE,
-			reason: `partial recall: ${failures.join("; ").slice(0, 300)}`,
-		};
+		// A budget miss leads with its own marker whichever banks answered; the
+		// rest keep the outage / partial wording the callers already read.
+		const prefix = timedOut ? "recall-timeout" : results.length === 0 ? "hindsight recall failed" : "partial recall";
+		return { results, degraded: true, notice: UNTRUSTED_MEMORY_NOTICE, reason: `${prefix}: ${failures.join("; ").slice(0, 300)}` };
 	}
 	return { results, degraded: false, notice: UNTRUSTED_MEMORY_NOTICE };
 }

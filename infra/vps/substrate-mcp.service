@@ -38,6 +38,10 @@ RestartPreventExitStatus=78
 # every fail-closed tool. See docs/mcp-audit.md.
 StateDirectory=substrate
 StateDirectoryMode=0700
+# The Hindsight retain outbox (uplift-2 R3): transient retain failures park
+# here as 0600 JSONL locators and replay with backoff across restarts. Never
+# the cache: anything that must survive a restart lives under StateDirectory.
+Environment=SUBSTRATE_RETAIN_OUTBOX_PATH=/var/lib/substrate/retain-outbox.jsonl
 
 StandardOutput=journal
 StandardError=journal
