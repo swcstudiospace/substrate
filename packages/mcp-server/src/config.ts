@@ -334,6 +334,14 @@ export interface SubstrateConfig {
 	 * and the shared `SUBSTRATE_BUDGET_ANONYMOUS_RPS` / `_BURST`. See `admission.ts`.
 	 */
 	admission: AdmissionSettings;
+	/**
+	 * One shared deadline for every dataset's retrieval in one `docs_search`,
+	 * ms (`SUBSTRATE_DOCS_SEARCH_BUDGET_MS`, default 4000; 0 = no shared
+	 * deadline, each retrieval bounded only by its own 4 s call timeout —
+	 * uplift-3 N5). A dataset that misses it is degraded alone; the others
+	 * still answer.
+	 */
+	docsSearchBudgetMs: number;
 }
 
 /** Production defaults: September's library, so the host ledger keeps deduplicating. */
@@ -590,6 +598,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		},
 		// uplift-3 N3
 		admission: loadAdmissionSettings(env),
+		// uplift-3 N5
+		docsSearchBudgetMs: nonNegativeOr(env.SUBSTRATE_DOCS_SEARCH_BUDGET_MS, 4000),
 	};
 }
 

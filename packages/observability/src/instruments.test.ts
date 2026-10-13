@@ -2,6 +2,9 @@ import { describe, expect, test } from "bun:test";
 import {
 	ADMISSION_CLASSES,
 	ADMISSION_DECISIONS,
+	CITATION_PROVENANCES,
+	DOCS_LATENCY_BUCKETS_MS,
+	DOCS_SEARCH_OUTCOMES,
 	METRIC,
 	PLANE_ERROR_REASONS,
 	SubstrateInstruments,
@@ -251,5 +254,50 @@ describe("recordAdmission", () => {
 			expect(ADMISSION_CLASSES as readonly string[]).toContain(String(point.attributes.class));
 			expect(ADMISSION_DECISIONS as readonly string[]).toContain(String(point.attributes.decision));
 		}
+	});
+});
+
+describe("recordDocsSearch (uplift-3 N5)", () => {
+	test("counts searches by surface, outcome and cached, times them end to end, and splits citations by provenance", () => {
+		const instruments = new SubstrateInstruments();
+		instruments.recordDocsSearch({ surface: "grok-bot", outcome: "hit", cached: false, durationMs: 1500, citations: { recorded: 3, unrecorded: 2 } });
+		instruments.recordDocsSearch({ surface: "grok-bot", outcome: "hit", cached: true, durationMs: 4, citations: { recorded: 3, unrecorded: 2 } });
+		instruments.recordDocsSearch({ surface: "omp", outcome: "empty", cached: false, durationMs: 900, citations: {} });
+		instruments.recordDocsSearch({ surface: "omp", outcome: "degraded", cached: false, durationMs: 4100, citations: {} });
+		instruments.recordDocsSearch({ surface: "omp", outcome: "hit", cached: false, durationMs: 300, citations: { unpinned: 1 } });
+
+		const snapshot = instruments.snapshot();
+		const searches = findCounter(snapshot, METRIC.docsSearch)!;
+		expect(sumCounter(searches)).toBe(5);
+		expect(sumCounter(searches, { surface: "grok-bot", outcome: "hit", cached: "true" })).toBe(1);
+		expect(sumCounter(searches, { surface: "grok-bot", outcome: "hit", cached: "false" })).toBe(1);
+		expect(sumCounter(searches, { outcome: "empty" })).toBe(1);
+		expect(sumCounter(searches, { outcome: "degraded" })).toBe(1);
+		// Every outcome label is one of the closed set; the attribute keys are exactly the three.
+		for (const point of searches.points) {
+			expect(DOCS_SEARCH_OUTCOMES as readonly string[]).toContain(String(point.attributes.outcome));
+			expect(Object.keys(point.attributes).sort()).toEqual(["cached", "outcome", "surface"]);
+		}
+
+		// A cache hit is counted per citation it returned too: the share of
+		// unrecorded answers is what the counter reads as, hit or loaded.
+		const citations = findCounter(snapshot, METRIC.docsCitations)!;
+		expect(sumCounter(citations, { provenance: "recorded" })).toBe(6);
+		expect(sumCounter(citations, { provenance: "unrecorded" })).toBe(4);
+		expect(sumCounter(citations, { provenance: "unpinned" })).toBe(1);
+		for (const point of citations.points) {
+			expect(CITATION_PROVENANCES as readonly string[]).toContain(String(point.attributes.provenance));
+			expect(Object.keys(point.attributes)).toEqual(["provenance"]);
+		}
+
+		const duration = findHistogram(snapshot, METRIC.docsDuration)!;
+		expect(mergeHistogram(duration).count).toBe(5);
+		expect(mergeHistogram(duration, { cached: "true" }).count).toBe(1);
+		expect(mergeHistogram(duration, { surface: "omp", cached: "false" }).count).toBe(3);
+		// Its edges carry the objective (2,000 ms) and the default budget (4,000 ms), so
+		// `docs.search.p95` is decidable and a budget-costing search is visibly past it.
+		expect(duration.bounds).toEqual(DOCS_LATENCY_BUCKETS_MS);
+		expect(DOCS_LATENCY_BUCKETS_MS).toContain(2000);
+		expect(DOCS_LATENCY_BUCKETS_MS).toContain(4000);
 	});
 });

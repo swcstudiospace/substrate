@@ -701,6 +701,10 @@ export function createHttpServer(
 				// The admission refusal rate (uplift-3 N3) rides beside the catalogue
 				// the same way: one objective, `insufficient-data` under 100 decisions.
 				const admissionSlo = evaluateAdmissionSlo(observability.snapshot());
+				// The docs-search latency objective (uplift-3 N5) rides beside it too:
+				// one row, `docs.search.p95`, in the catalogue's entry shape, never
+				// folded into `breached`.
+				const docs = observability.evaluateDocs();
 				// 200 either way. A breached objective is information, not a broken service,
 				// and a monitor that read this as an outage would page on a slow hour.
 				sendJson(res, 200, {
@@ -709,6 +713,7 @@ export function createHttpServer(
 					burn,
 					planes,
 					admission: admissionSlo,
+					docs,
 				});
 				return;
 			}

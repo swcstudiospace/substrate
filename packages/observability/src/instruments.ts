@@ -32,7 +32,43 @@ export const METRIC = {
 	planeDuration: "substrate.plane.duration",
 	planeErrors: "substrate.plane.errors",
 	admissionDecisions: "substrate.admission.decisions",
+	docsSearch: "substrate.docs.search",
+	docsCitations: "substrate.docs.citations",
+	docsDuration: "substrate.docs.duration",
 } as const;
+
+/** What one docs search answered with. One series each, so the label stays bounded. */
+export const DOCS_SEARCH_OUTCOMES = ["hit", "empty", "degraded"] as const;
+export type DocsSearchOutcome = (typeof DOCS_SEARCH_OUTCOMES)[number];
+
+/**
+ * Where a citation's commit came from (uplift-3 N5): the document's own
+ * ingest record (`recorded`), a record uploaded without a commit
+ * (`unpinned`), or no record at all (`unrecorded`). The closed set the
+ * `dataset-pin:<name>:<marker>` commit markers already define.
+ */
+export const CITATION_PROVENANCES = ["recorded", "unrecorded", "unpinned"] as const;
+export type CitationProvenance = (typeof CITATION_PROVENANCES)[number];
+
+/**
+ * The end-to-end docs search histogram's bounds. The shared default set has
+ * no edge at the `docs.search.p95` objective (2,000 ms) nor at the default
+ * budget (4,000 ms), and a latency objective is only decidable at one of
+ * its histogram's own edges (`evaluateLatency`), so this histogram carries
+ * both.
+ */
+export const DOCS_LATENCY_BUCKETS_MS: readonly number[] = [25, 50, 100, 200, 400, 800, 1000, 2000, 4000, 8000];
+
+/** One finished docs search, as the service measured it around the cache wrapper. */
+export interface DocsSearchSample {
+	surface: string;
+	outcome: DocsSearchOutcome;
+	/** Whether the answer came from the cache (no plane call) or was loaded. */
+	cached: boolean;
+	durationMs: number;
+	/** How many returned citations carry each provenance; absent keys count zero. */
+	citations: Partial<Record<CitationProvenance, number>>;
+}
 
 /** Why a plane call failed. One series each, so the reason stays bounded. */
 export const PLANE_ERROR_REASONS = ["timeout", "network", "server", "open", "other"] as const;
@@ -185,6 +221,9 @@ export class SubstrateInstruments {
 	readonly planeDuration: Histogram;
 	readonly planeErrors: Counter;
 	readonly admissionDecisions: Counter;
+	readonly docsSearch: Counter;
+	readonly docsCitations: Counter;
+	readonly docsDuration: Histogram;
 
 	constructor(registry: MetricRegistry = new MetricRegistry()) {
 		this.registry = registry;
@@ -266,6 +305,19 @@ export class SubstrateInstruments {
 		this.admissionDecisions = registry.counter(METRIC.admissionDecisions, {
 			description: "Admission budget decisions by surface, class (read|write|coordination) and decision (allowed|limited|shadow_limited|bypass).",
 			unit: "{decision}",
+		});
+		this.docsSearch = registry.counter(METRIC.docsSearch, {
+			description: "Docs searches by surface, outcome (hit|empty|degraded) and whether the cache answered (cached=true|false).",
+			unit: "{search}",
+		});
+		this.docsCitations = registry.counter(METRIC.docsCitations, {
+			description: "Citations returned by docs searches, by commit provenance (recorded|unrecorded|unpinned).",
+			unit: "{citation}",
+		});
+		this.docsDuration = registry.histogram(METRIC.docsDuration, {
+			unit: "ms",
+			bounds: DOCS_LATENCY_BUCKETS_MS,
+			description: "End-to-end time to answer one docs search, by surface and cached. The docs.search.p95 subject: p95 <= 2000 ms.",
 		});
 	}
 
@@ -388,5 +440,22 @@ export class SubstrateInstruments {
 	 */
 	recordAdmission(sample: { surface: string; klass: AdmissionClass; decision: AdmissionDecision }): void {
 		this.admissionDecisions.add(1, { surface: sample.surface, class: sample.klass, decision: sample.decision });
+	}
+
+	/**
+	 * One finished docs search (uplift-3 N5): its end-to-end latency as the
+	 * caller waited for it — cache hit or loaded — its bounded outcome, and
+	 * the provenance split of the citations it returned. The citation counter
+	 * is per returned citation, so `unrecorded / total` reads directly as the
+	 * share of answers the ingest records cannot vouch for.
+	 */
+	recordDocsSearch(sample: DocsSearchSample): void {
+		const cached = sample.cached ? "true" : "false";
+		this.docsDuration.record(sample.durationMs, cleanAttributes({ surface: sample.surface, cached }));
+		this.docsSearch.add(1, cleanAttributes({ surface: sample.surface, outcome: sample.outcome, cached }));
+		for (const provenance of CITATION_PROVENANCES) {
+			const count = sample.citations[provenance] ?? 0;
+			if (count > 0) this.docsCitations.add(count, { provenance });
+		}
 	}
 }

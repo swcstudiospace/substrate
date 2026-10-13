@@ -6,8 +6,10 @@
 import { describe, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { searchDocs, SNIPPET_CAP, UNTRUSTED_DOCS_NOTICE, type SearchReply } from "./docs-search.ts";
-import { RagflowFake } from "./ragflow-fake.ts";
+import type { DocsSearchSample } from "@substrate/observability";
+import { ReadThroughCache, type CacheRedis } from "./cache.ts";
+import { citationProvenanceCounts, searchDocs, searchReplyStorable, SNIPPET_CAP, UNTRUSTED_DOCS_NOTICE, type SearchReply } from "./docs-search.ts";
+import { RagflowFake, type FakeChunk } from "./ragflow-fake.ts";
 import type { EventInput } from "./types.ts";
 import { loadConfig } from "./config.ts";
 import { createMcpServer } from "./mcp.ts";
@@ -189,5 +191,220 @@ describe("docs_search metadata redaction", () => {
 		expect(cited?.title).not.toContain("sk-proj-");
 		expect(cited?.source_url).not.toContain("sk-proj-");
 		expect(cited?.heading_path).not.toContain("sk-proj-");
+	});
+});
+
+/** A redis that remembers every command, so the cache's store decision is observable. */
+class FakeRedis implements CacheRedis {
+	readonly values = new Map<string, string>();
+	readonly commands: string[] = [];
+	async get(key: string): Promise<string | null> {
+		this.commands.push(`GET ${key}`);
+		return this.values.get(key) ?? null;
+	}
+	async set(key: string, value: string, ttlSeconds: number): Promise<void> {
+		this.commands.push(`SET ${key} ttl=${ttlSeconds}`);
+		this.values.set(key, value);
+	}
+	async incr(key: string): Promise<number> {
+		this.commands.push(`INCR ${key}`);
+		const next = Number(this.values.get(key) ?? "0") + 1;
+		this.values.set(key, String(next));
+		return next;
+	}
+}
+
+describe("docs_search fan-out under one budget (uplift-3 N5)", () => {
+	const SLOW = "ds-hamm-programming-desk";
+	/** A budget the deadline timer — the code under test's own, not the test's — enforces quickly. */
+	const BUDGET_MS = 100;
+
+	/**
+	 * The slow dataset answers only when `gate` is resolved — never, unless
+	 * the test resolves it; `arrived` settles when its retrieval reaches the
+	 * fake. Every other dataset answers at once.
+	 */
+	function stall(fake: RagflowFake): { gate: PromiseWithResolvers<FakeChunk[]>; arrived: Promise<void> } {
+		const gate = Promise.withResolvers<FakeChunk[]>();
+		const arrived = Promise.withResolvers<void>();
+		fake.answer = (datasetId) => {
+			if (datasetId !== SLOW) return fake.chunks[datasetId] ?? [];
+			arrived.resolve();
+			return gate.promise;
+		};
+		return { gate, arrived: arrived.promise };
+	}
+
+	test("a dataset that outlives the budget is degraded alone: the others' citations arrive within the budget", async () => {
+		const fake = new RagflowFake();
+		// Never released: a dataset whose transport hangs past the budget.
+		stall(fake);
+		const events: EventInput[] = [];
+		const emit = async (event: EventInput): Promise<unknown> => {
+			events.push(event);
+			return { stored: false };
+		};
+		const started = performance.now();
+		const reply = await searchDocs({ config: CONFIG, emit, fetchImpl: fake.fetch, budgetMs: BUDGET_MS }, "who reads RAGFlow?");
+		const elapsed = performance.now() - started;
+
+		// Within the budget plus tolerance, not the per-call 4 s timeout the stalled dataset would cost.
+		expect(elapsed).toBeLessThan(BUDGET_MS * 10);
+		expect(reply.degraded).toBeUndefined();
+		expect(reply.degraded_datasets).toEqual([{ dataset: "programming-desk", reason: `deadline (${BUDGET_MS} ms docs budget)` }]);
+		// Both other datasets answered: their four seeded chunks, still score-sorted.
+		expect(reply.chunks).toHaveLength(4);
+		expect(new Set(reply.chunks.map((citation) => citation.source_url))).toEqual(
+			new Set(["https://example.com/agent-substrate/data-planes", "https://example.com/agent-skills/review"]),
+		);
+		expect(reply.chunks.map((citation) => citation.score)).toEqual([0.91, 0.91, 0.83, 0.83]);
+		// Not stored by the answer cache: the next caller retries the missing dataset.
+		expect(searchReplyStorable(reply)).toBe(false);
+		// Still one note, naming the two datasets that answered and the one that did not.
+		const notes = events.filter((event) => event.kind === "note");
+		expect(notes).toHaveLength(1);
+		expect(notes[0]?.payload).toMatchObject({
+			action: "docs.search",
+			dataset_ids: ["ds-berlin-agent-substrate", "ds-leipzig-agent-skills"],
+			count: 4,
+			degraded_datasets: [{ dataset: "programming-desk", reason: `deadline (${BUDGET_MS} ms docs budget)` }],
+		});
+		expect(events.filter((event) => event.kind === "warning")).toHaveLength(0);
+	});
+
+	test("a dataset that fails is degraded alone; the reply is `degraded: true` only when every dataset failed", async () => {
+		const fake = new RagflowFake();
+		fake.answer = (datasetId) => {
+			if (datasetId === SLOW) throw new Error("boom");
+			return fake.chunks[datasetId] ?? [];
+		};
+		const { events, search } = harness(fake);
+		const partial = await search("who reads RAGFlow?");
+		expect(partial.degraded).toBeUndefined();
+		expect(partial.chunks).toHaveLength(4);
+		expect(partial.degraded_datasets?.map((entry) => entry.dataset)).toEqual(["programming-desk"]);
+		expect(partial.degraded_datasets?.[0]?.reason).toStartWith("ragflow unreachable:");
+		expect(searchReplyStorable(partial)).toBe(false);
+
+		fake.failRetrievalWith = 503;
+		const all = await search("who reads RAGFlow?");
+		expect(all).toMatchObject({ chunks: [], degraded: true, reason: "ragflow 503" });
+		expect(all.degraded_datasets?.map((entry) => entry.dataset)).toEqual(["agent-substrate", "programming-desk", "agent-skills"]);
+		expect(all.degraded_datasets?.every((entry) => entry.reason === "ragflow 503")).toBe(true);
+		expect(searchReplyStorable(all)).toBe(false);
+		const warnings = events.filter((event) => event.kind === "warning");
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]?.payload).toMatchObject({ action: "docs.search", reason: "ragflow 503" });
+	});
+
+	test("a reply every dataset answered carries no degraded_datasets and is storable", async () => {
+		const fake = new RagflowFake();
+		const { search } = harness(fake);
+		const reply = await search("who reads RAGFlow?");
+		expect(reply.degraded_datasets).toBeUndefined();
+		expect(searchReplyStorable(reply)).toBe(true);
+	});
+
+	test("the retrievals leave together: each dataset answers only once every retrieval has arrived", async () => {
+		const fake = new RagflowFake();
+		const everyoneArrived = Promise.withResolvers<void>();
+		let seen = 0;
+		fake.answer = async (datasetId) => {
+			seen += 1;
+			if (seen === fake.datasets.length) everyoneArrived.resolve();
+			// A sequential client never gets all three in flight: its first
+			// retrieval would wait for a second it has not started, miss the
+			// budget, and the assertions below would name it.
+			await everyoneArrived.promise;
+			return fake.chunks[datasetId] ?? [];
+		};
+		const reply = await searchDocs({ config: CONFIG, emit: async () => ({ stored: false }), fetchImpl: fake.fetch, budgetMs: BUDGET_MS }, "who reads RAGFlow?");
+		expect(reply.degraded_datasets).toBeUndefined();
+		expect(reply.chunks).toHaveLength(6);
+		expect(fake.retrievals()).toHaveLength(3);
+		expect(fake.maxInFlight).toBe(3);
+	});
+
+	test("budget 0 keeps the per-call timeout only: a slow dataset is waited for", async () => {
+		const fake = new RagflowFake();
+		const { gate, arrived } = stall(fake);
+		const pending = searchDocs({ config: CONFIG, emit: async () => ({ stored: false }), fetchImpl: fake.fetch, budgetMs: 0 }, "slow?");
+		// Release the slow dataset only once the search has reached it and is waiting.
+		await arrived;
+		gate.resolve(fake.chunks[SLOW] ?? []);
+		const reply = await pending;
+		expect(reply.degraded_datasets).toBeUndefined();
+		expect(reply.chunks).toHaveLength(6);
+	});
+
+	test("Substrate.searchDocs: a partially served reply is not cached, and the configured budget reaches the search", async () => {
+		const fake = new RagflowFake();
+		stall(fake);
+		const redis = new FakeRedis();
+		const cache = new ReadThroughCache({ redis, enabled: true, log: () => {} });
+		const config = loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", SUBSTRATE_DOCS_SEARCH_BUDGET_MS: String(BUDGET_MS) });
+		expect(config.docsSearchBudgetMs).toBe(BUDGET_MS);
+		expect(loadConfig({}).docsSearchBudgetMs).toBe(4000);
+		expect(loadConfig({ SUBSTRATE_DOCS_SEARCH_BUDGET_MS: "soon" }).docsSearchBudgetMs).toBe(4000);
+		const substrate = new Substrate(config, { index: null, greptime: null, ragflowFetch: fake.fetch, cache });
+		const first = await substrate.searchDocs({ question: "who reads RAGFlow?" }, "omp");
+		expect(first.degraded_datasets?.map((entry) => entry.dataset)).toEqual(["programming-desk"]);
+		expect(redis.commands.some((command) => command.startsWith("SET substrate:v1:docs-search:"))).toBe(false);
+		// The slow dataset recovers: the next search loads again and is stored.
+		fake.answer = null;
+		const second = await substrate.searchDocs({ question: "who reads RAGFlow?" }, "omp");
+		expect(second.degraded_datasets).toBeUndefined();
+		expect(second.chunks).toHaveLength(6);
+		expect(redis.commands.filter((command) => command.startsWith("SET substrate:v1:docs-search:"))).toHaveLength(1);
+	});
+});
+
+describe("docs_search outcome metrics (uplift-3 N5)", () => {
+	test("Substrate.searchDocs reports one sample per search: hit/empty/degraded, cached or loaded, with the citation provenance split", async () => {
+		const fake = new RagflowFake();
+		const redis = new FakeRedis();
+		const cache = new ReadThroughCache({ redis, enabled: true, log: () => {} });
+		const samples: DocsSearchSample[] = [];
+		const substrate = new Substrate(
+			loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }),
+			{ index: null, greptime: null, ragflowFetch: fake.fetch, cache },
+			{ docsSearch: (sample) => samples.push(sample) },
+		);
+
+		// Loaded, then served from the cache: same answer, different `cached`.
+		await substrate.searchDocs({ question: "who reads RAGFlow?" }, "grok-bot");
+		await substrate.searchDocs({ question: "who reads RAGFlow?" }, "grok-bot");
+		// Nothing matched: a real answer with no citations.
+		fake.answer = () => [];
+		await substrate.searchDocs({ question: "nothing here" }, "omp");
+		// Every dataset failed.
+		fake.failRetrievalWith = 503;
+		await substrate.searchDocs({ question: "down" }, "omp");
+
+		expect(samples.map((sample) => [sample.surface, sample.outcome, sample.cached])).toEqual([
+			["grok-bot", "hit", false],
+			["grok-bot", "hit", true],
+			["omp", "empty", false],
+			["omp", "degraded", false],
+		]);
+		// The fake's documents have no ingest record, so every citation is `unrecorded` —
+		// counted on the cache hit too, since it returned them as well.
+		expect(samples[0]?.citations).toEqual({ unrecorded: 6 });
+		expect(samples[1]?.citations).toEqual({ unrecorded: 6 });
+		expect(samples[2]?.citations).toEqual({});
+		expect(samples[3]?.citations).toEqual({});
+		expect(samples.every((sample) => sample.durationMs >= 0)).toBe(true);
+	});
+
+	test("citationProvenanceCounts reads the markers cite writes", () => {
+		const citation = { title: "", source_url: "", heading_path: "", snippet: "", score: 0, document_id: "", chunk_id: "" };
+		expect(
+			citationProvenanceCounts([
+				{ ...citation, commit: "abc123" },
+				{ ...citation, commit: "dataset-pin:agent-substrate:unrecorded" },
+				{ ...citation, commit: "dataset-pin:agent-skills:unpinned" },
+				{ ...citation, commit: "dataset-pin:agent-skills:unpinned" },
+			]),
+		).toEqual({ recorded: 1, unrecorded: 1, unpinned: 2 });
 	});
 });

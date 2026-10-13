@@ -29,6 +29,7 @@ import {
 	SPAN_KIND,
 	SubstrateInstruments,
 	Tracer,
+	evaluateDocsSlos,
 	evaluatePlaneSlos,
 	evaluateSlos,
 	loadObservabilityConfig,
@@ -158,6 +159,8 @@ export interface Observability {
 	 * `configured` says which planes may be judged; the rest report `unconfigured`.
 	 */
 	evaluatePlanes(configured: Partial<Record<PlaneName, boolean>>): PlaneSloResult[];
+	/** The docs-search latency verdict (uplift-3 N5): one row, `docs.search.p95`, beside the catalogue. */
+	evaluateDocs(): SloResult[];
 	start(): Promise<string[]>;
 	stop(): void;
 }
@@ -235,6 +238,9 @@ export function createObservability(config: SubstrateConfig, env: Record<string,
 				void recordClaimWithdrawal(audit, instruments, sample);
 			}
 		},
+		docsSearch(sample) {
+			instruments.recordDocsSearch(sample);
+		},
 	};
 
 	return {
@@ -259,6 +265,7 @@ export function createObservability(config: SubstrateConfig, env: Record<string,
 				...(settings.slo.planeAvailability !== undefined ? { target: settings.slo.planeAvailability } : {}),
 				...(settings.slo.minSamples !== undefined ? { minSamples: settings.slo.minSamples } : {}),
 			}),
+		evaluateDocs: () => evaluateDocsSlos(instruments.snapshot(), settings.slo),
 		async start() {
 			const warnings: string[] = [];
 			const opened = await audit.open();
