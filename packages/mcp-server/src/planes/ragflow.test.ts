@@ -120,12 +120,17 @@ describe("listDatasets", () => {
 });
 
 describe("the plane gate (uplift-2 R2)", () => {
-	test("ragflowOp is a fixed table over the routes, never the path", () => {
+	test("ragflowOp is a fixed table over the documented routes, never the path", () => {
 		expect(ragflowOp("POST", "http://ragflow.test/api/v1/retrieval")).toBe("retrieve");
-		expect(ragflowOp("GET", "http://ragflow.test/api/v1/datasets")).toBe("datasets");
+		expect(ragflowOp("GET", "http://ragflow.test/api/v1/datasets?page=1&page_size=100")).toBe("datasets");
 		expect(ragflowOp("POST", "http://ragflow.test/api/v1/datasets")).toBe("dataset-create");
 		expect(ragflowOp("POST", "http://ragflow.test/api/v1/datasets/ds-1/documents")).toBe("upload");
-		expect(ragflowOp("GET", "http://ragflow.test/api/v1/documents/doc-1/parse?x=1")).toBe("parse-status");
+		expect(ragflowOp("GET", "http://ragflow.test/api/v1/datasets/ds-1/documents?id=doc-1")).toBe("documents");
+		expect(ragflowOp("DELETE", "http://ragflow.test/api/v1/datasets/ds-1/documents")).toBe("document-delete");
+		expect(ragflowOp("PATCH", "http://ragflow.test/api/v1/datasets/ds-1/documents/doc-1")).toBe("document-update");
+		expect(ragflowOp("POST", "http://ragflow.test/api/v1/datasets/ds-1/chunks")).toBe("parse");
+		// The pre-R6 rehearsal poll route is gone from the table with the client.
+		expect(ragflowOp("GET", "http://ragflow.test/api/v1/documents/doc-1/parse?x=1")).toBe("other");
 		expect(ragflowOp("GET", "http://ragflow.test/api/v1/something/else")).toBe("other");
 	});
 

@@ -29,12 +29,13 @@ import { REDACTED, redact } from "./redact.ts";
 
 export const CACHE_PREFIX = "substrate:v1";
 
-/** Seconds. Brief 5 min, memory search 10 min, graph view 1 min, last-good brief 1 h. */
+/** Seconds. Brief 5 min, memory search 10 min, graph view 1 min, last-good brief 1 h, docs search 5 min. */
 export const CACHE_TTL = {
 	brief: 300,
 	"memory-search": 600,
 	"graph-view": 60,
 	"brief-snapshot": 3600,
+	"docs-search": 300,
 } as const;
 
 export type CacheClass = keyof typeof CACHE_TTL;
@@ -49,6 +50,13 @@ export const GRAPHS_GENERATION_KEY = `${CACHE_PREFIX}:gen:graphs`;
 export function graphGenerationKey(graphId: string): string {
 	return `${CACHE_PREFIX}:gen:graph:${graphId}`;
 }
+
+/**
+ * Bumped by every successful docs ingest and every recorded dataset version
+ * (uplift-2 R6), so a refresh invalidates every cached `docs_search` answer
+ * at once; the pins are also part of the key.
+ */
+export const DOCS_GENERATION_KEY = `${CACHE_PREFIX}:gen:docs`;
 
 /**
  * Soonest future timestamp, in epoch ms. A cached answer must not outlive the
@@ -577,6 +585,11 @@ function shapeOk(klass: CacheClass, value: unknown): boolean {
 		if (!value || typeof value !== "object") return false;
 		const snapshot = value as { text?: unknown; at?: unknown };
 		return typeof snapshot.text === "string" && typeof snapshot.at === "string";
+	}
+	if (klass === "docs-search") {
+		if (!value || typeof value !== "object") return false;
+		const reply = value as { chunks?: unknown; untrusted?: unknown };
+		return Array.isArray(reply.chunks) && typeof reply.untrusted === "string";
 	}
 	if (klass === "memory-search") {
 		if (Array.isArray(value)) return true;

@@ -38,7 +38,7 @@ import {
 	type SubstrateConfig,
 } from "./config.ts";
 import { buildAgentCard, isKnownCardSurface } from "./agent-card.ts";
-import { DATASET_TRIGGERS, createVersionStore, latestVersion, refreshDataset, resolveDatasets } from "./docs-datasets.ts";
+import { DATASET_TRIGGERS } from "./docs-datasets.ts";
 import { scanIngestPages } from "./docs-ingest.ts";
 import { formatDrift } from "./drift.ts";
 import { InvalidEventError } from "./event.ts";
@@ -526,10 +526,9 @@ export function createHttpServer(
 	// sender to fix (claimed surface, kind, tokened or not) without carrying a payload.
 	const refusalLog = new AnonymousCallerLog(options.anonymousIntervalMs, options.now, options.refusalLog, "refused events");
 	refusalLog.start();
-	// Dataset versions recorded by the docs routes, for the process lifetime — the same
-	// lifetime-and-state-file split `docsIngestSeen` uses on the service side. The
-	// merge-trigger dedupes against the newest recorded version by content hash.
-	const docsVersions = createVersionStore();
+	// Dataset versions live in the service since uplift-2 R6, hydrated from and
+	// saved to the docs state file with the ingest records; the merge-trigger
+	// asks the service for the newest one and dedupes by content hash.
 	// The last `/healthz` body, served again for `config.healthzCacheMs` (uplift-2 R1).
 	const now = options.now ?? Date.now;
 	let healthMemo: HealthMemo | null = null;
@@ -1104,7 +1103,10 @@ export function createHttpServer(
 			// host-local automation and is loopback-only by design), and a repeat
 			// carrying the newest version's own commit and content hash re-answers it
 			// without ingesting or recording a second version — a webhook retry is
-			// cheap by hash.
+			// cheap by hash. Since uplift-2 R6 the ingest runs in the background: the
+			// route answers 202 with a job id at once (its caller, the skills-sync
+			// tick, gives up after 3 s while a real parse takes up to a minute per
+			// page), and `?wait=1` keeps the synchronous answer for operators.
 			if (req.method === "POST" && url.pathname === "/docs/merge-trigger") {
 				if (surface === null) {
 					sendJson(res, 401, { error: MERGE_TRIGGER_NEEDS_SURFACE });
@@ -1154,7 +1156,7 @@ export function createHttpServer(
 					sendJson(res, 200, { ok: true, dataset, noop: true, reason: "docs-plane-unconfigured" });
 					return;
 				}
-				const newest = latestVersion(docsVersions, dataset);
+				const newest = await substrate.latestDocsVersion(dataset);
 				if (newest && newest.commit === fields.commit && newest.content_sha256 === fields.content_sha256) {
 					sendJson(res, 200, { ok: true, version: newest, created: false, idempotent: true });
 					return;
@@ -1162,56 +1164,24 @@ export function createHttpServer(
 				if (dataset !== LOCALLY_INGESTED_DATASET) {
 					// This server holds no checkout of that dataset, so there is nothing it
 					// can truthfully ingest: a noop that says so, and no version recorded.
+					// The trigger itself is still evidence (skills-sync fast-forwarded).
+					substrate.noteDocsTrigger(dataset);
 					sendJson(res, 200, { ok: true, dataset, noop: true, reason: "no-configured-ingest-root" });
 					return;
 				}
-				// The guarded ingest reads the plane's dataset by name and refuses
-				// `unknown-dataset`, so on a configured plane without the dataset it
-				// must exist before that ingest runs. Creation is the resolve-by-name
-				// path the refresh already owns — discover first, create only on a
-				// name-miss — run here for the first trigger, whose ingest could not
-				// otherwise ever succeed. Order stays honest: ensure, ingest, and only
-				// then record the version, so a refused ingest still records nothing.
-				const ensured = await resolveDatasets({ config: config.ragflow }, [dataset]);
-				if (!ensured.ok) {
-					// A plane refusal is an outage of the docs plane, not a permission
-					// decision about the caller: 503 with the reason, and the caller
-					// decides on a retry.
-					sendJson(res, 503, { ok: false, reason: ensured.reason });
-					return;
-				}
-				const ensuredDataset = ensured.datasets[0];
-				// The guarded server-side ingest of this checkout's configured roots.
-				const ingested = await substrate.ingestDocs(
-					{
-						dataset,
-						commit: fields.commit,
-						pages: await scanIngestPages(options.docsIngestBaseDir ?? process.cwd(), config.docsIngestRoots),
-					},
+				substrate.noteDocsTrigger(dataset);
+				const baseDir = options.docsIngestBaseDir ?? process.cwd();
+				// The service ensures the dataset, runs the guarded ingest of this
+				// checkout's roots and records the version, in that order, in the
+				// background; the 202 is audited above like the 200 was. A plane
+				// refusal under `?wait=1` is an outage of the docs plane, not a
+				// permission decision about the caller: 503 with the reason.
+				const accepted = await substrate.startDocsRefresh(
+					{ ...fields, pages: () => scanIngestPages(baseDir, config.docsIngestRoots) },
 					surface,
+					{ wait: url.searchParams.get("wait") === "1" },
 				);
-				if (!ingested.ok) {
-					// A refusal (unreadable plane, a redactor finding, a skipped sweep) is
-					// an outage of the docs plane for a trigger whose whole job is that
-					// plane: 503 with the reason, and the caller decides on a retry. No
-					// version is recorded over documents that were never ingested.
-					sendJson(res, 503, { ok: false, reason: ingested.reason });
-					return;
-				}
-				const refreshed = await refreshDataset(
-					{ config: config.ragflow, versions: docsVersions, emit: (event) => substrate.emit(event), surface },
-					fields,
-				);
-				if (refreshed.ok && ensuredDataset?.created === true) {
-					// The resolve step created the dataset this trigger first needed, so
-					// the reply says so even though the refresh's own resolve found it
-					// sitting there.
-					sendJson(res, 200, { ...refreshed, created: true });
-					return;
-				}
-				// A plane refusal is an outage of the docs plane, not a permission decision
-				// about the caller: 503 with the reason, and the caller decides on a retry.
-				sendJson(res, refreshed.ok ? 200 : 503, refreshed);
+				sendJson(res, accepted.status, accepted.body);
 				return;
 			}
 

@@ -19,6 +19,7 @@ import {
 import { DEVNET_GENESIS_HASH } from "./anchor.ts";
 import { composeBrief, type BriefRequest, type BriefSource } from "./brief.ts";
 import {
+	DOCS_GENERATION_KEY,
 	GRAPHS_GENERATION_KEY,
 	MEMORY_GENERATION_KEY,
 	createReadThroughCache,
@@ -30,7 +31,29 @@ import {
 } from "./cache.ts";
 import { isReviewToken, type SubstrateConfig } from "./config.ts";
 import { DesktopBusy, type DesktopDriver, type DesktopLogEntry, type DesktopRunResult } from "./desktop/driver.ts";
-import { ingestDocs, loadIngestRecords, saveIngestRecords, type IngestOutcome, type IngestRecord, type PageSettlement } from "./docs-ingest.ts";
+import {
+	DatasetListCache,
+	createSkillsSyncTracker,
+	createVersionStore,
+	isSyncLive,
+	latestVersion,
+	noteSkillsSyncFastForward,
+	pinsFromVersions,
+	refreshDataset,
+	resolveDatasets,
+	type DatasetVersion,
+	type SkillsSyncTracker,
+	type VersionStore,
+} from "./docs-datasets.ts";
+import {
+	ingestDocs,
+	loadIngestRecords,
+	saveIngestRecords,
+	type IngestOutcome,
+	type IngestPage,
+	type IngestRecord,
+	type PageSettlement,
+} from "./docs-ingest.ts";
 import { DEFAULT_SEARCH_DATASET_NAMES, searchDocs, type SearchReply } from "./docs-search.ts";
 import {
 	DEFAULT_IDLE_SECONDS,
@@ -717,6 +740,36 @@ export function parseMemorySearch(request: MemorySearchRequest): MemorySearch {
 	return search;
 }
 
+// uplift-2 R6 — the asynchronous docs merge-trigger
+
+/** What one merge-trigger asks for: the dataset, its commit identity, and how to read the pages. */
+export interface DocsRefreshRequest {
+	dataset: string;
+	commit: string;
+	content_sha256: string;
+	/** The pages of the checkout, read when the job runs — not when it is accepted. */
+	pages: () => Promise<IngestPage[]>;
+}
+
+/** How one merge-trigger job ended, as `?wait=1` and the stderr line report it. */
+export type DocsRefreshOutcome =
+	| { ok: true; version: DatasetVersion; created: boolean; job: string }
+	| { ok: false; reason: string; job: string };
+
+interface DocsRefreshJob {
+	id: string;
+	dataset: string;
+	commit: string;
+	content_sha256: string;
+	done: Promise<DocsRefreshOutcome>;
+}
+
+/** The merge-trigger's answer: accepted into the background, or answered at once. */
+export type DocsRefreshAccepted =
+	| { status: 202; body: { accepted: true; job: string; dataset: string; commit: string; queued?: true } }
+	| { status: 200; body: DocsRefreshOutcome & { ok: true } }
+	| { status: 503; body: DocsRefreshOutcome & { ok: false } };
+
 export class Substrate {
 	readonly index: IndexStore | null;
 	readonly greptime: GreptimeClient | null;
@@ -761,6 +814,21 @@ export class Substrate {
 	private docsSeenReady: Promise<void> | null = null;
 	/** Serialized state-file saves, so overlapping ingests cannot interleave snapshots. */
 	private docsSaveChain: Promise<void> = Promise.resolve();
+	// uplift-2 R6 — RAGFlow docs plane
+	/**
+	 * Per-dataset version lists (the pins), hydrated with the ingest records
+	 * from the same state file and saved with them. Lived in the HTTP server
+	 * before, so a restart lost every pin and the merge-trigger's idempotency.
+	 */
+	private readonly docsVersions: VersionStore = createVersionStore();
+	/** The 60 s dataset-list cache every docs reader goes through; invalidated by a create or a failed list. */
+	private readonly docsDatasetList = new DatasetListCache();
+	/** Skills-sync fast-forward evidence: flipped by the first `agent-skills` merge-trigger this process sees (D25-07). */
+	private readonly docsSkillsSync: SkillsSyncTracker = createSkillsSyncTracker();
+	/** The merge-trigger jobs: one chain per dataset (a trigger queues behind the running one), plus every job still pending by id. */
+	private readonly docsRefreshChains = new Map<string, Promise<void>>();
+	private readonly docsRefreshPending = new Map<string, DocsRefreshJob>();
+	private docsRefreshSeq = 0;
 	/** `graphId/nodeId` → tail of that node's gated-completion chain. */
 	private readonly completionChains = new Map<string, Promise<void>>();
 	// uplift-2 R1 — brief fast path. The options `composeBrief` runs under, read
@@ -2645,6 +2713,15 @@ export class Substrate {
 	 * or an unknown dataset scope yields `{chunks: [], degraded: true, reason}`
 	 * with a warning event, never a throw. `datasets` names configured
 	 * datasets; unknown names are ignored and raw ids are never accepted.
+	 *
+	 * uplift-2 R6: the answer is cached under the `docs-search` class, keyed
+	 * by the normalised question, the dataset names and the current pins,
+	 * and invalidated by `gen:docs` (bumped by every ingest and every
+	 * recorded version); a degraded reply is never stored. Citations carry
+	 * the real commit pin once the dataset has a recorded version, and
+	 * `agent-skills` is marked pin-aged until this process has seen
+	 * skills-sync fast-forward evidence (D25-07). The dataset list comes
+	 * from the 60 s cache, so a search costs N retrievals, not 1 + N calls.
 	 */
 	async searchDocs(
 		input: { question?: unknown; datasets?: unknown; session_id?: unknown },
@@ -2656,33 +2733,61 @@ export class Substrate {
 		const names = Array.isArray(input.datasets)
 			? input.datasets.filter((name): name is string => typeof name === "string").filter((name) => DEFAULT_SEARCH_DATASET_NAMES.includes(name))
 			: [...DEFAULT_SEARCH_DATASET_NAMES];
-		return searchDocs(
-			{
-				config: this.config.ragflow,
-				datasetNames: names,
-				emit: (event) => this.emit(event),
-				surface,
-				...(sessionId !== undefined ? { sessionId } : {}),
-				fetchImpl: this.ragflowFetch,
-			},
-			question,
-		);
+		await this.hydrateDocsSeen();
+		const pins = pinsFromVersions(this.docsVersions);
+		const degradedDatasets = isSyncLive(this.docsSkillsSync) ? [] : ["agent-skills"];
+		const load = (): Promise<SearchReply> =>
+			searchDocs(
+				{
+					config: this.config.ragflow,
+					datasetNames: names,
+					pins,
+					degradedDatasets,
+					emit: (event) => this.emit(event),
+					surface,
+					...(sessionId !== undefined ? { sessionId } : {}),
+					fetchImpl: this.ragflowFetch,
+					datasets: this.docsDatasetList,
+					retrieval: this.config.docsRetrieval,
+					sourceUrlOf: (documentId) => {
+						for (const record of this.docsIngestSeen.values()) {
+							if (record.document_id === documentId) return record.source_url;
+						}
+						return undefined;
+					},
+				},
+				question,
+			);
+		// An empty question and an unconfigured plane are answered (degraded)
+		// without touching the cache: there is nothing to key on.
+		if (question.trim().length === 0 || this.config.ragflow === null) return load();
+		return this.cache.getOrLoad<SearchReply>({
+			klass: "docs-search",
+			surface,
+			args: { question: question.trim().replace(/\s+/g, " ").toLowerCase(), datasets: [...names].sort(), pins, degraded: degradedDatasets },
+			generations: [DOCS_GENERATION_KEY],
+			load,
+			store: (reply) => reply.degraded !== true,
+		});
 	}
 
 	/**
-	 * Hydrate ingest records from the state file, once per process.
+	 * Hydrate ingest records and dataset versions from the state file, once
+	 * per process.
 	 *
-	 * A missing file simply means an empty map; a corrupt one is reported
+	 * A missing file simply means empty tables; a corrupt one is reported
 	 * on stderr and likewise starts empty. Either way ingest proceeds —
-	 * losing dedup degrades to a duplicate upload, never to a refusal.
+	 * losing dedup degrades to a duplicate upload, losing pins to
+	 * `unpinned` citations, never to a refusal.
 	 */
 	private hydrateDocsSeen(): Promise<void> {
 		if (!this.docsSeenReady) {
 			this.docsSeenReady = (async () => {
 				const file = this.config.docsStateFile;
 				if (!file) return;
-				const { records, problem } = await loadIngestRecords(file);
+				const { records, versions, problem } = await loadIngestRecords(file);
 				for (const [key, record] of records) this.docsIngestSeen.set(key, record);
+				for (const [dataset, list] of versions) if (!this.docsVersions.has(dataset)) this.docsVersions.set(dataset, list);
 				if (problem) process.stderr.write(`[substrate] ${problem}\n`);
 			})();
 		}
@@ -2690,22 +2795,21 @@ export class Substrate {
 	}
 
 	/**
-	 * Persist ingest records best-effort, one save at a time. A failing disk
-	 * never fails the ingest it just completed; the reason lands on stderr
-	 * either way. Saves chain so overlapping ingests write whole snapshots
-	 * in order instead of interleaving them.
+	 * Persist ingest records and versions best-effort, one save at a time.
+	 * A failing disk never fails the ingest it just completed; the reason
+	 * lands on stderr either way. Saves chain so overlapping ingests write
+	 * whole snapshots in order instead of interleaving them.
 	 */
 	private persistDocsSeen(): Promise<void> {
 		const file = this.config.docsStateFile;
 		if (!file) return Promise.resolve();
 		this.docsSaveChain = this.docsSaveChain.then(() =>
-			saveIngestRecords(file, this.docsIngestSeen).catch((cause: unknown) => {
+			saveIngestRecords(file, this.docsIngestSeen, this.docsVersions).catch((cause: unknown) => {
 				process.stderr.write(`[substrate] docs ingest records not saved — ${String(cause)}\n`);
 			}),
 		);
 		return this.docsSaveChain;
 	}
-
 
 	/**
 	 * DOCS-02: ingest pages into a docs dataset through the substrate (D25-05).
@@ -2714,7 +2818,8 @@ export class Substrate {
 	 * a redactor finding, a missing source URL, an out-of-roots path or an
 	 * over-cap page is refused with a locator-only warning event — nothing is
 	 * uploaded. `dataset` names a configured dataset; raw ids are never
-	 * accepted.
+	 * accepted. A successful ingest persists the records and bumps the docs
+	 * generation, so every cached `docs_search` answer is invalidated.
 	 */
 	async ingestDocs(
 		input: { dataset?: unknown; commit?: unknown; pages?: unknown; session_id?: unknown },
@@ -2737,6 +2842,8 @@ export class Substrate {
 				surface: callerSurface,
 				...(sessionId !== undefined ? { sessionId } : {}),
 				fetchImpl: this.ragflowFetch,
+				datasets: this.docsDatasetList,
+				prune: this.config.docsPruneSuperseded,
 			},
 			{
 				dataset: typeof input.dataset === "string" ? input.dataset : "",
@@ -2753,8 +2860,136 @@ export class Substrate {
 				...(sessionId !== undefined ? { session_id: sessionId } : {}),
 			},
 		);
-		if (outcome.ok) await this.persistDocsSeen();
+		if (outcome.ok) {
+			await this.persistDocsSeen();
+			await this.cache.bump(DOCS_GENERATION_KEY);
+		}
 		return outcome;
+	}
+
+	// uplift-2 R6 — dataset versions and the merge-trigger, moved here from
+	// the HTTP server so they share the state file and the gated fetch.
+
+	/** The newest recorded version of a dataset, after hydration; the merge-trigger's idempotency key. */
+	async latestDocsVersion(dataset: string): Promise<DatasetVersion | undefined> {
+		await this.hydrateDocsSeen();
+		return latestVersion(this.docsVersions, dataset);
+	}
+
+	/**
+	 * A merge-trigger arrived for `dataset`. For `agent-skills` that is the
+	 * skills-sync fast-forward evidence D25-07 waits for: from here on its
+	 * citations stop carrying `pin_age_ms`. Other datasets record nothing.
+	 */
+	noteDocsTrigger(dataset: string): void {
+		if (dataset === "agent-skills") noteSkillsSyncFastForward(this.docsSkillsSync);
+	}
+
+	/**
+	 * Record a dataset version (resolve by name, create on miss), persist it
+	 * and bump the docs generation. The version store is the service's, so
+	 * the pin reaches the next search and the next trigger's idempotency
+	 * check, restart or not.
+	 */
+	async recordDocsVersion(
+		fields: { dataset: string; commit: string; content_sha256: string },
+		surface: Surface,
+	): Promise<{ ok: true; version: DatasetVersion; created: boolean } | { ok: false; reason: string }> {
+		if (this.config.ragflow === null) return { ok: false, reason: "ragflow-not-configured" };
+		await this.hydrateDocsSeen();
+		const refreshed = await refreshDataset(
+			{
+				config: this.config.ragflow,
+				versions: this.docsVersions,
+				emit: (event) => this.emit(event),
+				surface,
+				fetchImpl: this.ragflowFetch,
+				datasets: this.docsDatasetList,
+			},
+			fields,
+		);
+		if (refreshed.ok) {
+			await this.persistDocsSeen();
+			await this.cache.bump(DOCS_GENERATION_KEY);
+		}
+		return refreshed;
+	}
+
+	/**
+	 * Accept a merge-trigger into the background (uplift-2 R6).
+	 *
+	 * The route has already made its door decisions (auth, loopback, guest,
+	 * body, audit, idempotency, local checkout). Here one job per dataset
+	 * runs at a time; a trigger for a dataset whose job is still running or
+	 * queued with the same commit and hash is answered with that job's id
+	 * and `queued: true`; a different identity is queued behind it. The job
+	 * ensures the dataset exists (resolve by name, create on miss), runs the
+	 * guarded ingest of the checkout's roots, then records the version — so
+	 * a refused ingest records nothing, exactly as the inline route did.
+	 * Every outcome lands on stderr; a success lands in the version store
+	 * and the ingest records. `wait` keeps the synchronous answer for
+	 * operators and tests: 200 with the version, 503 with the reason.
+	 */
+	async startDocsRefresh(request: DocsRefreshRequest, surface: Surface, options: { wait?: boolean } = {}): Promise<DocsRefreshAccepted> {
+		const sameIdentity = (job: DocsRefreshJob): boolean =>
+			job.dataset === request.dataset && job.commit === request.commit && job.content_sha256 === request.content_sha256;
+		let job = [...this.docsRefreshPending.values()].find(sameIdentity);
+		const queued = job !== undefined || this.docsRefreshChains.has(request.dataset);
+		if (job === undefined) {
+			this.docsRefreshSeq += 1;
+			const id = `docs-refresh-${Date.now().toString(36)}-${this.docsRefreshSeq}`;
+			const ahead = this.docsRefreshChains.get(request.dataset) ?? Promise.resolve();
+			const done = ahead.then(() => this.runDocsRefresh(id, request, surface));
+			const settled = done.then(
+				() => undefined,
+				() => undefined,
+			);
+			job = { id, dataset: request.dataset, commit: request.commit, content_sha256: request.content_sha256, done };
+			this.docsRefreshPending.set(id, job);
+			this.docsRefreshChains.set(request.dataset, settled);
+			void settled.then(() => {
+				this.docsRefreshPending.delete(id);
+				if (this.docsRefreshChains.get(request.dataset) === settled) this.docsRefreshChains.delete(request.dataset);
+			});
+		}
+		if (options.wait === true) {
+			const outcome = await job.done;
+			return outcome.ok ? { status: 200, body: outcome } : { status: 503, body: outcome };
+		}
+		return {
+			status: 202,
+			body: { accepted: true, job: job.id, dataset: request.dataset, commit: request.commit, ...(queued ? { queued: true } : {}) },
+		};
+	}
+
+	/** One merge-trigger job: ensure, ingest, record; never throws. */
+	private async runDocsRefresh(job: string, request: DocsRefreshRequest, surface: Surface): Promise<DocsRefreshOutcome> {
+		const finish = (outcome: DocsRefreshOutcome): DocsRefreshOutcome => {
+			process.stderr.write(
+				`[substrate] docs merge-trigger ${job} ${request.dataset} ${request.commit.slice(0, 12)}: ${
+					outcome.ok ? `${outcome.version.version} recorded${outcome.created ? " (dataset created)" : ""}` : `failed — ${redact(outcome.reason)}`
+				}\n`,
+			);
+			return outcome;
+		};
+		try {
+			if (this.config.ragflow === null) return finish({ ok: false, reason: "ragflow-not-configured", job });
+			// The guarded ingest reads the plane's dataset by name and refuses
+			// `unknown-dataset`, so on a configured plane without the dataset it
+			// must exist before that ingest runs: discover first, create only on
+			// a name-miss. Order stays honest — ensure, ingest, and only then
+			// record the version.
+			const ensured = await resolveDatasets({ config: this.config.ragflow, fetchImpl: this.ragflowFetch, datasets: this.docsDatasetList }, [request.dataset]);
+			if (!ensured.ok) return finish({ ok: false, reason: ensured.reason, job });
+			const created = ensured.datasets[0]?.created === true;
+			const ingested = await this.ingestDocs({ dataset: request.dataset, commit: request.commit, pages: await request.pages() }, surface);
+			if (!ingested.ok) return finish({ ok: false, reason: ingested.reason, job });
+			const refreshed = await this.recordDocsVersion(request, surface);
+			if (!refreshed.ok) return finish({ ok: false, reason: refreshed.reason, job });
+			return finish({ ok: true, version: refreshed.version, created: created || refreshed.created, job });
+		} catch (cause) {
+			return finish({ ok: false, reason: redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200), job });
+		}
 	}
 
 	/**

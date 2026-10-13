@@ -7,9 +7,19 @@
  * untrusted; one `note` event lists the returned URLs and any error yields
  * an empty result with a reason (fail-open: search must never fail an
  * agent's turn).
+ *
+ * uplift-2 R6: the dataset list comes from an injected `DatasetListSource`
+ * (the service's 60 s cache) instead of one `GET /datasets` per search; the
+ * three documented retrieval knobs travel with every retrieval; and a
+ * chunk that carries no `source_url` — the reference documents none on
+ * retrieval chunks — is cited from the ingest record of its document id
+ * (`sourceUrlOf`) before falling back to `dataset:<name>`. The cached
+ * answer itself lives in the service (`docs-search` cache class), keyed by
+ * the pins, so a refresh invalidates it.
  */
 import { randomUUID } from "node:crypto";
-import { listDatasets, retrieveChunks, type FetchLike, type RagflowChunk, type RagflowConfig } from "./planes/ragflow.ts";
+import type { DatasetListSource } from "./docs-datasets.ts";
+import { listDatasets, retrieveChunks, type FetchLike, type RagflowChunk, type RagflowConfig, type RetrievalKnobs } from "./planes/ragflow.ts";
 import { redact, redactValue } from "./redact.ts";
 import type { EventInput, Surface } from "./types.ts";
 
@@ -64,6 +74,12 @@ export interface SearchDeps {
 	degradedDatasets?: readonly string[];
 	/** Clock for pin ages; the real clock when omitted. */
 	nowMs?: number;
+	/** The dataset list reader; the plane directly when omitted (uplift-2 R6). */
+	datasets?: DatasetListSource;
+	/** The documented retrieval tuning; RAGFlow's defaults when omitted (uplift-2 R6). */
+	retrieval?: RetrievalKnobs;
+	/** The ingest record's source URL for a document id, when the chunk carries none (uplift-2 R6). */
+	sourceUrlOf?: (documentId: string) => string | undefined;
 }
 
 function failed(deps: SearchDeps, sessionId: string, reason: string): Promise<SearchReply> {
@@ -93,11 +109,13 @@ function cite(
 	pin: DatasetPin | undefined,
 	markPinAge: boolean,
 	nowMs: number,
+	sourceUrlOf: ((documentId: string) => string | undefined) | undefined,
 ): SearchCitation {
 	const age = markPinAge ? pinAgeMs(pin, nowMs) : undefined;
+	const recorded = chunk.source_url ?? (chunk.document_id !== undefined ? sourceUrlOf?.(chunk.document_id) : undefined);
 	return {
 		title: redact(chunk.document_name),
-		source_url: chunk.source_url ? redact(chunk.source_url) : `dataset:${datasetName}`,
+		source_url: recorded !== undefined ? redact(recorded) : `dataset:${datasetName}`,
 		heading_path: chunk.heading_path ? redact(chunk.heading_path) : "",
 		commit: pin !== undefined ? pin.commit : `dataset-pin:${datasetName}:unpinned`,
 		snippet: redactValue(chunk.content).slice(0, SNIPPET_CAP),
@@ -114,7 +132,7 @@ export async function searchDocs(deps: SearchDeps, question: string): Promise<Se
 	if (question.trim().length === 0) return failed(deps, sessionId, "question is required");
 	if (deps.config === null) return failed(deps, sessionId, "ragflow-not-configured");
 
-	const listed = await listDatasets(deps.config, deps.fetchImpl);
+	const listed = deps.datasets ? await deps.datasets.list(deps.config, deps.fetchImpl) : await listDatasets(deps.config, deps.fetchImpl);
 	if (!listed.ok) return failed(deps, sessionId, listed.reason);
 	const wanted = deps.datasetNames ?? DEFAULT_SEARCH_DATASET_NAMES;
 	const readable = listed.datasets.filter((dataset) => wanted.includes(dataset.name));
@@ -125,14 +143,14 @@ export async function searchDocs(deps: SearchDeps, question: string): Promise<Se
 	for (const dataset of readable) {
 		const outcome = await retrieveChunks(
 			deps.config,
-			{ question, dataset_ids: [dataset.id] },
+			{ question, dataset_ids: [dataset.id], ...(deps.retrieval ? { retrieval: deps.retrieval } : {}) },
 			deps.fetchImpl,
 		);
 		if (!outcome.ok) return failed(deps, sessionId, outcome.reason);
 		ids.push(dataset.id);
 		for (const chunk of outcome.chunks) {
 			const degraded = deps.degradedDatasets?.includes(dataset.name) ?? false;
-			citations.push(cite(chunk, dataset.name, deps.pins?.[dataset.id], degraded, deps.nowMs ?? Date.now()));
+			citations.push(cite(chunk, dataset.name, deps.pins?.[dataset.id], degraded, deps.nowMs ?? Date.now(), deps.sourceUrlOf));
 		}
 	}
 	citations.sort((left, right) => right.score - left.score);

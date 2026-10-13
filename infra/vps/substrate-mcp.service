@@ -42,6 +42,11 @@ StateDirectoryMode=0700
 # here as 0600 JSONL locators and replay with backoff across restarts. Never
 # the cache: anything that must survive a restart lives under StateDirectory.
 Environment=SUBSTRATE_RETAIN_OUTBOX_PATH=/var/lib/substrate/retain-outbox.jsonl
+# The docs state file (uplift-2 R6): docs_ingest records (content hashes and
+# document ids) plus the per-dataset version pins, so a restart keeps citations
+# pinned and a repeated merge-trigger stays idempotent. Unset, both were
+# process-local. Never the cache, for the same reason as the outbox above.
+Environment=SUBSTRATE_DOCS_STATE_FILE=/var/lib/substrate/docs-ingest.json
 
 StandardOutput=journal
 StandardError=journal

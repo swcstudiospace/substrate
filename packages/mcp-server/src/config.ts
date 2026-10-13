@@ -12,7 +12,7 @@ import { LINEAR_API_URL } from "./linear.ts";
 import { parseGrants, type MemoryGrant } from "./memory-policy.ts";
 import { DEFAULT_RECALL_BUDGET_MS } from "./memory-recall.ts";
 import { NOTION_API_URL } from "./notion.ts";
-import { ragflowFromEnv, type RagflowConfig } from "./planes/ragflow.ts";
+import { DEFAULT_RETRIEVAL_KNOBS, ragflowFromEnv, type RagflowConfig, type RetrievalKnobs } from "./planes/ragflow.ts";
 import { DEFAULT_RETAIN_DRAIN_MS, DEFAULT_RETAIN_MAX_ATTEMPTS, DEFAULT_RETAIN_OUTBOX_MAX } from "./retain-outbox.ts";
 import { SURFACES, SWARM_SURFACES, isSwarmSurface, type Surface } from "./types.ts";
 
@@ -310,6 +310,20 @@ export interface SubstrateConfig {
 	 * recall reads the caller's own bank only. Presence, never a value.
 	 */
 	hindsightEnv: { legacyBankSet: boolean; urlSet: boolean; banksSet: boolean };
+	// uplift-2 R6 — RAGFlow docs plane
+	/**
+	 * Delete a superseded document after its replacement parsed
+	 * (`SUBSTRATE_DOCS_PRUNE_SUPERSEDED=1`). Off by default: nothing on the
+	 * plane is deleted unless the operator turns this on.
+	 */
+	docsPruneSuperseded: boolean;
+	/**
+	 * The three documented retrieval knobs sent on every `docs_search`
+	 * retrieval, from `SUBSTRATE_DOCS_SIMILARITY_THRESHOLD` (0.2),
+	 * `SUBSTRATE_DOCS_VECTOR_WEIGHT` (0.3) and `SUBSTRATE_DOCS_TOP_K` (1024).
+	 * The defaults are RAGFlow's own; junk or out-of-range values fall back.
+	 */
+	docsRetrieval: RetrievalKnobs;
 }
 
 /** Production defaults: September's library, so the host ledger keeps deduplicating. */
@@ -557,6 +571,13 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 			urlSet: (env.HINDSIGHT_URL?.trim() ?? "") !== "",
 			banksSet: (env.HINDSIGHT_BANKS?.trim() ?? "") !== "",
 		},
+		// uplift-2 R6
+		docsPruneSuperseded: (env.SUBSTRATE_DOCS_PRUNE_SUPERSEDED?.trim() ?? "") === "1",
+		docsRetrieval: {
+			similarityThreshold: unitIntervalOr(env.SUBSTRATE_DOCS_SIMILARITY_THRESHOLD, DEFAULT_RETRIEVAL_KNOBS.similarityThreshold),
+			vectorSimilarityWeight: unitIntervalOr(env.SUBSTRATE_DOCS_VECTOR_WEIGHT, DEFAULT_RETRIEVAL_KNOBS.vectorSimilarityWeight),
+			topK: positiveOr(env.SUBSTRATE_DOCS_TOP_K, DEFAULT_RETRIEVAL_KNOBS.topK),
+		},
 	};
 }
 
@@ -570,6 +591,12 @@ function nonNegativeOr(raw: string | undefined, fallback: number): number {
 function positiveOr(raw: string | undefined, fallback: number): number {
 	const value = Number(raw?.trim());
 	return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+}
+
+/** uplift-2 R6: a finite number in [0, 1]; anything else is the default. */
+function unitIntervalOr(raw: string | undefined, fallback: number): number {
+	const value = Number(raw?.trim());
+	return raw !== undefined && raw.trim() !== "" && Number.isFinite(value) && value >= 0 && value <= 1 ? value : fallback;
 }
 
 /**
