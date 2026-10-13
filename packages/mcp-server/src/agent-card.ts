@@ -92,8 +92,10 @@ export function buildAgentCard(surface: Surface, teachables: readonly MemoryEntr
 			name,
 			// A stale entry stays listed but says so: trust decay marks old
 			// memories `needs_reverification`, and a card that hid the warning
-			// would publish possibly-outdated advice as taught skill.
-			description: `${entry.needs_reverification ? "Check this advice before use. " : ""}${redact(entry.text)}`.slice(
+			// would publish possibly-outdated advice as taught skill. An entry past
+			// its `ttl` (uplift-3 N4) is served here only under report mode, and
+			// gets the same warning; under enforce the index leaves it out.
+			description: `${entry.needs_reverification || entry.expired === true ? "Check this advice before use. " : ""}${redact(entry.text)}`.slice(
 				0,
 				CARD_SKILL_DESCRIPTION_MAX,
 			),

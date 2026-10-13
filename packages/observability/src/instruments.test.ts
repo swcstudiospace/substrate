@@ -5,6 +5,7 @@ import {
 	CITATION_PROVENANCES,
 	DOCS_LATENCY_BUCKETS_MS,
 	DOCS_SEARCH_OUTCOMES,
+	MEMORY_EXPIRED_MODES,
 	METRIC,
 	PLANE_ERROR_REASONS,
 	SubstrateInstruments,
@@ -192,6 +193,29 @@ describe("recordQuarantine and recordAudit", () => {
 		instruments.recordAudit({ decision: "allowed", written: false });
 
 		expect(sumCounter(findCounter(instruments.snapshot(), METRIC.auditAppends)!, { outcome: "lost" })).toBe(1);
+	});
+});
+
+describe("recordMemoryExpired", () => {
+	test("served and hidden are separate series under one caller and kind, with no other label", () => {
+		// The report→enforce rollout reads this: `served` is what enforce would hide,
+		// `hidden` is what it did. A label a caller could type would unbound the series.
+		const instruments = new SubstrateInstruments();
+		instruments.recordMemoryExpired({ surface: "cursor", kind: "warning", mode: "served" });
+		instruments.recordMemoryExpired({ surface: "cursor", kind: "warning", mode: "served" });
+		instruments.recordMemoryExpired({ surface: "cursor", kind: "warning", mode: "hidden" });
+		instruments.recordMemoryExpired({ surface: "hermes", kind: "decision", mode: "hidden" });
+
+		const counter = findCounter(instruments.snapshot(), METRIC.memoryExpired)!;
+		expect(counter.unit).toBe("{entry}");
+		expect(sumCounter(counter, { surface: "cursor", kind: "warning", mode: "served" })).toBe(2);
+		expect(sumCounter(counter, { surface: "cursor", kind: "warning", mode: "hidden" })).toBe(1);
+		expect(sumCounter(counter, { mode: "hidden" })).toBe(2);
+		expect(sumCounter(counter)).toBe(4);
+		for (const point of counter.points) {
+			expect(Object.keys(point.attributes).sort()).toEqual(["kind", "mode", "surface"]);
+			expect(MEMORY_EXPIRED_MODES as readonly string[]).toContain(String(point.attributes.mode));
+		}
 	});
 });
 

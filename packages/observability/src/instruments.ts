@@ -35,6 +35,7 @@ export const METRIC = {
 	docsSearch: "substrate.docs.search",
 	docsCitations: "substrate.docs.citations",
 	docsDuration: "substrate.docs.duration",
+	memoryExpired: "substrate.memory.expired",
 } as const;
 
 /** What one docs search answered with. One series each, so the label stays bounded. */
@@ -69,6 +70,10 @@ export interface DocsSearchSample {
 	/** How many returned citations carry each provenance; absent keys count zero. */
 	citations: Partial<Record<CitationProvenance, number>>;
 }
+
+/** What a read did with an expired memory entry: served it tagged (`report`) or left it out (`enforce`). */
+export const MEMORY_EXPIRED_MODES = ["served", "hidden"] as const;
+export type MemoryExpiredMode = (typeof MEMORY_EXPIRED_MODES)[number];
 
 /** Why a plane call failed. One series each, so the reason stays bounded. */
 export const PLANE_ERROR_REASONS = ["timeout", "network", "server", "open", "other"] as const;
@@ -224,6 +229,7 @@ export class SubstrateInstruments {
 	readonly docsSearch: Counter;
 	readonly docsCitations: Counter;
 	readonly docsDuration: Histogram;
+	readonly memoryExpired: Counter;
 
 	constructor(registry: MetricRegistry = new MetricRegistry()) {
 		this.registry = registry;
@@ -318,6 +324,11 @@ export class SubstrateInstruments {
 			unit: "ms",
 			bounds: DOCS_LATENCY_BUCKETS_MS,
 			description: "End-to-end time to answer one docs search, by surface and cached. The docs.search.p95 subject: p95 <= 2000 ms.",
+		});
+		this.memoryExpired = registry.counter(METRIC.memoryExpired, {
+			description:
+				"Memory entries past their ttl met by an index read, by caller surface, memory kind and what was done (served|hidden).",
+			unit: "{entry}",
 		});
 	}
 
@@ -417,6 +428,16 @@ export class SubstrateInstruments {
 		this.planeDuration.record(sample.durationMs, { plane: sample.plane, op: sample.op, outcome: sample.outcome });
 		const reason = classifyPlaneReason(sample);
 		if (reason !== null) this.planeErrors.add(1, { plane: sample.plane, reason });
+	}
+
+	/**
+	 * One expired memory entry an index read met (uplift-3 N4). `kind` is the
+	 * closed memory-kind vocabulary and `mode` the two-way switch, so the series
+	 * count is surfaces × kinds × 2 and nothing a caller types reaches a label.
+	 * Counted where the index is read: a cache hit serves a copy and counts nothing.
+	 */
+	recordMemoryExpired(sample: { surface: string; kind: string; mode: MemoryExpiredMode }): void {
+		this.memoryExpired.add(1, cleanAttributes({ surface: sample.surface, kind: sample.kind, mode: sample.mode }));
 	}
 
 	/**

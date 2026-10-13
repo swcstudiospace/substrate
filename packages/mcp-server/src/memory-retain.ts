@@ -18,6 +18,13 @@
  * index. The warning is deferred to the outbox's last attempt, not removed.
  * Refusals (unsourced, unredacted, guest, 4xx other than 429) are not
  * transient and warn at once, exactly as before.
+ *
+ * An entry past its `ttl` is refused too (uplift-3 N4, `retain.expired`), in
+ * **both** `SUBSTRATE_MEMORY_EXPIRY` modes: `report` is about what the index
+ * still serves, and serving a dead memory tagged is honest where copying it
+ * into a bank that keeps it until replaced is not. The outbox replay hits this
+ * most — an entry parked for hours can be past its lifetime by the time its
+ * turn comes — and a refusal there is permanent, never retried.
  */
 import {
 	bankForSurface,
@@ -29,6 +36,7 @@ import {
 	type HindsightResult,
 } from "./planes/hindsight.ts";
 import { canonicalJson, sha256Hex } from "./event.ts";
+import { memoryExpiry, type GraphLifetime, type MemoryExpiry } from "./memory-policy.ts";
 import { applyRule, redact, REDACTION_RULES } from "./redact.ts";
 import { isTransientRetainReason, type RetainOutboxCandidate } from "./retain-outbox.ts";
 import { SURFACES, type EventInput, type MemoryEntry, type MemoryWriteRequest, type MemoryWriteResult } from "./types.ts";
@@ -51,6 +59,12 @@ export interface RetainDeps {
 	outbox?: RetainOutboxSink;
 	/** The retain POST bound (`HINDSIGHT_RETAIN_TIMEOUT_MS`); the plane default otherwise. */
 	retainTimeoutMs?: number;
+	/**
+	 * What the index knows of the graph a `ttl: graph` entry lives for (null: no
+	 * row), for `memoryExpiry`. Absent, a `graph` entry cannot be judged and is
+	 * forwarded; a `30d` entry is judged from its own `created` either way.
+	 */
+	graphLifetime?: (entry: MemoryEntry) => Promise<GraphLifetime | null>;
 }
 
 export interface ForwardOutcome {
@@ -187,6 +201,8 @@ async function forwardEntry(deps: RetainDeps, config: HindsightConfig, target: R
 	};
 	if (deps.vmGuest === true) return refuse("vm-guest");
 	if (!source) return refuse("retain.unsourced");
+	const expiry = await lifetimeOf(deps, entry);
+	if (expiry.expired) return refuse("retain.expired", { ttl: entry.ttl, expiry: expiry.reason });
 	const context = `memory ${entry.kind} at ${entry.scope}`;
 	const metadata: Record<string, string> = {
 		surface: writer,
@@ -248,4 +264,21 @@ async function forwardEntry(deps: RetainDeps, config: HindsightConfig, target: R
 	}
 	if (!retained.ok) return fail(`retain-${retained.error.kind}`);
 	return { forwarded: true, bank, document_id: documentId };
+}
+
+/**
+ * The entry's lifetime verdict for the forward. A `graph` entry needs the
+ * index's word on its graph; without a resolver it is treated as alive rather
+ * than guessed dead, because a forward refused on a guess warns about a memory
+ * that may be in force. An index read that fails is the same: alive, this time.
+ */
+async function lifetimeOf(deps: RetainDeps, entry: MemoryEntry): Promise<MemoryExpiry> {
+	if (entry.ttl !== "graph") return memoryExpiry(entry, null);
+	const alive: MemoryExpiry = { expired: false, expires_at: null, reason: null };
+	if (!deps.graphLifetime) return alive;
+	try {
+		return memoryExpiry(entry, await deps.graphLifetime(entry));
+	} catch {
+		return alive;
+	}
 }

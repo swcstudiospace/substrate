@@ -22,7 +22,8 @@ function entry(overrides: Partial<MemoryEntry> = {}): MemoryEntry {
 		writer: "cursor",
 		actor: "agent",
 		trust: "agent-claimed",
-		ttl: "30d",
+		// Permanent, so these forwards never age into `retain.expired`; lifetime has its own tests below.
+		ttl: "permanent",
 		created: "2026-10-10T00:00:00.000Z",
 		version: 1,
 		entry_hash: "hash_1",
@@ -184,6 +185,67 @@ describe("forwardRetain", () => {
 		expect(outcome).toMatchObject({ forwarded: false, reason: "hindsight is not configured" });
 		expect(fake.requests.length).toBe(0);
 		expect(emitted).toEqual([]);
+	});
+
+	test("an entry past its ttl is refused in either expiry mode — a dead memory is never copied into a bank", async () => {
+		// The forward does not know the mode, by design: `report` is about what the
+		// index still serves, and a bank keeps what it is given until replaced.
+		const { fake, emitted, deps } = setup();
+		const request = { ...sourced(), scope: "repo:acme/app", kind: "fact" as const, text: "x", writer: "cursor" };
+		const stale = entry({ ttl: "30d", created: new Date(Date.now() - 31 * 86_400_000).toISOString() });
+		const outcome = await forwardRetain(deps, request, accepted({ entry: stale }));
+		expect(outcome).toMatchObject({ forwarded: false, reason: "retain.expired" });
+		expect(fake.requests.length).toBe(0);
+		expect(emitted).toHaveLength(1);
+		expect(emitted[0]).toMatchObject({
+			kind: "warning",
+			payload: { action: "memory.retain", reason: "retain.expired", ttl: "30d", expiry: "30d", bank: "sub-cursor", document_id: "mwd_key1" },
+		});
+		expect(JSON.stringify(emitted[0])).not.toContain("fence the lease");
+
+		// Day 29 of the same class forwards.
+		const fresh = entry({ ttl: "30d", created: new Date(Date.now() - 29 * 86_400_000).toISOString() });
+		expect((await forwardRetain(deps, request, accepted({ entry: fresh }))).forwarded).toBe(true);
+	});
+
+	test("a graph entry is judged against the graph the index knows, and forwarded when nobody can say", async () => {
+		const request = { ...sourced(), scope: "graph:ut-1", kind: "fact" as const, text: "x", writer: "cursor" };
+		const scoped = entry({ ttl: "graph", scope: "graph:ut-1", graph_id: "ut-1" });
+		const asked: string[] = [];
+		for (const [status, forwarded, reason] of [
+			["In Progress", true, undefined],
+			["Merged", false, "graph-terminal"],
+			[null, false, "graph-unindexed"],
+		] as const) {
+			const { fake, emitted, deps } = setup();
+			const outcome = await forwardRetain(
+				{
+					...deps,
+					graphLifetime: async (candidate) => {
+						asked.push(candidate.graph_id ?? "");
+						return status === null ? null : { status };
+					},
+				},
+				request,
+				accepted({ entry: scoped }),
+			);
+			expect(outcome.forwarded).toBe(forwarded);
+			expect(fake.retains.length).toBe(forwarded ? 1 : 0);
+			if (!forwarded) expect(emitted[0]).toMatchObject({ payload: { reason: "retain.expired", ttl: "graph", expiry: reason } });
+		}
+		expect(asked).toEqual(["ut-1", "ut-1", "ut-1"]);
+
+		// No resolver (no index at hand): alive rather than guessed dead. A resolver
+		// that fails is the same — this forward, not the entry, pays for the outage.
+		const bare = setup();
+		expect((await forwardRetain(bare.deps, request, accepted({ entry: scoped }))).forwarded).toBe(true);
+		const failing = setup();
+		const outcome = await forwardRetain(
+			{ ...failing.deps, graphLifetime: async () => { throw new Error("index down"); } },
+			request,
+			accepted({ entry: scoped }),
+		);
+		expect(outcome.forwarded).toBe(true);
 	});
 });
 

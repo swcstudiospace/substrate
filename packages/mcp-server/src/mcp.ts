@@ -283,6 +283,21 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			json(await substrate.writeMemory({ ...entry, writer: memoryToolWriter(callerSurface, surface) })),
 	);
 
+	/**
+	 * Reading past an entry's lifetime is an operator action (uplift-3 N4).
+	 *
+	 * Under `SUBSTRATE_MEMORY_EXPIRY=enforce` the index hides expired entries;
+	 * `include_expired` is the operator's way to audit what it hid. Gated like
+	 * `force`: on the operator token, decided before any argument is read, so no
+	 * agent can widen its own reads by typing a flag. Under `report` the flag
+	 * changes nothing — expired entries are served tagged either way — but it is
+	 * refused the same, so a caller learns the rule once rather than at the flip.
+	 */
+	const INCLUDE_EXPIRED_REFUSED =
+		"`include_expired` reads entries past their ttl and is an operator action: present a token from " +
+		"SUBSTRATE_OPERATOR_TOKENS. Without it, expired entries are served tagged `expired` under " +
+		"SUBSTRATE_MEMORY_EXPIRY=report and left out under enforce.";
+
 	server.registerTool(
 		"memory_search",
 		{
@@ -290,7 +305,10 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			description:
 				"Full-text search over memory entries, optionally narrowed to one scope. Superseded entries are " +
 				"excluded unless asked for, and quarantined or unreviewed writes are never returned. An entry with " +
-				"`needs_reverification` has outlived its trust: check it before acting on it. Without `subject_prefix`, " +
+				"`needs_reverification` has outlived its trust: check it before acting on it. An entry with `expired` " +
+				"has outlived its `ttl` (`30d` past `expires_at`, or `graph` on a finished graph): under " +
+				"SUBSTRATE_MEMORY_EXPIRY=report it is still listed, tagged; under enforce it is left out unless an " +
+				"operator passes `include_expired`. Without `subject_prefix`, " +
 				"`before` or `before_id` the reply is a list of the newest `limit` matches, newest first. With any of " +
 				"them it is a page, `{ entries, next }`, ordered `created desc, id desc`: entries strictly before the " +
 				"keyset pair `(before, before_id)`, so ties at a page boundary are neither skipped nor repeated. `next` " +
@@ -305,6 +323,10 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 					.boolean()
 					.optional()
 					.describe("include retired versions — how you read a decision's history"),
+				include_expired: z
+					.boolean()
+					.optional()
+					.describe("also return entries past their ttl under SUBSTRATE_MEMORY_EXPIRY=enforce; needs an operator token"),
 				subject_prefix: z
 					.string()
 					.optional()
@@ -323,6 +345,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			annotations: { readOnlyHint: true },
 		},
 		async (request) => {
+			if (request.include_expired && !isOperator) return refusal(INCLUDE_EXPIRED_REFUSED);
 			try {
 				if (isPagedSearch(request)) return json(await substrate.searchMemoryPage(request, callerSurface ?? "unattributed"));
 				// Index entries first with derived plane hits appended (D26-05).
@@ -336,6 +359,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 						request.limit,
 						request.include_superseded,
 						callerSurface ?? "unattributed",
+						request.include_expired,
 					),
 				);
 			} catch (cause) {

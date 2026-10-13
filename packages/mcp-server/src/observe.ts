@@ -219,6 +219,9 @@ export function createObservability(config: SubstrateConfig, env: Record<string,
 		admission(sample) {
 			instruments.recordAdmission(sample);
 		},
+		memoryExpired(sample) {
+			instruments.recordMemoryExpired(sample);
+		},
 		claimed(sample) {
 			instruments.recordClaim({
 				surface: sample.surface,
