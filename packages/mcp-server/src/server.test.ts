@@ -788,7 +788,11 @@ describe("GET /events/stream", () => {
 				}
 				return out;
 			},
-			eventsByIds: async (ids: string[]) => events.filter((event) => ids.includes(event.id)).map(row),
+			// The route passes positions (uplift-2 R5) so the real client can bound the read in time; bare ids stay accepted.
+			eventsByIds: async (positions: ReadonlyArray<string | { id: string }>) => {
+				const wanted = new Set(positions.map((position) => (typeof position === "string" ? position : position.id)));
+				return events.filter((event) => wanted.has(event.id)).map(row);
+			},
 			append: (event: StubEvent) => {
 				positions.push({ id: event.id, ingestedAt: nextIngestedAt });
 				nextIngestedAt += 10;

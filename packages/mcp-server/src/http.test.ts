@@ -117,7 +117,7 @@ describe("GET /healthz", () => {
 		const body = (await response.json()) as {
 			index: boolean;
 			planes: Record<string, { ok: boolean | null; breaker: Record<string, unknown> | null; lastErrorAt: number | null }>;
-			capacity: { index: unknown };
+			capacity: { index: unknown; ledger: unknown };
 		};
 		expect(response.status).toBe(200);
 		expect(body.index).toBe(true);
@@ -130,7 +130,7 @@ describe("GET /healthz", () => {
 		expect(body.capacity).toEqual({ index: capacity, ledger: null });
 
 		const off = await start({ SUBSTRATE_BREAKER: "0" }, { index: { ping: async () => true, capacity: () => Promise.withResolvers<never>().promise } });
-		const offBody = (await (await fetch(`${off.base}/healthz`)).json()) as { planes: Record<string, { breaker: unknown }>; capacity: { index: unknown } };
+		const offBody = (await (await fetch(`${off.base}/healthz`)).json()) as { planes: Record<string, { breaker: unknown }>; capacity: { index: unknown; ledger: unknown } };
 		expect(offBody.planes.index?.breaker).toBeNull();
 		expect(offBody.capacity).toEqual({ index: null, ledger: null });
 	});
