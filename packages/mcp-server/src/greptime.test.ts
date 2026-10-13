@@ -7,6 +7,7 @@
  * is the entire contract with an append-only store.
  */
 import { afterEach, describe, expect, test } from "bun:test";
+import { BreakerOpenError, CircuitBreaker, type PlaneGate, type PlaneSample } from "@substrate/observability";
 import { normalizeEvent } from "./event.ts";
 import {
 	AppendOnlyViolation,
@@ -16,12 +17,14 @@ import {
 	EVENT_COLUMNS,
 	GreptimeClient,
 	GreptimeError,
+	GreptimeUnavailable,
 	INGEST_LAG_MS,
 	INGEST_BUDGET_MS,
 	IngestNotRecorded,
 	MAX_QUERY_LIMIT,
 	queryLimit,
 	quote,
+	sqlOp,
 } from "./greptime.ts";
 import type { GreptimeConfig } from "./config.ts";
 import type { EventInput } from "./types.ts";
@@ -254,6 +257,100 @@ describe("sql", () => {
 		await expect(new GreptimeClient(config).sql("SELECT 1")).rejects.toThrow(GreptimeError);
 	});
 
+	test("a 5xx or an unreachable host is GreptimeUnavailable; a SQL error is not", async () => {
+		// The distinction the breaker rests on: only the first two are the store's fault.
+		stubFetch(() => new Response("nope", { status: 503 }));
+		await expect(new GreptimeClient(config).sql("SELECT 1")).rejects.toBeInstanceOf(GreptimeUnavailable);
+		globalThis.fetch = (() => Promise.reject(new Error("connect ETIMEDOUT"))) as unknown as typeof fetch;
+		await expect(new GreptimeClient(config).sql("SELECT 1")).rejects.toBeInstanceOf(GreptimeUnavailable);
+		stubFetch(() => ({ error: "table not found" }));
+		const sqlError = new GreptimeClient(config).sql("SELECT 1");
+		await expect(sqlError).rejects.toBeInstanceOf(GreptimeError);
+		await expect(sqlError).rejects.not.toBeInstanceOf(GreptimeUnavailable);
+	});
+
+	test("sqlOp is the statement's verb, never the statement", () => {
+		expect(sqlOp('SELECT "hash" FROM "agent_events"')).toBe("select");
+		expect(sqlOp("  insert into x values (1)")).toBe("insert");
+		expect(sqlOp('SHOW CREATE TABLE "agent_events"')).toBe("show");
+		expect(sqlOp("CREATE TABLE IF NOT EXISTS x")).toBe("create");
+		expect(sqlOp("DESCRIBE x")).toBe("other");
+	});
+});
+
+describe("the ledger's plane gate", () => {
+	function gate(now: () => number, failureThreshold = 5): { gate: PlaneGate; samples: PlaneSample[] } {
+		const samples: PlaneSample[] = [];
+		return {
+			gate: { plane: "greptime", breaker: new CircuitBreaker("greptime", { failureThreshold, openMs: 30_000 }, now), observe: (s) => samples.push(s) },
+			samples,
+		};
+	}
+
+	test("opens after five consecutive failures and then fails fast without touching the network", async () => {
+		let now = 1_000_000;
+		const { gate: g, samples } = gate(() => now);
+		const client = new GreptimeClient(config, { gate: g });
+		let fetches = 0;
+		globalThis.fetch = (() => {
+			fetches += 1;
+			return Promise.reject(new Error("connect ETIMEDOUT"));
+		}) as unknown as typeof fetch;
+
+		for (let i = 0; i < 5; i++) await expect(client.sql("SELECT 1")).rejects.toThrow(/unreachable/);
+		expect(fetches).toBe(5);
+		expect(g.breaker?.state()).toBe("open");
+
+		const started = performance.now();
+		const refused = client.sql("SELECT 1");
+		await expect(refused).rejects.toBeInstanceOf(GreptimeUnavailable);
+		await expect(refused).rejects.toThrow(/circuit open/);
+		expect(performance.now() - started).toBeLessThan(5);
+		expect(fetches).toBe(5);
+		expect(await client.ping()).toBe(false);
+		expect(samples.map((s) => s.outcome)).toEqual(["error", "error", "error", "error", "error", "open", "open"]);
+		expect(samples.at(-1)?.op).toBe("ping");
+
+		// Thirty seconds later one probe goes out; it succeeds and the breaker closes.
+		now += 30_000;
+		stubFetch(() => records(["n"], [[1]]));
+		expect(await client.ping()).toBe(true);
+		expect(g.breaker?.state()).toBe("closed");
+	});
+
+	test("a 5xx charges the breaker; a SQL error does not", async () => {
+		const { gate: g, samples } = gate(() => 0, 2);
+		const client = new GreptimeClient(config, { gate: g });
+		stubFetch(() => ({ error: "table not found" }));
+		await expect(client.sql("SELECT 1")).rejects.toThrow(/table not found/);
+		expect(g.breaker?.snapshot().failures).toBe(0);
+		stubFetch(() => new Response("bad gateway", { status: 502 }));
+		await expect(client.sql("SELECT 1")).rejects.toThrow(/greptime 502/);
+		await expect(client.sql("SELECT 1")).rejects.toThrow(/greptime 502/);
+		expect(g.breaker?.state()).toBe("open");
+		await expect(client.sql("SELECT 1")).rejects.toBeInstanceOf(GreptimeUnavailable);
+		expect(samples.map((s) => `${s.op}:${s.outcome}`)).toEqual(["select:ok", "select:error", "select:error", "select:open"]);
+		expect(samples[1]?.reason).toContain("greptime 502");
+	});
+
+	test("without a gate, or with breakers disabled, every call still reaches the network", async () => {
+		let fetches = 0;
+		globalThis.fetch = (() => {
+			fetches += 1;
+			return Promise.reject(new Error("connect ETIMEDOUT"));
+		}) as unknown as typeof fetch;
+		const bare = new GreptimeClient(config);
+		const off = new GreptimeClient(config, { gate: { plane: "greptime", breaker: null, observe: null } });
+		for (let i = 0; i < 7; i++) {
+			await expect(bare.sql("SELECT 1")).rejects.toThrow(/unreachable/);
+			await expect(off.sql("SELECT 1")).rejects.toThrow(/unreachable/);
+		}
+		expect(fetches).toBe(14);
+		expect(BreakerOpenError.name).toBe("BreakerOpenError");
+	});
+});
+
+describe("the ledger client, continued", () => {
 	test("sends the database as a query parameter and basic auth as a header", async () => {
 		let seenUrl = "";
 		let seenAuth: string | undefined;
@@ -1083,7 +1180,7 @@ describe("insertEvent ingest record", () => {
 			return true;
 		}) as typeof process.stderr.write;
 		try {
-			await new GreptimeClient(config, undefined, clock).insertEvent(event);
+			await new GreptimeClient(config, { clock }).insertEvent(event);
 		} finally {
 			process.stderr.write = original;
 		}

@@ -8,14 +8,16 @@
  */
 import { afterAll, describe, expect, test } from "bun:test";
 import net, { type AddressInfo } from "node:net";
-import { findCounter, sumCounter, type MetricSnapshot } from "@substrate/observability";
+import { BreakerOpenError, CircuitBreaker, findCounter, sumCounter, type MetricSnapshot } from "@substrate/observability";
 import {
+	CACHE_CONNECT_COOLDOWN_MS,
 	CACHE_TTL,
 	COMMAND_TIMEOUT_MS,
 	CONNECT_TIMEOUT_MS,
 	GRAPHS_GENERATION_KEY,
 	MEMORY_GENERATION_KEY,
 	ReadThroughCache,
+	bunRedis,
 	cacheKey,
 	createReadThroughCache,
 	graphGenerationKey,
@@ -1193,20 +1195,54 @@ describe("Bun RedisClient", () => {
 		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 		const port = (server.address() as AddressInfo).port;
 		try {
-			const cache = createReadThroughCache(loadConfig({ DRAGONFLY_URL: `redis://127.0.0.1:${port}` }), () => {});
+			let now = 1_000_000;
+			const cache = createReadThroughCache(loadConfig({ DRAGONFLY_URL: `redis://127.0.0.1:${port}` }), { record: () => {}, now: () => now });
 			const request = { ...read, klass: "brief" as const, args: {}, load: async () => "source" };
 			const started = Date.now();
 			expect(await cache.getOrLoad(request)).toBe("source");
 			expect(Date.now() - started).toBeLessThan(1_000);
-			expect(cache.health()).toMatchObject({ bypasses: 1, errors: 1, hits: 0, mode: "degraded" });
+			expect(cache.health()).toMatchObject({ bypasses: 1, errors: 1, hits: 0, mode: "degraded", cooldownUntil: now + CACHE_CONNECT_COOLDOWN_MS });
 
+			// Inside the cooldown nothing touches the socket: a bypass in microseconds.
 			drop = false;
+			const cooled = Date.now();
+			expect(await cache.getOrLoad(request)).toBe("source");
+			expect(Date.now() - cooled).toBeLessThan(50);
+			expect(cache.health()).toMatchObject({ bypasses: 2, errors: 2, hits: 0, misses: 0 });
+
+			now += CACHE_CONNECT_COOLDOWN_MS;
 			expect(await cache.getOrLoad(request)).toBe("source");
 			expect(await cache.getOrLoad(request)).toBe("source");
-			expect(cache.health()).toMatchObject({ hits: 1, misses: 1, mode: "on", connected: true });
+			expect(cache.health()).toMatchObject({ hits: 1, misses: 1, mode: "on", connected: true, cooldownUntil: null });
 		} finally {
 			server.close();
 		}
+	});
+
+	test("the connect cooldown is reported and expires; a breaker refusal does not start one", async () => {
+		expect(CACHE_CONNECT_COOLDOWN_MS).toBe(5_000);
+		let now = 50_000;
+		// Nothing listens here: the connect fails at once.
+		const server = net.createServer();
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		const port = (server.address() as AddressInfo).port;
+		await new Promise<void>((resolve) => server.close(() => resolve()));
+
+		const redis = bunRedis(`redis://127.0.0.1:${port}`, { now: () => now, cooldownMs: 100 });
+		await expect(redis.get("k")).rejects.toThrow();
+		expect(redis.cooldownUntil?.()).toBe(now + 100);
+		await expect(redis.get("k")).rejects.toThrow(/cooling down/);
+		now += 100;
+		expect(redis.cooldownUntil?.()).toBeNull();
+		// The cooldown has expired: the socket is tried again (and fails again).
+		await expect(redis.get("k")).rejects.not.toThrow(/cooling down/);
+
+		const gated = bunRedis(`redis://127.0.0.1:${port}`, { now: () => now, cooldownMs: 100, gate: { plane: "cache", breaker: new CircuitBreaker("cache", { failureThreshold: 1 }, () => now), observe: null } });
+		await expect(gated.get("k")).rejects.toThrow();
+		now += 100;
+		await expect(gated.get("k")).rejects.toBeInstanceOf(BreakerOpenError);
+		// The breaker refused before any socket was opened, so no new cooldown started.
+		expect(gated.cooldownUntil?.()).toBeNull();
 	});
 });
 

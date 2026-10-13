@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { METRIC, SubstrateInstruments, classifyEventRefusal, extractUsage } from "./instruments.ts";
+import { METRIC, PLANE_ERROR_REASONS, SubstrateInstruments, classifyEventRefusal, classifyPlaneReason, extractUsage } from "./instruments.ts";
 import { findCounter, findHistogram, mergeHistogram, sumCounter } from "./metrics.ts";
 
 describe("extractUsage", () => {
@@ -180,5 +180,43 @@ describe("recordQuarantine and recordAudit", () => {
 		instruments.recordAudit({ decision: "allowed", written: false });
 
 		expect(sumCounter(findCounter(instruments.snapshot(), METRIC.auditAppends)!, { outcome: "lost" })).toBe(1);
+	});
+});
+
+describe("recordPlane", () => {
+	test("records the duration by plane, op and outcome, and an error by its bounded reason", () => {
+		const instruments = new SubstrateInstruments();
+		instruments.recordPlane({ plane: "greptime", op: "select", outcome: "ok", durationMs: 120 });
+		instruments.recordPlane({ plane: "greptime", op: "insert", outcome: "error", durationMs: 30, reason: "greptime 503: upstream" });
+		instruments.recordPlane({ plane: "hindsight", op: "recall", outcome: "timeout", durationMs: 4000, reason: "TimeoutError" });
+		instruments.recordPlane({ plane: "ragflow", op: "retrieve", outcome: "open", durationMs: 0 });
+		instruments.recordPlane({ plane: "index", op: "query", outcome: "error", durationMs: 1000, reason: "connect ECONNREFUSED 10.0.0.1:5432" });
+		instruments.recordPlane({ plane: "cache", op: "get", outcome: "error", durationMs: 1, reason: "WRONGTYPE" });
+
+		const snapshot = instruments.snapshot();
+		const duration = findHistogram(snapshot, METRIC.planeDuration)!;
+		expect(mergeHistogram(duration, { plane: "greptime" }).count).toBe(2);
+		expect(mergeHistogram(duration, { plane: "greptime", op: "select", outcome: "ok" }).count).toBe(1);
+		expect(mergeHistogram(duration, { outcome: "open" }).count).toBe(1);
+		const errors = findCounter(snapshot, METRIC.planeErrors)!;
+		expect(sumCounter(errors, { plane: "greptime", reason: "server" })).toBe(1);
+		expect(sumCounter(errors, { plane: "hindsight", reason: "timeout" })).toBe(1);
+		expect(sumCounter(errors, { plane: "ragflow", reason: "open" })).toBe(1);
+		expect(sumCounter(errors, { plane: "index", reason: "network" })).toBe(1);
+		expect(sumCounter(errors, { plane: "cache", reason: "other" })).toBe(1);
+		// An ok sample is not an error.
+		expect(sumCounter(errors)).toBe(5);
+		// Every reason attribute is one of the closed set, and the message never became one.
+		for (const point of errors.points) {
+			expect(PLANE_ERROR_REASONS as readonly string[]).toContain(String(point.attributes.reason));
+			expect(Object.keys(point.attributes).sort()).toEqual(["plane", "reason"]);
+		}
+	});
+
+	test("classifyPlaneReason keeps the set closed", () => {
+		expect(classifyPlaneReason({ plane: "index", op: "ping", outcome: "ok", durationMs: 1 })).toBeNull();
+		expect(classifyPlaneReason({ plane: "index", op: "ping", outcome: "error", durationMs: 1, reason: "server 502" })).toBe("server");
+		expect(classifyPlaneReason({ plane: "index", op: "ping", outcome: "error", durationMs: 1, reason: "fetch failed" })).toBe("network");
+		expect(classifyPlaneReason({ plane: "index", op: "ping", outcome: "error", durationMs: 1 })).toBe("other");
 	});
 });

@@ -25,15 +25,19 @@ import {
 import {
 	OtlpExporter,
 	PeriodicExporter,
+	PlaneWindow,
 	SPAN_KIND,
 	SubstrateInstruments,
 	Tracer,
+	evaluatePlaneSlos,
 	evaluateSlos,
 	loadObservabilityConfig,
 	parseTraceparent,
 	sloCatalogue,
 	type ClaimOutcome,
 	type MetricSnapshot,
+	type PlaneName,
+	type PlaneSloResult,
 	type SloResult,
 	type SloTarget,
 	type Span,
@@ -149,6 +153,11 @@ export interface Observability {
 	readonly observer: SubstrateObserver;
 	snapshot(): MetricSnapshot[];
 	evaluate(): SloResult[];
+	/**
+	 * The per-plane availability verdicts over the rolling hour (uplift-2 R2).
+	 * `configured` says which planes may be judged; the rest report `unconfigured`.
+	 */
+	evaluatePlanes(configured: Partial<Record<PlaneName, boolean>>): PlaneSloResult[];
 	start(): Promise<string[]>;
 	stop(): void;
 }
@@ -159,6 +168,8 @@ export function createObservability(config: SubstrateConfig, env: Record<string,
 	const tracer = new Tracer({ maxSpans: settings.maxSpans, sampleRatio: settings.sampleRatio });
 	const audit = new AuditLog({ path: config.audit.path, redact });
 	const slos = sloCatalogue(settings.slo);
+	/** One window per process: successive `/slo` reads are its samples. */
+	const planeWindow = new PlaneWindow();
 	/** How much of `tracer.dropped` has already been added to the monotonic counter. */
 	let reportedSpanDrops = 0;
 
@@ -199,6 +210,9 @@ export function createObservability(config: SubstrateConfig, env: Record<string,
 		cached(sample) {
 			instruments.recordCache(sample);
 		},
+		plane(sample) {
+			instruments.recordPlane(sample);
+		},
 		claimed(sample) {
 			instruments.recordClaim({
 				surface: sample.surface,
@@ -235,6 +249,13 @@ export function createObservability(config: SubstrateConfig, env: Record<string,
 		observer,
 		snapshot: () => instruments.snapshot(),
 		evaluate: () => evaluateSlos(instruments.snapshot(), slos),
+		evaluatePlanes: (configured) =>
+			evaluatePlaneSlos(instruments.snapshot(), {
+				configured,
+				window: planeWindow,
+				...(settings.slo.planeAvailability !== undefined ? { target: settings.slo.planeAvailability } : {}),
+				...(settings.slo.minSamples !== undefined ? { minSamples: settings.slo.minSamples } : {}),
+			}),
 		async start() {
 			const warnings: string[] = [];
 			const opened = await audit.open();

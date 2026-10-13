@@ -10,9 +10,9 @@
  *   POST /skills/propose propose a skill as a reviewable PR on the skills library
  *   POST /verify        recompute a graph's hash chain
  *   POST /evidence      the per-graph evidence bundle, as JSON or HTML
- *   GET  /healthz       store reachability, and whether events can actually be written
+ *   GET  /healthz       store reachability, whether events can actually be written, and each plane's breaker
  *   GET  /metrics       the OTLP metric snapshot this process holds
- *   GET  /slo           the SLO verdicts computed from it
+ *   GET  /slo           the SLO verdicts computed from it, plus burn and per-plane availability
  *
  * Hooks get REST because a hook process cannot call an MCP tool — it has no
  * client. Both paths run the same service code.
@@ -607,12 +607,18 @@ export function createHttpServer(
 				// rolling-hour ledger, so scrape frequency is the sample rate — the
 				// dispatcher's storm-breaker polls this same array.
 				const burn = evaluateBurnSlos(observability.snapshot());
+				// The per-plane availability objectives ride beside it the same way
+				// (uplift-2 R2): judged over the rolling hour, `unconfigured` for a plane
+				// the deployment does not have, and never folded into `breached`, which
+				// stays the catalogue's own list.
+				const planes = observability.evaluatePlanes(substrate.planesConfigured());
 				// 200 either way. A breached objective is information, not a broken service,
 				// and a monitor that read this as an outage would page on a slow hour.
 				sendJson(res, 200, {
 					results,
 					breached: results.filter((result) => result.status === "breached").map((result) => result.id),
 					burn,
+					planes,
 				});
 				return;
 			}

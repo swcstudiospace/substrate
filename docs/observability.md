@@ -51,10 +51,16 @@ substrate is keyed by. `surface` says which of the eight agents on the host;
 | `substrate.quarantine.total` | counter | `surface`, `graph_id`, `reason` |
 | `substrate.audit.appends` | counter | `decision`, `outcome` |
 | `substrate.trace.spans_dropped` | counter | — |
+| `substrate.plane.duration` | histogram, ms | `plane`, `op`, `outcome` = `ok` \| `error` \| `timeout` \| `open` |
+| `substrate.plane.errors` | counter | `plane`, `reason` = `timeout` \| `network` \| `server` \| `open` \| `other` |
 
 `status` is a class (`2xx`, `5xx`), not a code, and `route` is one of the known
 paths or `other` — an unauthenticated caller walking random URLs must not be able
-to mint a metric series per URL it tries.
+to mint a metric series per URL it tries. `plane` is one of the five data planes
+(`greptime`, `index`, `cache`, `hindsight`, `ragflow`) and `op` is a fixed label per
+client — a SQL verb for the ledger, a route-table entry for the HTTP planes
+(`recall`, `retain`, `retrieve`, `datasets`, …), a command name for the cache —
+never a statement or a URL.
 
 Everything is **cumulative and monotonic**. The exporter pushes the same running
 totals every interval and never resets, so a missed export is harmless: the next
@@ -120,6 +126,52 @@ below). An event with no usage contributes nothing rather than a zero, so a
 > `{"password": 123456}`. A number is not inherently safe; a named count is. The full
 > exemption is documented in the counter-exemption section of [`redaction.md`](redaction.md).
 
+## Plane circuit breakers (uplift-2 R2)
+
+Every outbound call to a data plane goes through `callPlane` in
+`packages/observability/src/breaker.ts`: ledger SQL (`greptime.ts`), index
+queries (`index-store.ts`), cache connects and commands (`cache.ts`), and every
+Hindsight and RAGFlow request (the gated `fetch` `Substrate` hands to
+`planes/*.ts`). One `CircuitBreaker` per plane, closed → open → half-open:
+
+- after `SUBSTRATE_BREAKER_FAILURES` (default **5**) consecutive failures — a
+  transport error, a timeout, or a 5xx; a 4xx or a SQL error is the caller's fault
+  and does not count — the breaker **opens** and every call fails in microseconds
+  with `BreakerOpenError` instead of waiting out a timeout;
+- after `SUBSTRATE_BREAKER_OPEN_MS` (default **30000**) it goes **half-open** and
+  admits exactly one probe; success closes it, failure re-opens it for another
+  window;
+- `SUBSTRATE_BREAKER=0` is the kill switch: breakers are `null`, every call runs
+  unwrapped exactly as before, and the plane series are still recorded.
+
+A refusal reaches each caller **exactly where a network error would**: the brief
+source read fails open, `memory_recall` answers `degraded: true` with a reason
+containing `circuit open`, `docs_search` answers `{chunks: [], degraded: true,
+reason: "ragflow circuit open"}`, and the fail-closed paths (emit, claim) stay
+closed. The cache additionally refuses to reconnect for `CACHE_CONNECT_COOLDOWN_MS`
+(5 s) after a failed connect, reported as `cache.cooldownUntil` in `/healthz`.
+
+`GET /healthz` carries one row per plane, **report-only** — the status code still
+comes from the ledger and the index alone:
+
+```json
+"planes": {
+  "greptime":  { "ok": true,  "breaker": { "plane": "greptime", "state": "closed", "failures": 0, "openedAt": null, "lastErrorAt": null, "lastError": null }, "lastErrorAt": null },
+  "index":     { "ok": true,  "breaker": { "state": "closed", "…": "…" }, "lastErrorAt": null },
+  "cache":     { "ok": null,  "breaker": { "…": "…" }, "lastErrorAt": null },
+  "hindsight": { "ok": false, "breaker": { "state": "open", "failures": 5, "openedAt": 1791480000000, "lastErrorAt": 1791480000000, "lastError": "hindsight GET /health: timed out" }, "lastErrorAt": 1791480000000 },
+  "ragflow":   { "ok": null,  "breaker": null, "lastErrorAt": null }
+},
+"capacity": { "index": { "databaseBytes": 11534336, "tables": [ { "name": "memory_entries", "totalBytes": 409600, "liveRows": 64, "deadRows": 0 } ] } }
+```
+
+`ok` is `null` for a plane that is not configured (and for the cache until its
+first command); `breaker` is `null` when `SUBSTRATE_BREAKER=0`. Hindsight and
+RAGFlow are probed once each, bounded to 1 s, only when configured; the index is
+pinged with the same bound and asked for its size (`capacity.index`, `null` when
+it does not answer in time); the cache is never pinged. `/healthz` therefore costs
+at most one round trip per configured plane.
+
 ## Traces
 
 Spans carry W3C trace context. `substrate-mcp` reads `traceparent` on the way in,
@@ -158,6 +210,26 @@ durable signal.
 Read them at `GET /slo`, or in an evidence bundle. `GET /slo` answers **200
 either way** — a breached objective is information, not a broken service, and a
 monitor that read it as an outage would page on a slow hour.
+
+### Per-plane availability, over a rolling hour (uplift-2 R2)
+
+Beside the catalogue (`results`) and the burn ceilings (`burn`), `GET /slo` carries
+a `planes` array with one objective per data plane:
+
+| Objective | Statement |
+| --- | --- |
+| `plane.<name>.availability` | `ok / (ok + error + timeout + open)` of `substrate.plane.duration{plane=<name>}` ≥ **99 %** over the rolling hour |
+
+The threshold is `SUBSTRATE_SLO_PLANE_AVAILABILITY` (default `0.99`); the minimum
+sample count is the shared `SUBSTRATE_SLO_MIN_SAMPLES`. An open-breaker refusal
+counts against the plane: the caller did not get an answer. Unlike the catalogue,
+these are judged over a **rolling hour**, not the process lifetime: `PlaneWindow`
+remembers the cumulative counts each `/slo` read sees (same discipline as the burn
+ledger — same-second reads coalesce, a counter reset drops the history), and the
+verdict is the share of calls between the oldest reading inside the hour and now.
+One reading alone judges nothing. A plane the deployment does not configure
+reports `unconfigured`, never `breached`, and plane breaches are **not** folded
+into `breached`, which stays the catalogue's own list.
 
 ### Two things the evaluator does on purpose
 
@@ -269,7 +341,7 @@ ledger is configured at all, so a local run does not have every claim withdrawn.
 When the withdrawal itself fails — the index is down too — the refusal says the
 node needs a manual release rather than leaving the caller to be refused forever.
 
-### The chaos smoke: Greptime down 60 s
+### The chaos smoke: a plane down for 60 s
 
 The deterministic proof is `packages/audit/src/chaos.test.ts`, which runs in CI
 with no network and gates the build. It drives a 60 s outage on a fake clock and
@@ -291,6 +363,17 @@ sudo iptables -I OUTPUT -d <ledger-ip> -j DROP && sleep 60 \
 # terminal 2
 SUBSTRATE_URL=http://127.0.0.1:7410 SUBSTRATE_TOKEN=… bun run smoke:chaos
 ```
+
+`--plane index|hindsight|ragflow|cache` (uplift-2 R2) blackholes a different
+plane instead (for the loopback cache, stop `redis-server` rather than drop
+packets). During the window every tick reads `/healthz`, asks for a brief as
+`grok-bot`, and — for Hindsight and RAGFlow — makes the read that plane serves
+(`/memory/recall`, `/docs/search`). The run asserts that `/healthz` reported the
+plane `ok: false` or its breaker `open` at least once (it **fails** otherwise:
+the outage has to have been observed), that every brief answered 200 within
+1500 ms, that the plane's own read answered `degraded: true`, that the breaker
+opened, and that `/slo` lists `plane.<name>.availability`. Nothing is appended
+in this mode.
 
 **It cannot pass without exercising the outage.** Two checks require it: at least
 one emit actually refused, and at least one claim actually withdrawn. Run it against
@@ -320,9 +403,9 @@ they stay; they carry no repo, so no brief shows them.
 | | |
 | --- | --- |
 | `GET /metrics` | the snapshot this process holds, in the shape `otlp.ts` encodes |
-| `GET /slo` | the verdicts computed from it, plus the breached ids |
+| `GET /slo` | the verdicts computed from it, the breached ids, `burn`, and the per-plane `planes` |
 | `POST /evidence` | `{ "graph_id": "ut-…", "format": "json" \| "html" }` |
-| `GET /healthz` | now also `auditDurable` and `auditRecords` |
+| `GET /healthz` | now also `auditDurable`, `auditRecords`, `planes` and `capacity` |
 
 `/metrics` and `/slo` are served whether or not a collector is configured, so an
 operator can read the same numbers the SLOs are computed from without standing one
@@ -357,6 +440,10 @@ substrate-specific spelling.
 | `SUBSTRATE_SLO_LEASE_STEAL` | `0.005` | Provisional. |
 | `SUBSTRATE_SLO_QUARANTINE` | `0.01` | Provisional. |
 | `SUBSTRATE_SLO_MIN_SAMPLES` | `20` | Below this an objective is `insufficient-data`. |
+| `SUBSTRATE_SLO_PLANE_AVAILABILITY` | `0.99` | Floor for every `plane.<name>.availability` over the rolling hour. |
+| `SUBSTRATE_BREAKER` | on | `0` \| `false` \| `no` disables every plane breaker (kill switch); calls still measured. |
+| `SUBSTRATE_BREAKER_FAILURES` | `5` | Consecutive failures that open a breaker; integer 1–100, else the default. |
+| `SUBSTRATE_BREAKER_OPEN_MS` | `30000` | How long an open breaker refuses before one probe; integer 1000–600000, else the default. |
 | `SUBSTRATE_CLAIM_REQUIRE_LEDGER` | derived | Withdraw a claim whose event did not land. |
 
 An endpoint pasted as `https://collector/v1/metrics` is accepted: the trailing

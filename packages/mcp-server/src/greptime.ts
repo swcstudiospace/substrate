@@ -9,8 +9,13 @@
  *
  * It lives on a Railway account this host reaches over the public internet, so
  * every call is timed out and every failure is the caller's to handle — an
- * unreachable event store must never block an agent.
+ * unreachable event store must never block an agent. Every HTTP call goes through
+ * the ledger's plane gate (uplift-2 R2): after `SUBSTRATE_BREAKER_FAILURES`
+ * consecutive transport failures or 5xx answers the breaker opens and `sql`
+ * fails in microseconds with the same `GreptimeUnavailable` an unreachable
+ * store raises, until `SUBSTRATE_BREAKER_OPEN_MS` has passed.
  */
+import { BreakerOpenError, callPlane, type PlaneGate } from "@substrate/observability";
 import type { GreptimeConfig } from "./config.ts";
 import type { SubstrateEvent } from "./types.ts";
 import { hourEnd, hourStart, isClosed } from "@substrate/ledger";
@@ -18,6 +23,29 @@ import { hourEnd, hourStart, isClosed } from "@substrate/ledger";
 const DEFAULT_TIMEOUT_MS = 5000;
 
 export class GreptimeError extends Error {}
+
+/**
+ * The ledger did not answer, or answered broken: unreachable, timed out, a 5xx,
+ * or refused by an open breaker. Only these charge the breaker — a SQL error is
+ * the statement's fault and the store is fine.
+ */
+export class GreptimeUnavailable extends GreptimeError {}
+
+/**
+ * The bounded operation label for a statement: its leading verb. Never the
+ * statement itself, which would put every distinct query into a metric series.
+ */
+export function sqlOp(statement: string): "select" | "insert" | "show" | "create" | "other" {
+	const verb = /^\s*(select|insert|show|create)\b/i.exec(statement)?.[1]?.toLowerCase();
+	return verb === "select" || verb === "insert" || verb === "show" || verb === "create" ? verb : "other";
+}
+
+export interface GreptimeClientOptions {
+	timeoutMs?: number;
+	clock?: () => number;
+	/** The ledger's plane gate; null runs every call unwrapped, as before breakers existed. */
+	gate?: PlaneGate | null;
+}
 
 /** A statement the ledger client refuses to send. See `assertAppendOnly`. */
 export class AppendOnlyViolation extends GreptimeError {}
@@ -395,11 +423,18 @@ export class GreptimeClient {
 	ingestAppendMode: boolean | null = null;
 	private ingestAppendModeCheckedAt = 0;
 
+	private readonly timeoutMs: number;
+	private readonly clock: () => number;
+	private readonly gate: PlaneGate | null;
+
 	constructor(
 		private readonly config: GreptimeConfig,
-		private readonly timeoutMs = DEFAULT_TIMEOUT_MS,
-		private readonly clock: () => number = Date.now,
-	) {}
+		options: GreptimeClientOptions = {},
+	) {
+		this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+		this.clock = options.clock ?? Date.now;
+		this.gate = options.gate ?? null;
+	}
 
 	private headers(): Record<string, string> {
 		const headers: Record<string, string> = { "content-type": "application/x-www-form-urlencoded" };
@@ -434,23 +469,33 @@ export class GreptimeClient {
 	 * the ledger, so it is the right place to make append-only structural rather
 	 * than a convention each caller has to remember.
 	 */
-	async sql(statement: string, timeoutMs = this.timeoutMs): Promise<Array<Record<string, unknown>>> {
+	async sql(statement: string, timeoutMs = this.timeoutMs, op: string = sqlOp(statement)): Promise<Array<Record<string, unknown>>> {
 		assertAppendOnly(statement);
 		const url = `${this.config.url}/v1/sql?db=${encodeURIComponent(this.config.db)}`;
-		let response: Response;
+		let answer: { status: number; text: string };
 		try {
-			response = await fetch(url, {
-				method: "POST",
-				headers: this.headers(),
-				body: new URLSearchParams({ sql: statement }),
-				signal: AbortSignal.timeout(timeoutMs),
+			// Everything thrown inside is the plane's fault — a transport error, a
+			// timeout, a 5xx — so the gate counts all of it. The raw fetch error is
+			// thrown as-is so a timeout is observed as one, and wrapped below.
+			answer = await callPlane(this.gate, op, async () => {
+				const response = await fetch(url, {
+					method: "POST",
+					headers: this.headers(),
+					body: new URLSearchParams({ sql: statement }),
+					signal: AbortSignal.timeout(timeoutMs),
+				});
+				const text = await response.text();
+				if (response.status >= 500) throw new GreptimeUnavailable(`greptime ${response.status}: ${text.slice(0, 500)}`);
+				return { status: response.status, text };
 			});
 		} catch (cause) {
-			throw new GreptimeError(`greptime unreachable: ${String(cause)}`);
+			if (cause instanceof GreptimeUnavailable) throw cause;
+			if (cause instanceof BreakerOpenError) throw new GreptimeUnavailable(cause.message);
+			throw new GreptimeUnavailable(`greptime unreachable: ${String(cause)}`);
 		}
 
-		const text = await response.text();
-		if (!response.ok) throw new GreptimeError(`greptime ${response.status}: ${text.slice(0, 500)}`);
+		const { status, text } = answer;
+		if (status < 200 || status >= 300) throw new GreptimeError(`greptime ${status}: ${text.slice(0, 500)}`);
 
 		let body: GreptimeResponse;
 		try {
@@ -1174,9 +1219,10 @@ export class GreptimeClient {
 		);
 	}
 
-	async ping(): Promise<boolean> {
+	/** Reachability. Bounded by `timeoutMs` so `/healthz` stays cheap; labelled `ping` in the plane series. */
+	async ping(timeoutMs = this.timeoutMs): Promise<boolean> {
 		try {
-			await this.sql("SELECT 1");
+			await this.sql("SELECT 1", timeoutMs, "ping");
 			return true;
 		} catch {
 			return false;

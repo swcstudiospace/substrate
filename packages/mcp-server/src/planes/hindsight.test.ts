@@ -6,6 +6,7 @@
  * timeout-as-Result, and errors that never leak the key or an array-detail.
  */
 import { beforeEach, describe, expect, test } from "bun:test";
+import { CircuitBreaker, gatedFetch, type PlaneSample } from "@substrate/observability";
 import { HindsightFake } from "../hindsight-fake.ts";
 import {
 	bankForSurface,
@@ -16,6 +17,7 @@ import {
 	getDocument,
 	hindsightBanksFromEnv,
 	hindsightFromEnv,
+	hindsightOp,
 	patchDocumentTags,
 	probeHealth,
 	probeVersion,
@@ -312,5 +314,52 @@ describe("bodyless deletes", () => {
 		// The ensured entry was cleared: re-ensuring probes the plane again.
 		await ensureBank(CONFIG, "sub-throwaway", fake.fetch);
 		expect(fake.requests.length).toBeGreaterThan(requestsBefore + 1);
+	});
+});
+
+describe("the plane gate (uplift-2 R2)", () => {
+	test("hindsightOp is a fixed table over the routes, never the path", () => {
+		expect(hindsightOp("GET", "http://fake/health")).toBe("health");
+		expect(hindsightOp("GET", "http://fake/version")).toBe("version");
+		expect(hindsightOp("POST", "http://fake/v1/default/banks/sub-cursor/memories/recall")).toBe("recall");
+		expect(hindsightOp("POST", "http://fake/v1/default/banks/sub-cursor/memories")).toBe("retain");
+		expect(hindsightOp("GET", "http://fake/v1/default/banks/sub-cursor/documents/mwd_1")).toBe("document");
+		expect(hindsightOp("PATCH", "http://fake/v1/default/banks/sub-cursor/config")).toBe("bank-config");
+		expect(hindsightOp("PUT", "http://fake/v1/default/banks/sub-cursor")).toBe("bank-create");
+		expect(hindsightOp("DELETE", "http://fake/v1/default/banks/sub-cursor")).toBe("bank-delete");
+		expect(hindsightOp("GET", "http://fake/v1/other")).toBe("other");
+	});
+
+	test("an open breaker is a network error saying `circuit open`, and no request goes out", async () => {
+		const fake = setup();
+		fake.failRecallWith = 502;
+		const samples: PlaneSample[] = [];
+		const breaker = new CircuitBreaker("hindsight", { failureThreshold: 2, openMs: 30_000 }, () => 0);
+		const fetchImpl = gatedFetch({ plane: "hindsight", breaker, observe: (s) => samples.push(s) }, fake.fetch, hindsightOp);
+
+		const first = await recallBank(CONFIG, "sub-cursor", { query: "lease" }, fetchImpl);
+		const second = await recallBank(CONFIG, "sub-cursor", { query: "lease" }, fetchImpl);
+		expect(first.ok).toBe(false);
+		expect(second.ok).toBe(false);
+		if (!first.ok) expect(first.error).toMatchObject({ kind: "server", status: 502 });
+		expect(breaker.state()).toBe("open");
+
+		const before = fake.requests.length;
+		const refused = await recallBank(CONFIG, "sub-cursor", { query: "lease" }, fetchImpl);
+		const health = await probeHealth(CONFIG, fetchImpl);
+		if (refused.ok || health.ok) throw new Error("expected refusals");
+		expect(refused.error).toEqual({ kind: "network", message: "hindsight POST /v1/default/banks/sub-cursor/memories/recall: circuit open" });
+		expect(health.error).toEqual({ kind: "network", message: "hindsight GET /health: circuit open" });
+		expect(fake.requests.length).toBe(before);
+		expect(samples.map((s) => `${s.op}:${s.outcome}`)).toEqual(["recall:error", "recall:error", "recall:open", "health:open"]);
+	});
+
+	test("a 4xx does not charge the breaker", async () => {
+		const fake = setup();
+		const breaker = new CircuitBreaker("hindsight", { failureThreshold: 1 }, () => 0);
+		const fetchImpl = gatedFetch({ plane: "hindsight", breaker, observe: null }, fake.fetch, hindsightOp);
+		const missing = await getDocument(CONFIG, "sub-cursor", "nope", fetchImpl);
+		expect(missing).toEqual({ ok: true, value: null });
+		expect(breaker.state()).toBe("closed");
 	});
 });

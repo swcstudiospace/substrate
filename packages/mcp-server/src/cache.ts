@@ -9,10 +9,14 @@
  * The client is Bun's `RedisClient` (Bun 1.4). It is constructed on the first
  * command, with an 800 ms connect timeout and the same budget on every command,
  * no offline queue and no reconnect retries, so one request never waits on a
- * second attempt.
+ * second attempt. A failed connect also starts a `CACHE_CONNECT_COOLDOWN_MS`
+ * cooldown during which `open()` refuses without touching the socket, and every
+ * connect and command goes through the cache's plane gate (uplift-2 R2), so a
+ * dead Dragonfly costs one timeout, not one per request.
  */
 import { createHash } from "node:crypto";
 import { RedisClient } from "bun";
+import { BreakerOpenError, callPlane, type PlaneGate } from "@substrate/observability";
 import type { SubstrateConfig } from "./config.ts";
 import { REDACTED, redact } from "./redact.ts";
 
@@ -61,6 +65,8 @@ export interface CacheHealth {
 	misses: number;
 	bypasses: number;
 	errors: number;
+	/** Epoch ms until which a failed connect is not retried; null when not cooling down. */
+	cooldownUntil: number | null;
 	/** Why the cache is off despite a URL being set — a DOCS-06 refusal. Absent otherwise. */
 	reason?: string;
 }
@@ -75,6 +81,8 @@ export interface CacheRedis {
 	get(key: string): Promise<string | null>;
 	set(key: string, value: string, ttlSeconds: number): Promise<void>;
 	incr(key: string): Promise<number>;
+	/** When the client is refusing to reconnect, epoch ms; absent or null otherwise. */
+	cooldownUntil?(): number | null;
 }
 
 export interface ReadThroughOptions {
@@ -96,6 +104,12 @@ export interface ReadThroughOptions {
  */
 export const COMMAND_TIMEOUT_MS = 800;
 export const CONNECT_TIMEOUT_MS = 800;
+/**
+ * After a failed connect, how long `open()` refuses before trying the socket
+ * again. Without it every request during an outage paid the 800 ms connect
+ * timeout; with it only the first does, and the rest bypass in microseconds.
+ */
+export const CACHE_CONNECT_COOLDOWN_MS = 5_000;
 const LOG_INTERVAL_MS = 60_000;
 
 /**
@@ -130,10 +144,20 @@ export function cacheKey(klass: CacheClass, surface: string, generation: string,
 	return `${CACHE_PREFIX}:${klass}:${hash}`;
 }
 
-function bunRedis(url: string): CacheRedis {
+export interface BunRedisOptions {
+	gate?: PlaneGate | null;
+	now?: () => number;
+	cooldownMs?: number;
+}
+
+/** Bun's client behind the three commands; exported for the socket-level tests only. */
+export function bunRedis(url: string, options: BunRedisOptions = {}): CacheRedis {
+	const gate = options.gate ?? null;
+	const now = options.now ?? Date.now;
+	const cooldownMs = options.cooldownMs ?? CACHE_CONNECT_COOLDOWN_MS;
 	let client: RedisClient | null = null;
 	let opening: Promise<RedisClient> | null = null;
-
+	let cooldownUntil: number | null = null;
 	const discard = (redis: RedisClient): void => {
 		if (client !== redis) return;
 		client = null;
@@ -148,10 +172,14 @@ function bunRedis(url: string): CacheRedis {
 	const open = (): Promise<RedisClient> => {
 		if (client?.connected) return Promise.resolve(client);
 		if (opening) return opening;
+		if (cooldownUntil !== null && now() < cooldownUntil) {
+			return Promise.reject(new Error(`cache connect cooling down for ${Math.ceil((cooldownUntil - now()) / 1000)} s`));
+		}
+		cooldownUntil = null;
 		// Built on the first command. `enableOfflineQueue: false` rejects a
 		// command sent before connect, so connect finishes first. A failure
-		// drops this client; the next request opens a new one. That is not a
-		// retry of the request that just failed.
+		// drops this client and starts the cooldown; the next request after
+		// it opens a new one. That is not a retry of the request that just failed.
 		const next = new RedisClient(url, {
 			connectionTimeout: CONNECT_TIMEOUT_MS,
 			idleTimeout: 0,
@@ -160,10 +188,13 @@ function bunRedis(url: string): CacheRedis {
 			enableOfflineQueue: false,
 		});
 		client = next;
-		const flight = next.connect().then(
+		const flight = callPlane(gate, "connect", () => next.connect()).then(
 			() => next,
 			(cause: unknown) => {
 				discard(next);
+				// An open breaker is already refusing; the cooldown is for the
+				// case where the socket itself failed.
+				if (!(cause instanceof BreakerOpenError)) cooldownUntil = now() + cooldownMs;
 				throw cause;
 			},
 		);
@@ -174,10 +205,10 @@ function bunRedis(url: string): CacheRedis {
 		return settled;
 	};
 
-	const run = async <T>(op: (redis: RedisClient) => Promise<T>): Promise<T> => {
+	const run = async <T>(op: "get" | "set" | "incr", command: (redis: RedisClient) => Promise<T>): Promise<T> => {
 		const redis = await open();
 		try {
-			return await op(redis);
+			return await callPlane(gate, op, () => command(redis));
 		} catch (cause) {
 			discard(redis);
 			throw cause;
@@ -185,16 +216,23 @@ function bunRedis(url: string): CacheRedis {
 	};
 
 	return {
-		get: (key) => run((redis) => redis.get(key)),
-		set: (key, value, ttlSeconds) => run((redis) => redis.set(key, value, "EX", ttlSeconds).then(() => undefined)),
-		incr: (key) => run((redis) => redis.incr(key)),
+		get: (key) => run("get", (redis) => redis.get(key)),
+		set: (key, value, ttlSeconds) => run("set", (redis) => redis.set(key, value, "EX", ttlSeconds).then(() => undefined)),
+		incr: (key) => run("incr", (redis) => redis.incr(key)),
+		cooldownUntil: () => (cooldownUntil !== null && now() < cooldownUntil ? cooldownUntil : null),
 	};
 }
 
-export function createReadThroughCache(
-	config: SubstrateConfig,
-	record?: (sample: CacheSample) => void,
-): ReadThroughCache {
+export interface CreateCacheOptions {
+	record?: (sample: CacheSample) => void;
+	/** The cache's plane gate (uplift-2 R2); null runs every command unwrapped. */
+	gate?: PlaneGate | null;
+	/** Clock for the connect cooldown; tests move it. */
+	now?: () => number;
+}
+
+export function createReadThroughCache(config: SubstrateConfig, options: CreateCacheOptions = {}): ReadThroughCache {
+	const { record } = options;
 	if (config.dragonflyRefused) {
 		process.stderr.write(`[substrate] cache off: ${config.dragonflyRefused}\n`);
 		return new ReadThroughCache({ redis: null, enabled: false, record, refusedReason: config.dragonflyRefused });
@@ -202,7 +240,12 @@ export function createReadThroughCache(
 	if (!config.cacheEnabled || !config.dragonflyUrl) {
 		return new ReadThroughCache({ redis: null, enabled: false, record });
 	}
-	return new ReadThroughCache({ redis: bunRedis(config.dragonflyUrl), enabled: true, record });
+	return new ReadThroughCache({
+		redis: bunRedis(config.dragonflyUrl, { gate: options.gate, now: options.now }),
+		enabled: true,
+		record,
+		now: options.now,
+	});
 }
 
 /**
@@ -245,6 +288,7 @@ export class ReadThroughCache {
 			misses: this.misses,
 			bypasses: this.bypasses,
 			errors: this.errors,
+			cooldownUntil: this.redis?.cooldownUntil?.() ?? null,
 			...(this.refusedReason !== undefined ? { reason: this.refusedReason } : {}),
 		};
 	}

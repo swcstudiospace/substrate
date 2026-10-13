@@ -8,6 +8,14 @@
 import { randomUUID } from "node:crypto";
 import { decideClaim, type ClaimDecision } from "@substrate/audit";
 import { createRpc, formatMemo, hourEnd, hourIso, hourStart, isClosed, merkleRootHex, parseMemo, HOUR_MS, type Rpc, type TransactionMemo } from "@substrate/ledger";
+import {
+	PLANES,
+	PlaneRegistry,
+	gatedFetch,
+	type BreakerSnapshot,
+	type PlaneName,
+	type PlaneSample,
+} from "@substrate/observability";
 import { DEVNET_GENESIS_HASH } from "./anchor.ts";
 import { composeBrief, type BriefRequest } from "./brief.ts";
 import {
@@ -43,7 +51,7 @@ import {
 	type EventQuery,
 	type QueryableColumn,
 } from "./greptime.ts";
-import { IndexStore, leaseSnapshot, type GraphBindResult } from "./index-store.ts";
+import { IndexStore, leaseSnapshot, type GraphBindResult, type IndexCapacity } from "./index-store.ts";
 import {
 	buildHandoff,
 	handoffGaps,
@@ -63,8 +71,8 @@ import { forwardRetain, retainDocumentId } from "./memory-retain.ts";
 import { mergeDerivedHits, type MergedMemoryResults } from "./memory-search.ts";
 import { governMemoryWrite } from "./memory-write.ts";
 import { TEACHABLE_SUBJECT_PREFIX, isTeachable, teachableEvent } from "./teachable.ts";
-import { bankForSurface, hindsightBanksFromEnv, hindsightFromEnv } from "./planes/hindsight.ts";
-import type { FetchLike } from "./planes/ragflow.ts";
+import { bankForSurface, hindsightBanksFromEnv, hindsightFromEnv, hindsightOp, probeHealth } from "./planes/hindsight.ts";
+import { listDatasets, ragflowOp, type FetchLike } from "./planes/ragflow.ts";
 import { redact, type SkillDocExampleRule } from "./redact.ts";
 import {
 	createExecFileRunner,
@@ -468,6 +476,8 @@ export interface SubstrateObserver {
 		payload: Record<string, unknown>;
 	}): void;
 	cached?(sample: CacheSample): void;
+	/** One outbound call to a data plane, as its gate observed it (uplift-2 R2). */
+	plane?(sample: PlaneSample): void;
 	claimed?(sample: {
 		surface: Surface;
 		graph_id: string;
@@ -687,11 +697,18 @@ export class Substrate {
 	readonly desktop: DesktopDriver | null;
 	private readonly observer: SubstrateObserver;
 	private readonly cache: ReadThroughCache;
+	/**
+	 * One circuit breaker per data plane (uplift-2 R2). Every outbound call —
+	 * ledger SQL, index query, cache command, Hindsight and RAGFlow request —
+	 * goes through its gate, which is what lets an outage cost microseconds
+	 * instead of a timeout per caller and lets `/healthz` name the plane.
+	 */
+	readonly planes: PlaneRegistry;
 	/** Connector-gate overrides for tests (connector fetch, URL, timeout); production reads config. */
 	private readonly dodGateTest: { fetchImpl?: typeof fetch; hermesLinearUrl?: string; timeoutMs?: number };
-	/** RAGFlow fetch override for tests; production uses the global fetch. */
+	/** RAGFlow fetch, gated. Tests inject the fake underneath; production uses the global fetch. */
 	private readonly ragflowFetch: FetchLike;
-	/** Hindsight fetch override for tests; production uses the global fetch. */
+	/** Hindsight fetch, gated. Tests inject the fake underneath; production uses the global fetch. */
 	private readonly hindsightFetch: FetchLike;
 	/** Background retains in flight, drained (bounded) on shutdown. */
 	private pendingRetains = 0;
@@ -725,10 +742,25 @@ export class Substrate {
 		},
 		observer: SubstrateObserver = {},
 	) {
+		this.observer = observer;
+		// Built first: the stores below take their gates from it. The breaker
+		// settings come from config so a test can inject them; the observer feeds
+		// the per-plane series.
+		this.planes = new PlaneRegistry(config.breaker, (sample) => {
+			this.observer.plane?.(sample);
+		});
 		this.index =
-			stores?.index !== undefined ? stores.index : config.postgresUrl ? new IndexStore(config.postgresUrl) : null;
+			stores?.index !== undefined
+				? stores.index
+				: config.postgresUrl
+					? new IndexStore(config.postgresUrl, { gate: this.planes.gate("index") })
+					: null;
 		this.greptime =
-			stores?.greptime !== undefined ? stores.greptime : config.greptime ? new GreptimeClient(config.greptime) : null;
+			stores?.greptime !== undefined
+				? stores.greptime
+				: config.greptime
+					? new GreptimeClient(config.greptime, { gate: this.planes.gate("greptime") })
+					: null;
 		this.mirror =
 			stores?.mirror !== undefined
 				? stores.mirror
@@ -744,13 +776,15 @@ export class Substrate {
 			});
 		this.desktop = stores?.desktop ?? null;
 		this.dodGateTest = stores?.dodGate ?? {};
-		this.ragflowFetch = stores?.ragflowFetch ?? fetch;
-		this.hindsightFetch = stores?.hindsightFetch ?? fetch;
-		this.observer = observer;
+		this.ragflowFetch = gatedFetch(this.planes.gate("ragflow"), stores?.ragflowFetch ?? fetch, ragflowOp);
+		this.hindsightFetch = gatedFetch(this.planes.gate("hindsight"), stores?.hindsightFetch ?? fetch, hindsightOp);
 		this.cache =
 			stores?.cache ??
-			createReadThroughCache(config, (sample) => {
-				this.observer.cached?.(sample);
+			createReadThroughCache(config, {
+				record: (sample) => {
+					this.observer.cached?.(sample);
+				},
+				gate: this.planes.gate("cache"),
 			});
 	}
 
@@ -3354,6 +3388,17 @@ export class Substrate {
 		return { period_start, period_end, status: "anchored", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, ...(memo.slot !== null ? { slot: memo.slot } : {}) };
 	}
 
+	/** Which planes have configuration, so `/slo` can tell "unconfigured" from "silent". */
+	planesConfigured(): Record<PlaneName, boolean> {
+		return {
+			greptime: this.greptime !== null,
+			index: this.index !== null,
+			cache: this.cache.health().enabled,
+			hindsight: hindsightFromEnv() !== null,
+			ragflow: this.config.ragflow !== null,
+		};
+	}
+
 	/**
 	 * `greptime` is reachability; `eventsWritable` is whether **every** event would
 	 * be accepted. They differ on a reachable ledger that is refusing, which is
@@ -3368,22 +3413,50 @@ export class Substrate {
 	 * Probing here is deliberate: a monitor's own request retries both checks, so a
 	 * ledger that recovers — or a table recreated out of band — is picked up without
 	 * waiting for a restart.
+	 *
+	 * `planes` (uplift-2 R2) is report-only: one row per data plane with its
+	 * reachability (`null` when the plane is not configured), its breaker and
+	 * when it last failed. Hindsight and RAGFlow get one `HEALTH_PROBE_MS`-bounded
+	 * probe each, only when configured, so `/healthz` costs at most one round
+	 * trip per configured plane; the cache is never pinged. `capacity.index`
+	 * is the index's own size report, raced against the same bound and `null`
+	 * when it does not answer in time. The status code still comes from the
+	 * ledger and the index alone — see `healthStatus`.
 	 */
-	async health(): Promise<{
-		index: boolean;
-		greptime: boolean;
-		appendOnly: boolean | null;
-		quotingDialectKnown: boolean;
-		eventsWritable: boolean;
-		cache: CacheHealth;
-	}> {
+	async health(): Promise<SubstrateHealth> {
 		const greptime = this.greptime ? await this.greptime.ping() : false;
 		const appendOnly = greptime ? (await this.greptime?.ensureAppendMode().catch(() => null)) ?? null : null;
 		const quotingDialectKnown = greptime
 			? await this.greptime?.probeDialect().then(() => this.greptime?.quotingDialectKnown === true).catch(() => false) ?? false
 			: false;
+		const hindsight = hindsightFromEnv();
+		const [index, capacity, hindsightOk, ragflowOk] = await Promise.all([
+			this.index ? this.index.ping(HEALTH_PROBE_MS).catch(() => false) : Promise.resolve(false),
+			this.index ? bounded(() => this.index!.capacity(), HEALTH_PROBE_MS) : Promise.resolve(null),
+			hindsight
+				? probeHealth(hindsight, this.hindsightFetch, HEALTH_PROBE_MS).then((probed) => probed.ok, () => false)
+				: Promise.resolve(null),
+			this.config.ragflow
+				? listDatasets(this.config.ragflow, this.ragflowFetch, HEALTH_PROBE_MS).then((listed) => listed.ok, () => false)
+				: Promise.resolve(null),
+		]);
+		const cache = this.cache.health();
+		const breakers = this.planes.snapshots();
+		const ok: Record<PlaneName, boolean | null> = {
+			greptime: this.greptime ? greptime : null,
+			index: this.index ? index : null,
+			// Never pinged: the last command's fate is what the cache knows. `null`
+			// while no command has run yet, so a fresh process is not reported down.
+			cache: !cache.enabled ? null : cache.connected ? true : cache.mode === "degraded" || cache.cooldownUntil !== null ? false : null,
+			hindsight: hindsightOk,
+			ragflow: ragflowOk,
+		};
+		const planes = {} as SubstrateHealth["planes"];
+		for (const plane of PLANES) {
+			planes[plane] = { ok: ok[plane], breaker: breakers[plane], lastErrorAt: breakers[plane]?.lastErrorAt ?? null };
+		}
 		return {
-			index: this.index ? await this.index.ping() : false,
+			index,
 			greptime,
 			appendOnly,
 			quotingDialectKnown,
@@ -3391,7 +3464,51 @@ export class Substrate {
 				greptime && quotingDialectKnown && (appendOnly === true || this.config.allowDeduplicatingLedger),
 			// In-memory counters only. Health does not ping Dragonfly and does not
 			// change its status code when the cache is down.
-			cache: this.cache.health(),
+			cache,
+			planes,
+			capacity: { index: capacity },
 		};
 	}
+}
+
+/** The bound on every per-plane probe `/healthz` makes. */
+export const HEALTH_PROBE_MS = 1000;
+
+export interface PlaneHealth {
+	/** Reachable as of this request; `null` when the plane is not configured (or, for the cache, not yet used). */
+	ok: boolean | null;
+	/** `null` when breakers are off (`SUBSTRATE_BREAKER=0`). */
+	breaker: BreakerSnapshot | null;
+	lastErrorAt: number | null;
+}
+
+export interface SubstrateHealth {
+	index: boolean;
+	greptime: boolean;
+	appendOnly: boolean | null;
+	quotingDialectKnown: boolean;
+	eventsWritable: boolean;
+	cache: CacheHealth;
+	planes: Record<PlaneName, PlaneHealth>;
+	capacity: { index: IndexCapacity | null };
+}
+
+/** `fn`'s answer, or `null` when it throws or outlasts `ms`. */
+function bounded<T>(fn: () => Promise<T>, ms: number): Promise<T | null> {
+	const { promise, resolve } = Promise.withResolvers<T | null>();
+	const timer = setTimeout(() => resolve(null), ms);
+	timer.unref?.();
+	Promise.resolve()
+		.then(fn)
+		.then(
+			(value) => {
+				clearTimeout(timer);
+				resolve(value);
+			},
+			() => {
+				clearTimeout(timer);
+				resolve(null);
+			},
+		);
+	return promise;
 }

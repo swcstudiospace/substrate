@@ -21,18 +21,25 @@
  * An objective with too few observations reports `insufficient-data`, never `ok`.
  * A green SLO computed from three samples is worse than no SLO: it is a claim the
  * data does not support, and it is exactly what an evidence bundle must not carry.
+ *
+ * The per-plane availability objectives (uplift-2 R2) live beside the catalogue,
+ * not in it — the catalogue is pinned to SPE-4793's four — and surface as a
+ * sibling `planes` array on `GET /slo`, judged over a rolling hour by
+ * `PlaneWindow` in the same way `burn.ts` judges spend: successive `/slo` reads
+ * are the samples.
  */
 import type { MetricSnapshot } from "./metrics.ts";
 import {
 	exactFractionAtOrBelow,
 	exactFractionBelow,
-	findCounter,
 	findHistogram,
+	findCounter,
 	mergeHistogram,
 	quantileFromBuckets,
 	sumCounter,
 } from "./metrics.ts";
 import { METRIC } from "./instruments.ts";
+import { PLANES, type PlaneName } from "./breaker.ts";
 
 export interface CounterSelector {
 	metric: string;
@@ -70,6 +77,8 @@ export interface SloThresholds {
 	leaseStealRatio?: number;
 	quarantineRatio?: number;
 	minSamples?: number;
+	/** Per-plane `ok / all` floor over the rolling hour; `SUBSTRATE_SLO_PLANE_AVAILABILITY`. */
+	planeAvailability?: number;
 }
 
 export const DEFAULT_THRESHOLDS: Required<SloThresholds> = {
@@ -81,6 +90,7 @@ export const DEFAULT_THRESHOLDS: Required<SloThresholds> = {
 	leaseStealRatio: 0.005,
 	quarantineRatio: 0.01,
 	minSamples: 20,
+	planeAvailability: 0.99,
 };
 
 export function sloCatalogue(overrides: SloThresholds = {}): SloTarget[] {
@@ -313,4 +323,150 @@ export function evaluateSlos(snapshot: MetricSnapshot[], catalogue: SloTarget[] 
 /** Every objective that is failing. Empty means nothing is breached — not that everything is judged. */
 export function breaches(results: SloResult[]): SloResult[] {
 	return results.filter((result) => result.status === "breached");
+}
+
+// ── per-plane availability, over a rolling hour ──────────────────────────────
+
+export const PLANE_AVAILABILITY_ENV = "SUBSTRATE_SLO_PLANE_AVAILABILITY";
+/** The rolling window every plane objective is judged over: one hour. */
+export const PLANE_WINDOW_MS = 60 * 60 * 1000;
+/** Samples kept per plane; the window is what bounds the useful history anyway. */
+const PLANE_MAX_SAMPLES = 480;
+
+export type PlaneSloStatus = "ok" | "breached" | "insufficient-data" | "unconfigured";
+
+/** One plane verdict; the field shape mirrors `SloResult` so `/slo` reads alike. */
+export interface PlaneSloResult {
+	id: string;
+	plane: PlaneName;
+	title: string;
+	statement: string;
+	status: PlaneSloStatus;
+	/** `ok / (ok + error + timeout + open)` over the window, or null before one exists. */
+	observed: number | null;
+	unit: "ratio";
+	target: number;
+	/** Calls inside the window. */
+	samples: number;
+	detail: string;
+}
+
+interface PlaneCountSample {
+	atMs: number;
+	ok: number;
+	total: number;
+}
+
+/** What one `PlaneWindow.observe` answers: the calls that fell inside the window. */
+export interface PlaneWindowReading {
+	ok: number;
+	total: number;
+	spanMs: number;
+	samples: number;
+}
+
+/**
+ * Recent cumulative `ok`/`total` call counts per plane, remembered so the share
+ * over the rolling window can be taken from the oldest sample still inside it.
+ *
+ * Same discipline as `BurnLedger`: entries older than the window are dropped on
+ * every observation, reads in the same wall-clock second coalesce, and a total
+ * that goes backwards is a restart, so the history is dropped rather than
+ * subtracted across it. One reading alone spans nothing and judges nothing.
+ */
+export class PlaneWindow {
+	private readonly byPlane: Partial<Record<PlaneName, PlaneCountSample[]>> = {};
+
+	constructor(readonly windowMs: number = PLANE_WINDOW_MS) {}
+
+	observe(plane: PlaneName, ok: number, total: number, atMs: number): PlaneWindowReading {
+		const samples = this.byPlane[plane] ?? [];
+		while (samples.length > 0 && samples[0]!.atMs < atMs - this.windowMs) samples.shift();
+		const last = samples[samples.length - 1];
+		if (last !== undefined && (total < last.total || ok < last.ok)) samples.length = 0;
+		if (last !== undefined && samples.length > 0 && Math.floor(last.atMs / 1000) === Math.floor(atMs / 1000)) {
+			last.atMs = atMs;
+			last.ok = ok;
+			last.total = total;
+		} else {
+			samples.push({ atMs, ok, total });
+		}
+		if (samples.length > PLANE_MAX_SAMPLES) samples.splice(0, samples.length - PLANE_MAX_SAMPLES);
+		this.byPlane[plane] = samples;
+		const base = samples[0]!;
+		return { ok: ok - base.ok, total: total - base.total, spanMs: atMs - base.atMs, samples: samples.length };
+	}
+}
+
+let sharedWindow: PlaneWindow | null = null;
+/** The process-wide window the default evaluator feeds; `/slo` scrapes are its samples. */
+export function sharedPlaneWindow(): PlaneWindow {
+	sharedWindow ??= new PlaneWindow();
+	return sharedWindow;
+}
+
+export interface PlaneEvalOptions {
+	/** Which planes have configuration; an unconfigured plane is reported, never judged. */
+	configured: Partial<Record<PlaneName, boolean>>;
+	/** Sample history; defaults to the process-wide window every evaluation feeds. */
+	window?: PlaneWindow;
+	/** Evaluation time in epoch milliseconds; defaults to now. */
+	now?: number;
+	/** The availability floor; defaults to `DEFAULT_THRESHOLDS.planeAvailability`. */
+	target?: number;
+	/** Calls needed inside the window before the objective is judged. */
+	minSamples?: number;
+}
+
+/**
+ * Evaluate `plane.<name>.availability` for every plane against a metric snapshot.
+ *
+ * `ok / (ok + error + timeout + open)` of `substrate.plane.duration`, counted
+ * over the rolling hour. An open-breaker refusal counts against the plane on
+ * purpose: the caller did not get an answer, and a plane that is refused for a
+ * minute is unavailable for that minute whoever decided it.
+ */
+export function evaluatePlaneSlos(snapshot: MetricSnapshot[], options: PlaneEvalOptions): PlaneSloResult[] {
+	const window = options.window ?? sharedPlaneWindow();
+	const now = options.now ?? Date.now();
+	const target = options.target ?? DEFAULT_THRESHOLDS.planeAvailability;
+	const minSamples = options.minSamples ?? DEFAULT_THRESHOLDS.minSamples;
+	const histogram = findHistogram(snapshot, METRIC.planeDuration);
+	return PLANES.map((plane): PlaneSloResult => {
+		const base = {
+			id: `plane.${plane}.availability`,
+			plane,
+			title: `${plane} availability`,
+			statement: `ok / (ok+error+timeout+open) of ${METRIC.planeDuration}{plane=${plane}} >= ${(target * 100).toFixed(2)} % over the rolling hour`,
+			unit: "ratio" as const,
+			target,
+		};
+		if (options.configured[plane] !== true) {
+			return { ...base, status: "unconfigured", observed: null, samples: 0, detail: `${plane} is not configured, so this objective is reported but never judged` };
+		}
+		const total = histogram ? mergeHistogram(histogram, { plane }).count : 0;
+		const ok = histogram ? mergeHistogram(histogram, { plane, outcome: "ok" }).count : 0;
+		const reading = window.observe(plane, ok, total, now);
+		if (reading.samples < 2 || reading.total < minSamples) {
+			return {
+				...base,
+				status: "insufficient-data",
+				observed: reading.total > 0 ? reading.ok / reading.total : null,
+				samples: reading.total,
+				detail:
+					`${reading.total} of ${minSamples} calls needed inside the window (${reading.samples} reading(s) spanning ` +
+					`${Math.round(reading.spanMs / 1000)} s); every /slo read feeds one`,
+			};
+		}
+		const observed = reading.ok / reading.total;
+		return {
+			...base,
+			status: observed >= target ? "ok" : "breached",
+			observed,
+			samples: reading.total,
+			detail:
+				`${reading.ok} of ${reading.total} calls ok (${(observed * 100).toFixed(3)} %) over ${Math.round(reading.spanMs / 60_000)} minute(s); ` +
+				`objective is at least ${(target * 100).toFixed(2)} %`,
+		};
+	});
 }

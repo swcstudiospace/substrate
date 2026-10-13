@@ -5,6 +5,7 @@
  * EnvironmentFile. Nothing here ever reads a secret from the repo.
  */
 import { SOLANA_CLI_DEFAULT } from "@substrate/ledger";
+import { loadBreakerSettings, type BreakerSettings } from "@substrate/observability";
 import { DEFAULT_INGEST_ROOTS } from "./docs-ingest.ts";
 import { normalizeTtlSeconds } from "./lease.ts";
 import { LINEAR_API_URL } from "./linear.ts";
@@ -257,6 +258,14 @@ export interface SubstrateConfig {
 	 * hold a `/verify` request open. Hours never reached read `unverified`.
 	 */
 	verifyTimeoutMs: number;
+	/**
+	 * Per-plane circuit breaker settings (uplift-2 R2), from `SUBSTRATE_BREAKER`,
+	 * `SUBSTRATE_BREAKER_FAILURES` and `SUBSTRATE_BREAKER_OPEN_MS`.
+	 *
+	 * `SUBSTRATE_BREAKER=0` is the kill switch: every plane call runs unwrapped,
+	 * exactly as before the breakers existed, and is still measured.
+	 */
+	breaker: BreakerSettings;
 }
 
 /** Production defaults: September's library, so the host ledger keeps deduplicating. */
@@ -477,6 +486,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		verifyTimeoutMs: Number.isFinite(Number(env.SUBSTRATE_VERIFY_TIMEOUT_MS)) && Number(env.SUBSTRATE_VERIFY_TIMEOUT_MS) > 0
 			? Number(env.SUBSTRATE_VERIFY_TIMEOUT_MS)
 			: 30_000,
+		breaker: loadBreakerSettings(env),
 	};
 }
 

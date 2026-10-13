@@ -14,10 +14,36 @@
  * (`POST {url}/api/v1/retrieval`, `{question, page, page_size}`,
  * `data.chunks[]`). The RESP client, `anchorMemoOnDevnet` and `teachable.ts`
  * are deliberately not ported.
+ *
+ * Every call goes out through the `fetchImpl` the caller injects; production
+ * hands in a `gatedFetch` over the plane's circuit breaker (uplift-2 R2), and
+ * `ragflowOp` is the bounded label that fetch records per route. An open
+ * breaker surfaces as the reason `ragflow circuit open`, so docs search and
+ * ingest degrade exactly as they do for an unreachable plane.
  */
 export interface RagflowConfig {
 	url: string;
 	apiKey: string;
+}
+
+/**
+ * The bounded operation label for one RAGFlow request, from its method and
+ * path. A fixed table, never the path itself: dataset and document ids would
+ * otherwise become metric series.
+ */
+export function ragflowOp(method: string, url: string): string {
+	const path = url.replace(/^[a-z]+:\/\/[^/]+/i, "").replace(/\?.*$/, "");
+	if (path === "/api/v1/retrieval") return "retrieve";
+	if (path === "/api/v1/datasets") return method === "POST" ? "dataset-create" : "datasets";
+	if (/^\/api\/v1\/datasets\/[^/]+\/documents$/.test(path)) return "upload";
+	if (/^\/api\/v1\/documents\/[^/]+\/parse$/.test(path)) return "parse-status";
+	return "other";
+}
+
+/** The reason a transport failure becomes; an open breaker is named as such. */
+function unreachable(cause: unknown): string {
+	if (cause instanceof Error && cause.name === "BreakerOpenError") return "ragflow circuit open";
+	return `ragflow unreachable: ${String(cause instanceof Error ? cause.message : cause).slice(0, 200)}`;
 }
 
 /**
@@ -101,7 +127,7 @@ export async function retrieveChunks(
 			signal: AbortSignal.timeout(timeoutMs),
 		});
 	} catch (cause) {
-		return { ok: false, reason: `ragflow unreachable: ${String(cause instanceof Error ? cause.message : cause).slice(0, 200)}` };
+		return { ok: false, reason: unreachable(cause) };
 	}
 	if (!response.ok) return { ok: false, reason: `ragflow ${response.status}` };
 	let body: unknown;
@@ -168,7 +194,7 @@ export async function listDatasets(
 			signal: AbortSignal.timeout(timeoutMs),
 		});
 	} catch (cause) {
-		return { ok: false, reason: `ragflow unreachable: ${String(cause instanceof Error ? cause.message : cause).slice(0, 200)}` };
+		return { ok: false, reason: unreachable(cause) };
 	}
 	if (!response.ok) return { ok: false, reason: `ragflow ${response.status}` };
 	let body: unknown;
@@ -231,7 +257,7 @@ export async function uploadDocument(
 			signal: AbortSignal.timeout(timeoutMs),
 		});
 	} catch (cause) {
-		return { ok: false, reason: `ragflow unreachable: ${String(cause instanceof Error ? cause.message : cause).slice(0, 200)}` };
+		return { ok: false, reason: unreachable(cause) };
 	}
 	if (!response.ok) return { ok: false, reason: `ragflow ${response.status}` };
 	let body: unknown;
@@ -278,7 +304,7 @@ export async function pollParseStatus(
 				signal: AbortSignal.timeout(timeoutMs),
 			});
 		} catch (cause) {
-			return { ok: false, reason: `ragflow unreachable: ${String(cause instanceof Error ? cause.message : cause).slice(0, 200)}` };
+			return { ok: false, reason: unreachable(cause) };
 		}
 		if (!response.ok) return { ok: false, reason: `ragflow ${response.status}` };
 		const body: unknown = await response.json().catch((): unknown => null);
@@ -321,7 +347,7 @@ export async function createDataset(
 			signal: AbortSignal.timeout(timeoutMs),
 		});
 	} catch (cause) {
-		return { ok: false, reason: `ragflow unreachable: ${String(cause instanceof Error ? cause.message : cause).slice(0, 200)}` };
+		return { ok: false, reason: unreachable(cause) };
 	}
 	if (!response.ok) return { ok: false, reason: `ragflow ${response.status}` };
 	const body: unknown = await response.json().catch((): unknown => null);

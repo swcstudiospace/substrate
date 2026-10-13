@@ -4,7 +4,8 @@
  * transport failures. The fake fails the anti-pattern (no dataset_ids).
  */
 import { describe, expect, test } from "bun:test";
-import { listDatasets, ragflowFromEnv, retrieveChunks } from "./ragflow.ts";
+import { BreakerOpenError, CircuitBreaker, gatedFetch, type PlaneSample } from "@substrate/observability";
+import { listDatasets, ragflowFromEnv, ragflowOp, retrieveChunks } from "./ragflow.ts";
 import { RagflowFake } from "../ragflow-fake.ts";
 const CONFIG = { url: "http://ragflow.test", apiKey: "test-key" };
 
@@ -115,5 +116,34 @@ describe("listDatasets", () => {
 			"agent-substrate",
 			"programming-desk",
 		]);
+	});
+});
+
+describe("the plane gate (uplift-2 R2)", () => {
+	test("ragflowOp is a fixed table over the routes, never the path", () => {
+		expect(ragflowOp("POST", "http://ragflow.test/api/v1/retrieval")).toBe("retrieve");
+		expect(ragflowOp("GET", "http://ragflow.test/api/v1/datasets")).toBe("datasets");
+		expect(ragflowOp("POST", "http://ragflow.test/api/v1/datasets")).toBe("dataset-create");
+		expect(ragflowOp("POST", "http://ragflow.test/api/v1/datasets/ds-1/documents")).toBe("upload");
+		expect(ragflowOp("GET", "http://ragflow.test/api/v1/documents/doc-1/parse?x=1")).toBe("parse-status");
+		expect(ragflowOp("GET", "http://ragflow.test/api/v1/something/else")).toBe("other");
+	});
+
+	test("an open breaker degrades to `ragflow circuit open` without a network call, and a 5xx opens it", async () => {
+		const samples: PlaneSample[] = [];
+		const breaker = new CircuitBreaker("ragflow", { failureThreshold: 2, openMs: 30_000 }, () => 0);
+		const failing = new RagflowFake();
+		failing.failRetrievalWith = 503;
+		const fetchImpl = gatedFetch({ plane: "ragflow", breaker, observe: (s) => samples.push(s) }, failing.fetch, ragflowOp);
+
+		expect(await retrieveChunks(CONFIG, { question: "q", dataset_ids: ["x"] }, fetchImpl)).toEqual({ ok: false, reason: "ragflow 503" });
+		expect(await retrieveChunks(CONFIG, { question: "q", dataset_ids: ["x"] }, fetchImpl)).toEqual({ ok: false, reason: "ragflow 503" });
+		expect(breaker.state()).toBe("open");
+		const before = failing.requests.length;
+		expect(await retrieveChunks(CONFIG, { question: "q", dataset_ids: ["x"] }, fetchImpl)).toEqual({ ok: false, reason: "ragflow circuit open" });
+		expect(await listDatasets(CONFIG, fetchImpl)).toEqual({ ok: false, reason: "ragflow circuit open" });
+		expect(failing.requests.length).toBe(before);
+		expect(samples.map((s) => `${s.op}:${s.outcome}`)).toEqual(["retrieve:error", "retrieve:error", "retrieve:open", "datasets:open"]);
+		expect(BreakerOpenError.name).toBe("BreakerOpenError");
 	});
 });

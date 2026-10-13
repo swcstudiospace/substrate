@@ -109,6 +109,59 @@ describe("GET /healthz", () => {
 		expect(body).toMatchObject({ index: false, greptime: false, auditDurable: false });
 		expect(response.status).toBe(503);
 	});
+
+	test("carries one row per plane and the index capacity, report-only (uplift-2 R2)", async () => {
+		const capacity = { databaseBytes: 11_000_000, tables: [{ name: "graph_nodes", totalBytes: 65_536, liveRows: 45, deadRows: 50 }] };
+		const harness = await start({}, { index: { ping: async () => true, capacity: async () => capacity } });
+		const response = await fetch(`${harness.base}/healthz`);
+		const body = (await response.json()) as {
+			index: boolean;
+			planes: Record<string, { ok: boolean | null; breaker: Record<string, unknown> | null; lastErrorAt: number | null }>;
+			capacity: { index: unknown };
+		};
+		expect(response.status).toBe(200);
+		expect(body.index).toBe(true);
+		expect(Object.keys(body.planes).sort()).toEqual(["cache", "greptime", "hindsight", "index", "ragflow"]);
+		expect(body.planes.index).toEqual({ ok: true, breaker: { plane: "index", state: "closed", failures: 0, openedAt: null, lastErrorAt: null, lastError: null }, lastErrorAt: null });
+		// Unconfigured planes are `null`, not failures — the status code is 200 above.
+		expect(body.planes.greptime?.ok).toBeNull();
+		expect(body.planes.hindsight?.ok).toBeNull();
+		expect(body.planes.ragflow?.ok).toBeNull();
+		expect(body.capacity).toEqual({ index: capacity });
+
+		const off = await start({ SUBSTRATE_BREAKER: "0" }, { index: { ping: async () => true, capacity: () => Promise.withResolvers<never>().promise } });
+		const offBody = (await (await fetch(`${off.base}/healthz`)).json()) as { planes: Record<string, { breaker: unknown }>; capacity: { index: unknown } };
+		expect(offBody.planes.index?.breaker).toBeNull();
+		expect(offBody.capacity).toEqual({ index: null });
+	});
+});
+
+describe("GET /slo lists the per-plane objectives", () => {
+	test("one per plane, unconfigured for the planes this deployment lacks, beside the catalogue (uplift-2 R2)", async () => {
+		const harness = await start({}, { index: { ping: async () => true } });
+		const body = (await (await fetch(`${harness.base}/slo`)).json()) as {
+			results: Array<{ id: string }>;
+			breached: string[];
+			planes: Array<{ id: string; plane: string; status: string; target: number }>;
+		};
+		expect(body.planes.map((entry) => entry.id)).toEqual([
+			"plane.greptime.availability",
+			"plane.index.availability",
+			"plane.cache.availability",
+			"plane.hindsight.availability",
+			"plane.ragflow.availability",
+		]);
+		expect(body.planes.find((entry) => entry.plane === "index")?.status).toBe("insufficient-data");
+		expect(body.planes.find((entry) => entry.plane === "greptime")?.status).toBe("unconfigured");
+		expect(body.planes.every((entry) => entry.target === 0.99)).toBe(true);
+		// The catalogue is still exactly SPE-4793's four, and `breached` is still theirs alone.
+		expect(body.results.map((entry) => entry.id)).toEqual(["brief.p95", "emit.success", "lease.steal_rate", "quarantine.rate"]);
+		expect(body.breached).toEqual([]);
+
+		const tuned = await start({ SUBSTRATE_SLO_PLANE_AVAILABILITY: "0.95" });
+		const tunedBody = (await (await fetch(`${tuned.base}/slo`)).json()) as { planes: Array<{ target: number }> };
+		expect(tunedBody.planes.every((entry) => entry.target === 0.95)).toBe(true);
+	});
 });
 
 describe("GET /metrics", () => {
