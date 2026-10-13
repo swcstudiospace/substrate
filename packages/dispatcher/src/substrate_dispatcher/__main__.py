@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, TextIO
 
 from .dispatch import LaunchFn, Log, make_launch_fn, tick
+from .handoff import make_prelaunch
 from .host import HostClient
 from .launcher import STATE_DIR
 from .linear import LinearClient
@@ -149,7 +150,9 @@ def main(argv: list[str] | None = None) -> int:
                 mcp=mcp,
                 # D24-05: the registry re-reads given_up.json before the first tick.
                 registry=SessionRegistry(state_dir=STATE_DIR, log=log),
-                launch_fn=make_launch_fn(log=log, open_task=host.launch),
+                # U3: the launch path writes the signed handoff packet and runs the
+                # pre-launch drift scan over the worktree, both fail-open.
+                launch_fn=make_launch_fn(log=log, open_task=host.launch, prelaunch=make_prelaunch(mcp)),
                 env_file=Path(os.environ.get("SUBSTRATE_ENV_FILE") or DEFAULT_ENV_FILE),
                 environ=os.environ,
                 iterations=1 if args.once else None,

@@ -10,6 +10,10 @@ D-15: ``SUBSTRATE_DISPATCH_DISABLED=1`` in the live env file stops every tick be
 U4 / SPE-10477: before any launch, one ``/slo`` burn read (quota.py) storm-breaks the tick —
 a breaching quota SLO posts the once-only ``[quota-burn]`` marker, emits one
 ``dispatch.stormbreak`` warning, and launches nothing while it stays breached.
+U3 / SPE-10477: inside the launch path, after the worktree exists and before the process
+starts, the prelaunch step (handoff.py, injected) runs ``coord_drift_scan`` over the
+worktree and posts the signed ``coord_handoff`` packet — fail-open, so neither can stop a
+launch; the packet, not the prompt, is the replayable record of what was dispatched.
 """
 
 from __future__ import annotations
@@ -55,6 +59,8 @@ MARKERS: dict[str, str] = {
 }
 
 LaunchFn = Callable[[Candidate, dict], Launched]
+# U3: the injected pre-launch step (handoff.make_prelaunch); None launches as before.
+PrelaunchFn = Callable[..., None]
 Log = Callable[[str], None]
 
 
@@ -475,18 +481,39 @@ def make_launch_fn(
     open_task: Callable[..., Launched] | None = None,
     state_dir: Path | None = None,
     hermes_bin: str | None = None,
+    prelaunch: PrelaunchFn | None = None,
 ) -> LaunchFn:
     """Compose D-12 (per-Graph-ID worktree) with D-13 (direct hermes chat) or D-06 (a VM task on
     substrate-host, ``open_task`` = HostClient.launch) for one candidate, by its surface.
 
     The prompt's ids are validated first, so an id render_prompt would refuse never leaves a
-    worktree behind.
+    worktree behind. ``prelaunch`` (U3) runs after the worktree exists and before any process
+    starts — drift scan, then the signed handoff packet — and is fail-open twice over: the
+    step itself never raises, and a broken step is logged and skipped rather than losing the
+    launch.
     """
 
     def launch_fn(candidate: Candidate, found: dict) -> Launched:
         validate_ids(candidate, found)
         repo_path = checkout(found["repo"])
         path = ensure(repo_path, found["graph_id"], found["branch"])
+        if prelaunch is not None:
+            try:
+                prelaunch(
+                    identifier=candidate.identifier,
+                    graph_id=found["graph_id"],
+                    node_id=found["node_id"],
+                    repo=found["repo"],
+                    branch=found.get("branch"),
+                    worktree=path,
+                    surface=candidate.surface,
+                    log=log,
+                )
+            except Exception as exc:  # noqa: BLE001 — a broken prelaunch never blocks a launch
+                log(
+                    f"{candidate.identifier}: prelaunch failed; launching anyway: "
+                    f"{type(exc).__name__}: {exc}"
+                )
         ids = dict(
             identifier=candidate.identifier,
             graph_id=found["graph_id"],
