@@ -266,6 +266,20 @@ export interface SubstrateConfig {
 	 * exactly as before the breakers existed, and is still measured.
 	 */
 	breaker: BreakerSettings;
+	// uplift-2 R1 — brief fast path and cache effectiveness. Every knob is
+	// default-on and `0` switches it off; none needs a redeploy of code.
+	/** Shared deadline for the four brief source reads, ms (`SUBSTRATE_BRIEF_BUDGET_MS`, default 1200; 0 = none). */
+	briefBudgetMs: number;
+	/** How far back the recent-actions query looks, days (`SUBSTRATE_BRIEF_RECENT_WINDOW_DAYS`, default 30). */
+	briefRecentWindowDays: number;
+	/** TTL of the last-good brief snapshot, s (`SUBSTRATE_BRIEF_SNAPSHOT_TTL_S`, default 3600; 0 = no snapshots). */
+	briefSnapshotTtlS: number;
+	/** Per-command cache timeout, ms (`SUBSTRATE_CACHE_COMMAND_TIMEOUT_MS`, default 250). */
+	cacheCommandTimeoutMs: number;
+	/** Cache connect timeout, ms (`SUBSTRATE_CACHE_CONNECT_TIMEOUT_MS`, default 250). */
+	cacheConnectTimeoutMs: number;
+	/** How long a computed `/healthz` body is served to pollers, ms (`SUBSTRATE_HEALTHZ_CACHE_MS`, default 5000; 0 = recompute per call). */
+	healthzCacheMs: number;
 }
 
 /** Production defaults: September's library, so the host ledger keeps deduplicating. */
@@ -487,7 +501,26 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 			? Number(env.SUBSTRATE_VERIFY_TIMEOUT_MS)
 			: 30_000,
 		breaker: loadBreakerSettings(env),
+		// uplift-2 R1
+		briefBudgetMs: nonNegativeOr(env.SUBSTRATE_BRIEF_BUDGET_MS, 1200),
+		briefRecentWindowDays: positiveOr(env.SUBSTRATE_BRIEF_RECENT_WINDOW_DAYS, 30),
+		briefSnapshotTtlS: nonNegativeOr(env.SUBSTRATE_BRIEF_SNAPSHOT_TTL_S, 3600),
+		cacheCommandTimeoutMs: positiveOr(env.SUBSTRATE_CACHE_COMMAND_TIMEOUT_MS, 250),
+		cacheConnectTimeoutMs: positiveOr(env.SUBSTRATE_CACHE_CONNECT_TIMEOUT_MS, 250),
+		healthzCacheMs: nonNegativeOr(env.SUBSTRATE_HEALTHZ_CACHE_MS, 5000),
 	};
+}
+
+/** uplift-2 R1: a finite number ≥ 0, floored (0 is "off"); anything else is the default. */
+function nonNegativeOr(raw: string | undefined, fallback: number): number {
+	const value = Number(raw?.trim());
+	return raw !== undefined && raw.trim() !== "" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : fallback;
+}
+
+/** uplift-2 R1: a finite number > 0, floored; anything else (0 included) is the default. */
+function positiveOr(raw: string | undefined, fallback: number): number {
+	const value = Number(raw?.trim());
+	return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
 }
 
 /**

@@ -50,7 +50,7 @@ setting `SUBSTRATE_STATE_DIR` alone leaves those two where they are.
 | File | Collector |
 | --- | --- |
 | `herdr-offsets.json` (`/var/lib/substrate` unless overridden) | herdr pane map and counters |
-| `muse-offsets.json` (under the state directory unless overridden) | brief writer, per-repo last success and last failure |
+| `muse-offsets.json` (under the state directory unless overridden) | brief writer, per-repo last success, last failure and the last brief `ETag` |
 | `grok-offsets.json` (`/var/lib/substrate` unless overridden) | grok tail offsets and counters |
 | `refused-emits.jsonl` (always under the state directory) | every collector and hook that was refused |
 
@@ -108,6 +108,14 @@ redacted and written by tmp plus rename. A failed fetch leaves `BRIEF.md`
 unchanged and still ensures the `AGENTS.md` pointer. The pointer is one
 marker block. `.substrate/` is added to the exclude file `git rev-parse
 --git-path info/exclude` names.
+
+The writer keeps the `ETag` of the last 200 per repo in its state file and
+sends it as `If-None-Match` on the next pass, while `BRIEF.md` still exists.
+A 304 counts `unchanged`, records `last_success`, and leaves `BRIEF.md`
+byte-identical without reading or redacting a body; a 200 replaces the file
+and the tag. A server that sends no `ETag` is handled as before. The pointer
+and exclude handling do not depend on which answer came back. The server-side
+contract (`ETag`, `X-Substrate-Brief`, 304) is in `docs/observability.md`.
 
 ## Muse tool hook
 
@@ -182,7 +190,9 @@ write. `--check` only reports.
 
 `/healthz` and `/brief` are two requests. The ledger can be up for the check
 and down for the brief, and `/brief` can still return 200. The writer stores
-that body. It cannot tell a degraded 200 from a healthy one.
+that body. The server marks such an answer `X-Substrate-Brief: degraded` or
+`snapshot` (a snapshot body starts with a dated banner line); the writer does
+not act on the header, so a degraded 200 is written like any other brief.
 
 Muse `PostToolUse` runs only after a successful tool call. Failures go to
 `PostToolUseFailure`, which this hook does not subscribe to, so `outcome` is

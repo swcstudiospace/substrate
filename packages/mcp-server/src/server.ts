@@ -390,9 +390,41 @@ async function readBody(req: IncomingMessage, maxBytes: number = MAX_BODY_BYTES)
 	return Buffer.concat(chunks).toString("utf8");
 }
 
-function send(res: ServerResponse, status: number, body: string, contentType = "text/plain; charset=utf-8"): void {
-	res.writeHead(status, { "content-type": contentType });
+function send(
+	res: ServerResponse,
+	status: number,
+	body: string,
+	contentType = "text/plain; charset=utf-8",
+	headers: Record<string, string> = {},
+): void {
+	res.writeHead(status, { "content-type": contentType, ...headers });
 	res.end(body);
+}
+
+/**
+ * Whether an `If-None-Match` header lists `etag`, by the weak comparison RFC 9110
+ * §8.8.3.2 prescribes for it: `W/` prefixes are ignored on both sides and `*`
+ * matches any current representation. The brief's tag is weak on purpose — it
+ * validates the text, not the bytes a proxy may re-encode.
+ */
+export function etagMatches(ifNoneMatch: string | string[] | undefined, etag: string): boolean {
+	if (ifNoneMatch === undefined) return false;
+	const header = Array.isArray(ifNoneMatch) ? ifNoneMatch.join(",") : ifNoneMatch;
+	const opaque = etag.replace(/^W\//, "");
+	for (const raw of header.split(",")) {
+		const candidate = raw.trim();
+		if (candidate === "*") return true;
+		if (candidate.replace(/^W\//, "") === opaque) return true;
+	}
+	return false;
+}
+
+/** `GET /healthz` as last computed, for pollers (uplift-2 R1). */
+interface HealthMemo {
+	status: number;
+	body: Record<string, unknown>;
+	/** Epoch ms when the body was computed. */
+	at: number;
 }
 
 function sendJson(res: ServerResponse, status: number, value: unknown): void {
@@ -498,6 +530,9 @@ export function createHttpServer(
 	// lifetime-and-state-file split `docsIngestSeen` uses on the service side. The
 	// merge-trigger dedupes against the newest recorded version by content hash.
 	const docsVersions = createVersionStore();
+	// The last `/healthz` body, served again for `config.healthzCacheMs` (uplift-2 R1).
+	const now = options.now ?? Date.now;
+	let healthMemo: HealthMemo | null = null;
 	const server = createServer(async (req, res) => {
 		const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
 		const authorization = req.headers.authorization ?? null;
@@ -573,22 +608,41 @@ export function createHttpServer(
 
 		try {
 			if (req.method === "GET" && url.pathname === "/healthz") {
-				const health = await substrate.health();
-				sendJson(res, healthStatus(health, config.greptime !== null), {
-					...health,
-					// A deployment whose audit chain is in memory is one restart from having no
-					// trail. That is a fact about the deployment, so it is reported — but it is
-					// not a 503: the substrate is serving, and refusing would be worse.
-					auditDurable: observability.audit.durable,
-					auditRecords: observability.audit.seq,
-					// Reported here as well as in every verification verdict, because a monitor is
-					// what notices it: the audit file was deleted or truncated after records were
-					// written to it, and nobody is going to ask `/evidence` about a graph until they
-					// already have a reason to.
-					...(observability.audit.missingHistory
-						? { auditMissingHistory: observability.audit.missingHistory }
-						: {}),
-				});
+				// Memoised for `healthzCacheMs` (uplift-2 R1): every collector polls this
+				// route, and each computation costs one round trip per configured plane.
+				// The status code is derived from the cached body by the same rule, so a
+				// poller sees the same verdict a fresh computation gave at `cachedAt`.
+				// `/metrics` and `/slo` are not memoised.
+				const ttl = config.healthzCacheMs;
+				const nowMs = now();
+				const stale = ttl > 0 && healthMemo !== null && nowMs - healthMemo.at < ttl;
+				let memo: HealthMemo;
+				if (stale && healthMemo !== null) {
+					memo = healthMemo;
+				} else {
+					const health = await substrate.health();
+					memo = {
+						status: healthStatus(health, config.greptime !== null),
+						at: nowMs,
+						body: {
+							...health,
+							// A deployment whose audit chain is in memory is one restart from having no
+							// trail. That is a fact about the deployment, so it is reported — but it is
+							// not a 503: the substrate is serving, and refusing would be worse.
+							auditDurable: observability.audit.durable,
+							auditRecords: observability.audit.seq,
+							// Reported here as well as in every verification verdict, because a monitor is
+							// what notices it: the audit file was deleted or truncated after records were
+							// written to it, and nobody is going to ask `/evidence` about a graph until they
+							// already have a reason to.
+							...(observability.audit.missingHistory
+								? { auditMissingHistory: observability.audit.missingHistory }
+								: {}),
+						},
+					};
+					healthMemo = memo;
+				}
+				sendJson(res, memo.status, { ...memo.body, cachedAt: new Date(memo.at).toISOString(), stale });
 				return;
 			}
 
@@ -665,13 +719,28 @@ export function createHttpServer(
 				const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
 				rememberClaim(claim, body);
 				if (!(await auditedRest(res, observability, surface, "brief", body))) return;
-				const brief = await substrate.brief({
+				const brief = await substrate.briefDetailed({
 					repo: typeof body.repo === "string" ? body.repo : undefined,
 					branch: typeof body.branch === "string" ? body.branch : undefined,
 					graph_id: typeof body.graph_id === "string" ? body.graph_id : undefined,
 					surface: (typeof body.surface === "string" ? (body.surface as Surface) : null) ?? surface ?? "claude-code",
 				});
-				send(res, 200, brief, "text/markdown; charset=utf-8");
+				// uplift-2 R1: the caller can tell a degraded or snapshot brief from a
+				// complete one and skip one it already holds. A degraded answer is still
+				// 200 — the fail-open contract is unchanged; only the headers say so.
+				// `no-cache` means revalidate, not "do not store": the ETag is the validator.
+				const headers: Record<string, string> = {
+					etag: brief.etag,
+					"cache-control": "no-cache",
+					"x-substrate-brief": brief.state,
+					...(brief.failed.length > 0 ? { "x-substrate-brief-failed": brief.failed.join(",") } : {}),
+				};
+				if (etagMatches(req.headers["if-none-match"], brief.etag)) {
+					res.writeHead(304, headers);
+					res.end();
+					return;
+				}
+				send(res, 200, brief.text, "text/markdown; charset=utf-8", headers);
 				return;
 			}
 
