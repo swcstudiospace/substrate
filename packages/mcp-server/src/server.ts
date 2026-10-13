@@ -37,6 +37,7 @@ import {
 	type SubstrateConfig,
 } from "./config.ts";
 import { buildAgentCard, isKnownCardSurface } from "./agent-card.ts";
+import { DATASET_TRIGGERS, createVersionStore, latestVersion, refreshDataset } from "./docs-datasets.ts";
 import { formatDrift } from "./drift.ts";
 import { InvalidEventError } from "./event.ts";
 import { InvalidHandoffError } from "./handoff.ts";
@@ -229,6 +230,25 @@ export class BodyTooLargeError extends Error {
 const PROPOSAL_NEEDS_SURFACE = "skills_propose needs an authenticated surface; nothing was proposed";
 /** Why an anonymous ingest is refused, even on a run that allows anonymous callers. */
 const INGEST_NEEDS_SURFACE = "docs_ingest needs an authenticated surface; nothing was ingested";
+/** Why an anonymous merge-trigger is refused, even on a run that allows anonymous callers. */
+const MERGE_TRIGGER_NEEDS_SURFACE = "docs merge-trigger needs an authenticated surface; nothing was refreshed";
+/** The dataset a post-merge hook triggers when the body names none (DOCS-03's own repo row). */
+const MERGE_TRIGGER_DATASET = "agent-substrate";
+
+/**
+ * Whether the request arrived over the loopback interface.
+ *
+ * The whole 127/8 in every notation (`::ffff:`-mapped IPv6 included) plus
+ * `::1` — the same loopback set `parseRedisUrl` refuses plaintext redis
+ * outside of. Node writes IPv4 remotes as a dotted quad and IPv6 remotes
+ * either bare or v4-mapped; a DNS name never appears in `remoteAddress`.
+ */
+export function isLoopbackRemote(remoteAddress: string | undefined): boolean {
+	const address = (remoteAddress ?? "").toLowerCase().replace(/^::ffff:/, "");
+	if (address === "::1") return true;
+	const octets = address.split(".");
+	return octets.length === 4 && octets[0] === "127" && octets.slice(1).every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255);
+}
 
 /**
  * The status `/healthz` answers with.
@@ -414,6 +434,10 @@ export function createHttpServer(
 	// sender to fix (claimed surface, kind, tokened or not) without carrying a payload.
 	const refusalLog = new AnonymousCallerLog(options.anonymousIntervalMs, options.now, options.refusalLog, "refused events");
 	refusalLog.start();
+	// Dataset versions recorded by the docs routes, for the process lifetime — the same
+	// lifetime-and-state-file split `docsIngestSeen` uses on the service side. The
+	// merge-trigger dedupes against the newest recorded version by content hash.
+	const docsVersions = createVersionStore();
 	const server = createServer(async (req, res) => {
 		const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
 		const authorization = req.headers.authorization ?? null;
@@ -880,6 +904,67 @@ export function createHttpServer(
 					return;
 				}
 				sendJson(res, 200, outcome);
+				return;
+			}
+
+			// U6 (DOCS-03): the documented refresh triggers, wired. A post-merge hook asks
+			// for the `agent-substrate` dataset (the default); the skills-sync tick names
+			// `agent-skills`. The refresh itself is the same `refreshDataset` entry
+			// `docs_ingest` wraps, so the refusal conventions cannot drift apart. Three
+			// doors are deliberate: an unauthenticated caller is refused before the body
+			// is read, a remote caller is refused even with a valid token (the trigger
+			// drives host-local automation and is loopback-only by design), and a repeat
+			// carrying the newest version's own commit and content hash re-answers it
+			// without recording a second version — a webhook retry is cheap by hash.
+			if (req.method === "POST" && url.pathname === "/docs/merge-trigger") {
+				if (surface === null) {
+					sendJson(res, 401, { error: MERGE_TRIGGER_NEEDS_SURFACE });
+					return;
+				}
+				if (!isLoopbackRemote(req.socket.remoteAddress)) {
+					sendJson(res, 403, { error: "docs merge-trigger is a loopback route; the caller is not loopback" });
+					return;
+				}
+				const parsed: unknown = JSON.parse(await readBody(req));
+				if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+					sendJson(res, 400, { error: "request body must be a JSON object" });
+					return;
+				}
+				const body = parsed as Record<string, unknown>;
+				const dataset = typeof body.dataset === "string" ? body.dataset : MERGE_TRIGGER_DATASET;
+				if (!(dataset in DATASET_TRIGGERS)) {
+					sendJson(res, 400, {
+						error: `unknown dataset ${JSON.stringify(dataset.slice(0, 80))}; known: ${Object.keys(DATASET_TRIGGERS).join(", ")}`,
+					});
+					return;
+				}
+				if (typeof body.commit !== "string" || body.commit.length === 0 || typeof body.content_sha256 !== "string" || body.content_sha256.length === 0) {
+					sendJson(res, 400, { error: "commit and content_sha256 are required" });
+					return;
+				}
+				const fields = { dataset, commit: body.commit, content_sha256: body.content_sha256 };
+				// Audited under `docs_ingest`, the fail-closed name the write it performs
+				// is decided under — a merge-trigger nobody recorded is an unrecorded
+				// publication, same as an ingest nobody recorded.
+				if (!(await auditedRest(res, observability, surface, "docs_ingest", fields))) return;
+				if (config.ragflow === null) {
+					// The null-block idiom: no docs plane is configured, so the trigger
+					// asks for nothing that exists — answered quietly, no plane call made.
+					sendJson(res, 200, { ok: true, dataset, noop: true, reason: "docs-plane-unconfigured" });
+					return;
+				}
+				const newest = latestVersion(docsVersions, dataset);
+				if (newest && newest.commit === fields.commit && newest.content_sha256 === fields.content_sha256) {
+					sendJson(res, 200, { ok: true, version: newest, created: false, idempotent: true });
+					return;
+				}
+				const refreshed = await refreshDataset(
+					{ config: config.ragflow, versions: docsVersions, emit: (event) => substrate.emit(event), surface },
+					fields,
+				);
+				// A plane refusal is an outage of the docs plane, not a permission decision
+				// about the caller: 503 with the reason, and the caller decides on a retry.
+				sendJson(res, refreshed.ok ? 200 : 503, refreshed);
 				return;
 			}
 

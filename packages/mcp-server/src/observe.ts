@@ -62,6 +62,7 @@ const KNOWN_ROUTES = [
 	"/skills/propose",
 	"/docs/search",
 	"/docs/ingest",
+	"/docs/merge-trigger",
 	"/memory/recall",
 ] as const;
 

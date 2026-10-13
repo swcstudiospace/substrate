@@ -5,7 +5,7 @@ import { memoryToolWriter } from "./mcp.ts";
 import { createObservability } from "./observe.ts";
 import type { FetchLike } from "./planes/ragflow.ts";
 import { RagflowFake } from "./ragflow-fake.ts";
-import { createHttpServer, healthStatus, memoryWriteStatus, memoryWriter } from "./server.ts";
+import { createHttpServer, healthStatus, isLoopbackRemote, memoryWriteStatus, memoryWriter } from "./server.ts";
 import { Substrate } from "./service.ts";
 import type { SubstrateEvent } from "./types.ts";
 
@@ -339,6 +339,183 @@ describe("routes", () => {
 				{ authorization: "Bearer tok-omp" },
 			);
 			expect(response.status).toBe(413);
+		} finally {
+			await stop();
+		}
+	});
+
+	/** Route only the fake plane host through `impl`; the loopback listener keeps the real fetch. */
+	function patchFetch(impl: FetchLike): () => void {
+		const original = globalThis.fetch;
+		globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (url.includes("ragflow.test")) return impl(input, init);
+			return original(input, init);
+		}) as typeof fetch;
+		return () => {
+			globalThis.fetch = original;
+		};
+	}
+
+	/** The `docs.ingest` ledger rows the refresh emits, so a test sees the refresh actually ran. */
+	function ingestEvents(written: SubstrateEvent[]): Array<Record<string, unknown>> {
+		return written
+			.map((event) => event.payload as Record<string, unknown> | null)
+			.filter((payload): payload is Record<string, unknown> => payload !== null && payload.action === "docs.ingest");
+	}
+
+	test("POST /docs/merge-trigger answers 401 without a token", async () => {
+		const { greptime } = ledger();
+		const { post, stop } = await serve(
+			greptime,
+			{ SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
+		);
+		try {
+			const response = await post("/docs/merge-trigger", { commit: "c-merge", content_sha256: "sha-merge" });
+			expect(response.status).toBe(401);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("POST /docs/merge-trigger answers 401 untokened even on a run that allows anonymous callers", async () => {
+		const { greptime } = ledger();
+		const { post, stop } = await serve(greptime, { SUBSTRATE_ALLOW_ANONYMOUS: "1", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" });
+		try {
+			// The global gate passes an untokened caller here; the route's own refusal is the 401.
+			const response = await post("/docs/merge-trigger", { commit: "c-merge", content_sha256: "sha-merge" });
+			expect(response.status).toBe(401);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("isLoopbackRemote takes the whole 127/8 and ::1, refuses everything else", () => {
+		for (const good of ["127.0.0.1", "127.9.240.1", "::1", "::ffff:127.0.0.1"]) {
+			expect(isLoopbackRemote(good)).toBe(true);
+		}
+		for (const bad of ["10.1.2.3", "::ffff:10.1.2.3", "::c0a8:1", "192.168.0.4", "", undefined, "127.cache.example.com"]) {
+			expect(isLoopbackRemote(bad)).toBe(false);
+		}
+	});
+
+	test("POST /docs/merge-trigger refreshes agent-substrate by default and records the version", async () => {
+		const { greptime, written } = ledger();
+		const fake = new RagflowFake();
+		const restore = patchFetch(fake.fetch);
+		const { post, stop } = await serve(
+			greptime,
+			{ SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
+		);
+		try {
+			const response = await post("/docs/merge-trigger", { commit: "c-merge", content_sha256: "sha-merge" }, { authorization: "Bearer tok-omp" });
+			const body = (await response.json()) as { ok: boolean; version?: { dataset: string; dataset_id: string; version: string; commit: string }; created?: boolean };
+			expect(response.status).toBe(200);
+			expect(body.ok).toBe(true);
+			expect(body.version?.dataset).toBe("agent-substrate");
+			expect(body.version?.dataset_id).toBe("ds-berlin-agent-substrate");
+			expect(body.version?.version).toBe("v1");
+			expect(body.version?.commit).toBe("c-merge");
+			// The refresh emitted its ledger event for the right dataset id.
+			const events = ingestEvents(written);
+			expect(events).toHaveLength(1);
+			expect(events[0]?.dataset_id).toBe("ds-berlin-agent-substrate");
+		} finally {
+			restore();
+			await stop();
+		}
+	});
+
+	test("POST /docs/merge-trigger names a requested dataset and dedupes by content hash", async () => {
+		const { greptime, written } = ledger();
+		const fake = new RagflowFake();
+		const restore = patchFetch(fake.fetch);
+		const { post, stop } = await serve(
+			greptime,
+			{ SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
+		);
+		try {
+			const first = await post("/docs/merge-trigger", { dataset: "agent-skills", commit: "c-ff", content_sha256: "sha-ff" }, { authorization: "Bearer tok-omp" });
+			const firstBody = (await first.json()) as { ok: boolean; version?: { dataset: string; dataset_id: string; version: string }; idempotent?: boolean };
+			expect(first.status).toBe(200);
+			expect(firstBody.version?.dataset).toBe("agent-skills");
+			expect(firstBody.version?.dataset_id).toBe("ds-leipzig-agent-skills");
+			expect(firstBody.version?.version).toBe("v1");
+			expect(firstBody.idempotent).toBeUndefined();
+
+			// The same commit and hash again: the newest version's own identity, so no
+			// second version is recorded and the reply says it answered from the record.
+			const repeat = await post("/docs/merge-trigger", { dataset: "agent-skills", commit: "c-ff", content_sha256: "sha-ff" }, { authorization: "Bearer tok-omp" });
+			const repeatBody = (await repeat.json()) as { ok: boolean; version?: { version: string }; idempotent?: boolean };
+			expect(repeat.status).toBe(200);
+			expect(repeatBody.idempotent).toBe(true);
+			expect(repeatBody.version?.version).toBe("v1");
+			expect(ingestEvents(written)).toHaveLength(1);
+
+			// New content: a real second version.
+			const next = await post("/docs/merge-trigger", { dataset: "agent-skills", commit: "c-ff2", content_sha256: "sha-ff2" }, { authorization: "Bearer tok-omp" });
+			const nextBody = (await next.json()) as { ok: boolean; version?: { version: string } };
+			expect(next.status).toBe(200);
+			expect(nextBody.version?.version).toBe("v2");
+			expect(ingestEvents(written)).toHaveLength(2);
+		} finally {
+			restore();
+			await stop();
+		}
+	});
+
+	test("POST /docs/merge-trigger no-ops on an unconfigured docs plane", async () => {
+		const { greptime, written } = ledger();
+		const { post, stop } = await serve(greptime, { SUBSTRATE_TOKEN_OMP: "tok-omp" });
+		try {
+			const response = await post("/docs/merge-trigger", { commit: "c-merge", content_sha256: "sha-merge" }, { authorization: "Bearer tok-omp" });
+			const body = (await response.json()) as { ok: boolean; dataset: string; noop?: boolean; reason?: string };
+			expect(response.status).toBe(200);
+			expect(body.ok).toBe(true);
+			expect(body.dataset).toBe("agent-substrate");
+			expect(body.noop).toBe(true);
+			expect(body.reason).toBe("docs-plane-unconfigured");
+			// No plane call, no refresh event: the trigger asked for nothing that exists.
+			expect(ingestEvents(written)).toHaveLength(0);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("POST /docs/merge-trigger answers 503 with the reason when the docs plane refuses", async () => {
+		const { greptime } = ledger();
+		const restore = patchFetch(async () => {
+			throw new Error("connect ECONNREFUSED 127.0.0.1:9");
+		});
+		const { post, stop } = await serve(
+			greptime,
+			{ SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
+		);
+		try {
+			const response = await post("/docs/merge-trigger", { commit: "c-merge", content_sha256: "sha-merge" }, { authorization: "Bearer tok-omp" });
+			const body = (await response.json()) as { ok: boolean; reason?: string };
+			expect(response.status).toBe(503);
+			expect(body.ok).toBe(false);
+			expect(body.reason).toContain("ragflow unreachable");
+		} finally {
+			restore();
+			await stop();
+		}
+	});
+
+	test("POST /docs/merge-trigger refuses an unknown dataset and a body without the hash", async () => {
+		const { greptime } = ledger();
+		const { post, stop } = await serve(
+			greptime,
+			{ SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
+		);
+		try {
+			const unknown = await post("/docs/merge-trigger", { dataset: "not-a-dataset", commit: "c", content_sha256: "s" }, { authorization: "Bearer tok-omp" });
+			expect(unknown.status).toBe(400);
+			const hashless = await post("/docs/merge-trigger", { commit: "c" }, { authorization: "Bearer tok-omp" });
+			expect(hashless.status).toBe(400);
+			const scalar = await post("/docs/merge-trigger", 42, { authorization: "Bearer tok-omp" });
+			expect(scalar.status).toBe(400);
 		} finally {
 			await stop();
 		}

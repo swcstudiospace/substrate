@@ -1,5 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { childEnv, decide, type RunResult, runSync, type SyncContext } from "./skills-sync.ts";
+import {
+	childEnv,
+	decide,
+	postDocsRefresh,
+	refreshTarget,
+	type RunResult,
+	runSync,
+	SYNC_REFRESH_DATASET,
+	type SyncContext,
+} from "./skills-sync.ts";
 import type { WarningEvent } from "./skills.ts";
 
 const L = "/tmp/lib";
@@ -30,13 +39,14 @@ describe("decide", () => {
 	});
 });
 
-type Script = { porcelain?: string; branch?: string; fetch?: RunResult; ancestor?: number; head?: string; origin?: string; merge?: RunResult };
+type Script = { porcelain?: string; branch?: string; fetch?: RunResult; ancestor?: number; head?: string; origin?: string; merge?: RunResult; tree?: string | null; refresh?: "ok" | "fail" | "throw" };
 
 function harness(script: Script) {
 	const calls: string[][] = [];
 	const warnings: WarningEvent[] = [];
 	const log: string[] = [];
 	let projected = 0;
+	const refreshPosts: Array<{ commit: string; content_sha256: string }> = [];
 	const runner = async (argv: readonly string[]): Promise<RunResult> => {
 		calls.push([...argv]);
 		const verb = argv.slice(3).join(" ");
@@ -53,10 +63,20 @@ function harness(script: Script) {
 				return ok(`${script.head ?? OLD}\n${script.origin ?? OLD}\n`);
 			case "merge --ff-only origin/main":
 				return script.merge ?? ok("Fast-forward\n");
+			case "rev-parse HEAD^{tree}":
+				return script.tree === null ? { code: 128, stdout: "", stderr: "fatal: not a git repository" } : ok(`${script.tree ?? "treehash"}\n`);
 			default:
 				throw new Error(`unexpected argv ${argv.join(" ")}`);
 		}
 	};
+	const notifyRefresh = script.refresh === undefined
+		? undefined
+		: async (input: { commit: string; content_sha256: string }) => {
+			refreshPosts.push(input);
+			if (script.refresh === "fail") return { ok: false as const, reason: "merge-trigger 503" };
+			if (script.refresh === "throw") throw new Error("boom");
+			return { ok: true as const };
+		};
 	const ctx: SyncContext = {
 		runner,
 		libraryDir: L,
@@ -69,8 +89,9 @@ function harness(script: Script) {
 			projected++;
 			return { actions: 0, warnings: 0 };
 		},
+		...(notifyRefresh ? { notifyRefresh } : {}),
 	};
-	return { ctx, calls, warnings, log, projected: () => projected };
+	return { ctx, calls, warnings, log, projected: () => projected, refreshPosts };
 }
 
 const verbs = (calls: string[][]) => calls.map((c) => c.slice(3).join(" "));
@@ -162,5 +183,146 @@ describe("childEnv allowlist", () => {
 
 	test("HOME falls back to /root and PATH to the system default when unset", () => {
 		expect(childEnv({})).toEqual({ PATH: "/usr/bin:/bin", HOME: "/root", GIT_TERMINAL_PROMPT: "0", GH_PROMPT_DISABLED: "1" });
+	});
+});
+
+/** One stderr capture; `restore` goes in a finally. */
+function captureStderr(): { lines: string[]; restore: () => void } {
+	const lines: string[] = [];
+	const original = process.stderr.write.bind(process.stderr);
+	process.stderr.write = ((chunk: Uint8Array | string, ...rest: unknown[]): boolean => {
+		void rest;
+		lines.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+		return true;
+	}) as typeof process.stderr.write;
+	return { lines, restore: () => (process.stderr.write = original) };
+}
+
+describe("runSync refresh trigger (U6)", () => {
+	test("a fast-forward fires exactly one refresh POST with the new head and tree hash", async () => {
+		const h = harness({ head: OLD, origin: NEW, tree: "treehash-1", refresh: "ok" });
+		expect(await runSync(h.ctx)).toEqual({ decision: "ff", code: 0 });
+		expect(h.refreshPosts).toEqual([{ commit: NEW, content_sha256: "treehash-1" }]);
+		expect(verbs(h.calls)).toContain("rev-parse HEAD^{tree}");
+		expect(h.projected()).toBe(1);
+	});
+
+	test("the POST rides the sync dataset constant, so the route hears agent-skills", async () => {
+		// The dataset name is fixed by the sync, not the route default: a skills fast-forward
+		// must never refresh the substrate's own docs dataset.
+		expect(SYNC_REFRESH_DATASET).toBe("agent-skills");
+	});
+
+	test("a dirty-tree sync fires no refresh and reads no tree hash", async () => {
+		const h = harness({ porcelain: " M docs-agno/SKILL.md\n", refresh: "ok" });
+		expect((await runSync(h.ctx)).decision).toBe("refuse-dirty");
+		expect(h.refreshPosts).toEqual([]);
+		expect(verbs(h.calls)).not.toContain("rev-parse HEAD^{tree}");
+	});
+
+	test("a current tick is not a fast-forward and fires no refresh", async () => {
+		const h = harness({ head: OLD, origin: OLD, refresh: "ok" });
+		expect((await runSync(h.ctx)).decision).toBe("current");
+		expect(h.refreshPosts).toEqual([]);
+		expect(verbs(h.calls)).not.toContain("rev-parse HEAD^{tree}");
+	});
+
+	test("a refused POST is one stderr line and the sync still succeeds", async () => {
+		const h = harness({ head: OLD, origin: NEW, refresh: "fail" });
+		const stderr = captureStderr();
+		try {
+			expect(await runSync(h.ctx)).toEqual({ decision: "ff", code: 0 });
+			expect(h.refreshPosts).toHaveLength(1);
+			expect(h.projected()).toBe(1);
+			expect(stderr.lines.join("")).toContain("[skills-sync] docs refresh not triggered: merge-trigger 503");
+		} finally {
+			stderr.restore();
+		}
+	});
+
+	test("a throwing refresh sink is caught: one stderr line, exit 0, projector ran", async () => {
+		const h = harness({ head: OLD, origin: NEW, refresh: "throw" });
+		const stderr = captureStderr();
+		try {
+			expect(await runSync(h.ctx)).toEqual({ decision: "ff", code: 0 });
+			expect(h.projected()).toBe(1);
+			expect(stderr.lines.join("")).toContain("[skills-sync] docs refresh not triggered: boom");
+		} finally {
+			stderr.restore();
+		}
+	});
+
+	test("a tree hash the tick cannot read skips the POST, never the sync", async () => {
+		const h = harness({ head: OLD, origin: NEW, tree: null, refresh: "ok" });
+		const stderr = captureStderr();
+		try {
+			expect(await runSync(h.ctx)).toEqual({ decision: "ff", code: 0 });
+			expect(h.refreshPosts).toEqual([]);
+			expect(stderr.lines.join("")).toContain("[skills-sync] docs refresh not triggered: tree hash failed");
+		} finally {
+			stderr.restore();
+		}
+	});
+
+	test("no refresh seam in the context means no POST and no tree read", async () => {
+		const h = harness({ head: OLD, origin: NEW });
+		expect(await runSync(h.ctx)).toEqual({ decision: "ff", code: 0 });
+		expect(h.refreshPosts).toEqual([]);
+		expect(verbs(h.calls)).not.toContain("rev-parse HEAD^{tree}");
+	});
+});
+
+describe("refreshTarget", () => {
+	test("no projector surface token means the trigger is off", () => {
+		expect(refreshTarget({})).toBeNull();
+		expect(refreshTarget({ SUBSTRATE_TOKEN: "   " })).toBeNull();
+	});
+
+	test("defaults to the loopback substrate and reads both at call time", () => {
+		expect(refreshTarget({ SUBSTRATE_TOKEN: "tok" })).toEqual({ url: "http://127.0.0.1:7410", token: "tok" });
+		expect(refreshTarget({ SUBSTRATE_TOKEN: "tok", SUBSTRATE_URL: "http://127.0.0.1:17410/" })).toEqual({
+			url: "http://127.0.0.1:17410",
+			token: "tok",
+		});
+	});
+});
+
+describe("postDocsRefresh", () => {
+	test("posts the dataset body with the bearer to the merge-trigger route", async () => {
+		const seen: Array<{ url: string; init: RequestInit }> = [];
+		const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+			seen.push({ url: String(input), init: init ?? {} });
+			return new Response("{}", { status: 200 });
+		}) as typeof fetch;
+		const outcome = await postDocsRefresh(
+			{ url: "http://127.0.0.1:7410", token: "tok" },
+			{ dataset: SYNC_REFRESH_DATASET, commit: NEW, content_sha256: "treehash-1" },
+			fetchImpl,
+		);
+		expect(outcome).toEqual({ ok: true });
+		expect(seen).toHaveLength(1);
+		expect(seen[0]?.url).toBe("http://127.0.0.1:7410/docs/merge-trigger");
+		const headers = seen[0]?.init.headers as Record<string, string>;
+		expect(headers.authorization).toBe("Bearer tok");
+		expect(headers["content-type"]).toBe("application/json");
+		expect(JSON.parse(String(seen[0]?.init.body))).toEqual({ dataset: "agent-skills", commit: NEW, content_sha256: "treehash-1" });
+	});
+
+	test("a refusal and an unreachable substrate are reasons, never throws", async () => {
+		const refusing = (async (_input: Parameters<typeof fetch>[0], _init?: RequestInit) => new Response("no", { status: 503 })) as typeof fetch;
+		expect(await postDocsRefresh({ url: "http://127.0.0.1:7410", token: "tok" }, { dataset: "agent-skills", commit: "c", content_sha256: "s" }, refusing)).toEqual({
+			ok: false,
+			reason: "merge-trigger 503",
+		});
+		const dead = (async (_input: Parameters<typeof fetch>[0], _init?: RequestInit): Promise<Response> => {
+			throw new Error("connect ECONNREFUSED");
+		}) as typeof fetch;
+		const unreachable = await postDocsRefresh(
+			{ url: "http://127.0.0.1:7410", token: "tok" },
+			{ dataset: "agent-skills", commit: "c", content_sha256: "s" },
+			dead,
+		);
+		expect(unreachable.ok).toBe(false);
+		if (!unreachable.ok) expect(unreachable.reason).toContain("merge-trigger unreachable: connect ECONNREFUSED");
 	});
 });

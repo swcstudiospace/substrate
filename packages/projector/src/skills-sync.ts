@@ -6,7 +6,10 @@
  *
  * One tick: refuse a dirty tree or a branch other than main (before any fetch), `git fetch origin
  * main`, refuse a history that is not a fast-forward, else `git merge --ff-only origin/main`; then
- * the skills projector, on every tick that got that far (so a deleted link self-heals). Every
+ * the skills projector, on every tick that got that far (so a deleted link self-heals). After a
+ * fast-forward the tick also fires the `agent-skills` dataset refresh — one bounded loopback POST
+ * to the substrate's `/docs/merge-trigger` with the projector's surface token; a failure is one
+ * stderr line and the tick still exits 0 (sync success never depends on ingest). Every
  * refusal ends the tick with one `warning` event and no merge. Log lines:
  *   [skills-sync] ff <old>..<new> | [skills-sync] current <sha> | [skills-sync] refused <reason>
  * Refusals exit 0 (a policy outcome); a failed git step exits 1.
@@ -17,9 +20,58 @@ import { defaultOptions, type EmitWarning, LIBRARY_DIR, postWarning, project } f
 
 const RUN_TIMEOUT_MS = 120_000;
 const OUTPUT_TAIL_CHARS = 200;
+/** The dataset a skills-sync fast-forward refreshes (the substrate's DATASET_TRIGGERS row). */
+export const SYNC_REFRESH_DATASET = "agent-skills";
+/** Same budget family as the projector's fail-open POST /events. */
+const REFRESH_TIMEOUT_MS = 3_000;
 
 export type RunResult = { code: number | null; stdout: string; stderr: string };
 export type Runner = (argv: readonly string[]) => Promise<RunResult>;
+
+/** The substrate's merge-trigger door, with the projector's own surface token. */
+export interface RefreshTarget {
+	url: string;
+	token: string;
+}
+
+/**
+ * Where the refresh POST goes, or null when the projector holds no surface
+ * token. The route is surface-token gated, so a tokenless POST could only
+ * ever be refused — unset means off, and the tick stays silent instead of
+ * guaranteeing itself a 401 every five minutes (the null-block idiom).
+ */
+export function refreshTarget(env: NodeJS.ProcessEnv = process.env): RefreshTarget | null {
+	const token = env.SUBSTRATE_TOKEN?.trim() ?? "";
+	if (token === "") return null;
+	return { url: (env.SUBSTRATE_URL ?? "http://127.0.0.1:7410").replace(/\/+$/, ""), token };
+}
+
+export type RefreshPostOutcome = { ok: true } | { ok: false; reason: string };
+
+/**
+ * Fire the dataset refresh at the substrate's merge-trigger route. A refusal
+ * or an unreachable substrate is a reason, never a throw — the caller owes
+ * the sync one stderr line, not a failed tick.
+ */
+export async function postDocsRefresh(
+	target: RefreshTarget,
+	input: { dataset: string; commit: string; content_sha256: string },
+	fetchImpl: typeof fetch = fetch,
+): Promise<RefreshPostOutcome> {
+	let response: Response;
+	try {
+		response = await fetchImpl(`${target.url}/docs/merge-trigger`, {
+			method: "POST",
+			headers: { "content-type": "application/json", authorization: `Bearer ${target.token}` },
+			body: JSON.stringify(input),
+			signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS),
+		});
+	} catch (cause) {
+		return { ok: false, reason: `merge-trigger unreachable: ${String(cause instanceof Error ? cause.message : cause).slice(0, 200)}` };
+	}
+	if (!response.ok) return { ok: false, reason: `merge-trigger ${response.status}` };
+	return { ok: true };
+}
 
 /**
  * The only environment a git child receives (D22-03): PATH, HOME (inherited,
@@ -80,6 +132,13 @@ export interface SyncContext {
 	log: (line: string) => void;
 	emitWarning: EmitWarning;
 	project: () => Promise<unknown>;
+	/**
+	 * The `agent-skills` dataset refresh after a successful fast-forward (U6):
+	 * fire the POST, answer with the outcome, never reject — a refused or
+	 * unreachable substrate costs one stderr line, never the tick. Absent
+	 * (tests, or a caller that wants no refresh): no POST, no hash read.
+	 */
+	notifyRefresh?: (input: { commit: string; content_sha256: string }) => Promise<RefreshPostOutcome>;
 }
 export interface SyncResult {
 	decision: Decision | "error";
@@ -136,6 +195,23 @@ export async function runSync(ctx: SyncContext): Promise<SyncResult> {
 		ctx.log(`[skills-sync] current ${head}`);
 	}
 	await ctx.project();
+	if (decision === "ff" && ctx.notifyRefresh) {
+		// The content hash of the refreshed tree, as git already knows it — the same
+		// hash the route's content-hash idempotency dedupes on. A tree the tick cannot
+		// name is a skipped refresh, never a failed sync.
+		const tree = await git("rev-parse", "HEAD^{tree}");
+		const posted: RefreshPostOutcome =
+			tree.code !== 0 || tree.stdout.trim() === ""
+				? { ok: false, reason: "tree hash failed" }
+				: await ctx
+						.notifyRefresh({ commit: originMain, content_sha256: tree.stdout.trim() })
+						.catch((cause: unknown): RefreshPostOutcome => ({ ok: false, reason: String(cause instanceof Error ? cause.message : cause) }));
+		// Fire-and-forget: the refresh is the substrate's to lose. One stderr line;
+		// the tick's exit code still says what the sync itself did.
+		if (!posted.ok) {
+			process.stderr.write(`[skills-sync] docs refresh not triggered: ${redact(posted.reason).slice(-OUTPUT_TAIL_CHARS)}\n`);
+		}
+	}
 	return { decision, code: 0 };
 }
 
@@ -147,6 +223,12 @@ if (import.meta.main) {
 		log,
 		emitWarning: postWarning,
 		project: () => project(defaultOptions()),
+		notifyRefresh: async (input) => {
+			const target = refreshTarget();
+			// No projector surface token: the trigger is off, silently.
+			if (!target) return { ok: true };
+			return postDocsRefresh(target, { dataset: SYNC_REFRESH_DATASET, ...input });
+		},
 	});
 	process.exit(result.code);
 }
