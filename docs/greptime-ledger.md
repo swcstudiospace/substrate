@@ -250,11 +250,11 @@ through, and its backfill pass appends events older than everything already
 stored — and, now that the table is append-only, two events can also share a
 millisecond and both survive, with Greptime free to return them in either order.
 
-So `ORDER BY "ts"` cannot identify the newest event. `lastHash` reads the whole
-session (just `hash` and `prev`, so the read stays small) and takes the tip: the
-hash no other row claims as its `prev`. A *window* of the newest rows by `ts` is
-what must not be used — a backfilled event is the real tip while sorting last, so a
-window would leave an already-claimed hash looking unclaimed and the next append
+So `ORDER BY "ts"` cannot identify the newest event. `lastHash` reads a session's
+rows (just `hash` and `prev`, so the read stays small) and takes the tip: the hash
+no other row claims as its `prev`. A *window of the newest rows by `ts`* is what
+must not be used — a backfilled event is the real tip while sorting last, so such
+a window would leave an already-claimed hash looking unclaimed and the next append
 would fork the session. The `LIMIT` in that query is a memory guard set far above
 any real session, not an ordering assumption. `verifyGraph` puts each session's
 events in chain order before verifying. This does not weaken verification — hashes are still recomputed,
@@ -263,15 +263,48 @@ into the walk, which are kept so the break is still reported. What it stops
 reporting is a database's arbitrary tie-break, which was never an integrity
 property.
 
-Two genuinely concurrent appends in one session can still read the same `prev` and
-fork the chain. That is inherent to computing `prev` with a read-then-write and no
-sequence column; the fork is *detected* by `verify`, not prevented.
+**The chain tip is read once per session, not once per emit (uplift-2 R5).**
+`session_id` is not a key, so that read was a scan of every row ever stored, on
+every event — 14,302 rows and ≈ 220 ms over the public edge per emit when it was
+measured. The client now keeps each session's tip in a bounded LRU
+(`SUBSTRATE_LEDGER_CHAIN_CACHE_MAX`, default 10 000 sessions): one read seeds it,
+every stored event moves it to that event's hash, and an error on the event row —
+a timed-out INSERT may have landed — forgets it, so the next append asks the ledger
+again. An ingest record that could not be confirmed keeps the tip, because the
+event row is in the ledger and the next event must chain onto it. A session the
+ledger has never seen is remembered as empty, so a handoff's read and the emit
+that follows share one lookup. Steady state is therefore two ledger calls per
+emit — the event row and its ingest record — instead of three or four.
+`SUBSTRATE_LEDGER_CHAIN_CACHE=0` turns the cache off and restores one read per
+emit, with nothing else changed.
+
+The seeding read itself is bounded to the last `SUBSTRATE_LEDGER_CHAIN_LOOKBACK_DAYS`
+(default 30) of `ts`. When that window holds nothing the whole session is read
+instead, so a session that fell silent for longer than the window continues its
+chain rather than restarting it — an empty session costs that second read once.
+The bound is a window, and the paragraph above says why windows are dangerous:
+what remains uncovered is a session whose real tip is a backfilled event older
+than the window *and* that this process has not yet appended to. `verify` detects
+that fork as it always has, and the window is an operator knob.
+
+**Two concurrent appends in one session cannot fork it (uplift-2 R5).** `prev`
+is still a read-then-write with no sequence column, but `Substrate.emit`
+serialises appends per `session_id` with a promise chain (the pattern
+`completionChains` uses for node completion): the second waits for the first to
+settle and reads the hash it stored. Different sessions never wait on each other,
+sessionless events never wait, and an event that fails validation releases its
+turn. `events_verify` is unchanged — it still recomputes the chain and still
+reports a fork a different process or an older build may have written.
 
 **Append-only, structurally.** Every statement passes `assertAppendOnly` before
 it leaves the client. It is deny-by-default — only `select`, `insert`, `create`,
 `show`, `describe`, `explain` and `with` — so `UPDATE`, `DELETE`, `DROP`,
-`TRUNCATE`, `ALTER` and `RENAME` cannot reach the ledger from this process at
-all. Batched statements are refused too, since Greptime's HTTP API accepts
+`TRUNCATE`, `RENAME` and every `ALTER` cannot reach the ledger from this process
+at all, with one exception that bypasses the guard for exactly one statement
+shape: `ALTER TABLE "<agent_events|event_ingest>" SET 'ttl'='<validated duration>'`,
+built from a typed table name and a value that has passed the duration check, sent
+only by `migrate()` and only when `SUBSTRATE_LEDGER_TTL` is set (see *Retention*).
+Batched statements are refused too, since Greptime's HTTP API accepts
 `;`-separated ones and checking only the first verb would leave a way in. The
 guard blanks string literals before reasoning about structure, so an event whose
 summary contains `;` or `--` is neither mistaken for a batch nor wrongly dropped.
@@ -465,6 +498,142 @@ have. `events_query` is a browse; the complete read of a session or graph is
 Not built here: a `substrate events` CLI subcommand. Hooks and the CLI can already
 reach `POST /events/query`; nothing needed it yet.
 
+**Stream polls are bounded in time (uplift-2 R5).** `GET /events/stream` polls the
+ledger every 500 ms per connection with two statements. `eventIdsAfter` finds the
+positions after the cursor: its outer side was already a window from the cursor's
+millisecond forward, but the anti-join that drops an event with an earlier record
+probed all of `event_ingest` before the cursor. It now looks back one hour
+(`INGEST_RETRY_LOOKBACK_MS`): the only way one event has two records is a retry
+inside the 1 s `INGEST_BUDGET_MS` of its first attempt, so an hour is three
+thousand times the gap that can exist, and the bound changes no answer. The
+positions carry each event's own `ts` from its ingest record, and `eventsByIds`
+brackets its row read with `"ts" BETWEEN` the earliest and the latest of them —
+`id` is not a key, so `WHERE "id" IN (...)` alone scanned every row ever stored,
+once per poll per stream. A caller with bare ids reads unbounded, as before.
+`readEvents` and `graphIngest`, which `events_verify` walks, are unbounded on
+purpose: verification must see everything.
+
+## Health: the write probe (uplift-2 R5)
+
+`GET /healthz` used to derive `eventsWritable` from metadata — the ledger answered
+`SELECT 1`, the quoting dialect was known, `SHOW CREATE TABLE` said `append_mode`
+— so a store that had stopped taking writes (a full volume, a region that would
+not flush) still reported 200 while every `events_emit` answered `stored: false`.
+
+`migrate()` now creates one more table, append-only with a one-day TTL so it never
+grows past a day of one row a minute:
+
+```sql
+CREATE TABLE IF NOT EXISTS "substrate_health" (
+  "ts"    TIMESTAMP TIME INDEX,
+  "probe" STRING
+) WITH ('append_mode' = 'true', 'ttl' = '1d')
+```
+
+A server that refuses the `ttl` option gets the table without it and a boot
+warning. `GreptimeClient.writeProbe()` inserts one row (`'healthz'`, stamped now);
+`probeWritable()` runs it at most once per `SUBSTRATE_LEDGER_WRITE_PROBE_S` (default
+60; `0` turns probing off), shares one in-flight probe between overlapping health
+calls, goes through the ledger's breaker like every other statement, and never
+throws: a failure *is* the verdict. `Substrate.health()` folds it in:
+
+```
+eventsWritable = greptime && quotingDialectKnown
+              && (appendOnly || SUBSTRATE_ALLOW_DEDUPLICATING_LEDGER)
+              && lastProbeOk !== false
+ledger: { writable, lastProbeAt, lastProbeOk, lastProbeError }
+```
+
+A probe that has not run yet — or that is off — neither proves nor disproves, so
+writability is the metadata's; a failed probe overrides it, and the existing status
+rule turns `/healthz` 503 within one interval of writes failing. `lastProbeError`
+has been through the redactor and had the store's URL and host scrubbed out, so
+the body can carry it. An unreachable ledger is not probed — it is already not
+writable, and a write that cannot connect would only charge the breaker twice.
+The deploy gate (`infra/vps/deploy-release.sh`) reads the status code, so a
+release onto a ledger that cannot take writes now fails its health gate.
+
+## Capacity (uplift-2 R5)
+
+`GreptimeClient.capacity()` reads `information_schema.region_statistics` joined to
+`information_schema.tables` for the configured database — approximate, as the
+server says — and answers `{ bytes, rows, tables }`, the ten largest tables by disk
+each as `{ name, rows, diskBytes, sstBytes, indexBytes }`, with a table's regions
+summed. `/healthz` reports it under `capacity.ledger`, beside R4's
+`capacity.index`, raced against the same 1 s bound and `null` when the store does
+not answer in time. The Railway volume is 500 MB; the measured ledger was 1.28 MB
+for 14,302 rows (BASELINES.md), so there is room, but the number is now visible
+rather than a one-off query.
+
+**Operator cleanup: the stale pre-append table.** `agent_events_pre_append_20260930`
+(9,851 rows, 1.29 MB; BASELINES.md) is, by its name, the copy kept when
+`agent_events` was recreated with `append_mode`. Nothing reads it; it shows up first in
+`capacity.ledger.tables`. Dropping it is an operator action — this client refuses
+`DROP` by design and will not grow a path for it — taken after an export of the
+table off-box, e.g. from the Greptime HTTP API with the same `events_query`-style
+window read into a file outside the VPS disk:
+
+```sql
+DROP TABLE "agent_events_pre_append_20260930";
+```
+
+## Retention: opt-in TTL (uplift-2 R5)
+
+`docs/data-planes.md` sets the ledger's policy as **"180 days hot, then export"**.
+Until now no table carried a TTL (`SHOW CREATE TABLE` showed only `append_mode`).
+
+`SUBSTRATE_LEDGER_TTL` applies it. Unset — the default — alters nothing: the client
+neither sets nor unsets a TTL on its own, so a retention applied by hand is left
+alone and so is a table that has none. When set, `migrate()` reads `SHOW CREATE
+TABLE` for `agent_events` and `event_ingest` and sends
+
+```sql
+ALTER TABLE "agent_events" SET 'ttl'='180d';
+ALTER TABLE "event_ingest" SET 'ttl'='180d';
+```
+
+only for a table whose live `ttl` differs, so a boot against tables that already
+carry the policy sends nothing. Every failure is a boot warning naming the live
+value, never a refusal to serve. The value is validated at config load against
+Greptime's time-duration grammar (reference, *Time Durations*: integer + unit
+spans such as `180d`, `4320h`, `1h30m`; no decimals, signs or hex; `forever` and
+`instant` are refused because they are not retention policies) and an invalid
+value refuses to boot with the reason — a retention that was set but silently
+never applied would be worse. The policy value is `180d`, matching
+`docs/data-planes.md`.
+
+**What a TTL does to `events_verify`.** Expiry is the server's own asynchronous
+job: rows whose `ts` is older than the TTL are deleted by Greptime, not by this
+process. A verified graph whose events have all expired reads as empty; one that
+straddles the boundary reports its oldest surviving event as a chain break, since
+its `prev` names a row that is gone. The hourly anchors keep the roots: `anchors`
+carries no TTL, so every anchored hour's Merkle root — and its devnet memo —
+stays, and an exported hour can still be checked against it. What is lost is the
+ability to *recompute* a root for an expired hour from the ledger itself.
+
+**Export before expiry.** The policy says *then export*, and the VPS disk is at
+95 % (BASELINES.md), so the export goes off-box. Before the first day on which
+rows would expire, an operator reads the window that is about to leave with
+`events_query` (`since`/`until` bounds, `include_payload: true`, paging by
+session or graph since the read is a window, not a cursor) or directly over the
+HTTP SQL API with the same `WHERE "ts" >= … AND "ts" < …` shape, and writes the
+rows to a file on a volume that is not the VPS root disk. The ingest records of
+the same `ingested_at` window go with them, so an exported hour can be
+re-anchored. Only once the export is confirmed is `SUBSTRATE_LEDGER_TTL` set.
+
+**Rollback.** The client has no path for it, by design. Per the Greptime SQL
+reference page *ALTER* (section "Unset table options"), the statement is
+
+```sql
+ALTER TABLE "agent_events" UNSET 'ttl';
+ALTER TABLE "event_ingest" UNSET 'ttl';
+```
+
+run by the operator against the store, with `SUBSTRATE_LEDGER_TTL` unset in
+`substrate.env` so the next boot does not set it again. The same page notes that
+unsetting stops further deletion but does not restore rows already removed — which
+is what the export step above is for.
+
 ## Configuration
 
 Four variables, read from the environment and never from this repo:
@@ -476,11 +645,18 @@ Four variables, read from the environment and never from this repo:
 | `GREPTIME_PASSWORD` | basic-auth password |
 | `GREPTIME_DB` | database; defaults to `public` |
 
-Plus one switch, which is not a credential:
+Plus switches, none of which is a credential:
 
 | | |
 | --- | --- |
 | `SUBSTRATE_ALLOW_DEDUPLICATING_LEDGER` | `true` appends even when the table is not provably in `append_mode`. Unset by default, which refuses; see above. |
+| `SUBSTRATE_LEDGER_CHAIN_CACHE` | `0`/`false`/`no` turns the per-session chain-tip cache off: one chain-tip read per emit again. Default on. |
+| `SUBSTRATE_LEDGER_CHAIN_CACHE_MAX` | sessions whose tip is remembered at once, 1..1 000 000; default 10 000, least recently used evicted. |
+| `SUBSTRATE_LEDGER_CHAIN_LOOKBACK_DAYS` | how far back in `ts` the one seeding read looks before it falls back to the whole session, 1..3650; default 30. |
+| `SUBSTRATE_LEDGER_WRITE_PROBE_S` | seconds between `/healthz` write probes, 0..86400; default 60. `0` never probes, and `eventsWritable` is metadata-only again. |
+| `SUBSTRATE_LEDGER_TTL` | retention applied to `agent_events` and `event_ingest` at boot, a Greptime duration such as `180d`. Unset by default: nothing is altered. Invalid refuses to boot. See *Retention*. |
+
+Out-of-range numbers clamp and unparseable ones fall back, as the breaker settings do.
 
 `.env.example` declares all four and fills none of them in. The real values live
 only in `/etc/substrate/substrate.env` on the VPS — root-owned, `chmod 0600`,

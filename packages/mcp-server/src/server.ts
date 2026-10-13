@@ -1434,7 +1434,8 @@ async function openEventStream(
 				}
 				const positions = await greptime.eventIdsAfter(cursor, bounds.batch);
 				if (positions.length === 0) return;
-				const rows = await greptime.eventsByIds(positions.map((position) => position.id));
+				// Positions, not ids: each carries `eventTs`, which bounds the row read in time (uplift-2 R5).
+				const rows = await greptime.eventsByIds(positions);
 				const byId = new Map(rows.map((row) => [String(row.id), row]));
 				for (const position of positions) {
 					const row = byId.get(position.id);

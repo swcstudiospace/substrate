@@ -142,7 +142,7 @@ export interface SubstrateConfig {
 	 * of two rows sharing a primary key and a millisecond, and a ledger that loses
 	 * rows while answering `stored: true` is worse than one that says it cannot
 	 * take the write. Recreating the table is the fix and is out of band — the
-	 * client refuses `ALTER` and `RENAME` by design.
+	 * client refuses `RENAME` and every `ALTER` but the guarded TTL one by design.
 	 *
 	 * This exists so an operator can knowingly accept that loss while the recreate
 	 * is pending, rather than having no lever at all. It is never the quiet path:
@@ -280,6 +280,12 @@ export interface SubstrateConfig {
 	cacheConnectTimeoutMs: number;
 	/** How long a computed `/healthz` body is served to pollers, ms (`SUBSTRATE_HEALTHZ_CACHE_MS`, default 5000; 0 = recompute per call). */
 	healthzCacheMs: number;
+	// uplift-2 R5
+	/**
+	 * Ledger chain cache, chain-tip lookback, write-probe cadence and opt-in TTL,
+	 * from `SUBSTRATE_LEDGER_*`. See `docs/greptime-ledger.md`.
+	 */
+	ledger: LedgerSettings;
 }
 
 /** Production defaults: September's library, so the host ledger keeps deduplicating. */
@@ -508,6 +514,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		cacheCommandTimeoutMs: positiveOr(env.SUBSTRATE_CACHE_COMMAND_TIMEOUT_MS, 250),
 		cacheConnectTimeoutMs: positiveOr(env.SUBSTRATE_CACHE_CONNECT_TIMEOUT_MS, 250),
 		healthzCacheMs: nonNegativeOr(env.SUBSTRATE_HEALTHZ_CACHE_MS, 5000),
+		// uplift-2 R5
+		ledger: loadLedgerSettings(env),
 	};
 }
 
@@ -797,4 +805,74 @@ export function desktopConfigWarnings(config: SubstrateConfig): string[] {
 		);
 	}
 	return warnings;
+}
+
+// uplift-2 R5 — GreptimeDB ledger settings
+
+/** The knobs behind `SUBSTRATE_LEDGER_*` (uplift-2 R5). */
+export interface LedgerSettings {
+	/** Remember each session's chain tip after one read; `SUBSTRATE_LEDGER_CHAIN_CACHE=0` restores one read per emit. */
+	chainCache: boolean;
+	/** Sessions whose tip is remembered at once; the least recently used is dropped past this. */
+	chainCacheMax: number;
+	/** How far back in `ts` the one chain-tip read looks before it falls back to the whole session. */
+	chainLookbackDays: number;
+	/** Seconds between `/healthz` write probes; 0 never probes, and writability is metadata only. */
+	writeProbeS: number;
+	/** Retention to apply to `agent_events` and `event_ingest` at boot; `null` alters nothing. */
+	ttl: string | null;
+}
+
+export const DEFAULT_LEDGER_SETTINGS: LedgerSettings = {
+	chainCache: true,
+	chainCacheMax: 10_000,
+	chainLookbackDays: 30,
+	writeProbeS: 60,
+	ttl: null,
+};
+
+/**
+ * Whether a string is a GreptimeDB time duration (reference, "Time Durations"):
+ * one or more `<integer><unit>` spans, units case-insensitive, singular or plural,
+ * spaces between spans allowed — `180d`, `4320h`, `1h 30m`. Decimals, signs and
+ * hex are not. `forever` and `instant` are legal TTLs too but are not retention
+ * policies, so they are refused here: unset means "leave the table alone".
+ */
+export function isGreptimeDuration(value: string): boolean {
+	// Suffixes are case-insensitive per the reference, so `M` (months) is also
+	// reached through the `m` alternative; the alternation lists long forms first
+	// so `ms` is not read as `m` + a stray `s`.
+	return /^(?:\d+(?:nsec|ns|usec|us|msec|ms|seconds|second|sec|s|minutes|minute|min|m|hours|hour|hr|h|days|day|d|weeks|week|w|months|month|years|year|y)\s*)+$/i.test(
+		value,
+	);
+}
+
+/** A whole number inside `[min, max]`, or `fallback` for anything else. */
+function boundedInt(raw: string | undefined, fallback: number, min: number, max: number): number {
+	const n = Number(raw?.trim());
+	if (raw === undefined || raw.trim() === "" || !Number.isFinite(n)) return fallback;
+	return Math.min(max, Math.max(min, Math.trunc(n)));
+}
+
+/**
+ * `SUBSTRATE_LEDGER_*` as the client reads them. Out-of-range numbers clamp,
+ * unparseable ones fall back — like the breaker settings — except the TTL: a
+ * retention that is set but is not a Greptime duration would never be applied
+ * and the operator would believe it was, so it refuses to boot with the reason.
+ */
+export function loadLedgerSettings(env: Record<string, string | undefined> = process.env): LedgerSettings {
+	const ttlRaw = env.SUBSTRATE_LEDGER_TTL?.trim() ?? "";
+	if (ttlRaw !== "" && !isGreptimeDuration(ttlRaw)) {
+		throw new ConfigError(
+			`SUBSTRATE_LEDGER_TTL=${JSON.stringify(ttlRaw)} is not a GreptimeDB time duration; use spans like 180d, 4320h or 1h30m ` +
+				"(integer + unit, no decimals), or unset it to leave the tables' retention unchanged",
+		);
+	}
+	return {
+		chainCache: !/^(0|false|no)$/i.test(env.SUBSTRATE_LEDGER_CHAIN_CACHE?.trim() ?? ""),
+		chainCacheMax: boundedInt(env.SUBSTRATE_LEDGER_CHAIN_CACHE_MAX, DEFAULT_LEDGER_SETTINGS.chainCacheMax, 1, 1_000_000),
+		chainLookbackDays: boundedInt(env.SUBSTRATE_LEDGER_CHAIN_LOOKBACK_DAYS, DEFAULT_LEDGER_SETTINGS.chainLookbackDays, 1, 3650),
+		writeProbeS: boundedInt(env.SUBSTRATE_LEDGER_WRITE_PROBE_S, DEFAULT_LEDGER_SETTINGS.writeProbeS, 0, 86_400),
+		ttl: ttlRaw === "" ? null : ttlRaw,
+	};
 }
