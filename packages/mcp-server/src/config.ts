@@ -916,6 +916,8 @@ export function loadLedgerSettings(env: Record<string, string | undefined> = pro
 		writeProbeS: boundedInt(env.SUBSTRATE_LEDGER_WRITE_PROBE_S, DEFAULT_LEDGER_SETTINGS.writeProbeS, 0, 86_400),
 		ttl: ttlRaw === "" ? null : ttlRaw,
 	};
+}
+
 // uplift-2 R3
 /** `memory_search`'s recall leg: shorter than the tool's own budget, so a slow plane never holds a search past it. */
 export const DEFAULT_SEARCH_RECALL_BUDGET_MS = 1500;
