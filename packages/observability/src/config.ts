@@ -21,6 +21,13 @@ export interface ObservabilityConfig {
 	sampleRatio: number;
 	maxSpans: number;
 	slo: SloThresholds;
+	/**
+	 * The index volume's size in bytes (`SUBSTRATE_INDEX_VOLUME_BYTES`, uplift-3
+	 * N2), the ceiling the capacity runway counts down to; `null` when unset or
+	 * not a positive number, which leaves `capacity.index.runway_days`
+	 * `insufficient-data` with the reason in its sentence.
+	 */
+	indexVolumeBytes: number | null;
 }
 
 /** `a=1,b=2` → `{a: "1", b: "2"}`, the form OTEL_EXPORTER_OTLP_HEADERS uses. */
@@ -70,6 +77,7 @@ export function loadObservabilityConfig(
 	const metricsEndpoint = normalizeEndpoint(env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT) || generic;
 	const tracesEndpoint = normalizeEndpoint(env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT) || generic;
 
+	const volume = optionalNumber(env.SUBSTRATE_INDEX_VOLUME_BYTES);
 	return {
 		// Either signal being configured is enough to run the exporter; each is sent only
 		// where it has somewhere to go.
@@ -101,6 +109,8 @@ export function loadObservabilityConfig(
 			minSamples: optionalNumber(env.SUBSTRATE_SLO_MIN_SAMPLES),
 			planeAvailability: optionalNumber(env.SUBSTRATE_SLO_PLANE_AVAILABILITY),
 			docsSearchP95Ms: optionalNumber(env.SUBSTRATE_SLO_DOCS_SEARCH_P95_MS),
+			runwayDays: optionalNumber(env.SUBSTRATE_SLO_RUNWAY_DAYS),
 		},
+		indexVolumeBytes: volume !== undefined && volume > 0 ? Math.floor(volume) : null,
 	};
 }

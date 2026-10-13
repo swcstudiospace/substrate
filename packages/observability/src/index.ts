@@ -122,7 +122,12 @@ export {
 } from "./breaker.ts";
 
 export {
+	type CapacityEvalOptions,
+	type CapacitySample,
+	type CapacitySloResult,
+	type CapacitySloStatus,
 	type CounterSelector,
+	type PlaneCountSample,
 	type PlaneEvalOptions,
 	type PlaneSloResult,
 	type PlaneSloStatus,
@@ -132,12 +137,20 @@ export {
 	type SloTarget,
 	type SloThresholds,
 	ADMISSION_SLO,
+	CAPACITY_DEDUPE_MS,
+	CAPACITY_MIN_SPAN_MS,
+	CAPACITY_RING_MAX,
+	CAPACITY_RUNWAY_ID,
+	CapacityRing,
 	DEFAULT_THRESHOLDS,
+	INDEX_VOLUME_ENV,
 	PLANE_AVAILABILITY_ENV,
+	PLANE_BUCKET_MS,
 	PLANE_WINDOW_MS,
 	PlaneWindow,
 	breaches,
 	evaluateAdmissionSlo,
+	evaluateCapacitySlos,
 	docsSearchObjective,
 	evaluateDocsSlos,
 	evaluatePlaneSlos,
@@ -156,6 +169,7 @@ export {
 	type BurnTarget,
 	type BurnThresholds,
 	BURN_COST_ID,
+	BURN_MAX_SAMPLES,
 	BURN_MIN_SPAN_MS,
 	BURN_TOKENS_ID,
 	BURN_WINDOW_MS,
@@ -166,5 +180,22 @@ export {
 	loadBurnThresholds,
 	sharedBurnLedger,
 } from "./burn.ts";
+
+export {
+	type CheckpointCounter,
+	type CheckpointExtras,
+	type CheckpointHistogram,
+	type CheckpointMetric,
+	type NotifyRecord,
+	type NotifyState,
+	type SloCheckpoint,
+	CHECKPOINT_VERSION,
+	CheckpointError,
+	MAX_CHECKPOINT_BYTES,
+	NOTIFY_STATES,
+	restoreCheckpoint,
+	serializeCheckpoint,
+	snapshotCheckpoint,
+} from "./checkpoint.ts";
 
 export { type ObservabilityConfig, loadObservabilityConfig, parseKeyValueList } from "./config.ts";

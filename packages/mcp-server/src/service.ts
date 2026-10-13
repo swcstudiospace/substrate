@@ -549,6 +549,8 @@ export interface SubstrateObserver {
 	docsSearch?(sample: DocsSearchSample): void;
 	/** One memory entry past its `ttl` that an index read met, and what the read did with it (uplift-3 N4). */
 	memoryExpired?(sample: MemoryExpiredSample): void;
+	/** One `/healthz` index size read (uplift-3 N2), the sample the capacity runway is fitted over. */
+	capacity?(sample: { at: number; databaseBytes: number }): void;
 	claimed?(sample: {
 		surface: Surface;
 		graph_id: string;
@@ -4100,6 +4102,9 @@ export class Substrate {
 		]);
 		const cache = this.cache.health();
 		const breakers = this.planes.snapshots();
+		// uplift-3 N2: every size read that answered in time is one runway sample;
+		// the observer's ring dedupes and bounds them.
+		if (capacity !== null) this.observer.capacity?.({ at: Date.now(), databaseBytes: capacity.databaseBytes });
 		const ok: Record<PlaneName, boolean | null> = {
 			greptime: this.greptime ? greptime : null,
 			index: this.index ? index : null,

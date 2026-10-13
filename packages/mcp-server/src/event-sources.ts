@@ -478,6 +478,47 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 		}),
 	},
 	{
+		// uplift-3 N2: the SLO notifier (slo-notify.ts, SUBSTRATE_SLO_NOTIFY=1)
+		// posts one warning when an objective's breach or a breaker's open state
+		// has held for SUBSTRATE_SLO_NOTIFY_SUSTAIN_S, deduped through the SLO
+		// checkpoint so a restart never repeats it. Lands after phase 33 like
+		// doctor.drift.
+		id: "slo.transition",
+		phase: 33,
+		kind: "warning",
+		surface: { fixed: "substrate" },
+		actions: ["slo.transition"],
+		runtime: "slo",
+		carriesRepo: false,
+		periodic: true,
+		sample: () => ({
+			surface: "substrate",
+			kind: "warning",
+			summary: "slo breached: brief.p95 (observed 1240, target 800)",
+			session_id: "slo:notify",
+			payload: { action: "slo.transition", runtime: "slo", objective: "brief.p95", state: "breached", observed: 1240, target: 800 },
+		}),
+	},
+	{
+		// uplift-3 N2: the same notifier's recovery, a note because it is good
+		// news; same payload with state "recovered".
+		id: "slo.recovered",
+		phase: 33,
+		kind: "note",
+		surface: { fixed: "substrate" },
+		actions: ["slo.transition"],
+		runtime: "slo",
+		carriesRepo: false,
+		periodic: true,
+		sample: () => ({
+			surface: "substrate",
+			kind: "note",
+			summary: "slo recovered: brief.p95 (observed 610, target 800)",
+			session_id: "slo:notify",
+			payload: { action: "slo.transition", runtime: "slo", objective: "brief.p95", state: "recovered", observed: 610, target: 800 },
+		}),
+	},
+	{
 		id: "teachable.accepted",
 		phase: 29,
 		kind: "note",

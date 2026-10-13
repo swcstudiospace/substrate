@@ -183,7 +183,8 @@ describe("GET /slo lists the per-plane objectives", () => {
 		expect(body.planes.find((entry) => entry.plane === "index")?.status).toBe("insufficient-data");
 		expect(body.planes.find((entry) => entry.plane === "greptime")?.status).toBe("unconfigured");
 		expect(body.planes.every((entry) => entry.target === 0.99)).toBe(true);
-		// The catalogue is still exactly SPE-4793's four, and `breached` is still theirs alone.
+		// The catalogue is still exactly SPE-4793's four. `breached` folds in plane and
+		// burn breaches since uplift-3 N2 (slo-history.test.ts), and here nothing is breached.
 		expect(body.results.map((entry) => entry.id)).toEqual(["brief.p95", "emit.success", "lease.steal_rate", "quarantine.rate"]);
 		expect(body.breached).toEqual([]);
 		// The docs-search objective (uplift-3 N5) rides beside them the same way: one

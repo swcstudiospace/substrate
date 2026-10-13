@@ -304,6 +304,108 @@ default budget are both exact edges. Judged as a process-lifetime count like the
 catalogue, never folded into `breached`. See `docs/docs-search-ingest.md` for the
 counters beside it.
 
+### History across restarts (uplift-3 N2)
+
+The catalogue is a process-lifetime aggregate and the plane and burn windows
+are in-memory rings, so until uplift-3 every deploy zeroed `brief.p95` and
+left the rolling hour empty for an hour. The server now keeps an **SLO
+checkpoint**: one JSON file (`v: 1`) holding every cumulative counter and
+histogram point with its attributes, the plane window buckets, the burn
+ledger samples, the capacity ring below and the notifier's last emitted state
+per objective. It is written every `SUBSTRATE_SLO_CHECKPOINT_S` (60 s; `0`
+writes only at shutdown) as `<path>.part` renamed over `<path>`, and once more
+on `SIGTERM` inside the same bound as the final OTLP flush.
+
+At boot the file is restored and the process becomes the next **epoch**: the
+restored points seed each instrument's *prior* layer, live observations start
+from zero on top of it, and every snapshot — `/metrics`, `/slo`, the exporter
+— is the merged series. Restoring the same file twice replaces the layer
+rather than adding to it, so nothing is double-counted; the registry's start
+time (and `/metrics.startedAt`) becomes the history's `since`, so a collector
+sees cumulative points that mean what they say. A missing file is a fresh
+start with nothing to say; a corrupt one, one over 4 MB, or one of another
+version is **one boot line** (`degraded — slo checkpoint … starts fresh`) and
+a fresh start, never a refusal to boot. A metric the running release no
+longer records, or a histogram whose bucket edges moved, is left out and
+named once.
+
+`GET /slo` carries the state as `history`:
+
+```json
+"history": { "epoch": 3, "since": "2026-10-13T09:12:04.118Z", "checkpointAt": "2026-10-14T07:30:00.212Z" }
+```
+
+`epoch` is 1 on a fresh start and the checkpoint's epoch + 1 after a restore;
+`since` is the oldest sample the merged series reach back to; `checkpointAt`
+is the newest write (this process's, else the restored file's; `null` with
+neither). The post-deploy check is `/slo.history.epoch ≥ 2` with the
+pre-restart `samples` still counted.
+
+The path is `SUBSTRATE_SLO_CHECKPOINT`. Unset, it is
+`/var/lib/substrate/slo-checkpoint.json` **only when that directory exists**
+(the unit's `StateDirectory`); on a bare local run there is no checkpoint and
+the boot says so. `off` disables it; a relative path disables it and is named
+at boot, because a checkpoint must never land in the repo by typo.
+
+`breached` also changed: it now lists the catalogue's breaches **and** the
+plane and burn breaches (`plane.<name>.availability`, `burn.tokens`,
+`burn.cost_usd`), in that order — the storm-breaker and the runbook read one
+list, and a plane that was unavailable for an hour is as much a breach as a
+slow brief. The per-array detail is unchanged beside it. The admission, docs
+and capacity rows are still not folded in.
+
+### Capacity runway (uplift-3 N2)
+
+`GET /healthz` reports the index's size as a point read; `GET /slo` now
+carries a `capacity` array with one row fitted over the history of those
+reads:
+
+| Objective | Statement |
+| --- | --- |
+| `capacity.index.runway_days` | `(SUBSTRATE_INDEX_VOLUME_BYTES − databaseBytes) / bytes per day ≥ 14 days` (`SUBSTRATE_SLO_RUNWAY_DAYS`), the rate a least-squares fit over the ring |
+
+Every `/healthz` capacity read that answered in time is one sample in a ring
+of at most 1,440 (`{at, databaseBytes}`; reads inside 60 s of the newest
+coalesce), carried in the checkpoint. The fit needs samples spanning at least
+**24 h** — one vacuum or one bulk ingest must not read as a trend — and
+reports `insufficient-data` with the span until then, and when
+`SUBSTRATE_INDEX_VOLUME_BYTES` is unset (the row says which). An index that is
+not growing has an unbounded runway (`ok`, `observed: null`, the rate in the
+sentence); one at or past the volume has none (`breached`, `observed: 0`).
+The row also carries `bytesPerDay`, `currentBytes` and `volumeBytes` so the
+runbook's arithmetic is checkable. No `index.pool.wait_p95` row: `IndexStore`
+measures statement time through the plane gate, not pool acquisition, and the
+row is not invented from a number that is not measured.
+
+### Notifications (uplift-3 N2)
+
+`SUBSTRATE_SLO_NOTIFY=1` schedules an evaluator every `SUBSTRATE_SLO_NOTIFY_S`
+(60 s) that judges the catalogue, the planes, the burn ceilings, the capacity
+runway and every breaker. A condition — an objective `breached`, or a breaker
+`open` (half-open counts as still open) — held for
+`SUBSTRATE_SLO_NOTIFY_SUSTAIN_S` (300 s) becomes **one** event on the ledger
+through the service's own `emit`, as surface `substrate`:
+
+```json
+{ "kind": "warning", "summary": "slo breached: plane.index.availability (observed 0.912, target 0.990)", "session_id": "slo:notify",
+  "payload": { "action": "slo.transition", "runtime": "slo", "objective": "plane.index.availability", "state": "breached", "observed": 0.912, "target": 0.99 } }
+```
+
+`state` is `breached` or `open`; the condition clearing for the same sustain
+is one `note` with `state: "recovered"` and the same payload (the sustain
+applies both ways, so an objective sitting on its threshold cannot pair a
+breach and a recovery every minute). A breaker's `observed` is its failure
+count and its `target` is `null`. The last state emitted per objective is in
+the checkpoint, so a restart that restores it says nothing about a breach it
+already announced and still announces the recovery; without a checkpoint a
+restart re-announces after one sustain. `SUBSTRATE_SLO_WEBHOOK_URL`, when
+set, is POSTed the same payload (plus `summary` and `at`) once per
+transition, bounded to 5 s and never retried — the ledger has the event, and
+a webhook that is down must not become a second incident. The URL is never
+printed. Both rows (`slo.transition`, `slo.recovered`) are in
+[`event-vocabulary.md`](event-vocabulary.md); the operator view is in
+[`runbooks/substrate-red.md`](runbooks/substrate-red.md).
+
 ### Two things the evaluator does on purpose
 
 **The p95 objective is checked as a count, not an interpolation.** 800 is one of the
@@ -374,10 +476,11 @@ chosen to be alarming rather than measured, and `SUBSTRATE_SLO_LEASE_STEAL` /
   out. One reason is emitted today, `unrecorded-claim` (below). Phase 2 adds
   dispatch-failure quarantine.
 
-The counters are process-lifetime totals, so an outage stays visible in `/slo`
-after it ends. A rolling window is the collector's job; an SLO that healed itself
-the moment the outage stopped would hide the outage from anyone who looked
-afterwards.
+The counters are cumulative totals — process-lifetime, and since uplift-3 N2
+across restarts too when the SLO checkpoint is on (`history.since` says how far
+back) — so an outage stays visible in `/slo` after it ends. A rolling window is
+the collector's job; an SLO that healed itself the moment the outage stopped
+would hide the outage from anyone who looked afterwards.
 
 ## Fail open, fail closed
 
@@ -476,8 +579,7 @@ they stay; they carry no repo, so no brief shows them.
 | | |
 | --- | --- |
 | `GET /metrics` | the snapshot this process holds, in the shape `otlp.ts` encodes |
-| `GET /slo` | the verdicts computed from it, the breached ids, `burn`, the per-plane `planes`, and the `admission` refusal rate |
-| `GET /slo` | the verdicts computed from it, the breached ids, `burn`, the per-plane `planes`, and the `docs` row |
+| `GET /slo` | the verdicts computed from it, the breached ids (catalogue, plane and burn), `burn`, the per-plane `planes`, the `admission` refusal rate, the `docs` row, the `capacity` runway row and `history` |
 | `POST /evidence` | `{ "graph_id": "ut-…", "format": "json" \| "html" }` |
 | `GET /healthz` | now also `auditDurable`, `auditRecords`, `planes`, `capacity`, `cachedAt` and `stale` |
 
@@ -515,6 +617,14 @@ substrate-specific spelling.
 | `SUBSTRATE_SLO_QUARANTINE` | `0.01` | Provisional. |
 | `SUBSTRATE_SLO_MIN_SAMPLES` | `20` | Below this an objective is `insufficient-data`. |
 | `SUBSTRATE_SLO_PLANE_AVAILABILITY` | `0.99` | Floor for every `plane.<name>.availability` over the rolling hour. |
+| `SUBSTRATE_SLO_RUNWAY_DAYS` | `14` | Floor for `capacity.index.runway_days`. |
+| `SUBSTRATE_INDEX_VOLUME_BYTES` | — | The index volume's size; unset leaves the runway `insufficient-data` with the reason. |
+| `SUBSTRATE_SLO_CHECKPOINT` | `/var/lib/substrate/slo-checkpoint.json` when that directory exists, else off | Absolute path of the SLO checkpoint; `off` disables; a relative path disables and is named at boot. |
+| `SUBSTRATE_SLO_CHECKPOINT_S` | `60` | Seconds between checkpoint writes; `0` writes only at shutdown. |
+| `SUBSTRATE_SLO_NOTIFY` | off | `1` schedules the transition notifier. |
+| `SUBSTRATE_SLO_NOTIFY_S` | `60` | Seconds between evaluations (floor 5). |
+| `SUBSTRATE_SLO_NOTIFY_SUSTAIN_S` | `300` | Seconds a breach, an open breaker or a recovery must hold before it is announced; `0` announces at once. |
+| `SUBSTRATE_SLO_WEBHOOK_URL` | — | `http(s)` URL POSTed each transition's payload, 5 s, one attempt. Never printed. |
 | `SUBSTRATE_BREAKER` | on | `0` \| `false` \| `no` disables every plane breaker (kill switch); calls still measured. |
 | `SUBSTRATE_BREAKER_FAILURES` | `5` | Consecutive failures that open a breaker; integer 1–100, else the default. |
 | `SUBSTRATE_BREAKER_OPEN_MS` | `30000` | How long an open breaker refuses before one probe; integer 1000–600000, else the default. |

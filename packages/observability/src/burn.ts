@@ -51,7 +51,7 @@ export const BURN_WINDOW_MS = 60 * 60 * 1000;
 export const BURN_MIN_SPAN_MS = 5 * 60 * 1000;
 
 /** Samples kept per metric; the window is what bounds the useful history anyway. */
-const BURN_MAX_SAMPLES = 480;
+export const BURN_MAX_SAMPLES = 480;
 
 export const BURN_TOKENS_ID = "burn.tokens";
 export const BURN_COST_ID = "burn.cost_usd";
@@ -111,6 +111,11 @@ export interface BurnSample {
  * backwards is a counter reset — a restart gave the process a fresh registry — and
  * the history is dropped rather than divided: subtracting across a reset would
  * read the restart itself as negative spend.
+ *
+ * `prior` (uplift-3 N2) is the history a checkpoint carried across a restart,
+ * copied in and capped as observed samples are. Its totals came from a merged
+ * snapshot, so the first live reading on a restored registry is never below
+ * them and the restart is not read as a reset.
  */
 export class BurnLedger {
 	readonly #byMetric = new Map<string, BurnSample[]>();
@@ -118,7 +123,22 @@ export class BurnLedger {
 	constructor(
 		readonly windowMs: number = BURN_WINDOW_MS,
 		readonly minSpanMs: number = BURN_MIN_SPAN_MS,
-	) {}
+		prior: Record<string, readonly BurnSample[]> = {},
+	) {
+		for (const [metric, samples] of Object.entries(prior)) {
+			if (samples.length === 0) continue;
+			this.#byMetric.set(metric, samples.slice(-BURN_MAX_SAMPLES).map((sample) => ({ ...sample })));
+		}
+	}
+
+	/** Every retained sample per metric, copied, for a checkpoint to carry. */
+	export(): Record<string, BurnSample[]> {
+		const out: Record<string, BurnSample[]> = {};
+		for (const [metric, samples] of this.#byMetric) {
+			if (samples.length > 0) out[metric] = samples.map((sample) => ({ ...sample }));
+		}
+		return out;
+	}
 
 	/** Record one observation of `metric` and answer the per-hour rate it supports. */
 	observe(metric: string, total: number, atMs: number): BurnReading {

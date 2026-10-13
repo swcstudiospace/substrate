@@ -3,7 +3,7 @@
 | | |
 | --- | --- |
 | Requirement | uplift-2 R2 (Build Plan A-5 "Runbooks: substrate red", A-3, SPE-10665 / SPE-10667) |
-| Symptoms | `GET /healthz` answers non-200; `bun run parity:check` FAIL on the healthz criterion; a `planes.<name>.breaker.state` of `open` in `/healthz`; a `plane.<name>.availability` objective `breached` in `/slo`; a Railway store down (Greptime, TimescaleDB, Hindsight, RAGFlow) or the loopback redis stopped; agents reporting degraded briefs, recalls or docs searches |
+| Symptoms | `GET /healthz` answers non-200; `bun run parity:check` FAIL on the healthz criterion; a `planes.<name>.breaker.state` of `open` in `/healthz`; a `plane.<name>.availability` objective `breached` in `/slo`; a `warning` event on the ledger with `payload.runtime: "slo"` (uplift-3 N2, step 3); a Railway store down (Greptime, TimescaleDB, Hindsight, RAGFlow) or the loopback redis stopped; agents reporting degraded briefs, recalls or docs searches |
 | Measured | 2026-10-13 baseline (`.planning/uplift-2/BASELINES.md`): `/healthz` mean 598 ms; brief p95 3,116 ms; Greptime / Hindsight / RAGFlow edge TTFB ≈ 220–250 ms; TimescaleDB cold connect 1,057 ms; time-to-degraded answer during an outage 4–5 s before breakers, < 50 ms once a breaker is open |
 | Scope | `substrate-mcp.service` on `127.0.0.1:7410` and the five data planes it reaches |
 | Untouched | The collectors, dispatcher, host, skills sync, surface tokens, event mapping, the stores' own data |
@@ -58,15 +58,45 @@ names only.
 3. **`/slo`: which plane, how long.**
 
    ```sh
-   curl -s http://127.0.0.1:7410/slo | jq '{breached, planes: [.planes[] | {id, status, observed, samples, detail}]}'
+   curl -s http://127.0.0.1:7410/slo | jq '{breached, history, planes: [.planes[] | {id, status, observed, samples, detail}], capacity}'
    ```
 
-   `breached` is the catalogue's list (`brief.p95`, `emit.success`, …).
+   `breached` lists the catalogue's breaches (`brief.p95`, `emit.success`, …)
+   and, since uplift-3 N2, the plane and burn ones (`plane.<name>.availability`,
+   `burn.tokens`, `burn.cost_usd`) in one list.
    `planes[]` is one `plane.<name>.availability` per plane over the rolling hour:
    `breached` means more than 1 % of that plane's calls in the last hour did not
    get an answer (timeouts, errors and breaker refusals all count);
-   `insufficient-data` right after a restart is normal (two `/slo` reads are the
-   first sample); `unconfigured` is a plane this deployment does not have.
+   `insufficient-data` right after a restart means the SLO checkpoint was not
+   restored — with it, the window carries over, and `history.epoch` is ≥ 2
+   (`history.since` is how far back the numbers reach; a boot line
+   `degraded — slo checkpoint … starts fresh` says why they do not);
+   `unconfigured` is a plane this deployment does not have.
+   `capacity[0]` is the index runway: `observed` days to
+   `SUBSTRATE_INDEX_VOLUME_BYTES` at the fitted growth, `insufficient-data`
+   until a day of `/healthz` reads or while the volume is unset.
+
+   **The warning events an operator will see.** With `SUBSTRATE_SLO_NOTIFY=1`
+   the server posts one `warning` per sustained condition and one `note` per
+   sustained recovery to the ledger, surface `substrate`, `payload.runtime`
+   `slo` (`docs/observability.md`, "Notifications"):
+
+   | `payload.objective` | `payload.state` | Means |
+   | --- | --- | --- |
+   | `plane.<name>.availability` | `breached` | under 99 % of that plane's calls answered over the last hour, for 5 min running — this runbook, from step 2 |
+   | `breaker.<name>` | `open` | the plane's breaker has been open (or half-open) for 5 min; `observed` is the failure count. Every call to it is refused until a probe succeeds |
+   | `brief.p95` | `breached` | briefs over 800 ms at p95 since `history.since`; a plane row usually says which source |
+   | `emit.success` / `lease.steal_rate` / `quarantine.rate` | `breached` | the ledger is dropping events / claims are contended — `eventsWritable` first |
+   | `burn.tokens` / `burn.cost_usd` | `breached` | spend over the configured hourly ceiling; the dispatcher's `[quota-burn]` marker says the same |
+   | `capacity.index.runway_days` | `breached` | under 14 days to the index volume at the current growth: [`disk-pressure.md`](disk-pressure.md) and `substrate index sweep` before it is an outage |
+   | any of the above | `recovered` | the condition has been clear for 5 min; a `note`, not a warning |
+
+   One event per transition, never one per tick: a breach that stays breached
+   is silent until it recovers, and a restart that restores the checkpoint does
+   not repeat it. Find them with `POST /events/query` (`{"surface": "substrate"}`,
+   the `events_query` tool) or in the brief's recent actions; `summary` carries
+   the observed and target values. The events are stored, not just posted: if a
+   webhook is configured and down the ledger still has them.
 
 4. **Parity.** `bun run parity:check --json` — the unit owns the port and serves
    the pinned release. A FAIL that names only `healthz` is this runbook; a FAIL

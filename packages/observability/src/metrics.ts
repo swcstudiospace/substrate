@@ -216,6 +216,14 @@ interface InstrumentOptions {
 /** Shared series bookkeeping, including the cardinality cap. */
 abstract class Instrument<S> {
 	protected readonly series = new Map<string, { attributes: Attributes; state: S }>();
+	/**
+	 * Series restored from a prior epoch's checkpoint (uplift-3 N2), merged into
+	 * every snapshot beneath the live ones. Never observed into — `seriesFor`
+	 * only ever touches `series` — and replaced whole by `seed`, never added to,
+	 * so restoring the same checkpoint twice cannot double-count: the live epoch
+	 * starts at zero on top of exactly one prior layer.
+	 */
+	protected readonly prior = new Map<string, { attributes: Attributes; state: S }>();
 	protected overflowed = 0;
 	readonly description: string;
 	readonly unit: string;
@@ -275,6 +283,18 @@ abstract class Instrument<S> {
 	get seriesCount(): number {
 		return this.series.size;
 	}
+
+	/** Live and prior series by key: the prior state first, the live one merged over it. */
+	protected merged(merge: (prior: S | undefined, live: S | undefined) => S): Array<{ attributes: Attributes; state: S }> {
+		const out: Array<{ attributes: Attributes; state: S }> = [];
+		for (const [key, { attributes, state }] of this.prior) {
+			out.push({ attributes, state: merge(state, this.series.get(key)?.state) });
+		}
+		for (const [key, { attributes, state }] of this.series) {
+			if (!this.prior.has(key)) out.push({ attributes, state: merge(undefined, state) });
+		}
+		return out;
+	}
 }
 
 /** A monotonic cumulative sum. */
@@ -301,6 +321,20 @@ export class Counter extends Instrument<{ value: number }> {
 		this.seriesFor(attributes).value += value;
 	}
 
+	/**
+	 * Replace the prior layer with a checkpoint's points (uplift-3 N2). Negative
+	 * or non-finite values are skipped: a counter restored from them would read
+	 * as having gone backwards, which the burn ledger and plane window treat as
+	 * a reset.
+	 */
+	seed(points: readonly CounterPoint[]): void {
+		this.prior.clear();
+		for (const point of points) {
+			if (!Number.isFinite(point.value) || point.value < 0) continue;
+			this.prior.set(attributeKey(point.attributes), { attributes: point.attributes, state: { value: point.value } });
+		}
+	}
+
 	snapshot(): CounterSnapshot {
 		return {
 			kind: "counter",
@@ -309,7 +343,7 @@ export class Counter extends Instrument<{ value: number }> {
 			unit: this.unit,
 			valueType: this.valueType,
 			overflowed: this.overflowed,
-			points: [...this.series.values()].map(({ attributes, state }) => ({
+			points: this.merged((prior, live) => ({ value: (prior?.value ?? 0) + (live?.value ?? 0) })).map(({ attributes, state }) => ({
 				attributes,
 				value: this.valueType === "int" ? Math.round(state.value) : state.value,
 			})),
@@ -359,7 +393,32 @@ export class Histogram extends Instrument<HistogramState> {
 		state.buckets[index] = (state.buckets[index] ?? 0) + 1;
 	}
 
+	/**
+	 * Replace the prior layer with a checkpoint's points (uplift-3 N2). A point
+	 * whose bucket count does not match these bounds is skipped: its counts
+	 * belong to another edge set and would land in the wrong buckets.
+	 */
+	seed(points: readonly HistogramPoint[]): void {
+		this.prior.clear();
+		for (const point of points) {
+			if (point.bucketCounts.length !== this.bounds.length + 1) continue;
+			if (!Number.isFinite(point.count) || point.count < 0 || !Number.isFinite(point.sum)) continue;
+			if (!point.bucketCounts.every((n) => Number.isFinite(n) && n >= 0)) continue;
+			this.prior.set(attributeKey(point.attributes), {
+				attributes: point.attributes,
+				state: {
+					count: point.count,
+					sum: point.sum,
+					min: point.count === 0 ? Number.POSITIVE_INFINITY : point.min,
+					max: point.count === 0 ? Number.NEGATIVE_INFINITY : point.max,
+					buckets: [...point.bucketCounts],
+				},
+			});
+		}
+	}
+
 	snapshot(): HistogramSnapshot {
+		const empty = this.initial();
 		return {
 			kind: "histogram",
 			name: this.name,
@@ -367,7 +426,13 @@ export class Histogram extends Instrument<HistogramState> {
 			unit: this.unit,
 			bounds: this.bounds,
 			overflowed: this.overflowed,
-			points: [...this.series.values()].map(({ attributes, state }) => ({
+			points: this.merged((prior = empty, live = empty) => ({
+				count: prior.count + live.count,
+				sum: prior.sum + live.sum,
+				min: Math.min(prior.min, live.min),
+				max: Math.max(prior.max, live.max),
+				buckets: prior.buckets.map((n, i) => n + (live.buckets[i] ?? 0)),
+			})).map(({ attributes, state }) => ({
 				attributes,
 				count: state.count,
 				sum: state.sum,
@@ -542,6 +607,42 @@ export class MetricRegistry {
 			...[...this.counters.values()].map((instrument) => instrument.snapshot()),
 			...[...this.histograms.values()].map((instrument) => instrument.snapshot()),
 		];
+	}
+
+	/**
+	 * Seed every instrument's prior layer from a snapshot a previous epoch wrote
+	 * (uplift-3 N2). Only instruments this registry already owns are seeded — a
+	 * metric the running release no longer records has no description or unit
+	 * to be created with — and a histogram whose bounds differ is skipped whole,
+	 * since its bucket counts would land on the wrong edges. The names left out
+	 * are returned so the caller can say so once.
+	 */
+	seed(
+		prior: ReadonlyArray<
+			| { kind: "counter"; name: string; points: readonly CounterPoint[] }
+			| { kind: "histogram"; name: string; bounds: readonly number[]; points: readonly HistogramPoint[] }
+		>,
+	): string[] {
+		const skipped: string[] = [];
+		for (const metric of prior) {
+			if (metric.kind === "counter") {
+				const counter = this.counters.get(metric.name);
+				if (!counter) skipped.push(metric.name);
+				else counter.seed(metric.points);
+				continue;
+			}
+			const histogram = this.histograms.get(metric.name);
+			if (
+				!histogram ||
+				histogram.bounds.length !== metric.bounds.length ||
+				!histogram.bounds.every((bound, i) => bound === metric.bounds[i])
+			) {
+				skipped.push(metric.name);
+				continue;
+			}
+			histogram.seed(metric.points);
+		}
+		return skipped;
 	}
 }
 
