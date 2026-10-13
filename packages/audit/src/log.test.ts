@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AuditLog, AuditUnavailableError } from "./log.ts";
+import { AuditLog, AuditUnavailableError, orderSegments, parseSegmentName, rolloverBytesFromEnv, segmentPath } from "./log.ts";
 import type { AuditRecordInput } from "./record.ts";
 import {
 	buildRecord,
@@ -956,5 +956,202 @@ describe("a tally's breakdown is bounded", () => {
 			"memory_write",
 		]);
 		expect(view.stats.byTool.some((entry) => entry.tool === TALLY_OVERFLOW)).toBe(false);
+	});
+});
+
+describe("rollover by size", () => {
+	/**
+	 * A fixed clock, one input and single-digit seq make every record past the first
+	 * the same size; the first is 62 bytes shorter, its `prev` being `null` rather than
+	 * a digest. `size` is that steady-state record; `head` the first.
+	 */
+	const clock = () => new Date("2026-10-13T12:00:00.000Z");
+
+	async function recordBytes(input: AuditRecordInput = allowed): Promise<{ head: number; size: number }> {
+		const path = join(temporaryDirectory(), "probe.jsonl");
+		const log = new AuditLog({ path, now: clock, rolloverBytes: null });
+		await log.open();
+		await log.append(input);
+		const head = statSync(path).size;
+		await log.append(input);
+		return { head, size: statSync(path).size - head };
+	}
+
+	test("closes a segment named by its seq range, at 0600, exactly when the next record would not fit", async () => {
+		const { head, size } = await recordBytes();
+		const dir = temporaryDirectory();
+		const path = join(dir, "mcp-audit.jsonl");
+		// Two steady-state records fit exactly; the third would take the file past the
+		// limit, so it opens the next file. Records 3 and 4 then fill the second file to
+		// the byte, which is the boundary: equal is in, one byte more is the next segment.
+		const log = new AuditLog({ path, now: clock, rolloverBytes: size * 2 });
+		await log.open();
+		for (let i = 0; i < 5; i++) expect((await log.append(allowed)).written).toBe(true);
+
+		expect(readdirSync(dir).sort()).toEqual([
+			"mcp-audit.jsonl",
+			"mcp-audit.jsonl.1-2.jsonl",
+			"mcp-audit.jsonl.3-4.jsonl",
+			"mcp-audit.jsonl.checkpoint",
+		]);
+		for (const name of ["mcp-audit.jsonl", "mcp-audit.jsonl.1-2.jsonl", "mcp-audit.jsonl.3-4.jsonl"]) {
+			expect(statSync(join(dir, name)).mode & 0o777).toBe(0o600);
+		}
+		// Each file holds whole lines only: a roll happens between records, never through one.
+		expect(readFileSync(segmentPath(path, 1, 2), "utf8").trim().split("\n").map((line) => JSON.parse(line).seq)).toEqual([1, 2]);
+		expect(readFileSync(segmentPath(path, 3, 4), "utf8").trim().split("\n").map((line) => JSON.parse(line).seq)).toEqual([3, 4]);
+		expect(readFileSync(path, "utf8").trim().split("\n").map((line) => JSON.parse(line).seq)).toEqual([5]);
+		expect(statSync(segmentPath(path, 1, 2)).size).toBe(head + size);
+		expect(statSync(segmentPath(path, 3, 4)).size).toBe(size * 2);
+	});
+
+	test("the new active file's first record chains prev to the closed segment's tip", async () => {
+		const { size } = await recordBytes();
+		const path = join(temporaryDirectory(), "mcp-audit.jsonl");
+		const log = new AuditLog({ path, now: clock, rolloverBytes: size * 2 });
+		await log.open();
+		for (let i = 0; i < 3; i++) await log.append(allowed);
+
+		const closed = readFileSync(segmentPath(path, 1, 2), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+		const active = readFileSync(path, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+		expect(active).toHaveLength(1);
+		expect(active[0].seq).toBe(3);
+		expect(active[0].prev).toBe(closed[1].hash);
+		// The checkpoint carried forward: it names the tip wherever the tip's file is.
+		expect(JSON.parse(readFileSync(`${path}.checkpoint`, "utf8"))).toMatchObject({ seq: 3, hash: active[0].hash });
+	});
+
+	test("verify, stats and the evidence view walk every segment before the active file", async () => {
+		const tagged: AuditRecordInput = { ...allowed, graph_id: "ut-1" };
+		const { size } = await recordBytes(tagged);
+		const path = join(temporaryDirectory(), "mcp-audit.jsonl");
+		const log = new AuditLog({ path, now: clock, rolloverBytes: size * 2 });
+		await log.open();
+		for (let i = 0; i < 5; i++) await log.append(tagged);
+
+		expect(await log.verify()).toMatchObject({ ok: true, records: 5, unparseable: 0 });
+		const all = await log.readAll();
+		expect(all.records.map((record) => record.seq)).toEqual([1, 2, 3, 4, 5]);
+		const view = await log.verifiedView("ut-1");
+		expect(view.verdict.ok).toBe(true);
+		expect(view.matched).toBe(5);
+		expect(view.stats.allowed).toBe(5);
+		expect(await log.report()).toEqual({ segments: 2, records: 5, firstSeq: 1, lastSeq: 5, ok: true, unparseable: 0 });
+
+		// A verifier that never opens the log for writing reads the same chain.
+		const reader = new AuditLog({ path });
+		expect(await reader.report()).toEqual({ segments: 2, records: 5, firstSeq: 1, lastSeq: 5, ok: true, unparseable: 0 });
+		expect(statSync(path).size).toBe(size);
+	});
+
+	test("a corrupted closed segment fails the verdict rather than being skipped", async () => {
+		const { size } = await recordBytes();
+		const path = join(temporaryDirectory(), "mcp-audit.jsonl");
+		const log = new AuditLog({ path, now: clock, rolloverBytes: size * 2 });
+		await log.open();
+		for (let i = 0; i < 5; i++) await log.append(allowed);
+
+		// Edit a record inside the first segment in place.
+		const segment = segmentPath(path, 1, 2);
+		const lines = readFileSync(segment, "utf8").trim().split("\n");
+		const tampered = { ...JSON.parse(lines[1] as string), decision: "denied" };
+		writeFileSync(segment, `${lines[0]}\n${JSON.stringify(tampered)}\n`);
+		expect(await log.verify()).toMatchObject({ ok: false, brokenAt: 2, reason: "hash does not match contents" });
+
+		// A segment that is gone is a chain that no longer opens at seq 1.
+		rmSync(segment);
+		const verdict = await log.verify();
+		expect(verdict.ok).toBe(false);
+		expect(verdict.ok ? "" : verdict.reason).toContain("does not open at seq 1");
+
+		// A reader with only the checkpoint to go on reports the same loss as missing history.
+		rmSync(segmentPath(path, 3, 4));
+		rmSync(path);
+		const reader = new AuditLog({ path });
+		const report = await reader.report();
+		expect(report).toMatchObject({ ok: false, segments: 0, records: 0, firstSeq: null, lastSeq: null });
+		expect(report.reason).toContain("missing history");
+	});
+
+	test("a chain continues across a restart, including one that died between a roll and the next record", async () => {
+		const { size } = await recordBytes();
+		const path = join(temporaryDirectory(), "mcp-audit.jsonl");
+		const first = new AuditLog({ path, now: clock, rolloverBytes: size * 2 });
+		await first.open();
+		for (let i = 0; i < 3; i++) await first.append(allowed);
+		const tip = first.tip;
+
+		// The ordinary restart: the active file holds seq 3 and names the next segment from it.
+		const second = new AuditLog({ path, now: clock, rolloverBytes: size * 2 });
+		expect(await second.open()).toMatchObject({ records: 3, tip, durable: true });
+		await second.append(allowed);
+		await second.append(allowed);
+		expect(readdirSync(join(path, "..")).sort()).toContain("mcp-audit.jsonl.3-4.jsonl");
+		expect(await second.verify()).toMatchObject({ ok: true, records: 5 });
+
+		// The crash between renaming the active file and writing the next record: the
+		// path is gone, a segment ends the chain, and the checkpoint agrees with it.
+		renameSync(path, segmentPath(path, 5, 5));
+		const third = new AuditLog({ path, now: clock, rolloverBytes: size * 2 });
+		const opened = await third.open();
+		expect(opened).toMatchObject({ records: 5, tip: second.tip, durable: true });
+		expect(opened.missingHistory).toBeUndefined();
+		const sixth = await third.append(allowed);
+		expect(sixth.record.seq).toBe(6);
+		expect(sixth.record.prev).toBe(second.tip);
+		expect(await third.report()).toMatchObject({ segments: 3, records: 6, firstSeq: 1, lastSeq: 6, ok: true });
+	});
+
+	test("off by default, and off for anything that is not a positive integer", async () => {
+		const { size } = await recordBytes();
+		const dir = temporaryDirectory();
+		const path = join(dir, "mcp-audit.jsonl");
+		const log = new AuditLog({ path, now: clock, rolloverBytes: null });
+		await log.open();
+		const written: number[] = [];
+		for (let i = 0; i < 10; i++) written.push((await log.append(allowed)).record.seq);
+		expect(readdirSync(dir).sort()).toEqual(["mcp-audit.jsonl", "mcp-audit.jsonl.checkpoint"]);
+		// Ten records in the one file and nothing else: the file is exactly their encoded
+		// lines. (Record 10 is a byte longer than its predecessors — two seq digits — so
+		// the steady-state size is not a multiplier here, only a lower bound.)
+		const { records } = await log.readAll();
+		expect(records.map((record) => record.seq)).toEqual(written);
+		expect(statSync(path).size).toBe(records.reduce((total, record) => total + Buffer.byteLength(`${JSON.stringify(record)}\n`), 0));
+		expect(statSync(path).size).toBeGreaterThan(size * 9);
+		expect(log.rolloverLimit).toBeNull();
+
+		expect(rolloverBytesFromEnv({})).toBeNull();
+		expect(rolloverBytesFromEnv({ SUBSTRATE_AUDIT_ROLLOVER_BYTES: "" })).toBeNull();
+		expect(rolloverBytesFromEnv({ SUBSTRATE_AUDIT_ROLLOVER_BYTES: "0" })).toBeNull();
+		expect(rolloverBytesFromEnv({ SUBSTRATE_AUDIT_ROLLOVER_BYTES: "50MB" })).toBeNull();
+		expect(rolloverBytesFromEnv({ SUBSTRATE_AUDIT_ROLLOVER_BYTES: "-1" })).toBeNull();
+		expect(rolloverBytesFromEnv({ SUBSTRATE_AUDIT_ROLLOVER_BYTES: " 52428800 " })).toBe(52_428_800);
+		expect(new AuditLog({ path: null, rolloverBytes: 0 }).rolloverLimit).toBeNull();
+		expect(new AuditLog({ path: null, rolloverBytes: 1.5 }).rolloverLimit).toBeNull();
+		expect(new AuditLog({ path: null, rolloverBytes: 4096 }).rolloverLimit).toBe(4096);
+	});
+
+	test("segment names are strict and ordered by sequence", () => {
+		const path = "/var/lib/substrate/mcp-audit.jsonl";
+		expect(parseSegmentName(path, "mcp-audit.jsonl.1-9000.jsonl")).toEqual({
+			path: "/var/lib/substrate/mcp-audit.jsonl.1-9000.jsonl",
+			firstSeq: 1,
+			lastSeq: 9000,
+		});
+		expect(parseSegmentName(path, "mcp-audit.jsonl")).toBeNull();
+		expect(parseSegmentName(path, "mcp-audit.jsonl.checkpoint")).toBeNull();
+		expect(parseSegmentName(path, "mcp-audit.jsonl.checkpoint.tmp")).toBeNull();
+		expect(parseSegmentName(path, "mcp-audit.jsonl.9-1.jsonl")).toBeNull();
+		expect(parseSegmentName(path, "mcp-audit.jsonl.0-1.jsonl")).toBeNull();
+		expect(parseSegmentName(path, "other.jsonl.1-2.jsonl")).toBeNull();
+		expect(parseSegmentName(path, "mcp-audit.jsonl.1-2.jsonl.bak")).toBeNull();
+		expect(segmentPath(path, 9001, 18000)).toBe("/var/lib/substrate/mcp-audit.jsonl.9001-18000.jsonl");
+		expect(
+			orderSegments([
+				{ path: "c", firstSeq: 9001, lastSeq: 18000 },
+				{ path: "a", firstSeq: 1, lastSeq: 9000 },
+				{ path: "b", firstSeq: 18001, lastSeq: 18001 },
+			]).map((segment) => segment.path),
+		).toEqual(["a", "c", "b"]);
 	});
 });

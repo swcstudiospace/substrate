@@ -5,10 +5,15 @@
 # directory is kept after a health-checked deploy. SUBSTRATE_RELEASE_RESTART=0
 # does not prune.
 #
-# The script never reads /etc/substrate, never prints an environment file,
-# and never talks to a host other than the health URL (loopback by default).
-# Tests point SUBSTRATE_RELEASE_ROOT, PATH (git, bun, systemctl, curl) and
-# SUBSTRATE_HEALTH_CMD at stubs. See infra/vps/README.md.
+# The script never prints an environment file and never talks to a host other
+# than the health URL (loopback by default). It reads /etc/substrate only to
+# ask whether GREPTIME_URL and SUBSTRATE_PG_URL are set there — by name, with
+# grep -q, never into a variable — so the store gate knows which stores the
+# new process is expected to reach. It refuses to build below a free-disk
+# floor (docs/runbooks/disk-pressure.md).
+# Tests point SUBSTRATE_RELEASE_ROOT, PATH (git, bun, systemctl, curl, df),
+# SUBSTRATE_HEALTH_ENV_FILE and SUBSTRATE_HEALTH_CMD at stubs. See
+# infra/vps/README.md.
 set -euo pipefail
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
@@ -23,9 +28,13 @@ HEALTH_TIMEOUT="${SUBSTRATE_HEALTH_TIMEOUT:-5}"
 HEALTH_DEADLINE="${SUBSTRATE_HEALTH_DEADLINE:-30}"
 HEALTH_INTERVAL="${SUBSTRATE_HEALTH_INTERVAL:-1}"
 UNIT_SETTLE="${SUBSTRATE_UNIT_SETTLE:-2}"
+MIN_FREE_GB="${SUBSTRATE_DEPLOY_MIN_FREE_GB:-5}"
+REQUIRE_STORES="${SUBSTRATE_HEALTH_REQUIRE_STORES:-1}"
+HEALTH_ENV_FILE="${SUBSTRATE_HEALTH_ENV_FILE:-/etc/substrate/substrate.env}"
 lockdir=""
 tmp_link=""
 health_config=""
+health_body=""
 units=()
 
 die() {
@@ -55,6 +64,10 @@ cleanup() {
 	if [[ -n "$health_config" ]]; then
 		rm -f -- "$health_config"
 		health_config=""
+	fi
+	if [[ -n "$health_body" ]]; then
+		rm -f -- "$health_body"
+		health_body=""
 	fi
 	if [[ -n "$lockdir" ]]; then
 		rmdir -- "$lockdir" 2>/dev/null || true
@@ -90,6 +103,9 @@ prepare_root() {
 	[[ "$HEALTH_DEADLINE" =~ ^[1-9][0-9]{0,3}$ ]] || die "SUBSTRATE_HEALTH_DEADLINE must be 1-9999 seconds"
 	[[ "$HEALTH_INTERVAL" =~ ^[0-9]{1,2}$ ]] || die "SUBSTRATE_HEALTH_INTERVAL must be 0-99 seconds"
 	[[ "$UNIT_SETTLE" =~ ^[0-9]{1,2}$ ]] || die "SUBSTRATE_UNIT_SETTLE must be 0-99 seconds"
+	[[ "$MIN_FREE_GB" =~ ^[0-9]{1,4}$ ]] || die "SUBSTRATE_DEPLOY_MIN_FREE_GB must be 0-9999 gigabytes"
+	[[ "$REQUIRE_STORES" == "0" || "$REQUIRE_STORES" == "1" ]] || die "SUBSTRATE_HEALTH_REQUIRE_STORES must be 0 or 1"
+	[[ "$HEALTH_ENV_FILE" == /* ]] || die "SUBSTRATE_HEALTH_ENV_FILE must be absolute"
 }
 
 acquire_lock() {
@@ -100,6 +116,22 @@ acquire_lock() {
 	fi
 	# Set only after mkdir wins, so a lost race does not rmdir the holder's lock.
 	lockdir="$candidate"
+}
+
+# Refuse to build on a filesystem below the floor. A release tree and its
+# node_modules land under $ROOT, and a host measured at 95 % disk is why this
+# exists: a build that fills the disk takes the running units down with it.
+# 0 disables the floor for an emergency deploy the operator has judged.
+require_free_space() {
+	local avail="" floor_kb avail_gb
+	[[ "$MIN_FREE_GB" != "0" ]] || return 0
+	{ read -r _ && read -r _ _ _ avail _; } < <(df -Pk -- "$ROOT") || die "cannot read free space on ${ROOT}"
+	[[ "$avail" =~ ^[0-9]{1,15}$ ]] || die "cannot read free space on ${ROOT}"
+	floor_kb=$((MIN_FREE_GB * 1024 * 1024))
+	if ((avail < floor_kb)); then
+		avail_gb=$((avail / 1024 / 1024))
+		die "refusing to build: ${avail_gb} GB free on ${ROOT} is below SUBSTRATE_DEPLOY_MIN_FREE_GB=${MIN_FREE_GB}; see docs/runbooks/disk-pressure.md"
+	fi
 }
 
 load_units() {
@@ -311,6 +343,10 @@ prepare_health() {
 		die "refusing health url"
 	fi
 	write_health_config
+	# The body of the answer that passes the poll, kept for the store gate so
+	# the gate judges the same response the status code came from.
+	health_body=$(mktemp "${TMPDIR:-/tmp}/substrate-healthz.XXXXXX")
+	chmod 600 "$health_body"
 }
 
 # 0 healthy, 7 still starting (retry), 22 definitive HTTP failure.
@@ -321,7 +357,7 @@ health_once() {
 		"${SUBSTRATE_HEALTH_CMD}"
 		return $?
 	fi
-	args=(-sS --max-time "$HEALTH_TIMEOUT" -o /dev/null -w '%{http_code}')
+	args=(-sS --max-time "$HEALTH_TIMEOUT" -o "${health_body:-/dev/null}" -w '%{http_code}')
 	if [[ -n "$health_config" ]]; then
 		args+=(-K "$health_config")
 	fi
@@ -363,6 +399,73 @@ health_ok() {
 		fi
 		sleep "$HEALTH_INTERVAL"
 	done
+}
+
+# Whether an env file sets NAME to a non-empty value. Presence only: the value
+# is never read into a variable and never printed. An unreadable or missing
+# file configures nothing.
+env_sets() {
+	local file="$1" name="$2"
+	[[ -f "$file" && ! -L "$file" ]] || return 1
+	grep -q -- "^${name}=." "$file" 2>/dev/null
+}
+
+# true, false, or empty when the body has no top-level boolean of that name.
+# The body is this server's own /healthz. A nested object under the same name
+# (planes carries an "index" entry) does not match: a boolean must follow the key.
+health_bool() {
+	local body="$1" key="$2"
+	if [[ "$body" =~ \"$key\"[[:space:]]*:[[:space:]]*(true|false) ]]; then
+		printf '%s\n' "${BASH_REMATCH[1]}"
+	fi
+}
+
+# The plane whose breaker is open, or nothing. A breaker snapshot writes `plane`
+# before `state` and nests no object, so one brace pair holds both; a breaker
+# that is null (breakers disabled) has no brace pair and never matches.
+open_breaker() {
+	local body="$1"
+	[[ "$body" == *'"planes"'* ]] || return 0
+	if [[ "$body" =~ \"breaker\"[[:space:]]*:[[:space:]]*\{[^{}]*\"plane\"[[:space:]]*:[[:space:]]*\"([a-z]+)\"[^{}]*\"state\"[[:space:]]*:[[:space:]]*\"open\" ]]; then
+		printf '%s\n' "${BASH_REMATCH[1]}"
+	fi
+}
+
+# The stores behind the status code. /healthz answers 200 while the index is
+# down (the brief still composes from the ledger) and, with no ledger
+# configured, while nothing is writable — so a deploy that looked only at the
+# code published a release nobody could record a claim on. Each store is
+# required only when the env file names it, and an open breaker (`planes`)
+# means the new process is already refusing that plane. A custom
+# SUBSTRATE_HEALTH_CMD is the operator's whole verdict and is not second-guessed.
+stores_ok() {
+	local body index events plane
+	[[ "$RESTART" == "1" && "$REQUIRE_STORES" == "1" ]] || return 0
+	[[ -z "${SUBSTRATE_HEALTH_CMD:-}" ]] || return 0
+	if [[ -z "$health_body" || ! -s "$health_body" ]]; then
+		printf '%s\n' "deploy-release: healthz answered with no body, so the stores cannot be checked" >&2
+		return 1
+	fi
+	body=$(<"$health_body")
+	if env_sets "$HEALTH_ENV_FILE" SUBSTRATE_PG_URL; then
+		index=$(health_bool "$body" index)
+		if [[ "$index" != "true" ]]; then
+			printf '%s\n' "deploy-release: healthz reports index=${index:-missing} while SUBSTRATE_PG_URL is configured" >&2
+			return 1
+		fi
+	fi
+	if env_sets "$HEALTH_ENV_FILE" GREPTIME_URL; then
+		events=$(health_bool "$body" eventsWritable)
+		if [[ "$events" != "true" ]]; then
+			printf '%s\n' "deploy-release: healthz reports eventsWritable=${events:-missing} while GREPTIME_URL is configured" >&2
+			return 1
+		fi
+	fi
+	plane=$(open_breaker "$body")
+	if [[ -n "$plane" ]]; then
+		printf '%s\n' "deploy-release: healthz reports the ${plane} plane's breaker open" >&2
+		return 1
+	fi
 }
 
 build_release() {
@@ -429,6 +532,7 @@ cmd_deploy() {
 		exit 1
 	fi
 	load_units
+	require_free_space
 	build_release "$sha"
 	require_release_entries "$ROOT/releases/$sha"
 	prepare_health
@@ -438,7 +542,7 @@ cmd_deploy() {
 		fi
 	fi
 	swap_link "$ROOT/current" "releases/$sha"
-	if ! restart_units || ! health_ok; then
+	if ! restart_units || ! health_ok || ! stores_ok; then
 		printf '%s\n' "deploy-release: health check failed; rolling back" >&2
 		restore_current "$old"
 		exit 1

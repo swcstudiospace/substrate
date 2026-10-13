@@ -43,6 +43,17 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=substrate-mcp
 
+# Resource ceilings (uplift-2 R7). Measured 2026-10-13: 53 MB RSS, 88 MB peak,
+# 0 restarts, on a host at 95 % disk with 12 of 15 GiB swap in use. MemoryHigh
+# throttles at ~12x the peak before MemoryMax (~23x) lets the OOM killer end the
+# process; Restart=always above brings it back. The slice (substrate.slice,
+# MemoryLow=2G) makes reclaim hit co-tenants before any substrate unit.
+Slice=substrate.slice
+MemoryHigh=1G
+MemoryMax=2G
+TasksMax=512
+CPUQuota=200%
+
 # It listens on loopback and talks to Postgres and Greptime. Nothing else.
 # ProtectHome=false is the remaining exception: ExecStart's bun lives under
 # /root/.local, so ProtectHome=true would hide the interpreter. The mutable

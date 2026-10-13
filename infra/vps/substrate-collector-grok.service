@@ -28,6 +28,14 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=substrate-collector-grok
 
+# Resource ceilings (uplift-2 R7): a collector tails files and posts to
+# loopback; substrate-mcp itself peaks at 88 MB RSS (measured 2026-10-13), so
+# 512M is headroom, not a budget. Lives in substrate.slice (MemoryLow=2G) so
+# reclaim hits co-tenants first. Restart=always above recovers an OOM kill.
+Slice=substrate.slice
+MemoryMax=512M
+TasksMax=256
+
 # ProtectHome=false remains because bun is under /root/.local and the Grok
 # session logs default to /root/.grok/sessions. WorkingDirectory is the
 # release tree, not the mutable checkout.
