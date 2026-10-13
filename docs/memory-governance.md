@@ -292,8 +292,9 @@ the decision was ever taken.
 
 `memory_writes` holds one row per idempotency key ever spent.
 
-- **An explicit `idempotency_key` is exactly-once and never expires.** That is what
-  the key is for.
+- **An explicit `idempotency_key` is exactly-once for 30 days.** That is what the
+  key is for; the sweeper (below) retires the spent record after that window, so a
+  replay more than 30 days later writes again.
 - **No key supplied** → one is derived from the governed content, and dedupes
   retries for 24 hours. Enough to survive a crash-retry without freezing memory:
   the same fact can be restated later.
@@ -525,6 +526,28 @@ With no `SUBSTRATE_MEMORY_REVIEW_TOKENS` configured, every review path stays clo
 and the queue simply fills. That is the correct default — nothing forged gets
 through — but it does mean an operator who wants global memories has to configure a
 token.
+
+## Retention: what the sweeper removes
+
+None of the governance tables was ever deleted from before `index-sweep.ts`
+(`substrate index sweep`, `substrate-index-sweep.timer`). It runs as a dry-run
+report unless `SUBSTRATE_INDEX_SWEEP=apply` is set, and the CLI's `--apply`
+additionally requires that env — two keys to delete. What it may remove, and when:
+
+| Rows | Window (env) | Why that is safe |
+|---|---|---|
+| `memory_writes`, derived key, not in flight | 7 d (`SUBSTRATE_SWEEP_DERIVED_WRITES_DAYS`) | A derived key dedupes for 24 h; after that the row is already takeable |
+| `memory_writes`, explicit key, not in flight | 30 d (`SUBSTRATE_SWEEP_EXPLICIT_WRITES_DAYS`) | The exactly-once window above; a later replay is a new write |
+| `memory_reviews` decided (`approved`) | 30 d (`SUBSTRATE_SWEEP_REVIEWS_DAYS`) | An audit trail, not a queue; pending rows are never touched |
+| `memory_quarantine` whose `entry_hash` later landed in `memory_entries` | 30 d (`SUBSTRATE_SWEEP_QUARANTINE_DAYS`) | The reviewer re-submitted it; the parked copy is redundant |
+| `memory_entries` with `superseded_by` set | 90 d (`SUBSTRATE_SWEEP_SUPERSEDED_DAYS`) | The decision log; `memory_search includeSuperseded` loses history older than this |
+
+Counted in every report and **never deleted**: unresolved quarantine rows (the
+table has no decision column, so "pending" is anything whose content never
+landed), `ttl=30d` entries older than 30 days and `ttl=graph` entries whose graph
+is finished. `memory_search` and the brief do not filter on `ttl`, so deleting
+those would change what the reads answer; they stay until the reads honour `ttl`.
+The graph tables follow `docs/data-planes.md`: terminal graphs + 90 days.
 
 ## Running the proofs
 

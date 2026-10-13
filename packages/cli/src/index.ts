@@ -13,6 +13,8 @@
  *   substrate skills propose --dir PATH ...  propose a skill as a PR on the skills library
  *   substrate docs ingest --dataset NAME --path PATH --source-url URL [...]
  *       ingest one page into a docs dataset (docs/docs-search-ingest.md)
+ *   substrate index sweep [--apply] [--json]  the index retention sweep (dry-run unless --apply
+ *       AND SUBSTRATE_INDEX_SWEEP=apply are both given)
  *
  * Exit status is always 0 for `brief`, `emit` and `handoff`. These run inside
  * git hooks and editor hooks, where a non-zero exit can abort the user's commit
@@ -430,6 +432,30 @@ async function cmdEvidence(args: Record<string, string | true>): Promise<number>
 	return 0;
 }
 
+/**
+ * `substrate index sweep [--apply] [--json]`
+ *
+ * Runs `packages/mcp-server/src/index-sweep-run.ts` from this checkout (or the
+ * pinned release the CLI is installed in) with the operator's environment, so the
+ * one job the timer runs is the one the operator runs by hand. Without `--apply`
+ * the runner is told `--dry-run` explicitly: an environment that happens to carry
+ * `SUBSTRATE_INDEX_SWEEP=apply` must not delete because someone asked for a
+ * report. With `--apply`, the runner refuses unless that env is also `apply` —
+ * two keys to delete — and the refusal comes back as exit 2 with its reason.
+ * The CLI package does not depend on the server package, which is why this is a
+ * spawn and not an import.
+ */
+function cmdIndex(argv: string[], args: Record<string, string | true>): number {
+	if (argv[0] !== "sweep") {
+		process.stderr.write("usage: substrate index sweep [--apply] [--json]\n");
+		return 2;
+	}
+	const runner = join(import.meta.dir, "..", "..", "mcp-server", "src", "index-sweep-run.ts");
+	const flags = [args.apply === true ? "--apply" : "--dry-run", ...(args.json === true ? ["--json"] : [])];
+	const result = spawnSync(process.execPath, [runner, ...flags], { stdio: "inherit", env: process.env });
+	return result.status ?? 1;
+}
+
 const [command, ...rest] = process.argv.slice(2);
 const args = parseArgs(rest);
 
@@ -490,6 +516,8 @@ switch (command) {
 				vmGuest: (process.env.SUBSTRATE_VM_GUEST?.trim() ?? "") === "1",
 			}),
 		);
+	case "index":
+		process.exit(cmdIndex(rest, args));
 	default:
 		process.stdout.write(
 			"substrate brief [--repo R] [--branch B] [--graph G] [--surface S] [--write]\n" +
@@ -503,7 +531,8 @@ switch (command) {
 				"substrate lessons add|recall|digest|outcome ...   (substrate lessons help)\n" +
 				"substrate skills propose --dir PATH [--name N] [--rationale R] [--remove a,b] [--session I] [--graph G]\n" +
 				"                         [--dry-run] [--replace] [--reopen] [--allow-doc-examples pem,jwt]\n" +
-				"substrate docs ingest --dataset NAME --path PATH --source-url URL [--commit C] [--heading H] [--session I]\n",
+				"substrate docs ingest --dataset NAME --path PATH --source-url URL [--commit C] [--heading H] [--session I]\n" +
+				"substrate index sweep [--apply] [--json]   (--apply also needs SUBSTRATE_INDEX_SWEEP=apply)\n",
 		);
 		process.exit(command ? 2 : 0);
 }
