@@ -31,7 +31,7 @@ Worktree-only convenience, untracked: `packages/mcp-server/node_modules` symlink
 | `HINDSIGHT_SEARCH_RECALL_BUDGET_MS` | 1500 | recall leg inside `memory_search` |
 | `HINDSIGHT_RETAIN_TIMEOUT_MS` | 8000 | one retain POST |
 
-Backoff: 30 s, 60 s, 2 m, 4 m, 8 m, 16 m, 32 m, 1 h, 1 h (±20 %) — ten attempts span under three hours.
+Backoff: 30 s, 60 s, 2 m, 4 m, 8 m, 16 m, 32 m, 1 h, 1 h (±20 %) — ten attempts span about 3 h (11,010 s at the jitter midpoint).
 
 ## Tests added (written, not run here)
 
@@ -57,7 +57,7 @@ Backoff: 30 s, 60 s, 2 m, 4 m, 8 m, 16 m, 32 m, 1 h, 1 h (±20 %) — ten attemp
 
 | Row | Baseline | After |
 | --- | --- | --- |
-| Hindsight: retains that reach the plane after a transient error | 0 % (one warning, memory lost; "retain/recall volumes unknown") | expected 100 % within ≤ 3 h backoff; post-deploy measurement pending — read `substrate.plane.duration{plane=hindsight,op=retain}` and count `memory.retain.failed` warnings over a day |
+| Hindsight: retains that reach the plane after a transient error | 0 % (one warning, memory lost; "retain/recall volumes unknown") | expected 100 % within the ≈ 3 h backoff; post-deploy measurement pending — read `substrate.plane.duration{plane=hindsight,op=retain}` and count `memory.retain.failed` warnings over a day |
 | `memory_search` while Hindsight is slow | waits the full 4 s fan-out | ≤ 1.5 s + index time (`HINDSIGHT_SEARCH_RECALL_BUDGET_MS`); post-deploy measurement pending — `substrate.request.duration{route=/memory}`/tool `memory_search` p95 during a Hindsight slow period |
 | Duplicate hits across banks | not measured | collapse on `document_id`; post-deploy measurement pending |
 | `HINDSIGHT_BANK` set, `HINDSIGHT_BANKS` unset in production | silent | two boot warnings on the next deploy (journal) |

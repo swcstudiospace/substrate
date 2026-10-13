@@ -143,10 +143,13 @@ describe("retainBackoffMs", () => {
 		expect(retainBackoffMs(-3, () => 0.5)).toBe(30_000);
 	});
 
-	test("ten attempts with the live one included span under three hours", () => {
-		let total = 0;
-		for (let attempt = 0; attempt < DEFAULT_RETAIN_MAX_ATTEMPTS - 1; attempt++) total += retainBackoffMs(attempt, () => 0.5);
-		expect(total).toBeLessThan(3 * 3_600_000);
+	test("ten attempts with the live one included span about three hours, growing monotonically to the cap", () => {
+		const waits: number[] = [];
+		for (let attempt = 0; attempt < DEFAULT_RETAIN_MAX_ATTEMPTS - 1; attempt++) waits.push(retainBackoffMs(attempt, () => 0.5));
+		// 30 + 60 + 120 + 240 + 480 + 960 + 1920 + 3600 + 3600 s = 11,010 s ≈ 3.06 h.
+		expect(waits.reduce((sum, wait) => sum + wait, 0)).toBe(11_010_000);
+		for (let index = 1; index < waits.length; index++) expect(waits[index]).toBeGreaterThanOrEqual(waits[index - 1] ?? 0);
+		expect(waits.at(-1)).toBe(3_600_000);
 	});
 });
 
