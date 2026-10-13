@@ -49,6 +49,8 @@ import {
 	IngestNotRecorded,
 	queryLimit,
 	type EventQuery,
+	type LedgerCapacity,
+	type LedgerProbe,
 	type QueryableColumn,
 } from "./greptime.ts";
 import { IndexStore, leaseSnapshot, type GraphBindResult, type IndexCapacity } from "./index-store.ts";
@@ -725,6 +727,14 @@ export class Substrate {
 	private docsSaveChain: Promise<void> = Promise.resolve();
 	/** `graphId/nodeId` → tail of that node's gated-completion chain. */
 	private readonly completionChains = new Map<string, Promise<void>>();
+	// uplift-2 R5 — ledger emit serialisation
+	/**
+	 * `session_id` → tail of that session's append chain. Two concurrent emits
+	 * for one session used to read the same `prev` and fork the chain; here the
+	 * second waits for the first, so it reads the hash the first stored. Entries
+	 * leave when their chain settles; different sessions never wait on each other.
+	 */
+	private readonly emitChains = new Map<string, Promise<void>>();
 
 	/** `stores` is a test seam; production always builds them from config. */
 	constructor(
@@ -759,7 +769,7 @@ export class Substrate {
 			stores?.greptime !== undefined
 				? stores.greptime
 				: config.greptime
-					? new GreptimeClient(config.greptime, { gate: this.planes.gate("greptime") })
+					? new GreptimeClient(config.greptime, { gate: this.planes.gate("greptime"), ledger: config.ledger })
 					: null;
 		this.mirror =
 			stores?.mirror !== undefined
@@ -947,12 +957,35 @@ export class Substrate {
 		return result;
 	}
 
+	/**
+	 * Appends for one session run one at a time (uplift-2 R5). `prev` is a
+	 * read-then-write with no sequence column, so two emits of one session in
+	 * flight together used to read the same tip and fork the chain — detected by
+	 * `verify`, never prevented. The second now waits for the first to settle
+	 * and reads the hash it stored. Other sessions, and sessionless events, are
+	 * untouched; the pattern is `completionChains`'.
+	 */
 	private async append(input: EventInput): Promise<EmitResult> {
-		let prev: string | null = null;
 		// The session id is looked up in its stored form, not as it arrived: the
 		// write path normalises it, and querying the raw value would match nothing
 		// and restart the chain on every append.
 		const sessionId = normalizeIdentifier(input.session_id);
+		if (!this.greptime || !sessionId) return this.appendChained(input, sessionId);
+		const previous = this.emitChains.get(sessionId) ?? Promise.resolve();
+		const { promise: gate, resolve: done } = Promise.withResolvers<void>();
+		const tail = previous.then(() => gate);
+		this.emitChains.set(sessionId, tail);
+		await previous;
+		try {
+			return await this.appendChained(input, sessionId);
+		} finally {
+			done();
+			if (this.emitChains.get(sessionId) === tail) this.emitChains.delete(sessionId);
+		}
+	}
+
+	private async appendChained(input: EventInput, sessionId: string | null): Promise<EmitResult> {
+		let prev: string | null = null;
 		if (this.greptime && sessionId) {
 			prev = await this.greptime.lastHash(sessionId).catch(() => null);
 		}
@@ -3422,6 +3455,15 @@ export class Substrate {
 	 * is the index's own size report, raced against the same bound and `null`
 	 * when it does not answer in time. The status code still comes from the
 	 * ledger and the index alone — see `healthStatus`.
+	 *
+	 * `ledger` (uplift-2 R5) is what makes `eventsWritable` honest: metadata says
+	 * the table *would* take a row, a one-row write into `substrate_health` says
+	 * it *did*. The probe runs at most once per `SUBSTRATE_LEDGER_WRITE_PROBE_S`
+	 * (0 turns it off, and writability is metadata-only again), through the
+	 * breaker, and never throws out of here; its last verdict folds into
+	 * `eventsWritable`, so a store that stopped taking writes turns `/healthz`
+	 * 503 within one interval by the existing status rule. `capacity.ledger` is
+	 * the ledger's size report, raced against the same bound as the index's.
 	 */
 	async health(): Promise<SubstrateHealth> {
 		const greptime = this.greptime ? await this.greptime.ping() : false;
@@ -3430,7 +3472,7 @@ export class Substrate {
 			? await this.greptime?.probeDialect().then(() => this.greptime?.quotingDialectKnown === true).catch(() => false) ?? false
 			: false;
 		const hindsight = hindsightFromEnv();
-		const [index, capacity, hindsightOk, ragflowOk] = await Promise.all([
+		const [index, capacity, hindsightOk, ragflowOk, probe, ledgerCapacity] = await Promise.all([
 			this.index ? this.index.ping(HEALTH_PROBE_MS).catch(() => false) : Promise.resolve(false),
 			this.index ? bounded(() => this.index!.capacity(), HEALTH_PROBE_MS) : Promise.resolve(null),
 			hindsight
@@ -3439,6 +3481,17 @@ export class Substrate {
 			this.config.ragflow
 				? listDatasets(this.config.ragflow, this.ragflowFetch, HEALTH_PROBE_MS).then((listed) => listed.ok, () => false)
 				: Promise.resolve(null),
+			// Only a reachable ledger is probed: an unreachable one is already not
+			// writable, and a write that cannot connect would only charge the
+			// breaker twice. Keeps the client's own write timeout rather than
+			// HEALTH_PROBE_MS so a slow day does not read as a full disk. The
+			// `.then` wrapper is for a test fake without the method: `null`, never a throw.
+			greptime
+				? Promise.resolve()
+						.then(() => this.greptime!.probeWritable(this.config.ledger.writeProbeS * 1000))
+						.catch(() => null)
+				: Promise.resolve(null),
+			greptime ? bounded(() => this.greptime!.capacity(HEALTH_PROBE_MS), HEALTH_PROBE_MS) : Promise.resolve(null),
 		]);
 		const cache = this.cache.health();
 		const breakers = this.planes.snapshots();
@@ -3455,18 +3508,27 @@ export class Substrate {
 		for (const plane of PLANES) {
 			planes[plane] = { ok: ok[plane], breaker: breakers[plane], lastErrorAt: breakers[plane]?.lastErrorAt ?? null };
 		}
+		const metadataWritable = greptime && quotingDialectKnown && (appendOnly === true || this.config.allowDeduplicatingLedger);
+		// A probe that has not run yet (or is off) neither proves nor disproves;
+		// only a failed one overrides the metadata.
+		const eventsWritable = metadataWritable && probe?.lastProbeOk !== false;
 		return {
 			index,
 			greptime,
 			appendOnly,
 			quotingDialectKnown,
-			eventsWritable:
-				greptime && quotingDialectKnown && (appendOnly === true || this.config.allowDeduplicatingLedger),
+			eventsWritable,
+			ledger: {
+				writable: eventsWritable,
+				lastProbeAt: probe?.lastProbeAt ?? null,
+				lastProbeOk: probe?.lastProbeOk ?? null,
+				lastProbeError: probe?.lastProbeError ?? null,
+			},
 			// In-memory counters only. Health does not ping Dragonfly and does not
 			// change its status code when the cache is down.
 			cache,
 			planes,
-			capacity: { index: capacity },
+			capacity: { index: capacity, ledger: ledgerCapacity },
 		};
 	}
 }
@@ -3488,9 +3550,11 @@ export interface SubstrateHealth {
 	appendOnly: boolean | null;
 	quotingDialectKnown: boolean;
 	eventsWritable: boolean;
+	/** The write probe behind `eventsWritable` (uplift-2 R5); probe fields `null` until one has run. */
+	ledger: { writable: boolean } & LedgerProbe;
 	cache: CacheHealth;
 	planes: Record<PlaneName, PlaneHealth>;
-	capacity: { index: IndexCapacity | null };
+	capacity: { index: IndexCapacity | null; ledger: LedgerCapacity | null };
 }
 
 /** `fn`'s answer, or `null` when it throws or outlasts `ms`. */

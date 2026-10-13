@@ -18,15 +18,18 @@ import {
 	GreptimeClient,
 	GreptimeError,
 	GreptimeUnavailable,
+	HEALTH_TABLE,
 	INGEST_LAG_MS,
 	INGEST_BUDGET_MS,
+	INGEST_RETRY_LOOKBACK_MS,
 	IngestNotRecorded,
 	MAX_QUERY_LIMIT,
 	queryLimit,
 	quote,
 	sqlOp,
+	ttlOf,
 } from "./greptime.ts";
-import type { GreptimeConfig } from "./config.ts";
+import { ConfigError, loadConfig, loadLedgerSettings, type GreptimeConfig } from "./config.ts";
 import type { EventInput } from "./types.ts";
 
 const config: GreptimeConfig = { url: "http://greptime.test", user: "u", password: "p", db: "substrate" };
@@ -570,16 +573,23 @@ describe("reads", () => {
 		expect(sql[0]).toContain('ORDER BY "ts" DESC');
 	});
 
-	test("lastHash reads the whole session, not a window of its newest rows", async () => {
+	test("lastHash reads a row window far above any real session, bounded in time and then unbounded", async () => {
 		// The regression: `ts` is collector-supplied, and the Grok collector's backfill
 		// pass appends events *older* than everything stored. A small window ordered by
 		// `ts` would not hold the real chain tip, and the next append would chain onto a
-		// hash that already had a successor — forking the session.
+		// hash that already had a successor — forking the session. The row limit is a
+		// memory guard only; the time bound (uplift-2 R5) falls back to the whole
+		// session when it sees nothing. See ledger-chain.test.ts for the bound itself.
 		const { sql } = stubFetch(() => records(["hash", "prev"], []));
 		await new GreptimeClient(config).lastHash("sess-1");
 
-		const limit = Number(sql[0]?.match(/LIMIT (\d+)/)?.[1]);
-		expect(limit).toBeGreaterThanOrEqual(10_000);
+		expect(sql).toHaveLength(2);
+		for (const statement of sql) {
+			const limit = Number(statement.match(/LIMIT (\d+)/)?.[1]);
+			expect(limit).toBeGreaterThanOrEqual(10_000);
+		}
+		expect(sql[0]).toContain('"ts" >=');
+		expect(sql[1]).not.toContain('"ts" >=');
 	});
 
 	test("lastHash finds a tip whose timestamp is older than the rest", async () => {
@@ -780,7 +790,7 @@ describe("eventIdsAfter", () => {
 		const at = new Date(T0).toISOString();
 		// The window: only records at or after the cursor's millisecond are
 		// considered — no poll rescans the whole history.
-		expect(statement).toContain(`SELECT i."event_id", i."ingested_at" FROM "event_ingest" i`);
+		expect(statement).toContain(`SELECT i."event_id", i."ingested_at", i."event_ts" FROM "event_ingest" i`);
 		expect(statement).toContain(`i."ingested_at" >= '${at}'`);
 		// The anti-join carries the full (ingested_at, event_id) cursor, so a
 		// retry record for an event whose first record the cursor already passed
@@ -1501,5 +1511,322 @@ describe("graphIngest", () => {
 				: defaultReply(statement),
 		);
 		await expect(new GreptimeClient(config).graphIngest(G)).rejects.toThrow("evt_9");
+	});
+});
+
+describe("stream reads are bounded in time (uplift-2 R5)", () => {
+	const T0 = Date.UTC(2026, 9, 13, 12);
+
+	test("eventIdsAfter bounds the anti-join's inner side to the retry lookback before the cursor", async () => {
+		const { sql } = stubFetch(() => records(["event_id", "ingested_at", "event_ts"], []));
+		await new GreptimeClient(config).eventIdsAfter({ id: "evt_9", ingestedAt: T0 }, 7);
+		const statement = sql[0] ?? "";
+		expect(INGEST_RETRY_LOOKBACK_MS).toBe(3_600_000);
+		expect(statement).toContain(`p."ingested_at" >= '${new Date(T0 - INGEST_RETRY_LOOKBACK_MS).toISOString()}'`);
+		// The lookback sits inside the anti-join, not on the outer window.
+		expect(statement.indexOf('p."ingested_at" >=')).toBeGreaterThan(statement.indexOf("NOT EXISTS"));
+		expect(() => assertAppendOnly(statement)).not.toThrow();
+	});
+
+	test("the lookback never reaches before the epoch for the ledger-start cursor", async () => {
+		const { sql } = stubFetch(() => records(["event_id", "ingested_at", "event_ts"], []));
+		await new GreptimeClient(config).eventIdsAfter({ id: "", ingestedAt: 0 }, 7);
+		expect(sql[0]).toContain(`p."ingested_at" >= '1970-01-01T00:00:00.000Z'`);
+	});
+
+	test("positions carry the event's own ts, and omit it when the record has none", async () => {
+		stubFetch(() =>
+			records(
+				["event_id", "ingested_at", "event_ts"],
+				[
+					["evt_1", T0 + 1, T0 - 500],
+					["evt_2", T0 + 2, null],
+				],
+			),
+		);
+		const positions = await new GreptimeClient(config).eventIdsAfter({ id: "", ingestedAt: T0 }, 10);
+		expect(positions).toEqual([
+			{ id: "evt_1", ingestedAt: T0 + 1, eventTs: T0 - 500 },
+			{ id: "evt_2", ingestedAt: T0 + 2 },
+		]);
+	});
+
+	test("eventsByIds brackets ts between the earliest and latest event_ts it is given", async () => {
+		const { sql } = stubFetch(() => records(["id"], []));
+		await new GreptimeClient(config).eventsByIds([
+			{ id: "evt_b", ingestedAt: T0 + 2, eventTs: T0 + 900 },
+			{ id: "evt_a", ingestedAt: T0 + 1, eventTs: T0 - 500 },
+		]);
+		const statement = sql[0] ?? "";
+		expect(statement).toContain(`"id" IN ('evt_b', 'evt_a')`);
+		expect(statement).toContain(`"ts" BETWEEN '${new Date(T0 - 500).toISOString()}' AND '${new Date(T0 + 900).toISOString()}'`);
+		expect(statement).not.toContain('"payload"');
+		expect(() => assertAppendOnly(statement)).not.toThrow();
+	});
+
+	test("eventsByIds stays unbounded for bare ids or a position without event_ts", async () => {
+		const { sql } = stubFetch(() => records(["id"], []));
+		const client = new GreptimeClient(config);
+		await client.eventsByIds(["evt_a", "evt_b"]);
+		await client.eventsByIds([{ id: "evt_a", ingestedAt: T0, eventTs: T0 }, { id: "evt_b", ingestedAt: T0 }]);
+		expect(sql).toHaveLength(2);
+		for (const statement of sql) expect(statement).not.toContain("BETWEEN");
+		expect(await client.eventsByIds([])).toEqual([]);
+	});
+
+	test("readEvents and graphIngest stay unbounded, because verify must see everything", async () => {
+		const { sql } = stubFetch(() => records(["id"], []));
+		const client = new GreptimeClient(config);
+		await client.readEvents("graph_id", "ut-1");
+		await client.graphIngest("ut-1");
+		for (const statement of sql.filter((s) => s.startsWith("SELECT"))) {
+			expect(statement).not.toContain('"ts" >=');
+			expect(statement).not.toContain("BETWEEN");
+			expect(statement).not.toContain('"ingested_at" >=');
+		}
+	});
+});
+
+describe("substrate_health and the write probe (uplift-2 R5)", () => {
+	/** The migrate stub: append_mode holds everywhere, so only the health table is of interest. */
+	function migrateReply(statement: string): unknown {
+		if (statement.includes("SHOW CREATE TABLE")) return records(["Table", "Create Table"], [["t", "... WITH( append_mode = 'true' )"]]);
+		if (statement.includes("information_schema")) return records(["column_name", "data_type", "semantic_type"], []);
+		return defaultReply(statement);
+	}
+
+	test("migrate creates substrate_health append-only with a one-day ttl, after the ledger tables", async () => {
+		const { sql } = stubFetch(migrateReply);
+		const { warnings } = await new GreptimeClient(config).migrate();
+		expect(warnings).toEqual([]);
+		const health = sql.find((s) => s.includes(`CREATE TABLE IF NOT EXISTS "${HEALTH_TABLE}"`)) ?? "";
+		expect(health).toContain('"ts" TIMESTAMP TIME INDEX');
+		expect(health).toContain('"probe" STRING');
+		expect(health).toContain("'append_mode' = 'true'");
+		expect(health).toContain("'ttl' = '1d'");
+		expect(sql.indexOf(health)).toBeGreaterThan(sql.findIndex((s) => s.includes('CREATE TABLE IF NOT EXISTS "anchors"')));
+		expect(() => assertAppendOnly(health)).not.toThrow();
+	});
+
+	test("a server that refuses the ttl option still gets the table, with a warning", async () => {
+		const { sql } = stubFetch((statement) =>
+			statement.includes(HEALTH_TABLE) && statement.includes("ttl") ? { error: "unrecognized table option" } : migrateReply(statement),
+		);
+		const { warnings } = await new GreptimeClient(config).migrate();
+		const creates = sql.filter((s) => s.includes(`CREATE TABLE IF NOT EXISTS "${HEALTH_TABLE}"`));
+		expect(creates).toHaveLength(2);
+		expect(creates[1]).not.toContain("ttl");
+		expect(creates[1]).toContain("append_mode");
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain("without a ttl");
+	});
+
+	test("writeProbe inserts one stamped row and is labelled probe in the plane series", async () => {
+		const { sql } = stubFetch();
+		const samples: PlaneSample[] = [];
+		const breaker = new CircuitBreaker("greptime", { failureThreshold: 5, openMs: 1000 }, () => 0);
+		const client = new GreptimeClient(config, {
+			clock: () => Date.UTC(2026, 9, 13, 12),
+			gate: { plane: "greptime", breaker, observe: (sample) => samples.push(sample) },
+		});
+		await client.writeProbe();
+		expect(sql[0]).toBe(`INSERT INTO "${HEALTH_TABLE}" ("ts", "probe") VALUES ('2026-10-13T12:00:00.000Z', 'healthz')`);
+		expect(samples.map((sample) => sample.op)).toEqual(["probe"]);
+		expect(() => assertAppendOnly(sql[0] ?? "")).not.toThrow();
+	});
+
+	test("probeWritable writes at most once per interval and reports the last verdict in between", async () => {
+		const { sql } = stubFetch();
+		let now = 1_000_000;
+		const client = new GreptimeClient(config, { clock: () => now });
+		const writes = () => sql.filter((s) => s.includes(HEALTH_TABLE)).length;
+
+		expect(await client.probeWritable(60_000)).toEqual({ lastProbeAt: 1_000_000, lastProbeOk: true, lastProbeError: null });
+		expect(writes()).toBe(1);
+		now += 59_999;
+		expect(await client.probeWritable(60_000)).toEqual({ lastProbeAt: 1_000_000, lastProbeOk: true, lastProbeError: null });
+		expect(writes()).toBe(1);
+		now += 1;
+		expect((await client.probeWritable(60_000)).lastProbeAt).toBe(1_060_000);
+		expect(writes()).toBe(2);
+	});
+
+	test("an interval of zero never probes and reports nothing known", async () => {
+		const { sql } = stubFetch();
+		const client = new GreptimeClient(config, { clock: () => 5 });
+		expect(await client.probeWritable(0)).toEqual({ lastProbeAt: null, lastProbeOk: null, lastProbeError: null });
+		expect(sql).toHaveLength(0);
+	});
+
+	test("a failed probe is the verdict, never a throw, with the reason redacted and the host scrubbed", async () => {
+		stubFetch(() => new Response("no space left on device while writing to http://greptime.test/data", { status: 500 }));
+		const client = new GreptimeClient(config, { clock: () => 7 });
+		const probe = await client.probeWritable(60_000);
+		expect(probe.lastProbeOk).toBe(false);
+		expect(probe.lastProbeAt).toBe(7);
+		expect(probe.lastProbeError).toContain("no space left");
+		expect(probe.lastProbeError).not.toContain("greptime.test");
+
+		// The next interval sees a recovered store.
+		stubFetch();
+		const recovered = new GreptimeClient(config, { clock: () => 8 });
+		expect((await recovered.probeWritable(60_000)).lastProbeOk).toBe(true);
+	});
+
+	test("a SQL error (the table is missing) fails the probe without charging the breaker", async () => {
+		stubFetch(() => ({ error: "table not found: substrate_health" }));
+		const breaker = new CircuitBreaker("greptime", { failureThreshold: 1, openMs: 1000 }, () => 0);
+		const client = new GreptimeClient(config, { clock: () => 9, gate: { plane: "greptime", breaker, observe: () => undefined } });
+		expect((await client.probeWritable(60_000)).lastProbeOk).toBe(false);
+		expect(breaker.state()).toBe("closed");
+	});
+
+	test("overlapping calls share one in-flight probe", async () => {
+		const { sql } = stubFetch();
+		const client = new GreptimeClient(config, { clock: () => 11 });
+		const [a, b] = await Promise.all([client.probeWritable(60_000), client.probeWritable(60_000)]);
+		expect(a).toEqual(b);
+		expect(sql.filter((s) => s.includes(HEALTH_TABLE))).toHaveLength(1);
+	});
+});
+
+describe("capacity (uplift-2 R5)", () => {
+	const COLUMNS = ["table_name", "region_rows", "disk_size", "sst_size", "index_size"];
+
+	test("joins region_statistics to tables in the configured schema and sums a table's regions", async () => {
+		const { sql } = stubFetch(() =>
+			records(COLUMNS, [
+				["agent_events", 14_302, 1_280_000, 1_250_000, 3_000],
+				["agent_events_pre_append_20260930", 9_851, 1_290_000, 1_200_000, 0],
+				["agent_events", 10, 100, 100, 0],
+				["event_ingest", 1_074, 50_000, 48_000, 0],
+			]),
+		);
+		const capacity = await new GreptimeClient(config).capacity();
+		expect(sql[0]).toContain('"information_schema"."region_statistics"');
+		expect(sql[0]).toContain('"information_schema"."tables"');
+		expect(sql[0]).toContain(`"table_schema" = 'substrate'`);
+		expect(() => assertAppendOnly(sql[0] ?? "")).not.toThrow();
+		expect(capacity).toEqual({
+			bytes: 1_280_100 + 1_290_000 + 50_000,
+			rows: 14_312 + 9_851 + 1_074,
+			tables: [
+				{ name: "agent_events_pre_append_20260930", rows: 9_851, diskBytes: 1_290_000, sstBytes: 1_200_000, indexBytes: 0 },
+				{ name: "agent_events", rows: 14_312, diskBytes: 1_280_100, sstBytes: 1_250_100, indexBytes: 3_000 },
+				{ name: "event_ingest", rows: 1_074, diskBytes: 50_000, sstBytes: 48_000, indexBytes: 0 },
+			],
+		});
+	});
+
+	test("keeps the ten largest tables by disk, totals over all of them, and reads a null cell as zero", async () => {
+		stubFetch(() => records(COLUMNS, Array.from({ length: 12 }, (_, i) => [`t${i}`, i, i * 10, null, null])));
+		const capacity = await new GreptimeClient(config).capacity();
+		expect(capacity.tables).toHaveLength(10);
+		expect(capacity.tables[0]?.name).toBe("t11");
+		expect(capacity.tables.map((table) => table.sstBytes)).toEqual(Array(10).fill(0));
+		expect(capacity.bytes).toBe(Array.from({ length: 12 }, (_, i) => i * 10).reduce((a, b) => a + b, 0));
+		expect(capacity.rows).toBe(66);
+	});
+
+	test("throws rather than inventing numbers when the store does not answer", async () => {
+		stubFetch(() => new Response("nope", { status: 503 }));
+		await expect(new GreptimeClient(config).capacity()).rejects.toBeInstanceOf(GreptimeUnavailable);
+	});
+});
+
+describe("opt-in ttl (uplift-2 R5)", () => {
+	/** Migrate stub where each retention table reports its own live ttl. */
+	function liveTtl(ttls: Partial<Record<"agent_events" | "event_ingest", string>>): { sql: string[] } {
+		return stubFetch((statement) => {
+			const table = /SHOW CREATE TABLE "([^"]+)"/.exec(statement)?.[1];
+			if (table) {
+				const ttl = ttls[table as "agent_events" | "event_ingest"];
+				return records(["Table", "Create Table"], [[table, `... WITH( append_mode = 'true'${ttl ? `, ttl = '${ttl}'` : ""} )`]]);
+			}
+			if (statement.includes("information_schema")) return records(["column_name", "data_type", "semantic_type"], []);
+			return defaultReply(statement);
+		});
+	}
+
+	test("ttlOf reads the option as Greptime prints it and as the DDL quotes it", () => {
+		expect(ttlOf("CREATE TABLE ... WITH( append_mode = 'true', ttl = '180d' )")).toBe("180d");
+		expect(ttlOf("WITH ('append_mode' = 'true', 'ttl' = '4320h')")).toBe("4320h");
+		expect(ttlOf("WITH( append_mode = 'true' )")).toBeNull();
+	});
+
+	test("sends no ALTER when SUBSTRATE_LEDGER_TTL is unset, whatever the tables carry", async () => {
+		const { sql } = liveTtl({ agent_events: "7d" });
+		const { warnings } = await new GreptimeClient(config).migrate();
+		expect(warnings).toEqual([]);
+		expect(sql.some((s) => /^ALTER/i.test(s))).toBe(false);
+	});
+
+	test("ALTERs exactly the tables whose live ttl differs, and only those", async () => {
+		const { sql } = liveTtl({ event_ingest: "180D" });
+		const client = new GreptimeClient(config, { ledger: loadLedgerSettings({ SUBSTRATE_LEDGER_TTL: "180d" }) });
+		const { warnings } = await client.migrate();
+		expect(warnings).toEqual([]);
+		expect(sql.filter((s) => s.startsWith("ALTER"))).toEqual([`ALTER TABLE "agent_events" SET 'ttl'='180d'`]);
+	});
+
+	test("a failed ALTER is a boot warning naming the live value, not a refusal to serve", async () => {
+		const { sql } = liveTtl({});
+		const base = globalThis.fetch;
+		globalThis.fetch = (async (url: string, init: RequestInit) => {
+			const statement = new URLSearchParams(String(init.body)).get("sql") ?? "";
+			if (statement.startsWith("ALTER")) {
+				sql.push(statement);
+				return new Response(JSON.stringify({ error: "permission denied" }), { status: 200 });
+			}
+			return base(url, init);
+		}) as unknown as typeof fetch;
+		const client = new GreptimeClient(config, { ledger: loadLedgerSettings({ SUBSTRATE_LEDGER_TTL: "180d" }) });
+		const { warnings } = await client.migrate();
+		expect(warnings).toHaveLength(2);
+		for (const warning of warnings) {
+			expect(warning).toContain("SUBSTRATE_LEDGER_TTL=180d was not applied");
+			expect(warning).toContain("live ttl unset");
+		}
+	});
+
+	test("an unreadable table is a warning and is not altered blind", async () => {
+		const { sql } = stubFetch((statement) =>
+			statement.includes("SHOW CREATE TABLE") ? new Response("nope", { status: 500 }) : defaultReply(statement),
+		);
+		const client = new GreptimeClient(config, { ledger: loadLedgerSettings({ SUBSTRATE_LEDGER_TTL: "180d" }) });
+		const { warnings } = await client.migrate();
+		expect(sql.some((s) => s.startsWith("ALTER"))).toBe(false);
+		expect(warnings.filter((warning) => warning.includes("could not read its ttl"))).toHaveLength(2);
+	});
+
+	test("the guarded path is the only ALTER: sql() still refuses one, and alterTtl refuses other tables and values", async () => {
+		const { sql } = stubFetch();
+		const client = new GreptimeClient(config);
+		await expect(client.sql(`ALTER TABLE "agent_events" SET 'ttl'='1d'`)).rejects.toThrow(AppendOnlyViolation);
+		await expect(client.sql(`ALTER TABLE "agent_events" DROP COLUMN "hash"`)).rejects.toThrow(AppendOnlyViolation);
+		await expect(client.alterTtl("anchors" as never, "1d")).rejects.toThrow(AppendOnlyViolation);
+		await expect(client.alterTtl("agent_events", "1.5d")).rejects.toThrow(AppendOnlyViolation);
+		await expect(client.alterTtl("agent_events", "1d; DROP TABLE x")).rejects.toThrow(AppendOnlyViolation);
+		expect(sql).toHaveLength(0);
+		await client.alterTtl("event_ingest", "4320h");
+		expect(sql).toEqual([`ALTER TABLE "event_ingest" SET 'ttl'='4320h'`]);
+		expect(sqlOp(sql[0] ?? "")).toBe("alter");
+	});
+
+	test("an invalid SUBSTRATE_LEDGER_TTL is refused at config load with a clear message; unset means no ttl", () => {
+		expect(loadConfig({}).ledger).toEqual({ chainCache: true, chainCacheMax: 10_000, chainLookbackDays: 30, writeProbeS: 60, ttl: null });
+		expect(loadConfig({ SUBSTRATE_LEDGER_TTL: "180d" }).ledger.ttl).toBe("180d");
+		expect(loadConfig({ SUBSTRATE_LEDGER_TTL: "1h 30m" }).ledger.ttl).toBe("1h 30m");
+		for (const bad of ["1.5h", "forever", "0xABm", "180", "+1d", "1d; DROP TABLE x"]) {
+			expect(() => loadConfig({ SUBSTRATE_LEDGER_TTL: bad })).toThrow(ConfigError);
+			expect(() => loadConfig({ SUBSTRATE_LEDGER_TTL: bad })).toThrow("SUBSTRATE_LEDGER_TTL");
+		}
+		const knobs = loadLedgerSettings({
+			SUBSTRATE_LEDGER_CHAIN_CACHE: "0",
+			SUBSTRATE_LEDGER_CHAIN_CACHE_MAX: "0",
+			SUBSTRATE_LEDGER_CHAIN_LOOKBACK_DAYS: "9999",
+			SUBSTRATE_LEDGER_WRITE_PROBE_S: "nope",
+		});
+		expect(knobs).toEqual({ chainCache: false, chainCacheMax: 1, chainLookbackDays: 3650, writeProbeS: 60, ttl: null });
 	});
 });

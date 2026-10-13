@@ -798,6 +798,7 @@ describe("append-mode enforcement", () => {
 			appendOnly: false,
 			quotingDialectKnown: true,
 			eventsWritable: false,
+			ledger: { writable: false, lastProbeAt: null, lastProbeOk: null, lastProbeError: null },
 			cache: { enabled: false, connected: false, mode: "off", hits: 0, misses: 0, bypasses: 0, errors: 0, cooldownUntil: null },
 			planes: {
 				greptime: { ok: true, breaker: closed("greptime"), lastErrorAt: null },
@@ -806,7 +807,7 @@ describe("append-mode enforcement", () => {
 				hindsight: { ok: null, breaker: closed("hindsight"), lastErrorAt: null },
 				ragflow: { ok: null, breaker: closed("ragflow"), lastErrorAt: null },
 			},
-			capacity: { index: null },
+			capacity: { index: null, ledger: null },
 		});
 	});
 
@@ -816,19 +817,19 @@ describe("append-mode enforcement", () => {
 		const quick = { ping: async () => true, capacity: async () => capacity };
 		const answered = await new Substrate(loadConfig({}), { index: quick as never, greptime: greptime as never }).health();
 		expect(answered.index).toBe(true);
-		expect(answered.capacity).toEqual({ index: capacity });
+		expect(answered.capacity).toEqual({ index: capacity, ledger: null });
 		expect(answered.planes.index).toMatchObject({ ok: true });
 
 		const slow = { ping: async () => true, capacity: () => Promise.withResolvers<never>().promise };
 		const started = Date.now();
 		const timedOut = await new Substrate(loadConfig({}), { index: slow as never, greptime: greptime as never }).health();
 		expect(Date.now() - started).toBeLessThan(HEALTH_PROBE_MS + 500);
-		expect(timedOut.capacity).toEqual({ index: null });
+		expect(timedOut.capacity).toEqual({ index: null, ledger: null });
 		expect(timedOut.index).toBe(true);
 
 		// An index without the method at all (an older fake) is null too, never a throw.
 		const bare = await new Substrate(loadConfig({}), { index: { ping: async () => true } as never, greptime: greptime as never }).health();
-		expect(bare.capacity).toEqual({ index: null });
+		expect(bare.capacity).toEqual({ index: null, ledger: null });
 	});
 
 	test("healthz probes a configured Hindsight and RAGFlow once each, bounded, and reports the breaker", async () => {

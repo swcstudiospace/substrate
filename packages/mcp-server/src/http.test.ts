@@ -127,12 +127,12 @@ describe("GET /healthz", () => {
 		expect(body.planes.greptime?.ok).toBeNull();
 		expect(body.planes.hindsight?.ok).toBeNull();
 		expect(body.planes.ragflow?.ok).toBeNull();
-		expect(body.capacity).toEqual({ index: capacity });
+		expect(body.capacity).toEqual({ index: capacity, ledger: null });
 
 		const off = await start({ SUBSTRATE_BREAKER: "0" }, { index: { ping: async () => true, capacity: () => Promise.withResolvers<never>().promise } });
 		const offBody = (await (await fetch(`${off.base}/healthz`)).json()) as { planes: Record<string, { breaker: unknown }>; capacity: { index: unknown } };
 		expect(offBody.planes.index?.breaker).toBeNull();
-		expect(offBody.capacity).toEqual({ index: null });
+		expect(offBody.capacity).toEqual({ index: null, ledger: null });
 	});
 });
 
