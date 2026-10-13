@@ -129,6 +129,31 @@ describe("planSweep", () => {
 		expect(by["entries-ttl-30d"]?.cutoff).toBe(iso(30));
 		expect(by["entries-ttl-30d"]?.days).toBe(30);
 	});
+
+	test("the ttl classes are report-only by default and under report, and deletable only under enforce", () => {
+		// The default is what every caller before N4 got: no option, no delete.
+		for (const steps of [planSweep(DEFAULT_SWEEP_POLICY, NOW), planSweep(DEFAULT_SWEEP_POLICY, NOW, { expiry: "report" })]) {
+			const by = Object.fromEntries(steps.map((step) => [step.cls.id, step.cls]));
+			expect(by["entries-ttl-30d"]?.mode).toBe("report");
+			expect(by["entries-ttl-graph"]?.mode).toBe("report");
+			expect(by["entries-ttl-30d"]?.deleteBatch).toBeUndefined();
+			expect(by["entries-ttl-graph"]?.deleteBatch).toBeUndefined();
+		}
+		const enforced = planSweep(DEFAULT_SWEEP_POLICY, NOW, { expiry: "enforce" });
+		const by = Object.fromEntries(enforced.map((step) => [step.cls.id, step.cls]));
+		expect(by["entries-ttl-30d"]?.mode).toBe("delete");
+		expect(by["entries-ttl-graph"]?.mode).toBe("delete");
+		expect(typeof by["entries-ttl-30d"]?.deleteBatch).toBe("function");
+		expect(typeof by["entries-ttl-graph"]?.deleteBatch).toBe("function");
+		// Everything else is untouched by the switch, cutoffs included.
+		const plain = planSweep(DEFAULT_SWEEP_POLICY, NOW);
+		for (const [i, step] of enforced.entries()) {
+			expect(step.cutoff).toBe(plain[i]!.cutoff);
+			if (!step.cls.id.startsWith("entries-ttl-")) expect(step.cls).toBe(plain[i]!.cls);
+		}
+		// And `SWEEP_CLASSES` itself did not change under anyone's feet.
+		expect(SWEEP_CLASSES.filter((cls) => cls.id.startsWith("entries-ttl-")).every((cls) => cls.mode === "report")).toBe(true);
+	});
 });
 
 describe("the classes", () => {
@@ -267,8 +292,30 @@ describe("the classes", () => {
 		);
 		const graphTtl = by["entries-ttl-graph"]!.count(cutoff);
 		expect(graphTtl.text).toContain("ttl = 'graph' and superseded_by is null and created < $1::timestamptz");
-		expect(graphTtl.text).toContain("not exists (select 1 from graph_index g where g.graph_id = e.graph_id");
+		// The graph is `memoryGraphId`'s: `graph_id`, or the tail of a `graph:` scope —
+		// the identity the reads judge by, so the sweep and `memoryExpiry` agree.
+		expect(graphTtl.text).toContain(
+			"not exists (select 1 from graph_index g where g.graph_id = coalesce(e.graph_id, " +
+				"case when left(e.scope, 6) = 'graph:' then substr(e.scope, 7) end)",
+		);
 		expect(graphTtl.params).toEqual([cutoff, TERMINAL_GRAPH_STATUSES.join("|")]);
+	});
+
+	test("the ttl classes carry a delete only under enforce, and it removes exactly what the count named", () => {
+		// `SWEEP_CLASSES` itself never exposes it: nothing that plans without the
+		// switch can reach a ttl delete.
+		for (const id of ["entries-ttl-30d", "entries-ttl-graph"] as const) {
+			expect(by[id]!.deleteBatch).toBeUndefined();
+			expect(by[id]!.underEnforce?.mode).toBe("delete");
+			const count = by[id]!.count(cutoff);
+			const pick = by[id]!.underEnforce!.deleteBatch(cutoff, 500).pick;
+			// Same `from … where …` text in both statements, then the limit as the next parameter.
+			const predicate = count.text.slice(count.text.indexOf("from ") + 5);
+			expect(pick.text).toContain(`select id from ${predicate} limit $${count.params.length + 1} for update skip locked`);
+			expect(pick.text).toContain("delete from memory_entries q using doomed where q.id = doomed.id");
+			expect(pick.params).toEqual([...count.params, 500]);
+		}
+		expect(by["entries-superseded"]!.underEnforce).toBeUndefined();
 	});
 });
 
@@ -364,6 +411,44 @@ describe("executeSweep", () => {
 			[50, 0],
 			[50, 0],
 		]);
+	});
+
+	test("under enforce the ttl classes delete on apply and still only count on a dry-run", async () => {
+		const ttl = (expiry: "report" | "enforce") =>
+			planSweep(DEFAULT_SWEEP_POLICY, NOW, { expiry }).filter((step) => step.cls.id.startsWith("entries-ttl-"));
+
+		// Dry-run under enforce: counts, nothing else — the sweep mode is its own key.
+		const dry = fakeRunner(7);
+		const dryReport = await executeSweep(dry.run, ttl("enforce"), { apply: false, batch: 500, now: NOW, expiry: "enforce" });
+		expect(dry.statements.every((statement) => statement.text.startsWith("select count"))).toBe(true);
+		expect(dryReport.expiry).toBe("enforce");
+		expect(dryReport.classes.map((cls) => [cls.mode, cls.candidates, cls.deleted])).toEqual([
+			["delete", 7, 0],
+			["delete", 7, 0],
+		]);
+
+		// Apply under report: still counts only, whatever the sweep mode says.
+		const reporting = fakeRunner(7);
+		const reported = await executeSweep(reporting.run, ttl("report"), { apply: true, batch: 500, now: NOW, expiry: "report" });
+		expect(reporting.statements.every((statement) => statement.text.startsWith("select count"))).toBe(true);
+		expect(reported.expiry).toBe("report");
+		expect(reported.classes.map((cls) => [cls.mode, cls.candidates, cls.deleted])).toEqual([
+			["report", 7, 0],
+			["report", 7, 0],
+		]);
+
+		// Apply under enforce: one count then one delete round per class (the fake
+		// holds one pool of rows, so each class gets its own), and the report says so.
+		for (const step of ttl("enforce")) {
+			const enforcing = fakeRunner(7);
+			const enforced = await executeSweep(enforcing.run, [step], { apply: true, batch: 500, now: NOW, expiry: "enforce" });
+			expect(enforcing.statements.map((statement) => statement.text.slice(0, 11))).toEqual(["select coun", "with doomed"]);
+			expect(enforced.classes.map((cls) => [cls.id, cls.mode, cls.candidates, cls.deleted])).toEqual([[step.cls.id, "delete", 7, 7]]);
+			expect(formatSweepReport(enforced)).toContain("ttl classes: enforce");
+		}
+		const thirty = ttl("enforce").filter((step) => step.cls.id === "entries-ttl-30d");
+		const rendered = formatSweepReport(await executeSweep(fakeRunner(7).run, thirty, { apply: true, batch: 500, now: NOW, expiry: "enforce" }));
+		expect(rendered).toMatch(/entries-ttl-30d\s+delete\s+> {2}30d candidates\s+7\s+deleted\s+7\n/);
 	});
 
 	test("the batch loop is bounded by the count it took, so a racing writer cannot keep it running", async () => {

@@ -74,10 +74,12 @@ export {
 export {
 	type ClaimOutcome,
 	type EventRefusalReason,
+	type MemoryExpiredMode,
 	type PlaneErrorReason,
 	type Usage,
 	CLAIM_OUTCOMES,
 	EVENT_REFUSAL_REASONS,
+	MEMORY_EXPIRED_MODES,
 	METRIC,
 	PLANE_ERROR_REASONS,
 	SubstrateInstruments,

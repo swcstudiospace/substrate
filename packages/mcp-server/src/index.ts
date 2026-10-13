@@ -13,7 +13,15 @@
  * surface, refuses boot with one names-only line on stderr and exit 78
  * (EX_CONFIG) rather than silently re-attributing a token.
  */
-import { ConfigError, configWarnings, desktopConfigWarnings, hindsightConfigWarnings, loadConfig, swarmTokenWarnings } from "./config.ts";
+import {
+	ConfigError,
+	configWarnings,
+	desktopConfigWarnings,
+	hindsightConfigWarnings,
+	loadConfig,
+	memoryExpiryConfigWarnings,
+	swarmTokenWarnings,
+} from "./config.ts";
 import { bufferRunner, createDesktopDriver } from "./desktop/driver.ts";
 import { createObservability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
@@ -43,7 +51,7 @@ for (const problem of await observability.start()) {
 	process.stderr.write(`[substrate] degraded — ${problem}\n`);
 }
 
-for (const warning of [...configWarnings(config), ...swarmTokenWarnings(config), ...desktopConfigWarnings(config), ...hindsightConfigWarnings(config)]) {
+for (const warning of [...configWarnings(config), ...swarmTokenWarnings(config), ...desktopConfigWarnings(config), ...memoryExpiryConfigWarnings(config), ...hindsightConfigWarnings(config)]) {
 	process.stderr.write(`[substrate] misconfigured — ${warning}\n`);
 }
 

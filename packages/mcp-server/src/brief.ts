@@ -110,15 +110,20 @@ function describeNode(node: GraphView["nodes"][number], now = Date.now()): strin
 }
 
 /**
- * Mark an entry whose trust has decayed.
+ * Mark an entry whose trust has decayed, or whose lifetime has run out.
  *
  * A decayed entry is still shown — dropping it would quietly lose the only record
  * that a decision was ever taken. What changes is that the brief stops presenting
  * it as settled, which is the whole point of `needs_reverification`: the next agent
  * is told to check before acting, not left to assume a year-old agent-claimed fact
  * still holds.
+ *
+ * An expired entry (uplift-3 N4) reaches here only under `SUBSTRATE_MEMORY_EXPIRY=report`,
+ * where the index still serves it; the brief says so rather than presenting a
+ * `30d` note from last quarter as current. Under `enforce` the index leaves it out.
  */
 function staleness(entry: MemoryEntry): string {
+	if (entry.expired === true) return " — expired";
 	return entry.needs_reverification ? " — needs reverification" : "";
 }
 
@@ -236,7 +241,7 @@ export async function composeBrief(
 	// Other graphs open in this repo.
 	const othersRead = index && repo ? start("open graphs", () => index.openGraphs(repo, graphId ?? undefined), [] as GraphView[]) : null;
 	// Warnings and decisions worth carrying into this session.
-	const memoryRead = index ? start("memory", () => index.memoryForBrief(repo, graphId), [] as MemoryEntry[]) : null;
+	const memoryRead = index ? start("memory", () => index.memoryForBrief(repo, graphId, undefined, { surface }), [] as MemoryEntry[]) : null;
 
 	const heading = [repo ?? "unknown repo", branch ? `@ ${branch}` : null, graphId ? `— ${graphId}` : null]
 		.filter(Boolean)
@@ -317,6 +322,9 @@ export async function composeBrief(
 
 	for (const entry of memory) {
 		if (!entry.needs_reverification) deadlines.push(entry.reverify_after);
+		// A cached brief must not outlive an entry's lifetime either: at `expires_at`
+		// the index would hide (enforce) or mark (report) it, and the brief should too.
+		if (entry.expired !== true) deadlines.push(entry.expires_at);
 	}
 
 	if (lines.length === 1) {

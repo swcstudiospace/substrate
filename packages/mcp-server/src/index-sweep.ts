@@ -16,13 +16,19 @@
  *     window has long passed, a review already decided, a quarantined write whose
  *     content a reviewer later landed, a finished graph nobody has touched for a
  *     quarter, a memory version a newer one has superseded.
- *   - **Report-only classes are counted, never deleted.** The read paths
- *     (`searchMemoryPage`, `memoryForBrief`) do not filter on `ttl`, so a `30d`
- *     entry older than 30 days is still what an agent is briefed with; deleting it
- *     here would change answers the reads still give. They are reported so the
- *     operator can see the gap, and they stay until the reads honour `ttl`.
- *     `memory_quarantine` has no decision column at all, so a parked row whose
- *     content never landed is reported rather than guessed at.
+ *   - **The two `ttl` classes follow the reads (uplift-3 N4).** `memoryExpiry`
+ *     in `memory-policy.ts` is the one predicate the brief, `memory_search` and
+ *     the retain forward judge an entry's lifetime by, and
+ *     `SUBSTRATE_MEMORY_EXPIRY` says what the reads do about it: under `report`
+ *     (the default) an expired `30d` or `graph` entry is still served, tagged, so
+ *     deleting it here would change answers the reads still give — the classes
+ *     only count. Under `enforce` the reads already hide it, and `planSweep`
+ *     given `{ expiry: "enforce" }` makes the classes deletable — still only on
+ *     `apply`, which the env and the flag gate separately. Two switches, three
+ *     keys, before a `ttl` row goes.
+ *   - **`memory_quarantine` is counted, never deleted,** when its content never
+ *     landed: it has no decision column at all, so a parked row is reported
+ *     rather than guessed at.
  *   - **Cutoffs are computed here from one `now`,** never by the database, so a
  *     test can pin them and the report says exactly which instant each class was
  *     judged against.
@@ -39,6 +45,7 @@
  *     delete keeps its graph whole — every node, edge, step and binding.
  */
 import { DEFAULT_LEASE_TTL_SECONDS } from "./lease.ts";
+import type { MemoryExpiryMode } from "./types.ts";
 
 /** Statuses that mean a graph is finished — exactly Notion's `complete` status group on the Agent Task Graph. */
 export const TERMINAL_GRAPH_STATUSES = ["Merged", "Resolved", "Done", "Won't Fix", "Closed", "Failed", "Canceled"] as const;
@@ -202,6 +209,13 @@ export interface SweepClass {
 	count(cutoff: string): SweepStatement;
 	/** Absent on report-only classes. */
 	deleteBatch?(cutoff: string, limit: number): SweepBatch;
+	/**
+	 * What the class becomes when the reads enforce `ttl` (`planSweep` with
+	 * `expiry: "enforce"`): the `ttl` classes carry their delete here, so
+	 * `SWEEP_CLASSES` itself stays report-only and nothing reaches `deleteBatch`
+	 * without that switch.
+	 */
+	underEnforce?: Required<Pick<SweepClass, "deleteBatch">> & { mode: "delete" };
 }
 
 /**
@@ -269,6 +283,34 @@ function reportClass(id: SweepClassId, days: SweepClass["days"], from: string, p
 		mode: "report",
 		days,
 		count: (cutoff) => ({ text: `select count(*)::int as candidates from ${from}`, params: params(cutoff) }),
+	};
+}
+
+/**
+ * A `ttl` class (uplift-3 N4): a report class whose delete exists but is only
+ * reachable through `underEnforce`. Count and pick share `from`, so what is
+ * reported is what would be removed; the pick's `limit` is the parameter after
+ * the predicate's own, and the delete joins the picked keys back to the table.
+ */
+function ttlClass(id: SweepClassId, days: SweepClass["days"], from: string, params: (cutoff: string) => unknown[]): SweepClass {
+	const table = from.slice(0, from.indexOf(" "));
+	return {
+		...reportClass(id, days, from, params),
+		underEnforce: {
+			mode: "delete",
+			deleteBatch: (cutoff, limit) => {
+				const bound = params(cutoff);
+				return {
+					pick: {
+						text:
+							`with doomed as (select id from ${from} limit $${bound.length + 1} for update skip locked), ` +
+							`d as (delete from ${table} q using doomed where q.id = doomed.id returning 1) ` +
+							"select count(*)::int as deleted from d",
+						params: [...bound, limit],
+					},
+				};
+			},
+		},
 	};
 }
 
@@ -403,18 +445,22 @@ export const SWEEP_CLASSES: readonly SweepClass[] = [
 		"superseded_by is not null and created < $1::timestamptz",
 	),
 	// The `30d` retention class, fixed by its name: the policy cannot move it.
-	reportClass(
+	// `created < cutoff` is `memoryExpiry`'s `created + 30d <= now`, to the instant.
+	ttlClass(
 		"entries-ttl-30d",
 		30,
 		"memory_entries where ttl = '30d' and superseded_by is null and created < $1::timestamptz",
 		(cutoff) => [cutoff],
 	),
-	// Old, scoped to a graph, and that graph is finished or no longer indexed.
-	reportClass(
+	// Old, scoped to a graph, and that graph is finished or no longer indexed. The
+	// graph is the one `memoryGraphId` names: `graph_id`, or the tail of a `graph:`
+	// scope when the write gave none — the same identity the reads judge by.
+	ttlClass(
 		"entries-ttl-graph",
 		"graphsDays",
 		"memory_entries e where ttl = 'graph' and superseded_by is null and created < $1::timestamptz " +
-			"and not exists (select 1 from graph_index g where g.graph_id = e.graph_id " +
+			"and not exists (select 1 from graph_index g where g.graph_id = coalesce(e.graph_id, " +
+			"case when left(e.scope, 6) = 'graph:' then substr(e.scope, 7) end) " +
 			`and (g.status is null or not (g.status = any(${TERMINAL_SET}))))`,
 		(cutoff) => [cutoff, TERMINAL],
 	),
@@ -429,11 +475,17 @@ export interface SweepStep {
 	days: number;
 }
 
-/** The cutoff per class for one `now`. Pure, and what the report echoes. */
-export function planSweep(policy: SweepPolicy, now: number): SweepStep[] {
+/**
+ * The cutoff per class for one `now`. Pure, and what the report echoes. With
+ * `expiry: "enforce"` the `ttl` classes take their `underEnforce` shape — the
+ * only way a step ever carries their delete. The default is `report`, which
+ * is what every caller before N4 got.
+ */
+export function planSweep(policy: SweepPolicy, now: number, options: { expiry?: MemoryExpiryMode } = {}): SweepStep[] {
 	return SWEEP_CLASSES.map((cls) => {
 		const days = typeof cls.days === "number" ? cls.days : policy[cls.days];
-		return { cls, days, cutoff: new Date(now - days * DAY_MS).toISOString() };
+		const effective = options.expiry === "enforce" && cls.underEnforce ? { ...cls, ...cls.underEnforce } : cls;
+		return { cls: effective, days, cutoff: new Date(now - days * DAY_MS).toISOString() };
 	});
 }
 
@@ -453,6 +505,8 @@ export interface SweepReport {
 	/** The `now` the cutoffs were taken from. */
 	at: string;
 	batch: number;
+	/** What the `ttl` classes were planned under: `enforce` is the only way they delete. */
+	expiry: MemoryExpiryMode;
 	classes: SweepClassReport[];
 }
 
@@ -496,7 +550,7 @@ async function runBatch(run: SweepRunner, batch: SweepBatch): Promise<{ picked: 
 export async function executeSweep(
 	run: SweepRunner,
 	steps: readonly SweepStep[],
-	options: { apply: boolean; batch: number; now: number },
+	options: { apply: boolean; batch: number; now: number; expiry?: MemoryExpiryMode },
 ): Promise<SweepReport> {
 	const classes: SweepClassReport[] = [];
 	for (const step of steps) {
@@ -528,12 +582,18 @@ export async function executeSweep(
 			}
 		}
 	}
-	return { apply: options.apply, at: new Date(options.now).toISOString(), batch: options.batch, classes };
+	return {
+		apply: options.apply,
+		at: new Date(options.now).toISOString(),
+		batch: options.batch,
+		expiry: options.expiry ?? "report",
+		classes,
+	};
 }
 
 /** The report as an operator reads it on a terminal; `--json` prints the object instead. */
 export function formatSweepReport(report: SweepReport): string {
-	const lines = [`index sweep ${report.apply ? "APPLY" : "dry-run"} at ${report.at} (batch ${report.batch})`];
+	const lines = [`index sweep ${report.apply ? "APPLY" : "dry-run"} at ${report.at} (batch ${report.batch}) ttl classes: ${report.expiry}`];
 	for (const cls of report.classes) {
 		const tail = cls.children ? ` (${Object.entries(cls.children).map(([k, v]) => `${k} ${v}`).join(", ")})` : "";
 		lines.push(

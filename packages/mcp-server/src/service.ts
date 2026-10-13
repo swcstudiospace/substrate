@@ -77,7 +77,7 @@ import {
 	type LedgerProbe,
 	type QueryableColumn,
 } from "./greptime.ts";
-import { IndexStore, leaseSnapshot, type GraphBindResult, type IndexCapacity } from "./index-store.ts";
+import { IndexStore, leaseSnapshot, type GraphBindResult, type IndexCapacity, type MemoryExpiredSample } from "./index-store.ts";
 import {
 	buildHandoff,
 	handoffGaps,
@@ -128,6 +128,7 @@ import {
 	type GraphView,
 	type MemoryEntry,
 	type MemoryEntryInput,
+	type MemoryReadOptions,
 	type MemorySearch,
 	type MemorySearchPage,
 	type MemoryWriteRequest,
@@ -533,6 +534,8 @@ export interface SubstrateObserver {
 	cached?(sample: CacheSample): void;
 	/** One outbound call to a data plane, as its gate observed it (uplift-2 R2). */
 	plane?(sample: PlaneSample): void;
+	/** One memory entry past its `ttl` that an index read met, and what the read did with it (uplift-3 N4). */
+	memoryExpired?(sample: MemoryExpiredSample): void;
 	claimed?(sample: {
 		surface: Surface;
 		graph_id: string;
@@ -692,6 +695,8 @@ export interface MemorySearchRequest {
 	scope?: string;
 	limit?: number;
 	include_superseded?: boolean;
+	/** Serve entries past their `ttl` under `enforce` (uplift-3 N4). Operator-gated in `mcp.ts`, never here. */
+	include_expired?: boolean;
 	subject_prefix?: string;
 	before?: string;
 	before_id?: string;
@@ -871,7 +876,16 @@ export class Substrate {
 			stores?.index !== undefined
 				? stores.index
 				: config.postgresUrl
-					? new IndexStore(config.postgresUrl, { gate: this.planes.gate("index") })
+					? new IndexStore(config.postgresUrl, {
+							gate: this.planes.gate("index"),
+							// uplift-3 N4: the mode is config, the count goes to the observer.
+							memoryExpiry: {
+								mode: config.memoryExpiry,
+								observe: (sample) => {
+									this.observer.memoryExpired?.(sample);
+								},
+							},
+						})
 					: null;
 		this.greptime =
 			stores?.greptime !== undefined
@@ -1422,6 +1436,13 @@ export class Substrate {
 	 * leg runs under its own shorter budget (`HINDSIGHT_SEARCH_RECALL_BUDGET_MS`,
 	 * uplift-2 R3): a slow plane costs a search at most that long, and the
 	 * reply says `recall-timeout` so the caller can tell slow from down.
+	 *
+	 * Lifetime (uplift-3 N4) is the index's to judge; `includeExpired` only widens
+	 * an `enforce` read and arrives already operator-gated. The cache key carries
+	 * the mode only when it is `enforce`, so a flip to `enforce` cannot be answered
+	 * from a `report` entry across a restart, while `report` keys are the keys
+	 * they were; and the refresh deadline is the nearest `expires_at` as well as
+	 * the nearest reverify, so a cached page never outlives an entry in it.
 	 */
 	async searchMemory(
 		query: string,
@@ -1429,21 +1450,30 @@ export class Substrate {
 		limit?: number,
 		includeSuperseded?: boolean,
 		surface = "unattributed",
+		includeExpired?: boolean,
 	): Promise<MergedMemoryResults> {
+		const read = this.memoryRead(surface, includeExpired);
 		return this.cache.getOrLoad({
 			klass: "memory-search",
 			surface,
 			// The shape marker keeps pre-upgrade bare-list entries under their
 			// old key: a hit must return the merged shape, never a stale array.
-			args: { query, scope: scope ?? null, limit: limit ?? null, includeSuperseded: includeSuperseded ?? false, shape: "merged-v1" },
+			args: {
+				query,
+				scope: scope ?? null,
+				limit: limit ?? null,
+				includeSuperseded: includeSuperseded ?? false,
+				shape: "merged-v1",
+				...this.expiryKey(includeExpired),
+			},
 			generations: [MEMORY_GENERATION_KEY],
-			refreshAt: (merged) => earliestRefreshAt(merged.entries.map((entry) => entry.reverify_after)),
+			refreshAt: (merged) => earliestRefreshAt(merged.entries.flatMap((entry) => [entry.reverify_after, entry.expires_at])),
 			// A degraded answer (outage, partial) is still the answer, but it
 			// must not sit in the cache: the next search re-probes the plane.
 			store: (merged) => !merged.degraded,
 			load: async () => {
 				const [entries, recall] = await Promise.all([
-					this.index ? this.index.searchMemory(query, scope, limit, includeSuperseded) : Promise.resolve([]),
+					this.index ? this.index.searchMemory(query, scope, limit, includeSuperseded, read) : Promise.resolve([]),
 					this.recallMemories({ query }, surface, this.config.hindsightBudgets.searchRecallBudgetMs),
 				]);
 				return mergeDerivedHits(entries, recall, scope);
@@ -1455,21 +1485,40 @@ export class Substrate {
 	 * A paged search: `subject_prefix` and the `(before, before_id)` cursor. The
 	 * visibility rules are `searchMemory`'s — this reads the same entries, only
 	 * further back — so nothing quarantined, parked or retired is reachable here
-	 * that was not before.
+	 * that was not before, and an expired entry is tagged or hidden the same way.
 	 */
 	async searchMemoryPage(request: MemorySearchRequest, surface = "unattributed"): Promise<MemorySearchPage> {
 		const search = parseMemorySearch(request);
+		const read = this.memoryRead(surface, request.include_expired);
 		return this.cache.getOrLoad({
 			klass: "memory-search",
 			surface,
-			args: search,
+			args: { ...search, ...this.expiryKey(request.include_expired) },
 			generations: [MEMORY_GENERATION_KEY],
-			refreshAt: (page) => earliestRefreshAt(page.entries.map((entry) => entry.reverify_after)),
+			refreshAt: (page) => earliestRefreshAt(page.entries.flatMap((entry) => [entry.reverify_after, entry.expires_at])),
 			load: async () => {
 				if (!this.index) return { entries: [], next: null };
-				return this.index.searchMemoryPage(search);
+				return this.index.searchMemoryPage(search, read);
 			},
 		});
+	}
+
+	/** The per-call lifetime options for an index read (uplift-3 N4): who is asking, and whether expired entries were asked for. */
+	private memoryRead(surface: string, includeExpired: boolean | undefined): MemoryReadOptions {
+		return { surface, ...(includeExpired === true ? { includeExpired: true } : {}) };
+	}
+
+	/**
+	 * The lifetime part of a memory cache key. Empty under `report` without
+	 * `includeExpired`, which keeps every pre-N4 key exactly what it was; set
+	 * otherwise, so an `enforce` answer and a widened one never share an entry
+	 * with a `report` one.
+	 */
+	private expiryKey(includeExpired: boolean | undefined): { expiry?: "enforce"; includeExpired?: true } {
+		return {
+			...(this.config.memoryExpiry === "enforce" ? { expiry: "enforce" as const } : {}),
+			...(includeExpired === true ? { includeExpired: true as const } : {}),
+		};
 	}
 
 	/**
@@ -1490,15 +1539,18 @@ export class Substrate {
 		let before: string | undefined;
 		let beforeId: string | undefined;
 		for (let pages = 0; pages < 100; pages++) {
-			const page = await this.index.searchMemoryPage({
-				query: "",
-				subjectPrefix: TEACHABLE_SUBJECT_PREFIX,
-				writer: surface,
-				kind: "fact",
-				limit: 100,
-				includeSuperseded: false,
-				...(before === undefined ? {} : { before, beforeId }),
-			});
+			const page = await this.index.searchMemoryPage(
+				{
+					query: "",
+					subjectPrefix: TEACHABLE_SUBJECT_PREFIX,
+					writer: surface,
+					kind: "fact",
+					limit: 100,
+					includeSuperseded: false,
+					...(before === undefined ? {} : { before, beforeId }),
+				},
+				{ surface },
+			);
 			for (const entry of page.entries) {
 				if (isTeachable(entry.kind, entry.subject) && entry.writer === surface && !entry.superseded_by) teachables.push(entry);
 			}
@@ -1623,6 +1675,7 @@ export class Substrate {
 							return true;
 						},
 					};
+		const index = this.index;
 		return {
 			config: hindsight,
 			fetchImpl: this.hindsightFetch,
@@ -1630,6 +1683,9 @@ export class Substrate {
 			emit: (event: EventInput) => this.emit(event),
 			outbox: sink,
 			retainTimeoutMs: this.config.hindsightBudgets.retainTimeoutMs,
+			// uplift-3 N4: a `graph` entry is judged against the graph as the index
+			// knows it now, so a forward of a finished graph's memory is refused.
+			...(index ? { graphLifetime: (entry: MemoryEntry) => index.graphLifetime(entry) } : {}),
 		};
 	}
 

@@ -53,6 +53,7 @@ substrate is keyed by. `surface` says which of the eight agents on the host;
 | `substrate.trace.spans_dropped` | counter | — |
 | `substrate.plane.duration` | histogram, ms | `plane`, `op`, `outcome` = `ok` \| `error` \| `timeout` \| `open` |
 | `substrate.plane.errors` | counter | `plane`, `reason` = `timeout` \| `network` \| `server` \| `open` \| `other` |
+| `substrate.memory.expired` | counter | `surface`, `kind` (memory kind), `mode` = `served` \| `hidden` — entries past their `ttl` met by an index read (uplift-3 N4; `docs/memory-governance.md` § Lifetime) |
 
 `status` is a class (`2xx`, `5xx`), not a code, and `route` is one of the known
 paths or `other` — an unauthenticated caller walking random URLs must not be able

@@ -14,7 +14,7 @@ import { DEFAULT_RECALL_BUDGET_MS } from "./memory-recall.ts";
 import { NOTION_API_URL } from "./notion.ts";
 import { DEFAULT_RETRIEVAL_KNOBS, ragflowFromEnv, type RagflowConfig, type RetrievalKnobs } from "./planes/ragflow.ts";
 import { DEFAULT_RETAIN_DRAIN_MS, DEFAULT_RETAIN_MAX_ATTEMPTS, DEFAULT_RETAIN_OUTBOX_MAX } from "./retain-outbox.ts";
-import { SURFACES, SWARM_SURFACES, isSwarmSurface, type Surface } from "./types.ts";
+import { MEMORY_EXPIRY_MODES, SURFACES, SWARM_SURFACES, isSwarmSurface, type MemoryExpiryMode, type Surface } from "./types.ts";
 
 /** Default hermes-linear-connector base URL (D23-25). */
 export const DEFAULT_HERMES_LINEAR_URL = "http://127.0.0.1:8792";
@@ -324,6 +324,18 @@ export interface SubstrateConfig {
 	 * The defaults are RAGFlow's own; junk or out-of-range values fall back.
 	 */
 	docsRetrieval: RetrievalKnobs;
+	// uplift-3 N4 — memory lifetime
+	/**
+	 * What the index's serving reads do with an entry past its `ttl`
+	 * (`SUBSTRATE_MEMORY_EXPIRY`): `report` (the default) serves it tagged
+	 * `expired` and counts it; `enforce` hides it unless an operator asks, and
+	 * lets the sweeper's two `entries-ttl-*` classes delete under `apply`. The
+	 * retain forward refuses an expired entry in both modes. Anything else is
+	 * `report`, named at boot by `memoryExpiryConfigWarnings`.
+	 */
+	memoryExpiry: MemoryExpiryMode;
+	/** The unrecognised `SUBSTRATE_MEMORY_EXPIRY` value, for the boot warning; null when the key parsed or was unset. */
+	memoryExpiryRejected: string | null;
 }
 
 /** Production defaults: September's library, so the host ledger keeps deduplicating. */
@@ -578,7 +590,38 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 			vectorSimilarityWeight: unitIntervalOr(env.SUBSTRATE_DOCS_VECTOR_WEIGHT, DEFAULT_RETRIEVAL_KNOBS.vectorSimilarityWeight),
 			topK: positiveOr(env.SUBSTRATE_DOCS_TOP_K, DEFAULT_RETRIEVAL_KNOBS.topK),
 		},
+		// uplift-3 N4
+		...memoryExpiryFromEnv(env.SUBSTRATE_MEMORY_EXPIRY),
 	};
+}
+
+/**
+ * uplift-3 N4: `report` or `enforce`, case- and space-insensitive; anything else
+ * keeps `report` and is carried back for the boot warning. Never `enforce` by
+ * accident: a typo must not start hiding memories.
+ */
+function memoryExpiryFromEnv(raw: string | undefined): Pick<SubstrateConfig, "memoryExpiry" | "memoryExpiryRejected"> {
+	const trimmed = raw?.trim() ?? "";
+	if (trimmed === "") return { memoryExpiry: "report", memoryExpiryRejected: null };
+	const mode = trimmed.toLowerCase();
+	if ((MEMORY_EXPIRY_MODES as readonly string[]).includes(mode)) {
+		return { memoryExpiry: mode as MemoryExpiryMode, memoryExpiryRejected: null };
+	}
+	return { memoryExpiry: "report", memoryExpiryRejected: trimmed };
+}
+
+/**
+ * An unrecognised `SUBSTRATE_MEMORY_EXPIRY`, reported at boot (uplift-3 N4). A
+ * sibling of `hindsightConfigWarnings`, not part of `configWarnings` (which
+ * returns early without operator tokens). The value is a mode name, never a
+ * credential, so the warning may quote it — that is how a typo gets found.
+ */
+export function memoryExpiryConfigWarnings(config: SubstrateConfig): string[] {
+	if (config.memoryExpiryRejected === null) return [];
+	return [
+		`SUBSTRATE_MEMORY_EXPIRY=${JSON.stringify(config.memoryExpiryRejected)} is neither report nor enforce; ` +
+			"running as report, so expired memory entries are still served (tagged `expired`) and nothing is hidden or deleted",
+	];
 }
 
 /** uplift-2 R1: a finite number ≥ 0, floored (0 is "off"); anything else is the default. */
