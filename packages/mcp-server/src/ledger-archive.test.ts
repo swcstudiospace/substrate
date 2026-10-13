@@ -188,7 +188,7 @@ describe("archiveWindow", () => {
 		expect(report.ok).toBe(false);
 		expect(report.mismatches.map((m) => m.kind)).toEqual(["sha256", "hash"]);
 		expect(report.mismatches[1]).toMatchObject({ kind: "hash", event: fx.events[2]?.id });
-		expect(formatVerifyReport(report)).toContain("hash does not match contents");
+		expect(formatVerifyReport(report)).toContain(`hash     an event's hash does not match its contents (${fx.events[2]?.id}): hash `);
 	});
 
 	test("an edited hourly root in the manifest is a root mismatch naming the hour, and nothing else", async () => {
@@ -358,6 +358,34 @@ describe("the runner's grammar", () => {
 		expect(text).toContain("uncovered hours       1 (limit 2)");
 		expect(text).toContain("    2026-10-12T11:00:00.000Z");
 		expect(text).toContain("none recorded");
+	});
+
+	test("formatVerifyReport prints one fixed sentence per mismatch kind, then where and the detail", () => {
+		const report = {
+			ok: false,
+			day: DAY,
+			dir: "/mnt/a",
+			counts: { events: 5, ingest: 5, anchors: 2 },
+			hours: { verified: 1, partial: 0, unanchored: 0, mismatched: 1 },
+			mismatches: [
+				{ kind: "sha256" as const, file: "events-2026-10-12.ndjson", detail: "sha256 aa differs from manifest bb" },
+				{ kind: "count" as const, file: "ingest-2026-10-12.ndjson", detail: "6 lines, manifest counts 5" },
+				{ kind: "hash" as const, event: "evt_1", detail: "hash cc does not match contents (dd)" },
+				{ kind: "chain" as const, event: "evt_2", detail: "session s1: prev ee… is also claimed by evt_1 (fork)" },
+				{ kind: "root" as const, hour: "2026-10-12T11:00:00.000Z", detail: "recomputed ff differs from manifest 00" },
+				{ kind: "anchor" as const, hour: "2026-10-12T11:00:00.000Z", detail: "recomputed ff differs from the receipt 11 at equal count 1" },
+			],
+		};
+		const lines = formatVerifyReport(report).split("\n");
+		expect(lines[0]).toBe(`verify ${DAY} in /mnt/a: 6 mismatches`);
+		expect(lines.slice(3, 9)).toEqual([
+			"  sha256   a file's digest differs from the manifest (events-2026-10-12.ndjson): sha256 aa differs from manifest bb",
+			"  count    a file's line count differs from the manifest (ingest-2026-10-12.ndjson): 6 lines, manifest counts 5",
+			"  hash     an event's hash does not match its contents (evt_1): hash cc does not match contents (dd)",
+			"  chain    the chain does not link (evt_2): session s1: prev ee… is also claimed by evt_1 (fork)",
+			"  root     an hourly root differs from the manifest (2026-10-12T11:00:00.000Z): recomputed ff differs from manifest 00",
+			"  anchor   an hourly root differs from its receipt (2026-10-12T11:00:00.000Z): recomputed ff differs from the receipt 11 at equal count 1",
+		]);
 	});
 });
 

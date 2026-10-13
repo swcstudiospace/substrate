@@ -819,7 +819,24 @@ export function formatManifest(manifest: ArchiveManifest): string {
 	return `archived ${manifest.day}: ${manifest.counts.events} events, ${manifest.counts.ingest} ingest rows (${manifest.counts.ingestMissing} without), ${manifest.counts.anchors} receipts, ${hours} hours rooted\n`;
 }
 
-/** A verify report as text: the verdict, the hour tallies, then one line per mismatch. */
+/**
+ * One sentence per mismatch kind, fixed: the text an operator greps the journal
+ * for, and what `ledger-archive.test.ts` pins. `detail` carries the specifics
+ * (the hash, the hour, the counts) after it.
+ */
+export const MISMATCH_SENTENCE: Record<VerifyMismatch["kind"], string> = {
+	missing: "a file the archive needs is missing",
+	manifest: "the manifest does not describe these files",
+	sha256: "a file's digest differs from the manifest",
+	count: "a file's line count differs from the manifest",
+	parse: "a line does not parse",
+	hash: "an event's hash does not match its contents",
+	chain: "the chain does not link",
+	root: "an hourly root differs from the manifest",
+	anchor: "an hourly root differs from its receipt",
+};
+
+/** A verify report as text: the verdict, the hour tallies, then one line per mismatch — `<kind> <sentence> (<where>): <detail>`. */
 export function formatVerifyReport(report: VerifyReport): string {
 	const lines = [
 		`verify ${report.day} in ${report.dir}: ${report.ok ? "ok" : `${report.mismatches.length} mismatch${report.mismatches.length === 1 ? "" : "es"}`}`,
@@ -828,7 +845,7 @@ export function formatVerifyReport(report: VerifyReport): string {
 	];
 	for (const m of report.mismatches) {
 		const where = [m.file, m.hour, m.event].filter((part): part is string => part !== undefined).join(" ");
-		lines.push(`  ${m.kind.padEnd(8)} ${where ? `${where}: ` : ""}${m.detail}`);
+		lines.push(`  ${m.kind.padEnd(8)} ${MISMATCH_SENTENCE[m.kind]}${where ? ` (${where})` : ""}: ${m.detail}`);
 	}
 	return `${lines.join("\n")}\n`;
 }

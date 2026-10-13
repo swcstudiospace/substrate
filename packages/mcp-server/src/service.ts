@@ -4158,9 +4158,8 @@ export class Substrate {
 	 */
 	async ledgerJobs(now: number = Date.now()): Promise<LedgerJobs> {
 		if (!this.greptime) return { ledger: null, reason: "no ledger configured" };
-		const fresh = (memo: typeof this.ledgerJobsMemo): memo is NonNullable<typeof this.ledgerJobsMemo> =>
-			memo !== null && now - memo.at < LEDGER_JOBS_MEMO_MS;
-		if (fresh(this.ledgerJobsMemo)) return { ledger: this.ledgerJobsMemo.value, reason: this.ledgerJobsMemo.reason };
+		const memoised = this.memoisedLedgerJobs(now);
+		if (memoised !== null) return memoised;
 		if (this.ledgerJobsInFlight === null) {
 			const greptime = this.greptime;
 			const startedAt = now;
@@ -4200,11 +4199,23 @@ export class Substrate {
 				});
 		}
 		await bounded(() => this.ledgerJobsInFlight ?? Promise.resolve(), HEALTH_PROBE_MS);
-		if (fresh(this.ledgerJobsMemo)) return { ledger: this.ledgerJobsMemo.value, reason: this.ledgerJobsMemo.reason };
-		return {
-			ledger: null,
-			reason: `coverage read still running after ${HEALTH_PROBE_MS} ms; a call within ${LEDGER_JOBS_MEMO_MS / 1000} s serves its answer`,
-		};
+		return (
+			this.memoisedLedgerJobs(now) ?? {
+				ledger: null,
+				reason: `coverage read still running after ${HEALTH_PROBE_MS} ms; a call within ${LEDGER_JOBS_MEMO_MS / 1000} s serves its answer`,
+			}
+		);
+	}
+
+	/**
+	 * The memo as `/healthz` reports it while it is fresh, else `null`. A method
+	 * rather than an inline check because the in-flight read assigns the memo
+	 * behind an `await`, which a property narrowing made before it would not see.
+	 */
+	private memoisedLedgerJobs(now: number): LedgerJobs | null {
+		const memo = this.ledgerJobsMemo;
+		if (memo === null || now - memo.at >= LEDGER_JOBS_MEMO_MS) return null;
+		return { ledger: memo.value, reason: memo.reason };
 	}
 }
 

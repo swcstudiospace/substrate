@@ -1816,7 +1816,15 @@ describe("opt-in ttl (uplift-2 R5)", () => {
 	});
 
 	test("an invalid SUBSTRATE_LEDGER_TTL is refused at config load with a clear message; unset means no ttl", () => {
-		expect(loadConfig({}).ledger).toEqual({ chainCache: true, chainCacheMax: 10_000, chainLookbackDays: 30, writeProbeS: 60, ttl: null });
+		expect(loadConfig({}).ledger).toEqual({
+			chainCache: true,
+			chainCacheMax: 10_000,
+			chainLookbackDays: 30,
+			writeProbeS: 60,
+			ttl: null,
+			maxUncoveredHours: 2,
+			archiveDir: null,
+		});
 		expect(loadConfig({ SUBSTRATE_LEDGER_TTL: "180d" }).ledger.ttl).toBe("180d");
 		expect(loadConfig({ SUBSTRATE_LEDGER_TTL: "1h 30m" }).ledger.ttl).toBe("1h 30m");
 		for (const bad of ["1.5h", "forever", "0xABm", "180", "+1d", "1d; DROP TABLE x"]) {
