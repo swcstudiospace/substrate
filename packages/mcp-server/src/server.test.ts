@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { loadConfig } from "./config.ts";
+import { dirname, join } from "node:path";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { scanIngestPages } from "./docs-ingest.ts";
 import type { EventQuery } from "./greptime.ts";
 import { memoryToolWriter } from "./mcp.ts";
 import { createObservability } from "./observe.ts";
@@ -372,6 +376,29 @@ describe("routes", () => {
 		};
 	}
 
+	/**
+	 * A tiny local checkout the merge-trigger can ingest from: the named files
+	 * and nothing else. The caller removes it in a finally.
+	 */
+	function docsFixture(files: Record<string, string>): string {
+		const root = mkdtempSync(join(tmpdir(), "substrate-docs-"));
+		for (const [path, body] of Object.entries(files)) {
+			mkdirSync(dirname(join(root, path)), { recursive: true });
+			writeFileSync(join(root, path), body);
+		}
+		return root;
+	}
+
+	/** The refresh versions the ledger recorded, so a test sees versions without pins. */
+	function refreshEvents(written: SubstrateEvent[]): Array<Record<string, unknown>> {
+		return ingestEvents(written).filter((payload) => "version" in payload);
+	}
+
+	/** The uploads the fake plane took for a dataset id, in order. */
+	function uploadsFor(fake: RagflowFake, datasetId: string): Array<{ content: string; metadata: Record<string, string> }> {
+		return fake.uploads.filter((upload) => upload.dataset_id === datasetId);
+	}
+
 	/** The `docs.ingest` ledger rows the refresh emits, so a test sees the refresh actually ran. */
 	function ingestEvents(written: SubstrateEvent[]): Array<Record<string, unknown>> {
 		return written
@@ -414,13 +441,16 @@ describe("routes", () => {
 		}
 	});
 
-	test("POST /docs/merge-trigger refreshes agent-substrate by default and records the version", async () => {
+	test("POST /docs/merge-trigger ingests the local roots, then records the version", async () => {
 		const { greptime, written } = ledger();
 		const fake = new RagflowFake();
 		const restore = patchFetch(fake.fetch);
+		const docs = docsFixture({ "README.md": "The substrate is the only door.", "docs/data-planes.md": "Planes and their readers." });
 		const { post, stop } = await serve(
 			greptime,
 			{ SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
+			{},
+			{ docsIngestBaseDir: docs },
 		);
 		try {
 			const response = await post("/docs/merge-trigger", { commit: "c-merge", content_sha256: "sha-merge" }, { authorization: "Bearer tok-omp" });
@@ -431,51 +461,94 @@ describe("routes", () => {
 			expect(body.version?.dataset_id).toBe("ds-berlin-agent-substrate");
 			expect(body.version?.version).toBe("v1");
 			expect(body.version?.commit).toBe("c-merge");
-			// The refresh emitted its ledger event for the right dataset id.
-			const events = ingestEvents(written);
+			// The refresh moved documents, not just a version row: both configured
+			// roots were scanned and uploaded under the dataset's id.
+			expect(uploadsFor(fake, "ds-berlin-agent-substrate")).toHaveLength(2);
+			expect(ingestEvents(written).filter((payload) => "source_urls" in payload)).toHaveLength(1);
+			// And the refresh emitted its ledger event for the right dataset id.
+			const events = refreshEvents(written);
 			expect(events).toHaveLength(1);
 			expect(events[0]?.dataset_id).toBe("ds-berlin-agent-substrate");
 		} finally {
 			restore();
 			await stop();
+			rmSync(docs, { recursive: true, force: true });
 		}
 	});
 
-	test("POST /docs/merge-trigger names a requested dataset and dedupes by content hash", async () => {
+	test("POST /docs/merge-trigger answers a dataset it holds no checkout of with a truthful noop", async () => {
 		const { greptime, written } = ledger();
 		const fake = new RagflowFake();
 		const restore = patchFetch(fake.fetch);
+		const docs = docsFixture({ "README.md": "The substrate is the only door." });
 		const { post, stop } = await serve(
 			greptime,
 			{ SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
+			{},
+			{ docsIngestBaseDir: docs },
 		);
 		try {
-			const first = await post("/docs/merge-trigger", { dataset: "agent-skills", commit: "c-ff", content_sha256: "sha-ff" }, { authorization: "Bearer tok-omp" });
-			const firstBody = (await first.json()) as { ok: boolean; version?: { dataset: string; dataset_id: string; version: string }; idempotent?: boolean };
+			// agent-skills is a known trigger row, but this server holds no checkout
+			// of it: a recorded version over documents that were never ingested
+			// would only lie to search, so the noop says what happened instead.
+			const response = await post("/docs/merge-trigger", { dataset: "agent-skills", commit: "c-ff", content_sha256: "sha-ff" }, { authorization: "Bearer tok-omp" });
+			const body = (await response.json()) as { ok: boolean; dataset: string; noop?: boolean; reason?: string };
+			expect(response.status).toBe(200);
+			expect(body.ok).toBe(true);
+			expect(body.dataset).toBe("agent-skills");
+			expect(body.noop).toBe(true);
+			expect(body.reason).toBe("no-configured-ingest-root");
+			expect(fake.uploads).toHaveLength(0);
+			expect(ingestEvents(written)).toHaveLength(0);
+		} finally {
+			restore();
+			await stop();
+			rmSync(docs, { recursive: true, force: true });
+		}
+	});
+
+	test("POST /docs/merge-trigger dedupes the default dataset by content hash", async () => {
+		const { greptime, written } = ledger();
+		const fake = new RagflowFake();
+		const restore = patchFetch(fake.fetch);
+		const docs = docsFixture({ "README.md": "The substrate is the only door.", "docs/data-planes.md": "Planes and their readers." });
+		const { post, stop } = await serve(
+			greptime,
+			{ SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
+			{},
+			{ docsIngestBaseDir: docs },
+		);
+		try {
+			const first = await post("/docs/merge-trigger", { commit: "c-merge", content_sha256: "sha-merge" }, { authorization: "Bearer tok-omp" });
+			const firstBody = (await first.json()) as { ok: boolean; version?: { version: string }; idempotent?: boolean };
 			expect(first.status).toBe(200);
-			expect(firstBody.version?.dataset).toBe("agent-skills");
-			expect(firstBody.version?.dataset_id).toBe("ds-leipzig-agent-skills");
 			expect(firstBody.version?.version).toBe("v1");
 			expect(firstBody.idempotent).toBeUndefined();
+			expect(uploadsFor(fake, "ds-berlin-agent-substrate")).toHaveLength(2);
 
-			// The same commit and hash again: the newest version's own identity, so no
-			// second version is recorded and the reply says it answered from the record.
-			const repeat = await post("/docs/merge-trigger", { dataset: "agent-skills", commit: "c-ff", content_sha256: "sha-ff" }, { authorization: "Bearer tok-omp" });
+			// The same commit and hash again: the newest version's own identity, so
+			// nothing is ingested or recorded and the reply says it answered from
+			// the record.
+			const repeat = await post("/docs/merge-trigger", { commit: "c-merge", content_sha256: "sha-merge" }, { authorization: "Bearer tok-omp" });
 			const repeatBody = (await repeat.json()) as { ok: boolean; version?: { version: string }; idempotent?: boolean };
 			expect(repeat.status).toBe(200);
 			expect(repeatBody.idempotent).toBe(true);
 			expect(repeatBody.version?.version).toBe("v1");
-			expect(ingestEvents(written)).toHaveLength(1);
+			expect(refreshEvents(written)).toHaveLength(1);
+			expect(fake.uploads).toHaveLength(2);
 
-			// New content: a real second version.
-			const next = await post("/docs/merge-trigger", { dataset: "agent-skills", commit: "c-ff2", content_sha256: "sha-ff2" }, { authorization: "Bearer tok-omp" });
+			// New content: a real second version. The pages' bytes are unchanged, so
+			// the ingest itself is unchanged by hash — only the version row moves.
+			const next = await post("/docs/merge-trigger", { commit: "c-merge-2", content_sha256: "sha-merge-2" }, { authorization: "Bearer tok-omp" });
 			const nextBody = (await next.json()) as { ok: boolean; version?: { version: string } };
 			expect(next.status).toBe(200);
 			expect(nextBody.version?.version).toBe("v2");
-			expect(ingestEvents(written)).toHaveLength(2);
+			expect(refreshEvents(written)).toHaveLength(2);
+			expect(fake.uploads).toHaveLength(2);
 		} finally {
 			restore();
 			await stop();
+			rmSync(docs, { recursive: true, force: true });
 		}
 	});
 
@@ -498,13 +571,16 @@ describe("routes", () => {
 	});
 
 	test("POST /docs/merge-trigger answers 503 with the reason when the docs plane refuses", async () => {
-		const { greptime } = ledger();
+		const { greptime, written } = ledger();
 		const restore = patchFetch(async () => {
 			throw new Error("connect ECONNREFUSED 127.0.0.1:9");
 		});
+		const docs = docsFixture({ "README.md": "The substrate is the only door." });
 		const { post, stop } = await serve(
 			greptime,
 			{ SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
+			{},
+			{ docsIngestBaseDir: docs },
 		);
 		try {
 			const response = await post("/docs/merge-trigger", { commit: "c-merge", content_sha256: "sha-merge" }, { authorization: "Bearer tok-omp" });
@@ -512,27 +588,75 @@ describe("routes", () => {
 			expect(response.status).toBe(503);
 			expect(body.ok).toBe(false);
 			expect(body.reason).toContain("ragflow unreachable");
+			// The ingest the refresh starts with is what refused, so nothing moved:
+			// no refresh event, no version recorded over a refused ingest.
+			expect(refreshEvents(written)).toHaveLength(0);
 		} finally {
 			restore();
 			await stop();
+			rmSync(docs, { recursive: true, force: true });
 		}
 	});
 
 	test("POST /docs/merge-trigger refuses an unknown dataset and a body without the hash", async () => {
 		const { greptime } = ledger();
+		const docs = docsFixture({ "README.md": "The substrate is the only door." });
 		const { post, stop } = await serve(
 			greptime,
 			{ SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
+			{},
+			{ docsIngestBaseDir: docs },
 		);
 		try {
 			const unknown = await post("/docs/merge-trigger", { dataset: "not-a-dataset", commit: "c", content_sha256: "s" }, { authorization: "Bearer tok-omp" });
 			expect(unknown.status).toBe(400);
+			// The names every object inherits are not dataset rows: `in` would pass
+			// "constructor" to the refresh; hasOwn refuses it like any other name.
+			const inherited = await post("/docs/merge-trigger", { dataset: "constructor", commit: "c", content_sha256: "s" }, { authorization: "Bearer tok-omp" });
+			expect(inherited.status).toBe(400);
 			const hashless = await post("/docs/merge-trigger", { commit: "c" }, { authorization: "Bearer tok-omp" });
 			expect(hashless.status).toBe(400);
 			const scalar = await post("/docs/merge-trigger", 42, { authorization: "Bearer tok-omp" });
 			expect(scalar.status).toBe(400);
 		} finally {
 			await stop();
+			rmSync(docs, { recursive: true, force: true });
+		}
+	});
+
+	test("POST /docs/merge-trigger records no version when the ingest is refused", async () => {
+		const { greptime, written } = ledger();
+		const fake = new RagflowFake();
+		const restore = patchFetch(fake.fetch);
+		const docs = docsFixture({ "README.md": "The substrate is the only door.", "docs/leak.md": "password: hunter2 in the shipped config" });
+		const { post, stop } = await serve(
+			greptime,
+			{ SUBSTRATE_TOKEN_OMP: "tok-omp", RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" },
+			{},
+			{ docsIngestBaseDir: docs },
+		);
+		try {
+			// The redactor refuses the whole call — never clean-and-publish — so the
+			// trigger answers 503 with the refusal reason and records nothing.
+			const refused = await post("/docs/merge-trigger", { commit: "c-leak", content_sha256: "sha-leak" }, { authorization: "Bearer tok-omp" });
+			const body = (await refused.json()) as { ok: boolean; reason?: string };
+			expect(refused.status).toBe(503);
+			expect(body.ok).toBe(false);
+			expect(body.reason).toBe("secret-findings");
+			expect(fake.uploads).toHaveLength(0);
+			expect(refreshEvents(written)).toHaveLength(0);
+
+			// The leak fixed: the next trigger is the first version — the refused
+			// one never became v1.
+			writeFileSync(join(docs, "docs/leak.md"), "passwords are long and random");
+			const again = await post("/docs/merge-trigger", { commit: "c-clean", content_sha256: "sha-clean" }, { authorization: "Bearer tok-omp" });
+			const againBody = (await again.json()) as { ok: boolean; version?: { version: string } };
+			expect(again.status).toBe(200);
+			expect(againBody.version?.version).toBe("v1");
+		} finally {
+			restore();
+			await stop();
+			rmSync(docs, { recursive: true, force: true });
 		}
 	});
 });
@@ -722,6 +846,60 @@ describe("GET /events/stream", () => {
 			expect(event).toMatchObject({ id: "e2", surface: "omp", kind: "note", summary: "second", hash: "h-e2" });
 			// Greptime's epoch millis rebuilt as the ISO string the chain hashed.
 			expect(event.ts).toBe(new Date(BASE + 1).toISOString());
+		} finally {
+			await stop();
+		}
+	});
+
+	test("a stream with no cursor starts live from connect, not from the first tick", async () => {
+		const stub = streamLedger([]);
+		const { get, stop } = await serve(stub, { SUBSTRATE_TOKEN_OMP: "tok-omp" }, {}, { streamPollMs: 10, streamIdleMs: 60_000 });
+		try {
+			const controller = new AbortController();
+			const response = await get("/events/stream", { authorization: "Bearer tok-omp" }, controller.signal);
+			expect(response.status).toBe(200);
+			// Landed after the response opened but before any poll tick: the start
+			// boundary was captured while the ledger was empty, so this first event
+			// is strictly after it and is delivered. A tip read at the first tick
+			// instead would have adopted this event as the starting cursor and
+			// sent it to no one.
+			stub.append({ id: "e1", ts: BASE, summary: "arrived before the first tick" });
+			const got = frames(await streamText(response, controller, 1, 2_000));
+			expect(got.map((frame) => frame.id)).toEqual(["e1"]);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("a cursorless stream on a non-empty ledger replays nothing but sends what comes later", async () => {
+		const stub = streamLedger([{ id: "e0", ts: BASE, summary: "already there" }]);
+		const { get, stop } = await serve(stub, { SUBSTRATE_TOKEN_OMP: "tok-omp" }, {}, { streamPollMs: 10, streamIdleMs: 60_000 });
+		try {
+			const controller = new AbortController();
+			const response = await get("/events/stream", { authorization: "Bearer tok-omp" }, controller.signal);
+			expect(response.status).toBe(200);
+			// Live start: the position the ledger already had at connect (e0), so
+			// nothing replays — and an event after connect is the first frame, not
+			// the cursor the first tick would have read.
+			stub.append({ id: "e1", ts: BASE + 1, summary: "later" });
+			const got = frames(await streamText(response, controller, 1, 2_000));
+			expect(got.map((frame) => frame.id)).toEqual(["e1"]);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("a ledger that cannot resolve the live start answers an ordinary error", async () => {
+		const stub = streamLedger([]);
+		stub.latestPosition = async () => {
+			throw new Error("greptime unreachable: connect ETIMEDOUT");
+		};
+		const { get, stop } = await serve(stub, { SUBSTRATE_TOKEN_OMP: "tok-omp" });
+		try {
+			const response = await get("/events/stream", { authorization: "Bearer tok-omp" });
+			expect(response.status).toBe(503);
+			expect(response.headers.get("content-type") ?? "").toContain("application/json");
+			expect(String(((await response.json()) as Record<string, unknown>).error)).toContain("stream start");
 		} finally {
 			await stop();
 		}
@@ -939,5 +1117,33 @@ describe("memoryToolWriter", () => {
 		// `unknown`, never the surface the caller asked to be.
 		expect(memoryToolWriter(null, "hermes")).toBe("unknown");
 		expect(memoryToolWriter(null, undefined)).toBe("unknown");
+	});
+});
+
+describe("scanIngestPages", () => {
+	test("sweeps directory roots, reads file roots, skips links and absences, and sorts by path", async () => {
+		const root = mkdtempSync(join(tmpdir(), "substrate-scan-"));
+		try {
+			mkdirSync(join(root, "docs", "sub"), { recursive: true });
+			writeFileSync(join(root, "README.md"), "The substrate is the only door.");
+			writeFileSync(join(root, "docs", "a.md"), "alpha");
+			writeFileSync(join(root, "docs", "sub", "b.md"), "beta");
+			// A link can leave the checkout and the roots guards have no real path
+			// to check against, so a sweep skips it instead of following it.
+			symlinkSync(join(root, "README.md"), join(root, "docs", "link.md"));
+
+			const pages = await scanIngestPages(root, ["docs/", "README.md", ".planning/PROJECT.md", "missing.md"]);
+			expect(pages.map((page) => page.path)).toEqual(["README.md", "docs/a.md", "docs/sub/b.md"]);
+			expect(pages[0]?.body).toBe("The substrate is the only door.");
+			expect(pages[0]?.source_url).toBe(`file://${join(root, "README.md")}`);
+			expect(pages.every((page) => page.source_url?.startsWith("file://") === true)).toBe(true);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test("an absent base directory sweeps to nothing, which the ingest refuses as no-pages", async () => {
+		const pages = await scanIngestPages(join(tmpdir(), "substrate-nowhere-9182"), ["docs/", "README.md"]);
+		expect(pages).toEqual([]);
 	});
 });

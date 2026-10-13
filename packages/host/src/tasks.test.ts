@@ -964,9 +964,11 @@ describe("reconcileSandboxes (U2)", () => {
 		tasks?: Record<string, Pick<TaskRecord, "graph_id" | "released">>;
 		enumerateThrows?: string;
 		terminateThrows?: string;
+		cleanupThrows?: string;
 	} = {}) {
 		const forgotten: string[] = [];
 		const removed: string[] = [];
+		const cleanups: string[] = [];
 		const warnings: Array<{ action: string; sandbox_id: string }> = [];
 		const logs: string[] = [];
 		const notes: string[] = [];
@@ -979,6 +981,10 @@ describe("reconcileSandboxes (U2)", () => {
 				list: () => opts.entries ?? [],
 				forget: (sandboxId: string) => forgotten.push(sandboxId),
 			},
+			runEgressCleanup: (sandboxId: string) => {
+				if (opts.cleanupThrows) throw new Error(opts.cleanupThrows);
+				cleanups.push(sandboxId);
+			},
 			taskFor: (graphId) => (opts.tasks ? (opts.tasks[graphId] ?? null) : graphId === GID ? { graph_id: GID, released: false } : null),
 			terminate: async (sandboxId: string) => {
 				if (opts.terminateThrows) throw new Error(opts.terminateThrows);
@@ -988,7 +994,7 @@ describe("reconcileSandboxes (U2)", () => {
 			log: (line) => logs.push(line),
 			stderr: (line) => notes.push(line),
 		});
-		return { result, forgotten, removed, warnings, logs, notes };
+		return { result, forgotten, removed, cleanups, warnings, logs, notes };
 	}
 
 	test("a labeled, running sandbox of a still-claimed task is re-attached: kept, no warning", async () => {
@@ -1009,13 +1015,33 @@ describe("reconcileSandboxes (U2)", () => {
 		const result = await reconcileSandboxes({
 			enumerate: async () => [box("box-a", { [GRAPH_LABEL]: GID })],
 			state: { list: () => [entry("box-a", GID)], forget: () => undefined },
-			taskFor: (graphId) => store.list().find((record) => record.graph_id === graphId) ?? null,
+			// main.ts's wiring: only an unreleased record may claim the graph's sandbox.
+			taskFor: (graphId) => store.list().find((record) => record.graph_id === graphId && !record.released) ?? null,
 			terminate: async () => undefined,
+			runEgressCleanup: () => undefined,
 		});
 		expect(result.reattached).toEqual(["box-a"]);
 		const h = harness({ store }); // the next boot step: resumeInterrupted (D-07)
 		expect(await h.service.resumeInterrupted()).toBe(1);
 		expect(h.prompts.map((p) => p.idempotencyKey)).toEqual([`${GID}:${NID}:resume:1`]);
+	});
+
+	test("a released record does not shadow a live claim of the same graph", async () => {
+		// The bug this pins: sorted task files put the finished node first, so a taskFor that
+		// takes the first record of a graph hands reconcile a released record and the live
+		// sandbox of the still-claimed node is deleted as an orphan.
+		const store = new MemoryTaskStore();
+		store.save(taskRecord({ node_id: "n1", released: true })); // finished node, first in list order
+		store.save(taskRecord({ node_id: "n2" })); // still claimed, sandbox running
+		const result = await reconcileSandboxes({
+			enumerate: async () => [box("box-a", { [GRAPH_LABEL]: GID })],
+			state: { list: () => [entry("box-a", GID)], forget: () => undefined },
+			taskFor: (graphId) => store.list().find((record) => record.graph_id === graphId && !record.released) ?? null,
+			terminate: async () => undefined,
+			runEgressCleanup: () => undefined,
+		});
+		expect(result.reattached).toEqual(["box-a"]);
+		expect(result.terminated).toEqual([]);
 	});
 
 	test("a labeled sandbox unknown to task state is terminated with one host.orphan warning", async () => {
@@ -1076,12 +1102,45 @@ describe("reconcileSandboxes (U2)", () => {
 	});
 
 	test("an entry whose sandbox is gone is forgotten, so no later boot re-adopts a phantom", async () => {
-		const { result, forgotten } = await reconcileHarness({
+		const { result, forgotten, cleanups } = await reconcileHarness({
 			live: [box("box-a", { [GRAPH_LABEL]: GID })],
 			entries: [entry("box-a", GID), entry("box-gone", GID)],
 		});
 		expect(result.reattached).toEqual(["box-a"]);
 		expect(forgotten).toEqual(["box-gone"]);
+		expect(cleanups).toEqual(["box-gone"]); // the phantom's recorded deletes were not lost with the entry
+	});
+
+	test("a phantom's egress deletes run before its state entry is dropped", async () => {
+		// The bug this pins: AutoRemove or a crash removed the container while the host was down,
+		// which never touches DOCKER-USER rules — the entry is the deletes' only home, so they
+		// must execute before the forget takes that home away.
+		const events: string[] = [];
+		await reconcileSandboxes({
+			enumerate: async () => [],
+			state: {
+				list: () => [
+					{ ...entry("box-gone", GID), egress_cleanup: [["iptables", "-D", "DOCKER-USER", "-s", "10.0.0.9", "-j", "DROP"]] },
+				],
+				forget: (sandboxId: string) => events.push(`forget:${sandboxId}`),
+			},
+			runEgressCleanup: (sandboxId: string) => events.push(`cleanup:${sandboxId}`),
+			taskFor: () => null,
+			terminate: async () => undefined,
+		});
+		expect(events).toEqual(["cleanup:box-gone", "forget:box-gone"]);
+	});
+
+	test("a failed phantom cleanup is one stderr note and the phantom is still forgotten", async () => {
+		const { result, forgotten, cleanups, notes } = await reconcileHarness({
+			entries: [{ ...entry("box-gone", GID), egress_cleanup: [["iptables", "-D", "DOCKER-USER", "-s", "10.0.0.9", "-j", "DROP"]] }],
+			cleanupThrows: "iptables vanished",
+		});
+		expect(result.ok).toBe(true); // best-effort: the boot is never failed by a phantom's cleanup
+		expect(cleanups).toEqual([]);
+		expect(forgotten).toEqual(["box-gone"]);
+		expect(notes.join("\n")).toContain("phantom sandbox box-gone egress cleanup failed");
+		expect(notes.join("\n")).toContain("iptables vanished");
 	});
 
 	test("a failed terminate is a stderr note and no warning; other containers still reconcile", async () => {

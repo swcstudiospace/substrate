@@ -321,6 +321,9 @@ def tick(
     """Run one poll → resolve → decide → act pass; per-candidate errors never stop the tick.
 
     ``slo`` is the U4 burn probe; ``None`` (or a standing-down probe) launches as before.
+    The probe is read once per enabled tick even when nothing can launch — zero
+    candidates or full capacity still sample it, so the ledger keeps burn history
+    across busy spells and the breaker has a span to judge when a slot opens.
     """
     if dispatch_disabled(env_file, environ):
         log(f"dispatch disabled ({DISABLE_KEY}=1)")
@@ -336,6 +339,12 @@ def tick(
         if stormbreak is None:
             stormbreak = stormbreak_breaches(env_file=env_file, environ=environ, slo=slo, log=log)
         return stormbreak
+
+    # The probe samples on every enabled tick, launch or not: history must accrue
+    # while both slots are busy or the queue is empty, or an hour-long run would
+    # leave the breaker nothing to judge when a slot finally opens.
+    if not stormbreak_disabled(env_file, environ):
+        breaches_once()
 
     for candidate in candidates:
         try:

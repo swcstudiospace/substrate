@@ -870,28 +870,39 @@ export class GreptimeClient {
 	/**
 	 * Positions strictly after `cursor`, in (ingested_at, event_id) order, capped.
 	 *
-	 * The read window opens at the cursor's own millisecond rather than strictly
-	 * after it, so a duplicate ingest record sitting beside its first record
-	 * collapses against it TypeScript-side — the same first-record rule the hour
-	 * read applies (D27-10), for the same reason: a retried record must not hand a
-	 * stream the same event twice. Bounded from both ends: `limit` positions out,
-	 * and the statement's own LIMIT bounds what one poll scans.
+	 * One statement does the whole ordering job, all of it before the LIMIT:
+	 * each event collapses to its earliest ingest record (D27-10, the same
+	 * first-record rule the hour read applies), the collapsed times are cut
+	 * strictly after the cursor's (ingested_at, event_id) boundary, and only
+	 * then is the page capped. Doing any of this TypeScript-side over a
+	 * pre-limited window would freeze or replay a stream: a boundary checked
+	 * after the limit re-reads the same first rows whenever one millisecond
+	 * holds more records than a page, and a `seen` set over the returned
+	 * window alone cannot see that a retry record for an older event hides the
+	 * record the cursor already passed — the retry would re-deliver the event.
+	 * The statement keeps the window open at the cursor's own millisecond for
+	 * that boundary, so a duplicate sitting beside its first record collapses
+	 * against it before the cut, not after. Bounded by `limit` positions.
 	 */
 	async eventIdsAfter(cursor: CursorPosition, limit: number): Promise<CursorPosition[]> {
 		const at = this.q(new Date(cursor.ingestedAt).toISOString());
 		const rows = await this.sql(
-			`SELECT "event_id", "ingested_at" FROM "event_ingest" WHERE "ingested_at" >= ${at}
-			 ORDER BY "ingested_at" ASC, "event_id" ASC LIMIT ${queryLimit(limit * 4)}`,
+			`SELECT f."event_id", f."first_ingested_at" AS "ingested_at" FROM
+				(SELECT "event_id", MIN("ingested_at") AS "first_ingested_at" FROM "event_ingest" GROUP BY "event_id") f
+			 WHERE (f."first_ingested_at" > ${at}) OR (f."first_ingested_at" = ${at} AND f."event_id" > ${this.q(cursor.id)})
+			 ORDER BY f."first_ingested_at" ASC, f."event_id" ASC
+			 LIMIT ${queryLimit(limit)}`,
 		);
-		const seen = new Set<string>();
 		const positions: CursorPosition[] = [];
+		// Two records for one event inside the same millisecond produce two equal
+		// first rows; keep one position per event regardless.
+		const seen = new Set<string>();
 		for (const row of rows) {
 			const id = String(row.event_id);
 			const ingestedAt = epochMs(row.ingested_at);
 			if (!Number.isFinite(ingestedAt)) throw new GreptimeError(`ingest record for ${id} has a time that is not a number`);
 			if (seen.has(id)) continue;
 			seen.add(id);
-			if (ingestedAt < cursor.ingestedAt || (ingestedAt === cursor.ingestedAt && id <= cursor.id)) continue;
 			positions.push({ id, ingestedAt });
 			if (positions.length >= limit) break;
 		}

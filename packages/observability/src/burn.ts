@@ -104,8 +104,10 @@ export interface BurnSample {
  * Recent cumulative totals of one monotonic series per metric, remembered so a
  * rate can be taken over the rolling window.
  *
- * Entries older than the window are dropped on every observation, so the retained
- * history stays bounded no matter how often the evaluator runs. A total that goes
+ * Entries older than the window are dropped on every observation, and reads
+ * within the same wall-clock second coalesce into one sample, so the retained
+ * history stays bounded — and long enough to judge — no matter how often the
+ * evaluator runs. A total that goes
  * backwards is a counter reset — a restart gave the process a fresh registry — and
  * the history is dropped rather than divided: subtracting across a reset would
  * read the restart itself as negative spend.
@@ -124,7 +126,24 @@ export class BurnLedger {
 		while (samples.length > 0 && samples[0]!.atMs < atMs - this.windowMs) samples.shift();
 		const last = samples[samples.length - 1];
 		if (last !== undefined && total < last.total) samples.length = 0;
-		samples.push({ atMs, total });
+		// Reads landing in the same wall-clock second coalesce into one sample.
+		// The cap below bounds samples by count, so without this a reader polling
+		// faster than once a second fills the ring with sub-second spacing — 480
+		// reads at 2 Hz is four minutes of span, under the five-minute minimum,
+		// and a busy /slo poller would keep both burn checks `insufficient-data`
+		// forever. At the cap the ring now holds 480 distinct seconds (eight
+		// minutes) whatever the read rate; slower readers are bounded by the
+		// window instead, as before.
+		if (
+			samples.length > 0 &&
+			Math.floor(samples[samples.length - 1]!.atMs / 1000) === Math.floor(atMs / 1000)
+		) {
+			const current = samples[samples.length - 1]!;
+			current.atMs = atMs;
+			current.total = total;
+		} else {
+			samples.push({ atMs, total });
+		}
 		if (samples.length > BURN_MAX_SAMPLES) samples.splice(0, samples.length - BURN_MAX_SAMPLES);
 		this.#byMetric.set(metric, samples);
 

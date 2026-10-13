@@ -39,6 +39,7 @@ import {
 } from "./config.ts";
 import { buildAgentCard, isKnownCardSurface } from "./agent-card.ts";
 import { DATASET_TRIGGERS, createVersionStore, latestVersion, refreshDataset } from "./docs-datasets.ts";
+import { scanIngestPages } from "./docs-ingest.ts";
 import { formatDrift } from "./drift.ts";
 import { InvalidEventError } from "./event.ts";
 import { type CursorPosition, type GreptimeClient } from "./greptime.ts";
@@ -207,6 +208,8 @@ export interface HttpServerOptions {
 	streamIdleMs?: number;
 	/** `/events/stream` slow-consumer cap; production uses `STREAM_MAX_BACKLOG_BYTES`. */
 	streamMaxBacklogBytes?: number;
+	/** Directory the merge-trigger's local docs ingest scans; production runs from the repo root. */
+	docsIngestBaseDir?: string;
 }
 
 /** Distinct keys one hourly line may hold before the rest are counted as `other`. */
@@ -243,6 +246,15 @@ const INGEST_NEEDS_SURFACE = "docs_ingest needs an authenticated surface; nothin
 const MERGE_TRIGGER_NEEDS_SURFACE = "docs merge-trigger needs an authenticated surface; nothing was refreshed";
 /** The dataset a post-merge hook triggers when the body names none (DOCS-03's own repo row). */
 const MERGE_TRIGGER_DATASET = "agent-substrate";
+
+/**
+ * The dataset this deployment refreshes from its own checkout: the trigger
+ * table's row whose sources (`config.docsIngestRoots`) live in the directory
+ * the server runs from. The other rows name checkouts this server does not
+ * hold, so their refresh is a truthful noop — a recorded version over
+ * documents that were never ingested would only lie to search.
+ */
+const LOCALLY_INGESTED_DATASET = MERGE_TRIGGER_DATASET;
 
 /** Why an anonymous stream is refused, even on a run that allows anonymous callers. */
 const STREAM_NEEDS_SURFACE = "events stream needs an authenticated surface; nothing was streamed";
@@ -1005,13 +1017,19 @@ export function createHttpServer(
 
 			// U6 (DOCS-03): the documented refresh triggers, wired. A post-merge hook asks
 			// for the `agent-substrate` dataset (the default); the skills-sync tick names
-			// `agent-skills`. The refresh itself is the same `refreshDataset` entry
-			// `docs_ingest` wraps, so the refusal conventions cannot drift apart. Three
-			// doors are deliberate: an unauthenticated caller is refused before the body
-			// is read, a remote caller is refused even with a valid token (the trigger
-			// drives host-local automation and is loopback-only by design), and a repeat
+			// `agent-skills`. A refresh first moves documents through the guarded ingest
+			// `docs_ingest` serves — the same redaction, refusals and content-hash
+			// idempotency, so the conventions cannot drift apart — and only then records
+			// the version: a trigger that answered ok while search still held the old
+			// files would be recording a refresh that never happened. This deployment
+			// ingests the dataset whose checkout it holds; a dataset with no configured
+			// ingest root here is a truthful noop, not a fake refresh. Three doors are
+			// deliberate: an unauthenticated caller is refused before the body is read,
+			// a remote caller is refused even with a valid token (the trigger drives
+			// host-local automation and is loopback-only by design), and a repeat
 			// carrying the newest version's own commit and content hash re-answers it
-			// without recording a second version — a webhook retry is cheap by hash.
+			// without ingesting or recording a second version — a webhook retry is
+			// cheap by hash.
 			if (req.method === "POST" && url.pathname === "/docs/merge-trigger") {
 				if (surface === null) {
 					sendJson(res, 401, { error: MERGE_TRIGGER_NEEDS_SURFACE });
@@ -1028,7 +1046,11 @@ export function createHttpServer(
 				}
 				const body = parsed as Record<string, unknown>;
 				const dataset = typeof body.dataset === "string" ? body.dataset : MERGE_TRIGGER_DATASET;
-				if (!(dataset in DATASET_TRIGGERS)) {
+				// hasOwn, not `in`: `in` also accepts the names every object inherits —
+				// "constructor", "toString", "__proto__" — and those would pass the
+				// known-dataset check and reach the refresh with a dataset the store
+				// never held. Only the trigger table's own rows are known.
+				if (!Object.hasOwn(DATASET_TRIGGERS, dataset)) {
 					sendJson(res, 400, {
 						error: `unknown dataset ${JSON.stringify(dataset.slice(0, 80))}; known: ${Object.keys(DATASET_TRIGGERS).join(", ")}`,
 					});
@@ -1052,6 +1074,29 @@ export function createHttpServer(
 				const newest = latestVersion(docsVersions, dataset);
 				if (newest && newest.commit === fields.commit && newest.content_sha256 === fields.content_sha256) {
 					sendJson(res, 200, { ok: true, version: newest, created: false, idempotent: true });
+					return;
+				}
+				if (dataset !== LOCALLY_INGESTED_DATASET) {
+					// This server holds no checkout of that dataset, so there is nothing it
+					// can truthfully ingest: a noop that says so, and no version recorded.
+					sendJson(res, 200, { ok: true, dataset, noop: true, reason: "no-configured-ingest-root" });
+					return;
+				}
+				// The guarded server-side ingest of this checkout's configured roots.
+				const ingested = await substrate.ingestDocs(
+					{
+						dataset,
+						commit: fields.commit,
+						pages: await scanIngestPages(options.docsIngestBaseDir ?? process.cwd(), config.docsIngestRoots),
+					},
+					surface,
+				);
+				if (!ingested.ok) {
+					// A refusal (unreadable plane, a redactor finding, a skipped sweep) is
+					// an outage of the docs plane for a trigger whose whole job is that
+					// plane: 503 with the reason, and the caller decides on a retry. No
+					// version is recorded over documents that were never ingested.
+					sendJson(res, 503, { ok: false, reason: ingested.reason });
 					return;
 				}
 				const refreshed = await refreshDataset(
@@ -1181,6 +1226,14 @@ function ledgerEventFrame(row: Record<string, unknown>): string {
  * footprint is its cursor, one unref'd interval, and whatever it has not yet
  * flushed.
  */
+/**
+ * The position an empty ledger starts a cursorless stream at: before every
+ * record the ledger can ever hold, so the first later event is strictly after
+ * it and is delivered. A null with no boundary would mean "read the tip at the
+ * first tick" — and the tip would then name the very event that arrived first.
+ */
+const LEDGER_START: CursorPosition = { id: "", ingestedAt: 0 };
+
 async function openEventStream(
 	res: ServerResponse,
 	greptime: GreptimeClient,
@@ -1190,15 +1243,29 @@ async function openEventStream(
 	// Setup. An id the ledger does not know replays nothing: the stream starts
 	// live from the tip, which is also the honest answer for a cursor older than
 	// the ledger's memory — there is nothing behind it left to replay.
-	let cursor: CursorPosition | null = null;
+	let resolved: CursorPosition | null = null;
 	if (cursorId !== "") {
-		let resolved: CursorPosition | null;
 		try {
 			resolved = await greptime.cursorPosition(cursorId);
 		} catch (cause) {
 			throw new Error(`the ledger would not resolve the stream cursor: ${redact(String(cause))}`);
 		}
+	}
+	// The live start is captured before the response opens, not on the first
+	// tick: a tip read after the first poll would adopt the events that arrived
+	// between connect and that tick as the starting cursor — sent to no one —
+	// and an empty ledger read late would swallow its first event. "Live" means
+	// everything after the position the ledger already had when the caller
+	// connected, or from the very first event when it was empty.
+	let cursor: CursorPosition;
+	if (resolved !== null) {
 		cursor = resolved;
+	} else {
+		try {
+			cursor = (await greptime.latestPosition()) ?? LEDGER_START;
+		} catch (cause) {
+			throw new Error(`the ledger would not resolve the stream start: ${redact(String(cause))}`);
+		}
 	}
 
 	res.writeHead(200, {
@@ -1246,10 +1313,6 @@ async function openEventStream(
 					// this process.
 					res.end();
 					cleanup();
-					return;
-				}
-				if (cursor === null) {
-					cursor = await greptime.latestPosition();
 					return;
 				}
 				const positions = await greptime.eventIdsAfter(cursor, bounds.batch);

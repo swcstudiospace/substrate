@@ -7,13 +7,15 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { GRAPH_LABEL, parseSandboxEgress, worktreeFor } from "./sandbox-options.ts";
+import { GRAPH_LABEL, parseSandboxEgress, SANDBOX_NETWORK, worktreeFor } from "./sandbox-options.ts";
 import { SEED_EGRESS } from "./seed.ts";
 import {
 	checkDiskFloor,
 	defaultSandboxStatePath,
 	destroySandbox,
 	DISK_FLOOR_BYTES,
+	EGRESS_NETWORK,
+	EGRESS_SUBNET,
 	ensureImagePulled,
 	type DockerClient,
 	listSandboxes,
@@ -140,16 +142,33 @@ function tmpState(): SandboxStateStore {
 	});
 }
 
-/** A full fake daemon for provider-level tests: containers live in a map, every call is recorded. */
-function daemonDocker(): { docker: DockerClient; calls: string[] } {
+/**
+ * A full fake daemon for provider-level tests: containers live in a map, every call is
+ * recorded, and docker's ordering is modeled truthfully — a created container carries no
+ * address until start, the stage-network address appears at start, and the egress address
+ * (which real docker pairs with the external route and the port publish) appears only at the
+ * network connect. No test can pass by reading an address docker would not have assigned yet.
+ */
+function daemonDocker(): {
+	docker: DockerClient;
+	calls: string[];
+	/** Whether any sandbox has its egress route; rule application must always observe false. */
+	egressAttached: () => boolean;
+} {
 	const calls: string[] = [];
-	const containers = new Map<string, { labels: Record<string, string>; running: boolean }>();
+	const containers = new Map<
+		string,
+		{ labels: Record<string, string>; running: boolean; stageIp: string; egressIp: string | null }
+	>();
 	const handle = (id: string) => ({
 		id,
 		start: async () => {
 			calls.push(`start:${id}`);
 			const container = containers.get(id);
-			if (container) container.running = true;
+			if (container) {
+				container.running = true;
+				container.stageIp = "172.16.9.2"; // the stage network's address, assigned at start
+			}
 		},
 		stop: async () => {
 			calls.push(`stop:${id}`);
@@ -161,8 +180,16 @@ function daemonDocker(): { docker: DockerClient; calls: string[] } {
 		inspect: async () => {
 			const container = containers.get(id);
 			if (!container) throw Object.assign(new Error("No such container"), { statusCode: 404 });
-			// U1: the provider pins egress rules to the container's bridge address.
-			return { Config: { Labels: container.labels }, NetworkSettings: { IPAddress: "172.17.0.2" } };
+			// Real docker: the first endpoint's address sits at the top level and the
+			// per-network addresses under Networks; a created-but-unstarted container has none.
+			const networks: Record<string, { IPAddress: string }> = {
+				[SANDBOX_NETWORK]: { IPAddress: container.stageIp },
+			};
+			if (container.egressIp !== null) networks[EGRESS_NETWORK] = { IPAddress: container.egressIp };
+			return {
+				Config: { Labels: container.labels },
+				NetworkSettings: { IPAddress: container.egressIp ?? container.stageIp, Networks: networks },
+			};
 		},
 	});
 	const docker = {
@@ -171,12 +198,22 @@ function daemonDocker(): { docker: DockerClient; calls: string[] } {
 			calls.push(`create:${id}`);
 			// buildContainerSpec always sends Labels: { [GRAPH_LABEL]: string }.
 			const labels = body.Labels as Record<string, string> | undefined;
-			containers.set(id, { labels: labels ?? {}, running: false });
+			containers.set(id, { labels: labels ?? {}, running: false, stageIp: "", egressIp: null });
 			return handle(id);
 		},
 		getContainer: (id: string) => handle(id),
-		// U1 internal-network tests join the existing SANDBOX_NETWORK; it is internal.
-		getNetwork: () => ({ inspect: async () => ({ Internal: true }) }),
+		// The stage network every sandbox starts on is internal; the egress bridge is not.
+		getNetwork: (name: string) => ({
+			inspect: async () => ({ Internal: name === SANDBOX_NETWORK }),
+			connect: async (body: Record<string, unknown>) => {
+				const endpoint = body.EndpointConfig as { IPAMConfig?: { IPv4Address?: string } } | undefined; // the provider's own connect body
+				const address = endpoint?.IPAMConfig?.IPv4Address;
+				if (typeof address !== "string" || address === "") throw new Error("connect needs a reserved address");
+				calls.push(`connect:${name}:${String(body.Container)}`);
+				const container = containers.get(String(body.Container));
+				if (container) container.egressIp = address; // docker: route and port publish come alive here
+			},
+		}),
 		createNetwork: async () => undefined,
 		getImage: (name: string) => {
 			calls.push(`getImage:${name}`);
@@ -186,12 +223,14 @@ function daemonDocker(): { docker: DockerClient; calls: string[] } {
 			calls.push(`pull:${name}`);
 			return { stream: true };
 		},
-		listContainers: async () =>
-			[...containers].map(([Id, container]) => ({
+		listContainers: async () => {
+			calls.push("list");
+			return [...containers].map(([Id, container]) => ({
 				Id,
 				Labels: container.labels,
 				State: container.running ? "running" : "exited",
-			})),
+			}));
+		},
 		modem: {
 			followProgress: (stream: unknown, onFinished: (error: Error | null, output: unknown) => void) => {
 				expect(stream).toEqual({ stream: true });
@@ -199,11 +238,13 @@ function daemonDocker(): { docker: DockerClient; calls: string[] } {
 			},
 		},
 	} satisfies DockerClient;
-	return { docker, calls };
+	return { docker, calls, egressAttached: () => [...containers.values()].some((container) => container.egressIp !== null) };
 }
 
 const U2_GID = "ut-a-12345678";
 const dfAboveFloor = () => `Avail\n${DISK_FLOOR_BYTES + 1}\n`;
+/** The first free host of EGRESS_SUBNET after the gateway — what an empty daemon's create reserves. */
+const IP = "10.77.0.2";
 
 function u2Provider(docker: DockerClient, state: SandboxStateStore) {
 	return substrateDocker({
@@ -224,7 +265,15 @@ describe("substrateDocker sandbox state (U2)", () => {
 		const { docker, calls } = daemonDocker();
 		const state = tmpState();
 		const sandboxId = await u2Provider(docker, state).create();
-		expect(calls).toEqual([`getImage:substrate-sandbox:0.1`, `create:${sandboxId}`, `start:${sandboxId}`]);
+		// Start-closed: start on the stage network, then the egress connect that opens the route
+		// and binds the port. The rule argv itself is stubbed out here (pinned in U1's suite).
+		expect(calls).toEqual([
+			"getImage:substrate-sandbox:0.1",
+			`create:${sandboxId}`,
+			`start:${sandboxId}`,
+			"list",
+			`connect:${EGRESS_NETWORK}:${sandboxId}`,
+		]);
 		expect(state.list()).toEqual([
 			{
 				sandbox_id: sandboxId,
@@ -232,8 +281,8 @@ describe("substrateDocker sandbox state (U2)", () => {
 				node_id: null,
 				task: null,
 				opened_at: expect.any(String),
-				// U1×U2: the published bridge's deny-all source drop is the one recorded delete.
-				egress_cleanup: [["iptables", "-D", "DOCKER-USER", "-s", "172.17.0.2", "-j", "DROP"]],
+				// U1×U2: the standing deny-all source drop is the one recorded delete.
+				egress_cleanup: [["iptables", "-D", "DOCKER-USER", "-s", IP, "-j", "DROP"]],
 			},
 		]);
 		await u2Provider(docker, state).destroy(sandboxId);
@@ -332,7 +381,7 @@ describe("egress cleanup persistence (U1×U2)", () => {
 		expect(state.list()).toEqual([]); // the deletes ran, then the entry died with the sandbox
 	});
 
-	test("destroySandbox — the reconciliation terminate — runs the recorded deletes and clears the field", async () => {
+	test("destroySandbox — the reconciliation terminate — stops, removes, then runs the recorded deletes", async () => {
 		const { docker, calls } = daemonDocker();
 		const state = tmpState();
 		state.record("box-a", {
@@ -342,13 +391,47 @@ describe("egress cleanup persistence (U1×U2)", () => {
 			opened_at: "t",
 			egress_cleanup: recordedDeletes(),
 		});
-		const deletes: string[][] = [];
-		await destroySandbox("box-a", docker, state, (argv) => deletes.push([...argv]));
-		expect(deletes).toEqual(recordedDeletes());
-		expect(calls).toContain("stop:box-a"); // the teardown proceeded past the cleanup
+		await destroySandbox("box-a", docker, state, (argv) => calls.push(argv.join(" ")));
+		// Finding 3, pinned: the guest is stopped and gone before any DOCKER-USER delete runs —
+		// a live container is never left standing without its filters.
+		expect(calls).toEqual(["stop:box-a", "remove:box-a", ...recordedDeletes().map((argv) => argv.join(" "))]);
 		expect(state.list()).toEqual([
 			{ sandbox_id: "box-a", graph_id: EGRESS_GID, node_id: null, task: null, opened_at: "t", egress_cleanup: null },
 		]); // the field is cleared; the caller's forget drops the rest
+	});
+
+	test("a failed teardown keeps the standing rules: no delete runs, the recorded argvs survive", async () => {
+		const { docker, calls } = daemonDocker();
+		const state = tmpState();
+		state.record("box-a", {
+			graph_id: EGRESS_GID,
+			node_id: null,
+			task: null,
+			opened_at: "t",
+			egress_cleanup: recordedDeletes(),
+		});
+		const failing = {
+			...docker,
+			getContainer: (id: string) => {
+				const handle = docker.getContainer(id);
+				return {
+					...handle,
+					remove: async () => {
+						calls.push(`remove:${id}`);
+						throw Object.assign(new Error("device or resource busy"), { statusCode: 500 });
+					},
+				};
+			},
+		} satisfies DockerClient;
+		await expect(destroySandbox("box-a", failing, state, (argv) => calls.push(argv.join(" ")))).rejects.toThrow(
+			/device or resource busy/,
+		);
+		// The container may still be running, so its rules stand with it and the deletes stay
+		// recorded for the next attempt.
+		expect(calls).toEqual(["stop:box-a", "remove:box-a"]);
+		expect(state.list()).toEqual([
+			{ sandbox_id: "box-a", graph_id: EGRESS_GID, node_id: null, task: null, opened_at: "t", egress_cleanup: recordedDeletes() },
+		]);
 	});
 
 	test("a failed recorded delete is a stderr note, never a throw; the field clears — a standing rule only narrows", () => {
@@ -401,12 +484,40 @@ describe("egress cleanup persistence (U1×U2)", () => {
 			state,
 			taskFor: () => null, // the crash lost the task's claim — the sandbox is an orphan
 			terminate: (sandboxId) => destroySandbox(sandboxId, docker, state, (argv) => deletes.push([...argv])),
+			// Wired exactly like main.ts; the live-orphan path cleans through terminate, so the
+			// exact-deletes assertion below also pins that the phantom branch never double-runs.
+			runEgressCleanup: (sandboxId) => runEgressCleanup(sandboxId, state, (argv) => deletes.push([...argv])),
 			warn: (payload) => warnings.push(payload),
 		});
 		expect(result.terminated).toEqual(["box-a"]);
-		expect(deletes).toEqual(recordedDeletes()); // the crash-orphan's standing rules are deleted
+		expect(deletes).toEqual(recordedDeletes()); // the crash-orphan's standing rules are deleted, exactly once
 		expect(state.list()).toEqual([]); // the field cleared with the take, the entry dropped with the forget
 		expect(warnings).toEqual([{ action: "host.orphan", sandbox_id: "box-a" }]);
+	});
+
+	test("a phantom entry — the sandbox gone while the host was down — deletes its recorded rules, then the entry", async () => {
+		const { docker } = daemonDocker();
+		const state = tmpState();
+		state.record("box-gone", {
+			graph_id: EGRESS_GID,
+			node_id: null,
+			task: null,
+			opened_at: "t",
+			egress_cleanup: recordedDeletes(),
+		});
+		const deletes: string[][] = [];
+		const result = await reconcileSandboxes({
+			enumerate: async () => [], // the container vanished while the host was down
+			state,
+			taskFor: () => ({ graph_id: EGRESS_GID, released: false }), // the task still claims it — the claim is not what dies
+			terminate: (sandboxId) => destroySandbox(sandboxId, docker, state, (argv) => deletes.push([...argv])),
+			// main.ts's wiring: the recorded argvs run through the phantom branch and only then
+			// is the entry forgotten.
+			runEgressCleanup: (sandboxId) => runEgressCleanup(sandboxId, state, (argv) => deletes.push([...argv])),
+		});
+		expect(result.terminated).toEqual([]); // nothing live to terminate
+		expect(deletes).toEqual(recordedDeletes()); // Docker's AutoRemove never touches DOCKER-USER; the deletes ran from the entry
+		expect(state.list()).toEqual([]); // and the entry died after them
 	});
 
 	test("without a warn option an egress refusal routes through the module sink (main.ts events_emit wiring)", async () => {
@@ -435,7 +546,6 @@ describe("defaultSandboxStatePath (U2)", () => {
 // ── U1: the sandbox egress allowlist ─────────────────────────────────────────────────────────
 
 const EGRESS_GID = "ut-eg-12345678";
-const IP = "172.17.0.2";
 
 type WarnEvent = { action: string; reason: string };
 
@@ -443,12 +553,13 @@ type ProviderOpts = Parameters<typeof substrateDocker>[0];
 
 /**
  * A published-bridge rig: the iptables argv lands in the same timeline as the docker calls, so
- * an exact `calls` assertion pins rule application between create and start (the desktop
- * PATH-stub precedent — argv is pinned end to end). Host resolution answers only the npm
- * registry, so an unlisted host is unresolvable.
+ * an exact `calls` assertion pins the start-closed ordering — start on the stage network, then
+ * the rules for the reserved address, then the egress connect (the desktop PATH-stub precedent
+ * — argv is pinned end to end). Host resolution answers only the npm registry, so an unlisted
+ * host is unresolvable.
  */
 function egressRig(overrides: Partial<ProviderOpts> = {}) {
-	const { docker, calls } = daemonDocker();
+	const { docker, calls, egressAttached } = daemonDocker();
 	const warnings: WarnEvent[] = [];
 	const state = overrides.sandboxState ?? tmpState(); // isolated so cleanup reads never hit a shared path
 	const provider = substrateDocker({
@@ -463,18 +574,23 @@ function egressRig(overrides: Partial<ProviderOpts> = {}) {
 		sandboxState: state,
 		...overrides,
 	});
-	return { provider, docker, calls, warnings, state };
+	return { provider, docker, calls, warnings, state, egressAttached };
 }
 
 describe("substrateDocker egress policy (U1)", () => {
-	test("deny-all default: the standing source drop is applied between create and start", async () => {
+	test("deny-all default: the standing drop covers the sandbox before its route exists", async () => {
 		const { provider, calls } = egressRig();
 		const sandboxId = await provider.create();
+		// Start-closed, pinned end to end: the container starts on the stage network (no route,
+		// no reachable port), the address is reserved from the daemon, the drop lands for it,
+		// and only the connect opens the outside.
 		expect(calls).toEqual([
 			"getImage:substrate-sandbox:0.1",
 			`create:${sandboxId}`,
-			`iptables -I DOCKER-USER 1 -s ${IP} -j DROP`,
 			`start:${sandboxId}`,
+			"list",
+			`iptables -I DOCKER-USER 1 -s ${IP} -j DROP`,
+			`connect:${EGRESS_NETWORK}:${sandboxId}`,
 		]);
 		await provider.destroy(sandboxId);
 		expect(calls).toContain(`iptables -D DOCKER-USER -s ${IP} -j DROP`);
@@ -503,11 +619,13 @@ describe("substrateDocker egress policy (U1)", () => {
 		const { provider, calls } = egressRig({ egress: { allow: [{ host: "registry.npmjs.org", port: 443 }] } });
 		const sandboxId = await provider.create();
 		expect(calls.slice(2)).toEqual([
+			`start:${sandboxId}`,
+			"list",
 			`iptables -I DOCKER-USER 1 -s ${IP} -p udp --dport 53 -j ACCEPT`,
 			`iptables -I DOCKER-USER 2 -s ${IP} -p tcp --dport 53 -j ACCEPT`,
 			`iptables -I DOCKER-USER 3 -s ${IP} -d 104.16.1.1 -p tcp --dport 443 -j ACCEPT`,
 			`iptables -I DOCKER-USER 4 -s ${IP} -j DROP`,
-			`start:${sandboxId}`,
+			`connect:${EGRESS_NETWORK}:${sandboxId}`,
 		]);
 	});
 
@@ -525,17 +643,19 @@ describe("substrateDocker egress policy (U1)", () => {
 		});
 		const sandboxId = await provider.create();
 		expect(calls.slice(2)).toEqual([
+			`start:${sandboxId}`,
+			"list",
 			`iptables -I DOCKER-USER 1 -s ${IP} -p udp --dport 53 -j ACCEPT`,
 			`iptables -I DOCKER-USER 2 -s ${IP} -p tcp --dport 53 -j ACCEPT`,
 			`iptables -I DOCKER-USER 3 -s ${IP} -d 93.184.216.34 -p tcp --dport 443 -j ACCEPT`,
 			`iptables -I DOCKER-USER 4 -s ${IP} -d 93.184.216.34 -p tcp --dport 443 -j ACCEPT`,
 			`iptables -I DOCKER-USER 5 -s ${IP} -j DROP`,
-			`start:${sandboxId}`,
+			`connect:${EGRESS_NETWORK}:${sandboxId}`,
 		]);
 	});
 
-	test("a failed rule application refuses the start: rollback, container removed, one warning", async () => {
-		const { docker, calls } = daemonDocker();
+	test("a failed rule application refuses the sandbox: started on the stage network, removed, one warning, never attached", async () => {
+		const { docker, calls, egressAttached } = daemonDocker();
 		const warnings: WarnEvent[] = [];
 		const provider = substrateDocker({
 			graphId: EGRESS_GID,
@@ -550,28 +670,113 @@ describe("substrateDocker egress policy (U1)", () => {
 			warn: (payload) => warnings.push(payload),
 		});
 		await expect(provider.create()).rejects.toThrow(/permission denied/);
-		expect(calls).toEqual(["getImage:substrate-sandbox:0.1", "create:c1", "remove:c1"]);
+		// The refusal happens routeless: the container is gone, nothing was ever attached.
+		expect(calls).toEqual(["getImage:substrate-sandbox:0.1", "create:c1", "start:c1", "list", "remove:c1"]);
+		expect(egressAttached()).toBe(false);
 		expect(warnings).toEqual([{ action: "sandbox.egress", reason: expect.stringContaining("permission denied") }]);
 	});
 
-	test("an unresolvable allowlist entry refuses the start before any rule runs", async () => {
+	test("a failed egress attach refuses the sandbox: rules rolled back, container removed, one warning", async () => {
+		const { docker, calls, egressAttached } = daemonDocker();
+		const warnings: WarnEvent[] = [];
+		const failing = {
+			...docker,
+			getNetwork: (name: string) => {
+				const network = docker.getNetwork(name);
+				return {
+					...network,
+					connect: async () => {
+						throw new Error("cannot attach endpoint");
+					},
+				};
+			},
+		} satisfies DockerClient;
+		const provider = substrateDocker({
+			graphId: EGRESS_GID,
+			worktree: worktreeFor(EGRESS_GID),
+			network: "published_loopback",
+			docker: failing,
+			runDf: dfAboveFloor,
+			runIptables: (argv) => calls.push(argv.join(" ")),
+			warn: (payload) => warnings.push(payload),
+		});
+		await expect(provider.create()).rejects.toThrow(/cannot attach endpoint/);
+		// Every applied rule is rolled back and the routeless container is torn down.
+		expect(calls).toEqual([
+			"getImage:substrate-sandbox:0.1",
+			"create:c1",
+			"start:c1",
+			"list",
+			`iptables -I DOCKER-USER 1 -s ${IP} -j DROP`,
+			`iptables -D DOCKER-USER -s ${IP} -j DROP`,
+			"remove:c1",
+		]);
+		expect(egressAttached()).toBe(false);
+		expect(warnings).toEqual([{ action: "sandbox.egress", reason: expect.stringContaining("cannot attach endpoint") }]);
+	});
+
+	test("an unresolvable allowlist entry refuses before anything is created", async () => {
 		const { provider, calls, warnings } = egressRig({ egress: { allow: [{ host: "gone.invalid", port: 443 }] } });
 		await expect(provider.create()).rejects.toThrow(/gone\.invalid.*does not resolve/);
-		expect(calls.some((call) => call.includes("DOCKER-USER"))).toBe(false);
-		expect(calls).toContain("remove:c1");
-		expect(calls).not.toContain("start:c1");
+		// The allowlist resolves before the first container exists: zero docker side effects.
+		expect(calls).toEqual(["getImage:substrate-sandbox:0.1"]);
 		expect(warnings).toEqual([{ action: "sandbox.egress", reason: expect.stringContaining("gone.invalid") }]);
 	});
 
-	test("a container without a bridge address refuses the start", async () => {
+	test("start-closed invariant: the egress address exists nowhere until start, and the route attaches only after the rules", async () => {
+		const base = daemonDocker();
+		const attachAtRule: boolean[] = [];
+		const calls = base.calls;
+		const { provider } = egressRig({
+			docker: base.docker,
+			runIptables: (argv) => {
+				// Observed at the exact moment the rules land: the container runs, but no egress
+				// address — and therefore no route or published port — exists yet.
+				attachAtRule.push(base.egressAttached());
+				calls.push(argv.join(" "));
+			},
+		});
+		const sandboxId = await provider.create();
+		expect(attachAtRule).toEqual([false]);
+		// And the address the rules pin is the reservation, not an inspect of the container.
+		const connectAt = calls.findIndex((call) => call.startsWith(`connect:${EGRESS_NETWORK}:`));
+		const ruleAt = calls.findIndex((call) => call.includes("DOCKER-USER"));
+		expect(ruleAt).toBeGreaterThan(0);
+		expect(connectAt).toBeGreaterThan(ruleAt);
+		expect(sandboxId).toBe("c1");
+	});
+
+	test("an exhausted egress subnet refuses the sandbox before any rule runs", async () => {
+		const { docker, calls } = daemonDocker();
+		const egress = docker.getNetwork(EGRESS_NETWORK);
+		for (let host = 2; host <= 254; host += 1) {
+			const container = await docker.createContainer({ Labels: {} });
+			await egress.connect({ Container: container.id, EndpointConfig: { IPAMConfig: { IPv4Address: `10.77.0.${host}` } } });
+		}
+		const provider = substrateDocker({
+			graphId: EGRESS_GID,
+			worktree: worktreeFor(EGRESS_GID),
+			network: "published_loopback",
+			docker,
+			runDf: dfAboveFloor,
+			runIptables: () => undefined,
+			warn: () => undefined,
+		});
+		await expect(provider.create()).rejects.toThrow(new RegExp(`${EGRESS_SUBNET}.*no free address`));
+		expect(calls.some((call) => call.includes("DOCKER-USER"))).toBe(false);
+	});
+
+	test("a sandbox with no egress address refuses the seed burst: the rules never compose from a phantom address", async () => {
 		const base = daemonDocker();
 		const warnings: WarnEvent[] = [];
 		const noAddress: DockerClient = {
 			...base.docker,
-			createContainer: async (body) => {
-				const handle = await base.docker.createContainer(body);
+			getContainer: (id: string) => {
+				const handle = base.docker.getContainer(id);
 				return {
 					...handle,
+					// A container that never got its egress endpoint: real docker truth for a
+					// created-but-unstarted sandbox, a broken attach for a started one.
 					inspect: async () => ({ Config: { Labels: { [GRAPH_LABEL]: EGRESS_GID } } }),
 				};
 			},
@@ -585,9 +790,8 @@ describe("substrateDocker egress policy (U1)", () => {
 			runIptables: () => undefined,
 			warn: (payload) => warnings.push(payload),
 		});
-		await expect(provider.create()).rejects.toThrow(/no bridge address/);
-		expect(base.calls).toContain("remove:c1");
-		expect(base.calls.some((call) => call.startsWith("iptables"))).toBe(false);
+		const sandboxId = await provider.create();
+		await expect(provider.withSeedEgress(sandboxId, async () => "never")).rejects.toThrow(/no egress address/);
 		expect(warnings).toHaveLength(1);
 	});
 

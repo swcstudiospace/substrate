@@ -396,4 +396,37 @@ describe("the quota-burn objectives (SPE-10477)", () => {
 		expect(reading.perHour).toBe(6000);
 		expect(reading.samples).toBe(2);
 	});
+
+	test("a reset whose first new read lands in the same second still starts fresh", () => {
+		// The coalesced same-second sample is the reset's own first reading, not a
+		// base to subtract the restart across.
+		const ledger = new BurnLedger(HOUR, 0);
+		expect(ledger.observe("substrate.tokens", 100, 0).samples).toBe(1);
+		const reading = ledger.observe("substrate.tokens", 90, 400);
+		expect(reading.samples).toBe(1);
+		expect(reading.perHour).toBe(null);
+		// 100 tokens across the one second after the reset: 360000 per hour.
+		expect(ledger.observe("substrate.tokens", 190, 1_400).perHour).toBe(360_000);
+	});
+
+	test("a fast /slo poller still leaves a five-minute span: same-second reads coalesce", () => {
+		// The ring used to bound samples by count alone, so a host reading /slo
+		// twice a second filled it in four minutes — under the five-minute minimum
+		// span — and both burn checks answered `insufficient-data` forever no
+		// matter what was spent. Same-second reads are one sample: the cap bounds
+		// seconds of history, not reads, while a genuinely idle hour (samples
+		// older than the window) is still dropped, not divided across.
+		const ledger = new BurnLedger(HOUR, BURN_MIN_SPAN_MS);
+		let reading = ledger.observe("substrate.tokens", 0, 0);
+		reading = ledger.observe("substrate.tokens", 5, 500);
+		expect(reading.samples).toBe(1); // half a second later is still one second of history
+
+		while (reading.samples < 480) {
+			const second = Math.ceil(reading.spanMs / 1000) + 1;
+			reading = ledger.observe("substrate.tokens", 10 * second, second * 1000 + 250);
+		}
+		expect(reading.samples).toBe(480); // the cap: 480 distinct seconds
+		expect(reading.spanMs).toBeGreaterThanOrEqual(BURN_MIN_SPAN_MS);
+		expect(reading.perHour).not.toBe(null);
+	});
 });

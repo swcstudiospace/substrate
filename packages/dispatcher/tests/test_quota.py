@@ -349,6 +349,48 @@ def test_burn_verdict_is_read_once_per_tick_for_many_candidates(env_file):
     assert len(linear.comments["i-1"]) == 1 and len(linear.comments["i-2"]) == 1
 
 
+# --- (f) the probe samples even when nothing can launch ---------------------------------------
+
+
+def test_burn_probe_samples_on_a_tick_with_no_candidates(env_file):
+    # A quiet queue is not a reason to stop collecting burn history: the next
+    # tick that can launch needs the span this one would otherwise skip.
+    linear, mcp = FakeLinear([]), EventMcp()
+    slo = FakeSlo(slo_snapshot(tokens="breached"))
+    decisions, lines, launch_fn, _ = run_tick(linear, mcp, env_file=env_file, slo=slo)
+
+    assert decisions == [] and launch_fn.calls == [] and mcp.emits == []
+    assert slo.calls == 1
+
+
+def test_burn_probe_samples_while_every_slot_is_busy(env_file):
+    # Both sessions running means no launch is possible for an hour at a time;
+    # the probe must still sample each tick or the breaker starts its span from
+    # zero the moment a slot opens.
+    linear, mcp = FakeLinear([cand()]), EventMcp()
+    slo = FakeSlo(slo_snapshot(tokens="breached"))
+    decisions, lines, launch_fn, _ = run_tick(
+        linear, mcp, env_file=env_file, slo=slo, registry=SessionRegistry(max_sessions=0),
+    )
+
+    assert [d.action for d in decisions] == ["skip"]  # at capacity
+    assert launch_fn.calls == []
+    assert slo.calls == 1
+
+
+def test_burn_probe_stays_quiet_while_the_breaker_is_disabled(env_file):
+    # The override skips the probe entirely — an empty queue with the breaker
+    # disabled reads no snapshot and logs no disabled notice.
+    env_file.write_text("LINEAR_API_KEY=secret\nSUBSTRATE_STORMBREAK_DISABLED=1\n")
+    linear, mcp = FakeLinear([]), EventMcp()
+    slo = FakeSlo(slo_snapshot(tokens="breached"))
+    decisions, lines, _, _ = run_tick(linear, mcp, env_file=env_file, slo=slo)
+
+    assert decisions == []
+    assert slo.calls == 0
+    assert not any("storm-breaker disabled" in line for line in lines)
+
+
 # --- quota.py units ---------------------------------------------------------------------------
 
 

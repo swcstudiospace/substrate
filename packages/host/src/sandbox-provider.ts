@@ -1,9 +1,12 @@
 // substrateDocker: the only sandbox provider substrate-host starts (D-01).
 //
 // Same SandboxProvider shape as upstream sandbox-agent@0.4.2 providers/docker.js (name "docker",
-// create/destroy/getUrl), but every container body comes from buildContainerSpec: host-loopback
-// port or an internal network, a per-container token, the graph label, the worktree bind, no
-// privileged mode and no docker socket. The token reaches sandboxAgentProvider through getToken(),
+// create/destroy/getUrl), but every container body comes from buildContainerSpec: a per-sandbox
+// token, the graph label, the worktree bind, no privileged mode and no docker socket. A
+// published_loopback sandbox starts CLOSED: it first runs on the internal bridge only (no
+// external route, no reachable published port), the DOCKER-USER rules go on for its reserved
+// egress address, and only then the egress attach opens the route — traffic never flows a
+// millisecond outside the policy. The token reaches sandboxAgentProvider through getToken(),
 // which SandboxAgent.start calls when no explicit token option is passed — so callers must not
 // pass `token` to sandboxAgentProvider.
 
@@ -36,10 +39,10 @@ type PortBinding = { HostIp?: string; HostPort?: string };
 type ContainerInspect = {
 	Config?: { Cmd?: string[] | null; Labels?: Record<string, string> | null };
 	NetworkSettings?: {
-		/** The container's bridge address; the U1 egress rules pin the container's own traffic by it. */
+		/** The first endpoint's address; the egress rules pin the container's own traffic by its address on EGRESS_NETWORK (legacy: the bridge address). */
 		IPAddress?: string;
 		Ports?: Record<string, PortBinding[] | null> | null;
-		Networks?: Record<string, { IPAddress?: string }> | null;
+		Networks?: Record<string, { IPAddress?: string; IPAMConfig?: { IPv4Address?: string } } | null> | null;
 	};
 };
 
@@ -60,7 +63,7 @@ type ContainerSummary = { Id: string; Names?: string[]; Labels?: Record<string, 
 export type DockerClient = {
 	createContainer(body: Record<string, unknown>): Promise<DockerContainer>;
 	getContainer(id: string): DockerContainer;
-	getNetwork(name: string): { inspect(): Promise<NetworkInspect> };
+	getNetwork(name: string): { inspect(): Promise<NetworkInspect>; connect(body: Record<string, unknown>): Promise<unknown> };
 	createNetwork(body: Record<string, unknown>): Promise<unknown>;
 	getImage(name: string): { inspect(): Promise<unknown> };
 	pull(name: string): Promise<unknown>;
@@ -264,9 +267,9 @@ export async function listSandboxes(docker: DockerClient = anyDocker()): Promise
 }
 
 /**
- * U2: remove one container by id — stop, then force-remove, an already-gone container is
- * success. Only ever called with host-labeled ids: reconcileSandboxes classifies before it
- * terminates, and the classification is the guard.
+ * U2: remove one container by id — stop, force-remove, and only then run the recorded egress
+ * deletes; an already-gone container is success. Only ever called with host-labeled ids:
+ * reconcileSandboxes classifies before it terminates, and the classification is the guard.
  */
 export async function destroySandbox(
 	sandboxId: string,
@@ -274,22 +277,29 @@ export async function destroySandbox(
 	state: Pick<SandboxStateStore, "takeEgressCleanup"> = sharedSandboxState(),
 	runIptables: (argv: readonly string[]) => void = defaultRunIptables,
 ): Promise<void> {
-	// U1×U2: the standing DOCKER-USER rules outlive this process in the state file — run the
-	// recorded deletes (best-effort) before the container goes, whether this boot applied them
-	// or not. Boot reconciliation terminates orphans through here, so crash-orphan rules die too.
-	runEgressCleanup(sandboxId, state, runIptables);
+	// U1×U2 order: the guest is stopped and gone before its DOCKER-USER rules are lifted — the
+	// reverse order would leave a live container unfiltered for the five-second stop window (and
+	// forever, if stop or remove failed). A failed teardown throws before cleanup: the standing
+	// rule stays in place, and a standing rule only narrows.
 	const container = docker.getContainer(sandboxId);
 	await container.stop({ t: 5 }).catch(() => undefined);
 	await container.remove({ force: true }).catch((error: unknown) => {
 		if (isNotFound(error)) return; // already gone
-		const status = typeof error === "object" && error !== null && "statusCode" in error ? error.statusCode : undefined;
 		// 409: AutoRemove started removing it when stop() returned.
-		if (status !== 409) throw error;
+		if (statusCode(error) !== 409) throw error;
 	});
+	runEgressCleanup(sandboxId, state, runIptables);
 }
 
 function isNotFound(error: unknown): boolean {
 	return typeof error === "object" && error !== null && (error as { statusCode?: unknown }).statusCode === 404;
+}
+
+/** Docker errors carry the daemon call's HTTP status, when it has one. */
+function statusCode(error: unknown): number | undefined {
+	if (typeof error !== "object" || error === null || !("statusCode" in error)) return undefined;
+	const status = error.statusCode; // narrowed by the `in` guard above
+	return typeof status === "number" ? status : undefined;
 }
 
 async function ensureInternalNetwork(docker: DockerClient): Promise<void> {
@@ -308,6 +318,76 @@ async function ensureInternalNetwork(docker: DockerClient): Promise<void> {
 		// A concurrent create won the race; the inspect on the next create() re-checks Internal.
 		if ((error as { statusCode?: unknown }).statusCode !== 409) throw error;
 	}
+}
+
+/**
+ * U1: the published sandboxes' egress attach target — a user-defined bridge, so a static
+ * address can be assigned at connect (the default bridge takes none). Docker only binds
+ * published ports and routes external traffic through non-internal networks, which is exactly
+ * what makes the start-closed ordering work: on the internal stage network nothing routes and
+ * nothing publishes, and the egress attach below is the single switch that opens both, after
+ * the rules are already in place.
+ */
+export const EGRESS_NETWORK = "substrate-sandbox-egress";
+export const EGRESS_SUBNET = "10.77.0.0/24";
+const EGRESS_GATEWAY = "10.77.0.1";
+
+function egressAddress(host: number): string {
+	return `10.77.0.${host}`;
+}
+
+async function ensureEgressNetwork(docker: DockerClient): Promise<void> {
+	try {
+		const info = await docker.getNetwork(EGRESS_NETWORK).inspect();
+		if (info.Internal === true) {
+			throw new Error(`docker network ${EGRESS_NETWORK} exists but is internal; refusing to use it`);
+		}
+		return;
+	} catch (error) {
+		if (!isNotFound(error)) throw error;
+	}
+	try {
+		await docker.createNetwork({
+			Name: EGRESS_NETWORK,
+			Driver: "bridge",
+			Internal: false,
+			CheckDuplicate: true,
+			IPAM: { Config: [{ Subnet: EGRESS_SUBNET, Gateway: EGRESS_GATEWAY }] },
+		});
+	} catch (error) {
+		// A concurrent create won the race; the connect below re-checks reachability. An
+		// operator network that already owns the subnet fails here too, by docker's own
+		// overlap refusal — fail-closed, naming the conflict.
+		if (statusCode(error) !== 409) throw error;
+	}
+}
+
+/**
+ * U1: the first egress address no container holds, gateway excluded. Reservations come from
+ * the daemon itself — every inspect of a container on EGRESS_NETWORK (its live address, or the
+ * static one a created-but-unstarted sandbox already carries in its endpoint config). Two
+ * concurrent creates can race onto the same address; docker refuses the duplicate and the
+ * create fails closed with nothing applied.
+ */
+async function reserveEgressAddress(docker: DockerClient): Promise<string> {
+	const used = new Set<string>([EGRESS_GATEWAY]);
+	for (const summary of await docker.listContainers({ all: true })) {
+		let info: ContainerInspect;
+		try {
+			info = await docker.getContainer(summary.Id).inspect();
+		} catch (error) {
+			if (!isNotFound(error)) throw error;
+			continue; // the container vanished mid-scan; it holds no address anymore
+		}
+		const endpoint = info.NetworkSettings?.Networks?.[EGRESS_NETWORK];
+		if (endpoint?.IPAddress) used.add(endpoint.IPAddress);
+		if (endpoint?.IPAMConfig?.IPv4Address) used.add(endpoint.IPAMConfig.IPv4Address);
+	}
+	for (let host = 2; host <= 254; host += 1) {
+		const address = egressAddress(host);
+		if (!used.has(address)) return address;
+	}
+	throw new Error(`docker network ${EGRESS_NETWORK} (${EGRESS_SUBNET}) has no free address for a new sandbox`);
 }
 
 export function substrateDocker(opts: SubstrateDockerOptions): SubstrateSandboxProvider {
@@ -382,11 +462,17 @@ export function substrateDocker(opts: SubstrateDockerOptions): SubstrateSandboxP
 		return resolved;
 	}
 
-	/** U1: the bridge address the rules pin the container's own traffic by. */
+	/**
+	 * U1: the address the rules pin the container's own traffic by — the reserved address on
+	 * EGRESS_NETWORK. Only ever read post-start (withSeedEgress): a created or starting
+	 * container carries no address, and nothing composes rules from an inspect before start.
+	 * The top-level address is the legacy fallback for sandboxes an older boot created straight
+	 * on the default bridge and this boot re-adopted.
+	 */
 	function containerIp(info: ContainerInspect): string {
-		const ip = info.NetworkSettings?.IPAddress;
+		const ip = info.NetworkSettings?.Networks?.[EGRESS_NETWORK]?.IPAddress ?? info.NetworkSettings?.IPAddress;
 		if (typeof ip !== "string" || ip === "") {
-			throw new Error("sandbox container has no bridge address to pin egress rules to");
+			throw new Error("sandbox container has no egress address to pin rules to");
 		}
 		return ip;
 	}
@@ -398,22 +484,51 @@ export function substrateDocker(opts: SubstrateDockerOptions): SubstrateSandboxP
 		async create() {
 			// The disk gate runs before any docker call: a missing image would pull here.
 			await ensureImagePulled(docker(), image, opts.runDf);
-			if (network === "internal") await ensureInternalNetwork(docker());
-			const token = randomBytes(32).toString("base64url");
-			const container = await docker().createContainer(
-				buildContainerSpec({ graphId, worktree, token, image, network, readOnlyBinds }),
-			);
-			// U1: the policy argv runs between create and start — the container never runs a
-			// millisecond wider than its policy. On the internal bridge deny-all is docker-native
-			// (no external route) and nothing is composed; on the published bridge the DOCKER-USER
-			// rules are pinned to the container's bridge address. Any failure here is a refused
-			// start: the rules applied so far are removed, the container is torn down, one warning
-			// event is emitted and the error propagates (fail-closed).
-			const applied: string[][] = [];
+			// The stage network hosts every sandbox: an internal one lives out its life there;
+			// a published one starts closed on it and gains its egress attach below.
+			await ensureInternalNetwork(docker());
+			if (network !== "internal") await ensureEgressNetwork(docker());
+			// U1: the allowlist resolves before anything exists — an unresolvable entry is a
+			// refusal with zero docker side effects and one warning event.
+			let resolved: Map<string, readonly string[]> | null = null;
 			if (network === "published_loopback") {
 				try {
-					const info = await container.inspect();
-					const rules = composeEgressRules(containerIp(info), egress.allow, await resolveEgress(egress));
+					resolved = await resolveEgress(egress);
+				} catch (cause) {
+					refuse(String(cause));
+				}
+			}
+			const token = randomBytes(32).toString("base64url");
+			const body = buildContainerSpec({ graphId, worktree, token, image, network, readOnlyBinds });
+			if (resolved !== null) {
+				// buildContainerSpec always returns the HostConfig object it just built.
+				const hostConfig = body.HostConfig as Record<string, unknown>;
+				// U1, start-closed: the sandbox first runs on the internal bridge only. A container
+				// there has no external route and no reachable published port — nothing can send
+				// or receive a packet that any rule would need to cover.
+				hostConfig.NetworkMode = SANDBOX_NETWORK;
+			}
+			const container = await docker().createContainer(body);
+			const applied: string[][] = [];
+			if (resolved === null) {
+				// The internal bridge denies everything docker-native (no external route): no
+				// rules compose, no address is needed, no argv runs.
+				try {
+					await container.start();
+				} catch (error) {
+					await container.remove({ force: true }).catch(() => undefined);
+					throw error;
+				}
+			} else {
+				// U1, start-closed: start on the stage network, apply the DOCKER-USER rules for
+				// the address reserved on the egress bridge, and only then connect that bridge —
+				// the single call that opens the external route and binds the published port,
+				// both already covered by the rules. An unstarted or just-created container never
+				// needs an IPAddress: the rules compose from the reservation, not an inspect.
+				try {
+					await container.start();
+					const egressIp = await reserveEgressAddress(docker());
+					const rules = composeEgressRules(egressIp, egress.allow, resolved);
 					for (let i = 0; i < rules.apply.length; i += 1) {
 						const apply = rules.apply[i];
 						const remove = rules.remove[i];
@@ -421,7 +536,15 @@ export function substrateDocker(opts: SubstrateDockerOptions): SubstrateSandboxP
 						runIptables(apply);
 						applied.push(remove);
 					}
+					await docker().getNetwork(EGRESS_NETWORK).connect({
+						Container: container.id,
+						EndpointConfig: { IPAMConfig: { IPv4Address: egressIp } },
+					});
 				} catch (cause) {
+					// Any failure — start, reservation, a refused rule, the attach — is a refused
+					// sandbox: the rules applied so far are removed, the container (still
+					// routeless on the stage network) is torn down, one warning event is emitted
+					// and the error propagates (fail-closed).
 					for (const argv of applied.splice(0)) {
 						try {
 							runIptables(argv);
@@ -432,20 +555,6 @@ export function substrateDocker(opts: SubstrateDockerOptions): SubstrateSandboxP
 					await container.remove({ force: true }).catch(() => undefined);
 					refuse(String(cause));
 				}
-			}
-			try {
-				await container.start();
-			} catch (error) {
-				// A refused start must not leave the just-applied rules pinned to a dead IP.
-				for (const argv of applied.splice(0)) {
-					try {
-						runIptables(argv);
-					} catch {
-						// Rollback is best-effort; the start failure below is what propagates.
-					}
-				}
-				await container.remove({ force: true }).catch(() => undefined);
-				throw error;
 			}
 			// U2: written only after a successful start, so a restarted host re-adopts exactly the
 			// sandboxes that came up. Best-effort: a failed record is a stderr warning, never an

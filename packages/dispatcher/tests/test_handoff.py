@@ -101,8 +101,11 @@ class RecordingMcp:
 class FakeSubstrate:
     """The ledger side: coord_handoff stores a signed packet, coord_handoff_list replays them."""
 
-    def __init__(self, *, signed: bool = True, drift: dict | None = None):
+    def __init__(self, *, signed: bool = True, drift: dict | None = None, verify_ok: bool | None = None):
         self.signed = signed
+        # None follows `signed` (the ledger's usual answer); True/False force a
+        # verdict, so a signed packet that fails verification can be replayed.
+        self.verify_ok = verify_ok
         self.drift = drift if drift is not None else {"ok": True, "findings": []}
         self.packets: list[dict] = []
         self.calls: list[tuple[str, dict]] = []
@@ -129,7 +132,7 @@ class FakeSubstrate:
                 "blockers": arguments.get("blockers") or [],
                 "prev_event_hash": None,
                 "lease_handover": False,
-                "notes": None,
+                "notes": arguments.get("notes"),
                 "signature": (
                     None
                     if not self.signed
@@ -155,13 +158,22 @@ class FakeSubstrate:
         if tool == "events_emit":
             return {"stored": True}
         if tool == "coord_handoff_list":
+            if self.verify_ok is None:
+                verdict = (
+                    {"ok": self.signed, "key_id": "k1"} if self.signed
+                    else {"ok": False, "reason": "unsigned"}
+                )
+            else:
+                verdict = (
+                    {"ok": True, "key_id": "k1"} if self.verify_ok
+                    else {"ok": False, "reason": "signature does not match packet"}
+                )
             return [
                 {
                     "event_id": f"evt_{i}",
                     "ts": packet["ts"],
                     "packet": packet,
-                    "verdict": {"ok": self.signed, "key_id": "k1"} if self.signed
-                    else {"ok": False, "reason": "unsigned"},
+                    "verdict": verdict,
                 }
                 for i, packet in enumerate(self.packets)
                 if packet["graph_id"] == arguments["graph_id"]
@@ -177,10 +189,12 @@ def quiet(_line: str) -> None:
 
 
 def test_packet_arguments_exact_shape():
+    working = "substrate/" + GID
     assert handoff.packet_arguments(**IDS) == {
         "to": "hermes",
         "goal": (
-            f"dispatch SWC-1: do the work Linear records for node {GID}/n1 in {REPO} on branch main; "
+            f"dispatch SWC-1: do the work Linear records for node {GID}/n1 in {REPO} "
+            f"on branch {working}; "
             "the task text is fetched at run time with issue_get, never carried here"
         ),
         "files": [WT],
@@ -190,14 +204,30 @@ def test_packet_arguments_exact_shape():
         "node_id": "n1",
         "linear_identifier": "SWC-1",
         "repo": REPO,
-        "branch": "main",
+        "branch": working,
+        "notes": f"worktree branch {working} was created from base branch main",
     }
 
 
-def test_packet_arguments_omit_branch_when_the_graph_names_none():
+def test_packet_names_the_worktree_branch_even_when_the_graph_names_no_base():
+    # The session edits substrate/<graph_id> whatever it was created from
+    # (ensure_worktree cuts it from HEAD when no base is named), so the packet
+    # records it even here; only the notes line is absent.
     args = handoff.packet_arguments(**{**IDS, "branch": None})
-    assert "branch" not in args
-    assert "branch None" in args["goal"]
+    assert args["branch"] == "substrate/" + GID
+    assert "notes" not in args
+    assert f"on branch substrate/{GID}" in args["goal"]
+
+
+def test_packet_branch_is_the_worktree_branch_and_the_base_only_names_notes():
+    # The base the worktree was created from (found["branch"] = "main") must
+    # never pose as the branch the session edits: replayed context pointed at
+    # "main" while work landed on substrate/<graph_id>.
+    args = handoff.packet_arguments(**IDS)
+    assert args["branch"] == "substrate/" + GID
+    assert args["branch"] != IDS["branch"]
+    assert "main" in args["notes"]
+    assert "substrate/" + GID in args["goal"]
 
 
 def test_packet_carries_no_issue_prose_even_when_the_caller_holds_some():
@@ -365,15 +395,20 @@ def test_kill_after_post_replay_rebuilds_the_dispatch_context_from_the_ledger():
     contexts = handoff.replay(ledger, GID, node_id="n1")
     assert len(contexts) == 1
     ctx = contexts[0]
+    working = "substrate/" + GID
     assert ctx["goal"] == handoff.goal_line(
-        identifier="SWC-1", graph_id=GID, node_id="n1", repo=REPO, branch="main",
+        identifier="SWC-1", graph_id=GID, node_id="n1", repo=REPO, branch=working,
     )
     assert ctx["dod"] == DOD
     assert ctx["files"] == [WT]
     assert ctx["graph_id"] == GID and ctx["node_id"] == "n1"
     assert ctx["linear_identifier"] == "SWC-1"
-    assert ctx["repo"] == REPO and ctx["branch"] == "main"
+    assert ctx["repo"] == REPO and ctx["branch"] == working
+    # The base is named in notes, never as the branch.
+    assert ctx["notes"] == f"worktree branch {working} was created from base branch main"
     assert ctx["signed"] is True
+    # And the replayed context carries the row's signature verdict.
+    assert ctx["verification"] == {"ok": True, "key_id": "k1"}
     # And the replayed context carries pointers and DoD, never issue prose.
     assert "Secret Feature Title" not in json.dumps(ctx)
     assert order[0] == "checkout" and order[1] == "ensure"
@@ -401,6 +436,23 @@ def test_replay_of_an_unsigned_packet_reports_it_unsigned():
     )
     ctx = handoff.replay(ledger, GID)[0]
     assert ctx["signed"] is False
+    assert ctx["verification"] == {"ok": False, "reason": "unsigned"}
+
+
+def test_replay_preserves_a_failed_signature_verdict_on_a_signed_packet():
+    # coord_handoff_list deliberately includes rows whose verification failed;
+    # dropping the verdict would leave a tampered packet reading as merely
+    # "has a signature", and a receiver would resume work the ledger marked bad.
+    ledger = FakeSubstrate(signed=True, verify_ok=False)
+    handoff.make_prelaunch(ledger)(
+        identifier="SWC-1", graph_id=GID, node_id="n1", repo=REPO, branch="main",
+        worktree=WT, surface="hermes", log=quiet,
+    )
+    ctx = handoff.replay(ledger, GID)[0]
+    assert ctx["signed"] is True  # a signature object exists …
+    assert ctx["verification"] == {"ok": False, "reason": "signature does not match packet"}
+    # … and the verdict names the failure, so the receiver can tell bad from good.
+    assert ctx["verification"]["ok"] is False
 
 
 def test_context_from_packet_tolerates_a_legacy_packet():
@@ -408,6 +460,8 @@ def test_context_from_packet_tolerates_a_legacy_packet():
     assert ctx["goal"] == "take over"
     assert ctx["dod"] == [] and ctx["files"] == []
     assert ctx["graph_id"] is None and ctx["signed"] is False
+    # No row, no invented verdict: the field is simply absent.
+    assert "verification" not in ctx
 
 
 def test_goal_line_is_ids_and_pointers_only():

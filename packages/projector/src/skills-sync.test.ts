@@ -1,13 +1,20 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	childEnv,
 	decide,
+	type PendingRefresh,
 	postDocsRefresh,
+	readPendingRefresh,
+	REFRESH_PENDING_FILE,
 	refreshTarget,
 	type RunResult,
 	runSync,
 	SYNC_REFRESH_DATASET,
 	type SyncContext,
+	writePendingRefresh,
 } from "./skills-sync.ts";
 import type { WarningEvent } from "./skills.ts";
 
@@ -39,7 +46,7 @@ describe("decide", () => {
 	});
 });
 
-type Script = { porcelain?: string; branch?: string; fetch?: RunResult; ancestor?: number; head?: string; origin?: string; merge?: RunResult; tree?: string | null; refresh?: "ok" | "fail" | "throw" };
+type Script = { porcelain?: string; branch?: string; fetch?: RunResult; ancestor?: number; head?: string; origin?: string; merge?: RunResult; tree?: string | null; refresh?: "ok" | "fail" | "throw"; pending?: PendingRefresh | null };
 
 function harness(script: Script) {
 	const calls: string[][] = [];
@@ -47,6 +54,7 @@ function harness(script: Script) {
 	const log: string[] = [];
 	let projected = 0;
 	const refreshPosts: Array<{ commit: string; content_sha256: string }> = [];
+	const pendingSaves: Array<PendingRefresh | null> = [];
 	const runner = async (argv: readonly string[]): Promise<RunResult> => {
 		calls.push([...argv]);
 		const verb = argv.slice(3).join(" ");
@@ -90,8 +98,12 @@ function harness(script: Script) {
 			return { actions: 0, warnings: 0 };
 		},
 		...(notifyRefresh ? { notifyRefresh } : {}),
+		// The key's presence is the seam; `pending` may be null (nothing stored).
+		...("pending" in script
+			? { loadPendingRefresh: () => (script.pending ?? null) satisfies PendingRefresh | null, savePendingRefresh: (pending: PendingRefresh | null) => pendingSaves.push(pending) }
+			: {}),
 	};
-	return { ctx, calls, warnings, log, projected: () => projected, refreshPosts };
+	return { ctx, calls, warnings, log, projected: () => projected, refreshPosts, pendingSaves };
 }
 
 const verbs = (calls: string[][]) => calls.map((c) => c.slice(3).join(" "));
@@ -270,12 +282,93 @@ describe("runSync refresh trigger (U6)", () => {
 		expect(h.refreshPosts).toEqual([]);
 		expect(verbs(h.calls)).not.toContain("rev-parse HEAD^{tree}");
 	});
+
+	const PENDING: PendingRefresh = { commit: OLD, content_sha256: "tree-pending" };
+
+	test("a pending refresh retries on a current tick and clears on success", async () => {
+		const h = harness({ head: OLD, origin: OLD, refresh: "ok", pending: PENDING });
+		expect(await runSync(h.ctx)).toEqual({ decision: "current", code: 0 });
+		// The payload that failed in an earlier tick is exactly what goes back on
+		// the wire — no new tree read for a tick that merged nothing.
+		expect(h.refreshPosts).toEqual([PENDING]);
+		expect(verbs(h.calls)).not.toContain("rev-parse HEAD^{tree}");
+		expect(h.projected()).toBe(1);
+		expect(h.warnings).toEqual([]);
+		expect(h.pendingSaves).toEqual([null]);
+	});
+
+	test("a pending refresh that fails again stays pending and the sync stays green", async () => {
+		const h = harness({ head: OLD, origin: OLD, refresh: "fail", pending: PENDING });
+		const stderr = captureStderr();
+		try {
+			expect(await runSync(h.ctx)).toEqual({ decision: "current", code: 0 });
+			expect(h.refreshPosts).toEqual([PENDING]);
+			// The payload is kept for the next tick; the tick itself still exits 0.
+			expect(h.pendingSaves).toEqual([PENDING]);
+			expect(stderr.lines.join("")).toContain("[skills-sync] docs refresh not triggered: merge-trigger 503");
+		} finally {
+			stderr.restore();
+		}
+	});
+
+	test("a fast-forward supersedes a pending refresh", async () => {
+		const h = harness({ head: OLD, origin: NEW, tree: "tree-new", refresh: "ok", pending: PENDING });
+		expect(await runSync(h.ctx)).toEqual({ decision: "ff", code: 0 });
+		// The newest tree is the one search should hold: the stale payload is
+		// never re-posted, and a delivered refresh clears the pending slot.
+		expect(h.refreshPosts).toEqual([{ commit: NEW, content_sha256: "tree-new" }]);
+		expect(h.pendingSaves).toEqual([null]);
+	});
+
+	test("a fast-forward whose POST fails leaves the new payload pending", async () => {
+		const h = harness({ head: OLD, origin: NEW, tree: "tree-new", refresh: "fail", pending: PENDING });
+		const stderr = captureStderr();
+		try {
+			expect(await runSync(h.ctx)).toEqual({ decision: "ff", code: 0 });
+			expect(h.refreshPosts).toEqual([{ commit: NEW, content_sha256: "tree-new" }]);
+			expect(h.pendingSaves).toEqual([{ commit: NEW, content_sha256: "tree-new" }]);
+			expect(stderr.lines.join("")).toContain("[skills-sync] docs refresh not triggered: merge-trigger 503");
+		} finally {
+			stderr.restore();
+		}
+	});
+
+	test("a tick the sync refuses touches neither the POST nor the pending slot", async () => {
+		const h = harness({ porcelain: " M docs-agno/SKILL.md\n", refresh: "ok", pending: PENDING });
+		expect((await runSync(h.ctx)).decision).toBe("refuse-dirty");
+		expect(h.refreshPosts).toEqual([]);
+		expect(h.pendingSaves).toEqual([]);
+	});
+
+	test("a tree hash the ff tick cannot read leaves the pending payload alone", async () => {
+		const h = harness({ head: OLD, origin: NEW, tree: null, refresh: "ok", pending: PENDING });
+		const stderr = captureStderr();
+		try {
+			expect(await runSync(h.ctx)).toEqual({ decision: "ff", code: 0 });
+			expect(h.refreshPosts).toEqual([]);
+			expect(h.pendingSaves).toEqual([]);
+			expect(stderr.lines.join("")).toContain("[skills-sync] docs refresh not triggered: tree hash failed");
+		} finally {
+			stderr.restore();
+		}
+	});
 });
 
 describe("refreshTarget", () => {
 	test("no projector surface token means the trigger is off", () => {
 		expect(refreshTarget({})).toBeNull();
 		expect(refreshTarget({ SUBSTRATE_TOKEN: "   " })).toBeNull();
+		expect(refreshTarget({ SUBSTRATE_TOKEN_SUBSTRATE: "  ", SUBSTRATE_TOKEN: "   " })).toBeNull();
+	});
+
+	test("the surface's own unit token wins, and the generic token is the fallback", () => {
+		expect(refreshTarget({ SUBSTRATE_TOKEN_SUBSTRATE: "tok-substrate" })).toEqual({ url: "http://127.0.0.1:7410", token: "tok-substrate" });
+		expect(refreshTarget({ SUBSTRATE_TOKEN_SUBSTRATE: "tok-substrate", SUBSTRATE_TOKEN: "tok-generic" })).toEqual({
+			url: "http://127.0.0.1:7410",
+			token: "tok-substrate",
+		});
+		// A deployment that only holds the older spelling still gets the trigger.
+		expect(refreshTarget({ SUBSTRATE_TOKEN: "tok-generic" })).toEqual({ url: "http://127.0.0.1:7410", token: "tok-generic" });
 	});
 
 	test("defaults to the loopback substrate and reads both at call time", () => {
@@ -324,5 +417,39 @@ describe("postDocsRefresh", () => {
 		);
 		expect(unreachable.ok).toBe(false);
 		if (!unreachable.ok) expect(unreachable.reason).toContain("merge-trigger unreachable: connect ECONNREFUSED");
+	});
+});
+
+describe("pending refresh state file", () => {
+	test("stores, replaces and clears the payload through the same file", () => {
+		const dir = mkdtempSync(join(tmpdir(), "substrate-pending-"));
+		const file = join(dir, "skills", "refresh-pending.json");
+		try {
+			expect(readPendingRefresh(file)).toBeNull();
+			writePendingRefresh(file, { commit: NEW, content_sha256: "tree-1" });
+			expect(readPendingRefresh(file)).toEqual({ commit: NEW, content_sha256: "tree-1" });
+			writePendingRefresh(file, { commit: OLD, content_sha256: "tree-2" });
+			expect(readPendingRefresh(file)).toEqual({ commit: OLD, content_sha256: "tree-2" });
+			writePendingRefresh(file, null);
+			expect(readPendingRefresh(file)).toBeNull();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("an unusable file is no pending refresh, never a throw", () => {
+		const dir = mkdtempSync(join(tmpdir(), "substrate-pending-"));
+		try {
+			const broken = join(dir, "broken.json");
+			for (const body of ["{not json", JSON.stringify(["not", "an", "object"]), JSON.stringify({ content_sha256: "tree-1" }), JSON.stringify({ commit: "", content_sha256: "tree-1" })]) {
+				writeFileSync(broken, body);
+				expect(readPendingRefresh(broken)).toBeNull();
+			}
+			// The production default is the sync's state directory, beside the
+			// projector's warned-state file.
+			expect(REFRESH_PENDING_FILE).toBe("/var/lib/substrate/skills/refresh-pending.json");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });

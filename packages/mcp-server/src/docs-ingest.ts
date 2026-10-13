@@ -20,8 +20,10 @@
  * than calling a guessed endpoint.
  */
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import type { Dirent } from "node:fs";
+import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
 	listDatasets,
 	pollParseStatus,
@@ -43,6 +45,57 @@ export const INGEST_CALL_MAX_BYTES = 5_000_000;
  * (`README.md`, `docs/`, `.planning/PROJECT.md`).
  */
 export const DEFAULT_INGEST_ROOTS: readonly string[] = ["docs/", "README.md", ".planning/PROJECT.md"];
+
+/**
+ * The pages the configured roots hold under `baseDir`, for a refresh that runs
+ * on the machine holding the checkout (the `/docs/merge-trigger` route).
+ *
+ * Roots are repo-relative, exactly as `roots` describes them for posted pages:
+ * a trailing `/` sweeps a directory tree, a bare name reads one file. Symlinked
+ * entries are skipped — a link can point outside the checkout, and the guards
+ * below have no real path to check against the roots. An entry that cannot be
+ * read is skipped, never fatal: a root this checkout does not have is not an
+ * outage of the docs plane. A sweep that finds nothing comes back empty, and
+ * the guarded ingest refuses `no-pages` on it. Every page carries a `file://`
+ * source URL derived from its resolved path, so the content-hash idempotency
+ * keys stay stable across restarts of the server. The result is sorted by
+ * path, so a refresh ingests in a stable order.
+ */
+export async function scanIngestPages(baseDir: string, roots: readonly string[]): Promise<IngestPage[]> {
+	const pages: IngestPage[] = [];
+	for (const root of roots) {
+		const absolute = resolve(baseDir, root);
+		if (root.endsWith("/")) await collectDirectory(absolute, root, pages);
+		else await addFilePage(absolute, root, pages);
+	}
+	pages.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+	return pages;
+}
+
+async function collectDirectory(dir: string, prefix: string, pages: IngestPage[]): Promise<void> {
+	let entries: Dirent[];
+	try {
+		entries = await readdir(dir, { withFileTypes: true });
+	} catch {
+		return; // missing or unreadable: skipped, not fatal
+	}
+	for (const entry of entries) {
+		if (entry.isSymbolicLink()) continue;
+		const relative = `${prefix}${entry.name}`;
+		if (entry.isDirectory()) await collectDirectory(join(dir, entry.name), `${relative}/`, pages);
+		else if (entry.isFile()) await addFilePage(join(dir, entry.name), relative, pages);
+	}
+}
+
+async function addFilePage(absolute: string, path: string, pages: IngestPage[]): Promise<void> {
+	let body: string;
+	try {
+		body = await readFile(absolute, "utf8");
+	} catch {
+		return;
+	}
+	pages.push({ path, source_url: pathToFileURL(absolute).href, body });
+}
 
 export interface IngestPage {
 	path: string;

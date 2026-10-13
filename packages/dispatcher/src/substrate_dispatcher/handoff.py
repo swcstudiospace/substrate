@@ -34,6 +34,10 @@ from typing import Any, Callable
 # convention for the whole dispatcher, not a second one.
 from .dispatch import Log, _emit
 
+# The branch a dispatched session edits is the worktree's own; the prefix is the
+# worktree module's naming law, so both sites derive it from one constant.
+from .worktree import BRANCH_PREFIX
+
 # The payload ``action`` of every warning this module emits, so a reader can tell
 # a handoff problem from a quota stop (``dispatch.stormbreak``) or an issue
 # fault (``dispatch``) — the same distinct-action convention as U4.
@@ -73,12 +77,17 @@ def packet_arguments(
     """The ``coord_handoff`` arguments for one dispatch.
 
     Ids are validated upstream (``validate_ids``). The only file pointer the
-    dispatcher honestly holds is the worktree every edit must land in.
+    dispatcher honestly holds is the worktree every edit must land in, and the
+    branch recorded is the one the session edits — the worktree's own
+    ``substrate/<graph_id>`` branch — never the base the worktree was created
+    from: a replayed packet must point the receiver at the branch to commit to.
+    The base, when the graph names one, rides in ``notes`` instead.
     """
+    working = BRANCH_PREFIX + graph_id
     arguments: dict[str, Any] = {
         "to": surface,
         "goal": goal_line(
-            identifier=identifier, graph_id=graph_id, node_id=node_id, repo=repo, branch=branch
+            identifier=identifier, graph_id=graph_id, node_id=node_id, repo=repo, branch=working
         ),
         "files": [str(worktree)],
         "dod": [
@@ -89,9 +98,10 @@ def packet_arguments(
         "node_id": node_id,
         "linear_identifier": identifier,
         "repo": repo,
+        "branch": working,
     }
     if branch:
-        arguments["branch"] = branch
+        arguments["notes"] = f"worktree branch {working} was created from base branch {branch}"
     return arguments
 
 
@@ -220,9 +230,17 @@ def post_handoff(
     return reply
 
 
-def context_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
-    """The dispatch context a receiver rebuilds from a ledger packet alone."""
-    return {
+def context_from_packet(packet: dict[str, Any], verdict: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The dispatch context a receiver rebuilds from a ledger packet alone.
+
+    ``verdict`` is the ledger's signature-verification result for the row the
+    packet came from, when ``coord_handoff_list`` carries one: the context must
+    say not just whether a signature object exists but whether the server judged
+    it good — a packet marked bad-signature or unknown-key loses exactly the
+    warning a receiver needs otherwise. A packet read without a row (legacy
+    callers) omits the field rather than inventing a verdict.
+    """
+    context: dict[str, Any] = {
         "handoff_id": packet.get("handoff_id"),
         "goal": packet.get("goal"),
         "dod": list(packet.get("dod") or []),
@@ -232,8 +250,12 @@ def context_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
         "linear_identifier": packet.get("linear_identifier"),
         "repo": packet.get("repo"),
         "branch": packet.get("branch"),
+        "notes": packet.get("notes"),
         "signed": bool(packet.get("signature")),
     }
+    if verdict is not None:
+        context["verification"] = verdict
+    return context
 
 
 def replay(mcp: Any, graph_id: str, *, node_id: str | None = None) -> list[dict[str, Any]]:
@@ -241,18 +263,22 @@ def replay(mcp: Any, graph_id: str, *, node_id: str | None = None) -> list[dict[
 
     This is the replay path the packet exists for: with the launching process
     gone, ``replay(...)`` returns every recorded dispatch context — goal, DoD,
-    file pointers and ids — with nothing but the ledger.
+    file pointers and ids — with nothing but the ledger. Each context carries
+    its row's signature verdict, because ``coord_handoff_list`` deliberately
+    includes rows whose verification failed.
     """
     rows = mcp.call("coord_handoff_list", {"graph_id": graph_id})
     if not isinstance(rows, list):
         raise ValueError(f"coord_handoff_list: unexpected reply: {str(rows)[:200]}")
-    packets = [
-        row["packet"]
+    rows = [
+        row
         for row in rows
         if isinstance(row, dict) and isinstance(row.get("packet"), dict)
         and (node_id is None or row["packet"].get("node_id") == node_id)
     ]
-    return [context_from_packet(packet) for packet in reversed(packets)]
+    # The row's verdict rides with its packet: a replayed bad-signature packet
+    # must still read as bad, not merely as "has a signature object".
+    return [context_from_packet(row["packet"], row.get("verdict")) for row in reversed(rows)]
 
 
 def prelaunch(

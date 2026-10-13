@@ -590,6 +590,110 @@ describe("chainTip", () => {
 	});
 });
 
+describe("eventIdsAfter", () => {
+	/** Any fixed epoch; every fixture record lands in or after this millisecond. */
+	const T0 = Date.UTC(2026, 9, 1);
+
+	/** One `event_ingest` record: the event id and the time a record for it landed. */
+	interface FixtureRecord {
+		id: string;
+		at: number;
+	}
+
+	/**
+	 * Answer `eventIdsAfter` from `table` by evaluating exactly the query the
+	 * statement must carry: earliest ingest record per event, strictly after the
+	 * full (ingested_at, event_id) cursor, ordered, then limited. A statement
+	 * that pages before collapsing or before the cursor cut fails the test
+	 * instead of quietly handing back wrong positions.
+	 */
+	function stubIngestStore(table: FixtureRecord[]): { sql: string[] } {
+		return stubFetch((statement) => {
+			const after = /f\."first_ingested_at" > '([^']+)'/.exec(statement);
+			const boundary = /f\."first_ingested_at" = '([^']+)' AND f\."event_id" > '([^']*)'/.exec(statement);
+			const capped = /LIMIT (\d+)\s*$/.exec(statement);
+			if (!after || !boundary || !capped || after[1] !== boundary[1]) {
+				throw new Error(`statement is not the earliest-records-after-cursor query: ${statement}`);
+			}
+			if (statement.indexOf("LIMIT") < statement.indexOf("WHERE")) {
+				throw new Error(`statement applies its limit before the cursor boundary: ${statement}`);
+			}
+			const afterMs = Date.parse(after[1]!);
+			if (!Number.isFinite(afterMs)) throw new Error(`cursor bound is not a timestamp: ${after[1]}`);
+			const first = new Map<string, number>();
+			for (const record of table) {
+				const held = first.get(record.id);
+				if (held === undefined || record.at < held) first.set(record.id, record.at);
+			}
+			const positions = [...first]
+				.filter(([id, at]) => at > afterMs || (at === afterMs && id > (boundary[2] ?? "")))
+				.sort((a, b) => a[1] - b[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+				.slice(0, Number(capped[1]));
+			return records(
+				["event_id", "ingested_at"],
+				positions.map(([id, at]) => [id, at]),
+			);
+		});
+	}
+
+	test("a retried ingest record never re-delivers its event across polls", async () => {
+		const client = new GreptimeClient(config);
+		stubIngestStore([
+			{ id: "evt_1", at: T0 },
+			{ id: "evt_1", at: T0 + 5000 }, // the retry, stamped later than the first record
+			{ id: "evt_2", at: T0 + 10 },
+		]);
+
+		const first = await client.eventIdsAfter({ id: "", ingestedAt: 0 }, 50);
+		expect(first).toEqual([
+			{ id: "evt_1", ingestedAt: T0 },
+			{ id: "evt_2", ingestedAt: T0 + 10 },
+		]);
+
+		// The second poll's cursor is past the first record, so a window that
+		// merely sat at `>= cursor` would hold only the retry for evt_1 and hand
+		// the stream the same event twice. Only the earliest record counts.
+		const second = await client.eventIdsAfter({ id: "evt_1", ingestedAt: T0 }, 50);
+		expect(second).toEqual([{ id: "evt_2", ingestedAt: T0 + 10 }]);
+	});
+
+	test("more same-millisecond records than a page still advance the stream", async () => {
+		const client = new GreptimeClient(config);
+		stubIngestStore(Array.from({ length: 501 }, (_, i) => ({ id: `evt_${String(i).padStart(3, "0")}`, at: T0 })));
+
+		// A limit applied before this boundary would re-read the same first rows
+		// on every poll and freeze at evt_350 forever; the statement cuts first,
+		// so the next page is exactly the hundred records after the cursor.
+		const page = await client.eventIdsAfter({ id: "evt_350", ingestedAt: T0 }, 100);
+		expect(page.map((position) => position.id)).toEqual(Array.from({ length: 100 }, (_, i) => `evt_${String(351 + i).padStart(3, "0")}`));
+	});
+
+	test("the statement collapses earliest records and carries the full cursor before its limit", async () => {
+		const { sql } = stubIngestStore([]);
+		await new GreptimeClient(config).eventIdsAfter({ id: "evt_9", ingestedAt: T0 }, 7);
+
+		const statement = sql[0] ?? "";
+		expect(statement).toContain('(SELECT "event_id", MIN("ingested_at") AS "first_ingested_at" FROM "event_ingest" GROUP BY "event_id")');
+		const at = new Date(T0).toISOString();
+		expect(statement).toContain(`(f."first_ingested_at" > '${at}') OR (f."first_ingested_at" = '${at}' AND f."event_id" > 'evt_9')`);
+		expect(statement).toContain('ORDER BY f."first_ingested_at" ASC, f."event_id" ASC');
+		expect(statement.indexOf("LIMIT")).toBeGreaterThan(statement.indexOf("WHERE"));
+		expect(statement.trim().endsWith("LIMIT 7")).toBe(true);
+	});
+
+	test("a record whose time is not a number is named, not skipped", async () => {
+		globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+			const statement = new URLSearchParams(String(init?.body)).get("sql") ?? "";
+			const after = /f\."first_ingested_at" > '([^']+)'/.exec(statement);
+			const boundary = /f\."first_ingested_at" = '([^']+)' AND f\."event_id" > '([^']*)'/.exec(statement);
+			const capped = /LIMIT (\d+)\s*$/.exec(statement);
+			const rows = after && boundary && capped ? [["evt_bad", null]] : [];
+			return new Response(JSON.stringify(records(["event_id", "ingested_at"], rows)), { status: 200 });
+		}) as unknown as typeof fetch;
+		await expect(new GreptimeClient(config).eventIdsAfter({ id: "", ingestedAt: 0 }, 5)).rejects.toThrow("evt_bad");
+	});
+});
+
 describe("queryEvents", () => {
 	/** The read among the recorded statements — the dialect probe precedes it. */
 	function selectStatement(sql: string[]): string {

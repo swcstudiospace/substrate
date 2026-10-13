@@ -15,7 +15,7 @@ import { type Client, createClient } from "@rivet-dev/agentos/client";
 import { createApiServer } from "./api.ts";
 import { startTrackerProxy } from "./mcp-proxy.ts";
 import { formatRoute, type MountRoute, parseMountRoute, parseRoute, parseTestsRoute, type Route, type TestsRoute, trackerRoute } from "./options.ts";
-import { defaultSandboxStatePath, destroySandbox, listSandboxes, setEgressWarnSink } from "./sandbox-provider.ts";
+import { defaultSandboxStatePath, destroySandbox, listSandboxes, runEgressCleanup, setEgressWarnSink } from "./sandbox-provider.ts";
 import { type SandboxNetwork } from "./sandbox-options.ts";
 import type { Skill, TrackerLocators } from "./seed.ts";
 import { LeaseStore, SubstrateClient } from "./substrate.ts";
@@ -211,8 +211,13 @@ const sandboxState = new SandboxStateStore(defaultSandboxStatePath(), warn);
 const reconciled = await reconcileSandboxes({
 	enumerate: () => listSandboxes(),
 	state: sandboxState,
-	taskFor: (graphId) => store.list().find((record) => record.graph_id === graphId) ?? null,
+	// A graph's released records (finished nodes) must not shadow a still-claimed one: the first
+	// match decides whether a live sandbox is re-attached or deleted as an orphan.
+	taskFor: (graphId) => store.list().find((record) => record.graph_id === graphId && !record.released) ?? null,
 	terminate: (sandboxId) => destroySandbox(sandboxId),
+	// U1×U2: a sandbox that vanished while the host was down leaves standing DOCKER-USER rules
+	// only its state entry knows how to delete — run those before the entry is forgotten.
+	runEgressCleanup: (sandboxId) => runEgressCleanup(sandboxId, sandboxState),
 	warn: (payload) => {
 		void substrate
 			.call("events_emit", {

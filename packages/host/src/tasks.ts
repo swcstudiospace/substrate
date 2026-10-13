@@ -374,6 +374,13 @@ export type SandboxReconcileDeps = {
 	enumerate: () => Promise<SandboxListing[]>;
 	/** The durable sandbox→task map (the U2 state file). */
 	state: Pick<SandboxStateStore, "list" | "forget">;
+	/**
+	 * Best-effort delete of a dead sandbox's standing egress rules — the recorded argvs of an
+	 * entry being forgotten. Docker's AutoRemove tears the container down but leaves DOCKER-USER
+	 * rules standing, so this must run before the entry (the deletes' only home) is dropped.
+	 * main.ts wires sandbox-provider's runEgressCleanup.
+	 */
+	runEgressCleanup: (sandboxId: string) => void;
 	/** The task record of a graph, or null; whether it still owns a sandbox is decided here. */
 	taskFor: (graphId: string) => Pick<TaskRecord, "graph_id" | "released"> | null;
 	/** Provider teardown by id; only host-labeled ids are ever passed — the classification here is the guard. */
@@ -420,9 +427,19 @@ export async function reconcileSandboxes(deps: SandboxReconcileDeps): Promise<Sa
 		deps.state.list().map((entry) => [entry.sandbox_id, entry]),
 	);
 	const liveIds = new Set(live.map((box) => box.sandbox_id));
-	// State hygiene: an entry whose sandbox is gone dies with it, so no later boot re-adopts a phantom.
+	// State hygiene: an entry whose sandbox is gone dies with it, so no later boot re-adopts a
+	// phantom — but its recorded egress deletes run first. The container vanished while the host
+	// was down (AutoRemove, a crash, manual removal), which never touches DOCKER-USER rules; the
+	// entry is the only place the deletes survive. Best-effort: a failed run is one stderr note
+	// and the forget proceeds — a standing rule only narrows.
 	for (const sandboxId of known.keys()) {
-		if (!liveIds.has(sandboxId)) deps.state.forget(sandboxId);
+		if (liveIds.has(sandboxId)) continue;
+		try {
+			deps.runEgressCleanup(sandboxId);
+		} catch (cause) {
+			stderr(`[substrate-host] phantom sandbox ${sandboxId.slice(0, 12)} egress cleanup failed: ${String(cause)}`);
+		}
+		deps.state.forget(sandboxId);
 	}
 	for (const box of live) {
 		const short = box.sandbox_id.slice(0, 12);
