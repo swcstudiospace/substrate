@@ -67,13 +67,14 @@ import { createMirror, type Mirror, type MirrorContext, type MirrorFailure, type
 import { runDodGate, type DodEvidence } from "./dod-gate.ts";
 import { normalizeSubject } from "./memory-policy.ts";
 import { recallMemories, UNTRUSTED_MEMORY_NOTICE, type RecallReply } from "./memory-recall.ts";
-import { forwardRetain, retainDocumentId } from "./memory-retain.ts";
+import { emitRetainWarning, forwardRetain, replayRetain, retainDocumentId, type RetainDeps, type RetainOutboxSink } from "./memory-retain.ts";
 import { mergeDerivedHits, type MergedMemoryResults } from "./memory-search.ts";
 import { governMemoryWrite } from "./memory-write.ts";
 import { TEACHABLE_SUBJECT_PREFIX, isTeachable, teachableEvent } from "./teachable.ts";
-import { bankForSurface, hindsightBanksFromEnv, hindsightFromEnv, hindsightOp, probeHealth } from "./planes/hindsight.ts";
+import { bankForSurface, hindsightBanksFromEnv, hindsightFromEnv, hindsightOp, probeHealth, type HindsightConfig } from "./planes/hindsight.ts";
 import { listDatasets, ragflowOp, type FetchLike } from "./planes/ragflow.ts";
 import { redact, type SkillDocExampleRule } from "./redact.ts";
+import { RetainOutbox, type RetainDeliveryOutcome, type RetainOutboxEntry, type RetainOutboxStats } from "./retain-outbox.ts";
 import {
 	createExecFileRunner,
 	createSkillProposer,
@@ -715,6 +716,13 @@ export class Substrate {
 	private retainWaiters: Array<() => void> = [];
 	/** Latest background forward per plane document, so versions land in order. */
 	private readonly retainChains = new Map<string, Promise<void>>();
+	// uplift-2 R3 — the Hindsight retain outbox
+	/** Parked transient retain failures, replayed with backoff; durable when `SUBSTRATE_RETAIN_OUTBOX_PATH` is set. */
+	private readonly retainOutbox: RetainOutbox;
+	/** The interval drain, started on the first parked entry and left unref'd so it never holds the process. */
+	private retainDrainTimer: ReturnType<typeof setInterval> | null = null;
+	/** Set while entries were parked under a non-closed breaker; the next live success replays the backlog early. */
+	private retainRecoverPending = false;
 	/** Source-URL ingest records for hash idempotency, held for the process lifetime. */
 	private docsIngestSeen = new Map<string, IngestRecord>();
 	/** In-flight page uploads by record key, tagged with the uploading sha. */
@@ -786,6 +794,30 @@ export class Substrate {
 				},
 				gate: this.planes.gate("cache"),
 			});
+		// uplift-2 R3: the outbox hydrates its file (if any) now, so entries parked
+		// before a restart are due again from the first drain tick. Every drop —
+		// bound, exhausted attempts, a memory-only queue at shutdown — ends with
+		// the warning the live forward would have emitted, in the same shape.
+		this.retainOutbox = new RetainOutbox({
+			path: config.retainOutbox.path,
+			max: config.retainOutbox.max,
+			maxAttempts: config.retainOutbox.maxAttempts,
+			allow: () => this.planes.gate("hindsight").breaker?.state() !== "open",
+			onDrop: (entry, cause) => {
+				const reason = cause === "outbox-full" ? "outbox-full" : entry.last_reason;
+				// Tracked like a forward: the shutdown drain waits for it (bounded).
+				this.trackRetain(
+					emitRetainWarning(
+						(event) => this.emit(event),
+						entry.surface,
+						entry.session_id,
+						`hindsight retain failed: ${reason} (${entry.bank}/${entry.document_id})`,
+						{ reason, bank: entry.bank, document_id: entry.document_id, entry_hash: entry.entry_hash },
+					),
+				);
+			},
+		});
+		if (this.retainOutbox.size() > 0) this.ensureRetainDrainTimer();
 	}
 
 	/**
@@ -1123,28 +1155,25 @@ export class Substrate {
 		}
 		if (result.outcome === "accepted" || commitUncertain) await this.cache.bump(MEMORY_GENERATION_KEY);
 		// The Hindsight forward runs after the accepted reply is decided and never
-		// blocks it: Postgres stays the governed store (D26-04). A refusal or plane
-		// failure warns without re-opening the write. A successful retain bumps the
-		// generation again: a recall cached in the gap between the index bump and
-		// the retain landing must not hide the fresh memory for a whole TTL.
+		// blocks it: Postgres stays the governed store (D26-04). A refusal warns
+		// without re-opening the write; a transient plane failure parks in the
+		// retain outbox and is replayed with backoff (uplift-2 R3), the warning
+		// deferred to its last attempt. A successful retain bumps the generation
+		// again: a recall cached in the gap between the index bump and the retain
+		// landing must not hide the fresh memory for a whole TTL — and drops any
+		// parked copy of the same document, which the success just made stale.
 		// Forwards to one document run in acceptance order: a stalled older
 		// version must not land after (and replace) its accepted replacement.
 		if (result.outcome === "accepted" && result.verified_persisted && result.entry) {
 			const entry = result.entry;
 			const hindsight = hindsightFromEnv();
 			const run = (): Promise<void> => {
-				return forwardRetain(
-					{
-						config: hindsight,
-						fetchImpl: this.hindsightFetch,
-						vmGuest: this.config.vmGuest,
-						emit: (event) => this.emit(event),
-					},
-					request,
-					result,
-				)
+				return forwardRetain(this.retainDeps(hindsight), request, result)
 					.then((outcome) => {
-						if (outcome.forwarded) return this.cache.bump(MEMORY_GENERATION_KEY);
+						if (!outcome.forwarded) return;
+						this.retainOutbox.forget(outcome.bank, outcome.document_id);
+						this.afterLiveRetain();
+						return this.cache.bump(MEMORY_GENERATION_KEY);
 					})
 					.then(() => undefined)
 					.catch(() => undefined);
@@ -1224,7 +1253,10 @@ export class Substrate {
 	/**
 	 * The list search: governed index entries first, Hindsight hits appended
 	 * after them marked derived (D26-05). A plane outage yields index-only
-	 * results with `{degraded: true, reason}` — never a refusal.
+	 * results with `{degraded: true, reason}` — never a refusal. The recall
+	 * leg runs under its own shorter budget (`HINDSIGHT_SEARCH_RECALL_BUDGET_MS`,
+	 * uplift-2 R3): a slow plane costs a search at most that long, and the
+	 * reply says `recall-timeout` so the caller can tell slow from down.
 	 */
 	async searchMemory(
 		query: string,
@@ -1247,7 +1279,7 @@ export class Substrate {
 			load: async () => {
 				const [entries, recall] = await Promise.all([
 					this.index ? this.index.searchMemory(query, scope, limit, includeSuperseded) : Promise.resolve([]),
-					this.recallMemories({ query }, surface),
+					this.recallMemories({ query }, surface, this.config.hindsightBudgets.searchRecallBudgetMs),
 				]);
 				return mergeDerivedHits(entries, recall, scope);
 			},
@@ -1319,9 +1351,12 @@ export class Substrate {
 	 * answers empty with a reason, never a throw. Reads emit nothing. Never
 	 * called from the brief's synchronous compose path. A guest instance
 	 * refuses before the cache lookup, so neither the tool nor the recall
-	 * inside `memory_search` leaks shared memories out of the guest.
+	 * inside `memory_search` leaks shared memories out of the guest. The
+	 * fan-out budget is `HINDSIGHT_RECALL_BUDGET_MS` unless the caller names a
+	 * shorter one (the search leg does); a non-degraded reply is budget-
+	 * independent, so the cache key ignores it.
 	 */
-	async recallMemories(input: { query?: unknown }, callerSurface: string | null): Promise<RecallReply> {
+	async recallMemories(input: { query?: unknown }, callerSurface: string | null, budgetMs?: number): Promise<RecallReply> {
 		if (this.config.vmGuest) {
 			return { results: [], degraded: true, notice: UNTRUSTED_MEMORY_NOTICE, reason: "vm-guest" };
 		}
@@ -1339,7 +1374,18 @@ export class Substrate {
 			// A degraded answer (outage, partial) is still the answer, but it
 			// must not sit in the cache: the next call re-probes the plane.
 			store: (reply) => !reply.degraded,
-			load: () => recallMemories({ config, banks, vmGuest: this.config.vmGuest, fetchImpl: this.hindsightFetch }, query, callerSurface),
+			load: () =>
+				recallMemories(
+					{
+						config,
+						banks,
+						vmGuest: this.config.vmGuest,
+						fetchImpl: this.hindsightFetch,
+						budgetMs: budgetMs ?? this.config.hindsightBudgets.recallBudgetMs,
+					},
+					query,
+					callerSurface,
+				),
 		});
 	}
 
@@ -1358,15 +1404,123 @@ export class Substrate {
 	}
 
 	/**
-	 * Wait for in-flight background retains, within a bound. A hanging plane
-	 * must not delay a stop into a SIGKILL; a finished one must not be lost
-	 * silently. Resolves either way.
+	 * Wait for in-flight background retains, within a bound, then give the
+	 * retain outbox one pass at its due entries inside what is left of it. A
+	 * hanging plane must not delay a stop into a SIGKILL; a finished one must
+	 * not be lost silently. Resolves either way. With `abandon` (shutdown) a
+	 * memory-only outbox gives up what is left with the warning each entry
+	 * would eventually have had — the process is about to forget them; a
+	 * durable outbox keeps them for the next boot. The outbox's drop warnings
+	 * are tracked like forwards, so they settle inside the same bound.
 	 */
-	async drainPendingRetains(timeoutMs = 10_000): Promise<void> {
+	async drainPendingRetains(timeoutMs = 10_000, options: { abandon?: boolean } = {}): Promise<void> {
+		const deadline = Date.now() + timeoutMs;
+		await this.awaitTrackedRetains(timeoutMs);
+		const left = deadline - Date.now();
+		if (left > 0 && this.retainOutbox.size() > 0) {
+			await Promise.race([this.drainRetainOutbox(), Bun.sleep(left)]);
+		}
+		if (options.abandon === true && !this.retainOutbox.durable) this.retainOutbox.abandonAll();
+		await this.awaitTrackedRetains(Math.max(0, deadline - Date.now()));
+	}
+
+	private async awaitTrackedRetains(timeoutMs: number): Promise<void> {
 		if (this.pendingRetains === 0) return;
 		const { promise, resolve } = Promise.withResolvers<void>();
 		this.retainWaiters.push(resolve);
 		await Promise.race([promise, Bun.sleep(timeoutMs)]);
+	}
+
+	// uplift-2 R3 — the retain outbox's wiring
+
+	/** The outbox's observable state, for operators; `/healthz` has no hook for plane extras, so it lives here. */
+	retainOutboxStats(): RetainOutboxStats {
+		return this.retainOutbox.stats();
+	}
+
+	/**
+	 * The forward's dependencies. The live forward parks transient failures in
+	 * the outbox; a replay hands in a sink that only says "deferred", because
+	 * the outbox entry being replayed reschedules itself. Either way the sink
+	 * taking the failure is what stops the immediate warning.
+	 */
+	private retainDeps(hindsight: HindsightConfig | null, mode: "live" | "replay" = "live"): RetainDeps {
+		const sink: RetainOutboxSink =
+			mode === "replay"
+				? { enqueue: () => true }
+				: {
+						enqueue: (candidate) => {
+							this.retainOutbox.enqueue(candidate);
+							this.ensureRetainDrainTimer();
+							// Parked while the breaker is not closed: the first live
+							// success after it closes replays everything early.
+							if (this.planes.gate("hindsight").breaker?.state() !== "closed") this.retainRecoverPending = true;
+							return true;
+						},
+					};
+		return {
+			config: hindsight,
+			fetchImpl: this.hindsightFetch,
+			vmGuest: this.config.vmGuest,
+			emit: (event: EventInput) => this.emit(event),
+			outbox: sink,
+			retainTimeoutMs: this.config.hindsightBudgets.retainTimeoutMs,
+		};
+	}
+
+	/** A live retain landed: if the plane had been refusing, replay the whole backlog now rather than on its schedule. */
+	private afterLiveRetain(): void {
+		if (!this.retainRecoverPending && !this.retainOutbox.held()) return;
+		this.retainRecoverPending = false;
+		if (this.retainOutbox.size() > 0) void this.drainRetainOutbox({ all: true });
+	}
+
+	private ensureRetainDrainTimer(): void {
+		if (this.retainDrainTimer !== null) return;
+		this.retainDrainTimer = setInterval(() => {
+			void this.drainRetainOutbox();
+		}, this.config.retainOutbox.drainMs);
+		this.retainDrainTimer.unref();
+	}
+
+	/**
+	 * One outbox pass: serial, one plane call per entry, skipped by the outbox
+	 * while the breaker is open. `all` ignores the backoff schedule — the
+	 * recovery path and tests use it; the timer and shutdown replay due entries.
+	 */
+	drainRetainOutbox(options: { all?: boolean } = {}): Promise<void> {
+		return this.retainOutbox.drain((entry) => this.deliverParkedRetain(entry), options);
+	}
+
+	/**
+	 * Replay one parked forward. The entry is re-read by id so the body sent is
+	 * the body in force: gone or superseded means the parked copy is stale and
+	 * is dropped without a word (its replacement had its own forward). An index
+	 * read failure is transient — it costs an attempt, never the entry.
+	 */
+	private async deliverParkedRetain(parked: RetainOutboxEntry): Promise<RetainDeliveryOutcome> {
+		const hindsight = hindsightFromEnv();
+		if (!hindsight || !this.index) return "gone";
+		let current: MemoryEntry | null;
+		try {
+			current = await this.index.readEntry(parked.entry_id);
+		} catch {
+			return { transient: "index-unreachable" };
+		}
+		if (!current || current.superseded_by !== undefined) return "gone";
+		const outcome = await replayRetain(this.retainDeps(hindsight, "replay"), {
+			entry: current,
+			writer: parked.surface,
+			bank: parked.bank,
+			documentId: parked.document_id,
+			...(parked.session_id !== undefined ? { sessionId: parked.session_id } : {}),
+		});
+		if (outcome.forwarded) {
+			await this.cache.bump(MEMORY_GENERATION_KEY).catch(() => undefined);
+			return "delivered";
+		}
+		if (outcome.queued === true) return { transient: outcome.reason ?? "retain-network" };
+		return "permanent";
 	}
 
 	/**

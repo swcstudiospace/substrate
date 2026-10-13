@@ -292,6 +292,15 @@ export function clearEnsuredBanks(): void {
 	ensuredBanks.clear();
 }
 
+/**
+ * Forget one ensured bank, so the next retain re-runs `ensureBank`. Called
+ * when a retain answers 404 (uplift-2 R3): the bank this process pinned was
+ * deleted or renamed out of band, and a cached "ensured" would 404 forever.
+ */
+export function forgetEnsuredBank(config: HindsightConfig, bank: string): void {
+	ensuredBanks.delete(`${config.url} ${bank}`);
+}
+
 function extractionMode(body: unknown): string | null {
 	if (body === null || typeof body !== "object" || !("config" in body)) return null;
 	const nested = body.config;
