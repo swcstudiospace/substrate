@@ -8,7 +8,7 @@
  */
 import { afterAll, describe, expect, test } from "bun:test";
 import net, { type AddressInfo } from "node:net";
-import { BreakerOpenError, CircuitBreaker, findCounter, sumCounter, type MetricSnapshot } from "@substrate/observability";
+import { BreakerOpenError, CircuitBreaker, findCounter, sumCounter, type MetricSnapshot, type PlaneSample } from "@substrate/observability";
 import {
 	CACHE_CONNECT_COOLDOWN_MS,
 	CACHE_TTL,
@@ -1251,6 +1251,55 @@ describe("Bun RedisClient", () => {
 		await expect(gated.get("k")).rejects.toBeInstanceOf(BreakerOpenError);
 		// The breaker refused before any socket was opened, so no new cooldown started.
 		expect(gated.cooldownUntil?.()).toBeNull();
+	});
+
+	test("a connected server that stops replying is a gate timeout, and the connection is dropped", async () => {
+		// Greptile round 1: the command deadline used to sit outside `callPlane`, so a
+		// wedged server left the command pending — the breaker saw nothing and the
+		// same dead connection was reused, costing every later request a timeout.
+		const store = new Map<string, string>();
+		let stall = false;
+		let connections = 0;
+		const server = net.createServer((socket) => {
+			connections += 1;
+			let pending = "";
+			socket.on("data", (buf) => {
+				pending += buf.toString("utf8");
+				const taken = takeCommands(store, pending);
+				pending = taken.rest;
+				// HELLO is always answered so the connect completes; later commands stall.
+				if (taken.answer.length > 0 && (!stall || taken.answer === hello)) socket.write(taken.answer);
+			});
+			socket.on("error", () => {});
+		});
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		const port = (server.address() as AddressInfo).port;
+		try {
+			const samples: PlaneSample[] = [];
+			const breaker = new CircuitBreaker("cache", { failureThreshold: 2 }, () => 0);
+			const redis = bunRedis(`redis://127.0.0.1:${port}`, {
+				gate: { plane: "cache", breaker, observe: (sample) => samples.push(sample) },
+				commandTimeoutMs: 30,
+				cooldownMs: 0,
+			});
+			expect(await redis.get("k")).toBeNull();
+			expect(connections).toBe(1);
+
+			stall = true;
+			const started = Date.now();
+			await expect(redis.get("k")).rejects.toThrow(/timed out/);
+			expect(Date.now() - started).toBeLessThan(500);
+			expect(samples.map((sample) => `${sample.op}:${sample.outcome}`)).toEqual(["connect:ok", "get:ok", "get:timeout"]);
+			expect(breaker.snapshot().failures).toBe(1);
+
+			// The wedged connection was discarded: the next call opens a fresh socket.
+			stall = false;
+			expect(await redis.get("k")).toBeNull();
+			expect(connections).toBe(2);
+			expect(breaker.state()).toBe("closed");
+		} finally {
+			server.close();
+		}
 	});
 });
 

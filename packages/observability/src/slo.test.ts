@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { METRIC, SubstrateInstruments } from "./instruments.ts";
-import { DEFAULT_THRESHOLDS, PLANE_WINDOW_MS, PlaneWindow, breaches, evaluatePlaneSlos, evaluateSlos, sloCatalogue, type PlaneSloResult } from "./slo.ts";
+import { DEFAULT_THRESHOLDS, PLANE_BUCKET_MS, PLANE_WINDOW_MS, PlaneWindow, breaches, evaluatePlaneSlos, evaluateSlos, sloCatalogue, type PlaneSloResult } from "./slo.ts";
 import { BURN_MIN_SPAN_MS, BURN_WINDOW_MS, type BurnResult, BurnLedger, evaluateBurnSlos, loadBurnThresholds } from "./burn.ts";
 
 function slo(results: ReturnType<typeof evaluateSlos>, id: string) {
@@ -533,18 +533,65 @@ describe("the per-plane availability objectives (uplift-2 R2)", () => {
 		);
 	});
 
-	test("same-second readings coalesce, so a fast poller does not fill the ring", () => {
-		// A bucket holds the newest reading of its second (as `BurnLedger` does), and
-		// the answer is newest − oldest-in-window. So the 500 ms reading replaces the
-		// 0 ms one as the base, and the 1600 ms reading replaces the 1500 ms one as
-		// the head: ok 3−2, total 4−2, span 1600−500.
-		const window = new PlaneWindow();
-		expect(window.observe("greptime", 1, 1, 0).samples).toBe(1);
-		expect(window.observe("greptime", 2, 2, 500).samples).toBe(1);
-		expect(window.observe("greptime", 3, 3, 1500)).toEqual({ ok: 1, total: 1, spanMs: 1000, samples: 2 });
-		expect(window.observe("greptime", 3, 4, 1600)).toEqual({ ok: 1, total: 2, spanMs: 1100, samples: 2 });
-		// Readings older than an hour relative to the newest drop; the oldest kept one is the base.
-		expect(window.observe("greptime", 10, 10, 1600 + PLANE_WINDOW_MS)).toEqual({ ok: 7, total: 6, spanMs: PLANE_WINDOW_MS, samples: 2 });
+	test("same-bucket readings coalesce, so a fast poller does not fill the ring", () => {
+		// A bucket keeps its first reading as the baseline and its newest as the
+		// head; the answer is head − baseline of the oldest kept bucket. With 1 s
+		// buckets here: the 500 ms reading joins the 0 ms bucket (baseline stays
+		// 1/1), the 1600 ms reading replaces the 1500 ms head: ok 3−1, total 4−1.
+		const window = new PlaneWindow(PLANE_WINDOW_MS, 1000);
+		expect(window.observe("greptime", 1, 1, 0)).toEqual({ ok: 0, total: 0, spanMs: 0, samples: 1 });
+		expect(window.observe("greptime", 2, 2, 500)).toEqual({ ok: 1, total: 1, spanMs: 500, samples: 1 });
+		expect(window.observe("greptime", 3, 3, 1500)).toEqual({ ok: 2, total: 2, spanMs: 1500, samples: 2 });
+		expect(window.observe("greptime", 3, 4, 1600)).toEqual({ ok: 2, total: 3, spanMs: 1600, samples: 2 });
+		// A bucket leaves once its newest reading is older than the window; the
+		// next bucket's first reading becomes the baseline.
+		expect(window.observe("greptime", 10, 10, 1600 + PLANE_WINDOW_MS)).toEqual({ ok: 7, total: 7, spanMs: PLANE_WINDOW_MS + 100, samples: 2 });
 		expect(window.observe("greptime", 11, 12, 2601 + PLANE_WINDOW_MS)).toEqual({ ok: 1, total: 2, spanMs: 1001, samples: 2 });
+	});
+
+	test("two readings inside one bucket still judge: a fresh process read twice within 10 s", () => {
+		// Greptile round 1 regression: with the newest reading as the bucket's
+		// baseline, the second reading collapsed to zero calls and `insufficient-data`.
+		const window = new PlaneWindow();
+		expect(window.observe("index", 0, 0, 0).spanMs).toBe(0);
+		expect(window.observe("index", 9, 10, 1000)).toEqual({ ok: 9, total: 10, spanMs: 1000, samples: 1 });
+	});
+
+	test("the window covers the hour whatever the scrape rate (Greptile round 1)", () => {
+		// Default buckets are 10 s, so an hour is 360 of them. A 1 Hz poller for 61
+		// minutes used to keep eight minutes of history under a count cap; now a
+		// failure burst in the first 30 s is still judged 59 minutes later and gone
+		// only once it is older than the hour.
+		expect(PLANE_BUCKET_MS).toBe(10_000);
+		const window = new PlaneWindow();
+		let ok = 0;
+		let total = 0;
+		let reading = window.observe("hindsight", ok, total, 0);
+		for (let second = 1; second <= 61 * 60; second++) {
+			// One call a second, failing for the first 30 s only.
+			total += 1;
+			if (second > 30) ok += 1;
+			reading = window.observe("hindsight", ok, total, second * 1000);
+			if (second === 59 * 60) {
+				// Baseline: bucket 0's first reading (second 0); 355 buckets kept.
+				expect(reading.samples).toBe(355);
+				expect(reading.spanMs).toBe(59 * 60 * 1000);
+				expect(reading.total - reading.ok).toBe(30);
+			}
+		}
+		// 61 minutes in: bucket 5 (newest reading at 59 s) has rolled off; the
+		// baseline is bucket 6's first reading (second 60, after the burst).
+		expect(reading.samples).toBe(361);
+		expect(reading.spanMs).toBe(PLANE_WINDOW_MS);
+		expect(reading.total - reading.ok).toBe(0);
+		expect(reading.total).toBe(3600);
+
+		// A slow poller covers the same hour with fewer readings.
+		const slow = new PlaneWindow();
+		let last = slow.observe("ragflow", 0, 0, 0);
+		for (let minute = 1; minute <= 61; minute++) last = slow.observe("ragflow", minute * 60, minute * 60, minute * 60_000);
+		expect(last.samples).toBe(61);
+		expect(last.spanMs).toBe(PLANE_WINDOW_MS);
+		expect(last.total).toBe(3600);
 	});
 });

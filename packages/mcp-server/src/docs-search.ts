@@ -10,15 +10,23 @@
  *
  * uplift-2 R6: the dataset list comes from an injected `DatasetListSource`
  * (the service's 60 s cache) instead of one `GET /datasets` per search; the
- * three documented retrieval knobs travel with every retrieval; and a
- * chunk that carries no `source_url` — the reference documents none on
- * retrieval chunks — is cited from the ingest record of its document id
- * (`sourceUrlOf`) before falling back to `dataset:<name>`. The cached
- * answer itself lives in the service (`docs-search` cache class), keyed by
- * the pins, so a refresh invalidates it.
+ * three documented retrieval knobs travel with every retrieval; and a chunk
+ * is cited from the ingest record of its document id (`provenanceOf`):
+ * its source URL when the chunk carries none (the reference documents no
+ * metadata on retrieval chunks), and — Greptile round 1 — its own commit.
+ * The commit resolution order is: the document's recorded commit; a
+ * recorded document uploaded without one → `dataset-pin:<name>:unpinned`
+ * (never the dataset's newest pin, which that document may predate); a
+ * document the records never uploaded → the dataset pin; neither →
+ * `dataset-pin:<name>:unpinned`. With the prune off, retrieval can return a
+ * replaced document, and this is what keeps it from being stamped with the
+ * newest commit. The cached answer itself lives in the service
+ * (`docs-search` cache class), keyed by the pins, so a refresh invalidates
+ * it.
  */
 import { randomUUID } from "node:crypto";
 import type { DatasetListSource } from "./docs-datasets.ts";
+import type { DocumentProvenance } from "./docs-ingest.ts";
 import { listDatasets, retrieveChunks, type FetchLike, type RagflowChunk, type RagflowConfig, type RetrievalKnobs } from "./planes/ragflow.ts";
 import { redact, redactValue } from "./redact.ts";
 import type { EventInput, Surface } from "./types.ts";
@@ -78,8 +86,8 @@ export interface SearchDeps {
 	datasets?: DatasetListSource;
 	/** The documented retrieval tuning; RAGFlow's defaults when omitted (uplift-2 R6). */
 	retrieval?: RetrievalKnobs;
-	/** The ingest record's source URL for a document id, when the chunk carries none (uplift-2 R6). */
-	sourceUrlOf?: (documentId: string) => string | undefined;
+	/** The ingest record of a document id — source URL and the commit it was uploaded under (uplift-2 R6). */
+	provenanceOf?: (documentId: string) => DocumentProvenance | undefined;
 }
 
 function failed(deps: SearchDeps, sessionId: string, reason: string): Promise<SearchReply> {
@@ -109,15 +117,18 @@ function cite(
 	pin: DatasetPin | undefined,
 	markPinAge: boolean,
 	nowMs: number,
-	sourceUrlOf: ((documentId: string) => string | undefined) | undefined,
+	provenanceOf: ((documentId: string) => DocumentProvenance | undefined) | undefined,
 ): SearchCitation {
 	const age = markPinAge ? pinAgeMs(pin, nowMs) : undefined;
-	const recorded = chunk.source_url ?? (chunk.document_id !== undefined ? sourceUrlOf?.(chunk.document_id) : undefined);
+	const record = chunk.document_id !== undefined ? provenanceOf?.(chunk.document_id) : undefined;
+	const sourceUrl = chunk.source_url ?? record?.source_url;
+	const unpinned = `dataset-pin:${datasetName}:unpinned`;
+	const commit = record !== undefined ? (record.commit ?? unpinned) : pin !== undefined ? pin.commit : unpinned;
 	return {
 		title: redact(chunk.document_name),
-		source_url: recorded !== undefined ? redact(recorded) : `dataset:${datasetName}`,
+		source_url: sourceUrl !== undefined ? redact(sourceUrl) : `dataset:${datasetName}`,
 		heading_path: chunk.heading_path ? redact(chunk.heading_path) : "",
-		commit: pin !== undefined ? pin.commit : `dataset-pin:${datasetName}:unpinned`,
+		commit,
 		snippet: redactValue(chunk.content).slice(0, SNIPPET_CAP),
 		score: chunk.score ?? 0,
 		document_id: chunk.document_id ?? "",
@@ -150,7 +161,7 @@ export async function searchDocs(deps: SearchDeps, question: string): Promise<Se
 		ids.push(dataset.id);
 		for (const chunk of outcome.chunks) {
 			const degraded = deps.degradedDatasets?.includes(dataset.name) ?? false;
-			citations.push(cite(chunk, dataset.name, deps.pins?.[dataset.id], degraded, deps.nowMs ?? Date.now(), deps.sourceUrlOf));
+			citations.push(cite(chunk, dataset.name, deps.pins?.[dataset.id], degraded, deps.nowMs ?? Date.now(), deps.provenanceOf));
 		}
 	}
 	citations.sort((left, right) => right.score - left.score);

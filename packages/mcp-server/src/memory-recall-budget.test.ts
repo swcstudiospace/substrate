@@ -98,7 +98,7 @@ describe("recall budget", () => {
 });
 
 describe("cross-bank dedupe", () => {
-	test("the same document from two banks collapses to its best score, keeping that bank", () => {
+	test("the same memory from two banks collapses to its best score, keeping that bank", () => {
 		const scored = [
 			{ bank: "sub-cursor", hit: hit("c1", "fence the lease", 0.4, "mwd_same") },
 			{ bank: "sub-hermes", hit: hit("h1", "fence the lease", 0.8, "mwd_same") },
@@ -110,15 +110,29 @@ describe("cross-bank dedupe", () => {
 		]);
 	});
 
-	test("hits without a document id dedupe on text, and a tie keeps the earlier bank", () => {
+	test("one document id in two banks with different text is two memories, never one (Greptile round 1)", () => {
+		// `retainDocumentId` omits the writer: cursor's and hermes's different
+		// facts about one subject share an id across their banks.
 		const scored = [
-			{ bank: "sub-cursor", hit: hit("c1", "same words", 0.5) },
-			{ bank: "sub-hermes", hit: hit("h1", "same words", 0.5) },
-			{ bank: "sub-hermes", hit: hit("h2", "same words", 0.2, "mwd_keyed") },
+			{ bank: "sub-cursor", hit: hit("c1", "cursor says fence first", 0.4, "subj_shared") },
+			{ bank: "sub-hermes", hit: hit("h1", "hermes says rotate first", 0.8, "subj_shared") },
 		];
 		expect(dedupeHits(scored).map(({ bank, hit: found }) => [bank, found.id])).toEqual([
 			["sub-cursor", "c1"],
-			["sub-hermes", "h2"],
+			["sub-hermes", "h1"],
+		]);
+	});
+
+	test("within one bank a document id collapses; across banks identical text collapses and a tie keeps the earlier bank", () => {
+		const scored = [
+			{ bank: "sub-cursor", hit: hit("c1", "same words", 0.5) },
+			{ bank: "sub-hermes", hit: hit("h1", "same words", 0.5) },
+			{ bank: "sub-hermes", hit: hit("h2", "other words", 0.2, "mwd_keyed") },
+			{ bank: "sub-hermes", hit: hit("h3", "other words, newer copy", 0.7, "mwd_keyed") },
+		];
+		expect(dedupeHits(scored).map(({ bank, hit: found }) => [bank, found.id])).toEqual([
+			["sub-cursor", "c1"],
+			["sub-hermes", "h3"],
 		]);
 	});
 

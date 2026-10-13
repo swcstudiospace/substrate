@@ -448,6 +448,71 @@ describe("RetainOutbox on disk", () => {
 		expect(outbox.size()).toBe(0);
 		expect(existsSync(join(dir, "nothing-yet.jsonl"))).toBe(false);
 	});
+
+	test("a failed save turns durable off and warns once; the next good save turns it back on (Greptile round 1)", () => {
+		const dir = tempDir();
+		// A regular file where the directory should be: every mkdir/append fails.
+		const blocker = join(dir, "blocker");
+		writeFileSync(blocker, "not a directory");
+		const path = join(blocker, "retain-outbox.jsonl");
+		const unsaved: string[] = [];
+		const outbox = new RetainOutbox({ path, now: clock().now, onUnsaved: (entry) => unsaved.push(entry.document_id) });
+		outbox.enqueue(candidate({ document_id: "a" }));
+		outbox.enqueue(candidate({ document_id: "b" }));
+		expect(outbox.durable).toBe(false);
+		expect(outbox.stats().durable).toBe(false);
+		expect(unsaved).toEqual(["a"]);
+		expect(outbox.size()).toBe(2);
+		// The disk comes back: the next save rewrites the whole queue, not just
+		// the newest line, and durability is restored without a second warning.
+		rmSync(blocker);
+		outbox.enqueue(candidate({ document_id: "c" }));
+		expect(outbox.durable).toBe(true);
+		expect(unsaved).toEqual(["a"]);
+		expect(readFileSync(path, "utf8").trim().split("\n").length).toBe(3);
+		expect(statSync(path).mode & 0o777).toBe(0o600);
+	});
+
+	test("the attempt ceiling is checked before any replay (Greptile round 1)", async () => {
+		const time = clock();
+		const drops: Array<[string, RetainDropCause]> = [];
+		let replays = 0;
+		const deliver = async () => {
+			replays += 1;
+			return { transient: "retain-server" };
+		};
+		// One attempt: the live try was it. Dropped at enqueue, never replayed.
+		const one = new RetainOutbox({ maxAttempts: 1, now: time.now, random: () => 0.5, onDrop: (entry, cause) => drops.push([entry.document_id, cause]) });
+		one.enqueue(candidate({ document_id: "once" }));
+		expect(one.size()).toBe(0);
+		await one.drain(deliver, { all: true });
+		expect(replays).toBe(0);
+		expect(drops).toEqual([["once", "exhausted"]]);
+		// Two attempts: exactly one replay, then the warning.
+		const two = new RetainOutbox({ maxAttempts: 2, now: time.now, random: () => 0.5, onDrop: (entry, cause) => drops.push([entry.document_id, cause]) });
+		two.enqueue(candidate({ document_id: "twice" }));
+		await two.drain(deliver, { all: true });
+		await two.drain(deliver, { all: true });
+		expect(replays).toBe(1);
+		expect(two.size()).toBe(0);
+		expect(drops).toEqual([
+			["once", "exhausted"],
+			["twice", "exhausted"],
+		]);
+		// Hydrated from a file written under a higher ceiling: the spent entry
+		// gets its warning on the first pass and no request.
+		const dir = tempDir();
+		const path = join(dir, "retain-outbox.jsonl");
+		const older = new RetainOutbox({ path, maxAttempts: 10, now: time.now, random: () => 0.5 });
+		older.enqueue(candidate({ document_id: "hydrated" }));
+		await older.drain(deliver, { all: true });
+		expect(replays).toBe(2);
+		const tighter = new RetainOutbox({ path, maxAttempts: 2, now: time.now, random: () => 0.5, onDrop: (entry, cause) => drops.push([entry.document_id, cause]) });
+		await tighter.drain(deliver, { all: true });
+		expect(replays).toBe(2);
+		expect(drops.at(-1)).toEqual(["hydrated", "exhausted"]);
+		expect(readFileSync(path, "utf8")).toBe("");
+	});
 });
 
 /** The Hindsight env the service reads at call time, restored afterwards. */
@@ -604,6 +669,76 @@ describe("Substrate retain outbox", () => {
 			expect(durable.warnings).toEqual([]);
 			expect(durable.substrate.retainOutboxStats()).toMatchObject({ size: 1, durable: true });
 			expect(readFileSync(path, "utf8").trim().split("\n").length).toBe(1);
+		} finally {
+			restore();
+		}
+	});
+
+	test("a replay queued behind a live forward for the same document cannot land before it (Greptile round 1)", async () => {
+		const restore = hindsightEnv();
+		try {
+			const fake = new HindsightFake();
+			const store = new FakeStore();
+			// A gate on the retain POST only: the live forward of v2 stalls inside
+			// the plane while the replay of v1 falls due behind it.
+			let gate: Promise<void> | null = null;
+			const gated: FetchLike = async (input, init) => {
+				const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+				if (gate !== null && init?.method === "POST" && url.endsWith("/memories")) await gate;
+				return fake.fetch(input, init);
+			};
+			clearEnsuredBanks();
+			const warnings: Array<Record<string, unknown>> = [];
+			const substrate = new Substrate(
+				loadConfig({ SUBSTRATE_MEMORY_GRANTS: GRANTS }),
+				{ index: store as never, greptime: null, hindsightFetch: gated },
+				{
+					emitted: (sample) => {
+						if (sample.kind === "warning" && sample.payload.action === "memory.retain") warnings.push(sample.payload);
+					},
+				},
+			);
+			fake.failRetainWith = 503;
+			await writeOne(substrate, "v1 of the rule");
+			expect(substrate.retainOutboxStats().size).toBe(1);
+			fake.failRetainWith = null;
+
+			const { promise: opened, resolve: open } = Promise.withResolvers<void>();
+			gate = opened;
+			const v2 = await substrate.writeMemory({ scope: "graph:ut-1", kind: "fact", subject: "handoff-rule", text: "v2 of the rule", writer: "cursor", source_event: "evt_e2e" });
+			expect(v2.outcome).toBe("accepted");
+			// The replay is due now and waits its turn in the document chain.
+			const replay = substrate.drainRetainOutbox({ all: true });
+			await substrate.drainPendingRetains(50);
+			expect(fake.retains.length).toBe(0);
+			open();
+			await replay;
+			await substrate.drainPendingRetains(2000);
+			// v2 landed; the v1 replay found itself forgotten and sent nothing.
+			expect(fake.retains.map((retained) => retained.item.content)).toEqual(["v2 of the rule"]);
+			expect(fake.banks.get("sub-cursor")?.memories.map((memory) => memory.text)).toEqual(["v2 of the rule"]);
+			expect(substrate.retainOutboxStats().size).toBe(0);
+			expect(warnings).toEqual([]);
+		} finally {
+			restore();
+		}
+	});
+
+	test("an outbox whose save failed is abandoned with warnings at shutdown like a memory-only one (Greptile round 1)", async () => {
+		const restore = hindsightEnv();
+		try {
+			const dir = tempDir();
+			const blocker = join(dir, "blocker");
+			writeFileSync(blocker, "not a directory");
+			const fake = new HindsightFake();
+			fake.failRetainWith = 503;
+			const { substrate, warnings } = substrateWith(fake, new FakeStore(), { SUBSTRATE_RETAIN_OUTBOX_PATH: join(blocker, "retain-outbox.jsonl") });
+			await writeOne(substrate, "never reached the disk");
+			expect(substrate.retainOutboxStats()).toMatchObject({ size: 1, durable: false });
+			expect(warnings.map((payload) => payload.reason)).toEqual(["outbox-unsaved"]);
+			await substrate.drainPendingRetains(500, { abandon: true });
+			expect(warnings.map((payload) => payload.reason)).toEqual(["outbox-unsaved", "retain-server"]);
+			expect(substrate.retainOutboxStats().size).toBe(0);
 		} finally {
 			restore();
 		}

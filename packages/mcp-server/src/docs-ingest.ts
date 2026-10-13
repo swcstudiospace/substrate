@@ -34,6 +34,7 @@ import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
 	createVersionStore,
+	DATASET_VERSION_RETENTION,
 	DIRECT_DATASET_LIST,
 	versionsFromJson,
 	versionsToJson,
@@ -190,12 +191,49 @@ export type IngestOutcome =
 	| { ok: true; results: IngestPageResult[]; stripped_images: number }
 	| { ok: false; refused: true; reason: string; rules?: string[]; page?: string };
 
-/** A source URL's last ingest in one dataset, for hash idempotency. */
+/** A document this record's source URL once published, still on the plane unless pruned. */
+export interface SupersededDocument {
+	document_id: string;
+	/** The commit that upload carried, when the caller named one. */
+	commit?: string;
+}
+
+/**
+ * A source URL's last ingest in one dataset, for hash idempotency — and,
+ * per document, the commit that upload carried (uplift-2 R6, Greptile
+ * round 1): a citation names its own document's commit, never the
+ * dataset's newest pin. `superseded` lists earlier documents of the same
+ * source URL that were replaced but not pruned (the last five), so a
+ * chunk retrieval still returns from an older document cites that older
+ * commit.
+ */
 export interface IngestRecord {
 	sha: string;
 	dataset_id: string;
 	source_url: string;
 	document_id: string;
+	commit?: string;
+	superseded?: SupersededDocument[];
+}
+
+/** What a citation needs to know about a document id: its source URL and the commit it was uploaded under, if any. */
+export interface DocumentProvenance {
+	source_url: string;
+	commit?: string;
+}
+
+/**
+ * The provenance of a document id across the ingest records: the current
+ * document of a source URL, or one of its superseded, unpruned
+ * predecessors. Undefined for a document these records never uploaded.
+ */
+export function documentProvenance(seen: ReadonlyMap<string, IngestRecord>, documentId: string): DocumentProvenance | undefined {
+	for (const record of seen.values()) {
+		if (record.document_id === documentId) return { source_url: record.source_url, ...(record.commit !== undefined ? { commit: record.commit } : {}) };
+		const earlier = record.superseded?.find((entry) => entry.document_id === documentId);
+		if (earlier) return { source_url: record.source_url, ...(earlier.commit !== undefined ? { commit: earlier.commit } : {}) };
+	}
+	return undefined;
 }
 
 export interface IngestDeps {
@@ -422,7 +460,25 @@ export async function ingestDocs(deps: IngestDeps, input: IngestInput): Promise<
 						...(replacedPrior ? { superseded_document_id: replacedPrior.document_id } : {}),
 						...(prune ?? {}),
 					};
-					seen.set(key, { sha, dataset_id: dataset.id, source_url: sourceUrl, document_id: uploaded.document_id });
+					// The record keeps this upload's commit (only a named one — "unpinned"
+					// on the wire is not a commit) and, unless the prune just deleted it,
+					// the replaced document with its own commit, bounded to the last five.
+					const lineage: SupersededDocument[] = [
+						...(replacedPrior?.superseded ?? []),
+						...(replacedPrior && prune !== null && "pruned_document_id" in prune
+							? []
+							: replacedPrior
+								? [{ document_id: replacedPrior.document_id, ...(replacedPrior.commit !== undefined ? { commit: replacedPrior.commit } : {}) }]
+								: []),
+					].slice(-DATASET_VERSION_RETENTION);
+					seen.set(key, {
+						sha,
+						dataset_id: dataset.id,
+						source_url: sourceUrl,
+						document_id: uploaded.document_id,
+						...(input.commit !== undefined ? { commit: input.commit } : {}),
+						...(lineage.length > 0 ? { superseded: lineage } : {}),
+					});
 					return { ok: true, result };
 				})();
 				locks.set(key, { task, sha });
@@ -506,7 +562,22 @@ export async function loadIngestRecords(
 		if (typeof record.sha !== "string" || typeof record.dataset_id !== "string" || typeof record.source_url !== "string" || typeof record.document_id !== "string") {
 			continue;
 		}
-		records.set(key, { sha: record.sha, dataset_id: record.dataset_id, source_url: record.source_url, document_id: record.document_id });
+		const superseded: SupersededDocument[] = [];
+		if ("superseded" in record && Array.isArray(record.superseded)) {
+			for (const entry of record.superseded) {
+				if (entry === null || typeof entry !== "object" || !("document_id" in entry) || typeof entry.document_id !== "string") continue;
+				const commit = "commit" in entry && typeof entry.commit === "string" ? entry.commit : undefined;
+				superseded.push({ document_id: entry.document_id, ...(commit !== undefined ? { commit } : {}) });
+			}
+		}
+		records.set(key, {
+			sha: record.sha,
+			dataset_id: record.dataset_id,
+			source_url: record.source_url,
+			document_id: record.document_id,
+			...("commit" in record && typeof record.commit === "string" ? { commit: record.commit } : {}),
+			...(superseded.length > 0 ? { superseded } : {}),
+		});
 	}
 	const versions = "versions" in parsed ? versionsFromJson(parsed.versions) : createVersionStore();
 	return { records, versions };

@@ -253,7 +253,9 @@ describe("durable versions and real pins", () => {
 		const dir = mkdtempSync(join(tmpdir(), "substrate-docs-state-"));
 		try {
 			const env = { RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", SUBSTRATE_DOCS_STATE_FILE: join(dir, "docs-ingest.json") };
+			// `Substrate` polls at the production cadence (2 s between polls): one poll keeps the test inside the runner's budget.
 			const fake = new RagflowFake();
+			fake.parseDonePolls = 1;
 			const first = new Substrate(loadConfig(env), { index: null, greptime: null, ragflowFetch: fake.fetch });
 			const before = await first.searchDocs({ question: "who reads RAGFlow?", datasets: ["agent-substrate"] }, "omp");
 			expect(before.chunks[0]?.commit).toBe("dataset-pin:agent-substrate:unpinned");
@@ -281,13 +283,94 @@ describe("durable versions and real pins", () => {
 		fake.chunks["ds-berlin-agent-substrate"] = [{ content: "clean", document_name: "a.md", document_id: "doc-rec", chunk_id: "c", source_url: "", score: 0.5 }];
 		const { emit } = eventSink();
 		const reply = await searchDocs(
-			{ config: CONFIG, emit, fetchImpl: fake.fetch, datasetNames: ["agent-substrate"], sourceUrlOf: (id) => (id === "doc-rec" ? "https://example.com/sk-proj-abcdefghij1234567890" : undefined) },
+			{
+				config: CONFIG,
+				emit,
+				fetchImpl: fake.fetch,
+				datasetNames: ["agent-substrate"],
+				provenanceOf: (id) => (id === "doc-rec" ? { source_url: "https://example.com/sk-proj-abcdefghij1234567890", commit: "c-doc" } : undefined),
+			},
 			"q",
 		);
 		expect(reply.chunks[0]?.source_url).toStartWith("https://example.com/");
 		expect(reply.chunks[0]?.source_url).not.toContain("sk-proj-");
+		expect(reply.chunks[0]?.commit).toBe("c-doc");
 		const unknown = await searchDocs({ config: CONFIG, emit, fetchImpl: fake.fetch, datasetNames: ["agent-substrate"] }, "q");
 		expect(unknown.chunks[0]?.source_url).toBe("dataset:agent-substrate");
+	});
+
+	test("Greptile round 1: a citation names its own document's commit, never the dataset's newest pin", async () => {
+		// The fake serves whatever `chunks` holds: after each ingest, point the
+		// dataset's chunks at the documents the plane actually holds, as a
+		// retrieval over an unpruned corpus would.
+		const fake = new RagflowFake();
+		fake.parseDonePolls = 1;
+		const chunkFor = (documentId: string) => ({ content: `from ${documentId}`, document_name: "data-planes.md", document_id: documentId, chunk_id: `chunk-${documentId}`, source_url: "", score: 0.5 });
+		const substrate = new Substrate(loadConfig({ RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k" }), { index: null, greptime: null, ragflowFetch: fake.fetch });
+		const old = await substrate.ingestDocs({ dataset: "agent-substrate", commit: "c-old", pages: [PAGE] }, "omp");
+		if (!old.ok) throw new Error(old.reason);
+		const oldId = old.results[0]?.document_id ?? "";
+		const recordedOld = await substrate.recordDocsVersion({ dataset: "agent-substrate", commit: "c-old", content_sha256: "sha-old" }, "omp");
+		if (!recordedOld.ok) throw new Error(recordedOld.reason);
+		// Prune is off (default): the replaced document stays on the plane.
+		const fresh = await substrate.ingestDocs({ dataset: "agent-substrate", commit: "c-new", pages: [{ ...PAGE, body: `${PAGE.body} More.` }] }, "omp");
+		if (!fresh.ok) throw new Error(fresh.reason);
+		const newId = fresh.results[0]?.document_id ?? "";
+		expect(fresh.results[0]?.superseded_document_id).toBe(oldId);
+		const recordedNew = await substrate.recordDocsVersion({ dataset: "agent-substrate", commit: "c-new", content_sha256: "sha-new" }, "omp");
+		if (!recordedNew.ok) throw new Error(recordedNew.reason);
+		fake.chunks["ds-berlin-agent-substrate"] = [chunkFor(oldId), chunkFor(newId), chunkFor("doc-unknown")];
+
+		const reply = await substrate.searchDocs({ question: "which commit?", datasets: ["agent-substrate"] }, "omp");
+		const byId = Object.fromEntries(reply.chunks.map((citation) => [citation.document_id, citation.commit]));
+		// The replaced-but-unpruned document cites its own, older commit.
+		expect(byId[oldId]).toBe("c-old");
+		// The new document cites the new commit.
+		expect(byId[newId]).toBe("c-new");
+		// A document the records never uploaded falls back to the dataset pin.
+		expect(byId["doc-unknown"]).toBe("c-new");
+		// Both recorded documents carry the ingest record's source URL.
+		expect(reply.chunks.filter((citation) => citation.document_id !== "doc-unknown").every((citation) => citation.source_url === PAGE.source_url)).toBe(true);
+
+		// A direct ingest without a commit: the record has none, and the
+		// citation says so rather than borrowing the dataset's newest pin.
+		const bare = await substrate.ingestDocs({ dataset: "agent-substrate", pages: [{ ...PAGE, source_url: "https://example.com/agent-substrate/bare", body: "bare" }] }, "omp");
+		if (!bare.ok) throw new Error(bare.reason);
+		const bareId = bare.results[0]?.document_id ?? "";
+		fake.chunks["ds-berlin-agent-substrate"] = [chunkFor(bareId)];
+		const bareReply = await substrate.searchDocs({ question: "which commit?", datasets: ["agent-substrate"] }, "omp");
+		expect(bareReply.chunks[0]?.commit).toBe("dataset-pin:agent-substrate:unpinned");
+	});
+
+	test("the lineage of replaced documents round-trips the state file, and a prune drops the pruned one", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "substrate-docs-state-"));
+		try {
+			const file = join(dir, "docs-ingest.json");
+			const env = { RAGFLOW_URL: "http://ragflow.test", RAGFLOW_API_KEY: "k", SUBSTRATE_DOCS_STATE_FILE: file };
+			const fake = new RagflowFake();
+			fake.parseDonePolls = 1;
+			const first = new Substrate(loadConfig(env), { index: null, greptime: null, ragflowFetch: fake.fetch });
+			const v1 = await first.ingestDocs({ dataset: "agent-substrate", commit: "c1", pages: [PAGE] }, "omp");
+			const v2 = await first.ingestDocs({ dataset: "agent-substrate", commit: "c2", pages: [{ ...PAGE, body: "two" }] }, "omp");
+			if (!v1.ok || !v2.ok) throw new Error("expected both ingests");
+			const loaded = await loadIngestRecords(file);
+			const record = [...loaded.records.values()][0];
+			expect(record).toMatchObject({ document_id: v2.results[0]?.document_id, commit: "c2", superseded: [{ document_id: v1.results[0]?.document_id, commit: "c1" }] });
+			// A new process resolves the old document from the hydrated lineage.
+			const second = new Substrate(loadConfig(env), { index: null, greptime: null, ragflowFetch: fake.fetch });
+			fake.chunks["ds-berlin-agent-substrate"] = [{ content: "x", document_name: "d", document_id: v1.results[0]?.document_id ?? "", chunk_id: "c", source_url: "", score: 1 }];
+			const reply = await second.searchDocs({ question: "q", datasets: ["agent-substrate"] }, "omp");
+			expect(reply.chunks[0]?.commit).toBe("c1");
+			// With the prune on, the deleted predecessor is not kept in the lineage.
+			const pruning = new Substrate(loadConfig({ ...env, SUBSTRATE_DOCS_PRUNE_SUPERSEDED: "1" }), { index: null, greptime: null, ragflowFetch: fake.fetch });
+			const v3 = await pruning.ingestDocs({ dataset: "agent-substrate", commit: "c3", pages: [{ ...PAGE, body: "three" }] }, "omp");
+			if (!v3.ok) throw new Error(v3.reason);
+			expect(v3.results[0]?.pruned_document_id).toBe(v2.results[0]?.document_id);
+			const after = await loadIngestRecords(file);
+			expect([...after.records.values()][0]).toMatchObject({ commit: "c3", superseded: [{ document_id: v1.results[0]?.document_id, commit: "c1" }] });
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });
 

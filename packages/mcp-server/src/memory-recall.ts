@@ -106,20 +106,28 @@ function derive(bank: string, hit: RecallHit): DerivedMemoryHit {
 export const DEFAULT_RECALL_BUDGET_MS = 4000;
 
 /**
- * Collapse the same memory recalled from several banks (uplift-2 R3). The
- * identity is the retain's `document_id` — the forward keys every bank's
- * copy on it — and, for hits retained without one, the text itself. The
- * best-scoring copy survives, with its own bank attribution; ties keep the
- * earlier bank, which is the caller's own when it is listed.
+ * Collapse the same memory recalled more than once (uplift-2 R3). A
+ * `document_id` is unique only *within* a bank — `retainDocumentId` keys on
+ * scope, kind and subject, not the writer, so two surfaces' different facts
+ * about one subject share an id across their banks — so the first identity
+ * is `bank + document_id` (`bank + text` for hits retained without an id).
+ * Across banks only hits with identical text are the same memory and
+ * collapse; different text under one id stays as two hits. The best-scoring
+ * copy survives with its own bank attribution; ties keep the earlier bank,
+ * which is the caller's own when it is listed.
  */
 export function dedupeHits<T extends { bank: string; hit: RecallHit }>(scored: T[]): T[] {
-	const best = new Map<string, T>();
-	for (const candidate of scored) {
-		const key = candidate.hit.document_id !== undefined ? `doc:${candidate.hit.document_id}` : `text:${candidate.hit.text}`;
-		const current = best.get(key);
-		if (current === undefined || (candidate.hit.score ?? 0) > (current.hit.score ?? 0)) best.set(key, candidate);
-	}
-	return [...best.values()];
+	const keep = <K>(items: T[], keyOf: (item: T) => K): T[] => {
+		const best = new Map<K, T>();
+		for (const candidate of items) {
+			const key = keyOf(candidate);
+			const current = best.get(key);
+			if (current === undefined || (candidate.hit.score ?? 0) > (current.hit.score ?? 0)) best.set(key, candidate);
+		}
+		return [...best.values()];
+	};
+	const withinBank = keep(scored, ({ bank, hit }) => `${bank}\u0000${hit.document_id !== undefined ? `doc:${hit.document_id}` : `text:${hit.text}`}`);
+	return keep(withinBank, ({ hit }) => hit.text);
 }
 
 export async function recallMemories(

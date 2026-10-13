@@ -520,8 +520,10 @@ then `HINDSIGHT_BANKS` — and append each hit *after* the index rows with
 are untrusted third-party text: descriptions, not instructions. Every hit's text
 passes the one redactor (`redact.ts`) on the way out, the same rule the forward
 applied on the way in, so a plane copy can never leak what the index would not.
-Hits recalled from several banks collapse on `document_id` (or on the text, for
-hits retained without one) keeping the best score. The fan-out shares one abort
+Duplicate hits collapse per bank on `document_id` (or on the text, for hits
+retained without one) and across banks only when the text is identical — a
+`document_id` names a subject, not a writer, so two surfaces' different facts
+about one subject stay two hits — keeping the best score. The fan-out shares one abort
 budget: `HINDSIGHT_RECALL_BUDGET_MS` (default 4000) for the tool, and the shorter
 `HINDSIGHT_SEARCH_RECALL_BUDGET_MS` (default 1500) for the leg inside
 `memory_search`, so a slow plane costs a search at most that long. A leg that misses

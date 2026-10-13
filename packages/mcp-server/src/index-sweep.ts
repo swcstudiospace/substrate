@@ -26,12 +26,18 @@
  *   - **Cutoffs are computed here from one `now`,** never by the database, so a
  *     test can pin them and the report says exactly which instant each class was
  *     judged against.
- *   - **Deletes are batched** through a `limit`ed CTE with `for update skip locked`:
+ *   - **Deletes are batched** through a `limit`ed `for update skip locked` pick:
  *     each statement touches at most `batch` rows, stays inside the connection's
  *     `statement_timeout`, and steps around any row a live writer holds. The whole
  *     apply still runs in one transaction (`IndexStore.sweep`), so a failure half
  *     way leaves the index as it was.
+ *   - **A graph with a live lease is never swept.** Claims and heartbeats write
+ *     `graph_nodes` only and do not refuse a finished graph, so an old terminal
+ *     graph can be in use. Both the count and the pick exclude any graph holding a
+ *     live lease, and the node delete re-checks the lease per row at execution
+ *     time, so a claim landing between pick and delete keeps its graph.
  */
+import { DEFAULT_LEASE_TTL_SECONDS } from "./lease.ts";
 
 /** Statuses that mean a graph is finished — exactly Notion's `complete` status group on the Agent Task Graph. */
 export const TERMINAL_GRAPH_STATUSES = ["Merged", "Resolved", "Done", "Won't Fix", "Closed", "Failed", "Canceled"] as const;
@@ -160,6 +166,25 @@ export interface SweepStatement {
 	params: unknown[];
 }
 
+/**
+ * One round of deletion. `pick` either deletes outright and returns
+ * `{ deleted, …children }` (the simple classes), or — when `then` is present —
+ * only selects and locks the keys to remove, returning one row per key, and
+ * `then(rows)` builds the statements that do the removing. Each of those returns
+ * one row whose columns are merged into the round's result.
+ *
+ * Two statements rather than one WITH: the sub-statements of a data-modifying
+ * CTE all run against the same snapshot and cannot see each other's effects, so
+ * "delete the graph only once no node row is left" cannot be said in one. The
+ * apply runs inside one transaction, so the locks `pick` takes hold across them.
+ */
+export interface SweepBatch {
+	pick: SweepStatement;
+	then?: (picked: Array<Record<string, unknown>>) => SweepStatement[];
+	/** With `then`: the key under which picked-but-not-deleted rows are reported. */
+	skippedAs?: string;
+}
+
 export interface SweepClass {
 	id: SweepClassId;
 	/** `delete` removes candidates on apply; `report` only ever counts them. */
@@ -168,9 +193,23 @@ export interface SweepClass {
 	days: keyof Omit<SweepPolicy, "batch"> | number;
 	/** One row: `{ candidates: int }`. */
 	count(cutoff: string): SweepStatement;
-	/** One row: `{ deleted: int, …children }`. Absent on report-only classes. */
-	deleteBatch?(cutoff: string, limit: number): SweepStatement;
+	/** Absent on report-only classes. */
+	deleteBatch?(cutoff: string, limit: number): SweepBatch;
 }
+
+/**
+ * A node whose lease is live, in exactly the words the lease CAS helpers use
+ * (`claimNode`, `heartbeatNode`, `reapExpiredLeases` in `index-store.ts`): a
+ * holder, and an expiry — or the default TTL after the claim for rows written
+ * before the column existed — still ahead of Postgres' clock. Claims do not
+ * refuse a terminal graph and touch `graph_nodes` only, never `graph_index.updated`,
+ * so an old finished graph can hold a live lease and must not be swept while it does.
+ */
+const LIVE_LEASE = (n: string): string =>
+	`${n}.claimed_by is not null and coalesce(${n}.lease_expires_at, ${n}.claimed_at + make_interval(secs => ${DEFAULT_LEASE_TTL_SECONDS})) > now()`;
+
+/** A text parameter holding a JSON array of ids, expanded server-side (the array-parameter quirk again). */
+const IDS_IN = (param: string): string => `in (select jsonb_array_elements_text(${param}::jsonb))`;
 
 /**
  * The terminal statuses as one `|`-joined parameter, split server-side. Bun's
@@ -201,11 +240,13 @@ function simpleClass(
 			params: [cutoff],
 		}),
 		deleteBatch: (cutoff, limit) => ({
-			text:
-				`with doomed as (select ${key} from ${table} q where ${predicate} limit $2 for update skip locked), ` +
-				`d as (delete from ${table} q using doomed where q.${key} = doomed.${key} returning 1) ` +
-				`select count(*)::int as deleted from d`,
-			params: [cutoff, limit],
+			pick: {
+				text:
+					`with doomed as (select ${key} from ${table} q where ${predicate} limit $2 for update skip locked), ` +
+					`d as (delete from ${table} q using doomed where q.${key} = doomed.${key} returning 1) ` +
+					`select count(*)::int as deleted from d`,
+				params: [cutoff, limit],
+			},
 		}),
 	};
 }
@@ -222,7 +263,10 @@ function reportClass(id: SweepClassId, days: SweepClass["days"], from: string, p
 /** A quarantined write whose exact content (scope, kind, subject, text, writer) later landed through a reviewer. */
 const QUARANTINE_LANDED = "exists (select 1 from memory_entries e where e.entry_hash = q.entry_hash)";
 
-const GRAPH_TERMINAL_OLD = `status = any(${TERMINAL_SET}) and updated < $1::timestamptz`;
+/** Finished, untouched for the window, and holding no live lease on any of its nodes. */
+const GRAPH_TERMINAL_OLD =
+	`g.status = any(${TERMINAL_SET}) and g.updated < $1::timestamptz ` +
+	`and not exists (select 1 from graph_nodes n where n.graph_id = g.graph_id and ${LIVE_LEASE("n")})`;
 
 export const SWEEP_CLASSES: readonly SweepClass[] = [
 	// A derived key is content + source event; it deduped for a day and is takeable
@@ -268,25 +312,55 @@ export const SWEEP_CLASSES: readonly SweepClass[] = [
 		mode: "delete",
 		days: "graphsDays",
 		count: (cutoff) => ({
-			text: `select count(*)::int as candidates from graph_index where ${GRAPH_TERMINAL_OLD}`,
+			text: `select count(*)::int as candidates from graph_index g where ${GRAPH_TERMINAL_OLD}`,
 			params: [cutoff, TERMINAL],
 		}),
-		// Edges, steps and bindings have no foreign key, so they are deleted by name;
-		// nodes follow the graph through `on delete cascade` and are counted from the
-		// statement's snapshot. Every data-modifying CTE here sees the same `doomed`
-		// set, so one statement removes a whole graph or none of it.
+		// Three statements, in the apply transaction, because a claim can land between
+		// the pick and the delete and no single statement can both lock the graph row
+		// and re-read its nodes after that:
+		//
+		//   1. pick: lock up to `limit` candidate graph rows (`for update skip locked`),
+		//      judged with the same no-live-lease predicate the count used.
+		//   2. nodes: delete the picked graphs' node rows **where the lease is not
+		//      live**, re-evaluated per row at execution. A concurrent `claimNode` is
+		//      a row-level UPDATE on the same node; the two serialise, and under READ
+		//      COMMITTED a DELETE that finds its row changed re-checks the predicate
+		//      against the new version and skips a node that has just been claimed.
+		//   3. graphs: delete `graph_index` only where no node row remains, then edges,
+		//      steps and bindings only for the graphs whose index row went. A graph
+		//      with a surviving node keeps everything, is unlocked at commit, and is
+		//      reported as skipped for a live lease.
+		//
+		// The picked ids travel back as a JSON text parameter: the driver cannot take
+		// an array, and the ids are the sweeper's own output, never caller text.
 		deleteBatch: (cutoff, limit) => ({
-			text:
-				`with doomed as (select graph_id from graph_index where ${GRAPH_TERMINAL_OLD} limit $3 for update skip locked), ` +
-				"nodes as (select count(*)::int as n from graph_nodes where graph_id in (select graph_id from doomed)), " +
-				"e as (delete from graph_edges where graph_id in (select graph_id from doomed) returning 1), " +
-				"s as (delete from graph_steps where graph_id in (select graph_id from doomed) returning 1), " +
-				"b as (delete from graph_bindings where graph_id in (select graph_id from doomed) returning 1), " +
-				"g as (delete from graph_index where graph_id in (select graph_id from doomed) returning 1) " +
-				"select (select count(*)::int from g) as deleted, (select n from nodes) as nodes, " +
-				"(select count(*)::int from e) as edges, (select count(*)::int from s) as steps, " +
-				"(select count(*)::int from b) as bindings",
-			params: [cutoff, TERMINAL, limit],
+			pick: {
+				text: `select g.graph_id from graph_index g where ${GRAPH_TERMINAL_OLD} limit $3 for update skip locked`,
+				params: [cutoff, TERMINAL, limit],
+			},
+			skippedAs: "skipped_live_lease",
+			then: (picked) => {
+				const ids = JSON.stringify(picked.map((row) => String(row.graph_id)));
+				return [
+					{
+						text:
+							`with d as (delete from graph_nodes n where n.graph_id ${IDS_IN("$1")} and not (${LIVE_LEASE("n")}) returning 1) ` +
+							"select count(*)::int as nodes from d",
+						params: [ids],
+					},
+					{
+						text:
+							`with g as (delete from graph_index gi where gi.graph_id ${IDS_IN("$1")} ` +
+							"and not exists (select 1 from graph_nodes n where n.graph_id = gi.graph_id) returning gi.graph_id), " +
+							"e as (delete from graph_edges where graph_id in (select graph_id from g) returning 1), " +
+							"s as (delete from graph_steps where graph_id in (select graph_id from g) returning 1), " +
+							"b as (delete from graph_bindings where graph_id in (select graph_id from g) returning 1) " +
+							"select (select count(*)::int from g) as deleted, (select count(*)::int from e) as edges, " +
+							"(select count(*)::int from s) as steps, (select count(*)::int from b) as bindings",
+						params: [ids],
+					},
+				];
+			},
 		}),
 	},
 	// The standing entry's `supersedes` pointer then names a row that is gone; a
@@ -361,6 +435,21 @@ function int(value: unknown): number {
 }
 
 /**
+ * One round of a class's delete: run `pick`; with `then`, feed what it picked to
+ * the follow-up statements and merge their one-row results. Returns how many
+ * rows the round *picked* (what bounds the loop) and the merged columns.
+ */
+async function runBatch(run: SweepRunner, batch: SweepBatch): Promise<{ picked: number; row: Record<string, unknown> }> {
+	const picked = await run(batch.pick);
+	if (!batch.then) return { picked: int(picked[0]?.deleted), row: picked[0] ?? {} };
+	if (picked.length === 0) return { picked: 0, row: {} };
+	const row: Record<string, unknown> = {};
+	for (const statement of batch.then(picked)) Object.assign(row, (await run(statement))[0] ?? {});
+	if (batch.skippedAs) row[batch.skippedAs] = picked.length - int(row.deleted);
+	return { picked: picked.length, row };
+}
+
+/**
  * Count every class, then — only when `apply` — delete the deletable ones in
  * batches until a batch comes back short. Counts are taken first for every class
  * so a report-only class is judged before a delete changes what it would see
@@ -368,6 +457,9 @@ function int(value: unknown): number {
  *
  * The batch loop is bounded by the count it just took: a class that keeps
  * finding rows past that (a writer racing the sweep) stops rather than chasing it.
+ * A two-phase class whose pick came back full but whose delete fell short (a
+ * graph claimed between the two) stops too: something is moving under the sweep,
+ * and the next tick will judge it fresh.
  */
 export async function executeSweep(
 	run: SweepRunner,
@@ -393,15 +485,14 @@ export async function executeSweep(
 			if (!build || report.candidates === 0) continue;
 			const maxRounds = Math.ceil(report.candidates / options.batch) + 1;
 			for (let round = 0; round < maxRounds; round++) {
-				const rows = await run(build(step.cutoff, options.batch));
-				const row = rows[0] ?? {};
+				const { picked, row } = await runBatch(run, build(step.cutoff, options.batch));
 				const deleted = int(row.deleted);
 				report.deleted += deleted;
 				for (const [key, value] of Object.entries(row)) {
 					if (key === "deleted") continue;
 					report.children = { ...report.children, [key]: (report.children?.[key] ?? 0) + int(value) };
 				}
-				if (deleted < options.batch) break;
+				if (picked < options.batch || deleted < picked) break;
 			}
 		}
 	}

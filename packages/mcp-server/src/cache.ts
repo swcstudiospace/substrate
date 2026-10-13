@@ -181,6 +181,24 @@ export interface BunRedisOptions {
 	now?: () => number;
 	cooldownMs?: number;
 	connectTimeoutMs?: number;
+	/** The deadline every command races inside the plane gate; `COMMAND_TIMEOUT_MS` by default. */
+	commandTimeoutMs?: number;
+}
+
+/**
+ * `run`'s answer, or an error named `TimeoutError` once `ms` has passed. Named
+ * so `callPlane` observes it as a timeout, not as a generic error.
+ */
+function deadline<T>(run: Promise<T>, ms: number, what: string): Promise<T> {
+	const { promise, resolve, reject } = Promise.withResolvers<T>();
+	const timer = setTimeout(() => {
+		const error = new Error(`cache ${what} timed out after ${ms} ms`);
+		error.name = "TimeoutError";
+		reject(error);
+	}, ms);
+	timer.unref?.();
+	run.then(resolve, reject).finally(() => clearTimeout(timer));
+	return promise;
 }
 
 /** Bun's client behind the three commands; exported for the socket-level tests only. */
@@ -238,10 +256,17 @@ export function bunRedis(url: string, options: BunRedisOptions = {}): CacheRedis
 		return settled;
 	};
 
+	const commandTimeoutMs = options.commandTimeoutMs ?? COMMAND_TIMEOUT_MS;
+	// The deadline lives inside the gated operation (Greptile round 1): a
+	// connected server that stops replying used to leave the command pending
+	// past the outer `attempt()` budget, so the breaker saw nothing and the
+	// wedged connection was kept for the next request to time out on again. Now
+	// the gate records the timeout and the connection is discarded, so the next
+	// call reconnects — subject to the connect cooldown.
 	const run = async <T>(op: "get" | "mget" | "set" | "incr", command: (redis: RedisClient) => Promise<T>): Promise<T> => {
 		const redis = await open();
 		try {
-			return await callPlane(gate, op, () => command(redis));
+			return await callPlane(gate, op, () => deadline(command(redis), commandTimeoutMs, op));
 		} catch (cause) {
 			discard(redis);
 			throw cause;
@@ -275,7 +300,12 @@ export function createReadThroughCache(config: SubstrateConfig, options: CreateC
 		return new ReadThroughCache({ redis: null, enabled: false, record });
 	}
 	return new ReadThroughCache({
-		redis: bunRedis(config.dragonflyUrl, { gate: options.gate, now: options.now, connectTimeoutMs: config.cacheConnectTimeoutMs }),
+		redis: bunRedis(config.dragonflyUrl, {
+			gate: options.gate,
+			now: options.now,
+			connectTimeoutMs: config.cacheConnectTimeoutMs,
+			commandTimeoutMs: config.cacheCommandTimeoutMs,
+		}),
 		enabled: true,
 		record,
 		now: options.now,

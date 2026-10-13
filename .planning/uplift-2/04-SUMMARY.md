@@ -66,6 +66,15 @@ Revert the R4 range. Env defaults restore today's client except for the pool siz
 | sweeper dry-run report present daily | none | one `index.sweep` note per day on surface `substrate` | `events_query` `surface=substrate`, `payload.action=index.sweep` |
 | TimescaleDB `select 1` cold 1,057 ms / `/healthz` mean 598 ms | unbounded ping | `ping` bounded at 1000 ms; pool keeps ≤ 8 warm connections 300 s | `/metrics` `substrate.request.duration` after deploy |
 
+## Greptile round 1 (PR #59)
+
+**[P1] "Sweep deletes live leases"** — the terminal-graph class judged a graph on `graph_index.status`/`updated` only; claims and heartbeats write `graph_nodes` and do not refuse a terminal graph, so an old finished graph with a fresh lease was a candidate. Fixed at the root in `index-sweep.ts`:
+- the count **and** the pick exclude any graph with a live lease — `not exists (… n.claimed_by is not null and coalesce(n.lease_expires_at, n.claimed_at + make_interval(secs => DEFAULT_LEASE_TTL_SECONDS)) > now())`, the lease expression `claimNode`/`heartbeatNode`/`reapExpiredLeases` use (`DEFAULT_LEASE_TTL_SECONDS` imported from `lease.ts`);
+- the graph delete is two-phase inside the apply transaction (`SweepBatch { pick, then, skippedAs }`): pick with `for update skip locked` on `graph_index`; delete the picked graphs' `graph_nodes` **only where the lease is not live**, re-evaluated per row at execution (a concurrent claim's row UPDATE and this DELETE serialise; READ COMMITTED re-checks the predicate against the new row version); then delete `graph_index` only where no node row remains, and edges/steps/bindings only for graphs whose index row went;
+- a picked graph that survived is reported as `children.skipped_live_lease` (so `candidates − deleted` is explained); a round whose delete fell short of its pick stops the loop;
+- tests: `index-sweep.test.ts` (predicate shape, two-phase statements, skipped accounting, loop stop, empty pick); `index-store.sweep.test.ts` (terminal graph with a live lease kept, with an expired lease deleted; a claim landing on a second connection between pick and node delete keeps the graph, no orphan edges/steps/bindings; the raced graph leaves the candidate set);
+- docs: `docs/data-planes.md` index row ("never while any node holds a live lease"), `docs/runbooks/lease-stuck.md` ("The sweeper does not release anything").
+
 ## Gates
 
 Final head of `ultrathink/uplift-2` (all seven items merged): `bunx tsc --noEmit` clean · `bun test` **3525 pass / 65 skip / 1 fail** — the 1 fail is the recorded F-01 environment-sensitive guard (`scripts/rehearsal.test.ts` `--port 7410`), failing identically on `main`, recorded not fixed · `bun run check:phase-close` pass (4 lock files green; EVENT_KINDS 12; SURFACES 27) · `bun run test:py` 298 passed. Live smoke on the scratch rehearsal twin (`bun run rehearsal up --name uplift2`, scratch Postgres 16 + GreptimeDB v0.14.4 on loopback, commit `1fe624a`): `bun run rehearsal smoke` 4/4 (brief, emit, register, claim). 

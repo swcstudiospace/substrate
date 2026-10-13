@@ -330,8 +330,14 @@ export function breaches(results: SloResult[]): SloResult[] {
 export const PLANE_AVAILABILITY_ENV = "SUBSTRATE_SLO_PLANE_AVAILABILITY";
 /** The rolling window every plane objective is judged over: one hour. */
 export const PLANE_WINDOW_MS = 60 * 60 * 1000;
-/** Samples kept per plane; the window is what bounds the useful history anyway. */
-const PLANE_MAX_SAMPLES = 480;
+/**
+ * Readings are coalesced into fixed time buckets, so the retained history is a
+ * function of time, not of how often `/slo` is read: 360 buckets of 10 s is the
+ * hour whether the poller runs once a second or once a minute. (Greptile round
+ * 1: a cap on reading *count* at one-per-second coalescing kept eight minutes
+ * under a 1 Hz poller and forty under a 5 s one, so failures vanished early.)
+ */
+export const PLANE_BUCKET_MS = 10_000;
 
 export type PlaneSloStatus = "ok" | "breached" | "insufficient-data" | "unconfigured";
 
@@ -351,10 +357,20 @@ export interface PlaneSloResult {
 	detail: string;
 }
 
+/**
+ * One time bucket: the newest reading that landed in it (`atMs`, `ok`, `total`)
+ * and the first (`baseAtMs`, `baseOk`, `baseTotal`). The newest decides when
+ * the bucket leaves the window; the first is the baseline when the bucket is
+ * the oldest kept — otherwise two readings inside one bucket (a fresh process
+ * read twice within 10 s) would collapse to zero calls and never be judged.
+ */
 interface PlaneCountSample {
 	atMs: number;
 	ok: number;
 	total: number;
+	baseAtMs: number;
+	baseOk: number;
+	baseTotal: number;
 }
 
 /** What one `PlaneWindow.observe` answers: the calls that fell inside the window. */
@@ -370,31 +386,38 @@ export interface PlaneWindowReading {
  * over the rolling window can be taken from the oldest sample still inside it.
  *
  * Same discipline as `BurnLedger`: entries older than the window are dropped on
- * every observation, reads in the same wall-clock second coalesce, and a total
- * that goes backwards is a restart, so the history is dropped rather than
- * subtracted across it. One reading alone spans nothing and judges nothing.
+ * every observation, readings in the same `PLANE_BUCKET_MS` bucket coalesce (the
+ * newest replaces), and a total that goes backwards is a restart, so the history
+ * is dropped rather than subtracted across it. One reading alone spans nothing
+ * and judges nothing.
  */
 export class PlaneWindow {
 	private readonly byPlane: Partial<Record<PlaneName, PlaneCountSample[]>> = {};
 
-	constructor(readonly windowMs: number = PLANE_WINDOW_MS) {}
+	constructor(
+		readonly windowMs: number = PLANE_WINDOW_MS,
+		readonly bucketMs: number = PLANE_BUCKET_MS,
+	) {}
 
 	observe(plane: PlaneName, ok: number, total: number, atMs: number): PlaneWindowReading {
 		const samples = this.byPlane[plane] ?? [];
 		while (samples.length > 0 && samples[0]!.atMs < atMs - this.windowMs) samples.shift();
 		const last = samples[samples.length - 1];
 		if (last !== undefined && (total < last.total || ok < last.ok)) samples.length = 0;
-		if (last !== undefined && samples.length > 0 && Math.floor(last.atMs / 1000) === Math.floor(atMs / 1000)) {
+		if (last !== undefined && samples.length > 0 && Math.floor(last.atMs / this.bucketMs) === Math.floor(atMs / this.bucketMs)) {
 			last.atMs = atMs;
 			last.ok = ok;
 			last.total = total;
 		} else {
-			samples.push({ atMs, ok, total });
+			samples.push({ atMs, ok, total, baseAtMs: atMs, baseOk: ok, baseTotal: total });
 		}
-		if (samples.length > PLANE_MAX_SAMPLES) samples.splice(0, samples.length - PLANE_MAX_SAMPLES);
+		// A hard cap only against a clock that jumps backwards; time bounds the
+		// history in every normal case, at windowMs / bucketMs + 1 entries.
+		const cap = Math.ceil(this.windowMs / this.bucketMs) + 1;
+		if (samples.length > cap) samples.splice(0, samples.length - cap);
 		this.byPlane[plane] = samples;
 		const base = samples[0]!;
-		return { ok: ok - base.ok, total: total - base.total, spanMs: atMs - base.atMs, samples: samples.length };
+		return { ok: ok - base.baseOk, total: total - base.baseTotal, spanMs: atMs - base.baseAtMs, samples: samples.length };
 	}
 }
 
@@ -447,7 +470,10 @@ export function evaluatePlaneSlos(snapshot: MetricSnapshot[], options: PlaneEval
 		const total = histogram ? mergeHistogram(histogram, { plane }).count : 0;
 		const ok = histogram ? mergeHistogram(histogram, { plane, outcome: "ok" }).count : 0;
 		const reading = window.observe(plane, ok, total, now);
-		if (reading.samples < 2 || reading.total < minSamples) {
+		// `spanMs === 0` is the window's first-ever reading: nothing precedes it,
+		// so there is nothing to count between. Two readings inside one bucket
+		// still span something and are judged.
+		if (reading.spanMs <= 0 || reading.total < minSamples) {
 			return {
 				...base,
 				status: "insufficient-data",

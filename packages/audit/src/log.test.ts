@@ -2,9 +2,21 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { appendFileSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AuditLog, AuditUnavailableError, orderSegments, parseSegmentName, rolloverBytesFromEnv, segmentPath } from "./log.ts";
+import {
+	AuditLog,
+	AuditUnavailableError,
+	MAX_WALK_ATTEMPTS,
+	listAuditSegments,
+	orderSegments,
+	parseSegmentName,
+	rolloverBytesFromEnv,
+	segmentPath,
+	verifyAuditSegments,
+	walkAuditFiles,
+} from "./log.ts";
 import type { AuditRecordInput } from "./record.ts";
 import {
+	ChainWalker,
 	buildRecord,
 	MAX_ARG_KEY,
 	MAX_ARG_KEYS,
@@ -1153,5 +1165,80 @@ describe("rollover by size", () => {
 				{ path: "b", firstSeq: 18001, lastSeq: 18001 },
 			]).map((segment) => segment.path),
 		).toEqual(["a", "c", "b"]);
+	});
+
+	test("a rollover between listing the segments and reading the active file is read again, not reported", async () => {
+		// The race: a reader lists the closed segments (none yet), then the writer
+		// rolls the file over, then the reader opens the active file — which now holds
+		// only the records after the roll. Without a second look the reader sees a
+		// chain that opens past seq 1. `begin` runs exactly in that window.
+		const { size } = await recordBytes();
+		const path = join(temporaryDirectory(), "mcp-audit.jsonl");
+		const writer = new AuditLog({ path, now: clock, rolloverBytes: size * 2 });
+		await writer.open();
+		await writer.append(allowed);
+		await writer.append(allowed);
+		expect(listAuditSegments(path)).toEqual([]);
+
+		let passes = 0;
+		let walker = new ChainWalker();
+		const seen: number[][] = [];
+		const walked = await walkAuditFiles(path, () => {
+			passes++;
+			walker = new ChainWalker();
+			seen.push([]);
+			if (passes === 1) {
+				// The writer rolls while the reader is between the listing and the read.
+				void writer.append(allowed);
+			}
+			return { walker, onRecord: (record) => seen[seen.length - 1]?.push(record.seq) };
+		});
+		expect(listAuditSegments(path).map((segment) => [segment.firstSeq, segment.lastSeq])).toEqual([[1, 2]]);
+		expect(walked.attempts).toBe(2);
+		expect(seen[0]).toEqual([3]);
+		expect(seen[1]).toEqual([1, 2, 3]);
+		expect(walker.verdict()).toEqual({ ok: true, records: 3 });
+		expect(walked).toMatchObject({ segments: 1, firstSeq: 1, lastSeq: 3, unparseable: 0 });
+
+		// The same chain through the public paths, after the dust has settled.
+		expect(await writer.verify()).toMatchObject({ ok: true, records: 3 });
+		expect(await verifyAuditSegments(path)).toMatchObject({ ok: true, segments: 1, records: 3 });
+	});
+
+	test("a chain genuinely broken at a segment boundary is reported after a bounded number of attempts", async () => {
+		const { size } = await recordBytes();
+		const path = join(temporaryDirectory(), "mcp-audit.jsonl");
+		const log = new AuditLog({ path, now: clock, rolloverBytes: size * 2 });
+		await log.open();
+		for (let i = 0; i < 5; i++) await log.append(allowed);
+		// Drop the active file's first record: it now begins at 6 while the newest
+		// closed segment ends at 4, which is what a mid-walk roll also looks like —
+		// except that re-reading finds the same files every time.
+		await log.append(allowed);
+		const lines = readFileSync(path, "utf8").trim().split("\n");
+		writeFileSync(path, `${lines[1]}\n`);
+
+		let passes = 0;
+		let walker = new ChainWalker();
+		const walked = await walkAuditFiles(path, () => {
+			passes++;
+			walker = new ChainWalker();
+			return { walker, onRecord: () => {} };
+		});
+		expect(passes).toBe(MAX_WALK_ATTEMPTS);
+		expect(walked.attempts).toBe(MAX_WALK_ATTEMPTS);
+		expect(walker.verdict()).toMatchObject({ ok: false, brokenAt: 6, reason: "prev does not match the preceding record" });
+		expect(await log.verify()).toMatchObject({ ok: false, brokenAt: 6 });
+		expect(await verifyAuditSegments(path)).toMatchObject({ ok: false, brokenAt: 6, segments: 2, records: 5 });
+	});
+
+	test("a steady chain is read in one pass", async () => {
+		const { size } = await recordBytes();
+		const path = join(temporaryDirectory(), "mcp-audit.jsonl");
+		const log = new AuditLog({ path, now: clock, rolloverBytes: size * 2 });
+		await log.open();
+		for (let i = 0; i < 5; i++) await log.append(allowed);
+		const walked = await walkAuditFiles(path, () => ({ walker: new ChainWalker(), onRecord: () => {} }));
+		expect(walked).toEqual({ unparseable: 0, segments: 2, firstSeq: 1, lastSeq: 5, attempts: 1 });
 	});
 });

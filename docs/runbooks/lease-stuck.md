@@ -36,6 +36,17 @@ is housekeeping that makes that visible — it clears the holder columns of ever
 lapsed lease, emits one `warning` per node naming who was evicted and mirrors
 `expire` to the trackers. Nothing schedules it; an agent or an operator calls it.
 
+**The sweeper does not release anything.** `substrate index sweep` (daily
+`substrate-index-sweep.timer`, `docs/data-planes.md`) retires graphs in a terminal
+status untouched for 90 days — and skips any graph with a **live** lease on any
+node, re-checking the lease per node inside the delete, because a claim does not
+refuse a finished graph and writes `graph_nodes` only. A lapsed lease on a
+terminal graph does not protect it: once the node is free by the clock, the graph
+and its nodes, edges, steps and bindings go with the next apply. So a lease that
+looks stuck on a graph that is `Done` is exactly case 1 or 2 below; the sweeper
+will not take it away from a live holder, and it will not clean up after a dead
+one until the lease has lapsed.
+
 ## Triage (read-only)
 
 From an operator session with an authenticated `psql`, never from an agent:

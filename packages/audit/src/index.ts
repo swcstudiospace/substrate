@@ -47,9 +47,11 @@ export {
 	listAuditSegments,
 	orderSegments,
 	parseSegmentName,
+	MAX_WALK_ATTEMPTS,
 	rolloverBytesFromEnv,
 	segmentPath,
 	verifyAuditSegments,
+	walkAuditFiles,
 } from "./log.ts";
 
 export {

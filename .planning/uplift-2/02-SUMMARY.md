@@ -50,6 +50,16 @@ breaker state machine (threshold, reset, half-open boundary, single probe, re-op
 | per-plane error rate | not measured (Hindsight/RAGFlow "unknown") | `/slo.planes[]` and `substrate.plane.errors` after deploy |
 | `/healthz` duration | 598 ms mean | re-read `substrate.request.duration{route=/healthz}` (adds ≤ 1 bounded probe per configured plane, run in parallel) |
 
+## Greptile round 1 (PR #59)
+
+| Finding | Root cause | Fix | Regression test |
+| --- | --- | --- | --- |
+| P2 `gatedFetch` counted a stalled body as success | the gate measured only `fetch()` (headers); the body was read by the caller outside it | the body is buffered inside the gated call under the request's own signal (`readBody` rejects with the signal's `TimeoutError`/`AbortError` as soon as it fires) and a `Response` with the same status/headers is returned; 5xx still charges the breaker and is still returned | `breaker.test.ts` "a body that stalls past the deadline is a timeout failure"; "a buffered answer keeps its status and headers" |
+| P2 cache command timeouts bypassed the breaker | the deadline lived in `ReadThroughCache.attempt()`, outside `callPlane`; a wedged connection's command never settled, so no failure was recorded and `discard()` never ran | `bunRedis` races every command against `commandTimeoutMs` inside the gated operation (`deadline()` throws a `TimeoutError`-named error); the catch discards the connection, so the next call reconnects (subject to the connect cooldown); `createReadThroughCache` passes `config.cacheCommandTimeoutMs` down | `cache.test.ts` "a connected server that stops replying is a gate timeout, and the connection is dropped" (fake RESP server, second connection observed) |
+| P2 `PlaneWindow` lost the hour under fast polling | 480-reading cap with 1 s coalescing: 8 min at 1 Hz, 40 min at 5 s | fixed 10 s buckets (`PLANE_BUCKET_MS`); each bucket keeps its first reading as the baseline and its newest as the head (a first cut used the newest as both, so two readings inside one bucket collapsed to zero calls — orchestrator-caught, fixed); a bucket leaves once its newest reading is older than the hour, so coverage is the full hour regardless of scrape rate; the judge guard is `spanMs > 0`, not a bucket count; 361-entry cap only guards a backwards clock | `slo.test.ts` "the window covers the hour whatever the scrape rate" (1 Hz × 61 min and 1/min × 61 min), "two readings inside one bucket still judge"; coalesce test uses explicit 1 s buckets |
+
+Files changed in the round: `packages/observability/src/breaker.ts`, `breaker.test.ts`, `slo.ts`, `slo.test.ts`; `packages/mcp-server/src/cache.ts`, `cache.test.ts`; `docs/observability.md` (bucket wording); this file.
+
 ## Gates
 
 Final head of `ultrathink/uplift-2` (all seven items merged): `bunx tsc --noEmit` clean · `bun test` **3525 pass / 65 skip / 1 fail** — the 1 fail is the recorded F-01 environment-sensitive guard (`scripts/rehearsal.test.ts` `--port 7410`), failing identically on `main`, recorded not fixed · `bun run check:phase-close` pass (4 lock files green; EVENT_KINDS 12; SURFACES 27) · `bun run test:py` 298 passed. Live smoke on the scratch rehearsal twin (`bun run rehearsal up --name uplift2`, scratch Postgres 16 + GreptimeDB v0.14.4 on loopback, commit `1fe624a`): `bun run rehearsal smoke` 4/4 (brief, emit, register, claim). 

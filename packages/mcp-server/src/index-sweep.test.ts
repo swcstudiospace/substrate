@@ -157,15 +157,15 @@ describe("the classes", () => {
 		for (const cls of SWEEP_CLASSES) {
 			if (!cls.deleteBatch) continue;
 			const count = cls.count(cutoff);
-			const del = cls.deleteBatch(cutoff, 500);
+			const del = cls.deleteBatch(cutoff, 500).pick;
 			const predicate = /where (.+)$/.exec(count.text)?.[1];
 			expect(predicate).toBeDefined();
 			expect(del.text).toContain(predicate!);
 			expect(del.text).toMatch(/limit \$\d+ for update skip locked/);
-			expect(del.text).toMatch(/^with doomed as/);
 			expect(count.params[0]).toBe(cutoff);
 			expect(del.params[0]).toBe(cutoff);
 			expect(del.params.at(-1)).toBe(500);
+			if (cls.id !== "graphs-terminal") expect(del.text).toMatch(/^with doomed as/);
 		}
 	});
 
@@ -197,20 +197,40 @@ describe("the classes", () => {
 		expect(by["quarantine-unresolved"]!.count(cutoff).text).toContain(`created < $1::timestamptz and not ${landed}`);
 	});
 
-	test("terminal graphs: the status list is the brief's, and the cascade names edges, steps, bindings and nodes", () => {
+	test("terminal graphs: the status list is the brief's, no graph with a live lease is a candidate, and the cascade is lease-checked", () => {
 		const graphs = by["graphs-terminal"]!;
+		const liveLease =
+			"n.claimed_by is not null and coalesce(n.lease_expires_at, n.claimed_at + make_interval(secs => 900)) > now()";
 		const count = graphs.count(cutoff);
-		expect(count.text).toContain("status = any(string_to_array($2::text, '|')) and updated < $1::timestamptz");
+		expect(count.text).toContain("g.status = any(string_to_array($2::text, '|')) and g.updated < $1::timestamptz");
+		expect(count.text).toContain(`and not exists (select 1 from graph_nodes n where n.graph_id = g.graph_id and ${liveLease})`);
 		expect(count.params).toEqual([cutoff, TERMINAL_GRAPH_STATUSES.join("|")]);
 		expect(TERMINAL_GRAPH_STATUSES).toEqual(["Merged", "Resolved", "Done", "Won't Fix", "Closed", "Failed", "Canceled"]);
-		const del = graphs.deleteBatch!(cutoff, 100);
-		for (const table of ["graph_edges", "graph_steps", "graph_bindings", "graph_index"]) {
-			expect(del.text).toContain(`delete from ${table} where graph_id in (select graph_id from doomed)`);
+
+		const batch = graphs.deleteBatch!(cutoff, 100);
+		// The pick is the count's predicate — live-lease exclusion included — locked.
+		expect(batch.pick.text).toBe(
+			`select g.graph_id from graph_index g where ${/where (.+)$/.exec(count.text)![1]} limit $3 for update skip locked`,
+		);
+		expect(batch.pick.params).toEqual([cutoff, TERMINAL_GRAPH_STATUSES.join("|"), 100]);
+		expect(batch.skippedAs).toBe("skipped_live_lease");
+
+		const [nodes, graphsThenRest, ...more] = batch.then!([{ graph_id: "ut-a" }, { graph_id: "ut-b" }]);
+		expect(more).toEqual([]);
+		const ids = JSON.stringify(["ut-a", "ut-b"]);
+		// Nodes go first, each row re-checked for a live lease at execution time.
+		expect(nodes!.text).toContain(`delete from graph_nodes n where n.graph_id in (select jsonb_array_elements_text($1::jsonb)) and not (${liveLease})`);
+		expect(nodes!.params).toEqual([ids]);
+		// Then the index row only where no node survived, and the FK-less tables only for graphs whose row went.
+		expect(graphsThenRest!.text).toContain(
+			"delete from graph_index gi where gi.graph_id in (select jsonb_array_elements_text($1::jsonb)) " +
+				"and not exists (select 1 from graph_nodes n where n.graph_id = gi.graph_id) returning gi.graph_id",
+		);
+		for (const table of ["graph_edges", "graph_steps", "graph_bindings"]) {
+			expect(graphsThenRest!.text).toContain(`delete from ${table} where graph_id in (select graph_id from g)`);
 		}
-		expect(del.text).toContain("from graph_nodes where graph_id in (select graph_id from doomed)");
-		expect(del.text).not.toContain("delete from graph_nodes");
-		expect(del.text).toMatch(/as deleted, .*as nodes, .*as edges, .*as steps, .*as bindings$/);
-		expect(del.params).toEqual([cutoff, TERMINAL_GRAPH_STATUSES.join("|"), 100]);
+		expect(graphsThenRest!.text).toMatch(/as deleted, .*as edges, .*as steps, .*as bindings$/);
+		expect(graphsThenRest!.params).toEqual([ids]);
 	});
 
 	test("memory entries: superseded versions are deletable; ttl classes only count rows the reads still return", () => {
@@ -228,17 +248,29 @@ describe("the classes", () => {
 });
 
 describe("executeSweep", () => {
-	/** A runner that answers every count with `candidates` and every delete with a full batch until `rows` are gone. */
+	/**
+	 * A runner that answers every count with `candidates`, every simple delete with
+	 * a full batch until the rows are gone, and the graph class's pick with that
+	 * many ids followed by a cascade that removes them all.
+	 */
 	function fakeRunner(candidates: number) {
 		const statements: SweepStatement[] = [];
 		let remaining = candidates;
+		let picked = 0;
 		const run = async (statement: SweepStatement) => {
 			statements.push(statement);
 			if (statement.text.startsWith("select count")) return [{ candidates }];
+			if (statement.text.startsWith("select g.graph_id")) {
+				picked = Math.min(Number(statement.params.at(-1)), remaining);
+				remaining -= picked;
+				return Array.from({ length: picked }, (_, i) => ({ graph_id: `g${i}` }));
+			}
+			if (statement.text.includes("delete from graph_nodes")) return [{ nodes: picked * 2 }];
+			if (statement.text.includes("delete from graph_index")) return [{ deleted: picked, edges: 0, steps: 0, bindings: 0 }];
 			const limit = Number(statement.params.at(-1));
 			const deleted = Math.min(limit, remaining);
 			remaining -= deleted;
-			return [{ deleted, nodes: deleted * 2 }];
+			return [{ deleted }];
 		};
 		return { run, statements };
 	}
@@ -260,13 +292,29 @@ describe("executeSweep", () => {
 		const { run, statements } = fakeRunner(1_200);
 		const steps = planSweep(DEFAULT_SWEEP_POLICY, NOW).filter((step) => step.cls.id === "graphs-terminal");
 		const report = await executeSweep(run, steps, { apply: true, batch: 500, now: NOW });
+		// Count once; then per round: pick, node delete, graph+cascade delete. 500,
+		// 500, 200 — the short third pick ends it.
 		expect(statements.map((statement) => statement.text.slice(0, 11))).toEqual([
+			"select coun",
+			...Array(3).fill(["select g.gr", "with d as (", "with g as ("]).flat(),
+		]);
+		expect(report.classes[0]).toMatchObject({
+			id: "graphs-terminal",
+			candidates: 1_200,
+			deleted: 1_200,
+			children: { nodes: 2_400, skipped_live_lease: 0 },
+		});
+
+		// A simple class takes one statement per round.
+		const simple = fakeRunner(1_200);
+		const superseded = planSweep(DEFAULT_SWEEP_POLICY, NOW).filter((step) => step.cls.id === "entries-superseded");
+		await executeSweep(simple.run, superseded, { apply: true, batch: 500, now: NOW });
+		expect(simple.statements.map((statement) => statement.text.slice(0, 11))).toEqual([
 			"select coun",
 			"with doomed",
 			"with doomed",
 			"with doomed",
 		]);
-		expect(report.classes[0]).toMatchObject({ id: "graphs-terminal", candidates: 1_200, deleted: 1_200, children: { nodes: 2_400 } });
 	});
 
 	test("apply never issues a delete for a report-only class or an empty one", async () => {
@@ -297,12 +345,55 @@ describe("executeSweep", () => {
 		expect(statements.filter((statement) => statement.text.startsWith("with doomed"))).toHaveLength(2);
 		expect(report.classes[0]?.deleted).toBe(20);
 	});
+
+	test("a terminal graph claimed between pick and delete is kept, reported as skipped, and stops the loop", async () => {
+		const statements: SweepStatement[] = [];
+		const run = async (statement: SweepStatement) => {
+			statements.push(statement);
+			if (statement.text.startsWith("select count")) return [{ candidates: 4 }];
+			// The pick finds two per round; one of them grows a live lease before the
+			// node delete runs, so its nodes survive and its index row stays.
+			if (statement.text.startsWith("select g.graph_id")) return [{ graph_id: "g-free" }, { graph_id: "g-claimed" }];
+			if (statement.text.includes("delete from graph_nodes")) return [{ nodes: 2 }];
+			return [{ deleted: 1, edges: 1, steps: 1, bindings: 1 }];
+		};
+		const steps = planSweep(DEFAULT_SWEEP_POLICY, NOW).filter((step) => step.cls.id === "graphs-terminal");
+		const report = await executeSweep(run, steps, { apply: true, batch: 2, now: NOW });
+		expect(report.classes[0]).toMatchObject({
+			candidates: 4,
+			deleted: 1,
+			children: { nodes: 2, edges: 1, steps: 1, bindings: 1, skipped_live_lease: 1 },
+		});
+		// One round only: the pick was full but the delete fell short, so the sweep
+		// stops rather than chasing a graph that is in use.
+		expect(statements.filter((statement) => statement.text.startsWith("select g.graph_id"))).toHaveLength(1);
+		// The node delete carries the picked ids and re-checks the lease per row.
+		const nodes = statements.find((statement) => statement.text.includes("delete from graph_nodes"))!;
+		expect(nodes.params).toEqual([JSON.stringify(["g-free", "g-claimed"])]);
+		expect(nodes.text).toContain("and not (n.claimed_by is not null and coalesce(n.lease_expires_at");
+	});
+
+	test("an empty pick issues no follow-up statements", async () => {
+		const statements: SweepStatement[] = [];
+		const run = async (statement: SweepStatement) => {
+			statements.push(statement);
+			return statement.text.startsWith("select count") ? [{ candidates: 2 }] : [];
+		};
+		const steps = planSweep(DEFAULT_SWEEP_POLICY, NOW).filter((step) => step.cls.id === "graphs-terminal");
+		const report = await executeSweep(run, steps, { apply: true, batch: 500, now: NOW });
+		expect(statements.map((statement) => statement.text.slice(0, 11))).toEqual(["select coun", "select g.gr"]);
+		expect(report.classes[0]?.deleted).toBe(0);
+	});
 });
 
 describe("report rendering", () => {
 	test("the ledger payload carries counts only", async () => {
-		const run = async (statement: SweepStatement) =>
-			statement.text.startsWith("select count") ? [{ candidates: 3 }] : [{ deleted: 3, nodes: 1, edges: 2, steps: 0, bindings: 0 }];
+		const run = async (statement: SweepStatement) => {
+			if (statement.text.startsWith("select count")) return [{ candidates: 3 }];
+			if (statement.text.startsWith("select g.graph_id")) return [{ graph_id: "a" }, { graph_id: "b" }, { graph_id: "c" }];
+			if (statement.text.includes("delete from graph_nodes")) return [{ nodes: 1 }];
+			return [{ deleted: 3, edges: 2, steps: 0, bindings: 0 }];
+		};
 		const report = await executeSweep(run, planSweep(DEFAULT_SWEEP_POLICY, NOW), { apply: true, batch: 500, now: NOW });
 		const counts = sweepCounts(report);
 		expect(Object.keys(counts)).toEqual([...SWEEP_CLASS_IDS]);
@@ -313,7 +404,7 @@ describe("report rendering", () => {
 		const text = formatSweepReport(report);
 		expect(text.startsWith(`index sweep APPLY at ${new Date(NOW).toISOString()} (batch 500)`)).toBe(true);
 		expect(text).toContain("graphs-terminal");
-		expect(text).toContain("nodes 1, edges 2");
+		expect(text).toContain("nodes 1, edges 2, steps 0, bindings 0, skipped_live_lease 0");
 		expect(text).toMatch(/entries-ttl-30d\s+report\s+> {2}30d candidates\s+3\s+deleted\s+0\n/);
 	});
 });

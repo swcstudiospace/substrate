@@ -253,4 +253,37 @@ describe("gatedFetch", () => {
 		await fetchImpl(new URL("http://plane.test/c"));
 		expect(samples.map((sample) => sample.op)).toEqual(["POST /a", "PATCH /b", "GET /c"]);
 	});
+
+	test("a body that stalls past the deadline is a timeout failure, not a success with headers", async () => {
+		// Greptile round 1: headers arrived, so the gate used to record ok and the
+		// caller timed out alone. The body is now read inside the gate under the
+		// request's own signal.
+		const { gate, samples } = gateFor("ragflow", new CircuitBreaker("ragflow", { failureThreshold: 1 }));
+		const stalled = new ReadableStream<Uint8Array>({ start: () => {} });
+		const fetchImpl = gatedFetch(gate, async () => new Response(stalled, { status: 200, headers: { "content-type": "application/json" } }), opOf);
+		const started = performance.now();
+		await expect(fetchImpl("http://plane.test/api/v1/retrieval", { method: "POST", signal: AbortSignal.timeout(30) })).rejects.toThrow();
+		expect(performance.now() - started).toBeLessThan(1000);
+		expect(samples).toHaveLength(1);
+		expect(samples[0]?.outcome).toBe("timeout");
+		expect(gate.breaker?.snapshot().failures).toBe(1);
+		expect(gate.breaker?.state()).toBe("open");
+	});
+
+	test("a buffered answer keeps its status and headers and still parses downstream", async () => {
+		const { gate, samples } = gateFor("hindsight", new CircuitBreaker("hindsight"));
+		const fetchImpl = gatedFetch(
+			gate,
+			async () => new Response(JSON.stringify({ results: [1, 2] }), { status: 201, headers: { "x-plane": "yes", "content-type": "application/json" } }),
+			opOf,
+		);
+		const response = await fetchImpl("http://plane.test/v1/x", { signal: AbortSignal.timeout(1000) });
+		expect(response.status).toBe(201);
+		expect(response.headers.get("x-plane")).toBe("yes");
+		expect(await response.json()).toEqual({ results: [1, 2] });
+		expect(samples[0]?.outcome).toBe("ok");
+
+		const empty = gatedFetch(gate, async () => new Response(null, { status: 204 }), opOf);
+		expect((await empty("http://plane.test/v1/y")).status).toBe(204);
+	});
 });

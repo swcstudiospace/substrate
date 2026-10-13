@@ -81,6 +81,12 @@ export interface RetainOutboxOptions {
 	allow?: () => boolean;
 	/** Every entry the outbox gives up on, with why. The caller emits the warning. */
 	onDrop?: (entry: RetainOutboxEntry, cause: RetainDropCause) => void;
+	/**
+	 * The first save that fails after a good state, with the entry at hand.
+	 * The caller emits one warning (reason `outbox-unsaved`); `durable` reads
+	 * false until a save succeeds again.
+	 */
+	onUnsaved?: (entry: RetainOutboxEntry) => void;
 }
 
 export interface RetainOutboxStats {
@@ -138,11 +144,14 @@ export class RetainOutbox {
 	private readonly random: () => number;
 	private readonly allow: () => boolean;
 	private readonly onDrop: (entry: RetainOutboxEntry, cause: RetainDropCause) => void;
+	private readonly onUnsaved: (entry: RetainOutboxEntry) => void;
 	/** Insertion order is age order: the first key is the oldest entry. */
 	private readonly entries = new Map<string, RetainOutboxEntry>();
 	private draining: Promise<void> | null = null;
 	/** Set when a drain was refused by the gate; cleared by the next drain that ran. */
 	private heldByGate = false;
+	/** True from a failed save until the next one that succeeds; `durable` is false meanwhile. */
+	private unsaved = false;
 	/** File-system error codes already reported, so a broken disk logs once per code. */
 	private readonly reported = new Set<string>();
 
@@ -154,11 +163,23 @@ export class RetainOutbox {
 		this.random = options.random ?? Math.random;
 		this.allow = options.allow ?? (() => true);
 		this.onDrop = options.onDrop ?? (() => undefined);
+		this.onUnsaved = options.onUnsaved ?? (() => undefined);
 		if (this.path !== null) this.hydrate(this.path);
 	}
 
+	/**
+	 * True only while every parked entry is on disk. A configured path whose
+	 * last save failed is *not* durable: shutdown must treat the queue as
+	 * memory-only (abandon with warnings) until a save succeeds again, or a
+	 * restart would silently lose what the failed save never wrote.
+	 */
 	get durable(): boolean {
-		return this.path !== null;
+		return this.path !== null && !this.unsaved;
+	}
+
+	/** Whether this exact entry is still parked: a replay that waited its turn re-checks before sending. */
+	holds(entry: RetainOutboxEntry): boolean {
+		return this.entries.get(keyOf(entry)) === entry;
 	}
 
 	size(): number {
@@ -194,7 +215,9 @@ export class RetainOutbox {
 	 * Park one failed forward. A document already parked is replaced — the
 	 * replay re-reads the entry by id, so the newest locator is the one that
 	 * matters — and the schedule starts over. Over the bound, the oldest entry
-	 * is dropped with an `outbox-full` warning before the new one is kept.
+	 * is dropped with an `outbox-full` warning before the new one is kept. A
+	 * ceiling of one attempt means the live try was the only one: the entry is
+	 * dropped at once with the final warning and never replayed.
 	 */
 	enqueue(candidate: RetainOutboxCandidate): RetainOutboxEntry {
 		const at = this.now();
@@ -211,6 +234,10 @@ export class RetainOutbox {
 			last_reason: candidate.reason,
 			enqueued_at: at,
 		};
+		if (entry.attempts >= this.maxAttempts) {
+			this.onDrop(entry, "exhausted");
+			return entry;
+		}
 		const key = keyOf(entry);
 		this.entries.delete(key);
 		this.entries.set(key, entry);
@@ -272,6 +299,14 @@ export class RetainOutbox {
 				// The breaker opened mid-pass: stop here, keep the rest for later.
 				this.heldByGate = true;
 				break;
+			}
+			// Hydrated under a higher ceiling than today's: the last attempt was
+			// already spent, so the entry gets its warning and no further request.
+			if (entry.attempts >= this.maxAttempts) {
+				this.entries.delete(key);
+				this.onDrop(entry, "exhausted");
+				changed = true;
+				continue;
 			}
 			let outcome: RetainDeliveryOutcome;
 			try {
@@ -346,13 +381,20 @@ export class RetainOutbox {
 
 	private append(entry: RetainOutboxEntry): void {
 		if (this.path === null) return;
+		// An earlier save failed: a plain append would leave the file missing
+		// what that save never wrote. Rewrite the whole queue instead.
+		if (this.unsaved) {
+			this.compact();
+			return;
+		}
 		try {
 			mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
 			const fresh = !existsSync(this.path);
 			appendFileSync(this.path, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
 			if (fresh) chmodSync(this.path, 0o600);
+			this.saved();
 		} catch (cause) {
-			this.report("append", cause);
+			this.failedSave("append", cause, entry);
 		}
 	}
 
@@ -365,9 +407,27 @@ export class RetainOutbox {
 			writeFileSync(tmp, lines.length === 0 ? "" : `${lines.join("\n")}\n`, { mode: 0o600 });
 			chmodSync(tmp, 0o600);
 			renameSync(tmp, this.path);
+			this.saved();
 		} catch (cause) {
-			this.report("rewrite", cause);
+			this.failedSave("rewrite", cause, this.entries.values().next().value ?? null);
 		}
+	}
+
+	private saved(): void {
+		this.unsaved = false;
+	}
+
+	/**
+	 * One save failed. The queue stays in memory and keeps retrying, but it is
+	 * no longer durable: the first failure after a good state warns once (the
+	 * retain-failed shape, reason `outbox-unsaved`, on the entry at hand so the
+	 * trail has a locator) and every later save rewrites the whole file.
+	 */
+	private failedSave(action: string, cause: unknown, entry: RetainOutboxEntry | null): void {
+		this.report(action, cause);
+		if (this.unsaved) return;
+		this.unsaved = true;
+		if (entry !== null) this.onUnsaved(entry);
 	}
 
 	/** Fixed text plus the errno code: the path is config, never a secret, but a body never belongs in a log. */

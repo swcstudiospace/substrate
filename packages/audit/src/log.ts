@@ -664,16 +664,10 @@ export class AuditLog {
 		const maxCollected = options.maxCollected ?? Number.POSITIVE_INFINITY;
 		const path = this.options.path;
 
-		const walker = new ChainWalker({ genesis: this.requireGenesis() });
-		const tally = new StatsAccumulator();
 		let unparseable = 0;
-		let matched = 0;
 		let segments = 0;
 		let firstSeq: number | null = null;
 		let lastSeq: number | null = null;
-		/** Whether the record at the boot checkpoint's `seq` still hashes to its hash. */
-		let anchorSeen = false;
-		let anchorHeld = true;
 
 		/**
 		 * The window over the newest matches, as a real ring.
@@ -686,8 +680,14 @@ export class AuditLog {
 		 * An unbounded window (`readAll`) needs no ring and gets none.
 		 */
 		const bounded = Number.isFinite(maxCollected);
-		const ring: AuditRecord[] = bounded ? new Array<AuditRecord>(Math.max(maxCollected, 0)) : [];
+		let ring: AuditRecord[] = [];
 		let written = 0;
+		let walker = new ChainWalker({ genesis: this.requireGenesis() });
+		let tally = new StatsAccumulator();
+		let matched = 0;
+		/** Whether the record at the boot checkpoint's `seq` still hashes to its hash. */
+		let anchorSeen = false;
+		let anchorHeld = true;
 
 		const offer = (record: AuditRecord): void => {
 			if (!keep || !keep(record)) return;
@@ -710,18 +710,39 @@ export class AuditLog {
 			if (record.hash !== this.anchor.hash) anchorHeld = false;
 		};
 
+		/**
+		 * Fresh state for one pass. The walk may run more than once when the writer
+		 * rolls the file over underneath it (see `walkAuditFiles`), and a verdict, a
+		 * tally or a window carried from an abandoned pass would double-count.
+		 */
+		const begin = (): { walker: ChainWalker; onRecord: (record: AuditRecord) => void } => {
+			walker = new ChainWalker({ genesis: this.requireGenesis() });
+			tally = new StatsAccumulator();
+			ring = bounded ? new Array<AuditRecord>(Math.max(maxCollected, 0)) : [];
+			written = 0;
+			matched = 0;
+			anchorSeen = false;
+			anchorHeld = true;
+			collected.length = 0;
+			return {
+				walker,
+				onRecord: (record) => {
+					checkAnchor(record);
+					offer(record);
+				},
+			};
+		};
+
 		if (path === null) {
+			const pass = begin();
 			for (const record of this.retained) {
-				walker.push(record);
+				pass.walker.push(record);
 				firstSeq ??= record.seq;
 				lastSeq = record.seq;
-				offer(record);
+				pass.onRecord(record);
 			}
 		} else {
-			const walked = await walkAuditFiles(path, walker, (record) => {
-				checkAnchor(record);
-				offer(record);
-			});
+			const walked = await walkAuditFiles(path, begin);
 			unparseable = walked.unparseable;
 			segments = walked.segments;
 			firstSeq = walked.firstSeq;
@@ -916,6 +937,9 @@ export class AuditLog {
 	}
 }
 
+/** How many times a walk starts over when the writer rolls the file underneath it. */
+export const MAX_WALK_ATTEMPTS = 3;
+
 /**
  * Every closed segment in sequence order, then the active file, through one walker.
  *
@@ -927,43 +951,65 @@ export class AuditLog {
  * which is exactly what the head check refuses — and rightly, since the records
  * before it are in the segments.
  *
- * `onRecord` sees every well-formed record, in order. Shared by `AuditLog.scan`
- * and `verifyAuditSegments`, so the writer and the read-only verifier cannot
- * disagree about which files hold the chain.
+ * **The set of files is read stably, or read again.** The writer can roll over
+ * between this listing the segments and this opening the active file: the
+ * segment it just closed is then not in the list, and the active file starts past
+ * the records that went into it — so an intact chain would read as a `seq` jump.
+ * A pass therefore records which segments it read and where the active file began,
+ * re-lists afterwards, and starts over (fresh walker and sink from `begin`, at most
+ * `MAX_WALK_ATTEMPTS` times) when a segment appeared or the active file did not
+ * begin at the last closed segment's `lastSeq + 1`. A chain that is genuinely
+ * broken at that boundary fails the same check every time and is reported after the
+ * last attempt, exactly as the walker found it.
+ *
+ * `begin` is called once per pass and hands back the walker and the record sink for
+ * it. Shared by `AuditLog.scan` and `verifyAuditSegments`, so the writer and the
+ * read-only verifier cannot disagree about which files hold the chain.
  */
-async function walkAuditFiles(
+export async function walkAuditFiles(
 	path: string,
-	walker: ChainWalker,
-	onRecord: (record: AuditRecord) => void,
-): Promise<{ unparseable: number; segments: number; firstSeq: number | null; lastSeq: number | null }> {
-	let unparseable = 0;
-	let firstSeq: number | null = null;
-	let lastSeq: number | null = null;
-	const scanFile = async (file: string): Promise<void> => {
-		for await (const line of readLines(file)) {
-			if (line.trim().length === 0) continue;
-			let parsed: unknown;
-			try {
-				parsed = JSON.parse(line);
-			} catch {
-				unparseable++;
-				continue;
+	begin: () => { walker: ChainWalker; onRecord: (record: AuditRecord) => void },
+): Promise<{ unparseable: number; segments: number; firstSeq: number | null; lastSeq: number | null; attempts: number }> {
+	for (let attempt = 1; ; attempt++) {
+		const closed = listAuditSegments(path);
+		const { walker, onRecord } = begin();
+		let unparseable = 0;
+		let firstSeq: number | null = null;
+		let lastSeq: number | null = null;
+		let activeFirstSeq: number | null = null;
+		const scanFile = async (file: string, active: boolean): Promise<void> => {
+			for await (const line of readLines(file)) {
+				if (line.trim().length === 0) continue;
+				let parsed: unknown;
+				try {
+					parsed = JSON.parse(line);
+				} catch {
+					unparseable++;
+					continue;
+				}
+				// A line that parses but is not a record is a *chain* fault, not an
+				// unparseable line: the walker reports it as one rather than throwing while
+				// reading fields off it — which used to reach `/evidence` as an HTTP 500.
+				walker.push(parsed);
+				if (isAuditRecord(parsed)) {
+					firstSeq ??= parsed.seq;
+					lastSeq = parsed.seq;
+					if (active) activeFirstSeq ??= parsed.seq;
+					onRecord(parsed);
+				}
 			}
-			// A line that parses but is not a record is a *chain* fault, not an
-			// unparseable line: the walker reports it as one rather than throwing while
-			// reading fields off it — which used to reach `/evidence` as an HTTP 500.
-			walker.push(parsed);
-			if (isAuditRecord(parsed)) {
-				firstSeq ??= parsed.seq;
-				lastSeq = parsed.seq;
-				onRecord(parsed);
-			}
-		}
-	};
-	const closed = listAuditSegments(path);
-	for (const segment of closed) await scanFile(segment.path);
-	if (existsSync(path)) await scanFile(path);
-	return { unparseable, segments: closed.length, firstSeq, lastSeq };
+		};
+		for (const segment of closed) await scanFile(segment.path, false);
+		if (existsSync(path)) await scanFile(path, true);
+
+		const result = { unparseable, segments: closed.length, firstSeq, lastSeq, attempts: attempt };
+		if (attempt >= MAX_WALK_ATTEMPTS) return result;
+		const after = listAuditSegments(path);
+		const sameSet = after.length === closed.length && after.every((segment, i) => segment.path === closed[i]?.path);
+		const newest = closed[closed.length - 1];
+		const continuous = newest === undefined || activeFirstSeq === null || activeFirstSeq === newest.lastSeq + 1;
+		if (sameSet && continuous) return result;
+	}
 }
 
 /** The checkpoint at `target`, or null when there is none this can trust. */
@@ -1065,10 +1111,17 @@ function reportFrom(
  */
 export async function verifyAuditSegments(path: string, checkpointPath: string | null = `${path}.checkpoint`): Promise<AuditReport> {
 	const anchor = checkpointPath === null ? null : readCheckpointFile(checkpointPath);
-	const walker = new ChainWalker({ genesis: true });
+	let walker = new ChainWalker({ genesis: true });
 	let rewritten = false;
-	const { unparseable, segments, firstSeq, lastSeq } = await walkAuditFiles(path, walker, (record) => {
-		if (anchor && record.seq === anchor.seq && record.hash !== anchor.hash) rewritten = true;
+	const { unparseable, segments, firstSeq, lastSeq } = await walkAuditFiles(path, () => {
+		walker = new ChainWalker({ genesis: true });
+		rewritten = false;
+		return {
+			walker,
+			onRecord: (record) => {
+				if (anchor && record.seq === anchor.seq && record.hash !== anchor.hash) rewritten = true;
+			},
+		};
 	});
 	let lostHistory: MissingHistory | null = null;
 	if (anchor && (lastSeq ?? 0) < anchor.seq) {

@@ -62,7 +62,7 @@ Every `substrate-*` unit carries `Slice=substrate.slice` and its own memory and 
 
 ### Loopback redis
 
-`substrate-mcp` caches in a redis on `127.0.0.1` (`DRAGONFLY_URL`; `docs/data-planes.md`, cache row). The cache tolerates loss by design, so it needs no persistence and must not snapshot to a disk measured at 95 %. `infra/vps/redis-substrate.conf` sets `maxmemory 256mb`, `allkeys-lru`, `save ""`, `appendonly no` and a loopback-only `bind`; `infra/vps/redis-server.service.d/10-substrate-limits.conf` caps the process at `MemoryMax=768M`. Operator step, its own window, not automated:
+`substrate-mcp` caches in a redis on `127.0.0.1` (`DRAGONFLY_URL`; `docs/data-planes.md`, cache row). The cache tolerates loss by design, so it needs no persistence and must not snapshot to a disk measured at 95 %. `infra/vps/redis-substrate.conf` sets `maxmemory 256mb`, `maxmemory-policy volatile-lru`, `save ""`, `appendonly no` and a loopback-only `bind`; `infra/vps/redis-server.service.d/10-substrate-limits.conf` caps the process at `MemoryMax=768M`. The policy is `volatile-lru` and not `allkeys-lru` on purpose: cached answers and snapshots carry TTLs, the generation counters (`substrate:v1:gen:*`) do not, and a reader treats a missing counter as generation 0 — so an evicted counter would make a generation-0 answer still inside its TTL readable again after a write had invalidated it. Evicting only TTL-bearing keys keeps every bump visible until its entries expire; the file's header spells it out. Operator step, its own window, not automated:
 
 ```sh
 install -m 0640 -o redis -g redis infra/vps/redis-substrate.conf /etc/redis/redis-substrate.conf
@@ -71,7 +71,7 @@ grep -q '^include /etc/redis/redis-substrate.conf' /etc/redis/redis.conf || \
 install -d -m 0755 /etc/systemd/system/redis-server.service.d
 cp infra/vps/redis-server.service.d/10-substrate-limits.conf /etc/systemd/system/redis-server.service.d/10-substrate-limits.conf
 systemctl daemon-reload && systemctl restart redis-server
-redis-cli -h 127.0.0.1 config get maxmemory-policy   # allkeys-lru
+redis-cli -h 127.0.0.1 config get maxmemory-policy   # volatile-lru
 ```
 
 The `include` goes last so it wins over the distro defaults above it. The restart empties the cache; the next brief is served uncached and refills it. Rollback: remove the `include` line and the drop-in, `daemon-reload`, restart.

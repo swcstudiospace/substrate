@@ -261,6 +261,12 @@ class PlaneServerError extends Error {
  * 4xx is the caller's fault and counts as a success. `opOf` maps the request to
  * a bounded operation label, so the metric attribute is a route table, never a
  * URL.
+ *
+ * The **body is read inside the gate**. A server that sends its headers and then
+ * stalls would otherwise be a success here and a timeout in the caller, leaving
+ * the breaker closed and availability counting it ok. The buffered bytes are
+ * handed back as a fresh `Response` with the same status and headers, so every
+ * client's `response.json()` / `.text()` is unchanged and settles at once.
  */
 export function gatedFetch(
 	gate: PlaneGate | null | undefined,
@@ -275,14 +281,41 @@ export function gatedFetch(
 		try {
 			return await callPlane(gate, op, async () => {
 				const response = await fetchImpl(input, init);
-				if (response.status >= 500) throw new PlaneServerError(response);
-				return response;
+				// Same signal as the request: an `AbortSignal.timeout` that fires during
+				// the body read ends it with the TimeoutError the gate classifies, whether
+				// or not the underlying stream is wired to the signal.
+				const body = await readBody(response, init?.signal ?? null);
+				const buffered = new Response(response.status === 204 || response.status === 304 ? null : body, {
+					status: response.status,
+					statusText: response.statusText,
+					headers: response.headers,
+				});
+				if (response.status >= 500) throw new PlaneServerError(buffered);
+				return buffered;
 			});
 		} catch (error) {
 			if (error instanceof PlaneServerError) return error.response;
 			throw error;
 		}
 	};
+}
+
+/** The whole body, or the signal's reason (as an Error carrying its name) once it aborts. */
+function readBody(response: Response, signal: AbortSignal | null): Promise<ArrayBuffer> {
+	if (!signal) return response.arrayBuffer();
+	const abortError = (): Error => {
+		const reason: unknown = signal.reason;
+		if (reason instanceof Error) return reason;
+		const error = new Error(String(reason ?? "aborted"));
+		error.name = reason !== null && typeof reason === "object" && "name" in reason && typeof reason.name === "string" ? reason.name : "AbortError";
+		return error;
+	};
+	if (signal.aborted) return Promise.reject(abortError());
+	const { promise, resolve, reject } = Promise.withResolvers<ArrayBuffer>();
+	const onAbort = (): void => reject(abortError());
+	signal.addEventListener("abort", onAbort, { once: true });
+	response.arrayBuffer().then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+	return promise;
 }
 
 /** One gate per plane, sharing the settings and the observer. */

@@ -59,7 +59,7 @@ Modified: `packages/mcp-server/src/planes/ragflow.ts`, `planes/ragflow.test.ts`,
 ## Deviations and why
 
 - **Metadata travels as a `meta_fields` PATCH after the upload** (§Update document) rather than inside the upload: the documented upload has no metadata slot. A failed PATCH deletes the orphan and fails the page, so no document sits on the plane without its source URL.
-- **`source_url` in citations comes from the ingest record** (`SearchDeps.sourceUrlOf`, the service scans `docsIngestSeen` by document id) because the reference documents no metadata echo on retrieval chunks; the chunk's own `source_url` still wins when a deployment echoes it. `heading_path` is empty unless echoed.
+- **`source_url` (and, since Greptile round 1, `commit`) in citations come from the ingest record** (`SearchDeps.provenanceOf`, the service resolves `docsIngestSeen` by document id) because the reference documents no metadata echo on retrieval chunks; the chunk's own `source_url` still wins when a deployment echoes it. `heading_path` is empty unless echoed.
 - **`pollParseStatus` takes `{dataset_id, document_id}`** — the documented status read is per dataset. Same name, one more field.
 - **`top_k` / `vector_similarity_weight`** are sent as the assignment names them; the reference marks `top_k` a deprecated alias of `knn_top_k` and `vector_similarity_weight` the legacy fallback of `keywords_similarity_weight` (both still documented and accepted). Noted in the docs; switching to the newer names is a one-line follow-up once a live call attests the backend version.
 - **Document name = repo path with `/` → `__`** (not the basename): two pages with the same basename must not collide on the plane.
@@ -88,6 +88,10 @@ Modified: `packages/mcp-server/src/planes/ragflow.ts`, `planes/ragflow.test.ts`,
 - Whether `top_k`/`vector_similarity_weight` are still accepted by the deployed version (documented as deprecated/legacy aliases).
 - Multipart acceptance of a `.md` file named `docs__x.md` and its type detection; parse duration against the 30 × 2 s budget.
 - The delete call's effect on already-served chunks (prune is off by default until attested).
+
+## Greptile round 1 (PR #59)
+
+**[P1] service.ts "Citations name the wrong commit"** — `searchDocs` stamped the dataset's newest pin on every chunk; with the prune off a retrieval can return a replaced document (labelled with the newer commit), and a direct `docs_ingest` changes documents without recording a version (the reverse). Fixed at the root: the commit is kept **per document**. `IngestRecord` (state file v2, extended compatibly) gains `commit?` (the upload's named commit; "unpinned" on the wire is not a commit) and `superseded?: [{document_id, commit?}]` — the replaced-but-unpruned predecessors of the same source URL, last five (`DATASET_VERSION_RETENTION`), a pruned predecessor not kept; `loadIngestRecords` reads both, older files load with neither. New `documentProvenance(seen, documentId)` → `{source_url, commit?}` over current documents and lineage. `SearchDeps.sourceUrlOf` became `provenanceOf`; `cite` resolves `commit` as: record commit → recorded without one: `dataset-pin:<name>:unpinned` → unknown document: dataset pin → neither: unpinned. The `docs-search` cache is already invalidated by every ingest (`gen:docs`), so a cached answer cannot outlive a record change. Files: `docs-ingest.ts`, `docs-search.ts`, `service.ts` (docs region, one line), `docs-plane-hardening.test.ts` (two regressions: replaced-unpruned cites its older commit / new cites new / unknown → pin / bare direct ingest → unpinned; lineage round-trips the state file across a restart and a prune drops the pruned predecessor), `docs/docs-search-ingest.md` (resolution order).
 
 ## Gates
 

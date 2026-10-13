@@ -138,8 +138,15 @@ export class RagflowFake {
 	readonly deleted: string[] = [];
 	/** Every document on the plane, by id. */
 	readonly documents: Record<string, FakeDocument> = {};
-	/** `done` parses after two polls; `never` stays running so timeout logic is provable; `fail` fails on the first poll. */
+	/** `done` parses after `parseDonePolls` polls; `never` stays running so timeout logic is provable; `fail` fails on the first poll. */
 	parseBehavior: "done" | "never" | "fail" = "done";
+	/**
+	 * Polls before a `done` parse reads `DONE`. Two by default, so a poller
+	 * provably re-reads; tests that drive ingest through `Substrate` — whose
+	 * production cadence sleeps 2 s between polls — set 1 to stay inside the
+	 * runner's 5 s budget.
+	 */
+	parseDonePolls = 2;
 	private nextDoc = 1;
 	/** A dataset's served chunks, by dataset id. Tests replace entries for redaction proofs. */
 	readonly chunks: Record<string, FakeChunk[]> = {
@@ -353,7 +360,7 @@ export class RagflowFake {
 			if (document.run !== "RUNNING") continue;
 			document.polls += 1;
 			if (this.parseBehavior === "fail") document.run = "FAIL";
-			else if (this.parseBehavior === "done" && document.polls >= 2) document.run = "DONE";
+			else if (this.parseBehavior === "done" && document.polls >= this.parseDonePolls) document.run = "DONE";
 		}
 		return Response.json({
 			code: 0,

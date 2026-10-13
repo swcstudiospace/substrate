@@ -259,7 +259,7 @@ sample count is the shared `SUBSTRATE_SLO_MIN_SAMPLES`. An open-breaker refusal
 counts against the plane: the caller did not get an answer. Unlike the catalogue,
 these are judged over a **rolling hour**, not the process lifetime: `PlaneWindow`
 remembers the cumulative counts each `/slo` read sees (same discipline as the burn
-ledger — same-second reads coalesce, a counter reset drops the history), and the
+ledger — readings in the same 10 s bucket coalesce (the bucket keeps its first reading as the baseline and its newest as the head), so the hour is 360 buckets whatever the scrape rate; a counter reset drops the history), and the
 verdict is the share of calls between the oldest reading inside the hour and now.
 One reading alone judges nothing. A plane the deployment does not configure
 reports `unconfigured`, never `breached`, and plane breaches are **not** folded

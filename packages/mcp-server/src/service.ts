@@ -46,6 +46,7 @@ import {
 	type VersionStore,
 } from "./docs-datasets.ts";
 import {
+	documentProvenance,
 	ingestDocs,
 	loadIngestRecords,
 	saveIngestRecords,
@@ -908,25 +909,28 @@ export class Substrate {
 		// uplift-2 R3: the outbox hydrates its file (if any) now, so entries parked
 		// before a restart are due again from the first drain tick. Every drop —
 		// bound, exhausted attempts, a memory-only queue at shutdown — ends with
-		// the warning the live forward would have emitted, in the same shape.
+		// the warning the live forward would have emitted, in the same shape; a
+		// save that fails warns once too, because the queue is then no longer
+		// durable and shutdown abandons it like a memory-only one.
+		const warnRetain = (entry: RetainOutboxEntry, reason: string): void => {
+			// Tracked like a forward: the shutdown drain waits for it (bounded).
+			this.trackRetain(
+				emitRetainWarning(
+					(event) => this.emit(event),
+					entry.surface,
+					entry.session_id,
+					`hindsight retain failed: ${reason} (${entry.bank}/${entry.document_id})`,
+					{ reason, bank: entry.bank, document_id: entry.document_id, entry_hash: entry.entry_hash },
+				),
+			);
+		};
 		this.retainOutbox = new RetainOutbox({
 			path: config.retainOutbox.path,
 			max: config.retainOutbox.max,
 			maxAttempts: config.retainOutbox.maxAttempts,
 			allow: () => this.planes.gate("hindsight").breaker?.state() !== "open",
-			onDrop: (entry, cause) => {
-				const reason = cause === "outbox-full" ? "outbox-full" : entry.last_reason;
-				// Tracked like a forward: the shutdown drain waits for it (bounded).
-				this.trackRetain(
-					emitRetainWarning(
-						(event) => this.emit(event),
-						entry.surface,
-						entry.session_id,
-						`hindsight retain failed: ${reason} (${entry.bank}/${entry.document_id})`,
-						{ reason, bank: entry.bank, document_id: entry.document_id, entry_hash: entry.entry_hash },
-					),
-				);
-			},
+			onDrop: (entry, cause) => warnRetain(entry, cause === "outbox-full" ? "outbox-full" : entry.last_reason),
+			onUnsaved: (entry) => warnRetain(entry, "outbox-unsaved"),
 		});
 		if (this.retainOutbox.size() > 0) this.ensureRetainDrainTimer();
 	}
@@ -1351,14 +1355,7 @@ export class Substrate {
 				return result;
 			}
 			const chainKey = `${hindsight.url} ${bankForSurface(hindsight, result.writer)} ${retainDocumentId(entry, result.idempotency_key)}`;
-			const previous = this.retainChains.get(chainKey);
-			const flight = (previous ?? Promise.resolve()).then(run, run);
-			this.retainChains.set(chainKey, flight);
-			this.trackRetain(
-				flight.finally(() => {
-					if (this.retainChains.get(chainKey) === flight) this.retainChains.delete(chainKey);
-				}),
-			);
+			this.trackRetain(this.chainRetain(chainKey, run));
 		}
 		return result;
 	}
@@ -1661,34 +1658,62 @@ export class Substrate {
 	}
 
 	/**
-	 * Replay one parked forward. The entry is re-read by id so the body sent is
-	 * the body in force: gone or superseded means the parked copy is stale and
-	 * is dropped without a word (its replacement had its own forward). An index
-	 * read failure is transient — it costs an attempt, never the entry.
+	 * Run one forward (live or replay) at the tail of its document's chain, so
+	 * forwards to one plane document land in the order they were decided: a
+	 * stalled older body — a retry included — can never replace a newer one
+	 * with `update_mode: replace`. The returned promise is the caller's own
+	 * flight; the chain itself only remembers that it settled.
 	 */
-	private async deliverParkedRetain(parked: RetainOutboxEntry): Promise<RetainDeliveryOutcome> {
-		const hindsight = hindsightFromEnv();
-		if (!hindsight || !this.index) return "gone";
-		let current: MemoryEntry | null;
-		try {
-			current = await this.index.readEntry(parked.entry_id);
-		} catch {
-			return { transient: "index-unreachable" };
-		}
-		if (!current || current.superseded_by !== undefined) return "gone";
-		const outcome = await replayRetain(this.retainDeps(hindsight, "replay"), {
-			entry: current,
-			writer: parked.surface,
-			bank: parked.bank,
-			documentId: parked.document_id,
-			...(parked.session_id !== undefined ? { sessionId: parked.session_id } : {}),
+	private chainRetain<T>(chainKey: string, run: () => Promise<T>): Promise<T> {
+		const previous = this.retainChains.get(chainKey) ?? Promise.resolve();
+		const flight = previous.then(run, run);
+		const tail = flight.then(
+			() => undefined,
+			() => undefined,
+		);
+		this.retainChains.set(chainKey, tail);
+		void tail.finally(() => {
+			if (this.retainChains.get(chainKey) === tail) this.retainChains.delete(chainKey);
 		});
-		if (outcome.forwarded) {
-			await this.cache.bump(MEMORY_GENERATION_KEY).catch(() => undefined);
-			return "delivered";
-		}
-		if (outcome.queued === true) return { transient: outcome.reason ?? "retain-network" };
-		return "permanent";
+		return flight;
+	}
+
+	/**
+	 * Replay one parked forward, at the tail of its document's chain so a live
+	 * forward decided earlier always lands first. Once its turn comes the
+	 * replay re-checks that it is still parked (a live success meanwhile
+	 * forgot it) and re-reads the entry by id so the body sent is the body in
+	 * force: gone or superseded means the parked copy is stale and is dropped
+	 * without a word (its replacement had its own forward). An index read
+	 * failure is transient — it costs an attempt, never the entry.
+	 */
+	private deliverParkedRetain(parked: RetainOutboxEntry): Promise<RetainDeliveryOutcome> {
+		const hindsight = hindsightFromEnv();
+		if (!hindsight || !this.index) return Promise.resolve("gone");
+		const index = this.index;
+		return this.chainRetain(`${hindsight.url} ${parked.bank} ${parked.document_id}`, async () => {
+			if (!this.retainOutbox.holds(parked)) return "gone";
+			let current: MemoryEntry | null;
+			try {
+				current = await index.readEntry(parked.entry_id);
+			} catch {
+				return { transient: "index-unreachable" };
+			}
+			if (!current || current.superseded_by !== undefined) return "gone";
+			const outcome = await replayRetain(this.retainDeps(hindsight, "replay"), {
+				entry: current,
+				writer: parked.surface,
+				bank: parked.bank,
+				documentId: parked.document_id,
+				...(parked.session_id !== undefined ? { sessionId: parked.session_id } : {}),
+			});
+			if (outcome.forwarded) {
+				await this.cache.bump(MEMORY_GENERATION_KEY).catch(() => undefined);
+				return "delivered";
+			}
+			if (outcome.queued === true) return { transient: outcome.reason ?? "retain-network" };
+			return "permanent";
+		});
 	}
 
 	/**
@@ -2749,12 +2774,7 @@ export class Substrate {
 					fetchImpl: this.ragflowFetch,
 					datasets: this.docsDatasetList,
 					retrieval: this.config.docsRetrieval,
-					sourceUrlOf: (documentId) => {
-						for (const record of this.docsIngestSeen.values()) {
-							if (record.document_id === documentId) return record.source_url;
-						}
-						return undefined;
-					},
+					provenanceOf: (documentId) => documentProvenance(this.docsIngestSeen, documentId),
 				},
 				question,
 			);

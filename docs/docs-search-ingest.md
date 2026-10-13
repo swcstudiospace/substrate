@@ -61,16 +61,25 @@ deployment echoes it.
 
 Each `docs_search` result carries `{title, source_url, heading_path,
 commit, snippet, score, document_id, chunk_id}` where every text field is
-redacted — `snippet` additionally capped at 1,200 characters — `commit`
-is the dataset version pinned at ingest time (and names the gap,
-`dataset-pin:<name>:unpinned`, only while nothing is pinned yet),
+redacted — `snippet` additionally capped at 1,200 characters —
 `source_url` is the chunk's own when it carries one, else the ingest
 record's for that document id, else `dataset:<name>`, and callers cite
-`source_url`, never the chunk. The reply carries an untrusted-docs
-notice; one `note` event (`payload.action: "docs.search"`) lists the
-returned URLs; any error yields `{chunks: [], degraded: true, reason}` —
-never a throw inside an agent's turn. At most 10 results, each retrieved
-over explicit `dataset_ids` with `page_size <= 10`.
+`source_url`, never the chunk. `commit` is resolved **per document**, in
+this order: (1) the commit the ingest record holds for that document id
+— the current document of a source URL, or one of its replaced-but-
+unpruned predecessors (the record keeps the last five with their own
+commits, so with the prune off a retrieval that returns an older
+document cites that older commit, never the dataset's newest pin);
+(2) a recorded document that was uploaded by a direct `docs_ingest`
+without a `commit` → `dataset-pin:<name>:unpinned` (it does not borrow
+the dataset pin, which it may predate or postdate); (3) a document the
+records never uploaded (another writer, or records lost) → the dataset's
+newest pin from the version store; (4) neither → `dataset-pin:<name>:unpinned`.
+The reply carries an untrusted-docs notice; one `note` event
+(`payload.action: "docs.search"`) lists the returned URLs; any error
+yields `{chunks: [], degraded: true, reason}` — never a throw inside an
+agent's turn. At most 10 results, each retrieved over explicit
+`dataset_ids` with `page_size <= 10`.
 
 ### Caches (uplift-2 R6)
 

@@ -20,7 +20,7 @@
 import { SQL } from "bun";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { IndexStore } from "./index-store.ts";
-import { DEFAULT_SWEEP_POLICY, type SweepReport } from "./index-sweep.ts";
+import { DEFAULT_SWEEP_POLICY, SWEEP_CLASSES, type SweepReport } from "./index-sweep.ts";
 
 const PG_URL = process.env.SUBSTRATE_TEST_PG_URL?.trim();
 const RUN = `ut-sweeptest-${Date.now().toString(36)}`;
@@ -129,6 +129,13 @@ describeLive("index sweep against a live index", () => {
 			["g-terminal-old", "Done", 91],
 			["g-terminal-young", "Closed", 89],
 			["g-open-old", "In Progress", 400],
+			// Finished long ago, but a node is held on a live lease — a claim does not
+			// refuse a terminal graph and never touches `graph_index.updated`.
+			["g-terminal-lease-live", "Merged", 400],
+			// Finished long ago, its lease lapsed and nobody reaped it: deletable.
+			["g-terminal-lease-expired", "Merged", 400],
+			// Finished long ago and free; claimed on a second connection mid-sweep by the race test.
+			["g-terminal-race", "Done", 400],
 		];
 		for (const [name, status, days] of graphs) {
 			const graphId = id(name);
@@ -140,6 +147,26 @@ describeLive("index sweep against a live index", () => {
 			await raw`insert into graph_steps (graph_id, node_id, step, state) values (${graphId}, 'n1', 1, 'done')`;
 			await raw`insert into graph_bindings (correlation_id, graph_id, bound_by) values (${`${graphId}-corr`}, ${graphId}, 'test')`;
 		}
+		// The leases, in the columns the CAS helpers write.
+		await raw`
+			update graph_nodes set claimed_by = 'hermes', claim_session = ${`${RUN}-live`}, claimed_at = now(),
+				lease_id = ${`lse_${RUN}_live`}, lease_epoch = 1, lease_heartbeat_at = now(),
+				lease_expires_at = now() + interval '1 hour'
+			where graph_id = ${id("g-terminal-lease-live")} and node_id = 'n1'`;
+		await raw`
+			update graph_nodes set claimed_by = 'hermes', claim_session = ${`${RUN}-expired`}, claimed_at = ${ago(2)},
+				lease_id = ${`lse_${RUN}_expired`}, lease_epoch = 1, lease_heartbeat_at = ${ago(2)},
+				lease_expires_at = ${ago(1)}
+			where graph_id = ${id("g-terminal-lease-expired")} and node_id = 'n1'`;
+	}
+
+	/** `graph_nodes` only: the sweep would have to see this claim land between its pick and its node delete. */
+	async function claimLive(name: string): Promise<void> {
+		await raw`
+			update graph_nodes set claimed_by = 'hermes', claim_session = ${`${RUN}-race`}, claimed_at = now(),
+				lease_id = ${`lse_${RUN}_race`}, lease_epoch = lease_epoch + 1, lease_heartbeat_at = now(),
+				lease_expires_at = now() + interval '1 hour'
+			where graph_id = ${id(name)} and node_id = 'n2'`;
 	}
 
 	async function count(table: string, column: string, name: string): Promise<number> {
@@ -179,6 +206,43 @@ describeLive("index sweep against a live index", () => {
 		expect(await count("memory_entries", "id", "e-v1-old")).toBe(1);
 	});
 
+	test("a claim that lands between the pick and the node delete keeps its graph, with no orphans", async () => {
+		// The sweep's own statements, driven by hand inside one transaction with the
+		// pick's lock held, and the claim arriving on a second connection in between —
+		// the window `IndexStore.sweep` cannot be paused in.
+		const graphs = SWEEP_CLASSES.find((cls) => cls.id === "graphs-terminal")!;
+		const cutoff = new Date(NOW - 90 * DAY_MS).toISOString();
+		const raced = id("g-terminal-race");
+		const outcome = await raw.begin(async (tx) => {
+			const batch = graphs.deleteBatch!(cutoff, 5_000);
+			const picked = (await tx.unsafe(batch.pick.text, batch.pick.params as unknown[])) as Array<Record<string, unknown>>;
+			expect(picked.map((row) => String(row.graph_id))).toContain(raced);
+			// Only the raced graph goes on to the delete here; the rest stay for the apply test.
+			const statements = batch.then!([{ graph_id: raced }]);
+			await claimLive("g-terminal-race");
+			const row: Record<string, unknown> = {};
+			for (const statement of statements) {
+				Object.assign(row, ((await tx.unsafe(statement.text, statement.params as unknown[])) as Array<Record<string, unknown>>)[0]);
+			}
+			return row;
+		});
+		// n1 (no lease) went; n2 (just claimed) survived; so the index row and its
+		// edge, step and binding all stayed.
+		expect(Number(outcome.nodes)).toBe(1);
+		expect(Number(outcome.deleted)).toBe(0);
+		expect(await count("graph_index", "graph_id", "g-terminal-race")).toBe(1);
+		expect(await count("graph_nodes", "graph_id", "g-terminal-race")).toBe(1);
+		expect(await count("graph_edges", "graph_id", "g-terminal-race")).toBe(1);
+		expect(await count("graph_steps", "graph_id", "g-terminal-race")).toBe(1);
+		expect(await count("graph_bindings", "graph_id", "g-terminal-race")).toBe(1);
+		// And it is no longer a candidate at all while the lease is live: the next
+		// pick — the count's predicate — does not name it, so no later round retries it.
+		const batch = graphs.deleteBatch!(cutoff, 5_000);
+		const next = (await raw.unsafe(batch.pick.text, batch.pick.params as unknown[])) as Array<Record<string, unknown>>;
+		expect(next.map((row) => String(row.graph_id))).not.toContain(raced);
+		expect(next.map((row) => String(row.graph_id))).toContain(id("g-terminal-old"));
+	});
+
 	test("apply removes exactly the spent rows and the terminal graph's cascade, and keeps the live twins", async () => {
 		const report = await store.sweep({ apply: true, now: NOW, policy: DEFAULT_SWEEP_POLICY });
 		const classes = byId(report);
@@ -202,7 +266,8 @@ describeLive("index sweep against a live index", () => {
 		expect(await count("memory_quarantine", "id", "q-unresolved-old")).toBe(1);
 		expect(classes["quarantine-unresolved"]?.deleted).toBe(0);
 
-		// Graphs: the whole terminal-old graph, and nothing of the other two.
+		// Graphs: the whole terminal-old graph and the one whose lease lapsed; nothing
+		// of the young, the open, or the two somebody holds a live lease on.
 		for (const [table, column] of [
 			["graph_index", "graph_id"],
 			["graph_nodes", "graph_id"],
@@ -211,14 +276,29 @@ describeLive("index sweep against a live index", () => {
 			["graph_bindings", "graph_id"],
 		] as const) {
 			expect(await count(table, column, "g-terminal-old")).toBe(0);
+			expect(await count(table, column, "g-terminal-lease-expired")).toBe(0);
 			expect(await count(table, column, "g-terminal-young")).toBeGreaterThanOrEqual(1);
 			expect(await count(table, column, "g-open-old")).toBeGreaterThanOrEqual(1);
+			expect(await count(table, column, "g-terminal-lease-live")).toBeGreaterThanOrEqual(1);
+			expect(await count(table, column, "g-terminal-race")).toBeGreaterThanOrEqual(1);
 		}
-		expect(classes["graphs-terminal"]?.deleted).toBeGreaterThanOrEqual(1);
-		expect(classes["graphs-terminal"]?.children?.edges).toBeGreaterThanOrEqual(1);
-		expect(classes["graphs-terminal"]?.children?.steps).toBeGreaterThanOrEqual(1);
-		expect(classes["graphs-terminal"]?.children?.bindings).toBeGreaterThanOrEqual(1);
-		expect(classes["graphs-terminal"]?.children?.nodes).toBeGreaterThanOrEqual(2);
+		// The held graph was never a candidate — the exclusion is in the count, not
+		// only in the delete — so it is neither counted nor reported as skipped here.
+		expect(classes["graphs-terminal"]?.children?.skipped_live_lease ?? 0).toBe(0);
+		expect(classes["graphs-terminal"]?.deleted).toBeGreaterThanOrEqual(2);
+		expect(classes["graphs-terminal"]?.children?.edges).toBeGreaterThanOrEqual(2);
+		expect(classes["graphs-terminal"]?.children?.steps).toBeGreaterThanOrEqual(2);
+		expect(classes["graphs-terminal"]?.children?.bindings).toBeGreaterThanOrEqual(2);
+		expect(classes["graphs-terminal"]?.children?.nodes).toBeGreaterThanOrEqual(4);
+		// No orphans: every edge, step and binding of this run still names a graph that exists.
+		for (const table of ["graph_edges", "graph_steps", "graph_bindings", "graph_nodes"]) {
+			const orphans = (await raw.unsafe(
+				`select count(*)::int as n from ${table} t where t.graph_id like $1 ` +
+					"and not exists (select 1 from graph_index g where g.graph_id = t.graph_id)",
+				[`${RUN}%`],
+			)) as Array<{ n: number }>;
+			expect(orphans[0]?.n ?? 0).toBe(0);
+		}
 
 		// Memory entries: the old superseded version goes; the standing entry, the
 		// young superseded one and both ttl classes stay (reads still return them).
