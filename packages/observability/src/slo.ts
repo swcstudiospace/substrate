@@ -320,6 +320,59 @@ export function evaluateSlos(snapshot: MetricSnapshot[], catalogue: SloTarget[] 
 	);
 }
 
+// ── admission budgets (uplift-3 N3) ──────────────────────────────────────────
+
+/**
+ * `admission.limited_rate`: refusals ÷ decisions of `substrate.admission.decisions`,
+ * at most 1 %. Beside the catalogue like the plane and burn objectives, because
+ * the catalogue is pinned to SPE-4793's four. `decided` is every decision the
+ * bucket itself made — `allowed`, `limited`, `shadow_limited` — so a `bypass`
+ * (the cache not answering) neither helps nor hurts the rate; `limited` alone is
+ * the numerator, so in `shadow` mode the rate is 0 whatever the shadow refusals
+ * say, and the shadow count is read from the metric while the budgets are tuned.
+ * 100 decisions before it is judged: a 1 % ceiling cannot be told from noise on
+ * fewer.
+ */
+export const ADMISSION_SLO: Exclude<SloTarget, { kind: "latency-quantile" }> = {
+	kind: "ratio-ceiling",
+	id: "admission.limited_rate",
+	title: "Admission refusal rate",
+	statement: `limited / (allowed + limited + shadow_limited) of ${METRIC.admissionDecisions} <= 1.00 %`,
+	numerator: { metric: METRIC.admissionDecisions, where: { decision: "limited" } },
+	denominator: { metric: METRIC.admissionDecisions },
+	target: 0.01,
+	minSamples: 100,
+};
+
+/**
+ * The bypasses are not decisions, so they are taken out of the denominator
+ * rather than summed by `evaluateRatio`: a cache outage must not dilute the
+ * refusal rate into `ok`.
+ */
+export function evaluateAdmissionSlo(snapshot: MetricSnapshot[], target = ADMISSION_SLO): SloResult {
+	const counter = findCounter(snapshot, target.denominator.metric);
+	const decided = counter ? sumCounter(counter) - sumCounter(counter, { decision: "bypass" }) : 0;
+	const limited = counter ? sumCounter(counter, target.numerator.where) : 0;
+	const base = { id: target.id, title: target.title, statement: target.statement, unit: "ratio" as const, target: target.target };
+	if (decided < target.minSamples) {
+		return {
+			...base,
+			status: "insufficient-data",
+			observed: decided > 0 ? limited / decided : null,
+			samples: decided,
+			detail: `${decided} of ${target.minSamples} decisions needed before this objective is judged`,
+		};
+	}
+	const observed = limited / decided;
+	return {
+		...base,
+		status: observed <= target.target ? "ok" : "breached",
+		observed,
+		samples: decided,
+		detail: `${limited} of ${decided} (${(observed * 100).toFixed(3)} %); objective is at most ${(target.target * 100).toFixed(3)} %`,
+	};
+}
+
 /** Every objective that is failing. Empty means nothing is breached — not that everything is judged. */
 export function breaches(results: SloResult[]): SloResult[] {
 	return results.filter((result) => result.status === "breached");

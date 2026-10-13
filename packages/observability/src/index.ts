@@ -72,10 +72,14 @@ export {
 } from "./otlp.ts";
 
 export {
+	type AdmissionClass,
+	type AdmissionDecision,
 	type ClaimOutcome,
 	type EventRefusalReason,
 	type PlaneErrorReason,
 	type Usage,
+	ADMISSION_CLASSES,
+	ADMISSION_DECISIONS,
 	CLAIM_OUTCOMES,
 	EVENT_REFUSAL_REASONS,
 	METRIC,
@@ -119,11 +123,13 @@ export {
 	type SloStatus,
 	type SloTarget,
 	type SloThresholds,
+	ADMISSION_SLO,
 	DEFAULT_THRESHOLDS,
 	PLANE_AVAILABILITY_ENV,
 	PLANE_WINDOW_MS,
 	PlaneWindow,
 	breaches,
+	evaluateAdmissionSlo,
 	evaluatePlaneSlos,
 	evaluateSlos,
 	sharedPlaneWindow,

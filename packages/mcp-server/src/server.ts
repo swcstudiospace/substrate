@@ -23,12 +23,16 @@
  * under the same tool name and the same audit mode its MCP equivalent has, and a
  * fail-closed route whose record the chain refuses is answered 503 rather than served.
  * Only `/healthz`, `/metrics` and `/slo` are exempt, and no agent action is behind them.
+ *
+ * Since uplift-3 N3 every other request also passes the admission budget of its
+ * bearer's surface — after the 401, before the handler and before the audit —
+ * so one surface's storm cannot spend another's brief budget. See `admission.ts`.
  */
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { auditMode } from "@substrate/audit";
-import { classifyEventRefusal, evaluateBurnSlos, loadBurnThresholds, type EventRefusalReason } from "@substrate/observability";
+import { classifyEventRefusal, evaluateAdmissionSlo, evaluateBurnSlos, loadBurnThresholds, type EventRefusalReason } from "@substrate/observability";
 import {
 	anonymousBridge,
 	isOperator,
@@ -37,6 +41,7 @@ import {
 	unmappedBearer,
 	type SubstrateConfig,
 } from "./config.ts";
+import { Admission, admitBatch, budgetBody, budgetRefusal, routeClass, type AdmissionVerdict } from "./admission.ts";
 import { buildAgentCard, isKnownCardSurface } from "./agent-card.ts";
 import { DATASET_TRIGGERS } from "./docs-datasets.ts";
 import { scanIngestPages } from "./docs-ingest.ts";
@@ -431,6 +436,15 @@ function sendJson(res: ServerResponse, status: number, value: unknown): void {
 	send(res, status, JSON.stringify(value), "application/json");
 }
 
+/**
+ * The 429 of an enforced budget: an integer `Retry-After` and the bounded body
+ * from `admission.ts`. Sent before the handler and before the audit — a refused
+ * request did nothing, so there is no action to record, only a decision to count.
+ */
+function sendBudgetRefusal(res: ServerResponse, verdict: AdmissionVerdict, body: unknown = budgetBody(verdict)): void {
+	send(res, 429, JSON.stringify(body), "application/json", { "retry-after": String(verdict.retryAfterS) });
+}
+
 /** A surface named in a request body. Only ever trusted on an unauthenticated run. */
 function bodySurface(body: Record<string, unknown>): Surface | null {
 	return typeof body.surface === "string" ? (body.surface as Surface) : null;
@@ -532,6 +546,13 @@ export function createHttpServer(
 	// The last `/healthz` body, served again for `config.healthzCacheMs` (uplift-2 R1).
 	const now = options.now ?? Date.now;
 	let healthMemo: HealthMemo | null = null;
+	// uplift-3 N3: the bucket per surface × class, on the cache plane. The
+	// decision is recorded through the same observer the service reports to.
+	const admission = new Admission(config.admission, {
+		script: (script, keys, args) => substrate.cacheScript(script, keys, args),
+		now,
+		record: (verdict) => observability.observer.admission?.(verdict),
+	});
 	const server = createServer(async (req, res) => {
 		const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
 		const authorization = req.headers.authorization ?? null;
@@ -605,6 +626,18 @@ export function createHttpServer(
 			return;
 		}
 
+		// uplift-3 N3: admission, after the bearer is known and before any handler.
+		// Monitor GETs are not metered; `/mcp` is metered per tool call in
+		// `handleMcp`, where the batch is parsed. A `limited` verdict only exists in
+		// `enforce`; `shadow` and every bypass fall through to the handler.
+		const klass = routeClass(req.method ?? "GET", url.pathname);
+		if (klass !== null) {
+			const verdict = await admission.admit({ surface, klass, cost: 1 });
+			if (verdict.decision === "limited") {
+				sendBudgetRefusal(res, verdict);
+				return;
+			}
+		}
 		try {
 			if (req.method === "GET" && url.pathname === "/healthz") {
 				// Memoised for `healthzCacheMs` (uplift-2 R1): every collector polls this
@@ -665,6 +698,9 @@ export function createHttpServer(
 				// the deployment does not have, and never folded into `breached`, which
 				// stays the catalogue's own list.
 				const planes = observability.evaluatePlanes(substrate.planesConfigured());
+				// The admission refusal rate (uplift-3 N3) rides beside the catalogue
+				// the same way: one objective, `insufficient-data` under 100 decisions.
+				const admissionSlo = evaluateAdmissionSlo(observability.snapshot());
 				// 200 either way. A breached objective is information, not a broken service,
 				// and a monitor that read this as an outage would page on a slow hour.
 				sendJson(res, 200, {
@@ -672,6 +708,7 @@ export function createHttpServer(
 					breached: results.filter((result) => result.status === "breached").map((result) => result.id),
 					burn,
 					planes,
+					admission: admissionSlo,
 				});
 				return;
 			}
@@ -1213,7 +1250,7 @@ export function createHttpServer(
 			}
 
 			if (url.pathname === "/mcp") {
-				await handleMcp(req, res, substrate, caller, observability, claim);
+				await handleMcp(req, res, substrate, caller, observability, claim, admission);
 				return;
 			}
 
@@ -1460,6 +1497,7 @@ async function handleMcp(
 	caller: McpCaller,
 	observability: Observability,
 	claim: { surface: string },
+	admission: Admission,
 ): Promise<void> {
 	if (req.method !== "POST") {
 		// Stateless mode has no server-initiated stream to attach to.
@@ -1470,7 +1508,18 @@ async function handleMcp(
 	const body: unknown = raw ? JSON.parse(raw) : undefined;
 	rememberClaim(claim, body);
 
-	const { denials } = await auditToolCalls(observability, caller.surface, toolCallsIn(body));
+	// uplift-3 N3: the batch is costed here, where its members are known — one
+	// token per `tools/call` of each member's class — and refused whole before
+	// any member runs and before the audit, which records actions, not refusals.
+	// One request token alone would let a batch of fifty calls cost one.
+	const calls = toolCallsIn(body);
+	const refused = await admitBatch(admission, caller.surface, calls);
+	if (refused !== null) {
+		sendBudgetRefusal(res, refused, budgetRefusal(body, refused));
+		return;
+	}
+
+	const { denials } = await auditToolCalls(observability, caller.surface, calls);
 	if (denials.size > 0) {
 		// 200 with a JSON-RPC error, not an HTTP error: the request was well-formed and
 		// the refusal is the answer to it, which is what an MCP client knows how to read.

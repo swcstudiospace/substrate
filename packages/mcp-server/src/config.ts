@@ -5,7 +5,8 @@
  * EnvironmentFile. Nothing here ever reads a secret from the repo.
  */
 import { SOLANA_CLI_DEFAULT } from "@substrate/ledger";
-import { loadBreakerSettings, type BreakerSettings } from "@substrate/observability";
+import { ADMISSION_CLASSES, loadBreakerSettings, type AdmissionClass, type BreakerSettings } from "@substrate/observability";
+import { ADMISSION_MODES, type AdmissionMode, type AdmissionSettings, type BucketLimit } from "./admission.ts";
 import { DEFAULT_INGEST_ROOTS } from "./docs-ingest.ts";
 import { normalizeTtlSeconds } from "./lease.ts";
 import { LINEAR_API_URL } from "./linear.ts";
@@ -324,6 +325,14 @@ export interface SubstrateConfig {
 	 * The defaults are RAGFlow's own; junk or out-of-range values fall back.
 	 */
 	docsRetrieval: RetrievalKnobs;
+	// uplift-3 N3 — admission budgets
+	/**
+	 * `SUBSTRATE_BUDGETS` (`off` | `shadow` | `enforce`, default `shadow`) and
+	 * the per-class buckets from `SUBSTRATE_BUDGET_<CLASS>_RPS` / `_BURST`, with
+	 * per-surface `SUBSTRATE_BUDGET_<SURFACE>_<CLASS>_RPS` / `_BURST` overrides
+	 * and the shared `SUBSTRATE_BUDGET_ANONYMOUS_RPS` / `_BURST`. See `admission.ts`.
+	 */
+	admission: AdmissionSettings;
 }
 
 /** Production defaults: September's library, so the host ledger keeps deduplicating. */
@@ -578,6 +587,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 			vectorSimilarityWeight: unitIntervalOr(env.SUBSTRATE_DOCS_VECTOR_WEIGHT, DEFAULT_RETRIEVAL_KNOBS.vectorSimilarityWeight),
 			topK: positiveOr(env.SUBSTRATE_DOCS_TOP_K, DEFAULT_RETRIEVAL_KNOBS.topK),
 		},
+		// uplift-3 N3
+		admission: loadAdmissionSettings(env),
 	};
 }
 
@@ -597,6 +608,68 @@ function positiveOr(raw: string | undefined, fallback: number): number {
 function unitIntervalOr(raw: string | undefined, fallback: number): number {
 	const value = Number(raw?.trim());
 	return raw !== undefined && raw.trim() !== "" && Number.isFinite(value) && value >= 0 && value <= 1 ? value : fallback;
+}
+
+/** uplift-3 N3: a finite rate > 0, fractions kept (0.5 rps is one call per 2 s); anything else is the default. */
+function positiveRateOr(raw: string | undefined, fallback: number): number {
+	const value = Number(raw?.trim());
+	return raw !== undefined && raw.trim() !== "" && Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+/** uplift-3 N3 defaults, per surface and second: the burst is one second of headroom over the rate. */
+export const DEFAULT_BUDGETS: Readonly<Record<AdmissionClass, BucketLimit>> & { readonly anonymous: BucketLimit } = {
+	read: { rps: 20, burst: 40 },
+	write: { rps: 10, burst: 20 },
+	coordination: { rps: 30, burst: 60 },
+	anonymous: { rps: 2, burst: 4 },
+};
+
+/**
+ * uplift-3 N3. The mode defaults to `shadow`: decide and count, never refuse,
+ * so the numbers are tuned from the metric before `enforce` makes a wrong one
+ * a 429. A per-surface override may set the rate, the burst or both; the half
+ * it leaves out is the class default, so `SUBSTRATE_BUDGET_GROK_BOT_READ_RPS=5`
+ * alone keeps the read burst of 40.
+ */
+export function loadAdmissionSettings(env: Record<string, string | undefined>): AdmissionSettings {
+	const rawMode = env.SUBSTRATE_BUDGETS?.trim().toLowerCase() ?? "";
+	const mode: AdmissionMode = (ADMISSION_MODES as readonly string[]).includes(rawMode) ? (rawMode as AdmissionMode) : "shadow";
+	const classes = Object.fromEntries(
+		ADMISSION_CLASSES.map((klass) => {
+			const name = klass.toUpperCase();
+			return [
+				klass,
+				{
+					rps: positiveRateOr(env[`SUBSTRATE_BUDGET_${name}_RPS`], DEFAULT_BUDGETS[klass].rps),
+					burst: positiveOr(env[`SUBSTRATE_BUDGET_${name}_BURST`], DEFAULT_BUDGETS[klass].burst),
+				},
+			];
+		}),
+	) as Record<AdmissionClass, BucketLimit>;
+	const overrides: AdmissionSettings["overrides"] = {};
+	for (const surface of SURFACES) {
+		// `grok-bot` → `GROK_BOT`, the spelling `SUBSTRATE_TOKEN_*` already uses.
+		const spelled = surface.toUpperCase().replace(/-/g, "_");
+		for (const klass of ADMISSION_CLASSES) {
+			const prefix = `SUBSTRATE_BUDGET_${spelled}_${klass.toUpperCase()}`;
+			const rps = env[`${prefix}_RPS`];
+			const burst = env[`${prefix}_BURST`];
+			if ((rps?.trim() ?? "") === "" && (burst?.trim() ?? "") === "") continue;
+			(overrides[surface] ??= {})[klass] = {
+				rps: positiveRateOr(rps, classes[klass].rps),
+				burst: positiveOr(burst, classes[klass].burst),
+			};
+		}
+	}
+	return {
+		mode,
+		classes,
+		anonymous: {
+			rps: positiveRateOr(env.SUBSTRATE_BUDGET_ANONYMOUS_RPS, DEFAULT_BUDGETS.anonymous.rps),
+			burst: positiveOr(env.SUBSTRATE_BUDGET_ANONYMOUS_BURST, DEFAULT_BUDGETS.anonymous.burst),
+		},
+		overrides,
+	};
 }
 
 /**

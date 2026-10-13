@@ -31,6 +31,7 @@ export const METRIC = {
 	cacheOperations: "substrate.cache.operations",
 	planeDuration: "substrate.plane.duration",
 	planeErrors: "substrate.plane.errors",
+	admissionDecisions: "substrate.admission.decisions",
 } as const;
 
 /** Why a plane call failed. One series each, so the reason stays bounded. */
@@ -56,6 +57,21 @@ export function classifyPlaneReason(sample: PlaneSample): PlaneErrorReason | nul
 	}
 	return "other";
 }
+
+/**
+ * The admission budget classes (uplift-3 N3). `coordination` is its own class so
+ * a heartbeat or a release never queues behind a storm of reads; a lease lost to
+ * throttling is the failure the budgets must not cause.
+ */
+export const ADMISSION_CLASSES = ["read", "write", "coordination"] as const;
+export type AdmissionClass = (typeof ADMISSION_CLASSES)[number];
+
+/**
+ * What the bucket decided. `shadow_limited` is a refusal that was not enforced
+ * (`SUBSTRATE_BUDGETS=shadow`); `bypass` is the cache not answering, which admits.
+ */
+export const ADMISSION_DECISIONS = ["allowed", "limited", "shadow_limited", "bypass"] as const;
+export type AdmissionDecision = (typeof ADMISSION_DECISIONS)[number];
 
 /** Why a `POST /events` was refused with 4xx. One series each, so the reason stays bounded. */
 export const EVENT_REFUSAL_REASONS = ["auth", "validation", "attribution", "graph_id"] as const;
@@ -168,6 +184,7 @@ export class SubstrateInstruments {
 	readonly cacheOperations: Counter;
 	readonly planeDuration: Histogram;
 	readonly planeErrors: Counter;
+	readonly admissionDecisions: Counter;
 
 	constructor(registry: MetricRegistry = new MetricRegistry()) {
 		this.registry = registry;
@@ -245,6 +262,10 @@ export class SubstrateInstruments {
 		this.planeErrors = registry.counter(METRIC.planeErrors, {
 			description: "Failed plane calls by plane and reason (timeout|network|server|open|other).",
 			unit: "{call}",
+		});
+		this.admissionDecisions = registry.counter(METRIC.admissionDecisions, {
+			description: "Admission budget decisions by surface, class (read|write|coordination) and decision (allowed|limited|shadow_limited|bypass).",
+			unit: "{decision}",
 		});
 	}
 
@@ -358,5 +379,14 @@ export class SubstrateInstruments {
 			1,
 			cleanAttributes({ route: sample.route, claimed_surface: sample.claimedSurface }),
 		);
+	}
+
+	/**
+	 * One admission decision (uplift-3 N3). `surface` is the bucket identity — a
+	 * known surface or `anonymous` — never a body-claimed name, so the series stay
+	 * bounded by the surface list; the other two labels are closed sets.
+	 */
+	recordAdmission(sample: { surface: string; klass: AdmissionClass; decision: AdmissionDecision }): void {
+		this.admissionDecisions.add(1, { surface: sample.surface, class: sample.klass, decision: sample.decision });
 	}
 }

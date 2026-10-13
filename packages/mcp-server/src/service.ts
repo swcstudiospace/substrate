@@ -12,6 +12,8 @@ import {
 	PLANES,
 	PlaneRegistry,
 	gatedFetch,
+	type AdmissionClass,
+	type AdmissionDecision,
 	type BreakerSnapshot,
 	type PlaneName,
 	type PlaneSample,
@@ -28,6 +30,7 @@ import {
 	type CacheHealth,
 	type CacheSample,
 	type ReadThroughCache,
+	type ScriptOutcome,
 } from "./cache.ts";
 import { isReviewToken, type SubstrateConfig } from "./config.ts";
 import { DesktopBusy, type DesktopDriver, type DesktopLogEntry, type DesktopRunResult } from "./desktop/driver.ts";
@@ -533,6 +536,8 @@ export interface SubstrateObserver {
 	cached?(sample: CacheSample): void;
 	/** One outbound call to a data plane, as its gate observed it (uplift-2 R2). */
 	plane?(sample: PlaneSample): void;
+	/** One admission budget decision (uplift-3 N3), as `server.ts` took it. */
+	admission?(sample: { surface: string; klass: AdmissionClass; decision: AdmissionDecision }): void;
 	claimed?(sample: {
 		surface: Surface;
 		graph_id: string;
@@ -3917,6 +3922,15 @@ export class Substrate {
 			hindsight: hindsightFromEnv() !== null,
 			ragflow: this.config.ragflow !== null,
 		};
+	}
+
+	/**
+	 * The admission bucket's round trip (uplift-3 N3): one script on the cache
+	 * plane, through its gate, timeout and cooldown. The cache stays private;
+	 * this is the one door `server.ts` has to it, and it never throws.
+	 */
+	cacheScript(script: string, keys: readonly string[], args: readonly string[]): Promise<ScriptOutcome> {
+		return this.cache.script(script, keys, args);
 	}
 
 	/**
