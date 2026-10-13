@@ -577,6 +577,120 @@ window read into a file outside the VPS disk:
 DROP TABLE "agent_events_pre_append_20260930";
 ```
 
+## Coverage and archive (uplift-3 N6)
+
+Two things BP-7 and DP-ret ("180 days hot, then export") promised and nothing
+showed: whether the hourly anchor is keeping up, and a verified export of what a
+TTL would delete. Both are read-only on the ledger; the archive writes only to
+the operator's directory and records one `note` per day it wrote.
+
+### Coverage
+
+`GreptimeClient.anchorCoverage({ now })` makes four bounded reads: the newest
+`anchors.period_start`; the anchor rows of the last 7 days (the anchor job's own
+lookback); one `date_bin` histogram over the same window of `event_ingest` — a
+count per hour, never the rows; and the newest `ledger archive` note on the
+`substrate`/`note` series, bounded on `ts`. It answers
+
+```
+{ newestAnchoredHour, lagHours, uncoveredHours: [ISO…], more, lastArchiveWindow }
+```
+
+An hour is *eligible* once it started an hour ago and is closed (its end plus
+the 5-minute ingest lag has passed) — one tick for the anchor timer, so a fresh
+boundary never reads as a gap; *uncovered* when eligible, holding ingest
+records and having no `anchors` row. The list is ascending, at most 48 with the
+newest kept and `more: true` when it was cut. `lagHours` counts whole hours from
+the newest anchored hour to the hour `now` is in, so **1 is the steady state**
+and `null` means no hour was ever anchored. Membership is "has a record in the
+hour", one step looser than `hourLeaves`'s first-record rule: an hour whose only
+record is a retry of an event first ingested the hour before (a one-second
+window at a boundary) is listed although the job rightly skips it; `substrate
+verify` on the event settles it.
+
+`substrate ledger coverage [--json]` prints it and exits 2 when the uncovered
+count exceeds `SUBSTRATE_LEDGER_MAX_UNCOVERED_HOURS` (default 2) or the list was
+cut, 1 when the ledger could not be read. `/healthz.jobs.ledger` carries
+`{ anchorLagHours, uncoveredHours (count), more, newestAnchoredHour, lastArchiveDay,
+computedAt }` from one `anchorCoverage` read memoised for 60 s in the service
+(`Substrate.ledgerJobs`): overlapping health calls share the one read, a caller
+waits at most the 1 s probe bound for it and otherwise gets `jobs.ledger: null`
+with `jobs.ledgerReason` while the read finishes and fills the memo; a failed
+read is memoised too, as `null` with its redacted, host-free reason, so an
+unreachable ledger costs one attempt a minute. It never changes the status code.
+
+### Archive
+
+`substrate ledger archive [--until YYYY-MM-DD] [--out DIR] [--page-size N]`
+(`packages/mcp-server/src/ledger-run.ts`, spawned by the CLI like `index sweep`
+because the ledger client stays inside the server package) writes every closed
+UTC day from the oldest event's day up to `--until` (yesterday by default; a day
+closes at midnight plus the ingest lag) that has no `manifest-<day>.json` in
+`--out` (default `SUBSTRATE_LEDGER_ARCHIVE_DIR`). A day with a manifest is never
+rewritten. Per day:
+
+| File | One line per | From |
+| --- | --- | --- |
+| `events-<day>.ndjson` | event, the exact hashed shape (`rowToEvent`), in `(ts, id)` order | `exportWindow` pages |
+| `ingest-<day>.ndjson` | event with a first ingest record: `{ event_id, ingested_at, event_ts }` | same pages |
+| `anchors-<day>.ndjson` | `anchors` row whose period starts in the day | same pages |
+| `manifest-<day>.json` | `{ day, counts: { events, ingest, ingestMissing, anchors }, first, last, chainTip, hourlyRoots, sha256, writtenAt, releaseSha? }` | written last |
+
+The window is the time index — `[day 00:00Z, next 00:00Z)` on `ts` — because
+that is the column a TTL expires on, so every event lands in exactly one day's
+archive. `GreptimeClient.exportWindow({ from, to, after?, limit })` reads it by
+keyset, never OFFSET: `("ts" > a OR ("ts" = a AND "id" > b)) ORDER BY "ts", "id"
+LIMIT n`, so a page costs the same on page 200 as on page one and a same-
+millisecond tie is split identically on the server and in the cursor; `next` is
+the last row of a full page. Each page also carries the first ingest record of
+its events (by id, bounded below at `from` less an hour — a backdated event's
+record is *later* than its `ts`) and the window's receipts. `hourlyRoots` are
+RFC 6962 roots per *first-ingest* hour over the day's members in
+`(ingested_at, event_id)` order — exactly the anchor job's grouping — and
+`chainTip` is the hash of the last event in file order. Files are written as
+`*.part` and renamed, data files before the manifest, so a manifest on disk
+always names complete files and a crash leaves only `.part` files for the next
+run to remove.
+
+Before writing a byte the command refuses: a day that is not closed; `--out`
+empty (what systemd expands an unset `SUBSTRATE_LEDGER_ARCHIVE_DIR` to); a
+directory that is `/`, inside the working tree, under `/opt/agent-substrate` or
+itself a checkout; and a filesystem with fewer than `SUBSTRATE_DEPLOY_MIN_FREE_GB`
+(5; `0` disables) gigabytes free, read with `df -Pk` exactly as the deploy gate
+reads it — unreadable refuses. Each archived day is then recorded in the ledger
+as a `note` on surface `substrate` (`session_id: "ledger-archive:<day>"`,
+`summary: "ledger archive <day>: …"`, `payload.action: "ledger.archive"` with the
+counts, cursors, chain tip and file digests — no bodies, no path), which is what
+`coverage` and `/healthz` read back as the last archive window. Exit 0 done, 1 a
+ledger failure, 2 a refusal. `infra/vps/substrate-ledger-archive.timer` runs it
+daily at 03:30 UTC, disabled until the operator mounts the off-box path
+(`infra/vps/README.md`, *Daily ledger archive*).
+
+### Verify
+
+`substrate ledger verify-archive <dir> [--day YYYY-MM-DD]` needs no ledger. For
+each manifest in the directory (or the one day) it recomputes, from the files
+alone: the SHA-256 of each data file against the manifest; the line counts; every
+event's `hash` as `eventHash` of the rest of the line (the recomputation
+`substrate verify` makes); the chain — within a session no two events may claim
+the same `prev` (a fork), while a `prev` naming an event outside the archive is a
+chain continuing from another day and is fine — and the chain tip; the hourly
+roots from the ingest file, hour for hour against the manifest; and each hour
+against its receipt: `verified` when the receipt's `event_count` equals the
+members present and the roots agree, `partial` when the count differs (the hour
+straddles midnight or holds a backdated event, so the rest is in another day's
+archive), `unanchored` with no receipt, `mismatched` — a finding — when the
+count agrees and the root does not. Every finding is `{ kind, file?, event?,
+hour?, detail }` with `kind` one of `missing | manifest | sha256 | count | parse
+| hash | chain | root | anchor`; the report never throws on a mismatch, and the
+command exits 2 on any, 1 when there was nothing to verify.
+
+**What this does not do.** It does not prove the archive *complete*: a backdated
+event ingested after its `ts` day was archived is missing from that day's file
+and will expire unarchived. `coverage` cannot see that either. The archive is a
+record of what the ledger held at `writtenAt`; `substrate verify <graph_id>`
+against the live ledger remains the check for recent graphs.
+
 ## Retention: opt-in TTL (uplift-2 R5)
 
 `docs/data-planes.md` sets the ledger's policy as **"180 days hot, then export"**.
@@ -612,14 +726,16 @@ stays, and an exported hour can still be checked against it. What is lost is the
 ability to *recompute* a root for an expired hour from the ledger itself.
 
 **Export before expiry.** The policy says *then export*, and the VPS disk is at
-95 % (BASELINES.md), so the export goes off-box. Before the first day on which
-rows would expire, an operator reads the window that is about to leave with
-`events_query` (`since`/`until` bounds, `include_payload: true`, paging by
-session or graph since the read is a window, not a cursor) or directly over the
-HTTP SQL API with the same `WHERE "ts" >= … AND "ts" < …` shape, and writes the
-rows to a file on a volume that is not the VPS root disk. The ingest records of
-the same `ingested_at` window go with them, so an exported hour can be
-re-anchored. Only once the export is confirmed is `SUBSTRATE_LEDGER_TTL` set.
+94 % (BASELINES.md), so the export goes off-box. **The precondition for setting
+`SUBSTRATE_LEDGER_TTL` is a verified archive of every day that would expire:**
+`substrate ledger archive --until <day>` for every closed day older than the TTL
+(the command writes every closed day without a manifest), then `substrate ledger
+verify-archive <dir>` exiting 0, then `substrate ledger coverage` showing the last
+archive window — see *Coverage and archive* above. The ingest records go with the
+events, so an exported hour can be re-anchored, and the receipts go with them so
+it can be checked without the ledger. Only once that verify has passed is
+`SUBSTRATE_LEDGER_TTL` set; from then on the daily timer keeps the archive one
+day ahead of expiry, and a day the timer missed is written by its next run.
 
 **Rollback.** The client has no path for it, by design. Per the Greptime SQL
 reference page *ALTER* (section "Unset table options"), the statement is
@@ -655,6 +771,8 @@ Plus switches, none of which is a credential:
 | `SUBSTRATE_LEDGER_CHAIN_LOOKBACK_DAYS` | how far back in `ts` the one seeding read looks before it falls back to the whole session, 1..3650; default 30. |
 | `SUBSTRATE_LEDGER_WRITE_PROBE_S` | seconds between `/healthz` write probes, 0..86400; default 60. `0` never probes, and `eventsWritable` is metadata-only again. |
 | `SUBSTRATE_LEDGER_TTL` | retention applied to `agent_events` and `event_ingest` at boot, a Greptime duration such as `180d`. Unset by default: nothing is altered. Invalid refuses to boot. See *Retention*. |
+| `SUBSTRATE_LEDGER_MAX_UNCOVERED_HOURS` | uncovered eligible hours `substrate ledger coverage` tolerates before exiting 2, 0..100000; default 2. Report-only on `/healthz`. See *Coverage and archive*. |
+| `SUBSTRATE_LEDGER_ARCHIVE_DIR` | where `substrate ledger archive` writes when `--out` is omitted, and what the archive unit's `ExecStart` expands. Unset by default: the command refuses by name. An off-box mount, never the root disk. |
 
 Out-of-range numbers clamp and unparseable ones fall back, as the breaker settings do.
 

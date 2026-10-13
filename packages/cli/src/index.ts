@@ -15,6 +15,8 @@
  *       ingest one page into a docs dataset (docs/docs-search-ingest.md)
  *   substrate index sweep [--apply] [--json]  the index retention sweep (dry-run unless --apply
  *       AND SUBSTRATE_INDEX_SWEEP=apply are both given)
+ *   substrate ledger coverage|archive|verify-archive   anchor coverage and the verified
+ *       off-box archive (docs/greptime-ledger.md, "Coverage and archive")
  *
  * Exit status is always 0 for `brief`, `emit` and `handoff`. These run inside
  * git hooks and editor hooks, where a non-zero exit can abort the user's commit
@@ -37,6 +39,7 @@ import { resolveBearer } from "./token.ts";
 import { docsTimeout, runDocs } from "./docs.ts";
 import { httpMemory, lessonsTimeout, runLessons } from "./lessons.ts";
 import { runSkills, skillsTimeout } from "./skills.ts";
+import { runLedger } from "./ledger.ts";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -456,6 +459,19 @@ function cmdIndex(argv: string[], args: Record<string, string | true>): number {
 	return result.status ?? 1;
 }
 
+/**
+ * `substrate ledger …` — the same spawn-the-runner shape as `index sweep`, for
+ * the same reason: the ledger client and its credentials live in the server
+ * package only. The grammar check and the exit code are `runLedger`'s.
+ */
+function cmdLedger(argv: string[], args: Record<string, string | true>): number {
+	const runner = join(import.meta.dir, "..", "..", "mcp-server", "src", "ledger-run.ts");
+	return runLedger(argv, args, {
+		spawn: (runnerArgs) => spawnSync(process.execPath, [runner, ...runnerArgs], { stdio: "inherit", env: process.env }).status ?? 1,
+		err: (text) => process.stderr.write(text),
+	});
+}
+
 const [command, ...rest] = process.argv.slice(2);
 const args = parseArgs(rest);
 
@@ -518,6 +534,8 @@ switch (command) {
 		);
 	case "index":
 		process.exit(cmdIndex(rest, args));
+	case "ledger":
+		process.exit(cmdLedger(rest, args));
 	default:
 		process.stdout.write(
 			"substrate brief [--repo R] [--branch B] [--graph G] [--surface S] [--write]\n" +
@@ -532,7 +550,8 @@ switch (command) {
 				"substrate skills propose --dir PATH [--name N] [--rationale R] [--remove a,b] [--session I] [--graph G]\n" +
 				"                         [--dry-run] [--replace] [--reopen] [--allow-doc-examples pem,jwt]\n" +
 				"substrate docs ingest --dataset NAME --path PATH --source-url URL [--commit C] [--heading H] [--session I]\n" +
-				"substrate index sweep [--apply] [--json]   (--apply also needs SUBSTRATE_INDEX_SWEEP=apply)\n",
+				"substrate index sweep [--apply] [--json]   (--apply also needs SUBSTRATE_INDEX_SWEEP=apply)\n" +
+				"substrate ledger coverage [--json] | archive [--until D] [--out DIR] [--page-size N] | verify-archive <dir> [--day D]\n",
 		);
 		process.exit(command ? 2 : 0);
 }

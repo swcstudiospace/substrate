@@ -134,6 +134,34 @@ describe("GET /healthz", () => {
 		expect(offBody.planes.index?.breaker).toBeNull();
 		expect(offBody.capacity).toEqual({ index: null, ledger: null });
 	});
+
+	test("carries jobs.ledger from one memoised coverage read, not one per poll (uplift-3 N6)", async () => {
+		let reads = 0;
+		const greptime = {
+			ping: async () => true,
+			ensureAppendMode: async () => true,
+			probeDialect: async () => true,
+			quotingDialectKnown: true,
+			anchorCoverage: async () => {
+				reads++;
+				return {
+					newestAnchoredHour: "2026-10-13T10:00:00.000Z",
+					lagHours: 1,
+					uncoveredHours: [],
+					more: false,
+					lastArchiveWindow: { day: "2026-10-12", writtenAt: "2026-10-13T03:30:00.000Z", eventId: "evt_note" },
+				};
+			},
+		};
+		// The route's own body memo is off, so each call reaches the service and the 60 s memo is what is measured.
+		const harness = await start({ SUBSTRATE_HEALTHZ_CACHE_MS: "0", SUBSTRATE_LEDGER_WRITE_PROBE_S: "0" }, { greptime });
+		const first = (await (await fetch(`${harness.base}/healthz`)).json()) as { jobs: { ledger: Record<string, unknown> | null; ledgerReason: string | null } };
+		const second = (await (await fetch(`${harness.base}/healthz`)).json()) as typeof first;
+		expect(first.jobs.ledger).toMatchObject({ anchorLagHours: 1, uncoveredHours: 0, more: false, lastArchiveDay: "2026-10-12" });
+		expect(first.jobs.ledgerReason).toBeNull();
+		expect(second.jobs).toEqual(first.jobs);
+		expect(reads).toBe(1);
+	});
 });
 
 describe("GET /slo lists the per-plane objectives", () => {

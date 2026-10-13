@@ -281,6 +281,7 @@ describe("repo units", () => {
 			"substrate-doctor.service",
 			"substrate-host.service",
 			"substrate-index-sweep.service",
+			"substrate-ledger-archive.service",
 			"substrate-mcp.service",
 			"substrate-skills-bridge.service",
 			"substrate-skills-sync.service",
@@ -313,6 +314,15 @@ describe("repo units", () => {
 		expect(doctor?.environmentFiles).toEqual([SHARED_ENV_FILE]);
 		expect(doctor?.restart).toBeNull();
 		expect(doctor?.environment.has("SUBSTRATE_DOCTOR_EMIT")).toBe(false);
+
+		// The ledger archive (uplift-3 N6) is the same shape again: shared env on the
+		// pinned release, oneshot, and the archive directory on the unit's drop-in
+		// rather than hard-coded, so an unset path refuses instead of writing to root.
+		const archive = units.find((unit) => unit.name === "substrate-ledger-archive.service");
+		expect(archive?.workingDirectory).toBe(RELEASE_CURRENT);
+		expect(archive?.environmentFiles).toEqual([SHARED_ENV_FILE]);
+		expect(archive?.restart).toBeNull();
+		expect(archive?.execStart).toContain("ledger archive --out ${SUBSTRATE_LEDGER_ARCHIVE_DIR}");
 		// The lane-B cutover (infra/vps/README.md operator step 4) moved herdr and
 		// muse onto the release tree with collector-only env files, like grok. Each
 		// unit loads exactly the file the identity manifest delivers its token to, so

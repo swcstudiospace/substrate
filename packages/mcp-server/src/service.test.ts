@@ -808,7 +808,83 @@ describe("append-mode enforcement", () => {
 				ragflow: { ok: null, breaker: closed("ragflow"), lastErrorAt: null },
 			},
 			capacity: { index: null, ledger: null },
+			// The stub has no `anchorCoverage`: the jobs row is null with the reason, never a throw.
+			jobs: { ledger: null, ledgerReason: expect.stringContaining("anchorCoverage") },
 		});
+	});
+
+	test("healthz.jobs.ledger comes from one coverage read a minute, and is null with a reason when the ledger cannot be read (uplift-3 N6)", async () => {
+		const { greptime } = ledger(true);
+		let reads = 0;
+		let fail = false;
+		const coverage = {
+			newestAnchoredHour: "2026-10-13T10:00:00.000Z",
+			lagHours: 2,
+			uncoveredHours: ["2026-10-13T11:00:00.000Z"],
+			more: false,
+			lastArchiveWindow: { day: "2026-10-12", writtenAt: "2026-10-13T03:30:00.000Z", eventId: "evt_a" },
+		};
+		const probed = {
+			...greptime,
+			anchorCoverage: async () => {
+				reads++;
+				if (fail) throw new Error("greptime unreachable: fetch failed http://greptime.test/v1/sql");
+				return coverage;
+			},
+		};
+		// The store's URL is what the reason must not quote; set on the config directly, never as an env literal.
+		const config = { ...loadConfig({}), greptime: { url: "http://greptime.test", user: undefined, password: undefined, db: "public" } };
+		const substrate = new Substrate(config, { index: null, greptime: probed as never });
+		const T0 = Date.UTC(2026, 9, 13, 12, 30);
+		const first = await substrate.ledgerJobs(T0);
+		expect(first).toEqual({
+			ledger: {
+				anchorLagHours: 2,
+				uncoveredHours: 1,
+				more: false,
+				newestAnchoredHour: "2026-10-13T10:00:00.000Z",
+				lastArchiveDay: "2026-10-12",
+				computedAt: new Date(T0).toISOString(),
+			},
+			reason: null,
+		});
+		// Within the minute: the memo, not another read.
+		expect(await substrate.ledgerJobs(T0 + 59_000)).toEqual(first);
+		expect(reads).toBe(1);
+		// Past it: one more read.
+		await substrate.ledgerJobs(T0 + 60_000);
+		expect(reads).toBe(2);
+
+		// An unreachable ledger: null with a redacted, host-free reason — memoised too, so the next call within the minute does not retry.
+		fail = true;
+		const down = await substrate.ledgerJobs(T0 + 120_000);
+		expect(down.ledger).toBeNull();
+		expect(down.reason).toContain("unreachable");
+		expect(down.reason).not.toContain("greptime.test");
+		expect(reads).toBe(3);
+		expect(await substrate.ledgerJobs(T0 + 150_000)).toEqual(down);
+		expect(reads).toBe(3);
+
+		// `health()` carries the same row and still answers while the ledger is down.
+		const health = await substrate.health();
+		expect(health.jobs).toEqual({ ledger: null, ledgerReason: down.reason });
+	});
+
+	test("healthz.jobs.ledger does not wait past the probe bound for a slow coverage read", async () => {
+		const { greptime } = ledger(true);
+		const pending = Promise.withResolvers<never>();
+		const slow = { ...greptime, anchorCoverage: () => pending.promise };
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: slow as never });
+		const started = Date.now();
+		const answer = await substrate.ledgerJobs();
+		expect(Date.now() - started).toBeLessThan(HEALTH_PROBE_MS + 500);
+		expect(answer.ledger).toBeNull();
+		expect(answer.reason).toContain("still running");
+	});
+
+	test("healthz.jobs.ledger is null with a reason when no ledger is configured", async () => {
+		const substrate = new Substrate(loadConfig({}), { index: null, greptime: null });
+		expect(await substrate.ledgerJobs()).toEqual({ ledger: null, reason: "no ledger configured" });
 	});
 
 	test("healthz reports the index's capacity, and null when it does not answer in time", async () => {

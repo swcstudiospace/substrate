@@ -103,7 +103,7 @@ import { governMemoryWrite } from "./memory-write.ts";
 import { TEACHABLE_SUBJECT_PREFIX, isTeachable, teachableEvent } from "./teachable.ts";
 import { bankForSurface, hindsightBanksFromEnv, hindsightFromEnv, hindsightOp, probeHealth, type HindsightConfig } from "./planes/hindsight.ts";
 import { listDatasets, ragflowOp, type FetchLike } from "./planes/ragflow.ts";
-import { redact, type SkillDocExampleRule } from "./redact.ts";
+import { redact, redactKnown, type SkillDocExampleRule } from "./redact.ts";
 import { RetainOutbox, type RetainDeliveryOutcome, type RetainOutboxEntry, type RetainOutboxStats } from "./retain-outbox.ts";
 import {
 	createExecFileRunner,
@@ -141,8 +141,13 @@ import {
 	type SubstrateEvent,
 } from "./types.ts";
 
-/** Greptime gives back loosely typed rows; rebuild the exact shape that was hashed. */
-function rowToEvent(row: Record<string, unknown>): SubstrateEvent {
+/**
+ * Greptime gives back loosely typed rows; rebuild the exact shape that was hashed.
+ * Exported for `ledger-archive.ts`, which writes this shape to the archive so
+ * `verifyArchive` recomputes the same hash from the file that `verifyGraph` does
+ * from the ledger.
+ */
+export function rowToEvent(row: Record<string, unknown>): SubstrateEvent {
 	const text = (value: unknown): string | null => (value === null || value === undefined ? null : String(value));
 	let payload: Record<string, unknown> = {};
 	try {
@@ -4003,6 +4008,11 @@ export class Substrate {
 	 * `eventsWritable`, so a store that stopped taking writes turns `/healthz`
 	 * 503 within one interval by the existing status rule. `capacity.ledger` is
 	 * the ledger's size report, raced against the same bound as the index's.
+	 *
+	 * `jobs.ledger` (uplift-3 N6) is the anchor's lag, the uncovered hours and
+	 * the newest archived day from {@link ledgerJobs}: one coverage read a
+	 * minute, never more, and `null` with `jobs.ledgerReason` when it could not
+	 * be had. It does not touch the status code.
 	 */
 	async health(): Promise<SubstrateHealth> {
 		const greptime = this.greptime ? await this.greptime.ping() : false;
@@ -4051,6 +4061,7 @@ export class Substrate {
 		// A probe that has not run yet (or is off) neither proves nor disproves;
 		// only a failed one overrides the metadata.
 		const eventsWritable = metadataWritable && probe?.lastProbeOk !== false;
+		const ledgerJobs = await this.ledgerJobs();
 		return {
 			index,
 			greptime,
@@ -4068,8 +4079,106 @@ export class Substrate {
 			cache,
 			planes,
 			capacity: { index: capacity, ledger: ledgerCapacity },
+			jobs: { ledger: ledgerJobs.ledger, ledgerReason: ledgerJobs.reason },
 		};
 	}
+
+	/** The last coverage read: when it started and its value, or why it has none. */
+	private ledgerJobsMemo: { at: number; value: LedgerJobsHealth | null; reason: string | null } | null = null;
+	private ledgerJobsInFlight: Promise<void> | null = null;
+
+	/**
+	 * `/healthz.jobs.ledger` (uplift-3 N6): the anchor's lag and uncovered hours
+	 * and the newest archived day, from one `anchorCoverage` read memoised for
+	 * {@link LEDGER_JOBS_MEMO_MS}. The read is four statements including a
+	 * histogram over seven days of ingest records, which is nothing a poller
+	 * should pay per call, so: the memo is served while fresh; a stale memo
+	 * starts one read, shared by every caller that arrives while it runs; the
+	 * caller waits at most `HEALTH_PROBE_MS` for it and otherwise answers `null`
+	 * with the reason while the read finishes in the background and fills the
+	 * memo for the next call. A failed read is memoised too — as `null` with
+	 * its redacted reason — so an unreachable ledger costs one attempt a
+	 * minute, not one per poll. Never throws; `/healthz` still answers.
+	 */
+	async ledgerJobs(now: number = Date.now()): Promise<LedgerJobs> {
+		if (!this.greptime) return { ledger: null, reason: "no ledger configured" };
+		const fresh = (memo: typeof this.ledgerJobsMemo): memo is NonNullable<typeof this.ledgerJobsMemo> =>
+			memo !== null && now - memo.at < LEDGER_JOBS_MEMO_MS;
+		if (fresh(this.ledgerJobsMemo)) return { ledger: this.ledgerJobsMemo.value, reason: this.ledgerJobsMemo.reason };
+		if (this.ledgerJobsInFlight === null) {
+			const greptime = this.greptime;
+			const startedAt = now;
+			this.ledgerJobsInFlight = Promise.resolve()
+				.then(() => greptime.anchorCoverage({ now: startedAt }))
+				.then(
+					(coverage) => {
+						this.ledgerJobsMemo = {
+							at: startedAt,
+							value: {
+								anchorLagHours: coverage.lagHours,
+								uncoveredHours: coverage.uncoveredHours.length,
+								more: coverage.more,
+								newestAnchoredHour: coverage.newestAnchoredHour,
+								lastArchiveDay: coverage.lastArchiveWindow?.day ?? null,
+								computedAt: new Date(startedAt).toISOString(),
+							},
+							reason: null,
+						};
+					},
+					(cause: unknown) => {
+						// A connection error quotes its URL, password and all; the host is
+						// scrubbed by name as the write probe does.
+						const url = this.config.greptime?.url ?? "";
+						let host = "";
+						try {
+							host = new URL(url).host;
+						} catch {
+							// Not a URL, so it cannot appear in the message as a host.
+						}
+						const reason = redactKnown(redact(String(cause instanceof Error ? cause.message : cause)), [url, host]).slice(0, 300);
+						this.ledgerJobsMemo = { at: startedAt, value: null, reason };
+					},
+				)
+				.finally(() => {
+					this.ledgerJobsInFlight = null;
+				});
+		}
+		await bounded(() => this.ledgerJobsInFlight ?? Promise.resolve(), HEALTH_PROBE_MS);
+		if (fresh(this.ledgerJobsMemo)) return { ledger: this.ledgerJobsMemo.value, reason: this.ledgerJobsMemo.reason };
+		return {
+			ledger: null,
+			reason: `coverage read still running after ${HEALTH_PROBE_MS} ms; a call within ${LEDGER_JOBS_MEMO_MS / 1000} s serves its answer`,
+		};
+	}
+}
+
+/** How long one `anchorCoverage` read serves `/healthz.jobs.ledger` (uplift-3 N6). */
+export const LEDGER_JOBS_MEMO_MS = 60_000;
+
+/**
+ * `/healthz.jobs.ledger`: the numbers a monitor pages on. Present only when
+ * the memoised coverage read answered; otherwise `/healthz.jobs.ledger` is
+ * `null` and `ledgerReason` says why, so "no gap" and "could not look" never
+ * read the same.
+ */
+export interface LedgerJobsHealth {
+	/** Whole hours from the newest anchored hour to the current one; `1` is the steady state; `null` with no anchor ever. */
+	anchorLagHours: number | null;
+	/** Closed hours (≥ 1 h old, last 7 days) with ingest records and no anchor; the probe lists at most 48, see `more`. */
+	uncoveredHours: number;
+	/** Whether the probe's list was cut at its cap. */
+	more: boolean;
+	newestAnchoredHour: string | null;
+	/** The day the newest `ledger archive` note names, or `null` when none was ever recorded. */
+	lastArchiveDay: string | null;
+	/** When the memoised read started. */
+	computedAt: string;
+}
+
+/** What `Substrate.ledgerJobs` answers: the value, or `null` and the reason. */
+export interface LedgerJobs {
+	ledger: LedgerJobsHealth | null;
+	reason: string | null;
 }
 
 /** The bound on every per-plane probe `/healthz` makes. */
@@ -4094,6 +4203,8 @@ export interface SubstrateHealth {
 	cache: CacheHealth;
 	planes: Record<PlaneName, PlaneHealth>;
 	capacity: { index: IndexCapacity | null; ledger: LedgerCapacity | null };
+	/** Scheduled-job health (uplift-3 N6): `ledger` is `null` with `ledgerReason` set when the ledger is unconfigured, unreachable or still being read. */
+	jobs: { ledger: LedgerJobsHealth | null; ledgerReason: string | null };
 }
 
 /** `fn`'s answer, or `null` when it throws or outlasts `ms`. */

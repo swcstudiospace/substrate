@@ -13,7 +13,9 @@ import {
 	AppendOnlyViolation,
 	assertAppendOnly,
 	chainTip,
+	COVERAGE_MAX_UNCOVERED,
 	DEFAULT_QUERY_LIMIT,
+	epochMsAnyUnit,
 	EVENT_COLUMNS,
 	GreptimeClient,
 	GreptimeError,
@@ -1827,6 +1829,205 @@ describe("opt-in ttl (uplift-2 R5)", () => {
 			SUBSTRATE_LEDGER_CHAIN_LOOKBACK_DAYS: "9999",
 			SUBSTRATE_LEDGER_WRITE_PROBE_S: "nope",
 		});
-		expect(knobs).toEqual({ chainCache: false, chainCacheMax: 1, chainLookbackDays: 3650, writeProbeS: 60, ttl: null });
+		expect(knobs).toEqual({
+			chainCache: false,
+			chainCacheMax: 1,
+			chainLookbackDays: 3650,
+			writeProbeS: 60,
+			ttl: null,
+			maxUncoveredHours: 2,
+			archiveDir: null,
+		});
+		// uplift-3 N6: the archive knobs read like the others — clamped, trimmed, unset means "not here".
+		expect(loadLedgerSettings({ SUBSTRATE_LEDGER_MAX_UNCOVERED_HOURS: "-3", SUBSTRATE_LEDGER_ARCHIVE_DIR: "  /mnt/ledger-archive " })).toMatchObject({
+			maxUncoveredHours: 0,
+			archiveDir: "/mnt/ledger-archive",
+		});
+		expect(loadLedgerSettings({ SUBSTRATE_LEDGER_ARCHIVE_DIR: "   " }).archiveDir).toBeNull();
+	});
+});
+
+describe("anchorCoverage (uplift-3 N6)", () => {
+	const HOUR = 3_600_000;
+	/** 12:00Z; `now` sits half an hour into it, so H-1 is closed and eligible and H is neither. */
+	const H = Date.UTC(2026, 9, 13, 12);
+	const NOW = H + 30 * 60_000;
+	const ANCHOR_COLUMNS = ["period_start", "period_end", "root", "event_count", "memo", "tx_sig", "signer", "cluster", "slot", "anchored_at", "stale_hashes"];
+	const anchorRow = (hour: number): unknown[] => [hour, hour + HOUR, "a".repeat(64), 3, "memo", "sig", "signer", "devnet", 1, hour + HOUR + 300_000, null];
+
+	/** The four reads, told apart by shape: newest anchor, the anchor window, the ingest histogram, the archive note. */
+	function stubCoverage(options: { anchoredHours: number[]; eventHours: number[]; note?: { ts: number; id: string; payload: string } }): { sql: string[] } {
+		return stubFetch((statement) => {
+			if (statement.includes('FROM "anchors"') && statement.includes('ORDER BY "period_start" DESC')) {
+				const newest = Math.max(...options.anchoredHours);
+				return records(["period_start"], options.anchoredHours.length > 0 ? [[newest]] : []);
+			}
+			if (statement.includes('FROM "anchors"')) return records(ANCHOR_COLUMNS, options.anchoredHours.map(anchorRow));
+			// Seconds, as `to_unixtime` answers, and a count per hour.
+			if (statement.includes("date_bin")) return records(["hour", "n"], options.eventHours.map((hour) => [hour / 1000, 7]));
+			if (statement.includes("ledger archive")) {
+				return records(["ts", "id", "payload"], options.note ? [[options.note.ts, options.note.id, options.note.payload]] : []);
+			}
+			return defaultReply(statement);
+		});
+	}
+
+	test("names the newest anchored hour, the lag in whole hours and the eligible hours with events but no anchor", async () => {
+		const { sql } = stubCoverage({
+			anchoredHours: [H - 3 * HOUR, H - 2 * HOUR],
+			// H-3..H-1 hold events; so does the current hour, which is not eligible.
+			eventHours: [H - 3 * HOUR, H - 2 * HOUR, H - HOUR, H],
+			note: { ts: H - 9 * HOUR, id: "evt_note", payload: JSON.stringify({ action: "ledger.archive", day: "2026-10-12" }) },
+		});
+		const coverage = await new GreptimeClient(config).anchorCoverage({ now: NOW });
+		expect(coverage).toEqual({
+			newestAnchoredHour: new Date(H - 2 * HOUR).toISOString(),
+			lagHours: 2,
+			uncoveredHours: [new Date(H - HOUR).toISOString()],
+			more: false,
+			lastArchiveWindow: { day: "2026-10-12", writtenAt: new Date(H - 9 * HOUR).toISOString(), eventId: "evt_note" },
+		});
+		// Every read is bounded and append-only: the histogram and the anchor window
+		// cover the 7-day lookback, the note read is a `ts` window on the
+		// `substrate`/`note` series, and nothing is written.
+		for (const statement of sql) assertAppendOnly(statement);
+		const histogram = sql.find((s) => s.includes("date_bin")) ?? "";
+		expect(histogram).toContain(`"ingested_at" >= '${new Date(H - 7 * 24 * HOUR).toISOString()}'`);
+		expect(histogram).toContain(`"ingested_at" < '${new Date(H).toISOString()}'`);
+		expect(histogram).toContain("GROUP BY");
+		const note = sql.find((s) => s.includes("ledger archive")) ?? "";
+		expect(note).toContain(`"surface" = 'substrate' AND "kind" = 'note'`);
+		expect(note).toContain('"ts" >=');
+		expect(note).toContain("LIMIT 1");
+		expect(sql.some((s) => s.startsWith("INSERT"))).toBe(false);
+	});
+
+	test("with no anchor at all, lists the newest 48 uncovered hours and says there are more; the lag is unknown", async () => {
+		const eventHours = Array.from({ length: 60 }, (_, i) => H - (i + 1) * HOUR);
+		stubCoverage({ anchoredHours: [], eventHours });
+		const coverage = await new GreptimeClient(config).anchorCoverage({ now: NOW });
+		expect(coverage.newestAnchoredHour).toBeNull();
+		expect(coverage.lagHours).toBeNull();
+		expect(coverage.more).toBe(true);
+		expect(coverage.uncoveredHours).toHaveLength(COVERAGE_MAX_UNCOVERED);
+		expect(coverage.uncoveredHours[0]).toBe(new Date(H - 48 * HOUR).toISOString());
+		expect(coverage.uncoveredHours.at(-1)).toBe(new Date(H - HOUR).toISOString());
+		expect(coverage.lastArchiveWindow).toBeNull();
+	});
+
+	test("an hour that ended less than the lag ago is not eligible yet, so a fresh boundary never reads as a gap", async () => {
+		stubCoverage({ anchoredHours: [H - 2 * HOUR], eventHours: [H - 2 * HOUR, H - HOUR] });
+		// Two minutes into H: H-1 ended 2 min ago, inside INGEST_LAG_MS.
+		const coverage = await new GreptimeClient(config).anchorCoverage({ now: H + 2 * 60_000 });
+		expect(coverage.uncoveredHours).toEqual([]);
+		expect(coverage.lagHours).toBe(2);
+	});
+
+	test("epochMsAnyUnit reads seconds, millis, micros, nanos and ISO text as the same instant", () => {
+		const ms = Date.UTC(2026, 9, 13, 12);
+		expect(epochMsAnyUnit(ms / 1000)).toBe(ms);
+		expect(epochMsAnyUnit(ms)).toBe(ms);
+		expect(epochMsAnyUnit(ms * 1000)).toBe(ms);
+		expect(epochMsAnyUnit(ms * 1_000_000)).toBe(ms);
+		expect(epochMsAnyUnit(new Date(ms).toISOString())).toBe(ms);
+		expect(epochMsAnyUnit(null)).toBeNaN();
+		expect(epochMsAnyUnit("soon")).toBeNaN();
+	});
+});
+
+describe("exportWindow (uplift-3 N6)", () => {
+	const T1 = Date.UTC(2026, 9, 12, 10, 0, 0, 500);
+	const T2 = T1 + 1;
+	const T3 = T1 + 60_000;
+	const FROM = "2026-10-12T00:00:00.000Z";
+	const TO = "2026-10-13T00:00:00.000Z";
+	/** Five events in `(ts, id)` order with a three-way tie on `ts`, as the server would store them. */
+	const EVENTS: Array<{ ts: number; id: string }> = [
+		{ ts: T1, id: "evt_a" },
+		{ ts: T1, id: "evt_b" },
+		{ ts: T1, id: "evt_c" },
+		{ ts: T2, id: "evt_d" },
+		{ ts: T3, id: "evt_e" },
+	];
+	const eventRow = (event: { ts: number; id: string }): unknown[] =>
+		EVENT_COLUMNS.map((column) => (column === "ts" ? event.ts : column === "id" ? event.id : column === "hash" ? "f".repeat(64) : null));
+
+	/** A server that honours the keyset predicate and the LIMIT, so paging is exercised rather than scripted. */
+	function stubWindow(): { sql: string[] } {
+		return stubFetch((statement) => {
+			if (statement.includes('FROM "agent_events"')) {
+				const after = /\("ts" > '([^']+)' OR \("ts" = '([^']+)' AND "id" > '([^']+)'\)\)/.exec(statement);
+				const limit = Number(/LIMIT (\d+)/.exec(statement)?.[1]);
+				const rows = EVENTS.filter((event) => {
+					if (!after) return true;
+					const ts = Date.parse(after[1] ?? "");
+					return event.ts > ts || (event.ts === ts && event.id > (after[3] ?? ""));
+				}).slice(0, limit);
+				return records([...EVENT_COLUMNS], rows.map(eventRow));
+			}
+			if (statement.includes('FROM "event_ingest"')) {
+				const ids = EVENTS.filter((event) => statement.includes(`'${event.id}'`));
+				// evt_c has no ingest record (a legacy row); evt_a has a retry one second later.
+				const rows = ids.filter((event) => event.id !== "evt_c").map((event) => [event.id, event.ts + 100, event.ts]);
+				if (ids.some((event) => event.id === "evt_a")) rows.push(["evt_a", T1 + 1_100, T1]);
+				return records(["event_id", "ingested_at", "event_ts"], rows);
+			}
+			if (statement.includes('FROM "anchors"')) {
+				const hour = Date.UTC(2026, 9, 12, 10);
+				return records(
+					["period_start", "period_end", "root", "event_count", "memo", "tx_sig", "signer", "cluster", "slot", "anchored_at", "stale_hashes"],
+					[[hour, hour + 3_600_000, "a".repeat(64), 5, "memo", "sig", "signer", "devnet", 1, hour + 3_900_000, null]],
+				);
+			}
+			return defaultReply(statement);
+		});
+	}
+
+	test("keyset pages return every row exactly once across a tie on ts, and the continuation round-trips", async () => {
+		const { sql } = stubWindow();
+		const client = new GreptimeClient(config);
+		const seen: string[] = [];
+		let after: { ts: string; id: string } | undefined;
+		let pages = 0;
+		for (;;) {
+			const page = await client.exportWindow({ from: FROM, to: TO, after, limit: 2 });
+			pages++;
+			seen.push(...page.events.map((row) => String(row.id)));
+			expect(page.anchors).toHaveLength(1);
+			if (page.next === null) break;
+			// The token is the page's last row, as JSON would carry it.
+			after = JSON.parse(JSON.stringify(page.next)) as { ts: string; id: string };
+		}
+		expect(seen).toEqual(["evt_a", "evt_b", "evt_c", "evt_d", "evt_e"]);
+		expect(pages).toBe(3);
+		const reads = sql.filter((s) => s.includes('FROM "agent_events"'));
+		expect(reads[0]).not.toContain("OR (");
+		expect(reads[1]).toContain(`("ts" > '${new Date(T1).toISOString()}' OR ("ts" = '${new Date(T1).toISOString()}' AND "id" > 'evt_b'))`);
+		for (const statement of reads) {
+			expect(statement).toContain(`"ts" >= '${FROM}'`);
+			expect(statement).toContain(`"ts" < '${TO}'`);
+			expect(statement).toContain('ORDER BY "ts" ASC, "id" ASC LIMIT 2');
+			expect(statement).not.toContain("OFFSET");
+		}
+		for (const statement of sql) assertAppendOnly(statement);
+	});
+
+	test("carries each event's first ingest record, bounded below at the window start less an hour, and omits events without one", async () => {
+		const { sql } = stubWindow();
+		const page = await new GreptimeClient(config).exportWindow({ from: FROM, to: TO, limit: 10 });
+		expect(page.next).toBeNull();
+		expect(page.ingest.map((row) => row.event_id)).toEqual(["evt_a", "evt_b", "evt_d", "evt_e"]);
+		// The retry record did not move evt_a: the first one counts.
+		expect(page.ingest[0]?.ingested_at).toBe(new Date(T1 + 100).toISOString());
+		const ingest = sql.find((s) => s.includes('FROM "event_ingest"')) ?? "";
+		expect(ingest).toContain(`"ingested_at" >= '${new Date(Date.parse(FROM) - 3_600_000).toISOString()}'`);
+		expect(ingest).toContain('"event_id" IN (');
+	});
+
+	test("refuses a window that is not two ISO instants in order", async () => {
+		stubWindow();
+		const client = new GreptimeClient(config);
+		await expect(client.exportWindow({ from: TO, to: FROM })).rejects.toThrow("from < to");
+		await expect(client.exportWindow({ from: "yesterday", to: TO })).rejects.toThrow("ISO");
 	});
 });
