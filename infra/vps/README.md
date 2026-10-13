@@ -40,6 +40,7 @@ Every service in this directory uses `WorkingDirectory=/opt/agent-substrate/curr
 | `substrate-collector-muse.service` | `substrate-collector-muse.service.d/10-environment.conf` | `/etc/substrate/substrate-collector-muse.env` |
 | `substrate-anchor.service` (+ `substrate-anchor.timer`) | `substrate-anchor.service.d/10-environment.conf` | `/etc/substrate/substrate.env` |
 | `substrate-index-sweep.service` (+ `substrate-index-sweep.timer`, staged: install and enable are operator steps after the dry-run report has been read for a few days) | `substrate-index-sweep.service.d/10-environment.conf` (also carries `Environment=SUBSTRATE_INDEX_SWEEP=dry-run`) | `/etc/substrate/substrate.env` |
+| `substrate-ledger-archive.service` (+ `substrate-ledger-archive.timer`, staged: install and enable are operator steps after the off-box archive path is mounted; see *Daily ledger archive*) | `substrate-ledger-archive.service.d/10-environment.conf` (carries `SUBSTRATE_LEDGER_ARCHIVE_DIR` once the operator sets it) | `/etc/substrate/substrate.env` |
 
 The MCP server is the process that needs the shared env file. The Grok collector must not load it. Create `collector-grok.env` (root-owned, mode 0600) with only the names this process reads: `SUBSTRATE_URL`, `SUBSTRATE_TOKEN`, and optionally `GROK_SESSIONS_DIR`. `SUBSTRATE_COLLECTOR_STATE` is already set on the unit. Do not put database URLs, plane keys, handoff keys, or review tokens in that file. No values belong in git.
 
@@ -57,6 +58,7 @@ Every `substrate-*` unit carries `Slice=substrate.slice` and its own memory and 
 | `substrate-collector-{grok,herdr,muse}.service` | — | 512M | 256 | — |
 | `substrate-dispatcher.service`, `substrate-host.service` | — | 4G | 1024 | — |
 | `substrate-anchor.service`, `substrate-index-sweep.service`, `substrate-skills-{sync,bridge}.service` (oneshots) | — | 1G | — | — |
+| `substrate-ledger-archive.service` (oneshot) | — | 512M | — | — |
 
 `MemoryHigh` throttles; `MemoryMax` is where the kernel ends the process and `Restart=always` (or the timer's next tick, for a oneshot) brings it back. The dispatcher's and host's cgroups hold the sessions and VM lifecycle they launch, which is why theirs are the large ones. Read the live numbers with `systemctl status substrate.slice` and `systemd-cgtop -1 -k /substrate.slice`. Rollback: reinstall the previous unit files (no `Slice=` line) and `daemon-reload`; the slice file is inert without members.
 
@@ -83,6 +85,19 @@ The `include` goes last so it wins over the distro defaults above it. The restar
 Trigger it only through `systemctl start substrate-anchor.service`: systemd never runs a second instance of an active oneshot, and the job re-checks the chain for the period immediately before every send, so two triggers cannot double-anchor an hour. Timing: the 5-minute ingest lag lives in the job, so an hour anchors at the second tick after it ends — pending for about 2 h, inside verify's 3 h window.
 
 The production key is used by the production unit only. A memo for some hour signed by that key from any other ledger would make production alarm on that hour, so the rehearsal harness never carries `SOLANA_*` names — check `env`, not values, if a scratch run looks anchored. The doctor covers the anchor unit like the server: `bun scripts/doctor-units.ts --dry-run` must stay green.
+
+### Daily ledger archive
+
+`substrate-ledger-archive.timer` fires `substrate-ledger-archive.service` daily at 03:30 UTC (`Persistent=true`), after the 03:17 sweep and three hours after the day's last anchor tick. The service is `Type=oneshot` with no `Restart=` and runs `bun packages/cli/src/index.ts ledger archive --out ${SUBSTRATE_LEDGER_ARCHIVE_DIR}` from the pinned release: every closed UTC day up to yesterday that has no `manifest-<day>.json` in the directory yet is exported as `events-<day>.ndjson`, `ingest-<day>.ndjson`, `anchors-<day>.ndjson` and the manifest (counts, first/last `(ts, id)`, chain tip, per-hour RFC 6962 roots, SHA-256 of each file), written as `*.part` and renamed, and recorded in the ledger as one `note` per day. `docs/greptime-ledger.md` ("Coverage and archive") has the format, the verify procedure and why this must exist before `SUBSTRATE_LEDGER_TTL` is set.
+
+**Both files are staged, disabled by default.** The archive must leave the box — the root disk is at 94 % and the release prune would take anything under `/opt/agent-substrate` with it — so enabling is an operator step, in this order:
+
+1. Mount the off-box path (an attached volume, an NFS or object-storage mount) somewhere `ProtectSystem=full` leaves writable, such as `/mnt/ledger-archive`, with at least `SUBSTRATE_DEPLOY_MIN_FREE_GB` (5 GB) free; the command refuses a filesystem below that floor, the release root, the checkout and `/`.
+2. Install the unit, timer and drop-in (`cp infra/vps/substrate-ledger-archive.{service,timer} /etc/systemd/system/`, `install -d -m 0700 /etc/systemd/system/substrate-ledger-archive.service.d`, `install -m 0600 infra/vps/substrate-ledger-archive.service.d/10-environment.conf` there) and add `Environment=SUBSTRATE_LEDGER_ARCHIVE_DIR=/mnt/ledger-archive` to the drop-in (or the same name to `substrate.env`). With the name unset the unit starts, refuses by name (exit 2) and writes nothing.
+3. `systemctl daemon-reload`, then one run by hand — `systemctl start substrate-ledger-archive.service` — and read `journalctl -u substrate-ledger-archive`; verify it from the checkout with `bun packages/cli/src/index.ts ledger verify-archive /mnt/ledger-archive` (exit 2 on any mismatch).
+4. `systemctl enable --now substrate-ledger-archive.timer`. `bun scripts/doctor-units.ts --dry-run` must stay green; `substrate ledger coverage` (and `/healthz.jobs.ledger.lastArchiveDay`) shows the newest archived day.
+
+Only once every day that a TTL would expire has a verified manifest is `SUBSTRATE_LEDGER_TTL` set — see the ledger doc's *Retention*.
 
 ### Root and ProtectHome=false
 

@@ -889,6 +889,11 @@ export interface LedgerSettings {
 	writeProbeS: number;
 	/** Retention to apply to `agent_events` and `event_ingest` at boot; `null` alters nothing. */
 	ttl: string | null;
+	// uplift-3 N6
+	/** Uncovered eligible hours `substrate ledger coverage` tolerates before exiting 2 (`SUBSTRATE_LEDGER_MAX_UNCOVERED_HOURS`, default 2). */
+	maxUncoveredHours: number;
+	/** Where `substrate ledger archive` writes when `--out` is omitted (`SUBSTRATE_LEDGER_ARCHIVE_DIR`); `null` means the command needs `--out`. */
+	archiveDir: string | null;
 }
 
 export const DEFAULT_LEDGER_SETTINGS: LedgerSettings = {
@@ -897,6 +902,8 @@ export const DEFAULT_LEDGER_SETTINGS: LedgerSettings = {
 	chainLookbackDays: 30,
 	writeProbeS: 60,
 	ttl: null,
+	maxUncoveredHours: 2,
+	archiveDir: null,
 };
 
 /**
@@ -942,6 +949,10 @@ export function loadLedgerSettings(env: Record<string, string | undefined> = pro
 		chainLookbackDays: boundedInt(env.SUBSTRATE_LEDGER_CHAIN_LOOKBACK_DAYS, DEFAULT_LEDGER_SETTINGS.chainLookbackDays, 1, 3650),
 		writeProbeS: boundedInt(env.SUBSTRATE_LEDGER_WRITE_PROBE_S, DEFAULT_LEDGER_SETTINGS.writeProbeS, 0, 86_400),
 		ttl: ttlRaw === "" ? null : ttlRaw,
+		// uplift-3 N6: the archive dir is a path, taken as given; the archive command
+		// itself refuses the repo, the release root and a filesystem below the floor.
+		maxUncoveredHours: boundedInt(env.SUBSTRATE_LEDGER_MAX_UNCOVERED_HOURS, DEFAULT_LEDGER_SETTINGS.maxUncoveredHours, 0, 100_000),
+		archiveDir: env.SUBSTRATE_LEDGER_ARCHIVE_DIR?.trim() ? env.SUBSTRATE_LEDGER_ARCHIVE_DIR.trim() : null,
 	};
 }
 

@@ -10,7 +10,7 @@
  *   POST /skills/propose propose a skill as a reviewable PR on the skills library
  *   POST /verify        recompute a graph's hash chain
  *   POST /evidence      the per-graph evidence bundle, as JSON or HTML
- *   GET  /healthz       store reachability, whether events can actually be written, and each plane's breaker
+ *   GET  /healthz       store reachability, whether events can actually be written, each plane's breaker, and the ledger jobs' coverage
  *   GET  /metrics       the OTLP metric snapshot this process holds
  *   GET  /slo           the SLO verdicts computed from it, plus burn and per-plane availability
  *

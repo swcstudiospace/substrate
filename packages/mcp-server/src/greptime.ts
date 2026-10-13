@@ -26,7 +26,7 @@ import { BreakerOpenError, callPlane, type PlaneGate } from "@substrate/observab
 import { DEFAULT_LEDGER_SETTINGS, isGreptimeDuration, type GreptimeConfig, type LedgerSettings } from "./config.ts";
 import { redact, redactKnown } from "./redact.ts";
 import type { SubstrateEvent } from "./types.ts";
-import { hourEnd, hourStart, isClosed } from "@substrate/ledger";
+import { HOUR_MS, hourEnd, hourIso, hourStart, isClosed } from "@substrate/ledger";
 
 const DEFAULT_TIMEOUT_MS = 5000;
 
@@ -511,6 +511,120 @@ export interface GraphIngestRecord {
 	event_id: string;
 	event_ts: number;
 	ingested_at: number;
+}
+
+/**
+ * How far back `anchorCoverage` looks for hours with ingest records and no
+ * anchor row: the anchor job's own 7-day lookback (`ANCHOR_LOOKBACK_MS`), so
+ * the probe reports exactly the hours the job would still pick up. Older
+ * gaps are `substrate verify`'s `unanchored`, and a coverage read must stay
+ * one bounded statement rather than a scan of the whole ingest history.
+ */
+export const COVERAGE_LOOKBACK_MS = 7 * 24 * HOUR_MS;
+
+/** Uncovered hours one coverage report lists; beyond this `more` is set and the oldest are dropped. */
+export const COVERAGE_MAX_UNCOVERED = 48;
+
+/**
+ * How long after an hour *starts* before it counts as eligible for coverage:
+ * one hour, so the hour is closed (`INGEST_LAG_MS` after its end) and the
+ * hourly anchor timer has had its tick. The steady-state lag is therefore 1,
+ * never 0 — the current hour cannot be anchored yet.
+ */
+export const COVERAGE_ELIGIBLE_AGE_MS = HOUR_MS;
+
+/**
+ * How far back `anchorCoverage` looks for the newest `ledger archive` note.
+ * Longer than any retention the policy names (180 d) with margin, so an
+ * archive written before a TTL was switched on is still found; bounded, so the
+ * read never scans the whole `substrate`/`note` series.
+ */
+export const ARCHIVE_NOTE_LOOKBACK_MS = 400 * 24 * HOUR_MS;
+
+/** The `summary` prefix every archive note carries; `anchorCoverage` reads the newest by it. */
+export const ARCHIVE_NOTE_PREFIX = "ledger archive ";
+
+/** What `anchorCoverage` found; see the method for each field's rule. */
+export interface AnchorCoverage {
+	/** ISO start of the newest anchored hour, or `null` when no hour was ever anchored. */
+	newestAnchoredHour: string | null;
+	/** Whole hours from the newest anchored hour to the current one; `1` is the steady state; `null` without an anchor. */
+	lagHours: number | null;
+	/** Eligible hours with ingest records and no anchor row, ISO, ascending; at most {@link COVERAGE_MAX_UNCOVERED}, the newest kept. */
+	uncoveredHours: string[];
+	/** Whether uncovered hours were dropped from the list to keep it bounded. */
+	more: boolean;
+	/** The newest `ledger archive` note the ledger holds, or `null` when no archive was ever recorded. */
+	lastArchiveWindow: { day: string; writtenAt: string; eventId: string } | null;
+}
+
+/** A keyset position in `(ts, id)` order: the last row a page returned, and where the next starts after. */
+export interface ExportCursor {
+	/** ISO `ts` of the row. */
+	ts: string;
+	id: string;
+}
+
+/** One closed window of the ledger, `[from, to)` on `ts`, read in bounded pages. */
+export interface ExportWindowQuery {
+	/** Inclusive ISO lower bound on `ts`. */
+	from: string;
+	/** Exclusive ISO upper bound on `ts`. */
+	to: string;
+	/** Resume strictly after this `(ts, id)`; omit for the first page. */
+	after?: ExportCursor;
+	/** Rows per page, clamped like every other read (`queryLimit`). */
+	limit?: number;
+}
+
+/** One event's first ingest record, ISO-stamped for the archive file. */
+export interface ExportIngestRow {
+	event_id: string;
+	ingested_at: string;
+	event_ts: string;
+}
+
+/** One page of an export window. */
+export interface ExportPage {
+	/** Event rows, every stored column, in `(ts, id)` ascending order. */
+	events: Array<Record<string, unknown>>;
+	/** The first ingest record of each event on this page that has one, in the events' order. */
+	ingest: ExportIngestRow[];
+	/** Anchor receipts whose period starts inside the window; the same rows on every page. */
+	anchors: AnchorRow[];
+	/** Where the next page starts, or `null` when this page was short — the window is exhausted. */
+	next: ExportCursor | null;
+}
+
+/**
+ * A TIMESTAMP-ish cell as epoch milliseconds, whatever unit the server chose.
+ *
+ * `date_bin` answers in the input column's unit over the HTTP API, and a
+ * `to_unixtime` wrapper answers seconds; a text cell parses as ISO. The
+ * magnitude decides: anything below 10^11 is seconds (that is the year 5138
+ * in seconds, 1973 in milliseconds), 10^14 microseconds, 10^17 nanoseconds.
+ * NaN when nothing fits, so a caller names the row instead of misfiling it.
+ */
+export function epochMsAnyUnit(value: unknown): number {
+	if (value === null || value === undefined || value === "") return Number.NaN;
+	const n = typeof value === "number" ? value : Number(value);
+	if (!Number.isFinite(n)) {
+		const parsed = Date.parse(String(value));
+		return Number.isFinite(parsed) ? parsed : Number.NaN;
+	}
+	if (Math.abs(n) < 1e11) return n * 1000;
+	if (Math.abs(n) < 1e14) return n;
+	if (Math.abs(n) < 1e17) return Math.floor(n / 1000);
+	return Math.floor(n / 1_000_000);
+}
+
+/** An ISO instant, strictly: parseable, and `from < to` when both are given. */
+function assertIsoWindow(from: string, to: string): { fromMs: number; toMs: number } {
+	const fromMs = Date.parse(from);
+	const toMs = Date.parse(to);
+	if (!Number.isFinite(fromMs) || !Number.isFinite(toMs)) throw new GreptimeError("export window bounds must be ISO instants");
+	if (fromMs >= toMs) throw new GreptimeError("export window must be non-empty: from < to");
+	return { fromMs, toMs };
 }
 
 export class GreptimeClient {
@@ -1597,5 +1711,184 @@ export class GreptimeClient {
 			rows: tables.reduce((sum, table) => sum + table.rows, 0),
 			tables: tables.slice(0, 10),
 		};
+	}
+
+	/**
+	 * Whether the hourly anchor is keeping up, and what the last archive covered
+	 * (uplift-3 N6). Four bounded reads, nothing written:
+	 *
+	 * - the newest `anchors.period_start` (one row, descending);
+	 * - the anchor rows of the last {@link COVERAGE_LOOKBACK_MS};
+	 * - the ingest hours of the same window as one `date_bin` histogram over
+	 *   `event_ingest` — a count per hour, not the rows — so the probe costs the
+	 *   same whether the hour held one record or a hundred thousand;
+	 * - the newest `ledger archive` note (`surface`/`kind` are the primary key's
+	 *   first and last columns, so the series is small and the `ts` bound keeps
+	 *   it a window).
+	 *
+	 * An hour is *eligible* once it started {@link COVERAGE_ELIGIBLE_AGE_MS} ago
+	 * and is closed; *uncovered* when eligible, holding at least one ingest record
+	 * and having no anchor row. Membership here is "has a record in the hour",
+	 * which is one step looser than `hourLeaves`'s first-record rule: an hour
+	 * whose only record is a retry of an event first ingested the hour before is
+	 * listed although the job rightly skips it as empty. That is a one-second
+	 * window at an hour boundary and it reads as a lasting single uncovered hour —
+	 * `substrate verify` on the event settles it; the probe never reads leaves.
+	 *
+	 * `lagHours` is counted in whole hours from the newest anchored hour to the
+	 * hour `now` falls in, so `1` means every eligible hour is anchored. Throws on
+	 * a failed read; `/healthz` turns that into `null` with the reason.
+	 */
+	async anchorCoverage(options: { now?: number } = {}): Promise<AnchorCoverage> {
+		const now = options.now ?? this.clock();
+		const currentHour = hourStart(now);
+		const at = (ms: number): string => this.q(new Date(ms).toISOString());
+		const windowStart = hourStart(now - COVERAGE_LOOKBACK_MS);
+
+		const newest = await this.sql(`SELECT "period_start" FROM "anchors" ORDER BY "period_start" DESC LIMIT 1`, this.timeoutMs, "coverage");
+		const newestMs = newest.length > 0 ? epochMsAnyUnit(newest[0]?.period_start) : Number.NaN;
+		const newestAnchoredHour = Number.isFinite(newestMs) ? hourIso(newestMs) : null;
+		const lagHours = Number.isFinite(newestMs) ? Math.round((currentHour - hourStart(newestMs)) / HOUR_MS) : null;
+
+		const anchored = new Set((await this.anchorsBetween(windowStart, currentHour)).map((row) => hourStart(Date.parse(row.period_start))));
+
+		const histogram = await this.sql(
+			`SELECT to_unixtime(date_bin(INTERVAL '1 hour', "ingested_at")) AS "hour", count("event_id") AS "n" FROM "event_ingest" ` +
+				`WHERE "ingested_at" >= ${at(windowStart)} AND "ingested_at" < ${at(currentHour)} ` +
+				`GROUP BY to_unixtime(date_bin(INTERVAL '1 hour', "ingested_at"))`,
+			this.timeoutMs,
+			"coverage",
+		);
+		const withEvents = new Set<number>();
+		for (const row of histogram) {
+			const hour = epochMsAnyUnit(row.hour);
+			if (!Number.isFinite(hour)) throw new GreptimeError("coverage histogram holds an hour that is not a time");
+			if (Number(row.n) > 0) withEvents.add(hourStart(hour));
+		}
+		const uncovered: number[] = [];
+		for (const hour of [...withEvents].sort((a, b) => a - b)) {
+			if (now - hour < COVERAGE_ELIGIBLE_AGE_MS || !isClosed(hour, now, INGEST_LAG_MS)) continue;
+			if (!anchored.has(hour)) uncovered.push(hour);
+		}
+		const more = uncovered.length > COVERAGE_MAX_UNCOVERED;
+		const uncoveredHours = (more ? uncovered.slice(uncovered.length - COVERAGE_MAX_UNCOVERED) : uncovered).map(hourIso);
+
+		const notes = await this.sql(
+			`SELECT "ts", "id", "payload" FROM "agent_events" WHERE "surface" = 'substrate' AND "kind" = 'note' ` +
+				`AND "ts" >= ${at(now - ARCHIVE_NOTE_LOOKBACK_MS)} AND "summary" LIKE ${this.q(`${ARCHIVE_NOTE_PREFIX}%`)} ` +
+				`ORDER BY "ts" DESC, "id" DESC LIMIT 1`,
+			this.timeoutMs,
+			"coverage",
+		);
+		let lastArchiveWindow: AnchorCoverage["lastArchiveWindow"] = null;
+		const note = notes[0];
+		if (note) {
+			let day = "";
+			try {
+				const payload: unknown = JSON.parse(String(note.payload ?? "{}"));
+				if (payload && typeof payload === "object" && "day" in payload && typeof payload.day === "string") day = payload.day;
+			} catch {
+				// A note whose payload does not parse names no day; it is not an archive record.
+			}
+			const writtenMs = epochMsAnyUnit(note.ts);
+			if (day !== "" && Number.isFinite(writtenMs)) {
+				lastArchiveWindow = { day, writtenAt: new Date(writtenMs).toISOString(), eventId: String(note.id) };
+			}
+		}
+
+		return { newestAnchoredHour, lagHours, uncoveredHours, more, lastArchiveWindow };
+	}
+
+	/**
+	 * The `ts` of the oldest event row, or `null` on an empty ledger — the first
+	 * day an archive can cover. By `ts`, not ingest: the archive windows the
+	 * time index, which is what the retention TTL expires on, and a backfilled
+	 * event sits earlier in `ts` than in ingest order.
+	 */
+	async firstEventMs(): Promise<number | null> {
+		const rows = await this.sql(`SELECT "ts" FROM "agent_events" ORDER BY "ts" ASC, "id" ASC LIMIT 1`);
+		if (rows.length === 0) return null;
+		const ms = epochMsAnyUnit(rows[0]?.ts);
+		return Number.isFinite(ms) ? ms : null;
+	}
+
+	/**
+	 * One page of a closed `ts` window, for the archive (uplift-3 N6): every
+	 * stored column of the events in `[from, to)` strictly after `after` in
+	 * `(ts, id)` order, the first ingest record of each, and the window's anchor
+	 * receipts.
+	 *
+	 * Keyset, never OFFSET: `("ts" > a OR ("ts" = a AND "id" > b))` makes every
+	 * page a bounded time-index read that costs the same on page 200 as on page
+	 * one, and a row appended between two pages can never shift the rest. Two
+	 * events sharing a millisecond are ordered by `id` on both the server and
+	 * the cursor, so a tie is split the same way on every page. `next` is the
+	 * last row of a full page and `null` once a page is short — the one extra
+	 * empty page when the window ends exactly on a boundary is the cost of not
+	 * reading one row ahead.
+	 *
+	 * The ingest read is by id in batches of {@link IN_BATCH}, bounded below at
+	 * `from` less one hour: a record precedes its event's `ts` only by clock
+	 * skew, and a backdated event's record is *later* than `ts`, which an upper
+	 * bound would cut off. An event with no record on the page is simply absent
+	 * from `ingest`; the archive counts those. Anchors are read on every page
+	 * because they are a handful of rows and a page is then self-contained.
+	 */
+	async exportWindow(query: ExportWindowQuery): Promise<ExportPage> {
+		const { fromMs, toMs } = assertIsoWindow(query.from, query.to);
+		await this.probeDialect().catch(() => undefined);
+		const at = (ms: number): string => this.q(new Date(ms).toISOString());
+		const limit = queryLimit(query.limit);
+		const where = [`"ts" >= ${at(fromMs)}`, `"ts" < ${at(toMs)}`];
+		if (query.after !== undefined) {
+			const afterMs = Date.parse(query.after.ts);
+			if (!Number.isFinite(afterMs)) throw new GreptimeError("export cursor ts must be an ISO instant");
+			where.push(`("ts" > ${at(afterMs)} OR ("ts" = ${at(afterMs)} AND "id" > ${this.q(query.after.id)}))`);
+		}
+		const events = await this.sql(
+			`SELECT ${EVENT_COLUMN_LIST} FROM "agent_events" WHERE ${where.join(" AND ")} ORDER BY "ts" ASC, "id" ASC LIMIT ${limit}`,
+			this.timeoutMs,
+			"export",
+		);
+
+		const first = new Map<string, { ingested_at: number; event_ts: number }>();
+		const ids = events.map((row) => String(row.id));
+		for (let i = 0; i < ids.length; i += IN_BATCH) {
+			const batch = ids.slice(i, i + IN_BATCH).map((id) => this.q(id)).join(", ");
+			const rows = await this.sql(
+				`SELECT "event_id", "ingested_at", "event_ts" FROM "event_ingest" WHERE "ingested_at" >= ${at(fromMs - HOUR_MS)} AND "event_id" IN (${batch})`,
+				this.timeoutMs,
+				"export",
+			);
+			for (const row of rows) {
+				const id = String(row.event_id);
+				const ingested_at = epochMsAnyUnit(row.ingested_at);
+				const event_ts = epochMsAnyUnit(row.event_ts);
+				if (!Number.isFinite(ingested_at) || !Number.isFinite(event_ts)) {
+					throw new GreptimeError(`ingest record for ${id} has a time that is not a number`);
+				}
+				const seen = first.get(id);
+				if (!seen || ingested_at < seen.ingested_at) first.set(id, { ingested_at, event_ts });
+			}
+		}
+		const ingest: ExportIngestRow[] = [];
+		for (const id of ids) {
+			const record = first.get(id);
+			if (record) {
+				ingest.push({
+					event_id: id,
+					ingested_at: new Date(record.ingested_at).toISOString(),
+					event_ts: new Date(record.event_ts).toISOString(),
+				});
+			}
+		}
+
+		const anchors = await this.anchorsBetween(fromMs, toMs);
+		const last = events[events.length - 1];
+		const next =
+			events.length === limit && last !== undefined
+				? { ts: new Date(epochMsAnyUnit(last.ts)).toISOString(), id: String(last.id) }
+				: null;
+		return { events, ingest, anchors, next };
 	}
 }
