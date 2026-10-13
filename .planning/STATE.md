@@ -234,10 +234,12 @@ Third standalone post-close series on branch `ultrathink/uplift-3` — proposal:
 
 | Item | Status | Evidence |
 |------|--------|----------|
-| N1 runtime drift and jobs doctor | in progress | [uplift-3/01-SUMMARY.md](uplift-3/01-SUMMARY.md) |
-| N2 restart-durable SLO history, capacity runway, ledger-native notifications | pending (wave B) | [uplift-3/02-SUMMARY.md](uplift-3/02-SUMMARY.md) |
-| N3 per-surface admission budgets (shadow first) | in progress | [uplift-3/03-SUMMARY.md](uplift-3/03-SUMMARY.md) |
-| N4 memory lifetime enforcement (report → enforce) | in progress | [uplift-3/04-SUMMARY.md](uplift-3/04-SUMMARY.md) |
-| N5 docs retrieval fan-out, metrics, offline golden harness | in progress | [uplift-3/05-SUMMARY.md](uplift-3/05-SUMMARY.md) |
-| N6 ledger coverage probe and verified archive | in progress | [uplift-3/06-SUMMARY.md](uplift-3/06-SUMMARY.md) |
-| N7 Grok connector contract: smoke, MCP brief metadata, per-surface SLO | pending (wave B) | [uplift-3/07-SUMMARY.md](uplift-3/07-SUMMARY.md) |
+| N1 runtime drift and jobs doctor | done | [uplift-3/01-SUMMARY.md](uplift-3/01-SUMMARY.md) |
+| N2 restart-durable SLO history, capacity runway, ledger-native notifications | done | [uplift-3/02-SUMMARY.md](uplift-3/02-SUMMARY.md) |
+| N3 per-surface admission budgets (shadow first) | done | [uplift-3/03-SUMMARY.md](uplift-3/03-SUMMARY.md) |
+| N4 memory lifetime enforcement (report → enforce) | done | [uplift-3/04-SUMMARY.md](uplift-3/04-SUMMARY.md) |
+| N5 docs retrieval fan-out, metrics, offline golden harness | done | [uplift-3/05-SUMMARY.md](uplift-3/05-SUMMARY.md) |
+| N6 ledger coverage probe and verified archive | done | [uplift-3/06-SUMMARY.md](uplift-3/06-SUMMARY.md) |
+| N7 Grok connector contract: smoke, MCP brief metadata, per-surface SLO | done | [uplift-3/07-SUMMARY.md](uplift-3/07-SUMMARY.md) |
+
+Gates at the final head: tsc clean · `bun test` 3845 pass / 1 skip / 1 fail (recorded F-01) · `check:phase-close` pass · `test:py` 298. Every new policy ships in its reporting/shadow/off default: `SUBSTRATE_BUDGETS=shadow`, `SUBSTRATE_MEMORY_EXPIRY=report`, `SUBSTRATE_SLO_NOTIFY` unset, the doctor and ledger-archive timers staged but not installed, `SUBSTRATE_LEDGER_ARCHIVE_DIR` unset. Operator steps after merge and deploy: [uplift-3/HANDOFF.md](uplift-3/HANDOFF.md).

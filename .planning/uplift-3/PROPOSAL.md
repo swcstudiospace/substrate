@@ -108,3 +108,10 @@ K8 outbox gauges + bank inventory, K14 miss coalescing, K12 chaos in CI, K13 usa
 |---|---|---|---|
 | proposal | presented 2026-10-13 | — | awaiting acceptance |
 | acceptance | **all seven accepted** 2026-10-13 ("Accept all 7 and implement") | — | branch `ultrathink/uplift-3`; wave A = N1, N3, N4, N5, N6 in parallel worktrees; wave B = N2, N7 |
+| N1 | done | tsc · suite green mod F-01 · live doctor run: 8 drift | [01-SUMMARY.md](01-SUMMARY.md) |
+| N2 | done | tsc · suite green mod F-01 | [02-SUMMARY.md](02-SUMMARY.md) — checkpoint, `history`, `capacity`, notifier off by default |
+| N3 | done | tsc · suite green mod F-01 · Lua smoke on loopback redis | [03-SUMMARY.md](03-SUMMARY.md) — shadow by default |
+| N4 | done | tsc · suite green mod F-01 · DB-backed tests | [04-SUMMARY.md](04-SUMMARY.md) — report by default |
+| N5 | done | tsc · suite green mod F-01 · golden 4/4 offline | [05-SUMMARY.md](05-SUMMARY.md) |
+| N6 | done | tsc · suite green mod F-01 | [06-SUMMARY.md](06-SUMMARY.md) — timer staged, archive dir unset |
+| N7 | done | tsc · suite green mod F-01 | [07-SUMMARY.md](07-SUMMARY.md) — `bun run smoke:grok` after deploy |
