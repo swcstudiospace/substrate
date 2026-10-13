@@ -33,7 +33,7 @@
  *
  * - `precision_at_k`: share of the top-k citations whose source URL is expected.
  * - `recall`: share of the expected URLs cited anywhere in the reply.
- * - `ndcg`: normalised DCG over the distinct cited URLs in reply order, gains from `grades`.
+ * - `ndcg`: normalised DCG over the distinct cited URLs in reply order, gains from `grades`; 1 (not applicable) when nothing is graded above 0.
  * - `provenance_coverage`: share of citations whose commit is a recorded one (not a `dataset-pin:` marker).
  * - `commit_match`: share of expected entries with a `commit` whose citation carries that commit.
  * - `redaction_clean`: no citation field changes under the redactor, and none contains a `forbidden` string.
@@ -204,7 +204,9 @@ export function scoreReply(fixture: GoldenFixture, reply: ScoredReply): GoldenSc
 		.sort((left, right) => right - left)
 		.slice(0, k);
 	const idealDcg = dcg(ideal);
-	const ndcg = idealDcg === 0 ? (ranked.length === 0 ? 1 : 0) : dcg(ranked.map((url) => fixture.grades[url] ?? 0)) / idealDcg;
+	// With nothing graded above 0 (an unanswerable fixture) NDCG is undefined:
+	// reported as 1 and never a failure — the citation cap is that fixture's verdict.
+	const ndcg = idealDcg === 0 ? 1 : dcg(ranked.map((url) => fixture.grades[url] ?? 0)) / idealDcg;
 
 	const provenanceCoverage =
 		citations.length === 0 ? 1 : citations.filter((citation) => !citation.commit.startsWith("dataset-pin:")).length / citations.length;
