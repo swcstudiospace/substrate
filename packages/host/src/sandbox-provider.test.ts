@@ -664,6 +664,7 @@ describe("substrateDocker egress policy (U1)", () => {
 			env: { SUBSTRATE_SANDBOX_EGRESS: "example.com:443, api.github.com:443" },
 			runIptables: (argv) => calls.push(argv.join(" ")),
 			resolveEgressHost: async () => ["93.184.216.34"],
+			sandboxState: tmpState(),
 		});
 		const sandboxId = await provider.create();
 		expect(calls.slice(2)).toEqual([
@@ -872,6 +873,7 @@ describe("substrateDocker egress policy (U1)", () => {
 			runDf: dfAboveFloor,
 			runIptables: () => undefined,
 			warn: (payload) => warnings.push(payload),
+			sandboxState: tmpState(),
 		});
 		const sandboxId = await provider.create();
 		await expect(provider.withSeedEgress(sandboxId, async () => "never")).rejects.toThrow(/no egress address/);
@@ -934,6 +936,7 @@ describe("substrateDocker egress policy (U1)", () => {
 				network: "published_loopback",
 				docker,
 				runDf: dfAboveFloor,
+				sandboxState: tmpState(),
 			});
 			await provider.create();
 		} finally {
