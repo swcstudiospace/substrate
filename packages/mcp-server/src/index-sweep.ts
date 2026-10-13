@@ -208,8 +208,13 @@ export interface SweepClass {
 const LIVE_LEASE = (n: string): string =>
 	`${n}.claimed_by is not null and coalesce(${n}.lease_expires_at, ${n}.claimed_at + make_interval(secs => ${DEFAULT_LEASE_TTL_SECONDS})) > now()`;
 
-/** A text parameter holding a JSON array of ids, expanded server-side (the array-parameter quirk again). */
-const IDS_IN = (param: string): string => `in (select jsonb_array_elements_text(${param}::jsonb))`;
+/**
+ * A text parameter holding a JSON array of ids, expanded server-side (the
+ * array-parameter quirk again). The parameter is typed `text` first: a bare
+ * `$1::jsonb` makes the driver JSON-encode the JS string, which arrives as a
+ * JSON *string* scalar and `jsonb_array_elements_text` refuses it (22023).
+ */
+const IDS_IN = (param: string): string => `in (select jsonb_array_elements_text(${param}::text::jsonb))`;
 
 /**
  * The terminal statuses as one `|`-joined parameter, split server-side. Bun's

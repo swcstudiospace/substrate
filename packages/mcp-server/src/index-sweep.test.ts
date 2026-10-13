@@ -219,11 +219,11 @@ describe("the classes", () => {
 		expect(more).toEqual([]);
 		const ids = JSON.stringify(["ut-a", "ut-b"]);
 		// Nodes go first, each row re-checked for a live lease at execution time.
-		expect(nodes!.text).toContain(`delete from graph_nodes n where n.graph_id in (select jsonb_array_elements_text($1::jsonb)) and not (${liveLease})`);
+		expect(nodes!.text).toContain(`delete from graph_nodes n where n.graph_id in (select jsonb_array_elements_text($1::text::jsonb)) and not (${liveLease})`);
 		expect(nodes!.params).toEqual([ids]);
 		// Then the index row only where no node survived, and the FK-less tables only for graphs whose row went.
 		expect(graphsThenRest!.text).toContain(
-			"delete from graph_index gi where gi.graph_id in (select jsonb_array_elements_text($1::jsonb)) " +
+			"delete from graph_index gi where gi.graph_id in (select jsonb_array_elements_text($1::text::jsonb)) " +
 				"and not exists (select 1 from graph_nodes n where n.graph_id = gi.graph_id) returning gi.graph_id",
 		);
 		for (const table of ["graph_edges", "graph_steps", "graph_bindings"]) {
