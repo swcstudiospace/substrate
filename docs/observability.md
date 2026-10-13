@@ -53,6 +53,7 @@ substrate is keyed by. `surface` says which of the eight agents on the host;
 | `substrate.trace.spans_dropped` | counter | — |
 | `substrate.plane.duration` | histogram, ms | `plane`, `op`, `outcome` = `ok` \| `error` \| `timeout` \| `open` |
 | `substrate.plane.errors` | counter | `plane`, `reason` = `timeout` \| `network` \| `server` \| `open` \| `other` |
+| `substrate.admission.decisions` | counter | `surface` (a known surface or `anonymous`), `class` = `read` \| `write` \| `coordination`, `decision` = `allowed` \| `limited` \| `shadow_limited` \| `bypass` |
 
 `status` is a class (`2xx`, `5xx`), not a code, and `route` is one of the known
 paths or `other` — an unauthenticated caller walking random URLs must not be able
@@ -265,6 +266,26 @@ One reading alone judges nothing. A plane the deployment does not configure
 reports `unconfigured`, never `breached`, and plane breaches are **not** folded
 into `breached`, which stays the catalogue's own list.
 
+### Admission budgets (uplift-3 N3)
+
+`GET /slo` also carries one `admission` objective, beside the catalogue for the
+same reason the plane and burn objectives are:
+
+| Objective | Statement |
+| --- | --- |
+| `admission.limited_rate` | `limited / (allowed + limited + shadow_limited)` of `substrate.admission.decisions` ≤ **1 %**; `insufficient-data` under 100 decisions |
+
+A `bypass` — the cache plane not answering the bucket, which admits the caller —
+is not a decision and sits in neither the numerator nor the denominator, so a
+cache outage can neither breach this objective nor dilute it into `ok`. Only an
+enforced refusal (`limited`) is a refusal; in the default `shadow` mode the
+rate is 0 whatever `shadow_limited` counts, and that series is what the budgets
+are tuned from before `SUBSTRATE_BUDGETS=enforce`. The identity label is the
+bearer's surface, never one a body named, so the series are bounded by the
+surface list plus `anonymous`. The bucket and the 429 a refused caller sees are
+described in [`data-planes.md`](data-planes.md) and [`grok-bot.md`](grok-bot.md);
+the per-class limits are the `SUBSTRATE_BUDGET_*` variables below.
+
 ### Two things the evaluator does on purpose
 
 **The p95 objective is checked as a count, not an interpolation.** 800 is one of the
@@ -437,7 +458,7 @@ they stay; they carry no repo, so no brief shows them.
 | | |
 | --- | --- |
 | `GET /metrics` | the snapshot this process holds, in the shape `otlp.ts` encodes |
-| `GET /slo` | the verdicts computed from it, the breached ids, `burn`, and the per-plane `planes` |
+| `GET /slo` | the verdicts computed from it, the breached ids, `burn`, the per-plane `planes`, and the `admission` refusal rate |
 | `POST /evidence` | `{ "graph_id": "ut-…", "format": "json" \| "html" }` |
 | `GET /healthz` | now also `auditDurable`, `auditRecords`, `planes`, `capacity`, `cachedAt` and `stale` |
 
@@ -485,6 +506,12 @@ substrate-specific spelling.
 | `SUBSTRATE_CACHE_COMMAND_TIMEOUT_MS` | `250` | One cache command; sized for the loopback redis. |
 | `SUBSTRATE_CACHE_CONNECT_TIMEOUT_MS` | `250` | One cache connect. |
 | `SUBSTRATE_HEALTHZ_CACHE_MS` | `5000` | How long a computed `/healthz` body is served to pollers; `0` = recompute per call. |
+| `SUBSTRATE_BUDGETS` | `shadow` | `off` \| `shadow` \| `enforce`: whether the admission buckets are skipped, decided and counted only, or answered with 429. |
+| `SUBSTRATE_BUDGET_READ_RPS` / `_BURST` | `20` / `40` | Per surface and second, with one second of headroom; reads are the GET routes, `/brief`, `/memory/recall`, `/docs/search`, `/events/query`, `/verify`, `/evidence`, `/drift` and the read tools. |
+| `SUBSTRATE_BUDGET_WRITE_RPS` / `_BURST` | `10` / `20` | `/events`, `/memory`, `/docs/ingest`, `/docs/merge-trigger`, `/skills/propose`, `/handoff` and the write tools. |
+| `SUBSTRATE_BUDGET_COORDINATION_RPS` / `_BURST` | `30` / `60` | `graph_claim`, `graph_heartbeat`, `graph_release`, `graph_complete`, `coord_reap_leases`: its own bucket, so reads never starve a heartbeat. |
+| `SUBSTRATE_BUDGET_ANONYMOUS_RPS` / `_BURST` | `2` / `4` | Every class of the bucket all accepted untokened bridge callers share. |
+| `SUBSTRATE_BUDGET_<SURFACE>_<CLASS>_RPS` / `_BURST` | — | Per-surface override (`GROK_BOT`, `SWARM_A01_ORCH`, …, the `SUBSTRATE_TOKEN_*` spelling); a half left unset is the class value. |
 
 An endpoint pasted as `https://collector/v1/metrics` is accepted: the trailing
 `/v1/metrics` is stripped, because appending it again would 404 on every export —

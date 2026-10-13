@@ -1,6 +1,18 @@
 import { describe, expect, test } from "bun:test";
 import { METRIC, SubstrateInstruments } from "./instruments.ts";
-import { DEFAULT_THRESHOLDS, PLANE_BUCKET_MS, PLANE_WINDOW_MS, PlaneWindow, breaches, evaluatePlaneSlos, evaluateSlos, sloCatalogue, type PlaneSloResult } from "./slo.ts";
+import {
+	ADMISSION_SLO,
+	DEFAULT_THRESHOLDS,
+	PLANE_BUCKET_MS,
+	PLANE_WINDOW_MS,
+	PlaneWindow,
+	breaches,
+	evaluateAdmissionSlo,
+	evaluatePlaneSlos,
+	evaluateSlos,
+	sloCatalogue,
+	type PlaneSloResult,
+} from "./slo.ts";
 import { BURN_MIN_SPAN_MS, BURN_WINDOW_MS, type BurnResult, BurnLedger, evaluateBurnSlos, loadBurnThresholds } from "./burn.ts";
 
 function slo(results: ReturnType<typeof evaluateSlos>, id: string) {
@@ -40,6 +52,44 @@ describe("the catalogue", () => {
 		// spreading it must not overwrite the defaults with holes.
 		const [brief] = sloCatalogue({ briefP95Ms: undefined });
 		expect(brief?.statement).toContain("800 ms");
+	});
+});
+
+describe("admission.limited_rate (uplift-3 N3), beside the catalogue", () => {
+	function decided(counts: { allowed?: number; limited?: number; shadow?: number; bypass?: number }): SubstrateInstruments {
+		const instruments = new SubstrateInstruments();
+		const record = (decision: "allowed" | "limited" | "shadow_limited" | "bypass", times = 0) => {
+			for (let index = 0; index < times; index += 1) instruments.recordAdmission({ surface: "cursor", klass: "read", decision });
+		};
+		record("allowed", counts.allowed);
+		record("limited", counts.limited);
+		record("shadow_limited", counts.shadow);
+		record("bypass", counts.bypass);
+		return instruments;
+	}
+
+	test("is not in the catalogue, and needs 100 decisions before it is judged", () => {
+		expect(sloCatalogue().some((target) => target.id === ADMISSION_SLO.id)).toBe(false);
+		expect(ADMISSION_SLO).toMatchObject({ id: "admission.limited_rate", kind: "ratio-ceiling", target: 0.01, minSamples: 100 });
+		const result = evaluateAdmissionSlo(decided({ allowed: 98, limited: 1 }).snapshot());
+		expect(result).toMatchObject({ id: "admission.limited_rate", status: "insufficient-data", samples: 99, unit: "ratio", target: 0.01 });
+		expect(result.observed).toBeCloseTo(1 / 99);
+		expect(evaluateAdmissionSlo(new SubstrateInstruments().snapshot())).toMatchObject({ status: "insufficient-data", samples: 0, observed: null });
+	});
+
+	test("limited over everything the bucket decided: shadow refusals count as decisions, not as refusals", () => {
+		const ok = evaluateAdmissionSlo(decided({ allowed: 50, shadow: 49, limited: 1 }).snapshot());
+		expect(ok).toMatchObject({ status: "ok", samples: 100, observed: 0.01 });
+		expect(ok.detail).toBe("1 of 100 (1.000 %); objective is at most 1.000 %");
+		const breached = evaluateAdmissionSlo(decided({ allowed: 98, limited: 2 }).snapshot());
+		expect(breached).toMatchObject({ status: "breached", samples: 100, observed: 0.02 });
+	});
+
+	test("a bypass is not a decision: a cache outage neither dilutes the rate nor counts toward the sample floor", () => {
+		const result = evaluateAdmissionSlo(decided({ allowed: 90, limited: 2, bypass: 500 }).snapshot());
+		expect(result).toMatchObject({ status: "insufficient-data", samples: 92 });
+		const judged = evaluateAdmissionSlo(decided({ allowed: 97, limited: 3, bypass: 900 }).snapshot());
+		expect(judged).toMatchObject({ status: "breached", samples: 100, observed: 0.03 });
 	});
 });
 

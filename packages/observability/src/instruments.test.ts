@@ -1,5 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { METRIC, PLANE_ERROR_REASONS, SubstrateInstruments, classifyEventRefusal, classifyPlaneReason, extractUsage } from "./instruments.ts";
+import {
+	ADMISSION_CLASSES,
+	ADMISSION_DECISIONS,
+	METRIC,
+	PLANE_ERROR_REASONS,
+	SubstrateInstruments,
+	classifyEventRefusal,
+	classifyPlaneReason,
+	extractUsage,
+} from "./instruments.ts";
 import { findCounter, findHistogram, mergeHistogram, sumCounter } from "./metrics.ts";
 
 describe("extractUsage", () => {
@@ -218,5 +227,29 @@ describe("recordPlane", () => {
 		expect(classifyPlaneReason({ plane: "index", op: "ping", outcome: "error", durationMs: 1, reason: "server 502" })).toBe("server");
 		expect(classifyPlaneReason({ plane: "index", op: "ping", outcome: "error", durationMs: 1, reason: "fetch failed" })).toBe("network");
 		expect(classifyPlaneReason({ plane: "index", op: "ping", outcome: "error", durationMs: 1 })).toBe("other");
+	});
+});
+
+describe("recordAdmission", () => {
+	test("counts one series per surface, class and decision, with exactly those three labels", () => {
+		const instruments = new SubstrateInstruments();
+		instruments.recordAdmission({ surface: "grok-bot", klass: "read", decision: "allowed" });
+		instruments.recordAdmission({ surface: "grok-bot", klass: "read", decision: "allowed" });
+		instruments.recordAdmission({ surface: "grok-bot", klass: "read", decision: "shadow_limited" });
+		instruments.recordAdmission({ surface: "anonymous", klass: "write", decision: "limited" });
+		instruments.recordAdmission({ surface: "omp", klass: "coordination", decision: "bypass" });
+
+		const counter = findCounter(instruments.snapshot(), METRIC.admissionDecisions)!;
+		expect(counter.name).toBe("substrate.admission.decisions");
+		expect(sumCounter(counter, { surface: "grok-bot", class: "read", decision: "allowed" })).toBe(2);
+		expect(sumCounter(counter, { surface: "grok-bot", decision: "shadow_limited" })).toBe(1);
+		expect(sumCounter(counter, { surface: "anonymous", class: "write", decision: "limited" })).toBe(1);
+		expect(sumCounter(counter, { decision: "bypass" })).toBe(1);
+		expect(sumCounter(counter)).toBe(5);
+		for (const point of counter.points) {
+			expect(Object.keys(point.attributes).sort()).toEqual(["class", "decision", "surface"]);
+			expect(ADMISSION_CLASSES as readonly string[]).toContain(String(point.attributes.class));
+			expect(ADMISSION_DECISIONS as readonly string[]).toContain(String(point.attributes.decision));
+		}
 	});
 });
