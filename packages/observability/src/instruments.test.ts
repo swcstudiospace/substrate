@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import {
 	ADMISSION_CLASSES,
 	ADMISSION_DECISIONS,
+	BRIEF_RESULTS,
+	BRIEF_STATES,
 	CITATION_PROVENANCES,
 	DOCS_LATENCY_BUCKETS_MS,
 	DOCS_SEARCH_OUTCOMES,
@@ -121,6 +123,30 @@ describe("recordBrief", () => {
 		const histogram = findHistogram(instruments.snapshot(), METRIC.briefDuration)!;
 		expect(histogram.points[0]?.attributes.outcome).toBe("error");
 		expect(mergeHistogram(histogram).count).toBe(1);
+	});
+});
+
+describe("recordBriefResult (uplift-3 N7)", () => {
+	test("the state and result labels are closed sets, and every combination is one series", () => {
+		expect([...BRIEF_STATES]).toEqual(["complete", "degraded", "snapshot"]);
+		expect([...BRIEF_RESULTS]).toEqual(["fresh", "not_modified"]);
+		const instruments = new SubstrateInstruments();
+		for (const state of BRIEF_STATES) {
+			for (const result of BRIEF_RESULTS) instruments.recordBriefResult({ surface: "grok-bot", state, result });
+		}
+		const counter = findCounter(instruments.snapshot(), METRIC.briefResult)!;
+		expect(counter.points).toHaveLength(BRIEF_STATES.length * BRIEF_RESULTS.length);
+		expect(sumCounter(counter, { surface: "grok-bot", state: "complete", result: "not_modified" })).toBe(1);
+		expect(sumCounter(counter)).toBe(6);
+		expect(Object.keys(counter.points[0]?.attributes ?? {}).sort()).toEqual(["result", "state", "surface"]);
+	});
+
+	test("is separate from the latency histogram: a not_modified answer is counted, not timed twice", () => {
+		const instruments = new SubstrateInstruments();
+		instruments.recordBrief({ surface: "grok-bot", ok: true, durationMs: 50 });
+		instruments.recordBriefResult({ surface: "grok-bot", state: "complete", result: "not_modified" });
+		expect(mergeHistogram(findHistogram(instruments.snapshot(), METRIC.briefDuration)!).count).toBe(1);
+		expect(sumCounter(findCounter(instruments.snapshot(), METRIC.briefResult)!, { result: "not_modified" })).toBe(1);
 	});
 });
 

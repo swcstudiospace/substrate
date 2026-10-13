@@ -29,6 +29,7 @@ import {
 	SPAN_KIND,
 	SubstrateInstruments,
 	Tracer,
+	briefBySurfaceObjectives,
 	evaluateDocsSlos,
 	evaluatePlaneSlos,
 	evaluateSlos,
@@ -41,6 +42,7 @@ import {
 	type PlaneSloResult,
 	type SloResult,
 	type SloTarget,
+	type SurfaceSloResult,
 	type Span,
 	type SpanContext,
 } from "@substrate/observability";
@@ -161,6 +163,8 @@ export interface Observability {
 	evaluatePlanes(configured: Partial<Record<PlaneName, boolean>>): PlaneSloResult[];
 	/** The docs-search latency verdict (uplift-3 N5): one row, `docs.search.p95`, beside the catalogue. */
 	evaluateDocs(): SloResult[];
+	/** `brief.p95` per surface (uplift-3 N7): one row per surface at or above `minSamples`, beside the catalogue. */
+	evaluateBriefSurfaces(): SurfaceSloResult[];
 	start(): Promise<string[]>;
 	stop(): void;
 }
@@ -206,6 +210,9 @@ export function createObservability(config: SubstrateConfig, env: Record<string,
 	const observer: SubstrateObserver = {
 		briefed(sample) {
 			instruments.recordBrief(sample);
+		},
+		briefResult(sample) {
+			instruments.recordBriefResult(sample);
 		},
 		emitted(sample) {
 			instruments.recordEmit(sample);
@@ -269,6 +276,7 @@ export function createObservability(config: SubstrateConfig, env: Record<string,
 				...(settings.slo.minSamples !== undefined ? { minSamples: settings.slo.minSamples } : {}),
 			}),
 		evaluateDocs: () => evaluateDocsSlos(instruments.snapshot(), settings.slo),
+		evaluateBriefSurfaces: () => briefBySurfaceObjectives(instruments.snapshot(), settings.slo),
 		async start() {
 			const warnings: string[] = [];
 			const opened = await audit.open();

@@ -58,6 +58,8 @@ export type SloTarget =
 			/** Must be one of the histogram's own bucket bounds, so the check is exact. */
 			thresholdMs: number;
 			minSamples: number;
+			/** Attribute equalities the judged series must satisfy; absent means every series of the metric. */
+			where?: Record<string, string>;
 	  }
 	| {
 			kind: "ratio-floor" | "ratio-ceiling";
@@ -224,7 +226,7 @@ function evaluateLatency(snapshot: MetricSnapshot[], target: Extract<SloTarget, 
 	if (!histogram) {
 		return { ...base, status: "insufficient-data", observed: null, samples: 0, detail: `${target.metric} has no series yet` };
 	}
-	const merged = mergeHistogram(histogram);
+	const merged = mergeHistogram(histogram, target.where);
 	const estimate = quantileFromBuckets(merged, target.quantile);
 	if (merged.count < target.minSamples) {
 		return {
@@ -412,6 +414,54 @@ export function docsSearchObjective(overrides: SloThresholds = {}): SloTarget {
 /** The `docs` array `GET /slo` serves: one row, `docs.search.p95`, in the catalogue's entry shape. */
 export function evaluateDocsSlos(snapshot: MetricSnapshot[], overrides: SloThresholds = {}): SloResult[] {
 	return evaluateSlos(snapshot, [docsSearchObjective(overrides)]);
+}
+
+// ── per-surface brief latency (uplift-3 N7) ──────────────────────────────────
+
+/** `SloResult` for one surface's slice of a metric: the same row shape with the surface named. */
+export interface SurfaceSloResult extends SloResult {
+	surface: string;
+}
+
+/**
+ * `brief.p95` judged per surface: one row for every `surface` value the
+ * `substrate.brief.duration` histogram has seen with at least `minSamples`
+ * observations, against the same `briefP95Ms` target as the global objective.
+ *
+ * The global row blends every caller, so a fast CLI hides a slow bot; a
+ * surface's own row is the verdict its operator wants. Rows below the floor
+ * are omitted rather than reported `insufficient-data` so the array is empty
+ * until there is something to say and never grows past the surfaces that
+ * call. Served as the sibling `surfaces` array on `GET /slo`, in the
+ * catalogue's entry shape plus `surface`, and never folded into `breached`.
+ */
+export function briefBySurfaceObjectives(snapshot: MetricSnapshot[], overrides: SloThresholds = {}): SurfaceSloResult[] {
+	const t = { ...DEFAULT_THRESHOLDS, ...stripUndefined(overrides) };
+	const histogram = findHistogram(snapshot, METRIC.briefDuration);
+	if (!histogram) return [];
+	const surfaces = new Set<string>();
+	for (const point of histogram.points) {
+		const surface = point.attributes.surface;
+		if (typeof surface === "string") surfaces.add(surface);
+	}
+	const rows: SurfaceSloResult[] = [];
+	for (const surface of [...surfaces].sort()) {
+		const where = { surface };
+		if (mergeHistogram(histogram, where).count < t.minSamples) continue;
+		const target: Extract<SloTarget, { kind: "latency-quantile" }> = {
+			kind: "latency-quantile",
+			id: "brief.p95",
+			title: "Brief latency",
+			statement: `p95 of ${METRIC.briefDuration}{surface=${surface}} <= ${t.briefP95Ms} ms`,
+			metric: METRIC.briefDuration,
+			quantile: 0.95,
+			thresholdMs: t.briefP95Ms,
+			minSamples: t.minSamples,
+			where,
+		};
+		rows.push({ ...evaluateLatency(snapshot, target), surface });
+	}
+	return rows;
 }
 
 // ── per-plane availability, over a rolling hour ──────────────────────────────

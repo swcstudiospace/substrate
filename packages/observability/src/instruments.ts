@@ -36,7 +36,21 @@ export const METRIC = {
 	docsCitations: "substrate.docs.citations",
 	docsDuration: "substrate.docs.duration",
 	memoryExpired: "substrate.memory.expired",
+	briefResult: "substrate.brief.result",
 } as const;
+
+/**
+ * What a brief was answered with (uplift-3 N7). `complete`: every source
+ * answered; `degraded`: some did not, thin live text; `snapshot`: some did
+ * not, last-good text served instead. The service's `BriefDetail.state` is
+ * this set — named here because it is a metric label and must stay closed.
+ */
+export const BRIEF_STATES = ["complete", "degraded", "snapshot"] as const;
+export type BriefState = (typeof BRIEF_STATES)[number];
+
+/** Whether the caller received the brief's text (`fresh`) or only its validator (`not_modified`: HTTP 304, MCP `not_modified: true`). */
+export const BRIEF_RESULTS = ["fresh", "not_modified"] as const;
+export type BriefResult = (typeof BRIEF_RESULTS)[number];
 
 /** What one docs search answered with. One series each, so the label stays bounded. */
 export const DOCS_SEARCH_OUTCOMES = ["hit", "empty", "degraded"] as const;
@@ -230,6 +244,7 @@ export class SubstrateInstruments {
 	readonly docsCitations: Counter;
 	readonly docsDuration: Histogram;
 	readonly memoryExpired: Counter;
+	readonly briefResult: Counter;
 
 	constructor(registry: MetricRegistry = new MetricRegistry()) {
 		this.registry = registry;
@@ -329,6 +344,11 @@ export class SubstrateInstruments {
 			description:
 				"Memory entries past their ttl met by an index read, by caller surface, memory kind and what was done (served|hidden).",
 			unit: "{entry}",
+		});
+		this.briefResult = registry.counter(METRIC.briefResult, {
+			description:
+				"Briefs answered, by surface, state (complete|degraded|snapshot) and result (fresh: text sent; not_modified: 304 or MCP not_modified).",
+			unit: "{brief}",
 		});
 	}
 
@@ -478,5 +498,16 @@ export class SubstrateInstruments {
 			const count = sample.citations[provenance] ?? 0;
 			if (count > 0) this.docsCitations.add(count, { provenance });
 		}
+	}
+
+	/**
+	 * One brief answered (uplift-3 N7). Counted where the answer is decided, not
+	 * where the brief is composed: the histogram above says how long a brief
+	 * took, this says whether the caller got text or a `not_modified`, which is
+	 * the saving a conditional request buys. `state` and `result` are the closed
+	 * sets above; `surface` is bounded by the caller.
+	 */
+	recordBriefResult(sample: { surface: string; state: BriefState; result: BriefResult }): void {
+		this.briefResult.add(1, cleanAttributes({ surface: sample.surface, state: sample.state, result: sample.result }));
 	}
 }
