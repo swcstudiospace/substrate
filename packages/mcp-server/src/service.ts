@@ -5,7 +5,7 @@
  * surfaces cannot drift. Hooks need REST (they cannot call MCP tools); agents
  * get MCP. Same code underneath.
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { decideClaim, type ClaimDecision } from "@substrate/audit";
 import { createRpc, formatMemo, hourEnd, hourIso, hourStart, isClosed, merkleRootHex, parseMemo, HOUR_MS, type Rpc, type TransactionMemo } from "@substrate/ledger";
 import {
@@ -17,7 +17,7 @@ import {
 	type PlaneSample,
 } from "@substrate/observability";
 import { DEVNET_GENESIS_HASH } from "./anchor.ts";
-import { composeBrief, type BriefRequest } from "./brief.ts";
+import { composeBrief, type BriefRequest, type BriefSource } from "./brief.ts";
 import {
 	GRAPHS_GENERATION_KEY,
 	MEMORY_GENERATION_KEY,
@@ -306,6 +306,34 @@ export interface EventQueryResult {
 	truncated: boolean;
 	/** Set when the ledger could not be read. Redacted, as on the write path. */
 	error?: string;
+}
+
+/**
+ * The brief as `POST /brief` answers it (uplift-2 R1). `text` is what every
+ * caller gets; the rest lets an HTTP caller tell a complete brief from a
+ * degraded one, skip an unchanged one, and know how old a snapshot is.
+ */
+export interface BriefDetail {
+	text: string;
+	/** `complete`: every source answered. `degraded`: some did not, thin live text. `snapshot`: some did not, last-good text served instead. */
+	state: "complete" | "degraded" | "snapshot";
+	/** The sources that failed or missed the budget, in section order; empty when complete. */
+	failed: BriefSource[];
+	/** Weak validator of `text`: `W/"<first 32 hex of sha256>"`. */
+	etag: string;
+	/** When the served snapshot was composed; null unless `state` is `snapshot`. */
+	snapshotAt: string | null;
+}
+
+/** What the `brief-snapshot` cache class holds. */
+interface BriefSnapshot {
+	text: string;
+	at: string;
+}
+
+/** Weak, so a proxy that re-encodes the body still matches; 32 hex is plenty against collision for a brief. */
+export function briefEtag(text: string): string {
+	return `W/"${createHash("sha256").update(text).digest("hex").slice(0, 32)}"`;
 }
 
 /**
@@ -725,6 +753,9 @@ export class Substrate {
 	private docsSaveChain: Promise<void> = Promise.resolve();
 	/** `graphId/nodeId` → tail of that node's gated-completion chain. */
 	private readonly completionChains = new Map<string, Promise<void>>();
+	// uplift-2 R1 — brief fast path. The options `composeBrief` runs under, read
+	// once from config so a brief does not re-derive them per call.
+	private readonly briefOptions: { budgetMs: number; recentWindowDays: number };
 
 	/** `stores` is a test seam; production always builds them from config. */
 	constructor(
@@ -786,6 +817,8 @@ export class Substrate {
 				},
 				gate: this.planes.gate("cache"),
 			});
+		// uplift-2 R1
+		this.briefOptions = { budgetMs: config.briefBudgetMs, recentWindowDays: config.briefRecentWindowDays };
 	}
 
 	/**
@@ -873,20 +906,39 @@ export class Substrate {
 		return { index: indexOk, greptime: greptimeOk, errors };
 	}
 
+	/** The brief as text — what MCP `memory_brief` and every non-HTTP caller want. */
 	async brief(request: BriefRequest): Promise<string> {
+		return (await this.briefDetailed(request)).text;
+	}
+
+	/**
+	 * The brief with the facts the REST route puts on the wire (uplift-2 R1):
+	 * whether every source answered, which did not, a weak ETag of the text, and
+	 * — when a source failed and a last-good snapshot exists — that snapshot
+	 * instead of the thin live text.
+	 *
+	 * A snapshot is written only for a brief that was composed complete *and*
+	 * loaded live (a cache hit was written when it was loaded); it is read only
+	 * when the live compose was degraded. Degraded text is never stored
+	 * anywhere, so an outage cannot outlive the store. Every cache step is
+	 * fail-open: the brief is the answer whatever the cache did.
+	 */
+	async briefDetailed(request: BriefRequest): Promise<BriefDetail> {
 		const started = performance.now();
 		let ok = false;
 		try {
 			const noted: Array<number | null> = [];
-			let complete = true;
-			const brief = await this.cache.getOrLoad({
+			const failed: BriefSource[] = [];
+			let loaded = false;
+			const args = {
+				repo: request.repo ?? null,
+				branch: request.branch ?? null,
+				graph_id: request.graph_id ?? null,
+			};
+			const live = await this.cache.getOrLoad({
 				klass: "brief",
 				surface: request.surface,
-				args: {
-					repo: request.repo ?? null,
-					branch: request.branch ?? null,
-					graph_id: request.graph_id ?? null,
-				},
+				args,
 				// The shared graphs generation covers repo briefs and the other
 				// graphs a single-graph brief lists. The graph's own key still
 				// moves when that graph is written.
@@ -894,21 +946,36 @@ export class Substrate {
 					? [MEMORY_GENERATION_KEY, GRAPHS_GENERATION_KEY, graphGenerationKey(request.graph_id)]
 					: [MEMORY_GENERATION_KEY, GRAPHS_GENERATION_KEY],
 				refreshAt: () => noted.at(-1) ?? null,
-				store: () => complete,
-				load: () =>
-					composeBrief(
+				store: () => failed.length === 0,
+				load: () => {
+					loaded = true;
+					return composeBrief(
 						request,
 						{ index: this.index, greptime: this.greptime },
 						(at) => {
 							noted.push(at);
 						},
-						() => {
-							complete = false;
+						(source) => {
+							failed.push(source);
 						},
-					),
+						this.briefOptions,
+					);
+				},
 			});
 			ok = true;
-			return brief;
+			if (failed.length === 0) {
+				if (loaded) {
+					await this.cache.put("brief-snapshot", request.surface, args, { text: live, at: new Date().toISOString() }, this.config.briefSnapshotTtlS);
+				}
+				return { text: live, state: "complete", failed, etag: briefEtag(live), snapshotAt: null };
+			}
+			const snapshot =
+				this.config.briefSnapshotTtlS > 0 ? await this.cache.peek<BriefSnapshot>("brief-snapshot", request.surface, args) : null;
+			if (snapshot === null) {
+				return { text: live, state: "degraded", failed, etag: briefEtag(live), snapshotAt: null };
+			}
+			const text = `_(substrate brief snapshot from ${snapshot.at}; live sources degraded: ${failed.join(", ")})_\n${snapshot.text}`;
+			return { text, state: "snapshot", failed, etag: briefEtag(text), snapshotAt: snapshot.at };
 		} finally {
 			// Timed in `finally` so a brief that threw is still in the histogram. The SLO
 			// is about what the caller waited for, and a failure is a wait too.
@@ -1860,7 +1927,14 @@ export class Substrate {
 		if (!this.index) throw new Error("graph_heartbeat requires SUBSTRATE_PG_URL");
 		const ttl = normalizeTtlSeconds(ttlSeconds, this.config.leaseTtlSeconds);
 		const result = await this.index.heartbeatNode(graphId, nodeId, leaseId, caller, ttl);
-		if (result.ok) await this.bumpGraph(graphId);
+		// Only this graph's generation, not the shared `gen:graphs` (uplift-2 R1).
+		// A renewed lease changes no text a repo brief shows before its
+		// `refreshAt`: the brief lists other graphs as held or free, and a
+		// heartbeat keeps a held lease held. Bumping the shared key here
+		// invalidated every brief on the host once per heartbeat, which is why the
+		// cache hit ratio measured 1 %. Claims, releases, completions and
+		// registrations still bump both, because those do change that text.
+		if (result.ok) await this.cache.bump(graphGenerationKey(graphId));
 		return {
 			ok: result.ok,
 			lease: result.lease,

@@ -172,6 +172,40 @@ pinged with the same bound and asked for its size (`capacity.index`, `null` when
 it does not answer in time); the cache is never pinged. `/healthz` therefore costs
 at most one round trip per configured plane.
 
+## Brief headers and the memoised `/healthz` (uplift-2 R1)
+
+`POST /brief` composes its four source reads — index graph, ledger recent actions,
+index open graphs, index memory — together, under one deadline
+(`SUBSTRATE_BRIEF_BUDGET_MS`, 1200 ms; `0` = none). A read that misses the deadline
+is a failed read: logged on stderr as `brief: <source> unavailable — deadline (…)`,
+left out of the text, and the brief still answers. The ledger read carries the same
+budget as its own HTTP timeout and is bounded to the last
+`SUBSTRATE_BRIEF_RECENT_WINDOW_DAYS` (30) days, so an uncached brief never scans a
+repo's whole history. The route answers with:
+
+| Header | Value |
+| --- | --- |
+| `ETag` | `W/"<first 32 hex of sha256(body)>"` — weak, so a proxy that re-encodes the body still matches |
+| `X-Substrate-Brief` | `complete` (every source answered) · `degraded` (some did not; thin live text) · `snapshot` (some did not; the last complete brief for these arguments, from the cache) |
+| `X-Substrate-Brief-Failed` | the failed sources, comma-separated (`graph`, `recent actions`, `open graphs`, `memory`); absent when complete |
+| `Cache-Control` | `no-cache` — revalidate with the ETag; it does not mean "do not store" |
+
+A request whose `If-None-Match` lists the current tag (weak comparison, `*` honoured)
+is answered **304 with no body** and the same headers. A degraded or snapshot brief is
+still **200**: the fail-open contract is unchanged, only the headers say so. A
+snapshot's text starts with the line `_(substrate brief snapshot from <ISO time>; live
+sources degraded: <sources>)_`; snapshots are written only for complete briefs, kept
+for `SUBSTRATE_BRIEF_SNAPSHOT_TTL_S` (3600 s; `0` disables both the write and the
+read) and never written while any source is down. MCP `memory_brief` returns the same
+text with no headers.
+
+`GET /healthz` is memoised for `SUBSTRATE_HEALTHZ_CACHE_MS` (5000 ms; `0` recomputes
+on every call): the body gains `cachedAt` (ISO time it was computed) and `stale`
+(`true` when this answer was served from the memo), and the status code is derived
+from the memoised body by the unchanged `healthStatus` rule. Collectors polling health
+therefore cost one round trip per configured plane per 5 s, not per call. `/metrics`
+and `/slo` are not memoised.
+
 ## Traces
 
 Spans carry W3C trace context. `substrate-mcp` reads `traceparent` on the way in,
@@ -405,7 +439,7 @@ they stay; they carry no repo, so no brief shows them.
 | `GET /metrics` | the snapshot this process holds, in the shape `otlp.ts` encodes |
 | `GET /slo` | the verdicts computed from it, the breached ids, `burn`, and the per-plane `planes` |
 | `POST /evidence` | `{ "graph_id": "ut-…", "format": "json" \| "html" }` |
-| `GET /healthz` | now also `auditDurable`, `auditRecords`, `planes` and `capacity` |
+| `GET /healthz` | now also `auditDurable`, `auditRecords`, `planes`, `capacity`, `cachedAt` and `stale` |
 
 `/metrics` and `/slo` are served whether or not a collector is configured, so an
 operator can read the same numbers the SLOs are computed from without standing one
@@ -445,6 +479,12 @@ substrate-specific spelling.
 | `SUBSTRATE_BREAKER_FAILURES` | `5` | Consecutive failures that open a breaker; integer 1–100, else the default. |
 | `SUBSTRATE_BREAKER_OPEN_MS` | `30000` | How long an open breaker refuses before one probe; integer 1000–600000, else the default. |
 | `SUBSTRATE_CLAIM_REQUIRE_LEDGER` | derived | Withdraw a claim whose event did not land. |
+| `SUBSTRATE_BRIEF_BUDGET_MS` | `1200` | Shared deadline for the brief's four source reads; `0` = none. |
+| `SUBSTRATE_BRIEF_RECENT_WINDOW_DAYS` | `30` | How far back the brief's recent-actions ledger read looks. |
+| `SUBSTRATE_BRIEF_SNAPSHOT_TTL_S` | `3600` | How long the last complete brief is kept for the degraded path; `0` = no snapshots. |
+| `SUBSTRATE_CACHE_COMMAND_TIMEOUT_MS` | `250` | One cache command; sized for the loopback redis. |
+| `SUBSTRATE_CACHE_CONNECT_TIMEOUT_MS` | `250` | One cache connect. |
+| `SUBSTRATE_HEALTHZ_CACHE_MS` | `5000` | How long a computed `/healthz` body is served to pollers; `0` = recompute per call. |
 
 An endpoint pasted as `https://collector/v1/metrics` is accepted: the trailing
 `/v1/metrics` is stripped, because appending it again would 404 on every export —

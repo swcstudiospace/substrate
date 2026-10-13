@@ -53,18 +53,19 @@ describe("composeBrief", () => {
 			openGraphs: () => Promise.reject(new Error("postgres is down")),
 			memoryForBrief: () => Promise.reject(new Error("postgres is down")),
 		};
-		let failed = 0;
+		const failed: string[] = [];
 		const brief = await composeBrief(
 			{ repo: "swcstudiospace/autonogrammer", graph_id: "ut-x", surface: "claude-code" },
 			{ index: exploding as never, greptime: null },
 			undefined,
-			() => {
-				failed += 1;
+			(source) => {
+				failed.push(source);
 			},
 		);
 		expect(brief).toContain("## Substrate brief:");
 		expect(brief).toContain("not in the index yet");
-		expect(failed).toBe(1);
+		// Once per failed source, in section order (uplift-2 R1); no ledger, so no recent-actions read.
+		expect(failed).toEqual(["graph", "open graphs", "memory"]);
 	});
 });
 

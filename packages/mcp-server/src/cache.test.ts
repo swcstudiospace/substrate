@@ -240,9 +240,10 @@ describe("ReadThroughCache", () => {
 		expect(cache.health()).toMatchObject({ connected: true, mode: "on" });
 	});
 
-	test("a command that does not return is a bypass, and the budgets are pinned to 800 ms", async () => {
-		expect(COMMAND_TIMEOUT_MS).toBe(800);
-		expect(CONNECT_TIMEOUT_MS).toBe(800);
+	test("a command that does not return is a bypass, and the budgets are pinned to 250 ms", async () => {
+		// Sized for the loopback redis production runs (uplift-2 R1); env-overridable in config.
+		expect(COMMAND_TIMEOUT_MS).toBe(250);
+		expect(CONNECT_TIMEOUT_MS).toBe(250);
 
 		const redis = new FakeRedis();
 		redis.hang = true;
@@ -438,7 +439,8 @@ describe("the same answer with the cache off, on and broken", () => {
 		expect(b).toEqual(a);
 		expect(c).toEqual(a);
 		expect(await live.brief(request)).toEqual(a);
-		expect(on.sets).toBe(1);
+		// The brief entry and its last-good snapshot (uplift-2 R1); the hit wrote nothing.
+		expect(on.sets).toBe(2);
 		expect(a).toContain("keep the prefix");
 	});
 
@@ -484,7 +486,8 @@ describe("the same answer with the cache off, on and broken", () => {
 		expect(recovered).toContain("active");
 		expect(recovered).not.toContain("not in the index yet");
 		expect(loads).toBe(2);
-		expect(redis.sets).toBe(1);
+		// The recovered brief and, now that it is complete, its snapshot.
+		expect(redis.sets).toBe(2);
 	});
 
 	test("graph_get matches", async () => {
@@ -749,10 +752,12 @@ describe("the same answer with the cache off, on and broken", () => {
 			cache: new ReadThroughCache({ redis, enabled: true, log: () => {}, now: Date.now }),
 		});
 		await substrate.brief({ surface: "cursor", graph_id: "ut-1" });
-		expect(redis.ttls).toHaveLength(1);
+		// The brief's own TTL stops at the lease; the snapshot written beside it keeps its class TTL.
+		expect(redis.ttls).toHaveLength(2);
 		expect(redis.ttls[0]).toBeLessThanOrEqual(25);
 		expect(redis.ttls[0]).toBeGreaterThanOrEqual(1);
 		expect(redis.ttls[0]).toBeLessThan(CACHE_TTL.brief);
+		expect(redis.ttls[1]).toBe(CACHE_TTL["brief-snapshot"]);
 	});
 
 	test("a brief is cached until its generation moves, and events are not", async () => {
@@ -1147,10 +1152,13 @@ describe("Bun RedisClient", () => {
 			if (!complete) break;
 			i = cursor;
 			const [command, key, value] = args;
+			const bulk = (stored: string | undefined): string => (stored === undefined ? "$-1\r\n" : `$${Buffer.byteLength(stored)}\r\n${stored}\r\n`);
 			if (command === "HELLO") out.push(hello);
-			else if (command === "GET") {
-				const stored = key ? store.get(key) : undefined;
-				out.push(stored === undefined ? "$-1\r\n" : `$${Buffer.byteLength(stored)}\r\n${stored}\r\n`);
+			else if (command === "GET") out.push(bulk(key ? store.get(key) : undefined));
+			else if (command === "MGET") {
+				// Generation keys arrive in one round trip since uplift-2 R1.
+				const keys = args.slice(1);
+				out.push(`*${keys.length}\r\n${keys.map((name) => bulk(store.get(name))).join("")}`);
 			} else if (command === "SET" && key !== undefined && value !== undefined) {
 				store.set(key, value);
 				out.push("+OK\r\n");
