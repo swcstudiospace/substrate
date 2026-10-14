@@ -1,0 +1,77 @@
+[Unit]
+Description=Agent Substrate daily index archive (logical export of the Postgres index to SUBSTRATE_INDEX_ARCHIVE_DIR with a verifiable manifest)
+Documentation=https://github.com/swcstudiospace/agent-substrate
+After=network-online.target substrate-mcp.service
+Wants=network-online.target
+# A missing entry point skips the start silently instead of failing into the
+# timer's persistent backlog. The path is the pinned release, not the checkout:
+# ConditionPathExists follows the current symlink.
+ConditionPathExists=/opt/agent-substrate/current/packages/cli/src/index.ts
+# Wait for, and require, the filesystem the archive lives on. systemd orders the
+# unit after the mount units that cover each path and fails the start when one
+# cannot be activated — a volume that did not come up after a reboot is a failed
+# run, not a local archive. The path below is the documented default; the
+# operator's drop-in (substrate-index-archive.service.d/10-environment.conf)
+# MUST repeat the directive for the real SUBSTRATE_INDEX_ARCHIVE_DIR when it
+# differs (RequiresMountsFor= accumulates, so adding a path never removes this
+# one). The command independently refuses a directory on the root filesystem
+# (unless SUBSTRATE_INDEX_ARCHIVE_ALLOW_ROOTFS=1, which the unit never sets), so
+# a missing or autofs-deferred mount is caught even where this ordering is not.
+RequiresMountsFor=/mnt/index-archive
+
+[Service]
+Type=oneshot
+# Resource ceilings (uplift-2 R7 shape): a oneshot that pages nine tables
+# through 500-row reads inside one transaction and writes NDJSON; the whole
+# index is 11.9 MB (2026-10-13), so 512M is headroom. Lives in substrate.slice
+# (MemoryLow=2G) so reclaim hits co-tenants first; the timer retries a killed
+# run next tick, and a snapshot is never half-archived — the manifest is written
+# last and the failed run removes its own `.part` files.
+Slice=substrate.slice
+MemoryMax=512M
+# The export's own bounds (SUBSTRATE_INDEX_ARCHIVE_MAX_SECONDS, default 900,
+# and _MAX_BYTES) end a runaway run first; this is the backstop. Not
+# TimeoutStartSec=infinity: a hung connection must end as a failed run.
+TimeoutStartSec=1200
+# No Restart=: a oneshot that exits 1 (index unreachable, export bound hit) or
+# 2 (archive directory unset or refused, disk floor) already shows failed, and
+# the timer retries on the next tick.
+# Credentials only; nothing secret lives in the repo. The drop-in
+# substrate-index-archive.service.d/10-environment.conf is the EnvironmentFile:
+# the job is a store client in the same trust domain as the server (the index
+# URL for its reads, the Greptime credentials for its one ledger note per run).
+# The archive directory comes from SUBSTRATE_INDEX_ARCHIVE_DIR in that file;
+# when it is unset the command refuses by name (exit 2) and writes nothing —
+# the unit is installed disabled and enabled by the operator after the off-box
+# path is mounted. See infra/vps/README.md and docs/runbooks/index-archive.md.
+WorkingDirectory=/opt/agent-substrate/current
+# Machine-specific: `command -v bun`. The binary on this host is under
+# /root/.local, which is why the unit still runs as root (no User=) and why
+# ProtectHome=false stays. The code itself is the release at WorkingDirectory.
+ExecStart=/root/.local/share/reflex/bun/bin/bun packages/cli/src/index.ts index archive --out ${SUBSTRATE_INDEX_ARCHIVE_DIR}
+
+# /var/lib/substrate, created by systemd and writable under ProtectSystem=full.
+StateDirectory=substrate
+StateDirectoryMode=0700
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=substrate-index-archive
+
+# It talks to the index and the ledger and writes to the archive mount. Nothing
+# else. ProtectSystem=full leaves /mnt and /srv writable, which is where an
+# off-box archive path is mounted; the command itself refuses the release root,
+# the checkout and any directory on the root filesystem, so a misconfigured or
+# unmounted path fails rather than filling the root disk.
+# ProtectHome=false is the remaining exception: ExecStart's bun lives under
+# /root/.local, so ProtectHome=true would hide the interpreter.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

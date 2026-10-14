@@ -41,6 +41,9 @@ Every service in this directory uses `WorkingDirectory=/opt/agent-substrate/curr
 | `substrate-anchor.service` (+ `substrate-anchor.timer`) | `substrate-anchor.service.d/10-environment.conf` | `/etc/substrate/substrate.env` |
 | `substrate-index-sweep.service` (+ `substrate-index-sweep.timer`, staged: install and enable are operator steps after the dry-run report has been read for a few days) | `substrate-index-sweep.service.d/10-environment.conf` (also carries `Environment=SUBSTRATE_INDEX_SWEEP=dry-run`) | `/etc/substrate/substrate.env` |
 | `substrate-ledger-archive.service` (+ `substrate-ledger-archive.timer`, staged: install and enable are operator steps after the off-box archive path is mounted; see *Daily ledger archive*) | `substrate-ledger-archive.service.d/10-environment.conf` (carries `SUBSTRATE_LEDGER_ARCHIVE_DIR` once the operator sets it) | `/etc/substrate/substrate.env` |
+| `substrate-index-archive.service` (+ `substrate-index-archive.timer`, staged: install and enable are operator steps after the off-box archive path is mounted; see *Daily index archive*) | `substrate-index-archive.service.d/10-environment.conf` (carries `SUBSTRATE_INDEX_ARCHIVE_DIR` once the operator sets it) | `/etc/substrate/substrate.env` |
+| `substrate-docs-canary.service` (+ `substrate-docs-canary.timer`, staged: copying the units, `systemctl enable --now` and the two opt-in lines on the drop-in are operator steps; installed without them the job exits 2 and posts nothing; see `docs/docs-search-ingest.md`) | `substrate-docs-canary.service.d/10-environment.conf` (carries `SUBSTRATE_DOCS_CANARY=1` and `SUBSTRATE_DOCS_CANARY_MANIFEST` as commented lines until the operator sets them) | `/etc/substrate/substrate.env` |
+| `substrate-alert@.service` (a template instantiated by `OnFailure=` on `substrate-mcp`, staged: installed with the watchdog drop-in; see *Hang detection*) | `substrate-alert@.service.d/10-environment.conf` | `/etc/substrate/substrate.env` |
 
 The MCP server is the process that needs the shared env file. The Grok collector must not load it. Create `collector-grok.env` (root-owned, mode 0600) with only the names this process reads: `SUBSTRATE_URL`, `SUBSTRATE_TOKEN`, and optionally `GROK_SESSIONS_DIR`. `SUBSTRATE_COLLECTOR_STATE` is already set on the unit. Do not put database URLs, plane keys, handoff keys, or review tokens in that file. No values belong in git.
 
@@ -59,6 +62,8 @@ Every `substrate-*` unit carries `Slice=substrate.slice` and its own memory and 
 | `substrate-dispatcher.service`, `substrate-host.service` | — | 4G | 1024 | — |
 | `substrate-anchor.service`, `substrate-index-sweep.service`, `substrate-skills-{sync,bridge}.service` (oneshots) | — | 1G | — | — |
 | `substrate-ledger-archive.service` (oneshot) | — | 512M | — | — |
+| `substrate-index-archive.service` (oneshot) | — | 512M | — | — |
+| `substrate-alert@.service`, `substrate-docs-canary.service`, `substrate-doctor.service` (oneshots) | — | 256M | 64 | — |
 
 `MemoryHigh` throttles; `MemoryMax` is where the kernel ends the process and `Restart=always` (or the timer's next tick, for a oneshot) brings it back. The dispatcher's and host's cgroups hold the sessions and VM lifecycle they launch, which is why theirs are the large ones. Read the live numbers with `systemctl status substrate.slice` and `systemd-cgtop -1 -k /substrate.slice`. Rollback: reinstall the previous unit files (no `Slice=` line) and `daemon-reload`; the slice file is inert without members.
 
@@ -100,6 +105,19 @@ The production key is used by the production unit only. A memo for some hour sig
 `note-pending-<day>.json` is written beside a day's manifest before its ledger note is sent and deleted only once the ledger reports it stored. If the ledger refuses the note (or the process dies mid-send) the files stay and the marker remains; the run exits 1 (the unit shows failed) and every later run sends the pending notes first and deletes each marker the ledger takes. Until then `coverage` does not list the day as archived.
 
 Only once every day that a TTL would expire has a verified manifest is `SUBSTRATE_LEDGER_TTL` set — see the ledger doc's *Retention*.
+
+### Daily index archive
+
+`substrate-index-archive.timer` fires `substrate-index-archive.service` daily at 03:45 UTC (`Persistent=true`), after the 03:17 sweep and the 03:30 ledger archive. The service is `Type=oneshot` with no `Restart=` (`MemoryMax=512M`, `TimeoutStartSec=1200`) and runs `bun packages/cli/src/index.ts index archive --out ${SUBSTRATE_INDEX_ARCHIVE_DIR}` from the pinned release: one `index-<stamp>/` snapshot with a `<table>.ndjson` per index table and a `manifest.json` written last, recorded in the ledger as one `note`. Quarantine and review text is never exported. `docs/runbooks/index-archive.md` has the format, the verify and restore-to-scratch procedure, and the guards.
+
+**Both files are staged, disabled by default, and nothing in the code installs them.** The unit file does not mount anything: the volume, the `RequiresMountsFor=` path and enabling the timer are operator steps, in this order:
+
+1. Mount the off-box path (not the root disk, not under `/opt/agent-substrate`) somewhere `ProtectSystem=full` leaves writable, such as `/mnt/index-archive`, with at least `SUBSTRATE_DEPLOY_MIN_FREE_GB` free. The command itself compares the `st_dev` of the nearest existing ancestor with that of `/` and of the release root before creating anything, so an unmounted volume is a named refusal (exit 2); `SUBSTRATE_INDEX_ARCHIVE_ALLOW_ROOTFS=1` waives only that gate and must not be set on the VPS.
+2. Install the unit, timer and drop-in (`cp infra/vps/substrate-index-archive.{service,timer} /etc/systemd/system/`, `install -d -m 0700 /etc/systemd/system/substrate-index-archive.service.d`, `install -m 0600 infra/vps/substrate-index-archive.service.d/10-environment.conf` there) and add `Environment=SUBSTRATE_INDEX_ARCHIVE_DIR=/mnt/index-archive` to the drop-in. The unit ships `RequiresMountsFor=/mnt/index-archive`; if the archive lives elsewhere add `RequiresMountsFor=<the real path>` to the drop-in (the directive accumulates). To see the archive's age on `/healthz` and `/slo`, put the same `SUBSTRATE_INDEX_ARCHIVE_DIR` (and, once the first archive verifies, `SUBSTRATE_INDEX_ARCHIVE_MAX_AGE_H=26`) in `/etc/substrate/substrate.env` and restart `substrate-mcp`; setting them in the drop-in alone only configures the job. With the name unset the unit starts, refuses by name (exit 2) and writes nothing.
+3. `systemctl daemon-reload`, one run by hand — `systemctl start substrate-index-archive.service` — then `journalctl -u substrate-index-archive` and `bun packages/cli/src/index.ts index verify-archive /mnt/index-archive` (exit 2 on any mismatch). Rehearse a restore with `SUBSTRATE_INDEX_SCRATCH_URL=<scratch url> bun packages/cli/src/index.ts index restore /mnt/index-archive`; it refuses the production database.
+4. `systemctl enable --now substrate-index-archive.timer`. `bun scripts/doctor-units.ts --dry-run` must stay green.
+
+Rollback: `systemctl disable --now substrate-index-archive.timer`, remove the unit files and drop-in, `daemon-reload`. Snapshots already written are left alone; the code never deletes one.
 
 ### Root and ProtectHome=false
 
@@ -160,6 +178,30 @@ systemctl enable --now substrate-doctor.timer
 ```
 
 Rollback: `systemctl disable --now substrate-doctor.timer`, remove the three files, `daemon-reload`. Nothing else changes; the doctor never writes outside its state file.
+
+### VPS runtime hardening (uplift-4 S3)
+
+Three parts. What each does and does not do:
+
+**1. Priority and swap isolation (unit-file settings, effective after the operator reinstalls them).** `substrate.slice` now declares `CPUWeight=300`, `IOWeight=300` and `ManagedOOMPreference=avoid`; `substrate-mcp.service` declares `MemorySwapMax=0`. Reinstall `substrate.slice` and `substrate-mcp.service` from this directory and `daemon-reload` (the `substrate-mcp` change needs a restart to apply). Weights are shares, not caps: they matter only when something else wants the CPU or disk. `IOWeight` is honoured only with the io controller enabled for the cgroup and BFQ (or io.cost) on the disk; under `none` or `mq-deadline` the value is accepted and ignored, and nothing here enables BFQ. The runtime doctor compares `CPUWeight`, `IOWeight` and `MemorySwapMax` with `systemctl show` (`drift` when different) and adds a `substrate.slice IOWeight` row that reads `/sys/fs/cgroup` and `lsblk -dno NAME,SCHED` and says `NOT enforced` (a `warn`, informational) when the kernel cannot honour it. `MemorySwapMax=0` turns memory pressure into `MemoryHigh` throttling and, at `MemoryMax`, an OOM kill that `Restart=always` recovers. Rollback: delete the keys, `daemon-reload`, restart.
+
+**2. Hang detection (opt-in; code is in the release, the unit changes are an operator step).** `GET /livez` (loopback peers only, no bearer, no store or plane I/O) answers `{ok, uptime_s, loop_lag_ms}`. `packages/mcp-server/src/watchdog.ts` is off unless `SUBSTRATE_WATCHDOG=1` and systemd gave the process a `NOTIFY_SOCKET`; then it sends `READY=1` once the server listens and `WATCHDOG=1` every `WatchdogSec/3` only when the event-loop lag is under `SUBSTRATE_WATCHDOG_LAG_MS` (default 5000) and a loopback fetch of its own `/livez` answers within `SUBSTRATE_WATCHDOG_PROBE_MS` (default 2000). The notifier is a spawned `systemd-notify` with a hard timeout (`SUBSTRATE_WATCHDOG_NOTIFY_MS`, default 3000). `substrate-mcp.service.d/20-watchdog.conf.example` is **not installed by anything**: it sets `Type=notify`, `WatchdogSec=30`, `TimeoutStartSec=60`, `NotifyAccess=all` (the notifier child is not the main PID), `Environment=SUBSTRATE_WATCHDOG=1` and `OnFailure=substrate-alert@%n.service`, plus an `ExecStopPost=` that starts the same alert so a watchdog kill that `Restart=always` immediately restarts is still reported. **`Type=notify` with the flag off blocks startup**, which is why the example sets both in one file; never keep the file and turn the flag off. `substrate-alert@.service` (staged, with `substrate-alert@.service.d/10-environment.conf`) runs `scripts/substrate-alert.ts <unit>`, which posts one `warning` event (`payload.unit`, `payload.result`, never logs) as the `substrate` surface using the doctor's bearer rule (first entry of a rotated token list), posts nothing when the result is exactly `success`, and always exits 0. `OnFailure=` alone never fires for a hang (the unit restarts and never reaches `failed`); the `ExecStopPost=` line starts the alert with systemd's `$SERVICE_RESULT` carried in the instance name (`substrate-alert@substrate-mcp.service:watchdog.service`), so the result is the one at that stop, not a later `systemctl show` read (kept only as the fallback for a manual run). The alert waits at most `SUBSTRATE_ALERT_WAIT_S` (default and cap 60) for `/livez`; its `TimeoutStartSec=120` covers that wait plus the POST.
+
+**Precondition: a release that contains `packages/mcp-server/src/watchdog.ts` must already be `current` and running before the drop-in is installed.** An older release never sends `READY=1`, so under `Type=notify` the unit is killed at the 60 s start timeout and `Restart=always` loops on it. Check with `test -f /opt/agent-substrate/current/packages/mcp-server/src/watchdog.ts && curl -fs http://127.0.0.1:7410/livez` first.
+
+```sh
+install -d -m 0755 /etc/systemd/system/substrate-mcp.service.d /etc/systemd/system/substrate-alert@.service.d
+install -m 0644 infra/vps/substrate-mcp.service.d/20-watchdog.conf.example /etc/systemd/system/substrate-mcp.service.d/20-watchdog.conf
+cp infra/vps/substrate-alert@.service /etc/systemd/system/
+install -m 0600 infra/vps/substrate-alert@.service.d/10-environment.conf /etc/systemd/system/substrate-alert@.service.d/10-environment.conf
+systemctl daemon-reload && systemctl restart substrate-mcp
+systemctl show substrate-mcp -p WatchdogUSec,Type,NotifyAccess   # 30s, notify, all
+curl -s http://127.0.0.1:7410/livez
+```
+
+Rollback: remove the `20-watchdog.conf` drop-in, `daemon-reload`, restart (back to `Type=simple`).
+
+**3. Disk guardrails (report-only).** The runtime doctor gains `disk`-class rows: release bytes with hardlinks counted once (one `du` over current, previous, then the rest newest first, so a release is charged only what the earlier ones do not share), per-child bytes and age under `/var/lib/substrate`, the journal size, and the audit chain's size and average daily growth, against `SUBSTRATE_RETAIN_RELEASE_MAX_GB` (default 6), `SUBSTRATE_STATE_MAX_GB` (default 1) and `SUBSTRATE_JOURNAL_MAX_MB` (default 400; `0` disables a compare). Over budget is a `warn` plus `would-reclaim` rows that name bytes; **nothing is deleted, vacuumed or pruned, and the audit chain is never offered**. `deploy-release.sh --dry-run` prints which release directories would be pruned in both cases — a redeploy of the current tag (keeps current and previous) and the next deploy of a new tag (keeps only the present current, so the present previous is removed too, listed as `keep previous … would remove after the next new-tag deploy`) — with their unique bytes; it takes no lock, creates nothing and deletes nothing, and the real prune is unchanged. A report whose du cap (64 paths) cut some entries says `N more not measured` and is `unknown`, never `ok`, unless the measured part already breaks the budget (`warn`). `infra/vps/journald-substrate.conf` (`SystemMaxUse=400M`) is a drop-in that nothing installs: `install -m 0644 infra/vps/journald-substrate.conf /etc/systemd/journald.conf.d/10-substrate.conf && systemctl restart systemd-journald`; removing the file and restarting restores the defaults. The doctor's rows are dark until `substrate-doctor.timer` is installed (see above); run `bun scripts/doctor-runtime.ts` by hand meanwhile.
 
 ## Code that reaches main through v1.3, not this PR
 

@@ -59,6 +59,7 @@ const MCP_OK = {
 	ActiveState: "active",
 	Slice: "substrate.slice",
 	MemoryMax: String(2 * 2 ** 30),
+	MemorySwapMax: "0",
 	TasksMax: "512",
 	NRestarts: "0",
 	Environment: "SUBSTRATE_RETAIN_OUTBOX_PATH=/var/lib/substrate/retain-outbox.jsonl SUBSTRATE_DOCS_STATE_FILE=/var/lib/substrate/docs-ingest.json",
@@ -335,11 +336,14 @@ function fixtureHost(input: {
 				const set = input.envFile.split("\n").some((line) => line.startsWith(`${name}=`) && line.length > name.length + 1);
 				return { code: set ? 0 : 1, out: "" };
 			}
+			if (cmd === "lsblk") return { code: 0, out: "vda bfq\n" };
 			return null;
 		},
 		readText(path) {
 			if (path === "/proc/vmstat") return vmstat[Math.min(vmstatReads++, 1)] ?? null;
 			if (path === "/proc/meminfo") return "SwapTotal:      15728640 kB\nSwapFree:       15728640 kB\n";
+			if (path === "/sys/fs/cgroup/cgroup.controllers") return "cpuset cpu io memory pids\n";
+			if (path === "/sys/fs/cgroup/substrate.slice/io.weight") return "default 300\n";
 			return null;
 		},
 		sleep: async () => {},
@@ -358,12 +362,19 @@ function asDeclared(policy: Policy): Record<string, string> {
 			"ActiveState=active",
 			`Slice=${unit.slice ?? ""}`,
 			`MemoryMax=${bytes === "infinity" || bytes === null ? "infinity" : bytes}`,
+			`MemorySwapMax=${unit.memorySwapMax ?? "infinity"}`,
 			`TasksMax=${unit.tasksMax ?? "4915"}`,
 			"NRestarts=0",
 			`Environment=${unit.environmentNames.map((n) => `${n}=${SENTINEL}`).join(" ")}`,
 		].join("\n");
 	}
-	out["substrate.slice"] = `LoadState=loaded\nActiveState=active\nMemoryLow=${parseBytes(policy.sliceMemoryLow)}`;
+	out["substrate.slice"] = [
+		"LoadState=loaded",
+		"ActiveState=active",
+		`MemoryLow=${parseBytes(policy.sliceMemoryLow)}`,
+		`CPUWeight=${policy.sliceWeights.cpuWeight ?? "[not set]"}`,
+		`IOWeight=${policy.sliceWeights.ioWeight ?? "[not set]"}`,
+	].join("\n");
 	out["redis-server.service"] = `LoadState=loaded\nMemoryMax=${parseBytes(policy.redisUnitMemoryMax)}`;
 	for (const timer of EXPECTED_TIMERS) {
 		out[timer.name] = `LoadState=loaded\nUnitFileState=enabled\nActiveState=active\nLastTriggerUSec=@${1_760_400_000 - 600}`;
@@ -382,7 +393,7 @@ describe("a whole run", () => {
 		expect(rows.filter((r) => r.status !== "ok").map((r) => `${r.check}: ${r.status}`)).toEqual([]);
 		expect(exitCode(rows)).toBe(0);
 		expect(driftClasses(rows)).toEqual([]);
-		for (const call of fx.calls) expect(call[0]).toMatch(/^(systemctl|redis-cli|df|grep)$/);
+		for (const call of fx.calls) expect(call[0]).toMatch(/^(systemctl|redis-cli|df|grep|lsblk)$/);
 		expect(fx.calls.some((c) => c.join(" ").includes("sh -c"))).toBe(false);
 		expect(fx.calls).toContainEqual(["grep", "-q", "--", `^${LEGACY.name}=.`, "/etc/substrate/substrate.env"]);
 		expect(JSON.stringify(rows)).not.toContain(SENTINEL);

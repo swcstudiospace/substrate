@@ -60,6 +60,13 @@ SyslogIdentifier=substrate-mcp
 Slice=substrate.slice
 MemoryHigh=1G
 MemoryMax=2G
+# Never page out (uplift-4 S3). RSS is ~53 MB while the host's co-tenants hold
+# 12.8 GiB of its 16 GiB swap, so a substrate page that reached swap would come
+# back at disk speed behind someone else's working set. With 0 the pressure
+# shows up as MemoryHigh throttling and, at MemoryMax, an OOM kill that
+# Restart=always recovers in seconds. Roll back by deleting this line and
+# running daemon-reload.
+MemorySwapMax=0
 TasksMax=512
 CPUQuota=200%
 

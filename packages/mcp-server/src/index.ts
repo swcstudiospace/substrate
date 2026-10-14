@@ -29,6 +29,9 @@ import { createObservability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
 import { SloNotifier } from "./slo-notify.ts";
+import { DROPPED_METRIC, MetricsHistorySampler } from "./metrics-history.ts";
+import { DocsLagTimer } from "./docs-lag-timer.ts";
+import { createWatchdog, livezUrlFor } from "./watchdog.ts";
 
 let config;
 try {
@@ -64,6 +67,7 @@ for (const warning of [
 	...memoryExpiryConfigWarnings(config),
 	...hindsightConfigWarnings(config),
 	...sloConfigWarnings(config),
+	...config.metricsHistory.problems,
 ]) {
 	process.stderr.write(`[substrate] misconfigured — ${warning}\n`);
 }
@@ -92,10 +96,43 @@ for (const problem of migration.errors) {
 	process.stderr.write(`[substrate] degraded — ${problem}\n`);
 }
 
+// uplift-4 S6: the durable metrics history, only under SUBSTRATE_METRICS_HISTORY=on.
+// Samples the registry into `metric_samples` through the ledger client; fail-open,
+// a failed write is a counted drop. Needs the ledger, so without one it stays off.
+const metricsHistory = new MetricsHistorySampler({
+	settings: { enabled: config.metricsHistory.enabled, intervalS: config.metricsHistory.intervalS },
+	snapshot: () => observability.snapshot(),
+	runwayDays: () => observability.evaluateCapacity()[0]?.observed ?? null,
+	record: async (rows) =>
+		substrate.greptime === null
+			? { stored: 0, drops: { unavailable: rows.length } }
+			: await substrate.greptime.recordMetricSamples(rows, config.metricsHistory.ttl),
+	onDrop: (reason, rows) => observability.instruments.registry.counter(DROPPED_METRIC).add(rows, { reason }),
+});
+if (metricsHistory.start()) {
+	process.stdout.write(`[substrate] metrics history: every ${config.metricsHistory.intervalS} s, ttl ${config.metricsHistory.ttl}\n`);
+}
+
+// uplift-4 S7: the docs merge-trigger lag warning is settled here, on an unref'd
+// timer, so `/slo` and `/metrics` only read the verdicts. With
+// SUBSTRATE_DOCS_TRIGGER_LAG_MIN=0 a pass finds nothing owed and does nothing.
+const docsLagTimer = new DocsLagTimer({
+	settle: () => substrate.settleDocsLag(),
+	idle: () => substrate.docsLagIdle(),
+	intervalS: config.docsFreshness.lagCheckS,
+});
+if (docsLagTimer.start()) {
+	process.stdout.write(`[substrate] docs lag check: every ${config.docsFreshness.lagCheckS} s\n`);
+}
+
 // Mirror target availability, once: a target is on when its key is configured.
 process.stdout.write(`[substrate] mirror: ${substrate.mirror?.describe() ?? "linear off, notion off"}\n`);
 
 const server = createHttpServer(substrate, config, observability);
+// uplift-4 S3: the systemd watchdog. A no-op unless SUBSTRATE_WATCHDOG=1 and
+// systemd gave this process a NOTIFY_SOCKET (Type=notify); `start()` below is
+// where READY=1 goes out, once the server listens.
+const { watchdog } = createWatchdog(process.env, livezUrlFor(config.host, config.port), (line) => process.stderr.write(line));
 
 server.listen(config.port, config.host, () => {
 	const stores = [migration.index ? "index" : null, migration.greptime ? "greptime" : null]
@@ -112,6 +149,7 @@ server.listen(config.port, config.host, () => {
 			`audit ${observability.audit.durable ? observability.audit.path : "in memory"}, ` +
 			`claims ${substrate.requireRecordedClaims ? "fail-closed" : "fail-open"})\n`,
 	);
+	if (watchdog.start()) process.stdout.write("[substrate] watchdog: armed, READY=1 first, then heartbeat gated on event-loop lag and loopback /livez\n");
 });
 
 /** How long the final OTLP export may take before shutdown stops waiting for it. */
@@ -122,6 +160,12 @@ const SHUTDOWN_RETAIN_MS = 10_000;
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
 	process.on(signal, () => {
 		notifier.stop();
+		metricsHistory.stop();
+		// Before the flush below: no new lag pass starts once shutdown began.
+		docsLagTimer.stop();
+		// Cancelled first and awaited with the flush below: no ping after shutdown began,
+		// and a stuck systemd-notify child is killed rather than outliving the process.
+		const watchdogStopped = watchdog.stop();
 		observability.stop();
 		server.close(async () => {
 			// In-flight background retains finish first (bounded), then the retain
@@ -137,7 +181,13 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 			// The SLO checkpoint (uplift-3 N2) is written inside the same bound: it is
 			// what lets the next epoch pick the series up where this one left them.
 			await Promise.race([
-				Promise.all([observability.exporter?.flush().catch(() => undefined) ?? Promise.resolve(), observability.flush()]),
+				Promise.all([
+					observability.exporter?.flush().catch(() => undefined) ?? Promise.resolve(),
+					observability.flush(),
+					metricsHistory.flush(),
+					docsLagTimer.flush(),
+					watchdogStopped,
+				]),
 				Bun.sleep(SHUTDOWN_FLUSH_MS),
 			]);
 			process.exit(0);

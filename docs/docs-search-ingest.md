@@ -219,6 +219,79 @@ answer for operators and tests: 200 with the version (and `job`), 503
 with the reason. The skills-sync tick (`packages/projector/src/skills-sync.ts`)
 treats any 2xx as delivered, so its 3 s budget now holds.
 
+### Freshness and trigger lag (uplift-4 S7)
+
+Two signals, both computed in-process from the persisted state file
+(`SUBSTRATE_DOCS_STATE_FILE`): no RAGFlow call and no new key. The lag warning
+is settled by one unref'd timer (`SUBSTRATE_DOCS_LAG_CHECK_S`, below).
+
+- **Freshness**: `substrate.docs.freshness_seconds{dataset}` is the time since
+  the newest `versions[].ingested_at` of the dataset (clamped at 0). Report-only
+  threshold `SUBSTRATE_DOCS_FRESHNESS_MAX_AGE_H` (default `168`; `0` reports the
+  age without judging it).
+- **Trigger lag**: every merge-trigger that starts a job (a new identity, not a
+  200 idempotent or a noop) is recorded in the state file's optional `triggers`
+  member, last 20 per dataset: `{commit, content_sha256, received_at}`. A
+  retry of the same commit and hash keeps its first `received_at`. A dataset is
+  `lagging` when its newest accepted trigger has no recorded version for that
+  commit after `SUBSTRATE_DOCS_TRIGGER_LAG_MIN` minutes (default `15`; `0`
+  stops recording triggers and detecting lag). The gauge is
+  `substrate.docs.trigger_lag_seconds{dataset}` (0 once it landed).
+
+Where they show: `GET /metrics` gains a `gauges` member (only once a dataset
+has data). These two labelled gauges are served **only** there: the registry's
+own unlabelled gauges (such as `substrate.index.archive.age_seconds`) are in
+`metrics[]` and in OTLP, but the OTLP exporter does not carry the docs gauges,
+so they are read from `/metrics`. `GET /slo` gains a `docs.freshness` row in the
+`docs` array beside `docs.search.p95`, with per-dataset detail. The row appears
+only when a dataset has a recorded version or an accepted trigger, and like
+the rest of `docs` it is never folded into `breached`. The `dataset` label is
+always a name of the trigger table.
+
+The lag also raises one `warning` event (`substrate` surface,
+`payload.action: "docs.freshness"`, `state: "lagging"`) per dataset per breach:
+the marker is written to the state file's `lag` member before the event is
+emitted and marked `warned` only after the ledger accepted it; while the breach
+lasts nothing more is emitted; when it clears, one `note`
+(`state: "recovered"`) is emitted and the marker removed. Delivery is a single
+background pass started by a timer (`SUBSTRATE_DOCS_LAG_CHECK_S`, default `60`,
+floor `15`, ceiling `3600`), so a breach is announced even when nobody reads
+`/slo`, and `GET /slo` and `GET /metrics` only read the verdicts: they never emit
+or write a state file, and answer from the in-memory state without waiting on
+the state-file hydrate (the first read after a boot can show no datasets until
+the timer's first pass, which runs at start, has loaded it). Each emit has a 5 s
+deadline that counts as a failure; a failed delivery is retried no sooner than
+60 s later; and a failing emit or save is logged and never fails a trigger or a
+read. With `SUBSTRATE_DOCS_TRIGGER_LAG_MIN=0` and no marker left behind a pass
+finds nothing owed and does nothing. The timer is stopped at shutdown, and the
+pass in flight is awaited inside the same two-second bound as the other flushes.
+
+The dedupe is best effort, not exactly-once. With `SUBSTRATE_DOCS_STATE_FILE`
+unset the markers live in the process and a restart can warn again; a failed
+state write is logged and swallowed, so a lost write can do the same; a crash
+between the emit and the second write, or an emit that finished after its
+deadline, can repeat one warning. A warning is never silently lost.
+
+What this does **not** prove. The offline golden harness proves the pipeline,
+not relevance. Freshness proves the corpus was refreshed recently, not that it
+is at the repository HEAD: HEAD is known only to the post-merge hook, so a hook
+that never fired leaves no trigger and no lag. The lag signal catches the
+other failure, a trigger the server accepted that never became an ingest (a
+refused ingest, a plane outage, a crash); a trigger counts as landed only when
+a recorded version carries both its commit and its content hash. A state file
+without the new members loads exactly as before, and a run that never accepted
+a trigger writes none. The row reads `insufficient-data` until a dataset has a
+recorded ingest and `unconfigured` when both thresholds are 0.
+
+Rollback. Setting `SUBSTRATE_DOCS_TRIGGER_LAG_MIN=0` in the substrate-mcp
+environment and restarting it (an operator step; nothing in the repo changes the
+host) stops recording and judging triggers; members already in the file are
+ignored and a marker left behind clears with one `note`. Freshness itself has
+no off switch: with `SUBSTRATE_DOCS_FRESHNESS_MAX_AGE_H=0` too the age is only
+reported, but the `docs.freshness` row (`unconfigured`) and the `/metrics`
+gauges still appear for any dataset with a recorded version. Removing them
+means reverting the code.
+
 ### Skills-sync degradation
 
 The Phase 22 sync unit is not yet live, so no fast-forward evidence
@@ -292,3 +365,40 @@ redactor; no `forbidden` string appears). Two tiers share the scorer:
   it exits 2 with a usage line and opens no socket.
 
 See `fixtures/docs-golden/README.md` for the fixture shape.
+
+### Live canary (uplift-4 S7, opt-in)
+
+`bun scripts/docs-golden.ts --live --emit` is the canary a daily staged timer
+runs (`infra/vps/substrate-docs-canary.{service,timer}`; shipped, **not**
+installed by any code). Unlike plain `--live` it asserts: every fixture goes
+through the loopback `POST /docs/search` as `omp` (bearer from
+`SUBSTRATE_TOKEN_OMP`, first entry of a list, else the tokens dir, else
+`SUBSTRATE_TOKEN`), is scored with the offline tier's scorer (expected sources,
+commit pins, redaction) and must also cite only the attested
+`dataset_commit`. A table is printed and the exit status is 0 (all pass),
+1 (a regression), 2 (refused: not configured), 3 (could not run: stale
+fixtures or manifest, search refused or unreachable, or a degraded answer —
+an outage is the SLO's to report, not a regression; nothing is posted) or 4
+(all pass but the dedupe record could not be cleared).
+
+It refuses by name, exit 2 with no socket opened, unless both
+`SUBSTRATE_DOCS_CANARY=1` and `SUBSTRATE_DOCS_CANARY_MANIFEST` are set, and
+when `SUBSTRATE_URL` (default loopback) is not a loopback address. The manifest
+is a JSON file `{"sha256": "<bun scripts/docs-golden.ts --manifest>",
+"dataset_commit": "<commit the corpus was ingested under>"}` that the
+operator writes after ingesting `fixtures/docs-golden/corpus/`; its `sha256`
+must equal the corpus on disk. On a regression it posts one `warning` as
+`substrate` (`payload.action: "docs.canary"`, fixture ids and metric names
+only) when the failing set differs from the one recorded in
+`SUBSTRATE_DOCS_CANARY_STATE` (default `/var/lib/substrate/docs-canary-last.json`);
+a failed post keeps the old record, so the next run posts again. The record is
+written through a temp file and a rename. It is
+read-only against RAGFlow and uses no key of its own.
+
+Procedure: ingest the corpus into a dataset under a known commit; write the
+manifest; on the drop-in `substrate-docs-canary.service.d/10-environment.conf`
+uncomment `SUBSTRATE_DOCS_CANARY=1` and set `SUBSTRATE_DOCS_CANARY_MANIFEST`;
+run the unit once (`systemctl start substrate-docs-canary.service`) and read the
+journal; then `systemctl enable --now substrate-docs-canary.timer`. Rollback:
+`systemctl disable --now substrate-docs-canary.timer`, remove the two lines
+(the job then exits 2 by itself) and delete the unit files.

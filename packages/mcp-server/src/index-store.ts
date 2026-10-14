@@ -19,6 +19,7 @@ import {
 	type SweepReport,
 	type SweepStatement,
 } from "./index-sweep.ts";
+import { exportedColumns, tableSpec, type ArchiveRow, type ArchiveTableSpec, type ColumnType } from "./index-archive-spec.ts";
 import { memoryExpiry, memoryGraphId, needsReverification, type GraphLifetime } from "./memory-policy.ts";
 import {
 	DERIVED_KEY_WINDOW_MS,
@@ -214,6 +215,8 @@ export interface IndexStoreOptions {
 	gate?: PlaneGate | null;
 	/** Lifetime handling on serving reads. Absent is `report`, uncounted: what every read did before N4, plus the tag. */
 	memoryExpiry?: MemoryExpirySettings;
+	/** `SUBSTRATE_INDEX_TUNE=apply` (uplift-4 S2): apply the lease-table storage tune once at the end of `migrate()`. Absent is `off`. */
+	tune?: "off" | "apply";
 }
 
 /** What `/healthz` reports about the database's size, from `capacity()`. */
@@ -221,6 +224,8 @@ export interface IndexCapacity {
 	databaseBytes: number;
 	/** The ten largest relations outside Timescale's own schemas. */
 	tables: Array<{ name: string; totalBytes: number; liveRows: number; deadRows: number }>;
+	/** `graph_nodes` lease-table bloat (uplift-4 S2), `null` when the table is absent: `n_tup_hot_upd / n_tup_upd` and `n_dead_tup / (n_live_tup + n_dead_tup)`, each `null` while its denominator is 0. */
+	graphNodes?: { hotUpdateRatio: number | null; deadRatio: number | null } | null;
 }
 
 /** Rejects with an error named `TimeoutError`, which the plane gate samples as a timeout. */
@@ -289,12 +294,15 @@ export class IndexStore implements MemoryStore {
 	private readonly gate: PlaneGate | null;
 	private readonly expiry: MemoryExpirySettings;
 	readonly poolSettings: IndexPoolSettings;
+	/** `SUBSTRATE_INDEX_TUNE`: `apply` runs {@link IndexStore.tuneGraphNodes} at the end of `migrate()`; `off` (the default) never alters a table. */
+	readonly tune: "off" | "apply";
 
 	constructor(connectionString: string, options: IndexStoreOptions = {}) {
 		this.poolSettings = { ...indexPoolSettingsFromEnv(), ...options.pool, applicationName: INDEX_APPLICATION_NAME };
 		this.sql = new SQL(connectionString, indexSqlOptions(this.poolSettings));
 		this.gate = options.gate ?? null;
 		this.expiry = options.memoryExpiry ?? { mode: "report" };
+		this.tune = options.tune ?? "off";
 	}
 
 	/** One index call under the plane gate. Without a gate it is just `fn()`. */
@@ -491,6 +499,14 @@ export class IndexStore implements MemoryStore {
 			create unique index if not exists memory_reviews_pending_idx on memory_reviews (entry_hash)
 			where state = 'pending'`;
 		await this.sql`drop index if exists memory_reviews_hash_idx`;
+		// Opt-in, once: a failed tune must not stop the service booting on a schema that is already complete.
+		if (this.tune === "apply") {
+			try {
+				await this.tuneGraphNodes();
+			} catch (cause) {
+				process.stderr.write(`[substrate] index tune not applied: ${redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200)}\n`);
+			}
+		}
 	}
 
 	// ── graph ──────────────────────────────────────────────────────────────────
@@ -1749,17 +1765,31 @@ export class IndexStore implements MemoryStore {
 	 */
 	async capacity(): Promise<IndexCapacity> {
 		return this.plane("capacity", async () => {
-			const size = (await this.sql`
-				select pg_database_size(current_database())::text as bytes`) as Array<Record<string, unknown>>;
-			const tables = (await this.sql`
-				select relname as name,
-				       pg_total_relation_size(relid)::text as total_bytes,
-				       n_live_tup::text as live_rows,
-				       n_dead_tup::text as dead_rows
-				from pg_stat_user_tables
-				where left(schemaname, 13) <> '_timescaledb_'
-				order by pg_total_relation_size(relid) desc
-				limit 10`) as Array<Record<string, unknown>>;
+			// Three independent reads, issued together: `/healthz` bounds this whole call at one second and every
+			// serial statement costs a proxy round trip, so the lease-table row must not add one.
+			const [size, tables, nodes] = (await Promise.all([
+				this.sql`
+					select pg_database_size(current_database())::text as bytes`,
+				this.sql`
+					select relname as name,
+					       pg_total_relation_size(relid)::text as total_bytes,
+					       n_live_tup::text as live_rows,
+					       n_dead_tup::text as dead_rows
+					from pg_stat_user_tables
+					where left(schemaname, 13) <> '_timescaledb_'
+					order by pg_total_relation_size(relid) desc
+					limit 10`,
+				// Lease-table bloat, visibility only: how many updates were HOT (no new
+				// index entries) and how much of the heap is dead. `null` ratios while the
+				// table has no updates or no rows yet.
+				this.sql`
+					select n_tup_upd::text as upd, n_tup_hot_upd::text as hot, n_live_tup::text as live, n_dead_tup::text as dead
+					from pg_stat_user_tables
+					where relname = 'graph_nodes' and schemaname = current_schema()`,
+			])) as [Array<Record<string, unknown>>, Array<Record<string, unknown>>, Array<Record<string, unknown>>];
+			const node = nodes[0];
+			const updates = Number(node?.upd ?? 0);
+			const rowsTotal = Number(node?.live ?? 0) + Number(node?.dead ?? 0);
 			return {
 				databaseBytes: Number(size[0]?.bytes ?? 0),
 				tables: tables.map((row) => ({
@@ -1768,6 +1798,13 @@ export class IndexStore implements MemoryStore {
 					liveRows: Number(row.live_rows ?? 0),
 					deadRows: Number(row.dead_rows ?? 0),
 				})),
+				graphNodes:
+					node === undefined
+						? null
+						: {
+								hotUpdateRatio: updates > 0 ? Number(node.hot ?? 0) / updates : null,
+								deadRatio: rowsTotal > 0 ? Number(node.dead ?? 0) / rowsTotal : null,
+							},
 			};
 		});
 	}
@@ -1795,10 +1832,143 @@ export class IndexStore implements MemoryStore {
 		)) as SweepReport;
 	}
 
+	/**
+	 * Run `work` against one consistent view of every archived table: a single
+	 * REPEATABLE READ READ ONLY transaction on one connection, so the pages of
+	 * every table are read at the same instant and nothing here can write. The
+	 * connection holds the transaction open for as long as `work` runs; the
+	 * runner bounds that by its own deadline and the connection's
+	 * `statement_timeout`. Not under the plane gate: it is the archive job's
+	 * own connection, never the server's request path.
+	 */
+	async withExportSnapshot<T>(work: (reader: IndexSnapshotReader) => Promise<T>): Promise<T> {
+		return (await this.sql.begin("isolation level repeatable read read only", (tx: SQL) => work(archiveAccess(tx)))) as T;
+	}
+
+	/** Run `work` in one read-write transaction on this (scratch) database; a throw rolls everything back. */
+	async withRestoreTransaction<T>(work: (tx: IndexRestoreTx) => Promise<T>): Promise<T> {
+		return (await this.sql.begin((tx: SQL) => work(archiveAccess(tx)))) as T;
+	}
+
+	/**
+	 * The lease-table storage tune (`SUBSTRATE_INDEX_TUNE=apply`): a lower
+	 * fillfactor leaves room on each page for heartbeat updates, and a lower
+	 * autovacuum scale factor vacuums the small, hot table sooner. Idempotent: it
+	 * reads `reloptions` first and issues the `alter table` only when either
+	 * option is not already set, so a boot that runs it every time changes
+	 * nothing after the first. It touches new pages only — rewriting existing
+	 * ones is the operator's `VACUUM FULL`, never this. No index is dropped.
+	 */
+	async tuneGraphNodes(): Promise<"applied" | "already"> {
+		const rows = (await this.sql`
+			select array_to_string(reloptions, ',') as options from pg_class where oid = 'graph_nodes'::regclass`) as Array<Record<string, unknown>>;
+		const have = String(rows[0]?.options ?? "").split(",");
+		if (have.includes("fillfactor=70") && have.includes("autovacuum_vacuum_scale_factor=0.02")) return "already";
+		await this.sql`alter table graph_nodes set (fillfactor = 70, autovacuum_vacuum_scale_factor = 0.02)`;
+		return "applied";
+	}
+
 	/** `timeout` in seconds, as Bun's `end` takes it; 0 drops in-flight statements instead of waiting on them. */
 	async close(options?: { timeout?: number }): Promise<void> {
 		await this.sql.end(options);
 	}
+}
+
+// ── archive (uplift-4 S2) ────────────────────────────────────────────────────
+
+/** Rows one export page may carry at most; the archive asks for far fewer. */
+export const MAX_ARCHIVE_PAGE_ROWS = 5000;
+
+/** The most rows one restore `insert` carries, so the statement stays under the driver's parameter limit. */
+const RESTORE_BATCH_ROWS = 200;
+
+/** The Postgres type a column type is cast to when a restore binds it. */
+const PG_TYPE: Record<ColumnType, string> = { text: "text", int: "int", bigint: "bigint", bool: "boolean", timestamptz: "timestamptz" };
+
+/** One REPEATABLE READ READ ONLY view of the archived tables: every read through it sees the same instant. */
+export interface IndexSnapshotReader {
+	/** Postgres `server_version`. */
+	serverVersion(): Promise<string>;
+	/** Rows in a whitelisted table in this view. */
+	count(table: string): Promise<number>;
+	/** The next `limit` rows of a whitelisted table in key order, strictly after `after` (the key values of the last row read), or from the start when `null`. */
+	page(table: string, after: ReadonlyArray<string | number> | null, limit: number): Promise<ArchiveRow[]>;
+}
+
+/** One read-write transaction on a scratch database: the reader plus the loader. */
+export interface IndexRestoreTx extends IndexSnapshotReader {
+	/** Insert rows of a whitelisted table; withheld columns are refilled from the spec's placeholders. */
+	insert(table: string, rows: readonly ArchiveRow[]): Promise<void>;
+}
+
+/**
+ * The select list of an export page: the exported columns only, timestamps
+ * rendered by Postgres to the microsecond in UTC (a JS `Date` would cut them
+ * to the millisecond and the restore would not reproduce the instant), and
+ * `bigint` as text. Every identifier comes from the closed spec.
+ */
+function exportSelectList(spec: ArchiveTableSpec): string {
+	return exportedColumns(spec)
+		.map((column) => {
+			const quoted = `"${column.name}"`;
+			if (column.type === "timestamptz") return `to_char(${quoted} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as ${quoted}`;
+			if (column.type === "bigint") return `${quoted}::text as ${quoted}`;
+			return quoted;
+		})
+		.join(", ");
+}
+
+/** The archive's reads and loads over one connection (a transaction handle). */
+function archiveAccess(sql: SQL): IndexRestoreTx {
+	return {
+		async serverVersion() {
+			const rows = (await sql`select current_setting('server_version') as version`) as Array<Record<string, unknown>>;
+			return String(rows[0]?.version ?? "");
+		},
+		async count(table) {
+			const spec = tableSpec(table);
+			const rows = (await sql.unsafe(`select count(*)::text as n from "${spec.name}"`)) as Array<Record<string, unknown>>;
+			return Number(rows[0]?.n ?? 0);
+		},
+		async page(table, after, limit) {
+			const spec = tableSpec(table);
+			if (!Number.isInteger(limit) || limit < 1 || limit > MAX_ARCHIVE_PAGE_ROWS) throw new Error(`archive page size must be 1..${MAX_ARCHIVE_PAGE_ROWS}`);
+			const keys = spec.key.map((name) => `"${name}"`).join(", ");
+			let where = "";
+			if (after !== null) {
+				if (after.length !== spec.key.length) throw new Error(`${spec.name}: cursor has ${after.length} values for a ${spec.key.length}-column key`);
+				const bound = spec.key.map((name, i) => `$${i + 1}::${PG_TYPE[spec.columns.find((column) => column.name === name)?.type ?? "text"]}`).join(", ");
+				where = ` where (${keys}) > (${bound})`;
+			}
+			const rows = (await sql.unsafe(`select ${exportSelectList(spec)} from "${spec.name}"${where} order by ${keys} limit ${limit}`, after === null ? [] : [...after])) as Array<
+				Record<string, unknown>
+			>;
+			// Rebuilt as plain objects in column order, so the NDJSON line (and its digest) never depends on the driver's row type.
+			return rows.map((row) => {
+				const out: ArchiveRow = {};
+				for (const column of exportedColumns(spec)) out[column.name] = (row[column.name] ?? null) as string | number | boolean | null;
+				return out;
+			});
+		},
+		async insert(table, rows) {
+			const spec = tableSpec(table);
+			const columns: Array<{ name: string; type: ColumnType; value: (row: ArchiveRow) => string | number | boolean | null }> = exportedColumns(spec).map((column) => ({
+				name: column.name,
+				type: column.type,
+				value: (row) => row[column.name] ?? null,
+			}));
+			for (const name of spec.withheld) {
+				const placeholder = spec.placeholders[name] ?? null;
+				if (placeholder !== null) columns.push({ name, type: "text", value: () => placeholder });
+			}
+			for (let from = 0; from < rows.length; from += RESTORE_BATCH_ROWS) {
+				const batch = rows.slice(from, from + RESTORE_BATCH_ROWS);
+				const params: Array<string | number | boolean | null> = [];
+				const tuples = batch.map((row) => `(${columns.map((column) => `$${params.push(column.value(row))}::${PG_TYPE[column.type]}`).join(", ")})`);
+				await sql.unsafe(`insert into "${spec.name}" (${columns.map((column) => `"${column.name}"`).join(", ")}) values ${tuples.join(", ")}`, params);
+			}
+		},
+	};
 }
 
 /** Postgres hands back `Date`; every surface that reports a lease wants ISO. */

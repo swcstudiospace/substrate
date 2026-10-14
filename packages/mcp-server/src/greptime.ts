@@ -27,6 +27,17 @@ import { DEFAULT_LEDGER_SETTINGS, isGreptimeDuration, type GreptimeConfig, type 
 import { redact, redactKnown } from "./redact.ts";
 import type { SubstrateEvent } from "./types.ts";
 import { HOUR_MS, hourEnd, hourIso, hourStart, isClosed } from "@substrate/ledger";
+import { DEFAULT_METRICS_HISTORY_TTL, parseMetricsHistoryTtl } from "./config.ts";
+import {
+	MAX_METRIC_BATCH,
+	MAX_METRIC_POINTS,
+	effectiveHistoryStep,
+	METRIC_SERIES,
+	canonicalLabels,
+	readLabels,
+	type MetricDropReason,
+	type MetricSampleRow,
+} from "./metrics-history.ts";
 
 const DEFAULT_TIMEOUT_MS = 5000;
 
@@ -38,6 +49,9 @@ export class GreptimeError extends Error {}
  * the statement's fault and the store is fine.
  */
 export class GreptimeUnavailable extends GreptimeError {}
+
+/** An open breaker refused the call: the plane was not asked. Still `GreptimeUnavailable` to every existing caller. */
+export class GreptimeBreakerOpen extends GreptimeUnavailable {}
 
 /**
  * The bounded operation label for a statement: its leading verb. Never the
@@ -763,7 +777,7 @@ export class GreptimeClient {
 			});
 		} catch (cause) {
 			if (cause instanceof GreptimeUnavailable) throw cause;
-			if (cause instanceof BreakerOpenError) throw new GreptimeUnavailable(cause.message);
+			if (cause instanceof BreakerOpenError) throw new GreptimeBreakerOpen(cause.message);
 			throw new GreptimeUnavailable(`greptime unreachable: ${String(cause)}`);
 		}
 
@@ -2001,4 +2015,226 @@ export class GreptimeClient {
 			cursor = { ms: epochMsAnyUnit(last.ingested_at), id: String(last.event_id) };
 		}
 	}
+
+	// ── metrics history (uplift-4 S6) ────────────────────────────────────────
+
+	/** Whether `metric_samples` is known to exist. Set by the first successful CREATE, so a deployment with the history off never creates it. */
+	private metricSamplesReady = false;
+	private metricSamplesCreating: Promise<void> | null = null;
+
+	/**
+	 * `CREATE TABLE IF NOT EXISTS metric_samples`, once per process, on first use.
+	 *
+	 * The TTL is part of the CREATE, so no new `ALTER` shape is needed and
+	 * `assertAppendOnly` is untouched (`create` is already an allowed verb). It is
+	 * re-rendered from the parsed day count, never taken from the caller's string,
+	 * and a table that already exists keeps the retention it has: changing it is
+	 * the operator's `ALTER`. A failure is not remembered, so the next call retries.
+	 */
+	private async ensureMetricSamples(ttl: string): Promise<void> {
+		if (this.metricSamplesReady) return;
+		const retention = parseMetricsHistoryTtl(ttl);
+		if (retention === null) throw new GreptimeError("the metrics history ttl is not a whole number of days from 1d to 90d");
+		this.metricSamplesCreating ??= this.sql(
+			`CREATE TABLE IF NOT EXISTS "${METRIC_SAMPLES_TABLE}" (` +
+				`"ts" TIMESTAMP TIME INDEX, "series" STRING, "labels" STRING, "kind" STRING, "value" DOUBLE, "count" BIGINT, PRIMARY KEY ("series")` +
+				`) WITH ('append_mode' = 'true', 'ttl' = '${retention.ttl}')`,
+			METRIC_WRITE_TIMEOUT_MS,
+		)
+			.then(() => {
+				this.metricSamplesReady = true;
+			})
+			.finally(() => {
+				this.metricSamplesCreating = null;
+			});
+		await this.metricSamplesCreating;
+	}
+
+	/**
+	 * One multi-row INSERT of the sampler's rows. Never throws and never waits on
+	 * a request path: on any failure the whole batch is dropped and the result
+	 * says how many rows and why (a closed reason), for the caller to count.
+	 *
+	 * Rows are validated against the series allow-list before anything is sent —
+	 * a series outside it, labels outside its closed set, or a non-finite number
+	 * is dropped as `invalid` — and the rest are quoted through the dialect-aware
+	 * literal helper. The deadline sits inside the gated call (`send`), so a
+	 * timeout is a breaker failure and an open breaker costs no network.
+	 */
+	async recordMetricSamples(rows: readonly MetricSampleRow[], ttl: string = DEFAULT_METRICS_HISTORY_TTL): Promise<MetricWriteResult> {
+		const drops: Partial<Record<MetricDropReason, number>> = {};
+		const drop = (reason: MetricDropReason, count: number): void => {
+			if (count > 0) drops[reason] = (drops[reason] ?? 0) + count;
+		};
+		const accepted: Array<{ row: MetricSampleRow; labels: string }> = [];
+		let invalid = 0;
+		let capped = 0;
+		for (const row of rows) {
+			const labels = validMetricRow(row);
+			if (labels === null) {
+				invalid += 1;
+			} else if (accepted.length >= MAX_METRIC_BATCH) {
+				capped += 1;
+			} else {
+				accepted.push({ row, labels });
+			}
+		}
+		drop("invalid", invalid);
+		drop("capped", capped);
+		if (accepted.length === 0) return { stored: 0, drops };
+
+		let stage: "ddl" | "insert" = "ddl";
+		try {
+			await this.ensureMetricSamples(ttl);
+			// Best effort: the labels carry no backslash by construction, so the dialect only sharpens reads.
+			await this.probeDialect().catch(() => undefined);
+			stage = "insert";
+			const values = accepted
+				.map(
+					({ row, labels }) =>
+						`(${this.q(new Date(row.tsMs).toISOString())}, ${this.q(row.series)}, ${this.q(labels)}, ` +
+						`${this.q(METRIC_SERIES[row.series]!.kind)}, ${this.q(row.value)}, ${this.q(row.count)})`,
+				)
+				.join(", ");
+			await this.sql(
+				`INSERT INTO "${METRIC_SAMPLES_TABLE}" ("ts", "series", "labels", "kind", "value", "count") VALUES ${values}`,
+				METRIC_WRITE_TIMEOUT_MS,
+			);
+			return { stored: accepted.length, drops };
+		} catch (cause) {
+			drop(metricDropReason(cause, stage), accepted.length);
+			return { stored: 0, drops };
+		}
+	}
+
+	/**
+	 * Aggregated history for one allow-listed series: `date_bin` buckets of
+	 * `stepS` seconds, folded per the series' own rule, newest {@link MAX_METRIC_POINTS}
+	 * points returned oldest first. The window is capped at the configured TTL and
+	 * the step is raised by {@link effectiveHistoryStep} until buckets x label values
+	 * fit the point cap, so the oldest bucket of the window is present; the step it
+	 * ran at is returned. Series, window and step are validated here as well as by
+	 * the route; nothing from the caller reaches the statement but a quoted
+	 * allow-listed name and whole numbers.
+	 *
+	 * A read never creates the table — `recordMetricSamples` owns that — so a
+	 * table that does not exist yet is an empty history, not an error. The deadline
+	 * is tighter than the ledger's default because this runs behind a public GET
+	 * through the ledger's breaker.
+	 */
+	async readMetricHistory(query: MetricHistoryQuery): Promise<MetricHistoryResult> {
+		if (!Object.hasOwn(METRIC_SERIES, query.series)) throw new MetricHistoryInputError("the series is not one this substrate records");
+		const spec = METRIC_SERIES[query.series]!;
+		const retention = parseMetricsHistoryTtl(query.ttl ?? DEFAULT_METRICS_HISTORY_TTL);
+		if (retention === null) throw new MetricHistoryInputError("the metrics history ttl is not a whole number of days from 1d to 90d");
+		const limit = 8.64e15;
+		if (![query.fromMs, query.toMs, query.stepS].every((value) => Number.isFinite(value)) || Math.abs(query.toMs) > limit || Math.abs(query.fromMs) > limit) {
+			throw new MetricHistoryInputError("the window and step must be finite numbers");
+		}
+		const toMs = Math.trunc(query.toMs);
+		const fromMs = Math.max(Math.trunc(query.fromMs), toMs - retention.days * DAY_MS);
+		if (toMs <= fromMs) throw new MetricHistoryInputError("the window is empty");
+		const stepS = effectiveHistoryStep(query.series, toMs - fromMs, query.stepS);
+
+		// No dialect probe: the series is an allow-listed slug and the bounds are ISO instants, so no literal carries a backslash.
+		const at = (ms: number): string => this.q(new Date(ms).toISOString());
+		const value =
+			spec.agg === "sum"
+				? 'SUM("value")'
+				: spec.agg === "max"
+					? 'MAX("value")'
+					: spec.agg === "wavg"
+						? 'SUM("value" * "count") / SUM("count")'
+						: 'AVG("value")';
+		let rows: Array<Record<string, unknown>>;
+		try {
+			rows = await this.sql(
+				`SELECT date_bin(INTERVAL '${stepS} seconds', "ts") AS "bucket", "labels", ${value} AS "value", SUM("count") AS "count" ` +
+					`FROM "${METRIC_SAMPLES_TABLE}" WHERE "series" = ${this.q(query.series)} AND "ts" >= ${at(fromMs)} AND "ts" < ${at(toMs)} ` +
+					`GROUP BY "bucket", "labels" ORDER BY "bucket" DESC LIMIT ${MAX_METRIC_POINTS}`,
+				METRIC_READ_TIMEOUT_MS,
+				"history",
+			);
+		} catch (cause) {
+			// Only the store's own "no such table" answer: it was never created (the history was never on), which is an empty history.
+			if (cause instanceof GreptimeError && !(cause instanceof GreptimeUnavailable) && MISSING_TABLE.test(cause.message)) return { points: [], stepS };
+			throw cause;
+		}
+		const points: MetricHistoryPoint[] = [];
+		for (const row of rows) {
+			const tsMs = epochMsAnyUnit(row.bucket);
+			if (!Number.isFinite(tsMs)) continue;
+			const number = row.value === null || row.value === undefined ? Number.NaN : Number(row.value);
+			points.push({
+				tsMs,
+				labels: readLabels(query.series, row.labels),
+				value: Number.isFinite(number) ? number : null,
+				count: Number.isFinite(Number(row.count)) ? Number(row.count) : 0,
+			});
+		}
+		return { points: points.reverse(), stepS };
+	}
+}
+
+// uplift-4 S6
+/** Where the metrics history lives. Append-only with a TTL, created on first use and only when `SUBSTRATE_METRICS_HISTORY=on`. */
+export const METRIC_SAMPLES_TABLE = "metric_samples";
+
+/** One INSERT or CREATE's deadline, inside the gated call. Below the smallest sampling interval, so a batch can never overlap the next tick on its own. */
+const METRIC_WRITE_TIMEOUT_MS = 3000;
+
+/** The readback's deadline: below the ledger default, because it runs behind a public GET and a timeout charges the shared breaker. */
+const METRIC_READ_TIMEOUT_MS = 2500;
+
+/** What Greptime says when a table does not exist (`Table not found: …`, code 4001, or a "does not exist" wording). */
+const MISSING_TABLE = /table[^\n]{0,200}(?:not found|not exist|doesn't exist)|TableNotFound|\b4001\b/i;
+
+/** What `recordMetricSamples` did. `drops` is by closed reason, row counts; empty when everything was stored. */
+export interface MetricWriteResult {
+	stored: number;
+	drops: Partial<Record<MetricDropReason, number>>;
+}
+
+export interface MetricHistoryQuery {
+	series: string;
+	fromMs: number;
+	toMs: number;
+	stepS: number;
+	/** The table's retention, which caps the window; the default when omitted. */
+	ttl?: string;
+}
+
+export interface MetricHistoryPoint {
+	tsMs: number;
+	/** Only the series' closed label, see `readLabels`. */
+	labels: Record<string, string>;
+	value: number | null;
+	count: number;
+}
+
+/** What a readback returns: the points, oldest first, and the step the read actually ran at. */
+export interface MetricHistoryResult {
+	points: MetricHistoryPoint[];
+	stepS: number;
+}
+
+/** A readback request outside what the history serves: not a store failure. */
+export class MetricHistoryInputError extends GreptimeError {}
+
+/** The labels JSON of a row that may be stored, or `null`: outside the allow-list, or a number the column cannot hold. */
+function validMetricRow(row: MetricSampleRow): string | null {
+	if (row === null || typeof row !== "object") return null;
+	if (!Number.isFinite(row.tsMs) || row.tsMs <= 0 || row.tsMs > 8.64e15) return null;
+	if (!Number.isFinite(row.value)) return null;
+	if (!Number.isSafeInteger(row.count) || row.count < 0) return null;
+	if (row.labels === null || typeof row.labels !== "object") return null;
+	return canonicalLabels(row.series, row.labels);
+}
+
+/** The closed reason a failed metrics write is counted under. */
+function metricDropReason(cause: unknown, stage: "ddl" | "insert"): MetricDropReason {
+	if (cause instanceof GreptimeBreakerOpen) return "breaker_open";
+	if (cause instanceof GreptimeUnavailable) return "unavailable";
+	if (cause instanceof GreptimeError) return stage === "ddl" ? "ddl" : "rejected";
+	return "internal";
 }

@@ -65,6 +65,7 @@ import { readFileSync } from "node:fs";
 import { rename, writeFile } from "node:fs/promises";
 import type { IncomingMessage } from "node:http";
 import type { SubstrateConfig } from "./config.ts";
+import { registerMetricsHistoryMetrics } from "./metrics-history.ts";
 import { redact } from "./redact.ts";
 import type { Substrate, SubstrateObserver } from "./service.ts";
 import type { Surface } from "./types.ts";
@@ -88,6 +89,8 @@ const KNOWN_ROUTES = [
 	"/docs/ingest",
 	"/docs/merge-trigger",
 	"/memory/recall",
+	"/slo/history",
+	"/livez",
 ] as const;
 
 export function normalizeRoute(pathname: string): string {
@@ -279,6 +282,8 @@ export function createObservability(
 	const restored = read.checkpoint;
 	const bootWarnings: string[] = read.warning === null ? [] : [read.warning];
 	const instruments = new SubstrateInstruments(new MetricRegistry(restored ? Date.parse(restored.since) : Date.now()));
+	// uplift-4 S6: registered before the seed below so a checkpoint restores the drop counter; with the history off it does not exist.
+	if (config.metricsHistory.enabled) registerMetricsHistoryMetrics(instruments.registry);
 	if (restored) {
 		const skipped = instruments.registry.seed(restored.metrics);
 		if (skipped.length > 0) {
@@ -380,6 +385,9 @@ export function createObservability(
 		},
 		capacity(sample) {
 			capacityRing.record(sample.at, sample.databaseBytes);
+		},
+		indexArchive(source) {
+			instruments.observeIndexArchiveAge(() => source.newestAtMs());
 		},
 	};
 

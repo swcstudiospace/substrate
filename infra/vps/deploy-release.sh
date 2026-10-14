@@ -3,7 +3,9 @@
 # /opt/agent-substrate/current. A failed health check points current back at
 # the previous release and restarts the units. Only that previous release
 # directory is kept after a health-checked deploy. SUBSTRATE_RELEASE_RESTART=0
-# does not prune.
+# does not prune. --dry-run prints what a redeploy of the current tag, and what
+# the next deploy of a NEW tag, would prune, with the bytes each would free; it
+# deletes, creates and locks nothing.
 #
 # The script never prints an environment file and never talks to a host other
 # than the health URL (loopback by default). It reads /etc/substrate only to
@@ -46,11 +48,17 @@ usage() {
 	cat >&2 <<'EOF'
 usage: deploy-release.sh <tag>
        deploy-release.sh rollback
+       deploy-release.sh --dry-run
 
 <tag> is a git tag whose commit is on main. The tree is archived into
 $SUBSTRATE_RELEASE_ROOT/releases/<sha> (default /opt/agent-substrate),
 dependencies are installed with bun install --frozen-lockfile, and
 current is swapped atomically. rollback points current at previous.
+--dry-run is read-only. It lists the release directories a health-checked
+deploy would prune, in both cases: a redeploy of the current tag keeps current
+and previous; the next deploy of a new tag keeps only the present current (it
+becomes previous), so the present previous is listed as removable after it.
+Bytes are unique bytes, counting hardlinks once.
 EOF
 	exit 2
 }
@@ -516,6 +524,96 @@ sha_of() {
 	printf '%s\n' "${1#releases/}"
 }
 
+# What the prune would remove, and the bytes that would free. Read-only: no
+# mkdir, no lock, no rm. Two cases, because a deploy keeps a different set
+# depending on the tag:
+#   redeploy of the current tag: keeps current and previous.
+#   deploy of a NEW tag: the new release becomes current and the present current
+#     becomes previous, so the present previous is pruned with the rest.
+# Both are printed. Bytes come from ONE `du` over current, previous, then the
+# rest newest first. Release trees share hardlinked node_modules, and a `du` per
+# tree charges every tree the whole thing (a 38 MB release showed next to a
+# "2.9 GB" one that way); one du counts an inode the first time it meets it, so
+# a release is charged only what the ones before it do not already hold. The
+# new release's own shared bytes are not known here and are not subtracted.
+cmd_dry_run() {
+	local requested="${SUBSTRATE_RELEASE_ROOT:-/opt/agent-substrate}" root cur="" prev="" name path role bytes du_out
+	local total=0 would_free=0 refused=0 removable=0 prev_bytes=0 has_prev=0
+	local -a names=() ordered=()
+	[[ "$requested" == /* ]] || die "SUBSTRATE_RELEASE_ROOT must be absolute"
+	[[ -d "$requested/releases" ]] || die "no releases directory under ${requested}"
+	root=$(CDPATH='' cd -- "$requested" && pwd)
+	if [[ -L "$root/current" ]]; then
+		cur=$(read_rel "$root/current") || die "refusing current symlink"
+		cur=$(sha_of "$cur")
+	fi
+	if [[ -L "$root/previous" ]]; then
+		prev=$(read_rel "$root/previous") || die "refusing previous symlink"
+		prev=$(sha_of "$prev")
+		[[ "$prev" != "$cur" ]] || prev=""
+	fi
+	# `ls -t` is newest first. Names are checked before use, exactly as prune does.
+	while IFS= read -r name; do
+		[[ -n "$name" ]] || continue
+		if [[ ! "$name" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ || -L "$root/releases/$name" || ! -d "$root/releases/$name" ]]; then
+			printf '%s\n' "refuse: releases/${name//[^[:print:]]/?} is not a plain release directory; the real prune would abort on it"
+			refused=1
+			continue
+		fi
+		names+=("$name")
+	done < <(ls -1t -- "$root/releases")
+	for name in "$cur" "$prev"; do
+		[[ -n "$name" && -d "$root/releases/$name" ]] || continue
+		[[ " ${ordered[*]:-} " == *" $name "* ]] && continue
+		ordered+=("$name")
+	done
+	for name in "${names[@]:-}"; do
+		[[ -n "$name" ]] || continue
+		[[ " ${ordered[*]:-} " == *" $name "* ]] && continue
+		ordered+=("$name")
+	done
+	if [[ ${#ordered[@]} -eq 0 ]]; then
+		printf '%s\n' "dry-run: no release directories under ${root}/releases; nothing would be removed"
+		return "$refused"
+	fi
+	local -a paths=()
+	for name in "${ordered[@]}"; do
+		paths+=("$root/releases/$name")
+	done
+	du_out=$(du -s --block-size=1 -- "${paths[@]}") || die "du failed on the release directories"
+	while IFS=$'\t' read -r bytes path; do
+		[[ "$bytes" =~ ^[0-9]{1,15}$ && -n "$path" ]] || continue
+		name="${path##*/}"
+		total=$((total + bytes))
+		role=""
+		if [[ "$name" == "$cur" ]]; then
+			role="current"
+		elif [[ "$name" == "$prev" ]]; then
+			role="previous"
+		fi
+		if [[ "$role" == "current" ]]; then
+			printf 'keep current %s %s bytes (%s MiB unique)\n' "$name" "$bytes" "$((bytes / 1048576))"
+		elif [[ "$role" == "previous" ]]; then
+			printf 'keep previous %s %s bytes (%s MiB unique): kept by a redeploy of the current tag, would remove after the next new-tag deploy\n' "$name" "$bytes" "$((bytes / 1048576))"
+			prev_bytes="$bytes"
+			has_prev=1
+		else
+			printf 'would-remove %s %s bytes (%s MiB unique)\n' "$name" "$bytes" "$((bytes / 1048576))"
+			would_free=$((would_free + bytes))
+			removable=$((removable + 1))
+		fi
+	done <<< "$du_out"
+	printf 'dry-run: a redeploy of the current tag would remove %s release(s), freeing %s bytes (%s MiB) of %s bytes counted once\n' \
+		"$removable" "$would_free" "$((would_free / 1048576))" "$total"
+	printf 'dry-run: the next deploy of a new tag would remove %s release(s), freeing %s bytes (%s MiB): the same set plus the present previous (%s bytes)\n' \
+		"$((removable + has_prev))" "$((would_free + prev_bytes))" "$(((would_free + prev_bytes) / 1048576))" "$prev_bytes"
+	printf '%s\n' "dry-run: nothing was deleted"
+	if [[ -z "$cur" ]]; then
+		printf '%s\n' "dry-run: current is not set, so every release is listed as removable; a deploy would keep the new release and its predecessor"
+	fi
+	return "$refused"
+}
+
 restore_current() {
 	local old="$1"
 	if [[ -n "$old" ]]; then
@@ -597,6 +695,10 @@ main() {
 		prepare_root
 		acquire_lock
 		cmd_rollback
+		;;
+	--dry-run)
+		[[ $# -eq 1 ]] || usage
+		cmd_dry_run
 		;;
 	"")
 		usage

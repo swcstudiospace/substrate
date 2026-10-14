@@ -323,8 +323,10 @@ not to gate.
 Every route that reaches the service goes through one wrapper, `auditedRest`, under the
 MCP tool's own name where there is one: `POST /memory` is audited as `memory_write` and
 `POST /handoff` as `coord_handoff`, so one action does not appear in the trail twice
-under two names. Only `/healthz`, `/metrics` and `/slo` are exempt; no agent action is
-behind them and a trail dominated by a Prometheus scrape is one nobody reads.
+under two names. Only `/healthz`, `/metrics`, `/slo`, `/slo/history` and `/livez` are exempt; no agent action is
+behind them and a trail dominated by a Prometheus scrape is one nobody reads. `/slo/history` is served
+beside `/slo` under the same bearer rule (a token, unless `SUBSTRATE_ALLOW_ANONYMOUS=1`) and is
+admission-metered as a `read` (`ROUTE_CLASSES`).
 
 REST twins of planned v1.3 tools (`POST /skills/propose` has landed, see
 [skills-propose.md](skills-propose.md); `/docs/search`,
@@ -394,7 +396,7 @@ MCP transport were audited, `/events` would be an unaudited door to the same act
 `/brief`, `/events`, `/verify` and `/evidence` are audited too, with
 `transport: "rest"`.
 
-`/healthz`, `/metrics` and `/slo` are not: they are monitoring traffic, no agent
+`/healthz`, `/metrics`, `/slo`, `/slo/history` and `/livez` are not: they are monitoring traffic, no agent
 action is behind them, and a trail dominated by a Prometheus scrape is one nobody
 reads.
 

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -591,6 +591,77 @@ describe("deploy-release.sh", () => {
 		writeFileSync(join(h.log, "healthz-body"), '{"index":false,"greptime":false,"eventsWritable":false}');
 		expect(deploy(h, ["v1"]).status).toBe(0);
 		expect(existsSync(join(h.log, "curl"))).toBe(false);
+	});
+
+	test("--dry-run lists what the prune would remove with unique bytes, and deletes, swaps, locks and restarts nothing", () => {
+		const h = harness();
+		stage(h.env, "v1", SHA1, true);
+		stage(h.env, "v2", SHA2, true);
+		stage(h.env, "v3", SHA3, true);
+		const norestart = { ...h.env, SUBSTRATE_RELEASE_RESTART: "0" };
+		expect(deploy(h, ["v1"], norestart).status).toBe(0);
+		expect(deploy(h, ["v2"], norestart).status).toBe(0);
+		expect(deploy(h, ["v3"], norestart).status).toBe(0);
+		// current -> SHA3; give `previous` a target by hand, as a restart deploy would have.
+		rmSync(join(h.root, "previous"), { force: true });
+		symlinkSync(`releases/${SHA2}`, join(h.root, "previous"));
+		// One hardlinked file shared by every tree, like node_modules: a du per tree would charge it three times.
+		const shared = join(h.root, "releases", SHA1, "shared.bin");
+		writeFileSync(shared, Buffer.alloc(2 * 1024 * 1024, 7));
+		linkSync(shared, join(h.root, "releases", SHA2, "shared.bin"));
+		linkSync(shared, join(h.root, "releases", SHA3, "shared.bin"));
+		// The previous release holds 512 KiB nobody else has: only a new-tag deploy would free it.
+		writeFileSync(join(h.root, "releases", SHA2, "own.bin"), Buffer.alloc(512 * 1024, 9));
+		const before = releases(h.root);
+		const linkBefore = readlinkSync(join(h.root, "current"));
+		rmSync(join(h.log, "systemctl"), { force: true });
+
+		const dry = deploy(h, ["--dry-run"]);
+		expect(dry.status).toBe(0);
+		expect(dry.stdout).toContain(`keep current ${SHA3}`);
+		expect(dry.stdout).toMatch(new RegExp(`keep previous ${SHA2} \\d+ bytes .*would remove after the next new-tag deploy`));
+		expect(dry.stdout).toContain(`would-remove ${SHA1}`);
+		const redeploy = /a redeploy of the current tag would remove 1 release\(s\), freeing (\d+) bytes/.exec(dry.stdout);
+		const newTag = /the next deploy of a new tag would remove 2 release\(s\), freeing (\d+) bytes/.exec(dry.stdout);
+		expect(redeploy).not.toBeNull();
+		expect(newTag).not.toBeNull();
+		// The new-tag case adds the present previous, with its unique bytes (at least its own 512 KiB).
+		expect(Number(newTag?.[1]) - Number(redeploy?.[1])).toBeGreaterThanOrEqual(512 * 1024);
+		expect(dry.stdout).toContain("nothing was deleted");
+		// The old tree is charged only what current and previous do not share: far less than its 2 MiB hardlink.
+		const charged = /would-remove [0-9a-f]{40} (\d+) bytes/.exec(dry.stdout);
+		expect(Number(charged?.[1])).toBeLessThan(1024 * 1024);
+
+		// Nothing changed: same releases, same symlinks, no lock directory, no unit touched, no build.
+		expect(releases(h.root)).toEqual(before);
+		expect(readlinkSync(join(h.root, "current"))).toBe(linkBefore);
+		expect(readlinkSync(join(h.root, "previous"))).toBe(`releases/${SHA2}`);
+		expect(existsSync(join(h.root, ".deploy.lock"))).toBe(false);
+		expect(existsSync(join(h.log, "systemctl"))).toBe(false);
+		// The real flow is unchanged: a health-checked deploy of the same tag still prunes.
+		expect(deploy(h, ["v3"]).status).toBe(0);
+		expect(releases(h.root)).toEqual([SHA2, SHA3]);
+	});
+
+	test("--dry-run with no releases, with extra arguments, and on a root that does not exist deletes and creates nothing", () => {
+		const h = harness();
+		mkdirSync(join(h.root, "releases"), { recursive: true });
+		const empty = deploy(h, ["--dry-run"]);
+		expect(empty.status).toBe(0);
+		expect(empty.stdout).toContain("nothing would be removed");
+		expect(deploy(h, ["--dry-run", "extra"]).status).toBe(2);
+		const missing = deploy(h, ["--dry-run"], { ...h.env, SUBSTRATE_RELEASE_ROOT: join(h.root, "absent") });
+		expect(missing.status).toBe(1);
+		expect(existsSync(join(h.root, "absent"))).toBe(false);
+	});
+
+	test("--dry-run flags a release directory the real prune would abort on, and deletes nothing", () => {
+		const h = harness();
+		mkdirSync(join(h.root, "releases", "not-a-sha"), { recursive: true });
+		const dry = deploy(h, ["--dry-run"]);
+		expect(dry.status).toBe(1);
+		expect(dry.stdout).toContain("refuse: releases/not-a-sha");
+		expect(existsSync(join(h.root, "releases", "not-a-sha"))).toBe(true);
 	});
 });
 

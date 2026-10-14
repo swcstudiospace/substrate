@@ -885,3 +885,106 @@ export function evaluateCapacitySlos(ring: CapacityRing, options: CapacityEvalOp
 		},
 	];
 }
+
+// ── docs freshness (uplift-4 S7) ─────────────────────────────────────────────
+
+export const DOCS_FRESHNESS_ID = "docs.freshness";
+
+/** One dataset's reading, as the substrate computes it from its persisted docs state; `dataset` is a configured name. */
+export interface DocsFreshnessReading {
+	dataset: string;
+	/** Seconds since the newest recorded ingest; `null` when none is recorded. */
+	freshnessSeconds: number | null;
+	/** Seconds the newest accepted merge-trigger has waited for its version; `null` or 0 when it landed or none was accepted. */
+	triggerLagSeconds: number | null;
+	/** Older than the staleness threshold. */
+	stale: boolean;
+	/** A trigger has waited past the lag threshold. */
+	lagging: boolean;
+}
+
+export interface DocsFreshnessSloResult {
+	id: string;
+	title: string;
+	statement: string;
+	status: "ok" | "breached" | "insufficient-data" | "unconfigured";
+	/** Age in hours of the oldest dataset's newest ingest; `null` when no dataset has one. */
+	observed: number | null;
+	unit: "hours";
+	/** The staleness threshold in hours; `0` means freshness is reported but not judged. */
+	target: number;
+	/** Datasets read. */
+	samples: number;
+	detail: string;
+	datasets: Array<{ dataset: string; freshness_seconds: number | null; trigger_lag_seconds: number | null; stale: boolean; lagging: boolean }>;
+}
+
+export interface DocsFreshnessEvalOptions {
+	/** `SUBSTRATE_DOCS_FRESHNESS_MAX_AGE_H`; `0` leaves freshness unjudged. */
+	maxAgeHours: number;
+	/** `SUBSTRATE_DOCS_TRIGGER_LAG_MIN`; `0` means lag is not detected. */
+	triggerLagMinutes: number;
+}
+
+/**
+ * The `docs.freshness` row `GET /slo` serves beside `docs.search.p95`: no
+ * RAGFlow call, only the persisted ingest times and accepted triggers. It is
+ * report-only (the `docs` array is never folded into `breached`) and it
+ * appears only when at least one dataset has a reading — a deployment that
+ * never ingested sees nothing rather than a false `ok`. Like every objective
+ * here it never reports `ok` without an observation it judged: `unconfigured`
+ * when both knobs are 0, `insufficient-data` when no dataset has a recorded
+ * ingest (a trigger alone has no age) or when nothing enabled could be judged.
+ * It proves the corpus was refreshed recently and that accepted triggers
+ * landed; it cannot know the repository HEAD.
+ */
+export function evaluateDocsFreshnessSlo(readings: readonly DocsFreshnessReading[], options: DocsFreshnessEvalOptions): DocsFreshnessSloResult[] {
+	if (readings.length === 0) return [];
+	const aged = readings.flatMap((reading) => (reading.freshnessSeconds === null ? [] : [reading.freshnessSeconds]));
+	const oldest = aged.length === 0 ? null : Math.max(...aged);
+	const stale = readings.filter((reading) => reading.stale);
+	const lagging = readings.filter((reading) => reading.lagging);
+	const ageJudged = options.maxAgeHours > 0;
+	const lagJudged = options.triggerLagMinutes > 0 && readings.some((reading) => reading.triggerLagSeconds !== null);
+	const status: DocsFreshnessSloResult["status"] =
+		stale.length > 0 || lagging.length > 0
+			? "breached"
+			: options.maxAgeHours === 0 && options.triggerLagMinutes === 0
+				? "unconfigured"
+				: aged.length > 0 && (ageJudged || lagJudged)
+					? "ok"
+					: "insufficient-data";
+	const parts = readings.map((reading) => {
+		const age = reading.freshnessSeconds === null ? "no ingest recorded" : `${(reading.freshnessSeconds / 3600).toFixed(1)} h old`;
+		const lag = reading.lagging ? `, trigger unrecorded for ${Math.round((reading.triggerLagSeconds ?? 0) / 60)} min` : "";
+		return `${reading.dataset} ${age}${reading.stale ? " (stale)" : ""}${lag}`;
+	});
+	const why =
+		status === "unconfigured"
+			? "neither threshold is set (age and lag are reported, not judged); "
+			: status === "insufficient-data"
+				? "nothing judged yet: needs a recorded ingest and an enabled threshold; "
+				: "";
+	return [
+		{
+			id: DOCS_FRESHNESS_ID,
+			title: "Docs corpus freshness",
+			statement:
+				`newest recorded ingest per dataset <= ${options.maxAgeHours > 0 ? `${options.maxAgeHours} h old` : "(age not judged)"}; ` +
+				`no accepted merge-trigger without a recorded version for ${options.triggerLagMinutes > 0 ? `${options.triggerLagMinutes} min` : "(lag not detected)"}`,
+			status,
+			observed: oldest === null ? null : oldest / 3600,
+			unit: "hours",
+			target: options.maxAgeHours,
+			samples: readings.length,
+			detail: `${why}${parts.join("; ")}`,
+			datasets: readings.map((reading) => ({
+				dataset: reading.dataset,
+				freshness_seconds: reading.freshnessSeconds,
+				trigger_lag_seconds: reading.triggerLagSeconds,
+				stale: reading.stale,
+				lagging: reading.lagging,
+			})),
+		},
+	];
+}

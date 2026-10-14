@@ -30,7 +30,7 @@
  * ring is cut to its own cap (newest kept) so a file written by a release with
  * larger rings cannot grow this one past its bounds.
  */
-import type { Attributes, CounterPoint, HistogramPoint, MetricSnapshot } from "./metrics.ts";
+import type { Attributes, CounterPoint, GaugeSnapshot, HistogramPoint, MetricSnapshot } from "./metrics.ts";
 import { BURN_MAX_SAMPLES, type BurnLedger, type BurnSample } from "./burn.ts";
 import { PLANES, type PlaneName } from "./breaker.ts";
 import {
@@ -118,7 +118,8 @@ export function snapshotCheckpoint(
 		epoch,
 		writtenAt: new Date(extras.now ?? Date.now()).toISOString(),
 		since: extras.since,
-		metrics: instruments.snapshot().map((metric): CheckpointMetric =>
+		// A gauge is a reading, not history: it is recomputed after a restart and never checkpointed.
+		metrics: instruments.snapshot().filter((metric): metric is Exclude<MetricSnapshot, GaugeSnapshot> => metric.kind !== "gauge").map((metric): CheckpointMetric =>
 			metric.kind === "counter"
 				? { kind: "counter", name: metric.name, points: metric.points.map((point) => ({ attributes: { ...point.attributes }, value: point.value })) }
 				: {

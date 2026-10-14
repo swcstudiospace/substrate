@@ -15,7 +15,7 @@
  * Export never throws. The substrate must fail open, and a collector being down is
  * not a reason for a prompt to be.
  */
-import type { CounterSnapshot, HistogramSnapshot, MetricSnapshot, Attributes } from "./metrics.ts";
+import type { CounterSnapshot, GaugeSnapshot, HistogramSnapshot, MetricSnapshot, Attributes } from "./metrics.ts";
 import type { SpanRecord } from "./trace.ts";
 
 const CUMULATIVE = 2;
@@ -116,6 +116,21 @@ function counterMetric(metric: CounterSnapshot, startNano: string, nowNano: stri
 	};
 }
 
+function gaugeMetric(metric: GaugeSnapshot, nowNano: string) {
+	return {
+		name: metric.name,
+		description: metric.description,
+		unit: metric.unit,
+		gauge: {
+			dataPoints: metric.points.map((point) => ({
+				attributes: keyValues(point.attributes),
+				timeUnixNano: nowNano,
+				asDouble: point.value,
+			})),
+		},
+	};
+}
+
 function histogramMetric(metric: HistogramSnapshot, startNano: string, nowNano: string) {
 	return {
 		name: metric.name,
@@ -153,7 +168,9 @@ export function encodeMetrics(
 		.map((metric) =>
 			metric.kind === "counter"
 				? counterMetric(metric, startNano, nowNano)
-				: histogramMetric(metric, startNano, nowNano),
+				: metric.kind === "gauge"
+					? gaugeMetric(metric, nowNano)
+					: histogramMetric(metric, startNano, nowNano),
 		);
 	const items = snapshot.reduce((total, metric) => total + metric.points.length, 0);
 	return {
