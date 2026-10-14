@@ -373,7 +373,7 @@ export function renderCompactBrief(sections: readonly BriefSection[], stateLine:
 
 const ENCODING_VERSION = 1;
 /** An encoded brief past this is not one the service wrote; refuse it before parsing. */
-const MAX_ENCODED_CHARS = 1_048_576;
+export const MAX_ENCODED_CHARS = 1_048_576;
 const MAX_SECTIONS = 16;
 const MAX_ENTRIES = 2000;
 

@@ -8,7 +8,7 @@
  * reads run together under one deadline (uplift-2 R1), so the brief costs its
  * slowest source rather than the sum, and a stalled store costs the budget.
  */
-import { foldLine, renderFullBrief, type BriefItem, type BriefSection, type BriefSectionId } from "./brief-profile.ts";
+import { MAX_ENCODED_CHARS, foldLine, renderFullBrief, type BriefItem, type BriefSection, type BriefSectionId } from "./brief-profile.ts";
 import { earliestRefreshAt } from "./cache.ts";
 import { sharedDeadline } from "./deadline.ts";
 import { normalizeIdentifier } from "./event.ts";
@@ -54,8 +54,14 @@ export interface BriefOptions {
 
 /** The most nodes one brief lists; past it the line says how many were left out (the cached encoding caps a section at 2000 items). */
 export const MAX_BRIEF_NODES = 1000;
+/*
+ * Derived from the cache encoding's size cap, not chosen: every node description is stored twice in a
+ * section (its `lines` and its `items`), JSON escaping can at worst double a character, and the other
+ * sections need headroom, so MAX_BRIEF_NODES labels of this length encode to about a quarter of
+ * MAX_ENCODED_CHARS (131 characters: 1000 x 131 x 2 x 2 = 524k of 1,048,576).
+ */
 /** The longest node label (id and tracker identifier) a brief prints, in code points; a longer one is cut with an ellipsis. */
-export const MAX_NODE_LABEL_CHARS = 512;
+export const MAX_NODE_LABEL_CHARS = Math.floor(MAX_ENCODED_CHARS / (8 * MAX_BRIEF_NODES));
 const RECENT_ACTION_LIMIT = 5;
 export const DEFAULT_RECENT_WINDOW_DAYS = 30;
 const DAY_MS = 86_400_000;

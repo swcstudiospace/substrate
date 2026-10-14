@@ -9,8 +9,8 @@
  */
 import { describe, expect, test } from "bun:test";
 import { SubstrateInstruments, findCounter, sumCounter } from "@substrate/observability";
-import { composeBrief } from "./brief.ts";
-import { utf8Bytes } from "./brief-profile.ts";
+import { MAX_BRIEF_NODES, MAX_NODE_LABEL_CHARS, composeBrief } from "./brief.ts";
+import { MAX_ENCODED_CHARS, decodeSections, encodeSections, utf8Bytes } from "./brief-profile.ts";
 import { CACHE_TTL, MEMORY_GENERATION_KEY, ReadThroughCache, classOf, snapshotKey, type CacheKeyClass, type CacheRedis } from "./cache.ts";
 import { loadConfig } from "./config.ts";
 import { HindsightFake } from "./hindsight-fake.ts";
@@ -492,17 +492,44 @@ describe("node labels", () => {
 		getGraph: async () => ({ ...graph(), nodes: [{ graph_id: "ut-1", node_id: id, linear_identifier: null, state: "todo", lease_epoch: 1 }] }),
 	});
 
-	test("a label of 512 characters prints whole; one more is cut with an ellipsis", async () => {
-		const exact = await world({}, { index: labelled("n".repeat(512)) }).substrate.briefDetailed(WITH_GRAPH, undefined, "grok-bot");
-		expect(exact.text).toContain(`Nodes: ${"n".repeat(512)} todo`);
-		const over = await world({}, { index: labelled("n".repeat(513)) }).substrate.briefDetailed(WITH_GRAPH, undefined, "grok-bot");
-		expect(over.text).toContain(`Nodes: ${"n".repeat(511)}… todo`);
+	test("a label of MAX_NODE_LABEL_CHARS characters prints whole; one more is cut with an ellipsis", async () => {
+		const exact = await world({}, { index: labelled("n".repeat(MAX_NODE_LABEL_CHARS)) }).substrate.briefDetailed(WITH_GRAPH, undefined, "grok-bot");
+		expect(exact.text).toContain(`Nodes: ${"n".repeat(MAX_NODE_LABEL_CHARS)} todo`);
+		const over = await world({}, { index: labelled("n".repeat(MAX_NODE_LABEL_CHARS + 1)) }).substrate.briefDetailed(WITH_GRAPH, undefined, "grok-bot");
+		expect(over.text).toContain(`Nodes: ${"n".repeat(MAX_NODE_LABEL_CHARS - 1)}… todo`);
 	});
 
 	test("the cut never splits a surrogate pair", async () => {
-		const brief = await world({}, { index: labelled(`${"a".repeat(510)}😀😀😀`) }).substrate.briefDetailed(WITH_GRAPH, undefined, "grok-bot");
-		expect(brief.text).toContain(`${"a".repeat(510)}😀… todo`);
+		const brief = await world({}, { index: labelled(`${"a".repeat(MAX_NODE_LABEL_CHARS - 2)}😀😀😀`) }).substrate.briefDetailed(WITH_GRAPH, undefined, "grok-bot");
+		expect(brief.text).toContain(`${"a".repeat(MAX_NODE_LABEL_CHARS - 2)}😀… todo`);
 		expect(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(brief.text)).toBe(false);
+	});
+});
+
+describe("the largest brief the compose step allows", () => {
+	test("the maximum node count with maximum-length labels encodes under the cache cap, decodes, and the second call is a cache hit", async () => {
+		await withHindsight(async () => {
+			const longest = (i: number) => `${i}`.padStart(6, "n") + "\"".repeat(MAX_NODE_LABEL_CHARS);
+			const index = {
+				...indexOf(),
+				getGraph: async () => ({
+					...graph(),
+					nodes: Array.from({ length: MAX_BRIEF_NODES + 500 }, (_, i) => ({ graph_id: "ut-1", node_id: longest(i), linear_identifier: null, state: "todo", lease_epoch: 1 })),
+				}),
+			};
+			const w = world({}, { index });
+			const first = await w.substrate.briefDetailed(WITH_GRAPH, undefined, "grok-bot");
+			expect(first.state).toBe("complete");
+			const [key] = w.redis.keysOf("brief");
+			const entry = JSON.parse(w.redis.values.get(key!)!) as { v: string };
+			expect(entry.v.length).toBeLessThan(MAX_ENCODED_CHARS * 0.75);
+			expect(decodeSections(entry.v)).not.toBeNull();
+			expect(decodeSections(encodeSections(decodeSections(entry.v)!))).not.toBeNull();
+			const hits = w.cache.health().hits;
+			const again = await w.substrate.briefDetailed(WITH_GRAPH, undefined, "grok-bot");
+			expect(again.text).toBe(first.text);
+			expect(w.cache.health().hits).toBeGreaterThan(hits);
+		});
 	});
 });
 
@@ -525,8 +552,8 @@ describe("a brief too large to cache", () => {
 		};
 		const w = world({}, { index });
 		const brief = await w.substrate.briefDetailed(WITH_GRAPH, undefined, "grok-bot");
-		expect(brief.text).not.toContain("n".repeat(600));
-		expect(brief.text).toContain(`${"n".repeat(511)}…`);
+		expect(brief.text).not.toContain("n".repeat(MAX_NODE_LABEL_CHARS + 100));
+		expect(brief.text).toContain(`${"n".repeat(MAX_NODE_LABEL_CHARS - 1)}…`);
 	});
 });
 

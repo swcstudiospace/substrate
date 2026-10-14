@@ -54,5 +54,5 @@ Tests added: `recall-snapshot.test.ts` (config, keys, state, results, parse, own
 - I used a relative path once at the start (`read` of `packages/mcp-server/src/brief.ts`), which resolved to the shared checkout; it was a read only, nothing under `/root/src/repos/agent-substrate` was written.
 
 ## Addendum: limits
-- Node labels longer than 512 code points are cut with an ellipsis (code-point boundary); the default text is byte-identical to main for labels up to 512 characters. At most 1000 nodes are listed.
+- Node labels longer than 131 code points (derived: floor(MAX_ENCODED_CHARS / (8 x 1000))) are cut with an ellipsis (code-point boundary); the default text is byte-identical to main for labels up to 131 characters. At most 1000 nodes are listed.
 - A recall tick stops starting refreshes after 80% of the interval; capacity is clamped by `floor(0.8 x interval / (budget + 250 ms))` pairs per tick. Overlapping ticks cannot occur from the elapsed bound (a tick skipped because a post-retain flush holds the single-flight slot is not counted).
