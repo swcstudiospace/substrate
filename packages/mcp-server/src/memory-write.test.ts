@@ -412,6 +412,45 @@ describe("denied — default-deny RBAC", () => {
 		expect(stored.entry?.session_id).toBe("sess-1");
 	});
 
+	test("a secret-only lesson is not stored, and a lesson with no source is not stored", async () => {
+		const secret = `sk-ant-api03-${"e".repeat(40)}`;
+		const redacted = await write({
+			subject: "lesson:v1.3/session/secret-only",
+			text: secret,
+			source_event: "session:sess-secret",
+			session_id: "sess-secret",
+		});
+		expect(redacted.outcome).toBe("denied");
+		expect(redacted.reason).toBe("lesson.empty");
+		expect(store.entries()).toEqual([]);
+		expect(store.quarantined).toEqual([]);
+		expect(JSON.stringify(redacted)).not.toContain(secret);
+
+		const unsourced = await write({
+			subject: "lesson:v1.3/session/lease-epochs",
+			text: "Lease epochs fence stale holders from releasing a lease.",
+		});
+		expect(unsourced.outcome).toBe("denied");
+		expect(unsourced.reason).toBe("lesson.unsourced");
+		expect(store.entries()).toEqual([]);
+
+		const fromSession = await write({
+			subject: "lesson:v1.3/session/lease-epochs",
+			text: "Lease epochs fence stale holders from releasing a lease.",
+			session_id: "sess-2",
+		});
+		expect(fromSession.outcome).toBe("accepted");
+		expect(fromSession.entry?.source_event).toBe("session:sess-2");
+		expect(fromSession.entry?.text).toContain("Lease epochs fence stale holders");
+
+		const digest = await write({
+			subject: "lesson-digest:v1.3",
+			text: "[lessonbankdigest]\nmilestone: v1.3\n\nMilestone v1.3 rolls up the lease lessons.",
+		});
+		expect(digest.reason).not.toBe("lesson.empty");
+		expect(digest.outcome).toBe("accepted");
+	});
+
 	test("a refusal spends no idempotency key", async () => {
 		const result = await write({ writer: "unknown", idempotency_key: "k1" });
 		expect(result.idempotency_key).toBe("");

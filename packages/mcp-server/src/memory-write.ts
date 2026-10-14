@@ -27,7 +27,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { canonicalJson, normalizeIdentifier, sha256Hex } from "./event.ts";
-import { lessonWriteIssue } from "./lesson-content.ts";
+import { isLessonWrite, lessonWriteIssue } from "./lesson-content.ts";
 import { classify } from "./memory-classify.ts";
 import {
 	conflictKey,
@@ -457,7 +457,11 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 	if (!raw) {
 		return refuse("denied", "text.empty", "text is required — an empty memory entry tells the next agent nothing.");
 	}
-	const lessonIssue = lessonWriteIssue(raw, typeof request.subject === "string" ? request.subject : null);
+	// Judge the text that would be stored. A body that is only a secret redacts
+	// to a label, and that label is not a lesson.
+	const judged = redact(raw);
+	const subjectInput = typeof request.subject === "string" ? request.subject : null;
+	const lessonIssue = lessonWriteIssue(judged, subjectInput);
 	if (lessonIssue) {
 		return refuse("denied", "lesson.empty", `${lessonIssue}. An empty lesson is not stored.`);
 	}
@@ -485,7 +489,20 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 	// can cut a token in half so its own pattern no longer matches.
 	const text = redact(raw).slice(0, MAX_MEMORY_TEXT);
 	const subject = normalizeSubject(request.subject);
-	const sourceEvent = normalizeIdentifier(request.source_event);
+	let sourceEvent = normalizeIdentifier(request.source_event);
+	const sessionId = normalizeIdentifier(request.session_id);
+	// The memory-bank retain drops a fact that names no source. A lesson without
+	// one would read as saved in the index and never come back from the bank.
+	if (isLessonWrite(judged, subjectInput) && !sourceEvent && sessionId) {
+		sourceEvent = normalizeIdentifier(`session:${sessionId}`);
+	}
+	if (isLessonWrite(judged, subjectInput) && !sourceEvent) {
+		return refuse(
+			"denied",
+			"lesson.unsourced",
+			"A lesson needs source_event or session_id so the memory bank can retain it. Nothing was stored.",
+		);
+	}
 	const graphId = normalizeIdentifier(request.graph_id);
 	const repo = normalizeIdentifier(request.repo);
 	// v1 passes the historical object and nothing else. A null `hv` or `tenant`

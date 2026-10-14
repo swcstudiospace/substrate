@@ -50,9 +50,23 @@ export function lessonContentIssue(text: string | null | undefined): string | nu
 	return null;
 }
 
+/** A lesson marker. `[lessonbankdigest]` and `[lessonbankoutcome]` are not lessons. */
+export function isLessonHeader(text: string): boolean {
+	return /^\[lessonbank\](?:\r?\n|$)/.test(text);
+}
+
+/** A `lesson:` subject. `lesson-digest:` and `lesson-outcome:` are not lessons. */
+export function isLessonSubject(subject: string | null | undefined): boolean {
+	return typeof subject === "string" && /^lesson:/i.test(subject.trim());
+}
+
+export function isLessonWrite(text: string, subject: string | null | undefined): boolean {
+	return isLessonSubject(subject) || isLessonHeader(text);
+}
+
 /** The prose under a `[lessonbank]` header, or the whole text when there is no header. */
 export function lessonProse(text: string): string {
-	if (!text.startsWith("[lessonbank]")) return text;
+	if (!isLessonHeader(text)) return text;
 	const lines = text.split("\n");
 	let index = 1;
 	for (; index < lines.length; index++) {
@@ -67,8 +81,6 @@ export function lessonProse(text: string): string {
  * lessons. Digests and outcomes use other subjects and are left alone.
  */
 export function lessonWriteIssue(text: string, subject: string | null | undefined): string | null {
-	const named = typeof subject === "string" && subject.trim().toLowerCase().startsWith("lesson:");
-	const headed = text.startsWith("[lessonbank]");
-	if (!named && !headed) return null;
-	return lessonContentIssue(headed ? lessonProse(text) : text);
+	if (!isLessonWrite(text, subject)) return null;
+	return lessonContentIssue(isLessonHeader(text) ? lessonProse(text) : text);
 }
