@@ -17,6 +17,7 @@ import {
 	DEFAULT_QUERY_LIMIT,
 	epochMsAnyUnit,
 	EVENT_COLUMNS,
+	EXPORT_INGEST_SKEW_MS,
 	GreptimeClient,
 	GreptimeError,
 	GreptimeUnavailable,
@@ -1979,6 +1980,8 @@ describe("exportWindow (uplift-3 N6)", () => {
 	const T3 = T1 + 60_000;
 	const FROM = "2026-10-12T00:00:00.000Z";
 	const TO = "2026-10-13T00:00:00.000Z";
+	/** The injected clock: the first ingest read starts here, so a record stamped after it arrived during the export. */
+	const CLOCK = Date.UTC(2026, 9, 13, 3, 30);
 	/** Five events in `(ts, id)` order with a three-way tie on `ts`, as the server would store them. */
 	const EVENTS: Array<{ ts: number; id: string }> = [
 		{ ts: T1, id: "evt_a" },
@@ -2017,7 +2020,7 @@ describe("exportWindow (uplift-3 N6)", () => {
 				// later; evt_e carries a collector-supplied `ts` a day after it was ingested.
 				const rows: Array<[string, number, number]> = EVENTS.filter((event) => !noRecord.includes(event.id)).map((event) => [
 					event.id,
-					event.id === "evt_e" ? event.ts - 86_400_000 : event.ts + 100,
+					event.id === "evt_e" ? event.ts - 86_400_000 : late.includes(event.id) ? CLOCK + 1_000 : event.ts + 100,
 					event.ts,
 				]);
 				rows.push(["evt_a", T1 + 1_100, T1]);
@@ -2026,12 +2029,15 @@ describe("exportWindow (uplift-3 N6)", () => {
 				const tsBound = /"event_ts" >= '([^']+)' AND "event_ts" < '([^']+)'/.exec(statement);
 				const cursor = /\("ingested_at" > '([^']+)' OR \("ingested_at" = '([^']+)' AND "event_id" > '([^']+)'\)\)/.exec(statement);
 				const inList = /"event_id" IN \(([^)]*)\)/.exec(statement);
+				const sinceMatch = /"ingested_at" >= '([^']+)'/.exec(statement);
+				const since = sinceMatch ? Date.parse(sinceMatch[1] ?? "") : null;
 				const wanted = inList ? [...(inList[1] ?? "").matchAll(/'([^']*)'/g)].map((m) => m[1]) : null;
 				const limit = Number(/LIMIT (\d+)/.exec(statement)?.[1] ?? "100000");
 				const selected = rows
 					// A late record is not there yet for the bulk scan, only for a lookup by id.
 					.filter(([id]) => wanted !== null || !late.includes(id))
 					.filter(([id]) => wanted === null || wanted.includes(id))
+					.filter(([, ingestedAt]) => since === null || ingestedAt >= since)
 					.filter(([, , eventTs]) => !tsBound || (eventTs >= Date.parse(tsBound[1] ?? "") && eventTs < Date.parse(tsBound[2] ?? "")))
 					.filter(([id, ingestedAt]) => {
 						if (!cursor) return true;
@@ -2142,7 +2148,7 @@ describe("exportWindow (uplift-3 N6)", () => {
 	test("an event whose ingest record was stored after the day's map was built is found by the bounded fallback lookup, not counted as missing", async () => {
 		// evt_d's record lands after page one built the map: the bulk scan never returns it, an id lookup does.
 		const { sql } = stubWindow({ noRecord: [], late: ["evt_d"] });
-		const client = new GreptimeClient(config);
+		const client = new GreptimeClient(config, { clock: () => CLOCK });
 		const first = await client.exportWindow({ from: FROM, to: TO, limit: 2 });
 		expect(first.ingest.map((row) => row.event_id)).toEqual(["evt_a", "evt_b"]);
 		expect(sql.filter((s) => s.includes('FROM "event_ingest"'))).toHaveLength(1);
@@ -2186,6 +2192,36 @@ describe("exportWindow (uplift-3 N6)", () => {
 		const ingest = sql.filter((s) => s.includes('FROM "event_ingest"'));
 		expect(ingest).toHaveLength(1);
 		expect(ingest[0]).not.toContain('"event_id" IN (');
+	});
+
+	test("the fallback lookup is bounded on the time index: ingested_at from the first read less the skew margin, so old history is never searched", async () => {
+		const { sql } = stubWindow({ noRecord: ["evt_c"] });
+		const client = new GreptimeClient(config, { clock: () => CLOCK });
+		await client.exportWindow({ from: FROM, to: TO, limit: 10 });
+		const lookups = sql.filter((s) => s.includes('"event_id" IN ('));
+		expect(lookups).toHaveLength(1);
+		expect(lookups[0]).toContain(`"ingested_at" >= '${new Date(CLOCK - EXPORT_INGEST_SKEW_MS).toISOString()}'`);
+		expect(lookups[0]).toContain(`"event_ts" >= '${FROM}' AND "event_ts" < '${TO}'`);
+		assertAppendOnly(lookups[0] ?? "");
+	});
+
+	test("a record that lands after the first read is still found; a legacy event with no row costs one bounded lookup per page and never an unbounded one", async () => {
+		// evt_d's record is stamped after the first read; evt_c is a legacy event with no ingest row at all.
+		const { sql } = stubWindow({ noRecord: ["evt_c"], late: ["evt_d"] });
+		const client = new GreptimeClient(config, { clock: () => CLOCK });
+		const first = await client.exportWindow({ from: FROM, to: TO, limit: 2 });
+		const second = await client.exportWindow({ from: FROM, to: TO, after: first.next ?? undefined, limit: 2 });
+		expect(second.ingest.map((row) => row.event_id)).toEqual(["evt_d"]);
+		const lookups = sql.filter((s) => s.includes('"event_id" IN ('));
+		// One lookup for the page that held evt_c and evt_d, naming both ids; every lookup carries the lower bound.
+		expect(lookups).toHaveLength(1);
+		expect(lookups[0]).toContain("'evt_c'");
+		expect(lookups[0]).toContain("'evt_d'");
+		for (const statement of lookups) expect(statement).toContain('"ingested_at" >= ');
+		// The page after it holds only evt_e, in the map: nothing more is searched, and evt_c is not looked up again.
+		const third = await client.exportWindow({ from: FROM, to: TO, after: second.next ?? undefined, limit: 2 });
+		expect(third.ingest.map((row) => row.event_id)).toEqual(["evt_e"]);
+		expect(sql.filter((s) => s.includes('"event_id" IN ('))).toHaveLength(1);
 	});
 
 	test("refuses a window that is not two ISO instants in order", async () => {

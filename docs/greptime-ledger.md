@@ -658,8 +658,13 @@ not one per page. An event on a later page whose id is not in the map — its
 record was stored after the map was built, as when a collector backfills the day
 during the export — is looked up by id (`event_id IN (…)`, 500 at a time, under
 the same `event_ts` window) and merged in before anything is counted missing, so
-only an id still absent is `ingestMissing`; a page whose ids are all in the map
-costs no extra statement.
+only an id still absent is `ingestMissing`. That lookup is also bounded on the
+time index, `ingested_at >=` the start of the first read less the 5-minute
+ingest lag (the margin for clock skew and a commit that lands just after the
+read): a record that predates the read is already in the map, so a legacy event
+from before `event_ingest` existed costs a search of the recent tail, never of
+the table's history. A page whose ids are all in the map costs no extra
+statement.
 `hourlyRoots` are
 RFC 6962 roots per *first-ingest* hour over the day's members in
 `(ingested_at, event_id)` order — exactly the anchor job's grouping — and

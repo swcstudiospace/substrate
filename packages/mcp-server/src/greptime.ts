@@ -551,6 +551,15 @@ export const ARCHIVE_NOTE_PREFIX = "ledger archive ";
  */
 export const EXPORT_INGEST_CAP = 500_000;
 
+/**
+ * How far before the first ingest read of an export window the fallback lookup
+ * reaches: `ingested_at` is stamped by the collector process's clock just
+ * before its INSERT (within `INGEST_BUDGET_MS`), so a row stamped slightly
+ * earlier than the read can still commit after it. The ingest lag is the
+ * system's own bound on clock skew and commit delay.
+ */
+export const EXPORT_INGEST_SKEW_MS = INGEST_LAG_MS;
+
 /** What `anchorCoverage` found; see the method for each field's rule. */
 export interface AnchorCoverage {
 	/** ISO start of the newest anchored hour, or `null` when no hour was ever anchored. */
@@ -671,7 +680,7 @@ export class GreptimeClient {
 	private readonly chainTips: ChainTipCache | null;
 
 	/** The current export window's first ingest records; see {@link exportWindow}. Dropped when the last page is served. */
-	private exportIngest: { window: string; first: Map<string, { ingested_at: number; event_ts: number }> } | null = null;
+	private exportIngest: { window: string; since: number; first: Map<string, { ingested_at: number; event_ts: number }> } | null = null;
 
 	/** The last write probe's verdict; see {@link probeWritable}. */
 	private probe: LedgerProbe = { lastProbeAt: null, lastProbeOk: null, lastProbeError: null };
@@ -1877,10 +1886,12 @@ export class GreptimeClient {
 		let cache = this.exportIngest;
 		if (query.after === undefined || cache === null || cache.window !== windowKey) {
 			this.exportIngest = null;
-			cache = { window: windowKey, first: await this.readExportIngest(fromMs, toMs) };
+			// The instant before the bulk read starts: later ingest rows are the only ones the map can lack.
+			const since = this.clock() - EXPORT_INGEST_SKEW_MS;
+			cache = { window: windowKey, since, first: await this.readExportIngest(fromMs, toMs) };
 			this.exportIngest = cache;
 		}
-		await this.fillExportIngest(cache.first, events.map((row) => String(row.id)), fromMs, toMs);
+		await this.fillExportIngest(cache.first, events.map((row) => String(row.id)), fromMs, toMs, cache.since);
 		const ingest: ExportIngestRow[] = [];
 		for (const row of events) {
 			const id = String(row.id);
@@ -1929,19 +1940,31 @@ export class GreptimeClient {
 	}
 
 	/**
-	 * Records for page events the day's map does not hold: an event backfilled
-	 * (or its ingest record stored) after the first page built the map. Looked
-	 * up by id in batches of {@link IN_BATCH}, bounded by the same `event_ts`
-	 * window, and merged into the map; an id still absent is genuinely without
-	 * a record. Costs nothing when every id is already in the map.
+	 * Records for page events the day's map does not hold: an ingest row stored
+	 * after the first page's read began (a collector backfilling the closed day
+	 * during the export). Bounded on the time index, `ingested_at >= sinceMs`,
+	 * where `sinceMs` is the start of the first read less
+	 * {@link EXPORT_INGEST_SKEW_MS}: a record that predates the read is already
+	 * in the map, so an id absent from it and older than that instant has no
+	 * record and is never searched for — a legacy event from before
+	 * `event_ingest` existed costs a lookup over the recent tail only, not the
+	 * table's history. Also looked up by id in batches of {@link IN_BATCH} under
+	 * the same `event_ts` window, and merged into the map; an id still absent
+	 * is genuinely without a record. Costs nothing when every id is in the map.
 	 */
-	private async fillExportIngest(first: Map<string, { ingested_at: number; event_ts: number }>, ids: string[], fromMs: number, toMs: number): Promise<void> {
+	private async fillExportIngest(
+		first: Map<string, { ingested_at: number; event_ts: number }>,
+		ids: string[],
+		fromMs: number,
+		toMs: number,
+		sinceMs: number,
+	): Promise<void> {
 		const at = (ms: number): string => this.q(new Date(ms).toISOString());
 		const missing = ids.filter((id) => !first.has(id));
 		for (let i = 0; i < missing.length; i += IN_BATCH) {
 			const batch = missing.slice(i, i + IN_BATCH).map((id) => this.q(id)).join(", ");
 			const rows = await this.sql(
-				`SELECT "event_id", "ingested_at", "event_ts" FROM "event_ingest" WHERE "event_ts" >= ${at(fromMs)} AND "event_ts" < ${at(toMs)} AND "event_id" IN (${batch})`,
+				`SELECT "event_id", "ingested_at", "event_ts" FROM "event_ingest" WHERE "ingested_at" >= ${at(sinceMs)} AND "event_ts" >= ${at(fromMs)} AND "event_ts" < ${at(toMs)} AND "event_id" IN (${batch})`,
 				this.timeoutMs,
 				"export",
 			);
