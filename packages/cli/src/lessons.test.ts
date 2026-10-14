@@ -1298,8 +1298,21 @@ describe("session lessons", () => {
 		expect(lessonContentIssue("{}")).toContain("placeholder");
 		expect(lessonContentIssue("Retry budget")).toContain("title or label");
 		expect(lessonContentIssue("Retry budget.")).toContain("title or label");
+		expect(lessonContentIssue(".")).toContain("placeholder");
 		expect(lessonContentIssue("TODO:")).toContain("placeholder");
 		expect(lessonContentIssue("The cache is disabled")).toBeNull();
+		expect(lessonContentIssue("Renew inside the TTL.")).toBeNull();
+		const kept = rankLessons(
+			[
+				lessonAt("short", "2026-10-06T00:00:00Z", "The cache is disabled"),
+				lessonAt("title", "2026-10-06T00:00:00Z", "Retry budget."),
+				lessonAt("dot", "2026-10-06T00:00:00Z", "."),
+				lessonAt("todo", "2026-10-06T00:00:00Z", "TODO:"),
+			],
+			[],
+			{ query: "", now: Date.parse("2026-10-07T00:00:00Z"), halfLifeDays: 90, limit: 5 },
+		);
+		expect(kept.map((entry) => entry.item.id)).toEqual(["short"]);
 		const cli = harness();
 		expect(await cli.run(["add", "--text", "Retry budget", "--phase", "15-lessons-bank", "--json"])).toBe(1);
 		expect(fake.writes).toHaveLength(0);
@@ -1398,6 +1411,15 @@ describe("session lessons", () => {
 		expect(report?.status).toBe("unverified");
 		expect(report?.id).toBeNull();
 		expect(report?.reason).toContain("empty");
+		expect(fake.writes).toHaveLength(2);
+
+		fake.scripted = [
+			{ outcome: "accepted", verified_persisted: true, entry: { id: "mem_empty", text: " " } },
+			{ outcome: "accepted", verified_persisted: true, entry: { id: "mem_filled", text: "Lease epochs fence stale holders." } },
+		];
+		const once = harness({ writeRetries: 0 });
+		expect(await once.run(["add", "--text", "Lease epochs fence stale holders.", "--phase", "15-lessons-bank", "--json"])).toBe(1);
+		expect(fake.writes).toHaveLength(3);
 	});
 
 	test("an unrelated recall is an empty match, not an error", async () => {

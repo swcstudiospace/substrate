@@ -210,6 +210,15 @@ export interface MemoryStore {
 	>;
 	readEntry(id: string): Promise<MemoryEntry | null>;
 	/**
+	 * Fill `source_event` on a row that has none.
+	 *
+	 * Conditional on the column still being null, so two retries cannot overwrite
+	 * each other's provenance. A row that already holds this same source is
+	 * returned unchanged. Anything else — a different source, or a missing row —
+	 * is null, and the gate must not report that write as saved.
+	 */
+	attachSource?(id: string, sourceEvent: string): Promise<MemoryEntry | null>;
+	/**
 	 * Park a classified write. Idempotent on `entry_hash` — a retried write that is
 	 * quarantined again must return the existing row rather than pile up duplicates
 	 * for a reviewer to wade through.
@@ -550,6 +559,30 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 	const asked = hashVersion === "v2" ? askedV2 : askedV1;
 	const priorEntry = hashVersion === "v2" ? contentV1 : contentV2;
 	const priorAsked = hashVersion === "v2" ? askedV1 : askedV2;
+	// The same ask with no source. A retry that only fills one in has to hash
+	// equal to this, or trust and actor would ride along unrecorded.
+	const askedV1Bare = requestHash({
+		entryHash: contentV1,
+		ttl,
+		trust: request.trust,
+		actor: request.actor,
+		sourceEvent: null,
+		graphId,
+		repo,
+	});
+	const askedV2Bare = requestHash({
+		entryHash: contentV2,
+		ttl,
+		trust: request.trust,
+		actor: request.actor,
+		sourceEvent: null,
+		graphId,
+		repo,
+		hv: HASH_VERSION_MARKER,
+		tenant: HASH_TENANT,
+	});
+	const askedBare = hashVersion === "v2" ? askedV2Bare : askedV1Bare;
+	const priorAskedBare = hashVersion === "v2" ? askedV1Bare : askedV2Bare;
 
 	/**
 	 * The fields every row the gate can write shares; only the target table, the id
@@ -638,10 +671,9 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 	});
 	if (!claim.claimed) {
 		const replayed = await replay(store, key, claim.existing, grant.name, entryHash, asked, priorEntry, priorAsked, {
-			ttl,
-			graphId,
-			repo,
 			sourceEvent,
+			askedBare,
+			priorAskedBare,
 		});
 		// Reconcile the proposal this key's write installed but may not have resolved.
 		//
@@ -999,7 +1031,11 @@ async function replay(
 	asked: string,
 	priorEntry: string | null,
 	priorAsked: string | null,
-	current: { ttl: string; graphId: string | null; repo: string | null; sourceEvent: string | null },
+	current: {
+		sourceEvent: string | null;
+		askedBare: string;
+		priorAskedBare: string | null;
+	},
 ): Promise<Decision> {
 	if (existing.outcome === "in-flight") {
 		// A key held for a *different* ask is spent, not merely busy. No amount of waiting
@@ -1045,25 +1081,40 @@ async function replay(
 	const divergent = existing.request_hash
 		? !digestMatches(existing.request_hash, asked, priorAsked)
 		: entry !== null && !digestMatches(entry.entry_hash, entryHash, priorEntry);
-	// Lessons written before source_event was sent keep the same body and key.
-	// Supplying a source on retry must replay that row, not conflict with it.
-	const sourceBackfill =
+	// A row stored before source_event was sent can take one on retry. The stored
+	// request hash has to equal this ask with the source removed, so a new trust
+	// or actor is still a different write. The source is written onto the row
+	// before the replay is reported: the retain queue re-reads that column, and
+	// a success that leaves it null drops the lesson as unsourced.
+	const storedSource = entry?.source_event ?? null;
+	const sameExceptSource =
+		existing.request_hash !== null &&
+		digestMatches(existing.request_hash, current.askedBare, current.priorAskedBare);
+	const sourceFill =
 		entry !== null &&
-		digestMatches(entry.entry_hash, entryHash, priorEntry) &&
-		entry.ttl === current.ttl &&
-		(entry.graph_id ?? null) === current.graphId &&
-		(entry.repo ?? null) === current.repo &&
-		(entry.source_event ?? null) === null &&
-		current.sourceEvent !== null;
-	if (divergent && !sourceBackfill) return reused(key, grant, entry);
+		sameExceptSource &&
+		current.sourceEvent !== null &&
+		(storedSource === null || storedSource === current.sourceEvent);
+	if (divergent && !sourceFill) return reused(key, grant, entry);
+
+	let recorded = entry;
+	if (sourceFill && entry !== null && storedSource === null && current.sourceEvent !== null) {
+		if (store.attachSource === undefined) return reused(key, grant, entry);
+		const saved = await store.attachSource(entry.id, current.sourceEvent);
+		if (saved === null || (saved.source_event ?? null) !== current.sourceEvent) return reused(key, grant, entry);
+		recorded = saved;
+	}
 
 	// Past the check above, any row there is this request's own content.
-	const verified = entry !== null;
+	const verified = recorded !== null;
+	const filledSource = storedSource === null && (recorded?.source_event ?? null) !== null;
 	return {
 		outcome: "accepted",
 		reason: "idempotent.replay",
 		remedy: verified
-			? "This key was already spent; the entry it wrote is returned unchanged. Nothing was written again."
+			? filledSource
+				? "This key was already spent. Its missing source was recorded on that entry; nothing else was written."
+				: "This key was already spent; the entry it wrote is returned unchanged. Nothing was written again."
 			: // Nothing is in the index under this key, so a fresh key writes one entry rather
 				// than a second. That is only true because the read above proved the absence.
 				"This key was already spent, but the entry it recorded is no longer in the index. Nothing is stored " +
@@ -1073,7 +1124,7 @@ async function replay(
 		idempotency_key: key,
 		deduplicated: true,
 		grant,
-		...(entry ? { entry } : {}),
+		...(recorded ? { entry: recorded } : {}),
 	};
 }
 

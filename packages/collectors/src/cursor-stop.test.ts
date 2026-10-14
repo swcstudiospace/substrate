@@ -162,6 +162,22 @@ describe("runStop", () => {
 		expect(events[0]?.kind).toBe("session.end");
 	});
 
+	test("a slow lesson flush cannot spend the hook budget", async () => {
+		const { events, emit } = recorder();
+		const path = transcript("Decision: The index sweep prints ttl candidate ids and does not delete documents.\n");
+		const raw = JSON.stringify({ conversation_id: ID, transcript_path: path, status: "completed" });
+		const started = Date.now();
+		await runStop(raw, {
+			emit,
+			root,
+			destDir: dest,
+			budgetMs: 80,
+			flushLesson: () => new Promise(() => {}),
+		});
+		expect(events[0]?.kind).toBe("session.end");
+		expect(Date.now() - started).toBeLessThan(500);
+	});
+
 	test("chatter does not flush an empty lesson", async () => {
 		const { emit } = recorder();
 		const flushed: unknown[] = [];

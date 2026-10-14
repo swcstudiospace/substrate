@@ -50,6 +50,8 @@ export class FakeStore implements MemoryStore {
 	failFinish: string | null = null;
 	/** Makes the read throw, which must never be read as "the row is not there". */
 	failReadEntry: string | null = null;
+	/** A source fill that the store declines, so the gate cannot report it as saved. */
+	failAttachSource = false;
 	/**
 	 * Makes resolving a parked proposal throw, after the entry has committed.
 	 *
@@ -275,6 +277,16 @@ export class FakeStore implements MemoryStore {
 		return this.rows.get(id)?.entry ?? null;
 	}
 
+	async attachSource(id: string, sourceEvent: string): Promise<MemoryEntry | null> {
+		if (this.failAttachSource) return null;
+		const row = this.rows.get(id);
+		if (!row) return null;
+		const current = row.entry.source_event ?? null;
+		if (current !== null && current !== sourceEvent) return null;
+		if (current === null) row.entry = { ...row.entry, source_event: sourceEvent };
+		return row.entry;
+	}
+
 	async quarantineEntry(row: NewMemoryEntry & { reason: QuarantineReason; detail: string }): Promise<string> {
 		const existing = this.quarantined.find((held) => held.entry_hash === row.entry_hash);
 		if (existing) return existing.id;
@@ -462,6 +474,16 @@ describe("denied — default-deny RBAC", () => {
 		expect(again.outcome).toBe("accepted");
 		expect(again.reason).toBe("idempotent.replay");
 		expect(again.entry?.id).toBe(first.entry?.id);
+		expect(again.entry?.source_event).toBe("session:sess-old");
+		expect(store.entries()).toHaveLength(1);
+		expect(store.entries()[0]?.source_event).toBe("session:sess-old");
+
+		const repeated = await write({
+			text: "hermes finished n2 with the lease held",
+			idempotency_key: "k-source",
+			source_event: "session:sess-old",
+		});
+		expect(repeated.reason).toBe("idempotent.replay");
 		expect(store.entries()).toHaveLength(1);
 
 		const changed = await write({
@@ -472,6 +494,34 @@ describe("denied — default-deny RBAC", () => {
 		});
 		expect(changed.reason).toBe("idempotency.reused");
 		expect(store.entries()).toHaveLength(1);
+	});
+
+	test("a source backfill does not confirm a different trust, and a fill that is not saved is not a success", async () => {
+		const first = await write({ text: "hermes finished n2 with the lease held", idempotency_key: "k-trust" });
+		expect(first.entry?.trust).toBe("agent-claimed");
+		const confirmed = await write({
+			text: "hermes finished n2 with the lease held",
+			idempotency_key: "k-trust",
+			source_event: "session:sess-trust",
+			trust: "human-confirmed",
+			review_token: REVIEW_TOKEN,
+		});
+		expect(confirmed.reason).toBe("idempotency.reused");
+		expect(confirmed.verified_persisted).toBe(false);
+		expect(store.entries()).toHaveLength(1);
+		expect(store.entries()[0]?.trust).toBe("agent-claimed");
+		expect(store.entries()[0]?.source_event).toBeUndefined();
+
+		await write({ text: "hermes finished n2 with the lease held", idempotency_key: "k-save" });
+		store.failAttachSource = true;
+		const unsaved = await write({
+			text: "hermes finished n2 with the lease held",
+			idempotency_key: "k-save",
+			source_event: "session:sess-save",
+		});
+		expect(unsaved.reason).toBe("idempotency.reused");
+		expect(unsaved.verified_persisted).toBe(false);
+		expect(store.entries().find((entry) => entry.idempotency_key === "k-save")?.source_event).toBeUndefined();
 	});
 
 	test("a refusal spends no idempotency key", async () => {

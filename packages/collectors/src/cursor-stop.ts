@@ -13,9 +13,10 @@
  *
  * Fails open: the hook never fails a Cursor turn and prints nothing on stdout,
  * because Cursor auto-submits a followup found there. The process always exits 0.
- * Emit goes through the shared client with the hook timeout; a 4xx is counted
- * as refused. `SUBSTRATE_CURSOR_ROOT` and `SUBSTRATE_TRANSCRIPTS_DIR` override
- * the defaults, and are read when the hook runs, not when the module loads.
+ * The lesson flush and `session.end` share one hook budget, so a slow bank cannot
+ * add a second full timeout before the event. A 4xx is counted as refused.
+ * `SUBSTRATE_CURSOR_ROOT` and `SUBSTRATE_TRANSCRIPTS_DIR` override the defaults,
+ * and are read when the hook runs, not when the module loads.
  */
 import { spawnSync } from "node:child_process";
 import { chmodSync, closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, writeSync } from "node:fs";
@@ -70,6 +71,12 @@ export interface StopDeps {
 	 * the Cursor turn. Absent in tests that only assert the event.
 	 */
 	flushLesson?: (lesson: { sessionId: string; text: string }) => Promise<void>;
+	/**
+	 * Wall-clock budget shared by the lesson flush and `session.end`.
+	 * Defaults to the hook timeout. The event keeps at least half of it, and
+	 * never less than nothing, so the flush cannot spend the whole wait.
+	 */
+	budgetMs?: number;
 }
 
 /** Roots read at call time so a long-lived process and tests see the live environment. */
@@ -203,6 +210,7 @@ export function copyTranscript(
  */
 export async function runStop(raw: string, deps: StopDeps): Promise<CopyResult> {
 	let result: CopyResult = { ref: null, reason: "hook error" };
+	let left = (): number => deps.budgetMs ?? HOOK_TIMEOUT_MS;
 	let event: EventInput = {
 		surface: "cursor",
 		kind: "session.end",
@@ -225,11 +233,17 @@ export async function runStop(raw: string, deps: StopDeps): Promise<CopyResult> 
 					: { ref: null, reason: resolved.reason };
 		}
 
+		const budgetMs = deps.budgetMs ?? HOOK_TIMEOUT_MS;
+		const reserveMs = Math.min(400, Math.floor(budgetMs / 2));
+		const deadline = Date.now() + budgetMs;
+		left = (): number => Math.max(0, deadline - Date.now());
 		if (id && result.ref && deps.flushLesson) {
 			try {
 				const text = sessionLessonText(readFileSync(result.ref, "utf8"));
-				if (text.length > 0) await deps.flushLesson({ sessionId: id, text });
-				else process.stderr.write(`[substrate] lesson ingest correlation=${id} outcome=nothing-durable\n`);
+				const lessonMs = Math.min(left(), Math.max(0, budgetMs - reserveMs));
+				if (text.length === 0) process.stderr.write(`[substrate] lesson ingest correlation=${id} outcome=nothing-durable\n`);
+				else if (lessonMs > 0) await finishWithin(deps.flushLesson({ sessionId: id, text }), lessonMs);
+				else process.stderr.write(`[substrate] lesson flush failed correlation=${id}\n`);
 			} catch {
 				process.stderr.write(`[substrate] lesson flush failed correlation=${id}\n`);
 			}
@@ -252,11 +266,26 @@ export async function runStop(raw: string, deps: StopDeps): Promise<CopyResult> 
 		// Fall through with the "hook error" event.
 	}
 	try {
-		await deps.emit(event);
+		await finishWithin(deps.emit(event), left());
 	} catch {
 		// An unreachable substrate must not fail the Cursor turn.
 	}
 	return result;
+}
+
+/** Await `work` until `ms` is gone. The timer is cleared either way. */
+async function finishWithin<T>(work: Promise<T>, ms: number): Promise<T> {
+	if (!(ms > 0)) throw new Error("hook budget spent");
+	let rejectTimer: (error: Error) => void = () => {};
+	const timeout = new Promise<T>((_, reject) => {
+		rejectTimer = reject;
+	});
+	const timer = setTimeout(() => rejectTimer(new Error("hook budget spent")), ms);
+	try {
+		return await Promise.race([work, timeout]);
+	} finally {
+		clearTimeout(timer);
+	}
 }
 
 async function readStdin(timeoutMs: number): Promise<string> {
@@ -291,6 +320,7 @@ if (import.meta.main) {
 			emit: (event) => postEvent(event, { timeoutMs: HOOK_TIMEOUT_MS, collector: "cursor-stop", source: "cursor.stop" }),
 			root: paths.root,
 			destDir: paths.destDir,
+			budgetMs: HOOK_TIMEOUT_MS,
 			flushLesson: (lesson) =>
 				flushSessionLesson({
 					sessionId: lesson.sessionId,
@@ -298,7 +328,7 @@ if (import.meta.main) {
 					repo,
 					url: (process.env.SUBSTRATE_URL?.trim() || "http://127.0.0.1:7410").replace(/\/+$/, ""),
 					token: resolveBearer("cursor", process.env) ?? undefined,
-					timeoutMs: HOOK_TIMEOUT_MS,
+					timeoutMs: HOOK_TIMEOUT_MS - Math.min(400, Math.floor(HOOK_TIMEOUT_MS / 2)),
 					root: process.cwd(),
 					cwd: process.cwd(),
 				}).then(() => undefined),

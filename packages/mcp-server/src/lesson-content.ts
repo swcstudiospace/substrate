@@ -48,11 +48,15 @@ export function lessonContentIssue(text: string | null | undefined): string | nu
 	const collapsed = collapse(text);
 	if (collapsed.length === 0) return "lesson body is empty";
 	const plain = simplified(collapsed);
+	// `.` and `TODO:` land here. Punctuation is not content, and a placeholder word
+	// is not a fact just because it wears a colon or a period.
 	if (plain.length === 0 || PLACEHOLDER_BODIES.has(plain)) return `lesson body is a placeholder (${collapsed})`;
+	// A clause is a fact even when it is short. Checked before the word count so
+	// "The cache is disabled" is kept: the stopword list would otherwise leave
+	// only two words and a count would hide it from recall.
+	if (CLAUSE.test(collapsed)) return null;
 	const words = plain.split(" ").filter((word) => word.length > 0 && !STOPWORDS[word]);
-	if (words.length < 3 && !CLAUSE.test(collapsed)) {
-		return "lesson body is only a title or label and has no factual content";
-	}
+	if (words.length < 3) return "lesson body is only a title or label and has no factual content";
 	return null;
 }
 

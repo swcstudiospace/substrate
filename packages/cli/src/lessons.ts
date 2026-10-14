@@ -103,13 +103,17 @@ function proseFromLine(line: string): string | null {
 	try {
 		const value: unknown = JSON.parse(trimmed);
 		if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
-		const record = value as Record<string, unknown>;
-		const message = record.message;
-		const nested = message !== null && typeof message === "object" ? (message as { content?: unknown }).content : message;
-		const picked = record.text ?? record.content ?? nested;
+		let picked: unknown;
+		if ("text" in value && typeof value.text === "string") picked = value.text;
+		else if ("content" in value && typeof value.content === "string") picked = value.content;
+		else if ("message" in value) {
+			const message = value.message;
+			if (typeof message === "string") picked = message;
+			else if (message !== null && typeof message === "object" && "content" in message) picked = message.content;
+		}
 		if (typeof picked !== "string") return null;
 		const text = picked.trim();
-		const role = typeof record.role === "string" ? record.role : "";
+		const role = "role" in value && typeof value.role === "string" ? value.role : "";
 		if ((role === "user" || role === "human" || role === "system") && !LABELED_FACT.test(text)) return null;
 		return text;
 	} catch {
@@ -1135,7 +1139,7 @@ async function writeGoverned(
 		if (decided.status === "recorded" || decided.status === "duplicate") {
 			const issue = readBackIssue(sent, reply, sessionId);
 			if (issue) {
-				if (attempt > 0) {
+				if (attempt >= retries) {
 					return {
 						status: "unverified",
 						id: null,
