@@ -154,18 +154,6 @@ import {
 	type SkillProposer,
 	type TreeMode,
 } from "./skills/propose.ts";
-import { loadManifest, lookupDocumentMeta, type DocsManifest, type DocsRagflow } from "./docs/manifest.ts";
-import { loadRegistry } from "./docs/registry.ts";
-import { ingestPage } from "./docs/ingest.ts";
-import { RagflowClient, type RagflowDatasetSummary } from "./docs/ragflow.ts";
-import {
-	runSearch,
-	validateSearchInput,
-	type SearchRagflow,
-	type SearchReply,
-	type SourceMeta,
-} from "./docs/search.ts";
-import { finalize } from "./docs/versions.ts";
 import {
 	fetchPrView,
 	LIST_MAX,
@@ -978,8 +966,6 @@ export class Substrate {
 	private skillRegistryWarned = false;
 	/** The desktop driver. Production wiring lives only in index.ts, so tests never reach docker by accident. */
 	readonly desktop: DesktopDriver | null;
-	/** The one RAGFlow seam the docs doors share; null answers `not-configured`. */
-	readonly ragflow: DocsClient | null;
 	private readonly observer: SubstrateObserver;
 	private readonly cache: ReadThroughCache;
 	/**
@@ -1074,7 +1060,6 @@ export class Substrate {
 			ragflowFetch?: FetchLike;
 			hindsightFetch?: FetchLike;
 			desktop?: DesktopDriver | null;
-			ragflow?: DocsClient | null;
 		},
 		observer: SubstrateObserver = {},
 	) {

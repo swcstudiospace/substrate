@@ -101,52 +101,24 @@ mkdir -p node_modules
 	writeExec(
 		join(bin, "systemctl"),
 		`#!/usr/bin/env bash
-	printf '%s\\n' "$*" >> "$STUB_LOG/systemctl"
-	if [[ "$1" == "show" ]]; then
-	  unit="\${!#}"
-	  if [[ "$*" == *"Type"* ]]; then
-	    if [[ "\$unit" == "substrate-docs-refresh.service" ]]; then
-	      printf 'Type=oneshot\\n'
-	    else
-	      printf 'Type=simple\\n'
-	    fi
-	    exit 0
-	  fi
-	  if [[ "$*" == *"Result"* ]]; then
-	    if [[ "\${FAIL_ONESHOT:-}" == "1" && "\$unit" == "substrate-docs-refresh.service" ]]; then
-	      printf 'Result=failed\\n'
-	    else
-	      printf 'Result=success\\n'
-	    fi
-	    exit 0
-	  fi
-	  key="$STUB_LOG/show-count-\$unit"
-	  count=0
-	  if [[ -f "\$key" ]]; then count=\$(cat "\$key"); fi
-	  count=\$((count + 1))
-	  printf '%s\\n' "\$count" > "\$key"
-	  if [[ "\${FAIL_LOOP:-}" == "1" && "\$unit" == "substrate-collector-grok.service" && \$((count % 2)) -eq 0 ]]; then
-	    printf 'ActiveState=activating\\nSubState=auto-restart\\nNRestarts=1\\n'
-	  else
-	    printf 'ActiveState=active\\nSubState=running\\nNRestarts=0\\n'
-	  fi
-	  exit 0
-	fi
-	if [[ "$1" == "is-active" ]]; then
-	  unit="\${!#}"
-	  # A Type=oneshot tick is never active after it runs; the gate checks its
-	  # completion instead, so the stub reports it inactive like the host does.
-	  if [[ "\$unit" == "substrate-docs-refresh.service" ]]; then exit 1; fi
-	  if [[ "\${FAIL_ACTIVE:-}" == "1" ]]; then exit 1; fi
-	  exit 0
-	fi
-	if [[ "$1" == "is-failed" ]]; then
-	  unit="\${!#}"
-	  if [[ "\${FAIL_ONESHOT:-}" == "1" && "\$unit" == "substrate-docs-refresh.service" ]]; then exit 0; fi
-	  exit 1
-	fi
-	if [[ "\${FAIL_SYSTEMCTL:-}" == "1" ]]; then exit 1; fi
-	`,
+printf '%s\\n' "$*" >> "$STUB_LOG/systemctl"
+if [[ "$1" == "show" ]]; then
+  unit="\${!#}"
+  key="$STUB_LOG/show-count-\$unit"
+  count=0
+  if [[ -f "\$key" ]]; then count=\$(cat "\$key"); fi
+  count=\$((count + 1))
+  printf '%s\\n' "\$count" > "\$key"
+  if [[ "\${FAIL_LOOP:-}" == "1" && "\$unit" == "substrate-collector-grok.service" && \$((count % 2)) -eq 0 ]]; then
+    printf 'ActiveState=activating\\nSubState=auto-restart\\nNRestarts=1\\n'
+  else
+    printf 'ActiveState=active\\nSubState=running\\nNRestarts=0\\n'
+  fi
+  exit 0
+fi
+if [[ "$1" == "is-active" && "\${FAIL_ACTIVE:-}" == "1" ]]; then exit 1; fi
+if [[ "\${FAIL_SYSTEMCTL:-}" == "1" ]]; then exit 1; fi
+`,
 	);
 	writeExec(
 		join(bin, "sleep"),
@@ -220,7 +192,6 @@ printf '%s\\n' ok >> "$STUB_LOG/health"
 			FAIL_SYSTEMCTL: "",
 			FAIL_ACTIVE: "",
 			FAIL_LOOP: "",
-			FAIL_ONESHOT: "",
 		},
 	};
 }
@@ -231,7 +202,6 @@ function stage(env: NodeJS.ProcessEnv, tag: string, sha: string, onMain: boolean
 	const tree = join(state, "trees", sha);
 	mkdirSync(join(tree, "packages/mcp-server/src"), { recursive: true });
 	mkdirSync(join(tree, "packages/collectors/src"), { recursive: true });
-	mkdirSync(join(tree, "packages/cli/src"), { recursive: true });
 	writeFileSync(join(tree, "package.json"), "{}\n");
 	writeFileSync(join(tree, "bun.lock"), "{}\n");
 	writeFileSync(join(tree, "packages/mcp-server/src/index.ts"), "");
@@ -277,9 +247,6 @@ describe("deploy-release.sh", () => {
 		expect(restarted).toContain("restart substrate-collector-grok.service");
 		expect(restarted).toContain("restart substrate-collector-herdr.service");
 		expect(restarted).toContain("restart substrate-collector-muse.service");
-		// The optional docs timer job is out of the default gate: the default
-		// deploy never restarts it (opt in via SUBSTRATE_RELEASE_UNITS).
-		expect(restarted).not.toContain("substrate-docs-refresh.service");
 		expect(restarted).not.toContain("dispatcher");
 		expect(restarted).not.toContain("skills");
 	});
@@ -393,33 +360,6 @@ describe("deploy-release.sh", () => {
 		expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA1}`);
 	});
 
-	test("a release missing the docs refresh entry publishes by default but not when opted in", () => {
-		// The entry gate follows the unit list: docs-refresh is out of the
-		// default gate, so its entry is only required when the operator
-		// lists the unit via SUBSTRATE_RELEASE_UNITS.
-		const h = harness();
-		stage(h.env, "v1", SHA1, true);
-		const tree = join(h.env.STUB_STATE ?? "", "trees", SHA1);
-		rmSync(join(tree, "packages/cli/src/docs-refresh.ts"));
-		const result = deploy(h, ["v1"]);
-		expect(result.status).toBe(0);
-		expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA1}`);
-
-		const opted = harness();
-		stage(opted.env, "v1", SHA1, true);
-		const optedTree = join(opted.env.STUB_STATE ?? "", "trees", SHA1);
-		rmSync(join(optedTree, "packages/cli/src/docs-refresh.ts"));
-		const env = {
-			...opted.env,
-			SUBSTRATE_RELEASE_UNITS: "substrate-mcp.service substrate-collector-grok.service substrate-docs-refresh.service",
-		};
-		const failed = deploy(opted, ["v1"], env);
-		expect(failed.status).not.toBe(0);
-		expect(failed.stderr).toContain("missing packages/cli/src/docs-refresh.ts");
-		expect(existsSync(join(opted.root, "current"))).toBe(false);
-		expect(existsSync(join(opted.log, "systemctl"))).toBe(false);
-	});
-
 	test("a release missing a unit entry is not published", () => {
 		const h = harness();
 		stage(h.env, "v1", SHA1, true);
@@ -458,54 +398,6 @@ describe("deploy-release.sh", () => {
 		const failed = deploy(h, ["v2"], { ...h.env, FAIL_ACTIVE: "1" });
 		expect(failed.status).not.toBe(0);
 		expect(failed.stderr).toContain("is not active");
-		expect(failed.stderr).toContain("rolling back");
-		expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA1}`);
-	});
-
-	test("a healthy oneshot docs refresh is gated on completion, not activeness", () => {
-		// The stub reports substrate-docs-refresh.service inactive (a
-		// Type=oneshot tick is never active after it runs) with
-		// Result=success and not failed: the deploy must succeed instead of
-		// rolling back on "is not active". The docs job is operator-opted-in
-		// here because it is out of the default gate.
-		const h = harness();
-		stage(h.env, "v1", SHA1, true);
-		const env = {
-			...h.env,
-			SUBSTRATE_RELEASE_UNITS: "substrate-mcp.service substrate-collector-grok.service substrate-docs-refresh.service",
-		};
-		const result = deploy(h, ["v1"], env);
-		expect(result.status).toBe(0);
-		expect(result.stderr).not.toContain("is not active");
-		expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA1}`);
-	});
-
-	test("a failed docs refresh does not block the default deploy", () => {
-		// The optional timer job is out of the default gate: even when its
-		// last run failed, a default deploy succeeds and never restarts it.
-		const h = harness();
-		stage(h.env, "v1", SHA1, true);
-		const result = deploy(h, ["v1"], { ...h.env, FAIL_ONESHOT: "1" });
-		expect(result.status).toBe(0);
-		expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA1}`);
-		expect(readFileSync(join(h.log, "systemctl"), "utf8")).not.toContain("substrate-docs-refresh.service");
-	});
-
-	test("a failed oneshot docs refresh rolls current back", () => {
-		// Operator-opted-in oneshots keep the completion gate: a failed
-		// docs tick still rolls back when the operator lists it.
-		const h = harness();
-		stage(h.env, "v1", SHA1, true);
-		stage(h.env, "v2", SHA2, true);
-		const env = {
-			...h.env,
-			SUBSTRATE_RELEASE_UNITS: "substrate-mcp.service substrate-collector-grok.service substrate-docs-refresh.service",
-		};
-		expect(deploy(h, ["v1"], env).status).toBe(0);
-		const failed = deploy(h, ["v2"], { ...env, FAIL_ONESHOT: "1" });
-		expect(failed.status).not.toBe(0);
-		expect(failed.stderr).toContain("substrate-docs-refresh.service");
-		expect(failed.stderr).toContain("is failed");
 		expect(failed.stderr).toContain("rolling back");
 		expect(readlinkSync(join(h.root, "current"))).toBe(`releases/${SHA1}`);
 	});

@@ -12,7 +12,6 @@ import { join } from "node:path";
 import {
 	acquireNameLock,
 	withNameLock,
-	buildRagflowSpawnArgv,
 	buildServerSpawnArgv,
 	confirmSpawnedTwin,
 	clearDirectory,
@@ -23,8 +22,6 @@ import {
 	gitOutput,
 	installUpCleanup,
 	isPortFree,
-	isRagflowFixtureArgv,
-	isRagflowFixturePid,
 	isTwinHealthy,
 	killVerifiedSpawn,
 	mayStop,
@@ -46,7 +43,6 @@ import {
 	refuseLedgerUrl,
 	refusePort,
 	refuseSmokeUrl,
-	readStartSeconds,
 	resolveContainerRemoval,
 	selectStoreContainer,
 	smokeToolResult,
@@ -114,35 +110,6 @@ function dockerCalls(log: string): string {
 	} catch {
 		return "";
 	}
-}
-
-function pidGone(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return false;
-	} catch {
-		return true;
-	}
-}
-
-/**
- * A live stand-in for the fake RAGFlow: a Bun process whose argv carries the
- * fixture entry name and an exact `--run-dir` pair, so the identity checks
- * accept it, but which only sleeps instead of serving. Detached like the
- * real fake, so init reaps it and no zombie lingers for the stop poll. The
- * poll below needs real delays: it waits on a live child reaching exec
- * (observed via /proc), which fake timers cannot drive.
- */
-async function spawnStubFake(runDir: string): Promise<{ pid: number; dir: string }> {
-	const dir = mkdtempSync(join(tmpdir(), "rh-stubfake-"));
-	writeFileSync(join(dir, "rehearsal-fake-ragflow.ts"), "await Promise.withResolvers().promise;\n");
-	const child = Bun.spawn(
-		[process.execPath, "--no-env-file", join(dir, "rehearsal-fake-ragflow.ts"), "--serve", "--run-dir", runDir, "--port", "19999"],
-		{ detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" },
-	);
-	child.unref();
-	for (let i = 0; i < 50 && !isRagflowFixturePid(child.pid, runDir); i++) await Bun.sleep(100);
-	return { pid: child.pid, dir };
 }
 
 describe("mayStop", () => {
@@ -655,9 +622,6 @@ describe("refuseExtraArgs", () => {
 		expect(refuseExtraArgs(["up", "--name", "x", "--skills-fixtures"])).toBe("unknown option --skills-fixtures");
 		expect(refuseExtraArgs(["up", "--skills-fixture", "extra"])).toBe("unexpected argument extra");
 		expect(refuseExtraArgs(["up", "--desktop-surfaces", "omp"])).toBeNull();
-		// The ragflow fixture rides the same bare-flag shape.
-		expect(refuseExtraArgs(["up", "--name", "x", "--ragflow-fixture"])).toBeNull();
-		expect(refuseExtraArgs(["up", "--name", "x", "--ragflow-fixtures"])).toBe("unknown option --ragflow-fixtures");
 		expect(refuseExtraArgs(["down", "--nmae", "other"])).toContain("--nmae");
 		expect(refuseExtraArgs(["down", "--name", "x", "extra"])).toContain("extra");
 		expect(refuseExtraArgs(["smoke", "--verbose"])).toContain("--verbose");
@@ -668,201 +632,6 @@ describe("refuseExtraArgs", () => {
 		expect(run.code).toBe(2);
 		expect(run.err).toContain("--nmae");
 	});
-});
-
-describe("ragflow fixture helpers", () => {
-	test("the fake spawn argv names the fixture script, the run dir and the port", () => {
-		const argv = buildRagflowSpawnArgv("/tmp/wt-checkout", "/tmp/run/p25", 19380);
-		expect(argv[0]).toBe(process.execPath);
-		expect(argv).toContain("--no-env-file");
-		expect(argv).toContain(join("/tmp/wt-checkout", "packages/mcp-server/src/rehearsal-fake-ragflow.ts"));
-		expect(argv).toContain("--serve");
-		expect(argv).toContain("/tmp/run/p25");
-		expect(argv).toContain("19380");
-		expect(argv).not.toContain("7410");
-	});
-
-	test("isRagflowFixturePid refuses a foreign or missing pid", () => {
-		expect(isRagflowFixturePid(1, "/tmp/run/p25")).toBe(false);
-		expect(isRagflowFixturePid(999999999, "/tmp/run/p25")).toBe(false);
-	});
-});
-
-describe("isRagflowFixtureArgv", () => {
-	const argv = (runDir: string): string[] => [
-		"/root/.local/bin/bun",
-		"--no-env-file",
-		"/wt/packages/mcp-server/src/rehearsal-fake-ragflow.ts",
-		"--serve",
-		"--run-dir",
-		runDir,
-		"--port",
-		"19380",
-	];
-
-	test("matches the exact fixture argv", () => {
-		expect(isRagflowFixtureArgv(argv("/tmp/run/p25"), "/tmp/run/p25")).toBe(true);
-	});
-
-	test("a sibling run dir that extends this one does not match", () => {
-		// .../a is a substring of .../a2, so a substring check would let
-		// `down` kill another run's fake after a pid reuse.
-		expect(isRagflowFixtureArgv(argv("/tmp/run/a2"), "/tmp/run/a")).toBe(false);
-		expect(isRagflowFixtureArgv(argv("/tmp/run/a"), "/tmp/run/a2")).toBe(false);
-	});
-
-	test("refuses a foreign argv", () => {
-		expect(isRagflowFixtureArgv(["/usr/bin/bun", "--no-env-file", "packages/mcp-server/src/index.ts"], "/tmp/run/p25")).toBe(false);
-		expect(isRagflowFixtureArgv(["bun", "--no-env-file", "/wt/rehearsal-fake-ragflow"], "/tmp/run/p25")).toBe(false);
-		expect(
-			isRagflowFixtureArgv(["bun", "--no-env-file", "/wt/rehearsal-fake-ragflow.ts", "--serve", "--run-dir"], "/tmp/run/p25"),
-		).toBe(false);
-	});
-});
-
-describe("stopRagflowFake", () => {
-	test("a reused pid with a different start time is never signalled", async () => {
-		const runDir = mkdtempSync(join(tmpdir(), "rh-fakerun-"));
-		const stub = await spawnStubFake(runDir);
-		try {
-			expect(isRagflowFixturePid(stub.pid, runDir)).toBe(true);
-			expect(() => stopRagflowFake(stub.pid, runDir, 1)).toThrow("reused");
-			// The refusal came before any signal: the fake is still alive.
-			expect(pidGone(stub.pid)).toBe(false);
-		} finally {
-			try {
-				stopRagflowFake(stub.pid, runDir);
-			} catch {
-				// A refusal means the pid is gone or not ours; never escalate blindly.
-			}
-			if (!pidGone(stub.pid) && isRagflowFixturePid(stub.pid, runDir)) {
-				try {
-					process.kill(stub.pid, "SIGKILL");
-				} catch {
-					// Gone between the check and the signal.
-				}
-			}
-			rmSync(runDir, { recursive: true, force: true });
-			rmSync(stub.dir, { recursive: true, force: true });
-		}
-		// Spawns a live stub; real child death observed via the signal probe,
-		// which fake timers cannot drive.
-	}, 30000);
-
-	test("the saved start time lets the real fake stop", async () => {
-		const runDir = mkdtempSync(join(tmpdir(), "rh-fakerun-"));
-		const stub = await spawnStubFake(runDir);
-		try {
-			const start = readStartSeconds(stub.pid);
-			expect(start).not.toBeNull();
-			stopRagflowFake(stub.pid, runDir, start as number);
-			// Real child death observed via the signal probe, which fake timers cannot drive.
-			for (let i = 0; i < 50 && !pidGone(stub.pid); i++) await Bun.sleep(100);
-			expect(pidGone(stub.pid)).toBe(true);
-		} finally {
-			if (!pidGone(stub.pid) && isRagflowFixturePid(stub.pid, runDir)) {
-				try {
-					process.kill(stub.pid, "SIGKILL");
-				} catch {
-					// Gone between the check and the signal.
-				}
-			}
-			rmSync(runDir, { recursive: true, force: true });
-			rmSync(stub.dir, { recursive: true, force: true });
-		}
-		// Spawns a live stub; real child death observed via the signal probe,
-		// which fake timers cannot drive.
-	}, 30000);
-
-	test("down with a provisional fake-only state stops the fake without signalling pid 0", async () => {
-		// A `down` that finds pid 0 (up killed during the fake readiness
-		// wait) stops the recorded fake, removes the run dir and exits 0.
-		const base = mkdtempSync(join(tmpdir(), "rh-down-prov-"));
-		const fake = fakeDocker();
-		const name = "rh-prov-fake";
-		const runDir = join(base, "substrate-rehearsal", name);
-		mkdirSync(runDir, { recursive: true, mode: 0o700 });
-		const stub = await spawnStubFake(runDir);
-		writeFileSync(
-			join(runDir, "state.json"),
-			JSON.stringify({ name, pid: 0, startSeconds: 0, checkout: "/tmp/wt-checkout", ragflowFixture: true, ragflowPid: stub.pid }),
-		);
-		try {
-			const run = runIsolated(["down", "--name", name], {
-				XDG_RUNTIME_DIR: base,
-				PATH: `${fake.bin}:${process.env.PATH ?? ""}`,
-				DOCKER_HOST: "unix:///nonexistent.sock",
-				DOCKER_CONTEXT: "",
-			});
-			expect(run.code).toBe(0);
-			expect(run.out).toContain("twin never started");
-			// Real child death observed via the signal probe, which fake timers cannot drive.
-			for (let i = 0; i < 50 && !pidGone(stub.pid); i++) await Bun.sleep(100);
-			expect(pidGone(stub.pid)).toBe(true);
-			expect(`${run.out}${run.err}`).not.toContain(SENTINEL);
-		} finally {
-			if (!pidGone(stub.pid) && isRagflowFixturePid(stub.pid, runDir)) {
-				try {
-					process.kill(stub.pid, "SIGKILL");
-				} catch {
-					// Gone between the check and the signal.
-				}
-			}
-			rmSync(base, { recursive: true, force: true });
-			rmSync(fake.dir, { recursive: true, force: true });
-			rmSync(stub.dir, { recursive: true, force: true });
-		}
-		// Spawns a live stub plus a full CLI run; real child death observed
-		// via the signal probe, which fake timers cannot drive.
-	}, 30000);
-
-	test("up after a twin crash stops the recorded fake before rebuilding", async () => {
-		// A crashed `up` leaves a dead twin pid plus a live fake; the next
-		// `up` rebuilds and must stop the recorded fake first
-		// (identity-checked) or the rebuild overwrites the saved pid and
-		// `down` can never stop the orphan.
-		const base = mkdtempSync(join(tmpdir(), "rh-up-crashed-"));
-		const fake = fakeDocker();
-		const name = "rh-crashed-fake";
-		const runDir = join(base, "substrate-rehearsal", name);
-		mkdirSync(runDir, { recursive: true, mode: 0o700 });
-		const stub = await spawnStubFake(runDir);
-		writeFileSync(
-			join(runDir, "state.json"),
-			JSON.stringify({ name, pid: 2 ** 30, startSeconds: 1, checkout: "/tmp/wt-checkout", ragflowFixture: true, ragflowPid: stub.pid }),
-		);
-		try {
-			const run = runIsolated(["up", "--name", name, "--port", "0", "--anonymous"], {
-				XDG_RUNTIME_DIR: base,
-				PATH: `${fake.bin}:${process.env.PATH ?? ""}`,
-				DOCKER_HOST: "unix:///nonexistent.sock",
-				DOCKER_CONTEXT: "",
-			});
-			// The rebuild refuses later: the fake `docker` never answers
-			// `info`, so the data-root floor proof fails — after the stop
-			// block under test has run. The recorded fake must already be
-			// stopped by then.
-			expect(run.code).toBe(2);
-			expect(run.err).toContain("could not read Docker's data root");
-			// Real child death observed via the signal probe, which fake timers cannot drive.
-			for (let i = 0; i < 50 && !pidGone(stub.pid); i++) await Bun.sleep(100);
-			expect(pidGone(stub.pid)).toBe(true);
-			expect(`${run.out}${run.err}`).not.toContain(SENTINEL);
-		} finally {
-			if (!pidGone(stub.pid) && isRagflowFixturePid(stub.pid, runDir)) {
-				try {
-					process.kill(stub.pid, "SIGKILL");
-				} catch {
-					// Gone between the check and the signal.
-				}
-			}
-			rmSync(base, { recursive: true, force: true });
-			rmSync(fake.dir, { recursive: true, force: true });
-			rmSync(stub.dir, { recursive: true, force: true });
-		}
-		// Spawns a live stub plus a full CLI run; real child death observed
-		// via the signal probe, which fake timers cannot drive.
-	}, 30000);
 });
 
 describe("resolveContainerRemoval", () => {

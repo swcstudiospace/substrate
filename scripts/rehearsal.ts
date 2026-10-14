@@ -59,7 +59,6 @@ import {
 	toShellExports,
 } from "../packages/mcp-server/src/rehearsal-env.ts";
 import { buildSkillsFixture, type SkillsFixture } from "../packages/mcp-server/src/rehearsal-skills.ts";
-import { buildRagflowFixture, type RagflowFixture } from "../packages/mcp-server/src/rehearsal-ragflow.ts";
 import { isSwarmSurface, SURFACES, type Surface } from "../packages/mcp-server/src/types.ts";
 
 /** The harness refused an input or a state; the message names hosts and ports, never values. */
@@ -336,136 +335,6 @@ export function parseDockerPortLine(line: string): { host: string; port: number 
 	return { host: m[1] as string, port };
 }
 
-/** The fake RAGFlow's spawn argv: Bun without env-file autoload, the fixture entry point. */
-export function buildRagflowSpawnArgv(checkout: string, runDir: string, port: number): string[] {
-	return [
-		process.execPath,
-		"--no-env-file",
-		join(checkout, "packages/mcp-server/src/rehearsal-fake-ragflow.ts"),
-		"--serve",
-		"--run-dir",
-		runDir,
-		"--port",
-		String(port),
-	];
-}
-
-/**
- * Whether an argv array is the fake RAGFlow spawned for this run: the
- * fixture entry point plus an exact `--run-dir <runDir>` pair. Exact
- * elements, never substrings: a sibling run dir that extends this one
- * (`.../a` vs `.../a2`) must not match, or `down` could kill another run's
- * fake after a pid reuse.
- */
-export function isRagflowFixtureArgv(argv: readonly string[], runDir: string): boolean {
-	const namesFixture = argv.some((arg) => arg === "rehearsal-fake-ragflow.ts" || arg.endsWith("/rehearsal-fake-ragflow.ts"));
-	if (!namesFixture) return false;
-	const at = argv.indexOf("--run-dir");
-	return at !== -1 && argv[at + 1] === runDir;
-}
-
-/**
- * Whether pid is the fake RAGFlow spawned for this run: its command line
- * names the fixture script and the run directory. Anything else is never
- * signalled, against pid reuse and against a foreign process.
- */
-export function isRagflowFixturePid(pid: number, runDir: string): boolean {
-	let cmd: string;
-	try {
-		cmd = readFileSync(`/proc/${pid}/cmdline`, "utf8");
-	} catch {
-		return false;
-	}
-	return isRagflowFixtureArgv(
-		cmd.split("\0").filter((s) => s.length > 0),
-		runDir,
-	);
-}
-
-/**
- * Verify the pid is still this run's fake: exact fixture argv plus the saved
- * start time when one was recorded (against pid reuse). Throws refusing to
- * signal otherwise.
- */
-function verifyRagflowFake(pid: number, runDir: string, startSeconds?: number): void {
-	if (!isRagflowFixturePid(pid, runDir)) {
-		throw new RehearsalRefused(`refusing to stop pid ${pid}: not the ragflow fixture for this run`);
-	}
-	if (startSeconds !== undefined) {
-		const current = readStartSeconds(pid);
-		if (current === null || current !== startSeconds) {
-			throw new RehearsalRefused(`refusing to stop pid ${pid}: pid was reused (start time differs)`);
-		}
-	}
-}
-
-/**
- * Whether pid is a zombie: dead but not yet reaped, so signal probing still
- * reports it alive (`process.kill(pid, 0)` succeeds) while
- * `/proc/<pid>/cmdline` is already empty. A zombie pid slot is still
- * allocated, so it cannot have been recycled by a stranger — there is
- * nothing left to stop. Read from `/proc/<pid>/stat` directly: unlike
- * reaping, it works while the caller is blocked (a caller parked in
- * `Bun.sleepSync`, like the wait below, or in a `spawnSync`'d CLI never
- * reaps its own dead children, so `pidAlive` stays true for them).
- */
-function isZombiePid(pid: number): boolean {
-	const stat = readText(`/proc/${pid}/stat`);
-	if (stat === null) return false;
-	const close = stat.lastIndexOf(")");
-	if (close < 0) return false;
-	return stat.slice(close + 1).trim().split(/\s+/)[0] === "Z";
-}
-
-/**
- * Stop the fake RAGFlow, verifying identity first; a reused or foreign pid
- * is never signalled. The saved start time (when the caller recorded one)
- * is compared before either signal, mirroring the twin's stop path.
- */
-export function stopRagflowFake(pid: number, runDir: string, startSeconds?: number): void {
-	if (!pidAlive(pid)) return;
-	verifyRagflowFake(pid, runDir, startSeconds);
-	try {
-		process.kill(pid, "SIGTERM");
-	} catch {
-		return;
-	}
-	const deadline = Date.now() + 5000;
-	// A zombie is already dead: its slot cannot have been recycled, so stop
-	// waiting and skip the stronger signal instead of burning the deadline
-	// and then refusing on its emptied cmdline below.
-	while (pidAlive(pid) && !isZombiePid(pid) && Date.now() < deadline) Bun.sleepSync(250);
-	if (!pidAlive(pid) || isZombiePid(pid)) return;
-	// Re-verify before the stronger signal: the pid could have been
-	// recycled between the TERM and the KILL.
-	verifyRagflowFake(pid, runDir, startSeconds);
-	try {
-		process.kill(pid, "SIGKILL");
-	} catch {
-		// Gone between the check and the signal.
-	}
-}
-
-/** Wait for the fake's dataset list to answer `{code: 0}`; false when it never did. */
-async function waitForFakeRagflow(url: string, timeoutMs: number): Promise<boolean> {
-	const deadline = Date.now() + timeoutMs;
-	while (Date.now() < deadline) {
-		try {
-			const res = await fetch(`${url}/api/v1/datasets?page=1&page_size=1`, {
-				signal: AbortSignal.timeout(5000),
-			});
-			if (res.status === 200) {
-				const body = (await res.json()) as { code?: unknown };
-				if (body.code === 0) return true;
-			}
-		} catch {
-			// Not up yet.
-		}
-		await Bun.sleep(250);
-	}
-	return false;
-}
-
 /** Instance run directory, outside every checkout. */
 export function runDirFor(name: string): string {
 	return `${process.env.XDG_RUNTIME_DIR ?? "/tmp"}/substrate-rehearsal/${name}`;
@@ -587,7 +456,7 @@ function readText(path: string): string | null {
 }
 
 /** Process start epoch from /proc: btime plus stat field 22 over the tick rate. */
-export function readStartSeconds(pid: number): number | null {
+function readStartSeconds(pid: number): number | null {
 	const stat = readText(`/proc/${pid}/stat`);
 	const statLine = readText("/proc/stat");
 	if (stat === null || statLine === null) return null;
@@ -678,14 +547,6 @@ export interface TwinState {
 	anonymous: boolean;
 	/** Started with `--skills-fixture`. Absent in a state file an older `up` wrote. */
 	skillsFixture?: boolean;
-	/** Started with `--ragflow-fixture`. Absent in a state file an older `up` wrote. */
-	ragflowFixture?: boolean;
-	/** The fake RAGFlow's pid, when the instance started one. */
-	ragflowPid?: number;
-	/** The fake RAGFlow's loopback port, when the instance started one. */
-	ragflowPort?: number;
-	/** The fake RAGFlow's start epoch, against pid reuse. */
-	ragflowStartSeconds?: number;
 }
 
 function readState(path: string): TwinState | null {
@@ -1108,24 +969,7 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 	const statePath = join(runDir, "state.json");
 
 	const prev = readState(statePath);
-	// Pid 0 is a provisional fake-only state: `up` was interrupted or killed
-	// before the twin spawned, so it is never a live twin — fall through and
-	// rebuild. A dead twin (pid !== 0 but no longer alive: crashed `up`)
-	// likewise proceeds to rebuild below, and its recorded fake would
-	// otherwise leak: the rebuild overwrites the saved fake pid and `down`
-	// can never stop the orphan. Stop the recorded fake first
-	// (identity-checked; a reused pid is never signalled) so the rebuild
-	// below does not leak it. A live twin never reaches this block —
-	// `!pidAlive(prev.pid)` is false for it — so the refuse/return paths
-	// below stop nothing.
-	if (prev !== null && prev.ragflowPid !== undefined && (prev.pid === 0 || !pidAlive(prev.pid))) {
-		try {
-			stopRagflowFake(prev.ragflowPid, runDir, prev.ragflowStartSeconds);
-		} catch {
-			// A refusal explains itself at `down`; the rebuild must proceed.
-		}
-	}
-	if (prev !== null && prev.pid !== 0 && pidAlive(prev.pid)) {
+	if (prev !== null && pidAlive(prev.pid)) {
 		const facts = readProcFacts(prev.pid);
 		// A missing `ss` (or any other unreadable /proc fact) used to fall
 		// through to removeLabelledContainers and delete a live twin's stores.
@@ -1322,138 +1166,6 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 	}
 	let serverEnv: Record<string, string>;
 	let skills: SkillsFixture | null = null;
-	let ragflow: RagflowFixture | null = null;
-	let ragflowPid = 0;
-	let ragflowPort = 0;
-	let ragflowStartSeconds = 0;
-	// Best-effort stop of the fake the failing path below may have started;
-	// a verification refusal inside never masks the original failure.
-const stopFake = (): void => {
-	if (ragflowPid === 0) return;
-	try {
-		stopRagflowFake(ragflowPid, runDir, ragflowStartSeconds);
-	} catch {
-		// The up failure being handled already explains the outcome.
-	}
-	ragflowPid = 0;
-};
-	if (opts.ragflowFixture) {
-		let fakeWaitDisarm: (() => void) | null = null;
-		let fakeStateSaved = false;
-		try {
-			ragflowPort = await pickFreePort();
-			const fakeRefused = refusePort(ragflowPort, []);
-			if (fakeRefused !== null) throw new RehearsalRefused(`fake RAGFlow ${fakeRefused}`);
-			if (!(await isPortFree(ragflowPort))) throw new RehearsalRefused(`fake RAGFlow port ${ragflowPort} is already listening`);
-			// Deleted and rebuilt inside the run dir, so a crashed `up` cannot
-			// make a later proof answer `unchanged` from a stale manifest.
-			ragflow = buildRagflowFixture(runDir, {
-				url: `http://127.0.0.1:${ragflowPort}`,
-				apiKey: hex(32),
-			});
-			const ragflowLog = join(runDir, "ragflow.log");
-			const ragflowFd = openSync(ragflowLog, "a", 0o600);
-			const fake = Bun.spawn(buildRagflowSpawnArgv(checkout, runDir, ragflowPort), {
-				env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" },
-				detached: true,
-				stdin: "ignore",
-				stdout: ragflowFd,
-				stderr: ragflowFd,
-			});
-			fake.unref();
-			try {
-				closeSync(ragflowFd);
-			} catch {
-				// The child holds its own descriptor; a close failure changes nothing.
-			}
-			ragflowPid = fake.pid;
-			const fakeStart = readStartSeconds(ragflowPid);
-			if (fakeStart === null || !isRagflowFixturePid(ragflowPid, runDir)) {
-				ragflowPid = 0;
-				removeLabelledContainers(opts.name);
-				throw new RehearsalRefused(
-					`could not verify the fake RAGFlow (pid ${fake.pid}); refusing to signal an unverified process`,
-				);
-			}
-			ragflowStartSeconds = fakeStart;
-			// The fake is detached and verified but nothing can stop it yet:
-			// an interruption during the readiness wait below would orphan
-			// the child (the twin-phase cleanup is only installed after the
-			// twin starts). Persist the verified fake identity first — pid 0
-			// marks "twin not spawned yet" — so a later `down` can stop it,
-			// then arm interruption cleanup for the wait. The twin phase
-			// below overwrites this provisional state and replaces the handler.
-			writeMode(
-				statePath,
-				`${JSON.stringify(
-					{
-						name: opts.name,
-						pid: 0,
-						startSeconds: 0,
-						checkout,
-						commit: "unknown",
-						mcpPort,
-						pgHostPort: pgHost.port,
-						ledgerHostPort: ledgerHost.port,
-						pgContainer,
-						ledgerContainer,
-						pgImage,
-						ledgerImage,
-						surfaces,
-						operator: opts.operator,
-						anonymous: opts.anonymous,
-						desktopSurfaces: opts.desktopSurfaces,
-						skillsFixture: opts.skillsFixture,
-						ragflowFixture: true,
-						ragflowPid,
-						ragflowPort,
-						ragflowStartSeconds,
-					} satisfies TwinState,
-					null,
-					2,
-				)}\n`,
-			);
-			fakeStateSaved = true;
-			fakeWaitDisarm = installUpCleanup((): void => {
-				stopFake();
-				try {
-					removeLabelledContainers(opts.name);
-				} catch {
-					// A signal handler must not throw; the kept provisional
-					// state lets a later `down` retry the removal.
-				}
-			});
-			let fakeReady = false;
-			try {
-				fakeReady = await waitForFakeRagflow(`http://127.0.0.1:${ragflowPort}`, 20_000);
-			} finally {
-				fakeWaitDisarm?.();
-				fakeWaitDisarm = null;
-			}
-			if (!fakeReady) {
-				stopFake();
-				removeLabelledContainers(opts.name);
-				rmSync(statePath, { force: true });
-				fakeStateSaved = false;
-				throw new RehearsalRefused(
-					`fake RAGFlow never answered on 127.0.0.1:${ragflowPort}; log kept at ${ragflowLog}`,
-				);
-			}
-		} catch (cause) {
-			if (fakeWaitDisarm !== null) {
-				fakeWaitDisarm();
-				fakeWaitDisarm = null;
-			}
-			stopFake();
-			removeLabelledContainers(opts.name);
-			if (fakeStateSaved) {
-				rmSync(statePath, { force: true });
-				fakeStateSaved = false;
-			}
-			if (cause instanceof RehearsalRefused) throw cause;
-			throw new RehearsalRefused(`the ragflow fixture could not be built: ${String((cause as Error).message ?? cause).split("\n")[0]}`);
-		}
-	}
 	try {
 		// Deleted and rebuilt inside the run dir, so a crashed `up` cannot make a later proof answer `existing`.
 		skills = opts.skillsFixture ? buildSkillsFixture(runDir) : null;
@@ -1471,7 +1183,6 @@ const stopFake = (): void => {
 	} catch (cause) {
 		// The scratch containers are already healthy here; a builder throw must
 		// not leak them, and must exit 2 instead of a stack trace.
-		stopFake();
 		removeLabelledContainers(opts.name);
 		if (cause instanceof RehearsalEnvError) throw new RehearsalRefused(cause.message);
 		if (opts.skillsFixture) throw new RehearsalRefused(`the skills fixture could not be built: ${String((cause as Error).message ?? cause).split("\n")[0]}`);
@@ -1500,7 +1211,6 @@ const stopFake = (): void => {
 		// Unverifiable means unsignallable: a blind killOwn could hit a reused
 		// pid. Containers are still removed; the twin (if it is ours) is orphaned
 		// rather than risking someone else's process.
-		stopFake();
 		removeLabelledContainers(opts.name);
 		throw new RehearsalRefused(`could not verify the spawned twin (pid ${server.pid}); refusing to signal an unverified process`);
 	}
@@ -1512,7 +1222,6 @@ const stopFake = (): void => {
 		// refusal `up` succeeds and every later `down` refuses, e.g. from a
 		// system.slice context the twin inherits.
 		killVerifiedSpawn(server.pid, checkout, facts.startSeconds);
-		stopFake();
 		removeLabelledContainers(opts.name);
 		throw new RehearsalRefused(`twin would not be stoppable: ${stopReason}`);
 	}
@@ -1540,15 +1249,10 @@ const stopFake = (): void => {
 		desktopSurfaces: opts.desktopSurfaces,
 		anonymous: opts.anonymous,
 		skillsFixture: opts.skillsFixture,
-		ragflowFixture: opts.ragflowFixture,
-		...(ragflowPid === 0
-			? {}
-			: { ragflowPid, ragflowPort, ragflowStartSeconds }),
 	};
 	writeMode(statePath, `${JSON.stringify(state, null, 2)}\n`);
 	const interruptCleanup = (): void => {
 		killVerifiedSpawn(server.pid, checkout, facts.startSeconds);
-		stopFake();
 		try {
 			removeLabelledContainers(opts.name);
 		} catch {
@@ -1570,7 +1274,6 @@ const stopFake = (): void => {
 		const health = await waitForHealth(`http://127.0.0.1:${mcpPort}`, firstToken ?? null, READY_TIMEOUT_MS);
 		if (!isTwinHealthy(health)) {
 			killVerifiedSpawn(server.pid, checkout, facts.startSeconds);
-			stopFake();
 			removeLabelledContainers(opts.name);
 			rmSync(statePath, { force: true });
 			process.stderr.write(`[rehearsal] twin never reached healthy /healthz (index=${health?.index} ledger=${health?.ledger} writable=${health?.writable}); log kept at ${logPath}.\n`);
@@ -1581,7 +1284,6 @@ const stopFake = (): void => {
 		const confirmReason = confirmSpawnedTwin(server.pid, mcpPort, facts.startSeconds);
 		if (confirmReason !== null) {
 			killVerifiedSpawn(server.pid, checkout, facts.startSeconds);
-			stopFake();
 			removeLabelledContainers(opts.name);
 			rmSync(statePath, { force: true });
 			throw new RehearsalRefused(confirmReason);
@@ -1600,9 +1302,6 @@ const stopFake = (): void => {
 			name: opts.name,
 			testPgUrl,
 			skills: skills ? { state: skills.state, origin: skills.origin, ghState: skills.ghState, repo: skills.repo } : null,
-			ragflow: ragflow
-				? { url: `http://127.0.0.1:${ragflowPort}`, registry: ragflow.registryFile, state: ragflow.stateFile, modeFile: ragflow.modeFile }
-				: null,
 		})));
 		writeMode(join(runDir, "stores.env"), toShellExports(storesEnvRecord({
 			ports: { mcp: mcpPort, ledger: ledgerHost.port, postgres: pgHost.port },
@@ -1625,7 +1324,6 @@ const stopFake = (): void => {
 		// best-effort here so the original error survives; the provisional
 		// state stays so a later `down` can retry it.
 		killVerifiedSpawn(server.pid, checkout, facts.startSeconds);
-		stopFake();
 		try {
 			removeLabelledContainers(opts.name);
 		} catch {
@@ -1651,16 +1349,6 @@ async function runDownInner(name: string, runDir: string): Promise<number> {
 		removeLabelledContainers(name);
 		rmSync(runDir, { recursive: true, force: true });
 		process.stdout.write(`[rehearsal] down ${name}: nothing to remove.\n`);
-		return 0;
-	}
-	if (state.ragflowPid !== undefined) stopRagflowFake(state.ragflowPid, runDir, state.ragflowStartSeconds);
-	if (state.pid === 0) {
-		// Provisional state: `up` never spawned the twin (interrupted or
-		// killed during the fake readiness wait). The fake above is already
-		// stopped; only containers may remain. Pid 0 itself is never signalled.
-		const removed = removeLabelledContainers(name);
-		rmSync(runDir, { recursive: true, force: true });
-		process.stdout.write(`[rehearsal] down ${name}: twin never started, removed ${removed} containers.\n`);
 		return 0;
 	}
 	if (!pidAlive(state.pid)) {
@@ -1763,14 +1451,6 @@ async function runStatusInner(name: string, runDir: string): Promise<number> {
 		process.stdout.write(`[rehearsal] status ${name}: no instance.\n`);
 		return 1;
 	}
-	if (state.pid === 0) {
-		// Provisional state: `up` never spawned the twin (interrupted or
-		// killed during the fake readiness wait). Pid 0 is not a process;
-		// report the fake instead of claiming the twin is alive.
-		const fakeAlive = state.ragflowPid !== undefined && pidAlive(state.ragflowPid);
-		process.stdout.write(`[rehearsal] status ${state.name}: twin never started, fake pid ${state.ragflowPid ?? "unknown"} alive=${fakeAlive}\n`);
-		return 1;
-	}
 	const alive = pidAlive(state.pid);
 	let health = "unknown";
 	if (alive) {
@@ -1793,12 +1473,6 @@ async function runStatusInner(name: string, runDir: string): Promise<number> {
 	process.stdout.write(`[rehearsal] commit ${state.commit} checkout ${state.checkout}\n`);
 	process.stdout.write(`[rehearsal] images pg=${state.pgImage} ledger=${state.ledgerImage}\n`);
 	process.stdout.write(`[rehearsal] skills fixture ${state.skillsFixture === true ? "on" : "off"}\n`);
-	if (state.ragflowFixture === true) {
-		const fakeAlive = state.ragflowPid !== undefined && pidAlive(state.ragflowPid);
-		process.stdout.write(`[rehearsal] ragflow fixture on: fake pid ${state.ragflowPid ?? "unknown"} alive=${fakeAlive} port ${state.ragflowPort ?? "unknown"}\n`);
-	} else {
-		process.stdout.write(`[rehearsal] ragflow fixture off\n`);
-	}
 	return health === "200" ? 0 : 1;
 }
 
@@ -2105,7 +1779,6 @@ async function main(argv: string[]): Promise<number> {
 	if (extra !== null) usage(extra);
 	const anonymous = argv.includes("--anonymous");
 	const skillsFixture = argv.includes("--skills-fixture");
-	const ragflowFixture = argv.includes("--ragflow-fixture");
 	try {
 		const name = parseName(nameRaw ?? undefined);
 		if (sub === "down") return await runDown(name);

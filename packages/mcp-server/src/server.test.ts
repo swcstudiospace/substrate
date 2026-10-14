@@ -106,6 +106,7 @@ async function serve(
  * the wrong body field or answering the wrong status fails here. The ledger is a
  * stub — this is about the wiring.
  */
+describe("routes", () => {
 	/** A ledger stub that records appends and replies to reads with fixed rows. */
 	function ledger(rows: Array<Record<string, unknown>> = []) {
 		const written: SubstrateEvent[] = [];

@@ -294,12 +294,6 @@ describe("repo units", () => {
 		}
 		const mcp = units.find((unit) => unit.name === "substrate-mcp.service");
 		expect(mcp?.environmentFiles).toEqual([SHARED_ENV_FILE]);
-		// The docs refresh tick (D25-18) ships on the release tree from the
-		// start: pinned WorkingDirectory, shared env file, no findings.
-		const refresh = units.find((unit) => unit.name === "substrate-docs-refresh.service");
-		expect(refresh?.workingDirectory).toBe(RELEASE_CURRENT);
-		expect(refresh?.environmentFiles).toEqual([SHARED_ENV_FILE]);
-
 		// The anchor job is a store client in the server's trust domain, not a
 		// collector: it loads the shared env on the pinned release and raises
 		// no finding of its own (D28-02).

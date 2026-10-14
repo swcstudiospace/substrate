@@ -430,21 +430,7 @@ async function readBody(req: IncomingMessage, maxBytes: number = MAX_BODY_BYTES)
 		if (size > maxBytes) throw new BodyTooLargeError();
 		chunks.push(chunk as Buffer);
 	}
-	return Buffer.concat(chunks);
-}
-
-async function readBody(req: IncomingMessage): Promise<string> {
-	return (await readBodyBytes(req)).toString("utf8");
-}
-
-/**
- * Fatal UTF-8 decode for POST /docs/ingest only. `Buffer.toString("utf8")`
- * silently replaces invalid bytes with U+FFFD before JSON parsing, so the
- * `not-text` check downstream cannot see the original bad byte and a damaged
- * page could upload. Every other route keeps the lossy `readBody`.
- */
-async function readBodyStrict(req: IncomingMessage): Promise<string> {
-	return new TextDecoder("utf-8", { fatal: true }).decode(await readBodyBytes(req));
+	return Buffer.concat(chunks).toString("utf8");
 }
 
 function send(
