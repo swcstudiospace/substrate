@@ -37,27 +37,36 @@ function simplified(text: string): string {
 	return text.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
+/** A finite clause. "The cache is disabled" is a fact; "Retry budget." is still a title. */
+function hasClause(text: string): boolean {
+	return CLAUSE.test(text);
+}
+
+/** A title or label. Fewer than three content words, and no clause, is not a fact. */
+function titleIssue(plain: string): string | null {
+	const words = plain.split(" ").filter((word) => word.length > 0 && !STOPWORDS[word]);
+	if (words.length < 3) return "lesson body is only a title or label and has no factual content";
+	return null;
+}
+
 /**
  * Why `text` cannot be stored as a lesson. Null, empty, whitespace, a
  * placeholder, or a title with no clause is a failed create. A short sentence
- * (`The cache is disabled`) is a fact. A trailing period does not turn a title
- * into one.
+ * is a fact. A trailing period does not turn a title into one.
+ *
+ * `.` and `TODO:` are placeholders. `Retry budget.` is a title. `The cache is
+ * disabled` is stored and recalled.
  */
 export function lessonContentIssue(text: string | null | undefined): string | null {
 	if (text == null) return "lesson body is null";
 	const collapsed = collapse(text);
 	if (collapsed.length === 0) return "lesson body is empty";
 	const plain = simplified(collapsed);
-	// `.` and `TODO:` land here. Punctuation is not content, and a placeholder word
-	// is not a fact just because it wears a colon or a period.
 	if (plain.length === 0 || PLACEHOLDER_BODIES.has(plain)) return `lesson body is a placeholder (${collapsed})`;
-	// A clause is a fact even when it is short. Checked before the word count so
-	// "The cache is disabled" is kept: the stopword list would otherwise leave
-	// only two words and a count would hide it from recall.
-	if (CLAUSE.test(collapsed)) return null;
-	const words = plain.split(" ").filter((word) => word.length > 0 && !STOPWORDS[word]);
-	if (words.length < 3) return "lesson body is only a title or label and has no factual content";
-	return null;
+	// The clause is decided before the word count. Stopwords would otherwise
+	// leave "cache" and "disabled", and a count would hide that sentence.
+	if (hasClause(collapsed)) return null;
+	return titleIssue(plain);
 }
 
 /** A lesson marker. `[lessonbankdigest]` and `[lessonbankoutcome]` are not lessons. */

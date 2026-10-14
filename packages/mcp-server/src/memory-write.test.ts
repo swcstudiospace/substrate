@@ -424,6 +424,29 @@ describe("denied — default-deny RBAC", () => {
 		expect(stored.entry?.session_id).toBe("sess-1");
 	});
 
+	test("a short sentence is stored, and punctuation or a title is not", async () => {
+		for (const text of [".", "TODO:", "Retry budget."]) {
+			const refused = await write({
+				subject: "lesson:v1.3/session/not-a-fact",
+				text,
+				source_event: "session:sess-marker",
+			});
+			expect(refused.outcome).toBe("denied");
+			expect(refused.reason).toBe("lesson.empty");
+		}
+		expect(store.entries()).toEqual([]);
+
+		const short = await write({
+			subject: "lesson:v1.3/session/cache-disabled",
+			text: "The cache is disabled",
+			source_event: "session:sess-short",
+			session_id: "sess-short",
+		});
+		expect(short.outcome).toBe("accepted");
+		expect(short.verified_persisted).toBe(true);
+		expect(short.entry?.text).toBe("The cache is disabled");
+	});
+
 	test("a secret-only lesson is not stored, and a lesson with no source is not stored", async () => {
 		const secret = `sk-ant-api03-${"e".repeat(40)}`;
 		const redacted = await write({
