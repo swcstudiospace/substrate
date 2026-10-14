@@ -486,6 +486,26 @@ describe("the degraded last-good snapshot carries no derived recall", () => {
 	});
 });
 
+describe("node labels", () => {
+	const labelled = (id: string) => ({
+		...indexOf(),
+		getGraph: async () => ({ ...graph(), nodes: [{ graph_id: "ut-1", node_id: id, linear_identifier: null, state: "todo", lease_epoch: 1 }] }),
+	});
+
+	test("a label of 512 characters prints whole; one more is cut with an ellipsis", async () => {
+		const exact = await world({}, { index: labelled("n".repeat(512)) }).substrate.briefDetailed(WITH_GRAPH, undefined, "grok-bot");
+		expect(exact.text).toContain(`Nodes: ${"n".repeat(512)} todo`);
+		const over = await world({}, { index: labelled("n".repeat(513)) }).substrate.briefDetailed(WITH_GRAPH, undefined, "grok-bot");
+		expect(over.text).toContain(`Nodes: ${"n".repeat(511)}… todo`);
+	});
+
+	test("the cut never splits a surrogate pair", async () => {
+		const brief = await world({}, { index: labelled(`${"a".repeat(510)}😀😀😀`) }).substrate.briefDetailed(WITH_GRAPH, undefined, "grok-bot");
+		expect(brief.text).toContain(`${"a".repeat(510)}😀… todo`);
+		expect(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(brief.text)).toBe(false);
+	});
+});
+
 describe("a brief too large to cache", () => {
 	test("is composed once: the live sections are used directly, never decoded back", async () => {
 		const huge = [1, 2, 3, 4].map((n) => entry("decision", `d${n} ${"x".repeat(300_000)}`));
@@ -505,7 +525,8 @@ describe("a brief too large to cache", () => {
 		};
 		const w = world({}, { index });
 		const brief = await w.substrate.briefDetailed(WITH_GRAPH, undefined, "grok-bot");
-		expect(brief.text).not.toContain("n".repeat(200));
+		expect(brief.text).not.toContain("n".repeat(600));
+		expect(brief.text).toContain(`${"n".repeat(511)}…`);
 	});
 });
 

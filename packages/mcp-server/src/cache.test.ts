@@ -1652,6 +1652,31 @@ describe("a waiter keeps its own deadline (uplift-4 S4)", () => {
 		slowGate.resolve([]);
 	});
 
+	test("an owner that degrades after the waiter's budget is spent: the waiter answers onDeadline and never starts its own load", async () => {
+		let now = 1_000;
+		const cache = cacheOf(new FakeRedis(), () => {}, () => now);
+		const gate = Promise.withResolvers<string[]>();
+		let own = 0;
+		const owner = cache.getOrLoad({ ...read, store: () => false, load: () => gate.promise });
+		await settle();
+		const waiter = cache.getOrLoad({
+			...read,
+			deadlineMs: 5_000,
+			onDeadline: () => DEGRADED,
+			load: async () => {
+				own += 1;
+				return ["waiter load"];
+			},
+		});
+		await settle();
+		// The clock moves past the waiter's budget before the owner's degraded answer lands; its own timer has not fired.
+		now += 6_000;
+		gate.resolve(["thin"]);
+		expect(await owner).toEqual(["thin"]);
+		expect(await waiter).toBe(DEGRADED);
+		expect(own).toBe(0);
+	});
+
 	test("callers with the same budget still coalesce, and a caller without a budget waits as before", async () => {
 		const cache = cacheOf(new FakeRedis());
 		const gate = Promise.withResolvers<string[]>();

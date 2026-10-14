@@ -307,6 +307,10 @@ export function buildRecallLines(hits: readonly RecallHitInput[], bank: string, 
 
 /** The most pairs the registry holds at its largest; the configured interval and TTL may lower it (`recallCapacity`). */
 export const WANTED_MAX = 32;
+/** The deadline of one recall is the configured budget plus this, so the deadline inside the gated call is the one that fires first. */
+const BUDGET_SLACK_MS = 250;
+/** A tick stops starting pair refreshes once this share of the interval has elapsed, so one tick cannot outlast the next. */
+export const TICK_TIME_SHARE = 0.8;
 /** The most pairs one tick refreshes, sequentially, each under its own deadline. */
 export const PREFETCH_HARD_MAX = 8;
 
@@ -317,15 +321,21 @@ export const PREFETCH_HARD_MAX = 8;
  * a tick, capped at `WANTED_MAX`. At the defaults (120 s, 900 s) that is
  * min(32, 8 x 6) = 32; an interval of an hour gives 8.
  */
-export function recallCapacity(config: Pick<RecallConfig, "intervalS" | "ttlS">): number {
+export function recallCapacity(config: Pick<RecallConfig, "intervalS" | "ttlS"> & { budgetMs?: number }): number {
 	const ticksPerTtl = Math.max(1, Math.floor(config.ttlS / config.intervalS) - 1);
-	return Math.min(WANTED_MAX, PREFETCH_HARD_MAX * ticksPerTtl);
+	return Math.min(WANTED_MAX, recallTickMax(config) * ticksPerTtl);
+}
+
+/** Pairs one tick can refresh within the share of the interval it may use: each takes up to `budgetMs` plus slack. At most `PREFETCH_HARD_MAX`, at least 1. */
+export function recallTickMax(config: Pick<RecallConfig, "intervalS"> & { budgetMs?: number }): number {
+	if (config.budgetMs === undefined) return PREFETCH_HARD_MAX;
+	return Math.max(1, Math.min(PREFETCH_HARD_MAX, Math.floor((config.intervalS * 1000 * TICK_TIME_SHARE) / (config.budgetMs + BUDGET_SLACK_MS))));
 }
 
 /** Pairs one tick refreshes for `wanted` pairs: enough to cover them all within half a TTL, at most `PREFETCH_HARD_MAX`. */
-export function recallPerTick(config: Pick<RecallConfig, "intervalS" | "ttlS">, wanted: number): number {
+export function recallPerTick(config: Pick<RecallConfig, "intervalS" | "ttlS"> & { budgetMs?: number }, wanted: number): number {
 	const ticksPerHalfTtl = Math.max(1, Math.floor(config.ttlS / 2 / config.intervalS));
-	return Math.max(1, Math.min(PREFETCH_HARD_MAX, Math.ceil(wanted / ticksPerHalfTtl)));
+	return Math.max(1, Math.min(recallTickMax(config), Math.ceil(wanted / ticksPerHalfTtl)));
 }
 export const WANTED_EXPIRY_MS = 3_600_000;
 
@@ -486,7 +496,6 @@ const MAX_FLUSH_REARMS = 3;
 /** How long `stop()` waits for the refresh in flight. */
 const STOP_WAIT_MS = 2000;
 /** The deadline of one recall is the configured budget plus this, so the deadline inside the gated call is the one that fires first. */
-const BUDGET_SLACK_MS = 250;
 
 /** What the injected recall answers: the surface's own bank's hits, or a failure. */
 export type RecallOutcome = { ok: true; hits: RecallHitInput[] } | { ok: false };
@@ -635,7 +644,7 @@ export class RecallPrefetcher {
 		await slot;
 	}
 
-	/** One interval tick: refresh at most two due pairs whose snapshot is older than half the TTL. */
+	/** One interval tick: refresh the due pairs (`recallPerTick`, bounded by elapsed time) whose snapshot is older than half the TTL. */
 	async tick(): Promise<void> {
 		if (this.deps.config.mode === "off" || this.stopped) return;
 		const slot = this.exclusive(async () => {
@@ -643,8 +652,11 @@ export class RecallPrefetcher {
 			const now = this.now();
 			let attempted = 0;
 			const perTick = recallPerTick(this.deps.config, this.registry.size);
+			const startedAt = now;
 			for (const pair of this.registry.due(now, this.registry.capacity)) {
 				if (attempted >= perTick || this.stopped) break;
+				// Elapsed bound: the rest stay due for the next tick, so ticks never overlap (and none is dropped by the single-flight slot).
+				if (this.now() - startedAt >= this.deps.config.intervalS * 1000 * TICK_TIME_SHARE) break;
 				const bank = this.deps.bankFor(pair.surface);
 				if (bank !== null && !this.deps.breakerOpen()) {
 					const held = await this.deps.peek(pair.surface, pair.repo, bank).catch(() => null);

@@ -16,6 +16,8 @@ import {
 	PREFETCH_HARD_MAX,
 	recallCapacity,
 	recallPerTick,
+	recallTickMax,
+	TICK_TIME_SHARE,
 	RECALL_STALE_FACTOR,
 	MIN_RECALL_REFRESH_S,
 	RETAIN_DEBOUNCE_MS,
@@ -195,6 +197,44 @@ describe("recall capacity and saturation", () => {
 		expect(recallCapacity({ intervalS: 3600, ttlS: 900 })).toBe(8);
 		expect(recallPerTick({ intervalS: 120, ttlS: 900 }, 32)).toBe(8);
 		expect(recallPerTick({ intervalS: 120, ttlS: 900 }, 1)).toBe(1);
+	});
+
+	test("a slow recall budget lowers the per-tick maximum and the capacity", () => {
+		expect(recallTickMax({ intervalS: 120, budgetMs: 1500 })).toBe(8);
+		expect(recallTickMax({ intervalS: 30, budgetMs: 10_000 })).toBe(2);
+		expect(recallCapacity({ intervalS: 30, ttlS: 60, budgetMs: 10_000 })).toBe(2);
+		expect(recallCapacity({ intervalS: 30, ttlS: 60 })).toBe(8);
+		expect(recallCapacity({ intervalS: 120, ttlS: 400 })).toBe(16);
+	});
+
+	test("a tick stops starting refreshes once 80% of the interval has elapsed, and the rest are done next tick", async () => {
+		const timers = new FakeTimers();
+		const clock = { at: T0 };
+		const recalls: string[] = [];
+		const prefetcher = new RecallPrefetcher({
+			config: { mode: "shadow", intervalS: 30, ttlS: 60, budgetMs: 4000 },
+			bankFor: () => "sub-omp",
+			breakerOpen: () => false,
+			cacheAvailable: () => true,
+			// Each recall takes 10 s of the injected clock.
+			recall: async ({ query }) => {
+				recalls.push(query);
+				clock.at += 10_000;
+				return { ok: false };
+			},
+			peek: async () => null,
+			put: async () => true,
+			now: () => clock.at,
+			timers,
+		});
+		for (let i = 0; i < 5; i++) prefetcher.want("omp", `acme/r${i}`);
+		await prefetcher.tick();
+		// Refreshes start at 0 s, 10 s and 20 s; a fourth would start at 30 s, past 0.8 x 30 s = 24 s.
+		expect(TICK_TIME_SHARE).toBe(0.8);
+		expect(recalls).toHaveLength(3);
+		clock.at = T0 + 120_000;
+		await prefetcher.tick();
+		expect(recalls.length).toBeGreaterThan(3);
 	});
 
 	test("32 wanted pairs under sustained traffic and no retains stay fresh across three TTLs at the defaults", async () => {

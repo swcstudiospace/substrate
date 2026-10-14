@@ -633,6 +633,8 @@ export class ReadThroughCache {
 			if (shared.storable) return cloneShared(shared.value);
 			// The owner's answer was degraded: load for ourselves, inside what is left of our own budget.
 			const left = spec.deadlineMs === undefined ? undefined : spec.deadlineMs - (this.now() - startedAt);
+			// Budget already spent: answer before the load is even started (an argument would be evaluated first).
+			if (left !== undefined && left <= 0 && spec.onDeadline !== undefined) return spec.onDeadline();
 			const own = await this.withDeadline(this.loadStore(klass, key, redis, spec, malformed), spec.onDeadline !== undefined, left);
 			return own === TIMED_OUT ? (spec.onDeadline as () => T)() : own.value;
 		}
