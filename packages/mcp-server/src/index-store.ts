@@ -566,7 +566,6 @@ export const MIGRATION_STEPS: ReadonlyArray<{ version: number; name: string; sql
 			create unique index if not exists memory_reviews_pending_idx on memory_reviews (entry_hash)
 			where state = 'pending'`,
 	},
-	{ version: 31, name: "memory_reviews_hash_idx_drop", sql: `drop index if exists memory_reviews_hash_idx` },
 ];
 
 export class IndexStore implements MemoryStore {
@@ -628,6 +627,10 @@ export class IndexStore implements MemoryStore {
 					throw cause;
 				}
 			}
+			// Not ledgered. A database can regain this index after the first boot (an old
+			// unique index on `(entry_hash, state)` rejects a second approval). `IF EXISTS`
+			// makes every later boot a no-op once it is gone.
+			await reserved.unsafe(`drop index if exists memory_reviews_hash_idx`);
 			// Opt-in, once: a failed tune must not stop the service booting on a schema that is already complete.
 			if (this.tune === "apply") {
 				try {
