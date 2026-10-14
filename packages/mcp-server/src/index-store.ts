@@ -13,6 +13,7 @@ import { normalizeIdentifier } from "./event.ts";
 import {
 	TERMINAL_GRAPH_STATUSES,
 	executeSweep,
+	memoryLifecycleQuery,
 	planSweep,
 	sweepPolicyFromEnv,
 	type SweepPolicy,
@@ -103,6 +104,16 @@ export const INDEX_MAX_LIFETIME_S = 3600;
 
 /** How long `ping` waits for `select 1` before calling the index unhealthy. */
 export const INDEX_PING_TIMEOUT_MS = 1000;
+
+/**
+ * How long `migrate` waits to take its session advisory lock. Two boots creating
+ * the same index otherwise deadlock; the loser gives up here instead of hanging
+ * on the pool's 5s `statement_timeout`.
+ */
+export const INDEX_MIGRATE_LOCK_TIMEOUT_MS = 180000;
+
+/** `statement_timeout` for the DDL itself, after the lock is held. */
+export const INDEX_MIGRATE_STATEMENT_TIMEOUT_MS = 120000;
 
 /**
  * The pool and the per-connection timeouts. Before these existed the client was
@@ -290,6 +301,274 @@ export interface GraphBindResult {
 /** A node row joined to its graph's repo, branch and status, for `graph_find`. */
 export type LinearNodeMatch = GraphNode & { repo: string | null; branch: string | null; graph_status: string | null };
 
+/**
+ * Boot DDL in application order. Versions are contiguous and never renumbered:
+ * a database stamps a version only after that statement commits. `tuneGraphNodes`
+ * is not a step — it stays opt-in inside `migrate` and is not ledgered.
+ */
+export const MIGRATION_STEPS: ReadonlyArray<{ version: number; name: string; sql: string }> = [
+	{
+		version: 1,
+		name: "graph_index",
+		sql: `
+			create table if not exists graph_index (
+				graph_id          text primary key,
+				notion_task_page  text,
+				repo              text,
+				branch            text,
+				surface           text,
+				status            text,
+				pr_url            text,
+				created           timestamptz default now(),
+				updated           timestamptz default now()
+			)`,
+	},
+	{
+		version: 2,
+		name: "graph_nodes",
+		sql: `
+			create table if not exists graph_nodes (
+				graph_id          text not null references graph_index(graph_id) on delete cascade,
+				node_id           text not null,
+				linear_issue_id   text,
+				linear_identifier text,
+				notion_page       text,
+				state             text,
+				claimed_by        text,
+				claimed_at        timestamptz,
+				claim_session     text,
+				primary key (graph_id, node_id)
+			)`,
+	},
+	// Leases were added after the table shipped, so the columns are added rather
+	// than declared: `create table if not exists` is a no-op against the Phase 0
+	// table and would leave a live index without them.
+	{ version: 3, name: "graph_nodes_lease_id", sql: `alter table graph_nodes add column if not exists lease_id text` },
+	{ version: 4, name: "graph_nodes_lease_expires_at", sql: `alter table graph_nodes add column if not exists lease_expires_at timestamptz` },
+	{ version: 5, name: "graph_nodes_lease_heartbeat_at", sql: `alter table graph_nodes add column if not exists lease_heartbeat_at timestamptz` },
+	{ version: 6, name: "graph_nodes_lease_epoch", sql: `alter table graph_nodes add column if not exists lease_epoch bigint not null default 0` },
+	{
+		version: 7,
+		name: "graph_edges",
+		sql: `
+			create table if not exists graph_edges (
+				graph_id  text not null,
+				from_node text not null,
+				to_node   text not null,
+				kind      text not null,
+				primary key (graph_id, from_node, to_node, kind)
+			)`,
+	},
+	{
+		version: 8,
+		name: "graph_steps",
+		sql: `
+			create table if not exists graph_steps (
+				graph_id            text not null,
+				node_id             text not null,
+				step                int  not null,
+				linear_sub_issue_id text,
+				notion_page         text,
+				state               text,
+				primary key (graph_id, node_id, step)
+			)`,
+	},
+	// A swarm run's correlation_id bound to exactly one Graph ID. The primary key is
+	// what makes two runs racing one correlation_id resolve to a winner and a reader;
+	// no foreign key to graph_index, because a run binds before it registers its nodes.
+	{
+		version: 9,
+		name: "graph_bindings",
+		sql: `
+			create table if not exists graph_bindings (
+				correlation_id text primary key,
+				graph_id       text not null,
+				bound_by       text,
+				created        timestamptz not null default now()
+			)`,
+	},
+	{
+		version: 10,
+		name: "memory_entries",
+		sql: `
+			create table if not exists memory_entries (
+				id           text primary key,
+				scope        text not null,
+				kind         text not null,
+				body         text not null,
+				source_event text,
+				writer       text not null,
+				trust        text not null default 'agent-claimed',
+				ttl          text not null default 'permanent',
+				created      timestamptz not null default now()
+			)`,
+	},
+	// Governance columns, added rather than declared: `memory_entries` predates the
+	// gate and is live, so every one of these has to be safe on a table that
+	// already holds rows. The defaults are what an ungoverned Phase 0 entry
+	// honestly was — one version, written by an agent, superseding nothing.
+	{
+		version: 11,
+		name: "memory_entries_governance_columns",
+		sql: `
+			alter table memory_entries
+				add column if not exists subject         text,
+				add column if not exists actor           text not null default 'agent',
+				add column if not exists session_id      text,
+				add column if not exists graph_id        text,
+				add column if not exists repo            text,
+				add column if not exists conflict_key    text,
+				add column if not exists version         int not null default 1,
+				add column if not exists supersedes      text,
+				add column if not exists superseded_by   text,
+				add column if not exists entry_hash      text,
+				add column if not exists reverify_after  timestamptz,
+				add column if not exists idempotency_key text`,
+	},
+	// The idempotency ledger. One row per key ever spent; `claimed` is what makes
+	// an abandoned in-flight claim recoverable and a derived key expire.
+	{
+		version: 12,
+		name: "memory_writes",
+		sql: `
+			create table if not exists memory_writes (
+				idempotency_key text primary key,
+				explicit        boolean not null default false,
+				outcome         text not null,
+				entry_id        text,
+				entry_hash      text not null,
+				request_hash    text,
+				holder          text,
+				claimed         timestamptz not null default now()
+			)`,
+	},
+	// Insurance for anyone who ran an earlier build of this migration, where the claim
+	// had no fencing token.
+	{ version: 13, name: "memory_writes_holder", sql: `alter table memory_writes add column if not exists holder text` },
+	{ version: 14, name: "memory_writes_request_hash", sql: `alter table memory_writes add column if not exists request_hash text` },
+	// Parked writes. Both tables hold the *redacted* body: a quarantined secret is
+	// quarantined so a reviewer can see what was attempted, never so the substrate
+	// can keep the credential.
+	{
+		version: 15,
+		name: "memory_quarantine",
+		sql: `
+			create table if not exists memory_quarantine (
+				id           text primary key,
+				scope        text not null,
+				kind         text not null,
+				body         text not null,
+				subject      text,
+				writer       text not null,
+				source_event text,
+				session_id   text,
+				graph_id     text,
+				repo         text,
+				entry_hash   text not null,
+				reason       text not null,
+				detail       text not null,
+				created      timestamptz not null default now()
+			)`,
+	},
+	{
+		version: 16,
+		name: "memory_reviews",
+		sql: `
+			create table if not exists memory_reviews (
+				id              text primary key,
+				scope           text not null,
+				kind            text not null,
+				body            text not null,
+				subject         text,
+				writer          text not null,
+				source_event    text,
+				session_id      text,
+				graph_id        text,
+				repo            text,
+				ttl             text not null default 'permanent',
+				entry_hash      text not null,
+				reason          text not null,
+				state           text not null default 'pending',
+				entry_id        text,
+				decided         timestamptz,
+				decided_by      text,
+				created         timestamptz not null default now()
+			)`,
+	},
+	// Skills governance (uplift-5 S5a). The registry of which merged skill pull request an
+	// operator approved, declined or retired. A row is never deleted; see skills/registry.ts.
+	{
+		version: 17,
+		name: "skills_registry",
+		sql: `
+			create table if not exists skills_registry (
+				repo            text not null,
+				name            text not null,
+				pr_number       integer not null,
+				content_sha256  text not null default '',
+				state           text not null check (state in ('proposed', 'approved', 'declined', 'retired')),
+				proposed_by     text,
+				pr_url          text,
+				branch          text,
+				merge_sha       text,
+				decided_by      text,
+				decided_at      timestamptz,
+				reason          text,
+				created         timestamptz not null default now(),
+				updated         timestamptz not null default now(),
+				primary key (repo, name, pr_number)
+			)`,
+	},
+	{ version: 18, name: "skills_registry_state_idx", sql: `create index if not exists skills_registry_state_idx on skills_registry (repo, state, name)` },
+	{ version: 19, name: "graph_index_repo_idx", sql: `create index if not exists graph_index_repo_idx on graph_index (repo)` },
+	{ version: 20, name: "graph_nodes_claimed_idx", sql: `create index if not exists graph_nodes_claimed_idx on graph_nodes (claimed_by)` },
+	{ version: 21, name: "graph_nodes_lease_idx", sql: `create index if not exists graph_nodes_lease_idx on graph_nodes (lease_expires_at)` },
+	{ version: 22, name: "graph_edges_graph_idx", sql: `create index if not exists graph_edges_graph_idx on graph_edges (graph_id)` },
+	{ version: 23, name: "graph_bindings_graph_idx", sql: `create index if not exists graph_bindings_graph_idx on graph_bindings (graph_id)` },
+	{ version: 24, name: "memory_scope_idx", sql: `create index if not exists memory_scope_idx on memory_entries (scope)` },
+	// Seek directly to a scoped page boundary in its output order, including history.
+	{
+		version: 25,
+		name: "memory_scope_created_id_idx",
+		sql: `
+			create index if not exists memory_scope_created_id_idx
+			on memory_entries (scope, created desc, id desc)`,
+	},
+	{ version: 26, name: "memory_fts_idx", sql: `create index if not exists memory_fts_idx on memory_entries using gin (to_tsvector('english', body))` },
+	// The identity the lww and versioned strategies resolve against: one standing
+	// entry per conflict key, enforced rather than merely selected for.
+	{
+		version: 27,
+		name: "memory_standing_idx",
+		sql: `
+			create unique index if not exists memory_standing_idx on memory_entries (conflict_key)
+			where conflict_key is not null and superseded_by is null`,
+	},
+	{ version: 28, name: "memory_reverify_idx", sql: `create index if not exists memory_reverify_idx on memory_entries (reverify_after)` },
+	// What makes parking idempotent: a retried write finds its own parked row
+	// instead of adding another for a reviewer to wade through.
+	{ version: 29, name: "memory_quarantine_hash_idx", sql: `create unique index if not exists memory_quarantine_hash_idx on memory_quarantine (entry_hash)` },
+	// One *pending* proposal per content, and nothing said about the decided ones.
+	//
+	// It used to be unique on `(entry_hash, state)`, which also forbade a second
+	// approved row — and that is a rule nobody wanted. Content approved once can be
+	// proposed again (the derived key for an unreviewed write is spent on a refusal,
+	// so re-asking is allowed by design), and approving that second proposal moves it
+	// to `approved` beside the first. Under the old index that UPDATE raised a
+	// duplicate key *after* the entry had already committed: the gate's catch held
+	// the claim, the caller was told the write failed, and the entry was sitting in
+	// the index all along. Uniqueness over the pending rows is what parking actually
+	// needs; the decided rows are an audit trail and may repeat.
+	{
+		version: 30,
+		name: "memory_reviews_pending_idx",
+		sql: `
+			create unique index if not exists memory_reviews_pending_idx on memory_reviews (entry_hash)
+			where state = 'pending'`,
+	},
+	{ version: 31, name: "memory_reviews_hash_idx_drop", sql: `drop index if exists memory_reviews_hash_idx` },
+];
+
 export class IndexStore implements MemoryStore {
 	private readonly sql: SQL;
 	private readonly gate: PlaneGate | null;
@@ -311,222 +590,70 @@ export class IndexStore implements MemoryStore {
 		return callPlane(this.gate, op, fn, { isFailure: isStoreFailure });
 	}
 
-	/** Idempotent DDL, run on boot. */
+	/**
+	 * Idempotent DDL, run on boot. One reserved connection holds a session advisory
+	 * lock so two boots cannot deadlock on `CREATE INDEX`. Versions already in
+	 * `schema_migrations` are skipped; a missing version still runs, so an index
+	 * that booted before the ledger still receives later statements.
+	 */
 	async migrate(): Promise<void> {
-		await this.sql`
-			create table if not exists graph_index (
-				graph_id          text primary key,
-				notion_task_page  text,
-				repo              text,
-				branch            text,
-				surface           text,
-				status            text,
-				pr_url            text,
-				created           timestamptz default now(),
-				updated           timestamptz default now()
-			)`;
-		await this.sql`
-			create table if not exists graph_nodes (
-				graph_id          text not null references graph_index(graph_id) on delete cascade,
-				node_id           text not null,
-				linear_issue_id   text,
-				linear_identifier text,
-				notion_page       text,
-				state             text,
-				claimed_by        text,
-				claimed_at        timestamptz,
-				claim_session     text,
-				primary key (graph_id, node_id)
-			)`;
-		// Leases were added after the table shipped, so the columns are added rather
-		// than declared: `create table if not exists` is a no-op against the Phase 0
-		// table and would leave a live index without them.
-		await this.sql`alter table graph_nodes add column if not exists lease_id text`;
-		await this.sql`alter table graph_nodes add column if not exists lease_expires_at timestamptz`;
-		await this.sql`alter table graph_nodes add column if not exists lease_heartbeat_at timestamptz`;
-		await this.sql`alter table graph_nodes add column if not exists lease_epoch bigint not null default 0`;
-		await this.sql`
-			create table if not exists graph_edges (
-				graph_id  text not null,
-				from_node text not null,
-				to_node   text not null,
-				kind      text not null,
-				primary key (graph_id, from_node, to_node, kind)
-			)`;
-		await this.sql`
-			create table if not exists graph_steps (
-				graph_id            text not null,
-				node_id             text not null,
-				step                int  not null,
-				linear_sub_issue_id text,
-				notion_page         text,
-				state               text,
-				primary key (graph_id, node_id, step)
-			)`;
-		// A swarm run's correlation_id bound to exactly one Graph ID. The primary key is
-		// what makes two runs racing one correlation_id resolve to a winner and a reader;
-		// no foreign key to graph_index, because a run binds before it registers its nodes.
-		await this.sql`
-			create table if not exists graph_bindings (
-				correlation_id text primary key,
-				graph_id       text not null,
-				bound_by       text,
-				created        timestamptz not null default now()
-			)`;
-		await this.sql`
-			create table if not exists memory_entries (
-				id           text primary key,
-				scope        text not null,
-				kind         text not null,
-				body         text not null,
-				source_event text,
-				writer       text not null,
-				trust        text not null default 'agent-claimed',
-				ttl          text not null default 'permanent',
-				created      timestamptz not null default now()
-			)`;
-
-		// Governance columns, added rather than declared: `memory_entries` predates the
-		// gate and is live, so every one of these has to be safe on a table that
-		// already holds rows. The defaults are what an ungoverned Phase 0 entry
-		// honestly was — one version, written by an agent, superseding nothing.
-		await this.sql`
-			alter table memory_entries
-				add column if not exists subject         text,
-				add column if not exists actor           text not null default 'agent',
-				add column if not exists session_id      text,
-				add column if not exists graph_id        text,
-				add column if not exists repo            text,
-				add column if not exists conflict_key    text,
-				add column if not exists version         int not null default 1,
-				add column if not exists supersedes      text,
-				add column if not exists superseded_by   text,
-				add column if not exists entry_hash      text,
-				add column if not exists reverify_after  timestamptz,
-				add column if not exists idempotency_key text`;
-
-		// The idempotency ledger. One row per key ever spent; `claimed` is what makes
-		// an abandoned in-flight claim recoverable and a derived key expire.
-		await this.sql`
-			create table if not exists memory_writes (
-				idempotency_key text primary key,
-				explicit        boolean not null default false,
-				outcome         text not null,
-				entry_id        text,
-				entry_hash      text not null,
-				request_hash    text,
-				holder          text,
-				claimed         timestamptz not null default now()
-			)`;
-		// Insurance for anyone who ran an earlier build of this migration, where the claim
-		// had no fencing token.
-		await this.sql`alter table memory_writes add column if not exists holder text`;
-		await this.sql`alter table memory_writes add column if not exists request_hash text`;
-
-		// Parked writes. Both tables hold the *redacted* body: a quarantined secret is
-		// quarantined so a reviewer can see what was attempted, never so the substrate
-		// can keep the credential.
-		await this.sql`
-			create table if not exists memory_quarantine (
-				id           text primary key,
-				scope        text not null,
-				kind         text not null,
-				body         text not null,
-				subject      text,
-				writer       text not null,
-				source_event text,
-				session_id   text,
-				graph_id     text,
-				repo         text,
-				entry_hash   text not null,
-				reason       text not null,
-				detail       text not null,
-				created      timestamptz not null default now()
-			)`;
-		await this.sql`
-			create table if not exists memory_reviews (
-				id              text primary key,
-				scope           text not null,
-				kind            text not null,
-				body            text not null,
-				subject         text,
-				writer          text not null,
-				source_event    text,
-				session_id      text,
-				graph_id        text,
-				repo            text,
-				ttl             text not null default 'permanent',
-				entry_hash      text not null,
-				reason          text not null,
-				state           text not null default 'pending',
-				entry_id        text,
-				decided         timestamptz,
-				decided_by      text,
-				created         timestamptz not null default now()
-			)`;
-		// Skills governance (uplift-5 S5a). The registry of which merged skill pull request an
-		// operator approved, declined or retired. A row is never deleted; see skills/registry.ts.
-		await this.sql`
-			create table if not exists skills_registry (
-				repo            text not null,
-				name            text not null,
-				pr_number       integer not null,
-				content_sha256  text not null default '',
-				state           text not null check (state in ('proposed', 'approved', 'declined', 'retired')),
-				proposed_by     text,
-				pr_url          text,
-				branch          text,
-				merge_sha       text,
-				decided_by      text,
-				decided_at      timestamptz,
-				reason          text,
-				created         timestamptz not null default now(),
-				updated         timestamptz not null default now(),
-				primary key (repo, name, pr_number)
-			)`;
-		await this.sql`create index if not exists skills_registry_state_idx on skills_registry (repo, state, name)`;
-
-		await this.sql`create index if not exists graph_index_repo_idx on graph_index (repo)`;
-		await this.sql`create index if not exists graph_nodes_claimed_idx on graph_nodes (claimed_by)`;
-		await this.sql`create index if not exists graph_nodes_lease_idx on graph_nodes (lease_expires_at)`;
-		await this.sql`create index if not exists graph_edges_graph_idx on graph_edges (graph_id)`;
-		await this.sql`create index if not exists graph_bindings_graph_idx on graph_bindings (graph_id)`;
-		await this.sql`create index if not exists memory_scope_idx on memory_entries (scope)`;
-		// Seek directly to a scoped page boundary in its output order, including history.
-		await this.sql`
-			create index if not exists memory_scope_created_id_idx
-			on memory_entries (scope, created desc, id desc)`;
-		await this.sql`create index if not exists memory_fts_idx on memory_entries using gin (to_tsvector('english', body))`;
-		// The identity the lww and versioned strategies resolve against: one standing
-		// entry per conflict key, enforced rather than merely selected for.
-		await this.sql`
-			create unique index if not exists memory_standing_idx on memory_entries (conflict_key)
-			where conflict_key is not null and superseded_by is null`;
-		await this.sql`create index if not exists memory_reverify_idx on memory_entries (reverify_after)`;
-		// What makes parking idempotent: a retried write finds its own parked row
-		// instead of adding another for a reviewer to wade through.
-		await this.sql`create unique index if not exists memory_quarantine_hash_idx on memory_quarantine (entry_hash)`;
-		// One *pending* proposal per content, and nothing said about the decided ones.
-		//
-		// It used to be unique on `(entry_hash, state)`, which also forbade a second
-		// approved row — and that is a rule nobody wanted. Content approved once can be
-		// proposed again (the derived key for an unreviewed write is spent on a refusal,
-		// so re-asking is allowed by design), and approving that second proposal moves it
-		// to `approved` beside the first. Under the old index that UPDATE raised a
-		// duplicate key *after* the entry had already committed: the gate's catch held
-		// the claim, the caller was told the write failed, and the entry was sitting in
-		// the index all along. Uniqueness over the pending rows is what parking actually
-		// needs; the decided rows are an audit trail and may repeat.
-		await this.sql`
-			create unique index if not exists memory_reviews_pending_idx on memory_reviews (entry_hash)
-			where state = 'pending'`;
-		await this.sql`drop index if exists memory_reviews_hash_idx`;
-		// Opt-in, once: a failed tune must not stop the service booting on a schema that is already complete.
-		if (this.tune === "apply") {
+		const reserved = await this.sql.reserve();
+		let migrateFailed = false;
+		try {
+			// SET does not accept bind parameters. The timeouts are numeric constants.
+			await reserved.unsafe(`SET lock_timeout = ${INDEX_MIGRATE_LOCK_TIMEOUT_MS}`);
+			await reserved.unsafe(`SET statement_timeout = ${INDEX_MIGRATE_LOCK_TIMEOUT_MS}`);
+			await reserved`select pg_advisory_lock(hashtextextended(${indexMigrateLockKey()}::text, 0))`;
+			await reserved.unsafe(`SET statement_timeout = ${INDEX_MIGRATE_STATEMENT_TIMEOUT_MS}`);
+			await reserved`
+				create table if not exists schema_migrations (
+					version int primary key,
+					name text not null,
+					applied_at timestamptz not null default now()
+				)`;
+			for (const step of MIGRATION_STEPS) {
+				const present = await reserved`select version from schema_migrations where version = ${step.version}`;
+				if (present.length > 0) continue;
+				await reserved`begin`;
+				try {
+					await reserved.unsafe(step.sql);
+					await reserved`insert into schema_migrations (version, name) values (${step.version}, ${step.name})`;
+					await reserved`commit`;
+				} catch (cause) {
+					try {
+						await reserved`rollback`;
+					} catch {
+						// The session may already be aborted; the statement error is the one to surface.
+					}
+					throw cause;
+				}
+			}
+			// Opt-in, once: a failed tune must not stop the service booting on a schema that is already complete.
+			if (this.tune === "apply") {
+				try {
+					await this.tuneGraphNodes();
+				} catch (cause) {
+					process.stderr.write(`[substrate] index tune not applied: ${redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200)}\n`);
+				}
+			}
+		} catch (cause) {
+			migrateFailed = true;
+			throw cause;
+		} finally {
 			try {
-				await this.tuneGraphNodes();
+				await reserved`select pg_advisory_unlock(hashtextextended(${indexMigrateLockKey()}::text, 0))`;
+				await reserved.unsafe("RESET lock_timeout");
+				await reserved.unsafe("RESET statement_timeout");
+				reserved.release();
 			} catch (cause) {
-				process.stderr.write(`[substrate] index tune not applied: ${redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200)}\n`);
+				// A failed unlock leaves the session lock on this connection. Returning it
+				// to the pool would pin that lock for the next borrower, so discard it.
+				try {
+					await reserved.close({ timeout: 0 });
+				} catch {
+					// Already dead. The session lock dies with the connection.
+				}
+				if (!migrateFailed) throw cause;
 			}
 		}
 	}
@@ -1541,6 +1668,13 @@ export class IndexStore implements MemoryStore {
 		return existing[0] ? String(existing[0].id) : row.id;
 	}
 
+	/** One column: the quarantine row whose `entry_hash` is this digest, if any. */
+	async findQuarantineByHash(entryHash: string): Promise<string | null> {
+		const rows = (await this.sql`
+			select id from memory_quarantine where entry_hash = ${entryHash}`) as Array<Record<string, unknown>>;
+		return rows[0] ? String(rows[0].id) : null;
+	}
+
 	/** Park a proposal for review. Idempotent on the content hash while pending. */
 	async enqueueReview(row: NewMemoryEntry & { reason: string }): Promise<string> {
 		const inserted = (await this.sql`
@@ -1561,6 +1695,15 @@ export class IndexStore implements MemoryStore {
 			Record<string, unknown>
 		>;
 		return existing[0] ? String(existing[0].id) : row.id;
+	}
+
+	/** One column: the pending review whose `entry_hash` is this digest, if any. */
+	async findPendingReviewByHash(entryHash: string): Promise<string | null> {
+		const rows = (await this.sql`
+			select id from memory_reviews where entry_hash = ${entryHash} and state = 'pending'`) as Array<
+			Record<string, unknown>
+		>;
+		return rows[0] ? String(rows[0].id) : null;
 	}
 
 	/**
@@ -2031,6 +2174,66 @@ export class IndexStore implements MemoryStore {
 	}
 
 	/**
+	 * One read of the two ttl classes `memoryLifecycleQuery` names. The sweep's
+	 * deletes are untouched. Same `sql.unsafe` path as a dry-run count.
+	 */
+	/**
+	 * One scratch row for the opt-in index drill. The rehearsal script must not
+	 * name `insertEntry` or a memory table: both are locked to this file and
+	 * `memory-write.ts`. The id is the text, so a restore can read it back.
+	 */
+	async recordDrillFact(id: string, text: string): Promise<void> {
+		const claim = await this.claimWrite({
+			key: id,
+			explicit: true,
+			entryHash: id,
+			requestHash: id,
+			entryId: id,
+		});
+		if (!claim.claimed) throw new Error("index drill could not claim the scratch memory row");
+		const inserted = await this.insertEntry(
+			{
+				id,
+				scope: "global",
+				kind: "fact",
+				subject: null,
+				text,
+				writer: "rehearsal",
+				actor: "agent",
+				trust: "agent-claimed",
+				ttl: "permanent",
+				source_event: null,
+				session_id: null,
+				graph_id: null,
+				repo: null,
+				conflict_key: null,
+				version: 1,
+				supersedes: null,
+				entry_hash: id,
+				reverify_after: new Date(Date.now() + 86_400_000).toISOString(),
+				idempotency_key: id,
+			},
+			{ key: id, holder: claim.holder },
+		);
+		if (!inserted.ok) throw new Error(`index drill insert refused: ${inserted.reason}`);
+		await this.finishWrite(id, claim.holder, "accepted", id);
+	}
+
+	/** The stored text of one memory row, or null when that id is absent. */
+	async readMemoryText(id: string): Promise<string | null> {
+		const rows = (await this.sql`select body from memory_entries where id = ${id}`) as Array<{ body?: string }>;
+		const body = rows[0]?.body;
+		return typeof body === "string" ? body : null;
+	}
+
+	async memoryLifecycleCandidates(options: { now?: number; policy?: SweepPolicy } = {}): Promise<Array<Record<string, unknown>>> {
+		const policy = options.policy ?? sweepPolicyFromEnv();
+		const now = options.now ?? Date.now();
+		const statement = memoryLifecycleQuery(policy, now);
+		return (await this.sql.unsafe(statement.text, statement.params as unknown[])) as Array<Record<string, unknown>>;
+	}
+
+	/**
 	 * Run `work` against one consistent view of every archived table: a single
 	 * REPEATABLE READ READ ONLY transaction on one connection, so the pages of
 	 * every table are read at the same instant and nothing here can write. The
@@ -2256,6 +2459,14 @@ function toQueueRow(row: Record<string, unknown>): GovernanceQueueRow {
  */
 export function skillDecisionLockKey(repo: string, name: string): string {
 	return `${repo}\n${name}`;
+}
+
+/**
+ * The text `migrate` hashes into its session advisory lock:
+ * `pg_advisory_lock(hashtextextended(<this>::text, 0))`. One boot at a time.
+ */
+export function indexMigrateLockKey(): string {
+	return "substrate.index.migrate";
 }
 
 function toSkillRow(row: Record<string, unknown>): SkillRegistryRow {

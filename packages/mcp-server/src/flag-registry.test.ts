@@ -214,6 +214,8 @@ describe("the registry's defaults are the code's defaults", () => {
 		SUBSTRATE_BRIEF_PROFILE: config.briefProfile.mode,
 		SUBSTRATE_BRIEF_RECALL: config.briefRecall.mode,
 		SUBSTRATE_MEMORY_EXPIRY: config.memoryExpiry,
+		SUBSTRATE_HASH_VERSION: config.hashVersion,
+		SUBSTRATE_MEMORY_LIFECYCLE: config.memoryLifecycle,
 		SUBSTRATE_INDEX_SWEEP: sweepModeFromEnv({}),
 		SUBSTRATE_INDEX_TUNE: config.indexArchive.tune,
 		SUBSTRATE_HINDSIGHT_INVENTORY: config.hindsightInventory.enabled ? "on" : "off",

@@ -1895,6 +1895,7 @@ export class Substrate {
 				store: this.index,
 				isReviewToken: (token) => isReviewToken(this.config, token),
 				grants: this.config.memoryGrants,
+				hashVersion: this.config.hashVersion,
 				// The one place memory consults the ledger, and it is a read of one column:
 				// `verified-by-test` rests on a source event, so the gate establishes that the
 				// event exists before honouring the trust. No ledger, unreachable ledger or

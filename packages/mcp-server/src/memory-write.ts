@@ -215,6 +215,18 @@ export interface MemoryStore {
 	enqueueReview(row: NewMemoryEntry & { reason: string }): Promise<string>;
 	/** Mark parked proposals for this content reviewed, once a reviewer lands one. */
 	releaseReviews(entryHash: string, entryId: string, decidedBy: string): Promise<number>;
+	/**
+	 * The quarantine unique index is `entry_hash`. Optional so a store that has not
+	 * grown the lookup still compiles: the gate calls it only when it is present,
+	 * and only to see whether a v1 digest already parks this content before a v2
+	 * insert would add a second row.
+	 */
+	findQuarantineByHash?(entryHash: string): Promise<string | null>;
+	/**
+	 * Pending-review uniqueness is the same shape. Absent means the gate inserts
+	 * and lets the store's own conflict clause answer a same-hash retry.
+	 */
+	findPendingReviewByHash?(entryHash: string): Promise<string | null>;
 }
 
 export interface GovernanceDeps {
@@ -235,6 +247,11 @@ export interface GovernanceDeps {
 	verifySourceEvent?: (eventId: string) => Promise<boolean>;
 	now?: () => Date;
 	newId?: (prefix: string) => string;
+	/**
+	 * `SUBSTRATE_HASH_VERSION`, already parsed. Omitted is v1: the preimage this
+	 * gate hashed before the flag existed. The gate does not read the environment.
+	 */
+	hashVersion?: "v1" | "v2";
 }
 
 function defaultId(prefix: string): string {
@@ -249,6 +266,11 @@ function refuse(
 ): Decision {
 	return { outcome, reason, remedy, verified_persisted: false, idempotency_key: "", ...extra };
 }
+
+/** Constant tenant folded into a v2 preimage. Not a column. */
+const HASH_TENANT = "swc";
+/** Hash-version marker folded into a v2 preimage. The number 2, key `hv`. */
+const HASH_VERSION_MARKER = 2;
 
 /** Derive a key from the content, so an interrupted retry dedupes without one. */
 function derivedKey(entryHash: string, sourceEvent: string | null, reviewed: boolean): string {
@@ -267,6 +289,8 @@ function contentHash(input: {
 	subject: string | null;
 	text: string;
 	writer: string;
+	hv?: number;
+	tenant?: string;
 }): string {
 	return sha256Hex(canonicalJson(input));
 }
@@ -297,8 +321,19 @@ function requestHash(input: {
 	sourceEvent: string | null;
 	graphId: string | null;
 	repo: string | null;
+	hv?: number;
+	tenant?: string;
 }): string {
 	return sha256Hex(canonicalJson(input));
+}
+
+/**
+ * A stored digest matches this request. Under v1 the prior digest is null, so
+ * this is equality with the one hash we stored. Under v2 a row written before
+ * the flip still matches: its digest is the v1 preimage.
+ */
+function digestMatches(stored: string, current: string, prior: string | null): boolean {
+	return stored === current || (prior !== null && stored === prior);
 }
 
 export async function governMemoryWrite(
@@ -380,16 +415,53 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 	const text = redact(raw).slice(0, MAX_MEMORY_TEXT);
 	const subject = normalizeSubject(request.subject);
 	const sourceEvent = normalizeIdentifier(request.source_event);
-	const entryHash = contentHash({ scope: scope.canonical, kind, subject, text, writer });
-	const asked = requestHash({
-		entryHash,
+	const graphId = normalizeIdentifier(request.graph_id);
+	const repo = normalizeIdentifier(request.repo);
+	// v1 passes the historical object and nothing else. A null `hv` or `tenant`
+	// would be kept by canonicalJson and change every digest.
+	const hashVersion = deps.hashVersion === "v2" ? "v2" : "v1";
+	const contentV1 = contentHash({ scope: scope.canonical, kind, subject, text, writer });
+	const askedV1 = requestHash({
+		entryHash: contentV1,
 		ttl,
 		trust: request.trust,
 		actor: request.actor,
 		sourceEvent,
-		graphId: normalizeIdentifier(request.graph_id),
-		repo: normalizeIdentifier(request.repo),
+		graphId,
+		repo,
 	});
+	// v2 stores the wider digest and still matches a row whose digest is the v1
+	// preimage. v1 never builds that wider object.
+	const contentV2 =
+		hashVersion === "v2"
+			? contentHash({
+					scope: scope.canonical,
+					kind,
+					subject,
+					text,
+					writer,
+					hv: HASH_VERSION_MARKER,
+					tenant: HASH_TENANT,
+				})
+			: null;
+	const askedV2 =
+		contentV2 === null
+			? null
+			: requestHash({
+					entryHash: contentV2,
+					ttl,
+					trust: request.trust,
+					actor: request.actor,
+					sourceEvent,
+					graphId,
+					repo,
+					hv: HASH_VERSION_MARKER,
+					tenant: HASH_TENANT,
+				});
+	const entryHash = contentV2 ?? contentV1;
+	const asked = askedV2 ?? askedV1;
+	const priorEntry = contentV2 === null ? null : contentV1;
+	const priorAsked = askedV2 === null ? null : askedV1;
 
 	/**
 	 * The fields every row the gate can write shares; only the target table, the id
@@ -408,8 +480,8 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 		ttl,
 		source_event: sourceEvent,
 		session_id: normalizeIdentifier(request.session_id),
-		graph_id: normalizeIdentifier(request.graph_id),
-		repo: normalizeIdentifier(request.repo),
+		graph_id: graphId,
+		repo,
 		conflict_key: null,
 		version: 1,
 		supersedes: null,
@@ -421,6 +493,19 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 	const classification = classify(raw, kind);
 	if (classification && !(classification.reviewable && reviewed)) {
 		const key = normalizeKey(request.idempotency_key) ?? derivedKey(entryHash, sourceEvent, reviewed);
+		const parkedAlready = priorEntry !== null ? await store.findQuarantineByHash?.(priorEntry) : undefined;
+		if (parkedAlready) {
+			return {
+				outcome: "quarantined",
+				reason: `quarantine.${classification.reason}`,
+				remedy: quarantineRemedy(classification.reason, classification.detail, kind),
+				verified_persisted: false,
+				idempotency_key: key,
+				quarantine_id: parkedAlready,
+				quarantine_reason: classification.reason,
+				grant: grant.name,
+			};
+		}
 		const parked = await store.quarantineEntry({
 			...baseRow,
 			id: newId("memq"),
@@ -454,7 +539,7 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 	const entryId = newId("mem");
 	const claim = await store.claimWrite({ key, explicit: explicitKey !== null, entryHash, requestHash: asked, entryId });
 	if (!claim.claimed) {
-		const replayed = await replay(store, key, claim.existing, grant.name, entryHash, asked);
+		const replayed = await replay(store, key, claim.existing, grant.name, entryHash, asked, priorEntry, priorAsked);
 		// Reconcile the proposal this key's write installed but may not have resolved.
 		//
 		// Resolving is guarded down in the accepted path, deliberately: the entry is
@@ -497,7 +582,7 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 	// The restore is deliberately not caught. It is the whole reason this refusal is safe
 	// to give, and a refusal that quietly left the claim rewritten would strand the write
 	// it exists to protect; failing here costs a retry instead, which is recoverable.
-	if (orphan && orphan.entry_hash !== entryHash) {
+	if (orphan && !digestMatches(orphan.entry_hash, entryHash, priorEntry)) {
 		await store.restoreWrite(key, holder, { entryId: orphan.id, entryHash: orphan.entry_hash });
 		return reused(key, grant.name, orphan);
 	}
@@ -576,6 +661,24 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 			// write never made. None of that is what the repeat-approval bug was about —
 			// the bug was the *approval* colliding with an earlier approved row, and that
 			// is fixed where it happened, in the uniqueness on `memory_reviews`.
+			const reviewAlready = priorEntry !== null ? await store.findPendingReviewByHash?.(priorEntry) : undefined;
+			if (reviewAlready) {
+				await store.finishWrite(key, holder, "conflict", null);
+				return {
+					outcome: "conflict",
+					reason: "review.required",
+					remedy:
+						`A ${kind} at global scope is read by every agent in every repo, so it is a proposal until a ` +
+						`reviewer releases it. It is parked as ${reviewAlready}. Re-submit the same write with a review_token ` +
+						"to install it, or scope it to this repo or graph instead.",
+					verified_persisted: false,
+					idempotency_key: key,
+					strategy: "require-review",
+					review_id: reviewAlready,
+					grant: grant.name,
+					...(trust.downgradedFrom ? { trust_downgraded_from: trust.downgradedFrom } : {}),
+				};
+			}
 			const reviewId = await store.enqueueReview({
 				...baseRow,
 				id: newId("memr"),
@@ -725,7 +828,7 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 		// Read it back before believing it. `verified_persisted` is a claim about what
 		// is in the index, and an insert that returned is not the same statement.
 		const stored = await store.readEntry(inserted.id);
-		const verified = stored !== null && stored.entry_hash === entryHash;
+		const verified = stored !== null && digestMatches(stored.entry_hash, entryHash, priorEntry);
 
 		// Guarded, and this is the honest half of the repeat-approval fix rather than a
 		// nicety. The entry is committed and the claim already records it; a proposal
@@ -791,13 +894,15 @@ async function replay(
 	grant: string,
 	entryHash: string,
 	asked: string,
+	priorEntry: string | null,
+	priorAsked: string | null,
 ): Promise<Decision> {
 	if (existing.outcome === "in-flight") {
 		// A key held for a *different* ask is spent, not merely busy. No amount of waiting
 		// turns it into this write's key, so "retry in a moment" would be advice that can
 		// only ever be refused — and the attempt holding it may already have written a row
 		// that a takeover would otherwise hand back as this one's.
-		if (existing.request_hash && existing.request_hash !== asked) return reused(key, grant, null);
+		if (existing.request_hash && !digestMatches(existing.request_hash, asked, priorAsked)) return reused(key, grant, null);
 
 		// The same answer for the same reason, one step further out. A claim whose
 		// reservation already holds another write's content is one the store will not part
@@ -808,7 +913,7 @@ async function replay(
 		//
 		// Unguarded for the reason given below: a read that fails is not evidence of absence.
 		const reserved = existing.entry_id ? await store.readEntry(existing.entry_id) : null;
-		if (reserved && reserved.entry_hash !== entryHash) return reused(key, grant, reserved);
+		if (reserved && !digestMatches(reserved.entry_hash, entryHash, priorEntry)) return reused(key, grant, reserved);
 
 		return refuse(
 			"conflict",
@@ -833,7 +938,9 @@ async function replay(
 	//
 	// A record with no `request_hash` predates it; fall back to the content comparison
 	// rather than refusing a write whose identity simply was not recorded.
-	const divergent = existing.request_hash ? existing.request_hash !== asked : entry !== null && entry.entry_hash !== entryHash;
+	const divergent = existing.request_hash
+		? !digestMatches(existing.request_hash, asked, priorAsked)
+		: entry !== null && !digestMatches(entry.entry_hash, entryHash, priorEntry);
 	if (divergent) return reused(key, grant, entry);
 
 	// Past the check above, any row there is this request's own content.

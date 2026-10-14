@@ -7,6 +7,8 @@
 | Blast radius | None on production. The export is one `REPEATABLE READ READ ONLY` transaction; restore refuses the production database |
 | Not covered | Hindsight banks, RAGFlow datasets, the Greptime ledger (see `docs/greptime-ledger.md`, *Coverage and archive*), the desk's own tables, Redis |
 
+The release gate does not prove this archive unless `SUBSTRATE_GATE_INDEX_DRILL=1`. That opt-in drill archives the twin's scratch Postgres into a temp directory under the run dir and restores it into a second database on the same loopback server. It does not read or write `/mnt/index-archive`, and it does not set `SUBSTRATE_INDEX_ARCHIVE_DIR`.
+
 Before this existed the only backup was a manual Railway volume snapshot taken
 before a sweep apply (`docs/runbooks/quarantine-spike.md`), and nothing ever
 proved a snapshot could be restored. This is a second, logical copy, and a way to

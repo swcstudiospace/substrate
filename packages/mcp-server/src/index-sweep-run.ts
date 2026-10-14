@@ -24,12 +24,15 @@ import { GreptimeClient } from "./greptime.ts";
 import { IndexStore } from "./index-store.ts";
 import {
 	SWEEP_MODE_ENV,
+	formatMemoryLifecycleReport,
 	formatSweepReport,
+	memoryLifecycleReport,
 	resolveSweepMode,
 	sweepCounts,
 	sweepPolicyFromEnv,
 	type SweepReport,
 } from "./index-sweep.ts";
+import { hindsightFromEnv } from "./planes/hindsight.ts";
 import { redact } from "./redact.ts";
 import { Substrate } from "./service.ts";
 
@@ -79,6 +82,17 @@ try {
 
 if (report) {
 	process.stdout.write(flags.json ? `${JSON.stringify(report)}\n` : formatSweepReport(report));
+	if (config.memoryLifecycle === "report") {
+		try {
+			const raw = await index.memoryLifecycleCandidates({ now, policy });
+			const hindsight = hindsightFromEnv();
+			const view = { batch: policy.batch, hindsight };
+			process.stdout.write(flags.json ? `${JSON.stringify(memoryLifecycleReport(raw, view))}\n` : formatMemoryLifecycleReport(raw, view));
+		} catch (cause) {
+			const message = redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200);
+			process.stderr.write(`[index-sweep] lifecycle report failed: ${message}\n`);
+		}
+	}
 	const candidates = report.classes.reduce((sum, cls) => sum + cls.candidates, 0);
 	const deleted = report.classes.reduce((sum, cls) => sum + cls.deleted, 0);
 	const note = await substrate.emit({

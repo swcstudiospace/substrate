@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, test } from "bun:test";
+import { canonicalJson, sha256Hex } from "./event.ts";
 import { grantFor, parseScope } from "./memory-policy.ts";
 import { REDACTED } from "./redact.ts";
 import { SWARM_SURFACES } from "./types.ts";
@@ -288,6 +289,14 @@ export class FakeStore implements MemoryStore {
 		return row.id;
 	}
 
+	async findQuarantineByHash(entryHash: string): Promise<string | null> {
+		return this.quarantined.find((held) => held.entry_hash === entryHash)?.id ?? null;
+	}
+
+	async findPendingReviewByHash(entryHash: string): Promise<string | null> {
+		return this.reviews.find((held) => held.entry_hash === entryHash && held.state === "pending")?.id ?? null;
+	}
+
 	async releaseReviews(entryHash: string, entryId: string): Promise<number> {
 		if (this.failReleaseReviews) throw new Error(this.failReleaseReviews);
 		const entry = this.rows.get(entryId);
@@ -323,7 +332,7 @@ beforeEach(() => {
 });
 
 /** Deterministic ids, so a test can assert on them. */
-function write(request: Partial<MemoryWriteRequest> = {}): Promise<MemoryWriteResult> {
+function write(request: Partial<MemoryWriteRequest> = {}, hashVersion?: "v1" | "v2"): Promise<MemoryWriteResult> {
 	return governMemoryWrite(
 		{ scope: "graph:ut-1", kind: "fact", text: "hermes finished n2", writer: "hermes", ...request },
 		{
@@ -335,6 +344,7 @@ function write(request: Partial<MemoryWriteRequest> = {}): Promise<MemoryWriteRe
 				if (ledgerFails) throw new Error(ledgerFails);
 				return knownEvents.has(eventId);
 			},
+			...(hashVersion ? { hashVersion } : {}),
 		},
 	);
 }
@@ -1611,6 +1621,50 @@ describe("swarm surfaces — default-deny proven from the outside (ADR 0001 S3)"
 		// Non-swarm surfaces are unchanged.
 		expect(at("hermes", "agent:hermes", "fact")?.name).toBe("agent-self");
 		expect(at("hermes", "repo:acme/widgets", "decision")?.name).toBe("repo-working");
+	});
+});
+
+describe("SUBSTRATE_HASH_VERSION", () => {
+	const fact = {
+		scope: "graph:ut-1",
+		kind: "fact" as const,
+		subject: null,
+		text: "hermes finished n2",
+		writer: "hermes",
+	};
+
+	test("with the flag omitted, entry_hash is the v1 content digest", async () => {
+		const result = await write();
+		const digest = sha256Hex(canonicalJson(fact));
+		expect(result.outcome).toBe("accepted");
+		expect(result.entry?.entry_hash).toBe(digest);
+	});
+
+	test("v2 entry_hash includes hv and tenant and differs from v1", async () => {
+		const result = await write({}, "v2");
+		const v1 = sha256Hex(canonicalJson(fact));
+		const v2 = sha256Hex(canonicalJson({ ...fact, hv: 2, tenant: "swc" }));
+		expect(result.outcome).toBe("accepted");
+		expect(result.entry?.entry_hash).toBe(v2);
+		expect(v2).not.toBe(v1);
+	});
+
+	test("a quarantine or review parked under v1 is reused when a later decide runs with v2", async () => {
+		const secret = "poller needs GITHUB_TOKEN=ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+		const parked = await write({ text: secret });
+		expect(parked.outcome).toBe("quarantined");
+		expect(store.quarantined).toHaveLength(1);
+		const again = await write({ text: secret }, "v2");
+		expect(again.quarantine_id).toBe(parked.quarantine_id);
+		expect(store.quarantined).toHaveLength(1);
+
+		const proposal = { scope: "global", kind: "fact" as const, text: "eight agents share one host" };
+		const review = await write(proposal);
+		expect(review.reason).toBe("review.required");
+		expect(store.reviews).toHaveLength(1);
+		const reviewAgain = await write(proposal, "v2");
+		expect(reviewAgain.review_id).toBe(review.review_id);
+		expect(store.reviews).toHaveLength(1);
 	});
 });
 

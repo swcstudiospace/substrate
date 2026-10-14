@@ -55,7 +55,8 @@ An unset, blank or unrecognised value is `off`; an unrecognised value prints one
 3. **Grandfather what is already on `main`.** Before `enforce`, every skill that
    should keep being linked must be approved, or new links for it stop. For each
    name in the warning (and in `ls /root/agent-skills`), approve it once with the
-   operator-only `skills_approve` (MCP tool or `POST /skills/approve`) against
+   operator-only `skills_approve` (MCP tool, `POST /skills/approve`, or
+   `substrate skills approve --name NAME --pr N --decision approve`) against
    the PR that merged it. Re-run until the `unapproved` warning stops, i.e.
    `count` reaches 0.
 4. **Switch to `enforce`.** Set `SUBSTRATE_SKILLS_GOVERNANCE=enforce`. The next
@@ -66,6 +67,10 @@ An unset, blank or unrecognised value is `off`; an unrecognised value prints one
 5. **Approve new skills as they arrive.** A newly merged skill is linked on the
    first tick after it is approved. Until then it appears in the `unapproved`
    warning.
+
+CLI. `substrate skills list` is `GET /skills` (the approved set; any authenticated
+surface). `substrate skills list --state all` needs an operator token, as does
+every other non-default state.
 
 ## What `enforce` does
 

@@ -45,7 +45,9 @@
  *     delete keeps its graph whole — every node, edge, step and binding.
  */
 import { DEFAULT_LEASE_TTL_SECONDS } from "./lease.ts";
-import type { MemoryExpiryMode } from "./types.ts";
+import { retainDocumentId } from "./memory-retain.ts";
+import { bankForSurface, type HindsightConfig } from "./planes/hindsight.ts";
+import type { MemoryEntry, MemoryExpiryMode } from "./types.ts";
 
 /** Statuses that mean a graph is finished — exactly Notion's `complete` status group on the Agent Task Graph. */
 export const TERMINAL_GRAPH_STATUSES = ["Merged", "Resolved", "Done", "Won't Fix", "Closed", "Failed", "Canceled"] as const;
@@ -609,4 +611,128 @@ export function sweepCounts(report: SweepReport): Record<string, { candidates: n
 	const out: Record<string, { candidates: number; deleted: number }> = {};
 	for (const cls of report.classes) out[cls.id] = { candidates: cls.candidates, deleted: cls.deleted };
 	return out;
+}
+
+const TTL_30_DAYS = 30;
+
+/**
+ * The graph half of `entries-ttl-graph`: the graph row is missing, or its
+ * status is in `TERMINAL_GRAPH_STATUSES`. `$3` is that set, `|`-joined.
+ * `g.status is null` stays inside the `not exists`, same as the sweep class.
+ */
+const LIFECYCLE_GRAPH_PREDICATE =
+	"not exists (select 1 from graph_index g where g.graph_id = coalesce(e.graph_id, " +
+	"case when left(e.scope, 6) = 'graph:' then substr(e.scope, 7) end) " +
+	"and (g.status is null or not (g.status = any(string_to_array($3::text, '|')))))";
+
+/**
+ * One read of the two ttl classes the sweep already counts (`entries-ttl-30d`,
+ * `entries-ttl-graph`). Not `entries-superseded`. Lists at most `policy.batch`
+ * ids per class and still returns each class's full count. No delete.
+ */
+export function memoryLifecycleQuery(policy: SweepPolicy, now: number): SweepStatement {
+	const cutoff30 = new Date(now - TTL_30_DAYS * DAY_MS).toISOString();
+	const cutoffGraph = new Date(now - policy.graphsDays * DAY_MS).toISOString();
+	const text =
+		"select id, scope, kind, subject, writer, ttl, graph_id, idempotency_key, created, class_count from (" +
+		"select e.id, e.scope, e.kind, e.subject, e.writer, e.ttl, e.graph_id, e.idempotency_key, e.created, " +
+		"count(*) over (partition by e.ttl)::int as class_count, " +
+		"row_number() over (partition by e.ttl order by e.created, e.id) as rn " +
+		"from memory_entries e where e.superseded_by is null and (" +
+		"(e.ttl = '30d' and e.created < $1::timestamptz) or " +
+		"(e.ttl = 'graph' and e.created < $2::timestamptz and " +
+		LIFECYCLE_GRAPH_PREDICATE +
+		"))" +
+		") ranked where rn <= $4::int";
+	return { text, params: [cutoff30, cutoffGraph, TERMINAL, policy.batch] };
+}
+
+export interface MemoryLifecyclePrintedRow {
+	id: string;
+	ttl: string;
+	writer: string;
+	bank: string | null;
+	document_id: string;
+}
+
+export interface MemoryLifecycleReport {
+	memoryLifecycle: "report";
+	batch: number;
+	counts: { "30d": number; graph: number };
+	truncated: { "30d": boolean; graph: boolean };
+	rows: MemoryLifecyclePrintedRow[];
+}
+
+const LIFECYCLE_TTLS = ["30d", "graph"] as const;
+
+function lifecycleCount(group: readonly Record<string, unknown>[]): number {
+	if (group.length === 0) return 0;
+	let full = group.length;
+	for (const row of group) {
+		if (row.class_count === undefined || row.class_count === null) continue;
+		const n = Number(row.class_count);
+		if (Number.isFinite(n) && n > full) full = n;
+	}
+	return full;
+}
+
+/** Drop subject after the document id is computed. Bank is null without Hindsight config. */
+export function memoryLifecycleReport(
+	raw: readonly Record<string, unknown>[],
+	options: { batch: number; hindsight: HindsightConfig | null },
+): MemoryLifecycleReport {
+	const counts = { "30d": 0, graph: 0 };
+	const truncated = { "30d": false, graph: false };
+	const rows: MemoryLifecyclePrintedRow[] = [];
+	for (const ttl of LIFECYCLE_TTLS) {
+		const group = raw.filter((row) => String(row.ttl) === ttl);
+		const full = lifecycleCount(group);
+		const listed = group.slice(0, options.batch);
+		counts[ttl] = full;
+		truncated[ttl] = full > listed.length;
+		for (const row of listed) {
+			const subject = typeof row.subject === "string" && row.subject.length > 0 ? row.subject : undefined;
+			const entry = {
+				id: String(row.id ?? ""),
+				scope: String(row.scope ?? ""),
+				kind: row.kind,
+				text: "",
+				writer: String(row.writer ?? ""),
+				...(subject !== undefined ? { subject } : {}),
+				ttl: String(row.ttl ?? ""),
+				created: String(row.created ?? ""),
+				actor: "agent",
+				trust: "unverified",
+				version: 1,
+			} as unknown as MemoryEntry;
+			const writer = String(row.writer ?? "");
+			rows.push({
+				id: String(row.id ?? ""),
+				ttl,
+				writer,
+				bank: options.hindsight === null ? null : bankForSurface(options.hindsight, writer),
+				document_id: retainDocumentId(entry, String(row.idempotency_key ?? "")),
+			});
+		}
+	}
+	return { memoryLifecycle: "report", batch: options.batch, counts, truncated, rows };
+}
+
+/** Second sweep section. Subject is not printed. */
+export function formatMemoryLifecycleReport(
+	raw: readonly Record<string, unknown>[],
+	options: { batch: number; hindsight: HindsightConfig | null },
+): string {
+	const report = memoryLifecycleReport(raw, options);
+	const lines = [`memory lifecycle report batch ${report.batch}`];
+	for (const ttl of LIFECYCLE_TTLS) {
+		const listed = report.rows.filter((row) => row.ttl === ttl).length;
+		lines.push(
+			`  ${ttl.padEnd(5)} candidates ${String(report.counts[ttl]).padStart(6)}  listed ${String(listed).padStart(6)}  truncated ${report.truncated[ttl]}`,
+		);
+	}
+	for (const row of report.rows) {
+		lines.push(`  ${row.id} ${row.ttl} ${row.writer} ${row.bank ?? "-"} ${row.document_id}`);
+	}
+	return `${lines.join("\n")}\n`;
 }
