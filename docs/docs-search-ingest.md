@@ -105,6 +105,12 @@ names them all. The single `note` event is unchanged apart from carrying
 in the ledger. A partially served reply is **never cached** (R6's rule
 "a degraded reply is never stored", extended): the next caller retries
 the missing dataset instead of inheriting a hole for a TTL.
+One exception to "leave together": while the RAGFlow breaker is
+**half-open** (it admits exactly one probe), the first resolved dataset is
+retrieved alone as that probe and the rest leave once it has settled —
+still under the one shared budget — so a recovery search does not see its
+siblings refused as `ragflow circuit open` behind a probe that succeeded
+(Greptile round 1, PR #61). A closed or open breaker changes nothing.
 
 ### Metrics (uplift-3 N5)
 

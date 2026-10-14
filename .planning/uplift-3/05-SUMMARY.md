@@ -35,6 +35,10 @@ R6's rule "a degraded reply is never stored" is kept and extended to `degraded_d
 
 `SUBSTRATE_DOCS_SEARCH_BUDGET_MS=0` restores per-call timeouts; the reply shape only gains an optional field. Metrics/SLO row are additive. Reverting the branch removes everything; no state, schema or unit changes.
 
+## Greptile round 1 (PR #61)
+
+**P2 — "Recovery searches drop healthy docs"** (`docs-search.ts` fan-out vs the breaker's half-open single probe). Fixed: `SearchDeps.breakerState?: () => BreakerState` (service passes `this.planes.gate("ragflow").breaker?.state() ?? "closed"`); when it reads `half-open` and more than one dataset is resolved, the first dataset is retrieved alone as the probe and the siblings fan out only after it settles, every retrieval still raced against the one shared deadline. Closed/open breakers and the omitted dep behave exactly as before. Tests (`docs-search.test.ts`, real `CircuitBreaker` + `gatedFetch` over the fake, dataset list from a cached source so the list does not consume the probe): half-open → one retrieval in flight until the probe is released, then the two siblings run (`maxInFlight` 2), breaker closes, 6 citations, no `degraded_datasets`; a stalled probe costs one budget — all three datasets carry the deadline reason, one retrieval reached the fake, breaker still half-open; a closed breaker with `breakerState` supplied still fans out all three at once. Docs: `docs/docs-search-ingest.md` fan-out section.
+
 ## Gates
 
 At the branch head after both waves merged (orchestrator-run, 2026-10-13): `bunx tsc --noEmit` clean · `bun test` with `SUBSTRATE_TEST_PG_URL` (scratch Postgres 16) **3845 pass / 1 skip / 1 fail** — the one failure is the recorded F-01 (`scripts/rehearsal.test.ts` "CLI refusals > --port 7410 exits 2", identical on `main`) · `bun run check:phase-close` pass (EVENT_KINDS 12, SURFACES 27, 4 lock files) · `bun run test:py` 298 pass. `bun scripts/docs-golden.ts` offline: 4/4 fixtures pass, exit 0.

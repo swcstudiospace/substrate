@@ -34,16 +34,18 @@ import {
 	realpathSync,
 	renameSync,
 	rmSync,
+	statSync,
 	writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { HOUR_MS, hourIso, hourStart, merkleRootHex } from "@substrate/ledger";
 import { z } from "zod";
 import { eventHash } from "./event.ts";
+import { redact } from "./redact.ts";
 import type { AnchorCoverage, ExportCursor, ExportPage, ExportWindowQuery } from "./greptime.ts";
-import { INGEST_LAG_MS } from "./greptime.ts";
+import { ARCHIVE_NOTE_PREFIX, INGEST_LAG_MS } from "./greptime.ts";
 import { rowToEvent } from "./service.ts";
-import type { SubstrateEvent } from "./types.ts";
+import type { EventInput, SubstrateEvent } from "./types.ts";
 
 const DAY_MS = 24 * HOUR_MS;
 
@@ -99,15 +101,14 @@ export const dfRunner: DfRunner = (path) => {
 };
 
 /**
- * Free kilobytes from `df -Pk` output: the fourth field of the second line,
+ * The free kilobytes in `df -Pk` output: the fourth field of its second line,
  * exactly as `deploy-release.sh` reads it (`read -r _ _ _ avail _`). `null`
- * when the output is not that shape — the gate then refuses rather than
+ * when the output is not that shape — the floor gate then refuses rather than
  * guessing that an unreadable disk has room.
  */
 export function freeKbOf(output: string | null): number | null {
 	if (output === null) return null;
-	const line = output.split("\n")[1] ?? "";
-	const avail = line.trim().split(/\s+/)[3] ?? "";
+	const avail = (output.split("\n")[1] ?? "").trim().split(/\s+/)[3] ?? "";
 	return /^\d{1,15}$/.test(avail) ? Number(avail) : null;
 }
 
@@ -226,6 +227,69 @@ export function refusedOutDir(outDir: string, options: { cwd: string; releaseRoo
 	return null;
 }
 
+/** The nearest existing ancestor of `path`, itself included: what the filesystem can be asked about before the directory exists. */
+function existingAncestor(path: string): string {
+	let probe = path;
+	while (!existsSync(probe)) {
+		const parent = dirname(probe);
+		if (parent === probe) return probe;
+		probe = parent;
+	}
+	return probe;
+}
+
+/** The device number (`st_dev`) a path lives on, or `null` when it cannot be read; injected by tests, which need no real mounts. */
+export type DevReader = (path: string) => number | null;
+
+/** The real one: `stat`'s device, which names the mounted filesystem the path is on, whatever the volume is called. */
+export const devReader: DevReader = (path) => {
+	try {
+		return statSync(path).dev;
+	} catch {
+		return null;
+	}
+};
+
+/**
+ * Why `outDir` is not on a dedicated archive filesystem, or `null` when it is.
+ *
+ * The question is asked of the nearest *existing* ancestor, before anything
+ * is created: after a reboot with the archive volume not yet mounted, the
+ * configured path's parent is a plain directory on the root disk, and a
+ * `mkdir -p` there would quietly build the archive on the one disk it exists
+ * to leave — with the free-space floor passing, because the root disk has
+ * room. So the ancestor's `st_dev` must differ from that of `/` and of the
+ * release root (when it exists). Devices are compared, not `df`'s device
+ * names: two tmpfs or overlay mounts share a name and are different
+ * filesystems, and btrfs subvolumes with different names can share a device.
+ * An unreadable `stat` refuses. `allowRootfs` — `SUBSTRATE_LEDGER_ARCHIVE_ALLOW_ROOTFS=1`
+ * — is for a deliberate local test on a machine with one disk, and the refusal
+ * names it so the operator sees what they are overriding.
+ */
+export function refusedMount(
+	outDir: string,
+	options: { cwd: string; dev?: DevReader; releaseRoot?: string; allowRootfs?: boolean },
+): string | null {
+	if (options.allowRootfs === true) return null;
+	const dev = options.dev ?? devReader;
+	const target = realish(resolve(options.cwd, outDir));
+	const ancestor = existingAncestor(target);
+	const here = dev(ancestor);
+	const root = dev("/");
+	if (here === null || root === null) {
+		return `cannot read the filesystem of ${outDir} (stat on ${here === null ? ancestor : "/"}); refusing without proof it is a dedicated mount`;
+	}
+	const override = "mount the archive volume first, or set SUBSTRATE_LEDGER_ARCHIVE_ALLOW_ROOTFS=1 for a deliberate local test";
+	if (here === root) return `refusing ${outDir}: it is on the root filesystem (device ${here}); ${override}`;
+	const releaseRoot = options.releaseRoot ?? RELEASE_ROOT;
+	if (existsSync(releaseRoot)) {
+		const release = dev(releaseRoot);
+		if (release === null) return `cannot read the filesystem of the release root ${releaseRoot}; refusing without proof ${outDir} is a dedicated mount`;
+		if (release === here) return `refusing ${outDir}: it shares the release root's filesystem (device ${here}); ${override}`;
+	}
+	return null;
+}
+
 /**
  * The release sha when `cwd` is (or links to) a `releases/<sha>` tree, as
  * `deploy-release.sh` lays them out; `undefined` from a checkout.
@@ -249,8 +313,12 @@ export interface ArchiveOptions {
 	now?: () => number;
 	/** The `df` reading; injected by tests. */
 	df?: DfRunner;
+	/** The `st_dev` reader for the mount gate; injected by tests. */
+	dev?: DevReader;
 	/** The free-space floor in GB; `0` disables, as for the deploy gate. */
 	minFreeGb?: number;
+	/** `SUBSTRATE_LEDGER_ARCHIVE_ALLOW_ROOTFS=1`: skip the dedicated-mount gate for a deliberate local test. */
+	allowRootfs?: boolean;
 	cwd?: string;
 	releaseSha?: string;
 }
@@ -323,15 +391,19 @@ function hourlyRootsOf(leaves: readonly ArchivedLeaf[]): Record<string, string> 
 }
 
 /**
- * Archive one closed day. Refuses — before writing a byte — a day that is not
- * closed, an output directory the gates reject ({@link refusedOutDir}), a
- * filesystem with fewer than `minFreeGb` free (read with `df -Pk`, unreadable
- * refuses), and a day that already has a manifest. Then pages the window
- * through `exportWindow`, appending each page to the three `.part` files and
- * digesting as it goes, computes the hourly roots over what it wrote, and
- * renames the data files into place before the manifest — so a `manifest-<day>`
- * on disk always names complete files, and a crash leaves only `.part` files,
- * which the next run removes.
+ * Archive one closed day. Refuses — before creating or writing anything — a
+ * day that is not closed, an output directory the path gates reject
+ * ({@link refusedOutDir}), one that is not on a dedicated filesystem
+ * ({@link refusedMount}: the root disk or the release root's, told by
+ * `st_dev` of the nearest existing ancestor so an unmounted volume is caught
+ * before `mkdir -p` could build the archive on the root disk), a filesystem
+ * with fewer than `minFreeGb` free (`df -Pk` on the same ancestor; unreadable refuses), and a
+ * day that already has a manifest. Then pages the window through
+ * `exportWindow`, appending each page to the three `.part` files and digesting
+ * as it goes, computes the hourly roots over what it wrote, and renames the
+ * data files into place before the manifest — so a `manifest-<day>` on disk
+ * always names complete files, and a crash leaves only `.part` files, which
+ * the next run removes.
  */
 export async function archiveWindow(
 	greptime: { exportWindow(query: ExportWindowQuery): Promise<ExportPage> },
@@ -344,10 +416,13 @@ export async function archiveWindow(
 	if (!isDayClosed(day, now())) throw new ArchiveRefused(`day ${day} is not closed yet (midnight plus ${INGEST_LAG_MS / 1000} s)`);
 	const refusal = refusedOutDir(outDir, { cwd });
 	if (refusal !== null) throw new ArchiveRefused(refusal);
-	mkdirSync(outDir, { recursive: true });
+	const df = options.df ?? dfRunner;
+	const mount = refusedMount(outDir, { cwd, dev: options.dev, allowRootfs: options.allowRootfs });
+	if (mount !== null) throw new ArchiveRefused(mount);
 	const minFreeGb = options.minFreeGb ?? DEFAULT_MIN_FREE_GB;
 	if (minFreeGb > 0) {
-		const freeKb = freeKbOf((options.df ?? dfRunner)(outDir));
+		// Asked of the nearest existing ancestor, like the mount gate: the directory is not created until every gate has passed.
+		const freeKb = freeKbOf(df(existingAncestor(realish(resolve(cwd, outDir)))));
 		if (freeKb === null) throw new ArchiveRefused(`cannot read free space on ${outDir}; refusing without the floor proof`);
 		const floorKb = minFreeGb * 1024 * 1024;
 		if (freeKb < floorKb) {
@@ -356,6 +431,7 @@ export async function archiveWindow(
 			);
 		}
 	}
+	mkdirSync(outDir, { recursive: true });
 	const files = archiveFiles(day);
 	if (existsSync(join(outDir, files.manifest))) throw new ArchiveRefused(`day ${day} is already archived in ${outDir} (${files.manifest} exists)`);
 
@@ -505,9 +581,10 @@ const AnchorLineSchema = z.looseObject({ period_start: z.string(), root: z.strin
  * and its SHA-256 equals the manifest's; line counts equal the manifest's
  * counts; every event line parses and its `hash` equals `eventHash` of the
  * rest (the same recomputation `substrate verify` makes); within each session
- * no two events claim the same `prev` (a fork) and no `prev` names an event
- * that is in the archive but is not a predecessor — a `prev` naming an event
- * outside the archive is a chain continuing from another day, and is fine;
+ * no two events claim the same `prev` (a fork) — counted for every non-null
+ * `prev`, including one naming an event outside the archive: that is a chain
+ * continuing from another day and is fine once, but two claimants of it are
+ * still a fork;
  * the last event's hash equals `chainTip`; the hourly roots recomputed from
  * the ingest file equal the manifest's, hour for hour; and each hour with a
  * receipt in the anchors file either matches it (`verified`), holds fewer
@@ -598,9 +675,11 @@ export function verifyArchive(dir: string, day: string): VerifyReport {
 		events.push(line.data);
 	});
 
-	// Chain: within a session a hash is claimed as `prev` by at most one event. A
-	// `prev` naming a hash outside the archive is the chain continuing from an
-	// earlier day — allowed, the archive is a window.
+	// Chain: within a session a hash is claimed as `prev` by at most one event,
+	// whether or not the claimed hash is in this archive. A `prev` naming a hash
+	// outside the window is the chain continuing from an earlier day — allowed —
+	// but two events naming it are still a fork, and the only way to see that
+	// fork from this day's files is to count every claim.
 	const bySession = new Map<string, Array<z.infer<typeof EventLineSchema>>>();
 	for (const event of events) {
 		const key = event.session_id ?? "";
@@ -609,10 +688,9 @@ export function verifyArchive(dir: string, day: string): VerifyReport {
 		else bySession.set(key, [event]);
 	}
 	for (const [session, members] of bySession) {
-		const present = new Set(members.map((event) => event.hash));
 		const claimed = new Map<string, string>();
 		for (const event of members) {
-			if (event.prev === null || !present.has(event.prev)) continue;
+			if (event.prev === null) continue;
 			const earlier = claimed.get(event.prev);
 			if (earlier !== undefined) {
 				mismatches.push({
@@ -708,6 +786,193 @@ export function verifyArchive(dir: string, day: string): VerifyReport {
 		}
 	}
 	return finish();
+}
+
+// ─── The ledger's own record of an archived day ─────────────────────────────
+
+/** What one emit attempt answers; the shape `Substrate.emit` already has, narrowed to what the marker needs. */
+export interface NoteOutcome {
+	stored: boolean;
+	error?: string;
+}
+
+/**
+ * The `note` that records one archived day in the ledger: counts, cursors,
+ * chain tip and file digests — no bodies and no path. It is what `coverage`
+ * and `/healthz.jobs.ledger.lastArchiveDay` read back, so an archive the
+ * ledger does not know about is, to every monitor, an archive that did not
+ * happen. Deterministic from the manifest, so a retried note carries exactly
+ * what the first attempt would have.
+ */
+export function archiveNote(manifest: ArchiveManifest): EventInput {
+	return {
+		surface: "substrate",
+		kind: "note",
+		summary: `${ARCHIVE_NOTE_PREFIX}${manifest.day}: ${manifest.counts.events} events, ${manifest.counts.ingest} ingest rows, ${manifest.counts.anchors} receipts`,
+		session_id: `ledger-archive:${manifest.day}`,
+		payload: {
+			action: "ledger.archive",
+			runtime: "ledger-archive",
+			day: manifest.day,
+			counts: manifest.counts,
+			first: manifest.first,
+			last: manifest.last,
+			chainTip: manifest.chainTip,
+			hours: Object.keys(manifest.hourlyRoots).length,
+			sha256: manifest.sha256,
+			...(manifest.releaseSha !== undefined ? { releaseSha: manifest.releaseSha } : {}),
+		},
+	};
+}
+
+/** The marker a day keeps beside its manifest from before its note is first sent until the ledger has taken it. */
+export interface PendingNote {
+	day: string;
+	note: EventInput;
+	/** Sends the ledger has refused or that threw; `0` while the first is still in flight. */
+	attempts: number;
+	lastError: string | null;
+	firstAttemptAt: string;
+}
+
+const PendingNoteSchema = z.object({
+	day: z.string(),
+	note: z.looseObject({ surface: z.string(), kind: z.string(), summary: z.string() }),
+	attempts: z.number(),
+	lastError: z.string().nullable(),
+	firstAttemptAt: z.string(),
+});
+
+/** `note-pending-<day>.json`: present exactly while the day's files exist and its note does not. */
+export function pendingNoteFile(day: string): string {
+	return `note-pending-${day}.json`;
+}
+
+/** Days with a pending-note marker in `dir`, ascending; an unreadable dir is empty. */
+export function pendingNoteDays(dir: string): string[] {
+	let names: string[];
+	try {
+		names = readdirSync(dir);
+	} catch {
+		return [];
+	}
+	const days: string[] = [];
+	for (const name of names) {
+		const day = /^note-pending-(\d{4}-\d{2}-\d{2})\.json$/.exec(name)?.[1];
+		if (day !== undefined && isDay(day)) days.push(day);
+	}
+	return days.sort();
+}
+
+/** The error text of a failed emit, redacted and short: it is written to a marker on disk. */
+function noteErrorOf(cause: unknown): string {
+	return redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 300);
+}
+
+/**
+ * One emit attempt as an outcome, never a throw: `Substrate.emit` throws on
+ * an input it refuses, and one bad note must be a pending day, not the end
+ * of the run that would have archived every later one.
+ */
+async function sendNote(emit: (input: EventInput) => Promise<NoteOutcome>, note: EventInput): Promise<NoteOutcome> {
+	try {
+		return await emit(note);
+	} catch (cause) {
+		return { stored: false, error: noteErrorOf(cause) };
+	}
+}
+
+/** Write the day's marker atomically, like the data files. */
+function writePendingNote(dir: string, pending: PendingNote): void {
+	const marker = join(dir, pendingNoteFile(pending.day));
+	writeFileSync(`${marker}.part`, `${JSON.stringify(pending, null, "\t")}\n`);
+	renameSync(`${marker}.part`, marker);
+}
+
+/**
+ * Send one day's note, with the marker in place for the whole attempt. The
+ * archive files are already in place and the manifest means "do not export
+ * this day again", so the note is the one thing no later run could redo
+ * unless something remembers it is owed. The marker is therefore written
+ * *before* the emit and removed only once the ledger reports it stored: an
+ * emit that throws, a process killed between the manifest rename and the
+ * answer, and a refused note all leave the marker for the next run. Written
+ * atomically like the data files. Returns the outcome (a throw is a
+ * `stored: false` with the redacted message).
+ */
+export async function recordArchiveNote(
+	dir: string,
+	manifest: ArchiveManifest,
+	emit: (input: EventInput) => Promise<NoteOutcome>,
+	now: () => number = Date.now,
+): Promise<NoteOutcome> {
+	const note = archiveNote(manifest);
+	const previous = readPendingNote(dir, manifest.day);
+	const pending: PendingNote = {
+		day: manifest.day,
+		note,
+		attempts: previous?.attempts ?? 0,
+		lastError: previous?.lastError ?? null,
+		firstAttemptAt: previous?.firstAttemptAt ?? new Date(now()).toISOString(),
+	};
+	writePendingNote(dir, pending);
+	const outcome = await sendNote(emit, note);
+	if (outcome.stored) {
+		rmSync(join(dir, pendingNoteFile(manifest.day)), { force: true });
+		return outcome;
+	}
+	writePendingNote(dir, { ...pending, attempts: pending.attempts + 1, lastError: outcome.error ?? null });
+	return outcome;
+}
+
+/** The day's marker, or `null` when there is none or it does not parse (a corrupt marker is rewritten on the next failure). */
+export function readPendingNote(dir: string, day: string): PendingNote | null {
+	const path = join(dir, pendingNoteFile(day));
+	if (!existsSync(path)) return null;
+	try {
+		const parsed = PendingNoteSchema.safeParse(JSON.parse(readFileSync(path, "utf8")));
+		// The marker was written from an `EventInput`; the schema checks the three fields every event has.
+		return parsed.success ? { ...parsed.data, note: parsed.data.note as unknown as EventInput } : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Send every pending note in `dir` again, oldest day first, clearing each
+ * marker the ledger takes and updating the rest. Runs at the start of every
+ * archive run so a day whose note was refused yesterday is recorded today
+ * without the operator doing anything. An emit that throws — a marker that
+ * parses but holds a note the ledger will not take — counts that day as
+ * pending and the loop goes on, so one bad marker cannot stop the run before
+ * it archives anything new. What it returns is the days still pending, which
+ * the runner turns into exit 1: the files are safe, but the ledger's record
+ * is incomplete and a monitor should know.
+ */
+export async function retryPendingNotes(
+	dir: string,
+	emit: (input: EventInput) => Promise<NoteOutcome>,
+): Promise<{ sent: string[]; pending: Array<{ day: string; attempts: number; lastError: string | null }> }> {
+	const sent: string[] = [];
+	const pending: Array<{ day: string; attempts: number; lastError: string | null }> = [];
+	for (const day of pendingNoteDays(dir)) {
+		const previous = readPendingNote(dir, day);
+		if (previous === null) {
+			// Unreadable marker: nothing to resend from it. Leave it for the operator; it still counts as pending.
+			pending.push({ day, attempts: 0, lastError: "marker does not parse" });
+			continue;
+		}
+		const outcome = await sendNote(emit, previous.note);
+		if (outcome.stored) {
+			rmSync(join(dir, pendingNoteFile(day)), { force: true });
+			sent.push(day);
+			continue;
+		}
+		const updated: PendingNote = { ...previous, attempts: previous.attempts + 1, lastError: outcome.error ?? null };
+		writePendingNote(dir, updated);
+		pending.push({ day, attempts: updated.attempts, lastError: updated.lastError });
+	}
+	return { sent, pending };
 }
 
 // ─── The runner's argument grammar and report text ──────────────────────────

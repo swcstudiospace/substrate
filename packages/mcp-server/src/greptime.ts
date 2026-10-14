@@ -544,6 +544,13 @@ export const ARCHIVE_NOTE_LOOKBACK_MS = 400 * 24 * HOUR_MS;
 /** The `summary` prefix every archive note carries; `anchorCoverage` reads the newest by it. */
 export const ARCHIVE_NOTE_PREFIX = "ledger archive ";
 
+/**
+ * The most events one export window's ingest map may hold (a day above it
+ * refuses to archive, see `GreptimeClient.readExportIngest`): ~100 MB of
+ * entries, inside the archive unit's 512M ceiling.
+ */
+export const EXPORT_INGEST_CAP = 500_000;
+
 /** What `anchorCoverage` found; see the method for each field's rule. */
 export interface AnchorCoverage {
 	/** ISO start of the newest anchored hour, or `null` when no hour was ever anchored. */
@@ -662,6 +669,9 @@ export class GreptimeClient {
 	 * `null` when `SUBSTRATE_LEDGER_CHAIN_CACHE=0`, which restores one read per emit.
 	 */
 	private readonly chainTips: ChainTipCache | null;
+
+	/** The current export window's first ingest records; see {@link exportWindow}. Dropped when the last page is served. */
+	private exportIngest: { window: string; first: Map<string, { ingested_at: number; event_ts: number }> } | null = null;
 
 	/** The last write probe's verdict; see {@link probeWritable}. */
 	private probe: LedgerProbe = { lastProbeAt: null, lastProbeOk: null, lastProbeError: null };
@@ -1776,7 +1786,9 @@ export class GreptimeClient {
 		const notes = await this.sql(
 			`SELECT "ts", "id", "payload" FROM "agent_events" WHERE "surface" = 'substrate' AND "kind" = 'note' ` +
 				`AND "ts" >= ${at(now - ARCHIVE_NOTE_LOOKBACK_MS)} AND "summary" LIKE ${this.q(`${ARCHIVE_NOTE_PREFIX}%`)} ` +
-				`ORDER BY "ts" DESC, "id" DESC LIMIT 1`,
+				// By the day in the summary (`ledger archive <YYYY-MM-DD>: …` sorts by day), not by `ts`: a note
+				// retried late for an older day carries a newer `ts` and must not move the last archive day backwards.
+				`ORDER BY "summary" DESC, "ts" DESC, "id" DESC LIMIT 1`,
 			this.timeoutMs,
 			"coverage",
 		);
@@ -1827,12 +1839,17 @@ export class GreptimeClient {
 	 * empty page when the window ends exactly on a boundary is the cost of not
 	 * reading one row ahead.
 	 *
-	 * The ingest read is by id in batches of {@link IN_BATCH}, bounded below at
-	 * `from` less one hour: a record precedes its event's `ts` only by clock
-	 * skew, and a backdated event's record is *later* than `ts`, which an upper
-	 * bound would cut off. An event with no record on the page is simply absent
-	 * from `ingest`; the archive counts those. Anchors are read on every page
-	 * because they are a handful of rows and a page is then self-contained.
+	 * The ingest records are read once per window, not per page: a first page
+	 * (no `after`) reads every record whose `event_ts` is in the window through
+	 * a bounded cursor ({@link GreptimeClient.readExportIngest}) into an id map
+	 * that later pages reuse and the last page drops. `event_ts` is the event's
+	 * own `ts`, so a record is found whatever its `ingested_at` — a backdated
+	 * event's is later than its `ts`, a future-stamped one's far earlier — and
+	 * no clock-skew bound is assumed. `event_id` is not a key, so the read is a
+	 * scan of `event_ingest` once per day (what `graphIngest` and `hourLeaves`'s
+	 * lookback pay too). An event with no record is simply absent from `ingest`;
+	 * the archive counts those. Anchors are read on every page because they are
+	 * a handful of rows and a page is then self-contained.
 	 */
 	async exportWindow(query: ExportWindowQuery): Promise<ExportPage> {
 		const { fromMs, toMs } = assertIsoWindow(query.from, query.to);
@@ -1851,29 +1868,18 @@ export class GreptimeClient {
 			"export",
 		);
 
-		const first = new Map<string, { ingested_at: number; event_ts: number }>();
-		const ids = events.map((row) => String(row.id));
-		for (let i = 0; i < ids.length; i += IN_BATCH) {
-			const batch = ids.slice(i, i + IN_BATCH).map((id) => this.q(id)).join(", ");
-			const rows = await this.sql(
-				`SELECT "event_id", "ingested_at", "event_ts" FROM "event_ingest" WHERE "ingested_at" >= ${at(fromMs - HOUR_MS)} AND "event_id" IN (${batch})`,
-				this.timeoutMs,
-				"export",
-			);
-			for (const row of rows) {
-				const id = String(row.event_id);
-				const ingested_at = epochMsAnyUnit(row.ingested_at);
-				const event_ts = epochMsAnyUnit(row.event_ts);
-				if (!Number.isFinite(ingested_at) || !Number.isFinite(event_ts)) {
-					throw new GreptimeError(`ingest record for ${id} has a time that is not a number`);
-				}
-				const seen = first.get(id);
-				if (!seen || ingested_at < seen.ingested_at) first.set(id, { ingested_at, event_ts });
-			}
+		// The day's first ingest records, read once on the first page and reused until the window ends.
+		const windowKey = `${fromMs}:${toMs}`;
+		let cache = this.exportIngest;
+		if (query.after === undefined || cache === null || cache.window !== windowKey) {
+			this.exportIngest = null;
+			cache = { window: windowKey, first: await this.readExportIngest(fromMs, toMs) };
+			this.exportIngest = cache;
 		}
 		const ingest: ExportIngestRow[] = [];
-		for (const id of ids) {
-			const record = first.get(id);
+		for (const row of events) {
+			const id = String(row.id);
+			const record = cache.first.get(id);
 			if (record) {
 				ingest.push({
 					event_id: id,
@@ -1889,6 +1895,52 @@ export class GreptimeClient {
 			events.length === limit && last !== undefined
 				? { ts: new Date(epochMsAnyUnit(last.ts)).toISOString(), id: String(last.id) }
 				: null;
+		if (next === null) this.exportIngest = null;
 		return { events, ingest, anchors, next };
+	}
+
+	/**
+	 * Every first ingest record whose `event_ts` falls in `[fromMs, toMs)`,
+	 * keyed by event id, for {@link exportWindow}. `event_ts` is stored verbatim
+	 * from the event's own `ts` (`emit`'s INSERT), so this is exactly the set
+	 * of records of the window's events — a future-stamped or backdated event
+	 * resolves like any other, whatever its `ingested_at`. Read through a
+	 * keyset cursor on the time index, `(ingested_at, event_id)`, in pages of
+	 * {@link MAX_QUERY_LIMIT}; the first record by `ingested_at` wins. The map
+	 * is capped at {@link EXPORT_INGEST_CAP} events and a day above it throws
+	 * rather than archiving with records silently missing, which would count
+	 * real events as `ingestMissing` and change the hourly roots.
+	 */
+	private async readExportIngest(fromMs: number, toMs: number): Promise<Map<string, { ingested_at: number; event_ts: number }>> {
+		const at = (ms: number): string => this.q(new Date(ms).toISOString());
+		const first = new Map<string, { ingested_at: number; event_ts: number }>();
+		let cursor: { ms: number; id: string } | undefined;
+		for (;;) {
+			const where = [`"event_ts" >= ${at(fromMs)}`, `"event_ts" < ${at(toMs)}`];
+			if (cursor !== undefined) {
+				where.push(`("ingested_at" > ${at(cursor.ms)} OR ("ingested_at" = ${at(cursor.ms)} AND "event_id" > ${this.q(cursor.id)}))`);
+			}
+			const rows = await this.sql(
+				`SELECT "event_id", "ingested_at", "event_ts" FROM "event_ingest" WHERE ${where.join(" AND ")} ORDER BY "ingested_at" ASC, "event_id" ASC LIMIT ${MAX_QUERY_LIMIT}`,
+				this.timeoutMs,
+				"export",
+			);
+			for (const row of rows) {
+				const id = String(row.event_id);
+				const ingested_at = epochMsAnyUnit(row.ingested_at);
+				const event_ts = epochMsAnyUnit(row.event_ts);
+				if (!Number.isFinite(ingested_at) || !Number.isFinite(event_ts)) {
+					throw new GreptimeError(`ingest record for ${id} has a time that is not a number`);
+				}
+				const seen = first.get(id);
+				if (seen === undefined && first.size >= EXPORT_INGEST_CAP) {
+					throw new GreptimeError(`the export window holds more than ${EXPORT_INGEST_CAP} ingest records; refusing to archive it with records missing`);
+				}
+				if (!seen || ingested_at < seen.ingested_at) first.set(id, { ingested_at, event_ts });
+			}
+			const last = rows[rows.length - 1];
+			if (rows.length < MAX_QUERY_LIMIT || last === undefined) return first;
+			cursor = { ms: epochMsAnyUnit(last.ingested_at), id: String(last.event_id) };
+		}
 	}
 }

@@ -33,3 +33,7 @@ Read-only script; delete `scripts/doctor-runtime*`, `packages/mcp-server/src/leg
 ## Gates
 
 At the branch head after both waves merged (orchestrator-run, 2026-10-13): `bunx tsc --noEmit` clean · `bun test` with `SUBSTRATE_TEST_PG_URL` (scratch Postgres 16) **3845 pass / 1 skip / 1 fail** — the one failure is the recorded F-01 (`scripts/rehearsal.test.ts` "CLI refusals > --port 7410 exits 2", identical on `main`) · `bun run check:phase-close` pass (EVENT_KINDS 12, SURFACES 27, 4 lock files) · `bun run test:py` 298 pass. Live run on the VPS before deploy: `bun scripts/doctor-runtime.ts` reported 8 drift / 0 warn / 5 unknown / 18 ok (redis maxmemory, policy, save and the unit's MemoryMax; `substrate-anchor.timer` not found; `substrate-skills-{bridge,sync}` in `system.slice`; legacy `HINDSIGHT_BANK`) and exited 2.
+
+## Greptile round 1 (PR #61)
+
+- P2 `scripts/doctor-runtime.ts` "Token rotation silences drift warnings": `SUBSTRATE_TOKEN_SUBSTRATE` may hold a comma- or whitespace-separated list during a rotation, and `doctorBearer` passed the whole value as one bearer — a 401 that would silence the emit. Fixed: the first non-empty entry (`split(/[\s,]+/)`) is the bearer, the same rule as `scripts/grok-connector-smoke.ts`; the doc-comment states why. New test in `doctor-runtime.test.ts` ("a rotated SUBSTRATE_TOKEN_SUBSTRATE list sends only its first entry as the bearer"): `old,new` and ` \nold new` both post with exactly `old`, the header value carries no comma and not the second entry, and stderr names no value.

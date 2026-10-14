@@ -214,9 +214,17 @@ export interface Observability {
 	/**
 	 * Save the checkpoint now (uplift-3 N2): the merged series, the rings and
 	 * the notify map, as `<path>.part` renamed over `<path>` so a reader never
-	 * sees a torn file. The periodic timer calls this; shutdown awaits it.
+	 * sees a torn file. The periodic timer and manual triggers call this; one
+	 * that arrives while a write is in flight joins it.
 	 */
 	checkpoint(): Promise<CheckpointWrite>;
+	/**
+	 * The shutdown write: waits for any write in flight, then runs one fresh
+	 * write, so everything observed before the call is in the file (a joined
+	 * in-flight write serialised its snapshot earlier). Calls made while that
+	 * final write runs join it, never start a parallel one.
+	 */
+	flush(): Promise<CheckpointWrite>;
 	start(): Promise<string[]>;
 	stop(): void;
 }
@@ -252,7 +260,17 @@ function readCheckpointFile(path: string | null): CheckpointRead {
 	}
 }
 
-export function createObservability(config: SubstrateConfig, env: Record<string, string | undefined> = process.env): Observability {
+/** The two filesystem calls a checkpoint write makes, injectable so a test can hold one open. */
+export interface CheckpointFiles {
+	writeFile(path: string, data: string, encoding: "utf8"): Promise<void>;
+	rename(from: string, to: string): Promise<void>;
+}
+
+export function createObservability(
+	config: SubstrateConfig,
+	env: Record<string, string | undefined> = process.env,
+	files: CheckpointFiles = { writeFile, rename },
+): Observability {
 	const settings = loadObservabilityConfig(env, SUBSTRATE_VERSION);
 	// uplift-3 N2: the prior epoch's checkpoint, before any instrument exists. A
 	// restored registry starts at the history's `since`, so the OTLP start time and
@@ -383,8 +401,8 @@ export function createObservability(config: SubstrateConfig, env: Record<string,
 			error = `checkpoint is ${bytes} bytes, over the ${MAX_CHECKPOINT_BYTES} byte limit the next boot would refuse`;
 		} else {
 			try {
-				await writeFile(`${path}.part`, text, "utf8");
-				await rename(`${path}.part`, path);
+				await files.writeFile(`${path}.part`, text, "utf8");
+				await files.rename(`${path}.part`, path);
 				checkpointAt = new Date().toISOString();
 			} catch (cause) {
 				error = cause instanceof Error ? cause.message : String(cause);
@@ -395,6 +413,35 @@ export function createObservability(config: SubstrateConfig, env: Record<string,
 			process.stderr.write(`[substrate] slo checkpoint ${path} not written: ${error}\n`);
 		}
 		return { written: error === null, bytes, error };
+	}
+
+	/**
+	 * The single-flight door every trigger goes through — the periodic timer,
+	 * `Observability.checkpoint()` and the shutdown write alike. A trigger that
+	 * arrives while a write is in flight joins it rather than starting a second
+	 * `.part` + rename over the same path; the timer calling `writeCheckpoint`
+	 * directly bypassed this and could overlap a slow write with the next tick
+	 * or with shutdown (Greptile round 1, PR #61).
+	 */
+	function checkpointOnce(): Promise<CheckpointWrite> {
+		checkpointInFlight ??= writeCheckpoint().finally(() => {
+			checkpointInFlight = null;
+		});
+		return checkpointInFlight;
+	}
+
+	/** The final write `flush()` is running, so a second shutdown call joins it. */
+	let flushing: Promise<CheckpointWrite> | null = null;
+	function flushCheckpoint(): Promise<CheckpointWrite> {
+		flushing ??= (async () => {
+			// The in-flight write's outcome is its own caller's business; this one
+			// only needs it out of the way before the fresh snapshot is taken.
+			if (checkpointInFlight !== null) await checkpointInFlight.catch(() => undefined);
+			return checkpointOnce();
+		})().finally(() => {
+			flushing = null;
+		});
+		return flushing;
 	}
 
 	return {
@@ -429,12 +476,8 @@ export function createObservability(config: SubstrateConfig, env: Record<string,
 			}),
 		notifyRecords,
 		history: () => ({ epoch, since, checkpointAt }),
-		checkpoint() {
-			checkpointInFlight ??= writeCheckpoint().finally(() => {
-				checkpointInFlight = null;
-			});
-			return checkpointInFlight;
-		},
+		checkpoint: checkpointOnce,
+		flush: flushCheckpoint,
 		async start() {
 			const warnings: string[] = [];
 			const opened = await audit.open();
@@ -471,7 +514,7 @@ export function createObservability(config: SubstrateConfig, env: Record<string,
 			if (config.sloCheckpointPath === null) {
 				warnings.push("no SLO checkpoint path (SUBSTRATE_SLO_CHECKPOINT unset and no state directory); SLO history ends at the next restart");
 			} else if (config.sloCheckpointS > 0 && checkpointTimer === null) {
-				checkpointTimer = setInterval(() => void writeCheckpoint(), config.sloCheckpointS * 1000);
+				checkpointTimer = setInterval(() => void checkpointOnce(), config.sloCheckpointS * 1000);
 				checkpointTimer.unref();
 			}
 			exporter?.start();

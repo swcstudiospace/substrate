@@ -15,9 +15,11 @@ import type { AnchorRow, ExportCursor, ExportPage, ExportWindowQuery } from "./g
 import {
 	archivedDays,
 	archiveFiles,
-	archiveWindow,
+	archiveNote,
+	archiveWindow as archiveWindowOn,
 	ArchiveRefused,
 	daysToArchive,
+	devReader,
 	dayWindow,
 	formatCoverage,
 	formatVerifyReport,
@@ -26,11 +28,18 @@ import {
 	LedgerUsageError,
 	newestClosedDay,
 	parseLedgerArgs,
+	pendingNoteDays,
+	pendingNoteFile,
+	readPendingNote,
+	recordArchiveNote,
+	refusedMount,
 	refusedOutDir,
 	releaseShaOf,
+	retryPendingNotes,
 	verifyArchive,
 } from "./ledger-archive.ts";
-import type { SubstrateEvent } from "./types.ts";
+import type { ArchiveManifest, ArchiveOptions, DevReader, NoteOutcome } from "./ledger-archive.ts";
+import type { EventInput, SubstrateEvent } from "./types.ts";
 
 const ROOT = join(import.meta.dir, "..", "..", "..");
 const DAY = "2026-10-12";
@@ -49,9 +58,26 @@ function outDir(name: string): string {
 	return dir;
 }
 
-/** `df -Pk` output with this many kilobytes free, in the two-line POSIX shape. */
+/** `df -Pk` output for the archive volume with this many kilobytes free, in the two-line POSIX shape. */
 function dfWith(availKb: number): string {
 	return `Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/sdz 100000000 1000 ${availKb} 1% /mnt/x\n`;
+}
+
+/** A `df` for the free-space floor: the same reading wherever it is asked. */
+function mountedDf(availKb = 50 * 1024 * 1024): (path: string) => string {
+	return () => dfWith(availKb);
+}
+
+/**
+ * A host with the archive volume mounted, as `st_dev` tells it: the root disk
+ * (device 1) holds `/` and the release root; every other path (the scratch
+ * dirs stand in for paths under the mount) is the volume's device 2.
+ */
+const mountedDev: DevReader = (path) => (path === "/" || path.startsWith("/opt/agent-substrate") ? 1 : 2);
+
+/** `archiveWindow` on that host unless a test says otherwise. */
+function archiveWindow(greptime: { exportWindow(query: ExportWindowQuery): Promise<ExportPage> }, options: ArchiveOptions): Promise<ArchiveManifest> {
+	return archiveWindowOn(greptime, { dev: mountedDev, ...options });
 }
 
 /** An event as the chain stores it; `prev` links it to the session's tip. */
@@ -137,7 +163,7 @@ function ledgerOf(fx: Fixture): { exportWindow(query: ExportWindowQuery): Promis
 	};
 }
 
-const okDf = (): string => dfWith(50 * 1024 * 1024);
+const okDf = mountedDf();
 
 describe("archiveWindow", () => {
 	test("archives a closed day to four files in bounded pages, and the archive verifies", async () => {
@@ -251,11 +277,13 @@ describe("archiveWindow", () => {
 	test("refuses before writing: a filesystem below the floor, an unreadable df, the working tree, the release root, a checkout, an unclosed day, an archived day", async () => {
 		const fx = fixture();
 		const dir = outDir("refused");
-		const low = archiveWindow(ledgerOf(fx), { day: DAY, outDir: dir, now: () => NOW, df: () => dfWith(4 * 1024 * 1024), cwd: ROOT });
+		const low = archiveWindow(ledgerOf(fx), { day: DAY, outDir: dir, now: () => NOW, df: mountedDf(4 * 1024 * 1024), cwd: ROOT });
 		await expect(low).rejects.toThrow(ArchiveRefused);
 		await expect(low).rejects.toThrow("SUBSTRATE_DEPLOY_MIN_FREE_GB=5");
+		// An unreadable df refuses at the floor by name; a floor of 0 disables it, as it does for the deploy script.
 		await expect(archiveWindow(ledgerOf(fx), { day: DAY, outDir: dir, now: () => NOW, df: () => null, cwd: ROOT })).rejects.toThrow("cannot read free space");
-		// A floor of 0 disables the gate, as it does for the deploy script.
+		// An unreadable stat refuses at the mount gate: no proof the path is a dedicated mount.
+		await expect(archiveWindow(ledgerOf(fx), { day: DAY, outDir: dir, now: () => NOW, df: okDf, dev: () => null, cwd: ROOT })).rejects.toThrow("dedicated mount");
 		const ledger = ledgerOf(fx);
 		await archiveWindow(ledger, { day: DAY, outDir: dir, now: () => NOW, df: () => null, minFreeGb: 0, cwd: ROOT });
 		expect(ledger.calls.length).toBeGreaterThan(0);
@@ -273,6 +301,173 @@ describe("archiveWindow", () => {
 		await expect(archiveWindow(untouched, { day: "13/10/2026", outDir: outDir("bad-day"), now: () => NOW, df: okDf, cwd: ROOT })).rejects.toThrow("YYYY-MM-DD");
 		expect(untouched.calls).toEqual([]);
 		expect(readdirSync(outDir("open"))).toEqual([]);
+	});
+
+	test("refuses a directory on the root filesystem — an unmounted archive volume — before creating it, unless the rootfs override is set", async () => {
+		const fx = fixture();
+		// The configured path's parent exists on the root disk; the volume is not mounted.
+		const parent = outDir("unmounted");
+		const dir = join(parent, "ledger-archive");
+		const asked: string[] = [];
+		const onRootDisk: DevReader = (path) => {
+			asked.push(path);
+			return 1;
+		};
+		const untouched = ledgerOf(fx);
+		const refused = archiveWindow(untouched, { day: DAY, outDir: dir, now: () => NOW, df: okDf, dev: onRootDisk, cwd: ROOT });
+		await expect(refused).rejects.toThrow(ArchiveRefused);
+		await expect(refused).rejects.toThrow("root filesystem");
+		await expect(refused).rejects.toThrow("SUBSTRATE_LEDGER_ARCHIVE_ALLOW_ROOTFS=1");
+		// Asked of the existing parent, never of the directory it would have created — which it did not.
+		expect(asked[0]).toBe(parent);
+		expect(existsSync(dir)).toBe(false);
+		expect(untouched.calls).toEqual([]);
+
+		// A volume mounted somewhere else but on the release root's device is the same mistake.
+		const releaseRoot = outDir("release-root");
+		const sharesRelease: DevReader = (path) => (path === "/" ? 1 : 7);
+		expect(refusedMount(dir, { cwd: ROOT, dev: sharesRelease, releaseRoot })).toContain("release root");
+		// A different device passes, the release root being on the root disk. No df is consulted: two tmpfs
+		// or overlay mounts carry the same df name and are different filesystems, and the device number says so.
+		const volumeOnly: DevReader = (path) => (path === "/" || path === releaseRoot ? 1 : 7);
+		expect(refusedMount(dir, { cwd: ROOT, dev: volumeOnly, releaseRoot })).toBeNull();
+		// An unreadable stat is not proof: refuse.
+		expect(refusedMount(dir, { cwd: ROOT, dev: () => null, releaseRoot })).toContain("cannot read the filesystem");
+		// The real reader answers a number for a path that exists and `null` for one that does not.
+		expect(typeof devReader("/")).toBe("number");
+		expect(devReader(join(scratch, "never-made"))).toBeNull();
+
+		// The override is for a deliberate one-disk test: the directory is then created and the day archives.
+		const manifest = await archiveWindow(ledgerOf(fx), { day: DAY, outDir: dir, now: () => NOW, df: okDf, dev: onRootDisk, allowRootfs: true, cwd: ROOT });
+		expect(manifest.counts.events).toBe(5);
+		expect(existsSync(join(dir, archiveFiles(DAY).manifest))).toBe(true);
+	});
+
+	test("two same-session events claiming a predecessor from another day are a fork, not a continuation", async () => {
+		const fx = fixture();
+		const yesterday = "e".repeat(64);
+		const one = event("s3", yesterday, "s3 continues", H10 + 4_000);
+		const two = event("s3", yesterday, "s3 continues, again", H10 + 4_500);
+		fx.events.push(one, two);
+		fx.ingest.set(one.id, H10 + 4_100);
+		fx.ingest.set(two.id, H10 + 4_600);
+		const dir = outDir("external-fork");
+		await archiveWindow(ledgerOf(fx), { day: DAY, outDir: dir, now: () => NOW, df: okDf, cwd: ROOT });
+
+		const report = verifyArchive(dir, DAY);
+		const chain = report.mismatches.filter((m) => m.kind === "chain");
+		expect(chain).toEqual([{ kind: "chain", event: two.id, detail: expect.stringContaining("fork") }]);
+		expect(chain[0]?.detail).toContain(one.id);
+	});
+
+	test("a refused ledger note leaves a retry marker beside the manifest, a later run sends only the note, and success clears the marker without touching the day files", async () => {
+		const dir = outDir("note-retry");
+		const manifest = await archiveWindow(ledgerOf(fixture()), { day: DAY, outDir: dir, now: () => NOW, df: okDf, cwd: ROOT });
+		const files = archiveFiles(DAY);
+		const dayFiles = [files.events, files.ingest, files.anchors, files.manifest];
+		const snapshot = (): string[] => dayFiles.map((name) => readFileSync(join(dir, name), "utf8"));
+		const before = snapshot();
+
+		// The ledger refuses the note: files stay, a marker records what to resend.
+		const refused: NoteOutcome = { stored: false, error: "greptime unreachable" };
+		const first = await recordArchiveNote(dir, manifest, async () => refused, () => NOW);
+		expect(first.stored).toBe(false);
+		expect(pendingNoteDays(dir)).toEqual([DAY]);
+		expect(readPendingNote(dir, DAY)).toEqual({
+			day: DAY,
+			note: archiveNote(manifest),
+			attempts: 1,
+			lastError: "greptime unreachable",
+			firstAttemptAt: new Date(NOW).toISOString(),
+		});
+		// The marker is not mistaken for an archive: the day still has exactly its manifest, and no `.part` survives.
+		expect(archivedDays(dir)).toEqual([DAY]);
+		expect(readdirSync(dir).filter((name) => name.endsWith(".part"))).toEqual([]);
+		expect(daysToArchive({ firstDay: DAY, until: DAY, dir })).toEqual([]);
+
+		// Still refused on the next run: the same note is resent, attempts climb, the first failure time stays.
+		const sent: EventInput[] = [];
+		const stillDown = await retryPendingNotes(dir, async (input) => {
+			sent.push(input);
+			return refused;
+		});
+		expect(stillDown).toEqual({ sent: [], pending: [{ day: DAY, attempts: 2, lastError: "greptime unreachable" }] });
+		expect(readPendingNote(dir, DAY)?.firstAttemptAt).toBe(new Date(NOW).toISOString());
+		expect(existsSync(join(dir, pendingNoteFile(DAY)))).toBe(true);
+
+		// The ledger is back: the note goes out once, byte for byte what the first attempt would have sent, and the marker is gone.
+		const recovered = await retryPendingNotes(dir, async (input) => {
+			sent.push(input);
+			return { stored: true };
+		});
+		expect(recovered).toEqual({ sent: [DAY], pending: [] });
+		expect(sent).toEqual([archiveNote(manifest), archiveNote(manifest)]);
+		expect(pendingNoteDays(dir)).toEqual([]);
+		expect(existsSync(join(dir, pendingNoteFile(DAY)))).toBe(false);
+		// A run with nothing pending sends nothing.
+		expect(await retryPendingNotes(dir, async () => ({ stored: true }))).toEqual({ sent: [], pending: [] });
+
+		// None of it rewrote the completed day.
+		expect(snapshot()).toEqual(before);
+		expect(verifyArchive(dir, DAY).ok).toBe(true);
+	});
+
+	test("a note stored on the first attempt leaves no marker, and a stored resend through recordArchiveNote clears an old one; an unreadable marker stays pending", async () => {
+		const dir = outDir("note-clear");
+		const manifest = await archiveWindow(ledgerOf(fixture()), { day: DAY, outDir: dir, now: () => NOW, df: okDf, cwd: ROOT });
+		expect((await recordArchiveNote(dir, manifest, async () => ({ stored: true }))).stored).toBe(true);
+		expect(pendingNoteDays(dir)).toEqual([]);
+
+		await recordArchiveNote(dir, manifest, async () => ({ stored: false }), () => NOW);
+		expect(pendingNoteDays(dir)).toEqual([DAY]);
+		expect(readPendingNote(dir, DAY)?.lastError).toBeNull();
+		await recordArchiveNote(dir, manifest, async () => ({ stored: true }));
+		expect(pendingNoteDays(dir)).toEqual([]);
+
+		// A marker that does not parse cannot be resent from: it is reported pending, never silently dropped.
+		writeFileSync(join(dir, pendingNoteFile(DAY)), "{not json");
+		const outcome = await retryPendingNotes(dir, async () => ({ stored: true }));
+		expect(outcome.sent).toEqual([]);
+		expect(outcome.pending).toEqual([{ day: DAY, attempts: 0, lastError: "marker does not parse" }]);
+		expect(existsSync(join(dir, pendingNoteFile(DAY)))).toBe(true);
+	});
+
+	test("the marker is on disk before the note is sent, so a throwing emit leaves it; one bad marker does not stop the others being sent", async () => {
+		const dir = outDir("note-throw");
+		const manifest = await archiveWindow(ledgerOf(fixture()), { day: DAY, outDir: dir, now: () => NOW, df: okDf, cwd: ROOT });
+		const marker = join(dir, pendingNoteFile(DAY));
+		// Present while the emit is in flight: a process killed here still owes the note.
+		let seenDuring = false;
+		const thrown = await recordArchiveNote(
+			dir,
+			manifest,
+			async () => {
+				seenDuring = existsSync(marker);
+				throw new Error("invalid input");
+			},
+			() => NOW,
+		);
+		expect(seenDuring).toBe(true);
+		expect(thrown).toEqual({ stored: false, error: "invalid input" });
+		expect(readPendingNote(dir, DAY)).toMatchObject({ attempts: 1, lastError: "invalid input", firstAttemptAt: new Date(NOW).toISOString() });
+		expect(verifyArchive(dir, DAY).ok).toBe(true);
+
+		// An older day whose marker parses but whose note the ledger will not take: emit throws for it.
+		const other = "2026-10-11";
+		const bad = { surface: "substrate", kind: "note", summary: "ledger archive 2026-10-11: bad" };
+		writeFileSync(
+			join(dir, pendingNoteFile(other)),
+			JSON.stringify({ day: other, note: bad, attempts: 3, lastError: null, firstAttemptAt: new Date(NOW).toISOString() }),
+		);
+		const outcome = await retryPendingNotes(dir, async (input) => {
+			if (input.summary.includes("bad")) throw new Error("emit refused the summary");
+			return { stored: true };
+		});
+		// The loop went past it: this day's note was sent, the bad one is pending with its attempts counted.
+		expect(outcome.sent).toEqual([DAY]);
+		expect(outcome.pending).toEqual([{ day: other, attempts: 4, lastError: "emit refused the summary" }]);
+		expect(pendingNoteDays(dir)).toEqual([other]);
+		expect(existsSync(marker)).toBe(false);
 	});
 
 	test("a failed page leaves no data file behind, only nothing", async () => {

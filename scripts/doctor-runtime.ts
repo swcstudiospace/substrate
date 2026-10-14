@@ -872,9 +872,15 @@ export interface EmitIo {
  * rule), then the shared env's `SUBSTRATE_TOKEN_SUBSTRATE` (what the host
  * jobs are delivered, by that name), then the client resolver's token file
  * and tokens dir for the `substrate` surface. Never logged.
+ *
+ * The server's variable may list several entries (comma or whitespace, as
+ * during a rotation) and any one of them authenticates; the whole list sent
+ * as one bearer is refused with 401 and the drift warnings fall silent, so
+ * the first non-empty entry is the bearer, as `grok-connector-smoke.ts` does.
  */
 export function doctorBearer(env: Record<string, string | undefined>): string | null {
-	return resolveBearer("substrate", { ...env, SUBSTRATE_TOKEN: env.SUBSTRATE_TOKEN?.trim() || env.SUBSTRATE_TOKEN_SUBSTRATE });
+	const listed = env.SUBSTRATE_TOKEN_SUBSTRATE?.split(/[\s,]+/).find((entry) => entry.length > 0);
+	return resolveBearer("substrate", { ...env, SUBSTRATE_TOKEN: env.SUBSTRATE_TOKEN?.trim() || listed });
 }
 
 /**

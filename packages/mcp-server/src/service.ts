@@ -1137,10 +1137,15 @@ export class Substrate {
 			const noted: Array<number | null> = [];
 			const failed: BriefSource[] = [];
 			let loaded = false;
+			// The expiry mode is part of the key for the same reason it is on a
+			// search (uplift-3 N4): a `report` brief carries expired advice, tagged,
+			// and must not be served `complete` — nor replayed as a snapshot — after
+			// a restart into `enforce`. Empty under `report`, so those keys stand.
 			const args = {
 				repo: request.repo ?? null,
 				branch: request.branch ?? null,
 				graph_id: request.graph_id ?? null,
+				...this.expiryKey(undefined),
 			};
 			const live = await this.cache.getOrLoad({
 				klass: "brief",
@@ -1545,7 +1550,7 @@ export class Substrate {
 				shape: "merged-v1",
 				...this.expiryKey(includeExpired),
 			},
-			generations: [MEMORY_GENERATION_KEY],
+			generations: this.memoryGenerations(),
 			refreshAt: (merged) => earliestRefreshAt(merged.entries.flatMap((entry) => [entry.reverify_after, entry.expires_at])),
 			// A degraded answer (outage, partial) is still the answer, but it
 			// must not sit in the cache: the next search re-probes the plane.
@@ -1573,7 +1578,7 @@ export class Substrate {
 			klass: "memory-search",
 			surface,
 			args: { ...search, ...this.expiryKey(request.include_expired) },
-			generations: [MEMORY_GENERATION_KEY],
+			generations: this.memoryGenerations(),
 			refreshAt: (page) => earliestRefreshAt(page.entries.flatMap((entry) => [entry.reverify_after, entry.expires_at])),
 			load: async () => {
 				if (!this.index) return { entries: [], next: null };
@@ -1598,6 +1603,19 @@ export class Substrate {
 			...(this.config.memoryExpiry === "enforce" ? { expiry: "enforce" as const } : {}),
 			...(includeExpired === true ? { includeExpired: true as const } : {}),
 		};
+	}
+
+	/**
+	 * What a cached memory search depends on (uplift-3 N4). The memory generation
+	 * moves on every accepted write; the shared graphs generation moves on every
+	 * graph write (`bumpGraph`) — and a `ttl: graph` entry's verdict is read off
+	 * `graph_index`, so a graph finishing must drop the searches that still list
+	 * (or still tag as alive) its memories. The same pair a brief already embeds;
+	 * a `graph` entry has no `expires_at` for `refreshAt` to reach, so this is the
+	 * only way a search learns that its graph closed before the cache TTL.
+	 */
+	private memoryGenerations(): string[] {
+		return [MEMORY_GENERATION_KEY, GRAPHS_GENERATION_KEY];
 	}
 
 	/**
@@ -2945,6 +2963,7 @@ export class Substrate {
 					retrieval: this.config.docsRetrieval,
 					provenanceOf: (documentId) => documentProvenance(this.docsIngestSeen, documentId),
 					budgetMs: this.config.docsSearchBudgetMs,
+					breakerState: () => this.planes.gate("ragflow").breaker?.state() ?? "closed",
 				},
 				question,
 			);

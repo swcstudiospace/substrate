@@ -1864,7 +1864,13 @@ describe("anchorCoverage (uplift-3 N6)", () => {
 	const anchorRow = (hour: number): unknown[] => [hour, hour + HOUR, "a".repeat(64), 3, "memo", "sig", "signer", "devnet", 1, hour + HOUR + 300_000, null];
 
 	/** The four reads, told apart by shape: newest anchor, the anchor window, the ingest histogram, the archive note. */
-	function stubCoverage(options: { anchoredHours: number[]; eventHours: number[]; note?: { ts: number; id: string; payload: string } }): { sql: string[] } {
+	function stubCoverage(options: {
+		anchoredHours: number[];
+		eventHours: number[];
+		note?: { ts: number; id: string; payload: string };
+		notes?: Array<{ ts: number; id: string; summary: string; payload: string }>;
+	}): { sql: string[] } {
+		const notes = options.notes ?? (options.note ? [{ ...options.note, summary: "ledger archive 2026-10-12: x" }] : []);
 		return stubFetch((statement) => {
 			if (statement.includes('FROM "anchors"') && statement.includes('ORDER BY "period_start" DESC')) {
 				const newest = Math.max(...options.anchoredHours);
@@ -1874,7 +1880,12 @@ describe("anchorCoverage (uplift-3 N6)", () => {
 			// Seconds, as `to_unixtime` answers, and a count per hour.
 			if (statement.includes("date_bin")) return records(["hour", "n"], options.eventHours.map((hour) => [hour / 1000, 7]));
 			if (statement.includes("ledger archive")) {
-				return records(["ts", "id", "payload"], options.note ? [[options.note.ts, options.note.id, options.note.payload]] : []);
+				// Ordered as the statement says: by summary (the day) when it asks, else by write time.
+				const bySummary = statement.includes('ORDER BY "summary" DESC');
+				const ordered = [...notes].sort((a, b) =>
+					bySummary ? (a.summary < b.summary ? 1 : a.summary > b.summary ? -1 : b.ts - a.ts) : b.ts - a.ts,
+				);
+				return records(["ts", "id", "payload"], ordered.slice(0, 1).map((n) => [n.ts, n.id, n.payload]));
 			}
 			return defaultReply(statement);
 		});
@@ -1908,6 +1919,25 @@ describe("anchorCoverage (uplift-3 N6)", () => {
 		expect(note).toContain('"ts" >=');
 		expect(note).toContain("LIMIT 1");
 		expect(sql.some((s) => s.startsWith("INSERT"))).toBe(false);
+	});
+
+	test("the last archive day is the newest day in a note's summary, not the newest write: a late retry of an older day does not move it backwards", async () => {
+		const note = (day: string, ts: number, id: string): { ts: number; id: string; summary: string; payload: string } => ({
+			ts,
+			id,
+			summary: `ledger archive ${day}: 5 events, 5 ingest rows, 2 receipts`,
+			payload: JSON.stringify({ action: "ledger.archive", day }),
+		});
+		// 2026-10-11's note failed and was retried an hour ago; 2026-10-12's was stored first, at 03:30.
+		const { sql } = stubCoverage({
+			anchoredHours: [H - HOUR],
+			eventHours: [],
+			notes: [note("2026-10-12", H - 9 * HOUR, "evt_d2"), note("2026-10-11", H - HOUR, "evt_d1_retry")],
+		});
+		const coverage = await new GreptimeClient(config).anchorCoverage({ now: NOW });
+		expect(coverage.lastArchiveWindow).toEqual({ day: "2026-10-12", writtenAt: new Date(H - 9 * HOUR).toISOString(), eventId: "evt_d2" });
+		const read = sql.find((s) => s.includes("ledger archive")) ?? "";
+		expect(read).toContain('ORDER BY "summary" DESC, "ts" DESC');
 	});
 
 	test("with no anchor at all, lists the newest 48 uncovered hours and says there are more; the lag is unknown", async () => {
@@ -1960,9 +1990,15 @@ describe("exportWindow (uplift-3 N6)", () => {
 	const eventRow = (event: { ts: number; id: string }): unknown[] =>
 		EVENT_COLUMNS.map((column) => (column === "ts" ? event.ts : column === "id" ? event.id : column === "hash" ? "f".repeat(64) : null));
 
-	/** A server that honours the keyset predicate and the LIMIT, so paging is exercised rather than scripted. */
-	function stubWindow(): { sql: string[] } {
-		return stubFetch((statement) => {
+	/**
+	 * A server that honours the keyset predicates and the LIMITs, so paging is exercised rather than
+	 * scripted. `filler` adds that many other events' ingest records, all inside the window and all
+	 * ingested before the page's events, so the day's ingest read needs several pages.
+	 */
+	function stubWindow(filler = 0): { sql: string[]; served: string[] } {
+		/** Every ingest row the fake returned, as `id@ingested_at`, across all statements. */
+		const served: string[] = [];
+		const { sql } = stubFetch((statement) => {
 			if (statement.includes('FROM "agent_events"')) {
 				const after = /\("ts" > '([^']+)' OR \("ts" = '([^']+)' AND "id" > '([^']+)'\)\)/.exec(statement);
 				const limit = Number(/LIMIT (\d+)/.exec(statement)?.[1]);
@@ -1974,11 +2010,30 @@ describe("exportWindow (uplift-3 N6)", () => {
 				return records([...EVENT_COLUMNS], rows.map(eventRow));
 			}
 			if (statement.includes('FROM "event_ingest"')) {
-				const ids = EVENTS.filter((event) => statement.includes(`'${event.id}'`));
-				// evt_c has no ingest record (a legacy row); evt_a has a retry one second later.
-				const rows = ids.filter((event) => event.id !== "evt_c").map((event) => [event.id, event.ts + 100, event.ts]);
-				if (ids.some((event) => event.id === "evt_a")) rows.push(["evt_a", T1 + 1_100, T1]);
-				return records(["event_id", "ingested_at", "event_ts"], rows);
+				// evt_c has no ingest record (a legacy row); evt_a has a retry one second
+				// later; evt_e carries a collector-supplied `ts` a day after it was ingested.
+				const rows: Array<[string, number, number]> = EVENTS.filter((event) => event.id !== "evt_c").map((event) => [
+					event.id,
+					event.id === "evt_e" ? event.ts - 86_400_000 : event.ts + 100,
+					event.ts,
+				]);
+				rows.push(["evt_a", T1 + 1_100, T1]);
+				// Pairs of fillers share an ingest millisecond, so a page boundary can fall inside a tie.
+				for (let i = 0; i < filler; i++) rows.push([`fill_${String(i).padStart(4, "0")}`, T1 - 10_000_000 + Math.floor(i / 2), T1]);
+				const tsBound = /"event_ts" >= '([^']+)' AND "event_ts" < '([^']+)'/.exec(statement);
+				const cursor = /\("ingested_at" > '([^']+)' OR \("ingested_at" = '([^']+)' AND "event_id" > '([^']+)'\)\)/.exec(statement);
+				const limit = Number(/LIMIT (\d+)/.exec(statement)?.[1]);
+				const selected = rows
+					.filter(([, , eventTs]) => !tsBound || (eventTs >= Date.parse(tsBound[1] ?? "") && eventTs < Date.parse(tsBound[2] ?? "")))
+					.filter(([id, ingestedAt]) => {
+						if (!cursor) return true;
+						const at = Date.parse(cursor[1] ?? "");
+						return ingestedAt > at || (ingestedAt === at && id > (cursor[3] ?? ""));
+					})
+					.sort((a, b) => a[1] - b[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+					.slice(0, limit);
+				for (const [id, ingestedAt] of selected) served.push(`${id}@${ingestedAt}`);
+				return records(["event_id", "ingested_at", "event_ts"], selected);
 			}
 			if (statement.includes('FROM "anchors"')) {
 				const hour = Date.UTC(2026, 9, 12, 10);
@@ -1989,6 +2044,7 @@ describe("exportWindow (uplift-3 N6)", () => {
 			}
 			return defaultReply(statement);
 		});
+		return { sql, served };
 	}
 
 	test("keyset pages return every row exactly once across a tie on ts, and the continuation round-trips", async () => {
@@ -2020,16 +2076,53 @@ describe("exportWindow (uplift-3 N6)", () => {
 		for (const statement of sql) assertAppendOnly(statement);
 	});
 
-	test("carries each event's first ingest record, bounded below at the window start less an hour, and omits events without one", async () => {
+	test("carries each event's first ingest record by id with no ingested_at bound, so a future-stamped event keeps its record, and omits events without one", async () => {
 		const { sql } = stubWindow();
 		const page = await new GreptimeClient(config).exportWindow({ from: FROM, to: TO, limit: 10 });
 		expect(page.next).toBeNull();
 		expect(page.ingest.map((row) => row.event_id)).toEqual(["evt_a", "evt_b", "evt_d", "evt_e"]);
 		// The retry record did not move evt_a: the first one counts.
 		expect(page.ingest[0]?.ingested_at).toBe(new Date(T1 + 100).toISOString());
-		const ingest = sql.find((s) => s.includes('FROM "event_ingest"')) ?? "";
-		expect(ingest).toContain(`"ingested_at" >= '${new Date(Date.parse(FROM) - 3_600_000).toISOString()}'`);
-		expect(ingest).toContain('"event_id" IN (');
+		// evt_e was ingested a day before its `ts`: its record is on the page, with that stamp.
+		expect(page.ingest[3]).toEqual({ event_id: "evt_e", ingested_at: new Date(T3 - 86_400_000).toISOString(), event_ts: new Date(T3).toISOString() });
+		const ingest = sql.filter((s) => s.includes('FROM "event_ingest"'));
+		expect(ingest).toHaveLength(1);
+		// The window is bounded on `event_ts` (the event's own `ts`); nothing bounds `ingested_at`, and there is no per-id IN scan.
+		expect(ingest[0]).toContain(`"event_ts" >= '${FROM}' AND "event_ts" < '${TO}'`);
+		expect(ingest[0]?.split("WHERE")[1]).not.toContain('"ingested_at" >=');
+		expect(ingest[0]).not.toContain('"event_id" IN (');
+		expect(ingest[0]).toContain('ORDER BY "ingested_at" ASC, "event_id" ASC LIMIT 500');
+		expect(() => assertAppendOnly(ingest[0] ?? "")).not.toThrow();
+	});
+
+	test("reads the day's ingest records once for all event pages, not once per page, and pages them through a keyset cursor on the time index", async () => {
+		// 1100 earlier records of other events in the window: three ingest pages of 500, 500 and 100.
+		const { sql, served } = stubWindow(1100);
+		const client = new GreptimeClient(config);
+		const perPage: string[][] = [];
+		let after: { ts: string; id: string } | undefined;
+		for (;;) {
+			const page = await client.exportWindow({ from: FROM, to: TO, after, limit: 2 });
+			perPage.push(page.ingest.map((row) => row.event_id));
+			if (page.next === null) break;
+			after = page.next;
+		}
+		expect(perPage).toEqual([["evt_a", "evt_b"], ["evt_d"], ["evt_e"]]);
+		const ingest = sql.filter((s) => s.includes('FROM "event_ingest"'));
+		expect(ingest).toHaveLength(3);
+		expect(ingest[0]).not.toContain("OR (");
+		// evt_e was ingested a day before its `ts`, so it opens page one and the 500th row is fill_0498.
+		// fill_0498 and fill_0499 share an ingest millisecond: the page boundary splits the tie, and the
+		// cursor's `= AND event_id >` half must pick fill_0499 up on page two.
+		expect(ingest[1]).toMatch(/\("ingested_at" > '[^']+' OR \("ingested_at" = '[^']+' AND "event_id" > 'fill_0498'\)\)/);
+		// Every row in the window was served exactly once across the three pages: none skipped, none repeated.
+		expect(served).toHaveLength(1105);
+		expect(new Set(served).size).toBe(1105);
+		for (const statement of ingest) assertAppendOnly(statement);
+
+		// A fresh export of the same window starts again from its first page: the map is re-read, never trusted across runs.
+		await client.exportWindow({ from: FROM, to: TO, limit: 10 });
+		expect(sql.filter((s) => s.includes('FROM "event_ingest"'))).toHaveLength(6);
 	});
 
 	test("refuses a window that is not two ISO instants in order", async () => {

@@ -589,7 +589,8 @@ the operator's directory and records one `note` per day it wrote.
 `GreptimeClient.anchorCoverage({ now })` makes four bounded reads: the newest
 `anchors.period_start`; the anchor rows of the last 7 days (the anchor job's own
 lookback); one `date_bin` histogram over the same window of `event_ingest` — a
-count per hour, never the rows; and the newest `ledger archive` note on the
+count per hour, never the rows; and the newest `ledger archive` note — by the day
+in its summary, so a retried older day cannot move it backwards — on the
 `substrate`/`note` series, bounded on `ts`. It answers
 
 ```
@@ -643,8 +644,17 @@ keyset, never OFFSET: `("ts" > a OR ("ts" = a AND "id" > b)) ORDER BY "ts", "id"
 LIMIT n`, so a page costs the same on page 200 as on page one and a same-
 millisecond tie is split identically on the server and in the cursor; `next` is
 the last row of a full page. Each page also carries the first ingest record of
-its events (by id, bounded below at `from` less an hour — a backdated event's
-record is *later* than its `ts`) and the window's receipts. `hourlyRoots` are
+its events and the window's receipts. The ingest records are read once per day,
+not per page: the first page reads every record whose `event_ts` (the event's own
+`ts`) is in the window through a keyset cursor on the time index, `(ingested_at,
+event_id)`, 500 rows at a time, into an id map the later pages reuse and the last
+drops, capped at 500 000 events — a day above the cap refuses to archive rather
+than count real events as `ingestMissing`. `ts` is collector-supplied, so a
+backdated event's record is *later* than its `ts` and a future-stamped event's is
+*earlier*, by any distance; keying on `event_ts` and not on `ingested_at` finds
+both. `event_id` is not a key, so this is still one scan of `event_ingest` per
+day (what `graphIngest` and `hourLeaves`'s lookback pay too), not one per page.
+`hourlyRoots` are
 RFC 6962 roots per *first-ingest* hour over the day's members in
 `(ingested_at, event_id)` order — exactly the anchor job's grouping — and
 `chainTip` is the hash of the last event in file order. Files are written as
@@ -652,19 +662,51 @@ RFC 6962 roots per *first-ingest* hour over the day's members in
 always names complete files and a crash leaves only `.part` files for the next
 run to remove.
 
-Before writing a byte the command refuses: a day that is not closed; `--out`
-empty (what systemd expands an unset `SUBSTRATE_LEDGER_ARCHIVE_DIR` to); a
-directory that is `/`, inside the working tree, under `/opt/agent-substrate` or
-itself a checkout; and a filesystem with fewer than `SUBSTRATE_DEPLOY_MIN_FREE_GB`
-(5; `0` disables) gigabytes free, read with `df -Pk` exactly as the deploy gate
-reads it — unreadable refuses. Each archived day is then recorded in the ledger
+Before creating or writing anything the command refuses: a day that is not
+closed; `--out` empty (what systemd expands an unset
+`SUBSTRATE_LEDGER_ARCHIVE_DIR` to); a directory that is `/`, inside the working
+tree, under `/opt/agent-substrate` or itself a checkout; a directory that is not
+on a filesystem of its own — the `st_dev` of the nearest *existing* ancestor,
+read before anything is created, must differ from that of `/` and of the
+release root (devices, not `df` names: two tmpfs mounts share a name and are
+different filesystems), else it refuses by name, as does an unreadable `stat`;
+and a filesystem with
+fewer than `SUBSTRATE_DEPLOY_MIN_FREE_GB` (5; `0` disables) gigabytes free, read
+with `df -Pk` on that same ancestor as the deploy gate reads it — unreadable
+refuses. The mount gate
+exists because an off-box volume that did not mount after a reboot leaves its
+path as a plain directory on the root disk, where `mkdir -p` would build the
+archive and the free-space floor would pass on the root disk's headroom.
+`SUBSTRATE_LEDGER_ARCHIVE_ALLOW_ROOTFS=1` waives only the mount gate, for a
+deliberate local test on a one-disk machine; the unit never sets it. The unit
+also carries `RequiresMountsFor=/mnt/ledger-archive` so systemd orders it after
+the volume's mount and fails the start when that mount is down; the operator's
+drop-in repeats the directive for the real `SUBSTRATE_LEDGER_ARCHIVE_DIR` when
+it is elsewhere.
+
+Each archived day is then recorded in the ledger
 as a `note` on surface `substrate` (`session_id: "ledger-archive:<day>"`,
 `summary: "ledger archive <day>: …"`, `payload.action: "ledger.archive"` with the
 counts, cursors, chain tip and file digests — no bodies, no path), which is what
-`coverage` and `/healthz` read back as the last archive window. Exit 0 done, 1 a
-ledger failure, 2 a refusal. `infra/vps/substrate-ledger-archive.timer` runs it
-daily at 03:30 UTC, disabled until the operator mounts the off-box path
-(`infra/vps/README.md`, *Daily ledger archive*).
+`coverage` and `/healthz` read back as the last archive window — the newest *day*
+in a note's summary, not the newest write, so a late retry of an older day never
+moves it backwards. A note the
+ledger does not take (`stored: false`, or an emit that throws) cannot be recovered
+by re-exporting — the manifest means "do not export this day again" — so the run
+writes `note-pending-<day>.json` beside the manifest *before* it sends the note
+and deletes it only once the ledger reports it stored (the note to send, an
+attempt count and the last error): a refused note, a throwing emit and a process
+killed mid-send all leave it. The day's files are never rewritten and the run
+exits 1. Every
+later `archive` run sends the pending notes first, oldest day first, and deletes
+each marker the ledger takes; a marker whose note the ledger will not take is
+counted pending and the run goes on to archive new days. Until then the day is
+on disk but absent from
+`coverage` and `/healthz.jobs.ledger.lastArchiveDay`, which is the truth. Exit 0
+done, 1 a ledger failure or a note still pending, 2 a refusal.
+`infra/vps/substrate-ledger-archive.timer` runs it daily at 03:30 UTC, disabled
+until the operator mounts the off-box path (`infra/vps/README.md`, *Daily ledger
+archive*).
 
 ### Verify
 
@@ -673,8 +715,10 @@ each manifest in the directory (or the one day) it recomputes, from the files
 alone: the SHA-256 of each data file against the manifest; the line counts; every
 event's `hash` as `eventHash` of the rest of the line (the recomputation
 `substrate verify` makes); the chain — within a session no two events may claim
-the same `prev` (a fork), while a `prev` naming an event outside the archive is a
-chain continuing from another day and is fine — and the chain tip; the hourly
+the same `prev` (a fork), counted for every non-null `prev`: a `prev` naming an
+event outside the archive is a chain continuing from another day and is fine
+once, but two events naming the same outside predecessor are a fork and fail —
+and the chain tip; the hourly
 roots from the ingest file, hour for hour against the manifest; and each hour
 against its receipt: `verified` when the receipt's `event_count` equals the
 members present and the roots agree, `partial` when the count differs (the hour

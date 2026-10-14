@@ -668,10 +668,15 @@ export function evaluatePlaneSlos(snapshot: MetricSnapshot[], options: PlaneEval
 
 export const INDEX_VOLUME_ENV = "SUBSTRATE_INDEX_VOLUME_BYTES";
 export const CAPACITY_RUNWAY_ID = "capacity.index.runway_days";
-/** Samples the ring keeps: one a minute for a day. */
-export const CAPACITY_RING_MAX = 1440;
-/** Two reads inside this many ms coalesce into one sample (the newest wins). */
-export const CAPACITY_DEDUPE_MS = 60_000;
+/**
+ * The fixed sampling grid: at most one sample per `floor(at / bucketMs)`
+ * bucket, and the first read in a bucket keeps it — a later read in the same
+ * bucket never moves that sample's timestamp. Keyed by the grid, not by the
+ * distance to the newest sample: a 5 s poller against a distance rule kept
+ * dragging the newest sample forward and the ring never spanned a day
+ * (Greptile round 1, PR #61).
+ */
+export const CAPACITY_BUCKET_MS = 60_000;
 /**
  * The span the samples must cover before a growth rate is fitted. A day, so
  * the daily vacuum and a single bulk ingest cannot read as a trend: the
@@ -679,6 +684,15 @@ export const CAPACITY_DEDUPE_MS = 60_000;
  * sweeper deleting rows would report an index that is shrinking forever.
  */
 export const CAPACITY_MIN_SPAN_MS = 24 * 60 * 60 * 1000;
+/**
+ * Samples the ring keeps: the minute buckets of the required span plus an
+ * hour of margin. N samples in consecutive buckets span at least
+ * `(N - 1) * bucketMs - (bucketMs - 1)` ms first-to-last, so the bare 1,440
+ * would stop a minute or two short of 24 h and never be judged; the margin
+ * keeps the oldest sample behind the day however the reads fall in their
+ * buckets (Greptile round 1, PR #61).
+ */
+export const CAPACITY_RING_MAX = CAPACITY_MIN_SPAN_MS / CAPACITY_BUCKET_MS + 60;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 export interface CapacitySample {
@@ -688,11 +702,12 @@ export interface CapacitySample {
 }
 
 /**
- * The `databaseBytes` history the runway is fitted over: one sample per
- * `/healthz` capacity read, bounded by count rather than time so a day of
- * minute reads is kept whatever the poll rate, and carried across restarts in
- * the SLO checkpoint. A read landing inside `dedupeMs` of the newest sample
- * replaces it, so a 5 s poller fills the ring no faster than a 60 s one.
+ * The `databaseBytes` history the runway is fitted over: at most one sample
+ * per `bucketMs` bucket of wall-clock time, so the ring holds a function of
+ * time rather than of the poll rate — a 5 s `/healthz` poller and a 60 s one
+ * both fill it at one sample a minute and reach the 24 h span in a day — and
+ * carried across restarts in the SLO checkpoint. Bounded by count, so the
+ * checkpoint section is bounded whatever a clock does.
  */
 export class CapacityRing {
 	readonly #samples: CapacitySample[];
@@ -700,7 +715,7 @@ export class CapacityRing {
 	constructor(
 		prior: readonly CapacitySample[] = [],
 		readonly max: number = CAPACITY_RING_MAX,
-		readonly dedupeMs: number = CAPACITY_DEDUPE_MS,
+		readonly bucketMs: number = CAPACITY_BUCKET_MS,
 	) {
 		this.#samples = prior
 			.filter((sample) => Number.isFinite(sample.at) && Number.isFinite(sample.databaseBytes) && sample.databaseBytes >= 0)
@@ -708,16 +723,16 @@ export class CapacityRing {
 			.map((sample) => ({ ...sample }));
 	}
 
-	/** Record one read. A non-finite or negative size, or a clock behind the newest sample, is ignored. */
+	/**
+	 * Record one read. A non-finite or negative size, or a clock behind the
+	 * newest sample, is ignored. A read in the newest sample's grid bucket is
+	 * ignored too — that sample keeps its own time and size; a read in a later
+	 * bucket starts a new sample.
+	 */
 	record(at: number, databaseBytes: number): void {
 		if (!Number.isFinite(at) || !Number.isFinite(databaseBytes) || databaseBytes < 0) return;
 		const last = this.#samples[this.#samples.length - 1];
-		if (last !== undefined && at < last.at) return;
-		if (last !== undefined && at - last.at < this.dedupeMs) {
-			last.at = at;
-			last.databaseBytes = databaseBytes;
-			return;
-		}
+		if (last !== undefined && (at < last.at || Math.floor(last.at / this.bucketMs) === Math.floor(at / this.bucketMs))) return;
 		this.#samples.push({ at, databaseBytes });
 		if (this.#samples.length > this.max) this.#samples.splice(0, this.#samples.length - this.max);
 	}

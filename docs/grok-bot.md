@@ -79,7 +79,7 @@ The tool also takes `if_none_match`: the `etag` from an earlier reply, in `If-No
 
 `bun run smoke:grok` (`scripts/grok-connector-smoke.ts`) proves the contract above over the wire, as the `grok-bot` bearer, against a running `substrate-mcp` (`SUBSTRATE_URL`, default `http://127.0.0.1:7410`). It is opt-in and read-only — two MCP calls, two REST briefs, one health read; no event, no retain, no write — and it never prints the bearer. Four checks, each `ok`, `degraded` or `failed`, one line each with its timing (`--json` for one JSON report):
 
-1. `mcp.brief` — `memory_brief { repo }` with no `surface` argument answers within 1,500 ms with non-empty text, an explicit `state`, and `surface: grok-bot`; another surface fails the check with a hint naming the variables.
+1. `mcp.brief` — `memory_brief { repo }` with no `surface` argument answers within 1,500 ms with non-empty text, an explicit `state`, and `surface: grok-bot`; another surface fails the check with a hint naming the variables, and a reply without `surface` (an older server) fails it too — the identity is not proven, so it is not a pass.
 2. `mcp.brief.not_modified` — `memory_brief { repo, if_none_match: <etag> }` answers `not_modified: true` within 500 ms.
 3. `rest.brief.304` — `POST /brief`, then the same with `If-None-Match`, answers `304` with an empty body.
 4. `healthz.planes` — every configured plane reachable with a closed breaker; otherwise `degraded`, not `failed`.

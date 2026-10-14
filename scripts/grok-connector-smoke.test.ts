@@ -246,4 +246,29 @@ describe("against the harness", () => {
 		expect(report.exit).toBe(2);
 		expect(report.checks[0]?.detail).toContain("unreachable");
 	});
+
+	test("a server that reports no caller surface fails check 1: the identity is not proven", async () => {
+		// A pre-N7 server, or one whose metadata dropped the field: text, state and
+		// etag are all there, only `surface` is missing.
+		const seen: string[] = [];
+		const fetchImpl = (async (input: string | URL | Request) => {
+			seen.push(String(input));
+			const reply = {
+				jsonrpc: "2.0",
+				id: 1,
+				result: {
+					content: [{ type: "text", text: "# acme/app\nNo substrate history for this repo yet." }],
+					structuredContent: { etag: 'W/"00000000000000000000000000000000"', state: "complete", failed_sources: [], snapshot_at: null },
+				},
+			};
+			return new Response(JSON.stringify(reply), { status: 200, headers: { "content-type": "application/json" } });
+		}) as unknown as typeof fetch;
+		const report = await runSmoke({ base: "http://127.0.0.1:1", bearer: GROK, fetchImpl });
+		expect(report.exit).toBe(2);
+		expect(report.checks[0]?.verdict).toBe("failed");
+		expect(report.checks[0]?.detail).toContain("no `surface` in structuredContent");
+		expect(report.checks[1]?.detail).toContain("not run");
+		// Check 3 stops after the first /brief (no ETag header to condition on); check 4 still reads health.
+		expect(seen).toEqual(["http://127.0.0.1:1/mcp", "http://127.0.0.1:1/brief", "http://127.0.0.1:1/healthz"]);
+	});
 });

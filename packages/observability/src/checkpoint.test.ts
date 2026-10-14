@@ -7,7 +7,7 @@ import { BurnLedger, BURN_MAX_SAMPLES, TOKENS_BURN_ENV, evaluateBurnSlos } from 
 import { CheckpointError, MAX_CHECKPOINT_BYTES, restoreCheckpoint, serializeCheckpoint, snapshotCheckpoint, type SloCheckpoint } from "./checkpoint.ts";
 import { METRIC, SubstrateInstruments } from "./instruments.ts";
 import { MetricRegistry, findHistogram, mergeHistogram } from "./metrics.ts";
-import { CapacityRing, PLANE_BUCKET_MS, PLANE_WINDOW_MS, PlaneWindow, evaluatePlaneSlos, evaluateSlos } from "./slo.ts";
+import { CAPACITY_RING_MAX, CapacityRing, PLANE_BUCKET_MS, PLANE_WINDOW_MS, PlaneWindow, evaluatePlaneSlos, evaluateSlos } from "./slo.ts";
 
 const T0 = Date.parse("2026-10-13T12:00:00.000Z");
 const SINCE = new Date(T0 - 3_600_000).toISOString();
@@ -208,14 +208,14 @@ describe("restoreCheckpoint refuses", () => {
 			...valid(),
 			planes: { index: Array.from({ length: planeCap + 50 }, (_, i) => ({ atMs: i, ok: i, total: i, baseAtMs: i, baseOk: i, baseTotal: i })) },
 			burn: { [METRIC.tokens]: Array.from({ length: BURN_MAX_SAMPLES + 20 }, (_, i) => ({ atMs: i, total: i })) },
-			capacity: Array.from({ length: 1500 }, (_, i) => ({ at: i, databaseBytes: i })),
+			capacity: Array.from({ length: CAPACITY_RING_MAX + 60 }, (_, i) => ({ at: i, databaseBytes: i })),
 		});
 		const restored = restoreCheckpoint(text);
 		expect(restored.planes.index).toHaveLength(planeCap);
 		expect(restored.planes.index?.[0]?.atMs).toBe(50);
 		expect(restored.burn[METRIC.tokens]).toHaveLength(BURN_MAX_SAMPLES);
 		expect(restored.burn[METRIC.tokens]?.[0]?.atMs).toBe(20);
-		expect(restored.capacity).toHaveLength(1440);
+		expect(restored.capacity).toHaveLength(CAPACITY_RING_MAX);
 		expect(restored.capacity[0]?.at).toBe(60);
 	});
 

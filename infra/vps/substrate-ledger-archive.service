@@ -7,6 +7,17 @@ Wants=network-online.target
 # timer's persistent backlog. The path is the pinned release, not the checkout:
 # ConditionPathExists follows the current symlink.
 ConditionPathExists=/opt/agent-substrate/current/packages/cli/src/index.ts
+# Wait for, and require, the filesystem the archive lives on. systemd orders the
+# unit after the mount units that cover each path and fails the start when one
+# cannot be activated — a volume that did not come up after a reboot is a failed
+# run, not a local archive. The path below is the documented default; the
+# operator's drop-in (substrate-ledger-archive.service.d/10-environment.conf)
+# MUST repeat the directive for the real SUBSTRATE_LEDGER_ARCHIVE_DIR when it
+# differs (RequiresMountsFor= accumulates, so adding a path never removes this
+# one). The command independently refuses a directory on the root filesystem
+# (unless SUBSTRATE_LEDGER_ARCHIVE_ALLOW_ROOTFS=1, which the unit never sets), so
+# a missing or autofs-deferred mount is caught even where this ordering is not.
+RequiresMountsFor=/mnt/ledger-archive
 
 [Service]
 Type=oneshot
@@ -47,8 +58,9 @@ SyslogIdentifier=substrate-ledger-archive
 
 # It talks to Greptime and writes to the archive mount. Nothing else.
 # ProtectSystem=full leaves /mnt and /srv writable, which is where an off-box
-# archive path is mounted; the command itself refuses the release root and the
-# checkout, so a misconfigured path fails rather than filling the root disk.
+# archive path is mounted; the command itself refuses the release root, the
+# checkout and any directory on the root filesystem, so a misconfigured or
+# unmounted path fails rather than filling the root disk.
 # ProtectHome=false is the remaining exception: ExecStart's bun lives under
 # /root/.local, so ProtectHome=true would hide the interpreter.
 NoNewPrivileges=true

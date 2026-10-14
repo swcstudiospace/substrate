@@ -3,8 +3,9 @@
  * started, fed, checkpointed, closed and started again on the same checkpoint
  * path, which is what a deploy does to the service.
  */
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test, vi } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { rename, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,7 +21,7 @@ import {
 	type CapacitySample,
 } from "@substrate/observability";
 import { loadConfig } from "./config.ts";
-import { createObservability, type Observability } from "./observe.ts";
+import { createObservability, type CheckpointFiles, type Observability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
 import { Substrate } from "./service.ts";
 
@@ -187,6 +188,101 @@ describe("/slo.history across restarts", () => {
 		const write = await harness.observability.checkpoint();
 		expect(write.written).toBe(false);
 		expect(write.error).not.toBeNull();
+	});
+
+	test("overlapping triggers share one write; the next trigger after it starts another (Greptile round 1, PR #61)", async () => {
+		// The periodic timer, `checkpoint()` and the shutdown path all go through
+		// the same single-flight door, so a slow disk never has two `.part` +
+		// rename sequences racing over one path.
+		const path = checkpointPath();
+		const harness = await start({ SUBSTRATE_SLO_CHECKPOINT: path, SUBSTRATE_SLO_CHECKPOINT_S: "1" });
+		harness.observability.observer.briefed?.({ surface: "omp", graph_id: "ut-1", ok: true, durationMs: 100 });
+		const first = harness.observability.checkpoint();
+		const second = harness.observability.checkpoint();
+		expect(second).toBe(first);
+		const [a, b] = await Promise.all([first, second]);
+		expect(a).toBe(b);
+		expect(a).toMatchObject({ written: true, error: null });
+		const writtenAt = restoreCheckpoint(readFileSync(path, "utf8")).writtenAt;
+
+		// Once it has settled, a new trigger is a new write.
+		harness.observability.observer.briefed?.({ surface: "omp", graph_id: "ut-1", ok: true, durationMs: 100 });
+		const third = harness.observability.checkpoint();
+		expect(third).not.toBe(first);
+		expect((await third).written).toBe(true);
+		const saved = restoreCheckpoint(readFileSync(path, "utf8"));
+		expect(Date.parse(saved.writtenAt)).toBeGreaterThanOrEqual(Date.parse(writtenAt));
+		expect(saved.metrics.find((m) => m.name === METRIC.briefDuration)?.points[0]).toMatchObject({ count: 2 });
+		expect(existsSync(`${path}.part`)).toBe(false);
+	});
+
+	test("the timer and a manual checkpoint never write concurrently; the shutdown flush waits for the write in flight, then writes fresh (Greptile round 1, PR #61)", async () => {
+		// The timer used to call the raw writer, so a slow write could overlap the
+		// next tick or the shutdown checkpoint: two `.part` writers and renames
+		// over one path. A held-open writeFile makes the overlap observable, and
+		// fake timers drive the ticks without a wall-clock wait.
+		const path = checkpointPath();
+		const env = { SUBSTRATE_SLO_CHECKPOINT: path, SUBSTRATE_SLO_CHECKPOINT_S: "1" };
+		let active = 0;
+		let maxActive = 0;
+		let started = 0;
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const files: CheckpointFiles = {
+			async writeFile(target, data, encoding) {
+				started++;
+				active++;
+				maxActive = Math.max(maxActive, active);
+				try {
+					await gate;
+					await writeFile(target, data, encoding);
+				} finally {
+					active--;
+				}
+			},
+			rename,
+		};
+		vi.useFakeTimers();
+		const observability = createObservability(loadConfig(env), env, files);
+		try {
+			await observability.start();
+			observability.observer.briefed?.({ surface: "omp", graph_id: "ut-1", ok: true, durationMs: 100 });
+			// The first timer tick starts a write, which then hangs on the gate.
+			vi.advanceTimersByTime(1000);
+			expect(started).toBe(1);
+
+			// Something is observed after that write took its snapshot, then the
+			// shutdown flush arrives mid-write, and a second and third timer tick
+			// fall inside the wait as well: none may start another writer.
+			observability.observer.briefed?.({ surface: "omp", graph_id: "ut-1", ok: true, durationMs: 100 });
+			let shutdownSettled = false;
+			const flush = observability.flush();
+			const shutdown = flush.then((write) => {
+				shutdownSettled = true;
+				return write;
+			});
+			// A second shutdown call joins the final write rather than starting one.
+			expect(observability.flush()).toBe(flush);
+			vi.advanceTimersByTime(2000);
+			await Promise.resolve();
+			expect(started).toBe(1);
+			expect(maxActive).toBe(1);
+			expect(shutdownSettled).toBe(false);
+
+			release();
+			expect(await shutdown).toMatchObject({ written: true, error: null });
+			// The in-flight write finished first, then exactly one fresh write ran,
+			// never overlapping it: the file holds the post-write observation.
+			expect(started).toBe(2);
+			expect(maxActive).toBe(1);
+			expect(restoreCheckpoint(readFileSync(path, "utf8")).metrics.find((m) => m.name === METRIC.briefDuration)?.points[0]).toMatchObject({ count: 2 });
+			expect(existsSync(`${path}.part`)).toBe(false);
+		} finally {
+			observability.stop();
+			vi.useRealTimers();
+		}
 	});
 });
 

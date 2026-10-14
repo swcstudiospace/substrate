@@ -40,3 +40,7 @@ Gateway adoption (programming-desk `desk-gateway`): recorded in `docs/grok-bot.m
 ## Gates
 
 At the branch head after both waves merged (orchestrator-run, 2026-10-13): `bunx tsc --noEmit` clean · `bun test` with `SUBSTRATE_TEST_PG_URL` (scratch Postgres 16) **3845 pass / 1 skip / 1 fail** — the one failure is the recorded F-01 (`scripts/rehearsal.test.ts` "CLI refusals > --port 7410 exits 2", identical on `main`) · `bun run check:phase-close` pass (EVENT_KINDS 12, SURFACES 27, 4 lock files) · `bun run test:py` 298 pass.
+
+## Greptile round 1 (PR #61)
+
+- P2 `scripts/grok-connector-smoke.ts:259` "Missing caller identity passes": check 1 accepted a reply whose `structuredContent.surface` was absent. Fixed: a missing `surface` now fails `mcp.brief` with the reason ``no `surface` in structuredContent — an older server, or the caller identity is not reported``; only `surface === grok-bot` passes. Test added in `scripts/grok-connector-smoke.test.ts` (fake `fetchImpl` answering text/state/etag without `surface` → exit 2, check 1 failed, check 2 not run). `docs/grok-bot.md` § Connector smoke says so.

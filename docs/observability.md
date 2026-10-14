@@ -344,7 +344,14 @@ start with nothing to say; a corrupt one, one over 4 MB, or one of another
 version is **one boot line** (`degraded — slo checkpoint … starts fresh`) and
 a fresh start, never a refusal to boot. A metric the running release no
 longer records, or a histogram whose bucket edges moved, is left out and
-named once.
+named once. Restored points are admitted under the same cardinality caps as live
+observations (the caps bound the restored and live series together), so a point
+past the cap folds into `_overflow` and is counted in `overflowed`, and repeated
+restarts cannot grow the series set. Every write — the timer, `SIGTERM` and a
+manual one — goes through one single-flight door: a trigger that arrives while a
+write is in flight joins it instead of starting a second `.part` rename. The
+`SIGTERM` write alone waits for the write in flight and then runs one fresh
+write, so observations made meanwhile are saved.
 
 `GET /slo` carries the state as `history`:
 
@@ -381,9 +388,12 @@ reads:
 | --- | --- |
 | `capacity.index.runway_days` | `(SUBSTRATE_INDEX_VOLUME_BYTES − databaseBytes) / bytes per day ≥ 14 days` (`SUBSTRATE_SLO_RUNWAY_DAYS`), the rate a least-squares fit over the ring |
 
-Every `/healthz` capacity read that answered in time is one sample in a ring
-of at most 1,440 (`{at, databaseBytes}`; reads inside 60 s of the newest
-coalesce), carried in the checkpoint. The fit needs samples spanning at least
+Every `/healthz` capacity read that answered in time is offered to a ring of at
+most 1,500 samples (`{at, databaseBytes}`), carried in the checkpoint. The ring
+keeps at most one sample per fixed 60 s bucket: the first read in a bucket
+keeps it, and later reads in that bucket never move its time, so a 5 s poller
+and a 60 s one fill it alike and 1,500 is the day's 1,440 minute samples plus
+an hour of margin. The fit needs samples spanning at least
 **24 h** — one vacuum or one bulk ingest must not read as a trend — and
 reports `insufficient-data` with the span until then, and when
 `SUBSTRATE_INDEX_VOLUME_BYTES` is unset (the row says which). An index that is

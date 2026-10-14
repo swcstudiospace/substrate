@@ -137,7 +137,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 			// The SLO checkpoint (uplift-3 N2) is written inside the same bound: it is
 			// what lets the next epoch pick the series up where this one left them.
 			await Promise.race([
-				Promise.all([observability.exporter?.flush().catch(() => undefined) ?? Promise.resolve(), observability.checkpoint()]),
+				Promise.all([observability.exporter?.flush().catch(() => undefined) ?? Promise.resolve(), observability.flush()]),
 				Bun.sleep(SHUTDOWN_FLUSH_MS),
 			]);
 			process.exit(0);

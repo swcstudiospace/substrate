@@ -47,3 +47,13 @@ Behaviour that does not depend on the flag: the retain forward refuses expired e
 ## Gates
 
 At the branch head after both waves merged (orchestrator-run, 2026-10-13): `bunx tsc --noEmit` clean · `bun test` with `SUBSTRATE_TEST_PG_URL` (scratch Postgres 16) **3845 pass / 1 skip / 1 fail** — the one failure is the recorded F-01 (`scripts/rehearsal.test.ts` "CLI refusals > --port 7410 exits 2", identical on `main`) · `bun run check:phase-close` pass (EVENT_KINDS 12, SURFACES 27, 4 lock files) · `bun run test:py` 298 pass.
+
+## Greptile round 1 (PR #61)
+
+Two P1 findings on `packages/mcp-server/src/service.ts`, both fixed:
+
+- **[3] Briefs keep expired advice.** `briefDetailed`'s `args` — the one object that keys both the `brief` answer and the `brief-snapshot` — now spreads `expiryKey(undefined)`, so under `enforce` both keys carry `expiry: "enforce"` and a report-mode brief (or its last-good snapshot) in redis is never served `complete`/`snapshot` by a process restarted into `enforce`. Under `report` the spread is empty, so every pre-N4 brief key is byte-identical (pinned by test).
+- **[4] Finished-graph memories stay cached.** Both memory-search cache entries (`searchMemory`, `searchMemoryPage`) now depend on `memoryGenerations()` = `[MEMORY_GENERATION_KEY, GRAPHS_GENERATION_KEY]` — the pair a brief already embeds. `bumpGraph` (register, bind, claim, release, completion, reap) moves the shared graphs key, so a `ttl: graph` entry (which has no `expires_at` for `refreshAt` to reach) is dropped from cached searches the moment its graph finishes, in both modes: under `enforce` it disappears, under `report` its `expired` tag is refreshed. Cost: a search miss after a graph write, which is what the brief already pays. `recallMemories` keeps its single memory dependency (plane hits do not depend on graph status).
+- Test: new `packages/mcp-server/src/memory-expiry-cache.test.ts` — under `enforce`, a cached list search and a cached paged search containing a `graph` entry both miss and return it gone after `registerGraph({ status: "Merged" })` (only the graph generations moved; the memory generation is untouched), with no TTL wait; under `report` the same bump refreshes the tag; a `report` brief cached in redis is not a hit for an `enforce` process, its snapshot replays for a degraded `report` process but not for a degraded `enforce` one; and `report` brief keys are unchanged between a process with the variable unset and one with `report` spelled out.
+
+Gates: pending orchestrator.

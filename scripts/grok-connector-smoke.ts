@@ -256,7 +256,12 @@ export async function runSmoke(options: SmokeOptions): Promise<Report> {
 		check("mcp.brief", "failed", first.ms, "the brief text was empty");
 	} else if (brief.state === null || !(BRIEF_STATES as readonly string[]).includes(brief.state) || brief.etag === null) {
 		check("mcp.brief", "failed", first.ms, "no explicit state or etag in structuredContent — an older server, or the metadata contract is broken");
-	} else if (brief.surface !== null && brief.surface !== GROK_SURFACE) {
+	} else if (brief.surface === null) {
+		// The bearer is the identity, and this field is the only place the server says
+		// which surface it resolved to: a reply without it cannot prove the token is
+		// grok-bot's, so it is not a pass.
+		check("mcp.brief", "failed", first.ms, "no `surface` in structuredContent — an older server, or the caller identity is not reported");
+	} else if (brief.surface !== GROK_SURFACE) {
 		check("mcp.brief", "failed", first.ms, `the bearer resolved to surface ${brief.surface}, not ${GROK_SURFACE}; ${BEARER_HINT}`);
 	} else if (first.ms > BRIEF_BUDGET_MS) {
 		check("mcp.brief", "failed", first.ms, `state ${brief.state}, but over the ${BRIEF_BUDGET_MS} ms budget`);

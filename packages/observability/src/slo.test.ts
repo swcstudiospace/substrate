@@ -829,11 +829,13 @@ describe("the capacity runway objective (uplift-3 N2)", () => {
 		expect(result!.bytesPerDay).toBeLessThan(30 * MB);
 	});
 
-	test("the ring dedupes inside a minute, ignores junk and a clock behind it, and is bounded", () => {
+	test("the ring keeps the first read of each minute bucket, ignores junk and a clock behind it, and is bounded", () => {
 		const samples = new CapacityRing();
 		samples.record(T0, 100);
+		// A later read in the same bucket never moves the sample's time or size.
 		samples.record(T0 + 30_000, 110);
-		expect(samples.samples()).toEqual([{ at: T0 + 30_000, databaseBytes: 110 }]);
+		samples.record(T0 + 59_999, 111);
+		expect(samples.samples()).toEqual([{ at: T0, databaseBytes: 100 }]);
 		samples.record(T0 + 90_000, 120);
 		expect(samples.size).toBe(2);
 		samples.record(T0 + 80_000, 999);
@@ -845,5 +847,37 @@ describe("the capacity runway objective (uplift-3 N2)", () => {
 		expect(samples.samples()[0]?.databaseBytes).toBe(10);
 		const restored = new CapacityRing(samples.samples());
 		expect(restored.samples()).toEqual(samples.samples());
+	});
+
+	test("the ring holds the day's minute buckets plus a margin", () => {
+		expect(CAPACITY_RING_MAX).toBeGreaterThan(24 * 60);
+	});
+
+	test("a 5 s poller for 25 h builds a ring that spans at least 24 h and is judged (Greptile round 1, PR #61)", () => {
+		// Replacing the newest sample on every read kept moving its time forward
+		// and never started a new one, so the ring never held two samples a day
+		// apart and the runway stayed insufficient-data forever.
+		const samples = new CapacityRing();
+		const start = T0 + 17_000;
+		for (let t = 0; t <= 25 * 3_600_000; t += 5_000) {
+			samples.record(start + t, Math.round(2 * GB + (100 * MB * t) / DAY));
+		}
+		const retained = samples.samples();
+		expect(retained.length).toBeGreaterThan(24 * 60);
+		// Never two samples in one bucket, and timestamps stay on first reads.
+		for (let i = 1; i < retained.length; i++) {
+			expect(Math.floor(retained[i]!.at / 60_000)).toBeGreaterThan(Math.floor(retained[i - 1]!.at / 60_000));
+		}
+		expect(retained[retained.length - 1]!.at - retained[0]!.at).toBeGreaterThanOrEqual(24 * 3_600_000);
+		const [result] = evaluateCapacitySlos(samples, { volumeBytes: 10 * GB });
+		expect(result!.status).toBe("ok");
+		expect(result!.bytesPerDay).toBeCloseTo(100 * MB, -3);
+		expect(result!.observed).toBeGreaterThan(70);
+	});
+
+	test("a 5 s poller for 23 h is still insufficient-data", () => {
+		const samples = new CapacityRing();
+		for (let t = 0; t <= 23 * 3_600_000; t += 5_000) samples.record(T0 + t, 2 * GB);
+		expect(evaluateCapacitySlos(samples, { volumeBytes: 10 * GB })[0]!.status).toBe("insufficient-data");
 	});
 });

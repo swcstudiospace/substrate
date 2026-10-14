@@ -520,6 +520,26 @@ describe("emit", () => {
 		expect(fx.posts.map((p) => p.bearer)).toEqual([BEARER, BEARER]);
 	});
 
+	test("a rotated SUBSTRATE_TOKEN_SUBSTRATE list sends only its first entry as the bearer", async () => {
+		// During a rotation the server's variable lists `old,new`; the whole
+		// list as one bearer is a 401 and the drift warnings would fall silent.
+		const OLD = "bearer-old-0123456789ab";
+		const NEW = "bearer-new-ba9876543210";
+		const comma = fake();
+		await emitDrift(drifted(), { SUBSTRATE_DOCTOR_EMIT: "1", SUBSTRATE_TOKEN_SUBSTRATE: `${OLD},${NEW}` }, comma.io);
+		expect(comma.posts.map((p) => p.bearer)).toEqual([OLD, OLD]);
+		for (const p of comma.posts) {
+			expect(p.bearer).not.toContain(",");
+			expect(p.bearer).not.toContain(NEW);
+		}
+		// Whitespace separators and a leading separator behave the same: first non-empty entry.
+		const spaced = fake();
+		await emitDrift(drifted(), { SUBSTRATE_DOCTOR_EMIT: "1", SUBSTRATE_TOKEN_SUBSTRATE: ` \n${OLD} ${NEW}` }, spaced.io);
+		expect(spaced.posts.map((p) => p.bearer)).toEqual([OLD, OLD]);
+		// Nothing on stderr names a value.
+		expect(`${comma.stderr.join("")}${spaced.stderr.join("")}`).not.toMatch(/bearer-(?:old|new)/);
+	});
+
 	test("a POST that is not stored keeps the previous record so the next run retries", async () => {
 		const failing = fake(null, false);
 		expect(await emitDrift(drifted(), ENV, failing.io)).toEqual([]);

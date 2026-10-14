@@ -6,10 +6,12 @@
 import { describe, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { DocsSearchSample } from "@substrate/observability";
+import { CircuitBreaker, gatedFetch, type DocsSearchSample, type PlaneGate } from "@substrate/observability";
 import { ReadThroughCache, type CacheRedis } from "./cache.ts";
 import { citationProvenanceCounts, searchDocs, searchReplyStorable, SNIPPET_CAP, UNTRUSTED_DOCS_NOTICE, type SearchReply } from "./docs-search.ts";
+import type { DatasetListSource } from "./docs-datasets.ts";
 import { RagflowFake, type FakeChunk } from "./ragflow-fake.ts";
+import { ragflowOp } from "./planes/ragflow.ts";
 import type { EventInput } from "./types.ts";
 import { loadConfig } from "./config.ts";
 import { createMcpServer } from "./mcp.ts";
@@ -224,15 +226,23 @@ describe("docs_search fan-out under one budget (uplift-3 N5)", () => {
 	 * the test resolves it; `arrived` settles when its retrieval reaches the
 	 * fake. Every other dataset answers at once.
 	 */
-	function stall(fake: RagflowFake): { gate: PromiseWithResolvers<FakeChunk[]>; arrived: Promise<void> } {
+	function stall(fake: RagflowFake, slow: string = SLOW): { gate: PromiseWithResolvers<FakeChunk[]>; arrived: Promise<void> } {
 		const gate = Promise.withResolvers<FakeChunk[]>();
 		const arrived = Promise.withResolvers<void>();
 		fake.answer = (datasetId) => {
-			if (datasetId !== SLOW) return fake.chunks[datasetId] ?? [];
+			if (datasetId !== slow) return fake.chunks[datasetId] ?? [];
 			arrived.resolve();
 			return gate.promise;
 		};
 		return { gate, arrived: arrived.promise };
+	}
+
+	/** The dataset list as the service's 60 s cache would hold it, so the list itself never consumes the breaker's probe. */
+	function listedBy(fake: RagflowFake): DatasetListSource {
+		return {
+			list: async () => ({ ok: true, datasets: fake.datasets.map((dataset) => ({ id: dataset.id, name: dataset.name })) }),
+			invalidate: () => {},
+		};
 	}
 
 	test("a dataset that outlives the budget is degraded alone: the others' citations arrive within the budget", async () => {
@@ -323,6 +333,121 @@ describe("docs_search fan-out under one budget (uplift-3 N5)", () => {
 		expect(reply.degraded_datasets).toBeUndefined();
 		expect(reply.chunks).toHaveLength(6);
 		expect(fake.retrievals()).toHaveLength(3);
+		expect(fake.maxInFlight).toBe(3);
+	});
+
+	test("Greptile round 1 (PR #61): a half-open breaker probes with the first dataset alone, then the siblings fan out and return citations", async () => {
+		const fake = new RagflowFake();
+		// A real breaker, opened by one failure and already past its open window.
+		let now = 1_000_000;
+		const breaker = new CircuitBreaker("ragflow", { enabled: true, failureThreshold: 1, openMs: 1000 }, () => now);
+		breaker.onFailure("ragflow 503");
+		now += 1000;
+		expect(breaker.state()).toBe("half-open");
+		const gate: PlaneGate = { plane: "ragflow", breaker, observe: null };
+		const fetchImpl = gatedFetch(gate, fake.fetch, ragflowOp);
+		// The probe settles only when released, so the siblings' departure is observable.
+		const { gate: probeGate, arrived } = stall(fake, "ds-berlin-agent-substrate");
+		const pending = searchDocs(
+			{ config: CONFIG, emit: async () => ({ stored: false }), fetchImpl, datasets: listedBy(fake), budgetMs: 2_000, breakerState: () => breaker.state() },
+			"who reads RAGFlow?",
+		);
+		await arrived;
+		// Only the probe has left; nobody was refused `ragflow circuit open`.
+		expect(fake.retrievals()).toHaveLength(1);
+		expect(breaker.state()).toBe("half-open");
+		probeGate.resolve(fake.chunks["ds-berlin-agent-substrate"] ?? []);
+		const reply = await pending;
+		// The probe closed the breaker; the siblings ran after it and answered.
+		expect(breaker.state()).toBe("closed");
+		expect(reply.degraded).toBeUndefined();
+		expect(reply.degraded_datasets).toBeUndefined();
+		expect(reply.chunks).toHaveLength(6);
+		expect(fake.retrievals()).toHaveLength(3);
+		expect(fake.maxInFlight).toBe(2);
+	});
+
+	test("Greptile round 1 (PR #61): the half-open probe still shares the budget — a stalled probe costs one budget, not a budget per dataset", async () => {
+		const fake = new RagflowFake();
+		let now = 1_000_000;
+		const breaker = new CircuitBreaker("ragflow", { enabled: true, failureThreshold: 1, openMs: 1000 }, () => now);
+		breaker.onFailure("ragflow 503");
+		now += 1000;
+		const fetchImpl = gatedFetch({ plane: "ragflow", breaker, observe: null }, fake.fetch, ragflowOp);
+		// Never released: the probe hangs past the budget. The deadline settles
+		// it, and the siblings — which only leave after it — find the same
+		// expired deadline, so the whole search still costs one budget and
+		// nothing reaches the plane behind a probe that never came back.
+		stall(fake, "ds-berlin-agent-substrate");
+		const started = performance.now();
+		const reply = await searchDocs(
+			{ config: CONFIG, emit: async () => ({ stored: false }), fetchImpl, datasets: listedBy(fake), budgetMs: BUDGET_MS, breakerState: () => breaker.state() },
+			"who reads RAGFlow?",
+		);
+		expect(performance.now() - started).toBeLessThan(BUDGET_MS * 10);
+		expect(reply.degraded).toBe(true);
+		expect(reply.degraded_datasets?.map((entry) => entry.dataset)).toEqual(["agent-substrate", "programming-desk", "agent-skills"]);
+		expect(reply.degraded_datasets?.every((entry) => entry.reason === `deadline (${BUDGET_MS} ms docs budget)`)).toBe(true);
+		// The breaker is still probing, so the siblings were refused at the gate: one retrieval reached the fake.
+		expect(fake.retrievals()).toHaveLength(1);
+		expect(breaker.state()).toBe("half-open");
+	});
+
+	/** A fetch that refuses the first retrieval of `datasetId` the way an open gate does, then serves normally. */
+	function refusingOnce(fake: RagflowFake, datasetId: string): typeof fetch {
+		let refused = false;
+		return (async (input: string | URL | Request, init?: RequestInit) => {
+			const body = typeof init?.body === "string" ? init.body : "";
+			if (!refused && String(input).endsWith("/api/v1/retrieval") && body.includes(datasetId)) {
+				refused = true;
+				const open = new Error("circuit open");
+				open.name = "BreakerOpenError";
+				throw open;
+			}
+			return fake.fetch(input, init);
+		}) as unknown as typeof fetch;
+	}
+
+	test("Greptile round 1 (PR #61): a sibling refused `ragflow circuit open` while the breaker has since closed is retried once and answers", async () => {
+		const fake = new RagflowFake();
+		const reply = await searchDocs(
+			{ config: CONFIG, emit: async () => ({ stored: false }), fetchImpl: refusingOnce(fake, "ds-leipzig-agent-skills"), budgetMs: 2_000, breakerState: () => "closed" },
+			"who reads RAGFlow?",
+		);
+		expect(reply.degraded).toBeUndefined();
+		expect(reply.degraded_datasets).toBeUndefined();
+		expect(reply.chunks).toHaveLength(6);
+		// Two first attempts reached the plane (the third was refused at the gate), plus the retry.
+		expect(fake.retrievals()).toHaveLength(3);
+	});
+
+	test("a `ragflow circuit open` refusal stands when the breaker is still not closed, and without breakerState nothing is retried", async () => {
+		for (const state of [() => "open" as const, undefined]) {
+			const fake = new RagflowFake();
+			const reply = await searchDocs(
+				{ config: CONFIG, emit: async () => ({ stored: false }), fetchImpl: refusingOnce(fake, "ds-leipzig-agent-skills"), budgetMs: 2_000, ...(state ? { breakerState: state } : {}) },
+				"who reads RAGFlow?",
+			);
+			expect(reply.degraded_datasets).toEqual([{ dataset: "agent-skills", reason: "ragflow circuit open" }]);
+			expect(reply.chunks).toHaveLength(4);
+		}
+	});
+
+	test("a closed breaker never serialises: all three leave together even with breakerState supplied", async () => {
+		const fake = new RagflowFake();
+		const everyoneArrived = Promise.withResolvers<void>();
+		let seen = 0;
+		fake.answer = async (datasetId) => {
+			seen += 1;
+			if (seen === fake.datasets.length) everyoneArrived.resolve();
+			await everyoneArrived.promise;
+			return fake.chunks[datasetId] ?? [];
+		};
+		const reply = await searchDocs(
+			{ config: CONFIG, emit: async () => ({ stored: false }), fetchImpl: fake.fetch, budgetMs: BUDGET_MS, breakerState: () => "closed" },
+			"who reads RAGFlow?",
+		);
+		expect(reply.chunks).toHaveLength(6);
 		expect(fake.maxInFlight).toBe(3);
 	});
 

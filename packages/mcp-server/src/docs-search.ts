@@ -32,7 +32,7 @@
  * failure isolation — see `searchDocs` and `degraded_datasets`.
  */
 import { randomUUID } from "node:crypto";
-import type { CitationProvenance } from "@substrate/observability";
+import type { BreakerState, CitationProvenance } from "@substrate/observability";
 import { sharedDeadline } from "./deadline.ts";
 import type { DatasetListSource } from "./docs-datasets.ts";
 import type { DocumentProvenance } from "./docs-ingest.ts";
@@ -42,6 +42,7 @@ import {
 	type FetchLike,
 	type RagflowChunk,
 	type RagflowConfig,
+	type RagflowDataset,
 	type RetrievalKnobs,
 	type RetrievalOutcome,
 } from "./planes/ragflow.ts";
@@ -160,6 +161,12 @@ export interface SearchDeps {
 	 * each retrieval bounded only by the plane client's own per-call timeout.
 	 */
 	budgetMs?: number;
+	/**
+	 * The RAGFlow breaker's state at search time (Greptile round 1, PR #61);
+	 * `closed` when omitted. Only `half-open` changes anything: the first
+	 * dataset is retrieved alone as the probe before the rest fan out.
+	 */
+	breakerState?: () => BreakerState;
 }
 
 function failed(deps: SearchDeps, sessionId: string, reason: string, degradedDatasets?: DegradedDataset[]): Promise<SearchReply> {
@@ -186,6 +193,9 @@ function failed(deps: SearchDeps, sessionId: string, reason: string, degradedDat
 
 /** The most characters a per-dataset reason carries into a reply or an event. */
 const REASON_CAP = 200;
+
+/** The reason the plane client gives a call its open (or probe-less half-open) breaker refused (`planes/ragflow.ts`). */
+const CIRCUIT_OPEN = "ragflow circuit open";
 
 /** The bounded, redacted form of why one dataset was not served. */
 function datasetReason(cause: unknown): string {
@@ -253,19 +263,50 @@ export async function searchDocs(deps: SearchDeps, question: string): Promise<Se
 	if (readable.length === 0) return failed(deps, sessionId, "no-readable-datasets");
 
 	const deadline = sharedDeadline(deps.budgetMs ?? 0, "docs budget");
-	// Every retrieval leaves now. A client that throws synchronously is a
-	// failed dataset too, not an exception out of the search.
-	const settled = await Promise.allSettled(
-		readable.map((dataset) => {
-			let flight: Promise<RetrievalOutcome>;
-			try {
-				flight = retrieveChunks(config, { question, dataset_ids: [dataset.id], ...(deps.retrieval ? { retrieval: deps.retrieval } : {}) }, deps.fetchImpl);
-			} catch (cause) {
-				flight = Promise.reject(cause);
-			}
-			return deadline.race(flight);
-		}),
-	);
+	// A client that throws synchronously is a failed dataset too, not an
+	// exception out of the search.
+	const retrieve = (dataset: RagflowDataset): Promise<RetrievalOutcome> => {
+		let flight: Promise<RetrievalOutcome>;
+		try {
+			flight = retrieveChunks(config, { question, dataset_ids: [dataset.id], ...(deps.retrieval ? { retrieval: deps.retrieval } : {}) }, deps.fetchImpl);
+		} catch (cause) {
+			flight = Promise.reject(cause);
+		}
+		return deadline.race(flight);
+	};
+	// Greptile round 1 (PR #61): a half-open breaker admits exactly one probe,
+	// so a fan-out that left together would see one dataset admitted and the
+	// rest refused as `ragflow circuit open` even when the probe succeeds —
+	// every recovery search would drop healthy datasets. While the gate is
+	// half-open the first dataset goes alone as the probe; the siblings leave
+	// once it has settled (closing or re-opening the breaker), still under
+	// the one shared deadline, so the budget bounds the total as before.
+	const [probe, ...rest] = readable;
+	const settled: PromiseSettledResult<RetrievalOutcome>[] = [];
+	if (probe !== undefined && rest.length > 0 && deps.breakerState?.() === "half-open") {
+		settled.push(...(await Promise.allSettled([retrieve(probe)])));
+		settled.push(...(await Promise.allSettled(rest.map(retrieve))));
+	} else {
+		settled.push(...(await Promise.allSettled(readable.map(retrieve))));
+	}
+	// A dataset refused `ragflow circuit open` while another probe held the
+	// half-open slot (a concurrent search, or one that left before the
+	// breaker went half-open) was not unhealthy. If the breaker has closed
+	// since, it is retried once under the same deadline; a breaker that is
+	// still open or half-open means the refusal stands.
+	if (deps.breakerState?.() === "closed") {
+		const refused = readable.flatMap((dataset, position) => {
+			const outcome = settled[position];
+			return outcome?.status === "fulfilled" && !outcome.value.ok && outcome.value.reason === CIRCUIT_OPEN ? [{ dataset, position }] : [];
+		});
+		if (refused.length > 0) {
+			const again = await Promise.allSettled(refused.map(({ dataset }) => retrieve(dataset)));
+			refused.forEach(({ position }, index) => {
+				const outcome = again[index];
+				if (outcome !== undefined) settled[position] = outcome;
+			});
+		}
+	}
 	deadline.clear();
 
 	const citations: SearchCitation[] = [];
