@@ -130,10 +130,15 @@ Since uplift-4 S3 the same doctor run also reports, report-only, what could be
 reclaimed and by whom: `releases unique bytes` (hardlinks counted once, so a
 release is charged only the bytes the newer ones do not share — a plain `du` per
 tree overstates the older one, because release trees share one `node_modules`),
-`state child …` rows with age, `journal size` and `audit chain size` with its
+`state child …` rows with age (the newest mtime inside a directory, depth 2, at most
+200 entries, not the directory's own timestamp) and owner, `journal size` and `audit chain size` with its
 average daily growth, against `SUBSTRATE_RETAIN_RELEASE_MAX_GB` (default 6),
 `SUBSTRATE_STATE_MAX_GB` (default 1) and `SUBSTRATE_JOURNAL_MAX_MB` (default
-400). Over budget adds `would-reclaim …` rows that name bytes and delete nothing;
+400). Over budget adds `would-reclaim …` rows that name bytes and delete nothing,
+only for a `phase<N>-baseline` directory with nothing recent inside it — every
+path the units write under `/var/lib/substrate` (skills, dispatcher, worktrees,
+transcripts, miner, offsets, checkpoints, outboxes, canary and docs state) is
+live and never listed, and a name nobody owns shows as `unknown owner`;
 the audit chain is never listed. `infra/vps/deploy-release.sh --dry-run` prints
 the release directories a health-checked deploy would prune, in both cases: a
 redeploy of the current tag keeps `current` and `previous`; the next deploy of a

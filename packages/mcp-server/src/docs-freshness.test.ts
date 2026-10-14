@@ -26,6 +26,7 @@ import {
 	LagSettler,
 	createFreshnessState,
 	evaluateFreshness,
+	type DatasetFreshness,
 	freshnessGauges,
 	freshnessStateFromJson,
 	freshnessStateToJson,
@@ -379,7 +380,7 @@ describe("the service bookkeeping", () => {
 		const events: EventInput[] = [];
 		spyOn(substrate, "emit").mockImplementation(async (event) => {
 			events.push(event);
-			return { event: normalizeEvent(event, null), stored: false };
+			return { event: normalizeEvent(event, null), stored: true };
 		});
 		return events;
 	}
@@ -543,7 +544,7 @@ describe("GET /slo and GET /metrics", () => {
 		const events: EventInput[] = [];
 		spyOn(substrate, "emit").mockImplementation(async (event) => {
 			events.push(event);
-			return { event: normalizeEvent(event, null), stored: false };
+			return { event: normalizeEvent(event, null), stored: true };
 		});
 		// The state file is loaded the way the timer's first pass loads it; the routes never wait on it.
 		await substrate.latestDocsVersion("agent-substrate");
@@ -832,6 +833,97 @@ describe("the background settler", () => {
 			await substrate.settleDocsLag(late + 1);
 			await substrate.settleDocsLag(late + 2);
 			expect(emitCalls).toBe(1);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("a resolved stored:false emit is a failed delivery", () => {
+	const lagging = (): DatasetFreshness[] =>
+		evaluateFreshness({ versions: store(version("agent-substrate", "c0", HOUR)), triggers: triggers([["agent-substrate", "c1", 20 * MIN]]), now: NOW, settings: SETTINGS });
+	const landed = (): DatasetFreshness[] =>
+		evaluateFreshness({ versions: store(version("agent-substrate", "c1", 0, 2)), triggers: triggers([["agent-substrate", "c1", 20 * MIN]]), now: NOW, settings: SETTINGS });
+
+	function effects(storedFlag: { value: boolean }, sent: EventInput[], lines: string[]) {
+		return {
+			persist: async () => undefined,
+			emit: async (event: EventInput) => {
+				sent.push(event);
+				return { stored: storedFlag.value };
+			},
+			report: (line: string) => lines.push(line),
+		};
+	}
+
+	test("the warning keeps its marker unwarned, counts as failed, and is retried once the ledger stores it", async () => {
+		const markers: LagMarkers = new Map();
+		const sent: EventInput[] = [];
+		const lines: string[] = [];
+		const flag = { value: false };
+		const first = await applyLagActions(planLagTransitions(lagging(), markers), markers, SETTINGS, new Date(NOW).toISOString(), effects(flag, sent, lines));
+		expect(first.applied).toEqual([]);
+		expect(first.failed).toHaveLength(1);
+		expect(markers.get("agent-substrate")).toMatchObject({ warned: false });
+		expect(lines).toHaveLength(1);
+
+		flag.value = true;
+		const second = await applyLagActions(planLagTransitions(lagging(), markers), markers, SETTINGS, new Date(NOW).toISOString(), effects(flag, sent, lines));
+		expect(second.applied).toHaveLength(1);
+		expect(markers.get("agent-substrate")).toMatchObject({ warned: true });
+		expect(sent.map((event) => event.kind)).toEqual(["warning", "warning"]);
+	});
+
+	test("the recovery note keeps its marker until the ledger stores it", async () => {
+		const markers: LagMarkers = new Map([["agent-substrate", { since: new Date(NOW).toISOString(), commit: "c1", warned: true }]]);
+		const sent: EventInput[] = [];
+		const lines: string[] = [];
+		const flag = { value: false };
+		const first = await applyLagActions(planLagTransitions(landed(), markers), markers, SETTINGS, new Date(NOW).toISOString(), effects(flag, sent, lines));
+		expect(first.failed).toHaveLength(1);
+		expect(markers.has("agent-substrate")).toBe(true);
+
+		flag.value = true;
+		const second = await applyLagActions(planLagTransitions(landed(), markers), markers, SETTINGS, new Date(NOW).toISOString(), effects(flag, sent, lines));
+		expect(second.applied).toHaveLength(1);
+		expect(markers.has("agent-substrate")).toBe(false);
+		expect(sent.map((event) => event.kind)).toEqual(["note", "note"]);
+	});
+
+	test("the settler retries a stored:false warning only after the retry interval", async () => {
+		const markers: LagMarkers = new Map();
+		const sent: EventInput[] = [];
+		const flag = { value: false };
+		const settler = new LagSettler(markers, effects(flag, sent, []), { retryMs: 60_000, emitDeadlineMs: 5_000 });
+		expect(settler.settle(lagging(), SETTINGS, NOW)).toBe(true);
+		await settler.flight;
+		expect(settler.settle(lagging(), SETTINGS, NOW + 30_000)).toBe(false);
+		flag.value = true;
+		expect(settler.settle(lagging(), SETTINGS, NOW + 60_000)).toBe(true);
+		await settler.flight;
+		expect(markers.get("agent-substrate")).toMatchObject({ warned: true });
+	});
+});
+
+describe("accepting a merge-trigger never waits on the state save", () => {
+	test("a hung state-file save does not delay the 202 (the job is queued first; the record is bounded to the deadline)", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "docs-freshness-"));
+		try {
+			const substrate = new Substrate(loadConfig({ SUBSTRATE_DOCS_STATE_FILE: join(dir, "state.json") }), { index: null, greptime: null });
+			// Reaching the private save method is the only way to hang it; a named seam type states why.
+			interface SaveSeam {
+				persistDocsSeen(): Promise<void>;
+			}
+			const seam: SaveSeam = substrate as unknown as SaveSeam;
+			spyOn(seam, "persistDocsSeen").mockImplementation(() => new Promise<void>(() => undefined));
+			const started = Date.now();
+			const answered = await Promise.race([
+				substrate.startDocsRefresh({ dataset: "agent-substrate", commit: "c1", content_sha256: "s1", pages: async () => [] }, "omp"),
+				Bun.sleep(3000).then(() => "blocked" as const),
+			]);
+			expect(answered).not.toBe("blocked");
+			expect(answered).toMatchObject({ status: 202, body: { accepted: true, dataset: "agent-substrate", commit: "c1" } });
+			expect(Date.now() - started).toBeLessThan(2500);
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}

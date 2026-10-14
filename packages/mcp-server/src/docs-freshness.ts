@@ -323,6 +323,18 @@ export interface LagOutcome {
 }
 
 /**
+ * Emit one event and treat a resolved `stored: false` (ledger unavailable or
+ * refused the write) as a failed delivery, exactly like a throw: the caller's
+ * marker stays as it was so a later pass retries.
+ */
+async function deliver(effects: LagEffects, event: EventInput): Promise<void> {
+	const result = await effects.emit(event);
+	if (result !== null && typeof result === "object" && "stored" in result && result.stored === false) {
+		throw new Error("event not stored");
+	}
+}
+
+/**
  * Apply the transitions in order. A breach writes its marker (not yet
  * `warned`) and persists it before emitting, and flips `warned` only once the
  * emit succeeded; a failed emit leaves the marker, so a later pass retries.
@@ -344,14 +356,14 @@ export async function applyLagActions(
 				const marker = markers.get(action.dataset) ?? { since: nowIso, commit: action.commit, warned: false };
 				markers.set(action.dataset, marker);
 				await effects.persist();
-				await effects.emit(lagWarningEvent(action, settings));
+				await deliver(effects, lagWarningEvent(action, settings));
 				marker.warned = true;
 				await effects.persist();
 			} else if (!action.warned) {
 				markers.delete(action.dataset);
 				await effects.persist();
 			} else {
-				await effects.emit(lagRecoveryEvent(action, settings));
+				await deliver(effects, lagRecoveryEvent(action, settings));
 				markers.delete(action.dataset);
 				await effects.persist();
 			}
@@ -367,6 +379,9 @@ export async function applyLagActions(
 /** Least time between two attempts to deliver the same dataset's transition after a failure. */
 export const LAG_RETRY_MS = 60_000;
 
+/** Longest `startDocsRefresh` waits for the accepted-trigger record before answering anyway. */
+export const TRIGGER_RECORD_DEADLINE_MS = 500;
+
 /** Longest an emit may take before it counts as a failure; a hung ledger must not pin the settler. */
 export const LAG_EMIT_DEADLINE_MS = 5_000;
 
@@ -376,9 +391,9 @@ export interface LagSettlerOptions {
 }
 
 /** Rejects when `work` has not settled inside `ms`; the timer is unref'd and cleared on every exit. */
-function withDeadline<T>(work: Promise<T>, ms: number): Promise<T> {
+export function withDeadline<T>(work: Promise<T>, ms: number): Promise<T> {
 	const expired = Promise.withResolvers<never>();
-	const handle = setTimeout(() => expired.reject(new Error("emit deadline exceeded")), ms);
+	const handle = setTimeout(() => expired.reject(new Error("deadline exceeded")), ms);
 	handle.unref();
 	return Promise.race([work, expired.promise]).finally(() => clearTimeout(handle));
 }

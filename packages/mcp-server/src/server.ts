@@ -779,7 +779,7 @@ export function createHttpServer(
 			// the history off or no ledger; the answer (and its validation) lives in `metrics-history.ts`.
 			if (req.method === "GET" && url.pathname === "/slo/history") {
 				const answer = await metricHistoryAnswer({ settings: config.metricsHistory, greptime: substrate.greptime, now, memo: historyMemo }, url.searchParams);
-				sendJson(res, answer.status, answer.body);
+				send(res, answer.status, JSON.stringify(answer.body), "application/json", answer.headers);
 				return;
 			}
 

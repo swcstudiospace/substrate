@@ -69,6 +69,10 @@ function defaultReply(statement: string): unknown {
 	if (statement.includes('SHOW CREATE TABLE "event_ingest"')) {
 		return records(["Table", "Create Table"], [["event_ingest", "... WITH( append_mode = 'true' )"]]);
 	}
+	// ensureMetricSamples asks the live table for append_mode before it is ready.
+	if (statement.includes('SHOW CREATE TABLE "metric_samples"')) {
+		return records(["Table", "Create Table"], [["metric_samples", "... WITH( append_mode = 'true', ttl = '14d' )"]]);
+	}
 	return affected;
 }
 
@@ -2368,6 +2372,47 @@ describe("metric_samples (uplift-4 S6)", () => {
 		// Created now: the next batch goes straight to the INSERT.
 		await client.recordMetricSamples([row()]);
 		expect(creates(sql)).toHaveLength(2);
+	});
+
+	test("an existing table without append_mode is not ready: nothing is inserted, the drop is `schema`, one line names the operator action, and a recreated table is picked up", async () => {
+		let appendMode = false;
+		const { sql } = stubFetch((statement) => {
+			if (statement.includes('SHOW CREATE TABLE "metric_samples"')) {
+				return records(["Table", "Create Table"], [["metric_samples", appendMode ? "... WITH( append_mode = 'true' )" : "... WITH( ttl = '14d' )"]]);
+			}
+			return defaultReply(statement);
+		});
+		const written: string[] = [];
+		const realWrite = process.stderr.write.bind(process.stderr);
+		process.stderr.write = ((chunk: string | Uint8Array) => {
+			written.push(String(chunk));
+			return true;
+		}) as typeof process.stderr.write;
+		try {
+			const client = new GreptimeClient(config);
+			expect(await client.recordMetricSamples([row(), row()])).toEqual({ stored: 0, drops: { schema: 2 } });
+			expect(await client.recordMetricSamples([row()])).toEqual({ stored: 0, drops: { schema: 1 } });
+			expect(inserts(sql)).toHaveLength(0);
+			// One named line, however many ticks, and it says what the operator must do (the client never drops).
+			const lines = written.filter((line) => line.includes("metric_samples"));
+			expect(lines).toHaveLength(1);
+			expect(lines[0]).toContain("append_mode");
+			expect(lines[0]).toContain("drop and recreate");
+			expect(sql.some((statement) => /^(DROP|ALTER)/i.test(statement))).toBe(false);
+
+			// The operator recreates it: the next sample re-asks and writes.
+			appendMode = true;
+			expect(await client.recordMetricSamples([row()])).toEqual({ stored: 1, drops: {} });
+			expect(inserts(sql)).toHaveLength(1);
+		} finally {
+			process.stderr.write = realWrite;
+		}
+	});
+
+	test("a table whose options cannot be read is not ready either: a counted ddl drop, retried next tick", async () => {
+		const { sql } = stubFetch((statement) => (statement.includes('SHOW CREATE TABLE "metric_samples"') ? affected : defaultReply(statement)));
+		expect(await new GreptimeClient(config).recordMetricSamples([row()])).toEqual({ stored: 0, drops: { ddl: 1 } });
+		expect(inserts(sql)).toHaveLength(0);
 	});
 
 	test("an open breaker drops the batch as breaker_open without touching the network; a timeout is a breaker failure", async () => {

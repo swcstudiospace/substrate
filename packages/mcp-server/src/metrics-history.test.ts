@@ -629,6 +629,106 @@ describe("metricHistoryAnswer", () => {
 		expect(reads.length).toBe(before + 1);
 	});
 
+	describe("pending reads are capped and never evicted while they run", () => {
+		function gated() {
+			const release = Promise.withResolvers<void>();
+			const reads: string[] = [];
+			let running = 0;
+			let peak = 0;
+			let failing = false;
+			const store = {
+				async readMetricHistory(query: ReadQuery) {
+					reads.push(`${query.series}|${query.toMs - query.fromMs}`);
+					running += 1;
+					peak = Math.max(peak, running);
+					try {
+						await release.promise;
+						if (failing) throw new Error("greptime unreachable");
+						return { points: [], stepS: 60 };
+					} finally {
+						running -= 1;
+					}
+				},
+			};
+			return { store, release, reads, peak: () => peak, fail: () => (failing = true) };
+		}
+		const settings16 = { enabled: true, intervalS: 60, ttl: "14d", ttlDays: 14 };
+
+		test("100 distinct concurrent keys never start more than 16 reads; the rest are answered busy with Retry-After", async () => {
+			const clock = 1_000_000;
+			const world = gated();
+			const memo = new MetricHistoryMemo(() => clock);
+			const ask = (minutes: number) =>
+				metricHistoryAnswer({ settings: settings16, greptime: world.store as never, now: () => clock, memo }, new URLSearchParams(`series=emit.success&window=${minutes}m`));
+			const answers = Array.from({ length: 100 }, (_, i) => ask(i + 1));
+			expect(world.reads).toHaveLength(16);
+			expect(memo.pendingSize).toBe(16);
+			const busy = await Promise.all(answers.slice(16));
+			expect(busy.every((answer) => answer.status === 503 && answer.body.busy === true && answer.headers?.["retry-after"] === "5")).toBe(true);
+			world.release.resolve();
+			const ok = await Promise.all(answers.slice(0, 16));
+			expect(ok.every((answer) => answer.status === 200)).toBe(true);
+			expect(world.reads).toHaveLength(16);
+			expect(world.peak()).toBe(16);
+			expect(memo.pendingSize).toBe(0);
+		});
+
+		test("the same key joins its pending read after more than 64 other keys have completed", async () => {
+			const clock = 1_000_000;
+			const hanging = gated();
+			const fast = gated();
+			fast.release.resolve();
+			const memo = new MetricHistoryMemo(() => clock, 15_000, 64, 16);
+			const ask = (store: unknown, minutes: number) =>
+				metricHistoryAnswer({ settings: settings16, greptime: store as never, now: () => clock, memo }, new URLSearchParams(`series=emit.success&window=${minutes}m`));
+			const first = ask(hanging.store, 1);
+			expect(hanging.reads).toHaveLength(1);
+			// 100 other keys start and finish while key 1 is still reading; the old single map evicted key 1's pending entry here.
+			for (let minutes = 2; minutes <= 101; minutes++) await ask(fast.store, minutes);
+			expect(memo.size).toBeLessThanOrEqual(64);
+			expect(memo.pendingSize).toBe(1);
+			const joined = ask(fast.store, 1);
+			expect(fast.reads).toHaveLength(100);
+			expect(hanging.reads).toHaveLength(1);
+			hanging.release.resolve();
+			expect((await Promise.all([first, joined])).map((answer) => answer.status)).toEqual([200, 200]);
+			expect(memo.pendingSize).toBe(0);
+		});
+
+		test("a full cap answers an expired completed key with its last answer instead of reading, and a failed read leaves no pending entry", async () => {
+			let clock = 1_000_000;
+			const memo = new MetricHistoryMemo(() => clock, 15_000, 64, 2);
+			const ask = (store: unknown, query: string) =>
+				metricHistoryAnswer({ settings: settings16, greptime: store as never, now: () => clock, memo }, new URLSearchParams(query));
+			const quick = gated();
+			quick.release.resolve();
+			const known = await ask(quick.store, "series=emit.success&window=1h");
+			expect(known.status).toBe(200);
+			clock += 20_000;
+
+			const slow = gated();
+			const a = ask(slow.store, "series=emit.success&window=2h");
+			const b = ask(slow.store, "series=emit.success&window=3h");
+			expect(memo.pendingSize).toBe(2);
+			// Expired but held: served as is, no third read.
+			const stale = await ask(slow.store, "series=emit.success&window=1h");
+			expect(stale).toBe(known);
+			expect(slow.reads).toHaveLength(2);
+			slow.release.resolve();
+			await Promise.all([a, b]);
+
+			const failing = gated();
+			failing.fail();
+			failing.release.resolve();
+			const failed = await ask(failing.store, "series=emit.success&window=9h");
+			expect(failed.status).toBe(503);
+			expect(memo.pendingSize).toBe(0);
+			// A failure is not remembered as an answer: the next request reads again.
+			await ask(failing.store, "series=emit.success&window=9h");
+			expect(failing.reads).toHaveLength(2);
+		});
+	});
+
 	test("the default window is an hour; the default step is the sampling interval at least", async () => {
 		const seen: Array<Record<string, unknown>> = [];
 		await metricHistoryAnswer({ settings: { ...settings, intervalS: 120 }, greptime: store([], seen) as never, now }, new URLSearchParams("series=emit.success"));

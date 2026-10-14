@@ -165,7 +165,7 @@ export const DEFAULT_STATE_MAX_GB = 1;
 /** The `SystemMaxUse=` of `infra/vps/journald-substrate.conf`; the journal was 329.6 MB. */
 export const DEFAULT_JOURNAL_MAX_MB = 400;
 export const DEFAULT_STATE_DIR = "/var/lib/substrate";
-/** A state child with no owner named in the runbook is a reclaim candidate only once it is this old. */
+/** A `phase<N>-baseline` directory is a reclaim candidate only once nothing inside it is newer than this. */
 export const STALE_STATE_DAYS = 30;
 /** Largest per-child rows shown; the rest are summed into one row. */
 const STATE_CHILD_ROWS = 8;
@@ -285,30 +285,63 @@ export function compareReleases(usage: ReleaseUsage, budgetBytes: number, releas
 	return rows;
 }
 
-/** What `docs/runbooks/disk-pressure.md` says about a child of the state directory. */
+/** Who owns a child of the state directory, as far as this repo's code and runbooks say. */
 interface StateOwner {
 	owner: string;
-	/** True when nothing may ever be proposed for reclaim. */
+	/** True when the entry must never be proposed for reclaim: live state, or an owner nobody named. */
 	keep: boolean;
 }
 
-const STATE_FILES_KEPT: Record<string, true> = { "doctor-last.json": true, "retain-outbox.jsonl": true, "docs-ingest.json": true };
+/**
+ * Every path the code base writes under /var/lib/substrate (`StateDirectory=substrate` in each unit),
+ * by the unit or module that owns it. Each is live state: never offered for reclaim, whatever its age.
+ * A directory's own mtime says nothing about files inside it, so a name here is protected outright.
+ */
+const LIVE_STATE: Record<string, string> = {
+	"agentos": "substrate-host rivetkit storage (RIVETKIT_STORAGE_PATH): stop the unit, decide per task record",
+	"desktop": "desktop_run screenshots (SUBSTRATE_DESKTOP_DIR): remove a run only with its owner",
+	"skills": "skills proposal and projector state (SUBSTRATE_SKILLS_STATE, refresh-pending.json, projector-warned.json)",
+	"dispatcher": "substrate-dispatcher launcher state (SUBSTRATE_STATE_DIR)",
+	"worktrees": "dispatcher task worktrees, one per graph id",
+	"transcripts": "cursor transcript copies written by the collectors",
+	"miner": "substrate_miner bridge log and held state",
+	"muse-plugin": "muse collector plugin state",
+	"docs-ingest.json": "docs_ingest records and dataset pins (SUBSTRATE_DOCS_STATE_FILE)",
+	"docs-canary-last.json": "docs golden canary dedupe record (SUBSTRATE_DOCS_CANARY_STATE)",
+	"slo-checkpoint.json": "SLO checkpoint (SUBSTRATE_SLO_CHECKPOINT)",
+	"retain-outbox.jsonl": "Hindsight retain outbox (SUBSTRATE_RETAIN_OUTBOX_PATH)",
+	"refused-emits.jsonl": "collector refused-emit log (emit.ts)",
+	"doctor-last.json": "runtime doctor dedupe record (SUBSTRATE_DOCTOR_STATE)",
+	"ledger-archive": "ledger archive output (SUBSTRATE_LEDGER_ARCHIVE_DIR)",
+	"index-archive": "index archive output (SUBSTRATE_INDEX_ARCHIVE_DIR)",
+};
 
-/** Owner of a state child by name and type (`d` directory, `f` file); null owner = none named in the runbook. */
-export function stateOwner(name: string, type: string): StateOwner | null {
+/** Stale rehearsal baseline snapshots: the only name class ever offered for reclaim. */
+const BASELINE_DIR = /^phase\d{1,3}-baseline$/;
+
+/**
+ * Owner of a state child. Conservative by construction: only a `phase<N>-baseline` directory is ever
+ * a reclaim candidate. Known live names (and their `.tmp`/rotated siblings, `*-offsets.json`, the audit
+ * chain) are protected, and every other name is `unknown owner`, reported and never proposed.
+ */
+export function stateOwner(name: string, type: string): StateOwner {
 	if (name.startsWith("mcp-audit")) return { owner: "audit chain: never reclaimed (docs/mcp-audit.md)", keep: true };
-	if (name === "agentos") return { owner: "substrate-host rivetkit storage: stop the unit, decide per task record", keep: true };
-	if (name === "desktop") return { owner: "desktop_run screenshots: remove a run only with its owner", keep: true };
-	if (type === "f" && (Object.hasOwn(STATE_FILES_KEPT, name) || name.endsWith("-offsets.json"))) return { owner: "unit state: never reclaimed", keep: true };
-	return null;
+	if (type === "f" && name.endsWith("-offsets.json")) return { owner: "collector offsets: live state, never reclaimed", keep: true };
+	for (const [live, owner] of Object.entries(LIVE_STATE)) {
+		if (name === live || (type === "f" && name.startsWith(`${live}.`))) return { owner: `${owner}: live, never reclaimed`, keep: true };
+	}
+	if (type === "d" && BASELINE_DIR.test(name)) return { owner: "stale rehearsal baseline snapshot: reclaim candidate once nothing inside it is recent", keep: false };
+	return { owner: "unknown owner: not named by any unit or runbook; never proposed for reclaim", keep: true };
 }
 
 export interface StateChild {
 	name: string;
 	type: string;
 	bytes: number;
-	/** Epoch seconds of the entry's mtime, or null. */
+	/** Epoch seconds of the newest mtime of the entry and, for a directory, of what is inside it; null when unknown. */
 	mtime: number | null;
+	/** True when the nested scan hit its entry cap: the age is a floor, so the entry is never reclaimable. */
+	ageCut?: boolean;
 }
 
 /**
@@ -324,7 +357,7 @@ export function compareState(children: readonly StateChild[], budgetBytes: numbe
 	if (children.length === 0) return [row("disk", check, "unknown", budget, "n/a", `no children read under ${stateDir}; find or du failed or the directory is empty`)];
 	const total = children.reduce((sum, c) => sum + c.bytes, 0);
 	const over = budgetBytes > 0 && total > budgetBytes;
-	const age = (c: StateChild): string => (c.mtime === null ? "age n/a" : `${ageText(Math.max(0, nowSeconds - c.mtime))} old`);
+	const age = (c: StateChild): string => (c.mtime === null ? "age n/a" : c.ageCut ? `age n/a (newest seen ${ageText(Math.max(0, nowSeconds - c.mtime))} old, scan cut)` : `${ageText(Math.max(0, nowSeconds - c.mtime))} old`);
 	const bySize = [...children].sort((a, b) => b.bytes - a.bytes || a.name.localeCompare(b.name));
 	// A total that leaves entries out is a floor. Over budget it is still a proven breach (warn);
 	// otherwise the verdict is unknown, never ok.
@@ -333,7 +366,7 @@ export function compareState(children: readonly StateChild[], budgetBytes: numbe
 	const rows = [row("disk", check, status, budget, `${humanBytes(total)} over ${children.length} entries${partial}`, "report only; the audit chain is never reclaimed")];
 	for (const c of bySize.slice(0, STATE_CHILD_ROWS)) {
 		const owner = stateOwner(c.name, c.type);
-		rows.push(row("disk", `state child ${safeName(c.name)}`, "ok", "report only", `${humanBytes(c.bytes)}, ${age(c)}`, owner?.owner ?? "no owner named in docs/runbooks/disk-pressure.md"));
+		rows.push(row("disk", `state child ${safeName(c.name)}`, "ok", "report only", `${humanBytes(c.bytes)}, ${age(c)}`, owner.owner));
 	}
 	const rest = bySize.slice(STATE_CHILD_ROWS);
 	if (rest.length > 0) {
@@ -343,11 +376,11 @@ export function compareState(children: readonly StateChild[], budgetBytes: numbe
 		let remaining = total - budgetBytes;
 		for (const c of bySize) {
 			if (remaining <= 0) break;
-			if (stateOwner(c.name, c.type)?.keep) continue;
+			if (stateOwner(c.name, c.type).keep || c.ageCut) continue;
 			if (c.mtime === null || nowSeconds - c.mtime < STALE_STATE_DAYS * 86_400) continue;
 			remaining -= c.bytes;
 			rows.push(
-				row("disk", `would-reclaim state ${safeName(c.name)}`, "warn", "operator decision", `${humanBytes(c.bytes)}, ${age(c)}`, "no owner named in the runbook and not touched for 30 days; nothing was deleted"),
+				row("disk", `would-reclaim state ${safeName(c.name)}`, "warn", "operator decision", `${humanBytes(c.bytes)}, ${age(c)}`, "a stale baseline snapshot with nothing recent inside it (30 days); nothing was deleted"),
 			);
 		}
 	}
@@ -446,6 +479,28 @@ function releaseUsage(host: Host, root: string): ReleaseUsage {
 	return { current, previous, entries, notMeasured: ordered.length - entries.length };
 }
 
+/** Depth and entry bounds of the nested mtime scan of one state directory. */
+export const NESTED_SCAN_DEPTH = 2;
+export const NESTED_SCAN_ENTRIES = 200;
+
+/**
+ * Newest mtime (epoch seconds) of a directory and what is inside it, to depth NESTED_SCAN_DEPTH. Only the
+ * first NESTED_SCAN_ENTRIES lines are read; more than that sets `cut`, and the caller then treats the age
+ * as unprovable. A directory's own mtime changes only when an entry directly in it is added or removed,
+ * so it can stay old while files inside are written every minute.
+ */
+export function nestedNewest(host: Host, dir: string, ownMtime: number | null): { mtime: number | null; cut: boolean } {
+	const out = runOut(host, ["find", dir, "-maxdepth", String(NESTED_SCAN_DEPTH), "-printf", "%T@\\n"]);
+	if (out === null) return { mtime: ownMtime, cut: false };
+	const lines = out.split("\n").filter((line) => line !== "");
+	let newest = ownMtime;
+	for (const line of lines.slice(0, NESTED_SCAN_ENTRIES)) {
+		const seconds = /^\d{1,12}(?:\.\d+)?$/.test(line) ? Number(line) : Number.NaN;
+		if (Number.isFinite(seconds) && (newest === null || seconds > newest)) newest = seconds;
+	}
+	return { mtime: newest, cut: lines.length > NESTED_SCAN_ENTRIES };
+}
+
 function stateChildren(host: Host, stateDir: string): { children: StateChild[]; auditPaths: string[]; notMeasured: number } {
 	const found = runOut(host, ["find", stateDir, "-mindepth", "1", "-maxdepth", "1", "-printf", "%p\\t%T@\\t%y\\n"]);
 	if (found === null) return { children: [], auditPaths: [], notMeasured: 0 };
@@ -463,7 +518,9 @@ function stateChildren(host: Host, stateDir: string): { children: StateChild[]; 
 	const bytes = new Map((du === null ? [] : parseDu(du)).map((e) => [e.path, e.bytes]));
 	const children = slice.flatMap((e) => {
 		const size = bytes.get(e.path);
-		return size === undefined ? [] : [{ name: e.path.slice(stateDir.length).replace(/^\/+/, ""), type: e.type, bytes: size, mtime: e.mtime }];
+		if (size === undefined) return [];
+		const nested = e.type === "d" ? nestedNewest(host, e.path, e.mtime) : { mtime: e.mtime, cut: false };
+		return [{ name: e.path.slice(stateDir.length).replace(/^\/+/, ""), type: e.type, bytes: size, mtime: nested.mtime, ...(nested.cut ? { ageCut: true } : {}) }];
 	});
 	return {
 		children,

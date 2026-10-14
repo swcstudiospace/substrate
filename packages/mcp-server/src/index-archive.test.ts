@@ -48,6 +48,8 @@ import {
 	type IndexArchiveManifest,
 	type IndexArchiveOptions,
 	type IndexArchiveSource,
+	LineTally,
+	TALLY_EXAMPLES,
 	type RestoreTarget,
 } from "./index-archive.ts";
 import type { IndexRestoreTx, IndexSnapshotReader } from "./index-store.ts";
@@ -841,5 +843,59 @@ describe("grammar and defaults", () => {
 		// Anything else is off, and an age that is not a positive whole number leaves the row report-only.
 		expect(loadIndexArchiveSettings({ SUBSTRATE_INDEX_TUNE: "yes", SUBSTRATE_INDEX_ARCHIVE_MAX_AGE_H: "0" })).toMatchObject({ tune: "off", maxAgeHours: null });
 		expect(loadIndexArchiveSettings({ SUBSTRATE_INDEX_ARCHIVE_MAX_AGE_H: "soon", SUBSTRATE_INDEX_ARCHIVE_MAX_SECONDS: "1" })).toMatchObject({ maxAgeHours: null, maxSeconds: 10 });
+	});
+});
+
+describe("private modes (the archive holds accepted memory text)", () => {
+	/** The permission bits of a path. */
+	const modeOf = (path: string): number => statSync(path).mode & 0o777;
+
+	test("under a permissive umask every directory and file the run creates is owner-only, the archive directory it creates included", async () => {
+		const previous = process.umask(0o000);
+		try {
+			const fresh = join(out, "not", "yet");
+			const manifest = await archiveIndex(new StubSource(counts()), options({ outDir: fresh }));
+			const dir = join(fresh, manifest.snapshot);
+			expect(modeOf(join(out, "not"))).toBe(0o700);
+			expect(modeOf(fresh)).toBe(0o700);
+			expect(modeOf(dir)).toBe(0o700);
+			for (const name of readdirSync(dir)) expect({ name, mode: modeOf(join(dir, name)) }).toEqual({ name, mode: 0o600 });
+			expect(readdirSync(dir)).toContain("manifest.json");
+			// The note marker, written beside the snapshot, is private too.
+			await recordIndexArchiveNote(fresh, manifest, async () => ({ stored: false, error: "down" }));
+			expect(modeOf(join(fresh, pendingIndexNoteFile(manifest.snapshot)))).toBe(0o600);
+		} finally {
+			process.umask(previous);
+		}
+	});
+
+	test("a restore only reads the archive: it creates no temp file beside it", async () => {
+		const { dir } = await archived();
+		const before = readdirSync(dir).sort();
+		await restoreIndexArchive(new MemoryTarget(), { dir });
+		expect(readdirSync(dir).sort()).toEqual(before);
+	});
+});
+
+describe("verify keeps constant state however damaged the file is", () => {
+	test("LineTally counts every line and keeps only the first three examples", () => {
+		const tally = new LineTally();
+		for (let line = 1; line <= 200_000; line++) tally.add(line);
+		expect(tally.count).toBe(200_000);
+		expect(tally.examples).toEqual([1, 2, 3]);
+		expect(TALLY_EXAMPLES).toBe(3);
+	});
+
+	test("a 200k-line damaged table is reported with its count and three example lines, and a small damage report is unchanged", async () => {
+		const { dir } = await archived();
+		writeFileSync(join(dir, "graph_edges.ndjson"), "{bad\n".repeat(200_000));
+		const parse = verifyIndexArchive(dir).mismatches.find((m) => m.kind === "parse" && m.table === "graph_edges");
+		expect(parse?.detail).toBe("200000 line(s) are not graph_edges rows in archive form (first at line 1, 2, 3)");
+		// Two bad lines among good ones: exactly the old wording.
+		const small = await archiveIndex(new StubSource(counts()), options({ now: () => NOW + 5_000 }));
+		const smallPath = join(out, small.snapshot, "graph_bindings.ndjson");
+		const lines = readFileSync(smallPath, "utf8").split("\n");
+		writeFileSync(smallPath, ["{not json", lines[1] ?? "", "{also not", ...lines.slice(3)].join("\n"));
+		expect(verifyIndexArchive(join(out, small.snapshot)).mismatches.find((m) => m.kind === "parse")?.detail).toBe("2 line(s) are not graph_bindings rows in archive form (first at line 1, 3)");
 	});
 });

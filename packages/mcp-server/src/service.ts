@@ -63,7 +63,7 @@ import {
 	type IngestRecord,
 	type PageSettlement,
 } from "./docs-ingest.ts";
-import { LagSettler, createFreshnessState, evaluateFreshness, type DatasetFreshness, type FreshnessState } from "./docs-freshness.ts";
+import { LagSettler, TRIGGER_RECORD_DEADLINE_MS, withDeadline, createFreshnessState, evaluateFreshness, type DatasetFreshness, type FreshnessState } from "./docs-freshness.ts";
 import { DEFAULT_SEARCH_DATASET_NAMES, citationProvenanceCounts, searchDocs, searchReplyStorable, type SearchReply } from "./docs-search.ts";
 import {
 	DEFAULT_IDLE_SECONDS,
@@ -3168,7 +3168,11 @@ export class Substrate {
 	 * operators and tests: 200 with the version, 503 with the reason.
 	 */
 	async startDocsRefresh(request: DocsRefreshRequest, surface: Surface, options: { wait?: boolean } = {}): Promise<DocsRefreshAccepted> {
-		await this.recordAcceptedTrigger(request);
+		// Recorded in the background and awaited only up to a short deadline, after
+		// the job is queued: a slow or hung state save must never delay the answer
+		// (the skills-sync caller gives up after 3 s). A late or failed record is
+		// logged by `recordAcceptedTrigger` and changes nothing the caller sees.
+		const recording = this.recordAcceptedTrigger(request);
 		const sameIdentity = (job: DocsRefreshJob): boolean =>
 			job.dataset === request.dataset && job.commit === request.commit && job.content_sha256 === request.content_sha256;
 		let job = [...this.docsRefreshPending.values()].find(sameIdentity);
@@ -3190,6 +3194,9 @@ export class Substrate {
 				if (this.docsRefreshChains.get(request.dataset) === settled) this.docsRefreshChains.delete(request.dataset);
 			});
 		}
+		await withDeadline(recording, TRIGGER_RECORD_DEADLINE_MS).catch(() => {
+			process.stderr.write("[substrate] docs trigger record is still pending; the job was queued and the answer is unchanged\n");
+		});
 		if (options.wait === true) {
 			const outcome = await job.done;
 			return outcome.ok ? { status: 200, body: outcome } : { status: 503, body: outcome };

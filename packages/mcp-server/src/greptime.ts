@@ -2021,6 +2021,7 @@ export class GreptimeClient {
 	/** Whether `metric_samples` is known to exist. Set by the first successful CREATE, so a deployment with the history off never creates it. */
 	private metricSamplesReady = false;
 	private metricSamplesCreating: Promise<void> | null = null;
+	private metricSamplesSchemaLogged = false;
 
 	/**
 	 * `CREATE TABLE IF NOT EXISTS metric_samples`, once per process, on first use.
@@ -2035,19 +2036,45 @@ export class GreptimeClient {
 		if (this.metricSamplesReady) return;
 		const retention = parseMetricsHistoryTtl(ttl);
 		if (retention === null) throw new GreptimeError("the metrics history ttl is not a whole number of days from 1d to 90d");
-		this.metricSamplesCreating ??= this.sql(
+		this.metricSamplesCreating ??= this.createMetricSamples(retention.ttl).finally(() => {
+			this.metricSamplesCreating = null;
+		});
+		await this.metricSamplesCreating;
+	}
+
+	/**
+	 * CREATE, then ask the LIVE table whether it is in append_mode, as the ledger
+	 * tables are asked: `CREATE TABLE IF NOT EXISTS` leaves an older table's
+	 * options alone, and without `append_mode` rows of different labels that share a
+	 * series and a millisecond replace one another. Only a table that answers
+	 * `append_mode = 'true'` is ready; one that does not is refused as
+	 * {@link MetricSamplesSchemaError} on every sample (re-asked each time, so an
+	 * operator's drop-and-recreate is picked up) and named once on stderr. The
+	 * client never drops or alters it.
+	 */
+	private async createMetricSamples(ttl: string): Promise<void> {
+		await this.sql(
 			`CREATE TABLE IF NOT EXISTS "${METRIC_SAMPLES_TABLE}" (` +
 				`"ts" TIMESTAMP TIME INDEX, "series" STRING, "labels" STRING, "kind" STRING, "value" DOUBLE, "count" BIGINT, PRIMARY KEY ("series")` +
-				`) WITH ('append_mode' = 'true', 'ttl' = '${retention.ttl}')`,
+				`) WITH ('append_mode' = 'true', 'ttl' = '${ttl}')`,
 			METRIC_WRITE_TIMEOUT_MS,
-		)
-			.then(() => {
-				this.metricSamplesReady = true;
-			})
-			.finally(() => {
-				this.metricSamplesCreating = null;
-			});
-		await this.metricSamplesCreating;
+		);
+		const rows = await this.sql(`SHOW CREATE TABLE "${METRIC_SAMPLES_TABLE}"`, METRIC_WRITE_TIMEOUT_MS);
+		if (rows.length === 0) throw new GreptimeError(`could not read the options of ${METRIC_SAMPLES_TABLE}`);
+		const ddl = Object.values(rows[0] ?? {})
+			.map((value) => String(value))
+			.join(" ");
+		if (!/append_mode'?\s*=\s*'?true/i.test(ddl)) {
+			if (!this.metricSamplesSchemaLogged) {
+				this.metricSamplesSchemaLogged = true;
+				process.stderr.write(
+					`[substrate] metrics history: ${METRIC_SAMPLES_TABLE} exists without append_mode, so samples of different labels could replace one another and none are written; ` +
+						"an operator must drop and recreate the table (the client never does)\n",
+				);
+			}
+			throw new MetricSamplesSchemaError(`${METRIC_SAMPLES_TABLE} is not in append_mode`);
+		}
+		this.metricSamplesReady = true;
 	}
 
 	/**
@@ -2221,6 +2248,9 @@ export interface MetricHistoryResult {
 /** A readback request outside what the history serves: not a store failure. */
 export class MetricHistoryInputError extends GreptimeError {}
 
+/** The live `metric_samples` table is not in append_mode; only an operator can fix it (drop and recreate). */
+export class MetricSamplesSchemaError extends GreptimeError {}
+
 /** The labels JSON of a row that may be stored, or `null`: outside the allow-list, or a number the column cannot hold. */
 function validMetricRow(row: MetricSampleRow): string | null {
 	if (row === null || typeof row !== "object") return null;
@@ -2234,6 +2264,7 @@ function validMetricRow(row: MetricSampleRow): string | null {
 /** The closed reason a failed metrics write is counted under. */
 function metricDropReason(cause: unknown, stage: "ddl" | "insert"): MetricDropReason {
 	if (cause instanceof GreptimeBreakerOpen) return "breaker_open";
+	if (cause instanceof MetricSamplesSchemaError) return "schema";
 	if (cause instanceof GreptimeUnavailable) return "unavailable";
 	if (cause instanceof GreptimeError) return stage === "ddl" ? "ddl" : "rejected";
 	return "internal";

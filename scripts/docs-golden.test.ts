@@ -267,7 +267,7 @@ describe("the CLI", () => {
 
 describe("the live canary (uplift-4 S7)", () => {
 	const MANIFEST_PATH = "/scratch/canary-manifest.json";
-	const goodManifest = () => JSON.stringify({ sha256: corpusManifest(), dataset_commit: COMMIT });
+	const goodManifest = (commit: string = COMMIT) => JSON.stringify({ sha256: corpusManifest(), dataset_commit: commit });
 
 	interface Recorded {
 		url: string;
@@ -276,7 +276,7 @@ describe("the live canary (uplift-4 S7)", () => {
 	}
 
 	/** A canary run against an in-memory deployment: replies per question, an events sink, a dedupe record and a token reader that logs every path. */
-	function canary(options: { env?: Record<string, string | undefined>; manifest?: string | null; state?: string | null; eventStatus?: number; searchStatus?: number; writeOk?: boolean } = {}) {
+	function canary(options: { env?: Record<string, string | undefined>; manifest?: string | null; state?: string | null; eventStatus?: number; searchStatus?: number; writeOk?: boolean; servedCommit?: string } = {}) {
 		const out: string[] = [];
 		const err: string[] = [];
 		const requests: Recorded[] = [];
@@ -300,13 +300,13 @@ describe("the live canary (uplift-4 S7)", () => {
 				if (options.searchStatus !== undefined) return new Response("nope", { status: options.searchStatus });
 				const fixture = fixtures.find((candidate) => candidate.question === body.question);
 				if (fixture === undefined) throw new Error("unknown question");
-				const offline = (await searchGoldenOffline(corpus, fixture, { commit: COMMIT })).reply as ScoredReply;
+				const offline = (await searchGoldenOffline(corpus, fixture, { commit: options.servedCommit ?? COMMIT })).reply as ScoredReply;
 				return Response.json(overrides.get(fixture.id)?.(offline) ?? offline);
 			},
 			stdout: (line: string) => out.push(line),
 			stderr: (line: string) => err.push(line),
 			offline: async (fixture: GoldenFixture): Promise<ScoredReply> => (await searchGoldenOffline(corpus, fixture, { commit: COMMIT })).reply,
-			readFile: (path: string) => (path === MANIFEST_PATH ? (options.manifest === undefined ? goodManifest() : options.manifest) : null),
+			readFile: (path: string) => (path === MANIFEST_PATH ? (options.manifest === undefined ? goodManifest(options.servedCommit) : options.manifest) : null),
 			readToken: (path: string) => {
 				tokenReads.push(path);
 				return null;
@@ -386,6 +386,39 @@ describe("the live canary (uplift-4 S7)", () => {
 			expect(await main(["--live", "--emit"], run.goldenIo)).toBe(3);
 			expect(run.err[0]).toContain("refusing the docs canary");
 			expect(run.requests).toEqual([]);
+		}
+	});
+
+	test("a corpus ingested under a release sha with a matching manifest passes: the live expectations use the attested commit", async () => {
+		const run = canary({ servedCommit: "rel-0123456789ab" });
+		expect(await main(["--live", "--emit"], run.goldenIo)).toBe(0);
+		expect(run.out.filter((line) => line.startsWith(" FAIL "))).toEqual([]);
+		expect(events(run.requests)).toEqual([]);
+		// The committed fixtures themselves still state the golden commit (offline tier unchanged).
+		expect(fixtures.some((fixture) => fixture.expected.some((entry) => entry.commit === COMMIT))).toBe(true);
+	});
+
+	test("a dataset with no recorded version pin is a named setup failure (3): nothing posted, record untouched", async () => {
+		const run = canary({ state: JSON.stringify({ failing: ["earlier"] }) });
+		const target = answerable();
+		run.overrides.set(target.id, (reply) => ({ ...reply, chunks: reply.chunks.map(({ dataset_commit: _pin, ...rest }) => rest) }));
+		expect(await main(["--live", "--emit"], run.goldenIo)).toBe(3);
+		expect(run.err[0]).toContain("no recorded version pin");
+		expect(run.err[0]).toContain(target.id);
+		expect(events(run.requests)).toEqual([]);
+		expect(JSON.parse(run.state() ?? "{}")).toEqual({ failing: ["earlier"] });
+	});
+
+	test("a missing manifest read by the real reader is the named refusal (3), not a crash", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "docs-canary-"));
+		try {
+			const run = canary({ env: { SUBSTRATE_DOCS_CANARY_MANIFEST: join(dir, "absent.json") } });
+			delete run.goldenIo.readFile;
+			expect(await main(["--live", "--emit"], run.goldenIo)).toBe(3);
+			expect(run.err[0]).toContain("SUBSTRATE_DOCS_CANARY_MANIFEST cannot be read");
+			expect(run.requests).toEqual([]);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
 		}
 	});
 

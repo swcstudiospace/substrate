@@ -395,10 +395,50 @@ a failed post keeps the old record, so the next run posts again. The record is
 written through a temp file and a rename. It is
 read-only against RAGFlow and uses no key of its own.
 
-Procedure: ingest the corpus into a dataset under a known commit; write the
-manifest; on the drop-in `substrate-docs-canary.service.d/10-environment.conf`
-uncomment `SUBSTRATE_DOCS_CANARY=1` and set `SUBSTRATE_DOCS_CANARY_MANIFEST`;
-run the unit once (`systemctl start substrate-docs-canary.service`) and read the
-journal; then `systemctl enable --now substrate-docs-canary.timer`. Rollback:
+Seeding the corpus and its pins (do this BEFORE enabling the canary). Search
+adds `dataset_commit` to a citation only from a dataset's recorded version
+(the `versions` list of `SUBSTRATE_DOCS_STATE_FILE`); `docs ingest` stores
+documents and ingest records but records no version. The only route that
+records a version is a merge-trigger job (`recordDocsVersion` in the refresh),
+and the route runs one only for `agent-substrate`, from the checkout's
+configured roots; for every other dataset the trigger is a noop. The fixtures
+use `agent-substrate`, `programming-desk` and `agent-skills`, so the pins for
+the last two cannot come from an HTTP route and are written by the operator.
+Pick one commit value `COMMIT` (a release SHA is fine) and use it everywhere:
+
+1. Make the pages ingestible: set `SUBSTRATE_DOCS_INGEST_ROOTS` on substrate-mcp
+   to include `fixtures/docs-golden/corpus/` (repo-relative roots) and restart
+   it; the datasets must already exist on the plane (`docs ingest` refuses
+   `unknown-dataset`; the merge-trigger creates `agent-substrate` on a miss).
+2. For every file under `fixtures/docs-golden/corpus/<dataset>/<slug>.md`, from
+   the checkout: `substrate docs ingest --dataset <dataset> --path
+   fixtures/docs-golden/corpus/<dataset>/<slug>.md --source-url
+   https://example.com/<dataset>/<slug> --commit COMMIT`. Each call prints
+   `key=value` lines (`status=ingested`, or `unchanged`/`replaced`); any other
+   status is a refusal to fix first. The source URLs and `COMMIT` must be exactly
+   those, since the fixtures expect them.
+3. Record one version per dataset. Stop substrate-mcp (it reads the state file
+   once at start and rewrites it on every save), and in the state file's
+   `versions` member add, per dataset name, a one-element list
+   `{"dataset": "<name>", "dataset_id": "<the plane's id for it>", "version":
+   "v1", "commit": "COMMIT", "content_sha256": "<sha256 of the corpus
+   manifest or any non-empty hash>", "ingested_at": "<ISO time>"}`, keeping
+   the existing members; then start substrate-mcp. (For `agent-substrate`
+   alone a `POST /docs/merge-trigger?wait=1` with `commit` = `COMMIT` records
+   the version itself, but it ingests the checkout's roots.)
+4. Verify before enabling: `POST /docs/search` as `omp` with a fixture's
+   question and its `datasets`, and check that every chunk carries
+   `dataset_commit` equal to `COMMIT` and the expected `source_url`. A chunk
+   without `dataset_commit` means that dataset still has no pin.
+5. Write the manifest `{"sha256": "<bun scripts/docs-golden.ts --manifest>",
+   "dataset_commit": "COMMIT"}`; uncomment `SUBSTRATE_DOCS_CANARY=1` and set
+   `SUBSTRATE_DOCS_CANARY_MANIFEST` on the drop-in; run the unit once
+   (`systemctl start substrate-docs-canary.service`), read the journal, then
+   `systemctl enable --now substrate-docs-canary.timer`.
+
+The canary scores commit expectations against the attested `COMMIT` (the
+committed fixtures keep stating `golden-v1` for the offline tier). A missing or
+unreadable manifest, or a citation without `dataset_commit` (no pin), is a
+named setup failure: exit 3, a line on stderr, nothing posted. Rollback:
 `systemctl disable --now substrate-docs-canary.timer`, remove the two lines
 (the job then exits 2 by itself) and delete the unit files.

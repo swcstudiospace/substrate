@@ -27,6 +27,7 @@
  */
 import {
 	appendFileSync,
+	chmodSync,
 	closeSync,
 	existsSync,
 	lstatSync,
@@ -77,6 +78,11 @@ export const INDEX_ARCHIVE_VERSION = 1;
 
 /** The manifest's file name inside a snapshot directory. */
 export const MANIFEST_FILE = "manifest.json";
+
+/** Snapshot files (data, `.part`, manifest, note markers) hold complete accepted memory text or its digests: owner-only whatever the process umask. */
+export const PRIVATE_FILE_MODE = 0o600;
+/** Snapshot directories, and the archive directory when this run has to create it: owner-only. */
+export const PRIVATE_DIR_MODE = 0o700;
 
 /** Rows per export page when the operator passes none. */
 export const DEFAULT_ARCHIVE_PAGE_ROWS = 500;
@@ -257,7 +263,7 @@ class NdjsonPart {
 	) {
 		this.part = join(dir, `${name}.part`);
 		rmSync(this.part, { force: true });
-		writeFileSync(this.part, "");
+		writeFileSync(this.part, "", { mode: PRIVATE_FILE_MODE });
 	}
 
 	append(lines: readonly string[]): void {
@@ -273,6 +279,7 @@ class NdjsonPart {
 
 	commit(): void {
 		renameSync(this.part, join(this.dir, this.name));
+		chmodSync(join(this.dir, this.name), PRIVATE_FILE_MODE);
 	}
 
 	/** Remove the `.part` and, when it was already renamed into place, the data file: an abandoned export leaves neither. */
@@ -406,9 +413,11 @@ export async function archiveIndex(source: IndexArchiveSource, options: IndexArc
 	// A killed earlier run (no catch ran) leaves a manifest-less directory; sweep those, and only those, and say so.
 	const swept = sweepStaleSnapshots(outDir, startedAt, Math.max(STALE_SNAPSHOT_MS, 2 * (options.maxSeconds ?? DEFAULT_ARCHIVE_MAX_SECONDS) * 1000));
 	if (swept.length > 0) options.onSwept?.(swept);
-	mkdirSync(outDir, { recursive: true });
+	mkdirSync(outDir, { recursive: true, mode: PRIVATE_DIR_MODE });
 	try {
-		mkdirSync(dir);
+		mkdirSync(dir, { mode: PRIVATE_DIR_MODE });
+		// Explicit, so an inherited setgid bit or default ACL on the parent cannot widen it.
+		chmodSync(dir, PRIVATE_DIR_MODE);
 	} catch (cause) {
 		if ((cause as NodeJS.ErrnoException).code === "EEXIST") throw new ArchiveRefused(`${snapshot} already exists in ${outDir}; wait a second and run again`);
 		throw cause;
@@ -486,8 +495,9 @@ export async function archiveIndex(source: IndexArchiveSource, options: IndexArc
 		for (const part of opened) part.commit();
 		// Last: its presence means every data file above is complete.
 		const manifestPart = join(dir, `${MANIFEST_FILE}.part`);
-		writeFileSync(manifestPart, `${JSON.stringify(manifest, null, "\t")}\n`);
+		writeFileSync(manifestPart, `${JSON.stringify(manifest, null, "\t")}\n`, { mode: PRIVATE_FILE_MODE });
 		renameSync(manifestPart, join(dir, MANIFEST_FILE));
+		chmodSync(join(dir, MANIFEST_FILE), PRIVATE_FILE_MODE);
 		return manifest;
 	} catch (cause) {
 		// Everything this run created, committed or not: a failure after the renames
@@ -509,8 +519,23 @@ interface LineStats {
 	sha256: string;
 	/** The file did not end with a newline. */
 	unterminated: boolean;
-	/** Numbers of lines over {@link MAX_LINE_BYTES}, whose text is not kept. */
-	overlong: number[];
+	/** Over-long lines (over {@link MAX_LINE_BYTES}), whose text is not kept: a count and three examples, never a list that grows with the file. */
+	overlong: LineTally;
+}
+
+/** How many example line numbers a {@link LineTally} keeps. */
+export const TALLY_EXAMPLES = 3;
+
+/** A count of damaged lines and the first few of their line numbers: constant memory whatever the file holds. */
+export class LineTally {
+	count = 0;
+	/** The smallest line numbers added, at most {@link TALLY_EXAMPLES}, ascending as long as `add` is called in line order. */
+	readonly examples: number[] = [];
+
+	add(line: number): void {
+		this.count++;
+		if (this.examples.length < TALLY_EXAMPLES) this.examples.push(line);
+	}
 }
 
 /**
@@ -541,7 +566,7 @@ function* ndjsonLines(path: string, stats: LineStats): Generator<{ n: number; li
 				stats.lines++;
 				if (discarding || full.length > MAX_LINE_BYTES) {
 					discarding = false;
-					stats.overlong.push(stats.lines);
+					stats.overlong.add(stats.lines);
 					yield { n: stats.lines, line: null };
 				} else {
 					yield { n: stats.lines, line: full.toString("utf8") };
@@ -563,7 +588,7 @@ function* ndjsonLines(path: string, stats: LineStats): Generator<{ n: number; li
 			stats.lines++;
 			stats.unterminated = true;
 			if (discarding) {
-				stats.overlong.push(stats.lines);
+				stats.overlong.add(stats.lines);
 				yield { n: stats.lines, line: null };
 			} else {
 				yield { n: stats.lines, line: carry.toString("utf8") };
@@ -576,7 +601,7 @@ function* ndjsonLines(path: string, stats: LineStats): Generator<{ n: number; li
 }
 
 function newStats(): LineStats {
-	return { bytes: 0, lines: 0, sha256: "", unterminated: false, overlong: [] };
+	return { bytes: 0, lines: 0, sha256: "", unterminated: false, overlong: new LineTally() };
 }
 
 // ─── Offline verify ─────────────────────────────────────────────────────────
@@ -687,19 +712,19 @@ export function verifyIndexArchive(dir: string): IndexVerifyReport {
 
 		const stats = newStats();
 		const digests = new TableDigests(spec);
-		const bad: number[] = [];
+		const bad = new LineTally();
 		for (const { n, line } of ndjsonLines(path, stats)) {
 			if (line === null) continue;
 			let row: CoercedRow;
 			try {
 				row = coerceRow(spec, JSON.parse(line));
 			} catch {
-				bad.push(n);
+				bad.add(n);
 				continue;
 			}
 			// The line must be exactly what the export writes, so the digests below are over the same text.
 			if (!row.ok || JSON.stringify(row.row) !== line) {
-				bad.push(n);
+				bad.add(n);
 				continue;
 			}
 			digests.add(line, row.row);
@@ -707,9 +732,10 @@ export function verifyIndexArchive(dir: string): IndexVerifyReport {
 		report.tables[spec.name] = { rows: stats.lines, bytes: stats.bytes };
 		if (stats.sha256 !== entry.sha256) mismatches.push({ kind: "hash", table: spec.name, file, detail: `sha256 ${stats.sha256} differs from manifest ${entry.sha256}` });
 		if (stats.lines !== entry.rows) mismatches.push({ kind: "rowcount", table: spec.name, file, detail: `${stats.lines} lines, manifest counts ${entry.rows}` });
-		const unparsed = bad.length + stats.overlong.length + (stats.unterminated ? 1 : 0);
+		const unparsed = bad.count + stats.overlong.count + (stats.unterminated ? 1 : 0);
 		if (unparsed > 0) {
-			const first = [...bad, ...stats.overlong].sort((a, b) => a - b).slice(0, 3);
+			// Each tally keeps its three smallest line numbers (lines are scanned in order), so the merge is the three smallest overall.
+			const first = [...bad.examples, ...stats.overlong.examples].sort((a, b) => a - b).slice(0, 3);
 			mismatches.push({
 				kind: "parse",
 				table: spec.name,
@@ -1119,8 +1145,9 @@ export interface IndexNoteOutcome extends NoteOutcome {
 function tryWritePendingNote(dir: string, pending: PendingIndexNote): string | null {
 	const marker = join(dir, pendingIndexNoteFile(pending.snapshot));
 	try {
-		writeFileSync(`${marker}.part`, `${JSON.stringify(pending, null, "\t")}\n`);
+		writeFileSync(`${marker}.part`, `${JSON.stringify(pending, null, "\t")}\n`, { mode: PRIVATE_FILE_MODE });
 		renameSync(`${marker}.part`, marker);
+		chmodSync(marker, PRIVATE_FILE_MODE);
 		return null;
 	} catch (cause) {
 		return `note marker not written: ${errorText(cause)}`;

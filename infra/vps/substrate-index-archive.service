@@ -29,6 +29,9 @@ Type=oneshot
 # last and the failed run removes its own `.part` files.
 Slice=substrate.slice
 MemoryMax=512M
+# The archive holds complete accepted memory text: every file and directory it
+# creates is owner-only even if the code's explicit modes were ever bypassed.
+UMask=0077
 # The export's own bounds (SUBSTRATE_INDEX_ARCHIVE_MAX_SECONDS, default 900,
 # and _MAX_BYTES) end a runaway run first; this is the backstop. Not
 # TimeoutStartSec=infinity: a hung connection must end as a failed run.

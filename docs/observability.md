@@ -54,7 +54,7 @@ substrate is keyed by. `surface` says which of the eight agents on the host;
 | `substrate.plane.duration` | histogram, ms | `plane`, `op`, `outcome` = `ok` \| `error` \| `timeout` \| `open` |
 | `substrate.plane.errors` | counter | `plane`, `reason` = `timeout` \| `network` \| `server` \| `open` \| `other` |
 | `substrate.admission.decisions` | counter | `surface` (a known surface or `anonymous`), `class` = `read` \| `write` \| `coordination`, `decision` = `allowed` \| `limited` \| `shadow_limited` \| `bypass` |
-| `substrate.metrics.history.dropped` | counter | `reason` = `breaker_open` \| `unavailable` \| `rejected` \| `ddl` \| `invalid` \| `capped` \| `internal` (rows not stored; registered only with `SUBSTRATE_METRICS_HISTORY=on` and a ledger) |
+| `substrate.metrics.history.dropped` | counter | `reason` = `breaker_open` \| `unavailable` \| `rejected` \| `ddl` \| `schema` \| `invalid` \| `capped` \| `internal` (rows not stored; registered only with `SUBSTRATE_METRICS_HISTORY=on` and a ledger) |
 | `substrate.docs.search` | counter | `surface`, `outcome` = `hit` \| `empty` \| `degraded`, `cached` = `true` \| `false` |
 | `substrate.docs.citations` | counter | `provenance` = `recorded` \| `unrecorded` \| `unpinned` |
 | `substrate.docs.duration` | histogram, ms (own edges, incl. 2000 and 4000) | `surface`, `cached` |
@@ -544,8 +544,12 @@ volume and the measured table size before enabling it, and before raising the TT
 deadline (3 s) inside the gated call, so a timeout counts as a breaker failure
 and an open breaker costs no network. On any failure the batch is **dropped, not
 retried**, and counted as `substrate.metrics.history.dropped{reason}` in rows, with
-`reason` one of `breaker_open`, `unavailable`, `rejected`, `ddl`, `invalid`,
-`capped`, `internal`. A write still in flight when the next tick fires skips that
+`reason` one of `breaker_open`, `unavailable`, `rejected`, `ddl`, `schema`, `invalid`,
+`capped`, `internal`. `schema` is a `metric_samples` table that already exists
+without `append_mode` (checked on the live table before the first write, as the
+ledger tables are): rows of different labels would replace one another, so nothing
+is written, one boot-log line names the table, and an operator must drop and
+recreate it — the client never does. A write still in flight when the next tick fires skips that
 tick (the deltas accumulate into the next sample, so only a *failed* batch loses
 data). The timer is unref'd; shutdown waits for the write in flight and then
 takes one fresh sample, within the same two-second bound as the other final
@@ -570,10 +574,14 @@ store that cannot answer is `503` with a fixed message, never the store's error 
 **A read never creates the table**: only the sampler's first write does, so before
 that (or if the history was never on) the answer is an empty list. The route needs a
 bearer exactly like `/slo` (unless `SUBSTRATE_ALLOW_ANONYMOUS=1`), and every miss scans
-the whole window through the ledger's breaker, so each
-validated request key is memoised for 15 s with one read in flight per key (at most
-64 keys; refused requests are never keys), and the read has its own 2.5 s deadline —
-a timeout counts as a ledger failure like any other.
+the whole window through the ledger's breaker, so each validated request key is
+memoised for 15 s (200 answers only, at most 64 kept) and the read has its own 2.5 s
+deadline — a timeout counts as a ledger failure like any other. A request for a key
+already being read joins that read, and running reads are held apart from kept
+answers, so they are never evicted while they run. At most **16 reads** run at once:
+past that a new key starts no read and is answered with its last kept answer if there
+is one, else `503 {"enabled": true, "busy": true}` with `Retry-After: 5`. A refused
+request is never a key.
 
 **Rollback.** `SUBSTRATE_METRICS_HISTORY=off` (or unset) and restart: no timer,
 no write, `/slo/history` answers 404. The table stays and its rows expire on the

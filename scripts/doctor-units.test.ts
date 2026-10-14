@@ -368,6 +368,14 @@ describe("repo units", () => {
 		expect(indexArchive?.environmentFiles).toEqual([SHARED_ENV_FILE]);
 		expect(indexArchive?.restart).toBeNull();
 		expect(indexArchive?.execStart).toContain("index archive --out ${SUBSTRATE_INDEX_ARCHIVE_DIR}");
+		// The archive holds accepted memory text: private files whatever the code does, and the example mount dependency sits in [Unit], where systemd reads it.
+		const indexUnitText = readFileSync(join(repoRoot, "infra/vps/substrate-index-archive.service"), "utf8");
+		expect(indexUnitText).toMatch(/^UMask=0077$/m);
+		expect(indexUnitText.indexOf("UMask=0077")).toBeGreaterThan(indexUnitText.indexOf("[Service]"));
+		const indexDropIn = readFileSync(join(repoRoot, "infra/vps/substrate-index-archive.service.d/10-environment.conf"), "utf8");
+		const exampleAt = indexDropIn.indexOf("#   RequiresMountsFor=");
+		expect(exampleAt).toBeGreaterThan(-1);
+		expect(indexDropIn.slice(0, exampleAt).trimEnd().split("\n").at(-1)).toBe("#   [Unit]");
 		// The lane-B cutover (infra/vps/README.md operator step 4) moved herdr and
 		// muse onto the release tree with collector-only env files, like grok. Each
 		// unit loads exactly the file the identity manifest delivers its token to, so

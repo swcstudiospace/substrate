@@ -26,6 +26,8 @@ import {
 	diskGuardrailsFromEnv,
 	gatherDiskGuardrails,
 	humanBytes,
+	NESTED_SCAN_ENTRIES,
+	nestedNewest,
 	type IoEvidence,
 	parseAuditStat,
 	parseDu,
@@ -231,16 +233,127 @@ describe("state directory, journal and audit rows", () => {
 		expect(rows.some((r) => r.check.startsWith("would-reclaim"))).toBe(false);
 	});
 
-	test("over budget: only stale children no runbook owner claims are would-reclaim, largest first, and the audit chain never is", () => {
+	test("over budget: only a stale phase<N>-baseline directory is would-reclaim; live and unknown names never are", () => {
 		const rows = compareState(children, 300 * MIB, NOW, "/var/lib/substrate");
 		expect(rows[0]?.status).toBe("warn");
 		const reclaim = rows.filter((r) => r.check.startsWith("would-reclaim"));
-		// phase3-baseline (120 MB, 90 d) and transcripts (30 MB, 45 d) qualify; worktrees is only 5 d old; agentos and audit are owned.
-		expect(reclaim.map((r) => r.check)).toEqual(["would-reclaim state phase3-baseline", "would-reclaim state transcripts"]);
-		expect(reclaim.every((r) => r.status === "warn")).toBe(true);
+		// transcripts is live (the collectors write it) however old; agentos and the audit chain are owned.
+		expect(reclaim.map((r) => r.check)).toEqual(["would-reclaim state phase3-baseline"]);
+		expect(reclaim[0]?.status).toBe("warn");
 		expect(reclaim[0]?.hint).toContain("nothing was deleted");
-		expect(JSON.stringify(reclaim)).not.toContain("mcp-audit");
-		expect(JSON.stringify(reclaim)).not.toContain("agentos");
+		const joined = JSON.stringify(reclaim);
+		for (const name of ["mcp-audit", "agentos", "transcripts", "worktrees"]) expect(joined).not.toContain(name);
+	});
+
+	test("every live owner is never would-reclaim, even 400 days old and far over budget", () => {
+		const live: Array<[string, string]> = [
+			["skills", "d"],
+			["dispatcher", "d"],
+			["worktrees", "d"],
+			["transcripts", "d"],
+			["miner", "d"],
+			["muse-plugin", "d"],
+			["agentos", "d"],
+			["desktop", "d"],
+			["docs-canary-last.json", "f"],
+			["docs-ingest.json", "f"],
+			["slo-checkpoint.json", "f"],
+			["slo-checkpoint.json.tmp", "f"],
+			["retain-outbox.jsonl", "f"],
+			["refused-emits.jsonl", "f"],
+			["doctor-last.json", "f"],
+			["grok-offsets.json", "f"],
+			["herdr-offsets.json", "f"],
+			["muse-offsets.json", "f"],
+			["mcp-audit.jsonl", "f"],
+			["mcp-audit.jsonl.1-900.jsonl", "f"],
+			["ledger-archive", "d"],
+			["index-archive", "d"],
+		];
+		const old = live.map(([name, type]) => ({ name, type, bytes: 100 * MIB, mtime: NOW - 400 * DAY }));
+		const rows = compareState(old, 1 * MIB, NOW, "/var/lib/substrate");
+		expect(rows[0]?.status).toBe("warn");
+		expect(rows.filter((r) => r.check.startsWith("would-reclaim"))).toEqual([]);
+		for (const [name, type] of live) expect(stateOwner(name, type).keep).toBe(true);
+	});
+
+	test("an unknown name is reported as `unknown owner` and never as would-reclaim, old or not", () => {
+		const unknown = ["scratch", "phase3-baseline.bak", "phase-baseline", "skills2", "stuff.json", "Phase3-baseline"].map((name) => ({ name, type: "d", bytes: 100 * MIB, mtime: NOW - 400 * DAY }));
+		const rows = compareState(unknown, 1 * MIB, NOW, "/var/lib/substrate");
+		expect(rows.filter((r) => r.check.startsWith("would-reclaim"))).toEqual([]);
+		const scratch = rows.find((r) => r.check === "state child scratch");
+		expect(scratch?.hint).toContain("unknown owner");
+		expect(stateOwner("scratch", "d")).toMatchObject({ keep: true, owner: expect.stringContaining("unknown owner") });
+		// A file named like a baseline directory is not one.
+		expect(stateOwner("phase3-baseline", "f").keep).toBe(true);
+	});
+
+	test("a baseline directory whose scan was cut is not reclaimable: its age is only a floor", () => {
+		const cut = [{ name: "phase4-baseline", type: "d", bytes: 100 * MIB, mtime: NOW - 90 * DAY, ageCut: true }];
+		const rows = compareState(cut, 1 * MIB, NOW, "/var/lib/substrate");
+		expect(rows.filter((r) => r.check.startsWith("would-reclaim"))).toEqual([]);
+		expect(rows.find((r) => r.check === "state child phase4-baseline")?.actual).toContain("scan cut");
+	});
+
+	describe("a directory's age is the newest mtime inside it", () => {
+		function findHost(nested: string) {
+			const calls: string[][] = [];
+			const host: Host = {
+				run(argv) {
+					calls.push([...argv]);
+					return { code: 0, out: nested };
+				},
+				readText: () => null,
+				sleep: async () => {},
+				now: () => NOW,
+			};
+			return { host, calls };
+		}
+
+		test("nestedNewest takes the freshest child over the directory's own old mtime, at depth 2", () => {
+			const { host, calls } = findHost(`${NOW - 90 * DAY}.0\n${NOW - 90 * DAY}.0\n${NOW - 120}.5\n`);
+			expect(nestedNewest(host, "/var/lib/substrate/phase5-baseline", NOW - 90 * DAY)).toEqual({ mtime: NOW - 120 + 0.5, cut: false });
+			expect(calls).toEqual([["find", "/var/lib/substrate/phase5-baseline", "-maxdepth", "2", "-printf", "%T@\\n"]]);
+		});
+
+		test("more than 200 entries sets cut and reads only the first 200", () => {
+			const lines = Array.from({ length: 250 }, (_, i) => `${i < 200 ? NOW - 90 * DAY : NOW - 5}.0`).join("\n");
+			const { host } = findHost(`${lines}\n`);
+			expect(nestedNewest(host, "/x", NOW - 90 * DAY)).toEqual({ mtime: NOW - 90 * DAY, cut: true });
+			const exact = findHost(`${Array(NESTED_SCAN_ENTRIES).fill(`${NOW - 90 * DAY}.0`).join("\n")}\n`);
+			expect(nestedNewest(exact.host, "/x", NOW - 90 * DAY).cut).toBe(false);
+		});
+
+		test("garbage lines and a failed find leave the directory's own mtime", () => {
+			expect(nestedNewest(findHost("not a number\n\n").host, "/x", 123)).toEqual({ mtime: 123, cut: false });
+			const failing: Host = { run: () => null, readText: () => null, sleep: async () => {}, now: () => NOW };
+			expect(nestedNewest(failing, "/x", 123)).toEqual({ mtime: 123, cut: false });
+		});
+
+		test("end to end: an old baseline directory with a fresh file inside is not would-reclaim; with nothing fresh it is", () => {
+			function host(freshInside: boolean): Host {
+				return {
+					run(argv) {
+						if (argv[0] === "find" && argv[1] === "/var/lib/substrate") {
+							return { code: 0, out: `/var/lib/substrate/phase6-baseline\t${NOW - 90 * DAY}.0\td\n/var/lib/substrate/other\t${NOW - 90 * DAY}.0\td\n` };
+						}
+						if (argv[0] === "find") return { code: 0, out: `${NOW - 90 * DAY}.0\n${freshInside ? `${NOW - 30}.0` : `${NOW - 91 * DAY}.0`}\n` };
+						if (argv[0] === "du") return { code: 0, out: argv.slice(4).map((p) => `${100 * MIB}\t${p}\n`).join("") };
+						return null;
+					},
+					readText: () => null,
+					sleep: async () => {},
+					now: () => NOW,
+				};
+			}
+			const guard = { ...GUARD, stateMaxBytes: MIB };
+			const fresh = gatherDiskGuardrails(host(true), guard);
+			expect(fresh.filter((r) => r.check.startsWith("would-reclaim state"))).toEqual([]);
+			const stale = gatherDiskGuardrails(host(false), guard);
+			// `other` is an unknown owner: never proposed, only the baseline directory is.
+			expect(stale.filter((r) => r.check.startsWith("would-reclaim state")).map((r) => r.check)).toEqual(["would-reclaim state phase6-baseline"]);
+			expect(stale.find((r) => r.check === "state child other")?.hint).toContain("unknown owner");
+		});
 	});
 
 	test("the per-child list is capped and the rest summed; names are printable and bounded", () => {
@@ -252,15 +365,19 @@ describe("state directory, journal and audit rows", () => {
 		expect(safeName("x".repeat(500)).length).toBe(64);
 	});
 
-	test("stateOwner names the audit chain, rivetkit, desktop and unit state, and nothing else", () => {
-		expect(stateOwner("mcp-audit.jsonl.1-900.jsonl", "f")?.keep).toBe(true);
-		expect(stateOwner("mcp-audit.checkpoint", "f")?.keep).toBe(true);
-		expect(stateOwner("agentos", "d")?.keep).toBe(true);
-		expect(stateOwner("desktop", "d")?.keep).toBe(true);
-		expect(stateOwner("grok-offsets.json", "f")?.keep).toBe(true);
-		expect(stateOwner("doctor-last.json", "f")?.keep).toBe(true);
-		expect(stateOwner("doctor-last.json", "d")).toBeNull();
-		expect(stateOwner("phase1-baseline", "d")).toBeNull();
+	test("stateOwner names the audit chain and every live owner, and calls anything else an unknown owner", () => {
+		expect(stateOwner("mcp-audit.jsonl.1-900.jsonl", "f").keep).toBe(true);
+		expect(stateOwner("mcp-audit.checkpoint", "f").keep).toBe(true);
+		expect(stateOwner("agentos", "d").keep).toBe(true);
+		expect(stateOwner("desktop", "d").keep).toBe(true);
+		expect(stateOwner("grok-offsets.json", "f").keep).toBe(true);
+		expect(stateOwner("doctor-last.json", "f").keep).toBe(true);
+		// A live owner's name is protected whatever the entry's kind.
+		expect(stateOwner("doctor-last.json", "d").keep).toBe(true);
+		const asDir = compareState([{ name: "doctor-last.json", type: "d", bytes: 100 * MIB, mtime: NOW - 400 * DAY }], MIB, NOW, "/var/lib/substrate");
+		expect(asDir.filter((r) => r.check.startsWith("would-reclaim"))).toEqual([]);
+		expect(stateOwner("never-heard-of-it", "d").owner).toContain("unknown owner");
+		expect(stateOwner("phase1-baseline", "d").keep).toBe(false);
 	});
 
 	test("journal: 329.6M parses, is under the 400M default, and over budget prints the vacuum it did not run", () => {

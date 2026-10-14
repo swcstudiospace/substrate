@@ -488,7 +488,7 @@ export function canaryEvent(failing: ReadonlyArray<{ fixture: string; failed: st
  * the same scorer as the offline tier and the printed live tier, plus the
  * attested pin. Exit 0 all pass; 1 a regression (one warning posted when the
  * failing set changed); 2 not configured (named, nothing sent); 3 unusable
- * (stale fixtures or manifest, service refused or unreachable, or a degraded
+ * (stale fixtures, an unreadable manifest, a dataset with no version pin, service refused or unreachable, or a degraded
  * answer — an open breaker is an outage, which is the SLO's to report, not a
  * regression to announce; nothing is posted); 4 the dedupe record could not be
  * cleared after a pass (a stale record would silently swallow the next
@@ -514,7 +514,13 @@ export async function runCanary(io: GoldenIo): Promise<number> {
 		return 2;
 	}
 	const manifestPath = io.env.SUBSTRATE_DOCS_CANARY_MANIFEST?.trim() ?? "";
-	const manifestText = (io.readFile ?? ((path: string) => readFileSync(path, "utf8")))(manifestPath);
+	let manifestText: string | null;
+	try {
+		manifestText = (io.readFile ?? ((path: string) => readFileSync(path, "utf8")))(manifestPath);
+	} catch {
+		// A missing or unreadable manifest is a setup failure (exit 3), never a crash.
+		manifestText = null;
+	}
 	const manifest = manifestText === null ? { problem: "cannot be read" } : parseCanaryManifest(manifestText);
 	if ("problem" in manifest) {
 		io.stderr(`refusing the docs canary: SUBSTRATE_DOCS_CANARY_MANIFEST ${manifest.problem}`);
@@ -556,7 +562,23 @@ export async function runCanary(io: GoldenIo): Promise<number> {
 			io.stderr(`${fixture.id}: POST /docs/search answered degraded (${String(reply.reason ?? "no reason").slice(0, 80)}); an outage cannot be scored, nothing posted`);
 			return 3;
 		}
-		const score = scoreReply(fixture, reply);
+		// A citation with no dataset_commit means the dataset has no recorded version
+		// (no pin): a setup failure to fix before enabling the canary, not a regression.
+		const unpinned = reply.chunks.filter((citation) => citation.dataset_commit === undefined);
+		if (unpinned.length > 0) {
+			io.stderr(
+				`refusing the docs canary: ${fixture.id} cited ${unpinned.length} chunk(s) from a dataset with no recorded version pin (datasets: ${fixture.datasets.join(", ")}); seed the pins first (docs/docs-search-ingest.md), nothing posted`,
+			);
+			return 3;
+		}
+		// The live expectations use the ATTESTED commit: the corpus may have been
+		// ingested under a release SHA, while the committed offline fixtures state
+		// the golden commit.
+		const live: GoldenFixture = {
+			...fixture,
+			expected: fixture.expected.map((entry) => (entry.commit === undefined ? entry : { ...entry, commit: manifest.dataset_commit })),
+		};
+		const score = scoreReply(live, reply);
 		// The attested pin is part of the verdict here: a citation from another
 		// ingest means the corpus the fixtures describe is not what is served.
 		if (reply.chunks.some((citation) => citation.dataset_commit !== manifest.dataset_commit)) score.failures.push("dataset_commit");

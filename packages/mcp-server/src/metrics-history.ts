@@ -36,7 +36,7 @@ import { SURFACES } from "./types.ts";
 export const DROPPED_METRIC = "substrate.metrics.history.dropped";
 
 /** Why a batch (or part of one) was not stored. A closed set: it is a metric label. */
-export const METRIC_DROP_REASONS = ["breaker_open", "unavailable", "rejected", "ddl", "invalid", "capped", "internal"] as const;
+export const METRIC_DROP_REASONS = ["breaker_open", "unavailable", "rejected", "ddl", "schema", "invalid", "capped", "internal"] as const;
 export type MetricDropReason = (typeof METRIC_DROP_REASONS)[number];
 
 /** Rows per `INSERT`. The sampler emits a few dozen, so this is a ceiling, not a target. */
@@ -399,7 +399,7 @@ export interface MetricsHistorySamplerDeps {
 /** Register the drop counter. Called before the registry is seeded, so a checkpoint can restore it. */
 export function registerMetricsHistoryMetrics(registry: MetricRegistry): void {
 	registry.counter(DROPPED_METRIC, {
-		description: "Metric-history rows not stored, by reason (breaker_open|unavailable|rejected|ddl|invalid|capped|internal).",
+		description: "Metric-history rows not stored, by reason (breaker_open|unavailable|rejected|ddl|schema|invalid|capped|internal).",
 		unit: "{row}",
 	});
 }
@@ -518,6 +518,9 @@ export function parseHistoryStep(raw: string): number | null {
 /** How long an answer is served again, and how many are kept. The route scans the whole TTL window through the shared ledger gate, so it is memoised. */
 export const HISTORY_MEMO_MS = 15_000;
 export const HISTORY_MEMO_MAX = 64;
+/** Reads that may run at once; each is a scan of the shared ledger, so this is the bound on the work a public route can add. */
+export const HISTORY_PENDING_MAX = 16;
+const HISTORY_RETRY_AFTER_S = 5;
 
 /**
  * The step a read is really run at, ONE rule for the client and the route.
@@ -538,42 +541,83 @@ export function effectiveHistoryStep(series: string, windowMs: number, requested
 }
 
 /**
- * Answers by request key, each served again for {@link HISTORY_MEMO_MS} and
- * computed once however many requests arrive meanwhile (the promise is stored,
- * so concurrent identical requests share one read). Bounded: expired entries are
- * purged first, then the oldest inserted goes until there is room, so a scanner
- * cycling keys cannot grow it past `max`. Keys are built from validated values.
+ * Answers by request key, in two maps that never mix.
+ *
+ * **Completed** answers (status 200 only) are served again for {@link HISTORY_MEMO_MS}
+ * and are a bounded LRU: the oldest inserted goes when `max` is exceeded, so a
+ * scanner cycling keys cannot grow it. **Pending** reads are never evicted while
+ * they run, so a request for a key already being read always joins that read,
+ * however many other keys arrived since; and they are capped at `maxPending`
+ * outstanding reads. With the cap full a new key starts NO read: it is answered
+ * with the last completed answer for that key (even an expired one) when there is
+ * one, else `503 { enabled: true, busy: true }` with a `Retry-After`. The entry
+ * leaves `pending` when its read settles, success or failure, so a failed read
+ * leaves nothing behind. Keys are built from validated values.
  */
 export class MetricHistoryMemo {
-	private readonly entries = new Map<string, { at: number; answer: Promise<MetricHistoryAnswer> }>();
+	private readonly completed = new Map<string, { at: number; answer: MetricHistoryAnswer }>();
+	private readonly pending = new Map<string, Promise<MetricHistoryAnswer>>();
 
 	constructor(
 		private readonly now: () => number,
 		private readonly ttlMs: number = HISTORY_MEMO_MS,
 		private readonly max: number = HISTORY_MEMO_MAX,
+		private readonly maxPending: number = HISTORY_PENDING_MAX,
 	) {}
 
+	/** Completed answers held. */
 	get size(): number {
-		return this.entries.size;
+		return this.completed.size;
+	}
+
+	/** Reads running right now. */
+	get pendingSize(): number {
+		return this.pending.size;
 	}
 
 	answer(key: string, load: () => Promise<MetricHistoryAnswer>): Promise<MetricHistoryAnswer> {
 		const now = this.now();
-		const hit = this.entries.get(key);
-		if (hit !== undefined && now - hit.at < this.ttlMs) return hit.answer;
-		this.entries.delete(key);
-		for (const [other, entry] of this.entries) {
-			if (now - entry.at >= this.ttlMs) this.entries.delete(other);
+		const done = this.completed.get(key);
+		if (done !== undefined && now - done.at < this.ttlMs) return Promise.resolve(done.answer);
+		const running = this.pending.get(key);
+		if (running !== undefined) return running;
+		if (this.pending.size >= this.maxPending) {
+			return Promise.resolve(done !== undefined ? done.answer : metricHistoryBusy());
 		}
-		while (this.entries.size >= this.max) {
-			const oldest = this.entries.keys().next().value;
-			if (oldest === undefined) break;
-			this.entries.delete(oldest);
+		let read: Promise<MetricHistoryAnswer>;
+		try {
+			read = load();
+		} catch (cause) {
+			read = Promise.reject(cause);
 		}
-		const answer = load();
-		this.entries.set(key, { at: now, answer });
-		return answer;
+		const tracked = read
+			.then((answer) => {
+				if (answer.status === 200) {
+					this.completed.delete(key);
+					this.completed.set(key, { at: this.now(), answer });
+					while (this.completed.size > this.max) {
+						const oldest = this.completed.keys().next().value;
+						if (oldest === undefined) break;
+						this.completed.delete(oldest);
+					}
+				}
+				return answer;
+			})
+			.finally(() => {
+				this.pending.delete(key);
+			});
+		this.pending.set(key, tracked);
+		return tracked;
 	}
+}
+
+/** The answer when every read slot is taken and nothing is held for the key: no ledger read is made. */
+function metricHistoryBusy(): MetricHistoryAnswer {
+	return {
+		status: 503,
+		body: { enabled: true, busy: true, error: "too many history reads are running; retry shortly" },
+		headers: { "retry-after": String(HISTORY_RETRY_AFTER_S) },
+	};
 }
 
 export interface MetricHistoryDeps {
@@ -588,6 +632,8 @@ export interface MetricHistoryDeps {
 export interface MetricHistoryAnswer {
 	status: number;
 	body: Record<string, unknown>;
+	/** Extra response headers (`Retry-After` on a busy 503). */
+	headers?: Record<string, string>;
 }
 
 /**
