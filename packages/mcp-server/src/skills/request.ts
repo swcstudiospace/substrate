@@ -8,7 +8,7 @@
 import { redact } from "../redact.ts";
 import { SkillProposalDenied, type SkillProposalRequest } from "../service.ts";
 import { SURFACES } from "../types.ts";
-import { ProposeFailed, ProposeRefused, ROUTE_MAX_BYTES } from "./propose.ts";
+import { ProposeFailed, ProposeRefused } from "./propose.ts";
 
 /** The most a failed git or gh step may say to a caller (D21-09). */
 const FAILURE_MESSAGE_MAX = 400;
@@ -46,22 +46,6 @@ export function proposalBodyProblem(body: unknown): string | null {
 	) {
 		return "allow_doc_examples must be an array of pem or jwt";
 	}
-	return null;
-}
-
-/**
- * The proposal body's serialized size, as a message for a cap refusal, or null when it fits.
- *
- * Measured on the canonical serialized UTF-8 JSON of the CALLER's proposal body, before any
- * server-owned injection: attribution to the token surface costs the caller nothing, so an
- * exact-1M wire body without a surface is accepted, not tipped over by injection. A
- * client-supplied surface field counts because the caller sent it. The JSON-RPC envelope is
- * never part of the measure. The engine's file-text cap stays as its own internal backstop
- * behind this guard. The message matches the CLI pre-flight so all three doors name one limit.
- */
-export function proposalBodySizeProblem(body: Record<string, unknown>): string | null {
-	const bytes = Buffer.byteLength(JSON.stringify(body), "utf8");
-	if (bytes > ROUTE_MAX_BYTES) return `the proposal is ${bytes} bytes as JSON, over the limit of ${ROUTE_MAX_BYTES} bytes`;
 	return null;
 }
 

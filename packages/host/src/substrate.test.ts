@@ -4,14 +4,13 @@
  * any assertion — only header presence and the `Bearer ` scheme.
  */
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	heartbeatDue,
 	LeaseStore,
 	resolveHostBearer,
-	resolveLeaseBearer,
 	SubstrateClient,
 	type LeaseRecord,
 } from "./substrate.ts";
@@ -32,6 +31,9 @@ function captureFetch(reply: (url: string, init: RequestInit) => Response) {
 	return { seen, fetchImpl };
 }
 
+function headersOf(init: RequestInit): Record<string, string> {
+	return (init.headers ?? {}) as Record<string, string>;
+}
 
 describe("resolveHostBearer", () => {
 	test("per-unit host env file variable wins", () => {
@@ -64,74 +66,44 @@ describe("resolveHostBearer", () => {
 	});
 });
 
-describe("resolveLeaseBearer", () => {
-	test("per-unit lease variable wins without touching the job chain", () => {
-		const bearer = resolveLeaseBearer(
-			{ SUBSTRATE_TOKEN_CLAUDE_CODE: "lease-bearer", SUBSTRATE_TOKEN: "direct-bearer" } as NodeJS.ProcessEnv,
-			() => null,
-		);
-		expect(bearer).toBe("lease-bearer");
-	});
-
-	test("Phase 20 order after the unit variable: direct, file, tokens dir claude-code surface", () => {
-		expect(
-			resolveLeaseBearer({ SUBSTRATE_TOKEN: "direct-bearer" } as NodeJS.ProcessEnv, () => null),
-		).toBe("direct-bearer");
-		expect(
-			resolveLeaseBearer(
-				{ SUBSTRATE_TOKEN_FILE: "/tmp/x" } as NodeJS.ProcessEnv,
-				() => "file-bearer",
-			),
-		).toBe("file-bearer");
-		expect(
-			resolveLeaseBearer({} as NodeJS.ProcessEnv, (path) =>
-				path === "/etc/substrate/tokens/claude-code" ? "dir-bearer" : null,
-			),
-		).toBe("dir-bearer");
-	});
-
-	test("lease and job chains never share a surface file", () => {
-		const read = (path: string) => (path.endsWith("/substrate") ? "job-bearer" : path.endsWith("/claude-code") ? "lease-bearer" : null);
-		expect(resolveHostBearer({} as NodeJS.ProcessEnv, read)).toBe("job-bearer");
-		expect(resolveLeaseBearer({} as NodeJS.ProcessEnv, read)).toBe("lease-bearer");
-	});
-
-	test("absent everywhere means null (fail-open; the server refuses)", () => {
-		expect(resolveLeaseBearer({} as NodeJS.ProcessEnv, () => null)).toBeNull();
-	});
-});
-
 describe("bearer carriage", () => {
-	test("lease and job bearers resolve distinctly with no cross-surface fallback", async () => {
-		const client = new SubstrateClient({ baseUrl: "http://127.0.0.1:9", fetchImpl: (async () => jsonRpc(1, {})) as unknown as typeof fetch, bearer: "lease-bearer", jobBearer: "job-bearer" });
+	test("every tool call carries the Authorization bearer header", async () => {
+		const { seen, fetchImpl } = captureFetch((url) =>
+			jsonRpc(1, { graph_id: "g", node_id: "n", nodes: [] }),
+		);
+		const client = new SubstrateClient({ baseUrl: "http://127.0.0.1:9", fetchImpl, bearer: "test-bearer" });
 		expect(client.authenticated).toBe(true);
-		expect(client.jobAuthenticated).toBe(true);
-		expect(client.bearer).not.toBe(client.jobBearer);
+		await client.graphGet("g");
+		expect(seen).toHaveLength(1);
+		expect(headersOf(seen[0]?.init ?? {}).authorization).toBe("Bearer test-bearer");
 	});
 
-	test("anonymous client carries neither bearer", async () => {
+	test("anonymous client sends no authorization header", async () => {
+		const { seen, fetchImpl } = captureFetch((url) =>
+			jsonRpc(1, { graph_id: "g", node_id: "n", nodes: [] }),
+		);
 		const client = new SubstrateClient({
 			baseUrl: "http://127.0.0.1:9",
-			fetchImpl: (async () => jsonRpc(1, {})) as unknown as typeof fetch,
+			fetchImpl,
 			env: {} as NodeJS.ProcessEnv,
 			readTokenFile: () => null,
 		});
 		expect(client.authenticated).toBe(false);
-		expect(client.jobAuthenticated).toBe(false);
+		await client.graphGet("g");
+		expect("authorization" in headersOf(seen[0]?.init ?? {})).toBe(false);
 	});
 
 	test("no baked secret: sources carry names only", () => {
 		const source = readFileSync(new URL("./substrate.ts", import.meta.url), "utf8");
 		expect(source).not.toMatch(/Bearer [A-Za-z0-9_-]{8,}/);
 		expect(source).toMatch(/SUBSTRATE_TOKEN_SUBSTRATE/);
-		expect(source).toMatch(/SUBSTRATE_TOKEN_CLAUDE_CODE/);
 	});
 });
 
 describe("lease persist and heartbeat", () => {
 	test("claimAndPersist writes the lease id to a 0600 file", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "lease-"));
-		const { fetchImpl } = captureFetch((url) => jsonRpc(1, { claimed: true, lease: { lease_id: "lease-123" } }));
+		const { fetchImpl } = captureFetch((url) => jsonRpc(1, { claimed: true, lease_id: "lease-123" }));
 		const client = new SubstrateClient({ baseUrl: "http://127.0.0.1:9", fetchImpl, bearer: "test-bearer" });
 		const store = new LeaseStore(dir);
 		const reply = await client.claimAndPersist(store, "g", "n", "claude-code", "s");
@@ -148,56 +120,6 @@ describe("lease persist and heartbeat", () => {
 		const client = new SubstrateClient({ baseUrl: "http://127.0.0.1:9", fetchImpl, bearer: "test-bearer" });
 		const store = new LeaseStore(dir);
 		await client.claimAndPersist(store, "g", "n", "claude-code", "s");
-		expect(store.load("g", "n")).toBeNull();
-	});
-
-	test("a real persist failure compensates with the captured grant and throws names-only", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "lease-"));
-		const file = join(dir, "not-a-dir");
-		writeFileSync(file, "occupied");
-		const released: string[] = [];
-		const fetchImpl = (async (url: string, init: RequestInit) => {
-			const body: unknown = JSON.parse(String(init.body));
-			const params: unknown = typeof body === "object" && body !== null && "params" in body ? body.params : undefined;
-			const name: unknown = typeof params === "object" && params !== null && "name" in params ? params.name : undefined;
-			if (name === "graph_release") {
-				released.push("grant");
-				return jsonRpc(2, { released: true });
-			}
-			return jsonRpc(1, { claimed: true, lease: { lease_id: "lease-123" } });
-		}) as unknown as typeof fetch;
-		const client = new SubstrateClient({ baseUrl: "http://127.0.0.1:9", fetchImpl, bearer: "test-bearer" });
-		const store = new LeaseStore(file);
-		const failure = await client.claimAndPersist(store, "g", "n", "claude-code", "s").then(
-			() => "no-throw",
-			(cause: unknown) => String(cause),
-		);
-		expect(failure).toContain("lease persist failed");
-		expect(failure).toContain("grant released");
-		expect(failure).not.toContain("lease-123");
-		expect(released).toEqual(["grant"]);
-		expect(store.load("g", "n")).toBeNull();
-	});
-
-	test("a refused compensation still throws without claiming release", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "lease-"));
-		const file = join(dir, "not-a-dir");
-		writeFileSync(file, "occupied");
-		const fetchImpl = (async (url: string, init: RequestInit) => {
-			const body: unknown = JSON.parse(String(init.body));
-			const params: unknown = typeof body === "object" && body !== null && "params" in body ? body.params : undefined;
-			const name: unknown = typeof params === "object" && params !== null && "name" in params ? params.name : undefined;
-			if (name === "graph_release") return jsonRpc(2, { released: false, reason: "stale-lease" });
-			return jsonRpc(1, { claimed: true, lease: { lease_id: "lease-123" } });
-		}) as unknown as typeof fetch;
-		const client = new SubstrateClient({ baseUrl: "http://127.0.0.1:9", fetchImpl, bearer: "test-bearer" });
-		const store = new LeaseStore(file);
-		const failure = await client.claimAndPersist(store, "g", "n", "claude-code", "s").then(
-			() => "no-throw",
-			(cause: unknown) => String(cause),
-		);
-		expect(failure).toContain("release refused");
-		expect(failure).not.toContain("lease-123");
 		expect(store.load("g", "n")).toBeNull();
 	});
 

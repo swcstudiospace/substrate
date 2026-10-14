@@ -183,10 +183,10 @@ process-local. Parse budget is thirty polls two seconds apart.
 
 | Dataset | Source | Refresh trigger |
 |---|---|---|
-| `agent-substrate` | `README.md`, `docs/`, `.planning/PROJECT.md` of this repo | merge to `main`, then `substrate docs refresh --dataset agent-substrate --commit SHA --dir <checkout>` |
-| `programming-desk` | `docs/`, `skills/`, `contracts/`, `ARCHITECTURE.md`, `prompts-assembled/` of `swcstudiospace/programming-desk` | merge of that repo, then `docs refresh` against its checkout |
-| `agent-skills` | every `SKILL.md` and `references/` in `swcstudiospace/agent-skills` | `substrate-skills-sync` after a fast-forward: the tick posts the corpus itself |
-| `<product>` (`kanbanos`, `desklanes`, `clippyos`, `auctioning`) | that repo's docs | merge of that repo, then `docs refresh` against its checkout |
+| `agent-substrate` | `README.md`, `docs/`, `.planning/PROJECT.md` of this repo | merge to `main` |
+| `programming-desk` | `docs/`, `skills/`, `contracts/`, `ARCHITECTURE.md`, `prompts-assembled/` of `swcstudiospace/programming-desk` | merge of that repo |
+| `agent-skills` | every `SKILL.md` and `references/` in `swcstudiospace/agent-skills` | `substrate-skills-sync` after a fast-forward |
+| `<product>` (`kanbanos`, `desklanes`, `clippyos`, `auctioning`) | that repo's docs | merge of that repo |
 
 Embedding: TEI `bge-small`; no chat model is registered; retrieval only.
 Discovery is by name and creation happens only on a name-miss. Each

@@ -1,12 +1,13 @@
 /**
- * DOCS-03: dataset version pins and the skills-sync degradation (D25-06,
- * D25-07).
+ * DOCS-03: dataset resolve-by-name, refresh triggers and the skills-sync
+ * degradation (D25-06, D25-07).
  *
- * Refresh records a version per dataset and keeps the last five. The
- * `agent-skills` refresh is driven by skills-sync fast-forward evidence:
- * with the sync unit not yet live there is no evidence, so refresh
- * degrades explicitly — one warning, and serve from the last pinned
- * version with the pin age in the reply.
+ * Existing datasets are reused by name; creation happens only on a
+ * name-miss with the pinned embedding model. Refresh records a version per
+ * dataset and keeps the last five. The `agent-skills` refresh is driven by
+ * skills-sync fast-forward evidence: with the sync unit not yet live there
+ * is no evidence, so refresh degrades explicitly — one warning, and serve
+ * from the last pinned version with the pin age in the reply.
  *
  * The hook has no timer and no surface: the sync tick's projection step
  * calls `noteSkillsSyncFastForward`, and search consults `isSyncLive`.
@@ -22,6 +23,16 @@ import { createDataset, listDatasets, type DatasetListOutcome, type FetchLike, t
 import type { DatasetPin } from "./docs-search.ts";
 import type { EventInput, Surface } from "./types.ts";
 
+/** Every dataset this phase knows, with its refresh trigger. */
+export const DATASET_TRIGGERS: Readonly<Record<string, string>> = {
+	"agent-substrate": "merge to main of agent-substrate",
+	"programming-desk": "merge to main of programming-desk",
+	"agent-skills": "substrate-skills-sync fast-forward",
+	kanbanos: "merge to main of kanbanos",
+	desklanes: "merge to main of desklanes",
+	clippyos: "merge to main of clippyos",
+	auctioning: "merge to main of auctioning",
+};
 
 /** How many versions each dataset keeps (D25-06). */
 export const DATASET_VERSION_RETENTION = 5;
@@ -33,20 +44,6 @@ export interface DatasetVersion {
 	commit: string;
 	content_sha256: string;
 	ingested_at: string;
-	/**
-	 * The served corpus: every document backing this pin, so search cites
-	 * the pin commit only for chunks from these documents. Pins recorded
-	 * without a manifest (older rows, resolve-first refreshes) cite
-	 * nothing: their chunks read as unpinned rather than falsely current.
-	 */
-	documents?: VersionDocument[];
-}
-
-/** One served document inside a version pin. */
-export interface VersionDocument {
-	source_url: string;
-	document_id: string;
-	content_sha256: string;
 }
 
 /** Per-dataset version lists, newest last. */
@@ -69,40 +66,12 @@ export function latestVersion(store: VersionStore, dataset: string): DatasetVers
 	return versions[versions.length - 1];
 }
 
-/** Fields a version finalize needs; the store supplies the monotonic number. */
-export interface DatasetVersionFields {
-	dataset: string;
-	dataset_id: string;
-	commit: string;
-	content_sha256: string;
-	ingested_at: string;
-	documents?: VersionDocument[];
-}
-
-/**
- * Record the next version for a dataset with a store-derived monotonic
- * number, keeping the last five (D25-06). Shared by the resolve-first
- * refresh and the substrate ingest finalize so the two doors cannot fork
- * the numbering: only changed, fully-parsed corpora promote, and the
- * caller decides that — this helper only numbers and retains.
- */
-export function recordDatasetVersion(store: VersionStore, fields: DatasetVersionFields): DatasetVersion {
-	const prior = store.get(fields.dataset) ?? [];
-	const generation = prior.reduce((top, record) => {
-		const n = Number(/^v(\d+)$/.exec(record.version)?.[1] ?? 0);
-		return Math.max(top, Number.isFinite(n) ? n : 0);
-	}, 0);
-	const version: DatasetVersion = { ...fields, version: `v${generation + 1}` };
-	recordVersion(store, version);
-	return version;
-}
-
 /** The search pins for every dataset with a recorded version. */
 export function pinsFromVersions(store: VersionStore): Record<string, DatasetPin> {
 	const pins: Record<string, DatasetPin> = {};
 	for (const versions of store.values()) {
 		const latest = versions[versions.length - 1];
-		if (latest) pins[latest.dataset_id] = { dataset: latest.dataset, dataset_id: latest.dataset_id, version: latest.version, commit: latest.commit, ingested_at: latest.ingested_at, ...(latest.documents !== undefined ? { documents: latest.documents } : {}) };
+		if (latest) pins[latest.dataset_id] = { dataset: latest.dataset, dataset_id: latest.dataset_id, version: latest.version, commit: latest.commit, ingested_at: latest.ingested_at };
 	}
 	return pins;
 }

@@ -7,7 +7,7 @@ import { describe, expect, test } from "bun:test";
 import { REDACTED } from "../redact.ts";
 import { SkillProposalDenied } from "../service.ts";
 import { ProposeFailed, ProposeRefused } from "./propose.ts";
-import { proposalBodyProblem, proposalBodySizeProblem, proposalFailure } from "./request.ts";
+import { proposalBodyProblem, proposalFailure, toProposalRequest } from "./request.ts";
 
 const valid = { name: "demo-skill", files: { "SKILL.md": "---\nname: demo-skill\n---\n" }, rationale: "why" };
 
@@ -58,33 +58,28 @@ describe("proposalBodyProblem", () => {
 	});
 });
 
-describe("proposalBodySizeProblem", () => {
-	test("a small body fits", () => {
-		expect(proposalBodySizeProblem(valid)).toBeNull();
+describe("toProposalRequest", () => {
+	test("carries only what the body names", () => {
+		expect(toProposalRequest(valid)).toEqual(valid);
 	});
 
-	test("the boundary is on canonical serialized UTF-8 bytes: exactly 1_000_000 fits, one more does not", () => {
-		// Multibyte content, JSON escaping and metadata overhead all count. The named
-		// surface is a client-owned field, so it counts toward the 1M.
-		const rationale = 'café "quoted"\nnewline';
-		const prefix = "---\nname: demo-skill\ndescription: a demo\n---\ncafé \"q\"\n";
-		const fixed = { name: "demo-skill", rationale, surface: "claude-code", session_id: "sess-1", graph_id: "ut-1" };
-		const sized = (target: number) => {
-			const pad = target - Buffer.byteLength(JSON.stringify({ ...fixed, files: { "SKILL.md": prefix } }), "utf8");
-			return { ...fixed, files: { "SKILL.md": prefix + "x".repeat(pad) } };
+	test("carries every optional field when present", () => {
+		const full = {
+			...valid,
+			remove: ["old.md"],
+			surface: "claude-code",
+			session_id: "sess-1",
+			graph_id: "ut-1",
+			dry_run: true,
+			mode: "replace",
+			reopen: true,
+			allow_doc_examples: ["pem"],
 		};
-		expect(proposalBodySizeProblem(sized(1_000_000))).toBeNull();
-		const over = proposalBodySizeProblem(sized(1_000_001)) ?? "";
-		expect(over).toContain("over the limit of 1000000 bytes");
-		expect(over).not.toContain("café");
+		expect(toProposalRequest(full)).toEqual(full as never);
 	});
 
-	test("a 1_000_000-byte caller body without a surface fits: attribution costs nothing", () => {
-		const fixed = { name: "demo-skill", rationale: "why" };
-		const pad = 1_000_000 - Buffer.byteLength(JSON.stringify({ ...fixed, files: { "SKILL.md": "" } }), "utf8");
-		const wire = { ...fixed, files: { "SKILL.md": "x".repeat(pad) } };
-		expect(Buffer.byteLength(JSON.stringify(wire), "utf8")).toBe(1_000_000);
-		expect(proposalBodySizeProblem(wire)).toBeNull();
+	test("drops a field the shape check does not know", () => {
+		expect(toProposalRequest({ ...valid, writer: "hermes", token: "x" })).toEqual(valid);
 	});
 });
 

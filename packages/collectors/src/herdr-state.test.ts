@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { describe, expect, test } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -37,22 +37,9 @@ function seeded(panes: HerdrPane[], now = NOW): HerdrStateFile {
 	return result.seeded;
 }
 
-const directories: string[] = [];
-
-function scratchDir(): string {
-	const dir = mkdtempSync(join(tmpdir(), "herdr-state-"));
-	directories.push(dir);
-	return dir;
-}
-
-afterEach(() => {
-	for (const dir of directories) rmSync(dir, { recursive: true, force: true });
-	directories.length = 0;
-});
-
 describe("reconcile", () => {
 	test("first run seeds and emits nothing, including a non-v2 file", () => {
-		const dir = scratchDir();
+		const dir = mkdtempSync(join(tmpdir(), "herdr-state-"));
 		const path = join(dir, "herdr-offsets.json");
 		writeFileSync(path, `${JSON.stringify({ lastSignature: { "w1:p1:pane.exited": "x" } })}\n`);
 		const loaded = loadHerdrState(path);
@@ -160,7 +147,7 @@ describe("reconcile", () => {
 		}
 		expect(Object.hasOwn(first.unmapped, "__proto__")).toBe(true);
 		const counted = commitReconcile(emptyHerdrState(), first, []);
-		const dir = scratchDir();
+		const dir = mkdtempSync(join(tmpdir(), "herdr-state-"));
 		const path = join(dir, "herdr-offsets.json");
 		expect(saveHerdrState(path, counted)).toBe(true);
 		const loaded = loadHerdrState(path);
@@ -229,7 +216,7 @@ describe("commit", () => {
 
 describe("state file", () => {
 	test("version 2 round-trips by tmp plus rename and a restart stays silent", () => {
-		const dir = scratchDir();
+		const dir = mkdtempSync(join(tmpdir(), "herdr-state-"));
 		const path = join(dir, "nested", "herdr-offsets.json");
 		const state = seeded([pane()]);
 		expect(saveHerdrState(path, state)).toBe(true);
@@ -241,107 +228,5 @@ describe("state file", () => {
 		const text = readFileSync(path, "utf8");
 		expect(text.endsWith("\n")).toBe(true);
 		expect(JSON.parse(text).version).toBe(2);
-	});
-
-	test("reload retries a failed agent end without duplicating another pane's committed note", () => {
-		const path = join(scratchDir(), "herdr-offsets.json");
-		const firstIdentity = paneIdentity("w1:p1", "term_a");
-		const secondIdentity = paneIdentity("w1:p2", "term_b");
-		const secondPane = pane({ pane_id: "w1:p2", terminal_id: "term_b" });
-		const state = seeded([pane(), secondPane]);
-		expect(saveHerdrState(path, state)).toBe(true);
-		const snapshot = [
-			pane({ agent: "claude", agent_status: "idle" }),
-			{ ...secondPane, agent_status: "idle" },
-		];
-		const planned = reconcile(loadHerdrState(path).state, snapshot, { now: LATER, attribute });
-		expect(planned.transitions.map((transition) => ({
-			identity: transition.identity, kind: transition.event.kind, session_id: transition.event.session_id,
-			surface: transition.event.surface, payload: transition.event.payload,
-		}))).toEqual([
-			{
-				identity: firstIdentity, kind: "session.end", session_id: `herdr:term_a:${NOW}`, surface: "omp",
-				payload: { runtime: "herdr", herdr_type: "pane.exited", pane_id: "w1:p1", agent: "omp", end_reason: "agent_released" },
-			},
-			{
-				identity: firstIdentity, kind: "session.start", session_id: `herdr:term_a:${LATER}`, surface: "claude-code",
-				payload: { runtime: "herdr", herdr_type: "pane.agent_detected", pane_id: "w1:p1", agent: "claude", status: "idle" },
-			},
-			{
-				identity: secondIdentity, kind: "note", session_id: `herdr:term_b:${NOW}`, surface: "omp",
-				payload: { runtime: "herdr", herdr_type: "pane.agent_status_changed", pane_id: "w1:p2", agent: "omp", previous_status: "working", status: "idle" },
-			},
-		]);
-		const failed = commitReconcile(loadHerdrState(path).state, planned, ["failed", "skipped", "stored"]);
-		expect(saveHerdrState(path, failed)).toBe(true);
-		const restarted = loadHerdrState(path);
-		expect(restarted.firstRun).toBe(false);
-		expect(restarted.state.panes[firstIdentity]).toEqual(state.panes[firstIdentity]);
-		expect(restarted.state.panes[secondIdentity]).toMatchObject({ status: "idle", session_id: `herdr:term_b:${NOW}` });
-		expect(restarted.state.counters).toEqual({ stored: 1, refused: 0, failed: 1, unmapped: {} });
-
-		const retried = reconcile(restarted.state, snapshot, { now: LATER, attribute });
-		expect(retried.transitions.map((transition) => transition.event)).toEqual(planned.transitions.slice(0, 2).map((transition) => transition.event));
-		for (const transition of retried.transitions) expect(transition.event).toMatchObject({
-			repo: "swcstudiospace/agent-substrate", branch: "main", actor: "agent",
-		});
-		// An end refusal is accountable: it advances and permits the new agent start.
-		const recovered = commitReconcile(restarted.state, retried, ["refused", "stored"]);
-		expect(saveHerdrState(path, recovered)).toBe(true);
-		const settled = loadHerdrState(path).state;
-		expect(settled.panes[firstIdentity]).toMatchObject({ agent: "claude", status: "idle", session_id: `herdr:term_a:${LATER}` });
-		expect(settled.counters).toEqual({ stored: 2, refused: 1, failed: 1, unmapped: {} });
-		expect(reconcile(settled, snapshot, { now: "2026-10-09T00:01:00.000Z", attribute }).transitions).toEqual([]);
-	});
-
-	test("reload after a half-committed agent swap retries only the new start and retains a failed end", () => {
-		const path = join(scratchDir(), "herdr-offsets.json");
-		const identity = paneIdentity("w1:p1", "term_a");
-		const state = seeded([pane()]);
-		expect(saveHerdrState(path, state)).toBe(true);
-		const snapshot = [pane({ agent: "claude", agent_status: "idle" })];
-		const swap = reconcile(loadHerdrState(path).state, snapshot, { now: LATER, attribute });
-		expect(swap.transitions.map((transition) => transition.event.kind)).toEqual(["session.end", "session.start"]);
-		const half = commitReconcile(loadHerdrState(path).state, swap, ["stored", "failed"]);
-		expect(saveHerdrState(path, half)).toBe(true);
-		const restarted = loadHerdrState(path);
-		expect(restarted.firstRun).toBe(false);
-		expect(restarted.state.panes).toEqual({});
-		expect(restarted.state.counters).toEqual({ stored: 1, refused: 0, failed: 1, unmapped: {} });
-
-		const recoveryTime = "2026-10-09T00:00:10.000Z";
-		const retry = reconcile(restarted.state, snapshot, { now: recoveryTime, attribute });
-		expect(retry.transitions.map((transition) => transition.event)).toEqual([{
-			kind: "session.start", surface: "claude-code", actor: "agent",
-			session_id: `herdr:term_a:${recoveryTime}`, repo: "swcstudiospace/agent-substrate", branch: "main",
-			summary: "herdr detected claude-code in pane w1:p1",
-			payload: { runtime: "herdr", herdr_type: "pane.agent_detected", pane_id: "w1:p1", agent: "claude", status: "idle" },
-		}]);
-		const started = commitReconcile(restarted.state, retry, ["stored"]);
-		expect(saveHerdrState(path, started)).toBe(true);
-		const stable = loadHerdrState(path).state;
-		expect(stable.panes[identity]?.session_id).toBe(`herdr:term_a:${recoveryTime}`);
-		expect(reconcile(stable, snapshot, { now: LATER, attribute }).transitions).toEqual([]);
-
-		const ending = reconcile(stable, [], { now: LATER, attribute });
-		expect(ending.transitions.map((transition) => transition.event)).toEqual([{
-			kind: "session.end", surface: "claude-code", actor: "agent",
-			session_id: `herdr:term_a:${recoveryTime}`, repo: "swcstudiospace/agent-substrate", branch: "main",
-			summary: "herdr pane w1:p1 exited",
-			payload: { runtime: "herdr", herdr_type: "pane.exited", pane_id: "w1:p1", agent: "claude", end_reason: "pane_gone" },
-		}]);
-		const failedEnd = commitReconcile(stable, ending, ["failed"]);
-		expect(saveHerdrState(path, failedEnd)).toBe(true);
-		const afterEndFailure = loadHerdrState(path).state;
-		expect(afterEndFailure.panes[identity]).toEqual(stable.panes[identity]);
-		expect(afterEndFailure.counters).toEqual({ stored: 2, refused: 0, failed: 2, unmapped: {} });
-		const endRetry = reconcile(afterEndFailure, [], { now: recoveryTime, attribute });
-		expect(endRetry.transitions.map((transition) => transition.event)).toEqual(ending.transitions.map((transition) => transition.event));
-		expect(saveHerdrState(path, commitReconcile(afterEndFailure, endRetry, ["refused"]))).toBe(true);
-		const ended = loadHerdrState(path).state;
-		expect(ended.panes).toEqual({});
-		expect(ended.counters).toEqual({ stored: 2, refused: 1, failed: 2, unmapped: {} });
-		expect(reconcile(ended, [], { now: recoveryTime, attribute }).transitions).toEqual([]);
-		expect(existsSync(`${path}.tmp`)).toBe(false);
 	});
 });

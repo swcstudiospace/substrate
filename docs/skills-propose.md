@@ -49,24 +49,11 @@ The CLI's flags map to it: `--name` (default the directory's basename), `--ratio
 | 400 | The body is malformed, or a guard refused the proposal: `{ error, findings? }`. A finding is `{ file, line, rule }`, never a value |
 | 401 | No authenticated surface |
 | 403 | A surface mismatch, or an operator-only option from a surface token |
-| 413 | The body is over the route's cap: 1 MB here, 6 MB on the `/docs/ingest` and `/mcp` doors that share the wider ingest intake. Other routes still answer an oversize body with a generic 500 |
+| 413 | The body is over 1 MB. Only on this route; other routes still answer an oversize body with a generic 500 |
 | 502 | A `git` or `gh` step failed or a lock stayed busy. The message is redacted and at most 400 characters |
 | 503 | The audit chain could not take the record. `skills_propose` is fail-closed, so nothing is proposed |
 
 The MCP tool returns the same result as JSON, and an `isError` reply carrying the same `{ error, findings? }` for every failure the tool itself returns (a refusal, a failed `git`/`gh` step, a missing mirror, a busy lock, an unaudited chain). That promise covers only errors returned by the tool: when the MCP audit chain cannot take the record, the transport refuses the call before the tool runs and answers a JSON-RPC error (`code -32000`), not a tool body. The CLI prints `key=value` lines (`status`, `pr_url`, `pr_number`, `branch`, `content_sha256`, `redactions`, the diff counts, one `finding=<file>:<line> <rule>` per finding) and exits 0 for the five successes and 1 for a refusal, a failure, a 401, 403, 413 or 5xx, or a server that did not answer. Its request timeout is about 180 s (`SUBSTRATE_SKILLS_TIMEOUT_MS` overrides it): a proposal runs `git fetch`, `git push` and `gh` behind the request. A CLI flag that takes a value with none given (`--remove` with nothing after it) is refused before the directory is read or anything is posted.
-
-The public proposal cap is **1,000,000 UTF-8 bytes of the caller's JSON body**,
-including escaping and caller-supplied metadata. Server-added token attribution
-does not consume that budget. The CLI preflights its posted body; REST caps the
-wire body; MCP checks caller arguments before attribution. A body over the cap
-is refused 413 before any git work, audited under `skills_propose` with a shape
-descriptor only, never the body itself. REST skills intake is also bounded at
-1,000,000 wire bytes; authenticated oversize refusals are audited, and audit
-denial takes precedence. Only `/docs/ingest` and `/mcp` use the separate
-6,000,000-byte transport intake needed for the 5 MB docs ingest ceiling.
-An oversize envelope on those doors is refused 413 before dispatch. MCP
-skills caller arguments still have the 1,000,000-byte pre-attribution cap;
-the wider MCP envelope does not enlarge a proposal's budget.
 
 ## What is checked, and in what order
 
@@ -105,7 +92,7 @@ The route and the tool are audited as `skills_propose`, fail-closed ([mcp-audit.
 
 A library other than the default is allowed only with a `file://` remote **and** an absolute `SUBSTRATE_SKILLS_GH`; otherwise the server boots with a warning naming the key and refuses to propose. That rule is what keeps the rehearsal harness off the real library.
 
-`git` and `gh` run with an allowlisted environment: the four base keys `PATH`, `HOME` and the two no-prompt flags, plus seven controlled fixed Git values that isolate global/system gitconfig and select the `gh` credential helper (user-selected "Keep current Git isolation", 2026-10-11; fixed hardening values, never secrets): store URLs, surface tokens and the handoff key never reach a child. The mirror is bootstrapped by the operator once (`git clone --bare`, then `remote.origin.fetch +refs/heads/main:refs/heads/main`); a missing mirror is a 502 that prints the commands. The ledger (`proposals.jsonl`) keeps September's format so the host's existing ledger keeps deduplicating.
+`git` and `gh` run with an allowlisted environment (`PATH`, `HOME` and the two no-prompt flags): store URLs, surface tokens and the handoff key never reach a child. The mirror is bootstrapped by the operator once (`git clone --bare`, then `remote.origin.fetch +refs/heads/main:refs/heads/main`); a missing mirror is a 502 that prints the commands. The ledger (`proposals.jsonl`) keeps September's format so the host's existing ledger keeps deduplicating.
 
 ## Approving a skill
 

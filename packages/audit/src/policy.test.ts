@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { FAIL_CLOSED_TOOLS, FAIL_OPEN_TOOLS, auditMode, decideClaim } from "./policy.ts";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 // Phase 17: the audit decision for every MCP tool v1.3 plans to add, written as a
 // literal independent of `policy.ts` so that removing or flipping any entry on

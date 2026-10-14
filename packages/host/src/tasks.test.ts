@@ -10,7 +10,6 @@ import {
 	interruptedTasks,
 	isHostSandboxLabel,
 	MemoryTaskStore,
-	mutationRefusal,
 	parseApprovalTimeoutMs,
 	pollCode,
 	reconcileSandboxes,
@@ -71,16 +70,6 @@ function harness(opts: {
 	reclaimRefusedFor?: string;
 	/** graphComplete answers refused. */
 	completeRefused?: boolean;
-	/** claimAndPersist throws (real persist failure): open answers 502 before any VM work. */
-	claimThrows?: string;
-	/** graphRelease answers refused with this reason (record stays unreleased). */
-	releaseRefused?: string;
-	/** graphRelease throws this transport error (record stays unreleased). */
-	releaseThrows?: string;
-	/** ensureSubstrateRoute throws (relay start failure). */
-	substrateRouteThrows?: string;
-	/** Route override (default s:hostfn rehearsal route). */
-	route?: Route;
 	/** When given, log lines accumulate here for value-scan assertions. */
 	logs?: string[];
 	/** Approval deadline override (default 900 s); plant short values, never wall-clock sleeps. */
@@ -160,11 +149,10 @@ function harness(opts: {
 				record("claimAndPersist", store, graphId, nodeId, surface, sessionId);
 				claimCalls += 1;
 				if (opts.claimed === false) return { claimed: false, reason: "held by hermes session s-9" };
-				if (opts.claimThrows) throw new Error(opts.claimThrows);
 				const refused = opts.reclaimRefused ? claimCalls > 1 : opts.reclaimRefusedFor !== undefined && graphId.includes(opts.reclaimRefusedFor);
 				if (refused) return { claimed: false, reason: "taken over by hermes session s-9" };
-			if (!opts.dropLeasePersist) store.persist(graphId, nodeId, { lease_id: leaseId, acquiredAtMs: 0, ttlSeconds: 900 });
-			return { claimed: true, lease: { lease_id: leaseId } };
+				if (!opts.dropLeasePersist) store.persist(graphId, nodeId, { lease_id: leaseId, acquiredAtMs: 0, ttlSeconds: 900 });
+				return { claimed: true, lease_id: leaseId };
 			},
 			heartbeat: async (...args) => {
 				record("heartbeat", ...args);
@@ -176,8 +164,6 @@ function harness(opts: {
 			},
 			graphRelease: async (...args) => {
 				record("graphRelease", ...args);
-				if (opts.releaseThrows) throw new Error(opts.releaseThrows);
-				if (opts.releaseRefused) return { released: false, reason: opts.releaseRefused };
 				return { released: true };
 			},
 			brief: async () => "# brief\n",
@@ -194,12 +180,7 @@ function harness(opts: {
 			if (opts.modelRouteThrows) throw new Error(opts.modelRouteThrows);
 			if (opts.modelRouteThrowsFor === graphId) throw new Error(`relay failed for ${graphId}`);
 		},
-		ensureSubstrateRoute: async (_handle, graphId) => {
-			record("ensureSubstrateRoute", graphId);
-			sequence.push(`ensureSubstrateRoute:${graphId}`);
-			if (opts.substrateRouteThrows) throw new Error(opts.substrateRouteThrows);
-		},
-		route: opts.route ?? ROUTE,
+		route: ROUTE,
 		testsRoute: "sandbox",
 		model: "grok-4.6",
 		skills: [{ name: "ultrathink-sync", files: [{ rel: "SKILL.md", content: "# sync" }] }],
@@ -285,8 +266,8 @@ describe("TaskService.openTask", () => {
 		expect(result.status).toBe(202);
 		expect(h.named("claimAndPersist")[0]?.args.slice(1)).toEqual([GID, NID, "claude-code", NID]);
 		expect(h.named("claimAndPersist")[0]?.args[0]).toBe(h.leases);
-		const order = h.calls.map((c) => c.name).filter((n) => ["graphGet", "claimAndPersist", "ensureModelRoute", "ensureSubstrateRoute", "sessions.open", "sessions.prompt"].includes(n));
-		expect(order).toEqual(["graphGet", "claimAndPersist", "ensureModelRoute", "ensureSubstrateRoute", "sessions.open", "ensureModelRoute", "ensureSubstrateRoute", "sessions.prompt"]);
+		const order = h.calls.map((c) => c.name).filter((n) => ["graphGet", "claimAndPersist", "ensureModelRoute", "sessions.open", "sessions.prompt"].includes(n));
+		expect(order).toEqual(["graphGet", "claimAndPersist", "ensureModelRoute", "sessions.open", "ensureModelRoute", "sessions.prompt"]);
 		const open = h.named("sessions.open")[0]?.args[0] as Parameters<VmHandle["sessions"]["open"]>[0];
 		expect(open.permissionPolicy).toBe("ask");
 		expect(open.sessionId).toBe(NID);
@@ -366,7 +347,7 @@ describe("TaskService.openTask", () => {
 		const result = await h.service.openTask(openBody());
 		expect(result.status).toBe(502);
 		expect(h.named("graphRelease")).toHaveLength(1);
-		expect(h.named("graphRelease")[0]?.args).toEqual([GID, NID, h.leaseId]);
+		expect(h.named("graphRelease")[0]?.args).toEqual([GID, NID, "claude-code", NID]);
 		expect(h.named("sessions.prompt")).toHaveLength(0);
 		expect(h.store.get(GID, NID)).toBeNull();
 	});
@@ -428,7 +409,7 @@ describe("TaskService status, terminate and kill", () => {
 		expect(h.named("sessions.cancelPrompt")).toHaveLength(1);
 		expect(h.named("sessions.unload")).toHaveLength(1);
 		expect(h.named("graphRelease")).toHaveLength(1);
-		expect(h.named("graphRelease")[0]?.args).toEqual([GID, NID, h.leaseId]);
+		expect(h.named("graphRelease")[0]?.args).toEqual([GID, NID, "claude-code", NID]);
 		const status = await h.service.status(GID, NID);
 		expect(status?.released).toBe(true);
 		expect(status?.exit_code).toBe(1);
@@ -487,131 +468,9 @@ describe("TaskService lease claim with persist-then-verify (32-01)", () => {
 		expect(result.status).toBe(502);
 		expect(JSON.stringify(result.body)).toContain("lease persist");
 		expect(h.named("graphRelease")).toHaveLength(1);
-		expect(h.named("graphRelease")[0]?.args).toEqual([GID, NID, h.leaseId]);
+		expect(h.named("graphRelease")[0]?.args).toEqual([GID, NID, "claude-code", NID]);
 		expect(h.named("sessions.prompt")).toHaveLength(0);
 		expect(h.store.get(GID, NID)).toBeNull();
-	});
-
-	test("a refused release never marks the record released", async () => {
-		const h = harness({ releaseRefused: "stale-lease" });
-		await h.service.openTask(openBody());
-		await h.settlePrompt("end_turn");
-		expect(h.named("graphRelease")).toHaveLength(1);
-		const status = await h.service.status(GID, NID);
-		expect(status?.released).toBe(false);
-		expect(h.logs.some((line) => line.includes(`release ${GID}/${NID} refused: stale-lease`))).toBe(true);
-	});
-
-	test("a failed release transport never marks the record released", async () => {
-		const h = harness({ releaseThrows: "connection reset" });
-		await h.service.openTask(openBody());
-		await h.settlePrompt("end_turn");
-		expect(h.named("graphRelease")).toHaveLength(1);
-		const status = await h.service.status(GID, NID);
-		expect(status?.released).toBe(false);
-		expect(h.logs.some((line) => line.includes(`release ${GID}/${NID} failed: Error: connection reset`))).toBe(true);
-	});
-
-	test("missing-lease compensation carries the captured grant id, never a force", async () => {
-		const leaseId = "lse_comp_0123456789abcdef0123456789abcdef";
-		const h = harness({ dropLeasePersist: true, leaseId });
-		const result = await h.service.openTask(openBody());
-		expect(result.status).toBe(502);
-		expect(h.named("graphRelease")[0]?.args).toEqual([GID, NID, leaseId]);
-	});
-
-	test("a claim persist throw answers 502 before any VM work with no session opened", async () => {
-		const logs: string[] = [];
-		const h = harness({ claimThrows: "claim g/n: lease persist failed; grant released", logs });
-		const result = await h.service.openTask(openBody());
-		expect(result.status).toBe(502);
-		expect(JSON.stringify(result.body)).toContain("lease persist failed");
-		expect(h.named("sessions.open")).toHaveLength(0);
-		expect(h.named("sessions.prompt")).toHaveLength(0);
-		expect(h.store.get(GID, NID)).toBeNull();
-	});
-
-	test("s:mcp opens against the credential-free in-VM relay with no bearer in the seed", async () => {
-		const relayLogs: string[] = [];
-		const h = harness({ route: parseRoute("a:loopback,b:prompt_hostfn,c:hostfn_commit,s:mcp"), logs: relayLogs });
-		const result = await h.service.openTask(openBody());
-		expect(result.status).toBe(202);
-		const openArg: unknown = h.named("sessions.open")[0]?.args[0];
-		if (typeof openArg !== "object" || openArg === null || !("mcpServers" in openArg)) throw new Error("unexpected sessions.open input");
-		expect(openArg.mcpServers).toEqual([{ type: "http", name: "substrate", url: "http://127.0.0.1:7413/mcp", headers: [] }]);
-		for (const [, content] of h.files) {
-			expect(content).not.toContain("smoke-bearer");
-		}
-		const seedRaw: unknown = JSON.parse(h.files.get("/home/agentos/.claude.json") ?? "{}");
-		if (typeof seedRaw !== "object" || seedRaw === null || !("mcpServers" in seedRaw)) throw new Error("unexpected seed entry");
-		const servers: unknown = seedRaw.mcpServers;
-		if (typeof servers !== "object" || servers === null || !("substrate" in servers)) throw new Error("unexpected seed servers");
-		expect(servers.substrate).toEqual({ type: "http", url: "http://127.0.0.1:7413/mcp" });
-		expect(h.named("ensureSubstrateRoute")).toHaveLength(2);
-		await h.settlePrompt("end_turn");
-	});
-});
-
-describe("SEC01/SEC03 shared transitions and revocation", () => {
-	test("guestRelease records terminal release and disarms the tick; later ticks idle and resumes send nothing", async () => {
-		const h = harness();
-		await h.service.openTask(openBody());
-		expect(h.service.heartbeatArmed(GID, NID)).toBe(true);
-		expect(await h.service.guestRelease(GID, NID)).toEqual({ released: true });
-		expect(h.service.heartbeatArmed(GID, NID)).toBe(false);
-		expect(h.store.get(GID, NID)?.released).toBe(true);
-		expect(await h.service.status(GID, NID)).toMatchObject({ released: true, turn_in_flight: false, exit_code: 0 });
-		expect(await h.service.heartbeatTick(GID, NID)).toBe("idle");
-		expect(await h.service.resumeInterrupted()).toBe(0);
-		await h.settlePrompt("end_turn");
-		expect(await h.service.status(GID, NID)).toMatchObject({ released: true, turn_in_flight: false, exit_code: 0 });
-	});
-
-	test("guestRelease refusal and transport leave the record live", async () => {
-		const refused = harness({ releaseRefused: "stale-lease" });
-		await refused.service.openTask(openBody());
-		expect(await refused.service.guestRelease(GID, NID)).toEqual({ released: false, reason: "stale-lease" });
-		expect(refused.store.get(GID, NID)?.released).toBe(false);
-		const broken = harness({ releaseThrows: "connection reset" });
-		await broken.service.openTask(openBody());
-		const outcome = await broken.service.guestRelease(GID, NID);
-		expect(outcome.released).toBe(false);
-		expect(broken.store.get(GID, NID)?.released).toBe(false);
-		await refused.settlePrompt("end_turn");
-		await broken.settlePrompt("end_turn");
-	});
-
-	test("lease loss cancels and unloads the session; settlement preserves the failure", async () => {
-		const h = harness({ heartbeats: [{ ok: false, reason: "expired" }], reclaimRefused: true });
-		await h.service.openTask(openBody());
-		h.leases.persist(GID, NID, { lease_id: h.leaseId, acquiredAtMs: 0, ttlSeconds: 900 });
-		expect(await h.service.heartbeatTick(GID, NID)).toBe("failed-closed");
-		expect(h.named("sessions.cancelPrompt")).toHaveLength(1);
-		expect(h.named("sessions.unload")).toHaveLength(1);
-		expect(h.store.get(GID, NID)?.last_error).toBe("lease lost");
-		expect(h.store.get(GID, NID)?.exit_code).toBe(1);
-		await h.settlePrompt("end_turn");
-		expect(h.store.get(GID, NID)?.last_error).toBe("lease lost");
-		expect(h.store.get(GID, NID)?.exit_code).toBe(1);
-	});
-
-	test("complete on a failed task refuses locally without a server call", async () => {
-		const h = harness({ heartbeats: [{ ok: false, reason: "expired" }], reclaimRefused: true });
-		await h.service.openTask(openBody());
-		h.leases.persist(GID, NID, { lease_id: h.leaseId, acquiredAtMs: 0, ttlSeconds: 900 });
-		expect(await h.service.heartbeatTick(GID, NID)).toBe("failed-closed");
-		expect((await h.service.complete(GID, NID, { summary: "late work", tests_pass: true })).completed).toBe(false);
-		expect(h.named("graphComplete")).toHaveLength(0);
-		await h.settlePrompt("end_turn");
-	});
-
-	test("mutationRefusal shares one rule: live passes, released/failed refuse, missing passes through", async () => {
-		expect(mutationRefusal(null)).toBeNull();
-		expect(mutationRefusal(undefined)).toBeNull();
-		expect(mutationRefusal({ released: false, exit_code: null })).toBeNull();
-		expect(mutationRefusal({ released: true, exit_code: null })).toBe("released");
-		expect(mutationRefusal({ released: true, exit_code: 1 })).toBe("released");
-		expect(mutationRefusal({ released: false, exit_code: 1 })).toBe("failed");
 	});
 });
 
@@ -886,7 +745,7 @@ describe("TaskService.resumeInterrupted", () => {
 		store.save(taskRecord({ graph_id: "ut-bbb-22222222" }));
 		const h = harness({ store, modelRouteThrowsFor: "ut-aaa-11111111" });
 		expect(await h.service.resumeInterrupted()).toBe(1);
-		expect(h.sequence).toEqual(["ensureModelRoute:ut-aaa-11111111", "ensureModelRoute:ut-bbb-22222222", "ensureSubstrateRoute:ut-bbb-22222222", "prompt:ut-bbb-22222222:n1:resume:1"]);
+		expect(h.sequence).toEqual(["ensureModelRoute:ut-aaa-11111111", "ensureModelRoute:ut-bbb-22222222", "prompt:ut-bbb-22222222:n1:resume:1"]);
 		const failed = store.get("ut-aaa-11111111", NID);
 		expect(failed?.exit_code).toBe(1);
 		expect(failed?.last_error).toContain("relay failed");
@@ -1414,7 +1273,7 @@ describe("TaskService approval deadlines (33-02, D33-04/D33-05)", () => {
 		await h.service.heartbeatTick(GID, NID);
 		await h.failPrompt(new Error("permission denied"));
 		expect(h.named("graphRelease")).toHaveLength(1);
-		expect(h.named("graphRelease")[0]?.args).toEqual([GID, NID, h.leaseId]);
+		expect(h.named("graphRelease")[0]?.args).toEqual([GID, NID, "claude-code", NID]);
 		const status = await h.service.status(GID, NID);
 		expect(status?.released).toBe(true);
 		expect(status?.exit_code).toBe(1);

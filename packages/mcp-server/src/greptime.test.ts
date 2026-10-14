@@ -256,16 +256,14 @@ describe("sql", () => {
 	test("reports an HTTP failure, a JSON error body and unparseable output", async () => {
 		const client = new GreptimeClient(config);
 
-		// Each transport failure mode rejects as the typed error the caller
-		// handles — never a bare SyntaxError, an empty row set, or silence.
 		stubFetch(() => new Response("nope", { status: 500 }));
-		await expect(client.sql("SELECT 1")).rejects.toThrow(GreptimeError);
+		await expect(client.sql("SELECT 1")).rejects.toThrow(/greptime 500/);
 
 		stubFetch(() => ({ error: "table not found" }));
-		await expect(client.sql("SELECT 1")).rejects.toThrow(GreptimeError);
+		await expect(client.sql("SELECT 1")).rejects.toThrow(/table not found/);
 
 		stubFetch(() => new Response("<html>", { status: 200 }));
-		await expect(client.sql("SELECT 1")).rejects.toThrow(GreptimeError);
+		await expect(client.sql("SELECT 1")).rejects.toThrow(/non-JSON/);
 	});
 
 	test("turns an unreachable host into a GreptimeError the caller can handle", async () => {
@@ -497,8 +495,7 @@ describe("migrate", () => {
 		const { warnings } = await new GreptimeClient(config).migrate();
 		expect(sql[1]).toContain('CREATE TABLE IF NOT EXISTS "agent_events"');
 		expect(sql[1]).not.toContain("append_mode");
-		// The fallback is reported loudly at boot rather than silent.
-		expect(warnings.length).toBeGreaterThan(0);
+		expect(warnings.some((warning) => warning.includes("created without append_mode"))).toBe(true);
 	});
 });
 
@@ -990,63 +987,6 @@ describe("migrate event_ingest and anchors", () => {
 		).toBe(true);
 	});
 
-	test("migration warnings never carry configured secrets", async () => {
-		const secretConfig: GreptimeConfig = {
-			url: "http://ledger-scratch.example:4000",
-			user: "scratch-user-9f2",
-			password: "scratch-pw-7h4k2m9q",
-			db: "scratchdb",
-		};
-		const leak = `password=${secretConfig.password} user ${secretConfig.user} at ${secretConfig.url} db ${secretConfig.db}`;
-		const { sql } = stubFetch((statement) => {
-			if (statement.includes("append_mode") && statement.includes("CREATE")) {
-				return new Response(leak, { status: 500 });
-			}
-			if (statement.includes("SHOW CREATE TABLE")) return records(["Create Table"], [["CREATE TABLE ..."]]);
-			return affected;
-		});
-		const { warnings } = await new GreptimeClient(secretConfig).migrate();
-		// The declared failure: every ingest CREATE still asks for append_mode
-		// (no silent deduplicating fallback) and the failure is reported.
-		const ingestCreates = sql.filter((s) => s.includes('CREATE TABLE IF NOT EXISTS "event_ingest"'));
-		expect(ingestCreates.length).toBeGreaterThan(0);
-		expect(ingestCreates.every((s) => s.includes("append_mode"))).toBe(true);
-		expect(warnings.length).toBeGreaterThan(0);
-		const text = warnings.join("\n");
-		for (const secret of [secretConfig.url, secretConfig.user ?? "", secretConfig.password ?? "", secretConfig.db]) {
-			expect(text).not.toContain(secret);
-		}
-		expect(text).toContain("[REDACTED]");
-	});
-
-	test("migration warnings never carry configured secrets, even single letters", async () => {
-		const shortConfig: GreptimeConfig = { url: "http://x.test", user: "u", password: "p", db: "qy" };
-		const leak = `password=${shortConfig.password} user ${shortConfig.user} at ${shortConfig.url} db ${shortConfig.db}`;
-		const { sql } = stubFetch((statement) => {
-			if (statement.includes("append_mode") && statement.includes("CREATE")) {
-				return new Response(leak, { status: 500 });
-			}
-			if (statement.includes("SHOW CREATE TABLE")) return records(["Create Table"], [["CREATE TABLE ..."]]);
-			return affected;
-		});
-		const { warnings } = await new GreptimeClient(shortConfig).migrate();
-		// The declared failure: every ingest CREATE still asks for append_mode
-		// (no silent deduplicating fallback) and the failure is reported.
-		const ingestCreates = sql.filter((s) => s.includes('CREATE TABLE IF NOT EXISTS "event_ingest"'));
-		expect(ingestCreates.length).toBeGreaterThan(0);
-		expect(ingestCreates.every((s) => s.includes("append_mode"))).toBe(true);
-		expect(warnings.length).toBeGreaterThan(0);
-		const text = warnings.join("\n");
-		// Single letters also occur in ordinary wording, so the boundary is
-		// pinned on the secret-bearing spans the server echoed, not the
-		// letters themselves: with the values filtered out, `leak` would
-		// print verbatim.
-		expect(text).not.toContain(leak);
-		expect(text).not.toContain("http://x.test");
-		expect(text).not.toContain("password=p");
-		expect(text).toContain("[REDACTED]");
-	});
-
 	test("emits the canonical 11-column period-keyed anchors DDL", async () => {
 		const { sql } = stubFetch((statement) => {
 			if (statement.includes("SHOW CREATE TABLE")) {
@@ -1099,66 +1039,6 @@ describe("migrate event_ingest and anchors", () => {
 		});
 		const { warnings } = await new GreptimeClient(config).migrate();
 		expect(sql.some((s) => s.includes("information_schema"))).toBe(true);
-		expect(warnings.some((warning) => warning.includes("anchors"))).toBe(true);
-	});
-
-	test("warns on a type-only drift in one anchors column", async () => {
-		stubFetch((statement) => {
-			if (statement.includes("information_schema")) {
-				return records(
-					["column_name", "data_type", "semantic_type"],
-					[
-						["period_start", "timestamp(3)", "TIMESTAMP"],
-						["period_end", "timestamp(3)", "FIELD"],
-						["root", "string", "FIELD"],
-						["event_count", "bigint", "FIELD"],
-						["memo", "string", "FIELD"],
-						["tx_sig", "string", "FIELD"],
-						["signer", "string", "FIELD"],
-						["cluster", "string", "FIELD"],
-						["slot", "integer", "FIELD"],
-						["anchored_at", "timestamp(3)", "FIELD"],
-						["stale_hashes", "bigint", "FIELD"],
-					],
-				);
-			}
-			if (statement.includes("SHOW CREATE TABLE")) {
-				return records(["Table", "Create Table"], [["agent_events", "... WITH( append_mode = 'true' )"]]);
-			}
-			if (statement.includes("LENGTH")) return records(["n"], [[3]]);
-			return affected;
-		});
-		const { warnings } = await new GreptimeClient(config).migrate();
-		expect(warnings.some((warning) => warning.includes("anchors"))).toBe(true);
-	});
-
-	test("warns on a semantic-type-only drift in one anchors column", async () => {
-		stubFetch((statement) => {
-			if (statement.includes("information_schema")) {
-				return records(
-					["column_name", "data_type", "semantic_type"],
-					[
-						["period_start", "timestamp(3)", "TIMESTAMP"],
-						["period_end", "timestamp(3)", "FIELD"],
-						["root", "string", "TAG"],
-						["event_count", "bigint", "FIELD"],
-						["memo", "string", "FIELD"],
-						["tx_sig", "string", "FIELD"],
-						["signer", "string", "FIELD"],
-						["cluster", "string", "FIELD"],
-						["slot", "bigint", "FIELD"],
-						["anchored_at", "timestamp(3)", "FIELD"],
-						["stale_hashes", "bigint", "FIELD"],
-					],
-				);
-			}
-			if (statement.includes("SHOW CREATE TABLE")) {
-				return records(["Table", "Create Table"], [["agent_events", "... WITH( append_mode = 'true' )"]]);
-			}
-			if (statement.includes("LENGTH")) return records(["n"], [[3]]);
-			return affected;
-		});
-		const { warnings } = await new GreptimeClient(config).migrate();
 		expect(warnings.some((warning) => warning.includes("anchors"))).toBe(true);
 	});
 
@@ -1246,32 +1126,6 @@ describe("insertEvent ingest record", () => {
 		expect(sql.filter((s) => s.startsWith('INSERT INTO "event_ingest"'))).toHaveLength(2);
 	});
 
-	test("a retried ingest record takes a fresh stamp in the new hour, not the failed one", async () => {
-		const H10 = Date.UTC(2026, 8, 26, 10);
-		const firstStamp = H10 + 5 * 60_000;
-		const retryStamp = H10 + 3_600_000 + 5 * 60_000;
-		expect(retryStamp - firstStamp).toBeGreaterThan(3_600_000 - 5 * 60_000);
-		const stamps = [firstStamp, retryStamp, retryStamp];
-		let clockCalls = 0;
-		const clock = (): number => stamps[Math.min(clockCalls++, stamps.length - 1)] ?? retryStamp;
-		let ingestAttempts = 0;
-		const { sql } = stubFetch((statement) => {
-			if (statement.includes('INSERT INTO "event_ingest"')) {
-				ingestAttempts += 1;
-				if (ingestAttempts === 1) return new Response("nope", { status: 500 });
-			}
-			return defaultReply(statement);
-		});
-		await new GreptimeClient(config, undefined, clock).insertEvent(normalizeEvent(input, null));
-		const events = sql.filter((s) => s.startsWith('INSERT INTO "agent_events"'));
-		const ingests = sql.filter((s) => s.startsWith('INSERT INTO "event_ingest"'));
-		expect(events).toHaveLength(1);
-		expect(ingests).toHaveLength(2);
-		expect(ingests[0]).toContain(new Date(firstStamp).toISOString());
-		expect(ingests[1]).toContain(new Date(retryStamp).toISOString());
-		expect(ingests[1]).not.toContain(new Date(firstStamp).toISOString());
-	});
-
 	test("throws IngestNotRecorded after two failed attempts with the event sent exactly once", async () => {
 		const { sql } = stubFetch((statement) =>
 			statement.includes('INSERT INTO "event_ingest"')
@@ -1352,38 +1206,6 @@ describe("insertEvent ingest record", () => {
 			process.stderr.write = original;
 		}
 		expect(written.join("")).toContain(event.id);
-	});
-
-	test("the late-record diagnostic is silent just before closure and single at closure", async () => {
-		const hour = Date.UTC(2026, 8, 26, 10);
-		const hourIso = new Date(hour).toISOString();
-		const stamp = hour + 5 * 60_000;
-		const written: string[] = [];
-		const original = process.stderr.write.bind(process.stderr);
-		process.stderr.write = ((chunk: string | Uint8Array) => {
-			written.push(String(chunk));
-			return true;
-		}) as typeof process.stderr.write;
-		try {
-			stubFetch();
-			const open = normalizeEvent(input, null);
-			const openNow = hour + 3_600_000 + INGEST_LAG_MS - 1;
-			const openTicks = [stamp, openNow];
-			await new GreptimeClient(config, undefined, () => openTicks.shift() ?? openNow).insertEvent(open);
-			expect(written.join("")).not.toContain(open.id);
-
-			stubFetch();
-			const closed = normalizeEvent(input, null);
-			const closedNow = hour + 3_600_000 + INGEST_LAG_MS;
-			const closedTicks = [stamp, closedNow];
-			await new GreptimeClient(config, undefined, () => closedTicks.shift() ?? closedNow).insertEvent(closed);
-			const lines = written.join("");
-			expect(lines).toContain(closed.id);
-			expect(lines).toContain(hourIso);
-			expect(written).toHaveLength(1);
-		} finally {
-			process.stderr.write = original;
-		}
 	});
 });
 

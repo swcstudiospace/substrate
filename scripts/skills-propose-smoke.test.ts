@@ -4,7 +4,7 @@
  * trusts, so a mis-parse cannot turn a failing proof green.
  */
 import { describe, expect, test } from "bun:test";
-import { branchPattern, parseKeyValues, rewrittenRefs, toolReply } from "./skills-propose-smoke.ts";
+import { branchPattern, parseKeyValues, rewrittenRefs, skillMd, toolReply } from "./skills-propose-smoke.ts";
 
 describe("parseKeyValues", () => {
 	test("reads key=value lines and keeps repeated keys in order", () => {
@@ -30,6 +30,11 @@ describe("branchPattern", () => {
 		expect(pattern.test("skill/omp/demo-skill-20261009T101530123Z-ab12")).toBe(false);
 		expect(pattern.test("skill/cursor/other-20261009T101530123Z-ab12")).toBe(false);
 		expect(pattern.test("skill/cursor/demo-skill-2026-10-09T10:15:30.123Z-ab12")).toBe(false);
+	});
+
+	test("agrees with the engine's own branchName", async () => {
+		const { branchName } = await import("../packages/mcp-server/src/skills/propose.ts");
+		expect(branchPattern("cursor", "demo-skill").test(branchName("cursor", "demo-skill", new Date(), "ab12"))).toBe(true);
 	});
 });
 
@@ -68,5 +73,13 @@ describe("toolReply", () => {
 		expect(toolReply("{}")).toBeNull();
 		expect(toolReply(JSON.stringify({ jsonrpc: "2.0", id: 1, error: { code: -32000, message: "no" } }))).toBeNull();
 		expect(toolReply("not json")).toBeNull();
+	});
+});
+
+describe("skillMd", () => {
+	test("carries the name in its frontmatter, as the engine requires", () => {
+		const text = skillMd("demo-skill");
+		expect(text.startsWith("---\nname: demo-skill\ndescription:")).toBe(true);
+		expect(text).toContain("A rehearsal smoke proposal.");
 	});
 });

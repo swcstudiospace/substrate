@@ -22,7 +22,6 @@ import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node
 import { dirname } from "node:path";
 import { redact } from "../../mcp-server/src/redact.ts";
 import { defaultOptions, type EmitWarning, LIBRARY_DIR, postWarning, project } from "./skills.ts";
-import { refreshLibraryCorpus, type RefreshOutcome } from "./corpus-refresh.ts";
 
 const RUN_TIMEOUT_MS = 120_000;
 const OUTPUT_TAIL_CHARS = 200;

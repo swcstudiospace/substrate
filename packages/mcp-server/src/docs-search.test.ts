@@ -19,14 +19,14 @@ import { Substrate } from "./service.ts";
 
 const CONFIG = { url: "http://ragflow.test", apiKey: "test-key" };
 
-function harness(fake: RagflowFake, pins?: Record<string, DatasetPin>) {
+function harness(fake: RagflowFake, pins?: Record<string, { dataset: string; dataset_id: string; version: string; commit: string }>) {
 	const events: EventInput[] = [];
 	const emit = async (event: EventInput): Promise<unknown> => {
 		events.push(event);
 		return { stored: false };
 	};
-	const search = (question: string, datasetNames?: readonly string[]): Promise<SearchReply> =>
-		searchDocs({ config: CONFIG, emit, fetchImpl: fake.fetch, ...(pins ? { pins } : {}), ...(datasetNames ? { datasetNames } : {}) }, question);
+	const search = (question: string): Promise<SearchReply> =>
+		searchDocs({ config: CONFIG, emit, fetchImpl: fake.fetch, ...(pins ? { pins } : {}) }, question);
 	return { events, search };
 }
 
@@ -63,7 +63,7 @@ describe("docs_search", () => {
 				commit: "abc123",
 			},
 		});
-		const reply = await search("pin fallback?", ["agent-substrate"]);
+		const reply = await search("pin fallback?");
 		expect(reply.chunks.length).toBeGreaterThan(0);
 		// No ingest record for this document: it may predate or postdate v3.
 		expect(reply.chunks[0]?.commit).toBe("dataset-pin:agent-substrate:unrecorded");

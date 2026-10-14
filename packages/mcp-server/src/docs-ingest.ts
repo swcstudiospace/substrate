@@ -54,8 +54,6 @@ import {
 } from "./planes/ragflow.ts";
 import { REDACTION_RULES, redact, redactSkillContent } from "./redact.ts";
 import type { EventInput, Surface } from "./types.ts";
-import { DATASET_VERSION_RETENTION } from "./docs-datasets.ts";
-import type { DatasetVersion, SkillsSyncTracker, VersionStore } from "./docs-datasets.ts";
 
 /** One page may not exceed 1 MB (D25-05, Phase 21 precedent). */
 export const INGEST_PAGE_MAX_BYTES = 1_000_000;

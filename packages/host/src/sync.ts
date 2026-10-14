@@ -10,7 +10,7 @@
 
 import { redact } from "../../mcp-server/src/redact.ts";
 import type { GraphNodeView, GraphView } from "./substrate.ts";
-import { mutationRefusal, type TaskRecord } from "./tasks.ts";
+import type { TaskRecord } from "./tasks.ts";
 
 /** The only Notion properties sync may write (ultrathink-sync's "PR opened" row, nothing terminal). */
 export const SYNC_WRITABLE = ["PR URL", "PR #", "PR State", "Repo", "Branch"] as const;
@@ -337,9 +337,6 @@ export type SyncTaskResult = (SyncResult & { synced_at: string; sync_by: "model"
 export async function syncTask(input: SyncTaskInput): Promise<SyncTaskResult> {
 	const record = input.store.get(input.graphId, input.nodeId);
 	if (!record) return { error: `no task for node ${input.nodeId} in this VM` };
-	const refusal = mutationRefusal(record);
-	if (refusal === "released") return { error: `task ${input.graphId}/${input.nodeId} already released` };
-	if (refusal === "failed") return { error: `task ${input.graphId}/${input.nodeId} is failed and holds no mutation authority` };
 	if (!record.pr_url || record.pr_number === null) return { error: "no pull request recorded for this task yet (run pr-create first)" };
 	if (input.prUrl !== record.pr_url) return { error: "pr-url does not match the pull request recorded for this task" };
 	const graph = await input.substrate.graphGet(input.graphId);

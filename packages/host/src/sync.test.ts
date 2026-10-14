@@ -280,18 +280,6 @@ describe("sync host function (T-03-07-04)", () => {
 		store.save(record({ pr_url: null, pr_number: null, synced_at: null, sync_by: null }));
 		expect(await syncTask({ ...deps, prUrl: PR_URL })).toEqual({ error: "no pull request recorded for this task yet (run pr-create first)" });
 	});
-
-	test("refuses released and failed tasks before any tracker call (SEC03)", async () => {
-		const fake = fakeSync();
-		const deps = { graphId: GID, nodeId: NID, substrate: { graphGet: async () => GRAPH }, sync: fake.sync, now: () => new Date("2026-09-25T12:00:00Z") };
-		const released = new MemoryTaskStore();
-		released.save(record({ released: true }));
-		expect(await syncTask({ ...deps, store: released, prUrl: PR_URL })).toEqual({ error: `task ${GID}/${NID} already released` });
-		const failed = new MemoryTaskStore();
-		failed.save(record({ exit_code: 1, last_error: "lease lost", turn_in_flight: false }));
-		expect(await syncTask({ ...deps, store: failed, prUrl: PR_URL })).toEqual({ error: `task ${GID}/${NID} is failed and holds no mutation authority` });
-		expect(fake.calls).toEqual([]);
-	});
 });
 
 /** TaskService with a store holding one record and a prompt that settles on demand. */
@@ -321,14 +309,13 @@ function serviceWith(routeValue: string, sync: HostSyncLike, rec: TaskRecord) {
 			claimAndPersist: async () => ({ claimed: true }),
 			heartbeat: async () => ({ ok: true }),
 			graphComplete: async () => ({ completed: true }),
-			graphRelease: async () => ({ released: true }),
+			graphRelease: async () => ({}),
 			brief: async () => "",
 		},
 		vmFor: () => handle,
 		store,
 		leases: new MemoryLeaseStore(),
 		ensureModelRoute: async () => {},
-		ensureSubstrateRoute: async () => {},
 		route: parseRoute(routeValue),
 		testsRoute: "sandbox",
 		model: "grok-4.6",

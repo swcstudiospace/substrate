@@ -908,20 +908,11 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 					)
 					.describe("Pages to ingest, each with a repo-rooted path and body."),
 				session_id: z.string().optional(),
-				refresh: z
-					.object({
-						id: z.string().min(1).max(128),
-						part: z.number().int().min(1).max(64),
-						parts: z.number().int().min(1).max(64),
-						trigger: z.enum(["repo-merge", "skills-sync"]),
-					})
-					.optional()
-					.describe("One part of a committed corpus refresh; its pin advances only after all parts parse."),
 			},
 			annotations: { destructiveHint: false, openWorldHint: true },
 		},
-		async ({ dataset, commit, pages, session_id, refresh }) => {
-			const outcome = await substrate.ingestDocs({ dataset, commit, pages, session_id, refresh }, callerSurface);
+		async ({ dataset, commit, pages, session_id }) => {
+			const outcome = await substrate.ingestDocs({ dataset, commit, pages, session_id }, callerSurface);
 			return outcome.ok ? json(outcome) : { ...json(outcome), isError: true };
 		},
 	);
@@ -1080,14 +1071,6 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 		},
 		async (request) => {
 			try {
-				// The same caller-body cap as the REST route and the CLI pre-flight, on the
-				// args as received (never the JSON-RPC envelope, never server-injected
-				// attribution): the zod schema below declares optional fields with no
-				// defaults, so nothing is injected before this line. Schema-valid but
-				// over-cap args are refused before the service, the proposer and any
-				// event. The HTTP audit gate already recorded this call before dispatch.
-				const sizeProblem = proposalBodySizeProblem(request as Record<string, unknown>);
-				if (sizeProblem) return { ...json({ error: sizeProblem }), isError: true };
 				return json(await substrate.proposeSkill(request, { surface: callerSurface, isOperator }));
 			} catch (cause) {
 				const failure = proposalFailure(cause);

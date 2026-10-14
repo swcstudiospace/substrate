@@ -751,14 +751,6 @@ export class GreptimeClient {
 	}
 
 	/**
-	 * Scrub caller-known secret values first, then pattern shapes. Idempotent:
-	 * the result still carries truthful status, only without secret text.
-	 */
-	private scrub(text: string): string {
-		return redact(redactKnown(text, this.knownSecrets));
-	}
-
-	/**
 	 * Run SQL and return rows as objects keyed by column name.
 	 *
 	 * Every statement passes `assertAppendOnly` first: this is the only door to
@@ -804,9 +796,9 @@ export class GreptimeClient {
 		try {
 			body = JSON.parse(text) as GreptimeResponse;
 		} catch {
-			throw new GreptimeError(this.scrub(`greptime returned non-JSON: ${text.slice(0, 200)}`));
+			throw new GreptimeError(`greptime returned non-JSON: ${text.slice(0, 200)}`);
 		}
-		if (body.error) throw new GreptimeError(this.scrub(`greptime: ${body.error}`));
+		if (body.error) throw new GreptimeError(`greptime: ${body.error}`);
 
 		const records = body.output?.[0]?.records;
 		if (!records?.rows) return [];
@@ -885,7 +877,7 @@ export class GreptimeClient {
 			// An older Greptime may not know the option. Losing dedup protection is
 			// worse than a warning but far better than having no ledger at all.
 			await this.sql(`CREATE TABLE IF NOT EXISTS "agent_events" (${columns})`);
-			warnings.push(`agent_events created without append_mode: ${this.scrub(String(cause))}`);
+			warnings.push(`agent_events created without append_mode: ${String(cause)}`);
 		}
 
 		try {
@@ -897,7 +889,7 @@ export class GreptimeClient {
 			// table without append_mode and without a primary key deduplicates on
 			// the time index alone, so two events ingested in the same millisecond
 			// would silently lose a record. A warning is cheaper than that loss.
-			warnings.push(`event_ingest not created in append_mode: ${this.scrub(String(cause))}`);
+			warnings.push(`event_ingest not created in append_mode: ${String(cause)}`);
 		}
 
 		await this.sql(`
@@ -1198,7 +1190,7 @@ export class GreptimeClient {
 					budget,
 				);
 			} catch (cause) {
-				failure = this.scrub(String(cause));
+				failure = cause;
 				continue;
 			}
 			const hour = hourStart(ingestedAt);

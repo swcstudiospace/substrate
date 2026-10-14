@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
 	boundsRefusal,
 	clickArgv,
+	DEFAULT_SETTLE_MS,
 	DesktopAction,
 	DesktopRunInput,
 	EXEC,
@@ -72,6 +73,22 @@ describe("key grammar", () => {
 });
 
 describe("argv builders", () => {
+	test("equal the fixed table exactly", () => {
+		const exec = ["docker", "exec", "-e", "DISPLAY=:1", "substrate-desktop"];
+		expect<readonly string[]>(EXEC).toEqual(exec);
+		expect(clickArgv({ type: "click", x: 10, y: 20 })).toEqual([...exec, "xdotool", "mousemove", "--sync", "10", "20", "click", "1"]);
+		expect(clickArgv({ type: "click", x: 10, y: 20, button: 3, double: true })).toEqual(
+			[...exec, "xdotool", "mousemove", "--sync", "10", "20", "click", "--repeat", "2", "3"],
+		);
+		expect(typeArgv({ type: "type", text: "hello" })).toEqual([...exec, "xdotool", "type", "--delay", "12", "--", "hello"]);
+		expect(keyArgv({ type: "key", keys: "ctrl+alt+t Return" })).toEqual(
+			[...exec, "xdotool", "key", "--clearmodifiers", "--", "ctrl+alt+t", "Return"],
+		);
+		expect(shotArgv()).toEqual([...exec, "xwd", "-root", "-silent"]);
+		expect(titleArgv()).toEqual([...exec, "xdotool", "getactivewindow", "getwindowname"]);
+		expect(geometryArgv()).toEqual([...exec, "xdotool", "getdisplaygeometry"]);
+	});
+
 	test("typed text that looks like an option stays one element after --", () => {
 		const argv = typeArgv({ type: "type", text: "-rf x" });
 
@@ -95,6 +112,10 @@ describe("argv builders", () => {
 			expect(argv).not.toContain("bash");
 			expect(argv).not.toContain("-c");
 		}
+	});
+
+	test("default settle times per action kind", () => {
+		expect(DEFAULT_SETTLE_MS).toMatchObject({ click: 300, type: 200, key: 800 });
 	});
 });
 

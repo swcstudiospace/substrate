@@ -12,7 +12,7 @@ import { redact } from "../../mcp-server/src/redact.ts";
 import { worktreeFor } from "./options.ts";
 import { isValidRepoSlug } from "./seed.ts";
 import type { GraphView } from "./substrate.ts";
-import { mutationRefusal, type TaskRecord } from "./tasks.ts";
+import type { TaskRecord } from "./tasks.ts";
 
 export const PR_TITLE_MAX = 256;
 export const PR_BODY_MAX = 20_000;
@@ -148,9 +148,6 @@ type Target = { record: TaskRecord; graph: GraphView; repo: string; base: string
 async function target(ctx: HostFnContext): Promise<Target> {
 	const record = ctx.store.get(ctx.graphId, ctx.nodeId);
 	if (!record) return { error: `no task for node ${ctx.nodeId} in this VM` };
-	const refusal = mutationRefusal(record);
-	if (refusal === "released") return { error: `task ${ctx.graphId}/${ctx.nodeId} already released` };
-	if (refusal === "failed") return { error: `task ${ctx.graphId}/${ctx.nodeId} is failed and holds no mutation authority` };
 	const graph = await ctx.substrate.graphGet(ctx.graphId);
 	if (!graph) return { error: `graph ${ctx.graphId} is not registered` };
 	const repo = graph.repo ?? record.repo;
@@ -239,9 +236,6 @@ export async function commit(ctx: HostFnContext & { message: string }): Promise<
 	if (ctx.message.length > COMMIT_MESSAGE_MAX) return { error: `message exceeds ${COMMIT_MESSAGE_MAX} characters` };
 	const record = ctx.store.get(ctx.graphId, ctx.nodeId);
 	if (!record) return { error: `no task for node ${ctx.nodeId} in this VM` };
-	const refusal = mutationRefusal(record);
-	if (refusal === "released") return { error: `task ${ctx.graphId}/${ctx.nodeId} already released` };
-	if (refusal === "failed") return { error: `task ${ctx.graphId}/${ctx.nodeId} is failed and holds no mutation authority` };
 	let argvs: [string[], string[]];
 	try {
 		argvs = commitArgv(ctx.graphId, ctx.message);

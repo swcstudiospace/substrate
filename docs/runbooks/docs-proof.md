@@ -77,25 +77,3 @@ URL, the event URL list and the served chunk agree.
 
 Rollback: none required (a read); record the session id in the phase
 report.
-
-## Live receipt 2026-10-12 (operator-approved window)
-
-- **G1 pass** (1.34s): real RAGFlow reachable; `GET /api/v1/datasets` 200 with
-  the rehearsed `code/data` shape — 20 datasets carrying per-dataset
-  id/name/embedding_model/chunk_method/document_count/chunk_count;
-  `GET /api/v1/system/version` → `v0.27.1` (only the `/api/v1` prefix is
-  served; `/v1/...` answers 404).
-- **G2 pass** (1.59s): 6/7 canonical names pre-existed (`agent-substrate`,
-  `programming-desk`, `agent-skills`, `kanbanos`, `desklanes`, `clippyos`;
-  `auctioning` missing). The one name-missing dataset was created — recorded
-  deviation: v0.27.1 refuses the literal `tei-bge-small` string (error 101,
-  `<model_name>@<provider>` format), so creation carried the deployment's TEI
-  bge-small model id `7124fc0ec34e11f1a1a345b27d28b31e`, the same identifier
-  all 20 pre-existing datasets carry. Relist: 21 datasets, pre-gate names
-  intact.
-- **G3/G4 blocked on deployment, not behavior**: the production service
-  (release `5f495ad5`, up since the 2026-10-10 switch-on) predates this
-  phase — `POST /docs/ingest` → 404 `no route`, and the served MCP tool list
-  has no `docs_search`/`docs_ingest`. The real-ingest and headless-session
-  gates run after the correction PR merges and parity deploys the corrected
-  release. No event, no upload, no fabricated substitute.

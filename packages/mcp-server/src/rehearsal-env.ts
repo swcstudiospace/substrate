@@ -13,7 +13,7 @@
  * never read, and every store URL must be loopback before it is emitted.
  */
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tokenEnvName } from "./config.ts";
@@ -41,37 +41,6 @@ export const FIXTURE_ENV_KEYS = [
 	"SUBSTRATE_SKILLS_REMOTE_URL",
 	"SUBSTRATE_SKILLS_GH",
 ] as const;
-
-/**
- * Server key names for the RAGFlow reach, reached only through these fields
- * so no tracked line ever writes a RAGFlow value next to its key. The twin
- * reads exactly these two (`ragflowFromEnv`); without `--ragflow-fixture`
- * neither is set and the twin has no RAGFlow reach.
- */
-export const RAGFLOW_KEYS = {
-	url: "RAGFLOW_URL",
-	apiKey: "RAGFLOW_API_KEY",
-} as const;
-
-/**
- * The owned RAGFlow stand-in for one instance (`--ragflow-fixture`): its
- * loopback URL plus the random scratch key the twin presents to it. The key
- * stays in the server env only — it is never exported to consumers.
- */
-export interface RagflowFixtureEnv {
-	url: string;
-	apiKey: string;
-}
-
-/**
- * Fixture-only server docs manifest, explicit and contained: the twin's
- * `SUBSTRATE_DOCS_STATE_FILE` points at this file directly inside the run
- * directory, so a twin can never write the host's records. Consumers reach
- * the same path (never a key) through `REHEARSAL_DOCS_STATE_KEY`.
- */
-export const REHEARSAL_DOCS_STATE_FILENAME = "docs-state.json";
-/** Consumer locator for the fixture's docs manifest: the own path only, never a key. */
-export const REHEARSAL_DOCS_STATE_KEY = "SUBSTRATE_REHEARSAL_DOCS_STATE_FILE";
 
 /** The builder refused an input; the message names surfaces and hosts, never values. */
 export class RehearsalEnvError extends Error {}
@@ -184,13 +153,6 @@ export interface BuildRehearsalEnvInput {
 	 * those). Absent by default; existing rehearsals behave unchanged.
 	 */
 	trackers?: TrackerBlockInput | null;
-	/**
-	 * Opt-in RAGFlow stand-in (`--ragflow-fixture`): its loopback URL plus the
-	 * random scratch key the twin presents to it. The URL must be loopback;
-	 * the key is emitted into the server env only. Absent by default; existing
-	 * rehearsals behave unchanged.
-	 */
-	ragflowFixture?: RagflowFixtureEnv | null;
 }
 
 /** Loopback tracker endpoints plus scratch keys, for one mirror rehearsal. */
@@ -383,20 +345,6 @@ export function buildRehearsalEnv(input: BuildRehearsalEnvInput): Record<string,
 		Object.assign(env, parseExtraEnv(Object.entries(input.extraEnv).map(([key, value]) => `${key}=${value}`)));
 	}
 	if (input.trackers) Object.assign(env, trackerBlock(input.trackers));
-	if (input.ragflowFixture) {
-		assertLoopback(input.ragflowFixture.url, "RAGFLOW_URL");
-		if (input.ragflowFixture.apiKey.length === 0) {
-			throw new RehearsalEnvError("rehearsal env refused: the RAGFlow fixture key is empty");
-		}
-		env[RAGFLOW_KEYS.url] = input.ragflowFixture.url;
-		env[RAGFLOW_KEYS.apiKey] = input.ragflowFixture.apiKey;
-		// Fixture-only docs manifest: explicit, contained in the run dir, so
-		// the twin's pins never touch the host's records. A crashed run's
-		// stale manifest must not survive: its document ids name uploads a
-		// dead stand-in served, so a fresh run starts empty.
-		env.SUBSTRATE_DOCS_STATE_FILE = join(input.runDir, REHEARSAL_DOCS_STATE_FILENAME);
-		rmSync(env.SUBSTRATE_DOCS_STATE_FILE, { force: true });
-	}
 	return env;
 }
 
@@ -420,18 +368,6 @@ export interface ConsumerEnvInput {
 	testPgUrl: string;
 	/** The skills fixture's paths, for the proof that drives it; absent without `--skills-fixture`. */
 	skills?: { state: string; origin: string; ghState: string; repo: string } | null;
-	/**
-	 * The RAGFlow stand-in locator, for the proof that drives it; absent
-	 * without `--ragflow-fixture`. Names the loopback endpoint, the readiness
-	 * marker and the fixture pid — never the plane key.
-	 */
-	ragflowFixture?: { url: string; pid: number } | null;
-	/**
-	 * Fixture-only docs manifest path, for the proof that reads its own
-	 * pins; absent by default so existing rehearsals behave unchanged. The
-	 * path only, never a key, and always inside `runDir`.
-	 */
-	docsStateFile?: string | null;
 }
 
 /**
@@ -446,8 +382,7 @@ export function storesEnvRecord(input: ScratchStoresInput): Record<string, strin
 /**
  * The `consumer.env` contract: everything a proof needs, and deliberately no
  * ledger key — clients reach the ledger only through the twin. With the skills fixture it also
- * names the fixture's paths; with the RAGFlow fixture it names the stand-in's
- * endpoint, readiness marker and pid (never the plane key). SUBSTRATE_TOKEN
+ * names the fixture's paths. SUBSTRATE_TOKEN
  * is always the first non-swarm surface's token; the operator token rides
  * separately so an `--operator` twin never disguises it as the credential.
  */
@@ -468,16 +403,6 @@ export function consumerEnvRecord(input: ConsumerEnvInput): Record<string, strin
 		out.SUBSTRATE_REHEARSAL_SKILLS_ORIGIN = input.skills.origin;
 		out.SUBSTRATE_REHEARSAL_SKILLS_GH_STATE = input.skills.ghState;
 		out.SUBSTRATE_REHEARSAL_SKILLS_REPO = input.skills.repo;
-	}
-	if (input.ragflowFixture) {
-		out.SUBSTRATE_RAGFLOW_FIXTURE_URL = input.ragflowFixture.url;
-		out.SUBSTRATE_RAGFLOW_FIXTURE_READY = "1";
-		out.SUBSTRATE_RAGFLOW_FIXTURE_PID = String(input.ragflowFixture.pid);
-	}
-	if (input.docsStateFile !== undefined && input.docsStateFile !== null) {
-		// The own path only, never a key, and always inside the run dir.
-		assertInsideRun(REHEARSAL_DOCS_STATE_KEY, input.docsStateFile, input.runDir);
-		out[REHEARSAL_DOCS_STATE_KEY] = input.docsStateFile;
 	}
 	return out;
 }

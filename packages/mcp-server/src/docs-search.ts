@@ -135,18 +135,6 @@ export interface DatasetPin {
 	version: string;
 	commit: string;
 	ingested_at?: string;
-	/**
-	 * The served corpus (mirrors `VersionDocument` in `docs-datasets.ts`).
-	 * A chunk cites this pin only when its document id is listed here.
-	 */
-	documents?: PinnedDocument[];
-}
-
-/** One served document inside a dataset pin. */
-export interface PinnedDocument {
-	source_url: string;
-	document_id: string;
-	content_sha256: string;
 }
 
 export interface SearchDeps {

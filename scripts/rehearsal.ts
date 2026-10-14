@@ -59,19 +59,6 @@ import {
 	toShellExports,
 } from "../packages/mcp-server/src/rehearsal-env.ts";
 import { buildSkillsFixture, type SkillsFixture } from "../packages/mcp-server/src/rehearsal-skills.ts";
-import {
-	buildFixtureSpawnArgv,
-	checkFixtureReady,
-	confirmFixtureSpawn,
-	fixtureEndpoint,
-	mayStopFixture,
-	newFixtureKey,
-	refuseFixtureControlUrl,
-	RAGFLOW_FIXTURE_KEY_ENV,
-	RAGFLOW_FIXTURE_PORT_ENV,
-	RAGFLOW_FIXTURE_SCRIPT,
-	type RagflowFixtureState,
-} from "../packages/mcp-server/src/rehearsal-ragflow.ts";
 import { isSwarmSurface, SURFACES, type Surface } from "../packages/mcp-server/src/types.ts";
 
 /** The harness refused an input or a state; the message names hosts and ports, never values. */
@@ -540,11 +527,11 @@ function pidAlive(pid: number): boolean {
 	}
 }
 
-/** Persisted twin identity. Null pid/startSeconds while starting: fixture verified, twin not yet spawned. */
+/** Persisted twin identity. */
 export interface TwinState {
 	name: string;
-	pid: number | null;
-	startSeconds: number | null;
+	pid: number;
+	startSeconds: number;
 	checkout: string;
 	commit: string;
 	mcpPort: number;
@@ -560,12 +547,6 @@ export interface TwinState {
 	anonymous: boolean;
 	/** Started with `--skills-fixture`. Absent in a state file an older `up` wrote. */
 	skillsFixture?: boolean;
-	/**
-	 * Started with `--ragflow-fixture`: the owned stand-in's endpoint plus the
-	 * pid/start-time/cwd/script identity `down` re-verifies before signalling.
-	 * Absent when the flag was off and in a state file an older `up` wrote.
-	 */
-	ragflowFixture?: RagflowFixtureState;
 }
 
 function readState(path: string): TwinState | null {
@@ -792,23 +773,6 @@ export function killVerifiedSpawn(pid: number, checkout: string, startSeconds: n
 	killOwn(pid);
 	return true;
 }
-
-/**
- * Stop a just-spawned fixture during `up` cleanup. Re-reads /proc and applies
- * the same ownership check `down` enforces through `mayStopFixture` (pid,
- * start time against reuse, fixture entry point, recorded checkout) before
- * signalling, so a reused or mismatched pid is never killed. Returns true
- * when the pid was signalled.
- */
-export function killVerifiedFixtureSpawn(pid: number, checkout: string, startSeconds: number): boolean {
-	const cur = readProcFacts(pid);
-	if (cur === null) return false;
-	if (cur.pid !== pid || cur.startSeconds !== startSeconds) return false;
-	if (cur.argv.at(-1) !== RAGFLOW_FIXTURE_SCRIPT) return false;
-	if (cur.cwd !== checkout) return false;
-	killOwn(pid);
-	return true;
-}
 /**
  * An exclusive per-instance lock, held across startup and teardown: a
  * concurrent `up`/`down` on one name must not read state or remove
@@ -966,66 +930,6 @@ export function confirmSpawnedTwin(
 }
 
 /**
- * Bounded startup identity qualification for a just-spawned child.
- *
- * A post-spawn `readProcFacts` may observe pre-exec transient state (empty
- * argv) before the child execs its entry point; a single-shot check would
- * then refuse our own spawn as foreign. Poll under the caller's existing
- * timeout (never widened here): the same pid and birth must remain
- * throughout, the known expected entry must read correct first, and
- * readiness/owned-listener checks still run after, before any network to
- * the port. A genuinely dead pid reports `dead` (numeric failure, not a
- * foreign refusal); an unverifiable or foreign pid reports without
- * signalling. No extra I/O delay beyond the poll interval.
- */
-export interface SpawnQualifyDeps {
-	factsOf: (pid: number) => ProcFacts | null;
-	alive: (pid: number) => boolean;
-	startOf: (pid: number) => number | null;
-	sleepMs: (ms: number) => Promise<void>;
-}
-export type SpawnQualifyOutcome =
-	| { kind: "ready"; facts: ProcFacts }
-	| { kind: "dead" }
-	| { kind: "foreign"; reason: string }
-	| { kind: "unverifiable"; reason: string };
-export async function qualifySpawnedEntry(
-	pid: number,
-	birth: number | null,
-	isExpectedEntry: (argv: string[]) => boolean,
-	timeoutMs: number,
-	deps: SpawnQualifyDeps,
-): Promise<SpawnQualifyOutcome> {
-	const deadline = Date.now() + Math.max(0, timeoutMs);
-	for (;;) {
-		const facts = deps.factsOf(pid);
-		if (facts !== null) {
-			if (birth !== null && facts.startSeconds !== birth) {
-				return { kind: "foreign", reason: `pid ${pid} was reused (start time differs)` };
-			}
-			if (isExpectedEntry(facts.argv)) return { kind: "ready", facts };
-			if (facts.argv.length > 0) {
-				return { kind: "foreign", reason: `pid ${pid} is not the expected entry point` };
-			}
-			if (!deps.alive(pid)) return { kind: "dead" };
-		} else {
-			if (!deps.alive(pid)) return { kind: "dead" };
-			if (birth !== null) {
-				const cur = deps.startOf(pid);
-				if (cur !== null && cur !== birth) {
-					return { kind: "foreign", reason: `pid ${pid} was reused (start time differs)` };
-				}
-			}
-		}
-		if (Date.now() >= deadline) {
-			if (!deps.alive(pid)) return { kind: "dead" };
-			return { kind: "unverifiable", reason: `could not verify the spawned process (pid ${pid}); refusing to signal an unverified process` };
-		}
-		await deps.sleepMs(50);
-	}
-}
-
-/**
  * Arm cleanup for an interruptible `up`: the first SIGINT/SIGTERM runs
  * cleanup, then the signal is re-raised with the handlers removed so the
  * process still dies from the signal. Returns a disarm function the caller
@@ -1065,10 +969,7 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 	const statePath = join(runDir, "state.json");
 
 	const prev = readState(statePath);
-	if (prev !== null && prev.pid !== null && pidAlive(prev.pid)) {
-		if (prev.startSeconds === null) {
-			throw new RehearsalRefused(`instance ${opts.name} has a live twin with unverified birth identity; preserving its recovery state`);
-		}
+	if (prev !== null && pidAlive(prev.pid)) {
 		const facts = readProcFacts(prev.pid);
 		// A missing `ss` (or any other unreadable /proc fact) used to fall
 		// through to removeLabelledContainers and delete a live twin's stores.
@@ -1078,29 +979,8 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 				`instance ${opts.name} has live pid ${prev.pid} that could not be verified; refusing to remove its stores`,
 			);
 		}
-		if (mayStop(facts, { pid: prev.pid, checkout: prev.checkout, startSeconds: prev.startSeconds }) === null) {
+		if (mayStop(facts, prev) === null) {
 			process.stderr.write(`[rehearsal] refused: instance ${opts.name} is already running (pid ${prev.pid}).\n`);
-			return 2;
-		}
-	}
-	// The fixture is an independent child: a dead twin with a live stand-in
-	// must not be overwritten, or `down` loses the identity it needs to stop
-	// it. Inspect the previous fixture on its own before any removal.
-	const prevFixture = prev?.ragflowFixture;
-	if (prevFixture?.enabled === true && pidAlive(prevFixture.pid)) {
-		if (prevFixture.startSeconds === null) {
-			throw new RehearsalRefused(
-				`instance ${opts.name} has a live fixture with unverified birth identity; preserving its recovery state`,
-			);
-		}
-		const prevFixtureFacts = readProcFacts(prevFixture.pid);
-		if (prevFixtureFacts === null) {
-			throw new RehearsalRefused(
-				`instance ${opts.name} has live fixture pid ${prevFixture.pid} that could not be verified; refusing to remove its stores`,
-			);
-		}
-		if (mayStopFixture(prevFixtureFacts, prevFixture, PRODUCTION_PORTS) === null) {
-			process.stderr.write(`[rehearsal] refused: instance ${opts.name} still owns a live fixture (pid ${prevFixture.pid}); run rehearsal down first.\n`);
 			return 2;
 		}
 	}
@@ -1284,20 +1164,6 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 	for (const [key, value] of Object.entries(process.env)) {
 		if (key.startsWith("BUN_")) parentEnv[key] = value;
 	}
-	// The fixture's port and scratch key are chosen before the server env is
-	// built: the twin's RAGFlow reach points at the fixture, so the builder
-	// needs both. The key is random per run and travels by child env only.
-	let fixturePort = 0;
-	let fixtureKey = "";
-	if (opts.ragflowFixture) {
-		fixturePort = await pickFreePort();
-		const pickedRefused = refusePort(fixturePort, []);
-		if (pickedRefused !== null) throw new RehearsalRefused(pickedRefused);
-		if (!(await isPortFree(fixturePort))) throw new RehearsalRefused(`fixture port ${fixturePort} is already listening`);
-		fixtureKey = newFixtureKey();
-		const controlRefused = refuseFixtureControlUrl(fixtureEndpoint(fixturePort), PRODUCTION_PORTS);
-		if (controlRefused !== null) throw new RehearsalRefused(controlRefused);
-	}
 	let serverEnv: Record<string, string>;
 	let skills: SkillsFixture | null = null;
 	try {
@@ -1323,23 +1189,52 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 		throw cause;
 	}
 
-	// The owned RAGFlow stand-in starts before the twin: the twin's scratch key
-	// points at it, so the fixture must be verified first. Its key travels by
-	// child env only — never a CLI arg, a log line or a consumer export — and
-	// the child inherits no store, token or home variables from the operator.
-	// Provisional recovery is armed BEFORE the first spawn: the validated
-	// starting state (actual nulls, no PID yet) is saved first, each actual
-	// child is recorded the moment it is born, and an unknown birth is
-	// preserved and refused, never signalled.
+	const logPath = join(runDir, "server.log");
+	const fd = openSync(logPath, "a", 0o600);
+	const server = Bun.spawn(buildServerSpawnArgv(), {
+		cwd: checkout,
+		env: serverEnv,
+		detached: true,
+		stdin: "ignore",
+		stdout: fd,
+		stderr: fd,
+	});
+	server.unref();
+	try {
+		closeSync(fd);
+	} catch {
+		// The child holds its own descriptor; a close failure changes nothing.
+	}
+
+	const facts = readProcFacts(server.pid);
+	if (facts === null) {
+		// Unverifiable means unsignallable: a blind killOwn could hit a reused
+		// pid. Containers are still removed; the twin (if it is ours) is orphaned
+		// rather than risking someone else's process.
+		removeLabelledContainers(opts.name);
+		throw new RehearsalRefused(`could not verify the spawned twin (pid ${server.pid}); refusing to signal an unverified process`);
+	}
+
+	const stopReason = mayStop(facts, { pid: server.pid, checkout, startSeconds: facts.startSeconds });
+	if (stopReason !== null) {
+		// Only our own spawn is signalled (killVerifiedSpawn re-checks the
+		// identity); the containers are always removed. Without this early
+		// refusal `up` succeeds and every later `down` refuses, e.g. from a
+		// system.slice context the twin inherits.
+		killVerifiedSpawn(server.pid, checkout, facts.startSeconds);
+		removeLabelledContainers(opts.name);
+		throw new RehearsalRefused(`twin would not be stoppable: ${stopReason}`);
+	}
+
+	// The twin is verified but no state exists yet: an interruption in the
+	// health wait below would orphan a detached server no `down` can find.
+	// Save the verified identity first so `down` (and the signal handler)
+	// can stop it, then arm interruption cleanup for the wait.
 	let saved = false;
-	let serverPid: number | null = null;
-	let serverStart: number | null = null;
-	let fixture: { pid: number; startSeconds: number | null } | null = null;
-	const fixtureUrl = opts.ragflowFixture ? fixtureEndpoint(fixturePort) : "";
 	const state: TwinState = {
 		name: opts.name,
-		pid: null,
-		startSeconds: null,
+		pid: server.pid,
+		startSeconds: facts.startSeconds,
 		checkout,
 		commit: "unknown",
 		mcpPort,
@@ -1354,18 +1249,10 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 		desktopSurfaces: opts.desktopSurfaces,
 		anonymous: opts.anonymous,
 		skillsFixture: opts.skillsFixture,
-		ragflowFixture: undefined,
 	};
-	try {
-		writeMode(statePath, `${JSON.stringify(state, null, 2)}\n`);
-	} catch (cause) {
-		// No child exists yet: only containers need removal.
-		removeLabelledContainers(opts.name);
-		throw cause;
-	}
+	writeMode(statePath, `${JSON.stringify(state, null, 2)}\n`);
 	const interruptCleanup = (): void => {
-		if (serverPid !== null && serverStart !== null) killVerifiedSpawn(serverPid, checkout, serverStart);
-		if (fixture !== null && fixture.startSeconds !== null) killVerifiedFixtureSpawn(fixture.pid, checkout, fixture.startSeconds);
+		killVerifiedSpawn(server.pid, checkout, facts.startSeconds);
 		try {
 			removeLabelledContainers(opts.name);
 		} catch {
@@ -1373,203 +1260,10 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 			// lets a later `down` retry the removal.
 			return;
 		}
-		// A `false` stop (unverifiable or foreign pid) must never delete the
-		// recovery identity: only a proven-gone pair plus containers removed
-		// may drop the provisional state. Log names only, never values.
-		const twinGone = serverPid === null || !pidAlive(serverPid);
-		const fixtureGone = fixture === null || !pidAlive(fixture.pid);
-		if (!saved && twinGone && fixtureGone) {
-			try {
-				rmSync(statePath, { force: true });
-			} catch {
-				// A signal handler must not throw; `down` retries the removal.
-			}
-		}
+		if (!saved) rmSync(statePath, { force: true });
 	};
 	const disarm = installUpCleanup(interruptCleanup);
-	if (opts.ragflowFixture) {
-		const fixtureEnv: Record<string, string> = {};
-		if (parentEnv.PATH !== undefined) fixtureEnv.PATH = parentEnv.PATH;
-		for (const [key, value] of Object.entries(parentEnv)) {
-			if (value !== undefined && key.startsWith("BUN_")) fixtureEnv[key] = value;
-		}
-		fixtureEnv[RAGFLOW_FIXTURE_KEY_ENV] = fixtureKey;
-		fixtureEnv[RAGFLOW_FIXTURE_PORT_ENV] = String(fixturePort);
-		const fixtureLogPath = join(runDir, "fixture.log");
-		const fixtureFd = openSync(fixtureLogPath, "a", 0o600);
-		const child = Bun.spawn(buildFixtureSpawnArgv(), {
-			cwd: checkout,
-			env: fixtureEnv,
-			detached: true,
-			stdin: "ignore",
-			stdout: fixtureFd,
-			stderr: fixtureFd,
-		});
-		child.unref();
-		try {
-			closeSync(fixtureFd);
-		} catch {
-			// The child holds its own descriptor; a close failure changes nothing.
-		}
-		// CaptureSrcStart before verification is legitimate: the born PID and
-		// its birth are recorded before any identity check, so a later throw
-		// stays down-able. A null birth means untestable, never a sentinel.
-		const bornStart = readStartSeconds(child.pid);
-		fixture = { pid: child.pid, startSeconds: bornStart };
-		state.ragflowFixture = {
-			enabled: true,
-			endpoint: fixtureUrl,
-			pid: child.pid,
-			startSeconds: bornStart,
-			cwd: checkout,
-			script: RAGFLOW_FIXTURE_SCRIPT,
-		};
-		try {
-			writeMode(statePath, `${JSON.stringify(state, null, 2)}\n`);
-		} catch (cause) {
-			if (bornStart !== null) killVerifiedFixtureSpawn(child.pid, checkout, bornStart);
-			removeLabelledContainers(opts.name);
-			throw cause;
-		}
-		if (bornStart === null) {
-			// Untestable birth: preserve the born recovery record and refuse
-			// without signalling across PIDs. `down` re-reads the record and
-			// refuses the same way until the birth reads verifiable.
-			removeLabelledContainers(opts.name);
-			throw new RehearsalRefused(`could not verify the start of fixture pid ${child.pid}; refusing to signal an unverified process`);
-		}
-		// Bounded startup identity qualification under the existing ready
-		// timeout: the same PID and birth must remain; the known expected
-		// entry must read correct before any listener or network check.
-		const qualified = await qualifySpawnedEntry(
-			child.pid,
-			bornStart,
-			(argv) => argv.at(-1) === RAGFLOW_FIXTURE_SCRIPT,
-			READY_TIMEOUT_MS,
-			{ factsOf: readProcFacts, alive: pidAlive, startOf: readStartSeconds, sleepMs: (ms) => Bun.sleep(ms) },
-		);
-		if (qualified.kind === "dead") {
-			removeLabelledContainers(opts.name);
-			if (!pidAlive(child.pid)) rmSync(statePath, { force: true });
-			return 1;
-		}
-		if (qualified.kind !== "ready") {
-			killVerifiedFixtureSpawn(child.pid, checkout, bornStart);
-			removeLabelledContainers(opts.name);
-			const fixtureGone = !pidAlive(child.pid);
-			if (fixtureGone) rmSync(statePath, { force: true });
-			throw new RehearsalRefused(qualified.kind === "foreign" ? `fixture would not be stoppable: ${qualified.reason}` : qualified.reason);
-		}
-		const fixtureStopReason = mayStopFixture(
-			qualified.facts,
-			{ pid: child.pid, startSeconds: bornStart, cwd: checkout, script: RAGFLOW_FIXTURE_SCRIPT },
-			PRODUCTION_PORTS,
-		);
-		if (fixtureStopReason !== null) {
-			// Only our own spawn is signalled; the containers are always
-			// removed. Without this early refusal `up` succeeds and every
-			// later `down` refuses.
-			killVerifiedFixtureSpawn(child.pid, checkout, bornStart);
-			removeLabelledContainers(opts.name);
-			const fixtureGone = !pidAlive(child.pid);
-			if (fixtureGone) rmSync(statePath, { force: true });
-			throw new RehearsalRefused(`fixture would not be stoppable: ${fixtureStopReason}`);
-		}
-		// The verified birth replaces the born capture; same PID and birth.
-		fixture = { pid: child.pid, startSeconds: qualified.facts.startSeconds };
-		state.ragflowFixture = {
-			enabled: true,
-			endpoint: fixtureUrl,
-			pid: child.pid,
-			startSeconds: qualified.facts.startSeconds,
-			cwd: checkout,
-			script: RAGFLOW_FIXTURE_SCRIPT,
-		};
-		writeMode(statePath, `${JSON.stringify(state, null, 2)}\n`);
-	}
 	try {
-		// Twin setup runs under the armed cleanup and the provisional state
-		// above: a log-open throw, spawn failure, or unverifiable twin still
-		// stops the owned fixture safely and retains recovery when it cannot
-		// be confirmed gone. Never a blind kill: every signal re-checks
-		// pid/start/entry/cwd, and pid reuse, foreign listeners, and
-		// production-port ownership all refuse.
-		const logPath = join(runDir, "server.log");
-		const fd = openSync(logPath, "a", 0o600);
-		const server = Bun.spawn(buildServerSpawnArgv(), {
-			cwd: checkout,
-			env: serverEnv,
-			detached: true,
-			stdin: "ignore",
-			stdout: fd,
-			stderr: fd,
-		});
-		server.unref();
-		try {
-			closeSync(fd);
-		} catch {
-			// The child holds its own descriptor; a close failure changes nothing.
-		}
-		// Each actual child is recorded ASAP after birth, before verification:
-		// the born PID plus its birth stay recoverable even if the entry has
-		// not exec'd yet. A null birth is preserved and refused, never
-		// signalled. Same PID and birth must remain throughout.
-		serverPid = server.pid;
-		serverStart = readStartSeconds(server.pid);
-		state.pid = serverPid;
-		state.startSeconds = serverStart;
-		writeMode(statePath, `${JSON.stringify(state, null, 2)}\n`);
-		if (serverStart === null) {
-			if (fixture !== null && fixture.startSeconds !== null) killVerifiedFixtureSpawn(fixture.pid, checkout, fixture.startSeconds);
-			removeLabelledContainers(opts.name);
-			const fixtureGone = fixture === null || !pidAlive(fixture.pid);
-			if (!pidAlive(server.pid) && fixtureGone) rmSync(statePath, { force: true });
-			throw new RehearsalRefused(`could not verify the start of twin pid ${server.pid}; refusing to signal an unverified process`);
-		}
-		const twinQualified = await qualifySpawnedEntry(
-			server.pid,
-			serverStart,
-			(argv) => argv.at(-1)?.endsWith("packages/mcp-server/src/index.ts") === true,
-			READY_TIMEOUT_MS,
-			{ factsOf: readProcFacts, alive: pidAlive, startOf: readStartSeconds, sleepMs: (ms) => Bun.sleep(ms) },
-		);
-		if (twinQualified.kind === "dead") {
-			if (fixture !== null && fixture.startSeconds !== null) killVerifiedFixtureSpawn(fixture.pid, checkout, fixture.startSeconds);
-			removeLabelledContainers(opts.name);
-			const fixtureGone = fixture === null || !pidAlive(fixture.pid);
-			if (!pidAlive(server.pid) && fixtureGone) rmSync(statePath, { force: true });
-			return 1;
-		}
-		if (twinQualified.kind !== "ready") {
-			if (fixture !== null && fixture.startSeconds !== null) killVerifiedFixtureSpawn(fixture.pid, checkout, fixture.startSeconds);
-			removeLabelledContainers(opts.name);
-			const fixtureGone = fixture === null || !pidAlive(fixture.pid);
-			if (!pidAlive(server.pid) && fixtureGone) rmSync(statePath, { force: true });
-			throw new RehearsalRefused(twinQualified.kind === "foreign" ? `twin would not be stoppable: ${twinQualified.reason}` : twinQualified.reason);
-		}
-		const facts = twinQualified.facts;
-		const stopReason = mayStop(facts, { pid: server.pid, checkout, startSeconds: facts.startSeconds });
-		if (stopReason !== null) {
-			// Only our own spawn is signalled (killVerifiedSpawn re-checks the
-			// identity); the containers are always removed. Without this early
-			// refusal `up` succeeds and every later `down` refuses, e.g. from a
-			// system.slice context the twin inherits. Retain recovery unless
-			// both children are proven gone.
-			killVerifiedSpawn(server.pid, checkout, facts.startSeconds);
-			if (fixture !== null && fixture.startSeconds !== null) killVerifiedFixtureSpawn(fixture.pid, checkout, fixture.startSeconds);
-			removeLabelledContainers(opts.name);
-			const twinGone = !pidAlive(server.pid);
-			const fixtureGone = fixture === null || !pidAlive(fixture.pid);
-			if (twinGone && fixtureGone) rmSync(statePath, { force: true });
-			throw new RehearsalRefused(`twin would not be stoppable: ${stopReason}`);
-		}
-		// The verified identity replaces the captured starting identity.
-		// Recovery remains provisional until both listeners pass readiness.
-		serverPid = server.pid;
-		serverStart = facts.startSeconds;
-		state.pid = server.pid;
-		state.startSeconds = facts.startSeconds;
-		writeMode(statePath, `${JSON.stringify(state, null, 2)}\n`);
 		// SUBSTRATE_TOKEN is the first non-swarm surface's token (the
 		// documented contract); the operator token rides separately for the
 		// smoke, so an `--operator` twin no longer hands proofs the
@@ -1577,37 +1271,11 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 		const firstSurface = surfaces.find((s) => !isSwarmSurface(s)) ?? surfaces[0];
 		const firstToken = firstSurface !== undefined ? secrets.surfaceTokens[firstSurface] : undefined;
 		const operatorToken = opts.operator !== null ? secrets.surfaceTokens[opts.operator] : undefined;
-		// The fixture answers its own health gate first: the twin's RAGFlow reach
-		// is only real once the stand-in serves its control shape, not merely a
-		// listener. Bounded polls against the actual HTTP endpoint.
-		if (fixture !== null) {
-			const fixtureDeadline = Date.now() + READY_TIMEOUT_MS;
-			let fixtureOk = await checkFixtureReady(fixtureUrl, 10_000);
-			while (!fixtureOk && Date.now() < fixtureDeadline) {
-				await Bun.sleep(POLL_MS);
-				fixtureOk = await checkFixtureReady(fixtureUrl, 10_000);
-			}
-			if (!fixtureOk) {
-				killVerifiedSpawn(server.pid, checkout, facts.startSeconds);
-				if (fixture !== null && fixture.startSeconds !== null) killVerifiedFixtureSpawn(fixture.pid, checkout, fixture.startSeconds);
-				removeLabelledContainers(opts.name);
-				// A `false` stop must preserve the recovery identity: drop the
-				// provisional state only when both children are proven gone.
-				const twinGone = !pidAlive(server.pid);
-				const fixtureGone = !pidAlive(fixture.pid);
-				if (twinGone && fixtureGone) rmSync(statePath, { force: true });
-				process.stderr.write(`[rehearsal] fixture never answered its health gate on 127.0.0.1:${fixturePort}; log kept at ${join(runDir, "fixture.log")}.\n`);
-				return 1;
-			}
-		}
 		const health = await waitForHealth(`http://127.0.0.1:${mcpPort}`, firstToken ?? null, READY_TIMEOUT_MS);
 		if (!isTwinHealthy(health)) {
 			killVerifiedSpawn(server.pid, checkout, facts.startSeconds);
-			if (fixture !== null && fixture.startSeconds !== null) killVerifiedFixtureSpawn(fixture.pid, checkout, fixture.startSeconds);
 			removeLabelledContainers(opts.name);
-			const twinGone = !pidAlive(server.pid);
-			const fixtureGone = fixture === null || !pidAlive(fixture.pid);
-			if (twinGone && fixtureGone) rmSync(statePath, { force: true });
+			rmSync(statePath, { force: true });
 			process.stderr.write(`[rehearsal] twin never reached healthy /healthz (index=${health?.index} ledger=${health?.ledger} writable=${health?.writable}); log kept at ${logPath}.\n`);
 			return 1;
 		}
@@ -1616,39 +1284,11 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 		const confirmReason = confirmSpawnedTwin(server.pid, mcpPort, facts.startSeconds);
 		if (confirmReason !== null) {
 			killVerifiedSpawn(server.pid, checkout, facts.startSeconds);
-			if (fixture !== null && fixture.startSeconds !== null) killVerifiedFixtureSpawn(fixture.pid, checkout, fixture.startSeconds);
 			removeLabelledContainers(opts.name);
-			const twinGone = !pidAlive(server.pid);
-			const fixtureGone = fixture === null || !pidAlive(fixture.pid);
-			if (twinGone && fixtureGone) rmSync(statePath, { force: true });
+			rmSync(statePath, { force: true });
 			throw new RehearsalRefused(confirmReason);
 		}
-		// The fixture listener must be ours too: a stranger answering the
-		// health gate must not be recorded as the instance's stand-in.
-		if (fixture !== null) {
-			if (fixture.startSeconds === null) {
-				killVerifiedSpawn(server.pid, checkout, facts.startSeconds);
-				removeLabelledContainers(opts.name);
-				const twinGone = !pidAlive(server.pid);
-				const fixtureGone = !pidAlive(fixture.pid);
-				if (twinGone && fixtureGone) rmSync(statePath, { force: true });
-				throw new RehearsalRefused(`could not verify the start of fixture pid ${fixture.pid}; refusing to signal an unverified process`);
-			}
-			const fixtureConfirmReason = confirmFixtureSpawn(fixture.pid, fixturePort, fixture.startSeconds, {
-				alive: pidAlive,
-				startOf: readStartSeconds,
-				listensOn: readListeningPorts,
-			});
-			if (fixtureConfirmReason !== null) {
-				killVerifiedSpawn(server.pid, checkout, facts.startSeconds);
-				killVerifiedFixtureSpawn(fixture.pid, checkout, fixture.startSeconds);
-				removeLabelledContainers(opts.name);
-				const twinGone = !pidAlive(server.pid);
-				const fixtureGone = !pidAlive(fixture.pid);
-				if (twinGone && fixtureGone) rmSync(statePath, { force: true });
-				throw new RehearsalRefused(fixtureConfirmReason);
-			}
-		}
+
 		state.commit = gitOutput(checkout, ["log", "-1", "--pretty=%H"]) ?? "unknown";
 		const dirtyOut = gitOutput(checkout, ["status", "--porcelain=v1", "--", "packages", "package.json", "bun.lock"]);
 		writeMode(statePath, `${JSON.stringify(state, null, 2)}\n`);
@@ -1662,8 +1302,6 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 			name: opts.name,
 			testPgUrl,
 			skills: skills ? { state: skills.state, origin: skills.origin, ghState: skills.ghState, repo: skills.repo } : null,
-			ragflowFixture: fixture !== null ? { url: fixtureUrl, pid: fixture.pid } : null,
-			docsStateFile: fixture !== null ? join(runDir, REHEARSAL_DOCS_STATE_FILENAME) : null,
 		})));
 		writeMode(join(runDir, "stores.env"), toShellExports(storesEnvRecord({
 			ports: { mcp: mcpPort, ledger: ledgerHost.port, postgres: pgHost.port },
@@ -1679,29 +1317,25 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 		for (const [key, value] of Object.entries(opts.extraEnv)) process.stdout.write(`[rehearsal] extra-env ${key}=${value}\n`);
 		return 0;
 	} catch (cause) {
-		// An unexpected throw after either spawn must not leak a verified
-		// child: stop whatever is tracked and remove containers, then
-		// rethrow. The expected failures above already cleaned up, so this is
-		// a no-op for them (the kill is identity-checked; the removal finds
-		// nothing). The removal is best-effort here so the original error
-		// survives. A `false` stop retains the provisional state so a later
-		// `down` can retry it; only proven-gone children may drop it.
-		if (serverPid !== null && serverStart !== null) killVerifiedSpawn(serverPid, checkout, serverStart);
-		if (fixture !== null && fixture.startSeconds !== null) killVerifiedFixtureSpawn(fixture.pid, checkout, fixture.startSeconds);
+		// An unexpected throw after the spawn must not leak the twin: stop
+		// it and remove its containers, then rethrow. The expected failures
+		// above already cleaned up, so this is a no-op for them (the kill
+		// is identity-checked; the removal finds nothing). The removal is
+		// best-effort here so the original error survives; the provisional
+		// state stays so a later `down` can retry it.
+		killVerifiedSpawn(server.pid, checkout, facts.startSeconds);
 		try {
 			removeLabelledContainers(opts.name);
 		} catch {
 			throw cause;
 		}
-		const twinGone = serverPid === null || !pidAlive(serverPid);
-		const fixtureGone = fixture === null || !pidAlive(fixture.pid);
-		if (!saved && twinGone && fixtureGone) rmSync(statePath, { force: true });
+		if (!saved) rmSync(statePath, { force: true });
 		throw cause;
 	} finally {
 		disarm();
 	}
-	return 0;
 }
+
 async function runDown(name: string): Promise<number> {
 	const runDir = runDirFor(name);
 	return await withNameLock(runDir, name, () => runDownInner(name, runDir));
@@ -1717,99 +1351,40 @@ async function runDownInner(name: string, runDir: string): Promise<number> {
 		process.stdout.write(`[rehearsal] down ${name}: nothing to remove.\n`);
 		return 0;
 	}
-	// Stop the recorded fixture child, if any: only the exact pid/start-time/
-	// entry-point/checkout identity recorded in this state is ever signalled.
-	// A foreign or reused pid refuses and leaves the run directory for repair.
-	const stopFixture = async (): Promise<string | null> => {
-		const recorded = state.ragflowFixture;
-		if (recorded === undefined || recorded.enabled !== true) return null;
-		if (!Number.isInteger(recorded.pid) || recorded.pid <= 0) {
-			throw new RehearsalRefused(`fixture identity for ${name} is unverifiable; refusing to signal`);
-		}
-		if (!pidAlive(recorded.pid)) return `fixture pid ${recorded.pid} already gone`;
-		if (recorded.startSeconds === null || !Number.isFinite(recorded.startSeconds)) {
-			throw new RehearsalRefused(`fixture pid ${recorded.pid} has unverified birth identity; preserving its recovery state`);
-		}
-		const fixtureFacts = readProcFacts(recorded.pid);
-		if (fixtureFacts === null) throw new RehearsalRefused(`cannot verify fixture pid ${recorded.pid}; refusing to signal`);
-		const fixtureReason = mayStopFixture(fixtureFacts, { pid: recorded.pid, startSeconds: recorded.startSeconds, cwd: recorded.cwd, script: recorded.script }, PRODUCTION_PORTS);
-		if (fixtureReason !== null) throw new RehearsalRefused(`refusing to stop fixture pid ${recorded.pid}: ${fixtureReason}`);
-		try {
-			process.kill(recorded.pid, "SIGTERM");
-		} catch {
-			// Gone between the check and the signal; fall through to cleanup.
-		}
-		const fixtureDeadline = Date.now() + DOWN_WAIT_MS;
-		while (pidAlive(recorded.pid) && Date.now() < fixtureDeadline) {
-			await Bun.sleep(POLL_MS);
-		}
-		if (pidAlive(recorded.pid)) {
-			const againFacts = readProcFacts(recorded.pid);
-			if (againFacts === null) throw new RehearsalRefused(`cannot re-verify fixture pid ${recorded.pid}; refusing SIGKILL`);
-			const againReason = mayStopFixture(againFacts, { pid: recorded.pid, startSeconds: recorded.startSeconds as number, cwd: recorded.cwd, script: recorded.script }, PRODUCTION_PORTS);
-			if (againReason !== null) throw new RehearsalRefused(`refusing to stop fixture pid ${recorded.pid}: ${againReason}`);
-			try {
-				process.kill(recorded.pid, "SIGKILL");
-			} catch {
-				// Gone between the check and the signal.
-			}
-		}
-		return `stopped fixture pid ${recorded.pid}`;
-	};
-	if (state.pid === null || state.startSeconds === null) {
-		// Starting state: the twin never spawned, but a fixture may own its
-		// listener. Stop only the recorded fixture, then remove containers.
-		const fixtureNote = await stopFixture();
+	if (!pidAlive(state.pid)) {
 		const removed = removeLabelledContainers(name);
 		rmSync(runDir, { recursive: true, force: true });
-		process.stdout.write(`[rehearsal] down ${name}: twin pending, removed ${removed} containers${fixtureNote === null ? "" : `, ${fixtureNote}`}.\n`);
+		process.stdout.write(`[rehearsal] down ${name}: pid ${state.pid} already gone, removed ${removed} containers.\n`);
 		return 0;
 	}
-	const maybePid = state.pid;
-	if (maybePid === null || !Number.isInteger(maybePid) || maybePid <= 0 || !pidAlive(maybePid)) {
-		const fixtureNote = await stopFixture();
-		const removed = removeLabelledContainers(name);
-		if (maybePid !== null && Number.isInteger(maybePid) && maybePid > 0 && pidAlive(maybePid)) {
-			throw new RehearsalRefused(`twin identity for ${name} is unverifiable; preserving its recovery state`);
-		}
-		rmSync(runDir, { recursive: true, force: true });
-		process.stdout.write(`[rehearsal] down ${name}: pid ${state.pid} already gone, removed ${removed} containers${fixtureNote === null ? "" : `, ${fixtureNote}`}.\n`);
-		return 0;
-	}
-	const twinPid = state.pid;
-	const twinStart = state.startSeconds;
-	if (twinPid === null || twinStart === null || !Number.isInteger(twinPid) || twinPid <= 0 || !Number.isFinite(twinStart)) {
-		throw new RehearsalRefused(`twin identity for ${name} is pending; refusing to signal`);
-	}
-	const twinIdentity = { pid: twinPid, checkout: state.checkout, startSeconds: twinStart };
-	const facts = readProcFacts(twinPid);
-	if (facts === null) throw new RehearsalRefused(`cannot verify pid ${twinPid}; refusing to signal`);
-	const reason = mayStop(facts, twinIdentity);
-	if (reason !== null) throw new RehearsalRefused(`refusing to stop pid ${twinPid}: ${reason}`);
+	const facts = readProcFacts(state.pid);
+	if (facts === null) throw new RehearsalRefused(`cannot verify pid ${state.pid}; refusing to signal`);
+	const reason = mayStop(facts, state);
+	if (reason !== null) throw new RehearsalRefused(`refusing to stop pid ${state.pid}: ${reason}`);
+
 	try {
-		process.kill(twinPid, "SIGTERM");
+		process.kill(state.pid, "SIGTERM");
 	} catch {
 		// Gone between the check and the signal; fall through to cleanup.
 	}
 	const deadline = Date.now() + DOWN_WAIT_MS;
-	while (pidAlive(twinPid) && Date.now() < deadline) {
+	while (pidAlive(state.pid) && Date.now() < deadline) {
 		await Bun.sleep(POLL_MS);
 	}
-	if (pidAlive(twinPid)) {
-		const again = readProcFacts(twinPid);
-		if (again === null) throw new RehearsalRefused(`cannot re-verify pid ${twinPid}; refusing SIGKILL`);
-		const againReason = mayStop(again, twinIdentity);
-		if (againReason !== null) throw new RehearsalRefused(`refusing to stop pid ${twinPid}: ${againReason}`);
+	if (pidAlive(state.pid)) {
+		const again = readProcFacts(state.pid);
+		if (again === null) throw new RehearsalRefused(`cannot re-verify pid ${state.pid}; refusing SIGKILL`);
+		const againReason = mayStop(again, state);
+		if (againReason !== null) throw new RehearsalRefused(`refusing to stop pid ${state.pid}: ${againReason}`);
 		try {
-			process.kill(twinPid, "SIGKILL");
+			process.kill(state.pid, "SIGKILL");
 		} catch {
 			// Gone between the check and the signal.
 		}
 	}
-	const fixtureNote = await stopFixture();
 	const removed = removeLabelledContainers(name);
 	rmSync(runDir, { recursive: true, force: true });
-	process.stdout.write(`[rehearsal] down ${name}: stopped pid ${twinPid}, removed ${removed} containers${fixtureNote === null ? "" : `, ${fixtureNote}`}.\n`);
+	process.stdout.write(`[rehearsal] down ${name}: stopped pid ${state.pid}, removed ${removed} containers.\n`);
 	return 0;
 }
 
@@ -1876,75 +1451,28 @@ async function runStatusInner(name: string, runDir: string): Promise<number> {
 		process.stdout.write(`[rehearsal] status ${name}: no instance.\n`);
 		return 1;
 	}
-	const twinPid = state.pid;
-	const twinStart = state.startSeconds;
-	const twinPidOk = twinPid !== null && Number.isInteger(twinPid) && twinPid > 0;
-	const twinBirthOk = twinStart !== null && Number.isFinite(twinStart);
-	const alive = twinPidOk && pidAlive(twinPid as number);
+	const alive = pidAlive(state.pid);
 	let health = "unknown";
-	if (!twinPidOk || !twinBirthOk) {
-		health = "twin pending";
-	} else if (alive) {
-		// Readiness alone does not say which pid answered: verify the
-		// recorded twin still owns its port before any request, so a
-		// replacement listener is never reported as this instance.
-		const twinFacts = readProcFacts(twinPid as number);
-		const twinOwned =
-			twinFacts !== null &&
-			mayStop(twinFacts, { pid: twinPid as number, checkout: state.checkout, startSeconds: twinStart as number }) === null &&
-			twinFacts.listensOn.includes(state.mcpPort);
-		if (!twinOwned) {
-			health = "unverifiable";
-		} else {
-			try {
-				const tok =
-					state.surfaces.length > 0 ? readText(join(runDir, "tokens", state.surfaces[0] as string))?.trim() : null;
-				const res = await fetch(`http://127.0.0.1:${state.mcpPort}/healthz`, {
-					headers: tok ? { authorization: `Bearer ${tok}` } : {},
-					signal: AbortSignal.timeout(10_000),
-				});
-				health = String(res.status);
-			} catch {
-				health = "unreachable";
-			}
+	if (alive) {
+		try {
+			const tok =
+				state.surfaces.length > 0 ? readText(join(runDir, "tokens", state.surfaces[0] as string))?.trim() : null;
+			const res = await fetch(`http://127.0.0.1:${state.mcpPort}/healthz`, {
+				headers: tok ? { authorization: `Bearer ${tok}` } : {},
+				signal: AbortSignal.timeout(10_000),
+			});
+			health = String(res.status);
+		} catch {
+			health = "unreachable";
 		}
 	} else {
 		health = "pid gone";
 	}
-	process.stdout.write(`[rehearsal] status ${state.name}: pid ${twinPid ?? "pending"} alive=${alive} healthz=${health}\n`);
+	process.stdout.write(`[rehearsal] status ${state.name}: pid ${state.pid} alive=${alive} healthz=${health}\n`);
 	process.stdout.write(`[rehearsal] url http://127.0.0.1:${state.mcpPort} pg=127.0.0.1:${state.pgHostPort} ledger=127.0.0.1:${state.ledgerHostPort}\n`);
 	process.stdout.write(`[rehearsal] commit ${state.commit} checkout ${state.checkout}\n`);
 	process.stdout.write(`[rehearsal] images pg=${state.pgImage} ledger=${state.ledgerImage}\n`);
 	process.stdout.write(`[rehearsal] skills fixture ${state.skillsFixture === true ? "on" : "off"}\n`);
-	const recorded = state.ragflowFixture;
-	if (recorded?.enabled === true) {
-		// The endpoint comes from our own state, but a hand-edited state must
-		// not point status at a stranger: verify the recorded fixture identity
-		// still owns its port before any readiness fetch. Mismatched, gone,
-		// or unverifiable fixtures report not ready without contacting a
-		// replacement listener; redirects are rejected inside the fetch.
-		let fixtureOk = false;
-		const fixtureGuard = refuseFixtureControlUrl(recorded.endpoint, PRODUCTION_PORTS);
-		const fixturePidOk = Number.isInteger(recorded.pid) && recorded.pid > 0;
-		const fixtureBirthOk = recorded.startSeconds !== null && Number.isFinite(recorded.startSeconds);
-		if (fixtureGuard === null && fixturePidOk && fixtureBirthOk && pidAlive(recorded.pid)) {
-			const fixtureFacts = readProcFacts(recorded.pid);
-			if (fixtureFacts !== null && mayStopFixture(fixtureFacts, { pid: recorded.pid, startSeconds: recorded.startSeconds as number, cwd: recorded.cwd, script: recorded.script }, PRODUCTION_PORTS) === null) {
-				let fixturePort: number | null = null;
-				try {
-					fixturePort = Number(new URL(recorded.endpoint).port);
-				} catch {
-					fixturePort = null;
-				}
-				if (fixturePort !== null && fixtureFacts.listensOn.includes(fixturePort)) {
-					fixtureOk = await checkFixtureReady(recorded.endpoint, 10_000);
-				}
-			}
-		}
-		process.stdout.write(`[rehearsal] ragflow fixture ${recorded.endpoint} pid ${recorded.pid} ready=${fixtureOk}\n`);
-	} else {
-		process.stdout.write("[rehearsal] ragflow fixture off\n");
-	}
 	return health === "200" ? 0 : 1;
 }
 
@@ -2251,7 +1779,6 @@ async function main(argv: string[]): Promise<number> {
 	if (extra !== null) usage(extra);
 	const anonymous = argv.includes("--anonymous");
 	const skillsFixture = argv.includes("--skills-fixture");
-	const ragflowFixture = argv.includes("--ragflow-fixture");
 	try {
 		const name = parseName(nameRaw ?? undefined);
 		if (sub === "down") return await runDown(name);

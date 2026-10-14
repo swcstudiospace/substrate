@@ -19,8 +19,7 @@ and the 32 tail stops at L1 by plan contract.
 
 Names only below — no file in git holds an environment value, and no token
 value, passphrase, or non-loopback hostname is ever typed into a record.
-Report the bearers by name (`SUBSTRATE_TOKEN_CLAUDE_CODE` for the lease bearer,
-`SUBSTRATE_TOKEN_SUBSTRATE` for the host-job bearer); report the lease by
+Report the bearer by name (`SUBSTRATE_TOKEN_SUBSTRATE`); report the lease by
 presence (`lease_id` persisted / heartbeat ok), never by value.
 
 ## Engine share-vs-own outcome (D31-04)
@@ -93,12 +92,12 @@ curl -s http://127.0.0.1:7411/healthz
 
 | Item | Rule |
 | --- | --- |
-| Claim | `openTask` claims as `claude-code` through `claimAndPersist` under the lease bearer; the granted `lease.lease_id` persists 0600 beside the task records (`<storage>/leases`, sibling of `<storage>/tasks`), read back before the open proceeds. A wrong-surface bearer is refused server-side (`not-holder`), never loosened. |
-| Heartbeat | Tick at half-TTL (~450 s of the 900 s TTL) while `turn_in_flight`; fenced on the persisted `lease_id` under the lease bearer |
-| Refusal | Exactly one `claimAndPersist` re-claim, never an extension; a refused re-claim fails the turn closed and releases fenced |
-| Release | Single fenced `releaseOnce` helper guarded by the record's `released` flag: settle, failure, kill, terminate, completion, lease-loss. Sends only the persisted `lease_id` (or null); consumes the reply's `released` flag — a refusal or transport error never marks the record released. Never force (operator-only). |
+| Claim | `openTask` claims as `claude-code` through `claimAndPersist`; the granted `lease_id` persists 0600 beside the task records (`<storage>/leases`, sibling of `<storage>/tasks`), read back before the open proceeds |
+| Heartbeat | Tick at half-TTL (~450 s of the 900 s TTL) while `turn_in_flight`; fenced on the persisted `lease_id` |
+| Refusal | Exactly one `claimAndPersist` re-claim, never an extension; a refused re-claim fails the turn closed and releases |
+| Release | Single `releaseOnce` helper guarded by the record's `released` flag: settle, failure, kill, terminate, completion, lease-loss |
 | Completion | `graph_complete` with the persisted `lease_id` + DoD (`summary` non-empty capped, `tests_pass`, optional `review_pass`); the server drops the lease, the record is marked released |
-| Missing lease | A real persist throw compensates inside `claimAndPersist` with the captured grant's own `lease_id` (fenced, never force) and throws names-only; `openTask` answers 502 before any VM work with no claimed lease left. A grant without a readable lease file compensates once the same way and answers 502 |
+| Missing lease | A grant without a readable lease file releases the claim and answers 502 like any failed open |
 
 Logs report presence only (`lease persisted …: yes`, `heartbeat ok/refused`) — never a `lease_id` or bearer value.
 
@@ -137,11 +136,9 @@ Approvals-channel checklist (names only — values never enter the repo):
 
 | Item | Rule |
 | --- | --- |
-| Unit env file | `/etc/substrate/substrate-host.env` (root-owned, 0600): names `SUBSTRATE_TOKEN_SUBSTRATE` (host-job reads) and `SUBSTRATE_TOKEN_CLAUDE_CODE` (lease claim/heartbeat/release/complete); values never enter the repo, a record, or a transcript |
-| Tokens-dir order | Lease: `SUBSTRATE_TOKEN_CLAUDE_CODE` → `SUBSTRATE_TOKEN` → file → tokens dir `claude-code`; job: `SUBSTRATE_TOKEN_SUBSTRATE` → `SUBSTRATE_TOKEN` → file → tokens dir `substrate`; resolved host-side only, never cross-surface fallback |
-| No seed credential | No bearer is seeded into the VM (no `.claude.json`/env/files entry on any route). s:mcp entry points at the in-VM relay (`127.0.0.1:7413`, VM-local); s:hostfn entry stays headerless and inert (host functions are that route's channel) |
-| Guest MCP relay | s:mcp only: the in-VM relay pipes the guest MCP exchange to the `substrate-mcp` host function (`handleSubstrateRelayRequest` in `packages/host/src/substrate-relay.ts`, no rivet import — the parent throwaway entrypoint), which answers protocol methods locally and executes only `issue_get`/`graph_release`/`graph_complete` through the shared TaskService transitions (`complete`/`guestRelease`, same terminal state as every path), plus `graph_register` as a bound idempotent re-register of the host's canonical graph (identity/nodes/steps from the canonical view; guest graph/repo/branch/steps/lease/authority ignored, edges never written, real upsert return). Guest-supplied graph/session/lease/force are never read; refusals return as data unmarked. The relay proves a real initialize handshake (serverInfo name + protocol version, never a bare HTTP response) before sessions.open and every prompt inside a bounded 30 s budget; expiry throws into claim/release compensation. Restarted on resume |
-| Lifecycle authority | Host-credentialed callbacks (commit/push/PR/sync/complete/run-tests, both guest routes) run only for live tasks: `released` or settled-failed records are refused (`mutationRefusal` shared rule). Terminal release transitions stay exempt. Lease loss marks the record failed synchronously, then cancels + unloads the session best-effort; cancellation delay/failure never restores authority, and prompt settlement never overwrites the recorded failure |
+| Unit env file | `/etc/substrate/substrate-host.env` (root-owned, 0600): names `SUBSTRATE_TOKEN_SUBSTRATE`; values never enter the repo, a record, or a transcript |
+| Tokens-dir order | `SUBSTRATE_TOKEN_SUBSTRATE` → `SUBSTRATE_TOKEN` → file → tokens dir; resolved host-side only |
+| The one seed file | The `.claude.json` substrate entry carries the host-job bearer iff the served proxy URL is loopback (static hostname gate, never a probe); otherwise headerless and the model uses host functions |
 | Tracker proxy | Seeded notion/linear entries point at the loopback tracker proxy; inert off `tracker_route vm_mcp`; the VM never gets a tracker key |
 | Host git/gh | `git -C <worktree> push origin substrate/<gid>`, `gh pr create --repo/--head/--base` fixed by the graph, commit identity fixed; guest supplies title/body/message text within limits only; `.substrate-*` excluded from every add; scratch guard before any network call |
 | Host sync | `NOTION_API_KEY`/`LINEAR_API_KEY` read in the host process only; sync writes PR URL / PR # / PR State / Repo / Branch and the Linear PR link — no workflow state, no Notion Status, never Done (Done comes only from `graph_complete` through the DoD gate) |

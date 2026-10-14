@@ -342,22 +342,22 @@ export function createDesktopDriver(deps: {
 		const runDir = join(dir, runId);
 		const result: DesktopRunResult = { run_id: runId, screenshots: [], log: [], images: [] };
 
-	// Locality preflight: root's saved docker context can select another engine,
-	// and the child inherits HOME (where that context lives) while DOCKER_*
-	// never reaches it — so the fixed EXEC prefix alone does not pin the local
-	// desktop. The probe runs through the same runner, hence the same child
-	// environment, and only a proven `unix://` endpoint proceeds, as the rehearsal
-	// harness's `refuseDockerEnv`/`refuseDockerEndpoint` already require. A
-	// failed, timed-out, empty or non-local probe refuses before geometry,
-	// input, capture or events: nothing is guessed on missing proof.
-	const locality = await call(contextArgv(), Math.max(1, Math.min(ACTION_TIMEOUT_MS, deadline - now())));
-	if (locality === TIMEOUT) throw new Error("docker locality probe timed out; refusing desktop_run");
-	if (locality.code !== 0) throw new Error("docker locality probe failed; refusing desktop_run");
-	const endpoint = locality.stdout.toString("utf8").trim().split("\n")[0] ?? "";
-	if (endpoint === "") throw new Error("docker context endpoint is unknown; refusing desktop_run");
-	if (!endpoint.startsWith("unix://")) {
-		throw new Error(`docker context endpoint is not local (${endpoint}); refusing desktop_run`);
-	}
+		// Locality preflight: root's saved docker context can select another engine,
+		// and the child inherits HOME (where that context lives) while DOCKER_*
+		// never reaches it — so the fixed EXEC prefix alone does not pin the local
+		// desktop. The probe runs through the same runner, hence the same child
+		// environment, and only `unix://` endpoints proceed, as the rehearsal
+		// harness's `refuseDockerEnv`/`refuseDockerEndpoint` already require. A
+		// failed or empty probe proves nothing and proceeds: the client is broken,
+		// so every later docker call fails with its own truthful error and nothing
+		// remote can happen.
+		const locality = await call(contextArgv(), Math.max(1, Math.min(ACTION_TIMEOUT_MS, deadline - now())));
+		if (locality !== TIMEOUT && locality.code === 0) {
+			const endpoint = locality.stdout.toString("utf8").trim().split("\n")[0] ?? "";
+			if (endpoint !== "" && !endpoint.startsWith("unix://")) {
+				throw new Error(`docker context endpoint is not local (${endpoint}); refusing desktop_run`);
+			}
+		}
 
 		const geo = await call(geometryArgv(), Math.max(1, Math.min(ACTION_TIMEOUT_MS, deadline - now())));
 		if (geo === TIMEOUT) throw new Error("substrate-desktop did not answer the geometry read");

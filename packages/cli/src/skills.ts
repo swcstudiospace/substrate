@@ -29,8 +29,7 @@ import { list, parseArgs, str, type Args } from "./args.ts";
 
 /**
  * The route's cap on a request body, so a directory too big to be accepted is refused
- * here, before it is posted. The route and the MCP tool enforce the same limit on the
- * caller's proposal body; this pre-flight only saves a doomed post.
+ * here, before it is posted. `skills.test.ts` pins it equal to the engine's own cap.
  */
 export const MAX_BODY_BYTES = 1_000_000;
 

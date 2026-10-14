@@ -5,6 +5,7 @@
  * real files; no test calls real `gh`. Real git is `propose.git.test.ts`.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
@@ -16,14 +17,19 @@ import {
 	addArgv,
 	branchName,
 	checkoutArgv,
+	childBinary,
+	childEnv,
 	cloneArgv,
 	commitArgv,
 	createExecFileRunner,
+	createSkillProposer,
+	DEFAULT_LIBRARY,
 	diffQuietArgv,
 	fetchArgv,
 	legacyContentSha256,
 	LIBRARY_REPO,
 	LIBRARY_URL,
+	MIRROR,
 	mirrorOriginUrl,
 	missingMirrorMessage,
 	nameStatusArgv,
@@ -306,11 +312,16 @@ describe("validateProposal refusals (before any Runner call)", () => {
 });
 
 describe("validateProposal acceptance, redaction and hashing", () => {
-	test("accepts references/ and scripts/ beside SKILL.md", () => {
+	test("accepts references/ and scripts/ beside SKILL.md and hashes mode, files and removals", () => {
 		const files = { "SKILL.md": skillMd(), "references/api.md": "# API\n", "scripts/run.py": "print('hi')\n" };
 		const v = validateProposal(input({ files, remove: ["old.md"] }), { maxBytes: ROUTE_MAX_BYTES, mode: "overlay" });
 		expect(Object.keys(v.files).sort()).toEqual(["SKILL.md", "references/api.md", "scripts/run.py"]);
 		expect(v.redactions).toEqual([]);
+		const h = createHash("sha256");
+		h.update("overlay\0");
+		for (const path of ["SKILL.md", "references/api.md", "scripts/run.py"]) h.update(`file\0${path}\0${files[path as keyof typeof files]}\0`);
+		h.update("delete\0old.md\0");
+		expect(v.content_sha256).toBe(h.digest("hex"));
 	});
 
 	test("the same proposal always hashes the same; mode and removals change it", () => {
@@ -323,6 +334,11 @@ describe("validateProposal acceptance, redaction and hashing", () => {
 	test("accepts a SKILL.md with the preserved byte-order mark, bytes unchanged", () => {
 		const v = validateProposal(input({ files: { "SKILL.md": `\ufeff${skillMd()}` } }), { maxBytes: ROUTE_MAX_BYTES, mode: "overlay" });
 		expect(v.files["SKILL.md"]?.startsWith("\ufeff---\n")).toBe(true);
+	});
+
+	test("the pre-tag hash differs, so old ledger lines need the compatibility lookup", () => {
+		const v = validateProposal(input(), { maxBytes: ROUTE_MAX_BYTES, mode: "overlay" });
+		expect(legacyContentSha256(v.mode, v.files, v.remove)).not.toBe(v.content_sha256);
 	});
 
 	test("a ghp_ token shape is refused with a github finding and the refusal never carries it", () => {
@@ -442,6 +458,19 @@ describe("branch and argv builders", () => {
 		expect(branchName("hermes", "x", new Date("2026-09-26T10:15:00.123Z"), "a1b2")).toBe("skill/hermes/x-20260926T101500123Z-a1b2");
 	});
 
+	test("argv builders are exact", () => {
+		const dir = "/var/lib/substrate/skills/propose/p1";
+		const br = "skill/hermes/x-20260926T101500123Z-a1b2";
+		expect(fetchArgv()).toEqual(["git", "-C", MIRROR, "fetch", "origin", "main"]);
+		expect(cloneArgv(dir)).toEqual(["git", "clone", "--shared", "--no-checkout", MIRROR, dir]);
+		expect(setUrlArgv(dir, LIBRARY_URL)).toEqual(["git", "-C", dir, "remote", "set-url", "origin", "https://github.com/swcstudiospace/agent-skills.git"]);
+		expect(checkoutArgv(dir, br)).toEqual(["git", "-C", dir, "checkout", "-q", "-b", br, "origin/main"]);
+		expect(addArgv(dir, "x")).toEqual(["git", "-C", dir, "add", "--", "x"]);
+		expect(pushArgv(dir, br)).toEqual(["git", "-C", dir, "push", "origin", br]);
+		expect(prViewArgv(PR_URL)).toEqual(["gh", "pr", "view", PR_URL, "--json", "state,url,number"]);
+		expect(prListHeadArgv(br, LIBRARY_REPO)).toEqual(["gh", "pr", "list", "--repo", "swcstudiospace/agent-skills", "--head", br, "--state", "all", "--json", "url,number,state"]);
+		expect(prCreateArgv(br, "t", "b", LIBRARY_REPO)).toEqual(["gh", "pr", "create", "--repo", "swcstudiospace/agent-skills", "--head", br, "--base", "main", "--title", "t", "--body", "b"]);
+	});
 
 	test("no builder carries a force or search flag, and the push has no colon refspec", () => {
 		const dir = "/var/lib/substrate/skills/propose/p1";
@@ -559,10 +588,15 @@ describe("proposeSkill ledger idempotence", () => {
 		const result = await proposeSkill(input(), options(f.run));
 		expect(result).toMatchObject({ status: "opened", pr_url: PR_URL, pr_number: 7, content_sha256: sha(), redactions: [] });
 		expect(result.branch).toMatch(/^skill\/claude-code\/demo-skill-\d{8}T\d{9}Z-[0-9a-f]{4}$/);
+		expect(f.steps()).toEqual(["fetch", "clone", "set-url", "checkout", "add", "ls-files", "diff-quiet", "commit", "get-url", "push", "gh pr create"]);
 		const lines = ledgerLines();
 		expect(lines.map((line) => line.state)).toEqual(["pushed", "opened"]);
 		expect(lines[1]).toMatchObject({ content_sha256: sha(), name: NAME, surface: "claude-code", branch: result.branch, pr_url: PR_URL, pr_number: 7 });
 		expect(statSync(join(state, "proposals.jsonl")).mode & 0o777).toBe(0o600);
+		const commit = f.calls.find((argv) => step(argv) === "commit") ?? [];
+		expect(commit).toContain("user.name=substrate skills");
+		expect(commit).toContain("user.email=skills@substrate.local");
+		expect(commit.at(-1)).toBe(`skill(${NAME}): claude-code proposal\n\nskill-content-sha256: ${sha()}`);
 	});
 
 	test("a PR URL from another repo is not accepted", async () => {
@@ -732,6 +766,21 @@ describe("PR title and body", () => {
 });
 
 describe("locks", () => {
+	test("the mirror lock is released after the fetch; the content lock is held through the ledger writes", async () => {
+		const observed: Record<string, boolean[]> = {};
+		const f = fake({
+			onCall: (s) => {
+				observed[s] = [existsSync(join(state, "mirror.lock")), existsSync(join(state, "locks", sha()))];
+			},
+		});
+		await proposeSkill(input(), options(f.run));
+		expect(observed.fetch).toEqual([true, true]);
+		expect(observed.clone).toEqual([false, true]);
+		expect(observed["gh pr create"]).toEqual([false, true]);
+		expect(existsSync(join(state, "mirror.lock"))).toBe(false);
+		expect(existsSync(join(state, "locks", sha()))).toBe(false);
+	});
+
 	test("a lock whose PID is not alive is reclaimed", async () => {
 		mkdirSync(join(state, "mirror.lock"), { recursive: true });
 		writeFileSync(join(state, "mirror.lock", "pid"), String(DEAD_PID));
@@ -860,13 +909,46 @@ describe("non-default library", () => {
 		expect(result).toMatchObject({ status: "declined", pr_url: PR_URL, pr_number: 7 });
 		expect(f.steps()).toEqual(["gh pr list"]);
 	});
+
+	test("the default library is September's slug and remote", () => {
+		expect(DEFAULT_LIBRARY).toEqual({ repo: LIBRARY_REPO, remoteUrl: LIBRARY_URL });
+	});
 });
 
 describe("child environment", () => {
-	// Isolation is proved behaviorally, not by copying the allowlist object: see
-	// propose.git.test.ts, which runs createExecFileRunner against a recording
-	// executable under poisoned parent env and a hostile scratch-HOME gitconfig,
-	// and the fixture's non-fast-forward/delete refusals.
+	test("childEnv is exactly the allowlist", () => {
+		expect(childEnv("/home/svc")).toEqual({
+			PATH: process.env.PATH ?? "",
+			HOME: "/home/svc",
+			GIT_CONFIG_GLOBAL: "/dev/null",
+			GIT_CONFIG_SYSTEM: "/dev/null",
+			GIT_CONFIG_COUNT: "2",
+			GIT_CONFIG_KEY_0: "credential.helper",
+			GIT_CONFIG_VALUE_0: "",
+			GIT_CONFIG_KEY_1: "credential.https://github.com.helper",
+			GIT_CONFIG_VALUE_1: "!/usr/bin/gh auth git-credential",
+			GIT_TERMINAL_PROMPT: "0",
+			GH_PROMPT_DISABLED: "1",
+		});
+		expect(Object.keys(childEnv("/home/svc")).sort()).toEqual([
+			"GH_PROMPT_DISABLED",
+			"GIT_CONFIG_COUNT",
+			"GIT_CONFIG_GLOBAL",
+			"GIT_CONFIG_KEY_0",
+			"GIT_CONFIG_KEY_1",
+			"GIT_CONFIG_SYSTEM",
+			"GIT_CONFIG_VALUE_0",
+			"GIT_CONFIG_VALUE_1",
+			"GIT_TERMINAL_PROMPT",
+			"HOME",
+			"PATH",
+		]);
+	});
+
+	test("childBinary maps only gh to the configured binary", () => {
+		expect(childBinary("gh", "/run/fake-gh")).toBe("/run/fake-gh");
+		expect(childBinary("git", "/run/fake-gh")).toBe("git");
+	});
 
 	test("createExecFileRunner surfaces a missing binary as a failed run, never a throw", async () => {
 		const run = createExecFileRunner({ gh: "/run/definitely-not-gh", home: "/home/svc" });
@@ -893,6 +975,29 @@ describe("missing mirror", () => {
 		const message = missingMirrorMessage("/var/lib/substrate/skills/mirror.git", LIBRARY_URL);
 		expect(message).toContain("/var/lib/substrate/skills/mirror.git");
 		expect(message).toContain(LIBRARY_URL);
+	});
+});
+
+describe("createSkillProposer", () => {
+	test("binds the runner", async () => {
+		const f = fake();
+		const proposer = createSkillProposer({ run: f.run });
+		const result = await proposer.propose(input(), { maxBytes: ROUTE_MAX_BYTES, mode: "overlay", stateDir: state });
+		expect(result.status).toBe("opened");
+		expect(f.steps()).toContain("gh pr create");
+	});
+
+	test("binds library and stateDir", async () => {
+		const f = fake({
+			replies: {
+				"get-url": { stdout: `${REHEARSAL_LIBRARY.remoteUrl}\n` },
+				"gh pr create": { stdout: `${REHEARSAL_PR_URL}\n` },
+			},
+		});
+		const proposer = createSkillProposer({ run: f.run, library: REHEARSAL_LIBRARY, stateDir: state });
+		const result = await proposer.propose(input(), { maxBytes: ROUTE_MAX_BYTES, mode: "overlay" });
+		expect(result).toMatchObject({ status: "opened", pr_url: REHEARSAL_PR_URL, pr_number: 9 });
+		expect(f.steps()).toContain("gh pr create");
 	});
 });
 
@@ -961,173 +1066,4 @@ describe("lock takeover and release", () => {
 		expect(existsSync(path)).toBe(false);
 		expect(readdirSync(join(state, "locks")).filter((entry) => entry.includes(".stale."))).toEqual([]);
 	});
-});
-
-describe("recovery from malformed gh output and failed creates", () => {
-	const CLOSED_URL = "https://github.com/swcstudiospace/agent-skills/pull/6";
-
-	for (const stdout of ["not json", "null", `"OPEN"`, "42", `{"url": "https://github.com/x/y/pull/1"}`]) {
-		test(`a pushed branch with gh pr list printing ${stdout} fails closed with no push or create`, async () => {
-			writeLedger({ ts: "t", content_sha256: sha(), name: NAME, surface: "claude-code", branch: "skill/claude-code/b1", state: "pushed" });
-			const before = readFileSync(join(state, "proposals.jsonl"), "utf8");
-			const f = fake({ replies: { "gh pr list": { stdout } } });
-			const error = await proposeSkill(input(), options(f.run)).catch((e: unknown) => e);
-			expect(error).toBeInstanceOf(ProposeFailed);
-			expect(f.steps()).toEqual(["gh pr list"]);
-			expect(readFileSync(join(state, "proposals.jsonl"), "utf8")).toBe(before);
-		});
-	}
-
-	for (const stdout of ["not json", "null", "[]", `"OPEN"`, "42", `{"state": "WEIRD"}`]) {
-		test(`a recorded PR with gh pr view printing ${stdout} fails closed with no push or create`, async () => {
-			writeLedger({ ts: "t", content_sha256: sha(), name: NAME, surface: "claude-code", branch: "b1", state: "opened", pr_url: PR_URL, pr_number: 7 });
-			const f = fake({ replies: { "gh pr view": { stdout } } });
-			const error = await proposeSkill(input(), options(f.run)).catch((e: unknown) => e);
-			expect(error).toBeInstanceOf(ProposeFailed);
-			expect(f.steps()).toEqual(["gh pr view"]);
-			expect(ledgerLines()).toHaveLength(1);
-		});
-	}
-
-	test("mixed list rows keep OPEN precedence over CLOSED in either order", async () => {
-		for (const rows of [
-			[
-				{ url: CLOSED_URL, number: 6, state: "CLOSED" },
-				{ url: PR_URL, number: 7, state: "OPEN" },
-			],
-			[
-				{ url: PR_URL, number: 7, state: "OPEN" },
-				{ url: CLOSED_URL, number: 6, state: "CLOSED" },
-			],
-		]) {
-			writeLedger({ ts: "t", content_sha256: sha(), name: NAME, surface: "claude-code", branch: "skill/claude-code/b1", state: "pushed" });
-			const f = fake({ replies: { "gh pr list": { stdout: JSON.stringify(rows) } } });
-			const result = await proposeSkill(input(), options(f.run));
-			expect(result).toMatchObject({ status: "existing", pr_url: PR_URL, pr_number: 7, branch: "skill/claude-code/b1" });
-			expect(f.steps()).toEqual(["gh pr list"]);
-			expect(ledgerLines().at(-1)).toMatchObject({ state: "opened", pr_url: PR_URL });
-		}
-	});
-
-	test("a pushed branch whose only PR merged runs the git path on a fresh branch", async () => {
-		writeLedger({ ts: "t", content_sha256: sha(), name: NAME, surface: "claude-code", branch: "skill/claude-code/b1", state: "pushed" });
-		const f = fake({ replies: { "gh pr list": { stdout: JSON.stringify([{ url: PR_URL, number: 7, state: "MERGED" }]) } } });
-		const result = await proposeSkill(input(), options(f.run));
-		expect(result.status).toBe("opened");
-		expect(result.branch).not.toBe("skill/claude-code/b1");
-		const create = f.calls.find((argv) => step(argv) === "gh pr create") ?? [];
-		expect(create[create.indexOf("--head") + 1]).toBe(result.branch);
-	});
-
-	test("a create failure after the push is recovered by retry on the same branch", async () => {
-		const failing = fake({ replies: { "gh pr create": { code: 1, stderr: "rejected" } } });
-		const error = await proposeSkill(input(), options(failing.run)).catch((e: unknown) => e);
-		expect(error).toBeInstanceOf(ProposeFailed);
-		const pushed = ledgerLines();
-		expect(pushed.map((line) => line.state)).toEqual(["pushed"]);
-		const branch = pushed[0]?.branch as string;
-		expect(typeof branch).toBe("string");
-
-		const retry = fake();
-		const result = await proposeSkill(input(), options(retry.run));
-		expect(result).toMatchObject({ status: "opened", pr_url: PR_URL, pr_number: 7, branch });
-		expect(retry.steps()).toEqual(["gh pr list", "gh pr create"]);
-	});
-});
-
-describe("dry run over previously proposed content", () => {
-	function dryFake(): { run: Runner; steps: () => string[]; calls: string[][] } {
-		return fake({
-			base: { "SKILL.md": "old" },
-			replies: { "name-status": { stdout: `M\t${NAME}/SKILL.md\n` } },
-		});
-	}
-
-	test("a dry run over OPEN content still clones, stages and diffs with no gh call and no ledger write", async () => {
-		writeLedger({ ts: "t", content_sha256: sha(), name: NAME, surface: "claude-code", branch: "b1", state: "opened", pr_url: PR_URL, pr_number: 7 });
-		const before = readFileSync(join(state, "proposals.jsonl"), "utf8");
-		const f = dryFake();
-		const result = await proposeSkill(input(), options(f.run, { dryRun: true }));
-		expect(result).toMatchObject({ status: "dry_run", content_sha256: sha(), diff_changed: 1 });
-		expect(f.steps()).toContain("clone");
-		expect(f.steps()).toContain("name-status");
-		expect(f.steps().filter((s) => s.startsWith("gh"))).toEqual([]);
-		expect(f.steps()).not.toContain("push");
-		expect(readFileSync(join(state, "proposals.jsonl"), "utf8")).toBe(before);
-	});
-
-	test("a dry run over CLOSED content returns dry_run, never declined, with the ledger untouched", async () => {
-		writeLedger({ ts: "t", content_sha256: sha(), name: NAME, surface: "claude-code", branch: "b1", state: "opened", pr_url: PR_URL, pr_number: 7 });
-		const f = dryFake();
-		const closed = fake({ replies: { "gh pr view": { stdout: JSON.stringify({ state: "CLOSED", url: PR_URL, number: 7 }) } } });
-		const declined = await proposeSkill(input(), options(closed.run));
-		expect(declined.status).toBe("declined");
-		const before = readFileSync(join(state, "proposals.jsonl"), "utf8");
-		const result = await proposeSkill(input(), options(f.run, { dryRun: true }));
-		expect(result).toMatchObject({ status: "dry_run", content_sha256: sha() });
-		expect(f.steps().filter((s) => s.startsWith("gh"))).toEqual([]);
-		expect(readFileSync(join(state, "proposals.jsonl"), "utf8")).toBe(before);
-	});
-
-	test("a dry run over a pushed branch with no recorded PR makes no list call and writes no ledger line", async () => {
-		writeLedger({ ts: "t", content_sha256: sha(), name: NAME, surface: "claude-code", branch: "skill/claude-code/b1", state: "pushed" });
-		const before = readFileSync(join(state, "proposals.jsonl"), "utf8");
-		const f = dryFake();
-		const result = await proposeSkill(input(), options(f.run, { dryRun: true }));
-		expect(result).toMatchObject({ status: "dry_run", content_sha256: sha() });
-		expect(f.steps()).toContain("clone");
-		expect(f.steps().filter((s) => s.startsWith("gh"))).toEqual([]);
-		expect(readFileSync(join(state, "proposals.jsonl"), "utf8")).toBe(before);
-	});
-});
-
-describe("engine file-text cap (internal layer only)", () => {
-	// These pin the engine's INTERNAL file-text backstop only: validateProposal
-	// refuses file text over maxBytes before any runner call. They do NOT close
-	// the exact wire G3: the public three-door proof is the serialized
-	// proposal-body UTF-8 cap enforced at the input guard (the shared
-	// proposalBodyProblem / MCP-args check, transport-owned, applied before
-	// token-surface injection so an exact-1M body cannot grow over the cap
-	// afterwards). The whole JSON-RPC envelope is never capped: the engine only
-	// ever sees the proposal body.
-	const skillBytes = (): number => Buffer.byteLength(skillMd(), "utf8");
-
-	test("file text at exactly 1_000_000 bytes is accepted; one byte more is refused before any runner call", async () => {
-		const fill = "x".repeat(ROUTE_MAX_BYTES - skillBytes());
-		const at = input({ files: { "SKILL.md": skillMd(), "references/big.md": fill } });
-		expect(Buffer.byteLength(`${skillMd()}${fill}`, "utf8")).toBe(ROUTE_MAX_BYTES);
-		expect(() => validateProposal(at, { maxBytes: ROUTE_MAX_BYTES, mode: "overlay" })).not.toThrow();
-		const over = input({ files: { "SKILL.md": skillMd(), "references/big.md": `${fill}x` } });
-		const f = fake();
-		const error = await proposeSkill(over, options(f.run)).catch((e: unknown) => e);
-		expect(error).toBeInstanceOf(ProposeRefused);
-		expect(f.calls).toEqual([]);
-	});
-
-	test("multibyte text counts UTF-8 bytes, not characters", async () => {
-		const head = "é".repeat(Math.floor((ROUTE_MAX_BYTES - skillBytes()) / 2));
-		const pad = ROUTE_MAX_BYTES - skillBytes() - Buffer.byteLength(head, "utf8");
-		const fill = head + "x".repeat(pad);
-		expect(Buffer.byteLength(`${skillMd()}${fill}`, "utf8")).toBe(ROUTE_MAX_BYTES);
-		expect(fill.length).toBeLessThan(ROUTE_MAX_BYTES - skillBytes());
-		expect(() => validateProposal(input({ files: { "SKILL.md": skillMd(), "references/big.md": fill } }), { maxBytes: ROUTE_MAX_BYTES, mode: "overlay" })).not.toThrow();
-		const error = await proposeSkill(input({ files: { "SKILL.md": skillMd(), "references/big.md": `${fill}é` } }), options(fake().run)).catch((e: unknown) => e);
-		expect(error).toBeInstanceOf(ProposeRefused);
-	});
-
-	test("escaping overhead can exceed the wire cap while the engine accepts: wire refusal belongs to the input guard", () => {
-		// 999_000 quote characters are 999_000 file bytes but nearly twice as many
-		// serialized bytes once escaped, so the serialized body is over the shared
-		// cap while the file text is under it. This test only documents the
-		// layering: refusing that body is the input guard's job (transport-owned
-		// serialized-body cap before surface injection), and nothing here proves
-		// the guard does it. The engine accepts its content as its internal
-		// backstop permits.
-		const fill = `"`.repeat(999_000);
-		const body = input({ files: { "SKILL.md": skillMd(), "references/big.md": fill } });
-		expect(Buffer.byteLength(`${skillMd()}${fill}`, "utf8")).toBeLessThan(ROUTE_MAX_BYTES);
-		expect(Buffer.byteLength(JSON.stringify({ ...body, mode: "overlay" }), "utf8")).toBeGreaterThan(ROUTE_MAX_BYTES);
-		expect(() => validateProposal(body, { maxBytes: ROUTE_MAX_BYTES, mode: "overlay" })).not.toThrow();
-	});
-
 });

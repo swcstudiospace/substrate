@@ -30,6 +30,7 @@ type SubCalls = { heartbeats: string[]; claims: string[]; releases: string[] };
 function fakeSubstrate(calls: SubCalls, order: string[]) {
 	let n = 0;
 	return {
+		bearer: "restart-bearer",
 		graphGet: async (graphId: string) => ({
 			graph_id: graphId,
 			nodes: [
@@ -53,7 +54,7 @@ function fakeSubstrate(calls: SubCalls, order: string[]) {
 			n += 1;
 			const leaseId = `lse_restart_${n}`;
 			store.persist(graphId, nodeId, { lease_id: leaseId, acquiredAtMs: 0, ttlSeconds: 900 });
-			return { claimed: true, lease: { lease_id: leaseId } };
+			return { claimed: true, lease_id: leaseId };
 		},
 		heartbeat: async (graphId: string, nodeId: string) => {
 			calls.heartbeats.push(`${graphId}/${nodeId}`);
@@ -61,8 +62,8 @@ function fakeSubstrate(calls: SubCalls, order: string[]) {
 			return { ok: true };
 		},
 		graphComplete: async () => ({ completed: true }),
-		graphRelease: async (graphId: string, nodeId: string, lid: string | null) => {
-			calls.releases.push(`${graphId}/${nodeId}:${lid ?? "null"}`);
+		graphRelease: async (graphId: string, nodeId: string) => {
+			calls.releases.push(`${graphId}/${nodeId}`);
 			return { released: true };
 		},
 		brief: async () => "restart brief",
@@ -133,9 +134,6 @@ function boot(
 			actor.routeCalls.push(graphId);
 			order.push(`route:${graphId}`);
 			if (routeFailsFor === graphId) throw new Error(`relay failed for ${graphId}`);
-		},
-		ensureSubstrateRoute: async (_handle, graphId) => {
-			order.push(`substrate-route:${graphId}`);
 		},
 		route: ROUTE,
 		testsRoute: "sandbox",
@@ -213,7 +211,7 @@ describe("kill-and-restart over on-disk stores (32-02)", () => {
 			expect(actor.prompts).toEqual([`${GID}:${NID}:1`, `${GID}:${NID}:resume:1`]);
 			// Route re-established first, heartbeat-or-reclaim before the continuation.
 			const tail = order.slice(order.indexOf(`prompt:${GID}:${NID}:1`) + 1);
-			expect(tail).toEqual([`route:${GID}`, `substrate-route:${GID}`, `heartbeat:${GID}`, `prompt:${GID}:${NID}:resume:1`]);
+			expect(tail).toEqual([`route:${GID}`, `heartbeat:${GID}`, `prompt:${GID}:${NID}:resume:1`]);
 			const resumed = store.get(GID, NID);
 			expect(resumed?.resumes).toBe(1);
 			expect(resumed?.stale_approvals).toBe(1);

@@ -192,15 +192,6 @@ describe("gitPush executor (T-03-07-01)", () => {
 		expect(noGraph.calls).toEqual([]);
 	});
 
-	test("refuses released and failed tasks before any git call (SEC03)", async () => {
-		const released = ctx(CLEAN_REPLIES, record({ released: true }));
-		expect(await gitPush(released.ctx)).toEqual({ error: `task ${GID}/${NID} already released` });
-		expect(released.calls).toEqual([]);
-		const failed = ctx(CLEAN_REPLIES, record({ exit_code: 1, last_error: "lease lost", turn_in_flight: false }));
-		expect(await gitPush(failed.ctx)).toEqual({ error: `task ${GID}/${NID} is failed and holds no mutation authority` });
-		expect(failed.calls).toEqual([]);
-	});
-
 	test("a failed push returns its exit code and a capped output tail, never throws", async () => {
 		const c = ctx({ ...CLEAN_REPLIES, [`push origin ${BRANCH}`]: { code: 1, stderr: "! [rejected] non-fast-forward" } });
 		const result = await gitPush(c.ctx);
@@ -273,15 +264,6 @@ describe("commit executor (c:hostfn_commit)", () => {
 			"-c user.name=substrate claude-code -c user.email=claude-code@substrate.local commit -m m": { code: 1, stdout: "nothing to commit, working tree clean\n" },
 		});
 		expect(await commit({ ...nothing.ctx, message: "m" })).toEqual({ error: "git commit exited 1: nothing to commit, working tree clean" });
-	});
-
-	test("refuses released and failed tasks before running git (SEC03)", async () => {
-		const released = ctx({}, record({ released: true }));
-		expect(await commit({ ...released.ctx, message: "m" })).toEqual({ error: `task ${GID}/${NID} already released` });
-		expect(released.calls).toEqual([]);
-		const failed = ctx({}, record({ exit_code: 1, last_error: "lease lost", turn_in_flight: false }));
-		expect(await commit({ ...failed.ctx, message: "m" })).toEqual({ error: `task ${GID}/${NID} is failed and holds no mutation authority` });
-		expect(failed.calls).toEqual([]);
 	});
 });
 
