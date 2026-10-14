@@ -18,9 +18,12 @@ import {
 	ConfigError,
 	configWarnings,
 	desktopConfigWarnings,
+	eventIdempotencyConfigWarnings,
 	hindsightConfigWarnings,
 	loadConfig,
 	memoryExpiryConfigWarnings,
+	requestPathConfigWarnings,
+	skillsGovernanceConfigWarnings,
 	sloConfigWarnings,
 	swarmTokenWarnings,
 } from "./config.ts";
@@ -68,12 +71,15 @@ for (const warning of [
 	...swarmTokenWarnings(config),
 	...desktopConfigWarnings(config),
 	...memoryExpiryConfigWarnings(config),
+	...skillsGovernanceConfigWarnings(config),
 	...hindsightConfigWarnings(config),
 	...sloConfigWarnings(config),
 	...briefProfileConfigWarnings(config),
 	...config.metricsHistory.problems,
 	...briefRecallConfigWarnings(config),
 	...hindsightInventoryConfigWarnings(config),
+	...requestPathConfigWarnings(config),
+	...eventIdempotencyConfigWarnings(config),
 ]) {
 	process.stderr.write(`[substrate] misconfigured — ${warning}\n`);
 }

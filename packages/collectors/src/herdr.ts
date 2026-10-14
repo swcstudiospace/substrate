@@ -12,7 +12,8 @@
  *   bun packages/collectors/src/herdr.ts --session <name>
  */
 import { createConnection, type Socket } from "node:net";
-import { postEvent, type EmitOutcome } from "./emit.ts";
+import { drainEventSpool, postEvent, SPOOL_DRAIN_MS, type EmitOutcome } from "./emit.ts";
+import { spoolConfig } from "./spool.ts";
 import { branchFor, repoSlug } from "./git-context.ts";
 import type { HerdrPane } from "./herdr-map.ts";
 import {
@@ -92,6 +93,12 @@ export interface HerdrCollectorOptions {
 	post?: (event: Parameters<typeof postEvent>[0], source: string) => Promise<EmitOutcome>;
 	attribute?: (pane: HerdrPane) => { repo?: string; branch?: string };
 	now?: () => string;
+	/**
+	 * The spool replay run on a tick while watching. Defaults to `drainEventSpool` when
+	 * `SUBSTRATE_EVENT_SPOOL=on` and to nothing otherwise (no timer is created).
+	 */
+	drain?: () => Promise<unknown>;
+	drainMs?: number;
 }
 
 interface LiveSocket {
@@ -113,6 +120,10 @@ export class HerdrCollector {
 	private readonly post: (event: Parameters<typeof postEvent>[0], source: string) => Promise<EmitOutcome>;
 	private readonly attribute: (pane: HerdrPane) => { repo?: string; branch?: string };
 	private readonly now: () => string;
+	private readonly drain: (() => Promise<unknown>) | null;
+	private readonly drainMs: number;
+	private drainTimer: ReturnType<typeof setInterval> | undefined;
+	private draining: Promise<unknown> | null = null;
 	private seq = 0;
 	private dirty = false;
 	private stopped = false;
@@ -135,6 +146,8 @@ export class HerdrCollector {
 			return { repo: repoSlug(cwd), branch: branchFor(cwd) };
 		});
 		this.now = options.now ?? (() => new Date().toISOString());
+		this.drain = options.drain ?? (spoolConfig().mode === "on" ? () => drainEventSpool({ budgetMs: 10_000 }) : null);
+		this.drainMs = options.drainMs ?? SPOOL_DRAIN_MS;
 	}
 
 	static fromArgs(argv: readonly string[], env: NodeJS.ProcessEnv = process.env): HerdrCollector {
@@ -184,14 +197,36 @@ export class HerdrCollector {
 		this.dirty = true;
 		void this.pump();
 		this.poll = setInterval(() => this.markDirty(), this.pollMs);
+		this.startDrain();
+	}
+
+	/**
+	 * Replay the spool on its own tick, single-flight: a pass that is still running is
+	 * never overlapped, the timer is `unref`'d so it cannot keep the process alive, and
+	 * `stop()` clears it on every exit path.
+	 */
+	private startDrain(): void {
+		const drain = this.drain;
+		if (drain === null || this.drainTimer) return;
+		this.drainTimer = setInterval(() => {
+			if (this.stopped || this.draining) return;
+			this.draining = drain()
+				.catch(() => undefined)
+				.finally(() => {
+					this.draining = null;
+				});
+		}, this.drainMs);
+		this.drainTimer.unref();
 	}
 
 	stop(): void {
 		this.stopped = true;
 		if (this.timer) clearTimeout(this.timer);
 		if (this.poll) clearInterval(this.poll);
+		clearInterval(this.drainTimer);
 		this.timer = undefined;
 		this.poll = undefined;
+		this.drainTimer = undefined;
 		this.global?.socket.destroy();
 		this.global = undefined;
 		for (const live of this.paneSockets.values()) live.socket.destroy();
@@ -227,7 +262,13 @@ export class HerdrCollector {
 				} catch {
 					outcome = { kind: "failed", error: "post threw" };
 				}
-			outcomes.push(outcome.kind);
+			// An event parked in the spool is owned by the spool (same key and ts on every replay);
+			// re-emitting it next pass would write a second row, so it advances like a stored one.
+			const spooled = outcome.kind === "failed" && outcome.spooled === true;
+			outcomes.push(spooled ? "spooled" : outcome.kind);
+			if (spooled) {
+				continue;
+			}
 			if (outcome.kind === "failed") {
 				failed += 1;
 				blocked.add(transition.identity);
@@ -399,6 +440,7 @@ if (import.meta.main) {
 		collector.startWatch();
 	} else {
 		const result = await collector.runPass();
+		await drainEventSpool({ budgetMs: 10_000 });
 		process.stdout.write(`[herdr-collector] pass emitted ${result.emitted}\n`);
 		collector.stop();
 	}

@@ -23,9 +23,12 @@ check it.
 | `memory_quarantine.ndjson`, `memory_reviews.ndjson` | Parked writes — **without their text** (below) |
 | `manifest.json` | Format version, `createdAt`, release sha, Postgres `server_version`, the schema hash, and per table `{file, rows, bytes, sha256, columns, withheld, rowDigest, entryHashDigest}` |
 
-The table list is closed: it is `IndexStore.migrate()`'s (nine tables), held in
-`index-archive-spec.ts`, and no table or column name ever comes from input. There
-is no `skills` table in the index. `index-store.archive.test.ts` compares the list
+The table list is closed: it is `IndexStore.migrate()`'s nine graph and memory tables, held in
+`index-archive-spec.ts`, and no table or column name ever comes from input. The
+`skills_registry` table (uplift-5) is not archived, and the `skill.*` events in the ledger are a
+best-effort trail, not a restore source: a lost table is rebuilt by deciding the pull requests
+again ([skills-propose.md](../skills-propose.md#approving-a-skill)).
+`index-store.archive.test.ts` compares the list
 with `information_schema` on a live database, so a column added to `migrate()` and
 not to the spec fails CI. Tables are read in key order, in pages of
 `--page-size` rows (default 500, at most 5000), through one connection; the

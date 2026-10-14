@@ -374,6 +374,11 @@ describe("the class tables are exhaustive over what the server serves", () => {
 		expect(coordination).toEqual(["coord_reap_leases", "graph_claim", "graph_complete", "graph_heartbeat", "graph_release"]);
 	});
 
+	test("the skills registry doors: approve is a write, list a read, on both the tool and the route", () => {
+		expect({ approve: toolClass("skills_approve"), list: toolClass("skills_list") }).toEqual({ approve: "write", list: "read" });
+		expect({ approve: routeClass("POST", "/skills/approve"), list: routeClass("GET", "/skills") }).toEqual({ approve: "write", list: "read" });
+	});
+
 	test("an unknown route or tool is a read; monitor GETs and /mcp are not metered here; a POST to a monitor path is", () => {
 		expect(DEFAULT_CLASS).toBe("read");
 		expect(routeClass("POST", "/not-a-route")).toBe("read");

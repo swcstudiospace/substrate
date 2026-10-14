@@ -1,0 +1,71 @@
+# S5a — skills governance, server half
+
+Slice branch `u5/s5`. Nothing was run (edit-only); every statement below is what the code does, checked by reading, not by executing.
+
+## What changed
+
+New
+- `packages/mcp-server/src/skills/registry.ts` — the state machine (`transition`), value checks (`validateApproval`), the `gh pr view <n> --repo <library> --json state,mergeCommit,url,headRefName,baseRefName,files` check through the existing `Runner` (`fetchPrView`, `prRefusal`, `prBindsToSkill`, `proposalBranchSurface`), error classes (`SkillApprovalDenied` 401/403, `SkillApprovalRefused` 400/409 with a closed `rule`, `SkillApprovalFailed` 502/503), `approvalFailure`, the REST body shape, `toListEntry`.
+- Tests: `skills/registry.test.ts` (pure), `skills-approve.test.ts` (service, MCP, REST, flag), `index-store.skills.test.ts` (live Postgres, `describeLive`, skipped without `SUBSTRATE_TEST_PG_URL`).
+
+Changed
+- `index-store.ts` — `skills_registry` table + `skills_registry_state_idx` in `migrate()` (`create table if not exists`); methods `upsertProposedSkill`, `decideSkill` (one transaction, row locked with `for update`, `transition` decides), `listSkills`; `toSkillRow`.
+- `service.ts` — `approveSkill`, `listSkills`, `recordProposedSkill` (called from `proposeSkill`), `emitApprovalRefused`, a `skillRun` Runner (the proposer's runner, also a test seam via `stores.skillRun`).
+- `mcp.ts` — tools `skills_approve`, `skills_list`. `server.ts` — `POST /skills/approve`, `GET /skills`; 413 for an oversize approve body.
+- `config.ts` — `skillsGovernance` (`off|report|enforce`, default `off`), `skillsGovernanceRejected`, `skillsGovernanceConfigWarnings` (wired in `index.ts`).
+- Registries the lock tests pin: `packages/audit/src/policy.ts` (`skills_approve` FAIL_CLOSED, `skills_list` FAIL_OPEN; the REST routes are audited under the same names), `admission.ts` (tools and both routes), `observe.ts` (tool labels, `/skills`, `/skills/approve`), `event-sources.ts` (`skills.approve`, `skills.decline`, `skills.retire`, `skills.approve.refused`) and the matching rows of the marked table in `docs/event-vocabulary.md`.
+- Pin tests extended: `policy.test.ts`, `observe.test.ts`, `event-sources.test.ts`, `admission.test.ts`.
+- Docs: `docs/skills-propose.md` (new "Approving a skill" section, config row, events), `docs/mcp-audit.md`, `docs/event-vocabulary.md`, `docs/observability.md` (budget classes), `docs/runbooks/index-archive.md` + the `index-archive-spec.ts` docblock (they said "no skills table"; now they say `skills_registry` exists and is not archived, and why).
+- `.planning/uplift-5/env-notes/S5a.md` — the `.env.example` lines.
+
+## Design decisions
+
+- **Key** `(repo, name, pr_number)`. A pull request is one content and one merge, so a name approved again through a later pull request is a new row, never a replace (documented in the registry header and the docs). The brief suggested `(name, content_sha256)` + `merge_sha`; I used the pull request number because `skills_approve` takes `pr_number`, because the approve path can create a row for a pull request that was never proposed through the substrate (its `content_sha256` is `''`), and because the proposal hash is over redacted *proposal files* and cannot be derived from a merge. A later proposal of the same pull request fills in a missing hash.
+- **A pull request must be on the library, merged into its default branch, and bound to the skill by EITHER (a) a proposal branch for that name** (`skill/<surface>/<name>-<time>-<4 hex>` from `branchName`) **OR (b) its changed files including exactly `<name>/SKILL.md`** (the library layout `writeTree` writes and the projector's `libraryNames` reads; `gh pr view --json …,files`, exact path match, never a prefix, name validated first). The URL is compared to repo and number (`pr_wrong_repo`); `baseRefName` must equal `LIBRARY_BASE` (`main`, exported from `propose.ts` and used by `prCreateArgv` for the PR base) or the refusal is `pr_wrong_base`, because a pull request merged into a stacked base has a merge commit that never reached `main`. Without a binding an operator typo would attach a merge commit to a name it never touched (`pr_not_for_skill`). (b) was added after review so that skills merged through hand-opened pull requests (most of what is on the library's `main`) can be approved; the first version bound only (a). `files` and `baseRefName` are required and parsed defensively (missing or odd ⇒ `502`); a list gh cuts at 100 files that lacks the path is refused. Skills on `main` with no pull request at all still cannot be approved (see limits).
+- **Order in `approveSkill`**: authority → values → library config / index → `gh` (approve, decline only) → atomic row decision → note. Authority and every value refusal precede any gh call; the tests assert the fake runner is never invoked.
+- **Retire needs no gh call** (a local state change on an approved row).
+- **Refused attempts** emit one `warning` `{action:"skill.approve.refused", rule, decision?, name?}`; `name` only when it is a valid skill name, so free text never reaches the ledger. `401`/`403` emit nothing; on `POST /skills/approve` they are answered before the body is read, parsed or audited (so no audit record on the REST door, and an oversize body, invalid JSON or an audit outage never changes them).
+- **`exists`** (same state again; for approve also the same merge commit) emits nothing. Approving a row with a different merge commit is `bad_transition`.
+- **`skills_list`**: default approved-only to any authenticated surface (incl. `substrate`; a caller with no surface is `401` on both the tool and `GET /skills`, before the audit and the read); other `state` values operator-only. No index or a failed read is `503`, never an empty list (so an enforcing reader can tell "nothing approved" from "unreadable"). Max 500 rows (`LIST_MAX`), `truncated` set by asking for 501. **The default list is by NAME**: one entry per name, its most recent approved row (latest `decided_at`, then highest pull request number), ordered by name in code-unit order (`collate "C"`). Decisions still act on one `(name, pr)` row, so a name stays approved while any of its rows is approved; to withdraw a name retire every approved row. Every decision's answer carries `remaining_approved_for_name` (counted in the decision's transaction); declining a later proposal never touches an earlier approval. Contract for the projector: `GET /skills?state=approved` → 200 `{governance, skills:[{name,content_sha256,merge_sha,pr_url,approved_at,proposed_by}], truncated}`, one entry per name, sorted by name. The projector reads a name set, so it needs no change. `governance` is the running mode; the registry is returned in every mode. Other `state` values list every row (several per name) with `state`, `pr_number`, `decided_by`, `decided_at`, `reason`.
+- **`proposeSkill` registry write** only under `report`/`enforce`, only for `opened` / `existing` with a pr number and url, never for a dry run; failure is caught, warned once per failure streak to stderr, and the proposal's answer and event are unchanged. Retry path: the next proposal of the same content returns `existing` and writes it; an approval also creates a missing row.
+- **No CLI** (`substrate skills list|approve`) — optional in the brief; the existing CLI command is a propose client with its own body shaping, and adding two subcommands there is not small. Left out.
+- **Not archived.** `skills_registry` is not in `index-archive-spec.ts`: adding a table changes `schemaHash` and would make earlier archives fail `verify-archive`. The table is the source of truth; the `skill.*` events are a best-effort trail (the decision answer carries `noted: true|false`, and an unstored note is logged to stderr with the row key).
+
+## Flag
+
+`SUBSTRATE_SKILLS_GOVERNANCE` = `off` (default) | `report` | `enforce`; invalid → `off` + boot warning (`skillsGovernanceConfigWarnings`). Under `off`: `skills_propose` writes nothing to the registry (asserted); the two tools exist, `skills_approve` still works for operators. This slice stores and serves only; what `report`/`enforce` do to the projector is U5-5b.
+
+## Tests and what each proves
+
+- `registry.test.ts` — every state-machine move incl. `exists`, final declined/retired, retire needs approved; value checks and boundaries (500-char reason, int ceiling); the gh answer parsing (every missing/odd field incl. `files` is a 502, never a guess; oid lower-cased; credentials redacted); the proposal-branch binding (`demo` ≠ `demo-skill`, hand-named branches do not match it); the file binding (`prBindsToSkill` via `prRefusal`: exact `<name>/SKILL.md` only, lookalike/nested/cased paths refused, invalid names bind nothing, a 100-file cut list without the path refused, a proposal branch still binds without the file); `prRefusal` per decision; REST body shape; failure mapping.
+- `skills-approve.test.ts` — anonymous 401 / non-operator 403 / swarm and `substrate` never operators, all with an empty gh call list and no rows/events; value refusals before gh with one rule-only warning; gh merged/closed/open/no-merge-commit/wrong repo/wrong skill; gh failure ⇒ 502, no row, no event; idempotent re-approve; decline/retire; row survives an unstorable event; registry write failure ⇒ 503, retry works; `proposeSkill` flag-off parity (no registry call), report/enforce write, only-with-a-PR, throwing-store isolation with once-per-streak warning; `skills_list` default/ordering/state gating/limit/503; flag parsing; MCP and REST doors incl. 413-before-read ordering (401 before body), fail-closed audit 503 with no gh call, `GET /skills` served with an unwritable audit file.
+- `index-store.skills.test.ts` (live) — key and CHECK, idempotent proposal that never un-decides, atomic transitions, 4-way concurrent decide ⇒ one applied, new-PR-same-name is a new row, list isolation/order/limit, nothing deleted.
+- Pin tests: policy, observe, event-sources (rows, kinds, rule-only payload), admission (write/read), plus the existing generic exhaustiveness tests (admission tool/route tables, policy "every served tool", event-vocabulary doc equals table).
+
+## Smoke commands for the orchestrator (expected)
+
+```sh
+bun test packages/audit/src/policy.test.ts packages/mcp-server/src/skills packages/mcp-server/src/skills-approve.test.ts packages/mcp-server/src/event-sources.test.ts packages/mcp-server/src/admission.test.ts packages/mcp-server/src/observe.test.ts packages/mcp-server/src/config.test.ts   # all pass
+SUBSTRATE_TEST_PG_URL=<scratch> bun test packages/mcp-server/src/index-store.skills.test.ts packages/mcp-server/src/index-store.archive.test.ts   # pass (archive test must still pass: skills_registry is outside its graph_/memory_ table filter)
+bun run check:phase-close   # store-lock + vocabulary-lock green
+```
+
+Manual (rehearsal instance, optional): with `SUBSTRATE_TOKEN_OMP` also in `SUBSTRATE_OPERATOR_TOKENS`, `POST /skills/approve {"name":"…","pr_number":N,"decision":"approve"}` on a merged proposal PR → `200 {"status":"approved","merge_sha":…}`; again → `{"status":"exists"}`; `GET /skills` → the six-field entry.
+
+## Operator steps (not done here)
+
+1. Add the `.env.example` lines from `env-notes/S5a.md`.
+2. Deploy; `migrate()` creates `skills_registry` on boot (additive).
+3. Keep `SUBSTRATE_SKILLS_GOVERNANCE=off`; set `report` later, only after U5-5b is deployed and the registry is compared with `main`.
+4. Decide how already-merged skills are grandfathered before any `enforce` (UNKNOWN in L4, still open).
+
+## Known limits / unknowns
+
+- A skill that exists on `main` with no pull request on the library (committed directly, or its pull request cannot be retrieved) cannot be approved through `skills_approve`: nothing binds a merge commit to it. How to bring those into the registry is an operator decision (approve their original pull requests, re-propose, or a separate import); not built.
+- `gh pr view` lists at most the first 100 changed files. A hand-opened pull request with more files whose `<name>/SKILL.md` falls past the cut is refused as `pr_not_for_skill` (fail safe); the proposal-branch route is unaffected. `GH_FILES_LIMIT` documents the number; the code treats a missing path as refused whatever the list length.
+- A pull request that merely touches `<name>/SKILL.md` (including deleting it) is bound to that name; `files` carries no change type here. Approving still needs a merged PR with a merge commit and an operator's decision.
+- `content_sha256` is the proposal hash over redacted files, not a digest of the merged tree; the registry proves which merge commit was approved, not that the tree equals the proposal. A merge tree-hash was left out (L4 [INFERENCE]). A row for a pull request not proposed through the substrate has an empty hash and no `proposed_by`.
+- The proposal-branch binding trusts `headRefName`; the file binding trusts what `gh` lists for the pull request; both are GitHub's answers about the pull request at approval time.
+- Registry write retry after a failed `skills_propose` write relies on the proposal being asked again (or an approval); there is no background retry.
+- `skills_registry` is not archived, so a lost table is rebuilt only by deciding the pull requests again; the `skill.*` events are a best-effort trail (a `noted:false` answer means the ledger did not take the note; a re-run answers `exists` and emits nothing, so it is recorded by hand).
+- Tests were run in the corrective rounds (tsc, the targeted suites); the live-Postgres test (`index-store.skills.test.ts`) was never run here: the `distinct on` name-level list, the `collate "C"` ordering and the in-transaction `remaining_approved` count are only proven by it.

@@ -60,6 +60,7 @@ substrate is keyed by. `surface` says which of the eight agents on the host;
 | `substrate.docs.duration` | histogram, ms (own edges, incl. 2000 and 4000) | `surface`, `cached` |
 | `substrate.cache.operations` | counter | `class` = `brief` \| `memory-search` \| `graph-view` \| `brief-snapshot` \| `recall-snapshot` \| `docs-search` \| `budget` \| `gen` \| `unknown`, `result` = `hit` \| `miss` \| `coalesced` \| `stale` \| `refresh` \| `would_serve_stale` \| `bypass` \| `error`, `mode` = `off` \| `on` \| `degraded` (uplift-4 S4: `coalesced` joined another caller's load; `stale` served a last-good brief; `refresh` a background refresh started; `would_serve_stale` only under `SUBSTRATE_CACHE_SWR=shadow`) |
 | `substrate.memory.expired` | counter | `surface`, `kind` (memory kind), `mode` = `served` \| `hidden` — entries past their `ttl` met by an index read (uplift-3 N4; `docs/memory-governance.md` § Lifetime) |
+| `substrate.events.replay` | counter | `result` = `deduplicated` \| `appended` \| `refused` \| `lookup_failed` — one per `POST /events` that took the idempotency lookup (a replay-marked request under `accept`, any keyed one under `enforce`) or was refused on the idempotency rules; silent while `SUBSTRATE_EVENT_IDEMPOTENCY=off`. A `deduplicated` replay is not counted as an emit (U5-4a; `docs/greptime-ledger.md` § Idempotent replay) |
 | `substrate.brief.result` | counter | `surface` (a known surface or `unknown`), `state` = `complete` \| `degraded` \| `snapshot`, `result` = `fresh` \| `not_modified` — one per brief answered at either door; `not_modified` is a REST 304 or an MCP `not_modified: true` (uplift-3 N7) |
 | `substrate.brief.profile_bytes_saved` | counter | `surface` (a known surface or `unknown`) — full minus compact UTF-8 bytes of a fresh brief, recorded in `shadow` and `enforce` only and never below zero (uplift-4 S1; `docs/grok-bot.md` § The brief profile) |
 | `substrate.brief.profile` | counter | `surface`, `profile` = `full` \| `compact`, `mode` = `off` \| `shadow` \| `enforce` — one per brief answered; `profile` is what was served |
@@ -230,6 +231,18 @@ on every call): the body gains `cachedAt` (ISO time it was computed) and `stale`
 from the memoised body by the unchanged `healthStatus` rule. Collectors polling health
 therefore cost one round trip per configured plane per 5 s, not per call. `/metrics`
 and `/slo` are not memoised.
+
+Under `SUBSTRATE_HEALTHZ_CACHE_MS` above 0 the computation is also **single-flight** (uplift-5 U5-3): probes that arrive while one is running join it and get its body (`stale: false`, same `cachedAt`), so a burst makes one `substrate.health()` call rather than one per probe, and a computation that throws fails its joiners and is not joined by the next probe. `SUBSTRATE_HEALTHZ_INDEX_CAPACITY_MEMO_S` (default `0`, at most 300) reuses `capacity.index` for that many seconds. Both are described in `docs/data-planes.md` § Request-path flags.
+
+### Verifying the request-path flags (uplift-5 U5-3)
+
+All three read from `GET /metrics` (bearer required) and `GET /healthz`; none adds a metric name or a label key; the one new value is `op="graph.brief"` on `substrate.plane.duration`.
+
+| Flag | Signal | What a change looks like |
+| --- | --- | --- |
+| `SUBSTRATE_BRIEF_GRAPH_READ=lite` | `substrate.plane.duration{plane="index",op="graph.brief"}` against `op="graph.get"` | A graph-scoped brief records one `graph.brief` sample (two statements in one round trip) where `full` recorded one `graph.get` sample (four serial statements). `graph.get` still moves for `graph_get`, claims and registrations. `substrate.brief.result` and `X-Substrate-Brief-Failed` are unchanged: a failed graph read is still the `graph` source. Watch `brief.p95` on `/slo`. |
+| `SUBSTRATE_CACHE_BUMP_SCOPE=narrow` | `substrate.cache.operations{class="brief",result="miss"}` per accepted write | One accepted, retained write adds one flush of briefs (a miss per distinct brief asked for afterwards), not two, and heartbeats add none for `class="brief"`. The hit ratio is `/healthz.cache` (`hits` / `misses`). |
+| `SUBSTRATE_HEALTHZ_INDEX_CAPACITY_MEMO_S>0` | `substrate.plane.duration{plane="index",op="capacity"}` count; `op="ping"` with `outcome="timeout"` | `capacity` samples drop to about one per memo window however often `/healthz` is polled; a poll burst inside `SUBSTRATE_HEALTHZ_CACHE_MS` makes one `ping` sample. Capacity can be up to the memo old. |
 
 ## Traces
 
@@ -908,11 +921,14 @@ substrate-specific spelling.
 | `SUBSTRATE_CACHE_COMMAND_TIMEOUT_MS` | `250` | One cache command; sized for the loopback redis. |
 | `SUBSTRATE_CACHE_CONNECT_TIMEOUT_MS` | `250` | One cache connect. |
 | `SUBSTRATE_HEALTHZ_CACHE_MS` | `5000` | How long a computed `/healthz` body is served to pollers; `0` = recompute per call. |
+| `SUBSTRATE_BRIEF_GRAPH_READ` | `full` | `full` \| `lite` (uplift-5 U5-3): `lite` reads a graph-scoped brief's graph as two concurrent statements (index row, nodes) instead of four serial ones; the text is identical. An unknown value is `full`, named at boot. |
+| `SUBSTRATE_CACHE_BUMP_SCOPE` | `legacy` | `legacy` \| `narrow` (uplift-5 U5-3): `narrow` moves the post-retain and outbox-replay bump to a recall-only generation and stops a heartbeat flushing briefs. An unknown value is `legacy`, named at boot. |
+| `SUBSTRATE_HEALTHZ_INDEX_CAPACITY_MEMO_S` | `0` | Seconds `/healthz` reuses the index size report; `0` measures on every computed body, capped at 300 (named at boot). |
 | `SUBSTRATE_CACHE_SWR` | `shadow` | `off` \| `shadow` \| `enforce` (uplift-4 S4): whether a brief miss after a generation bump may be answered with a last-good younger than the window while one background refresh runs. `shadow` only counts `would_serve_stale`; junk is `shadow`. |
 | `SUBSTRATE_CACHE_SWR_WINDOW_S` | `30` | How old a last-good brief may be and still be served stale, seconds; max 300. |
 | `SUBSTRATE_BUDGETS` | `shadow` | `off` \| `shadow` \| `enforce`: whether the admission buckets are skipped, decided and counted only, or answered with 429. |
-| `SUBSTRATE_BUDGET_READ_RPS` / `_BURST` | `20` / `40` | Per surface and second, with one second of headroom; reads are the GET routes, `/brief`, `/memory/recall`, `/docs/search`, `/events/query`, `/verify`, `/evidence`, `/drift`, `/slo/history` and the read tools. |
-| `SUBSTRATE_BUDGET_WRITE_RPS` / `_BURST` | `10` / `20` | `/events`, `/memory`, `/docs/ingest`, `/docs/merge-trigger`, `/skills/propose`, `/handoff` and the write tools. |
+| `SUBSTRATE_BUDGET_READ_RPS` / `_BURST` | `20` / `40` | Per surface and second, with one second of headroom; reads are the GET routes, `/brief`, `/memory/recall`, `/docs/search`, `/events/query`, `/verify`, `/evidence`, `/drift`, `/slo/history`, `/skills` and the read tools. |
+| `SUBSTRATE_BUDGET_WRITE_RPS` / `_BURST` | `10` / `20` | `/events`, `/memory`, `/docs/ingest`, `/docs/merge-trigger`, `/skills/propose`, `/skills/approve`, `/handoff` and the write tools. |
 | `SUBSTRATE_BUDGET_COORDINATION_RPS` / `_BURST` | `30` / `60` | `graph_claim`, `graph_heartbeat`, `graph_release`, `graph_complete`, `coord_reap_leases`: its own bucket, so reads never starve a heartbeat. |
 | `SUBSTRATE_BUDGET_ANONYMOUS_RPS` / `_BURST` | `2` / `4` | Every class of the bucket all accepted untokened bridge callers share. |
 | `SUBSTRATE_BUDGET_<SURFACE>_<CLASS>_RPS` / `_BURST` | — | Per-surface override (`GROK_BOT`, `SWARM_A01_ORCH`, …, the `SUBSTRATE_TOKEN_*` spelling); a half left unset is the class value. |

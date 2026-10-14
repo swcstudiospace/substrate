@@ -70,6 +70,14 @@ export type EventKind = (typeof EVENT_KINDS)[number];
 export const ACTORS = ["agent", "human"] as const;
 export type Actor = (typeof ACTORS)[number];
 
+/**
+ * `SUBSTRATE_EVENT_IDEMPOTENCY` (U5-4a). `off` ignores `idempotency_key` and the replay marker;
+ * `accept` stores a valid key and looks it up only for a replay-marked request; `enforce` looks
+ * up every keyed request.
+ */
+export const EVENT_IDEMPOTENCY_MODES = ["off", "accept", "enforce"] as const;
+export type EventIdempotencyMode = (typeof EVENT_IDEMPOTENCY_MODES)[number];
+
 /** An event as a collector submits it. `id`, `ts`, `hash` and `prev` are filled in on ingest. */
 export interface EventInput {
 	surface: Surface;
@@ -86,6 +94,12 @@ export interface EventInput {
 	payload?: Record<string, unknown>;
 	/** Collector-supplied timestamp; defaults to ingest time. */
 	ts?: string;
+	/**
+	 * Optional replay key (U5-4a): 8-128 characters from `[A-Za-z0-9._:-]`. Honoured only under
+	 * `SUBSTRATE_EVENT_IDEMPOTENCY=accept|enforce`, where it is stored as the reserved payload
+	 * key `_ik`; under `off` it is ignored unread. See `docs/greptime-ledger.md`.
+	 */
+	idempotency_key?: string;
 }
 
 /** An event as stored. Every field below `hash` participates in the chain. */

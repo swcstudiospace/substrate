@@ -76,4 +76,20 @@ describe("IndexStore.capacity", () => {
 		expect((await capacityOf(fakeSql([{ upd: "0", hot: "0", live: "0", dead: "0" }]))).graphNodes).toEqual({ hotUpdateRatio: null, deadRatio: null });
 		expect((await capacityOf(fakeSql([]))).graphNodes).toBeNull();
 	});
+
+	test("the relation size is computed once per relation and the order is on the number, not the text column", async () => {
+		const statements: string[] = [];
+		const fake = fakeSql([LEASE_ROW]);
+		const asked = fake.sql;
+		fake.sql = (strings: TemplateStringsArray): Promise<Row[]> => {
+			statements.push(strings.join("?"));
+			return asked(strings);
+		};
+		await capacityOf(fake);
+		const sized = statements.filter((text) => text.includes("pg_total_relation_size"));
+		expect(sized).toHaveLength(1);
+		// One call in the statement, and the sort uses the numeric column of the inner select (a bare `total_bytes` is the text output).
+		expect(sized[0]?.match(/pg_total_relation_size\(/g)).toHaveLength(1);
+		expect(sized[0]).toMatch(/order by relations\.total_bytes desc/);
+	});
 });

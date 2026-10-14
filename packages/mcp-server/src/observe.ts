@@ -87,6 +87,8 @@ const KNOWN_ROUTES = [
 	"/slo",
 	"/evidence",
 	"/skills/propose",
+	"/skills",
+	"/skills/approve",
 	"/docs/search",
 	"/docs/ingest",
 	"/docs/merge-trigger",
@@ -368,6 +370,9 @@ export function createObservability(
 		emitted(sample) {
 			instruments.recordEmit(sample);
 		},
+		eventReplay(sample) {
+			instruments.recordEventReplay(sample);
+		},
 		cached(sample) {
 			instruments.recordCache(sample);
 		},
@@ -633,6 +638,8 @@ const KNOWN_TOOLS: ReadonlySet<string> = new Set([
 	"coord_drift_scan",
 	"coord_reap_leases",
 	"skills_propose",
+	"skills_approve",
+	"skills_list",
 	"docs_search",
 	"docs_ingest",
 	"desktop_run",

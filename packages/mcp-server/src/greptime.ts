@@ -25,6 +25,7 @@
 import { BreakerOpenError, callPlane, type PlaneGate } from "@substrate/observability";
 import { DEFAULT_LEDGER_SETTINGS, isGreptimeDuration, type GreptimeConfig, type LedgerSettings } from "./config.ts";
 import { redact, redactKnown } from "./redact.ts";
+import { IDEMPOTENCY_KEY_PATTERN, IDEMPOTENCY_PAYLOAD_KEY } from "./event.ts";
 import type { SubstrateEvent } from "./types.ts";
 import { HOUR_MS, hourEnd, hourIso, hourStart, isClosed } from "@substrate/ledger";
 import { DEFAULT_METRICS_HISTORY_TTL, parseMetricsHistoryTtl } from "./config.ts";
@@ -103,6 +104,13 @@ export const INGEST_LAG_MS = 300_000;
  * runs only with whatever of the second is left.
  */
 export const INGEST_BUDGET_MS = 1_000;
+
+/**
+ * Rows one idempotency lookup reads. More than one because `LIKE` reads `_` as a wildcard, so
+ * lookalike keys in the same cell and millisecond can precede the real row; still a hard bound,
+ * and well above the handful of rows one (surface, repo, graph_id, kind, ts) cell holds.
+ */
+export const IDEMPOTENCY_LOOKUP_LIMIT = 5;
 
 /** Columns of `agent_events`, in the order every statement uses them. */
 export const EVENT_COLUMNS = [
@@ -1182,6 +1190,69 @@ export class GreptimeClient {
 			return;
 		}
 		throw new IngestNotRecorded(event.id, failure);
+	}
+
+	/**
+	 * The stored event a replay duplicates, if any (U5-4a). One bounded read, run only for a
+	 * replay-marked request (`accept`) or a keyed one (`enforce`), and by `Substrate.append`
+	 * INSIDE the per-session emit gate so two concurrent same-key requests cannot both miss.
+	 *
+	 * The cell is the table's primary-key prefix (`surface`, `repo`, `graph_id`, `kind`) plus the
+	 * exact normalised `ts` the client fixed at its first attempt. A NULL `repo` or `graph_id` is
+	 * `IS NULL`: `= NULL` matches nothing. `LIMIT` {@link IDEMPOTENCY_LOOKUP_LIMIT}, a small bound.
+	 *
+	 * The key is matched against the end of the stored payload text. `normalizeEvent` appends `_ik`
+	 * as the payload's last key, so the stored text ends `"_ik":"<key>"}`; anchoring there means a
+	 * caller who buried a nested `_ik` in their own payload cannot masquerade as the original. `LIKE`
+	 * reads `_` as a wildcard, so a lookalike row in the same cell and millisecond can match the
+	 * pattern too and come back first; that is why the read takes a few rows rather than one, and
+	 * why each is checked here against the exact suffix. A row that only over-matches is skipped,
+	 * never taken as a hit that would swallow a new event. If the read comes back FULL
+	 * ({@link IDEMPOTENCY_LOOKUP_LIMIT} rows) and none carries the exact suffix, the real row may be
+	 * hiding past the limit, so the answer is inconclusive and this throws like any lookup error
+	 * rather than reporting a miss that would append a duplicate. A short read without an exact
+	 * match is a genuine miss.
+	 *
+	 * It does not catch what it did not look for: only the same cell and `ts`. That is the contract,
+	 * not an accident. Whether the exact-`ts` + key-prefix predicate is cheap on the production
+	 * image has not been measured; the operator step is an `EXPLAIN` of this statement.
+	 *
+	 * Throws on any ledger error, an open breaker included, and on a hit that is not a well-formed
+	 * row: the caller answers 503 and writes nothing, because a lookup that errors must never be
+	 * read as a miss.
+	 */
+	async findByIdempotencyKey(
+		cell: Pick<SubstrateEvent, "surface" | "repo" | "graph_id" | "kind" | "ts">,
+		key: string,
+	): Promise<{ id: string; hash: string } | null> {
+		if (!IDEMPOTENCY_KEY_PATTERN.test(key)) throw new GreptimeError("refusing an idempotency lookup for a malformed key");
+		await this.probeDialect();
+		if (!this.dialectProbed && [cell.repo, cell.graph_id].some((value) => value !== null && value.includes("\\"))) {
+			// The same refusal `insertEvent` makes: until the dialect is known a backslash cannot be quoted
+			// safely, so a lookup could silently miss the row the original attempt stored.
+			throw new GreptimeError("refusing an idempotency lookup on a value containing a backslash before the server's quoting dialect is known");
+		}
+		const equals = (column: "surface" | "repo" | "graph_id" | "kind", value: string | null): string =>
+			value === null ? `"${column}" IS NULL` : `"${column}" = ${this.q(value)}`;
+		const suffix = `"${IDEMPOTENCY_PAYLOAD_KEY}":"${key}"}`;
+		const rows = await this.sql(
+			`SELECT "id", "hash", "payload" FROM "agent_events" WHERE ${equals("surface", cell.surface)} AND ${equals("repo", cell.repo)} ` +
+				`AND ${equals("graph_id", cell.graph_id)} AND ${equals("kind", cell.kind)} AND "ts" = ${this.q(cell.ts)} ` +
+				`AND "payload" LIKE ${this.q(`%${suffix}`)} LIMIT ${IDEMPOTENCY_LOOKUP_LIMIT}`,
+		);
+		let found: { id: string; hash: string } | null = null;
+		for (const row of rows) {
+			if (typeof row.id !== "string" || typeof row.hash !== "string") {
+				throw new GreptimeError("idempotency lookup returned a row without a string id and hash");
+			}
+			if (found === null && typeof row.payload === "string" && row.payload.endsWith(suffix)) found = { id: row.id, hash: row.hash };
+		}
+		if (found === null && rows.length >= IDEMPOTENCY_LOOKUP_LIMIT) {
+			throw new GreptimeError(
+				`idempotency lookup inconclusive: ${rows.length} rows matched the key pattern and none ends with the exact key`,
+			);
+		}
+		return found;
 	}
 
 	/**

@@ -81,6 +81,9 @@ post_emit() {
 	export SUBSTRATE_HOOK_FILES="$files"
 	export SUBSTRATE_HOOK_REPO="$repo"
 	export SUBSTRATE_HOOK_BRANCH="$branch"
+	# The installer bakes the collectors source dir in here; the event spool (SUBSTRATE_EVENT_SPOOL=on)
+	# needs it, and an uninstalled copy leaves the placeholder, which the script treats as absent.
+	export SUBSTRATE_COLLECTORS_SRC="${SUBSTRATE_COLLECTORS_SRC:-__SUBSTRATE_COLLECTORS_SRC__}"
 	bun -e '
 const rawTimeout = Number(process.env.SUBSTRATE_TIMEOUT_MS);
 const timeoutMs = Number.isFinite(rawTimeout) && rawTimeout > 0 ? rawTimeout : 3000;
@@ -98,6 +101,23 @@ const event = {
 };
 if (process.env.SUBSTRATE_HOOK_REPO) event.repo = process.env.SUBSTRATE_HOOK_REPO;
 if (process.env.SUBSTRATE_HOOK_BRANCH) event.branch = process.env.SUBSTRATE_HOOK_BRANCH;
+// Event spool (uplift-5 U5-4b). Off unless SUBSTRATE_EVENT_SPOOL=on and the installer baked the
+// collectors dir in. The hook only ever APPENDS to the spool: it never replays, so it stays inside
+// its time bound. The event is redacted, stamped and keyed before the first attempt so a replay
+// can be deduplicated by the server.
+let spool = null;
+let prepared = null;
+const collectorsDir = process.env.SUBSTRATE_COLLECTORS_SRC || "";
+if ((process.env.SUBSTRATE_EVENT_SPOOL || "").trim().toLowerCase() === "on" && collectorsDir && !collectorsDir.startsWith("__")) {
+  try {
+    spool = await import(collectorsDir + "/emit.ts");
+    prepared = spool.prepareEvent(event, { collector: "git-post-commit" });
+  } catch { spool = null; prepared = null; }
+}
+function park(reason) {
+  if (!spool || !prepared) return;
+  try { spool.parkEvent(prepared, { collector: "git-post-commit", source: "git.post-commit", reason }); } catch {}
+}
 function report(status, error) {
   const safe = String(error || "").replace(/[\r\n]/g, " ").slice(0, 200);
   const suffix = safe ? " error=" + safe : "";
@@ -110,7 +130,7 @@ try {
       "content-type": "application/json",
       ...(token ? { authorization: "Bearer " + token } : {}),
     },
-    body: JSON.stringify(event),
+    body: prepared ? prepared.body : JSON.stringify(event),
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!response.ok) {
@@ -120,9 +140,11 @@ try {
       if (body && typeof body.error === "string") error = body.error;
     } catch {}
     report(response.status, error);
+    if (response.status >= 500) park("http-" + response.status);
   }
 } catch {
   report(0, "unreachable");
+  park("unreachable");
 }
 '
 )

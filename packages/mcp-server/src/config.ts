@@ -19,7 +19,7 @@ import { NOTION_API_URL } from "./notion.ts";
 import { DEFAULT_RETRIEVAL_KNOBS, ragflowFromEnv, type RagflowConfig, type RetrievalKnobs } from "./planes/ragflow.ts";
 import { loadRecallConfig, type RecallConfig } from "./recall-snapshot.ts";
 import { DEFAULT_RETAIN_DRAIN_MS, DEFAULT_RETAIN_MAX_ATTEMPTS, DEFAULT_RETAIN_OUTBOX_MAX } from "./retain-outbox.ts";
-import { MEMORY_EXPIRY_MODES, SURFACES, SWARM_SURFACES, isSwarmSurface, type MemoryExpiryMode, type Surface } from "./types.ts";
+import { EVENT_IDEMPOTENCY_MODES, MEMORY_EXPIRY_MODES, SURFACES, SWARM_SURFACES, isSwarmSurface, type EventIdempotencyMode, type MemoryExpiryMode, type Surface } from "./types.ts";
 
 /** Default hermes-linear-connector base URL (D23-25). */
 export const DEFAULT_HERMES_LINEAR_URL = "http://127.0.0.1:8792";
@@ -206,6 +206,16 @@ export interface SubstrateConfig {
 	 */
 	skills: { repo: string; remoteUrl: string; stateDir: string; gh: string; problem: string | null };
 	/**
+	 * Skills governance (uplift-5 S5a, `SUBSTRATE_SKILLS_GOVERNANCE`): `off` (the default) leaves
+	 * `skills_propose` exactly as it was and writes nothing to the registry; `report` and `enforce`
+	 * make `skills_propose` record a `proposed` row (the projector slice reads the mode; `enforce`
+	 * is what lets it filter). `skills_approve` and `skills_list` exist in every mode. Anything else
+	 * is `off`, named at boot by `skillsGovernanceConfigWarnings`.
+	 */
+	skillsGovernance: SkillsGovernanceMode;
+	/** The unrecognised `SUBSTRATE_SKILLS_GOVERNANCE` value, for the boot warning; null when the key parsed or was unset. */
+	skillsGovernanceRejected: string | null;
+	/**
 	 * Surfaces allowed to call `desktop_run`, from `SUBSTRATE_DESKTOP_SURFACES`.
 	 *
 	 * The operator allowlist is the only gate (D30-01): unset or empty means
@@ -292,6 +302,13 @@ export interface SubstrateConfig {
 	cacheSwr: "off" | "shadow" | "enforce";
 	/** How old a last-good brief may be and still be served stale, s (`SUBSTRATE_CACHE_SWR_WINDOW_S`, default 30, max 300). */
 	cacheSwrWindowS: number;
+	// uplift-5 U5-3
+	/**
+	 * Request-path flags, each defaulting to today's behaviour: `SUBSTRATE_BRIEF_GRAPH_READ=full|lite`,
+	 * `SUBSTRATE_CACHE_BUMP_SCOPE=legacy|narrow`, `SUBSTRATE_HEALTHZ_INDEX_CAPACITY_MEMO_S` (0 = unmemoised, at most 300).
+	 * `problems` are the boot warnings for a value that was refused or capped (`requestPathConfigWarnings`).
+	 */
+	requestPath: RequestPathSettings;
 	// uplift-2 R5
 	/**
 	 * Ledger chain cache, chain-tip lookback, write-probe cadence and opt-in TTL,
@@ -365,6 +382,16 @@ export interface SubstrateConfig {
 	memoryExpiry: MemoryExpiryMode;
 	/** The unrecognised `SUBSTRATE_MEMORY_EXPIRY` value, for the boot warning; null when the key parsed or was unset. */
 	memoryExpiryRejected: string | null;
+	// U5-4a — idempotent event replay
+	/**
+	 * `SUBSTRATE_EVENT_IDEMPOTENCY`: `off` (the default) ignores an event's `idempotency_key` and the
+	 * `x-substrate-replay` header entirely; `accept` stores a valid key and looks it up only for a
+	 * replay-marked request; `enforce` looks up every keyed request. Anything else is `off`, named
+	 * at boot by `eventIdempotencyConfigWarnings`. `GET /healthz` reports the mode as `idempotency`.
+	 */
+	eventIdempotency: EventIdempotencyMode;
+	/** The unrecognised `SUBSTRATE_EVENT_IDEMPOTENCY` value, for the boot warning; null when the key parsed or was unset. */
+	eventIdempotencyRejected: string | null;
 	// uplift-3 N2 — restart-durable SLO history and notifications
 	/**
 	 * Where the SLO checkpoint is written and restored from
@@ -670,6 +697,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		// uplift-4 S4
 		cacheSwr: cacheSwrOr(env.SUBSTRATE_CACHE_SWR),
 		cacheSwrWindowS: Math.min(300, positiveOr(env.SUBSTRATE_CACHE_SWR_WINDOW_S, 30)),
+		// uplift-5 U5-3
+		requestPath: loadRequestPathSettings(env),
 		// uplift-2 R5
 		ledger: loadLedgerSettings(env),
 		// uplift-4 S2
@@ -704,6 +733,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		docsSearchBudgetMs: nonNegativeOr(env.SUBSTRATE_DOCS_SEARCH_BUDGET_MS, 4000),
 		// uplift-3 N4
 		...memoryExpiryFromEnv(env.SUBSTRATE_MEMORY_EXPIRY),
+		// uplift-5 S5a
+		...skillsGovernanceFromEnv(env.SUBSTRATE_SKILLS_GOVERNANCE),
 		// uplift-3 N2
 		...sloCheckpointFromEnv(env.SUBSTRATE_SLO_CHECKPOINT, probes),
 		sloCheckpointS: boundedInt(env.SUBSTRATE_SLO_CHECKPOINT_S, 60, 0, 86_400),
@@ -725,6 +756,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		// uplift-4 S5
 		briefRecall: loadRecallConfig(env),
 		hindsightInventory: loadInventoryConfig(env),
+		// U5-4a
+		...eventIdempotencyFromEnv(env.SUBSTRATE_EVENT_IDEMPOTENCY),
 	};
 }
 
@@ -787,6 +820,65 @@ export function memoryExpiryConfigWarnings(config: SubstrateConfig): string[] {
 	];
 }
 
+/**
+ * U5-4a: `off`, `accept` or `enforce`, case- and space-insensitive; unset or blank is `off`; anything
+ * else is `off` and carried back for the boot warning. Never switched on by a typo: the flag changes
+ * what a `POST /events` may be answered with.
+ */
+function eventIdempotencyFromEnv(raw: string | undefined): Pick<SubstrateConfig, "eventIdempotency" | "eventIdempotencyRejected"> {
+	const trimmed = raw?.trim() ?? "";
+	if (trimmed === "") return { eventIdempotency: "off", eventIdempotencyRejected: null };
+	const mode = trimmed.toLowerCase();
+	if ((EVENT_IDEMPOTENCY_MODES as readonly string[]).includes(mode)) {
+		return { eventIdempotency: mode as EventIdempotencyMode, eventIdempotencyRejected: null };
+	}
+	return { eventIdempotency: "off", eventIdempotencyRejected: trimmed };
+}
+
+/**
+ * An unrecognised `SUBSTRATE_EVENT_IDEMPOTENCY`, reported at boot (U5-4a). A sibling of
+ * `memoryExpiryConfigWarnings`; the value is a mode name, never a credential, so the warning may
+ * quote it.
+ */
+export function eventIdempotencyConfigWarnings(config: SubstrateConfig): string[] {
+	if (config.eventIdempotencyRejected === null) return [];
+	return [
+		`SUBSTRATE_EVENT_IDEMPOTENCY=${JSON.stringify(config.eventIdempotencyRejected)} is not off, accept or enforce; ` +
+			"running as off, so idempotency_key and the replay marker are ignored and a replayed event is appended again",
+	];
+}
+
+export const SKILLS_GOVERNANCE_MODES = ["off", "report", "enforce"] as const;
+export type SkillsGovernanceMode = (typeof SKILLS_GOVERNANCE_MODES)[number];
+
+/**
+ * uplift-5 S5a: `off`, `report` or `enforce`, case- and space-insensitive; anything else keeps
+ * `off` and is carried back for the boot warning. Never `enforce` by accident: a typo must not
+ * start filtering what the agents receive.
+ */
+function skillsGovernanceFromEnv(raw: string | undefined): Pick<SubstrateConfig, "skillsGovernance" | "skillsGovernanceRejected"> {
+	const trimmed = raw?.trim() ?? "";
+	if (trimmed === "") return { skillsGovernance: "off", skillsGovernanceRejected: null };
+	const mode = trimmed.toLowerCase();
+	if ((SKILLS_GOVERNANCE_MODES as readonly string[]).includes(mode)) {
+		return { skillsGovernance: mode as SkillsGovernanceMode, skillsGovernanceRejected: null };
+	}
+	return { skillsGovernance: "off", skillsGovernanceRejected: trimmed.slice(0, 40) };
+}
+
+/**
+ * An unrecognised `SUBSTRATE_SKILLS_GOVERNANCE`, reported at boot (uplift-5 S5a). A sibling of
+ * `memoryExpiryConfigWarnings`. The value is a mode name, never a credential, so the warning
+ * may quote it (bounded to 40 characters).
+ */
+export function skillsGovernanceConfigWarnings(config: SubstrateConfig): string[] {
+	if (config.skillsGovernanceRejected === null) return [];
+	return [
+		`SUBSTRATE_SKILLS_GOVERNANCE=${JSON.stringify(config.skillsGovernanceRejected)} is not off, report or enforce; ` +
+			"running as off, so skills_propose records no registry row and nothing is filtered",
+	];
+}
+
 /** uplift-2 R1: a finite number ≥ 0, floored (0 is "off"); anything else is the default. */
 function nonNegativeOr(raw: string | undefined, fallback: number): number {
 	const value = Number(raw?.trim());
@@ -809,6 +901,61 @@ function unitIntervalOr(raw: string | undefined, fallback: number): number {
 function cacheSwrOr(raw: string | undefined): "off" | "shadow" | "enforce" {
 	const value = raw?.trim().toLowerCase();
 	return value === "off" || value === "enforce" ? value : "shadow";
+}
+
+/** The three uplift-5 U5-3 request-path flags, parsed. */
+export interface RequestPathSettings {
+	/** `lite` reads the brief's graph with two concurrent statements (nodes only); `full` is `getGraph`. */
+	briefGraphRead: "full" | "lite";
+	/** `narrow` bumps the recall generation (not memory) after a retain and drops the graph key from briefs. */
+	cacheBumpScope: "legacy" | "narrow";
+	/** Seconds `/healthz` reuses the index capacity report; 0 = measured on every computed body. */
+	healthzIndexCapacityMemoS: number;
+	problems: string[];
+}
+
+/** The most seconds a capacity report may be reused: a database that grows must show on `/healthz` within five minutes. */
+export const MAX_HEALTHZ_INDEX_CAPACITY_MEMO_S = 300;
+
+/**
+ * uplift-5 U5-3: an unset or empty flag is the default silently. A value outside the vocabulary
+ * keeps the default and is named in `problems`, so a typo never switches a policy on. The memo
+ * seconds take a non-negative number; a larger one is capped (named), anything else is 0 (named).
+ */
+function loadRequestPathSettings(env: Record<string, string | undefined>): RequestPathSettings {
+	const problems: string[] = [];
+	const choice = <T extends string>(name: string, raw: string | undefined, allowed: readonly [T, T], fallback: T): T => {
+		const trimmed = raw?.trim() ?? "";
+		if (trimmed === "") return fallback;
+		const value = trimmed.toLowerCase();
+		if ((allowed as readonly string[]).includes(value)) return value as T;
+		problems.push(`${name}=${JSON.stringify(trimmed)} is neither ${allowed[0]} nor ${allowed[1]}; running as ${fallback}`);
+		return fallback;
+	};
+	const briefGraphRead = choice("SUBSTRATE_BRIEF_GRAPH_READ", env.SUBSTRATE_BRIEF_GRAPH_READ, ["full", "lite"], "full");
+	const cacheBumpScope = choice("SUBSTRATE_CACHE_BUMP_SCOPE", env.SUBSTRATE_CACHE_BUMP_SCOPE, ["legacy", "narrow"], "legacy");
+	let healthzIndexCapacityMemoS = 0;
+	const rawMemo = env.SUBSTRATE_HEALTHZ_INDEX_CAPACITY_MEMO_S?.trim() ?? "";
+	if (rawMemo !== "") {
+		const value = Number(rawMemo);
+		if (!Number.isFinite(value) || value < 0) {
+			problems.push(`SUBSTRATE_HEALTHZ_INDEX_CAPACITY_MEMO_S=${JSON.stringify(rawMemo)} is not a number of seconds >= 0; the index capacity is measured on every health computation`);
+		} else if (value > MAX_HEALTHZ_INDEX_CAPACITY_MEMO_S) {
+			healthzIndexCapacityMemoS = MAX_HEALTHZ_INDEX_CAPACITY_MEMO_S;
+			problems.push(`SUBSTRATE_HEALTHZ_INDEX_CAPACITY_MEMO_S=${JSON.stringify(rawMemo)} exceeds ${MAX_HEALTHZ_INDEX_CAPACITY_MEMO_S}; capped at ${MAX_HEALTHZ_INDEX_CAPACITY_MEMO_S} s`);
+		} else {
+			healthzIndexCapacityMemoS = Math.floor(value);
+			if (healthzIndexCapacityMemoS !== value) {
+				problems.push(`SUBSTRATE_HEALTHZ_INDEX_CAPACITY_MEMO_S=${JSON.stringify(rawMemo)} is not a whole number of seconds; using ${healthzIndexCapacityMemoS} s${healthzIndexCapacityMemoS === 0 ? " (the index capacity is measured on every health computation)" : ""}`);
+			}
+		}
+	}
+	return { briefGraphRead, cacheBumpScope, healthzIndexCapacityMemoS, problems };
+}
+
+/** The uplift-5 U5-3 flags that were refused or capped, for the boot log. Values are mode names and numbers, never credentials. */
+export function requestPathConfigWarnings(config: SubstrateConfig): string[] {
+	return [...config.requestPath.problems];
 }
 
 /** uplift-3 N3: a finite rate > 0, fractions kept (0.5 rps is one call per 2 s); anything else is the default. */

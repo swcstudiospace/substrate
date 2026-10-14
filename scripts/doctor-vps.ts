@@ -324,6 +324,7 @@ const LIVE_STATE: Record<string, string> = {
 	"slo-checkpoint.json": "SLO checkpoint (SUBSTRATE_SLO_CHECKPOINT)",
 	"retain-outbox.jsonl": "Hindsight retain outbox (SUBSTRATE_RETAIN_OUTBOX_PATH)",
 	"refused-emits.jsonl": "collector refused-emit log (emit.ts)",
+	"event-spool.jsonl": "collector event spool (SUBSTRATE_EVENT_SPOOL): parked events not yet replayed",
 	"doctor-last.json": "runtime doctor dedupe record (SUBSTRATE_DOCTOR_STATE)",
 	"ledger-archive": "ledger archive output (SUBSTRATE_LEDGER_ARCHIVE_DIR)",
 	"index-archive": "index archive output (SUBSTRATE_INDEX_ARCHIVE_DIR)",

@@ -19,6 +19,7 @@ import {
 	type BriefRecallResult,
 	type BriefState,
 	type DocsSearchSample,
+	type EventReplayResult,
 	type PlaneName,
 	type PlaneSample,
 	type RecallPrefetchResult,
@@ -43,6 +44,7 @@ import {
 	DOCS_GENERATION_KEY,
 	GRAPHS_GENERATION_KEY,
 	MEMORY_GENERATION_KEY,
+	RECALL_GENERATION_KEY,
 	createReadThroughCache,
 	earliestRefreshAt,
 	graphGenerationKey,
@@ -90,7 +92,7 @@ import {
 	type DriftGitTip,
 	type DriftReport,
 } from "./drift.ts";
-import { InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, verifyChain } from "./event.ts";
+import { checkIdempotencyKey, checkReplayTs, IdempotencyRefusal, InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, verifyChain } from "./event.ts";
 import { checkoutKnowsCommit, readGitTip } from "./git.ts";
 import {
 	GreptimeClient,
@@ -148,9 +150,33 @@ import {
 	SKILL_NAME_RE,
 	type ProposeInput,
 	type ProposeResult,
+	type Runner,
 	type SkillProposer,
 	type TreeMode,
 } from "./skills/propose.ts";
+import {
+	fetchPrView,
+	LIST_MAX,
+	prRefusal,
+	proposalBranchSurface,
+	refusalMessage,
+	SKILL_DECISIONS,
+	SKILL_LIST_STATES,
+	SkillApprovalDenied,
+	SkillApprovalFailed,
+	SkillApprovalRefused,
+	toListEntry,
+	validateApproval,
+	type ApprovalRule,
+	type PrView,
+	type SkillApprovalRequest,
+	type SkillApprovalResult,
+	type SkillDecisionResult,
+	type SkillListResult,
+	type SkillRegistryRow,
+	type SkillState,
+	type ValidApproval,
+} from "./skills/registry.ts";
 import {
 	ACTORS,
 	EVENT_KINDS,
@@ -484,7 +510,31 @@ export interface EmitResult {
 	 * will not be anchored. The event is not re-emitted in either case.
 	 */
 	warning?: string;
+	/**
+	 * Set (with `stored: true`) when a replay matched an event already in the ledger (U5-4a): `event.id` and
+	 * `event.hash` are the EXISTING row's, nothing was written, and `event.prev` is not the stored one's.
+	 */
+	deduplicated?: true;
+	/** Set (with `stored: false`) when the idempotency lookup itself failed: nothing was written and the event is not in the ledger. */
+	lookupFailed?: true;
 }
+
+/** What `emit` is told about the request, beyond the event: the transport's replay marker (`x-substrate-replay: 1`). */
+export interface EmitOptions {
+	replay?: boolean;
+}
+
+/** What `SUBSTRATE_EVENT_IDEMPOTENCY` makes of one request: its validated key (null: none) and whether it takes the ledger lookup. */
+interface IdempotencyPlan {
+	key: string | null;
+	lookup: boolean;
+}
+
+/**
+ * Prefix of the emit-turn key for a keyed event that has no session. Not a session id a caller can
+ * pick by accident: sharing a turn with one would only make the two wait for each other.
+ */
+const KEY_TURN_PREFIX = "\u0000idempotency:";
 
 /**
  * One closed UTC hour of the ledger, digested in ingest order for the hourly anchor.
@@ -642,6 +692,8 @@ export interface SubstrateObserver {
 		durationMs: number;
 		payload: Record<string, unknown>;
 	}): void;
+	/** One idempotent `POST /events` outcome (U5-4a): a lookup's result, or a refusal on the idempotency rules. Silent while `SUBSTRATE_EVENT_IDEMPOTENCY` is `off`. */
+	eventReplay?(sample: { result: EventReplayResult }): void;
 	cached?(sample: CacheSample): void;
 	/** One outbound call to a data plane, as its gate observed it (uplift-2 R2). */
 	plane?(sample: PlaneSample): void;
@@ -908,6 +960,10 @@ export class Substrate {
 	readonly mirror: Mirror | null;
 	/** The one git path proposals take; inert until plan 02's `proposeSkill` calls it. */
 	readonly skills: SkillProposer;
+	/** The gh/git runner. The proposer's, and the one `skills_approve` asks `gh pr view` through. */
+	private readonly skillRun: Runner;
+	/** True from a failed registry write until the next successful one, so a streak warns once. */
+	private skillRegistryWarned = false;
 	/** The desktop driver. Production wiring lives only in index.ts, so tests never reach docker by accident. */
 	readonly desktop: DesktopDriver | null;
 	private readonly observer: SubstrateObserver;
@@ -973,7 +1029,9 @@ export class Substrate {
 	private readonly completionChains = new Map<string, Promise<void>>();
 	// uplift-2 R1 — brief fast path. The options `composeBrief` runs under, read
 	// once from config so a brief does not re-derive them per call.
-	private readonly briefOptions: { budgetMs: number; recentWindowDays: number };
+	private readonly briefOptions: { budgetMs: number; recentWindowDays: number; graphRead: "full" | "lite" };
+	// uplift-5 U5-3 — `SUBSTRATE_CACHE_BUMP_SCOPE=narrow`: a retain bumps the recall generation, a brief drops the heartbeat-bumped graph key.
+	private readonly narrowBumps: boolean;
 	// uplift-4 S5 — recall in the brief and the Hindsight inventory
 	/** The wanted registry, the prefetch timer and the post-retain refresh; inert unless `SUBSTRATE_BRIEF_RECALL` is `shadow` or `enforce`. */
 	private readonly recall: RecallPrefetcher;
@@ -995,6 +1053,7 @@ export class Substrate {
 			index?: IndexStore | null;
 			greptime?: GreptimeClient | null;
 			skills?: SkillProposer;
+			skillRun?: Runner;
 			mirror?: Mirror | null;
 			dodGate?: { fetchImpl?: typeof fetch; hermesLinearUrl?: string; timeoutMs?: number };
 			cache?: ReadThroughCache;
@@ -1045,10 +1104,11 @@ export class Substrate {
 				: config.linearApiKey || config.notionApiKey
 					? createMirror(config)
 					: null;
+		this.skillRun = stores?.skillRun ?? createExecFileRunner({ gh: config.skills.gh });
 		this.skills =
 			stores?.skills ??
 			createSkillProposer({
-				run: createExecFileRunner({ gh: config.skills.gh }),
+				run: this.skillRun,
 				library: { repo: config.skills.repo, remoteUrl: config.skills.remoteUrl },
 				stateDir: config.skills.stateDir,
 			});
@@ -1065,7 +1125,8 @@ export class Substrate {
 				gate: this.planes.gate("cache"),
 			});
 		// uplift-2 R1
-		this.briefOptions = { budgetMs: config.briefBudgetMs, recentWindowDays: config.briefRecentWindowDays };
+		this.briefOptions = { budgetMs: config.briefBudgetMs, recentWindowDays: config.briefRecentWindowDays, graphRead: config.requestPath.briefGraphRead };
+		this.narrowBumps = config.requestPath.cacheBumpScope === "narrow";
 		// uplift-2 R3: the outbox hydrates its file (if any) now, so entries parked
 		// before a restart are due again from the first drain tick. Every drop —
 		// bound, exhausted attempts, a memory-only queue at shutdown — ends with
@@ -1359,10 +1420,16 @@ export class Substrate {
 				args: { ...args, shape: BRIEF_CACHE_SHAPE },
 				// The shared graphs generation covers repo briefs and the other
 				// graphs a single-graph brief lists. The graph's own key still
-				// moves when that graph is written.
-				generations: request.graph_id
-					? [MEMORY_GENERATION_KEY, GRAPHS_GENERATION_KEY, graphGenerationKey(request.graph_id)]
-					: [MEMORY_GENERATION_KEY, GRAPHS_GENERATION_KEY],
+				// moves when that graph is written. Under `narrow` the brief
+				// drops that key: it moves on a heartbeat, which changes no text a
+				// brief shows (describeNode prints the claim time, never the lease
+				// expiry; `refreshAt` already ends an entry at the expiry it
+				// baked in), and every other write that moves it also moves
+				// `gen:graphs` (`bumpGraph`, the reaper), which stays listed.
+				generations:
+					request.graph_id && !this.narrowBumps
+						? [MEMORY_GENERATION_KEY, GRAPHS_GENERATION_KEY, graphGenerationKey(request.graph_id)]
+						: [MEMORY_GENERATION_KEY, GRAPHS_GENERATION_KEY],
 				refreshAt: () => noted.at(-1) ?? null,
 				store: (value: string) => failed.length === 0 && decodeSections(value) !== null,
 				load: async () => {
@@ -1569,9 +1636,16 @@ export class Substrate {
 	 * substrate is never allowed to fail an agent's turn; the failure comes back
 	 * as `stored: false` and is left to the caller to act on or ignore.
 	 */
-	async emit(input: EventInput): Promise<EmitResult> {
+	async emit(input: EventInput, options: EmitOptions = {}): Promise<EmitResult> {
 		const started = performance.now();
-		const result = await this.append(input);
+		const idem = this.idempotencyPlan(input, options);
+		const result = await this.append(input, idem);
+		if (result.deduplicated) {
+			// Nothing was written, so nothing is counted as an emit: the tokens and cost its payload
+			// carries were counted when the first attempt was stored.
+			this.observer.eventReplay?.({ result: "deduplicated" });
+			return result;
+		}
 		// Reported after the append rather than around it, because the sample carries
 		// `stored` — and because the payload is where a collector puts the tokens and
 		// cost this event is accountable for.
@@ -1583,7 +1657,33 @@ export class Substrate {
 			durationMs: performance.now() - started,
 			payload: result.event.payload,
 		});
+		if (idem?.lookup) {
+			if (result.lookupFailed) this.observer.eventReplay?.({ result: "lookup_failed" });
+			else if (result.stored) this.observer.eventReplay?.({ result: "appended" });
+		}
 		return result;
+	}
+
+	/**
+	 * What this request asks of the ledger under `SUBSTRATE_EVENT_IDEMPOTENCY` (U5-4a); `null` under
+	 * `off`, where the key and the replay marker are not read at all and nothing below differs from
+	 * before the flag existed. Refusals (a malformed key; a replay stamped over 24 hours ahead) throw
+	 * before any read or write, and are counted.
+	 *
+	 * `lookup` is the whole read-cost rule: `accept` looks up only a replay-marked request, `enforce`
+	 * every keyed one, and a request without a key never does.
+	 */
+	private idempotencyPlan(input: EventInput, options: EmitOptions): IdempotencyPlan | null {
+		const mode = this.config.eventIdempotency;
+		if (mode === "off") return null;
+		try {
+			const key = checkIdempotencyKey(input?.idempotency_key);
+			if (options.replay === true) checkReplayTs(input?.ts, Date.now(), key !== null);
+			return { key, lookup: key !== null && (mode === "enforce" || options.replay === true) };
+		} catch (cause) {
+			if (cause instanceof IdempotencyRefusal) this.observer.eventReplay?.({ result: "refused" });
+			throw cause;
+		}
 	}
 
 	/**
@@ -1591,34 +1691,63 @@ export class Substrate {
 	 * read-then-write with no sequence column, so two emits of one session in
 	 * flight together used to read the same tip and fork the chain — detected by
 	 * `verify`, never prevented. The second now waits for the first to settle
-	 * and reads the hash it stored. Other sessions, and sessionless events, are
-	 * untouched; the pattern is `completionChains`'.
+	 * and reads the hash it stored. Other sessions are untouched, and so are sessionless
+	 * events — except a keyed sessionless event under `SUBSTRATE_EVENT_IDEMPOTENCY` accept or
+	 * enforce, which takes its turn on its key (`KEY_TURN_PREFIX`) so a replay cannot look
+	 * before the original attempt's INSERT has settled. The pattern is `completionChains`'.
 	 */
-	private async append(input: EventInput): Promise<EmitResult> {
+	private async append(input: EventInput, idem: IdempotencyPlan | null): Promise<EmitResult> {
 		// The session id is looked up in its stored form, not as it arrived: the
 		// write path normalises it, and querying the raw value would match nothing
 		// and restart the chain on every append.
 		const sessionId = normalizeIdentifier(input.session_id);
-		if (!this.greptime || !sessionId) return this.appendChained(input, sessionId);
-		const previous = this.emitChains.get(sessionId) ?? Promise.resolve();
+		// A keyed event with no session has no session turn to wait for, so under accept or enforce
+		// its key is the turn: a replay's lookup must not run while the original attempt's INSERT
+		// is still in flight (U5-4a). Keyless sessionless events, and everything under `off`, never wait.
+		const turnKey = sessionId ?? (idem?.key != null ? `${KEY_TURN_PREFIX}${idem.key}` : null);
+		if (!this.greptime || turnKey === null) return this.appendChained(input, sessionId, idem);
+		const previous = this.emitChains.get(turnKey) ?? Promise.resolve();
 		const { promise: gate, resolve: done } = Promise.withResolvers<void>();
 		const tail = previous.then(() => gate);
-		this.emitChains.set(sessionId, tail);
+		this.emitChains.set(turnKey, tail);
 		await previous;
 		try {
-			return await this.appendChained(input, sessionId);
+			return await this.appendChained(input, sessionId, idem);
 		} finally {
 			done();
-			if (this.emitChains.get(sessionId) === tail) this.emitChains.delete(sessionId);
+			if (this.emitChains.get(turnKey) === tail) this.emitChains.delete(turnKey);
 		}
 	}
 
-	private async appendChained(input: EventInput, sessionId: string | null): Promise<EmitResult> {
+	/**
+	 * The replay lookup, run inside the turn (U5-4a). `null` is a miss: append as usual. A hit is
+	 * the existing event, answered without a write — no INSERT, no ingest record, and the chain tip
+	 * is not read or moved. A lookup that throws is an answer too, `stored: false`: reading it as a
+	 * miss would write the duplicate this exists to prevent, so the client keeps its copy and retries.
+	 */
+	private async replayOutcome(input: EventInput, key: string): Promise<EmitResult | null> {
+		const probe = normalizeEvent(input, null, { key });
+		try {
+			const existing = await this.greptime!.findByIdempotencyKey(probe, key);
+			if (existing === null) return null;
+			return { event: { ...probe, id: existing.id, hash: existing.hash }, stored: true, deduplicated: true };
+		} catch (cause) {
+			const error = redact(String(cause));
+			process.stderr.write(`[substrate] idempotency lookup failed, event not stored — ${error}\n`);
+			return { event: probe, stored: false, error: `idempotency lookup failed: ${error}`, lookupFailed: true };
+		}
+	}
+
+	private async appendChained(input: EventInput, sessionId: string | null, idem: IdempotencyPlan | null): Promise<EmitResult> {
+		if (idem?.lookup && idem.key !== null && this.greptime) {
+			const settled = await this.replayOutcome(input, idem.key);
+			if (settled !== null) return settled;
+		}
 		let prev: string | null = null;
 		if (this.greptime && sessionId) {
 			prev = await this.greptime.lastHash(sessionId).catch(() => null);
 		}
-		const event = normalizeEvent(input, prev);
+		const event = idem === null ? normalizeEvent(input, prev) : normalizeEvent(input, prev, { key: idem.key });
 		if (!this.greptime) return { event, stored: false, error: "GREPTIME_URL is not set" };
 
 		// Fail closed: a ledger that may deduplicate does not get the write unless an
@@ -1792,6 +1921,10 @@ export class Substrate {
 		// again: a recall cached in the gap between the index bump and the retain
 		// landing must not hide the fresh memory for a whole TTL — and drops any
 		// parked copy of the same document, which the success just made stale.
+		// Under `SUBSTRATE_CACHE_BUMP_SCOPE=narrow` that second bump moves the
+		// recall generation, which only the entries holding a Hindsight recall
+		// list: a brief and a paged search read the index alone, so the accept
+		// bump above is the one flush they need.
 		// Forwards to one document run in acceptance order: a stalled older
 		// version must not land after (and replace) its accepted replacement.
 		if (result.outcome === "accepted" && result.verified_persisted && result.entry) {
@@ -1803,7 +1936,7 @@ export class Substrate {
 						if (!outcome.forwarded) return;
 						this.retainOutbox.forget(outcome.bank, outcome.document_id);
 						this.afterLiveRetain(result.writer);
-						return this.cache.bump(MEMORY_GENERATION_KEY);
+						return this.cache.bump(this.narrowBumps ? RECALL_GENERATION_KEY : MEMORY_GENERATION_KEY);
 					})
 					.then(() => undefined)
 					.catch(() => undefined);
@@ -1910,7 +2043,8 @@ export class Substrate {
 				shape: "merged-v1",
 				...this.expiryKey(includeExpired),
 			},
-			generations: this.memoryGenerations(),
+			// The merged search holds a Hindsight recall, so under `narrow` it lists the recall generation too.
+			generations: this.memoryGenerations(true),
 			refreshAt: (merged) => earliestRefreshAt(merged.entries.flatMap((entry) => [entry.reverify_after, entry.expires_at])),
 			// A degraded answer (outage, partial) is still the answer, but it
 			// must not sit in the cache: the next search re-probes the plane.
@@ -1973,9 +2107,16 @@ export class Substrate {
 	 * (or still tag as alive) its memories. The same pair a brief already embeds;
 	 * a `graph` entry has no `expires_at` for `refreshAt` to reach, so this is the
 	 * only way a search learns that its graph closed before the cache TTL.
+	 *
+	 * `includesRecall` is true for the merged search, whose answer carries a
+	 * Hindsight recall: under `SUBSTRATE_CACHE_BUMP_SCOPE=narrow` a retain moves
+	 * the recall generation, not the memory one, so that entry lists it as well.
+	 * The paged search reads the index alone and never does.
 	 */
-	private memoryGenerations(): string[] {
-		return [MEMORY_GENERATION_KEY, GRAPHS_GENERATION_KEY];
+	private memoryGenerations(includesRecall = false): string[] {
+		return includesRecall && this.narrowBumps
+			? [MEMORY_GENERATION_KEY, GRAPHS_GENERATION_KEY, RECALL_GENERATION_KEY]
+			: [MEMORY_GENERATION_KEY, GRAPHS_GENERATION_KEY];
 	}
 
 	/**
@@ -2064,9 +2205,11 @@ export class Substrate {
 			klass: "memory-search",
 			surface,
 			args: { recall: true, query, banks: banks ?? null },
-			// An accepted memory write bumps this generation, so a fresh
-			// retain is never hidden behind a stale recall (D26-06a).
-			generations: [MEMORY_GENERATION_KEY],
+			// An accepted memory write bumps the memory generation, so a fresh
+			// retain is never hidden behind a stale recall (D26-06a). The retain
+			// itself lands later: under `narrow` it bumps the recall generation,
+			// which this entry lists beside the memory one.
+			generations: this.narrowBumps ? [MEMORY_GENERATION_KEY, RECALL_GENERATION_KEY] : [MEMORY_GENERATION_KEY],
 			// A degraded answer (outage, partial) is still the answer, but it
 			// must not sit in the cache: the next call re-probes the plane.
 			store: (reply) => !reply.degraded,
@@ -2316,7 +2459,7 @@ export class Substrate {
 				...(parked.session_id !== undefined ? { sessionId: parked.session_id } : {}),
 			});
 			if (outcome.forwarded) {
-				await this.cache.bump(MEMORY_GENERATION_KEY).catch(() => undefined);
+				await this.cache.bump(this.narrowBumps ? RECALL_GENERATION_KEY : MEMORY_GENERATION_KEY).catch(() => undefined);
 				return "delivered";
 			}
 			if (outcome.queued === true) return { transient: outcome.reason ?? "retain-network" };
@@ -2502,6 +2645,7 @@ export class Substrate {
 				reopen: request.reopen === true,
 				allowDocExamples: new Set(request.allow_doc_examples ?? []),
 			});
+			if (!dryRun) await this.recordProposedSkill(request, result, surface);
 			if (!dryRun) {
 				await this.emit({
 					surface,
@@ -2545,6 +2689,207 @@ export class Substrate {
 			}
 			throw cause;
 		}
+	}
+
+	/**
+	 * Mirror a proposal into the skills registry as a `proposed` row (uplift-5 S5a). Only under
+	 * `SUBSTRATE_SKILLS_GOVERNANCE` report or enforce, and only once a pull request exists
+	 * (`opened`, or `existing` for a retry). It can never fail the proposal: a pull request is
+	 * already open, and the registry is a record about it. A failed write is warned once per streak
+	 * and retried by the next proposal of the same content (`existing`) or filled in by the
+	 * approval itself, which creates a missing row.
+	 */
+	private async recordProposedSkill(request: SkillProposalRequest, result: ProposeResult, surface: Surface): Promise<void> {
+		if (this.config.skillsGovernance === "off" || this.index === null) return;
+		if ((result.status !== "opened" && result.status !== "existing") || result.pr_number === undefined || result.pr_url === undefined) return;
+		try {
+			await this.index.upsertProposedSkill({
+				repo: this.config.skills.repo,
+				name: request.name,
+				pr_number: result.pr_number,
+				pr_url: result.pr_url,
+				branch: result.branch ?? null,
+				content_sha256: result.content_sha256,
+				proposed_by: surface,
+			});
+			this.skillRegistryWarned = false;
+		} catch (cause) {
+			if (this.skillRegistryWarned) return;
+			this.skillRegistryWarned = true;
+			const reason = redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200);
+			process.stderr.write(`[substrate] skills registry write failed; the proposal stands and the next proposal of it retries: ${reason}\n`);
+		}
+	}
+
+	/** A refused approval attempt, recorded as one `warning` carrying a rule name and nothing free-form. An event that cannot be stored never changes the answer. */
+	private async emitApprovalRefused(surface: Surface, sessionId: string, rule: ApprovalRule, request: SkillApprovalRequest): Promise<void> {
+		const name = typeof request.name === "string" && SKILL_NAME_RE.test(request.name) ? request.name : undefined;
+		const decision = (SKILL_DECISIONS as readonly string[]).includes(request.decision) ? request.decision : undefined;
+		await this.emit({
+			surface,
+			kind: "warning",
+			summary: `refused skill approval ${name ?? "(invalid name)"}: ${rule}`,
+			session_id: sessionId,
+			payload: { action: "skill.approve.refused", rule, ...(decision ? { decision } : {}), ...(name ? { name } : {}) },
+		}).catch(() => undefined);
+	}
+
+	/**
+	 * An operator's decision on a merged (or closed) skill pull request: approve, decline or
+	 * retire, recorded in the skills registry. The one writer of decided rows.
+	 *
+	 * Steps, in this order, and what survives a failure at each:
+	 *   1. authority: no surface 401, not an operator 403 (a swarm surface and `substrate` never
+	 *      are). Nothing has happened and nothing is emitted; the audit chain is the record.
+	 *   2. the values (decision, name, pr_number, reason): a refusal emits one refused warning.
+	 *   3. the library config and the index: a skills library that is not fixed, or no index, stops
+	 *      here, before gh is asked anything.
+	 *   4. `gh pr view` (approve and decline; retire is a local state change and needs no network):
+	 *      a failed or unreadable answer is 502 with NO row and NO event. A pull request that
+	 *      contradicts the decision is refused (one refused warning) before any row changes.
+	 *   5. the registry row, atomically: `exists` returns without emitting, a refused move emits
+	 *      one refused warning, an applied one is the decision.
+	 *   6. the decision's `note`. The row is the source of truth; the event is a best-effort trail. An
+	 *      event the ledger would not store never changes the decision: the answer carries
+	 *      `noted: false` and one stderr line names the row. A re-run answers `exists` and emits
+	 *      nothing, so an unstored note is recorded by hand, not by retrying.
+	 */
+	async approveSkill(
+		request: SkillApprovalRequest,
+		caller: { surface: Surface | null; isOperator: boolean },
+	): Promise<SkillApprovalResult> {
+		const surface = caller.surface;
+		if (surface === null) {
+			throw new SkillApprovalDenied(401, "skills_approve needs an authenticated surface; nothing was changed");
+		}
+		if (!caller.isOperator || isSwarmSurface(surface) || surface === "substrate") {
+			throw new SkillApprovalDenied(403, "skills_approve needs an operator token; nothing was changed");
+		}
+		const sessionId = `skills-approve:${randomUUID()}`;
+		let valid: ValidApproval;
+		try {
+			valid = validateApproval(request);
+		} catch (cause) {
+			if (cause instanceof SkillApprovalRefused) await this.emitApprovalRefused(surface, sessionId, cause.rule, request);
+			throw cause;
+		}
+		// Boot only warns. A non-default library that is not a local file remote, or one that
+		// still points at the real `gh`, must not reach gh.
+		if (this.config.skills.problem) {
+			throw new SkillApprovalFailed(502, `skill approvals are refused until the skills library is fixed: ${this.config.skills.problem}`);
+		}
+		const index = this.index;
+		if (index === null) {
+			throw new SkillApprovalFailed(503, "the skills registry lives in the index (SUBSTRATE_PG_URL), which is not configured; nothing was changed");
+		}
+		const repo = this.config.skills.repo;
+		const { name, pr_number: prNumber, decision } = valid;
+		let view: PrView | null = null;
+		if (decision !== "retire") {
+			view = await fetchPrView(this.skillRun, repo, prNumber);
+			const rule = prRefusal(decision, name, repo, prNumber, view);
+			if (rule !== null) {
+				await this.emitApprovalRefused(surface, sessionId, rule, request);
+				throw new SkillApprovalRefused(rule, refusalMessage(rule));
+			}
+		}
+		let decided: SkillDecisionResult;
+		try {
+			decided = await index.decideSkill({
+				repo,
+				name,
+				pr_number: prNumber,
+				decision,
+				merge_sha: decision === "approve" ? (view?.merge_sha ?? null) : null,
+				pr_url: view?.url ?? null,
+				branch: view?.head_ref ?? null,
+				proposed_by: view ? proposalBranchSurface(view.head_ref, name) : null,
+				decided_by: surface,
+				reason: valid.reason,
+			});
+		} catch (cause) {
+			const reason = redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200);
+			throw new SkillApprovalFailed(503, `the skills registry could not record the decision; nothing was changed: ${reason}`);
+		}
+		if (decided.outcome === "refused") {
+			await this.emitApprovalRefused(surface, sessionId, decided.rule, request);
+			throw new SkillApprovalRefused(decided.rule, refusalMessage(decided.rule));
+		}
+		const row = decided.row;
+		const result: SkillApprovalResult = {
+			status: decided.outcome === "exists" ? "exists" : (`${decision}d` as "approved" | "declined" | "retired"),
+			state: row.state,
+			name: row.name,
+			pr_number: row.pr_number,
+			pr_url: row.pr_url,
+			merge_sha: row.merge_sha,
+			content_sha256: row.content_sha256,
+			remaining_approved_for_name: decided.remaining_approved,
+		};
+		if (decided.outcome === "applied") {
+			// emit() reports a ledger that would not take the event as `stored: false`, it does not throw. The row
+			// is the decision and stands; the answer says whether its note was stored, and an unstored one is
+			// logged with the row's key, because a re-run answers `exists` and emits nothing.
+			const emitted = await this.emit({
+				surface,
+				kind: "note",
+				summary: `${decision}d skill ${name} (PR ${String(prNumber)})`,
+				repo,
+				session_id: sessionId,
+				payload: {
+					action: `skill.${decision}`,
+					name,
+					pr_number: prNumber,
+					...(row.pr_url !== null ? { pr_url: row.pr_url } : {}),
+					...(row.merge_sha !== null && decision !== "decline" ? { merge_sha: row.merge_sha } : {}),
+					decided_by: surface,
+				},
+			}).catch(() => null);
+			result.noted = emitted?.stored === true;
+			if (!result.noted) {
+				process.stderr.write(
+					`[substrate] skills registry: ${decision} of ${repo}/${name}#${String(prNumber)} by ${surface} is recorded but its skill.${decision} event was not stored; record it manually (a re-run answers exists and emits nothing)\n`,
+				);
+			}
+		}
+		return result;
+	}
+
+	/**
+	 * The skills registry as a reader sees it, by NAME. The default (`approved`) is open to any authenticated
+	 * surface, the substrate host-job surface included, and is what a projector filters on: one entry per name,
+	 * its most recent approved row, so a name stays listed while any of its rows is approved. Every other
+	 * `state` shows rows (proposals and decisions, several per name) and is an operator action, like
+	 * `include_expired`. A caller with no surface is 401 even on a run that allows anonymous callers. With no
+	 * index the answer is a 503, never an empty list: an enforcing reader must be able to tell "nothing is
+	 * approved" from "the registry cannot be read".
+	 */
+	async listSkills(query: { state?: string }, caller: { surface: Surface | null; isOperator: boolean }): Promise<SkillListResult> {
+		if (caller.surface === null) {
+			throw new SkillApprovalDenied(401, "skills_list needs an authenticated surface");
+		}
+		const state = query.state ?? "approved";
+		if (!(SKILL_LIST_STATES as readonly string[]).includes(state)) {
+			throw new SkillApprovalRefused("invalid_state", "state must be approved, proposed, declined, retired or all");
+		}
+		if (state !== "approved" && !caller.isOperator) {
+			throw new SkillApprovalDenied(403, "skills_list with a state other than approved needs an operator token; the default lists approved skills");
+		}
+		if (this.index === null) {
+			throw new SkillApprovalFailed(503, "the skills registry lives in the index (SUBSTRATE_PG_URL), which is not configured");
+		}
+		let rows: SkillRegistryRow[];
+		try {
+			rows = await this.index.listSkills(this.config.skills.repo, state === "all" ? null : (state as SkillState), LIST_MAX + 1);
+		} catch (cause) {
+			const reason = redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200);
+			throw new SkillApprovalFailed(503, `the skills registry could not be read: ${reason}`);
+		}
+		return {
+			governance: this.config.skillsGovernance,
+			skills: rows.slice(0, LIST_MAX).map((row) => toListEntry(row, state !== "approved")),
+			truncated: rows.length > LIST_MAX,
+		};
 	}
 
 	/** Where a node's events belong: the graph's repo, not whatever the caller said. */
@@ -4703,7 +5048,7 @@ export class Substrate {
 		const hindsight = hindsightFromEnv();
 		const [index, capacity, hindsightOk, ragflowOk, probe, ledgerCapacity] = await Promise.all([
 			this.index ? this.index.ping(HEALTH_PROBE_MS).catch(() => false) : Promise.resolve(false),
-			this.index ? bounded(() => this.index!.capacity(), HEALTH_PROBE_MS) : Promise.resolve(null),
+			this.index ? this.indexCapacityForHealth(this.index) : Promise.resolve(null),
 			hindsight
 				? probeHealth(hindsight, this.hindsightFetch, HEALTH_PROBE_MS).then((probed) => probed.ok, () => false)
 				: Promise.resolve(null),
@@ -4725,8 +5070,11 @@ export class Substrate {
 		const cache = this.cache.health();
 		const breakers = this.planes.snapshots();
 		// uplift-3 N2: every size read that answered in time is one runway sample;
-		// the observer's ring dedupes and bounds them.
-		if (capacity !== null) this.observer.capacity?.({ at: Date.now(), databaseBytes: capacity.databaseBytes });
+		// the observer's ring dedupes and bounds them. With a capacity memo the
+		// sample is taken where the measurement is, so a reused report is not sampled again.
+		if (capacity !== null && this.config.requestPath.healthzIndexCapacityMemoS === 0) {
+			this.observer.capacity?.({ at: Date.now(), databaseBytes: capacity.databaseBytes });
+		}
 		const ok: Record<PlaneName, boolean | null> = {
 			greptime: this.greptime ? greptime : null,
 			index: this.index ? index : null,
@@ -4765,6 +5113,39 @@ export class Substrate {
 			capacity: { index: capacity, ledger: ledgerCapacity },
 			jobs: { ledger: ledgerJobs.ledger, ledgerReason: ledgerJobs.reason, ...(indexArchive !== null ? { index: indexArchive } : {}) },
 		};
+	}
+
+	/** The last index size report `SUBSTRATE_HEALTHZ_INDEX_CAPACITY_MEMO_S` keeps, and the measurement still running. */
+	private indexCapacityMemo: { at: number; value: IndexCapacity } | null = null;
+	private indexCapacityFlight: Promise<IndexCapacity> | null = null;
+
+	/**
+	 * `/healthz`'s index size report (uplift-5 U5-3). Unset (0 s) it is today's call: measured on every
+	 * computed body, bounded at `HEALTH_PROBE_MS`. With a memo a report younger than the memo is
+	 * answered from memory, and a measurement still running (one that outlived the bound) is joined,
+	 * so a slow database is asked once, not once per poll. A measurement that fails or times out
+	 * stores nothing: the last good report stays until it ages out, then the answer is `null` again.
+	 * The runway sample is taken once per measurement.
+	 */
+	private indexCapacityForHealth(index: IndexStore): Promise<IndexCapacity | null> {
+		const memoMs = this.config.requestPath.healthzIndexCapacityMemoS * 1000;
+		if (memoMs === 0) return bounded(() => index.capacity(), HEALTH_PROBE_MS);
+		const memo = this.indexCapacityMemo;
+		// A negative age (the wall clock stepped back) is expired: a report must never outlive its memo.
+		const age = memo === null ? -1 : Date.now() - memo.at;
+		if (memo !== null && age >= 0 && age < memoMs) return Promise.resolve(memo.value);
+		this.indexCapacityFlight ??= Promise.resolve()
+			.then(() => index.capacity())
+			.then((value) => {
+				this.indexCapacityMemo = { at: Date.now(), value };
+				this.observer.capacity?.({ at: this.indexCapacityMemo.at, databaseBytes: value.databaseBytes });
+				return value;
+			})
+			.finally(() => {
+				this.indexCapacityFlight = null;
+			});
+		const flight = this.indexCapacityFlight;
+		return bounded(() => flight, HEALTH_PROBE_MS);
 	}
 
 	/** The last coverage read: when it started and its value, or why it has none. */
