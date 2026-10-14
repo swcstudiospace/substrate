@@ -387,6 +387,31 @@ describe("denied — default-deny RBAC", () => {
 		expect((await write({ text: "   " })).reason).toBe("text.empty");
 	});
 
+	test("a title-only lesson is a denial and a lesson with a fact is stored", async () => {
+		const empty = await write({ subject: "lesson:v1.3/session/retry-budget", text: "Retry budget" });
+		expect(empty.outcome).toBe("denied");
+		expect(empty.reason).toBe("lesson.empty");
+		expect(store.entries()).toEqual([]);
+
+		const headed = await write({
+			subject: "lesson:v1.3/session/lease-epochs",
+			text: "[lessonbank]\nmilestone: v1.3\nphase: session\n\n",
+		});
+		expect(headed.reason).toBe("lesson.empty");
+		expect(store.entries()).toEqual([]);
+
+		const stored = await write({
+			subject: "lesson:v1.3/session/lease-epochs",
+			text: "[lessonbank]\nmilestone: v1.3\nphase: session\n\nLease epochs fence stale holders.",
+			source_event: "session:sess-1",
+			session_id: "sess-1",
+		});
+		expect(stored.outcome).toBe("accepted");
+		expect(stored.verified_persisted).toBe(true);
+		expect(stored.entry?.text).toContain("Lease epochs fence stale holders.");
+		expect(stored.entry?.session_id).toBe("sess-1");
+	});
+
 	test("a refusal spends no idempotency key", async () => {
 		const result = await write({ writer: "unknown", idempotency_key: "k1" });
 		expect(result.idempotency_key).toBe("");

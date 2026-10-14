@@ -21,6 +21,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { lessonContentIssue } from "../../mcp-server/src/lesson-content.ts";
 import { redact, redactKnown, redactValue } from "../../mcp-server/src/redact.ts";
 import { list, parseArgs, str, type Args } from "./args.ts";
 
@@ -78,42 +79,7 @@ const STOPWORDS: Record<string, true> = Object.fromEntries(
 	].map((word) => [word, true]),
 );
 
-/** Bodies that name a label and carry no fact. Compared after whitespace collapse. */
-const PLACEHOLDER_BODIES = new Set([
-	"todo",
-	"tbd",
-	"n/a",
-	"na",
-	"placeholder",
-	"lorem ipsum",
-	"lesson",
-	"none",
-	"null",
-	"{}",
-	"[]",
-	"fixme",
-	"xxx",
-	"...",
-	"empty",
-]);
-
-/**
- * Why `text` cannot be stored as a lesson. Null, empty, whitespace, `{}`, `[]`,
- * a placeholder, or a title with no clause and fewer than four meaningful words
- * is a failed create: nothing successful is stored.
- */
-export function lessonContentIssue(text: string | null | undefined): string | null {
-	if (text == null) return "lesson body is null";
-	const collapsed = normalizeText(text);
-	if (collapsed.length === 0) return "lesson body is empty";
-	if (PLACEHOLDER_BODIES.has(collapsed.toLowerCase())) return `lesson body is a placeholder (${collapsed})`;
-	const words = collapsed
-		.toLowerCase()
-		.split(/[^a-z0-9]+/)
-		.filter((word) => word.length > 0 && !STOPWORDS[word]);
-	if (words.length < 4 && !/[.:;]/.test(collapsed)) return "lesson body is only a title or label and has no factual content";
-	return null;
-}
+export { lessonContentIssue } from "../../mcp-server/src/lesson-content.ts";
 
 const CHATTER = /session (?:ended|started)|pane[- ]?\w* exited|idle to working|\(no output\)|^no output$/i;
 
@@ -1320,7 +1286,8 @@ async function add(args: Args, deps: LessonsDeps): Promise<number> {
 /**
  * One lesson from a finished session. Facts share one correlation id (the session
  * id) and one idempotency key, so a replay returns the original lesson. A session
- * with no durable fact stores nothing and does not fail the caller.
+ * with no durable fact stores nothing and exits 1: that is a failed create, not
+ * a saved empty lesson.
  */
 async function ingest(args: Args, deps: LessonsDeps): Promise<number> {
 	const started = deps.now().getTime();
@@ -1338,7 +1305,7 @@ async function ingest(args: Args, deps: LessonsDeps): Promise<number> {
 			`[substrate] lesson ingest correlation=${sessionId} outcome=nothing-durable dropped=${dropped} latency_ms=${elapsed()}\n`,
 		);
 		if (args.json === true) deps.out(`${JSON.stringify({ outcome: "nothing-durable", correlation: sessionId, dropped })}\n`);
-		return 0;
+		return 1;
 	}
 	const milestone = identifier(str(args.milestone) ?? currentMilestone(deps) ?? "");
 	const phase = identifier(str(args.phase) ?? "");
@@ -1688,4 +1655,32 @@ async function outcome(args: Args, positional: string | undefined, deps: Lessons
 		if (now) deps.out(`${" ".repeat(12)}score of ${lessonId}: ${from} -> ${to}\n`);
 	}
 	return USABLE[report.status] ? 0 : 1;
+}
+
+/**
+ * The session-end hook's write. Same ingest as the CLI, with the hook's own
+ * timeout, so a copied transcript becomes one lesson before the turn is acknowledged.
+ * A session with no durable fact exits 1 and stores nothing.
+ */
+export async function flushSessionLesson(input: {
+	sessionId: string;
+	text: string;
+	repo?: string;
+	url: string;
+	token?: string;
+	timeoutMs: number;
+	root: string;
+	cwd: string;
+}): Promise<number> {
+	const args = ["ingest", "--session", input.sessionId, "--text", input.text, "--milestone", "session", "--phase", "cursor"];
+	if (input.repo) args.push("--repo", input.repo);
+	return runLessons(args, {
+		memory: httpMemory({ url: input.url, token: input.token, timeoutMs: input.timeoutMs }),
+		repo: input.repo,
+		root: input.root,
+		cwd: input.cwd,
+		now: () => new Date(),
+		out: () => {},
+		err: (text) => process.stderr.write(text),
+	});
 }

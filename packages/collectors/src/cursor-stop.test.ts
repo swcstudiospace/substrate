@@ -129,6 +129,44 @@ describe("copyTranscript", () => {
 });
 
 describe("runStop", () => {
+	test("flushes a lesson from the copied transcript before session.end", async () => {
+		const { events, emit } = recorder();
+		const flushed: Array<{ sessionId: string; text: string }> = [];
+		const path = transcript('Decision: The index sweep prints ttl candidate ids and does not delete documents.\nsession ended\n');
+		const raw = JSON.stringify({ conversation_id: ID, transcript_path: path, status: "completed" });
+		await runStop(raw, {
+			emit,
+			root,
+			destDir: dest,
+			flushLesson: async (lesson) => {
+				flushed.push(lesson);
+			},
+		});
+		expect(flushed).toEqual([
+			{
+				sessionId: ID,
+				text: "The index sweep prints ttl candidate ids and does not delete documents.",
+			},
+		]);
+		expect(events[0]?.kind).toBe("session.end");
+	});
+
+	test("chatter does not flush an empty lesson", async () => {
+		const { emit } = recorder();
+		const flushed: unknown[] = [];
+		const path = transcript("session ended\n");
+		const raw = JSON.stringify({ conversation_id: ID, transcript_path: path, status: "completed" });
+		await runStop(raw, {
+			emit,
+			root,
+			destDir: dest,
+			flushLesson: async (lesson) => {
+				flushed.push(lesson);
+			},
+		});
+		expect(flushed).toEqual([]);
+	});
+
 	test("copies an in-root transcript and emits session.end naming it", async () => {
 		const { events, emit } = recorder();
 		const raw = JSON.stringify({ conversation_id: ID, transcript_path: transcript(), status: "completed" });

@@ -27,6 +27,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { canonicalJson, normalizeIdentifier, sha256Hex } from "./event.ts";
+import { lessonWriteIssue } from "./lesson-content.ts";
 import { classify } from "./memory-classify.ts";
 import {
 	conflictKey,
@@ -455,6 +456,10 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 	const raw = typeof request.text === "string" ? request.text.trim() : "";
 	if (!raw) {
 		return refuse("denied", "text.empty", "text is required — an empty memory entry tells the next agent nothing.");
+	}
+	const lessonIssue = lessonWriteIssue(raw, typeof request.subject === "string" ? request.subject : null);
+	if (lessonIssue) {
+		return refuse("denied", "lesson.empty", `${lessonIssue}. An empty lesson is not stored.`);
 	}
 
 	// ── 2. RBAC, default-deny ──────────────────────────────────────────────────

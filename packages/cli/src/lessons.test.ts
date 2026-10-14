@@ -1346,7 +1346,7 @@ describe("session lessons", () => {
 
 	test("chatter and a planted bearer are not a successful empty or secret lesson", async () => {
 		const empty = harness();
-		expect(await empty.run(["ingest", "--session", "sess-chatter", "--text", "session ended\nherdr pane-7 exited", "--phase", "15-lessons-bank", "--json"])).toBe(0);
+		expect(await empty.run(["ingest", "--session", "sess-chatter", "--text", "session ended\nherdr pane-7 exited", "--phase", "15-lessons-bank", "--json"])).toBe(1);
 		expect(fake.writes).toHaveLength(0);
 		expect(empty.out()).toContain("nothing-durable");
 

@@ -17,8 +17,11 @@
  * as refused. `SUBSTRATE_CURSOR_ROOT` and `SUBSTRATE_TRANSCRIPTS_DIR` override
  * the defaults, and are read when the hook runs, not when the module loads.
  */
-import { chmodSync, closeSync, constants, fstatSync, mkdirSync, openSync, readSync, realpathSync, renameSync, rmSync, writeSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { chmodSync, closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, writeSync } from "node:fs";
 import { join } from "node:path";
+import { extractDurableFacts, flushSessionLesson } from "../../cli/src/lessons.ts";
+import { resolveBearer } from "../../cli/src/token.ts";
 import { redact } from "../../mcp-server/src/redact.ts";
 import type { EventInput } from "../../mcp-server/src/types.ts";
 import { HOOK_TIMEOUT_MS, postEvent } from "./emit.ts";
@@ -44,12 +47,29 @@ export interface CopyResult {
 	reason?: string;
 }
 
+/** Facts already extracted from a copied transcript, capped so the lesson is not the raw log. */
+export function sessionLessonText(transcript: string, limit = 3000): string {
+	let body = "";
+	for (const fact of extractDurableFacts(transcript).facts) {
+		const next = body ? `${body}\n${fact}` : fact;
+		if (next.length > limit) break;
+		body = next;
+	}
+	return body;
+}
+
 export interface StopDeps {
 	emit: (event: EventInput) => Promise<unknown>;
 	/** Transcripts outside this directory (after realpath) are refused. */
 	root?: string;
 	destDir?: string;
 	maxBytes?: number;
+	/**
+	 * Writes the lesson for a copied transcript that contains durable facts.
+	 * The hook awaits it and then still exits 0: a lesson failure must not fail
+	 * the Cursor turn. Absent in tests that only assert the event.
+	 */
+	flushLesson?: (lesson: { sessionId: string; text: string }) => Promise<void>;
 }
 
 /** Roots read at call time so a long-lived process and tests see the live environment. */
@@ -205,6 +225,16 @@ export async function runStop(raw: string, deps: StopDeps): Promise<CopyResult> 
 					: { ref: null, reason: resolved.reason };
 		}
 
+		if (id && result.ref && deps.flushLesson) {
+			try {
+				const text = sessionLessonText(readFileSync(result.ref, "utf8"));
+				if (text.length > 0) await deps.flushLesson({ sessionId: id, text });
+				else process.stderr.write(`[substrate] lesson ingest correlation=${id} outcome=nothing-durable\n`);
+			} catch {
+				process.stderr.write(`[substrate] lesson flush failed correlation=${id}\n`);
+			}
+		}
+
 		event = {
 			surface: "cursor",
 			kind: "session.end",
@@ -244,14 +274,34 @@ async function readStdin(timeoutMs: number): Promise<string> {
 	}
 }
 
+function originRepo(): string | undefined {
+	const named = process.env.SUBSTRATE_REPO?.trim();
+	if (named) return named;
+	const result = spawnSync("git", ["remote", "get-url", "origin"], { encoding: "utf8" });
+	if (result.status !== 0) return undefined;
+	return result.stdout.trim().match(/[:/]([^/:]+\/[^/]+?)(?:\.git)?$/)?.[1];
+}
+
 if (import.meta.main) {
 	try {
 		const raw = await readStdin(STDIN_TIMEOUT_MS);
 		const paths = hookPaths();
+		const repo = originRepo();
 		await runStop(raw, {
 			emit: (event) => postEvent(event, { timeoutMs: HOOK_TIMEOUT_MS, collector: "cursor-stop", source: "cursor.stop" }),
 			root: paths.root,
 			destDir: paths.destDir,
+			flushLesson: (lesson) =>
+				flushSessionLesson({
+					sessionId: lesson.sessionId,
+					text: lesson.text,
+					repo,
+					url: (process.env.SUBSTRATE_URL?.trim() || "http://127.0.0.1:7410").replace(/\/+$/, ""),
+					token: resolveBearer("cursor", process.env) ?? undefined,
+					timeoutMs: HOOK_TIMEOUT_MS,
+					root: process.cwd(),
+					cwd: process.cwd(),
+				}).then(() => undefined),
 		});
 	} catch {
 		// Fail open.
