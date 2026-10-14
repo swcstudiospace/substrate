@@ -294,21 +294,6 @@ describe("repo units", () => {
 		}
 		const mcp = units.find((unit) => unit.name === "substrate-mcp.service");
 		expect(mcp?.environmentFiles).toEqual([SHARED_ENV_FILE]);
-		// The dispatcher is TypeScript on Bun: its bun entry resolves, it
-		// loads only its own env file, it restarts only on failure, and no
-		// baked-in disable switch can restart-loop it. The python
-		// substrate_dispatcher fixtures above stay as negative tests.
-		const dispatcher = units.find((unit) => unit.name === "substrate-dispatcher.service");
-		expect(dispatcher?.execStart).toContain("packages/dispatcher/src/index.ts");
-		expect(entryFromExecStart(dispatcher?.execStart ?? "")).toEqual({
-			kind: "path",
-			path: "packages/dispatcher/src/index.ts",
-			absolute: false,
-		});
-		expect(dispatcher?.environmentFiles).toEqual(["/etc/substrate/dispatcher.env"]);
-		expect(dispatcher?.environmentFiles).not.toContain(SHARED_ENV_FILE);
-		expect([...(dispatcher?.environment.keys() ?? [])]).toEqual([]);
-		expect(dispatcher?.restart).toBe("on-failure");
 		// The anchor job is a store client in the server's trust domain, not a
 		// collector: it loads the shared env on the pinned release and raises
 		// no finding of its own (D28-02).

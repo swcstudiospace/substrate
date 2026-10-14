@@ -84,4 +84,4 @@ gh variable delete CI_ENABLED --repo swcstudiospace/agent-substrate            #
 - Keep `permissions: contents: read` and `persist-credentials: false`. No secrets belong in this file; the database password is a scratch value for a container that lives for one job.
 - Change a gate command in `scripts/verify.ts` and in the workflow together; the drift test names whichever one you forgot.
 - The job and step names are stable on purpose: they are what a branch-protection rule would require.
-- The dispatcher is TypeScript on Bun tested by `bun test`. No Python tests exist on `main` yet. When the miner lands (milestone v1.3), add a `setup-python` step pinned by commit SHA and a pytest step to `verify` for the miner only, and mirror it in `scripts/verify.ts`.
+- No Python tests exist on `main` yet. When the dispatcher and miner land (milestone v1.3), add a `setup-python` step pinned by commit SHA and a pytest step to `verify`, and mirror it in `scripts/verify.ts`.
