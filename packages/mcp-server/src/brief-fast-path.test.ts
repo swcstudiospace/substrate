@@ -20,8 +20,8 @@ import {
 } from "./cache.ts";
 import { loadConfig, type SubstrateConfig } from "./config.ts";
 import { createObservability, type Observability } from "./observe.ts";
-import { createHttpServer, etagMatches, type HttpServerOptions } from "./server.ts";
-import { Substrate, briefEtag } from "./service.ts";
+import { createHttpServer, type HttpServerOptions } from "./server.ts";
+import { Substrate, briefEtag, etagMatches } from "./service.ts";
 
 /** A redis that answers after `delayMs`, remembers every command and may lack MGET. */
 class FakeRedis implements CacheRedis {

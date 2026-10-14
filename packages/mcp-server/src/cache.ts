@@ -20,7 +20,10 @@
  * One class is generation-free: `brief-snapshot` holds the last *complete*
  * brief per surface and arguments (uplift-2 R1), read only when the live
  * compose came back degraded. It is still a cache — a restart drops it and the
- * brief composes as before.
+ * brief composes as before. The admission buckets (uplift-3 N3, `admission.ts`)
+ * are the one key class that is not a cached answer: `budget:<surface>:<class>`,
+ * stepped by one `EVAL` through `script()`, always with a TTL, and a cache that
+ * cannot answer admits every caller.
  */
 import { createHash } from "node:crypto";
 import { RedisClient } from "bun";
@@ -93,6 +96,9 @@ export interface CacheSample {
 	mode: CacheMode;
 }
 
+/** What `ReadThroughCache.script` answers; `ok: false` is a bounded, redacted reason the caller treats as cache-off. */
+export type ScriptOutcome = { ok: true; value: unknown } | { ok: false; reason: string };
+
 /** The commands the cache uses. Tests pass a fake; production uses Bun. */
 export interface CacheRedis {
 	get(key: string): Promise<string | null>;
@@ -100,6 +106,11 @@ export interface CacheRedis {
 	incr(key: string): Promise<number>;
 	/** One round trip for several keys. A fake without it is read with concurrent GETs. */
 	mget?(keys: readonly string[]): Promise<Array<string | null>>;
+	/**
+	 * Run a Lua script atomically (uplift-3 N3 admission). A fake without it makes
+	 * every admission decision a bypass, which is the cache-off answer.
+	 */
+	eval?(script: string, keys: readonly string[], args: readonly string[]): Promise<unknown>;
 	/** When the client is refusing to reconnect, epoch ms; absent or null otherwise. */
 	cooldownUntil?(): number | null;
 }
@@ -268,7 +279,7 @@ export function bunRedis(url: string, options: BunRedisOptions = {}): CacheRedis
 	// is one outcome — a failed connect still charges the breaker, a successful
 	// one on its own never clears it — and an open breaker refuses before any
 	// socket is opened, so no cooldown starts from a refusal.
-	const run = <T>(op: "get" | "mget" | "set" | "incr", command: (redis: RedisClient) => Promise<T>): Promise<T> => {
+	const run = <T>(op: "get" | "mget" | "set" | "incr" | "eval", command: (redis: RedisClient) => Promise<T>): Promise<T> => {
 		// The cooldown is checked outside the gate: a refusal is not a plane outcome.
 		if (cooldownUntil !== null && now() < cooldownUntil) {
 			return Promise.reject(new Error(`cache connect cooling down for ${Math.ceil((cooldownUntil - now()) / 1000)} s`));
@@ -289,6 +300,10 @@ export function bunRedis(url: string, options: BunRedisOptions = {}): CacheRedis
 		mget: (keys) => run("mget", (redis) => redis.mget(...keys)),
 		set: (key, value, ttlSeconds) => run("set", (redis) => redis.set(key, value, "EX", ttlSeconds).then(() => undefined)),
 		incr: (key) => run("incr", (redis) => redis.incr(key)),
+		// Bun spells it `eval(script, numkeys, ...keysAndArgs)`; the whole script is
+		// sent each time rather than `EVALSHA`, so a flushed or restarted server
+		// never answers NOSCRIPT inside the one command budget a request has.
+		eval: (script, keys, args) => run("eval", (redis) => redis.eval(script, keys.length, ...keys, ...args)),
 		cooldownUntil: () => (cooldownUntil !== null && now() < cooldownUntil ? cooldownUntil : null),
 	};
 }
@@ -530,6 +545,28 @@ export class ReadThroughCache {
 		} catch (cause) {
 			this.fail(cause, false);
 			return false;
+		}
+	}
+
+	/**
+	 * Run a script atomically (uplift-3 N3): the admission bucket's one round
+	 * trip. `ok: false` is the cache off, a client without `EVAL`, or a command
+	 * that failed or timed out — every one a reason the caller admits and counts
+	 * a bypass, so the reason is bounded and redacted and never the answer.
+	 * A failure degrades the cache like any other failed command; not a counted
+	 * bypass, because no read was served from the source in its place.
+	 */
+	async script(script: string, keys: readonly string[], args: readonly string[]): Promise<ScriptOutcome> {
+		if (!this.enabled || !this.redis) return { ok: false, reason: "cache off" };
+		const redis = this.redis;
+		if (!redis.eval) return { ok: false, reason: "cache client has no EVAL" };
+		try {
+			const value = await this.attempt(() => redis.eval!(script, keys, args));
+			this.noteConnected();
+			return { ok: true, value };
+		} catch (cause) {
+			this.fail(cause, false);
+			return { ok: false, reason: redact(stripRedisUrl(cause instanceof Error ? cause.message : String(cause))) };
 		}
 	}
 

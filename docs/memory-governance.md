@@ -288,6 +288,69 @@ decayed entry is still briefed; the brief appends `— needs reverification` rat
 than presenting it as settled, because dropping it would lose the only record that
 the decision was ever taken.
 
+## Lifetime: what `ttl` does on read
+
+`ttl` is retention — the other half of the sentence above. Until uplift-3 N4 nothing
+read it: a `30d` note from last quarter and a `graph` decision for a graph merged
+months ago were briefed and searched like a `permanent` one, and the sweeper's two
+`entries-ttl-*` classes stayed report-only because deleting what the reads still
+served would have changed their answers. One predicate now answers the question
+everywhere, `memoryExpiry(entry, graph, now)` in `memory-policy.ts`:
+
+| `ttl` | Expired when | `expires_at` |
+|---|---|---|
+| `30d` | `created + 30 days` has passed | that instant |
+| `graph` | the graph it lives for is finished (a status in `TERMINAL_GRAPH_STATUSES`, the sweeper's list) or has no `graph_index` row — swept, or never registered | none: its end is an event |
+| `permanent` | never | none |
+
+The graph a `graph` entry lives for is its `graph_id`, or the id of a `graph:` scope
+when the write gave none (`memoryGraphId`); an entry with neither has no graph to
+live for and is expired. An indexed graph whose row carries no status is open, as
+`openGraphs` reads it. A `ttl` nobody defined, or a row whose `created` cannot be
+parsed, never expires: a row we cannot classify is not one to hide on the strength
+of the gap.
+
+The index applies it at the one place entries are served (`IndexStore.servable`,
+shared by `memoryForBrief` and `searchMemoryPage` — so the brief, `memory_search`,
+the subject listings and the agent card cannot disagree): after a page is read,
+one extra bounded query fetches the `graph_index` status of every distinct graph
+the page's `graph` entries name, and the predicate runs in process. Every served
+entry carries `expired` (and `expires_at` where the class has one), so a reader can
+see what enforcement would do before it is turned on. What happens next is
+`SUBSTRATE_MEMORY_EXPIRY`:
+
+| Mode | Reads | Brief | Sweep `entries-ttl-*` | Counter |
+|---|---|---|---|---|
+| `report` (default, and anything unrecognised — with a boot warning) | expired entries served, tagged `expired: true` | listed with `— expired` | count only | `substrate.memory.expired{mode=served}` |
+| `enforce` | expired entries left out unless the caller passes `include_expired` | left out | deletable, still only under `SUBSTRATE_INDEX_SWEEP=apply` plus `--apply` | `substrate.memory.expired{mode=hidden}` |
+
+`include_expired` on `memory_search` is an operator action, gated like `force` on
+the operator token: an agent cannot widen its own reads by typing a flag. It is
+refused under `report` too, so the rule is learned once rather than at the flip.
+The counter carries `surface` (the caller), the memory `kind` and `mode`, and is
+taken where the index is read — a cache hit serves a copy and counts nothing. The
+cache refreshes a search or a brief at the nearest `expires_at` it holds, as it
+already did at the nearest `reverify_after`; a cached answer never outlives an
+entry in it. Under `enforce` the memory cache keys change (the mode is part of the
+key), so a flip followed by a restart cannot be answered from `report` entries.
+
+**The retain forward refuses an expired entry in both modes** (`retain.expired`, a
+`memory.retain.failed` warning naming the `ttl` and the reason, never the body).
+`report` is about what the index still serves; a Hindsight bank keeps what it is
+given until replaced, and copying a dead memory into one is wrong whichever way
+the reads are set. The outbox replay meets this most — an entry parked for hours
+can be past its lifetime by the time its turn comes — and a refusal there is
+permanent, never retried. A `graph` entry the forward cannot judge (no index at
+hand, or an index read that failed) is forwarded rather than guessed dead.
+
+No row is deleted by any of this. Under `enforce` the sweep's two `ttl` classes
+gain a delete, but it runs only on `apply`, which the env and the flag gate
+separately — two switches, three keys, before a `ttl` row goes. The 30-day span
+of the sweep's `entries-ttl-30d` cutoff is the predicate's own constant, and the
+graph class names the graph the same way `memoryGraphId` does, so the sweep removes
+exactly what the reads already hide (and, for `graph` entries, only once the
+`graphsDays` window has also passed).
+
 ## Exactly-once
 
 `memory_writes` holds one row per idempotency key ever spent.
@@ -412,6 +475,7 @@ caller's filter, not an authorisation: reads carry no per-scope RBAC, as before.
 | `scope` | Exactly this scope. |
 | `limit` | 1–100, default 20. |
 | `include_superseded` | Also retired versions: a decision's history. |
+| `include_expired` | Also entries past their `ttl` under `SUBSTRATE_MEMORY_EXPIRY=enforce` (§ Lifetime). An operator action: refused without an operator token, in either mode. |
 | `subject_prefix` | Only entries whose stored subject starts with this. Normalised like a subject (`normalizeSubject`: trimmed and lowercased) and matched literally with `left()`, so `%`, `_` and `\` are characters, not LIKE patterns. An entry with no subject never matches. |
 | `before` | Cursor: an ISO-8601 instant with a zone. Only entries created strictly before it. |
 | `before_id` | Cursor tie-break, only with `before`: also entries created *at* `before` whose id sorts below this. |
@@ -613,10 +677,11 @@ additionally requires that env — two keys to delete. What it may remove, and w
 
 Counted in every report and **never deleted**: unresolved quarantine rows (the
 table has no decision column, so "pending" is anything whose content never
-landed), `ttl=30d` entries older than 30 days and `ttl=graph` entries whose graph
-is finished. `memory_search` and the brief do not filter on `ttl`, so deleting
-those would change what the reads answer; they stay until the reads honour `ttl`.
-The graph tables follow `docs/data-planes.md`: terminal graphs + 90 days.
+landed). The `ttl=30d` entries older than 30 days and `ttl=graph` entries whose
+graph is finished or unindexed are counted too, and deleted only under
+`SUBSTRATE_MEMORY_EXPIRY=enforce` — once the reads hide them, removing them
+changes no answer; see § Lifetime. The graph tables follow `docs/data-planes.md`:
+terminal graphs + 90 days.
 
 ## Running the proofs
 

@@ -43,7 +43,8 @@ function entry(overrides: Partial<MemoryEntry> = {}): MemoryEntry {
 		writer: "cursor",
 		actor: "agent",
 		trust: "agent-claimed",
-		ttl: "30d",
+		// Permanent, so a replay never ages into `retain.expired` (memory-retain.test.ts covers that).
+		ttl: "permanent",
 		created: "2026-10-10T00:00:00.000Z",
 		version: 1,
 		entry_hash: "hash_1",

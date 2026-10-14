@@ -31,7 +31,63 @@ export const METRIC = {
 	cacheOperations: "substrate.cache.operations",
 	planeDuration: "substrate.plane.duration",
 	planeErrors: "substrate.plane.errors",
+	admissionDecisions: "substrate.admission.decisions",
+	docsSearch: "substrate.docs.search",
+	docsCitations: "substrate.docs.citations",
+	docsDuration: "substrate.docs.duration",
+	memoryExpired: "substrate.memory.expired",
+	briefResult: "substrate.brief.result",
 } as const;
+
+/**
+ * What a brief was answered with (uplift-3 N7). `complete`: every source
+ * answered; `degraded`: some did not, thin live text; `snapshot`: some did
+ * not, last-good text served instead. The service's `BriefDetail.state` is
+ * this set — named here because it is a metric label and must stay closed.
+ */
+export const BRIEF_STATES = ["complete", "degraded", "snapshot"] as const;
+export type BriefState = (typeof BRIEF_STATES)[number];
+
+/** Whether the caller received the brief's text (`fresh`) or only its validator (`not_modified`: HTTP 304, MCP `not_modified: true`). */
+export const BRIEF_RESULTS = ["fresh", "not_modified"] as const;
+export type BriefResult = (typeof BRIEF_RESULTS)[number];
+
+/** What one docs search answered with. One series each, so the label stays bounded. */
+export const DOCS_SEARCH_OUTCOMES = ["hit", "empty", "degraded"] as const;
+export type DocsSearchOutcome = (typeof DOCS_SEARCH_OUTCOMES)[number];
+
+/**
+ * Where a citation's commit came from (uplift-3 N5): the document's own
+ * ingest record (`recorded`), a record uploaded without a commit
+ * (`unpinned`), or no record at all (`unrecorded`). The closed set the
+ * `dataset-pin:<name>:<marker>` commit markers already define.
+ */
+export const CITATION_PROVENANCES = ["recorded", "unrecorded", "unpinned"] as const;
+export type CitationProvenance = (typeof CITATION_PROVENANCES)[number];
+
+/**
+ * The end-to-end docs search histogram's bounds. The shared default set has
+ * no edge at the `docs.search.p95` objective (2,000 ms) nor at the default
+ * budget (4,000 ms), and a latency objective is only decidable at one of
+ * its histogram's own edges (`evaluateLatency`), so this histogram carries
+ * both.
+ */
+export const DOCS_LATENCY_BUCKETS_MS: readonly number[] = [25, 50, 100, 200, 400, 800, 1000, 2000, 4000, 8000];
+
+/** One finished docs search, as the service measured it around the cache wrapper. */
+export interface DocsSearchSample {
+	surface: string;
+	outcome: DocsSearchOutcome;
+	/** Whether the answer came from the cache (no plane call) or was loaded. */
+	cached: boolean;
+	durationMs: number;
+	/** How many returned citations carry each provenance; absent keys count zero. */
+	citations: Partial<Record<CitationProvenance, number>>;
+}
+
+/** What a read did with an expired memory entry: served it tagged (`report`) or left it out (`enforce`). */
+export const MEMORY_EXPIRED_MODES = ["served", "hidden"] as const;
+export type MemoryExpiredMode = (typeof MEMORY_EXPIRED_MODES)[number];
 
 /** Why a plane call failed. One series each, so the reason stays bounded. */
 export const PLANE_ERROR_REASONS = ["timeout", "network", "server", "open", "other"] as const;
@@ -56,6 +112,21 @@ export function classifyPlaneReason(sample: PlaneSample): PlaneErrorReason | nul
 	}
 	return "other";
 }
+
+/**
+ * The admission budget classes (uplift-3 N3). `coordination` is its own class so
+ * a heartbeat or a release never queues behind a storm of reads; a lease lost to
+ * throttling is the failure the budgets must not cause.
+ */
+export const ADMISSION_CLASSES = ["read", "write", "coordination"] as const;
+export type AdmissionClass = (typeof ADMISSION_CLASSES)[number];
+
+/**
+ * What the bucket decided. `shadow_limited` is a refusal that was not enforced
+ * (`SUBSTRATE_BUDGETS=shadow`); `bypass` is the cache not answering, which admits.
+ */
+export const ADMISSION_DECISIONS = ["allowed", "limited", "shadow_limited", "bypass"] as const;
+export type AdmissionDecision = (typeof ADMISSION_DECISIONS)[number];
 
 /** Why a `POST /events` was refused with 4xx. One series each, so the reason stays bounded. */
 export const EVENT_REFUSAL_REASONS = ["auth", "validation", "attribution", "graph_id"] as const;
@@ -168,6 +239,12 @@ export class SubstrateInstruments {
 	readonly cacheOperations: Counter;
 	readonly planeDuration: Histogram;
 	readonly planeErrors: Counter;
+	readonly admissionDecisions: Counter;
+	readonly docsSearch: Counter;
+	readonly docsCitations: Counter;
+	readonly docsDuration: Histogram;
+	readonly memoryExpired: Counter;
+	readonly briefResult: Counter;
 
 	constructor(registry: MetricRegistry = new MetricRegistry()) {
 		this.registry = registry;
@@ -245,6 +322,33 @@ export class SubstrateInstruments {
 		this.planeErrors = registry.counter(METRIC.planeErrors, {
 			description: "Failed plane calls by plane and reason (timeout|network|server|open|other).",
 			unit: "{call}",
+		});
+		this.admissionDecisions = registry.counter(METRIC.admissionDecisions, {
+			description: "Admission budget decisions by surface, class (read|write|coordination) and decision (allowed|limited|shadow_limited|bypass).",
+			unit: "{decision}",
+		});
+		this.docsSearch = registry.counter(METRIC.docsSearch, {
+			description: "Docs searches by surface, outcome (hit|empty|degraded) and whether the cache answered (cached=true|false).",
+			unit: "{search}",
+		});
+		this.docsCitations = registry.counter(METRIC.docsCitations, {
+			description: "Citations returned by docs searches, by commit provenance (recorded|unrecorded|unpinned).",
+			unit: "{citation}",
+		});
+		this.docsDuration = registry.histogram(METRIC.docsDuration, {
+			unit: "ms",
+			bounds: DOCS_LATENCY_BUCKETS_MS,
+			description: "End-to-end time to answer one docs search, by surface and cached. The docs.search.p95 subject: p95 <= 2000 ms.",
+		});
+		this.memoryExpired = registry.counter(METRIC.memoryExpired, {
+			description:
+				"Memory entries past their ttl met by an index read, by caller surface, memory kind and what was done (served|hidden).",
+			unit: "{entry}",
+		});
+		this.briefResult = registry.counter(METRIC.briefResult, {
+			description:
+				"Briefs answered, by surface, state (complete|degraded|snapshot) and result (fresh: text sent; not_modified: 304 or MCP not_modified).",
+			unit: "{brief}",
 		});
 	}
 
@@ -347,6 +451,16 @@ export class SubstrateInstruments {
 	}
 
 	/**
+	 * One expired memory entry an index read met (uplift-3 N4). `kind` is the
+	 * closed memory-kind vocabulary and `mode` the two-way switch, so the series
+	 * count is surfaces × kinds × 2 and nothing a caller types reaches a label.
+	 * Counted where the index is read: a cache hit serves a copy and counts nothing.
+	 */
+	recordMemoryExpired(sample: { surface: string; kind: string; mode: MemoryExpiredMode }): void {
+		this.memoryExpired.add(1, cleanAttributes({ surface: sample.surface, kind: sample.kind, mode: sample.mode }));
+	}
+
+	/**
 	 * One untokened caller that was accepted.
 	 *
 	 * `claimedSurface` is what the body named, or `none` when it named nobody —
@@ -358,5 +472,42 @@ export class SubstrateInstruments {
 			1,
 			cleanAttributes({ route: sample.route, claimed_surface: sample.claimedSurface }),
 		);
+	}
+
+	/**
+	 * One admission decision (uplift-3 N3). `surface` is the bucket identity — a
+	 * known surface or `anonymous` — never a body-claimed name, so the series stay
+	 * bounded by the surface list; the other two labels are closed sets.
+	 */
+	recordAdmission(sample: { surface: string; klass: AdmissionClass; decision: AdmissionDecision }): void {
+		this.admissionDecisions.add(1, { surface: sample.surface, class: sample.klass, decision: sample.decision });
+	}
+
+	/**
+	 * One finished docs search (uplift-3 N5): its end-to-end latency as the
+	 * caller waited for it — cache hit or loaded — its bounded outcome, and
+	 * the provenance split of the citations it returned. The citation counter
+	 * is per returned citation, so `unrecorded / total` reads directly as the
+	 * share of answers the ingest records cannot vouch for.
+	 */
+	recordDocsSearch(sample: DocsSearchSample): void {
+		const cached = sample.cached ? "true" : "false";
+		this.docsDuration.record(sample.durationMs, cleanAttributes({ surface: sample.surface, cached }));
+		this.docsSearch.add(1, cleanAttributes({ surface: sample.surface, outcome: sample.outcome, cached }));
+		for (const provenance of CITATION_PROVENANCES) {
+			const count = sample.citations[provenance] ?? 0;
+			if (count > 0) this.docsCitations.add(count, { provenance });
+		}
+	}
+
+	/**
+	 * One brief answered (uplift-3 N7). Counted where the answer is decided, not
+	 * where the brief is composed: the histogram above says how long a brief
+	 * took, this says whether the caller got text or a `not_modified`, which is
+	 * the saving a conditional request buys. `state` and `result` are the closed
+	 * sets above; `surface` is bounded by the caller.
+	 */
+	recordBriefResult(sample: { surface: string; state: BriefState; result: BriefResult }): void {
+		this.briefResult.add(1, cleanAttributes({ surface: sample.surface, state: sample.state, result: sample.result }));
 	}
 }

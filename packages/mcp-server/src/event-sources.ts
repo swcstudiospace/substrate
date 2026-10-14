@@ -448,6 +448,77 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 		}),
 	},
 	{
+		// uplift-3 N1: the runtime doctor (scripts/doctor-runtime.ts --emit) posts
+		// one warning per drift CLASS (units, slice, redis, timers, disk, swap,
+		// env) when its drift set changed since the last run. The phase column
+		// is the v1.3 numbering; this row lands after phase 33.
+		id: "doctor.drift",
+		phase: 33,
+		kind: "warning",
+		surface: { fixed: "substrate" },
+		actions: ["doctor"],
+		runtime: "doctor",
+		carriesRepo: false,
+		periodic: true,
+		sample: () => ({
+			surface: "substrate",
+			kind: "warning",
+			summary: "runtime drift (redis): redis maxmemory, redis maxmemory-policy, redis save",
+			session_id: "doctor:2026-10-13T12:00:00.000Z",
+			payload: {
+				action: "doctor",
+				runtime: "doctor",
+				class: "redis",
+				checks: [
+					{ check: "redis maxmemory", expected: "256M", actual: "0" },
+					{ check: "redis maxmemory-policy", expected: "volatile-lru", actual: "noeviction" },
+					{ check: "redis save", expected: '"" (no RDB snapshots)', actual: "3600 1 300 100 60 10000" },
+				],
+			},
+		}),
+	},
+	{
+		// uplift-3 N2: the SLO notifier (slo-notify.ts, SUBSTRATE_SLO_NOTIFY=1)
+		// posts one warning when an objective's breach or a breaker's open state
+		// has held for SUBSTRATE_SLO_NOTIFY_SUSTAIN_S, deduped through the SLO
+		// checkpoint so a restart never repeats it. Lands after phase 33 like
+		// doctor.drift.
+		id: "slo.transition",
+		phase: 33,
+		kind: "warning",
+		surface: { fixed: "substrate" },
+		actions: ["slo.transition"],
+		runtime: "slo",
+		carriesRepo: false,
+		periodic: true,
+		sample: () => ({
+			surface: "substrate",
+			kind: "warning",
+			summary: "slo breached: brief.p95 (observed 1240, target 800)",
+			session_id: "slo:notify",
+			payload: { action: "slo.transition", runtime: "slo", objective: "brief.p95", state: "breached", observed: 1240, target: 800 },
+		}),
+	},
+	{
+		// uplift-3 N2: the same notifier's recovery, a note because it is good
+		// news; same payload with state "recovered".
+		id: "slo.recovered",
+		phase: 33,
+		kind: "note",
+		surface: { fixed: "substrate" },
+		actions: ["slo.transition"],
+		runtime: "slo",
+		carriesRepo: false,
+		periodic: true,
+		sample: () => ({
+			surface: "substrate",
+			kind: "note",
+			summary: "slo recovered: brief.p95 (observed 610, target 800)",
+			session_id: "slo:notify",
+			payload: { action: "slo.transition", runtime: "slo", objective: "brief.p95", state: "recovered", observed: 610, target: 800 },
+		}),
+	},
+	{
 		id: "teachable.accepted",
 		phase: 29,
 		kind: "note",

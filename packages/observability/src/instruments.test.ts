@@ -1,5 +1,20 @@
 import { describe, expect, test } from "bun:test";
-import { METRIC, PLANE_ERROR_REASONS, SubstrateInstruments, classifyEventRefusal, classifyPlaneReason, extractUsage } from "./instruments.ts";
+import {
+	ADMISSION_CLASSES,
+	ADMISSION_DECISIONS,
+	BRIEF_RESULTS,
+	BRIEF_STATES,
+	CITATION_PROVENANCES,
+	DOCS_LATENCY_BUCKETS_MS,
+	DOCS_SEARCH_OUTCOMES,
+	MEMORY_EXPIRED_MODES,
+	METRIC,
+	PLANE_ERROR_REASONS,
+	SubstrateInstruments,
+	classifyEventRefusal,
+	classifyPlaneReason,
+	extractUsage,
+} from "./instruments.ts";
 import { findCounter, findHistogram, mergeHistogram, sumCounter } from "./metrics.ts";
 
 describe("extractUsage", () => {
@@ -111,6 +126,30 @@ describe("recordBrief", () => {
 	});
 });
 
+describe("recordBriefResult (uplift-3 N7)", () => {
+	test("the state and result labels are closed sets, and every combination is one series", () => {
+		expect([...BRIEF_STATES]).toEqual(["complete", "degraded", "snapshot"]);
+		expect([...BRIEF_RESULTS]).toEqual(["fresh", "not_modified"]);
+		const instruments = new SubstrateInstruments();
+		for (const state of BRIEF_STATES) {
+			for (const result of BRIEF_RESULTS) instruments.recordBriefResult({ surface: "grok-bot", state, result });
+		}
+		const counter = findCounter(instruments.snapshot(), METRIC.briefResult)!;
+		expect(counter.points).toHaveLength(BRIEF_STATES.length * BRIEF_RESULTS.length);
+		expect(sumCounter(counter, { surface: "grok-bot", state: "complete", result: "not_modified" })).toBe(1);
+		expect(sumCounter(counter)).toBe(6);
+		expect(Object.keys(counter.points[0]?.attributes ?? {}).sort()).toEqual(["result", "state", "surface"]);
+	});
+
+	test("is separate from the latency histogram: a not_modified answer is counted, not timed twice", () => {
+		const instruments = new SubstrateInstruments();
+		instruments.recordBrief({ surface: "grok-bot", ok: true, durationMs: 50 });
+		instruments.recordBriefResult({ surface: "grok-bot", state: "complete", result: "not_modified" });
+		expect(mergeHistogram(findHistogram(instruments.snapshot(), METRIC.briefDuration)!).count).toBe(1);
+		expect(sumCounter(findCounter(instruments.snapshot(), METRIC.briefResult)!, { result: "not_modified" })).toBe(1);
+	});
+});
+
 describe("recordClaim", () => {
 	test("a stolen claim lands in both the claim counter and the lease-steal counter", () => {
 		// The SLO's numerator is the steal counter and its denominator is the claim
@@ -183,6 +222,29 @@ describe("recordQuarantine and recordAudit", () => {
 	});
 });
 
+describe("recordMemoryExpired", () => {
+	test("served and hidden are separate series under one caller and kind, with no other label", () => {
+		// The report→enforce rollout reads this: `served` is what enforce would hide,
+		// `hidden` is what it did. A label a caller could type would unbound the series.
+		const instruments = new SubstrateInstruments();
+		instruments.recordMemoryExpired({ surface: "cursor", kind: "warning", mode: "served" });
+		instruments.recordMemoryExpired({ surface: "cursor", kind: "warning", mode: "served" });
+		instruments.recordMemoryExpired({ surface: "cursor", kind: "warning", mode: "hidden" });
+		instruments.recordMemoryExpired({ surface: "hermes", kind: "decision", mode: "hidden" });
+
+		const counter = findCounter(instruments.snapshot(), METRIC.memoryExpired)!;
+		expect(counter.unit).toBe("{entry}");
+		expect(sumCounter(counter, { surface: "cursor", kind: "warning", mode: "served" })).toBe(2);
+		expect(sumCounter(counter, { surface: "cursor", kind: "warning", mode: "hidden" })).toBe(1);
+		expect(sumCounter(counter, { mode: "hidden" })).toBe(2);
+		expect(sumCounter(counter)).toBe(4);
+		for (const point of counter.points) {
+			expect(Object.keys(point.attributes).sort()).toEqual(["kind", "mode", "surface"]);
+			expect(MEMORY_EXPIRED_MODES as readonly string[]).toContain(String(point.attributes.mode));
+		}
+	});
+});
+
 describe("recordPlane", () => {
 	test("records the duration by plane, op and outcome, and an error by its bounded reason", () => {
 		const instruments = new SubstrateInstruments();
@@ -218,5 +280,74 @@ describe("recordPlane", () => {
 		expect(classifyPlaneReason({ plane: "index", op: "ping", outcome: "error", durationMs: 1, reason: "server 502" })).toBe("server");
 		expect(classifyPlaneReason({ plane: "index", op: "ping", outcome: "error", durationMs: 1, reason: "fetch failed" })).toBe("network");
 		expect(classifyPlaneReason({ plane: "index", op: "ping", outcome: "error", durationMs: 1 })).toBe("other");
+	});
+});
+
+describe("recordAdmission", () => {
+	test("counts one series per surface, class and decision, with exactly those three labels", () => {
+		const instruments = new SubstrateInstruments();
+		instruments.recordAdmission({ surface: "grok-bot", klass: "read", decision: "allowed" });
+		instruments.recordAdmission({ surface: "grok-bot", klass: "read", decision: "allowed" });
+		instruments.recordAdmission({ surface: "grok-bot", klass: "read", decision: "shadow_limited" });
+		instruments.recordAdmission({ surface: "anonymous", klass: "write", decision: "limited" });
+		instruments.recordAdmission({ surface: "omp", klass: "coordination", decision: "bypass" });
+
+		const counter = findCounter(instruments.snapshot(), METRIC.admissionDecisions)!;
+		expect(counter.name).toBe("substrate.admission.decisions");
+		expect(sumCounter(counter, { surface: "grok-bot", class: "read", decision: "allowed" })).toBe(2);
+		expect(sumCounter(counter, { surface: "grok-bot", decision: "shadow_limited" })).toBe(1);
+		expect(sumCounter(counter, { surface: "anonymous", class: "write", decision: "limited" })).toBe(1);
+		expect(sumCounter(counter, { decision: "bypass" })).toBe(1);
+		expect(sumCounter(counter)).toBe(5);
+		for (const point of counter.points) {
+			expect(Object.keys(point.attributes).sort()).toEqual(["class", "decision", "surface"]);
+			expect(ADMISSION_CLASSES as readonly string[]).toContain(String(point.attributes.class));
+			expect(ADMISSION_DECISIONS as readonly string[]).toContain(String(point.attributes.decision));
+		}
+	});
+});
+
+describe("recordDocsSearch (uplift-3 N5)", () => {
+	test("counts searches by surface, outcome and cached, times them end to end, and splits citations by provenance", () => {
+		const instruments = new SubstrateInstruments();
+		instruments.recordDocsSearch({ surface: "grok-bot", outcome: "hit", cached: false, durationMs: 1500, citations: { recorded: 3, unrecorded: 2 } });
+		instruments.recordDocsSearch({ surface: "grok-bot", outcome: "hit", cached: true, durationMs: 4, citations: { recorded: 3, unrecorded: 2 } });
+		instruments.recordDocsSearch({ surface: "omp", outcome: "empty", cached: false, durationMs: 900, citations: {} });
+		instruments.recordDocsSearch({ surface: "omp", outcome: "degraded", cached: false, durationMs: 4100, citations: {} });
+		instruments.recordDocsSearch({ surface: "omp", outcome: "hit", cached: false, durationMs: 300, citations: { unpinned: 1 } });
+
+		const snapshot = instruments.snapshot();
+		const searches = findCounter(snapshot, METRIC.docsSearch)!;
+		expect(sumCounter(searches)).toBe(5);
+		expect(sumCounter(searches, { surface: "grok-bot", outcome: "hit", cached: "true" })).toBe(1);
+		expect(sumCounter(searches, { surface: "grok-bot", outcome: "hit", cached: "false" })).toBe(1);
+		expect(sumCounter(searches, { outcome: "empty" })).toBe(1);
+		expect(sumCounter(searches, { outcome: "degraded" })).toBe(1);
+		// Every outcome label is one of the closed set; the attribute keys are exactly the three.
+		for (const point of searches.points) {
+			expect(DOCS_SEARCH_OUTCOMES as readonly string[]).toContain(String(point.attributes.outcome));
+			expect(Object.keys(point.attributes).sort()).toEqual(["cached", "outcome", "surface"]);
+		}
+
+		// A cache hit is counted per citation it returned too: the share of
+		// unrecorded answers is what the counter reads as, hit or loaded.
+		const citations = findCounter(snapshot, METRIC.docsCitations)!;
+		expect(sumCounter(citations, { provenance: "recorded" })).toBe(6);
+		expect(sumCounter(citations, { provenance: "unrecorded" })).toBe(4);
+		expect(sumCounter(citations, { provenance: "unpinned" })).toBe(1);
+		for (const point of citations.points) {
+			expect(CITATION_PROVENANCES as readonly string[]).toContain(String(point.attributes.provenance));
+			expect(Object.keys(point.attributes)).toEqual(["provenance"]);
+		}
+
+		const duration = findHistogram(snapshot, METRIC.docsDuration)!;
+		expect(mergeHistogram(duration).count).toBe(5);
+		expect(mergeHistogram(duration, { cached: "true" }).count).toBe(1);
+		expect(mergeHistogram(duration, { surface: "omp", cached: "false" }).count).toBe(3);
+		// Its edges carry the objective (2,000 ms) and the default budget (4,000 ms), so
+		// `docs.search.p95` is decidable and a budget-costing search is visibly past it.
+		expect(duration.bounds).toEqual(DOCS_LATENCY_BUCKETS_MS);
+		expect(DOCS_LATENCY_BUCKETS_MS).toContain(2000);
+		expect(DOCS_LATENCY_BUCKETS_MS).toContain(4000);
 	});
 });

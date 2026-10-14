@@ -134,6 +134,34 @@ describe("GET /healthz", () => {
 		expect(offBody.planes.index?.breaker).toBeNull();
 		expect(offBody.capacity).toEqual({ index: null, ledger: null });
 	});
+
+	test("carries jobs.ledger from one memoised coverage read, not one per poll (uplift-3 N6)", async () => {
+		let reads = 0;
+		const greptime = {
+			ping: async () => true,
+			ensureAppendMode: async () => true,
+			probeDialect: async () => true,
+			quotingDialectKnown: true,
+			anchorCoverage: async () => {
+				reads++;
+				return {
+					newestAnchoredHour: "2026-10-13T10:00:00.000Z",
+					lagHours: 1,
+					uncoveredHours: [],
+					more: false,
+					lastArchiveWindow: { day: "2026-10-12", writtenAt: "2026-10-13T03:30:00.000Z", eventId: "evt_note" },
+				};
+			},
+		};
+		// The route's own body memo is off, so each call reaches the service and the 60 s memo is what is measured.
+		const harness = await start({ SUBSTRATE_HEALTHZ_CACHE_MS: "0", SUBSTRATE_LEDGER_WRITE_PROBE_S: "0" }, { greptime });
+		const first = (await (await fetch(`${harness.base}/healthz`)).json()) as { jobs: { ledger: Record<string, unknown> | null; ledgerReason: string | null } };
+		const second = (await (await fetch(`${harness.base}/healthz`)).json()) as typeof first;
+		expect(first.jobs.ledger).toMatchObject({ anchorLagHours: 1, uncoveredHours: 0, more: false, lastArchiveDay: "2026-10-12" });
+		expect(first.jobs.ledgerReason).toBeNull();
+		expect(second.jobs).toEqual(first.jobs);
+		expect(reads).toBe(1);
+	});
 });
 
 describe("GET /slo lists the per-plane objectives", () => {
@@ -143,6 +171,8 @@ describe("GET /slo lists the per-plane objectives", () => {
 			results: Array<{ id: string }>;
 			breached: string[];
 			planes: Array<{ id: string; plane: string; status: string; target: number }>;
+			docs: Array<{ id: string; status: string; statement: string }>;
+			surfaces: Array<{ id: string; surface: string; status: string; samples: number }>;
 		};
 		expect(body.planes.map((entry) => entry.id)).toEqual([
 			"plane.greptime.availability",
@@ -154,9 +184,27 @@ describe("GET /slo lists the per-plane objectives", () => {
 		expect(body.planes.find((entry) => entry.plane === "index")?.status).toBe("insufficient-data");
 		expect(body.planes.find((entry) => entry.plane === "greptime")?.status).toBe("unconfigured");
 		expect(body.planes.every((entry) => entry.target === 0.99)).toBe(true);
-		// The catalogue is still exactly SPE-4793's four, and `breached` is still theirs alone.
+		// The catalogue is still exactly SPE-4793's four. `breached` folds in plane and
+		// burn breaches since uplift-3 N2 (slo-history.test.ts), and here nothing is breached.
 		expect(body.results.map((entry) => entry.id)).toEqual(["brief.p95", "emit.success", "lease.steal_rate", "quarantine.rate"]);
 		expect(body.breached).toEqual([]);
+		// The docs-search objective (uplift-3 N5) rides beside them the same way: one
+		// row, insufficient-data until twenty searches, never folded into `breached`.
+		expect(body.docs.map((entry) => entry.id)).toEqual(["docs.search.p95"]);
+		expect(body.docs[0]?.status).toBe("insufficient-data");
+		expect(body.docs[0]?.statement).toContain("<= 2000 ms");
+		const docsTuned = await start({ SUBSTRATE_SLO_DOCS_SEARCH_P95_MS: "1000" });
+		const docsTunedBody = (await (await fetch(`${docsTuned.base}/slo`)).json()) as { docs: Array<{ statement: string }> };
+		expect(docsTunedBody.docs[0]?.statement).toContain("<= 1000 ms");
+		// The per-surface brief rows (uplift-3 N7) ride beside them too: none until a
+		// surface has twenty briefs, then one `brief.p95` row naming it, never in `breached`.
+		expect(body.surfaces).toEqual([]);
+		for (let i = 0; i < 19; i++) harness.observability.observer.briefed?.({ surface: "grok-bot", graph_id: null, ok: true, durationMs: 50 });
+		expect(((await (await fetch(`${harness.base}/slo`)).json()) as typeof body).surfaces).toEqual([]);
+		harness.observability.observer.briefed?.({ surface: "grok-bot", graph_id: null, ok: true, durationMs: 50 });
+		const judged = (await (await fetch(`${harness.base}/slo`)).json()) as typeof body;
+		expect(judged.surfaces.map((entry) => [entry.id, entry.surface, entry.status, entry.samples])).toEqual([["brief.p95", "grok-bot", "ok", 20]]);
+		expect(judged.breached).toEqual([]);
 
 		const tuned = await start({ SUBSTRATE_SLO_PLANE_AVAILABILITY: "0.95" });
 		const tunedBody = (await (await fetch(`${tuned.base}/slo`)).json()) as { planes: Array<{ target: number }> };

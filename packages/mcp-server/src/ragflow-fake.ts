@@ -27,6 +27,11 @@
  *
  * Anti-pattern gate: any retrieval missing `dataset_ids` fails, so a test
  * suite passing against this fake proves no unscoped retrieval exists.
+ *
+ * uplift-3 N5: `answer` scripts a question-aware reply per dataset (the
+ * golden harness and the fan-out tests use it); `inFlight`/`maxInFlight`
+ * record how many retrievals overlapped, which is how a test tells a
+ * concurrent client from a sequential one.
  */
 import type { RagflowChunk } from "./planes/ragflow.ts";
 
@@ -154,6 +159,18 @@ export class RagflowFake {
 		[HAMM_ID]: seedChunks(HAMM_ID, "https://example.com/programming-desk/architecture"),
 		[LEIPZIG_ID]: seedChunks(LEIPZIG_ID, "https://example.com/agent-skills/review"),
 	};
+	/**
+	 * uplift-3 N5: a question-aware answer for one dataset. When set, a
+	 * retrieval over `datasetId` serves what this returns instead of
+	 * `chunks[datasetId]`, so a test can script relevance (the golden
+	 * harness) or hold one dataset open past a budget (a promise that
+	 * resolves late). Unset — the default — keeps the contract fixture's
+	 * behaviour: fixture order, question ignored.
+	 */
+	answer: ((datasetId: string, question: string) => FakeChunk[] | Promise<FakeChunk[]>) | null = null;
+	/** Retrievals being served right now, and the most that ever overlapped: the fan-out proof. */
+	inFlight = 0;
+	maxInFlight = 0;
 
 	/** A `fetch` over this fake, for injection into the plane client. */
 	readonly fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
@@ -210,36 +227,47 @@ export class RagflowFake {
 		return this.requests.filter((request) => request.method === "GET" && request.path === "/api/v1/datasets");
 	}
 
-	private retrieval(body: unknown): Response {
+	private async retrieval(body: unknown): Promise<Response> {
 		if (this.failRetrievalWith !== null) return failure(100, "injected failure", this.failRetrievalWith);
 		if (body === null || typeof body !== "object" || !("dataset_ids" in body) || !Array.isArray(body.dataset_ids) || body.dataset_ids.length === 0) {
 			return failure(102, "`dataset_ids` is required.", 400);
 		}
 		const pageSize = "page_size" in body && typeof body.page_size === "number" ? body.page_size : 30;
+		const question = "question" in body && typeof body.question === "string" ? body.question : "";
+		// Counted across the await on `answer`, so two retrievals the client
+		// started together are seen overlapping; a sequential client never
+		// reads above 1.
+		this.inFlight += 1;
+		this.maxInFlight = Math.max(this.maxInFlight, this.inFlight);
 		const out: Record<string, unknown>[] = [];
-		for (const id of body.dataset_ids) {
-			if (typeof id !== "string") continue;
-			for (const chunk of this.chunks[id] ?? []) {
-				if (this.chunkShape === "minimal") {
-					out.push({ content: chunk.content, document_keyword: chunk.document_name });
-				} else {
-					out.push({
-						content: chunk.content,
-						content_ltks: chunk.content,
-						document_id: chunk.document_id ?? "",
-						document_keyword: chunk.document_name,
-						highlight: chunk.content,
-						id: chunk.chunk_id ?? "",
-						image_id: "",
-						important_keywords: [],
-						dataset_id: id,
-						positions: [],
-						similarity: chunk.score ?? 0,
-						term_similarity: chunk.score ?? 0,
-						vector_similarity: chunk.score ?? 0,
-					});
+		try {
+			for (const id of body.dataset_ids) {
+				if (typeof id !== "string") continue;
+				const served = this.answer !== null ? await this.answer(id, question) : (this.chunks[id] ?? []);
+				for (const chunk of served) {
+					if (this.chunkShape === "minimal") {
+						out.push({ content: chunk.content, document_keyword: chunk.document_name });
+					} else {
+						out.push({
+							content: chunk.content,
+							content_ltks: chunk.content,
+							document_id: chunk.document_id ?? "",
+							document_keyword: chunk.document_name,
+							highlight: chunk.content,
+							id: chunk.chunk_id ?? "",
+							image_id: "",
+							important_keywords: [],
+							dataset_id: id,
+							positions: [],
+							similarity: chunk.score ?? 0,
+							term_similarity: chunk.score ?? 0,
+							vector_similarity: chunk.score ?? 0,
+						});
+					}
 				}
 			}
+		} finally {
+			this.inFlight -= 1;
 		}
 		const page = out.slice(0, Math.max(0, pageSize));
 		return Response.json({

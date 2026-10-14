@@ -7,7 +7,9 @@
  * `memory_brief` / `events_emit`, so this stays consistent with them.
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { BRIEF_STATES } from "@substrate/observability";
 import { z } from "zod";
+import { BRIEF_SOURCES } from "./brief.ts";
 import { DesktopRunInput } from "./desktop/actions.ts";
 import { DEFAULT_IDLE_SECONDS, formatDrift } from "./drift.ts";
 import { DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT } from "./greptime.ts";
@@ -207,16 +209,59 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 		{
 			title: "Substrate brief",
 			description:
-				"The cross-agent session briefing for a repo: this graph's nodes and claims, other open graphs, recent agent actions, decisions in force and warnings. Call this before your first action in a repo.",
+				"The cross-agent session briefing for a repo: this graph's nodes and claims, other open graphs, recent agent actions, decisions in force and warnings. Call this before your first action in a repo. " +
+				"`structuredContent` carries the brief's `etag` (weak validator of the text), `state` (complete | degraded | snapshot), " +
+				"`failed_sources` and `snapshot_at`, the same facts `POST /brief` puts in its ETag and X-Substrate-Brief headers. " +
+				"Pass the `etag` you hold as `if_none_match` on the next call: an unchanged brief answers `not_modified: true` " +
+				"with no text, so keep the copy you have. A degraded or snapshot brief is still an answer, not an error.",
 			inputSchema: {
 				repo: z.string().optional().describe("owner/name, e.g. swcstudiospace/autonogrammer"),
 				branch: z.string().optional(),
 				graph_id: z.string().optional().describe("ut-<ts36>-<8hex> from the ultrathink uplift"),
 				surface: surfaceSchema.optional().describe("defaults to the caller's own surface"),
+				if_none_match: z
+					.string()
+					.optional()
+					.describe(
+						"the `etag` from an earlier reply, in If-None-Match grammar (weak or strong, a list, or *); " +
+							"a match answers `not_modified: true` and no text",
+					),
+			},
+			outputSchema: {
+				etag: z.string().describe('weak validator of the brief text, W/"<32 hex>"'),
+				state: z.enum(BRIEF_STATES),
+				surface: surfaceSchema.describe("the surface the brief was composed for: the argument, else the bearer's own"),
+				not_modified: z.boolean().optional().describe("true when `if_none_match` listed the current etag; the text is omitted"),
+				failed_sources: z.array(z.enum(BRIEF_SOURCES)).optional().describe("sources that failed or missed the budget; empty when complete"),
+				snapshot_at: z.string().nullable().optional().describe("when the served snapshot was composed; null unless state is snapshot"),
 			},
 		},
-		async ({ repo, branch, graph_id, surface }) =>
-			text(await substrate.brief({ repo, branch, graph_id, surface: surface ?? callerSurface ?? "claude-code" })),
+		async ({ repo, branch, graph_id, surface, if_none_match }) => {
+			// The text is byte-for-byte what this tool has always returned; the
+			// metadata rides beside it so an older client sees no change. The
+			// matcher is the REST route's own, so one stored ETag means the same
+			// thing at both doors (uplift-3 N7). `surface` is reported because the
+			// bearer is the identity: a connector that omits the argument can see
+			// which surface its token resolved to, and the smoke refuses a wrong one.
+			const briefSurface = surface ?? callerSurface ?? "claude-code";
+			const { detail, notModified } = await substrate.briefConditional({ repo, branch, graph_id, surface: briefSurface }, if_none_match);
+			if (notModified) {
+				return {
+					...text(`brief unchanged (etag ${detail.etag})`),
+					structuredContent: { not_modified: true, etag: detail.etag, state: detail.state, surface: briefSurface },
+				};
+			}
+			return {
+				...text(detail.text),
+				structuredContent: {
+					etag: detail.etag,
+					state: detail.state,
+					surface: briefSurface,
+					failed_sources: detail.failed,
+					snapshot_at: detail.snapshotAt,
+				},
+			};
+		},
 	);
 
 	server.registerTool(
@@ -283,6 +328,21 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			json(await substrate.writeMemory({ ...entry, writer: memoryToolWriter(callerSurface, surface) })),
 	);
 
+	/**
+	 * Reading past an entry's lifetime is an operator action (uplift-3 N4).
+	 *
+	 * Under `SUBSTRATE_MEMORY_EXPIRY=enforce` the index hides expired entries;
+	 * `include_expired` is the operator's way to audit what it hid. Gated like
+	 * `force`: on the operator token, decided before any argument is read, so no
+	 * agent can widen its own reads by typing a flag. Under `report` the flag
+	 * changes nothing — expired entries are served tagged either way — but it is
+	 * refused the same, so a caller learns the rule once rather than at the flip.
+	 */
+	const INCLUDE_EXPIRED_REFUSED =
+		"`include_expired` reads entries past their ttl and is an operator action: present a token from " +
+		"SUBSTRATE_OPERATOR_TOKENS. Without it, expired entries are served tagged `expired` under " +
+		"SUBSTRATE_MEMORY_EXPIRY=report and left out under enforce.";
+
 	server.registerTool(
 		"memory_search",
 		{
@@ -290,7 +350,10 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			description:
 				"Full-text search over memory entries, optionally narrowed to one scope. Superseded entries are " +
 				"excluded unless asked for, and quarantined or unreviewed writes are never returned. An entry with " +
-				"`needs_reverification` has outlived its trust: check it before acting on it. Without `subject_prefix`, " +
+				"`needs_reverification` has outlived its trust: check it before acting on it. An entry with `expired` " +
+				"has outlived its `ttl` (`30d` past `expires_at`, or `graph` on a finished graph): under " +
+				"SUBSTRATE_MEMORY_EXPIRY=report it is still listed, tagged; under enforce it is left out unless an " +
+				"operator passes `include_expired`. Without `subject_prefix`, " +
 				"`before` or `before_id` the reply is a list of the newest `limit` matches, newest first. With any of " +
 				"them it is a page, `{ entries, next }`, ordered `created desc, id desc`: entries strictly before the " +
 				"keyset pair `(before, before_id)`, so ties at a page boundary are neither skipped nor repeated. `next` " +
@@ -305,6 +368,10 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 					.boolean()
 					.optional()
 					.describe("include retired versions — how you read a decision's history"),
+				include_expired: z
+					.boolean()
+					.optional()
+					.describe("also return entries past their ttl under SUBSTRATE_MEMORY_EXPIRY=enforce; needs an operator token"),
 				subject_prefix: z
 					.string()
 					.optional()
@@ -323,6 +390,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 			annotations: { readOnlyHint: true },
 		},
 		async (request) => {
+			if (request.include_expired && !isOperator) return refusal(INCLUDE_EXPIRED_REFUSED);
 			try {
 				if (isPagedSearch(request)) return json(await substrate.searchMemoryPage(request, callerSurface ?? "unattributed"));
 				// Index entries first with derived plane hits appended (D26-05).
@@ -336,6 +404,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 						request.limit,
 						request.include_superseded,
 						callerSurface ?? "unattributed",
+						request.include_expired,
 					),
 				);
 			} catch (cause) {

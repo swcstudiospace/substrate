@@ -12,6 +12,10 @@
  * `Substrate.emit` path the anchor job uses — a `note` carrying the counts, or a
  * `warning` when the sweep itself failed. Counts only: no ids, no bodies.
  *
+ * `SUBSTRATE_MEMORY_EXPIRY` (uplift-3 N4) reaches the sweep through `loadConfig`:
+ * under `enforce` the two `entries-ttl-*` classes delete on `apply`; under the
+ * default `report` they only count, whatever the sweep mode.
+ *
  * Exit codes: 0 when the sweep ran (or was off), 1 when it failed, 2 on usage —
  * a refused `--apply`, an unknown flag, or no `SUBSTRATE_PG_URL`.
  */
@@ -68,7 +72,7 @@ const session = `index-sweep:${new Date(now).toISOString().slice(0, 10)}`;
 let report: SweepReport | null = null;
 let failure: string | null = null;
 try {
-	report = await index.sweep({ apply: mode === "apply", now, policy });
+	report = await index.sweep({ apply: mode === "apply", now, policy, expiry: config.memoryExpiry });
 } catch (cause) {
 	failure = redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200);
 }
@@ -86,6 +90,7 @@ if (report) {
 			action: "index.sweep",
 			runtime: "index-sweep",
 			mode,
+			memory_expiry: report.expiry,
 			batch: report.batch,
 			classes: sweepCounts(report),
 		},

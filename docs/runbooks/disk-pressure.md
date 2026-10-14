@@ -116,6 +116,16 @@ Each step is its own decision. Stop when `df -h /` is above the floor you need.
 A deploy refused by the floor has written nothing: no tree, no symlink, no
 restart. Reclaim, then run the same command again.
 
+The runtime doctor reports the deploy reserve before a deploy trips over it:
+`bun scripts/doctor-runtime.ts` (`infra/vps/README.md`, "Runtime doctor")
+reads `df -Pk /opt/agent-substrate` and prints a `disk` row — `drift` below
+`SUBSTRATE_DEPLOY_MIN_FREE_GB`, `warn` below twice it (a release tree plus its
+`node_modules` is what takes it the rest of the way), `ok` above. Its `swap`
+row says whether the host is paging right now, with the occupancy in the hint.
+With `substrate-doctor.timer` installed and `SUBSTRATE_DOCTOR_EMIT=1`, a
+`disk` drift arrives on the ledger as one `warning` event, re-sent only when
+the drift set changes.
+
 ## Prevention already in place
 
 - the deploy prunes to `current` + `previous` after every health-checked deploy;

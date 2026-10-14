@@ -120,6 +120,14 @@ export type Trust = (typeof TRUST_LEVELS)[number];
 export const MEMORY_TTLS = ["graph", "30d", "permanent"] as const;
 export type MemoryTtl = (typeof MEMORY_TTLS)[number];
 
+/**
+ * What a serving read does with an entry past its `ttl` (uplift-3 N4,
+ * `SUBSTRATE_MEMORY_EXPIRY`): `report` serves it tagged `expired`; `enforce`
+ * leaves it out unless the caller asked for expired entries.
+ */
+export const MEMORY_EXPIRY_MODES = ["report", "enforce"] as const;
+export type MemoryExpiryMode = (typeof MEMORY_EXPIRY_MODES)[number];
+
 /** The five scope families. RBAC is granted per family, never per literal scope string. */
 export const MEMORY_SCOPE_CLASSES = ["graph", "repo", "global", "agent", "person"] as const;
 export type MemoryScopeClass = (typeof MEMORY_SCOPE_CLASSES)[number];
@@ -188,6 +196,14 @@ export interface MemoryEntry extends MemoryEntryInput {
 	reverify_after?: string;
 	/** Derived on read from `reverify_after`: true once the trust has decayed. */
 	needs_reverification: boolean;
+	/**
+	 * Derived on read from `ttl` (uplift-3 N4): true once the entry is past its
+	 * lifetime, by `memoryExpiry`. Set by every index read that serves entries;
+	 * absent on one that came another way — a write's reply, a fixture.
+	 */
+	expired?: boolean;
+	/** When a `30d` entry expires, ISO. A `graph` entry's end is an event and carries none. */
+	expires_at?: string;
 	idempotency_key?: string;
 }
 
@@ -230,6 +246,18 @@ export interface MemorySearchCursor {
 export interface MemorySearchPage {
 	entries: MemoryEntry[];
 	next: MemorySearchCursor | null;
+}
+
+/**
+ * The per-call half of lifetime handling on a serving read (uplift-3 N4). The
+ * mode itself is the store's; a caller can only widen a read to expired entries,
+ * and only after the operator gate let it.
+ */
+export interface MemoryReadOptions {
+	/** Serve expired entries under `enforce` too. Gated on an operator token before it gets here. */
+	includeExpired?: boolean;
+	/** The caller, for the `substrate.memory.expired` series; `unattributed` when absent. */
+	surface?: string;
 }
 
 /** One parked write, as a reviewer's queue lists it. */

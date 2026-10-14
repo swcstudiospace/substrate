@@ -19,7 +19,7 @@ import {
 	type SweepReport,
 	type SweepStatement,
 } from "./index-sweep.ts";
-import { needsReverification } from "./memory-policy.ts";
+import { memoryExpiry, memoryGraphId, needsReverification, type GraphLifetime } from "./memory-policy.ts";
 import {
 	DERIVED_KEY_WINDOW_MS,
 	IN_FLIGHT_TIMEOUT_MS,
@@ -38,6 +38,9 @@ import type {
 	GraphStep,
 	GraphView,
 	MemoryEntry,
+	MemoryExpiryMode,
+	MemoryKind,
+	MemoryReadOptions,
 	MemorySearch,
 	MemorySearchPage,
 	MemoryWriteOutcome,
@@ -186,11 +189,31 @@ export function indexSqlOptions(settings: Partial<IndexPoolSettings> = {}): Inde
 	};
 }
 
+/** One expired entry a serving read met, and what the read did with it (uplift-3 N4). */
+export interface MemoryExpiredSample {
+	/** The caller the read was for; `unattributed` when the read did not say. */
+	surface: string;
+	kind: MemoryKind;
+	mode: "served" | "hidden";
+}
+
+/**
+ * How the store's serving reads treat entries past their `ttl` (uplift-3 N4).
+ * `report` serves them tagged; `enforce` leaves them out unless the read asked
+ * for them. `observe` is called once per expired entry met, in either mode.
+ */
+export interface MemoryExpirySettings {
+	mode: MemoryExpiryMode;
+	observe?: (sample: MemoryExpiredSample) => void;
+}
+
 export interface IndexStoreOptions {
 	/** Overrides on top of `indexPoolSettingsFromEnv(process.env)`. */
 	pool?: Partial<IndexPoolSettings>;
 	/** The index plane's breaker and observer. Absent means every call runs unwrapped, as before. */
 	gate?: PlaneGate | null;
+	/** Lifetime handling on serving reads. Absent is `report`, uncounted: what every read did before N4, plus the tag. */
+	memoryExpiry?: MemoryExpirySettings;
 }
 
 /** What `/healthz` reports about the database's size, from `capacity()`. */
@@ -264,12 +287,14 @@ export type LinearNodeMatch = GraphNode & { repo: string | null; branch: string 
 export class IndexStore implements MemoryStore {
 	private readonly sql: SQL;
 	private readonly gate: PlaneGate | null;
+	private readonly expiry: MemoryExpirySettings;
 	readonly poolSettings: IndexPoolSettings;
 
 	constructor(connectionString: string, options: IndexStoreOptions = {}) {
 		this.poolSettings = { ...indexPoolSettingsFromEnv(), ...options.pool, applicationName: INDEX_APPLICATION_NAME };
 		this.sql = new SQL(connectionString, indexSqlOptions(this.poolSettings));
 		this.gate = options.gate ?? null;
+		this.expiry = options.memoryExpiry ?? { mode: "report" };
 	}
 
 	/** One index call under the plane gate. Without a gate it is just `fn()`. */
@@ -1538,8 +1563,14 @@ export class IndexStore implements MemoryStore {
 	 * The newest `limit` matches and nothing more; `searchMemoryPage` is how a caller
 	 * reads past them.
 	 */
-	async searchMemory(query: string, scope?: string, limit = 20, includeSuperseded = false): Promise<MemoryEntry[]> {
-		return (await this.searchMemoryPage({ query, scope, limit, includeSuperseded })).entries;
+	async searchMemory(
+		query: string,
+		scope?: string,
+		limit = 20,
+		includeSuperseded = false,
+		read?: MemoryReadOptions,
+	): Promise<MemoryEntry[]> {
+		return (await this.searchMemoryPage({ query, scope, limit, includeSuperseded }, read)).entries;
 	}
 
 	/**
@@ -1557,8 +1588,15 @@ export class IndexStore implements MemoryStore {
 	 *
 	 * `subjectPrefix` arrives normalised and is matched with `left()`, so `%`, `_`
 	 * and `\` in it are the characters they are rather than LIKE patterns.
+	 *
+	 * Lifetime (uplift-3 N4) is judged after the page is read — see
+	 * {@link IndexStore.servable}. The cursor is taken from the page as the
+	 * database returned it, before any expired entry is left out, so a page
+	 * `enforce` thinned stays a page: `next` still points past every row it
+	 * covered and nothing is skipped or repeated. A page may therefore come back
+	 * shorter than `limit` with `next` set; only a short *raw* page is the end.
 	 */
-	async searchMemoryPage(search: MemorySearch): Promise<MemorySearchPage> {
+	async searchMemoryPage(search: MemorySearch, read?: MemoryReadOptions): Promise<MemorySearchPage> {
 		const limit = search.limit ?? 20;
 		const query = search.query ?? "";
 		const prefix = search.subjectPrefix ?? null;
@@ -1571,24 +1609,26 @@ export class IndexStore implements MemoryStore {
 			: beforeId === null
 				? this.sql`and created < ${before}::timestamptz`
 				: this.sql`and (created, id) < (${before}::timestamptz, ${beforeId}::text)`;
-		const rows = await this.plane("memory.search", async () => (await this.sql`
-			select *, to_char(created at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as cursor_created
-			from memory_entries
-			where true
-			  ${search.scope == null ? this.sql`` : this.sql`and scope = ${search.scope}`}
-			  ${search.includeSuperseded ? this.sql`` : this.sql`and superseded_by is null`}
-			  ${query === "" ? this.sql`` : this.sql`and to_tsvector('english', body) @@ plainto_tsquery('english', ${query})`}
-			  ${prefix === null ? this.sql`` : this.sql`and left(subject, char_length(${prefix}::text)) = ${prefix}::text`}
-			  ${search.writer == null ? this.sql`` : this.sql`and writer = ${search.writer}`}
-			  ${search.kind == null ? this.sql`` : this.sql`and kind = ${search.kind}`}
-			  ${cursor}
-			order by created desc, id desc
-			limit ${limit}`) as Array<Record<string, unknown>>);
-		const last = rows.length === limit ? rows[rows.length - 1] : undefined;
-		return {
-			entries: rows.map((row) => toMemoryEntry(row)),
-			next: last ? { before: String(last.cursor_created), before_id: String(last.id) } : null,
-		};
+		return this.plane("memory.search", async () => {
+			const rows = (await this.sql`
+				select *, to_char(created at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as cursor_created
+				from memory_entries
+				where true
+				  ${search.scope == null ? this.sql`` : this.sql`and scope = ${search.scope}`}
+				  ${search.includeSuperseded ? this.sql`` : this.sql`and superseded_by is null`}
+				  ${query === "" ? this.sql`` : this.sql`and to_tsvector('english', body) @@ plainto_tsquery('english', ${query})`}
+				  ${prefix === null ? this.sql`` : this.sql`and left(subject, char_length(${prefix}::text)) = ${prefix}::text`}
+				  ${search.writer == null ? this.sql`` : this.sql`and writer = ${search.writer}`}
+				  ${search.kind == null ? this.sql`` : this.sql`and kind = ${search.kind}`}
+				  ${cursor}
+				order by created desc, id desc
+				limit ${limit}`) as Array<Record<string, unknown>>;
+			const last = rows.length === limit ? rows[rows.length - 1] : undefined;
+			return {
+				entries: await this.servable(rows, read),
+				next: last ? { before: String(last.cursor_created), before_id: String(last.id) } : null,
+			};
+		});
 	}
 
 	/**
@@ -1598,7 +1638,7 @@ export class IndexStore implements MemoryStore {
 	 * them that way — querying the raw spelling would match nothing, the same trap
 	 * `emit` fell into with session ids.
 	 */
-	async memoryForBrief(repo: string | null, graphId: string | null, limit = 10): Promise<MemoryEntry[]> {
+	async memoryForBrief(repo: string | null, graphId: string | null, limit = 10, read?: MemoryReadOptions): Promise<MemoryEntry[]> {
 		const normalizedRepo = normalizeIdentifier(repo);
 		const normalizedGraph = normalizeIdentifier(graphId);
 		const scopes = [
@@ -1608,14 +1648,82 @@ export class IndexStore implements MemoryStore {
 		];
 		// `in ${sql(array)}` is the form Bun's SQL expands to a value list. Passing
 		// the array straight to `any()` stringifies it into a malformed array literal.
-		const rows = await this.plane("memory.brief", async () => (await this.sql`
-			select *
-			from memory_entries
-			where scope in ${this.sql(scopes)}
-			  and superseded_by is null
-			order by created desc
-			limit ${limit}`) as Array<Record<string, unknown>>);
-		return rows.map(toMemoryEntry);
+		return this.plane("memory.brief", async () => {
+			const rows = (await this.sql`
+				select *
+				from memory_entries
+				where scope in ${this.sql(scopes)}
+				  and superseded_by is null
+				order by created desc
+				limit ${limit}`) as Array<Record<string, unknown>>;
+			return this.servable(rows, read);
+		});
+	}
+
+	/**
+	 * What `graph_index` holds for each graph, one round trip for the whole list;
+	 * an id with no row is absent from the map. The list is a page's distinct
+	 * graph ids, so it is bounded by the page. The list goes through the
+	 * tagged-template helper: a bare array parameter is the malformed-literal
+	 * quirk `memoryForBrief` notes.
+	 */
+	private async graphLifetimes(graphIds: readonly string[]): Promise<Map<string, GraphLifetime>> {
+		if (graphIds.length === 0) return new Map();
+		const rows = (await this.sql`
+			select graph_id, status from graph_index where graph_id in ${this.sql([...graphIds])}`) as Array<Record<string, unknown>>;
+		return new Map(rows.map((row) => [String(row.graph_id), { status: row.status == null ? null : String(row.status) }]));
+	}
+
+	/** The graph a `ttl: graph` entry lives for, as the index knows it now; null when it has no row. Under the plane gate. */
+	async graphLifetime(entry: Pick<MemoryEntry, "scope" | "graph_id">): Promise<GraphLifetime | null> {
+		const graphId = memoryGraphId(entry);
+		if (graphId === null) return null;
+		return this.plane("memory.expiry", async () => (await this.graphLifetimes([graphId])).get(graphId) ?? null);
+	}
+
+	/**
+	 * The rows a serving read hands out, judged by `memoryExpiry` (uplift-3 N4).
+	 *
+	 * One extra bounded query: the `graph_index` status of every distinct graph
+	 * the page's `ttl: graph` entries name, which is what the predicate needs and
+	 * nothing a `30d` or `permanent` entry does — a page without graph entries
+	 * costs no second round trip. Every entry is then tagged `expired` (and
+	 * `expires_at` where the class has one), in both modes, so a reader can see
+	 * what `enforce` would hide before turning it on. Under `report` the tagged
+	 * page is returned whole; under `enforce` an expired entry is left out unless
+	 * the read asked for it. Each expired entry met is reported once, as `served`
+	 * or `hidden`, which is the series the rollout watches.
+	 *
+	 * Shared by `searchMemoryPage` (so `memory_search`, the subject listings and
+	 * the agent card) and `memoryForBrief`, so the brief and a search can never
+	 * disagree about whether an entry is alive. `readEntry` is not a serving read
+	 * — it is the gate's read-back of a row it just wrote — and stays untouched.
+	 */
+	private async servable(rows: Array<Record<string, unknown>>, read: MemoryReadOptions | undefined): Promise<MemoryEntry[]> {
+		const now = Date.now();
+		const entries = rows.map((row) => toMemoryEntry(row, now));
+		const graphIds = new Set<string>();
+		for (const entry of entries) {
+			if (entry.ttl !== "graph") continue;
+			const graphId = memoryGraphId(entry);
+			if (graphId !== null) graphIds.add(graphId);
+		}
+		const graphs = await this.graphLifetimes([...graphIds]);
+		const hide = this.expiry.mode === "enforce" && read?.includeExpired !== true;
+		const surface = read?.surface ?? "unattributed";
+		const served: MemoryEntry[] = [];
+		for (const entry of entries) {
+			const graph = entry.ttl === "graph" ? (graphs.get(memoryGraphId(entry) ?? "") ?? null) : null;
+			const verdict = memoryExpiry(entry, graph, now);
+			if (verdict.expired) this.expiry.observe?.({ surface, kind: entry.kind, mode: hide ? "hidden" : "served" });
+			if (verdict.expired && hide) continue;
+			served.push({
+				...entry,
+				expired: verdict.expired,
+				...(verdict.expires_at === null ? {} : { expires_at: verdict.expires_at }),
+			});
+		}
+		return served;
 	}
 
 	/**
@@ -1669,16 +1777,21 @@ export class IndexStore implements MemoryStore {
 	 * classes, the thresholds and the SQL. A dry-run runs the COUNT statements on
 	 * the pool. An apply runs everything inside one transaction: the counts, then
 	 * the batched deletes, so a failure half way commits nothing.
+	 *
+	 * `expiry` is explicit, not the store's own setting: the sweep is a one-shot
+	 * job and the operator's `SUBSTRATE_MEMORY_EXPIRY` reaches it through the
+	 * runner's config. Absent means `report` — the `ttl` classes only count.
 	 */
-	async sweep(options: { apply?: boolean; now?: number; policy?: SweepPolicy } = {}): Promise<SweepReport> {
+	async sweep(options: { apply?: boolean; now?: number; policy?: SweepPolicy; expiry?: MemoryExpiryMode } = {}): Promise<SweepReport> {
 		const policy = options.policy ?? sweepPolicyFromEnv();
 		const now = options.now ?? Date.now();
-		const steps = planSweep(policy, now);
+		const expiry = options.expiry ?? "report";
+		const steps = planSweep(policy, now, { expiry });
 		const run = (sql: SQL) => async (statement: SweepStatement) =>
 			(await sql.unsafe(statement.text, statement.params as unknown[])) as Array<Record<string, unknown>>;
-		if (!options.apply) return executeSweep(run(this.sql), steps, { apply: false, batch: policy.batch, now });
+		if (!options.apply) return executeSweep(run(this.sql), steps, { apply: false, batch: policy.batch, now, expiry });
 		return (await this.sql.begin((tx: SQL) =>
-			executeSweep(run(tx), steps, { apply: true, batch: policy.batch, now }),
+			executeSweep(run(tx), steps, { apply: true, batch: policy.batch, now, expiry }),
 		)) as SweepReport;
 	}
 

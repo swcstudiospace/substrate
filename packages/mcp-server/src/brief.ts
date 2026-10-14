@@ -9,6 +9,7 @@
  * slowest source rather than the sum, and a stalled store costs the budget.
  */
 import { earliestRefreshAt } from "./cache.ts";
+import { sharedDeadline } from "./deadline.ts";
 import { normalizeIdentifier } from "./event.ts";
 import type { GreptimeClient } from "./greptime.ts";
 import { quote } from "./greptime.ts";
@@ -110,15 +111,20 @@ function describeNode(node: GraphView["nodes"][number], now = Date.now()): strin
 }
 
 /**
- * Mark an entry whose trust has decayed.
+ * Mark an entry whose trust has decayed, or whose lifetime has run out.
  *
  * A decayed entry is still shown — dropping it would quietly lose the only record
  * that a decision was ever taken. What changes is that the brief stops presenting
  * it as settled, which is the whole point of `needs_reverification`: the next agent
  * is told to check before acting, not left to assume a year-old agent-claimed fact
  * still holds.
+ *
+ * An expired entry (uplift-3 N4) reaches here only under `SUBSTRATE_MEMORY_EXPIRY=report`,
+ * where the index still serves it; the brief says so rather than presenting a
+ * `30d` note from last quarter as current. Under `enforce` the index leaves it out.
  */
 function staleness(entry: MemoryEntry): string {
+	if (entry.expired === true) return " — expired";
 	return entry.needs_reverification ? " — needs reverification" : "";
 }
 
@@ -127,42 +133,6 @@ function swallow<T>(what: string, fallback: T): (cause: unknown) => T {
 	return (cause) => {
 		process.stderr.write(`[substrate] brief: ${what} unavailable — ${String(cause)}\n`);
 		return fallback;
-	};
-}
-
-/** A read that outlived the budget. Its message is what the stderr line shows. */
-class BriefDeadline extends Error {
-	constructor(budgetMs: number) {
-		super(`deadline (${budgetMs} ms brief budget)`);
-		this.name = "BriefDeadline";
-	}
-}
-
-interface SharedDeadline {
-	race: <T>(read: Promise<T>) => Promise<T>;
-	clear: () => void;
-}
-
-/**
- * One shared deadline for every read. `race` settles a read against it; a
- * read that misses rejects with `BriefDeadline`, which the caller treats like
- * any other failed read. The underlying promise is not cancelled — a Postgres
- * query has no abort handle — but nobody waits for it any more, and the
- * Greptime read carries the same bound as its own fetch timeout.
- */
-function sharedDeadline(budgetMs: number): SharedDeadline {
-	if (budgetMs <= 0) return { race: (read) => read, clear: () => {} };
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	const expired = new Promise<never>((_, reject) => {
-		timer = setTimeout(() => reject(new BriefDeadline(budgetMs)), budgetMs);
-		timer.unref?.();
-	});
-	// A brief with nothing to read never races it; without this the timer's
-	// rejection would be unhandled.
-	expired.catch(() => {});
-	return {
-		race: (read) => Promise.race([read, expired]),
-		clear: () => clearTimeout(timer),
 	};
 }
 
@@ -202,7 +172,12 @@ export async function composeBrief(
 			return swallow(what, fallback)(cause);
 		};
 	};
-	const deadline = sharedDeadline(budgetMs);
+	// One shared deadline (`deadline.ts`) for every read; a read that misses it
+	// is a failed read, no different from a store that threw. The underlying
+	// promise is not cancelled — a Postgres query has no abort handle — but
+	// nobody waits for it any more, and the Greptime read carries the same
+	// bound as its own fetch timeout.
+	const deadline = sharedDeadline(budgetMs, "brief budget");
 	// Start a read now, under the deadline, already failed open. A source whose
 	// call throws synchronously (a fake, a client refusing before the socket) is
 	// a failed read too, not an exception out of the brief.
@@ -236,7 +211,7 @@ export async function composeBrief(
 	// Other graphs open in this repo.
 	const othersRead = index && repo ? start("open graphs", () => index.openGraphs(repo, graphId ?? undefined), [] as GraphView[]) : null;
 	// Warnings and decisions worth carrying into this session.
-	const memoryRead = index ? start("memory", () => index.memoryForBrief(repo, graphId), [] as MemoryEntry[]) : null;
+	const memoryRead = index ? start("memory", () => index.memoryForBrief(repo, graphId, undefined, { surface }), [] as MemoryEntry[]) : null;
 
 	const heading = [repo ?? "unknown repo", branch ? `@ ${branch}` : null, graphId ? `— ${graphId}` : null]
 		.filter(Boolean)
@@ -317,6 +292,9 @@ export async function composeBrief(
 
 	for (const entry of memory) {
 		if (!entry.needs_reverification) deadlines.push(entry.reverify_after);
+		// A cached brief must not outlive an entry's lifetime either: at `expires_at`
+		// the index would hide (enforce) or mark (report) it, and the brief should too.
+		if (entry.expired !== true) deadlines.push(entry.expires_at);
 	}
 
 	if (lines.length === 1) {

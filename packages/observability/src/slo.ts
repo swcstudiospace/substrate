@@ -58,6 +58,8 @@ export type SloTarget =
 			/** Must be one of the histogram's own bucket bounds, so the check is exact. */
 			thresholdMs: number;
 			minSamples: number;
+			/** Attribute equalities the judged series must satisfy; absent means every series of the metric. */
+			where?: Record<string, string>;
 	  }
 	| {
 			kind: "ratio-floor" | "ratio-ceiling";
@@ -79,6 +81,10 @@ export interface SloThresholds {
 	minSamples?: number;
 	/** Per-plane `ok / all` floor over the rolling hour; `SUBSTRATE_SLO_PLANE_AVAILABILITY`. */
 	planeAvailability?: number;
+	/** End-to-end docs search p95 ceiling, ms; `SUBSTRATE_SLO_DOCS_SEARCH_P95_MS` (uplift-3 N5). */
+	docsSearchP95Ms?: number;
+	/** Days of index capacity runway the fitted growth must leave; `SUBSTRATE_SLO_RUNWAY_DAYS` (uplift-3 N2). */
+	runwayDays?: number;
 }
 
 export const DEFAULT_THRESHOLDS: Required<SloThresholds> = {
@@ -91,6 +97,12 @@ export const DEFAULT_THRESHOLDS: Required<SloThresholds> = {
 	quarantineRatio: 0.01,
 	minSamples: 20,
 	planeAvailability: 0.99,
+	// uplift-3 N5: half the default shared budget, so a search that costs the
+	// whole budget is a breach, not the norm.
+	docsSearchP95Ms: 2000,
+	// uplift-3 N2: two weeks, the lead time a volume resize or an archive run
+	// needs to be scheduled rather than done during an incident.
+	runwayDays: 14,
 };
 
 export function sloCatalogue(overrides: SloThresholds = {}): SloTarget[] {
@@ -219,7 +231,7 @@ function evaluateLatency(snapshot: MetricSnapshot[], target: Extract<SloTarget, 
 	if (!histogram) {
 		return { ...base, status: "insufficient-data", observed: null, samples: 0, detail: `${target.metric} has no series yet` };
 	}
-	const merged = mergeHistogram(histogram);
+	const merged = mergeHistogram(histogram, target.where);
 	const estimate = quantileFromBuckets(merged, target.quantile);
 	if (merged.count < target.minSamples) {
 		return {
@@ -320,9 +332,141 @@ export function evaluateSlos(snapshot: MetricSnapshot[], catalogue: SloTarget[] 
 	);
 }
 
+// ── admission budgets (uplift-3 N3) ──────────────────────────────────────────
+
+/**
+ * `admission.limited_rate`: refusals ÷ decisions of `substrate.admission.decisions`,
+ * at most 1 %. Beside the catalogue like the plane and burn objectives, because
+ * the catalogue is pinned to SPE-4793's four. `decided` is every decision the
+ * bucket itself made — `allowed`, `limited`, `shadow_limited` — so a `bypass`
+ * (the cache not answering) neither helps nor hurts the rate; `limited` alone is
+ * the numerator, so in `shadow` mode the rate is 0 whatever the shadow refusals
+ * say, and the shadow count is read from the metric while the budgets are tuned.
+ * 100 decisions before it is judged: a 1 % ceiling cannot be told from noise on
+ * fewer.
+ */
+export const ADMISSION_SLO: Exclude<SloTarget, { kind: "latency-quantile" }> = {
+	kind: "ratio-ceiling",
+	id: "admission.limited_rate",
+	title: "Admission refusal rate",
+	statement: `limited / (allowed + limited + shadow_limited) of ${METRIC.admissionDecisions} <= 1.00 %`,
+	numerator: { metric: METRIC.admissionDecisions, where: { decision: "limited" } },
+	denominator: { metric: METRIC.admissionDecisions },
+	target: 0.01,
+	minSamples: 100,
+};
+
+/**
+ * The bypasses are not decisions, so they are taken out of the denominator
+ * rather than summed by `evaluateRatio`: a cache outage must not dilute the
+ * refusal rate into `ok`.
+ */
+export function evaluateAdmissionSlo(snapshot: MetricSnapshot[], target = ADMISSION_SLO): SloResult {
+	const counter = findCounter(snapshot, target.denominator.metric);
+	const decided = counter ? sumCounter(counter) - sumCounter(counter, { decision: "bypass" }) : 0;
+	const limited = counter ? sumCounter(counter, target.numerator.where) : 0;
+	const base = { id: target.id, title: target.title, statement: target.statement, unit: "ratio" as const, target: target.target };
+	if (decided < target.minSamples) {
+		return {
+			...base,
+			status: "insufficient-data",
+			observed: decided > 0 ? limited / decided : null,
+			samples: decided,
+			detail: `${decided} of ${target.minSamples} decisions needed before this objective is judged`,
+		};
+	}
+	const observed = limited / decided;
+	return {
+		...base,
+		status: observed <= target.target ? "ok" : "breached",
+		observed,
+		samples: decided,
+		detail: `${limited} of ${decided} (${(observed * 100).toFixed(3)} %); objective is at most ${(target.target * 100).toFixed(3)} %`,
+	};
+}
+
 /** Every objective that is failing. Empty means nothing is breached — not that everything is judged. */
 export function breaches(results: SloResult[]): SloResult[] {
 	return results.filter((result) => result.status === "breached");
+}
+
+// ── docs search latency (uplift-3 N5) ────────────────────────────────────────
+
+/**
+ * The docs-search latency objective: p95 of the end-to-end
+ * `substrate.docs.duration` histogram <= `docsSearchP95Ms` (2,000 ms by
+ * default; `SUBSTRATE_SLO_DOCS_SEARCH_P95_MS`), judged exactly like
+ * `brief.p95` — same evaluator, same `minSamples` floor, same inclusive
+ * bucket-edge statement. It lives beside the catalogue, like the burn and
+ * plane objectives, because the catalogue is pinned to SPE-4793's four and
+ * its consumers assert that list; it surfaces as the sibling `docs` array on
+ * `GET /slo` and is never folded into `breached`.
+ */
+export function docsSearchObjective(overrides: SloThresholds = {}): SloTarget {
+	const t = { ...DEFAULT_THRESHOLDS, ...stripUndefined(overrides) };
+	return {
+		kind: "latency-quantile",
+		id: "docs.search.p95",
+		title: "Docs search latency",
+		statement: `p95 of ${METRIC.docsDuration} <= ${t.docsSearchP95Ms} ms`,
+		metric: METRIC.docsDuration,
+		quantile: 0.95,
+		thresholdMs: t.docsSearchP95Ms,
+		minSamples: t.minSamples,
+	};
+}
+
+/** The `docs` array `GET /slo` serves: one row, `docs.search.p95`, in the catalogue's entry shape. */
+export function evaluateDocsSlos(snapshot: MetricSnapshot[], overrides: SloThresholds = {}): SloResult[] {
+	return evaluateSlos(snapshot, [docsSearchObjective(overrides)]);
+}
+
+// ── per-surface brief latency (uplift-3 N7) ──────────────────────────────────
+
+/** `SloResult` for one surface's slice of a metric: the same row shape with the surface named. */
+export interface SurfaceSloResult extends SloResult {
+	surface: string;
+}
+
+/**
+ * `brief.p95` judged per surface: one row for every `surface` value the
+ * `substrate.brief.duration` histogram has seen with at least `minSamples`
+ * observations, against the same `briefP95Ms` target as the global objective.
+ *
+ * The global row blends every caller, so a fast CLI hides a slow bot; a
+ * surface's own row is the verdict its operator wants. Rows below the floor
+ * are omitted rather than reported `insufficient-data` so the array is empty
+ * until there is something to say and never grows past the surfaces that
+ * call. Served as the sibling `surfaces` array on `GET /slo`, in the
+ * catalogue's entry shape plus `surface`, and never folded into `breached`.
+ */
+export function briefBySurfaceObjectives(snapshot: MetricSnapshot[], overrides: SloThresholds = {}): SurfaceSloResult[] {
+	const t = { ...DEFAULT_THRESHOLDS, ...stripUndefined(overrides) };
+	const histogram = findHistogram(snapshot, METRIC.briefDuration);
+	if (!histogram) return [];
+	const surfaces = new Set<string>();
+	for (const point of histogram.points) {
+		const surface = point.attributes.surface;
+		if (typeof surface === "string") surfaces.add(surface);
+	}
+	const rows: SurfaceSloResult[] = [];
+	for (const surface of [...surfaces].sort()) {
+		const where = { surface };
+		if (mergeHistogram(histogram, where).count < t.minSamples) continue;
+		const target: Extract<SloTarget, { kind: "latency-quantile" }> = {
+			kind: "latency-quantile",
+			id: "brief.p95",
+			title: "Brief latency",
+			statement: `p95 of ${METRIC.briefDuration}{surface=${surface}} <= ${t.briefP95Ms} ms`,
+			metric: METRIC.briefDuration,
+			quantile: 0.95,
+			thresholdMs: t.briefP95Ms,
+			minSamples: t.minSamples,
+			where,
+		};
+		rows.push({ ...evaluateLatency(snapshot, target), surface });
+	}
+	return rows;
 }
 
 // ── per-plane availability, over a rolling hour ──────────────────────────────
@@ -364,7 +508,7 @@ export interface PlaneSloResult {
  * the oldest kept — otherwise two readings inside one bucket (a fresh process
  * read twice within 10 s) would collapse to zero calls and never be judged.
  */
-interface PlaneCountSample {
+export interface PlaneCountSample {
 	atMs: number;
 	ok: number;
 	total: number;
@@ -390,6 +534,11 @@ export interface PlaneWindowReading {
  * newest replaces), and a total that goes backwards is a restart, so the history
  * is dropped rather than subtracted across it. One reading alone spans nothing
  * and judges nothing.
+ *
+ * `prior` (uplift-3 N2) is the history a checkpoint carried across a restart,
+ * copied in and capped exactly as observed buckets are. The totals it holds
+ * came from a merged snapshot, so the first live reading on top of a restored
+ * registry is never below them and the restart does not read as a reset.
  */
 export class PlaneWindow {
 	private readonly byPlane: Partial<Record<PlaneName, PlaneCountSample[]>> = {};
@@ -397,7 +546,25 @@ export class PlaneWindow {
 	constructor(
 		readonly windowMs: number = PLANE_WINDOW_MS,
 		readonly bucketMs: number = PLANE_BUCKET_MS,
-	) {}
+		prior: Partial<Record<PlaneName, readonly PlaneCountSample[]>> = {},
+	) {
+		const cap = Math.ceil(this.windowMs / this.bucketMs) + 1;
+		for (const plane of PLANES) {
+			const samples = prior[plane];
+			if (!samples || samples.length === 0) continue;
+			this.byPlane[plane] = samples.slice(-cap).map((sample) => ({ ...sample }));
+		}
+	}
+
+	/** Every retained bucket per plane, copied, for a checkpoint to carry. */
+	export(): Partial<Record<PlaneName, PlaneCountSample[]>> {
+		const out: Partial<Record<PlaneName, PlaneCountSample[]>> = {};
+		for (const plane of PLANES) {
+			const samples = this.byPlane[plane];
+			if (samples && samples.length > 0) out[plane] = samples.map((sample) => ({ ...sample }));
+		}
+		return out;
+	}
 
 	observe(plane: PlaneName, ok: number, total: number, atMs: number): PlaneWindowReading {
 		const samples = this.byPlane[plane] ?? [];
@@ -495,4 +662,226 @@ export function evaluatePlaneSlos(snapshot: MetricSnapshot[], options: PlaneEval
 				`objective is at least ${(target * 100).toFixed(2)} %`,
 		};
 	});
+}
+
+// ── capacity runway (uplift-3 N2) ────────────────────────────────────────────
+
+export const INDEX_VOLUME_ENV = "SUBSTRATE_INDEX_VOLUME_BYTES";
+export const CAPACITY_RUNWAY_ID = "capacity.index.runway_days";
+/**
+ * The fixed sampling grid: at most one sample per `floor(at / bucketMs)`
+ * bucket, and the first read in a bucket keeps it — a later read in the same
+ * bucket never moves that sample's timestamp. Keyed by the grid, not by the
+ * distance to the newest sample: a 5 s poller against a distance rule kept
+ * dragging the newest sample forward and the ring never spanned a day
+ * (Greptile round 1, PR #61).
+ */
+export const CAPACITY_BUCKET_MS = 60_000;
+/**
+ * The span the samples must cover before a growth rate is fitted. A day, so
+ * the daily vacuum and a single bulk ingest cannot read as a trend: the
+ * objective is about weeks of runway, and a slope taken over an hour of the
+ * sweeper deleting rows would report an index that is shrinking forever.
+ */
+export const CAPACITY_MIN_SPAN_MS = 24 * 60 * 60 * 1000;
+/**
+ * Samples the ring keeps: the minute buckets of the required span plus an
+ * hour of margin. N samples in consecutive buckets span at least
+ * `(N - 1) * bucketMs - (bucketMs - 1)` ms first-to-last, so the bare 1,440
+ * would stop a minute or two short of 24 h and never be judged; the margin
+ * keeps the oldest sample behind the day however the reads fall in their
+ * buckets (Greptile round 1, PR #61).
+ */
+export const CAPACITY_RING_MAX = CAPACITY_MIN_SPAN_MS / CAPACITY_BUCKET_MS + 60;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+export interface CapacitySample {
+	/** Epoch ms of the `/healthz` capacity read. */
+	at: number;
+	databaseBytes: number;
+}
+
+/**
+ * The `databaseBytes` history the runway is fitted over: at most one sample
+ * per `bucketMs` bucket of wall-clock time, so the ring holds a function of
+ * time rather than of the poll rate — a 5 s `/healthz` poller and a 60 s one
+ * both fill it at one sample a minute and reach the 24 h span in a day — and
+ * carried across restarts in the SLO checkpoint. Bounded by count, so the
+ * checkpoint section is bounded whatever a clock does.
+ */
+export class CapacityRing {
+	readonly #samples: CapacitySample[];
+
+	constructor(
+		prior: readonly CapacitySample[] = [],
+		readonly max: number = CAPACITY_RING_MAX,
+		readonly bucketMs: number = CAPACITY_BUCKET_MS,
+	) {
+		this.#samples = prior
+			.filter((sample) => Number.isFinite(sample.at) && Number.isFinite(sample.databaseBytes) && sample.databaseBytes >= 0)
+			.slice(-max)
+			.map((sample) => ({ ...sample }));
+	}
+
+	/**
+	 * Record one read. A non-finite or negative size, or a clock behind the
+	 * newest sample, is ignored. A read in the newest sample's grid bucket is
+	 * ignored too — that sample keeps its own time and size; a read in a later
+	 * bucket starts a new sample.
+	 */
+	record(at: number, databaseBytes: number): void {
+		if (!Number.isFinite(at) || !Number.isFinite(databaseBytes) || databaseBytes < 0) return;
+		const last = this.#samples[this.#samples.length - 1];
+		if (last !== undefined && (at < last.at || Math.floor(last.at / this.bucketMs) === Math.floor(at / this.bucketMs))) return;
+		this.#samples.push({ at, databaseBytes });
+		if (this.#samples.length > this.max) this.#samples.splice(0, this.#samples.length - this.max);
+	}
+
+	/** Every retained sample, oldest first, copied. */
+	samples(): CapacitySample[] {
+		return this.#samples.map((sample) => ({ ...sample }));
+	}
+
+	get size(): number {
+		return this.#samples.length;
+	}
+}
+
+export type CapacitySloStatus = "ok" | "breached" | "insufficient-data";
+
+/** One capacity verdict; the field shape mirrors `SloResult` so `/slo` reads alike. */
+export interface CapacitySloResult {
+	id: string;
+	title: string;
+	statement: string;
+	status: CapacitySloStatus;
+	/** Days until the volume is full at the fitted growth rate; `null` when not judged, or when the index is not growing. */
+	observed: number | null;
+	unit: "days";
+	target: number;
+	/** Samples in the ring. */
+	samples: number;
+	detail: string;
+	/** The least-squares growth, bytes per day, or `null` before one is fitted. */
+	bytesPerDay: number | null;
+	/** The newest sample's size, or `null` with no sample. */
+	currentBytes: number | null;
+	/** The configured volume, or `null` when `SUBSTRATE_INDEX_VOLUME_BYTES` is unset. */
+	volumeBytes: number | null;
+}
+
+export interface CapacityEvalOptions {
+	/** The index volume's size in bytes; `null` leaves the objective `insufficient-data` and the detail says why. */
+	volumeBytes: number | null;
+	/** The runway floor in days; defaults to `DEFAULT_THRESHOLDS.runwayDays`. */
+	targetDays?: number;
+	/** The span the samples must cover before a rate is fitted; defaults to `CAPACITY_MIN_SPAN_MS`. */
+	minSpanMs?: number;
+}
+
+/**
+ * Evaluate `capacity.index.runway_days`: days until `SUBSTRATE_INDEX_VOLUME_BYTES`
+ * is full at the growth fitted by least squares over the ring, which must span
+ * at least a day. Fitted rather than first-to-last so one bulk ingest or vacuum
+ * at either end cannot set the rate alone. An index that is not growing has an
+ * unbounded runway, reported `ok` with `observed: null` and the rate in the
+ * sentence; an index already at or past the volume has none.
+ */
+export function evaluateCapacitySlos(ring: CapacityRing, options: CapacityEvalOptions): CapacitySloResult[] {
+	const target = options.targetDays ?? DEFAULT_THRESHOLDS.runwayDays;
+	const minSpanMs = options.minSpanMs ?? CAPACITY_MIN_SPAN_MS;
+	const samples = ring.samples();
+	const newest = samples[samples.length - 1];
+	const oldest = samples[0];
+	const base = {
+		id: CAPACITY_RUNWAY_ID,
+		title: "Index capacity runway",
+		statement:
+			options.volumeBytes === null
+				? `(${INDEX_VOLUME_ENV} - databaseBytes) / fitted bytes per day >= ${target} days (${INDEX_VOLUME_ENV} unset)`
+				: `(${options.volumeBytes} - databaseBytes) / fitted bytes per day >= ${target} days`,
+		unit: "days" as const,
+		target,
+		samples: samples.length,
+		currentBytes: newest?.databaseBytes ?? null,
+		volumeBytes: options.volumeBytes,
+	};
+	if (options.volumeBytes === null) {
+		return [
+			{
+				...base,
+				status: "insufficient-data",
+				observed: null,
+				bytesPerDay: null,
+				detail: `${INDEX_VOLUME_ENV} is unset, so the volume's size is unknown and no runway can be computed`,
+			},
+		];
+	}
+	const spanMs = newest !== undefined && oldest !== undefined ? newest.at - oldest.at : 0;
+	if (samples.length < 2 || spanMs < minSpanMs) {
+		return [
+			{
+				...base,
+				status: "insufficient-data",
+				observed: null,
+				bytesPerDay: null,
+				detail:
+					`${samples.length} sample(s) span ${(spanMs / 3_600_000).toFixed(1)} h; a growth rate needs samples at least ` +
+					`${Math.round(minSpanMs / 3_600_000)} h apart, and every /healthz capacity read feeds one`,
+			},
+		];
+	}
+	// Least squares on (t, bytes) with t centred on its mean, which keeps the
+	// sums small: epoch milliseconds squared would otherwise overflow double
+	// precision long before the ring is full.
+	const meanT = samples.reduce((sum, sample) => sum + sample.at, 0) / samples.length;
+	const meanY = samples.reduce((sum, sample) => sum + sample.databaseBytes, 0) / samples.length;
+	let sxy = 0;
+	let sxx = 0;
+	for (const sample of samples) {
+		const dt = sample.at - meanT;
+		sxy += dt * (sample.databaseBytes - meanY);
+		sxx += dt * dt;
+	}
+	const bytesPerDay = sxx > 0 ? (sxy / sxx) * DAY_MS : 0;
+	const current = newest!.databaseBytes;
+	const remaining = options.volumeBytes - current;
+	const mb = (bytes: number) => `${(bytes / 1_048_576).toFixed(1)} MiB`;
+	if (remaining <= 0) {
+		return [
+			{
+				...base,
+				status: "breached",
+				observed: 0,
+				bytesPerDay,
+				detail: `index is ${mb(current)}, at or past the ${mb(options.volumeBytes)} volume; no runway remains`,
+			},
+		];
+	}
+	if (bytesPerDay <= 0) {
+		return [
+			{
+				...base,
+				status: "ok",
+				observed: null,
+				bytesPerDay,
+				detail:
+					`index is ${mb(current)} of ${mb(options.volumeBytes)} and not growing (${mb(bytesPerDay)}/day over ` +
+					`${(spanMs / 3_600_000).toFixed(1)} h, ${samples.length} samples); runway is unbounded`,
+			},
+		];
+	}
+	const runwayDays = remaining / bytesPerDay;
+	return [
+		{
+			...base,
+			status: runwayDays >= target ? "ok" : "breached",
+			observed: runwayDays,
+			bytesPerDay,
+			detail:
+				`index is ${mb(current)} of ${mb(options.volumeBytes)}, growing ${mb(bytesPerDay)}/day over ` +
+				`${(spanMs / 3_600_000).toFixed(1)} h (${samples.length} samples): ${runwayDays.toFixed(1)} days of runway; ` +
+				`objective is at least ${target}`,
+		},
+	];
 }

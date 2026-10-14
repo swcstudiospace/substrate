@@ -5,16 +5,18 @@
  * EnvironmentFile. Nothing here ever reads a secret from the repo.
  */
 import { SOLANA_CLI_DEFAULT } from "@substrate/ledger";
-import { loadBreakerSettings, type BreakerSettings } from "@substrate/observability";
+import { ADMISSION_CLASSES, loadBreakerSettings, type AdmissionClass, type BreakerSettings } from "@substrate/observability";
+import { ADMISSION_MODES, type AdmissionMode, type AdmissionSettings, type BucketLimit } from "./admission.ts";
 import { DEFAULT_INGEST_ROOTS } from "./docs-ingest.ts";
 import { normalizeTtlSeconds } from "./lease.ts";
+import { LEGACY_ENV_KEYS } from "./legacy-env.ts";
 import { LINEAR_API_URL } from "./linear.ts";
 import { parseGrants, type MemoryGrant } from "./memory-policy.ts";
 import { DEFAULT_RECALL_BUDGET_MS } from "./memory-recall.ts";
 import { NOTION_API_URL } from "./notion.ts";
 import { DEFAULT_RETRIEVAL_KNOBS, ragflowFromEnv, type RagflowConfig, type RetrievalKnobs } from "./planes/ragflow.ts";
 import { DEFAULT_RETAIN_DRAIN_MS, DEFAULT_RETAIN_MAX_ATTEMPTS, DEFAULT_RETAIN_OUTBOX_MAX } from "./retain-outbox.ts";
-import { SURFACES, SWARM_SURFACES, isSwarmSurface, type Surface } from "./types.ts";
+import { MEMORY_EXPIRY_MODES, SURFACES, SWARM_SURFACES, isSwarmSurface, type MemoryExpiryMode, type Surface } from "./types.ts";
 
 /** Default hermes-linear-connector base URL (D23-25). */
 export const DEFAULT_HERMES_LINEAR_URL = "http://127.0.0.1:8792";
@@ -324,6 +326,80 @@ export interface SubstrateConfig {
 	 * The defaults are RAGFlow's own; junk or out-of-range values fall back.
 	 */
 	docsRetrieval: RetrievalKnobs;
+	// uplift-3 N3 — admission budgets
+	/**
+	 * `SUBSTRATE_BUDGETS` (`off` | `shadow` | `enforce`, default `shadow`) and
+	 * the per-class buckets from `SUBSTRATE_BUDGET_<CLASS>_RPS` / `_BURST`, with
+	 * per-surface `SUBSTRATE_BUDGET_<SURFACE>_<CLASS>_RPS` / `_BURST` overrides
+	 * and the shared `SUBSTRATE_BUDGET_ANONYMOUS_RPS` / `_BURST`. See `admission.ts`.
+	 */
+	admission: AdmissionSettings;
+	/**
+	 * One shared deadline for every dataset's retrieval in one `docs_search`,
+	 * ms (`SUBSTRATE_DOCS_SEARCH_BUDGET_MS`, default 4000; 0 = no shared
+	 * deadline, each retrieval bounded only by its own 4 s call timeout —
+	 * uplift-3 N5). A dataset that misses it is degraded alone; the others
+	 * still answer.
+	 */
+	docsSearchBudgetMs: number;
+	// uplift-3 N4 — memory lifetime
+	/**
+	 * What the index's serving reads do with an entry past its `ttl`
+	 * (`SUBSTRATE_MEMORY_EXPIRY`): `report` (the default) serves it tagged
+	 * `expired` and counts it; `enforce` hides it unless an operator asks, and
+	 * lets the sweeper's two `entries-ttl-*` classes delete under `apply`. The
+	 * retain forward refuses an expired entry in both modes. Anything else is
+	 * `report`, named at boot by `memoryExpiryConfigWarnings`.
+	 */
+	memoryExpiry: MemoryExpiryMode;
+	/** The unrecognised `SUBSTRATE_MEMORY_EXPIRY` value, for the boot warning; null when the key parsed or was unset. */
+	memoryExpiryRejected: string | null;
+	// uplift-3 N2 — restart-durable SLO history and notifications
+	/**
+	 * Where the SLO checkpoint is written and restored from
+	 * (`SUBSTRATE_SLO_CHECKPOINT`): an absolute path, or `null` when disabled.
+	 * Unset, it is `DEFAULT_SLO_CHECKPOINT_PATH` only when that file's directory
+	 * exists on this host — asked of the `directoryExists` probe `loadConfig` is
+	 * given, which the entry point supplies and tests do not, so a bare
+	 * `loadConfig({})` never reads or writes under `/var/lib`. `off`, `0`, `none`
+	 * or a relative value disable it; the relative one is named at boot by
+	 * `sloConfigWarnings`, since a typo must not land a checkpoint in the repo.
+	 */
+	sloCheckpointPath: string | null;
+	/** The rejected relative `SUBSTRATE_SLO_CHECKPOINT`, for the boot warning; null otherwise. */
+	sloCheckpointRejected: string | null;
+	/** Seconds between checkpoint writes (`SUBSTRATE_SLO_CHECKPOINT_S`, default 60); `0` writes only at shutdown. */
+	sloCheckpointS: number;
+	/**
+	 * The transition notifier (`SUBSTRATE_SLO_NOTIFY=1`, default off): every
+	 * `intervalS` it judges the catalogue, planes, burn, capacity and breakers,
+	 * and a condition held for `sustainS` becomes one `warning` event on the
+	 * ledger (and one POST to `webhookUrl` when set). See `slo-notify.ts`.
+	 */
+	sloNotify: SloNotifySettings;
+}
+
+/** The knobs behind `SUBSTRATE_SLO_NOTIFY*` and `SUBSTRATE_SLO_WEBHOOK_URL` (uplift-3 N2). */
+export interface SloNotifySettings {
+	enabled: boolean;
+	/** Seconds between evaluations (`SUBSTRATE_SLO_NOTIFY_S`, default 60, floor 5). */
+	intervalS: number;
+	/** Seconds a breach or an open breaker must hold before it is announced (`SUBSTRATE_SLO_NOTIFY_SUSTAIN_S`, default 300; 0 announces at once). */
+	sustainS: number;
+	/** `SUBSTRATE_SLO_WEBHOOK_URL`, an `http(s)` URL given the same payload, or `null`. A URL, never a credential, but never printed either. */
+	webhookUrl: string | null;
+}
+
+/** Where the SLO checkpoint lives when `SUBSTRATE_SLO_CHECKPOINT` is unset and the state directory exists. */
+export const DEFAULT_SLO_CHECKPOINT_PATH = "/var/lib/substrate/slo-checkpoint.json";
+
+/**
+ * What `loadConfig` may ask the host. Only the entry point supplies a probe;
+ * everything else gets the fail-safe answer, so no test harness discovers a
+ * state directory on the machine it runs on.
+ */
+export interface ConfigProbes {
+	directoryExists?: (path: string) => boolean;
 }
 
 /** Production defaults: September's library, so the host ledger keeps deduplicating. */
@@ -476,7 +552,7 @@ function isKnownDesktopSurface(value: string): value is Surface {
 	return (SURFACES as readonly string[]).includes(value);
 }
 
-export function loadConfig(env: Record<string, string | undefined> = process.env): SubstrateConfig {
+export function loadConfig(env: Record<string, string | undefined> = process.env, probes: ConfigProbes = {}): SubstrateConfig {
 	const greptimeUrl = env.GREPTIME_URL?.trim();
 	const leaseTtl = Number(env.SUBSTRATE_LEASE_TTL_SECONDS);
 	const tokens = tokenConfig(env);
@@ -578,7 +654,81 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 			vectorSimilarityWeight: unitIntervalOr(env.SUBSTRATE_DOCS_VECTOR_WEIGHT, DEFAULT_RETRIEVAL_KNOBS.vectorSimilarityWeight),
 			topK: positiveOr(env.SUBSTRATE_DOCS_TOP_K, DEFAULT_RETRIEVAL_KNOBS.topK),
 		},
+		// uplift-3 N3
+		admission: loadAdmissionSettings(env),
+		// uplift-3 N5
+		docsSearchBudgetMs: nonNegativeOr(env.SUBSTRATE_DOCS_SEARCH_BUDGET_MS, 4000),
+		// uplift-3 N4
+		...memoryExpiryFromEnv(env.SUBSTRATE_MEMORY_EXPIRY),
+		// uplift-3 N2
+		...sloCheckpointFromEnv(env.SUBSTRATE_SLO_CHECKPOINT, probes),
+		sloCheckpointS: boundedInt(env.SUBSTRATE_SLO_CHECKPOINT_S, 60, 0, 86_400),
+		sloNotify: {
+			enabled: (env.SUBSTRATE_SLO_NOTIFY?.trim() ?? "") === "1",
+			intervalS: boundedInt(env.SUBSTRATE_SLO_NOTIFY_S, 60, 5, 86_400),
+			sustainS: boundedInt(env.SUBSTRATE_SLO_NOTIFY_SUSTAIN_S, 300, 0, 86_400),
+			webhookUrl: /^https?:\/\//i.test(env.SUBSTRATE_SLO_WEBHOOK_URL?.trim() ?? "") ? env.SUBSTRATE_SLO_WEBHOOK_URL!.trim() : null,
+		},
 	};
+}
+
+/**
+ * uplift-3 N2: the checkpoint path. Unset asks the probe whether the default's
+ * directory exists and uses it only then; an explicit `off`/`0`/`none` disables;
+ * a relative path disables and is carried back for the boot warning, like
+ * `SUBSTRATE_DESKTOP_DIR` — the file must never land in the repo by typo.
+ */
+function sloCheckpointFromEnv(raw: string | undefined, probes: ConfigProbes): Pick<SubstrateConfig, "sloCheckpointPath" | "sloCheckpointRejected"> {
+	const trimmed = raw?.trim() ?? "";
+	if (raw === undefined) {
+		const directory = DEFAULT_SLO_CHECKPOINT_PATH.slice(0, DEFAULT_SLO_CHECKPOINT_PATH.lastIndexOf("/"));
+		return { sloCheckpointPath: probes.directoryExists?.(directory) === true ? DEFAULT_SLO_CHECKPOINT_PATH : null, sloCheckpointRejected: null };
+	}
+	if (trimmed === "" || /^(off|0|none|false|no)$/i.test(trimmed)) return { sloCheckpointPath: null, sloCheckpointRejected: null };
+	if (!trimmed.startsWith("/")) return { sloCheckpointPath: null, sloCheckpointRejected: trimmed };
+	return { sloCheckpointPath: trimmed, sloCheckpointRejected: null };
+}
+
+/**
+ * A relative `SUBSTRATE_SLO_CHECKPOINT`, reported at boot (uplift-3 N2). A
+ * sibling of `memoryExpiryConfigWarnings`; the value is a path, never a
+ * credential, so the warning may quote it.
+ */
+export function sloConfigWarnings(config: SubstrateConfig): string[] {
+	if (config.sloCheckpointRejected === null) return [];
+	return [
+		`SUBSTRATE_SLO_CHECKPOINT=${JSON.stringify(config.sloCheckpointRejected)} is not an absolute path; ` +
+			"the SLO checkpoint is disabled, so every restart starts the SLO history fresh",
+	];
+}
+
+/**
+ * uplift-3 N4: `report` or `enforce`, case- and space-insensitive; anything else
+ * keeps `report` and is carried back for the boot warning. Never `enforce` by
+ * accident: a typo must not start hiding memories.
+ */
+function memoryExpiryFromEnv(raw: string | undefined): Pick<SubstrateConfig, "memoryExpiry" | "memoryExpiryRejected"> {
+	const trimmed = raw?.trim() ?? "";
+	if (trimmed === "") return { memoryExpiry: "report", memoryExpiryRejected: null };
+	const mode = trimmed.toLowerCase();
+	if ((MEMORY_EXPIRY_MODES as readonly string[]).includes(mode)) {
+		return { memoryExpiry: mode as MemoryExpiryMode, memoryExpiryRejected: null };
+	}
+	return { memoryExpiry: "report", memoryExpiryRejected: trimmed };
+}
+
+/**
+ * An unrecognised `SUBSTRATE_MEMORY_EXPIRY`, reported at boot (uplift-3 N4). A
+ * sibling of `hindsightConfigWarnings`, not part of `configWarnings` (which
+ * returns early without operator tokens). The value is a mode name, never a
+ * credential, so the warning may quote it — that is how a typo gets found.
+ */
+export function memoryExpiryConfigWarnings(config: SubstrateConfig): string[] {
+	if (config.memoryExpiryRejected === null) return [];
+	return [
+		`SUBSTRATE_MEMORY_EXPIRY=${JSON.stringify(config.memoryExpiryRejected)} is neither report nor enforce; ` +
+			"running as report, so expired memory entries are still served (tagged `expired`) and nothing is hidden or deleted",
+	];
 }
 
 /** uplift-2 R1: a finite number ≥ 0, floored (0 is "off"); anything else is the default. */
@@ -597,6 +747,68 @@ function positiveOr(raw: string | undefined, fallback: number): number {
 function unitIntervalOr(raw: string | undefined, fallback: number): number {
 	const value = Number(raw?.trim());
 	return raw !== undefined && raw.trim() !== "" && Number.isFinite(value) && value >= 0 && value <= 1 ? value : fallback;
+}
+
+/** uplift-3 N3: a finite rate > 0, fractions kept (0.5 rps is one call per 2 s); anything else is the default. */
+function positiveRateOr(raw: string | undefined, fallback: number): number {
+	const value = Number(raw?.trim());
+	return raw !== undefined && raw.trim() !== "" && Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+/** uplift-3 N3 defaults, per surface and second: the burst is one second of headroom over the rate. */
+export const DEFAULT_BUDGETS: Readonly<Record<AdmissionClass, BucketLimit>> & { readonly anonymous: BucketLimit } = {
+	read: { rps: 20, burst: 40 },
+	write: { rps: 10, burst: 20 },
+	coordination: { rps: 30, burst: 60 },
+	anonymous: { rps: 2, burst: 4 },
+};
+
+/**
+ * uplift-3 N3. The mode defaults to `shadow`: decide and count, never refuse,
+ * so the numbers are tuned from the metric before `enforce` makes a wrong one
+ * a 429. A per-surface override may set the rate, the burst or both; the half
+ * it leaves out is the class default, so `SUBSTRATE_BUDGET_GROK_BOT_READ_RPS=5`
+ * alone keeps the read burst of 40.
+ */
+export function loadAdmissionSettings(env: Record<string, string | undefined>): AdmissionSettings {
+	const rawMode = env.SUBSTRATE_BUDGETS?.trim().toLowerCase() ?? "";
+	const mode: AdmissionMode = (ADMISSION_MODES as readonly string[]).includes(rawMode) ? (rawMode as AdmissionMode) : "shadow";
+	const classes = Object.fromEntries(
+		ADMISSION_CLASSES.map((klass) => {
+			const name = klass.toUpperCase();
+			return [
+				klass,
+				{
+					rps: positiveRateOr(env[`SUBSTRATE_BUDGET_${name}_RPS`], DEFAULT_BUDGETS[klass].rps),
+					burst: positiveOr(env[`SUBSTRATE_BUDGET_${name}_BURST`], DEFAULT_BUDGETS[klass].burst),
+				},
+			];
+		}),
+	) as Record<AdmissionClass, BucketLimit>;
+	const overrides: AdmissionSettings["overrides"] = {};
+	for (const surface of SURFACES) {
+		// `grok-bot` → `GROK_BOT`, the spelling `SUBSTRATE_TOKEN_*` already uses.
+		const spelled = surface.toUpperCase().replace(/-/g, "_");
+		for (const klass of ADMISSION_CLASSES) {
+			const prefix = `SUBSTRATE_BUDGET_${spelled}_${klass.toUpperCase()}`;
+			const rps = env[`${prefix}_RPS`];
+			const burst = env[`${prefix}_BURST`];
+			if ((rps?.trim() ?? "") === "" && (burst?.trim() ?? "") === "") continue;
+			(overrides[surface] ??= {})[klass] = {
+				rps: positiveRateOr(rps, classes[klass].rps),
+				burst: positiveOr(burst, classes[klass].burst),
+			};
+		}
+	}
+	return {
+		mode,
+		classes,
+		anonymous: {
+			rps: positiveRateOr(env.SUBSTRATE_BUDGET_ANONYMOUS_RPS, DEFAULT_BUDGETS.anonymous.rps),
+			burst: positiveOr(env.SUBSTRATE_BUDGET_ANONYMOUS_BURST, DEFAULT_BUDGETS.anonymous.burst),
+		},
+		overrides,
+	};
 }
 
 /**
@@ -889,6 +1101,11 @@ export interface LedgerSettings {
 	writeProbeS: number;
 	/** Retention to apply to `agent_events` and `event_ingest` at boot; `null` alters nothing. */
 	ttl: string | null;
+	// uplift-3 N6
+	/** Uncovered eligible hours `substrate ledger coverage` tolerates before exiting 2 (`SUBSTRATE_LEDGER_MAX_UNCOVERED_HOURS`, default 2). */
+	maxUncoveredHours: number;
+	/** Where `substrate ledger archive` writes when `--out` is omitted (`SUBSTRATE_LEDGER_ARCHIVE_DIR`); `null` means the command needs `--out`. */
+	archiveDir: string | null;
 }
 
 export const DEFAULT_LEDGER_SETTINGS: LedgerSettings = {
@@ -897,6 +1114,8 @@ export const DEFAULT_LEDGER_SETTINGS: LedgerSettings = {
 	chainLookbackDays: 30,
 	writeProbeS: 60,
 	ttl: null,
+	maxUncoveredHours: 2,
+	archiveDir: null,
 };
 
 /**
@@ -942,6 +1161,10 @@ export function loadLedgerSettings(env: Record<string, string | undefined> = pro
 		chainLookbackDays: boundedInt(env.SUBSTRATE_LEDGER_CHAIN_LOOKBACK_DAYS, DEFAULT_LEDGER_SETTINGS.chainLookbackDays, 1, 3650),
 		writeProbeS: boundedInt(env.SUBSTRATE_LEDGER_WRITE_PROBE_S, DEFAULT_LEDGER_SETTINGS.writeProbeS, 0, 86_400),
 		ttl: ttlRaw === "" ? null : ttlRaw,
+		// uplift-3 N6: the archive dir is a path, taken as given; the archive command
+		// itself refuses the repo, the release root and a filesystem below the floor.
+		maxUncoveredHours: boundedInt(env.SUBSTRATE_LEDGER_MAX_UNCOVERED_HOURS, DEFAULT_LEDGER_SETTINGS.maxUncoveredHours, 0, 100_000),
+		archiveDir: env.SUBSTRATE_LEDGER_ARCHIVE_DIR?.trim() ? env.SUBSTRATE_LEDGER_ARCHIVE_DIR.trim() : null,
 	};
 }
 
@@ -973,7 +1196,8 @@ function positiveIntOr(raw: string | undefined, fallback: number): number {
 export function hindsightConfigWarnings(config: SubstrateConfig): string[] {
 	const warnings: string[] = [];
 	if (config.hindsightEnv.legacyBankSet) {
-		warnings.push("HINDSIGHT_BANK is set but legacy and unread; recall fans out over HINDSIGHT_BANKS (sub-* names), so set that instead");
+		// The sentence lives in legacy-env.ts so the runtime doctor prints the same one.
+		for (const key of LEGACY_ENV_KEYS) if (key.name === "HINDSIGHT_BANK") warnings.push(key.hint);
 	}
 	if (config.hindsightEnv.urlSet && !config.hindsightEnv.banksSet) {
 		warnings.push("HINDSIGHT_URL is set but HINDSIGHT_BANKS is empty, so recall reads the caller's own bank only; list the sub-* banks to fan out");

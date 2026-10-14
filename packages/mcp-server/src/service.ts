@@ -12,7 +12,12 @@ import {
 	PLANES,
 	PlaneRegistry,
 	gatedFetch,
+	type AdmissionClass,
+	type AdmissionDecision,
 	type BreakerSnapshot,
+	type BriefResult,
+	type BriefState,
+	type DocsSearchSample,
 	type PlaneName,
 	type PlaneSample,
 } from "@substrate/observability";
@@ -28,6 +33,7 @@ import {
 	type CacheHealth,
 	type CacheSample,
 	type ReadThroughCache,
+	type ScriptOutcome,
 } from "./cache.ts";
 import { isReviewToken, type SubstrateConfig } from "./config.ts";
 import { DesktopBusy, type DesktopDriver, type DesktopLogEntry, type DesktopRunResult } from "./desktop/driver.ts";
@@ -55,7 +61,7 @@ import {
 	type IngestRecord,
 	type PageSettlement,
 } from "./docs-ingest.ts";
-import { DEFAULT_SEARCH_DATASET_NAMES, searchDocs, type SearchReply } from "./docs-search.ts";
+import { DEFAULT_SEARCH_DATASET_NAMES, citationProvenanceCounts, searchDocs, searchReplyStorable, type SearchReply } from "./docs-search.ts";
 import {
 	DEFAULT_IDLE_SECONDS,
 	analyzeDrift,
@@ -77,7 +83,7 @@ import {
 	type LedgerProbe,
 	type QueryableColumn,
 } from "./greptime.ts";
-import { IndexStore, leaseSnapshot, type GraphBindResult, type IndexCapacity } from "./index-store.ts";
+import { IndexStore, leaseSnapshot, type GraphBindResult, type IndexCapacity, type MemoryExpiredSample } from "./index-store.ts";
 import {
 	buildHandoff,
 	handoffGaps,
@@ -99,7 +105,7 @@ import { governMemoryWrite } from "./memory-write.ts";
 import { TEACHABLE_SUBJECT_PREFIX, isTeachable, teachableEvent } from "./teachable.ts";
 import { bankForSurface, hindsightBanksFromEnv, hindsightFromEnv, hindsightOp, probeHealth, type HindsightConfig } from "./planes/hindsight.ts";
 import { listDatasets, ragflowOp, type FetchLike } from "./planes/ragflow.ts";
-import { redact, type SkillDocExampleRule } from "./redact.ts";
+import { redact, redactKnown, type SkillDocExampleRule } from "./redact.ts";
 import { RetainOutbox, type RetainDeliveryOutcome, type RetainOutboxEntry, type RetainOutboxStats } from "./retain-outbox.ts";
 import {
 	createExecFileRunner,
@@ -128,6 +134,7 @@ import {
 	type GraphView,
 	type MemoryEntry,
 	type MemoryEntryInput,
+	type MemoryReadOptions,
 	type MemorySearch,
 	type MemorySearchPage,
 	type MemoryWriteRequest,
@@ -137,8 +144,13 @@ import {
 	type SubstrateEvent,
 } from "./types.ts";
 
-/** Greptime gives back loosely typed rows; rebuild the exact shape that was hashed. */
-function rowToEvent(row: Record<string, unknown>): SubstrateEvent {
+/**
+ * Greptime gives back loosely typed rows; rebuild the exact shape that was hashed.
+ * Exported for `ledger-archive.ts`, which writes this shape to the archive so
+ * `verifyArchive` recomputes the same hash from the file that `verifyGraph` does
+ * from the ledger.
+ */
+export function rowToEvent(row: Record<string, unknown>): SubstrateEvent {
 	const text = (value: unknown): string | null => (value === null || value === undefined ? null : String(value));
 	let payload: Record<string, unknown> = {};
 	try {
@@ -343,13 +355,23 @@ export interface EventQueryResult {
 export interface BriefDetail {
 	text: string;
 	/** `complete`: every source answered. `degraded`: some did not, thin live text. `snapshot`: some did not, last-good text served instead. */
-	state: "complete" | "degraded" | "snapshot";
+	state: BriefState;
 	/** The sources that failed or missed the budget, in section order; empty when complete. */
 	failed: BriefSource[];
 	/** Weak validator of `text`: `W/"<first 32 hex of sha256>"`. */
 	etag: string;
 	/** When the served snapshot was composed; null unless `state` is `snapshot`. */
 	snapshotAt: string | null;
+}
+
+/**
+ * A brief as it was answered to one caller (uplift-3 N7): the detail, and
+ * whether the caller's validator matched so no text was sent.
+ */
+export interface BriefAnswer {
+	detail: BriefDetail;
+	/** True when `ifNoneMatch` listed the current ETag: REST answers 304, MCP `not_modified`. */
+	notModified: boolean;
 }
 
 /** What the `brief-snapshot` cache class holds. */
@@ -361,6 +383,28 @@ interface BriefSnapshot {
 /** Weak, so a proxy that re-encodes the body still matches; 32 hex is plenty against collision for a brief. */
 export function briefEtag(text: string): string {
 	return `W/"${createHash("sha256").update(text).digest("hex").slice(0, 32)}"`;
+}
+
+/**
+ * Whether an `If-None-Match` validator lists `etag`, by the weak comparison RFC 9110
+ * §8.8.3.2 prescribes for it: `W/` prefixes are ignored on both sides and `*`
+ * matches any current representation. The brief's tag is weak on purpose — it
+ * validates the text, not the bytes a proxy may re-encode.
+ *
+ * One matcher for both doors: `POST /brief` reads the header and MCP
+ * `memory_brief` its `if_none_match` argument, and the two must agree on what
+ * "unchanged" means or a gateway that holds one ETag would get two answers.
+ */
+export function etagMatches(ifNoneMatch: string | string[] | undefined, etag: string): boolean {
+	if (ifNoneMatch === undefined) return false;
+	const header = Array.isArray(ifNoneMatch) ? ifNoneMatch.join(",") : ifNoneMatch;
+	const opaque = etag.replace(/^W\//, "");
+	for (const raw of header.split(",")) {
+		const candidate = raw.trim();
+		if (candidate === "*") return true;
+		if (candidate.replace(/^W\//, "") === opaque) return true;
+	}
+	return false;
 }
 
 /**
@@ -522,6 +566,12 @@ const INGEST_NOT_RECORDED =
  */
 export interface SubstrateObserver {
 	briefed?(sample: { surface: Surface; graph_id: string | null; ok: boolean; durationMs: number }): void;
+	/**
+	 * One brief answered to a caller (uplift-3 N7): `fresh` carried the text,
+	 * `not_modified` only the validator. `surface` is bounded to the surface list
+	 * (`unknown` otherwise) because `POST /brief` takes the body's surface unchecked.
+	 */
+	briefResult?(sample: { surface: string; state: BriefState; result: BriefResult }): void;
 	emitted?(sample: {
 		surface: Surface;
 		graph_id: string | null;
@@ -533,6 +583,14 @@ export interface SubstrateObserver {
 	cached?(sample: CacheSample): void;
 	/** One outbound call to a data plane, as its gate observed it (uplift-2 R2). */
 	plane?(sample: PlaneSample): void;
+	/** One admission budget decision (uplift-3 N3), as `server.ts` took it. */
+	admission?(sample: { surface: string; klass: AdmissionClass; decision: AdmissionDecision }): void;
+	/** One finished docs search, end to end, cached or loaded (uplift-3 N5). */
+	docsSearch?(sample: DocsSearchSample): void;
+	/** One memory entry past its `ttl` that an index read met, and what the read did with it (uplift-3 N4). */
+	memoryExpired?(sample: MemoryExpiredSample): void;
+	/** One `/healthz` index size read (uplift-3 N2), the sample the capacity runway is fitted over. */
+	capacity?(sample: { at: number; databaseBytes: number }): void;
 	claimed?(sample: {
 		surface: Surface;
 		graph_id: string;
@@ -692,6 +750,8 @@ export interface MemorySearchRequest {
 	scope?: string;
 	limit?: number;
 	include_superseded?: boolean;
+	/** Serve entries past their `ttl` under `enforce` (uplift-3 N4). Operator-gated in `mcp.ts`, never here. */
+	include_expired?: boolean;
 	subject_prefix?: string;
 	before?: string;
 	before_id?: string;
@@ -871,7 +931,16 @@ export class Substrate {
 			stores?.index !== undefined
 				? stores.index
 				: config.postgresUrl
-					? new IndexStore(config.postgresUrl, { gate: this.planes.gate("index") })
+					? new IndexStore(config.postgresUrl, {
+							gate: this.planes.gate("index"),
+							// uplift-3 N4: the mode is config, the count goes to the observer.
+							memoryExpiry: {
+								mode: config.memoryExpiry,
+								observe: (sample) => {
+									this.observer.memoryExpired?.(sample);
+								},
+							},
+						})
 					: null;
 		this.greptime =
 			stores?.greptime !== undefined
@@ -1020,9 +1089,33 @@ export class Substrate {
 		return { index: indexOk, greptime: greptimeOk, errors };
 	}
 
-	/** The brief as text — what MCP `memory_brief` and every non-HTTP caller want. */
+	/** The brief as text — what every caller without a validator to offer wants. */
 	async brief(request: BriefRequest): Promise<string> {
 		return (await this.briefDetailed(request)).text;
+	}
+
+	/**
+	 * The brief as answered to a caller that may already hold it (uplift-3 N7).
+	 *
+	 * `ifNoneMatch` is the validator the caller offered — the `If-None-Match`
+	 * header on `POST /brief`, the `if_none_match` argument of MCP
+	 * `memory_brief` — in the header's own grammar (weak or strong, a list, or
+	 * `*`). When it lists the brief's current ETag the answer is `notModified`
+	 * and the route sends no text. The brief is still composed in full (it has
+	 * to be, to know the tag), so the saving is the transfer, not the compose;
+	 * `briefed` still times it. The result counter is recorded here, once, so
+	 * both doors count alike; `surface` is bounded to the surface list first
+	 * because the REST body's surface is not validated.
+	 */
+	async briefConditional(request: BriefRequest, ifNoneMatch: string | string[] | undefined): Promise<BriefAnswer> {
+		const detail = await this.briefDetailed(request);
+		const notModified = etagMatches(ifNoneMatch, detail.etag);
+		this.observer.briefResult?.({
+			surface: (SURFACES as readonly string[]).includes(request.surface) ? request.surface : "unknown",
+			state: detail.state,
+			result: notModified ? "not_modified" : "fresh",
+		});
+		return { detail, notModified };
 	}
 
 	/**
@@ -1044,10 +1137,15 @@ export class Substrate {
 			const noted: Array<number | null> = [];
 			const failed: BriefSource[] = [];
 			let loaded = false;
+			// The expiry mode is part of the key for the same reason it is on a
+			// search (uplift-3 N4): a `report` brief carries expired advice, tagged,
+			// and must not be served `complete` — nor replayed as a snapshot — after
+			// a restart into `enforce`. Empty under `report`, so those keys stand.
 			const args = {
 				repo: request.repo ?? null,
 				branch: request.branch ?? null,
 				graph_id: request.graph_id ?? null,
+				...this.expiryKey(undefined),
 			};
 			const live = await this.cache.getOrLoad({
 				klass: "brief",
@@ -1422,6 +1520,13 @@ export class Substrate {
 	 * leg runs under its own shorter budget (`HINDSIGHT_SEARCH_RECALL_BUDGET_MS`,
 	 * uplift-2 R3): a slow plane costs a search at most that long, and the
 	 * reply says `recall-timeout` so the caller can tell slow from down.
+	 *
+	 * Lifetime (uplift-3 N4) is the index's to judge; `includeExpired` only widens
+	 * an `enforce` read and arrives already operator-gated. The cache key carries
+	 * the mode only when it is `enforce`, so a flip to `enforce` cannot be answered
+	 * from a `report` entry across a restart, while `report` keys are the keys
+	 * they were; and the refresh deadline is the nearest `expires_at` as well as
+	 * the nearest reverify, so a cached page never outlives an entry in it.
 	 */
 	async searchMemory(
 		query: string,
@@ -1429,21 +1534,30 @@ export class Substrate {
 		limit?: number,
 		includeSuperseded?: boolean,
 		surface = "unattributed",
+		includeExpired?: boolean,
 	): Promise<MergedMemoryResults> {
+		const read = this.memoryRead(surface, includeExpired);
 		return this.cache.getOrLoad({
 			klass: "memory-search",
 			surface,
 			// The shape marker keeps pre-upgrade bare-list entries under their
 			// old key: a hit must return the merged shape, never a stale array.
-			args: { query, scope: scope ?? null, limit: limit ?? null, includeSuperseded: includeSuperseded ?? false, shape: "merged-v1" },
-			generations: [MEMORY_GENERATION_KEY],
-			refreshAt: (merged) => earliestRefreshAt(merged.entries.map((entry) => entry.reverify_after)),
+			args: {
+				query,
+				scope: scope ?? null,
+				limit: limit ?? null,
+				includeSuperseded: includeSuperseded ?? false,
+				shape: "merged-v1",
+				...this.expiryKey(includeExpired),
+			},
+			generations: this.memoryGenerations(),
+			refreshAt: (merged) => earliestRefreshAt(merged.entries.flatMap((entry) => [entry.reverify_after, entry.expires_at])),
 			// A degraded answer (outage, partial) is still the answer, but it
 			// must not sit in the cache: the next search re-probes the plane.
 			store: (merged) => !merged.degraded,
 			load: async () => {
 				const [entries, recall] = await Promise.all([
-					this.index ? this.index.searchMemory(query, scope, limit, includeSuperseded) : Promise.resolve([]),
+					this.index ? this.index.searchMemory(query, scope, limit, includeSuperseded, read) : Promise.resolve([]),
 					this.recallMemories({ query }, surface, this.config.hindsightBudgets.searchRecallBudgetMs),
 				]);
 				return mergeDerivedHits(entries, recall, scope);
@@ -1455,21 +1569,53 @@ export class Substrate {
 	 * A paged search: `subject_prefix` and the `(before, before_id)` cursor. The
 	 * visibility rules are `searchMemory`'s — this reads the same entries, only
 	 * further back — so nothing quarantined, parked or retired is reachable here
-	 * that was not before.
+	 * that was not before, and an expired entry is tagged or hidden the same way.
 	 */
 	async searchMemoryPage(request: MemorySearchRequest, surface = "unattributed"): Promise<MemorySearchPage> {
 		const search = parseMemorySearch(request);
+		const read = this.memoryRead(surface, request.include_expired);
 		return this.cache.getOrLoad({
 			klass: "memory-search",
 			surface,
-			args: search,
-			generations: [MEMORY_GENERATION_KEY],
-			refreshAt: (page) => earliestRefreshAt(page.entries.map((entry) => entry.reverify_after)),
+			args: { ...search, ...this.expiryKey(request.include_expired) },
+			generations: this.memoryGenerations(),
+			refreshAt: (page) => earliestRefreshAt(page.entries.flatMap((entry) => [entry.reverify_after, entry.expires_at])),
 			load: async () => {
 				if (!this.index) return { entries: [], next: null };
-				return this.index.searchMemoryPage(search);
+				return this.index.searchMemoryPage(search, read);
 			},
 		});
+	}
+
+	/** The per-call lifetime options for an index read (uplift-3 N4): who is asking, and whether expired entries were asked for. */
+	private memoryRead(surface: string, includeExpired: boolean | undefined): MemoryReadOptions {
+		return { surface, ...(includeExpired === true ? { includeExpired: true } : {}) };
+	}
+
+	/**
+	 * The lifetime part of a memory cache key. Empty under `report` without
+	 * `includeExpired`, which keeps every pre-N4 key exactly what it was; set
+	 * otherwise, so an `enforce` answer and a widened one never share an entry
+	 * with a `report` one.
+	 */
+	private expiryKey(includeExpired: boolean | undefined): { expiry?: "enforce"; includeExpired?: true } {
+		return {
+			...(this.config.memoryExpiry === "enforce" ? { expiry: "enforce" as const } : {}),
+			...(includeExpired === true ? { includeExpired: true as const } : {}),
+		};
+	}
+
+	/**
+	 * What a cached memory search depends on (uplift-3 N4). The memory generation
+	 * moves on every accepted write; the shared graphs generation moves on every
+	 * graph write (`bumpGraph`) — and a `ttl: graph` entry's verdict is read off
+	 * `graph_index`, so a graph finishing must drop the searches that still list
+	 * (or still tag as alive) its memories. The same pair a brief already embeds;
+	 * a `graph` entry has no `expires_at` for `refreshAt` to reach, so this is the
+	 * only way a search learns that its graph closed before the cache TTL.
+	 */
+	private memoryGenerations(): string[] {
+		return [MEMORY_GENERATION_KEY, GRAPHS_GENERATION_KEY];
 	}
 
 	/**
@@ -1490,15 +1636,18 @@ export class Substrate {
 		let before: string | undefined;
 		let beforeId: string | undefined;
 		for (let pages = 0; pages < 100; pages++) {
-			const page = await this.index.searchMemoryPage({
-				query: "",
-				subjectPrefix: TEACHABLE_SUBJECT_PREFIX,
-				writer: surface,
-				kind: "fact",
-				limit: 100,
-				includeSuperseded: false,
-				...(before === undefined ? {} : { before, beforeId }),
-			});
+			const page = await this.index.searchMemoryPage(
+				{
+					query: "",
+					subjectPrefix: TEACHABLE_SUBJECT_PREFIX,
+					writer: surface,
+					kind: "fact",
+					limit: 100,
+					includeSuperseded: false,
+					...(before === undefined ? {} : { before, beforeId }),
+				},
+				{ surface },
+			);
 			for (const entry of page.entries) {
 				if (isTeachable(entry.kind, entry.subject) && entry.writer === surface && !entry.superseded_by) teachables.push(entry);
 			}
@@ -1623,6 +1772,7 @@ export class Substrate {
 							return true;
 						},
 					};
+		const index = this.index;
 		return {
 			config: hindsight,
 			fetchImpl: this.hindsightFetch,
@@ -1630,6 +1780,9 @@ export class Substrate {
 			emit: (event: EventInput) => this.emit(event),
 			outbox: sink,
 			retainTimeoutMs: this.config.hindsightBudgets.retainTimeoutMs,
+			// uplift-3 N4: a `graph` entry is judged against the graph as the index
+			// knows it now, so a forward of a finished graph's memory is refused.
+			...(index ? { graphLifetime: (entry: MemoryEntry) => index.graphLifetime(entry) } : {}),
 		};
 	}
 
@@ -2748,12 +2901,44 @@ export class Substrate {
 	 * `agent-skills` is marked pin-aged until this process has seen
 	 * skills-sync fast-forward evidence (D25-07). The dataset list comes
 	 * from the 60 s cache, so a search costs N retrievals, not 1 + N calls.
+	 *
+	 * uplift-3 N5: the datasets are retrieved concurrently under one shared
+	 * budget (`docsSearchBudgetMs`); a partially served reply names its
+	 * missing datasets in `degraded_datasets` and, like a degraded one, is
+	 * never stored. Every search is measured end to end — cache hit or
+	 * loaded, as the caller waited for it — through `observer.docsSearch`.
 	 */
 	async searchDocs(
 		input: { question?: unknown; datasets?: unknown; session_id?: unknown },
 		callerSurface: Surface | null,
 	): Promise<SearchReply> {
 		const surface = callerSurface ?? "claude-code";
+		const started = performance.now();
+		let loaded = false;
+		let reply: SearchReply | null = null;
+		try {
+			reply = await this.searchDocsUnmeasured(input, surface, () => {
+				loaded = true;
+			});
+			return reply;
+		} finally {
+			// Timed in `finally` so a search that threw is still in the histogram:
+			// the SLO is about what the caller waited for.
+			this.observer.docsSearch?.({
+				surface,
+				outcome: reply === null || reply.degraded === true ? "degraded" : reply.chunks.length === 0 ? "empty" : "hit",
+				cached: !loaded,
+				durationMs: performance.now() - started,
+				citations: citationProvenanceCounts(reply?.chunks ?? []),
+			});
+		}
+	}
+
+	private async searchDocsUnmeasured(
+		input: { question?: unknown; datasets?: unknown; session_id?: unknown },
+		surface: Surface,
+		noteLoaded: () => void,
+	): Promise<SearchReply> {
 		const sessionId = typeof input.session_id === "string" && input.session_id.length > 0 ? input.session_id : undefined;
 		const question = typeof input.question === "string" ? input.question : "";
 		const names = Array.isArray(input.datasets)
@@ -2762,8 +2947,9 @@ export class Substrate {
 		await this.hydrateDocsSeen();
 		const pins = pinsFromVersions(this.docsVersions);
 		const degradedDatasets = isSyncLive(this.docsSkillsSync) ? [] : ["agent-skills"];
-		const load = (): Promise<SearchReply> =>
-			searchDocs(
+		const load = (): Promise<SearchReply> => {
+			noteLoaded();
+			return searchDocs(
 				{
 					config: this.config.ragflow,
 					datasetNames: names,
@@ -2776,9 +2962,12 @@ export class Substrate {
 					datasets: this.docsDatasetList,
 					retrieval: this.config.docsRetrieval,
 					provenanceOf: (documentId) => documentProvenance(this.docsIngestSeen, documentId),
+					budgetMs: this.config.docsSearchBudgetMs,
+					breakerState: () => this.planes.gate("ragflow").breaker?.state() ?? "closed",
 				},
 				question,
 			);
+		};
 		// An empty question and an unconfigured plane are answered (degraded)
 		// without touching the cache: there is nothing to key on.
 		if (question.trim().length === 0 || this.config.ragflow === null) return load();
@@ -2788,7 +2977,7 @@ export class Substrate {
 			args: { question: question.trim().replace(/\s+/g, " ").toLowerCase(), datasets: [...names].sort(), pins, degraded: degradedDatasets },
 			generations: [DOCS_GENERATION_KEY],
 			load,
-			store: (reply) => reply.degraded !== true,
+			store: searchReplyStorable,
 		});
 	}
 
@@ -3920,6 +4109,15 @@ export class Substrate {
 	}
 
 	/**
+	 * The admission bucket's round trip (uplift-3 N3): one script on the cache
+	 * plane, through its gate, timeout and cooldown. The cache stays private;
+	 * this is the one door `server.ts` has to it, and it never throws.
+	 */
+	cacheScript(script: string, keys: readonly string[], args: readonly string[]): Promise<ScriptOutcome> {
+		return this.cache.script(script, keys, args);
+	}
+
+	/**
 	 * `greptime` is reachability; `eventsWritable` is whether **every** event would
 	 * be accepted. They differ on a reachable ledger that is refusing, which is
 	 * exactly the state a monitor needs to see because `ping` still succeeds.
@@ -3951,6 +4149,11 @@ export class Substrate {
 	 * `eventsWritable`, so a store that stopped taking writes turns `/healthz`
 	 * 503 within one interval by the existing status rule. `capacity.ledger` is
 	 * the ledger's size report, raced against the same bound as the index's.
+	 *
+	 * `jobs.ledger` (uplift-3 N6) is the anchor's lag, the uncovered hours and
+	 * the newest archived day from {@link ledgerJobs}: one coverage read a
+	 * minute, never more, and `null` with `jobs.ledgerReason` when it could not
+	 * be had. It does not touch the status code.
 	 */
 	async health(): Promise<SubstrateHealth> {
 		const greptime = this.greptime ? await this.greptime.ping() : false;
@@ -3982,6 +4185,9 @@ export class Substrate {
 		]);
 		const cache = this.cache.health();
 		const breakers = this.planes.snapshots();
+		// uplift-3 N2: every size read that answered in time is one runway sample;
+		// the observer's ring dedupes and bounds them.
+		if (capacity !== null) this.observer.capacity?.({ at: Date.now(), databaseBytes: capacity.databaseBytes });
 		const ok: Record<PlaneName, boolean | null> = {
 			greptime: this.greptime ? greptime : null,
 			index: this.index ? index : null,
@@ -3999,6 +4205,7 @@ export class Substrate {
 		// A probe that has not run yet (or is off) neither proves nor disproves;
 		// only a failed one overrides the metadata.
 		const eventsWritable = metadataWritable && probe?.lastProbeOk !== false;
+		const ledgerJobs = await this.ledgerJobs();
 		return {
 			index,
 			greptime,
@@ -4016,8 +4223,117 @@ export class Substrate {
 			cache,
 			planes,
 			capacity: { index: capacity, ledger: ledgerCapacity },
+			jobs: { ledger: ledgerJobs.ledger, ledgerReason: ledgerJobs.reason },
 		};
 	}
+
+	/** The last coverage read: when it started and its value, or why it has none. */
+	private ledgerJobsMemo: { at: number; value: LedgerJobsHealth | null; reason: string | null } | null = null;
+	private ledgerJobsInFlight: Promise<void> | null = null;
+
+	/**
+	 * `/healthz.jobs.ledger` (uplift-3 N6): the anchor's lag and uncovered hours
+	 * and the newest archived day, from one `anchorCoverage` read memoised for
+	 * {@link LEDGER_JOBS_MEMO_MS}. The read is four statements including a
+	 * histogram over seven days of ingest records, which is nothing a poller
+	 * should pay per call, so: the memo is served while fresh; a stale memo
+	 * starts one read, shared by every caller that arrives while it runs; the
+	 * caller waits at most `HEALTH_PROBE_MS` for it and otherwise answers `null`
+	 * with the reason while the read finishes in the background and fills the
+	 * memo for the next call. A failed read is memoised too — as `null` with
+	 * its redacted reason — so an unreachable ledger costs one attempt a
+	 * minute, not one per poll. Never throws; `/healthz` still answers.
+	 */
+	async ledgerJobs(now: number = Date.now()): Promise<LedgerJobs> {
+		if (!this.greptime) return { ledger: null, reason: "no ledger configured" };
+		const memoised = this.memoisedLedgerJobs(now);
+		if (memoised !== null) return memoised;
+		if (this.ledgerJobsInFlight === null) {
+			const greptime = this.greptime;
+			const startedAt = now;
+			this.ledgerJobsInFlight = Promise.resolve()
+				.then(() => greptime.anchorCoverage({ now: startedAt }))
+				.then(
+					(coverage) => {
+						this.ledgerJobsMemo = {
+							at: startedAt,
+							value: {
+								anchorLagHours: coverage.lagHours,
+								uncoveredHours: coverage.uncoveredHours.length,
+								more: coverage.more,
+								newestAnchoredHour: coverage.newestAnchoredHour,
+								lastArchiveDay: coverage.lastArchiveWindow?.day ?? null,
+								computedAt: new Date(startedAt).toISOString(),
+							},
+							reason: null,
+						};
+					},
+					(cause: unknown) => {
+						// A connection error quotes its URL, password and all; the host is
+						// scrubbed by name as the write probe does.
+						const url = this.config.greptime?.url ?? "";
+						let host = "";
+						try {
+							host = new URL(url).host;
+						} catch {
+							// Not a URL, so it cannot appear in the message as a host.
+						}
+						const reason = redactKnown(redact(String(cause instanceof Error ? cause.message : cause)), [url, host]).slice(0, 300);
+						this.ledgerJobsMemo = { at: startedAt, value: null, reason };
+					},
+				)
+				.finally(() => {
+					this.ledgerJobsInFlight = null;
+				});
+		}
+		await bounded(() => this.ledgerJobsInFlight ?? Promise.resolve(), HEALTH_PROBE_MS);
+		return (
+			this.memoisedLedgerJobs(now) ?? {
+				ledger: null,
+				reason: `coverage read still running after ${HEALTH_PROBE_MS} ms; a call within ${LEDGER_JOBS_MEMO_MS / 1000} s serves its answer`,
+			}
+		);
+	}
+
+	/**
+	 * The memo as `/healthz` reports it while it is fresh, else `null`. A method
+	 * rather than an inline check because the in-flight read assigns the memo
+	 * behind an `await`, which a property narrowing made before it would not see.
+	 */
+	private memoisedLedgerJobs(now: number): LedgerJobs | null {
+		const memo = this.ledgerJobsMemo;
+		if (memo === null || now - memo.at >= LEDGER_JOBS_MEMO_MS) return null;
+		return { ledger: memo.value, reason: memo.reason };
+	}
+}
+
+/** How long one `anchorCoverage` read serves `/healthz.jobs.ledger` (uplift-3 N6). */
+export const LEDGER_JOBS_MEMO_MS = 60_000;
+
+/**
+ * `/healthz.jobs.ledger`: the numbers a monitor pages on. Present only when
+ * the memoised coverage read answered; otherwise `/healthz.jobs.ledger` is
+ * `null` and `ledgerReason` says why, so "no gap" and "could not look" never
+ * read the same.
+ */
+export interface LedgerJobsHealth {
+	/** Whole hours from the newest anchored hour to the current one; `1` is the steady state; `null` with no anchor ever. */
+	anchorLagHours: number | null;
+	/** Closed hours (≥ 1 h old, last 7 days) with ingest records and no anchor; the probe lists at most 48, see `more`. */
+	uncoveredHours: number;
+	/** Whether the probe's list was cut at its cap. */
+	more: boolean;
+	newestAnchoredHour: string | null;
+	/** The day the newest `ledger archive` note names, or `null` when none was ever recorded. */
+	lastArchiveDay: string | null;
+	/** When the memoised read started. */
+	computedAt: string;
+}
+
+/** What `Substrate.ledgerJobs` answers: the value, or `null` and the reason. */
+export interface LedgerJobs {
+	ledger: LedgerJobsHealth | null;
+	reason: string | null;
 }
 
 /** The bound on every per-plane probe `/healthz` makes. */
@@ -4042,6 +4358,8 @@ export interface SubstrateHealth {
 	cache: CacheHealth;
 	planes: Record<PlaneName, PlaneHealth>;
 	capacity: { index: IndexCapacity | null; ledger: LedgerCapacity | null };
+	/** Scheduled-job health (uplift-3 N6): `ledger` is `null` with `ledgerReason` set when the ledger is unconfigured, unreachable or still being read. */
+	jobs: { ledger: LedgerJobsHealth | null; ledgerReason: string | null };
 }
 
 /** `fn`'s answer, or `null` when it throws or outlasts `ms`. */

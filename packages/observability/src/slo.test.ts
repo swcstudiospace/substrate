@@ -1,6 +1,25 @@
 import { describe, expect, test } from "bun:test";
 import { METRIC, SubstrateInstruments } from "./instruments.ts";
-import { DEFAULT_THRESHOLDS, PLANE_BUCKET_MS, PLANE_WINDOW_MS, PlaneWindow, breaches, evaluatePlaneSlos, evaluateSlos, sloCatalogue, type PlaneSloResult } from "./slo.ts";
+import {
+	ADMISSION_SLO,
+	CAPACITY_RING_MAX,
+	CapacityRing,
+	DEFAULT_THRESHOLDS,
+	INDEX_VOLUME_ENV,
+	PLANE_BUCKET_MS,
+	PLANE_WINDOW_MS,
+	PlaneWindow,
+	breaches,
+	briefBySurfaceObjectives,
+	evaluateAdmissionSlo,
+	evaluateCapacitySlos,
+	docsSearchObjective,
+	evaluateDocsSlos,
+	evaluatePlaneSlos,
+	evaluateSlos,
+	sloCatalogue,
+	type PlaneSloResult,
+} from "./slo.ts";
 import { BURN_MIN_SPAN_MS, BURN_WINDOW_MS, type BurnResult, BurnLedger, evaluateBurnSlos, loadBurnThresholds } from "./burn.ts";
 
 function slo(results: ReturnType<typeof evaluateSlos>, id: string) {
@@ -40,6 +59,44 @@ describe("the catalogue", () => {
 		// spreading it must not overwrite the defaults with holes.
 		const [brief] = sloCatalogue({ briefP95Ms: undefined });
 		expect(brief?.statement).toContain("800 ms");
+	});
+});
+
+describe("admission.limited_rate (uplift-3 N3), beside the catalogue", () => {
+	function decided(counts: { allowed?: number; limited?: number; shadow?: number; bypass?: number }): SubstrateInstruments {
+		const instruments = new SubstrateInstruments();
+		const record = (decision: "allowed" | "limited" | "shadow_limited" | "bypass", times = 0) => {
+			for (let index = 0; index < times; index += 1) instruments.recordAdmission({ surface: "cursor", klass: "read", decision });
+		};
+		record("allowed", counts.allowed);
+		record("limited", counts.limited);
+		record("shadow_limited", counts.shadow);
+		record("bypass", counts.bypass);
+		return instruments;
+	}
+
+	test("is not in the catalogue, and needs 100 decisions before it is judged", () => {
+		expect(sloCatalogue().some((target) => target.id === ADMISSION_SLO.id)).toBe(false);
+		expect(ADMISSION_SLO).toMatchObject({ id: "admission.limited_rate", kind: "ratio-ceiling", target: 0.01, minSamples: 100 });
+		const result = evaluateAdmissionSlo(decided({ allowed: 98, limited: 1 }).snapshot());
+		expect(result).toMatchObject({ id: "admission.limited_rate", status: "insufficient-data", samples: 99, unit: "ratio", target: 0.01 });
+		expect(result.observed).toBeCloseTo(1 / 99);
+		expect(evaluateAdmissionSlo(new SubstrateInstruments().snapshot())).toMatchObject({ status: "insufficient-data", samples: 0, observed: null });
+	});
+
+	test("limited over everything the bucket decided: shadow refusals count as decisions, not as refusals", () => {
+		const ok = evaluateAdmissionSlo(decided({ allowed: 50, shadow: 49, limited: 1 }).snapshot());
+		expect(ok).toMatchObject({ status: "ok", samples: 100, observed: 0.01 });
+		expect(ok.detail).toBe("1 of 100 (1.000 %); objective is at most 1.000 %");
+		const breached = evaluateAdmissionSlo(decided({ allowed: 98, limited: 2 }).snapshot());
+		expect(breached).toMatchObject({ status: "breached", samples: 100, observed: 0.02 });
+	});
+
+	test("a bypass is not a decision: a cache outage neither dilutes the rate nor counts toward the sample floor", () => {
+		const result = evaluateAdmissionSlo(decided({ allowed: 90, limited: 2, bypass: 500 }).snapshot());
+		expect(result).toMatchObject({ status: "insufficient-data", samples: 92 });
+		const judged = evaluateAdmissionSlo(decided({ allowed: 97, limited: 3, bypass: 900 }).snapshot());
+		expect(judged).toMatchObject({ status: "breached", samples: 100, observed: 0.03 });
 	});
 });
 
@@ -235,11 +292,108 @@ describe("naming", () => {
 		// A catalogue that referred to a metric nothing records would report
 		// `insufficient-data` forever and look like a quiet system.
 		const registered = new Set(new SubstrateInstruments().snapshot().map((metric) => metric.name));
-		for (const target of sloCatalogue()) {
+		for (const target of [...sloCatalogue(), docsSearchObjective()]) {
 			const names = target.kind === "latency-quantile" ? [target.metric] : [target.numerator.metric, target.denominator.metric];
 			for (const name of names) expect(registered).toContain(name);
 		}
 		expect(registered).toContain(METRIC.briefDuration);
+	});
+});
+
+describe("docs.search.p95 (uplift-3 N5)", () => {
+	function searches(latencies: number[]): SubstrateInstruments {
+		const instruments = new SubstrateInstruments();
+		for (const durationMs of latencies) {
+			instruments.recordDocsSearch({ surface: "grok-bot", outcome: "hit", cached: false, durationMs, citations: {} });
+		}
+		return instruments;
+	}
+
+	test("is one row beside the catalogue, never in it, with the 2,000 ms default stated inclusively", () => {
+		expect(sloCatalogue().map((target) => target.id)).not.toContain("docs.search.p95");
+		const [row] = evaluateDocsSlos(new SubstrateInstruments().snapshot());
+		expect(row?.id).toBe("docs.search.p95");
+		expect(row?.statement).toBe(`p95 of ${METRIC.docsDuration} <= 2000 ms`);
+		expect(DEFAULT_THRESHOLDS.docsSearchP95Ms).toBe(2000);
+	});
+
+	test("too few searches is `insufficient-data`, never `ok`", () => {
+		expect(slo(evaluateDocsSlos(new SubstrateInstruments().snapshot()), "docs.search.p95").status).toBe("insufficient-data");
+		const result = slo(evaluateDocsSlos(searches(Array.from({ length: 19 }, () => 100)).snapshot()), "docs.search.p95");
+		expect(result.status).toBe("insufficient-data");
+		expect(result.detail).toContain("19 of 20");
+	});
+
+	test("judged exactly at the histogram's own 2,000 ms edge: 95 % at or below is ok, less is breached", () => {
+		const ok = evaluateDocsSlos(searches([...Array.from({ length: 95 }, () => 1500), ...Array.from({ length: 5 }, () => 3000)]).snapshot());
+		expect(slo(ok, "docs.search.p95").status).toBe("ok");
+		const breached = evaluateDocsSlos(searches([...Array.from({ length: 94 }, () => 1500), ...Array.from({ length: 6 }, () => 3000)]).snapshot());
+		expect(slo(breached, "docs.search.p95").status).toBe("breached");
+		// A search that cost the whole default budget sits above the edge.
+		const budgeted = evaluateDocsSlos(searches(Array.from({ length: 30 }, () => 4000)).snapshot());
+		expect(slo(budgeted, "docs.search.p95").status).toBe("breached");
+	});
+
+	test("an operator's threshold reaches the statement, but only one of the histogram's edges is decidable", () => {
+		const tuned = slo(evaluateDocsSlos(searches(Array.from({ length: 30 }, () => 500)).snapshot(), { docsSearchP95Ms: 1000 }), "docs.search.p95");
+		expect(tuned.statement).toContain("1000 ms");
+		expect(tuned.status).toBe("ok");
+		expect(slo(evaluateDocsSlos(searches(Array.from({ length: 30 }, () => 500)).snapshot(), { docsSearchP95Ms: 1500 }), "docs.search.p95").status).toBe(
+			"unmeasurable",
+		);
+	});
+});
+
+describe("brief.p95 per surface (uplift-3 N7)", () => {
+	/** Briefs per surface, each list one latency per brief; graph ids vary so the per-surface merge spans series. */
+	function perSurface(bySurface: Record<string, number[]>): SubstrateInstruments {
+		const instruments = new SubstrateInstruments();
+		for (const [surface, latencies] of Object.entries(bySurface)) {
+			latencies.forEach((durationMs, index) => {
+				instruments.recordBrief({ surface, graph_id: index % 2 === 0 ? "ut-a" : "ut-b", ok: true, durationMs });
+			});
+		}
+		return instruments;
+	}
+	const fast = (n: number) => Array.from({ length: n }, () => 100);
+
+	test("is empty with no histogram and empty while no surface reaches minSamples; a surface at 19 is absent", () => {
+		expect(briefBySurfaceObjectives([])).toEqual([]);
+		expect(briefBySurfaceObjectives(new SubstrateInstruments().snapshot())).toEqual([]);
+		const rows = briefBySurfaceObjectives(perSurface({ "grok-bot": fast(19), omp: fast(5) }).snapshot());
+		expect(rows).toEqual([]);
+	});
+
+	test("one brief.p95 row per surface at or above 20 samples, in the catalogue's shape plus the surface, sorted", () => {
+		const rows = briefBySurfaceObjectives(perSurface({ omp: fast(20), "grok-bot": fast(25), cursor: fast(19) }).snapshot());
+		expect(rows.map((row) => [row.surface, row.id, row.samples, row.status])).toEqual([
+			["grok-bot", "brief.p95", 25, "ok"],
+			["omp", "brief.p95", 20, "ok"],
+		]);
+		expect(rows[0]?.statement).toBe(`p95 of ${METRIC.briefDuration}{surface=grok-bot} <= 800 ms`);
+		expect(rows[0]?.target).toBe(800);
+		expect(rows[0]?.unit).toBe("ms");
+		// The global objective is unchanged: it still blends every surface.
+		expect(slo(evaluateSlos(perSurface({ omp: fast(20), "grok-bot": fast(25) }).snapshot()), "brief.p95").samples).toBe(45);
+		expect(sloCatalogue().map((target) => target.id)).toEqual(["brief.p95", "emit.success", "lease.steal_rate", "quarantine.rate"]);
+	});
+
+	test("a slow surface is breached on its own row while a fast one stays ok, and the blend can hide it", () => {
+		const instruments = perSurface({ "grok-bot": Array.from({ length: 20 }, () => 1500), omp: fast(400) });
+		const rows = briefBySurfaceObjectives(instruments.snapshot());
+		expect(rows.find((row) => row.surface === "grok-bot")?.status).toBe("breached");
+		expect(rows.find((row) => row.surface === "omp")?.status).toBe("ok");
+		// 20 slow of 420: 95.2 % at or below 800 ms, so the global row reads ok.
+		expect(slo(evaluateSlos(instruments.snapshot()), "brief.p95").status).toBe("ok");
+	});
+
+	test("takes the operator's briefP95Ms and minSamples like the global objective", () => {
+		const snapshot = perSurface({ "grok-bot": Array.from({ length: 10 }, () => 300) }).snapshot();
+		expect(briefBySurfaceObjectives(snapshot)).toEqual([]);
+		const [row] = briefBySurfaceObjectives(snapshot, { minSamples: 10, briefP95Ms: 400 });
+		expect(row?.statement).toContain("400 ms");
+		expect(row?.status).toBe("ok");
+		expect(briefBySurfaceObjectives(snapshot, { minSamples: 10, briefP95Ms: 200 })[0]?.status).toBe("breached");
 	});
 });
 
@@ -593,5 +747,137 @@ describe("the per-plane availability objectives (uplift-2 R2)", () => {
 		expect(last.samples).toBe(61);
 		expect(last.spanMs).toBe(PLANE_WINDOW_MS);
 		expect(last.total).toBe(3600);
+	});
+});
+
+describe("the capacity runway objective (uplift-3 N2)", () => {
+	const GB = 1_073_741_824;
+	const MB = 1_048_576;
+	const DAY = 24 * 60 * 60 * 1000;
+	const T0 = Date.parse("2026-10-13T00:00:00Z");
+
+	/** `hours` of samples, one every 10 minutes, growing `perDay` bytes a day from `start`. */
+	function ring(hours: number, perDay: number, start = 2 * GB): CapacityRing {
+		const out = new CapacityRing();
+		for (let minute = 0; minute <= hours * 60; minute += 10) {
+			out.record(T0 + minute * 60_000, Math.round(start + (perDay * minute) / (24 * 60)));
+		}
+		return out;
+	}
+
+	test("48 h growing 100 MB/day against a 10 GB volume is (10 GB - current) / 100 MB days", () => {
+		const samples = ring(48, 100 * MB);
+		const [result] = evaluateCapacitySlos(samples, { volumeBytes: 10 * GB });
+		const current = samples.samples().at(-1)!.databaseBytes;
+		expect(result!.id).toBe("capacity.index.runway_days");
+		expect(result!.status).toBe("ok");
+		expect(result!.bytesPerDay).toBeCloseTo(100 * MB, -3);
+		expect(result!.observed).toBeCloseTo((10 * GB - current) / (100 * MB), 1);
+		expect(result!.unit).toBe("days");
+		expect(result!.target).toBe(14);
+		expect(result!.samples).toBe(samples.size);
+		expect(result!.volumeBytes).toBe(10 * GB);
+		expect(result!.currentBytes).toBe(current);
+		expect(result!.detail).toContain("days of runway");
+	});
+
+	test("under 24 h of samples is insufficient-data, whatever the growth", () => {
+		const [result] = evaluateCapacitySlos(ring(23, 100 * GB), { volumeBytes: 10 * GB });
+		expect(result!.status).toBe("insufficient-data");
+		expect(result!.observed).toBeNull();
+		expect(result!.detail).toContain("23.0 h");
+		expect(result!.detail).toContain("24 h apart");
+	});
+
+	test("an unset volume is insufficient-data and names the variable", () => {
+		const [result] = evaluateCapacitySlos(ring(48, 100 * MB), { volumeBytes: null });
+		expect(result!.status).toBe("insufficient-data");
+		expect(result!.detail).toContain(INDEX_VOLUME_ENV);
+		expect(result!.statement).toContain("unset");
+		expect(result!.volumeBytes).toBeNull();
+	});
+
+	test("less runway than the floor is breached; a full volume has none", () => {
+		const [tight] = evaluateCapacitySlos(ring(48, 1 * GB, 2 * GB), { volumeBytes: 10 * GB });
+		expect(tight!.status).toBe("breached");
+		expect(tight!.observed).toBeCloseTo(6, 0);
+		const [full] = evaluateCapacitySlos(ring(48, 1 * MB, 10 * GB), { volumeBytes: 10 * GB });
+		expect(full!.status).toBe("breached");
+		expect(full!.observed).toBe(0);
+		expect(full!.detail).toContain("no runway remains");
+	});
+
+	test("an index that is not growing has an unbounded runway and is ok", () => {
+		const [result] = evaluateCapacitySlos(ring(48, -50 * MB, 5 * GB), { volumeBytes: 10 * GB });
+		expect(result!.status).toBe("ok");
+		expect(result!.observed).toBeNull();
+		expect(result!.bytesPerDay).toBeLessThan(0);
+		expect(result!.detail).toContain("not growing");
+	});
+
+	test("the floor is a threshold", () => {
+		const [result] = evaluateCapacitySlos(ring(48, 100 * MB), { volumeBytes: 10 * GB, targetDays: 1000 });
+		expect(result!.status).toBe("breached");
+		expect(result!.target).toBe(1000);
+	});
+
+	test("one bulk ingest at the end does not set the rate alone", () => {
+		const samples = ring(48, 0, 2 * GB);
+		samples.record(T0 + 48 * 60 * 60_000 + 60_000 * 15, 2 * GB + 500 * MB);
+		const [result] = evaluateCapacitySlos(samples, { volumeBytes: 10 * GB });
+		// First-to-last would say 250 MB/day; the fit over 289 flat samples says far less.
+		expect(result!.bytesPerDay).toBeLessThan(30 * MB);
+	});
+
+	test("the ring keeps the first read of each minute bucket, ignores junk and a clock behind it, and is bounded", () => {
+		const samples = new CapacityRing();
+		samples.record(T0, 100);
+		// A later read in the same bucket never moves the sample's time or size.
+		samples.record(T0 + 30_000, 110);
+		samples.record(T0 + 59_999, 111);
+		expect(samples.samples()).toEqual([{ at: T0, databaseBytes: 100 }]);
+		samples.record(T0 + 90_000, 120);
+		expect(samples.size).toBe(2);
+		samples.record(T0 + 80_000, 999);
+		samples.record(T0 + 200_000, Number.NaN);
+		samples.record(T0 + 200_000, -1);
+		expect(samples.size).toBe(2);
+		for (let i = 0; i < CAPACITY_RING_MAX + 10; i++) samples.record(T0 + 1_000_000 + i * 60_000, i);
+		expect(samples.size).toBe(CAPACITY_RING_MAX);
+		expect(samples.samples()[0]?.databaseBytes).toBe(10);
+		const restored = new CapacityRing(samples.samples());
+		expect(restored.samples()).toEqual(samples.samples());
+	});
+
+	test("the ring holds the day's minute buckets plus a margin", () => {
+		expect(CAPACITY_RING_MAX).toBeGreaterThan(24 * 60);
+	});
+
+	test("a 5 s poller for 25 h builds a ring that spans at least 24 h and is judged (Greptile round 1, PR #61)", () => {
+		// Replacing the newest sample on every read kept moving its time forward
+		// and never started a new one, so the ring never held two samples a day
+		// apart and the runway stayed insufficient-data forever.
+		const samples = new CapacityRing();
+		const start = T0 + 17_000;
+		for (let t = 0; t <= 25 * 3_600_000; t += 5_000) {
+			samples.record(start + t, Math.round(2 * GB + (100 * MB * t) / DAY));
+		}
+		const retained = samples.samples();
+		expect(retained.length).toBeGreaterThan(24 * 60);
+		// Never two samples in one bucket, and timestamps stay on first reads.
+		for (let i = 1; i < retained.length; i++) {
+			expect(Math.floor(retained[i]!.at / 60_000)).toBeGreaterThan(Math.floor(retained[i - 1]!.at / 60_000));
+		}
+		expect(retained[retained.length - 1]!.at - retained[0]!.at).toBeGreaterThanOrEqual(24 * 3_600_000);
+		const [result] = evaluateCapacitySlos(samples, { volumeBytes: 10 * GB });
+		expect(result!.status).toBe("ok");
+		expect(result!.bytesPerDay).toBeCloseTo(100 * MB, -3);
+		expect(result!.observed).toBeGreaterThan(70);
+	});
+
+	test("a 5 s poller for 23 h is still insufficient-data", () => {
+		const samples = new CapacityRing();
+		for (let t = 0; t <= 23 * 3_600_000; t += 5_000) samples.record(T0 + t, 2 * GB);
+		expect(evaluateCapacitySlos(samples, { volumeBytes: 10 * GB })[0]!.status).toBe("insufficient-data");
 	});
 });
