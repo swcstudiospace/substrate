@@ -14,6 +14,7 @@ import {
 	createHttpServer,
 	healthStatus,
 	isLoopbackRemote,
+	publicEdgeNeedsBearer,
 	memoryWriteStatus,
 	memoryWriter,
 	streamRefusal,
@@ -859,6 +860,15 @@ describe("GET /events/stream", () => {
 		expect(String(streamRefusal("omp" as Surface, "10.1.2.3")?.error)).toContain("loopback");
 		expect(streamRefusal("omp" as Surface, "127.9.240.1")).toBeNull();
 		expect(streamRefusal("omp" as Surface, "::1")).toBeNull();
+	});
+
+	test("the public edge requires a bearer except for GET /healthz", () => {
+		expect(publicEdgeNeedsBearer("public", "POST", "/memory", null)).toBe(true);
+		expect(publicEdgeNeedsBearer("public", "GET", "/brief", null)).toBe(true);
+		expect(publicEdgeNeedsBearer("public", "GET", "/healthz", null)).toBe(false);
+		expect(publicEdgeNeedsBearer("public", "GET", "/memory", "omp" as Surface)).toBe(false);
+		expect(publicEdgeNeedsBearer(undefined, "POST", "/memory", null)).toBe(false);
+		expect(publicEdgeNeedsBearer(["public"], "POST", "/events", null)).toBe(true);
 	});
 
 	test("an untokened caller is refused, even on a run that allows anonymous callers", async () => {
