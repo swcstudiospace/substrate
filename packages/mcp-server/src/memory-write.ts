@@ -488,6 +488,11 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 	// Redact before capping, for the reason `normalizeEvent` does: truncating first
 	// can cut a token in half so its own pattern no longer matches.
 	const text = redact(raw).slice(0, MAX_MEMORY_TEXT);
+	// The cap can cut a valid body down to a header. Judge the text that will be stored.
+	const storedIssue = lessonWriteIssue(text, subjectInput);
+	if (storedIssue) {
+		return refuse("denied", "lesson.empty", `${storedIssue}. An empty lesson is not stored.`);
+	}
 	const subject = normalizeSubject(request.subject);
 	let sourceEvent = normalizeIdentifier(request.source_event);
 	const sessionId = normalizeIdentifier(request.session_id);
@@ -632,7 +637,12 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 		alsoRequestHash: priorAsked,
 	});
 	if (!claim.claimed) {
-		const replayed = await replay(store, key, claim.existing, grant.name, entryHash, asked, priorEntry, priorAsked);
+		const replayed = await replay(store, key, claim.existing, grant.name, entryHash, asked, priorEntry, priorAsked, {
+			ttl,
+			graphId,
+			repo,
+			sourceEvent,
+		});
 		// Reconcile the proposal this key's write installed but may not have resolved.
 		//
 		// Resolving is guarded down in the accepted path, deliberately: the entry is
@@ -989,6 +999,7 @@ async function replay(
 	asked: string,
 	priorEntry: string | null,
 	priorAsked: string | null,
+	current: { ttl: string; graphId: string | null; repo: string | null; sourceEvent: string | null },
 ): Promise<Decision> {
 	if (existing.outcome === "in-flight") {
 		// A key held for a *different* ask is spent, not merely busy. No amount of waiting
@@ -1034,7 +1045,17 @@ async function replay(
 	const divergent = existing.request_hash
 		? !digestMatches(existing.request_hash, asked, priorAsked)
 		: entry !== null && !digestMatches(entry.entry_hash, entryHash, priorEntry);
-	if (divergent) return reused(key, grant, entry);
+	// Lessons written before source_event was sent keep the same body and key.
+	// Supplying a source on retry must replay that row, not conflict with it.
+	const sourceBackfill =
+		entry !== null &&
+		digestMatches(entry.entry_hash, entryHash, priorEntry) &&
+		entry.ttl === current.ttl &&
+		(entry.graph_id ?? null) === current.graphId &&
+		(entry.repo ?? null) === current.repo &&
+		(entry.source_event ?? null) === null &&
+		current.sourceEvent !== null;
+	if (divergent && !sourceBackfill) return reused(key, grant, entry);
 
 	// Past the check above, any row there is this request's own content.
 	const verified = entry !== null;

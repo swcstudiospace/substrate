@@ -13,40 +13,46 @@ const STOPWORDS: Record<string, true> = Object.fromEntries(
 const PLACEHOLDER_BODIES = new Set([
 	"todo",
 	"tbd",
-	"n/a",
+	"n a",
 	"na",
 	"placeholder",
 	"lorem ipsum",
 	"lesson",
 	"none",
 	"null",
-	"{}",
-	"[]",
 	"fixme",
 	"xxx",
-	"...",
 	"empty",
 ]);
+
+/** A short sentence can still be a fact. A noun phrase with none of these is a title. */
+const CLAUSE = /\b(?:is|are|was|were|has|have|had|does|did|can|cannot|do)\b/i;
 
 function collapse(text: string): string {
 	return text.replace(/\s+/g, " ").trim();
 }
 
+/** Letters and digits only, so `TODO:` and `n/a` match the placeholder list. */
+function simplified(text: string): string {
+	return text.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
 /**
- * Why `text` cannot be stored as a lesson. Null, empty, whitespace, `{}`, `[]`,
- * a placeholder, or a title with no clause and fewer than four meaningful words
- * is a failed create.
+ * Why `text` cannot be stored as a lesson. Null, empty, whitespace, a
+ * placeholder, or a title with no clause is a failed create. A short sentence
+ * (`The cache is disabled`) is a fact. A trailing period does not turn a title
+ * into one.
  */
 export function lessonContentIssue(text: string | null | undefined): string | null {
 	if (text == null) return "lesson body is null";
 	const collapsed = collapse(text);
 	if (collapsed.length === 0) return "lesson body is empty";
-	if (PLACEHOLDER_BODIES.has(collapsed.toLowerCase())) return `lesson body is a placeholder (${collapsed})`;
-	const words = collapsed
-		.toLowerCase()
-		.split(/[^a-z0-9]+/)
-		.filter((word) => word.length > 0 && !STOPWORDS[word]);
-	if (words.length < 4 && !/[.:;]/.test(collapsed)) return "lesson body is only a title or label and has no factual content";
+	const plain = simplified(collapsed);
+	if (plain.length === 0 || PLACEHOLDER_BODIES.has(plain)) return `lesson body is a placeholder (${collapsed})`;
+	const words = plain.split(" ").filter((word) => word.length > 0 && !STOPWORDS[word]);
+	if (words.length < 3 && !CLAUSE.test(collapsed)) {
+		return "lesson body is only a title or label and has no factual content";
+	}
 	return null;
 }
 

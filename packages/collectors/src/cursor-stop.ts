@@ -52,7 +52,7 @@ export function sessionLessonText(transcript: string, limit = 3000): string {
 	let body = "";
 	for (const fact of extractDurableFacts(transcript).facts) {
 		const next = body ? `${body}\n${fact}` : fact;
-		if (next.length > limit) break;
+		if (next.length > limit) continue;
 		body = next;
 	}
 	return body;

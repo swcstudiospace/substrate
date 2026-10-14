@@ -14,6 +14,7 @@ import {
 	parseStopInput,
 	runStop,
 	safeConversationId,
+	sessionLessonText,
 	TRANSCRIPTS_DIR,
 	transcriptSource,
 } from "./cursor-stop.ts";
@@ -125,6 +126,16 @@ describe("copyTranscript", () => {
 		const result = copyTranscript(transcript("x".repeat(64)), ID, dest, 32);
 		expect(result).toEqual({ ref: null, reason: "too large" });
 		expect(existsSync(join(dest, `${ID}.jsonl`))).toBe(false);
+	});
+});
+
+describe("sessionLessonText", () => {
+	test("an oversized first fact does not hide a later one", () => {
+		const huge = `Decision: ${"alpha ".repeat(800)}`;
+		const later = "Decision: The index sweep prints ttl candidate ids and does not delete documents.";
+		expect(sessionLessonText(`${huge}\n${later}`, 3000)).toBe(
+			"The index sweep prints ttl candidate ids and does not delete documents.",
+		);
 	});
 });
 

@@ -81,7 +81,9 @@ const STOPWORDS: Record<string, true> = Object.fromEntries(
 
 export { lessonContentIssue } from "../../mcp-server/src/lesson-content.ts";
 
-const CHATTER = /session (?:ended|started)|pane[- ]?\w* exited|idle to working|\(no output\)|^no output$/i;
+/** Whole lines only. A fact that mentions a session ending is still a fact. */
+const CHATTER = /^(?:session (?:ended|started)|(?:\S+\s+)?pane[- ]?\S* exited|idle to working|\(no output\)|no output)$/i;
+const LABELED_FACT = /^(?:goal|decision|preference|outcome|blocker|fact)\s*:\s*(.*)$/i;
 
 export interface DurableExtraction {
 	facts: string[];
@@ -93,14 +95,39 @@ export interface DurableExtraction {
  * outcome, blocker or fact is kept when it has factual content. Chatter and
  * title-only lines are counted as dropped and are not invented into filler.
  */
+/** Text from a transcript line. JSONL records contribute their text, not the wrapper. */
+function proseFromLine(line: string): string | null {
+	const trimmed = line.trim();
+	if (trimmed.length === 0) return null;
+	if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return trimmed;
+	try {
+		const value: unknown = JSON.parse(trimmed);
+		if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+		const record = value as Record<string, unknown>;
+		const message = record.message;
+		const nested = message !== null && typeof message === "object" ? (message as { content?: unknown }).content : message;
+		const picked = record.text ?? record.content ?? nested;
+		if (typeof picked !== "string") return null;
+		const text = picked.trim();
+		const role = typeof record.role === "string" ? record.role : "";
+		if ((role === "user" || role === "human" || role === "system") && !LABELED_FACT.test(text)) return null;
+		return text;
+	} catch {
+		return null;
+	}
+}
+
 export function extractDurableFacts(sessionText: string): DurableExtraction {
 	const facts: string[] = [];
 	let dropped = 0;
 	for (const line of sessionText.split(/\n+/)) {
-		const trimmed = line.trim();
-		if (trimmed.length === 0) continue;
-		const labeled = /^(?:goal|decision|preference|outcome|blocker|fact)\s*:\s*(.*)$/i.exec(trimmed);
-		const candidate = (labeled ? (labeled[1] ?? "") : trimmed).trim();
+		const prose = proseFromLine(line);
+		if (prose === null) {
+			if (line.trim().length > 0) dropped++;
+			continue;
+		}
+		const labeled = LABELED_FACT.exec(prose);
+		const candidate = (labeled ? (labeled[1] ?? "") : prose).trim();
 		if (candidate.length === 0 || CHATTER.test(candidate) || lessonContentIssue(candidate)) {
 			dropped++;
 			continue;
@@ -110,9 +137,12 @@ export function extractDurableFacts(sessionText: string): DurableExtraction {
 	return { facts, dropped };
 }
 
-/** One lesson per session in a scope. A replay of the same session id is the same key. */
-export function sessionLessonKey(scope: string, sessionId: string): string {
-	return `${SUBJECT.lesson}${sha256(`${scope}\nsession\n${sessionId}`)}`;
+/**
+ * One lesson for one session body. The same text replays. A later turn whose
+ * facts differ gets its own key, so the first turn does not block the rest.
+ */
+export function sessionLessonKey(scope: string, sessionId: string, text: string): string {
+	return `${SUBJECT.lesson}${sha256(`${scope}\nsession\n${sessionId}\n${normalizeText(text)}`)}`;
 }
 
 export interface Lesson {
@@ -966,6 +996,8 @@ export interface LessonsDeps {
 	now: () => Date;
 	out: (text: string) => void;
 	err: (text: string) => void;
+	/** Extra read-back attempts after the first write. The stop hook uses 0. */
+	writeRetries?: number;
 }
 
 const USAGE =
@@ -1074,6 +1106,7 @@ export function readBackIssue(sent: string, reply: WriteReply, sessionId?: strin
 async function writeGoverned(
 	memory: MemoryApi,
 	request: Record<string, unknown>,
+	retries = 1,
 ): Promise<Pick<WriteReport, "status" | "id" | "reason" | "remedy">> {
 	const sent = typeof request.text === "string" ? request.text : "";
 	const sessionId = typeof request.session_id === "string" ? request.session_id : undefined;
@@ -1113,7 +1146,7 @@ async function writeGoverned(
 				continue;
 			}
 		}
-		if (decided.status !== "unverified" || attempt > 0) return decided;
+		if (decided.status !== "unverified" || attempt >= retries) return decided;
 	}
 }
 
@@ -1268,13 +1301,17 @@ async function add(args: Args, deps: LessonsDeps): Promise<number> {
 				remedy: "Run the same command again once it answers.",
 			});
 		} else {
-			const decided = await writeGoverned(deps.memory, {
-				scope,
-				kind: "fact",
-				subject: plan.subject,
-				text: plan.body,
-				idempotency_key: plan.key,
-			});
+			const decided = await writeGoverned(
+				deps.memory,
+				{
+					scope,
+					kind: "fact",
+					subject: plan.subject,
+					text: plan.body,
+					idempotency_key: plan.key,
+				},
+				deps.writeRetries ?? 1,
+			);
 			if (decided.status === "unreachable") reachable = false;
 			reports.push({ ...base, ...decided });
 		}
@@ -1321,28 +1358,32 @@ async function ingest(args: Args, deps: LessonsDeps): Promise<number> {
 	const lesson: Lesson = {
 		milestone,
 		phase,
-		slug: slugify(facts[0] ?? text),
+		slug: slugify(redact(facts[0] ?? text)),
 		outcome: outcomeOf(str(args.outcome)),
 		tags: [...new Set((list(args.tags) ?? []).map(identifier).filter(Boolean))],
 		source: `session:${sessionId}`,
 		text,
 	};
 	const subject = lessonSubject(milestone, phase, lesson.slug);
-	const key = sessionLessonKey(scope, sessionId);
+	const key = sessionLessonKey(scope, sessionId, text);
 	const body = lessonBody(lesson);
 	if (body.length > MAX_BODY) {
 		deps.err(`[substrate] lesson ingest correlation=${sessionId} outcome=too-long latency_ms=${elapsed()}\n`);
 		return 1;
 	}
-	const decided = await writeGoverned(deps.memory, {
-		scope,
-		kind: "fact",
-		subject,
-		text: body,
-		idempotency_key: key,
-		session_id: sessionId,
-		source_event: lessonSourceEvent(key, sessionId),
-	});
+	const decided = await writeGoverned(
+		deps.memory,
+		{
+			scope,
+			kind: "fact",
+			subject,
+			text: body,
+			idempotency_key: key,
+			session_id: sessionId,
+			source_event: lessonSourceEvent(key, sessionId),
+		},
+		deps.writeRetries ?? 1,
+	);
 	const report: WriteReport = { subject, key, ...decided };
 	printReports([report], args.json === true, deps);
 	deps.err(
@@ -1541,7 +1582,11 @@ async function digest(args: Args, positional: string | undefined, deps: LessonsD
 		printPlanned([{ subject, key, body, skipped: false }], scope, args.json === true, deps);
 		return 0;
 	}
-	const decided = await writeGoverned(deps.memory, { scope, kind: "fact", subject, text: body, idempotency_key: key });
+	const decided = await writeGoverned(
+		deps.memory,
+		{ scope, kind: "fact", subject, text: body, idempotency_key: key },
+		deps.writeRetries ?? 1,
+	);
 	printReports([{ subject, key, ...decided }], args.json === true, deps);
 	return USABLE[decided.status] ? 0 : 1;
 }
@@ -1633,7 +1678,11 @@ async function outcome(args: Args, positional: string | undefined, deps: Lessons
 		subject,
 		key,
 		report: reportId,
-		...(await writeGoverned(deps.memory, { scope, kind: "fact", subject, text: body, idempotency_key: key })),
+		...(await writeGoverned(
+			deps.memory,
+			{ scope, kind: "fact", subject, text: body, idempotency_key: key },
+			deps.writeRetries ?? 1,
+		)),
 	};
 	const was = scoreOf(before);
 	// Read back rather than computed locally, so the score shown is the one recall will see.
@@ -1682,5 +1731,6 @@ export async function flushSessionLesson(input: {
 		now: () => new Date(),
 		out: () => {},
 		err: (text) => process.stderr.write(text),
+		writeRetries: 0,
 	});
 }

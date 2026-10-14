@@ -1297,6 +1297,9 @@ describe("session lessons", () => {
 		expect(lessonContentIssue("   ")).toBe("lesson body is empty");
 		expect(lessonContentIssue("{}")).toContain("placeholder");
 		expect(lessonContentIssue("Retry budget")).toContain("title or label");
+		expect(lessonContentIssue("Retry budget.")).toContain("title or label");
+		expect(lessonContentIssue("TODO:")).toContain("placeholder");
+		expect(lessonContentIssue("The cache is disabled")).toBeNull();
 		const cli = harness();
 		expect(await cli.run(["add", "--text", "Retry budget", "--phase", "15-lessons-bank", "--json"])).toBe(1);
 		expect(fake.writes).toHaveLength(0);
@@ -1325,7 +1328,9 @@ describe("session lessons", () => {
 		expect(body).toContain("no DNS record");
 		expect(body).not.toContain("session ended");
 		expect(body).not.toContain("\ntodo");
-		expect(fake.writes[0]?.idempotency_key).toBe(sessionLessonKey("repo:acme/widgets", "sess-facts-1"));
+		expect(fake.writes[0]?.idempotency_key).toBe(
+			sessionLessonKey("repo:acme/widgets", "sess-facts-1", extractDurableFacts(SESSION).facts.join("\n")),
+		);
 		expect(fake.writes[0]?.session_id).toBe("sess-facts-1");
 		expect(fake.writes[0]?.source_event).toBe("session:sess-facts-1");
 		expect(first.err()).toContain("correlation=sess-facts-1");
@@ -1364,9 +1369,17 @@ describe("session lessons", () => {
 			]),
 		).toBe(0);
 		expect(fake.writes[0]?.text).not.toContain(secret);
+		expect(fake.writes[0]?.subject).not.toContain(secret);
 		expect(fake.writes[0]?.text).toContain("[REDACTED]");
 		expect(cli.err()).not.toContain(secret);
 		expect(extractDurableFacts("session ended").facts).toEqual([]);
+		expect(extractDurableFacts('{"role":"user","text":"please inspect the lease code"}').facts).toEqual([]);
+		expect(
+			extractDurableFacts('{"role":"assistant","text":"The cache is disabled until the soak finishes."}').facts,
+		).toEqual(["The cache is disabled until the soak finishes."]);
+		expect(extractDurableFacts("Outcome: The session ended because the index write failed.").facts).toEqual([
+			"The session ended because the index write failed.",
+		]);
 	});
 
 	test("a verified write with an empty or different body is not saved", async () => {

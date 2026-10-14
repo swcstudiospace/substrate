@@ -665,10 +665,11 @@ export function createHttpServer(
 		// of knowing who used it.
 		// A bearer that names no surface is not an untokened caller. The bridge
 		// accepts the absence of a token; this used to be 401 and still is.
+		const openHealth = (req.method ?? "GET") === "GET" && url.pathname === "/healthz";
 		if (
 			unmappedBearer(config, authorization) ||
 			publicEdgeNeedsBearer(req.headers[PUBLIC_EDGE_HEADER], req.method, url.pathname, surface) ||
-			(!config.allowAnonymous && surface === null)
+			(!openHealth && !config.allowAnonymous && surface === null)
 		) {
 			if (req.method === "POST" && url.pathname === "/events") eventRefusal = "auth";
 			sendJson(res, 401, { error: "unknown or missing bearer token" });
@@ -706,6 +707,7 @@ export function createHttpServer(
 						at: nowMs,
 						body: {
 							...health,
+							publicOrigin: config.publicOrigin,
 							// U5-4a: what a replaying client may rely on. It MUST NOT replay against `off` (or a body
 							// without this field); the mode is static config, so the memo cannot make it stale.
 							idempotency: config.eventIdempotency,

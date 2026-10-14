@@ -451,6 +451,29 @@ describe("denied — default-deny RBAC", () => {
 		expect(digest.outcome).toBe("accepted");
 	});
 
+	test("a later source on the same body replays the stored row", async () => {
+		const first = await write({ text: "hermes finished n2 with the lease held", idempotency_key: "k-source" });
+		expect(first.outcome).toBe("accepted");
+		const again = await write({
+			text: "hermes finished n2 with the lease held",
+			idempotency_key: "k-source",
+			source_event: "session:sess-old",
+		});
+		expect(again.outcome).toBe("accepted");
+		expect(again.reason).toBe("idempotent.replay");
+		expect(again.entry?.id).toBe(first.entry?.id);
+		expect(store.entries()).toHaveLength(1);
+
+		const changed = await write({
+			text: "hermes finished n2 with the lease held",
+			idempotency_key: "k-source",
+			source_event: "session:sess-old",
+			ttl: "30d",
+		});
+		expect(changed.reason).toBe("idempotency.reused");
+		expect(store.entries()).toHaveLength(1);
+	});
+
 	test("a refusal spends no idempotency key", async () => {
 		const result = await write({ writer: "unknown", idempotency_key: "k1" });
 		expect(result.idempotency_key).toBe("");
