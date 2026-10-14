@@ -7,9 +7,12 @@ import {
 	type Citable,
 	citableLesson,
 	type LessonsDeps,
+	extractDurableFacts,
 	httpMemory,
 	lessonBody,
+	lessonContentIssue,
 	lessonKey,
+	sessionLessonKey,
 	lessonSubject,
 	type MemoryApi,
 	type OutcomeRecord,
@@ -975,17 +978,19 @@ describe("recall, digest and outcome", () => {
 		expect(cli.err()).toContain("mem_typo");
 	});
 
-	test("recall fails open: an unreachable bank prints nothing and exits 0", async () => {
+	test("recall reports unavailable when the bank cannot be reached, not an empty match", async () => {
 		const cli = harness({ memory: httpMemory({ url: "http://127.0.0.1:1", token: fake.token, timeoutMs: 500 }) });
-		expect(await cli.run(["recall", "lease"])).toBe(0);
-		expect(cli.out()).toBe("");
-		expect(cli.err()).toContain("nothing recalled");
+		expect(await cli.run(["recall", "lease"])).toBe(2);
+		expect(cli.out()).toContain("recall-unavailable");
+		expect(cli.out()).not.toContain("No lessons");
+		expect(cli.err()).toContain("recall-unavailable");
 	});
 
 	test("a search the server refuses is not mistaken for an empty bank", async () => {
 		const cli = harness({ memory: httpMemory({ url: fake.url, token: "wrong", timeoutMs: 2000 }) });
-		expect(await cli.run(["recall", "lease"])).toBe(0);
-		expect(cli.out()).toBe("");
+		expect(await cli.run(["recall", "lease"])).toBe(2);
+		expect(cli.out()).toContain("recall-unavailable");
+		expect(cli.out()).not.toContain("No lessons");
 		expect(cli.err()).toContain("HTTP 401");
 	});
 });
@@ -999,8 +1004,8 @@ describe("lesson transport diagnostics", () => {
 				timeoutMs: 500,
 			}),
 		});
-		expect(await cli.run(["recall", "lease"])).toBe(0);
-		expect(cli.out()).toBe("");
+		expect(await cli.run(["recall", "lease"])).toBe(2);
+		expect(cli.out()).toContain("recall-unavailable");
 		expect(cli.err()).toContain("127.0.0.1:1");
 		expect(cli.err()).toContain("did not answer");
 		for (const secret of ["canary-user", "canary%2Dpassword", "canary-password", "canary-query", "canary-fragment", "canary-bearer"]) {
@@ -1272,5 +1277,97 @@ describe("reading every lesson in scope", () => {
 		expect(pages.get("lesson:")).toBe(50);
 		expect(cli.err()).toContain("stopped reading lesson: entries in repo:acme/widgets after 50 pages");
 		expect(cli.out()).toContain("## Prior Lessons");
+	});
+});
+
+const SESSION = `Decision: The index sweep prints ttl candidate ids and does not delete Hindsight documents.
+Preference: Leave the hash version at v1 until a soak finishes.
+Outcome: Greptile approved the head and the typecheck passed.
+Blocker: substrate.swcstudio.space has no DNS record yet, so cutover stays stopped.
+session ended
+todo`;
+
+describe("session lessons", () => {
+	test("a title, a placeholder, and whitespace are not stored", async () => {
+		expect(lessonContentIssue("   ")).toBe("lesson body is empty");
+		expect(lessonContentIssue("{}")).toContain("placeholder");
+		expect(lessonContentIssue("Retry budget")).toContain("title or label");
+		const cli = harness();
+		expect(await cli.run(["add", "--text", "Retry budget", "--phase", "15-lessons-bank", "--json"])).toBe(1);
+		expect(fake.writes).toHaveLength(0);
+		expect(cli.out()).toContain("invalid");
+	});
+
+	test("a session with concrete facts stores one lesson, and a replay does not add another", async () => {
+		const first = harness();
+		expect(
+			await first.run([
+				"ingest",
+				"--session",
+				"sess-facts-1",
+				"--text",
+				SESSION,
+				"--phase",
+				"15-lessons-bank",
+				"--json",
+			]),
+		).toBe(0);
+		expect(fake.writes).toHaveLength(1);
+		const body = fake.writes[0]?.text ?? "";
+		expect(body).toContain("ttl candidate ids");
+		expect(body).toContain("hash version at v1");
+		expect(body).toContain("Greptile approved");
+		expect(body).toContain("no DNS record");
+		expect(body).not.toContain("session ended");
+		expect(body).not.toContain("\ntodo");
+		expect(fake.writes[0]?.idempotency_key).toBe(sessionLessonKey("repo:acme/widgets", "sess-facts-1"));
+		expect(first.err()).toContain("correlation=sess-facts-1");
+		expect(first.err()).not.toContain("ttl candidate");
+
+		const again = harness();
+		expect(await again.run(["ingest", "--session", "sess-facts-1", "--text", SESSION, "--phase", "15-lessons-bank"])).toBe(0);
+		expect(fake.entries).toHaveLength(1);
+		expect(again.out()).toContain("duplicate");
+
+		const recall = harness();
+		expect(await recall.run(["recall", "hindsight", "dns", "--json"])).toBe(0);
+		const ranked = JSON.parse(recall.out()) as Array<{ id: string; text: string; source: string }>;
+		expect(ranked[0]?.text).toContain("ttl candidate ids");
+		expect(ranked[0]?.source).toBe("session:sess-facts-1");
+		expect(ranked.some((item) => item.text.includes("unrelated zircon"))).toBe(false);
+	});
+
+	test("chatter and a planted bearer are not a successful empty or secret lesson", async () => {
+		const empty = harness();
+		expect(await empty.run(["ingest", "--session", "sess-chatter", "--text", "session ended\nherdr pane-7 exited", "--phase", "15-lessons-bank", "--json"])).toBe(0);
+		expect(fake.writes).toHaveLength(0);
+		expect(empty.out()).toContain("nothing-durable");
+
+		const secret = "abcdefghijklmnopqrstuvwxyz";
+		const cli = harness();
+		expect(
+			await cli.run([
+				"ingest",
+				"--session",
+				"sess-secret",
+				"--text",
+				`Decision: The deploy token is Authorization: Bearer ${secret} and it must stay out of the lesson.`,
+				"--phase",
+				"15-lessons-bank",
+			]),
+		).toBe(0);
+		expect(fake.writes[0]?.text).not.toContain(secret);
+		expect(fake.writes[0]?.text).toContain("[REDACTED]");
+		expect(cli.err()).not.toContain(secret);
+		expect(extractDurableFacts("session ended").facts).toEqual([]);
+	});
+
+	test("an unrelated recall is an empty match, not an error", async () => {
+		const cli = harness();
+		expect(await cli.run(["add", "--text", "Lease epochs fence stale holders.", "--phase", "15-lessons-bank"])).toBe(0);
+		const recall = harness();
+		expect(await recall.run(["recall", "zircon-pottery"])).toBe(0);
+		expect(recall.out()).toContain("No lessons");
+		expect(recall.out()).not.toContain("recall-unavailable");
 	});
 });

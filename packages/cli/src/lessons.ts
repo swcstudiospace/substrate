@@ -77,6 +77,77 @@ const STOPWORDS: Record<string, true> = Object.fromEntries(
 	].map((word) => [word, true]),
 );
 
+/** Bodies that name a label and carry no fact. Compared after whitespace collapse. */
+const PLACEHOLDER_BODIES = new Set([
+	"todo",
+	"tbd",
+	"n/a",
+	"na",
+	"placeholder",
+	"lorem ipsum",
+	"lesson",
+	"none",
+	"null",
+	"{}",
+	"[]",
+	"fixme",
+	"xxx",
+	"...",
+	"empty",
+]);
+
+/**
+ * Why `text` cannot be stored as a lesson. Null, empty, whitespace, `{}`, `[]`,
+ * a placeholder, or a title with no clause and fewer than four meaningful words
+ * is a failed create: nothing successful is stored.
+ */
+export function lessonContentIssue(text: string | null | undefined): string | null {
+	if (text == null) return "lesson body is null";
+	const collapsed = normalizeText(text);
+	if (collapsed.length === 0) return "lesson body is empty";
+	if (PLACEHOLDER_BODIES.has(collapsed.toLowerCase())) return `lesson body is a placeholder (${collapsed})`;
+	const words = collapsed
+		.toLowerCase()
+		.split(/[^a-z0-9]+/)
+		.filter((word) => word.length > 0 && !STOPWORDS[word]);
+	if (words.length < 4 && !/[.:;]/.test(collapsed)) return "lesson body is only a title or label and has no factual content";
+	return null;
+}
+
+const CHATTER = /session (?:ended|started)|pane[- ]?\w* exited|idle to working|\(no output\)|^no output$/i;
+
+export interface DurableExtraction {
+	facts: string[];
+	dropped: number;
+}
+
+/**
+ * Durable lines from a finished session. A labelled goal, decision, preference,
+ * outcome, blocker or fact is kept when it has factual content. Chatter and
+ * title-only lines are counted as dropped and are not invented into filler.
+ */
+export function extractDurableFacts(sessionText: string): DurableExtraction {
+	const facts: string[] = [];
+	let dropped = 0;
+	for (const line of sessionText.split(/\n+/)) {
+		const trimmed = line.trim();
+		if (trimmed.length === 0) continue;
+		const labeled = /^(?:goal|decision|preference|outcome|blocker|fact)\s*:\s*(.*)$/i.exec(trimmed);
+		const candidate = (labeled ? labeled[1] : trimmed).trim();
+		if (candidate.length === 0 || CHATTER.test(candidate) || lessonContentIssue(candidate)) {
+			dropped++;
+			continue;
+		}
+		facts.push(candidate);
+	}
+	return { facts, dropped };
+}
+
+/** One lesson per session in a scope. A replay of the same session id is the same key. */
+export function sessionLessonKey(scope: string, sessionId: string): string {
+	return `${SUBJECT.lesson}${sha256(`${scope}\nsession\n${sessionId}`)}`;
+}
+
 export interface Lesson {
 	milestone: string;
 	phase: string;
@@ -203,7 +274,7 @@ export function lessonBody(lesson: Lesson): string {
 		...(lesson.tags.length > 0 ? [`tags: ${lesson.tags.join(", ")}`] : []),
 		`source: ${lesson.source}`,
 		"",
-		normalizeText(lesson.text),
+		redact(normalizeText(lesson.text)),
 	].join("\n");
 }
 
@@ -422,7 +493,8 @@ export function rankLessons(items: readonly Citable[], outcomes: readonly Outcom
 	for (const outcome of outcomes) reports.set(outcome.lesson, [...(reports.get(outcome.lesson) ?? []), outcome]);
 
 	return items
-		.filter((item) => item.digest ? activeDigests.has(item) : !digested.has(item.id))
+		.filter((item) => (item.digest ? activeDigests.has(item) : !digested.has(item.id)))
+		.filter((item) => item.digest || lessonContentIssue(item.text) === null)
 		.map((item) => {
 			const { score, count } = scoreOf(reports.get(item.id) ?? []);
 			const match = matchScore(terms, item);
@@ -650,6 +722,7 @@ export type WriteStatus =
 	| "refused"
 	| "unreachable"
 	| "too-long"
+	| "invalid"
 	| "skipped";
 
 export interface WriteReport {
@@ -931,6 +1004,7 @@ export interface LessonsDeps {
 const USAGE =
 	"substrate lessons add --text T --phase P [--milestone M] [--slug S] [--tags a,b] [--outcome O] [--source PATH]\n" +
 	"substrate lessons add --from SUMMARY.md [--key-decisions] [--milestone M] [--phase P] [--tags a,b] [--skip slug,...]\n" +
+	"substrate lessons ingest --session ID --text T --phase P [--milestone M]\n" +
 	"substrate lessons recall [QUERY] [--limit N] [--half-life DAYS]\n" +
 	"substrate lessons digest <milestone> [--ids a,b [--unchecked]] [--text T]\n" +
 	"substrate lessons outcome <lesson id> --result success|partial|failure --phase P --report-id ID [--milestone M] [--note T] [--unchecked]\n" +
@@ -946,6 +1020,8 @@ export async function runLessons(argv: string[], deps: LessonsDeps): Promise<num
 		switch (command) {
 			case "add":
 				return await add(args, deps);
+			case "ingest":
+				return await ingest(args, deps);
 			case "recall":
 				return await recall(args, positional.join(" "), deps);
 			case "digest":
@@ -1040,6 +1116,8 @@ interface Planned {
 	key: string;
 	body: string;
 	skipped: boolean;
+	/** Set when the body has no factual content. The plan is not sent. */
+	invalid?: string | null;
 	/** The caller's report identity, on outcome dry runs: the `--report-id` the key is scoped to. */
 	report?: string;
 }
@@ -1110,6 +1188,7 @@ async function add(args: Args, deps: LessonsDeps): Promise<number> {
 	const skip = new Set((list(args.skip) ?? []).map(identifier));
 	const taken = new Set<string>();
 	const planned: Planned[] = items.map((item) => {
+		const issue = lessonContentIssue(item.text);
 		const base = item.slug || slugify(item.text);
 		let slug = base;
 		// Two bullets opening with the same words would share a subject. Facts append, so
@@ -1130,6 +1209,7 @@ async function add(args: Args, deps: LessonsDeps): Promise<number> {
 			key: lessonKey(scope, source, item.text),
 			body: lessonBody(lesson),
 			skipped: skip.has(slug),
+			invalid: issue,
 		};
 	});
 
@@ -1144,6 +1224,14 @@ async function add(args: Args, deps: LessonsDeps): Promise<number> {
 		const base = { subject: plan.subject, key: plan.key };
 		if (plan.skipped) {
 			reports.push({ ...base, status: "skipped", id: null, reason: null, remedy: null });
+		} else if (plan.invalid) {
+			reports.push({
+				...base,
+				status: "invalid",
+				id: null,
+				reason: plan.invalid,
+				remedy: "Give the lesson a concrete fact. An empty, placeholder, or title-only body is not stored.",
+			});
 		} else if (plan.body.length > MAX_BODY) {
 			reports.push({
 				...base,
@@ -1174,6 +1262,71 @@ async function add(args: Args, deps: LessonsDeps): Promise<number> {
 	}
 	printReports(reports, args.json === true, deps);
 	return reports.every((report) => report.status === "skipped" || USABLE[report.status]) ? 0 : 1;
+}
+
+/**
+ * One lesson from a finished session. Facts share one correlation id (the session
+ * id) and one idempotency key, so a replay returns the original lesson. A session
+ * with no durable fact stores nothing and does not fail the caller.
+ */
+async function ingest(args: Args, deps: LessonsDeps): Promise<number> {
+	const started = deps.now().getTime();
+	const scope = scopeOf(args, deps);
+	const sessionId = str(args.session)?.trim() ?? "";
+	if (!/^[A-Za-z0-9._:-]{1,200}$/.test(sessionId)) {
+		throw new UsageError("lessons ingest needs --session ID (letters, digits, . _ : -, 1-200 characters)");
+	}
+	const raw = str(args.text);
+	if (raw == null) throw new UsageError("lessons ingest needs --text, the session text to read facts from");
+	const { facts, dropped } = extractDurableFacts(raw);
+	const elapsed = (): number => Math.max(0, deps.now().getTime() - started);
+	if (facts.length === 0) {
+		deps.err(
+			`[substrate] lesson ingest correlation=${sessionId} outcome=nothing-durable dropped=${dropped} latency_ms=${elapsed()}\n`,
+		);
+		if (args.json === true) deps.out(`${JSON.stringify({ outcome: "nothing-durable", correlation: sessionId, dropped })}\n`);
+		return 0;
+	}
+	const milestone = identifier(str(args.milestone) ?? currentMilestone(deps) ?? "");
+	const phase = identifier(str(args.phase) ?? "");
+	if (!milestone || !phase) {
+		throw new UsageError("lessons ingest needs --milestone and --phase, or a .planning/STATE.md milestone and --phase");
+	}
+	const text = facts.join("\n");
+	const issue = lessonContentIssue(text);
+	if (issue) {
+		deps.err(`[substrate] lesson ingest correlation=${sessionId} outcome=invalid reason=${issue} latency_ms=${elapsed()}\n`);
+		return 1;
+	}
+	const lesson: Lesson = {
+		milestone,
+		phase,
+		slug: slugify(facts[0] ?? text),
+		outcome: outcomeOf(str(args.outcome)),
+		tags: [...new Set((list(args.tags) ?? []).map(identifier).filter(Boolean))],
+		source: `session:${sessionId}`,
+		text,
+	};
+	const subject = lessonSubject(milestone, phase, lesson.slug);
+	const key = sessionLessonKey(scope, sessionId);
+	const body = lessonBody(lesson);
+	if (body.length > MAX_BODY) {
+		deps.err(`[substrate] lesson ingest correlation=${sessionId} outcome=too-long latency_ms=${elapsed()}\n`);
+		return 1;
+	}
+	const decided = await writeGoverned(deps.memory, {
+		scope,
+		kind: "fact",
+		subject,
+		text: body,
+		idempotency_key: key,
+	});
+	const report: WriteReport = { subject, key, ...decided };
+	printReports([report], args.json === true, deps);
+	deps.err(
+		`[substrate] lesson ingest correlation=${sessionId} outcome=${report.status} lesson=${report.id ?? "-"} dropped=${dropped} latency_ms=${elapsed()}\n`,
+	);
+	return USABLE[report.status] ? 0 : 1;
 }
 
 interface Bank {
@@ -1294,8 +1447,11 @@ async function recall(args: Args, positional: string, deps: LessonsDeps): Promis
 		// Fail-open, by the proposal's rule: a phase that cannot reach the bank goes
 		// ahead without prior lessons rather than not at all. Said on stderr, so the
 		// operator knows the block is missing rather than empty.
-		deps.err(`[substrate] the lessons bank did not answer for ${scope}; nothing recalled: ${message(cause)}\n`);
-		return 0;
+		const reason = message(cause);
+		deps.err(`[substrate] recall-unavailable for ${scope}: ${reason}\n`);
+		if (args.json === true) deps.out(`${JSON.stringify({ outcome: "recall-unavailable", reason })}\n`);
+		else deps.out(`recall-unavailable: the lessons bank did not answer for ${scope}.\n`);
+		return 2;
 	}
 	const ranked = rankLessons(bank.items, bank.outcomes, { query, now: deps.now().getTime(), halfLifeDays, limit });
 	if (args.json) {

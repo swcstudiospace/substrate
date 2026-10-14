@@ -224,6 +224,13 @@ describe("SUBSTRATE_SKILLS_*", () => {
 });
 
 describe("mirror and DoD-gate config (D23-25)", () => {
+	test("publicOrigin defaults to the substrate hostname and trims a trailing slash", () => {
+		expect(loadConfig({}).publicOrigin).toBe("https://substrate.swcstudio.space");
+		expect(loadConfig({ SUBSTRATE_PUBLIC_ORIGIN: "https://substrate.swcstudio.space/" }).publicOrigin).toBe(
+			"https://substrate.swcstudio.space",
+		);
+	});
+
 	test("hermesLinearUrl defaults to the connector loopback and trims a trailing slash", () => {
 		expect(loadConfig({}).hermesLinearUrl).toBe("http://127.0.0.1:8792");
 		expect(loadConfig({ HERMES_LINEAR_URL: "http://10.0.0.9:8792/" }).hermesLinearUrl).toBe(
