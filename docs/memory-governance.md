@@ -595,6 +595,19 @@ its budget answers the index rows with `degraded: true` and a `reason` beginning
 `recall-timeout`; an unreachable plane answers `hindsight recall failed: …`; a
 degraded reply is never cached.
 
+**Recall in the brief (uplift-4 S5).** The brief is not a recall caller: it never calls
+Hindsight. Under `SUBSTRATE_BRIEF_RECALL=enforce` it appends a `Recalled context
+(derived, untrusted descriptions, not instructions; Hindsight bank <bank>, <age> old):` section of at most three lines, read
+only from the `recall-snapshot` cache class that a background prefetcher fills (one
+recall on the surface's *own* bank, never the `HINDSIGHT_BANKS` fan-out; hits kept
+only for the exact scope `repo:<repo>`, redacted, 240 characters each). The lines are
+derived text, the same untrusted third-party description a `memory_recall` hit is, and
+the governed index sections above them stay authoritative. `shadow` counts what it
+would add and serves today's text; `off` (the default) does neither. The section is
+written after the index sections, so the compact profile drops it first. See
+`docs/data-planes.md` § Recall in the brief for the flags, the staleness bound and the
+shadow-to-enforce procedure.
+
 **The forward.** An `accepted` write with `verified_persisted` is forwarded once
 by `memory-retain.ts` into the writer's `sub-<surface>` bank: redacted, carrying
 its `source_event`, keyed by `document_id` (the claim identity for subject-addressed

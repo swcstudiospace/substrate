@@ -24,6 +24,9 @@ import {
 	sloConfigWarnings,
 	swarmTokenWarnings,
 } from "./config.ts";
+import { briefProfileConfigWarnings } from "./brief-profile.ts";
+import { hindsightInventoryConfigWarnings } from "./hindsight-inventory.ts";
+import { briefRecallConfigWarnings } from "./recall-snapshot.ts";
 import { bufferRunner, createDesktopDriver } from "./desktop/driver.ts";
 import { createObservability } from "./observe.ts";
 import { createHttpServer } from "./server.ts";
@@ -67,7 +70,10 @@ for (const warning of [
 	...memoryExpiryConfigWarnings(config),
 	...hindsightConfigWarnings(config),
 	...sloConfigWarnings(config),
+	...briefProfileConfigWarnings(config),
 	...config.metricsHistory.problems,
+	...briefRecallConfigWarnings(config),
+	...hindsightInventoryConfigWarnings(config),
 ]) {
 	process.stderr.write(`[substrate] misconfigured — ${warning}\n`);
 }
@@ -150,6 +156,10 @@ server.listen(config.port, config.host, () => {
 			`claims ${substrate.requireRecordedClaims ? "fail-closed" : "fail-open"})\n`,
 	);
 	if (watchdog.start()) process.stdout.write("[substrate] watchdog: armed, READY=1 first, then heartbeat gated on event-loop lag and loopback /livez\n");
+	// uplift-4 S5: each timer starts only under its own flag (both default off) and is unref'd.
+	const background = substrate.startRecall();
+	if (background.recall) process.stdout.write(`[substrate] brief recall: ${config.briefRecall.mode}, refresh every ${config.briefRecall.intervalS} s, snapshot ttl ${config.briefRecall.ttlS} s\n`);
+	if (background.inventory) process.stdout.write(`[substrate] hindsight inventory: on, every ${config.hindsightInventory.intervalS} s, read-only\n`);
 });
 
 /** How long the final OTLP export may take before shutdown stops waiting for it. */
@@ -166,6 +176,9 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 		// Cancelled first and awaited with the flush below: no ping after shutdown began,
 		// and a stuck systemd-notify child is killed rather than outliving the process.
 		const watchdogStopped = watchdog.stop();
+		// uplift-4 S5: the recall prefetch and Hindsight inventory timers are cleared now and
+		// their in-flight work is awaited inside the same bound as the flush below.
+		const recallStopped = substrate.stopRecall();
 		observability.stop();
 		server.close(async () => {
 			// In-flight background retains finish first (bounded), then the retain
@@ -187,6 +200,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 					metricsHistory.flush(),
 					docsLagTimer.flush(),
 					watchdogStopped,
+					recallStopped,
 				]),
 				Bun.sleep(SHUTDOWN_FLUSH_MS),
 			]);

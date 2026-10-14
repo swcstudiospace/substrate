@@ -75,6 +75,7 @@ export {
 
 export {
 	type AdmissionClass,
+	type CacheMetricResult,
 	type AdmissionDecision,
 	type BriefResult,
 	type BriefState,
@@ -85,6 +86,8 @@ export {
 	type Usage,
 	ADMISSION_CLASSES,
 	ADMISSION_DECISIONS,
+	CACHE_METRIC_CLASSES,
+	CACHE_METRIC_RESULTS,
 	BRIEF_RESULTS,
 	BRIEF_STATES,
 	type CitationProvenance,
@@ -104,6 +107,37 @@ export {
 	classifyPlaneReason,
 	extractUsage,
 } from "./instruments.ts";
+
+export {
+	type BriefProfile,
+	type BriefProfileMode,
+	type ServedTokenTool,
+	BRIEF_PROFILES,
+	BRIEF_PROFILE_MODES,
+	SERVED_TOKEN_TOOLS,
+	estimateTokens,
+} from "./instruments.ts";
+
+export {
+	type BriefRecallMode,
+	type BriefRecallResult,
+	type RecallPrefetchResult,
+	BRIEF_RECALL_MODES,
+	BRIEF_RECALL_RESULTS,
+	OUTBOX_DURABLE_METRIC,
+	OUTBOX_OLDEST_METRIC,
+	OUTBOX_SIZE_METRIC,
+	RECALL_PREFETCH_RESULTS,
+} from "./instruments.ts";
+
+export {
+	type ServedTokensEvalOptions,
+	type ServedTokensResult,
+	type ServedTokensStatus,
+	SERVED_TOKENS_ENV,
+	SERVED_TOKENS_ID,
+	servedTokensBySurface,
+} from "./slo.ts";
 
 export {
 	type BreakerSettings,

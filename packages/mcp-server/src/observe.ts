@@ -45,6 +45,7 @@ import {
 	restoreCheckpoint,
 	serializeCheckpoint,
 	sloCatalogue,
+	servedTokensBySurface,
 	snapshotCheckpoint,
 	type BurnResult,
 	type CapacitySloResult,
@@ -56,6 +57,7 @@ import {
 	type SloCheckpoint,
 	type SloResult,
 	type SloTarget,
+	type ServedTokensResult,
 	type SurfaceSloResult,
 	type Span,
 	type SpanContext,
@@ -213,6 +215,8 @@ export interface Observability {
 	evaluateBurn(): BurnResult[];
 	/** The capacity runway verdict (uplift-3 N2): one row, `capacity.index.runway_days`, over the `/healthz` size ring. */
 	evaluateCapacity(): CapacitySloResult[];
+	/** `served.tokens_est` per surface (uplift-4 S1): the estimated hourly tokens served, against `SUBSTRATE_SERVED_TOKENS_PER_HOUR`. Every call is a sample. */
+	evaluateServedTokens(): ServedTokensResult[];
 	history(): SloHistory;
 	/**
 	 * Save the checkpoint now (uplift-3 N2): the merged series, the rings and
@@ -345,6 +349,21 @@ export function createObservability(
 		},
 		briefResult(sample) {
 			instruments.recordBriefResult(sample);
+		},
+		briefProfiled(sample) {
+			instruments.recordBriefProfile(sample);
+		},
+		servedTokens(sample) {
+			instruments.recordServedTokens(sample);
+		},
+		briefRecall(sample) {
+			instruments.recordBriefRecall(sample);
+		},
+		recallPrefetch(sample) {
+			instruments.recordRecallPrefetch(sample);
+		},
+		hindsightOutbox(sample) {
+			instruments.setHindsightOutbox(sample);
 		},
 		emitted(sample) {
 			instruments.recordEmit(sample);
@@ -482,6 +501,7 @@ export function createObservability(
 				volumeBytes: settings.indexVolumeBytes,
 				...(settings.slo.runwayDays !== undefined ? { targetDays: settings.slo.runwayDays } : {}),
 			}),
+		evaluateServedTokens: () => servedTokensBySurface(instruments.snapshot(), { ledger: burnLedger, env }),
 		notifyRecords,
 		history: () => ({ epoch, since, checkpointAt }),
 		checkpoint: checkpointOnce,

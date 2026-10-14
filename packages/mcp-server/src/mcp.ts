@@ -7,9 +7,10 @@
  * `memory_brief` / `events_emit`, so this stays consistent with them.
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { BRIEF_STATES } from "@substrate/observability";
+import { BRIEF_PROFILES, BRIEF_STATES } from "@substrate/observability";
 import { z } from "zod";
 import { BRIEF_SOURCES } from "./brief.ts";
+import { parseBriefProfile } from "./brief-profile.ts";
 import { DesktopRunInput } from "./desktop/actions.ts";
 import { DEFAULT_IDLE_SECONDS, formatDrift } from "./drift.ts";
 import { DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT } from "./greptime.ts";
@@ -213,7 +214,10 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				"`structuredContent` carries the brief's `etag` (weak validator of the text), `state` (complete | degraded | snapshot), " +
 				"`failed_sources` and `snapshot_at`, the same facts `POST /brief` puts in its ETag and X-Substrate-Brief headers. " +
 				"Pass the `etag` you hold as `if_none_match` on the next call: an unchanged brief answers `not_modified: true` " +
-				"with no text, so keep the copy you have. A degraded or snapshot brief is still an answer, not an error.",
+				"with no text, so keep the copy you have. A degraded or snapshot brief is still an answer, not an error. " +
+				"`profile` (full | compact; anything else is an error) names the rendering: `compact` is a capped brief whose first line states `[brief: complete]` or `[brief: degraded; failed: …]`, " +
+				"and `structuredContent.profile` says which one this reply is. An explicit `full` always wins; the substrate decides the default per surface. " +
+				"`age_s` is present only when a last-good brief was served stale (state stays `complete`).",
 			inputSchema: {
 				repo: z.string().optional().describe("owner/name, e.g. swcstudiospace/autonogrammer"),
 				branch: z.string().optional(),
@@ -226,6 +230,7 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 						"the `etag` from an earlier reply, in If-None-Match grammar (weak or strong, a list, or *); " +
 							"a match answers `not_modified: true` and no text",
 					),
+				profile: z.string().optional().describe("full | compact. Unknown values are refused, never coerced; full is always honoured, compact only while the substrate enforces profiles."),
 			},
 			outputSchema: {
 				etag: z.string().describe('weak validator of the brief text, W/"<32 hex>"'),
@@ -233,22 +238,34 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 				surface: surfaceSchema.describe("the surface the brief was composed for: the argument, else the bearer's own"),
 				not_modified: z.boolean().optional().describe("true when `if_none_match` listed the current etag; the text is omitted"),
 				failed_sources: z.array(z.enum(BRIEF_SOURCES)).optional().describe("sources that failed or missed the budget; empty when complete"),
+				profile: z.enum(BRIEF_PROFILES).describe("the rendering this reply carries: full is the whole brief, compact the capped one (its first line states the brief's state)"),
 				snapshot_at: z.string().nullable().optional().describe("when the served snapshot was composed; null unless state is snapshot"),
+				age_s: z.number().int().nonnegative().optional().describe("seconds since the served brief was composed; present only when it was served stale"),
 			},
 		},
-		async ({ repo, branch, graph_id, surface, if_none_match }) => {
+		async ({ repo, branch, graph_id, surface, if_none_match, profile }) => {
 			// The text is byte-for-byte what this tool has always returned; the
 			// metadata rides beside it so an older client sees no change. The
 			// matcher is the REST route's own, so one stored ETag means the same
 			// thing at both doors (uplift-3 N7). `surface` is reported because the
 			// bearer is the identity: a connector that omits the argument can see
 			// which surface its token resolved to, and the smoke refuses a wrong one.
+			const requested = parseBriefProfile(profile);
+			if (!requested.ok) return refusal(requested.error);
 			const briefSurface = surface ?? callerSurface ?? "claude-code";
-			const { detail, notModified } = await substrate.briefConditional({ repo, branch, graph_id, surface: briefSurface }, if_none_match);
+			// The profile follows the bearer's own surface, not an `surface` argument a caller may set for attribution.
+			const { detail, notModified } = await substrate.briefConditional({ repo, branch, graph_id, surface: briefSurface }, if_none_match, requested.profile, callerSurface);
 			if (notModified) {
 				return {
 					...text(`brief unchanged (etag ${detail.etag})`),
-					structuredContent: { not_modified: true, etag: detail.etag, state: detail.state, surface: briefSurface },
+					structuredContent: {
+						not_modified: true,
+						etag: detail.etag,
+						state: detail.state,
+						surface: briefSurface,
+						profile: detail.profile,
+						...(detail.ageS !== undefined ? { age_s: detail.ageS } : {}),
+					},
 				};
 			}
 			return {
@@ -259,6 +276,8 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 					surface: briefSurface,
 					failed_sources: detail.failed,
 					snapshot_at: detail.snapshotAt,
+					profile: detail.profile,
+					...(detail.ageS !== undefined ? { age_s: detail.ageS } : {}),
 				},
 			};
 		},

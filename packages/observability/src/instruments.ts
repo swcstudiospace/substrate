@@ -37,6 +37,11 @@ export const METRIC = {
 	docsDuration: "substrate.docs.duration",
 	memoryExpired: "substrate.memory.expired",
 	briefResult: "substrate.brief.result",
+	briefProfileBytesSaved: "substrate.brief.profile_bytes_saved",
+	briefProfile: "substrate.brief.profile",
+	servedTokensEst: "substrate.served.tokens_est",
+	briefRecall: "substrate.brief.recall",
+	recallPrefetch: "substrate.recall.prefetch",
 } as const;
 
 /**
@@ -51,6 +56,49 @@ export type BriefState = (typeof BRIEF_STATES)[number];
 /** Whether the caller received the brief's text (`fresh`) or only its validator (`not_modified`: HTTP 304, MCP `not_modified: true`). */
 export const BRIEF_RESULTS = ["fresh", "not_modified"] as const;
 export type BriefResult = (typeof BRIEF_RESULTS)[number];
+
+/**
+ * Which rendering of a brief a caller was served (uplift-4 S1). `full` is the
+ * text every surface has always received; `compact` is the capped,
+ * state-carrying rendering. A metric label, so the set stays closed.
+ */
+export const BRIEF_PROFILES = ["full", "compact"] as const;
+export type BriefProfile = (typeof BRIEF_PROFILES)[number];
+
+/** `SUBSTRATE_BRIEF_PROFILE`: `off` and `shadow` serve `full`; `shadow` also records what `compact` would have saved. */
+export const BRIEF_PROFILE_MODES = ["off", "shadow", "enforce"] as const;
+export type BriefProfileMode = (typeof BRIEF_PROFILE_MODES)[number];
+
+/** The replies whose served size is estimated into `substrate.served.tokens_est`. */
+export const SERVED_TOKEN_TOOLS = ["brief", "recall", "docs"] as const;
+export type ServedTokenTool = (typeof SERVED_TOKEN_TOOLS)[number];
+
+/** `SUBSTRATE_BRIEF_RECALL` (uplift-4 S5): `off` does nothing, `shadow` prefetches and counts what the brief would carry, `enforce` appends the `recall` section. */
+export const BRIEF_RECALL_MODES = ["off", "shadow", "enforce"] as const;
+export type BriefRecallMode = (typeof BRIEF_RECALL_MODES)[number];
+
+/** What one brief did with the recall snapshot (`substrate.brief.recall{result}`): a metric label, so the set stays closed. */
+export const BRIEF_RECALL_RESULTS = ["included", "would_include", "cold", "stale", "disabled"] as const;
+export type BriefRecallResult = (typeof BRIEF_RECALL_RESULTS)[number];
+
+/** What one prefetch attempt did (`substrate.recall.prefetch{result}`). */
+export const RECALL_PREFETCH_RESULTS = ["ok", "empty", "error", "skipped_breaker", "skipped_unconfigured", "skipped_cache"] as const;
+export type RecallPrefetchResult = (typeof RECALL_PREFETCH_RESULTS)[number];
+
+/** The estimate's one rule, ceil(bytes / 4): a rough guess for English text, never a model-reported count. */
+export function estimateTokens(bytes: number): number {
+	return Number.isFinite(bytes) && bytes > 0 ? Math.ceil(bytes / 4) : 0;
+}
+
+/**
+ * The key classes of the read-through cache (uplift-4 S4) and the results one
+ * operation can have. Both are metric labels and must stay closed: a class the
+ * cache does not know is recorded as `unknown`, never as the raw string.
+ * `would_serve_stale` is only ever counted under `SUBSTRATE_CACHE_SWR=shadow`.
+ */
+export const CACHE_METRIC_CLASSES = ["brief", "memory-search", "graph-view", "brief-snapshot", "recall-snapshot", "docs-search", "budget", "gen"] as const;
+export const CACHE_METRIC_RESULTS = ["hit", "miss", "bypass", "error", "coalesced", "stale", "refresh", "would_serve_stale"] as const;
+export type CacheMetricResult = (typeof CACHE_METRIC_RESULTS)[number];
 
 /** What one docs search answered with. One series each, so the label stays bounded. */
 export const DOCS_SEARCH_OUTCOMES = ["hit", "empty", "degraded"] as const;
@@ -245,6 +293,11 @@ export class SubstrateInstruments {
 	readonly docsDuration: Histogram;
 	readonly memoryExpired: Counter;
 	readonly briefResult: Counter;
+	readonly briefProfileBytesSaved: Counter;
+	readonly briefProfile: Counter;
+	readonly servedTokensEst: Counter;
+	readonly briefRecall: Counter;
+	readonly recallPrefetch: Counter;
 
 	constructor(registry: MetricRegistry = new MetricRegistry()) {
 		this.registry = registry;
@@ -312,7 +365,8 @@ export class SubstrateInstruments {
 			unit: "{request}",
 		});
 		this.cacheOperations = registry.counter(METRIC.cacheOperations, {
-			description: "Read-through cache results (hit|miss|bypass|error) and the mode they were counted in.",
+			description:
+				"Read-through cache results (hit|miss|coalesced|stale|refresh|would_serve_stale|bypass|error), the key class they belong to and the mode they were counted in.",
 			unit: "{operation}",
 		});
 		this.planeDuration = registry.histogram(METRIC.planeDuration, {
@@ -349,6 +403,31 @@ export class SubstrateInstruments {
 			description:
 				"Briefs answered, by surface, state (complete|degraded|snapshot) and result (fresh: text sent; not_modified: 304 or MCP not_modified).",
 			unit: "{brief}",
+		});
+		this.briefProfileBytesSaved = registry.counter(METRIC.briefProfileBytesSaved, {
+			description:
+				"Bytes the compact brief profile would save (full minus compact UTF-8 bytes, never below zero), by surface; recorded in shadow and enforce for fresh answers only.",
+			unit: "By",
+		});
+		this.briefProfile = registry.counter(METRIC.briefProfile, {
+			description:
+				"Briefs answered, by surface, the profile served (full|compact) and the SUBSTRATE_BRIEF_PROFILE mode (off|shadow|enforce).",
+			unit: "{brief}",
+		});
+		this.servedTokensEst = registry.counter(METRIC.servedTokensEst, {
+			description:
+				"ESTIMATED tokens served to callers (ceil(bytes / 4) of the reply text), by surface and tool (brief|recall|docs). Not model-reported and never added to substrate.tokens.",
+			unit: "{token}",
+		});
+		this.briefRecall = registry.counter(METRIC.briefRecall, {
+			description:
+				"Briefs answered under SUBSTRATE_BRIEF_RECALL=shadow|enforce, by surface and result (included|would_include|cold|stale|disabled).",
+			unit: "{brief}",
+		});
+		this.recallPrefetch = registry.counter(METRIC.recallPrefetch, {
+			description:
+				"Recall snapshot refreshes, by surface and result (ok|empty|error|skipped_breaker|skipped_unconfigured|skipped_cache).",
+			unit: "{refresh}",
 		});
 	}
 
@@ -436,8 +515,9 @@ export class SubstrateInstruments {
 		this.eventsRefused.add(1, { reason: sample.reason });
 	}
 
-	recordCache(sample: { result: "hit" | "miss" | "bypass" | "error"; mode: "off" | "on" | "degraded" }): void {
-		this.cacheOperations.add(1, { result: sample.result, mode: sample.mode });
+	recordCache(sample: { result: CacheMetricResult; mode: "off" | "on" | "degraded"; cacheClass?: string }): void {
+		const known = sample.cacheClass !== undefined && (CACHE_METRIC_CLASSES as readonly string[]).includes(sample.cacheClass);
+		this.cacheOperations.add(1, { result: sample.result, mode: sample.mode, class: known ? (sample.cacheClass as string) : "unknown" });
 	}
 
 	/**
@@ -512,6 +592,26 @@ export class SubstrateInstruments {
 	}
 
 	/**
+	 * One brief answered with its profile (uplift-4 S1). `bytesSaved` is the
+	 * full-minus-compact size of a fresh answer in `shadow` or `enforce`, null
+	 * when it is not measured (`off`, a 304, a compact rendering that failed);
+	 * a compact text longer than the full one saves nothing rather than going
+	 * negative on a monotonic counter.
+	 */
+	recordBriefProfile(sample: { surface: string; profile: BriefProfile; mode: BriefProfileMode; bytesSaved: number | null }): void {
+		this.briefProfile.add(1, cleanAttributes({ surface: sample.surface, profile: sample.profile, mode: sample.mode }));
+		if (sample.bytesSaved !== null && sample.bytesSaved > 0) {
+			this.briefProfileBytesSaved.add(sample.bytesSaved, cleanAttributes({ surface: sample.surface }));
+		}
+	}
+
+	/** One reply served, as the estimate `ceil(bytes / 4)` in `substrate.served.tokens_est`; a zero-byte reply adds nothing. */
+	recordServedTokens(sample: { surface: string; tool: ServedTokenTool; bytes: number }): void {
+		const tokens = estimateTokens(sample.bytes);
+		if (tokens > 0) this.servedTokensEst.add(tokens, cleanAttributes({ surface: sample.surface, tool: sample.tool }));
+	}
+
+	/**
 	 * The age of the newest complete index archive (a snapshot whose manifest is
 	 * on disk — the manifest is written last — not one re-verified), in seconds
 	 * (uplift-4 S2). `newestAtMs` answers the newest archive's creation time or
@@ -528,7 +628,35 @@ export class SubstrateInstruments {
 			return at === null ? null : Math.max(0, (now() - at) / 1000);
 		};
 	}
+
+	/**
+	 * The retain outbox's depth, oldest entry age and durability (uplift-4 S5).
+	 * Three gauges set from the outbox's own in-process state; no external call.
+	 * `oldestAgeSeconds` is 0 for an empty outbox.
+	 */
+	setHindsightOutbox(sample: { size: number; oldestAgeSeconds: number; durable: boolean }): void {
+		this.registry.gauge(OUTBOX_SIZE_METRIC, { description: "Retain forwards parked for replay", unit: "{entry}" }).set(sample.size);
+		this.registry.gauge(OUTBOX_OLDEST_METRIC, { description: "Age of the oldest parked retain forward; 0 when none", unit: "s" }).set(sample.oldestAgeSeconds);
+		this.registry.gauge(OUTBOX_DURABLE_METRIC, { description: "1 when the retain outbox survives a restart, 0 when it is memory only", unit: "1" }).set(sample.durable ? 1 : 0);
+	}
+
+	/** One brief's use of the recall snapshot (uplift-4 S5). `surface` is bounded by the caller; a result outside the closed set is dropped. */
+	recordBriefRecall(sample: { surface: string; result: BriefRecallResult }): void {
+		if (!(BRIEF_RECALL_RESULTS as readonly string[]).includes(sample.result)) return;
+		this.briefRecall.add(1, cleanAttributes({ surface: sample.surface, result: sample.result }));
+	}
+
+	/** One prefetch attempt (uplift-4 S5). `surface` is bounded by the caller; a result outside the closed set is dropped. */
+	recordRecallPrefetch(sample: { surface: string; result: RecallPrefetchResult }): void {
+		if (!(RECALL_PREFETCH_RESULTS as readonly string[]).includes(sample.result)) return;
+		this.recallPrefetch.add(1, cleanAttributes({ surface: sample.surface, result: sample.result }));
+	}
 }
 
 /** The gauge `observeIndexArchiveAge` installs (uplift-4 S2). */
 export const INDEX_ARCHIVE_AGE_METRIC = "substrate.index.archive.age_seconds";
+
+/** The three unlabelled gauges `setHindsightOutbox` sets (uplift-4 S5): the retain outbox, read in-process. */
+export const OUTBOX_SIZE_METRIC = "substrate.hindsight.retain_outbox.size";
+export const OUTBOX_OLDEST_METRIC = "substrate.hindsight.retain_outbox.oldest_age_seconds";
+export const OUTBOX_DURABLE_METRIC = "substrate.hindsight.retain_outbox.durable";

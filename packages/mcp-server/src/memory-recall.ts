@@ -1,5 +1,5 @@
 /**
- * `memory_recall`: Hindsight recall as an explicit tool, never in the brief.
+ * `memory_recall`: Hindsight recall as an explicit tool; the brief only ever reads a warm cache snapshot of it.
  *
  * DOCS-04's read half (D26-03, D26-05): a bounded fan-out over the configured
  * explicit `sub-*` bank list — the caller's bank first, then the rest — under
@@ -9,8 +9,13 @@
  * D26-08); reads emit nothing (D26-07).
  *
  * The negative gates live with the tests: an unlisted surface never falls
- * back to a shared bank, and the brief's synchronous compose path never
- * imports `planes/hindsight` (the acc30a8 4 s in-brief recall anti-pattern).
+ * back to a shared bank, and the brief never calls the plane. Since uplift-4
+ * S5 the brief may carry a `Recalled context` section, but it reads it ONLY
+ * from the `recall-snapshot` cache class (a cache read an injected function
+ * performs); the prefetcher in `recall-snapshot.ts` is what fills it, off
+ * the request path. `brief.ts`, `brief-profile.ts` and `recall-snapshot.ts`
+ * never import `planes/hindsight` (the acc30a8 4 s in-brief recall
+ * anti-pattern).
  */
 import {
 	MAX_RECALL_PER_BANK,

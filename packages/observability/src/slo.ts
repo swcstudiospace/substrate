@@ -39,6 +39,7 @@ import {
 	sumCounter,
 } from "./metrics.ts";
 import { METRIC } from "./instruments.ts";
+import { sharedBurnLedger, thresholdFrom, warnOnce, type BurnLedger } from "./burn.ts";
 import { PLANES, type PlaneName } from "./breaker.ts";
 
 export interface CounterSelector {
@@ -884,6 +885,107 @@ export function evaluateCapacitySlos(ring: CapacityRing, options: CapacityEvalOp
 				`objective is at least ${target}`,
 		},
 	];
+}
+
+// ── estimated served tokens per surface (uplift-4 S1) ────────────────────────
+
+export const SERVED_TOKENS_ID = "served.tokens_est";
+export const SERVED_TOKENS_ENV = "SUBSTRATE_SERVED_TOKENS_PER_HOUR";
+
+export type ServedTokensStatus = "ok" | "breached" | "unconfigured" | "insufficient-data";
+
+/** One surface's estimated spend verdict; the field shape mirrors `BurnResult` so `/slo` reads alike. */
+export interface ServedTokensResult {
+	id: typeof SERVED_TOKENS_ID;
+	title: string;
+	statement: string;
+	surface: string;
+	status: ServedTokensStatus;
+	/** The estimated per-hour rate, or `null` before one exists. */
+	observed: number | null;
+	unit: "tokens/h (estimated)";
+	/** The configured ceiling, or `null` when unconfigured. */
+	target: number | null;
+	samples: number;
+	detail: string;
+}
+
+export interface ServedTokensEvalOptions {
+	/** Environment the ceiling is read from; defaults to `process.env`. */
+	env?: Record<string, string | undefined>;
+	/** Sample history; defaults to the process-wide burn ledger, which keys these series apart from the burn ones. */
+	ledger?: BurnLedger;
+	/** Evaluation time in epoch milliseconds; defaults to now. */
+	now?: number;
+	/** Where a malformed-env warning goes; defaults to one stderr line. */
+	warn?: (message: string) => void;
+}
+
+/**
+ * `served.tokens_est` per surface: the hourly rate of `substrate.served.tokens_est`
+ * (bytes / 4 of what brief, recall and docs replies carried) against
+ * `SUBSTRATE_SERVED_TOKENS_PER_HOUR`.
+ *
+ * This is an ESTIMATE of what a surface's model had to read, not what it was
+ * billed: `burn.tokens` stays the model-reported series and never includes it.
+ * One row per surface that has a series, sorted, so the array is empty until
+ * something was served; an unset ceiling is `unconfigured` (reported, never
+ * judged), exactly as `burn.ts` does. Every call is a sample in the ledger,
+ * keyed per surface so the burn series and the surfaces never share history.
+ * Served as the sibling `served` array on `GET /slo` and never folded into
+ * `breached`.
+ */
+export function servedTokensBySurface(snapshot: MetricSnapshot[], options: ServedTokensEvalOptions = {}): ServedTokensResult[] {
+	const counter = findCounter(snapshot, METRIC.servedTokensEst);
+	if (!counter) return [];
+	const ceiling = thresholdFrom(options.env ?? process.env, SERVED_TOKENS_ENV, options.warn ?? warnOnce, "served-tokens objective");
+	const ledger = options.ledger ?? sharedBurnLedger();
+	const now = options.now ?? Date.now();
+	const surfaces = new Set<string>();
+	for (const point of counter.points) {
+		const surface = point.attributes.surface;
+		if (typeof surface === "string") surfaces.add(surface);
+	}
+	const ceilingText = ceiling === null ? null : `${Math.round(ceiling)} tokens`;
+	return [...surfaces].sort().map((surface): ServedTokensResult => {
+		const base = {
+			id: SERVED_TOKENS_ID as typeof SERVED_TOKENS_ID,
+			title: "Estimated served tokens",
+			surface,
+			unit: "tokens/h (estimated)" as const,
+			target: ceiling,
+			statement:
+				ceilingText === null
+					? `estimated sum of ${METRIC.servedTokensEst}{surface=${surface}} (bytes/4 of served replies) per rolling hour, ceiling from ${SERVED_TOKENS_ENV} (unset)`
+					: `estimated sum of ${METRIC.servedTokensEst}{surface=${surface}} (bytes/4 of served replies) per rolling hour <= ${ceilingText}`,
+		};
+		if (ceiling === null) {
+			return { ...base, status: "unconfigured", observed: null, samples: 0, detail: `${SERVED_TOKENS_ENV} is unset, so this estimate is reported but never judged` };
+		}
+		const reading = ledger.observe(`${METRIC.servedTokensEst}|${surface}`, sumCounter(counter, { surface }), now);
+		if (reading.perHour === null) {
+			return {
+				...base,
+				status: "insufficient-data",
+				observed: null,
+				samples: reading.samples,
+				detail:
+					`${reading.samples} sample(s) span ${Math.round(reading.spanMs / 1000)} s; a rate needs two samples ` +
+					`at least ${Math.round(ledger.minSpanMs / 60_000)} minute(s) apart, and every /slo read feeds one`,
+			};
+		}
+		const breached = reading.perHour > ceiling;
+		return {
+			...base,
+			status: breached ? "breached" : "ok",
+			observed: reading.perHour,
+			samples: reading.samples,
+			detail:
+				`about ${Math.round(reading.perHour)} tokens/h (estimated, bytes/4) over the rolling hour, extrapolated from ` +
+				`${reading.samples} samples spanning ${Math.round(reading.spanMs / 60_000)} minute(s); ` +
+				`${breached ? "over" : "within"} the ${Math.round(ceiling)} tokens/h ceiling`,
+		};
+	});
 }
 
 // ── docs freshness (uplift-4 S7) ─────────────────────────────────────────────
