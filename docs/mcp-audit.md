@@ -302,7 +302,7 @@ lives in [event-vocabulary.md](event-vocabulary.md).
 | `skills_list` (uplift-5 S5a, **landed**) | fail-open | A read of the skills registry, also `GET /skills`, like `memory_search`: a projector reading it during a sync must not be failed by an unwritable audit file. Needs an authenticated surface (`401` otherwise, before the audit). |
 | `docs_ingest` (25) | fail-closed | Writes a shared dataset every agent reads; it is also a publication path. |
 | `desktop_run` (30) | fail-closed | Acts on a desktop — landed in Phase 30 (DESK-03 covered by unit and HTTP tests; live desktop smoke NOT-RUN). |
-| `docs_search` (25) | fail-open | A read inside an agent's turn. |
+| `docs_search` (25, **landed**) | fail-open | A read inside an agent's turn. Served as the MCP tool and as `POST /docs/search`, which is audited under the same name and always answers 200. |
 | `issue_get` (23) | fail-open | A read of untrusted tracker text. |
 | `graph_find` (23) | fail-open | A read of the index. |
 | `memory_recall` (26) | fail-open | A read like `memory_search`. |

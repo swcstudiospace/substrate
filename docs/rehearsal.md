@@ -161,6 +161,10 @@ Every later proof sources `consumer.env` and hardcodes nothing:
 | `SUBSTRATE_REHEARSAL_TOKENS_DIR` | One 0600 file per surface |
 | `SUBSTRATE_REHEARSAL_NAME` | The instance name |
 | `SUBSTRATE_TEST_PG_URL` | The scratch Postgres URL, so the existing live index tests run against scratch |
+| `SUBSTRATE_REHEARSAL_RAGFLOW_URL` | The fake RAGFlow's loopback URL (only with `--ragflow-fixture`) |
+| `SUBSTRATE_REHEARSAL_RAGFLOW_REGISTRY` | The fixture registry file (only with `--ragflow-fixture`) |
+| `SUBSTRATE_REHEARSAL_RAGFLOW_STATE` | What the fake received, persisted on every mutation (only with `--ragflow-fixture`) |
+| `SUBSTRATE_REHEARSAL_RAGFLOW_MODE_FILE` | The fake's scriptable mode file (only with `--ragflow-fixture`) |
 
 It does not export the ledger keys: clients talk to the ledger only through
 `SUBSTRATE_URL`.
@@ -196,3 +200,21 @@ of the server on loopback against scratch stores. `CHAOS_REHEARSAL=1` is a
 outage-only checks to notes so the script can be tested against a healthy
 deployment, and its report says so. A rehearsal of the script is never a
 proof; a twin from this harness is where proofs run.
+
+## Live-gated docs proof checklist — NOT RUN
+
+The isolated proof (`rehearsal up --ragflow-fixture`, `smoke:docs`, unit
+tests) covers every refusal and error path against fakes. The five steps
+below touch the live RAGFlow or the host, so each waits for an explicit
+operator approval window. None has run; none is implied to have run.
+Until the product slugs confirm (25-CONTEXT.md open question 3), the live
+DOCS-03 proof covers `agent-substrate`, `agent-skills` and
+`programming-desk` only.
+
+| Step | Approval window | Status |
+|---|---|---|
+| 1. Read-only: query RAGFlow's version, its dataset list and its embedding models, to confirm endpoint shapes, existing datasets and the TEI `bge-small` model id | _blank — operator approval required_ | NOT RUN |
+| 2. Read-only: confirm the product repo slugs on GitHub, and that the host can fetch each repo | _blank — operator approval required_ | NOT RUN |
+| 3. Write: create the missing datasets and run the first `substrate docs refresh` for each dataset, as a RAGFlow write | _blank — operator approval required_ | NOT RUN |
+| 4. Write: deploy the release, create `/var/lib/substrate/docs`, and install and enable `substrate-docs-refresh.timer` | _blank — operator approval required_ | NOT RUN |
+| 5. Write and read: the live search and ingest proof against the deployed RAGFlow, which writes an event and an audit record; then confirm a skills-sync fast-forward triggers the agent-skills refresh | _blank — operator approval required_ | NOT RUN |

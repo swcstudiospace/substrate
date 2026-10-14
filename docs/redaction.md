@@ -11,7 +11,7 @@ and output; the labelled table only names what was already there.
 
 ## The rule table
 
-Thirty named rules on the event pass. The skill pass mirrors each one under
+Thirty-one named rules on the event pass. The skill pass mirrors each one under
 the same name, except where the exclusion list says otherwise. The table
 below names each rule and the shape it catches; the middle column is the
 reported skill family, which groups shapes that mean the same credential.
@@ -45,6 +45,7 @@ reported skill family, which groups shapes that mean the same credential.
 | `gitlab` | `gitlab` | A personal access token |
 | `digitalocean` | `digitalocean` | A personal access token |
 | `openai-proj` | `openai-proj` | An `sk-proj-` key, which the `sk-` rule stops short of |
+| `ragflow` | `ragflow` | A RAGFlow API key (D25-23); a key pasted into a doc page is refused, never uploaded |
 | `pk-rk` | `pk-rk` | A publishable or restricted key — digit-bearing only, see below |
 | `jwt` | `jwt` | A JWT |
 | `keypair-array` | — (excluded) | A pasted private keypair array; byte arrays are ordinary code in docs |

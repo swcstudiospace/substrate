@@ -247,6 +247,9 @@ const FIXTURES: Record<RedactionRuleName, readonly RuleFixture[]> = {
 	gitlab: [{ text: "glpat-" + rnd(ALNUM, 20), secret: "glpat-" + rnd(ALNUM, 20) }],
 	digitalocean: [{ text: "dop_v1_" + rnd(HEX, 64), secret: "dop_v1_" + rnd(HEX, 64) }],
 	"openai-proj": [{ text: "sk-proj-" + rnd(ALNUM, 40), secret: "sk-proj-" + rnd(ALNUM, 40) }],
+	// The key prefix is a literal like the other provider prefixes above; the
+	// tail is deterministic runtime output, never a real credential.
+	ragflow: [{ text: "ragflow-" + rnd(ALNUM, 40), secret: "ragflow-" + rnd(ALNUM, 40) }],
 	// Two fixtures: one pk- body and one rk- body, each digit-bearing per D18-21.
 	"pk-rk": [
 		{ text: "pk-" + pkBody, secret: "pk-" + pkBody },
@@ -276,7 +279,7 @@ describe("one fixture per named rule", () => {
 	test("every rule carries a unique stable name", () => {
 		const names = REDACTION_RULES.map((entry) => entry.name);
 		expect(new Set(names).size).toBe(names.length);
-		expect(names.length).toBe(30);
+		expect(names.length).toBe(31);
 	});
 
 	test("every rule name has at least one fixture", () => {
@@ -445,6 +448,7 @@ describe("redactSkillContent rejects high-confidence secrets", () => {
 			gitlab: "glpat-" + rnd(ALNUM, 20),
 			digitalocean: "dop_v1_" + rnd(HEX, 64),
 			"openai-proj": "sk-proj-" + rnd(ALNUM, 40),
+			ragflow: "ragflow-" + rnd(ALNUM, 40),
 		};
 		for (const rule of SKILL_HIGH_CONFIDENCE_RULES) {
 			const sample = samples[rule];
