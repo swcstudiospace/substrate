@@ -154,7 +154,6 @@ import {
 	type SkillProposer,
 	type TreeMode,
 } from "./skills/propose.ts";
-import { TEACHABLE_SUBJECT_PREFIX, isTeachable, teachableEvent } from "./teachable.ts";
 import {
 	fetchPrView,
 	LIST_MAX,
@@ -1859,31 +1858,6 @@ export class Substrate {
 	}
 
 	/**
-	 * True only when the ledger was read and it holds no teachable note for
-	 * this memory. A missing client, a throw, or no session to narrow by
-	 * answers false: the caller then does not emit on a replay.
-	 */
-	private async teachableNoteMissing(memoryId: string, sessionId: string | undefined): Promise<boolean> {
-		if (!sessionId || !this.greptime) return false;
-		try {
-			const rows = await this.greptime.queryEvents({
-				match: { session_id: sessionId },
-				includePayload: true,
-				limit: 500,
-				order: "desc",
-			});
-			return !rows.some((row) => {
-				const payload = row["payload"];
-				if (typeof payload !== "object" || payload === null) return false;
-				const record = payload as Record<string, unknown>;
-				return record["action"] === "teachable" && record["memory_id"] === memoryId;
-			});
-		} catch {
-			return false;
-		}
-	}
-
-	/**
 	 * Write a memory entry through the governance gate.
 	 *
 	 * **This is the fail-closed path.** `emit` hands a caller its event back even
@@ -2520,38 +2494,6 @@ export class Substrate {
 			if (outcome.queued === true) return { transient: outcome.reason ?? "retain-network" };
 			return "permanent";
 		});
-	}
-
-	/**
-	 * A surface's live teachables, newest first, for its Agent Card.
-	 *
-	 * Pure read path: a `subjectPrefix` search over the index — the convention
-	 * needs no new index — filtered to governed `fact`s this surface wrote and
-	 * excluding superseded rows, the same "not briefed" rule briefs use.
-	 * Unknown surface reads as empty; the route, not the reader, owns the 400.
-	 * No emit, no gate, no cache-bump.
-	 */
-	async teachablesForSurface(surface: string): Promise<MemoryEntry[]> {
-		if (!this.index) return [];
-		if (!(SURFACES as readonly string[]).includes(surface)) return [];
-		const found: MemoryEntry[] = [];
-		let cursor: { before: string; before_id: string } | null = null;
-		for (;;) {
-			const page: MemorySearchPage = await this.index.searchMemoryPage({
-				subjectPrefix: TEACHABLE_SUBJECT_PREFIX,
-				writer: surface,
-				kind: "fact",
-				includeSuperseded: false,
-				limit: 100,
-				...(cursor ? { before: cursor.before, beforeId: cursor.before_id } : {}),
-			});
-			for (const entry of page.entries) {
-				if (entry.writer === surface && isTeachable(entry.kind, entry.subject)) found.push(entry);
-			}
-			if (!page.next) break;
-			cursor = page.next;
-		}
-		return found;
 	}
 
 	/**
