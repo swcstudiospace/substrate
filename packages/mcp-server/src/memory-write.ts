@@ -156,6 +156,9 @@ export interface MemoryStore {
 		entryHash: string;
 		requestHash: string;
 		entryId: string;
+		/** The other hash version of this same request, so a retry still takes over its own claim. */
+		alsoEntryHash?: string | null;
+		alsoRequestHash?: string | null;
 	}): Promise<ClaimResult>;
 	/** Records an outcome only while `holder` still owns the claim. */
 	finishWrite(key: string, holder: string, outcome: MemoryWriteOutcome, entryId: string | null): Promise<void>;
@@ -227,6 +230,11 @@ export interface MemoryStore {
 	 * and lets the store's own conflict clause answer a same-hash retry.
 	 */
 	findPendingReviewByHash?(entryHash: string): Promise<string | null>;
+	/**
+	 * The claim row for a key, without taking it. Used so a derived key minted
+	 * under the other hash version is found before a second key is created.
+	 */
+	findWrite?(key: string): Promise<WriteRecord | null>;
 }
 
 export interface GovernanceDeps {
@@ -336,6 +344,64 @@ function digestMatches(stored: string, current: string, prior: string | null): b
 	return stored === current || (prior !== null && stored === prior);
 }
 
+/** The key this write would mint, and whether the caller supplied it. */
+function candidateKey(
+	raw: unknown,
+	entryHash: string,
+	sourceEvent: string | null,
+	reviewed: boolean,
+): { key: string; explicit: boolean } {
+	const explicitKey = normalizeKey(raw);
+	return { key: explicitKey ?? derivedKey(entryHash, sourceEvent, reviewed), explicit: explicitKey !== null };
+}
+
+/**
+ * A derived key minted under the other hash version is the same write. An
+ * explicit key never changes. A missing `findWrite` keeps today's single key.
+ */
+async function idempotencyKey(
+	store: MemoryStore,
+	currentKey: string,
+	explicit: boolean,
+	entryHash: string,
+	asked: string,
+	priorEntry: string,
+	priorAsked: string,
+	sourceEvent: string | null,
+	reviewed: boolean,
+): Promise<string> {
+	if (explicit || store.findWrite === undefined) return currentKey;
+	const other = derivedKey(priorEntry, sourceEvent, reviewed);
+	if (other === currentKey) return currentKey;
+	const existing = await store.findWrite(other);
+	if (existing === null) return currentKey;
+	const sameContent = digestMatches(existing.entry_hash, entryHash, priorEntry);
+	const sameAsk = existing.request_hash === null || digestMatches(existing.request_hash, asked, priorAsked);
+	return sameContent && sameAsk ? other : currentKey;
+}
+
+async function parkedContent(
+	find: ((entryHash: string) => Promise<string | null>) | undefined,
+	current: string,
+	prior: string,
+): Promise<string | undefined> {
+	if (find === undefined) return undefined;
+	const found = (await find(current)) ?? (current === prior ? null : await find(prior));
+	return found ?? undefined;
+}
+
+/** Resolve a proposal stored under either hash version. Failures stay a stale queue row, not a lost write. */
+async function releaseCompatibleReviews(
+	store: MemoryStore,
+	entryHash: string,
+	priorEntry: string,
+	entryId: string,
+	writer: string,
+): Promise<void> {
+	await store.releaseReviews(entryHash, entryId, writer).catch(() => undefined);
+	if (priorEntry !== entryHash) await store.releaseReviews(priorEntry, entryId, writer).catch(() => undefined);
+}
+
 export async function governMemoryWrite(
 	request: MemoryWriteRequest,
 	deps: GovernanceDeps,
@@ -430,38 +496,33 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 		graphId,
 		repo,
 	});
-	// v2 stores the wider digest and still matches a row whose digest is the v1
-	// preimage. v1 never builds that wider object.
-	const contentV2 =
-		hashVersion === "v2"
-			? contentHash({
-					scope: scope.canonical,
-					kind,
-					subject,
-					text,
-					writer,
-					hv: HASH_VERSION_MARKER,
-					tenant: HASH_TENANT,
-				})
-			: null;
-	const askedV2 =
-		contentV2 === null
-			? null
-			: requestHash({
-					entryHash: contentV2,
-					ttl,
-					trust: request.trust,
-					actor: request.actor,
-					sourceEvent,
-					graphId,
-					repo,
-					hv: HASH_VERSION_MARKER,
-					tenant: HASH_TENANT,
-				});
-	const entryHash = contentV2 ?? contentV1;
-	const asked = askedV2 ?? askedV1;
-	const priorEntry = contentV2 === null ? null : contentV1;
-	const priorAsked = askedV2 === null ? null : askedV1;
+	// Both preimages are computed on every write. The flag chooses only which
+	// digest a new row stores. Comparisons accept either, so a flip to v2 and a
+	// rollback to v1 both still find the row, the claim, and the derived key.
+	const contentV2 = contentHash({
+		scope: scope.canonical,
+		kind,
+		subject,
+		text,
+		writer,
+		hv: HASH_VERSION_MARKER,
+		tenant: HASH_TENANT,
+	});
+	const askedV2 = requestHash({
+		entryHash: contentV2,
+		ttl,
+		trust: request.trust,
+		actor: request.actor,
+		sourceEvent,
+		graphId,
+		repo,
+		hv: HASH_VERSION_MARKER,
+		tenant: HASH_TENANT,
+	});
+	const entryHash = hashVersion === "v2" ? contentV2 : contentV1;
+	const asked = hashVersion === "v2" ? askedV2 : askedV1;
+	const priorEntry = hashVersion === "v2" ? contentV1 : contentV2;
+	const priorAsked = hashVersion === "v2" ? askedV1 : askedV2;
 
 	/**
 	 * The fields every row the gate can write shares; only the target table, the id
@@ -492,8 +553,9 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 	// ── 3. quarantine ──────────────────────────────────────────────────────────
 	const classification = classify(raw, kind);
 	if (classification && !(classification.reviewable && reviewed)) {
-		const key = normalizeKey(request.idempotency_key) ?? derivedKey(entryHash, sourceEvent, reviewed);
-		const parkedAlready = priorEntry !== null ? await store.findQuarantineByHash?.(priorEntry) : undefined;
+		const minted = candidateKey(request.idempotency_key, entryHash, sourceEvent, reviewed);
+		const key = await idempotencyKey(store, minted.key, minted.explicit, entryHash, asked, priorEntry, priorAsked, sourceEvent, reviewed);
+		const parkedAlready = await parkedContent(store.findQuarantineByHash?.bind(store), entryHash, priorEntry);
 		if (parkedAlready) {
 			return {
 				outcome: "quarantined",
@@ -526,8 +588,9 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 	}
 
 	// ── 4. exactly-once ────────────────────────────────────────────────────────
-	const explicitKey = normalizeKey(request.idempotency_key);
-	const key = explicitKey ?? derivedKey(entryHash, sourceEvent, reviewed);
+	const minted = candidateKey(request.idempotency_key, entryHash, sourceEvent, reviewed);
+	const explicitKey = minted.explicit ? minted.key : null;
+	const key = await idempotencyKey(store, minted.key, minted.explicit, entryHash, asked, priorEntry, priorAsked, sourceEvent, reviewed);
 	// Minted before the claim, so the claim can reserve it. An attempt that inserts its
 	// row and then dies is otherwise indistinguishable from one that never got that far,
 	// and its successor has to guess — which means either duplicating the row or losing
@@ -537,7 +600,15 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 	// reservation rather than replacing it with this one, so the pointer to a row that
 	// may already exist is never overwritten before it has been resolved. See `rowId`.
 	const entryId = newId("mem");
-	const claim = await store.claimWrite({ key, explicit: explicitKey !== null, entryHash, requestHash: asked, entryId });
+	const claim = await store.claimWrite({
+		key,
+		explicit: explicitKey !== null,
+		entryHash,
+		requestHash: asked,
+		entryId,
+		alsoEntryHash: priorEntry,
+		alsoRequestHash: priorAsked,
+	});
 	if (!claim.claimed) {
 		const replayed = await replay(store, key, claim.existing, grant.name, entryHash, asked, priorEntry, priorAsked);
 		// Reconcile the proposal this key's write installed but may not have resolved.
@@ -551,7 +622,7 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 		// "global"` is exactly `conflictPlan`'s `requiresReview`, which has not been
 		// computed yet here.
 		if (replayed.outcome === "accepted" && replayed.entry && scope.class === "global") {
-			await store.releaseReviews(entryHash, replayed.entry.id, writer).catch(() => undefined);
+			await releaseCompatibleReviews(store, entryHash, priorEntry, replayed.entry.id, writer);
 		}
 		return replayed;
 	}
@@ -591,7 +662,7 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 		// the acknowledgement died, not the review. Leaving it in the queue would have a
 		// reviewer weighing a decision that is already in force.
 		if (reviewed && scope.class === "global") {
-			await store.releaseReviews(entryHash, orphan.id, writer).catch(() => undefined);
+			await releaseCompatibleReviews(store, entryHash, priorEntry, orphan.id, writer);
 		}
 		await store.finishWrite(key, holder, "accepted", orphan.id).catch(() => undefined);
 		return {
@@ -661,7 +732,7 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 			// write never made. None of that is what the repeat-approval bug was about —
 			// the bug was the *approval* colliding with an earlier approved row, and that
 			// is fixed where it happened, in the uniqueness on `memory_reviews`.
-			const reviewAlready = priorEntry !== null ? await store.findPendingReviewByHash?.(priorEntry) : undefined;
+			const reviewAlready = await parkedContent(store.findPendingReviewByHash?.bind(store), entryHash, priorEntry);
 			if (reviewAlready) {
 				await store.finishWrite(key, holder, "conflict", null);
 				return {
@@ -839,7 +910,7 @@ async function decide(request: MemoryWriteRequest, deps: GovernanceDeps): Promis
 		// guards the same call for the same reason.
 		if (verified && plan.requiresReview) {
 			// A failure here leaves a stale proposal, which the retry path above clears.
-			await store.releaseReviews(entryHash, inserted.id, writer).catch(() => undefined);
+			await releaseCompatibleReviews(store, entryHash, priorEntry, inserted.id, writer);
 		}
 
 		return {

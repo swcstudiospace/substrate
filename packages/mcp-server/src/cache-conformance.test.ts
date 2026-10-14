@@ -62,6 +62,7 @@ async function exercise(url: string, suffix: string): Promise<LiveShape> {
 	expect(got).toBe(value);
 	const many = await redis.mget?.([key, missing]);
 	expect(many).toEqual([value, null]);
+	await redis.set(counter, "0", 30);
 	const stepped = await redis.incr(counter);
 	expect(stepped).toBe(1);
 	const echoed = await redis.eval?.("return ARGV[1]", [key], ["conformance-eval"]);

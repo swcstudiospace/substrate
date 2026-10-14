@@ -631,14 +631,6 @@ export class IndexStore implements MemoryStore {
 			// unique index on `(entry_hash, state)` rejects a second approval). `IF EXISTS`
 			// makes every later boot a no-op once it is gone.
 			await reserved.unsafe(`drop index if exists memory_reviews_hash_idx`);
-			// Opt-in, once: a failed tune must not stop the service booting on a schema that is already complete.
-			if (this.tune === "apply") {
-				try {
-					await this.tuneGraphNodes();
-				} catch (cause) {
-					process.stderr.write(`[substrate] index tune not applied: ${redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200)}\n`);
-				}
-			}
 		} catch (cause) {
 			migrateFailed = true;
 			throw cause;
@@ -657,6 +649,19 @@ export class IndexStore implements MemoryStore {
 					// Already dead. The session lock dies with the connection.
 				}
 				if (!migrateFailed) throw cause;
+			}
+		}
+		// After the reserved connection is back in the pool. `tuneGraphNodes` uses
+		// `this.sql`, so running it while `reserve()` holds the only connection
+		// (`SUBSTRATE_PG_POOL_MAX=1`) waits on itself and boot never finishes.
+		if (!migrateFailed) {
+			// Opt-in, once: a failed tune must not stop the service booting on a schema that is already complete.
+			if (this.tune === "apply") {
+				try {
+					await this.tuneGraphNodes();
+				} catch (cause) {
+					process.stderr.write(`[substrate] index tune not applied: ${redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200)}\n`);
+				}
 			}
 		}
 	}
@@ -1375,6 +1380,8 @@ export class IndexStore implements MemoryStore {
 		entryHash: string;
 		requestHash: string;
 		entryId: string;
+		alsoEntryHash?: string | null;
+		alsoRequestHash?: string | null;
 	}): Promise<ClaimResult> {
 		const holder = `hold_${randomUUID().replace(/-/g, "")}`;
 		const inFlightSeconds = IN_FLIGHT_TIMEOUT_MS / 1000;
@@ -1437,7 +1444,9 @@ export class IndexStore implements MemoryStore {
 			// finished record. Whether the attempt that spent it acknowledged itself or died
 			// still holding the key does not change what the key promised.
 			const heldFor = optional(row.request_hash);
-			const sameAsk = heldFor !== undefined && heldFor === input.requestHash;
+			const alsoRequest = input.alsoRequestHash ?? null;
+			const sameAsk =
+				heldFor !== undefined && (heldFor === input.requestHash || (alsoRequest !== null && heldFor === alsoRequest));
 
 			// A record written before `request_hash` existed records no identity, and no
 			// identity is *unknown*, not "matches whoever asks". Reading it as a wildcard was
@@ -1451,7 +1460,11 @@ export class IndexStore implements MemoryStore {
 			// So an unidentified claim is handed over only where the hand-over can strand
 			// nothing: its reservation names no row yet, or names one already holding this
 			// write's content — which is the write that made it, retrying.
-			const reservationIsOurs = reservedHash === undefined || reservedHash === input.entryHash;
+			const alsoEntry = input.alsoEntryHash ?? null;
+			const reservationIsOurs =
+				reservedHash === undefined ||
+				reservedHash === input.entryHash ||
+				(alsoEntry !== null && reservedHash === alsoEntry);
 			const legacyRecoverable = heldFor === undefined && reservationIsOurs;
 			const takeable =
 				(outcome !== "accepted" && !inFlight) ||
@@ -1669,6 +1682,23 @@ export class IndexStore implements MemoryStore {
 		const existing = (await this.sql`
 			select id from memory_quarantine where entry_hash = ${row.entry_hash}`) as Array<Record<string, unknown>>;
 		return existing[0] ? String(existing[0].id) : row.id;
+	}
+
+	/** The claim row for a key, or null. Does not take the lock and does not insert. */
+	async findWrite(key: string): Promise<WriteRecord | null> {
+		const rows = (await this.sql`
+			select idempotency_key, explicit, outcome, entry_id, entry_hash, request_hash
+			from memory_writes where idempotency_key = ${key}`) as Array<Record<string, unknown>>;
+		const row = rows[0];
+		if (row === undefined) return null;
+		return {
+			idempotency_key: String(row.idempotency_key),
+			explicit: row.explicit === true,
+			outcome: String(row.outcome) as WriteRecord["outcome"],
+			entry_id: row.entry_id === null || row.entry_id === undefined ? null : String(row.entry_id),
+			entry_hash: String(row.entry_hash),
+			request_hash: row.request_hash === null || row.request_hash === undefined ? null : String(row.request_hash),
+		};
 	}
 
 	/** One column: the quarantine row whose `entry_hash` is this digest, if any. */

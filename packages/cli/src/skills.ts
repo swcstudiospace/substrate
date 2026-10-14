@@ -144,6 +144,10 @@ export async function runSkills(argv: string[], deps: SkillsDeps): Promise<numbe
 		}
 		return propose(parseArgs(argv.slice(1)), deps);
 	}
+	if ((command === "list" || command === "approve") && (argv.includes("--help") || argv.includes("-h"))) {
+		deps.out(USAGE);
+		return 0;
+	}
 	if (command === "list") return listCommand(parseArgs(argv.slice(1)), deps);
 	if (command === "approve") return approveCommand(parseArgs(argv.slice(1)), deps);
 	deps.err(USAGE);
