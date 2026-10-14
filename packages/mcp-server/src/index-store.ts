@@ -1651,10 +1651,12 @@ export class IndexStore implements MemoryStore {
 	}
 
 	/**
-	 * Apply one operator decision to the registry, atomically. The row is locked, the pure
-	 * `transition` judges it, and only an `apply` writes: `exists` leaves the row (and so the caller
-	 * emits nothing), a refusal leaves it too. A row that does not exist yet is created in the
-	 * decided state, which is how a pull request proposed while the registry was off is approved.
+	 * Apply one operator decision to the registry, atomically. Decisions are serialised per (repo, name) by a
+	 * transaction-scoped advisory lock taken first, so `remaining_approved` is the true post-decision total of
+	 * the name. Then the row is locked, the pure `transition` judges it, and only an `apply` writes: `exists`
+	 * leaves the row (and so the caller emits nothing), a refusal leaves it too. A row that does not exist yet
+	 * is created in the decided state, which is how a pull request proposed while the registry was off is
+	 * approved.
 	 */
 	async decideSkill(input: {
 		repo: string;
@@ -1679,6 +1681,13 @@ export class IndexStore implements MemoryStore {
 						where repo = ${input.repo} and name = ${input.name} and state = 'approved'`) as Array<Record<string, unknown>>;
 					return Number(counted[0]?.n ?? 0);
 				};
+				// Serialise decisions per (repo, name) BEFORE locking the row or counting: the row lock below is one
+				// pull request's, but `remaining` counts every approved row of the name, so two concurrent decisions on
+				// different pull requests of one name could each see the other's row still approved and both answer a
+				// count that is not the final total. The transaction-scoped advisory lock (released at commit or
+				// rollback) makes the count the true post-decision total. The key is a stable 64-bit hash of repo+name
+				// (a collision only makes two unrelated names wait for each other).
+				await tx`select pg_advisory_xact_lock(hashtextextended(${skillDecisionLockKey(input.repo, input.name)}::text, 0))`;
 				for (let attempt = 0; attempt < 2; attempt++) {
 					const found = (await tx`
 						select * from skills_registry
@@ -2238,6 +2247,15 @@ function toQueueRow(row: Record<string, unknown>): GovernanceQueueRow {
 		...(optional(row.ttl) ? { ttl: optional(row.ttl) } : {}),
 		...(optional(row.detail) ? { detail: optional(row.detail) } : {}),
 	};
+}
+
+/**
+ * The text `decideSkill` hashes into its per-(repo, name) advisory lock key:
+ * `pg_advisory_xact_lock(hashtextextended(<this>::text, 0))`. Exported so the live test holds the very same
+ * key and proves the lock is what serialises decisions.
+ */
+export function skillDecisionLockKey(repo: string, name: string): string {
+	return `${repo}\n${name}`;
 }
 
 function toSkillRow(row: Record<string, unknown>): SkillRegistryRow {

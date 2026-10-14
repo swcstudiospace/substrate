@@ -35,6 +35,8 @@ export interface SpoolStatusReport {
 	due: number;
 	/** Lines the reader could not use (a torn tail included). */
 	malformed: number;
+	/** Why the spool file could not be read (an errno code), or null. An unreadable file is never reported as empty. */
+	unreadable: string | null;
 	caps: { max: number; max_bytes: number; ttl_h: number; max_attempts: number };
 	/** Entries dropped by cause, counted within the retained journal files (`refused-emits.jsonl` and its one rotated `.1`): the counts fall when a rotation discards the older file. */
 	dropped: Record<string, number>;
@@ -82,6 +84,7 @@ export function spoolStatus(deps: SpoolDeps): SpoolStatusReport {
 		oldest_age_s: stats.oldestAt === null ? null : Math.max(0, Math.round((now() - stats.oldestAt) / 1000)),
 		due: stats.due,
 		malformed: stats.malformed,
+		unreadable: stats.unreadable,
 		caps: { max: config.max, max_bytes: config.maxBytes, ttl_h: config.ttlMs / 3_600_000, max_attempts: config.maxAttempts },
 		dropped: countSpoolDrops(),
 	};
@@ -90,11 +93,21 @@ export function spoolStatus(deps: SpoolDeps): SpoolStatusReport {
 function describeFlush(result: DrainResult): string {
 	if (result.status === "off") return "event spool is off (SUBSTRATE_EVENT_SPOOL); nothing to flush";
 	if (result.status === "held") {
-		return `replay held: ${result.reason}; the spool is kept and retried later${result.dropped > 0 ? ` (dropped ${result.dropped} expired or exhausted)` : ""}`;
+		const clauses = [
+			result.dropped > 0 ? `dropped ${result.dropped} expired or exhausted` : "",
+			result.failure === "read" ? "spool file could not be read, nothing was changed" : "",
+			result.failure === "write" ? "write failed, settled entries are still in the file" : "",
+		].filter((clause) => clause !== "");
+		return `replay held: ${result.reason}; the spool is kept${result.remaining === null ? "" : ` (remaining=${result.remaining})`} and retried later${clauses.length > 0 ? ` (${clauses.join("; ")})` : ""}`;
 	}
 	const base = `delivered=${result.delivered} refused=${result.refused} retried=${result.retried} dropped=${result.dropped} remaining=${result.remaining}${result.skipped > 0 ? ` skipped=${result.skipped}` : ""}`;
-	if (result.held !== null) return `${base}; replay stopped early (${result.held}), the rest is kept`;
-	return result.budgetExhausted ? `${base}; time budget spent, the rest is kept` : base;
+	const failures = [
+		result.readFailed ? "spool file could not be read, nothing was changed" : "",
+		result.writeFailed ? "write failed, settled entries are still in the file and were not counted as removed" : "",
+	].filter((clause) => clause !== "");
+	const tail = failures.length > 0 ? `; ${failures.join("; ")}` : "";
+	if (result.held !== null) return `${base}; replay stopped early (${result.held}), the rest is kept${tail}`;
+	return result.budgetExhausted ? `${base}; time budget spent, the rest is kept${tail}` : `${base}${tail}`;
 }
 
 export async function runSpool(argv: readonly string[], deps: SpoolDeps): Promise<number> {
@@ -121,6 +134,7 @@ export async function runSpool(argv: readonly string[], deps: SpoolDeps): Promis
 			`event spool: ${report.mode}\n` +
 				`path: ${report.path}\n` +
 				`depth: ${report.depth} (due ${report.due}, malformed ${report.malformed})\n` +
+				(report.unreadable === null ? "" : `unreadable: ${report.unreadable} (the file exists but could not be read; it was not changed)\n`) +
 				`bytes: ${report.bytes}\n` +
 				`oldest age: ${report.oldest_age_s === null ? "-" : `${report.oldest_age_s}s`}\n` +
 				`caps: max=${report.caps.max} max_bytes=${report.caps.max_bytes} ttl_h=${report.caps.ttl_h} max_attempts=${report.caps.max_attempts}\n` +

@@ -32,6 +32,8 @@ let WARNED: string;
 let CLAUDE: Root;
 
 const TARGET = { url: "http://substrate.invalid", token: "tok-surface" };
+const ORIGIN = "http://substrate.invalid";
+const SRC = { url: ORIGIN, library: "owner/skills" };
 
 function skill(dir: string, name: string): void {
 	mkdirSync(join(dir, name), { recursive: true });
@@ -366,7 +368,7 @@ describe("approved cache", () => {
 		skill(LIB, "a");
 		await project(opts(gov("enforce", fakeFetch(() => approvedBody(["b", "a"]))), [], []));
 		expect((lstatSync(CACHE).mode & 0o777).toString(8)).toBe("600");
-		expect([...(readApprovedCache(CACHE)?.names ?? [])].sort()).toEqual(["a", "b"]);
+		expect([...(readApprovedCache(CACHE, ORIGIN)?.names ?? [])].sort()).toEqual(["a", "b"]);
 		expect(readdirSync(join(T, "state")).filter((f) => f.endsWith(".substrate-tmp"))).toEqual([]);
 	});
 
@@ -374,7 +376,7 @@ describe("approved cache", () => {
 		skill(LIB, "a");
 		skill(LIB, "b");
 		mkdirSync(join(T, "state"), { recursive: true });
-		writeApprovedCache(CACHE, new Set(["a"]), 0);
+		writeApprovedCache(CACHE, new Set(["a"]), 0, false, SRC);
 		const warnings: WarningEvent[] = [];
 		const out: string[] = [];
 		await project(opts(gov("enforce", unreachable()), warnings, out));
@@ -398,26 +400,39 @@ describe("approved cache", () => {
 		expect(warnings[0]?.payload).toMatchObject({ action: "skills.sync", reason: "approved-list-unavailable", mode: "enforce", count: 2, names: [] });
 	});
 
-	test("a corrupt, oversized, wrong-version or badly named cache is ignored, never partly trusted", () => {
+	test("a corrupt, oversized, wrong-version, source-less or badly named cache is ignored, never partly trusted", () => {
 		mkdirSync(join(T, "state"), { recursive: true });
+		const ok = { version: 2, source: SRC, names: ["a"] };
 		const bad: Record<string, string> = {
 			garbage: "{not json",
 			array: "[]",
-			version: JSON.stringify({ version: 2, names: ["a"] }),
-			names: JSON.stringify({ version: 1, names: "a" }),
-			path: JSON.stringify({ version: 1, names: ["a", "../b"] }),
-			number: JSON.stringify({ version: 1, names: ["a", 7] }),
-			big: JSON.stringify({ version: 1, names: ["a"], pad: "x".repeat(MAX_CACHE_BYTES) }),
-			many: JSON.stringify({ version: 1, names: Array.from({ length: MAX_APPROVED + 1 }, (_, i) => `n${i}`) }),
+			version: JSON.stringify({ ...ok, version: 3 }),
+			oldFormat: JSON.stringify({ version: 1, names: ["a"] }),
+			noSource: JSON.stringify({ version: 2, names: ["a"] }),
+			sourceNull: JSON.stringify({ ...ok, source: null }),
+			sourceUrlType: JSON.stringify({ ...ok, source: { url: 7, library: null } }),
+			sourceUrlEmpty: JSON.stringify({ ...ok, source: { url: "", library: null } }),
+			sourceUrlLong: JSON.stringify({ ...ok, source: { url: `http://${"h".repeat(300)}`, library: null } }),
+			sourceLibraryType: JSON.stringify({ ...ok, source: { url: ORIGIN, library: 5 } }),
+			sourceLibraryLong: JSON.stringify({ ...ok, source: { url: ORIGIN, library: "x".repeat(300) } }),
+			otherOrigin: JSON.stringify({ ...ok, source: { url: "http://other.invalid", library: null } }),
+			names: JSON.stringify({ ...ok, names: "a" }),
+			path: JSON.stringify({ ...ok, names: ["a", "../b"] }),
+			number: JSON.stringify({ ...ok, names: ["a", 7] }),
+			big: JSON.stringify({ ...ok, pad: "x".repeat(MAX_CACHE_BYTES) }),
+			many: JSON.stringify({ ...ok, names: Array.from({ length: MAX_APPROVED + 1 }, (_, i) => `n${i}`) }),
 		};
 		for (const [label, body] of Object.entries(bad)) {
 			writeFileSync(CACHE, body);
-			expect([label, readApprovedCache(CACHE)]).toEqual([label, null]);
+			expect([label, readApprovedCache(CACHE, ORIGIN)]).toEqual([label, null]);
 		}
-		writeFileSync(CACHE, JSON.stringify({ version: 1, names: ["a"] }));
-		expect([...(readApprovedCache(CACHE)?.names ?? [])]).toEqual(["a"]);
+		writeFileSync(CACHE, JSON.stringify(ok));
+		expect([...(readApprovedCache(CACHE, ORIGIN)?.names ?? [])]).toEqual(["a"]);
+		expect(readApprovedCache(CACHE, null)).toBeNull();
+		writeFileSync(CACHE, JSON.stringify({ ...ok, source: { url: ORIGIN, library: null } }));
+		expect(readApprovedCache(CACHE, ORIGIN)?.library).toBeNull();
 		rmSync(CACHE);
-		expect(readApprovedCache(CACHE)).toBeNull();
+		expect(readApprovedCache(CACHE, ORIGIN)).toBeNull();
 	});
 
 	test("a corrupt cache after a failed fetch fails closed for new links", async () => {
@@ -469,7 +484,7 @@ describe("names from the server", () => {
 		const warnings: WarningEvent[] = [];
 		await project(opts(gov("enforce", fakeFetch(() => approvedBody(["../a", "a/../a"]))), warnings, []));
 		expect(linked("a")).toBe(false);
-		expect(existsSync(CACHE) ? readApprovedCache(CACHE)?.names : new Set()).toEqual(new Set());
+		expect(existsSync(CACHE) ? readApprovedCache(CACHE, ORIGIN)?.names : new Set()).toEqual(new Set());
 		expect((warnings[0]?.payload as { names: string[] }).names).toEqual(["a"]);
 	});
 });
@@ -541,14 +556,14 @@ describe("a list the server cut", () => {
 		expect(linked("b")).toBe(false);
 		expect(warnings).toHaveLength(1);
 		expect(warnings[0]?.payload).toMatchObject({ action: "skills.sync", reason: "approved-list-truncated", mode: "enforce", count: 1, names: ["b"], truncated: true });
-		expect(readApprovedCache(CACHE)?.truncated).toBe(true);
+		expect(readApprovedCache(CACHE, ORIGIN)?.truncated).toBe(true);
 	});
 
 	test("the cut survives a fetch failure: the cached set still reports approved-list-truncated", async () => {
 		skill(LIB, "a");
 		skill(LIB, "b");
 		mkdirSync(join(T, "state"), { recursive: true });
-		writeApprovedCache(CACHE, new Set(["a"]), 0, true);
+		writeApprovedCache(CACHE, new Set(["a"]), 0, true, SRC);
 		const warnings: WarningEvent[] = [];
 		await project(opts(gov("report", unreachable()), warnings, []));
 		expect((warnings[0]?.payload as { reason: string }).reason).toBe("approved-list-truncated");
@@ -561,13 +576,13 @@ describe("a list the server cut", () => {
 		await project(opts(gov("report", fakeFetch(() => approvedBody(["a"]))), warnings, []));
 		expect(warnings[0]?.payload.reason).toBe("unapproved");
 		expect(Object.hasOwn(warnings[0]?.payload ?? {}, "truncated")).toBe(false);
-		expect(readApprovedCache(CACHE)?.truncated).toBe(false);
+		expect(readApprovedCache(CACHE, ORIGIN)?.truncated).toBe(false);
 	});
 
 	test("a cache whose truncated field is not a boolean is ignored whole", () => {
 		mkdirSync(join(T, "state"), { recursive: true });
-		writeFileSync(CACHE, JSON.stringify({ version: 1, truncated: "yes", names: ["a"] }));
-		expect(readApprovedCache(CACHE)).toBeNull();
+		writeFileSync(CACHE, JSON.stringify({ version: 2, source: SRC, truncated: "yes", names: ["a"] }));
+		expect(readApprovedCache(CACHE, ORIGIN)).toBeNull();
 	});
 });
 
@@ -651,5 +666,91 @@ describe("events posted with the unit's host-job token", () => {
 		expect(server.stored.map((e) => [e.surface, e.payload.action, e.payload.reason])).toEqual([["substrate", "skills.sync", "unapproved"]]);
 		expect(Object.hasOwn(server.stored[0]?.payload ?? {}, "root_surface")).toBe(false);
 		expect(Object.hasOwn(JSON.parse(readFileSync(WARNED, "utf8")), "unapproved")).toBe(true);
+	});
+});
+
+describe("cache source identity", () => {
+	const body = (names: readonly string[], library?: unknown) => () => approvedBody(names, library === undefined ? {} : { library });
+	const at = (url: string): GovernanceOptions["target"] => ({ url, token: "tok-surface" });
+
+	test("a successful fetch records the origin (no path, query or credentials) and the server's library", async () => {
+		skill(LIB, "a");
+		const target = at("http://user:pw@substrate.invalid:7410/base/path?x=1");
+		await project(opts(gov("enforce", fakeFetch(body(["a"], "owner/skills")), { target }), [], []));
+		const stored = JSON.parse(readFileSync(CACHE, "utf8")) as { source: unknown };
+		expect(stored.source).toEqual({ url: "http://substrate.invalid:7410", library: "owner/skills" });
+		expect(readFileSync(CACHE, "utf8")).not.toContain("pw");
+	});
+
+	test("a failing fetch against a different origin does not use the old cache: no new link, existing link untouched, one warning", async () => {
+		skill(LIB, "a");
+		skill(LIB, "b");
+		symlinkSync(join(LIB, "a"), join(CLAUDE.dir, "a"));
+		await project(opts(gov("enforce", fakeFetch(body(["a", "b"], "owner/skills"))), [], []));
+		expect(linked("b")).toBe(true);
+		rmSync(join(CLAUDE.dir, "b"));
+		const warnings: WarningEvent[] = [];
+		await project(opts(gov("enforce", unreachable(), { target: at("http://new-server.invalid") }), warnings, []));
+		expect(linked("b")).toBe(false);
+		expect(readlinkSync(join(CLAUDE.dir, "a"))).toBe(join(LIB, "a"));
+		expect(warnings).toHaveLength(1);
+		expect((warnings[0]?.payload as { reason: string }).reason).toBe("approved-list-unavailable");
+	});
+
+	test("a failing fetch against the same origin uses the cache, whatever the path or credentials of the URL", async () => {
+		skill(LIB, "a");
+		skill(LIB, "b");
+		await project(opts(gov("enforce", fakeFetch(body(["a"], "owner/skills"))), [], []));
+		await project(opts(gov("enforce", unreachable(), { target: at("http://substrate.invalid/other") }), [], []));
+		expect(linked("a")).toBe(true);
+		expect(linked("b")).toBe(false);
+	});
+
+	test("with no token the cache is still bound to the origin of the configured URL", async () => {
+		skill(LIB, "a");
+		mkdirSync(join(T, "state"), { recursive: true });
+		writeApprovedCache(CACHE, new Set(["a"]), 0, false, SRC);
+		await project(opts(gov("enforce", unreachable(), { target: null, url: "http://other.invalid" }), [], []));
+		expect(linked("a")).toBe(false);
+		await project(opts(gov("enforce", unreachable(), { target: null, url: ORIGIN }), [], []));
+		expect(linked("a")).toBe(true);
+	});
+
+	test("a successful fetch with a different library replaces the cache; the old approvals are not used", async () => {
+		skill(LIB, "a");
+		skill(LIB, "b");
+		mkdirSync(join(T, "state"), { recursive: true });
+		writeApprovedCache(CACHE, new Set(["a", "b"]), 0, false, { url: ORIGIN, library: "owner/old" });
+		await project(opts(gov("enforce", fakeFetch(body(["a"], "owner/new"))), [], []));
+		expect(linked("a")).toBe(true);
+		expect(linked("b")).toBe(false);
+		const cached = readApprovedCache(CACHE, ORIGIN);
+		expect([...(cached?.names ?? [])]).toEqual(["a"]);
+		expect(cached?.library).toBe("owner/new");
+		// After a later failure the replaced set decides, not the old one.
+		await project(opts(gov("enforce", unreachable()), [], []));
+		expect(linked("b")).toBe(false);
+	});
+
+	test("a library the server omits or sends oddly is null, and the run keeps working", async () => {
+		skill(LIB, "a");
+		for (const library of [undefined, 5, "", ["x"], "x".repeat(300)]) {
+			rmSync(join(CLAUDE.dir, "a"), { force: true });
+			await project(opts(gov("enforce", fakeFetch(body(["a"], library))), [], []));
+			expect(linked("a")).toBe(true);
+			expect(readApprovedCache(CACHE, ORIGIN)?.library).toBeNull();
+		}
+	});
+
+	test("a cache that cannot be replaced after a successful fetch does not outlive it", async () => {
+		skill(LIB, "a");
+		mkdirSync(join(T, "state"), { recursive: true });
+		writeApprovedCache(CACHE, new Set(["a"]), 0, false, SRC);
+		// A directory where the temp file goes makes the write fail while the old cache is removable.
+		mkdirSync(`${CACHE}.${process.pid}.substrate-tmp`);
+		const out: string[] = [];
+		await project(opts(gov("enforce", fakeFetch(body(["b"], "owner/skills"))), [], out));
+		expect(out.some((l) => l.includes("governance cache not written"))).toBe(true);
+		expect(existsSync(CACHE)).toBe(false);
 	});
 });

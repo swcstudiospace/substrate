@@ -399,10 +399,29 @@ replay waits for the original attempt still in flight. A keyed event with no ses
 takes its turn on the key instead.
 
 - **Hit:** `202` with the usual body plus `"deduplicated": true` and the **existing**
-  event's `id` and `hash`. Nothing is written: no `agent_events` row, no `event_ingest`
-  record, and the session's chain tip is neither read nor moved. It is counted in
-  `substrate.events.replay{result=deduplicated}` and not as an emit, so the tokens and
-  cost in its payload are not counted twice.
+  event's `id` and `hash`. No second `agent_events` row is written and the session's
+  chain tip is neither read nor moved. A hit also reads the event's `event_ingest`
+  membership (one point read by event id, `GreptimeClient.cursorPosition`, the read the
+  stream already uses to resolve a cursor), because the original attempt may have landed
+  its row and then ended before writing the record, and a client that drops its copy on
+  this answer would otherwise leave the event outside every hourly anchor.
+  - Membership **found**: nothing is written and the answer is the plain hit. A second
+    record is never added to an event that has one: the stream would deliver the event
+    again as a new position once its original record is older than the stream's
+    one-hour retry window, and the coverage histogram would count the later hour while
+    `hourLeaves` (which keeps each event's earliest record) excludes it.
+  - Membership **confirmed missing**: the normal path's write (`recordIngest`, same
+    table, 1 s budget and two attempts) records it. It becomes the event's first record,
+    so the stream, the anchor and coverage each see it once, in the hour of the
+    **server's** time at the replay (the hour anchoring rule above), not the event's `ts`.
+  - The membership read **fails**, or the repair write fails: nothing further is
+    written, the answer is still `202` `stored: true`, and it carries the warning a
+    normal append gives when its ingest write cannot be confirmed (the event is stored;
+    do not re-emit it; hourly coverage may be missing). A journal line names the event
+    id only. Never a 5xx, never a second event.
+
+  A hit is counted in `substrate.events.replay{result=deduplicated}` and not as an emit,
+  so the tokens and cost in its payload are not counted twice.
 - **Miss:** a normal append with `_ik` stored (`result=appended`).
 - **Lookup error** (an unreachable ledger, an open breaker, a malformed row): `503`
   `stored: false`, nothing written, `result=lookup_failed`. A lookup that errors is
@@ -416,10 +435,12 @@ takes its turn on the key instead.
   request whose `ts`, as a string or a number, is more than 24 hours ahead of the
   server's clock). Key rules apply only when the mode is not `off`.
 
-**What it costs.** Each lookup is one ledger read. It is expected to be cheap because
-it carries the key prefix and an exact time, but that has not been measured on the
-production image; an operator should `EXPLAIN` the statement before turning on
-`enforce`. `accept` costs nothing on an ordinary emit.
+**What it costs.** Each lookup is one ledger read, and a hit adds a second one (the
+membership read: a single event-id read of `event_ingest`; a repair write follows only
+when that membership is missing). Both are expected to be cheap because the lookup
+carries the key prefix and an exact time and the membership read is keyed by the event
+id, but neither has been measured on the production image; an operator should `EXPLAIN`
+the lookup before turning on `enforce`. `accept` costs nothing on an ordinary emit.
 
 **Capability.** `GET /healthz` carries `"idempotency": "off" | "accept" | "enforce"`.
 A client MUST NOT replay against a server that reports `off` or lacks the field: it
@@ -427,8 +448,8 @@ keeps its copy and retries later.
 
 **Honest limits.** Dedupe applies only to replay-marked requests (or any keyed request
 in `enforce`) within the same `surface`, `repo`, `graph_id`, `kind` and `ts` cell. `_ik`
-is a reserved payload key. Each replay costs one ledger read. With the server at `off`,
-replays can duplicate, which is why the client checks `/healthz` first.
+is a reserved payload key. A miss costs one ledger read and a hit two. With the server
+at `off`, replays can duplicate, which is why the client checks `/healthz` first.
 
 **Enable order.** Set `SUBSTRATE_EVENT_IDEMPOTENCY=accept` on the server and confirm
 `/healthz` reports it; only then enable a client spool. `enforce` is for after replays

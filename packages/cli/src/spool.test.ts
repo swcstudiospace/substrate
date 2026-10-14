@@ -4,7 +4,7 @@
  * whole round trip through the real CLI process against a loopback stub.
  */
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventSpool } from "../../collectors/src/spool.ts";
@@ -116,9 +116,9 @@ describe("flush", () => {
 	test("replays everything regardless of backoff, under the budget it was given, and exits 0 whatever happened", async () => {
 		const calls: Array<{ all: boolean; budgetMs: number }> = [];
 		const results: DrainResult[] = [
-			{ status: "ran", delivered: 2, refused: 1, retried: 0, skipped: 0, dropped: 0, held: null, budgetExhausted: false, remaining: 0 },
-			{ status: "held", reason: "idempotency-off", dropped: 0 },
-			{ status: "ran", delivered: 0, refused: 0, retried: 0, skipped: 0, dropped: 0, held: "unreachable", budgetExhausted: false, remaining: 4 },
+			{ status: "ran", delivered: 2, refused: 1, retried: 0, skipped: 0, dropped: 0, held: null, budgetExhausted: false, remaining: 0, readFailed: false, writeFailed: false },
+			{ status: "held", reason: "idempotency-off", dropped: 0, remaining: 4 },
+			{ status: "ran", delivered: 0, refused: 0, retried: 0, skipped: 0, dropped: 0, held: "unreachable", budgetExhausted: false, remaining: 4, readFailed: false, writeFailed: false },
 		];
 		const lines: string[] = [];
 		for (const result of results) {
@@ -140,8 +140,49 @@ describe("flush", () => {
 			{ all: true, budgetMs: 5000 },
 		]);
 		expect(lines[0]).toBe("delivered=2 refused=1 retried=0 dropped=0 remaining=0");
-		expect(lines[1]).toBe("replay held: idempotency-off; the spool is kept and retried later");
+		expect(lines[1]).toBe("replay held: idempotency-off; the spool is kept (remaining=4) and retried later");
 		expect(lines[2]).toContain("replay stopped early (unreachable), the rest is kept");
+	});
+
+	test("a flush that could not read or write the spool says so, and never reports a write that failed as a removal", async () => {
+		const results: DrainResult[] = [
+			{ status: "ran", delivered: 0, refused: 0, retried: 0, skipped: 0, dropped: 0, held: null, budgetExhausted: false, remaining: 3, readFailed: false, writeFailed: true },
+			{ status: "held", reason: "spool-unreadable", dropped: 0, remaining: 4, failure: "read" },
+			{ status: "held", reason: "healthz-auth", dropped: 0, remaining: 4, failure: "write" },
+		];
+		const lines: string[] = [];
+		for (const result of results) {
+			const io = capture();
+			expect(await runSpool(["flush"], { ...io.deps, drain: async () => result })).toBe(0);
+			lines.push(io.out.join(""));
+		}
+
+		expect(lines[0]).toContain("write failed, settled entries are still in the file and were not counted as removed");
+		expect(lines[1]).toContain("spool file could not be read, nothing was changed");
+		expect(lines[2]).toContain("write failed, settled entries are still in the file");
+	});
+
+	test("a held result with an unknown depth prints no remaining clause, and the JSON keeps null", async () => {
+		const held: DrainResult = { status: "held", reason: "spool-unreadable", dropped: 0, remaining: null, failure: "read" };
+		const text = capture();
+		const json = capture();
+
+		await runSpool(["flush"], { ...text.deps, drain: async () => held });
+		await runSpool(["flush", "--json"], { ...json.deps, drain: async () => held });
+
+		expect(text.out.join("")).not.toContain("remaining");
+		expect(text.out.join("")).toContain("spool file could not be read, nothing was changed");
+		expect(JSON.parse(json.out.join("")).remaining).toBeNull();
+	});
+
+	test("status reports an unreadable spool instead of an empty one", async () => {
+		mkdirSync(join(stateDir, "event-spool.jsonl"));
+		const io = capture();
+
+		await runSpool(["status"], io.deps);
+
+		expect(io.out.join("")).toContain("unreadable: EISDIR");
+		expect(io.out.join("")).toContain("depth: 0");
 	});
 
 	test("the default budget is 30 s and an absurd one is clamped", async () => {

@@ -1721,21 +1721,49 @@ export class Substrate {
 
 	/**
 	 * The replay lookup, run inside the turn (U5-4a). `null` is a miss: append as usual. A hit is
-	 * the existing event, answered without a write — no INSERT, no ingest record, and the chain tip
-	 * is not read or moved. A lookup that throws is an answer too, `stored: false`: reading it as a
-	 * miss would write the duplicate this exists to prevent, so the client keeps its copy and retries.
+	 * the existing event, answered without a second `agent_events` row and without touching the chain
+	 * tip. It then confirms the event's `event_ingest` membership with one point read
+	 * (`cursorPosition`, the by-event-id read the stream already uses): the original attempt may
+	 * have landed its row and then ended (a lost reply, a crash) before writing the record, and a
+	 * collector that drops its copy on this answer would otherwise leave the event outside every
+	 * hourly anchor. Membership FOUND: nothing is written (a second record would be returned by
+	 * the stream as a new position and counted by the coverage histogram, which `hourLeaves`
+	 * excludes). CONFIRMED MISSING: `recordIngest` writes it, the event's first record, in the
+	 * server-time hour of the replay. The read FAILS, or the repair write fails: nothing more is
+	 * written and the hit stays `stored: true` with the normal path's warning, never a failure. A
+	 * lookup that throws is `stored: false`: reading it as a miss would write the duplicate this
+	 * exists to prevent, so the client keeps its copy and retries.
 	 */
 	private async replayOutcome(input: EventInput, key: string): Promise<EmitResult | null> {
 		const probe = normalizeEvent(input, null, { key });
+		let existing: { id: string; hash: string } | null;
 		try {
-			const existing = await this.greptime!.findByIdempotencyKey(probe, key);
-			if (existing === null) return null;
-			return { event: { ...probe, id: existing.id, hash: existing.hash }, stored: true, deduplicated: true };
+			existing = await this.greptime!.findByIdempotencyKey(probe, key);
 		} catch (cause) {
 			const error = redact(String(cause));
 			process.stderr.write(`[substrate] idempotency lookup failed, event not stored — ${error}\n`);
 			return { event: probe, stored: false, error: `idempotency lookup failed: ${error}`, lookupFailed: true };
 		}
+		if (existing === null) return null;
+		const event = { ...probe, id: existing.id, hash: existing.hash };
+		const hit: EmitResult = { event, stored: true, deduplicated: true };
+		let membership: unknown;
+		try {
+			membership = await this.greptime!.cursorPosition(event.id);
+		} catch (cause) {
+			process.stderr.write(`[substrate] event ${event.id} replay matched; ingest membership unconfirmed, nothing written — ${redact(String(cause))}\n`);
+			return { ...hit, warning: INGEST_NOT_RECORDED };
+		}
+		if (membership !== null) return hit;
+		try {
+			await this.greptime!.recordIngest(event);
+		} catch (cause) {
+			// Any failure, not only `IngestNotRecorded`: the event row exists either way and the
+			// answer to the caller is still "stored".
+			process.stderr.write(`[substrate] event ${event.id} replay matched; ingest membership missing and not repaired — ${redact(String(cause))}\n`);
+			return { ...hit, warning: INGEST_NOT_RECORDED };
+		}
+		return hit;
 	}
 
 	private async appendChained(input: EventInput, sessionId: string | null, idem: IdempotencyPlan | null): Promise<EmitResult> {
@@ -2887,6 +2915,7 @@ export class Substrate {
 		}
 		return {
 			governance: this.config.skillsGovernance,
+			library: this.config.skills.repo,
 			skills: rows.slice(0, LIST_MAX).map((row) => toListEntry(row, state !== "approved")),
 			truncated: rows.length > LIST_MAX,
 		};

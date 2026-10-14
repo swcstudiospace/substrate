@@ -561,13 +561,25 @@ describe("a failing disk", () => {
 
 		// The entry is still in the file, so nothing was dropped yet and nothing was announced.
 		expect(drops).toEqual([]);
-		expect(first.dropped).toBe(1);
+		// Nothing was removed, so nothing is counted as removed; the failed write-back is reported separately.
+		expect(first).toMatchObject({ dropped: 0, writeFailed: true, readFailed: false });
 		expect(spool.stats().depth).toBe(1);
 
-		await make({ ttlMs: 60_000 }).drain(async () => delivered, { budgetMs: 1000, all: true });
+		const healthy = await make({ ttlMs: 60_000 }).drain(async () => delivered, { budgetMs: 1000, all: true });
 
+		expect(healthy).toMatchObject({ dropped: 1, writeFailed: false });
 		expect(drops.map((report) => [report.cause, report.count])).toEqual([["ttl", 1]]);
 		expect(spool.stats().depth).toBe(0);
+	});
+
+	test("the sweep counts only what its rewrite removed, and says when the write failed", () => {
+		const spool = make({ ttlMs: 60_000 });
+		spool.append(candidate(1));
+		clock += 61_000;
+
+		expect(make({ ttlMs: 60_000, io: { writeFile: enospc } }).sweepSettled()).toEqual({ dropped: 0, failure: "write", remaining: null });
+		expect(spool.stats().depth).toBe(1);
+		expect(make({ ttlMs: 60_000 }).sweepSettled()).toEqual({ dropped: 1, failure: null, remaining: 0 });
 	});
 
 	test("a write that fails half way leaves no temp file behind, and neither does a failed rename", async () => {
@@ -643,6 +655,228 @@ describe("a failing disk", () => {
 		expect(spool.stats().malformed).toBe(0);
 		expect(make().append(candidate(3)).ok).toBe(true);
 		expect(make().list().map((entry) => entry.key)).toEqual(["key-000001", "key-000003"]);
+	});
+});
+
+describe("an unreadable spool is never treated as empty", () => {
+	const eio = (): never => {
+		throw Object.assign(new Error("i/o error"), { code: "EIO" });
+	};
+
+	test("a read that fails EIO leaves the file byte for byte untouched through compaction, sweep, drain and append-with-room, and every path says so", async () => {
+		const seed = make({ ttlMs: 60_000, max: 2 });
+		for (let i = 1; i <= 2; i += 1) seed.append(candidate(i));
+		clock += 61_000;
+		const before = fileText();
+		const broken = make({ ttlMs: 60_000, max: 2, io: { readFile: eio } });
+
+		expect(broken.sweepSettled()).toEqual({ dropped: 0, failure: "read", remaining: null });
+		const report = await broken.drain(async () => delivered, { budgetMs: 1000, all: true });
+		// A third append would cross the line cap and needs a rewrite: it must refuse, not rewrite from "nothing".
+		const appended = broken.append(candidate(3));
+
+		expect(report).toMatchObject({ readFailed: true, writeFailed: false, dropped: 0, delivered: 0, held: "spool-unreadable" });
+		expect(appended.ok).toBe(false);
+		expect(broken.stats()).toMatchObject({ depth: 0, unreadable: "EIO" });
+		expect(broken.eligible(true)).toBeNull();
+		expect(fileText()).toBe(before);
+		expect(drops.filter((report) => report.cause !== "write_failed")).toEqual([]);
+	});
+
+	test("a re-read that fails at write-back time is a READ failure, not a write failure; the symmetric write failure stays a write failure", async () => {
+		const seed = make();
+		seed.append(candidate(1));
+		clock += 120_000;
+		// The snapshot read succeeds; the locked re-read inside the write-back fails.
+		let reads = 0;
+		const flaky = make({
+			io: {
+				readFile: (path) => {
+					reads += 1;
+					if (reads >= 2) return eio();
+					return readFileSync(path, "utf8");
+				},
+			},
+		});
+
+		const readCase = await flaky.drain(async () => delivered, { budgetMs: 1000, all: true });
+
+		expect(readCase).toMatchObject({ delivered: 1, readFailed: true, writeFailed: false, dropped: 0 });
+		expect(fileText().length).toBeGreaterThan(0);
+
+		const writeCase = await make({ io: { writeFile: () => { throw Object.assign(new Error("full"), { code: "ENOSPC" }); } } }).drain(async () => delivered, { budgetMs: 1000, all: true });
+
+		expect(writeCase).toMatchObject({ delivered: 1, readFailed: false, writeFailed: true });
+	});
+
+	test("an absent file is still an empty spool, not a read failure", () => {
+		const spool = make({ path: join(dir, "nope", "event-spool.jsonl") });
+
+		expect(spool.stats()).toMatchObject({ depth: 0, unreadable: null });
+		expect(spool.sweepSettled()).toEqual({ dropped: 0, failure: null, remaining: null });
+	});
+});
+
+describe("append enforces the caps before it accepts", () => {
+	const enospc = (): never => {
+		throw Object.assign(new Error("no space"), { code: "ENOSPC" });
+	};
+	const bigEvent = (n: number, size: number): SpoolCandidate => candidate(n, { event: { surface: "claude-code", kind: "note", summary: "z".repeat(size) } });
+
+	test("a line larger than the byte cap is refused with a reason and nothing is written", () => {
+		const spool = make({ maxBytes: 1024 });
+
+		expect(spool.append(bigEvent(1, 2000))).toEqual({ ok: false, error: "larger-than-cap" });
+
+		expect(existsSync(join(dir, "event-spool.jsonl"))).toBe(false);
+		expect(drops.map((report) => report.cause)).toEqual(["oversize"]);
+	});
+
+	test("at a tiny cap the new line is kept and the older ones go, oldest first, visibly", () => {
+		const spool = make({ maxBytes: 1024 });
+		for (let i = 1; i <= 3; i += 1) {
+			clock += 10;
+			expect(spool.append(bigEvent(i, 150)).ok).toBe(true);
+		}
+		clock += 10;
+
+		// Roughly 400 bytes a line: the cap holds two. The newest append must survive its own enforcement.
+		const result = spool.append(bigEvent(4, 150));
+
+		expect(result.ok).toBe(true);
+		const keys = spool.list().map((entry) => entry.key);
+		expect(keys.at(-1)).toBe("key-000004");
+		expect(keys.length).toBeLessThan(4);
+		expect(statSync(join(dir, "event-spool.jsonl")).size).toBeLessThanOrEqual(1024);
+		expect(drops.some((report) => report.cause === "bytes" && report.sample[0]?.key === "key-000001")).toBe(true);
+	});
+
+	test("when making room fails (ENOSPC) the append is refused, the file does not grow past the cap, and no drop is announced", () => {
+		const seed = make({ maxBytes: 1024 });
+		for (let i = 1; i <= 2; i += 1) seed.append(bigEvent(i, 150));
+		const before = fileText();
+		const failing = make({ maxBytes: 1024, io: { writeFile: enospc } });
+
+		for (let i = 3; i <= 6; i += 1) expect(failing.append(bigEvent(i, 150)).ok).toBe(false);
+
+		expect(fileText()).toBe(before);
+		expect(statSync(join(dir, "event-spool.jsonl")).size).toBeLessThanOrEqual(1024);
+		expect(drops.filter((report) => report.cause !== "write_failed")).toEqual([]);
+	});
+
+	test("the line cap makes room before accepting too: ok means the new entry is in the file within the cap", () => {
+		const spool = make({ max: 2 });
+		for (let i = 1; i <= 6; i += 1) {
+			clock += 10;
+			expect(spool.append(candidate(i)).ok).toBe(true);
+		}
+
+		expect(spool.list().map((entry) => entry.key).at(-1)).toBe("key-000006");
+		expect(spool.list().length).toBeLessThanOrEqual(2 + 1);
+	});
+});
+
+describe("the byte cap is exact when the file ends in a torn line", () => {
+	const CAP = 1024;
+
+	/** The byte length of one serialized entry for `candidate(1)` under the fixed clock. */
+	function lineLength(): number {
+		const probeDir = mkdtempSync(join(tmpdir(), "spool-probe-"));
+		const probe = new EventSpool({ path: join(probeDir, "event-spool.jsonl"), now: () => clock, random: () => 0.5 });
+		probe.append(candidate(1));
+		return statSync(join(probeDir, "event-spool.jsonl")).size;
+	}
+
+	test.each([-1, 0, 1])("torn tail plus a new line landing at cap%+d never leaves the file above the cap, and ok means the line is on disk", (delta) => {
+		const line = lineLength();
+		// T + separator + line == CAP + delta, i.e. T = CAP + delta - 1 - line.
+		const torn = '{"v":1,"id":"torn","x":"' + "a".repeat(CAP + delta - 1 - line - 24);
+		writeFileSync(join(dir, "event-spool.jsonl"), torn);
+		expect(Buffer.byteLength(torn) + 1 + line).toBe(CAP + delta);
+		const spool = make({ maxBytes: CAP });
+
+		const result = spool.append(candidate(1));
+
+		expect(statSync(join(dir, "event-spool.jsonl")).size).toBeLessThanOrEqual(CAP);
+		expect(result.ok).toBe(true);
+		expect(spool.list().map((entry) => entry.key)).toEqual(["key-000001"]);
+	});
+
+	test("a torn tail does not make an ordinary append refuse or rewrite when the line fits with its separator", () => {
+		const spool = make({ maxBytes: CAP });
+		spool.append(candidate(1));
+		writeFileSync(join(dir, "event-spool.jsonl"), `${fileText()}{"v":1,"torn`);
+
+		expect(spool.append(candidate(2)).ok).toBe(true);
+
+		expect(spool.list().map((entry) => entry.key)).toEqual(["key-000001", "key-000002"]);
+		expect(drops).toEqual([]);
+	});
+});
+
+describe("concurrent replay passes merge, they do not overwrite", () => {
+	const failing = async (): Promise<SpoolDelivery> => ({ kind: "retry", reason: "http-503" });
+
+	test("two passes that both read attempts:1 and both fail leave attempts 3 and the later backoff", async () => {
+		let slowClock = clock;
+		let fastClock = clock;
+		const slow = make({ now: () => slowClock });
+		slow.append(candidate(1));
+		slowClock += 120_000;
+		fastClock = slowClock + 10_000;
+		const fast = make({ now: () => fastClock });
+
+		// While the slow pass is mid-delivery (its snapshot says attempts:1), another process runs a whole failing pass.
+		const slowReport = await slow.drain(
+			async () => {
+				await fast.drain(failing, { budgetMs: 1000, all: true });
+				return failing();
+			},
+			{ budgetMs: 1000, all: true },
+		);
+
+		expect(slowReport.retried).toBe(1);
+		const [row] = slow.list();
+		expect(row?.attempts).toBe(3);
+		// fast: fastClock + 60 s (its snapshot attempts 1); slow: slowClock + 60 s. The later one wins.
+		expect(row?.next_at).toBe(fastClock + 60_000);
+	});
+
+	test("a row another process already removed is not resurrected by a pass that failed it", async () => {
+		const first = make();
+		first.append(candidate(1));
+		first.append(candidate(2));
+		clock += 120_000;
+
+		await first.drain(
+			async (entry) => {
+				if (entry.key === "key-000001") await make().drain(async (other) => (other.key === "key-000001" ? delivered : { kind: "skip", reason: "x" }), { budgetMs: 1000, all: true });
+				return entry.key === "key-000001" ? failing() : { kind: "skip", reason: "x" };
+			},
+			{ budgetMs: 1000, all: true },
+		);
+
+		expect(first.list().map((entry) => entry.key)).toEqual(["key-000002"]);
+	});
+
+	test("an entry that exhausts its attempts by the merged count is dropped, visibly, once", async () => {
+		let t = clock;
+		const a = make({ maxAttempts: 3, now: () => t });
+		a.append(candidate(1));
+		t += 120_000;
+		const b = make({ maxAttempts: 3, now: () => t });
+
+		const report = await a.drain(
+			async () => {
+				await b.drain(failing, { budgetMs: 1000, all: true });
+				return failing();
+			},
+			{ budgetMs: 1000, all: true },
+		);
+
+		expect(report.dropped).toBe(1);
+		expect(a.list()).toEqual([]);
+		expect(drops.map((entry) => [entry.cause, entry.count])).toEqual([["attempts", 1]]);
 	});
 });
 

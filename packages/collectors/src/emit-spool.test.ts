@@ -5,7 +5,7 @@
  * one), the clock is the real one only where `AbortSignal.timeout` needs it.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -473,7 +473,7 @@ describe("replay", () => {
 			const server = serve({ healthz, events: ACCEPTING.events });
 			await park(server, `parked-${stubs.length}`);
 
-			expect(await drainEventSpool({ all: true })).toEqual({ status: "held", reason, dropped: 0 });
+			expect(await drainEventSpool({ all: true })).toEqual({ status: "held", reason, dropped: 0, remaining: expect.any(Number) });
 			expect(server.events()).toEqual([]);
 		}
 		expect(spooled().map((entry) => entry.attempts)).toEqual([1, 1, 1]);
@@ -605,7 +605,7 @@ describe("replay", () => {
 
 			const result = await drainEventSpool({});
 
-			expect(result).toEqual({ status: "held", reason: "healthz-auth", dropped: 0 });
+			expect(result).toEqual({ status: "held", reason: "healthz-auth", dropped: 0, remaining: expect.any(Number) });
 			expect(spooled().map((entry) => entry.attempts)).toEqual([1, 1]);
 			expect(countSpoolDrops(stateDir)).toEqual({});
 		});
@@ -630,7 +630,7 @@ describe("replay", () => {
 			const wrong = await drainEventSpool({ token: BAD });
 			const right = await drainEventSpool({ token: GOOD });
 
-			expect(wrong).toEqual({ status: "held", reason: "healthz-auth", dropped: 0 });
+			expect(wrong).toEqual({ status: "held", reason: "healthz-auth", dropped: 0, remaining: expect.any(Number) });
 			expect(right).toMatchObject({ status: "ran", delivered: 1 });
 			expect(server.healthz().map((hit) => hit.auth)).toEqual([`Bearer ${BAD}`, `Bearer ${GOOD}`]);
 		});
@@ -640,7 +640,7 @@ describe("replay", () => {
 			tokenFor("codex", BAD);
 			const server = authServer();
 			process.env.SUBSTRATE_URL = server.url;
-			expect(await drainEventSpool({})).toEqual({ status: "held", reason: "healthz-auth", dropped: 0 });
+			expect(await drainEventSpool({})).toEqual({ status: "held", reason: "healthz-auth", dropped: 0, remaining: expect.any(Number) });
 
 			tokenFor("codex", GOOD);
 			const result = await drainEventSpool({});
@@ -716,7 +716,7 @@ describe("replay", () => {
 
 			const result = await drainEventSpool({});
 
-			expect(result).toEqual({ status: "held", reason: "healthz-auth", dropped: 1 });
+			expect(result).toEqual({ status: "held", reason: "healthz-auth", dropped: 1, remaining: expect.any(Number) });
 			expect(spooled().map((entry) => entry.event.summary)).toEqual(["live"]);
 			expect(countSpoolDrops(stateDir)).toEqual({ ttl: 1 });
 		});
@@ -741,7 +741,7 @@ describe("replay", () => {
 			const server = gate(accepted);
 			process.env.SUBSTRATE_URL = server.url;
 
-			expect(await drainEventSpool({ token: GOOD })).toEqual({ status: "held", reason: "healthz-auth", dropped: 0 });
+			expect(await drainEventSpool({ token: GOOD })).toEqual({ status: "held", reason: "healthz-auth", dropped: 0, remaining: expect.any(Number) });
 			accepted.add(GOOD);
 			const second = await drainEventSpool({ token: GOOD });
 
@@ -760,7 +760,7 @@ describe("replay", () => {
 
 			const result = await drainEventSpool({});
 
-			expect(result).toEqual({ status: "held", reason: "healthz-auth", dropped: 0 });
+			expect(result).toEqual({ status: "held", reason: "healthz-auth", dropped: 0, remaining: expect.any(Number) });
 			expect(server.healthz().map((hit) => hit.auth)).toEqual(["Bearer tok-s0", "Bearer tok-s1", "Bearer tok-s2", "Bearer tok-s3"]);
 		});
 
@@ -781,6 +781,180 @@ describe("replay", () => {
 
 			expect(second).toMatchObject({ status: "ran", delivered: 2, remaining: 0 });
 			expect(spooled().map((entry) => entry.attempts)).toEqual([]);
+		});
+
+		describe("a failed sweep is outstanding only until a later rewrite commits", () => {
+			/** The sweep's rewrite fails (its temp file name is taken by a directory) until `unblock()` removes it. */
+			function blockRewrite(): { unblock: () => void } {
+				const blocker = `${spoolPath()}.${process.pid}.tmp`;
+				mkdirSync(blocker);
+				return { unblock: () => rmSync(blocker, { recursive: true, force: true }) };
+			}
+
+			test("a one-shot sweep failure followed by a successful replay is cleared: writeFailed false, the drop counted once, CLI line clean", async () => {
+				process.env.SUBSTRATE_TOKEN = GOOD;
+				seed("claude-code", "expired", 2 * 3_600_000);
+				seed("claude-code", "live", 120_000);
+				const block = blockRewrite();
+				const server = serve({
+					healthz: ACCEPTING.healthz,
+					events: () => {
+						block.unblock();
+						return Response.json({ stored: true }, { status: 202 });
+					},
+				});
+				process.env.SUBSTRATE_URL = server.url;
+				const out: string[] = [];
+
+				await runSpool(["flush"], { out: (text) => out.push(text), err: () => undefined });
+
+				expect(out.join("")).toContain("delivered=1");
+				expect(out.join("")).toContain("dropped=1");
+				expect(out.join("")).toContain("remaining=0");
+				expect(out.join("")).not.toContain("write failed");
+				expect(spooled()).toEqual([]);
+				expect(countSpoolDrops(stateDir)).toEqual({ ttl: 1 });
+			});
+
+			test("the same recovery through the drain result: writeFailed false, dropped 1", async () => {
+				process.env.SUBSTRATE_TOKEN = GOOD;
+				seed("claude-code", "expired", 2 * 3_600_000);
+				seed("claude-code", "live", 120_000);
+				const block = blockRewrite();
+				const server = serve({
+					healthz: ACCEPTING.healthz,
+					events: () => {
+						block.unblock();
+						return Response.json({ stored: true }, { status: 202 });
+					},
+				});
+				process.env.SUBSTRATE_URL = server.url;
+
+				const result = await drainEventSpool({ all: true });
+
+				expect(result).toMatchObject({ status: "ran", delivered: 1, dropped: 1, remaining: 0, writeFailed: false, readFailed: false });
+			});
+
+			test("a sweep failure with no replay that rewrites stays reported (held)", async () => {
+				seed("claude-code", "expired", 2 * 3_600_000);
+				seed("claude-code", "live", 120_000);
+				blockRewrite();
+				const server = serve({ healthz: () => Response.json({ idempotency: "off" }), events: ACCEPTING.events });
+				process.env.SUBSTRATE_URL = server.url;
+
+				const result = await drainEventSpool({ all: true });
+
+				expect(result).toEqual({ status: "held", reason: "idempotency-off", dropped: 0, failure: "write", remaining: expect.any(Number) });
+				expect(spooled().map((entry) => entry.event.summary)).toEqual(["expired", "live"]);
+			});
+
+			test("early hold (probe refused) after a failed first sweep and a successful re-sweep reports what is really on disk", async () => {
+				// The live entry comes first in the file, so no replay ever reaches the expired one behind it.
+				seed("claude-code", "live", 120_000);
+				seed("claude-code", "expired", 2 * 3_600_000);
+				const block = blockRewrite();
+				const server = serve({
+					healthz: () => {
+						block.unblock();
+						return Response.json({ idempotency: "off" });
+					},
+					events: ACCEPTING.events,
+				});
+				process.env.SUBSTRATE_URL = server.url;
+
+				// A concurrent writer appends right after the re-sweep commits (the drop line is written just after the
+				// commit): the file then holds 2, so a result that re-read the file instead of using the committed depth says 2.
+				const patched = process.stderr.write;
+				let raced = false;
+				process.stderr.write = ((chunk: Uint8Array | string) => {
+					if (!raced && String(chunk).includes("dropped spooled event")) {
+						raced = true;
+						seed("claude-code", "raced-in", 120_000);
+					}
+					return true;
+				}) as typeof process.stderr.write;
+
+				let result: Awaited<ReturnType<typeof drainEventSpool>>;
+				try {
+					result = await drainEventSpool({ all: true });
+				} finally {
+					process.stderr.write = patched;
+				}
+
+				expect(raced).toBe(true);
+				expect(result).toEqual({ status: "held", reason: "idempotency-off", dropped: 1, remaining: 1 });
+				expect(spooled().map((entry) => entry.event.summary)).toEqual(["live", "raced-in"]);
+				expect(countSpoolDrops(stateDir)).toEqual({ ttl: 1 });
+			});
+
+			test("an unreadable spool is held with an UNKNOWN depth: null, never 0, in the result, the CLI text and the CLI JSON", async () => {
+				mkdirSync(spoolPath());
+				const server = serve(ACCEPTING);
+				process.env.SUBSTRATE_URL = server.url;
+
+				const result = await drainEventSpool({ all: true });
+				const text: string[] = [];
+				const json: string[] = [];
+				await runSpool(["flush"], { out: (t) => text.push(t), err: () => undefined });
+				await runSpool(["flush", "--json"], { out: (t) => json.push(t), err: () => undefined });
+
+				expect(result).toEqual({ status: "held", reason: "spool-unreadable", dropped: 0, remaining: null, failure: "read" });
+				expect(text.join("")).toContain("spool file could not be read, nothing was changed");
+				expect(text.join("")).not.toContain("remaining=");
+				expect(JSON.parse(json.join(""))).toMatchObject({ status: "held", remaining: null, failure: "read" });
+				expect(server.hits).toEqual([]);
+			});
+
+			test("an exhausted time budget after a failed first sweep and a successful re-sweep: remaining is the committed depth, nothing is double-counted", async () => {
+				process.env.SUBSTRATE_TOKEN = GOOD;
+				seed("claude-code", "live", 120_000);
+				seed("claude-code", "expired", 2 * 3_600_000);
+				const block = blockRewrite();
+				const server = serve({
+					healthz: () => {
+						block.unblock();
+						return Response.json({ idempotency: "accept", greptime: true });
+					},
+					events: ACCEPTING.events,
+				});
+				process.env.SUBSTRATE_URL = server.url;
+				const out: string[] = [];
+
+				// A zero budget stops the replay before its first entry: no delivery, no write-back of its own.
+				const result = await drainEventSpool({ all: true, budgetMs: 0 });
+				resetSpoolReplayState();
+				await runSpool(["status"], { out: (text) => out.push(text), err: () => undefined });
+
+				expect(result).toMatchObject({ status: "ran", delivered: 0, budgetExhausted: true, dropped: 1, remaining: 1, writeFailed: false, readFailed: false });
+				expect(out.join("")).toContain("depth: 1");
+			});
+
+			test("a sweep failure with nothing eligible to replay stays reported, and counts nothing as dropped", async () => {
+				seed("claude-code", "expired", 2 * 3_600_000);
+				blockRewrite();
+				const server = serve(ACCEPTING);
+				process.env.SUBSTRATE_URL = server.url;
+
+				const result = await drainEventSpool({ all: true });
+
+				expect(result).toMatchObject({ status: "ran", dropped: 0, writeFailed: true, remaining: 1 });
+			});
+
+			test("a sweep failure whose replay write-back also fails is still reported, and a later pass clears it with the drop counted once", async () => {
+				process.env.SUBSTRATE_TOKEN = GOOD;
+				seed("claude-code", "expired", 2 * 3_600_000);
+				seed("claude-code", "live", 120_000);
+				const block = blockRewrite();
+				const server = serve(ACCEPTING);
+				process.env.SUBSTRATE_URL = server.url;
+
+				const first = await drainEventSpool({ all: true });
+				block.unblock();
+				const second = await drainEventSpool({ all: true });
+
+				expect(first).toMatchObject({ status: "ran", delivered: 1, dropped: 0, writeFailed: true });
+				expect(second).toMatchObject({ status: "ran", dropped: 1, writeFailed: false });
+			});
 		});
 
 		describe("the probe cache and the log throttle", () => {
@@ -851,7 +1025,7 @@ describe("replay", () => {
 			const server = serve({ healthz: () => Response.json({ error: "unknown or missing bearer token" }, { status }), events: ACCEPTING.events });
 			await park(server, `auth-${status}`);
 
-			expect(await drainEventSpool({ all: true })).toEqual({ status: "held", reason: "healthz-auth", dropped: 0 });
+			expect(await drainEventSpool({ all: true })).toEqual({ status: "held", reason: "healthz-auth", dropped: 0, remaining: expect.any(Number) });
 			expect(server.events()).toEqual([]);
 		}
 		resetSpoolReplayState();
@@ -916,7 +1090,7 @@ describe("replay", () => {
 
 		const result = await drainEventSpool({ all: true });
 
-		expect(result).toEqual({ status: "held", reason: "healthz-unreachable", dropped: 0 });
+		expect(result).toEqual({ status: "held", reason: "healthz-unreachable", dropped: 0, remaining: expect.any(Number) });
 		expect(spooled()[0]?.attempts).toBe(1);
 	});
 

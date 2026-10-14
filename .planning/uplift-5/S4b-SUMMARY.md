@@ -101,6 +101,27 @@ caps above their ceilings (100000 lines, 64 MiB, 720 h, 100 attempts) are clampe
 - The pre-probe sweep's drops are now part of every `DrainResult` (`held` gains `dropped`; `ran` adds them to `dropped`), so the CLI line, the Grok summary and the journal agree.
 - Added tests: sweep before probe, cleanup-only hold reported by CLI, same bearer refused then accepted (401 never cached), four-credential probe bound, shared bearer across surfaces, probe cache TTL and 16-entry bound, `healthz-auth` log throttle. `spoolProbeCacheSize()` is exported for the bound test; Date.now is overridden in those tests.
 
+## Review round 5 (Greptile PR #66)
+
+- P1: `read()` throws `SpoolReadError` for any error but ENOENT; stats/eligible/sweep/drain/compact/append report it (`unreadable`, `readFailed`, `failure: "read"`) and never rewrite after a failed read. Oversized-file tail reads announce the discarded head as a drop.
+- P2: `append()` refuses a line larger than the byte cap and, when a cap may be crossed, makes room in one atomic rewrite that includes the new line; ok:true only when the line is in the file within the caps; a failed rewrite refuses the append.
+- P2: replay updates are deltas (`attemptsDelta`, candidate `next_at`) merged against the current row under the lock (attempts = current + delta, next_at = max); removed rows are not resurrected; exhaustion is decided on the merged count.
+- P2: `dropped` comes from the rewrite that reached the disk; `writeFailed` is reported separately (drain report, sweep result, CLI line, Grok summary).
+
+## Review round 6
+
+- Byte cap exact with a torn tail: the separator byte is read from the live tail under the lock and counted before the fast path is chosen.
+- The kind of a failed write-back (read vs write) is preserved in the drain report (`readFailed` / `writeFailed`).
+- A failed pre-probe sweep is cleared when a later rewrite in the same pass commits (re-sweep after the drain; no double count); it stays reported when none ran.
+
+## Review round 7
+
+- `SweepResult.remaining` (committed depth, null when no rewrite committed); the post-drain re-sweep and the probe-held path use it, and `DrainResult.held` now carries `remaining`; the CLI held line and Grok summary print it.
+
+## Review round 8
+
+- `DrainResult.held.remaining` is `number | null`: null when the spool is unreadable and no earlier snapshot or committed depth exists; the CLI line and Grok summary omit the count, JSON carries null. Depth-only fallbacks check `stats().unreadable` first.
+
 ## Smoke commands for the orchestrator
 
 ```
@@ -131,8 +152,8 @@ exits 0 and `/tmp/x/event-spool.jsonl` has one 0600 line; `... spool status` pri
 
 - The cross-process lock is a lock file. A stale one is taken over after 10 s; if two processes take it over in the same
   instant, one append can be lost. A lock held longer than 0.5 s makes an append fail visibly (`spool-write_failed`).
-- Line cap enforcement between size checks can overshoot by up to a tenth of the cap (at most ~1600 lines); the byte cap is
-  exact.
+- The line cap is checked every tenth of its capacity of file growth, so the file can briefly hold up to a tenth of the cap
+  more lines; the byte cap is exact and, like the line cap, is enforced BEFORE an append is accepted (round 5).
 - `refused-emits.jsonl` rotation is not locked: two processes crossing the cap at once can rotate twice and lose the older
   of the two files' lines. Bounded, and only refusal lines.
 - The Muse tool hook (projector-generated, self-contained) does not spool; the git hook does only when the installer baked

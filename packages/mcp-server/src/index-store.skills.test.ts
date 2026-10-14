@@ -14,7 +14,7 @@
  */
 import { SQL } from "bun";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { IndexStore } from "./index-store.ts";
+import { IndexStore, skillDecisionLockKey } from "./index-store.ts";
 
 const PG_URL = process.env.SUBSTRATE_TEST_PG_URL?.trim();
 const RUN = Date.now().toString(36);
@@ -185,9 +185,68 @@ describeLive("the skills registry against a live index", () => {
 		}
 	});
 
+	test("two concurrent retires on DIFFERENT approved pull requests of one name wait on the per-name advisory lock, then answer 1 and 0 and leave the name unlisted", async () => {
+		// Real time is unavoidable here: the test observes backends blocked inside Postgres (polled) and asserts that
+		// nothing settles while the key is held, which no fake clock can drive.
+		const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+		// Two rounds, the pull request order swapped. Each holds the REAL lock key from a third connection, so both
+		// retires are provably in flight at once: without the lock in `decideSkill` they would settle while it is held.
+		for (const [round, first, second] of [[0, 200, 201], [1, 301, 300]] as const) {
+			const name = `pair-skill-${String(round)}`;
+			await a.decideSkill(decision({ name, pr_number: first }));
+			await a.decideSkill(decision({ name, pr_number: second, merge_sha: "d".repeat(40) }));
+			// Two approved pull requests, one list entry for the name.
+			expect((await a.listSkills(REPO, "approved", 500)).filter((row) => row.name === name)).toHaveLength(1);
+
+			const release = Promise.withResolvers<void>();
+			const held = Promise.withResolvers<void>();
+			// The third connection: a transaction that takes the same advisory lock and keeps it until released.
+			const holder = raw.begin(async (tx: SQL) => {
+				await tx`select pg_advisory_xact_lock(hashtextextended(${skillDecisionLockKey(REPO, name)}::text, 0))`;
+				held.resolve();
+				await release.promise;
+			});
+			await held.promise;
+
+			const settled: string[] = [];
+			const retire = (store: IndexStore, pr: number) =>
+				store.decideSkill(decision({ name, pr_number: pr, decision: "retire", merge_sha: null })).finally(() => settled.push(String(pr)));
+			const calls = [retire(a, first), retire(b, second)];
+
+			// Both backends must be blocked on the advisory lock before anything is judged.
+			const deadline = Date.now() + 5000;
+			let waiters = 0;
+			while (Date.now() < deadline) {
+				const counted = (await raw`
+					select count(*)::int as n from pg_locks
+					where locktype = 'advisory' and not granted and database = (select oid from pg_database where datname = current_database())`) as Array<{ n: number }>;
+				waiters = counted[0]?.n ?? 0;
+				if (waiters >= 2) break;
+				await sleep(25);
+			}
+			if (waiters < 2) {
+				release.resolve();
+				await Promise.allSettled([holder, ...calls]);
+			}
+			expect({ round, waiters_blocked_on_the_advisory_lock: waiters }).toEqual({ round, waiters_blocked_on_the_advisory_lock: 2 });
+
+			// While the key is held neither decision may settle; without the lock in decideSkill both would already have.
+			await sleep(300);
+			expect({ round, settled_while_lock_held: [...settled] }).toEqual({ round, settled_while_lock_held: [] });
+
+			release.resolve();
+			await holder;
+			const results = await Promise.all(calls);
+			expect(results.map((result) => result.outcome)).toEqual(["applied", "applied"]);
+			// The multiset, not the order: one decision saw one approved row left, the other saw none.
+			expect(results.map((result) => (result.outcome === "refused" ? -1 : result.remaining_approved)).sort()).toEqual([0, 1]);
+			expect((await a.listSkills(REPO, "approved", 500)).filter((row) => row.name === name)).toEqual([]);
+		}
+	});
+
 	test("nothing in the store deletes: every row written above is still there", async () => {
 		const rows = (await raw`select count(*)::int as n from skills_registry where repo = ${REPO}`) as Array<{ n: number }>;
-		// idem, known, unproposed, walk, no-skill, race, evolving (three) and the hyphen pair (two) = 11 rows; "never-approved" left none.
-		expect(rows[0]?.n).toBe(11);
+		// idem, known, unproposed, walk, no-skill, race, evolving (three), the hyphen pair (two) and two retired pairs (four) = 15 rows; "never-approved" left none.
+		expect(rows[0]?.n).toBe(15);
 	});
 });

@@ -147,9 +147,15 @@ export interface SkillApprovalResult {
 	noted?: boolean;
 }
 
-/** What `skills_list` answers. `governance` is the running `SUBSTRATE_SKILLS_GOVERNANCE`, so a reader knows whether an empty list means "nothing approved" or "nobody has populated the registry". */
+/**
+ * What `skills_list` answers. `governance` is the running `SUBSTRATE_SKILLS_GOVERNANCE`, so a reader knows whether an
+ * empty list means "nothing approved" or "nobody has populated the registry". `library` is the configured skills
+ * library's `owner/repo` slug (what the rows are about; never a URL or a credential), so a reader that caches the
+ * answer can bind the cache to the library as well as to the server it came from.
+ */
 export interface SkillListResult {
 	governance: "off" | "report" | "enforce";
+	library: string;
 	skills: Array<ApprovedSkillEntry | SkillEntry>;
 	truncated: boolean;
 }

@@ -239,6 +239,19 @@ export interface SpoolDrainReport {
 	budgetExhausted: boolean;
 	/** Lines left in the file after the last write-back. */
 	remaining: number;
+	/** The spool file could not be read (not merely absent): nothing was rewritten, nothing was dropped. */
+	readFailed: boolean;
+	/** The last write-back did not reach the disk: its settled entries are still in the file and `dropped` does not count them. */
+	writeFailed: boolean;
+}
+
+/** What a local sweep of expired and exhausted entries did. */
+export interface SweepResult {
+	/** Entries actually removed (0 when the rewrite did not reach the disk). */
+	dropped: number;
+	failure: "read" | "write" | null;
+	/** Entries left in the file by the rewrite that committed; null when no rewrite committed (nothing to settle, or it failed). */
+	remaining: number | null;
 }
 
 export interface SpoolStats {
@@ -252,10 +265,14 @@ export interface SpoolStats {
 	due: number;
 	/** Lines the reader could not use (a torn tail included). */
 	malformed: number;
+	/** Why the file could not be read (an errno code), or null. An unreadable file is reported, never shown as empty. */
+	unreadable: string | null;
 }
 
 /** The disk writes a failing disk can interrupt; injectable so tests can fail them deterministically. */
 export interface SpoolIo {
+	/** Whole-file text read; throws on any failure (the caller tells ENOENT from the rest). */
+	readFile: (path: string) => string;
 	writeFile: (path: string, body: string, options: { mode: number }) => void;
 	rename: (from: string, to: string) => void;
 	/** Returns the bytes written, which may be fewer than `length`. */
@@ -283,10 +300,36 @@ export interface EventSpoolOptions {
 
 export type AppendResult = { ok: true; id: string } | { ok: false; error: string };
 
+/**
+ * What a pass learned about one entry, as a DELTA to merge against the row that is in the file when the
+ * write-back runs: two passes (herdr's tick and `substrate spool flush`) that both read `attempts: 1` and both
+ * fail must leave `attempts: 3`, and an older backoff must never overwrite a newer one.
+ */
 type Update =
 	| { kind: "remove" }
 	| { kind: "drop"; cause: SpoolDropCause }
-	| { kind: "retry"; attempts: number; next_at: number; last_reason: string };
+	| { kind: "retry"; attemptsDelta: number; next_at: number; last_reason: string };
+
+/** The spool file exists but could not be read. Distinct from "no file": a rewrite after it would erase the queue. */
+class SpoolReadError extends Error {
+	constructor(readonly code: string) {
+		super(`spool unreadable (${code})`);
+	}
+}
+
+interface CompactResult {
+	ok: boolean;
+	left: number;
+	dropped: number;
+	failure: "read" | "write" | "lock" | null;
+}
+
+/** Drops decided inside one locked rewrite; announced only after the rewrite reached the disk. */
+interface RewriteContext {
+	drops: Map<SpoolDropCause, SpoolEntry[]>;
+	/** The file was larger than the bounded read: its oldest lines were never seen and the rewrite discards them. */
+	headLost: boolean;
+}
 
 function isEntry(value: unknown): value is SpoolEntry {
 	if (value === null || typeof value !== "object") return false;
@@ -325,6 +368,8 @@ function lineBytes(entry: SpoolEntry): number {
 interface Parsed {
 	entries: SpoolEntry[];
 	malformed: number;
+	/** The read started past the beginning of an oversized file. */
+	headSkipped: boolean;
 }
 
 export class EventSpool {
@@ -358,6 +403,7 @@ export class EventSpool {
 		this.lockWaitMs = options.lockWaitMs ?? 500;
 		this.lockStaleMs = options.lockStaleMs ?? 10_000;
 		this.io = {
+			readFile: options.io?.readFile ?? ((path) => readFileSync(path, "utf8")),
 			writeFile: options.io?.writeFile ?? ((path, body, opts) => writeFileSync(path, body, opts)),
 			rename: options.io?.rename ?? renameSync,
 			write: options.io?.write ?? ((fd, data, offset, length) => writeSync(fd, data, offset, length)),
@@ -395,35 +441,76 @@ export class EventSpool {
 			return { ok: false, error: "max-attempts" };
 		}
 		const line = `${JSON.stringify(entry)}\n`;
-		let size: { before: number; after: number };
+		// A line that cannot fit the byte cap even in an empty file is refused up front: nothing is written.
+		if (Buffer.byteLength(line) > this.maxBytes) {
+			this.drop({ cause: "oversize", count: 1, sample: [entry] });
+			return { ok: false, error: "larger-than-cap" };
+		}
+		const ctx: RewriteContext = { drops: new Map(), headLost: false };
+		let committed = false;
 		try {
 			mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
-			const locked = this.withLock(() => this.appendLocked(line));
+			const locked = this.withLock(() => {
+				const before = this.sizeNow();
+				// The bytes this append really adds: a file that ends mid-line (a torn write) gets a separator newline first.
+				// Read here, under the lock, so the byte cap is judged on the actual tail and not on a guess.
+				const separator = this.endsMidLine(before) ? 1 : 0;
+				if (this.mayCross(before, before + separator + Buffer.byteLength(line))) {
+					// A cap may be crossed: make room FIRST, in a rewrite that already contains the new line. The file only
+					// changes when the whole rewrite succeeded, so "ok" means the line is in the file and within the caps.
+					this.rewriteLocked(new Map(), entry, ctx);
+				} else {
+					this.appendLocked(line);
+				}
+				committed = true;
+			});
 			if (!locked.ok) return this.writeFailed(entry, locked.error);
-			size = locked.value;
 		} catch (cause) {
 			return this.writeFailed(entry, (cause as NodeJS.ErrnoException | null)?.code ?? "EIO");
 		}
-		if (this.overCap(size.before, size.after)) {
-			// Only now is a full read worth its cost: enforce the caps, dropping the oldest visibly.
-			this.compact(new Map());
-		}
+		if (committed) this.announce(ctx);
 		return { ok: true, id: entry.id };
 	}
 
+	/** Whether the file's last byte is not a newline (a torn write that `appendLocked` will terminate before appending). */
+	private endsMidLine(size: number): boolean {
+		if (size === 0) return false;
+		try {
+			const fd = openSync(this.path, "r");
+			try {
+				const last = Buffer.alloc(1);
+				readSync(fd, last, 0, 1, size - 1);
+				return last[0] !== 0x0a;
+			} finally {
+				closeSync(fd);
+			}
+		} catch {
+			// Unknown tail: assume the separator, so the cap is never exceeded by it.
+			return true;
+		}
+	}
+
+	/** Size of the spool file, 0 when it does not exist yet. */
+	private sizeNow(): number {
+		try {
+			return statSync(this.path).size;
+		} catch {
+			return 0;
+		}
+	}
+
 	/**
-	 * Whether this append may have crossed a cap. The byte cap is exact (one `fstat`). The
-	 * line cap needs a read, so it is checked only when the file has just crossed a stride
-	 * boundary past the size at which `max` minimum-size lines would fit: a stride holds
-	 * at most `max / 10` lines (every line is at least `MIN_LINE_BYTES`), so the file can
-	 * exceed `max` lines by at most that before the next check, and an append stays one
-	 * lock and one write almost every time.
+	 * Whether this append may cross a cap. The byte cap is exact. The line cap needs a read, so it is checked
+	 * only when the file has just crossed a stride boundary past the size at which `max` minimum-size lines
+	 * would fit: a stride holds at most `max / 10` lines (every line is at least `MIN_LINE_BYTES`), so between
+	 * checks the file can hold at most that many lines more than `max`, and an append stays one lock and one
+	 * write almost every time.
 	 */
-	private overCap(before: number, after: number): boolean {
+	private mayCross(before: number, after: number): boolean {
 		if (after > this.maxBytes) return true;
 		if (after <= this.max * MIN_LINE_BYTES) return false;
 		const stride = Math.max(MIN_LINE_BYTES, Math.min(262_144, Math.floor(this.max / 10) * MIN_LINE_BYTES));
-		return Math.floor(before / stride) !== Math.floor(after / stride) && this.countLines() > this.max;
+		return Math.floor(before / stride) !== Math.floor(after / stride) && this.countLines() >= this.max;
 	}
 
 	/**
@@ -439,41 +526,39 @@ export class EventSpool {
 	drain(deliver: (entry: SpoolEntry) => Promise<SpoolDelivery>, options: { budgetMs: number; all?: boolean }): Promise<SpoolDrainReport> {
 		if (this.draining) return this.draining;
 		this.draining = this.runDrain(deliver, options.budgetMs, options.all === true)
-			.catch((): SpoolDrainReport => ({ delivered: 0, refused: 0, retried: 0, skipped: 0, dropped: 0, held: "error", budgetExhausted: false, remaining: 0 }))
+			.catch((): SpoolDrainReport => ({ delivered: 0, refused: 0, retried: 0, skipped: 0, dropped: 0, held: "error", budgetExhausted: false, remaining: 0, readFailed: false, writeFailed: false }))
 			.finally(() => {
 				this.draining = null;
 			});
 		return this.draining;
 	}
 
-	/** Depth, size and age, read-only and without any event body. Never throws. */
+	/** Depth, size and age, read-only and without any event body. Never throws; an unreadable file is reported, not shown as empty. */
 	stats(): SpoolStats {
-		const parsed = this.read();
+		const read = this.tryRead();
 		const at = this.now();
-		let bytes = 0;
-		try {
-			bytes = statSync(this.path).size;
-		} catch {
-			bytes = 0;
-		}
+		const bytes = this.sizeNow();
+		if ("error" in read) return { depth: 0, bytes, oldestAt: null, nextDueAt: null, due: 0, malformed: 0, unreadable: read.error };
 		let oldest: number | null = null;
 		let next: number | null = null;
 		let due = 0;
-		for (const entry of parsed.entries) {
+		for (const entry of read.parsed.entries) {
 			if (oldest === null || entry.enqueued_at < oldest) oldest = entry.enqueued_at;
 			if (next === null || entry.next_at < next) next = entry.next_at;
 			if (entry.next_at <= at) due += 1;
 		}
-		return { depth: parsed.entries.length, bytes, oldestAt: oldest, nextDueAt: next, due, malformed: parsed.malformed };
+		return { depth: read.parsed.entries.length, bytes, oldestAt: oldest, nextDueAt: next, due, malformed: read.parsed.malformed, unreadable: null };
 	}
 
 	/**
 	 * Entries a replay may send right now: unexpired, under the attempt ceiling, and due (or all of those with
-	 * `all`). A pure local read; no lock, no network.
+	 * `all`). A pure local read; no lock, no network. `null` when the file could not be read.
 	 */
-	eligible(all: boolean): SpoolEntry[] {
+	eligible(all: boolean): SpoolEntry[] | null {
+		const read = this.tryRead();
+		if ("error" in read) return null;
 		const at = this.now();
-		return this.read().entries.filter(
+		return read.parsed.entries.filter(
 			(entry) => at - entry.enqueued_at <= this.ttlMs && entry.attempts < this.maxAttempts && (all || entry.next_at <= at),
 		);
 	}
@@ -481,35 +566,51 @@ export class EventSpool {
 	/**
 	 * Drop expired and attempt-exhausted entries now, visibly, without any delivery. Local only: a replay pass
 	 * calls it before it asks the server anything, so a failed capability probe can never keep a dead entry alive.
-	 * Returns how many entries were dropped (0 when none, or when the rewrite failed). A healthy file is not rewritten.
+	 * `dropped` counts only entries the rewrite really removed; a read or write failure is reported in `failure`
+	 * and leaves the file as it was. A healthy file is not rewritten.
 	 */
-	sweepSettled(): number {
+	sweepSettled(): SweepResult {
+		const read = this.tryRead();
+		if ("error" in read) return { dropped: 0, failure: "read", remaining: null };
 		const at = this.now();
-		const settled = this.read().entries.filter((entry) => at - entry.enqueued_at > this.ttlMs || entry.attempts >= this.maxAttempts).length;
-		// Counted only when the rewrite reached the disk: a failed one dropped (and announced) nothing.
-		return settled > 0 && this.compact(new Map()) !== null ? settled : 0;
+		const settled = read.parsed.entries.some((entry) => at - entry.enqueued_at > this.ttlMs || entry.attempts >= this.maxAttempts);
+		if (!settled) return { dropped: 0, failure: null, remaining: null };
+		const result = this.compact(new Map());
+		return { dropped: result.dropped, failure: result.ok ? null : result.failure === "read" ? "read" : "write", remaining: result.ok ? result.left : null };
 	}
 
-	/** The parked entries, oldest first. Tests and the flush path read them; status never does. */
+	/** The parked entries, oldest first; empty when the file is absent or unreadable. Tests and the flush path read them; status never does. */
 	list(): SpoolEntry[] {
-		return this.read().entries;
+		const read = this.tryRead();
+		return "error" in read ? [] : read.parsed.entries;
 	}
 
 	private async runDrain(deliver: (entry: SpoolEntry) => Promise<SpoolDelivery>, budgetMs: number, all: boolean): Promise<SpoolDrainReport> {
-		const report: SpoolDrainReport = { delivered: 0, refused: 0, retried: 0, skipped: 0, dropped: 0, held: null, budgetExhausted: false, remaining: 0 };
-		const parsed = this.read();
+		const report: SpoolDrainReport = { delivered: 0, refused: 0, retried: 0, skipped: 0, dropped: 0, held: null, budgetExhausted: false, remaining: 0, readFailed: false, writeFailed: false };
+		const read = this.tryRead();
+		if ("error" in read) {
+			// An unreadable file is not an empty one: nothing is replayed, nothing is rewritten.
+			report.readFailed = true;
+			report.held = "spool-unreadable";
+			return report;
+		}
+		const parsed = read.parsed;
 		report.remaining = parsed.entries.length;
 		const started = this.now();
 		const updates = new Map<string, Update>();
 		let unwritten = 0;
 		let failuresInARow = 0;
+		let lastFailure: CompactResult["failure"] = null;
 		const flush = (): void => {
 			if (updates.size === 0) return;
-			const written = this.compact(updates);
+			const result = this.compact(updates);
+			lastFailure = result.ok ? null : result.failure;
 			// A failed write-back keeps the updates: the next flush retries them, and a replay
-			// that already succeeded only costs one more deduplicated request.
-			if (written === null) return;
-			report.remaining = written;
+			// that already succeeded only costs one more deduplicated request. Nothing it would
+			// have removed is counted as removed.
+			if (!result.ok) return;
+			report.remaining = result.left;
+			report.dropped += result.dropped;
 			updates.clear();
 			unwritten = 0;
 		};
@@ -521,13 +622,11 @@ export class EventSpool {
 			}
 			if (this.now() - entry.enqueued_at > this.ttlMs) {
 				updates.set(entry.id, { kind: "drop", cause: "ttl" });
-				report.dropped += 1;
 				unwritten += 1;
 				continue;
 			}
 			if (entry.attempts >= this.maxAttempts) {
 				updates.set(entry.id, { kind: "drop", cause: "attempts" });
-				report.dropped += 1;
 				unwritten += 1;
 				continue;
 			}
@@ -556,20 +655,15 @@ export class EventSpool {
 				report.refused += 1;
 				failuresInARow = 0;
 			} else {
-				const attempts = entry.attempts + 1;
+				// A delta, merged against the live row at write-back: an exhausted entry is dropped there, by its merged count.
 				report.retried += 1;
 				failuresInARow += 1;
-				if (attempts >= this.maxAttempts) {
-					updates.set(entry.id, { kind: "drop", cause: "attempts" });
-					report.dropped += 1;
-				} else {
-					updates.set(entry.id, {
-						kind: "retry",
-						attempts,
-						next_at: this.now() + spoolBackoffMs(attempts - 1, this.random),
-						last_reason: outcome.reason.slice(0, 120),
-					});
-				}
+				updates.set(entry.id, {
+					kind: "retry",
+					attemptsDelta: 1,
+					next_at: this.now() + spoolBackoffMs(entry.attempts, this.random),
+					last_reason: outcome.reason.slice(0, 120),
+				});
 				if (failuresInARow >= MAX_CONSECUTIVE_FAILURES) {
 					report.held = "consecutive-failures";
 					break;
@@ -578,81 +672,114 @@ export class EventSpool {
 			if (unwritten >= FLUSH_EVERY) flush();
 		}
 		flush();
+		// Updates still pending mean the last write-back did not commit. Say which kind it was: a re-read that failed
+		// attempted no write, and the report must not claim one.
+		if (updates.size > 0) {
+			if (lastFailure === "read") report.readFailed = true;
+			else report.writeFailed = true;
+		}
 		return report;
 	}
 
 	/**
-	 * Rewrite the file under the lock: re-read it (so an event a hook appended
-	 * during a replay survives), apply the settled updates by id, enforce TTL,
-	 * attempts and the two caps, then write a temp file and rename it into
-	 * place. Returns the lines left, or null when the lock or the disk refused.
+	 * Rewrite the file under the lock: re-read it (so an event a hook appended during a replay survives, and
+	 * a row another process already removed is not resurrected), merge the settled updates into the CURRENT
+	 * rows by id, enforce TTL, attempts and the two caps, then write a temp file and rename it into place. A
+	 * file that cannot be read is never rewritten.
 	 */
-	private compact(updates: Map<string, Update>): number | null {
-		const drops = new Map<SpoolDropCause, SpoolEntry[]>();
-		const note = (cause: SpoolDropCause, entry: SpoolEntry): void => {
-			const list = drops.get(cause) ?? [];
-			list.push(entry);
-			drops.set(cause, list);
-		};
-		let left: number | null = null;
-		let committed = false;
+	private compact(updates: Map<string, Update>): CompactResult {
+		const ctx: RewriteContext = { drops: new Map(), headLost: false };
+		let result: CompactResult = { ok: false, left: 0, dropped: 0, failure: "write" };
 		try {
-			const result = this.withLock(() => {
-				const parsed = this.read();
-				const at = this.now();
-				let kept: SpoolEntry[] = [];
-				for (const entry of parsed.entries) {
-					const update = updates.get(entry.id);
-					if (update?.kind === "remove") continue;
-					if (update?.kind === "drop") {
-						note(update.cause, entry);
-						continue;
-					}
-					if (update?.kind === "retry") {
-						kept.push({ ...entry, attempts: update.attempts, next_at: update.next_at, last_reason: update.last_reason });
-						continue;
-					}
-					kept.push(entry);
-				}
-				const survivors: SpoolEntry[] = [];
-				for (const entry of kept) {
-					if (at - entry.enqueued_at > this.ttlMs) note("ttl", entry);
-					else if (entry.attempts >= this.maxAttempts) note("attempts", entry);
-					else survivors.push(entry);
-				}
-				kept = survivors;
-				let start = 0;
-				while (kept.length - start > this.max) {
-					note("overflow", kept[start] as SpoolEntry);
-					start += 1;
-				}
-				let bytes = 0;
-				const sizes = kept.map((entry) => lineBytes(entry));
-				for (let i = start; i < kept.length; i += 1) bytes += sizes[i] as number;
-				while (start < kept.length && bytes > this.maxBytes) {
-					bytes -= sizes[start] as number;
-					note("bytes", kept[start] as SpoolEntry);
-					start += 1;
-				}
-				kept = kept.slice(start);
-				this.sweepTmp();
-				this.writeFile(kept);
-				committed = true;
-				return kept.length;
-			});
-			if (result.ok) left = result.value;
-			else this.once("compact", result.error);
+			const locked = this.withLock(() => this.rewriteLocked(updates, null, ctx));
+			if (locked.ok) {
+				result = { ok: true, left: locked.value, dropped: 0, failure: null };
+			} else {
+				this.once("compact", locked.error);
+				result = { ok: false, left: 0, dropped: 0, failure: "lock" };
+			}
 		} catch (cause) {
-			this.once("compact", (cause as NodeJS.ErrnoException | null)?.code ?? "EIO");
+			if (cause instanceof SpoolReadError) result = { ok: false, left: 0, dropped: 0, failure: "read" };
+			else this.once("compact", (cause as NodeJS.ErrnoException | null)?.code ?? "EIO");
 		}
-		// Drops are reported only for a compaction that reached the disk: when the write failed the entries
-		// are still in the file, and the next attempt will decide (and report) again, once.
-		if (!committed) drops.clear();
-		// Drop visibility is written after the lock is released: it touches another file.
-		for (const [cause, entries] of drops) {
+		// Drops are reported only for a rewrite that reached the disk: otherwise the entries are still in the
+		// file, and the next attempt will decide (and report) again, once.
+		if (!result.ok) return result;
+		result.dropped = this.announce(ctx);
+		return result;
+	}
+
+	/** Write the visibility for a committed rewrite (it touches another file, so never under the lock); returns how many entries it reported. */
+	private announce(ctx: RewriteContext): number {
+		let total = 0;
+		if (ctx.headLost) this.drop({ cause: "bytes", count: 1, sample: [] });
+		for (const [cause, entries] of ctx.drops) {
+			total += entries.length;
 			this.drop({ cause, count: entries.length, sample: entries.slice(0, DROP_SAMPLE) });
 		}
-		return left;
+		return total;
+	}
+
+	/**
+	 * The rewrite itself, lock already held. `incoming` is a new entry being appended: room is made for it by
+	 * dropping the oldest, and it is part of the same atomic write, so it is never dropped by its own append.
+	 * Returns the lines in the new file. Throws (leaving the file untouched) on a failed read or write.
+	 */
+	private rewriteLocked(updates: Map<string, Update>, incoming: SpoolEntry | null, ctx: RewriteContext): number {
+		const note = (cause: SpoolDropCause, entry: SpoolEntry): void => {
+			const list = ctx.drops.get(cause) ?? [];
+			list.push(entry);
+			ctx.drops.set(cause, list);
+		};
+		const parsed = this.read();
+		ctx.headLost = parsed.headSkipped;
+		const at = this.now();
+		let kept: SpoolEntry[] = [];
+		for (const entry of parsed.entries) {
+			const update = updates.get(entry.id);
+			if (update?.kind === "remove") continue;
+			if (update?.kind === "drop") {
+				note(update.cause, entry);
+				continue;
+			}
+			if (update?.kind === "retry") {
+				kept.push({
+					...entry,
+					attempts: entry.attempts + update.attemptsDelta,
+					next_at: Math.max(entry.next_at, update.next_at),
+					last_reason: update.last_reason,
+				});
+				continue;
+			}
+			kept.push(entry);
+		}
+		const survivors: SpoolEntry[] = [];
+		for (const entry of kept) {
+			if (at - entry.enqueued_at > this.ttlMs) note("ttl", entry);
+			else if (entry.attempts >= this.maxAttempts) note("attempts", entry);
+			else survivors.push(entry);
+		}
+		kept = survivors;
+		const reserveLines = incoming === null ? 0 : 1;
+		const reserveBytes = incoming === null ? 0 : lineBytes(incoming);
+		let start = 0;
+		while (kept.length - start + reserveLines > this.max) {
+			note("overflow", kept[start] as SpoolEntry);
+			start += 1;
+		}
+		const sizes = kept.map((entry) => lineBytes(entry));
+		let bytes = reserveBytes;
+		for (let i = start; i < kept.length; i += 1) bytes += sizes[i] as number;
+		while (start < kept.length && bytes > this.maxBytes) {
+			bytes -= sizes[start] as number;
+			note("bytes", kept[start] as SpoolEntry);
+			start += 1;
+		}
+		kept = kept.slice(start);
+		if (incoming !== null) kept.push(incoming);
+		this.sweepTmp();
+		this.writeFile(kept);
+		return kept.length;
 	}
 
 	private writeFile(entries: readonly SpoolEntry[]): void {
@@ -746,12 +873,14 @@ export class EventSpool {
 	}
 
 	/**
-	 * Read and parse without a lock. Bounded while reading: a file somehow larger
-	 * than four times the byte cap is read from its tail only. The last segment
-	 * of a file that does not end in a newline is a torn write and is ignored.
+	 * Read and parse without a lock. Bounded while reading: a file somehow larger than four times the byte cap
+	 * is read from its tail only (`headSkipped`). The last segment of a file that does not end in a newline is
+	 * a torn write and is ignored. A missing file is an empty spool; ANY other read failure throws
+	 * `SpoolReadError`, because treating "could not read" as "empty" would let the next rewrite erase the queue.
 	 */
 	private read(): Parsed {
 		let text: string;
+		let headSkipped = false;
 		try {
 			const size = statSync(this.path).size;
 			const limit = this.maxBytes * 4 + SPOOL_BODY_CAP_BYTES;
@@ -766,14 +895,16 @@ export class EventSpool {
 				} finally {
 					closeSync(fd);
 				}
-				this.once("read", "EFBIG");
+				headSkipped = true;
+				this.once("read", "EFBIG", "the oldest lines of the oversized file are not read");
 			} else {
-				text = readFileSync(this.path, "utf8");
+				text = this.io.readFile(this.path);
 			}
 		} catch (cause) {
-			const code = (cause as NodeJS.ErrnoException | null)?.code;
-			if (code !== "ENOENT") this.once("read", code ?? "EIO");
-			return { entries: [], malformed: 0 };
+			const code = (cause as NodeJS.ErrnoException | null)?.code ?? "EIO";
+			if (code === "ENOENT") return { entries: [], malformed: 0, headSkipped: false };
+			this.once("read", code, "the spool file is left untouched");
+			throw new SpoolReadError(code);
 		}
 		const entries: SpoolEntry[] = [];
 		let malformed = 0;
@@ -790,7 +921,16 @@ export class EventSpool {
 				malformed += 1;
 			}
 		}
-		return { entries, malformed };
+		return { entries, malformed, headSkipped };
+	}
+
+	/** `read()` as a value: the parse, or the errno code that stopped it. Never throws. */
+	private tryRead(): { parsed: Parsed } | { error: string } {
+		try {
+			return { parsed: this.read() };
+		} catch (cause) {
+			return { error: cause instanceof SpoolReadError ? cause.code : ((cause as NodeJS.ErrnoException | null)?.code ?? "EIO") };
+		}
 	}
 
 	/** Newline count of the file without parsing it: the cheap way to ask whether the line cap was crossed. */
@@ -857,12 +997,12 @@ export class EventSpool {
 	}
 
 	/** Fixed text plus the errno code, once per action and code: a broken disk logs once, not once per event. */
-	private once(action: string, code: string): void {
+	private once(action: string, code: string, effect = "the event is not spooled"): void {
 		const key = `${action}:${code}`;
 		if (this.reported.has(key)) return;
 		this.reported.add(key);
 		try {
-			process.stderr.write(`[collectors] event spool ${action} failed (${code}) at ${this.path}; the event is not spooled\n`);
+			process.stderr.write(`[collectors] event spool ${action} failed (${code}) at ${this.path}; ${effect}\n`);
 		} catch {
 			// Never throw from a reporting path.
 		}

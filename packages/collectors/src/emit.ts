@@ -616,15 +616,32 @@ export interface DrainOptions {
 
 export type DrainResult =
 	| { status: "off" }
-	/** `dropped` counts entries the pre-probe local sweep removed (expired or out of attempts) before the hold. */
-	| { status: "held"; reason: string; dropped: number }
+	/**
+	 * `dropped` counts entries the pre-probe local sweep really removed (expired or out of attempts) before the
+	 * hold. `failure` is present only when the spool file could not be read ("read") or the sweep's rewrite did
+	 * not reach the disk ("write"); nothing was rewritten or removed in the first case. `remaining` is the depth
+	 * on disk after the cleanup, or null when the file could not be read and no earlier snapshot or committed rewrite
+	 * of this pass gives a trustworthy depth: an unknown depth is never reported as 0.
+	 */
+	| { status: "held"; reason: string; dropped: number; remaining: number | null; failure?: "read" | "write" }
 	| ({ status: "ran" } & SpoolDrainReport);
 
-const NOTHING_TO_DO: SpoolDrainReport = { delivered: 0, refused: 0, retried: 0, skipped: 0, dropped: 0, held: null, budgetExhausted: false, remaining: 0 };
+const NOTHING_TO_DO: SpoolDrainReport = { delivered: 0, refused: 0, retried: 0, skipped: 0, dropped: 0, held: null, budgetExhausted: false, remaining: 0, readFailed: false, writeFailed: false };
 let draining: Promise<DrainResult> | null = null;
+
+/** The depth on disk right now, or null when the file cannot be read (an unreadable spool is never "0 entries"). */
+function currentDepth(spool: EventSpool): number | null {
+	const stats = spool.stats();
+	return stats.unreadable === null ? stats.depth : null;
+}
 
 async function runDrain(spool: EventSpool, opts: DrainOptions): Promise<DrainResult> {
 	const before = spool.stats();
+	// An unreadable spool is not an empty one: say so, touch nothing.
+	if (before.unreadable !== null) {
+		logHeld("spool-unreadable");
+		return { status: "held", reason: "spool-unreadable", dropped: 0, remaining: null, failure: "read" };
+	}
 	// Nothing parked, or nothing due: no probe and no request.
 	if (before.depth === 0 || (opts.all !== true && before.due === 0)) return { status: "ran", ...NOTHING_TO_DO, remaining: before.depth };
 	const base = baseUrl(opts.url);
@@ -632,12 +649,36 @@ async function runDrain(spool: EventSpool, opts: DrainOptions): Promise<DrainRes
 	// Expiry and attempt cleanup is local and does not depend on the server: it runs first, so an entry that
 	// should be gone is never kept alive by a failed probe.
 	const swept = spool.sweepSettled();
+	if (swept.failure === "read") {
+		logHeld("spool-unreadable");
+		// The depth read at the start of this pass is the last trustworthy one: the sweep read nothing and wrote nothing.
+		return { status: "held", reason: "spool-unreadable", dropped: 0, remaining: before.depth, failure: "read" };
+	}
+	const sweepWriteFailed = swept.failure === "write";
 	const eligible = spool.eligible(opts.all === true);
-	if (eligible.length === 0) return { status: "ran", ...NOTHING_TO_DO, dropped: swept, remaining: spool.stats().depth };
+	if (eligible === null) {
+		logHeld("spool-unreadable");
+		return { status: "held", reason: "spool-unreadable", dropped: swept.dropped, remaining: swept.remaining ?? before.depth, failure: "read" };
+	}
+	if (eligible.length === 0) {
+		const depth = swept.remaining ?? currentDepth(spool);
+		if (depth === null) return { status: "held", reason: "spool-unreadable", dropped: swept.dropped, remaining: null, failure: "read" };
+		return { status: "ran", ...NOTHING_TO_DO, dropped: swept.dropped, writeFailed: sweepWriteFailed, remaining: depth };
+	}
 	const probe = await probeAny(base, timeoutMs, eligible, opts.token);
 	if (!probe.ok) {
 		logHeld(probe.reason);
-		return { status: "held", reason: probe.reason, dropped: swept };
+		// The failed cleanup gets its second chance here too: if this rewrite commits, its drops and depth are the truth.
+		const again = sweepWriteFailed ? spool.sweepSettled() : null;
+		const failure = again === null ? undefined : again.failure === "read" ? ("read" as const) : again.failure === "write" ? ("write" as const) : undefined;
+		return {
+			status: "held",
+			reason: probe.reason,
+			dropped: swept.dropped + (again?.dropped ?? 0),
+			// A committed rewrite is the truth; failing that, the file's depth now; an unreadable file has no depth to report.
+			remaining: again?.remaining ?? swept.remaining ?? currentDepth(spool),
+			...(failure !== undefined ? { failure } : {}),
+		};
 	}
 	const refusedCredentials = new Set<string>();
 	const report = await spool.drain((entry) => replayEntry(entry, base, timeoutMs, opts.token, refusedCredentials), {
@@ -648,7 +689,18 @@ async function runDrain(spool: EventSpool, opts: DrainOptions): Promise<DrainRes
 	if (report.held === null && refusedCredentials.size > 0 && report.skipped > 0 && report.delivered + report.refused + report.retried === 0) {
 		report.held = "unauthorized";
 	}
-	report.dropped += swept;
+	report.dropped += swept.dropped;
+	// A sweep rewrite that failed is outstanding only if nothing committed since: the replay write-back rewrites the
+	// whole file (expired entries included), so after a successful pass there is nothing left to settle. Ask again;
+	// the re-sweep is a no-op when the file is clean, so a recovered failure is cleared and never double-counted.
+	if (sweepWriteFailed) {
+		const again = spool.sweepSettled();
+		report.dropped += again.dropped;
+		// A re-sweep that committed is the newest word on what is on disk: the pass already removed those entries.
+		if (again.remaining !== null) report.remaining = again.remaining;
+		if (again.failure === "write") report.writeFailed = true;
+		else if (again.failure === "read") report.readFailed = true;
+	}
 	if (report.held !== null) logHeld(report.held);
 	return { status: "ran", ...report };
 }
@@ -664,7 +716,7 @@ export function drainEventSpool(opts: DrainOptions = {}): Promise<DrainResult> {
 	const spool = eventSpool();
 	if (spool === null) return Promise.resolve({ status: "off" });
 	draining = runDrain(spool, opts)
-		.catch((): DrainResult => ({ status: "held", reason: "error", dropped: 0 }))
+		.catch((): DrainResult => ({ status: "held", reason: "error", dropped: 0, remaining: null }))
 		.finally(() => {
 			draining = null;
 		});

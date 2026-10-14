@@ -80,8 +80,13 @@ An unset, blank or unrecognised value is `off`; an unrecognised value prints one
 - Uses the last approved list the projector saved when the fetch fails:
   `/var/lib/substrate/skills/approved.json` (beside `projector-warned.json`),
   written after every successful fetch in `report` and `enforce`, mode 0600, tmp
-  + rename. A cache that is missing, larger than 64 KiB, of another version, has
-  more than 500 names or any name outside the library name rule is ignored whole.
+  + rename. The file records its source: the origin of `SUBSTRATE_URL` (scheme,
+  host and port only, no credentials, path or query) and the `library` the
+  server named in its answer (null from a server that sends none). A cache that
+  is missing, larger than 64 KiB, of another format version (the first format
+  had no source and is rejected), has a missing or malformed source, was
+  fetched from a different origin than the current `SUBSTRATE_URL`, has more
+  than 500 names or any name outside the library name rule is ignored whole.
 - With no usable list at all, treats nothing as approved: no NEW link is made,
   existing links are left alone, and one `reason: approved-list-unavailable`
   warning is sent (again after 24 hours if it persists).
@@ -111,6 +116,14 @@ changes nothing about the registry on the server.
 
 ## Limits
 
+- The cache is checked against the current origin only. After a failed fetch the
+  current library is unknown, so a server that kept its origin but switched to a
+  different library is not detected until a fetch succeeds; that fetch replaces
+  the cache (old approvals are never merged in or used afterwards). A successful
+  fetch whose cache cannot be written removes the old file. Changing
+  `SUBSTRATE_URL` therefore makes the first failing run behave as "no list":
+  no new links, existing links untouched, one `approved-list-unavailable`
+  warning, until the new server answers once.
 - The approved list is whatever the server returned within 3 s; a server that
   returns fewer than 500 entries with `truncated: false` is trusted as complete.
 - A list the server cut (`truncated: true`, or more than 500 entries) is used

@@ -258,9 +258,11 @@ async function replaySpool(): Promise<void> {
 	const result = await drainEventSpool({ budgetMs: 10_000 });
 	if (result.status === "off") return;
 	const delivered = result.status === "ran" ? result.delivered : 0;
-	if (delivered > 0 || result.dropped > 0) {
-		const left = result.status === "ran" ? `, left ${result.remaining}` : `, held ${result.reason}`;
-		process.stdout.write(`[grok-collector] spool replayed ${delivered}, dropped ${result.dropped}${left}\n`);
+	const failed = result.status === "ran" ? result.readFailed || result.writeFailed : result.failure !== undefined;
+	if (delivered > 0 || result.dropped > 0 || failed) {
+		const left = result.status === "ran" ? `, left ${result.remaining}` : `, held ${result.reason}${result.remaining === null ? "" : `, left ${result.remaining}`}`;
+		const note = failed ? " (spool read or write failed; see stderr)" : "";
+		process.stdout.write(`[grok-collector] spool replayed ${delivered}, dropped ${result.dropped}${left}${note}\n`);
 	}
 }
 

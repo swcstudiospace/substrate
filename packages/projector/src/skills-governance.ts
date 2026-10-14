@@ -57,7 +57,10 @@ export const FETCH_TIMEOUT_MS = 3_000;
 /** The same warning is re-sent after this long even when nothing changed, so a standing gap stays visible. */
 export const RENOTIFY_MS = 24 * 60 * 60 * 1000;
 const TMP_SUFFIX = ".substrate-tmp";
-const CACHE_VERSION = 1;
+/** Version 2 adds `source`; a version-1 file carries no identity and is rejected on read. */
+const CACHE_VERSION = 2;
+/** Longest origin or library string a cache may carry. */
+const MAX_SOURCE_CHARS = 200;
 
 export const APPROVED_CACHE_NAME = "approved.json";
 export const GOVERNANCE_WARNED_NAME = "governance-warned.json";
@@ -72,6 +75,8 @@ export interface GovernanceOptions {
 	mode: GovernanceMode;
 	/** Null when the projector holds no surface token: the fetch cannot be authorised, so it is not attempted. */
 	target: GovernanceTarget | null;
+	/** The substrate URL when `target` is null (no token): the cache is still bound to its origin. */
+	url?: string;
 	/** The unrecognised flag value, for the boot-style warning; null when parsed or unset. */
 	rejected?: string | null;
 	fetchImpl?: typeof fetch;
@@ -121,7 +126,7 @@ export function governanceFromEnv(env: NodeJS.ProcessEnv = process.env): Governa
 	const { mode, rejected } = parseGovernanceMode(env[GOVERNANCE_ENV]);
 	const token = resolveSurfaceToken(env);
 	const url = (env.SUBSTRATE_URL ?? "http://127.0.0.1:7410").replace(/\/+$/, "");
-	return { mode, rejected, target: token === "" ? null : { url, token } };
+	return { mode, rejected, url, target: token === "" ? null : { url, token } };
 }
 
 /** The flag value the projector fell back from, in the shape the repo prints misconfigurations. */
@@ -135,6 +140,19 @@ export interface ApprovedList {
 	truncated: boolean;
 	/** Entries dropped for a missing or invalid name. */
 	dropped: number;
+	/** The `<owner/repo>` the server says the list belongs to; null from an old server or an odd value. */
+	library: string | null;
+}
+
+/** `scheme://host[:port]` of a URL, without credentials, path or query; null when it is not an http(s) URL. */
+export function originOf(url: string): string | null {
+	try {
+		const parsed = new URL(url);
+		if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+		return parsed.origin.length <= MAX_SOURCE_CHARS ? parsed.origin : null;
+	} catch {
+		return null;
+	}
 }
 
 /**
@@ -161,7 +179,8 @@ export function parseApproved(body: unknown): ApprovedList | null {
 		}
 		names.add(name);
 	}
-	return { names, truncated, dropped };
+	const library = typeof record.library === "string" && record.library.length > 0 && record.library.length <= MAX_SOURCE_CHARS ? record.library : null;
+	return { names, truncated, dropped, library };
 }
 
 /** Read the body in chunks and stop at the cap: the limit is enforced while reading, not after. */
@@ -209,8 +228,15 @@ export async function fetchApproved(target: GovernanceTarget, fetchImpl: typeof 
 	}
 }
 
-/** The set (and whether the server cut it) from a schema-valid cache file, or null for anything else (missing, oversized, corrupt, wrong shape). */
-export function readApprovedCache(file: string): { names: Set<string>; truncated: boolean } | null {
+/**
+ * The set (and whether the server cut it) from a schema-valid cache file whose recorded source
+ * origin equals `origin`, or null for anything else: missing, oversized, corrupt, wrong shape, an
+ * older format without `source`, a malformed `source`, or another origin (approvals fetched from a
+ * different server must never gate this one). The library cannot be compared here: after a failed
+ * fetch the current library is unknown.
+ */
+export function readApprovedCache(file: string, origin: string | null): { names: Set<string>; truncated: boolean; library: string | null } | null {
+	if (origin === null) return null;
 	try {
 		const stat = lstatSync(file);
 		if (!stat.isFile() || stat.size > MAX_CACHE_BYTES) return null;
@@ -218,13 +244,20 @@ export function readApprovedCache(file: string): { names: Set<string>; truncated
 		if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
 		const record = parsed as Record<string, unknown>;
 		if (record.version !== CACHE_VERSION || !Array.isArray(record.names) || record.names.length > MAX_APPROVED) return null;
+		const source = record.source;
+		if (source === null || typeof source !== "object" || Array.isArray(source)) return null;
+		const cachedOrigin = (source as Record<string, unknown>).url;
+		const library = (source as Record<string, unknown>).library;
+		if (typeof cachedOrigin !== "string" || cachedOrigin.length === 0 || cachedOrigin.length > MAX_SOURCE_CHARS) return null;
+		if (library !== null && (typeof library !== "string" || library.length === 0 || library.length > MAX_SOURCE_CHARS)) return null;
+		if (cachedOrigin !== origin) return null;
 		const names = new Set<string>();
 		for (const name of record.names) {
 			if (typeof name !== "string" || !SKILL_NAME_RE.test(name)) return null;
 			names.add(name);
 		}
 		if (record.truncated !== undefined && typeof record.truncated !== "boolean") return null;
-		return { names, truncated: record.truncated === true };
+		return { names, truncated: record.truncated === true, library };
 	} catch {
 		return null;
 	}
@@ -244,8 +277,14 @@ function writeJsonAtomic(file: string, value: unknown): void {
 	}
 }
 
-export function writeApprovedCache(file: string, names: ReadonlySet<string>, now: number, truncated = false): void {
-	writeJsonAtomic(file, { version: CACHE_VERSION, fetched_at: new Date(now).toISOString(), truncated, names: [...names].sort() });
+export function writeApprovedCache(
+	file: string,
+	names: ReadonlySet<string>,
+	now: number,
+	truncated: boolean,
+	source: { url: string; library: string | null },
+): void {
+	writeJsonAtomic(file, { version: CACHE_VERSION, fetched_at: new Date(now).toISOString(), source, truncated, names: [...names].sort() });
 }
 
 export type ApprovedSource = "live" | "cache" | "none";
@@ -306,6 +345,7 @@ export async function evaluateGovernance(
 	if (gov.mode === "off") return null;
 	const now = gov.now ?? Date.now;
 	const notes: string[] = [];
+	const origin = originOf(gov.target?.url ?? gov.url ?? "");
 	let approved: ReadonlySet<string> | null = null;
 	let source: ApprovedSource = "none";
 	let truncated = false;
@@ -320,11 +360,19 @@ export async function evaluateGovernance(
 			source = "live";
 			truncated = outcome.list.truncated;
 			if (outcome.list.dropped > 0) notes.push(`[projector] governance dropped ${outcome.list.dropped} approved entr${outcome.list.dropped === 1 ? "y" : "ies"} with an invalid name`);
-			if (files.persist) {
+			// A successful answer replaces the cache whatever it held: approvals of another origin or
+			// library are never merged in. When the replacement cannot be written the old file is
+			// removed, so a stale set from another source cannot outlive this answer.
+			if (files.persist && origin !== null) {
 				try {
-					writeApprovedCache(files.cache, outcome.list.names, now(), outcome.list.truncated);
+					writeApprovedCache(files.cache, outcome.list.names, now(), outcome.list.truncated, { url: origin, library: outcome.list.library });
 				} catch (cause) {
 					notes.push(`[projector] governance cache not written: ${String(cause instanceof Error ? cause.message : cause).slice(0, 120)}`);
+					try {
+						rmSync(files.cache, { force: true });
+					} catch {
+						// A cache that can neither be replaced nor removed is still origin-checked on read.
+					}
 				}
 			}
 		} else {
@@ -332,7 +380,7 @@ export async function evaluateGovernance(
 		}
 	}
 	if (approved === null) {
-		const cached = readApprovedCache(files.cache);
+		const cached = readApprovedCache(files.cache, origin);
 		if (cached !== null) {
 			approved = cached.names;
 			truncated = cached.truncated;

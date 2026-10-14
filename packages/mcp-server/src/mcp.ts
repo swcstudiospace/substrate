@@ -1121,7 +1121,8 @@ export function createMcpServer(substrate: Substrate, caller: McpCaller | Surfac
 		{
 			title: "List approved skills",
 			description:
-				"The skills registry. By default the APPROVED skills, `{ governance, skills, truncated }`, sorted by name, ONE " +
+				"The skills registry. By default the APPROVED skills, `{ governance, library, skills, truncated }` (`library` is the " +
+				"configured skills library's owner/repo slug), sorted by name, ONE " +
 				"entry per name (its most recent approved row; a name stays listed while any of its rows is approved): each " +
 				"entry has the skill's name, its proposal `content_sha256` (empty when the pull request was not proposed " +
 				"through this substrate), the `merge_sha` that was approved, `pr_url`, `approved_at` and `proposed_by`. " +

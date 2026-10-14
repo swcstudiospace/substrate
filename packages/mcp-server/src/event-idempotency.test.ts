@@ -54,6 +54,10 @@ const COLUMNS = ["ts", "id", "surface", "session_id", "graph_id", "node_id", "li
 interface FakeLedger {
 	rows: Row[];
 	ingests: number;
+	/** Every `event_ingest` record written, as (event_id, event_ts, graph_id). */
+	ingestRecords: Array<{ event_id: unknown; event_ts: unknown; graph_id: unknown }>;
+	/** The same records with their server-time stamp (epoch ms), which the stream and coverage reads order and bucket by. */
+	ingestStamps: Array<{ event_id: string; ingested_at: number }>;
 	sql: string[];
 	/** Runs ahead of every statement; a `Response` answers it instead of the store. */
 	before: (statement: string) => Promise<Response | undefined>;
@@ -88,6 +92,8 @@ function fakeLedger(): FakeLedger {
 	const ledger: FakeLedger = {
 		rows: [],
 		ingests: 0,
+		ingestRecords: [],
+		ingestStamps: [],
 		sql: [],
 		before: async () => undefined,
 		lookups: () => ledger.sql.filter((statement) => statement.includes('"payload" LIKE')),
@@ -109,7 +115,40 @@ function fakeLedger(): FakeLedger {
 		}
 		if (statement.startsWith('INSERT INTO "event_ingest"')) {
 			ledger.ingests++;
+			const [ingested_at, event_id, event_ts, graph_id] = insertedValues(statement);
+			ledger.ingestRecords.push({ event_id, event_ts, graph_id });
+			ledger.ingestStamps.push({ event_id: String(event_id), ingested_at: Date.parse(String(ingested_at)) });
 			return affected;
+		}
+		if (statement.startsWith('SELECT "event_id", "ingested_at" FROM "event_ingest" WHERE "event_id" =')) {
+			// `cursorPosition`: the event's earliest record, if any.
+			const id = /"event_id" = '([^']*)'/.exec(statement)?.[1];
+			const first = ledger.ingestStamps.filter((row) => row.event_id === id).sort((a, b) => a.ingested_at - b.ingested_at)[0];
+			return records(["event_id", "ingested_at"], first ? [[first.event_id, first.ingested_at]] : []);
+		}
+		if (statement.includes("date_bin")) {
+			// `anchorCoverage`'s histogram: raw record counts per ingest hour, as the statement counts them.
+			const per = new Map<number, number>();
+			for (const row of ledger.ingestStamps) {
+				const hour = Math.floor(row.ingested_at / HOUR_MS) * HOUR_MS;
+				per.set(hour, (per.get(hour) ?? 0) + 1);
+			}
+			return records(["hour", "n"], [...per].map(([hour, n]) => [hour / 1000, n]));
+		}
+		if (statement.includes("NOT EXISTS")) {
+			// `eventIdsAfter`, as written: an event is NEW unless an earlier record sits inside the one-hour lookback.
+			const bounds = [...statement.matchAll(/"ingested_at" >= '([^']*)'/g)].map((match) => Date.parse(match[1]!));
+			const [at, lookback] = bounds as [number, number];
+			const fresh = ledger.ingestStamps
+				.filter((row) => row.ingested_at >= at)
+				.filter(
+					(row) =>
+						!ledger.ingestStamps.some(
+							(prior) => prior.event_id === row.event_id && prior.ingested_at >= lookback && prior.ingested_at < at,
+						),
+				)
+				.sort((a, b) => a.ingested_at - b.ingested_at);
+			return records(["event_id", "ingested_at", "event_ts"], fresh.map((row) => [row.event_id, row.ingested_at, FIRST_TS && Date.parse(FIRST_TS)]));
 		}
 		if (statement.includes('"payload" LIKE')) {
 			const text = (column: string): string | null | undefined => {
@@ -231,18 +270,20 @@ describe("accept: store the key, look it up only for a marked replay", () => {
 		expect(verifyChain(ledger.events())).toEqual({ ok: true });
 	});
 
-	test("a marked replay of a stored key answers the existing event and writes nothing", async () => {
+	test("a hit whose membership exists writes NOTHING: no second event, no second ingest record, an unchanged answer", async () => {
 		const ledger = fakeLedger();
 		const seen: Seen = { replays: [], emitted: 0 };
 		const substrate = substrateWith(ACCEPT, seen);
 		const first = await substrate.emit(base({ idempotency_key: KEY }));
 		const inserts = ledger.inserts().length;
 		const ingests = ledger.ingests;
+		expect(ingests).toBe(1);
 
 		const replay = await substrate.emit(base({ idempotency_key: KEY }), { replay: true });
 
 		expect(replay.deduplicated).toBe(true);
 		expect(replay.stored).toBe(true);
+		expect(replay.warning).toBeUndefined();
 		expect(replay.event.id).toBe(first.event.id);
 		expect(replay.event.hash).toBe(first.event.hash);
 		expect(replay.event.ts).toBe(first.event.ts);
@@ -253,6 +294,108 @@ describe("accept: store the key, look it up only for a marked replay", () => {
 		// The dedupe is counted as a replay and NOT as an emit: its tokens and cost were counted once already.
 		expect(seen.replays).toEqual(["deduplicated"]);
 		expect(seen.emitted).toBe(1);
+	});
+
+	test("a hit whose original never wrote its ingest record repairs it: exactly one record for the existing id, no second event", async () => {
+		const ledger = fakeLedger();
+		const substrate = substrateWith(ACCEPT);
+		// The original's agent_events INSERT lands, then its reply is lost and its ingest record is never written.
+		ledger.before = async (statement) => {
+			if (!statement.startsWith('INSERT INTO "agent_events"')) return undefined;
+			ledger.land(statement);
+			return new Response("gateway timeout", { status: 503 });
+		};
+		const lost = await substrate.emit(base({ idempotency_key: KEY }));
+		expect(lost.stored).toBe(false);
+		expect(ledger.rows).toHaveLength(1);
+		expect(ledger.ingestRecords).toEqual([]);
+		ledger.before = async () => undefined;
+
+		const replay = await substrate.emit(base({ idempotency_key: KEY }), { replay: true });
+
+		expect(replay.deduplicated).toBe(true);
+		expect(replay.stored).toBe(true);
+		expect(replay.warning).toBeUndefined();
+		expect(ledger.rows).toHaveLength(1);
+		expect(ledger.inserts()).toHaveLength(1);
+		expect(ledger.ingestRecords).toEqual([{ event_id: ledger.rows[0]!.id, event_ts: FIRST_TS, graph_id: "ut-1" }]);
+
+		// It is now the event's first record: a further replay finds it and writes nothing.
+		await substrate.emit(base({ idempotency_key: KEY }), { replay: true });
+		expect(ledger.ingestRecords).toHaveLength(1);
+	});
+
+	test("a membership read that fails writes nothing and warns, never a failure or a second event", async () => {
+		const ledger = fakeLedger();
+		const seen: Seen = { replays: [], emitted: 0 };
+		const substrate = substrateWith(ACCEPT, seen);
+		ledger.before = async (statement) => {
+			if (!statement.startsWith('INSERT INTO "agent_events"')) return undefined;
+			ledger.land(statement);
+			return new Response("gateway timeout", { status: 503 });
+		};
+		await substrate.emit(base({ idempotency_key: KEY }));
+		ledger.before = async (statement) =>
+			statement.startsWith('SELECT "event_id", "ingested_at" FROM "event_ingest"') ? new Response("down", { status: 503 }) : undefined;
+
+		const replay = await substrate.emit(base({ idempotency_key: KEY }), { replay: true });
+
+		expect(replay.stored).toBe(true);
+		expect(replay.deduplicated).toBe(true);
+		expect(replay.lookupFailed).toBeUndefined();
+		expect(replay.warning).toContain("Do not re-emit it");
+		expect(ledger.ingestRecords).toEqual([]);
+		expect(ledger.inserts()).toHaveLength(1);
+		expect(ledger.rows).toHaveLength(1);
+		expect(seen.replays).toEqual(["deduplicated"]);
+	});
+
+	test("a repair write that fails stays stored:true with the normal path's warning, and writes no second event", async () => {
+		const ledger = fakeLedger();
+		const seen: Seen = { replays: [], emitted: 0 };
+		const substrate = substrateWith(ACCEPT, seen);
+		ledger.before = async (statement) => {
+			if (!statement.startsWith('INSERT INTO "agent_events"')) return undefined;
+			ledger.land(statement);
+			return new Response("gateway timeout", { status: 503 });
+		};
+		await substrate.emit(base({ idempotency_key: KEY }));
+		ledger.before = async (statement) => (statement.startsWith('INSERT INTO "event_ingest"') ? new Response("nope", { status: 503 }) : undefined);
+
+		const replay = await substrate.emit(base({ idempotency_key: KEY }), { replay: true });
+
+		expect(replay.stored).toBe(true);
+		expect(replay.deduplicated).toBe(true);
+		expect(replay.lookupFailed).toBeUndefined();
+		expect(replay.warning).toContain("Do not re-emit it");
+		expect(ledger.inserts()).toHaveLength(1);
+		expect(ledger.rows).toHaveLength(1);
+		expect(ledger.ingestRecords).toEqual([]);
+		expect(seen.replays).toEqual(["deduplicated"]);
+	});
+
+	test("a replay hours later with the membership present leaves the stream and the coverage histogram as they were", async () => {
+		const ledger = fakeLedger();
+		const originalAt = Date.now() - 6 * HOUR_MS - 123_456;
+		let now = originalAt;
+		const client = new GreptimeClient(config, { ledger: loadConfig(ACCEPT).ledger, clock: () => now });
+		const substrate = new Substrate(loadConfig(ACCEPT), { index: null, greptime: client });
+		const first = await substrate.emit(base({ idempotency_key: KEY }));
+		expect(ledger.ingestStamps).toHaveLength(1);
+
+		// The stream's cursor sits two hours after the event; the replay arrives three hours after it.
+		const cursor = { id: "evt_cursor", ingestedAt: originalAt + 2 * HOUR_MS };
+		now = originalAt + 3 * HOUR_MS;
+		const replay = await substrate.emit(base({ idempotency_key: KEY }), { replay: true });
+
+		expect(replay.deduplicated).toBe(true);
+		expect(replay.event.id).toBe(first.event.id);
+		expect(ledger.ingestStamps).toHaveLength(1);
+		// The stream does not hand the stored event out again as a new position.
+		expect(await client.eventIdsAfter(cursor, 10)).toEqual([]);
+		// Coverage counts only the hour the membership really sits in — the hour `hourLeaves` would anchor it in.
+		const coverage = await client.anchorCoverage({ now: originalAt + 5 * HOUR_MS });
+		expect(coverage.uncoveredHours).toEqual([new Date(Math.floor(originalAt / HOUR_MS) * HOUR_MS).toISOString()]);
 	});
 
 	test("the lookup is the contract's: key prefix, exact ts, NULL as IS NULL, a small LIMIT", async () => {

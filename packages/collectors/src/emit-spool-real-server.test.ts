@@ -124,7 +124,7 @@ describe("replay against the real server with a bearer required", () => {
 
 		const result = await drainEventSpool({ all: true, url: server.url });
 
-		expect(result).toEqual({ status: "held", reason: "healthz-auth", dropped: 0 });
+		expect(result).toEqual({ status: "held", reason: "healthz-auth", dropped: 0, remaining: expect.any(Number) });
 		expect(server.healthAuth).toEqual([null]);
 		expect(server.written).toEqual([]);
 		expect(new EventSpool({ path: join(stateDir, "event-spool.jsonl") }).list()[0]?.attempts).toBe(1);
@@ -136,7 +136,7 @@ describe("replay against the real server with a bearer required", () => {
 
 		const result = await drainEventSpool({ all: true, url: server.url, token: "tok-not-a-token" });
 
-		expect(result).toEqual({ status: "held", reason: "healthz-auth", dropped: 0 });
+		expect(result).toEqual({ status: "held", reason: "healthz-auth", dropped: 0, remaining: expect.any(Number) });
 		expect(server.written).toEqual([]);
 	});
 

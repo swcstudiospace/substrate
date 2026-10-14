@@ -273,8 +273,41 @@ A drop writes a line with `kind` `dropped` to `refused-emits.jsonl` (the same
 seven keys, `status` 0, `error` `spool-<cause>`, never the summary or payload)
 and one stderr line. A drop of many entries at once writes up to 20 lines and
 one `more=<n>` summary line. An unwritable spool (`spool-write_failed`) drops
-the event as it always did. The line cap is enforced to within a tenth of its
-value between size checks. Cap parsing, for each of the four caps and
+the event as it always did.
+
+An append enforces the caps before it accepts the event. A line larger than
+`SUBSTRATE_EVENT_SPOOL_MAX_BYTES` is refused (`spool-oversize`) and nothing is
+written. When the byte cap would be crossed, or the line cap may be, room is
+made first: the oldest entries are dropped in one rewrite that already contains
+the new line and that must succeed before anything changes. If that rewrite
+fails (a full disk, say) the append is refused, the event is not spooled, the
+file does not grow past the cap, and the caller treats it as it treats any
+write failure (the collector keeps its own state, as with the flag off). The
+byte cap is exact, a file that ends in a torn line included (the separator the
+append would add is counted before the append is chosen); the line cap is checked every tenth of its capacity of file
+growth, so the file can briefly hold up to a tenth of the cap more lines.
+
+A file that exists but cannot be read (an I/O error, not a missing file) is
+never treated as empty: no rewrite, sweep, replay or room-making append touches
+it, `substrate spool status` prints `unreadable: <errno>`, `substrate spool
+flush` says the file could not be read, and one stderr line is logged. Replay
+passes merge their results into the rows in the file when they write back: two
+passes that both fail an entry add two attempts, the later backoff wins, and a
+row another process already removed is not brought back. A write-back that does
+not reach the disk is reported (`write failed` in the flush line) and its
+settled entries are not counted as removed; they are retried at the next pass.
+The report names the kind of failure: a write-back whose re-read failed is a
+read failure (`readFailed`), not a write failure. A failed cleanup before the
+replay is reported only until a later rewrite in the same pass commits; if the
+replay's write-back succeeds, nothing is outstanding and each drop is counted
+once. The depth in every result (`remaining`, also on a held result) is what is on
+disk after the last rewrite that committed, so entries the pass already removed
+are not reported as still there. When the file could not be read and this pass has no trustworthy depth
+(an earlier snapshot or a committed rewrite), the depth is unknown: `remaining`
+is `null` in the JSON, and the flush line and the Grok summary leave the count
+out instead of printing 0.
+
+Cap parsing, for each of the four caps and
 `SUBSTRATE_REFUSED_EMITS_MAX_BYTES`: unset or blank is the default, silently; a
 value that is not a positive integer (including `0`) is the default with one
 warning; a value below the minimum (spool bytes 1024, refused journal 4096) is

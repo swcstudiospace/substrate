@@ -742,6 +742,7 @@ describe("skills_list", () => {
 		for (const caller of [asAgent, { surface: "substrate" as Surface, isOperator: false }, { surface: "omp" as Surface, isOperator: true }]) {
 			const listed = await w.substrate.listSkills({}, caller);
 			expect(listed.governance).toBe("report");
+			expect(listed.library).toBe(REPO);
 			expect(listed.truncated).toBe(false);
 			expect(listed.skills.map((skill) => skill.name)).toEqual(["alpha", "zeta"]);
 			expect(Object.keys(listed.skills[0] ?? {}).sort()).toEqual(["approved_at", "content_sha256", "merge_sha", "name", "pr_url", "proposed_by"]);
@@ -801,6 +802,18 @@ describe("skills_list", () => {
 		const listed = await off.substrate.listSkills({}, asAgent);
 		expect(listed.governance).toBe("off");
 		expect(listed.skills.map((skill) => skill.name)).toEqual(["alpha", "zeta"]);
+	});
+
+	test("the list names the configured library and shows only that library's rows", async () => {
+		const w = await seeded();
+		const other = world({ SUBSTRATE_SKILLS_REPO: "rehearsal/agent-skills", SUBSTRATE_SKILLS_REMOTE_URL: "file:///tmp/rehearsal/agent-skills.git", SUBSTRATE_SKILLS_GH: "/run/fake-gh" });
+		other.registry.rows.push(...w.registry.rows);
+		const listed = await other.substrate.listSkills({}, asAgent);
+		expect(listed.library).toBe("rehearsal/agent-skills");
+		// Every seeded row belongs to the default library, so none is this library's.
+		expect(listed.skills).toEqual([]);
+		// A slug, never a URL: nothing with userinfo or a scheme.
+		expect(listed.library).not.toMatch(/[:@]/);
 	});
 
 	test("more than LIST_MAX rows is cut at LIST_MAX and says so", async () => {
@@ -881,7 +894,7 @@ describe("the MCP doors", () => {
 		expect(approved.isError).toBe(false);
 		expect(approved.json()).toMatchObject({ status: "approved", merge_sha: MERGE });
 		const listed = await call(client, "skills_list", {});
-		expect(listed.json()).toMatchObject({ governance: "off", skills: [{ name: "demo-skill", merge_sha: MERGE }], truncated: false });
+		expect(listed.json()).toMatchObject({ governance: "off", library: REPO, skills: [{ name: "demo-skill", merge_sha: MERGE }], truncated: false });
 	});
 
 	test("a non-operator is refused with no gh call, and may still read the approved list but not other states", async () => {
@@ -1088,6 +1101,7 @@ describe("the REST doors", () => {
 		expect(reply.status).toBe(200);
 		expect(reply.json).toEqual({
 			governance: "report",
+			library: REPO,
 			skills: [{ name: "demo-skill", content_sha256: HASH, merge_sha: MERGE, pr_url: PR_URL(12), approved_at: now, proposed_by: "claude-code" }],
 			truncated: false,
 		});

@@ -1137,13 +1137,29 @@ export class GreptimeClient {
 		// the session's next event must chain onto this hash.
 		if (event.session_id !== null) this.chainTips?.set(event.session_id, event.hash);
 
-		// The ingest record goes second: it must never name an event that does not
-		// exist. Each attempt takes a fresh stamp immediately before its INSERT; a
-		// duplicate can only appear when the retry follows an ambiguous timeout
-		// that had in fact landed, and the hour read collapses it (D27-10).
-		// `quote(null)` renders a null graph_id as NULL with no branch (D27-07).
-		// Both attempts, and the live append_mode probe, share INGEST_BUDGET_MS so
-		// a caller that already has the event row is not held for two full timeouts.
+		// The ingest record goes second: it must never name an event that does not exist.
+		await this.recordIngest(event);
+	}
+
+	/**
+	 * The event's `event_ingest` record: the membership an hourly anchor reads (D27-10). Shared by
+	 * `insertEvent`, after its row landed, and by an idempotent replay that matched an existing
+	 * row (U5-4a), whose original attempt may have ended before this write.
+	 *
+	 * Each attempt takes a fresh stamp immediately before its INSERT; a duplicate can only appear
+	 * when a retry follows an ambiguous timeout that had in fact landed (or, for a replay, when the
+	 * original's record exists already), and `hourLeaves` collapses it: it keeps each event's
+	 * EARLIEST record and drops an event that has an earlier record than the hour (`first` map and
+	 * the `ingested_at < start` read there), as `graphIngest` does. A second record therefore
+	 * never moves an event's hour or position — and the hour a repaired membership lands in is
+	 * this write's server time, never the event's `ts`.
+	 * `quote(null)` renders a null graph_id as NULL with no branch (D27-07).
+	 * Both attempts, and the live append_mode probe, share INGEST_BUDGET_MS so a caller that
+	 * already has the event row is not held for two full timeouts.
+	 *
+	 * Throws {@link IngestNotRecorded} when it cannot be confirmed; the event row is untouched.
+	 */
+	async recordIngest(event: Pick<SubstrateEvent, "id" | "ts" | "graph_id">): Promise<void> {
 		const budgetStarted = Date.now();
 		const remaining = (): number => INGEST_BUDGET_MS - (Date.now() - budgetStarted);
 		const probeBudget = remaining();
