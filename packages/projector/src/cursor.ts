@@ -19,11 +19,23 @@
  * no file.
  */
 import { existsSync, readFileSync, writeFileSync, copyFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const DEFAULT_PATH = "/root/.cursor/hooks.json";
-const CLI = process.env.SUBSTRATE_CLI ?? "/root/src/repos/agent-substrate/packages/cli/src/index.ts";
-const STOP_SCRIPT =
-	process.env.SUBSTRATE_CURSOR_STOP ?? "/root/src/repos/agent-substrate/packages/collectors/src/cursor-stop.ts";
+const HERE = dirname(fileURLToPath(import.meta.url));
+/** This checkout's CLI and stop script. A VPS checkout at the historical path resolves to that path. */
+const PACKAGE_CLI = join(HERE, "..", "..", "cli", "src", "index.ts");
+const PACKAGE_STOP = join(HERE, "..", "..", "collectors", "src", "cursor-stop.ts");
+
+function cursorHome(): string {
+	const fromEnv = process.env.HOME?.trim();
+	return fromEnv ? fromEnv : homedir();
+}
+
+const DEFAULT_PATH = join(cursorHome(), ".cursor", "hooks.json");
+const CLI = process.env.SUBSTRATE_CLI?.trim() || PACKAGE_CLI;
+const STOP_SCRIPT = process.env.SUBSTRATE_CURSOR_STOP?.trim() || PACKAGE_STOP;
 
 interface HookEntry {
 	type: string;

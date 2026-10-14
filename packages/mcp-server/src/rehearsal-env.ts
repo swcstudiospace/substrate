@@ -61,6 +61,65 @@ export const RAGFLOW_FIXTURE_ENV_KEYS = [
 /** The builder refused an input; the message names surfaces and hosts, never values. */
 export class RehearsalEnvError extends Error {}
 
+/**
+ * The server settings `rehearsal up --extra-env KEY=VALUE` may add, each with the exact values it
+ * accepts. A closed list of non-secret feature flags and one SLO sample floor: nothing here names a
+ * store, a token, a path or a host, so no entry can point the twin at production or carry a
+ * credential. Every value is an enumeration or a short integer, never free text, so a typo is
+ * refused with the rule name rather than silently becoming a server warning.
+ *
+ * - `SUBSTRATE_METRICS_HISTORY`, `SUBSTRATE_BRIEF_PROFILE`, `SUBSTRATE_CACHE_SWR` and
+ *   `SUBSTRATE_EVENT_IDEMPOTENCY` are flags the
+ *   server on main reads and a release most often changes the default of; a twin that cannot set
+ *   them cannot prove them. `SUBSTRATE_BREAKER_FAILURES` is the per-plane breaker threshold the
+ *   server reads (1..999). Add a flag here only when the server reads it, with the value set the
+ *   server accepts: a list that pins an invented value set refuses valid ones.
+ * - `SUBSTRATE_SLO_MIN_SAMPLES` lets a short outage window (the release gate's) reach the
+ *   observation count an SLO needs before it is judged; the production default is 20.
+ */
+export const EXTRA_ENV_ALLOWLIST: Readonly<Record<string, RegExp>> = {
+	SUBSTRATE_METRICS_HISTORY: /^(on|off)$/,
+	SUBSTRATE_BRIEF_PROFILE: /^(off|shadow|enforce)$/,
+	SUBSTRATE_CACHE_SWR: /^(off|shadow|enforce)$/,
+	SUBSTRATE_EVENT_IDEMPOTENCY: /^(off|accept|enforce)$/,
+	SUBSTRATE_BREAKER_FAILURES: /^[1-9][0-9]{0,2}$/,
+	SUBSTRATE_SLO_MIN_SAMPLES: /^[1-9][0-9]{0,2}$/,
+};
+
+/** The allowlisted keys, in the order a refusal names them. */
+export const EXTRA_ENV_KEYS: readonly string[] = Object.keys(EXTRA_ENV_ALLOWLIST);
+
+/**
+ * `--extra-env KEY=VALUE` entries into the record the builder takes. Refuses, naming a rule and the
+ * key but never echoing a value of a key that is not on the list:
+ *
+ * - `extra-env-format`: the entry is not `KEY=VALUE` with a non-empty key;
+ * - `extra-env-key`: the key is not on the allowlist (`Object.hasOwn`, so `__proto__` and
+ *   `constructor` are refused like any other stranger);
+ * - `extra-env-value`: the key is listed but the value is not one it accepts;
+ * - `extra-env-duplicate`: the key was given twice, so the later value cannot silently win.
+ */
+export function parseExtraEnv(entries: readonly string[]): Record<string, string> {
+	const out: Record<string, string> = {};
+	for (const entry of entries) {
+		const at = entry.indexOf("=");
+		if (at <= 0) throw new RehearsalEnvError("rehearsal env refused: rule extra-env-format: expected KEY=VALUE");
+		const key = entry.slice(0, at);
+		const value = entry.slice(at + 1);
+		if (!Object.hasOwn(EXTRA_ENV_ALLOWLIST, key)) {
+			throw new RehearsalEnvError(
+				`rehearsal env refused: rule extra-env-key: ${JSON.stringify(key.slice(0, 64))} is not an allowlisted setting (${EXTRA_ENV_KEYS.join(", ")})`,
+			);
+		}
+		if (!(EXTRA_ENV_ALLOWLIST[key] as RegExp).test(value)) {
+			throw new RehearsalEnvError(`rehearsal env refused: rule extra-env-value: ${key} does not accept ${JSON.stringify(value.slice(0, 40))}`);
+		}
+		if (Object.hasOwn(out, key)) throw new RehearsalEnvError(`rehearsal env refused: rule extra-env-duplicate: ${key} was given twice`);
+		out[key] = value;
+	}
+	return out;
+}
+
 export interface ScratchPorts {
 	/** Scratch MCP server port. */
 	mcp: number;
@@ -98,6 +157,11 @@ export interface BuildRehearsalEnvInput {
 	parentEnv: Record<string, string | undefined>;
 	/** The skills fixture's server settings, when the instance was started with `--skills-fixture`. */
 	skillsFixture?: Record<string, string> | null;
+	/**
+	 * Allowlisted extra settings (`--extra-env`), applied last. Re-validated here, so a caller of the
+	 * builder cannot hand it a key the harness's own flag would have refused.
+	 */
+	extraEnv?: Record<string, string> | null;
 	/**
 	 * Opt-in tracker fakes for the claim-mirror rehearsal (Phase 23): every
 	 * URL must be loopback, and the keys are random scratch, never the host's
@@ -312,6 +376,10 @@ export function buildRehearsalEnv(input: BuildRehearsalEnvInput): Record<string,
 		const home = join(input.runDir, "home");
 		mkdirSync(home, { recursive: true, mode: 0o700 });
 		env.HOME = home;
+	}
+	if (input.extraEnv) {
+		// Through the same parser, so the builder holds the allowlist whoever calls it.
+		Object.assign(env, parseExtraEnv(Object.entries(input.extraEnv).map(([key, value]) => `${key}=${value}`)));
 	}
 	if (input.trackers) Object.assign(env, trackerBlock(input.trackers));
 	// Always inside the run directory (D25-24): a rehearsal never points at

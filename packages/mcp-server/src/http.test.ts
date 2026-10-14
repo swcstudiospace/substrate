@@ -109,6 +109,107 @@ describe("GET /healthz", () => {
 		expect(body).toMatchObject({ index: false, greptime: false, auditDurable: false });
 		expect(response.status).toBe(503);
 	});
+
+	test("carries one row per plane and the index capacity, report-only (uplift-2 R2)", async () => {
+		const capacity = { databaseBytes: 11_000_000, tables: [{ name: "graph_nodes", totalBytes: 65_536, liveRows: 45, deadRows: 50 }] };
+		const harness = await start({}, { index: { ping: async () => true, capacity: async () => capacity } });
+		const response = await fetch(`${harness.base}/healthz`);
+		const body = (await response.json()) as {
+			index: boolean;
+			planes: Record<string, { ok: boolean | null; breaker: Record<string, unknown> | null; lastErrorAt: number | null }>;
+			capacity: { index: unknown; ledger: unknown };
+		};
+		expect(response.status).toBe(200);
+		expect(body.index).toBe(true);
+		expect(Object.keys(body.planes).sort()).toEqual(["cache", "greptime", "hindsight", "index", "ragflow"]);
+		expect(body.planes.index).toEqual({ ok: true, breaker: { plane: "index", state: "closed", failures: 0, openedAt: null, lastErrorAt: null, lastError: null }, lastErrorAt: null });
+		// Unconfigured planes are `null`, not failures — the status code is 200 above.
+		expect(body.planes.greptime?.ok).toBeNull();
+		expect(body.planes.hindsight?.ok).toBeNull();
+		expect(body.planes.ragflow?.ok).toBeNull();
+		expect(body.capacity).toEqual({ index: capacity, ledger: null });
+
+		const off = await start({ SUBSTRATE_BREAKER: "0" }, { index: { ping: async () => true, capacity: () => Promise.withResolvers<never>().promise } });
+		const offBody = (await (await fetch(`${off.base}/healthz`)).json()) as { planes: Record<string, { breaker: unknown }>; capacity: { index: unknown; ledger: unknown } };
+		expect(offBody.planes.index?.breaker).toBeNull();
+		expect(offBody.capacity).toEqual({ index: null, ledger: null });
+	});
+
+	test("carries jobs.ledger from one memoised coverage read, not one per poll (uplift-3 N6)", async () => {
+		let reads = 0;
+		const greptime = {
+			ping: async () => true,
+			ensureAppendMode: async () => true,
+			probeDialect: async () => true,
+			quotingDialectKnown: true,
+			anchorCoverage: async () => {
+				reads++;
+				return {
+					newestAnchoredHour: "2026-10-13T10:00:00.000Z",
+					lagHours: 1,
+					uncoveredHours: [],
+					more: false,
+					lastArchiveWindow: { day: "2026-10-12", writtenAt: "2026-10-13T03:30:00.000Z", eventId: "evt_note" },
+				};
+			},
+		};
+		// The route's own body memo is off, so each call reaches the service and the 60 s memo is what is measured.
+		const harness = await start({ SUBSTRATE_HEALTHZ_CACHE_MS: "0", SUBSTRATE_LEDGER_WRITE_PROBE_S: "0" }, { greptime });
+		const first = (await (await fetch(`${harness.base}/healthz`)).json()) as { jobs: { ledger: Record<string, unknown> | null; ledgerReason: string | null } };
+		const second = (await (await fetch(`${harness.base}/healthz`)).json()) as typeof first;
+		expect(first.jobs.ledger).toMatchObject({ anchorLagHours: 1, uncoveredHours: 0, more: false, lastArchiveDay: "2026-10-12" });
+		expect(first.jobs.ledgerReason).toBeNull();
+		expect(second.jobs).toEqual(first.jobs);
+		expect(reads).toBe(1);
+	});
+});
+
+describe("GET /slo lists the per-plane objectives", () => {
+	test("one per plane, unconfigured for the planes this deployment lacks, beside the catalogue (uplift-2 R2)", async () => {
+		const harness = await start({}, { index: { ping: async () => true } });
+		const body = (await (await fetch(`${harness.base}/slo`)).json()) as {
+			results: Array<{ id: string }>;
+			breached: string[];
+			planes: Array<{ id: string; plane: string; status: string; target: number }>;
+			docs: Array<{ id: string; status: string; statement: string }>;
+			surfaces: Array<{ id: string; surface: string; status: string; samples: number }>;
+		};
+		expect(body.planes.map((entry) => entry.id)).toEqual([
+			"plane.greptime.availability",
+			"plane.index.availability",
+			"plane.cache.availability",
+			"plane.hindsight.availability",
+			"plane.ragflow.availability",
+		]);
+		expect(body.planes.find((entry) => entry.plane === "index")?.status).toBe("insufficient-data");
+		expect(body.planes.find((entry) => entry.plane === "greptime")?.status).toBe("unconfigured");
+		expect(body.planes.every((entry) => entry.target === 0.99)).toBe(true);
+		// The catalogue is still exactly SPE-4793's four. `breached` folds in plane and
+		// burn breaches since uplift-3 N2 (slo-history.test.ts), and here nothing is breached.
+		expect(body.results.map((entry) => entry.id)).toEqual(["brief.p95", "emit.success", "lease.steal_rate", "quarantine.rate"]);
+		expect(body.breached).toEqual([]);
+		// The docs-search objective (uplift-3 N5) rides beside them the same way: one
+		// row, insufficient-data until twenty searches, never folded into `breached`.
+		expect(body.docs.map((entry) => entry.id)).toEqual(["docs.search.p95"]);
+		expect(body.docs[0]?.status).toBe("insufficient-data");
+		expect(body.docs[0]?.statement).toContain("<= 2000 ms");
+		const docsTuned = await start({ SUBSTRATE_SLO_DOCS_SEARCH_P95_MS: "1000" });
+		const docsTunedBody = (await (await fetch(`${docsTuned.base}/slo`)).json()) as { docs: Array<{ statement: string }> };
+		expect(docsTunedBody.docs[0]?.statement).toContain("<= 1000 ms");
+		// The per-surface brief rows (uplift-3 N7) ride beside them too: none until a
+		// surface has twenty briefs, then one `brief.p95` row naming it, never in `breached`.
+		expect(body.surfaces).toEqual([]);
+		for (let i = 0; i < 19; i++) harness.observability.observer.briefed?.({ surface: "grok-bot", graph_id: null, ok: true, durationMs: 50 });
+		expect(((await (await fetch(`${harness.base}/slo`)).json()) as typeof body).surfaces).toEqual([]);
+		harness.observability.observer.briefed?.({ surface: "grok-bot", graph_id: null, ok: true, durationMs: 50 });
+		const judged = (await (await fetch(`${harness.base}/slo`)).json()) as typeof body;
+		expect(judged.surfaces.map((entry) => [entry.id, entry.surface, entry.status, entry.samples])).toEqual([["brief.p95", "grok-bot", "ok", 20]]);
+		expect(judged.breached).toEqual([]);
+
+		const tuned = await start({ SUBSTRATE_SLO_PLANE_AVAILABILITY: "0.95" });
+		const tunedBody = (await (await fetch(`${tuned.base}/slo`)).json()) as { planes: Array<{ target: number }> };
+		expect(tunedBody.planes.every((entry) => entry.target === 0.95)).toBe(true);
+	});
 });
 
 describe("GET /metrics", () => {
@@ -846,6 +947,38 @@ describe("the anonymous bridge", () => {
 		expect(lines[0]).toContain("/events");
 		expect(lines[0]).toContain("claimed=hermes");
 		expect(lines[0]).not.toContain("payload-secret-marker");
+	});
+
+	test("the watchdog's tokenless /livez probe is not an anonymous caller, while a tokenless /slo still is", async () => {
+		const lines: string[] = [];
+		let now = 1_000;
+		const harness = await start(BRIDGE, {}, {
+			now: () => now,
+			anonymousLog: (line) => {
+				lines.push(line);
+			},
+			anonymousIntervalMs: 60 * 60 * 1000,
+		});
+
+		expect((await fetch(`${harness.base}/livez`)).status).toBe(200);
+		expect((await fetch(`${harness.base}/livez`)).status).toBe(200);
+		expect((await fetch(`${harness.base}/slo`)).status).toBe(200);
+
+		const body = (await (await fetch(`${harness.base}/metrics`)).json()) as {
+			metrics: Array<{ name: string; points: Array<{ attributes: Record<string, string>; value: number }> }>;
+		};
+		const routes = (body.metrics.find((metric) => metric.name === "substrate.anonymous.requests")?.points ?? []).map((entry) => entry.attributes.route);
+		expect(routes).toContain("/slo");
+		expect(routes).not.toContain("/livez");
+		// The request counters still see the probe.
+		const requests = body.metrics.find((metric) => metric.name === "substrate.request.total")?.points ?? [];
+		expect(requests.some((entry) => entry.attributes.route === "/livez")).toBe(true);
+
+		now += 60 * 60 * 1000;
+		await fetch(`${harness.base}/healthz`);
+		expect(lines).toHaveLength(1);
+		expect(lines[0]).toContain("/slo");
+		expect(lines[0]).not.toContain("/livez");
 	});
 
 	test("refused events are logged hourly by reason, caller, surface and kind, without payload", async () => {

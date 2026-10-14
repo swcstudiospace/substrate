@@ -26,7 +26,9 @@ import {
 	assertOperatorAllowed,
 	buildRehearsalEnv,
 	consumerEnvRecord,
+	EXTRA_ENV_KEYS,
 	LEDGER_KEYS,
+	parseExtraEnv,
 	RehearsalEnvError,
 	storesEnvRecord,
 	toShellExports,
@@ -511,96 +513,76 @@ describe("the opt-in tracker block", () => {
 	});
 });
 
-describe("the ragflow fixture's settings", () => {
-	const ragflowEnv = (runDir: string): Record<string, string> => ({
-		RAGFLOW_URL: "http://127.0.0.1:19380",
-		RAGFLOW_API_KEY: "fixture-key",
-		SUBSTRATE_DOCS_STATE: join(runDir, "docs"),
-		SUBSTRATE_DOCS_DATASETS: join(runDir, "ragflow-fixture", "registry.json"),
-		SUBSTRATE_DOCS_EMBEDDING_MODEL: "fixture-embedding-model",
-		SUBSTRATE_RAGFLOW_TIMEOUT_MS: "3000",
+describe("the extra-env allowlist (--extra-env)", () => {
+	test("accepts each listed flag with a value it takes and returns them as a record", () => {
+		expect(
+			parseExtraEnv([
+				"SUBSTRATE_BRIEF_PROFILE=shadow",
+				"SUBSTRATE_METRICS_HISTORY=on",
+				"SUBSTRATE_CACHE_SWR=enforce",
+				"SUBSTRATE_EVENT_IDEMPOTENCY=accept",
+				"SUBSTRATE_BREAKER_FAILURES=5",
+				"SUBSTRATE_SLO_MIN_SAMPLES=5",
+			]),
+		).toEqual({
+			SUBSTRATE_BRIEF_PROFILE: "shadow",
+			SUBSTRATE_METRICS_HISTORY: "on",
+			SUBSTRATE_CACHE_SWR: "enforce",
+			SUBSTRATE_EVENT_IDEMPOTENCY: "accept",
+			SUBSTRATE_BREAKER_FAILURES: "5",
+			SUBSTRATE_SLO_MIN_SAMPLES: "5",
+		});
+		expect(parseExtraEnv([])).toEqual({});
 	});
 
-	test("the docs state always lives inside the run directory, never at the production path", () => {
-		for (const over of [{}, { ragflowFixture: null }]) {
-			const input = scratchInput(over);
-			const env = buildRehearsalEnv(input);
-			expect(env.SUBSTRATE_DOCS_STATE).toBe(join(input.runDir, "docs"));
-			expect(env.SUBSTRATE_DOCS_STATE).not.toBe("/var/lib/substrate/docs");
-			expect(loadConfig(env).docs.stateDir).toBe(join(input.runDir, "docs"));
+	test("refuses with the rule name: format, key, value and duplicate", () => {
+		expect(() => parseExtraEnv(["SUBSTRATE_BRIEF_PROFILE"])).toThrow("rule extra-env-format");
+		expect(() => parseExtraEnv(["=shadow"])).toThrow("rule extra-env-format");
+		expect(() => parseExtraEnv(["SUBSTRATE_PORT=7410"])).toThrow("rule extra-env-key");
+		expect(() => parseExtraEnv(["SUBSTRATE_BRIEF_PROFILE=loud"])).toThrow("rule extra-env-value");
+		expect(() => parseExtraEnv(["SUBSTRATE_SLO_MIN_SAMPLES=0"])).toThrow("rule extra-env-value");
+		expect(() => parseExtraEnv(["SUBSTRATE_SLO_MIN_SAMPLES=5000"])).toThrow("rule extra-env-value");
+		expect(() => parseExtraEnv(["SUBSTRATE_CACHE_SWR=shadow", "SUBSTRATE_CACHE_SWR=off"])).toThrow("rule extra-env-duplicate");
+		expect(() => parseExtraEnv(["SUBSTRATE_BRIEF_PROFILE=shadow\n"])).toThrow("rule extra-env-value");
+	});
+
+	test("a key outside the list is refused by name and never by its value, including prototype keys", () => {
+		for (const key of ["__proto__", "constructor", "toString", "SUBSTRATE_PG_URL", "PATH", "SUBSTRATE_OPERATOR_TOKENS"]) {
+			expect(() => parseExtraEnv([`${key}=x`])).toThrow(RehearsalEnvError);
+			expect(() => parseExtraEnv([`${key}=x`])).toThrow("rule extra-env-key");
+		}
+		const secretish = randomBytes(8).toString("hex");
+		try {
+			parseExtraEnv([`SUBSTRATE_PG_URL=${secretish}`]);
+		} catch (cause) {
+			expect(String(cause)).not.toContain(secretish);
 		}
 	});
 
-	test("the fixture wires the fake URL, the registry and the run-dir state", () => {
-		const runDir = tempDir();
-		const env = buildRehearsalEnv(scratchInput({ runDir, ragflowFixture: ragflowEnv(runDir) }));
-		expect(env.RAGFLOW_URL).toBe("http://127.0.0.1:19380");
-		expect(env.SUBSTRATE_DOCS_STATE).toBe(join(runDir, "docs"));
-		expect(env.SUBSTRATE_DOCS_DATASETS).toBe(join(runDir, "ragflow-fixture", "registry.json"));
+	test("the list holds no store, token, path or host setting", () => {
+		for (const key of EXTRA_ENV_KEYS) expect(key).not.toMatch(/URL|TOKEN|KEY|PASSWORD|PATH|DIR|HOST|PORT/);
+	});
+
+	test("the builder applies them, and the real loadConfig reads them", () => {
+		const env = buildRehearsalEnv(
+			scratchInput({ extraEnv: { SUBSTRATE_BRIEF_PROFILE: "enforce", SUBSTRATE_METRICS_HISTORY: "on" } }),
+		);
+		expect(env.SUBSTRATE_BRIEF_PROFILE).toBe("enforce");
+		expect(env.SUBSTRATE_METRICS_HISTORY).toBe("on");
 		const config = loadConfig(env);
-		expect(config.ragflow?.problem).toBeNull();
-		expect(config.ragflow?.url).toBe("http://127.0.0.1:19380");
-		expect(config.docs.stateDir).toBe(join(runDir, "docs"));
-		expect(configWarnings(config)).toEqual([]);
+		expect(config.briefProfile.mode).toBe("enforce");
+		expect(config.metricsHistory.enabled).toBe(true);
 	});
 
-	test("a non-loopback fake URL is refused without naming a value", () => {
-		const runDir = tempDir();
-		const fixture = { ...ragflowEnv(runDir), RAGFLOW_URL: "https://ragflow.example.com:9380" };
-		expect(() => buildRehearsalEnv(scratchInput({ runDir, ragflowFixture: fixture }))).toThrow(
-			"rehearsal env refused: the ragflow fixture",
-		);
+	test("the builder holds the allowlist for its own callers: a store key cannot ride in", () => {
+		expect(() => buildRehearsalEnv(scratchInput({ extraEnv: { SUBSTRATE_PG_URL: "postgres://elsewhere" } }))).toThrow("rule extra-env-key");
+		expect(() => buildRehearsalEnv(scratchInput({ extraEnv: { SUBSTRATE_BRIEF_PROFILE: "loud" } }))).toThrow("rule extra-env-value");
 	});
 
-	test("a state path outside the run directory is refused", () => {
-		const runDir = tempDir();
-		const fixture = { ...ragflowEnv(runDir), SUBSTRATE_DOCS_STATE: "/var/lib/substrate/docs" };
-		expect(() => buildRehearsalEnv(scratchInput({ runDir, ragflowFixture: fixture }))).toThrow(
-			"is not inside the run directory",
-		);
-	});
-
-	test("an unknown fixture key and an empty api key are refused", () => {
-		const runDir = tempDir();
-		expect(() =>
-			buildRehearsalEnv(scratchInput({ runDir, ragflowFixture: { ...ragflowEnv(runDir), RAGFLOW_MCP_URL: "x" } })),
-		).toThrow("is not a ragflow fixture setting");
-		expect(() =>
-			buildRehearsalEnv(scratchInput({ runDir, ragflowFixture: { ...ragflowEnv(runDir), RAGFLOW_API_KEY: "" } })),
-		).toThrow("needs a key");
-	});
-
-	test("a stale fixture without the flag refuses instead of pointing at a dead fake", () => {
-		const runDir = tempDir();
-		mkdirSync(join(runDir, "ragflow-fixture"), { recursive: true });
-		writeFileSync(join(runDir, "ragflow-fixture", "mode.json"), '{"mode":"normal"}\n');
-		expect(() => buildRehearsalEnv(scratchInput({ runDir }))).toThrow("pass --ragflow-fixture or choose a new name");
-		const env = buildRehearsalEnv(scratchInput({ runDir, ragflowFixture: ragflowEnv(runDir) }));
-		expect(env.SUBSTRATE_DOCS_DATASETS).toBe(join(runDir, "ragflow-fixture", "registry.json"));
-	});
-
-	test("the consumer record names the fixture's paths only when there is a fixture", () => {
-		const server = buildRehearsalEnv(scratchInput());
-		const base = {
-			mcpPort: 17410,
-			firstToken: server[tokenEnvName("claude-code")] ?? "",
-			operatorToken: server[tokenEnvName("hermes")] ?? "",
-			runDir: tempDir(),
-			name: "ragflow-twin",
-			testPgUrl: server.SUBSTRATE_PG_URL ?? "",
-		};
-		const ragflow = {
-			url: "http://127.0.0.1:19380",
-			registry: "/run/x/ragflow-fixture/registry.json",
-			state: "/run/x/ragflow-fixture/state.json",
-			modeFile: "/run/x/ragflow-fixture/mode.json",
-		};
-		const out = consumerEnvRecord({ ...base, ragflow });
-		expect(out.SUBSTRATE_REHEARSAL_RAGFLOW_URL).toBe(ragflow.url);
-		expect(out.SUBSTRATE_REHEARSAL_RAGFLOW_REGISTRY).toBe(ragflow.registry);
-		expect(out.SUBSTRATE_REHEARSAL_RAGFLOW_STATE).toBe(ragflow.state);
-		expect(out.SUBSTRATE_REHEARSAL_RAGFLOW_MODE_FILE).toBe(ragflow.modeFile);
-		expect(Object.keys(out)).toHaveLength(10);
-		expect(Object.keys(consumerEnvRecord({ ...base, ragflow: null }))).toHaveLength(6);
+	test("without --extra-env the environment is exactly what it was", () => {
+		const parentEnv = { PATH: "/usr/bin:/bin", HOME: "/root", SUBSTRATE_BRIEF_PROFILE: "enforce", SUBSTRATE_METRICS_HISTORY: "on" };
+		const env = buildRehearsalEnv(scratchInput({ parentEnv }));
+		expect(Object.hasOwn(env, "SUBSTRATE_BRIEF_PROFILE")).toBe(false);
+		expect(Object.hasOwn(env, "SUBSTRATE_METRICS_HISTORY")).toBe(false);
 	});
 });

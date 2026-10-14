@@ -73,7 +73,8 @@ describe("resolveBearer", () => {
 
 	test("a directory at the token-file path means no token", () => {
 		const dir = mkdtempSync(join(tmpdir(), "tok-"));
-		expect(resolveBearer("cursor", envOf({ SUBSTRATE_TOKEN_FILE: dir }))).toBeNull();
+		const empty = mkdtempSync(join(tmpdir(), "tok-empty-"));
+		expect(resolveBearer("cursor", envOf({ SUBSTRATE_TOKEN_FILE: dir, SUBSTRATE_TOKENS_DIR: empty }))).toBeNull();
 	});
 
 	test("an oversize dir file means no token", () => {

@@ -51,13 +51,73 @@ service says so at boot, so a deployment cannot end up in it by accident. The
 parent directory is created on open, and writability is proved then — an operator
 hears about an unwritable path at boot rather than when the first claim is refused.
 
-It has no compaction and no rotation. Plan for `logrotate` with `copytruncate`
-**off** — truncating the file mid-chain is indistinguishable from tampering to
-`verify`. Rotate by moving the file and restarting the service, which starts a
-fresh chain whose first record has `prev: null`; keep the rotated files, since the
-chain they hold is only verifiable as a whole. Remove `<path>.checkpoint` along with
-the file when you do, or the new chain is reported as **missing history** — which is
-the point of it.
+It has no compaction. It **rolls over by size** when `SUBSTRATE_AUDIT_ROLLOVER_BYTES`
+is set, and never otherwise — see the next section. Do not point `logrotate` at it:
+`copytruncate` truncates the file mid-chain, which is indistinguishable from
+tampering to `verify`, and a plain rename behind the writer's back leaves it
+appending to a file it has lost the name of.
+
+### Rollover: one chain, several files
+
+```
+SUBSTRATE_AUDIT_ROLLOVER_BYTES=52428800
+```
+
+Unset, `0` or anything that is not a positive integer means the file is never
+rolled, which is what every deployment before this setting did. Set, the writer
+itself closes the active file once the *next* record would take it past that many
+bytes:
+
+1. the active file is renamed to `<path>.<firstSeq>-<lastSeq>.jsonl` in the same
+   directory, mode 0600 — `mcp-audit.jsonl.1-9000.jsonl`, say;
+2. a fresh active file starts at the **same** `path`, and its first record carries
+   `prev` = the closed segment's tip hash. The chain never breaks: `seq` keeps
+   counting and every `prev` still names the record before it, whichever file that
+   record is in;
+3. the checkpoint is carried forward untouched — it names the tip's `seq` and
+   `hash`, not the tip's file.
+
+A roll happens *between* records, never through one: the record that did not fit is
+written whole into the new file, so no segment ends in half a line. A rename that
+fails leaves the active file where it is and the record is appended there; the roll
+is retried on the next append. The writer reads the setting itself, so a test, a
+script and the service roll by one rule.
+
+**Verification walks the segments.** `verify`, `/evidence`, `readAll` and
+`scripts/audit-verify.ts` read every closed segment in sequence order and then the
+active file through one `ChainWalker`, so a verdict always covers every record ever
+appended, and a segment that is missing, edited, or does not continue the one
+before it is reported exactly as a gap inside a single file would be. A closed
+segment verified *alone* does not open at `seq: 1` and is rightly reported broken —
+the chain it holds is only verifiable together with the segments before it. Keep
+every segment.
+
+```sh
+bun run audit:verify                      # SUBSTRATE_AUDIT_PATH
+bun run audit:verify --path /var/lib/substrate/mcp-audit.jsonl
+# {"segments":2,"records":18412,"firstSeq":1,"lastSeq":18412,"ok":true}
+```
+
+It is read-only: it never opens the log for writing (the service is the single
+writer), asks no store anything, and prints counts and positions only. It anchors to
+`<path>.checkpoint` the way boot does, so segments deleted after their records were
+committed read as **missing history** rather than as a shorter chain. Exit 0 when the
+chain verifies, 1 when it does not, 2 on a usage error. Nothing is pruned
+automatically; `docs/runbooks/disk-pressure.md` says what may be reclaimed on this
+host, and audit segments are not on that list.
+
+**Recovery after a roll.** A process that dies between renaming the active file and
+writing the next record leaves no active file beside a closed segment. Boot reads
+the newest segment's tail for the chain's position, checks it against the
+checkpoint, and continues from it — `/healthz` does not report missing history for
+that, because none is missing.
+
+**The manual procedure still works** as the fallback when rollover is off: stop the
+service, move the file *and* `<path>.checkpoint` aside together, start the service.
+That starts a fresh chain whose first record has `prev: null`; the moved files hold
+a complete, verifiable chain of their own. Moving the file without the checkpoint
+makes the new chain report **missing history** — which is the point of the
+checkpoint. A rolled-over chain needs none of this.
 
 ### The checkpoint, and telling a fresh install from a deleted file
 
@@ -179,10 +239,11 @@ verify, four ways:
   later `prev` and `seq` still follows it. Checking the head is the only thing that
   catches it, which is exactly why the head is checked rather than assumed.
 
-The consequence is deliberate: a file rotated without restarting the writer does not
-open at `seq: 1`, and is reported broken rather than verified in isolation. That is
-the truth about such a file — the chain it holds is only verifiable together with the
-one it continues.
+The consequence is deliberate: a closed segment, or a file rotated behind the
+writer's back, does not open at `seq: 1`, and is reported broken when verified in
+isolation. That is the truth about such a file — the chain it holds is only
+verifiable together with the one it continues, which is why every verify path
+walks the closed segments before the active file (see "Rollover" above).
 
 The head check applies to a **file**, which holds every record ever appended. A
 memory-only chain answers from a bounded tail (`maxRetained`), so once it has dropped
@@ -237,7 +298,9 @@ lives in [event-vocabulary.md](event-vocabulary.md).
 | Tool (phase) | Mode | Why |
 | --- | --- | --- |
 | `skills_propose` (21, **landed**) | fail-closed | Opens a PR other agents will receive after merge; a proposal nobody recorded is an unaudited publication. Served as the MCP tool and as `POST /skills/propose`, which is audited under the same name before any git work and answers `503` when the chain cannot take the record. |
-| `docs_ingest` (25, **landed**) | fail-closed | Writes a shared dataset every agent reads; it is also a publication path. Served as the MCP tool and as `POST /docs/ingest`, which is audited under the same name before any upload and answers `503` when the chain cannot take the record. |
+| `skills_approve` (uplift-5 S5a, **landed**) | fail-closed | Records which merged skill pull request an operator approved, declined or retired; a decision nobody recorded is an unaudited statement of what is published. Served as the MCP tool and as `POST /skills/approve`, audited under the same name before any gh call and answering `503` when the chain cannot take the record. Operator-only: `POST /skills/approve` answers a caller with no surface `401` and a non-operator `403` before the body is read or the call is audited (like `skills_propose`'s `401`), so those refusals leave no audit record on the REST door and an audit outage cannot turn them into `503`; on `/mcp` the `tools/call` is audited before dispatch. The service emits no event for them. |
+| `skills_list` (uplift-5 S5a, **landed**) | fail-open | A read of the skills registry, also `GET /skills`, like `memory_search`: a projector reading it during a sync must not be failed by an unwritable audit file. Needs an authenticated surface (`401` otherwise, before the audit). |
+| `docs_ingest` (25) | fail-closed | Writes a shared dataset every agent reads; it is also a publication path. |
 | `desktop_run` (30) | fail-closed | Acts on a desktop — landed in Phase 30 (DESK-03 covered by unit and HTTP tests; live desktop smoke NOT-RUN). |
 | `docs_search` (25, **landed**) | fail-open | A read inside an agent's turn. Served as the MCP tool and as `POST /docs/search`, which is audited under the same name and always answers 200. |
 | `issue_get` (23) | fail-open | A read of untrusted tracker text. |
@@ -262,8 +325,10 @@ not to gate.
 Every route that reaches the service goes through one wrapper, `auditedRest`, under the
 MCP tool's own name where there is one: `POST /memory` is audited as `memory_write` and
 `POST /handoff` as `coord_handoff`, so one action does not appear in the trail twice
-under two names. Only `/healthz`, `/metrics` and `/slo` are exempt; no agent action is
-behind them and a trail dominated by a Prometheus scrape is one nobody reads.
+under two names. Only `/healthz`, `/metrics`, `/slo`, `/slo/history` and `/livez` are exempt; no agent action is
+behind them and a trail dominated by a Prometheus scrape is one nobody reads. `/slo/history` is served
+beside `/slo` under the same bearer rule (a token, unless `SUBSTRATE_ALLOW_ANONYMOUS=1`) and is
+admission-metered as a `read` (`ROUTE_CLASSES`).
 
 REST twins of planned v1.3 tools (`POST /skills/propose` has landed, see
 [skills-propose.md](skills-propose.md); `/docs/search`,
@@ -333,7 +398,7 @@ MCP transport were audited, `/events` would be an unaudited door to the same act
 `/brief`, `/events`, `/verify` and `/evidence` are audited too, with
 `transport: "rest"`.
 
-`/healthz`, `/metrics` and `/slo` are not: they are monitoring traffic, no agent
+`/healthz`, `/metrics`, `/slo`, `/slo/history` and `/livez` are not: they are monitoring traffic, no agent
 action is behind them, and a trail dominated by a Prometheus scrape is one nobody
 reads.
 

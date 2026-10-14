@@ -21,57 +21,57 @@
     {
       "number": "19",
       "name": "Lane B collectors",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "20",
       "name": "Production identity and Phase 0 UAT",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "21",
       "name": "skills_propose",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "22",
       "name": "Skills sync, bridge and miners",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "23",
       "name": "Claim mirror and DoD gate",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "24",
       "name": "substrate-dispatcher",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "25",
       "name": "Docs search and ingest (RAGFlow)",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "26",
       "name": "Hindsight recall and Dragonfly cache",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "27",
       "name": "Ledger primitives and ingest order",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "28",
       "name": "Hourly anchor job and verify",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "29",
       "name": "Agent Cards and teachable moments",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "30",
@@ -81,23 +81,23 @@
     {
       "number": "31",
       "name": "Lane A runtime: spike, packaging and VM host",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "32",
       "name": "Lane A host core",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "33",
       "name": "Lane A dispatch route and approvals",
-      "status": "pending"
+      "status": "complete"
     }
   ],
   "next": {
-    "command": "/gsd:progress --next",
-    "label": "Advance to the next step (plan phase 19)",
-    "reason": "Phase 19 of 18 — needs a plan"
+    "command": "/gsd:progress",
+    "label": "Show progress",
+    "reason": "Unsure of state — showing progress"
   },
-  "updated_at": "2026-10-09T09:30:08.877Z"
+  "updated_at": "2026-10-11T02:42:06.519Z"
 }

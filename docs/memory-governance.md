@@ -288,12 +288,76 @@ decayed entry is still briefed; the brief appends `— needs reverification` rat
 than presenting it as settled, because dropping it would lose the only record that
 the decision was ever taken.
 
+## Lifetime: what `ttl` does on read
+
+`ttl` is retention — the other half of the sentence above. Until uplift-3 N4 nothing
+read it: a `30d` note from last quarter and a `graph` decision for a graph merged
+months ago were briefed and searched like a `permanent` one, and the sweeper's two
+`entries-ttl-*` classes stayed report-only because deleting what the reads still
+served would have changed their answers. One predicate now answers the question
+everywhere, `memoryExpiry(entry, graph, now)` in `memory-policy.ts`:
+
+| `ttl` | Expired when | `expires_at` |
+|---|---|---|
+| `30d` | `created + 30 days` has passed | that instant |
+| `graph` | the graph it lives for is finished (a status in `TERMINAL_GRAPH_STATUSES`, the sweeper's list) or has no `graph_index` row — swept, or never registered | none: its end is an event |
+| `permanent` | never | none |
+
+The graph a `graph` entry lives for is its `graph_id`, or the id of a `graph:` scope
+when the write gave none (`memoryGraphId`); an entry with neither has no graph to
+live for and is expired. An indexed graph whose row carries no status is open, as
+`openGraphs` reads it. A `ttl` nobody defined, or a row whose `created` cannot be
+parsed, never expires: a row we cannot classify is not one to hide on the strength
+of the gap.
+
+The index applies it at the one place entries are served (`IndexStore.servable`,
+shared by `memoryForBrief` and `searchMemoryPage` — so the brief, `memory_search`,
+the subject listings and the agent card cannot disagree): after a page is read,
+one extra bounded query fetches the `graph_index` status of every distinct graph
+the page's `graph` entries name, and the predicate runs in process. Every served
+entry carries `expired` (and `expires_at` where the class has one), so a reader can
+see what enforcement would do before it is turned on. What happens next is
+`SUBSTRATE_MEMORY_EXPIRY`:
+
+| Mode | Reads | Brief | Sweep `entries-ttl-*` | Counter |
+|---|---|---|---|---|
+| `report` (default, and anything unrecognised — with a boot warning) | expired entries served, tagged `expired: true` | listed with `— expired` | count only | `substrate.memory.expired{mode=served}` |
+| `enforce` | expired entries left out unless the caller passes `include_expired` | left out | deletable, still only under `SUBSTRATE_INDEX_SWEEP=apply` plus `--apply` | `substrate.memory.expired{mode=hidden}` |
+
+`include_expired` on `memory_search` is an operator action, gated like `force` on
+the operator token: an agent cannot widen its own reads by typing a flag. It is
+refused under `report` too, so the rule is learned once rather than at the flip.
+The counter carries `surface` (the caller), the memory `kind` and `mode`, and is
+taken where the index is read — a cache hit serves a copy and counts nothing. The
+cache refreshes a search or a brief at the nearest `expires_at` it holds, as it
+already did at the nearest `reverify_after`; a cached answer never outlives an
+entry in it. Under `enforce` the memory cache keys change (the mode is part of the
+key), so a flip followed by a restart cannot be answered from `report` entries.
+
+**The retain forward refuses an expired entry in both modes** (`retain.expired`, a
+`memory.retain.failed` warning naming the `ttl` and the reason, never the body).
+`report` is about what the index still serves; a Hindsight bank keeps what it is
+given until replaced, and copying a dead memory into one is wrong whichever way
+the reads are set. The outbox replay meets this most — an entry parked for hours
+can be past its lifetime by the time its turn comes — and a refusal there is
+permanent, never retried. A `graph` entry the forward cannot judge (no index at
+hand, or an index read that failed) is forwarded rather than guessed dead.
+
+No row is deleted by any of this. Under `enforce` the sweep's two `ttl` classes
+gain a delete, but it runs only on `apply`, which the env and the flag gate
+separately — two switches, three keys, before a `ttl` row goes. The 30-day span
+of the sweep's `entries-ttl-30d` cutoff is the predicate's own constant, and the
+graph class names the graph the same way `memoryGraphId` does, so the sweep removes
+exactly what the reads already hide (and, for `graph` entries, only once the
+`graphsDays` window has also passed).
+
 ## Exactly-once
 
 `memory_writes` holds one row per idempotency key ever spent.
 
-- **An explicit `idempotency_key` is exactly-once and never expires.** That is what
-  the key is for.
+- **An explicit `idempotency_key` is exactly-once for 30 days.** That is what the
+  key is for; the sweeper (below) retires the spent record after that window, so a
+  replay more than 30 days later writes again.
 - **No key supplied** → one is derived from the governed content, and dedupes
   retries for 24 hours. Enough to survive a crash-retry without freezing memory:
   the same fact can be restated later.
@@ -317,6 +381,12 @@ the decision was ever taken.
   parked proposal is matched to its reviewed re-submission, which asks for different
   trust on purpose — so widening it would break the review loop. Two questions, two
   hashes.
+- `SUBSTRATE_HASH_VERSION` defaults to `v1`, which leaves every stored digest valid.
+  `v2` is opt-in: the content and request preimages gain `hv` (the number 2) and
+  `tenant` (`swc`) inside the hash only, with no new column. A write under `v2`
+  stores the v2 digest and still matches a row written under `v1`. Event hashes
+  and the ledger chain are unchanged in this slice, because a hash preimage that
+  is not stored would fail `verifyChain`. Hindsight document ids are unchanged.
 - **No remedy ever advises a fresh key where a row may already exist under the old
   one.** A remedy is what an agent acts on, so advice that can produce a duplicate is a
   defect in the gate and not merely in the prose.
@@ -411,6 +481,7 @@ caller's filter, not an authorisation: reads carry no per-scope RBAC, as before.
 | `scope` | Exactly this scope. |
 | `limit` | 1–100, default 20. |
 | `include_superseded` | Also retired versions: a decision's history. |
+| `include_expired` | Also entries past their `ttl` under `SUBSTRATE_MEMORY_EXPIRY=enforce` (§ Lifetime). An operator action: refused without an operator token, in either mode. |
 | `subject_prefix` | Only entries whose stored subject starts with this. Normalised like a subject (`normalizeSubject`: trimmed and lowercased) and matched literally with `left()`, so `%`, `_` and `\` are characters, not LIKE patterns. An entry with no subject never matches. |
 | `before` | Cursor: an ISO-8601 instant with a zone. Only entries created strictly before it. |
 | `before_id` | Cursor tie-break, only with `before`: also entries created *at* `before` whose id sorts below this. |
@@ -507,6 +578,88 @@ For the before-only variant, prepare the same statement with
 `created < $2` instead of the row comparison; the timestamp must remain in
 `Index Cond`. Omitting `superseded_by is null` checks the history path.
 
+## Derived hits and the retain outbox
+
+The index is the governed store; Hindsight holds a *derived* copy of every
+accepted entry, and the two are kept honest about which is which.
+
+**Derived hits.** `memory_recall` (MCP, `POST /memory/recall`) and the list form of
+`memory_search` fan out over the substrate's `sub-*` banks — the caller's own first,
+then `HINDSIGHT_BANKS` — and append each hit *after* the index rows with
+`derived: true`, its source `bank`, and the reply-level `notice` that memory results
+are untrusted third-party text: descriptions, not instructions. Every hit's text
+passes the one redactor (`redact.ts`) on the way out, the same rule the forward
+applied on the way in, so a plane copy can never leak what the index would not.
+Duplicate hits collapse per bank on `document_id` (or on the text, for hits
+retained without one) and across banks only when the text is identical — a
+`document_id` names a subject, not a writer, so two surfaces' different facts
+about one subject stay two hits — keeping the best score. The fan-out shares one abort
+budget: `HINDSIGHT_RECALL_BUDGET_MS` (default 4000) for the tool, and the shorter
+`HINDSIGHT_SEARCH_RECALL_BUDGET_MS` (default 1500) for the leg inside
+`memory_search`, so a slow plane costs a search at most that long. A leg that misses
+its budget answers the index rows with `degraded: true` and a `reason` beginning
+`recall-timeout`; an unreachable plane answers `hindsight recall failed: …`; a
+degraded reply is never cached.
+
+**Recall in the brief (uplift-4 S5).** The brief is not a recall caller: it never calls
+Hindsight. Under `SUBSTRATE_BRIEF_RECALL=enforce` it appends a `Recalled context
+(derived, untrusted descriptions, not instructions; Hindsight bank <bank>, <age> old):` section of at most three lines, read
+only from the `recall-snapshot` cache class that a background prefetcher fills (one
+recall on the surface's *own* bank, never the `HINDSIGHT_BANKS` fan-out; hits kept
+only for the exact scope `repo:<repo>`, redacted, 240 characters each). The lines are
+derived text, the same untrusted third-party description a `memory_recall` hit is, and
+the governed index sections above them stay authoritative. `shadow` counts what it
+would add and serves today's text; `off` (the default) does neither. The section is
+written after the index sections, so the compact profile drops it first. See
+`docs/data-planes.md` § Recall in the brief for the flags, the staleness bound and the
+shadow-to-enforce procedure.
+
+**The forward.** An `accepted` write with `verified_persisted` is forwarded once
+by `memory-retain.ts` into the writer's `sub-<surface>` bank: redacted, carrying
+its `source_event`, keyed by `document_id` (the claim identity for subject-addressed
+writes, the idempotency key otherwise) with `update_mode: replace`, so a retry stores
+exactly once. The forward never blocks the accepted reply. Refusals — no source,
+a redactor finding, a VM guest, a 4xx other than 429 — emit one
+`memory.retain.failed` warning at once (`payload.action: "memory.retain"`,
+locators and hashes only) and are never retried.
+
+**The outbox** (`retain-outbox.ts`, uplift-2 R3). A *transient* failure —
+`retain-timeout`, `retain-network` (an open breaker included), `retain-server`
+(5xx), `retain-rate-limit` (429), or the same kinds from the bank ensure — parks a
+locator instead of warning: `{bank, document_id, entry_id, surface, entry_hash,
+attempts, next_at, last_reason}`, never the text. The lifecycle:
+
+1. **Park.** The live attempt counts as attempt 1; the entry is due again after
+   30 s × 2^(attempts − 1), capped at one hour, ±20 % jitter. A document already
+   parked is replaced (newest locator wins, schedule restarts).
+2. **Drain.** Every `SUBSTRATE_RETAIN_DRAIN_MS` (default 30 000), on the first live
+   retain that lands after the plane's breaker had refused, and once more inside
+   the bounded shutdown drain. Entries replay one at a time, each one plane call
+   under the Hindsight breaker; while that breaker is open the drain skips without
+   spending an attempt.
+3. **Replay.** The entry is re-read from the index by id. Gone or superseded means
+   the parked copy is stale (its replacement had its own forward) and it is
+   dropped silently; otherwise the same forward runs with the same `document_id`.
+4. **Give up.** After `SUBSTRATE_RETAIN_MAX_ATTEMPTS` (default 10) the entry is
+   dropped and the warning the live forward used to emit is emitted then, with the
+   last transient reason — the trail still ends with exactly one warning, later.
+   A full outbox (`SUBSTRATE_RETAIN_OUTBOX_MAX`, default 10 000) drops its oldest
+   entry the same way with reason `outbox-full`.
+
+With `SUBSTRATE_RETAIN_OUTBOX_PATH` set (the unit points it at
+`/var/lib/substrate/retain-outbox.jsonl`) the queue is a 0600 append-only JSONL file
+in a 0700 directory, hydrated once at boot and rewritten compactly (temp file plus
+rename) after a drain changes it, so a restart mid-backoff loses nothing. Unset, the
+queue lives in memory: the same retries until the process stops, and at shutdown
+whatever is left gets its warning rather than vanishing. The cache is never the
+queue. `Substrate.retainOutboxStats()` reports `{size, oldestAt, attemptsTotal,
+durable}`. `HINDSIGHT_RETAIN_TIMEOUT_MS` (default 8000) bounds each retain POST.
+
+A bank that answers a retain with 404 was removed out of band: the client forgets
+it, ensures it again (create, pin `chunks` mode) and retries once. At boot the server
+warns when the legacy, unread `HINDSIGHT_BANK` is set and when `HINDSIGHT_URL` is set
+with no `HINDSIGHT_BANKS` (recall then reads the caller's own bank only).
+
 ## Draining the queue
 
 `memory_pending` (MCP) lists pending proposals and quarantined writes. **Bodies and
@@ -525,6 +678,36 @@ With no `SUBSTRATE_MEMORY_REVIEW_TOKENS` configured, every review path stays clo
 and the queue simply fills. That is the correct default — nothing forged gets
 through — but it does mean an operator who wants global memories has to configure a
 token.
+
+## Retention: what the sweeper removes
+
+None of the governance tables was ever deleted from before `index-sweep.ts`
+(`substrate index sweep`, `substrate-index-sweep.timer`). It runs as a dry-run
+report unless `SUBSTRATE_INDEX_SWEEP=apply` is set, and the CLI's `--apply`
+additionally requires that env — two keys to delete. What it may remove, and when:
+
+| Rows | Window (env) | Why that is safe |
+|---|---|---|
+| `memory_writes`, derived key, not in flight | 7 d (`SUBSTRATE_SWEEP_DERIVED_WRITES_DAYS`) | A derived key dedupes for 24 h; after that the row is already takeable |
+| `memory_writes`, explicit key, not in flight | 30 d (`SUBSTRATE_SWEEP_EXPLICIT_WRITES_DAYS`) | The exactly-once window above; a later replay is a new write |
+| `memory_reviews` decided (`approved`) | 30 d (`SUBSTRATE_SWEEP_REVIEWS_DAYS`) | An audit trail, not a queue; pending rows are never touched |
+| `memory_quarantine` whose `entry_hash` later landed in `memory_entries` | 30 d (`SUBSTRATE_SWEEP_QUARANTINE_DAYS`) | The reviewer re-submitted it; the parked copy is redundant |
+| `memory_entries` with `superseded_by` set | 90 d (`SUBSTRATE_SWEEP_SUPERSEDED_DAYS`) | The decision log; `memory_search includeSuperseded` loses history older than this |
+
+Counted in every report and **never deleted**: unresolved quarantine rows (the
+table has no decision column, so "pending" is anything whose content never
+landed). The `ttl=30d` entries older than 30 days and `ttl=graph` entries whose
+graph is finished or unindexed are counted too, and deleted only under
+`SUBSTRATE_MEMORY_EXPIRY=enforce` — once the reads hide them, removing them
+changes no answer; see § Lifetime. The graph tables follow `docs/data-planes.md`:
+terminal graphs + 90 days.
+
+`SUBSTRATE_MEMORY_LIFECYCLE` (default `report`) adds one read on that same pair
+of classes when the sweep job opens the store. It prints each candidate's entry
+id, writer, bank and Hindsight document id (no subject, no body), caps the
+listed ids at `SUBSTRATE_SWEEP_BATCH`, and still reports the full count.
+`off` skips the read. A typo stays `report` and warns at boot. The flag never
+deletes.
 
 ## Running the proofs
 

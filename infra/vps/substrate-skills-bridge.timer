@@ -1,0 +1,12 @@
+[Unit]
+Description=Agent Substrate — Hermes pending-skill bridge every 5 minutes
+Documentation=https://github.com/swcstudiospace/agent-substrate
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=substrate-skills-bridge.service
+
+[Install]
+WantedBy=timers.target

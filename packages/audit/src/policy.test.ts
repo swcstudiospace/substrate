@@ -118,6 +118,22 @@ describe("auditMode", () => {
 		expect(auditMode("skills_propose")).toBe("fail-closed");
 	});
 
+	test("skills_approve is served on both doors and fail-closed; skills_list is a fail-open read on both", () => {
+		// An approval nobody recorded is an unaudited statement of what is published; the list is read by a sync
+		// that an unwritable audit file must not stop.
+		const src = join(import.meta.dir, "..", "..", "mcp-server", "src");
+		const mcp = readFileSync(join(src, "mcp.ts"), "utf8");
+		const server = readFileSync(join(src, "server.ts"), "utf8");
+		for (const tool of ["skills_approve", "skills_list"]) {
+			expect(mcp).toMatch(new RegExp(`registerTool\\(\\s*"${tool}"`));
+			expect(server).toMatch(new RegExp(`auditedRest\\(\\s*res\\s*,\\s*observability\\s*,\\s*surface\\s*,\\s*"${tool}"`));
+		}
+		expect(auditMode("skills_approve")).toBe("fail-closed");
+		expect(auditMode("skills_list")).toBe("fail-open");
+		expect(FAIL_CLOSED_TOOLS.has("skills_list")).toBe(false);
+		expect(FAIL_OPEN_TOOLS.has("skills_approve")).toBe(false);
+	});
+
 	test("every served tool and REST route has an explicit audit decision", () => {
 		// A later phase registering a tool with no decision fails here when the
 		// suite runs, not the first time the tool is called in production.

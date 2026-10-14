@@ -1,0 +1,43 @@
+# substrate.slice — the cgroup every substrate-* unit runs in (uplift-2 R7).
+#
+# Installed to /etc/systemd/system/substrate.slice. Each unit in this directory
+# carries Slice=substrate.slice, so one `systemctl status substrate.slice`
+# shows the whole substrate's memory and task use, and one knob below decides
+# how the kernel treats the substrate when the host is under pressure.
+#
+# MemoryLow=2G is protection, not a cap: when memory is reclaimed, pages of
+# units in this slice are reclaimed only after the co-tenants outside it
+# (the operator's other containers and checkouts on this host) have been
+# reclaimed down to their own protection. Measured 2026-10-13: substrate-mcp
+# 53 MB RSS, 88 MB peak; the host at 31 GiB with 12 of 15 GiB swap in use.
+# 2G therefore covers the whole substrate several times over and still leaves
+# the kernel free to reclaim it before anything OOM-kills.
+#
+# Per-unit ceilings (MemoryHigh/MemoryMax/TasksMax/CPUQuota) live in the unit
+# files themselves, which are the source of truth; the slice only groups them.
+[Unit]
+Description=Agent Substrate units (substrate-mcp, collectors, dispatcher, host, timers' jobs)
+Documentation=https://github.com/swcstudiospace/agent-substrate
+
+[Slice]
+MemoryLow=2G
+# Priority (uplift-4 S3). CPUWeight and IOWeight are relative shares against
+# siblings under the parent slice, not caps: they matter only while something
+# else on the host wants the same CPU or disk. This host's co-tenants (the
+# operator's agents and containers) sit in system.slice at the default weight
+# of 100, so 300 gives the substrate three shares to their one when the host
+# is saturated (load 10 on 8 vCPU measured 2026-10-13) and costs nothing when
+# it is idle. CPUQuota in the unit files stays the ceiling.
+#
+# IOWeight is honoured only when the io controller is enabled for the cgroup
+# AND the block device's scheduler is BFQ, or io.cost is enabled (io.cost.qos
+# `enable=1`). Under `none` or `mq-deadline` without io.cost the value is
+# accepted and has no effect. `bun scripts/doctor-runtime.ts` reports whether
+# this host can honour it (the `substrate.slice IOWeight honoured` row); this
+# file does not enable BFQ or io.cost and nothing here claims it works.
+CPUWeight=300
+IOWeight=300
+# systemd-oomd (when it runs) picks victims by this preference; `avoid` takes
+# the slice out of the first rank of candidates. It does not stop the kernel
+# OOM killer, and MemoryMax in each unit still ends a runaway process.
+ManagedOOMPreference=avoid

@@ -170,9 +170,12 @@ export function parityVerdict(facts: ParityFacts, opts: VerdictOptions = {}): Pa
 	if (facts.mainPid === null || facts.ssOwnerPids.length !== 1 || facts.ssOwnerPids[0] !== facts.mainPid) {
 		failures.push(`port 7410 owners [${facts.ssOwnerPids.join(", ")}] are not exactly MainPID ${facts.mainPid ?? "(unknown)"}`);
 	}
+	// The unit's own cgroup, under the slice the unit files name: `substrate.slice`
+	// since uplift-2 R7, `system.slice` for a unit file without a `Slice=` line.
+	// Anything else (a user session scope, a rehearsal twin) is not production.
 	const slice = facts.cgroup?.split(":").pop() ?? null;
-	if (slice !== "/system.slice/substrate-mcp.service") {
-		failures.push(`cgroup is ${facts.cgroup ?? "(unknown)"}, want system.slice/substrate-mcp.service`);
+	if (slice !== "/substrate.slice/substrate-mcp.service" && slice !== "/system.slice/substrate-mcp.service") {
+		failures.push(`cgroup is ${facts.cgroup ?? "(unknown)"}, want substrate.slice/substrate-mcp.service (or system.slice/ before the slice)`);
 	}
 	if (facts.healthzStatus === null) {
 		failures.push("healthz is not answering on 127.0.0.1:7410");
@@ -371,8 +374,8 @@ function readBtime(): number | null {
 	return m?.[1] ? Number(m[1]) : null;
 }
 
-/** ExecMainStartTimestamp in --timestamp=unix form (@epoch); human form as fallback. */
-function systemdTimestampToEpoch(value: string | undefined): number | null {
+/** A `systemctl show` timestamp in --timestamp=unix form (@epoch); human form as fallback. Shared with the runtime doctor. */
+export function systemdTimestampToEpoch(value: string | undefined): number | null {
 	if (!value) return null;
 	const at = /^@(\d+)$/.exec(value.trim());
 	if (at?.[1]) return Number(at[1]);

@@ -18,6 +18,7 @@ import {
 	clearDirectory,
 	ensurePrivateDir,
 	flag,
+	flagAll,
 	freeBytes,
 	gitOutput,
 	installUpCleanup,
@@ -34,6 +35,7 @@ import {
 	parseName,
 	parseOperator,
 	parseShellExports,
+	parseStore,
 	parseSurfaces,
 	pickFreePort,
 	pickSmokeToken,
@@ -46,8 +48,9 @@ import {
 	refuseSmokeUrl,
 	readStartSeconds,
 	resolveContainerRemoval,
+	selectStoreContainer,
 	smokeToolResult,
-	stopRagflowFake,
+	storeContainerName,
 	type ProcFacts,
 } from "./rehearsal.ts";
 import type { Surface } from "../packages/mcp-server/src/types.ts";
@@ -1058,5 +1061,278 @@ describe("installUpCleanup", () => {
 		expect(process.listenerCount("SIGINT")).toBe(intBefore);
 		expect(process.listenerCount("SIGTERM")).toBe(termBefore);
 		disarm(); // Double disarm is safe.
+	});
+});
+
+/**
+ * A fake `docker` that behaves like a daemon for exactly the calls `pause`/`unpause` make: `ps`
+ * answers the listing in `ps.txt`, `inspect` the paused flag in `paused.txt`, `pause`/`unpause` flip it.
+ * Every argv line is recorded, so a test can prove which verbs were (not) sent.
+ */
+function fakeStoreDocker(ps: string, paused: boolean): { dir: string; bin: string; log: string; flag: string } {
+	const dir = mkdtempSync(join(tmpdir(), "rh-fakestore-"));
+	const bin = join(dir, "bin");
+	mkdirSync(bin, { recursive: true });
+	const log = join(dir, "calls.log");
+	const flagFile = join(dir, "paused.txt");
+	writeFileSync(join(dir, "ps.txt"), ps);
+	writeFileSync(flagFile, `${paused}\n`);
+	writeFileSync(
+		join(bin, "docker"),
+		[
+			"#!/bin/sh",
+			`echo "$*" >> "${log}"`,
+			'case "$1" in',
+			'  context) echo "unix:///var/run/docker.sock";;',
+			`  ps) cat "${join(dir, "ps.txt")}";;`,
+			`  inspect) cat "${flagFile}";;`,
+			`  pause) echo true > "${flagFile}";;`,
+			`  unpause) echo false > "${flagFile}";;`,
+			"esac",
+			"exit 0",
+			"",
+		].join("\n"),
+	);
+	chmodSync(join(bin, "docker"), 0o755);
+	return { dir, bin, log, flag: flagFile };
+}
+
+function runPauseCli(args: string[], fake: { bin: string }, base: string): { code: number; out: string; err: string } {
+	return runIsolated(args, { XDG_RUNTIME_DIR: base, PATH: `${fake.bin}:${process.env.PATH ?? ""}`, DOCKER_HOST: "", DOCKER_CONTEXT: "" });
+}
+
+describe("parseStore", () => {
+	test("takes ledger and index and refuses everything else with the rule name", () => {
+		expect(parseStore("ledger")).toBe("ledger");
+		expect(parseStore("index")).toBe("index");
+		for (const bad of [undefined, "", "pg", "postgres", "Ledger", "ledger,index", "all"]) {
+			expect(() => parseStore(bad)).toThrow("rule pause-store");
+		}
+	});
+
+	test("the store names map to the containers up creates", () => {
+		expect(storeContainerName("gate-1", "ledger")).toBe("substrate-rehearsal-gate-1-ledger");
+		expect(storeContainerName("gate-1", "index")).toBe("substrate-rehearsal-gate-1-pg");
+	});
+});
+
+describe("selectStoreContainer", () => {
+	const ok = (out: string): { ok: boolean; out: string; err: string } => ({ ok: true, out, err: "" });
+	const listing = [
+		"aaaaaaaaaaaa substrate-rehearsal-gt-pg",
+		"bbbbbbbbbbbb substrate-rehearsal-gt-ledger",
+	].join("\n");
+
+	test("picks the instance's own container for the named store", () => {
+		expect(selectStoreContainer("gt", "ledger", ok(listing))).toBe("bbbbbbbbbbbb");
+		expect(selectStoreContainer("gt", "index", ok(listing))).toBe("aaaaaaaaaaaa");
+	});
+
+	test("refuses a container that is not that instance's: a look-alike, another instance, another role", () => {
+		for (const foreign of [
+			"cccccccccccc substrate-rehearsal-gt-ledger-old",
+			"cccccccccccc substrate-rehearsal-other-ledger",
+			"cccccccccccc substrate-rehearsal-gt",
+			"cccccccccccc my-production-ledger",
+			"cccccccccccc prefix-substrate-rehearsal-gt-ledger",
+		]) {
+			expect(() => selectStoreContainer("gt", "ledger", ok(foreign))).toThrow("rule pause-target");
+		}
+		// The pg container is not the ledger even though both carry the label.
+		expect(() => selectStoreContainer("gt", "ledger", ok("aaaaaaaaaaaa substrate-rehearsal-gt-pg"))).toThrow("rule pause-target");
+	});
+
+	test("refuses an empty listing, two matches, a malformed id and a failed listing", () => {
+		expect(() => selectStoreContainer("gt", "ledger", ok(""))).toThrow("no running ledger");
+		expect(() =>
+			selectStoreContainer("gt", "ledger", ok("bbbbbbbbbbbb substrate-rehearsal-gt-ledger\ndddddddddddd substrate-rehearsal-gt-ledger")),
+		).toThrow("more than one");
+		expect(() => selectStoreContainer("gt", "ledger", ok("--all substrate-rehearsal-gt-ledger"))).toThrow("rule pause-target");
+		expect(() => selectStoreContainer("gt", "ledger", { ok: false, out: "", err: "Cannot connect" })).toThrow("could not list");
+	});
+
+	test("a container with several names matches on the exact one", () => {
+		expect(selectStoreContainer("gt", "ledger", ok("bbbbbbbbbbbb alias,substrate-rehearsal-gt-ledger"))).toBe("bbbbbbbbbbbb");
+	});
+});
+
+describe("flagAll and the new flags' argument handling", () => {
+	test("flagAll reads every occurrence and refuses a missing value", () => {
+		expect(flagAll(["up", "--extra-env", "A=1", "--name", "x", "--extra-env", "B=2"], "--extra-env")).toEqual(["A=1", "B=2"]);
+		expect(flagAll(["up"], "--extra-env")).toEqual([]);
+		expect(flagAll(["up", "--extra-env"], "--extra-env")).toBeNull();
+		expect(flagAll(["up", "--extra-env", "--name", "x"], "--extra-env")).toBeNull();
+	});
+
+	test("each flag is accepted only by the subcommand that reads it", () => {
+		expect(refuseExtraArgs(["pause", "--name", "x", "--store", "ledger"])).toBeNull();
+		expect(refuseExtraArgs(["unpause", "--store", "index"])).toBeNull();
+		expect(refuseExtraArgs(["up", "--extra-env", "SUBSTRATE_BRIEF_PROFILE=shadow", "--extra-env", "SUBSTRATE_CACHE_SWR=off"])).toBeNull();
+		expect(refuseExtraArgs(["down", "--store", "ledger"])).toBe("--store is only valid with pause and unpause");
+		expect(refuseExtraArgs(["smoke", "--extra-env", "SUBSTRATE_BRIEF_PROFILE=shadow"])).toBe("--extra-env is only valid with up");
+		expect(refuseExtraArgs(["pause", "--extra-env", "SUBSTRATE_BRIEF_PROFILE=shadow"])).toBe("--extra-env is only valid with up");
+	});
+});
+
+describe("CLI: --extra-env refusals reach no docker", () => {
+	for (const [entry, rule] of [
+		["SUBSTRATE_PORT=7410", "rule extra-env-key"],
+		["SUBSTRATE_PG_URL=postgres://elsewhere", "rule extra-env-key"],
+		["SUBSTRATE_BRIEF_PROFILE=loud", "rule extra-env-value"],
+		["SUBSTRATE_BRIEF_PROFILE", "rule extra-env-format"],
+	] as const) {
+		test(`up --extra-env ${entry.split("=")[0]} exits 2 naming ${rule}`, () => {
+			const base = mkdtempSync(join(tmpdir(), "rh-extra-"));
+			const fake = fakeDocker();
+			try {
+				const run = runPauseCli(["up", "--name", "rh-extra", "--port", "0", "--extra-env", entry], fake, base);
+				expect(run.code).toBe(2);
+				expect(run.err).toContain(rule);
+				expect(dockerCalls(fake.log)).toBe("");
+				expect(`${run.out}${run.err}`).not.toContain("postgres://elsewhere");
+			} finally {
+				rmSync(base, { recursive: true, force: true });
+				rmSync(fake.dir, { recursive: true, force: true });
+			}
+		});
+	}
+
+	test("a second occurrence of one key is refused, not last-wins", () => {
+		const base = mkdtempSync(join(tmpdir(), "rh-extra-dup-"));
+		const fake = fakeDocker();
+		try {
+			const run = runPauseCli(
+				["up", "--name", "rh-extra", "--port", "0", "--extra-env", "SUBSTRATE_CACHE_SWR=off", "--extra-env", "SUBSTRATE_CACHE_SWR=enforce"],
+				fake,
+				base,
+			);
+			expect(run.code).toBe(2);
+			expect(run.err).toContain("rule extra-env-duplicate");
+			expect(dockerCalls(fake.log)).toBe("");
+		} finally {
+			rmSync(base, { recursive: true, force: true });
+			rmSync(fake.dir, { recursive: true, force: true });
+		}
+	});
+
+	test("--extra-env on down is a usage error that stops nothing", () => {
+		const base = mkdtempSync(join(tmpdir(), "rh-extra-down-"));
+		const fake = fakeDocker();
+		try {
+			const run = runPauseCli(["down", "--name", "rh-extra", "--extra-env", "SUBSTRATE_CACHE_SWR=off"], fake, base);
+			expect(run.code).toBe(2);
+			expect(run.err).toContain("--extra-env is only valid with up");
+			expect(dockerCalls(fake.log)).toBe("");
+		} finally {
+			rmSync(base, { recursive: true, force: true });
+			rmSync(fake.dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("CLI: pause and unpause", () => {
+	const OWN = "bbbbbbbbbbbb substrate-rehearsal-rh-pz-ledger\naaaaaaaaaaaa substrate-rehearsal-rh-pz-pg\n";
+
+	test("pause without a valid --store exits 2 before any docker call", () => {
+		for (const args of [["pause", "--name", "rh-pz"], ["pause", "--name", "rh-pz", "--store", "disk"], ["unpause", "--name", "rh-pz", "--store"]]) {
+			const base = mkdtempSync(join(tmpdir(), "rh-pz-arg-"));
+			const fake = fakeDocker();
+			try {
+				const run = runPauseCli(args, fake, base);
+				expect(run.code).toBe(2);
+				expect(dockerCalls(fake.log)).toBe("");
+			} finally {
+				rmSync(base, { recursive: true, force: true });
+				rmSync(fake.dir, { recursive: true, force: true });
+			}
+		}
+	});
+
+	test("pause freezes the named store of the named instance, reads it back and touches nothing else", () => {
+		const base = mkdtempSync(join(tmpdir(), "rh-pz-"));
+		const fake = fakeStoreDocker(OWN, false);
+		try {
+			const run = runPauseCli(["pause", "--name", "rh-pz", "--store", "ledger"], fake, base);
+			expect(run.code).toBe(0);
+			expect(run.out).toContain("ledger paused");
+			const calls = dockerCalls(fake.log).split("\n").filter(Boolean);
+			expect(calls).toContain("pause bbbbbbbbbbbb");
+			expect(calls.some((line) => line.startsWith("pause aaaaaaaaaaaa") || line.startsWith("rm") || line.startsWith("kill"))).toBe(false);
+			expect(calls).toContain("ps --filter label=substrate.rehearsal=rh-pz --format {{.ID}} {{.Names}}");
+			expect(readFileSync(fake.flag, "utf8").trim()).toBe("true");
+		} finally {
+			rmSync(base, { recursive: true, force: true });
+			rmSync(fake.dir, { recursive: true, force: true });
+		}
+	});
+
+	test("unpause thaws it, and is idempotent on a store that was never paused", () => {
+		const base = mkdtempSync(join(tmpdir(), "rh-unpz-"));
+		const fake = fakeStoreDocker(OWN, true);
+		try {
+			const first = runPauseCli(["unpause", "--name", "rh-pz", "--store", "ledger"], fake, base);
+			expect(first.code).toBe(0);
+			expect(first.out).toContain("ledger running");
+			const second = runPauseCli(["unpause", "--name", "rh-pz", "--store", "ledger"], fake, base);
+			expect(second.code).toBe(0);
+			expect(second.out).toContain("already running");
+			const verbs = dockerCalls(fake.log).split("\n").filter((line) => line.startsWith("unpause "));
+			expect(verbs).toEqual(["unpause bbbbbbbbbbbb"]);
+		} finally {
+			rmSync(base, { recursive: true, force: true });
+			rmSync(fake.dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a container that is not this instance's is refused and never paused", () => {
+		const base = mkdtempSync(join(tmpdir(), "rh-pz-foreign-"));
+		// The listing (already label-filtered by the daemon in real life) offers a production-looking name.
+		const fake = fakeStoreDocker("cccccccccccc substrate-greptime\ndddddddddddd substrate-rehearsal-other-ledger\n", false);
+		try {
+			const run = runPauseCli(["pause", "--name", "rh-pz", "--store", "ledger"], fake, base);
+			expect(run.code).toBe(2);
+			expect(run.err).toContain("rule pause-target");
+			expect(dockerCalls(fake.log)).not.toMatch(/^pause /m);
+			expect(readFileSync(fake.flag, "utf8").trim()).toBe("false");
+		} finally {
+			rmSync(base, { recursive: true, force: true });
+			rmSync(fake.dir, { recursive: true, force: true });
+		}
+	});
+
+	test("with the instance lock held elsewhere it refuses before docker", () => {
+		const base = mkdtempSync(join(tmpdir(), "rh-pz-lock-"));
+		const fake = fakeStoreDocker(OWN, false);
+		const held = acquireNameLock(join(base, "substrate-rehearsal", "rh-pz"), "rh-pz");
+		try {
+			const run = runPauseCli(["pause", "--name", "rh-pz", "--store", "ledger"], fake, base);
+			expect(run.code).toBe(2);
+			expect(run.err).toContain("locked by another operation");
+			expect(dockerCalls(fake.log)).toBe("");
+		} finally {
+			held.release();
+			rmSync(base, { recursive: true, force: true });
+			rmSync(fake.dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a daemon that cannot list refuses instead of reporting success", () => {
+		const base = mkdtempSync(join(tmpdir(), "rh-pz-dead-"));
+		const dir = mkdtempSync(join(tmpdir(), "rh-fakedocker-"));
+		const bin = join(dir, "bin");
+		mkdirSync(bin, { recursive: true });
+		writeFileSync(
+			join(bin, "docker"),
+			'#!/bin/sh\nif [ "$1" = "context" ]; then echo "unix:///var/run/docker.sock"; exit 0; fi\necho "Cannot connect" >&2\nexit 1\n',
+		);
+		chmodSync(join(bin, "docker"), 0o755);
+		try {
+			const run = runPauseCli(["pause", "--name", "rh-pz", "--store", "ledger"], { bin }, base);
+			expect(run.code).toBe(2);
+			expect(run.err).toContain("could not list");
+		} finally {
+			rmSync(base, { recursive: true, force: true });
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });

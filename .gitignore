@@ -1,4 +1,6 @@
+# directories and the symlinks worktrees point at the main checkout's install
 node_modules/
+node_modules
 dist/
 build/
 *.tsbuildinfo

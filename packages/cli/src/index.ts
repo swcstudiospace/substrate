@@ -10,9 +10,20 @@
  *   substrate handoff --to S --goal G ...    record a signed handoff packet
  *   substrate evidence --graph G             the evidence bundle, as JSON or HTML
  *   substrate lessons add|recall|digest|outcome   the lessons bank (docs/lessons-bank.md)
- *   substrate skills propose --dir PATH ...  propose a skill as a PR on the skills library
- *   substrate docs ingest --dataset N --file P --source-url U --commit S   ingest one page (DOCS-02)
- *   substrate docs refresh --dataset N --commit S [--repo P] [--slug O/R]  refresh a dataset at a commit (DOCS-03)
+ *   substrate skills propose|list|approve ...  propose, list or decide a skill (docs/runbooks/skills-governance.md)
+ *   substrate docs ingest --dataset NAME --path PATH --source-url URL [...]
+ *       ingest one page into a docs dataset (docs/docs-search-ingest.md)
+ *   substrate index sweep [--apply] [--json]  the index retention sweep (dry-run unless --apply
+ *       AND SUBSTRATE_INDEX_SWEEP=apply are both given)
+ *   substrate ledger coverage|archive|verify-archive   anchor coverage and the verified
+ *       off-box archive (docs/greptime-ledger.md, "Coverage and archive")
+ *   substrate index archive|verify-archive|restore   the verified logical export of the Postgres
+ *       index and its restore-to-scratch proof (docs/runbooks/index-archive.md)
+ *   substrate spool status|flush             the collector event spool (docs/collectors.md, "Event spool")
+ *
+ * With `SUBSTRATE_EVENT_SPOOL=on`, `emit` parks an event that failed for a retryable reason
+ * (network error, timeout, 5xx) in the spool and returns at once — it never replays; `spool flush`
+ * does. With the flag off `emit` is the single POST it always was.
  *
  * Exit status is always 0 for `brief`, `emit` and `handoff`. These run inside
  * git hooks and editor hooks, where a non-zero exit can abort the user's commit
@@ -26,17 +37,19 @@
  * The bearer for a surface comes from the token resolver: the environment
  * value first, then the token-file variable, then the per-surface file in
  * the tokens dir. Commands without a surface send as `claude-code`.
- * `skills propose` reports failure like `verify` and `drift`: it is not a hook command, and
- * a proposal that was refused or never reached the server must not look like one that landed.
- * `docs ingest` and `docs refresh` report failure the same way: they are not hook
- * commands, and a page that was refused or never reached the server must not look like one that landed.
+ * `skills` reports failure like `verify` and `drift`: it is not a hook command, and
+ * a proposal, list or decision that was refused or never reached the server must not look like one that landed.
  */
 import { chainStateOf, renderEvidenceHtml, type EvidenceBundle } from "@substrate/evidence";
 import { list, parseArgs, str } from "./args.ts";
 import { resolveBearer } from "./token.ts";
+import { docsTimeout, runDocs } from "./docs.ts";
 import { httpMemory, lessonsTimeout, runLessons } from "./lessons.ts";
 import { runSkills, skillsTimeout } from "./skills.ts";
-import { docsTimeout, runDocs } from "./docs-refresh.ts";
+import { runLedger } from "./ledger.ts";
+import { runSpool } from "./spool.ts";
+import { spoolConfig } from "../../collectors/src/spool.ts";
+import { INDEX_ARCHIVE_SUBCOMMANDS, INDEX_ARCHIVE_USAGE, runIndexArchive } from "./index-archive.ts";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -140,22 +153,31 @@ async function cmdEmit(args: Record<string, string | true>): Promise<void> {
 		}
 	}
 	const surface = str(args.surface) ?? "claude-code";
-	await post(
-		"/events",
-		{
-			kind,
-			summary,
-			surface,
-			session_id: str(args.session),
-			graph_id: str(args.graph),
-			node_id: str(args.node),
-			repo: str(args.repo) ?? repoSlug(),
-			branch: str(args.branch) ?? branch(),
-			actor: str(args.actor) ?? "agent",
-			payload,
-		},
+	const body = {
+		kind,
+		summary,
 		surface,
-	);
+		session_id: str(args.session),
+		graph_id: str(args.graph),
+		node_id: str(args.node),
+		repo: str(args.repo) ?? repoSlug(),
+		branch: str(args.branch) ?? branch(),
+		actor: str(args.actor) ?? "agent",
+		payload,
+	};
+	if (spoolConfig().mode === "on") {
+		// The shared emit stamps `ts` and the idempotency key at this first attempt and parks a
+		// retryable failure in the spool; the CLI never replays (`substrate spool flush` does).
+		const { postEvent } = await import("../../collectors/src/emit.ts");
+		await postEvent(body as Parameters<typeof postEvent>[0], {
+			timeoutMs: timeout(),
+			collector: "cli",
+			source: "cli.emit",
+			url: base(),
+		});
+		return;
+	}
+	await post("/events", body, surface);
 }
 
 /** Write the brief to disk, then exec the agent. For surfaces with no hook API. */
@@ -432,6 +454,52 @@ async function cmdEvidence(args: Record<string, string | true>): Promise<number>
 	return 0;
 }
 
+/**
+ * `substrate index sweep [--apply] [--json]`
+ *
+ * Runs `packages/mcp-server/src/index-sweep-run.ts` from this checkout (or the
+ * pinned release the CLI is installed in) with the operator's environment, so the
+ * one job the timer runs is the one the operator runs by hand. Without `--apply`
+ * the runner is told `--dry-run` explicitly: an environment that happens to carry
+ * `SUBSTRATE_INDEX_SWEEP=apply` must not delete because someone asked for a
+ * report. With `--apply`, the runner refuses unless that env is also `apply` —
+ * two keys to delete — and the refusal comes back as exit 2 with its reason.
+ * The CLI package does not depend on the server package, which is why this is a
+ * spawn and not an import.
+ */
+function cmdIndex(argv: string[], args: Record<string, string | true>): number {
+	if ((INDEX_ARCHIVE_SUBCOMMANDS as readonly string[]).includes(argv[0] ?? "")) {
+		// uplift-4 S2: the same spawn-the-runner shape, for the verified index archive.
+		const archiveRunner = join(import.meta.dir, "..", "..", "mcp-server", "src", "index-run.ts");
+		return runIndexArchive(argv, args, {
+			spawn: (runnerArgs) => spawnSync(process.execPath, [archiveRunner, ...runnerArgs], { stdio: "inherit", env: process.env }).status ?? 1,
+			err: (text) => process.stderr.write(text),
+			env: process.env,
+		});
+	}
+	if (argv[0] !== "sweep") {
+		process.stderr.write(`usage: substrate index sweep [--apply] [--json]\n${INDEX_ARCHIVE_USAGE}`);
+		return 2;
+	}
+	const runner = join(import.meta.dir, "..", "..", "mcp-server", "src", "index-sweep-run.ts");
+	const flags = [args.apply === true ? "--apply" : "--dry-run", ...(args.json === true ? ["--json"] : [])];
+	const result = spawnSync(process.execPath, [runner, ...flags], { stdio: "inherit", env: process.env });
+	return result.status ?? 1;
+}
+
+/**
+ * `substrate ledger …` — the same spawn-the-runner shape as `index sweep`, for
+ * the same reason: the ledger client and its credentials live in the server
+ * package only. The grammar check and the exit code are `runLedger`'s.
+ */
+function cmdLedger(argv: string[], args: Record<string, string | true>): number {
+	const runner = join(import.meta.dir, "..", "..", "mcp-server", "src", "ledger-run.ts");
+	return runLedger(argv, args, {
+		spawn: (runnerArgs) => spawnSync(process.execPath, [runner, ...runnerArgs], { stdio: "inherit", env: process.env }).status ?? 1,
+		err: (text) => process.stderr.write(text),
+	});
+}
+
 const [command, ...rest] = process.argv.slice(2);
 const args = parseArgs(rest);
 
@@ -484,9 +552,21 @@ switch (command) {
 		process.exit(
 			await runDocs(rest, {
 				url: base(),
-				token: resolveBearer("substrate", process.env) ?? undefined,
+				token: resolveBearer("claude-code", process.env) ?? undefined,
 				timeoutMs: docsTimeout(process.env.SUBSTRATE_DOCS_TIMEOUT_MS),
 				cwd: process.cwd(),
+				out: (text) => process.stdout.write(text),
+				err: (text) => process.stderr.write(text),
+				vmGuest: (process.env.SUBSTRATE_VM_GUEST?.trim() ?? "") === "1",
+			}),
+		);
+	case "index":
+		process.exit(cmdIndex(rest, args));
+	case "ledger":
+		process.exit(cmdLedger(rest, args));
+	case "spool":
+		process.exit(
+			await runSpool(rest, {
 				out: (text) => process.stdout.write(text),
 				err: (text) => process.stderr.write(text),
 			}),
@@ -501,11 +581,16 @@ switch (command) {
 				"substrate handoff --to S --goal G [--files a,b] [--dod 'x;y'] [--blockers 'z']\n" +
 				"                  [--graph G] [--node N] [--lease L] [--release] [--session I]\n" +
 				"substrate evidence --graph <graph_id> [--format json|html] [--out PATH]\n" +
-				"substrate lessons add|recall|digest|outcome ...   (substrate lessons help)\n" +
+				"substrate lessons add|ingest|recall|digest|outcome ...   (substrate lessons help)\n" +
 				"substrate skills propose --dir PATH [--name N] [--rationale R] [--remove a,b] [--session I] [--graph G]\n" +
 				"                         [--dry-run] [--replace] [--reopen] [--allow-doc-examples pem,jwt]\n" +
-				"substrate docs ingest --dataset N --file P --source-url U --commit S [--title T] [--dry-run]\n" +
-				"substrate docs refresh --dataset N --commit S [--repo P] [--slug O/R]\n",
+				"substrate skills list [--state approved|proposed|declined|retired|all]\n" +
+				"substrate skills approve --name N --pr NUMBER --decision approve|decline|retire [--reason R]\n" +
+				"substrate docs ingest --dataset NAME --path PATH --source-url URL [--commit C] [--heading H] [--session I]\n" +
+				"substrate index sweep [--apply] [--json]   (--apply also needs SUBSTRATE_INDEX_SWEEP=apply)\n" +
+				"substrate index archive [--out DIR] [--page-size N] | verify-archive <dir> | restore --scratch URL <dir>\n" +
+				"substrate ledger coverage [--json] | archive [--until D] [--out DIR] [--page-size N] | verify-archive <dir> [--day D]\n" +
+				"substrate spool status [--json] | flush [--json] [--budget-ms N]   (the event spool needs SUBSTRATE_EVENT_SPOOL=on)\n",
 		);
 		process.exit(command ? 2 : 0);
 }
