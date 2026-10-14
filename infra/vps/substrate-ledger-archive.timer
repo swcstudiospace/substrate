@@ -1,0 +1,17 @@
+[Unit]
+Description=Archive closed ledger days daily (substrate-ledger-archive.service)
+Documentation=https://github.com/swcstudiospace/agent-substrate
+
+[Timer]
+# Once a day at 03:30 UTC: after the 03:17 index sweep so the two oneshots
+# never share a tick, and three and a half hours after midnight so the
+# hourly anchor has had its ticks for the day's last hours — an hour anchored
+# after its day was archived would show as `unanchored` in that day's verify.
+# Persistent=true runs a missed day at the next boot: the archive is what the
+# retention TTL is allowed to delete behind, so a gap is a gap in evidence.
+OnCalendar=*-*-* 03:30:00 UTC
+Persistent=true
+Unit=substrate-ledger-archive.service
+
+[Install]
+WantedBy=timers.target

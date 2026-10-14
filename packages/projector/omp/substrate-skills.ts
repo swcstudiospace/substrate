@@ -1,5 +1,5 @@
 /**
- * Omp extension (D22-15): Omp's skill creator proposes to the shared library
+ * Omp extension (D-11 as relocated by D-17): Omp's skill creator proposes to the shared library
  * instead of writing ~/.omp/agent/managed-skills.
  *
  * Installed as a symlink: ~/.omp/agent/extensions/substrate-skills.ts → this file (Omp's
@@ -11,29 +11,24 @@
  *   lesson still lands, and name the PR in additionalContext.
  * - manage_skill delete and every other tool pass through.
  *
- * Omp's tool_call budget is 30 s and fail-closed, so the request aborts at 25 s. A missing
- * token, a timeout, a transport error, a 401, a 403 or a 5xx queues the exact propose body
- * under /root/.omp/agent/substrate-pending/<name>-<UTC ts>.json (0600 file in a 0700 dir)
- * and still blocks/strips; the 22-02 bridge drains the queue as surface omp. 400 and 413
- * are final: block with the reason, queue nothing. The handler never throws.
+ * Omp's tool_call budget is 30 s and fail-closed, so the request aborts at 25 s. A timeout,
+ * transport error, 5xx, 401 or missing bearer queues the exact propose body under
+ * ~/.omp/agent/substrate-pending/<name>-<UTC ts>.json (0600; the 22-02 bridge drains it)
+ * and still blocks/strips. 400 and 413 are final: block with the reason, queue nothing.
+ * The handler never throws.
  *
  * Provenance: Omp passes every tool_call handler a ctx whose sessionManager.getSessionId() is the
  * calling session's id; it travels in the propose body (and so in a queued file) as `session_id`,
- * which the substrate prints in the PR body. No ctx, a blank id or a throwing getter omits the key.
+ * which the substrate prints in the PR body. No ctx, a blank id or a throwing getter omits it.
  *
- * Auth is the `omp` token through a standalone copy of Phase 20's resolver order
- * (packages/cli/src/token.ts): the `SUBSTRATE_TOKEN` value in the environment, else the first
- * line of the file named by `SUBSTRATE_TOKEN_FILE`, else the first line of the `omp` file in
- * the tokens dir (the `SUBSTRATE_TOKENS_DIR` value or /etc/substrate/tokens). The token is read
- * per call and sent only as the `authorization: Bearer` header (Phase 21 takes the proposal's
- * surface from the token): never logged, never queued, never in a reason.
+ * The omp surface bearer (SUBSTRATE_TOKEN, SUBSTRATE_TOKEN_FILE or the tokens-dir file, per the
+ * token.ts order) is resolved per call and sent only as the Authorization header: never logged,
+ * never queued, never in a reason.
  *
  * No import from the Omp package or the repo's module graph: the types below are structural copies of
- * pi-coding-agent's extensibility/shared-events.ts ToolCallEventResult, and the resolver below is a
- * copy of the token module's rule, so this file loads standalone.
+ * pi-coding-agent's extensibility/shared-events.ts ToolCallEventResult.
  */
-import { randomBytes } from "node:crypto";
-import { chmodSync, closeSync, mkdirSync, openSync, readSync, statSync, unlinkSync, writeSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export interface ToolCallEvent {
@@ -77,108 +72,32 @@ export interface ProposeBody {
 
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 
-/**
- * Write every UTF-8 byte. `writeSync` may accept only a prefix; a short
- * count is retried from the remainder, and a write that makes no progress
- * fails instead of reporting a truncated file as queued.
- */
-export function writeAllSync(
-	fd: number,
-	text: string,
-	write: (fd: number, buffer: Buffer, offset: number, length: number) => number = writeSync,
-): void {
-	const bytes = Buffer.from(text, "utf8");
-	let offset = 0;
-	while (offset < bytes.length) {
-		const wrote = write(fd, bytes, offset, bytes.length - offset);
-		if (wrote <= 0) throw new Error("proposal queue write made no progress");
-		offset += wrote;
-	}
-}
-
 export interface HandlerOptions {
 	fetchImpl: FetchLike;
 	url: string;
 	timeoutMs: number;
 	pendingDir: string;
+	/** Explicit bearer (tests). When absent, resolved per call following the token.ts order. */
+	bearer?: string;
+	/** Tokens-dir override for per-call resolution (tests). */
+	tokensDir?: string;
+	/** Env override for per-call resolution (tests). */
 	env?: Record<string, string | undefined>;
-	readFile?: (path: string) => string | null;
 	now?: () => Date;
-	randomHex?: () => string;
 }
 
-/** Same literal as mcp-server skills/propose.ts SKILL_NAME_RE (copied: this file loads standalone). */
+/**
+ * Same literal as mcp-server skills/propose.ts SKILL_NAME_RE. Intentionally local, not imported:
+ * this file loads standalone inside Omp (symlinked under ~/.omp/agent/extensions) and cannot
+ * import the repo's module graph; the no-Omp-import rule runs the other way for the same reason.
+ */
 const SKILL_NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+const SURFACE = "omp";
+const DEFAULT_TOKENS_DIR = "/etc/substrate/tokens";
+/** A token file holds one short value; anything larger is not one. */
+const MAX_TOKEN_FILE_BYTES = 4096;
 const PLAIN_SCALAR_RE = /^[A-Za-z0-9][A-Za-z0-9 ,.;()_/+='?-]*$/;
 const YAML_RESERVED_RE = /^(true|false|yes|no|on|off|null|~|[-+]?(\d[\d_]*)?\.?\d*([eE][-+]?\d+)?|\.inf|\.nan)$/i;
-
-/** Standalone copy of Phase 20's resolver (token.ts) for surface omp: direct value, then the
- * token-file variable, then <tokens dir>/omp. Any read problem means no token: never throws,
- * never logs. */
-export const OMP_SURFACE = "omp";
-/** Built-in tokens dir, used when the environment names none. A plain path constant. */
-export const DEFAULT_TOKENS_DIR = "/etc/substrate/tokens";
-/** Token files hold one short value; anything larger is not one. */
-const MAX_TOKEN_FILE_BYTES = 4096;
-/** Caller-controlled surfaces are validated before they are joined to a path. */
-const SURFACE_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
-
-/**
- * The first line of a file, trimmed, or null when there is nothing usable.
- *
- * Missing paths, directories, oversize or unreadable files, and empty first
- * lines all mean null. Never throws, never logs.
- */
-export function firstLineOfFile(path: string): string | null {
-	try {
-		const info = statSync(path);
-		// A token file is a few bytes. Anything larger, or not a regular file
-		// at all, is not one, and reading it whole would be trusting a file
-		// this is meant to be sceptical of.
-		if (!info.isFile() || info.size === 0 || info.size > MAX_TOKEN_FILE_BYTES) return null;
-		const buffer = Buffer.alloc(info.size);
-		const fd = openSync(path, "r");
-		try {
-			readSync(fd, buffer, 0, info.size, 0);
-		} finally {
-			closeSync(fd);
-		}
-		const line = buffer.toString("utf8").split("\n", 1)[0]?.trim() ?? "";
-		return line ? line : null;
-	} catch {
-		// An unreadable token file is not an error. Treated as absent, which
-		// queues the proposal for the bridge rather than failing the tool.
-		return null;
-	}
-}
-
-/**
- * The bearer for surface omp, or null when none is configured.
- *
- * `read` is injectable so tests can prove the order without touching the filesystem.
- */
-export function resolveOmpToken(
-	env: Record<string, string | undefined> = process.env,
-	read: (path: string) => string | null = firstLineOfFile,
-): string | null {
-	const direct = env.SUBSTRATE_TOKEN?.trim();
-	if (direct) return direct;
-	const readLine = (path: string): string | null => {
-		try {
-			return read(path);
-		} catch {
-			return null;
-		}
-	};
-	const file = env.SUBSTRATE_TOKEN_FILE?.trim();
-	if (file) {
-		const viaFile = readLine(file);
-		if (viaFile) return viaFile;
-	}
-	if (!SURFACE_NAME.test(OMP_SURFACE)) return null;
-	const dir = env.SUBSTRATE_TOKENS_DIR?.trim() || DEFAULT_TOKENS_DIR;
-	return readLine(join(dir, OMP_SURFACE));
-}
 
 function str(value: unknown): string {
 	return typeof value === "string" ? value : "";
@@ -208,6 +127,40 @@ function yamlScalar(value: string): string {
 export function renderSkillMd(skill: { name: string; description: string; body: string }): string {
 	const body = skill.body.replace(/\n+$/, "");
 	return `---\nname: ${yamlScalar(skill.name)}\ndescription: ${yamlScalar(skill.description)}\n---\n\n${body}\n`;
+}
+
+function firstLine(path: string): string | null {
+	try {
+		const st = statSync(path);
+		if (!st.isFile() || st.size === 0 || st.size > MAX_TOKEN_FILE_BYTES) return null;
+		const line = readFileSync(path, "utf8").split("\n", 1)[0]?.trim() ?? "";
+		return line ? line : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * The bearer for surface omp, or null when none is configured. Same order as
+ * packages/cli/src/token.ts: SUBSTRATE_TOKEN, then SUBSTRATE_TOKEN_FILE, then
+ * the per-surface file in the tokens dir. Read per call and sent only as the
+ * Authorization header: never logged, never queued, never in a reason.
+ */
+export function resolveBearer(
+	env: Record<string, string | undefined> = process.env,
+	tokensDir?: string,
+	read: (path: string) => string | null = firstLine,
+): string | null {
+	const direct = (env.SUBSTRATE_TOKEN ?? "").trim();
+	if (direct) return direct;
+	const file = (env.SUBSTRATE_TOKEN_FILE ?? "").trim();
+	if (file) {
+		const viaFile = read(file);
+		if (viaFile) return viaFile;
+	}
+	if (!SKILL_NAME_RE.test(SURFACE)) return null;
+	const dir = (tokensDir ?? (env.SUBSTRATE_TOKENS_DIR ?? "").trim()) || DEFAULT_TOKENS_DIR;
+	return read(join(dir, SURFACE));
 }
 
 /** The calling Omp session's id, trimmed and capped, or undefined when unknown; never throws. */
@@ -249,53 +202,26 @@ function describe(skillName: string, reply: unknown): string {
 
 export function createHandler(opts: HandlerOptions): (event: ToolCallEvent, ctx?: OmpContext) => Promise<ToolCallResult | undefined> {
 	const now = opts.now ?? (() => new Date());
-	const env = opts.env ?? process.env;
-	const read = opts.readFile ?? firstLineOfFile;
-	const randomHex = opts.randomHex ?? (() => randomBytes(8).toString("hex"));
 	const endpoint = `${opts.url.replace(/\/+$/, "")}/skills/propose`;
 
 	function queue(body: ProposeBody): Outcome {
 		mkdirSync(opts.pendingDir, { recursive: true, mode: 0o700 });
 		const at = now().toISOString().replace(/\.\d{3}Z$/, "Z").replace(/[-:]/g, ""); // yyyymmddThhmmssZ
-		// Two proposals for one skill in one second must not share a file: a random suffix plus
-		// exclusive create keeps the first. A collision retries with a fresh suffix.
-		for (let attempt = 0; attempt < 100; attempt++) {
-			const path = join(opts.pendingDir, `${body.name}-${at}-${randomHex()}.json`);
-			let fd: number;
-			try {
-				fd = openSync(path, "wx", 0o600);
-			} catch (cause) {
-				if ((cause as NodeJS.ErrnoException)?.code === "EEXIST") continue;
-				throw cause;
-			}
-			const payload = `${JSON.stringify(body)}\n`;
-			try {
-				writeAllSync(fd, payload);
-			} catch (cause) {
-				closeSync(fd);
-				try {
-					unlinkSync(path);
-				} catch {
-					// The exclusive file must not stay truncated for the drain.
-				}
-				throw cause;
-			}
-			closeSync(fd);
-			chmodSync(path, 0o600);
-			return { kind: "queued", path };
-		}
-		throw new Error(`could not queue a proposal for ${body.name}: the pending directory keeps colliding`);
+		const path = join(opts.pendingDir, `${body.name}-${at}.json`);
+		writeFileSync(path, `${JSON.stringify(body)}\n`, { mode: 0o600 });
+		chmodSync(path, 0o600);
+		return { kind: "queued", path };
 	}
 
 	async function propose(body: ProposeBody): Promise<Outcome> {
-		const token = resolveOmpToken(env, read);
-		if (token === null) return queue(body);
+		const bearer = opts.bearer ?? resolveBearer(opts.env ?? process.env, opts.tokensDir);
+		if (bearer === null) return queue(body);
 		let res: Response;
 		let reply: unknown;
 		try {
 			res = await opts.fetchImpl(endpoint, {
 				method: "POST",
-				headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+				headers: { "content-type": "application/json", authorization: `Bearer ${bearer}` },
 				body: JSON.stringify(body),
 				signal: AbortSignal.timeout(opts.timeoutMs),
 			});
@@ -310,7 +236,7 @@ export function createHandler(opts: HandlerOptions): (event: ToolCallEvent, ctx?
 		if (res.status === 400) {
 			return { kind: "final", text: `The substrate refused the skill ${body.name}: ${replyError(reply)}. Nothing was written locally.` };
 		}
-		if (res.status === 401 || res.status === 403 || res.status >= 500) return queue(body);
+		if (res.status === 401 || res.status >= 500) return queue(body);
 		return { kind: "final", text: `The substrate answered HTTP ${res.status} for the skill ${body.name}; nothing was written locally.` };
 	}
 
@@ -320,9 +246,7 @@ export function createHandler(opts: HandlerOptions): (event: ToolCallEvent, ctx?
 			if (skill === null) return undefined;
 			if (!SKILL_NAME_RE.test(skill.name)) {
 				const reason = `invalid skill name ${JSON.stringify(skill.name.slice(0, 80))}: must match ${SKILL_NAME_RE.source}; nothing was proposed or written.`;
-				// A failed skill branch must not block the whole learn call: the lesson still
-				// lands, with the skill failure reported beside it.
-				return skill.kind === "learn" ? strip(event, reason) : { block: true, reason };
+				return { block: true, reason };
 			}
 			const sid = sessionIdOf(ctx);
 			const body: ProposeBody = {
@@ -340,9 +264,7 @@ export function createHandler(opts: HandlerOptions): (event: ToolCallEvent, ctx?
 			return skill.kind === "learn" ? strip(event, text) : { block: true, reason: text };
 		} catch (cause) {
 			const message = cause instanceof Error ? cause.message : String(cause);
-			const reason = `substrate-skills extension failed (${message.slice(0, 200)}); nothing was written locally.`;
-			const skill = skillFromToolCall(event);
-			return skill?.kind === "learn" ? strip(event, reason) : { block: true, reason };
+			return { block: true, reason: `substrate-skills extension failed (${message.slice(0, 200)}); nothing was written locally.` };
 		}
 	};
 }

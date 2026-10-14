@@ -1,4 +1,4 @@
-"""Hermes pending-skill bridge: staged skill_manage writes become library PRs (D22-08).
+"""Hermes pending-skill bridge: staged skill_manage writes become library PRs (D-10).
 
 With ``skills.write_approval`` on, Hermes stages every skill_manage call as
 ``~/.hermes/pending/skills/<8hex>.json`` (tools/write_approval.py) instead of writing it. Each tick
@@ -13,26 +13,17 @@ this module:
    per record (Hermes' own local skills, deletes, background-review creates, replays that do not
    apply) — never deleted, never proposed (checker W3),
 4. sends only the files that differ from the library copy plus SKILL.md, and a ``remove`` list
-   (checker W2), to POST /skills/propose as a bearer of the queue's own surface (D22-09),
+   (checker W2), to POST /skills/propose with the hermes surface bearer (D22-01),
 5. unlinks the group's records only on a final reply (200 opened/existing/unchanged/declined, or
-   400 refused with rule names) and logs {ts, name, ids, status, pr_url}; 413 or an over-cap body
-   is held as oversize; transport errors, a missing token, 401, 403, 5xx, any other status and
-   the ``dry_run`` status keep everything for the next tick, and 401, 403 or a missing token end
-   the tick with exit 1 so the timer shows red (D22-10).
+   400) and logs {ts, name, ids, status, pr_url}; 413 or an over-cap body is held as oversize;
+   401, 5xx and transport errors keep everything for the next tick.
 
 A held library-skill record is resolved by a propose PR or a rejection, never by ``/skills
 approve``: approve replays the write past the gate into external_dirs, i.e. the live checkout
 /root/agent-skills (D-04, checker W11). Every held line says so.
 
 The same client also drains the Omp and Grok queued-proposal directories (04-03's contract: a
-file holding exactly the propose body, written when the substrate was unreachable). Each queue
-is proposed under its own surface's token, and the 120 s quiet applies to queue files by mtime:
-skill-autonomy writes a file in two steps (create, then write), so a tick could otherwise read
-a half-written file and move it to ``rejected/`` (D22-11).
-
-``bridge --once --dry-run`` classifies and builds every proposal, posts it with ``dry_run: true``
-(Phase 21 validates, redacts and counts without pushing), prints one line per group or file and
-never deletes, moves or holds anything (D22-12).
+file holding exactly the propose body, written when the substrate was unreachable).
 """
 
 from __future__ import annotations
@@ -40,22 +31,20 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import httpx
-
-from . import token as token_module
 
 PENDING_SKILLS = Path("/root/.hermes/pending/skills")
 HERMES_SKILLS = Path("/root/.hermes/skills")
 LIBRARY = Path("/root/agent-skills")
 BRIDGE_LOG = Path("/var/lib/substrate/miner/bridge-log.jsonl")
 HELD_STATE = Path("/var/lib/substrate/miner/bridge-held.json")
+DEFAULT_TOKENS_DIR = Path("/etc/substrate/tokens")
 SUBSTRATE_URL = os.environ.get("SUBSTRATE_URL") or "http://127.0.0.1:7410"
 ROUTE_MAX_BYTES = 1_000_000
 QUIET_S = 120
@@ -63,13 +52,60 @@ ALLOWED_PREFIXES = ("references/", "templates/", "scripts/", "assets/")
 OMP_QUEUE = Path("/root/.omp/agent/substrate-pending")
 GROK_QUEUE = Path("/root/.grok/plugin-data/skill-autonomy/pending")
 
-#: The queue each surface drains: Hermes records go out as hermes, the Omp
-#: queue as omp, the Grok queue as grok-build (D22-09).
-HERMES_SURFACE = "hermes"
-QUEUE_SURFACES = (HERMES_SURFACE, "omp", "grok-build")
+SURFACE = "hermes"
 # Same literal as SKILL_NAME_RE in packages/mcp-server/src/skills/propose.ts.
 SKILL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
-#: 200 replies that end a record's life: the proposal reached the ledger.
+# A token file holds one short value; anything larger is not one.
+MAX_TOKEN_FILE_BYTES = 4096
+FINAL_STATUSES = frozenset({"opened", "existing", "unchanged", "declined"})
+OVERSIZE = "oversize"
+HERMES_LOCAL = "hermes-local"
+
+
+def first_line(path: Path | str) -> str | None:
+    """The first line of a token file, trimmed, or None when there is nothing usable.
+
+    Missing paths, directories, oversize or unreadable files, and empty first
+    lines all mean None. Never raises, never logs: an unreadable token file
+    leaves the previous keep-for-next-tick behaviour rather than failing one.
+    """
+    try:
+        candidate = Path(path)
+        size = candidate.stat().st_size
+        if not candidate.is_file() or size == 0 or size > MAX_TOKEN_FILE_BYTES:
+            return None
+        line = candidate.read_text(encoding="utf-8").split("\n", 1)[0].strip()
+        return line or None
+    except OSError:
+        return None
+
+
+def resolve_bearer(
+    surface: str = SURFACE,
+    env: dict[str, str] | os._Environ[str] | None = None,
+    read: Any = first_line,
+) -> str | None:
+    """The bearer for a surface, or None when none is configured.
+
+    Same order as packages/cli/src/token.ts: the SUBSTRATE_TOKEN value in the
+    environment, else the first line of the file named by SUBSTRATE_TOKEN_FILE,
+    else the first line of the per-surface file in the tokens dir
+    (SUBSTRATE_TOKENS_DIR or the built-in default), else no bearer. The value
+    is never logged here; callers must not log it either.
+    """
+    source = os.environ if env is None else env
+    direct = (source.get("SUBSTRATE_TOKEN") or "").strip()
+    if direct:
+        return direct
+    token_file = (source.get("SUBSTRATE_TOKEN_FILE") or "").strip()
+    if token_file:
+        via_file = read(token_file)
+        if via_file:
+            return via_file
+    if not SKILL_NAME_RE.fullmatch(surface):
+        return None
+    directory = (source.get("SUBSTRATE_TOKENS_DIR") or "").strip() or str(DEFAULT_TOKENS_DIR)
+    return read(str(Path(directory) / surface))
 FINAL_STATUSES = frozenset({"opened", "existing", "unchanged", "declined"})
 OVERSIZE = "oversize"
 HERMES_LOCAL = "hermes-local"
@@ -83,8 +119,8 @@ class BridgeError(RuntimeError):
     """The propose request did not produce a reply (transport error)."""
 
 
-class NoToken(BridgeError):
-    """No bearer is configured for the proposal's surface."""
+class BearerMissing(BridgeError):
+    """No bearer is configured for the surface: records are kept for the next tick."""
 
 
 @dataclass(frozen=True)
@@ -191,7 +227,7 @@ def _target(file_path: Any) -> str:
     parts = file_path.split("/")
     if file_path.startswith("/") or "\\" in file_path or any(part in ("", ".", "..") for part in parts):
         raise Skip(f"path outside references/ templates/ scripts/ assets/: {file_path[:120]}")
-    if file_path == "SKILL.md":
+    if parts[-1] == "SKILL.md" and len(parts) in (1, 2):
         return "SKILL.md"
     if not file_path.startswith(ALLOWED_PREFIXES) or len(parts) < 2:
         raise Skip(f"path outside references/ templates/ scripts/ assets/: {file_path[:120]}")
@@ -318,55 +354,11 @@ def base_tree(library: Path | str, name: str) -> dict[str, str]:
     return tree
 
 
-def refresh_origin_main(library: Path | str) -> bool:
-    """Update ``refs/remotes/origin/main`` without touching the worktree.
-
-    The server checks out whatever ``origin/main`` is on GitHub at propose time. A local
-    remote-tracking ref from the last sync can be older than that, and replaying the local
-    ``SKILL.md`` onto it reverts the owner's merge. Fetch first. Failure leaves the ref
-    alone; the caller then holds rather than proposing from an unknown position only when
-    the ref we do have is already behind. A missing remote fails this call and proposes
-    only if ``library_behind`` is not True.
-    """
-    try:
-        proc = subprocess.run(
-            ["git", "-C", str(library), "fetch", "--no-tags", "origin", "main"],
-            capture_output=True, text=True, timeout=30, check=False,
-            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return proc.returncode == 0
-
-
-def library_behind(library: Path | str) -> bool | None:
-    """True when the local library checkout is behind origin/main, False when it is not, None when unknown.
-
-    Local refs only: ``git rev-list --count --left-right`` never touches the network. Any failure
-    (not a checkout, no origin/main ref, unreadable output) means None: the caller proposes as before
-    and the doctor reports the position separately.
-    """
-    try:
-        proc = subprocess.run(
-            ["git", "-C", str(library), "rev-list", "--count", "--left-right", "origin/main...HEAD"],
-            capture_output=True, text=True, timeout=30, check=False)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if proc.returncode != 0:
-        return None
-    match = re.fullmatch(r"(\d+)\s+(\d+)\s*", proc.stdout)
-    if not match:
-        return None
-    return int(match.group(1)) > 0
-
-
 def proposal_for(base: dict[str, str], replayed: dict[str, str]) -> tuple[dict[str, str], list[str]]:
     """(files that differ from the library copy plus SKILL.md, sorted base paths the replay removed)."""
     if "SKILL.md" not in replayed:
         raise Skip("no SKILL.md")
     files = {path: text for path, text in sorted(replayed.items()) if base.get(path) != text}
-    # The propose route rejects a body with no SKILL.md, so an unchanged instruction
-    # file is still sent. Callers hold the group first when the checkout is behind
-    # the fetched origin/main; otherwise this copy would revert the owner's merge.
     files["SKILL.md"] = replayed["SKILL.md"]
     remove = sorted(path for path in base if path not in replayed)
     return files, remove
@@ -376,24 +368,22 @@ def proposal_for(base: dict[str, str], replayed: dict[str, str]) -> tuple[dict[s
 
 
 class ProposeClient:
-    """POST /skills/propose as a bearer of one surface per queue (D22-09).
-
-    Tokens are resolved per request from ``tokens`` (surface -> bearer) and
-    sent only as an ``Authorization: Bearer`` header, never logged. A surface
-    with no token raises :class:`NoToken`: the tick keeps everything and ends
-    with exit 1.
-    """
+    """POST /skills/propose as a host caller: the bearer is resolved per request, sent only as a header."""
 
     def __init__(
         self,
         url: str = SUBSTRATE_URL,
         *,
-        tokens: Mapping[str, str] | None = None,
+        surface: str = SURFACE,
+        bearer: str | None = None,
+        tokens_dir: Path | str | None = None,
         timeout: float = 30.0,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.url = url.rstrip("/") + "/skills/propose"
-        self.tokens = dict(tokens or {})
+        self.surface = surface
+        self._bearer = bearer
+        self._tokens_dir = tokens_dir
         kwargs: dict[str, Any] = {"timeout": timeout}
         if transport is not None:
             kwargs["transport"] = transport
@@ -408,36 +398,29 @@ class ProposeClient:
     def __exit__(self, *args: object) -> None:
         self.close()
 
-    def token_for(self, surface: str) -> str:
-        value = self.tokens.get(surface, "")
-        if not value:
-            raise NoToken(f"no token for surface {surface}")
-        return value
+    def bearer(self) -> str:
+        """The bearer for this client's surface, following the token.ts order. Never logged."""
+        if self._bearer:
+            return self._bearer
+        env: dict[str, str] = dict(os.environ)
+        if self._tokens_dir is not None:
+            env["SUBSTRATE_TOKENS_DIR"] = str(self._tokens_dir)
+        token = resolve_bearer(self.surface, env=env)
+        if not token:
+            raise BearerMissing(f"no bearer for surface {self.surface}")
+        return token
 
-    def post(self, body: bytes, surface: str) -> tuple[int, dict[str, Any]]:
-        headers = {"content-type": "application/json", "authorization": f"Bearer {self.token_for(surface)}"}
+    def post(self, body: bytes) -> tuple[int, dict[str, Any]]:
+        headers = {"content-type": "application/json", "authorization": f"Bearer {self.bearer()}"}
         try:
             response = self._client.post(self.url, content=body, headers=headers)
-        except httpx.HTTPError:
-            raise BridgeError("transport error") from None
+        except httpx.HTTPError as error:
+            raise BridgeError(f"transport error: {type(error).__name__}") from None
         try:
             data = response.json()
         except ValueError:
             data = {}
         return response.status_code, data if isinstance(data, dict) else {}
-
-
-def resolve_surface_tokens(
-    surfaces: tuple[str, ...] = QUEUE_SURFACES,
-    env: Mapping[str, str] | None = None,
-) -> dict[str, str]:
-    """Resolve each surface's bearer from the tokens dir; absent surfaces are omitted."""
-    resolved: dict[str, str] = {}
-    for surface in surfaces:
-        value = token_module.resolve(surface, env)
-        if value:
-            resolved[surface] = value
-    return resolved
 
 
 # --- state and log ----------------------------------------------------------------------------
@@ -474,9 +457,8 @@ def _save_held(path: Path, held: dict[str, str]) -> None:
 
 def resolve_hint(record_id: str, *, library_skill: bool, local_skill: bool) -> str:
     """How the owner settles a held record. A library skill is never approved (W11)."""
-    publish = ("publish it with the substrate skills propose command, using a copy outside "
-               "the live library directory and the hermes token file from the substrate tokens "
-               f"directory, then `/skills reject {record_id}`; or just `/skills reject {record_id}`")
+    publish = ("publish it with `substrate skills propose --dir <a copy outside /root/agent-skills> "
+               f"--surface hermes`, then `/skills reject {record_id}`; or just `/skills reject {record_id}`")
     if library_skill:
         return (f"library skill: {publish}. Never `/skills approve {record_id}`: approve replays the write "
                 "past the gate into external_dirs, i.e. the live checkout /root/agent-skills (D-04).")
@@ -493,45 +475,6 @@ def _rationale(name: str, group: list[Record]) -> str:
             f"substrate bridge (D-10). Records: {records}")
 
 
-def _dry_run_line(name: str, surface: str, classification: str, ids: list[str], reply: str) -> str:
-    return (f"[skills-bridge:dry-run] name={name} surface={surface} "
-            f"classification={classification} records={','.join(ids)} reply={reply}")
-
-
-# --- reply matrix (D22-10) --------------------------------------------------------------------
-#
-# Final replies end a record's life (deleted, or a queue file moved to
-# rejected/): 200 opened/existing/unchanged/declined, 400 refused (logged with
-# rule names), 413 or an over-cap body (oversize: a Hermes group is held, a
-# queue file is moved to rejected/). Everything else is kept for the next tick
-# — transport errors, a missing token, 401, 403, 502, 503, any other status and
-# the dry_run status — and 401, 403 or a missing token end the tick with exit 1.
-
-_DELETE = "delete"
-_REFUSED = "refused"
-_OVERSIZE = "oversize"
-_KEEP_FAIL = "keep-auth-fail"
-_KEEP = "keep"
-
-
-def _reply_disposition(status: int, reply: dict[str, Any]) -> str:
-    if status == 200:
-        if reply.get("status") in FINAL_STATUSES:
-            return _DELETE
-        return _KEEP
-    if status == 400:
-        return _REFUSED
-    if status == 413:
-        return _OVERSIZE
-    if status in (401, 403):
-        return _KEEP_FAIL
-    return _KEEP
-
-
-def _rule_names(reply: dict[str, Any]) -> list[str]:
-    return sorted({str(f.get("rule")) for f in reply.get("findings") or [] if isinstance(f, dict)})
-
-
 # --- ticks ------------------------------------------------------------------------------------
 
 
@@ -543,8 +486,6 @@ def run_once(
     hermes_skills: Path | str = HERMES_SKILLS,
     log_path: Path | str = BRIDGE_LOG,
     held_path: Path | str = HELD_STATE,
-    surface: str = HERMES_SURFACE,
-    dry_run: bool = False,
     now: float | None = None,
 ) -> RunResult:
     """One bridge tick over Hermes' pending skills records."""
@@ -553,12 +494,12 @@ def run_once(
     result = RunResult()
     records = load_pending(pending_dir)
     if not records:
-        if not dry_run and held_path.exists():
+        if held_path.exists():
             _save_held(held_path, {})
         return result
     try:
-        client.token_for(surface)
-    except NoToken:
+        client.bearer()
+    except BearerMissing:
         result.ok = False
         result.kept = len(records)
         return result
@@ -571,7 +512,7 @@ def run_once(
         library_skill = name in lib or any(n in lib for r in group for n in record_names(r))
         for record in group:
             result.held += 1
-            if dry_run or held.get(record.id) == reason:
+            if held.get(record.id) == reason:
                 continue
             held[record.id] = reason
             _log(log_path, {"name": name, "id": record.id, "status": "held", "reason": reason,
@@ -585,100 +526,58 @@ def run_once(
         _log(log_path, entry)
 
     groups = sorted(group_by_name(records).items())
-    # One fetch per tick. Repeating it for every library group blocks the
-    # rest of the queue for up to 30 s each when GitHub is slow.
-    if any(
-        ready(group, now) and classify(group, lib, local)[0] == "library"
-        for _, group in groups
-    ):
-        refresh_origin_main(library)
     for index, (name, group) in enumerate(groups):
-        ids = [r.id for r in group]
         if not ready(group, now):
             result.waiting += len(group)
-            if dry_run:
-                print(_dry_run_line(name, surface, "waiting", ids, "-"), flush=True)
             continue
         kind, reason = classify(group, lib, local)
         if kind == "hold":
-            if dry_run:
-                print(_dry_run_line(name, surface, f"hold:{reason or 'held'}", ids, "-"), flush=True)
-            else:
-                hold(name, group, reason or "held")
-            continue
-        if kind == "library" and library_behind(library) is True:
-            # The local copy is older than what the server checks out (origin/main): replaying
-            # onto it would resend a stale SKILL.md over the owner's merged copy. Wait for the sync.
-            if dry_run:
-                print(_dry_run_line(name, surface, "hold:library-behind", ids, "-"), flush=True)
-            else:
-                hold(name, group, "library-behind")
+            hold(name, group, reason or "held")
             continue
         base = base_tree(library, name) if kind == "library" else {}
         try:
             files, remove = proposal_for(base, replay(base, group, name))
         except Skip as skip:
-            if dry_run:
-                print(_dry_run_line(name, surface, f"hold:{skip}", ids, "-"), flush=True)
-            else:
-                hold(name, group, str(skip))
+            hold(name, group, str(skip))
             continue
+        ids = [r.id for r in group]
         if all(held.get(rid) == OVERSIZE for rid in ids):
             result.held += len(group)
-            if dry_run:
-                print(_dry_run_line(name, surface, f"hold:{OVERSIZE}", ids, "-"), flush=True)
             continue
         body: dict[str, Any] = {"name": name, "files": files}
         if remove:
             body["remove"] = remove
-        body.update(rationale=_rationale(name, group), surface=surface)
-        if dry_run:
-            body["dry_run"] = True
+        body.update(rationale=_rationale(name, group), surface=SURFACE)
         data = json.dumps(body, ensure_ascii=False).encode("utf-8")
         if len(data) > ROUTE_MAX_BYTES:
-            if dry_run:
-                print(_dry_run_line(name, surface, f"hold:{OVERSIZE}", ids, "-"), flush=True)
-            else:
-                hold(name, group, OVERSIZE)
+            hold(name, group, OVERSIZE)
             continue
         try:
-            status, reply = client.post(data, surface)
-        except NoToken:
+            status, reply = client.post(data)
+        except BearerMissing:
             result.ok = False
             result.kept += sum(len(g) for _, g in groups[index:])
-            if dry_run:
-                print(_dry_run_line(name, surface, kind, ids, "no-token"), flush=True)
             break
         except BridgeError:
             result.kept += len(group)
-            if dry_run:
-                print(_dry_run_line(name, surface, kind, ids, "transport-error"), flush=True)
             continue
-        disposition = _reply_disposition(status, reply)
-        reply_status = str(reply.get("status", f"http-{status}"))
-        if dry_run:
-            print(_dry_run_line(name, surface, kind, ids, reply_status), flush=True)
-            if disposition == _KEEP_FAIL:
-                result.ok = False
-            result.kept += len(group)
-            continue
-        if disposition == _DELETE:
+        if status == 200 and reply.get("status") in FINAL_STATUSES:
             finish(group, {"name": name, "ids": ids, "status": reply["status"], "pr_url": reply.get("pr_url")})
             result.proposed += 1
-        elif disposition == _REFUSED:
+        elif status == 400:
+            rules = sorted({str(f.get("rule")) for f in reply.get("findings") or [] if isinstance(f, dict)})
             finish(group, {"name": name, "ids": ids, "status": "rejected", "pr_url": None,
-                           "error": str(reply.get("error", ""))[:400], "rules": _rule_names(reply)})
+                           "error": str(reply.get("error", ""))[:400], "rules": rules})
             result.rejected += 1
-        elif disposition == _OVERSIZE:
+        elif status == 413:
             hold(name, group, OVERSIZE)
-        elif disposition == _KEEP_FAIL:
+        elif status == 401:
             result.ok = False
             result.kept += sum(len(g) for _, g in groups[index:])
             break
         else:
             result.kept += len(group)
-    if not dry_run:
-        _save_held(held_path, held)
+    _save_held(held_path, held)
     return result
 
 
@@ -688,124 +587,66 @@ def _reject_queued(path: Path) -> None:
     os.replace(path, rejected / path.name)
 
 
-def _queue_mtime(path: Path) -> float | None:
-    try:
-        return path.stat().st_mtime
-    except OSError:
-        return None
-
-
 def drain_queue(
     directory: Path | str,
     expected_surface: str,
     client: ProposeClient,
     *,
     log_path: Path | str = BRIDGE_LOG,
-    dry_run: bool = False,
-    quiet: float = QUIET_S,
-    now: float | None = None,
 ) -> RunResult:
-    """Post each queued propose body as-is; remove on success, move to rejected/ on 400/413.
-
-    Files younger than ``quiet`` by mtime are kept: skill-autonomy writes a
-    file in two steps (create, then write), so a fresh file may be half-written
-    (D22-11). In ``dry_run`` mode every settled file is posted with
-    ``dry_run: true`` and nothing is deleted, moved or held.
-    """
+    """Post each queued propose body as-is; remove on success, move to rejected/ on 400/413."""
     root, log_path = Path(directory), Path(log_path)
-    now = time.time() if now is None else now
     result = RunResult()
     files = sorted(p for p in root.glob("*.json") if p.is_file()) if root.is_dir() else []
     if not files:
         return result
     try:
-        client.token_for(expected_surface)
-    except NoToken:
+        client.bearer()
+    except BearerMissing:
         result.ok = False
         result.kept = len(files)
         return result
     for index, path in enumerate(files):
         base = {"queue": expected_surface, "file": path.name}
-        mtime = _queue_mtime(path)
-        if mtime is not None and mtime > now - quiet:
-            result.kept += 1
-            if dry_run:
-                print(_dry_run_line(path.stem, expected_surface, "waiting", [path.stem], "-"), flush=True)
-            continue
         try:
             raw = path.read_bytes()
             body = json.loads(raw)
         except (OSError, ValueError):
-            if dry_run:
-                print(_dry_run_line(path.stem, expected_surface, "hold:unreadable", [path.stem], "-"),
-                      flush=True)
-                result.kept += 1
-                continue
             _reject_queued(path)
             _log(log_path, {**base, "status": "rejected", "error": "unreadable or invalid JSON"})
             result.rejected += 1
             continue
         if not isinstance(body, dict) or body.get("surface") != expected_surface:
-            if dry_run:
-                print(_dry_run_line(path.stem, expected_surface, "hold:surface-mismatch", [path.stem], "-"),
-                      flush=True)
-                result.kept += 1
-                continue
             _reject_queued(path)
             _log(log_path, {**base, "status": "rejected", "error": f"surface is not {expected_surface}"})
             result.rejected += 1
             continue
         base["name"] = str(body.get("name", ""))[:80]
         if len(raw) > ROUTE_MAX_BYTES:
-            if dry_run:
-                print(_dry_run_line(str(base["name"]), expected_surface, f"hold:{OVERSIZE}", [path.stem],
-                                    "-"), flush=True)
-                result.kept += 1
-                continue
             _reject_queued(path)
             _log(log_path, {**base, "status": "rejected", "error": "body over the propose route's 1 MB cap"})
             result.rejected += 1
             continue
-        if dry_run:
-            posted = dict(body)
-            posted["dry_run"] = True
-            wire = json.dumps(posted, ensure_ascii=False).encode("utf-8")
-        else:
-            wire = raw
         try:
-            status, reply = client.post(wire, expected_surface)
-        except NoToken:
+            status, reply = client.post(raw)
+        except BearerMissing:
             result.ok = False
             result.kept += len(files) - index
-            if dry_run:
-                print(_dry_run_line(str(base["name"]), expected_surface, "queued", [path.stem], "no-token"),
-                      flush=True)
             break
         except BridgeError:
             result.kept += 1
-            if dry_run:
-                print(_dry_run_line(str(base["name"]), expected_surface, "queued", [path.stem],
-                                    "transport-error"), flush=True)
             continue
-        disposition = _reply_disposition(status, reply)
-        reply_status = str(reply.get("status", f"http-{status}"))
-        if dry_run:
-            print(_dry_run_line(str(base["name"]), expected_surface, "queued", [path.stem], reply_status),
-                  flush=True)
-            if disposition == _KEEP_FAIL:
-                result.ok = False
-            result.kept += 1
-            continue
-        if disposition == _DELETE:
+        if status == 200 and reply.get("status") in FINAL_STATUSES:
             path.unlink(missing_ok=True)
             _log(log_path, {**base, "status": reply["status"], "pr_url": reply.get("pr_url")})
             result.proposed += 1
-        elif disposition in (_REFUSED, _OVERSIZE):
+        elif status in (400, 413):
             _reject_queued(path)
+            rules = sorted({str(f.get("rule")) for f in reply.get("findings") or [] if isinstance(f, dict)})
             _log(log_path, {**base, "status": "rejected", "error": str(reply.get("error", ""))[:400],
-                            "http_status": status, "rules": _rule_names(reply)})
+                            "http_status": status, "rules": rules})
             result.rejected += 1
-        elif disposition == _KEEP_FAIL:
+        elif status == 401:
             result.ok = False
             result.kept += len(files) - index
             break

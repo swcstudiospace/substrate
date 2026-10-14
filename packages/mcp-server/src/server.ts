@@ -5,13 +5,18 @@
  *   POST /brief         the same briefing as plain text, for hooks
  *   POST /events        append an event, for hooks
  *   POST /events/query  read a window of the ledger
+ *   GET  /events/stream replay the ledger as Server-Sent Events, loopback only
  *   POST /memory        write a memory entry through the governance gate
  *   POST /skills/propose propose a skill as a reviewable PR on the skills library
+ *   POST /skills/approve approve, decline or retire a skill pull request in the skills registry, operators only
+ *   GET  /skills        the skills registry: approved skills by default, `?state=` for the rest (operators only)
  *   POST /verify        recompute a graph's hash chain
  *   POST /evidence      the per-graph evidence bundle, as JSON or HTML
- *   GET  /healthz       store reachability, and whether events can actually be written
- *   GET  /metrics       the OTLP metric snapshot this process holds
- *   GET  /slo           the SLO verdicts computed from it
+ *   GET  /healthz       store reachability, whether events can actually be written, each plane's breaker, and the ledger jobs' coverage
+ *   GET  /metrics       the OTLP metric snapshot this process holds (counters, histograms, registry gauges), plus the labelled docs gauges
+ *   GET  /slo           the SLO verdicts computed from it, plus burn and per-plane availability
+ *   GET  /slo/history   the durable metrics history behind /slo (uplift-4 S6), metered as a `read`, off unless the history is on
+ *   GET  /livez         process liveness for the systemd watchdog: uptime and event-loop lag, no store I/O, local peers only
  *
  * Hooks get REST because a hook process cannot call an MCP tool — it has no
  * client. Both paths run the same service code.
@@ -21,13 +26,19 @@
  * for both transports: every route that reaches the service goes through `auditedRest`
  * under the same tool name and the same audit mode its MCP equivalent has, and a
  * fail-closed route whose record the chain refuses is answered 503 rather than served.
- * Only `/healthz`, `/metrics` and `/slo` are exempt, and no agent action is behind them.
+ * Only `/healthz`, `/metrics`, `/slo`, `/slo/history` and `/livez` are exempt, and no agent action is behind them.
+ * `/slo/history` is served beside `/slo` under the same bearer rule (a token, unless `SUBSTRATE_ALLOW_ANONYMOUS=1`)
+ * and is admission-metered as a `read` (`ROUTE_CLASSES`). `/livez` is also answered before the bearer check, to a peer that is this host only.
+ *
+ * Since uplift-3 N3 every other request also passes the admission budget of its
+ * bearer's surface — after the 401, before the handler and before the audit —
+ * so one surface's storm cannot spend another's brief budget. See `admission.ts`.
  */
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { auditMode } from "@substrate/audit";
-import { classifyEventRefusal, type EventRefusalReason } from "@substrate/observability";
+import { classifyEventRefusal, evaluateAdmissionSlo, evaluateDocsFreshnessSlo, loadBurnThresholds, type EventRefusalReason } from "@substrate/observability";
 import {
 	anonymousBridge,
 	isOperator,
@@ -36,8 +47,15 @@ import {
 	unmappedBearer,
 	type SubstrateConfig,
 } from "./config.ts";
+import { Admission, admitBatch, budgetBody, budgetRefusal, routeClass, type AdmissionVerdict } from "./admission.ts";
+import { buildAgentCard, isKnownCardSurface } from "./agent-card.ts";
+import { parseBriefProfile } from "./brief-profile.ts";
+import { DATASET_TRIGGERS } from "./docs-datasets.ts";
+import { freshnessGauges } from "./docs-freshness.ts";
+import { scanIngestPages } from "./docs-ingest.ts";
 import { formatDrift } from "./drift.ts";
-import { InvalidEventError } from "./event.ts";
+import { IdempotencyRefusal, InvalidEventError } from "./event.ts";
+import { type CursorPosition, type GreptimeClient } from "./greptime.ts";
 import { InvalidHandoffError } from "./handoff.ts";
 import { attributedSurface, createMcpServer, type McpCaller } from "./mcp.ts";
 import {
@@ -50,9 +68,13 @@ import {
 	toolCallsIn,
 	type Observability,
 } from "./observe.ts";
+import { MetricHistoryMemo, metricHistoryAnswer } from "./metrics-history.ts";
+import { redact } from "./redact.ts";
 import type { Substrate } from "./service.ts";
 import { proposalBodyProblem, proposalFailure, toProposalRequest } from "./skills/request.ts";
+import { approvalBodyProblem, approvalFailure, toApprovalRequest } from "./skills/registry.ts";
 import { EVENT_KINDS, SURFACES, type Surface } from "./types.ts";
+import { isLocalPeer, livezBody, LoopLagMonitor } from "./watchdog.ts";
 
 /** One hour. Anonymous callers are logged once per window, not once per request. */
 const ANONYMOUS_LOG_INTERVAL_MS = 60 * 60 * 1000;
@@ -62,6 +84,7 @@ const ANONYMOUS_LOG_INTERVAL_MS = 60 * 60 * 1000;
  * so a scanner cannot mint a series per path on this counter either.
  */
 const ANONYMOUS_ROUTES = new Set([
+	"/.well-known/agent-card.json",
 	"/brief",
 	"/events",
 	"/events/query",
@@ -74,6 +97,8 @@ const ANONYMOUS_ROUTES = new Set([
 	"/metrics",
 	"/slo",
 	"/evidence",
+	"/slo/history",
+	"/livez",
 ]);
 
 function anonymousRoute(pathname: string): string {
@@ -195,6 +220,14 @@ export interface HttpServerOptions {
 	anonymousIntervalMs?: number;
 	/** Where the hourly refused-event line goes. Defaults to stderr. */
 	refusalLog?: (line: string) => void;
+	/** `/events/stream` poll interval; production uses `STREAM_POLL_MS`. */
+	streamPollMs?: number;
+	/** `/events/stream` idle close; production uses `STREAM_IDLE_MS`. */
+	streamIdleMs?: number;
+	/** `/events/stream` slow-consumer cap; production uses `STREAM_MAX_BACKLOG_BYTES`. */
+	streamMaxBacklogBytes?: number;
+	/** Directory the merge-trigger's local docs ingest scans; production runs from the repo root. */
+	docsIngestBaseDir?: string;
 }
 
 /** Distinct keys one hourly line may hold before the rest are counted as `other`. */
@@ -203,8 +236,18 @@ const MAX_LOG_KEYS = 50;
 const MAX_BODY_BYTES = 1_000_000;
 
 /**
- * A body over `MAX_BODY_BYTES`. Final for that body, so `/skills/propose` answers it 413. Every
- * other route still answers it with the generic 500 it always has.
+ * Room for the documented ingest call cap (5 MB of pages plus JSON
+ * overhead). `/docs/ingest` and `/mcp` read with this; every other route
+ * keeps the 1 MB cap. The MCP door serves loopback callers and the buffer
+ * is transient, so the wider cap buys ingest without opening a new
+ * amplification path.
+ */
+const DOCS_MAX_BODY_BYTES = 6_000_000;
+
+/**
+ * A body over the route's cap. Final for that body: the uploading routes
+ * answer it 413. Every other route still answers it with the generic 500
+ * it always has.
  */
 export class BodyTooLargeError extends Error {
 	constructor() {
@@ -215,6 +258,100 @@ export class BodyTooLargeError extends Error {
 
 /** Why an anonymous proposal is refused, even on a run that allows anonymous callers. */
 const PROPOSAL_NEEDS_SURFACE = "skills_propose needs an authenticated surface; nothing was proposed";
+/** Why an anonymous approval is refused, even on a run that allows anonymous callers. */
+const APPROVAL_NEEDS_SURFACE = "skills_approve needs an authenticated surface; nothing was changed";
+/** Why a non-operator approval is refused: the same words the service uses. */
+const APPROVAL_NEEDS_OPERATOR = "skills_approve needs an operator token; nothing was changed";
+/** Why an anonymous registry read is refused, even on a run that allows anonymous callers. */
+const LIST_NEEDS_SURFACE = "skills_list needs an authenticated surface";
+/** Why an anonymous ingest is refused, even on a run that allows anonymous callers. */
+const INGEST_NEEDS_SURFACE = "docs_ingest needs an authenticated surface; nothing was ingested";
+/** Why an anonymous merge-trigger is refused, even on a run that allows anonymous callers. */
+const MERGE_TRIGGER_NEEDS_SURFACE = "docs merge-trigger needs an authenticated surface; nothing was refreshed";
+/** The dataset a post-merge hook triggers when the body names none (DOCS-03's own repo row). */
+const MERGE_TRIGGER_DATASET = "agent-substrate";
+
+/**
+ * The dataset this deployment refreshes from its own checkout: the trigger
+ * table's row whose sources (`config.docsIngestRoots`) live in the directory
+ * the server runs from. The other rows name checkouts this server does not
+ * hold, so their refresh is a truthful noop — a recorded version over
+ * documents that were never ingested would only lie to search.
+ */
+const LOCALLY_INGESTED_DATASET = MERGE_TRIGGER_DATASET;
+
+/** Why an anonymous stream is refused, even on a run that allows anonymous callers. */
+const STREAM_NEEDS_SURFACE = "events stream needs an authenticated surface; nothing was streamed";
+
+/*
+ * The bounds of one `/events/stream` connection. Deliberately constants, not
+ * configuration: a poll interval a config file can crank down is a ledger load it
+ * can silently multiply, and the bounds exist so a stream never costs more than
+ * the polling it replaces. Tests inject smaller values through `HttpServerOptions`.
+ */
+
+/** How often one connection polls the ledger for rows after its cursor. */
+export const STREAM_POLL_MS = 500;
+/** Close a connection that has delivered nothing for this long; the client reconnects with Last-Event-ID and resumes. */
+export const STREAM_IDLE_MS = 5 * 60_000;
+/** Rows one poll may deliver: the ledger is the buffer, so no connection reads past this per tick. */
+export const STREAM_BATCH = 200;
+/** Unflushed bytes past which a slow consumer is cut off instead of buffered without limit. */
+export const STREAM_MAX_BACKLOG_BYTES = 1_000_000;
+
+/**
+ * The refusals a `/events/stream` connection is answered with before anything
+ * opens, in the order they are checked. The 401 is the same door decision
+ * `/docs/merge-trigger` makes: an unauthenticated caller is refused even on a run
+ * that allows anonymous callers, because a stream is a standing read of the whole
+ * trail and no bridge run should hand that to whoever can reach the port. Only
+ * then the loopback check, for the same reason the merge-trigger is loopback-only.
+ * Null when the connection may proceed.
+ */
+export function streamRefusal(
+	surface: Surface | null,
+	remoteAddress: string | undefined,
+): { status: number; error: string } | null {
+	if (surface === null) return { status: 401, error: STREAM_NEEDS_SURFACE };
+	if (!isLoopbackRemote(remoteAddress)) {
+		return { status: 403, error: "events stream is a loopback route; the caller is not loopback" };
+	}
+	return null;
+}
+
+/**
+ * Whether the request arrived over the loopback interface.
+ *
+ * The whole 127/8 in every notation (`::ffff:`-mapped IPv6 included) plus
+ * `::1` — the same loopback set `parseRedisUrl` refuses plaintext redis
+ * outside of. Node writes IPv4 remotes as a dotted quad and IPv6 remotes
+ * either bare or v4-mapped; a DNS name never appears in `remoteAddress`.
+ */
+/** Set by the public nginx vhost only. Local clients never send it, so the anonymous bridge stays on loopback. */
+export const PUBLIC_EDGE_HEADER = "x-substrate-edge";
+
+/**
+ * A request that arrived through the public edge without a surface token.
+ * `GET /healthz` stays open: it carries no lesson or session content.
+ * Every other route needs a bearer even while `SUBSTRATE_ALLOW_ANONYMOUS=1`.
+ */
+export function publicEdgeNeedsBearer(
+	edgeHeader: string | string[] | undefined,
+	method: string | undefined,
+	pathname: string,
+	surface: Surface | null,
+): boolean {
+	const edge = Array.isArray(edgeHeader) ? edgeHeader[0] : edgeHeader;
+	if (edge !== "public" || surface !== null) return false;
+	return !((method ?? "GET") === "GET" && pathname === "/healthz");
+}
+
+export function isLoopbackRemote(remoteAddress: string | undefined): boolean {
+	const address = (remoteAddress ?? "").toLowerCase().replace(/^::ffff:/, "");
+	if (address === "::1") return true;
+	const octets = address.split(".");
+	return octets.length === 4 && octets[0] === "127" && octets.slice(1).every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255);
+}
 
 /**
  * The status `/healthz` answers with.
@@ -285,24 +422,47 @@ export function memoryWriteStatus(result: { outcome: string; reason: string; ver
 	}
 }
 
-async function readBody(req: IncomingMessage): Promise<string> {
+async function readBody(req: IncomingMessage, maxBytes: number = MAX_BODY_BYTES): Promise<string> {
 	const chunks: Buffer[] = [];
 	let size = 0;
 	for await (const chunk of req) {
 		size += (chunk as Buffer).length;
-		if (size > MAX_BODY_BYTES) throw new BodyTooLargeError();
+		if (size > maxBytes) throw new BodyTooLargeError();
 		chunks.push(chunk as Buffer);
 	}
 	return Buffer.concat(chunks).toString("utf8");
 }
 
-function send(res: ServerResponse, status: number, body: string, contentType = "text/plain; charset=utf-8"): void {
-	res.writeHead(status, { "content-type": contentType });
+function send(
+	res: ServerResponse,
+	status: number,
+	body: string,
+	contentType = "text/plain; charset=utf-8",
+	headers: Record<string, string> = {},
+): void {
+	res.writeHead(status, { "content-type": contentType, ...headers });
 	res.end(body);
+}
+
+/** `GET /healthz` as last computed, for pollers (uplift-2 R1). */
+interface HealthMemo {
+	status: number;
+	body: Record<string, unknown>;
+	/** Epoch ms when the body was computed. */
+	at: number;
 }
 
 function sendJson(res: ServerResponse, status: number, value: unknown): void {
 	send(res, status, JSON.stringify(value), "application/json");
+}
+
+/**
+ * The 429 of an enforced budget: an integer `Retry-After` and the bounded body
+ * from `admission.ts`. Sent before the handler and before the audit — a refused
+ * request did nothing, so there is no action to record, only a decision to count.
+ */
+function sendBudgetRefusal(res: ServerResponse, verdict: AdmissionVerdict, body: unknown = budgetBody(verdict)): void {
+	send(res, 429, JSON.stringify(body), "application/json", { "retry-after": String(verdict.retryAfterS) });
 }
 
 /** A surface named in a request body. Only ever trusted on an unauthenticated run. */
@@ -325,7 +485,7 @@ function bodySurface(body: Record<string, unknown>): Surface | null {
  * is the wrapper every route goes through, so honouring it is not a line a future route
  * has to remember.
  *
- * `/healthz`, `/metrics` and `/slo` are not audited: they are monitoring traffic, no
+ * `/healthz`, `/metrics`, `/slo`, `/slo/history` and `/livez` are not audited: they are monitoring traffic, no
  * agent action is behind them, and a trail dominated by a Prometheus scrape is a
  * trail nobody reads.
  */
@@ -392,10 +552,36 @@ export function createHttpServer(
 ) {
 	const anonymousLog = new AnonymousCallerLog(options.anonymousIntervalMs, options.now, options.anonymousLog);
 	anonymousLog.start();
+	// `/livez` (uplift-4 S3) answers from this monitor alone: no store, no plane.
+	const loopLag = new LoopLagMonitor();
+	loopLag.start();
+	// Read once here so a malformed `SUBSTRATE_BURN_*` ceiling warns at boot, not on
+	// the first scrape; the route re-reads the environment per request and the
+	// reader warns once per variable, so this line never repeats itself.
+	loadBurnThresholds();
 	// Same hourly window. `/metrics` counts refusals by reason; this line says which
 	// sender to fix (claimed surface, kind, tokened or not) without carrying a payload.
 	const refusalLog = new AnonymousCallerLog(options.anonymousIntervalMs, options.now, options.refusalLog, "refused events");
 	refusalLog.start();
+	// Dataset versions live in the service since uplift-2 R6, hydrated from and
+	// saved to the docs state file with the ingest records; the merge-trigger
+	// asks the service for the newest one and dedupes by content hash.
+	// The last `/healthz` body, served again for `config.healthzCacheMs` (uplift-2 R1).
+	const now = options.now ?? Date.now;
+	let healthMemo: HealthMemo | null = null;
+	// uplift-5 U5-3: the computation in flight. Pollers that arrive while it runs inside the memo window
+	// join it instead of starting their own (each compute is a round trip per configured plane on the
+	// same small pool); cleared in `finally`, so a compute that throws is not joined by the next poll.
+	let healthFlight: Promise<HealthMemo> | null = null;
+	// uplift-4 S6: `/slo/history` answers, 15 s per validated request, one read per key in flight.
+	const historyMemo = new MetricHistoryMemo(now);
+	// uplift-3 N3: the bucket per surface × class, on the cache plane. The
+	// decision is recorded through the same observer the service reports to.
+	const admission = new Admission(config.admission, {
+		script: (script, keys, args) => substrate.cacheScript(script, keys, args),
+		now,
+		record: (verdict) => observability.observer.admission?.(verdict),
+	});
 	const server = createServer(async (req, res) => {
 		const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
 		const authorization = req.headers.authorization ?? null;
@@ -411,16 +597,21 @@ export function createHttpServer(
 		};
 		const route = normalizeRoute(url.pathname);
 
-		// Measured from `finish` rather than at each `send` call site: that way every
+		// Measured from `close` rather than at each `send` call site: that way every
 		// exit — a 401 below, a thrown handler, the MCP transport writing its own
-		// response — lands in the histogram with the status the client actually saw.
+		// response, a stream cut off mid-flight for backpressure — lands in the
+		// histogram with the status the client actually saw. `finish` would miss the
+		// last one: a response destroyed before it drained never finishes, and the
+		// exit still happened. `close` always fires, after `end` and after a destroy.
 		const started = performance.now();
 		const span = startRequestSpan(observability, req, route, surface);
-		// Set before the response is finished. `finish` reads both.
+		// Set before the response is finished. `close` reads both.
 		let eventRefusal: EventRefusalReason | null = null;
 		let eventShape: { surface: string; kind: string } = { surface: "none", kind: "none" };
 		const claim = { surface: "none" };
-		res.on("finish", () => {
+		// Set when the request is answered as the host's own liveness probe.
+		let selfProbe = false;
+		res.on("close", () => {
 			span.setAttribute("http.response.status_code", res.statusCode);
 			if (res.statusCode >= 500) span.fail(`HTTP ${res.statusCode}`);
 			span.end();
@@ -439,12 +630,26 @@ export function createHttpServer(
 				);
 			}
 			// Accepted untokened callers only. A 401 was refused, not served anonymously.
-			if (config.allowAnonymous && surface === null && res.statusCode !== 401) {
+			// The watchdog's own `/livez` probe is not a caller: counting it would keep
+			// "any anonymous callers left?" above zero for as long as the host runs.
+			if (config.allowAnonymous && surface === null && res.statusCode !== 401 && !selfProbe) {
 				const anonRoute = anonymousRoute(url.pathname);
 				observability.instruments.recordAnonymous({ route: anonRoute, claimedSurface: claim.surface });
 				anonymousLog.record(anonRoute, claim.surface);
 			}
 		});
+
+		// `GET /livez` (uplift-4 S3): the systemd watchdog's probe. Answered before
+		// the bearer check because the watchdog sends none, and only to a peer that
+		// is this host (a loopback client, or a client at the address it connected
+		// to); anyone else falls through to the checks below. It reads the lag
+		// monitor and the process clock and touches no store, plane, cache or audit
+		// chain, so a store outage can never fail it. No agent action is behind it.
+		if (req.method === "GET" && url.pathname === "/livez" && isLocalPeer(req.socket.remoteAddress, req.socket.localAddress)) {
+			selfProbe = true;
+			sendJson(res, 200, livezBody(loopLag));
+			return;
+		}
 
 		// A configured deployment requires a token that names a surface, unless
 		// `SUBSTRATE_ALLOW_ANONYMOUS=1` is keeping untokened callers during migration.
@@ -460,30 +665,97 @@ export function createHttpServer(
 		// of knowing who used it.
 		// A bearer that names no surface is not an untokened caller. The bridge
 		// accepts the absence of a token; this used to be 401 and still is.
-		if (unmappedBearer(config, authorization) || (!config.allowAnonymous && surface === null)) {
+		// GET /healthz stays open with no bearer: it names the origin and the
+		// store state, and it carries no lesson or session content. A present
+		// bearer that names no surface is still refused above.
+		const openHealth = (req.method ?? "GET") === "GET" && url.pathname === "/healthz";
+		if (
+			unmappedBearer(config, authorization) ||
+			publicEdgeNeedsBearer(req.headers[PUBLIC_EDGE_HEADER], req.method, url.pathname, surface) ||
+			(!openHealth && !config.allowAnonymous && surface === null)
+		) {
 			if (req.method === "POST" && url.pathname === "/events") eventRefusal = "auth";
 			sendJson(res, 401, { error: "unknown or missing bearer token" });
 			return;
 		}
 
+		// uplift-3 N3: admission, after the bearer is known and before any handler.
+		// Monitor GETs are not metered; `/mcp` is metered per tool call in
+		// `handleMcp`, where the batch is parsed. A `limited` verdict only exists in
+		// `enforce`; `shadow` and every bypass fall through to the handler.
+		const klass = routeClass(req.method ?? "GET", url.pathname);
+		if (klass !== null) {
+			const verdict = await admission.admit({ surface, klass, cost: 1 });
+			if (verdict.decision === "limited") {
+				sendBudgetRefusal(res, verdict);
+				return;
+			}
+		}
 		try {
 			if (req.method === "GET" && url.pathname === "/healthz") {
-				const health = await substrate.health();
-				sendJson(res, healthStatus(health, config.greptime !== null), {
-					...health,
-					// A deployment whose audit chain is in memory is one restart from having no
-					// trail. That is a fact about the deployment, so it is reported — but it is
-					// not a 503: the substrate is serving, and refusing would be worse.
-					auditDurable: observability.audit.durable,
-					auditRecords: observability.audit.seq,
-					// Reported here as well as in every verification verdict, because a monitor is
-					// what notices it: the audit file was deleted or truncated after records were
-					// written to it, and nobody is going to ask `/evidence` about a graph until they
-					// already have a reason to.
-					...(observability.audit.missingHistory
-						? { auditMissingHistory: observability.audit.missingHistory }
-						: {}),
-				});
+				// Memoised for `healthzCacheMs` (uplift-2 R1): every collector polls this
+				// route, and each computation costs one round trip per configured plane.
+				// The status code is derived from the cached body by the same rule, so a
+				// poller sees the same verdict a fresh computation gave at `cachedAt`.
+				// `/metrics` and `/slo` are not memoised.
+				const ttl = config.healthzCacheMs;
+				const nowMs = now();
+				const stale = ttl > 0 && healthMemo !== null && nowMs - healthMemo.at < ttl;
+				const compute = async (): Promise<HealthMemo> => {
+					const health = await substrate.health();
+					const hindsight = substrate.hindsightInventoryHealth();
+					const recall = substrate.recallHealth();
+					return {
+						status: healthStatus(health, config.greptime !== null),
+						at: nowMs,
+						body: {
+							...health,
+							publicOrigin: config.publicOrigin,
+							// U5-4a: what a replaying client may rely on. It MUST NOT replay against `off` (or a body
+							// without this field); the mode is static config, so the memo cannot make it stale.
+							idempotency: config.eventIdempotency,
+							// A deployment whose audit chain is in memory is one restart from having no
+							// trail. That is a fact about the deployment, so it is reported — but it is
+							// not a 503: the substrate is serving, and refusing would be worse.
+							auditDurable: observability.audit.durable,
+							auditRecords: observability.audit.seq,
+							// Reported here as well as in every verification verdict, because a monitor is
+							// what notices it: the audit file was deleted or truncated after records were
+							// written to it, and nobody is going to ask `/evidence` about a graph until they
+							// already have a reason to.
+							...(observability.audit.missingHistory
+								? { auditMissingHistory: observability.audit.missingHistory }
+								: {}),
+							// The read-only Hindsight inventory (uplift-4 S5): the newest probe, from memory. Absent when
+							// SUBSTRATE_HINDSIGHT_INVENTORY is off; no existing field changes.
+							...(hindsight !== null ? { hindsight } : {}),
+							// Recall in the brief (uplift-4 S5): how many pairs the prefetcher can keep fresh; absent while it is off.
+							...(recall !== null ? { recall } : {}),
+						},
+					};
+				};
+				let memo: HealthMemo;
+				if (stale && healthMemo !== null) {
+					memo = healthMemo;
+				} else if (ttl > 0 && healthFlight !== null) {
+					// A caller that joins a compute waited for it: its body is fresh, not memoised (`stale: false`).
+					memo = await healthFlight;
+				} else if (ttl > 0) {
+					const flight = compute().then((computed) => {
+						healthMemo = computed;
+						return computed;
+					});
+					healthFlight = flight;
+					try {
+						memo = await flight;
+					} finally {
+						if (healthFlight === flight) healthFlight = null;
+					}
+				} else {
+					memo = await compute();
+					healthMemo = memo;
+				}
+				sendJson(res, memo.status, { ...memo.body, cachedAt: new Date(memo.at).toISOString(), stale });
 				return;
 			}
 
@@ -491,18 +763,120 @@ export function createHttpServer(
 				// The snapshot this process holds, in the shape `otlp.ts` encodes. Served
 				// whether or not a collector is configured, so an operator can read the same
 				// numbers the SLOs are computed from without standing one up.
-				sendJson(res, 200, { startedAt: new Date(observability.startedAt).toISOString(), metrics: observability.snapshot() });
+				// The docs gauges ride beside the snapshot (uplift-4 S7). `metrics` holds
+				// counters, histograms and the registry's unlabelled gauges; the labelled docs
+				// gauges (`substrate.docs.freshness_seconds`, `substrate.docs.trigger_lag_seconds`)
+				// are served ONLY here, under `gauges`, and are not in OTLP. The key is absent
+				// until a dataset has data. A read: nothing is settled or written here.
+				// The Hindsight per-bank gauges (uplift-4 S5) ride in the same key. The outbox gauges are in
+				// the snapshot below: the call refreshes them first, from in-process state, with no plane call.
+				const bankGauges = substrate.hindsightGauges();
+				const gauges = [...freshnessGauges(await substrate.evaluateDocsFreshness().catch(() => [])), ...bankGauges];
+				sendJson(res, 200, {
+					startedAt: new Date(observability.startedAt).toISOString(),
+					metrics: observability.snapshot(),
+					...(gauges.length > 0 ? { gauges } : {}),
+				});
 				return;
 			}
 
 			if (req.method === "GET" && url.pathname === "/slo") {
 				const results = observability.evaluate();
+				// The quota-burn objectives ride beside the catalogue, never inside it: the
+				// catalogue is exactly SPE-4793's four. Every read both feeds and reads the
+				// rolling-hour ledger, so scrape frequency is the sample rate — the
+				// dispatcher's storm-breaker polls this same array. The ledger is the
+				// observability's own since uplift-3 N2, so a restart restores it.
+				const burn = observability.evaluateBurn();
+				// The per-plane availability objectives ride beside it the same way
+				// (uplift-2 R2): judged over the rolling hour, `unconfigured` for a plane
+				// the deployment does not have.
+				const planes = observability.evaluatePlanes(substrate.planesConfigured());
+				// The admission refusal rate (uplift-3 N3) rides beside the catalogue
+				// the same way: one objective, `insufficient-data` under 100 decisions.
+				const admissionSlo = evaluateAdmissionSlo(observability.snapshot());
+				// The docs-search latency objective (uplift-3 N5) rides beside it too:
+				// one row, `docs.search.p95`, in the catalogue's entry shape, never
+				// folded into `breached`.
+				// `docs.freshness` (uplift-4 S7) joins it when a dataset has data: report-only too.
+				const freshness = await substrate.evaluateDocsFreshness().catch(() => []);
+				const docs = [
+					...observability.evaluateDocs(),
+					...evaluateDocsFreshnessSlo(
+						freshness.map((row) => ({
+							dataset: row.dataset,
+							freshnessSeconds: row.freshness_seconds,
+							triggerLagSeconds: row.trigger_lag_seconds,
+							stale: row.stale,
+							lagging: row.lagging,
+						})),
+						config.docsFreshness,
+					),
+				];
+				// `brief.p95` per surface (uplift-3 N7): one row per surface with enough
+				// samples, same shape plus `surface`; empty until a surface qualifies and
+				// never folded into `breached` — the global row is still the catalogue's.
+				const surfaces = observability.evaluateBriefSurfaces();
+				// The capacity runway (uplift-3 N2): one row over the `/healthz` size ring.
+				const capacity = observability.evaluateCapacity();
+				// The estimated-spend row per surface (uplift-4 S1): what was served, by
+				// bytes/4, against SUBSTRATE_SERVED_TOKENS_PER_HOUR. Beside the catalogue,
+				// never folded into `breached`, and never part of `burn` — those are
+				// model-reported tokens.
+				const served = observability.evaluateServedTokens();
+				// The index archive age (uplift-4 S2): one row, present only when an archive directory is configured; report-only until its ceiling is set.
+				const indexArchive = await substrate.indexArchiveSlo();
 				// 200 either way. A breached objective is information, not a broken service,
 				// and a monitor that read this as an outage would page on a slow hour.
+				//
+				// `breached` lists the catalogue's breaches first, then (uplift-3 N2) the
+				// plane and burn ones: the storm-breaker and the runbook read this one
+				// list, and a plane that was unavailable for an hour is as much a breach
+				// as a slow brief. The per-array detail is unchanged beside it.
 				sendJson(res, 200, {
 					results,
-					breached: results.filter((result) => result.status === "breached").map((result) => result.id),
+					breached: [
+						...results.filter((result) => result.status === "breached").map((result) => result.id),
+						...planes.filter((result) => result.status === "breached").map((result) => result.id),
+						...burn.filter((result) => result.status === "breached").map((result) => result.id),
+					],
+					burn,
+					planes,
+					admission: admissionSlo,
+					docs,
+					surfaces,
+					capacity,
+					served,
+					...(indexArchive !== null ? { indexArchive: [indexArchive] } : {}),
+					history: observability.history(),
 				});
+				return;
+			}
+
+			// uplift-4 S6: the durable metrics history, aggregated numbers only. 404 with
+			// the history off or no ledger; the answer (and its validation) lives in `metrics-history.ts`.
+			if (req.method === "GET" && url.pathname === "/slo/history") {
+				const answer = await metricHistoryAnswer({ settings: config.metricsHistory, greptime: substrate.greptime, now, memo: historyMemo }, url.searchParams);
+				send(res, answer.status, JSON.stringify(answer.body), "application/json", answer.headers);
+				return;
+			}
+
+			// Per-surface A2A Agent Card (Phase 29, CARD-01). Unauthenticated
+			// discovery, same exemption class as /healthz: no agent action sits
+			// behind it, no audit record, emits nothing. One route serves all 27
+			// surfaces; the ?surface= parameter demultiplexes, and its absence
+			// is a 400, never a silent default.
+			if (req.method === "GET" && url.pathname === "/.well-known/agent-card.json") {
+				const surface = url.searchParams.get("surface");
+				if (!surface) {
+					sendJson(res, 400, { error: "surface query parameter is required" });
+					return;
+				}
+				if (!isKnownCardSurface(surface)) {
+					sendJson(res, 400, { error: `unknown surface ${JSON.stringify(surface.slice(0, 80))}` });
+					return;
+				}
+				sendJson(res, 200, buildAgentCard(surface, await substrate.teachablesForSurface(surface)));
 				return;
 			}
 
@@ -529,13 +903,44 @@ export function createHttpServer(
 				const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
 				rememberClaim(claim, body);
 				if (!(await auditedRest(res, observability, surface, "brief", body))) return;
-				const brief = await substrate.brief({
-					repo: typeof body.repo === "string" ? body.repo : undefined,
-					branch: typeof body.branch === "string" ? body.branch : undefined,
-					graph_id: typeof body.graph_id === "string" ? body.graph_id : undefined,
-					surface: (typeof body.surface === "string" ? (body.surface as Surface) : null) ?? surface ?? "claude-code",
-				});
-				send(res, 200, brief, "text/markdown; charset=utf-8");
+				// uplift-4 S1: an unknown profile is the caller's mistake, refused here
+				// and never coerced to one the caller did not ask for.
+				const requested = parseBriefProfile(body.profile);
+				if (!requested.ok) {
+					sendJson(res, 400, { error: requested.error });
+					return;
+				}
+				const { detail: brief, notModified } = await substrate.briefConditional(
+					{
+						repo: typeof body.repo === "string" ? body.repo : undefined,
+						branch: typeof body.branch === "string" ? body.branch : undefined,
+						graph_id: typeof body.graph_id === "string" ? body.graph_id : undefined,
+						surface: (typeof body.surface === "string" ? (body.surface as Surface) : null) ?? surface ?? "claude-code",
+					},
+					req.headers["if-none-match"],
+					requested.profile,
+					// The profile follows the resolved bearer, never the body's `surface` (attribution only).
+					surface,
+				);
+				// uplift-2 R1: the caller can tell a degraded or snapshot brief from a
+				// complete one and skip one it already holds. A degraded answer is still
+				// 200 — the fail-open contract is unchanged; only the headers say so.
+				// `no-cache` means revalidate, not "do not store": the ETag is the validator.
+				const headers: Record<string, string> = {
+					etag: brief.etag,
+					"cache-control": "no-cache",
+					"x-substrate-brief": brief.state,
+					"x-substrate-brief-profile": brief.profile,
+					...(brief.failed.length > 0 ? { "x-substrate-brief-failed": brief.failed.join(",") } : {}),
+					// uplift-4 S4: additive; present only when the text is a last-good served inside the stale window.
+					...(brief.ageS !== undefined ? { "x-substrate-brief-age": String(brief.ageS) } : {}),
+				};
+				if (notModified) {
+					res.writeHead(304, headers);
+					res.end();
+					return;
+				}
+				send(res, 200, brief.text, "text/markdown; charset=utf-8", headers);
 				return;
 			}
 
@@ -578,10 +983,15 @@ export function createHttpServer(
 					sendJson(res, 403, { error: "an untokened caller cannot emit as a surface that has a token" });
 					return;
 				}
-				const result = await substrate.emit({
-					...(body as object),
-					surface: attribution.surface,
-				} as Parameters<Substrate["emit"]>[0]);
+				// `x-substrate-replay: 1` marks a re-send of an earlier attempt (U5-4a). Read here, honoured
+				// (or ignored, under `off`) by `Substrate.emit`.
+				const result = await substrate.emit(
+					{
+						...(body as object),
+						surface: attribution.surface,
+					} as Parameters<Substrate["emit"]>[0],
+					{ replay: req.headers["x-substrate-replay"] === "1" },
+				);
 				// 503 when the ledger did not take it. The `substrate` CLI ignores the
 				// status and exits 0 either way — failing open is the client's job, and
 				// this surface owes its caller the truth about durability.
@@ -592,6 +1002,7 @@ export function createHttpServer(
 					stored: result.stored,
 					...(result.error ? { error: result.error } : {}),
 					...(result.warning ? { warning: result.warning } : {}),
+					...(result.deduplicated ? { deduplicated: true } : {}),
 				});
 				return;
 			}
@@ -608,6 +1019,51 @@ export function createHttpServer(
 				const result = await substrate.queryEvents(body as Parameters<Substrate["queryEvents"]>[0]);
 				// An empty window is a real answer, so 200; 503 is the ledger not answering.
 				sendJson(res, result.error ? 503 : 200, result);
+				return;
+			}
+
+			// U7: the push seam. Every consumer polled the ledger before this — collectors
+			// reconciled on timers — and the stream changes only the transport: the ledger
+			// stays the buffer, each connection keeps its own cursor and one poll timer,
+			// and no emit path ever touches subscriber state, so a broken or vanished
+			// subscriber costs the server a bounded backlog and nothing else.
+			if (req.method === "GET" && url.pathname === "/events/stream") {
+				const refusal = streamRefusal(surface, req.socket.remoteAddress);
+				if (refusal) {
+					sendJson(res, refusal.status, { error: refusal.error });
+					return;
+				}
+				// Last-Event-ID is what an EventSource sends back on reconnect;
+				// `?cursor=` is the same name for a consumer that cannot set headers.
+				const headerId = req.headers["last-event-id"];
+				const requested = (Array.isArray(headerId) ? headerId[0] : headerId) ?? url.searchParams.get("cursor") ?? "";
+				const cursorId = requested.trim().slice(0, 128);
+				// Audited once per connection, under the name `/events/query` is audited
+				// under — the same read, so the trail never grows a second name for one
+				// action. Never per frame.
+				if (!(await auditedRest(res, observability, surface, "events_query", { cursor: cursorId === "" ? null : cursorId }))) {
+					return;
+				}
+				const greptime = substrate.greptime;
+				if (!greptime) {
+					sendJson(res, 503, { error: "GREPTIME_URL is not set; there is no ledger to stream" });
+					return;
+				}
+				try {
+					await openEventStream(res, greptime, cursorId, {
+						pollMs: options.streamPollMs ?? STREAM_POLL_MS,
+						idleMs: options.streamIdleMs ?? STREAM_IDLE_MS,
+						batch: STREAM_BATCH,
+						maxBacklogBytes: options.streamMaxBacklogBytes ?? STREAM_MAX_BACKLOG_BYTES,
+					});
+				} catch (cause) {
+					// Setup failed before the stream opened, so an ordinary error response
+					// is still available — fail-open here means the caller learns the
+					// stream did not open, and a 503 names the ledger, not the caller,
+					// as the thing that failed.
+					if (res.headersSent) throw cause;
+					sendJson(res, 503, { error: redact(String(cause)) });
+				}
 				return;
 			}
 
@@ -628,6 +1084,25 @@ export function createHttpServer(
 				sendJson(res, memoryWriteStatus(result), result);
 				return;
 			}
+
+		// A read inside an agent's turn: fail-open, so anonymous callers reach
+		// the audit gate like every other read and an unreachable plane
+		// answers degraded rather than refusing the turn.
+		if (req.method === "POST" && url.pathname === "/memory/recall") {
+			const parsed: unknown = JSON.parse(await readBody(req));
+			if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+				sendJson(res, 400, { error: "request body must be a JSON object" });
+				return;
+			}
+			if (!("query" in parsed) || typeof parsed.query !== "string") {
+				sendJson(res, 400, { error: "query is required" });
+				return;
+			}
+			const fields: Record<string, unknown> = { query: parsed.query };
+			if (!(await auditedRest(res, observability, surface, "memory_recall", fields))) return;
+			sendJson(res, 200, await substrate.recallMemories(fields, surface));
+			return;
+		}
 
 			// Hooks get the coordination paths over REST for the same reason they get
 			// the brief: a hook process has no MCP client. Same service code beneath.
@@ -734,6 +1209,189 @@ export function createHttpServer(
 				return;
 			}
 
+			// A read inside an agent's turn: fail-open, so anonymous callers reach
+			// the audit gate like every other read and an unreachable plane
+			// answers degraded rather than refusing the turn.
+			if (req.method === "POST" && url.pathname === "/docs/search") {
+				const parsed: unknown = JSON.parse(await readBody(req));
+				if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+					sendJson(res, 400, { error: "request body must be a JSON object" });
+					return;
+				}
+				if (!("question" in parsed) || typeof parsed.question !== "string") {
+					sendJson(res, 400, { error: "question is required" });
+					return;
+				}
+				const datasets = "datasets" in parsed ? parsed.datasets : undefined;
+				const sessionId = "session_id" in parsed ? parsed.session_id : undefined;
+				if (
+					(datasets !== undefined && !(Array.isArray(datasets) && datasets.every((name) => typeof name === "string"))) ||
+					(sessionId !== undefined && typeof sessionId !== "string")
+				) {
+					sendJson(res, 400, { error: "datasets must be a string array and session_id a string" });
+					return;
+				}
+				const fields: Record<string, unknown> = {
+					question: parsed.question,
+					...(datasets !== undefined ? { datasets } : {}),
+					...(sessionId !== undefined ? { session_id: sessionId } : {}),
+				};
+				if (!(await auditedRest(res, observability, surface, "docs_search", fields))) return;
+				sendJson(res, 200, await substrate.searchDocs(fields, surface));
+				return;
+			}
+
+			// A publication path other agents read from, so an anonymous caller is
+			// refused before the body is read, even on a run that otherwise allows
+			// untokened callers. Audited fail-closed under the tool's own name.
+			if (req.method === "POST" && url.pathname === "/docs/ingest") {
+				if (surface === null) {
+					sendJson(res, 401, { error: INGEST_NEEDS_SURFACE });
+					return;
+				}
+				const parsed: unknown = JSON.parse(await readBody(req, DOCS_MAX_BODY_BYTES));
+				if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+					sendJson(res, 400, { error: "request body must be a JSON object" });
+					return;
+				}
+				if (!("dataset" in parsed) || typeof parsed.dataset !== "string") {
+					sendJson(res, 400, { error: "dataset is required" });
+					return;
+				}
+				const commit = "commit" in parsed ? parsed.commit : undefined;
+				const pages = "pages" in parsed ? parsed.pages : undefined;
+				const ingestSession = "session_id" in parsed ? parsed.session_id : undefined;
+				const pagesValid =
+					Array.isArray(pages) &&
+					pages.every(
+						(page) =>
+							page !== null &&
+							typeof page === "object" &&
+							!Array.isArray(page) &&
+							"path" in page &&
+							typeof page.path === "string" &&
+							"body" in page &&
+							typeof page.body === "string" &&
+							(!("source_url" in page) || typeof page.source_url === "string") &&
+							(!("real_path" in page) || typeof page.real_path === "string") &&
+							(!("heading_path" in page) || typeof page.heading_path === "string"),
+					);
+				if (!pagesValid || (commit !== undefined && typeof commit !== "string") || (ingestSession !== undefined && typeof ingestSession !== "string")) {
+					sendJson(res, 400, { error: "pages must carry string path and body; commit and session_id must be strings" });
+					return;
+				}
+				const ingestFields: Record<string, unknown> = {
+					dataset: parsed.dataset,
+					pages,
+					...(commit !== undefined ? { commit } : {}),
+					...(ingestSession !== undefined ? { session_id: ingestSession } : {}),
+				};
+				if (!(await auditedRest(res, observability, surface, "docs_ingest", ingestFields))) return;
+				const outcome = await substrate.ingestDocs(ingestFields, surface);
+				if (!outcome.ok) {
+					sendJson(res, outcome.reason === "vm-guest" ? 403 : 400, outcome);
+					return;
+				}
+				sendJson(res, 200, outcome);
+				return;
+			}
+
+			// U6 (DOCS-03): the documented refresh triggers, wired. A post-merge hook asks
+			// for the `agent-substrate` dataset (the default); the skills-sync tick names
+			// `agent-skills`. A refresh first moves documents through the guarded ingest
+			// `docs_ingest` serves — the same redaction, refusals and content-hash
+			// idempotency, so the conventions cannot drift apart — and only then records
+			// the version: a trigger that answered ok while search still held the old
+			// files would be recording a refresh that never happened. This deployment
+			// ingests the dataset whose checkout it holds; a dataset with no configured
+			// ingest root here is a truthful noop, not a fake refresh. Three doors are
+			// deliberate: an unauthenticated caller is refused before the body is read,
+			// a remote caller is refused even with a valid token (the trigger drives
+			// host-local automation and is loopback-only by design), and a repeat
+			// carrying the newest version's own commit and content hash re-answers it
+			// without ingesting or recording a second version — a webhook retry is
+			// cheap by hash. Since uplift-2 R6 the ingest runs in the background: the
+			// route answers 202 with a job id at once (its caller, the skills-sync
+			// tick, gives up after 3 s while a real parse takes up to a minute per
+			// page), and `?wait=1` keeps the synchronous answer for operators.
+			if (req.method === "POST" && url.pathname === "/docs/merge-trigger") {
+				if (surface === null) {
+					sendJson(res, 401, { error: MERGE_TRIGGER_NEEDS_SURFACE });
+					return;
+				}
+				if (!isLoopbackRemote(req.socket.remoteAddress)) {
+					sendJson(res, 403, { error: "docs merge-trigger is a loopback route; the caller is not loopback" });
+					return;
+				}
+				// DOCS-02: ingestion accepts only authenticated callers that are not VM
+				// guests — a guest that could drive ingest could also create a missing
+				// shared dataset through the ensure step below. Same door as
+				// memory-retain's guest refusal.
+				if (config.vmGuest) {
+					sendJson(res, 403, { error: "docs merge-trigger refuses VM guests: guests do not drive ingest" });
+					return;
+				}
+				const parsed: unknown = JSON.parse(await readBody(req));
+				if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+					sendJson(res, 400, { error: "request body must be a JSON object" });
+					return;
+				}
+				const body = parsed as Record<string, unknown>;
+				const dataset = typeof body.dataset === "string" ? body.dataset : MERGE_TRIGGER_DATASET;
+				// hasOwn, not `in`: `in` also accepts the names every object inherits —
+				// "constructor", "toString", "__proto__" — and those would pass the
+				// known-dataset check and reach the refresh with a dataset the store
+				// never held. Only the trigger table's own rows are known.
+				if (!Object.hasOwn(DATASET_TRIGGERS, dataset)) {
+					sendJson(res, 400, {
+						error: `unknown dataset ${JSON.stringify(dataset.slice(0, 80))}; known: ${Object.keys(DATASET_TRIGGERS).join(", ")}`,
+					});
+					return;
+				}
+				if (typeof body.commit !== "string" || body.commit.length === 0 || typeof body.content_sha256 !== "string" || body.content_sha256.length === 0) {
+					sendJson(res, 400, { error: "commit and content_sha256 are required" });
+					return;
+				}
+				const fields = { dataset, commit: body.commit, content_sha256: body.content_sha256 };
+				// Audited under `docs_ingest`, the fail-closed name the write it performs
+				// is decided under — a merge-trigger nobody recorded is an unrecorded
+				// publication, same as an ingest nobody recorded.
+				if (!(await auditedRest(res, observability, surface, "docs_ingest", fields))) return;
+				if (config.ragflow === null) {
+					// The null-block idiom: no docs plane is configured, so the trigger
+					// asks for nothing that exists — answered quietly, no plane call made.
+					sendJson(res, 200, { ok: true, dataset, noop: true, reason: "docs-plane-unconfigured" });
+					return;
+				}
+				const newest = await substrate.latestDocsVersion(dataset);
+				if (newest && newest.commit === fields.commit && newest.content_sha256 === fields.content_sha256) {
+					sendJson(res, 200, { ok: true, version: newest, created: false, idempotent: true });
+					return;
+				}
+				if (dataset !== LOCALLY_INGESTED_DATASET) {
+					// This server holds no checkout of that dataset, so there is nothing it
+					// can truthfully ingest: a noop that says so, and no version recorded.
+					// The trigger itself is still evidence (skills-sync fast-forwarded).
+					substrate.noteDocsTrigger(dataset);
+					sendJson(res, 200, { ok: true, dataset, noop: true, reason: "no-configured-ingest-root" });
+					return;
+				}
+				substrate.noteDocsTrigger(dataset);
+				const baseDir = options.docsIngestBaseDir ?? process.cwd();
+				// The service ensures the dataset, runs the guarded ingest of this
+				// checkout's roots and records the version, in that order, in the
+				// background; the 202 is audited above like the 200 was. A plane
+				// refusal under `?wait=1` is an outage of the docs plane, not a
+				// permission decision about the caller: 503 with the reason.
+				const accepted = await substrate.startDocsRefresh(
+					{ ...fields, pages: () => scanIngestPages(baseDir, config.docsIngestRoots) },
+					surface,
+					{ wait: url.searchParams.get("wait") === "1" },
+				);
+				sendJson(res, accepted.status, accepted.body);
+				return;
+			}
+
 			// A proposal spends the owner's GitHub credential, so an anonymous caller is refused
 			// before the body is read, even on a run that otherwise allows untokened callers.
 			if (req.method === "POST" && url.pathname === "/skills/propose") {
@@ -761,14 +1419,64 @@ export function createHttpServer(
 				return;
 			}
 
+			// An approval is an operator's decision on what the registry says is published, and it asks the owner's
+			// GitHub credential about a pull request. A caller with no surface (401) and one that is not an operator (403;
+			// a swarm surface and `substrate` never are) are both refused before the body is read, parsed or audited: an
+			// oversize or malformed body, or an audit outage, never changes a refusal into another status.
+			if (req.method === "POST" && url.pathname === "/skills/approve") {
+				if (surface === null) {
+					sendJson(res, 401, { error: APPROVAL_NEEDS_SURFACE });
+					return;
+				}
+				if (!caller.isOperator) {
+					sendJson(res, 403, { error: APPROVAL_NEEDS_OPERATOR });
+					return;
+				}
+				const body = JSON.parse(await readBody(req)) as unknown;
+				const fields = body !== null && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : null;
+				if (fields && !(await auditedRest(res, observability, surface, "skills_approve", fields))) return;
+				const problem = approvalBodyProblem(body);
+				if (problem) {
+					sendJson(res, 400, { error: problem });
+					return;
+				}
+				try {
+					sendJson(res, 200, await substrate.approveSkill(toApprovalRequest(fields ?? {}), { surface, isOperator: caller.isOperator }));
+				} catch (cause) {
+					const failure = approvalFailure(cause);
+					if (failure === null) throw cause;
+					sendJson(res, failure.status, failure.body);
+				}
+				return;
+			}
+
+			// The registry read: approved skills by default, any authenticated surface (the projector's is `substrate`).
+			// A caller with no surface is refused before the audit and the read.
+			if (req.method === "GET" && url.pathname === "/skills") {
+				if (surface === null) {
+					sendJson(res, 401, { error: LIST_NEEDS_SURFACE });
+					return;
+				}
+				const state = url.searchParams.get("state") ?? undefined;
+				if (!(await auditedRest(res, observability, surface, "skills_list", state === undefined ? {} : { state }))) return;
+				try {
+					sendJson(res, 200, await substrate.listSkills(state === undefined ? {} : { state }, { surface, isOperator: caller.isOperator }));
+				} catch (cause) {
+					const failure = approvalFailure(cause);
+					if (failure === null) throw cause;
+					sendJson(res, failure.status, failure.body);
+				}
+				return;
+			}
+
 			if (url.pathname === "/mcp") {
-				await handleMcp(req, res, substrate, caller, observability, claim);
+				await handleMcp(req, res, substrate, caller, observability, claim, admission);
 				return;
 			}
 
 			sendJson(res, 404, { error: `no route for ${req.method} ${url.pathname}` });
 		} catch (cause) {
-			if (cause instanceof BodyTooLargeError && url.pathname === "/skills/propose") {
+			if (cause instanceof BodyTooLargeError && (url.pathname === "/skills/propose" || url.pathname === "/skills/approve" || url.pathname === "/docs/ingest" || url.pathname === "/mcp")) {
 				sendJson(res, 413, { error: cause.message });
 				return;
 			}
@@ -776,7 +1484,7 @@ export function createHttpServer(
 				if (req.method === "POST" && url.pathname === "/events" && cause instanceof InvalidEventError) {
 					eventRefusal = classifyEventRefusal(400, cause.message) ?? "validation";
 				}
-				sendJson(res, 400, { error: cause.message });
+				sendJson(res, 400, { error: cause.message, ...(cause instanceof IdempotencyRefusal ? { rule: cause.rule } : {}) });
 				return;
 			}
 			if (cause instanceof SyntaxError) {
@@ -795,6 +1503,7 @@ export function createHttpServer(
 	server.close = ((callback?: (err?: Error) => void) => {
 		anonymousLog.stop();
 		refusalLog.stop();
+		loopLag.stop();
 		// A request still in flight can finish after the timers stop. Flush once more when
 		// the server has actually closed, so its count still reaches stderr.
 		return close((err?: Error) => {
@@ -804,6 +1513,191 @@ export function createHttpServer(
 		});
 	}) as typeof server.close;
 	return server;
+}
+
+/**
+ * The body of one stream frame: the same event shape `/events/query` returns for
+ * a read without payload. Mirrors `rowToEvent` in `service.ts` — Greptime hands
+ * back loosely typed rows and epoch millis — and adds no redaction of its own,
+ * because these rows were redacted on the write path, exactly as for every other
+ * read of them. `payload` is not selected, the read path's default.
+ */
+function ledgerEventFrame(row: Record<string, unknown>): string {
+	const text = (value: unknown): string | null => (value === null || value === undefined ? null : String(value));
+	return JSON.stringify({
+		id: String(row.id),
+		ts: new Date(Number(row.ts)).toISOString(),
+		surface: String(row.surface),
+		session_id: text(row.session_id),
+		graph_id: text(row.graph_id),
+		node_id: text(row.node_id),
+		linear_identifier: text(row.linear_identifier),
+		step: row.step === null || row.step === undefined ? null : Number(row.step),
+		repo: text(row.repo),
+		branch: text(row.branch),
+		actor: String(row.actor),
+		kind: String(row.kind),
+		summary: String(row.summary),
+		hash: String(row.hash),
+		prev: text(row.prev),
+	});
+}
+
+/**
+ * Open one Server-Sent Events response: resolve the cursor, then hand the
+ * response to a poll loop that writes one `id:`/`data:` frame per ledger event,
+ * in (ingested_at, id) order, until the client goes away or the stream idles out.
+ *
+ * Everything before the response headers is setup: a failure there throws, and
+ * the route answers an ordinary error — fail-open means the caller learns the
+ * stream did not open, not that it silently got nothing. Once the headers are
+ * written the failure rule inverts: a ledger that will not answer skips its tick
+ * and the connection stays open, because tearing down every consumer on one
+ * blip would make the stream less reliable than the polling it replaces.
+ *
+ * The ledger is the buffer. No fan-out list, no queue beyond the socket's own,
+ * and no shared state an emit path could touch: each connection's whole
+ * footprint is its cursor, one unref'd interval, and whatever it has not yet
+ * flushed.
+ */
+/**
+ * The position an empty ledger starts a cursorless stream at: before every
+ * record the ledger can ever hold, so the first later event is strictly after
+ * it and is delivered. A null with no boundary would mean "read the tip at the
+ * first tick" — and the tip would then name the very event that arrived first.
+ */
+const LEDGER_START: CursorPosition = { id: "", ingestedAt: 0 };
+
+async function openEventStream(
+	res: ServerResponse,
+	greptime: GreptimeClient,
+	cursorId: string,
+	bounds: { pollMs: number; idleMs: number; batch: number; maxBacklogBytes: number },
+): Promise<void> {
+	// The connection-life listeners go on before any await, because the setup
+	// reads below are the first async steps and a cursorless client can vanish
+	// while `latestPosition()` is still pending — before the headers, and
+	// before anything else would notice. Ending the socket during setup has to
+	// leave no timer behind.
+	let timer: ReturnType<typeof setInterval> | null = null;
+	let closed = false;
+
+	const cleanup = (): void => {
+		if (closed) return;
+		closed = true;
+		if (timer !== null) {
+			clearInterval(timer);
+			timer = null;
+		}
+	};
+	// Both ends of the connection's life — a normal end, a client that vanished,
+	// a socket error — land here, and the timer never outlives any of them.
+	res.on("close", cleanup);
+	res.on("error", cleanup);
+
+	// Setup. An id the ledger does not know replays nothing: the stream starts
+	// live from the tip, which is also the honest answer for a cursor older than
+	// the ledger's memory — there is nothing behind it left to replay.
+	let resolved: CursorPosition | null = null;
+	if (cursorId !== "") {
+		try {
+			resolved = await greptime.cursorPosition(cursorId);
+		} catch (cause) {
+			throw new Error(`the ledger would not resolve the stream cursor: ${redact(String(cause))}`);
+		}
+	}
+	// The live start is captured before the response opens, not on the first
+	// tick: a tip read after the first poll would adopt the events that arrived
+	// between connect and that tick as the starting cursor — sent to no one —
+	// and an empty ledger read late would swallow its first event. "Live" means
+	// everything after the position the ledger already had when the caller
+	// connected, or from the very first event when it was empty.
+	let cursor: CursorPosition;
+	if (resolved !== null) {
+		cursor = resolved;
+	} else {
+		try {
+			cursor = (await greptime.latestPosition()) ?? LEDGER_START;
+		} catch (cause) {
+			throw new Error(`the ledger would not resolve the stream start: ${redact(String(cause))}`);
+		}
+	}
+	// The socket died during those reads: the response has nobody left to open
+	// for, and a setup that went on to write headers and start the interval
+	// would create a timer whose cleanup had already fired. Returning here is
+	// the whole point of the listeners sitting above the setup.
+	if (closed || res.destroyed) return;
+
+	res.writeHead(200, {
+		"content-type": "text/event-stream; charset=utf-8",
+		"cache-control": "no-cache, no-transform",
+		// The stream *is* the response; when it ends the connection has no further
+		// use, and closing it lets a server shutdown wait on no idle socket.
+		connection: "close",
+	});
+	// A reconnect hint an EventSource honours; custom consumers ignore it.
+	res.write("retry: 5000\n\n");
+
+	let polling = false;
+	let lastActivity = Date.now();
+
+	const tick = (): void => {
+		if (closed || polling) return;
+		polling = true;
+		void (async () => {
+			try {
+				// Checked after the read on purpose, not before it: a client that
+				// vanished mid-poll still made its last read, which is what keeps a
+				// leaked timer observable — the disconnect test counts ledger reads,
+				// and a timer nobody cleared would keep counting after the socket
+				// closed.
+				if (res.destroyed || res.writableEnded) return;
+				if (Date.now() - lastActivity >= bounds.idleMs) {
+					// Idle close. The client reconnects with Last-Event-ID and resumes
+					// exactly where this cursor stopped; the ledger held the gap, not
+					// this process.
+					res.end();
+					cleanup();
+					return;
+				}
+				const positions = await greptime.eventIdsAfter(cursor, bounds.batch);
+				if (positions.length === 0) return;
+				// Positions, not ids: each carries `eventTs`, which bounds the row read in time (uplift-2 R5).
+				const rows = await greptime.eventsByIds(positions);
+				const byId = new Map(rows.map((row) => [String(row.id), row]));
+				for (const position of positions) {
+					const row = byId.get(position.id);
+					// The event row is written before its ingest record, so a position
+					// without a row is not a state storage reaches; if it ever lies,
+					// stop on it and retry the same cursor rather than skip a frame in
+					// silence.
+					if (!row || !Number.isFinite(Number(row.ts))) return;
+					res.write(`id: ${position.id}\ndata: ${ledgerEventFrame(row)}\n\n`);
+					cursor = position;
+					lastActivity = Date.now();
+					// Slow consumer: the unflushed backlog is the memory this one
+					// connection costs the server, and past the cap the connection is
+					// worth less than the memory. Destroying it fires `close`, clears
+					// the timer, and the client replays from its Last-Event-ID.
+					if (res.writableLength > bounds.maxBacklogBytes) {
+						res.destroy();
+						cleanup();
+						return;
+					}
+				}
+			} catch {
+				// A ledger that will not answer is a skipped tick, not a torn-down
+				// stream: the cursor stays put, and the next poll retries it.
+			} finally {
+				polling = false;
+			}
+		})();
+	};
+
+	// Unref'd, like every other timer this server holds: an open stream must not
+	// be the thing keeping a closing process alive.
+	timer = setInterval(tick, bounds.pollMs);
+	timer.unref?.();
 }
 
 /**
@@ -824,17 +1718,29 @@ async function handleMcp(
 	caller: McpCaller,
 	observability: Observability,
 	claim: { surface: string },
+	admission: Admission,
 ): Promise<void> {
 	if (req.method !== "POST") {
 		// Stateless mode has no server-initiated stream to attach to.
 		res.writeHead(405, { allow: "POST" }).end();
 		return;
 	}
-	const raw = await readBody(req);
+	const raw = await readBody(req, DOCS_MAX_BODY_BYTES);
 	const body: unknown = raw ? JSON.parse(raw) : undefined;
 	rememberClaim(claim, body);
 
-	const { denials } = await auditToolCalls(observability, caller.surface, toolCallsIn(body));
+	// uplift-3 N3: the batch is costed here, where its members are known — one
+	// token per `tools/call` of each member's class — and refused whole before
+	// any member runs and before the audit, which records actions, not refusals.
+	// One request token alone would let a batch of fifty calls cost one.
+	const calls = toolCallsIn(body);
+	const refused = await admitBatch(admission, caller.surface, calls);
+	if (refused !== null) {
+		sendBudgetRefusal(res, refused, budgetRefusal(body, refused));
+		return;
+	}
+
+	const { denials } = await auditToolCalls(observability, caller.surface, calls);
 	if (denials.size > 0) {
 		// 200 with a JSON-RPC error, not an HTTP error: the request was well-formed and
 		// the refusal is the answer to it, which is what an MCP client knows how to read.

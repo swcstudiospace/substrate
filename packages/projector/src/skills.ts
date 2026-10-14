@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Project the shared skills library into each agent's skill root (D-05, D-06, D-20; ported D22-01).
+ * Project the shared skills library into each agent's skill root (D-05, D-06, D-20).
  *
  *   bun packages/projector/src/skills.ts [--check] [--root <id>]
  *
@@ -11,9 +11,8 @@
  *   - backup-then-link  — a real directory byte-identical to the library copy (ignoring __pycache__/
  *                         and *.pyc): copy it to `<backupDir>/<root-id>/<name>/` with a MANIFEST line
  *                         per file and a RESTORE line, then replace it by the link;
- *   - remove-own-link   — remove a link this projector owns (`<root>/<name>` → library):
- *                         the root is disabled, or the library no longer has that name.
- *                         Foreign links stay;
+ *   - remove-own-link   — the root's disableFlag exists: remove the links this projector owns there
+ *                         (`<root>/<name>` → `<LIBRARY_DIR>/<name>`) and do nothing else in that root;
  *   - skip-warn         — a differing real directory (real-dir-differs), a link elsewhere
  *                         (foreign-link), or in a root with `knownReal` (Grok) a real directory that is
  *                         neither a library name nor known (stray-real-dir, Pitfall 12): never touched,
@@ -29,28 +28,9 @@
  * `--check` exits 1 when any change is pending and writes nothing; skip-warn entries are not drift.
  * With nothing pending it prints an "already current" line and exits 0.
  *
- * Phase 22 (D22-03): every warning this projector sends is a host-job event — surface `substrate`,
- * actor `agent`, `payload.action` `skills.sync`, `payload.runtime` `skills-sync`, `payload.reason`,
- * no `repo`, `session_id` `skills-sync:<UTC yyyy-mm-ddThh>` — mapping onto the existing
- * `skills.sync.refused` row, so EVENT_SOURCES and the vocabulary doc do not change. The skip-warn
- * payload keeps its September fields (`root`, `name`, `path`, `link_target`) with September's three
- * reasons. The bearer comes from Phase 20's resolver (`resolveBearer("substrate", env)`), never raw
- * `process.env.SUBSTRATE_TOKEN`; posting stays fail-open with a 3 s timeout.
- *
- * Phase 22 (D22-07) seams — production defaults are September's; each has an override so tests and
- * the smoke never touch `/root/agent-skills`, `/root/.*` or `/var/lib/substrate`:
- *   - `SUBSTRATE_SKILLS_LIBRARY` — the library dir (default `/root/agent-skills`);
- *   - `SUBSTRATE_SKILLS_HOME` — the home the roots live under (default `/root`; each root dir and
- *     the exports dir have their leading `/root` replaced, so `/root/.claude/skills` under
- *     `SUBSTRATE_SKILLS_HOME=/tmp/t` becomes `/tmp/t/.claude/skills`);
- *   - `SUBSTRATE_SKILLS_STATE` — the state dir, shared with Phase 21 (default
- *     `/var/lib/substrate/skills`; holds `projector-warned.json` plus the enable/disable flags,
- *     whose defaults are rewritten the same way when the state dir moves);
- *   - `SUBSTRATE_SKILLS_BACKUP` — the backup root (default
- *     `/var/lib/substrate/phase4-baseline/projector`);
- *   - `SUBSTRATE_URL` — the substrate base URL (default `http://127.0.0.1:7410`).
- * Bearer resolution additionally honours `SUBSTRATE_TOKEN`, `SUBSTRATE_TOKEN_FILE` and
- * `SUBSTRATE_TOKENS_DIR` per Phase 20 (`packages/cli/src/token.ts`).
+ * `SUBSTRATE_SKILLS_GOVERNANCE=off|report|enforce` (default off) adds approval gating — see
+ * skills-governance.ts: `report` projects everything and warns once about unapproved skills,
+ * `enforce` holds back NEW links for unapproved skills and never unlinks anything.
  */
 import { createHash } from "node:crypto";
 import {
@@ -65,13 +45,23 @@ import {
 	readlinkSync,
 	renameSync,
 	rmSync,
-	statSync,
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { resolveBearer } from "../../cli/src/token.ts";
 import { SKILL_NAME_RE } from "../../mcp-server/src/skills/propose.ts";
+import {
+	evaluateGovernance,
+	type GovernanceOptions,
+	type GovernanceRun,
+	governanceFromEnv,
+	governancePaths,
+	resolveSurfaceToken,
+	usesHostJobToken,
+	RENOTIFY_MS,
+	reportGovernance,
+	skillsGovernanceConfigWarnings,
+} from "./skills-governance.ts";
 import type { EventInput, Surface } from "../../mcp-server/src/types.ts";
 
 export interface Root {
@@ -130,38 +120,9 @@ export const LIBRARY_DIR = "/root/agent-skills";
 export const EXPORTS_DIR = "/root/.openclaw/workspace/projects/docs-scraper/data/exports/skills";
 export const BACKUP_ROOT = "/var/lib/substrate/phase4-baseline/projector";
 export const WARNED_STATE = "/var/lib/substrate/skills/projector-warned.json";
-/** Phase 21's state dir; shared by the projector warned file, the sync warned file and the flags. */
-export const STATE_DIR_DEFAULT = "/var/lib/substrate/skills";
-const HOME_DEFAULT = "/root";
 const TMP_SUFFIX = ".substrate-tmp";
 const OLD_SUFFIX = ".substrate-old";
-const SUBSTRATE_URL_DEFAULT = "http://127.0.0.1:7410";
-
-/** `skills-sync:<UTC yyyy-mm-ddThh>` — the hourly host-job session every sync/projector event joins. */
-export function syncSessionId(now: Date = new Date()): string {
-	return `skills-sync:${now.toISOString().slice(0, 13)}`;
-}
-
-/** UTC calendar day `yyyy-mm-dd`, the D22-05 daily-reminder key. */
-export function utcDay(now: Date = new Date()): string {
-	return now.toISOString().slice(0, 10);
-}
-
-/**
- * One host-job warning for the skills plane (D22-03): fixed surface `substrate`, actor `agent`,
- * `payload.action` `skills.sync`, `payload.runtime` `skills-sync`, the refusal `reason`, no `repo`.
- * Maps onto the existing `skills.sync.refused` row — no new EVENT_SOURCES row.
- */
-export function hostJobWarning(reason: string, summary: string, extra: Record<string, unknown>, now: Date = new Date()): WarningEvent {
-	return {
-		surface: "substrate",
-		kind: "warning",
-		actor: "agent",
-		summary,
-		session_id: syncSessionId(now),
-		payload: { action: "skills.sync", runtime: "skills-sync", reason, ...extra },
-	};
-}
+const SUBSTRATE_URL = (process.env.SUBSTRATE_URL ?? "http://127.0.0.1:7410").replace(/\/+$/, "");
 
 export type Entry = { type: "link"; target: string } | { type: "dir" } | { type: "other" };
 export interface Inventory {
@@ -204,8 +165,6 @@ export function inventory(root: Root): Inventory {
 	const entries = new Map<string, Entry>();
 	if (!existsSync(root.dir)) return { root, exists: false, entries };
 	for (const d of readdirSync(root.dir, { withFileTypes: true })) {
-		// The projector's own swap files are transient, not skills: neither warned about nor pruned.
-		if (d.name.endsWith(TMP_SUFFIX) || d.name.includes(OLD_SUFFIX)) continue;
 		const path = join(root.dir, d.name);
 		if (d.isSymbolicLink()) entries.set(d.name, { type: "link", target: readlinkSync(path) });
 		else entries.set(d.name, d.isDirectory() ? { type: "dir" } : { type: "other" });
@@ -222,11 +181,6 @@ function isIgnored(name: string): boolean {
 	return name === "__pycache__" || name.endsWith(".pyc");
 }
 
-/** Whether the owner-executable bit is set: direct execution fails when a link swaps it away. */
-function isExecutable(path: string): boolean {
-	return (statSync(path).mode & 0o111) !== 0;
-}
-
 /** Relative path → kind and content key of every entry below dir, skipping __pycache__ and *.pyc. */
 function treeOf(dir: string, rel = "", out = new Map<string, string>()): Map<string, string> {
 	for (const d of readdirSync(join(dir, rel), { withFileTypes: true })) {
@@ -236,7 +190,7 @@ function treeOf(dir: string, rel = "", out = new Map<string, string>()): Map<str
 		else if (d.isDirectory()) {
 			out.set(r, "dir");
 			treeOf(dir, r, out);
-		} else out.set(r, `file:${isExecutable(join(dir, r)) ? "exec" : "noexec"}`);
+		} else out.set(r, "file");
 	}
 	return out;
 }
@@ -248,9 +202,7 @@ export function sameTree(a: string, b: string): boolean {
 	if (ta.size !== tb.size) return false;
 	for (const [rel, kind] of ta) {
 		if (tb.get(rel) !== kind) return false;
-		// `file:exec` / `file:noexec` already disagree when the executable bit
-		// differs. Bytes still have to match, or a same-mode edit looks identical.
-		if (kind.startsWith("file:") && !readFileSync(join(a, rel)).equals(readFileSync(join(b, rel)))) return false;
+		if (kind === "file" && !readFileSync(join(a, rel)).equals(readFileSync(join(b, rel)))) return false;
 	}
 	return true;
 }
@@ -285,15 +237,6 @@ export function plan(
 				if (resolved === target) continue;
 				if (resolved === join(dirs.exportsDir, name)) actions.push({ kind: "repoint", root, name, target, from: entry.target });
 				else actions.push({ kind: "skip-warn", root, name, reason: "foreign-link", from: entry.target });
-			}
-		}
-		// The owner removed or renamed a library skill: drop our link when it still points at
-		// the matching library path. Foreign links and real dirs are left alone.
-		const live = new Set(names);
-		for (const [name, entry] of [...entries].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
-			if (entry.type !== "link" || live.has(name)) continue;
-			if (resolve(root.dir, entry.target) === join(dirs.libraryDir, name)) {
-				actions.push({ kind: "remove-own-link", root, name, from: entry.target });
 			}
 		}
 		if (root.knownReal !== undefined) {
@@ -344,7 +287,7 @@ function filesOf(dir: string, rel = ""): string[] {
 		if (d.isDirectory()) out.push(...filesOf(dir, r));
 		else if (d.isFile()) out.push(r);
 	}
-	return out;
+	return out.sort();
 }
 
 /**
@@ -366,20 +309,6 @@ function backUp(path: string, rootId: string, name: string, backupDir: string): 
 	return dest;
 }
 
-/**
- * The swap path for the backup-then-link rename: the fixed `.substrate-old` name while it is
- * free, otherwise a per-process suffixed name. A pre-existing directory at the fixed name is
- * never deleted — it may hold an interrupted run's real dir or something unrelated.
- */
-function stagingOld(path: string): string {
-	const base = `${path}${OLD_SUFFIX}`;
-	if (!existsSync(base)) return base;
-	for (let n = 1; ; n++) {
-		const candidate = `${base}-${process.pid}-${n}`;
-		if (!existsSync(candidate)) return candidate;
-	}
-}
-
 export async function apply(actions: readonly Action[], ctx: ApplyContext): Promise<ApplyResult> {
 	const restore = join(ctx.backupDir, "RESTORE.md");
 	const ensureBackupDir = (): void => {
@@ -395,20 +324,20 @@ export async function apply(actions: readonly Action[], ctx: ApplyContext): Prom
 		if (action.kind === "skip-warn") {
 			const key = `${action.root.id}:${action.name}:${action.reason}`;
 			if (warned[key]) continue;
-			const accepted = await ctx.emitWarning(
-				hostJobWarning(
-					action.reason,
-					`skills projector left ${path} alone (${action.reason})`,
-					{
-						component: "skills-projector",
-						root: action.root.id,
-						name: action.name,
-						path,
-						...(action.from === undefined ? {} : { link_target: action.from }),
-					},
-				),
-			);
-			// A refused post is not recorded, so the next run retries it.
+			const accepted = await ctx.emitWarning({
+				surface: action.root.surface,
+				kind: "warning",
+				actor: "agent",
+				summary: `skills projector left ${path} alone (${action.reason})`,
+				payload: {
+					component: "skills-projector",
+					root: action.root.id,
+					name: action.name,
+					reason: action.reason,
+					path,
+					...(action.from === undefined ? {} : { link_target: action.from }),
+				},
+			});
 			if (!accepted) continue;
 			warned[key] = new Date().toISOString();
 			emitted++;
@@ -438,9 +367,10 @@ export async function apply(actions: readonly Action[], ctx: ApplyContext): Prom
 					ctx.log(`[projector] ${action.root.id} backup-failed ${action.name}`);
 					continue;
 				}
-				appendFileSync(restore, `rm -f '${path}' && cp -a '${backup}' '${path}'\n`);
-				const old = stagingOld(path);
+				appendFileSync(restore, `rm '${path}' && cp -a '${backup}' '${path}'\n`);
+				const old = `${path}${OLD_SUFFIX}`;
 				rmSync(tmp, { force: true });
+				rmSync(old, { recursive: true, force: true });
 				symlinkSync(action.target, tmp);
 				renameSync(path, old);
 				renameSync(tmp, path);
@@ -448,7 +378,7 @@ export async function apply(actions: readonly Action[], ctx: ApplyContext): Prom
 				break;
 			}
 			default:
-				appendFileSync(restore, action.kind === "repoint" ? `ln -sfn '${action.from}' '${path}'\n` : `rm -f '${path}'\n`);
+				appendFileSync(restore, action.kind === "repoint" ? `ln -sfn '${action.from}' '${path}'\n` : `rm '${path}'\n`);
 				rmSync(tmp, { force: true });
 				symlinkSync(action.target, tmp);
 				renameSync(tmp, path);
@@ -466,21 +396,30 @@ export async function apply(actions: readonly Action[], ctx: ApplyContext): Prom
 }
 
 /**
- * Fail-open POST /events with Phase 20's bearer (D22-04); false when the substrate did not accept it.
- * A refused post never changes the tick's outcome. `env` is injectable so tests prove the resolver
- * order without touching the filesystem.
+ * Fail-open POST /events; false when the substrate did not accept it. The bearer is the one the
+ * governance fetch uses (`resolveSurfaceToken`: the unit's `SUBSTRATE_TOKEN_SUBSTRATE`, then the
+ * generic `SUBSTRATE_TOKEN`, first entry of a list), so the shipped unit's events are not anonymous.
+ *
+ * The unit's token is the `substrate` host-job surface token, and the server refuses (403) an event
+ * that names another surface with it. Posted with that token, an event for a root's surface
+ * (claude-code, grok-build, ...) therefore goes out as `substrate` and keeps the root's surface in
+ * `payload.root_surface`; the root id stays in `payload.root`. With only the generic token (or none)
+ * the event goes out exactly as built.
  */
-export async function postWarning(event: WarningEvent, env: Record<string, string | undefined> = process.env): Promise<boolean> {
+export async function postWarning(event: WarningEvent, env: NodeJS.ProcessEnv = process.env, fetchImpl: typeof fetch = fetch): Promise<boolean> {
+	const token = resolveSurfaceToken(env);
+	const posted: WarningEvent =
+		usesHostJobToken(env) && event.surface !== "substrate"
+			? { ...event, surface: "substrate", payload: { ...event.payload, root_surface: event.surface } }
+			: event;
 	try {
-		const base = (env.SUBSTRATE_URL ?? SUBSTRATE_URL_DEFAULT).replace(/\/+$/, "");
-		const bearer = resolveBearer("substrate", env);
-		const response = await fetch(`${base}/events`, {
+		const response = await fetchImpl(`${SUBSTRATE_URL}/events`, {
 			method: "POST",
 			headers: {
 				"content-type": "application/json",
-				...(bearer ? { authorization: `Bearer ${bearer}` } : {}),
+				...(token === "" ? {} : { authorization: `Bearer ${token}` }),
 			},
-			body: JSON.stringify(event),
+			body: JSON.stringify(posted),
 			signal: AbortSignal.timeout(3000),
 		});
 		return response.ok;
@@ -497,47 +436,57 @@ export interface ProjectOptions {
 	stateFile: string;
 	stdout: (line: string) => void;
 	emitWarning: EmitWarning;
+	/**
+	 * Approval-gated projection (skills-governance.ts). Absent or mode `off`: nothing extra runs, the
+	 * run is byte-identical to the ungoverned projector. `defaultOptions()` reads it from the env.
+	 */
+	governance?: GovernanceOptions;
 }
 
-/** Rewrite `path`'s leading `from` prefix as `to`; untouched when the prefix does not match. */
-function withPrefix(path: string, from: string, to: string): string {
-	if (to === from) return path;
-	return path === from || path.startsWith(`${from}/`) ? `${to}${path.slice(from.length)}` : path;
-}
-
-/**
- * Production defaults with the D22-07 seams applied. `SUBSTRATE_SKILLS_HOME` moves every root dir
- * and the exports dir; `SUBSTRATE_SKILLS_STATE` moves the warned file and the enable/disable flags.
- */
-export function defaultOptions(env: Record<string, string | undefined> = process.env): ProjectOptions {
-	const home = env.SUBSTRATE_SKILLS_HOME?.trim() || HOME_DEFAULT;
-	const stateDir = env.SUBSTRATE_SKILLS_STATE?.trim() || STATE_DIR_DEFAULT;
-	const roots = ROOTS.map((r) => ({
-		...r,
-		dir: withPrefix(r.dir, HOME_DEFAULT, home),
-		...(r.enableFlag === undefined ? {} : { enableFlag: withPrefix(r.enableFlag, STATE_DIR_DEFAULT, stateDir) }),
-		...(r.disableFlag === undefined ? {} : { disableFlag: withPrefix(r.disableFlag, STATE_DIR_DEFAULT, stateDir) }),
-	}));
+export function defaultOptions(): ProjectOptions {
 	return {
-		roots,
-		libraryDir: env.SUBSTRATE_SKILLS_LIBRARY?.trim() || LIBRARY_DIR,
-		exportsDir: withPrefix(EXPORTS_DIR, HOME_DEFAULT, home),
-		backupRoot: env.SUBSTRATE_SKILLS_BACKUP?.trim() || BACKUP_ROOT,
-		stateFile: join(stateDir, "projector-warned.json"),
+		roots: ROOTS,
+		libraryDir: LIBRARY_DIR,
+		exportsDir: EXPORTS_DIR,
+		backupRoot: BACKUP_ROOT,
+		stateFile: WARNED_STATE,
 		stdout: (line) => process.stdout.write(`${line}\n`),
-		emitWarning: (event) => postWarning(event, env),
+		emitWarning: postWarning,
+		governance: governanceFromEnv(),
 	};
 }
 
-function planFor(opts: ProjectOptions): Action[] {
+/**
+ * The planner's actions for this run. With governance on, the approved list is consulted once (a
+ * bounded, fail-open fetch) and in `enforce` the new links for unapproved skills are held back;
+ * `persist` lets the real run refresh the approved cache while `--check` writes nothing.
+ */
+async function planFor(opts: ProjectOptions, persist: boolean): Promise<{ actions: Action[]; governance: GovernanceRun | null; libraryCount: number }> {
 	const names = libraryNames(opts.libraryDir);
 	if (names.length === 0) throw new Error(`no library skills under ${opts.libraryDir}; refusing to project`);
-	return plan(activeRoots(opts.roots).map(inventory), names, opts);
+	const actions = plan(activeRoots(opts.roots).map(inventory), names, opts);
+	const gov = opts.governance;
+	if (gov === undefined || gov.mode === "off") {
+		// A rejected flag value is named once per run; a valid or unset one prints nothing.
+		if (gov !== undefined) for (const line of skillsGovernanceConfigWarnings(gov)) opts.stdout(`[projector] ${line}`);
+		return { actions, governance: null, libraryCount: names.length };
+	}
+	const governance = await evaluateGovernance(gov, names, actions, { cache: governancePaths(opts.stateFile).cache, persist });
+	return { actions: governance?.actions ?? actions, governance, libraryCount: names.length };
 }
 
 /** One projector run: plan, apply, print the totals. Used by the CLI and by skills-sync. */
 export async function project(opts: ProjectOptions): Promise<ApplyResult> {
-	const actions = planFor(opts);
+	const { actions, governance, libraryCount } = await planFor(opts, true);
+	if (governance !== null && opts.governance !== undefined) {
+		await reportGovernance(governance, libraryCount, {
+			warnedFile: governancePaths(opts.stateFile).warned,
+			emitWarning: opts.emitWarning,
+			log: opts.stdout,
+			now: opts.governance.now ?? Date.now,
+			renotifyMs: opts.governance.renotifyMs ?? RENOTIFY_MS,
+		});
+	}
 	const ts = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
 	const result = await apply(actions, {
 		backupDir: join(opts.backupRoot, ts),
@@ -566,7 +515,7 @@ export async function main(args: readonly string[], base: ProjectOptions = defau
 		await project(opts);
 		return 0;
 	}
-	const pending = planFor(opts).filter((a) => a.kind !== "skip-warn");
+	const pending = (await planFor(opts, false)).actions.filter((a) => a.kind !== "skip-warn");
 	if (pending.length === 0) {
 		opts.stdout(`[projector] already current (${activeRoots(opts.roots).map((r) => r.id).join(", ")})`);
 		return 0;

@@ -1,2 +1,2 @@
 #!/bin/sh
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/opt/agent-substrate/current/packages/miner/src exec /usr/bin/python3 -m substrate_miner monitor
+PYTHONPATH=/root/src/repos/agent-substrate/packages/miner/src exec /usr/bin/python3 -m substrate_miner monitor

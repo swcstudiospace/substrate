@@ -111,7 +111,16 @@ export interface HistogramSnapshot {
 	overflowed: number;
 }
 
-export type MetricSnapshot = CounterSnapshot | HistogramSnapshot;
+export interface GaugeSnapshot {
+	kind: "gauge";
+	name: string;
+	description: string;
+	unit: string;
+	points: CounterPoint[];
+	overflowed: number;
+}
+
+export type MetricSnapshot = CounterSnapshot | HistogramSnapshot | GaugeSnapshot;
 
 /**
  * A stable key for an attribute set: keys sorted, values stringified, joined on
@@ -216,7 +225,25 @@ interface InstrumentOptions {
 /** Shared series bookkeeping, including the cardinality cap. */
 abstract class Instrument<S> {
 	protected readonly series = new Map<string, { attributes: Attributes; state: S }>();
+	/**
+	 * Series restored from a prior epoch's checkpoint (uplift-3 N2), merged into
+	 * every snapshot beneath the live ones. Never observed into — `seriesFor`
+	 * only ever touches `series` — and replaced whole by `seedPrior`, never added
+	 * to, so restoring the same checkpoint twice cannot double-count: the live
+	 * epoch starts at zero on top of exactly one prior layer.
+	 *
+	 * Bounded by the **same** caps as the live series, over the union of the two
+	 * layers (`distinct`): a checkpoint seeded without the cap would carry every
+	 * `graph_id` ever seen from epoch to epoch, and the file would grow until the
+	 * next boot refused it (Greptile round 1, PR #61). Restored points past the
+	 * cap fold into the same `_overflow` series a live observation would.
+	 */
+	protected readonly prior = new Map<string, { attributes: Attributes; state: S }>();
+	/** Observations and restored points that collapsed into `_overflow` this epoch; the prior layer's count is kept apart so a re-seed replaces it. */
 	protected overflowed = 0;
+	private priorOverflowed = 0;
+	/** Distinct series across both layers — what the caps bound. A key in both counts once. */
+	private distinct = 0;
 	readonly description: string;
 	readonly unit: string;
 	private readonly maxSeries: number;
@@ -234,6 +261,20 @@ abstract class Instrument<S> {
 
 	protected abstract initial(): S;
 
+	/** Add `from` into `into`: how two restored points of one collapsed series combine. */
+	protected abstract fold(into: S, from: S): void;
+
+	/**
+	 * The attributes a new series is admitted under: its own while there is room,
+	 * the volatile attributes collapsed at the soft cap, everything collapsed at
+	 * the hard ceiling. Shared by the live and the restored path so the bound is
+	 * one rule, not two.
+	 */
+	private placement(attributes: Attributes): { attributes: Attributes; overflow: boolean } {
+		if (this.distinct < this.maxSeries) return { attributes, overflow: false };
+		return { attributes: this.distinct >= this.hardMaxSeries ? collapseAll(attributes) : collapse(attributes), overflow: true };
+	}
+
 	/**
 	 * The series an observation belongs in, creating it if there is room.
 	 *
@@ -247,33 +288,102 @@ abstract class Instrument<S> {
 		const existing = this.series.get(key);
 		if (existing) return existing.state;
 
-		if (this.series.size >= this.maxSeries) {
+		// A series the prior layer already holds is not new: its live half is
+		// created without consulting the cap, so a restored graph keeps its own row.
+		if (this.prior.has(key)) {
+			const created = { attributes, state: this.initial() };
+			this.series.set(key, created);
+			return created.state;
+		}
+
+		const placed = this.placement(attributes);
+		if (placed.overflow) {
 			// Past the hard ceiling nothing new is admitted at all: every observation
 			// folds into the single all-collapsed series. This is what makes the bound a
 			// property of this code rather than a promise each call site has to keep.
-			const attrs = this.series.size >= this.hardMaxSeries ? collapseAll(attributes) : collapse(attributes);
-			const collapsedKey = attributeKey(attrs);
+			this.overflowed++;
+			const collapsedKey = attributeKey(placed.attributes);
 			const found = this.series.get(collapsedKey);
-			if (found) {
-				this.overflowed++;
-				return found.state;
-			}
+			if (found) return found.state;
 			// The collapsed series itself may still be new. Admit it — there are only as
 			// many of those as there are combinations of bounded attributes, and the hard
 			// ceiling above catches the case where an attribute turns out not to be.
-			const created = { attributes: attrs, state: this.initial() };
+			const created = { attributes: placed.attributes, state: this.initial() };
 			this.series.set(collapsedKey, created);
-			this.overflowed++;
+			if (!this.prior.has(collapsedKey)) this.distinct++;
 			return created.state;
 		}
 
 		const created = { attributes, state: this.initial() };
 		this.series.set(key, created);
+		this.distinct++;
 		return created.state;
+	}
+
+	/**
+	 * Replace the prior layer with restored entries, admitted through the same
+	 * cap as live observations: the live series stay distinct, and each restored
+	 * point either keeps its key (room left, or the live layer already holds it)
+	 * or folds into the collapsed series it would have landed in live. The
+	 * prior layer's overflow count is replaced, not added to.
+	 */
+	protected seedPrior(entries: ReadonlyArray<{ attributes: Attributes; state: S }>): void {
+		this.prior.clear();
+		this.priorOverflowed = 0;
+		this.distinct = this.series.size;
+		for (const entry of entries) {
+			const key = attributeKey(entry.attributes);
+			const duplicate = this.prior.get(key);
+			if (duplicate) {
+				this.fold(duplicate.state, entry.state);
+				continue;
+			}
+			if (this.series.has(key)) {
+				this.prior.set(key, entry);
+				continue;
+			}
+			const placed = this.placement(entry.attributes);
+			if (!placed.overflow) {
+				this.prior.set(key, entry);
+				this.distinct++;
+				continue;
+			}
+			this.priorOverflowed++;
+			const collapsedKey = attributeKey(placed.attributes);
+			const found = this.prior.get(collapsedKey);
+			if (found) {
+				this.fold(found.state, entry.state);
+				continue;
+			}
+			this.prior.set(collapsedKey, { attributes: placed.attributes, state: entry.state });
+			if (!this.series.has(collapsedKey)) this.distinct++;
+		}
+	}
+
+	/** Live and restored points that collapsed into `_overflow`, as a snapshot reports it. */
+	protected get overflowedTotal(): number {
+		return this.overflowed + this.priorOverflowed;
 	}
 
 	get seriesCount(): number {
 		return this.series.size;
+	}
+
+	/** Distinct series across the live and prior layers: the number the caps bound. */
+	get distinctCount(): number {
+		return this.distinct;
+	}
+
+	/** Live and prior series by key: the prior state first, the live one merged over it. */
+	protected merged(merge: (prior: S | undefined, live: S | undefined) => S): Array<{ attributes: Attributes; state: S }> {
+		const out: Array<{ attributes: Attributes; state: S }> = [];
+		for (const [key, { attributes, state }] of this.prior) {
+			out.push({ attributes, state: merge(state, this.series.get(key)?.state) });
+		}
+		for (const [key, { attributes, state }] of this.series) {
+			if (!this.prior.has(key)) out.push({ attributes, state: merge(undefined, state) });
+		}
+		return out;
 	}
 }
 
@@ -291,6 +401,10 @@ export class Counter extends Instrument<{ value: number }> {
 		return { value: 0 };
 	}
 
+	protected fold(into: { value: number }, from: { value: number }): void {
+		into.value += from.value;
+	}
+
 	/**
 	 * Add to a series. A negative or non-finite delta is ignored rather than
 	 * thrown: a counter that can go backwards is not a counter, and a bad caller
@@ -301,6 +415,20 @@ export class Counter extends Instrument<{ value: number }> {
 		this.seriesFor(attributes).value += value;
 	}
 
+	/**
+	 * Replace the prior layer with a checkpoint's points (uplift-3 N2), under the
+	 * cardinality cap. Negative or non-finite values are skipped: a counter
+	 * restored from them would read as having gone backwards, which the burn
+	 * ledger and plane window treat as a reset.
+	 */
+	seed(points: readonly CounterPoint[]): void {
+		this.seedPrior(
+			points
+				.filter((point) => Number.isFinite(point.value) && point.value >= 0)
+				.map((point) => ({ attributes: point.attributes, state: { value: point.value } })),
+		);
+	}
+
 	snapshot(): CounterSnapshot {
 		return {
 			kind: "counter",
@@ -308,8 +436,8 @@ export class Counter extends Instrument<{ value: number }> {
 			description: this.description,
 			unit: this.unit,
 			valueType: this.valueType,
-			overflowed: this.overflowed,
-			points: [...this.series.values()].map(({ attributes, state }) => ({
+			overflowed: this.overflowedTotal,
+			points: this.merged((prior, live) => ({ value: (prior?.value ?? 0) + (live?.value ?? 0) })).map(({ attributes, state }) => ({
 				attributes,
 				value: this.valueType === "int" ? Math.round(state.value) : state.value,
 			})),
@@ -345,6 +473,14 @@ export class Histogram extends Instrument<HistogramState> {
 		};
 	}
 
+	protected fold(into: HistogramState, from: HistogramState): void {
+		into.count += from.count;
+		into.sum += from.sum;
+		if (from.min < into.min) into.min = from.min;
+		if (from.max > into.max) into.max = from.max;
+		for (let i = 0; i < into.buckets.length; i++) into.buckets[i] = (into.buckets[i] ?? 0) + (from.buckets[i] ?? 0);
+	}
+
 	record(value: number, attributes: Attributes = {}): void {
 		if (!Number.isFinite(value) || value < 0) return;
 		const state = this.seriesFor(attributes);
@@ -359,15 +495,52 @@ export class Histogram extends Instrument<HistogramState> {
 		state.buckets[index] = (state.buckets[index] ?? 0) + 1;
 	}
 
+	/**
+	 * Replace the prior layer with a checkpoint's points (uplift-3 N2), under the
+	 * cardinality cap. A point whose bucket count does not match these bounds is
+	 * skipped: its counts belong to another edge set and would land in the
+	 * wrong buckets.
+	 */
+	seed(points: readonly HistogramPoint[]): void {
+		this.seedPrior(
+			points
+				.filter(
+					(point) =>
+						point.bucketCounts.length === this.bounds.length + 1 &&
+						Number.isFinite(point.count) &&
+						point.count >= 0 &&
+						Number.isFinite(point.sum) &&
+						point.bucketCounts.every((n) => Number.isFinite(n) && n >= 0),
+				)
+				.map((point) => ({
+					attributes: point.attributes,
+					state: {
+						count: point.count,
+						sum: point.sum,
+						min: point.count === 0 ? Number.POSITIVE_INFINITY : point.min,
+						max: point.count === 0 ? Number.NEGATIVE_INFINITY : point.max,
+						buckets: [...point.bucketCounts],
+					},
+				})),
+		);
+	}
+
 	snapshot(): HistogramSnapshot {
+		const empty = this.initial();
 		return {
 			kind: "histogram",
 			name: this.name,
 			description: this.description,
 			unit: this.unit,
 			bounds: this.bounds,
-			overflowed: this.overflowed,
-			points: [...this.series.values()].map(({ attributes, state }) => ({
+			overflowed: this.overflowedTotal,
+			points: this.merged((prior = empty, live = empty) => ({
+				count: prior.count + live.count,
+				sum: prior.sum + live.sum,
+				min: Math.min(prior.min, live.min),
+				max: Math.max(prior.max, live.max),
+				buckets: prior.buckets.map((n, i) => n + (live.buckets[i] ?? 0)),
+			})).map(({ attributes, state }) => ({
 				attributes,
 				count: state.count,
 				sum: state.sum,
@@ -509,6 +682,59 @@ export function quantileFromBuckets(
 }
 
 /**
+ * The latest value of one reading, with no attributes. Not cumulative: it
+ * reports whatever was last set or observed, which is why it never rides a checkpoint.
+ */
+export class Gauge {
+	private value: number | null = null;
+	/** Computes the reading at snapshot time; replaces `set` when installed (`null` means no reading yet). */
+	observe: (() => number | null) | null = null;
+	readonly description: string;
+	readonly unit: string;
+
+	constructor(
+		readonly name: string,
+		options: InstrumentOptions = {},
+	) {
+		this.description = options.description ?? "";
+		this.unit = options.unit ?? "";
+	}
+
+	/** Replace the reading. A non-finite value is ignored: a bad caller must not be able to fail what it is instrumenting. */
+	set(value: number): void {
+		if (Number.isFinite(value)) this.value = value;
+	}
+
+	/**
+	 * The current reading: the observer's answer when one is installed (computed
+	 * now, at snapshot time, so an export that nobody else triggers is never
+	 * stale), else the last `set`. A throwing or non-finite observer reads as no
+	 * point — a gauge must not be able to fail the export that reads it.
+	 */
+	private current(): number | null {
+		if (this.observe === null) return this.value;
+		try {
+			const observed = this.observe();
+			return observed !== null && Number.isFinite(observed) ? observed : null;
+		} catch {
+			return null;
+		}
+	}
+
+	snapshot(): GaugeSnapshot {
+		const value = this.current();
+		return {
+			kind: "gauge",
+			name: this.name,
+			description: this.description,
+			unit: this.unit,
+			overflowed: 0,
+			points: value === null ? [] : [{ attributes: {}, value }],
+		};
+	}
+}
+
+/**
  * Every instrument the process owns, plus the process start time.
  *
  * `startedAt` is the `start_time_unix_nano` every cumulative point carries: it is
@@ -518,6 +744,7 @@ export function quantileFromBuckets(
 export class MetricRegistry {
 	private readonly counters = new Map<string, Counter>();
 	private readonly histograms = new Map<string, Histogram>();
+	private readonly gauges = new Map<string, Gauge>();
 
 	constructor(readonly startedAt: number = Date.now()) {}
 
@@ -537,11 +764,61 @@ export class MetricRegistry {
 		return created;
 	}
 
+	/**
+	 * One observed value (uplift-4 S2), created on first use so a process that
+	 * never sets it carries no extra series. A gauge is a reading, not history:
+	 * it is not checkpointed and not seeded across restarts.
+	 */
+	gauge(name: string, options: InstrumentOptions = {}): Gauge {
+		const existing = this.gauges.get(name);
+		if (existing) return existing;
+		const created = new Gauge(name, options);
+		this.gauges.set(name, created);
+		return created;
+	}
+
 	snapshot(): MetricSnapshot[] {
 		return [
 			...[...this.counters.values()].map((instrument) => instrument.snapshot()),
 			...[...this.histograms.values()].map((instrument) => instrument.snapshot()),
+			...[...this.gauges.values()].map((instrument) => instrument.snapshot()),
 		];
+	}
+
+	/**
+	 * Seed every instrument's prior layer from a snapshot a previous epoch wrote
+	 * (uplift-3 N2). Only instruments this registry already owns are seeded — a
+	 * metric the running release no longer records has no description or unit
+	 * to be created with — and a histogram whose bounds differ is skipped whole,
+	 * since its bucket counts would land on the wrong edges. The names left out
+	 * are returned so the caller can say so once.
+	 */
+	seed(
+		prior: ReadonlyArray<
+			| { kind: "counter"; name: string; points: readonly CounterPoint[] }
+			| { kind: "histogram"; name: string; bounds: readonly number[]; points: readonly HistogramPoint[] }
+		>,
+	): string[] {
+		const skipped: string[] = [];
+		for (const metric of prior) {
+			if (metric.kind === "counter") {
+				const counter = this.counters.get(metric.name);
+				if (!counter) skipped.push(metric.name);
+				else counter.seed(metric.points);
+				continue;
+			}
+			const histogram = this.histograms.get(metric.name);
+			if (
+				!histogram ||
+				histogram.bounds.length !== metric.bounds.length ||
+				!histogram.bounds.every((bound, i) => bound === metric.bounds[i])
+			) {
+				skipped.push(metric.name);
+				continue;
+			}
+			histogram.seed(metric.points);
+		}
+		return skipped;
 	}
 }
 

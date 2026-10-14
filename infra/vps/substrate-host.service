@@ -1,0 +1,94 @@
+# substrate-host.service — STAGED ONLY (Phase 31).
+#
+# Install/restart is OPERATOR-GATED G4: the executor stops at the gated tail and
+# never runs `systemctl enable --now substrate-host`. Staging means this file
+# exists in the repo; installing means the operator copies it to
+# /etc/systemd/system and restarts. The manifest row stays `dormant:31` until
+# that gated restart — NOT in this phase's PR.
+#
+# Ported from September (acc30a8) P-15 with the spike-decided engine env
+# (D31-04): G2 has no verdict, so the unit shares the existing loopback engine
+# on 127.0.0.1:6420 (UNVERIFIED) and MUST NOT set RIVET_RUN_ENGINE=1 — spawning
+# an owned engine would collide with the other project's container on 6420.
+# A recorded G2 fallback (second loopback engine) changes the three ENGINE
+# lines below, not the code.
+[Unit]
+Description=Agent Substrate — host (agentOS VMs for dispatch:claude-code)
+Documentation=https://github.com/swcstudiospace/agent-substrate
+After=substrate-mcp.service network-online.target docker.service
+Wants=substrate-mcp.service
+# substrate-mcp, Docker or the engine may be briefly unavailable at boot; that is not a reason to
+# give up. This key only takes effect in [Unit] — systemd ignores it under [Service].
+StartLimitIntervalSec=0
+# A missing entry point skips the start silently instead of crash-looping
+# (Phase 16 convention: the pinned release, not the checkout — the release is
+# a full git archive, so the host sources ship with it; September reached
+# NRestarts=114888 on an empty path).
+ConditionPathExists=/opt/agent-substrate/current/packages/host/src/main.ts
+
+[Service]
+Type=simple
+# Credentials for the host only (D-08): names SUBSTRATE_TOKEN_SUBSTRATE — the value lives
+# with the operator in /etc/substrate/substrate-host.env, never in the repo. Nothing from
+# this file is copied into a VM except, on route a:anthropic_key,
+# SUBSTRATE_VM_ANTHROPIC_API_KEY as the session's model auth.
+EnvironmentFile=/etc/substrate/substrate-host.env
+Environment=HOME=/root
+# Engine: shared loopback engine (31-SPIKE.md G2 UNVERIFIED). No RIVET_RUN_ENGINE=1.
+Environment=SUBSTRATE_ENGINE_ENDPOINT=http://127.0.0.1:6420
+Environment=RIVET_RUN_ENGINE_HOST=127.0.0.1
+Environment=RIVETKIT_STORAGE_PATH=/var/lib/substrate/agentos
+# Route and sandbox facts from .planning/phases/31-lane-a-runtime/31-SPIKE.md
+# (route_choice, sandbox_net, hostfn_sandbox_collection, tests_route).
+# A re-spike changes these lines, not the code.
+Environment=SUBSTRATE_HOST_ROUTE=a:loopback,b:prompt_hostfn,c:hostfn_commit,s:hostfn
+Environment=SUBSTRATE_HOST_MODEL=grok-4.6
+Environment=SUBSTRATE_SANDBOX_NET=published_loopback
+Environment=SUBSTRATE_SANDBOX_HOSTFN=sandbox
+Environment=SUBSTRATE_TESTS_ROUTE=sandbox
+Environment=SUBSTRATE_HOST_PORT=7411
+# The pinned release (doctor-units convention: every unit runs from
+# /opt/agent-substrate/current; 31-03 main.ts derives the checkout from its
+# own location, so the release tree works without an env override).
+WorkingDirectory=/opt/agent-substrate/current
+# Machine-specific: `command -v node` (Node 24 runs the .ts sources by type stripping). Adjust when deploying elsewhere.
+ExecStart=/usr/bin/node packages/host/src/main.ts
+Restart=always
+RestartSec=5
+# Stopping the unit disposes every VM (sandbox containers included); 15 s before SIGKILL.
+TimeoutStopSec=15
+# SIGTERM reaches main.ts first (SIGINT/SIGTERM → beginShutdown): in-flight prompts keep
+# their records so the next boot resumes them. Never shorten this below the model-relay
+# drain or set KillMode such that SIGKILL precedes the handler.
+
+# VM storage, task records and (via substrate-dispatcher) the worktrees live under /var/lib/substrate.
+# 32-02 layout: <state>/agentos/tasks holds one 0600 JSON per task, <state>/agentos/leases
+# the sibling 0600 lease files — both persist restarts under StateDirectory=substrate, and the
+# tasks dir never holds lease files (TaskStore.list reads every *.json it finds).
+StateDirectory=substrate
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=substrate-host
+
+# Resource ceilings (uplift-2 R7). The host's cgroup covers the Node process
+# and the VM/sandbox lifecycle it drives (containers run under docker's own
+# cgroup); 4G is the budget for a few concurrent prompts on a 31 GiB host.
+# substrate-mcp itself peaks at 88 MB RSS (measured 2026-10-13). Lives in
+# substrate.slice (MemoryLow=2G) so reclaim hits co-tenants first.
+# Restart=always above recovers an OOM kill.
+Slice=substrate.slice
+MemoryMax=4G
+TasksMax=1024
+
+# It listens on loopback, talks to substrate-mcp, the engine and the Docker socket (AF_UNIX). Nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

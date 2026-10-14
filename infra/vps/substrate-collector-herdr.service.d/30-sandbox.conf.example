@@ -1,0 +1,88 @@
+# substrate-collector-herdr.service sandbox drop-in (uplift-5 U5-2). AN EXAMPLE: the `.example` suffix keeps it out of
+# every `*.conf` reader (systemd, doctor-units.ts, doctor-runtime.ts), and nothing in this repo
+# installs it. It is operator-installed, in its own window, after the transient test below.
+# See docs/runbooks/vps-hardening.md for the class rationale and the full procedure.
+#
+# sandbox-class: B
+# exposure-ceiling: 6.0
+#
+# Purpose: take the herdr runtime collector from the shipped 8.1 EXPOSED (`systemd-analyze security`) to
+#   about 5.5 by ending its access to what it does not use. Measured offline with `systemd-analyze security
+#   --offline=true` (systemd 255): 5.5. The shipped hardening block of the base unit stays; this file only
+#   adds directives.
+# Class B: it writes inside operator checkouts or tool homes under /root, so ProtectHome=false
+# STAYS and ReadWritePaths= lists exactly what it needs. ProtectSystem=strict still makes /usr,
+# /etc, /boot, /opt and /srv read-only. User= stays unset (root).
+#
+# Writes: /var/lib/substrate (StateDirectory=substrate: herdr-offsets.json). It only CONNECTS to
+#   $HOME/.config/herdr/herdr.sock (collectors/src/herdr.ts:47-56); the directory is listed so a socket that
+#   needs write permission on its directory does not make this a mystery failure.
+# Reads: the herdr socket under /root/.config/herdr, /opt/agent-substrate/current and the bun binary under
+#   /root.
+# ReadWritePaths: Remove the line if a transient test shows the collector works without it (connecting to a
+#   socket on a read-only mount normally succeeds).
+#
+# Directive reasons (the shared rationale and every REJECTED directive are in the runbook):
+#  - ProtectKernelModules/ProtectKernelLogs/ProtectClock/ProtectHostname: no unit loads modules, reads
+#    dmesg, sets the clock or renames the host.
+#  - LockPersonality/RestrictRealtime/RestrictSUIDSGID: no unit changes its ABI personality, takes a
+#    realtime class or creates setuid files.
+#  - SystemCallArchitectures=native: bun, node and python3 are native binaries of the host architecture.
+#  - RestrictNamespaces=true: nothing here unshares a namespace.
+#  - CapabilityBoundingSet=~...: a DENY list that keeps CAP_DAC_OVERRIDE, CAP_DAC_READ_SEARCH, CAP_FOWNER,
+#    CAP_CHOWN, CAP_SETUID/GID and CAP_KILL (an empty or allow-list set was rejected, see the runbook).
+#
+# Test first, as a transient unit (changes no unit file; the properties are the drop-in's below). The state
+# directory (when there is one) is a THROWAWAY name on purpose: never put StateDirectory=substrate in a
+# transient unit, systemd would re-apply its default 0755 mode to the shared /var/lib/substrate (audit chain).
+#
+#   systemd-run --pipe --wait --collect \
+#     -p ProtectSystem=strict \
+#     -p ProtectHome=false \
+#     -p ProtectKernelModules=true \
+#     -p ProtectKernelLogs=true \
+#     -p ProtectClock=true \
+#     -p ProtectHostname=true \
+#     -p LockPersonality=true \
+#     -p RestrictRealtime=true \
+#     -p RestrictSUIDSGID=true \
+#     -p RestrictNamespaces=true \
+#     -p SystemCallArchitectures=native \
+#     -p 'CapabilityBoundingSet=~CAP_SYS_RAWIO CAP_SYS_BOOT CAP_SYS_PACCT CAP_SYS_TTY_CONFIG CAP_LINUX_IMMUTABLE CAP_BPF CAP_SYSLOG CAP_BLOCK_SUSPEND CAP_AUDIT_CONTROL CAP_AUDIT_READ CAP_AUDIT_WRITE CAP_LEASE CAP_MAC_ADMIN CAP_MAC_OVERRIDE' \
+#     -p ReadWritePaths=-/root/.config/herdr \
+#     -p StateDirectory=u5-sandbox-test \
+#     /bin/sh -c '/root/.local/share/reflex/bun/bin/bun --version && test -w /root/.config/herdr && ! test -w /usr && test -w /var/lib/u5-sandbox-test'
+#
+# Afterwards remove the throwaway directory:
+#   rm -rf /var/lib/u5-sandbox-test
+#
+# Success prints the version and exits 0. Failure looks like: `Read-only file system` or `Permission
+# denied` naming a path (add it to ReadWritePaths= only if the unit really writes there), exit status
+# 226/NAMESPACE (a ReadWritePaths= path without a `-` prefix is missing), 218/CAPABILITIES (a denied capability is needed)
+# or the process killed by SIGSYS (a non-native syscall architecture).
+#
+# Install (nothing below runs unless the operator runs it):
+#
+#   install -d -m 0755 /etc/systemd/system/substrate-collector-herdr.service.d
+#   install -m 0644 infra/vps/substrate-collector-herdr.service.d/30-sandbox.conf.example \
+#     /etc/systemd/system/substrate-collector-herdr.service.d/30-sandbox.conf
+#   systemctl daemon-reload && systemctl restart substrate-collector-herdr.service
+#   bun scripts/doctor-runtime.ts   # the exposure and sandbox rows for this unit
+#
+# Rollback: rm /etc/systemd/system/substrate-collector-herdr.service.d/30-sandbox.conf
+#   then `systemctl daemon-reload` and `systemctl restart substrate-collector-herdr.service`. Back to the base unit.
+
+[Service]
+ProtectSystem=strict
+ProtectHome=false
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectClock=true
+ProtectHostname=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=~CAP_SYS_RAWIO CAP_SYS_BOOT CAP_SYS_PACCT CAP_SYS_TTY_CONFIG CAP_LINUX_IMMUTABLE CAP_BPF CAP_SYSLOG CAP_BLOCK_SUSPEND CAP_AUDIT_CONTROL CAP_AUDIT_READ CAP_AUDIT_WRITE CAP_LEASE CAP_MAC_ADMIN CAP_MAC_OVERRIDE
+ReadWritePaths=-/root/.config/herdr

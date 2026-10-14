@@ -250,7 +250,9 @@ summed request counts (sum of point `value` fields), not point counts.
 
 | Date (UTC) | identity:check | stranded live clients | unattributed 4xx at restart | unattributed 4xx after soak |
 | --- | --- | --- | --- | --- |
-| | | | | |
+| 2026-10-10 | PASS — names-only live, `--values` on the staged file pre-promote | 0 | 0 | 3 (dormant roster — skills-sync/bridge/miner/anchor attempts; every live surface clean 2xx) |
+
+Window 2026-10-10 14:23–15:00Z: switch-on 14:22Z (staged env promoted, one restart, `parity:check` PASS); 2xx by surface at soak close — claude-code 23, muse 14 (writer ticks), omp 14 (herdr per-event), cursor 1; hermes/grok-build/grok-bot idle in window (no prompts). Cache side: loopback redis, `connected:true`, 0 errors.
 
 ## Rollback
 
@@ -343,3 +345,22 @@ The operator, in an approved window: generates every value with the
 command above; writes the client files and env entries; runs the values
 check; adds the server variables and restarts once; reads the metrics
 evidence; rotates and rolls back as above.
+
+## Phase 24 live tail (OPERATOR-GATED — staged, not applied)
+
+> OPERATOR-GATED: the phase PR stages the dispatcher unit and its docs;
+> every step below waits for explicit operator approval in its own window,
+> after the DISP-08 proof in `docs/runbooks/dispatch-proof.md` completes.
+
+1. Provision `/etc/substrate/substrate-dispatcher.env`
+   (`SUBSTRATE_TOKEN_SUBSTRATE`, `LINEAR_API_KEY`,
+   `SUBSTRATE_DISPATCH_DISABLED=1`).
+2. Deploy this phase's code; restart `substrate-mcp` only if the release
+   script requires it.
+3. Run `docs/runbooks/dispatch-proof.md` verbatim in a bounded
+   kill-switch-off window, ending with the switch back to `1`.
+4. Restart `substrate-dispatcher.service`, then retire the `dormant:24`
+   expected-401 count on the `dispatcher` row above and flip the manifest
+   row `dormant:24` → `live`. The count delta is staged here, applied only
+   after the gated restart — the row above still reads `dormant:24` until
+   then.

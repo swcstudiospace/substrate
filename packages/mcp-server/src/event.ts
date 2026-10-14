@@ -46,6 +46,84 @@ function isKind(value: string): value is SubstrateEvent["kind"] {
 export class InvalidEventError extends Error {}
 
 /**
+ * Idempotent replay (U5-4a). The contract is `docs/greptime-ledger.md` § Idempotent replay.
+ *
+ * A key is 8-128 characters of `[A-Za-z0-9._:-]`. The alphabet is the reason the ledger lookup can
+ * embed it in a `LIKE` pattern without quoting trouble: no quote, backslash or `%` can appear.
+ */
+export const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{8,128}$/;
+
+/** The reserved payload key a stored idempotency key lives under. Callers can never set it: it is stripped first. */
+export const IDEMPOTENCY_PAYLOAD_KEY = "_ik";
+
+/** A replay stamped further than this past the server's clock is refused: a client clock that far ahead is a bug, not a late replay. */
+export const REPLAY_MAX_FUTURE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The closed set of rule names an idempotency refusal carries, so a client (and the replay
+ * counter) can tell them apart without parsing prose. The message never quotes the caller's
+ * value: an invalid key is arbitrary text.
+ */
+export const IDEMPOTENCY_RULES = ["idempotency_key_type", "idempotency_key_format", "replay_ts_missing", "replay_ts_future"] as const;
+export type IdempotencyRule = (typeof IDEMPOTENCY_RULES)[number];
+
+/** A 400 on the idempotency rules. Still an `InvalidEventError`, so every existing 400 path handles it. */
+export class IdempotencyRefusal extends InvalidEventError {
+	constructor(
+		readonly rule: IdempotencyRule,
+		detail: string,
+	) {
+		super(`${rule}: ${detail}`);
+	}
+}
+
+/**
+ * The key a request carries: `null` when it carries none (`undefined` or JSON `null`), the key when
+ * it is well formed, a refusal otherwise. Only called when the mode is not `off`.
+ */
+export function checkIdempotencyKey(raw: unknown): string | null {
+	if (raw === undefined || raw === null) return null;
+	if (typeof raw !== "string") throw new IdempotencyRefusal("idempotency_key_type", "idempotency_key must be a string");
+	if (!IDEMPOTENCY_KEY_PATTERN.test(raw)) {
+		throw new IdempotencyRefusal("idempotency_key_format", "idempotency_key must be 8-128 characters from A-Z a-z 0-9 . _ : -");
+	}
+	return raw;
+}
+
+/**
+ * The `ts` rules of a replay-marked request. Only called when the mode is not `off` and the request
+ * is marked.
+ *
+ * A keyed replay MUST carry the original attempt's `ts`: the lookup matches the exact normalised
+ * `ts`, and `normalizeEvent` would stamp a missing one with the server's clock, so such a replay
+ * could never match and would append a duplicate while looking like a normal miss. Missing is
+ * whatever `normalizeEvent` treats as absent (any falsy `ts`). A marker without a key has nothing to
+ * match, so it is held only to the future bound.
+ *
+ * The future bound reads `ts` the way `normalizeEvent` does for the two types a client sends — a
+ * string or a JSON number, both through `new Date(ts)` — so a numeric far-future `ts` cannot slip
+ * past it. Other types and unparseable values pass here: they are the ordinary `invalid ts`
+ * refusal `normalizeEvent` raises.
+ */
+export function checkReplayTs(ts: unknown, now: number, keyed: boolean): void {
+	if (!ts) {
+		if (keyed) throw new IdempotencyRefusal("replay_ts_missing", "a replay must carry the original attempt's ts");
+		return;
+	}
+	if (typeof ts !== "string" && typeof ts !== "number") return;
+	const at = new Date(ts).getTime();
+	if (Number.isNaN(at)) return;
+	if (at > now + REPLAY_MAX_FUTURE_MS) {
+		throw new IdempotencyRefusal("replay_ts_future", "a replay's ts may not be more than 24 hours in the future");
+	}
+}
+
+/** What `normalizeEvent` needs when the idempotency mode is not `off`: the validated key, or `null` for none. */
+export interface EventIdempotency {
+	key: string | null;
+}
+
+/**
  * Caps on a single event, so one runaway collector cannot flood a log that
  * nothing will ever compact or delete.
  */
@@ -112,6 +190,33 @@ function normalizePayload(payload: Record<string, unknown> | undefined): Record<
 	return { _dropped: `payload exceeded ${MAX_PAYLOAD_BYTES} bytes`, _bytes: bytes };
 }
 
+/** A caller's payload without the reserved `_ik`. Anything that is not a plain object is left for `normalizePayload` as it always was. */
+function withoutReservedKey(payload: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+	if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return payload;
+	if (!Object.hasOwn(payload, IDEMPOTENCY_PAYLOAD_KEY)) return payload;
+	const { [IDEMPOTENCY_PAYLOAD_KEY]: _ignored, ...rest } = payload;
+	return rest;
+}
+
+/**
+ * The stored payload. Under `off` (`idempotency` absent) this is `normalizePayload` and nothing
+ * else, byte for byte. Otherwise a caller-supplied `_ik` is stripped first and never trusted, and
+ * a valid key is added AFTER the payload is redacted and capped: it is server-validated text from a
+ * 128-character alphabet, so redaction has nothing to find, and a payload replaced for its size
+ * (`_dropped`) must still carry the key or its replay would append a second row. It is always the
+ * LAST key, which is what lets the ledger lookup anchor its pattern at the end of the stored text
+ * and so never match a nested `_ik` a caller buried in the payload. It adds at most ~140 bytes
+ * beyond the payload cap.
+ */
+function normalizedPayload(input: EventInput, idempotency: EventIdempotency | undefined): Record<string, unknown> {
+	if (idempotency === undefined) return normalizePayload(input.payload);
+	const payload = normalizePayload(withoutReservedKey(input.payload));
+	if (idempotency.key === null) return payload;
+	// A scalar or array payload is wrong on the wire but stored today as given; spreading it would scramble it.
+	if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return { _payload: payload, [IDEMPOTENCY_PAYLOAD_KEY]: idempotency.key };
+	return { ...payload, [IDEMPOTENCY_PAYLOAD_KEY]: idempotency.key };
+}
+
 /**
  * Validate, redact and chain an incoming event.
  *
@@ -121,7 +226,7 @@ function normalizePayload(payload: Record<string, unknown> | undefined): Record<
  * or a session id is agent-supplied too, and there is no second chance once a
  * row is in an append-only log.
  */
-export function normalizeEvent(input: EventInput, prev: string | null): SubstrateEvent {
+export function normalizeEvent(input: EventInput, prev: string | null, idempotency?: EventIdempotency): SubstrateEvent {
 	if (!input || typeof input !== "object") throw new InvalidEventError("event must be an object");
 	if (typeof input.surface !== "string" || !isSurface(input.surface)) {
 		throw new InvalidEventError(`unknown surface: ${String(input.surface)}`);
@@ -151,7 +256,7 @@ export function normalizeEvent(input: EventInput, prev: string | null): Substrat
 		actor: input.actor === "human" ? "human" : "agent",
 		kind: input.kind,
 		summary: clean(input.summary, MAX_SUMMARY) ?? "",
-		payload: normalizePayload(input.payload),
+		payload: normalizedPayload(input, idempotency),
 		prev,
 	};
 

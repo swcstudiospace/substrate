@@ -13,6 +13,7 @@
  * failing open; this does not.
  */
 import { normalizeIdentifier } from "./event.ts";
+import { TERMINAL_GRAPH_STATUSES } from "./index-sweep.ts";
 import {
 	MEMORY_KINDS,
 	MEMORY_SCOPE_CLASSES,
@@ -20,6 +21,7 @@ import {
 	SURFACES,
 	type Actor,
 	type ConflictStrategy,
+	type MemoryEntry,
 	type MemoryKind,
 	type MemoryScope,
 	type MemoryScopeClass,
@@ -321,4 +323,88 @@ export function resolveTrust(request: {
 /** An `actor: "human"` claim is provenance, so it needs a reviewer's token too. */
 export function resolveActor(requested: Actor | undefined, reviewed: boolean): Actor {
 	return reviewed && requested === "human" ? "human" : "agent";
+}
+
+// ── lifetime ─────────────────────────────────────────────────────────────────
+
+/** The `30d` class, fixed by its name: `created` plus thirty days, the same span the sweeper's cutoff uses. */
+export const MEMORY_TTL_30D_MS = 30 * DAY_MS;
+
+/** Why an entry is past its lifetime; null while it is not. */
+export type MemoryExpiryReason = "30d" | "graph-terminal" | "graph-unindexed";
+
+export interface MemoryExpiry {
+	expired: boolean;
+	/** The instant a `30d` entry expires, ISO. Null for `graph` — its end is an event, not a time — and `permanent`. */
+	expires_at: string | null;
+	reason: MemoryExpiryReason | null;
+}
+
+/** What `graph_index` holds for a graph: its status, which a row registered without one carries as null. */
+export interface GraphLifetime {
+	status: string | null;
+}
+
+const NOT_EXPIRED: MemoryExpiry = { expired: false, expires_at: null, reason: null };
+const GRAPH_SCOPE_PREFIX = "graph:";
+
+/** Exactly the sweeper's list, so a graph the sweep would retire is one whose entries have expired. */
+export function isTerminalGraphStatus(status: string | null | undefined): boolean {
+	return typeof status === "string" && (TERMINAL_GRAPH_STATUSES as readonly string[]).includes(status);
+}
+
+/**
+ * The graph a `ttl: graph` entry lives as long as: its `graph_id`, or the id of
+ * a `graph:` scope when the write named none. Both are stored normalised, so the
+ * scope's tail is the same spelling `graph_index` keys on. An entry with neither
+ * is tied to no graph at all, and `memoryExpiry` treats it as one whose graph is
+ * not indexed — the sweeper's `entries-ttl-graph` class already counts it so.
+ */
+export function memoryGraphId(entry: Pick<MemoryEntry, "scope" | "graph_id">): string | null {
+	if (entry.graph_id) return entry.graph_id;
+	if (!entry.scope.startsWith(GRAPH_SCOPE_PREFIX)) return null;
+	const id = entry.scope.slice(GRAPH_SCOPE_PREFIX.length);
+	return id.length > 0 ? id : null;
+}
+
+/**
+ * Whether an entry is past the lifetime its `ttl` promised (uplift-3 N4, BP-5.3).
+ *
+ * This is retention, not trust: `needsReverification` says an entry must be
+ * checked before it is acted on; this says it should no longer be served at all.
+ * One predicate, pure, so the brief, `memory_search`, the retain forward and the
+ * sweeper cannot disagree about which entries are dead — which is what kept the
+ * two `entries-ttl-*` sweep classes report-only.
+ *
+ *   - `30d` expires at `created + 30 days`, inclusive, and says when.
+ *   - `graph` expires the moment its graph is finished (a status in
+ *     `TERMINAL_GRAPH_STATUSES`) or is no longer in `graph_index` at all — the
+ *     sweeper may have retired it, or it was never registered. `graph` is what
+ *     the caller looked up for `memoryGraphId(entry)`: null means no row. An
+ *     indexed graph with a null status is open, as `openGraphs` reads it.
+ *   - `permanent` never expires. Neither does a `ttl` nobody defined, nor an
+ *     entry whose `created` cannot be parsed: a row we cannot date or classify is
+ *     not one to hide on the strength of the gap.
+ *
+ * The mode — serve-and-tag or hide — is the caller's (`SUBSTRATE_MEMORY_EXPIRY`);
+ * this only answers the question.
+ */
+export function memoryExpiry(
+	entry: Pick<MemoryEntry, "ttl" | "created">,
+	graph: GraphLifetime | null,
+	now = Date.now(),
+): MemoryExpiry {
+	if (entry.ttl === "30d") {
+		const created = Date.parse(entry.created);
+		if (!Number.isFinite(created)) return NOT_EXPIRED;
+		const at = created + MEMORY_TTL_30D_MS;
+		const expired = at <= now;
+		return { expired, expires_at: new Date(at).toISOString(), reason: expired ? "30d" : null };
+	}
+	if (entry.ttl === "graph") {
+		if (graph === null) return { expired: true, expires_at: null, reason: "graph-unindexed" };
+		if (isTerminalGraphStatus(graph.status)) return { expired: true, expires_at: null, reason: "graph-terminal" };
+		return NOT_EXPIRED;
+	}
+	return NOT_EXPIRED;
 }

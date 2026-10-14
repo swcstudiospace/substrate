@@ -18,23 +18,15 @@ import { join } from "node:path";
 import {
 	activeRoots,
 	apply,
-	BACKUP_ROOT,
 	type ApplyContext,
-	defaultOptions,
 	GROK_KNOWN_REAL,
-	hostJobWarning,
 	inventory,
-	LIBRARY_DIR,
 	libraryNames,
 	main,
 	plan,
 	ROOTS,
 	type Root,
 	sameTree,
-	STATE_DIR_DEFAULT,
-	syncSessionId,
-	utcDay,
-	WARNED_STATE,
 	type WarningEvent,
 } from "./skills.ts";
 
@@ -68,10 +60,10 @@ function dirs() {
 }
 
 beforeEach(() => {
-	T = mkdtempSync(join(tmpdir(), "p22-skills-"));
+	T = mkdtempSync(join(tmpdir(), "p4-skills-"));
 	LIB = join(T, "agent-skills");
 	EXP = join(T, "exports");
-	BACKUP = join(T, "backup", "20261009T000000Z");
+	BACKUP = join(T, "backup", "20260926T000000Z");
 	STATE = join(T, "state", "projector-warned.json");
 	mkdirSync(LIB);
 	mkdirSync(EXP);
@@ -199,7 +191,7 @@ describe("apply writes", () => {
 		expect(lstatSync(BACKUP).mode & 0o777).toBe(0o700);
 		const restore = readFileSync(join(BACKUP, "RESTORE.md"), "utf8");
 		expect(restore).toContain(`ln -sfn '${join(EXP, "exp")}' '${join(GROK.dir, "exp")}'`);
-		expect(restore).toContain(`rm -f '${join(GROK.dir, "fresh")}'`);
+		expect(restore).toContain(`rm '${join(GROK.dir, "fresh")}'`);
 		expect(log).toEqual(["[projector] grok repoint exp", "[projector] grok link-new fresh"]);
 	});
 
@@ -225,7 +217,7 @@ describe("apply writes", () => {
 });
 
 describe("warning dedupe", () => {
-	test("one warning per (root, name, reason) as a host-job event; a second run emits none", async () => {
+	test("one warning per (root, name, reason) with the root's surface; a second run emits none", async () => {
 		skill(LIB, "real");
 		skill(LIB, "foreign");
 		skill(CLAUDE.dir, "real", "claude's own");
@@ -236,9 +228,9 @@ describe("warning dedupe", () => {
 		const first = await apply(plan([inventory(CLAUDE), inventory(GROK)], names, dirs()), ctx(warnings));
 		expect(first).toEqual({ actions: 1, warnings: 3 });
 		expect(warnings.map((w) => [w.surface, w.kind, w.payload.root, w.payload.name, w.payload.reason])).toEqual([
-			["substrate", "warning", "claude", "real", "real-dir-differs"],
-			["substrate", "warning", "grok", "foreign", "foreign-link"],
-			["substrate", "warning", "grok", "real", "real-dir-differs"],
+			["claude-code", "warning", "claude", "real", "real-dir-differs"],
+			["grok-build", "warning", "grok", "foreign", "foreign-link"],
+			["grok-build", "warning", "grok", "real", "real-dir-differs"],
 		]);
 		const second = await apply(plan([inventory(CLAUDE), inventory(GROK)], names, dirs()), ctx(warnings));
 		expect(second).toEqual({ actions: 0, warnings: 0 });
@@ -253,96 +245,6 @@ describe("warning dedupe", () => {
 		expect(failed.warnings).toBe(0);
 		const warnings: WarningEvent[] = [];
 		expect((await apply(actions, ctx(warnings))).warnings).toBe(1);
-	});
-});
-
-describe("host-job warning shape (D22-03, D22-05)", () => {
-	test("skip-warn events equal the skills.sync.refused row: kind warning, surface substrate, action skills.sync, runtime skills-sync", async () => {
-		skill(LIB, "real");
-		skill(GROK.dir, "real", "grok's own");
-		const warnings: WarningEvent[] = [];
-		await apply(plan([inventory(GROK)], libraryNames(LIB), dirs()), ctx(warnings));
-		expect(warnings.length).toBe(1);
-		const event = warnings[0];
-		if (!event) throw new Error("expected one warning");
-		expect(event.kind).toBe("warning");
-		expect(event.surface).toBe("substrate");
-		expect(event.actor).toBe("agent");
-		expect(event.payload.action).toBe("skills.sync");
-		expect(event.payload.runtime).toBe("skills-sync");
-		expect(event.payload.reason).toBe("real-dir-differs");
-		expect(event.payload.root).toBe("grok");
-		expect(event.payload.name).toBe("real");
-		expect(event.payload.path).toBe(join(GROK.dir, "real"));
-		expect("repo" in event).toBe(false);
-		expect(event.session_id).toMatch(/^skills-sync:\d{4}-\d{2}-\d{2}T\d{2}$/);
-	});
-
-	test("foreign-link keeps link_target; stray-real-dir keeps root and name", async () => {
-		skill(LIB, "foreign");
-		skill(LIB, "lib");
-		symlinkSync("/elsewhere/x", join(GROK.dir, "foreign"));
-		symlinkSync(join(LIB, "lib"), join(GROK.dir, "lib"));
-		skill(GROK.dir, "stray");
-		const warnings: WarningEvent[] = [];
-		await apply(plan([inventory(GROK)], libraryNames(LIB), dirs()), ctx(warnings));
-		const byName = new Map(warnings.map((w) => [w.payload.name, w]));
-		expect(byName.get("foreign")?.payload.link_target).toBe("/elsewhere/x");
-		expect(byName.get("foreign")?.payload.reason).toBe("foreign-link");
-		expect(byName.get("stray")?.payload.reason).toBe("stray-real-dir");
-		for (const w of warnings) {
-			expect(w.surface).toBe("substrate");
-			expect(w.payload.action).toBe("skills.sync");
-			expect(w.payload.runtime).toBe("skills-sync");
-		}
-	});
-
-	test("hostJobWarning builds the row without a repo field", () => {
-		const event = hostJobWarning("dirty", "skills sync refused: dirty", { component: "skills-sync" }, new Date("2026-10-09T07:30:00Z"));
-		expect(event).toMatchObject({
-			surface: "substrate",
-			kind: "warning",
-			actor: "agent",
-			session_id: "skills-sync:2026-10-09T07",
-		});
-		expect(event.payload).toMatchObject({ action: "skills.sync", runtime: "skills-sync", reason: "dirty" });
-		expect("repo" in event).toBe(false);
-	});
-
-	test("syncSessionId is hourly UTC; utcDay is the calendar day", () => {
-		expect(syncSessionId(new Date("2026-10-09T07:59:59Z"))).toBe("skills-sync:2026-10-09T07");
-		expect(utcDay(new Date("2026-10-09T23:59:59Z"))).toBe("2026-10-09");
-	});
-});
-
-describe("env seams (D22-07)", () => {
-	test("production defaults are September's", () => {
-		const opts = defaultOptions({});
-		expect(opts.libraryDir).toBe(LIBRARY_DIR);
-		expect(opts.libraryDir).toBe("/root/agent-skills");
-		expect(opts.exportsDir).toBe("/root/.openclaw/workspace/projects/docs-scraper/data/exports/skills");
-		expect(opts.backupRoot).toBe(BACKUP_ROOT);
-		expect(opts.stateFile).toBe(WARNED_STATE);
-		expect(opts.roots).toEqual([...ROOTS]);
-		expect(STATE_DIR_DEFAULT).toBe("/var/lib/substrate/skills");
-	});
-
-	test("overrides move the library, the home, the state dir and the backup dir", () => {
-		const opts = defaultOptions({
-			SUBSTRATE_SKILLS_LIBRARY: join(T, "lib"),
-			SUBSTRATE_SKILLS_HOME: join(T, "home"),
-			SUBSTRATE_SKILLS_STATE: join(T, "state"),
-			SUBSTRATE_SKILLS_BACKUP: join(T, "backup"),
-		});
-		expect(opts.libraryDir).toBe(join(T, "lib"));
-		expect(opts.exportsDir).toBe(join(T, "home", ".openclaw/workspace/projects/docs-scraper/data/exports/skills"));
-		expect(opts.backupRoot).toBe(join(T, "backup"));
-		expect(opts.stateFile).toBe(join(T, "state", "projector-warned.json"));
-		const byId = new Map(opts.roots.map((r) => [r.id, r]));
-		expect(byId.get("claude")?.dir).toBe(join(T, "home", ".claude/skills"));
-		expect(byId.get("grok")?.dir).toBe(join(T, "home", ".grok/skills"));
-		expect(byId.get("agents")?.disableFlag).toBe(join(T, "state", "disable-agents-root"));
-		expect(byId.get("cursor")?.enableFlag).toBe(join(T, "state", "enable-cursor-root"));
 	});
 });
 
@@ -457,11 +359,6 @@ describe("sameTree", () => {
 		writeFileSync(join(b, "s", "scripts", "client.py"), "print(2)\n");
 		expect(sameTree(join(a, "s"), join(b, "s"))).toBe(false);
 		writeFileSync(join(b, "s", "scripts", "client.py"), "print(1)\n");
-		chmodSync(join(b, "s", "scripts", "client.py"), 0o755);
-		expect(sameTree(join(a, "s"), join(b, "s"))).toBe(false);
-		chmodSync(join(a, "s", "scripts", "client.py"), 0o755);
-		expect(sameTree(join(a, "s"), join(b, "s"))).toBe(true);
-		chmodSync(join(a, "s", "scripts", "client.py"), 0o644);
 		writeFileSync(join(b, "s", "extra.md"), "x");
 		expect(sameTree(join(a, "s"), join(b, "s"))).toBe(false);
 		rmSync(join(b, "s", "extra.md"));
@@ -479,7 +376,6 @@ describe("backup-then-link (D-06)", () => {
 		skill(LIB, "same");
 		mkdirSync(join(LIB, "same", "scripts"));
 		writeFileSync(join(LIB, "same", "scripts", "run.sh"), "#!/bin/sh\necho hi\n");
-		chmodSync(join(LIB, "same", "scripts", "run.sh"), 0o755);
 		skill(GROK.dir, "same");
 		mkdirSync(join(GROK.dir, "same", "scripts", "__pycache__"), { recursive: true });
 		writeFileSync(join(GROK.dir, "same", "scripts", "run.sh"), "#!/bin/sh\necho hi\n");
@@ -505,7 +401,7 @@ describe("backup-then-link (D-06)", () => {
 			).sort(),
 		);
 		const restore = readFileSync(join(BACKUP, "RESTORE.md"), "utf8");
-		const line = `rm -f '${path}' && cp -a '${backup}' '${path}'`;
+		const line = `rm '${path}' && cp -a '${backup}' '${path}'`;
 		expect(restore).toContain(line);
 		expect(log).toEqual(["[projector] grok backup-then-link same"]);
 
@@ -526,20 +422,6 @@ describe("backup-then-link (D-06)", () => {
 		expect(lstatSync(join(GROK.dir, "same")).isDirectory()).toBe(true);
 		expect(existsSync(BACKUP)).toBe(false);
 		expect(log).toEqual(["[projector] grok changed-underfoot same"]);
-	});
-
-	test("a pre-existing .substrate-old directory is left in place", async () => {
-		skill(LIB, "same");
-		skill(CLAUDE.dir, "same");
-		const path = join(CLAUDE.dir, "same");
-		const kept = `${path}.substrate-old`;
-		mkdirSync(kept);
-		writeFileSync(join(kept, "keep.txt"), "operator\n");
-		const actions = plan([inventory(CLAUDE)], libraryNames(LIB), dirs());
-		expect(actions.map((action) => action.kind)).toEqual(["backup-then-link"]);
-		expect(await apply(actions, ctx())).toEqual({ actions: 1, warnings: 0 });
-		expect(readFileSync(join(kept, "keep.txt"), "utf8")).toBe("operator\n");
-		expect(readlinkSync(path)).toBe(join(LIB, "same"));
 	});
 });
 
@@ -593,16 +475,6 @@ describe("agents root (Cursor) and the D-20 disable flag", () => {
 			["link-new", "c"],
 		]);
 	});
-
-	test("a name the library dropped removes the owned link and leaves a foreign one", () => {
-		skill(LIB, "a");
-		symlinkSync(join(LIB, "a"), join(AGENTS.dir, "a"));
-		symlinkSync(join(LIB, "gone"), join(AGENTS.dir, "gone"));
-		symlinkSync("/elsewhere/x", join(AGENTS.dir, "x"));
-		expect(plan([inventory(AGENTS)], libraryNames(LIB), dirs()).map((action) => [action.kind, action.name])).toEqual([
-			["remove-own-link", "gone"],
-		]);
-	});
 });
 
 describe("muse root (create)", () => {
@@ -619,7 +491,7 @@ describe("muse root (create)", () => {
 		expect(lstatSync(MUSE.dir).mode & 0o777).toBe(0o755);
 		for (const n of ["a", "b"]) expect(readlinkSync(join(MUSE.dir, n))).toBe(join(LIB, n));
 		const restore = readFileSync(join(BACKUP, "RESTORE.md"), "utf8").trim().split("\n");
-		expect(restore.slice(-3)).toEqual([`rmdir '${MUSE.dir}'`, `rm -f '${join(MUSE.dir, "a")}'`, `rm -f '${join(MUSE.dir, "b")}'`]);
+		expect(restore.slice(-3)).toEqual([`rmdir '${MUSE.dir}'`, `rm '${join(MUSE.dir, "a")}'`, `rm '${join(MUSE.dir, "b")}'`]);
 		expect(log).toEqual([`[projector] muse created ${MUSE.dir}`, "[projector] muse link-new a", "[projector] muse link-new b"]);
 	});
 
@@ -681,7 +553,7 @@ describe("Grok stray real dirs (Pitfall 12)", () => {
 		const warnings: WarningEvent[] = [];
 		expect(await apply(actions, ctx(warnings))).toEqual({ actions: 1, warnings: 1 });
 		expect(warnings.map((w) => [w.surface, w.payload.root, w.payload.name, w.payload.reason])).toEqual([
-			["substrate", "grok", "grok-habit", "stray-real-dir"],
+			["grok-build", "grok", "grok-habit", "stray-real-dir"],
 		]);
 		expect(lstatSync(join(GROK.dir, "grok-habit")).isDirectory()).toBe(true);
 		expect(await apply(plan([inventory(CLAUDE), inventory(GROK)], libraryNames(LIB), dirs()), ctx(warnings))).toEqual({

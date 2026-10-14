@@ -26,7 +26,7 @@ function facts(over: Partial<ParityFacts> = {}): ParityFacts {
 		nRestarts: 0,
 		startEpoch: 1791479652,
 		ssOwnerPids: [1525582],
-		cgroup: "0::/system.slice/substrate-mcp.service",
+		cgroup: "0::/substrate.slice/substrate-mcp.service",
 		procCwd: "/root/src/repos/agent-substrate",
 		workingDirectory: "/root/src/repos/agent-substrate",
 		pinned: false,
@@ -86,10 +86,15 @@ describe("parityVerdict", () => {
 	});
 
 	test("fails on a user-slice cgroup", () => {
-		// A harness twin runs in user.slice; only system.slice counts as production.
+		// A harness twin runs in user.slice; only the unit's own cgroup counts as production.
 		const verdict = parityVerdict(facts({ cgroup: "0::/user.slice/user-0.slice/session-457.scope" }));
 		expect(verdict.pass).toBe(false);
 		expect(verdict.failures.join("\n")).toContain("cgroup");
+	});
+
+	test("passes in system.slice too: a unit file without a Slice= line is still production", () => {
+		const verdict = parityVerdict(facts({ cgroup: "0::/system.slice/substrate-mcp.service" }));
+		expect(verdict.failures.join("\n")).not.toContain("cgroup");
 	});
 
 	test("fails when healthz is not 200", () => {

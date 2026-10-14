@@ -25,6 +25,7 @@ export const FAIL_CLOSED_TOOLS: ReadonlySet<string> = new Set([
 	"coord_reap_leases",
 	// Phase 17: planned v1.3 writes, decided before they ship.
 	"skills_propose", // Phase 21: opens a PR other agents receive after merge.
+	"skills_approve", // uplift-5 S5a: records which merged skill an operator approved, declined or retired.
 	"docs_ingest", // Phase 25: writes a shared dataset every agent reads.
 	"desktop_run", // Phase 30: acts on a desktop (DESK-03).
 ]);
@@ -58,6 +59,7 @@ export const FAIL_OPEN_TOOLS: ReadonlySet<string> = new Set([
 	"coord_handoff_verify",
 	"coord_handoff_list",
 	"coord_drift_scan",
+	"skills_list", // uplift-5 S5a: a read of the skills registry, like `memory_search`.
 	// The one write that is fail-open on purpose: an event costs a line in the trail,
 	// and refusing the turn over it would make a substrate outage an outage of the host.
 	"events_emit",

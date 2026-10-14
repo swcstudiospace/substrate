@@ -5,12 +5,15 @@ name: CI
 # Postgres-backed tests that skip on a machine without a database.
 #
 # Pull requests run on the organisation's VPS runner, the same way programming-desk's
-# gates do. CI_ENABLED is still the switch: while the repository variable is unset both
-# jobs are skipped, which GitHub reports as a skipped (not failed) check.
+# gates do. CI_ENABLED is still the switch: while the repository variable is unset every job is
+# skipped, which GitHub reports as a skipped (not failed) check.
 # `gh variable set CI_ENABLED --body true` turns the gate on; `gh variable delete CI_ENABLED`
 # is the kill switch.
 #
 # The scratch Postgres is published on host port 54321. Port 5432 on that runner is already taken.
+#
+# The third job, `boot-gate`, is report-only and opt-in twice over: it needs CI_ENABLED and its own
+# repository variable BOOT_GATE, because it starts Docker containers on the shared runner.
 on:
   pull_request:
   push:
@@ -107,3 +110,31 @@ jobs:
 
       - name: Audit installed packages (fail on high or critical)
         run: bun audit --audit-level=high
+
+  boot-gate:
+    name: Boot and prove (report-only)
+    # Boots this commit against scratch Postgres and GreptimeDB containers on the runner's Docker
+    # (the rehearsal harness), proves it over HTTP, freezes the scratch ledger for a real outage,
+    # and removes everything. `continue-on-error` keeps it advisory: a red run is a report, never a
+    # block. It starts containers, so it is off until `gh variable set BOOT_GATE --body true`, and it
+    # does not run on the weekly schedule. No `services:` block: the harness owns its own stores.
+    if: vars.CI_ENABLED == 'true' && vars.BOOT_GATE == 'true' && github.event_name != 'schedule'
+    continue-on-error: true
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 15
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.0.2
+        with:
+          bun-version: "1.4.0"
+
+      - name: Install dependencies (the harness refuses a checkout without node_modules)
+        run: bun install --frozen-lockfile
+
+      - name: Boot the commit against scratch stores and prove it
+        run: bun run gate:boot

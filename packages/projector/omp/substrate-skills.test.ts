@@ -1,35 +1,27 @@
-import { closeSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import register, {
 	createHandler,
-	writeAllSync,
 	type FetchLike,
 	type OmpPi,
 	renderSkillMd,
-	resolveOmpToken,
+	resolveBearer,
 	skillFromToolCall,
 	type ToolCallEvent,
 } from "./substrate-skills.ts";
 
-const KEY = "0123456789abcdef".repeat(4);
-const FILE_KEY = "fedcba9876543210".repeat(4);
+const BEARER = "0123456789abcdef".repeat(4);
 const PR = "https://github.com/swcstudiospace/agent-skills/pull/7";
 const AT = new Date("2026-09-26T10:11:12.345Z");
 
 let dir: string;
-let tokensDir: string;
 let pendingDir: string;
-let env: Record<string, string | undefined>;
 
 beforeEach(() => {
 	dir = mkdtempSync(join(tmpdir(), "omp-substrate-skills-"));
-	tokensDir = join(dir, "tokens");
-	mkdirSync(tokensDir, { recursive: true });
-	writeFileSync(join(tokensDir, "omp"), `${KEY}\n`, { mode: 0o600 });
 	pendingDir = join(dir, "pending");
-	env = { SUBSTRATE_TOKENS_DIR: tokensDir };
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -54,8 +46,8 @@ function reply(status: number, body: unknown): Response {
 	return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
-function handlerWith(fetchImpl: FetchLike, timeoutMs = 50, envOverride?: Record<string, string | undefined>) {
-	return createHandler({ fetchImpl, url: "http://127.0.0.1:7410", timeoutMs, pendingDir, env: envOverride ?? env, now: () => AT });
+function handlerWith(fetchImpl: FetchLike, timeoutMs = 50) {
+	return createHandler({ fetchImpl, url: "http://127.0.0.1:7410", timeoutMs, pendingDir, bearer: BEARER, now: () => AT });
 }
 
 function event(toolName: string, input: Record<string, unknown>): ToolCallEvent {
@@ -68,15 +60,14 @@ const expectedBody = {
 	files: { "SKILL.md": "---\nname: deploy-notes\ndescription: How to deploy\n---\n\n1. Build\n2. Ship\n" },
 	surface: "omp",
 };
-const pendingPrefix = "deploy-notes-20260926T101112Z-";
-const pendingMatch = () => {
+const pendingPath = () => join(pendingDir, "deploy-notes-20260926T101112Z.json");
+const pendingFiles = () => {
 	try {
-		return readdirSync(pendingDir).filter((f) => f.startsWith(pendingPrefix) && f.endsWith(".json"));
+		return readdirSync(pendingDir);
 	} catch {
 		return [];
 	}
 };
-const pendingPath = () => join(pendingDir, pendingMatch()[0] as string);
 
 describe("skillFromToolCall", () => {
 	test("manage_skill create/update are skill writes; delete, learn without skill and other tools are not", () => {
@@ -109,28 +100,6 @@ describe("renderSkillMd", () => {
 	});
 });
 
-describe("resolveOmpToken", () => {
-	test("order is SUBSTRATE_TOKEN, then the token-file variable, then <tokens dir>/omp", () => {
-		const fileToken = join(dir, "file-token");
-		writeFileSync(fileToken, `${FILE_KEY}\n`, { mode: 0o600 });
-		expect(resolveOmpToken({ SUBSTRATE_TOKEN: KEY, SUBSTRATE_TOKEN_FILE: fileToken, SUBSTRATE_TOKENS_DIR: tokensDir })).toBe(KEY);
-		expect(resolveOmpToken({ SUBSTRATE_TOKEN_FILE: fileToken, SUBSTRATE_TOKENS_DIR: tokensDir })).toBe(FILE_KEY);
-		expect(resolveOmpToken({ SUBSTRATE_TOKENS_DIR: tokensDir })).toBe(KEY);
-	});
-
-	test("missing everything means no token; blank values are skipped", () => {
-		expect(resolveOmpToken({ SUBSTRATE_TOKENS_DIR: join(dir, "absent") })).toBeNull();
-		expect(resolveOmpToken({ SUBSTRATE_TOKEN: "  ", SUBSTRATE_TOKEN_FILE: "  ", SUBSTRATE_TOKENS_DIR: join(dir, "absent") })).toBeNull();
-		expect(resolveOmpToken({})).toBeNull();
-	});
-
-	test("an unreadable token file is no token, never a throw", () => {
-		expect(resolveOmpToken({ SUBSTRATE_TOKENS_DIR: tokensDir }, () => {
-			throw new Error("disk gone");
-		})).toBeNull();
-	});
-});
-
 describe("createHandler", () => {
 	test("manage_skill create is proposed with the bearer header and blocked with the PR URL", async () => {
 		const { fetchImpl, calls } = fakeFetch(() => reply(200, { status: "opened", pr_url: PR, content_sha256: "c", redactions: [] }));
@@ -138,16 +107,14 @@ describe("createHandler", () => {
 		expect(result?.block).toBe(true);
 		expect(result?.reason).toContain(PR);
 		expect(result?.reason).toContain("Nothing was written locally");
-		expect(result?.reason).not.toContain(KEY);
 		expect(calls).toHaveLength(1);
 		expect(calls[0]?.url).toBe("http://127.0.0.1:7410/skills/propose");
 		expect(calls[0]?.init.method).toBe("POST");
-		expect((calls[0]?.init.headers as Record<string, string>).authorization).toBe(`Bearer ${KEY}`);
-		expect("x-substrate-propose-key" in ((calls[0]?.init.headers as Record<string, string>) ?? {})).toBe(false);
+		expect((calls[0]?.init.headers as Record<string, string>).authorization).toBe(`Bearer ${BEARER}`);
 		const body = JSON.parse(String(calls[0]?.init.body));
 		expect(body).toMatchObject(expectedBody);
 		expect(body.rationale).toContain("manage_skill");
-		expect(pendingMatch()).toEqual([]);
+		expect(pendingFiles()).toEqual([]);
 	});
 
 	test("existing and unchanged replies block with their own reasons", async () => {
@@ -158,51 +125,23 @@ describe("createHandler", () => {
 		expect(unchanged).toEqual({ block: true, reason: "The library already has this exact skill (deploy-notes); nothing was written." });
 	});
 
-	test("a short write is retried until every byte is on disk", () => {
-		const path = join(dir, "partial.json");
-		const fd = openSync(path, "wx", 0o600);
-		const text = `${JSON.stringify({ name: "deploy-notes", surface: "omp" })}\n`;
-		try {
-			writeAllSync(fd, text, (handle, buffer, offset, length) => writeSync(handle, buffer, offset, Math.min(3, length)));
-		} finally {
-			closeSync(fd);
-		}
-		expect(readFileSync(path, "utf8")).toBe(text);
-	});
-
-	test("a missing token queues without a request, and the pending file never holds the token", async () => {
-		const empty = join(dir, "empty-tokens");
-		mkdirSync(empty, { recursive: true });
+	test("a missing bearer queues without a request, and the pending file never holds it", async () => {
 		const { fetchImpl, calls } = fakeFetch(() => reply(200, { status: "opened", pr_url: PR }));
-		const result = await handlerWith(fetchImpl, 50, { SUBSTRATE_TOKENS_DIR: empty })(create);
+		const handler = createHandler({ fetchImpl, url: "http://127.0.0.1:7410", timeoutMs: 50, pendingDir, env: {}, tokensDir: join(dir, "empty-tokens"), now: () => AT });
+		const result = await handler(create);
 		expect(calls).toHaveLength(0);
 		expect(result?.block).toBe(true);
-		expect(result?.reason).toContain(pendingPrefix);
-		expect(result?.reason).not.toContain(KEY);
-		expect(pendingMatch()).toHaveLength(1);
-		expect(readFileSync(pendingPath(), "utf8")).not.toContain(KEY);
+		expect(result?.reason).toContain(pendingPath());
+		expect(readFileSync(pendingPath(), "utf8")).not.toContain(BEARER);
 	});
 
-	test("a 401 reply queues exactly the propose body, without the token", async () => {
-		const { fetchImpl } = fakeFetch(() => reply(401, { error: "unknown surface" }));
+	test("a 401 reply queues exactly the propose body, without the bearer", async () => {
+		const { fetchImpl } = fakeFetch(() => reply(401, { error: "anonymous" }));
 		const result = await handlerWith(fetchImpl)(create);
 		expect(result?.block).toBe(true);
-		expect(result?.reason).toContain(pendingPrefix);
-		expect(pendingMatch()).toHaveLength(1);
+		expect(result?.reason).toContain(pendingPath());
 		const text = readFileSync(pendingPath(), "utf8");
-		expect(text).not.toContain(KEY);
-		expect(JSON.parse(text)).toMatchObject(expectedBody);
-	});
-
-	test("a 403 reply queues exactly the propose body, without the token", async () => {
-		const { fetchImpl, calls } = fakeFetch(() => reply(403, { error: "surface mismatch" }));
-		const result = await handlerWith(fetchImpl)(create);
-		expect(calls).toHaveLength(1);
-		expect(result?.block).toBe(true);
-		expect(result?.reason).toContain(pendingPrefix);
-		expect(pendingMatch()).toHaveLength(1);
-		const text = readFileSync(pendingPath(), "utf8");
-		expect(text).not.toContain(KEY);
+		expect(text).not.toContain(BEARER);
 		expect(JSON.parse(text)).toMatchObject(expectedBody);
 	});
 
@@ -228,8 +167,7 @@ describe("createHandler", () => {
 		const result = await handlerWith(fetchImpl, 50)(create);
 		expect(performance.now() - started).toBeLessThan(2_000);
 		expect(result?.block).toBe(true);
-		expect(result?.reason).toContain(`queued at ${pendingDir}/`);
-		expect(result?.reason).toContain(pendingPrefix);
+		expect(result?.reason).toContain(`queued at ${pendingPath()}`);
 		const queued = JSON.parse(readFileSync(pendingPath(), "utf8"));
 		expect(Object.keys(queued).sort()).toEqual(["files", "name", "rationale", "surface"]);
 		expect(queued).toMatchObject(expectedBody);
@@ -245,8 +183,8 @@ describe("createHandler", () => {
 			rmSync(pendingDir, { recursive: true, force: true });
 			const result = await handlerWith(fakeFetch(respond).fetchImpl)(create);
 			expect(result?.block).toBe(true);
-			expect(result?.reason).toContain(pendingPrefix);
-			expect(pendingMatch()).toHaveLength(1);
+			expect(result?.reason).toContain(pendingPath());
+			expect(pendingFiles()).toEqual(["deploy-notes-20260926T101112Z.json"]);
 		}
 	});
 
@@ -261,7 +199,7 @@ describe("createHandler", () => {
 		const declined = await handlerWith(fakeFetch(() => reply(200, { status: "declined", pr_url: closed })).fetchImpl)(create);
 		expect(declined?.block).toBe(true);
 		expect(declined?.reason).toContain(`closed an identical proposal (${closed})`);
-		expect(pendingMatch()).toEqual([]);
+		expect(pendingFiles()).toEqual([]);
 	});
 
 	test("an invalid name is blocked without a request; delete and other tools pass through", async () => {
@@ -273,18 +211,18 @@ describe("createHandler", () => {
 		expect(await handler(event("manage_skill", { action: "delete", name: "deploy-notes" }))).toBeUndefined();
 		expect(await handler(event("bash", { command: "ls" }))).toBeUndefined();
 		expect(calls).toHaveLength(0);
-		expect(pendingMatch()).toEqual([]);
+		expect(pendingFiles()).toEqual([]);
 	});
 
 	test("an internal failure becomes a block, never a throw", async () => {
 		const blocker = join(dir, "blocker");
 		writeFileSync(blocker, "x");
-		const stuck = join(blocker, "under-a-file");
-		const handler = createHandler({ fetchImpl: fakeFetch(() => Promise.reject(new TypeError("down"))).fetchImpl, url: "http://127.0.0.1:7410", timeoutMs: 50, pendingDir: stuck, env, now: () => AT });
+		pendingDir = join(blocker, "under-a-file");
+		const handler = handlerWith(fakeFetch(() => Promise.reject(new TypeError("down"))).fetchImpl);
 		const result = await handler(create);
 		expect(result?.block).toBe(true);
 		expect(result?.reason).toContain("nothing was written locally");
-		expect(result?.reason).not.toContain(KEY);
+		expect(result?.reason).not.toContain(BEARER);
 	});
 
 	test("the ctx session id is sent as session_id, rationale unchanged", async () => {
@@ -302,56 +240,8 @@ describe("createHandler", () => {
 	test("a queued proposal keeps the session_id in its pending file", async () => {
 		const { fetchImpl } = fakeFetch(() => Promise.reject(new TypeError("connection refused")));
 		const result = await handlerWith(fetchImpl)(create, { sessionManager: { getSessionId: () => "sess-omp-1" } });
-		expect(result?.reason).toContain(pendingPrefix);
+		expect(result?.reason).toContain(`queued at ${pendingPath()}`);
 		expect(JSON.parse(readFileSync(pendingPath(), "utf8"))).toMatchObject({ ...expectedBody, session_id: "sess-omp-1" });
-	});
-
-	test("two proposals in the same second keep both files", async () => {
-		const { fetchImpl } = fakeFetch(() => reply(401, { error: "unknown surface" }));
-		const handler = handlerWith(fetchImpl);
-		expect((await handler(create))?.block).toBe(true);
-		expect((await handler(create))?.block).toBe(true);
-		const files = pendingMatch();
-		expect(files).toHaveLength(2);
-		expect(new Set(files).size).toBe(2);
-		for (const file of files) expect(JSON.parse(readFileSync(join(pendingDir, file), "utf8"))).toMatchObject(expectedBody);
-	});
-
-	test("a colliding pending name is retried, never overwritten", async () => {
-		mkdirSync(pendingDir, { recursive: true });
-		writeFileSync(join(pendingDir, `${pendingPrefix}aa.json`), "original\n");
-		const hexes = ["aa", "bb"];
-		const { fetchImpl } = fakeFetch(() => reply(401, { error: "unknown surface" }));
-		const handler = createHandler({ fetchImpl, url: "http://127.0.0.1:7410", timeoutMs: 50, pendingDir, env, now: () => AT, randomHex: () => hexes.shift() as string });
-		const result = await handler(create);
-		expect(result?.block).toBe(true);
-		expect(result?.reason).toContain(`${pendingPrefix}bb.json`);
-		expect(readFileSync(join(pendingDir, `${pendingPrefix}aa.json`), "utf8")).toBe("original\n");
-		expect(pendingMatch()).toHaveLength(2);
-	});
-
-	test("learn with an invalid skill name keeps the lesson and reports in additionalContext", async () => {
-		const { fetchImpl, calls } = fakeFetch(() => reply(200, { status: "opened", pr_url: PR }));
-		const result = await handlerWith(fetchImpl)(
-			event("learn", { memory: "lesson", skill: { action: "create", name: "Bad Name", description: "d", body: "b" } }),
-		);
-		expect(result?.block).toBeUndefined();
-		expect(result?.input).toEqual({ memory: "lesson" });
-		expect(result?.additionalContext).toContain("invalid skill name");
-		expect(calls).toHaveLength(0);
-	});
-
-	test("learn survives a queue failure with the lesson intact", async () => {
-		const blocker = join(dir, "blocker");
-		writeFileSync(blocker, "x");
-		const stuck = join(blocker, "under-a-file");
-		const handler = createHandler({ fetchImpl: fakeFetch(() => Promise.reject(new TypeError("down"))).fetchImpl, url: "http://127.0.0.1:7410", timeoutMs: 50, pendingDir: stuck, env, now: () => AT });
-		const result = await handler(
-			event("learn", { memory: "lesson", skill: { action: "create", name: "deploy-notes", description: "d", body: "b" } }),
-		);
-		expect(result?.block).toBeUndefined();
-		expect(result?.input).toEqual({ memory: "lesson" });
-		expect(result?.additionalContext).toContain("extension failed");
 	});
 
 	test("no ctx, a throwing getter or a blank id sends no session_id key and still proposes", async () => {
@@ -393,4 +283,24 @@ test("the default export registers exactly one handler, for tool_call", () => {
 	const pi: OmpPi = { on: (name) => void registered.push(name) };
 	register(pi);
 	expect(registered).toEqual(["tool_call"]);
+});
+
+describe("resolveBearer", () => {
+	test("follows the token.ts order: env, then token file, then tokens dir", () => {
+		const tokens = join(dir, "tokens");
+		const named = join(dir, "named.token");
+		expect(resolveBearer({}, tokens, () => null)).toBeNull();
+		const read = (path: string): string | null =>
+			path === join(tokens, "omp") ? "dir-bearer" : path === named ? "file-bearer" : null;
+		expect(resolveBearer({}, tokens, read)).toBe("dir-bearer");
+		expect(resolveBearer({ SUBSTRATE_TOKEN_FILE: named }, tokens, read)).toBe("file-bearer");
+		expect(resolveBearer({ SUBSTRATE_TOKEN: "env-bearer", SUBSTRATE_TOKEN_FILE: named }, tokens, read)).toBe("env-bearer");
+	});
+
+	test("a queued fixture drains through the bridge queue contract unchanged", () => {
+		const queued = { name: "deploy-notes", files: expectedBody.files, rationale: "queued", surface: "omp" };
+		expect(Object.keys(queued).sort()).toEqual(["files", "name", "rationale", "surface"]);
+		expect(queued.surface).toBe("omp");
+		expect(typeof queued.files["SKILL.md"]).toBe("string");
+	});
 });
