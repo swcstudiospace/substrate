@@ -493,7 +493,8 @@ function environmentFilePath(value: string): string {
 	return stripped.startsWith("-/") ? stripped.slice(1) : stripped;
 }
 
-function logicalLines(text: string): string[] {
+/** Unit-file lines with `\`-continuations joined. Shared with the runtime doctor, which scans the same files for ceilings. */
+export function logicalLines(text: string): string[] {
 	const lines: string[] = [];
 	let pending = "";
 	for (const raw of text.replace(/^\uFEFF/, "").split(/\r?\n/)) {

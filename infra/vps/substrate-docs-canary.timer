@@ -1,0 +1,20 @@
+[Unit]
+Description=Run the live docs golden canary daily (substrate-docs-canary.service; opt-in, staged)
+Documentation=https://github.com/swcstudiospace/agent-substrate
+
+[Timer]
+# Once a day, off the hour so it never shares a tick with substrate-anchor
+# (hourly), substrate-index-sweep (03:17 UTC) or the doctor. A day is the
+# cadence a relevance regression needs: the corpus changes on merges, and the
+# freshness and trigger-lag checks already cover the hour-scale failures.
+# Persistent=true runs a missed day at the next boot.
+#
+# Staged, not installed: copying this file, `systemctl enable --now` and the two
+# variables on the service's drop-in are operator steps. Installed without the
+# variables, the service exits 2 and posts nothing.
+OnCalendar=*-*-* 04:41:00 UTC
+Persistent=true
+Unit=substrate-docs-canary.service
+
+[Install]
+WantedBy=timers.target

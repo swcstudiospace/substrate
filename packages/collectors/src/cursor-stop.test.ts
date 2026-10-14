@@ -14,6 +14,7 @@ import {
 	parseStopInput,
 	runStop,
 	safeConversationId,
+	sessionLessonText,
 	TRANSCRIPTS_DIR,
 	transcriptSource,
 } from "./cursor-stop.ts";
@@ -128,7 +129,94 @@ describe("copyTranscript", () => {
 	});
 });
 
+describe("sessionLessonText", () => {
+	test("an oversized first fact does not hide a later one", () => {
+		const huge = `Decision: ${"alpha ".repeat(800)}`;
+		const later = "Decision: The index sweep prints ttl candidate ids and does not delete documents.";
+		expect(sessionLessonText(`${huge}\n${later}`, 3000)).toBe(
+			"The index sweep prints ttl candidate ids and does not delete documents.",
+		);
+	});
+});
+
 describe("runStop", () => {
+	test("flushes a lesson from the copied transcript before session.end", async () => {
+		const { events, emit } = recorder();
+		const flushed: Array<{ sessionId: string; text: string }> = [];
+		const path = transcript('Decision: The index sweep prints ttl candidate ids and does not delete documents.\nsession ended\n');
+		const raw = JSON.stringify({ conversation_id: ID, transcript_path: path, status: "completed" });
+		await runStop(raw, {
+			emit,
+			root,
+			destDir: dest,
+			flushLesson: async (lesson) => {
+				flushed.push(lesson);
+			},
+		});
+		expect(flushed).toEqual([
+			{
+				sessionId: ID,
+				text: "The index sweep prints ttl candidate ids and does not delete documents.",
+			},
+		]);
+		expect(events[0]?.kind).toBe("session.end");
+	});
+
+	test("a slow lesson flush cannot spend the hook budget", async () => {
+		const { events, emit } = recorder();
+		const path = transcript("Decision: The index sweep prints ttl candidate ids and does not delete documents.\n");
+		const raw = JSON.stringify({ conversation_id: ID, transcript_path: path, status: "completed" });
+		const started = Date.now();
+		await runStop(raw, {
+			emit,
+			root,
+			destDir: dest,
+			budgetMs: 80,
+			flushLesson: () => new Promise(() => {}),
+		});
+		expect(events[0]?.kind).toBe("session.end");
+		expect(Date.now() - started).toBeLessThan(500);
+	});
+
+	test("session.end is posted with the time still left, and its park finishes before the hook returns", async () => {
+		const path = transcript("Decision: The index sweep prints ttl candidate ids and does not delete documents.\n");
+		const raw = JSON.stringify({ conversation_id: ID, transcript_path: path, status: "completed" });
+		let timeoutMs = -1;
+		let parked = false;
+		const started = Date.now();
+		await runStop(raw, {
+			root,
+			destDir: dest,
+			budgetMs: 80,
+			flushLesson: () => new Promise(() => {}),
+			emit: async (_event, ms) => {
+				timeoutMs = ms;
+				await new Promise((resolve) => setTimeout(resolve, ms + 20));
+				parked = true;
+			},
+		});
+		expect(parked).toBe(true);
+		expect(timeoutMs).toBeGreaterThanOrEqual(0);
+		expect(timeoutMs).toBeLessThanOrEqual(80);
+		expect(Date.now() - started).toBeLessThan(500);
+	});
+
+	test("chatter does not flush an empty lesson", async () => {
+		const { emit } = recorder();
+		const flushed: unknown[] = [];
+		const path = transcript("session ended\n");
+		const raw = JSON.stringify({ conversation_id: ID, transcript_path: path, status: "completed" });
+		await runStop(raw, {
+			emit,
+			root,
+			destDir: dest,
+			flushLesson: async (lesson) => {
+				flushed.push(lesson);
+			},
+		});
+		expect(flushed).toEqual([]);
+	});
+
 	test("copies an in-root transcript and emits session.end naming it", async () => {
 		const { events, emit } = recorder();
 		const raw = JSON.stringify({ conversation_id: ID, transcript_path: transcript(), status: "completed" });

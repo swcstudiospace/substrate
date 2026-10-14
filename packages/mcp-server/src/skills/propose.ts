@@ -444,8 +444,11 @@ export function prListHeadArgv(branch: string, repo: string): string[] {
 	return ["gh", "pr", "list", "--repo", repo, "--head", branch, "--state", "all", "--json", "url,number,state"];
 }
 
+/** The library's default branch: the base every proposal PR targets, and the only base `skills_approve` accepts. */
+export const LIBRARY_BASE = "main";
+
 export function prCreateArgv(branch: string, title: string, body: string, repo: string): string[] {
-	return ["gh", "pr", "create", "--repo", repo, "--head", branch, "--base", "main", "--title", title, "--body", body];
+	return ["gh", "pr", "create", "--repo", repo, "--head", branch, "--base", LIBRARY_BASE, "--title", title, "--body", body];
 }
 
 /** worktree.py `_origin_matches`: exactly this owner/repo (case-insensitive, `.git` ignored, path or scp suffix). */

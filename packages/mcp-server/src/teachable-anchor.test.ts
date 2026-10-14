@@ -1,220 +1,257 @@
+/**
+ * Teachable anchor-coverage proof (Phase 29, CARD-03/CARD-04 isolated half).
+ *
+ * Scratch ledger + fake RPC only: never a real send, no live credentials, no
+ * CLI spawn, no network. A `writeMemory` for a `teachable:` fact from the
+ * 29-01 corpus lands its `teachable` event in an hour; `hourDigest` covers
+ * the event id; a frozen anchor row plus a fake read-back lets
+ * `verifyGraph` report that hour `anchored` with the teachable inside it.
+ * Altering one event in the hour (a decoy from another graph) breaks the
+ * whole-hour digest, and verify is non-ok naming the hour — the coverage
+ * CARD-03 claims.
+ *
+ * The pubkey is a fake in-process constant wired through the config object,
+ * never a `SOLANA_*` environment value: no keypair, no RPC override (the
+ * read-back is injected), no chain interaction of any kind.
+ */
 import { describe, expect, test } from "bun:test";
 import { formatMemo, hourEnd, merkleRootHex } from "@substrate/ledger";
+import { DEVNET_GENESIS_HASH } from "./anchor.ts";
+import { eventHash } from "./event.ts";
 import { loadConfig } from "./config.ts";
-import { INGEST_LAG_MS } from "./greptime.ts";
-import type { ClaimResult, MemoryStore, NewMemoryEntry } from "./memory-write.ts";
+import { FakeStore } from "./memory-write.test.ts";
 import { Substrate } from "./service.ts";
-import type { MemoryEntry, SubstrateEvent } from "./types.ts";
+import { ACCEPTED_TEACHABLE } from "./teachable.fixtures.ts";
+import type { MemorySearch, MemorySearchPage, SubstrateEvent } from "./types.ts";
 
-/**
- * CARD-03 proof: every teachable is covered by the hourly anchor.
- *
- * The claim is demonstrated, not asserted, on a scratch ledger with a
- * fake-RPC read-back — never a real send, no SOLANA_* env, no CLI, no
- * network. The path under proof is the normal one: the teachable emit from
- * 29-01 is a plain `note` event, so server ingest order, `hourDigest` and
- * `verifyGraph` cover it with zero anchor-code changes.
- */
+const H = Date.UTC(2026, 8, 1, 10);
 const HOUR = 3_600_000;
-const H = Date.UTC(2026, 9, 10, 10);
-const START_ISO = new Date(H).toISOString();
-const END_ISO = new Date(H + HOUR).toISOString();
-const CLOSED = hourEnd(H) + INGEST_LAG_MS;
+const NOW = H + 5 * HOUR;
 const PUBKEY = "TestPubkey1111111111111111111111111111111";
 
-/** The narrowest store the accepted-fact path needs: claims granted, rows read back. */
-class ScratchMemoryStore implements MemoryStore {
-	private readonly rows = new Map<string, MemoryEntry>();
-	private readonly claims = new Map<string, string>();
-	private holders = 0;
-
-	async claimWrite(input: { key: string; explicit: boolean; entryHash: string; requestHash: string; entryId: string }): Promise<ClaimResult> {
-		const holder = `hold_${++this.holders}`;
-		this.claims.set(input.key, holder);
-		return { claimed: true, holder, tookOverFrom: null };
-	}
-
-	async finishWrite(): Promise<void> {}
-	async releaseWrite(): Promise<void> {}
-	async restoreWrite(): Promise<void> {}
-	async standingEntry(): Promise<MemoryEntry | null> {
-		return null;
-	}
-
-	async insertEntry(
-		row: NewMemoryEntry,
-		claim: { key: string; holder: string },
-	): Promise<{ ok: true; entry: MemoryEntry } | { ok: false; reason: "standing-moved" | "claim-lost" | "standing-exists" }> {
-		if (this.claims.get(claim.key) !== claim.holder) return { ok: false, reason: "claim-lost" };
-		const entry: MemoryEntry = {
-			id: row.id,
-			scope: row.scope,
-			kind: row.kind,
-			text: row.text,
-			writer: row.writer,
-			actor: row.actor,
-			trust: row.trust,
-			ttl: row.ttl,
-			created: new Date().toISOString(),
-			version: row.version,
-			entry_hash: row.entry_hash,
-			needs_reverification: false,
-			...(row.subject ? { subject: row.subject } : {}),
-			...(row.session_id ? { session_id: row.session_id } : {}),
-			...(row.graph_id ? { graph_id: row.graph_id } : {}),
-			...(row.idempotency_key ? { idempotency_key: row.idempotency_key } : {}),
-		};
-		this.rows.set(row.id, entry);
-		return { ok: true, entry };
-	}
-
-	async readEntry(id: string): Promise<MemoryEntry | null> {
-		return this.rows.get(id) ?? null;
-	}
-
-	async quarantineEntry(): Promise<string> {
-		return "memq_1";
-	}
-
-	async enqueueReview(): Promise<string> {
-		return "rev_1";
-	}
-
-	async releaseReviews(): Promise<number> {
-		return 0;
+/** A `FakeStore` that also answers prefix searches, newest first. */
+class ScratchIndex extends FakeStore {
+	async searchMemoryPage(search: MemorySearch): Promise<MemorySearchPage> {
+		const prefix = search.subjectPrefix ?? null;
+		const kept = [...this.rows.values()]
+			.map((row) => row.entry)
+			.filter((row) => prefix === null || row.subject?.startsWith(prefix))
+			.filter((row) => search.includeSuperseded || !row.superseded_by)
+			.sort((a, b) => (b.created === a.created ? (b.id < a.id ? -1 : 1) : b.created < a.created ? -1 : 1));
+		const limit = search.limit ?? 20;
+		return { entries: kept.slice(0, limit), next: null };
 	}
 }
 
-interface ScratchHour {
-	rows: Array<Record<string, unknown>>;
-	leaves: Array<{ event_id: string; ingested_at: number; hash: string }>;
-	records: Array<{ event_id: string; event_ts: number; ingested_at: number }>;
+interface StoredRow extends SubstrateEvent {
+	/** Fixed ingest clock: every appended event lands in hour H. */
+	ingestedAt: number;
 }
 
-/** A scratch substrate: the write path stores, the ledger captures, the anchor side is filled in after. */
-function scratch() {
-	const captured: SubstrateEvent[] = [];
-	let hour: ScratchHour | null = null;
-	let anchor: Record<string, unknown> | null = null;
+interface IngestRecord {
+	event_id: string;
+	event_ts: number;
+	ingested_at: number;
+}
+
+export interface ScratchLedger {
+	greptime: {
+		ensureAppendMode: () => Promise<boolean>;
+		lastHash: (sessionId: string) => Promise<string | null>;
+		insertEvent: (event: SubstrateEvent) => Promise<void>;
+		readEvents: (column: string, value: string) => Promise<Array<Record<string, unknown>>>;
+		graphIngest: (graphId: string) => Promise<IngestRecord[]>;
+		firstIngestMs: () => Promise<number>;
+		hourLeaves: (hour: number) => Promise<Array<{ event_id: string; hash: string }>>;
+		anchorForPeriod: (hour: number) => Promise<Record<string, unknown> | null>;
+	};
+	rows: Map<string, StoredRow>;
+	/** The memo the frozen anchor row carries, for the fake read-back. */
+	frozenMemo: () => string | null;
+	/** Freeze the anchor row the way the hourly job would have written it. */
+	anchorHour: () => void;
+}
+
+/**
+ * A scratch ledger: events keep their own timestamps (so chains verify),
+ * while ingest records land on a fixed clock in hour H (so digests and the
+ * hour report are deterministic).
+ */
+function scratchLedger(): ScratchLedger {
+	const rows = new Map<string, StoredRow>();
+	const tips = new Map<string, string>();
+	const records: IngestRecord[] = [];
+	let anchored: Record<string, unknown> | null = null;
+	let clock = 0;
+
+	const leaves = () =>
+		records
+			.filter((record) => record.ingested_at >= H && record.ingested_at < H + HOUR)
+			.sort((a, b) => a.ingested_at - b.ingested_at)
+			.map((record) => ({ event_id: record.event_id, hash: rows.get(record.event_id)?.hash ?? "" }));
+
 	const greptime = {
 		ensureAppendMode: async () => true,
-		lastHash: async () => null,
+		lastHash: async (sessionId: string) => tips.get(sessionId) ?? null,
 		insertEvent: async (event: SubstrateEvent) => {
-			captured.push(event);
+			clock += 1;
+			const ingestedAt = H + 1000 * clock;
+			rows.set(event.id, { ...event, ingestedAt });
+			if (event.session_id) tips.set(event.session_id, event.hash);
+			records.push({ event_id: event.id, event_ts: Date.parse(event.ts), ingested_at: ingestedAt });
 		},
-		readEvents: async () => hour?.rows ?? [],
-		graphIngest: async () => hour?.records ?? [],
-		firstIngestMs: async () => (hour ? H : null),
-		hourLeaves: async () => hour?.leaves ?? [],
-		anchorForPeriod: async () => anchor,
-	};
-	const substrate = new Substrate(loadConfig({ SOLANA_ANCHOR_PUBKEY: PUBKEY }), {
-		index: new ScratchMemoryStore() as never,
-		greptime: greptime as never,
-	});
-	return {
-		substrate,
-		captured,
-		place: (next: ScratchHour | null) => {
-			hour = next;
+		readEvents: async (column: string, value: string) =>
+			[...rows.values()]
+				.filter((row) => String((row as unknown as Record<string, unknown>)[column]) === value)
+				.map((row) => ({ ...row, ingestedAt: undefined, ts: Date.parse(row.ts), payload: JSON.stringify(row.payload) })),
+		graphIngest: async (graphId: string) => {
+			const ids = new Set(
+				[...rows.values()].filter((row) => row.graph_id === graphId).map((row) => row.id),
+			);
+			return records.filter((record) => ids.has(record.event_id));
 		},
-		anchor: (next: Record<string, unknown> | null) => {
-			anchor = next;
+		firstIngestMs: async () => H,
+		hourLeaves: async (hour: number) => (hour === H ? leaves() : []),
+		anchorForPeriod: async (hour: number) => (hour === H ? anchored : null),
+	};
+
+	return {
+		greptime,
+		rows,
+		frozenMemo: () => (anchored ? String(anchored.memo) : null),
+		anchorHour: () => {
+			const batch = leaves();
+			const root = merkleRootHex(batch.map((leaf) => leaf.hash));
+			anchored = {
+				period_start: new Date(H).toISOString(),
+				period_end: new Date(hourEnd(H)).toISOString(),
+				root,
+				event_count: batch.length,
+				memo: formatMemo({ periodStartMs: H, rootHex: root, count: batch.length }),
+				tx_sig: "sig-scratch-1",
+				signer: PUBKEY,
+				cluster: "devnet",
+				slot: 42,
+				anchored_at: new Date(NOW).toISOString(),
+			};
 		},
 	};
 }
 
-function rpcReturning(memo: string | null) {
-	return {
-		getGenesisHash: async () => "EtWTRABZaYq6iMfeYKouRu166VU2xqaEyCydFLPYGEC",
-		transactionMemo: async () => ({ memo, payer: PUBKEY, payerSigned: true, err: null, fee: 5000, slot: 42, blockTime: null }),
+export interface ScratchWorld {
+	ledger: ScratchLedger;
+	substrate: Substrate;
+	rpc: {
+		getGenesisHash: () => Promise<string>;
+		transactionMemo: () => Promise<{
+			memo: string | null;
+			payer: string;
+			payerSigned: boolean;
+			err: null;
+			fee: number;
+			slot: number;
+			blockTime: number;
+		}>;
 	};
 }
 
-/** House the captured teachable event in hour H: rows, leaves and ingest records off its id and hash. */
-function houseInHour(event: SubstrateEvent): { world: ScratchHour; root: string; memo: string } {
-	const world: ScratchHour = {
-		rows: [{ ...event, ts: Date.parse(event.ts), payload: JSON.stringify(event.payload) }],
-		leaves: [{ event_id: event.id, ingested_at: H + 1000, hash: event.hash }],
-		records: [{ event_id: event.id, event_ts: Date.parse(event.ts), ingested_at: H + 1000 }],
+function scratchWorld(): ScratchWorld {
+	const ledger = scratchLedger();
+	const index = new ScratchIndex();
+	const base = loadConfig({});
+	const substrate = new Substrate(
+		{ ...base, solana: { ...base.solana, pubkey: PUBKEY } },
+		{ index: index as never, greptime: ledger.greptime as never },
+	);
+	const rpc = {
+		getGenesisHash: async () => DEVNET_GENESIS_HASH,
+		transactionMemo: async () => ({
+			memo: ledger.frozenMemo(),
+			payer: PUBKEY,
+			payerSigned: true,
+			err: null,
+			fee: 5000,
+			slot: 42,
+			blockTime: 1_790_000_000,
+		}),
 	};
-	const root = merkleRootHex([event.hash]);
-	const memo = formatMemo({ periodStartMs: H, rootHex: root, count: 1 });
-	return { world, root, memo };
+	return { ledger, substrate, rpc };
 }
 
-function anchorRow(root: string, memo: string, over: Record<string, unknown> = {}) {
-	return {
-		period_start: START_ISO,
-		period_end: END_ISO,
-		root,
-		event_count: 1,
-		memo,
-		tx_sig: "sig-teachable-1",
-		signer: PUBKEY,
-		cluster: "devnet",
-		slot: 42,
-		anchored_at: new Date(H + 5 * HOUR).toISOString(),
-		...over,
-	};
+/** The ledger id of the teachable note the write emitted for a session. */
+function teachableEventId(ledger: ScratchLedger, session: string): string {
+	const found = [...ledger.rows.values()].find(
+		(row) => row.session_id === session && (row.payload as Record<string, unknown>)?.action === "teachable",
+	);
+	if (!found) throw new Error(`no teachable event for session ${session}`);
+	return found.id;
 }
-
-const TEACHABLE_WRITE = {
-	scope: "graph:ut-1",
-	kind: "fact" as const,
-	text: "retry with a capped budget and backoff",
-	writer: "hermes",
-	subject: "teachable:retry-budget",
-	session_id: "sess-anchor-1",
-	graph_id: "ut-1",
-};
 
 describe("teachable anchor coverage", () => {
-	test("an accepted teachable's event sits in an hour verify reports anchored", async () => {
-		const world = scratch();
+	test("the teachable event sits inside a verify-reported anchored hour", async () => {
+		const { ledger, substrate, rpc } = scratchWorld();
 
-		const result = await world.substrate.writeMemory({ ...TEACHABLE_WRITE });
-		expect(result.outcome).toBe("accepted");
-		expect(result.verified_persisted).toBe(true);
+		const written = await substrate.writeMemory({
+			...ACCEPTED_TEACHABLE.request,
+			scope: "graph:ut-teach-29",
+			graph_id: "ut-teach-29",
+			session_id: "sess-p29-anchor",
+		});
+		expect(written.outcome).toBe("accepted");
+		expect(written.verified_persisted).toBe(true);
 
-		const trail = world.captured.filter((event) => event.payload["action"] === "teachable");
-		expect(trail).toHaveLength(1);
-		const event = trail[0] as SubstrateEvent;
+		const digest = await substrate.hourDigest(H, NOW);
+		expect(digest.event_ids).toContain(teachableEventId(ledger, "sess-p29-anchor"));
+		expect(digest.root).toMatch(/^[0-9a-f]{64}$/);
 
-		const { world: housed, root, memo } = houseInHour(event);
-		world.place(housed);
-
-		// The hour's digest covers the teachable event id.
-		const digest = await world.substrate.hourDigest(H, CLOSED);
-		expect(digest.event_ids).toContain(event.id);
-		expect(digest.event_count).toBe(1);
-
-		// And verify reports that hour anchored, with the event inside it.
-		world.anchor(anchorRow(root, memo));
-		const verdict = await world.substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(memo) as never });
+		ledger.anchorHour();
+		const verdict = await substrate.verifyGraph("ut-teach-29", { now: NOW, rpc: rpc as never });
 
 		expect(verdict.ok).toBe(true);
+		expect(verdict.chain).toEqual({ ok: true });
 		expect(verdict.hours).toHaveLength(1);
-		expect(verdict.hours[0]).toMatchObject({ period_start: START_ISO, status: "anchored", event_count: 1, root });
-		expect(verdict.uncovered).toEqual({ count: 0, ids: [] });
+		expect(verdict.hours[0]).toMatchObject({
+			period_start: new Date(H).toISOString(),
+			status: "anchored",
+			tx_sig: "sig-scratch-1",
+		});
+		expect(verdict.reason).toBeUndefined();
 	});
 
-	test("an altered hour fails verify naming the hour — the tamper case", async () => {
-		const world = scratch();
+	test("altering one event in the hour fails verify naming the hour", async () => {
+		const { ledger, substrate, rpc } = scratchWorld();
 
-		const result = await world.substrate.writeMemory({ ...TEACHABLE_WRITE });
-		expect(result.outcome).toBe("accepted");
-		const event = world.captured.filter((e) => e.payload["action"] === "teachable")[0] as SubstrateEvent;
+		await substrate.writeMemory({
+			...ACCEPTED_TEACHABLE.request,
+			scope: "graph:ut-teach-29",
+			graph_id: "ut-teach-29",
+			session_id: "sess-p29-anchor",
+		});
+		// A second event in the same hour from another graph: the hour is
+		// digested whole, so tampering with it breaks the teachable's hour.
+		await substrate.emit({
+			surface: "omp",
+			kind: "note",
+			summary: "unrelated decoy in the same hour",
+			session_id: "sess-decoy",
+			graph_id: "ut-other",
+		});
+		ledger.anchorHour();
 
-		const { world: housed, memo } = houseInHour(event);
-		world.place(housed);
+		const decoy = [...ledger.rows.values()].find((row) => row.session_id === "sess-decoy");
+		expect(decoy).toBeDefined();
+		// The digest covers leaf hashes, so the tamper re-hashes the altered
+		// event the way the ledger would have: even a self-consistent edit of
+		// another event in the hour breaks the anchored coverage.
+		const { ingestedAt, hash: _previous, ...unhashed } = decoy!;
+		const tampered = { ...unhashed, summary: "tampered after anchoring" };
+		ledger.rows.set(decoy!.id, { ...tampered, hash: eventHash(tampered), ingestedAt });
 
-		// The anchor row names a root the hour's events do not digest to.
-		world.anchor(anchorRow("f".repeat(64), memo));
-		const verdict = await world.substrate.verifyGraph("ut-1", { now: H + 5 * HOUR, rpc: rpcReturning(memo) as never });
+		const verdict = await substrate.verifyGraph("ut-teach-29", { now: NOW, rpc: rpc as never });
 
 		expect(verdict.ok).toBe(false);
+		expect(verdict.chain).toEqual({ ok: true });
 		expect(verdict.hours[0]?.status).toBe("mismatch");
-		expect(verdict.reason).toContain(START_ISO);
+		expect(verdict.reason).toContain(new Date(H).toISOString());
 	});
 });

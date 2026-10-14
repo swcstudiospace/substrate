@@ -1,0 +1,17 @@
+[Unit]
+Description=Archive the Postgres index daily (substrate-index-archive.service)
+Documentation=https://github.com/swcstudiospace/agent-substrate
+
+[Timer]
+# Once a day at 03:45 UTC: after the 03:17 index sweep (so the archive holds
+# what the sweep left) and after the 03:30 ledger archive, so the three
+# oneshots never share a tick. The 26 h age objective (`index.archive.age`,
+# SUBSTRATE_INDEX_ARCHIVE_MAX_AGE_H=26) is a day plus two hours of slack.
+# Persistent=true runs a missed day at the next boot: a gap is a day the index
+# could not be rebuilt from anything but the volume.
+OnCalendar=*-*-* 03:45:00 UTC
+Persistent=true
+Unit=substrate-index-archive.service
+
+[Install]
+WantedBy=timers.target

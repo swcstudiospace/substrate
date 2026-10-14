@@ -23,25 +23,51 @@ import {
 	type AuditTransport,
 } from "@substrate/audit";
 import {
+	BurnLedger,
+	CapacityRing,
+	CheckpointError,
+	MAX_CHECKPOINT_BYTES,
+	MetricRegistry,
 	OtlpExporter,
 	PeriodicExporter,
+	PlaneWindow,
 	SPAN_KIND,
 	SubstrateInstruments,
 	Tracer,
+	briefBySurfaceObjectives,
+	evaluateBurnSlos,
+	evaluateCapacitySlos,
+	evaluateDocsSlos,
+	evaluatePlaneSlos,
 	evaluateSlos,
 	loadObservabilityConfig,
 	parseTraceparent,
+	restoreCheckpoint,
+	serializeCheckpoint,
 	sloCatalogue,
+	servedTokensBySurface,
+	snapshotCheckpoint,
+	type BurnResult,
+	type CapacitySloResult,
 	type ClaimOutcome,
 	type MetricSnapshot,
+	type NotifyRecord,
+	type PlaneName,
+	type PlaneSloResult,
+	type SloCheckpoint,
 	type SloResult,
 	type SloTarget,
+	type ServedTokensResult,
+	type SurfaceSloResult,
 	type Span,
 	type SpanContext,
 } from "@substrate/observability";
 import { buildEvidence, renderEvidenceHtml, type EvidenceBundle } from "@substrate/evidence";
+import { readFileSync } from "node:fs";
+import { rename, writeFile } from "node:fs/promises";
 import type { IncomingMessage } from "node:http";
 import type { SubstrateConfig } from "./config.ts";
+import { registerMetricsHistoryMetrics } from "./metrics-history.ts";
 import { redact } from "./redact.ts";
 import type { Substrate, SubstrateObserver } from "./service.ts";
 import type { Surface } from "./types.ts";
@@ -53,6 +79,7 @@ export const SUBSTRATE_VERSION = "0.1.0";
 const KNOWN_ROUTES = [
 	"/brief",
 	"/events",
+	"/events/stream",
 	"/verify",
 	"/healthz",
 	"/mcp",
@@ -60,7 +87,14 @@ const KNOWN_ROUTES = [
 	"/slo",
 	"/evidence",
 	"/skills/propose",
-	"/.well-known/agent-card.json",
+	"/skills",
+	"/skills/approve",
+	"/docs/search",
+	"/docs/ingest",
+	"/docs/merge-trigger",
+	"/memory/recall",
+	"/slo/history",
+	"/livez",
 ] as const;
 
 export function normalizeRoute(pathname: string): string {
@@ -133,6 +167,24 @@ export async function recordClaimWithdrawal(
 	}
 }
 
+/** `/slo.history` (uplift-3 N2): how far back the merged series reach, and how often they are saved. */
+export interface SloHistory {
+	/** Restarts so far, this process included: 1 on a fresh start, the checkpoint's epoch + 1 after a restore. */
+	epoch: number;
+	/** ISO time of the oldest sample the merged series reach back to. */
+	since: string;
+	/** ISO time of the newest checkpoint — this process's last write, else the restored file's; `null` with neither. */
+	checkpointAt: string | null;
+}
+
+/** What one checkpoint write did. Never throws: a checkpoint that could not be saved is a line, not an outage. */
+export interface CheckpointWrite {
+	/** `false` when no path is configured or the write failed (`error` says why). */
+	written: boolean;
+	bytes: number;
+	error: string | null;
+}
+
 export interface Observability {
 	readonly instruments: SubstrateInstruments;
 	readonly tracer: Tracer;
@@ -143,20 +195,128 @@ export interface Observability {
 	readonly exporter: PeriodicExporter | null;
 	/** The observer handed to `Substrate`, so brief/emit/claim are measured. */
 	readonly observer: SubstrateObserver;
+	/**
+	 * The last transition the notifier emitted per objective (uplift-3 N2),
+	 * restored from the checkpoint and saved with it. Mutated in place by
+	 * `slo-notify.ts`, read by nothing else: it exists so a restart cannot
+	 * announce a breach twice.
+	 */
+	readonly notifyRecords: Record<string, NotifyRecord>;
 	snapshot(): MetricSnapshot[];
 	evaluate(): SloResult[];
+	/**
+	 * The per-plane availability verdicts over the rolling hour (uplift-2 R2).
+	 * `configured` says which planes may be judged; the rest report `unconfigured`.
+	 */
+	evaluatePlanes(configured: Partial<Record<PlaneName, boolean>>): PlaneSloResult[];
+	/** The docs-search latency verdict (uplift-3 N5): one row, `docs.search.p95`, beside the catalogue. */
+	evaluateDocs(): SloResult[];
+	/** `brief.p95` per surface (uplift-3 N7): one row per surface at or above `minSamples`, beside the catalogue. */
+	evaluateBriefSurfaces(): SurfaceSloResult[];
+	/** The burn verdicts over this process's ledger (restored across restarts since uplift-3 N2). Every call is a sample. */
+	evaluateBurn(): BurnResult[];
+	/** The capacity runway verdict (uplift-3 N2): one row, `capacity.index.runway_days`, over the `/healthz` size ring. */
+	evaluateCapacity(): CapacitySloResult[];
+	/** `served.tokens_est` per surface (uplift-4 S1): the estimated hourly tokens served, against `SUBSTRATE_SERVED_TOKENS_PER_HOUR`. Every call is a sample. */
+	evaluateServedTokens(): ServedTokensResult[];
+	history(): SloHistory;
+	/**
+	 * Save the checkpoint now (uplift-3 N2): the merged series, the rings and
+	 * the notify map, as `<path>.part` renamed over `<path>` so a reader never
+	 * sees a torn file. The periodic timer and manual triggers call this; one
+	 * that arrives while a write is in flight joins it.
+	 */
+	checkpoint(): Promise<CheckpointWrite>;
+	/**
+	 * The shutdown write: waits for any write in flight, then runs one fresh
+	 * write, so everything observed before the call is in the file (a joined
+	 * in-flight write serialised its snapshot earlier). Calls made while that
+	 * final write runs join it, never start a parallel one.
+	 */
+	flush(): Promise<CheckpointWrite>;
 	start(): Promise<string[]>;
 	stop(): void;
 }
 
-export function createObservability(config: SubstrateConfig, env: Record<string, string | undefined> = process.env): Observability {
+/** The checkpoint file as found at boot: restored, absent, or refused with the reason to log once. */
+interface CheckpointRead {
+	checkpoint: SloCheckpoint | null;
+	warning: string | null;
+}
+
+/**
+ * Read the checkpoint synchronously at construction, because the registry's
+ * start time and every instrument's prior layer must exist before the first
+ * observation. An absent file is a fresh start with nothing to say; anything
+ * else that fails — unreadable, over the size limit, not a checkpoint — is one
+ * warning, and the process starts fresh rather than refusing to boot over its
+ * own history. The path is quoted: it is a path, never a credential.
+ */
+function readCheckpointFile(path: string | null): CheckpointRead {
+	if (path === null) return { checkpoint: null, warning: null };
+	let text: string;
+	try {
+		text = readFileSync(path, "utf8");
+	} catch (cause) {
+		if ((cause as NodeJS.ErrnoException).code === "ENOENT") return { checkpoint: null, warning: null };
+		return { checkpoint: null, warning: `slo checkpoint ${path} could not be read (${(cause as Error).message}); SLO history starts fresh` };
+	}
+	try {
+		return { checkpoint: restoreCheckpoint(text), warning: null };
+	} catch (cause) {
+		const reason = cause instanceof CheckpointError ? cause.message : String(cause);
+		return { checkpoint: null, warning: `slo checkpoint ${path} is not usable (${reason}); SLO history starts fresh` };
+	}
+}
+
+/** The two filesystem calls a checkpoint write makes, injectable so a test can hold one open. */
+export interface CheckpointFiles {
+	writeFile(path: string, data: string, encoding: "utf8"): Promise<void>;
+	rename(from: string, to: string): Promise<void>;
+}
+
+export function createObservability(
+	config: SubstrateConfig,
+	env: Record<string, string | undefined> = process.env,
+	files: CheckpointFiles = { writeFile, rename },
+): Observability {
 	const settings = loadObservabilityConfig(env, SUBSTRATE_VERSION);
-	const instruments = new SubstrateInstruments();
+	// uplift-3 N2: the prior epoch's checkpoint, before any instrument exists. A
+	// restored registry starts at the history's `since`, so the OTLP start time and
+	// `/metrics.startedAt` say what the cumulative points actually cover.
+	const read = readCheckpointFile(config.sloCheckpointPath);
+	const restored = read.checkpoint;
+	const bootWarnings: string[] = read.warning === null ? [] : [read.warning];
+	const instruments = new SubstrateInstruments(new MetricRegistry(restored ? Date.parse(restored.since) : Date.now()));
+	// uplift-4 S6: registered before the seed below so a checkpoint restores the drop counter; with the history off it does not exist.
+	if (config.metricsHistory.enabled) registerMetricsHistoryMetrics(instruments.registry);
+	if (restored) {
+		const skipped = instruments.registry.seed(restored.metrics);
+		if (skipped.length > 0) {
+			bootWarnings.push(`slo checkpoint carried ${skipped.length} metric(s) this release does not record or whose buckets moved, left out: ${skipped.join(", ")}`);
+		}
+	}
+	const epoch = restored ? restored.epoch + 1 : 1;
+	const since = restored ? restored.since : new Date(instruments.registry.startedAt).toISOString();
+	/** ISO time of the newest checkpoint write this process knows of. */
+	let checkpointAt: string | null = restored?.writtenAt ?? null;
+	const notifyRecords: Record<string, NotifyRecord> = { ...(restored?.notify ?? {}) };
 	const tracer = new Tracer({ maxSpans: settings.maxSpans, sampleRatio: settings.sampleRatio });
 	const audit = new AuditLog({ path: config.audit.path, redact });
 	const slos = sloCatalogue(settings.slo);
+	/** One window per process: successive `/slo` reads are its samples; restored buckets seed it. */
+	const planeWindow = new PlaneWindow(undefined, undefined, restored?.planes ?? {});
+	/** One ledger per process, the same way; restored samples seed it. */
+	const burnLedger = new BurnLedger(undefined, undefined, restored?.burn ?? {});
+	/** The `/healthz` size reads the runway is fitted over. */
+	const capacityRing = new CapacityRing(restored?.capacity ?? []);
 	/** How much of `tracer.dropped` has already been added to the monotonic counter. */
 	let reportedSpanDrops = 0;
+	let checkpointTimer: ReturnType<typeof setInterval> | null = null;
+	/** One write at a time: a slow disk must not pile up `.part` renames. */
+	let checkpointInFlight: Promise<CheckpointWrite> | null = null;
+	/** Each write failure is logged once per reason, so a full disk is one line a boot, not one a minute. */
+	const loggedWriteFailures = new Set<string>();
 
 	const exporter = settings.exportEnabled
 		? new PeriodicExporter({
@@ -189,11 +349,41 @@ export function createObservability(config: SubstrateConfig, env: Record<string,
 		briefed(sample) {
 			instruments.recordBrief(sample);
 		},
+		briefResult(sample) {
+			instruments.recordBriefResult(sample);
+		},
+		briefProfiled(sample) {
+			instruments.recordBriefProfile(sample);
+		},
+		servedTokens(sample) {
+			instruments.recordServedTokens(sample);
+		},
+		briefRecall(sample) {
+			instruments.recordBriefRecall(sample);
+		},
+		recallPrefetch(sample) {
+			instruments.recordRecallPrefetch(sample);
+		},
+		hindsightOutbox(sample) {
+			instruments.setHindsightOutbox(sample);
+		},
 		emitted(sample) {
 			instruments.recordEmit(sample);
 		},
+		eventReplay(sample) {
+			instruments.recordEventReplay(sample);
+		},
 		cached(sample) {
 			instruments.recordCache(sample);
+		},
+		plane(sample) {
+			instruments.recordPlane(sample);
+		},
+		admission(sample) {
+			instruments.recordAdmission(sample);
+		},
+		memoryExpired(sample) {
+			instruments.recordMemoryExpired(sample);
 		},
 		claimed(sample) {
 			instruments.recordClaim({
@@ -214,7 +404,77 @@ export function createObservability(config: SubstrateConfig, env: Record<string,
 				void recordClaimWithdrawal(audit, instruments, sample);
 			}
 		},
+		docsSearch(sample) {
+			instruments.recordDocsSearch(sample);
+		},
+		capacity(sample) {
+			capacityRing.record(sample.at, sample.databaseBytes);
+		},
+		indexArchive(source) {
+			instruments.observeIndexArchiveAge(() => source.newestAtMs());
+		},
 	};
+
+	/**
+	 * One atomic write: serialise, refuse a file over the read limit (a
+	 * checkpoint the next boot would refuse is not worth the disk), write
+	 * `<path>.part`, rename over `<path>`. Failures are returned and logged
+	 * once per reason; nothing here throws into the timer or the shutdown path.
+	 */
+	async function writeCheckpoint(): Promise<CheckpointWrite> {
+		const path = config.sloCheckpointPath;
+		if (path === null) return { written: false, bytes: 0, error: null };
+		const text = serializeCheckpoint(
+			snapshotCheckpoint(instruments, planeWindow, burnLedger, epoch, { since, capacity: capacityRing.samples(), notify: notifyRecords }),
+		);
+		const bytes = Buffer.byteLength(text, "utf8");
+		let error: string | null = null;
+		if (bytes > MAX_CHECKPOINT_BYTES) {
+			error = `checkpoint is ${bytes} bytes, over the ${MAX_CHECKPOINT_BYTES} byte limit the next boot would refuse`;
+		} else {
+			try {
+				await files.writeFile(`${path}.part`, text, "utf8");
+				await files.rename(`${path}.part`, path);
+				checkpointAt = new Date().toISOString();
+			} catch (cause) {
+				error = cause instanceof Error ? cause.message : String(cause);
+			}
+		}
+		if (error !== null && !loggedWriteFailures.has(error)) {
+			loggedWriteFailures.add(error);
+			process.stderr.write(`[substrate] slo checkpoint ${path} not written: ${error}\n`);
+		}
+		return { written: error === null, bytes, error };
+	}
+
+	/**
+	 * The single-flight door every trigger goes through — the periodic timer,
+	 * `Observability.checkpoint()` and the shutdown write alike. A trigger that
+	 * arrives while a write is in flight joins it rather than starting a second
+	 * `.part` + rename over the same path; the timer calling `writeCheckpoint`
+	 * directly bypassed this and could overlap a slow write with the next tick
+	 * or with shutdown (Greptile round 1, PR #61).
+	 */
+	function checkpointOnce(): Promise<CheckpointWrite> {
+		checkpointInFlight ??= writeCheckpoint().finally(() => {
+			checkpointInFlight = null;
+		});
+		return checkpointInFlight;
+	}
+
+	/** The final write `flush()` is running, so a second shutdown call joins it. */
+	let flushing: Promise<CheckpointWrite> | null = null;
+	function flushCheckpoint(): Promise<CheckpointWrite> {
+		flushing ??= (async () => {
+			// The in-flight write's outcome is its own caller's business; this one
+			// only needs it out of the way before the fresh snapshot is taken.
+			if (checkpointInFlight !== null) await checkpointInFlight.catch(() => undefined);
+			return checkpointOnce();
+		})().finally(() => {
+			flushing = null;
+		});
+		return flushing;
+	}
 
 	return {
 		instruments,
@@ -231,6 +491,26 @@ export function createObservability(config: SubstrateConfig, env: Record<string,
 		observer,
 		snapshot: () => instruments.snapshot(),
 		evaluate: () => evaluateSlos(instruments.snapshot(), slos),
+		evaluatePlanes: (configured) =>
+			evaluatePlaneSlos(instruments.snapshot(), {
+				configured,
+				window: planeWindow,
+				...(settings.slo.planeAvailability !== undefined ? { target: settings.slo.planeAvailability } : {}),
+				...(settings.slo.minSamples !== undefined ? { minSamples: settings.slo.minSamples } : {}),
+			}),
+		evaluateDocs: () => evaluateDocsSlos(instruments.snapshot(), settings.slo),
+		evaluateBriefSurfaces: () => briefBySurfaceObjectives(instruments.snapshot(), settings.slo),
+		evaluateBurn: () => evaluateBurnSlos(instruments.snapshot(), { ledger: burnLedger, env }),
+		evaluateCapacity: () =>
+			evaluateCapacitySlos(capacityRing, {
+				volumeBytes: settings.indexVolumeBytes,
+				...(settings.slo.runwayDays !== undefined ? { targetDays: settings.slo.runwayDays } : {}),
+			}),
+		evaluateServedTokens: () => servedTokensBySurface(instruments.snapshot(), { ledger: burnLedger, env }),
+		notifyRecords,
+		history: () => ({ epoch, since, checkpointAt }),
+		checkpoint: checkpointOnce,
+		flush: flushCheckpoint,
 		async start() {
 			const warnings: string[] = [];
 			const opened = await audit.open();
@@ -261,11 +541,24 @@ export function createObservability(config: SubstrateConfig, env: Record<string,
 			if (!settings.exportEnabled) {
 				warnings.push("no OTLP endpoint configured; metrics are collected and served but not exported");
 			}
+			// uplift-3 N2: said once, at boot, so a refused checkpoint is in the journal
+			// beside the other degradations and not only in a missing `/slo.history`.
+			warnings.push(...bootWarnings);
+			if (config.sloCheckpointPath === null) {
+				warnings.push("no SLO checkpoint path (SUBSTRATE_SLO_CHECKPOINT unset and no state directory); SLO history ends at the next restart");
+			} else if (config.sloCheckpointS > 0 && checkpointTimer === null) {
+				checkpointTimer = setInterval(() => void checkpointOnce(), config.sloCheckpointS * 1000);
+				checkpointTimer.unref();
+			}
 			exporter?.start();
 			return warnings;
 		},
 		stop() {
 			exporter?.stop();
+			if (checkpointTimer !== null) {
+				clearInterval(checkpointTimer);
+				checkpointTimer = null;
+			}
 		},
 	};
 }
@@ -325,6 +618,7 @@ const KNOWN_TOOLS: ReadonlySet<string> = new Set([
 	"memory_brief",
 	"memory_write",
 	"memory_search",
+	"memory_recall",
 	"memory_pending",
 	"events_emit",
 	"events_query",
@@ -344,6 +638,10 @@ const KNOWN_TOOLS: ReadonlySet<string> = new Set([
 	"coord_drift_scan",
 	"coord_reap_leases",
 	"skills_propose",
+	"skills_approve",
+	"skills_list",
+	"docs_search",
+	"docs_ingest",
 	"desktop_run",
 	// REST routes, as `server.ts` audits them. A route audited under a tool's own name
 	// (`/memory` as `memory_write`) is covered by that name above and not repeated.

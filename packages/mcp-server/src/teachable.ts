@@ -1,39 +1,46 @@
 /**
- * Teachable moments: the `teachable:` subject convention and its trail event.
+ * Teachable moments (Phase 29, CARD-02/CARD-03).
  *
  * A teachable is a governed `fact` whose subject carries the tag as the prefix
- * `teachable:` (e.g. `teachable:retry-budget`). `MemoryEntryInput` has no tags
- * field and none is added. Facts append, so a second write of the same
- * subject stores another memory rather than replacing the lesson. The card
- * builder finds a surface's teachables with a `subjectPrefix` search — no
- * new index, no migration, no new memory kind.
+ * `teachable:` (e.g. `teachable:retry-budget`). No new memory kind, no tags
+ * field, no schema change: the subject carries the tag because the conflict key
+ * is `scope|kind|subject`, so a teachable is addressable per topic, and the card
+ * builder reads them back with a `subjectPrefix` search — no new index, no
+ * migration (D29-01). `fact` entries are append-only: a revised teachable under
+ * the same subject leaves both facts live, newest first, superseding by recency.
  *
- * The gate path is unchanged: a teachable passes `governMemoryWrite` like any
- * other fact, and a refused teachable is a refused fact, nothing more. The one
- * addition is the trail: an accepted + verified teachable emits a `note` from
- * the writer's surface shaped like the `teachable.accepted` sample in
- * `event-sources.ts`, so the hourly anchor covers it with zero anchor-code
- * changes. The payload carries the entry id and its content hash, never
- * content — the body may be exactly what a future quarantine would park.
+ * This module holds the predicate, the slug helper, and the one new event
+ * builder of the phase. The builder returns an EventInput shaped exactly like
+ * the `teachable.accepted` sample in `event-sources.ts` — kind `note`, the
+ * writer's surface, `{ action: "teachable", memory_id, subject,
+ * content_sha256 }` — hash only, never content bytes. No new event kind, no new
+ * surface, no `planes/` import, no `SOLANA_*` names.
  */
 import { normalizeSubject } from "./memory-policy.ts";
-import type { EventInput, MemoryWriteRequest, MemoryWriteResult, Surface } from "./types.ts";
+import type {
+	EventInput,
+	MemoryKind,
+	MemoryWriteRequest,
+	MemoryWriteResult,
+	Surface,
+} from "./types.ts";
 
-/** The tag a teachable carries, as a subject prefix rather than a new field. */
+/** The tag a teachable carries, as the prefix of its subject (D29-01). */
 export const TEACHABLE_SUBJECT_PREFIX = "teachable:";
 
 /**
- * Whether this write is a teachable: kind `fact` with a non-empty slug after
- * the prefix. The subject is normalised the way the gate normalises a stored
- * subject, so `Teachable:Retry` and `teachable:retry` are the same teachable.
+ * Whether a write is a teachable: kind `fact` with a normalised subject that
+ * starts with the prefix and carries a non-empty slug after it. An empty slug
+ * (`teachable:` with nothing after) is not a teachable.
  */
-export function isTeachable(kind: unknown, subject: unknown): boolean {
-	return kind === "fact" && teachableSlug(subject) !== null;
+export function isTeachable(kind: MemoryKind | string, subject: unknown): boolean {
+	if (kind !== "fact") return false;
+	return teachableSlug(subject) !== null;
 }
 
 /**
- * The part after the prefix, or null where the subject is not a teachable —
- * including `teachable:` with nothing after it, which names no topic.
+ * The part of a teachable subject after the prefix, for summaries and skill
+ * names. Null when the subject is not a teachable.
  */
 export function teachableSlug(subject: unknown): string | null {
 	const normalized = normalizeSubject(subject);
@@ -43,15 +50,10 @@ export function teachableSlug(subject: unknown): string | null {
 }
 
 /**
- * The trail event for an accepted teachable, shaped like the
- * `teachable.accepted` sample: kind `note` from the writer's surface, summary
- * `teachable accepted: <slug>`, the caller's session/graph, and a payload of
- * `{ action, memory_id, subject, content_sha256 }` — the entry id and its
- * content hash, never the body.
- *
- * Callers gate on accepted + verified + known surface before reaching here;
- * `result.entry` is always present on that path (every accepted reply carries
- * the stored entry), and the fallbacks below are unreachable defence.
+ * The `teachable.accepted` trail event for an accepted + verified teachable
+ * write: kind `note` on the writer's surface, shaped like the mapped sample in
+ * `event-sources.ts`. Carries the accepted entry's id, its full (normalised)
+ * subject, and the 64-hex entry hash — never content bytes.
  */
 export function teachableEvent(
 	writer: Surface,
@@ -59,17 +61,18 @@ export function teachableEvent(
 	result: MemoryWriteResult,
 ): EventInput {
 	const entry = result.entry;
-	const slug = teachableSlug(request.subject) ?? teachableSlug(entry?.subject) ?? "";
+	const slug = teachableSlug(request.subject) ?? "";
+	const subject = entry?.subject ?? (normalizeSubject(request.subject) || "");
 	return {
 		surface: writer,
 		kind: "note",
 		summary: `teachable accepted: ${slug}`,
-		...(request.session_id ? { session_id: request.session_id } : {}),
-		...(request.graph_id ? { graph_id: request.graph_id } : {}),
+		...(typeof request.session_id === "string" && request.session_id ? { session_id: request.session_id } : {}),
+		...(typeof request.graph_id === "string" && request.graph_id ? { graph_id: request.graph_id } : {}),
 		payload: {
 			action: "teachable",
 			memory_id: entry?.id ?? "",
-			subject: entry?.subject ?? request.subject ?? "",
+			subject,
 			content_sha256: entry?.entry_hash ?? "",
 		},
 	};

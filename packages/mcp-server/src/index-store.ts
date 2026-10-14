@@ -8,8 +8,20 @@
  */
 import { SQL } from "bun";
 import { randomUUID } from "node:crypto";
+import { callPlane, type PlaneGate } from "@substrate/observability";
 import { normalizeIdentifier } from "./event.ts";
-import { needsReverification } from "./memory-policy.ts";
+import {
+	TERMINAL_GRAPH_STATUSES,
+	executeSweep,
+	memoryLifecycleQuery,
+	planSweep,
+	sweepPolicyFromEnv,
+	type SweepPolicy,
+	type SweepReport,
+	type SweepStatement,
+} from "./index-sweep.ts";
+import { exportedColumns, tableSpec, type ArchiveRow, type ArchiveTableSpec, type ColumnType } from "./index-archive-spec.ts";
+import { memoryExpiry, memoryGraphId, needsReverification, type GraphLifetime } from "./memory-policy.ts";
 import {
 	DERIVED_KEY_WINDOW_MS,
 	IN_FLIGHT_TIMEOUT_MS,
@@ -28,6 +40,9 @@ import type {
 	GraphStep,
 	GraphView,
 	MemoryEntry,
+	MemoryExpiryMode,
+	MemoryKind,
+	MemoryReadOptions,
 	MemorySearch,
 	MemorySearchPage,
 	MemoryWriteOutcome,
@@ -52,13 +67,199 @@ import {
 	type ReleaseDecision,
 } from "./lease.ts";
 import { redact } from "./redact.ts";
+import { transition, type SkillDecision, type SkillDecisionResult, type SkillRegistryRow, type SkillState } from "./skills/registry.ts";
 
 /**
  * Statuses that mean a graph is finished, so it is no longer "open" in a brief.
- * These are exactly Notion's `complete` status group on the Agent Task Graph —
- * a shorter list leaves Closed and Resolved graphs showing up as live work.
+ * Shared with the sweeper, which retires graphs in exactly these statuses — a
+ * shorter list here would leave Closed and Resolved graphs showing up as live
+ * work, and a different list there would retire graphs a brief still shows.
  */
-const TERMINAL_STATUSES = ["Merged", "Resolved", "Done", "Won't Fix", "Closed", "Failed", "Canceled"];
+const TERMINAL_STATUSES: string[] = [...TERMINAL_GRAPH_STATUSES];
+
+/**
+ * Thrown by {@link IndexStore.node} for a node that is not in the index. Its own
+ * class so the plane gate can tell it from a database failure: an unknown node is
+ * an answer, not an outage, and must not count against the breaker.
+ */
+class UnknownNode extends Error {
+	constructor(graphId: string, nodeId: string) {
+		super(`unknown node ${graphId}/${nodeId}`);
+		this.name = "UnknownNode";
+	}
+}
+
+/** A store error for the breaker is anything that is not the index answering "no such node". */
+const isStoreFailure = (error: unknown): boolean => !(error instanceof UnknownNode);
+
+/** `application_name` on every connection, so `pg_stat_activity` names this client. */
+export const INDEX_APPLICATION_NAME = "substrate-mcp";
+
+/**
+ * Connections are recycled after this long whatever their state. A proxy in front
+ * of the database (Railway's TCP proxy is one) drops long-lived idle sockets
+ * silently; a bounded lifetime turns that into a planned reconnect.
+ */
+export const INDEX_MAX_LIFETIME_S = 3600;
+
+/** How long `ping` waits for `select 1` before calling the index unhealthy. */
+export const INDEX_PING_TIMEOUT_MS = 1000;
+
+/**
+ * How long `migrate` waits to take its session advisory lock. Two boots creating
+ * the same index otherwise deadlock; the loser gives up here instead of hanging
+ * on the pool's 5s `statement_timeout`.
+ */
+export const INDEX_MIGRATE_LOCK_TIMEOUT_MS = 180000;
+
+/** `statement_timeout` for the DDL itself, after the lock is held. */
+export const INDEX_MIGRATE_STATEMENT_TIMEOUT_MS = 120000;
+
+/**
+ * The pool and the per-connection timeouts. Before these existed the client was
+ * `new SQL(url)`: Bun's default pool of 10 per process, no connect timeout, no
+ * `statement_timeout`, no name — and production showed 19 idle connections with
+ * an empty `application_name` and a server-side `statement_timeout` of 0.
+ */
+export interface IndexPoolSettings {
+	/** Pool size per process. */
+	max: number;
+	/** How long one connect may take. */
+	connectTimeoutMs: number;
+	/** `statement_timeout` and `idle_in_transaction_session_timeout` per connection; 0 leaves the server default. */
+	statementTimeoutMs: number;
+	/** Idle connections are closed after this long; 0 keeps them forever. */
+	idleTimeoutS: number;
+	/** Always {@link INDEX_APPLICATION_NAME}; carried here so the composed options are one object. */
+	applicationName: string;
+}
+
+export const DEFAULT_INDEX_POOL_SETTINGS: IndexPoolSettings = {
+	max: 8,
+	connectTimeoutMs: 2000,
+	statementTimeoutMs: 5000,
+	idleTimeoutS: 300,
+	applicationName: INDEX_APPLICATION_NAME,
+};
+
+/** An integer within bounds, or the fallback. Bad values never throw: the server must still boot. */
+function boundedInt(raw: string | undefined, fallback: number, min: number, max: number): number {
+	const text = raw?.trim();
+	if (!text || !/^\d+$/.test(text)) return fallback;
+	const value = Number(text);
+	if (!Number.isSafeInteger(value)) return fallback;
+	return Math.min(max, Math.max(min, value));
+}
+
+/**
+ * `SUBSTRATE_PG_POOL_MAX` (1..50), `SUBSTRATE_PG_CONNECT_TIMEOUT_MS` (200..60000),
+ * `SUBSTRATE_PG_STATEMENT_TIMEOUT_MS` (0 = unset, ≤ 600000) and
+ * `SUBSTRATE_PG_IDLE_TIMEOUT_S` (0 = never, ≤ 86400). Out-of-range values clamp
+ * and unparseable ones fall back to the defaults.
+ */
+export function indexPoolSettingsFromEnv(env: Record<string, string | undefined> = process.env): IndexPoolSettings {
+	return {
+		max: boundedInt(env.SUBSTRATE_PG_POOL_MAX, DEFAULT_INDEX_POOL_SETTINGS.max, 1, 50),
+		connectTimeoutMs: boundedInt(env.SUBSTRATE_PG_CONNECT_TIMEOUT_MS, DEFAULT_INDEX_POOL_SETTINGS.connectTimeoutMs, 200, 60_000),
+		statementTimeoutMs: boundedInt(env.SUBSTRATE_PG_STATEMENT_TIMEOUT_MS, DEFAULT_INDEX_POOL_SETTINGS.statementTimeoutMs, 0, 600_000),
+		idleTimeoutS: boundedInt(env.SUBSTRATE_PG_IDLE_TIMEOUT_S, DEFAULT_INDEX_POOL_SETTINGS.idleTimeoutS, 0, 86_400),
+		applicationName: INDEX_APPLICATION_NAME,
+	};
+}
+
+/** The options object handed to Bun's `SQL`, as the constructor composes it. */
+export interface IndexSqlOptions {
+	max: number;
+	/** Seconds: Bun's unit for every pool timeout. */
+	connectionTimeout: number;
+	idleTimeout: number;
+	maxLifetime: number;
+	/** Startup parameters, sent with every connection so no `set` round-trip is needed. */
+	connection: Record<string, string>;
+}
+
+/**
+ * Pure, so a test can assert the composed options without opening a connection.
+ * `statement_timeout` and `idle_in_transaction_session_timeout` travel as startup
+ * parameters (Bun's `connection` option), which Postgres applies before the
+ * first statement — a `set` after connect would leave the first query unbounded.
+ * The idle-in-transaction bound is the same value: a transaction left open by a
+ * crashed caller holds row locks the sweeper and the lease CAS would wait on.
+ */
+export function indexSqlOptions(settings: Partial<IndexPoolSettings> = {}): IndexSqlOptions {
+	const merged = { ...DEFAULT_INDEX_POOL_SETTINGS, ...settings, applicationName: INDEX_APPLICATION_NAME };
+	const connection: Record<string, string> = { application_name: merged.applicationName };
+	if (merged.statementTimeoutMs > 0) {
+		connection.statement_timeout = String(merged.statementTimeoutMs);
+		connection.idle_in_transaction_session_timeout = String(merged.statementTimeoutMs);
+	}
+	return {
+		max: merged.max,
+		connectionTimeout: merged.connectTimeoutMs / 1000,
+		idleTimeout: merged.idleTimeoutS,
+		maxLifetime: INDEX_MAX_LIFETIME_S,
+		connection,
+	};
+}
+
+/** One expired entry a serving read met, and what the read did with it (uplift-3 N4). */
+export interface MemoryExpiredSample {
+	/** The caller the read was for; `unattributed` when the read did not say. */
+	surface: string;
+	kind: MemoryKind;
+	mode: "served" | "hidden";
+}
+
+/**
+ * How the store's serving reads treat entries past their `ttl` (uplift-3 N4).
+ * `report` serves them tagged; `enforce` leaves them out unless the read asked
+ * for them. `observe` is called once per expired entry met, in either mode.
+ */
+export interface MemoryExpirySettings {
+	mode: MemoryExpiryMode;
+	observe?: (sample: MemoryExpiredSample) => void;
+}
+
+export interface IndexStoreOptions {
+	/** Overrides on top of `indexPoolSettingsFromEnv(process.env)`. */
+	pool?: Partial<IndexPoolSettings>;
+	/** The index plane's breaker and observer. Absent means every call runs unwrapped, as before. */
+	gate?: PlaneGate | null;
+	/** Lifetime handling on serving reads. Absent is `report`, uncounted: what every read did before N4, plus the tag. */
+	memoryExpiry?: MemoryExpirySettings;
+	/** `SUBSTRATE_INDEX_TUNE=apply` (uplift-4 S2): apply the lease-table storage tune once at the end of `migrate()`. Absent is `off`. */
+	tune?: "off" | "apply";
+}
+
+/** What `/healthz` reports about the database's size, from `capacity()`. */
+export interface IndexCapacity {
+	databaseBytes: number;
+	/** The ten largest relations outside Timescale's own schemas. */
+	tables: Array<{ name: string; totalBytes: number; liveRows: number; deadRows: number }>;
+	/** `graph_nodes` lease-table bloat (uplift-4 S2), `null` when the table is absent: `n_tup_hot_upd / n_tup_upd` and `n_dead_tup / (n_live_tup + n_dead_tup)`, each `null` while its denominator is 0. */
+	graphNodes?: { hotUpdateRatio: number | null; deadRatio: number | null } | null;
+}
+
+/** Rejects with an error named `TimeoutError`, which the plane gate samples as a timeout. */
+function withTimeout<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
+	return new Promise<T>((resolve, reject) => {
+		const timer = setTimeout(() => {
+			const error = new Error(`${what} timed out after ${ms} ms`);
+			error.name = "TimeoutError";
+			reject(error);
+		}, ms);
+		work.then(
+			(value) => {
+				clearTimeout(timer);
+				resolve(value);
+			},
+			(cause) => {
+				clearTimeout(timer);
+				reject(cause);
+			},
+		);
+	});
+}
 
 /**
  * How many times a claim re-reads and retries after losing the compare-and-swap.
@@ -100,16 +301,16 @@ export interface GraphBindResult {
 /** A node row joined to its graph's repo, branch and status, for `graph_find`. */
 export type LinearNodeMatch = GraphNode & { repo: string | null; branch: string | null; graph_status: string | null };
 
-export class IndexStore implements MemoryStore {
-	private readonly sql: SQL;
-
-	constructor(connectionString: string) {
-		this.sql = new SQL(connectionString);
-	}
-
-	/** Idempotent DDL, run on boot. */
-	async migrate(): Promise<void> {
-		await this.sql`
+/**
+ * Boot DDL in application order. Versions are contiguous and never renumbered:
+ * a database stamps a version only after that statement commits. `tuneGraphNodes`
+ * is not a step — it stays opt-in inside `migrate` and is not ledgered.
+ */
+export const MIGRATION_STEPS: ReadonlyArray<{ version: number; name: string; sql: string }> = [
+	{
+		version: 1,
+		name: "graph_index",
+		sql: `
 			create table if not exists graph_index (
 				graph_id          text primary key,
 				notion_task_page  text,
@@ -120,8 +321,12 @@ export class IndexStore implements MemoryStore {
 				pr_url            text,
 				created           timestamptz default now(),
 				updated           timestamptz default now()
-			)`;
-		await this.sql`
+			)`,
+	},
+	{
+		version: 2,
+		name: "graph_nodes",
+		sql: `
 			create table if not exists graph_nodes (
 				graph_id          text not null references graph_index(graph_id) on delete cascade,
 				node_id           text not null,
@@ -133,23 +338,31 @@ export class IndexStore implements MemoryStore {
 				claimed_at        timestamptz,
 				claim_session     text,
 				primary key (graph_id, node_id)
-			)`;
-		// Leases were added after the table shipped, so the columns are added rather
-		// than declared: `create table if not exists` is a no-op against the Phase 0
-		// table and would leave a live index without them.
-		await this.sql`alter table graph_nodes add column if not exists lease_id text`;
-		await this.sql`alter table graph_nodes add column if not exists lease_expires_at timestamptz`;
-		await this.sql`alter table graph_nodes add column if not exists lease_heartbeat_at timestamptz`;
-		await this.sql`alter table graph_nodes add column if not exists lease_epoch bigint not null default 0`;
-		await this.sql`
+			)`,
+	},
+	// Leases were added after the table shipped, so the columns are added rather
+	// than declared: `create table if not exists` is a no-op against the Phase 0
+	// table and would leave a live index without them.
+	{ version: 3, name: "graph_nodes_lease_id", sql: `alter table graph_nodes add column if not exists lease_id text` },
+	{ version: 4, name: "graph_nodes_lease_expires_at", sql: `alter table graph_nodes add column if not exists lease_expires_at timestamptz` },
+	{ version: 5, name: "graph_nodes_lease_heartbeat_at", sql: `alter table graph_nodes add column if not exists lease_heartbeat_at timestamptz` },
+	{ version: 6, name: "graph_nodes_lease_epoch", sql: `alter table graph_nodes add column if not exists lease_epoch bigint not null default 0` },
+	{
+		version: 7,
+		name: "graph_edges",
+		sql: `
 			create table if not exists graph_edges (
 				graph_id  text not null,
 				from_node text not null,
 				to_node   text not null,
 				kind      text not null,
 				primary key (graph_id, from_node, to_node, kind)
-			)`;
-		await this.sql`
+			)`,
+	},
+	{
+		version: 8,
+		name: "graph_steps",
+		sql: `
 			create table if not exists graph_steps (
 				graph_id            text not null,
 				node_id             text not null,
@@ -158,18 +371,26 @@ export class IndexStore implements MemoryStore {
 				notion_page         text,
 				state               text,
 				primary key (graph_id, node_id, step)
-			)`;
-		// A swarm run's correlation_id bound to exactly one Graph ID. The primary key is
-		// what makes two runs racing one correlation_id resolve to a winner and a reader;
-		// no foreign key to graph_index, because a run binds before it registers its nodes.
-		await this.sql`
+			)`,
+	},
+	// A swarm run's correlation_id bound to exactly one Graph ID. The primary key is
+	// what makes two runs racing one correlation_id resolve to a winner and a reader;
+	// no foreign key to graph_index, because a run binds before it registers its nodes.
+	{
+		version: 9,
+		name: "graph_bindings",
+		sql: `
 			create table if not exists graph_bindings (
 				correlation_id text primary key,
 				graph_id       text not null,
 				bound_by       text,
 				created        timestamptz not null default now()
-			)`;
-		await this.sql`
+			)`,
+	},
+	{
+		version: 10,
+		name: "memory_entries",
+		sql: `
 			create table if not exists memory_entries (
 				id           text primary key,
 				scope        text not null,
@@ -180,13 +401,16 @@ export class IndexStore implements MemoryStore {
 				trust        text not null default 'agent-claimed',
 				ttl          text not null default 'permanent',
 				created      timestamptz not null default now()
-			)`;
-
-		// Governance columns, added rather than declared: `memory_entries` predates the
-		// gate and is live, so every one of these has to be safe on a table that
-		// already holds rows. The defaults are what an ungoverned Phase 0 entry
-		// honestly was — one version, written by an agent, superseding nothing.
-		await this.sql`
+			)`,
+	},
+	// Governance columns, added rather than declared: `memory_entries` predates the
+	// gate and is live, so every one of these has to be safe on a table that
+	// already holds rows. The defaults are what an ungoverned Phase 0 entry
+	// honestly was — one version, written by an agent, superseding nothing.
+	{
+		version: 11,
+		name: "memory_entries_governance_columns",
+		sql: `
 			alter table memory_entries
 				add column if not exists subject         text,
 				add column if not exists actor           text not null default 'agent',
@@ -199,11 +423,14 @@ export class IndexStore implements MemoryStore {
 				add column if not exists superseded_by   text,
 				add column if not exists entry_hash      text,
 				add column if not exists reverify_after  timestamptz,
-				add column if not exists idempotency_key text`;
-
-		// The idempotency ledger. One row per key ever spent; `claimed` is what makes
-		// an abandoned in-flight claim recoverable and a derived key expire.
-		await this.sql`
+				add column if not exists idempotency_key text`,
+	},
+	// The idempotency ledger. One row per key ever spent; `claimed` is what makes
+	// an abandoned in-flight claim recoverable and a derived key expire.
+	{
+		version: 12,
+		name: "memory_writes",
+		sql: `
 			create table if not exists memory_writes (
 				idempotency_key text primary key,
 				explicit        boolean not null default false,
@@ -213,16 +440,19 @@ export class IndexStore implements MemoryStore {
 				request_hash    text,
 				holder          text,
 				claimed         timestamptz not null default now()
-			)`;
-		// Insurance for anyone who ran an earlier build of this migration, where the claim
-		// had no fencing token.
-		await this.sql`alter table memory_writes add column if not exists holder text`;
-		await this.sql`alter table memory_writes add column if not exists request_hash text`;
-
-		// Parked writes. Both tables hold the *redacted* body: a quarantined secret is
-		// quarantined so a reviewer can see what was attempted, never so the substrate
-		// can keep the credential.
-		await this.sql`
+			)`,
+	},
+	// Insurance for anyone who ran an earlier build of this migration, where the claim
+	// had no fencing token.
+	{ version: 13, name: "memory_writes_holder", sql: `alter table memory_writes add column if not exists holder text` },
+	{ version: 14, name: "memory_writes_request_hash", sql: `alter table memory_writes add column if not exists request_hash text` },
+	// Parked writes. Both tables hold the *redacted* body: a quarantined secret is
+	// quarantined so a reviewer can see what was attempted, never so the substrate
+	// can keep the credential.
+	{
+		version: 15,
+		name: "memory_quarantine",
+		sql: `
 			create table if not exists memory_quarantine (
 				id           text primary key,
 				scope        text not null,
@@ -238,8 +468,12 @@ export class IndexStore implements MemoryStore {
 				reason       text not null,
 				detail       text not null,
 				created      timestamptz not null default now()
-			)`;
-		await this.sql`
+			)`,
+	},
+	{
+		version: 16,
+		name: "memory_reviews",
+		sql: `
 			create table if not exists memory_reviews (
 				id              text primary key,
 				scope           text not null,
@@ -259,43 +493,177 @@ export class IndexStore implements MemoryStore {
 				decided         timestamptz,
 				decided_by      text,
 				created         timestamptz not null default now()
-			)`;
-
-		await this.sql`create index if not exists graph_index_repo_idx on graph_index (repo)`;
-		await this.sql`create index if not exists graph_nodes_claimed_idx on graph_nodes (claimed_by)`;
-		await this.sql`create index if not exists graph_nodes_lease_idx on graph_nodes (lease_expires_at)`;
-		await this.sql`create index if not exists graph_edges_graph_idx on graph_edges (graph_id)`;
-		await this.sql`create index if not exists graph_bindings_graph_idx on graph_bindings (graph_id)`;
-		await this.sql`create index if not exists memory_scope_idx on memory_entries (scope)`;
-		// Seek directly to a scoped page boundary in its output order, including history.
-		await this.sql`
+			)`,
+	},
+	// Skills governance (uplift-5 S5a). The registry of which merged skill pull request an
+	// operator approved, declined or retired. A row is never deleted; see skills/registry.ts.
+	{
+		version: 17,
+		name: "skills_registry",
+		sql: `
+			create table if not exists skills_registry (
+				repo            text not null,
+				name            text not null,
+				pr_number       integer not null,
+				content_sha256  text not null default '',
+				state           text not null check (state in ('proposed', 'approved', 'declined', 'retired')),
+				proposed_by     text,
+				pr_url          text,
+				branch          text,
+				merge_sha       text,
+				decided_by      text,
+				decided_at      timestamptz,
+				reason          text,
+				created         timestamptz not null default now(),
+				updated         timestamptz not null default now(),
+				primary key (repo, name, pr_number)
+			)`,
+	},
+	{ version: 18, name: "skills_registry_state_idx", sql: `create index if not exists skills_registry_state_idx on skills_registry (repo, state, name)` },
+	{ version: 19, name: "graph_index_repo_idx", sql: `create index if not exists graph_index_repo_idx on graph_index (repo)` },
+	{ version: 20, name: "graph_nodes_claimed_idx", sql: `create index if not exists graph_nodes_claimed_idx on graph_nodes (claimed_by)` },
+	{ version: 21, name: "graph_nodes_lease_idx", sql: `create index if not exists graph_nodes_lease_idx on graph_nodes (lease_expires_at)` },
+	{ version: 22, name: "graph_edges_graph_idx", sql: `create index if not exists graph_edges_graph_idx on graph_edges (graph_id)` },
+	{ version: 23, name: "graph_bindings_graph_idx", sql: `create index if not exists graph_bindings_graph_idx on graph_bindings (graph_id)` },
+	{ version: 24, name: "memory_scope_idx", sql: `create index if not exists memory_scope_idx on memory_entries (scope)` },
+	// Seek directly to a scoped page boundary in its output order, including history.
+	{
+		version: 25,
+		name: "memory_scope_created_id_idx",
+		sql: `
 			create index if not exists memory_scope_created_id_idx
-			on memory_entries (scope, created desc, id desc)`;
-		await this.sql`create index if not exists memory_fts_idx on memory_entries using gin (to_tsvector('english', body))`;
-		// The identity the lww and versioned strategies resolve against: one standing
-		// entry per conflict key, enforced rather than merely selected for.
-		await this.sql`
+			on memory_entries (scope, created desc, id desc)`,
+	},
+	{ version: 26, name: "memory_fts_idx", sql: `create index if not exists memory_fts_idx on memory_entries using gin (to_tsvector('english', body))` },
+	// The identity the lww and versioned strategies resolve against: one standing
+	// entry per conflict key, enforced rather than merely selected for.
+	{
+		version: 27,
+		name: "memory_standing_idx",
+		sql: `
 			create unique index if not exists memory_standing_idx on memory_entries (conflict_key)
-			where conflict_key is not null and superseded_by is null`;
-		await this.sql`create index if not exists memory_reverify_idx on memory_entries (reverify_after)`;
-		// What makes parking idempotent: a retried write finds its own parked row
-		// instead of adding another for a reviewer to wade through.
-		await this.sql`create unique index if not exists memory_quarantine_hash_idx on memory_quarantine (entry_hash)`;
-		// One *pending* proposal per content, and nothing said about the decided ones.
-		//
-		// It used to be unique on `(entry_hash, state)`, which also forbade a second
-		// approved row — and that is a rule nobody wanted. Content approved once can be
-		// proposed again (the derived key for an unreviewed write is spent on a refusal,
-		// so re-asking is allowed by design), and approving that second proposal moves it
-		// to `approved` beside the first. Under the old index that UPDATE raised a
-		// duplicate key *after* the entry had already committed: the gate's catch held
-		// the claim, the caller was told the write failed, and the entry was sitting in
-		// the index all along. Uniqueness over the pending rows is what parking actually
-		// needs; the decided rows are an audit trail and may repeat.
-		await this.sql`
+			where conflict_key is not null and superseded_by is null`,
+	},
+	{ version: 28, name: "memory_reverify_idx", sql: `create index if not exists memory_reverify_idx on memory_entries (reverify_after)` },
+	// What makes parking idempotent: a retried write finds its own parked row
+	// instead of adding another for a reviewer to wade through.
+	{ version: 29, name: "memory_quarantine_hash_idx", sql: `create unique index if not exists memory_quarantine_hash_idx on memory_quarantine (entry_hash)` },
+	// One *pending* proposal per content, and nothing said about the decided ones.
+	//
+	// It used to be unique on `(entry_hash, state)`, which also forbade a second
+	// approved row — and that is a rule nobody wanted. Content approved once can be
+	// proposed again (the derived key for an unreviewed write is spent on a refusal,
+	// so re-asking is allowed by design), and approving that second proposal moves it
+	// to `approved` beside the first. Under the old index that UPDATE raised a
+	// duplicate key *after* the entry had already committed: the gate's catch held
+	// the claim, the caller was told the write failed, and the entry was sitting in
+	// the index all along. Uniqueness over the pending rows is what parking actually
+	// needs; the decided rows are an audit trail and may repeat.
+	{
+		version: 30,
+		name: "memory_reviews_pending_idx",
+		sql: `
 			create unique index if not exists memory_reviews_pending_idx on memory_reviews (entry_hash)
-			where state = 'pending'`;
-		await this.sql`drop index if exists memory_reviews_hash_idx`;
+			where state = 'pending'`,
+	},
+];
+
+export class IndexStore implements MemoryStore {
+	private readonly sql: SQL;
+	private readonly gate: PlaneGate | null;
+	private readonly expiry: MemoryExpirySettings;
+	readonly poolSettings: IndexPoolSettings;
+	/** `SUBSTRATE_INDEX_TUNE`: `apply` runs {@link IndexStore.tuneGraphNodes} at the end of `migrate()`; `off` (the default) never alters a table. */
+	readonly tune: "off" | "apply";
+
+	constructor(connectionString: string, options: IndexStoreOptions = {}) {
+		this.poolSettings = { ...indexPoolSettingsFromEnv(), ...options.pool, applicationName: INDEX_APPLICATION_NAME };
+		this.sql = new SQL(connectionString, indexSqlOptions(this.poolSettings));
+		this.gate = options.gate ?? null;
+		this.expiry = options.memoryExpiry ?? { mode: "report" };
+		this.tune = options.tune ?? "off";
+	}
+
+	/** One index call under the plane gate. Without a gate it is just `fn()`. */
+	private plane<T>(op: string, fn: () => Promise<T>): Promise<T> {
+		return callPlane(this.gate, op, fn, { isFailure: isStoreFailure });
+	}
+
+	/**
+	 * Idempotent DDL, run on boot. One reserved connection holds a session advisory
+	 * lock so two boots cannot deadlock on `CREATE INDEX`. Versions already in
+	 * `schema_migrations` are skipped; a missing version still runs, so an index
+	 * that booted before the ledger still receives later statements.
+	 */
+	async migrate(): Promise<void> {
+		const reserved = await this.sql.reserve();
+		let migrateFailed = false;
+		try {
+			// SET does not accept bind parameters. The timeouts are numeric constants.
+			await reserved.unsafe(`SET lock_timeout = ${INDEX_MIGRATE_LOCK_TIMEOUT_MS}`);
+			await reserved.unsafe(`SET statement_timeout = ${INDEX_MIGRATE_LOCK_TIMEOUT_MS}`);
+			await reserved`select pg_advisory_lock(hashtextextended(${indexMigrateLockKey()}::text, 0))`;
+			await reserved.unsafe(`SET statement_timeout = ${INDEX_MIGRATE_STATEMENT_TIMEOUT_MS}`);
+			await reserved`
+				create table if not exists schema_migrations (
+					version int primary key,
+					name text not null,
+					applied_at timestamptz not null default now()
+				)`;
+			for (const step of MIGRATION_STEPS) {
+				const present = await reserved`select version from schema_migrations where version = ${step.version}`;
+				if (present.length > 0) continue;
+				await reserved`begin`;
+				try {
+					await reserved.unsafe(step.sql);
+					await reserved`insert into schema_migrations (version, name) values (${step.version}, ${step.name})`;
+					await reserved`commit`;
+				} catch (cause) {
+					try {
+						await reserved`rollback`;
+					} catch {
+						// The session may already be aborted; the statement error is the one to surface.
+					}
+					throw cause;
+				}
+			}
+			// Not ledgered. A database can regain this index after the first boot (an old
+			// unique index on `(entry_hash, state)` rejects a second approval). `IF EXISTS`
+			// makes every later boot a no-op once it is gone.
+			await reserved.unsafe(`drop index if exists memory_reviews_hash_idx`);
+		} catch (cause) {
+			migrateFailed = true;
+			throw cause;
+		} finally {
+			try {
+				await reserved`select pg_advisory_unlock(hashtextextended(${indexMigrateLockKey()}::text, 0))`;
+				await reserved.unsafe("RESET lock_timeout");
+				await reserved.unsafe("RESET statement_timeout");
+				reserved.release();
+			} catch (cause) {
+				// A failed unlock leaves the session lock on this connection. Returning it
+				// to the pool would pin that lock for the next borrower, so discard it.
+				try {
+					await reserved.close({ timeout: 0 });
+				} catch {
+					// Already dead. The session lock dies with the connection.
+				}
+				if (!migrateFailed) throw cause;
+			}
+		}
+		// After the reserved connection is back in the pool. `tuneGraphNodes` uses
+		// `this.sql`, so running it while `reserve()` holds the only connection
+		// (`SUBSTRATE_PG_POOL_MAX=1`) waits on itself and boot never finishes.
+		if (!migrateFailed) {
+			// Opt-in, once: a failed tune must not stop the service booting on a schema that is already complete.
+			if (this.tune === "apply") {
+				try {
+					await this.tuneGraphNodes();
+				} catch (cause) {
+					process.stderr.write(`[substrate] index tune not applied: ${redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200)}\n`);
+				}
+			}
+		}
 	}
 
 	// ── graph ──────────────────────────────────────────────────────────────────
@@ -389,34 +757,76 @@ export class IndexStore implements MemoryStore {
 	}
 
 	async getGraph(graphId: string): Promise<GraphView | null> {
-		const rows = (await this.sql`select * from graph_index where graph_id = ${graphId}`) as GraphIndexRow[];
-		const row = rows[0];
-		if (!row) return null;
-		const nodes = ((await this.sql`
-			select * from graph_nodes where graph_id = ${graphId} order by node_id`) as GraphNode[]).map(toNode);
-		const steps = (await this.sql`
-			select * from graph_steps where graph_id = ${graphId} order by node_id, step`) as GraphStep[];
-		const edges = (await this.sql`
-			select * from graph_edges where graph_id = ${graphId} order by from_node, to_node, kind`) as GraphEdge[];
-		return { ...row, nodes, steps, edges };
+		return this.plane("graph.get", async () => {
+			const rows = (await this.sql`select * from graph_index where graph_id = ${graphId}`) as GraphIndexRow[];
+			const row = rows[0];
+			if (!row) return null;
+			const nodes = ((await this.sql`
+				select * from graph_nodes where graph_id = ${graphId} order by node_id`) as GraphNode[]).map(toNode);
+			const steps = (await this.sql`
+				select * from graph_steps where graph_id = ${graphId} order by node_id, step`) as GraphStep[];
+			const edges = (await this.sql`
+				select * from graph_edges where graph_id = ${graphId} order by from_node, to_node, kind`) as GraphEdge[];
+			return { ...row, nodes, steps, edges };
+		});
 	}
 
-	/** Graphs in a repo that are not finished — what "who else is working here" means. */
+	/**
+	 * The graph as a brief reads it (uplift-5 U5-3, `SUBSTRATE_BRIEF_GRAPH_READ=lite`): the
+	 * `graph_index` row and the `graph_nodes` rows, issued together, with `steps` and `edges`
+	 * left empty. The brief prints status, surface, pr_url and the nodes and nothing else, so two
+	 * statements in one round trip replace `getGraph`'s four in sequence, and the view is
+	 * `openGraphs`' own shape. Same answers as `getGraph` where the brief looks: no row is `null`
+	 * (whatever the nodes read did), a failed index read throws, and a failed node read throws
+	 * only when there is a row to attach its nodes to.
+	 */
+	async getGraphForBrief(graphId: string): Promise<GraphView | null> {
+		return this.plane("graph.brief", async () => {
+			const [indexRead, nodesRead] = await Promise.allSettled([
+				this.sql`select * from graph_index where graph_id = ${graphId}`,
+				this.sql`select * from graph_nodes where graph_id = ${graphId} order by node_id`,
+			]);
+			if (indexRead.status === "rejected") throw indexRead.reason;
+			const row = (indexRead.value as GraphIndexRow[])[0];
+			if (!row) return null;
+			if (nodesRead.status === "rejected") throw nodesRead.reason;
+			return { ...row, nodes: (nodesRead.value as GraphNode[]).map(toNode), steps: [], edges: [] };
+		});
+	}
+
+	/**
+	 * Graphs in a repo that are not finished — what "who else is working here" means.
+	 *
+	 * Two round trips, however many graphs are open: one `graph_index` select for
+	 * the (at most ten) open rows, then one `graph_nodes` select for all of them,
+	 * grouped per graph here. The brief runs this under a shared budget, and in
+	 * production every round trip crosses a public proxy — a query per open graph
+	 * spent the whole budget on nodes alone. Zero open graphs means one trip. Per
+	 * graph the nodes keep `node_id` order; a graph with no nodes has `nodes: []`.
+	 */
 	async openGraphs(repo: string, excludeGraphId?: string): Promise<GraphView[]> {
-		const rows = (await this.sql`
-			select * from graph_index
-			where repo = ${repo}
-			  and (status is null or status not in ${this.sql(TERMINAL_STATUSES)})
-			  and (${excludeGraphId ?? null}::text is null or graph_id <> ${excludeGraphId ?? null})
-			order by updated desc
-			limit 10`) as GraphIndexRow[];
-		const out: GraphView[] = [];
-		for (const row of rows) {
-			const nodes = ((await this.sql`
-				select * from graph_nodes where graph_id = ${row.graph_id} order by node_id`) as GraphNode[]).map(toNode);
-			out.push({ ...row, nodes, steps: [], edges: [] });
-		}
-		return out;
+		return this.plane("graph.open", async () => {
+			const rows = (await this.sql`
+				select * from graph_index
+				where repo = ${repo}
+				  and (status is null or status not in ${this.sql(TERMINAL_STATUSES)})
+				  and (${excludeGraphId ?? null}::text is null or graph_id <> ${excludeGraphId ?? null})
+				order by updated desc
+				limit 10`) as GraphIndexRow[];
+			if (rows.length === 0) return [];
+			const ids = rows.map((row) => row.graph_id);
+			// The list helper, as above for the statuses: handing the driver a bare
+			// array stringifies it into a literal Postgres rejects.
+			const nodeRows = (await this.sql`
+				select * from graph_nodes where graph_id in ${this.sql(ids)} order by graph_id, node_id`) as GraphNode[];
+			const nodesByGraph = new Map<string, GraphNode[]>();
+			for (const node of nodeRows) {
+				const list = nodesByGraph.get(node.graph_id);
+				if (list) list.push(toNode(node));
+				else nodesByGraph.set(node.graph_id, [toNode(node)]);
+			}
+			return rows.map((row) => ({ ...row, nodes: nodesByGraph.get(row.graph_id) ?? [], steps: [], edges: [] }));
+		});
 	}
 
 	// ── leases ─────────────────────────────────────────────────────────────────
@@ -437,7 +847,7 @@ export class IndexStore implements MemoryStore {
 
 	private async node(graphId: string, nodeId: string): Promise<GraphNode> {
 		const found = await this.readNode(graphId, nodeId);
-		if (!found) throw new Error(`unknown node ${graphId}/${nodeId}`);
+		if (!found) throw new UnknownNode(graphId, nodeId);
 		return found;
 	}
 
@@ -469,6 +879,17 @@ export class IndexStore implements MemoryStore {
 		sessionId: string,
 		caller: Surface | null,
 		ttlSeconds: number = DEFAULT_LEASE_TTL_SECONDS,
+	): Promise<{ claimed: boolean; node: GraphNode; lease: LeaseView; decision: ClaimDecision }> {
+		return this.plane("lease.claim", () => this.claimNodeUnguarded(graphId, nodeId, surface, sessionId, caller, ttlSeconds));
+	}
+
+	private async claimNodeUnguarded(
+		graphId: string,
+		nodeId: string,
+		surface: Surface,
+		sessionId: string,
+		caller: Surface | null,
+		ttlSeconds: number,
 	): Promise<{ claimed: boolean; node: GraphNode; lease: LeaseView; decision: ClaimDecision }> {
 		const ttl = normalizeTtlSeconds(ttlSeconds);
 		const request = { surface, session_id: sessionId, ttl_seconds: ttl, caller };
@@ -563,6 +984,16 @@ export class IndexStore implements MemoryStore {
 		caller: Surface | null,
 		ttlSeconds: number = DEFAULT_LEASE_TTL_SECONDS,
 	): Promise<{ ok: boolean; node: GraphNode; lease: LeaseView; decision: HeartbeatDecision }> {
+		return this.plane("lease.heartbeat", () => this.heartbeatNodeUnguarded(graphId, nodeId, leaseId, caller, ttlSeconds));
+	}
+
+	private async heartbeatNodeUnguarded(
+		graphId: string,
+		nodeId: string,
+		leaseId: string,
+		caller: Surface | null,
+		ttlSeconds: number,
+	): Promise<{ ok: boolean; node: GraphNode; lease: LeaseView; decision: HeartbeatDecision }> {
 		const ttl = normalizeTtlSeconds(ttlSeconds);
 		const request = { lease_id: leaseId, ttl_seconds: ttl, caller };
 		const observed = await this.node(graphId, nodeId);
@@ -641,6 +1072,16 @@ export class IndexStore implements MemoryStore {
 		caller: Surface | null,
 		ttlSeconds: number = DEFAULT_LEASE_TTL_SECONDS,
 	): Promise<{ ok: boolean; node: GraphNode; lease: LeaseView; decision: HeartbeatDecision }> {
+		return this.plane("lease.review", () => this.reviewNodeUnguarded(graphId, nodeId, leaseId, caller, ttlSeconds));
+	}
+
+	private async reviewNodeUnguarded(
+		graphId: string,
+		nodeId: string,
+		leaseId: string,
+		caller: Surface | null,
+		ttlSeconds: number,
+	): Promise<{ ok: boolean; node: GraphNode; lease: LeaseView; decision: HeartbeatDecision }> {
 		const ttl = normalizeTtlSeconds(ttlSeconds);
 		const request = { lease_id: leaseId, ttl_seconds: ttl, caller };
 		const observed = await this.node(graphId, nodeId);
@@ -689,6 +1130,16 @@ export class IndexStore implements MemoryStore {
 		/** Written in the same statement as the release, for `completeNode`. */
 		alsoSetState?: NodeState,
 	): Promise<{ released: boolean; node: GraphNode; decision: ReleaseDecision }> {
+		return this.plane("lease.release", () => this.releaseNodeUnguarded(graphId, nodeId, request, caller, alsoSetState));
+	}
+
+	private async releaseNodeUnguarded(
+		graphId: string,
+		nodeId: string,
+		request: { lease_id?: string | null; force?: boolean },
+		caller: Surface | null,
+		alsoSetState?: NodeState,
+	): Promise<{ released: boolean; node: GraphNode; decision: ReleaseDecision }> {
 		const observed = await this.node(graphId, nodeId);
 		const decision = decideRelease(leaseSnapshot(observed), { ...request, caller }, Date.now());
 		if (!decision.ok) return { released: false, node: observed, decision };
@@ -732,6 +1183,12 @@ export class IndexStore implements MemoryStore {
 	 * it goes to whoever asked and into the ledger, and neither is the holder.
 	 */
 	async reapExpiredLeases(
+		repo?: string | null,
+	): Promise<Array<{ graph_id: string; node_id: string; linear_issue_id: string | null; linear_identifier: string | null; notion_page: string | null; holder: LeaseHolder | null; lease_epoch: number; expired_at: string | null }>> {
+		return this.plane("lease.reap", () => this.reapExpiredLeasesUnguarded(repo));
+	}
+
+	private async reapExpiredLeasesUnguarded(
 		repo?: string | null,
 	): Promise<Array<{ graph_id: string; node_id: string; linear_issue_id: string | null; linear_identifier: string | null; notion_page: string | null; holder: LeaseHolder | null; lease_epoch: number; expired_at: string | null }>> {
 		// The holders are read in a CTE rather than out of `returning`: an UPDATE's
@@ -923,6 +1380,8 @@ export class IndexStore implements MemoryStore {
 		entryHash: string;
 		requestHash: string;
 		entryId: string;
+		alsoEntryHash?: string | null;
+		alsoRequestHash?: string | null;
 	}): Promise<ClaimResult> {
 		const holder = `hold_${randomUUID().replace(/-/g, "")}`;
 		const inFlightSeconds = IN_FLIGHT_TIMEOUT_MS / 1000;
@@ -985,7 +1444,9 @@ export class IndexStore implements MemoryStore {
 			// finished record. Whether the attempt that spent it acknowledged itself or died
 			// still holding the key does not change what the key promised.
 			const heldFor = optional(row.request_hash);
-			const sameAsk = heldFor !== undefined && heldFor === input.requestHash;
+			const alsoRequest = input.alsoRequestHash ?? null;
+			const sameAsk =
+				heldFor !== undefined && (heldFor === input.requestHash || (alsoRequest !== null && heldFor === alsoRequest));
 
 			// A record written before `request_hash` existed records no identity, and no
 			// identity is *unknown*, not "matches whoever asks". Reading it as a wildcard was
@@ -999,7 +1460,11 @@ export class IndexStore implements MemoryStore {
 			// So an unidentified claim is handed over only where the hand-over can strand
 			// nothing: its reservation names no row yet, or names one already holding this
 			// write's content — which is the write that made it, retrying.
-			const reservationIsOurs = reservedHash === undefined || reservedHash === input.entryHash;
+			const alsoEntry = input.alsoEntryHash ?? null;
+			const reservationIsOurs =
+				reservedHash === undefined ||
+				reservedHash === input.entryHash ||
+				(alsoEntry !== null && reservedHash === alsoEntry);
 			const legacyRecoverable = heldFor === undefined && reservationIsOurs;
 			const takeable =
 				(outcome !== "accepted" && !inFlight) ||
@@ -1201,6 +1666,25 @@ export class IndexStore implements MemoryStore {
 		return row ? toMemoryEntry(row) : null;
 	}
 
+	/**
+	 * Record a source on an entry that has none. The retain replay reads this
+	 * column, so a retry that only reports the source leaves the queued lesson
+	 * unsourced. A row that already has this source is unchanged; a different
+	 * source is left alone and reported as not saved.
+	 */
+	async attachSource(id: string, sourceEvent: string): Promise<MemoryEntry | null> {
+		const updated = (await this.sql`
+			update memory_entries
+			set source_event = ${sourceEvent}
+			where id = ${id} and source_event is null
+			returning *`) as Array<Record<string, unknown>>;
+		const row = updated[0];
+		if (row) return toMemoryEntry(row);
+		const current = await this.readEntry(id);
+		if (current && (current.source_event ?? null) === sourceEvent) return current;
+		return null;
+	}
+
 	/** Park a classified write. Idempotent on the content hash. */
 	async quarantineEntry(row: NewMemoryEntry & { reason: QuarantineReason; detail: string }): Promise<string> {
 		const inserted = (await this.sql`
@@ -1217,6 +1701,30 @@ export class IndexStore implements MemoryStore {
 		const existing = (await this.sql`
 			select id from memory_quarantine where entry_hash = ${row.entry_hash}`) as Array<Record<string, unknown>>;
 		return existing[0] ? String(existing[0].id) : row.id;
+	}
+
+	/** The claim row for a key, or null. Does not take the lock and does not insert. */
+	async findWrite(key: string): Promise<WriteRecord | null> {
+		const rows = (await this.sql`
+			select idempotency_key, explicit, outcome, entry_id, entry_hash, request_hash
+			from memory_writes where idempotency_key = ${key}`) as Array<Record<string, unknown>>;
+		const row = rows[0];
+		if (row === undefined) return null;
+		return {
+			idempotency_key: String(row.idempotency_key),
+			explicit: row.explicit === true,
+			outcome: String(row.outcome) as WriteRecord["outcome"],
+			entry_id: row.entry_id === null || row.entry_id === undefined ? null : String(row.entry_id),
+			entry_hash: String(row.entry_hash),
+			request_hash: row.request_hash === null || row.request_hash === undefined ? null : String(row.request_hash),
+		};
+	}
+
+	/** One column: the quarantine row whose `entry_hash` is this digest, if any. */
+	async findQuarantineByHash(entryHash: string): Promise<string | null> {
+		const rows = (await this.sql`
+			select id from memory_quarantine where entry_hash = ${entryHash}`) as Array<Record<string, unknown>>;
+		return rows[0] ? String(rows[0].id) : null;
 	}
 
 	/** Park a proposal for review. Idempotent on the content hash while pending. */
@@ -1239,6 +1747,15 @@ export class IndexStore implements MemoryStore {
 			Record<string, unknown>
 		>;
 		return existing[0] ? String(existing[0].id) : row.id;
+	}
+
+	/** One column: the pending review whose `entry_hash` is this digest, if any. */
+	async findPendingReviewByHash(entryHash: string): Promise<string | null> {
+		const rows = (await this.sql`
+			select id from memory_reviews where entry_hash = ${entryHash} and state = 'pending'`) as Array<
+			Record<string, unknown>
+		>;
+		return rows[0] ? String(rows[0].id) : null;
 	}
 
 	/**
@@ -1294,6 +1811,151 @@ export class IndexStore implements MemoryStore {
 		return { reviews: reviews.map(toQueueRow), quarantined: quarantined.map(toQueueRow) };
 	}
 
+	// ── skills registry (uplift-5 S5a) ─────────────────────────────────────────
+	//
+	// One row per (repo, name, pr_number); rows are never deleted. The state machine and the
+	// reasons behind it are in `skills/registry.ts`; this is the storage half.
+
+	/**
+	 * Record that `skills_propose` opened (or found) a pull request. Idempotent: a row that exists
+	 * is left as it is, except that a row an approval created before the proposal was recorded
+	 * (no content hash) learns it. State is never touched here, so a retry after a decision cannot
+	 * move a decided row back to `proposed`.
+	 */
+	async upsertProposedSkill(input: {
+		repo: string;
+		name: string;
+		pr_number: number;
+		pr_url: string;
+		branch: string | null;
+		content_sha256: string;
+		proposed_by: string;
+	}): Promise<void> {
+		await this.plane("skills.propose", async () => {
+			await this.sql`
+				insert into skills_registry (repo, name, pr_number, content_sha256, state, proposed_by, pr_url, branch)
+				values (${input.repo}, ${input.name}, ${input.pr_number}, ${input.content_sha256}, 'proposed',
+				        ${input.proposed_by}, ${input.pr_url}, ${input.branch})
+				on conflict (repo, name, pr_number) do update
+				set content_sha256 = excluded.content_sha256,
+				    proposed_by = coalesce(skills_registry.proposed_by, excluded.proposed_by),
+				    branch = coalesce(skills_registry.branch, excluded.branch),
+				    updated = now()
+				where skills_registry.content_sha256 = ''`;
+		});
+	}
+
+	/**
+	 * Apply one operator decision to the registry, atomically. Decisions are serialised per (repo, name) by a
+	 * transaction-scoped advisory lock taken first, so `remaining_approved` is the true post-decision total of
+	 * the name. Then the row is locked, the pure `transition` judges it, and only an `apply` writes: `exists`
+	 * leaves the row (and so the caller emits nothing), a refusal leaves it too. A row that does not exist yet
+	 * is created in the decided state, which is how a pull request proposed while the registry was off is
+	 * approved.
+	 */
+	async decideSkill(input: {
+		repo: string;
+		name: string;
+		pr_number: number;
+		decision: SkillDecision;
+		/** The merge commit an approve is about; null for decline and retire. */
+		merge_sha: string | null;
+		pr_url: string | null;
+		branch: string | null;
+		/** `proposed_by` for a row this decision creates. */
+		proposed_by: string | null;
+		decided_by: string;
+		reason: string | null;
+	}): Promise<SkillDecisionResult> {
+		return this.plane("skills.decide", async () =>
+			this.sql.begin(async (tx: SQL) => {
+				// How many approved rows the name has once this decision stands, in the same transaction.
+				const remaining = async (): Promise<number> => {
+					const counted = (await tx`
+						select count(*)::int as n from skills_registry
+						where repo = ${input.repo} and name = ${input.name} and state = 'approved'`) as Array<Record<string, unknown>>;
+					return Number(counted[0]?.n ?? 0);
+				};
+				// Serialise decisions per (repo, name) BEFORE locking the row or counting: the row lock below is one
+				// pull request's, but `remaining` counts every approved row of the name, so two concurrent decisions on
+				// different pull requests of one name could each see the other's row still approved and both answer a
+				// count that is not the final total. The transaction-scoped advisory lock (released at commit or
+				// rollback) makes the count the true post-decision total. The key is a stable 64-bit hash of repo+name
+				// (a collision only makes two unrelated names wait for each other).
+				await tx`select pg_advisory_xact_lock(hashtextextended(${skillDecisionLockKey(input.repo, input.name)}::text, 0))`;
+				for (let attempt = 0; attempt < 2; attempt++) {
+					const found = (await tx`
+						select * from skills_registry
+						where repo = ${input.repo} and name = ${input.name} and pr_number = ${input.pr_number}
+						for update`) as Array<Record<string, unknown>>;
+					const current = found[0] ? toSkillRow(found[0]) : null;
+					const verdict = transition(current, input.decision, input.merge_sha);
+					if (verdict.kind === "exists" && current) return { outcome: "exists" as const, row: current, remaining_approved: await remaining() };
+					if (verdict.kind === "refuse") return { outcome: "refused" as const, rule: verdict.rule, row: current };
+					if (verdict.kind !== "apply") continue;
+					if (current) {
+						const updated = (await tx`
+							update skills_registry
+							set state = ${verdict.to},
+							    merge_sha = coalesce(${input.merge_sha}::text, merge_sha),
+							    pr_url = coalesce(${input.pr_url}::text, pr_url),
+							    branch = coalesce(${input.branch}::text, branch),
+							    decided_by = ${input.decided_by}, decided_at = now(), reason = ${input.reason},
+							    updated = now()
+							where repo = ${input.repo} and name = ${input.name} and pr_number = ${input.pr_number}
+							returning *`) as Array<Record<string, unknown>>;
+						return { outcome: "applied" as const, row: toSkillRow(updated[0] as Record<string, unknown>), remaining_approved: await remaining() };
+					}
+					const inserted = (await tx`
+						insert into skills_registry (
+							repo, name, pr_number, content_sha256, state, proposed_by, pr_url, branch, merge_sha,
+							decided_by, decided_at, reason)
+						values (${input.repo}, ${input.name}, ${input.pr_number}, '', ${verdict.to}, ${input.proposed_by},
+						        ${input.pr_url}, ${input.branch}, ${input.merge_sha}, ${input.decided_by}, now(), ${input.reason})
+						on conflict (repo, name, pr_number) do nothing
+						returning *`) as Array<Record<string, unknown>>;
+					// A concurrent decision created the row between the select and the insert: judge it on the next pass.
+					if (inserted[0]) return { outcome: "applied" as const, row: toSkillRow(inserted[0]), remaining_approved: await remaining() };
+				}
+				throw new Error("skills registry row kept changing under the decision");
+			}) as Promise<SkillDecisionResult>,
+		);
+	}
+
+	/**
+	 * What `skills_list` reads, at most `limit` entries, ordered by name in code-unit order
+	 * (`collate "C"`, so `a-b` sorts before `ab`, as a JS string compare does; the database's own
+	 * collation ignores the hyphen at the first level).
+	 *
+	 * `state` `approved` is BY NAME: one row per name, its most recent approved row (latest
+	 * `decided_at`, then highest pull request number), because a reader builds a set of names and a
+	 * name stays approved while any of its rows is. Any other `state` (null is every state) is every
+	 * matching row by name then pull request number. Callers ask for `LIST_MAX + 1` to learn whether
+	 * the answer was cut.
+	 */
+	async listSkills(repo: string, state: SkillState | null, limit: number): Promise<SkillRegistryRow[]> {
+		return this.plane("skills.list", async () => {
+			const rows = (
+				state === "approved"
+					? await this.sql`
+						select * from (
+							select distinct on (name) *
+							from skills_registry
+							where repo = ${repo} and state = 'approved'
+							order by name, decided_at desc nulls last, pr_number desc
+						) latest
+						order by name collate "C" asc
+						limit ${limit}`
+					: await this.sql`
+						select * from skills_registry
+						where repo = ${repo} and (${state}::text is null or state = ${state})
+						order by name collate "C" asc, pr_number asc
+						limit ${limit}`
+			) as Array<Record<string, unknown>>;
+			return rows.map(toSkillRow);
+		});
+	}
+
 	/**
 	 * Full-text search. Superseded entries are excluded by default: an agent asking
 	 * what is true wants what is in force, not every version of it. A decision log is
@@ -1302,8 +1964,14 @@ export class IndexStore implements MemoryStore {
 	 * The newest `limit` matches and nothing more; `searchMemoryPage` is how a caller
 	 * reads past them.
 	 */
-	async searchMemory(query: string, scope?: string, limit = 20, includeSuperseded = false): Promise<MemoryEntry[]> {
-		return (await this.searchMemoryPage({ query, scope, limit, includeSuperseded })).entries;
+	async searchMemory(
+		query: string,
+		scope?: string,
+		limit = 20,
+		includeSuperseded = false,
+		read?: MemoryReadOptions,
+	): Promise<MemoryEntry[]> {
+		return (await this.searchMemoryPage({ query, scope, limit, includeSuperseded }, read)).entries;
 	}
 
 	/**
@@ -1321,8 +1989,15 @@ export class IndexStore implements MemoryStore {
 	 *
 	 * `subjectPrefix` arrives normalised and is matched with `left()`, so `%`, `_`
 	 * and `\` in it are the characters they are rather than LIKE patterns.
+	 *
+	 * Lifetime (uplift-3 N4) is judged after the page is read — see
+	 * {@link IndexStore.servable}. The cursor is taken from the page as the
+	 * database returned it, before any expired entry is left out, so a page
+	 * `enforce` thinned stays a page: `next` still points past every row it
+	 * covered and nothing is skipped or repeated. A page may therefore come back
+	 * shorter than `limit` with `next` set; only a short *raw* page is the end.
 	 */
-	async searchMemoryPage(search: MemorySearch): Promise<MemorySearchPage> {
+	async searchMemoryPage(search: MemorySearch, read?: MemoryReadOptions): Promise<MemorySearchPage> {
 		const limit = search.limit ?? 20;
 		const query = search.query ?? "";
 		const prefix = search.subjectPrefix ?? null;
@@ -1335,24 +2010,26 @@ export class IndexStore implements MemoryStore {
 			: beforeId === null
 				? this.sql`and created < ${before}::timestamptz`
 				: this.sql`and (created, id) < (${before}::timestamptz, ${beforeId}::text)`;
-		const rows = (await this.sql`
-			select *, to_char(created at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as cursor_created
-			from memory_entries
-			where true
-			  ${search.scope == null ? this.sql`` : this.sql`and scope = ${search.scope}`}
-			  ${search.includeSuperseded ? this.sql`` : this.sql`and superseded_by is null`}
-			  ${query === "" ? this.sql`` : this.sql`and to_tsvector('english', body) @@ plainto_tsquery('english', ${query})`}
-			  ${prefix === null ? this.sql`` : this.sql`and left(subject, char_length(${prefix}::text)) = ${prefix}::text`}
-			  ${search.writer == null ? this.sql`` : this.sql`and writer = ${search.writer}`}
-			  ${search.kind == null ? this.sql`` : this.sql`and kind = ${search.kind}`}
-			  ${cursor}
-			order by created desc, id desc
-			limit ${limit}`) as Array<Record<string, unknown>>;
-		const last = rows.length === limit ? rows[rows.length - 1] : undefined;
-		return {
-			entries: rows.map((row) => toMemoryEntry(row)),
-			next: last ? { before: String(last.cursor_created), before_id: String(last.id) } : null,
-		};
+		return this.plane("memory.search", async () => {
+			const rows = (await this.sql`
+				select *, to_char(created at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as cursor_created
+				from memory_entries
+				where true
+				  ${search.scope == null ? this.sql`` : this.sql`and scope = ${search.scope}`}
+				  ${search.includeSuperseded ? this.sql`` : this.sql`and superseded_by is null`}
+				  ${query === "" ? this.sql`` : this.sql`and to_tsvector('english', body) @@ plainto_tsquery('english', ${query})`}
+				  ${prefix === null ? this.sql`` : this.sql`and left(subject, char_length(${prefix}::text)) = ${prefix}::text`}
+				  ${search.writer == null ? this.sql`` : this.sql`and writer = ${search.writer}`}
+				  ${search.kind == null ? this.sql`` : this.sql`and kind = ${search.kind}`}
+				  ${cursor}
+				order by created desc, id desc
+				limit ${limit}`) as Array<Record<string, unknown>>;
+			const last = rows.length === limit ? rows[rows.length - 1] : undefined;
+			return {
+				entries: await this.servable(rows, read),
+				next: last ? { before: String(last.cursor_created), before_id: String(last.id) } : null,
+			};
+		});
 	}
 
 	/**
@@ -1362,7 +2039,7 @@ export class IndexStore implements MemoryStore {
 	 * them that way — querying the raw spelling would match nothing, the same trap
 	 * `emit` fell into with session ids.
 	 */
-	async memoryForBrief(repo: string | null, graphId: string | null, limit = 10): Promise<MemoryEntry[]> {
+	async memoryForBrief(repo: string | null, graphId: string | null, limit = 10, read?: MemoryReadOptions): Promise<MemoryEntry[]> {
 		const normalizedRepo = normalizeIdentifier(repo);
 		const normalizedGraph = normalizeIdentifier(graphId);
 		const scopes = [
@@ -1372,28 +2049,379 @@ export class IndexStore implements MemoryStore {
 		];
 		// `in ${sql(array)}` is the form Bun's SQL expands to a value list. Passing
 		// the array straight to `any()` stringifies it into a malformed array literal.
-		const rows = (await this.sql`
-			select *
-			from memory_entries
-			where scope in ${this.sql(scopes)}
-			  and superseded_by is null
-			order by created desc
-			limit ${limit}`) as Array<Record<string, unknown>>;
-		return rows.map(toMemoryEntry);
+		return this.plane("memory.brief", async () => {
+			const rows = (await this.sql`
+				select *
+				from memory_entries
+				where scope in ${this.sql(scopes)}
+				  and superseded_by is null
+				order by created desc
+				limit ${limit}`) as Array<Record<string, unknown>>;
+			return this.servable(rows, read);
+		});
 	}
 
-	async ping(): Promise<boolean> {
+	/**
+	 * What `graph_index` holds for each graph, one round trip for the whole list;
+	 * an id with no row is absent from the map. The list is a page's distinct
+	 * graph ids, so it is bounded by the page. The list goes through the
+	 * tagged-template helper: a bare array parameter is the malformed-literal
+	 * quirk `memoryForBrief` notes.
+	 */
+	private async graphLifetimes(graphIds: readonly string[]): Promise<Map<string, GraphLifetime>> {
+		if (graphIds.length === 0) return new Map();
+		const rows = (await this.sql`
+			select graph_id, status from graph_index where graph_id in ${this.sql([...graphIds])}`) as Array<Record<string, unknown>>;
+		return new Map(rows.map((row) => [String(row.graph_id), { status: row.status == null ? null : String(row.status) }]));
+	}
+
+	/** The graph a `ttl: graph` entry lives for, as the index knows it now; null when it has no row. Under the plane gate. */
+	async graphLifetime(entry: Pick<MemoryEntry, "scope" | "graph_id">): Promise<GraphLifetime | null> {
+		const graphId = memoryGraphId(entry);
+		if (graphId === null) return null;
+		return this.plane("memory.expiry", async () => (await this.graphLifetimes([graphId])).get(graphId) ?? null);
+	}
+
+	/**
+	 * The rows a serving read hands out, judged by `memoryExpiry` (uplift-3 N4).
+	 *
+	 * One extra bounded query: the `graph_index` status of every distinct graph
+	 * the page's `ttl: graph` entries name, which is what the predicate needs and
+	 * nothing a `30d` or `permanent` entry does — a page without graph entries
+	 * costs no second round trip. Every entry is then tagged `expired` (and
+	 * `expires_at` where the class has one), in both modes, so a reader can see
+	 * what `enforce` would hide before turning it on. Under `report` the tagged
+	 * page is returned whole; under `enforce` an expired entry is left out unless
+	 * the read asked for it. Each expired entry met is reported once, as `served`
+	 * or `hidden`, which is the series the rollout watches.
+	 *
+	 * Shared by `searchMemoryPage` (so `memory_search`, the subject listings and
+	 * the agent card) and `memoryForBrief`, so the brief and a search can never
+	 * disagree about whether an entry is alive. `readEntry` is not a serving read
+	 * — it is the gate's read-back of a row it just wrote — and stays untouched.
+	 */
+	private async servable(rows: Array<Record<string, unknown>>, read: MemoryReadOptions | undefined): Promise<MemoryEntry[]> {
+		const now = Date.now();
+		const entries = rows.map((row) => toMemoryEntry(row, now));
+		const graphIds = new Set<string>();
+		for (const entry of entries) {
+			if (entry.ttl !== "graph") continue;
+			const graphId = memoryGraphId(entry);
+			if (graphId !== null) graphIds.add(graphId);
+		}
+		const graphs = await this.graphLifetimes([...graphIds]);
+		const hide = this.expiry.mode === "enforce" && read?.includeExpired !== true;
+		const surface = read?.surface ?? "unattributed";
+		const served: MemoryEntry[] = [];
+		for (const entry of entries) {
+			const graph = entry.ttl === "graph" ? (graphs.get(memoryGraphId(entry) ?? "") ?? null) : null;
+			const verdict = memoryExpiry(entry, graph, now);
+			if (verdict.expired) this.expiry.observe?.({ surface, kind: entry.kind, mode: hide ? "hidden" : "served" });
+			if (verdict.expired && hide) continue;
+			served.push({
+				...entry,
+				expired: verdict.expired,
+				...(verdict.expires_at === null ? {} : { expires_at: verdict.expires_at }),
+			});
+		}
+		return served;
+	}
+
+	/**
+	 * Whether the index answers `select 1` inside `timeoutMs`. Bounded, because
+	 * `/healthz` used to wait on this for as long as a cold connect took (a second
+	 * over the proxy, unbounded when the host was gone) and the whole probe hung
+	 * on it. A timeout is `false`, and under a gate it is sampled as one.
+	 */
+	async ping(timeoutMs = INDEX_PING_TIMEOUT_MS): Promise<boolean> {
 		try {
-			await this.sql`select 1`;
+			await this.plane("ping", () => withTimeout(this.sql`select 1`.then(() => undefined), timeoutMs, "index ping"));
 			return true;
 		} catch {
 			return false;
 		}
 	}
 
-	async close(): Promise<void> {
-		await this.sql.end();
+	/**
+	 * Database size and the ten largest relations, for `/healthz`. Timescale's own
+	 * schemas are excluded so the list names this repo's tables, not chunk
+	 * bookkeeping; `pg_total_relation_size` includes indexes and TOAST, which is
+	 * what the volume actually fills with.
+	 */
+	async capacity(): Promise<IndexCapacity> {
+		return this.plane("capacity", async () => {
+			// Three independent reads, issued together: `/healthz` bounds this whole call at one second and every
+			// serial statement costs a proxy round trip, so the lease-table row must not add one.
+			const [size, tables, nodes] = (await Promise.all([
+				this.sql`
+					select pg_database_size(current_database())::text as bytes`,
+				// `pg_total_relation_size` once per relation. The order is on `relations.total_bytes`, the number: a bare
+				// `total_bytes` would name the text output column and sort "9" above "10".
+				this.sql`
+					select name,
+					       total_bytes::text as total_bytes,
+					       live_rows::text as live_rows,
+					       dead_rows::text as dead_rows
+					from (
+						select relname as name,
+						       pg_total_relation_size(relid) as total_bytes,
+						       n_live_tup as live_rows,
+						       n_dead_tup as dead_rows
+						from pg_stat_user_tables
+						where left(schemaname, 13) <> '_timescaledb_'
+					) as relations
+					order by relations.total_bytes desc
+					limit 10`,
+				// Lease-table bloat, visibility only: how many updates were HOT (no new
+				// index entries) and how much of the heap is dead. `null` ratios while the
+				// table has no updates or no rows yet.
+				this.sql`
+					select n_tup_upd::text as upd, n_tup_hot_upd::text as hot, n_live_tup::text as live, n_dead_tup::text as dead
+					from pg_stat_user_tables
+					where relname = 'graph_nodes' and schemaname = current_schema()`,
+			])) as [Array<Record<string, unknown>>, Array<Record<string, unknown>>, Array<Record<string, unknown>>];
+			const node = nodes[0];
+			const updates = Number(node?.upd ?? 0);
+			const rowsTotal = Number(node?.live ?? 0) + Number(node?.dead ?? 0);
+			return {
+				databaseBytes: Number(size[0]?.bytes ?? 0),
+				tables: tables.map((row) => ({
+					name: String(row.name),
+					totalBytes: Number(row.total_bytes ?? 0),
+					liveRows: Number(row.live_rows ?? 0),
+					deadRows: Number(row.dead_rows ?? 0),
+				})),
+				graphNodes:
+					node === undefined
+						? null
+						: {
+								hotUpdateRatio: updates > 0 ? Number(node.hot ?? 0) / updates : null,
+								deadRatio: rowsTotal > 0 ? Number(node.dead ?? 0) / rowsTotal : null,
+							},
+			};
+		});
 	}
+
+	/**
+	 * Apply (or only report) the documented retention — `index-sweep.ts` holds the
+	 * classes, the thresholds and the SQL. A dry-run runs the COUNT statements on
+	 * the pool. An apply runs everything inside one transaction: the counts, then
+	 * the batched deletes, so a failure half way commits nothing.
+	 *
+	 * `expiry` is explicit, not the store's own setting: the sweep is a one-shot
+	 * job and the operator's `SUBSTRATE_MEMORY_EXPIRY` reaches it through the
+	 * runner's config. Absent means `report` — the `ttl` classes only count.
+	 */
+	async sweep(options: { apply?: boolean; now?: number; policy?: SweepPolicy; expiry?: MemoryExpiryMode } = {}): Promise<SweepReport> {
+		const policy = options.policy ?? sweepPolicyFromEnv();
+		const now = options.now ?? Date.now();
+		const expiry = options.expiry ?? "report";
+		const steps = planSweep(policy, now, { expiry });
+		const run = (sql: SQL) => async (statement: SweepStatement) =>
+			(await sql.unsafe(statement.text, statement.params as unknown[])) as Array<Record<string, unknown>>;
+		if (!options.apply) return executeSweep(run(this.sql), steps, { apply: false, batch: policy.batch, now, expiry });
+		return (await this.sql.begin((tx: SQL) =>
+			executeSweep(run(tx), steps, { apply: true, batch: policy.batch, now, expiry }),
+		)) as SweepReport;
+	}
+
+	/**
+	 * One read of the two ttl classes `memoryLifecycleQuery` names. The sweep's
+	 * deletes are untouched. Same `sql.unsafe` path as a dry-run count.
+	 */
+	/**
+	 * One scratch row for the opt-in index drill. The rehearsal script must not
+	 * name `insertEntry` or a memory table: both are locked to this file and
+	 * `memory-write.ts`. The id is the text, so a restore can read it back.
+	 */
+	async recordDrillFact(id: string, text: string): Promise<void> {
+		const claim = await this.claimWrite({
+			key: id,
+			explicit: true,
+			entryHash: id,
+			requestHash: id,
+			entryId: id,
+		});
+		if (!claim.claimed) throw new Error("index drill could not claim the scratch memory row");
+		const inserted = await this.insertEntry(
+			{
+				id,
+				scope: "global",
+				kind: "fact",
+				subject: null,
+				text,
+				writer: "rehearsal",
+				actor: "agent",
+				trust: "agent-claimed",
+				ttl: "permanent",
+				source_event: null,
+				session_id: null,
+				graph_id: null,
+				repo: null,
+				conflict_key: null,
+				version: 1,
+				supersedes: null,
+				entry_hash: id,
+				reverify_after: new Date(Date.now() + 86_400_000).toISOString(),
+				idempotency_key: id,
+			},
+			{ key: id, holder: claim.holder },
+		);
+		if (!inserted.ok) throw new Error(`index drill insert refused: ${inserted.reason}`);
+		await this.finishWrite(id, claim.holder, "accepted", id);
+	}
+
+	/** The stored text of one memory row, or null when that id is absent. */
+	async readMemoryText(id: string): Promise<string | null> {
+		const rows = (await this.sql`select body from memory_entries where id = ${id}`) as Array<{ body?: string }>;
+		const body = rows[0]?.body;
+		return typeof body === "string" ? body : null;
+	}
+
+	async memoryLifecycleCandidates(options: { now?: number; policy?: SweepPolicy } = {}): Promise<Array<Record<string, unknown>>> {
+		const policy = options.policy ?? sweepPolicyFromEnv();
+		const now = options.now ?? Date.now();
+		const statement = memoryLifecycleQuery(policy, now);
+		return (await this.sql.unsafe(statement.text, statement.params as unknown[])) as Array<Record<string, unknown>>;
+	}
+
+	/**
+	 * Run `work` against one consistent view of every archived table: a single
+	 * REPEATABLE READ READ ONLY transaction on one connection, so the pages of
+	 * every table are read at the same instant and nothing here can write. The
+	 * connection holds the transaction open for as long as `work` runs; the
+	 * runner bounds that by its own deadline and the connection's
+	 * `statement_timeout`. Not under the plane gate: it is the archive job's
+	 * own connection, never the server's request path.
+	 */
+	async withExportSnapshot<T>(work: (reader: IndexSnapshotReader) => Promise<T>): Promise<T> {
+		return (await this.sql.begin("isolation level repeatable read read only", (tx: SQL) => work(archiveAccess(tx)))) as T;
+	}
+
+	/** Run `work` in one read-write transaction on this (scratch) database; a throw rolls everything back. */
+	async withRestoreTransaction<T>(work: (tx: IndexRestoreTx) => Promise<T>): Promise<T> {
+		return (await this.sql.begin((tx: SQL) => work(archiveAccess(tx)))) as T;
+	}
+
+	/**
+	 * The lease-table storage tune (`SUBSTRATE_INDEX_TUNE=apply`): a lower
+	 * fillfactor leaves room on each page for heartbeat updates, and a lower
+	 * autovacuum scale factor vacuums the small, hot table sooner. Idempotent: it
+	 * reads `reloptions` first and issues the `alter table` only when either
+	 * option is not already set, so a boot that runs it every time changes
+	 * nothing after the first. It touches new pages only — rewriting existing
+	 * ones is the operator's `VACUUM FULL`, never this. No index is dropped.
+	 */
+	async tuneGraphNodes(): Promise<"applied" | "already"> {
+		const rows = (await this.sql`
+			select array_to_string(reloptions, ',') as options from pg_class where oid = 'graph_nodes'::regclass`) as Array<Record<string, unknown>>;
+		const have = String(rows[0]?.options ?? "").split(",");
+		if (have.includes("fillfactor=70") && have.includes("autovacuum_vacuum_scale_factor=0.02")) return "already";
+		await this.sql`alter table graph_nodes set (fillfactor = 70, autovacuum_vacuum_scale_factor = 0.02)`;
+		return "applied";
+	}
+
+	/** `timeout` in seconds, as Bun's `end` takes it; 0 drops in-flight statements instead of waiting on them. */
+	async close(options?: { timeout?: number }): Promise<void> {
+		await this.sql.end(options);
+	}
+}
+
+// ── archive (uplift-4 S2) ────────────────────────────────────────────────────
+
+/** Rows one export page may carry at most; the archive asks for far fewer. */
+export const MAX_ARCHIVE_PAGE_ROWS = 5000;
+
+/** The most rows one restore `insert` carries, so the statement stays under the driver's parameter limit. */
+const RESTORE_BATCH_ROWS = 200;
+
+/** The Postgres type a column type is cast to when a restore binds it. */
+const PG_TYPE: Record<ColumnType, string> = { text: "text", int: "int", bigint: "bigint", bool: "boolean", timestamptz: "timestamptz" };
+
+/** One REPEATABLE READ READ ONLY view of the archived tables: every read through it sees the same instant. */
+export interface IndexSnapshotReader {
+	/** Postgres `server_version`. */
+	serverVersion(): Promise<string>;
+	/** Rows in a whitelisted table in this view. */
+	count(table: string): Promise<number>;
+	/** The next `limit` rows of a whitelisted table in key order, strictly after `after` (the key values of the last row read), or from the start when `null`. */
+	page(table: string, after: ReadonlyArray<string | number> | null, limit: number): Promise<ArchiveRow[]>;
+}
+
+/** One read-write transaction on a scratch database: the reader plus the loader. */
+export interface IndexRestoreTx extends IndexSnapshotReader {
+	/** Insert rows of a whitelisted table; withheld columns are refilled from the spec's placeholders. */
+	insert(table: string, rows: readonly ArchiveRow[]): Promise<void>;
+}
+
+/**
+ * The select list of an export page: the exported columns only, timestamps
+ * rendered by Postgres to the microsecond in UTC (a JS `Date` would cut them
+ * to the millisecond and the restore would not reproduce the instant), and
+ * `bigint` as text. Every identifier comes from the closed spec.
+ */
+function exportSelectList(spec: ArchiveTableSpec): string {
+	return exportedColumns(spec)
+		.map((column) => {
+			const quoted = `"${column.name}"`;
+			if (column.type === "timestamptz") return `to_char(${quoted} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as ${quoted}`;
+			if (column.type === "bigint") return `${quoted}::text as ${quoted}`;
+			return quoted;
+		})
+		.join(", ");
+}
+
+/** The archive's reads and loads over one connection (a transaction handle). */
+function archiveAccess(sql: SQL): IndexRestoreTx {
+	return {
+		async serverVersion() {
+			const rows = (await sql`select current_setting('server_version') as version`) as Array<Record<string, unknown>>;
+			return String(rows[0]?.version ?? "");
+		},
+		async count(table) {
+			const spec = tableSpec(table);
+			const rows = (await sql.unsafe(`select count(*)::text as n from "${spec.name}"`)) as Array<Record<string, unknown>>;
+			return Number(rows[0]?.n ?? 0);
+		},
+		async page(table, after, limit) {
+			const spec = tableSpec(table);
+			if (!Number.isInteger(limit) || limit < 1 || limit > MAX_ARCHIVE_PAGE_ROWS) throw new Error(`archive page size must be 1..${MAX_ARCHIVE_PAGE_ROWS}`);
+			const keys = spec.key.map((name) => `"${name}"`).join(", ");
+			let where = "";
+			if (after !== null) {
+				if (after.length !== spec.key.length) throw new Error(`${spec.name}: cursor has ${after.length} values for a ${spec.key.length}-column key`);
+				const bound = spec.key.map((name, i) => `$${i + 1}::${PG_TYPE[spec.columns.find((column) => column.name === name)?.type ?? "text"]}`).join(", ");
+				where = ` where (${keys}) > (${bound})`;
+			}
+			const rows = (await sql.unsafe(`select ${exportSelectList(spec)} from "${spec.name}"${where} order by ${keys} limit ${limit}`, after === null ? [] : [...after])) as Array<
+				Record<string, unknown>
+			>;
+			// Rebuilt as plain objects in column order, so the NDJSON line (and its digest) never depends on the driver's row type.
+			return rows.map((row) => {
+				const out: ArchiveRow = {};
+				for (const column of exportedColumns(spec)) out[column.name] = (row[column.name] ?? null) as string | number | boolean | null;
+				return out;
+			});
+		},
+		async insert(table, rows) {
+			const spec = tableSpec(table);
+			const columns: Array<{ name: string; type: ColumnType; value: (row: ArchiveRow) => string | number | boolean | null }> = exportedColumns(spec).map((column) => ({
+				name: column.name,
+				type: column.type,
+				value: (row) => row[column.name] ?? null,
+			}));
+			for (const name of spec.withheld) {
+				const placeholder = spec.placeholders[name] ?? null;
+				if (placeholder !== null) columns.push({ name, type: "text", value: () => placeholder });
+			}
+			for (let from = 0; from < rows.length; from += RESTORE_BATCH_ROWS) {
+				const batch = rows.slice(from, from + RESTORE_BATCH_ROWS);
+				const params: Array<string | number | boolean | null> = [];
+				const tuples = batch.map((row) => `(${columns.map((column) => `$${params.push(column.value(row))}::${PG_TYPE[column.type]}`).join(", ")})`);
+				await sql.unsafe(`insert into "${spec.name}" (${columns.map((column) => `"${column.name}"`).join(", ")}) values ${tuples.join(", ")}`, params);
+			}
+		},
+	};
 }
 
 /** Postgres hands back `Date`; every surface that reports a lease wants ISO. */
@@ -1473,6 +2501,45 @@ function toQueueRow(row: Record<string, unknown>): GovernanceQueueRow {
 		// quarantined write never got as far as being kept for anything.
 		...(optional(row.ttl) ? { ttl: optional(row.ttl) } : {}),
 		...(optional(row.detail) ? { detail: optional(row.detail) } : {}),
+	};
+}
+
+/**
+ * The text `decideSkill` hashes into its per-(repo, name) advisory lock key:
+ * `pg_advisory_xact_lock(hashtextextended(<this>::text, 0))`. Exported so the live test holds the very same
+ * key and proves the lock is what serialises decisions.
+ */
+export function skillDecisionLockKey(repo: string, name: string): string {
+	return `${repo}\n${name}`;
+}
+
+/**
+ * The text `migrate` hashes into its session advisory lock:
+ * `pg_advisory_lock(hashtextextended(<this>::text, 0))`. One boot at a time.
+ */
+export function indexMigrateLockKey(): string {
+	return "substrate.index.migrate";
+}
+
+function toSkillRow(row: Record<string, unknown>): SkillRegistryRow {
+	const text = (value: unknown): string | null => (value === null || value === undefined ? null : String(value));
+	const time = (value: unknown): string | null => (value === null || value === undefined ? null : timestamp(value));
+	return {
+		repo: String(row.repo),
+		name: String(row.name),
+		pr_number: Number(row.pr_number),
+		// '' is a value here (a pull request not proposed through the substrate), not "unset".
+		content_sha256: String(row.content_sha256),
+		state: String(row.state) as SkillState,
+		proposed_by: text(row.proposed_by),
+		pr_url: text(row.pr_url),
+		branch: text(row.branch),
+		merge_sha: text(row.merge_sha),
+		decided_by: text(row.decided_by),
+		decided_at: time(row.decided_at),
+		reason: text(row.reason),
+		created: timestamp(row.created),
+		updated: timestamp(row.updated),
 	};
 }
 

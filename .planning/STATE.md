@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.3
 milestone_name: Build plan completion
-current_phase: 19
-current_phase_name: Lane B collectors
-status: planning
-stopped_at: Phase 18 complete, ready to plan Phase 19
-last_updated: "2026-10-09T09:30:08.863Z"
-last_activity: 2026-10-09
-last_activity_desc: Phase 18 complete, transitioned to Phase 19
-state_head: bed218a95cb3156d84f711b143ae5128769f8a07
+status: Awaiting next milestone
+stopped_at: Milestone v1.3 completed and archived 2026-10-11; 43 gated live-tail proofs recorded in VALIDATION.md and phase runbooks
+last_updated: "2026-10-11T02:42:06.506Z"
+last_activity: 2026-10-11
+last_activity_desc: Milestone v1.3 completed and archived
+state_head: 1a9f4fd365ede291c4e21be71b6ff236e0e49c67
 progress:
   total_phases: 18
-  completed_phases: 3
-  total_plans: 12
-  completed_plans: 12
-  percent: 17
+  completed_phases: 18
+  total_plans: 76
+  completed_plans: 76
+  percent: 100
+current_phase: 33
+current_phase_name: lane-a-dispatch-route-and-approvals
 ---
 
 # State
@@ -154,10 +154,10 @@ which is why Greptime worked immediately and Postgres did not.
 
 ## Current Position
 
-Phase: 19 — Lane B collectors
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-10-09 — Phase 18 complete, transitioned to Phase 19
+Phase: Milestone v1.3 complete
+Plan: —
+Status: Awaiting next milestone
+Last activity: 2026-10-11 — Milestone v1.3 completed and archived
 
 ## Deferred Items
 
@@ -195,3 +195,87 @@ Resume file: None
 - [Phase 16]: 16-03: smoke reads only consumer.env and refuses :7410/non-loopback before any request; claim needs claimed true plus granted
 - [Phase 16]: 16-03: requirements-completed left empty, FOUND-01 stays open until the 16-05 live proof
 - [Phase 16]: 16-04: docs carry key names only, no connection-string shapes; production-mutating steps framed operator-only
+
+## Post-milestone uplift (graph ut-mv5r71hp-65f7b012, 2026-10-12)
+
+Standalone post-close series on branch `ultrathink/uplift-7` — proposal: [UPLIFT_PROPOSAL.md](UPLIFT_PROPOSAL.md). Operator pre-authorized autonomous selection (engineering mix); no new milestone.
+
+| Item | Status | Evidence |
+|------|--------|----------|
+| U5 gate verdicts as events (memory plane) | done | [uplift/01-SUMMARY.md](uplift/01-SUMMARY.md) — mcp-server 0 fail, phase-close pass, tsc clean |
+| U4 quota-burn SLOs + dispatch storm-breaker | done | [uplift/02-SUMMARY.md](uplift/02-SUMMARY.md) — test:py 272 pass, obs/mcp 0 fail, tsc clean |
+| U2 host VM re-adoption after restart | done | [uplift/03-SUMMARY.md](uplift/03-SUMMARY.md) — host 244 pass, tsc clean, full suite green mod F-01 |
+| U1 sandbox egress allowlist | done | [uplift/04-SUMMARY.md](uplift/04-SUMMARY.md) — host 281 pass, tsc clean, full suite green mod F-01 |
+| U3 signed dispatch handoffs + drift gate | done | [uplift/05-SUMMARY.md](uplift/05-SUMMARY.md) — test:py 293 pass, tsc clean |
+| U6 knowledge freshness automation | done | [uplift/06-SUMMARY.md](uplift/06-SUMMARY.md) — projector+mcp 0 fail, phase-close pass, tsc clean |
+| U7 loopback SSE event stream | done | [uplift/07-SUMMARY.md](uplift/07-SUMMARY.md) — mcp 0 fail, phase-close pass, tsc clean, full suite green mod F-01 |
+
+## Post-milestone uplift 2 (graph ut-mv66gjpd-4d730336, 2026-10-13)
+
+Second standalone post-close series on branch `ultrathink/uplift-2` — proposal: [uplift-2/PROPOSAL.md](uplift-2/PROPOSAL.md) (recon [CONTEXT.md](uplift-2/CONTEXT.md), measurements [BASELINES.md](uplift-2/BASELINES.md)). Operator accepted all seven on 2026-10-13; repo changes only, data-reducing policies behind opt-in flags (nothing deleted in production); no new milestone. Measured driver: `brief.p95` 3,116 ms against the 800 ms SLO with a 1 % cache hit ratio.
+
+| Item | Status | Evidence |
+|------|--------|----------|
+| R1 brief fast path + cache effectiveness | done | [uplift-2/01-SUMMARY.md](uplift-2/01-SUMMARY.md) — twin: ETag/304 8 ms, degraded brief 1.21 s under a hung ledger |
+| R2 plane breakers, per-plane SLOs, dependency-aware healthz, chaos per plane, substrate-red runbook | done | [uplift-2/02-SUMMARY.md](uplift-2/02-SUMMARY.md) — twin: breaker open after 5 timeouts, emit fails closed in 5 ms, healthz 503 |
+| R3 Hindsight retain outbox, bounded recall, config hygiene | done | [uplift-2/03-SUMMARY.md](uplift-2/03-SUMMARY.md) — unit evidence; production pending deploy |
+| R4 index pool/timeouts, capacity, dry-run sweeper, lease-stuck + quarantine-spike runbooks | done | [uplift-2/04-SUMMARY.md](uplift-2/04-SUMMARY.md) — twin: capacity live, sweep dry-run deletes nothing |
+| R5 ledger chain cache, bounded reads, write-probe health, opt-in TTL | done | [uplift-2/05-SUMMARY.md](uplift-2/05-SUMMARY.md) — twin: write probe + capacity.ledger live |
+| R6 RAGFlow documented shapes, durable pins, caches, opt-in prune, async trigger | done | [uplift-2/06-SUMMARY.md](uplift-2/06-SUMMARY.md) — fake-enforced; live RAGFlow still operator-gated |
+| R7 VPS ceilings + slice, store-aware deploy gate, redis config, audit rollover, disk runbook | done | [uplift-2/07-SUMMARY.md](uplift-2/07-SUMMARY.md) — twin: `audit:verify` ok |
+
+Gates at the final head: tsc clean · `bun test` 3525 pass / 65 skip / 1 fail (recorded F-01) · `check:phase-close` pass · `test:py` 298. Operator steps after merge: `infra/vps/deploy-release.sh` (new unit ceilings, `substrate.slice`, env lines), then read `/slo` and `/healthz` for the post-deploy rows in BASELINES.md; optional flags documented in `.env.example` (`SUBSTRATE_INDEX_SWEEP=apply`, `SUBSTRATE_LEDGER_TTL`, `SUBSTRATE_DOCS_PRUNE_SUPERSEDED`, `SUBSTRATE_AUDIT_ROLLOVER_BYTES`) stay off until chosen.
+
+Deployed 2026-10-13T21:02Z (`release-20261013-91487e7`) and, after the post-deploy follow-up PR #60, `release-20261013-9231f43`: `brief.p95` 700 ms, all five plane breakers closed, `parity:check` PASS. Record: [uplift-2/HANDOFF.md](uplift-2/HANDOFF.md), [uplift-2/BASELINES.md](uplift-2/BASELINES.md).
+
+## Post-milestone uplift 3 (graph ut-mv78nh8v-aa49a98b, 2026-10-13)
+
+Third standalone post-close series on branch `ultrathink/uplift-3` — proposal: [uplift-3/PROPOSAL.md](uplift-3/PROPOSAL.md) (recon [CONTEXT.md](uplift-3/CONTEXT.md), live baseline [BASELINES.md](uplift-3/BASELINES.md)). Operator chose the series after the same prompt returned a fourth time and accepted all seven on 2026-10-13; same rules as uplift-2: repo changes plus the VPS deploy, every policy behind a flag that preserves today's behaviour, nothing deleted in production. Measured driver: evidence and policy are not durable — SLOs reset on every restart, memory TTLs are declared but not honoured, the ledger has no verified archive and anchoring is not scheduled, redis runtime policy drifted from the R7 config, no admission budgets, sequential RAGFlow retrieval, no Grok connector contract.
+
+| Item | Status | Evidence |
+|------|--------|----------|
+| N1 runtime drift and jobs doctor | done | [uplift-3/01-SUMMARY.md](uplift-3/01-SUMMARY.md) |
+| N2 restart-durable SLO history, capacity runway, ledger-native notifications | done | [uplift-3/02-SUMMARY.md](uplift-3/02-SUMMARY.md) |
+| N3 per-surface admission budgets (shadow first) | done | [uplift-3/03-SUMMARY.md](uplift-3/03-SUMMARY.md) |
+| N4 memory lifetime enforcement (report → enforce) | done | [uplift-3/04-SUMMARY.md](uplift-3/04-SUMMARY.md) |
+| N5 docs retrieval fan-out, metrics, offline golden harness | done | [uplift-3/05-SUMMARY.md](uplift-3/05-SUMMARY.md) |
+| N6 ledger coverage probe and verified archive | done | [uplift-3/06-SUMMARY.md](uplift-3/06-SUMMARY.md) |
+| N7 Grok connector contract: smoke, MCP brief metadata, per-surface SLO | done | [uplift-3/07-SUMMARY.md](uplift-3/07-SUMMARY.md) |
+
+Gates at the final head: tsc clean · `bun test` 3845 pass / 1 skip / 1 fail (recorded F-01) · `check:phase-close` pass · `test:py` 298. Every new policy ships in its reporting/shadow/off default: `SUBSTRATE_BUDGETS=shadow`, `SUBSTRATE_MEMORY_EXPIRY=report`, `SUBSTRATE_SLO_NOTIFY` unset, the doctor and ledger-archive timers staged but not installed, `SUBSTRATE_LEDGER_ARCHIVE_DIR` unset. Operator steps after merge and deploy: [uplift-3/HANDOFF.md](uplift-3/HANDOFF.md).
+
+## Post-milestone uplift 4 (graph ut-mv7ciy6p-4429f130, 2026-10-14)
+
+Fourth standalone post-close series — proposal: [uplift-4/PROPOSAL.md](uplift-4/PROPOSAL.md) (recon [CONTEXT.md](uplift-4/CONTEXT.md), live baseline [BASELINES.md](uplift-4/BASELINES.md)). Operator accepted all seven on 2026-10-14 at the proposal gate and chose to land uplift-3 (PR #61) first; same rules as uplift-2 and 3: repo changes only, every policy behind a flag whose default preserves today's behaviour or only reports, nothing deleted in production, no new service or plan tier. Two PRs: **A** S2, S3, S6, S7 (data planes and VPS); **B** S4, S1, S5 (the brief pipeline) — handoff and operator steps: [uplift-4/HANDOFF.md](uplift-4/HANDOFF.md). Measured driver: the Grok Bot's brief is uncapped and drops its own state, the index has no verified backup, the cache re-composes every brief after any write, BP-5.0 recall is not in the brief, SLO history lives only in a local checkpoint, a stale or lagging docs corpus is invisible, and the VPS runs at equal cgroup weight with no watchdog and a 330 MB uncapped journal.
+
+| Item | Status | Evidence |
+|------|--------|----------|
+| S2 index disaster recovery (verified export, offline verify, restore-to-scratch, lease-bloat visibility) | done in PR A | [uplift-4/S2-SUMMARY.md](uplift-4/S2-SUMMARY.md) |
+| S3 VPS runtime hardening (slice priority and swap isolation, `/livez` and opt-in watchdog, disk guardrails) | done in PR A | [uplift-4/S3-SUMMARY.md](uplift-4/S3-SUMMARY.md) |
+| S6 durable metrics history in GreptimeDB | done in PR A | [uplift-4/S6-SUMMARY.md](uplift-4/S6-SUMMARY.md) |
+| S7 docs freshness SLI, trigger lag, live golden canary | done in PR A | [uplift-4/S7-SUMMARY.md](uplift-4/S7-SUMMARY.md) |
+| S4 cache single-flight, stale-while-revalidate, per-class metrics | done in PR B | [uplift-4/S4-SUMMARY.md](uplift-4/S4-SUMMARY.md) |
+| S1 Grok brief contract: compact profile, state line, estimated-spend SLI | done in PR B | [uplift-4/S1-SUMMARY.md](uplift-4/S1-SUMMARY.md) |
+| S5 cross-session recall in the brief, Hindsight inventory and gauges | done in PR B | [uplift-4/S5-SUMMARY.md](uplift-4/S5-SUMMARY.md) |
+
+Every new policy ships in its off or report/shadow default: `SUBSTRATE_METRICS_HISTORY` off, `SUBSTRATE_INDEX_ARCHIVE_DIR` unset (the archive refuses by name), `SUBSTRATE_INDEX_TUNE` off, `SUBSTRATE_WATCHDOG` off with the watchdog drop-in shipped as an example, the docs canary refusing without its opt-in, and the freshness and lag rows report-only. The one default-on change is additive: `capacity()` also reports `graph_nodes` HOT-update and dead-row ratios, read concurrently with the existing statements.
+
+PR B's defaults: `SUBSTRATE_BRIEF_PROFILE=shadow` (serves the full text, counts what the compact one would save), `SUBSTRATE_CACHE_SWR=shadow` (serves live, counts `would_serve_stale`), `SUBSTRATE_BRIEF_RECALL=off`, `SUBSTRATE_HINDSIGHT_INVENTORY=off`. Default-on and additive: identical concurrent cache misses share one load (single-flight); the brief answer carries `x-substrate-brief-profile` and, over MCP, `profile`; brief cache entries move to shape `sections-v1` (one cold start on deploy); a brief lists at most 1000 nodes (then says how many it left out); `/healthz.cache` gains `coalesced`, `stale`, `wouldServeStale`, `refreshes`; the three retain-outbox gauges and the per-class cache counters are always present.
+
+## Post-milestone uplift 5 (graph ut-mv7mtq2j-b41cedcc, 2026-10-14)
+
+Fifth standalone post-close series — proposal: [uplift-5/PROPOSAL.md](uplift-5/PROPOSAL.md) (recon [CONTEXT.md](uplift-5/CONTEXT.md), live baseline [BASELINES.md](uplift-5/BASELINES.md)). Operator accepted all seven on 2026-10-14 at the proposal gate and chose **merge only; the operator deploys**; same rules as uplift-2 to 4: repo changes only, every policy behind a flag whose default preserves today's behaviour or only reports, nothing deletes production data, units, timers, drop-ins and Railway variables are operator steps staged as files, cost-neutral. Two PRs: **A** (release assurance, VPS sandbox hardening, dashboards, promotion advisor) and **B** (request path, durable events, skills governance).
+
+| Item | Status | Evidence |
+|------|--------|----------|
+| U5-1 release assurance: deploy preflight, rollback-compatibility tests, opt-in boot-and-prove gate, report-only CI job | done in PR A | [uplift-5/S1a-SUMMARY.md](uplift-5/S1a-SUMMARY.md), [uplift-5/S1b-SUMMARY.md](uplift-5/S1b-SUMMARY.md) |
+| U5-2 VPS sandbox hardening: staged drop-ins per unit class, doctor exposure rows, offline exposure test | done in PR A | [uplift-5/S2-SUMMARY.md](uplift-5/S2-SUMMARY.md) |
+| U5-6 SLO dashboards as code and opt-in extended history series | done in PR A | [uplift-5/S6-SUMMARY.md](uplift-5/S6-SUMMARY.md) |
+| U5-7 promotion advisor, flag registry and config reference | done in PR A | [uplift-5/S7-SUMMARY.md](uplift-5/S7-SUMMARY.md) |
+| U5-3 request-path efficiency: lite brief graph read, narrow cache invalidation, `/healthz` single-flight | done in PR B | [uplift-5/S3-SUMMARY.md](uplift-5/S3-SUMMARY.md) |
+| U5-4 durable events: idempotent replay key and bounded collector spool | done in PR B | [uplift-5/S4a-SUMMARY.md](uplift-5/S4a-SUMMARY.md), [uplift-5/S4b-SUMMARY.md](uplift-5/S4b-SUMMARY.md) |
+| U5-5 skills governance: registry, operator-only approve, approval-gated projection | done in PR B | [uplift-5/S5a-SUMMARY.md](uplift-5/S5a-SUMMARY.md), [uplift-5/S5b-SUMMARY.md](uplift-5/S5b-SUMMARY.md) |
+
+PR A's defaults: `SUBSTRATE_DEPLOY_PREFLIGHT=report` (prints a table, never changes a deploy), `SUBSTRATE_DEPLOY_GATE=off`, `SUBSTRATE_EXPOSURE_MAX` unset (the doctor only reports exposure), `SUBSTRATE_METRICS_HISTORY_SERIES=core`; the sandbox drop-ins ship as `.example` files and nothing installs them; the `boot-gate` CI job needs both `vars.CI_ENABLED` and `vars.BOOT_GATE`. The one runtime-visible change in PR A is the `SUBSTRATE_METRICS_HISTORY_SERIES` parser (default core, byte-identical); everything else is scripts, infra examples, tests and docs.
+
+PR B's defaults: `SUBSTRATE_BRIEF_GRAPH_READ=full`, `SUBSTRATE_CACHE_BUMP_SCOPE=legacy`, `SUBSTRATE_HEALTHZ_INDEX_CAPACITY_MEMO_S=0`, `SUBSTRATE_EVENT_IDEMPOTENCY=off`, `SUBSTRATE_EVENT_SPOOL=off`, `SUBSTRATE_SKILLS_GOVERNANCE=off`. Default-on and additive: concurrent `/healthz` probes share one computation; `/healthz` carries an `idempotency` field; `refused-emits.jsonl` rotates to one `.1` file at 1 MiB; the skills projector resolves its bearer the way its fetch does (surface token first, first entry of a list); `skills_registry` is created at boot; `skills_approve` and `skills_list` exist (operator-only and approved-only by default). Handoff and operator steps: [uplift-5/HANDOFF.md](uplift-5/HANDOFF.md). Nothing was deployed.

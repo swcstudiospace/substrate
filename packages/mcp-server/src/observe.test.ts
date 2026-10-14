@@ -36,6 +36,7 @@ describe("normalizeRoute", () => {
 	test("keeps the routes that exist", () => {
 		expect(normalizeRoute("/brief")).toBe("/brief");
 		expect(normalizeRoute("/mcp")).toBe("/mcp");
+		expect(normalizeRoute("/events/stream")).toBe("/events/stream");
 	});
 
 	test("folds everything else into one bucket", () => {
@@ -355,11 +356,21 @@ describe("auditToolCalls", () => {
 		expect(normalizeRoute("/skills/propose/../../etc")).toBe("other");
 	});
 
+	test("the skills registry doors are known tools and known routes", () => {
+		expect(toolLabel("skills_approve")).toBe("skills_approve");
+		expect(toolLabel("skills_list")).toBe("skills_list");
+		expect(normalizeRoute("/skills/approve")).toBe("/skills/approve");
+		expect(normalizeRoute("/skills")).toBe("/skills");
+		expect(normalizeRoute("/skills/approve/../../etc")).toBe("other");
+	});
+
 	test("toolLabel keeps the tools that exist", () => {
 		expect(toolLabel("graph_claim")).toBe("graph_claim");
 		expect(toolLabel("desktop_run")).toBe("desktop_run");
 		expect(toolLabel("graph_find")).toBe("graph_find");
 		expect(toolLabel("issue_get")).toBe("issue_get");
+		expect(toolLabel("docs_search")).toBe("docs_search");
+		expect(toolLabel("docs_ingest")).toBe("docs_ingest");
 		expect(toolLabel("events")).toBe("events");
 		expect(toolLabel("../../etc/passwd")).toBe("unrecognized");
 	});

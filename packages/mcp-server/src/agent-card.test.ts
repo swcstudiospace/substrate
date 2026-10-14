@@ -1,456 +1,370 @@
+/**
+ * Agent Cards (Phase 29, CARD-01/CARD-02).
+ *
+ * Pins the card builder (per-surface identity, teachable-mapped `skills[]`,
+ * fold-collision suffixes), the fake spec validator against its fixture
+ * corpus (including the stub-shape rejection), the `teachablesForSurface`
+ * reader, and the loopback route over a real listener.
+ */
 import { describe, expect, test } from "bun:test";
 import {
-	AGENT_CARD_PROTOCOL_BINDING,
 	AGENT_CARD_VERSION,
-	agentCardOrigin,
 	buildAgentCard,
-	skillDescriptionForTeachable,
-	skillNameForTeachable,
-	TEACHABLE_SKILL_DESCRIPTION_CHARS,
+	isKnownCardSurface,
+	normalizeSkillName,
+	TEACHABLE_SKILL_TAG,
 	validateAgentCard,
-	type AgentCard,
 } from "./agent-card.ts";
+import { AGENT_CARD_FIXTURES, VALID_CARD } from "./agent-card.fixtures.ts";
 import { loadConfig } from "./config.ts";
-import type { ClaimResult, MemoryStore, NewMemoryEntry } from "./memory-write.ts";
+import { FakeStore } from "./memory-write.test.ts";
+import { createObservability } from "./observe.ts";
 import { Substrate } from "./service.ts";
-import { SKILL_NAME_RE } from "./skills/propose.ts";
-import type { MemoryEntry, MemorySearch, SubstrateEvent, Surface } from "./types.ts";
-const BASE = "http://127.0.0.1:7410";
+import { createHttpServer } from "./server.ts";
+import { SURFACES, type MemoryEntry, type MemorySearch, type MemorySearchPage } from "./types.ts";
 
-function teachableEntry(over: Partial<MemoryEntry> & { id: string }): MemoryEntry {
+/** A standing memory entry; callers override what their case needs. */
+function entry(over: Partial<MemoryEntry> & { id: string }): MemoryEntry {
 	return {
-		scope: "graph:ut-1",
+		scope: "graph:ut-card",
 		kind: "fact",
-		text: "retry with a capped budget and backoff",
+		text: "cap retries at three before paging the human",
 		writer: "hermes",
 		subject: "teachable:retry-budget",
 		actor: "agent",
 		trust: "agent-claimed",
 		ttl: "graph",
-		created: "2026-10-10T00:00:00.000Z",
+		created: "2026-10-01T10:00:00.000Z",
 		version: 1,
-		entry_hash: "cd".repeat(32),
+		entry_hash: "c".repeat(64),
 		needs_reverification: false,
 		...over,
 	};
 }
 
-describe("skillNameForTeachable", () => {
-	test("a clean slug passes through", () => {
-		expect(skillNameForTeachable("retry-budget", "mem_1")).toBe("retry-budget");
+/**
+ * An index stub that honours `subjectPrefix`, `writer`, `kind`, and
+ * `includeSuperseded` the way the real store does, so the reader is
+ * exercised against store semantics, not a canned answer. Records every
+ * search it receives for parameter assertions.
+ */
+function prefixIndex(rows: MemoryEntry[]) {
+	const seen: MemorySearch[] = [];
+	return {
+		seen,
+		searchMemoryPage: async (search: MemorySearch): Promise<MemorySearchPage> => {
+			seen.push(search);
+			const prefix = search.subjectPrefix ?? null;
+			const kept = rows
+				.filter((row) => (prefix === null || row.subject?.startsWith(prefix)) ?? false)
+				.filter((row) => search.writer === undefined || row.writer === search.writer)
+				.filter((row) => search.kind === undefined || row.kind === search.kind)
+				.filter((row) => search.includeSuperseded || !row.superseded_by)
+				.sort((a, b) => (b.created === a.created ? (b.id < a.id ? -1 : 1) : b.created < a.created ? -1 : 1));
+			const limit = search.limit ?? 20;
+			let start = 0;
+			if (search.before !== undefined) {
+				start = kept.findIndex(
+					(row) => row.created < search.before! || (row.created === search.before && row.id < (search.beforeId ?? "")),
+				);
+				if (start === -1) start = kept.length;
+			}
+			const page = kept.slice(start, start + limit);
+			const rest = kept.slice(start + limit);
+			return {
+				entries: page,
+				next: rest.length === 0 || page.length === 0
+					? null
+					: { before: page[page.length - 1]!.created, before_id: page[page.length - 1]!.id },
+			};
+		},
+	};
+}
+
+describe("normalizeSkillName", () => {
+	test("lowercases and folds separators", () => {
+		expect(normalizeSkillName("Retry-Budget")).toBe("retry-budget");
+		expect(normalizeSkillName("retry_budget")).toBe("retry-budget");
+		expect(normalizeSkillName("retry  budget")).toBe("retry-budget");
 	});
 
-	test("spaces, slashes and shouting fold to the skill rule", () => {
-		const name = skillNameForTeachable("Retry Budget/2!", "mem_1");
-		expect(name).toBe("retry-budget-2");
-		expect(SKILL_NAME_RE.test(name)).toBe(true);
-	});
-
-	test("underscores fold too — memory ids are not skill names", () => {
-		expect(skillNameForTeachable("my_lesson", "mem_1")).toBe("my-lesson");
-	});
-
-	test("nothing usable left falls back to the memory id, never an empty name", () => {
-		const name = skillNameForTeachable("---", "mem_9");
-		expect(SKILL_NAME_RE.test(name)).toBe(true);
-		expect(name).toContain("mem-9");
-	});
-
-	test("a long slug caps at the rule's length", () => {
-		const name = skillNameForTeachable("a".repeat(100), "mem_1");
-		expect(name.length).toBeLessThanOrEqual(64);
-		expect(SKILL_NAME_RE.test(name)).toBe(true);
-	});
-});
-
-describe("skillDescriptionForTeachable", () => {
-	test("ordinary text passes through", () => {
-		const entry = teachableEntry({ id: "mem_1" });
-		expect(skillDescriptionForTeachable(entry, "retry-budget")).toBe(entry.text);
-	});
-
-	test("a credential in the body is redacted, not published", () => {
-		const leaked = `ghp_${"C".repeat(36)}`;
-		const entry = teachableEntry({ id: "mem_1", text: `rotate the token ${leaked} weekly` });
-		const description = skillDescriptionForTeachable(entry, "rotation");
-
-		expect(description).not.toContain(leaked);
-		expect(description).toContain("[REDACTED]");
-	});
-
-	test("a long body caps at the snippet precedent", () => {
-		const entry = teachableEntry({ id: "mem_1", text: "x".repeat(2000) });
-		expect(skillDescriptionForTeachable(entry, "long")).toHaveLength(TEACHABLE_SKILL_DESCRIPTION_CHARS);
-		expect(TEACHABLE_SKILL_DESCRIPTION_CHARS).toBe(1200);
-	});
-
-	test("a stale teachable says it needs reverification", () => {
-		const entry = teachableEntry({ id: "mem_1", needs_reverification: true });
-		const description = skillDescriptionForTeachable(entry, "retry-budget");
-		expect(description.startsWith("Needs reverification before use.")).toBe(true);
-		expect(description).toContain(entry.text);
-	});
-
-	test("redaction that leaves nothing still yields a non-empty description", () => {
-		const entry = teachableEntry({ id: "mem_1", text: `ghp_${"D".repeat(36)}` });
-		const description = skillDescriptionForTeachable(entry, "rotation");
-
-		expect(description.length).toBeGreaterThan(0);
-		expect(description).not.toContain("ghp_");
+	test("never emits an invalid name", () => {
+		expect(normalizeSkillName("")).toBe("teachable");
+		expect(normalizeSkillName("!!!")).toBe("teachable");
 	});
 });
 
 describe("buildAgentCard", () => {
-	test("a surface with teachables gets a validator-clean card with one skill each", () => {
-		const teachables = [
-			teachableEntry({ id: "mem_2", subject: "teachable:retry-budget", created: "2026-10-10T00:02:00.000Z" }),
-			teachableEntry({ id: "mem_1", subject: "teachable:backoff", created: "2026-10-10T00:01:00.000Z" }),
-		];
+	test("every known surface gets a validator-clean card with a unique id", () => {
+		const ids = new Set<string>();
+		for (const surface of SURFACES) {
+			const card = buildAgentCard(surface, []);
+			expect(validateAgentCard(card)).toEqual([]);
+			expect(card.skills).toEqual([]);
+			ids.add(card.id);
+		}
+		expect(ids.size).toBe(SURFACES.length);
+	});
 
-		const card = buildAgentCard("hermes", BASE, teachables);
+	test("one skill entry per teachable, newest first", () => {
+		const older = entry({ id: "mem_old", subject: "teachable:retry-budget", created: "2026-10-01T10:00:00.000Z" });
+		const newer = entry({ id: "mem_new", subject: "teachable:paging-policy", created: "2026-10-01T11:00:00.000Z" });
+		const card = buildAgentCard("hermes", [newer, older]);
 
 		expect(validateAgentCard(card)).toEqual([]);
-		expect(card.skills).toHaveLength(2);
-		expect(card.skills[0]).toMatchObject({ id: "mem_2", name: "retry-budget", tags: ["teachable"] });
-		expect(card.skills[0]?.description.length).toBeGreaterThan(0);
-		expect(card.skills[1]).toMatchObject({ id: "mem_1", name: "backoff" });
-	});
-
-	test("folded names stay unique past the first 999 suffixes", () => {
-		const teachables = Array.from({ length: 1001 }, (_, index) =>
-			teachableEntry({ id: `mem_${index}`, subject: "teachable:retry-budget" }),
-		);
-		const names = buildAgentCard("hermes", BASE, teachables).skills.map((skill) => skill.name);
-		expect(new Set(names).size).toBe(names.length);
-		expect(names[0]).toBe("retry-budget");
-		expect(names[1000]).toBe("retry-budget-1001");
-		expect(names.every((name) => SKILL_NAME_RE.test(name))).toBe(true);
-	});
-
-	test("a long run of one folded name still takes the next suffix", () => {
-		const teachables = Array.from({ length: 4000 }, (_, index) =>
-			teachableEntry({ id: `mem_${index}`, subject: "teachable:retry-budget" }),
-		);
-		const names = buildAgentCard("hermes", BASE, teachables).skills.map((skill) => skill.name);
-		expect(new Set(names).size).toBe(names.length);
-		expect(names[3999]).toBe("retry-budget-4000");
-	});
-
-	test("an IPv6 listen host is bracketed in the card origin", () => {
-		expect(agentCardOrigin("::1", 7410)).toBe("http://[::1]:7410");
-		expect(agentCardOrigin("127.0.0.1", 7410)).toBe("http://127.0.0.1:7410");
-	});
-
-	test("folded names that collide take a numeric suffix", () => {
-		const card = buildAgentCard("hermes", BASE, [
-			teachableEntry({ id: "mem_2", subject: "teachable:retry-budget" }),
-			teachableEntry({ id: "mem_1", subject: "teachable:Retry Budget" }),
-		]);
-
-		expect(card.skills.map((skill) => skill.name)).toEqual(["retry-budget", "retry-budget-2"]);
-		expect(new Set(card.skills.map((skill) => skill.name)).size).toBe(card.skills.length);
-		expect(validateAgentCard(card)).toEqual([]);
-	});
-
-	test("an empty surface still validates — no teachables is a card with no skills", () => {
-		const card = buildAgentCard("hermes", BASE, []);
-
-		expect(validateAgentCard(card)).toEqual([]);
-		expect(card.skills).toEqual([]);
-	});
-
-	test("the url names the loopback base this deployment serves", () => {
-		const card = buildAgentCard("hermes", "http://127.0.0.1:7410/", []);
-
-		expect(card.url).toBe("http://127.0.0.1:7410/.well-known/agent-card.json?surface=hermes");
-	});
-
-	test("the A2A v1.0 fields are present with their contract values", () => {
-		const card = buildAgentCard("omp", BASE, []);
-
-		expect(card.id).toBe("substrate:omp");
+		expect(card.skills.map((skill) => skill.id)).toEqual(["mem_new", "mem_old"]);
+		expect(card.skills[0]).toMatchObject({ name: "paging-policy", tags: [TEACHABLE_SKILL_TAG] });
 		expect(card.version).toBe(AGENT_CARD_VERSION);
-		expect(card.supportedInterfaces).toEqual([
-			{
-				url: `${BASE}/.well-known/agent-card.json?surface=omp`,
-				protocolBinding: AGENT_CARD_PROTOCOL_BINDING,
-				protocolVersion: AGENT_CARD_VERSION,
-			},
-		]);
-		expect(card.capabilities).toEqual({ streaming: false, pushNotifications: false });
-		expect(card.defaultInputModes).toEqual(["text"]);
-		expect(card.defaultOutputModes).toEqual(["text"]);
+	});
+
+	test("fold collisions keep both entries with a numeric suffix", () => {
+		const a = entry({ id: "mem_a", subject: "teachable:Retry-Budget" });
+		const b = entry({ id: "mem_b", subject: "teachable:retry_budget", text: "budgets compose per surface" });
+		const card = buildAgentCard("hermes", [a, b]);
+
+		expect(validateAgentCard(card)).toEqual([]);
+		expect(card.skills.map((skill) => skill.name)).toEqual(["retry-budget", "retry-budget-2"]);
+		expect(card.skills.map((skill) => skill.id)).toEqual(["mem_a", "mem_b"]);
+	});
+
+	test("descriptions are redacted and capped at 1200 chars", () => {
+		const secret = entry({
+			id: "mem_s",
+			subject: "teachable:deploy-key",
+			text: `rotate it: PGPASSWORD=s3cr3t-do-not-log. ${"padding ".repeat(400)}`,
+		});
+		const card = buildAgentCard("hermes", [secret]);
+
+		expect(validateAgentCard(card)).toEqual([]);
+		expect(card.skills[0]?.description).not.toContain("s3cr3t");
+		expect(card.skills[0]?.description.length).toBeLessThanOrEqual(1200);
+	});
+
+	test("stale entries keep their re-verification warning", () => {
+		const stale = entry({ id: "mem_stale", subject: "teachable:old-advice", needs_reverification: true });
+		const fresh = entry({ id: "mem_fresh", subject: "teachable:new-advice" });
+		const card = buildAgentCard("hermes", [stale, fresh]);
+
+		expect(validateAgentCard(card)).toEqual([]);
+		expect(card.skills[0]?.description.startsWith("Check this advice before use. ")).toBe(true);
+		expect(card.skills[1]?.description.startsWith("Check this advice")).toBe(false);
 	});
 });
 
 describe("validateAgentCard", () => {
-	function valid(): AgentCard {
-		return buildAgentCard("hermes", BASE, [teachableEntry({ id: "mem_1" })]);
-	}
-
-	test("catches every missing CARD-01 field", () => {
-		const missing: Array<[string, (card: Record<string, unknown>) => void]> = [
-			["id", (card) => delete card.id],
-			["name", (card) => delete card.name],
-			["description", (card) => delete card.description],
-			["url", (card) => delete card.url],
-			["version", (card) => delete card.version],
-			["supportedInterfaces", (card) => delete card.supportedInterfaces],
-			["capabilities", (card) => delete card.capabilities],
-			["defaultInputModes", (card) => delete card.defaultInputModes],
-			["defaultOutputModes", (card) => delete card.defaultOutputModes],
-			["skills", (card) => delete card.skills],
-		];
-		for (const [field, remove] of missing) {
-			const card = valid() as unknown as Record<string, unknown>;
-			remove(card);
-			expect(validateAgentCard(card).length, field).toBeGreaterThan(0);
+	test("the fixture corpus answers its pinned verdict", () => {
+		for (const fixture of AGENT_CARD_FIXTURES) {
+			const violations = validateAgentCard(fixture.card);
+			if (fixture.valid) expect(violations).toEqual([]);
+			else expect(violations.length).toBeGreaterThan(0);
 		}
 	});
 
-	test("rejects degraded field shapes, not just absent ones", () => {
-		const cases: Array<[string, unknown]> = [
-			["empty modes", { ...valid(), defaultInputModes: [] }],
-			["blank mode", { ...valid(), defaultOutputModes: [""] }],
-			["null capabilities", { ...valid(), capabilities: null }],
-			["array capabilities", { ...valid(), capabilities: [] }],
-			["empty interfaces", { ...valid(), supportedInterfaces: [] }],
-			["string interfaces", { ...valid(), supportedInterfaces: ["a2a"] }],
-			["non-array skills", { ...valid(), skills: {} }],
-		];
-		for (const [name, card] of cases) {
-			expect(validateAgentCard(card).length, name).toBeGreaterThan(0);
+	test("the stub shape is rejected field by field", () => {
+		const violations = validateAgentCard({
+			agent: "hermes",
+			surface: "hermes",
+			version: "v0.3-a2a",
+			skills: [{ name: "retry-budget", framing: "cap retries", tags: ["teachable-moment"] }],
+			teachables: ["teachable:retry-budget"],
+		});
+		const joined = violations.join("\n");
+		for (const field of ["id", "description", "capabilities", "defaultInputModes", "supportedInterfaces", "skills[0].description"]) {
+			expect(joined).toContain(field);
 		}
 	});
 
-	test("every skill needs an id, a rule-valid name and a non-empty description", () => {
-		const badSkills: unknown[] = [
-			{ name: "fine", description: "d" },
-			{ id: "mem_1", description: "d" },
-			{ id: "mem_1", name: "Has Caps", description: "d" },
-			{ id: "mem_1", name: "fine", description: "" },
-			{ id: "mem_1", name: "fine" },
-			"a-string-is-not-a-skill",
-		];
-		for (const skill of badSkills) {
-			expect(validateAgentCard({ ...valid(), skills: [skill] }).length, JSON.stringify(skill)).toBeGreaterThan(0);
-		}
-	});
-
-	test("rejects non-objects outright", () => {
-		expect(validateAgentCard(null)).toHaveLength(1);
-		expect(validateAgentCard("card")).toHaveLength(1);
-		expect(validateAgentCard([])).toHaveLength(1);
+	test("duplicate skill names are rejected", () => {
+		expect(
+			validateAgentCard({
+				...VALID_CARD,
+				skills: [
+					{ id: "mem_1", name: "retry-budget", description: "a", tags: [TEACHABLE_SKILL_TAG] },
+					{ id: "mem_2", name: "retry-budget", description: "b", tags: [TEACHABLE_SKILL_TAG] },
+				],
+			}).join("\n"),
+		).toContain("duplicates");
 	});
 });
 
 describe("teachablesForSurface", () => {
-	/**
-	 * An index stub that honours the three things the reader relies on —
-	 * `subjectPrefix`, the superseded exclusion and newest-first keyset pages —
-	 * so the reader test proves the filtering, not the SQL.
-	 */
-	function reader(rows: MemoryEntry[], surface: Surface | string = "hermes", seen?: MemorySearch[]) {
-		const ordered = [...rows].sort((a, b) => b.created.localeCompare(a.created) || b.id.localeCompare(a.id));
-		const index = {
-			searchMemoryPage: async (search: MemorySearch) => {
-				seen?.push(search);
-				let out = search.includeSuperseded ? [...ordered] : ordered.filter((entry) => !entry.superseded_by);
-				if (search.subjectPrefix) {
-					const prefix = search.subjectPrefix;
-					out = out.filter((entry) => (entry.subject ?? "").startsWith(prefix));
-				}
-				if (search.writer) out = out.filter((entry) => entry.writer === search.writer);
-				if (search.kind) out = out.filter((entry) => entry.kind === search.kind);
-				if (search.before) {
-					const at = search.before;
-					const tie = search.beforeId ?? "";
-					out = out.filter((entry) => entry.created < at || (entry.created === at && entry.id < tie));
-				}
-				const limit = search.limit ?? 20;
-				const entries = out.slice(0, limit);
-				const last = entries[entries.length - 1];
-				return {
-					entries,
-					next: entries.length === limit && out.length > limit && last ? { before: last.created, before_id: last.id } : null,
-				};
-			},
-		};
-		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null });
-		return substrate.teachablesForSurface(surface);
+	const rows = [
+		entry({ id: "mem_live", subject: "teachable:retry-budget", created: "2026-10-01T10:00:00.000Z" }),
+		entry({ id: "mem_newer", subject: "teachable:paging-policy", created: "2026-10-01T12:00:00.000Z" }),
+		entry({ id: "mem_warn", kind: "warning", subject: "teachable:noisy", created: "2026-10-01T13:00:00.000Z" }),
+		entry({ id: "mem_plain", subject: "n2-status", created: "2026-10-01T14:00:00.000Z" }),
+		entry({ id: "mem_omp", writer: "omp", subject: "teachable:other-surface", created: "2026-10-01T15:00:00.000Z" }),
+		entry({ id: "mem_old", subject: "teachable:retired", superseded_by: "mem_live", created: "2026-10-01T09:00:00.000Z" }),
+	];
+
+	function substrateFor(index: unknown) {
+		return new Substrate(loadConfig({}), { index: index as never, greptime: null });
 	}
 
 	test("returns exactly the surface's live teachable facts, newest first", async () => {
-		const rows = [
-			teachableEntry({ id: "mem_new", subject: "teachable:retry-budget", writer: "hermes", created: "2026-10-10T00:03:00.000Z" }),
-			teachableEntry({ id: "mem_warn", subject: "teachable:retry-budget", kind: "warning", writer: "hermes", created: "2026-10-10T00:04:00.000Z" }),
-			teachableEntry({ id: "mem_plain", subject: "ordinary-note", writer: "hermes", created: "2026-10-10T00:05:00.000Z" }),
-			teachableEntry({ id: "mem_other", subject: "teachable:retry-budget", writer: "omp", created: "2026-10-10T00:06:00.000Z" }),
-			teachableEntry({ id: "mem_old", subject: "teachable:backoff", writer: "hermes", created: "2026-10-10T00:01:00.000Z" }),
-			teachableEntry({ id: "mem_dead", subject: "teachable:retired", writer: "hermes", superseded_by: "mem_newer", created: "2026-10-10T00:02:00.000Z" }),
-		];
+		const teachables = await substrateFor(prefixIndex(rows)).teachablesForSurface("hermes");
 
-		const seen: MemorySearch[] = [];
-		const found = await reader(rows, "hermes", seen);
-
-		expect(found.map((entry) => entry.id)).toEqual(["mem_new", "mem_old"]);
-		expect(seen[0]).toMatchObject({ writer: "hermes", kind: "fact", subjectPrefix: "teachable:" });
+		expect(teachables.map((row) => row.id)).toEqual(["mem_newer", "mem_live"]);
 	});
 
-	test("an unknown surface reads as empty — the route owns the 400", async () => {
-		const rows = [teachableEntry({ id: "mem_1", writer: "hermes" })];
+	test("filters writer and kind before paging, so no surface hides another's skills", async () => {
+		const stub = prefixIndex(rows);
+		await substrateFor(stub).teachablesForSurface("hermes");
 
-		expect(await reader(rows, "nope")).toEqual([]);
+		expect(stub.seen[0]).toMatchObject({ writer: "hermes", kind: "fact", subjectPrefix: "teachable:" });
 	});
 
-	test("no index reads as empty, never a throw", async () => {
-		const substrate = new Substrate(loadConfig({}), { index: null, greptime: null });
+	test("an empty-slug fact never becomes a skill", async () => {
+		const withEmpty = [...rows, entry({ id: "mem_empty", subject: "teachable:" })];
+		const teachables = await substrateFor(prefixIndex(withEmpty)).teachablesForSurface("hermes");
 
-		expect(await substrate.teachablesForSurface("hermes")).toEqual([]);
+		expect(teachables.map((row) => row.id)).toEqual(["mem_newer", "mem_live"]);
 	});
 
-	test("pages past the first page — every live teachable appears once", async () => {
-		const rows = Array.from({ length: 105 }, (_, i) =>
-			teachableEntry({
-				id: `mem_${String(i).padStart(3, "0")}`,
-				subject: `teachable:lesson-${i}`,
-				writer: "hermes",
-				created: new Date(Date.UTC(2026, 9, 10, 0, 0, i)).toISOString(),
-			}),
-		);
+	test("another surface sees only its own", async () => {
+		const teachables = await substrateFor(prefixIndex(rows)).teachablesForSurface("omp");
 
-		const found = await reader(rows);
-		const ids = found.map((entry) => entry.id).sort();
-		const unique = ids.filter((id, at) => ids.indexOf(id) === at);
+		expect(teachables.map((row) => row.id)).toEqual(["mem_omp"]);
+	});
 
-		expect(found).toHaveLength(105);
-		expect(unique).toHaveLength(105);
-		expect(found[0]?.subject).toBe("teachable:lesson-104");
+	test("an unknown surface reads as an empty list — the route owns the 400", async () => {
+		expect(await substrateFor(prefixIndex(rows)).teachablesForSurface("nope")).toEqual([]);
+		expect(isKnownCardSurface("nope")).toBe(false);
+		expect(isKnownCardSurface("hermes")).toBe(true);
+	});
+
+	test("no index reads as an empty list", async () => {
+		expect(await substrateFor(null).teachablesForSurface("hermes")).toEqual([]);
 	});
 });
 
-describe("session to card", () => {
-	/**
-	 * A scratch index the whole CARD-04 isolated leg runs against: governed
-	 * writes land through the gate's store seam, and the card reader lists
-	 * them back through the search seam. The session → anchored-hour leg lives
-	 * in teachable-anchor.test.ts; same run, both green.
-	 */
-	class ScratchIndex implements MemoryStore {
-		private readonly rows = new Map<string, MemoryEntry>();
-		private readonly claims = new Map<string, string>();
-		private holders = 0;
-
-		async claimWrite(input: { key: string; explicit: boolean; entryHash: string; requestHash: string; entryId: string }): Promise<ClaimResult> {
-			const holder = `hold_${++this.holders}`;
-			this.claims.set(input.key, holder);
-			return { claimed: true, holder, tookOverFrom: null };
-		}
-
-		async finishWrite(): Promise<void> {}
-		async releaseWrite(): Promise<void> {}
-		async restoreWrite(): Promise<void> {}
-		async standingEntry(): Promise<MemoryEntry | null> {
-			return null;
-		}
-
-		async insertEntry(
-			row: NewMemoryEntry,
-			claim: { key: string; holder: string },
-		): Promise<{ ok: true; entry: MemoryEntry } | { ok: false; reason: "standing-moved" | "claim-lost" | "standing-exists" }> {
-			if (this.claims.get(claim.key) !== claim.holder) return { ok: false, reason: "claim-lost" };
-			const entry: MemoryEntry = {
-				id: row.id,
-				scope: row.scope,
-				kind: row.kind,
-				text: row.text,
-				writer: row.writer,
-				actor: row.actor,
-				trust: row.trust,
-				ttl: row.ttl,
-				created: new Date().toISOString(),
-				version: row.version,
-				entry_hash: row.entry_hash,
-				needs_reverification: false,
-				...(row.subject ? { subject: row.subject } : {}),
-				...(row.session_id ? { session_id: row.session_id } : {}),
-				...(row.graph_id ? { graph_id: row.graph_id } : {}),
-				...(row.idempotency_key ? { idempotency_key: row.idempotency_key } : {}),
-			};
-			this.rows.set(row.id, entry);
-			return { ok: true, entry };
-		}
-
-		async readEntry(id: string): Promise<MemoryEntry | null> {
-			return this.rows.get(id) ?? null;
-		}
-
-		async quarantineEntry(): Promise<string> {
-			return "memq_1";
-		}
-
-		async enqueueReview(): Promise<string> {
-			return "rev_1";
-		}
-
-		async releaseReviews(): Promise<number> {
-			return 0;
-		}
-
-		async searchMemoryPage(search: MemorySearch) {
-			let out = search.includeSuperseded ? [...this.rows.values()] : [...this.rows.values()].filter((entry) => !entry.superseded_by);
-			if (search.subjectPrefix) {
-				const prefix = search.subjectPrefix;
-				out = out.filter((entry) => (entry.subject ?? "").startsWith(prefix));
-			}
-			out.sort((a, b) => b.created.localeCompare(a.created) || b.id.localeCompare(a.id));
-			if (search.before) {
-				const at = search.before;
-				const tie = search.beforeId ?? "";
-				out = out.filter((entry) => entry.created < at || (entry.created === at && entry.id < tie));
-			}
-			const limit = search.limit ?? 20;
-			const entries = out.slice(0, limit);
-			const last = entries[entries.length - 1];
-			return {
-				entries,
-				next: entries.length === limit && out.length > limit && last ? { before: last.created, before_id: last.id } : null,
-			};
-		}
+describe("GET /.well-known/agent-card.json", () => {
+	/** Boot the real server on an ephemeral port; `stop` closes it. */
+	async function serve(index: unknown) {
+		const config = loadConfig({});
+		const observability = createObservability(config, {});
+		await observability.start();
+		const substrate = new Substrate(config, { index: index as never, greptime: null }, observability.observer);
+		const server = createHttpServer(substrate, config, observability);
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		const address = server.address();
+		const port = typeof address === "object" && address ? address.port : 0;
+		return {
+			get: (path: string) => fetch(`http://127.0.0.1:${port}${path}`),
+			stop: () =>
+				new Promise<void>((resolve) => {
+					observability.stop();
+					server.close(() => resolve());
+				}),
+		};
 	}
 
+	const cardRows = [
+		entry({ id: "mem_live", subject: "teachable:retry-budget", session_id: "sess-p29-teachable", graph_id: "ut-card" }),
+	];
+
+	test("200 with a validator-clean card for a taught surface", async () => {
+		const { get, stop } = await serve(prefixIndex(cardRows));
+		try {
+			const response = await get("/.well-known/agent-card.json?surface=hermes");
+			expect(response.status).toBe(200);
+			const card = (await response.json()) as Record<string, unknown>;
+			expect(validateAgentCard(card)).toEqual([]);
+			const skills = card.skills as Array<Record<string, unknown>>;
+			expect(skills).toHaveLength(1);
+			expect(skills[0]).toMatchObject({ id: "mem_live", name: "retry-budget" });
+		} finally {
+			await stop();
+		}
+	});
+
+	test("200 with empty skills for an untaught surface", async () => {
+		const { get, stop } = await serve(prefixIndex(cardRows));
+		try {
+			const response = await get("/.well-known/agent-card.json?surface=omp");
+			expect(response.status).toBe(200);
+			const card = (await response.json()) as Record<string, unknown>;
+			expect(validateAgentCard(card)).toEqual([]);
+			expect(card.skills).toEqual([]);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("400 naming the parameter when surface is missing", async () => {
+		const { get, stop } = await serve(prefixIndex(cardRows));
+		try {
+			const response = await get("/.well-known/agent-card.json");
+			expect(response.status).toBe(400);
+			expect(((await response.json()) as Record<string, unknown>).error).toContain("surface");
+		} finally {
+			await stop();
+		}
+	});
+
+	test("400 for an unknown surface", async () => {
+		const { get, stop } = await serve(prefixIndex(cardRows));
+		try {
+			const response = await get("/.well-known/agent-card.json?surface=nope");
+			expect(response.status).toBe(400);
+		} finally {
+			await stop();
+		}
+	});
+
+	test("anonymous loopback GETs return 200 — discovery needs no bearer", async () => {
+		const { get, stop } = await serve(prefixIndex(cardRows));
+		try {
+			const response = await get("/.well-known/agent-card.json?surface=hermes");
+			expect(response.status).toBe(200);
+		} finally {
+			await stop();
+		}
+	});
+});
+
+describe("card end-to-end (session → card)", () => {
 	test("a session teachable appears in its surface's card only, validator-clean", async () => {
-		const captured: SubstrateEvent[] = [];
+		// The CARD-04 isolated half: session write → card lists it (the
+		// session → anchored-hour leg is the teachable-anchor proof; same
+		// scratch shape, both green). No new fixtures beyond the corpus.
+		class Searchable extends FakeStore {
+			async searchMemoryPage(search: MemorySearch): Promise<MemorySearchPage> {
+				const prefix = search.subjectPrefix ?? null;
+				const kept = [...this.rows.values()]
+					.map((row) => row.entry)
+					.filter((row) => prefix === null || row.subject?.startsWith(prefix))
+					.filter((row) => search.includeSuperseded || !row.superseded_by)
+					.sort((a, b) => (b.created === a.created ? (b.id < a.id ? -1 : 1) : b.created < a.created ? -1 : 1));
+				return { entries: kept.slice(0, search.limit ?? 20), next: null };
+			}
+		}
 		const substrate = new Substrate(loadConfig({}), {
-			index: new ScratchIndex() as never,
+			index: new Searchable() as never,
 			greptime: {
 				ensureAppendMode: async () => true,
 				lastHash: async () => null,
-				insertEvent: async (event: SubstrateEvent) => {
-					captured.push(event);
-				},
+				insertEvent: async () => {},
 			} as never,
 		});
 
 		const written = await substrate.writeMemory({
-			scope: "graph:ut-card",
+			scope: "graph:ut-card-e2e",
 			kind: "fact",
-			text: "retry with a capped budget and backoff",
+			text: "cap retries at three before paging the human",
 			writer: "hermes",
 			subject: "teachable:retry-budget",
-			session_id: "sess-card-1",
-			graph_id: "ut-card",
+			session_id: "sess-p29-card",
+			graph_id: "ut-card-e2e",
 		});
 		expect(written.outcome).toBe("accepted");
-		expect(written.verified_persisted).toBe(true);
-		expect(captured.filter((event) => event.payload["action"] === "teachable")).toHaveLength(1);
 
-		const card = buildAgentCard("hermes", BASE, await substrate.teachablesForSurface("hermes"));
+		const card = buildAgentCard("hermes", await substrate.teachablesForSurface("hermes"));
 		expect(validateAgentCard(card)).toEqual([]);
 		expect(card.skills).toHaveLength(1);
 		expect(card.skills[0]).toMatchObject({ id: written.entry?.id, name: "retry-budget" });
 
-		const other = buildAgentCard("omp", BASE, await substrate.teachablesForSurface("omp"));
+		const other = buildAgentCard("omp", await substrate.teachablesForSurface("omp"));
 		expect(validateAgentCard(other)).toEqual([]);
 		expect(other.skills).toEqual([]);
 	});

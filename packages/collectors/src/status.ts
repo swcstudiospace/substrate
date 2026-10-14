@@ -164,7 +164,9 @@ function main(): void {
 		muse: readJson(join(stateDir, "muse-offsets.json")),
 		grok: readJson(join(stateDir, "grok-offsets.json")),
 	};
-	const summary = summarize(states, readLines(join(stateDir, REFUSED_FILE)), since);
+	// The refused journal rotates to `.1` at its size cap; the older lines come first.
+	const refusedLines = [...readLines(join(stateDir, `${REFUSED_FILE}.1`)), ...readLines(join(stateDir, REFUSED_FILE))];
+	const summary = summarize(states, refusedLines, since);
 
 	if (json) {
 		process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);

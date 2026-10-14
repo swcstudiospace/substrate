@@ -1,0 +1,60 @@
+[Unit]
+Description=Agent Substrate live docs golden canary (opt-in: refuses until SUBSTRATE_DOCS_CANARY=1 and an attested corpus manifest are set; read-only against RAGFlow)
+Documentation=https://github.com/swcstudiospace/agent-substrate
+After=network-online.target substrate-mcp.service
+Wants=network-online.target
+# A missing entry point skips the start silently instead of failing into the
+# timer's persistent backlog. The path is the pinned release, not the checkout:
+# ConditionPathExists follows the current symlink.
+ConditionPathExists=/opt/agent-substrate/current/scripts/docs-golden.ts
+
+[Service]
+Type=oneshot
+# No SuccessExitStatus=: exit 1 is a regression against the golden questions,
+# and a failed oneshot is the visible half of the signal (the other half is the
+# one `warning` event, posted when the failing set changes). Exit 2 means the
+# canary is not configured (the opt-in is off, which is the shipped state) and
+# exit 3 means it could not run (stale fixtures, refused search); neither posts.
+#
+# Credentials only; nothing secret lives in the repo. The drop-in
+# substrate-docs-canary.service.d/10-environment.conf is the EnvironmentFile:
+# the canary is a host job in the same trust domain as the server. It searches
+# as `omp` (SUBSTRATE_TOKEN_OMP, first entry) and posts as `substrate`
+# (SUBSTRATE_TOKEN_SUBSTRATE), both from the shared env, never printed.
+WorkingDirectory=/opt/agent-substrate/current
+# Machine-specific: `command -v bun`. The binary on this host is under
+# /root/.local, which is why the unit still runs as root (no User=) and why
+# ProtectHome=false stays. The code itself is the release at WorkingDirectory.
+ExecStart=/root/.local/share/reflex/bun/bin/bun scripts/docs-golden.ts --live --emit
+
+# /var/lib/substrate, created by systemd and writable under ProtectSystem=full.
+# The dedupe record (the failing fixtures last announced) lives there.
+StateDirectory=substrate
+StateDirectoryMode=0700
+Environment=SUBSTRATE_DOCS_CANARY_STATE=/var/lib/substrate/docs-canary-last.json
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=substrate-docs-canary
+
+# Resource ceilings (uplift-2 R7 shape): a oneshot that posts a handful of
+# searches and at most one event. Lives in substrate.slice so it is accounted
+# with the rest.
+Slice=substrate.slice
+MemoryMax=256M
+TasksMax=64
+
+# It talks to the loopback substrate-mcp only (the canary refuses a SUBSTRATE_URL
+# that is not loopback). ProtectHome=false is the remaining exception:
+# ExecStart's bun lives under /root/.local, so ProtectHome=true would hide the
+# interpreter.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

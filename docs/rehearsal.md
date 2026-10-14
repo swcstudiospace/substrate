@@ -35,12 +35,14 @@ default; clients reach the ledger only through `SUBSTRATE_URL`.
 
 ## Commands
 
-All four run through the `rehearsal` package script:
+All six run through the `rehearsal` package script:
 
 ```sh
-bun run rehearsal up [--name <n>] [--port <N>] [--surfaces a,b] [--operator <s>] [--anonymous] [--skills-fixture]
+bun run rehearsal up [--name <n>] [--port <N>] [--surfaces a,b] [--operator <s>] [--anonymous] [--skills-fixture] [--extra-env KEY=VALUE]...
 bun run rehearsal smoke [--name <n>]
 bun run rehearsal status [--name <n>]
+bun run rehearsal pause --store ledger|index [--name <n>]
+bun run rehearsal unpause --store ledger|index [--name <n>]
 bun run rehearsal down [--name <n>]
 ```
 
@@ -68,7 +70,10 @@ Flags, as built:
   runs for real; `consumer.env` gains the four `SUBSTRATE_REHEARSAL_SKILLS_*` paths.
   `bun run smoke:skills-propose` is the proof that drives it. Every instance, with
   or without the flag, sets `SUBSTRATE_SKILLS_STATE` inside its run directory, so a
-  twin can never write the host's skills state.
+  twin can never write the host's skills state. `bun run smoke:skills-sync`
+  ([skills-sync-bridge-miners.md](skills-sync-bridge-miners.md)) replays the
+  mined-to-projected loop on the same fixture: bridge propose, queue drains,
+  sync refusals, a simulated owner merge plus ff tick, and projector links.
 
 `up` refuses unless Docker is reachable, both images are present locally, free
 disk is above the ~2 GiB floor (it never prunes), and the port is free. It
@@ -77,6 +82,21 @@ then starts the two labelled containers, spawns the checkout's own
 waits for `GET /healthz` to report a writable index and ledger, and prints the
 `consumer.env` path, the URL, the checkout commit, a dirty flag and the image
 tags. Never a credential.
+
+`--extra-env KEY=VALUE` (repeatable, `up` only) adds one server setting to the twin's environment. It is a closed list in `packages/mcp-server/src/rehearsal-env.ts` (`EXTRA_ENV_ALLOWLIST`), and every key accepts only the values listed here:
+
+| Key | Accepts |
+| --- | --- |
+| `SUBSTRATE_METRICS_HISTORY` | `on`, `off` |
+| `SUBSTRATE_BRIEF_PROFILE` | `off`, `shadow`, `enforce` |
+| `SUBSTRATE_CACHE_SWR` | `off`, `shadow`, `enforce` |
+| `SUBSTRATE_SLO_MIN_SAMPLES` | a whole number, 1 to 999 |
+
+Anything else exits `2` before any Docker call, naming the rule: `extra-env-format` (not `KEY=VALUE`), `extra-env-key` (not on the list, so no store URL, token, path or host can be injected), `extra-env-value` (a value the key does not take) or `extra-env-duplicate` (the same key twice; the later value never silently wins). A key is added to the list only once the server reads it, with the values the server accepts. `up` prints each accepted pair.
+
+`pause` and `unpause` freeze and thaw one scratch store of one instance with `docker pause` / `docker unpause`: the container keeps its connections open and answers nothing, which is how a dropped-packet outage looks to the server (`index` is the Postgres container, `ledger` the other). They take the same per-instance lock as `down` and the same local-daemon check. The container is found by the instance label **and** its exact name (`substrate-rehearsal-<name>-ledger` or `-pg`); anything else, none or two matches refuse with rule `pause-target` and nothing is paused. A store already in the asked state is reported and left alone (exit `0`), so a cleanup `unpause` is always safe, and the state is read back from Docker after the verb. A paused store does not stop `down`: removal is forced.
+
+`bun run gate:boot` ([runbooks/release-gate.md](runbooks/release-gate.md)) is the driver that uses all of it: boot, prove, freeze the ledger, run the chaos smoke, thaw, `down`.
 
 `down` is idempotent. It signals only the pid recorded in its own `state.json`,
 and only after checking that pid's command line is the server entry point,
@@ -153,7 +173,8 @@ bun run rehearsal smoke --name <n>
 ## Exits
 
 `0` pass, `1` failed, `2` usage or refused. Unreachable preconditions — a
-missing `consumer.env`, a production-looking smoke target — refuse with exit
+missing `consumer.env`, a production-looking smoke target, a refused `--extra-env`,
+`--store` or pause target — refuse with exit
 `2` before proving anything. Scratch stores or a twin that never reach
 healthy stay exit `1`: the harness ran, and the proof failed.
 

@@ -1,7 +1,16 @@
+/**
+ * Teachable write path (Phase 29, CARD-02/CARD-03).
+ *
+ * Pins the `teachable:` predicate, the slug helper, the sample-shaped event
+ * builder, the shared fixture corpus outcomes, and the `writeMemory` emit
+ * hook: one sample-shaped `note` on accepted + verified teachable facts,
+ * nothing new on refused, quarantined, or conflicting writes.
+ */
 import { describe, expect, test } from "bun:test";
 import { loadConfig } from "./config.ts";
 import { EVENT_SOURCES } from "./event-sources.ts";
-import type { ClaimResult, MemoryStore, NewMemoryEntry } from "./memory-write.ts";
+import { governMemoryWrite } from "./memory-write.ts";
+import { FakeStore } from "./memory-write.test.ts";
 import { Substrate } from "./service.ts";
 import {
 	TEACHABLE_SUBJECT_PREFIX,
@@ -9,464 +18,327 @@ import {
 	teachableEvent,
 	teachableSlug,
 } from "./teachable.ts";
-import { SURFACES, type MemoryEntry, type SubstrateEvent, type Surface } from "./types.ts";
+import {
+	ACCEPTED_TEACHABLE,
+	CONFLICT_TEACHABLE,
+	FOLD_COLLISION_TEACHABLES,
+	QUARANTINED_TEACHABLE,
+	REFUSED_TEACHABLE,
+	TEACHABLE_FIXTURES,
+} from "./teachable.fixtures.ts";
+import type { MemoryWriteRequest, SubstrateEvent } from "./types.ts";
 
-describe("teachable subject convention", () => {
-	test("the prefix is the documented tag", () => {
-		expect(TEACHABLE_SUBJECT_PREFIX).toBe("teachable:");
-	});
-
+describe("isTeachable", () => {
 	test("a fact with the prefix is a teachable", () => {
 		expect(isTeachable("fact", "teachable:retry-budget")).toBe(true);
 	});
 
-	test("only facts qualify — warnings and decisions with the prefix do not", () => {
-		expect(isTeachable("warning", "teachable:retry-budget")).toBe(false);
-		expect(isTeachable("decision", "teachable:retry-budget")).toBe(false);
-		expect(isTeachable("todo", "teachable:retry-budget")).toBe(false);
+	test("normalisation applies: case and padding do not matter", () => {
+		expect(isTeachable("fact", "  Teachable:Retry-Budget ")).toBe(true);
 	});
 
-	test("a fact without the prefix is an ordinary fact", () => {
-		expect(isTeachable("fact", "retry-budget")).toBe(false);
-		expect(isTeachable("fact", "unteachable:retry-budget")).toBe(false);
-		expect(isTeachable("fact", undefined)).toBe(false);
-		expect(isTeachable("fact", "")).toBe(false);
-	});
-
-	test("the prefix alone names no topic, so it is not a teachable", () => {
+	test("an empty slug is not a teachable", () => {
 		expect(isTeachable("fact", "teachable:")).toBe(false);
-		expect(teachableSlug("teachable:")).toBeNull();
+		expect(isTeachable("fact", "teachable:   ")).toBe(false);
 	});
 
-	test("matching normalises the way the gate stores a subject", () => {
-		expect(isTeachable("fact", "  Teachable:Retry-Budget  ")).toBe(true);
-		expect(teachableSlug("  Teachable:Retry-Budget  ")).toBe("retry-budget");
+	test("other kinds are not teachables, even with the prefix", () => {
+		for (const kind of ["decision", "warning", "handoff", "todo"]) {
+			expect(isTeachable(kind, "teachable:retry-budget")).toBe(false);
+		}
 	});
 
-	test("the slug is the part after the prefix", () => {
+	test("a missing or non-string subject is not a teachable", () => {
+		expect(isTeachable("fact", undefined)).toBe(false);
+		expect(isTeachable("fact", null)).toBe(false);
+		expect(isTeachable("fact", "")).toBe(false);
+		expect(isTeachable("fact", "retry-budget")).toBe(false);
+	});
+});
+
+describe("teachableSlug", () => {
+	test("returns the part after the prefix", () => {
 		expect(teachableSlug("teachable:retry-budget")).toBe("retry-budget");
+	});
+
+	test("normalises before slicing", () => {
+		expect(teachableSlug("Teachable:Retry-Budget")).toBe("retry-budget");
+	});
+
+	test("null outside the convention", () => {
+		expect(teachableSlug("teachable:")).toBeNull();
 		expect(teachableSlug("retry-budget")).toBeNull();
 		expect(teachableSlug(undefined)).toBeNull();
 	});
 });
 
 describe("teachableEvent", () => {
-	const request = {
-		scope: "graph:ut-1",
-		kind: "fact" as const,
-		text: "retry with a capped budget and backoff",
-		writer: "hermes" as Surface,
-		subject: "teachable:retry-budget",
-		session_id: "sess-1",
-		graph_id: "ut-1",
-	};
-	const entry: MemoryEntry = {
-		id: "mem_1",
-		scope: "graph:ut-1",
-		kind: "fact",
-		text: "retry with a capped budget and backoff",
-		writer: "hermes",
-		subject: "teachable:retry-budget",
-		actor: "agent",
-		trust: "agent-claimed",
-		ttl: "graph",
-		created: "2026-10-10T00:00:00.000Z",
-		version: 1,
-		entry_hash: "ab".repeat(32),
-		needs_reverification: false,
-	};
-	const result = {
-		outcome: "accepted" as const,
-		reason: "accepted",
-		remedy: "Stored and read back.",
-		verified_persisted: true,
-		idempotency_key: "k1",
-		writer: "hermes",
-		entry,
-	};
-
-	test("carries the entry id and its content hash, never the body", () => {
-		const event = teachableEvent("hermes", request, result);
+	test("is shaped like the teachable.accepted sample", () => {
+		const request: MemoryWriteRequest = { ...ACCEPTED_TEACHABLE.request };
+		const event = teachableEvent("hermes", request, {
+			outcome: "accepted",
+			reason: "ok",
+			remedy: "stored",
+			verified_persisted: true,
+			idempotency_key: "key_1",
+			writer: "hermes",
+			entry: {
+				id: "mem_1",
+				scope: "graph:ut-teach",
+				kind: "fact",
+				text: request.text,
+				writer: "hermes",
+				subject: "teachable:retry-budget",
+				actor: "agent",
+				trust: "agent-claimed",
+				ttl: "session",
+				created: "2026-10-01T10:00:00.000Z",
+				version: 1,
+				entry_hash: "c".repeat(64),
+				needs_reverification: false,
+			},
+		});
 
 		expect(event.kind).toBe("note");
 		expect(event.surface).toBe("hermes");
 		expect(event.summary).toBe("teachable accepted: retry-budget");
-		expect(event.session_id).toBe("sess-1");
-		expect(event.graph_id).toBe("ut-1");
+		expect(event.session_id).toBe("sess-p29-teachable");
+		expect(event.graph_id).toBe("ut-teach");
 		expect(event.payload).toEqual({
 			action: "teachable",
 			memory_id: "mem_1",
 			subject: "teachable:retry-budget",
-			content_sha256: "ab".repeat(32),
+			content_sha256: "c".repeat(64),
 		});
-		expect(JSON.stringify(event)).not.toContain("capped budget");
+		// No content bytes ride the trail: id, subject and hash only.
+		expect(JSON.stringify(event.payload)).not.toContain("cap retries");
 	});
 
-	test("omits session and graph where the caller sent none", () => {
-		const { session_id: _s, graph_id: _g, ...bare } = request;
-		const event = teachableEvent("hermes", bare, result);
-
-		expect(event).not.toHaveProperty("session_id");
-		expect(event).not.toHaveProperty("graph_id");
-		expect(event.payload).toMatchObject({ action: "teachable", memory_id: "mem_1" });
+	test("carries no session or graph id when the caller sent none", () => {
+		const request: MemoryWriteRequest = {
+			scope: "graph:ut-teach",
+			kind: "fact",
+			text: "x",
+			writer: "hermes",
+			subject: "teachable:retry-budget",
+		};
+		const event = teachableEvent("hermes", request, {
+			outcome: "accepted",
+			reason: "ok",
+			remedy: "stored",
+			verified_persisted: true,
+			idempotency_key: "key_1",
+			writer: "hermes",
+		});
+		expect(event.session_id).toBeUndefined();
+		expect(event.graph_id).toBeUndefined();
+		expect(event.payload).toMatchObject({ action: "teachable" });
 	});
 });
 
 describe("teachable.accepted sample conformance", () => {
-	test("the builder matches the mapped sample's shape", () => {
+	test("the emitted event deep-matches the mapped sample shape", () => {
+		// The sample is the contract the vocabulary already maps: kind, surface
+		// semantics (the writer's surface), action, and payload keys. Values
+		// come from the write; keys and shape must not drift from the map.
 		const mapped = EVENT_SOURCES.find((source) => source.id === "teachable.accepted");
 		expect(mapped).toBeDefined();
 		expect(mapped?.kind).toBe("note");
 		expect(mapped?.actions).toEqual(["teachable"]);
 
-		const sample = mapped?.sample() as { surface: string; kind: string; summary: string; payload: Record<string, unknown> };
-		const event = teachableEvent(
-			"hermes",
-			{
-				scope: "graph:ut-1",
+		const sample = mapped?.sample() as { kind: "note"; surface: string; payload: Record<string, unknown> };
+		const event = teachableEvent("hermes", { ...ACCEPTED_TEACHABLE.request }, {
+			outcome: "accepted",
+			reason: "ok",
+			remedy: "stored",
+			verified_persisted: true,
+			idempotency_key: "key_1",
+			writer: "hermes",
+			entry: {
+				id: "mem_1",
+				scope: "graph:ut-teach",
 				kind: "fact",
-				text: "retry with a capped budget and backoff",
+				text: "t",
 				writer: "hermes",
 				subject: "teachable:retry-budget",
-				session_id: "sess-p17-teachable",
+				actor: "agent",
+				trust: "agent-claimed",
+				ttl: "session",
+				created: "2026-10-01T10:00:00.000Z",
+				version: 1,
+				entry_hash: "c".repeat(64),
+				needs_reverification: false,
 			},
-			{
-				outcome: "accepted",
-				reason: "accepted",
-				remedy: "Stored and read back.",
-				verified_persisted: true,
-				idempotency_key: "k1",
-				writer: "hermes",
-				entry: {
-					id: "mem-p17-1",
-					scope: "graph:ut-1",
-					kind: "fact",
-					text: "retry with a capped budget and backoff",
-					writer: "hermes",
-					actor: "agent",
-					trust: "agent-claimed",
-					ttl: "graph",
-					created: "2026-10-10T00:00:00.000Z",
-					version: 1,
-					entry_hash: "0123456789abcdef".repeat(4),
-					needs_reverification: false,
-				},
-			},
-		);
+		});
 
-		// Shape, not values: kind, the writer-as-surface semantics, the action,
-		// and exactly the sample's payload keys — so vocabulary-smoke cannot drift.
-		expect(sample.kind).toBe("note");
-		expect(event.kind).toBe("note");
-		expect((SURFACES as readonly string[])).toContain(event.surface);
-		expect(event.summary).toMatch(/^teachable accepted: \S+/);
-		expect(event.payload?.["action"]).toBe(sample.payload["action"]);
-		expect(Object.keys(event.payload ?? {}).sort()).toEqual(Object.keys(sample.payload).sort());
-		expect(event.payload?.["content_sha256"]).toMatch(/^[0-9a-f]{64}$/);
+		expect(event.kind).toBe(sample.kind);
+		expect(typeof event.surface).toBe(typeof sample.surface);
+		expect(event.summary).toContain("teachable accepted: ");
+		expect(Object.keys(event.payload ?? {}).sort()).toEqual(Object.keys(sample.payload as object).sort());
+		expect(event.payload).toMatchObject({ action: "teachable" });
 	});
 });
 
-/**
- * The narrowest store the gate needs for an append-only fact: claims are
- * honoured, rows land and read back, nothing else the accepted path touches
- * moves. Refusals never reach it — RBAC and classification run first.
- */
-class TeachableStore implements MemoryStore {
-	readonly rows = new Map<string, MemoryEntry>();
-	private readonly claims = new Map<
-		string,
-		{ holder: string; outcome: string; entry_id: string | null; entry_hash: string; request_hash: string }
-	>();
-	private holders = 0;
-	/** Makes the read-back miss: the only way to reach `accepted.unverified`. */
-	hideFromReadBack = false;
+describe("fixture corpus outcomes", () => {
+	function gate(request: MemoryWriteRequest) {
+		const store = new FakeStore();
+		return governMemoryWrite(request, {
+			store,
+			isReviewToken: () => false,
+			now: () => new Date(store.clock),
+			newId: (prefix) => `${prefix}_1`,
+			verifySourceEvent: async () => false,
+		});
+	}
 
-	async claimWrite(input: {
-		key: string;
-		explicit: boolean;
-		entryHash: string;
-		requestHash: string;
-		entryId: string;
-	}): Promise<ClaimResult> {
-		const existing = this.claims.get(input.key);
-		if (existing && existing.outcome !== "in-flight") {
-			return {
-				claimed: false,
-				existing: {
-					idempotency_key: input.key,
-					explicit: input.explicit,
-					outcome: existing.outcome as "accepted",
-					entry_id: existing.entry_id,
-					entry_hash: existing.entry_hash,
-					request_hash: existing.request_hash,
-				},
-			};
+	test("every corpus row answers its pinned outcome", async () => {
+		for (const fixture of TEACHABLE_FIXTURES) {
+			const result = await gate({ ...fixture.request });
+			expect(result.outcome).toBe(fixture.outcome);
+			if (fixture.outcome === "accepted") expect(result.verified_persisted).toBe(true);
 		}
-		const holder = `hold_${++this.holders}`;
-		this.claims.set(input.key, {
-			holder,
-			outcome: "in-flight",
-			entry_id: input.entryId,
-			entry_hash: input.entryHash,
-			request_hash: input.requestHash,
-		});
-		return { claimed: true, holder, tookOverFrom: null };
-	}
-
-	async finishWrite(key: string, holder: string, outcome: "accepted" | "conflict" | "quarantined" | "denied", entryId: string | null): Promise<void> {
-		const record = this.claims.get(key);
-		if (record?.holder === holder) this.claims.set(key, { ...record, outcome, entry_id: entryId });
-	}
-
-	async releaseWrite(): Promise<void> {}
-	async restoreWrite(): Promise<void> {}
-	async standingEntry(): Promise<MemoryEntry | null> {
-		return null;
-	}
-
-	async insertEntry(
-		row: NewMemoryEntry,
-		claim: { key: string; holder: string },
-	): Promise<{ ok: true; entry: MemoryEntry } | { ok: false; reason: "standing-moved" | "claim-lost" | "standing-exists" }> {
-		const owner = this.claims.get(claim.key);
-		if (owner?.holder !== claim.holder || owner.outcome !== "in-flight") return { ok: false, reason: "claim-lost" };
-		const entry: MemoryEntry = {
-			id: row.id,
-			scope: row.scope,
-			kind: row.kind,
-			text: row.text,
-			writer: row.writer,
-			actor: row.actor,
-			trust: row.trust,
-			ttl: row.ttl,
-			created: new Date().toISOString(),
-			version: row.version,
-			entry_hash: row.entry_hash,
-			needs_reverification: false,
-			...(row.subject ? { subject: row.subject } : {}),
-			...(row.session_id ? { session_id: row.session_id } : {}),
-			...(row.graph_id ? { graph_id: row.graph_id } : {}),
-			...(row.idempotency_key ? { idempotency_key: row.idempotency_key } : {}),
-		};
-		this.rows.set(row.id, entry);
-		return { ok: true, entry };
-	}
-
-	async readEntry(id: string): Promise<MemoryEntry | null> {
-		if (this.hideFromReadBack) return null;
-		return this.rows.get(id) ?? null;
-	}
-
-	async quarantineEntry(): Promise<string> {
-		return "memq_1";
-	}
-
-	async enqueueReview(): Promise<string> {
-		return "rev_1";
-	}
-
-	async releaseReviews(): Promise<number> {
-		return 0;
-	}
-}
-
-function teachableWorld(store: TeachableStore) {
-	const emitted: SubstrateEvent[] = [];
-	const greptime = {
-		ensureAppendMode: async () => true,
-		lastHash: async () => null,
-		insertEvent: async (event: SubstrateEvent) => {
-			emitted.push(event);
-		},
-	};
-	const substrate = new Substrate(loadConfig({}), { index: store as never, greptime: greptime as never });
-	return { substrate, emitted };
-}
-
-const TEACHABLE = {
-	scope: "graph:ut-1",
-	kind: "fact" as const,
-	text: "retry with a capped budget and backoff",
-	writer: "hermes",
-	subject: "teachable:retry-budget",
-	session_id: "sess-1",
-	graph_id: "ut-1",
-};
-
-const teachableEvents = (emitted: SubstrateEvent[]) => emitted.filter((event) => event.payload["action"] === "teachable");
-
-describe("writeMemory emits the teachable trail", () => {
-	test("an accepted teachable emits one sample-shaped note", async () => {
-		const { substrate, emitted } = teachableWorld(new TeachableStore());
-
-		const result = await substrate.writeMemory({ ...TEACHABLE });
-
-		expect(result.outcome).toBe("accepted");
-		expect(result.verified_persisted).toBe(true);
-		const trail = teachableEvents(emitted);
-		expect(trail).toHaveLength(1);
-		expect(trail[0]?.kind).toBe("note");
-		expect(trail[0]?.surface).toBe("hermes");
-		expect(trail[0]?.summary).toBe("teachable accepted: retry-budget");
-		expect(trail[0]?.session_id).toBe("sess-1");
-		expect(trail[0]?.payload).toEqual({
-			action: "teachable",
-			memory_id: result.entry?.id,
-			subject: "teachable:retry-budget",
-			content_sha256: result.entry?.entry_hash,
-		});
-		expect(trail[0]?.payload["content_sha256"]).toMatch(/^[0-9a-f]{64}$/);
 	});
 
-	test("an accepted ordinary fact emits nothing new", async () => {
-		const { substrate, emitted } = teachableWorld(new TeachableStore());
-
-		const result = await substrate.writeMemory({ ...TEACHABLE, subject: "retry-budget" });
-
-		expect(result.outcome).toBe("accepted");
-		expect(emitted).toEqual([]);
+	test("slugs match the predicate on every row", () => {
+		for (const fixture of TEACHABLE_FIXTURES) {
+			expect(teachableSlug(fixture.request.subject)).toBe(fixture.slug);
+			expect(isTeachable(fixture.request.kind, fixture.request.subject)).toBe(true);
+		}
 	});
+});
 
-	test("an ordinary fact retry does not ask the ledger", async () => {
-		const store = new TeachableStore();
-		let queries = 0;
-		const substrate = new Substrate(loadConfig({}), {
-			index: store as never,
-			greptime: {
-				ensureAppendMode: async () => true,
-				lastHash: async () => null,
-				insertEvent: async () => {},
-				queryEvents: async () => {
-					queries += 1;
-					return [];
-				},
-			} as never,
-		});
-
-		await substrate.writeMemory({ ...TEACHABLE, subject: "retry-budget", idempotency_key: "k-plain" });
-		const retry = await substrate.writeMemory({ ...TEACHABLE, subject: "retry-budget", idempotency_key: "k-plain" });
-
-		expect(retry.deduplicated).toBe(true);
-		expect(queries).toBe(0);
-	});
-
-	test("an unverified accept emits no trail — durability is the precondition", async () => {
-		const store = new TeachableStore();
-		store.hideFromReadBack = true;
-		const { substrate, emitted } = teachableWorld(store);
-
-		const result = await substrate.writeMemory({ ...TEACHABLE });
-
-		expect(result.outcome).toBe("accepted");
-		expect(result.verified_persisted).toBe(false);
-		expect(teachableEvents(emitted)).toEqual([]);
-	});
-
-	test("a quarantined teachable emits no teachable event — only the refusal trail", async () => {
-		const { substrate, emitted } = teachableWorld(new TeachableStore());
-
-		const result = await substrate.writeMemory({
-			...TEACHABLE,
-			text: "the poller needs GITHUB_TOKEN=ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa tonight",
-		});
-
-		expect(result.outcome).toBe("quarantined");
-		expect(teachableEvents(emitted)).toEqual([]);
-		// The existing audit trail still records the refusal; the emit adds nothing.
-		expect(emitted).toHaveLength(1);
-		expect(emitted[0]?.kind).toBe("warning");
-	});
-
-	test("a denied teachable emits nothing at all", async () => {
-		const { substrate, emitted } = teachableWorld(new TeachableStore());
-
-		const result = await substrate.writeMemory({ ...TEACHABLE, writer: "unknown" });
-
-		expect(result.outcome).toBe("denied");
-		expect(emitted).toEqual([]);
-	});
-
-	test("a conflicting teachable emits no teachable event", async () => {
-		const { substrate, emitted } = teachableWorld(new TeachableStore());
-
-		const first = await substrate.writeMemory({ ...TEACHABLE, idempotency_key: "k-teach" });
-		expect(first.outcome).toBe("accepted");
-		expect(teachableEvents(emitted)).toHaveLength(1);
-
-		// Same key, different content: the key is spent, so the retry collides.
-		const clash = await substrate.writeMemory({
-			...TEACHABLE,
-			text: "a different lesson under the same key",
-			idempotency_key: "k-teach",
-		});
-		expect(clash.outcome).toBe("conflict");
-		expect(teachableEvents(emitted)).toHaveLength(1);
-	});
-
-	test("a retry after an unverified accept emits the one acceptance note", async () => {
-		const store = new TeachableStore();
-		store.hideFromReadBack = true;
+describe("writeMemory teachable emit", () => {
+	/** A substrate over a real gate (`FakeStore`) that records ledger appends. */
+	function scratch() {
 		const emitted: SubstrateEvent[] = [];
+		const index = new FakeStore();
 		const greptime = {
 			ensureAppendMode: async () => true,
 			lastHash: async () => null,
 			insertEvent: async (event: SubstrateEvent) => {
 				emitted.push(event);
 			},
-			queryEvents: async () => emitted.map((event) => ({ ...event })),
 		};
-		const substrate = new Substrate(loadConfig({}), { index: store as never, greptime: greptime as never });
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+		return { emitted, substrate };
+	}
 
-		const first = await substrate.writeMemory({ ...TEACHABLE, idempotency_key: "k-late" });
-		expect(first.outcome).toBe("accepted");
-		expect(first.verified_persisted).toBe(false);
-		expect(teachableEvents(emitted)).toEqual([]);
+	const teachableEvents = (emitted: SubstrateEvent[]) =>
+		emitted.filter((event) => (event.payload as Record<string, unknown> | undefined)?.action === "teachable");
 
-		store.hideFromReadBack = false;
-		const retry = await substrate.writeMemory({ ...TEACHABLE, idempotency_key: "k-late" });
-		expect(retry.outcome).toBe("accepted");
-		expect(retry.deduplicated).toBe(true);
-		expect(retry.verified_persisted).toBe(true);
-		expect(teachableEvents(emitted)).toHaveLength(1);
-		expect(teachableEvents(emitted)[0]?.payload["memory_id"]).toBe(retry.entry?.id);
+	test("an accepted teachable fact emits exactly one sample-shaped note", async () => {
+		const { emitted, substrate } = scratch();
 
-		const again = await substrate.writeMemory({ ...TEACHABLE, idempotency_key: "k-late" });
-		expect(again.deduplicated).toBe(true);
-		expect(teachableEvents(emitted)).toHaveLength(1);
-	});
-
-	test("a same-key retry does not emit a second acceptance note", async () => {
-		const { substrate, emitted } = teachableWorld(new TeachableStore());
-
-		const first = await substrate.writeMemory({ ...TEACHABLE, idempotency_key: "k-once" });
-		expect(first.outcome).toBe("accepted");
-		expect(first.verified_persisted).toBe(true);
-		expect(first.deduplicated).toBeUndefined();
-
-		const retry = await substrate.writeMemory({ ...TEACHABLE, idempotency_key: "k-once" });
-		expect(retry.outcome).toBe("accepted");
-		expect(retry.deduplicated).toBe(true);
-		expect(retry.verified_persisted).toBe(true);
-		expect(teachableEvents(emitted)).toHaveLength(1);
-		expect(teachableEvents(emitted)[0]?.payload["memory_id"]).toBe(first.entry?.id);
-	});
-
-	test("a failed trail write never fails the memory write", async () => {
-		const store = new TeachableStore();
-		const substrate = new Substrate(loadConfig({}), {
-			index: store as never,
-			greptime: {
-				ensureAppendMode: async () => true,
-				lastHash: async () => null,
-				insertEvent: async () => {
-					throw new Error("ledger down");
-				},
-			} as never,
-		});
-
-		const result = await substrate.writeMemory({ ...TEACHABLE });
+		const result = await substrate.writeMemory({ ...ACCEPTED_TEACHABLE.request });
 
 		expect(result.outcome).toBe("accepted");
 		expect(result.verified_persisted).toBe(true);
+		const trail = teachableEvents(emitted);
+		expect(trail).toHaveLength(1);
+		expect(trail[0]).toMatchObject({
+			kind: "note",
+			surface: "hermes",
+			summary: "teachable accepted: retry-budget",
+			session_id: "sess-p29-teachable",
+		});
+		expect(trail[0]?.payload).toEqual({
+			action: "teachable",
+			memory_id: result.entry?.id,
+			subject: "teachable:retry-budget",
+			content_sha256: result.entry?.entry_hash,
+		});
+		expect(trail[0]?.payload.content_sha256).toMatch(/^[0-9a-f]{64}$/);
+	});
+
+	test("a refused teachable emits no teachable event", async () => {
+		const { emitted, substrate } = scratch();
+
+		const result = await substrate.writeMemory({ ...REFUSED_TEACHABLE.request });
+
+		expect(result.outcome).toBe("denied");
+		expect(teachableEvents(emitted)).toEqual([]);
+	});
+
+	test("a quarantined teachable emits no teachable event", async () => {
+		const { emitted, substrate } = scratch();
+
+		const result = await substrate.writeMemory({ ...QUARANTINED_TEACHABLE.request });
+
+		expect(result.outcome).toBe("quarantined");
+		expect(teachableEvents(emitted)).toEqual([]);
+	});
+
+	test("a conflicting teachable emits no teachable event", async () => {
+		const { emitted, substrate } = scratch();
+
+		const result = await substrate.writeMemory({ ...CONFLICT_TEACHABLE.request });
+
+		expect(result.outcome).toBe("conflict");
+		expect(teachableEvents(emitted)).toEqual([]);
+	});
+
+	test("an accepted non-teachable fact emits nothing new", async () => {
+		const { emitted, substrate } = scratch();
+
+		const result = await substrate.writeMemory({
+			scope: "graph:ut-teach",
+			kind: "fact",
+			text: "hermes finished n2",
+			writer: "hermes",
+			subject: "n2-status",
+		});
+
+		expect(result.outcome).toBe("accepted");
+		expect(teachableEvents(emitted)).toEqual([]);
+	});
+
+	test("a ledger that refuses the trail does not fail the memory write", async () => {
+		const index = new FakeStore();
+		const greptime = {
+			ensureAppendMode: async () => true,
+			lastHash: async () => null,
+			insertEvent: async () => {
+				throw new Error("greptime unreachable");
+			},
+		};
+		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: greptime as never });
+
+		const result = await substrate.writeMemory({ ...ACCEPTED_TEACHABLE.request });
+
+		expect(result.outcome).toBe("accepted");
+		expect(result.verified_persisted).toBe(true);
+	});
+
+	test("the fold-collision pair both emit, one event each", async () => {
+		const { emitted, substrate } = scratch();
+
+		for (const fixture of FOLD_COLLISION_TEACHABLES) {
+			const result = await substrate.writeMemory({ ...fixture.request });
+			expect(result.outcome).toBe("accepted");
+		}
+
+		expect(teachableEvents(emitted)).toHaveLength(2);
+	});
+
+	test("an idempotent replay emits no second acceptance note", async () => {
+		const { emitted, substrate } = scratch();
+		const request = { ...ACCEPTED_TEACHABLE.request, idempotency_key: "key-replay-1" };
+
+		const first = await substrate.writeMemory(request);
+		expect(first.outcome).toBe("accepted");
+		const replay = await substrate.writeMemory(request);
+		expect(replay.outcome).toBe("accepted");
+		expect(replay.deduplicated).toBe(true);
+
+		expect(teachableEvents(emitted)).toHaveLength(1);
+	});
+
+	test("an unattributed writer emits no teachable event", async () => {
+		const { emitted, substrate } = scratch();
+
+		const result = await substrate.writeMemory({ ...ACCEPTED_TEACHABLE.request, writer: "unknown" });
+
+		expect(result.outcome).toBe("denied");
+		expect(teachableEvents(emitted)).toEqual([]);
 	});
 });

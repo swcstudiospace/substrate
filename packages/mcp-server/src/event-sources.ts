@@ -192,6 +192,93 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 		}),
 	},
 	{
+		id: "skills.approve",
+		phase: 21,
+		kind: "note",
+		surface: "caller",
+		actions: ["skill.approve"],
+		carriesRepo: true,
+		periodic: false,
+		sample: () => ({
+			surface: "claude-code",
+			kind: "note",
+			summary: "approved skill p17-demo (PR 12)",
+			session_id: "sess-p17-skills-approve",
+			repo: "swcstudiospace/agent-skills",
+			payload: {
+				action: "skill.approve",
+				name: "p17-demo",
+				pr_number: 12,
+				pr_url: "https://github.com/swcstudiospace/agent-skills/pull/12",
+				merge_sha: "0123456789abcdef0123456789abcdef01234567",
+				decided_by: "claude-code",
+			},
+		}),
+	},
+	{
+		id: "skills.decline",
+		phase: 21,
+		kind: "note",
+		surface: "caller",
+		actions: ["skill.decline"],
+		carriesRepo: true,
+		periodic: false,
+		sample: () => ({
+			surface: "claude-code",
+			kind: "note",
+			summary: "declined skill p17-demo (PR 12)",
+			session_id: "sess-p17-skills-approve",
+			repo: "swcstudiospace/agent-skills",
+			payload: {
+				action: "skill.decline",
+				name: "p17-demo",
+				pr_number: 12,
+				pr_url: "https://github.com/swcstudiospace/agent-skills/pull/12",
+				decided_by: "claude-code",
+			},
+		}),
+	},
+	{
+		id: "skills.retire",
+		phase: 21,
+		kind: "note",
+		surface: "caller",
+		actions: ["skill.retire"],
+		carriesRepo: true,
+		periodic: false,
+		sample: () => ({
+			surface: "claude-code",
+			kind: "note",
+			summary: "retired skill p17-demo (PR 12)",
+			session_id: "sess-p17-skills-approve",
+			repo: "swcstudiospace/agent-skills",
+			payload: {
+				action: "skill.retire",
+				name: "p17-demo",
+				pr_number: 12,
+				pr_url: "https://github.com/swcstudiospace/agent-skills/pull/12",
+				merge_sha: "0123456789abcdef0123456789abcdef01234567",
+				decided_by: "claude-code",
+			},
+		}),
+	},
+	{
+		id: "skills.approve.refused",
+		phase: 21,
+		kind: "warning",
+		surface: "caller",
+		actions: ["skill.approve.refused"],
+		carriesRepo: false,
+		periodic: false,
+		sample: () => ({
+			surface: "claude-code",
+			kind: "warning",
+			summary: "refused skill approval p17-demo: pr_not_merged",
+			session_id: "sess-p17-skills-approve",
+			payload: { action: "skill.approve.refused", decision: "approve", rule: "pr_not_merged", name: "p17-demo" },
+		}),
+	},
+	{
 		id: "skills.sync.refused",
 		phase: 22,
 		kind: "warning",
@@ -295,6 +382,89 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 		}),
 	},
 	{
+		id: "memory.write.accepted",
+		phase: 26,
+		kind: "note",
+		surface: "memory-writer",
+		// The write verdicts have one emitter: the service's `auditMemoryWrite`. Its
+		// payload names outcome, reason, scope and kind — there is no `payload.action`
+		// to declare, so like the herdr rows these declare no actions.
+		carriesRepo: false,
+		periodic: false,
+		sample: () => ({
+			surface: "hermes",
+			kind: "note",
+			summary: "memory.write accepted: fact at repo:swcstudiospace/agent-substrate",
+			session_id: "sess-p26-memory-write",
+			payload: {
+				outcome: "accepted",
+				kind: "fact",
+				scope: "repo:swcstudiospace/agent-substrate",
+			},
+		}),
+	},
+	{
+		id: "memory.write.conflict",
+		phase: 26,
+		kind: "note",
+		surface: "memory-writer",
+		carriesRepo: false,
+		periodic: false,
+		sample: () => ({
+			surface: "hermes",
+			kind: "note",
+			summary: "memory.write conflict: version.stale (decision at repo:swcstudiospace/agent-substrate)",
+			session_id: "sess-p26-memory-write",
+			payload: {
+				outcome: "conflict",
+				reason: "version.stale",
+				kind: "decision",
+				scope: "repo:swcstudiospace/agent-substrate",
+			},
+		}),
+	},
+	{
+		id: "memory.write.quarantined",
+		phase: 26,
+		kind: "warning",
+		surface: "memory-writer",
+		carriesRepo: false,
+		periodic: false,
+		sample: () => ({
+			surface: "hermes",
+			kind: "warning",
+			summary: "memory.write quarantined: quarantine.secret (fact at repo:swcstudiospace/agent-skills)",
+			session_id: "sess-p26-memory-write",
+			payload: {
+				outcome: "quarantined",
+				reason: "quarantine.secret",
+				kind: "fact",
+				scope: "repo:swcstudiospace/agent-skills",
+				quarantine_id: "memq_p26-write",
+			},
+		}),
+	},
+	{
+		id: "memory.write.denied",
+		phase: 26,
+		kind: "warning",
+		surface: "memory-writer",
+		carriesRepo: false,
+		periodic: false,
+		sample: () => ({
+			surface: "hermes",
+			kind: "warning",
+			summary: "memory.write denied: rbac.no-grant (fact at repo:swcstudiospace/agent-skills)",
+			session_id: "sess-p26-memory-write",
+			payload: {
+				outcome: "denied",
+				reason: "rbac.no-grant",
+				kind: "fact",
+				scope: "repo:swcstudiospace/agent-skills",
+			},
+		}),
+	},
+	{
 		id: "desktop.action",
 		phase: 30,
 		kind: "tool.call",
@@ -362,6 +532,77 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 			summary: "anchor failed for hour 2026-10-08T00: send-failed",
 			session_id: "anchor:2026-10-08T00",
 			payload: { action: "anchor", runtime: "anchor", period_start: "2026-10-08T00:00:00Z", reason: "send-failed" },
+		}),
+	},
+	{
+		// uplift-3 N1: the runtime doctor (scripts/doctor-runtime.ts --emit) posts
+		// one warning per drift CLASS (units, slice, redis, timers, disk, swap,
+		// env) when its drift set changed since the last run. The phase column
+		// is the v1.3 numbering; this row lands after phase 33.
+		id: "doctor.drift",
+		phase: 33,
+		kind: "warning",
+		surface: { fixed: "substrate" },
+		actions: ["doctor"],
+		runtime: "doctor",
+		carriesRepo: false,
+		periodic: true,
+		sample: () => ({
+			surface: "substrate",
+			kind: "warning",
+			summary: "runtime drift (redis): redis maxmemory, redis maxmemory-policy, redis save",
+			session_id: "doctor:2026-10-13T12:00:00.000Z",
+			payload: {
+				action: "doctor",
+				runtime: "doctor",
+				class: "redis",
+				checks: [
+					{ check: "redis maxmemory", expected: "256M", actual: "0" },
+					{ check: "redis maxmemory-policy", expected: "volatile-lru", actual: "noeviction" },
+					{ check: "redis save", expected: '"" (no RDB snapshots)', actual: "3600 1 300 100 60 10000" },
+				],
+			},
+		}),
+	},
+	{
+		// uplift-3 N2: the SLO notifier (slo-notify.ts, SUBSTRATE_SLO_NOTIFY=1)
+		// posts one warning when an objective's breach or a breaker's open state
+		// has held for SUBSTRATE_SLO_NOTIFY_SUSTAIN_S, deduped through the SLO
+		// checkpoint so a restart never repeats it. Lands after phase 33 like
+		// doctor.drift.
+		id: "slo.transition",
+		phase: 33,
+		kind: "warning",
+		surface: { fixed: "substrate" },
+		actions: ["slo.transition"],
+		runtime: "slo",
+		carriesRepo: false,
+		periodic: true,
+		sample: () => ({
+			surface: "substrate",
+			kind: "warning",
+			summary: "slo breached: brief.p95 (observed 1240, target 800)",
+			session_id: "slo:notify",
+			payload: { action: "slo.transition", runtime: "slo", objective: "brief.p95", state: "breached", observed: 1240, target: 800 },
+		}),
+	},
+	{
+		// uplift-3 N2: the same notifier's recovery, a note because it is good
+		// news; same payload with state "recovered".
+		id: "slo.recovered",
+		phase: 33,
+		kind: "note",
+		surface: { fixed: "substrate" },
+		actions: ["slo.transition"],
+		runtime: "slo",
+		carriesRepo: false,
+		periodic: true,
+		sample: () => ({
+			surface: "substrate",
+			kind: "note",
+			summary: "slo recovered: brief.p95 (observed 610, target 800)",
+			session_id: "slo:notify",
+			payload: { action: "slo.transition", runtime: "slo", objective: "brief.p95", state: "recovered", observed: 610, target: 800 },
 		}),
 	},
 	{
@@ -571,6 +812,131 @@ export const EVENT_SOURCES: readonly EventSource[] = [
 			session_id: "sess-p17-cursor-stop",
 			actor: "human",
 			payload: { conversation_id: "conv-p17-1", transcript_ref: "cursor-transcript-conv-p17-1", status: "completed" },
+		}),
+	},
+	{
+		// uplift-4 S7: an accepted docs merge-trigger whose commit has no recorded
+		// version after SUBSTRATE_DOCS_TRIGGER_LAG_MIN. One warning per dataset per
+		// breach, deduped through the docs state file; evaluated in-process on the
+		// SUBSTRATE_DOCS_LAG_CHECK_S timer, never by a /slo or /metrics read.
+		id: "docs.freshness",
+		phase: 25,
+		kind: "warning",
+		surface: { fixed: "substrate" },
+		actions: ["docs.freshness"],
+		runtime: "docs-freshness",
+		carriesRepo: false,
+		periodic: true,
+		sample: () => ({
+			surface: "substrate",
+			kind: "warning",
+			summary: "docs agent-substrate: merge-trigger for 0123456789ab has no recorded ingest after 20 min",
+			session_id: "docs-freshness:agent-substrate",
+			payload: {
+				action: "docs.freshness",
+				runtime: "docs-freshness",
+				state: "lagging",
+				dataset: "agent-substrate",
+				commit: "0123456789abcdef0123456789abcdef01234567",
+				lag_seconds: 1200,
+				threshold_minutes: 15,
+			},
+		}),
+	},
+	{
+		// uplift-4 S7: the same breach clearing, a note because it is good news.
+		id: "docs.freshness.recovered",
+		phase: 25,
+		kind: "note",
+		surface: { fixed: "substrate" },
+		actions: ["docs.freshness"],
+		runtime: "docs-freshness",
+		carriesRepo: false,
+		periodic: true,
+		sample: () => ({
+			surface: "substrate",
+			kind: "note",
+			summary: "docs agent-substrate: merge-trigger lag cleared (0123456789ab)",
+			session_id: "docs-freshness:agent-substrate",
+			payload: {
+				action: "docs.freshness",
+				runtime: "docs-freshness",
+				state: "recovered",
+				dataset: "agent-substrate",
+				commit: "0123456789abcdef0123456789abcdef01234567",
+				threshold_minutes: 15,
+			},
+		}),
+	},
+	{
+		// uplift-4 S7: the opt-in live golden canary (scripts/docs-golden.ts --live
+		// --emit, SUBSTRATE_DOCS_CANARY=1) posts one warning when its failing set
+		// changes, deduped through SUBSTRATE_DOCS_CANARY_STATE.
+		id: "docs.canary",
+		phase: 25,
+		kind: "warning",
+		surface: { fixed: "substrate" },
+		actions: ["docs.canary"],
+		runtime: "docs-canary",
+		carriesRepo: false,
+		periodic: true,
+		sample: () => ({
+			surface: "substrate",
+			kind: "warning",
+			summary: "docs canary regression: review-gate",
+			session_id: "docs-canary:2026-10-14T03:00:00.000Z",
+			payload: {
+				action: "docs.canary",
+				runtime: "docs-canary",
+				total: 4,
+				failing: [{ fixture: "review-gate", failed: ["recall", "commit_match"] }],
+			},
+		}),
+	},
+	{
+		// uplift-4 S2: `substrate index archive` records one finished snapshot:
+		// counts and digests per table, never rows or a path.
+		id: "index.archive",
+		phase: 28,
+		kind: "note",
+		surface: { fixed: "substrate" },
+		actions: ["index.archive"],
+		runtime: "index-archive",
+		carriesRepo: false,
+		periodic: true,
+		sample: () => ({
+			surface: "substrate",
+			kind: "note",
+			summary: "index archive index-20261014T034500Z: 1200 rows in 1 tables",
+			session_id: "index-archive:index-20261014T034500Z",
+			payload: {
+				action: "index.archive",
+				runtime: "index-archive",
+				snapshot: "index-20261014T034500Z",
+				createdAt: "2026-10-14T03:45:00.000Z",
+				serverVersion: "0.0.0",
+				schemaHash: HEX_64,
+				tables: { graph_nodes: { rows: 1200, bytes: 480_000, sha256: HEX_64 } },
+			},
+		}),
+	},
+	{
+		// uplift-4 S3: `substrate-alert@.service` (OnFailure= on substrate-mcp) posts
+		// one warning naming the failed unit and systemd's result, nothing else.
+		id: "alert",
+		phase: 33,
+		kind: "warning",
+		surface: { fixed: "substrate" },
+		actions: ["alert"],
+		runtime: "alert",
+		carriesRepo: false,
+		periodic: true,
+		sample: () => ({
+			surface: "substrate",
+			kind: "warning",
+			summary: "unit failed: substrate-mcp.service (watchdog)",
+			session_id: "alert:2026-10-14T03:00:00.000Z",
+			payload: { action: "alert", runtime: "alert", unit: "substrate-mcp.service", result: "watchdog" },
 		}),
 	},
 ];
