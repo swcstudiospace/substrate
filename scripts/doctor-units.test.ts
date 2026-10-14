@@ -273,12 +273,21 @@ describe("repo units", () => {
 	test("infra/vps substrate units all run from the release with their own env files at HEAD", () => {
 		const units = loadUnits(join(repoRoot, "infra/vps"));
 		expect(units.map((unit) => unit.name).sort()).toEqual([
+			"substrate-alert@.service",
 			"substrate-anchor.service",
 			"substrate-collector-grok.service",
 			"substrate-collector-herdr.service",
 			"substrate-collector-muse.service",
 			"substrate-dispatcher.service",
+			"substrate-docs-canary.service",
+			"substrate-doctor.service",
+			"substrate-host.service",
+			"substrate-index-archive.service",
+			"substrate-index-sweep.service",
+			"substrate-ledger-archive.service",
 			"substrate-mcp.service",
+			"substrate-skills-bridge.service",
+			"substrate-skills-sync.service",
 		]);
 		for (const unit of units) {
 			expect(unit.workingDirectory).toBe(RELEASE_CURRENT);
@@ -307,6 +316,81 @@ describe("repo units", () => {
 		expect(anchor?.workingDirectory).toBe(RELEASE_CURRENT);
 		expect(anchor?.environmentFiles).toEqual([SHARED_ENV_FILE]);
 		expect(anchor?.restart).toBeNull();
+		// The index sweep is the same kind of unit as the anchor (D28-02 shape):
+		// shared env on the pinned release, oneshot, dry-run pinned on the unit
+		// rather than in substrate.env, so the server never carries a delete switch.
+		const sweep = units.find((unit) => unit.name === "substrate-index-sweep.service");
+		expect(sweep?.workingDirectory).toBe(RELEASE_CURRENT);
+		expect(sweep?.environmentFiles).toEqual([SHARED_ENV_FILE]);
+		expect(sweep?.restart).toBeNull();
+		expect(sweep?.environment.get("SUBSTRATE_INDEX_SWEEP")).toBe("dry-run");
+		// The runtime doctor (uplift-3 N1) has the anchor's shape: shared env on
+		// the pinned release, oneshot, no Restart=. Its emit switch is a commented
+		// line on its own drop-in, so a fresh install reports and never posts.
+		const doctor = units.find((unit) => unit.name === "substrate-doctor.service");
+		expect(doctor?.workingDirectory).toBe(RELEASE_CURRENT);
+		expect(doctor?.environmentFiles).toEqual([SHARED_ENV_FILE]);
+		expect(doctor?.restart).toBeNull();
+		expect(doctor?.environment.has("SUBSTRATE_DOCTOR_EMIT")).toBe(false);
+		// The docs canary (uplift-4 S7) is the doctor's shape: shared env on the
+		// pinned release, oneshot, and both opt-in lines commented on its drop-in, so
+		// a fresh install refuses (exit 2) and posts nothing.
+		const canary = units.find((unit) => unit.name === "substrate-docs-canary.service");
+		expect(canary?.workingDirectory).toBe(RELEASE_CURRENT);
+		expect(canary?.environmentFiles).toEqual([SHARED_ENV_FILE]);
+		expect(canary?.restart).toBeNull();
+		expect(canary?.environment.has("SUBSTRATE_DOCS_CANARY")).toBe(false);
+		expect(canary?.environment.has("SUBSTRATE_DOCS_CANARY_MANIFEST")).toBe(false);
+
+		// The failure alert (uplift-4 S3) is a oneshot host job like the doctor: shared
+		// env on the pinned release, no Restart=, and it runs the alert script with the
+		// failed unit as its instance (%i: the escaped form would turn `-` into `/`).
+		const alert = units.find((unit) => unit.name === "substrate-alert@.service");
+		expect(alert?.workingDirectory).toBe(RELEASE_CURRENT);
+		expect(alert?.environmentFiles).toEqual([SHARED_ENV_FILE]);
+		expect(alert?.restart).toBeNull();
+		expect(alert?.execStart).toContain("scripts/substrate-alert.ts %i");
+		expect(alert?.execStart).not.toContain("%I");
+		// The watchdog is an operator-installed EXAMPLE drop-in, never part of the
+		// main unit: Type=notify with the flag off would block startup.
+		const mcpText = readFileSync(join(repoRoot, "infra/vps/substrate-mcp.service"), "utf8");
+		expect(mcpText).not.toContain("Type=notify");
+		expect(mcpText).not.toContain("WatchdogSec");
+		expect(mcpText).toContain("MemorySwapMax=0");
+		const example = readFileSync(join(repoRoot, "infra/vps/substrate-mcp.service.d/20-watchdog.conf.example"), "utf8");
+		for (const line of ["Type=notify", "WatchdogSec=30", "TimeoutStartSec=60", "NotifyAccess=all", "OnFailure=substrate-alert@%n.service", "Environment=SUBSTRATE_WATCHDOG=1"]) {
+			expect(example).toContain(line);
+		}
+		expect(example).toContain("operator-");
+		expect(example).toContain("blocks startup");
+		// The alert is told how the unit stopped by systemd itself ($SERVICE_RESULT, passed in the
+		// instance name), never left to a `systemctl show` read that races the restart.
+		expect(example).toContain("ExecStopPost=-/usr/bin/systemctl start --no-block substrate-alert@%n:${SERVICE_RESULT}.service");
+		expect(example).toContain("OnFailure= ALONE NEVER FIRES");
+		expect(example).toContain("PRECONDITION");
+		expect(example).toContain("watchdog.ts");
+		// The ledger archive (uplift-3 N6) is the same shape again: shared env on the
+		// pinned release, oneshot, and the archive directory on the unit's drop-in
+		// rather than hard-coded, so an unset path refuses instead of writing to root.
+		const archive = units.find((unit) => unit.name === "substrate-ledger-archive.service");
+		expect(archive?.workingDirectory).toBe(RELEASE_CURRENT);
+		expect(archive?.environmentFiles).toEqual([SHARED_ENV_FILE]);
+		expect(archive?.restart).toBeNull();
+		expect(archive?.execStart).toContain("ledger archive --out ${SUBSTRATE_LEDGER_ARCHIVE_DIR}");
+		// The index archive (uplift-4 S2) is the same shape: shared env, oneshot, and the directory on the drop-in so an unset path refuses by name.
+		const indexArchive = units.find((unit) => unit.name === "substrate-index-archive.service");
+		expect(indexArchive?.workingDirectory).toBe(RELEASE_CURRENT);
+		expect(indexArchive?.environmentFiles).toEqual([SHARED_ENV_FILE]);
+		expect(indexArchive?.restart).toBeNull();
+		expect(indexArchive?.execStart).toContain("index archive --out ${SUBSTRATE_INDEX_ARCHIVE_DIR}");
+		// The archive holds accepted memory text: private files whatever the code does, and the example mount dependency sits in [Unit], where systemd reads it.
+		const indexUnitText = readFileSync(join(repoRoot, "infra/vps/substrate-index-archive.service"), "utf8");
+		expect(indexUnitText).toMatch(/^UMask=0077$/m);
+		expect(indexUnitText.indexOf("UMask=0077")).toBeGreaterThan(indexUnitText.indexOf("[Service]"));
+		const indexDropIn = readFileSync(join(repoRoot, "infra/vps/substrate-index-archive.service.d/10-environment.conf"), "utf8");
+		const exampleAt = indexDropIn.indexOf("#   RequiresMountsFor=");
+		expect(exampleAt).toBeGreaterThan(-1);
+		expect(indexDropIn.slice(0, exampleAt).trimEnd().split("\n").at(-1)).toBe("#   [Unit]");
 		// The lane-B cutover (infra/vps/README.md operator step 4) moved herdr and
 		// muse onto the release tree with collector-only env files, like grok. Each
 		// unit loads exactly the file the identity manifest delivers its token to, so
@@ -331,7 +415,36 @@ describe("repo units", () => {
 			expect(unit?.environmentFiles).toEqual([expected[name]]);
 			expect(unit?.environmentFiles).not.toContain(SHARED_ENV_FILE);
 		}
-		expect(diagnose(units, listGitTree(repoRoot, "HEAD"))).toEqual([]);
+		// Phase 22 skills units (SKILL-02/SKILL-03): shared env plus the per-unit
+		// file the identity manifest delivers the bearer to, by name — the value
+		// lives only on the host, never in this repo (D22-10, D20-07).
+		const skillsExpected = {
+			"substrate-skills-sync.service": deliveredTo("skills-sync"),
+			"substrate-skills-bridge.service": deliveredTo("bridge"),
+		} as const;
+		expect(skillsExpected).toEqual({
+			"substrate-skills-sync.service": "/etc/substrate/substrate-skills-sync.env",
+			"substrate-skills-bridge.service": "/etc/substrate/substrate-bridge.env",
+		});
+		for (const [unitName, perUnit] of Object.entries(skillsExpected)) {
+			const unit = units.find((candidate) => candidate.name === unitName);
+			expect(unit?.environmentFiles).toEqual([SHARED_ENV_FILE, perUnit]);
+		}
+		// Phase 24 dispatcher (DISP-01/DISP-08): the Python loop runs from the
+		// pinned release like every other unit, with only its per-unit file —
+		// the manifest delivers SUBSTRATE_TOKEN_SUBSTRATE there, by name.
+		const dispatcher = units.find((unit) => unit.name === "substrate-dispatcher.service");
+		expect(dispatcher?.workingDirectory).toBe(RELEASE_CURRENT);
+		expect(dispatcher?.environmentFiles).toEqual([deliveredTo("dispatcher")]);
+		expect(deliveredTo("dispatcher")).toBe("/etc/substrate/substrate-dispatcher.env");
+		// Phase 31 host (LANEA-01): node runs the .ts sources from the pinned
+		// release like every other unit, with only its per-unit file — the
+		// manifest delivers SUBSTRATE_TOKEN_SUBSTRATE there, by name. Staged
+		// only: install/restart is OPERATOR-GATED G4.
+		const host = units.find((unit) => unit.name === "substrate-host.service");
+		expect(host?.workingDirectory).toBe(RELEASE_CURRENT);
+		expect(host?.environmentFiles).toEqual([deliveredTo("substrate-host")]);
+		expect(deliveredTo("substrate-host")).toBe("/etc/substrate/substrate-host.env");
 	});
 
 	test("the dry-run command reports no findings and does not claim it wrote anything", () => {

@@ -24,11 +24,30 @@ These apply to every source:
 - **`payload.action` is the discriminator** for events a component records
   about itself, following the existing use (`action: "expired"` on the reap
   event, `"released"` / `"stolen"` on lease events). New concepts become
-  `payload.action` values, never kinds: `skill.propose`, `docs.ingest`,
+  `payload.action` values, never kinds: `skill.propose`, `skill.approve`,
+  `skill.decline`, `skill.retire`, `skill.approve.refused`, `docs.ingest`,
   `docs.search`, `teachable`, `anchor`, `mirror`, `dispatch`, `approval`,
-  `skills.sync`, `dod`.
+  `skills.sync`, `dod`, `doctor`, `slo.transition`, `docs.freshness`, `docs.canary`,
+  `index.archive`, `alert`.
 - **`payload.runtime` names a non-agent producer** acting for an agent or for
-  the host (`herdr`, `agentos`, `anchor`, `dispatcher`, `skills-sync`).
+  the host (`herdr`, `agentos`, `anchor`, `dispatcher`, `skills-sync`,
+  `doctor` — the runtime doctor, uplift-3 N1, one `warning` per drift class
+  with `payload.class` and `payload.checks[{check, expected, actual}]`; never
+  a value from an env file; `slo` — the SLO notifier, uplift-3 N2, one
+  `warning` per sustained breach or open breaker and one `note` per sustained
+  recovery, with `payload.objective`, `state`, `observed`, `target`, deduped
+  through the SLO checkpoint so a restart never repeats a transition;
+  `docs-freshness` — uplift-4 S7, one `warning` per dataset per breach when an
+  accepted merge-trigger has no recorded ingest after
+  `SUBSTRATE_DOCS_TRIGGER_LAG_MIN` and one `note` when it clears, with
+  `payload.state`, `dataset`, `commit`, `lag_seconds`, deduped through the
+  docs state file; `docs-canary` — the opt-in live golden canary, one
+  `warning` per changed failing set, with `payload.failing[{fixture, failed}]`;
+  `index-archive` — uplift-4 S2, one `note` per finished index snapshot with
+  `payload.snapshot`, `createdAt`, `serverVersion`, `schemaHash` and per-table
+  `rows`, `bytes`, `sha256`, never rows or a path; `alert` — uplift-4 S3, one
+  `warning` from `substrate-alert@.service` when a watched unit fails, with
+  `payload.unit` and `payload.result`).
 - **The original type always travels.** Where a source has its own event type
   (herdr's `pane.*`), the exact type is kept in a payload field
   (`payload.herdr_type`), the v1.1 swarm precedent (`payload.swarm_type`). An
@@ -67,15 +86,31 @@ These apply to every source:
 | `skills.propose` | 21 | `note` | `caller` | `skill.propose` | — | `swcstudiospace/agent-skills` | no |
 | `skills.propose.refused` | 21 | `warning` | `caller` | `skill.propose` | — | — | no |
 | `skills.propose.failed` | 21 | `warning` | `caller` | `skill.propose` | — | — | no |
+| `skills.approve` | 21 | `note` | `caller` | `skill.approve` | — | `swcstudiospace/agent-skills` | no |
+| `skills.decline` | 21 | `note` | `caller` | `skill.decline` | — | `swcstudiospace/agent-skills` | no |
+| `skills.retire` | 21 | `note` | `caller` | `skill.retire` | — | `swcstudiospace/agent-skills` | no |
+| `skills.approve.refused` | 21 | `warning` | `caller` | `skill.approve.refused` | — | — | no |
 | `skills.sync.refused` | 22 | `warning` | `substrate` | `skills.sync` | `skills-sync` | — | yes |
 | `docs.search` | 25 | `note` | `caller` | `docs.search` | — | — | no |
 | `docs.search.failed` | 25 | `warning` | `caller` | `docs.search` | — | — | no |
 | `docs.ingest` | 25 | `note` | `caller` | `docs.ingest` | — | — | no |
 | `docs.ingest.refused` | 25 | `warning` | `caller` | `docs.ingest` | — | — | no |
 | `memory.retain.failed` | 26 | `warning` | `memory-writer` | `memory.retain` | — | — | no |
+| `memory.write.accepted` | 26 | `note` | `memory-writer` | — | — | — | no |
+| `memory.write.conflict` | 26 | `note` | `memory-writer` | — | — | — | no |
+| `memory.write.quarantined` | 26 | `warning` | `memory-writer` | — | — | — | no |
+| `memory.write.denied` | 26 | `warning` | `memory-writer` | — | — | — | no |
 | `desktop.action` | 30 | `tool.call` | `caller` | `click`, `type`, `key`, `screenshot` | — | — | no |
 | `anchor.written` | 28 | `note` | `substrate` | `anchor` | `anchor` | — | yes |
 | `anchor.failed` | 28 | `warning` | `substrate` | `anchor` | `anchor` | — | yes |
+| `doctor.drift` | 33 | `warning` | `substrate` | `doctor` | `doctor` | — | yes |
+| `slo.transition` | 33 | `warning` | `substrate` | `slo.transition` | `slo` | — | yes |
+| `slo.recovered` | 33 | `note` | `substrate` | `slo.transition` | `slo` | — | yes |
+| `docs.freshness` | 25 | `warning` | `substrate` | `docs.freshness` | `docs-freshness` | — | yes |
+| `docs.freshness.recovered` | 25 | `note` | `substrate` | `docs.freshness` | `docs-freshness` | — | yes |
+| `docs.canary` | 25 | `warning` | `substrate` | `docs.canary` | `docs-canary` | — | yes |
+| `index.archive` | 28 | `note` | `substrate` | `index.archive` | `index-archive` | — | yes |
+| `alert` | 33 | `warning` | `substrate` | `alert` | `alert` | — | yes |
 | `teachable.accepted` | 29 | `note` | `memory-writer` | `teachable` | — | — | no |
 | `mirror.failed` | 23 | `warning` | `lease-holder` | `mirror` | — | — | no |
 | `lease.release.dod` | 23 | `note` | `lease-holder` | `released` | — | graph repo via placeOf | no |
@@ -108,6 +143,14 @@ apart by kind and `payload.status`: a `note` for an outcome, a `warning` with st
 `refused` for a guard's refusal, a `warning` with status `failed` for a git or `gh`
 step that failed. Their payloads carry hashes, names and rule names, never skill
 content; the detail is in [skills-propose.md](skills-propose.md).
+
+The four `skills.approve`, `skills.decline`, `skills.retire` and `skills.approve.refused`
+rows are the operator's decisions on the skills registry (`skills_approve`, uplift-5 S5a):
+a `note` carrying `name`, `pr_number`, `pr_url`, `decided_by` and, for approve and retire,
+the `merge_sha` the decision is about; a `warning` for an attempt the rules refused,
+carrying `decision`, `name` when it was a valid one, and `rule` from a closed list and no
+free text. A decision that changed nothing (`exists`) emits nothing. See
+[skills-propose.md](skills-propose.md#approving-a-skill).
 
 ## Silent sources
 

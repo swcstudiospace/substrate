@@ -428,41 +428,81 @@ describe("memory_search", () => {
 	function searchIndex() {
 		const plain: unknown[][] = [];
 		const paged: Array<Record<string, unknown>> = [];
+		/** The per-call read options each search arrived with (uplift-3 N4). */
+		const reads: unknown[] = [];
 		const entry = { id: "mem_1", scope: "repo:acme/widgets", kind: "fact", text: "x", created: "2026-10-01T00:00:00.000Z" };
 		return {
 			plain,
 			paged,
+			reads,
 			index: {
 				searchMemory: async (...args: unknown[]) => {
-					plain.push(args);
+					plain.push(args.slice(0, 4));
+					reads.push(args[4]);
 					return [entry];
 				},
-				searchMemoryPage: async (search: Record<string, unknown>) => {
+				searchMemoryPage: async (search: Record<string, unknown>, read: unknown) => {
 					paged.push(search);
+					reads.push(read);
 					return { entries: [entry], next: { before: "2026-10-01T00:00:00.123456Z", before_id: "mem_1" } };
 				},
 			},
 		};
 	}
 
-	async function connectIndex(index: unknown) {
+	async function connectIndex(index: unknown, caller: Surface | { surface: Surface; isOperator: boolean } = "omp") {
 		const substrate = new Substrate(loadConfig({}), { index: index as never, greptime: null });
-		const server = createMcpServer(substrate, "omp");
+		const server = createMcpServer(substrate, caller);
 		const client = new Client({ name: "substrate-test", version: "0.0.0" });
 		const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 		await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
 		return client;
 	}
 
-	test("with neither new parameter, the reply is the bare list it always was", async () => {
+	test("with neither new parameter, the reply carries index entries plus derived plane hits", async () => {
 		const stub = searchIndex();
 		const client = await connectIndex(stub.index);
 		const reply = await call(client, "memory_search", { query: "lease", scope: "repo:acme/widgets", limit: 5 });
 
 		expect(reply.isError).toBe(false);
-		expect(Array.isArray(JSON.parse(reply.text))).toBe(true);
+		expect(reply.json()).toMatchObject({ entries: [{ id: "mem_1" }], derived: [], degraded: false });
 		expect(stub.plain).toEqual([["lease", "repo:acme/widgets", 5, undefined]]);
+		// The read is attributed to the caller and asks for nothing past its lifetime.
+		expect(stub.reads).toEqual([{ surface: "omp" }]);
 		expect(stub.paged).toEqual([]);
+	});
+
+	test("include_expired is an operator action: refused for a surface token before any read, honoured for an operator on both shapes", async () => {
+		const agent = searchIndex();
+		const client = await connectIndex(agent.index);
+		for (const args of [
+			{ query: "lease", include_expired: true },
+			{ subject_prefix: "lesson:", include_expired: true },
+		]) {
+			const reply = await call(client, "memory_search", args);
+			expect(reply.isError).toBe(true);
+			expect(reply.json().error).toContain("operator");
+			expect(reply.json().error).toContain("SUBSTRATE_OPERATOR_TOKENS");
+		}
+		expect(agent.reads).toEqual([]);
+		// `false` is not a request: the plain read runs as it always did.
+		const plainReply = await call(client, "memory_search", { query: "lease", include_expired: false });
+		expect(plainReply.isError).toBe(false);
+		expect(agent.reads).toEqual([{ surface: "omp" }]);
+
+		const operator = searchIndex();
+		const privileged = await connectIndex(operator.index, { surface: "omp", isOperator: true });
+		const listed = await call(privileged, "memory_search", { query: "lease", include_expired: true });
+		expect(listed.isError).toBe(false);
+		const page = await call(privileged, "memory_search", { subject_prefix: "lesson:", include_expired: true });
+		expect(page.isError).toBe(false);
+		expect(operator.reads).toEqual([
+			{ surface: "omp", includeExpired: true },
+			{ surface: "omp", includeExpired: true },
+		]);
+		// The index's own search arguments never carry the flag: it travels as a read option, so the paged shape is untouched.
+		expect(operator.paged[0]).not.toHaveProperty("includeExpired");
+		expect(operator.paged[0]).not.toHaveProperty("include_expired");
 	});
 
 	test("subject_prefix lists without a query, normalised like a subject, and answers a page with its next pair", async () => {

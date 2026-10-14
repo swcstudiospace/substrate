@@ -31,6 +31,14 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=substrate-collector-herdr
 
+# Resource ceilings (uplift-2 R7): a collector tails a socket and posts to
+# loopback; substrate-mcp itself peaks at 88 MB RSS (measured 2026-10-13), so
+# 512M is headroom, not a budget. Lives in substrate.slice (MemoryLow=2G) so
+# reclaim hits co-tenants first. Restart=always above recovers an OOM kill.
+Slice=substrate.slice
+MemoryMax=512M
+TasksMax=256
+
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full

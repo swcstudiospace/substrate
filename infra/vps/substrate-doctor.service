@@ -1,0 +1,61 @@
+[Unit]
+Description=Agent Substrate runtime doctor (host vs declared policy; reports, never changes anything)
+Documentation=https://github.com/swcstudiospace/agent-substrate
+After=network-online.target substrate-mcp.service
+Wants=network-online.target
+# A missing entry point skips the start silently instead of failing into the
+# timer's persistent backlog. The path is the pinned release, not the checkout:
+# ConditionPathExists follows the current symlink.
+ConditionPathExists=/opt/agent-substrate/current/scripts/doctor-runtime.ts
+
+[Service]
+Type=oneshot
+# Drift is the doctor's normal finding, reported as a `warning` event on the
+# ledger (uplift-3 N1). Exit 2 means "drift found", not "the doctor broke", so
+# it is a success here: a oneshot left in failed state every six hours would
+# be noise the operator learns to ignore. Exit 1 (usage, unreadable policy)
+# still fails the unit.
+SuccessExitStatus=2
+# Credentials only; nothing secret lives in the repo. The drop-in
+# substrate-doctor.service.d/10-environment.conf is the EnvironmentFile: the
+# doctor emits as the `substrate` surface with the token the shared env
+# delivers to every host job (SUBSTRATE_TOKEN_SUBSTRATE), and it checks that
+# same file for legacy keys by NAME only. See infra/vps/README.md.
+WorkingDirectory=/opt/agent-substrate/current
+# Machine-specific: `command -v bun`. The binary on this host is under
+# /root/.local, which is why the unit still runs as root (no User=) and why
+# ProtectHome=false stays. The code itself is the release at WorkingDirectory.
+ExecStart=/root/.local/share/reflex/bun/bin/bun scripts/doctor-runtime.ts --emit
+
+# /var/lib/substrate, created by systemd and writable under ProtectSystem=full.
+# The dedupe record (the last emitted drift set) lives there.
+StateDirectory=substrate
+StateDirectoryMode=0700
+Environment=SUBSTRATE_DOCTOR_STATE=/var/lib/substrate/doctor-last.json
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=substrate-doctor
+
+# Resource ceilings (uplift-2 R7 shape): a oneshot that runs a few dozen
+# `systemctl show` and `redis-cli` calls and one POST. Lives in
+# substrate.slice so it is accounted with the rest; 256M is several times
+# what bun needs for this script, and TasksMax covers bun's thread pool plus
+# the one child process at a time.
+Slice=substrate.slice
+MemoryMax=256M
+TasksMax=64
+
+# It talks to systemd, the loopback redis and substrate-mcp. Nothing else.
+# ProtectHome=false is the remaining exception: ExecStart's bun lives under
+# /root/.local, so ProtectHome=true would hide the interpreter.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

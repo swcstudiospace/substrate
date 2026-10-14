@@ -1,0 +1,5 @@
+[tool.pytest.ini_options]
+# Lets `python3 -m pytest packages/miner/tests packages/dispatcher/tests`
+# (root `test:py`) resolve both packages. Single-package runs keep using
+# their own pyproject (closest ini wins), so this changes nothing for them.
+pythonpath = ["packages/miner/src", "packages/dispatcher/src"]

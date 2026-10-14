@@ -5,6 +5,10 @@ import {
 	conflictPlan,
 	DEFAULT_GRANTS,
 	grantFor,
+	isTerminalGraphStatus,
+	MEMORY_TTL_30D_MS,
+	memoryExpiry,
+	memoryGraphId,
 	needsReverification,
 	normalizeSubject,
 	parseGrants,
@@ -15,6 +19,7 @@ import {
 	TRUST_SHELF_LIFE_DAYS,
 	type MemoryGrant,
 } from "./memory-policy.ts";
+import { TERMINAL_GRAPH_STATUSES } from "./index-sweep.ts";
 import { MEMORY_KINDS, type MemoryKind, type MemoryScope } from "./types.ts";
 
 /** Shorthand: the parsed scope, asserted non-null so a typo in a test fails loudly. */
@@ -288,5 +293,56 @@ describe("an agent cannot vouch for itself", () => {
 		expect(resolveActor("human", false)).toBe("agent");
 		expect(resolveActor("human", true)).toBe("human");
 		expect(resolveActor(undefined, true)).toBe("agent");
+	});
+});
+
+describe("memory lifetime (uplift-3 N4)", () => {
+	const created = "2026-09-01T00:00:00.000Z";
+	const at = (days: number): number => Date.parse(created) + days * 86_400_000;
+
+	test("a 30d entry is alive on day 29 and expired on day 31, and says when", () => {
+		const entry = { ttl: "30d", created };
+		expect(memoryExpiry(entry, null, at(29))).toEqual({ expired: false, expires_at: "2026-10-01T00:00:00.000Z", reason: null });
+		expect(memoryExpiry(entry, null, at(31))).toEqual({ expired: true, expires_at: "2026-10-01T00:00:00.000Z", reason: "30d" });
+		// Inclusive at the instant, like `needsReverification`; the span is the constant the sweeper's cutoff also uses.
+		expect(memoryExpiry(entry, null, at(30)).expired).toBe(true);
+		expect(MEMORY_TTL_30D_MS).toBe(30 * 86_400_000);
+		// The graph argument is irrelevant to a dated class.
+		expect(memoryExpiry(entry, { status: "Merged" }, at(1)).expired).toBe(false);
+	});
+
+	test("a graph entry lives while its graph is open and dies with it or without it", () => {
+		const entry = { ttl: "graph", created };
+		expect(memoryExpiry(entry, { status: "In Progress" }, at(400))).toEqual({ expired: false, expires_at: null, reason: null });
+		// A row registered without a status is open, as `openGraphs` reads it.
+		expect(memoryExpiry(entry, { status: null }, at(400)).expired).toBe(false);
+		expect(memoryExpiry(entry, { status: "Merged" }, at(0))).toEqual({ expired: true, expires_at: null, reason: "graph-terminal" });
+		for (const status of TERMINAL_GRAPH_STATUSES) expect(memoryExpiry(entry, { status }, at(0)).reason).toBe("graph-terminal");
+		// No row in graph_index: swept, or never registered — either way nothing to live for.
+		expect(memoryExpiry(entry, null, at(0))).toEqual({ expired: true, expires_at: null, reason: "graph-unindexed" });
+	});
+
+	test("permanent, an undefined ttl and an undatable row never expire", () => {
+		expect(memoryExpiry({ ttl: "permanent", created }, null, at(10_000)).expired).toBe(false);
+		expect(memoryExpiry({ ttl: "permanent", created }, { status: "Merged" }, at(10_000)).expired).toBe(false);
+		expect(memoryExpiry({ ttl: "forever", created }, null, at(10_000)).expired).toBe(false);
+		expect(memoryExpiry({ ttl: "30d", created: "not-a-date" }, null, at(10_000))).toEqual({ expired: false, expires_at: null, reason: null });
+	});
+
+	test("the terminal list is the sweeper's, so the two cannot drift apart", () => {
+		for (const status of TERMINAL_GRAPH_STATUSES) expect(isTerminalGraphStatus(status)).toBe(true);
+		expect(isTerminalGraphStatus("In Progress")).toBe(false);
+		expect(isTerminalGraphStatus("merged")).toBe(false);
+		expect(isTerminalGraphStatus(null)).toBe(false);
+		expect(isTerminalGraphStatus(undefined)).toBe(false);
+	});
+
+	test("the graph an entry lives for is its graph_id, else the tail of a graph: scope, else none", () => {
+		expect(memoryGraphId({ scope: "repo:acme/app", graph_id: "ut-1" })).toBe("ut-1");
+		expect(memoryGraphId({ scope: "graph:ut-2", graph_id: "ut-1" })).toBe("ut-1");
+		expect(memoryGraphId({ scope: "graph:ut-2" })).toBe("ut-2");
+		expect(memoryGraphId({ scope: "repo:acme/app" })).toBeNull();
+		expect(memoryGraphId({ scope: "global" })).toBeNull();
+		expect(memoryGraphId({ scope: "graph:" })).toBeNull();
 	});
 });

@@ -267,12 +267,27 @@ describe("the gate matches the CI workflow", () => {
 		const audit = GATE_STEPS.find((step) => step.id === "audit");
 		if (audit === undefined) throw new Error("the gate has no audit step");
 		expect(audit.optIn).toBe(true);
-		expect(runLines(between("dependency-audit"))).toEqual(["bun install --frozen-lockfile --ignore-scripts", audit.argv.join(" ")]);
+		expect(runLines(between("dependency-audit", "boot-gate"))).toEqual(["bun install --frozen-lockfile --ignore-scripts", audit.argv.join(" ")]);
 	});
 
-	test("both jobs stay behind the CI_ENABLED switch", () => {
+	test("the boot-gate job is last, report-only, opt-in on its own variable, and runs only the install and `bun run gate:boot`", () => {
+		const jobNames = [...workflow.slice(workflow.indexOf("\njobs:\n")).matchAll(/^ {2}([a-z][a-z-]*):$/gm)].map((match) => match[1] as string);
+		expect(jobNames).toEqual(["verify", "dependency-audit", "boot-gate"]);
+		const job = between("boot-gate");
+		// The harness refuses a checkout without node_modules, so the install is a prerequisite, not part of the gate.
+		expect(runLines(job)).toEqual(["bun install --frozen-lockfile", "bun run gate:boot"]);
+		expect(job).toMatch(/^ {4}continue-on-error: true$/m);
+		expect(job).toMatch(/^ {4}if: .*vars\.CI_ENABLED == 'true'.*vars\.BOOT_GATE == 'true'/m);
+		// The harness owns its own scratch stores; a service container would be a second, shared one.
+		expect(job).not.toMatch(/^ {4}services:/m);
+		// Neither gating job may become advisory by accident.
+		expect(between("verify", "dependency-audit")).not.toContain("continue-on-error");
+		expect(between("dependency-audit", "boot-gate")).not.toContain("continue-on-error");
+	});
+
+	test("every job stays behind the CI_ENABLED switch", () => {
 		const ifLines = [...workflow.matchAll(/^ {4}if: (.+)$/gm)].map((match) => match[1] as string);
-		expect(ifLines).toHaveLength(2);
+		expect(ifLines).toHaveLength(3);
 		for (const line of ifLines) expect(line).toContain("vars.CI_ENABLED == 'true'");
 	});
 

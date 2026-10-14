@@ -79,6 +79,14 @@ source: .planning/milestones/v1.1-phases/08-memory-structures/08-01-SUMMARY.md
 quarantined and review.required are returned to the caller, never retried.
 ```
 
+The write also sends `source_event` and, for `ingest`, `session_id`. The memory-bank
+retain refuses a fact that names no source, so a lesson whose text landed in the
+index and not the bank cannot be recalled from the bank later. `ingest` uses
+`session:<id>` for both. `add`, `digest` and `outcome` use `lesson:<idempotency key>`.
+A success is a read-back whose `text` is the body that was sent. An empty read-back,
+or a session lesson whose read-back names a different session, is `unverified` and
+is not a saved lesson.
+
 - The slug is the first six words that carry meaning, or the bold lead of a SUMMARY
   bullet. Subjects are lowercase and at most 200 characters, which is what the server
   stores them as. Two bullets in one SUMMARY that would share a slug get `-2`, `-3`.

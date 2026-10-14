@@ -1,0 +1,74 @@
+# Systemd watchdog for substrate-mcp (uplift-4 S3). AN EXAMPLE: the `.example`
+# suffix keeps it out of every `*.conf` reader (systemd, doctor-units.ts,
+# doctor-runtime.ts), and nothing in this repo installs it. It is operator-
+# installed, in its own window. PRECONDITION: a release that contains
+# packages/mcp-server/src/watchdog.ts (the one that introduced /livez) must already
+# be `current` and running BEFORE this file is installed. An older release never
+# sends READY=1, so under Type=notify the unit sits in "starting", is killed at
+# TimeoutStartSec=60 and Restart=always loops on that forever. Check first:
+#   test -f /opt/agent-substrate/current/packages/mcp-server/src/watchdog.ts && \
+#     curl -fs http://127.0.0.1:7410/livez
+# Then:
+#
+#   install -d -m 0755 /etc/systemd/system/substrate-mcp.service.d
+#   install -m 0644 infra/vps/substrate-mcp.service.d/20-watchdog.conf.example \
+#     /etc/systemd/system/substrate-mcp.service.d/20-watchdog.conf
+#   cp infra/vps/substrate-alert@.service /etc/systemd/system/
+#   install -d -m 0755 /etc/systemd/system/substrate-alert@.service.d
+#   install -m 0600 infra/vps/substrate-alert@.service.d/10-environment.conf \
+#     /etc/systemd/system/substrate-alert@.service.d/10-environment.conf
+#   systemctl daemon-reload && systemctl restart substrate-mcp
+#   systemctl show substrate-mcp -p WatchdogUSec,Type,NotifyAccess   # 30000000, notify, all
+#
+# WARNING: Type=notify with SUBSTRATE_WATCHDOG unset or 0 blocks startup. The
+# unit is "starting" until the process sends READY=1, the server only sends it
+# when SUBSTRATE_WATCHDOG=1 and NOTIFY_SOCKET is set, and TimeoutStartSec=60
+# then kills it and Restart=always starts it again: a restart loop that never
+# serves. That is why this file sets the flag itself, in the same drop-in, so
+# the two cannot be installed apart. Never keep Type=notify and flip the flag
+# off; remove this whole file instead.
+#
+# Rollback: rm /etc/systemd/system/substrate-mcp.service.d/20-watchdog.conf,
+# `systemctl daemon-reload`, `systemctl restart substrate-mcp` (back to
+# Type=simple, WatchdogUSec=0).
+#
+# How it works (packages/mcp-server/src/watchdog.ts): READY=1 once the server
+# listens; then every WatchdogSec/3 (10 s) the process sends WATCHDOG=1 ONLY if
+# its measured event-loop lag is under SUBSTRATE_WATCHDOG_LAG_MS (default
+# 5000) AND a loopback fetch of its own GET /livez answers within
+# SUBSTRATE_WATCHDOG_PROBE_MS (default 2000). /livez touches no store, so a
+# Railway outage can never restart a healthy process. A blocked event loop
+# sends nothing, WatchdogSec=30 expires, systemd kills the unit (SIGABRT) and
+# Restart=always brings it back.
+#
+# The notifier is the `systemd-notify` binary, spawned per message with a hard
+# timeout. The child is not the unit's main PID, so systemd rejects its
+# datagram unless NotifyAccess=all.
+[Unit]
+# OnFailure= runs only when the unit enters `failed`. With Restart=always and the
+# base unit's StartLimitIntervalSec=0 a watchdog kill is restarted and never
+# reaches `failed`, so OnFailure= ALONE NEVER FIRES for the hang this file exists
+# for; it only covers the one way the unit does end up failed (exit 78, which
+# RestartPreventExitStatus refuses to restart). ExecStopPost below is the path
+# that covers a restarted hang. For an exit-78 failure both start an alert, so
+# that case can post two warnings; a hang posts one.
+OnFailure=substrate-alert@%n.service
+
+[Service]
+Type=notify
+NotifyAccess=all
+WatchdogSec=30
+TimeoutStartSec=60
+Environment=SUBSTRATE_WATCHDOG=1
+# Runs after every stop of the main process, including a deploy's restart. systemd
+# sets $SERVICE_RESULT for ExecStopPost commands to how the main process ended
+# (`watchdog`, `exit-code`, `signal`, `oom-kill`, `success`, ...). It is passed
+# here as part of the alert's instance name (`substrate-mcp.service:watchdog`;
+# `${...}` is the form that systemd expands inside a word), so the alert gets the
+# result as of THIS stop. Reading `systemctl show` afterwards would race the
+# restart: a slow cold start can still say `success` from before the hang and the
+# alert would be skipped in exactly the case it exists for. The script posts
+# nothing only when the result is exactly `success` (a deploy's restart).
+# `--no-block` and the `-` prefix are deliberate: the stop sequence must never
+# wait on the alert, which itself waits for this unit to come back up.
+ExecStopPost=-/usr/bin/systemctl start --no-block substrate-alert@%n:${SERVICE_RESULT}.service

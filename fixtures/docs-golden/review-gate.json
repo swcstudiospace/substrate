@@ -1,0 +1,25 @@
+{
+	"id": "review-gate",
+	"question": "Who runs the Greptile merge gate for every pull request?",
+	"datasets": ["programming-desk", "agent-substrate"],
+	"expected": [{ "source_url": "https://example.com/programming-desk/review-gate", "commit": "golden-v1" }],
+	"grades": {
+		"https://example.com/programming-desk/review-gate": 2,
+		"https://example.com/programming-desk/draft-pr": 1,
+		"https://example.com/agent-substrate/data-planes": 0
+	},
+	"answerable": true,
+	"k": 5,
+	"thresholds": {
+		"precision_at_k": 0.5,
+		"recall": 1,
+		"ndcg": 0.95,
+		"provenance_coverage": 1,
+		"commit_match": 1,
+		"redaction_clean": true
+	},
+	"corpus_manifest": {
+		"sha256": "a9a30850816e065c3f26e643da07e19386af75d6f151830cfb3dc03c33eb203f",
+		"dataset_commit": "golden-v1"
+	}
+}

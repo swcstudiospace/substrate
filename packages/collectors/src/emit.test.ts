@@ -7,6 +7,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { postEvent } from "./emit.ts";
+import { isolateSpoolEnv } from "./spool-test-env.ts";
 import type { EventInput } from "../../mcp-server/src/types.ts";
 
 // Runtime-assembled so no credential shape sits in source (redact-lock rule 4).
@@ -57,7 +58,11 @@ let stateDir = "";
 let servers: { close: () => void }[] = [];
 let stderr: { lines: string[]; restore: () => void } | null = null;
 
+let restoreSpoolEnv: () => void = () => undefined;
+
 beforeEach(() => {
+	// The spool is a different test file's subject: an operator's SUBSTRATE_EVENT_SPOOL must not park these failures.
+	restoreSpoolEnv = isolateSpoolEnv();
 	stateDir = mkdtempSync(join(tmpdir(), "emit-test-"));
 	process.env.SUBSTRATE_STATE_DIR = stateDir;
 	delete process.env.SUBSTRATE_URL;
@@ -71,6 +76,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	restoreSpoolEnv();
 	for (const server of servers) server.close();
 	servers = [];
 	stderr?.restore();

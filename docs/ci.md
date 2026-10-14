@@ -22,7 +22,7 @@ bun run verify --list
 
 A passing step prints one line (with the pass/skip/fail counts for the suite). A failing step prints the last 60 lines of its output and the run stops, exit code 1. Exit code 2 means bad usage.
 
-`scripts/verify.test.ts` reads `.github/workflows/ci.yml` and fails when the workflow runs different commands from `bun run verify`, or when a job loses its `CI_ENABLED` switch, so the two cannot drift apart silently.
+`scripts/verify.test.ts` reads `.github/workflows/ci.yml` and fails when the workflow runs different commands from `bun run verify`, when a job loses its `CI_ENABLED` switch, or when the report-only `boot-gate` job stops being last, report-only or limited to `bun install --frozen-lockfile` and `bun run gate:boot`, so the workflow cannot drift apart silently.
 
 ### The database-backed tests
 
@@ -42,12 +42,34 @@ Nothing in the suite needs GreptimeDB; the real-store proofs are the rehearsal s
 |---|---|---|
 | `verify` ("Typecheck, tests and repo locks") | pull request, push to `main`, on demand | the four steps above, with a Postgres 16 service container and a full-history checkout (`check:phase-close` diffs against a baseline commit) |
 | `dependency-audit` ("Known-vulnerability audit") | push to `main`, Mondays 03:17 UTC, on demand (never on a pull request) | `bun install --frozen-lockfile --ignore-scripts`, `bun audit --audit-level=high` |
+| `boot-gate` ("Boot and prove (report-only)") | pull request, push to `main`, on demand (never on the schedule); only when `BOOT_GATE` is `true` | `bun install --frozen-lockfile`, `bun run gate:boot` |
 
 The audit does not gate pull requests on purpose: advisories appear without any change here. A red scheduled run is the signal to upgrade.
 
+### The boot-gate job
+
+`bun run gate:boot` ([runbooks/release-gate.md](runbooks/release-gate.md)) boots the commit under test against scratch Postgres and GreptimeDB containers through the rehearsal harness ([rehearsal.md](rehearsal.md)), proves it over HTTP, freezes the scratch ledger for a real outage and removes everything again. Its exit code is 0 (every check passed), 1 (a check failed) or 2 (the harness refused to start, for example Docker missing or an image absent).
+
+The job is **report-only**: `continue-on-error: true`, so a red or exit-2 run is reported on the run page and never blocks a pull request or turns the workflow red. It has no Postgres service container; the harness starts its own stores.
+
+It is opt-in on a second repository variable, because it starts containers on the shared self-hosted runner:
+
+```sh
+gh variable set BOOT_GATE --body true --repo swcstudiospace/agent-substrate   # on (also needs CI_ENABLED)
+gh variable delete BOOT_GATE --repo swcstudiospace/agent-substrate            # off
+```
+
+Host caveats, all of which show as exit 2 rather than a failure:
+
+- It needs a local Docker daemon the runner user may use, and the images `postgres:16` and `greptime/greptimedb:v0.14.4` already present locally. The harness never pulls and never prunes.
+- It needs 2 GiB free on Docker's data root (the harness refuses below that; it checks no RAM floor), and it runs two store containers plus the server while it lasts. On a runner that is also production, the host's disk pressure and the daily image prune decide whether it can run at all.
+- It runs the real server on a free loopback port and never touches the production ports (`7410`, `7411`, `6420`) or any container it did not label itself. Another run with the same name is refused, not stopped.
+- A normal run takes about one to two minutes (one live run with the previous 20 s outage window took 64 s; the default window is now 40 s, and the recovery wait can use up to 90 s when the ledger is slow to come back).
+- A cancelled or timed-out job: the gate cleans up on `SIGINT`, `SIGTERM` and `SIGHUP` (a runner's cancel signal), but `SIGKILL` after the runner's grace period cannot be handled and can leave the detached twin and its two containers behind. Sweep them with `bun run rehearsal down --name <gate name>` (printed in the job log as `gate-<time>`) or look with `docker ps -a --filter label=substrate.rehearsal`. The job has no always-run cleanup step on purpose: the job's run lines stay pinned to the install and `bun run gate:boot`, and an extra cleanup command would need `verify.test.ts` to learn it.
+
 ### Switching it on
 
-Both jobs run only when the repository variable `CI_ENABLED` is `true`. While it is unset they are reported as skipped, which is not a failure and uses no runner minutes.
+Every job runs only when the repository variable `CI_ENABLED` is `true`; `boot-gate` additionally needs `BOOT_GATE`. While `CI_ENABLED` is unset they are reported as skipped, which is not a failure and uses no runner minutes.
 
 ```sh
 gh variable set CI_ENABLED --body true --repo swcstudiospace/agent-substrate   # on

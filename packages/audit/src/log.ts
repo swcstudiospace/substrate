@@ -14,9 +14,29 @@
  * Beside the file sits a **checkpoint**: the last `seq` and `hash` this process
  * committed, rewritten after every append. It is what makes "the file is empty" a
  * question with two answers rather than one — see `open`.
+ *
+ * The file can also be **rolled over by size** (`rolloverBytes`, off unless set):
+ * the active file is renamed to `<path>.<firstSeq>-<lastSeq>.jsonl` beside it and
+ * a fresh active file starts at the same path, its first record chaining `prev` to
+ * the closed segment's tip. One chain, several files; `scan` walks the closed
+ * segments in sequence order and then the active file, so a verdict always covers
+ * every record ever appended — see `rollover`.
  */
-import { appendFileSync, existsSync, mkdirSync, openSync, readSync, closeSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import {
+	appendFileSync,
+	chmodSync,
+	closeSync,
+	existsSync,
+	mkdirSync,
+	openSync,
+	readdirSync,
+	readSync,
+	renameSync,
+	statSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
+import { basename, dirname, join } from "node:path";
 import {
 	type AuditRecord,
 	type AuditRecordInput,
@@ -93,6 +113,87 @@ export interface AuditLogOptions {
 	checkpointPath?: string | false;
 	/** How far back recovery will scan for a complete record before giving up. */
 	maxScanBytes?: number;
+	/**
+	 * Close the active file and start a new one once an append would take it past
+	 * this many bytes. `null` never rolls. Undefined reads
+	 * `SUBSTRATE_AUDIT_ROLLOVER_BYTES` from the environment (`rolloverBytesFromEnv`).
+	 */
+	rolloverBytes?: number | null;
+}
+
+/** A closed segment of the chain: `<path>.<firstSeq>-<lastSeq>.jsonl` beside the active file. */
+export interface AuditSegment {
+	path: string;
+	firstSeq: number;
+	lastSeq: number;
+}
+
+/** What `report` answers: the whole chain on disk, every segment included. */
+export interface AuditReport {
+	/** Closed segments beside the active file. */
+	segments: number;
+	records: number;
+	firstSeq: number | null;
+	lastSeq: number | null;
+	ok: boolean;
+	unparseable: number;
+	brokenAt?: number;
+	reason?: string;
+}
+
+/** The file a closed segment is renamed to: same directory, so the same `StateDirectory` and mode. */
+export function segmentPath(path: string, firstSeq: number, lastSeq: number): string {
+	return `${path}.${firstSeq}-${lastSeq}.jsonl`;
+}
+
+/**
+ * The segment a file name beside `path` denotes, or null for any other file — the
+ * active file itself, its checkpoint, a temporary, a stranger. Strict on purpose:
+ * a verifier that guessed at names would be a verifier that could be fed a file.
+ */
+export function parseSegmentName(path: string, name: string): AuditSegment | null {
+	const base = basename(path);
+	if (!name.startsWith(`${base}.`) || !name.endsWith(".jsonl")) return null;
+	const span = name.slice(base.length + 1, -".jsonl".length);
+	const match = /^([1-9][0-9]{0,14})-([1-9][0-9]{0,14})$/.exec(span);
+	if (!match) return null;
+	const firstSeq = Number(match[1]);
+	const lastSeq = Number(match[2]);
+	if (firstSeq > lastSeq) return null;
+	return { path: join(dirname(path), name), firstSeq, lastSeq };
+}
+
+/** Segments in chain order. Pure, so the ordering is testable without a directory. */
+export function orderSegments(segments: readonly AuditSegment[]): AuditSegment[] {
+	return [...segments].sort((a, b) => a.firstSeq - b.firstSeq || a.lastSeq - b.lastSeq);
+}
+
+/** Every closed segment beside `path`, in chain order. A directory that cannot be read holds none. */
+export function listAuditSegments(path: string): AuditSegment[] {
+	let names: string[];
+	try {
+		names = readdirSync(dirname(path));
+	} catch {
+		return [];
+	}
+	const segments: AuditSegment[] = [];
+	for (const name of names) {
+		const segment = parseSegmentName(path, name);
+		if (segment) segments.push(segment);
+	}
+	return orderSegments(segments);
+}
+
+/**
+ * `SUBSTRATE_AUDIT_ROLLOVER_BYTES`, or null. Unset, `0`, or anything that is not a
+ * positive integer means the chain never rolls — which is what every deployment
+ * before this setting did, so a typo cannot start rotating a file by surprise.
+ */
+export function rolloverBytesFromEnv(env: Record<string, string | undefined> = process.env): number | null {
+	const raw = env.SUBSTRATE_AUDIT_ROLLOVER_BYTES?.trim();
+	if (!raw || !/^[0-9]{1,15}$/.test(raw)) return null;
+	const bytes = Number(raw);
+	return bytes > 0 ? bytes : null;
 }
 
 /** The checkpoint file's contents. Small on purpose: it is rewritten every append. */
@@ -122,6 +223,12 @@ export class AuditLog {
 	private readonly maxRetained: number;
 	private readonly checkpointPath: string | null;
 	private readonly maxScanBytes: number;
+	/** Size at which the active file is closed, or null to never roll. */
+	private readonly rolloverBytes: number | null;
+	/** Bytes in the active file, kept current so a roll decision costs no stat. */
+	private activeBytes = 0;
+	/** `seq` of the active file's first record; null while it holds none. Names the segment at roll. */
+	private activeFirstSeq: number | null = null;
 
 	constructor(private readonly options: AuditLogOptions) {
 		this.redact = options.redact ?? ((text) => text);
@@ -136,10 +243,19 @@ export class AuditLog {
 				? null
 				: (options.checkpointPath ?? (options.path === null ? null : `${options.path}.checkpoint`));
 		this.maxScanBytes = Math.max(options.maxScanBytes ?? 64 * 1024 * 1024, this.tailBytes);
+		// Read here rather than by the server, so every writer of this file — the service,
+		// a test, a script — rolls by the same rule. Anything but a positive integer is off.
+		const rollover = options.rolloverBytes === undefined ? rolloverBytesFromEnv() : options.rolloverBytes;
+		this.rolloverBytes = rollover !== null && Number.isInteger(rollover) && rollover > 0 ? rollover : null;
 	}
 
 	get path(): string | null {
 		return this.options.path;
+	}
+
+	/** The size the active file is rolled at, or null when it never is. */
+	get rolloverLimit(): number | null {
+		return this.rolloverBytes;
 	}
 
 	get durable(): boolean {
@@ -202,7 +318,25 @@ export class AuditLog {
 		try {
 			mkdirSync(dirname(path), { recursive: true });
 			const checkpoint = this.readCheckpoint();
-			const recovered = existsSync(path) ? this.readLastRecord(path) : { record: null, size: 0, exhausted: true };
+			let recovered: { record: AuditRecord | null; size: number; exhausted: boolean } = existsSync(path)
+				? this.readLastRecord(path)
+				: { record: null, size: 0, exhausted: true };
+			const segments = listAuditSegments(path);
+			const newest = segments[segments.length - 1];
+			if (!recovered.record && recovered.exhausted && newest) {
+				// No active file, an empty one, or one holding nothing readable, beside a
+				// closed segment: the process died between closing a segment and writing the
+				// first record of the next one — before, or partway through, that write. The
+				// chain's tip is the segment's, and the next record continues it. Nothing in
+				// the active file is readable, so nothing in it can outrank the segment; a
+				// partial first line is not a lost record, and reporting it as one made a
+				// mid-write crash read as a deleted file (Greptile round 2). The size stays
+				// the active file's: that is what the checks below are about, and a fragment
+				// is terminated below exactly as it would be in any other file. `exhausted`
+				// is the guard — a file too large to have been scanned to its head may still
+				// hold records past the window, and those outrank any segment.
+				recovered = { ...this.readLastRecord(newest.path), size: recovered.size };
+			}
 			if (recovered.record) {
 				this.chainSeq = recovered.record.seq;
 				this.chainTip = recovered.record.hash;
@@ -258,8 +392,15 @@ export class AuditLog {
 			}
 			// Prove the sink is writable now rather than discovering it on the first
 			// fail-closed call, which would deny a claim for a reason an operator could
-			// have been told about at boot.
-			appendFileSync(path, "");
+			// have been told about at boot. 0600 like a closed segment: the trail is read
+			// during incidents and nothing else on the host has business reading it.
+			appendFileSync(path, "", { mode: 0o600 });
+			this.activeBytes = statSync(path).size;
+			// The segment a roll would close is named by its first record. Read it from the
+			// file; when the head is unreadable the newest closed segment says where this
+			// one must start, and a file with no segment beside it started the chain.
+			this.activeFirstSeq =
+				this.activeBytes === 0 ? null : (this.readFirstRecord(path)?.seq ?? (newest ? newest.lastSeq + 1 : 1));
 			this.writable = true;
 			return {
 				records: this.chainSeq,
@@ -308,6 +449,8 @@ export class AuditLog {
 			return { record, written: false, error: this.refuseWrites };
 		}
 
+		const line = `${JSON.stringify(record)}\n`;
+		const bytes = Buffer.byteLength(line);
 		try {
 			// A previous append threw, so it may have written part of a line. Close that
 			// fragment off before this record goes on, or the two would join into one
@@ -315,8 +458,16 @@ export class AuditLog {
 			if (this.mayHaveFragment) {
 				this.terminateTrailingFragment(path);
 				this.mayHaveFragment = false;
+				this.activeBytes = statSync(path).size;
 			}
-			appendFileSync(path, `${JSON.stringify(record)}\n`);
+			// Roll *before* the record, never through it: a record is written whole into
+			// whichever file it lands in, so no segment ends in half a line.
+			if (this.rolloverBytes !== null && this.activeFirstSeq !== null && this.activeBytes + bytes > this.rolloverBytes) {
+				this.rollover(path);
+			}
+			appendFileSync(path, line, { mode: 0o600 });
+			this.activeBytes += bytes;
+			this.activeFirstSeq ??= record.seq;
 			this.commit(record);
 			this.writeCheckpoint(record);
 			return { record, written: true };
@@ -352,6 +503,81 @@ export class AuditLog {
 	}
 
 	/**
+	 * Close the active file and start the next one at the same path.
+	 *
+	 * The active file is renamed to `<path>.<firstSeq>-<lastSeq>.jsonl` — same
+	 * directory, 0600 — and nothing else changes: `chainSeq` and `chainTip` stand, so
+	 * the next record's `prev` is the closed segment's tip hash and the chain crosses
+	 * the boundary unbroken; the checkpoint already names that tip and is carried
+	 * forward untouched; and `scan` reads closed segments in order before the active
+	 * file, so a verdict covers every record whichever file it is in. This is what the
+	 * old manual rotation (move the file, restart, accept a `prev: null` head) could
+	 * not give: one chain, several files.
+	 *
+	 * A rename that fails leaves the active file where it was, and the record is
+	 * appended there — the record outranks the rotation. The roll is retried on the
+	 * next append, under a new `lastSeq`. A name that already exists is never
+	 * overwritten; it means the range was closed once already, and that too is
+	 * retried rather than clobbered.
+	 *
+	 * **A file holding no committed record is never rolled.** After the closed-segment
+	 * recovery in `open`, the active file can be a terminated fragment and nothing
+	 * else: `activeFirstSeq` is then the `seq` the next record *will* have, one past
+	 * `chainSeq`. Rolling that file would name it by a reversed range (`4-3`), which
+	 * `parseSegmentName` rejects — so the verifier would never read the fragment and
+	 * a damaged write would verify clean (Greptile round 3). The record goes into
+	 * that file instead; the roll waits for the one that follows, and the fragment
+	 * then closes inside a readable `first-last` segment as the unparseable line it
+	 * already is. The file's size overshoots the limit by one record, once.
+	 */
+	private rollover(path: string): void {
+		if (this.activeFirstSeq === null || this.activeFirstSeq > this.chainSeq) return;
+		const closed = segmentPath(path, this.activeFirstSeq, this.chainSeq);
+		if (existsSync(closed)) return;
+		try {
+			renameSync(path, closed);
+		} catch {
+			return;
+		}
+		try {
+			chmodSync(closed, 0o600);
+		} catch {
+			// The segment keeps the mode the active file had. It is still the chain.
+		}
+		this.activeBytes = 0;
+		this.activeFirstSeq = null;
+	}
+
+	/**
+	 * The first complete JSON line of a file, as a record, or null.
+	 *
+	 * Reads one window from the head — never less than `MAX_RECORD_BYTES`, so a record
+	 * this writer produced always fits — and asks for nothing past the first newline.
+	 * Only `open` needs it, to know what a roll would name the file.
+	 */
+	private readFirstRecord(path: string): AuditRecord | null {
+		const size = statSync(path).size;
+		const window = Math.min(this.tailBytes, size);
+		if (window === 0) return null;
+		const buffer = Buffer.alloc(window);
+		const fd = openSync(path, "r");
+		try {
+			readSync(fd, buffer, 0, window, 0);
+		} finally {
+			closeSync(fd);
+		}
+		const text = buffer.toString("utf8");
+		const newline = text.indexOf("\n");
+		if (newline < 0 && window < size) return null;
+		try {
+			const parsed: unknown = JSON.parse(newline < 0 ? text : text.slice(0, newline));
+			return isAuditRecord(parsed) ? parsed : null;
+		} catch {
+			return null;
+		}
+	}
+
+	/**
 	 * Record the committed position beside the file.
 	 *
 	 * Written through a temporary file and renamed, so a crash mid-write leaves either
@@ -382,31 +608,7 @@ export class AuditLog {
 
 	/** The last committed position, or null when there is none to read. */
 	private readCheckpoint(): Checkpoint | null {
-		const target = this.checkpointPath;
-		if (target === null || !existsSync(target)) return null;
-		try {
-			const size = statSync(target).size;
-			// A checkpoint is a few dozen bytes. Anything larger is not one, and reading it
-			// whole would be trusting a file this is meant to be sceptical of.
-			if (size === 0 || size > 4096) return null;
-			const buffer = Buffer.alloc(size);
-			const fd = openSync(target, "r");
-			try {
-				readSync(fd, buffer, 0, size, 0);
-			} finally {
-				closeSync(fd);
-			}
-			const parsed: unknown = JSON.parse(buffer.toString("utf8"));
-			if (!parsed || typeof parsed !== "object") return null;
-			const { seq, hash, ts } = parsed as Partial<Checkpoint>;
-			if (typeof seq !== "number" || !Number.isInteger(seq) || seq < 1) return null;
-			if (typeof hash !== "string" || hash.length === 0) return null;
-			return { seq, hash, ts: typeof ts === "string" ? ts : "" };
-		} catch {
-			// An unreadable checkpoint is not evidence of loss. Treated as absent, which
-			// leaves the pre-checkpoint behaviour rather than inventing an alarm.
-			return null;
-		}
+		return this.checkpointPath === null ? null : readCheckpointFile(this.checkpointPath);
 	}
 
 	private commit(record: AuditRecord): void {
@@ -468,19 +670,21 @@ export class AuditLog {
 		stats: AuditStats;
 		/** How many records matched, which may exceed `records.length`. */
 		matched: number;
+		/** Closed segments read before the active file. 0 for a memory-only chain. */
+		segments: number;
+		/** The first and last readable record on disk, or null when there is none. */
+		firstSeq: number | null;
+		lastSeq: number | null;
 	}> {
 		const collected = options.into ?? [];
 		const keep = options.collect;
 		const maxCollected = options.maxCollected ?? Number.POSITIVE_INFINITY;
 		const path = this.options.path;
 
-		const walker = new ChainWalker({ genesis: this.requireGenesis() });
-		const tally = new StatsAccumulator();
 		let unparseable = 0;
-		let matched = 0;
-		/** Whether the record at the boot checkpoint's `seq` still hashes to its hash. */
-		let anchorSeen = false;
-		let anchorHeld = true;
+		let segments = 0;
+		let firstSeq: number | null = null;
+		let lastSeq: number | null = null;
 
 		/**
 		 * The window over the newest matches, as a real ring.
@@ -493,8 +697,14 @@ export class AuditLog {
 		 * An unbounded window (`readAll`) needs no ring and gets none.
 		 */
 		const bounded = Number.isFinite(maxCollected);
-		const ring: AuditRecord[] = bounded ? new Array<AuditRecord>(Math.max(maxCollected, 0)) : [];
+		let ring: AuditRecord[] = [];
 		let written = 0;
+		let walker = new ChainWalker({ genesis: this.requireGenesis() });
+		let tally = new StatsAccumulator();
+		let matched = 0;
+		/** Whether the record at the boot checkpoint's `seq` still hashes to its hash. */
+		let anchorSeen = false;
+		let anchorHeld = true;
 
 		const offer = (record: AuditRecord): void => {
 			if (!keep || !keep(record)) return;
@@ -517,30 +727,43 @@ export class AuditLog {
 			if (record.hash !== this.anchor.hash) anchorHeld = false;
 		};
 
+		/**
+		 * Fresh state for one pass. The walk may run more than once when the writer
+		 * rolls the file over underneath it (see `walkAuditFiles`), and a verdict, a
+		 * tally or a window carried from an abandoned pass would double-count.
+		 */
+		const begin = (): { walker: ChainWalker; onRecord: (record: AuditRecord) => void } => {
+			walker = new ChainWalker({ genesis: this.requireGenesis() });
+			tally = new StatsAccumulator();
+			ring = bounded ? new Array<AuditRecord>(Math.max(maxCollected, 0)) : [];
+			written = 0;
+			matched = 0;
+			anchorSeen = false;
+			anchorHeld = true;
+			collected.length = 0;
+			return {
+				walker,
+				onRecord: (record) => {
+					checkAnchor(record);
+					offer(record);
+				},
+			};
+		};
+
 		if (path === null) {
+			const pass = begin();
 			for (const record of this.retained) {
-				walker.push(record);
-				offer(record);
+				pass.walker.push(record);
+				firstSeq ??= record.seq;
+				lastSeq = record.seq;
+				pass.onRecord(record);
 			}
-		} else if (existsSync(path)) {
-			for await (const line of readLines(path)) {
-				if (line.trim().length === 0) continue;
-				let parsed: unknown;
-				try {
-					parsed = JSON.parse(line);
-				} catch {
-					unparseable++;
-					continue;
-				}
-				// A line that parses but is not a record is a *chain* fault, not an
-				// unparseable line: the walker reports it as one rather than throwing while
-				// reading fields off it — which used to reach `/evidence` as an HTTP 500.
-				walker.push(parsed);
-				if (isAuditRecord(parsed)) {
-					checkAnchor(parsed);
-					offer(parsed);
-				}
-			}
+		} else {
+			const walked = await walkAuditFiles(path, begin);
+			unparseable = walked.unparseable;
+			segments = walked.segments;
+			firstSeq = walked.firstSeq;
+			lastSeq = walked.lastSeq;
 		}
 
 		// Unroll the ring once, oldest first. `written` past the cap means it wrapped, so
@@ -566,6 +789,9 @@ export class AuditLog {
 			unparseable,
 			stats: tally.stats(),
 			matched,
+			segments,
+			firstSeq,
+			lastSeq,
 		};
 	}
 
@@ -605,6 +831,20 @@ export class AuditLog {
 	async verify(): Promise<ChainVerdict & { unparseable: number }> {
 		const { verdict } = await this.scan();
 		return this.judge(verdict);
+	}
+
+	/**
+	 * The whole chain on disk, judged, with the segment count and the span.
+	 *
+	 * On a log that is not open this is `verifyAuditSegments` — the read-only
+	 * verifier, which never touches the active file. On a log that *is* open the
+	 * anchor is the one `open` read and the answer is `verify`'s with the extra fields.
+	 */
+	async report(): Promise<AuditReport> {
+		const path = this.options.path;
+		if (path !== null && !this.opened) return verifyAuditSegments(path, this.checkpointPath);
+		const { verdict, segments, firstSeq, lastSeq } = await this.scan();
+		return reportFrom(this.judge(verdict), segments, firstSeq, lastSeq);
 	}
 
 	/**
@@ -650,37 +890,7 @@ export class AuditLog {
 
 	/** The reported verdict: what the walker found, plus what the file cannot show. */
 	private judge(verdict: ChainVerdict & { unparseable: number }): ChainVerdict & { unparseable: number } {
-		if (this.lostHistory) {
-			const { kind, checkpointSeq, foundSeq } = this.lostHistory;
-			return {
-				ok: false,
-				records: verdict.records,
-				// `NO_POSITION`: the records that would name the position are the ones that
-				// are gone or replaced. Callers rendering a verdict check for it rather than
-				// printing "broken at -1" — see `chainRow` in @substrate/evidence.
-				brokenAt: NO_POSITION,
-				reason:
-					kind === "missing"
-						? `the audit file is missing history: this chain committed ${checkpointSeq} record(s) and the file now ` +
-							`accounts for ${foundSeq}, so ${checkpointSeq - foundSeq} earlier decision(s) are not in it — ` +
-							"the file was deleted or truncated after they were written"
-						: `the audit file does not hold the records this chain committed: the record at seq ${checkpointSeq} is ` +
-							"not the one whose hash was checkpointed, so the file has been replaced with a different chain — " +
-							"the decisions it now shows are not the decisions that were made",
-				unparseable: verdict.unparseable,
-			};
-		}
-		if (!verdict.ok) return verdict;
-		if (verdict.unparseable > 0) {
-			return {
-				ok: false,
-				records: verdict.records,
-				brokenAt: NO_POSITION,
-				reason: `${verdict.unparseable} line(s) could not be parsed, so the records they hold cannot be verified`,
-				unparseable: verdict.unparseable,
-			};
-		}
-		return verdict;
+		return judgeVerdict(verdict, this.lostHistory);
 	}
 
 	/**
@@ -742,6 +952,201 @@ export class AuditLog {
 		}
 		return null;
 	}
+}
+
+/** How many times a walk starts over when the writer rolls the file underneath it. */
+export const MAX_WALK_ATTEMPTS = 3;
+
+/**
+ * Every closed segment in sequence order, then the active file, through one walker.
+ *
+ * A closed segment and the active file are read by the same rule because they are
+ * the same chain: the walker carries `prev` and `seq` across the boundary, so a
+ * segment that does not continue the one before it is reported exactly as a gap
+ * inside a single file would be. A segment is never skipped: a verdict over the
+ * active file alone would be a verdict over a chain that opens past `seq: 1`,
+ * which is exactly what the head check refuses — and rightly, since the records
+ * before it are in the segments.
+ *
+ * **The set of files is read stably, or read again.** The writer can roll over
+ * between this listing the segments and this opening the active file: the
+ * segment it just closed is then not in the list, and the active file starts past
+ * the records that went into it — so an intact chain would read as a `seq` jump.
+ * A pass therefore records which segments it read and where the active file began,
+ * re-lists afterwards, and starts over (fresh walker and sink from `begin`, at most
+ * `MAX_WALK_ATTEMPTS` times) when a segment appeared or the active file did not
+ * begin at the last closed segment's `lastSeq + 1`. A chain that is genuinely
+ * broken at that boundary fails the same check every time and is reported after the
+ * last attempt, exactly as the walker found it.
+ *
+ * `begin` is called once per pass and hands back the walker and the record sink for
+ * it. Shared by `AuditLog.scan` and `verifyAuditSegments`, so the writer and the
+ * read-only verifier cannot disagree about which files hold the chain.
+ */
+export async function walkAuditFiles(
+	path: string,
+	begin: () => { walker: ChainWalker; onRecord: (record: AuditRecord) => void },
+): Promise<{ unparseable: number; segments: number; firstSeq: number | null; lastSeq: number | null; attempts: number }> {
+	for (let attempt = 1; ; attempt++) {
+		const closed = listAuditSegments(path);
+		const { walker, onRecord } = begin();
+		let unparseable = 0;
+		let firstSeq: number | null = null;
+		let lastSeq: number | null = null;
+		let activeFirstSeq: number | null = null;
+		const scanFile = async (file: string, active: boolean): Promise<void> => {
+			for await (const line of readLines(file)) {
+				if (line.trim().length === 0) continue;
+				let parsed: unknown;
+				try {
+					parsed = JSON.parse(line);
+				} catch {
+					unparseable++;
+					continue;
+				}
+				// A line that parses but is not a record is a *chain* fault, not an
+				// unparseable line: the walker reports it as one rather than throwing while
+				// reading fields off it — which used to reach `/evidence` as an HTTP 500.
+				walker.push(parsed);
+				if (isAuditRecord(parsed)) {
+					firstSeq ??= parsed.seq;
+					lastSeq = parsed.seq;
+					if (active) activeFirstSeq ??= parsed.seq;
+					onRecord(parsed);
+				}
+			}
+		};
+		for (const segment of closed) await scanFile(segment.path, false);
+		if (existsSync(path)) await scanFile(path, true);
+
+		const result = { unparseable, segments: closed.length, firstSeq, lastSeq, attempts: attempt };
+		if (attempt >= MAX_WALK_ATTEMPTS) return result;
+		const after = listAuditSegments(path);
+		const sameSet = after.length === closed.length && after.every((segment, i) => segment.path === closed[i]?.path);
+		const newest = closed[closed.length - 1];
+		const continuous = newest === undefined || activeFirstSeq === null || activeFirstSeq === newest.lastSeq + 1;
+		if (sameSet && continuous) return result;
+	}
+}
+
+/** The checkpoint at `target`, or null when there is none this can trust. */
+function readCheckpointFile(target: string): Checkpoint | null {
+	if (!existsSync(target)) return null;
+	try {
+		const size = statSync(target).size;
+		// A checkpoint is a few dozen bytes. Anything larger is not one, and reading it
+		// whole would be trusting a file this is meant to be sceptical of.
+		if (size === 0 || size > 4096) return null;
+		const buffer = Buffer.alloc(size);
+		const fd = openSync(target, "r");
+		try {
+			readSync(fd, buffer, 0, size, 0);
+		} finally {
+			closeSync(fd);
+		}
+		const parsed: unknown = JSON.parse(buffer.toString("utf8"));
+		if (!parsed || typeof parsed !== "object") return null;
+		const { seq, hash, ts } = parsed as Partial<Checkpoint>;
+		if (typeof seq !== "number" || !Number.isInteger(seq) || seq < 1) return null;
+		if (typeof hash !== "string" || hash.length === 0) return null;
+		return { seq, hash, ts: typeof ts === "string" ? ts : "" };
+	} catch {
+		// An unreadable checkpoint is not evidence of loss. Treated as absent, which
+		// leaves the pre-checkpoint behaviour rather than inventing an alarm.
+		return null;
+	}
+}
+
+/** The reported verdict: what the walker found, plus what the file cannot show. See `AuditLog.verify`. */
+function judgeVerdict(
+	verdict: ChainVerdict & { unparseable: number },
+	lostHistory: MissingHistory | null,
+): ChainVerdict & { unparseable: number } {
+	if (lostHistory) {
+		const { kind, checkpointSeq, foundSeq } = lostHistory;
+		return {
+			ok: false,
+			records: verdict.records,
+			// `NO_POSITION`: the records that would name the position are the ones that
+			// are gone or replaced. Callers rendering a verdict check for it rather than
+			// printing "broken at -1" — see `chainRow` in @substrate/evidence.
+			brokenAt: NO_POSITION,
+			reason:
+				kind === "missing"
+					? `the audit file is missing history: this chain committed ${checkpointSeq} record(s) and the file now ` +
+						`accounts for ${foundSeq}, so ${checkpointSeq - foundSeq} earlier decision(s) are not in it — ` +
+						"the file was deleted or truncated after they were written"
+					: `the audit file does not hold the records this chain committed: the record at seq ${checkpointSeq} is ` +
+						"not the one whose hash was checkpointed, so the file has been replaced with a different chain — " +
+						"the decisions it now shows are not the decisions that were made",
+			unparseable: verdict.unparseable,
+		};
+	}
+	if (!verdict.ok) return verdict;
+	if (verdict.unparseable > 0) {
+		return {
+			ok: false,
+			records: verdict.records,
+			brokenAt: NO_POSITION,
+			reason: `${verdict.unparseable} line(s) could not be parsed, so the records they hold cannot be verified`,
+			unparseable: verdict.unparseable,
+		};
+	}
+	return verdict;
+}
+
+function reportFrom(
+	judged: ChainVerdict & { unparseable: number },
+	segments: number,
+	firstSeq: number | null,
+	lastSeq: number | null,
+): AuditReport {
+	return {
+		segments,
+		records: judged.records,
+		firstSeq,
+		lastSeq,
+		ok: judged.ok,
+		unparseable: judged.unparseable,
+		...(judged.ok ? {} : { brokenAt: judged.brokenAt, reason: judged.reason }),
+	};
+}
+
+/**
+ * Verify the chain at `path` — every closed segment, then the active file — without
+ * an `AuditLog` and without writing.
+ *
+ * What `scripts/audit-verify.ts` prints. `AuditLog.open` proves the sink writable by
+ * appending to the active file, and a verifier running beside the single writer must
+ * not touch that file; nor does a verifier need a redactor, since it prints nothing a
+ * record holds. So this reads the checkpoint itself (`<path>.checkpoint` unless named)
+ * and anchors the walk to it the way boot would: a checkpoint past the last record on
+ * disk is **missing history** — a file or segment truncated or removed after those
+ * records were committed; a record at the checkpoint's `seq` with another hash is
+ * **rewritten history**. Both fail the verdict whatever the surviving records say,
+ * by the same rules as `AuditLog.verify`.
+ */
+export async function verifyAuditSegments(path: string, checkpointPath: string | null = `${path}.checkpoint`): Promise<AuditReport> {
+	const anchor = checkpointPath === null ? null : readCheckpointFile(checkpointPath);
+	let walker = new ChainWalker({ genesis: true });
+	let rewritten = false;
+	const { unparseable, segments, firstSeq, lastSeq } = await walkAuditFiles(path, () => {
+		walker = new ChainWalker({ genesis: true });
+		rewritten = false;
+		return {
+			walker,
+			onRecord: (record) => {
+				if (anchor && record.seq === anchor.seq && record.hash !== anchor.hash) rewritten = true;
+			},
+		};
+	});
+	let lostHistory: MissingHistory | null = null;
+	if (anchor && (lastSeq ?? 0) < anchor.seq) {
+		lostHistory = { kind: "missing", checkpointSeq: anchor.seq, foundSeq: lastSeq ?? 0 };
+	} else if (anchor && rewritten) {
+		lostHistory = { kind: "rewritten", checkpointSeq: anchor.seq, foundSeq: lastSeq ?? 0 };
+	}
+	return reportFrom(judgeVerdict({ ...walker.verdict(), unparseable }, lostHistory), segments, firstSeq, lastSeq);
 }
 
 /**

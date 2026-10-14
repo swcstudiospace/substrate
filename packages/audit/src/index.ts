@@ -39,9 +39,19 @@ export {
 export {
 	type AuditAppend,
 	type AuditLogOptions,
+	type AuditReport,
+	type AuditSegment,
 	type MissingHistory,
 	AuditLog,
 	AuditUnavailableError,
+	listAuditSegments,
+	orderSegments,
+	parseSegmentName,
+	MAX_WALK_ATTEMPTS,
+	rolloverBytesFromEnv,
+	segmentPath,
+	verifyAuditSegments,
+	walkAuditFiles,
 } from "./log.ts";
 
 export {

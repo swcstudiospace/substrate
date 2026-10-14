@@ -3,6 +3,7 @@
  *
  *   substrate lessons add --text T --phase P ...      one lesson, from text
  *   substrate lessons add --from SUMMARY.md ...       every bullet under `## Lessons`
+ *   substrate lessons ingest --session ID --text T    one lesson from a finished session
  *   substrate lessons recall [QUERY]                  a `## Prior Lessons` block for CONTEXT.md
  *   substrate lessons digest <milestone>              roll a milestone's lessons up into one fact
  *   substrate lessons outcome <id> --result R ...     report how a cited lesson worked out
@@ -20,6 +21,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { lessonContentIssue } from "../../mcp-server/src/lesson-content.ts";
 import { redact, redactKnown, redactValue } from "../../mcp-server/src/redact.ts";
 import { list, parseArgs, str, type Args } from "./args.ts";
 
@@ -76,6 +78,76 @@ const STOPWORDS: Record<string, true> = Object.fromEntries(
 		"its", "of", "on", "or", "that", "the", "their", "this", "to", "was", "were", "when", "with", "not", "no",
 	].map((word) => [word, true]),
 );
+
+export { lessonContentIssue } from "../../mcp-server/src/lesson-content.ts";
+
+/** Whole lines only. A fact that mentions a session ending is still a fact. */
+const CHATTER = /^(?:session (?:ended|started)|(?:\S+\s+)?pane[- ]?\S* exited|idle to working|\(no output\)|no output)$/i;
+const LABELED_FACT = /^(?:goal|decision|preference|outcome|blocker|fact)\s*:\s*(.*)$/i;
+
+export interface DurableExtraction {
+	facts: string[];
+	dropped: number;
+}
+
+/**
+ * Durable lines from a finished session. A labelled goal, decision, preference,
+ * outcome, blocker or fact is kept when it has factual content. Chatter and
+ * title-only lines are counted as dropped and are not invented into filler.
+ */
+/** Text from a transcript line. JSONL records contribute their text, not the wrapper. */
+function proseFromLine(line: string): string | null {
+	const trimmed = line.trim();
+	if (trimmed.length === 0) return null;
+	if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return trimmed;
+	try {
+		const value: unknown = JSON.parse(trimmed);
+		if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+		let picked: unknown;
+		if ("text" in value && typeof value.text === "string") picked = value.text;
+		else if ("content" in value && typeof value.content === "string") picked = value.content;
+		else if ("message" in value) {
+			const message = value.message;
+			if (typeof message === "string") picked = message;
+			else if (message !== null && typeof message === "object" && "content" in message) picked = message.content;
+		}
+		if (typeof picked !== "string") return null;
+		const text = picked.trim();
+		const role = "role" in value && typeof value.role === "string" ? value.role : "";
+		if ((role === "user" || role === "human" || role === "system") && !LABELED_FACT.test(text)) return null;
+		return text;
+	} catch {
+		return null;
+	}
+}
+
+export function extractDurableFacts(sessionText: string): DurableExtraction {
+	const facts: string[] = [];
+	let dropped = 0;
+	for (const line of sessionText.split(/\n+/)) {
+		const prose = proseFromLine(line);
+		if (prose === null) {
+			if (line.trim().length > 0) dropped++;
+			continue;
+		}
+		const labeled = LABELED_FACT.exec(prose);
+		const candidate = (labeled ? (labeled[1] ?? "") : prose).trim();
+		if (candidate.length === 0 || CHATTER.test(candidate) || lessonContentIssue(candidate)) {
+			dropped++;
+			continue;
+		}
+		facts.push(candidate);
+	}
+	return { facts, dropped };
+}
+
+/**
+ * One lesson for one session body. The same text replays. A later turn whose
+ * facts differ gets its own key, so the first turn does not block the rest.
+ */
+export function sessionLessonKey(scope: string, sessionId: string, text: string): string {
+	return `${SUBJECT.lesson}${sha256(`${scope}\nsession\n${sessionId}\n${normalizeText(text)}`)}`;
+}
 
 export interface Lesson {
 	milestone: string;
@@ -203,7 +275,7 @@ export function lessonBody(lesson: Lesson): string {
 		...(lesson.tags.length > 0 ? [`tags: ${lesson.tags.join(", ")}`] : []),
 		`source: ${lesson.source}`,
 		"",
-		normalizeText(lesson.text),
+		redact(normalizeText(lesson.text)),
 	].join("\n");
 }
 
@@ -422,7 +494,8 @@ export function rankLessons(items: readonly Citable[], outcomes: readonly Outcom
 	for (const outcome of outcomes) reports.set(outcome.lesson, [...(reports.get(outcome.lesson) ?? []), outcome]);
 
 	return items
-		.filter((item) => item.digest ? activeDigests.has(item) : !digested.has(item.id))
+		.filter((item) => (item.digest ? activeDigests.has(item) : !digested.has(item.id)))
+		.filter((item) => item.digest || lessonContentIssue(item.text) === null)
 		.map((item) => {
 			const { score, count } = scoreOf(reports.get(item.id) ?? []);
 			const match = matchScore(terms, item);
@@ -630,7 +703,7 @@ export interface WriteReply {
 	reason?: string;
 	remedy?: string;
 	verified_persisted?: boolean;
-	entry?: { id?: string };
+	entry?: { id?: string; text?: string; session_id?: string | null };
 	deduplicated?: boolean;
 	quarantine_id?: string;
 	review_id?: string;
@@ -650,6 +723,7 @@ export type WriteStatus =
 	| "refused"
 	| "unreachable"
 	| "too-long"
+	| "invalid"
 	| "skipped";
 
 export interface WriteReport {
@@ -926,11 +1000,14 @@ export interface LessonsDeps {
 	now: () => Date;
 	out: (text: string) => void;
 	err: (text: string) => void;
+	/** Extra read-back attempts after the first write. The stop hook uses 0. */
+	writeRetries?: number;
 }
 
 const USAGE =
 	"substrate lessons add --text T --phase P [--milestone M] [--slug S] [--tags a,b] [--outcome O] [--source PATH]\n" +
 	"substrate lessons add --from SUMMARY.md [--key-decisions] [--milestone M] [--phase P] [--tags a,b] [--skip slug,...]\n" +
+	"substrate lessons ingest --session ID --text T --phase P [--milestone M]\n" +
 	"substrate lessons recall [QUERY] [--limit N] [--half-life DAYS]\n" +
 	"substrate lessons digest <milestone> [--ids a,b [--unchecked]] [--text T]\n" +
 	"substrate lessons outcome <lesson id> --result success|partial|failure --phase P --report-id ID [--milestone M] [--note T] [--unchecked]\n" +
@@ -946,6 +1023,8 @@ export async function runLessons(argv: string[], deps: LessonsDeps): Promise<num
 		switch (command) {
 			case "add":
 				return await add(args, deps);
+			case "ingest":
+				return await ingest(args, deps);
 			case "recall":
 				return await recall(args, positional.join(" "), deps);
 			case "digest":
@@ -995,19 +1074,58 @@ function outcomeOf(value: string | undefined): LessonOutcome {
 }
 
 /**
+ * The source the retain forward requires. A session lesson names that session.
+ * Any other lesson names its idempotency key, so a retry is the same source and
+ * the memory bank can store the body instead of refusing it as unsourced.
+ */
+export function lessonSourceEvent(key: string, sessionId?: string): string {
+	const session = sessionId?.trim() ?? "";
+	const source = session.length > 0 ? `session:${session}` : `lesson:${key}`;
+	return source.slice(0, 512);
+}
+
+/**
+ * Why a verified write still cannot be acknowledged. The gate's read-back has to
+ * carry the same body that was sent, and a session lesson has to carry that session.
+ * An empty or different body is not a saved lesson.
+ */
+export function readBackIssue(sent: string, reply: WriteReply, sessionId?: string): string | null {
+	const stored = typeof reply.entry?.text === "string" ? reply.entry.text : "";
+	if (stored.trim().length === 0) return "read-back body is empty";
+	if (normalizeText(stored) !== normalizeText(sent)) return "read-back body does not match the lesson that was sent";
+	const session = sessionId?.trim() ?? "";
+	if (session.length > 0 && reply.entry?.session_id !== session) return "read-back is not tied to the session that produced the lesson";
+	return null;
+}
+
+/**
  * One governed write, sent again once under the same key when the gate accepted it
  * but could not read it back. That replay re-verifies rather than writing again,
  * which makes it the one retry that is always safe. A quarantine, a denial or a
  * conflict is the gate's answer, and asking again would only get it again.
+ *
+ * Every write names a `source_event`. Without one the index can accept the row
+ * and the memory-bank retain still refuses it, so a later recall never sees the text.
  */
 async function writeGoverned(
 	memory: MemoryApi,
 	request: Record<string, unknown>,
+	retries = 1,
 ): Promise<Pick<WriteReport, "status" | "id" | "reason" | "remedy">> {
+	const sent = typeof request.text === "string" ? request.text : "";
+	const sessionId = typeof request.session_id === "string" ? request.session_id : undefined;
+	const key = typeof request.idempotency_key === "string" ? request.idempotency_key : "";
+	const outbound: Record<string, unknown> = {
+		...request,
+		source_event:
+			typeof request.source_event === "string" && request.source_event.trim().length > 0
+				? request.source_event.trim().slice(0, 512)
+				: lessonSourceEvent(key, sessionId),
+	};
 	for (let attempt = 0; ; attempt++) {
 		let reply: WriteReply;
 		try {
-			reply = await memory.write(request);
+			reply = await memory.write(outbound);
 		} catch (cause) {
 			if (!(cause instanceof Unreachable)) throw cause;
 			return {
@@ -1018,7 +1136,21 @@ async function writeGoverned(
 			};
 		}
 		const decided = interpret(reply);
-		if (decided.status !== "unverified" || attempt > 0) return decided;
+		if (decided.status === "recorded" || decided.status === "duplicate") {
+			const issue = readBackIssue(sent, reply, sessionId);
+			if (issue) {
+				if (attempt >= retries) {
+					return {
+						status: "unverified",
+						id: null,
+						reason: issue,
+						remedy: "The bank did not keep this lesson's text. Run the same command again once it answers with the body.",
+					};
+				}
+				continue;
+			}
+		}
+		if (decided.status !== "unverified" || attempt >= retries) return decided;
 	}
 }
 
@@ -1040,6 +1172,8 @@ interface Planned {
 	key: string;
 	body: string;
 	skipped: boolean;
+	/** Set when the body has no factual content. The plan is not sent. */
+	invalid?: string | null;
 	/** The caller's report identity, on outcome dry runs: the `--report-id` the key is scoped to. */
 	report?: string;
 }
@@ -1110,6 +1244,7 @@ async function add(args: Args, deps: LessonsDeps): Promise<number> {
 	const skip = new Set((list(args.skip) ?? []).map(identifier));
 	const taken = new Set<string>();
 	const planned: Planned[] = items.map((item) => {
+		const issue = lessonContentIssue(item.text);
 		const base = item.slug || slugify(item.text);
 		let slug = base;
 		// Two bullets opening with the same words would share a subject. Facts append, so
@@ -1130,6 +1265,7 @@ async function add(args: Args, deps: LessonsDeps): Promise<number> {
 			key: lessonKey(scope, source, item.text),
 			body: lessonBody(lesson),
 			skipped: skip.has(slug),
+			invalid: issue,
 		};
 	});
 
@@ -1144,6 +1280,14 @@ async function add(args: Args, deps: LessonsDeps): Promise<number> {
 		const base = { subject: plan.subject, key: plan.key };
 		if (plan.skipped) {
 			reports.push({ ...base, status: "skipped", id: null, reason: null, remedy: null });
+		} else if (plan.invalid) {
+			reports.push({
+				...base,
+				status: "invalid",
+				id: null,
+				reason: plan.invalid,
+				remedy: "Give the lesson a concrete fact. An empty, placeholder, or title-only body is not stored.",
+			});
 		} else if (plan.body.length > MAX_BODY) {
 			reports.push({
 				...base,
@@ -1161,19 +1305,95 @@ async function add(args: Args, deps: LessonsDeps): Promise<number> {
 				remedy: "Run the same command again once it answers.",
 			});
 		} else {
-			const decided = await writeGoverned(deps.memory, {
-				scope,
-				kind: "fact",
-				subject: plan.subject,
-				text: plan.body,
-				idempotency_key: plan.key,
-			});
+			const decided = await writeGoverned(
+				deps.memory,
+				{
+					scope,
+					kind: "fact",
+					subject: plan.subject,
+					text: plan.body,
+					idempotency_key: plan.key,
+				},
+				deps.writeRetries ?? 1,
+			);
 			if (decided.status === "unreachable") reachable = false;
 			reports.push({ ...base, ...decided });
 		}
 	}
 	printReports(reports, args.json === true, deps);
 	return reports.every((report) => report.status === "skipped" || USABLE[report.status]) ? 0 : 1;
+}
+
+/**
+ * One lesson from a finished session. Facts share one correlation id (the session
+ * id) and one idempotency key, so a replay returns the original lesson. A session
+ * with no durable fact stores nothing and exits 1: that is a failed create, not
+ * a saved empty lesson.
+ */
+async function ingest(args: Args, deps: LessonsDeps): Promise<number> {
+	const started = deps.now().getTime();
+	const scope = scopeOf(args, deps);
+	const sessionId = str(args.session)?.trim() ?? "";
+	if (!/^[A-Za-z0-9._:-]{1,200}$/.test(sessionId)) {
+		throw new UsageError("lessons ingest needs --session ID (letters, digits, . _ : -, 1-200 characters)");
+	}
+	const raw = str(args.text);
+	if (raw == null) throw new UsageError("lessons ingest needs --text, the session text to read facts from");
+	const { facts, dropped } = extractDurableFacts(raw);
+	const elapsed = (): number => Math.max(0, deps.now().getTime() - started);
+	if (facts.length === 0) {
+		deps.err(
+			`[substrate] lesson ingest correlation=${sessionId} outcome=nothing-durable dropped=${dropped} latency_ms=${elapsed()}\n`,
+		);
+		if (args.json === true) deps.out(`${JSON.stringify({ outcome: "nothing-durable", correlation: sessionId, dropped })}\n`);
+		return 1;
+	}
+	const milestone = identifier(str(args.milestone) ?? currentMilestone(deps) ?? "");
+	const phase = identifier(str(args.phase) ?? "");
+	if (!milestone || !phase) {
+		throw new UsageError("lessons ingest needs --milestone and --phase, or a .planning/STATE.md milestone and --phase");
+	}
+	const text = facts.join("\n");
+	const issue = lessonContentIssue(text);
+	if (issue) {
+		deps.err(`[substrate] lesson ingest correlation=${sessionId} outcome=invalid reason=${issue} latency_ms=${elapsed()}\n`);
+		return 1;
+	}
+	const lesson: Lesson = {
+		milestone,
+		phase,
+		slug: slugify(redact(facts[0] ?? text)),
+		outcome: outcomeOf(str(args.outcome)),
+		tags: [...new Set((list(args.tags) ?? []).map(identifier).filter(Boolean))],
+		source: `session:${sessionId}`,
+		text,
+	};
+	const subject = lessonSubject(milestone, phase, lesson.slug);
+	const key = sessionLessonKey(scope, sessionId, text);
+	const body = lessonBody(lesson);
+	if (body.length > MAX_BODY) {
+		deps.err(`[substrate] lesson ingest correlation=${sessionId} outcome=too-long latency_ms=${elapsed()}\n`);
+		return 1;
+	}
+	const decided = await writeGoverned(
+		deps.memory,
+		{
+			scope,
+			kind: "fact",
+			subject,
+			text: body,
+			idempotency_key: key,
+			session_id: sessionId,
+			source_event: lessonSourceEvent(key, sessionId),
+		},
+		deps.writeRetries ?? 1,
+	);
+	const report: WriteReport = { subject, key, ...decided };
+	printReports([report], args.json === true, deps);
+	deps.err(
+		`[substrate] lesson ingest correlation=${sessionId} outcome=${report.status} lesson=${report.id ?? "-"} dropped=${dropped} latency_ms=${elapsed()}\n`,
+	);
+	return USABLE[report.status] ? 0 : 1;
 }
 
 interface Bank {
@@ -1294,8 +1514,11 @@ async function recall(args: Args, positional: string, deps: LessonsDeps): Promis
 		// Fail-open, by the proposal's rule: a phase that cannot reach the bank goes
 		// ahead without prior lessons rather than not at all. Said on stderr, so the
 		// operator knows the block is missing rather than empty.
-		deps.err(`[substrate] the lessons bank did not answer for ${scope}; nothing recalled: ${message(cause)}\n`);
-		return 0;
+		const reason = message(cause);
+		deps.err(`[substrate] recall-unavailable for ${scope}: ${reason}\n`);
+		if (args.json === true) deps.out(`${JSON.stringify({ outcome: "recall-unavailable", reason })}\n`);
+		else deps.out(`recall-unavailable: the lessons bank did not answer for ${scope}.\n`);
+		return 2;
 	}
 	const ranked = rankLessons(bank.items, bank.outcomes, { query, now: deps.now().getTime(), halfLifeDays, limit });
 	if (args.json) {
@@ -1363,7 +1586,11 @@ async function digest(args: Args, positional: string | undefined, deps: LessonsD
 		printPlanned([{ subject, key, body, skipped: false }], scope, args.json === true, deps);
 		return 0;
 	}
-	const decided = await writeGoverned(deps.memory, { scope, kind: "fact", subject, text: body, idempotency_key: key });
+	const decided = await writeGoverned(
+		deps.memory,
+		{ scope, kind: "fact", subject, text: body, idempotency_key: key },
+		deps.writeRetries ?? 1,
+	);
 	printReports([{ subject, key, ...decided }], args.json === true, deps);
 	return USABLE[decided.status] ? 0 : 1;
 }
@@ -1455,7 +1682,11 @@ async function outcome(args: Args, positional: string | undefined, deps: Lessons
 		subject,
 		key,
 		report: reportId,
-		...(await writeGoverned(deps.memory, { scope, kind: "fact", subject, text: body, idempotency_key: key })),
+		...(await writeGoverned(
+			deps.memory,
+			{ scope, kind: "fact", subject, text: body, idempotency_key: key },
+			deps.writeRetries ?? 1,
+		)),
 	};
 	const was = scoreOf(before);
 	// Read back rather than computed locally, so the score shown is the one recall will see.
@@ -1477,4 +1708,33 @@ async function outcome(args: Args, positional: string | undefined, deps: Lessons
 		if (now) deps.out(`${" ".repeat(12)}score of ${lessonId}: ${from} -> ${to}\n`);
 	}
 	return USABLE[report.status] ? 0 : 1;
+}
+
+/**
+ * The session-end hook's write. Same ingest as the CLI, with the hook's own
+ * timeout, so a copied transcript becomes one lesson before the turn is acknowledged.
+ * A session with no durable fact exits 1 and stores nothing.
+ */
+export async function flushSessionLesson(input: {
+	sessionId: string;
+	text: string;
+	repo?: string;
+	url: string;
+	token?: string;
+	timeoutMs: number;
+	root: string;
+	cwd: string;
+}): Promise<number> {
+	const args = ["ingest", "--session", input.sessionId, "--text", input.text, "--milestone", "session", "--phase", "cursor"];
+	if (input.repo) args.push("--repo", input.repo);
+	return runLessons(args, {
+		memory: httpMemory({ url: input.url, token: input.token, timeoutMs: input.timeoutMs }),
+		repo: input.repo,
+		root: input.root,
+		cwd: input.cwd,
+		now: () => new Date(),
+		out: () => {},
+		err: (text) => process.stderr.write(text),
+		writeRetries: 0,
+	});
 }

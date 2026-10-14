@@ -1,0 +1,14 @@
+# S2 — Index disaster recovery: verified logical export, offline verify, restore-to-scratch (trimmed plan)
+
+## Target
+`packages/mcp-server/src/index-archive.ts` (+ `index-archive-spec.ts`, `index-archive-watch.ts`, tests), `index-run.ts` (runner modelled on `ledger-run.ts`), `index-store.ts` (read-only whitelisted export iterator, restore transaction, `capacity()` ratios, tune), `packages/cli/src/index.ts` (+ `index-archive.ts`), `config.ts`, `infra/vps/substrate-index-archive.{service,timer}` (staged), `docs/runbooks/index-archive.md`, the capacity rows in `docs/observability.md`.
+
+## Change
+1. Export every table `migrate()` creates (graph_index, graph_nodes, graph_edges, graph_steps, graph_bindings, memory_entries, memory_writes, memory_quarantine, memory_reviews; there is no `skills` table in the index) as NDJSON through a closed whitelist, key-ordered keyset pages, one REPEATABLE READ READ ONLY transaction, bounded page size and duration, streamed to disk. Quarantine and review rows export without `body`/`subject`; restore verifies counts and hashes for them, not text.
+2. Manifest written last (tmp + rename): version, createdAt, release sha, server_version, schema hash, per table `{file, rows, bytes, sha256, columns}`. `index verify-archive` is fully offline with the closed vocabulary `missing-file|size|hash|rowcount|parse|schema|manifest`, exit 2 with names, never row contents.
+3. `index restore --scratch <url> <dir>`: refuses the production URL (normalised host, port, database) and an unset `SUBSTRATE_PG_URL`; `migrate()` on the scratch; FK-order load in a transaction; compare counts and the `entry_hash` row-hash; print a table; never print credentials.
+4. Guards as the ledger archive: `SUBSTRATE_INDEX_ARCHIVE_DIR` (unset refuses by name), `st_dev` mount proof, free-space floor, rootfs override flag. One ledger `note` after success with a retry marker written before the emit and cleared on `stored: true`. `jobs.index.lastArchiveAt` on `/healthz`, gauge `substrate.index.archive.age_seconds`, SLO row `index.archive.age` report-only until `SUBSTRATE_INDEX_ARCHIVE_MAX_AGE_H`.
+5. Lease-bloat visibility: `capacity()` adds `hotUpdateRatio` and `deadRatio` for `graph_nodes`; the DDL tune runs only under `SUBSTRATE_INDEX_TUNE=apply`, once, idempotent; no index is dropped by code.
+
+## Acceptance
+Roundtrip archive → verify → restore against `SUBSTRATE_TEST_PG_URL` with counts and hashes equal; one corruption test per mismatch kind; refusal tests (production URL, root filesystem, missing mount, unset directory, free space); a quarantine row never exports secret-bearing text; marker semantics (marker before emit, throwing emit leaves it, next run retries only the note); streaming bound (100k-row stub never holds more than one page); tune DDL off by default.

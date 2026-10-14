@@ -70,6 +70,14 @@ export type EventKind = (typeof EVENT_KINDS)[number];
 export const ACTORS = ["agent", "human"] as const;
 export type Actor = (typeof ACTORS)[number];
 
+/**
+ * `SUBSTRATE_EVENT_IDEMPOTENCY` (U5-4a). `off` ignores `idempotency_key` and the replay marker;
+ * `accept` stores a valid key and looks it up only for a replay-marked request; `enforce` looks
+ * up every keyed request.
+ */
+export const EVENT_IDEMPOTENCY_MODES = ["off", "accept", "enforce"] as const;
+export type EventIdempotencyMode = (typeof EVENT_IDEMPOTENCY_MODES)[number];
+
 /** An event as a collector submits it. `id`, `ts`, `hash` and `prev` are filled in on ingest. */
 export interface EventInput {
 	surface: Surface;
@@ -86,6 +94,12 @@ export interface EventInput {
 	payload?: Record<string, unknown>;
 	/** Collector-supplied timestamp; defaults to ingest time. */
 	ts?: string;
+	/**
+	 * Optional replay key (U5-4a): 8-128 characters from `[A-Za-z0-9._:-]`. Honoured only under
+	 * `SUBSTRATE_EVENT_IDEMPOTENCY=accept|enforce`, where it is stored as the reserved payload
+	 * key `_ik`; under `off` it is ignored unread. See `docs/greptime-ledger.md`.
+	 */
+	idempotency_key?: string;
 }
 
 /** An event as stored. Every field below `hash` participates in the chain. */
@@ -119,6 +133,14 @@ export type Trust = (typeof TRUST_LEVELS)[number];
 /** Retention, which is a different question from trust — see `TRUST_SHELF_LIFE_DAYS`. */
 export const MEMORY_TTLS = ["graph", "30d", "permanent"] as const;
 export type MemoryTtl = (typeof MEMORY_TTLS)[number];
+
+/**
+ * What a serving read does with an entry past its `ttl` (uplift-3 N4,
+ * `SUBSTRATE_MEMORY_EXPIRY`): `report` serves it tagged `expired`; `enforce`
+ * leaves it out unless the caller asked for expired entries.
+ */
+export const MEMORY_EXPIRY_MODES = ["report", "enforce"] as const;
+export type MemoryExpiryMode = (typeof MEMORY_EXPIRY_MODES)[number];
 
 /** The five scope families. RBAC is granted per family, never per literal scope string. */
 export const MEMORY_SCOPE_CLASSES = ["graph", "repo", "global", "agent", "person"] as const;
@@ -188,6 +210,14 @@ export interface MemoryEntry extends MemoryEntryInput {
 	reverify_after?: string;
 	/** Derived on read from `reverify_after`: true once the trust has decayed. */
 	needs_reverification: boolean;
+	/**
+	 * Derived on read from `ttl` (uplift-3 N4): true once the entry is past its
+	 * lifetime, by `memoryExpiry`. Set by every index read that serves entries;
+	 * absent on one that came another way — a write's reply, a fixture.
+	 */
+	expired?: boolean;
+	/** When a `30d` entry expires, ISO. A `graph` entry's end is an event and carries none. */
+	expires_at?: string;
 	idempotency_key?: string;
 }
 
@@ -203,6 +233,10 @@ export interface MemorySearch {
 	includeSuperseded?: boolean;
 	/** Only entries whose stored subject starts with this, literally. */
 	subjectPrefix?: string;
+	/** Only entries written by this surface, exactly. */
+	writer?: string;
+	/** Only entries of this memory kind. */
+	kind?: MemoryKind;
 	/** Only entries created before this ISO timestamp — or, with `beforeId`, at it with a smaller id. */
 	before?: string;
 	beforeId?: string;
@@ -226,6 +260,18 @@ export interface MemorySearchCursor {
 export interface MemorySearchPage {
 	entries: MemoryEntry[];
 	next: MemorySearchCursor | null;
+}
+
+/**
+ * The per-call half of lifetime handling on a serving read (uplift-3 N4). The
+ * mode itself is the store's; a caller can only widen a read to expired entries,
+ * and only after the operator gate let it.
+ */
+export interface MemoryReadOptions {
+	/** Serve expired entries under `enforce` too. Gated on an operator token before it gets here. */
+	includeExpired?: boolean;
+	/** The caller, for the `substrate.memory.expired` series; `unattributed` when absent. */
+	surface?: string;
 }
 
 /** One parked write, as a reviewer's queue lists it. */

@@ -1,0 +1,75 @@
+[Unit]
+Description=Agent Substrate daily ledger archive (export closed days to SUBSTRATE_LEDGER_ARCHIVE_DIR with a verifiable manifest)
+Documentation=https://github.com/swcstudiospace/agent-substrate
+After=network-online.target substrate-mcp.service
+Wants=network-online.target
+# A missing entry point skips the start silently instead of failing into the
+# timer's persistent backlog. The path is the pinned release, not the checkout:
+# ConditionPathExists follows the current symlink.
+ConditionPathExists=/opt/agent-substrate/current/packages/cli/src/index.ts
+# Wait for, and require, the filesystem the archive lives on. systemd orders the
+# unit after the mount units that cover each path and fails the start when one
+# cannot be activated — a volume that did not come up after a reboot is a failed
+# run, not a local archive. The path below is the documented default; the
+# operator's drop-in (substrate-ledger-archive.service.d/10-environment.conf)
+# MUST repeat the directive for the real SUBSTRATE_LEDGER_ARCHIVE_DIR when it
+# differs (RequiresMountsFor= accumulates, so adding a path never removes this
+# one). The command independently refuses a directory on the root filesystem
+# (unless SUBSTRATE_LEDGER_ARCHIVE_ALLOW_ROOTFS=1, which the unit never sets), so
+# a missing or autofs-deferred mount is caught even where this ordering is not.
+RequiresMountsFor=/mnt/ledger-archive
+
+[Service]
+Type=oneshot
+# Resource ceilings (uplift-2 R7 shape): a oneshot that pages one day of the
+# ledger through 500-row reads and writes NDJSON; substrate-mcp itself peaks
+# at 88 MB RSS (measured 2026-10-13), so 512M is headroom. Lives in
+# substrate.slice (MemoryLow=2G) so reclaim hits co-tenants first; the timer
+# retries a killed run next tick, and a day is never half-archived — the
+# manifest is written last and `.part` files are removed by the next run.
+Slice=substrate.slice
+MemoryMax=512M
+# No Restart=: a oneshot that exits 1 (ledger unreachable) or 2 (archive
+# directory unset or refused, disk floor) already shows failed, and the timer
+# retries on the next tick.
+# Credentials only; nothing secret lives in the repo. The drop-in
+# substrate-ledger-archive.service.d/10-environment.conf is the EnvironmentFile:
+# the job is a store client in the same trust domain as the server (the Greptime
+# credentials for its reads and its one ledger note per day). The archive
+# directory comes from SUBSTRATE_LEDGER_ARCHIVE_DIR in that file; when it is
+# unset the command refuses by name (exit 2) and writes nothing — the unit is
+# installed disabled and enabled by the operator after the off-box path is
+# mounted. See infra/vps/README.md and docs/greptime-ledger.md.
+WorkingDirectory=/opt/agent-substrate/current
+# Machine-specific: `command -v bun`. The binary on this host is under
+# /root/.local, which is why the unit still runs as root (no User=) and why
+# ProtectHome=false stays. The code itself is the release at WorkingDirectory.
+# --until is omitted: the CLI computes yesterday (UTC) itself, so a missed day
+# run by Persistent=true still archives every closed day without a manifest.
+ExecStart=/root/.local/share/reflex/bun/bin/bun packages/cli/src/index.ts ledger archive --out ${SUBSTRATE_LEDGER_ARCHIVE_DIR}
+
+# /var/lib/substrate, created by systemd and writable under ProtectSystem=full.
+StateDirectory=substrate
+StateDirectoryMode=0700
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=substrate-ledger-archive
+
+# It talks to Greptime and writes to the archive mount. Nothing else.
+# ProtectSystem=full leaves /mnt and /srv writable, which is where an off-box
+# archive path is mounted; the command itself refuses the release root, the
+# checkout and any directory on the root filesystem, so a misconfigured or
+# unmounted path fails rather than filling the root disk.
+# ProtectHome=false is the remaining exception: ExecStart's bun lives under
+# /root/.local, so ProtectHome=true would hide the interpreter.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
