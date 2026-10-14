@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, test } from "bun:test";
+import { canonicalJson, sha256Hex } from "./event.ts";
 import { grantFor, parseScope } from "./memory-policy.ts";
 import { REDACTED } from "./redact.ts";
 import { SWARM_SURFACES } from "./types.ts";
@@ -49,6 +50,8 @@ export class FakeStore implements MemoryStore {
 	failFinish: string | null = null;
 	/** Makes the read throw, which must never be read as "the row is not there". */
 	failReadEntry: string | null = null;
+	/** A source fill that the store declines, so the gate cannot report it as saved. */
+	failAttachSource = false;
 	/**
 	 * Makes resolving a parked proposal throw, after the entry has committed.
 	 *
@@ -274,6 +277,16 @@ export class FakeStore implements MemoryStore {
 		return this.rows.get(id)?.entry ?? null;
 	}
 
+	async attachSource(id: string, sourceEvent: string): Promise<MemoryEntry | null> {
+		if (this.failAttachSource) return null;
+		const row = this.rows.get(id);
+		if (!row) return null;
+		const current = row.entry.source_event ?? null;
+		if (current !== null && current !== sourceEvent) return null;
+		if (current === null) row.entry = { ...row.entry, source_event: sourceEvent };
+		return row.entry;
+	}
+
 	async quarantineEntry(row: NewMemoryEntry & { reason: QuarantineReason; detail: string }): Promise<string> {
 		const existing = this.quarantined.find((held) => held.entry_hash === row.entry_hash);
 		if (existing) return existing.id;
@@ -286,6 +299,14 @@ export class FakeStore implements MemoryStore {
 		if (existing) return existing.id;
 		this.reviews.push({ ...row, state: "pending", entry_id: null, created: this.clock });
 		return row.id;
+	}
+
+	async findQuarantineByHash(entryHash: string): Promise<string | null> {
+		return this.quarantined.find((held) => held.entry_hash === entryHash)?.id ?? null;
+	}
+
+	async findPendingReviewByHash(entryHash: string): Promise<string | null> {
+		return this.reviews.find((held) => held.entry_hash === entryHash && held.state === "pending")?.id ?? null;
 	}
 
 	async releaseReviews(entryHash: string, entryId: string): Promise<number> {
@@ -311,6 +332,7 @@ let store: FakeStore;
 let ids: number;
 /** Event ids the stand-in ledger will confirm. Empty, unless a test says otherwise. */
 let knownEvents: Set<string>;
+
 /** Set to make the ledger lookup throw, which must read as "unconfirmed". */
 let ledgerFails: string | null;
 
@@ -322,7 +344,7 @@ beforeEach(() => {
 });
 
 /** Deterministic ids, so a test can assert on them. */
-function write(request: Partial<MemoryWriteRequest> = {}): Promise<MemoryWriteResult> {
+function write(request: Partial<MemoryWriteRequest> = {}, hashVersion?: "v1" | "v2"): Promise<MemoryWriteResult> {
 	return governMemoryWrite(
 		{ scope: "graph:ut-1", kind: "fact", text: "hermes finished n2", writer: "hermes", ...request },
 		{
@@ -334,6 +356,7 @@ function write(request: Partial<MemoryWriteRequest> = {}): Promise<MemoryWriteRe
 				if (ledgerFails) throw new Error(ledgerFails);
 				return knownEvents.has(eventId);
 			},
+			...(hashVersion ? { hashVersion } : {}),
 		},
 	);
 }
@@ -374,6 +397,154 @@ describe("denied — default-deny RBAC", () => {
 
 	test("an empty entry is a denial", async () => {
 		expect((await write({ text: "   " })).reason).toBe("text.empty");
+	});
+
+	test("a title-only lesson is a denial and a lesson with a fact is stored", async () => {
+		const empty = await write({ subject: "lesson:v1.3/session/retry-budget", text: "Retry budget" });
+		expect(empty.outcome).toBe("denied");
+		expect(empty.reason).toBe("lesson.empty");
+		expect(store.entries()).toEqual([]);
+
+		const headed = await write({
+			subject: "lesson:v1.3/session/lease-epochs",
+			text: "[lessonbank]\nmilestone: v1.3\nphase: session\n\n",
+		});
+		expect(headed.reason).toBe("lesson.empty");
+		expect(store.entries()).toEqual([]);
+
+		const stored = await write({
+			subject: "lesson:v1.3/session/lease-epochs",
+			text: "[lessonbank]\nmilestone: v1.3\nphase: session\n\nLease epochs fence stale holders.",
+			source_event: "session:sess-1",
+			session_id: "sess-1",
+		});
+		expect(stored.outcome).toBe("accepted");
+		expect(stored.verified_persisted).toBe(true);
+		expect(stored.entry?.text).toContain("Lease epochs fence stale holders.");
+		expect(stored.entry?.session_id).toBe("sess-1");
+	});
+
+	test("a short sentence is stored, and punctuation or a title is not", async () => {
+		for (const text of [".", "TODO:", "Retry budget."]) {
+			const refused = await write({
+				subject: "lesson:v1.3/session/not-a-fact",
+				text,
+				source_event: "session:sess-marker",
+			});
+			expect(refused.outcome).toBe("denied");
+			expect(refused.reason).toBe("lesson.empty");
+		}
+		expect(store.entries()).toEqual([]);
+
+		const short = await write({
+			subject: "lesson:v1.3/session/cache-disabled",
+			text: "The cache is disabled",
+			source_event: "session:sess-short",
+			session_id: "sess-short",
+		});
+		expect(short.outcome).toBe("accepted");
+		expect(short.verified_persisted).toBe(true);
+		expect(short.entry?.text).toBe("The cache is disabled");
+	});
+
+	test("a secret-only lesson is not stored, and a lesson with no source is not stored", async () => {
+		const secret = `sk-ant-api03-${"e".repeat(40)}`;
+		const redacted = await write({
+			subject: "lesson:v1.3/session/secret-only",
+			text: secret,
+			source_event: "session:sess-secret",
+			session_id: "sess-secret",
+		});
+		expect(redacted.outcome).toBe("denied");
+		expect(redacted.reason).toBe("lesson.empty");
+		expect(store.entries()).toEqual([]);
+		expect(store.quarantined).toEqual([]);
+		expect(JSON.stringify(redacted)).not.toContain(secret);
+
+		const unsourced = await write({
+			subject: "lesson:v1.3/session/lease-epochs",
+			text: "Lease epochs fence stale holders from releasing a lease.",
+		});
+		expect(unsourced.outcome).toBe("denied");
+		expect(unsourced.reason).toBe("lesson.unsourced");
+		expect(store.entries()).toEqual([]);
+
+		const fromSession = await write({
+			subject: "lesson:v1.3/session/lease-epochs",
+			text: "Lease epochs fence stale holders from releasing a lease.",
+			session_id: "sess-2",
+		});
+		expect(fromSession.outcome).toBe("accepted");
+		expect(fromSession.entry?.source_event).toBe("session:sess-2");
+		expect(fromSession.entry?.text).toContain("Lease epochs fence stale holders");
+
+		const digest = await write({
+			subject: "lesson-digest:v1.3",
+			text: "[lessonbankdigest]\nmilestone: v1.3\n\nMilestone v1.3 rolls up the lease lessons.",
+		});
+		expect(digest.reason).not.toBe("lesson.empty");
+		expect(digest.outcome).toBe("accepted");
+	});
+
+	test("a later source on the same body replays the stored row", async () => {
+		const first = await write({ text: "hermes finished n2 with the lease held", idempotency_key: "k-source" });
+		expect(first.outcome).toBe("accepted");
+		const again = await write({
+			text: "hermes finished n2 with the lease held",
+			idempotency_key: "k-source",
+			source_event: "session:sess-old",
+		});
+		expect(again.outcome).toBe("accepted");
+		expect(again.reason).toBe("idempotent.replay");
+		expect(again.entry?.id).toBe(first.entry?.id);
+		expect(again.entry?.source_event).toBe("session:sess-old");
+		expect(store.entries()).toHaveLength(1);
+		expect(store.entries()[0]?.source_event).toBe("session:sess-old");
+
+		const repeated = await write({
+			text: "hermes finished n2 with the lease held",
+			idempotency_key: "k-source",
+			source_event: "session:sess-old",
+		});
+		expect(repeated.reason).toBe("idempotent.replay");
+		expect(store.entries()).toHaveLength(1);
+
+		const changed = await write({
+			text: "hermes finished n2 with the lease held",
+			idempotency_key: "k-source",
+			source_event: "session:sess-old",
+			ttl: "30d",
+		});
+		expect(changed.reason).toBe("idempotency.reused");
+		expect(store.entries()).toHaveLength(1);
+	});
+
+	test("a source backfill does not confirm a different trust, and a fill that is not saved is not a success", async () => {
+		const first = await write({ text: "hermes finished n2 with the lease held", idempotency_key: "k-trust" });
+		expect(first.entry?.trust).toBe("agent-claimed");
+		const confirmed = await write({
+			text: "hermes finished n2 with the lease held",
+			idempotency_key: "k-trust",
+			source_event: "session:sess-trust",
+			trust: "human-confirmed",
+			review_token: REVIEW_TOKEN,
+		});
+		expect(confirmed.reason).toBe("idempotency.reused");
+		expect(confirmed.verified_persisted).toBe(false);
+		expect(store.entries()).toHaveLength(1);
+		expect(store.entries()[0]?.trust).toBe("agent-claimed");
+		expect(store.entries()[0]?.source_event).toBeUndefined();
+
+		await write({ text: "hermes finished n2 with the lease held", idempotency_key: "k-save" });
+		store.failAttachSource = true;
+		const unsaved = await write({
+			text: "hermes finished n2 with the lease held",
+			idempotency_key: "k-save",
+			source_event: "session:sess-save",
+		});
+		expect(unsaved.reason).toBe("idempotency.reused");
+		expect(unsaved.verified_persisted).toBe(false);
+		expect(store.entries().find((entry) => entry.idempotency_key === "k-save")?.source_event).toBeUndefined();
 	});
 
 	test("a refusal spends no idempotency key", async () => {
@@ -1612,3 +1783,48 @@ describe("swarm surfaces — default-deny proven from the outside (ADR 0001 S3)"
 		expect(at("hermes", "repo:acme/widgets", "decision")?.name).toBe("repo-working");
 	});
 });
+
+describe("SUBSTRATE_HASH_VERSION", () => {
+	const fact = {
+		scope: "graph:ut-1",
+		kind: "fact" as const,
+		subject: null,
+		text: "hermes finished n2",
+		writer: "hermes",
+	};
+
+	test("with the flag omitted, entry_hash is the v1 content digest", async () => {
+		const result = await write();
+		const digest = sha256Hex(canonicalJson(fact));
+		expect(result.outcome).toBe("accepted");
+		expect(result.entry?.entry_hash).toBe(digest);
+	});
+
+	test("v2 entry_hash includes hv and tenant and differs from v1", async () => {
+		const result = await write({}, "v2");
+		const v1 = sha256Hex(canonicalJson(fact));
+		const v2 = sha256Hex(canonicalJson({ ...fact, hv: 2, tenant: "swc" }));
+		expect(result.outcome).toBe("accepted");
+		expect(result.entry?.entry_hash).toBe(v2);
+		expect(v2).not.toBe(v1);
+	});
+
+	test("a quarantine or review parked under v1 is reused when a later decide runs with v2", async () => {
+		const secret = "poller needs GITHUB_TOKEN=ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+		const parked = await write({ text: secret });
+		expect(parked.outcome).toBe("quarantined");
+		expect(store.quarantined).toHaveLength(1);
+		const again = await write({ text: secret }, "v2");
+		expect(again.quarantine_id).toBe(parked.quarantine_id);
+		expect(store.quarantined).toHaveLength(1);
+
+		const proposal = { scope: "global", kind: "fact" as const, text: "eight agents share one host" };
+		const review = await write(proposal);
+		expect(review.reason).toBe("review.required");
+		expect(store.reviews).toHaveLength(1);
+		const reviewAgain = await write(proposal, "v2");
+		expect(reviewAgain.review_id).toBe(review.review_id);
+		expect(store.reviews).toHaveLength(1);
+	});
+});
+

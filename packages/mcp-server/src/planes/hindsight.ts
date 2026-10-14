@@ -15,12 +15,37 @@
  * document GET/DELETE/PATCH, `Result` returns that never reject, and
  * FastAPI array-`detail` never shown. The RESP client, the single-bank shape
  * and recall inside the brief are deliberately not ported.
+ *
+ * Every call goes out through the `fetchImpl` the caller injects; production
+ * hands in a `gatedFetch` over the plane's circuit breaker (uplift-2 R2), and
+ * `hindsightOp` is the bounded label that fetch records per route. An open
+ * breaker surfaces here as a `network` error whose message says `circuit open`,
+ * so every fail-open caller degrades exactly as it does for an unreachable plane.
  */
 export interface HindsightConfig {
 	url: string;
 	apiKey: string;
 	/** Bank name prefix; `sub-` names the substrate surfaces' banks (D26-03). */
 	bankPrefix: string;
+}
+
+/**
+ * The bounded operation label for one Hindsight request, from its method and
+ * path. A fixed table, never the path itself: bank and document ids would
+ * otherwise become metric series.
+ */
+export function hindsightOp(method: string, url: string): string {
+	const path = url.replace(/^[a-z]+:\/\/[^/]+/i, "").replace(/\?.*$/, "");
+	if (path === "/health") return "health";
+	if (path === "/version") return "version";
+	if (/\/memories\/recall$/.test(path)) return "recall";
+	if (/\/memories$/.test(path)) return "retain";
+	if (/\/documents\/[^/]+$/.test(path)) return "document";
+	if (/\/banks\/[^/]+\/config$/.test(path)) return "bank-config";
+	if (/\/banks$/.test(path)) return "bank-list";
+	if (/\/banks\/[^/]+\/stats$/.test(path)) return "bank-stats";
+	if (/\/banks\/[^/]+$/.test(path)) return method === "DELETE" ? "bank-delete" : "bank-create";
+	return "other";
 }
 
 /**
@@ -140,6 +165,11 @@ async function readJson(response: Response): Promise<{ ok: true; body: unknown }
 function transportError(action: string, cause: unknown): HindsightError {
 	if (cause instanceof Error && (cause.name === "AbortError" || cause.name === "TimeoutError")) {
 		return { kind: "timeout", message: `hindsight ${action}: timed out` };
+	}
+	// The plane's breaker refused before anything went out: unreachable by
+	// decision rather than by socket, and worded so a degraded reply says why.
+	if (cause instanceof Error && cause.name === "BreakerOpenError") {
+		return { kind: "network", message: `hindsight ${action}: circuit open` };
 	}
 	const message = cause instanceof Error ? cause.message : String(cause);
 	return { kind: "network", message: `hindsight ${action}: unreachable (${message.slice(0, 120)})` };
@@ -264,6 +294,15 @@ export function clearEnsuredBanks(): void {
 	ensuredBanks.clear();
 }
 
+/**
+ * Forget one ensured bank, so the next retain re-runs `ensureBank`. Called
+ * when a retain answers 404 (uplift-2 R3): the bank this process pinned was
+ * deleted or renamed out of band, and a cached "ensured" would 404 forever.
+ */
+export function forgetEnsuredBank(config: HindsightConfig, bank: string): void {
+	ensuredBanks.delete(`${config.url} ${bank}`);
+}
+
 function extractionMode(body: unknown): string | null {
 	if (body === null || typeof body !== "object" || !("config" in body)) return null;
 	const nested = body.config;
@@ -328,6 +367,154 @@ export async function ensureBank(
 	// The bank pre-existed (it answered the config GET): pinning its mode is
 	// not creating it, and the G2 rollback must only delete probe-created banks.
 	return { ok: true, value: { created: false } };
+}
+
+/** What one bank looks like in `GET /v1/default/banks` (uplift-4 S5): only the fields the inventory reads, each null when absent or mistyped. */
+export interface HindsightBankSummary {
+	bank_id: string;
+	fact_count: number | null;
+	last_write_at: string | null;
+}
+
+/** The inventory's page size, bank ceiling and the longest bank id kept (an upstream id is never trusted to be short). */
+export const BANK_LIST_PAGE = 50;
+export const MAX_LISTED_BANKS = 200;
+/** Requests one listing may make, whatever page size the server honours. */
+export const MAX_LIST_PAGES = 40;
+const MAX_BANK_ID_CHARS = 200;
+
+function numberOrNull(value: unknown): number | null {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function textOrNull(value: unknown, max: number): string | null {
+	return typeof value === "string" && value.length > 0 ? value.slice(0, max) : null;
+}
+
+/**
+ * `GET /v1/default/banks`, read-only (uplift-4 S5): the banks the deployment
+ * holds, in bounded pages (`BANK_LIST_PAGE` per request, at most
+ * `MAX_LISTED_BANKS` banks in all; `truncated` says the list went past that).
+ * Every page shares the caller's `signal` or its own `timeoutMs`. The first
+ * failing page fails the listing: a partial list would read as "bank missing".
+ */
+export async function listBanks(
+	config: HindsightConfig,
+	fetchImpl: FetchLike = fetch,
+	options: { timeoutMs?: number; signal?: AbortSignal } = {},
+): Promise<HindsightResult<{ banks: HindsightBankSummary[]; truncated: boolean }>> {
+	const banks: HindsightBankSummary[] = [];
+	let offset = 0;
+	let truncated = false;
+	let pages = 0;
+	while (true) {
+		const path = `/v1/default/banks?limit=${BANK_LIST_PAGE}&offset=${offset}`;
+		const got = await get(config, path, {
+			authed: true,
+			fetchImpl,
+			timeoutMs: options.timeoutMs ?? 4000,
+			...(options.signal !== undefined ? { signal: options.signal } : {}),
+		});
+		if (!got.ok) return got;
+		if (got.value.status !== 200) {
+			return fail(statusKind(got.value.status), errorMessage("GET /v1/default/banks", got.value.status, got.value.body), got.value.status);
+		}
+		const body = got.value.body;
+		if (body === null || typeof body !== "object" || !("banks" in body) || !Array.isArray(body.banks)) {
+			return fail("invalid-response", "hindsight GET /v1/default/banks: response had no banks array", got.value.status);
+		}
+		const total = "total" in body ? numberOrNull(body.total) : null;
+		for (const entry of body.banks) {
+			if (entry === null || typeof entry !== "object" || !("bank_id" in entry)) continue;
+			const id = textOrNull(entry.bank_id, MAX_BANK_ID_CHARS);
+			if (id === null) continue;
+			if (banks.length >= MAX_LISTED_BANKS) {
+				truncated = true;
+				break;
+			}
+			banks.push({
+				bank_id: id,
+				fact_count: "fact_count" in entry ? numberOrNull(entry.fact_count) : null,
+				last_write_at: "last_write_at" in entry ? textOrNull(entry.last_write_at, 64) : null,
+			});
+		}
+		offset += body.banks.length;
+		// A server may cap a page below the 50 asked for, so a short page is the end only when the reply
+		// states no total; with a total the end is the offset reaching it, or an empty page.
+		const done = body.banks.length === 0 || (total !== null ? offset >= total : body.banks.length < BANK_LIST_PAGE);
+		if (truncated || done) break;
+		pages += 1;
+		if (pages >= MAX_LIST_PAGES) {
+			// Bounded however the server pages: a list this long is cut and said to be.
+			truncated = true;
+			break;
+		}
+		if (banks.length >= MAX_LISTED_BANKS) {
+			// Exactly at the ceiling with more pages upstream: say so rather than read one more page to find out.
+			truncated = total === null || offset < total;
+			break;
+		}
+	}
+	return { ok: true, value: { banks, truncated } };
+}
+
+/** `GET {bank}/stats`, read-only: the operation backlog and the last write the bank saw (each null when absent). */
+export interface HindsightBankStats {
+	pending_operations: number | null;
+	failed_operations: number | null;
+	last_write_at: string | null;
+}
+
+export async function bankStats(
+	config: HindsightConfig,
+	bank: string,
+	fetchImpl: FetchLike = fetch,
+	options: { timeoutMs?: number; signal?: AbortSignal } = {},
+): Promise<HindsightResult<HindsightBankStats>> {
+	const path = `${bankPath(bank)}/stats`;
+	const got = await get(config, path, {
+		authed: true,
+		fetchImpl,
+		timeoutMs: options.timeoutMs ?? 4000,
+		...(options.signal !== undefined ? { signal: options.signal } : {}),
+	});
+	if (!got.ok) return got;
+	if (got.value.status !== 200) {
+		return fail(statusKind(got.value.status), errorMessage(`GET ${path}`, got.value.status, got.value.body), got.value.status);
+	}
+	const body = got.value.body;
+	if (body === null || typeof body !== "object") {
+		return fail("invalid-response", `hindsight GET ${path}: unexpected response shape`, got.value.status);
+	}
+	return {
+		ok: true,
+		value: {
+			pending_operations: "pending_operations" in body ? numberOrNull(body.pending_operations) : null,
+			failed_operations: "failed_operations" in body ? numberOrNull(body.failed_operations) : null,
+			last_write_at: "last_memory_write_at" in body ? textOrNull(body.last_memory_write_at, 64) : null,
+		},
+	};
+}
+
+/** `GET {bank}/config`, read-only: the retain extraction mode the bank resolves to (null when the reply names none). */
+export async function bankConfig(
+	config: HindsightConfig,
+	bank: string,
+	fetchImpl: FetchLike = fetch,
+	options: { timeoutMs?: number; signal?: AbortSignal } = {},
+): Promise<HindsightResult<{ retain_extraction_mode: string | null }>> {
+	const path = bankConfigPath(bank);
+	const got = await get(config, path, {
+		authed: true,
+		fetchImpl,
+		timeoutMs: options.timeoutMs ?? 4000,
+		...(options.signal !== undefined ? { signal: options.signal } : {}),
+	});
+	if (!got.ok) return got;
+	if (got.value.status !== 200) {
+		return fail(statusKind(got.value.status), errorMessage(`GET ${path}`, got.value.status, got.value.body), got.value.status);
+	}
+	return { ok: true, value: { retain_extraction_mode: extractionMode(got.value.body) } };
 }
 
 export interface RetainItem {

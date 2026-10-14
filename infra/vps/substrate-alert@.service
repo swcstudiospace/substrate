@@ -1,0 +1,55 @@
+[Unit]
+Description=Agent Substrate failure alert for %i (posts one warning event; changes nothing)
+Documentation=https://github.com/swcstudiospace/agent-substrate
+# Staged, not installed by any script (uplift-4 S3). It is started by the
+# OnFailure= and ExecStopPost= lines of the example drop-in
+# substrate-mcp.service.d/20-watchdog.conf.example, never by a timer.
+#
+# %i, not %I: the instance is the failed unit's full name, `substrate-mcp.service`,
+# optionally followed by `:<result>` (the ExecStopPost path passes systemd's
+# $SERVICE_RESULT that way), and %I would unescape the `-` into `/`.
+#
+# Deliberately NOT After=substrate-mcp.service: the alert is raised because that
+# unit just died or is restarting, and ordering behind it would be waiting on the
+# thing that is being reported. The script waits for the server's /livez itself.
+ConditionPathExists=/opt/agent-substrate/current/scripts/substrate-alert.ts
+
+[Service]
+Type=oneshot
+# Credentials only; nothing secret lives in the repo. The drop-in
+# substrate-alert@.service.d/10-environment.conf is the EnvironmentFile. See
+# infra/vps/README.md.
+WorkingDirectory=/opt/agent-substrate/current
+# Machine-specific: `command -v bun`; same interpreter as every other unit.
+# The script posts ONE `warning` event (payload: unit and result, never logs)
+# through the doctor's emit path and always exits 0: an alert that fails must
+# not become a second failed unit. It waits at most SUBSTRATE_ALERT_WAIT_S
+# (default 60, capped at 60) for the server's loopback /livez before the single
+# POST, because the server it reports on is usually mid-restart.
+# TimeoutStartSec must exceed the worst case of that wait plus the POST: the
+# optional `systemctl show` fallback (10 s) + 60 s wait + one 2 s probe + 1 s
+# poll + the 10 s POST = 83 s, so 120 s leaves margin. scripts/substrate-alert.test.ts
+# pins this arithmetic to the number below; change one, change both.
+ExecStart=/root/.local/share/reflex/bun/bin/bun scripts/substrate-alert.ts %i
+TimeoutStartSec=120
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=substrate-alert
+
+# Resource ceilings (uplift-2 R7 shape): one short bun process, one GET loop and
+# one POST. Lives in substrate.slice so it is accounted with the rest.
+Slice=substrate.slice
+MemoryMax=256M
+TasksMax=64
+
+# It talks to systemd (one `systemctl show`) and substrate-mcp. Nothing else.
+# ProtectHome=false is the remaining exception: ExecStart's bun lives under
+# /root/.local, so ProtectHome=true would hide the interpreter.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX

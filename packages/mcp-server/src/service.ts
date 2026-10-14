@@ -8,35 +8,81 @@
 import { createHash, randomUUID } from "node:crypto";
 import { decideClaim, type ClaimDecision } from "@substrate/audit";
 import { createRpc, formatMemo, hourEnd, hourIso, hourStart, isClosed, merkleRootHex, parseMemo, HOUR_MS, type Rpc, type TransactionMemo } from "@substrate/ledger";
-import { DEVNET_GENESIS_HASH } from "./anchor.ts";
-import { composeBrief, type BriefRequest } from "./brief.ts";
 import {
+	PLANES,
+	PlaneRegistry,
+	gatedFetch,
+	type AdmissionClass,
+	type AdmissionDecision,
+	type BreakerSnapshot,
+	type BriefResult,
+	type BriefRecallResult,
+	type BriefState,
+	type DocsSearchSample,
+	type EventReplayResult,
+	type PlaneName,
+	type PlaneSample,
+	type RecallPrefetchResult,
+	type ServedTokenTool,
+} from "@substrate/observability";
+import { DEVNET_GENESIS_HASH } from "./anchor.ts";
+import { composeBriefSections, type BriefOptions, type BriefRequest, type BriefSource } from "./brief.ts";
+import {
+	briefStateLine,
+	decodeSections,
+	encodeSections,
+	parseSections,
+	renderCompactBrief,
+	renderFullBrief,
+	resolveBriefProfile,
+	utf8Bytes,
+	type BriefProfile,
+	type BriefProfileMode,
+	type BriefSection,
+} from "./brief-profile.ts";
+import {
+	DOCS_GENERATION_KEY,
 	GRAPHS_GENERATION_KEY,
 	MEMORY_GENERATION_KEY,
+	RECALL_GENERATION_KEY,
 	createReadThroughCache,
 	earliestRefreshAt,
 	graphGenerationKey,
 	type CacheHealth,
 	type CacheSample,
 	type ReadThroughCache,
+	type ScriptOutcome,
 } from "./cache.ts";
 import { isReviewToken, type SubstrateConfig } from "./config.ts";
 import { DesktopBusy, type DesktopDriver, type DesktopLogEntry, type DesktopRunResult } from "./desktop/driver.ts";
-import { ingestDocs, isRefreshMeta, loadIngestRecords, saveIngestRecords, MAX_STAGED_REFRESHES, type IngestOutcome, type IngestRecord, type PageSettlement, type RefreshMeta, type StagedPage, type StagedRefresh } from "./docs-ingest.ts";
 import {
+	DatasetListCache,
 	createSkillsSyncTracker,
 	createVersionStore,
-	degradedAgentSkillsServe,
 	isSyncLive,
 	latestVersion,
 	noteSkillsSyncFastForward,
 	pinsFromVersions,
-	recordDatasetVersion,
+	recordTrigger,
+	TRIGGER_FIELD_MAX,
+	refreshDataset,
+	resolveDatasets,
+	type DatasetVersion,
 	type SkillsSyncTracker,
-	type VersionDocument,
 	type VersionStore,
 } from "./docs-datasets.ts";
-import { DEFAULT_SEARCH_DATASET_NAMES, searchDocs, type SearchReply } from "./docs-search.ts";
+import {
+	documentProvenance,
+	ingestDocs,
+	loadIngestRecords,
+	saveIngestRecords,
+	type IngestOutcome,
+	type IngestPage,
+	type IngestRecord,
+	type PageSettlement,
+} from "./docs-ingest.ts";
+import { LagSettler, TRIGGER_RECORD_DEADLINE_MS, withDeadline, createFreshnessState, evaluateFreshness, type DatasetFreshness, type FreshnessState } from "./docs-freshness.ts";
+import { DEFAULT_SEARCH_DATASET_NAMES, citationProvenanceCounts, searchDocs, searchReplyStorable, type SearchReply } from "./docs-search.ts";
 import {
 	DEFAULT_IDLE_SECONDS,
 	analyzeDrift,
@@ -46,7 +92,7 @@ import {
 	type DriftGitTip,
 	type DriftReport,
 } from "./drift.ts";
-import { InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, verifyChain } from "./event.ts";
+import { checkIdempotencyKey, checkReplayTs, IdempotencyRefusal, InvalidEventError, inChainOrder, normalizeEvent, normalizeIdentifier, verifyChain } from "./event.ts";
 import { checkoutKnowsCommit, readGitTip } from "./git.ts";
 import {
 	GreptimeClient,
@@ -54,9 +100,13 @@ import {
 	IngestNotRecorded,
 	queryLimit,
 	type EventQuery,
+	type LedgerCapacity,
+	type LedgerProbe,
 	type QueryableColumn,
 } from "./greptime.ts";
-import { IndexStore, leaseSnapshot, type GraphBindResult } from "./index-store.ts";
+import { HindsightInventory, type BankGaugeSample, type InventoryHealth, type InventoryReport } from "./hindsight-inventory.ts";
+import { IndexStore, leaseSnapshot, type GraphBindResult, type IndexCapacity, type MemoryExpiredSample } from "./index-store.ts";
+import { IndexArchiveWatch, evaluateIndexArchiveSlo, type IndexArchiveReading, type IndexArchiveSloResult } from "./index-archive-watch.ts";
 import {
 	buildHandoff,
 	handoffGaps,
@@ -72,13 +122,25 @@ import { createMirror, type Mirror, type MirrorContext, type MirrorFailure, type
 import { runDodGate, type DodEvidence } from "./dod-gate.ts";
 import { normalizeSubject } from "./memory-policy.ts";
 import { recallMemories, UNTRUSTED_MEMORY_NOTICE, type RecallReply } from "./memory-recall.ts";
-import { forwardRetain, retainDocumentId } from "./memory-retain.ts";
+import { emitRetainWarning, forwardRetain, replayRetain, retainDocumentId, type RetainDeps, type RetainOutboxSink } from "./memory-retain.ts";
 import { mergeDerivedHits, type MergedMemoryResults } from "./memory-search.ts";
 import { governMemoryWrite } from "./memory-write.ts";
 import { TEACHABLE_SUBJECT_PREFIX, isTeachable, teachableEvent } from "./teachable.ts";
-import { bankForSurface, hindsightBanksFromEnv, hindsightFromEnv } from "./planes/hindsight.ts";
-import type { FetchLike, RagflowConfig } from "./planes/ragflow.ts";
-import { redact, type SkillDocExampleRule } from "./redact.ts";
+import { bankForSurface, hindsightBanksFromEnv, hindsightFromEnv, hindsightOp, probeHealth, type HindsightConfig } from "./planes/hindsight.ts";
+import { listDatasets, ragflowOp, type FetchLike } from "./planes/ragflow.ts";
+import { redact, redactKnown, type SkillDocExampleRule } from "./redact.ts";
+import { RetainOutbox, type RetainDeliveryOutcome, type RetainOutboxEntry, type RetainOutboxStats } from "./retain-outbox.ts";
+import {
+	RecallPrefetcher,
+	parseRecallSnapshot,
+	recallBriefResult,
+	recallKey,
+	RECALL_TITLE_PREFIX,
+	recallSnapshotArgs,
+	snapshotState,
+	type RecallLook,
+	type RecallSnapshot,
+} from "./recall-snapshot.ts";
 import {
 	createExecFileRunner,
 	createSkillProposer,
@@ -88,9 +150,33 @@ import {
 	SKILL_NAME_RE,
 	type ProposeInput,
 	type ProposeResult,
+	type Runner,
 	type SkillProposer,
 	type TreeMode,
 } from "./skills/propose.ts";
+import {
+	fetchPrView,
+	LIST_MAX,
+	prRefusal,
+	proposalBranchSurface,
+	refusalMessage,
+	SKILL_DECISIONS,
+	SKILL_LIST_STATES,
+	SkillApprovalDenied,
+	SkillApprovalFailed,
+	SkillApprovalRefused,
+	toListEntry,
+	validateApproval,
+	type ApprovalRule,
+	type PrView,
+	type SkillApprovalRequest,
+	type SkillApprovalResult,
+	type SkillDecisionResult,
+	type SkillListResult,
+	type SkillRegistryRow,
+	type SkillState,
+	type ValidApproval,
+} from "./skills/registry.ts";
 import {
 	ACTORS,
 	EVENT_KINDS,
@@ -106,6 +192,7 @@ import {
 	type GraphView,
 	type MemoryEntry,
 	type MemoryEntryInput,
+	type MemoryReadOptions,
 	type MemorySearch,
 	type MemorySearchPage,
 	type MemoryWriteRequest,
@@ -115,8 +202,13 @@ import {
 	type SubstrateEvent,
 } from "./types.ts";
 
-/** Greptime gives back loosely typed rows; rebuild the exact shape that was hashed. */
-function rowToEvent(row: Record<string, unknown>): SubstrateEvent {
+/**
+ * Greptime gives back loosely typed rows; rebuild the exact shape that was hashed.
+ * Exported for `ledger-archive.ts`, which writes this shape to the archive so
+ * `verifyArchive` recomputes the same hash from the file that `verifyGraph` does
+ * from the ledger.
+ */
+export function rowToEvent(row: Record<string, unknown>): SubstrateEvent {
 	const text = (value: unknown): string | null => (value === null || value === undefined ? null : String(value));
 	let payload: Record<string, unknown> = {};
 	try {
@@ -313,6 +405,92 @@ export interface EventQueryResult {
 	error?: string;
 }
 
+/** Bound a surface name to the surface list for a metric label; anything else, a body-claimed name included, is `unknown`. */
+function boundedSurface(surface: string | null | undefined): string {
+	return typeof surface === "string" && (SURFACES as readonly string[]).includes(surface) ? surface : "unknown";
+}
+
+/** Keeps the section-shaped brief entry apart from the plain-text entries older processes wrote under the same cache class. */
+const BRIEF_CACHE_SHAPE = "sections-v1";
+
+/**
+ * The brief as `POST /brief` answers it (uplift-2 R1). `text` is what every
+ * caller gets; the rest lets an HTTP caller tell a complete brief from a
+ * degraded one, skip an unchanged one, and know how old a snapshot is.
+ */
+export interface BriefDetail {
+	text: string;
+	/** `complete`: every source answered. `degraded`: some did not, thin live text. `snapshot`: some did not, last-good text served instead. */
+	state: BriefState;
+	/** The sources that failed or missed the budget, in section order; empty when complete. */
+	failed: BriefSource[];
+	/** Weak validator of `text`: `W/"<first 32 hex of sha256>"`. */
+	etag: string;
+	/** When the served snapshot was composed; null unless `state` is `snapshot`. */
+	snapshotAt: string | null;
+	/** The rendering `text` is (uplift-4 S1): `compact` only under `SUBSTRATE_BRIEF_PROFILE=enforce`, and `full` whenever the compact one could not be built. */
+	profile: BriefProfile;
+	/** `SUBSTRATE_BRIEF_PROFILE` as this answer was served under. */
+	mode: BriefProfileMode;
+	/** Full minus compact UTF-8 bytes of this answer (negative when compact is longer); null under `off` or when no compact rendering exists. */
+	bytesSaved: number | null;
+	/** Seconds since a last-good brief was composed, present only when it was served stale (uplift-4 S4, `SUBSTRATE_CACHE_SWR=enforce`); `state` stays `complete`. */
+	ageS?: number;
+}
+
+/**
+ * A brief as it was answered to one caller (uplift-3 N7): the detail, and
+ * whether the caller's validator matched so no text was sent.
+ */
+export interface BriefAnswer {
+	detail: BriefDetail;
+	/** True when `ifNoneMatch` listed the current ETag: REST answers 304, MCP `not_modified`. */
+	notModified: boolean;
+}
+
+/** What the `brief-snapshot` cache class holds. */
+interface BriefSnapshot {
+	text: string;
+	at: string;
+	/** The brief's sections, so a snapshot can be served as `compact` too; absent on a snapshot written before profiles. */
+	sections?: unknown;
+	/** Epoch ms the text stops being true (a lease or reverify deadline); null for none. Absent on snapshots written before uplift-4 S4. */
+	until?: number | null;
+}
+
+/** What one brief saw of the recall snapshot (uplift-4 S5): the snapshot itself and how it judged. */
+interface RecallRead {
+	look: RecallLook;
+	snapshot: RecallSnapshot | null;
+}
+
+/** Weak, so a proxy that re-encodes the body still matches; 32 hex is plenty against collision for a brief. */
+export function briefEtag(text: string): string {
+	return `W/"${createHash("sha256").update(text).digest("hex").slice(0, 32)}"`;
+}
+
+/**
+ * Whether an `If-None-Match` validator lists `etag`, by the weak comparison RFC 9110
+ * §8.8.3.2 prescribes for it: `W/` prefixes are ignored on both sides and `*`
+ * matches any current representation. The brief's tag is weak on purpose — it
+ * validates the text, not the bytes a proxy may re-encode.
+ *
+ * One matcher for both doors: `POST /brief` reads the header and MCP
+ * `memory_brief` its `if_none_match` argument, and the two must agree on what
+ * "unchanged" means or a gateway that holds one ETag would get two answers.
+ */
+export function etagMatches(ifNoneMatch: string | string[] | undefined, etag: string): boolean {
+	if (ifNoneMatch === undefined) return false;
+	const header = Array.isArray(ifNoneMatch) ? ifNoneMatch.join(",") : ifNoneMatch;
+	const opaque = etag.replace(/^W\//, "");
+	for (const raw of header.split(",")) {
+		const candidate = raw.trim();
+		if (candidate === "*") return true;
+		if (candidate.replace(/^W\//, "") === opaque) return true;
+	}
+	return false;
+}
+
 /**
  * The outcome of an append.
  *
@@ -332,7 +510,31 @@ export interface EmitResult {
 	 * will not be anchored. The event is not re-emitted in either case.
 	 */
 	warning?: string;
+	/**
+	 * Set (with `stored: true`) when a replay matched an event already in the ledger (U5-4a): `event.id` and
+	 * `event.hash` are the EXISTING row's, nothing was written, and `event.prev` is not the stored one's.
+	 */
+	deduplicated?: true;
+	/** Set (with `stored: false`) when the idempotency lookup itself failed: nothing was written and the event is not in the ledger. */
+	lookupFailed?: true;
 }
+
+/** What `emit` is told about the request, beyond the event: the transport's replay marker (`x-substrate-replay: 1`). */
+export interface EmitOptions {
+	replay?: boolean;
+}
+
+/** What `SUBSTRATE_EVENT_IDEMPOTENCY` makes of one request: its validated key (null: none) and whether it takes the ledger lookup. */
+interface IdempotencyPlan {
+	key: string | null;
+	lookup: boolean;
+}
+
+/**
+ * Prefix of the emit-turn key for a keyed event that has no session. Not a session id a caller can
+ * pick by accident: sharing a turn with one would only make the two wait for each other.
+ */
+const KEY_TURN_PREFIX = "\u0000idempotency:";
 
 /**
  * One closed UTC hour of the ledger, digested in ingest order for the hourly anchor.
@@ -472,6 +674,16 @@ const INGEST_NOT_RECORDED =
  */
 export interface SubstrateObserver {
 	briefed?(sample: { surface: Surface; graph_id: string | null; ok: boolean; durationMs: number }): void;
+	/**
+	 * One brief answered to a caller (uplift-3 N7): `fresh` carried the text,
+	 * `not_modified` only the validator. `surface` is bounded to the surface list
+	 * (`unknown` otherwise) because `POST /brief` takes the body's surface unchecked.
+	 */
+	briefResult?(sample: { surface: string; state: BriefState; result: BriefResult }): void;
+	/** One brief answered with its profile (uplift-4 S1); `bytesSaved` only for a fresh answer measured under `shadow` or `enforce`. */
+	briefProfiled?(sample: { surface: string; profile: BriefProfile; mode: BriefProfileMode; bytesSaved: number | null }): void;
+	/** One reply served to a caller, sized for the estimated-spend counter (uplift-4 S1). `surface` is bounded to the surface list. */
+	servedTokens?(sample: { surface: string; tool: ServedTokenTool; bytes: number }): void;
 	emitted?(sample: {
 		surface: Surface;
 		graph_id: string | null;
@@ -480,7 +692,27 @@ export interface SubstrateObserver {
 		durationMs: number;
 		payload: Record<string, unknown>;
 	}): void;
+	/** One idempotent `POST /events` outcome (U5-4a): a lookup's result, or a refusal on the idempotency rules. Silent while `SUBSTRATE_EVENT_IDEMPOTENCY` is `off`. */
+	eventReplay?(sample: { result: EventReplayResult }): void;
 	cached?(sample: CacheSample): void;
+	/** One outbound call to a data plane, as its gate observed it (uplift-2 R2). */
+	plane?(sample: PlaneSample): void;
+	/** One admission budget decision (uplift-3 N3), as `server.ts` took it. */
+	admission?(sample: { surface: string; klass: AdmissionClass; decision: AdmissionDecision }): void;
+	/** One finished docs search, end to end, cached or loaded (uplift-3 N5). */
+	docsSearch?(sample: DocsSearchSample): void;
+	/** One memory entry past its `ttl` that an index read met, and what the read did with it (uplift-3 N4). */
+	memoryExpired?(sample: MemoryExpiredSample): void;
+	/** One `/healthz` index size read (uplift-3 N2), the sample the capacity runway is fitted over. */
+	capacity?(sample: { at: number; databaseBytes: number }): void;
+	/** Offered once at construction when `SUBSTRATE_INDEX_ARCHIVE_DIR` is set (uplift-4 S2): `newestAtMs` answers the newest complete index archive's creation time, which `substrate.index.archive.age_seconds` is computed from at snapshot time. */
+	indexArchive?(source: { newestAtMs(): number | null }): void;
+	/** One brief's use of the recall snapshot (uplift-4 S5), recorded when `SUBSTRATE_BRIEF_RECALL` is not `off`. `surface` is bounded to the surface list. */
+	briefRecall?(sample: { surface: string; result: BriefRecallResult }): void;
+	/** One recall prefetch attempt (uplift-4 S5). `surface` is bounded to the surface list. */
+	recallPrefetch?(sample: { surface: string; result: RecallPrefetchResult }): void;
+	/** The retain outbox's state (uplift-4 S5): size, oldest parked entry's age and durability, read in-process. */
+	hindsightOutbox?(sample: { size: number; oldestAgeSeconds: number; durable: boolean }): void;
 	claimed?(sample: {
 		surface: Surface;
 		graph_id: string;
@@ -640,6 +872,8 @@ export interface MemorySearchRequest {
 	scope?: string;
 	limit?: number;
 	include_superseded?: boolean;
+	/** Serve entries past their `ttl` under `enforce` (uplift-3 N4). Operator-gated in `mcp.ts`, never here. */
+	include_expired?: boolean;
 	subject_prefix?: string;
 	before?: string;
 	before_id?: string;
@@ -689,6 +923,36 @@ export function parseMemorySearch(request: MemorySearchRequest): MemorySearch {
 	return search;
 }
 
+// uplift-2 R6 — the asynchronous docs merge-trigger
+
+/** What one merge-trigger asks for: the dataset, its commit identity, and how to read the pages. */
+export interface DocsRefreshRequest {
+	dataset: string;
+	commit: string;
+	content_sha256: string;
+	/** The pages of the checkout, read when the job runs — not when it is accepted. */
+	pages: () => Promise<IngestPage[]>;
+}
+
+/** How one merge-trigger job ended, as `?wait=1` and the stderr line report it. */
+export type DocsRefreshOutcome =
+	| { ok: true; version: DatasetVersion; created: boolean; job: string }
+	| { ok: false; reason: string; job: string };
+
+interface DocsRefreshJob {
+	id: string;
+	dataset: string;
+	commit: string;
+	content_sha256: string;
+	done: Promise<DocsRefreshOutcome>;
+}
+
+/** The merge-trigger's answer: accepted into the background, or answered at once. */
+export type DocsRefreshAccepted =
+	| { status: 202; body: { accepted: true; job: string; dataset: string; commit: string; queued?: true } }
+	| { status: 200; body: DocsRefreshOutcome & { ok: true } }
+	| { status: 503; body: DocsRefreshOutcome & { ok: false } };
+
 export class Substrate {
 	readonly index: IndexStore | null;
 	readonly greptime: GreptimeClient | null;
@@ -696,21 +960,39 @@ export class Substrate {
 	readonly mirror: Mirror | null;
 	/** The one git path proposals take; inert until plan 02's `proposeSkill` calls it. */
 	readonly skills: SkillProposer;
+	/** The gh/git runner. The proposer's, and the one `skills_approve` asks `gh pr view` through. */
+	private readonly skillRun: Runner;
+	/** True from a failed registry write until the next successful one, so a streak warns once. */
+	private skillRegistryWarned = false;
 	/** The desktop driver. Production wiring lives only in index.ts, so tests never reach docker by accident. */
 	readonly desktop: DesktopDriver | null;
 	private readonly observer: SubstrateObserver;
 	private readonly cache: ReadThroughCache;
+	/**
+	 * One circuit breaker per data plane (uplift-2 R2). Every outbound call —
+	 * ledger SQL, index query, cache command, Hindsight and RAGFlow request —
+	 * goes through its gate, which is what lets an outage cost microseconds
+	 * instead of a timeout per caller and lets `/healthz` name the plane.
+	 */
+	readonly planes: PlaneRegistry;
 	/** Connector-gate overrides for tests (connector fetch, URL, timeout); production reads config. */
 	private readonly dodGateTest: { fetchImpl?: typeof fetch; hermesLinearUrl?: string; timeoutMs?: number };
-	/** RAGFlow fetch override for tests; production uses the global fetch. */
+	/** RAGFlow fetch, gated. Tests inject the fake underneath; production uses the global fetch. */
 	private readonly ragflowFetch: FetchLike;
-	/** Hindsight fetch override for tests; production uses the global fetch. */
+	/** Hindsight fetch, gated. Tests inject the fake underneath; production uses the global fetch. */
 	private readonly hindsightFetch: FetchLike;
 	/** Background retains in flight, drained (bounded) on shutdown. */
 	private pendingRetains = 0;
 	private retainWaiters: Array<() => void> = [];
 	/** Latest background forward per plane document, so versions land in order. */
 	private readonly retainChains = new Map<string, Promise<void>>();
+	// uplift-2 R3 — the Hindsight retain outbox
+	/** Parked transient retain failures, replayed with backoff; durable when `SUBSTRATE_RETAIN_OUTBOX_PATH` is set. */
+	private readonly retainOutbox: RetainOutbox;
+	/** The interval drain, started on the first parked entry and left unref'd so it never holds the process. */
+	private retainDrainTimer: ReturnType<typeof setInterval> | null = null;
+	/** Set while entries were parked under a non-closed breaker; the next live success replays the backlog early. */
+	private retainRecoverPending = false;
 	/** Source-URL ingest records for hash idempotency, held for the process lifetime. */
 	private docsIngestSeen = new Map<string, IngestRecord>();
 	/** In-flight page uploads by record key, tagged with the uploading sha. */
@@ -725,8 +1007,50 @@ export class Substrate {
 	private docsSeenReady: Promise<void> | null = null;
 	/** Serialized state-file saves, so overlapping ingests cannot interleave snapshots. */
 	private docsSaveChain: Promise<void> = Promise.resolve();
+	// uplift-2 R6 — RAGFlow docs plane
+	/**
+	 * Per-dataset version lists (the pins), hydrated with the ingest records
+	 * from the same state file and saved with them. Lived in the HTTP server
+	 * before, so a restart lost every pin and the merge-trigger's idempotency.
+	 */
+	private readonly docsVersions: VersionStore = createVersionStore();
+	/** The 60 s dataset-list cache every docs reader goes through; invalidated by a create or a failed list. */
+	private readonly docsDatasetList = new DatasetListCache();
+	/** Skills-sync fast-forward evidence: flipped by the first `agent-skills` merge-trigger this process sees (D25-07). */
+	private readonly docsSkillsSync: SkillsSyncTracker = createSkillsSyncTracker();
+	/** The merge-trigger jobs: one chain per dataset (a trigger queues behind the running one), plus every job still pending by id. */
+	private readonly docsRefreshChains = new Map<string, Promise<void>>();
+	private readonly docsRefreshPending = new Map<string, DocsRefreshJob>();
+	private docsRefreshSeq = 0;
+	// uplift-4 S7 — docs freshness and merge-trigger lag
+	/** Accepted merge-triggers and the lag warning's dedupe markers; persisted in the docs state file only once non-empty. */
+	private readonly docsFreshnessState: FreshnessState = createFreshnessState();
+	/** Runs lag transitions in the background, one pass at a time; reads never wait on it. */
+	private readonly docsLagSettler = new LagSettler(this.docsFreshnessState.lag, {
+		persist: () => this.persistDocsSeen(),
+		emit: (event) => this.emit(event),
+		report: (line) => process.stderr.write(`[substrate] ${line}\n`),
+	});
 	/** `graphId/nodeId` → tail of that node's gated-completion chain. */
 	private readonly completionChains = new Map<string, Promise<void>>();
+	// uplift-2 R1 — brief fast path. The options `composeBrief` runs under, read
+	// once from config so a brief does not re-derive them per call.
+	private readonly briefOptions: { budgetMs: number; recentWindowDays: number; graphRead: "full" | "lite" };
+	// uplift-5 U5-3 — `SUBSTRATE_CACHE_BUMP_SCOPE=narrow`: a retain bumps the recall generation, a brief drops the heartbeat-bumped graph key.
+	private readonly narrowBumps: boolean;
+	// uplift-4 S5 — recall in the brief and the Hindsight inventory
+	/** The wanted registry, the prefetch timer and the post-retain refresh; inert unless `SUBSTRATE_BRIEF_RECALL` is `shadow` or `enforce`. */
+	private readonly recall: RecallPrefetcher;
+	/** The read-only bank inventory; inert unless `SUBSTRATE_HINDSIGHT_INVENTORY=on`. */
+	private readonly hindsightInventory: HindsightInventory;
+	// uplift-2 R5 — ledger emit serialisation
+	/**
+	 * `session_id` → tail of that session's append chain. Two concurrent emits
+	 * for one session used to read the same `prev` and fork the chain; here the
+	 * second waits for the first, so it reads the hash the first stored. Entries
+	 * leave when their chain settles; different sessions never wait on each other.
+	 */
+	private readonly emitChains = new Map<string, Promise<void>>();
 
 	/** `stores` is a test seam; production always builds them from config. */
 	constructor(
@@ -735,6 +1059,7 @@ export class Substrate {
 			index?: IndexStore | null;
 			greptime?: GreptimeClient | null;
 			skills?: SkillProposer;
+			skillRun?: Runner;
 			mirror?: Mirror | null;
 			dodGate?: { fetchImpl?: typeof fetch; hermesLinearUrl?: string; timeoutMs?: number };
 			cache?: ReadThroughCache;
@@ -744,33 +1069,137 @@ export class Substrate {
 		},
 		observer: SubstrateObserver = {},
 	) {
+		this.observer = observer;
+		if (config.indexArchive.dir !== null) {
+			const watch = new IndexArchiveWatch(config.indexArchive.dir);
+			this.indexArchiveWatch = watch;
+			// The age gauge asks the watch at snapshot time (an export tick), not only when someone polls `/healthz` or `/slo`.
+			this.observer.indexArchive?.({ newestAtMs: () => watch.peekCreatedAt() });
+		}
+		// Built first: the stores below take their gates from it. The breaker
+		// settings come from config so a test can inject them; the observer feeds
+		// the per-plane series.
+		this.planes = new PlaneRegistry(config.breaker, (sample) => {
+			this.observer.plane?.(sample);
+		});
 		this.index =
-			stores?.index !== undefined ? stores.index : config.postgresUrl ? new IndexStore(config.postgresUrl) : null;
+			stores?.index !== undefined
+				? stores.index
+				: config.postgresUrl
+					? new IndexStore(config.postgresUrl, {
+							gate: this.planes.gate("index"),
+							tune: config.indexArchive.tune,
+							// uplift-3 N4: the mode is config, the count goes to the observer.
+							memoryExpiry: {
+								mode: config.memoryExpiry,
+								observe: (sample) => {
+									this.observer.memoryExpired?.(sample);
+								},
+							},
+						})
+					: null;
 		this.greptime =
-			stores?.greptime !== undefined ? stores.greptime : config.greptime ? new GreptimeClient(config.greptime) : null;
+			stores?.greptime !== undefined
+				? stores.greptime
+				: config.greptime
+					? new GreptimeClient(config.greptime, { gate: this.planes.gate("greptime"), ledger: config.ledger })
+					: null;
 		this.mirror =
 			stores?.mirror !== undefined
 				? stores.mirror
 				: config.linearApiKey || config.notionApiKey
 					? createMirror(config)
 					: null;
+		this.skillRun = stores?.skillRun ?? createExecFileRunner({ gh: config.skills.gh });
 		this.skills =
 			stores?.skills ??
 			createSkillProposer({
-				run: createExecFileRunner({ gh: config.skills.gh }),
+				run: this.skillRun,
 				library: { repo: config.skills.repo, remoteUrl: config.skills.remoteUrl },
 				stateDir: config.skills.stateDir,
 			});
 		this.desktop = stores?.desktop ?? null;
 		this.dodGateTest = stores?.dodGate ?? {};
-		this.ragflowFetch = stores?.ragflowFetch ?? fetch;
-		this.hindsightFetch = stores?.hindsightFetch ?? fetch;
-		this.observer = observer;
+		this.ragflowFetch = gatedFetch(this.planes.gate("ragflow"), stores?.ragflowFetch ?? fetch, ragflowOp);
+		this.hindsightFetch = gatedFetch(this.planes.gate("hindsight"), stores?.hindsightFetch ?? fetch, hindsightOp);
 		this.cache =
 			stores?.cache ??
-			createReadThroughCache(config, (sample) => {
-				this.observer.cached?.(sample);
+			createReadThroughCache(config, {
+				record: (sample) => {
+					this.observer.cached?.(sample);
+				},
+				gate: this.planes.gate("cache"),
 			});
+		// uplift-2 R1
+		this.briefOptions = { budgetMs: config.briefBudgetMs, recentWindowDays: config.briefRecentWindowDays, graphRead: config.requestPath.briefGraphRead };
+		this.narrowBumps = config.requestPath.cacheBumpScope === "narrow";
+		// uplift-2 R3: the outbox hydrates its file (if any) now, so entries parked
+		// before a restart are due again from the first drain tick. Every drop —
+		// bound, exhausted attempts, a memory-only queue at shutdown — ends with
+		// the warning the live forward would have emitted, in the same shape; a
+		// save that fails warns once too, because the queue is then no longer
+		// durable and shutdown abandons it like a memory-only one.
+		const warnRetain = (entry: RetainOutboxEntry, reason: string): void => {
+			// Tracked like a forward: the shutdown drain waits for it (bounded).
+			this.trackRetain(
+				emitRetainWarning(
+					(event) => this.emit(event),
+					entry.surface,
+					entry.session_id,
+					`hindsight retain failed: ${reason} (${entry.bank}/${entry.document_id})`,
+					{ reason, bank: entry.bank, document_id: entry.document_id, entry_hash: entry.entry_hash },
+				),
+			);
+		};
+		this.retainOutbox = new RetainOutbox({
+			path: config.retainOutbox.path,
+			max: config.retainOutbox.max,
+			maxAttempts: config.retainOutbox.maxAttempts,
+			allow: () => this.planes.gate("hindsight").breaker?.state() !== "open",
+			onDrop: (entry, cause) => warnRetain(entry, cause === "outbox-full" ? "outbox-full" : entry.last_reason),
+			onUnsaved: (entry) => warnRetain(entry, "outbox-unsaved"),
+		});
+		if (this.retainOutbox.size() > 0) this.ensureRetainDrainTimer();
+		// uplift-4 S5: the recall prefetcher (inert unless SUBSTRATE_BRIEF_RECALL is shadow or enforce) and the
+		// read-only Hindsight inventory (inert unless SUBSTRATE_HINDSIGHT_INVENTORY=on). Neither starts a timer here.
+		this.recall = new RecallPrefetcher({
+			config: config.briefRecall,
+			bankFor: (surface) => {
+				const hindsight = hindsightFromEnv();
+				return hindsight === null || config.vmGuest ? null : bankForSurface(hindsight, surface);
+			},
+			breakerOpen: () => this.planes.gate("hindsight").breaker?.state() === "open",
+			cacheAvailable: () => this.cache.health().enabled,
+			recall: async ({ surface, bank, query, budgetMs }) => {
+				const hindsight = hindsightFromEnv();
+				if (hindsight === null || bankForSurface(hindsight, surface) !== bank) return { ok: false };
+				// `banks: null`: the surface's OWN bank only, never the HINDSIGHT_BANKS fan-out. The
+				// deadline `budgetMs` is the recall's abort signal, so it fires inside the gated fetch.
+				const reply = await recallMemories({ config: hindsight, banks: null, vmGuest: config.vmGuest, fetchImpl: this.hindsightFetch, budgetMs }, query, surface);
+				if (reply.degraded) return { ok: false };
+				return {
+					ok: true,
+					hits: reply.results.map((hit) => ({
+						bank: hit.bank,
+						text: hit.text,
+						...(hit.scope !== undefined ? { scope: hit.scope } : {}),
+						...(hit.type !== undefined ? { type: hit.type } : {}),
+					})),
+				};
+			},
+			peek: async (surface, repo, bank) => parseRecallSnapshot(await this.cache.peekQuiet("recall-snapshot", surface, recallSnapshotArgs(repo, bank))),
+			put: (surface, repo, bank, snapshot, ttlS) => this.cache.put("recall-snapshot", surface, recallSnapshotArgs(repo, bank), snapshot, ttlS),
+			observe: (sample) => this.observer.recallPrefetch?.({ surface: boundedSurface(sample.surface), result: sample.result }),
+			warn: (line) => process.stderr.write(`[substrate] ${line}\n`),
+		});
+		this.hindsightInventory = new HindsightInventory({
+			config: config.hindsightInventory,
+			hindsight: () => (config.vmGuest ? null : hindsightFromEnv()),
+			banks: () => hindsightBanksFromEnv(),
+			fetchImpl: this.hindsightFetch,
+			breakerOpen: () => this.planes.gate("hindsight").breaker?.state() === "open",
+		});
+		this.noteHindsightOutbox();
 	}
 
 	/**
@@ -858,42 +1287,247 @@ export class Substrate {
 		return { index: indexOk, greptime: greptimeOk, errors };
 	}
 
+	/** The brief as text — what every caller without a validator to offer wants. */
 	async brief(request: BriefRequest): Promise<string> {
+		// In-process callers read the whole brief whatever the wire profile is.
+		return (await this.briefDetailed(request, "full")).text;
+	}
+
+	/**
+	 * The brief as answered to a caller that may already hold it (uplift-3 N7).
+	 *
+	 * `ifNoneMatch` is the validator the caller offered — the `If-None-Match`
+	 * header on `POST /brief`, the `if_none_match` argument of MCP
+	 * `memory_brief` — in the header's own grammar (weak or strong, a list, or
+	 * `*`). When it lists the brief's current ETag the answer is `notModified`
+	 * and the route sends no text. The brief is still composed in full (it has
+	 * to be, to know the tag), so the saving is the transfer, not the compose;
+	 * `briefed` still times it. The result counter is recorded here, once, so
+	 * both doors count alike; `surface` is bounded to the surface list first
+	 * because the REST body's surface is not validated.
+	 */
+	async briefConditional(
+		request: BriefRequest,
+		ifNoneMatch: string | string[] | undefined,
+		profile?: BriefProfile,
+		bearerSurface?: string | null,
+	): Promise<BriefAnswer> {
+		const detail = await this.briefDetailed(request, profile, bearerSurface);
+		const notModified = etagMatches(ifNoneMatch, detail.etag);
+		const surface = boundedSurface(request.surface);
+		this.observer.briefResult?.({
+			surface,
+			state: detail.state,
+			result: notModified ? "not_modified" : "fresh",
+		});
+		// The profile counter and the spend estimate are measurements about an
+		// answer already decided; neither may fail it. A 304 carried no text, so
+		// it saved nothing and cost the model nothing to read.
+		try {
+			this.observer.briefProfiled?.({ surface, profile: detail.profile, mode: detail.mode, bytesSaved: notModified ? null : detail.bytesSaved });
+			if (!notModified) this.observer.servedTokens?.({ surface, tool: "brief", bytes: utf8Bytes(detail.text) });
+		} catch (cause) {
+			process.stderr.write(`[substrate] brief: profile metrics unavailable — ${String(cause).slice(0, 200)}\n`);
+		}
+		return { detail, notModified };
+	}
+
+	/**
+	 * The brief with the facts the REST route puts on the wire (uplift-2 R1):
+	 * whether every source answered, which did not, a weak ETag of the text, and
+	 * — when a source failed and a last-good snapshot exists — that snapshot
+	 * instead of the thin live text.
+	 *
+	 * A snapshot is written only for a brief that was composed complete *and*
+	 * loaded live (a cache hit was written when it was loaded); it is read only
+	 * when the live compose was degraded. Degraded text is never stored
+	 * anywhere, so an outage cannot outlive the store. Every cache step is
+	 * fail-open: the brief is the answer whatever the cache did.
+	 *
+	 * uplift-4 S1: the cache holds the brief as sections (`brief-profile.ts`),
+	 * not as text, so one entry — and one set of source reads — renders as
+	 * either profile. The profile is therefore chosen when the answer is served
+	 * and is in no cache key: an entry written under `shadow` serves `compact`
+	 * after a restart into `enforce`, and the reverse. `requestedProfile` is the
+	 * caller's own word (`profile` on the REST body or MCP call), resolved by
+	 * `resolveBriefProfile` against the mode and the surface list.
+	 */
+	async briefDetailed(request: BriefRequest, requestedProfile?: BriefProfile, bearerSurface?: string | null): Promise<BriefDetail> {
 		const started = performance.now();
 		let ok = false;
 		try {
 			const noted: Array<number | null> = [];
-			let complete = true;
-			const brief = await this.cache.getOrLoad({
+			const failed: BriefSource[] = [];
+			let loaded = false;
+			let liveSections: BriefSection[] | null = null;
+			let staleAgeS: number | undefined;
+			// uplift-4 S5: with recall `off` none of this runs and every key and text is today's.
+			const recallMode = this.config.briefRecall.mode;
+			const recallRepo = normalizeIdentifier(request.repo);
+			// Recall is for the caller whose bearer IS the surface the brief names: the snapshot is that
+			// surface's own bank. The body or argument `surface` is attribution only, so a bearer that names
+			// another surface, and an anonymous caller, get no recall: nothing is registered, read or
+			// composed, and their keys are the recall-off keys (never an enforce entry written for the real surface).
+			const recallActive = recallMode !== "off" && bearerSurface != null && bearerSurface === request.surface;
+			const recallRead: Promise<RecallRead> | null =
+				recallMode === "off" ? null : recallActive ? this.readRecall(request, recallRepo) : Promise.resolve<RecallRead>({ look: "disabled", snapshot: null });
+			const recallOptions = recallRead === null || !recallActive ? {} : this.recallBriefOptions(request, recallRepo, recallRead);
+			const noteRecall = (served: readonly BriefSection[] | null, detail: BriefDetail): Promise<void> => this.noteBriefRecall(request, recallRead, served, detail);
+			// One compose, parameterised by where it reports its lease note and failed sources, so a
+			// background refresh never touches this call's `failed` (S4) and every caller gets the
+			// brief as sections (S1).
+			const compose = (into: Array<number | null>, lost: BriefSource[]): Promise<BriefSection[]> =>
+				composeBriefSections(
+					request,
+					{ index: this.index, greptime: this.greptime },
+					(at) => {
+						into.push(at);
+					},
+					(source) => {
+						lost.push(source);
+					},
+					{ ...this.briefOptions, ...recallOptions },
+				);
+			// The last-good snapshot: the rendered text, its sections (so it can be served compact and
+			// as stale-while-revalidate), when it was composed and when it stops being true.
+			// Sections go into the snapshot only when they would decode again: a value `decodeSections` rejects
+			// would make every later hit a miss, so such a snapshot keeps its text alone.
+			const keep = (text: string, sections: readonly BriefSection[], until: number | null) => {
+				const decodable = decodeSections(encodeSections(sections)) !== null;
+				// Without sections the fallback cannot strip recall later, so the text saved then is rendered
+				// without it: the stored snapshot never carries derived recall.
+				const saved = decodable ? text : renderFullBrief(sections.filter((section) => section.id !== "recall"));
+				return this.cache.put(
+					"brief-snapshot",
+					request.surface,
+					args,
+					{ text: saved, at: new Date().toISOString(), ...(decodable ? { sections } : {}), until },
+					this.config.briefSnapshotTtlS,
+				);
+			};
+			// The expiry mode is part of the key for the same reason it is on a
+			// search (uplift-3 N4): a `report` brief carries expired advice, tagged,
+			// and must not be served `complete` — nor replayed as a snapshot — after
+			// a restart into `enforce`. Empty under `report`, so those keys stand.
+			const args = {
+				repo: request.repo ?? null,
+				branch: request.branch ?? null,
+				graph_id: request.graph_id ?? null,
+				...this.expiryKey(undefined),
+				// The recall mode changes the rendered text, so it is in every key the text lives under
+				// (answer, last-good snapshot): a shadow entry is never served as enforce, nor the reverse.
+				...recallKey(recallActive ? recallMode : "off", recallActive ? this.recallBankOf(request.surface) : null),
+			};
+			const encoded = await this.cache.getOrLoad({
 				klass: "brief",
 				surface: request.surface,
-				args: {
-					repo: request.repo ?? null,
-					branch: request.branch ?? null,
-					graph_id: request.graph_id ?? null,
-				},
+				// `shape` keeps this entry apart from the plain-text values older
+				// processes wrote under the same class, so neither reads the other's.
+				args: { ...args, shape: BRIEF_CACHE_SHAPE },
 				// The shared graphs generation covers repo briefs and the other
 				// graphs a single-graph brief lists. The graph's own key still
-				// moves when that graph is written.
-				generations: request.graph_id
-					? [MEMORY_GENERATION_KEY, GRAPHS_GENERATION_KEY, graphGenerationKey(request.graph_id)]
-					: [MEMORY_GENERATION_KEY, GRAPHS_GENERATION_KEY],
+				// moves when that graph is written. Under `narrow` the brief
+				// drops that key: it moves on a heartbeat, which changes no text a
+				// brief shows (describeNode prints the claim time, never the lease
+				// expiry; `refreshAt` already ends an entry at the expiry it
+				// baked in), and every other write that moves it also moves
+				// `gen:graphs` (`bumpGraph`, the reaper), which stays listed.
+				generations:
+					request.graph_id && !this.narrowBumps
+						? [MEMORY_GENERATION_KEY, GRAPHS_GENERATION_KEY, graphGenerationKey(request.graph_id)]
+						: [MEMORY_GENERATION_KEY, GRAPHS_GENERATION_KEY],
 				refreshAt: () => noted.at(-1) ?? null,
-				store: () => complete,
-				load: () =>
-					composeBrief(
-						request,
-						{ index: this.index, greptime: this.greptime },
-						(at) => {
-							noted.push(at);
-						},
-						() => {
-							complete = false;
-						},
-					),
+				store: (value: string) => failed.length === 0 && decodeSections(value) !== null,
+				load: async () => {
+					loaded = true;
+					liveSections = await compose(noted, failed);
+					return encodeSections(liveSections);
+				},
+				// Stale-while-revalidate (uplift-4 S4) reuses the last-good snapshot above. A
+				// refresh composes with its own state, so it never touches this call's `failed`.
+				// The cached value is the encoded sections (uplift-4 S1), so the last-good is too:
+				// a snapshot without readable sections is not a last-good, and nothing here ever
+				// composes synchronously.
+				swr:
+					this.config.briefSnapshotTtlS > 0
+						? {
+								lastGood: async () => {
+									const good = await this.cache.peekQuiet<BriefSnapshot>("brief-snapshot", request.surface, args);
+									if (good === null) return null;
+									const atMs = Date.parse(good.at);
+									// An absent `until` is a snapshot from before the deadline was recorded: its lease or
+									// reverify time is unknown, so it is not a last-good. Null means "no deadline", a number
+									// is one; anything else is refused.
+									const until = good.until;
+									if (until === undefined || (until !== null && !Number.isFinite(until)) || !Number.isFinite(atMs)) return null;
+									const sections = parseSections(good.sections);
+									if (sections === null) return null;
+									return { value: encodeSections(sections), atMs, untilMs: until };
+								},
+								refresh: () => {
+									const refreshNoted: Array<number | null> = [];
+									const refreshFailed: BriefSource[] = [];
+									return {
+										load: async () => encodeSections(await compose(refreshNoted, refreshFailed)),
+										refreshAt: () => refreshNoted.at(-1) ?? null,
+										// The same rule as the foreground write: a value `decodeSections` would reject is not stored, so the stale one is kept.
+										store: (value: string) => refreshFailed.length === 0 && decodeSections(value) !== null,
+										stored: async (value: string) => {
+											const fresh = decodeSections(value);
+											if (fresh !== null) await keep(renderFullBrief(fresh), fresh, refreshNoted.at(-1) ?? null);
+										},
+									};
+								},
+								served: (ageMs: number) => {
+									staleAgeS = Math.floor(ageMs / 1000);
+								},
+							}
+						: undefined,
 			});
+			// What this call composed itself is used as it is: a brief too large to cache would not decode,
+			// and decoding it is what used to compose it a second time.
+			let sections = loaded && liveSections !== null ? liveSections : decodeSections(encoded);
+			if (sections === null) {
+				// Not an encoding this process wrote (an entry from before profiles, or
+				// a foreign value): a miss. Compose afresh, leave the entry to expire. What is
+				// served is live, so nothing is advertised as stale.
+				failed.length = 0;
+				noted.length = 0;
+				staleAgeS = undefined;
+				loaded = true;
+				sections = await compose(noted, failed);
+			}
 			ok = true;
-			return brief;
+			const live = renderFullBrief(sections);
+			const profileSurface = bearerSurface ?? request.surface;
+			if (failed.length === 0) {
+				if (loaded) {
+					await keep(live, sections, noted.at(-1) ?? null);
+				}
+				const detail = this.servedBrief(live, sections, "complete", failed, null, requestedProfile, profileSurface, staleAgeS);
+				await noteRecall(sections, detail);
+				return detail;
+			}
+			const snapshot =
+				this.config.briefSnapshotTtlS > 0 ? await this.cache.peek<BriefSnapshot>("brief-snapshot", request.surface, args) : null;
+			if (snapshot === null) {
+				const detail = this.servedBrief(live, sections, "degraded", failed, null, requestedProfile, profileSurface);
+				await noteRecall(sections, detail);
+				return detail;
+			}
+			// `snapshot.text` is the rendered brief, never the encoded sections.
+			const text = `_(substrate brief snapshot from ${snapshot.at}; live sources degraded: ${failed.join(", ")})_\n${snapshot.text}`;
+			// A snapshot is served because a live source is down: it never carries derived recall, whose age is
+			// bounded only for a brief composed live. The sections are filtered and the text re-rendered from them.
+			const stored = parseSections(snapshot.sections);
+			const snapshotSections = stored === null ? null : stored.filter((section) => section.id !== "recall");
+			const snapshotText =
+				stored !== null && snapshotSections !== null && snapshotSections.length !== stored.length
+					? `_(substrate brief snapshot from ${snapshot.at}; live sources degraded: ${failed.join(", ")})_\n${renderFullBrief(snapshotSections)}`
+					: text;
+			const detail = this.servedBrief(snapshotText, snapshotSections, "snapshot", failed, snapshot.at, requestedProfile, profileSurface);
+			await noteRecall(snapshotSections, detail);
+			return detail;
 		} finally {
 			// Timed in `finally` so a brief that threw is still in the histogram. The SLO
 			// is about what the caller waited for, and a failure is a wait too.
@@ -907,6 +1541,99 @@ export class Substrate {
 	}
 
 	/**
+	 * What a brief sees of the warm recall snapshot (uplift-4 S5). Registers the (surface, repo)
+	 * pair for the prefetcher (a map write) and reads the snapshot with a cache read that counts
+	 * nothing: no Hindsight call is ever made on this path, and a failed read is a cold snapshot,
+	 * never an error. The key holds the surface, the repo and the surface's own bank.
+	 */
+	/** The bank a surface's recall reads, or null with no Hindsight configured. */
+	private recallBankOf(surface: string): string | null {
+		const hindsight = hindsightFromEnv();
+		return hindsight === null ? null : bankForSurface(hindsight, surface);
+	}
+
+	private async readRecall(request: BriefRequest, repo: string | null): Promise<RecallRead> {
+		const hindsight = hindsightFromEnv();
+		if (repo === null || hindsight === null || this.config.vmGuest || !this.cache.health().enabled || !(SURFACES as readonly string[]).includes(request.surface)) {
+			return { look: "disabled", snapshot: null };
+		}
+		this.recall.want(request.surface, repo);
+		try {
+			const stored = await this.cache.peekQuiet<unknown>("recall-snapshot", request.surface, recallSnapshotArgs(repo, bankForSurface(hindsight, request.surface)));
+			const snapshot = parseRecallSnapshot(stored);
+			return { look: snapshotState(snapshot, Date.now(), this.config.briefRecall.ttlS), snapshot };
+		} catch {
+			return { look: "cold", snapshot: null };
+		}
+	}
+
+	/** The compose options recall adds: the subject sink in `shadow` and `enforce`, the snapshot read only in `enforce` (the shadow text is exactly today's). */
+	private recallBriefOptions(request: BriefRequest, repo: string | null, read: Promise<RecallRead>): Partial<BriefOptions> {
+		return {
+			...(repo !== null ? { noteSubjects: (subjects: string[]) => this.recall.noteSubjects(request.surface, repo, subjects) } : {}),
+			...(this.config.briefRecall.mode === "enforce" ? { recall: { read: async () => (await read).snapshot, ttlS: this.config.briefRecall.ttlS } } : {}),
+		};
+	}
+
+	/** `substrate.brief.recall` for one answered brief: what the served sections carry against what the snapshot offered. A metric never fails the brief. */
+	private async noteBriefRecall(request: BriefRequest, read: Promise<RecallRead> | null, served: readonly BriefSection[] | null, detail: BriefDetail): Promise<void> {
+		const mode = this.config.briefRecall.mode;
+		if (read === null || mode === "off") return;
+		try {
+			const { look } = await read;
+			const composed = served?.some((section) => section.id === "recall") === true;
+			// `included` is what the text the caller RECEIVED carries: the compact profile's byte cap drops
+			// recall first, so a section that was composed but cut is its own result.
+			const delivered = composed && detail.text.includes(RECALL_TITLE_PREFIX);
+			const result: BriefRecallResult = mode === "enforce" && composed && !delivered ? "dropped_by_cap" : recallBriefResult(mode, look, delivered);
+			this.observer.briefRecall?.({ surface: boundedSurface(request.surface), result });
+		} catch (cause) {
+			process.stderr.write(`[substrate] brief: recall metric unavailable — ${redact(String(cause)).slice(0, 200)}\n`);
+		}
+	}
+
+	/**
+	 * One brief as the profile in force serves it. The compact rendering is built
+	 * from `sections` whenever the mode is not `off` (so `shadow` can measure it)
+	 * and served only when the profile resolves to `compact`; a rendering that
+	 * cannot be built — an exception, or a snapshot with no sections — serves the
+	 * full text, the unchanged behaviour.
+	 */
+	private servedBrief(
+		full: string,
+		sections: readonly BriefSection[] | null,
+		state: BriefState,
+		failed: BriefSource[],
+		snapshotAt: string | null,
+		requested: BriefProfile | undefined,
+		surface: string,
+		ageS?: number,
+	): BriefDetail {
+		const config = this.config.briefProfile;
+		let compact: string | null = null;
+		if (config.mode !== "off" && sections !== null) {
+			try {
+				compact = renderCompactBrief(sections, briefStateLine(state, failed, snapshotAt, ageS), config);
+			} catch (cause) {
+				process.stderr.write(`[substrate] brief: compact profile unavailable — ${String(cause).slice(0, 200)}\n`);
+			}
+		}
+		const served: BriefProfile = compact !== null && resolveBriefProfile(config, surface, requested) === "compact" ? "compact" : "full";
+		const text = served === "compact" ? compact! : full;
+		return {
+			text,
+			state,
+			failed,
+			etag: briefEtag(text),
+			snapshotAt,
+			profile: served,
+			mode: config.mode,
+			bytesSaved: compact === null ? null : utf8Bytes(full) - utf8Bytes(compact),
+			...(ageS !== undefined ? { ageS } : {}),
+		};
+	}
+
+	/**
 	 * Append an event. Chains onto the session's previous event when Greptime
 	 * knows of one; a session's first event has `prev: null`.
 	 *
@@ -915,9 +1642,16 @@ export class Substrate {
 	 * substrate is never allowed to fail an agent's turn; the failure comes back
 	 * as `stored: false` and is left to the caller to act on or ignore.
 	 */
-	async emit(input: EventInput): Promise<EmitResult> {
+	async emit(input: EventInput, options: EmitOptions = {}): Promise<EmitResult> {
 		const started = performance.now();
-		const result = await this.append(input);
+		const idem = this.idempotencyPlan(input, options);
+		const result = await this.append(input, idem);
+		if (result.deduplicated) {
+			// Nothing was written, so nothing is counted as an emit: the tokens and cost its payload
+			// carries were counted when the first attempt was stored.
+			this.observer.eventReplay?.({ result: "deduplicated" });
+			return result;
+		}
 		// Reported after the append rather than around it, because the sample carries
 		// `stored` — and because the payload is where a collector puts the tokens and
 		// cost this event is accountable for.
@@ -929,19 +1663,125 @@ export class Substrate {
 			durationMs: performance.now() - started,
 			payload: result.event.payload,
 		});
+		if (idem?.lookup) {
+			if (result.lookupFailed) this.observer.eventReplay?.({ result: "lookup_failed" });
+			else if (result.stored) this.observer.eventReplay?.({ result: "appended" });
+		}
 		return result;
 	}
 
-	private async append(input: EventInput): Promise<EmitResult> {
-		let prev: string | null = null;
+	/**
+	 * What this request asks of the ledger under `SUBSTRATE_EVENT_IDEMPOTENCY` (U5-4a); `null` under
+	 * `off`, where the key and the replay marker are not read at all and nothing below differs from
+	 * before the flag existed. Refusals (a malformed key; a replay stamped over 24 hours ahead) throw
+	 * before any read or write, and are counted.
+	 *
+	 * `lookup` is the whole read-cost rule: `accept` looks up only a replay-marked request, `enforce`
+	 * every keyed one, and a request without a key never does.
+	 */
+	private idempotencyPlan(input: EventInput, options: EmitOptions): IdempotencyPlan | null {
+		const mode = this.config.eventIdempotency;
+		if (mode === "off") return null;
+		try {
+			const key = checkIdempotencyKey(input?.idempotency_key);
+			if (options.replay === true) checkReplayTs(input?.ts, Date.now(), key !== null);
+			return { key, lookup: key !== null && (mode === "enforce" || options.replay === true) };
+		} catch (cause) {
+			if (cause instanceof IdempotencyRefusal) this.observer.eventReplay?.({ result: "refused" });
+			throw cause;
+		}
+	}
+
+	/**
+	 * Appends for one session run one at a time (uplift-2 R5). `prev` is a
+	 * read-then-write with no sequence column, so two emits of one session in
+	 * flight together used to read the same tip and fork the chain — detected by
+	 * `verify`, never prevented. The second now waits for the first to settle
+	 * and reads the hash it stored. Other sessions are untouched, and so are sessionless
+	 * events — except a keyed sessionless event under `SUBSTRATE_EVENT_IDEMPOTENCY` accept or
+	 * enforce, which takes its turn on its key (`KEY_TURN_PREFIX`) so a replay cannot look
+	 * before the original attempt's INSERT has settled. The pattern is `completionChains`'.
+	 */
+	private async append(input: EventInput, idem: IdempotencyPlan | null): Promise<EmitResult> {
 		// The session id is looked up in its stored form, not as it arrived: the
 		// write path normalises it, and querying the raw value would match nothing
 		// and restart the chain on every append.
 		const sessionId = normalizeIdentifier(input.session_id);
+		// A keyed event with no session has no session turn to wait for, so under accept or enforce
+		// its key is the turn: a replay's lookup must not run while the original attempt's INSERT
+		// is still in flight (U5-4a). Keyless sessionless events, and everything under `off`, never wait.
+		const turnKey = sessionId ?? (idem?.key != null ? `${KEY_TURN_PREFIX}${idem.key}` : null);
+		if (!this.greptime || turnKey === null) return this.appendChained(input, sessionId, idem);
+		const previous = this.emitChains.get(turnKey) ?? Promise.resolve();
+		const { promise: gate, resolve: done } = Promise.withResolvers<void>();
+		const tail = previous.then(() => gate);
+		this.emitChains.set(turnKey, tail);
+		await previous;
+		try {
+			return await this.appendChained(input, sessionId, idem);
+		} finally {
+			done();
+			if (this.emitChains.get(turnKey) === tail) this.emitChains.delete(turnKey);
+		}
+	}
+
+	/**
+	 * The replay lookup, run inside the turn (U5-4a). `null` is a miss: append as usual. A hit is
+	 * the existing event, answered without a second `agent_events` row and without touching the chain
+	 * tip. It then confirms the event's `event_ingest` membership with one point read
+	 * (`cursorPosition`, the by-event-id read the stream already uses): the original attempt may
+	 * have landed its row and then ended (a lost reply, a crash) before writing the record, and a
+	 * collector that drops its copy on this answer would otherwise leave the event outside every
+	 * hourly anchor. Membership FOUND: nothing is written (a second record would be returned by
+	 * the stream as a new position and counted by the coverage histogram, which `hourLeaves`
+	 * excludes). CONFIRMED MISSING: `recordIngest` writes it, the event's first record, in the
+	 * server-time hour of the replay. The read FAILS, or the repair write fails: nothing more is
+	 * written and the hit stays `stored: true` with the normal path's warning, never a failure. A
+	 * lookup that throws is `stored: false`: reading it as a miss would write the duplicate this
+	 * exists to prevent, so the client keeps its copy and retries.
+	 */
+	private async replayOutcome(input: EventInput, key: string): Promise<EmitResult | null> {
+		const probe = normalizeEvent(input, null, { key });
+		let existing: { id: string; hash: string } | null;
+		try {
+			existing = await this.greptime!.findByIdempotencyKey(probe, key);
+		} catch (cause) {
+			const error = redact(String(cause));
+			process.stderr.write(`[substrate] idempotency lookup failed, event not stored — ${error}\n`);
+			return { event: probe, stored: false, error: `idempotency lookup failed: ${error}`, lookupFailed: true };
+		}
+		if (existing === null) return null;
+		const event = { ...probe, id: existing.id, hash: existing.hash };
+		const hit: EmitResult = { event, stored: true, deduplicated: true };
+		let membership: unknown;
+		try {
+			membership = await this.greptime!.cursorPosition(event.id);
+		} catch (cause) {
+			process.stderr.write(`[substrate] event ${event.id} replay matched; ingest membership unconfirmed, nothing written — ${redact(String(cause))}\n`);
+			return { ...hit, warning: INGEST_NOT_RECORDED };
+		}
+		if (membership !== null) return hit;
+		try {
+			await this.greptime!.recordIngest(event);
+		} catch (cause) {
+			// Any failure, not only `IngestNotRecorded`: the event row exists either way and the
+			// answer to the caller is still "stored".
+			process.stderr.write(`[substrate] event ${event.id} replay matched; ingest membership missing and not repaired — ${redact(String(cause))}\n`);
+			return { ...hit, warning: INGEST_NOT_RECORDED };
+		}
+		return hit;
+	}
+
+	private async appendChained(input: EventInput, sessionId: string | null, idem: IdempotencyPlan | null): Promise<EmitResult> {
+		if (idem?.lookup && idem.key !== null && this.greptime) {
+			const settled = await this.replayOutcome(input, idem.key);
+			if (settled !== null) return settled;
+		}
+		let prev: string | null = null;
 		if (this.greptime && sessionId) {
 			prev = await this.greptime.lastHash(sessionId).catch(() => null);
 		}
-		const event = normalizeEvent(input, prev);
+		const event = idem === null ? normalizeEvent(input, prev) : normalizeEvent(input, prev, { key: idem.key });
 		if (!this.greptime) return { event, stored: false, error: "GREPTIME_URL is not set" };
 
 		// Fail closed: a ledger that may deduplicate does not get the write unless an
@@ -1061,6 +1901,7 @@ export class Substrate {
 				store: this.index,
 				isReviewToken: (token) => isReviewToken(this.config, token),
 				grants: this.config.memoryGrants,
+				hashVersion: this.config.hashVersion,
 				// The one place memory consults the ledger, and it is a read of one column:
 				// `verified-by-test` rests on a source event, so the gate establishes that the
 				// event exists before honouring the trust. No ledger, unreachable ledger or
@@ -1108,28 +1949,29 @@ export class Substrate {
 		}
 		if (result.outcome === "accepted" || commitUncertain) await this.cache.bump(MEMORY_GENERATION_KEY);
 		// The Hindsight forward runs after the accepted reply is decided and never
-		// blocks it: Postgres stays the governed store (D26-04). A refusal or plane
-		// failure warns without re-opening the write. A successful retain bumps the
-		// generation again: a recall cached in the gap between the index bump and
-		// the retain landing must not hide the fresh memory for a whole TTL.
+		// blocks it: Postgres stays the governed store (D26-04). A refusal warns
+		// without re-opening the write; a transient plane failure parks in the
+		// retain outbox and is replayed with backoff (uplift-2 R3), the warning
+		// deferred to its last attempt. A successful retain bumps the generation
+		// again: a recall cached in the gap between the index bump and the retain
+		// landing must not hide the fresh memory for a whole TTL — and drops any
+		// parked copy of the same document, which the success just made stale.
+		// Under `SUBSTRATE_CACHE_BUMP_SCOPE=narrow` that second bump moves the
+		// recall generation, which only the entries holding a Hindsight recall
+		// list: a brief and a paged search read the index alone, so the accept
+		// bump above is the one flush they need.
 		// Forwards to one document run in acceptance order: a stalled older
 		// version must not land after (and replace) its accepted replacement.
 		if (result.outcome === "accepted" && result.verified_persisted && result.entry) {
 			const entry = result.entry;
 			const hindsight = hindsightFromEnv();
 			const run = (): Promise<void> => {
-				return forwardRetain(
-					{
-						config: hindsight,
-						fetchImpl: this.hindsightFetch,
-						vmGuest: this.config.vmGuest,
-						emit: (event) => this.emit(event),
-					},
-					request,
-					result,
-				)
+				return forwardRetain(this.retainDeps(hindsight), request, result)
 					.then((outcome) => {
-						if (outcome.forwarded) return this.cache.bump(MEMORY_GENERATION_KEY);
+						if (!outcome.forwarded) return;
+						this.retainOutbox.forget(outcome.bank, outcome.document_id);
+						this.afterLiveRetain(result.writer);
+						return this.cache.bump(this.narrowBumps ? RECALL_GENERATION_KEY : MEMORY_GENERATION_KEY);
 					})
 					.then(() => undefined)
 					.catch(() => undefined);
@@ -1139,36 +1981,39 @@ export class Substrate {
 				return result;
 			}
 			const chainKey = `${hindsight.url} ${bankForSurface(hindsight, result.writer)} ${retainDocumentId(entry, result.idempotency_key)}`;
-			const previous = this.retainChains.get(chainKey);
-			const flight = (previous ?? Promise.resolve()).then(run, run);
-			this.retainChains.set(chainKey, flight);
-			this.trackRetain(
-				flight.finally(() => {
-					if (this.retainChains.get(chainKey) === flight) this.retainChains.delete(chainKey);
-				}),
-			);
+			this.trackRetain(this.chainRetain(chainKey, run));
 		}
 		return result;
 	}
 
 	/**
-	 * Put a refused or unverified memory write in the event log.
+	 * Put every finished memory write in the event log — the one emitter for the
+	 * verdict trail.
 	 *
 	 * Governance that leaves no trace is indistinguishable from no governance: a
 	 * denied write is otherwise visible only to the agent that was denied, which is
-	 * the one party with an interest in not mentioning it.
+	 * the one party with an interest in not mentioning it. An accepted write had the
+	 * opposite hole — no trace at all — so it trails here too, and the ledger shows
+	 * the writes that landed beside the ones that did not.
 	 *
 	 * The event carries the decision, never the body. The body may be exactly the
 	 * secret or the PII that got the write quarantined, and copying it into an
 	 * append-only ledger to record that it was quarantined would be absurd.
 	 */
 	private async auditMemoryWrite(request: MemoryWriteRequest, result: MemoryWriteResult): Promise<void> {
-		if (result.outcome === "accepted" && result.verified_persisted) return;
 		// Redacted, and redacted *here* rather than relying on the event path: `scope`,
 		// `kind` and `writer` are all caller-controlled, a refused write is exactly where
 		// a malformed one arrives, and a credential in the journal is a credential
 		// leaked whether or not the event that would have carried it was ever emitted.
-		const line = redact(`memory.write ${result.outcome}: ${result.reason} (${request.kind} at ${request.scope})`);
+		//
+		// An accepted, verified write needs no reason segment — the reason exists to
+		// say why a write *did not* land, and `verified_persisted` says the rest. An
+		// accepted-but-unverified write keeps the refusal shape: the caveat is the news.
+		const line = redact(
+			result.outcome === "accepted" && result.verified_persisted
+				? `memory.write accepted: ${request.kind} at ${request.scope}`
+				: `memory.write ${result.outcome}: ${result.reason} (${request.kind} at ${request.scope})`,
+		);
 		const writer = String(request.writer);
 		process.stderr.write(`[substrate] ${line} by ${redact(writer)}\n`);
 
@@ -1177,14 +2022,16 @@ export class Substrate {
 		if (!(SURFACES as readonly string[]).includes(writer)) return;
 		await this.emit({
 			surface: writer as Surface,
-			kind: result.outcome === "conflict" ? "note" : "warning",
+			kind: result.outcome === "conflict" || (result.outcome === "accepted" && result.verified_persisted) ? "note" : "warning",
 			summary: line,
 			graph_id: request.graph_id,
 			session_id: request.session_id,
 			repo: request.repo,
 			payload: {
 				outcome: result.outcome,
-				reason: result.reason,
+				// Omitted when absent, never written as `undefined`: the accepted payload
+				// is exactly the refusal payload's keys minus a reason that is not there.
+				...(result.reason ? { reason: result.reason } : {}),
 				scope: request.scope,
 				kind: request.kind,
 				...(result.strategy ? { strategy: result.strategy } : {}),
@@ -1197,7 +2044,17 @@ export class Substrate {
 	/**
 	 * The list search: governed index entries first, Hindsight hits appended
 	 * after them marked derived (D26-05). A plane outage yields index-only
-	 * results with `{degraded: true, reason}` — never a refusal.
+	 * results with `{degraded: true, reason}` — never a refusal. The recall
+	 * leg runs under its own shorter budget (`HINDSIGHT_SEARCH_RECALL_BUDGET_MS`,
+	 * uplift-2 R3): a slow plane costs a search at most that long, and the
+	 * reply says `recall-timeout` so the caller can tell slow from down.
+	 *
+	 * Lifetime (uplift-3 N4) is the index's to judge; `includeExpired` only widens
+	 * an `enforce` read and arrives already operator-gated. The cache key carries
+	 * the mode only when it is `enforce`, so a flip to `enforce` cannot be answered
+	 * from a `report` entry across a restart, while `report` keys are the keys
+	 * they were; and the refresh deadline is the nearest `expires_at` as well as
+	 * the nearest reverify, so a cached page never outlives an entry in it.
 	 */
 	async searchMemory(
 		query: string,
@@ -1205,22 +2062,32 @@ export class Substrate {
 		limit?: number,
 		includeSuperseded?: boolean,
 		surface = "unattributed",
+		includeExpired?: boolean,
 	): Promise<MergedMemoryResults> {
+		const read = this.memoryRead(surface, includeExpired);
 		return this.cache.getOrLoad({
 			klass: "memory-search",
 			surface,
 			// The shape marker keeps pre-upgrade bare-list entries under their
 			// old key: a hit must return the merged shape, never a stale array.
-			args: { query, scope: scope ?? null, limit: limit ?? null, includeSuperseded: includeSuperseded ?? false, shape: "merged-v1" },
-			generations: [MEMORY_GENERATION_KEY],
-			refreshAt: (merged) => earliestRefreshAt(merged.entries.map((entry) => entry.reverify_after)),
+			args: {
+				query,
+				scope: scope ?? null,
+				limit: limit ?? null,
+				includeSuperseded: includeSuperseded ?? false,
+				shape: "merged-v1",
+				...this.expiryKey(includeExpired),
+			},
+			// The merged search holds a Hindsight recall, so under `narrow` it lists the recall generation too.
+			generations: this.memoryGenerations(true),
+			refreshAt: (merged) => earliestRefreshAt(merged.entries.flatMap((entry) => [entry.reverify_after, entry.expires_at])),
 			// A degraded answer (outage, partial) is still the answer, but it
 			// must not sit in the cache: the next search re-probes the plane.
 			store: (merged) => !merged.degraded,
 			load: async () => {
 				const [entries, recall] = await Promise.all([
-					this.index ? this.index.searchMemory(query, scope, limit, includeSuperseded) : Promise.resolve([]),
-					this.recallMemories({ query }, surface),
+					this.index ? this.index.searchMemory(query, scope, limit, includeSuperseded, read) : Promise.resolve([]),
+					this.recallUncounted({ query }, surface, this.config.hindsightBudgets.searchRecallBudgetMs),
 				]);
 				return mergeDerivedHits(entries, recall, scope);
 			},
@@ -1231,21 +2098,60 @@ export class Substrate {
 	 * A paged search: `subject_prefix` and the `(before, before_id)` cursor. The
 	 * visibility rules are `searchMemory`'s — this reads the same entries, only
 	 * further back — so nothing quarantined, parked or retired is reachable here
-	 * that was not before.
+	 * that was not before, and an expired entry is tagged or hidden the same way.
 	 */
 	async searchMemoryPage(request: MemorySearchRequest, surface = "unattributed"): Promise<MemorySearchPage> {
 		const search = parseMemorySearch(request);
+		const read = this.memoryRead(surface, request.include_expired);
 		return this.cache.getOrLoad({
 			klass: "memory-search",
 			surface,
-			args: search,
-			generations: [MEMORY_GENERATION_KEY],
-			refreshAt: (page) => earliestRefreshAt(page.entries.map((entry) => entry.reverify_after)),
+			args: { ...search, ...this.expiryKey(request.include_expired) },
+			generations: this.memoryGenerations(),
+			refreshAt: (page) => earliestRefreshAt(page.entries.flatMap((entry) => [entry.reverify_after, entry.expires_at])),
 			load: async () => {
 				if (!this.index) return { entries: [], next: null };
-				return this.index.searchMemoryPage(search);
+				return this.index.searchMemoryPage(search, read);
 			},
 		});
+	}
+
+	/** The per-call lifetime options for an index read (uplift-3 N4): who is asking, and whether expired entries were asked for. */
+	private memoryRead(surface: string, includeExpired: boolean | undefined): MemoryReadOptions {
+		return { surface, ...(includeExpired === true ? { includeExpired: true } : {}) };
+	}
+
+	/**
+	 * The lifetime part of a memory cache key. Empty under `report` without
+	 * `includeExpired`, which keeps every pre-N4 key exactly what it was; set
+	 * otherwise, so an `enforce` answer and a widened one never share an entry
+	 * with a `report` one.
+	 */
+	private expiryKey(includeExpired: boolean | undefined): { expiry?: "enforce"; includeExpired?: true } {
+		return {
+			...(this.config.memoryExpiry === "enforce" ? { expiry: "enforce" as const } : {}),
+			...(includeExpired === true ? { includeExpired: true as const } : {}),
+		};
+	}
+
+	/**
+	 * What a cached memory search depends on (uplift-3 N4). The memory generation
+	 * moves on every accepted write; the shared graphs generation moves on every
+	 * graph write (`bumpGraph`) — and a `ttl: graph` entry's verdict is read off
+	 * `graph_index`, so a graph finishing must drop the searches that still list
+	 * (or still tag as alive) its memories. The same pair a brief already embeds;
+	 * a `graph` entry has no `expires_at` for `refreshAt` to reach, so this is the
+	 * only way a search learns that its graph closed before the cache TTL.
+	 *
+	 * `includesRecall` is true for the merged search, whose answer carries a
+	 * Hindsight recall: under `SUBSTRATE_CACHE_BUMP_SCOPE=narrow` a retain moves
+	 * the recall generation, not the memory one, so that entry lists it as well.
+	 * The paged search reads the index alone and never does.
+	 */
+	private memoryGenerations(includesRecall = false): string[] {
+		return includesRecall && this.narrowBumps
+			? [MEMORY_GENERATION_KEY, GRAPHS_GENERATION_KEY, RECALL_GENERATION_KEY]
+			: [MEMORY_GENERATION_KEY, GRAPHS_GENERATION_KEY];
 	}
 
 	/**
@@ -1266,15 +2172,18 @@ export class Substrate {
 		let before: string | undefined;
 		let beforeId: string | undefined;
 		for (let pages = 0; pages < 100; pages++) {
-			const page = await this.index.searchMemoryPage({
-				query: "",
-				subjectPrefix: TEACHABLE_SUBJECT_PREFIX,
-				writer: surface,
-				kind: "fact",
-				limit: 100,
-				includeSuperseded: false,
-				...(before === undefined ? {} : { before, beforeId }),
-			});
+			const page = await this.index.searchMemoryPage(
+				{
+					query: "",
+					subjectPrefix: TEACHABLE_SUBJECT_PREFIX,
+					writer: surface,
+					kind: "fact",
+					limit: 100,
+					includeSuperseded: false,
+					...(before === undefined ? {} : { before, beforeId }),
+				},
+				{ surface },
+			);
 			for (const entry of page.entries) {
 				if (isTeachable(entry.kind, entry.subject) && entry.writer === surface && !entry.superseded_by) teachables.push(entry);
 			}
@@ -1287,14 +2196,39 @@ export class Substrate {
 
 	/**
 	 * `memory_recall`: Hindsight recall as an explicit tool (D26-03, D26-05).
+	 * The reply's size is counted into the estimated-spend series
+	 * (`substrate.served.tokens_est`, tool `recall`); the recall leg inside
+	 * `memory_search` is not a reply to a caller and is not counted.
+	 */
+	async recallMemories(input: { query?: unknown }, callerSurface: string | null): Promise<RecallReply> {
+		const reply = await this.recallUncounted(input, callerSurface);
+		this.noteServed("recall", callerSurface, reply);
+		return reply;
+	}
+
+	/** Size one reply for `substrate.served.tokens_est`; a failed measurement never fails the reply. */
+	private noteServed(tool: ServedTokenTool, surface: string | null, reply: unknown): void {
+		if (this.observer.servedTokens === undefined) return;
+		try {
+			this.observer.servedTokens({ surface: boundedSurface(surface), tool, bytes: utf8Bytes(JSON.stringify(reply)) });
+		} catch (cause) {
+			process.stderr.write(`[substrate] ${tool}: served-token estimate unavailable — ${String(cause).slice(0, 200)}\n`);
+		}
+	}
+
+	/**
+	 * Hindsight recall, uncounted.
 	 *
 	 * Read-only and fail-open: an unconfigured plane or an unreachable bank
 	 * answers empty with a reason, never a throw. Reads emit nothing. Never
 	 * called from the brief's synchronous compose path. A guest instance
 	 * refuses before the cache lookup, so neither the tool nor the recall
-	 * inside `memory_search` leaks shared memories out of the guest.
+	 * inside `memory_search` leaks shared memories out of the guest. The
+	 * fan-out budget is `HINDSIGHT_RECALL_BUDGET_MS` unless the caller names a
+	 * shorter one (the search leg does); a non-degraded reply is budget-
+	 * independent, so the cache key ignores it.
 	 */
-	async recallMemories(input: { query?: unknown }, callerSurface: string | null): Promise<RecallReply> {
+	private async recallUncounted(input: { query?: unknown }, callerSurface: string | null, budgetMs?: number): Promise<RecallReply> {
 		if (this.config.vmGuest) {
 			return { results: [], degraded: true, notice: UNTRUSTED_MEMORY_NOTICE, reason: "vm-guest" };
 		}
@@ -1306,13 +2240,31 @@ export class Substrate {
 			klass: "memory-search",
 			surface,
 			args: { recall: true, query, banks: banks ?? null },
-			// An accepted memory write bumps this generation, so a fresh
-			// retain is never hidden behind a stale recall (D26-06a).
-			generations: [MEMORY_GENERATION_KEY],
+			// An accepted memory write bumps the memory generation, so a fresh
+			// retain is never hidden behind a stale recall (D26-06a). The retain
+			// itself lands later: under `narrow` it bumps the recall generation,
+			// which this entry lists beside the memory one.
+			generations: this.narrowBumps ? [MEMORY_GENERATION_KEY, RECALL_GENERATION_KEY] : [MEMORY_GENERATION_KEY],
 			// A degraded answer (outage, partial) is still the answer, but it
 			// must not sit in the cache: the next call re-probes the plane.
 			store: (reply) => !reply.degraded,
-			load: () => recallMemories({ config, banks, vmGuest: this.config.vmGuest, fetchImpl: this.hindsightFetch }, query, callerSurface),
+			// This caller's own budget: a search leg (short) that joins a recall (long) already in
+			// flight answers its own `recall-timeout` reply when its budget is spent, instead of
+			// waiting out the owner's. The reply is the shape `recallMemories` gives on a budget miss.
+			deadlineMs: budgetMs ?? this.config.hindsightBudgets.recallBudgetMs,
+			onDeadline: () => ({ results: [], degraded: true, notice: UNTRUSTED_MEMORY_NOTICE, reason: "recall-timeout: budget exceeded" }),
+			load: () =>
+				recallMemories(
+					{
+						config,
+						banks,
+						vmGuest: this.config.vmGuest,
+						fetchImpl: this.hindsightFetch,
+						budgetMs: budgetMs ?? this.config.hindsightBudgets.recallBudgetMs,
+					},
+					query,
+					callerSurface,
+				),
 		});
 	}
 
@@ -1331,15 +2283,223 @@ export class Substrate {
 	}
 
 	/**
-	 * Wait for in-flight background retains, within a bound. A hanging plane
-	 * must not delay a stop into a SIGKILL; a finished one must not be lost
-	 * silently. Resolves either way.
+	 * Wait for in-flight background retains, within a bound, then give the
+	 * retain outbox one pass at its due entries inside what is left of it. A
+	 * hanging plane must not delay a stop into a SIGKILL; a finished one must
+	 * not be lost silently. Resolves either way. With `abandon` (shutdown) a
+	 * memory-only outbox gives up what is left with the warning each entry
+	 * would eventually have had — the process is about to forget them; a
+	 * durable outbox keeps them for the next boot. The outbox's drop warnings
+	 * are tracked like forwards, so they settle inside the same bound.
 	 */
-	async drainPendingRetains(timeoutMs = 10_000): Promise<void> {
+	async drainPendingRetains(timeoutMs = 10_000, options: { abandon?: boolean } = {}): Promise<void> {
+		const deadline = Date.now() + timeoutMs;
+		await this.awaitTrackedRetains(timeoutMs);
+		const left = deadline - Date.now();
+		if (left > 0 && this.retainOutbox.size() > 0) {
+			await Promise.race([this.drainRetainOutbox(), Bun.sleep(left)]);
+		}
+		if (options.abandon === true && !this.retainOutbox.durable) this.retainOutbox.abandonAll();
+		await this.awaitTrackedRetains(Math.max(0, deadline - Date.now()));
+	}
+
+	private async awaitTrackedRetains(timeoutMs: number): Promise<void> {
 		if (this.pendingRetains === 0) return;
 		const { promise, resolve } = Promise.withResolvers<void>();
 		this.retainWaiters.push(resolve);
 		await Promise.race([promise, Bun.sleep(timeoutMs)]);
+	}
+
+	// uplift-2 R3 — the retain outbox's wiring
+
+	/** The outbox's observable state, for operators; `/healthz` has no hook for plane extras, so it lives here. */
+	retainOutboxStats(): RetainOutboxStats {
+		return this.retainOutbox.stats();
+	}
+
+	// uplift-4 S5 — the recall snapshot, the Hindsight inventory and the outbox gauges
+
+	/** Read the retain outbox's in-process state into its three gauges. No external call; a failure never fails the caller. */
+	private noteHindsightOutbox(): void {
+		if (this.observer.hindsightOutbox === undefined) return;
+		try {
+			const stats = this.retainOutbox.stats();
+			const oldest = stats.oldestAt === null ? Number.NaN : Date.parse(stats.oldestAt);
+			const oldestAgeSeconds = Number.isFinite(oldest) ? Math.max(0, Math.floor((Date.now() - oldest) / 1000)) : 0;
+			this.observer.hindsightOutbox({ size: stats.size, oldestAgeSeconds, durable: stats.durable });
+		} catch (cause) {
+			process.stderr.write(`[substrate] hindsight: outbox gauges unavailable — ${redact(String(cause)).slice(0, 200)}\n`);
+		}
+	}
+
+	/** Start the recall prefetch and the Hindsight inventory timers. Each is a no-op while its flag is off; each timer is unref'd. */
+	startRecall(): { recall: boolean; inventory: boolean } {
+		return { recall: this.recall.start(), inventory: this.hindsightInventory.start() };
+	}
+
+	/** Clear both timers and wait, bounded, for the work in flight. No final refresh: the snapshot is cache-only. */
+	async stopRecall(): Promise<void> {
+		await Promise.all([this.recall.stop(), this.hindsightInventory.stop()]);
+	}
+
+	/** Run one prefetch tick now (the interval's body): at most two due pairs, single-flight. Off: nothing. */
+	runRecallTick(): Promise<void> {
+		return this.recall.tick();
+	}
+
+	/** Run the debounced post-retain refresh now instead of after its 5 s wait. Off, or nothing wanted: nothing. */
+	flushRecallRetain(): Promise<void> {
+		return this.recall.flush();
+	}
+
+	/** Probe the Hindsight inventory now (single-flight, forced past the 60 s memo). Off: null and no call. */
+	refreshHindsightInventory(): Promise<InventoryReport | null> {
+		return this.hindsightInventory.refresh({ force: true });
+	}
+
+	/** `/healthz.recall`: the prefetcher's capacity and whether more pairs are wanted than it can keep fresh; null while recall is off. */
+	recallHealth(): { mode: string; capacity: number; wanted: number; saturated: boolean } | null {
+		return this.config.briefRecall.mode === "off" ? null : this.recall.health();
+	}
+
+	/** `/healthz.hindsight`: the inventory's newest probe, or null when it is off. Memory only, no call. */
+	hindsightInventoryHealth(): InventoryHealth | null {
+		return this.hindsightInventory.health();
+	}
+
+	/** The per-bank gauge points `/metrics` serves under `gauges`. Also refreshes the outbox gauges, which are read in-process. */
+	hindsightGauges(): BankGaugeSample[] {
+		this.noteHindsightOutbox();
+		return this.hindsightInventory.gauges();
+	}
+
+	/**
+	 * The forward's dependencies. The live forward parks transient failures in
+	 * the outbox; a replay hands in a sink that only says "deferred", because
+	 * the outbox entry being replayed reschedules itself. Either way the sink
+	 * taking the failure is what stops the immediate warning.
+	 */
+	private retainDeps(hindsight: HindsightConfig | null, mode: "live" | "replay" = "live"): RetainDeps {
+		const sink: RetainOutboxSink =
+			mode === "replay"
+				? { enqueue: () => true }
+				: {
+						enqueue: (candidate) => {
+							this.retainOutbox.enqueue(candidate);
+							this.noteHindsightOutbox();
+							this.ensureRetainDrainTimer();
+							// Parked while the breaker is not closed: the first live
+							// success after it closes replays everything early.
+							if (this.planes.gate("hindsight").breaker?.state() !== "closed") this.retainRecoverPending = true;
+							return true;
+						},
+					};
+		const index = this.index;
+		return {
+			config: hindsight,
+			fetchImpl: this.hindsightFetch,
+			vmGuest: this.config.vmGuest,
+			emit: (event: EventInput) => this.emit(event),
+			outbox: sink,
+			retainTimeoutMs: this.config.hindsightBudgets.retainTimeoutMs,
+			// uplift-3 N4: a `graph` entry is judged against the graph as the index
+			// knows it now, so a forward of a finished graph's memory is refused.
+			...(index ? { graphLifetime: (entry: MemoryEntry) => index.graphLifetime(entry) } : {}),
+		};
+	}
+
+	/**
+	 * A live retain landed on `surface`. Two jobs, the second independent of the first: schedule the
+	 * debounced recall refresh of that surface's wanted pairs (uplift-4 S5; a no-op while recall is
+	 * `off` or nothing wants the surface, so it never sends a call by itself), and, if the plane had
+	 * been refusing, replay the whole backlog now rather than on its schedule.
+	 */
+	private afterLiveRetain(surface: string): void {
+		try {
+			this.recall.noteRetain(surface);
+			this.noteHindsightOutbox();
+		} catch (cause) {
+			process.stderr.write(`[substrate] recall: post-retain hook failed — ${redact(String(cause)).slice(0, 200)}\n`);
+		}
+		if (!this.retainRecoverPending && !this.retainOutbox.held()) return;
+		this.retainRecoverPending = false;
+		if (this.retainOutbox.size() > 0) void this.drainRetainOutbox({ all: true });
+	}
+
+	private ensureRetainDrainTimer(): void {
+		if (this.retainDrainTimer !== null) return;
+		this.retainDrainTimer = setInterval(() => {
+			void this.drainRetainOutbox();
+		}, this.config.retainOutbox.drainMs);
+		this.retainDrainTimer.unref();
+	}
+
+	/**
+	 * One outbox pass: serial, one plane call per entry, skipped by the outbox
+	 * while the breaker is open. `all` ignores the backoff schedule — the
+	 * recovery path and tests use it; the timer and shutdown replay due entries.
+	 */
+	drainRetainOutbox(options: { all?: boolean } = {}): Promise<void> {
+		return this.retainOutbox.drain((entry) => this.deliverParkedRetain(entry), options).finally(() => this.noteHindsightOutbox());
+	}
+
+	/**
+	 * Run one forward (live or replay) at the tail of its document's chain, so
+	 * forwards to one plane document land in the order they were decided: a
+	 * stalled older body — a retry included — can never replace a newer one
+	 * with `update_mode: replace`. The returned promise is the caller's own
+	 * flight; the chain itself only remembers that it settled.
+	 */
+	private chainRetain<T>(chainKey: string, run: () => Promise<T>): Promise<T> {
+		const previous = this.retainChains.get(chainKey) ?? Promise.resolve();
+		const flight = previous.then(run, run);
+		const tail = flight.then(
+			() => undefined,
+			() => undefined,
+		);
+		this.retainChains.set(chainKey, tail);
+		void tail.finally(() => {
+			if (this.retainChains.get(chainKey) === tail) this.retainChains.delete(chainKey);
+		});
+		return flight;
+	}
+
+	/**
+	 * Replay one parked forward, at the tail of its document's chain so a live
+	 * forward decided earlier always lands first. Once its turn comes the
+	 * replay re-checks that it is still parked (a live success meanwhile
+	 * forgot it) and re-reads the entry by id so the body sent is the body in
+	 * force: gone or superseded means the parked copy is stale and is dropped
+	 * without a word (its replacement had its own forward). An index read
+	 * failure is transient — it costs an attempt, never the entry.
+	 */
+	private deliverParkedRetain(parked: RetainOutboxEntry): Promise<RetainDeliveryOutcome> {
+		const hindsight = hindsightFromEnv();
+		if (!hindsight || !this.index) return Promise.resolve("gone");
+		const index = this.index;
+		return this.chainRetain(`${hindsight.url} ${parked.bank} ${parked.document_id}`, async () => {
+			if (!this.retainOutbox.holds(parked)) return "gone";
+			let current: MemoryEntry | null;
+			try {
+				current = await index.readEntry(parked.entry_id);
+			} catch {
+				return { transient: "index-unreachable" };
+			}
+			if (!current || current.superseded_by !== undefined) return "gone";
+			const outcome = await replayRetain(this.retainDeps(hindsight, "replay"), {
+				entry: current,
+				writer: parked.surface,
+				bank: parked.bank,
+				documentId: parked.document_id,
+				...(parked.session_id !== undefined ? { sessionId: parked.session_id } : {}),
+			});
+			if (outcome.forwarded) {
+				await this.cache.bump(this.narrowBumps ? RECALL_GENERATION_KEY : MEMORY_GENERATION_KEY).catch(() => undefined);
+				return "delivered";
+			}
+			if (outcome.queued === true) return { transient: outcome.reason ?? "retain-network" };
+			return "permanent";
+		});
 	}
 
 	/**
@@ -1520,6 +2680,7 @@ export class Substrate {
 				reopen: request.reopen === true,
 				allowDocExamples: new Set(request.allow_doc_examples ?? []),
 			});
+			if (!dryRun) await this.recordProposedSkill(request, result, surface);
 			if (!dryRun) {
 				await this.emit({
 					surface,
@@ -1563,6 +2724,208 @@ export class Substrate {
 			}
 			throw cause;
 		}
+	}
+
+	/**
+	 * Mirror a proposal into the skills registry as a `proposed` row (uplift-5 S5a). Only under
+	 * `SUBSTRATE_SKILLS_GOVERNANCE` report or enforce, and only once a pull request exists
+	 * (`opened`, or `existing` for a retry). It can never fail the proposal: a pull request is
+	 * already open, and the registry is a record about it. A failed write is warned once per streak
+	 * and retried by the next proposal of the same content (`existing`) or filled in by the
+	 * approval itself, which creates a missing row.
+	 */
+	private async recordProposedSkill(request: SkillProposalRequest, result: ProposeResult, surface: Surface): Promise<void> {
+		if (this.config.skillsGovernance === "off" || this.index === null) return;
+		if ((result.status !== "opened" && result.status !== "existing") || result.pr_number === undefined || result.pr_url === undefined) return;
+		try {
+			await this.index.upsertProposedSkill({
+				repo: this.config.skills.repo,
+				name: request.name,
+				pr_number: result.pr_number,
+				pr_url: result.pr_url,
+				branch: result.branch ?? null,
+				content_sha256: result.content_sha256,
+				proposed_by: surface,
+			});
+			this.skillRegistryWarned = false;
+		} catch (cause) {
+			if (this.skillRegistryWarned) return;
+			this.skillRegistryWarned = true;
+			const reason = redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200);
+			process.stderr.write(`[substrate] skills registry write failed; the proposal stands and the next proposal of it retries: ${reason}\n`);
+		}
+	}
+
+	/** A refused approval attempt, recorded as one `warning` carrying a rule name and nothing free-form. An event that cannot be stored never changes the answer. */
+	private async emitApprovalRefused(surface: Surface, sessionId: string, rule: ApprovalRule, request: SkillApprovalRequest): Promise<void> {
+		const name = typeof request.name === "string" && SKILL_NAME_RE.test(request.name) ? request.name : undefined;
+		const decision = (SKILL_DECISIONS as readonly string[]).includes(request.decision) ? request.decision : undefined;
+		await this.emit({
+			surface,
+			kind: "warning",
+			summary: `refused skill approval ${name ?? "(invalid name)"}: ${rule}`,
+			session_id: sessionId,
+			payload: { action: "skill.approve.refused", rule, ...(decision ? { decision } : {}), ...(name ? { name } : {}) },
+		}).catch(() => undefined);
+	}
+
+	/**
+	 * An operator's decision on a merged (or closed) skill pull request: approve, decline or
+	 * retire, recorded in the skills registry. The one writer of decided rows.
+	 *
+	 * Steps, in this order, and what survives a failure at each:
+	 *   1. authority: no surface 401, not an operator 403 (a swarm surface and `substrate` never
+	 *      are). Nothing has happened and nothing is emitted; the audit chain is the record.
+	 *   2. the values (decision, name, pr_number, reason): a refusal emits one refused warning.
+	 *   3. the library config and the index: a skills library that is not fixed, or no index, stops
+	 *      here, before gh is asked anything.
+	 *   4. `gh pr view` (approve and decline; retire is a local state change and needs no network):
+	 *      a failed or unreadable answer is 502 with NO row and NO event. A pull request that
+	 *      contradicts the decision is refused (one refused warning) before any row changes.
+	 *   5. the registry row, atomically: `exists` returns without emitting, a refused move emits
+	 *      one refused warning, an applied one is the decision.
+	 *   6. the decision's `note`. The row is the source of truth; the event is a best-effort trail. An
+	 *      event the ledger would not store never changes the decision: the answer carries
+	 *      `noted: false` and one stderr line names the row. A re-run answers `exists` and emits
+	 *      nothing, so an unstored note is recorded by hand, not by retrying.
+	 */
+	async approveSkill(
+		request: SkillApprovalRequest,
+		caller: { surface: Surface | null; isOperator: boolean },
+	): Promise<SkillApprovalResult> {
+		const surface = caller.surface;
+		if (surface === null) {
+			throw new SkillApprovalDenied(401, "skills_approve needs an authenticated surface; nothing was changed");
+		}
+		if (!caller.isOperator || isSwarmSurface(surface) || surface === "substrate") {
+			throw new SkillApprovalDenied(403, "skills_approve needs an operator token; nothing was changed");
+		}
+		const sessionId = `skills-approve:${randomUUID()}`;
+		let valid: ValidApproval;
+		try {
+			valid = validateApproval(request);
+		} catch (cause) {
+			if (cause instanceof SkillApprovalRefused) await this.emitApprovalRefused(surface, sessionId, cause.rule, request);
+			throw cause;
+		}
+		// Boot only warns. A non-default library that is not a local file remote, or one that
+		// still points at the real `gh`, must not reach gh.
+		if (this.config.skills.problem) {
+			throw new SkillApprovalFailed(502, `skill approvals are refused until the skills library is fixed: ${this.config.skills.problem}`);
+		}
+		const index = this.index;
+		if (index === null) {
+			throw new SkillApprovalFailed(503, "the skills registry lives in the index (SUBSTRATE_PG_URL), which is not configured; nothing was changed");
+		}
+		const repo = this.config.skills.repo;
+		const { name, pr_number: prNumber, decision } = valid;
+		let view: PrView | null = null;
+		if (decision !== "retire") {
+			view = await fetchPrView(this.skillRun, repo, prNumber);
+			const rule = prRefusal(decision, name, repo, prNumber, view);
+			if (rule !== null) {
+				await this.emitApprovalRefused(surface, sessionId, rule, request);
+				throw new SkillApprovalRefused(rule, refusalMessage(rule));
+			}
+		}
+		let decided: SkillDecisionResult;
+		try {
+			decided = await index.decideSkill({
+				repo,
+				name,
+				pr_number: prNumber,
+				decision,
+				merge_sha: decision === "approve" ? (view?.merge_sha ?? null) : null,
+				pr_url: view?.url ?? null,
+				branch: view?.head_ref ?? null,
+				proposed_by: view ? proposalBranchSurface(view.head_ref, name) : null,
+				decided_by: surface,
+				reason: valid.reason,
+			});
+		} catch (cause) {
+			const reason = redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200);
+			throw new SkillApprovalFailed(503, `the skills registry could not record the decision; nothing was changed: ${reason}`);
+		}
+		if (decided.outcome === "refused") {
+			await this.emitApprovalRefused(surface, sessionId, decided.rule, request);
+			throw new SkillApprovalRefused(decided.rule, refusalMessage(decided.rule));
+		}
+		const row = decided.row;
+		const result: SkillApprovalResult = {
+			status: decided.outcome === "exists" ? "exists" : (`${decision}d` as "approved" | "declined" | "retired"),
+			state: row.state,
+			name: row.name,
+			pr_number: row.pr_number,
+			pr_url: row.pr_url,
+			merge_sha: row.merge_sha,
+			content_sha256: row.content_sha256,
+			remaining_approved_for_name: decided.remaining_approved,
+		};
+		if (decided.outcome === "applied") {
+			// emit() reports a ledger that would not take the event as `stored: false`, it does not throw. The row
+			// is the decision and stands; the answer says whether its note was stored, and an unstored one is
+			// logged with the row's key, because a re-run answers `exists` and emits nothing.
+			const emitted = await this.emit({
+				surface,
+				kind: "note",
+				summary: `${decision}d skill ${name} (PR ${String(prNumber)})`,
+				repo,
+				session_id: sessionId,
+				payload: {
+					action: `skill.${decision}`,
+					name,
+					pr_number: prNumber,
+					...(row.pr_url !== null ? { pr_url: row.pr_url } : {}),
+					...(row.merge_sha !== null && decision !== "decline" ? { merge_sha: row.merge_sha } : {}),
+					decided_by: surface,
+				},
+			}).catch(() => null);
+			result.noted = emitted?.stored === true;
+			if (!result.noted) {
+				process.stderr.write(
+					`[substrate] skills registry: ${decision} of ${repo}/${name}#${String(prNumber)} by ${surface} is recorded but its skill.${decision} event was not stored; record it manually (a re-run answers exists and emits nothing)\n`,
+				);
+			}
+		}
+		return result;
+	}
+
+	/**
+	 * The skills registry as a reader sees it, by NAME. The default (`approved`) is open to any authenticated
+	 * surface, the substrate host-job surface included, and is what a projector filters on: one entry per name,
+	 * its most recent approved row, so a name stays listed while any of its rows is approved. Every other
+	 * `state` shows rows (proposals and decisions, several per name) and is an operator action, like
+	 * `include_expired`. A caller with no surface is 401 even on a run that allows anonymous callers. With no
+	 * index the answer is a 503, never an empty list: an enforcing reader must be able to tell "nothing is
+	 * approved" from "the registry cannot be read".
+	 */
+	async listSkills(query: { state?: string }, caller: { surface: Surface | null; isOperator: boolean }): Promise<SkillListResult> {
+		if (caller.surface === null) {
+			throw new SkillApprovalDenied(401, "skills_list needs an authenticated surface");
+		}
+		const state = query.state ?? "approved";
+		if (!(SKILL_LIST_STATES as readonly string[]).includes(state)) {
+			throw new SkillApprovalRefused("invalid_state", "state must be approved, proposed, declined, retired or all");
+		}
+		if (state !== "approved" && !caller.isOperator) {
+			throw new SkillApprovalDenied(403, "skills_list with a state other than approved needs an operator token; the default lists approved skills");
+		}
+		if (this.index === null) {
+			throw new SkillApprovalFailed(503, "the skills registry lives in the index (SUBSTRATE_PG_URL), which is not configured");
+		}
+		let rows: SkillRegistryRow[];
+		try {
+			rows = await this.index.listSkills(this.config.skills.repo, state === "all" ? null : (state as SkillState), LIST_MAX + 1);
+		} catch (cause) {
+			const reason = redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 200);
+			throw new SkillApprovalFailed(503, `the skills registry could not be read: ${reason}`);
+		}
+		return {
+			governance: this.config.skillsGovernance,
+			library: this.config.skills.repo,
+			skills: rows.slice(0, LIST_MAX).map((row) => toListEntry(row, state !== "approved")),
+			truncated: rows.length > LIST_MAX,
+		};
 	}
 
 	/** Where a node's events belong: the graph's repo, not whatever the caller said. */
@@ -1833,7 +3196,14 @@ export class Substrate {
 		if (!this.index) throw new Error("graph_heartbeat requires SUBSTRATE_PG_URL");
 		const ttl = normalizeTtlSeconds(ttlSeconds, this.config.leaseTtlSeconds);
 		const result = await this.index.heartbeatNode(graphId, nodeId, leaseId, caller, ttl);
-		if (result.ok) await this.bumpGraph(graphId);
+		// Only this graph's generation, not the shared `gen:graphs` (uplift-2 R1).
+		// A renewed lease changes no text a repo brief shows before its
+		// `refreshAt`: the brief lists other graphs as held or free, and a
+		// heartbeat keeps a held lease held. Bumping the shared key here
+		// invalidated every brief on the host once per heartbeat, which is why the
+		// cache hit ratio measured 1 %. Claims, releases, completions and
+		// registrations still bump both, because those do change that text.
+		if (result.ok) await this.cache.bump(graphGenerationKey(graphId));
 		return {
 			ok: result.ok,
 			lease: result.lease,
@@ -2357,57 +3727,116 @@ export class Substrate {
 	 * or an unknown dataset scope yields `{chunks: [], degraded: true, reason}`
 	 * with a warning event, never a throw. `datasets` names configured
 	 * datasets; unknown names are ignored and raw ids are never accepted.
+	 *
+	 * uplift-2 R6: the answer is cached under the `docs-search` class, keyed
+	 * by the normalised question, the dataset names and the current pins,
+	 * and invalidated by `gen:docs` (bumped by every ingest and every
+	 * recorded version); a degraded reply is never stored. Citations carry
+	 * their own document's commit; the dataset's newest recorded version
+	 * travels separately as `dataset_commit` (Greptile round 2), and
+	 * `agent-skills` is marked pin-aged until this process has seen
+	 * skills-sync fast-forward evidence (D25-07). The dataset list comes
+	 * from the 60 s cache, so a search costs N retrievals, not 1 + N calls.
+	 *
+	 * uplift-3 N5: the datasets are retrieved concurrently under one shared
+	 * budget (`docsSearchBudgetMs`); a partially served reply names its
+	 * missing datasets in `degraded_datasets` and, like a degraded one, is
+	 * never stored. Every search is measured end to end — cache hit or
+	 * loaded, as the caller waited for it — through `observer.docsSearch`.
 	 */
 	async searchDocs(
 		input: { question?: unknown; datasets?: unknown; session_id?: unknown },
 		callerSurface: Surface | null,
 	): Promise<SearchReply> {
 		const surface = callerSurface ?? "claude-code";
+		const started = performance.now();
+		let loaded = false;
+		let reply: SearchReply | null = null;
+		try {
+			reply = await this.searchDocsUnmeasured(input, surface, () => {
+				loaded = true;
+			});
+			this.noteServed("docs", surface, reply);
+			return reply;
+		} finally {
+			// Timed in `finally` so a search that threw is still in the histogram:
+			// the SLO is about what the caller waited for.
+			this.observer.docsSearch?.({
+				surface,
+				outcome: reply === null || reply.degraded === true ? "degraded" : reply.chunks.length === 0 ? "empty" : "hit",
+				cached: !loaded,
+				durationMs: performance.now() - started,
+				citations: citationProvenanceCounts(reply?.chunks ?? []),
+			});
+		}
+	}
+
+	private async searchDocsUnmeasured(
+		input: { question?: unknown; datasets?: unknown; session_id?: unknown },
+		surface: Surface,
+		noteLoaded: () => void,
+	): Promise<SearchReply> {
 		const sessionId = typeof input.session_id === "string" && input.session_id.length > 0 ? input.session_id : undefined;
 		const question = typeof input.question === "string" ? input.question : "";
 		const names = Array.isArray(input.datasets)
 			? input.datasets.filter((name): name is string => typeof name === "string").filter((name) => DEFAULT_SEARCH_DATASET_NAMES.includes(name))
 			: [...DEFAULT_SEARCH_DATASET_NAMES];
 		await this.hydrateDocsSeen();
-		const live = isSyncLive(this.docsSync);
-		const ragflow = this.config.ragflow;
-		if (names.includes("agent-skills") && !live && ragflow !== null) {
-			await this.warnDocsSyncNotLive(ragflow, surface, sessionId);
-		}
-		return searchDocs(
-			{
-				config: this.config.ragflow,
-				datasetNames: names,
-				pins: pinsFromVersions(this.docsVersions),
-				...(names.includes("agent-skills") && !live ? { degradedDatasets: ["agent-skills"] } : {}),
-				emit: (event) => this.emit(event),
-				surface,
-				...(sessionId !== undefined ? { sessionId } : {}),
-				fetchImpl: this.ragflowFetch,
-				nowMs: Date.now(),
-			},
-			question,
-		);
+		const pins = pinsFromVersions(this.docsVersions);
+		const degradedDatasets = isSyncLive(this.docsSkillsSync) ? [] : ["agent-skills"];
+		const load = (): Promise<SearchReply> => {
+			noteLoaded();
+			return searchDocs(
+				{
+					config: this.config.ragflow,
+					datasetNames: names,
+					pins,
+					degradedDatasets,
+					emit: (event) => this.emit(event),
+					surface,
+					...(sessionId !== undefined ? { sessionId } : {}),
+					fetchImpl: this.ragflowFetch,
+					datasets: this.docsDatasetList,
+					retrieval: this.config.docsRetrieval,
+					provenanceOf: (documentId) => documentProvenance(this.docsIngestSeen, documentId),
+					budgetMs: this.config.docsSearchBudgetMs,
+					breakerState: () => this.planes.gate("ragflow").breaker?.state() ?? "closed",
+				},
+				question,
+			);
+		};
+		// An empty question and an unconfigured plane are answered (degraded)
+		// without touching the cache: there is nothing to key on.
+		if (question.trim().length === 0 || this.config.ragflow === null) return load();
+		return this.cache.getOrLoad<SearchReply>({
+			klass: "docs-search",
+			surface,
+			args: { question: question.trim().replace(/\s+/g, " ").toLowerCase(), datasets: [...names].sort(), pins, degraded: degradedDatasets },
+			generations: [DOCS_GENERATION_KEY],
+			load,
+			store: searchReplyStorable,
+		});
 	}
 
 	/**
-	 * Hydrate ingest records, version pins and the sync tracker from the
-	 * state file, once per process.
+	 * Hydrate ingest records and dataset versions from the state file, once
+	 * per process.
 	 *
 	 * A missing file simply means empty tables; a corrupt one is reported
-	 * on stderr and likewise starts empty. Either way ingest proceeds and
-	 * search names the pin gap — losing state degrades, never refuses.
+	 * on stderr and likewise starts empty. Either way ingest proceeds —
+	 * losing dedup degrades to a duplicate upload, losing pins to
+	 * `unpinned` citations, never to a refusal.
 	 */
 	private hydrateDocsSeen(): Promise<void> {
 		if (!this.docsSeenReady) {
 			this.docsSeenReady = (async () => {
 				const file = this.config.docsStateFile;
 				if (!file) return;
-				const { records, versions, sync, staging, problem } = await loadIngestRecords(file);
+				const { records, versions, freshness, problem } = await loadIngestRecords(file);
 				for (const [key, record] of records) this.docsIngestSeen.set(key, record);
-				for (const [dataset, list] of versions) this.docsVersions.set(dataset, list);
-				this.docsSync = sync;
-				for (const [id, row] of staging) this.docsStaging.set(id, row);
+				for (const [dataset, list] of versions) if (!this.docsVersions.has(dataset)) this.docsVersions.set(dataset, list);
+				for (const [dataset, list] of freshness.triggers) if (!this.docsFreshnessState.triggers.has(dataset)) this.docsFreshnessState.triggers.set(dataset, list);
+				for (const [dataset, marker] of freshness.lag) if (!this.docsFreshnessState.lag.has(dataset)) this.docsFreshnessState.lag.set(dataset, marker);
 				if (problem) process.stderr.write(`[substrate] ${problem}\n`);
 			})();
 		}
@@ -2415,23 +3844,21 @@ export class Substrate {
 	}
 
 	/**
-	 * Persist ingest records, version pins and the sync tracker
-	 * best-effort, one save at a time. A failing disk never fails the
-	 * ingest it just completed; the reason lands on stderr either way.
-	 * Saves chain so overlapping ingests write whole snapshots in order
-	 * instead of interleaving them.
+	 * Persist ingest records and versions best-effort, one save at a time.
+	 * A failing disk never fails the ingest it just completed; the reason
+	 * lands on stderr either way. Saves chain so overlapping ingests write
+	 * whole snapshots in order instead of interleaving them.
 	 */
 	private persistDocsSeen(): Promise<void> {
 		const file = this.config.docsStateFile;
 		if (!file) return Promise.resolve();
 		this.docsSaveChain = this.docsSaveChain.then(() =>
-			saveIngestRecords(file, this.docsIngestSeen, { versions: this.docsVersions, sync: this.docsSync, staging: this.docsStaging }).catch((cause: unknown) => {
+			saveIngestRecords(file, this.docsIngestSeen, this.docsVersions, this.docsFreshnessState).catch((cause: unknown) => {
 				process.stderr.write(`[substrate] docs ingest records not saved — ${String(cause)}\n`);
 			}),
 		);
 		return this.docsSaveChain;
 	}
-
 
 	/**
 	 * DOCS-02: ingest pages into a docs dataset through the substrate (D25-05).
@@ -2440,7 +3867,11 @@ export class Substrate {
 	 * a redactor finding, a missing source URL, an out-of-roots path or an
 	 * over-cap page is refused with a locator-only warning event — nothing is
 	 * uploaded. `dataset` names a configured dataset; raw ids are never
-	 * accepted.
+	 * accepted. An ingest that stored anything — a successful one, or one
+	 * that failed after an earlier page landed (and, with the prune on,
+	 * deleted its predecessor) — persists the records and bumps the docs
+	 * generation, so every cached `docs_search` answer is invalidated and a
+	 * restart never names a pruned document (Greptile round 2).
 	 */
 	async ingestDocs(
 		input: { dataset?: unknown; commit?: unknown; pages?: unknown; session_id?: unknown; refresh?: unknown },
@@ -2485,6 +3916,8 @@ export class Substrate {
 				surface: callerSurface,
 				...(sessionId !== undefined ? { sessionId } : {}),
 				fetchImpl: this.ragflowFetch,
+				datasets: this.docsDatasetList,
+				prune: this.config.docsPruneSuperseded,
 			},
 			{
 				dataset: datasetName,
@@ -2501,16 +3934,217 @@ export class Substrate {
 				...(sessionId !== undefined ? { session_id: sessionId } : {}),
 			},
 		);
-		if (outcome.ok) {
-			if (meta === undefined) {
-				await this.finalizeOrdinaryVersion(outcome, datasetName, commit, callerSurface, sessionId);
-			} else if (commit !== undefined) {
-				const staged = await this.stageRefreshPart(meta, datasetName, commit, outcome, callerSurface, sessionId);
-				if (staged !== undefined) return staged;
-			}
+		if (outcome.ok || outcome.changed) {
 			await this.persistDocsSeen();
+			await this.cache.bump(DOCS_GENERATION_KEY);
 		}
 		return outcome;
+	}
+
+	// uplift-2 R6 — dataset versions and the merge-trigger, moved here from
+	// the HTTP server so they share the state file and the gated fetch.
+
+	/** The newest recorded version of a dataset, after hydration; the merge-trigger's idempotency key. */
+	async latestDocsVersion(dataset: string): Promise<DatasetVersion | undefined> {
+		await this.hydrateDocsSeen();
+		return latestVersion(this.docsVersions, dataset);
+	}
+
+	/**
+	 * A merge-trigger arrived for `dataset`. For `agent-skills` that is the
+	 * skills-sync fast-forward evidence D25-07 waits for: from here on its
+	 * citations stop carrying `pin_age_ms`. Other datasets record nothing.
+	 */
+	noteDocsTrigger(dataset: string): void {
+		if (dataset === "agent-skills") noteSkillsSyncFastForward(this.docsSkillsSync);
+	}
+
+	/**
+	 * Record a dataset version (resolve by name, create on miss), persist it
+	 * and bump the docs generation. The version store is the service's, so
+	 * the pin reaches the next search and the next trigger's idempotency
+	 * check, restart or not.
+	 */
+	async recordDocsVersion(
+		fields: { dataset: string; commit: string; content_sha256: string },
+		surface: Surface,
+	): Promise<{ ok: true; version: DatasetVersion; created: boolean } | { ok: false; reason: string }> {
+		if (this.config.ragflow === null) return { ok: false, reason: "ragflow-not-configured" };
+		await this.hydrateDocsSeen();
+		const refreshed = await refreshDataset(
+			{
+				config: this.config.ragflow,
+				versions: this.docsVersions,
+				emit: (event) => this.emit(event),
+				surface,
+				fetchImpl: this.ragflowFetch,
+				datasets: this.docsDatasetList,
+			},
+			fields,
+		);
+		if (refreshed.ok) {
+			await this.persistDocsSeen();
+			await this.cache.bump(DOCS_GENERATION_KEY);
+		}
+		return refreshed;
+	}
+
+	/**
+	 * Accept a merge-trigger into the background (uplift-2 R6).
+	 *
+	 * The route has already made its door decisions (auth, loopback, guest,
+	 * body, audit, idempotency, local checkout). Here one job per dataset
+	 * runs at a time; a trigger for a dataset whose job is still running or
+	 * queued with the same commit and hash is answered with that job's id
+	 * and `queued: true`; a different identity is queued behind it. The job
+	 * ensures the dataset exists (resolve by name, create on miss), runs the
+	 * guarded ingest of the checkout's roots, then records the version — so
+	 * a refused ingest records nothing, exactly as the inline route did.
+	 * Every outcome lands on stderr; a success lands in the version store
+	 * and the ingest records. `wait` keeps the synchronous answer for
+	 * operators and tests: 200 with the version, 503 with the reason.
+	 */
+	async startDocsRefresh(request: DocsRefreshRequest, surface: Surface, options: { wait?: boolean } = {}): Promise<DocsRefreshAccepted> {
+		// Recorded in the background and awaited only up to a short deadline, after
+		// the job is queued: a slow or hung state save must never delay the answer
+		// (the skills-sync caller gives up after 3 s). A late or failed record is
+		// logged by `recordAcceptedTrigger` and changes nothing the caller sees.
+		const recording = this.recordAcceptedTrigger(request);
+		const sameIdentity = (job: DocsRefreshJob): boolean =>
+			job.dataset === request.dataset && job.commit === request.commit && job.content_sha256 === request.content_sha256;
+		let job = [...this.docsRefreshPending.values()].find(sameIdentity);
+		const queued = job !== undefined || this.docsRefreshChains.has(request.dataset);
+		if (job === undefined) {
+			this.docsRefreshSeq += 1;
+			const id = `docs-refresh-${Date.now().toString(36)}-${this.docsRefreshSeq}`;
+			const ahead = this.docsRefreshChains.get(request.dataset) ?? Promise.resolve();
+			const done = ahead.then(() => this.runDocsRefresh(id, request, surface));
+			const settled = done.then(
+				() => undefined,
+				() => undefined,
+			);
+			job = { id, dataset: request.dataset, commit: request.commit, content_sha256: request.content_sha256, done };
+			this.docsRefreshPending.set(id, job);
+			this.docsRefreshChains.set(request.dataset, settled);
+			void settled.then(() => {
+				this.docsRefreshPending.delete(id);
+				if (this.docsRefreshChains.get(request.dataset) === settled) this.docsRefreshChains.delete(request.dataset);
+			});
+		}
+		await withDeadline(recording, TRIGGER_RECORD_DEADLINE_MS).catch(() => {
+			process.stderr.write("[substrate] docs trigger record is still pending; the job was queued and the answer is unchanged\n");
+		});
+		if (options.wait === true) {
+			const outcome = await job.done;
+			return outcome.ok ? { status: 200, body: outcome } : { status: 503, body: outcome };
+		}
+		return {
+			status: 202,
+			body: { accepted: true, job: job.id, dataset: request.dataset, commit: request.commit, ...(queued ? { queued: true } : {}) },
+		};
+	}
+
+	/** One merge-trigger job: ensure, ingest, record; never throws. */
+	private async runDocsRefresh(job: string, request: DocsRefreshRequest, surface: Surface): Promise<DocsRefreshOutcome> {
+		const finish = (outcome: DocsRefreshOutcome): DocsRefreshOutcome => {
+			process.stderr.write(
+				`[substrate] docs merge-trigger ${job} ${request.dataset} ${request.commit.slice(0, 12)}: ${
+					outcome.ok ? `${outcome.version.version} recorded${outcome.created ? " (dataset created)" : ""}` : `failed — ${redact(outcome.reason)}`
+				}\n`,
+			);
+			return outcome;
+		};
+		try {
+			if (this.config.ragflow === null) return finish({ ok: false, reason: "ragflow-not-configured", job });
+			// The guarded ingest reads the plane's dataset by name and refuses
+			// `unknown-dataset`, so on a configured plane without the dataset it
+			// must exist before that ingest runs: discover first, create only on
+			// a name-miss. Order stays honest — ensure, ingest, and only then
+			// record the version.
+			const ensured = await resolveDatasets({ config: this.config.ragflow, fetchImpl: this.ragflowFetch, datasets: this.docsDatasetList }, [request.dataset]);
+			if (!ensured.ok) return finish({ ok: false, reason: ensured.reason, job });
+			const created = ensured.datasets[0]?.created === true;
+			const ingested = await this.ingestDocs({ dataset: request.dataset, commit: request.commit, pages: await request.pages() }, surface);
+			if (!ingested.ok) return finish({ ok: false, reason: ingested.reason, job });
+			const refreshed = await this.recordDocsVersion(request, surface);
+			if (!refreshed.ok) return finish({ ok: false, reason: refreshed.reason, job });
+			return finish({ ok: true, version: refreshed.version, created: created || refreshed.created, job });
+		} catch (cause) {
+			return finish({ ok: false, reason: redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200), job });
+		}
+	}
+
+	// ── uplift-4 S7: docs freshness and trigger lag ────────────────────────────
+
+	/**
+	 * Remember an accepted merge-trigger before its job runs, so a job that never
+	 * records a version leaves the evidence the lag check needs. Off at
+	 * `SUBSTRATE_DOCS_TRIGGER_LAG_MIN=0`. A commit or hash longer than a real
+	 * one is not recorded (it could not be read back). Never throws: the
+	 * trigger is answered whatever this does.
+	 */
+	private async recordAcceptedTrigger(request: DocsRefreshRequest): Promise<void> {
+		if (this.config.docsFreshness.triggerLagMinutes === 0) return;
+		if (request.commit.length > TRIGGER_FIELD_MAX || request.content_sha256.length > TRIGGER_FIELD_MAX) return;
+		try {
+			await this.hydrateDocsSeen();
+			recordTrigger(this.docsFreshnessState.triggers, request.dataset, {
+				commit: request.commit,
+				content_sha256: request.content_sha256,
+				received_at: new Date().toISOString(),
+			});
+			await this.persistDocsSeen();
+		} catch (cause) {
+			process.stderr.write(`[substrate] docs trigger not recorded — ${redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200)}\n`);
+		}
+	}
+
+	/**
+	 * The freshness and trigger-lag verdict per dataset, from the persisted docs
+	 * state alone (no RAGFlow call). A pure read for `/slo` and `/metrics`: it
+	 * answers at once from the in-memory state, never awaits the state-file
+	 * hydrate (a slow disk must not slow a monitor route; the hydrate is only
+	 * started in the background, so the first answers after boot can be empty),
+	 * and never emits or writes: the lag warning is settled by
+	 * {@link settleDocsLag} on a timer.
+	 */
+	async evaluateDocsFreshness(now: number = Date.now()): Promise<DatasetFreshness[]> {
+		void this.hydrateDocsSeen().catch(() => undefined);
+		return this.docsFreshnessRows(now);
+	}
+
+	private docsFreshnessRows(now: number): DatasetFreshness[] {
+		const settings = this.config.docsFreshness;
+		return evaluateFreshness({
+			versions: this.docsVersions,
+			triggers: settings.triggerLagMinutes === 0 ? new Map() : this.docsFreshnessState.triggers,
+			now,
+			settings,
+		});
+	}
+
+	/**
+	 * One timer pass over the lag verdicts: hydrate the state file, evaluate,
+	 * and start the background settle (one `warning` when a dataset enters the
+	 * breach, one `note` when it clears, deduplicated through the state file's
+	 * markers). Returns at once after starting it; `LagSettler` keeps a pass
+	 * single-flight, deadline-bounded and retry-limited, and a failed delivery
+	 * is retried no sooner than a minute later. With
+	 * `SUBSTRATE_DOCS_TRIGGER_LAG_MIN=0` and no marker left behind nothing is
+	 * owed, so nothing is emitted or written. Never throws.
+	 */
+	async settleDocsLag(now: number = Date.now()): Promise<void> {
+		try {
+			await this.hydrateDocsSeen();
+			this.docsLagSettler.settle(this.docsFreshnessRows(now), this.config.docsFreshness, now);
+		} catch (cause) {
+			process.stderr.write(`[substrate] docs lag pass failed — ${redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200)}\n`);
+		}
+	}
+
+	/** Resolves when no lag pass is in flight; the shutdown seam (and a test's), never on a request path. */
+	async docsLagIdle(): Promise<void> {
+		await this.docsLagSettler.flight;
 	}
 
 	/**
@@ -3671,6 +5305,26 @@ export class Substrate {
 		return { period_start, period_end, status: "anchored", event_count: digest.event_count, root: digest.root, tx_sig: row.tx_sig, ...(memo.slot !== null ? { slot: memo.slot } : {}) };
 	}
 
+	/** Which planes have configuration, so `/slo` can tell "unconfigured" from "silent". */
+	planesConfigured(): Record<PlaneName, boolean> {
+		return {
+			greptime: this.greptime !== null,
+			index: this.index !== null,
+			cache: this.cache.health().enabled,
+			hindsight: hindsightFromEnv() !== null,
+			ragflow: this.config.ragflow !== null,
+		};
+	}
+
+	/**
+	 * The admission bucket's round trip (uplift-3 N3): one script on the cache
+	 * plane, through its gate, timeout and cooldown. The cache stays private;
+	 * this is the one door `server.ts` has to it, and it never throws.
+	 */
+	cacheScript(script: string, keys: readonly string[], args: readonly string[]): Promise<ScriptOutcome> {
+		return this.cache.script(script, keys, args);
+	}
+
 	/**
 	 * `greptime` is reachability; `eventsWritable` is whether **every** event would
 	 * be accepted. They differ on a reachable ledger that is refusing, which is
@@ -3685,30 +5339,340 @@ export class Substrate {
 	 * Probing here is deliberate: a monitor's own request retries both checks, so a
 	 * ledger that recovers — or a table recreated out of band — is picked up without
 	 * waiting for a restart.
+	 *
+	 * `planes` (uplift-2 R2) is report-only: one row per data plane with its
+	 * reachability (`null` when the plane is not configured), its breaker and
+	 * when it last failed. Hindsight and RAGFlow get one `HEALTH_PROBE_MS`-bounded
+	 * probe each, only when configured, so `/healthz` costs at most one round
+	 * trip per configured plane; the cache is never pinged. `capacity.index`
+	 * is the index's own size report, raced against the same bound and `null`
+	 * when it does not answer in time. The status code still comes from the
+	 * ledger and the index alone — see `healthStatus`.
+	 *
+	 * `ledger` (uplift-2 R5) is what makes `eventsWritable` honest: metadata says
+	 * the table *would* take a row, a one-row write into `substrate_health` says
+	 * it *did*. The probe runs at most once per `SUBSTRATE_LEDGER_WRITE_PROBE_S`
+	 * (0 turns it off, and writability is metadata-only again), through the
+	 * breaker, and never throws out of here; its last verdict folds into
+	 * `eventsWritable`, so a store that stopped taking writes turns `/healthz`
+	 * 503 within one interval by the existing status rule. `capacity.ledger` is
+	 * the ledger's size report, raced against the same bound as the index's.
+	 *
+	 * `jobs.ledger` (uplift-3 N6) is the anchor's lag, the uncovered hours and
+	 * the newest archived day from {@link ledgerJobs}: one coverage read a
+	 * minute, never more, and `null` with `jobs.ledgerReason` when it could not
+	 * be had. It does not touch the status code.
 	 */
-	async health(): Promise<{
-		index: boolean;
-		greptime: boolean;
-		appendOnly: boolean | null;
-		quotingDialectKnown: boolean;
-		eventsWritable: boolean;
-		cache: CacheHealth;
-	}> {
-		const greptime = this.greptime ? await this.greptime.ping() : false;
+	async health(): Promise<SubstrateHealth> {
+		// A store that throws is down. `/healthz` has to answer that; a 500 would hide the outage from the monitor.
+		let greptime = false;
+		if (this.greptime) {
+			try {
+				greptime = await this.greptime.ping();
+			} catch {
+				greptime = false;
+			}
+		}
 		const appendOnly = greptime ? (await this.greptime?.ensureAppendMode().catch(() => null)) ?? null : null;
 		const quotingDialectKnown = greptime
 			? await this.greptime?.probeDialect().then(() => this.greptime?.quotingDialectKnown === true).catch(() => false) ?? false
 			: false;
+		const hindsight = hindsightFromEnv();
+		const [index, capacity, hindsightOk, ragflowOk, probe, ledgerCapacity] = await Promise.all([
+			this.index
+				? Promise.resolve()
+						.then(() => this.index!.ping(HEALTH_PROBE_MS))
+						.catch(() => false)
+				: Promise.resolve(false),
+			this.index ? this.indexCapacityForHealth(this.index) : Promise.resolve(null),
+			hindsight
+				? probeHealth(hindsight, this.hindsightFetch, HEALTH_PROBE_MS).then((probed) => probed.ok, () => false)
+				: Promise.resolve(null),
+			this.config.ragflow
+				? listDatasets(this.config.ragflow, this.ragflowFetch, HEALTH_PROBE_MS).then((listed) => listed.ok, () => false)
+				: Promise.resolve(null),
+			// Only a reachable ledger is probed: an unreachable one is already not
+			// writable, and a write that cannot connect would only charge the
+			// breaker twice. Keeps the client's own write timeout rather than
+			// HEALTH_PROBE_MS so a slow day does not read as a full disk. The
+			// `.then` wrapper is for a test fake without the method: `null`, never a throw.
+			greptime
+				? Promise.resolve()
+						.then(() => this.greptime!.probeWritable(this.config.ledger.writeProbeS * 1000))
+						.catch(() => null)
+				: Promise.resolve(null),
+			greptime ? bounded(() => this.greptime!.capacity(HEALTH_PROBE_MS), HEALTH_PROBE_MS) : Promise.resolve(null),
+		]);
+		const cache = this.cache.health();
+		const breakers = this.planes.snapshots();
+		// uplift-3 N2: every size read that answered in time is one runway sample;
+		// the observer's ring dedupes and bounds them. With a capacity memo the
+		// sample is taken where the measurement is, so a reused report is not sampled again.
+		if (capacity !== null && this.config.requestPath.healthzIndexCapacityMemoS === 0) {
+			this.observer.capacity?.({ at: Date.now(), databaseBytes: capacity.databaseBytes });
+		}
+		const ok: Record<PlaneName, boolean | null> = {
+			greptime: this.greptime ? greptime : null,
+			index: this.index ? index : null,
+			// Never pinged: the last command's fate is what the cache knows. `null`
+			// while no command has run yet, so a fresh process is not reported down.
+			cache: !cache.enabled ? null : cache.connected ? true : cache.mode === "degraded" || cache.cooldownUntil !== null ? false : null,
+			hindsight: hindsightOk,
+			ragflow: ragflowOk,
+		};
+		const planes = {} as SubstrateHealth["planes"];
+		for (const plane of PLANES) {
+			planes[plane] = { ok: ok[plane], breaker: breakers[plane], lastErrorAt: breakers[plane]?.lastErrorAt ?? null };
+		}
+		const metadataWritable = greptime && quotingDialectKnown && (appendOnly === true || this.config.allowDeduplicatingLedger);
+		// A probe that has not run yet (or is off) neither proves nor disproves;
+		// only a failed one overrides the metadata.
+		const eventsWritable = metadataWritable && probe?.lastProbeOk !== false;
+		const ledgerJobs = await this.ledgerJobs();
+		const indexArchive = await this.indexArchiveHealth();
 		return {
-			index: this.index ? await this.index.ping() : false,
+			index,
 			greptime,
 			appendOnly,
 			quotingDialectKnown,
-			eventsWritable:
-				greptime && quotingDialectKnown && (appendOnly === true || this.config.allowDeduplicatingLedger),
+			eventsWritable,
+			ledger: {
+				writable: eventsWritable,
+				lastProbeAt: probe?.lastProbeAt ?? null,
+				lastProbeOk: probe?.lastProbeOk ?? null,
+				lastProbeError: probe?.lastProbeError ?? null,
+			},
 			// In-memory counters only. Health does not ping Dragonfly and does not
 			// change its status code when the cache is down.
-			cache: this.cache.health(),
+			cache,
+			planes,
+			capacity: { index: capacity, ledger: ledgerCapacity },
+			jobs: { ledger: ledgerJobs.ledger, ledgerReason: ledgerJobs.reason, ...(indexArchive !== null ? { index: indexArchive } : {}) },
 		};
 	}
+
+	/** The last index size report `SUBSTRATE_HEALTHZ_INDEX_CAPACITY_MEMO_S` keeps, and the measurement still running. */
+	private indexCapacityMemo: { at: number; value: IndexCapacity } | null = null;
+	private indexCapacityFlight: Promise<IndexCapacity> | null = null;
+
+	/**
+	 * `/healthz`'s index size report (uplift-5 U5-3). Unset (0 s) it is today's call: measured on every
+	 * computed body, bounded at `HEALTH_PROBE_MS`. With a memo a report younger than the memo is
+	 * answered from memory, and a measurement still running (one that outlived the bound) is joined,
+	 * so a slow database is asked once, not once per poll. A measurement that fails or times out
+	 * stores nothing: the last good report stays until it ages out, then the answer is `null` again.
+	 * The runway sample is taken once per measurement.
+	 */
+	private indexCapacityForHealth(index: IndexStore): Promise<IndexCapacity | null> {
+		const memoMs = this.config.requestPath.healthzIndexCapacityMemoS * 1000;
+		if (memoMs === 0) return bounded(() => index.capacity(), HEALTH_PROBE_MS);
+		const memo = this.indexCapacityMemo;
+		// A negative age (the wall clock stepped back) is expired: a report must never outlive its memo.
+		const age = memo === null ? -1 : Date.now() - memo.at;
+		if (memo !== null && age >= 0 && age < memoMs) return Promise.resolve(memo.value);
+		this.indexCapacityFlight ??= Promise.resolve()
+			.then(() => index.capacity())
+			.then((value) => {
+				this.indexCapacityMemo = { at: Date.now(), value };
+				this.observer.capacity?.({ at: this.indexCapacityMemo.at, databaseBytes: value.databaseBytes });
+				return value;
+			})
+			.finally(() => {
+				this.indexCapacityFlight = null;
+			});
+		const flight = this.indexCapacityFlight;
+		return bounded(() => flight, HEALTH_PROBE_MS);
+	}
+
+	/** The last coverage read: when it started and its value, or why it has none. */
+	private ledgerJobsMemo: { at: number; value: LedgerJobsHealth | null; reason: string | null } | null = null;
+	private ledgerJobsInFlight: Promise<void> | null = null;
+
+	/** The index archive directory's watch; `null` when `SUBSTRATE_INDEX_ARCHIVE_DIR` is unset (uplift-4 S2). Built in the constructor so the age gauge exists before any poll. */
+	private indexArchiveWatch: IndexArchiveWatch | null = null;
+
+	/** The watch's reading, bounded like every `/healthz` probe; `null` when no archive directory is configured. */
+	private async indexArchiveReading(): Promise<IndexArchiveReading | null> {
+		const watch = this.indexArchiveWatch;
+		if (watch === null) return null;
+		return (await bounded(() => watch.read(), HEALTH_PROBE_MS)) ?? { status: null, reason: `archive directory read still running after ${HEALTH_PROBE_MS} ms` };
+	}
+
+	/** `/healthz.jobs.index` (uplift-4 S2); `null` when no archive directory is configured. */
+	async indexArchiveHealth(): Promise<IndexArchiveHealth | null> {
+		const reading = await this.indexArchiveReading();
+		if (reading === null) return null;
+		return {
+			lastArchiveAt: reading.status?.lastArchiveAt ?? null,
+			ageSeconds: reading.status?.ageSeconds ?? null,
+			snapshot: reading.status?.snapshot ?? null,
+			reason: reading.reason,
+		};
+	}
+
+	/** The `index.archive.age` row for `/slo` (uplift-4 S2); `null` when no archive directory is configured. */
+	async indexArchiveSlo(): Promise<IndexArchiveSloResult | null> {
+		const reading = await this.indexArchiveReading();
+		return reading === null ? null : evaluateIndexArchiveSlo(reading, this.config.indexArchive.maxAgeHours);
+	}
+
+	/**
+	 * `/healthz.jobs.ledger` (uplift-3 N6): the anchor's lag and uncovered hours
+	 * and the newest archived day, from one `anchorCoverage` read memoised for
+	 * {@link LEDGER_JOBS_MEMO_MS}. The read is four statements including a
+	 * histogram over seven days of ingest records, which is nothing a poller
+	 * should pay per call, so: the memo is served while fresh; a stale memo
+	 * starts one read, shared by every caller that arrives while it runs; the
+	 * caller waits at most `HEALTH_PROBE_MS` for it and otherwise answers `null`
+	 * with the reason while the read finishes in the background and fills the
+	 * memo for the next call. A failed read is memoised too — as `null` with
+	 * its redacted reason — so an unreachable ledger costs one attempt a
+	 * minute, not one per poll. Never throws; `/healthz` still answers.
+	 */
+	async ledgerJobs(now: number = Date.now()): Promise<LedgerJobs> {
+		if (!this.greptime) return { ledger: null, reason: "no ledger configured" };
+		const memoised = this.memoisedLedgerJobs(now);
+		if (memoised !== null) return memoised;
+		if (this.ledgerJobsInFlight === null) {
+			const greptime = this.greptime;
+			const startedAt = now;
+			this.ledgerJobsInFlight = Promise.resolve()
+				.then(() => greptime.anchorCoverage({ now: startedAt }))
+				.then(
+					(coverage) => {
+						this.ledgerJobsMemo = {
+							at: startedAt,
+							value: {
+								anchorLagHours: coverage.lagHours,
+								uncoveredHours: coverage.uncoveredHours.length,
+								more: coverage.more,
+								newestAnchoredHour: coverage.newestAnchoredHour,
+								lastArchiveDay: coverage.lastArchiveWindow?.day ?? null,
+								computedAt: new Date(startedAt).toISOString(),
+							},
+							reason: null,
+						};
+					},
+					(cause: unknown) => {
+						// A connection error quotes its URL, password and all; the host is
+						// scrubbed by name as the write probe does.
+						const url = this.config.greptime?.url ?? "";
+						let host = "";
+						try {
+							host = new URL(url).host;
+						} catch {
+							// Not a URL, so it cannot appear in the message as a host.
+						}
+						const reason = redactKnown(redact(String(cause instanceof Error ? cause.message : cause)), [url, host]).slice(0, 300);
+						this.ledgerJobsMemo = { at: startedAt, value: null, reason };
+					},
+				)
+				.finally(() => {
+					this.ledgerJobsInFlight = null;
+				});
+		}
+		await bounded(() => this.ledgerJobsInFlight ?? Promise.resolve(), HEALTH_PROBE_MS);
+		return (
+			this.memoisedLedgerJobs(now) ?? {
+				ledger: null,
+				reason: `coverage read still running after ${HEALTH_PROBE_MS} ms; a call within ${LEDGER_JOBS_MEMO_MS / 1000} s serves its answer`,
+			}
+		);
+	}
+
+	/**
+	 * The memo as `/healthz` reports it while it is fresh, else `null`. A method
+	 * rather than an inline check because the in-flight read assigns the memo
+	 * behind an `await`, which a property narrowing made before it would not see.
+	 */
+	private memoisedLedgerJobs(now: number): LedgerJobs | null {
+		const memo = this.ledgerJobsMemo;
+		if (memo === null || now - memo.at >= LEDGER_JOBS_MEMO_MS) return null;
+		return { ledger: memo.value, reason: memo.reason };
+	}
+}
+
+/** How long one `anchorCoverage` read serves `/healthz.jobs.ledger` (uplift-3 N6). */
+export const LEDGER_JOBS_MEMO_MS = 60_000;
+
+/**
+ * `/healthz.jobs.ledger`: the numbers a monitor pages on. Present only when
+ * the memoised coverage read answered; otherwise `/healthz.jobs.ledger` is
+ * `null` and `ledgerReason` says why, so "no gap" and "could not look" never
+ * read the same.
+ */
+export interface LedgerJobsHealth {
+	/** Whole hours from the newest anchored hour to the current one; `1` is the steady state; `null` with no anchor ever. */
+	anchorLagHours: number | null;
+	/** Closed hours (≥ 1 h old, last 7 days) with ingest records and no anchor; the probe lists at most 48, see `more`. */
+	uncoveredHours: number;
+	/** Whether the probe's list was cut at its cap. */
+	more: boolean;
+	newestAnchoredHour: string | null;
+	/** The day the newest `ledger archive` note names, or `null` when none was ever recorded. */
+	lastArchiveDay: string | null;
+	/** When the memoised read started. */
+	computedAt: string;
+}
+
+/** What `Substrate.ledgerJobs` answers: the value, or `null` and the reason. */
+export interface LedgerJobs {
+	ledger: LedgerJobsHealth | null;
+	reason: string | null;
+}
+
+/** The bound on every per-plane probe `/healthz` makes. */
+export const HEALTH_PROBE_MS = 1000;
+
+export interface PlaneHealth {
+	/** Reachable as of this request; `null` when the plane is not configured (or, for the cache, not yet used). */
+	ok: boolean | null;
+	/** `null` when breakers are off (`SUBSTRATE_BREAKER=0`). */
+	breaker: BreakerSnapshot | null;
+	lastErrorAt: number | null;
+}
+
+export interface SubstrateHealth {
+	index: boolean;
+	greptime: boolean;
+	appendOnly: boolean | null;
+	quotingDialectKnown: boolean;
+	eventsWritable: boolean;
+	/** The write probe behind `eventsWritable` (uplift-2 R5); probe fields `null` until one has run. */
+	ledger: { writable: boolean } & LedgerProbe;
+	cache: CacheHealth;
+	planes: Record<PlaneName, PlaneHealth>;
+	capacity: { index: IndexCapacity | null; ledger: LedgerCapacity | null };
+	/** Scheduled-job health (uplift-3 N6): `ledger` is `null` with `ledgerReason` set when the ledger is unconfigured, unreachable or still being read. */
+	jobs: { ledger: LedgerJobsHealth | null; ledgerReason: string | null; index?: IndexArchiveHealth };
+}
+
+/** `/healthz.jobs.index` (uplift-4 S2): present only when `SUBSTRATE_INDEX_ARCHIVE_DIR` is set. */
+export interface IndexArchiveHealth {
+	/** `createdAt` of the newest complete index archive, or `null` when there is none or the directory could not be read (see `reason`). */
+	lastArchiveAt: string | null;
+	ageSeconds: number | null;
+	snapshot: string | null;
+	/** Why the directory could not be read, or `null`. */
+	reason: string | null;
+}
+
+/** `fn`'s answer, or `null` when it throws or outlasts `ms`. */
+function bounded<T>(fn: () => Promise<T>, ms: number): Promise<T | null> {
+	const { promise, resolve } = Promise.withResolvers<T | null>();
+	const timer = setTimeout(() => resolve(null), ms);
+	timer.unref?.();
+	Promise.resolve()
+		.then(fn)
+		.then(
+			(value) => {
+				clearTimeout(timer);
+				resolve(value);
+			},
+			() => {
+				clearTimeout(timer);
+				resolve(null);
+			},
+		);
+	return promise;
 }

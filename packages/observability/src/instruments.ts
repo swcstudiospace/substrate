@@ -8,6 +8,7 @@
  * `MetricRegistry` collapses it to `_overflow` past the series cap — see
  * `VOLATILE_ATTRIBUTES`.
  */
+import type { PlaneSample } from "./breaker.ts";
 import type { AttributeValue, Counter, Histogram, MetricSnapshot } from "./metrics.ts";
 import { LATENCY_BUCKETS_MS, MetricRegistry, cleanAttributes } from "./metrics.ts";
 
@@ -28,11 +29,166 @@ export const METRIC = {
 	eventsRefused: "substrate.events.refused",
 	anonymousRequests: "substrate.anonymous.requests",
 	cacheOperations: "substrate.cache.operations",
+	planeDuration: "substrate.plane.duration",
+	planeErrors: "substrate.plane.errors",
+	admissionDecisions: "substrate.admission.decisions",
+	docsSearch: "substrate.docs.search",
+	docsCitations: "substrate.docs.citations",
+	docsDuration: "substrate.docs.duration",
+	memoryExpired: "substrate.memory.expired",
+	briefResult: "substrate.brief.result",
+	briefProfileBytesSaved: "substrate.brief.profile_bytes_saved",
+	briefProfile: "substrate.brief.profile",
+	servedTokensEst: "substrate.served.tokens_est",
+	briefRecall: "substrate.brief.recall",
+	recallPrefetch: "substrate.recall.prefetch",
+	eventsReplay: "substrate.events.replay",
 } as const;
+
+/**
+ * What a brief was answered with (uplift-3 N7). `complete`: every source
+ * answered; `degraded`: some did not, thin live text; `snapshot`: some did
+ * not, last-good text served instead. The service's `BriefDetail.state` is
+ * this set — named here because it is a metric label and must stay closed.
+ */
+export const BRIEF_STATES = ["complete", "degraded", "snapshot"] as const;
+export type BriefState = (typeof BRIEF_STATES)[number];
+
+/** Whether the caller received the brief's text (`fresh`) or only its validator (`not_modified`: HTTP 304, MCP `not_modified: true`). */
+export const BRIEF_RESULTS = ["fresh", "not_modified"] as const;
+export type BriefResult = (typeof BRIEF_RESULTS)[number];
+
+/**
+ * Which rendering of a brief a caller was served (uplift-4 S1). `full` is the
+ * text every surface has always received; `compact` is the capped,
+ * state-carrying rendering. A metric label, so the set stays closed.
+ */
+export const BRIEF_PROFILES = ["full", "compact"] as const;
+export type BriefProfile = (typeof BRIEF_PROFILES)[number];
+
+/** `SUBSTRATE_BRIEF_PROFILE`: `off` and `shadow` serve `full`; `shadow` also records what `compact` would have saved. */
+export const BRIEF_PROFILE_MODES = ["off", "shadow", "enforce"] as const;
+export type BriefProfileMode = (typeof BRIEF_PROFILE_MODES)[number];
+
+/** The replies whose served size is estimated into `substrate.served.tokens_est`. */
+export const SERVED_TOKEN_TOOLS = ["brief", "recall", "docs"] as const;
+export type ServedTokenTool = (typeof SERVED_TOKEN_TOOLS)[number];
+
+/** `SUBSTRATE_BRIEF_RECALL` (uplift-4 S5): `off` does nothing, `shadow` prefetches and counts what the brief would carry, `enforce` appends the `recall` section. */
+export const BRIEF_RECALL_MODES = ["off", "shadow", "enforce"] as const;
+export type BriefRecallMode = (typeof BRIEF_RECALL_MODES)[number];
+
+/** What one brief did with the recall snapshot (`substrate.brief.recall{result}`): a metric label, so the set stays closed. */
+export const BRIEF_RECALL_RESULTS = ["included", "would_include", "cold", "stale", "disabled", "dropped_by_cap"] as const;
+export type BriefRecallResult = (typeof BRIEF_RECALL_RESULTS)[number];
+
+/** What one prefetch attempt did (`substrate.recall.prefetch{result}`). */
+export const RECALL_PREFETCH_RESULTS = ["ok", "empty", "error", "skipped_breaker", "skipped_unconfigured", "skipped_cache"] as const;
+export type RecallPrefetchResult = (typeof RECALL_PREFETCH_RESULTS)[number];
+
+/** The estimate's one rule, ceil(bytes / 4): a rough guess for English text, never a model-reported count. */
+export function estimateTokens(bytes: number): number {
+	return Number.isFinite(bytes) && bytes > 0 ? Math.ceil(bytes / 4) : 0;
+}
+
+/**
+ * The key classes of the read-through cache (uplift-4 S4) and the results one
+ * operation can have. Both are metric labels and must stay closed: a class the
+ * cache does not know is recorded as `unknown`, never as the raw string.
+ * `would_serve_stale` is only ever counted under `SUBSTRATE_CACHE_SWR=shadow`.
+ */
+export const CACHE_METRIC_CLASSES = ["brief", "memory-search", "graph-view", "brief-snapshot", "recall-snapshot", "docs-search", "budget", "gen"] as const;
+export const CACHE_METRIC_RESULTS = ["hit", "miss", "bypass", "error", "coalesced", "stale", "refresh", "would_serve_stale"] as const;
+export type CacheMetricResult = (typeof CACHE_METRIC_RESULTS)[number];
+
+/** What one docs search answered with. One series each, so the label stays bounded. */
+export const DOCS_SEARCH_OUTCOMES = ["hit", "empty", "degraded"] as const;
+export type DocsSearchOutcome = (typeof DOCS_SEARCH_OUTCOMES)[number];
+
+/**
+ * Where a citation's commit came from (uplift-3 N5): the document's own
+ * ingest record (`recorded`), a record uploaded without a commit
+ * (`unpinned`), or no record at all (`unrecorded`). The closed set the
+ * `dataset-pin:<name>:<marker>` commit markers already define.
+ */
+export const CITATION_PROVENANCES = ["recorded", "unrecorded", "unpinned"] as const;
+export type CitationProvenance = (typeof CITATION_PROVENANCES)[number];
+
+/**
+ * The end-to-end docs search histogram's bounds. The shared default set has
+ * no edge at the `docs.search.p95` objective (2,000 ms) nor at the default
+ * budget (4,000 ms), and a latency objective is only decidable at one of
+ * its histogram's own edges (`evaluateLatency`), so this histogram carries
+ * both.
+ */
+export const DOCS_LATENCY_BUCKETS_MS: readonly number[] = [25, 50, 100, 200, 400, 800, 1000, 2000, 4000, 8000];
+
+/** One finished docs search, as the service measured it around the cache wrapper. */
+export interface DocsSearchSample {
+	surface: string;
+	outcome: DocsSearchOutcome;
+	/** Whether the answer came from the cache (no plane call) or was loaded. */
+	cached: boolean;
+	durationMs: number;
+	/** How many returned citations carry each provenance; absent keys count zero. */
+	citations: Partial<Record<CitationProvenance, number>>;
+}
+
+/** What a read did with an expired memory entry: served it tagged (`report`) or left it out (`enforce`). */
+export const MEMORY_EXPIRED_MODES = ["served", "hidden"] as const;
+export type MemoryExpiredMode = (typeof MEMORY_EXPIRED_MODES)[number];
+
+/** Why a plane call failed. One series each, so the reason stays bounded. */
+export const PLANE_ERROR_REASONS = ["timeout", "network", "server", "open", "other"] as const;
+export type PlaneErrorReason = (typeof PLANE_ERROR_REASONS)[number];
+
+/**
+ * The bounded reason for one failed plane sample.
+ *
+ * `timeout` and `open` are outcomes the gate already classified. An `error`
+ * outcome carries the client's message: a `server <status>` from `gatedFetch`
+ * or a `greptime 5xx` is the plane answering broken; a socket-level message is
+ * the plane not answering at all; anything else is `other`. The message itself
+ * is never an attribute.
+ */
+export function classifyPlaneReason(sample: PlaneSample): PlaneErrorReason | null {
+	if (sample.outcome === "ok") return null;
+	if (sample.outcome === "timeout" || sample.outcome === "open") return sample.outcome;
+	const reason = sample.reason ?? "";
+	if (/\b5\d\d\b/.test(reason)) return "server";
+	if (/ECONN|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|EPIPE|EHOSTUNREACH|ENETUNREACH|unreachable|fetch failed|socket|Unable to connect|connection/i.test(reason)) {
+		return "network";
+	}
+	return "other";
+}
+
+/**
+ * The admission budget classes (uplift-3 N3). `coordination` is its own class so
+ * a heartbeat or a release never queues behind a storm of reads; a lease lost to
+ * throttling is the failure the budgets must not cause.
+ */
+export const ADMISSION_CLASSES = ["read", "write", "coordination"] as const;
+export type AdmissionClass = (typeof ADMISSION_CLASSES)[number];
+
+/**
+ * What the bucket decided. `shadow_limited` is a refusal that was not enforced
+ * (`SUBSTRATE_BUDGETS=shadow`); `bypass` is the cache not answering, which admits.
+ */
+export const ADMISSION_DECISIONS = ["allowed", "limited", "shadow_limited", "bypass"] as const;
+export type AdmissionDecision = (typeof ADMISSION_DECISIONS)[number];
 
 /** Why a `POST /events` was refused with 4xx. One series each, so the reason stays bounded. */
 export const EVENT_REFUSAL_REASONS = ["auth", "validation", "attribution", "graph_id"] as const;
 export type EventRefusalReason = (typeof EVENT_REFUSAL_REASONS)[number];
+
+/**
+ * What an idempotent `POST /events` came to (U5-4a). `deduplicated`: the key was already
+ * stored, nothing written. `appended`: the lookup missed and the event was appended.
+ * `refused`: a 400 on the idempotency rules (bad key, replay stamped past the clock bound).
+ * `lookup_failed`: the ledger read errored, so the request was answered 503 and nothing written.
+ */
+export const EVENT_REPLAY_RESULTS = ["deduplicated", "appended", "refused", "lookup_failed"] as const;
+export type EventReplayResult = (typeof EVENT_REPLAY_RESULTS)[number];
 
 /**
  * The only 400 whose reason is `graph_id`. Matched whole, because the message
@@ -139,6 +295,20 @@ export class SubstrateInstruments {
 	readonly eventsRefused: Counter;
 	readonly anonymousRequests: Counter;
 	readonly cacheOperations: Counter;
+	readonly planeDuration: Histogram;
+	readonly planeErrors: Counter;
+	readonly admissionDecisions: Counter;
+	readonly docsSearch: Counter;
+	readonly docsCitations: Counter;
+	readonly docsDuration: Histogram;
+	readonly memoryExpired: Counter;
+	readonly eventsReplay: Counter;
+	readonly briefResult: Counter;
+	readonly briefProfileBytesSaved: Counter;
+	readonly briefProfile: Counter;
+	readonly servedTokensEst: Counter;
+	readonly briefRecall: Counter;
+	readonly recallPrefetch: Counter;
 
 	constructor(registry: MetricRegistry = new MetricRegistry()) {
 		this.registry = registry;
@@ -201,13 +371,79 @@ export class SubstrateInstruments {
 			description: "POST /events refusals by reason (auth|validation|attribution|graph_id).",
 			unit: "{event}",
 		});
+		this.eventsReplay = registry.counter(METRIC.eventsReplay, {
+			description:
+				"POST /events idempotency outcomes by result (deduplicated|appended|refused|lookup_failed): a replay (or a keyed request under enforce) that took the lookup, or a request refused on the idempotency rules. Silent while SUBSTRATE_EVENT_IDEMPOTENCY is off.",
+			unit: "{event}",
+		});
 		this.anonymousRequests = registry.counter(METRIC.anonymousRequests, {
 			description: "Untokened requests accepted while anonymous mode is on, by route and claimed surface.",
 			unit: "{request}",
 		});
 		this.cacheOperations = registry.counter(METRIC.cacheOperations, {
-			description: "Read-through cache results (hit|miss|bypass|error) and the mode they were counted in.",
+			description:
+				"Read-through cache results (hit|miss|coalesced|stale|refresh|would_serve_stale|bypass|error), the key class they belong to and the mode they were counted in.",
 			unit: "{operation}",
+		});
+		this.planeDuration = registry.histogram(METRIC.planeDuration, {
+			...ms,
+			description: "Time per outbound call to a data plane, by plane, bounded op and outcome (ok|error|timeout|open).",
+		});
+		this.planeErrors = registry.counter(METRIC.planeErrors, {
+			description: "Failed plane calls by plane and reason (timeout|network|server|open|other).",
+			unit: "{call}",
+		});
+		this.admissionDecisions = registry.counter(METRIC.admissionDecisions, {
+			description: "Admission budget decisions by surface, class (read|write|coordination) and decision (allowed|limited|shadow_limited|bypass).",
+			unit: "{decision}",
+		});
+		this.docsSearch = registry.counter(METRIC.docsSearch, {
+			description: "Docs searches by surface, outcome (hit|empty|degraded) and whether the cache answered (cached=true|false).",
+			unit: "{search}",
+		});
+		this.docsCitations = registry.counter(METRIC.docsCitations, {
+			description: "Citations returned by docs searches, by commit provenance (recorded|unrecorded|unpinned).",
+			unit: "{citation}",
+		});
+		this.docsDuration = registry.histogram(METRIC.docsDuration, {
+			unit: "ms",
+			bounds: DOCS_LATENCY_BUCKETS_MS,
+			description: "End-to-end time to answer one docs search, by surface and cached. The docs.search.p95 subject: p95 <= 2000 ms.",
+		});
+		this.memoryExpired = registry.counter(METRIC.memoryExpired, {
+			description:
+				"Memory entries past their ttl met by an index read, by caller surface, memory kind and what was done (served|hidden).",
+			unit: "{entry}",
+		});
+		this.briefResult = registry.counter(METRIC.briefResult, {
+			description:
+				"Briefs answered, by surface, state (complete|degraded|snapshot) and result (fresh: text sent; not_modified: 304 or MCP not_modified).",
+			unit: "{brief}",
+		});
+		this.briefProfileBytesSaved = registry.counter(METRIC.briefProfileBytesSaved, {
+			description:
+				"Bytes the compact brief profile would save (full minus compact UTF-8 bytes, never below zero), by surface; recorded in shadow and enforce for fresh answers only.",
+			unit: "By",
+		});
+		this.briefProfile = registry.counter(METRIC.briefProfile, {
+			description:
+				"Briefs answered, by surface, the profile served (full|compact) and the SUBSTRATE_BRIEF_PROFILE mode (off|shadow|enforce).",
+			unit: "{brief}",
+		});
+		this.servedTokensEst = registry.counter(METRIC.servedTokensEst, {
+			description:
+				"ESTIMATED tokens served to callers (ceil(bytes / 4) of the reply text), by surface and tool (brief|recall|docs). Not model-reported and never added to substrate.tokens.",
+			unit: "{token}",
+		});
+		this.briefRecall = registry.counter(METRIC.briefRecall, {
+			description:
+				"Briefs answered under SUBSTRATE_BRIEF_RECALL=shadow|enforce, by surface and result (included|would_include|cold|stale|disabled|dropped_by_cap).",
+			unit: "{brief}",
+		});
+		this.recallPrefetch = registry.counter(METRIC.recallPrefetch, {
+			description:
+				"Recall snapshot refreshes, by surface and result (ok|empty|error|skipped_breaker|skipped_unconfigured|skipped_cache).",
+			unit: "{refresh}",
 		});
 	}
 
@@ -295,8 +531,34 @@ export class SubstrateInstruments {
 		this.eventsRefused.add(1, { reason: sample.reason });
 	}
 
-	recordCache(sample: { result: "hit" | "miss" | "bypass" | "error"; mode: "off" | "on" | "degraded" }): void {
-		this.cacheOperations.add(1, { result: sample.result, mode: sample.mode });
+	/** One replay or keyed `POST /events` and what became of it. The result is the closed set in `EVENT_REPLAY_RESULTS`. */
+	recordEventReplay(sample: { result: EventReplayResult }): void {
+		this.eventsReplay.add(1, { result: sample.result });
+	}
+
+	recordCache(sample: { result: CacheMetricResult; mode: "off" | "on" | "degraded"; cacheClass?: string }): void {
+		const known = sample.cacheClass !== undefined && (CACHE_METRIC_CLASSES as readonly string[]).includes(sample.cacheClass);
+		this.cacheOperations.add(1, { result: sample.result, mode: sample.mode, class: known ? (sample.cacheClass as string) : "unknown" });
+	}
+
+	/**
+	 * One outbound plane call, as `callPlane` observed it. `op` is a label the
+	 * client fixed — a route-table entry or a SQL verb — never a statement.
+	 */
+	recordPlane(sample: PlaneSample): void {
+		this.planeDuration.record(sample.durationMs, { plane: sample.plane, op: sample.op, outcome: sample.outcome });
+		const reason = classifyPlaneReason(sample);
+		if (reason !== null) this.planeErrors.add(1, { plane: sample.plane, reason });
+	}
+
+	/**
+	 * One expired memory entry an index read met (uplift-3 N4). `kind` is the
+	 * closed memory-kind vocabulary and `mode` the two-way switch, so the series
+	 * count is surfaces × kinds × 2 and nothing a caller types reaches a label.
+	 * Counted where the index is read: a cache hit serves a copy and counts nothing.
+	 */
+	recordMemoryExpired(sample: { surface: string; kind: string; mode: MemoryExpiredMode }): void {
+		this.memoryExpired.add(1, cleanAttributes({ surface: sample.surface, kind: sample.kind, mode: sample.mode }));
 	}
 
 	/**
@@ -312,4 +574,110 @@ export class SubstrateInstruments {
 			cleanAttributes({ route: sample.route, claimed_surface: sample.claimedSurface }),
 		);
 	}
+
+	/**
+	 * One admission decision (uplift-3 N3). `surface` is the bucket identity — a
+	 * known surface or `anonymous` — never a body-claimed name, so the series stay
+	 * bounded by the surface list; the other two labels are closed sets.
+	 */
+	recordAdmission(sample: { surface: string; klass: AdmissionClass; decision: AdmissionDecision }): void {
+		this.admissionDecisions.add(1, { surface: sample.surface, class: sample.klass, decision: sample.decision });
+	}
+
+	/**
+	 * One finished docs search (uplift-3 N5): its end-to-end latency as the
+	 * caller waited for it — cache hit or loaded — its bounded outcome, and
+	 * the provenance split of the citations it returned. The citation counter
+	 * is per returned citation, so `unrecorded / total` reads directly as the
+	 * share of answers the ingest records cannot vouch for.
+	 */
+	recordDocsSearch(sample: DocsSearchSample): void {
+		const cached = sample.cached ? "true" : "false";
+		this.docsDuration.record(sample.durationMs, cleanAttributes({ surface: sample.surface, cached }));
+		this.docsSearch.add(1, cleanAttributes({ surface: sample.surface, outcome: sample.outcome, cached }));
+		for (const provenance of CITATION_PROVENANCES) {
+			const count = sample.citations[provenance] ?? 0;
+			if (count > 0) this.docsCitations.add(count, { provenance });
+		}
+	}
+
+	/**
+	 * One brief answered (uplift-3 N7). Counted where the answer is decided, not
+	 * where the brief is composed: the histogram above says how long a brief
+	 * took, this says whether the caller got text or a `not_modified`, which is
+	 * the saving a conditional request buys. `state` and `result` are the closed
+	 * sets above; `surface` is bounded by the caller.
+	 */
+	recordBriefResult(sample: { surface: string; state: BriefState; result: BriefResult }): void {
+		this.briefResult.add(1, cleanAttributes({ surface: sample.surface, state: sample.state, result: sample.result }));
+	}
+
+	/**
+	 * One brief answered with its profile (uplift-4 S1). `bytesSaved` is the
+	 * full-minus-compact size of a fresh answer in `shadow` or `enforce`, null
+	 * when it is not measured (`off`, a 304, a compact rendering that failed);
+	 * a compact text longer than the full one saves nothing rather than going
+	 * negative on a monotonic counter.
+	 */
+	recordBriefProfile(sample: { surface: string; profile: BriefProfile; mode: BriefProfileMode; bytesSaved: number | null }): void {
+		this.briefProfile.add(1, cleanAttributes({ surface: sample.surface, profile: sample.profile, mode: sample.mode }));
+		if (sample.bytesSaved !== null && sample.bytesSaved > 0) {
+			this.briefProfileBytesSaved.add(sample.bytesSaved, cleanAttributes({ surface: sample.surface }));
+		}
+	}
+
+	/** One reply served, as the estimate `ceil(bytes / 4)` in `substrate.served.tokens_est`; a zero-byte reply adds nothing. */
+	recordServedTokens(sample: { surface: string; tool: ServedTokenTool; bytes: number }): void {
+		const tokens = estimateTokens(sample.bytes);
+		if (tokens > 0) this.servedTokensEst.add(tokens, cleanAttributes({ surface: sample.surface, tool: sample.tool }));
+	}
+
+	/**
+	 * The age of the newest complete index archive (a snapshot whose manifest is
+	 * on disk — the manifest is written last — not one re-verified), in seconds
+	 * (uplift-4 S2). `newestAtMs` answers the newest archive's creation time or
+	 * `null`; the age is computed from it when the registry is snapshotted, so an
+	 * export that nobody polls `/healthz` for still reports an age that grows,
+	 * never a frozen young one. The gauge has no point until there is an
+	 * archive, and a deployment that never sets `SUBSTRATE_INDEX_ARCHIVE_DIR`
+	 * never installs it.
+	 */
+	observeIndexArchiveAge(newestAtMs: () => number | null, now: () => number = Date.now): void {
+		const gauge = this.registry.gauge(INDEX_ARCHIVE_AGE_METRIC, { description: "Age of the newest complete index archive snapshot", unit: "s" });
+		gauge.observe = () => {
+			const at = newestAtMs();
+			return at === null ? null : Math.max(0, (now() - at) / 1000);
+		};
+	}
+
+	/**
+	 * The retain outbox's depth, oldest entry age and durability (uplift-4 S5).
+	 * Three gauges set from the outbox's own in-process state; no external call.
+	 * `oldestAgeSeconds` is 0 for an empty outbox.
+	 */
+	setHindsightOutbox(sample: { size: number; oldestAgeSeconds: number; durable: boolean }): void {
+		this.registry.gauge(OUTBOX_SIZE_METRIC, { description: "Retain forwards parked for replay", unit: "{entry}" }).set(sample.size);
+		this.registry.gauge(OUTBOX_OLDEST_METRIC, { description: "Age of the oldest parked retain forward; 0 when none", unit: "s" }).set(sample.oldestAgeSeconds);
+		this.registry.gauge(OUTBOX_DURABLE_METRIC, { description: "1 when the retain outbox survives a restart, 0 when it is memory only", unit: "1" }).set(sample.durable ? 1 : 0);
+	}
+
+	/** One brief's use of the recall snapshot (uplift-4 S5). `surface` is bounded by the caller; a result outside the closed set is dropped. */
+	recordBriefRecall(sample: { surface: string; result: BriefRecallResult }): void {
+		if (!(BRIEF_RECALL_RESULTS as readonly string[]).includes(sample.result)) return;
+		this.briefRecall.add(1, cleanAttributes({ surface: sample.surface, result: sample.result }));
+	}
+
+	/** One prefetch attempt (uplift-4 S5). `surface` is bounded by the caller; a result outside the closed set is dropped. */
+	recordRecallPrefetch(sample: { surface: string; result: RecallPrefetchResult }): void {
+		if (!(RECALL_PREFETCH_RESULTS as readonly string[]).includes(sample.result)) return;
+		this.recallPrefetch.add(1, cleanAttributes({ surface: sample.surface, result: sample.result }));
+	}
 }
+
+/** The gauge `observeIndexArchiveAge` installs (uplift-4 S2). */
+export const INDEX_ARCHIVE_AGE_METRIC = "substrate.index.archive.age_seconds";
+
+/** The three unlabelled gauges `setHindsightOutbox` sets (uplift-4 S5): the retain outbox, read in-process. */
+export const OUTBOX_SIZE_METRIC = "substrate.hindsight.retain_outbox.size";
+export const OUTBOX_OLDEST_METRIC = "substrate.hindsight.retain_outbox.oldest_age_seconds";
+export const OUTBOX_DURABLE_METRIC = "substrate.hindsight.retain_outbox.durable";

@@ -7,24 +7,37 @@
  * is the entire contract with an append-only store.
  */
 import { afterEach, describe, expect, test } from "bun:test";
+import { BreakerOpenError, CircuitBreaker, type PlaneGate, type PlaneSample } from "@substrate/observability";
 import { normalizeEvent } from "./event.ts";
 import {
 	AppendOnlyViolation,
 	assertAppendOnly,
 	chainTip,
+	COVERAGE_MAX_UNCOVERED,
 	DEFAULT_QUERY_LIMIT,
+	epochMsAnyUnit,
 	EVENT_COLUMNS,
+	EXPORT_INGEST_SKEW_MS,
 	GreptimeClient,
+	GreptimeBreakerOpen,
+	METRIC_SAMPLES_TABLE,
+	MetricHistoryInputError,
 	GreptimeError,
+	GreptimeUnavailable,
+	HEALTH_TABLE,
 	INGEST_LAG_MS,
 	INGEST_BUDGET_MS,
+	INGEST_RETRY_LOOKBACK_MS,
 	IngestNotRecorded,
 	MAX_QUERY_LIMIT,
 	queryLimit,
 	quote,
+	sqlOp,
+	ttlOf,
 } from "./greptime.ts";
-import type { GreptimeConfig } from "./config.ts";
+import { ConfigError, loadConfig, loadLedgerSettings, type GreptimeConfig } from "./config.ts";
 import type { EventInput } from "./types.ts";
+import { MAX_METRIC_BATCH, MAX_METRIC_POINTS, METRIC_SERIES, type MetricSampleRow } from "./metrics-history.ts";
 
 const config: GreptimeConfig = { url: "http://greptime.test", user: "u", password: "p", db: "substrate" };
 
@@ -55,6 +68,10 @@ function defaultReply(statement: string): unknown {
 	// A stub that cannot answer would look like "not confirmed" and refuse the hour.
 	if (statement.includes('SHOW CREATE TABLE "event_ingest"')) {
 		return records(["Table", "Create Table"], [["event_ingest", "... WITH( append_mode = 'true' )"]]);
+	}
+	// ensureMetricSamples asks the live table for append_mode before it is ready.
+	if (statement.includes('SHOW CREATE TABLE "metric_samples"')) {
+		return records(["Table", "Create Table"], [["metric_samples", "... WITH( append_mode = 'true', ttl = '14d' )"]]);
 	}
 	return affected;
 }
@@ -256,6 +273,100 @@ describe("sql", () => {
 		await expect(new GreptimeClient(config).sql("SELECT 1")).rejects.toThrow(GreptimeError);
 	});
 
+	test("a 5xx or an unreachable host is GreptimeUnavailable; a SQL error is not", async () => {
+		// The distinction the breaker rests on: only the first two are the store's fault.
+		stubFetch(() => new Response("nope", { status: 503 }));
+		await expect(new GreptimeClient(config).sql("SELECT 1")).rejects.toBeInstanceOf(GreptimeUnavailable);
+		globalThis.fetch = (() => Promise.reject(new Error("connect ETIMEDOUT"))) as unknown as typeof fetch;
+		await expect(new GreptimeClient(config).sql("SELECT 1")).rejects.toBeInstanceOf(GreptimeUnavailable);
+		stubFetch(() => ({ error: "table not found" }));
+		const sqlError = new GreptimeClient(config).sql("SELECT 1");
+		await expect(sqlError).rejects.toBeInstanceOf(GreptimeError);
+		await expect(sqlError).rejects.not.toBeInstanceOf(GreptimeUnavailable);
+	});
+
+	test("sqlOp is the statement's verb, never the statement", () => {
+		expect(sqlOp('SELECT "hash" FROM "agent_events"')).toBe("select");
+		expect(sqlOp("  insert into x values (1)")).toBe("insert");
+		expect(sqlOp('SHOW CREATE TABLE "agent_events"')).toBe("show");
+		expect(sqlOp("CREATE TABLE IF NOT EXISTS x")).toBe("create");
+		expect(sqlOp("DESCRIBE x")).toBe("other");
+	});
+});
+
+describe("the ledger's plane gate", () => {
+	function gate(now: () => number, failureThreshold = 5): { gate: PlaneGate; samples: PlaneSample[] } {
+		const samples: PlaneSample[] = [];
+		return {
+			gate: { plane: "greptime", breaker: new CircuitBreaker("greptime", { failureThreshold, openMs: 30_000 }, now), observe: (s) => samples.push(s) },
+			samples,
+		};
+	}
+
+	test("opens after five consecutive failures and then fails fast without touching the network", async () => {
+		let now = 1_000_000;
+		const { gate: g, samples } = gate(() => now);
+		const client = new GreptimeClient(config, { gate: g });
+		let fetches = 0;
+		globalThis.fetch = (() => {
+			fetches += 1;
+			return Promise.reject(new Error("connect ETIMEDOUT"));
+		}) as unknown as typeof fetch;
+
+		for (let i = 0; i < 5; i++) await expect(client.sql("SELECT 1")).rejects.toThrow(/unreachable/);
+		expect(fetches).toBe(5);
+		expect(g.breaker?.state()).toBe("open");
+
+		const started = performance.now();
+		const refused = client.sql("SELECT 1");
+		await expect(refused).rejects.toBeInstanceOf(GreptimeUnavailable);
+		await expect(refused).rejects.toThrow(/circuit open/);
+		expect(performance.now() - started).toBeLessThan(5);
+		expect(fetches).toBe(5);
+		expect(await client.ping()).toBe(false);
+		expect(samples.map((s) => s.outcome)).toEqual(["error", "error", "error", "error", "error", "open", "open"]);
+		expect(samples.at(-1)?.op).toBe("ping");
+
+		// Thirty seconds later one probe goes out; it succeeds and the breaker closes.
+		now += 30_000;
+		stubFetch(() => records(["n"], [[1]]));
+		expect(await client.ping()).toBe(true);
+		expect(g.breaker?.state()).toBe("closed");
+	});
+
+	test("a 5xx charges the breaker; a SQL error does not", async () => {
+		const { gate: g, samples } = gate(() => 0, 2);
+		const client = new GreptimeClient(config, { gate: g });
+		stubFetch(() => ({ error: "table not found" }));
+		await expect(client.sql("SELECT 1")).rejects.toThrow(/table not found/);
+		expect(g.breaker?.snapshot().failures).toBe(0);
+		stubFetch(() => new Response("bad gateway", { status: 502 }));
+		await expect(client.sql("SELECT 1")).rejects.toThrow(/greptime 502/);
+		await expect(client.sql("SELECT 1")).rejects.toThrow(/greptime 502/);
+		expect(g.breaker?.state()).toBe("open");
+		await expect(client.sql("SELECT 1")).rejects.toBeInstanceOf(GreptimeUnavailable);
+		expect(samples.map((s) => `${s.op}:${s.outcome}`)).toEqual(["select:ok", "select:error", "select:error", "select:open"]);
+		expect(samples[1]?.reason).toContain("greptime 502");
+	});
+
+	test("without a gate, or with breakers disabled, every call still reaches the network", async () => {
+		let fetches = 0;
+		globalThis.fetch = (() => {
+			fetches += 1;
+			return Promise.reject(new Error("connect ETIMEDOUT"));
+		}) as unknown as typeof fetch;
+		const bare = new GreptimeClient(config);
+		const off = new GreptimeClient(config, { gate: { plane: "greptime", breaker: null, observe: null } });
+		for (let i = 0; i < 7; i++) {
+			await expect(bare.sql("SELECT 1")).rejects.toThrow(/unreachable/);
+			await expect(off.sql("SELECT 1")).rejects.toThrow(/unreachable/);
+		}
+		expect(fetches).toBe(14);
+		expect(BreakerOpenError.name).toBe("BreakerOpenError");
+	});
+});
+
+describe("the ledger client, continued", () => {
 	test("sends the database as a query parameter and basic auth as a header", async () => {
 		let seenUrl = "";
 		let seenAuth: string | undefined;
@@ -476,16 +587,23 @@ describe("reads", () => {
 		expect(sql[0]).toContain('ORDER BY "ts" DESC');
 	});
 
-	test("lastHash reads the whole session, not a window of its newest rows", async () => {
+	test("lastHash reads a row window far above any real session, bounded in time and then unbounded", async () => {
 		// The regression: `ts` is collector-supplied, and the Grok collector's backfill
 		// pass appends events *older* than everything stored. A small window ordered by
 		// `ts` would not hold the real chain tip, and the next append would chain onto a
-		// hash that already had a successor — forking the session.
+		// hash that already had a successor — forking the session. The row limit is a
+		// memory guard only; the time bound (uplift-2 R5) falls back to the whole
+		// session when it sees nothing. See ledger-chain.test.ts for the bound itself.
 		const { sql } = stubFetch(() => records(["hash", "prev"], []));
 		await new GreptimeClient(config).lastHash("sess-1");
 
-		const limit = Number(sql[0]?.match(/LIMIT (\d+)/)?.[1]);
-		expect(limit).toBeGreaterThanOrEqual(10_000);
+		expect(sql).toHaveLength(2);
+		for (const statement of sql) {
+			const limit = Number(statement.match(/LIMIT (\d+)/)?.[1]);
+			expect(limit).toBeGreaterThanOrEqual(10_000);
+		}
+		expect(sql[0]).toContain('"ts" >=');
+		expect(sql[1]).not.toContain('"ts" >=');
 	});
 
 	test("lastHash finds a tip whose timestamp is older than the rest", async () => {
@@ -590,6 +708,125 @@ describe("chainTip", () => {
 
 		globalThis.fetch = (() => Promise.reject(new Error("down"))) as unknown as typeof fetch;
 		expect(await new GreptimeClient(config).ping()).toBe(false);
+	});
+});
+
+describe("eventIdsAfter", () => {
+	/** Any fixed epoch; every fixture record lands in or after this millisecond. */
+	const T0 = Date.UTC(2026, 9, 1);
+
+	/** One `event_ingest` record: the event id and the time a record for it landed. */
+	interface FixtureRecord {
+		id: string;
+		at: number;
+	}
+
+	/**
+	 * Answer `eventIdsAfter` from `table` by evaluating exactly the query the
+	 * statement must carry: rows inside the cursor's window, an event only when
+	 * no record of it sits at or before the full (ingested_at, event_id)
+	 * cursor, ordered, then limited. A statement that rescans history before
+	 * the cursor filter, pages before cutting, or drops the anti-join fails
+	 * the test instead of quietly handing back wrong positions.
+	 */
+	function stubIngestStore(table: FixtureRecord[]): { sql: string[] } {
+		return stubFetch((statement) => {
+			const window = /i\."ingested_at" >= '([^']+)'/.exec(statement);
+			const before = /p\."ingested_at" < '([^']+)'/.exec(statement);
+			const boundary = /p\."ingested_at" = '([^']+)' AND p\."event_id" <= '([^']*)'/.exec(statement);
+			const capped = /LIMIT (\d+)\s*$/.exec(statement);
+			if (!window || !before || !boundary || !capped || window[1] !== before[1] || window[1] !== boundary[1]) {
+				throw new Error(`statement is not the earliest-records-after-cursor query: ${statement}`);
+			}
+			if (!statement.includes("NOT EXISTS")) {
+				throw new Error(`statement lacks the per-event pre-cursor anti-join: ${statement}`);
+			}
+			if (statement.indexOf("LIMIT") < statement.indexOf("WHERE")) {
+				throw new Error(`statement applies its limit before the cursor boundary: ${statement}`);
+			}
+			const windowMs = Date.parse(window[1]!);
+			if (!Number.isFinite(windowMs)) throw new Error(`cursor bound is not a timestamp: ${window[1]}`);
+			// An event with any record at or before the full cursor is already
+			// delivered — its window rows (including retries) are all excluded,
+			// which is what keeps a retry from re-delivering its event.
+			const excluded = new Set<string>();
+			for (const record of table) {
+				if (record.at < windowMs || (record.at === windowMs && record.id <= (boundary[2] ?? ""))) excluded.add(record.id);
+			}
+			const positions = table
+				.filter((record) => record.at >= windowMs && !excluded.has(record.id))
+				.sort((a, b) => a.at - b.at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+				.slice(0, Number(capped[1]));
+			return records(
+				["event_id", "ingested_at"],
+				positions.map((record) => [record.id, record.at]),
+			);
+		});
+	}
+
+	test("a retried ingest record never re-delivers its event across polls", async () => {
+		const client = new GreptimeClient(config);
+		stubIngestStore([
+			{ id: "evt_1", at: T0 },
+			{ id: "evt_1", at: T0 + 5000 }, // the retry, stamped later than the first record
+			{ id: "evt_2", at: T0 + 10 },
+		]);
+
+		const first = await client.eventIdsAfter({ id: "", ingestedAt: 0 }, 50);
+		expect(first).toEqual([
+			{ id: "evt_1", ingestedAt: T0 },
+			{ id: "evt_2", ingestedAt: T0 + 10 },
+		]);
+
+		// The second poll's cursor is past the first record, so a window that
+		// merely sat at `>= cursor` would hold only the retry for evt_1 and hand
+		// the stream the same event twice. Only the earliest record counts.
+		const second = await client.eventIdsAfter({ id: "evt_1", ingestedAt: T0 }, 50);
+		expect(second).toEqual([{ id: "evt_2", ingestedAt: T0 + 10 }]);
+	});
+
+	test("more same-millisecond records than a page still advance the stream", async () => {
+		const client = new GreptimeClient(config);
+		stubIngestStore(Array.from({ length: 501 }, (_, i) => ({ id: `evt_${String(i).padStart(3, "0")}`, at: T0 })));
+
+		// A limit applied before this boundary would re-read the same first rows
+		// on every poll and freeze at evt_350 forever; the statement cuts first,
+		// so the next page is exactly the hundred records after the cursor.
+		const page = await client.eventIdsAfter({ id: "evt_350", ingestedAt: T0 }, 100);
+		expect(page.map((position) => position.id)).toEqual(Array.from({ length: 100 }, (_, i) => `evt_${String(351 + i).padStart(3, "0")}`));
+	});
+
+	test("the statement stays inside the cursor window, carries the full cursor in its anti-join, and limits last", async () => {
+		const { sql } = stubIngestStore([]);
+		await new GreptimeClient(config).eventIdsAfter({ id: "evt_9", ingestedAt: T0 }, 7);
+
+		const statement = sql[0] ?? "";
+		const at = new Date(T0).toISOString();
+		// The window: only records at or after the cursor's millisecond are
+		// considered — no poll rescans the whole history.
+		expect(statement).toContain(`SELECT i."event_id", i."ingested_at", i."event_ts" FROM "event_ingest" i`);
+		expect(statement).toContain(`i."ingested_at" >= '${at}'`);
+		// The anti-join carries the full (ingested_at, event_id) cursor, so a
+		// retry record for an event whose first record the cursor already passed
+		// is excluded with its original.
+		expect(statement).toContain("NOT EXISTS");
+		expect(statement).toContain(`p."ingested_at" < '${at}' OR (p."ingested_at" = '${at}' AND p."event_id" <= 'evt_9')`);
+		expect(statement).toContain('ORDER BY i."ingested_at" ASC, i."event_id" ASC');
+		expect(statement.indexOf("LIMIT")).toBeGreaterThan(statement.indexOf("WHERE"));
+		expect(statement.trim().endsWith("LIMIT 7")).toBe(true);
+	});
+
+	test("a record whose time is not a number is named, not skipped", async () => {
+		globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+			const statement = new URLSearchParams(String(init?.body)).get("sql") ?? "";
+			const window = /i\."ingested_at" >= '([^']+)'/.exec(statement);
+			const before = /p\."ingested_at" < '([^']+)'/.exec(statement);
+			const boundary = /p\."ingested_at" = '([^']+)' AND p\."event_id" <= '([^']*)'/.exec(statement);
+			const capped = /LIMIT (\d+)\s*$/.exec(statement);
+			const rows = window && before && boundary && capped ? [["evt_bad", null]] : [];
+			return new Response(JSON.stringify(records(["event_id", "ingested_at"], rows)), { status: 200 });
+		}) as unknown as typeof fetch;
+		await expect(new GreptimeClient(config).eventIdsAfter({ id: "", ingestedAt: 0 }, 5)).rejects.toThrow("evt_bad");
 	});
 });
 
@@ -1110,7 +1347,7 @@ describe("insertEvent ingest record", () => {
 			return true;
 		}) as typeof process.stderr.write;
 		try {
-			await new GreptimeClient(config, undefined, clock).insertEvent(event);
+			await new GreptimeClient(config, { clock }).insertEvent(event);
 		} finally {
 			process.stderr.write = original;
 		}
@@ -1463,5 +1700,1118 @@ describe("graphIngest", () => {
 				: defaultReply(statement),
 		);
 		await expect(new GreptimeClient(config).graphIngest(G)).rejects.toThrow("evt_9");
+	});
+});
+
+describe("stream reads are bounded in time (uplift-2 R5)", () => {
+	const T0 = Date.UTC(2026, 9, 13, 12);
+
+	test("eventIdsAfter bounds the anti-join's inner side to the retry lookback before the cursor", async () => {
+		const { sql } = stubFetch(() => records(["event_id", "ingested_at", "event_ts"], []));
+		await new GreptimeClient(config).eventIdsAfter({ id: "evt_9", ingestedAt: T0 }, 7);
+		const statement = sql[0] ?? "";
+		expect(INGEST_RETRY_LOOKBACK_MS).toBe(3_600_000);
+		expect(statement).toContain(`p."ingested_at" >= '${new Date(T0 - INGEST_RETRY_LOOKBACK_MS).toISOString()}'`);
+		// The lookback sits inside the anti-join, not on the outer window.
+		expect(statement.indexOf('p."ingested_at" >=')).toBeGreaterThan(statement.indexOf("NOT EXISTS"));
+		expect(() => assertAppendOnly(statement)).not.toThrow();
+	});
+
+	test("the lookback never reaches before the epoch for the ledger-start cursor", async () => {
+		const { sql } = stubFetch(() => records(["event_id", "ingested_at", "event_ts"], []));
+		await new GreptimeClient(config).eventIdsAfter({ id: "", ingestedAt: 0 }, 7);
+		expect(sql[0]).toContain(`p."ingested_at" >= '1970-01-01T00:00:00.000Z'`);
+	});
+
+	test("positions carry the event's own ts, and omit it when the record has none", async () => {
+		stubFetch(() =>
+			records(
+				["event_id", "ingested_at", "event_ts"],
+				[
+					["evt_1", T0 + 1, T0 - 500],
+					["evt_2", T0 + 2, null],
+				],
+			),
+		);
+		const positions = await new GreptimeClient(config).eventIdsAfter({ id: "", ingestedAt: T0 }, 10);
+		expect(positions).toEqual([
+			{ id: "evt_1", ingestedAt: T0 + 1, eventTs: T0 - 500 },
+			{ id: "evt_2", ingestedAt: T0 + 2 },
+		]);
+	});
+
+	test("eventsByIds brackets ts between the earliest and latest event_ts it is given", async () => {
+		const { sql } = stubFetch(() => records(["id"], []));
+		await new GreptimeClient(config).eventsByIds([
+			{ id: "evt_b", ingestedAt: T0 + 2, eventTs: T0 + 900 },
+			{ id: "evt_a", ingestedAt: T0 + 1, eventTs: T0 - 500 },
+		]);
+		const statement = sql[0] ?? "";
+		expect(statement).toContain(`"id" IN ('evt_b', 'evt_a')`);
+		expect(statement).toContain(`"ts" BETWEEN '${new Date(T0 - 500).toISOString()}' AND '${new Date(T0 + 900).toISOString()}'`);
+		expect(statement).not.toContain('"payload"');
+		expect(() => assertAppendOnly(statement)).not.toThrow();
+	});
+
+	test("eventsByIds stays unbounded for bare ids or a position without event_ts", async () => {
+		const { sql } = stubFetch(() => records(["id"], []));
+		const client = new GreptimeClient(config);
+		await client.eventsByIds(["evt_a", "evt_b"]);
+		await client.eventsByIds([{ id: "evt_a", ingestedAt: T0, eventTs: T0 }, { id: "evt_b", ingestedAt: T0 }]);
+		expect(sql).toHaveLength(2);
+		for (const statement of sql) expect(statement).not.toContain("BETWEEN");
+		expect(await client.eventsByIds([])).toEqual([]);
+	});
+
+	test("readEvents and graphIngest stay unbounded, because verify must see everything", async () => {
+		const { sql } = stubFetch(() => records(["id"], []));
+		const client = new GreptimeClient(config);
+		await client.readEvents("graph_id", "ut-1");
+		await client.graphIngest("ut-1");
+		for (const statement of sql.filter((s) => s.startsWith("SELECT"))) {
+			expect(statement).not.toContain('"ts" >=');
+			expect(statement).not.toContain("BETWEEN");
+			expect(statement).not.toContain('"ingested_at" >=');
+		}
+	});
+});
+
+describe("substrate_health and the write probe (uplift-2 R5)", () => {
+	/** The migrate stub: append_mode holds everywhere, so only the health table is of interest. */
+	function migrateReply(statement: string): unknown {
+		if (statement.includes("SHOW CREATE TABLE")) return records(["Table", "Create Table"], [["t", "... WITH( append_mode = 'true' )"]]);
+		if (statement.includes("information_schema")) return records(["column_name", "data_type", "semantic_type"], []);
+		return defaultReply(statement);
+	}
+
+	test("migrate creates substrate_health append-only with a one-day ttl, after the ledger tables", async () => {
+		const { sql } = stubFetch(migrateReply);
+		const { warnings } = await new GreptimeClient(config).migrate();
+		expect(warnings).toEqual([]);
+		const health = sql.find((s) => s.includes(`CREATE TABLE IF NOT EXISTS "${HEALTH_TABLE}"`)) ?? "";
+		expect(health).toContain('"ts" TIMESTAMP TIME INDEX');
+		expect(health).toContain('"probe" STRING');
+		expect(health).toContain("'append_mode' = 'true'");
+		expect(health).toContain("'ttl' = '1d'");
+		expect(sql.indexOf(health)).toBeGreaterThan(sql.findIndex((s) => s.includes('CREATE TABLE IF NOT EXISTS "anchors"')));
+		expect(() => assertAppendOnly(health)).not.toThrow();
+	});
+
+	test("a server that refuses the ttl option still gets the table, with a warning", async () => {
+		const { sql } = stubFetch((statement) =>
+			statement.includes(HEALTH_TABLE) && statement.includes("ttl") ? { error: "unrecognized table option" } : migrateReply(statement),
+		);
+		const { warnings } = await new GreptimeClient(config).migrate();
+		const creates = sql.filter((s) => s.includes(`CREATE TABLE IF NOT EXISTS "${HEALTH_TABLE}"`));
+		expect(creates).toHaveLength(2);
+		expect(creates[1]).not.toContain("ttl");
+		expect(creates[1]).toContain("append_mode");
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain("without a ttl");
+	});
+
+	test("writeProbe inserts one stamped row and is labelled probe in the plane series", async () => {
+		const { sql } = stubFetch();
+		const samples: PlaneSample[] = [];
+		const breaker = new CircuitBreaker("greptime", { failureThreshold: 5, openMs: 1000 }, () => 0);
+		const client = new GreptimeClient(config, {
+			clock: () => Date.UTC(2026, 9, 13, 12),
+			gate: { plane: "greptime", breaker, observe: (sample) => samples.push(sample) },
+		});
+		await client.writeProbe();
+		expect(sql[0]).toBe(`INSERT INTO "${HEALTH_TABLE}" ("ts", "probe") VALUES ('2026-10-13T12:00:00.000Z', 'healthz')`);
+		expect(samples.map((sample) => sample.op)).toEqual(["probe"]);
+		expect(() => assertAppendOnly(sql[0] ?? "")).not.toThrow();
+	});
+
+	test("probeWritable writes at most once per interval and reports the last verdict in between", async () => {
+		const { sql } = stubFetch();
+		let now = 1_000_000;
+		const client = new GreptimeClient(config, { clock: () => now });
+		const writes = () => sql.filter((s) => s.includes(HEALTH_TABLE)).length;
+
+		expect(await client.probeWritable(60_000)).toEqual({ lastProbeAt: 1_000_000, lastProbeOk: true, lastProbeError: null });
+		expect(writes()).toBe(1);
+		now += 59_999;
+		expect(await client.probeWritable(60_000)).toEqual({ lastProbeAt: 1_000_000, lastProbeOk: true, lastProbeError: null });
+		expect(writes()).toBe(1);
+		now += 1;
+		expect((await client.probeWritable(60_000)).lastProbeAt).toBe(1_060_000);
+		expect(writes()).toBe(2);
+	});
+
+	test("an interval of zero never probes and reports nothing known", async () => {
+		const { sql } = stubFetch();
+		const client = new GreptimeClient(config, { clock: () => 5 });
+		expect(await client.probeWritable(0)).toEqual({ lastProbeAt: null, lastProbeOk: null, lastProbeError: null });
+		expect(sql).toHaveLength(0);
+	});
+
+	test("a failed probe is the verdict, never a throw, with the reason redacted and the host scrubbed", async () => {
+		stubFetch(() => new Response("no space left on device while writing to http://greptime.test/data", { status: 500 }));
+		const client = new GreptimeClient(config, { clock: () => 7 });
+		const probe = await client.probeWritable(60_000);
+		expect(probe.lastProbeOk).toBe(false);
+		expect(probe.lastProbeAt).toBe(7);
+		expect(probe.lastProbeError).toContain("no space left");
+		expect(probe.lastProbeError).not.toContain("greptime.test");
+
+		// The next interval sees a recovered store.
+		stubFetch();
+		const recovered = new GreptimeClient(config, { clock: () => 8 });
+		expect((await recovered.probeWritable(60_000)).lastProbeOk).toBe(true);
+	});
+
+	test("a SQL error (the table is missing) fails the probe without charging the breaker", async () => {
+		stubFetch(() => ({ error: "table not found: substrate_health" }));
+		const breaker = new CircuitBreaker("greptime", { failureThreshold: 1, openMs: 1000 }, () => 0);
+		const client = new GreptimeClient(config, { clock: () => 9, gate: { plane: "greptime", breaker, observe: () => undefined } });
+		expect((await client.probeWritable(60_000)).lastProbeOk).toBe(false);
+		expect(breaker.state()).toBe("closed");
+	});
+
+	test("overlapping calls share one in-flight probe", async () => {
+		const { sql } = stubFetch();
+		const client = new GreptimeClient(config, { clock: () => 11 });
+		const [a, b] = await Promise.all([client.probeWritable(60_000), client.probeWritable(60_000)]);
+		expect(a).toEqual(b);
+		expect(sql.filter((s) => s.includes(HEALTH_TABLE))).toHaveLength(1);
+	});
+});
+
+describe("capacity (uplift-2 R5)", () => {
+	const COLUMNS = ["table_name", "region_rows", "disk_size", "sst_size", "index_size"];
+
+	test("joins region_statistics to tables in the configured schema and sums a table's regions", async () => {
+		const { sql } = stubFetch(() =>
+			records(COLUMNS, [
+				["agent_events", 14_302, 1_280_000, 1_250_000, 3_000],
+				["agent_events_pre_append_20260930", 9_851, 1_290_000, 1_200_000, 0],
+				["agent_events", 10, 100, 100, 0],
+				["event_ingest", 1_074, 50_000, 48_000, 0],
+			]),
+		);
+		const capacity = await new GreptimeClient(config).capacity();
+		expect(sql[0]).toContain('"information_schema"."region_statistics"');
+		expect(sql[0]).toContain('"information_schema"."tables"');
+		expect(sql[0]).toContain(`"table_schema" = 'substrate'`);
+		expect(() => assertAppendOnly(sql[0] ?? "")).not.toThrow();
+		expect(capacity).toEqual({
+			bytes: 1_280_100 + 1_290_000 + 50_000,
+			rows: 14_312 + 9_851 + 1_074,
+			tables: [
+				{ name: "agent_events_pre_append_20260930", rows: 9_851, diskBytes: 1_290_000, sstBytes: 1_200_000, indexBytes: 0 },
+				{ name: "agent_events", rows: 14_312, diskBytes: 1_280_100, sstBytes: 1_250_100, indexBytes: 3_000 },
+				{ name: "event_ingest", rows: 1_074, diskBytes: 50_000, sstBytes: 48_000, indexBytes: 0 },
+			],
+		});
+	});
+
+	test("keeps the ten largest tables by disk, totals over all of them, and reads a null cell as zero", async () => {
+		stubFetch(() => records(COLUMNS, Array.from({ length: 12 }, (_, i) => [`t${i}`, i, i * 10, null, null])));
+		const capacity = await new GreptimeClient(config).capacity();
+		expect(capacity.tables).toHaveLength(10);
+		expect(capacity.tables[0]?.name).toBe("t11");
+		expect(capacity.tables.map((table) => table.sstBytes)).toEqual(Array(10).fill(0));
+		expect(capacity.bytes).toBe(Array.from({ length: 12 }, (_, i) => i * 10).reduce((a, b) => a + b, 0));
+		expect(capacity.rows).toBe(66);
+	});
+
+	test("throws rather than inventing numbers when the store does not answer", async () => {
+		stubFetch(() => new Response("nope", { status: 503 }));
+		await expect(new GreptimeClient(config).capacity()).rejects.toBeInstanceOf(GreptimeUnavailable);
+	});
+});
+
+describe("opt-in ttl (uplift-2 R5)", () => {
+	/** Migrate stub where each retention table reports its own live ttl. */
+	function liveTtl(ttls: Partial<Record<"agent_events" | "event_ingest", string>>): { sql: string[] } {
+		return stubFetch((statement) => {
+			const table = /SHOW CREATE TABLE "([^"]+)"/.exec(statement)?.[1];
+			if (table) {
+				const ttl = ttls[table as "agent_events" | "event_ingest"];
+				return records(["Table", "Create Table"], [[table, `... WITH( append_mode = 'true'${ttl ? `, ttl = '${ttl}'` : ""} )`]]);
+			}
+			if (statement.includes("information_schema")) return records(["column_name", "data_type", "semantic_type"], []);
+			return defaultReply(statement);
+		});
+	}
+
+	test("ttlOf reads the option as Greptime prints it and as the DDL quotes it", () => {
+		expect(ttlOf("CREATE TABLE ... WITH( append_mode = 'true', ttl = '180d' )")).toBe("180d");
+		expect(ttlOf("WITH ('append_mode' = 'true', 'ttl' = '4320h')")).toBe("4320h");
+		expect(ttlOf("WITH( append_mode = 'true' )")).toBeNull();
+	});
+
+	test("sends no ALTER when SUBSTRATE_LEDGER_TTL is unset, whatever the tables carry", async () => {
+		const { sql } = liveTtl({ agent_events: "7d" });
+		const { warnings } = await new GreptimeClient(config).migrate();
+		expect(warnings).toEqual([]);
+		expect(sql.some((s) => /^ALTER/i.test(s))).toBe(false);
+	});
+
+	test("ALTERs exactly the tables whose live ttl differs, and only those", async () => {
+		const { sql } = liveTtl({ event_ingest: "180D" });
+		const client = new GreptimeClient(config, { ledger: loadLedgerSettings({ SUBSTRATE_LEDGER_TTL: "180d" }) });
+		const { warnings } = await client.migrate();
+		expect(warnings).toEqual([]);
+		expect(sql.filter((s) => s.startsWith("ALTER"))).toEqual([`ALTER TABLE "agent_events" SET 'ttl'='180d'`]);
+	});
+
+	test("a failed ALTER is a boot warning naming the live value, not a refusal to serve", async () => {
+		const { sql } = liveTtl({});
+		const base = globalThis.fetch;
+		globalThis.fetch = (async (url: string, init: RequestInit) => {
+			const statement = new URLSearchParams(String(init.body)).get("sql") ?? "";
+			if (statement.startsWith("ALTER")) {
+				sql.push(statement);
+				return new Response(JSON.stringify({ error: "permission denied" }), { status: 200 });
+			}
+			return base(url, init);
+		}) as unknown as typeof fetch;
+		const client = new GreptimeClient(config, { ledger: loadLedgerSettings({ SUBSTRATE_LEDGER_TTL: "180d" }) });
+		const { warnings } = await client.migrate();
+		expect(warnings).toHaveLength(2);
+		for (const warning of warnings) {
+			expect(warning).toContain("SUBSTRATE_LEDGER_TTL=180d was not applied");
+			expect(warning).toContain("live ttl unset");
+		}
+	});
+
+	test("an unreadable table is a warning and is not altered blind", async () => {
+		const { sql } = stubFetch((statement) =>
+			statement.includes("SHOW CREATE TABLE") ? new Response("nope", { status: 500 }) : defaultReply(statement),
+		);
+		const client = new GreptimeClient(config, { ledger: loadLedgerSettings({ SUBSTRATE_LEDGER_TTL: "180d" }) });
+		const { warnings } = await client.migrate();
+		expect(sql.some((s) => s.startsWith("ALTER"))).toBe(false);
+		expect(warnings.filter((warning) => warning.includes("could not read its ttl"))).toHaveLength(2);
+	});
+
+	test("the guarded path is the only ALTER: sql() still refuses one, and alterTtl refuses other tables and values", async () => {
+		const { sql } = stubFetch();
+		const client = new GreptimeClient(config);
+		await expect(client.sql(`ALTER TABLE "agent_events" SET 'ttl'='1d'`)).rejects.toThrow(AppendOnlyViolation);
+		await expect(client.sql(`ALTER TABLE "agent_events" DROP COLUMN "hash"`)).rejects.toThrow(AppendOnlyViolation);
+		await expect(client.alterTtl("anchors" as never, "1d")).rejects.toThrow(AppendOnlyViolation);
+		await expect(client.alterTtl("agent_events", "1.5d")).rejects.toThrow(AppendOnlyViolation);
+		await expect(client.alterTtl("agent_events", "1d; DROP TABLE x")).rejects.toThrow(AppendOnlyViolation);
+		expect(sql).toHaveLength(0);
+		await client.alterTtl("event_ingest", "4320h");
+		expect(sql).toEqual([`ALTER TABLE "event_ingest" SET 'ttl'='4320h'`]);
+		expect(sqlOp(sql[0] ?? "")).toBe("alter");
+	});
+
+	test("an invalid SUBSTRATE_LEDGER_TTL is refused at config load with a clear message; unset means no ttl", () => {
+		expect(loadConfig({}).ledger).toEqual({
+			chainCache: true,
+			chainCacheMax: 10_000,
+			chainLookbackDays: 30,
+			writeProbeS: 60,
+			ttl: null,
+			maxUncoveredHours: 2,
+			archiveDir: null,
+		});
+		expect(loadConfig({ SUBSTRATE_LEDGER_TTL: "180d" }).ledger.ttl).toBe("180d");
+		expect(loadConfig({ SUBSTRATE_LEDGER_TTL: "1h 30m" }).ledger.ttl).toBe("1h 30m");
+		for (const bad of ["1.5h", "forever", "0xABm", "180", "+1d", "1d; DROP TABLE x"]) {
+			expect(() => loadConfig({ SUBSTRATE_LEDGER_TTL: bad })).toThrow(ConfigError);
+			expect(() => loadConfig({ SUBSTRATE_LEDGER_TTL: bad })).toThrow("SUBSTRATE_LEDGER_TTL");
+		}
+		const knobs = loadLedgerSettings({
+			SUBSTRATE_LEDGER_CHAIN_CACHE: "0",
+			SUBSTRATE_LEDGER_CHAIN_CACHE_MAX: "0",
+			SUBSTRATE_LEDGER_CHAIN_LOOKBACK_DAYS: "9999",
+			SUBSTRATE_LEDGER_WRITE_PROBE_S: "nope",
+		});
+		expect(knobs).toEqual({
+			chainCache: false,
+			chainCacheMax: 1,
+			chainLookbackDays: 3650,
+			writeProbeS: 60,
+			ttl: null,
+			maxUncoveredHours: 2,
+			archiveDir: null,
+		});
+		// uplift-3 N6: the archive knobs read like the others — clamped, trimmed, unset means "not here".
+		expect(loadLedgerSettings({ SUBSTRATE_LEDGER_MAX_UNCOVERED_HOURS: "-3", SUBSTRATE_LEDGER_ARCHIVE_DIR: "  /mnt/ledger-archive " })).toMatchObject({
+			maxUncoveredHours: 0,
+			archiveDir: "/mnt/ledger-archive",
+		});
+		expect(loadLedgerSettings({ SUBSTRATE_LEDGER_ARCHIVE_DIR: "   " }).archiveDir).toBeNull();
+	});
+});
+
+describe("anchorCoverage (uplift-3 N6)", () => {
+	const HOUR = 3_600_000;
+	/** 12:00Z; `now` sits half an hour into it, so H-1 is closed and eligible and H is neither. */
+	const H = Date.UTC(2026, 9, 13, 12);
+	const NOW = H + 30 * 60_000;
+	const ANCHOR_COLUMNS = ["period_start", "period_end", "root", "event_count", "memo", "tx_sig", "signer", "cluster", "slot", "anchored_at", "stale_hashes"];
+	const anchorRow = (hour: number): unknown[] => [hour, hour + HOUR, "a".repeat(64), 3, "memo", "sig", "signer", "devnet", 1, hour + HOUR + 300_000, null];
+
+	/** The four reads, told apart by shape: newest anchor, the anchor window, the ingest histogram, the archive note. */
+	function stubCoverage(options: {
+		anchoredHours: number[];
+		eventHours: number[];
+		note?: { ts: number; id: string; payload: string };
+		notes?: Array<{ ts: number; id: string; summary: string; payload: string }>;
+	}): { sql: string[] } {
+		const notes = options.notes ?? (options.note ? [{ ...options.note, summary: "ledger archive 2026-10-12: x" }] : []);
+		return stubFetch((statement) => {
+			if (statement.includes('FROM "anchors"') && statement.includes('ORDER BY "period_start" DESC')) {
+				const newest = Math.max(...options.anchoredHours);
+				return records(["period_start"], options.anchoredHours.length > 0 ? [[newest]] : []);
+			}
+			if (statement.includes('FROM "anchors"')) return records(ANCHOR_COLUMNS, options.anchoredHours.map(anchorRow));
+			// Seconds, as `to_unixtime` answers, and a count per hour.
+			if (statement.includes("date_bin")) return records(["hour", "n"], options.eventHours.map((hour) => [hour / 1000, 7]));
+			if (statement.includes("ledger archive")) {
+				// Ordered as the statement says: by summary (the day) when it asks, else by write time.
+				const bySummary = statement.includes('ORDER BY "summary" DESC');
+				const ordered = [...notes].sort((a, b) =>
+					bySummary ? (a.summary < b.summary ? 1 : a.summary > b.summary ? -1 : b.ts - a.ts) : b.ts - a.ts,
+				);
+				return records(["ts", "id", "payload"], ordered.slice(0, 1).map((n) => [n.ts, n.id, n.payload]));
+			}
+			return defaultReply(statement);
+		});
+	}
+
+	test("names the newest anchored hour, the lag in whole hours and the eligible hours with events but no anchor", async () => {
+		const { sql } = stubCoverage({
+			anchoredHours: [H - 3 * HOUR, H - 2 * HOUR],
+			// H-3..H-1 hold events; so does the current hour, which is not eligible.
+			eventHours: [H - 3 * HOUR, H - 2 * HOUR, H - HOUR, H],
+			note: { ts: H - 9 * HOUR, id: "evt_note", payload: JSON.stringify({ action: "ledger.archive", day: "2026-10-12" }) },
+		});
+		const coverage = await new GreptimeClient(config).anchorCoverage({ now: NOW });
+		expect(coverage).toEqual({
+			newestAnchoredHour: new Date(H - 2 * HOUR).toISOString(),
+			lagHours: 2,
+			uncoveredHours: [new Date(H - HOUR).toISOString()],
+			more: false,
+			lastArchiveWindow: { day: "2026-10-12", writtenAt: new Date(H - 9 * HOUR).toISOString(), eventId: "evt_note" },
+		});
+		// Every read is bounded and append-only: the histogram and the anchor window
+		// cover the 7-day lookback, the note read is a `ts` window on the
+		// `substrate`/`note` series, and nothing is written.
+		for (const statement of sql) assertAppendOnly(statement);
+		const histogram = sql.find((s) => s.includes("date_bin")) ?? "";
+		expect(histogram).toContain(`"ingested_at" >= '${new Date(H - 7 * 24 * HOUR).toISOString()}'`);
+		expect(histogram).toContain(`"ingested_at" < '${new Date(H).toISOString()}'`);
+		expect(histogram).toContain("GROUP BY");
+		const note = sql.find((s) => s.includes("ledger archive")) ?? "";
+		expect(note).toContain(`"surface" = 'substrate' AND "kind" = 'note'`);
+		expect(note).toContain('"ts" >=');
+		expect(note).toContain("LIMIT 1");
+		expect(sql.some((s) => s.startsWith("INSERT"))).toBe(false);
+	});
+
+	test("the last archive day is the newest day in a note's summary, not the newest write: a late retry of an older day does not move it backwards", async () => {
+		const note = (day: string, ts: number, id: string): { ts: number; id: string; summary: string; payload: string } => ({
+			ts,
+			id,
+			summary: `ledger archive ${day}: 5 events, 5 ingest rows, 2 receipts`,
+			payload: JSON.stringify({ action: "ledger.archive", day }),
+		});
+		// 2026-10-11's note failed and was retried an hour ago; 2026-10-12's was stored first, at 03:30.
+		const { sql } = stubCoverage({
+			anchoredHours: [H - HOUR],
+			eventHours: [],
+			notes: [note("2026-10-12", H - 9 * HOUR, "evt_d2"), note("2026-10-11", H - HOUR, "evt_d1_retry")],
+		});
+		const coverage = await new GreptimeClient(config).anchorCoverage({ now: NOW });
+		expect(coverage.lastArchiveWindow).toEqual({ day: "2026-10-12", writtenAt: new Date(H - 9 * HOUR).toISOString(), eventId: "evt_d2" });
+		const read = sql.find((s) => s.includes("ledger archive")) ?? "";
+		expect(read).toContain('ORDER BY "summary" DESC, "ts" DESC');
+	});
+
+	test("with no anchor at all, lists the newest 48 uncovered hours and says there are more; the lag is unknown", async () => {
+		const eventHours = Array.from({ length: 60 }, (_, i) => H - (i + 1) * HOUR);
+		stubCoverage({ anchoredHours: [], eventHours });
+		const coverage = await new GreptimeClient(config).anchorCoverage({ now: NOW });
+		expect(coverage.newestAnchoredHour).toBeNull();
+		expect(coverage.lagHours).toBeNull();
+		expect(coverage.more).toBe(true);
+		expect(coverage.uncoveredHours).toHaveLength(COVERAGE_MAX_UNCOVERED);
+		expect(coverage.uncoveredHours[0]).toBe(new Date(H - 48 * HOUR).toISOString());
+		expect(coverage.uncoveredHours.at(-1)).toBe(new Date(H - HOUR).toISOString());
+		expect(coverage.lastArchiveWindow).toBeNull();
+	});
+
+	test("an hour that ended less than the lag ago is not eligible yet, so a fresh boundary never reads as a gap", async () => {
+		stubCoverage({ anchoredHours: [H - 2 * HOUR], eventHours: [H - 2 * HOUR, H - HOUR] });
+		// Two minutes into H: H-1 ended 2 min ago, inside INGEST_LAG_MS.
+		const coverage = await new GreptimeClient(config).anchorCoverage({ now: H + 2 * 60_000 });
+		expect(coverage.uncoveredHours).toEqual([]);
+		expect(coverage.lagHours).toBe(2);
+	});
+
+	test("epochMsAnyUnit reads seconds, millis, micros, nanos and ISO text as the same instant", () => {
+		const ms = Date.UTC(2026, 9, 13, 12);
+		expect(epochMsAnyUnit(ms / 1000)).toBe(ms);
+		expect(epochMsAnyUnit(ms)).toBe(ms);
+		expect(epochMsAnyUnit(ms * 1000)).toBe(ms);
+		expect(epochMsAnyUnit(ms * 1_000_000)).toBe(ms);
+		expect(epochMsAnyUnit(new Date(ms).toISOString())).toBe(ms);
+		expect(epochMsAnyUnit(null)).toBeNaN();
+		expect(epochMsAnyUnit("soon")).toBeNaN();
+	});
+});
+
+describe("exportWindow (uplift-3 N6)", () => {
+	const T1 = Date.UTC(2026, 9, 12, 10, 0, 0, 500);
+	const T2 = T1 + 1;
+	const T3 = T1 + 60_000;
+	const FROM = "2026-10-12T00:00:00.000Z";
+	const TO = "2026-10-13T00:00:00.000Z";
+	/** The injected clock: the first ingest read starts here, so a record stamped after it arrived during the export. */
+	const CLOCK = Date.UTC(2026, 9, 13, 3, 30);
+	/** Five events in `(ts, id)` order with a three-way tie on `ts`, as the server would store them. */
+	const EVENTS: Array<{ ts: number; id: string }> = [
+		{ ts: T1, id: "evt_a" },
+		{ ts: T1, id: "evt_b" },
+		{ ts: T1, id: "evt_c" },
+		{ ts: T2, id: "evt_d" },
+		{ ts: T3, id: "evt_e" },
+	];
+	const eventRow = (event: { ts: number; id: string }): unknown[] =>
+		EVENT_COLUMNS.map((column) => (column === "ts" ? event.ts : column === "id" ? event.id : column === "hash" ? "f".repeat(64) : null));
+
+	/**
+	 * A server that honours the keyset predicates and the LIMITs, so paging is exercised rather than
+	 * scripted. `filler` adds that many other events' ingest records, all inside the window and all
+	 * ingested before the page's events, so the day's ingest read needs several pages. `noRecord` are
+	 * events with no ingest record at all (evt_c, a legacy row, by default); `late` are events whose
+	 * record the bulk scan does not return but a lookup by id does — stored after the scan ran.
+	 */
+	function stubWindow(options: { filler?: number; noRecord?: string[]; late?: string[] } = {}): { sql: string[]; served: string[] } {
+		const { filler = 0, noRecord = ["evt_c"], late = [] } = options;
+		/** Every ingest row the fake returned, as `id@ingested_at`, across all statements. */
+		const served: string[] = [];
+		const { sql } = stubFetch((statement) => {
+			if (statement.includes('FROM "agent_events"')) {
+				const after = /\("ts" > '([^']+)' OR \("ts" = '([^']+)' AND "id" > '([^']+)'\)\)/.exec(statement);
+				const limit = Number(/LIMIT (\d+)/.exec(statement)?.[1]);
+				const rows = EVENTS.filter((event) => {
+					if (!after) return true;
+					const ts = Date.parse(after[1] ?? "");
+					return event.ts > ts || (event.ts === ts && event.id > (after[3] ?? ""));
+				}).slice(0, limit);
+				return records([...EVENT_COLUMNS], rows.map(eventRow));
+			}
+			if (statement.includes('FROM "event_ingest"')) {
+				// evt_c has no ingest record (a legacy row); evt_a has a retry one second
+				// later; evt_e carries a collector-supplied `ts` a day after it was ingested.
+				const rows: Array<[string, number, number]> = EVENTS.filter((event) => !noRecord.includes(event.id)).map((event) => [
+					event.id,
+					event.id === "evt_e" ? event.ts - 86_400_000 : late.includes(event.id) ? CLOCK + 1_000 : event.ts + 100,
+					event.ts,
+				]);
+				rows.push(["evt_a", T1 + 1_100, T1]);
+				// Pairs of fillers share an ingest millisecond, so a page boundary can fall inside a tie.
+				for (let i = 0; i < filler; i++) rows.push([`fill_${String(i).padStart(4, "0")}`, T1 - 10_000_000 + Math.floor(i / 2), T1]);
+				const tsBound = /"event_ts" >= '([^']+)' AND "event_ts" < '([^']+)'/.exec(statement);
+				const cursor = /\("ingested_at" > '([^']+)' OR \("ingested_at" = '([^']+)' AND "event_id" > '([^']+)'\)\)/.exec(statement);
+				const inList = /"event_id" IN \(([^)]*)\)/.exec(statement);
+				const sinceMatch = /"ingested_at" >= '([^']+)'/.exec(statement);
+				const since = sinceMatch ? Date.parse(sinceMatch[1] ?? "") : null;
+				const wanted = inList ? [...(inList[1] ?? "").matchAll(/'([^']*)'/g)].map((m) => m[1]) : null;
+				const limit = Number(/LIMIT (\d+)/.exec(statement)?.[1] ?? "100000");
+				const selected = rows
+					// A late record is not there yet for the bulk scan, only for a lookup by id.
+					.filter(([id]) => wanted !== null || !late.includes(id))
+					.filter(([id]) => wanted === null || wanted.includes(id))
+					.filter(([, ingestedAt]) => since === null || ingestedAt >= since)
+					.filter(([, , eventTs]) => !tsBound || (eventTs >= Date.parse(tsBound[1] ?? "") && eventTs < Date.parse(tsBound[2] ?? "")))
+					.filter(([id, ingestedAt]) => {
+						if (!cursor) return true;
+						const at = Date.parse(cursor[1] ?? "");
+						return ingestedAt > at || (ingestedAt === at && id > (cursor[3] ?? ""));
+					})
+					.sort((a, b) => a[1] - b[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+					.slice(0, limit);
+				for (const [id, ingestedAt] of selected) served.push(`${id}@${ingestedAt}`);
+				return records(["event_id", "ingested_at", "event_ts"], selected);
+			}
+			if (statement.includes('FROM "anchors"')) {
+				const hour = Date.UTC(2026, 9, 12, 10);
+				return records(
+					["period_start", "period_end", "root", "event_count", "memo", "tx_sig", "signer", "cluster", "slot", "anchored_at", "stale_hashes"],
+					[[hour, hour + 3_600_000, "a".repeat(64), 5, "memo", "sig", "signer", "devnet", 1, hour + 3_900_000, null]],
+				);
+			}
+			return defaultReply(statement);
+		});
+		return { sql, served };
+	}
+
+	test("keyset pages return every row exactly once across a tie on ts, and the continuation round-trips", async () => {
+		const { sql } = stubWindow();
+		const client = new GreptimeClient(config);
+		const seen: string[] = [];
+		let after: { ts: string; id: string } | undefined;
+		let pages = 0;
+		for (;;) {
+			const page = await client.exportWindow({ from: FROM, to: TO, after, limit: 2 });
+			pages++;
+			seen.push(...page.events.map((row) => String(row.id)));
+			expect(page.anchors).toHaveLength(1);
+			if (page.next === null) break;
+			// The token is the page's last row, as JSON would carry it.
+			after = JSON.parse(JSON.stringify(page.next)) as { ts: string; id: string };
+		}
+		expect(seen).toEqual(["evt_a", "evt_b", "evt_c", "evt_d", "evt_e"]);
+		expect(pages).toBe(3);
+		const reads = sql.filter((s) => s.includes('FROM "agent_events"'));
+		expect(reads[0]).not.toContain("OR (");
+		expect(reads[1]).toContain(`("ts" > '${new Date(T1).toISOString()}' OR ("ts" = '${new Date(T1).toISOString()}' AND "id" > 'evt_b'))`);
+		for (const statement of reads) {
+			expect(statement).toContain(`"ts" >= '${FROM}'`);
+			expect(statement).toContain(`"ts" < '${TO}'`);
+			expect(statement).toContain('ORDER BY "ts" ASC, "id" ASC LIMIT 2');
+			expect(statement).not.toContain("OFFSET");
+		}
+		for (const statement of sql) assertAppendOnly(statement);
+	});
+
+	test("carries each event's first ingest record by id with no ingested_at bound, so a future-stamped event keeps its record, and omits events without one", async () => {
+		const { sql } = stubWindow();
+		const page = await new GreptimeClient(config).exportWindow({ from: FROM, to: TO, limit: 10 });
+		expect(page.next).toBeNull();
+		expect(page.ingest.map((row) => row.event_id)).toEqual(["evt_a", "evt_b", "evt_d", "evt_e"]);
+		// The retry record did not move evt_a: the first one counts.
+		expect(page.ingest[0]?.ingested_at).toBe(new Date(T1 + 100).toISOString());
+		// evt_e was ingested a day before its `ts`: its record is on the page, with that stamp.
+		expect(page.ingest[3]).toEqual({ event_id: "evt_e", ingested_at: new Date(T3 - 86_400_000).toISOString(), event_ts: new Date(T3).toISOString() });
+		const ingest = sql.filter((s) => s.includes('FROM "event_ingest"'));
+		// The bulk read, then one bounded lookup for evt_c, which it did not return.
+		expect(ingest).toHaveLength(2);
+		// The window is bounded on `event_ts` (the event's own `ts`); nothing bounds `ingested_at`, and there is no per-id IN scan.
+		expect(ingest[0]).toContain(`"event_ts" >= '${FROM}' AND "event_ts" < '${TO}'`);
+		expect(ingest[0]?.split("WHERE")[1]).not.toContain('"ingested_at" >=');
+		expect(ingest[0]).not.toContain('"event_id" IN (');
+		expect(ingest[1]).toContain('"event_id" IN (');
+		expect(ingest[1]).toContain("'evt_c'");
+		expect(ingest[0]).toContain('ORDER BY "ingested_at" ASC, "event_id" ASC LIMIT 500');
+		expect(() => assertAppendOnly(ingest[0] ?? "")).not.toThrow();
+	});
+
+	test("reads the day's ingest records once for all event pages, not once per page, and pages them through a keyset cursor on the time index", async () => {
+		// 1100 earlier records of other events in the window: three ingest pages of 500, 500 and 100.
+		const { sql, served } = stubWindow({ filler: 1100 });
+		const client = new GreptimeClient(config);
+		const perPage: string[][] = [];
+		let after: { ts: string; id: string } | undefined;
+		for (;;) {
+			const page = await client.exportWindow({ from: FROM, to: TO, after, limit: 2 });
+			perPage.push(page.ingest.map((row) => row.event_id));
+			if (page.next === null) break;
+			after = page.next;
+		}
+		expect(perPage).toEqual([["evt_a", "evt_b"], ["evt_d"], ["evt_e"]]);
+		const ingest = sql.filter((s) => s.includes('FROM "event_ingest"'));
+		// Three bulk pages of 500, 500 and 100; page two of events adds one lookup for evt_c, which has no record.
+		expect(ingest).toHaveLength(4);
+		expect(ingest[0]).not.toContain("OR (");
+		// evt_e was ingested a day before its `ts`, so it opens page one and the 500th row is fill_0498.
+		// fill_0498 and fill_0499 share an ingest millisecond: the page boundary splits the tie, and the
+		// cursor's `= AND event_id >` half must pick fill_0499 up on page two.
+		expect(ingest[1]).toMatch(/\("ingested_at" > '[^']+' OR \("ingested_at" = '[^']+' AND "event_id" > 'fill_0498'\)\)/);
+		// Every row in the window was served exactly once across the three pages: none skipped, none repeated.
+		expect(served).toHaveLength(1105);
+		expect(new Set(served).size).toBe(1105);
+		for (const statement of ingest) assertAppendOnly(statement);
+
+		// A fresh export of the same window starts again from its first page: the map is re-read, never trusted across runs.
+		await client.exportWindow({ from: FROM, to: TO, limit: 10 });
+		// The three bulk pages, plus one lookup for evt_c — a legacy row with no record anywhere.
+		expect(sql.filter((s) => s.includes('"event_id" IN ('))).toHaveLength(2);
+		expect(sql.filter((s) => s.includes('FROM "event_ingest"'))).toHaveLength(8);
+	});
+
+	test("an event whose ingest record was stored after the day's map was built is found by the bounded fallback lookup, not counted as missing", async () => {
+		// evt_d's record lands after page one built the map: the bulk scan never returns it, an id lookup does.
+		const { sql } = stubWindow({ noRecord: [], late: ["evt_d"] });
+		const client = new GreptimeClient(config, { clock: () => CLOCK });
+		const first = await client.exportWindow({ from: FROM, to: TO, limit: 2 });
+		expect(first.ingest.map((row) => row.event_id)).toEqual(["evt_a", "evt_b"]);
+		expect(sql.filter((s) => s.includes('FROM "event_ingest"'))).toHaveLength(1);
+		const second = await client.exportWindow({ from: FROM, to: TO, after: first.next ?? undefined, limit: 2 });
+		// Both events on page two have a record; without the fallback evt_d would be absent and count as `ingestMissing`.
+		expect(second.ingest.map((row) => row.event_id)).toEqual(["evt_c", "evt_d"]);
+		const lookups = sql.filter((s) => s.includes('FROM "event_ingest"') && s.includes('"event_id" IN ('));
+		expect(lookups).toHaveLength(1);
+		// Only the id the map lacked, under the same `event_ts` window, and append-only.
+		expect(lookups[0]).toContain("'evt_d'");
+		expect(lookups[0]).not.toContain("'evt_c'");
+		expect(lookups[0]).toContain(`"event_ts" >= '${FROM}' AND "event_ts" < '${TO}'`);
+		assertAppendOnly(lookups[0] ?? "");
+		// The merged record is cached: a later page naming evt_d again would not look it up twice.
+		const third = await client.exportWindow({ from: FROM, to: TO, after: second.next ?? undefined, limit: 2 });
+		expect(third.ingest.map((row) => row.event_id)).toEqual(["evt_e"]);
+		expect(sql.filter((s) => s.includes('"event_id" IN ('))).toHaveLength(1);
+	});
+
+	test("an id still absent after the fallback lookup stays missing", async () => {
+		const { sql } = stubWindow({ noRecord: ["evt_c"] });
+		const client = new GreptimeClient(config);
+		const first = await client.exportWindow({ from: FROM, to: TO, limit: 2 });
+		const second = await client.exportWindow({ from: FROM, to: TO, after: first.next ?? undefined, limit: 2 });
+		expect(second.ingest.map((row) => row.event_id)).toEqual(["evt_d"]);
+		const lookups = sql.filter((s) => s.includes('"event_id" IN ('));
+		expect(lookups).toHaveLength(1);
+		expect(lookups[0]).toContain("'evt_c'");
+		expect(lookups[0]).not.toContain("'evt_d'");
+	});
+
+	test("no fallback lookup is issued when every id on the page is already in the map", async () => {
+		const { sql } = stubWindow({ noRecord: [] });
+		const client = new GreptimeClient(config);
+		let after: { ts: string; id: string } | undefined;
+		for (;;) {
+			const page = await client.exportWindow({ from: FROM, to: TO, after, limit: 2 });
+			if (page.next === null) break;
+			after = page.next;
+		}
+		const ingest = sql.filter((s) => s.includes('FROM "event_ingest"'));
+		expect(ingest).toHaveLength(1);
+		expect(ingest[0]).not.toContain('"event_id" IN (');
+	});
+
+	test("the fallback lookup is bounded on the time index: ingested_at from the first read less the skew margin, so old history is never searched", async () => {
+		const { sql } = stubWindow({ noRecord: ["evt_c"] });
+		const client = new GreptimeClient(config, { clock: () => CLOCK });
+		await client.exportWindow({ from: FROM, to: TO, limit: 10 });
+		const lookups = sql.filter((s) => s.includes('"event_id" IN ('));
+		expect(lookups).toHaveLength(1);
+		expect(lookups[0]).toContain(`"ingested_at" >= '${new Date(CLOCK - EXPORT_INGEST_SKEW_MS).toISOString()}'`);
+		expect(lookups[0]).toContain(`"event_ts" >= '${FROM}' AND "event_ts" < '${TO}'`);
+		assertAppendOnly(lookups[0] ?? "");
+	});
+
+	test("a record that lands after the first read is still found; a legacy event with no row costs one bounded lookup per page and never an unbounded one", async () => {
+		// evt_d's record is stamped after the first read; evt_c is a legacy event with no ingest row at all.
+		const { sql } = stubWindow({ noRecord: ["evt_c"], late: ["evt_d"] });
+		const client = new GreptimeClient(config, { clock: () => CLOCK });
+		const first = await client.exportWindow({ from: FROM, to: TO, limit: 2 });
+		const second = await client.exportWindow({ from: FROM, to: TO, after: first.next ?? undefined, limit: 2 });
+		expect(second.ingest.map((row) => row.event_id)).toEqual(["evt_d"]);
+		const lookups = sql.filter((s) => s.includes('"event_id" IN ('));
+		// One lookup for the page that held evt_c and evt_d, naming both ids; every lookup carries the lower bound.
+		expect(lookups).toHaveLength(1);
+		expect(lookups[0]).toContain("'evt_c'");
+		expect(lookups[0]).toContain("'evt_d'");
+		for (const statement of lookups) expect(statement).toContain('"ingested_at" >= ');
+		// The page after it holds only evt_e, in the map: nothing more is searched, and evt_c is not looked up again.
+		const third = await client.exportWindow({ from: FROM, to: TO, after: second.next ?? undefined, limit: 2 });
+		expect(third.ingest.map((row) => row.event_id)).toEqual(["evt_e"]);
+		expect(sql.filter((s) => s.includes('"event_id" IN ('))).toHaveLength(1);
+	});
+
+	test("refuses a window that is not two ISO instants in order", async () => {
+		stubWindow();
+		const client = new GreptimeClient(config);
+		await expect(client.exportWindow({ from: TO, to: FROM })).rejects.toThrow("from < to");
+		await expect(client.exportWindow({ from: "yesterday", to: TO })).rejects.toThrow("ISO");
+	});
+});
+
+describe("metric_samples (uplift-4 S6)", () => {
+	const NOW = 1_790_000_000_000;
+	const row = (over: Partial<MetricSampleRow> = {}): MetricSampleRow => ({
+		tsMs: NOW,
+		series: "brief.p95",
+		labels: { surface: "grok-bot" },
+		value: 41.5,
+		count: 12,
+		...over,
+	});
+	const creates = (sql: string[]): string[] => sql.filter((statement) => statement.startsWith(`CREATE TABLE IF NOT EXISTS "${METRIC_SAMPLES_TABLE}"`));
+	const inserts = (sql: string[]): string[] => sql.filter((statement) => statement.startsWith(`INSERT INTO "${METRIC_SAMPLES_TABLE}"`));
+
+	test("the table is created on first use only, with append_mode and the TTL in the CREATE", async () => {
+		const { sql } = stubFetch();
+		const client = new GreptimeClient(config);
+		expect(await client.recordMetricSamples([row()])).toEqual({ stored: 1, drops: {} });
+		expect(await client.recordMetricSamples([row({ tsMs: NOW + 60_000 })])).toEqual({ stored: 1, drops: {} });
+
+		expect(creates(sql)).toHaveLength(1);
+		const create = creates(sql)[0]!;
+		expect(create).toContain("WITH ('append_mode' = 'true', 'ttl' = '14d')");
+		for (const column of ['"ts" TIMESTAMP TIME INDEX', '"series" STRING', '"labels" STRING', '"kind" STRING', '"value" DOUBLE', '"count" BIGINT']) {
+			expect(create).toContain(column);
+		}
+		// `create` is already an allowed verb and the TTL needs no ALTER, so the append-only guard is untouched.
+		expect(() => assertAppendOnly(create)).not.toThrow();
+		expect(sql.some((statement) => /^ALTER/i.test(statement))).toBe(false);
+		expect(inserts(sql)).toHaveLength(2);
+		for (const statement of inserts(sql)) expect(() => assertAppendOnly(statement)).not.toThrow();
+	});
+
+	test("a configured TTL goes into the CREATE; a hostile one is refused before anything is sent", async () => {
+		const accepted = stubFetch();
+		await new GreptimeClient(config).recordMetricSamples([row()], "30d");
+		expect(creates(accepted.sql)[0]).toContain("'ttl' = '30d'");
+
+		for (const ttl of ["14d'); DROP TABLE metric_samples; --", "14d', 'append_mode' = 'false", "999d", "0d", "14 d", "1h", "", "forever", "14d; SELECT 1"]) {
+			const refused = stubFetch();
+			const result = await new GreptimeClient(config).recordMetricSamples([row(), row()], ttl);
+			expect(result).toEqual({ stored: 0, drops: { ddl: 2 } });
+			expect(refused.sql).toEqual([]);
+		}
+	});
+
+	test("one multi-row INSERT per batch, every value a literal, the kind taken from the series", async () => {
+		const { sql } = stubFetch();
+		await new GreptimeClient(config).recordMetricSamples([
+			row(),
+			row({ series: "emit.success", labels: {}, value: 0.9, count: 10 }),
+			row({ series: "admission.decisions", labels: { decision: "allowed" }, value: 3, count: 3 }),
+		]);
+		const statement = inserts(sql)[0]!;
+		expect(inserts(sql)).toHaveLength(1);
+		expect(statement).toContain('("ts", "series", "labels", "kind", "value", "count") VALUES ');
+		expect(statement.match(/\), \(/g)).toHaveLength(2);
+		expect(statement).toContain(`('${new Date(NOW).toISOString()}', 'brief.p95', '{"surface":"grok-bot"}', 'histogram', 41.5, 12)`);
+		expect(statement).toContain("'emit.success', '{}', 'ratio', 0.9, 10)");
+		expect(statement).toContain("'admission.decisions', '{\"decision\":\"allowed\"}', 'counter', 3, 3)");
+	});
+
+	test("an extended series (uplift-5 S6) is stored with its own kind and labels, and a label outside its closed set is still invalid", async () => {
+		const { sql } = stubFetch();
+		const result = await new GreptimeClient(config).recordMetricSamples([
+			row({ series: "cache.operations", labels: { result: "would_serve_stale" }, value: 4, count: 4 }),
+			row({ series: "hindsight.outbox_size", labels: {}, value: 7, count: 1 }),
+			row({ series: "memory.expired", labels: { mode: "served" }, value: 2, count: 2 }),
+			row({ series: "cache.operations", labels: { result: "x'); DROP TABLE metric_samples; --" } }),
+			row({ series: "cache.operations", labels: { mode: "served" } }),
+		]);
+		expect(result).toEqual({ stored: 3, drops: { invalid: 2 } });
+		const statement = inserts(sql)[0]!;
+		expect(statement).toContain("'cache.operations', '{\"result\":\"would_serve_stale\"}', 'counter', 4, 4)");
+		expect(statement).toContain("'hindsight.outbox_size', '{}', 'gauge', 7, 1)");
+		expect(statement).toContain("'memory.expired', '{\"mode\":\"served\"}', 'counter', 2, 2)");
+		expect(statement).not.toContain("DROP");
+	});
+
+	test("hostile series and label text cannot reach the statement: those rows are dropped as invalid", async () => {
+		const hostile = [
+			row({ series: "brief.p95', 1, 1); DROP TABLE metric_samples; --" }),
+			row({ series: "nope" }),
+			row({ series: "__proto__" }),
+			row({ labels: { surface: "x'); DROP TABLE metric_samples; --" } }),
+			row({ labels: { surface: "back\\slash'" } }),
+			row({ labels: { surface: "grok-bot", extra: "x" } }),
+			row({ labels: {} }),
+		];
+		const onlyHostile = stubFetch();
+		const client = new GreptimeClient(config);
+		expect(await client.recordMetricSamples(hostile)).toEqual({ stored: 0, drops: { invalid: hostile.length } });
+		expect(onlyHostile.sql).toEqual([]);
+
+		const mixed = stubFetch();
+		const result = await new GreptimeClient(config).recordMetricSamples([...hostile, row()]);
+		expect(result).toEqual({ stored: 1, drops: { invalid: hostile.length } });
+		const statement = inserts(mixed.sql)[0]!;
+		expect(statement).not.toContain("DROP");
+		expect(statement).not.toContain("nope");
+		expect(statement).not.toContain("slash");
+	});
+
+	test("numbers the columns cannot hold are dropped as invalid", async () => {
+		const { sql } = stubFetch();
+		const result = await new GreptimeClient(config).recordMetricSamples([
+			row({ value: Number.NaN }),
+			row({ value: Number.POSITIVE_INFINITY }),
+			row({ count: -1 }),
+			row({ count: 1.5 }),
+			row({ tsMs: Number.NaN }),
+			row({ tsMs: 0 }),
+			row({ tsMs: 9e15 }),
+		]);
+		expect(result).toEqual({ stored: 0, drops: { invalid: 7 } });
+		expect(sql).toEqual([]);
+	});
+
+	test("a batch is capped at 200 rows; the rest are counted, not sent", async () => {
+		const { sql } = stubFetch();
+		const rows = Array.from({ length: MAX_METRIC_BATCH + 50 }, (_, i) => row({ tsMs: NOW + i }));
+		const result = await new GreptimeClient(config).recordMetricSamples(rows);
+		expect(result).toEqual({ stored: MAX_METRIC_BATCH, drops: { capped: 50 } });
+		expect(inserts(sql)[0]!.match(/\), \(/g)).toHaveLength(MAX_METRIC_BATCH - 1);
+	});
+
+	test("Greptime down: the batch is dropped with a counted reason and nothing throws", async () => {
+		globalThis.fetch = (() => Promise.reject(new Error("connect ECONNREFUSED"))) as unknown as typeof fetch;
+		const result = await new GreptimeClient(config).recordMetricSamples([row(), row()]);
+		expect(result).toEqual({ stored: 0, drops: { unavailable: 2 } });
+
+		stubFetch(() => new Response("bad gateway", { status: 502 }));
+		expect(await new GreptimeClient(config).recordMetricSamples([row()])).toEqual({ stored: 0, drops: { unavailable: 1 } });
+	});
+
+	test("a refused statement is a counted reason by stage, and a failed CREATE is retried on the next call", async () => {
+		let creating = true;
+		const { sql } = stubFetch((statement) => {
+			if (statement.startsWith('CREATE TABLE IF NOT EXISTS "metric_samples"') && creating) return { error: "unsupported option" };
+			if (statement.startsWith('INSERT INTO "metric_samples"')) return { error: "column count mismatch" };
+			return defaultReply(statement);
+		});
+		const client = new GreptimeClient(config);
+		expect(await client.recordMetricSamples([row()])).toEqual({ stored: 0, drops: { ddl: 1 } });
+		creating = false;
+		expect(await client.recordMetricSamples([row(), row()])).toEqual({ stored: 0, drops: { rejected: 2 } });
+		expect(creates(sql)).toHaveLength(2);
+		// Created now: the next batch goes straight to the INSERT.
+		await client.recordMetricSamples([row()]);
+		expect(creates(sql)).toHaveLength(2);
+	});
+
+	test("an existing table without append_mode is not ready: nothing is inserted, the drop is `schema`, one line names the operator action, and a recreated table is picked up", async () => {
+		let appendMode = false;
+		const { sql } = stubFetch((statement) => {
+			if (statement.includes('SHOW CREATE TABLE "metric_samples"')) {
+				return records(["Table", "Create Table"], [["metric_samples", appendMode ? "... WITH( append_mode = 'true' )" : "... WITH( ttl = '14d' )"]]);
+			}
+			return defaultReply(statement);
+		});
+		const written: string[] = [];
+		const realWrite = process.stderr.write.bind(process.stderr);
+		process.stderr.write = ((chunk: string | Uint8Array) => {
+			written.push(String(chunk));
+			return true;
+		}) as typeof process.stderr.write;
+		try {
+			const client = new GreptimeClient(config);
+			expect(await client.recordMetricSamples([row(), row()])).toEqual({ stored: 0, drops: { schema: 2 } });
+			expect(await client.recordMetricSamples([row()])).toEqual({ stored: 0, drops: { schema: 1 } });
+			expect(inserts(sql)).toHaveLength(0);
+			// One named line, however many ticks, and it says what the operator must do (the client never drops).
+			const lines = written.filter((line) => line.includes("metric_samples"));
+			expect(lines).toHaveLength(1);
+			expect(lines[0]).toContain("append_mode");
+			expect(lines[0]).toContain("drop and recreate");
+			expect(sql.some((statement) => /^(DROP|ALTER)/i.test(statement))).toBe(false);
+
+			// The operator recreates it: the next sample re-asks and writes.
+			appendMode = true;
+			expect(await client.recordMetricSamples([row()])).toEqual({ stored: 1, drops: {} });
+			expect(inserts(sql)).toHaveLength(1);
+		} finally {
+			process.stderr.write = realWrite;
+		}
+	});
+
+	test("a table whose options cannot be read is not ready either: a counted ddl drop, retried next tick", async () => {
+		const { sql } = stubFetch((statement) => (statement.includes('SHOW CREATE TABLE "metric_samples"') ? affected : defaultReply(statement)));
+		expect(await new GreptimeClient(config).recordMetricSamples([row()])).toEqual({ stored: 0, drops: { ddl: 1 } });
+		expect(inserts(sql)).toHaveLength(0);
+	});
+
+	test("an open breaker drops the batch as breaker_open without touching the network; a timeout is a breaker failure", async () => {
+		const samples: PlaneSample[] = [];
+		const breaker = new CircuitBreaker("greptime", { failureThreshold: 2, openMs: 30_000 }, () => 0);
+		const gate: PlaneGate = { plane: "greptime", breaker, observe: (sample) => samples.push(sample) };
+		let fetches = 0;
+		globalThis.fetch = (() => {
+			fetches += 1;
+			return Promise.reject(new DOMException("timed out", "TimeoutError"));
+		}) as unknown as typeof fetch;
+		const client = new GreptimeClient(config, { gate });
+
+		expect(await client.recordMetricSamples([row()])).toEqual({ stored: 0, drops: { unavailable: 1 } });
+		expect(await client.recordMetricSamples([row()])).toEqual({ stored: 0, drops: { unavailable: 1 } });
+		expect(samples.map((sample) => sample.outcome)).toEqual(["timeout", "timeout"]);
+		expect(breaker.state()).toBe("open");
+
+		const before = fetches;
+		const started = performance.now();
+		expect(await client.recordMetricSamples([row(), row(), row()])).toEqual({ stored: 0, drops: { breaker_open: 3 } });
+		expect(fetches).toBe(before);
+		expect(performance.now() - started).toBeLessThan(50);
+		expect(new GreptimeBreakerOpen("x")).toBeInstanceOf(GreptimeUnavailable);
+	});
+
+	test("the write carries a deadline inside the gated call", async () => {
+		let signal: AbortSignal | null | undefined;
+		globalThis.fetch = (async (_url: string, init: RequestInit) => {
+			signal ??= init.signal;
+			return new Response(JSON.stringify(affected), { status: 200 });
+		}) as unknown as typeof fetch;
+		await new GreptimeClient(config).recordMetricSamples([row()]);
+		expect(signal).toBeInstanceOf(AbortSignal);
+	});
+
+	test("flag-off parity: nothing in boot or the ledger's own paths creates or touches metric_samples", async () => {
+		const { sql } = stubFetch((statement) => {
+			if (statement.includes("SHOW CREATE TABLE")) return records(["Table", "Create Table"], [["agent_events", "... WITH( append_mode = 'true' )"]]);
+			return defaultReply(statement);
+		});
+		const client = new GreptimeClient(config);
+		await client.migrate();
+		await client.insertEvent(normalizeEvent(input, null));
+		await client.probeWritable(1000);
+		expect(sql.length).toBeGreaterThan(5);
+		expect(sql.some((statement) => statement.includes(METRIC_SAMPLES_TABLE))).toBe(false);
+	});
+
+	describe("readMetricHistory", () => {
+		const TO = NOW;
+		const reply = (statement: string): unknown => {
+			if (!statement.includes("date_bin")) return defaultReply(statement);
+			return records(
+				["bucket", "labels", "value", "count"],
+				[
+					[TO - 60_000, '{"surface":"grok-bot"}', 55, 3],
+					[TO - 120_000, '{"surface":"https://internal.example","extra":1}', "7", 2],
+					[TO - 180_000, null, null, 1],
+				],
+			);
+		};
+		const select = (sql: string[]): string => sql.find((statement) => statement.includes("date_bin")) ?? "";
+
+		test("a bounded, ordered, allow-listed query; points come back oldest first with only closed labels", async () => {
+			const { sql } = stubFetch(reply);
+			const { points } = await new GreptimeClient(config).readMetricHistory({ series: "brief.p95", fromMs: TO - 3_600_000, toMs: TO, stepS: 60 });
+			const statement = select(sql);
+			expect(() => assertAppendOnly(statement)).not.toThrow();
+			expect(statement).toContain(`date_bin(INTERVAL '60 seconds', "ts") AS "bucket"`);
+			expect(statement).toContain(`FROM "metric_samples" WHERE "series" = 'brief.p95'`);
+			expect(statement).toContain(`"ts" >= '${new Date(TO - 3_600_000).toISOString()}' AND "ts" < '${new Date(TO).toISOString()}'`);
+			expect(statement).toContain('MAX("value")');
+			expect(statement).toContain(`GROUP BY "bucket", "labels" ORDER BY "bucket" DESC LIMIT ${MAX_METRIC_POINTS}`);
+			expect(points).toEqual([
+				{ tsMs: TO - 180_000, labels: {}, value: null, count: 1 },
+				{ tsMs: TO - 120_000, labels: {}, value: 7, count: 2 },
+				{ tsMs: TO - 60_000, labels: { surface: "grok-bot" }, value: 55, count: 3 },
+			]);
+		});
+
+		test("the window is capped at the TTL and the step raised until the window fits the point cap", async () => {
+			const { sql } = stubFetch(reply);
+			const client = new GreptimeClient(config);
+			const result = await client.readMetricHistory({ series: "emit.p95", fromMs: TO - 90 * 86_400_000, toMs: TO, stepS: 60 });
+			const statement = select(sql);
+			expect(statement).toContain(`"ts" >= '${new Date(TO - 14 * 86_400_000).toISOString()}'`);
+			// An unlabelled series: (buckets + 1) <= 2000, so 14 days / 1999 buckets = 605.8 s, rounded up.
+			expect(statement).toContain("INTERVAL '606 seconds'");
+			expect(result.stepS).toBe(606);
+
+			const seven = stubFetch(reply);
+			await client.readMetricHistory({ series: "emit.p95", fromMs: TO - 90 * 86_400_000, toMs: TO, stepS: 60, ttl: "7d" });
+			expect(select(seven.sql)).toContain(`"ts" >= '${new Date(TO - 7 * 86_400_000).toISOString()}'`);
+		});
+
+		test("each series is folded by its own rule", async () => {
+			const folds: Array<[string, string]> = [
+				["admission.decisions", 'SUM("value") AS "value"'],
+				["emit.success", 'SUM("value" * "count") / SUM("count") AS "value"'],
+				["brief.p50", 'AVG("value") AS "value"'],
+				["docs.p95", 'MAX("value") AS "value"'],
+			];
+			for (const [series, expression] of folds) {
+				const { sql } = stubFetch(reply);
+				await new GreptimeClient(config).readMetricHistory({ series, fromMs: TO - 3_600_000, toMs: TO, stepS: 60 });
+				expect(select(sql)).toContain(expression);
+			}
+		});
+
+		test("no SQL from input: a series outside the allow-list, a hostile TTL or a bad window never reaches the network", async () => {
+			const { sql } = stubFetch(reply);
+			const client = new GreptimeClient(config);
+			for (const series of ["", "nope", "__proto__", "constructor", "brief.p95' OR '1'='1", 'agent_events"; DROP TABLE x; --']) {
+				await expect(client.readMetricHistory({ series, fromMs: TO - 1000, toMs: TO, stepS: 60 })).rejects.toBeInstanceOf(MetricHistoryInputError);
+			}
+			await expect(client.readMetricHistory({ series: "brief.p95", fromMs: TO - 1000, toMs: TO, stepS: 60, ttl: "14d'); DROP TABLE x; --" })).rejects.toBeInstanceOf(
+				MetricHistoryInputError,
+			);
+			await expect(client.readMetricHistory({ series: "brief.p95", fromMs: TO, toMs: TO, stepS: 60 })).rejects.toBeInstanceOf(MetricHistoryInputError);
+			await expect(client.readMetricHistory({ series: "brief.p95", fromMs: Number.NaN, toMs: TO, stepS: 60 })).rejects.toBeInstanceOf(MetricHistoryInputError);
+			await expect(client.readMetricHistory({ series: "brief.p95", fromMs: TO - 1000, toMs: TO, stepS: Number.NaN })).rejects.toBeInstanceOf(MetricHistoryInputError);
+			expect(sql).toEqual([]);
+		});
+
+		test("an unreachable store is a GreptimeUnavailable the route turns into a 503", async () => {
+			globalThis.fetch = (() => Promise.reject(new Error("connect ECONNREFUSED"))) as unknown as typeof fetch;
+			await expect(new GreptimeClient(config).readMetricHistory({ series: "brief.p95", fromMs: TO - 1000, toMs: TO, stepS: 60 })).rejects.toBeInstanceOf(
+				GreptimeUnavailable,
+			);
+		});
+
+		test("a read never runs DDL, creates nothing and sends no probe: it is one SELECT", async () => {
+			const { sql } = stubFetch(reply);
+			await new GreptimeClient(config).readMetricHistory({ series: "emit.success", fromMs: TO - 3_600_000, toMs: TO, stepS: 60 });
+			expect(sql).toHaveLength(1);
+			expect(sql[0]).toMatch(/^SELECT /);
+			expect(sql.some((statement) => /^(CREATE|ALTER|DROP|INSERT)/i.test(statement) || statement.includes("LENGTH"))).toBe(false);
+		});
+
+		test("a table that does not exist yet is an empty history, with the step reported; any other error is still an error", async () => {
+			for (const message of ["Table not found: greptime.public.metric_samples", "Failed to plan SQL: Table not found: metric_samples (code 4001)"]) {
+				stubFetch(() => ({ error: message }));
+				expect(await new GreptimeClient(config).readMetricHistory({ series: "emit.success", fromMs: TO - 3_600_000, toMs: TO, stepS: 60 })).toEqual({
+					points: [],
+					stepS: 60,
+				});
+			}
+			stubFetch(() => ({ error: "Invalid argument: unknown function date_bin" }));
+			await expect(new GreptimeClient(config).readMetricHistory({ series: "emit.success", fromMs: TO - 3_600_000, toMs: TO, stepS: 60 })).rejects.toBeInstanceOf(
+				GreptimeError,
+			);
+			// A store that is down is not an empty history either, even when its text mentions a table.
+			stubFetch(() => new Response("table not found upstream", { status: 503 }));
+			await expect(new GreptimeClient(config).readMetricHistory({ series: "emit.success", fromMs: TO - 3_600_000, toMs: TO, stepS: 60 })).rejects.toBeInstanceOf(
+				GreptimeUnavailable,
+			);
+		});
+
+		test("the read carries a deadline inside the gated call", async () => {
+			let signal: AbortSignal | null | undefined;
+			globalThis.fetch = (async (_url: string, init: RequestInit) => {
+				signal ??= init.signal;
+				return new Response(JSON.stringify(reply("date_bin")), { status: 200 });
+			}) as unknown as typeof fetch;
+			const samples: PlaneSample[] = [];
+			const gate: PlaneGate = { plane: "greptime", breaker: new CircuitBreaker("greptime", { failureThreshold: 5, openMs: 1000 }, () => 0), observe: (sample) => samples.push(sample) };
+			await new GreptimeClient(config, { gate }).readMetricHistory({ series: "emit.success", fromMs: TO - 3_600_000, toMs: TO, stepS: 60 });
+			expect(signal).toBeInstanceOf(AbortSignal);
+			expect(samples.map((sample) => sample.op)).toEqual(["history"]);
+		});
+
+		test("the effective step is returned, and a labelled series over a long window keeps its OLDEST bucket inside the point cap", async () => {
+			const surfaces = [...METRIC_SERIES["brief.p95"]!.values!];
+			expect(surfaces).toHaveLength(28);
+			// A store holding a row for every surface in every bucket, answering the way the statement asks: newest first, cut at LIMIT.
+			const store = (statement: string): unknown => {
+				if (!statement.includes("date_bin")) return defaultReply(statement);
+				const step = Number(/INTERVAL '(\d+) seconds'/.exec(statement)![1]);
+				const [, from, to] = /"ts" >= '([^']+)' AND "ts" < '([^']+)'/.exec(statement)!;
+				const limit = Number(/LIMIT (\d+)$/.exec(statement)![1]);
+				const first = Math.floor(Date.parse(from!) / 1000 / step) * step * 1000;
+				const buckets: number[] = [];
+				for (let at = first; at < Date.parse(to!); at += step * 1000) buckets.push(at);
+				const rows = buckets.reverse().flatMap((at) => surfaces.map((surface) => [at, JSON.stringify({ surface }), 10, 1]));
+				return records(["bucket", "labels", "value", "count"], rows.slice(0, limit));
+			};
+			for (const days of [1, 14]) {
+				const { sql } = stubFetch(store);
+				const result = await new GreptimeClient(config).readMetricHistory({ series: "brief.p95", fromMs: TO - days * 86_400_000, toMs: TO, stepS: 60 });
+				const step = Number(/INTERVAL '(\d+) seconds'/.exec(select(sql))![1]);
+				expect(result.stepS).toBe(step);
+				// Raised far above the 60 s asked for: one day is ~20 minutes, 14 days ~5 hours.
+				expect(step).toBeGreaterThan(60);
+				const oldestBucket = Math.floor((TO - days * 86_400_000) / 1000 / step) * step * 1000;
+				expect(result.points[0]?.tsMs).toBe(oldestBucket);
+				expect(result.points.length).toBeLessThanOrEqual(MAX_METRIC_POINTS);
+				// Nothing was cut: every bucket of the window has all 28 surfaces.
+				expect(result.points.length % 28).toBe(0);
+				expect(new Set(result.points.map((point) => point.labels.surface)).size).toBe(28);
+			}
+			// The old rule (step raised only to window / 2000, ignoring labels) would have cut the oldest days: pin that the cap bites without the label term.
+			const old = Math.ceil((14 * 86_400) / MAX_METRIC_POINTS);
+			expect(Math.ceil((14 * 86_400) / old + 1) * 28).toBeGreaterThan(MAX_METRIC_POINTS);
+		});
 	});
 });

@@ -1,5 +1,5 @@
 /**
- * `memory_recall`: Hindsight recall as an explicit tool, never in the brief.
+ * `memory_recall`: Hindsight recall as an explicit tool; the brief only ever reads a warm cache snapshot of it.
  *
  * DOCS-04's read half (D26-03, D26-05): a bounded fan-out over the configured
  * explicit `sub-*` bank list — the caller's bank first, then the rest — under
@@ -9,8 +9,13 @@
  * D26-08); reads emit nothing (D26-07).
  *
  * The negative gates live with the tests: an unlisted surface never falls
- * back to a shared bank, and the brief's synchronous compose path never
- * imports `planes/hindsight` (the acc30a8 4 s in-brief recall anti-pattern).
+ * back to a shared bank, and the brief never calls the plane. Since uplift-4
+ * S5 the brief may carry a `Recalled context` section, but it reads it ONLY
+ * from the `recall-snapshot` cache class (a cache read an injected function
+ * performs); the prefetcher in `recall-snapshot.ts` is what fills it, off
+ * the request path. `brief.ts`, `brief-profile.ts` and `recall-snapshot.ts`
+ * never import `planes/hindsight` (the acc30a8 4 s in-brief recall
+ * anti-pattern).
  */
 import {
 	MAX_RECALL_PER_BANK,
@@ -102,6 +107,34 @@ function derive(bank: string, hit: RecallHit): DerivedMemoryHit {
 	};
 }
 
+/** The fan-out's shared abort budget when the caller names none (`HINDSIGHT_RECALL_BUDGET_MS`). */
+export const DEFAULT_RECALL_BUDGET_MS = 4000;
+
+/**
+ * Collapse the same memory recalled more than once (uplift-2 R3). A
+ * `document_id` is unique only *within* a bank — `retainDocumentId` keys on
+ * scope, kind and subject, not the writer, so two surfaces' different facts
+ * about one subject share an id across their banks — so the first identity
+ * is `bank + document_id` (`bank + text` for hits retained without an id).
+ * Across banks only hits with identical text are the same memory and
+ * collapse; different text under one id stays as two hits. The best-scoring
+ * copy survives with its own bank attribution; ties keep the earlier bank,
+ * which is the caller's own when it is listed.
+ */
+export function dedupeHits<T extends { bank: string; hit: RecallHit }>(scored: T[]): T[] {
+	const keep = <K>(items: T[], keyOf: (item: T) => K): T[] => {
+		const best = new Map<K, T>();
+		for (const candidate of items) {
+			const key = keyOf(candidate);
+			const current = best.get(key);
+			if (current === undefined || (candidate.hit.score ?? 0) > (current.hit.score ?? 0)) best.set(key, candidate);
+		}
+		return [...best.values()];
+	};
+	const withinBank = keep(scored, ({ bank, hit }) => `${bank}\u0000${hit.document_id !== undefined ? `doc:${hit.document_id}` : `text:${hit.text}`}`);
+	return keep(withinBank, ({ hit }) => hit.text);
+}
+
 export async function recallMemories(
 	deps: RecallDeps,
 	query: string,
@@ -123,13 +156,19 @@ export async function recallMemories(
 	const config = deps.config;
 	const fetchImpl = deps.fetchImpl ?? fetch;
 	const controller = new AbortController();
-	const budget = setTimeout(() => controller.abort(), deps.budgetMs ?? 4000);
-	let settled: PromiseSettledResult<{ bank: string; hits: RecallHit[]; reason?: string }>[];
+	const budget = setTimeout(() => controller.abort(), deps.budgetMs ?? DEFAULT_RECALL_BUDGET_MS);
+	let settled: PromiseSettledResult<{ bank: string; hits: RecallHit[]; reason?: string; timedOut?: boolean }>[];
 	try {
 		settled = await Promise.allSettled(
 			resolved.banks.map(async (bank) => {
 				const recalled = await recallBank(config, bank, { query, signal: controller.signal }, fetchImpl);
-				if (!recalled.ok) return { bank, hits: [], reason: recalled.error.message };
+				if (!recalled.ok) {
+					// The shared budget is the only abort source on this leg, so a
+					// timeout here is the budget firing (uplift-2 R3): named as such,
+					// so `memory_search` can tell "Hindsight was slow" from "down".
+					if (recalled.error.kind === "timeout") return { bank, hits: [], reason: "budget exceeded", timedOut: true };
+					return { bank, hits: [], reason: recalled.error.message };
+				}
 				return { bank, hits: recalled.value };
 			}),
 		);
@@ -137,6 +176,7 @@ export async function recallMemories(
 		clearTimeout(budget);
 	}
 	const failures: string[] = [];
+	let timedOut = false;
 	const scored: Array<{ bank: string; hit: RecallHit }> = [];
 	for (const [index, bank] of resolved.banks.entries()) {
 		const outcome = settled[index];
@@ -146,22 +186,19 @@ export async function recallMemories(
 		}
 		if (outcome.value.reason !== undefined) {
 			failures.push(`${bank}: ${outcome.value.reason}`);
+			if (outcome.value.timedOut === true) timedOut = true;
 			continue;
 		}
 		for (const hit of outcome.value.hits.slice(0, MAX_RECALL_PER_BANK)) scored.push({ bank, hit });
 	}
-	scored.sort((left, right) => (right.hit.score ?? 0) - (left.hit.score ?? 0));
-	const results = scored.map(({ bank, hit }) => derive(bank, hit));
-	if (results.length === 0 && failures.length > 0) {
-		return { results, degraded: true, notice: UNTRUSTED_MEMORY_NOTICE, reason: `hindsight recall failed: ${failures.join("; ").slice(0, 300)}` };
-	}
+	const results = dedupeHits(scored)
+		.sort((left, right) => (right.hit.score ?? 0) - (left.hit.score ?? 0))
+		.map(({ bank, hit }) => derive(bank, hit));
 	if (failures.length > 0) {
-		return {
-			results,
-			degraded: true,
-			notice: UNTRUSTED_MEMORY_NOTICE,
-			reason: `partial recall: ${failures.join("; ").slice(0, 300)}`,
-		};
+		// A budget miss leads with its own marker whichever banks answered; the
+		// rest keep the outage / partial wording the callers already read.
+		const prefix = timedOut ? "recall-timeout" : results.length === 0 ? "hindsight recall failed" : "partial recall";
+		return { results, degraded: true, notice: UNTRUSTED_MEMORY_NOTICE, reason: `${prefix}: ${failures.join("; ").slice(0, 300)}` };
 	}
 	return { results, degraded: false, notice: UNTRUSTED_MEMORY_NOTICE };
 }

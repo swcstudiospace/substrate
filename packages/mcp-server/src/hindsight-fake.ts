@@ -82,6 +82,14 @@ export class HindsightFake {
 	retainDelayMs = 0;
 	/** Every retained item, in order, with its bank. */
 	readonly retains: Array<{ bank: string; item: Record<string, unknown> }> = [];
+	/** When set, `GET /v1/default/banks` answers with this status instead. */
+	failListWith: number | null = null;
+	/** When set, a list page never holds more than this many banks, whatever `limit` asked for (a server that caps pages). */
+	listPageCap: number | null = null;
+	/** Per-bank `GET {bank}/stats` fields layered over the defaults. */
+	statsOverride: Record<string, Record<string, unknown>> = {};
+	/** Per-bank last write instants the list and stats report. */
+	lastWriteAt: Record<string, string> = {};
 
 	/** Seed a bank in `chunks` mode with recallable memories. */
 	seed(bank: string, memories: RecallHit[]): void {
@@ -108,6 +116,7 @@ export class HindsightFake {
 				? json({ api_version: "0.9.1", features: { recall: true, retain: true } })
 				: json({});
 		}
+		if (method === "GET" && url.pathname === "/v1/default/banks") return this.listBanks(url);
 		if (url.pathname.startsWith(BANK_PREFIX)) {
 			const rest = url.pathname.slice(BANK_PREFIX.length);
 			const slash = rest.indexOf("/");
@@ -119,6 +128,7 @@ export class HindsightFake {
 			if (tail === "/memories" && method === "POST") return this.retain(bank, body);
 			if (tail === "/memories/recall" && method === "POST") return this.recall(bank, body, init?.signal);
 			if (tail.startsWith("/documents/") && method === "GET") return this.getDocument(bank, tail.slice("/documents/".length));
+			if (tail === "/stats" && method === "GET") return this.bankStats(bank);
 			if (tail.startsWith("/documents/") && method === "DELETE") return this.deleteDocument(bank, tail.slice("/documents/".length));
 			if (tail.startsWith("/documents/") && method === "PATCH") return this.patchDocument(bank, tail.slice("/documents/".length), body);
 			if (tail === "" && method === "DELETE") return this.deleteBank(bank);
@@ -234,5 +244,31 @@ export class HindsightFake {
 		if (!this.banks.delete(decodeURIComponent(bank))) return json({ detail: "bank not found" }, 404);
 		if (this.emptyDelete) return new Response(null, { status: 204 });
 		return json({ success: true });
+	}
+
+	/** `GET /v1/default/banks?limit&offset`: every bank in map order, paged like the deployment. */
+	private listBanks(url: URL): Response {
+		if (this.failListWith !== null) return json({ error: "injected failure" }, this.failListWith);
+		const limit = Math.min(this.listPageCap ?? Number.POSITIVE_INFINITY, Math.max(1, Number(url.searchParams.get("limit") ?? "100")));
+		const offset = Math.max(0, Number(url.searchParams.get("offset") ?? "0"));
+		const all = [...this.banks.entries()].map(([bank, state]) => ({
+			bank_id: bank,
+			name: bank,
+			fact_count: state.memories.length,
+			last_write_at: this.lastWriteAt[bank] ?? null,
+		}));
+		return json({ banks: all.slice(offset, offset + limit), total: all.length });
+	}
+
+	/** `GET {bank}/stats`: the operation backlog; a test overrides it per bank. */
+	private bankStats(bank: string): Response {
+		const name = decodeURIComponent(bank);
+		if (!this.banks.has(name)) return json({ detail: "bank not found" }, 404);
+		return json({
+			pending_operations: 0,
+			failed_operations: 0,
+			last_memory_write_at: this.lastWriteAt[name] ?? null,
+			...(this.statsOverride[name] ?? {}),
+		});
 	}
 }

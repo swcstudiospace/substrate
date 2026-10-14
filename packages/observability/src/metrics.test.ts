@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
 	Counter,
+	type CounterPoint,
 	DEFAULT_MAX_SERIES,
 	Histogram,
+	type HistogramPoint,
 	LATENCY_BUCKETS_MS,
 	IDENTIFIER_ATTRIBUTES,
 	MAX_ATTRIBUTE_LENGTH,
@@ -173,6 +175,90 @@ describe("the cardinality cap", () => {
 
 	test("model is volatile, because it arrives on a caller's payload", () => {
 		expect(VOLATILE_ATTRIBUTES).toContain("model");
+	});
+
+	test("a restored checkpoint is admitted under the same cap, with the overflow folded and counted (Greptile round 1, PR #61)", () => {
+		// Without this, every graph_id ever seen rode from epoch to epoch in the
+		// checkpoint until the file outgrew the limit the next boot refuses.
+		const counter = new Counter("c", "int", { maxSeries: 3 });
+		counter.seed(Array.from({ length: 10 }, (_, i) => ({ attributes: { surface: "omp", graph_id: `ut-${i}` }, value: 1 })));
+
+		const snapshot = counter.snapshot();
+		expect(snapshot.points).toHaveLength(4);
+		expect(counter.distinctCount).toBe(4);
+		expect(snapshot.overflowed).toBe(7);
+		expect(snapshot.points.reduce((total, point) => total + point.value, 0)).toBe(10);
+		expect(snapshot.points.find((point) => point.attributes.graph_id === OVERFLOW)?.value).toBe(7);
+
+		// Live observations after the restore see the union: a restored graph keeps
+		// its own row, a new one collapses, and the count cannot grow past the cap.
+		counter.add(1, { surface: "omp", graph_id: "ut-0" });
+		counter.add(1, { surface: "omp", graph_id: "ut-new" });
+		const after = counter.snapshot();
+		expect(after.points).toHaveLength(4);
+		expect(after.points.find((point) => point.attributes.graph_id === "ut-0")?.value).toBe(2);
+		expect(after.points.find((point) => point.attributes.graph_id === OVERFLOW)?.value).toBe(8);
+		expect(after.overflowed).toBe(8);
+
+		// Re-seeding replaces the prior layer and its overflow, never adds to them.
+		counter.seed([{ attributes: { surface: "omp", graph_id: "ut-0" }, value: 5 }]);
+		const reseeded = counter.snapshot();
+		expect(reseeded.points.find((point) => point.attributes.graph_id === "ut-0")?.value).toBe(6);
+		expect(reseeded.overflowed).toBe(1);
+	});
+
+	test("the hard ceiling applies to a restored checkpoint too, and a histogram folds its buckets", () => {
+		const counter = new Counter("c", "int", { maxSeries: 2, hardMaxSeries: 3 });
+		counter.seed(Array.from({ length: 100 }, (_, i) => ({ attributes: { surface: `s${i}`, tool: `t${i}` }, value: 1 })));
+		expect(counter.snapshot().points.length).toBeLessThanOrEqual(4); // the ceiling, plus its one all-collapsed series
+		expect(counter.snapshot().points.reduce((total, point) => total + point.value, 0)).toBe(100);
+		expect(counter.snapshot().points.find((point) => point.attributes.surface === OVERFLOW)?.attributes.tool).toBe(OVERFLOW);
+
+		const histogram = new Histogram("h", [10, 100], { maxSeries: 1 });
+		histogram.seed([
+			{ attributes: { surface: "omp", graph_id: "ut-1" }, count: 2, sum: 15, min: 5, max: 10, bucketCounts: [2, 0, 0] },
+			{ attributes: { surface: "omp", graph_id: "ut-2" }, count: 1, sum: 50, min: 50, max: 50, bucketCounts: [0, 1, 0] },
+			{ attributes: { surface: "omp", graph_id: "ut-3" }, count: 1, sum: 500, min: 500, max: 500, bucketCounts: [0, 0, 1] },
+		]);
+		const points = histogram.snapshot().points;
+		expect(points).toHaveLength(2);
+		const overflow = points.find((point) => point.attributes.graph_id === OVERFLOW);
+		expect(overflow).toMatchObject({ count: 2, sum: 550, min: 50, max: 500, bucketCounts: [0, 1, 1] });
+		expect(histogram.snapshot().overflowed).toBe(2);
+	});
+
+	test("repeated restarts with fresh graph_ids never grow the series set past the cap, for a counter and a histogram (Greptile round 1, PR #61)", () => {
+		// Each epoch: seed from the last checkpoint, observe a process's worth of
+		// new graph_ids, then checkpoint (snapshot). Unbounded seeding added the
+		// whole restored set to the live one every epoch.
+		const cap = 5;
+		let counterPoints: CounterPoint[] = [];
+		let histogramPoints: HistogramPoint[] = [];
+		for (let epoch = 0; epoch < 40; epoch++) {
+			const counter = new Counter("c", "int", { maxSeries: cap });
+			const histogram = new Histogram("h", [10, 100], { maxSeries: cap });
+			counter.seed(counterPoints);
+			histogram.seed(histogramPoints);
+			for (let i = 0; i < 8; i++) {
+				const attributes = { surface: "omp", graph_id: `e${epoch}-g${i}` };
+				counter.add(1, attributes);
+				histogram.record(5, attributes);
+			}
+			const counterSnapshot = counter.snapshot();
+			const histogramSnapshot = histogram.snapshot();
+			// The cap, plus the one collapsed series that holds the rest.
+			expect(counterSnapshot.points.length).toBeLessThanOrEqual(cap + 1);
+			expect(histogramSnapshot.points.length).toBeLessThanOrEqual(cap + 1);
+			expect(counter.distinctCount).toBeLessThanOrEqual(cap + 1);
+			expect(histogram.distinctCount).toBeLessThanOrEqual(cap + 1);
+			// Nothing is dropped: the totals keep growing by exactly what was observed.
+			expect(counterSnapshot.points.reduce((total, point) => total + point.value, 0)).toBe((epoch + 1) * 8);
+			expect(histogramSnapshot.points.reduce((total, point) => total + point.count, 0)).toBe((epoch + 1) * 8);
+			counterPoints = counterSnapshot.points;
+			histogramPoints = histogramSnapshot.points;
+		}
+		expect(counterPoints.length).toBeLessThanOrEqual(cap + 1);
+		expect(histogramPoints.length).toBeLessThanOrEqual(cap + 1);
 	});
 });
 

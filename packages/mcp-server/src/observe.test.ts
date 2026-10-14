@@ -36,6 +36,7 @@ describe("normalizeRoute", () => {
 	test("keeps the routes that exist", () => {
 		expect(normalizeRoute("/brief")).toBe("/brief");
 		expect(normalizeRoute("/mcp")).toBe("/mcp");
+		expect(normalizeRoute("/events/stream")).toBe("/events/stream");
 	});
 
 	test("folds everything else into one bucket", () => {
@@ -353,6 +354,14 @@ describe("auditToolCalls", () => {
 		expect(toolLabel("skills_propose")).toBe("skills_propose");
 		expect(normalizeRoute("/skills/propose")).toBe("/skills/propose");
 		expect(normalizeRoute("/skills/propose/../../etc")).toBe("other");
+	});
+
+	test("the skills registry doors are known tools and known routes", () => {
+		expect(toolLabel("skills_approve")).toBe("skills_approve");
+		expect(toolLabel("skills_list")).toBe("skills_list");
+		expect(normalizeRoute("/skills/approve")).toBe("/skills/approve");
+		expect(normalizeRoute("/skills")).toBe("/skills");
+		expect(normalizeRoute("/skills/approve/../../etc")).toBe("other");
 	});
 
 	test("toolLabel keeps the tools that exist", () => {

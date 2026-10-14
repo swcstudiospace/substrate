@@ -213,6 +213,18 @@ describe("commit", () => {
 		expect(half.panes[paneIdentity("w1:p1", "term_a")]).toBeUndefined();
 		expect(half.counters).toMatchObject({ stored: 1, failed: 1 });
 	});
+
+	test("a spooled transition advances like a stored one so it is not emitted twice, and counts failed", () => {
+		const state = seeded([pane({ agent: "omp" })]);
+		const changed = reconcile(state, [pane({ agent: "claude" })], { now: LATER, attribute });
+
+		const parked = commitReconcile(state, changed, ["spooled", "spooled"]);
+
+		expect(parked.panes[paneIdentity("w1:p1", "term_a")]?.agent).toBe("claude");
+		expect(parked.counters).toMatchObject({ stored: 0, refused: 0, failed: 2 });
+		// The next pass sees no change: the spool owns the event now.
+		expect(reconcile(parked, [pane({ agent: "claude" })], { now: LATER, attribute }).transitions).toEqual([]);
+	});
 });
 
 describe("state file", () => {

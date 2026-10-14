@@ -250,11 +250,11 @@ through, and its backfill pass appends events older than everything already
 stored — and, now that the table is append-only, two events can also share a
 millisecond and both survive, with Greptime free to return them in either order.
 
-So `ORDER BY "ts"` cannot identify the newest event. `lastHash` reads the whole
-session (just `hash` and `prev`, so the read stays small) and takes the tip: the
-hash no other row claims as its `prev`. A *window* of the newest rows by `ts` is
-what must not be used — a backfilled event is the real tip while sorting last, so a
-window would leave an already-claimed hash looking unclaimed and the next append
+So `ORDER BY "ts"` cannot identify the newest event. `lastHash` reads a session's
+rows (just `hash` and `prev`, so the read stays small) and takes the tip: the hash
+no other row claims as its `prev`. A *window of the newest rows by `ts`* is what
+must not be used — a backfilled event is the real tip while sorting last, so such
+a window would leave an already-claimed hash looking unclaimed and the next append
 would fork the session. The `LIMIT` in that query is a memory guard set far above
 any real session, not an ordering assumption. `verifyGraph` puts each session's
 events in chain order before verifying. This does not weaken verification — hashes are still recomputed,
@@ -263,15 +263,48 @@ into the walk, which are kept so the break is still reported. What it stops
 reporting is a database's arbitrary tie-break, which was never an integrity
 property.
 
-Two genuinely concurrent appends in one session can still read the same `prev` and
-fork the chain. That is inherent to computing `prev` with a read-then-write and no
-sequence column; the fork is *detected* by `verify`, not prevented.
+**The chain tip is read once per session, not once per emit (uplift-2 R5).**
+`session_id` is not a key, so that read was a scan of every row ever stored, on
+every event — 14,302 rows and ≈ 220 ms over the public edge per emit when it was
+measured. The client now keeps each session's tip in a bounded LRU
+(`SUBSTRATE_LEDGER_CHAIN_CACHE_MAX`, default 10 000 sessions): one read seeds it,
+every stored event moves it to that event's hash, and an error on the event row —
+a timed-out INSERT may have landed — forgets it, so the next append asks the ledger
+again. An ingest record that could not be confirmed keeps the tip, because the
+event row is in the ledger and the next event must chain onto it. A session the
+ledger has never seen is remembered as empty, so a handoff's read and the emit
+that follows share one lookup. Steady state is therefore two ledger calls per
+emit — the event row and its ingest record — instead of three or four.
+`SUBSTRATE_LEDGER_CHAIN_CACHE=0` turns the cache off and restores one read per
+emit, with nothing else changed.
+
+The seeding read itself is bounded to the last `SUBSTRATE_LEDGER_CHAIN_LOOKBACK_DAYS`
+(default 30) of `ts`. When that window holds nothing the whole session is read
+instead, so a session that fell silent for longer than the window continues its
+chain rather than restarting it — an empty session costs that second read once.
+The bound is a window, and the paragraph above says why windows are dangerous:
+what remains uncovered is a session whose real tip is a backfilled event older
+than the window *and* that this process has not yet appended to. `verify` detects
+that fork as it always has, and the window is an operator knob.
+
+**Two concurrent appends in one session cannot fork it (uplift-2 R5).** `prev`
+is still a read-then-write with no sequence column, but `Substrate.emit`
+serialises appends per `session_id` with a promise chain (the pattern
+`completionChains` uses for node completion): the second waits for the first to
+settle and reads the hash it stored. Different sessions never wait on each other,
+sessionless events never wait, and an event that fails validation releases its
+turn. `events_verify` is unchanged — it still recomputes the chain and still
+reports a fork a different process or an older build may have written.
 
 **Append-only, structurally.** Every statement passes `assertAppendOnly` before
 it leaves the client. It is deny-by-default — only `select`, `insert`, `create`,
 `show`, `describe`, `explain` and `with` — so `UPDATE`, `DELETE`, `DROP`,
-`TRUNCATE`, `ALTER` and `RENAME` cannot reach the ledger from this process at
-all. Batched statements are refused too, since Greptime's HTTP API accepts
+`TRUNCATE`, `RENAME` and every `ALTER` cannot reach the ledger from this process
+at all, with one exception that bypasses the guard for exactly one statement
+shape: `ALTER TABLE "<agent_events|event_ingest>" SET 'ttl'='<validated duration>'`,
+built from a typed table name and a value that has passed the duration check, sent
+only by `migrate()` and only when `SUBSTRATE_LEDGER_TTL` is set (see *Retention*).
+Batched statements are refused too, since Greptime's HTTP API accepts
 `;`-separated ones and checking only the first verb would leave a way in. The
 guard blanks string literals before reasoning about structure, so an event whose
 summary contains `;` or `--` is neither mistaken for a batch nor wrongly dropped.
@@ -334,6 +367,99 @@ landed quickly. A timeout is not proof the write was lost, so the warning does n
 say the hour will be uncovered.
 There is **no backfill**: events stored before this table first existed belong to no
 hour, and the first anchored hour is Phase 28's decision.
+
+## Idempotent replay (U5-4a)
+
+The ledger is append-only and `normalizeEvent` mints a new id, hash and row on every
+call, so a client that retries an event whose first attempt timed out **after** the
+ledger stored it would write a duplicate. `POST /events` therefore accepts an optional
+key and a replay marker, behind `SUBSTRATE_EVENT_IDEMPOTENCY=off|accept|enforce`
+(default `off`).
+
+**Request.** The body is today's `EventInput` plus an optional
+`"idempotency_key"`: 8–128 characters from `[A-Za-z0-9._:-]`. The header
+`x-substrate-replay: 1` marks the request as a replay of an earlier attempt. The
+client fixes the event's `ts` (ISO) and the key at its first attempt and re-sends both
+unchanged; the server honours a client `ts` exactly as it always has.
+
+| Mode | Key and marker | Lookup |
+| --- | --- | --- |
+| `off` (default) | Ignored unread: nothing stored, no validation, no lookup, the same statements and responses as before the flag existed. A caller-supplied payload `_ik` is left as it was. | never |
+| `accept` | A valid key is stored in the event's payload under the reserved key `_ik`. | only a replay-marked request that carries a key; every other request costs zero extra reads |
+| `enforce` | As `accept`. | every request that carries a key |
+
+Under `accept` and `enforce` any payload `_ik` the caller wrote is stripped first and
+never trusted. `_ik` is appended as the payload's **last** key after redaction and the
+size cap, so it is inside the hashed event (no schema change, no `ALTER`: the
+append-only guard is untouched) and survives a payload that was replaced for its size.
+It adds at most about 140 bytes beyond the 16 000-byte payload cap.
+
+**Lookup.** One bounded `SELECT` in `GreptimeClient.findByIdempotencyKey`: the
+primary-key prefix (`surface`, `repo`, `graph_id`, `kind`; a NULL `repo` or `graph_id`
+is `IS NULL`) plus the exact normalised `ts`, with the payload matched against
+`…"_ik":"<key>"}` at the end of its text, at most 5 rows (`LIKE` reads `_` as a wildcard,
+so a lookalike key can match too; each returned row is checked for the exact suffix, and a full read with no exact match is treated as a failed lookup — `503`, nothing written, `result=lookup_failed` — never as a miss, so an unusual key whose pattern matches five other rows in its cell can be answered 503 but never duplicated). It runs inside the per-session
+emit turn (`emitChains`), so two concurrent same-key requests leave one row, and a
+replay waits for the original attempt still in flight. A keyed event with no session
+takes its turn on the key instead.
+
+- **Hit:** `202` with the usual body plus `"deduplicated": true` and the **existing**
+  event's `id` and `hash`. No second `agent_events` row is written and the session's
+  chain tip is neither read nor moved. A hit also reads the event's `event_ingest`
+  membership (one point read by event id, `GreptimeClient.cursorPosition`, the read the
+  stream already uses to resolve a cursor), because the original attempt may have landed
+  its row and then ended before writing the record, and a client that drops its copy on
+  this answer would otherwise leave the event outside every hourly anchor.
+  - Membership **found**: nothing is written and the answer is the plain hit. A second
+    record is never added to an event that has one: the stream would deliver the event
+    again as a new position once its original record is older than the stream's
+    one-hour retry window, and the coverage histogram would count the later hour while
+    `hourLeaves` (which keeps each event's earliest record) excludes it.
+  - Membership **confirmed missing**: the normal path's write (`recordIngest`, same
+    table, 1 s budget and two attempts) records it. It becomes the event's first record,
+    so the stream, the anchor and coverage each see it once, in the hour of the
+    **server's** time at the replay (the hour anchoring rule above), not the event's `ts`.
+  - The membership read **fails**, or the repair write fails: nothing further is
+    written, the answer is still `202` `stored: true`, and it carries the warning a
+    normal append gives when its ingest write cannot be confirmed (the event is stored;
+    do not re-emit it; hourly coverage may be missing). A journal line names the event
+    id only. Never a 5xx, never a second event.
+
+  A hit is counted in `substrate.events.replay{result=deduplicated}` and not as an emit,
+  so the tokens and cost in its payload are not counted twice.
+- **Miss:** a normal append with `_ik` stored (`result=appended`).
+- **Lookup error** (an unreachable ledger, an open breaker, a malformed row): `503`
+  `stored: false`, nothing written, `result=lookup_failed`. A lookup that errors is
+  never read as a miss, because that would write the duplicate this exists to prevent;
+  the client keeps its copy and retries.
+- **Refused:** `400` with a `rule` field and the same name opening `error`, nothing
+  written, `result=refused`. The closed set is `idempotency_key_type`,
+  `idempotency_key_format`, `replay_ts_missing` (a replay-marked request that carries a
+  key but no `ts`: a replay must carry the original `ts`, since the server would stamp
+  its own clock and the lookup could never match) and `replay_ts_future` (a replay-marked
+  request whose `ts`, as a string or a number, is more than 24 hours ahead of the
+  server's clock). Key rules apply only when the mode is not `off`.
+
+**What it costs.** Each lookup is one ledger read, and a hit adds a second one (the
+membership read: a single event-id read of `event_ingest`; a repair write follows only
+when that membership is missing). Both are expected to be cheap because the lookup
+carries the key prefix and an exact time and the membership read is keyed by the event
+id, but neither has been measured on the production image; an operator should `EXPLAIN`
+the lookup before turning on `enforce`. `accept` costs nothing on an ordinary emit.
+
+**Capability.** `GET /healthz` carries `"idempotency": "off" | "accept" | "enforce"`.
+A client MUST NOT replay against a server that reports `off` or lacks the field: it
+keeps its copy and retries later.
+
+**Honest limits.** Dedupe applies only to replay-marked requests (or any keyed request
+in `enforce`) within the same `surface`, `repo`, `graph_id`, `kind` and `ts` cell. `_ik`
+is a reserved payload key. A miss costs one ledger read and a hit two. With the server
+at `off`, replays can duplicate, which is why the client checks `/healthz` first.
+
+**Enable order.** Set `SUBSTRATE_EVENT_IDEMPOTENCY=accept` on the server and confirm
+`/healthz` reports it; only then enable a client spool. `enforce` is for after replays
+have been seen to dedupe. Rollback is setting the variable back to `off`: `_ik` already
+stored is ordinary payload data and nothing needs cleaning.
 
 ## Anchoring (Phase 28)
 
@@ -470,6 +596,313 @@ have. `events_query` is a browse; the complete read of a session or graph is
 Not built here: a `substrate events` CLI subcommand. Hooks and the CLI can already
 reach `POST /events/query`; nothing needed it yet.
 
+**Stream polls are bounded in time (uplift-2 R5).** `GET /events/stream` polls the
+ledger every 500 ms per connection with two statements. `eventIdsAfter` finds the
+positions after the cursor: its outer side was already a window from the cursor's
+millisecond forward, but the anti-join that drops an event with an earlier record
+probed all of `event_ingest` before the cursor. It now looks back one hour
+(`INGEST_RETRY_LOOKBACK_MS`): the only way one event has two records is a retry
+inside the 1 s `INGEST_BUDGET_MS` of its first attempt, so an hour is three
+thousand times the gap that can exist, and the bound changes no answer. The
+positions carry each event's own `ts` from its ingest record, and `eventsByIds`
+brackets its row read with `"ts" BETWEEN` the earliest and the latest of them —
+`id` is not a key, so `WHERE "id" IN (...)` alone scanned every row ever stored,
+once per poll per stream. A caller with bare ids reads unbounded, as before.
+`readEvents` and `graphIngest`, which `events_verify` walks, are unbounded on
+purpose: verification must see everything.
+
+## Health: the write probe (uplift-2 R5)
+
+`GET /healthz` used to derive `eventsWritable` from metadata — the ledger answered
+`SELECT 1`, the quoting dialect was known, `SHOW CREATE TABLE` said `append_mode`
+— so a store that had stopped taking writes (a full volume, a region that would
+not flush) still reported 200 while every `events_emit` answered `stored: false`.
+
+`migrate()` now creates one more table, append-only with a one-day TTL so it never
+grows past a day of one row a minute:
+
+```sql
+CREATE TABLE IF NOT EXISTS "substrate_health" (
+  "ts"    TIMESTAMP TIME INDEX,
+  "probe" STRING
+) WITH ('append_mode' = 'true', 'ttl' = '1d')
+```
+
+A server that refuses the `ttl` option gets the table without it and a boot
+warning. `GreptimeClient.writeProbe()` inserts one row (`'healthz'`, stamped now);
+`probeWritable()` runs it at most once per `SUBSTRATE_LEDGER_WRITE_PROBE_S` (default
+60; `0` turns probing off), shares one in-flight probe between overlapping health
+calls, goes through the ledger's breaker like every other statement, and never
+throws: a failure *is* the verdict. `Substrate.health()` folds it in:
+
+```
+eventsWritable = greptime && quotingDialectKnown
+              && (appendOnly || SUBSTRATE_ALLOW_DEDUPLICATING_LEDGER)
+              && lastProbeOk !== false
+ledger: { writable, lastProbeAt, lastProbeOk, lastProbeError }
+```
+
+A probe that has not run yet — or that is off — neither proves nor disproves, so
+writability is the metadata's; a failed probe overrides it, and the existing status
+rule turns `/healthz` 503 within one interval of writes failing. `lastProbeError`
+has been through the redactor and had the store's URL and host scrubbed out, so
+the body can carry it. An unreachable ledger is not probed — it is already not
+writable, and a write that cannot connect would only charge the breaker twice.
+The deploy gate (`infra/vps/deploy-release.sh`) reads the status code, so a
+release onto a ledger that cannot take writes now fails its health gate.
+
+## Capacity (uplift-2 R5)
+
+`GreptimeClient.capacity()` reads `information_schema.region_statistics` joined to
+`information_schema.tables` for the configured database — approximate, as the
+server says — and answers `{ bytes, rows, tables }`, the ten largest tables by disk
+each as `{ name, rows, diskBytes, sstBytes, indexBytes }`, with a table's regions
+summed. `/healthz` reports it under `capacity.ledger`, beside R4's
+`capacity.index`, raced against the same 1 s bound and `null` when the store does
+not answer in time. The Railway volume is 500 MB; the measured ledger was 1.28 MB
+for 14,302 rows (BASELINES.md), so there is room, but the number is now visible
+rather than a one-off query.
+
+**Operator cleanup: the stale pre-append table.** `agent_events_pre_append_20260930`
+(9,851 rows, 1.29 MB; BASELINES.md) is, by its name, the copy kept when
+`agent_events` was recreated with `append_mode`. Nothing reads it; it shows up first in
+`capacity.ledger.tables`. Dropping it is an operator action — this client refuses
+`DROP` by design and will not grow a path for it — taken after an export of the
+table off-box, e.g. from the Greptime HTTP API with the same `events_query`-style
+window read into a file outside the VPS disk:
+
+```sql
+DROP TABLE "agent_events_pre_append_20260930";
+```
+
+## Coverage and archive (uplift-3 N6)
+
+Two things BP-7 and DP-ret ("180 days hot, then export") promised and nothing
+showed: whether the hourly anchor is keeping up, and a verified export of what a
+TTL would delete. Both are read-only on the ledger; the archive writes only to
+the operator's directory and records one `note` per day it wrote.
+
+### Coverage
+
+`GreptimeClient.anchorCoverage({ now })` makes four bounded reads: the newest
+`anchors.period_start`; the anchor rows of the last 7 days (the anchor job's own
+lookback); one `date_bin` histogram over the same window of `event_ingest` — a
+count per hour, never the rows; and the newest `ledger archive` note — by the day
+in its summary, so a retried older day cannot move it backwards — on the
+`substrate`/`note` series, bounded on `ts`. It answers
+
+```
+{ newestAnchoredHour, lagHours, uncoveredHours: [ISO…], more, lastArchiveWindow }
+```
+
+An hour is *eligible* once it started an hour ago and is closed (its end plus
+the 5-minute ingest lag has passed) — one tick for the anchor timer, so a fresh
+boundary never reads as a gap; *uncovered* when eligible, holding ingest
+records and having no `anchors` row. The list is ascending, at most 48 with the
+newest kept and `more: true` when it was cut. `lagHours` counts whole hours from
+the newest anchored hour to the hour `now` is in, so **1 is the steady state**
+and `null` means no hour was ever anchored. Membership is "has a record in the
+hour", one step looser than `hourLeaves`'s first-record rule: an hour whose only
+record is a retry of an event first ingested the hour before (a one-second
+window at a boundary) is listed although the job rightly skips it; `substrate
+verify` on the event settles it.
+
+`substrate ledger coverage [--json]` prints it and exits 2 when the uncovered
+count exceeds `SUBSTRATE_LEDGER_MAX_UNCOVERED_HOURS` (default 2) or the list was
+cut, 1 when the ledger could not be read. `/healthz.jobs.ledger` carries
+`{ anchorLagHours, uncoveredHours (count), more, newestAnchoredHour, lastArchiveDay,
+computedAt }` from one `anchorCoverage` read memoised for 60 s in the service
+(`Substrate.ledgerJobs`): overlapping health calls share the one read, a caller
+waits at most the 1 s probe bound for it and otherwise gets `jobs.ledger: null`
+with `jobs.ledgerReason` while the read finishes and fills the memo; a failed
+read is memoised too, as `null` with its redacted, host-free reason, so an
+unreachable ledger costs one attempt a minute. It never changes the status code.
+
+### Archive
+
+`substrate ledger archive [--until YYYY-MM-DD] [--out DIR] [--page-size N]`
+(`packages/mcp-server/src/ledger-run.ts`, spawned by the CLI like `index sweep`
+because the ledger client stays inside the server package) writes every closed
+UTC day from the oldest event's day up to `--until` (yesterday by default; a day
+closes at midnight plus the ingest lag) that has no `manifest-<day>.json` in
+`--out` (default `SUBSTRATE_LEDGER_ARCHIVE_DIR`). A day with a manifest is never
+rewritten. Per day:
+
+| File | One line per | From |
+| --- | --- | --- |
+| `events-<day>.ndjson` | event, the exact hashed shape (`rowToEvent`), in `(ts, id)` order | `exportWindow` pages |
+| `ingest-<day>.ndjson` | event with a first ingest record: `{ event_id, ingested_at, event_ts }` | same pages |
+| `anchors-<day>.ndjson` | `anchors` row whose period starts in the day | same pages |
+| `manifest-<day>.json` | `{ day, counts: { events, ingest, ingestMissing, anchors }, first, last, chainTip, hourlyRoots, sha256, writtenAt, releaseSha? }` | written last |
+
+The window is the time index — `[day 00:00Z, next 00:00Z)` on `ts` — because
+that is the column a TTL expires on, so every event lands in exactly one day's
+archive. `GreptimeClient.exportWindow({ from, to, after?, limit })` reads it by
+keyset, never OFFSET: `("ts" > a OR ("ts" = a AND "id" > b)) ORDER BY "ts", "id"
+LIMIT n`, so a page costs the same on page 200 as on page one and a same-
+millisecond tie is split identically on the server and in the cursor; `next` is
+the last row of a full page. Each page also carries the first ingest record of
+its events and the window's receipts. The ingest records are read once per day,
+not per page: the first page reads every record whose `event_ts` (the event's own
+`ts`) is in the window through a keyset cursor on the time index, `(ingested_at,
+event_id)`, 500 rows at a time, into an id map the later pages reuse and the last
+drops, capped at 500 000 events — a day above the cap refuses to archive rather
+than count real events as `ingestMissing`. `ts` is collector-supplied, so a
+backdated event's record is *later* than its `ts` and a future-stamped event's is
+*earlier*, by any distance; keying on `event_ts` and not on `ingested_at` finds
+both. `event_id` is not a key, so the bulk read is still one scan of
+`event_ingest` per day (what `graphIngest` and `hourLeaves`'s lookback pay too),
+not one per page. An event on a later page whose id is not in the map — its
+record was stored after the map was built, as when a collector backfills the day
+during the export — is looked up by id (`event_id IN (…)`, 500 at a time, under
+the same `event_ts` window) and merged in before anything is counted missing, so
+only an id still absent is `ingestMissing`. That lookup is also bounded on the
+time index, `ingested_at >=` the start of the first read less the 5-minute
+ingest lag (the margin for clock skew and a commit that lands just after the
+read): a record that predates the read is already in the map, so a legacy event
+from before `event_ingest` existed costs a search of the recent tail, never of
+the table's history. A page whose ids are all in the map costs no extra
+statement.
+`hourlyRoots` are
+RFC 6962 roots per *first-ingest* hour over the day's members in
+`(ingested_at, event_id)` order — exactly the anchor job's grouping — and
+`chainTip` is the hash of the last event in file order. Files are written as
+`*.part` and renamed, data files before the manifest, so a manifest on disk
+always names complete files and a crash leaves only `.part` files for the next
+run to remove.
+
+Before creating or writing anything the command refuses: a day that is not
+closed; `--out` empty (what systemd expands an unset
+`SUBSTRATE_LEDGER_ARCHIVE_DIR` to); a directory that is `/`, inside the working
+tree, under `/opt/agent-substrate` or itself a checkout; a directory that is not
+on a filesystem of its own — the `st_dev` of the nearest *existing* ancestor,
+read before anything is created, must differ from that of `/` and of the
+release root (devices, not `df` names: two tmpfs mounts share a name and are
+different filesystems), else it refuses by name, as does an unreadable `stat`;
+and a filesystem with
+fewer than `SUBSTRATE_DEPLOY_MIN_FREE_GB` (5; `0` disables) gigabytes free, read
+with `df -Pk` on that same ancestor as the deploy gate reads it — unreadable
+refuses. The mount gate
+exists because an off-box volume that did not mount after a reboot leaves its
+path as a plain directory on the root disk, where `mkdir -p` would build the
+archive and the free-space floor would pass on the root disk's headroom.
+`SUBSTRATE_LEDGER_ARCHIVE_ALLOW_ROOTFS=1` waives only the mount gate, for a
+deliberate local test on a one-disk machine; the unit never sets it. The unit
+also carries `RequiresMountsFor=/mnt/ledger-archive` so systemd orders it after
+the volume's mount and fails the start when that mount is down; the operator's
+drop-in repeats the directive for the real `SUBSTRATE_LEDGER_ARCHIVE_DIR` when
+it is elsewhere.
+
+Each archived day is then recorded in the ledger
+as a `note` on surface `substrate` (`session_id: "ledger-archive:<day>"`,
+`summary: "ledger archive <day>: …"`, `payload.action: "ledger.archive"` with the
+counts, cursors, chain tip and file digests — no bodies, no path), which is what
+`coverage` and `/healthz` read back as the last archive window — the newest *day*
+in a note's summary, not the newest write, so a late retry of an older day never
+moves it backwards. A note the
+ledger does not take (`stored: false`, or an emit that throws) cannot be recovered
+by re-exporting — the manifest means "do not export this day again" — so the run
+writes `note-pending-<day>.json` beside the manifest *before* it sends the note
+and deletes it only once the ledger reports it stored (the note to send, an
+attempt count and the last error): a refused note, a throwing emit and a process
+killed mid-send all leave it. The day's files are never rewritten and the run
+exits 1. Every
+later `archive` run sends the pending notes first, oldest day first, and deletes
+each marker the ledger takes; a marker whose note the ledger will not take is
+counted pending and the run goes on to archive new days. Until then the day is
+on disk but absent from
+`coverage` and `/healthz.jobs.ledger.lastArchiveDay`, which is the truth. Exit 0
+done, 1 a ledger failure or a note still pending, 2 a refusal.
+`infra/vps/substrate-ledger-archive.timer` runs it daily at 03:30 UTC, disabled
+until the operator mounts the off-box path (`infra/vps/README.md`, *Daily ledger
+archive*).
+
+### Verify
+
+`substrate ledger verify-archive <dir> [--day YYYY-MM-DD]` needs no ledger. For
+each manifest in the directory (or the one day) it recomputes, from the files
+alone: the SHA-256 of each data file against the manifest; the line counts; every
+event's `hash` as `eventHash` of the rest of the line (the recomputation
+`substrate verify` makes); the chain — within a session no two events may claim
+the same `prev` (a fork), counted for every non-null `prev`: a `prev` naming an
+event outside the archive is a chain continuing from another day and is fine
+once, but two events naming the same outside predecessor are a fork and fail —
+and the chain tip; the hourly
+roots from the ingest file, hour for hour against the manifest; and each hour
+against its receipt: `verified` when the receipt's `event_count` equals the
+members present and the roots agree, `partial` when the count differs (the hour
+straddles midnight or holds a backdated event, so the rest is in another day's
+archive), `unanchored` with no receipt, `mismatched` — a finding — when the
+count agrees and the root does not. Every finding is `{ kind, file?, event?,
+hour?, detail }` with `kind` one of `missing | manifest | sha256 | count | parse
+| hash | chain | root | anchor`; the report never throws on a mismatch, and the
+command exits 2 on any, 1 when there was nothing to verify.
+
+**What this does not do.** It does not prove the archive *complete*: a backdated
+event ingested after its `ts` day was archived is missing from that day's file
+and will expire unarchived. `coverage` cannot see that either. The archive is a
+record of what the ledger held at `writtenAt`; `substrate verify <graph_id>`
+against the live ledger remains the check for recent graphs.
+
+## Retention: opt-in TTL (uplift-2 R5)
+
+`docs/data-planes.md` sets the ledger's policy as **"180 days hot, then export"**.
+Until now no table carried a TTL (`SHOW CREATE TABLE` showed only `append_mode`).
+
+`SUBSTRATE_LEDGER_TTL` applies it. Unset — the default — alters nothing: the client
+neither sets nor unsets a TTL on its own, so a retention applied by hand is left
+alone and so is a table that has none. When set, `migrate()` reads `SHOW CREATE
+TABLE` for `agent_events` and `event_ingest` and sends
+
+```sql
+ALTER TABLE "agent_events" SET 'ttl'='180d';
+ALTER TABLE "event_ingest" SET 'ttl'='180d';
+```
+
+only for a table whose live `ttl` differs, so a boot against tables that already
+carry the policy sends nothing. Every failure is a boot warning naming the live
+value, never a refusal to serve. The value is validated at config load against
+Greptime's time-duration grammar (reference, *Time Durations*: integer + unit
+spans such as `180d`, `4320h`, `1h30m`; no decimals, signs or hex; `forever` and
+`instant` are refused because they are not retention policies) and an invalid
+value refuses to boot with the reason — a retention that was set but silently
+never applied would be worse. The policy value is `180d`, matching
+`docs/data-planes.md`.
+
+**What a TTL does to `events_verify`.** Expiry is the server's own asynchronous
+job: rows whose `ts` is older than the TTL are deleted by Greptime, not by this
+process. A verified graph whose events have all expired reads as empty; one that
+straddles the boundary reports its oldest surviving event as a chain break, since
+its `prev` names a row that is gone. The hourly anchors keep the roots: `anchors`
+carries no TTL, so every anchored hour's Merkle root — and its devnet memo —
+stays, and an exported hour can still be checked against it. What is lost is the
+ability to *recompute* a root for an expired hour from the ledger itself.
+
+**Export before expiry.** The policy says *then export*, and the VPS disk is at
+94 % (BASELINES.md), so the export goes off-box. **The precondition for setting
+`SUBSTRATE_LEDGER_TTL` is a verified archive of every day that would expire:**
+`substrate ledger archive --until <day>` for every closed day older than the TTL
+(the command writes every closed day without a manifest), then `substrate ledger
+verify-archive <dir>` exiting 0, then `substrate ledger coverage` showing the last
+archive window — see *Coverage and archive* above. The ingest records go with the
+events, so an exported hour can be re-anchored, and the receipts go with them so
+it can be checked without the ledger. Only once that verify has passed is
+`SUBSTRATE_LEDGER_TTL` set; from then on the daily timer keeps the archive one
+day ahead of expiry, and a day the timer missed is written by its next run.
+
+**Rollback.** The client has no path for it, by design. Per the Greptime SQL
+reference page *ALTER* (section "Unset table options"), the statement is
+
+```sql
+ALTER TABLE "agent_events" UNSET 'ttl';
+ALTER TABLE "event_ingest" UNSET 'ttl';
+```
+
+run by the operator against the store, with `SUBSTRATE_LEDGER_TTL` unset in
+`substrate.env` so the next boot does not set it again. The same page notes that
+unsetting stops further deletion but does not restore rows already removed — which
+is what the export step above is for.
+
 ## Configuration
 
 Four variables, read from the environment and never from this repo:
@@ -481,11 +914,21 @@ Four variables, read from the environment and never from this repo:
 | `GREPTIME_PASSWORD` | basic-auth password |
 | `GREPTIME_DB` | database; defaults to `public` |
 
-Plus one switch, which is not a credential:
+Plus switches, none of which is a credential:
 
 | | |
 | --- | --- |
 | `SUBSTRATE_ALLOW_DEDUPLICATING_LEDGER` | `true` appends even when the table is not provably in `append_mode`. Unset by default, which refuses; see above. |
+| `SUBSTRATE_LEDGER_CHAIN_CACHE` | `0`/`false`/`no` turns the per-session chain-tip cache off: one chain-tip read per emit again. Default on. |
+| `SUBSTRATE_LEDGER_CHAIN_CACHE_MAX` | sessions whose tip is remembered at once, 1..1 000 000; default 10 000, least recently used evicted. |
+| `SUBSTRATE_LEDGER_CHAIN_LOOKBACK_DAYS` | how far back in `ts` the one seeding read looks before it falls back to the whole session, 1..3650; default 30. |
+| `SUBSTRATE_LEDGER_WRITE_PROBE_S` | seconds between `/healthz` write probes, 0..86400; default 60. `0` never probes, and `eventsWritable` is metadata-only again. |
+| `SUBSTRATE_LEDGER_TTL` | retention applied to `agent_events` and `event_ingest` at boot, a Greptime duration such as `180d`. Unset by default: nothing is altered. Invalid refuses to boot. See *Retention*. |
+| `SUBSTRATE_EVENT_IDEMPOTENCY` | `off` (default), `accept` or `enforce`. Anything else is `off` with a boot warning. See *Idempotent replay*. |
+| `SUBSTRATE_LEDGER_MAX_UNCOVERED_HOURS` | uncovered eligible hours `substrate ledger coverage` tolerates before exiting 2, 0..100000; default 2. Report-only on `/healthz`. See *Coverage and archive*. |
+| `SUBSTRATE_LEDGER_ARCHIVE_DIR` | where `substrate ledger archive` writes when `--out` is omitted, and what the archive unit's `ExecStart` expands. Unset by default: the command refuses by name. An off-box mount, never the root disk. |
+
+Out-of-range numbers clamp and unparseable ones fall back, as the breaker settings do.
 
 `.env.example` declares all four and fills none of them in. The real values live
 only in `/etc/substrate/substrate.env` on the VPS — root-owned, `chmod 0600`,

@@ -91,6 +91,8 @@ describe("loadObservabilityConfig", () => {
 		expect(config.slo.briefP95Ms).toBeUndefined();
 		expect(loadObservabilityConfig({ SUBSTRATE_SLO_BRIEF_P95_MS: "400" }).slo.briefP95Ms).toBe(400);
 		expect(loadObservabilityConfig({ SUBSTRATE_SLO_BRIEF_P95_MS: "" }).slo.briefP95Ms).toBeUndefined();
+		expect(config.slo.docsSearchP95Ms).toBeUndefined();
+		expect(loadObservabilityConfig({ SUBSTRATE_SLO_DOCS_SEARCH_P95_MS: "1000" }).slo.docsSearchP95Ms).toBe(1000);
 	});
 
 	test("refuses an export interval short enough to be its own load problem", () => {

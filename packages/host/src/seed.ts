@@ -152,6 +152,14 @@ export type SkillFile = { rel: string; content: string };
 export type Skill = { name: string; files: SkillFile[] };
 export type TrackerLocators = { notionDataSourceUrl: string; linearTeam: string };
 
+/**
+ * U1 seed burst: the package registries seeding needs while it runs, declared here because the
+ * seeder owns what it needs. The provider opens exactly these — parsed with the strict egress
+ * grammar and resolved like any allowlist entry — inside `withSeedEgress`, and drops them again
+ * even when the seeded work throws (sandbox-provider.ts, finally).
+ */
+export const SEED_EGRESS = ["registry.npmjs.org:443"] as const;
+
 export type SeedFilesInput = {
 	brief: string;
 	skills: Skill[];

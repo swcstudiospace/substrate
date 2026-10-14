@@ -1,0 +1,18 @@
+[Unit]
+Description=Run the substrate runtime doctor every six hours (substrate-doctor.service)
+Documentation=https://github.com/swcstudiospace/agent-substrate
+
+[Timer]
+# Every six hours, off the hour so it never shares a tick with
+# substrate-anchor (hourly) or substrate-index-sweep (03:17 UTC). Six hours
+# is the slowest cadence at which a drift that appeared after a deploy or a
+# reboot is still on the ledger before the next working day; faster buys
+# nothing, since the drifts it reports are operator steps, not incidents.
+# Persistent=true runs a missed tick at the next boot: a reboot is exactly
+# when the installed units and redis settings are worth re-reading.
+OnCalendar=*-*-* 00/6:23:00 UTC
+Persistent=true
+Unit=substrate-doctor.service
+
+[Install]
+WantedBy=timers.target

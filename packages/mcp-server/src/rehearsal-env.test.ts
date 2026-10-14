@@ -26,9 +26,9 @@ import {
 	assertOperatorAllowed,
 	buildRehearsalEnv,
 	consumerEnvRecord,
+	EXTRA_ENV_KEYS,
 	LEDGER_KEYS,
-	REHEARSAL_DOCS_STATE_FILENAME,
-	REHEARSAL_DOCS_STATE_KEY,
+	parseExtraEnv,
 	RehearsalEnvError,
 	storesEnvRecord,
 	toShellExports,
@@ -511,109 +511,76 @@ describe("the opt-in tracker block", () => {
 	});
 });
 
-describe("the opt-in RAGFlow fixture", () => {
-	const FIXTURE_URL = "http://127.0.0.1:18410";
-
-	function fixtureKey(): string {
-		return `rh-fixture-${randomBytes(16).toString("hex")}`;
-	}
-
-	test("off by default: no RAGFlow reach without the fixture", () => {
-		const env = buildRehearsalEnv(scratchInput());
-		expect(env.RAGFLOW_URL).toBeUndefined();
-		expect(env.RAGFLOW_API_KEY).toBeUndefined();
-		expect(loadConfig(env).ragflow).toBeNull();
-		expect(env.SUBSTRATE_DOCS_STATE_FILE).toBeUndefined();
+describe("the extra-env allowlist (--extra-env)", () => {
+	test("accepts each listed flag with a value it takes and returns them as a record", () => {
+		expect(
+			parseExtraEnv([
+				"SUBSTRATE_BRIEF_PROFILE=shadow",
+				"SUBSTRATE_METRICS_HISTORY=on",
+				"SUBSTRATE_CACHE_SWR=enforce",
+				"SUBSTRATE_EVENT_IDEMPOTENCY=accept",
+				"SUBSTRATE_BREAKER_FAILURES=5",
+				"SUBSTRATE_SLO_MIN_SAMPLES=5",
+			]),
+		).toEqual({
+			SUBSTRATE_BRIEF_PROFILE: "shadow",
+			SUBSTRATE_METRICS_HISTORY: "on",
+			SUBSTRATE_CACHE_SWR: "enforce",
+			SUBSTRATE_EVENT_IDEMPOTENCY: "accept",
+			SUBSTRATE_BREAKER_FAILURES: "5",
+			SUBSTRATE_SLO_MIN_SAMPLES: "5",
+		});
+		expect(parseExtraEnv([])).toEqual({});
 	});
 
-	test("loopback fixture reach is emitted and loads through the real loadConfig", () => {
-		const key = fixtureKey();
-		const input = scratchInput({ ragflowFixture: { url: FIXTURE_URL, apiKey: key } });
-		const env = buildRehearsalEnv(input);
-		expect(env.RAGFLOW_URL).toBe(FIXTURE_URL);
-		expect(env.RAGFLOW_API_KEY).toBe(key);
-		expect(loadConfig(env).ragflow).toEqual({ url: FIXTURE_URL, apiKey: key });
-		expect(env.SUBSTRATE_DOCS_STATE_FILE).toBe(join(input.runDir, REHEARSAL_DOCS_STATE_FILENAME));
-		expect(loadConfig(env).docsStateFile).toBe(join(input.runDir, REHEARSAL_DOCS_STATE_FILENAME));
+	test("refuses with the rule name: format, key, value and duplicate", () => {
+		expect(() => parseExtraEnv(["SUBSTRATE_BRIEF_PROFILE"])).toThrow("rule extra-env-format");
+		expect(() => parseExtraEnv(["=shadow"])).toThrow("rule extra-env-format");
+		expect(() => parseExtraEnv(["SUBSTRATE_PORT=7410"])).toThrow("rule extra-env-key");
+		expect(() => parseExtraEnv(["SUBSTRATE_BRIEF_PROFILE=loud"])).toThrow("rule extra-env-value");
+		expect(() => parseExtraEnv(["SUBSTRATE_SLO_MIN_SAMPLES=0"])).toThrow("rule extra-env-value");
+		expect(() => parseExtraEnv(["SUBSTRATE_SLO_MIN_SAMPLES=5000"])).toThrow("rule extra-env-value");
+		expect(() => parseExtraEnv(["SUBSTRATE_CACHE_SWR=shadow", "SUBSTRATE_CACHE_SWR=off"])).toThrow("rule extra-env-duplicate");
+		expect(() => parseExtraEnv(["SUBSTRATE_BRIEF_PROFILE=shadow\n"])).toThrow("rule extra-env-value");
 	});
 
-	test("a non-loopback fixture URL is refused before any server starts", () => {
-		expect(() =>
-			buildRehearsalEnv(scratchInput({ ragflowFixture: { url: "http://agent-substrate-forwarder:9380", apiKey: fixtureKey() } })),
-		).toThrow(RehearsalEnvError);
+	test("a key outside the list is refused by name and never by its value, including prototype keys", () => {
+		for (const key of ["__proto__", "constructor", "toString", "SUBSTRATE_PG_URL", "PATH", "SUBSTRATE_OPERATOR_TOKENS"]) {
+			expect(() => parseExtraEnv([`${key}=x`])).toThrow(RehearsalEnvError);
+			expect(() => parseExtraEnv([`${key}=x`])).toThrow("rule extra-env-key");
+		}
+		const secretish = randomBytes(8).toString("hex");
+		try {
+			parseExtraEnv([`SUBSTRATE_PG_URL=${secretish}`]);
+		} catch (cause) {
+			expect(String(cause)).not.toContain(secretish);
+		}
 	});
 
-	test("an empty fixture key is refused before any server starts", () => {
-		expect(() => buildRehearsalEnv(scratchInput({ ragflowFixture: { url: FIXTURE_URL, apiKey: "" } }))).toThrow(RehearsalEnvError);
+	test("the list holds no store, token, path or host setting", () => {
+		for (const key of EXTRA_ENV_KEYS) expect(key).not.toMatch(/URL|TOKEN|KEY|PASSWORD|PATH|DIR|HOST|PORT/);
 	});
 
-	test("the consumer record names the locator by name and never the plane key", () => {
-		const server = buildRehearsalEnv(scratchInput());
-		const base = {
-			mcpPort: 17410,
-			firstToken: server[tokenEnvName("claude-code")] ?? "",
-			operatorToken: server[tokenEnvName("hermes")] ?? "",
-			runDir: tempDir(),
-			name: "ragflow",
-			testPgUrl: server.SUBSTRATE_PG_URL ?? "",
-		};
-		const out = consumerEnvRecord({ ...base, ragflowFixture: { url: FIXTURE_URL, pid: 424243 } });
-		expect(out.SUBSTRATE_RAGFLOW_FIXTURE_URL).toBe(FIXTURE_URL);
-		expect(out.SUBSTRATE_RAGFLOW_FIXTURE_READY).toBe("1");
-		expect(out.SUBSTRATE_RAGFLOW_FIXTURE_PID).toBe("424243");
-		expect(Object.keys(out)).toHaveLength(9);
-		expect(out).not.toHaveProperty("RAGFLOW_API_KEY");
-		expect(out).not.toHaveProperty("RAGFLOW_URL");
-		expect(Object.keys(consumerEnvRecord({ ...base, ragflowFixture: null }))).toHaveLength(6);
-	});
-
-	test("the consumer record combines both fixtures without changing either shape", () => {
-		const server = buildRehearsalEnv(scratchInput());
-		const base = {
-			mcpPort: 17410,
-			firstToken: server[tokenEnvName("claude-code")] ?? "",
-			operatorToken: server[tokenEnvName("hermes")] ?? "",
-			runDir: tempDir(),
-			name: "both",
-			testPgUrl: server.SUBSTRATE_PG_URL ?? "",
-		};
-		const skills = { state: "/run/x/skills", origin: "/run/x/skills-fixture/o.git", ghState: "/run/x/skills-fixture/gh-state.json", repo: "rehearsal/agent-skills" };
-		const out = consumerEnvRecord({ ...base, skills, ragflowFixture: { url: FIXTURE_URL, pid: 424243 } });
-		expect(Object.keys(out)).toHaveLength(13);
-		expect(out.SUBSTRATE_REHEARSAL_SKILLS_REPO).toBe(skills.repo);
-		expect(out.SUBSTRATE_RAGFLOW_FIXTURE_URL).toBe(FIXTURE_URL);
-	});
-
-	test("the consumer docs manifest names the own path only, absent by default", () => {
-		const server = buildRehearsalEnv(scratchInput());
-		const runDir = tempDir();
-		const base = {
-			mcpPort: 17410,
-			firstToken: server[tokenEnvName("claude-code")] ?? "",
-			operatorToken: server[tokenEnvName("hermes")] ?? "",
-			runDir,
-			name: "docsmanifest",
-			testPgUrl: server.SUBSTRATE_PG_URL ?? "",
-		};
-		expect(consumerEnvRecord(base)).not.toHaveProperty(REHEARSAL_DOCS_STATE_KEY);
-		const out = consumerEnvRecord({ ...base, docsStateFile: join(runDir, REHEARSAL_DOCS_STATE_FILENAME) });
-		expect(out[REHEARSAL_DOCS_STATE_KEY]).toBe(join(runDir, REHEARSAL_DOCS_STATE_FILENAME));
-		expect(Object.keys(out)).toHaveLength(7);
-	});
-
-	test("a docs manifest outside the run directory is refused", () => {
-		const server = buildRehearsalEnv(scratchInput());
-		const runDir = tempDir();
-		const base = {
-			mcpPort: 17410,
-			firstToken: server[tokenEnvName("claude-code")] ?? "",
-			operatorToken: server[tokenEnvName("hermes")] ?? "",
-			runDir,
-			name: "docsmanifest",
-			testPgUrl: server.SUBSTRATE_PG_URL ?? "",
-		};
-		expect(() => consumerEnvRecord({ ...base, docsStateFile: join(tmpdir(), "elsewhere.json") })).toThrow(
-			"is not inside the run directory",
+	test("the builder applies them, and the real loadConfig reads them", () => {
+		const env = buildRehearsalEnv(
+			scratchInput({ extraEnv: { SUBSTRATE_BRIEF_PROFILE: "enforce", SUBSTRATE_METRICS_HISTORY: "on" } }),
 		);
+		expect(env.SUBSTRATE_BRIEF_PROFILE).toBe("enforce");
+		expect(env.SUBSTRATE_METRICS_HISTORY).toBe("on");
+		const config = loadConfig(env);
+		expect(config.briefProfile.mode).toBe("enforce");
+		expect(config.metricsHistory.enabled).toBe(true);
+	});
+
+	test("the builder holds the allowlist for its own callers: a store key cannot ride in", () => {
+		expect(() => buildRehearsalEnv(scratchInput({ extraEnv: { SUBSTRATE_PG_URL: "postgres://elsewhere" } }))).toThrow("rule extra-env-key");
+		expect(() => buildRehearsalEnv(scratchInput({ extraEnv: { SUBSTRATE_BRIEF_PROFILE: "loud" } }))).toThrow("rule extra-env-value");
+	});
+
+	test("without --extra-env the environment is exactly what it was", () => {
+		const parentEnv = { PATH: "/usr/bin:/bin", HOME: "/root", SUBSTRATE_BRIEF_PROFILE: "enforce", SUBSTRATE_METRICS_HISTORY: "on" };
+		const env = buildRehearsalEnv(scratchInput({ parentEnv }));
+		expect(Object.hasOwn(env, "SUBSTRATE_BRIEF_PROFILE")).toBe(false);
+		expect(Object.hasOwn(env, "SUBSTRATE_METRICS_HISTORY")).toBe(false);
 	});
 });

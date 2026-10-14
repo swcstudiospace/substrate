@@ -17,6 +17,11 @@
  * the ledger drops between the check and the fetch. This writer cannot see
  * that race; a degraded 200 is written like any other brief. The gap is
  * recorded in `docs/collectors.md`.
+ *
+ * Since uplift-2 R1 the server answers with an `ETag`; the writer keeps the
+ * last one per repo in its state file, sends it back as `If-None-Match`, and a
+ * 304 leaves `BRIEF.md` alone (counted `unchanged`) instead of fetching and
+ * rewriting the same text every pass.
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
@@ -41,11 +46,15 @@ export interface MuseCounters {
 	fetch_failed: number;
 	no_slug: number;
 	orphan_pointer: number;
+	/** Passes answered 304: the brief the file holds is still current. */
+	unchanged: number;
 }
 
 export interface RepoRecord {
 	last_success?: string;
 	last_failure?: string;
+	/** The `ETag` of the last 200, sent as `If-None-Match` on the next fetch. */
+	etag?: string;
 }
 
 export interface MuseState {
@@ -55,7 +64,7 @@ export interface MuseState {
 
 export function emptyState(): MuseState {
 	return {
-		counters: { stored: 0, refused: 0, failed: 0, fetch_failed: 0, no_slug: 0, orphan_pointer: 0 },
+		counters: { stored: 0, refused: 0, failed: 0, fetch_failed: 0, no_slug: 0, orphan_pointer: 0, unchanged: 0 },
 		repos: {},
 	};
 }
@@ -85,6 +94,7 @@ export function loadState(path = stateFile()): MuseState {
 				const next: RepoRecord = {};
 				if (typeof entry.last_success === "string") next.last_success = entry.last_success;
 				if (typeof entry.last_failure === "string") next.last_failure = entry.last_failure;
+				if (typeof entry.etag === "string" && entry.etag.length > 0 && entry.etag.length <= 256) next.etag = entry.etag;
 				state.repos[repo] = next;
 			}
 		}
@@ -170,19 +180,30 @@ export async function ledgerAvailable(): Promise<boolean> {
 	}
 }
 
-/** A good brief is 2xx with a non-empty body. Anything else is a failed fetch. */
-export async function fetchBrief(slug: string, branch: string | undefined): Promise<{ ok: true; text: string } | { ok: false; reason: string }> {
+/** What one `POST /brief` came back as. `unchanged` is a 304 against the tag we sent. */
+export type FetchedBrief =
+	| { ok: true; unchanged: false; text: string; etag: string | null }
+	| { ok: true; unchanged: true; etag: string }
+	| { ok: false; reason: string };
+
+/**
+ * A good brief is 2xx with a non-empty body, or a 304 when `etag` was sent and
+ * still matches. Anything else is a failed fetch. A 304 without a tag sent is
+ * a server fault and counts as `http_304`.
+ */
+export async function fetchBrief(slug: string, branch: string | undefined, etag: string | null = null): Promise<FetchedBrief> {
 	try {
 		const response = await fetch(`${substrateUrl()}/brief`, {
 			method: "POST",
-			headers: { "content-type": "application/json", ...bearer() },
+			headers: { "content-type": "application/json", ...bearer(), ...(etag ? { "if-none-match": etag } : {}) },
 			body: JSON.stringify({ repo: slug, branch: branch ?? null, surface: "muse" }),
 			signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
 		});
+		if (response.status === 304 && etag) return { ok: true, unchanged: true, etag };
 		if (!response.ok) return { ok: false, reason: `http_${response.status}` };
 		const text = await response.text();
 		if (text.length === 0) return { ok: false, reason: "empty" };
-		return { ok: true, text };
+		return { ok: true, unchanged: false, text, etag: response.headers.get("etag") };
 	} catch {
 		return { ok: false, reason: "network" };
 	}
@@ -357,7 +378,10 @@ export function briefPathFor(repo: string): string | null {
  *
  * A ledger that is down counts `fetch_failed` (`ledger_unavailable`) for every
  * repo and still ensures the pointer. A repo with no origin slug is skipped
- * and counted `no_slug`. A failed brief leaves `BRIEF.md` byte-identical.
+ * and counted `no_slug`. A failed brief leaves `BRIEF.md` byte-identical. A
+ * 304 against the stored tag counts `unchanged` and leaves it byte-identical
+ * too; the tag is only sent while the file it describes still exists, so a
+ * deleted `BRIEF.md` is fetched in full and rewritten.
  */
 export async function pass(repos: string[], state: MuseState, now: string = new Date().toISOString()): Promise<void> {
 	const ready = await ledgerAvailable();
@@ -373,30 +397,37 @@ export async function pass(repos: string[], state: MuseState, now: string = new 
 			journal(`${repo}: no origin slug; skipped`);
 			continue;
 		}
-		const fetched = await fetchBrief(slug, branchFor(repo));
+		const record = state.repos[repo] ?? {};
+		const briefPath = briefPathFor(repo);
+		const known = record.etag && briefPath && existsSync(briefPath) ? record.etag : null;
+		const fetched = await fetchBrief(slug, branchFor(repo), known);
 		if (!fetched.ok) {
 			noteFailure(state, repo, fetched.reason, now);
 			ensurePointer(repo, state.counters);
 			ensureExclude(repo);
 			continue;
 		}
-		const briefPath = briefPathFor(repo);
 		if (!briefPath) {
 			noteFailure(state, repo, "brief_dir_outside_repo", now);
 			ensurePointer(repo, state.counters);
 			continue;
 		}
-		try {
-			writeIfChanged(briefPath, redact(fetched.text));
-		} catch (cause) {
-			noteFailure(state, repo, "write", now);
-			journal(`cannot write brief for ${repo}: ${String(cause)}`);
-			ensurePointer(repo, state.counters);
-			continue;
+		if (fetched.unchanged) {
+			state.counters.unchanged += 1;
+		} else {
+			try {
+				writeIfChanged(briefPath, redact(fetched.text));
+			} catch (cause) {
+				noteFailure(state, repo, "write", now);
+				journal(`cannot write brief for ${repo}: ${String(cause)}`);
+				ensurePointer(repo, state.counters);
+				continue;
+			}
+			if (fetched.etag) record.etag = fetched.etag;
+			else delete record.etag;
 		}
 		ensureExclude(repo);
 		ensurePointer(repo, state.counters);
-		const record = state.repos[repo] ?? {};
 		record.last_success = now;
 		state.repos[repo] = record;
 	}

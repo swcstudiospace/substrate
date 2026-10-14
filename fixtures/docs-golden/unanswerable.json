@@ -1,0 +1,19 @@
+{
+	"id": "unanswerable",
+	"question": "Tidal rhythm of lunar basalt?",
+	"datasets": ["agent-substrate", "programming-desk", "agent-skills"],
+	"expected": [],
+	"grades": {},
+	"answerable": false,
+	"k": 5,
+	"thresholds": {
+		"max_citations": 0,
+		"recall": 1,
+		"ndcg": 1,
+		"redaction_clean": true
+	},
+	"corpus_manifest": {
+		"sha256": "a9a30850816e065c3f26e643da07e19386af75d6f151830cfb3dc03c33eb203f",
+		"dataset_commit": "golden-v1"
+	}
+}

@@ -7,10 +7,10 @@
 // VM on every status call and folded into exit_code by the pure pollCode.
 
 import { createHash } from "node:crypto";
-import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { type Route, sessionEnv, SUBSTRATE_RELAY_URL, type TestsRoute, trackerRoute, worktreeFor } from "./options.ts";
-import { isValidGraphId } from "./sandbox-options.ts";
+import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { TEST_RUN_LABEL, type Route, sessionEnv, SUBSTRATE_MCP_URL, type TestsRoute, trackerRoute, worktreeFor } from "./options.ts";
+import { GRAPH_LABEL, isValidGraphId } from "./sandbox-options.ts";
 import {
 	ADDITIONAL_INSTRUCTIONS,
 	isValidIdentifier,
@@ -254,6 +254,219 @@ export class MemoryTaskStore implements TaskStoreLike {
 	list(): TaskRecord[] {
 		return [...this.records.values()];
 	}
+}
+
+/** One entry of the durable sandbox→task map (U2): which task a live sandbox belongs to. */
+export type SandboxStateEntry = {
+	graph_id: string;
+	/** The acquiring task's node, when a caller knows it; the provider learns only the graph, so it writes null. */
+	node_id: string | null;
+	/** The dispatcher identifier of that task, null with node_id. */
+	task: string | null;
+	/** When the sandbox was recorded (ISO 8601). */
+	opened_at: string;
+	/**
+	 * U1×U2: the exact iptables delete argv lists for the sandbox's standing DOCKER-USER rules,
+	 * recorded when the provider applies them so a crash's orphans stay removable after a restart
+	 * (the provider's in-process rule memory dies with the process). `[]` when no rules were
+	 * composed (the internal bridge is deny-all by docker); null once the deletes ran. Absent in
+	 * entries written before this field existed and read as none.
+	 */
+	egress_cleanup?: string[][] | null;
+};
+
+/**
+ * The sandbox reconciliation state (U2): sandbox id → owning task in one 0600 JSON file beside
+ * the task records (the approvals.json idiom: a single state file in the unit's storage root),
+ * written atomically via temp + rename (the TaskStore idiom). Every method is best-effort by
+ * contract: a failed read is an empty map and a failed write a stderr warning — reconciliation
+ * only loses its memory, a state problem is never a task failure.
+ */
+export class SandboxStateStore {
+	path: string;
+	private warn: (line: string) => void;
+
+	constructor(path: string, warn?: (line: string) => void) {
+		this.path = path;
+		this.warn = warn ?? ((line) => process.stderr.write(`[substrate-host] ${line}\n`));
+	}
+
+	private read(): Record<string, SandboxStateEntry> {
+		try {
+			const parsed = JSON.parse(readFileSync(this.path, "utf8")) as unknown;
+			if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+			return parsed as Record<string, SandboxStateEntry>;
+		} catch (cause) {
+			const code = typeof cause === "object" && cause !== null && "code" in cause ? cause.code : undefined;
+			if (code !== "ENOENT") {
+				this.warn(`sandbox state ${this.path} unreadable: ${String(cause)}`);
+			}
+			return {};
+		}
+	}
+
+	private write(entries: Record<string, SandboxStateEntry>): void {
+		const tmp = `${this.path}.${process.pid}.tmp`;
+		try {
+			mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
+			writeFileSync(tmp, `${JSON.stringify(entries, null, 2)}\n`, { mode: 0o600 });
+			renameSync(tmp, this.path);
+			chmodSync(this.path, 0o600);
+		} catch (cause) {
+			rmSync(tmp, { force: true });
+			this.warn(`sandbox state ${this.path} write failed: ${String(cause)}`);
+		}
+	}
+
+	/** Record the sandbox a task acquired; overwrites any previous entry for the id. */
+	record(sandboxId: string, entry: SandboxStateEntry): void {
+		const entries = this.read();
+		entries[sandboxId] = entry;
+		this.write(entries);
+	}
+
+	/** Drop the entry of a sandbox torn down or found gone; an absent id is a no-op. */
+	forget(sandboxId: string): void {
+		const entries = this.read();
+		if (!(sandboxId in entries)) return;
+		delete entries[sandboxId];
+		this.write(entries);
+	}
+
+	/**
+	 * U1×U2: pop the egress delete argvs recorded for one sandbox, clearing the field on the
+	 * same atomic write; the caller executes them best-effort (runEgressCleanup,
+	 * sandbox-provider.ts). A delete can only ever remove a standing deny rule, so clearing
+	 * unconditionally — a failed delete is not retried — leaves access narrower, never wider.
+	 * [] when none were recorded.
+	 */
+	takeEgressCleanup(sandboxId: string): string[][] {
+		const entries = this.read();
+		const entry = entries[sandboxId];
+		const cleanup = entry?.egress_cleanup;
+		if (entry === undefined || !cleanup || cleanup.length === 0) return [];
+		entry.egress_cleanup = null;
+		this.write(entries);
+		return cleanup;
+	}
+
+	list(): Array<SandboxStateEntry & { sandbox_id: string }> {
+		return Object.entries(this.read()).map(([sandbox_id, entry]) => ({ sandbox_id, ...entry }));
+	}
+}
+
+/** One live container as the provider's enumeration reports it (U2). */
+export type SandboxListing = {
+	sandbox_id: string;
+	/** The container's docker labels; the ones this host stamps are `substrate.graph_id` and `substrate.test_run`. */
+	labels: Record<string, string>;
+	/** Docker's state string ("running", "exited", …). */
+	state: string;
+};
+
+/** Whether a container carries a label this host stamps on the containers it starts (U2). */
+export function isHostSandboxLabel(labels: Record<string, string> | undefined): boolean {
+	return labels !== undefined && (GRAPH_LABEL in labels || TEST_RUN_LABEL in labels);
+}
+
+export type SandboxReconcileDeps = {
+	/** Live containers from the provider: everything on the daemon, host-owned by label, foreign unlabeled. */
+	enumerate: () => Promise<SandboxListing[]>;
+	/** The durable sandbox→task map (the U2 state file). */
+	state: Pick<SandboxStateStore, "list" | "forget">;
+	/**
+	 * Best-effort delete of a dead sandbox's standing egress rules — the recorded argvs of an
+	 * entry being forgotten. Docker's AutoRemove tears the container down but leaves DOCKER-USER
+	 * rules standing, so this must run before the entry (the deletes' only home) is dropped.
+	 * main.ts wires sandbox-provider's runEgressCleanup.
+	 */
+	runEgressCleanup: (sandboxId: string) => void;
+	/** The task record of a graph, or null; whether it still owns a sandbox is decided here. */
+	taskFor: (graphId: string) => Pick<TaskRecord, "graph_id" | "released"> | null;
+	/** Provider teardown by id; only host-labeled ids are ever passed — the classification here is the guard. */
+	terminate: (sandboxId: string) => Promise<void>;
+	/** One warning event per removed orphan; best-effort, wired to events_emit by main.ts. */
+	warn?: (payload: { action: string; sandbox_id: string }) => void;
+	log?: (line: string) => void;
+	/** Where stderr notes go (foreign containers, enumeration failure); default process.stderr. */
+	stderr?: (line: string) => void;
+};
+
+export type SandboxReconcileResult = {
+	ok: boolean;
+	/** Live sandboxes of still-claimed tasks, left running for their continuation (re-attach). */
+	reattached: string[];
+	/** Host-labeled containers removed as orphans. */
+	terminated: string[];
+	/** Foreign containers reported to stderr and never touched. */
+	foreign: string[];
+};
+
+/**
+ * Boot reconciliation (U2): a host restart must orphan nothing. Every live container is
+ * classified: a sandbox the state file maps to a still-claimed task is re-attached — its record
+ * stays in flight, so the boot's `resumeInterrupted` (D-07) sends the continuation and rearms
+ * the heartbeat; any other host-labeled container is an orphan — terminated, one warning event,
+ * its state entry dropped; unlabeled containers are foreign — a stderr note, never a terminate
+ * call. Best-effort by contract: an enumeration failure is one stderr warning and a fail-open
+ * boot, a failed terminate is a stderr note for that container alone, and this function never
+ * throws.
+ */
+export async function reconcileSandboxes(deps: SandboxReconcileDeps): Promise<SandboxReconcileResult> {
+	const log = deps.log ?? (() => undefined);
+	const stderr = deps.stderr ?? ((line) => process.stderr.write(`${line}\n`));
+	const result: SandboxReconcileResult = { ok: true, reattached: [], terminated: [], foreign: [] };
+	let live: SandboxListing[];
+	try {
+		live = await deps.enumerate();
+	} catch (cause) {
+		stderr(`[substrate-host] sandbox reconcile skipped: enumeration failed: ${String(cause)} (serving anyway)`);
+		return { ...result, ok: false };
+	}
+	const known = new Map<string, SandboxStateEntry & { sandbox_id: string }>(
+		deps.state.list().map((entry) => [entry.sandbox_id, entry]),
+	);
+	const liveIds = new Set(live.map((box) => box.sandbox_id));
+	// State hygiene: an entry whose sandbox is gone dies with it, so no later boot re-adopts a
+	// phantom — but its recorded egress deletes run first. The container vanished while the host
+	// was down (AutoRemove, a crash, manual removal), which never touches DOCKER-USER rules; the
+	// entry is the only place the deletes survive. Best-effort: a failed run is one stderr note
+	// and the forget proceeds — a standing rule only narrows.
+	for (const sandboxId of known.keys()) {
+		if (liveIds.has(sandboxId)) continue;
+		try {
+			deps.runEgressCleanup(sandboxId);
+		} catch (cause) {
+			stderr(`[substrate-host] phantom sandbox ${sandboxId.slice(0, 12)} egress cleanup failed: ${String(cause)}`);
+		}
+		deps.state.forget(sandboxId);
+	}
+	for (const box of live) {
+		const short = box.sandbox_id.slice(0, 12);
+		if (!isHostSandboxLabel(box.labels)) {
+			result.foreign.push(box.sandbox_id);
+			stderr(`[substrate-host] foreign container ${short} is not labeled by this host; left untouched`);
+			continue;
+		}
+		const entry = known.get(box.sandbox_id);
+		const task = entry ? deps.taskFor(entry.graph_id) : null;
+		if (entry && task !== null && !task.released && box.state === "running") {
+			result.reattached.push(box.sandbox_id);
+			log(`[substrate-host] sandbox re-attached ${short} (graph ${entry.graph_id})`);
+			continue;
+		}
+		try {
+			await deps.terminate(box.sandbox_id);
+		} catch (cause) {
+			stderr(`[substrate-host] orphan sandbox ${short} remove failed: ${String(cause)}`);
+			continue;
+		}
+		result.terminated.push(box.sandbox_id);
+		if (entry) deps.state.forget(box.sandbox_id);
+		deps.warn?.({ action: "host.orphan", sandbox_id: box.sandbox_id });
+		log(`[substrate-host] orphan sandbox removed ${short}${entry ? ` (stale state, graph ${entry.graph_id})` : " (unknown to task state)"}`);
+	}
+	return result;
 }
 
 /** The slice of a rivet VM handle TaskService drives; vm.ts's client handle satisfies it. */

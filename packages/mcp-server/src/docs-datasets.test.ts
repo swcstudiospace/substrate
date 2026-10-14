@@ -9,15 +9,22 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
+	DATASET_TRIGGER_RETENTION,
+	TRIGGER_SCAN_MAX,
 	createSkillsSyncTracker,
+	createTriggerStore,
 	createVersionStore,
 	degradedAgentSkillsServe,
 	isSyncLive,
 	latestVersion,
 	noteSkillsSyncFastForward,
 	pinsFromVersions,
-	recordDatasetVersion,
+	recordTrigger,
 	recordVersion,
+	refreshDataset,
+	resolveDatasets,
+	triggersFromJson,
+	triggersToJson,
 	type RefreshDeps,
 } from "./docs-datasets.ts";
 import { searchDocs } from "./docs-search.ts";
@@ -52,7 +59,7 @@ describe("recordDatasetVersion", () => {
 		expect(latestVersion(versions, "agent-substrate")?.commit).toBe("c7");
 	});
 
-	test("pins cite the commit only for chunks from the pinned documents", async () => {
+	test("pins travel as dataset_commit; an unrecorded document is never cited with the pin as its commit", async () => {
 		const fake = new RagflowFake();
 		const { emit } = eventsHarness();
 		const versions = createVersionStore();
@@ -73,7 +80,8 @@ describe("recordDatasetVersion", () => {
 			"who reads RAGFlow?",
 		);
 		expect(reply.chunks.length).toBeGreaterThan(0);
-		expect(reply.chunks.every((citation) => citation.commit === "pinned-commit")).toBe(true);
+		expect(reply.chunks.every((citation) => citation.dataset_commit === "pinned-commit")).toBe(true);
+		expect(reply.chunks.every((citation) => citation.commit === "dataset-pin:agent-substrate:unrecorded")).toBe(true);
 	});
 });
 
@@ -167,5 +175,39 @@ describe("skills-sync degradation", () => {
 		);
 		if (serve.ok) throw new Error("expected a reason");
 		expect(serve.reason).toBe("no-pinned-version");
+	});
+});
+
+describe("the accepted-trigger store (uplift-4 S7)", () => {
+	const at = "2026-10-14T00:00:00.000Z";
+
+	test("keeps the newest DATASET_TRIGGER_RETENTION per dataset, oldest first, and an empty store serialises to nothing", () => {
+		const store = createTriggerStore();
+		expect(triggersToJson(store)).toBeUndefined();
+		for (let i = 0; i < DATASET_TRIGGER_RETENTION + 7; i += 1) recordTrigger(store, "agent-substrate", { commit: `c${i}`, content_sha256: "s", received_at: at });
+		const kept = store.get("agent-substrate") ?? [];
+		expect(kept).toHaveLength(DATASET_TRIGGER_RETENTION);
+		expect(kept[0]?.commit).toBe("c7");
+		expect(kept[kept.length - 1]?.commit).toBe(`c${DATASET_TRIGGER_RETENTION + 6}`);
+	});
+
+	test("round-trips through JSON, reading only the trigger table's own datasets and skipping bad rows", () => {
+		const store = createTriggerStore();
+		recordTrigger(store, "kanbanos", { commit: "k1", content_sha256: "s", received_at: at });
+		const json = triggersToJson(store);
+		expect(triggersFromJson(JSON.parse(JSON.stringify(json))).get("kanbanos")).toEqual([{ commit: "k1", content_sha256: "s", received_at: at }]);
+		const hostile = triggersFromJson({ constructor: [{ commit: "c", content_sha256: "s", received_at: at }], kanbanos: [null, 5, { commit: "k", content_sha256: "s", received_at: "nope" }] });
+		expect(hostile.size).toBe(0);
+		expect(triggersFromJson(null).size).toBe(0);
+		expect(triggersFromJson([]).size).toBe(0);
+	});
+
+	test("reads at most TRIGGER_SCAN_MAX rows from the tail of an oversized list", () => {
+		const rows = Array.from({ length: 10_000 }, (_, i) => ({ commit: `c${i}`, content_sha256: "s", received_at: at }));
+		const kept = triggersFromJson({ "agent-substrate": rows }).get("agent-substrate") ?? [];
+		expect(kept).toHaveLength(DATASET_TRIGGER_RETENTION);
+		expect(kept[kept.length - 1]?.commit).toBe("c9999");
+		const garbage = Array.from({ length: TRIGGER_SCAN_MAX + 5 }, () => ({ nope: true }));
+		expect(triggersFromJson({ "agent-substrate": [{ commit: "old", content_sha256: "s", received_at: at }, ...garbage] }).size).toBe(0);
 	});
 });

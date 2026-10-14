@@ -193,3 +193,115 @@ describe("docs/event-vocabulary.md equals the table", () => {
 	});
 });
 
+describe("the skills.propose rows", () => {
+	const row = (id: string) => {
+		const found = EVENT_SOURCES.find((candidate) => candidate.id === id);
+		if (!found) throw new Error(`no EVENT_SOURCES row ${id}`);
+		return found;
+	};
+
+	test("an outcome is a note and a refusal or a failed git or gh step is a warning, all from the caller", () => {
+		expect(row("skills.propose")).toMatchObject({ kind: "note", surface: "caller", actions: ["skill.propose"], carriesRepo: true });
+		for (const id of ["skills.propose.refused", "skills.propose.failed"]) {
+			expect(row(id)).toMatchObject({ kind: "warning", surface: "caller", actions: ["skill.propose"], carriesRepo: false, periodic: false });
+		}
+	});
+
+	test("the failed row's sample names its status and carries a reason, never content", () => {
+		const payload = row("skills.propose.failed").sample().payload ?? {};
+		expect(payload).toMatchObject({ action: "skill.propose", status: "failed" });
+		expect(Object.keys(payload).sort()).toEqual(["action", "name", "reason", "status"]);
+	});
+});
+
+describe("the skills approval rows", () => {
+	const row = (id: string) => {
+		const found = EVENT_SOURCES.find((candidate) => candidate.id === id);
+		if (!found) throw new Error(`no EVENT_SOURCES row ${id}`);
+		return found;
+	};
+
+	test("a decision is a note from the caller carrying the library repo; a refusal is a warning with no repo", () => {
+		for (const [id, action] of [["skills.approve", "skill.approve"], ["skills.decline", "skill.decline"], ["skills.retire", "skill.retire"]] as const) {
+			expect(row(id)).toMatchObject({ kind: "note", surface: "caller", actions: [action], carriesRepo: true, periodic: false });
+		}
+		expect(row("skills.approve.refused")).toMatchObject({ kind: "warning", surface: "caller", actions: ["skill.approve.refused"], carriesRepo: false, periodic: false });
+	});
+
+	test("a refusal's sample names a rule and carries no free text; a decision names the pull request and who decided", () => {
+		expect(Object.keys(row("skills.approve.refused").sample().payload ?? {}).sort()).toEqual(["action", "decision", "name", "rule"]);
+		for (const id of ["skills.approve", "skills.decline", "skills.retire"]) {
+			expect(Object.keys(row(id).sample().payload ?? {})).toEqual(expect.arrayContaining(["action", "name", "pr_number", "pr_url", "decided_by"]));
+		}
+	});
+});
+
+describe("the memory.write verdict rows", () => {
+	const row = (id: string) => {
+		const found = EVENT_SOURCES.find((candidate) => candidate.id === id);
+		if (!found) throw new Error(`no EVENT_SOURCES row ${id}`);
+		return found;
+	};
+
+	test("an accepted or conflicting write is a note, a quarantined or denied one a warning, all from the writer", () => {
+		expect(row("memory.write.accepted")).toMatchObject({
+			kind: "note",
+			surface: "memory-writer",
+			carriesRepo: false,
+			periodic: false,
+		});
+		expect(row("memory.write.conflict")).toMatchObject({
+			kind: "note",
+			surface: "memory-writer",
+			carriesRepo: false,
+			periodic: false,
+		});
+		for (const id of ["memory.write.quarantined", "memory.write.denied"]) {
+			expect(row(id)).toMatchObject({
+				kind: "warning",
+				surface: "memory-writer",
+				carriesRepo: false,
+				periodic: false,
+			});
+		}
+	});
+
+	test("the audit payload carries no action, so no row declares one", () => {
+		// One emitter — the service's audit — and its payload names the outcome, the
+		// reason, the scope and the kind. With no `payload.action` there is no actions
+		// column to fill: the field stays unset, exactly like the herdr rows.
+		for (const id of ["memory.write.accepted", "memory.write.conflict", "memory.write.quarantined", "memory.write.denied"]) {
+			expect({ id, actions: row(id).actions }).toEqual({ id, actions: undefined });
+		}
+	});
+
+	test("each sample carries the outcome, the entry kind and the scope — never content, never a verdict key", () => {
+		// The accepted payload has no `reason`: a plain acceptance carries none, and
+		// the row samples the common case. Every other outcome names its reason.
+		const expected: Record<string, { outcome: string; reason?: string }> = {
+			"memory.write.accepted": { outcome: "accepted" },
+			"memory.write.conflict": { outcome: "conflict", reason: "version.stale" },
+			"memory.write.quarantined": { outcome: "quarantined", reason: "quarantine.secret" },
+			"memory.write.denied": { outcome: "denied", reason: "rbac.no-grant" },
+		};
+		for (const [id, want] of Object.entries(expected)) {
+			const payload = row(id).sample().payload ?? {};
+			expect(payload).toMatchObject(want);
+			const keys = Object.keys(payload).sort();
+			const wantKeys = [
+				"kind",
+				"outcome",
+				...(want.reason === undefined ? [] : ["reason"]),
+				// A quarantined write names the parked row a reviewer would look for.
+				...(id === "memory.write.quarantined" ? ["quarantine_id"] : []),
+				"scope",
+			].sort();
+			expect(keys).toEqual(wantKeys);
+			expect(keys).not.toContain("verdict");
+			expect(keys).not.toContain("action");
+		}
+		// A quarantined write names the parked row a reviewer would look for.
+		const quarantined = row("memory.write.quarantined").sample().payload ?? {};
+		expect(Object.keys(quarantined).sort()).toEqual(["kind", "outcome", "quarantine_id", "reason", "scope"]);
+	});
+});

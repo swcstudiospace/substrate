@@ -679,3 +679,98 @@ def test_unstored_outcome_is_logged_with_ids(env_file):
     mcp.call = lambda tool, args: {**real_call(tool, args), "stored": False}
     _, lines, _, _ = run_tick(linear, mcp, env_file=env_file)
     assert any("events_emit not stored" in line and GID in line for line in lines)
+
+
+# --- U3: the prelaunch step in the launch path ----------------------------------------------
+
+
+def test_make_launch_fn_runs_prelaunch_after_worktree_before_launch():
+    order: list[str] = []
+    captured: dict = {}
+    lines: list[str] = []
+
+    def checkout(_repo):
+        order.append("checkout")
+        return Path("/root/src/repos/agent-substrate")
+
+    def ensure(_repo, _gid, _branch):
+        order.append("ensure")
+        return Path(f"/var/lib/substrate/worktrees/{GID}")
+
+    def prelaunch(**kwargs):
+        order.append("prelaunch")
+        captured.update(kwargs)
+
+    def launch(**_kwargs):
+        order.append("launch")
+        return launched(7)
+
+    fn = make_launch_fn(
+        log=lines.append, checkout=checkout, ensure=ensure, launch=launch, prelaunch=prelaunch,
+    )
+    assert fn(cand(), FOUND).pid == 7
+    assert order == ["checkout", "ensure", "prelaunch", "launch"]
+    captured.pop("log")
+    assert captured == {
+        "identifier": "SWC-1", "graph_id": GID, "node_id": "n1", "repo": FOUND["repo"],
+        "branch": "main", "worktree": Path(f"/var/lib/substrate/worktrees/{GID}"),
+        "surface": "hermes",
+    }
+
+
+def test_broken_prelaunch_does_not_block_the_launch():
+    lines: list[str] = []
+
+    def prelaunch(**_kwargs):
+        raise RuntimeError("poster broke")
+
+    fn = make_launch_fn(
+        log=lines.append,
+        checkout=lambda _repo: Path("/root/src/repos/agent-substrate"),
+        ensure=lambda _repo, _gid, _branch: Path(f"/var/lib/substrate/worktrees/{GID}"),
+        launch=lambda **_kwargs: launched(9),
+        prelaunch=prelaunch,
+    )
+    assert fn(cand(), FOUND).pid == 9
+    assert any("prelaunch failed; launching anyway" in line for line in lines)
+
+
+def test_no_prelaunch_launches_exactly_as_before():
+    fn = make_launch_fn(
+        log=lambda _l: None,
+        checkout=lambda _repo: Path("/root/src/repos/agent-substrate"),
+        ensure=lambda _repo, _gid, _branch: Path(f"/var/lib/substrate/worktrees/{GID}"),
+        launch=lambda **_kwargs: launched(11),
+    )
+    assert fn(cand(), FOUND).pid == 11
+
+
+def test_tick_launch_with_prelaunch_registers_the_session_and_emits_outcome(env_file):
+    emit_events: list[tuple[str, dict]] = []
+
+    class SubMcp(FakeMcp):
+        def call(self, tool: str, arguments: dict):
+            if tool == "events_emit":
+                emit_events.append((tool, arguments))
+                return {"stored": True}
+            raise AssertionError(tool)
+
+    seen: list[dict] = []
+
+    def prelaunch(**kwargs):
+        seen.append(kwargs)
+
+    launch_fn = make_launch_fn(
+        log=lambda _l: None,
+        checkout=lambda _repo: Path("/root/src/repos/agent-substrate"),
+        ensure=lambda _repo, _gid, _branch: Path(f"/var/lib/substrate/worktrees/{GID}"),
+        launch=lambda **_kwargs: launched(13),
+        prelaunch=prelaunch,
+    )
+    linear, mcp = FakeLinear([cand()]), SubMcp()
+    decisions, _, registry, _ = run_tick(linear, mcp, env_file=env_file, launch_fn=launch_fn)
+    assert [d.action for d in decisions] == ["launch"]
+    assert registry.active_issue_ids() == {"i-1"}
+    assert len(seen) == 1 and seen[0]["graph_id"] == GID and seen[0]["surface"] == "hermes"
+    # The launch outcome still lands on the dispatch row with the prelaunch wired.
+    assert [args["payload"]["action"] for _, args in emit_events] == ["dispatch"]

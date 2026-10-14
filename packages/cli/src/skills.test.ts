@@ -24,6 +24,8 @@ import {
 interface Seen {
 	method: string;
 	path: string;
+	/** Query string without `?`; empty when the request had none. */
+	search: string;
 	authorization: string | null;
 	body: Record<string, unknown>;
 }
@@ -37,9 +39,11 @@ class RouteStub {
 		hostname: "127.0.0.1",
 		fetch: async (request) => {
 			const raw = await request.text();
+			const url = new URL(request.url);
 			this.seen.push({
 				method: request.method,
-				path: new URL(request.url).pathname,
+				path: url.pathname,
+				search: url.search.startsWith("?") ? url.search.slice(1) : url.search,
 				authorization: request.headers.get("authorization"),
 				body: raw ? (JSON.parse(raw) as Record<string, unknown>) : {},
 			});
@@ -256,8 +260,8 @@ describe("what the CLI refuses before posting", () => {
 		expect(stub.seen).toEqual([]);
 	});
 
-	test("anything but `propose` is a usage error", async () => {
-		const { code, err } = await run(["list"]);
+	test("an unknown subcommand is a usage error", async () => {
+		const { code, err } = await run(["nope"]);
 		expect(code).toBe(2);
 		expect(err).toContain("substrate skills propose");
 	});
@@ -363,6 +367,115 @@ describe("how the CLI reports the server's answer", () => {
 	});
 });
 
+describe("skills list", () => {
+	const listed = {
+		governance: "enforce",
+		library: "swcstudiospace/agent-skills",
+		truncated: false,
+		skills: [
+			{
+				name: "demo-skill",
+				content_sha256: "ab".repeat(32),
+				merge_sha: "deadbeef",
+				pr_url: "https://github.com/swcstudiospace/agent-skills/pull/12",
+				approved_at: "2026-10-14T13:00:00.000Z",
+				proposed_by: "cursor",
+			},
+		],
+	};
+
+	test("the default list is GET /skills with an empty query, the bearer and no body", async () => {
+		stub.reply = { status: 200, body: listed };
+		const { code } = await run(["list"]);
+		expect(code).toBe(0);
+		expect(stub.seen).toHaveLength(1);
+		expect(stub.seen[0]).toMatchObject({ method: "GET", path: "/skills", search: "", authorization: "Bearer tok-agent", body: {} });
+	});
+
+	test("list --state all sends state=all", async () => {
+		stub.reply = { status: 200, body: { ...listed, skills: [] } };
+		await run(["list", "--state", "all"]);
+		expect(stub.seen[0]).toMatchObject({ method: "GET", path: "/skills", search: "state=all" });
+	});
+
+	test("list without a token records nothing", async () => {
+		const { code, out, err } = await run(["list"], { token: undefined });
+		expect(code).toBe(1);
+		expect(out).toContain("status=refused");
+		expect(err).toContain("nothing was sent");
+		expect(stub.seen).toEqual([]);
+	});
+
+	test("a 200 prints governance, library and one skill line", async () => {
+		stub.reply = { status: 200, body: listed };
+		const { code, out } = await run(["list"]);
+		expect(code).toBe(0);
+		expect(out).toContain("governance=enforce");
+		expect(out).toContain("library=swcstudiospace/agent-skills");
+		expect(out).toContain("truncated=false");
+		expect(out).toContain("count=1");
+		expect(out).toContain("skill=name=demo-skill");
+		expect(out).toContain(`content_sha256=${"ab".repeat(32)}`);
+	});
+
+	test("a 403 is refused and exits 1", async () => {
+		stub.reply = { status: 403, body: { error: "skills_list of a non-default state needs an operator token" } };
+		const { code, out, err } = await run(["list", "--state", "proposed"]);
+		expect(code).toBe(1);
+		expect(out).toBe("status=refused\n");
+		expect(err).toContain("operator token");
+		expect(err).not.toContain("tok-agent");
+	});
+
+	test("a bad or valueless --state is refused before HTTP", async () => {
+		for (const argv of [["list", "--state"], ["list", "--state", "open"]]) {
+			const { code, out } = await run(argv);
+			expect(code).toBe(1);
+			expect(out).toContain("status=refused");
+		}
+		expect(stub.seen).toEqual([]);
+	});
+});
+
+describe("skills approve", () => {
+	const declined = {
+		status: "declined",
+		state: "declined",
+		name: "demo-skill",
+		pr_number: 4,
+		pr_url: null,
+		merge_sha: null,
+		content_sha256: "cd".repeat(32),
+		remaining_approved_for_name: 1,
+		noted: true,
+	};
+
+	test("posts pr_number as a number for decline and for retire", async () => {
+		for (const decision of ["decline", "retire"] as const) {
+			stub.seen = [];
+			stub.reply = { status: 200, body: { ...declined, status: decision === "retire" ? "retired" : "declined", state: decision === "retire" ? "retired" : "declined" } };
+			const { code } = await run(["approve", "--name", "demo-skill", "--pr", "4", "--decision", decision, "--reason", "reviewed"]);
+			expect(code).toBe(0);
+			expect(stub.seen[0]).toMatchObject({ method: "POST", path: "/skills/approve", authorization: "Bearer tok-agent" });
+			expect(stub.seen[0]?.body).toEqual({ name: "demo-skill", pr_number: 4, decision, reason: "reviewed" });
+			expect(typeof stub.seen[0]?.body.pr_number).toBe("number");
+		}
+	});
+
+	test("a missing name, a non-integer --pr or a bad decision records nothing", async () => {
+		for (const argv of [
+			["approve", "--pr", "4", "--decision", "decline"],
+			["approve", "--name", "demo-skill", "--pr", "4.5", "--decision", "decline"],
+			["approve", "--name", "demo-skill", "--pr", "4", "--decision", "maybe"],
+		]) {
+			const { code, out } = await run(argv);
+			expect(code).toBe(1);
+			expect(out).toContain("status=refused");
+		}
+		expect(stub.seen).toEqual([]);
+	});
+});
+
 describe("readSkillDir, the timeout and the cap", () => {
 	test("reads every file in sorted order and refuses a special file by name", () => {
 		const dir = skillDir();
@@ -435,5 +548,30 @@ describe("the real command", () => {
 	test("the usage text lists the command", async () => {
 		const result = await spawn([], {});
 		expect(result.stdout).toContain("substrate skills propose --dir PATH");
+		expect(result.stdout).toContain("substrate skills list");
+		expect(result.stdout).toContain("substrate skills approve");
+	});
+
+	test("dispatches `skills list` as GET /skills and exits 0", async () => {
+		stub.reply = { status: 200, body: { governance: "off", library: "o/r", skills: [], truncated: false } };
+		const result = await spawn(["skills", "list"], { SUBSTRATE_URL: stub.url, SUBSTRATE_TOKEN: "tok-real" });
+		expect(result.code).toBe(0);
+		expect(result.stdout).toContain("governance=off");
+		expect(stub.seen[0]).toMatchObject({ method: "GET", path: "/skills", search: "", authorization: "Bearer tok-real" });
+	});
+
+	test("dispatches `skills approve` as POST /skills/approve and exits 0", async () => {
+		stub.reply = {
+			status: 200,
+			body: { status: "declined", state: "declined", name: "demo-skill", pr_number: 9, pr_url: null, merge_sha: null, content_sha256: "ab".repeat(32), remaining_approved_for_name: 0 },
+		};
+		const result = await spawn(
+			["skills", "approve", "--name", "demo-skill", "--pr", "9", "--decision", "decline"],
+			{ SUBSTRATE_URL: stub.url, SUBSTRATE_TOKEN: "tok-real" },
+		);
+		expect(result.code).toBe(0);
+		expect(result.stdout).toContain("status=declined");
+		expect(stub.seen[0]?.body.pr_number).toBe(9);
+		expect(stub.seen[0]).toMatchObject({ method: "POST", path: "/skills/approve", authorization: "Bearer tok-real" });
 	});
 });
