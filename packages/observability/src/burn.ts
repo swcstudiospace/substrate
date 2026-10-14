@@ -186,13 +186,20 @@ export function sharedBurnLedger(): BurnLedger {
 }
 
 const warnedAbout = new Set<string>();
-function warnOnce(message: string): void {
+/** One stderr line per distinct message; the default warning sink of every env-read ceiling. */
+export function warnOnce(message: string): void {
 	if (warnedAbout.has(message)) return;
 	warnedAbout.add(message);
 	process.stderr.write(`[substrate] misconfigured — ${message}\n`);
 }
 
-function thresholdFrom(env: Record<string, string | undefined>, key: string, warn: (message: string) => void): number | null {
+/** A non-negative number from `env[key]`, or `null` when unset, blank or malformed (with one warning). */
+export function thresholdFrom(
+	env: Record<string, string | undefined>,
+	key: string,
+	warn: (message: string) => void,
+	objective = "burn objective",
+): number | null {
 	const raw = env[key];
 	if (raw === undefined || raw.trim() === "") return null;
 	const value = Number(raw);
@@ -200,7 +207,7 @@ function thresholdFrom(env: Record<string, string | undefined>, key: string, war
 		const quoted = raw.length > 40 ? `${raw.slice(0, 37)}...` : raw;
 		warn(
 			`${key} is set to ${JSON.stringify(quoted)}, which is not a non-negative number; ` +
-				"the burn objective it configures is treated as unset",
+				`the ${objective} it configures is treated as unset`,
 		);
 		return null;
 	}

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { METRIC, SubstrateInstruments } from "./instruments.ts";
+import { findCounter, sumCounter } from "./metrics.ts";
 import {
 	DOCS_FRESHNESS_ID,
 	evaluateDocsFreshnessSlo,
@@ -20,6 +21,8 @@ import {
 	evaluateDocsSlos,
 	evaluatePlaneSlos,
 	evaluateSlos,
+	SERVED_TOKENS_ENV,
+	servedTokensBySurface,
 	sloCatalogue,
 	type PlaneSloResult,
 } from "./slo.ts";
@@ -882,6 +885,85 @@ describe("the capacity runway objective (uplift-3 N2)", () => {
 		const samples = new CapacityRing();
 		for (let t = 0; t <= 23 * 3_600_000; t += 5_000) samples.record(T0 + t, 2 * GB);
 		expect(evaluateCapacitySlos(samples, { volumeBytes: 10 * GB })[0]!.status).toBe("insufficient-data");
+	});
+});
+
+describe("served.tokens_est per surface (uplift-4 S1)", () => {
+	const HOUR = BURN_WINDOW_MS;
+	const CEILING = { [SERVED_TOKENS_ENV]: "1000000" };
+
+	/** The instruments after serving `tokens` estimated tokens to each named surface (bytes = tokens * 4). */
+	function served(perSurface: Record<string, number>): SubstrateInstruments {
+		const instruments = new SubstrateInstruments();
+		for (const [surface, tokens] of Object.entries(perSurface)) instruments.recordServedTokens({ surface, tool: "brief", bytes: tokens * 4 });
+		return instruments;
+	}
+
+	test("is empty until something was served", () => {
+		expect(servedTokensBySurface([], { env: CEILING })).toEqual([]);
+		expect(servedTokensBySurface(new SubstrateInstruments().snapshot(), { env: CEILING })).toEqual([]);
+	});
+
+	test("an unset ceiling is unconfigured, per surface, and says which variable to set", () => {
+		const rows = servedTokensBySurface(served({ omp: 10, "grok-bot": 10_000_000 }).snapshot(), { env: {}, ledger: new BurnLedger(HOUR, 0), now: 0 });
+		expect(rows.map((row) => [row.surface, row.id, row.status, row.observed, row.target])).toEqual([
+			["grok-bot", "served.tokens_est", "unconfigured", null, null],
+			["omp", "served.tokens_est", "unconfigured", null, null],
+		]);
+		expect(rows[0]!.detail).toContain(SERVED_TOKENS_ENV);
+		expect(rows[0]!.statement).toContain("(unset)");
+	});
+
+	test("judged like the burn objectives: a rate from the delta of successive reads, per surface, never breaching another's", () => {
+		const ledger = new BurnLedger(HOUR, 0);
+		const first = servedTokensBySurface(served({ "grok-bot": 1, omp: 1 }).snapshot(), { env: CEILING, ledger, now: 0 });
+		expect(first.map((row) => row.status)).toEqual(["insufficient-data", "insufficient-data"]);
+
+		// 600k estimated tokens in a half hour is 1.2M an hour for the bot; the other surface stayed small.
+		const rows = servedTokensBySurface(served({ "grok-bot": 600_001, omp: 11 }).snapshot(), { env: CEILING, ledger, now: HOUR / 2 });
+		const bot = rows.find((row) => row.surface === "grok-bot")!;
+		const omp = rows.find((row) => row.surface === "omp")!;
+		expect(bot.status).toBe("breached");
+		expect(bot.observed).toBe(1_200_000);
+		expect(bot.samples).toBe(2);
+		expect(bot.detail).toContain("over the 1000000 tokens/h ceiling");
+		expect(omp.status).toBe("ok");
+		expect(omp.observed).toBe(20);
+	});
+
+	test("it is labelled estimated everywhere, and is never the model-reported burn", () => {
+		const instruments = served({ "grok-bot": 5_000_000 });
+		const [row] = servedTokensBySurface(instruments.snapshot(), { env: CEILING, ledger: new BurnLedger(HOUR, 0), now: 0 });
+		expect(row!.unit).toBe("tokens/h (estimated)");
+		expect(row!.title).toContain("Estimated");
+		expect(row!.statement).toContain("estimated");
+		expect(row!.statement).toContain(METRIC.servedTokensEst);
+		// The burn objective reads substrate.tokens only: served-only traffic gives it no series.
+		const burn = evaluateBurnSlos(instruments.snapshot(), { env: { SUBSTRATE_BURN_TOKENS_PER_HOUR: "1" }, ledger: new BurnLedger(HOUR, 0), now: 0 }).find((result) => result.id === "burn.tokens");
+		expect(burn?.status).toBe("insufficient-data");
+		// The model-reported counter holds nothing: the served estimate never reached it.
+		expect(sumCounter(findCounter(instruments.snapshot(), METRIC.tokens)!)).toBe(0);
+	});
+
+	test("sharing the burn ledger keeps the series apart", () => {
+		const ledger = new BurnLedger(HOUR, 0);
+		const instruments = served({ "grok-bot": 100 });
+		instruments.recordUsage({ surface: "grok-bot", payload: { input_tokens: 7 } });
+		servedTokensBySurface(instruments.snapshot(), { env: CEILING, ledger, now: 0 });
+		evaluateBurnSlos(instruments.snapshot(), { env: { SUBSTRATE_BURN_TOKENS_PER_HOUR: "1000" }, ledger, now: 0 });
+		const kept = ledger.export();
+		expect(kept[`${METRIC.servedTokensEst}|grok-bot`]?.at(-1)?.total).toBe(100);
+		expect(kept[METRIC.tokens]?.at(-1)?.total).toBe(7);
+	});
+
+	test("a malformed ceiling is unset, with one warning", () => {
+		const warnings: string[] = [];
+		const [row] = servedTokensBySurface(served({ omp: 1 }).snapshot(), { env: { [SERVED_TOKENS_ENV]: "plenty" }, ledger: new BurnLedger(HOUR, 0), now: 0, warn: (message) => warnings.push(message) });
+		expect(row!.status).toBe("unconfigured");
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain(SERVED_TOKENS_ENV);
+		expect(warnings[0]).toContain("the served-tokens objective it configures is treated as unset");
+		expect(warnings[0]).not.toContain("burn objective");
 	});
 });
 

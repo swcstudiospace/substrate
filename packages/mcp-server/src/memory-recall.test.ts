@@ -143,10 +143,14 @@ describe("registration", () => {
 });
 
 describe("anti-pattern gates", () => {
-	test("the brief's synchronous compose path never imports the Hindsight client", async () => {
-		const body = await Bun.file(new URL("./brief.ts", import.meta.url)).text();
-		const offenders = body.split("\n").filter((line) => /planes\/hindsight/.test(line));
-		expect({ offenders }).toEqual({ offenders: [] });
+	test("the brief's compose path, its profiles and the recall snapshot never import the Hindsight client", async () => {
+		// The brief reads recall ONLY from the `recall-snapshot` cache class, through a function the
+		// service injects; none of the three modules may reach the plane.
+		for (const file of ["./brief.ts", "./brief-profile.ts", "./recall-snapshot.ts"]) {
+			const body = await Bun.file(new URL(file, import.meta.url)).text();
+			const offenders = body.split("\n").filter((line) => /planes\/hindsight/.test(line) && !/^\s*(\/\/|\*|\/\*)/.test(line));
+			expect({ file, offenders }).toEqual({ file, offenders: [] });
+		}
 	});
 });
 

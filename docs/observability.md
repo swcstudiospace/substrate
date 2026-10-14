@@ -58,8 +58,16 @@ substrate is keyed by. `surface` says which of the eight agents on the host;
 | `substrate.docs.search` | counter | `surface`, `outcome` = `hit` \| `empty` \| `degraded`, `cached` = `true` \| `false` |
 | `substrate.docs.citations` | counter | `provenance` = `recorded` \| `unrecorded` \| `unpinned` |
 | `substrate.docs.duration` | histogram, ms (own edges, incl. 2000 and 4000) | `surface`, `cached` |
+| `substrate.cache.operations` | counter | `class` = `brief` \| `memory-search` \| `graph-view` \| `brief-snapshot` \| `recall-snapshot` \| `docs-search` \| `budget` \| `gen` \| `unknown`, `result` = `hit` \| `miss` \| `coalesced` \| `stale` \| `refresh` \| `would_serve_stale` \| `bypass` \| `error`, `mode` = `off` \| `on` \| `degraded` (uplift-4 S4: `coalesced` joined another caller's load; `stale` served a last-good brief; `refresh` a background refresh started; `would_serve_stale` only under `SUBSTRATE_CACHE_SWR=shadow`) |
 | `substrate.memory.expired` | counter | `surface`, `kind` (memory kind), `mode` = `served` \| `hidden` — entries past their `ttl` met by an index read (uplift-3 N4; `docs/memory-governance.md` § Lifetime) |
 | `substrate.brief.result` | counter | `surface` (a known surface or `unknown`), `state` = `complete` \| `degraded` \| `snapshot`, `result` = `fresh` \| `not_modified` — one per brief answered at either door; `not_modified` is a REST 304 or an MCP `not_modified: true` (uplift-3 N7) |
+| `substrate.brief.profile_bytes_saved` | counter | `surface` (a known surface or `unknown`) — full minus compact UTF-8 bytes of a fresh brief, recorded in `shadow` and `enforce` only and never below zero (uplift-4 S1; `docs/grok-bot.md` § The brief profile) |
+| `substrate.brief.profile` | counter | `surface`, `profile` = `full` \| `compact`, `mode` = `off` \| `shadow` \| `enforce` — one per brief answered; `profile` is what was served |
+| `substrate.served.tokens_est` | counter | `surface`, `tool` = `brief` \| `recall` \| `docs` — an **estimate**, `ceil(bytes / 4)` of the reply text (fresh briefs only, not a 304); a separate series, never added to the model-reported `substrate.tokens` (uplift-4 S1) |
+| `substrate.brief.recall` | counter | `surface` (a known surface or `unknown`), `result` = `included` \| `would_include` \| `cold` \| `stale` (older than `SUBSTRATE_BRIEF_RECALL_TTL_S`, up to twice it) \| `disabled` (no repo, no Hindsight, no cache, a bearer that is not the surface named, or an anonymous caller) — one per brief answered while `SUBSTRATE_BRIEF_RECALL` is `shadow` or `enforce`; nothing under `off` (uplift-4 S5; `docs/data-planes.md` § Recall in the brief) |
+| `substrate.recall.prefetch` | counter | `surface`, `result` = `ok` \| `empty` \| `error` \| `skipped_breaker` \| `skipped_unconfigured` \| `skipped_cache` — one per recall snapshot refresh attempt (uplift-4 S5; `skipped_cache`: the cache cannot hold a snapshot, so no recall was sent) |
+| `substrate.hindsight.retain_outbox.size`, `.oldest_age_seconds`, `.durable` | gauge | none — the retain outbox's depth, the age of its oldest parked forward (0 when empty) and 1 when it survives a restart; read in-process, always present (uplift-4 S5) |
+| `substrate.hindsight.bank.facts`, `.pending_operations`, `.failed_operations`, `.last_write_age_seconds` | gauge (served on `GET /metrics` under `gauges`, not in `metrics`) | `bank` — only a bank named in `HINDSIGHT_BANKS`, never a string the plane sent; present only with `SUBSTRATE_HINDSIGHT_INVENTORY=on` and after a probe that answered |
 | `substrate.index.archive.age_seconds` | gauge, s (a registry gauge: in `/metrics` `metrics[]` and OTLP, not checkpointed) | — (no attributes; absent until an archive exists, installed only with `SUBSTRATE_INDEX_ARCHIVE_DIR`) |
 | `substrate.docs.freshness_seconds` | gauge, s (**`/metrics` `gauges` only**, not in `metrics[]` and not OTLP) | `dataset` (a configured dataset name; absent until the dataset has a recorded version) |
 | `substrate.docs.trigger_lag_seconds` | gauge, s (**`/metrics` `gauges` only**, as above) | `dataset`; `0` once the newest accepted merge-trigger's commit has a recorded version |
@@ -161,6 +169,8 @@ reason: "ragflow circuit open"}`, and the fail-closed paths (emit, claim) stay
 closed. The cache additionally refuses to reconnect for `CACHE_CONNECT_COOLDOWN_MS`
 (5 s) after a failed connect, reported as `cache.cooldownUntil` in `/healthz`.
 
+`bun scripts/cache-stats.ts` (uplift-4 S4) is the operator-run, read-only census of the cache's key classes and value bytes and the `maxmemory` they justify: bounded `SCAN`, `TYPE` and `STRLEN`, no value read, loopback URLs only unless `--allow-remote`. The hit, stale and coalesced ratios come from the running service's `/healthz`, which needs the bearer: set `SUBSTRATE_TOKEN` or `SUBSTRATE_TOKEN_FILE` (first entry of a list; it is sent only as an `Authorization` header and never printed); a 401/403 is reported by name in the output.
+
 `GET /healthz` carries one row per plane, **report-only** — the status code still
 comes from the ledger and the index alone:
 
@@ -199,6 +209,7 @@ repo's whole history. The route answers with:
 | `X-Substrate-Brief` | `complete` (every source answered) · `degraded` (some did not; thin live text) · `snapshot` (some did not; the last complete brief for these arguments, from the cache) |
 | `X-Substrate-Brief-Failed` | the failed sources, comma-separated (`graph`, `recent actions`, `open graphs`, `memory`); absent when complete |
 | `Cache-Control` | `no-cache` — revalidate with the ETag; it does not mean "do not store" |
+| `X-Substrate-Brief-Age` | seconds since a last-good brief was composed; present only when it was served stale inside the `SUBSTRATE_CACHE_SWR_WINDOW_S` window (`SUBSTRATE_CACHE_SWR=enforce`, uplift-4 S4); `X-Substrate-Brief` stays `complete` |
 
 A request whose `If-None-Match` lists the current tag (weak comparison, `*` honoured)
 is answered **304 with no body** and the same headers. A degraded or snapshot brief is
@@ -325,6 +336,11 @@ a breached row is never folded into `breached`, which stays the catalogue's own 
 The global `brief.p95` blends every caller, so a fast CLI can hide a slow bot; the
 bot's own row is the verdict its operator wants, and `bun run smoke:grok` is the
 contract check beside it.
+
+### Estimated served tokens per surface (uplift-4 S1)
+
+`GET /slo` also carries a `served` array: one `served.tokens_est` row per surface that has been served anything, in the shape of the `burn` rows plus `surface`, unit `tokens/h (estimated)`. It is the hourly rate of `substrate.served.tokens_est` against `SUBSTRATE_SERVED_TOKENS_PER_HOUR`; unset is `unconfigured` (reported, never judged), as for `burn.tokens`. It is judged like the burn rows: every `/slo` read is a sample, a rate needs two reads at least five minutes apart, and the samples live in the burn ledger under their own `substrate.served.tokens_est|<surface>` keys, so the checkpoint restores them. The row is an estimate of what a surface's model had to read, not what it was billed: `burn.tokens` stays model-reported, and a breached `served` row is never folded into `breached`.
+
 ### History across restarts (uplift-3 N2)
 
 The catalogue is a process-lifetime aggregate and the plane and burn windows
@@ -435,6 +451,49 @@ directory could not be read). It is never folded into `breached`. The read is th
 directory's manifests, memoised for 60 s and bounded to the 1 s probe; with the
 variable unset the key and the row are absent. The archive itself:
 `docs/runbooks/index-archive.md`.
+
+### Hindsight outbox gauges, inventory and drift (uplift-4 S5)
+
+**Always on, no flag.** `substrate.hindsight.retain_outbox.size`, `.oldest_age_seconds` and
+`.durable` are gauges set from the retain outbox's own in-process state (`stats()`), when
+the process starts, when a forward is parked, when the outbox drains and when `/metrics`
+is read. They make no Hindsight call. They are in the `metrics` array of `GET /metrics`
+(a registry gauge); an outbox whose oldest entry keeps growing is a plane that is not
+taking retains.
+
+**Opt-in.** `SUBSTRATE_HINDSIGHT_INVENTORY=on` starts a read-only probe every
+`SUBSTRATE_HINDSIGHT_INVENTORY_INTERVAL_S` (60, floor 30; also run once at start).
+It lists the banks (`GET /v1/default/banks`, 50 per page, at most 200 banks) and, for the
+banks named in `HINDSIGHT_BANKS` only (at most 16), reads `GET {bank}/stats` and
+`GET {bank}/config`. The probe is single-flight, serves a result younger than 60 s
+again, and carries one 10 s deadline inside every breaker-gated call, so a stall
+counts as a plane failure; it makes no call while the Hindsight breaker is open and
+stops asking after the first call that says the plane itself is unwell.
+**Nothing is written to Hindsight**: every call is a `GET`.
+
+What it exports:
+
+- Per configured bank that the plane lists: `substrate.hindsight.bank.facts`,
+  `.pending_operations`, `.failed_operations` and `.last_write_age_seconds`, label
+  `bank`. Because the registry's gauge instrument carries no labels, these are served
+  on `GET /metrics` under `gauges` (the same key the docs freshness gauges use), not in
+  the `metrics` array. The `bank` label is always a name from `HINDSIGHT_BANKS`: a bank
+  the plane reports under any other name is never a label.
+- `GET /healthz` gains an additive `hindsight` block (nothing existing changes, and it
+  is absent when the inventory is off; it reads the last probe from memory and never
+  calls the plane): `checkedAt`, `ok`, `reason` (a fixed word such as `server`,
+  `timeout`, `circuit-open`, `unconfigured`, never plane text), `upstreamBanks`,
+  `truncated`, one row per configured bank, and `drift`.
+- `drift` names, at most 20 per list with `more` counting the rest: `missing`
+  (`HINDSIGHT_BANKS` entries the deployment does not list), `unconfigured` (`sub-*`
+  banks it lists that are not configured; a bank outside the `HINDSIGHT_BANKS` list, the
+  surfaces' own `sub-<surface>` banks included, shows up here until it is listed) and
+  `notChunks` (configured banks whose retain extraction mode is known and is not
+  `chunks`). A name from the plane is reduced to `[A-Za-z0-9._:-]` and 64 characters
+  before it is reported.
+
+The drift report is a report. Nothing creates, patches, consolidates or deletes a bank,
+and the status code of `/healthz` does not move.
 
 ### Notifications (uplift-3 N2)
 
@@ -774,11 +833,11 @@ checks and the bearer order.
 
 | | |
 | --- | --- |
-| `GET /metrics` | the snapshot this process holds, in the shape `otlp.ts` encodes |
+| `GET /metrics` | the snapshot this process holds, in the shape `otlp.ts` encodes; the per-bank Hindsight gauges (uplift-4 S5) and the docs freshness gauges (uplift-4 S7) ride beside it under `gauges` |
 | `GET /slo` | the verdicts computed from it, the breached ids, `burn`, the per-plane `planes`, the `admission` refusal rate, the `docs` row and the per-surface `surfaces` rows |
 | `GET /slo` | the verdicts computed from it, the breached ids (catalogue, plane and burn), `burn`, the per-plane `planes`, the `admission` refusal rate, the `docs` row, the `capacity` runway row and `history` |
 | `POST /evidence` | `{ "graph_id": "ut-…", "format": "json" \| "html" }` |
-| `GET /healthz` | now also `auditDurable`, `auditRecords`, `planes`, `capacity`, `cachedAt` and `stale` |
+| `GET /healthz` | now also `auditDurable`, `auditRecords`, `planes`, `capacity`, `cachedAt` and `stale`; with `SUBSTRATE_HINDSIGHT_INVENTORY=on` an additive `hindsight` block (uplift-4 S5), absent otherwise |
 | `GET /slo/history` | `?series=&window=&step=`: durable, aggregated metric history from `metric_samples` (uplift-4 S6); `404 {"enabled":false}` unless `SUBSTRATE_METRICS_HISTORY=on` and a ledger is configured |
 
 `/metrics` and `/slo` are served whether or not a collector is configured, so an
@@ -837,6 +896,8 @@ substrate-specific spelling.
 | `SUBSTRATE_CACHE_COMMAND_TIMEOUT_MS` | `250` | One cache command; sized for the loopback redis. |
 | `SUBSTRATE_CACHE_CONNECT_TIMEOUT_MS` | `250` | One cache connect. |
 | `SUBSTRATE_HEALTHZ_CACHE_MS` | `5000` | How long a computed `/healthz` body is served to pollers; `0` = recompute per call. |
+| `SUBSTRATE_CACHE_SWR` | `shadow` | `off` \| `shadow` \| `enforce` (uplift-4 S4): whether a brief miss after a generation bump may be answered with a last-good younger than the window while one background refresh runs. `shadow` only counts `would_serve_stale`; junk is `shadow`. |
+| `SUBSTRATE_CACHE_SWR_WINDOW_S` | `30` | How old a last-good brief may be and still be served stale, seconds; max 300. |
 | `SUBSTRATE_BUDGETS` | `shadow` | `off` \| `shadow` \| `enforce`: whether the admission buckets are skipped, decided and counted only, or answered with 429. |
 | `SUBSTRATE_BUDGET_READ_RPS` / `_BURST` | `20` / `40` | Per surface and second, with one second of headroom; reads are the GET routes, `/brief`, `/memory/recall`, `/docs/search`, `/events/query`, `/verify`, `/evidence`, `/drift`, `/slo/history` and the read tools. |
 | `SUBSTRATE_BUDGET_WRITE_RPS` / `_BURST` | `10` / `20` | `/events`, `/memory`, `/docs/ingest`, `/docs/merge-trigger`, `/skills/propose`, `/handoff` and the write tools. |
@@ -846,6 +907,12 @@ substrate-specific spelling.
 | `SUBSTRATE_METRICS_HISTORY` | off | `on` samples the registry into `metric_samples` and serves `/slo/history`; anything else is off. It also needs the ledger: with no ledger configured it stays off, the route answers `404 {"enabled":false}` and boot says why. |
 | `SUBSTRATE_METRICS_HISTORY_INTERVAL_S` | `60` | Seconds between samples; floor 15, ceiling 3600. |
 | `SUBSTRATE_METRICS_HISTORY_TTL` | `14d` | Whole days `1d`–`90d`, applied when the table is **created**; anything else falls back to `14d`. An existing table keeps the retention it was created with, so a raised value needs an operator `ALTER TABLE "metric_samples" SET 'ttl'='<n>d'` on it; until then `/slo/history` accepts windows up to the configured value (`retentionDays`) but the table holds no more than its own TTL. |
+| `SUBSTRATE_BRIEF_RECALL` | `off` | `off` \| `shadow` \| `enforce` (uplift-4 S5, Build Plan BP-5.0): `off` adds no Hindsight traffic and leaves every brief, ETag and cache key as it was; `shadow` runs the prefetcher and counts `would_include` while serving today's text; `enforce` appends the `Recalled context` section. An unknown value is `off`, named at boot. |
+| `SUBSTRATE_BRIEF_RECALL_INTERVAL_S` | `120` | Seconds between prefetch ticks (floor 30, ceiling 3600); each tick refreshes at most two wanted pairs. |
+| `SUBSTRATE_BRIEF_RECALL_TTL_S` | `900` | How long a recall snapshot lives in the `recall-snapshot` cache class (60–86400). The entry lives twice this: fresh up to it, `stale` (omitted from the brief, counted) up to twice it. A pair is refreshed once its snapshot is older than half of it. |
+| `SUBSTRATE_BRIEF_RECALL_BUDGET_MS` | `1500` | The deadline of one recall, inside the breaker-gated call (100–10000); a timeout is a plane failure. |
+| `SUBSTRATE_HINDSIGHT_INVENTORY` | off | `on` runs the read-only bank inventory (uplift-4 S5): per-bank gauges, the drift report and `/healthz.hindsight`. Anything else is off. The retain outbox gauges do not depend on it. |
+| `SUBSTRATE_HINDSIGHT_INVENTORY_INTERVAL_S` | `60` | Seconds between inventory probes (floor 30, ceiling 3600). |
 
 An endpoint pasted as `https://collector/v1/metrics` is accepted: the trailing
 `/v1/metrics` is stripped, because appending it again would 404 on every export —

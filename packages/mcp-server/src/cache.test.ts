@@ -8,8 +8,13 @@
  */
 import { afterAll, describe, expect, test } from "bun:test";
 import net, { type AddressInfo } from "node:net";
-import { BreakerOpenError, CircuitBreaker, findCounter, sumCounter, type MetricSnapshot, type PlaneSample } from "@substrate/observability";
+import { BreakerOpenError, CACHE_METRIC_CLASSES, CircuitBreaker, findCounter, sumCounter, type MetricSnapshot, type PlaneSample } from "@substrate/observability";
 import {
+	CACHE_CLASSES,
+	MAX_REFRESHES,
+	classOf,
+	snapshotKey,
+	type LastGood,
 	CACHE_CONNECT_COOLDOWN_MS,
 	CACHE_TTL,
 	COMMAND_TIMEOUT_MS,
@@ -1433,5 +1438,519 @@ describe("GET /healthz", () => {
 		const counter = findCounter(metrics.metrics, "substrate.cache.operations");
 		expect(counter).toBeDefined();
 		expect(sumCounter(counter!, { result: "bypass" })).toBeGreaterThan(0);
+	});
+});
+
+/**
+ * Single-flight and stale-while-revalidate (uplift-4 S4). Every test below
+ * fails on the old `getOrLoad`: it had no in-flight map, no stale path and no
+ * class on its samples.
+ */
+describe("single-flight (uplift-4 S4)", () => {
+	function deferred() {
+		const gate = Promise.withResolvers<void>();
+		return { wait: gate.promise, open: () => gate.resolve() };
+	}
+	// One macrotask turn drains every promise continuation the fake redis produced; no wall-clock wait.
+	const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+	test("N concurrent identical misses call the loader once and every caller gets the value", async () => {
+		const redis = new FakeRedis();
+		const cache = cacheOf(redis);
+		const gate = deferred();
+		let loads = 0;
+		const load = async () => {
+			loads += 1;
+			await gate.wait;
+			return [{ text: "shared" }];
+		};
+		const calls = Array.from({ length: 10 }, () => cache.getOrLoad({ ...read, load }));
+		await settle();
+		gate.open();
+		const results = await Promise.all(calls);
+
+		expect(loads).toBe(1);
+		for (const result of results) expect(result).toEqual([{ text: "shared" }]);
+		// Each waiter has its own copy: editing one does not edit another.
+		expect(results[1]).not.toBe(results[2]);
+		expect(redis.sets).toBe(1);
+		expect(cache.health()).toMatchObject({ misses: 10, coalesced: 9 });
+	});
+
+	test("a rejecting loader does not poison later calls and every waiter sees the failure", async () => {
+		const redis = new FakeRedis();
+		const cache = cacheOf(redis);
+		const gate = deferred();
+		let loads = 0;
+		const failing = async (): Promise<string> => {
+			loads += 1;
+			await gate.wait;
+			throw new Error("source down");
+		};
+		const calls = Array.from({ length: 4 }, () => cache.getOrLoad({ ...read, klass: "brief", load: failing }).then(() => "ok", (cause: Error) => cause.message));
+		await settle();
+		gate.open();
+		expect(await Promise.all(calls)).toEqual(["source down", "source down", "source down", "source down"]);
+		expect(loads).toBe(1);
+
+		expect(await cache.getOrLoad({ ...read, klass: "brief", load: async () => "recovered" })).toBe("recovered");
+		expect(await cache.getOrLoad({ ...read, klass: "brief", load: async () => "never" })).toBe("recovered");
+	});
+
+	test("a degraded load is shared with nobody: waiters load for themselves and nothing is stored", async () => {
+		const redis = new FakeRedis();
+		const cache = cacheOf(redis);
+		const gate = deferred();
+		let loads = 0;
+		const request = {
+			...read,
+			klass: "brief" as const,
+			store: () => false,
+			load: async () => {
+				loads += 1;
+				await gate.wait;
+				return `thin ${loads}`;
+			},
+		};
+		const calls = [cache.getOrLoad(request), cache.getOrLoad(request), cache.getOrLoad(request)];
+		await settle();
+		gate.open();
+		await Promise.all(calls);
+
+		expect(loads).toBe(3);
+		expect(redis.sets).toBe(0);
+		// Nothing is left registered: the next call loads again, and is not handed a stale promise.
+		await cache.getOrLoad({ ...request, load: async () => "after" });
+		expect(redis.sets).toBe(0);
+	});
+
+	test("the in-flight map is capped: beyond it requests load independently", async () => {
+		const redis = new FakeRedis();
+		const cache = new ReadThroughCache({ redis, enabled: true, log: () => {}, now: () => 1_000, maxInflight: 2 });
+		const gate = deferred();
+		const loads = new Map<string, number>();
+		const call = (name: string) =>
+			cache.getOrLoad({
+				...read,
+				args: { name },
+				load: async () => {
+					loads.set(name, (loads.get(name) ?? 0) + 1);
+					await gate.wait;
+					return [{ text: name }];
+				},
+			});
+		const calls = [call("a"), call("b"), call("c"), call("a"), call("b"), call("c")];
+		await settle();
+		gate.open();
+		await Promise.all(calls);
+
+		expect(loads.get("a")).toBe(1);
+		expect(loads.get("b")).toBe(1);
+		expect(loads.get("c")).toBe(2);
+	});
+
+	test("a load older than the join age is not joined, so a hung loader cannot capture later callers", async () => {
+		const redis = new FakeRedis();
+		let now = 1_000;
+		const cache = new ReadThroughCache({ redis, enabled: true, log: () => {}, now: () => now, flightMaxAgeMs: 1_000 });
+		const hung = Promise.withResolvers<string[]>();
+		void cache.getOrLoad({ ...read, load: () => hung.promise }).catch(() => {});
+		await settle();
+		now += 5_000;
+		expect(await cache.getOrLoad({ ...read, load: async () => ["independent"] })).toEqual(["independent"]);
+		hung.resolve(["late"]);
+	});
+
+	test("a cache that errors still answers from the source, once per caller", async () => {
+		const redis = new FakeRedis();
+		redis.fail = true;
+		const cache = cacheOf(redis);
+		let loads = 0;
+		const load = async () => {
+			loads += 1;
+			return [{ text: "source" }];
+		};
+		expect(await Promise.all([cache.getOrLoad({ ...read, load }), cache.getOrLoad({ ...read, load })])).toEqual([[{ text: "source" }], [{ text: "source" }]]);
+		expect(loads).toBe(2);
+	});
+});
+
+describe("stale-while-revalidate (uplift-4 S4)", () => {
+	const clock = { now: 1_000_000 };
+	const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+	const iso = (ms: number) => new Date(ms).toISOString();
+
+	interface Probe {
+		loads: number;
+		refreshLoads: number;
+		served: number[];
+		stored: string[];
+	}
+	const probeOf = (): Probe => ({ loads: 0, refreshLoads: 0, served: [], stored: [] });
+
+	function cacheWith(redis: FakeRedis, mode: "off" | "shadow" | "enforce" | undefined, windowS = 30): ReadThroughCache {
+		return new ReadThroughCache({ redis, enabled: true, log: () => {}, now: () => clock.now, ...(mode ? { swr: { mode, windowS } } : {}) });
+	}
+
+	function call(
+		cache: ReadThroughCache,
+		probe: Probe,
+		hooks: {
+			args?: unknown;
+			load?: () => Promise<string>;
+			refresh?: () => Promise<string>;
+			degraded?: boolean;
+			lastGood?: () => Promise<LastGood<string> | null>;
+		} = {},
+	): Promise<string> {
+		const args = hooks.args ?? { repo: "acme/app" };
+		return cache.getOrLoad({
+			klass: "brief",
+			surface: "cursor",
+			args,
+			generations: [MEMORY_GENERATION_KEY],
+			load: async () => {
+				probe.loads += 1;
+				return (hooks.load ?? (async () => "live"))();
+			},
+			swr: {
+				lastGood:
+					hooks.lastGood ??
+					(async () => {
+						const good = await cache.peekQuiet<{ text: string; at: string }>("brief-snapshot", "cursor", args);
+						return good ? { value: good.text, atMs: Date.parse(good.at), untilMs: null } : null;
+					}),
+				refresh: () => ({
+					load: async () => {
+						probe.refreshLoads += 1;
+						return (hooks.refresh ?? (async () => "refreshed"))();
+					},
+					store: () => hooks.degraded !== true,
+					stored: async (text) => {
+						probe.stored.push(text);
+						await cache.put("brief-snapshot", "cursor", args, { text, at: iso(clock.now) }, 3600);
+					},
+				}),
+				served: (ageMs) => {
+					probe.served.push(ageMs);
+				},
+			},
+		});
+	}
+
+	const seed = (cache: ReadThroughCache, text: string, ageMs: number, args: unknown = { repo: "acme/app" }) =>
+		cache.put("brief-snapshot", "cursor", args, { text, at: iso(clock.now - ageMs) }, 3600);
+
+	test("shadow counts would_serve_stale and still serves the live value", async () => {
+		const redis = new FakeRedis();
+		const cache = cacheWith(redis, "shadow");
+		const probe = probeOf();
+		await seed(cache, "old", 5_000);
+
+		expect(await call(cache, probe)).toBe("live");
+		expect(probe).toMatchObject({ loads: 1, refreshLoads: 0, served: [] });
+		expect(cache.health()).toMatchObject({ wouldServeStale: 1, stale: 0, refreshes: 0 });
+	});
+
+	test("enforce serves the last-good inside the window and refreshes exactly once under N callers", async () => {
+		const redis = new FakeRedis();
+		const cache = cacheWith(redis, "enforce");
+		const probe = probeOf();
+		await seed(cache, "old", 5_000);
+		const gate = Promise.withResolvers<void>();
+
+		const calls = Array.from({ length: 6 }, () =>
+			call(cache, probe, {
+				refresh: async () => {
+					await gate.promise;
+					return "refreshed";
+				},
+			}),
+		);
+		expect(await Promise.all(calls)).toEqual(Array(6).fill("old"));
+		expect(probe.loads).toBe(0);
+		expect(probe.refreshLoads).toBe(1);
+		expect(probe.served).toEqual(Array(6).fill(5_000));
+		expect(cache.health()).toMatchObject({ stale: 6, refreshes: 1, wouldServeStale: 0 });
+
+		gate.resolve();
+		await settle();
+		expect(probe.stored).toEqual(["refreshed"]);
+		// The refresh stored the entry under the current generation and moved the last-good.
+		expect(await call(cache, probe)).toBe("refreshed");
+		expect(probe.refreshLoads).toBe(1);
+		expect(await cache.peekQuiet<{ text: string }>("brief-snapshot", "cursor", { repo: "acme/app" })).toMatchObject({ text: "refreshed" });
+	});
+
+	test("a degraded refresh is never stored and never becomes the last-good", async () => {
+		const redis = new FakeRedis();
+		const cache = cacheWith(redis, "enforce");
+		const probe = probeOf();
+		await seed(cache, "old", 5_000);
+
+		expect(await call(cache, probe, { degraded: true, refresh: async () => "thin" })).toBe("old");
+		await settle();
+		expect(probe.refreshLoads).toBe(1);
+		expect(probe.stored).toEqual([]);
+		expect([...redis.values.keys()].filter((key) => classOf(key) === "brief")).toEqual([]);
+		expect(await cache.peekQuiet<{ text: string }>("brief-snapshot", "cursor", { repo: "acme/app" })).toMatchObject({ text: "old" });
+	});
+
+	test("a failing refresh is swallowed, counted, and does not block the next one", async () => {
+		const redis = new FakeRedis();
+		const cache = cacheWith(redis, "enforce");
+		const probe = probeOf();
+		await seed(cache, "old", 5_000);
+		const failing = async (): Promise<string> => {
+			throw new Error("source down");
+		};
+
+		expect(await call(cache, probe, { refresh: failing })).toBe("old");
+		await settle();
+		expect(cache.health().errors).toBe(1);
+		expect(await call(cache, probe, { refresh: failing })).toBe("old");
+		await settle();
+		expect(probe.refreshLoads).toBe(2);
+	});
+
+	test("after the window the live value is loaded and nothing is served stale", async () => {
+		const redis = new FakeRedis();
+		const cache = cacheWith(redis, "enforce", 30);
+		const probe = probeOf();
+		await seed(cache, "old", 29_000);
+		clock.now += 1_000;
+
+		expect(await call(cache, probe)).toBe("live");
+		expect(probe).toMatchObject({ loads: 1, refreshLoads: 0, served: [] });
+		expect(cache.health().stale).toBe(0);
+	});
+
+	test("a last-good from the future, or one past its own deadline, is not served", async () => {
+		const redis = new FakeRedis();
+		const cache = cacheWith(redis, "enforce");
+		const probe = probeOf();
+		await seed(cache, "future", -5_000);
+		expect(await call(cache, probe)).toBe("live");
+
+		const expired = probeOf();
+		expect(
+			await call(cache, expired, {
+				args: { repo: "other" },
+				lastGood: async () => ({ value: "lease gone", atMs: clock.now - 1_000, untilMs: clock.now - 1 }),
+			}),
+		).toBe("live");
+		expect(expired.served).toEqual([]);
+	});
+
+	test("the refresh cap holds: at most MAX_REFRESHES run at once, the rest are still answered stale", async () => {
+		const redis = new FakeRedis();
+		const cache = cacheWith(redis, "enforce");
+		const probe = probeOf();
+		const gate = Promise.withResolvers<void>();
+		const names = Array.from({ length: MAX_REFRESHES + 4 }, (_, index) => ({ n: index }));
+		for (const args of names) await seed(cache, "old", 1_000, args);
+
+		const answers = await Promise.all(
+			names.map((args) =>
+				call(cache, probe, {
+					args,
+					refresh: async () => {
+						await gate.promise;
+						return "refreshed";
+					},
+				}),
+			),
+		);
+		expect(answers).toEqual(Array(names.length).fill("old"));
+		expect(probe.refreshLoads).toBe(MAX_REFRESHES);
+		gate.resolve();
+		await settle();
+	});
+
+	test("a probe that throws, or a cache that errors, is the old answer", async () => {
+		const redis = new FakeRedis();
+		const cache = cacheWith(redis, "enforce");
+		const probe = probeOf();
+		expect(
+			await call(cache, probe, {
+				lastGood: async () => {
+					throw new Error("probe failed");
+				},
+			}),
+		).toBe("live");
+
+		redis.fail = true;
+		expect(await call(cache, probe)).toBe("live");
+		expect(probe.served).toEqual([]);
+	});
+
+	test("off and shadow answer exactly what a cache without SWR answers, step for step", async () => {
+		async function run(mode: "off" | "shadow" | undefined): Promise<{ answers: string[]; stored: string[]; health: unknown }> {
+			const redis = new FakeRedis();
+			const cache = cacheWith(redis, mode);
+			const probe = probeOf();
+			let version = 0;
+			const load = async () => `v${(version += 1)}`;
+			const answers: string[] = [];
+			answers.push(await call(cache, probe, { load }));
+			answers.push(await call(cache, probe, { load }));
+			await seed(cache, "old", 5_000);
+			await cache.bump(MEMORY_GENERATION_KEY);
+			answers.push(await call(cache, probe, { load }));
+			answers.push(await call(cache, probe, { load }));
+			const health = cache.health();
+			return {
+				answers,
+				stored: [...redis.values.entries()].filter(([key]) => classOf(key) === "brief").map(([, value]) => value),
+				health: { hits: health.hits, misses: health.misses, bypasses: health.bypasses, errors: health.errors, mode: health.mode },
+			};
+		}
+		const baseline = await run(undefined);
+		expect(baseline.answers).toEqual(["v1", "v1", "v2", "v2"]);
+		expect(await run("off")).toEqual(baseline);
+		expect(await run("shadow")).toEqual(baseline);
+	});
+
+	test("every sample carries a class from the closed set, including the new results", async () => {
+		const redis = new FakeRedis();
+		const samples: Array<{ result: string; cacheClass?: string }> = [];
+		const cache = new ReadThroughCache({
+			redis,
+			enabled: true,
+			log: () => {},
+			now: () => clock.now,
+			swr: { mode: "enforce", windowS: 30 },
+			record: (sample) => samples.push(sample),
+		});
+		const probe = probeOf();
+		await seed(cache, "old", 5_000);
+		await call(cache, probe);
+		await settle();
+		await call(cache, probe);
+		await cache.bump(MEMORY_GENERATION_KEY);
+		await cache.getOrLoad({ ...read, load: async () => [{ text: "x" }] });
+
+		expect(new Set(samples.map((sample) => sample.result))).toEqual(new Set(["miss", "stale", "refresh", "hit"]));
+		for (const sample of samples) expect(CACHE_CLASSES as readonly string[]).toContain(sample.cacheClass as string);
+		expect(samples.find((sample) => sample.result === "refresh")?.cacheClass).toBe("brief");
+		expect(samples.find((sample) => sample.cacheClass === "memory-search")).toBeDefined();
+	});
+
+	function hungCache(): ReadThroughCache {
+		return new ReadThroughCache({
+			redis: new FakeRedis(),
+			enabled: true,
+			log: () => {},
+			now: () => clock.now,
+			swr: { mode: "enforce", windowS: 30 },
+			flightMaxAgeMs: 5,
+		});
+	}
+
+	test("a hung refresh keeps its key until the load settles, and a late load writes nothing over a newer snapshot", async () => {
+		const redis = new FakeRedis();
+		const cache = new ReadThroughCache({ redis, enabled: true, log: () => {}, now: () => clock.now, swr: { mode: "enforce", windowS: 30 }, flightMaxAgeMs: 5 });
+		const probe = probeOf();
+		await seed(cache, "old", 5_000);
+		const hung = Promise.withResolvers<string>();
+
+		expect(await call(cache, probe, { refresh: () => hung.promise })).toBe("old");
+		// Wait for the signal, not a guessed duration: the deadline counts one error.
+		while (cache.health().errors === 0) await settle();
+		// The deadline released the flight, not the key: a second refresh for the same key does not start while the first load lives.
+		expect(await call(cache, probe, { refresh: async () => "second" })).toBe("old");
+		await settle();
+		expect(probe.refreshLoads).toBe(1);
+
+		hung.resolve("late");
+		await settle();
+		await settle();
+		// The late value was not stored, not as the entry and not as the last-good.
+		expect(probe.stored).toEqual([]);
+		expect([...redis.values.keys()].filter((key) => classOf(key) === "brief")).toEqual([]);
+		expect(await cache.peekQuiet<{ text: string }>("brief-snapshot", "cursor", { repo: "acme/app" })).toMatchObject({ text: "old" });
+
+		// Settled: the key is free again.
+		expect(await call(cache, probe, { refresh: async () => "recovered" })).toBe("old");
+		await settle();
+		expect(probe.refreshLoads).toBe(2);
+		expect(probe.stored).toEqual(["recovered"]);
+	});
+
+	test("MAX_REFRESHES stays strict after a deadline: hung loads keep their slots until they settle", async () => {
+		const cache = hungCache();
+		const probe = probeOf();
+		const hung = Promise.withResolvers<string>();
+		const names = Array.from({ length: MAX_REFRESHES + 1 }, (_, index) => ({ n: index }));
+		for (const args of names) await seed(cache, "old", 1_000, args);
+		for (const args of names.slice(0, MAX_REFRESHES)) await call(cache, probe, { args, refresh: () => hung.promise });
+		while (cache.health().errors < MAX_REFRESHES) await settle();
+
+		const extra = names[MAX_REFRESHES];
+		expect(await call(cache, probe, { args: extra, refresh: async () => "extra" })).toBe("old");
+		await settle();
+		expect(probe.refreshLoads).toBe(MAX_REFRESHES);
+
+		hung.resolve("late");
+		await settle();
+		await settle();
+		expect(await call(cache, probe, { args: extra, refresh: async () => "extra" })).toBe("old");
+		await settle();
+		expect(probe.refreshLoads).toBe(MAX_REFRESHES + 1);
+	});
+
+	test("shadow probes beside the load: the load starts while the probe is still waiting", async () => {
+		const redis = new FakeRedis();
+		const cache = cacheWith(redis, "shadow");
+		const probe = probeOf();
+		const parked = Promise.withResolvers<void>();
+		const answer = call(cache, probe, {
+			lastGood: async () => {
+				await parked.promise;
+				return { value: "old", atMs: clock.now - 1_000, untilMs: null };
+			},
+		});
+		await settle();
+		// A serial probe would not have loaded yet.
+		expect(probe.loads).toBe(1);
+		parked.resolve();
+		expect(await answer).toBe("live");
+		expect(cache.health()).toMatchObject({ wouldServeStale: 1, stale: 0 });
+	});
+
+	test("a failing last-good read is silent: no error, no bypass, the cache stays on, in both modes", async () => {
+		for (const mode of ["shadow", "enforce"] as const) {
+			const redis = new FakeRedis();
+			const cache = cacheWith(redis, mode);
+			const probe = probeOf();
+			const get = redis.get.bind(redis);
+			redis.get = async (key: string) => {
+				if (classOf(key) === "brief-snapshot") throw new Error("snapshot read failed");
+				return get(key);
+			};
+			// The default probe is `peekQuiet`, which reads the snapshot key.
+			expect(await call(cache, probe)).toBe("live");
+			expect(cache.health()).toMatchObject({ errors: 0, bypasses: 0, mode: "on", wouldServeStale: 0, stale: 0 });
+		}
+	});
+
+	test("the metric class set is the cache's class set", () => {
+		expect([...CACHE_METRIC_CLASSES]).toEqual([...CACHE_CLASSES]);
+	});
+});
+
+describe("classOf (uplift-4 S4)", () => {
+	test("names the class of every key the cache writes and nothing else", () => {
+		expect(classOf(cacheKey("brief", "cursor", "0", {}))).toBe("brief");
+		expect(classOf(cacheKey("memory-search", "cursor", "0", {}))).toBe("memory-search");
+		expect(classOf(cacheKey("graph-view", "cursor", "0", {}))).toBe("graph-view");
+		expect(classOf(cacheKey("docs-search", "cursor", "0", {}))).toBe("docs-search");
+		expect(classOf(snapshotKey("brief-snapshot", "cursor", {}))).toBe("brief-snapshot");
+		expect(classOf(MEMORY_GENERATION_KEY)).toBe("gen");
+		expect(classOf(graphGenerationKey("ut-1"))).toBe("gen");
+		expect(classOf("substrate:v1:budget:cursor:read")).toBe("budget");
+		expect(classOf("substrate:v1:unknown:abc")).toBeNull();
+		expect(classOf("other:v1:brief:abc")).toBeNull();
+		expect(classOf("substrate:v1:__proto__:abc")).toBeNull();
 	});
 });

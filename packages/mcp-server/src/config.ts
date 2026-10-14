@@ -6,8 +6,10 @@
  */
 import { SOLANA_CLI_DEFAULT } from "@substrate/ledger";
 import { ADMISSION_CLASSES, loadBreakerSettings, type AdmissionClass, type BreakerSettings } from "@substrate/observability";
+import { loadBriefProfileConfig, type BriefProfileConfig } from "./brief-profile.ts";
 import { ADMISSION_MODES, type AdmissionMode, type AdmissionSettings, type BucketLimit } from "./admission.ts";
 import { DEFAULT_INGEST_ROOTS } from "./docs-ingest.ts";
+import { loadInventoryConfig, type InventoryConfig } from "./hindsight-inventory.ts";
 import { normalizeTtlSeconds } from "./lease.ts";
 import { LEGACY_ENV_KEYS } from "./legacy-env.ts";
 import { LINEAR_API_URL } from "./linear.ts";
@@ -15,6 +17,7 @@ import { parseGrants, type MemoryGrant } from "./memory-policy.ts";
 import { DEFAULT_RECALL_BUDGET_MS } from "./memory-recall.ts";
 import { NOTION_API_URL } from "./notion.ts";
 import { DEFAULT_RETRIEVAL_KNOBS, ragflowFromEnv, type RagflowConfig, type RetrievalKnobs } from "./planes/ragflow.ts";
+import { loadRecallConfig, type RecallConfig } from "./recall-snapshot.ts";
 import { DEFAULT_RETAIN_DRAIN_MS, DEFAULT_RETAIN_MAX_ATTEMPTS, DEFAULT_RETAIN_OUTBOX_MAX } from "./retain-outbox.ts";
 import { MEMORY_EXPIRY_MODES, SURFACES, SWARM_SURFACES, isSwarmSurface, type MemoryExpiryMode, type Surface } from "./types.ts";
 
@@ -284,6 +287,11 @@ export interface SubstrateConfig {
 	cacheConnectTimeoutMs: number;
 	/** How long a computed `/healthz` body is served to pollers, ms (`SUBSTRATE_HEALTHZ_CACHE_MS`, default 5000; 0 = recompute per call). */
 	healthzCacheMs: number;
+	// uplift-4 S4
+	/** Stale-while-revalidate for the brief (`SUBSTRATE_CACHE_SWR=off|shadow|enforce`, default shadow: counts `would_serve_stale`, serves live). */
+	cacheSwr: "off" | "shadow" | "enforce";
+	/** How old a last-good brief may be and still be served stale, s (`SUBSTRATE_CACHE_SWR_WINDOW_S`, default 30, max 300). */
+	cacheSwrWindowS: number;
 	// uplift-2 R5
 	/**
 	 * Ledger chain cache, chain-tip lookback, write-probe cadence and opt-in TTL,
@@ -380,6 +388,13 @@ export interface SubstrateConfig {
 	 * ledger (and one POST to `webhookUrl` when set). See `slo-notify.ts`.
 	 */
 	sloNotify: SloNotifySettings;
+	/**
+	 * The brief profile (uplift-4 S1): `SUBSTRATE_BRIEF_PROFILE` (off | shadow |
+	 * enforce, default shadow), `SUBSTRATE_BRIEF_PROFILE_SURFACES` and the three
+	 * `SUBSTRATE_BRIEF_COMPACT_*` limits. Parsed by `brief-profile.ts`; its
+	 * `warnings` are printed at boot.
+	 */
+	briefProfile: BriefProfileConfig;
 	// uplift-4 S7 — docs freshness SLI and merge-trigger lag
 	/**
 	 * `SUBSTRATE_DOCS_FRESHNESS_MAX_AGE_H` (default 168; `0` reports freshness
@@ -393,6 +408,14 @@ export interface SubstrateConfig {
 	// uplift-4 S6
 	/** The durable metrics history (`SUBSTRATE_METRICS_HISTORY*`, default off). See `metrics-history.ts`. */
 	metricsHistory: MetricsHistorySettings;
+	// uplift-4 S5
+	/**
+	 * Cross-session recall in the brief: `SUBSTRATE_BRIEF_RECALL` (off | shadow | enforce, default off),
+	 * `SUBSTRATE_BRIEF_RECALL_INTERVAL_S`, `_TTL_S` and `_BUDGET_MS`. Parsed by `recall-snapshot.ts`.
+	 */
+	briefRecall: RecallConfig;
+	/** The read-only Hindsight inventory (`SUBSTRATE_HINDSIGHT_INVENTORY=on`, default off). Parsed by `hindsight-inventory.ts`. */
+	hindsightInventory: InventoryConfig;
 }
 
 /** The knobs behind `SUBSTRATE_SLO_NOTIFY*` and `SUBSTRATE_SLO_WEBHOOK_URL` (uplift-3 N2). */
@@ -644,6 +667,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		cacheCommandTimeoutMs: positiveOr(env.SUBSTRATE_CACHE_COMMAND_TIMEOUT_MS, 250),
 		cacheConnectTimeoutMs: positiveOr(env.SUBSTRATE_CACHE_CONNECT_TIMEOUT_MS, 250),
 		healthzCacheMs: nonNegativeOr(env.SUBSTRATE_HEALTHZ_CACHE_MS, 5000),
+		// uplift-4 S4
+		cacheSwr: cacheSwrOr(env.SUBSTRATE_CACHE_SWR),
+		cacheSwrWindowS: Math.min(300, positiveOr(env.SUBSTRATE_CACHE_SWR_WINDOW_S, 30)),
 		// uplift-2 R5
 		ledger: loadLedgerSettings(env),
 		// uplift-4 S2
@@ -687,6 +713,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 			sustainS: boundedInt(env.SUBSTRATE_SLO_NOTIFY_SUSTAIN_S, 300, 0, 86_400),
 			webhookUrl: /^https?:\/\//i.test(env.SUBSTRATE_SLO_WEBHOOK_URL?.trim() ?? "") ? env.SUBSTRATE_SLO_WEBHOOK_URL!.trim() : null,
 		},
+		// uplift-4 S1
+		briefProfile: loadBriefProfileConfig(env),
 		docsFreshness: {
 			maxAgeHours: boundedInt(env.SUBSTRATE_DOCS_FRESHNESS_MAX_AGE_H, 168, 0, 8760),
 			triggerLagMinutes: boundedInt(env.SUBSTRATE_DOCS_TRIGGER_LAG_MIN, 15, 0, 10_080),
@@ -694,6 +722,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		},
 		// uplift-4 S6
 		metricsHistory: loadMetricsHistorySettings(env, greptimeUrl !== undefined && greptimeUrl !== ""),
+		// uplift-4 S5
+		briefRecall: loadRecallConfig(env),
+		hindsightInventory: loadInventoryConfig(env),
 	};
 }
 
@@ -772,6 +803,12 @@ function positiveOr(raw: string | undefined, fallback: number): number {
 function unitIntervalOr(raw: string | undefined, fallback: number): number {
 	const value = Number(raw?.trim());
 	return raw !== undefined && raw.trim() !== "" && Number.isFinite(value) && value >= 0 && value <= 1 ? value : fallback;
+}
+
+/** uplift-4 S4: `off`, `shadow` or `enforce` (case-insensitive); anything else, unset included, is `shadow`, which only reports. */
+function cacheSwrOr(raw: string | undefined): "off" | "shadow" | "enforce" {
+	const value = raw?.trim().toLowerCase();
+	return value === "off" || value === "enforce" ? value : "shadow";
 }
 
 /** uplift-3 N3: a finite rate > 0, fractions kept (0.5 rps is one call per 2 s); anything else is the default. */

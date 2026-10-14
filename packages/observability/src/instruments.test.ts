@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
+	CACHE_METRIC_CLASSES,
+	CACHE_METRIC_RESULTS,
 	ADMISSION_CLASSES,
 	ADMISSION_DECISIONS,
+	BRIEF_PROFILES,
+	BRIEF_PROFILE_MODES,
 	BRIEF_RESULTS,
 	BRIEF_STATES,
 	CITATION_PROVENANCES,
@@ -10,8 +14,10 @@ import {
 	MEMORY_EXPIRED_MODES,
 	METRIC,
 	PLANE_ERROR_REASONS,
+	SERVED_TOKEN_TOOLS,
 	SubstrateInstruments,
 	classifyEventRefusal,
+	estimateTokens,
 	classifyPlaneReason,
 	extractUsage,
 } from "./instruments.ts";
@@ -147,6 +153,51 @@ describe("recordBriefResult (uplift-3 N7)", () => {
 		instruments.recordBriefResult({ surface: "grok-bot", state: "complete", result: "not_modified" });
 		expect(mergeHistogram(findHistogram(instruments.snapshot(), METRIC.briefDuration)!).count).toBe(1);
 		expect(sumCounter(findCounter(instruments.snapshot(), METRIC.briefResult)!, { result: "not_modified" })).toBe(1);
+	});
+});
+
+describe("brief profile and estimated spend (uplift-4 S1)", () => {
+	test("the label sets are closed", () => {
+		expect([...BRIEF_PROFILES]).toEqual(["full", "compact"]);
+		expect([...BRIEF_PROFILE_MODES]).toEqual(["off", "shadow", "enforce"]);
+		expect([...SERVED_TOKEN_TOOLS]).toEqual(["brief", "recall", "docs"]);
+	});
+
+	test("the estimate is ceil(bytes / 4), and nothing for an empty or invalid size", () => {
+		expect([0, 1, 3, 4, 5, 3500].map(estimateTokens)).toEqual([0, 1, 1, 1, 2, 875]);
+		expect([-4, Number.NaN, Number.POSITIVE_INFINITY].map(estimateTokens)).toEqual([0, 0, 0]);
+	});
+
+	test("recordBriefProfile counts every answer by surface, profile and mode, and the saving only when there is one", () => {
+		const instruments = new SubstrateInstruments();
+		instruments.recordBriefProfile({ surface: "grok-bot", profile: "full", mode: "shadow", bytesSaved: 4000 });
+		instruments.recordBriefProfile({ surface: "grok-bot", profile: "full", mode: "shadow", bytesSaved: null });
+		instruments.recordBriefProfile({ surface: "grok-bot", profile: "compact", mode: "enforce", bytesSaved: -30 });
+		const profile = findCounter(instruments.snapshot(), METRIC.briefProfile)!;
+		expect(sumCounter(profile, { surface: "grok-bot", profile: "full", mode: "shadow" })).toBe(2);
+		expect(sumCounter(profile, { profile: "compact", mode: "enforce" })).toBe(1);
+		expect(Object.keys(profile.points[0]?.attributes ?? {}).sort()).toEqual(["mode", "profile", "surface"]);
+		const saved = findCounter(instruments.snapshot(), METRIC.briefProfileBytesSaved)!;
+		expect(sumCounter(saved)).toBe(4000);
+		expect(Object.keys(saved.points[0]?.attributes ?? {})).toEqual(["surface"]);
+	});
+
+	test("served tokens are a separate series from the model-reported ones", () => {
+		const instruments = new SubstrateInstruments();
+		instruments.recordServedTokens({ surface: "grok-bot", tool: "brief", bytes: 3500 });
+		instruments.recordServedTokens({ surface: "grok-bot", tool: "docs", bytes: 10 });
+		instruments.recordServedTokens({ surface: "grok-bot", tool: "recall", bytes: 0 });
+		const served = findCounter(instruments.snapshot(), METRIC.servedTokensEst)!;
+		expect(sumCounter(served, { tool: "brief" })).toBe(875);
+		expect(sumCounter(served, { tool: "docs" })).toBe(3);
+		expect(sumCounter(served, { tool: "recall" })).toBe(0);
+		expect(Object.keys(served.points[0]?.attributes ?? {}).sort()).toEqual(["surface", "tool"]);
+		expect(METRIC.servedTokensEst).not.toBe(METRIC.tokens);
+		expect(sumCounter(findCounter(instruments.snapshot(), METRIC.tokens)!)).toBe(0);
+		// Recording usage the model reported does not move the estimate.
+		instruments.recordUsage({ surface: "grok-bot", payload: { usage: { input_tokens: 100, output_tokens: 50 } } });
+		expect(sumCounter(findCounter(instruments.snapshot(), METRIC.servedTokensEst)!)).toBe(878);
+		expect(sumCounter(findCounter(instruments.snapshot(), METRIC.tokens)!)).toBe(150);
 	});
 });
 
@@ -349,5 +400,31 @@ describe("recordDocsSearch (uplift-3 N5)", () => {
 		expect(duration.bounds).toEqual(DOCS_LATENCY_BUCKETS_MS);
 		expect(DOCS_LATENCY_BUCKETS_MS).toContain(2000);
 		expect(DOCS_LATENCY_BUCKETS_MS).toContain(4000);
+	});
+});
+
+describe("recordCache (uplift-4 S4)", () => {
+	test("labels every operation with its class; an unknown or missing class is `unknown`, never the raw string", () => {
+		const instruments = new SubstrateInstruments();
+		instruments.recordCache({ result: "hit", mode: "on", cacheClass: "brief" });
+		instruments.recordCache({ result: "coalesced", mode: "on", cacheClass: "brief" });
+		instruments.recordCache({ result: "stale", mode: "on", cacheClass: "brief" });
+		instruments.recordCache({ result: "would_serve_stale", mode: "on", cacheClass: "brief" });
+		instruments.recordCache({ result: "miss", mode: "degraded", cacheClass: "memory-search" });
+		instruments.recordCache({ result: "bypass", mode: "off", cacheClass: "user:supplied:name" });
+		instruments.recordCache({ result: "error", mode: "on" });
+
+		const counter = findCounter(instruments.snapshot(), METRIC.cacheOperations)!;
+		expect(sumCounter(counter)).toBe(7);
+		// The pre-existing consumers select by result and mode only; adding a label keeps them whole.
+		expect(sumCounter(counter, { result: "bypass" })).toBe(1);
+		expect(sumCounter(counter, { mode: "degraded" })).toBe(1);
+		expect(sumCounter(counter, { class: "brief", result: "coalesced" })).toBe(1);
+		expect(sumCounter(counter, { class: "unknown" })).toBe(2);
+		for (const point of counter.points) {
+			expect([...CACHE_METRIC_CLASSES, "unknown"] as readonly string[]).toContain(String(point.attributes.class));
+			expect(CACHE_METRIC_RESULTS as readonly string[]).toContain(String(point.attributes.result));
+			expect(Object.keys(point.attributes).sort()).toEqual(["class", "mode", "result"]);
+		}
 	});
 });
