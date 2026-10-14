@@ -154,34 +154,6 @@ describe("the tracked manifest", () => {
 		});
 	});
 
-	test("the bridge is three live tokens-dir rows, one per queue surface", () => {
-		const manifest = loadManifest(MANIFEST_PATH);
-		const rows: Array<[string, string]> = [
-			["bridge-hermes", "hermes"],
-			["bridge-omp", "omp"],
-			["bridge-grok-build", "grok-build"],
-		];
-		for (const [id, surface] of rows) {
-			expect(manifest.clients.find((c) => c.id === id)).toEqual({
-				id,
-				surface,
-				delivery: { kind: "tokens-dir" },
-				state: "live",
-				evidence: expect.any(String),
-			});
-		}
-	});
-
-	test("no live env-file delivery names a non-token variable such as SUBSTRATE_URL", () => {
-		const manifest = loadManifest(MANIFEST_PATH);
-		for (const client of manifest.clients) {
-			if (client.delivery.kind !== "env-file" || !isLive(client.state)) continue;
-			expect(client.delivery.variable === "SUBSTRATE_TOKEN" || client.delivery.variable.startsWith("SUBSTRATE_TOKEN_")).toBe(
-				true,
-			);
-		}
-	});
-
 	test("herdr env files are production paths", () => {
 		const manifest = loadManifest(MANIFEST_PATH);
 		expect(manifest.herdr_env_files).toEqual(["/etc/substrate/substrate-collector-herdr.env"]);
@@ -231,12 +203,10 @@ describe("the tracked manifest", () => {
 		for (const client of manifest.clients) {
 			if (isLive(client.state)) expect(required.has(tokenEnvName(client.surface as Surface))).toBe(true);
 		}
-		// Skills sync is a live substrate client, so the server must hold its bearer.
-		expect(required.has("SUBSTRATE_TOKEN_SUBSTRATE")).toBe(true);
 		// Surfaces with no live client stay out: swarm workspaces provision
 		// on install, herdr-only and muse surfaces ride the collector gate,
 		// and dormant phases restore in their own window.
-		for (const name of ["SUBSTRATE_TOKEN_SWARM_A01_ORCH", "SUBSTRATE_TOKEN_CODEX", "SUBSTRATE_TOKEN_MUSE"]) {
+		for (const name of ["SUBSTRATE_TOKEN_SWARM_A01_ORCH", "SUBSTRATE_TOKEN_CODEX", "SUBSTRATE_TOKEN_MUSE", "SUBSTRATE_TOKEN_SUBSTRATE"]) {
 			expect(required.has(name)).toBe(false);
 		}
 	});

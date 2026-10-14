@@ -21,8 +21,6 @@ const repoRoot = join(import.meta.dir, "..");
 
 const MCP_ENTRY = "packages/mcp-server/src/index.ts";
 const GROK_ENTRY = "packages/collectors/src/grok.ts";
-const SYNC_ENTRY = "packages/projector/src/skills-sync.ts";
-const BRIDGE_MAIN = "packages/miner/src/substrate_miner/__main__.py";
 
 function treeOf(...paths: string[]): Set<string> {
 	return new Set(paths);
@@ -221,7 +219,7 @@ EnvironmentFile=${SHARED_ENV_FILE}
 		);
 		const units = loadUnits(dir, true);
 		const findings = diagnose(units, treeOf("packages/dispatcher/src/substrate_dispatcher/__main__.py"));
-		expect(findings.map((finding) => finding.code)).toEqual(["restart-loop", "shared-env"]);
+		expect(findings.map((finding) => finding.code)).toEqual(["restart-loop"]);
 		expect(findings[0]?.detail).toContain("SUBSTRATE_DISPATCH_DISABLED=1");
 		expect(JSON.stringify(findings)).not.toContain("PLANE_SECRET");
 		expect(JSON.stringify(findings)).not.toContain("should-not-surface");
@@ -268,91 +266,6 @@ EnvironmentFile=${SHARED_ENV_FILE}
 		);
 		expect(unit.execStart).toContain(MCP_ENTRY);
 		expect(diagnose([unit], treeOf(MCP_ENTRY))).toEqual([]);
-	});
-});
-
-describe("skills units", () => {
-	test("the sync tick resolves its bun entry under the release", () => {
-		const unit = parseUnit(
-			"substrate-skills-sync.service",
-			`[Service]
-WorkingDirectory=${RELEASE_CURRENT}
-ExecStart=/root/.local/share/reflex/bun/bin/bun ${SYNC_ENTRY}
-EnvironmentFile=/etc/substrate/substrate-skills-sync.env
-`,
-		);
-		expect(diagnose([unit], treeOf(SYNC_ENTRY))).toEqual([]);
-		expect(diagnose([unit], treeOf(MCP_ENTRY)).map((finding) => finding.code)).toEqual(["missing-entry"]);
-	});
-
-	test("the bridge python3 -m entry resolves to the miner __main__", () => {
-		const unit = parseUnit(
-			"substrate-skills-bridge.service",
-			`[Service]
-WorkingDirectory=${RELEASE_CURRENT}
-ExecStart=/usr/bin/python3 -m substrate_miner bridge --once
-Environment=PYTHONPATH=${RELEASE_CURRENT}/packages/miner/src
-Environment=PYTHONDONTWRITEBYTECODE=1
-EnvironmentFile=/etc/substrate/substrate-bridge.env
-`,
-		);
-		expect(diagnose([unit], treeOf(BRIDGE_MAIN))).toEqual([]);
-		expect(diagnose([unit], treeOf()).map((finding) => finding.code)).toEqual(["missing-entry"]);
-	});
-
-	test("a skills unit loading the shared server env is a finding", () => {
-		const sync = parseUnit(
-			"substrate-skills-sync.service",
-			`[Service]
-WorkingDirectory=${RELEASE_CURRENT}
-ExecStart=/root/.local/share/reflex/bun/bin/bun ${SYNC_ENTRY}
-EnvironmentFile=${SHARED_ENV_FILE}
-`,
-		);
-		expect(diagnose([sync], treeOf(SYNC_ENTRY)).map((finding) => finding.code)).toEqual(["shared-env"]);
-		const bridge = parseUnit(
-			"substrate-skills-bridge.service",
-			`[Service]
-WorkingDirectory=${RELEASE_CURRENT}
-ExecStart=/usr/bin/python3 -m substrate_miner bridge --once
-EnvironmentFile=${SHARED_ENV_FILE}
-`,
-			[
-				`[Service]
-EnvironmentFile=
-EnvironmentFile=/etc/substrate/substrate-bridge.env
-`,
-			],
-		);
-		expect(diagnose([bridge], treeOf(BRIDGE_MAIN))).toEqual([]);
-	});
-
-	test("the repo bridge unit sets no single-token variable and loads no shared env", () => {
-		const service = readFileSync(join(repoRoot, "infra/vps/substrate-skills-bridge.service"), "utf8");
-		const dropIn = readFileSync(
-			join(repoRoot, "infra/vps/substrate-skills-bridge.service.d/10-environment.conf"),
-			"utf8",
-		);
-		for (const text of [service, dropIn]) {
-			expect(text).not.toMatch(/SUBSTRATE_TOKEN\s*=/);
-			expect(text).not.toMatch(/SUBSTRATE_TOKEN_FILE\s*=/);
-			expect(text).not.toContain(SHARED_ENV_FILE);
-		}
-		expect(dropIn).toContain("EnvironmentFile=/etc/substrate/substrate-bridge.env");
-	});
-
-	test("the skills timers keep the five-minute tick with boot delays", () => {
-		const ticks: Array<[string, string, string]> = [
-			["substrate-skills-sync.timer", "OnBootSec=2min", "Unit=substrate-skills-sync.service"],
-			["substrate-skills-bridge.timer", "OnBootSec=3min", "Unit=substrate-skills-bridge.service"],
-		];
-		for (const [file, boot, unit] of ticks) {
-			const text = readFileSync(join(repoRoot, "infra/vps", file), "utf8");
-			expect(text).toContain("OnUnitActiveSec=5min");
-			expect(text).toContain("AccuracySec=30s");
-			expect(text).toContain(boot);
-			expect(text).toContain(unit);
-		}
 	});
 });
 

@@ -86,11 +86,8 @@ two cannot drift.
 | `herdr-muse` | `muse` | tokens-dir file for the surface | `after-phase-19` | metrics 2xx points under surface muse and no single-surface token in the herdr env |
 | `dispatcher` | `substrate` | per-unit dispatcher env file, host-job token variable | `dormant:24` | expected 401s counted in unattributed 4xx points until the restoring phase |
 | `substrate-host` | `substrate` | per-unit host env file, host-job token variable | `dormant:31` | expected 401s counted in unattributed 4xx points until the restoring phase |
-| `skills-sync` | `substrate` | per-unit env file `/etc/substrate/substrate-skills-sync.env`, variable `SUBSTRATE_TOKEN` | `live` | warning events under surface substrate with action skills.sync |
-| `bridge-hermes` | `hermes` | tokens-dir file for the surface | `live` | hermes queue proposals open as skill/hermes branches from the tokens-dir file |
-| `bridge-omp` | `omp` | tokens-dir file for the surface | `live` | omp queue bodies proposed as omp from the tokens-dir file |
-| `bridge-grok-build` | `grok-build` | tokens-dir file for the surface | `live` | grok queue bodies proposed as grok-build from the tokens-dir file |
-| `omp-extension` | `omp` | tokens-dir file for the surface | `live` | manage_skill creates blocked with a PR reason; queued bodies proposed as omp |
+| `skills-sync` | `substrate` | per-unit skills sync env file, host-job token variable | `dormant:22` | expected 401s counted in unattributed 4xx points until the restoring phase |
+| `bridge` | `substrate` | per-unit bridge env file, host-job token variable | `dormant:22` | expected 401s counted in unattributed 4xx points until the restoring phase |
 | `miner` | `substrate` | per-unit miner env file, host-job token variable | `dormant:22` | expected 401s counted in unattributed 4xx points until the restoring phase |
 | `anchor` | `substrate` | per-unit anchor env file, host-job token variable | `dormant:28` | expected 401s counted in unattributed 4xx points until the restoring phase |
 | `git-hook` | `cursor` | tokens-dir file for the surface | `not-installed` | install check reports present once installed |
@@ -209,12 +206,12 @@ does not apply. Nothing in this phase names the bridge flag in code.
 
 ## Expected dormant 401s
 
-The dormant rows (`dispatcher`, `substrate-host`, `miner`, `anchor`) hold the host-job token by name, but their
+The dormant rows (`dispatcher`, `substrate-host`, `skills-sync`,
+`bridge`, `miner`, `anchor`) hold the host-job token by name, but their
 code cannot send a bearer yet or is broken until its restoring phase, so
 their attempts at switch-on answer 401. That is expected and harmless:
-dispatch is disabled, the host is inactive, and the miner
-already fails. Skills sync and the bridge are live and are not part of this
-dormant count. The runbook records the count instead of hiding it: sum the
+dispatch is disabled, the host is inactive, and sync, bridge and miner
+already fail. The runbook records the count instead of hiding it: sum the
 unattributed 4xx point values once right after the restart and again after
 the 30-minute soak, and attribute any delta to the dormant roster above
 or to a stranded client. A delta that names a live client is the failure
