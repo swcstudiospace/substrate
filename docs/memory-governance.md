@@ -381,6 +381,12 @@ exactly what the reads already hide (and, for `graph` entries, only once the
   parked proposal is matched to its reviewed re-submission, which asks for different
   trust on purpose — so widening it would break the review loop. Two questions, two
   hashes.
+- `SUBSTRATE_HASH_VERSION` defaults to `v1`, which leaves every stored digest valid.
+  `v2` is opt-in: the content and request preimages gain `hv` (the number 2) and
+  `tenant` (`swc`) inside the hash only, with no new column. A write under `v2`
+  stores the v2 digest and still matches a row written under `v1`. Event hashes
+  and the ledger chain are unchanged in this slice, because a hash preimage that
+  is not stored would fail `verifyChain`. Hindsight document ids are unchanged.
 - **No remedy ever advises a fresh key where a row may already exist under the old
   one.** A remedy is what an agent acts on, so advice that can produce a duplicate is a
   defect in the gate and not merely in the prose.
@@ -695,6 +701,13 @@ graph is finished or unindexed are counted too, and deleted only under
 `SUBSTRATE_MEMORY_EXPIRY=enforce` — once the reads hide them, removing them
 changes no answer; see § Lifetime. The graph tables follow `docs/data-planes.md`:
 terminal graphs + 90 days.
+
+`SUBSTRATE_MEMORY_LIFECYCLE` (default `report`) adds one read on that same pair
+of classes when the sweep job opens the store. It prints each candidate's entry
+id, writer, bank and Hindsight document id (no subject, no body), caps the
+listed ids at `SUBSTRATE_SWEEP_BATCH`, and still reports the full count.
+`off` skips the read. A typo stays `report` and warns at boot. The flag never
+deletes.
 
 ## Running the proofs
 

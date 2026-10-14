@@ -10,7 +10,7 @@
  *   substrate handoff --to S --goal G ...    record a signed handoff packet
  *   substrate evidence --graph G             the evidence bundle, as JSON or HTML
  *   substrate lessons add|recall|digest|outcome   the lessons bank (docs/lessons-bank.md)
- *   substrate skills propose --dir PATH ...  propose a skill as a PR on the skills library
+ *   substrate skills propose|list|approve ...  propose, list or decide a skill (docs/runbooks/skills-governance.md)
  *   substrate docs ingest --dataset NAME --path PATH --source-url URL [...]
  *       ingest one page into a docs dataset (docs/docs-search-ingest.md)
  *   substrate index sweep [--apply] [--json]  the index retention sweep (dry-run unless --apply
@@ -37,8 +37,8 @@
  * The bearer for a surface comes from the token resolver: the environment
  * value first, then the token-file variable, then the per-surface file in
  * the tokens dir. Commands without a surface send as `claude-code`.
- * `skills propose` reports failure like `verify` and `drift`: it is not a hook command, and
- * a proposal that was refused or never reached the server must not look like one that landed.
+ * `skills` reports failure like `verify` and `drift`: it is not a hook command, and
+ * a proposal, list or decision that was refused or never reached the server must not look like one that landed.
  */
 import { chainStateOf, renderEvidenceHtml, type EvidenceBundle } from "@substrate/evidence";
 import { list, parseArgs, str } from "./args.ts";
@@ -584,6 +584,8 @@ switch (command) {
 				"substrate lessons add|recall|digest|outcome ...   (substrate lessons help)\n" +
 				"substrate skills propose --dir PATH [--name N] [--rationale R] [--remove a,b] [--session I] [--graph G]\n" +
 				"                         [--dry-run] [--replace] [--reopen] [--allow-doc-examples pem,jwt]\n" +
+				"substrate skills list [--state approved|proposed|declined|retired|all]\n" +
+				"substrate skills approve --name N --pr NUMBER --decision approve|decline|retire [--reason R]\n" +
 				"substrate docs ingest --dataset NAME --path PATH --source-url URL [--commit C] [--heading H] [--session I]\n" +
 				"substrate index sweep [--apply] [--json]   (--apply also needs SUBSTRATE_INDEX_SWEEP=apply)\n" +
 				"substrate index archive [--out DIR] [--page-size N] | verify-archive <dir> | restore --scratch URL <dir>\n" +

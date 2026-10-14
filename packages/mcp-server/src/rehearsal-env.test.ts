@@ -518,12 +518,16 @@ describe("the extra-env allowlist (--extra-env)", () => {
 				"SUBSTRATE_BRIEF_PROFILE=shadow",
 				"SUBSTRATE_METRICS_HISTORY=on",
 				"SUBSTRATE_CACHE_SWR=enforce",
+				"SUBSTRATE_EVENT_IDEMPOTENCY=accept",
+				"SUBSTRATE_BREAKER_FAILURES=5",
 				"SUBSTRATE_SLO_MIN_SAMPLES=5",
 			]),
 		).toEqual({
 			SUBSTRATE_BRIEF_PROFILE: "shadow",
 			SUBSTRATE_METRICS_HISTORY: "on",
 			SUBSTRATE_CACHE_SWR: "enforce",
+			SUBSTRATE_EVENT_IDEMPOTENCY: "accept",
+			SUBSTRATE_BREAKER_FAILURES: "5",
 			SUBSTRATE_SLO_MIN_SAMPLES: "5",
 		});
 		expect(parseExtraEnv([])).toEqual({});

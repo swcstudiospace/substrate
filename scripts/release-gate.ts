@@ -73,8 +73,10 @@ import {
 	parseSurfaces,
 	REHEARSAL_LABEL,
 	refuseSmokeUrl,
+	rehearsalHooksEnabled,
 	RehearsalRefused,
 	runDirFor,
+	runRehearsalHooks,
 } from "./rehearsal.ts";
 
 const ROOT = join(import.meta.dir, "..");
@@ -683,7 +685,21 @@ export async function runGate(opts: GateOptions, deps: GateDeps): Promise<Receip
 			rec.skip(PROOF_IDS_AFTER_LIVEZ, "the twin does not answer /livez");
 			return;
 		}
-		await rec.step("healthz", async () => judgeHealthz(await call(ccToken, "GET", "/healthz")));
+		const healthz = await rec.step("healthz", async () => judgeHealthz(await call(ccToken, "GET", "/healthz")));
+		// Opt-in only. `rehearsal.hooks` is not in CHECK_IDS, so a default run's receipt stays the constant list.
+		if (healthz && rehearsalHooksEnabled(deps.parentEnv)) {
+			const hooksOk = await rec.step("rehearsal.hooks", async () => {
+				const consumer = parseShellExports(deps.readFile(join(runDir, "consumer.env")) ?? "");
+				return runRehearsalHooks({ name, runDir, consumer, env: deps.parentEnv });
+			});
+			if (!hooksOk) {
+				rec.skip(
+					PROOF_IDS_AFTER_LIVEZ.filter((id) => id !== "healthz"),
+					"rehearsal hooks failed",
+				);
+				return;
+			}
+		}
 		await rec.step("slo", async () => judgeSlo(await call(ccToken, "GET", "/slo")));
 
 		// The brief, per surface and per profile.

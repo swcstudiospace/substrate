@@ -52,18 +52,21 @@ export class RehearsalEnvError extends Error {}
  * credential. Every value is an enumeration or a short integer, never free text, so a typo is
  * refused with the rule name rather than silently becoming a server warning.
  *
- * - `SUBSTRATE_METRICS_HISTORY`, `SUBSTRATE_BRIEF_PROFILE` and `SUBSTRATE_CACHE_SWR` are flags the
+ * - `SUBSTRATE_METRICS_HISTORY`, `SUBSTRATE_BRIEF_PROFILE`, `SUBSTRATE_CACHE_SWR` and
+ *   `SUBSTRATE_EVENT_IDEMPOTENCY` are flags the
  *   server on main reads and a release most often changes the default of; a twin that cannot set
- *   them cannot prove them. Add a flag here only when the server reads it, with the value set the
+ *   them cannot prove them. `SUBSTRATE_BREAKER_FAILURES` is the per-plane breaker threshold the
+ *   server reads (1..999). Add a flag here only when the server reads it, with the value set the
  *   server accepts: a list that pins an invented value set refuses valid ones.
  * - `SUBSTRATE_SLO_MIN_SAMPLES` lets a short outage window (the release gate's) reach the
  *   observation count an SLO needs before it is judged; the production default is 20.
-
  */
 export const EXTRA_ENV_ALLOWLIST: Readonly<Record<string, RegExp>> = {
 	SUBSTRATE_METRICS_HISTORY: /^(on|off)$/,
 	SUBSTRATE_BRIEF_PROFILE: /^(off|shadow|enforce)$/,
 	SUBSTRATE_CACHE_SWR: /^(off|shadow|enforce)$/,
+	SUBSTRATE_EVENT_IDEMPOTENCY: /^(off|accept|enforce)$/,
+	SUBSTRATE_BREAKER_FAILURES: /^[1-9][0-9]{0,2}$/,
 	SUBSTRATE_SLO_MIN_SAMPLES: /^[1-9][0-9]{0,2}$/,
 };
 

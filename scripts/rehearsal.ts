@@ -27,16 +27,29 @@ import {
 	lstatSync,
 	mkdirSync,
 	openSync,
+	mkdtempSync,
 	readdirSync,
 	readFileSync,
 	readlinkSync,
+	realpathSync,
 	rmSync,
 	statfsSync,
 	writeFileSync,
 } from "node:fs";
 import { createServer } from "node:net";
 import { dirname, join } from "node:path";
+import { SQL } from "bun";
 import { dlopen, FFIType, read } from "bun:ffi";
+import {
+	archiveIndex,
+	describePgUrl,
+	normalizePgUrl,
+	refusedScratchUrl,
+	restoreIndexArchive,
+	verifyIndexArchive,
+} from "../packages/mcp-server/src/index-archive.ts";
+import { IndexStore } from "../packages/mcp-server/src/index-store.ts";
+import { redact } from "../packages/mcp-server/src/redact.ts";
 import {
 	buildRehearsalEnv,
 	consumerEnvRecord,
@@ -972,6 +985,13 @@ async function runUpInner(opts: UpOptions, checkout: string, runDir: string): Pr
 		}
 	}
 
+	// A reserved production port is refused before the checkout check. From this
+	// repo's own tree the checkout refusal would otherwise hide it, and the port
+	// is illegal wherever the command is run.
+	if (opts.port !== 0) {
+		const reserved = refusePort(opts.port, []);
+		if (reserved !== null) throw new RehearsalRefused(reserved);
+	}
 	const checkoutRefused = refuseCheckoutDir(checkout);
 	if (checkoutRefused !== null) throw new RehearsalRefused(checkoutRefused);
 	const dockerRefused = refuseDockerLocality();
@@ -1370,7 +1390,7 @@ async function runDownInner(name: string, runDir: string): Promise<number> {
 
 async function runPause(name: string, store: PauseStore, action: "pause" | "unpause"): Promise<number> {
 	const runDir = runDirFor(name);
-	return await withNameLock(runDir, name, () => runPauseInner(name, store, action));
+	return await withNameLock(runDir, name, () => pauseScratchStoreUnlocked(name, store, action));
 }
 
 /**
@@ -1380,7 +1400,12 @@ async function runPause(name: string, store: PauseStore, action: "pause" | "unpa
  * failed run never errors on a store that was never frozen. The result is read back from the daemon
  * (`State.Paused`), never assumed from the exit code.
  */
-async function runPauseInner(name: string, store: PauseStore, action: "pause" | "unpause"): Promise<number> {
+/**
+ * Freeze or thaw one scratch store without taking the name lock. `pause`/`unpause` hold the lock
+ * and then call this. Callers that already hold the lock (the chaos-planes hook) must use this
+ * and must not spawn `rehearsal pause`, which would wait on the same lock.
+ */
+export async function pauseScratchStoreUnlocked(name: string, store: PauseStore, action: "pause" | "unpause"): Promise<number> {
 	const dockerRefused = refuseDockerLocality();
 	if (dockerRefused !== null) throw new RehearsalRefused(dockerRefused);
 	const ps = docker(["ps", "--filter", `label=${REHEARSAL_LABEL}=${name}`, "--format", "{{.ID}} {{.Names}}"]);
@@ -1681,7 +1706,7 @@ export function refuseExtraArgs(argv: string[]): string | null {
 		"--store": true,
 		"--extra-env": true,
 	};
-	const bare: Record<string, true> = { "--anonymous": true, "--skills-fixture": true };
+	const bare: Record<string, true> = { "--anonymous": true, "--skills-fixture": true, "--chaos-planes": true };
 	for (let i = 1; i < argv.length; i++) {
 		const token = argv[i] ?? "";
 		if (valued[token] === true) {
@@ -1692,6 +1717,7 @@ export function refuseExtraArgs(argv: string[]): string | null {
 			i++;
 			continue;
 		}
+		if (token === "--chaos-planes" && argv[0] !== "smoke") return "--chaos-planes is only valid with smoke";
 		if (bare[token] === true) continue;
 		if (token.startsWith("--")) return `unknown option ${token}`;
 		return `unexpected argument ${token}`;
@@ -1721,7 +1747,7 @@ export function flagAll(argv: string[], name: string): string[] | null {
 
 function usage(message: string): never {
 	process.stderr.write(
-		`[rehearsal] ${message}\nusage: rehearsal up|down|status|smoke|pause|unpause [--name <n>] [--port <N>] [--surfaces a,b] [--operator <s>] [--desktop-surfaces a,b] [--anonymous] [--skills-fixture] [--extra-env KEY=VALUE]... [--store ledger|index]\n`,
+		`[rehearsal] ${message}\nusage: rehearsal up|down|status|smoke|pause|unpause [--name <n>] [--port <N>] [--surfaces a,b] [--operator <s>] [--desktop-surfaces a,b] [--anonymous] [--skills-fixture] [--extra-env KEY=VALUE]... [--store ledger|index] [--chaos-planes]\n`,
 	);
 	process.exit(2);
 }
@@ -1757,7 +1783,15 @@ async function main(argv: string[]): Promise<number> {
 		const name = parseName(nameRaw ?? undefined);
 		if (sub === "down") return await runDown(name);
 		if (sub === "status") return await runStatus(name);
-		if (sub === "smoke") return await runSmoke(name);
+		if (sub === "smoke") {
+			const smoked = await runSmoke(name);
+			if (smoked === 0 && argv.includes("--chaos-planes")) {
+				const { chaosPlanesFromInstance } = await import("./chaos-planes.ts");
+				const planes = await chaosPlanesFromInstance(name, runDirFor(name));
+				return planes.exit;
+			}
+			return smoked;
+		}
 		if (sub === "pause" || sub === "unpause") return await runPause(name, parseStore(storeRaw ?? undefined), sub);
 		let extraEnv: Record<string, string>;
 		try {
@@ -1780,6 +1814,142 @@ async function main(argv: string[]): Promise<number> {
 		}
 		throw cause;
 	}
+}
+
+/** Opt-in index archive drill. Only the exact string `1` enables it. */
+export function indexDrillEnabled(env: Record<string, string | undefined>): boolean {
+	return env.SUBSTRATE_GATE_INDEX_DRILL === "1";
+}
+
+/** True when either opt-in rehearsal hook should run. Neither flag is an `--extra-env` key. */
+export function rehearsalHooksEnabled(env: Record<string, string | undefined>): boolean {
+	return indexDrillEnabled(env) || env.SUBSTRATE_GATE_CHAOS_PLANES === "1";
+}
+
+/** The production archive mount. A drill must not resolve onto it or anything under it. */
+export const INDEX_ARCHIVE_MOUNT = "/mnt/index-archive";
+
+/** Why this resolved directory cannot hold a drill archive, or null when it can. */
+export function refuseIndexDrillOutDir(realPath: string): string | null {
+	const norm = realPath.replace(/\/+$/, "") || "/";
+	if (norm === INDEX_ARCHIVE_MOUNT || norm.startsWith(`${INDEX_ARCHIVE_MOUNT}/`)) {
+		return `refusing index drill output ${norm}: it is ${INDEX_ARCHIVE_MOUNT} or a child of it`;
+	}
+	return null;
+}
+
+/** Why this Postgres URL cannot be the drill source, or null when it is loopback. Never echoes a password. */
+export function refuseIndexDrillSource(raw: string): string | null {
+	const target = normalizePgUrl(raw);
+	if (target === null || target.host !== "loopback") {
+		return `refusing index drill source ${describePgUrl(raw)}: the drill only uses a loopback postgres URL`;
+	}
+	return null;
+}
+
+export interface RehearsalHookContext {
+	name: string;
+	runDir: string;
+	/** `consumer.env` keys. The drill reads `SUBSTRATE_TEST_PG_URL` and nothing from `process.env`. */
+	consumer: Record<string, string>;
+	/** Parent environment. Gate flags are read here, not from the twin. */
+	env: Record<string, string | undefined>;
+}
+
+/** `gate_idx_` plus the instance name, hyphens as underscores. Empty when it is not a safe identifier. */
+export function indexDrillDatabaseName(instance: string): string | null {
+	const name = `gate_idx_${instance.replace(/-/g, "_")}`;
+	return /^[a-z_][a-z0-9_]{0,62}$/.test(name) ? name : null;
+}
+
+function withDatabase(url: string, database: string): string {
+	const parsed = new URL(url);
+	parsed.pathname = `/${database}`;
+	return parsed.toString();
+}
+
+/**
+ * Archive the twin's scratch index and restore it into a new database on the same server.
+ * Source is `consumer.SUBSTRATE_TEST_PG_URL` only. Output is a temp dir under `runDir`.
+ * The source database is never dropped.
+ */
+export async function indexArchiveRestoreDrill(ctx: RehearsalHookContext): Promise<{ ok: boolean; detail: string }> {
+	const sourceUrl = ctx.consumer.SUBSTRATE_TEST_PG_URL ?? "";
+	const refusedSource = refuseIndexDrillSource(sourceUrl);
+	if (refusedSource !== null) return { ok: false, detail: refusedSource };
+	const source = normalizePgUrl(sourceUrl);
+	if (source === null) return { ok: false, detail: `refusing index drill source ${describePgUrl(sourceUrl)}` };
+	const dbName = indexDrillDatabaseName(ctx.name);
+	if (dbName === null) return { ok: false, detail: "refusing index drill: the scratch database name is not a safe identifier" };
+	if (dbName === source.database) return { ok: false, detail: `refusing index drill: scratch database ${dbName} is the source database` };
+
+	const tag = `gate-index-drill-${ctx.name}-${Date.now().toString(36)}`;
+	let outDir: string | null = null;
+	let sourceStore: IndexStore | null = null;
+	let scratchStore: IndexStore | null = null;
+	let admin: SQL | null = null;
+	let created = false;
+	try {
+		outDir = mkdtempSync(join(ctx.runDir, "index-drill-"));
+		const realOut = realpathSync(outDir);
+		const refusedOut = refuseIndexDrillOutDir(realOut);
+		if (refusedOut !== null) return { ok: false, detail: refusedOut };
+
+		sourceStore = new IndexStore(sourceUrl);
+		await sourceStore.migrate();
+		await sourceStore.recordDrillFact(tag, tag);
+
+		const manifest = await archiveIndex(sourceStore, { outDir, allowRootfs: true, minFreeGb: 0, cwd: ctx.runDir });
+		const snapshotDir = join(outDir, manifest.snapshot);
+		const verified = verifyIndexArchive(snapshotDir);
+		if (!verified.ok) return { ok: false, detail: `index drill archive did not verify (${verified.mismatches.map((m) => m.kind).join(", ")})` };
+
+		admin = new SQL(sourceUrl);
+		await admin.unsafe(`create database "${dbName}"`);
+		created = true;
+		const scratchUrl = withDatabase(sourceUrl, dbName);
+		const refusedScratch = refusedScratchUrl(scratchUrl, sourceUrl);
+		if (refusedScratch !== null) return { ok: false, detail: refusedScratch };
+
+		scratchStore = new IndexStore(scratchUrl);
+		const restored = await restoreIndexArchive(scratchStore, { dir: snapshotDir });
+		if (!restored.results.every((result) => result.ok)) {
+			return { ok: false, detail: "index drill restore did not match the archive" };
+		}
+		const body = scratchStore === null ? null : await scratchStore.readMemoryText(tag);
+		if (body !== tag) return { ok: false, detail: `index drill scratch row ${describePgUrl(scratchUrl)} did not return the drilled text` };
+		return { ok: true, detail: `index drill restored ${describePgUrl(scratchUrl)}` };
+	} catch (cause) {
+		return { ok: false, detail: `index drill failed: ${redact(String((cause as Error)?.message ?? cause)).split("\n")[0]?.slice(0, 300) ?? "unknown"}` };
+	} finally {
+		await scratchStore?.close().catch(() => undefined);
+		if (created && admin !== null && dbName !== null) {
+			await admin.unsafe(`drop database if exists "${dbName}" with (force)`).catch(() => undefined);
+		}
+		await admin?.end().catch(() => undefined);
+		await sourceStore?.close().catch(() => undefined);
+		if (outDir !== null) rmSync(outDir, { recursive: true, force: true });
+	}
+}
+
+/**
+ * Index drill first, then per-plane chaos, each only when its own flag is exactly `1`.
+ * The chaos flag is not passed into the twin; the drill flag is not an `--extra-env` key.
+ */
+export async function runRehearsalHooks(ctx: RehearsalHookContext): Promise<{ ok: boolean; detail: string }> {
+	const details: string[] = [];
+	if (indexDrillEnabled(ctx.env)) {
+		const drill = await indexArchiveRestoreDrill(ctx);
+		details.push(drill.detail);
+		if (!drill.ok) return { ok: false, detail: details.join("; ") };
+	}
+	if (ctx.env.SUBSTRATE_GATE_CHAOS_PLANES === "1") {
+		const { chaosPlanesFromInstance } = await import("./chaos-planes.ts");
+		const planes = await chaosPlanesFromInstance(ctx.name, ctx.runDir);
+		details.push(planes.detail);
+		if (planes.exit !== 0) return { ok: false, detail: details.join("; ") };
+	}
+	return { ok: true, detail: details.join("; ") || "rehearsal hooks passed" };
 }
 
 if (import.meta.main) process.exit(await main(process.argv.slice(2)));

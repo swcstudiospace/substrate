@@ -382,6 +382,24 @@ export interface SubstrateConfig {
 	memoryExpiry: MemoryExpiryMode;
 	/** The unrecognised `SUBSTRATE_MEMORY_EXPIRY` value, for the boot warning; null when the key parsed or was unset. */
 	memoryExpiryRejected: string | null;
+	/**
+	 * Which preimage `memory.write` hashes (`SUBSTRATE_HASH_VERSION`). `v1` (the
+	 * default, and the value of anything that is not `v2`) is today's object.
+	 * `v2` adds `hv` and `tenant` inside the hash only. An unrecognised non-empty
+	 * value is named at boot by `hashVersionConfigWarnings`.
+	 */
+	hashVersion: HashVersion;
+	/** The unrecognised `SUBSTRATE_HASH_VERSION` value, for the boot warning; null when the key parsed or was unset. */
+	hashVersionRejected: string | null;
+	/**
+	 * What the index sweep prints about expired memory (`SUBSTRATE_MEMORY_LIFECYCLE`).
+	 * `report` (the default) lists candidate ids and document ids and deletes nothing.
+	 * `off` skips that read. There is no enforce mode. Anything else is `report`,
+	 * named at boot by `memoryLifecycleConfigWarnings`.
+	 */
+	memoryLifecycle: MemoryLifecycleMode;
+	/** The unrecognised `SUBSTRATE_MEMORY_LIFECYCLE` value, for the boot warning; null when the key parsed or was unset. */
+	memoryLifecycleRejected: string | null;
 	// U5-4a — idempotent event replay
 	/**
 	 * `SUBSTRATE_EVENT_IDEMPOTENCY`: `off` (the default) ignores an event's `idempotency_key` and the
@@ -733,6 +751,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		docsSearchBudgetMs: nonNegativeOr(env.SUBSTRATE_DOCS_SEARCH_BUDGET_MS, 4000),
 		// uplift-3 N4
 		...memoryExpiryFromEnv(env.SUBSTRATE_MEMORY_EXPIRY),
+		...hashVersionFromEnv(env.SUBSTRATE_HASH_VERSION),
+		...memoryLifecycleFromEnv(env.SUBSTRATE_MEMORY_LIFECYCLE),
 		// uplift-5 S5a
 		...skillsGovernanceFromEnv(env.SUBSTRATE_SKILLS_GOVERNANCE),
 		// uplift-3 N2
@@ -817,6 +837,68 @@ export function memoryExpiryConfigWarnings(config: SubstrateConfig): string[] {
 	return [
 		`SUBSTRATE_MEMORY_EXPIRY=${JSON.stringify(config.memoryExpiryRejected)} is neither report nor enforce; ` +
 			"running as report, so expired memory entries are still served (tagged `expired`) and nothing is hidden or deleted",
+	];
+}
+
+export const HASH_VERSIONS = ["v1", "v2"] as const;
+export type HashVersion = (typeof HASH_VERSIONS)[number];
+
+/**
+ * `v1` or `v2`, case- and space-insensitive. Unset, blank, and anything else
+ * are `v1`. Only a non-empty unrecognised value is carried back for the boot
+ * warning: a typo must not switch the preimage.
+ */
+function hashVersionFromEnv(raw: string | undefined): Pick<SubstrateConfig, "hashVersion" | "hashVersionRejected"> {
+	const trimmed = raw?.trim() ?? "";
+	if (trimmed === "") return { hashVersion: "v1", hashVersionRejected: null };
+	const mode = trimmed.toLowerCase();
+	if ((HASH_VERSIONS as readonly string[]).includes(mode)) {
+		return { hashVersion: mode as HashVersion, hashVersionRejected: null };
+	}
+	return { hashVersion: "v1", hashVersionRejected: trimmed };
+}
+
+/**
+ * An unrecognised `SUBSTRATE_HASH_VERSION`, reported at boot. A sibling of
+ * `memoryExpiryConfigWarnings`. The value is a mode name, never a credential,
+ * so the warning may quote it.
+ */
+export function hashVersionConfigWarnings(config: SubstrateConfig): string[] {
+	if (config.hashVersionRejected === null) return [];
+	return [
+		`SUBSTRATE_HASH_VERSION=${JSON.stringify(config.hashVersionRejected)} is neither v1 nor v2; ` +
+			"running as v1, so memory digests stay today's preimage and nothing already stored changes",
+	];
+}
+
+export const MEMORY_LIFECYCLE_MODES = ["report", "off"] as const;
+export type MemoryLifecycleMode = (typeof MEMORY_LIFECYCLE_MODES)[number];
+
+/**
+ * `report` or `off`, case- and space-insensitive. Unset or blank is `report`.
+ * Anything else is `report` and is carried back for the boot warning. There is
+ * no enforce mode: a typo must not delete.
+ */
+function memoryLifecycleFromEnv(raw: string | undefined): Pick<SubstrateConfig, "memoryLifecycle" | "memoryLifecycleRejected"> {
+	const trimmed = raw?.trim() ?? "";
+	if (trimmed === "") return { memoryLifecycle: "report", memoryLifecycleRejected: null };
+	const mode = trimmed.toLowerCase();
+	if ((MEMORY_LIFECYCLE_MODES as readonly string[]).includes(mode)) {
+		return { memoryLifecycle: mode as MemoryLifecycleMode, memoryLifecycleRejected: null };
+	}
+	return { memoryLifecycle: "report", memoryLifecycleRejected: trimmed };
+}
+
+/**
+ * An unrecognised `SUBSTRATE_MEMORY_LIFECYCLE`, reported at boot. A sibling of
+ * `hashVersionConfigWarnings`. The value is a mode name, never a credential,
+ * so the warning may quote it.
+ */
+export function memoryLifecycleConfigWarnings(config: SubstrateConfig): string[] {
+	if (config.memoryLifecycleRejected === null) return [];
+	return [
+		`SUBSTRATE_MEMORY_LIFECYCLE=${JSON.stringify(config.memoryLifecycleRejected)} is neither report nor off; ` +
+			"running as report, so the sweep lists lifecycle candidate ids and document ids and deletes nothing",
 	];
 }
 

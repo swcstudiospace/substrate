@@ -88,8 +88,8 @@ The gate does not prove, and its green must not be read as proving:
 - **Production configuration and host state.** It runs a fresh twin with a generated environment: no production env file, unit hardening, slices, redis/Dragonfly, swap, timers or file permissions. `bun run doctor:runtime` and `bun run parity:check` read the host and are separate.
 - **The cache plane.** The twin configures no redis, so cache behaviour (single-flight, stale-while-revalidate, generations) is not exercised. `SUBSTRATE_CACHE_SWR` can be set on the twin but has no cache to act on.
 - **Hindsight and RAGFlow.** Neither is configured on the twin; recall, the docs search and their breakers are not exercised.
-- **The index outage.** `rehearsal pause --store index` exists, but the gate only freezes the ledger. Postgres loss and recovery are not proven here.
-- **The index archive and restore drill** (`docs/runbooks/index-archive.md`). Out of scope for this gate.
+- **The index outage.** By default the gate only freezes the ledger. `rehearsal pause --store index` and `SUBSTRATE_GATE_CHAOS_PLANES=1` (opt-in, not the ledger freeze) can pause the twin's own Postgres container; neither is on unless that flag is exactly `1`. Postgres loss and recovery are not proven by a default green gate.
+- **The production index archive.** A default gate does not prove the production index archive or anything under `/mnt/index-archive`. `SUBSTRATE_GATE_INDEX_DRILL=1` runs a scratch archive/restore drill against the twin's loopback Postgres and a temp directory under the run dir; it does not touch `/mnt/index-archive`. See [index-archive.md](index-archive.md).
 - **Production data volume, retention and latency.** Scratch stores run on tmpfs and are empty; the brief and SLO timings say nothing about production load. The GreptimeDB image is the local v0.14.4, not production's version (see [../rehearsal.md](../rehearsal.md)).
 - **The metrics history writer and the Grok connector against production gateways.** `SUBSTRATE_METRICS_HISTORY` is not turned on by the gate, and `smoke:grok` runs against the twin only.
 - **Concurrency and soak.** One caller at a time, for a short window.

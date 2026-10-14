@@ -24,12 +24,15 @@ import { GreptimeClient } from "./greptime.ts";
 import { IndexStore } from "./index-store.ts";
 import {
 	SWEEP_MODE_ENV,
+	formatMemoryLifecycleReport,
 	formatSweepReport,
+	memoryLifecycleReport,
 	resolveSweepMode,
 	sweepCounts,
 	sweepPolicyFromEnv,
 	type SweepReport,
 } from "./index-sweep.ts";
+import { hindsightFromEnv } from "./planes/hindsight.ts";
 import { redact } from "./redact.ts";
 import { Substrate } from "./service.ts";
 
@@ -69,6 +72,17 @@ const policy = sweepPolicyFromEnv(process.env);
 const now = Date.now();
 const session = `index-sweep:${new Date(now).toISOString().slice(0, 10)}`;
 
+let lifecycleRaw: Array<Record<string, unknown>> | null = null;
+let lifecycleError: string | null = null;
+if (config.memoryLifecycle === "report") {
+	// Before any delete. An apply under expiry enforce removes the rows this report exists to name.
+	try {
+		lifecycleRaw = await index.memoryLifecycleCandidates({ now, policy });
+	} catch (cause) {
+		lifecycleError = redact(String(cause instanceof Error ? cause.message : cause)).slice(0, 200);
+	}
+}
+
 let report: SweepReport | null = null;
 let failure: string | null = null;
 try {
@@ -78,7 +92,16 @@ try {
 }
 
 if (report) {
-	process.stdout.write(flags.json ? `${JSON.stringify(report)}\n` : formatSweepReport(report));
+	const hindsight = hindsightFromEnv();
+	const view = { batch: policy.batch, hindsight };
+	const lifecycle = lifecycleRaw === null ? null : memoryLifecycleReport(lifecycleRaw, view);
+	if (flags.json) {
+		process.stdout.write(`${JSON.stringify(lifecycle === null ? report : { ...report, lifecycle })}\n`);
+	} else {
+		process.stdout.write(formatSweepReport(report));
+		if (lifecycleRaw !== null) process.stdout.write(formatMemoryLifecycleReport(lifecycleRaw, view));
+	}
+	if (lifecycleError !== null) process.stderr.write(`[index-sweep] lifecycle report failed: ${lifecycleError}\n`);
 	const candidates = report.classes.reduce((sum, cls) => sum + cls.candidates, 0);
 	const deleted = report.classes.reduce((sum, cls) => sum + cls.deleted, 0);
 	const note = await substrate.emit({
