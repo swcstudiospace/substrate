@@ -12,6 +12,8 @@ import {
 	lessonBody,
 	lessonContentIssue,
 	lessonKey,
+	lessonSourceEvent,
+	readBackIssue,
 	sessionLessonKey,
 	lessonSubject,
 	type MemoryApi,
@@ -32,6 +34,7 @@ interface FakeEntry {
 	subject: string | null;
 	text: string;
 	created: string;
+	session_id?: string | null;
 }
 
 type Reply = Record<string, unknown>;
@@ -154,6 +157,7 @@ class FakeSubstrate {
 			subject: typeof request.subject === "string" ? request.subject.toLowerCase() : null,
 			text: text.trim(),
 			created: new Date(this.clock).toISOString(),
+			...(typeof request.session_id === "string" ? { session_id: request.session_id } : {}),
 		};
 		// A minute apart, so "newest first" is never a tie.
 		this.clock += 60_000;
@@ -1050,6 +1054,7 @@ describe("lesson transport diagnostics", () => {
 		expect(fake.writes).toHaveLength(1);
 		expect(fake.writes[0]).toMatchObject({ kind: "fact", subject: "lesson:v1.2/15-lessons-bank/lease-epochs-fence-stale-holders" });
 		expect(fake.writes[0]?.text).toContain("Lease epochs fence stale holders.");
+		expect(fake.writes[0]?.source_event).toBe(lessonSourceEvent(String(fake.writes[0]?.idempotency_key)));
 	});
 
 	test("governed refusal reason and remedy are scrubbed without changing the denial", async () => {
@@ -1321,6 +1326,8 @@ describe("session lessons", () => {
 		expect(body).not.toContain("session ended");
 		expect(body).not.toContain("\ntodo");
 		expect(fake.writes[0]?.idempotency_key).toBe(sessionLessonKey("repo:acme/widgets", "sess-facts-1"));
+		expect(fake.writes[0]?.session_id).toBe("sess-facts-1");
+		expect(fake.writes[0]?.source_event).toBe("session:sess-facts-1");
 		expect(first.err()).toContain("correlation=sess-facts-1");
 		expect(first.err()).not.toContain("ttl candidate");
 
@@ -1360,6 +1367,24 @@ describe("session lessons", () => {
 		expect(fake.writes[0]?.text).toContain("[REDACTED]");
 		expect(cli.err()).not.toContain(secret);
 		expect(extractDurableFacts("session ended").facts).toEqual([]);
+	});
+
+	test("a verified write with an empty or different body is not saved", async () => {
+		const sent = "Lease epochs fence stale holders.";
+		expect(readBackIssue(sent, { entry: { id: "mem_1", text: "   " } })).toBe("read-back body is empty");
+		expect(readBackIssue(sent, { entry: { id: "mem_1", text: "A different fact was stored." } })).toContain("does not match");
+		expect(readBackIssue(`session fact`, { entry: { id: "mem_1", text: "session fact", session_id: "other" } }, "sess-1")).toContain("session");
+
+		fake.scripted = [
+			{ outcome: "accepted", verified_persisted: true, entry: { id: "mem_empty", text: " " } },
+			{ outcome: "accepted", verified_persisted: true, entry: { id: "mem_empty", text: " " } },
+		];
+		const cli = harness();
+		expect(await cli.run(["add", "--text", "Lease epochs fence stale holders.", "--phase", "15-lessons-bank", "--json"])).toBe(1);
+		const [report] = JSON.parse(cli.out()) as Array<{ status: string; id: string | null; reason: string }>;
+		expect(report?.status).toBe("unverified");
+		expect(report?.id).toBeNull();
+		expect(report?.reason).toContain("empty");
 	});
 
 	test("an unrelated recall is an empty match, not an error", async () => {

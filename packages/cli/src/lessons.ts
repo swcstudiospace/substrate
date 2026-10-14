@@ -3,6 +3,7 @@
  *
  *   substrate lessons add --text T --phase P ...      one lesson, from text
  *   substrate lessons add --from SUMMARY.md ...       every bullet under `## Lessons`
+ *   substrate lessons ingest --session ID --text T    one lesson from a finished session
  *   substrate lessons recall [QUERY]                  a `## Prior Lessons` block for CONTEXT.md
  *   substrate lessons digest <milestone>              roll a milestone's lessons up into one fact
  *   substrate lessons outcome <id> --result R ...     report how a cited lesson worked out
@@ -702,7 +703,7 @@ export interface WriteReply {
 	reason?: string;
 	remedy?: string;
 	verified_persisted?: boolean;
-	entry?: { id?: string };
+	entry?: { id?: string; text?: string; session_id?: string | null };
 	deduplicated?: boolean;
 	quarantine_id?: string;
 	review_id?: string;
@@ -1071,19 +1072,57 @@ function outcomeOf(value: string | undefined): LessonOutcome {
 }
 
 /**
+ * The source the retain forward requires. A session lesson names that session.
+ * Any other lesson names its idempotency key, so a retry is the same source and
+ * the memory bank can store the body instead of refusing it as unsourced.
+ */
+export function lessonSourceEvent(key: string, sessionId?: string): string {
+	const session = sessionId?.trim() ?? "";
+	const source = session.length > 0 ? `session:${session}` : `lesson:${key}`;
+	return source.slice(0, 512);
+}
+
+/**
+ * Why a verified write still cannot be acknowledged. The gate's read-back has to
+ * carry the same body that was sent, and a session lesson has to carry that session.
+ * An empty or different body is not a saved lesson.
+ */
+export function readBackIssue(sent: string, reply: WriteReply, sessionId?: string): string | null {
+	const stored = typeof reply.entry?.text === "string" ? reply.entry.text : "";
+	if (stored.trim().length === 0) return "read-back body is empty";
+	if (normalizeText(stored) !== normalizeText(sent)) return "read-back body does not match the lesson that was sent";
+	const session = sessionId?.trim() ?? "";
+	if (session.length > 0 && reply.entry?.session_id !== session) return "read-back is not tied to the session that produced the lesson";
+	return null;
+}
+
+/**
  * One governed write, sent again once under the same key when the gate accepted it
  * but could not read it back. That replay re-verifies rather than writing again,
  * which makes it the one retry that is always safe. A quarantine, a denial or a
  * conflict is the gate's answer, and asking again would only get it again.
+ *
+ * Every write names a `source_event`. Without one the index can accept the row
+ * and the memory-bank retain still refuses it, so a later recall never sees the text.
  */
 async function writeGoverned(
 	memory: MemoryApi,
 	request: Record<string, unknown>,
 ): Promise<Pick<WriteReport, "status" | "id" | "reason" | "remedy">> {
+	const sent = typeof request.text === "string" ? request.text : "";
+	const sessionId = typeof request.session_id === "string" ? request.session_id : undefined;
+	const key = typeof request.idempotency_key === "string" ? request.idempotency_key : "";
+	const outbound: Record<string, unknown> = {
+		...request,
+		source_event:
+			typeof request.source_event === "string" && request.source_event.trim().length > 0
+				? request.source_event.trim().slice(0, 512)
+				: lessonSourceEvent(key, sessionId),
+	};
 	for (let attempt = 0; ; attempt++) {
 		let reply: WriteReply;
 		try {
-			reply = await memory.write(request);
+			reply = await memory.write(outbound);
 		} catch (cause) {
 			if (!(cause instanceof Unreachable)) throw cause;
 			return {
@@ -1094,6 +1133,20 @@ async function writeGoverned(
 			};
 		}
 		const decided = interpret(reply);
+		if (decided.status === "recorded" || decided.status === "duplicate") {
+			const issue = readBackIssue(sent, reply, sessionId);
+			if (issue) {
+				if (attempt > 0) {
+					return {
+						status: "unverified",
+						id: null,
+						reason: issue,
+						remedy: "The bank did not keep this lesson's text. Run the same command again once it answers with the body.",
+					};
+				}
+				continue;
+			}
+		}
 		if (decided.status !== "unverified" || attempt > 0) return decided;
 	}
 }
@@ -1320,6 +1373,8 @@ async function ingest(args: Args, deps: LessonsDeps): Promise<number> {
 		subject,
 		text: body,
 		idempotency_key: key,
+		session_id: sessionId,
+		source_event: lessonSourceEvent(key, sessionId),
 	});
 	const report: WriteReport = { subject, key, ...decided };
 	printReports([report], args.json === true, deps);
